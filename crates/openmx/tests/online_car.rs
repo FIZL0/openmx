@@ -10,22 +10,63 @@
 //! switched into a car and driven online drives as the same switch and pads drive offline's garage,
 //! bit for bit, and a state sent in bytes (a resync, a join) drives on as the one it was taken from.
 //!
+//! T2 beyond the host's truck: the guest's own switch into the buggy, both seats in cars at once
+//! (the baja and the truck), each over two shells; a resync and a join while a car is out, through
+//! the session itself ([`Netplay`] over an in-memory wire, as tests/netplay.rs's harness, on
+//! [`Rides`] with every seat's cars); and the online pause's switch row offering the cars.
+//!
 //! Needs the disc's `machine.res` cars and skips without the disc, saying so.
 
 #[allow(unused)]
 #[path = "../src/thread.rs"]
 mod thread;
+// the pause's switch row and what it needs (T2), as tests/machines_everywhere.rs mounts them
+#[allow(unused)]
+#[path = "../src/clock.rs"]
+mod clock;
+#[allow(unused)]
+#[path = "../src/files.rs"]
+mod files;
+#[path = "../src/menu.rs"]
+#[allow(dead_code)]
+mod menu;
+#[path = "../src/roster.rs"]
+#[allow(dead_code)]
+mod roster;
+#[path = "../src/dress.rs"]
+#[allow(dead_code)]
+mod dress;
+#[path = "../src/join.rs"]
+#[allow(dead_code)]
+mod join;
+#[path = "../src/split.rs"]
+#[allow(dead_code)]
+mod split;
+#[allow(dead_code)]
+#[path = "../src/window.rs"]
+mod window;
+#[allow(dead_code)]
+#[path = "../src/pad.rs"]
+mod pad;
 #[allow(dead_code)]
 #[path = "../src/audio.rs"]
 mod audio;
 #[path = "../src/vehicle.rs"]
 #[allow(dead_code)]
 mod vehicle;
+#[allow(dead_code)]
+#[path = "../src/net/mod.rs"]
+mod net;
+#[allow(dead_code)]
+#[path = "../src/peer.rs"]
+mod peer;
 
 use game_render::Disc;
 use game_sim::input::{PADS, Report};
 use game_sim::world::Flat;
 use game_sim::Sim;
+use net::rides::{self, Rides};
+use net::{Lineup, Netplay, Timing};
 use ps2_float::F;
 use vehicle::{CarRide, Garage, Kind, Machine};
 use std::path::Path;
@@ -45,8 +86,9 @@ fn line_with<'a>(said: &'a str, part: &str) -> &'a str {
     said.lines().find(|l| l.contains(part)).unwrap_or_else(|| panic!("no line with `{part}`:\n{said}"))
 }
 
-/// Two shells riding `track` online for `frames` ticks, the host's on `script`: each one's output.
-fn ride_online(track: &str, frames: u32, script: &str) -> [String; 2] {
+/// Two shells riding `track` online for `frames` ticks, host's and guest's on `scripts`: each one's
+/// output.
+fn ride_online(track: &str, frames: u32, scripts: [Option<&str>; 2]) -> [String; 2] {
     // Two ports the system has free now (machines_everywhere's way).
     let port = || std::net::UdpSocket::bind("127.0.0.1:0").and_then(|s| s.local_addr()).expect("a free port").port();
     let (hp, mut gp) = (port(), port());
@@ -69,7 +111,7 @@ fn ride_online(track: &str, frames: u32, script: &str) -> [String; 2] {
         shell.spawn().expect("the shell starts")
     };
     // A shell that fails takes its peer down with it: the peer would wait for its pads for ever.
-    let mut kids = [ride(&h, &g, Some(script)), ride(&g, &h, None)];
+    let mut kids = [ride(&h, &g, scripts[0]), ride(&g, &h, scripts[1])];
     let readers = kids.each_mut().map(|c| {
         let mut out = c.stdout.take().expect("piped stdout");
         std::thread::spawn(move || {
@@ -112,7 +154,7 @@ fn two_online_shells_see_the_host_switch_into_the_monster_truck_and_back() {
     if disc().is_none() {
         return;
     }
-    let said = ride_online("free09", 420, "40:monster,41:gas,200:lift,330:bike");
+    let said = ride_online("free09", 420, [Some("40:monster,41:gas,200:lift,330:bike"), None]);
     for (who, s) in ["host", "guest"].iter().zip(&said) {
         let switched: Vec<&str> = s.lines().filter(|l| l.starts_with("vehicle: ") && !l.contains("every machine agrees")).collect();
         // The load's bike first, then the session's two switches.
@@ -127,6 +169,59 @@ fn two_online_shells_see_the_host_switch_into_the_monster_truck_and_back() {
     assert_eq!(line_with(&said[0], "car: monster "), line_with(&said[1], "car: monster "));
     let state = |s: &str| line_with(s, "state before tick 300").rsplit(' ').next().unwrap().to_string();
     assert_eq!(state(&said[0]), state(&said[1]), "the two machines' rides parted with the truck out");
+}
+
+/// T2: what two online shells' runs must both say — the load's bike and then `switched`, every
+/// seat's, in the order the session made them; 0 desyncs; each car of `left` left gone more than 20
+/// ft from where it was taken, at the same place on both; the same state before tick 300; and the
+/// cars the pause offers (the garage's, which the pause's `menu.cars` is set from).
+fn both_agree(said: &[String; 2], switched: &[&str], left: &[&str]) {
+    for (who, s) in ["host", "guest"].iter().zip(said) {
+        let saw: Vec<&str> = s
+            .lines()
+            .filter(|l| l.starts_with("vehicle: ") && !l.contains("every machine agrees"))
+            .map(|l| &l["vehicle: ".len()..])
+            .collect();
+        assert_eq!(saw[0], "bike", "{who}:\n{s}");
+        assert_eq!(saw[1..], *switched, "{who}:\n{s}");
+        assert!(line_with(s, "desyncs").contains(" 0 desyncs"), "{who}:\n{s}");
+        let offered = line_with(s, "(switch from the pause)");
+        assert!(["buggy", "monster", "baja"].iter().all(|c| offered.contains(c)), "{who}: {offered}");
+        for car in left {
+            let at = format!("car: {car} ");
+            let line = line_with(s, &at);
+            let gone: f32 = line[at.len()..].split(' ').next().unwrap().parse().expect("a distance");
+            assert!(gone > 20.0, "{who}: the {car} stayed where it was taken: {line}");
+        }
+    }
+    for car in left {
+        let at = format!("car: {car} ");
+        assert_eq!(line_with(&said[0], &at), line_with(&said[1], &at), "the two machines drove the {car} apart");
+    }
+    let state = |s: &str| line_with(s, "state before tick 300").rsplit(' ').next().unwrap().to_string();
+    assert_eq!(state(&said[0]), state(&said[1]), "the two machines' rides parted with a car out");
+}
+
+/// T2: the guest's own pick of the buggy goes over the wire as the host's of the truck does: both
+/// machines switch the guest's seat in and out at one tick, and drive it alike.
+#[test]
+fn two_online_shells_see_the_guest_switch_into_the_buggy_and_back() {
+    if disc().is_none() {
+        return;
+    }
+    let said = ride_online("free09", 420, [None, Some("40:buggy,41:gas,200:lift,330:bike")]);
+    both_agree(&said, &["buggy", "bike"], &["buggy"]);
+}
+
+/// T2: both seats in cars at once, each its own seat's copy — the host's in the baja, the guest's
+/// in the truck, out together from tick 60 to 330.
+#[test]
+fn two_online_shells_drive_two_cars_at_once() {
+    if disc().is_none() {
+        return;
+    }
+    let said = ride_online("free09", 450, [Some("40:baja,41:gas,240:lift,330:bike"), Some("60:monster,61:gas,260:lift,370:bike")]);
+    both_agree(&said, &["baja", "monster", "bike", "bike"], &["baja", "monster"]);
 }
 
 /// Seat 0's pads for a tick: Cross held (the shipped preset's gas) or nothing.
@@ -209,5 +304,271 @@ fn a_seats_car_lane_drives_as_the_offline_garage_and_through_its_bytes() {
         // And a car pick with no copy of the car stays on the bike.
         assert!(vehicle::switch_lane_among(to, None, &[], &mut online, &mut floor).is_err());
         assert_eq!(vehicle::lane_up(&online), Kind::Bike);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------
+// T2: a resync and a join with a car out, through the session itself
+// ---------------------------------------------------------------------------------------------------
+
+/// A round of the harness: one tick of the ride's 30 Hz clock, as tests/netplay.rs's.
+const ROUND: std::time::Duration = std::time::Duration::from_nanos(1_001_000_000_000 / 30_000);
+
+/// The tick g's machine alone knocks seat 1's bike sideways (the next checksum after it is 330).
+const GLITCH: u64 = 320;
+
+/// One machine's ride, as the shell steps it online: a [`Sim`] a seat over a flat floor, every
+/// seat's cars as [`vehicle::Lot::online_cars`] gives them. `glitch` is [`GLITCH`]'s knock.
+struct Machine2 {
+    sims: Vec<Sim>,
+    world: Flat,
+    cars: Vec<Vec<CarRide>>,
+    glitch: bool,
+}
+
+impl Machine2 {
+    fn new(seats: usize, cars: &[CarRide]) -> Machine2 {
+        let first = Sim::new(1);
+        let sims = (0..seats)
+            .map(|s| {
+                let mut sim = first.clone();
+                sim.rng = 1 + s as u32;
+                sim
+            })
+            .collect();
+        Machine2 { sims, world: Flat::default(), cars: vec![cars.to_vec(); net::SEATS], glitch: false }
+    }
+
+    fn frame(&mut self, np: &mut Netplay<rides::State>, local: &[Report]) {
+        let glitch = self.glitch;
+        let mut after = |seat: usize, _: F, sim: &mut Sim, _: &game_sim::ride::Controls| {
+            if glitch && seat == 1 && sim.ticks == GLITCH {
+                sim.rider.ride.chassis.vel = ps2_float::Vf::new(0.5, 0.0, 0.0, 0.0);
+            }
+        };
+        let mut game = Rides { sims: &mut self.sims, world: &mut self.world, after: Some(&mut after), time_scale: None, plane: None, cars: &self.cars };
+        np.frame(&mut game, local, ROUND.as_secs_f32());
+    }
+
+    /// Where seat `seat`'s car is, if it is in one.
+    fn car_at(&self, seat: usize) -> Option<(Kind, f32)> {
+        let lane = self.sims.get(seat)?.car.as_ref()?;
+        let at = lane.machine.matrix.0[3];
+        Some((vehicle::lane_up(&self.sims[seat]), at.x().hypot(at.z())))
+    }
+}
+
+/// Seat `seat`'s pad at tick `tick`: `script`'s pick from its tick on, the gas held from then too
+/// and the stick a little to one side, so the car circles.
+fn scripted(seat: usize, tick: usize, script: &[(usize, usize, Kind)]) -> Report {
+    let mut r = Report::from_buttons(0);
+    let pick = script.iter().filter(|&&(s, t, _)| s == seat && tick >= t).last();
+    if let Some(&(_, _, to)) = pick {
+        r = Report::from_buttons(game_sim::input::Control::Cross.mask());
+        r.set_axis(2, 0xa0);
+        r.0[net::SWITCH] = vehicle::Wanted { to: Some(to), dpad_rides: true, ..Default::default() }.byte();
+    }
+    r
+}
+
+/// ggrs' clock a [`ROUND`] a round from now on, on this thread: before any session is made.
+fn driven() {
+    ggrs::clock::drive(true);
+}
+
+fn dumps() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("openmx-online-car-{}", std::process::id()))
+}
+
+/// The machines `nets` with their rides `games` over a link `lag` rounds long that loses nothing,
+/// each one's pads `script`'s, for `rounds`; `each(round, nets, games)` before every round, which may
+/// add a machine (a joiner) to both. ggrs' clock is driven from [`driven`], called before the
+/// sessions are made (ggrs reads the clock as it starts them), and let go after the last round.
+fn rounds(
+    nets: &mut Vec<Netplay<rides::State>>,
+    games: &mut Vec<Machine2>,
+    lag: u32,
+    rounds: std::ops::Range<u32>,
+    script: &[(usize, usize, Kind)],
+    mut each: impl FnMut(u32, &mut Vec<Netplay<rides::State>>, &mut Vec<Machine2>),
+) {
+    let mut wire: Vec<(String, u32, String, Vec<u8>)> = Vec::new();
+    for round in rounds {
+        each(round, nets, games);
+        for (to, at, from, d) in std::mem::take(&mut wire) {
+            if at > round {
+                wire.push((to, at, from, d));
+            } else if let Some(np) = nets.iter_mut().find(|n| n.me == to) {
+                np.heard(&from, &d);
+            }
+        }
+        for (np, game) in nets.iter_mut().zip(games.iter_mut()) {
+            let local: Vec<Report> = np.lineup.mine(&np.me).into_iter().map(|s| scripted(s, np.tick(), script)).collect();
+            game.frame(np, &local);
+            for (to, d) in np.outgoing() {
+                assert!(d.len() <= net::link::DATAGRAM_MAX, "a datagram of {} bytes", d.len());
+                wire.push((to, round + lag, np.me.clone(), d));
+            }
+            np.said.clear();
+        }
+        ggrs::clock::advance(ROUND);
+    }
+    ggrs::clock::drive(false);
+}
+
+/// Every machine of `nets` ran the same pads and had the same state before every tick all of them
+/// settled from `from`: how many ticks that is.
+fn agree(nets: &[Netplay<rides::State>], from: usize) -> usize {
+    let n = nets.iter().map(|np| np.settled().max(0) as usize).min().unwrap();
+    for np in nets {
+        let at = (from..n).find(|&t| np.hashes[t] != nets[0].hashes[t] || np.log[t] != nets[0].log[t]);
+        assert_eq!(at, None, "{} parts from {} at tick {at:?}", np.me, nets[0].me);
+    }
+    n.saturating_sub(from)
+}
+
+fn online_cars(disc: &mut Disc) -> Vec<CarRide> {
+    let machines = disc.res("machine.res").expect("the machines' archive");
+    vehicle::car_kit(&mut |n| machines.read_suffix(n).ok())
+}
+
+/// A desync caught while the host's seat is out in the truck: g's state is put back from the host's
+/// bytes, the truck in them with its collision's probe (`Rides::probe`), and from the resync on the
+/// two machines agree again tick for tick with the truck still out and driven on — on both.
+#[test]
+fn a_resync_with_the_truck_out_carries_it_and_both_drive_on() {
+    let Some(mut disc) = disc() else { return };
+    let cars = online_cars(&mut disc);
+    let lineup = Lineup::parse("host,g").unwrap();
+    driven();
+    let mut nets: Vec<Netplay<rides::State>> = ["host", "g"].iter().map(|me| Netplay::new(lineup.clone(), me, Timing::default(), dumps()).unwrap()).collect();
+    let mut games: Vec<Machine2> = (0..2).map(|_| Machine2::new(2, &cars)).collect();
+    games[1].glitch = true;
+    let script = [(0, 30, Kind::Monster)];
+    let mut out = Vec::new();
+    rounds(&mut nets, &mut games, 3, 0..900, &script, |round, _, games| {
+        if round == 300 {
+            out = games.iter().map(|g| g.car_at(0)).collect();
+        }
+    });
+    assert!(out.iter().all(|c| c.is_some_and(|(k, _)| k == Kind::Monster)), "the truck out before the glitch: {out:?}");
+    let fresh = nets[1].resync.fresh as usize;
+    for np in &nets {
+        assert!(np.desyncs.first().is_some_and(|d| (320..400).contains(&d.0)), "{}: {:?}", np.me, np.desyncs);
+        assert_eq!(np.resync.done, 1, "{}: resyncs", np.me);
+        assert!(!np.desynced, "{} still out of sync", np.me);
+        if let Some(report) = &np.report {
+            let _ = std::fs::remove_file(report);
+        }
+    }
+    assert!(fresh > 330, "taken at {fresh}");
+    let n = agree(&nets, fresh);
+    assert!(n > 300, "only {n} ticks agreed after the resync");
+    // The truck still out on both and gone on from where it was before the glitch (the same truck
+    // tick for tick is the hashes above, which hold it: the machines end on ticks of their own).
+    for (who, g) in ["host", "g"].iter().zip(&games) {
+        let (kind, far) = g.car_at(0).expect("the truck still out");
+        assert_eq!(kind, Kind::Monster, "{who}");
+        assert!(far > out[0].unwrap().1 + 30.0, "{who}: the truck went from {out:?} to {far} ft");
+    }
+    assert!(games.iter().all(|g| g.sims[0].car.as_ref().unwrap().struck.as_ref().is_some_and(|s| !s.rays.segments.is_empty())), "a car without its probe");
+}
+
+/// A freeride opened online with the host out in the baja: g joins mid-ride, its seat spawned from
+/// the host's, and takes the ride's state with the baja in it; from the join on both machines agree,
+/// the baja driven on both, and g's own pick of the buggy after it goes as any pick does — two cars
+/// out at once, the same on both.
+#[test]
+fn a_join_with_the_baja_out_takes_it_and_a_second_car_follows() {
+    let Some(mut disc) = disc() else { return };
+    let cars = online_cars(&mut disc);
+    let spawn = rides::seat_bytes(&Machine2::new(1, &cars).sims[0]);
+    driven();
+    let mut nets = vec![Netplay::new(Lineup::parse("host").unwrap(), "host", Timing::default(), dumps()).unwrap()];
+    let mut games = vec![Machine2::new(1, &cars)];
+    // The baja from tick 30; g joins at round 200 (asked 30 before); its buggy from its tick 500.
+    let script = [(0, 30, Kind::Baja), (1, 500, Kind::Buggy)];
+    let join = 200;
+    let mut at_join = None;
+    rounds(&mut nets, &mut games, 3, 0..1000, &script, |round, nets, games| {
+        if round + 30 == join {
+            nets[0].admit("g", &[1], rides::spawn_on(&spawn, &[])).unwrap();
+        }
+        if round == join {
+            at_join = games[0].car_at(0);
+            nets.push(Netplay::joining("host", "g", Timing::default(), dumps()).unwrap());
+            games.push(Machine2::new(1, &cars));
+        }
+    });
+    assert!(at_join.is_some_and(|(k, _)| k == Kind::Baja), "the baja out at the join: {at_join:?}");
+    let t = nets[0].admit.joins.first().expect("g taken on").1 as usize;
+    for np in &nets {
+        assert_eq!(np.lineup.text(), "host,g", "{}", np.me);
+        assert!(np.desyncs.is_empty() && !np.desynced, "{}: {:?}", np.me, np.desyncs);
+    }
+    let n = agree(&nets, t);
+    assert!(n > 600, "host and g agree on {n} ticks from the join at {t}");
+    for (who, g) in ["host", "g"].iter().zip(&games) {
+        assert_eq!(g.sims.len(), 2, "{who}");
+        let (baja, buggy) = (g.car_at(0).expect("the baja out"), g.car_at(1).expect("g's buggy out"));
+        assert_eq!((baja.0, buggy.0), (Kind::Baja, Kind::Buggy), "{who}");
+        assert!(baja.1 > at_join.unwrap().1 + 30.0, "{who}: the baja went from {at_join:?} to {baja:?}");
+    }
+}
+
+/// T2: the pause of a rider online offers the cars. Set as the shell sets it in an online ride
+/// (main.rs: `menu.cars` from the seat's garage, which has its copies of the disc's cars, and
+/// `menu.session`), the switch row goes Buggy, Monster Truck, Baja and round again, the session's
+/// Leave row beside it; Cross on each asks for that machine, whose word is a car this machine's
+/// online lane can take (the copies `Lot::online_cars` hands the session are the same kit).
+#[test]
+fn the_online_pause_offers_the_cars() {
+    use game_sim::input::Control;
+    use menu::{Act, Controls, Machine as Pick, Menu, Reader, Screen, Settings};
+    let Some(mut disc) = disc() else { return };
+    let cars = online_cars(&mut disc);
+    let mut garage = Garage::new(Kind::Bike, None).unwrap();
+    garage.cars = cars.clone();
+
+    let mut reader = Reader::new();
+    let mut m = Menu::new(Settings::default(), Controls::default());
+    let mut tap = |m: &mut Menu, c: Option<Control>| -> Vec<Act> {
+        // A press, then three frames up so the next tap is not a bounce (P109).
+        let press = c.map_or(Report::idle(), |c| Report::from_buttons(c.mask()));
+        [press, Report::idle(), Report::idle(), Report::idle()].iter().map(|r| m.step(reader.read(r))).collect()
+    };
+    tap(&mut m, None);
+    tap(&mut m, Some(Control::Cross));
+    tap(&mut m, Some(Control::Cross));
+    assert!(m.riding());
+    m.riders = 1;
+    m.session = true;
+    m.up[0] = Pick::from_word(garage.up.name()).unwrap();
+    m.switchable[0] = garage.plane.is_some();
+    for (k, kind) in [Kind::Buggy, Kind::Monster, Kind::Baja].into_iter().enumerate() {
+        m.cars[0][k] = garage.machines().contains(&kind);
+    }
+    assert_eq!(m.choices(0), [Pick::Buggy, Pick::Monster, Pick::Baja]);
+
+    tap(&mut m, Some(Control::Start));
+    assert_eq!(m.screen(), Some(Screen::Pause));
+    let rows = m.pause_rows();
+    let at = rows.iter().position(|r| r.starts_with("Switch To Machine")).expect("a switch row");
+    assert!(rows.iter().any(|r| r == "Leave Session"), "the online pause: {rows:?}");
+    for _ in 0..at {
+        tap(&mut m, Some(Control::Down));
+    }
+    for want in [Pick::Buggy, Pick::Monster, Pick::Baja, Pick::Buggy] {
+        assert_eq!(m.pause_rows()[at], format!("Switch To Machine: < {} >", want.label()));
+        tap(&mut m, Some(Control::Right));
+    }
+    // On the truck (one Right on from the round), Cross asks for it.
+    let acts = tap(&mut m, Some(Control::Cross));
+    assert!(acts.contains(&Act::Switch(0, Pick::Monster)), "{acts:?}");
+    let to = Kind::parse(Pick::Monster.word()).unwrap();
+    assert!(cars.iter().any(|c| Some(c.machine) == to.car()), "the lane has no {to:?}");
+    for pick in [Pick::Buggy, Pick::Baja] {
+        let to = Kind::parse(pick.word()).unwrap();
+        assert!(cars.iter().any(|c| Some(c.machine) == to.car()), "the lane has no {to:?}");
     }
 }
