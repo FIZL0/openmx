@@ -2162,7 +2162,7 @@ impl Machine {
         noise: &mut impl FnMut(F) -> F,
     ) {
         let physics = crate::biplane::World { iterations: 1, rate: F(115.0) };
-        physics.step(dt, &mut Stepping { m: self, car, world, acos, curve, noise, struck: None });
+        physics.step(dt, &mut Stepping { m: self, car, world, acos, curve, noise, struck: None, met: None });
     }
 
     /// Once a frame before the substeps: the controls, the centre of mass's travel, and the probes.
@@ -2461,6 +2461,8 @@ struct Stepping<'a, W, N> {
     noise: &'a mut N,
     /// The collision object, searched already this frame, and the movers its contacts name.
     struck: Option<(&'a mut Collision, &'a [crate::contact::Mover])>,
+    /// The riders' bikes its mirrors name (F26), the others of its resolve.
+    met: Option<&'a mut crate::flight::Met>,
 }
 
 impl<W: crate::world::World, N: FnMut(F) -> F> crate::biplane::Dynamics for Stepping<'_, W, N> {
@@ -2476,10 +2478,22 @@ impl<W: crate::world::World, N: FnMut(F) -> F> crate::biplane::Dynamics for Step
     fn force(&mut self, _: i32, h: F) {
         match &mut self.struck {
             None => self.m.force(self.car, h, self.acos, self.curve, self.noise),
-            Some((c, movers)) => self.m.force_with(self.car, h, self.acos, self.curve, self.noise, |body| {
-                let mut weighed = crate::contact::Weighed { body, mass: c.mass };
-                crate::contact::resolve(&mut c.collider, &mut weighed, &mut c.record.contacts, &mut [], movers, true);
-            }),
+            Some((c, movers)) => {
+                let met = &mut self.met;
+                self.m.force_with(self.car, h, self.acos, self.curve, self.noise, |body| {
+                    let mut weighed = crate::contact::Weighed { body, mass: c.mass };
+                    let mut others: Vec<crate::contact::Other<'_>> = match met.as_deref_mut() {
+                        Some(m) => m
+                            .colliders
+                            .iter_mut()
+                            .zip(m.vehicles.iter_mut())
+                            .map(|(collider, v)| crate::contact::Other { collider, side: crate::contact::Side::Vehicle(v) })
+                            .collect(),
+                        None => Vec::new(),
+                    };
+                    crate::contact::resolve(&mut c.collider, &mut weighed, &mut c.record.contacts, &mut others, movers, true);
+                })
+            }
         }
     }
     fn enabled(&self, _: i32) -> bool {
@@ -2721,6 +2735,24 @@ impl Kind {
     }
 }
 
+/// The cars' collidable meshes in `machine.res`, beside their ray probes: the stock skin's `%sf.col`
+/// (F26), the hull another object's rays strike (a rider's bike's body rays,
+/// [`crate::rider_contact::gather_met`]). The alternate liveries' files are the same sizes.
+pub const MONSTER_TRUCK_HULL: &str = "MonsterTruck\\col\\monstertruckf.col";
+pub const BUGGY_HULL: &str = "Buggy\\col\\buggyf.col";
+pub const BAJA_HULL: &str = "Baja\\col\\bajaf.col";
+
+impl Kind {
+    /// The machine's collidable mesh in `machine.res` (F26).
+    pub fn hull(self) -> &'static str {
+        match self {
+            Kind::MonsterTruck => MONSTER_TRUCK_HULL,
+            Kind::Buggy => BUGGY_HULL,
+            Kind::Baja => BAJA_HULL,
+        }
+    }
+}
+
 /// A car's collidable's categories (the collision object's `+0x1f8`, its `+0x84`), off S149a's
 /// switched truck: not a key of the file. Its actor and collides-with masks are the helicopter's.
 pub const COLLIDABLE: u32 = 0x0005_2058;
@@ -2769,11 +2801,72 @@ impl Machine {
         curve: &CurveTable,
         noise: &mut impl FnMut(F) -> F,
     ) {
+        self.step_met(car, world, collision, None, dt, acos, curve, noise);
+    }
+
+    /// **[`Machine::step_struck`] among the riders' bikes** (F26): with `met`, the mirrors of the
+    /// bikes' strikes on the car's hull ([`crate::rider_contact::gather_met`]) filed on its record
+    /// after its own search's entries, up to the record's room ([`Collision::file_mirrors`]), and
+    /// resolved every substep against the bikes' chassis ([`crate::flight::Met`]'s colliders and
+    /// vehicles, by player), which a mirror's spring and friction read and never move. Without one,
+    /// [`Machine::step_struck`] exactly.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_met(
+        &mut self,
+        car: &Car,
+        world: &mut impl crate::world::World,
+        collision: &mut Collision,
+        met: Option<&mut crate::flight::Met>,
+        dt: F,
+        acos: &AcosTable,
+        curve: &CurveTable,
+        noise: &mut impl FnMut(F) -> F,
+    ) {
         let movers = collision.search(&mut self.body, &mut *world, dt);
+        if let Some(m) = met.as_deref() {
+            collision.file_mirrors(&m.mirrors);
+        }
         self.touching = collision.record.touching;
         let physics = crate::biplane::World { iterations: 1, rate: F(115.0) };
-        physics.step(dt, &mut Stepping { m: self, car, world, acos, curve, noise, struck: Some((collision, &movers)) });
+        physics.step(dt, &mut Stepping { m: self, car, world, acos, curve, noise, struck: Some((collision, &movers)), met });
         collision.record.search_ground = self.searches_terrain(world);
+    }
+
+    /// **Its hull as the riders' bikes meet it** (F26): `mesh` (the car's `f.col`, [`Kind::hull`])
+    /// where its collision object's node stands it (the body's pose, as its next search will place
+    /// it), the room `collision`'s record has, and the car's category ([`COLLIDABLE`]). Seat `seat`
+    /// is the car's player.
+    pub fn hull<'a>(&self, seat: usize, mesh: &'a crate::track::Mesh, collision: &Collision) -> crate::rider_contact::Hull<'a> {
+        let n = crate::wreck_bike::node_of(&self.body);
+        let at = crate::math::Mat4([n.rows[0], n.rows[1], n.rows[2], n.origin]);
+        crate::rider_contact::Hull { seat, mesh, at, capacity: collision.record.capacity, category: COLLIDABLE }
+    }
+
+    /// Its body as a bike's resolve pushes it (F26, [`crate::rider_contact::Bump::planes`]): the
+    /// collision object's tuning and the body, the copy nearest `from` (the bike) on a world that
+    /// wraps, as a flown plane's is ([`crate::flight::Flight::flown`]).
+    pub fn flown(&self, seat: usize, collision: &Collision, from: Vf, world: &dyn crate::world::World) -> crate::rider_contact::Flown {
+        let mut body = self.body;
+        let near = crate::nearest_copy(world, from, body.position);
+        if near != body.position {
+            let by = near.sub(body.position);
+            body.position = near;
+            body.last_position = body.last_position.add(by);
+        }
+        crate::rider_contact::Flown { seat, collider: collision.collider, body, mass: collision.mass }
+    }
+
+    /// The body a bike's resolve pushed, written back (F26): its speeds, spins and what the resolve
+    /// wrote, where the car really is, as a plane's is ([`crate::flight::Flight::pushed`]).
+    pub fn pushed(&mut self, collision: &mut Collision, p: &crate::rider_contact::Flown) {
+        let (position, last_position) = (self.body.position, self.body.last_position);
+        let by = p.body.position.sub(position);
+        self.body = p.body;
+        (self.body.position, self.body.last_position) = (position, last_position);
+        collision.collider = p.collider;
+        if p.body.position != position {
+            collision.collider.cofg_world = collision.collider.cofg_world.sub(by);
+        }
     }
 
     /// The measure's last word, on the collision record's terrain switch: the next frame's search

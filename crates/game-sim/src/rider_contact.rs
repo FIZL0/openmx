@@ -330,12 +330,18 @@ pub fn gather_near(seats: &[Seat<'_>], dt: F, near: Near<'_>) -> Vec<Vec<Contact
 /// (`biplanef.col`, [`crate::flight::Flight::hull`]) where the plane's collision node stands it
 /// (the model's origin, as the plane's own search last placed it), and the room its record has.
 /// Its seat is the plane's player, which the bikes' resolve writes its body back to.
+///
+/// A driven car's hull is one too (F26, [`crate::car::Machine::hull`]): its `f.col` where its
+/// collision node stands, its category the car's ([`crate::car::COLLIDABLE`]).
 #[derive(Clone, Copy)]
 pub struct Hull<'a> {
     pub seat: usize,
     pub mesh: &'a crate::track::Mesh,
     pub at: Mat4,
     pub capacity: usize,
+    /// Its collidable's category: the plane's [`crate::flight::COLLIDABLE`], a car's
+    /// [`crate::car::COLLIDABLE`]. The bikes' body rays ignore neither.
+    pub category: u32,
 }
 
 /// A hull where it stands, with the sphere its collidable is gathered by.
@@ -379,7 +385,7 @@ pub fn gather_met(seats: &[Seat<'_>], hulls: &[Hull<'_>], dt: F, near: Near<'_>)
         flags: flags::ENABLED,
         nearby: true,
         radius: crate::world::Prop::posed(h.mesh, &h.at).2,
-        category: crate::flight::COLLIDABLE,
+        category: h.category,
         collides_with: crate::flight::COLLIDES_WITH,
         categories: world_search::Categories { mode: 1, list: Vec::new() },
         ..Collidable::default()
