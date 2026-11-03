@@ -22,6 +22,10 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
+/// MD75d: the spawned quad read out of the image as a [`Ride`].
+#[path = "atv_quad/image.rs"]
+mod image;
+
 const OBJ: u32 = 0x01c0_0000;
 const BODY: u32 = 0x01c0_2000;
 const WORLD: u32 = 0x01c0_2400;

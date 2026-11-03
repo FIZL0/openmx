@@ -31,3 +31,7 @@ MD75, part 5 (`5-wheel-spin.md`): the wheel integrate's surface drag and spin ar
 and proved alone in `tests/atv_wheel.rs`. `quad::Steps` runs them inside the wheel integrate.
 `tests/atv_quad.rs` unhooks all three under the Force body: 10,000 states, every region equal. Still
 open: the whole-frame proof, which is filed as follow-ups.
+
+MD75d (`7-image-ride.md`): `tests/atv_quad/image.rs`'s `read_ride` reads the spawned quad out of
+`atv-r-spawn.ee.bin` as a `Ride`, with the gaps it cannot carry listed (the scene past four nodes above all).
+Poked back at the harness's layout, all 2,654 words the poke writes equal the image's.

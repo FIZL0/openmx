@@ -6829,6 +6829,16 @@ atv_spatial_move            atv 0x0018d690 = an entry's box moved in its spatial
 atv_spatial_move_in         atv 0x0018ffc0 = atv_spatial_move's body (a0 database handle, a1 entry, ...)
 atv_part_sync               atv 0x00114360 = a collidable brought to its node (vt +0xc8) and its box moved (atv_part_box_move)
 atv_part_box_move           atv 0x00114480 = a collidable's box (vt +0xc4) into its database, if it has one (+0x20)
+# MD75d — the spawned quad read as a tests/atv_quad.rs Ride (tests/atv_quad/image.rs read_ride; the check
+# pokes it back at the harness's layout and compares 2,654 words with the image). Where atv-r-spawn.ee.bin keeps
+# the quad 0x015e0690's parts: body 0x0159c7f0, world 0x0159be10, vehicle state 0x01ce6410 (+0x28 = 1), record
+# 0x016286d0 (vtable 0x003b9290; +0x20c 0, nothing struck), engine 0x0162cc60 (ratios 0x0162e930, torque curve
+# 0x0162e8f0, rpm curve 0x0162e8b0; 5 gears, 10 points; driven LR 0x0162ba20 and RR 0x0162c340), wheels
+# 0x0162a7e0/0x0162b100/0x0162ba20/0x0162c340 (each +0x1e0 = 0x0184c7d0, the world's +0xa8 box too), gate
+# +0x680 0x019afa60, node +0xe4 0x0159c290 (vtable 0x003b4ed0; one child 0x015e2a60, then the rider's
+# skeleton: at least 40 nodes, 0x130 apart, vtable 0x003b56e0), collidables +0xcc = +0xd8 = +0x1438
+# 0x0159c500 (riding), +0xd0 0x01627370 (frame), +0xd4 0x016282b0, +0x1430 0x0162cd30, +0x1434 0x0162cef0.
+# +0x14ec is 0x636f6c00 (text, not buttons); +0x44 is 0x74730567 (bit 0 the sync, +0x45 flags 0x05).
 # MD62 — atv_bike_airborne_control's fields, bike-relative (tests/mxvatv_air.rs runs it off state04 too):
 # +0x1170..+0x117c AirborneControlMoment, +0x1180 damping, +0x1184 control force, +0x1188/+0x118c
 # authority and its time, +0x1194 the backflip's torque in, +0x1198 its ramp (flipping), +0x11d0 the
