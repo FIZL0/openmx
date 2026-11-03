@@ -1057,6 +1057,7 @@ struct Struck<'a> {
 impl Surroundings for Struck<'_> {
     fn post(&mut self, body: &Body) {
         self.ground.post(body);
+        self.wreckage.blades.gather_round(self.ground.collision, body);
     }
     fn resolve(&mut self, body: &mut Body) {
         let ground = &mut self.ground;
@@ -1263,7 +1264,7 @@ fn a_captured_rotor_strike_replays_bit_exact() {
     // at each place in that frame.
     let mut torn: Option<(usize, Kiowa, Ride, Measure)> = None;
     let mut phases = std::collections::BTreeMap::new();
-    let (mut parts, mut in_post) = (0, 0);
+    let (mut parts, mut in_post, mut struck_blades) = (0, 0, 0);
     let rng_of = |row: usize| -> u64 { cap.text(row, "rng_state").parse().expect("rng_state") };
     for row in 1..cap.rows.len() {
         let frame = cap.u32(row, "frame_counter");
@@ -1273,7 +1274,10 @@ fn a_captured_rotor_strike_replays_bit_exact() {
         }
         let drawn_from = rng.state();
         let measured_before = s.ride.measure;
-        let movers = s.collision.search(&mut s.ride.body, &mut s.place, dt);
+        // The helicopter's rays meet the blades its post gathered (C24), its mirrors on them
+        // filed ahead of their own entries.
+        let (movers, struck) = s.collision.search_knocking(&mut s.ride.body, &mut s.place, dt, &wreckage.blades.gathered());
+        struck_blades += struck.len();
         // The blades share the helicopter's world, as the shell's `KiowaRide::step` runs them: they
         // search after it, their rays meeting its hull, and step after it in its world's step.
         let blades_out = wreckage.blades.started.iter().any(|b| b.out);
@@ -1281,6 +1285,7 @@ fn a_captured_rotor_strike_replays_bit_exact() {
         if blades_out {
             let (field, props, trees) = game_sim::world::World::wooded(&mut s.place);
             wreckage.blades.search_on(dt, field.as_deref(), props, trees, &mut s.collision, &s.ride.body);
+            wreckage.blades.file_struck(struck);
             blade_movers = props.map(|p| game_sim::flight_search::movers(&p.props)).unwrap_or_default();
         }
         let ground = Grounded { collision: &mut s.collision, world: &mut s.place, movers: &movers, rotor: &s.rotor, asked: Vec::new() };
@@ -1316,6 +1321,7 @@ fn a_captured_rotor_strike_replays_bit_exact() {
         if let Some(fraction) = put_back {
             s.kiowa.put_back_controls(fraction);
             s.collision.refresh(&s.ride.body, &mut s.place);
+            wreckage.blades.gather_round(&s.collision, &s.ride.body);
             put_backs.push(frame);
         }
         events.clear();
@@ -1388,7 +1394,204 @@ fn a_captured_rotor_strike_replays_bit_exact() {
     assert_eq!(put_backs, vec![PUT_BACK_ON], "the put-backs");
     assert_eq!(thrown, 4, "the blades thrown");
     println!("the fall's rows by where they were read (0 after the frame, 1 + i at the next frame's next[i]): {phases:?}, {parts} part-way through a response, {in_post} in their frame's post");
+    // The blades fly off outward from the hub: the helicopter's rays never meet one (C24).
+    assert_eq!(struck_blades, 0, "frames whose helicopter rays met a gathered blade");
     assert!(moved[0] && moved[4], "the tape's climb and pedal are not in the capture: {moved:?}");
     let last = cap.u32(cap.rows.len() - 1, "frame_counter");
     println!("the rotor strike: 1205..={STRUCK_ON} bit-exact, run on to {last}; wrecked on {STRUCK_ON} by the rotor's contact search, 4 blades thrown on the original's 12 draws, put back on {PUT_BACK_ON}");
+}
+
+/// C24's roll tape: C14's state, 11 ticks' rest, then the stick hard right for 150 ticks on the ground
+/// and rest (`research/c14/make_tape.py` fields `22 300:-:255,127 250`). The helicopter rolls onto its
+/// right side, the rotor goes into the ground, and blade 3 comes down under the hull; the wreck stays
+/// where it fell.
+const ROLL: &str = "capture/c24/roll.csv";
+/// C24's fast tape: C14's state, 30 ticks' rest, Cross for 40, the stick forward for 100 and then
+/// forward with Square held (fields `60 80:cross 200:-:127,0 200:square:127,0 400`). The helicopter
+/// climbs to about 210 ft, noses over and flies into the ground at about 30 ft/s; the wreck slides
+/// some 70 ft with its blades thrown about it.
+const FAST: &str = "capture/c24/fast1.csv";
+/// C24's tip tape: C14's state, 20 ticks' rest, then the stick hard forward and left for 150 ticks on
+/// the ground and rest (fields `40 300:-:0,0 250`). The helicopter tips over its nose and left side;
+/// blade 1 comes down within the hull's rays, a few feet from the probe.
+const TIP: &str = "capture/c24/try4.csv";
+
+/// What [`replay_wreck`] saw.
+struct Replayed {
+    wrecks: Vec<(u32, u32)>,
+    put_backs: Vec<u32>,
+    /// Frames whose helicopter search was offered at least one blade, and the nearest offered.
+    offered: usize,
+    nearest: Option<F>,
+    /// Frames whose helicopter rays met a blade.
+    struck: Vec<u32>,
+    last: u32,
+}
+
+/// **A wreck replayed from C14's image** (C24), as [`a_captured_rotor_strike_replays_bit_exact`]
+/// replays the strike, the helicopter's search offered the blades in its nearby list
+/// ([`game_sim::kiowa::Blades::gather_round`], [`game_sim::kiowa::Collision::search_knocking`]),
+/// every row compared: before the wreck after its frame, after it where it was read
+/// ([`compare_torn`]). The wreck's 12 draws are the original's: the generator is reseeded from the
+/// row before the wreck, the tapes' draws having parted from the port's by then (the original draws
+/// on input). The put-back steps once, not twice as the strike's does (below).
+fn replay_wreck(capture: &str) -> Option<Replayed> {
+    use game_sim::kiowa::{BLADE_MODEL, BLADE_RAYS, BLADE_SHAPE, Blades, KIOWA_HULL, KIOWA_MODEL, RotorTree, WRECK_BLADE_PHY, Wreckage};
+    let (cap_path, image) = (ctx(capture)?, ctx(STATE)?);
+    let mut disc = the_disc()?;
+    let [blade_phy, blade_psg, blade_rays, blade_shape, kiowa_psg, hull] =
+        machine_files([WRECK_BLADE_PHY, BLADE_MODEL, BLADE_RAYS, BLADE_SHAPE, KIOWA_MODEL, KIOWA_HULL])?;
+    let cap = Capture::load(&cap_path);
+    let ee = Ee::from_ram(&image).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(cap.u32(0, "frame_counter"), 1204, "the capture does not start on the image's tick");
+    let props = std::mem::take(&mut disc.props);
+    let terrain = Terrain::parse(&disc.terrain).expect("free09's terrain");
+    let mut s = c14_start(&ee, &disc, props, &terrain);
+    s.ride.rotor_angle = f(&ee, HELI + wreck_at::ROTOR_ANGLE);
+
+    let edge = ee.u32_at(ee.u32_at(HELI + wreck_at::BLADES) + wreck_at::BLADE_EDGE);
+    let lane = |a: u32| F(ee.f32_at(edge + a));
+    let edge = game_sim::prop_world::Edge {
+        min: [lane(wreck_at::EDGE_MIN), lane(wreck_at::EDGE_MIN + 8)],
+        max: [lane(wreck_at::EDGE_MAX), lane(wreck_at::EDGE_MAX + 8)],
+    };
+    let blades = Blades::new(&blade_phy, &blade_psg, Some(&blade_rays), Some(&blade_shape), Some(edge)).and_then(|b| b.with_hull(&hull)).expect("the blades");
+    let mut wreckage = Wreckage::new(&disc.phy, quad(&ee, HELI + wreck_at::INERTIA), disc.phy.mass_properties.mass);
+    let three = |a: u32| [quad(&ee, a), quad(&ee, a + 16), quad(&ee, a + 32)];
+    wreckage.place = three(HELI + wreck_at::PLACE);
+    wreckage.spawn = three(HELI + wreck_at::SPAWN);
+    wreckage.blades = blades;
+    let tree = RotorTree::read(&kiowa_psg).expect("kiowa.psg's nodes");
+    let tables = game_sim::ragdoll::Tables::build();
+
+    let acos = AcosTable::build();
+    let world_step = World { iterations: 1, rate: F(115.0) };
+    let mut pad = game_sim::input::Pad::new(0);
+    pad.connected = true;
+    let mut events = EventQueue::new();
+    let mut rng = Rng::from_state(0x0c24_0c24_0c24_0c24);
+    let wrecked_on = (0..cap.rows.len())
+        .map(|r| (cap.u32(r, "frame_counter"), cap.block(r, "heli_a", at::BLOCK_A).u32(at::WRECKED)))
+        .find(|w| w.1 != 0)
+        .expect("a wreck in the capture")
+        .0;
+    let rng_of = |row: usize| -> u64 { cap.text(row, "rng_state").parse().expect("rng_state") };
+    let mut seen = Replayed { wrecks: Vec::new(), put_backs: Vec::new(), offered: 0, nearest: None, struck: Vec::new(), last: 0 };
+    let mut torn: Option<(usize, Kiowa, Ride, Measure)> = None;
+    for row in 1..cap.rows.len() {
+        let frame = cap.u32(row, "frame_counter");
+        let dt = F(cap.f32(row, "dt"));
+        if frame == wrecked_on {
+            rng = Rng::from_state(rng_of(row - 1));
+        }
+        let drawn_from = rng.state();
+        let measured_before = s.ride.measure;
+        let offered = wreckage.blades.gathered();
+        if !offered.is_empty() {
+            seen.offered += 1;
+            let near = offered.iter().map(|&(_, _, d)| d).fold(F(f32::INFINITY), F::min);
+            seen.nearest = Some(seen.nearest.map_or(near, |n| n.min(near)));
+        }
+        let (movers, struck) = s.collision.search_knocking(&mut s.ride.body, &mut s.place, dt, &offered);
+        if !struck.is_empty() {
+            seen.struck.push(frame);
+        }
+        let blades_out = wreckage.blades.started.iter().any(|b| b.out);
+        let mut blade_movers = Vec::new();
+        if blades_out {
+            let (field, props, trees) = game_sim::world::World::wooded(&mut s.place);
+            wreckage.blades.search_on(dt, field.as_deref(), props, trees, &mut s.collision, &s.ride.body);
+            wreckage.blades.file_struck(struck);
+            blade_movers = props.map(|p| game_sim::flight_search::movers(&p.props)).unwrap_or_default();
+        }
+        let ground = Grounded { collision: &mut s.collision, world: &mut s.place, movers: &movers, rotor: &s.rotor, asked: Vec::new() };
+        let mut around = Struck {
+            ground,
+            wreckage: &mut wreckage,
+            tree: &tree,
+            curve: &s.curve,
+            put_back: None,
+            first_hit: None,
+            tables: &tables,
+            blade_movers: &blade_movers,
+            substeps: Vec::new(),
+        };
+        let out = s.kiowa.tick(&mut s.ride, &world_step, None, &s.curve, &acos, &mut rng, dt, &mut around);
+        let put_back = around.put_back;
+        let substeps = std::mem::take(&mut around.substeps);
+        if let Some((at, kiowa, ride, before)) = torn.take() {
+            compare_torn(&cap, at, &kiowa, &ride, &before, s.filter, &substeps);
+        }
+        if blades_out || wreckage.blades.started.iter().any(|b| b.out) {
+            wreckage.blades.post(dt);
+        }
+        if let Some(fraction) = put_back {
+            s.kiowa.put_back_controls(fraction);
+            s.collision.refresh(&s.ride.body, &mut s.place);
+            wreckage.blades.gather_round(&s.collision, &s.ride.body);
+            seen.put_backs.push(frame);
+        }
+        // No second step after the put-back: every one of these captures has the placed body on its
+        // put-back's row and the first step on the next.
+        events.clear();
+        pad.poll(dt, &report_of(&cap, row - 1), &mut events);
+        s.kiowa.pad = Pad::from_pad(&pad);
+        if let Some(reason) = out.wreck {
+            seen.wrecks.push((frame, reason));
+        }
+        if frame != wrecked_on {
+            assert_eq!(rng.state(), drawn_from, "tick {frame}: the port's frame drew from the generator");
+        }
+        if frame <= wrecked_on {
+            compare(&cap, row, &s.kiowa, &s.ride, s.filter);
+        } else {
+            torn = Some((row, s.kiowa, s.ride, measured_before));
+        }
+        seen.last = frame;
+    }
+    if let Some((at, kiowa, ride, before)) = torn.take() {
+        compare_torn(&cap, at, &kiowa, &ride, &before, s.filter, &[]);
+    }
+    Some(seen)
+}
+
+/// The roll (C24): bit-exact through its wreck, blade throw, fall and put-back to the capture's
+/// end. The wreck does not move far enough for the helicopter to gather its list again, so no blade
+/// is ever offered to its rays.
+#[test]
+fn a_rolled_wreck_replays_bit_exact() {
+    let Some(seen) = replay_wreck(ROLL) else { return };
+    assert_eq!(seen.wrecks, vec![(1257, game_sim::biplane::CRASHED)], "the wrecks");
+    assert_eq!(seen.put_backs, vec![1408], "the put-backs");
+    assert_eq!(seen.offered, 0, "frames whose helicopter search was offered a blade");
+    println!("the roll: 1205..={} bit-exact, wrecked on 1257, put back on 1408, no blade offered", seen.last);
+}
+
+/// The tip (C24): bit-exact to the capture's end. Blade 1 lies where the helicopter's rays would meet
+/// it on 1270, but the wreck never gathers its list again, so it is never offered them and the
+/// original's record holds only the blade's own mirrors. (Offered every blade on every post, the port
+/// meets it and parts from the game on 1270's speed.)
+#[test]
+fn a_tipped_wreck_never_meets_its_blades() {
+    let Some(seen) = replay_wreck(TIP) else { return };
+    assert_eq!(seen.wrecks, vec![(1267, game_sim::biplane::CRASHED)], "the wrecks");
+    assert_eq!(seen.put_backs, vec![1418], "the put-backs");
+    assert_eq!(seen.offered, 0, "frames whose helicopter search was offered a blade");
+    println!("the tip: 1205..={} bit-exact, wrecked on 1267, put back on 1418, no blade offered", seen.last);
+}
+
+/// The fast wreck (C24): bit-exact to the capture's end, its slide gathering the helicopter's list
+/// again with the blades out, so its rays are offered them, from 0 ft away, and meet none: nor does
+/// the original's record ever hold an entry on a blade but the blades' own mirrors.
+#[test]
+fn a_fast_wreck_offers_its_blades_bit_exact() {
+    let Some(seen) = replay_wreck(FAST) else { return };
+    assert_eq!(seen.wrecks, vec![(1451, game_sim::biplane::CRASHED)], "the wrecks");
+    assert_eq!(seen.put_backs, vec![1602], "the put-backs");
+    assert!(seen.offered > 0, "the slide never gathered the blades");
+    assert_eq!(seen.struck, Vec::<u32>::new(), "frames whose helicopter rays met a blade");
+    println!(
+        "the fast wreck: 1205..={} bit-exact, wrecked on 1451, put back on 1602; blades offered on {} frames, the nearest {:?} ft off, none met",
+        seen.last, seen.offered, seen.nearest
+    );
 }

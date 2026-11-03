@@ -1847,6 +1847,24 @@ impl Collision {
     /// [`crate::flight_search::Scene::flown`]), the transform where the last post left the body. Gives
     /// the movers the contacts name, for the response.
     pub fn search(&mut self, body: &mut Body, world: &mut dyn crate::world::World, dt: F) -> Vec<crate::contact::Mover> {
+        self.search_knocking(body, world, dt, &[]).0
+    }
+
+    /// **[`Collision::search`] with the thrown blades in the helicopter's nearby list** (C24): each
+    /// of `knocks` (a blade, its collidable, and its distance as the list's gather left it,
+    /// [`Blades::gathered`]) a collidable after the world's
+    /// ([`crate::flight_search::Scene::knocking_gathered`]), its collidable's owner the blade's collision
+    /// record. The helicopter's entry on blade `k` names `k` as its other side, for
+    /// [`Grounded::resolve_among`]'s [`Blades::with_others`]; the mirrors each blade's record takes
+    /// are given back by blade, in `knocks`' order, each naming the helicopter as side `0`, for
+    /// [`Blades::file_struck`].
+    pub fn search_knocking(
+        &mut self,
+        body: &mut Body,
+        world: &mut dyn crate::world::World,
+        dt: F,
+        knocks: &[(usize, Knock<'_>, F)],
+    ) -> (Vec<crate::contact::Mover>, Vec<(usize, Vec<crate::contact::Contact>)>) {
         use crate::contact_search::{self, Search};
         use crate::flight_search::{self, Scene};
         let rays = self.rays.clone();
@@ -1854,13 +1872,31 @@ impl Collision {
         contact_search::clear(&mut self.record, Some(&mut *body));
         let (field, props, trees) = flight_search::near_world(world, &rays, &self.record.node, &mut self.nearby);
         let bounds = field.as_deref().map(field_box);
-        let mut scene = Scene::flown(props, trees, None, bounds, &rays, &self.record.node, &mut self.nearby);
-        let mut records = [std::mem::take(&mut self.record)];
+        let posed: Vec<Knock<'_>> = knocks.iter().map(|&(_, n, _)| n).collect();
+        let distances: Vec<F> = knocks.iter().map(|&(_, _, d)| d).collect();
+        let mut scene =
+            Scene::flown(props, trees, None, bounds, &rays, &self.record.node, &mut self.nearby).sweep_of(crate::prop_world::sweep_categories());
+        if !posed.is_empty() {
+            scene = scene.knocking_gathered(&posed, 1, &distances);
+        }
+        let mut records = vec![std::mem::take(&mut self.record)];
+        records.extend(posed.iter().map(|n| contact_search::Record { capacity: n.capacity, ..contact_search::Record::default() }));
         contact_search::collide(&mut records, 0, Some(body), field.as_deref(), &mut scene, dt);
         let movers = Search::movers(&scene);
-        let [record] = records;
-        self.record = record;
-        movers
+        drop(scene);
+        let mut records = records.into_iter();
+        self.record = records.next().unwrap_or_default();
+        for e in &mut self.record.contacts {
+            if let Some(i) = e.other.and_then(|o| o.checked_sub(1)) {
+                e.other = Some(knocks[i].0);
+            }
+        }
+        let struck = records
+            .zip(knocks)
+            .filter(|(r, _)| !r.contacts.is_empty())
+            .map(|(r, &(k, _, _))| (k, r.contacts.into_iter().map(|m| crate::contact::Contact { other: Some(0), ..m }).collect()))
+            .collect();
+        (movers, struck)
     }
 
     /// The body wrapper's post: the nearby list gathered again round the ray probe placed where the body
@@ -2488,12 +2524,17 @@ pub struct Blades {
     /// The helicopter's collidable mesh, [`KIOWA_HULL`], when it was given ([`Blades::with_hull`]):
     /// what the blades' rays meet the hull on (C21).
     pub hull: Option<Arc<Mesh>>,
+    /// The blades in the helicopter's nearby list as its post last gathered or re-sorted it, each
+    /// with its distance then ([`Blades::gather_round`], C24).
+    pub near: Vec<(usize, F)>,
+    /// Where the helicopter's list was last gathered round, as the last [`Blades::gather_round`] saw it.
+    pub gathered_round: Option<[F; 4]>,
 }
 
 impl Default for Blades {
     /// No blades: what [`Wreckage::new`] leaves before [`Blades::new`]'s are put in.
     fn default() -> Blades {
-        Blades { set: blade_set(Vec::new(), Vec::new(), None), started: [Started::default(); 4], rays: Arc::default(), shape: None, hull: None }
+        Blades { set: blade_set(Vec::new(), Vec::new(), None), started: [Started::default(); 4], rays: Arc::default(), shape: None, hull: None, near: Vec::new(), gathered_round: None }
     }
 }
 
@@ -2539,7 +2580,7 @@ impl Blades {
         for k in 0..4 {
             set.place(k);
         }
-        Ok(Blades { set, started: [Started::default(); 4], rays: Arc::new(vec![rays; 4]), shape, hull: None })
+        Ok(Blades { set, started: [Started::default(); 4], rays: Arc::new(vec![rays; 4]), shape, hull: None, near: Vec::new(), gathered_round: None })
     }
 
     /// **`wreck_part_start`** on blade `k` (its wrapper's slot `+0x11c`): started, the node shown and
@@ -2600,6 +2641,38 @@ impl Blades {
         Ok(self)
     }
 
+    /// **The helicopter's gather, as the blades are in it** (C24): its post's refresh
+    /// ([`Collision::refresh`]) gathers its kept list afresh only when the ray probe's reach has left
+    /// the bound round where it was last gathered, and else only measures the list's distances again
+    /// (`broad_phase::gather`). The blades are moving objects, which a fresh gather walks after the
+    /// static ones, and their collidables are not held to the bound, so a gather while blades are out
+    /// ([`Blades::knocks`]) puts every one of them in the list, where their last posts stood them (the crash test that throws them and their own
+    /// posts come after the helicopter's); a re-sort keeps the ones it has, each measured again
+    /// ([`crate::flight_search::knock_distance`] from the probe standing where `body` now is). A
+    /// helicopter wrecked where it stands does not gather again, so its rays never meet its blades.
+    /// Run straight after every refresh: the list's centre moves only on a fresh gather.
+    pub fn gather_round(&mut self, collision: &Collision, body: &Body) {
+        let node = crate::wreck_bike::node_of(body);
+        let centre = collision.nearby.centre;
+        let fresh = self.gathered_round != Some(centre);
+        self.gathered_round = Some(centre);
+        let knocks = self.knocks();
+        let measured = |k: usize| knocks.iter().find(|(j, _)| *j == k).map(|(_, n)| crate::flight_search::knock_distance(&collision.rays, &node, n));
+        self.near = if fresh {
+            knocks.iter().map(|&(k, _)| k).filter_map(|k| Some((k, measured(k)?))).collect()
+        } else {
+            self.near.iter().filter_map(|&(k, _)| Some((k, measured(k)?))).collect()
+        };
+    }
+
+    /// The blades of the helicopter's nearby list ([`Blades::gather_round`]) still out, each where
+    /// its node now stands it with its distance as gathered: what [`Collision::search_knocking`]
+    /// offers the helicopter's rays.
+    pub fn gathered(&self) -> Vec<(usize, Knock<'_>, F)> {
+        let knocks = self.knocks();
+        self.near.iter().filter_map(|&(k, d)| knocks.iter().find(|(j, _)| *j == k).map(|&(_, n)| (k, n, d))).collect()
+    }
+
     /// **[`Blades::search`] with the helicopter's hull in the blades' world** (C21): its
     /// [`Blades::hull`] where its collision record's node stands it (as [`Collision::search`] left
     /// it this frame) and moving with `body`, its collidable the helicopter's ([`COLLIDABLE`],
@@ -2629,6 +2702,22 @@ impl Blades {
             .map(|m| crate::contact::Contact { other: m.other.map(|i| strike.struck[i].object), ..*m })
             .collect();
         collision.file_mirrors(&mirrors);
+    }
+
+    /// **What the helicopter's rays put on the blades** (C24), after this frame's
+    /// [`Blades::search_on`]: `struck`'s mirrors ([`Collision::search_knocking`]) on each blade's
+    /// record ahead of its own entries — the collision node clears every record before any searches,
+    /// and files the helicopter ahead of the four blades — as many as its capacity holds, its own
+    /// entries after them up to it; the record touching another object.
+    pub fn file_struck(&mut self, struck: Vec<(usize, Vec<crate::contact::Contact>)>) {
+        for (k, mirrors) in struck {
+            let Some(c) = self.set.objects[k].collision.as_mut() else { continue };
+            let r = &mut c.record;
+            (r.touching, r.on_object, r.touching_other) = (true, true, true);
+            let own = std::mem::replace(&mut r.contacts, mirrors);
+            r.contacts.extend(own);
+            r.contacts.truncate(r.capacity);
+        }
     }
 
     /// The blades as the other sides of the hull's mirrors (C21), by blade: each one's collision

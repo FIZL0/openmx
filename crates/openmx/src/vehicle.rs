@@ -2589,6 +2589,7 @@ use game_sim::kiowa::Surroundings as _;
 impl game_sim::kiowa::Surroundings for KiowaAround<'_> {
     fn post(&mut self, body: &game_sim::biplane::Body) {
         self.ground.post(body);
+        self.wreckage.blades.gather_round(self.ground.collision, body);
     }
     fn resolve(&mut self, body: &mut game_sim::biplane::Body) {
         let ground = &mut self.ground;
@@ -2823,7 +2824,9 @@ impl KiowaRide {
     /// nearby list gathered again where it was put (the reset's probes put back in), then the frame
     /// once more on the placed body, as the original steps it (C21). Nothing for a helicopter not out.
     ///
-    /// Its thrown blades (P265) share its world: their collide pass after its own, their rays meeting
+    /// Its thrown blades (P265) share its world: its rays offered the ones its nearby list holds
+    /// ([`game_sim::kiowa::Collision::search_knocking`], [`game_sim::kiowa::Blades::gather_round`],
+    /// C24), their collide pass after its own, their rays meeting
     /// its hull ([`game_sim::kiowa::Blades::search_on`], C21), and their step after its body's in its
     /// world's step ([`game_sim::kiowa::Surroundings::among`]), before the crash test's answer is
     /// acted on in it, then their posts
@@ -2835,12 +2838,14 @@ impl KiowaRide {
         let Some(h) = self.flown.as_mut() else { return };
         let stick = (pad.axis_through(Axis::LeftX, &AxisRange::PLAYER), pad.axis_through(Axis::LeftY, &AxisRange::PLAYER));
         let input = game_sim::kiowa::Pad::from_sticks(stick, |c| table.value(pad, c));
-        let movers = h.collision.search(&mut h.ride.body, world, dt);
+        // Its rays meet the blades its nearby list holds (C24).
+        let (movers, struck) = h.collision.search_knocking(&mut h.ride.body, world, dt, &h.wreckage.blades.gathered());
         let blades_out = h.wreckage.blades.started.iter().any(|s| s.out);
         let mut blade_movers = Vec::new();
         if blades_out {
             let (field, props, trees) = world.wooded();
             h.wreckage.blades.search_on(dt, field.as_deref(), props, trees, &mut h.collision, &h.ride.body);
+            h.wreckage.blades.file_struck(struck);
             blade_movers = props.map(|p| game_sim::flight_search::movers(&p.props)).unwrap_or_default();
         }
         let ground = game_sim::kiowa::Grounded { collision: &mut h.collision, world: &mut *world, movers: &movers, rotor: &self.phy.wreck_rotor.rays, asked: Vec::new() };
@@ -2855,6 +2860,7 @@ impl KiowaRide {
         if let Some(fraction) = put_back {
             h.kiowa.put_back_controls(fraction);
             h.collision.refresh(&h.ride.body, world);
+            h.wreckage.blades.gather_round(&h.collision, &h.ride.body);
             // The original steps the placed body once more that frame, on this frame's input (C21);
             // the put-back stopped every blade.
             let movers = h.collision.search(&mut h.ride.body, world, dt);
