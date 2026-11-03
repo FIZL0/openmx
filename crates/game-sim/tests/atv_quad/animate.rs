@@ -1,18 +1,27 @@
 //! MD65c — the quad's animation driver (vt `+0x3e4`), [`quad::animate`] against the original's.
 //!
-//! The original runs with every callee but the stunt table's lookup hooked: the biplane's own driver,
-//! the animation stop, the clip play and blend, the node pose, the two frame reads, the hung nodes'
+//! The original runs with every callee but the stunt table's lookup and the biplane's base driver
+//! (MD65c1, with its net check, vt `+0x3e8`) hooked: the net interpolation and unpack, the animation stop, the clip play and blend, the node pose, the two frame reads, the hung nodes'
 //! frame sets and the attachment's move are logged as [`Call`]s. Clips are compared as the handles
 //! the quad's clip table (`+0x1534`) holds, so a table with repeated or empty handles (the image's)
 //! compares as well as the generated one. What is compared besides the calls: the five words the
 //! driver writes (the fade, the stunt it plays, the two pose blends and the put-back's settle word),
-//! and that it wrote nothing else but the body's two self-copies and its stack.
+//! the world angular velocity the base zeroes, and that it wrote nothing else but the body's two
+//! self-copies and its stack. The net interpolation's snapshots are compared as the pointers the
+//! quad's five slots hold.
 
 use super::*;
 
 const ANIMATE: u32 = 0x004b_e3c0;
-/// The biplane's driver, through the thunk the quad's calls.
+/// The biplane's driver, through the thunk the quad's calls (run unhooked), and the net check it
+/// asks (vt `+0x3e8`, the biplane's own, run unhooked); the quad's net interpolation (vt `+0x3ec`).
 const BASE_ANIMATE: u32 = 0x004e_7bb0;
+const NET_CHECK: u32 = 0x004a_86f0;
+const NET_INTERPOLATE: u32 = 0x004e_7bc0;
+/// The network clock's pointer (its `+0x4cc` is the time), and the generated snapshots.
+const NET_CLOCK: u32 = 0x0038_f768;
+const SNAPS_AT: u32 = 0x01d6_0000;
+const SNAP_SLOTS: [u32; 5] = [0xcd4, 0xcdc, 0xce4, 0xcec, 0xcf4];
 const ANIM_STOP: u32 = 0x0013_e650;
 const PLAY_CLIP: u32 = 0x0013_eec0;
 const BLEND_CLIPS: u32 = 0x0013_f5e0;
@@ -45,6 +54,7 @@ struct At {
     attach: u32,
     frames: [u32; 2],
     hung_nodes: u32,
+    snaps: [u32; 5],
 }
 
 impl At {
@@ -55,6 +65,7 @@ impl At {
             attach: ee.u32_at(quad + 0x1480),
             frames: [ee.u32_at(quad + 0x1104), ee.u32_at(quad + 0x1108)],
             hung_nodes: ee.u32_at(quad + 0x1474),
+            snaps: SNAP_SLOTS.map(|o| ee.u32_at(quad + o)),
         }
     }
 }
@@ -66,6 +77,10 @@ fn in_handles(ee: &Ee, quad: u32, c: &Call) -> String {
     let c = match *c {
         Call::PlayClip { clip, weight, fade } => Call::PlayClip { clip: handle(clip), weight, fade },
         Call::BlendClips { clips, weight, mix, fade } => Call::BlendClips { clips: clips.map(handle), weight, mix, fade },
+        Call::NetInterpolate { older, newer, t } => {
+            let slot = |i: usize| ee.u32_at(quad + SNAP_SLOTS[i]) as usize;
+            Call::NetInterpolate { older: slot(older), newer: slot(newer), t }
+        }
         c => c,
     };
     format!("{c:?}")
@@ -81,9 +96,20 @@ fn hook_animate(ee: &mut Ee, at: &Rc<Cell<At>>) -> Log<String> {
     let put = |log: &Log<String>, c: Call| log.borrow_mut().push(format!("{c:?}"));
     {
         let (l, at) = (log.clone(), at.clone());
-        ee.hooks.insert(BASE_ANIMATE, Box::new(move |ee| {
-            assert_eq!(ee.r(4) as u32, at.get().quad, "the base driver's quad");
-            put(&l, Call::BaseAnimate(F(ee.f(12))));
+        ee.hooks.insert(NET_INTERPOLATE, Box::new(move |ee| {
+            assert_eq!(ee.r(4) as u32, at.get().quad, "the net interpolation's quad");
+            let snaps = at.get().snaps;
+            for r in [5, 6] {
+                assert!(snaps.contains(&(ee.r(r) as u32)), "the net interpolation's snapshot {:#x}", ee.r(r));
+            }
+            put(&l, Call::NetInterpolate { older: ee.r(5) as u32 as usize, newer: ee.r(6) as u32 as usize, t: F(ee.f(13)) });
+        }));
+    }
+    {
+        let (l, at) = (log.clone(), at.clone());
+        ee.hooks.insert(NET_UNPACK, Box::new(move |ee| {
+            assert_eq!(ee.r(4) as u32, at.get().quad, "the net unpack's quad");
+            put(&l, Call::NetUnpack(F(ee.f(12))));
         }));
     }
     {
@@ -157,8 +183,8 @@ fn hook_animate(ee: &mut Ee, at: &Rc<Cell<At>>) -> Log<String> {
 }
 
 /// What the port is handed, read off the quad at `quad`: the driver's words, the put-back's three, the
-/// stick and the crossup.
-fn read_anim(ee: &Ee, quad: u32) -> (quad::Anim, quad::PutBack, Quad) {
+/// stick, the crossup and the world angular velocity, and the net clock.
+fn read_anim(ee: &Ee, quad: u32) -> (quad::Anim, quad::PutBack, Quad, quad::NetClock) {
     let f = |o: u32| F(ee.f32_at(quad + o));
     let i = |o: u32| ee.u32_at(quad + o) as i32;
     let a = quad::Anim {
@@ -182,8 +208,15 @@ fn read_anim(ee: &Ee, quad: u32) -> (quad::Anim, quad::PutBack, Quad) {
         request: ee.u32_at(quad + 0x31c),
         ..Default::default()
     };
-    let q = Quad { lean: f(0x12e8), lean_fore_aft: f(0x12ec), crossup: f(0x330), ..Quad::default() };
-    (a, pb, q)
+    let v = |o: u32| Vf::new(ee.f32_at(quad + o), ee.f32_at(quad + o + 4), ee.f32_at(quad + o + 8), ee.f32_at(quad + o + 12));
+    let q = Quad { lean: f(0x12e8), lean_fore_aft: f(0x12ec), crossup: f(0x330), world_ang_vel: v(0x340), ..Quad::default() };
+    let net = quad::NetClock {
+        snapshots: ee.u32_at(quad + 0xd04),
+        now: F(ee.f32_at(ee.u32_at(NET_CLOCK) + 0x4cc)),
+        delay: f(0xd10),
+        times: SNAP_SLOTS.map(|o| F(ee.f32_at(ee.u32_at(quad + o)))),
+    };
+    (a, pb, q, net)
 }
 
 /// The stunt table's answers, as the original reads them: the rider's set's entry for the stunt
@@ -204,28 +237,32 @@ impl quad::StuntClips for Table<'_> {
     }
 }
 
-/// The words the driver writes, by bits: fade, stunt, crossup blend, fore-and-aft blend, settle.
-fn written(ee: &Ee, quad: u32) -> [u32; 5] {
-    [0x14bc, 0x1524, 0x14b4, 0x14b8, 0x141c].map(|o| ee.u32_at(quad + o))
+/// The words the driver writes, by bits: fade, stunt, crossup blend, fore-and-aft blend, settle, and
+/// the world angular velocity's four.
+const WRITTEN: [u32; 9] = [0x14bc, 0x1524, 0x14b4, 0x14b8, 0x141c, 0x340, 0x344, 0x348, 0x34c];
+
+fn written(ee: &Ee, quad: u32) -> [u32; 9] {
+    WRITTEN.map(|o| ee.u32_at(quad + o))
 }
 
-fn port_written(a: &quad::Anim, pb: &quad::PutBack) -> [u32; 5] {
-    [a.fade.0.to_bits(), a.stunt as u32, a.crossup_blend.0.to_bits(), a.fore_aft_blend.0.to_bits(), pb.settle.0.to_bits()]
+fn port_written(a: &quad::Anim, pb: &quad::PutBack, q: &Quad) -> [u32; 9] {
+    let w = q.world_ang_vel.0.map(f32::to_bits);
+    [a.fade.0.to_bits(), a.stunt as u32, a.crossup_blend.0.to_bits(), a.fore_aft_blend.0.to_bits(), pb.settle.0.to_bits(), w[0], w[1], w[2], w[3]]
 }
 
-/// Runs both on the quad at `quad` and compares the five words, the calls and the balance guard; the
-/// original may write nothing but the five words, the body's two self-copies and its stack.
+/// Runs both on the quad at `quad` and compares the nine words, the calls and the balance guard; the
+/// original may write nothing but the nine words, the body's two self-copies and its stack.
 fn compare_animate(ee: &mut Ee, at: &Rc<Cell<At>>, log: &Log<String>, quad: u32, dt: F, label: &str) {
     at.set(At::of(ee, quad));
-    let (mut a, mut pb, mut q) = read_anim(ee, quad);
-    let start = (a, pb.clone(), q);
+    let (mut a, mut pb, mut q, net) = read_anim(ee, quad);
+    let start = (a, pb.clone(), q, net);
     log.borrow_mut().clear();
     ee.call(ANIMATE, &[u64::from(quad)], &[dt.0], 50_000);
     let body = ee.u32_at(quad + 0xb8);
     let frame = (ee.stack - 0x2000, ee.stack + 0x40);
     for (lo, hi) in ee.written_ranges() {
         for x in lo..hi {
-            let word = [0x14bc, 0x1524, 0x14b4, 0x14b8, 0x141c].iter().any(|&o| (quad + o..quad + o + 4).contains(&x));
+            let word = WRITTEN.iter().any(|&o| (quad + o..quad + o + 4).contains(&x));
             let copies = [0x80, 0x190].iter().any(|&o| (body + o..body + o + 0x10).contains(&x));
             let stack = (frame.0..frame.1).contains(&x);
             assert!(word || copies || stack, "{label}: the original wrote {x:#010x} (in {lo:#010x}..{hi:#010x})");
@@ -233,12 +270,12 @@ fn compare_animate(ee: &mut Ee, at: &Rc<Cell<At>>, log: &Log<String>, quad: u32,
     }
     let mut calls = Vec::new();
     let mut b = Body::default();
-    quad::animate(&mut a, &mut pb, &mut q, &mut b, dt, &mut Table(ee, quad), &mut calls);
+    quad::animate(&mut a, &mut pb, &mut q, &mut b, &net, dt, &mut Table(ee, quad), &mut calls);
     let port: Vec<String> = calls.iter().map(|c| in_handles(ee, quad, c)).collect();
     assert_eq!(
         written(ee, quad),
-        port_written(&a, &pb),
-        "{label}: fade, stunt, crossup blend, fore-aft blend, settle: the original's, then the port's\n{start:#?}"
+        port_written(&a, &pb, &q),
+        "{label}: fade, stunt, crossup blend, fore-aft blend, settle, world angular velocity: the original's, then the port's\n{start:#?}"
     );
     assert_eq!(*log.borrow(), port, "{label}: the calls\n{start:#?}");
     assert_eq!(q.balancing, a.stunt == ee.u32_at(quad + 0x152c) as i32, "{label}: the balance guard");
@@ -246,11 +283,12 @@ fn compare_animate(ee: &mut Ee, at: &Rc<Cell<At>>, log: &Log<String>, quad: u32,
 
 /// The path a case takes, read off what it starts from.
 fn animate_paths(ee: &Ee, quad: u32) -> Vec<&'static str> {
-    let (a, pb, _) = read_anim(ee, quad);
+    let (a, pb, _, net) = read_anim(ee, quad);
     let mut p = vec![];
     let stopped = pb.request == 0 && (a.next_stunt != a.stunt || a.restart != 0);
     p.push(if stopped { "stopped" } else { "playing on" });
     let held = matches!(a.vehicle_state, 3 | 4);
+    p.extend(base_paths(held, &net));
     let id = a.next_stunt;
     if id < STUNT_IDS && quad::StuntClips::ready(&mut Table(ee, quad), id) {
         p.push(if stopped { "stunt clip, from its start" } else { "stunt clip" });
@@ -265,6 +303,25 @@ fn animate_paths(ee: &Ee, quad: u32) -> Vec<&'static str> {
     p
 }
 
+/// The base driver's path: not held, too few snapshots, or the pair it interpolates between and
+/// where `t` falls against its clamp.
+#[allow(clippy::float_arithmetic, clippy::neg_cmp_op_on_partial_ord)]
+fn base_paths(held: bool, net: &quad::NetClock) -> Vec<&'static str> {
+    if !held {
+        return vec!["base: not held"];
+    }
+    if net.snapshots < 5 {
+        return vec!["base: too few snapshots"];
+    }
+    let want = net.now - net.delay - F(0.1);
+    // The walk compares the second, third and fourth times (the oldest's is only the last pair's end).
+    let n = (1..4).take_while(|&i| want < net.times[i]).count();
+    let (older, newer) = [(1, 0), (2, 1), (3, 2), (4, 3)][n];
+    let t = (want - net.times[older]) / (net.times[newer] - net.times[older]);
+    let pair = ["base: pair (1, 0)", "base: pair (2, 1)", "base: pair (3, 2)", "base: pair (4, 3)"][n];
+    vec![pair, if t < F(-0.9) { "base: t clamped low" } else if t > F(1.9) { "base: t clamped high" } else { "base: t inside" }]
+}
+
 impl Gen {
     fn stunt_id(&mut self) -> i32 {
         match self.bits() % 8 {
@@ -274,6 +331,22 @@ impl Gen {
             _ => (self.bits() % STUNT_IDS as u32) as i32,
         }
     }
+}
+
+/// The net clock and five snapshots, newest first, a step apart (now and then none, so the walk
+/// divides by zero), with the wanted time anywhere from past the newest to before the oldest.
+fn lay_net(ee: &mut Ee, g: &mut Gen) {
+    ee.set_u32(OBJ + 0xd04, if g.one_in(5) { g.bits() % 5 } else { 5 + g.bits() % 30 });
+    let now = g.f(0.0, 500.0);
+    put_f(ee, ee.u32_at(NET_CLOCK) + 0x4cc, now);
+    let mut time = now - g.or_zero(0.0, 0.3);
+    for (i, &o) in SNAP_SLOTS.iter().enumerate() {
+        let at = SNAPS_AT + 0x80 * i as u32;
+        ee.set_u32(OBJ + o, at);
+        put_f(ee, at, time);
+        time = time - if g.one_in(8) { F::ZERO } else { g.f(0.01, 0.2) };
+    }
+    put_f(ee, OBJ + 0xd10, g.f(-0.4, 1.0));
 }
 
 fn lay_animate(ee: &mut Ee, g: &mut Gen) -> F {
@@ -288,6 +361,8 @@ fn lay_animate(ee: &mut Ee, g: &mut Gen) -> F {
     put_v(ee, ANIM_BODY + 0x190, g.quaternion());
     ee.set_u32(OBJ + 0xbc4, VSTATE);
     ee.set_u32(VSTATE + 0x28, if g.one_in(3) { 3 + g.bits() % 2 } else { g.bits() % 7 });
+    put_v(ee, OBJ + 0x340, g.vec(-5.0, 5.0));
+    lay_net(ee, g);
     ee.set_u32(OBJ + 0x1428, CONTROLLER);
     ee.set_u32(CONTROLLER + 4, CONTROLLER_VT);
     ee.set_u32(CONTROLLER_VT + 0x88, CONTROLLER_FN);
@@ -347,6 +422,10 @@ fn lay_animate(ee: &mut Ee, g: &mut Gen) -> F {
 fn the_quads_animation_driver_is_the_originals() {
     let Some(mut ee) = image() else { return };
     assert_eq!(ee.u32_at(QUAD_VTABLE + 0x3e4), ANIMATE, "the quad's animation slot");
+    assert_eq!(ee.u32_at(QUAD_VTABLE + 0x3e8), NET_CHECK, "the quad's net check slot");
+    assert_eq!(ee.u32_at(QUAD_VTABLE + 0x3ec), NET_INTERPOLATE, "the quad's net interpolation slot");
+    assert_eq!(ee.u32_at(QUAD_VTABLE + 0x3f0), NET_UNPACK, "the quad's net unpack slot");
+    assert_eq!(ee.u32_at(BASE_ANIMATE) >> 26, 2, "the base driver's thunk is a jump");
     assert_eq!(ee.u32_at(QUAD_VTABLE + 0x554), POSE_NODES, "the quad's node-pose slot");
     let at = Rc::new(Cell::new(At::of(&ee, OBJ)));
     let log = hook_animate(&mut ee, &at);
@@ -372,6 +451,15 @@ fn the_quads_animation_driver_is_the_originals() {
             "riding pose, held",
             "riding pose, no range",
             "middle pose, held",
+            "base: not held",
+            "base: too few snapshots",
+            "base: pair (1, 0)",
+            "base: pair (2, 1)",
+            "base: pair (3, 2)",
+            "base: pair (4, 3)",
+            "base: t clamped low",
+            "base: t clamped high",
+            "base: t inside",
         ],
         200,
     );
@@ -388,7 +476,7 @@ fn the_spawned_quads_animation_driver_is_the_ports() {
     let state = ee.u32_at(quad + 0xbc4);
     let keep: Vec<(u32, u32)> = (0..0x1800).step_by(4).map(|o| (quad + o, ee.u32_at(quad + o))).collect();
     let kept_state = ee.u32_at(state + 0x28);
-    let (spawned, _, _) = read_anim(&ee, quad);
+    let (spawned, _, _, net) = read_anim(&ee, quad);
     let mut t = BTreeMap::new();
     for id in (0..=60).chain([255]) {
         for request in [0, 1] {
@@ -402,7 +490,7 @@ fn the_spawned_quads_animation_driver_is_the_ports() {
                     ee.set_u32(quad + 0x31c, request);
                     // The image's set has stunts ready that the clip table has no clip for: playing one
                     // reads the length through a null handle, which faults the original too.
-                    let (a, pb, _) = read_anim(&ee, quad);
+                    let (a, pb, _, _) = read_anim(&ee, quad);
                     let stopped = pb.request == 0 && (a.next_stunt != a.stunt || a.restart != 0);
                     let clipless = ee.u32_at(quad + 0x1534 + 4 * id as u32) == 0;
                     if id < STUNT_IDS && quad::StuntClips::ready(&mut Table(&ee, quad), id) && clipless && !stopped {
@@ -421,6 +509,6 @@ fn the_spawned_quads_animation_driver_is_the_ports() {
         ee.set_u32(a, w);
     }
     ee.set_u32(state + 0x28, kept_state);
-    eprintln!("the spawned quad: {spawned:?}, vehicle state {kept_state}; paths {t:?}");
+    eprintln!("the spawned quad: {spawned:?}, vehicle state {kept_state}, {net:?}; paths {t:?}");
     each_path_seen(&t, &["stopped", "playing on", "riding pose", "riding pose, held", "another id"], 1);
 }

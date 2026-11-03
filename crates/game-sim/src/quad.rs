@@ -651,12 +651,16 @@ pub enum Call {
     /// The quad's level setup's ([`remap_surfaces`], MD65b): a global flag set, then the bike's shared
     /// level setup, handed the level.
     LevelSetup,
-    /// The animation driver's ([`animate`], MD65c), in its order: the biplane's own driver (first,
-    /// handed `dt`); the rider's animation stopped; one clip played or two blended (`clip`s are places
+    /// The animation driver's ([`animate`], MD65c), in its order: in vehicle states 3 and 4 the
+    /// biplane's base driver's ([`base_animate`], MD65c1) — the quad put between two of its network
+    /// snapshots (vt `+0x3ec`; `older` and `newer` are places in [`NetClock::times`], `t` how far from
+    /// the older to the newer, clamped to `-0.9..1.9`) and the net unpack (vt `+0x3f0`, handed `dt`:
+    /// [`net_unpack`] is its port); the rider's animation stopped; one clip played or two blended (`clip`s are places
     /// in [`Anim`]'s clip table, `weight` and `mix` clamped to `0..1`, `fade` [`Anim::fade`]); the
     /// model's nodes posed; then [`Call::ReadFrame`] and [`Call::SetFrame`] as the put-back's, and the
     /// attachment's box moved in the spatial database.
-    BaseAnimate(F),
+    NetInterpolate { older: usize, newer: usize, t: F },
+    NetUnpack(F),
     AnimStop,
     PlayClip { clip: i32, weight: F, fade: F },
     BlendClips { clips: [i32; 2], weight: F, mix: F, fade: F },
@@ -2563,6 +2567,56 @@ pub struct Anim {
     pub fore_aft_blend: F,
 }
 
+/// What the base driver's net interpolation (vt `+0x3e8`) reads: how many snapshots have come
+/// (`+0xd04`), the network clock's time (its `+0x4cc`), the quad's lag behind it (`+0xd10`), and the
+/// times (word 0) of the five snapshots the slots `+0xcd4`, `+0xcdc` .. `+0xcf4` (8 apart) point at,
+/// newest first.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct NetClock {
+    pub snapshots: u32,
+    pub now: F,
+    pub delay: F,
+    pub times: [F; 5],
+}
+
+/// The interpolation's own lag, on top of [`NetClock::delay`], in seconds.
+const NET_LAG: f32 = 0.1;
+/// How far the interpolation may run before the older snapshot or past the newer one.
+const NET_T_MIN: f32 = -0.9;
+const NET_T_MAX: f32 = 1.9;
+
+/// **The biplane's base animation driver** (`atv_biplane_animate`), as the quad's [`animate`] runs it
+/// first: only in vehicle states 3 and 4, the world angular velocity is zeroed (`(0,0,0,1)`), then the
+/// net interpolation (vt `+0x3e8`) runs and, as it always answers yes, the net unpack
+/// ([`Call::NetUnpack`]).
+///
+/// The interpolation does nothing with fewer than five snapshots. Otherwise it wants the time
+/// `now − delay − 0.1` and walks the snapshots from the newest while that is before the older one's
+/// time, at most four steps; the original's walk reads the second slot twice, so a stop on its second
+/// step never happens and the pair is (1, 0), (2, 1), (3, 2) or (4, 3). It hands the pair and `t` =
+/// `(want − older) / (newer − older)`, clamped to `-0.9..1.9`, to [`Call::NetInterpolate`].
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
+pub fn base_animate(vehicle_state: u32, net: &NetClock, q: &mut Quad, body: &mut Body, dt: F, m: &mut impl Moto) {
+    if vehicle_state.wrapping_sub(3) >= 2 {
+        return;
+    }
+    q.world_ang_vel = NOTHING;
+    if net.snapshots >= 5 {
+        let want = net.now - net.delay - F(NET_LAG);
+        let (mut older, mut newer) = (1, 0);
+        for i in 0..4 {
+            if !(want < net.times[older]) {
+                break;
+            }
+            newer = older;
+            older = i + 1;
+        }
+        let t = (want - net.times[older]) / (net.times[newer] - net.times[older]);
+        m.call(Call::NetInterpolate { older, newer, t: t.max(F(NET_T_MIN)).min(F(NET_T_MAX)) }, q, body);
+    }
+    m.call(Call::NetUnpack(dt), q, body);
+}
+
 /// What the animation driver asks of the rider's stunt clips: whether the rider's animation set has a
 /// stunt's clip ready (asked for ids below [`RIDING_POSE`]), and that clip's length (asked only when
 /// it is ready and the animation was not stopped this frame).
@@ -2575,11 +2629,13 @@ fn unit(x: F) -> F {
     x.max(F::ZERO).min(F::ONE)
 }
 
-/// **The quad's animation driver**, once a frame: the biplane's own driver first, then the rider's
-/// clip, the model's nodes and the hung nodes.
+/// **The quad's animation driver**, once a frame: the biplane's own driver first ([`base_animate`]),
+/// then the rider's clip, the model's nodes and the hung nodes.
 ///
 /// What the simulation reads of it:
 ///
+/// - In vehicle states 3 and 4, [`base_animate`]'s: the world angular velocity zeroed, the quad put
+///   between its network snapshots and unpacked.
 /// - [`Anim::fade`] run down by `dt` (`0 + fade − rate·dt` through the accumulator) into `0..1`.
 /// - With no put-back this frame ([`PutBack::request`] zero) and the stunt changed or
 ///   [`Anim::restart`] set, the rider's animation is stopped and the fade put back to one.
@@ -2599,11 +2655,12 @@ pub fn animate(
     pb: &mut PutBack,
     q: &mut Quad,
     body: &mut Body,
+    net: &NetClock,
     dt: F,
     clips: &mut impl StuntClips,
     m: &mut impl Moto,
 ) {
-    m.call(Call::BaseAnimate(dt), q, body);
+    base_animate(a.vehicle_state, net, q, body, dt, m);
     a.fade = unit(Acc::adda(F::ZERO, a.fade).msub(a.fade_rate, dt));
     let stopped = pb.request == 0 && (a.next_stunt != a.stunt || a.restart != 0);
     if stopped {
