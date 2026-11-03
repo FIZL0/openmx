@@ -10474,6 +10474,27 @@ fn seed_bike_search(st: &SaveState, sim: &mut game_sim::Sim, world: &mut dyn Wor
     assert_eq!(cars.count() == 0, ghost, "the port's list holds the cars as the image's does");
 }
 
+/// [`seed_bike_search`] for an image whose bike was teleported (research/s167_windmill.py and
+/// r14_windmill_bones.py move the bike, not its search): the original's list is still the one its last
+/// tick gathered where the bike was (`+0x10`, the probe's centre then), and the first tick's substeps
+/// collide against that before the tick's gather, out of the bound, gathers afresh where the bike now
+/// is (B16). So the port's list is gathered with the probe on the image's centre.
+fn seed_bike_search_kept(st: &SaveState, sim: &mut game_sim::Sim, world: &mut dyn World) {
+    seed_bike_search(st, sim, world);
+    let kept = st.vf(st.rider_at(0x7bc).expect("the bike's search") + 0x10).expect("its centre");
+    let ride = &mut sim.rider.ride;
+    let here = ride.nearby.as_deref().expect("free06 hands its props over").centre;
+    let mut at = ride.transform();
+    for i in 0..3 {
+        at.0[3].0[i] = (F(at.0[3].0[i]) + (F(kept.0[i]) - here[i])).0;
+    }
+    ride.nearby = None;
+    let rays = sim.rider.bike_col.clone();
+    ride.gather_nearby(&at, rays.as_deref().map(|c| &c.rays), world, !st.bike_search_holds_cars());
+    let centre = ride.nearby.as_deref().unwrap().centre;
+    assert!((0..3).all(|i| (centre[i].0 - kept.0[i]).abs() < 1e-2), "the list kept at {kept:?}: {centre:?}");
+}
+
 /// The cars' meshes as a frame of the traffic leaves them, standing where they are: a prop is a path
 /// car's ([`game_sim::traffic::Moving`], the toys' category in the bike's world) from the first frame
 /// the cars run, and a search gathered before it would take them for scenery. Their span of the props.
@@ -10594,6 +10615,8 @@ struct S211Tick {
     at: Vf,
     wreck: Option<u8>,
     bone: Vf,
+    /// The wreck's main bone's velocity, while the rider is down.
+    bone_vel: Option<Vf>,
 }
 
 /// The port's ride from S167's south image, its bike moved by `by` (every place on the bike, as
@@ -10656,7 +10679,7 @@ fn s211_ride_in(image: &std::path::Path, by: [f32; 3], ticks: usize, toys: bool)
                 props.props[at].stand(&away);
             }
         }
-        seed_bike_search(&st, &mut sim, world);
+        seed_bike_search_kept(&st, &mut sim, world);
         let mut out = Vec::new();
         for _ in 0..ticks {
             sim.tick_in(Input::default(), world);
@@ -10666,6 +10689,7 @@ fn s211_ride_in(image: &std::path::Path, by: [f32; 3], ticks: usize, toys: bool)
                 at: r.crash.as_ref().map_or(r.ride.origin, |c| c.bike.origin()),
                 wreck: r.state.wreck.map(|w| w.0),
                 bone: Rider::main_bone(&r.ride, r.ragdoll_kit.as_deref(), r.ragdoll.as_ref(), r.crash.as_ref()),
+                bone_vel: r.ragdoll.as_ref().map(|d| d.main().velocity),
             });
         }
         Some(out)
@@ -10805,8 +10829,18 @@ fn r14_capture(name: &str) -> Option<Vec<std::collections::HashMap<String, f32>>
 /// map's margin. So the original's 14 and 85 in S211 measure the teleport. `south-bones`: the same
 /// run with every bone moved with the bike. The windmill wrecks the bike as before, the bones go
 /// with the wreck at ~130 ft/s, and nothing throws in 188 frames; the port's ride from that image
-/// throws nothing either, and its main bone stays by the original's. The port wrecks a tick early
-/// from this image (its tick `t` is the csv's row `t + 2`), filed.
+/// throws nothing either.
+///
+/// B16: port tick `t` is the csv's row `t + 1`, as in S211. The script moves the bike but not its
+/// nearby search, so the original's first tick collides against the list it last gathered where the
+/// bike was (and only the tick's own gather finds the windmill): the bike falls on tick 1 and is
+/// thrown on tick 2, and the port, its list seeded there too ([`seed_bike_search_kept`]), matches
+/// both ticks' velocities bit for bit (the csv's nine figures round-trip). On the throw's row the original's body
+/// actor is still riding (its wreck entry clears that word on the next row), and its bones already
+/// go at ~0.8 of the thrown bike: they had one more riding step on the bike as thrown, and enter
+/// the wreck from it a tick later. The port enters on the verdict's tick, from the tick before's
+/// pose; here, with no riding ragdoll run (no drawn chassis to hold it to), off the kit's pose at
+/// rest, so its main bone stays where the bike stood. Pinned until that is ported.
 #[test]
 fn the_windmill_wrecks_the_bones_with_the_bike() {
     let Some(left) = r14_capture("south") else { return };
@@ -10828,15 +10862,33 @@ fn the_windmill_wrecks_the_bones_with_the_bike() {
     let image = private_dir("capture").join("r14").join("south-bones-before.ram");
     let Some(port) = s211_ride_in(&image, [0.0; 3], 40, true) else { return };
     assert_eq!(s211_cannonball(port.iter().map(|p| [p.vel.x(), p.vel.y(), p.vel.z()])), None, "the port throws nothing");
-    let mut far = 0.0f32;
-    for (t, p) in port.iter().enumerate().take(30) {
-        let d = apart([p.bone.x(), p.bone.y(), p.bone.z()], bone(&moved[t + 2], 0));
-        println!("tick {}: port main bone {:?}, {d:.2} ft from the original's", t + 1, p.bone);
-        far = far.max(d);
+
+    // The fall, then the throw: port tick t is row t + 1.
+    let vel = |r: &std::collections::HashMap<String, f32>| [r["vx"], r["vy"], r["vz"]];
+    for t in 1..=2 {
+        let (got, want) = ([port[t - 1].vel.x(), port[t - 1].vel.y(), port[t - 1].vel.z()], vel(&moved[t + 1]));
+        println!("tick {t}: port vel {got:?}, original {want:?}");
+        assert!((0..3).all(|i| got[i].to_bits() == want[i].to_bits()), "tick {t}: port {got:?}, original {want:?}");
+        assert_eq!(port[t - 1].wreck, (t == 2).then_some(4), "tick {t}: the windmill's wreck on the throw's tick");
     }
-    println!("the main bones at most {far:.2} ft apart over 30 ticks");
-    // ~1 ft at the wreck, then ~0.35 ft a tick apart (the wreck bodies' speeds differ by ~10 ft/s).
-    assert!(far < 12.0, "the port's main bone leaves the original's: {far}");
+
+    // The original's body actor: riding on the throw's row, its bones carried with the thrown bike;
+    // the wreck entered on the next row.
+    let (throw, entry) = (&moved[3], &moved[4]);
+    assert_eq!((moved[2]["riding"], throw["riding"], entry["riding"]), (1.0, 1.0, 0.0), "the actor lets go a row after the verdict");
+    let carried = |i: usize| throw[&format!("b0_v{}", ["x", "y", "z"][i])] / vel(throw)[i];
+    println!("the original's main bone on the throw's row at {:?} of the bike's velocity", [carried(0), carried(1), carried(2)]);
+    assert!((0..3).all(|i| (carried(i) - 0.8).abs() < 0.03), "the main bone carried with the bike");
+    let first = bone(entry, 0);
+    println!("the original's main bone on the entry's row: {first:?}, at {:?}", [entry["b0_vx"], entry["b0_vy"], entry["b0_vz"]]);
+
+    // The port's, entered on the throw's tick from the kit's pose at rest: pinned to see it change.
+    let v = port[1].bone_vel.expect("the port's bones down on the throw's tick");
+    println!("the port's main bone on the throw's tick at {v:?}");
+    assert!(v.z().abs() < 5.0, "the port's main bone carried with the bike: {v:?}");
+    let off = apart([port[2].bone.x(), port[2].bone.y(), port[2].bone.z()], first);
+    println!("the port's main bone on tick 3 is {off:.2} ft from the original's");
+    assert!(off > 2.0, "the port's main bone is the original's on tick 3 ({off} ft)");
 }
 
 /// **S129: the bike meeting the Dallas train, in the original and replayed.**
