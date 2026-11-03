@@ -64,6 +64,10 @@ libc_free                   boot 0x0040d460
 sceSifInitRpc               boot 0x003fe828 one-shot; sets the RPC queue up at 0x4e6180
 sceSifBindRpc               boot 0x003fef68 (client, serve_id, mode)
 sceSifCallRpc               boot 0x003ff138 (client, fno, mode, send, ssize, recv, rsize, end, arg)
+sceSifCheckStatRpc          boot 0x003ff328 (client) -> 1 while the client's last call is still with the IOP
+iop_rpc_send                boot 0x00198b90 (queue, fno, buf, size): waits on sceSifCheckStatRpc for the
+#                                           other of its two buffers' clients, then a no-wait
+#                                           sceSifCallRpc of this one; voice_start and the rest call it
 SyncDCache                  boot 0x003fc8d8 (start, end), rounded to 64-byte lines, interrupts off
 sceSifInitIopHeap           boot 0x00402f38 binds 0x80000003
 sceSifAllocIopHeap          boot 0x00402fc0 (size) -> IOP address
