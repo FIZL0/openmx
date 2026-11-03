@@ -399,6 +399,8 @@ struct Routes {
     cuts: Vec<usize>,
     /// P241: a CDN that sends the whole file for a Range.
     no_ranges: bool,
+    /// B12: the next this-many GETs of a path hang up without an answer.
+    drops: HashMap<String, usize>,
 }
 
 struct Fake {
@@ -429,6 +431,10 @@ impl Fake {
                     let range = head.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("range: bytes=")?.strip_suffix('-')?.parse::<u64>().ok());
                     let mut routes = r.lock().unwrap();
                     routes.asked.push(path.clone());
+                    if let Some(n) = routes.drops.get_mut(&path).filter(|n| **n > 0) {
+                        *n -= 1;
+                        return;
+                    }
                     let mut cut = None;
                     if path.starts_with("/cdn/") {
                         routes.ranges.push(range);
@@ -685,6 +691,45 @@ fn a_busy_store_leaves_the_last_listing_up() {
     s2.list(true);
     let got = until(&s2, |e| matches!(e, Event::Listing(_)));
     assert!(got.contains(&Event::Listing(Err(BUSY.into()))), "{got:?}");
+    let _ = (std::fs::remove_dir_all(&dir), std::fs::remove_dir_all(&dir2));
+}
+
+/// B12: a meta.json the store fails to send (here it hangs up) is asked for once more; failing twice it
+/// fails the listing, which leaves the last one up with a note rather than drop the mod for an hour.
+/// Only a 404 means no mod.
+#[test]
+fn a_failed_meta_fails_the_listing() {
+    let fake = Fake::start();
+    let (dir, mods) = scratch("metafail");
+    let (za, zb) = (zip(&track("meta_a", b"x")), zip(&track("meta_b", b"x")));
+    fake.tree("main", &["meta_a", "meta_b"]);
+    fake.publish("main", &meta("meta_a", Kind::Track, &za), &za, None);
+    fake.publish("main", &meta("meta_b", Kind::Track, &zb), &zb, None);
+    fake.pulls(&[]);
+    let s = Store::new(&fake.base, &dir, &mods);
+    let ids = |l: &[Entry]| l.iter().map(|e| e.meta.id.clone()).collect::<Vec<_>>();
+    let b = Fake::file("main", "mods/meta_b/meta.json");
+    let drop = |n: usize| fake.routes.lock().unwrap().drops.insert(b.clone(), n);
+
+    drop(1);
+    let first = listing(&s, true);
+    assert_eq!(ids(&first), ["meta_a", "meta_b"]);
+    assert_eq!(fake.asked().iter().filter(|p| **p == b).count(), 2);
+
+    drop(2);
+    s.list(true);
+    let got = until(&s, |e| matches!(e, Event::Note(_)));
+    assert!(got.contains(&Event::Listing(Ok(first.clone()))), "{got:?}");
+    assert!(got.iter().any(|e| matches!(e, Event::Note(n) if n.starts_with("Showing the last listing: can't reach the store"))), "{got:?}");
+    let (dir2, mods2) = scratch("metafail-none");
+    let s2 = Store::new(&fake.base, &dir2, &mods2);
+    drop(2);
+    s2.list(true);
+    let got = until(&s2, |e| matches!(e, Event::Listing(_)));
+    assert!(got.iter().any(|e| matches!(e, Event::Listing(Err(m)) if m.starts_with("Can't read the mod store: "))), "{got:?}");
+
+    fake.set(&b, 404, b"{}".to_vec());
+    assert_eq!(ids(&listing(&s, true)), ["meta_a"]);
     let _ = (std::fs::remove_dir_all(&dir), std::fs::remove_dir_all(&dir2));
 }
 

@@ -857,11 +857,21 @@ impl Store {
         }
     }
 
+    /// `id`'s meta on `rev`: none only for a 404, or a meta.json too big or that fails [`meta_of`]. B12:
+    /// any other failure (a network error, or a CORS-blocked 429/5xx, which a browser sees as one) is
+    /// tried once more and then fails the listing, so the last one stays up rather than a mod going
+    /// missing from Browse for an hour.
     async fn get_meta(&self, rev: &str, id: &str) -> Result<Option<Meta>, String> {
-        match self.get(&self.file_url(rev, &format!("mods/{id}/meta.json")), MAX_META).await {
-            Ok(b) => Ok(meta_of(&b, id)),
-            Err(e) if e == BUSY => Err(e),
-            Err(_) => Ok(None),
+        let url = self.file_url(rev, &format!("mods/{id}/meta.json"));
+        let mut tries = 0;
+        loop {
+            tries += 1;
+            match self.get(&url, MAX_META).await {
+                Ok(b) => return Ok(meta_of(&b, id)),
+                Err(e) if e.starts_with("the store said 404") || e == "too big" => return Ok(None),
+                Err(e) if e == BUSY || tries == 2 => return Err(e),
+                Err(_) => {}
+            }
         }
     }
 
