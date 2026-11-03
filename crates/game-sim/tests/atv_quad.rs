@@ -34,6 +34,10 @@ mod oasis;
 #[path = "atv_quad/animate.rs"]
 mod animate;
 
+/// MD65c2: the net interpolation.
+#[path = "atv_quad/interpolate.rs"]
+mod interpolate;
+
 const OBJ: u32 = 0x01c0_0000;
 const BODY: u32 = 0x01c0_2000;
 const WORLD: u32 = 0x01c0_2400;
