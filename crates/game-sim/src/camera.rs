@@ -1201,7 +1201,39 @@ impl Preset {
         if count < 1 {
             return Vec::new();
         }
-        (0..count).map(|i| Preset::one(ini, &format!("Preset{}{}", i + 1, suffix))).collect()
+        (0..count)
+            .map(|i| Preset::one(ini, &format!("Preset{}{}", i + 1, suffix), "CameraSwing"))
+            .collect()
+    }
+
+    /// Read one of MX vs. ATV Unleashed's follow-camera files (`Cam\FC_ATVDefault.pb` and the rest
+    /// in `Cam\CameraPresets.res`) the way SLUS-21104's loader reads one.
+    ///
+    /// Those files have no count. Their sections are `[<aspect>/<viewport>/<n>]` — `[4x3/1p/1]`,
+    /// `[16x9/2pv/3]` — and the loader takes `n` from one up for as long as the section is there. A
+    /// layout with no sections at all falls back to the same viewport at 4:3, which every file has;
+    /// asking for 4:3 itself and finding nothing is a failed load, no presets.
+    ///
+    /// The keys are this module's, read in the same order, with one difference that matters: the
+    /// loader asks for the lean swing under `Swing`, and the files spell it `CameraSwing`. So every
+    /// preset this reads has a [`Preset::camera_swing`] of zero, which is what the game's own records
+    /// hold, whatever the file says.
+    pub fn read_layout(ini: &Ini, aspect: Aspect, viewport: Viewport) -> Vec<Preset> {
+        let names = ini.names();
+        let has = |name: &str| names.iter().any(|n| n.eq_ignore_ascii_case(name));
+        let prefix = |a: Aspect| format!("{}/{}/", a.word(), viewport.word());
+        let mut at = prefix(aspect);
+        if !has(&format!("{at}1")) {
+            if aspect == Aspect::Standard {
+                return Vec::new();
+            }
+            at = prefix(Aspect::Standard);
+        }
+        (1..)
+            .map(|n| format!("{at}{n}"))
+            .take_while(|s| has(s))
+            .map(|s| Preset::one(ini, &s, "Swing"))
+            .collect()
     }
 
     /// The same, from a file's bytes.
@@ -1220,7 +1252,9 @@ impl Preset {
     /// One preset out of one section, in the loader's own key order. The order matters only for a
     /// file with a key twice, which the first-match scan settles anyway; it is kept because it is the
     /// record of what the loader reads.
-    fn one(ini: &Ini, name: &str) -> Preset {
+    /// `swing` is the key the lean swing is read under: `CameraSwing` for MX Unleashed, `Swing` for
+    /// MX vs. ATV ([`Preset::read_layout`]).
+    fn one(ini: &Ini, name: &str, swing: &str) -> Preset {
         let mut p = Preset::default();
         if !ini.names().iter().any(|n| n.eq_ignore_ascii_case(name)) {
             return p;
@@ -1245,7 +1279,7 @@ impl Preset {
         p.cycle_thru_this_preset = s.flag("CycleThruThisPreset", p.cycle_thru_this_preset);
         p.filter_this_preset = s.flag("FilterThisPreset", p.filter_this_preset);
         p.is_look_back_cam = s.flag("IsLookBackCam", p.is_look_back_cam);
-        p.camera_swing = s.float_or("CameraSwing", p.camera_swing);
+        p.camera_swing = s.float_or(swing, p.camera_swing);
         p.look_swing = s.float_or("LookSwing", p.look_swing);
         p.look_filters = s.vector("LookFilters", p.look_filters);
         p.pos_filters = s.vector("PosFilters", p.pos_filters);
@@ -1261,6 +1295,54 @@ impl Preset {
             s.float_or("LowSpeedAngleXScaleFactor", p.low_speed_angle_x_scale_factor);
         p.offset_from_body_point = s.vector("OffsetFromBodyPoint", p.offset_from_body_point);
         p
+    }
+}
+
+/// The screen shape an MX vs. ATV camera file is read for: the `<aspect>` of its `[<aspect>/<viewport>/<n>]`
+/// sections. SLUS-21104 picks it from the game's widescreen setting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Aspect {
+    /// `1x1`. The loader can ask for it; no file on the disc has it, so it falls back to 4:3.
+    Square,
+    /// `4x3`, the one every file has.
+    Standard,
+    /// `16x9`.
+    Wide,
+}
+
+impl Aspect {
+    /// The word the sections use.
+    pub fn word(self) -> &'static str {
+        match self {
+            Aspect::Square => "1x1",
+            Aspect::Standard => "4x3",
+            Aspect::Wide => "16x9",
+        }
+    }
+}
+
+/// The viewport an MX vs. ATV camera file is read for: the `<viewport>` of its sections.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Viewport {
+    /// `1p`, one player on the whole screen.
+    Full,
+    /// `2ph`, two players, the screen cut across.
+    SplitH,
+    /// `2pv`, two players side by side.
+    SplitV,
+    /// `4p`. No file on the disc has it, and there is no 4:3 fallback for a viewport.
+    Quad,
+}
+
+impl Viewport {
+    /// The word the sections use.
+    pub fn word(self) -> &'static str {
+        match self {
+            Viewport::Full => "1p",
+            Viewport::SplitH => "2ph",
+            Viewport::SplitV => "2pv",
+            Viewport::Quad => "4p",
+        }
     }
 }
 

@@ -8384,3 +8384,11 @@ atv_car_listener_60         atv 0x004cbb60 = a car listener at this-60 (the bugg
 #   (DetectCollisionsWhenDisabled, ResetTime -1) stays filed on the heli's world node +0x30 and its
 #   list goes to mode 0 [0x40], the props' wake mask. +0x128 is bladebentf.col's mesh (Mesh, not a
 #   Hierarchy file): Mesh::parse reads it.
+# MD82a — MX vs. ATV's per-machine camera files (tests/mxvatv_camera_presets.rs on MD39a's, MD37a's and
+# state04's RAM images). Journal: research/journal/2026-11-03-md82-mxvatv-camera-presets.
+atv_vehicle_camera_defaults atv 0x004a6140 = sets FCamFileName (+0xdb0, 0x20 bytes) by the machine kind word +0xbbc: 1 ATV, 2 Biplane, 3 Heli, 4 Buggy, 5 Monster, 6 Baja, 7 GolfCart, 8 Sandrail, else MX ("FC_<X>Default.pb")
+atv_camera_controller_load  atv 0x0048fd10 = "Cam\" + FCamFileName, FC_ -> RC_ when the current camera (+0x78) is the race camera (+0x7c); loads out of Cam\CameraPresets.res by the camera's vt +0x12c (+0x130 cached); cycling preset +0x54, 1p stunt +0x58, look-back +0x5c
+atv_follow_presets_load     atv 0x001c5e00 = the follow camera's file loader: sections "<aspect>/<viewport>/<n>" (aspect by 0x00390a68: 0 1x1, 1 4x3, else 16x9; viewport by cam+0x1a8: 0 1p, 1 2ph, 2 2pv, else 4p), n from 1 while present, else retry at 4x3; MXU's keys but the swing (+0x80) under "Swing" (0x0039ab13); file name to cam+0x128, then vt +0x100
+atv_preset_array_grow       atv 0x001c6480 = grows the 0xa0-byte record array (zeroes only on growth)
+atv_follow_camera_vtable    atv 0x003cc6f0 = MXCameraFollow's vtable (at object +4): update 0x0048b490, ground probe 0x0048b3e0; preset +0x110 current, +0x118 count, +0x124 records, +0x128 file
+atv_race_camera_vtable      atv 0x003cc180 = the race camera's vtable: update 0x00485b20, probe 0x00485a70; allocated in free ride, no presets
