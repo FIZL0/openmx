@@ -3044,6 +3044,9 @@ pub struct Menu {
     /// A page's Save Over question (P229), while it is up: its page, the preset it would write
     /// over, and its row, 1 being Cancel.
     over: Option<(Screen, Over, usize)>,
+    /// A many-choice row's dropdown (P277), while it is open: its page, its row, and the choice
+    /// the cursor is on in it.
+    listing: Option<(Screen, usize, usize)>,
     /// Frames shown, for the track stills' slideshow.
     pub tick: u32,
     /// The settings changed since [`Menu::take_changed`] last said so.
@@ -3370,6 +3373,7 @@ impl Menu {
             camera_pick: 0,
             camera_over: 0,
             over: None,
+            listing: None,
             tick: 0,
             changed: false,
             note: None,
@@ -4451,12 +4455,14 @@ impl Menu {
 
     fn push(&mut self, screen: Screen) {
         self.stack.push(screen);
-        // A page's Save Over question (P229) is not there to come back to.
+        // A page's Save Over question (P229) is not there to come back to, nor its dropdown (P277).
         self.over = None;
+        self.listing = None;
     }
 
     fn pop(&mut self) {
         self.stack.pop();
+        self.listing = None;
     }
 
     fn type_for(&mut self, purpose: Typing) {
@@ -4606,6 +4612,10 @@ impl Menu {
             return self.splash_step(&[(Dev::Keys, p)]);
         }
         self.tick = self.tick.wrapping_add(self.pace.step);
+        // A dropdown (P277) left open on a page gone some other way than its own presses.
+        if self.listing.is_some_and(|(s, ..)| self.screen() != Some(s)) {
+            self.listing = None;
+        }
         let Some(screen) = self.screen() else {
             // In a ride the only thing the menu hears is Start, which opens this rider's pause.
             if p.start {

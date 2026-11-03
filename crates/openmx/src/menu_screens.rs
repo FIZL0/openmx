@@ -127,6 +127,137 @@ pub(super) fn trick_stage(size: (usize, usize)) -> [f32; 4] {
     [o[0] + x * em, o[1] + y * em, w * em, h * em]
 }
 
+/// An option page's column (P277, for a click's sake too): its left, its width, and its first row's
+/// top, under the tabs where it has them.
+pub(super) fn page_column(tabs: bool) -> (f32, f32, f32) {
+    (3.8, 36.4, if tabs { 11.4 } else { 8.2 })
+}
+
+/// An option page's rows laid out from `top` in a column `x` to `x + w`, scrolled so row `at` shows:
+/// each shown row's place and box (a heading's [`HEAD_H`] tall), and whether rows run past the top
+/// and past the bottom.
+pub(super) fn row_spots(rows: &[Row], at: usize, x: f32, w: f32, top: f32) -> (Vec<(usize, Box4)>, bool, bool) {
+    let bottom = STAGE.1 - BAND - 0.4;
+    let shown = (((bottom - top) / (ROW_H + ROW_GAP)) as usize).max(1);
+    let first = at.saturating_sub(shown / 2).min(rows.len().saturating_sub(shown));
+    let mut y = top;
+    let mut spots = Vec::new();
+    for (i, r) in rows.iter().enumerate().skip(first).take(shown) {
+        let h = if r.kind == Kind::Heading { HEAD_H } else { ROW_H };
+        spots.push((i, [x, y, w, h]));
+        y += h + ROW_GAP;
+    }
+    (spots, first > 0, first + shown < rows.len())
+}
+
+/// A dropdown's type (P277), and the pitch of its choices.
+const DROP_TYPE: f32 = 1.2;
+const DROP_PITCH: f32 = 2.05;
+/// How much wider than its words a dropdown's value pill is, in its type's ems: the padding, the
+/// gap and the ▼.
+const DROP_PILL_EXTRA: f32 = 0.55 + 0.4 + 0.6 + 0.55;
+
+/// Where an open dropdown (P277) is: its panel, each choice shown and its box, and whether choices
+/// run past the top and past the bottom.
+pub(super) struct DropSpots {
+    pub panel: Box4,
+    pub items: Vec<(usize, Box4)>,
+    pub above: bool,
+    pub below: bool,
+}
+
+/// A dropdown of `n` choices, the cursor on `j`, for the row whose box is `row`: right-aligned under
+/// the row's value, or over the row where there is more room there, between the logo and the band;
+/// as many choices as fit, scrolled round `j`, past which an arrow says there are more.
+pub(super) fn drop_spots(row: Box4, n: usize, j: usize) -> DropSpots {
+    let (top, bottom) = (2.0, STAGE.1 - BAND - 0.3);
+    let pad = 0.45;
+    let w = 23.0f32.min(row[2] - 1.0);
+    let x = row[0] + row[2] - w - 0.6;
+    let below = bottom - (row[1] + row[3] + 0.15);
+    let above = row[1] - 0.15 - top;
+    let room = below.max(above);
+    let fits = (((room - 2.0 * pad) / DROP_PITCH) as usize).clamp(1, n.max(1));
+    let shown = n.min(fits);
+    let first = j.saturating_sub(shown / 2).min(n - shown);
+    let h = shown as f32 * DROP_PITCH + 2.0 * pad;
+    let y = if below >= h || below >= above { row[1] + row[3] + 0.15 } else { row[1] - 0.15 - h };
+    let items = (first..first + shown).map(|k| (k, [x + 0.35, y + pad + (k - first) as f32 * DROP_PITCH, w - 0.7, DROP_PITCH])).collect();
+    DropSpots { panel: [x, y, w, h], items, above: first > 0, below: first + shown < n }
+}
+
+impl Menu {
+    /// A click (or a tap) at `at` in a `size` view on an option page (P277), in its pixels. With a
+    /// dropdown open, a choice picks it as Cross does and anywhere else closes it as Circle does;
+    /// otherwise a row moves the cursor to it and, unless it is a slider or the Player row, presses
+    /// Cross on it: a dropdown opens, a two-way row flips, an action is done. Whether it was taken.
+    pub(super) fn click_page(&mut self, at: [f32; 2], size: (usize, usize)) -> bool {
+        let Some(screen) = self.screen().filter(|s| Menu::is_page(*s)) else { return false };
+        if self.overwriting().is_some() {
+            return false;
+        }
+        let (em, o) = fit(size);
+        let p = [(at[0] - o[0]) / em, (at[1] - o[1]) / em];
+        let inside = |b: &Box4| p[0] >= b[0] && p[1] >= b[1] && p[0] < b[0] + b[2] && p[1] < b[1] + b[3];
+        let rows = self.page_of(screen);
+        if rows.is_empty() {
+            return false;
+        }
+        let cur = self.cursor(screen).min(rows.len() - 1);
+        let (x, w, top) = page_column(!self.tabs(screen).is_empty());
+        let spots = row_spots(&rows, cur, x, w, top).0;
+        if let Some((i, j)) = self.listing() {
+            self.listing = None;
+            let hit = spots.iter().find(|s| s.0 == i).and_then(|&(_, b)| drop_spots(b, rows[i].choices.len(), j).items.into_iter().find(|(_, b)| inside(b)));
+            match hit {
+                Some((k, _)) => {
+                    self.pick(&rows[i], k);
+                    self.cues.list.push(Cue::Accept);
+                }
+                None => self.cues.list.push(Cue::Back),
+            }
+            return true;
+        }
+        let Some(&(i, _)) = spots.iter().find(|(i, b)| rows[*i].selectable() && inside(b)) else { return false };
+        let moved = self.cursor[screen.index()] != i;
+        self.cursor[screen.index()] = i;
+        let r = &rows[i];
+        if r.off.is_none() && matches!(r.kind, Kind::Choice | Kind::Action | Kind::Opens) {
+            self.walk_page(screen, Press { ok: true, ..Press::default() });
+            self.cues.list.push(Cue::Accept);
+        } else if moved {
+            self.cues.list.push(Cue::Move);
+        }
+        true
+    }
+}
+
+impl Menu {
+    /// The middle of option row `i` as the page shown draws it in a `size` view, in its pixels: where a
+    /// click lands on it (P277). `None` for a row scrolled off or no page.
+    pub fn row_point(&self, i: usize, size: (usize, usize)) -> Option<[f32; 2]> {
+        let screen = self.screen().filter(|s| Menu::is_page(*s))?;
+        let rows = self.page_of(screen);
+        let (x, w, top) = page_column(!self.tabs(screen).is_empty());
+        let (_, b) = row_spots(&rows, self.cursor(screen).min(rows.len().checked_sub(1)?), x, w, top).0.into_iter().find(|s| s.0 == i)?;
+        let (em, o) = fit(size);
+        Some([o[0] + (b[0] + b[2] / 2.0) * em, o[1] + (b[1] + b[3] / 2.0) * em])
+    }
+
+    /// The middle of choice `k` in the open dropdown (P277), as [`Menu::row_point`]; `None` with no
+    /// list open or the choice scrolled off.
+    pub fn list_point(&self, k: usize, size: (usize, usize)) -> Option<[f32; 2]> {
+        let (i, j) = self.listing()?;
+        let screen = self.screen()?;
+        let rows = self.page_of(screen);
+        let (x, w, top) = page_column(!self.tabs(screen).is_empty());
+        let (_, row) = row_spots(&rows, self.cursor(screen), x, w, top).0.into_iter().find(|s| s.0 == i)?;
+        let (_, b) = drop_spots(row, rows[i].choices.len(), j).items.into_iter().find(|s| s.0 == k)?;
+        let (em, o) = fit(size);
+        Some([o[0] + (b[0] + b[2] / 2.0) * em, o[1] + (b[1] + b[3] / 2.0) * em])
+    }
+}
+
 impl<'a> Pen<'a> {
     pub(super) fn new(art: &'a Art, out: &'a mut Vec<Sprite>, base: usize, size: (usize, usize)) -> Pen<'a> {
         let (w, h) = (size.0.max(1) as f32, size.1.max(1) as f32);
@@ -632,25 +763,25 @@ impl<'a> Pen<'a> {
         self.fade = 1.0;
     }
 
-    /// An option page's rows from `top` in a column `x` to `x + w`, scrolled so the cursor shows.
-    fn rows(&mut self, rows: &[Row], at: usize, x: f32, w: f32, top: f32) {
-        let bottom = STAGE.1 - BAND - 0.4;
-        let shown = (((bottom - top) / (ROW_H + ROW_GAP)) as usize).max(1);
-        let first = at.saturating_sub(shown / 2).min(rows.len().saturating_sub(shown));
-        if first > 0 {
+    /// An option page's rows from `top` in a column `x` to `x + w`, scrolled so the cursor shows;
+    /// row `open`'s dropdown open (P277).
+    fn rows(&mut self, rows: &[Row], at: usize, x: f32, w: f32, top: f32, open: Option<usize>) {
+        let (spots, above, below) = row_spots(rows, at, x, w, top);
+        if above {
             self.arrow(x + w / 2.0, top - 0.6, [0.0, -1.0], 0.7, BONE);
         }
         let mut y = top;
-        for (i, r) in rows.iter().enumerate().skip(first).take(shown) {
+        for &(i, b) in &spots {
+            let r = &rows[i];
             let lit = i == at;
+            y = b[1] + b[3] + ROW_GAP;
             if r.kind == Kind::Heading {
-                let base = Pen::mid(y + HEAD_H / 2.0 + 0.2, 1.0);
+                let base = Pen::mid(b[1] + HEAD_H / 2.0 + 0.2, 1.0);
                 self.text(Weight::Bold, &r.label.to_uppercase(), x + 0.4, base, 1.0, 0.0, HEADING, Align::Left);
-                y += HEAD_H + ROW_GAP;
                 continue;
             }
             self.fade = if r.off.is_some() { 0.4 } else { 1.0 };
-            let b = [x, y, w, ROW_H];
+            let y = b[1];
             let mid = y + ROW_H / 2.0;
             if lit {
                 self.pill(b, 0.25, 0.1);
@@ -672,12 +803,51 @@ impl<'a> Pen<'a> {
                 let lx = x + 1.3 + self.wide(kw, &label, k) + 0.5;
                 self.tag("World", lx, mid);
             }
-            self.value(r, lit, x + w - 1.1, mid);
+            self.value(r, lit, x + w - 1.1, mid, open == Some(i));
             self.fade = 1.0;
-            y += ROW_H + ROW_GAP;
         }
-        if first + shown < rows.len() {
+        if below {
             self.arrow(x + w / 2.0, y + 0.1, [0.0, 1.0], 0.7, BONE);
+        }
+    }
+
+    /// Row `at`'s open dropdown (P277, opentennis's B498) under the row's box `row`, or over it:
+    /// every choice of `r` that fits, the one it is on lit, the row's own dotted, each with its hint.
+    fn drop_list(&mut self, r: &Row, row: Box4, j: usize) {
+        let d = drop_spots(row, r.choices.len(), j);
+        let b = d.panel;
+        self.round([b[0] + 0.35, b[1] + 0.4, b[2], b[3]], 0.9, SHADOW, SHADOW);
+        self.round(b, 0.9, [0x2a, 0x14, 0x08, 250], [0x12, 0x09, 0x04, 250]);
+        self.ring(b, 0.9, 0.12, [255, 255, 255, 90]);
+        let size = DROP_TYPE;
+        for &(k, ib) in &d.items {
+            let mid = ib[1] + ib[3] / 2.0;
+            let lit = k == j;
+            if lit {
+                self.pill(ib, 0.15, 0.08);
+            }
+            let (cw, cc) = if lit { (Weight::Heavy, CHALK) } else { (Weight::Bold, BONE) };
+            let tx = ib[0] + 0.9;
+            let end = ib[0] + ib[2] - 1.8;
+            let name = self.fit(cw, &r.choices[k], size, end - tx);
+            self.text(cw, &name, tx, Pen::mid(mid, size), size, if lit { SLANT } else { 0.0 }, cc, Align::Left);
+            if let Some(tip) = r.tips.get(k).filter(|t| !t.is_empty()) {
+                let hx = tx + self.wide(cw, &name, size) + 0.6;
+                if hx < end - 2.0 {
+                    let tip = self.fit(Weight::Bold, tip, 0.8 * size, end - hx);
+                    self.text(Weight::Bold, &tip, hx, Pen::mid(mid, size), 0.8 * size, 0.0, if lit { PAPER } else { TIP }, Align::Left);
+                }
+            }
+            if r.now == Some(k) {
+                self.disc(ib[0] + ib[2] - 0.9, mid, 0.3, CHALK);
+            }
+        }
+        let cx = b[0] + b[2] / 2.0;
+        if d.above {
+            self.arrow(cx, b[1] + 0.35, [0.0, -1.0], 0.45, BONE);
+        }
+        if d.below {
+            self.arrow(cx, b[1] + b[3] - 0.35, [0.0, 1.0], 0.45, BONE);
         }
     }
 
@@ -695,6 +865,9 @@ impl<'a> Pen<'a> {
     fn value_wide(&self, r: &Row) -> f32 {
         let v = 1.3;
         let text = self.wide(Weight::Bold, &r.value, v);
+        if r.many() {
+            return text + DROP_PILL_EXTRA * v;
+        }
         match r.kind {
             Kind::Choice | Kind::Player => text + 2.0 * (0.7 * v + 0.45 * v),
             Kind::Slider => 10.0 * 0.48 * v + 0.45 * v + text.max(2.2 * v) + 2.0 * (0.7 * v + 0.45 * v),
@@ -704,10 +877,27 @@ impl<'a> Pen<'a> {
         }
     }
 
-    /// A row's value, right-aligned at `right`.
-    fn value(&mut self, r: &Row, lit: bool, right: f32, mid: f32) {
+    /// A row's value, right-aligned at `right`; a dropdown's (P277) on its pill with a ▼, a ▲ on
+    /// the lit pill while `open`.
+    fn value(&mut self, r: &Row, lit: bool, right: f32, mid: f32, open: bool) {
         let v = 1.3;
         let base = Pen::mid(mid, v);
+        if r.many() {
+            let (pad, a) = (0.55 * v, 0.6 * v);
+            let w = self.wide(Weight::Bold, &r.value, v) + DROP_PILL_EXTRA * v;
+            let b = [right - w + 0.4 * v, mid - 0.8 * v, w, 1.6 * v];
+            let end = b[0] + b[2];
+            if open {
+                self.round(b, b[3] / 2.0, LIT_TOP, LIT_BOTTOM);
+                self.ring(b, b[3] / 2.0, 0.1, CHALK);
+            } else {
+                self.round(b, b[3] / 2.0, GLASS, GLASS);
+                self.ring(b, b[3] / 2.0, 0.08, if lit { CHALK } else { RIM });
+            }
+            self.arrow(end - pad - a / 2.0, mid, [0.0, if open { -1.0 } else { 1.0 }], a, CHALK);
+            self.text(Weight::Bold, &r.value, end - pad - a - 0.4 * v, base, v, 0.0, CHALK, Align::Right);
+            return;
+        }
         let arrows = matches!(r.kind, Kind::Choice | Kind::Player | Kind::Slider);
         let a = 0.7 * v;
         let mut x = right;
@@ -1488,8 +1678,9 @@ impl Pen<'_> {
         }
         let page = menu.page_of(screen);
         let at = menu.cursor(screen).min(page.len().saturating_sub(1));
-        let top = if tabs.is_empty() { 8.2 } else { 11.4 };
-        self.rows(&page, at, 3.8, 36.4, top);
+        let (x, w, top) = page_column(!tabs.is_empty());
+        let open = menu.listing();
+        self.rows(&page, at, x, w, top, open.map(|o| o.0));
         let Some(r) = page.get(at) else { return };
         let mut side = if screen == Screen::Settings && menu.tab(screen) == pages::TAB_CONTROLS { 4.5 } else { 7.6 };
         if screen == Screen::Garage {
@@ -1498,12 +1689,22 @@ impl Pen<'_> {
             side = 25.2;
         }
         self.side(menu, screen, &page, r, 45.0, side, 31.0);
+        if let Some((i, j)) = open {
+            let spots = row_spots(&page, at, x, w, top).0;
+            if let Some(&(_, b)) = spots.iter().find(|s| s.0 == i) {
+                self.drop_list(&page[i], b, j);
+            }
+        }
         let title = match screen {
             Screen::Modifiers => "Game Modifiers",
             s => s.title(),
         };
         self.title(title);
-        let ok = if r.kind == Kind::Action || r.kind == Kind::Opens { "Select" } else { "Change" };
+        let ok = match r.kind {
+            Kind::Action | Kind::Opens => "Select",
+            _ if r.listed() => "Open",
+            _ => "Change",
+        };
         let mut hints = vec![(Btn::Circle, "Back")];
         if !tabs.is_empty() {
             hints.push((Btn::L1R1, "Tabs"));
@@ -1513,6 +1714,9 @@ impl Pen<'_> {
         if let Some((ask, rows, row)) = menu.overwriting() {
             self.hints(&[(Btn::Circle, "Cancel"), (Btn::Cross, "Select")]);
             self.popup(&ask, &rows, row);
+        } else if open.is_some() {
+            // P277: the list takes every press but its own
+            self.hints(&[(Btn::Circle, "Close"), (Btn::Cross, "Pick")]);
         } else {
             self.hints(&hints);
         }
@@ -2319,7 +2523,7 @@ impl Pen<'_> {
         refresh.kind = Kind::Action;
         refresh.label = "Refresh".into();
         rows.push(refresh);
-        self.rows(&rows, at, 3.8, 36.4, 8.2);
+        self.rows(&rows, at, 3.8, 36.4, 8.2, None);
         let (x, w) = (45.0, 31.0);
         if let Some(l) = menu.lobby.found.get(at) {
             let track = TRACKS.iter().find(|t| t.0 == l.track).map_or(l.track.as_str(), |t| t.1);

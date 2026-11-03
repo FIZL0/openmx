@@ -145,6 +145,15 @@ fn settings_at(m: &mut Menu, r: &mut Reader, tab: &str) {
     tab_to(m, r, tab);
 }
 
+/// A dropdown row's next choice by its list (P277): Cross opens it, Down moves, Cross picks.
+fn list_next(m: &mut Menu, r: &mut Reader) {
+    tap(m, r, Control::Cross);
+    assert!(m.listing().is_some(), "Cross did not open the list");
+    tap(m, r, Control::Down);
+    tap(m, r, Control::Cross);
+    assert_eq!(m.listing(), None, "Cross did not close the list");
+}
+
 /// Down an option page to the row that is `key`, round from the bottom if it is above.
 fn down_to(m: &mut Menu, r: &mut Reader, key: menu::Key) {
     let screen = m.screen().unwrap();
@@ -202,6 +211,11 @@ fn press_every_row(m: &mut Menu, r: &mut Reader, upward: bool) -> Vec<menu::Key>
         tap(m, r, Control::Right);
         if key(m) == before {
             tap(m, r, Control::Cross);
+        }
+        // a dropdown Cross opened (P277), closed again by Circle
+        if m.listing().is_some() {
+            tap(m, r, Control::Circle);
+            assert_eq!((m.listing(), m.screen()), (None, Some(screen)), "{screen:?} {:?}: Circle did not close its list", row.key);
         }
         if m.screen() != Some(screen) {
             tap(m, r, Control::Circle);
@@ -642,13 +656,14 @@ fn the_graphics_row_swaps_the_whole_map_for_the_originals_fog() {
         tap(&mut m, &mut r, Control::Left);
     }
     assert_eq!(m.settings.graphics, Graphics::Full);
-    tap(&mut m, &mut r, Control::Cross);
+    // Its four are a dropdown (P277): Cross opens it, Down the next, Cross picks it.
+    list_next(&mut m, &mut r);
     assert_eq!(m.settings.graphics, Graphics::Farther);
     assert!(Settings::parse(&m.settings.text()).graphics == Graphics::Farther);
-    tap(&mut m, &mut r, Control::Cross);
+    list_next(&mut m, &mut r);
     assert_eq!(m.settings.graphics, Graphics::Far);
     assert!(Settings::parse(&m.settings.text()).graphics == Graphics::Far);
-    tap(&mut m, &mut r, Control::Cross);
+    list_next(&mut m, &mut r);
     assert_eq!(m.settings.graphics, Graphics::Original);
     assert!(Settings::parse(&m.settings.text()).graphics == Graphics::Original);
     assert_eq!(Settings::parse("graphics = far\n").graphics, Graphics::Far);
@@ -781,9 +796,10 @@ fn the_render_scale_row_cycles_and_is_saved() {
     assert_eq!(m.settings.graphics, Graphics::Farther, "the graphics row is untouched");
     tap(&mut m, &mut r, Control::Left);
     assert_eq!(m.settings.render_scale, RenderScale::Forty);
-    tap(&mut m, &mut r, Control::Cross);
+    // a dropdown since P277, round from the bottom
+    list_next(&mut m, &mut r);
     assert_eq!(m.settings.render_scale, RenderScale::Auto);
-    tap(&mut m, &mut r, Control::Cross);
+    list_next(&mut m, &mut r);
     assert_eq!(m.settings.render_scale, RenderScale::Full);
     // The row under it is VSync's, which the render scale's press does not reach.
     tap(&mut m, &mut r, Control::Down);
@@ -5413,9 +5429,11 @@ fn original_on_sets_every_sub_switch_and_one_turned_back_leaves_the_rest() {
         tap(&mut m, &mut r, Control::Right);
         assert!(!m.some_original(d), "{d:?} back to ours");
         // Aspect Ratio's six (P176) step on from 4:3 to 16:9, another of ours, and Shadow Quality
-        // (V108, user 2026-10-30) from Original to Low.
+        // (V108, user 2026-10-30) from Original to Low; Draw Distance round from Original Fog to
+        // the whole map (Farther Fog its first since P268).
         let ours = match d {
             Departure::Picture => "16:9",
+            Departure::Fog => "Whole Map",
             Departure::Shadows => "Low",
             _ => d.choices()[0],
         };
@@ -8280,4 +8298,161 @@ fn the_cars_presets_are_on_the_camera_page() {
     assert!(walk(&mut cam).contains(&kept), "{kept}");
     let labels: Vec<String> = m.camera_choices().iter().map(|p| p.label()).collect();
     assert_eq!(labels.last(), Some(&format!("Buggy: {kept} (Mine)")), "{labels:?}");
+}
+
+// ---- dropdowns (P277) ----------------------------------------------------------------------------
+
+/// The Graphics tab's Render Scale row as a fresh settings file has it (Auto, the first of five),
+/// from the splash claimed by `dev`'s Cross so that it is 1P.
+fn on_render_scale(dev: &Dev) -> (Menu, Readers, Reader) {
+    let (mut m, mut rs) = on_the_splash();
+    let rest = at_rest(dev);
+    devices(&mut m, &mut rs, &rest);
+    let press: Vec<_> = rest.iter().map(|(d, r)| (d.clone(), if d == dev { cross() } else { *r })).collect();
+    devices(&mut m, &mut rs, &press);
+    devices(&mut m, &mut rs, &rest);
+    past_the_card(&mut m, &mut rs, &rest);
+    assert_eq!(m.p1(), Some(dev));
+    let mut r = Reader::new();
+    m.step(r.read(&Report::idle()));
+    settings_at(&mut m, &mut r, "Graphics");
+    down_to(&mut m, &mut r, menu::Key::RenderScale);
+    assert_eq!(m.settings.render_scale, RenderScale::Auto);
+    (m, rs, r)
+}
+
+/// The keyboard, a second pad and `dev`, all at rest.
+fn at_rest(dev: &Dev) -> Vec<(Dev, Report)> {
+    let mut rest = vec![(Dev::Keys, Report::idle()), (pad("other"), Report::idle())];
+    if *dev != Dev::Keys {
+        rest.push((dev.clone(), Report::idle()));
+    }
+    rest
+}
+
+/// One tap of `control` on `dev` alone, every other device of `on_render_scale`'s at rest.
+fn dev_tap(m: &mut Menu, rs: &mut Readers, dev: &Dev, control: Control) {
+    for down in [true, false, false, false] {
+        let mut frame = at_rest(dev);
+        frame.retain(|(d, _)| d != dev);
+        frame.push((dev.clone(), if down { Report::from_buttons(control.mask()) } else { Report::idle() }));
+        devices(m, rs, &frame);
+    }
+}
+
+/// A row of three or more choices opens its list on Cross, Up and Down move round it, Cross picks,
+/// Circle closes it as it was: from a pad, the keyboard (Space is its Cross) and the touch pad's
+/// buttons alike. Every choice in the list has its hint.
+#[test]
+fn a_many_choice_row_opens_moves_picks_and_closes_its_list_by_pad_keyboard_and_touch_pad() {
+    for dev in [pad("pad"), Dev::Keys, pad("Touch controls")] {
+        let (mut m, mut rs, _) = on_render_scale(&dev);
+        let row = m.page()[m.cursor(Screen::Settings)].clone();
+        assert!(row.many() && row.listed(), "{dev:?}: Render Scale is a dropdown");
+        assert_eq!(row.choices.len(), RenderScale::ALL.len());
+        assert_eq!(row.tips.len(), row.choices.len(), "every choice has its hint");
+        assert!(row.tips.iter().all(|t| !t.is_empty()), "{:?}", row.tips);
+        let at = m.cursor(Screen::Settings);
+
+        dev_tap(&mut m, &mut rs, &dev, Control::Cross);
+        assert_eq!(m.listing(), Some((at, 0)), "{dev:?}: Cross opens the list on the row's choice");
+        assert!(!m.take_changed(), "{dev:?}: opening changes nothing");
+        // round from the top to the bottom, and back
+        dev_tap(&mut m, &mut rs, &dev, Control::Up);
+        assert_eq!(m.listing(), Some((at, 4)), "{dev:?}: Up from the first is the last");
+        dev_tap(&mut m, &mut rs, &dev, Control::Down);
+        assert_eq!(m.listing(), Some((at, 0)), "{dev:?}: Down from the last is the first");
+        dev_tap(&mut m, &mut rs, &dev, Control::Down);
+        dev_tap(&mut m, &mut rs, &dev, Control::Down);
+        assert_eq!(m.listing(), Some((at, 2)));
+        // Left and Right do nothing while it is open, nor does the setting move as it does
+        dev_tap(&mut m, &mut rs, &dev, Control::Right);
+        dev_tap(&mut m, &mut rs, &dev, Control::Left);
+        assert_eq!((m.listing(), m.settings.render_scale), (Some((at, 2)), RenderScale::Auto), "{dev:?}");
+        assert_eq!(m.cursor(Screen::Settings), at, "{dev:?}: Down in the list is not the page's");
+        dev_tap(&mut m, &mut rs, &dev, Control::Cross);
+        assert_eq!(m.listing(), None, "{dev:?}: Cross closes it");
+        assert!(m.take_changed());
+        assert_eq!(m.settings.render_scale, RenderScale::ALL[2], "{dev:?}: Cross picks");
+
+        // Circle closes it as it was, and stays on the page
+        dev_tap(&mut m, &mut rs, &dev, Control::Cross);
+        assert_eq!(m.listing(), Some((at, 2)), "{dev:?}: it opens on the picked choice");
+        dev_tap(&mut m, &mut rs, &dev, Control::Down);
+        dev_tap(&mut m, &mut rs, &dev, Control::Circle);
+        assert_eq!((m.listing(), m.screen()), (None, Some(Screen::Settings)), "{dev:?}: Circle closes the list, not the page");
+        assert_eq!(m.settings.render_scale, RenderScale::ALL[2], "{dev:?}: Circle picks nothing");
+        assert!(!m.take_changed());
+        // Left and Right on the closed row still step it
+        dev_tap(&mut m, &mut rs, &dev, Control::Right);
+        assert_eq!(m.settings.render_scale, RenderScale::ALL[3], "{dev:?}");
+    }
+}
+
+/// The mouse, and a tap on a touch screen, which the shell hands the menu as the same click: a
+/// click on a many-choice row opens its list, a click on a choice picks it, a click off the list
+/// closes it as it was. A click on a two-choice row toggles it.
+#[test]
+fn a_click_opens_a_list_picks_a_choice_and_off_it_closes_it() {
+    let size = (1920, 1080);
+    let (mut m, mut r) = fresh();
+    settings_at(&mut m, &mut r, "Graphics");
+    let rows = m.page();
+    let at = rows.iter().position(|row| row.key == menu::Key::RenderScale).unwrap();
+    let vsync = rows.iter().position(|row| row.key == menu::Key::VSync).unwrap();
+    // the tab scrolls: its rows from the one above in view
+    down_to(&mut m, &mut r, rows[..at].iter().rev().find(|row| row.selectable()).unwrap().key);
+
+    assert!(m.click(m.row_point(at, size).expect("the row is on screen"), size));
+    assert_eq!(m.cursor(Screen::Settings), at, "the click moves the cursor there");
+    assert_eq!(m.listing(), Some((at, 0)), "and opens its list");
+    assert!(m.click(m.list_point(3, size).expect("the choice is on screen"), size));
+    assert_eq!(m.listing(), None);
+    assert_eq!(m.settings.render_scale, RenderScale::ALL[3], "the click picks the choice");
+    assert!(m.take_changed());
+
+    assert!(m.click(m.row_point(at, size).unwrap(), size));
+    assert_eq!(m.listing(), Some((at, 3)));
+    // the top left corner is off the list, and off every row
+    assert!(m.click([2.0, 2.0], size));
+    assert_eq!((m.listing(), m.screen()), (None, Some(Screen::Settings)), "a click off the list closes it");
+    assert_eq!(m.settings.render_scale, RenderScale::ALL[3]);
+    assert!(!m.take_changed());
+
+    // On/Off keeps its toggle, by click and by pad
+    let was = m.settings.vsync;
+    assert!(m.click(m.row_point(vsync, size).unwrap(), size));
+    assert_eq!((m.settings.vsync, m.listing()), (!was, None), "a click toggles VSync");
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!((m.settings.vsync, m.listing()), (was, None), "Cross toggles VSync back");
+}
+
+/// Only rows of three or more choices drop: every two-choice row of every option page still
+/// toggles on Cross with no list, sliders never drop, and a dimmed many-choice row opens nothing.
+#[test]
+fn two_choice_rows_toggle_and_only_many_choice_rows_drop() {
+    let (mut m, mut r) = fresh();
+    settings_at(&mut m, &mut r, "Graphics");
+    let screen = Screen::Settings;
+    for tab in m.tabs(screen).iter().map(|t| t.to_string()).collect::<Vec<_>>() {
+        tab_to(&mut m, &mut r, &tab);
+        for row in m.page() {
+            let many = row.kind == menu::Kind::Choice && row.choices.len() >= 3;
+            if row.kind != menu::Kind::Choice || row.off.is_some() {
+                assert!(!row.listed(), "{tab} {:?} is no choice row but drops", row.key);
+            } else if !many {
+                assert!(!row.many(), "{tab} {:?}: two choices are no dropdown", row.key);
+            }
+            if row.listed() {
+                assert_eq!(row.tips.len(), row.choices.len(), "{tab} {:?}: a hint for each choice", row.key);
+            }
+        }
+    }
+    tab_to(&mut m, &mut r, "Graphics");
+    down_to(&mut m, &mut r, menu::Key::VSync);
+    for _ in 0..2 {
+        let was = m.settings.vsync;
+        tap(&mut m, &mut r, Control::Cross);
+        assert_eq!((m.settings.vsync, m.listing()), (!was, None));
+    }
 }
