@@ -602,7 +602,9 @@ impl Rider {
     /// (`table`: `from_table`, `holding`) and clip as they were then. Only while the rider is up and has a kit and holds; started afresh
     /// when there is none yet or the bike has gone where the bones did not ([`Riding::strayed`]).
     fn riding_tick(&mut self, before: &crate::math::Mat4, table: (bool, bool), clip: i32, dt: F, world: &mut dyn World) {
-        let up = self.state.wreck.is_none() && self.crash.is_none() && self.ragdoll.is_none();
+        // The verdict's tick is still ridden by a body whose entry waits (B19).
+        let up = (self.state.wreck.is_none() && self.crash.is_none() || Self::entry_waits(&self.state, self.crash.as_ref(), None, self.riding.as_deref(), false))
+            && self.ragdoll.is_none();
         let (Some(kit), Some(holds), true) = (self.ragdoll_kit.clone(), self.holds.clone(), up) else {
             self.riding = None;
             return;
@@ -686,7 +688,7 @@ impl Rider {
         let Rider {
             ride, tricks, state, motion, packed_pose, packed_fore_aft, set, clips, sense, racing, wreckage, crash, animation,
             flight, airborne, ragdoll_kit, ragdoll, skeleton, drawn, riding, wreck_sounds, wreck_kit, wreck_clocks, idles, ghost, edge_armed, page,
-            put_back, ragdoll_shown, score, bike_col, fifty, cars, ..
+            put_back, ragdoll_shown, score, bike_col, fifty, cars, holds, ..
         } = self;
         *ragdoll_shown = None;
         // 0b — the reverse command the body asks with this tick is the one the last tick left (F13).
@@ -1146,8 +1148,12 @@ impl Rider {
                 wreck_clocks.clank_entry(wreck_kit, wreck_sound::magnitude(ride.mv.g_peak), ragdoll_ride::generator(idles));
             }
             // The body actor's wreck entry: the bones off the bike, then the wreck sound picked.
-            // Both draw from the game's one generator, which is the idle pool's.
+            // Both draw from the game's one generator, which is the idle pool's. A rider with a
+            // riding body enters a tick later (B19): the actor rides this tick out on the bike as
+            // the verdict left it (step 9) and enters at the end of the next ([`Rider::enter_late`]).
+            let late = holds.is_some() && riding.as_deref().is_some_and(Riding::placed) && !out.respawned;
             *ragdoll = match (ragdoll_kit.as_ref(), wreckage.as_ref(), crash.as_ref()) {
+                _ if late => None,
                 (Some(kit), Some(w), Some(down)) => {
                     let rng = ragdoll_ride::generator(idles);
                     // From the riding bodies when there are some (S110), else from the animated
@@ -1250,8 +1256,9 @@ impl Rider {
             if let Some(nodes) = nodes {
                 *drawn = ragdoll_ride::drawn(&nodes);
             }
-        } else {
-            // The riding body too (S110): the next one is placed afresh off the pose.
+        } else if !Self::entry_waits(state, crash.as_ref(), ragdoll.as_ref(), riding.as_deref(), out.respawned) {
+            // The riding body too (S110): the next one is placed afresh off the pose. One whose wreck
+            // entry waits for the end of the tick is kept for it (B19).
             *riding = None;
         }
         // 7b — the two wreck emitters' frames past the entry's tick (S173), the bike's then the
@@ -1302,10 +1309,51 @@ impl Rider {
         // tick (S90), so the shell draws the bodies this tick left under the bike it left, and a
         // wreck entered next tick starts from them.
         // A tick that put the bike back starts a fresh body off the skeleton where the bike now is.
+        // B19: the verdict's tick still rides (the actor reads the reason a tick on), and the tick
+        // after enters the wreck from what that ride left.
         let (before, table, clip) = riding_from;
         let before = if out.respawned { self.ride.transform() } else { before };
-        self.riding_tick(&before, table, clip, dt, world);
+        if out.wreck.is_none() && Self::entry_waits(&self.state, self.crash.as_ref(), self.ragdoll.as_ref(), self.riding.as_deref(), out.respawned) {
+            out.separated |= self.enter_late(dt, world);
+        } else {
+            self.riding_tick(&before, table, clip, dt, world);
+        }
         out
+    }
+
+    /// **The rider is down and the body actor has not entered the wreck yet** (B19): a wreck body
+    /// under the rider, no bones thrown, and a placed riding body to enter from. The original's actor
+    /// rides the verdict's tick out on the thrown bike (its riding word is still set on that tick's
+    /// row, its bones carried at ~0.8 of the bike) and enters on the next: R14's south-bones.csv,
+    /// S56's four captures (the reason a row ahead of the body's mode) and S110's run2 (verdict 3716,
+    /// entry 3718).
+    fn entry_waits(state: &state::Ride, crash: Option<&Crash>, ragdoll: Option<&Down>, riding: Option<&Riding>, respawned: bool) -> bool {
+        state.wreck.is_some() && crash.is_some() && ragdoll.is_none() && riding.is_some_and(Riding::placed) && !respawned
+    }
+
+    /// **The body actor's wreck entry, a tick after the verdict** (B19), at the end of the tick as the
+    /// actor runs after the rider (S90): the bones off the riding bodies as the verdict's tick left them
+    /// ([`Riding::hand_over`]), against the wreck body as this tick's step left it, then the wreck sound
+    /// picked (both draw from the game's one generator), then the rest of the actor's update: the
+    /// wreck's first step, which S110's run2 hook on the original's entry shows running after it returns.
+    /// The riding body is done. Returns whether that step let go of the bars.
+    fn enter_late(&mut self, dt: F, world: &mut dyn World) -> bool {
+        let riding = self.riding.take();
+        let (Some(kit), Some(w), Some(down), Some(reason), Some(riding)) =
+            (self.ragdoll_kit.as_ref(), self.wreckage.as_ref(), self.crash.as_ref(), self.state.wreck, riding)
+        else {
+            return false;
+        };
+        let Some((now, before)) = riding.hand_over(kit) else { return false };
+        let rng = ragdoll_ride::generator(&mut self.idles);
+        let mut doll = Down::enter_from(kit, &now, before, dt, down, down.throw, i32::from(reason.0), &w.wrecks, rng, world);
+        self.wreck_clocks.voice_entry(&mut self.wreck_sounds, &self.wreck_kit, i32::from(reason.0), rng);
+        let held = doll.ragdoll.holds[0] || doll.ragdoll.holds[1];
+        let knockable = self.ride.props.as_deref_mut().map(|l| &mut l.0);
+        doll.step_posed_among(kit, self.skeleton.as_deref(), dt, down, world, true, knockable);
+        let separated = held && !(doll.ragdoll.holds[0] || doll.ragdoll.holds[1]);
+        self.ragdoll = Some(doll);
+        separated
     }
 
     /// What the points read off the bike (S79): its wheels, its air, and the chassis' up and

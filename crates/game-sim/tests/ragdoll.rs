@@ -1731,9 +1731,11 @@ fn the_riders_bones_lose_the_wreck_bike_on_the_put_back_tick() {
     }}
 
 /// **The wreck enters from the riding bodies** (S110): a rider handed its holds steps the riding
-/// ragdoll each tick it is up, and its wreck's bones start where those bodies are on the verdict's
-/// tick (as the tick before left them, since S90 steps them at the frame's end); a rider with no holds (a fixture, a session online) has no riding ragdoll and enters from the
-/// skeleton as before. Thrown upside down at the top of a jump, it wrecks in the air.
+/// ragdoll each tick it is up, and its wreck's bones start where those bodies are; a rider with no holds (a fixture, a session online) has no riding ragdoll and enters from the
+/// skeleton on the verdict's tick as before. Thrown upside down at the top of a jump, it wrecks in the air.
+/// Since B19 the held rider's body rides the verdict's tick out on the thrown bike and enters at the
+/// end of the next, then takes the wreck's first step: its bones are, bit for bit, that entry off the
+/// bodies the verdict's tick left, against the wreck body as the entry's tick left it, stepped once.
 #[test]
 fn the_wreck_enters_from_the_riding_bodies() {
     use game_sim::ragdoll_riding::Holds;
@@ -1777,18 +1779,33 @@ fn the_wreck_enters_from_the_riding_bodies() {
             assert!(held.riding.is_some(), "tick {tick}: riding on");
             continue;
         }
-        let riding = up.riding.as_deref().expect("a rider up with holds rides its ragdoll");
-        assert!(riding.placed(), "tick {tick}: the riding bodies are placed");
-        assert!(held.riding.is_none(), "the wreck ends the riding ragdoll");
+        assert!(up.riding.as_deref().is_some_and(|r| r.placed()), "tick {tick}: the riding bodies are placed");
+        // The verdict's tick: the held rider's body rides it out, the bare one's bones are down.
+        let riding = held.riding.as_deref().expect("the verdict's tick rides on (B19)");
+        assert!(riding.placed() && held.ragdoll.is_none(), "tick {tick}: the held rider's entry waits");
+        assert!(bare.ragdoll.is_some(), "tick {tick}: the bare rider enters on the verdict's tick");
+        let mid = held.clone();
+        let out = held.frame(&p, &tables, &idle, dt, &mut world);
+        bare.frame(&p, &tables, &idle, dt, &mut world);
+        assert_eq!(out.wreck, None, "the verdict is once");
+        assert!(held.riding.is_none(), "the entry ends the riding ragdoll");
         let doll = held.ragdoll.as_ref().expect("the wreck's bones");
         let skeleton = bare.ragdoll.as_ref().expect("the bare rider's wreck bones");
-        let (now, _) = riding.hand_over(&kit).expect("the riding bodies handed over");
-        let off = |a: &[Bone], b: &[Vf]| a.iter().zip(b).flat_map(|(x, y)| (0..3).map(move |l| (x.body.position[l] - y[l]).abs())).fold(0f32, f32::max);
-        let bodies: Vec<Vf> = riding.actor.ragdoll.bones.iter().map(|b| b.body.position).collect();
-        let (from_riding, from_skeleton) = (off(&doll.ragdoll.bones, &bodies), off(&skeleton.ragdoll.bones, &bodies));
-        eprintln!("wrecked on tick {tick}: the entry is {from_riding} off the riding bodies, the skeleton's {from_skeleton}");
-        assert_eq!(now.len(), doll.ragdoll.bones.len());
-        assert!(from_riding < 1e-3, "the entry starts at the riding bodies ({from_riding} off)");
+        // The entry rebuilt: the bodies the verdict's tick left, the wreck body as this tick left it.
+        let riding = mid.riding.as_deref().expect("the riding body");
+        let (now, before) = riding.hand_over(&kit).expect("the riding bodies handed over");
+        let crash = held.crash.as_ref().expect("the wreck body");
+        let reason = i32::from(held.state.wreck.expect("down").0);
+        let mut pool = mid.idles.clone();
+        let rng = game_sim::ragdoll_ride::generator(&mut pool);
+        let mut want = game_sim::ragdoll_ride::Down::enter_from(&kit, &now, before, dt, crash, crash.throw, reason, &wrecks, rng, &mut world);
+        mid.wreck_clocks.clone().voice_entry(&mut mid.wreck_sounds.clone(), &mid.wreck_kit, reason, rng);
+        want.step_posed_among(&kit, held.skeleton.as_deref(), dt, crash, &mut world, true, None);
+        let bits = |bs: &[Bone]| bs.iter().flat_map(|b| (0..3).flat_map(|l| [b.body.position[l].to_bits(), b.body.velocity[l].to_bits()])).collect::<Vec<_>>();
+        assert_eq!(bits(&doll.ragdoll.bones), bits(&want.ragdoll.bones), "the entry is the riding bodies', stepped once");
+        let off = |a: &[Bone], b: &[Bone]| a.iter().zip(b).flat_map(|(x, y)| (0..3).map(move |l| (x.body.position[l] - y.body.position[l]).abs())).fold(0f32, f32::max);
+        let from_skeleton = off(&skeleton.ragdoll.bones, &doll.ragdoll.bones);
+        eprintln!("wrecked on tick {tick}: the bare rider's bones are {from_skeleton} off the held one's");
         assert!(from_skeleton > 0.01, "the bare rider's entry is the skeleton's, not the riding bodies' ({from_skeleton} off)");
         return;
     }

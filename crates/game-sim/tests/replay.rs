@@ -10639,6 +10639,19 @@ fn s211_ride_watched(
     by: [f32; 3],
     ticks: usize,
     toys: bool,
+    each: impl FnMut(&mut game_sim::Sim),
+) -> Option<Vec<S211Tick>> {
+    s211_ride_seeded(image, by, ticks, toys, |_, _| {}, each)
+}
+
+/// [`s211_ride_watched`], `seed` handed the image and the sim once it is seeded, before the first
+/// tick (B19's riding body).
+fn s211_ride_seeded(
+    image: &std::path::Path,
+    by: [f32; 3],
+    ticks: usize,
+    toys: bool,
+    seed: impl FnOnce(&SaveState, &mut game_sim::Sim),
     mut each: impl FnMut(&mut game_sim::Sim),
 ) -> Option<Vec<S211Tick>> {
     let image = image.to_path_buf();
@@ -10691,6 +10704,7 @@ fn s211_ride_watched(
             }
         }
         seed_bike_search_kept(&st, &mut sim, world);
+        seed(&st, &mut sim);
         let mut out = Vec::new();
         for _ in 0..ticks {
             sim.tick_in(Input::default(), world);
@@ -10858,9 +10872,11 @@ fn columns_capture(dir: &str, name: &str) -> Option<Vec<std::collections::HashMa
 /// both ticks' velocities bit for bit (the csv's nine figures round-trip). On the throw's row the original's body
 /// actor is still riding (its wreck entry clears that word on the next row), and its bones already
 /// go at ~0.8 of the thrown bike: they had one more riding step on the bike as thrown, and enter
-/// the wreck from it a tick later. The port enters on the verdict's tick, from the tick before's
-/// pose; here, with no riding ragdoll run (no drawn chassis to hold it to), off the kit's pose at
-/// rest, so its main bone stays where the bike stood. Pinned until that is ported.
+/// the wreck from it a tick later. So does the port's riding body since B19, seeded from the
+/// original's actor ([`b19_ride`]): its main bone goes with the bike on the throw's tick and is the
+/// original's to 0.5 ft on the entry's. With no riding ragdoll run (no drawn chassis to hold it to)
+/// the port still enters on the verdict's tick, off the kit's pose at rest, so its main bone stays
+/// where the bike stood.
 #[test]
 fn the_windmill_wrecks_the_bones_with_the_bike() {
     let Some(left) = r14_capture("south") else { return };
@@ -10902,13 +10918,22 @@ fn the_windmill_wrecks_the_bones_with_the_bike() {
     let first = bone(entry, 0);
     println!("the original's main bone on the entry's row: {first:?}, at {:?}", [entry["b0_vx"], entry["b0_vy"], entry["b0_vz"]]);
 
-    // The port's, entered on the throw's tick from the kit's pose at rest: pinned to see it change.
-    let v = port[1].bone_vel.expect("the port's bones down on the throw's tick");
+    // The port's, its riding body seeded from the original's actor (B19): it rides the throw's tick
+    // out on the thrown bike, carried as the original's, and enters the wreck on the next.
+    let Some((_, bones, _)) = b19_ride("r14", "south-bones", 3) else { return };
+    let (riding, down) = (&bones[1], &bones[2]);
+    assert!(!riding.down && down.down, "the port lets go a tick after the verdict");
+    let v = riding.bones[0].1;
     println!("the port's main bone on the throw's tick at {v:?}");
-    assert!(v.z().abs() < 5.0, "the port's main bone carried with the bike: {v:?}");
-    let off = apart([port[2].bone.x(), port[2].bone.y(), port[2].bone.z()], first);
+    assert!((0..3).all(|i| (v[i] - throw[&format!("b0_v{}", ["x", "y", "z"][i])]).abs() < 0.5), "the port's main bone carried with the bike: {v:?}");
+    let p = down.bones[0].0;
+    let off = apart([p.x(), p.y(), p.z()], first);
     println!("the port's main bone on tick 3 is {off:.2} ft from the original's");
-    assert!(off > 2.0, "the port's main bone is the original's on tick 3 ({off} ft)");
+    assert!(off < 0.5, "the port's main bone is the original's on tick 3 ({off} ft)");
+    // With no riding body to enter from (no drawn chassis to hold it to), the port still enters on
+    // the verdict's tick off the kit's pose at rest (B19's stand-in): its main bone stays behind.
+    let v = port[1].bone_vel.expect("the port's bones down on the throw's tick");
+    assert!(v.z().abs() < 5.0, "the riderless entry's main bone carried with the bike: {v:?}");
 }
 
 // B15: S211's south3 image again, bones and all. S167's slot 5 was s144's midback-2734.p2s (s1's
@@ -10962,8 +10987,13 @@ fn b15_ride(ticks: usize, still_after: Option<usize>) -> Option<(Vec<S211Tick>, 
 /// 10,000–100,000 ft/s, and that is S211's early put-back. With the body stepped (its mover
 /// still) the same bones touch and stay under 20 ft/s. So the strike is B19's entry, met by
 /// S167's unstepped body, which the original's bones, carried a tick on the thrown bike, never
-/// reach. Bone by bone the port is feet off from the entry. Pinned until B19 lands, when this is
-/// its proof.
+/// reach. Bone by bone the port is feet off from the entry. That stays the port's ride with no
+/// riding body (B19's stand-in). Since B19, with the original's riding body seeded ([`b19_ride`]),
+/// the port's actor rides the throw's tick out and enters on the next row as the original's: its
+/// bones never come near the windmill's face, go no faster than ~140 ft/s, and nothing is put back in
+/// 40 ticks. They are the original's to 1.7 ft while riding and 3.4 ft on the entry's row, then part
+/// at ~2.2 ft a tick: the original's main bone leaves the entry at (41, −39, 122) ft/s, the port's
+/// at the bike's (8, 16, 133) (B22).
 #[test]
 fn the_windmill_strikes_the_ports_bones_left_at_its_face() {
     let Some(rows) = columns_capture("b15", "south3-bones") else { return };
@@ -11026,6 +11056,234 @@ fn the_windmill_strikes_the_ports_bones_left_at_its_face() {
         let fast = b.bones.iter().map(|(_, v)| speed([v.x(), v.y(), v.z()])).fold(0.0f32, f32::max);
         assert!(fast < 20.0, "tick {}: a stepped windmill flings the bones at {fast}", t + 1);
     }
+
+    // B19: the port's riding body seeded from the original's actor. It rides the throw's tick out
+    // and enters on the next, as the original, and the windmill never strikes its bones.
+    let Some((port, bones, seeded)) = b19_ride("b15", "south3-bones", 40) else { return };
+    let off = |t: usize, i: usize, b: &B19Bones| {
+        let (p, w) = (b.bones[i].0, bone(&rows[t + 1], i));
+        speed([p.x() - w[0], p.y() - w[1], p.z() - w[2]])
+    };
+    let off0 = (0..18).map(|i| speed([seeded[i].x() - bone(&rows[0], i)[0], seeded[i].y() - bone(&rows[0], i)[1], seeded[i].z() - bone(&rows[0], i)[2]])).fold(0.0, f32::max);
+    assert!(off0 < 1e-3, "the seeded riding body is off row 0 by {off0} ft");
+    assert_eq!(port[2].wreck, Some(4), "the throw's wreck on tick 3");
+    let mut seen = Vec::new();
+    for (t, b) in bones.iter().enumerate().map(|(i, b)| (i + 1, b)) {
+        let worst = (0..18).map(|i| off(t, i, b)).fold(0.0, f32::max);
+        let fast = b.bones.iter().map(|(_, v)| speed([v.x(), v.y(), v.z()])).fold(0.0f32, f32::max);
+        seen.push(format!("tick {t}: down {}, worst {worst:.2} ft off, fastest {fast:.1} ft/s", b.down));
+        assert_eq!(b.down, rows[t + 1]["riding"] == 0.0, "tick {t}: the port's bones down against the original's riding word:\n{}", seen.join("\n"));
+        assert!(fast < 200.0, "tick {t}: the riding body's bones flung:\n{}", seen.join("\n"));
+        // Riding, and the entry's row: the original's bones (B19). Past it they part (B22).
+        if t <= 4 {
+            assert!(worst < [1.5, 2.0, 2.0, 4.0][t - 1], "tick {t}: the bones apart:\n{}", seen.join("\n"));
+        }
+    }
+    println!("{}", seen.join("\n"));
+    assert_eq!(s211_cannonball(port.iter().map(|p| [p.vel.x(), p.vel.y(), p.vel.z()])), None, "no put-back in 40 ticks");
+}
+
+// B19: R14's south-bones image once more, the port's riding body seeded from the original's actor.
+
+/// One port tick's bones for B19: whether they are the wreck's ([`Rider::ragdoll`]) or still the
+/// riding body's, and each body's position and velocity.
+struct B19Bones {
+    down: bool,
+    bones: Vec<(Vf, Vf)>,
+}
+
+/// **The human's body actor in `st` as the port's riding body** (B19): the actor whose main bone is
+/// nearest the bike (the original's rider body actor class, by its vtable, with eighteen parts),
+/// each part's body, the joints' and the holds' pins, the bone collisions and the actor's own words
+/// read as S273's down rider is ([`s273_doll`]); and the holds its last riding request was made
+/// with, carried into the frame of `m`, the bike's transform now. The original's actor fields are
+/// research/oracle.txt's (S50, S51, S61, S110), as tests/ragdoll_riding.rs reads them.
+fn b19_riding(st: &SaveState, kit: &game_sim::ragdoll_ride::Kit, m: &Mat4) -> (game_sim::ragdoll_riding::Riding, game_sim::ragdoll_riding::Holds) {
+    use game_sim::rider_anim::Mode;
+    let ee = ps2_oracle::Ee::with_ram(st.ram.clone());
+    let f = |at: u32| F(ee.f32_at(at));
+    let quad = |at: u32| Vf::from_bits([0, 4, 8, 12].map(|k| ee.u32_at(at + k)));
+    let mat = |at: u32| Mat4([0, 0x10, 0x20, 0x30].map(|k| quad(at + k)));
+    let body_of = |a: u32, i: usize| ee.u32_at(ee.u32_at(a + 0x2f4) + 0xb0 * i as u32 + 0xa4);
+    let bike = m.0[3];
+    let near = |a: u32| {
+        let p = quad(body_of(a, 0) + 0x60);
+        (0..3).map(|l| (p[l] - bike[l]).powi(2)).sum::<f32>()
+    };
+    let a = (0x10_0000..0x200_0000u32)
+        .step_by(16)
+        .filter(|&a| ee.u32_at(a + 8) == 0x0045_8eb0 && ee.u32_at(a + 0x2e0) == 18)
+        .min_by(|&x, &y| near(x).total_cmp(&near(y)))
+        .expect("a rider body actor");
+    assert!(near(a) < 100.0, "the nearest body actor's main bone is {} ft from the bike", near(a).sqrt());
+    let mut riding = game_sim::ragdoll_riding::Riding::new(kit);
+    let actor = &mut riding.actor;
+    let n = actor.ragdoll.bones.len();
+    let bone_of = |b: u32| (0..n).find(|&i| body_of(a, i) == b).expect("a bone's body");
+    let r = &mut actor.ragdoll;
+    for (i, bone) in r.bones.iter_mut().enumerate() {
+        let b = body_of(a, i);
+        bone.body = s252a_body(&ee, b);
+        bone.mass = f(b + 0x0c);
+        bone.inertia = quad(b + 0x110);
+        bone.reference = quad(b + 0x160);
+    }
+    let joint_pin = |i: usize| ee.u32_at(ee.u32_at(a + 0x4c0) + 0x50 * i as u32 + 8);
+    for (i, j) in r.joints.iter_mut().enumerate() {
+        let pin = joint_pin(i);
+        j.wrecked = ee.u32_at(pin + 0x70) != 0;
+        j.max_angle = f(pin + 0xc4);
+        j.spring = quad(pin + 0xd0);
+        j.damping = quad(pin + 0xe0);
+        j.critical = quad(pin + 0xf0);
+    }
+    let holds = [0x5d0, 0x5d4, 0x5d8, 0x5dc];
+    let pins: Vec<u32> = holds.iter().map(|&h| ee.u32_at(a + h)).chain((0..r.joints.len()).map(joint_pin)).collect();
+    assert_eq!(pins.len(), r.pins.len(), "the holds' and joints' pins");
+    for (p, &at) in r.pins.iter_mut().zip(&pins) {
+        let second = ee.u32_at(at + 0x6c);
+        *p = game_sim::ragdoll::Pin {
+            first: bone_of(ee.u32_at(at + 0x68)),
+            second: (second != 0).then(|| bone_of(second)),
+            anchors: [quad(at + 0x20), quad(at + 0x30)],
+            target: quad(at + 0x40),
+            target_velocity: quad(at + 0x50),
+            lower: quad(at + 0x80),
+            upper: quad(at + 0x90),
+            hit: quad(at + 0xa0),
+            sticky: quad(at + 0xb0),
+            gains: quad(at + 0x100),
+        };
+    }
+    for (i, c) in r.collisions.iter_mut().enumerate() {
+        let k = ee.u32_at(ee.u32_at(a + 0x624) + 4 * i as u32);
+        assert_eq!(c.bone, bone_of(ee.u32_at(k + 0x7c)), "collision {i}'s bone");
+        c.enabled = ee.u32_at(k + 0x04) != 0;
+        c.touching = ee.u32_at(k + 0x14) != 0;
+    }
+    r.holds = holds.map(|h| ee.u32_at(ee.u32_at(a + h) + 0x04) != 0);
+    r.throwing = ee.u32_at(ee.u32_at(a + 0x62c)) != 0;
+    r.entered = ee.u32_at(a + 0x49c) != 0;
+    r.stiff = ee.u32_at(a + 0x2b4) != 0;
+    r.riding = ee.u32_at(a + 0x2a4) != 0;
+    r.off_bike = ee.u32_at(a + 0x6b0) != 0;
+    r.flung = ee.u32_at(a + 0x6b8) != 0;
+    r.settled = ee.u32_at(a + 0x6b4) != 0;
+    r.roll = f(a + 0x490);
+    r.pull = quad(a + 0x6e0);
+    let mode = |at: u32| match ee.i32_at(at) {
+        0 => Mode::Held,
+        1 => Mode::Riding,
+        2 => Mode::Wrecked,
+        3 => Mode::Posed,
+        4 => Mode::Gate,
+        m => panic!("mode {m}"),
+    };
+    actor.mode = mode(a + 0x47c);
+    actor.prev = mode(a + 0x480);
+    actor.idle = ee.u32_at(a + 0xa2c) != 0;
+    actor.look_pose = ee.i32_at(a + 0x9f0);
+    actor.clip = ee.i32_at(a + 0x8f4);
+    actor.touching = ee.u32_at(a + 0x48c) != 0;
+    actor.fade = game_sim::ragdoll_body::Fade { length: f(a + 0x644), left: f(a + 0x648) };
+    actor.foot_fade = [f(a + 0x638), f(a + 0x63c)];
+    actor.pose_damping = quad(a + 0x660);
+    actor.hold_targets = std::array::from_fn(|k| quad(a + 0x4d0 + 0x10 * k as u32));
+    actor.hold_velocity = quad(a + 0x530);
+    actor.bike_frame = mat(a + 0x580);
+    actor.placed = ee.u32_at(a + 0x2ac) != 0;
+    actor.active = ee.u32_at(a + 0x2b0) != 0;
+    actor.repose = ee.u32_at(a + 0x2a8) != 0;
+    actor.torques = ee.u32_at(a + 0x2b8) != 0;
+    actor.gravity_scale = f(a + 0x2d0);
+    actor.impact = quad(a + 0x6f0);
+    // The request: its frame is the drawn bike's root node under the bike, its hands and feet the
+    // grips and the pegs in the world.
+    let req = ee.u32_at(a + 0x488);
+    let inv = math::inverse(m).expect("the bike's transform");
+    let local = |at: u32| math::transform_point(&inv, quad(at));
+    let holds = game_sim::ragdoll_riding::Holds {
+        root: math::mul(&mat(req + 0x50), &inv),
+        hands: [local(req + 0xb0), local(req + 0xc0)],
+        feet: [local(req + 0xd0), local(req + 0xe0)],
+    };
+    (riding, holds)
+}
+
+/// The port's ride from an image of research/r14_windmill_bones.py's (`dir`/`name`-before.ram) with
+/// its riding body seeded from the original's ([`b19_riding`]), and each tick's bones.
+fn b19_ride(dir: &str, name: &str, ticks: usize) -> Option<(Vec<S211Tick>, Vec<B19Bones>, Vec<Vf>)> {
+    let image = private_dir("capture").join(dir).join(format!("{name}-before.ram"));
+    let (mut bones, mut seeded) = (Vec::new(), Vec::new());
+    let ride = s211_ride_seeded(
+        &image,
+        [0.0; 3],
+        ticks,
+        true,
+        |st, sim| {
+            let kit = sim.rider.ragdoll_kit.clone().expect("the kit");
+            let (riding, holds) = b19_riding(st, &kit, &sim.rider.ride.transform());
+            seeded = riding.actor.ragdoll.bones.iter().map(|b| b.body.position).collect();
+            sim.rider.riding = Some(Box::new(riding));
+            sim.rider.holds = Some(Arc::new(holds));
+        },
+        |sim| {
+            let r = &sim.rider;
+            let of = |bs: &[game_sim::ragdoll::Bone]| bs.iter().map(|b| (b.body.position, b.body.velocity)).collect();
+            bones.push(match (&r.ragdoll, &r.riding) {
+                (Some(d), _) => B19Bones { down: true, bones: of(&d.ragdoll.bones) },
+                (None, Some(rd)) => B19Bones { down: false, bones: of(&rd.actor.ragdoll.bones) },
+                (None, None) => B19Bones { down: false, bones: Vec::new() },
+            });
+        },
+    )?;
+    Some((ride, bones, seeded))
+}
+
+/// **B19: the bones enter the wreck a tick after the verdict.** R14's south-bones image, ridden with
+/// the original's riding body read out of it ([`b19_riding`]: its bodies equal row 0's), against the
+/// csv's `b{i}_` bones (port tick `t` is row `t + 1`, as S211's). On the verdict's tick (reason 4 on
+/// row 3) the original's riding word is still set and its bones are the riding body's, carried at ~0.8
+/// of the bike; on row 4 the word is down and the bones have entered the wreck and taken its first
+/// step: S110's run2 hook shows that step running after `rider_body_wreck_enter` returns, from the
+/// nodes the verdict's riding step left. The port does the same ([`game_sim::rider::Rider`]'s late
+/// entry) and stays with the original's bones through the stretch.
+///
+/// Measured (mean / worst bone off the row, worst bone velocity off): tick 2 0.26 / 0.49 ft,
+/// 12.2 ft/s; tick 3 0.40 / 0.73 ft, 9.1 ft/s; tick 11 1.59 / 2.22 ft, 10.1 ft/s. Entered on the
+/// verdict's tick from the tick before's bodies (the port before B19), tick 2 was 4.35 ft off and
+/// tick 11 41 ft; a riding step more before the entry (no first step) 1.27 ft on tick 3 and 8.2 ft on
+/// tick 11; the entry with no first step 4.12 ft on tick 3.
+#[test]
+fn the_bones_enter_the_wreck_a_tick_after_the_verdict() {
+    let Some(rows) = r14_capture("south-bones") else { return };
+    let Some((port, bones, seeded)) = b19_ride("r14", "south-bones", 12) else { return };
+    let col = |r: &std::collections::HashMap<String, f32>, k: &str| [r[&format!("{k}x")], r[&format!("{k}y")], r[&format!("{k}z")]];
+    let apart = |a: Vf, b: [f32; 3]| ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+    let off0: f32 = (0..18).map(|i| apart(seeded[i], col(&rows[0], &format!("b{i}_")))).fold(0.0, f32::max);
+    assert!(off0 < 1e-3, "the seeded riding body is off row 0 by {off0} ft");
+    assert_eq!((rows[2]["reason"], rows[3]["reason"], rows[3]["riding"], rows[4]["riding"]), (0.0, 4.0, 1.0, 0.0), "the capture's verdict and entry rows");
+    let wrecked = port.iter().position(|t| t.wreck.is_some()).map(|i| i + 1);
+    assert_eq!(wrecked, Some(2), "the port's verdict is on row 3's tick");
+    let mut table = Vec::new();
+    for t in 1..=11 {
+        let b = &bones[t - 1];
+        let row = &rows[t + 1];
+        assert_eq!(b.bones.len(), 18, "tick {t}: no bones");
+        let offs: Vec<f32> = (0..18).map(|i| apart(b.bones[i].0, col(row, &format!("b{i}_")))).collect();
+        let voffs: Vec<f32> = (0..18).map(|i| apart(b.bones[i].1, col(row, &format!("b{i}_v")))).collect();
+        let mean = offs.iter().sum::<f32>() / 18.0;
+        let worst = offs.iter().copied().fold(0.0, f32::max);
+        let vworst = voffs.iter().copied().fold(0.0, f32::max);
+        table.push(format!("tick {t}: down {}, mean {mean:.3} worst {worst:.3} ft, velocity worst {vworst:.2} ft/s", b.down));
+        // Down from the tick after the verdict on, as the original's riding word.
+        assert_eq!(b.down, row["riding"] == 0.0, "tick {t}: down {} against row {}'s riding {}", b.down, t + 1, row["riding"]);
+        // The wreck's bones part from the original's slowly (the doll's own contacts and the wreck
+        // body's drift, ~0.15 ft a tick), but never by a tick's travel (~4 ft here).
+        let (near, far) = if t <= 3 { (0.5, 1.0) } else { (2.0, 2.5) };
+        assert!(mean < near && worst < far && vworst < 15.0, "tick {t}: mean {mean} worst {worst} ft, velocity {vworst}:\n{}", table.join("\n"));
+    }
+    println!("{}", table.join("\n"));
 }
 
 /// **S129: the bike meeting the Dallas train, in the original and replayed.**
