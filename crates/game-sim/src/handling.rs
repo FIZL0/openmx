@@ -541,9 +541,14 @@ pub fn mxvatv_ini(ini: &crate::phy::Ini) -> crate::phy::Ini {
 /// An MX vs. ATV bike file read for the ride: [`mxvatv_ini`] through MX Unleashed's reader, with
 /// [`MassPart`]'s gravity and frictions over it, the bike set on [`Handling::MxVsAtv`].
 pub fn mxvatv_phy(bytes: &[u8], curve: &crate::camera::CurveTable) -> crate::phy::Phy {
-    let ini = crate::phy::Ini::parse_bytes(bytes);
-    let mut phy = crate::phy::Phy::read(&mxvatv_ini(&ini), curve);
-    let part = MassPart::read(&ini);
+    mxvatv_phy_ini(&crate::phy::Ini::parse_bytes(bytes), curve)
+}
+
+/// [`mxvatv_phy`] on a file already read: Untamed's compiled `mx_*.phy.bpb` (MD81a) through
+/// [`crate::bpb::ini`], whose sections and pairs are the text's.
+pub fn mxvatv_phy_ini(ini: &crate::phy::Ini, curve: &crate::camera::CurveTable) -> crate::phy::Phy {
+    let mut phy = crate::phy::Phy::read(&mxvatv_ini(ini), curve);
+    let part = MassPart::read(ini);
     phy.mass.gravity = part.gravity_scale;
     phy.mv.gravity = part.gravity;
     phy.collisions.friction = part.friction;
