@@ -40,3 +40,7 @@ the test left it unflown, and an unflown plane's controls hold the brake on. The
 has it flown with the brake off. `controls_off_the_save_state` reads the gate, the pad and the
 surfaces from the image. The port's own plane now matches the capture's rows bit for bit and wakes
 ctruck on 11092.
+
+S273 (file 6, FINAL): the ragdoll's strike now has a test. The port's down rider takes its 18 bones from
+S252a's `doll` state, and ctruck wakes on the original's 11962 at the original's point. That holds with
+the bones pinned to the capture's rows and with the port's own bones. With the bones 100 ft up, it drives on.

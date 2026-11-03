@@ -8550,7 +8550,7 @@ atv_viewport_set_eye        atv 0x00111c30 = eye -> viewport +0x140, normalised 
 atv_follow_lag_loaders      atv 0x001c4c40 0x001c4de0 = vt +0x104 / +0x108, the preset's lag constants
 atv_const_w1                atv 0x00396fc0 = (0, 0, 0, 1), the reverse test's stand-in velocity
 atv_const_up                atv 0x00397000 = UP
-atv_follow_fields           atv cam +0x70 viewport (eye +0x140, near +0x19c = 1.0), +0x78 snap, +0x80 target block, +0xb0 distance, +0xb4 yaw, +0xb8 pitch, +0xc4/+0xc8 -> 3 look / 3 position lags, +0xd0 fov lag, +0xd4 spare lag, +0xd8..+0xe4 user zoom/yaw/pitch/fov, +0x108 speed reference 117.3328 (0x42eaaa65), +0x10c height bias 3, +0x110 preset, +0x11c pitch lock, +0x1c4 terrain, +0x1cc lift, +0x1e8/+0x1ec rear fade angles (0x3f860a91, pi/2)
-atv_follow_target_block     atv target +0x10 point, +0x30 forward, +0x40 up, +0x50 velocity, +0x84 lean, +0xb0 airborne, +0xb4 speed, +0xb8 117.3328
-atv_camera_still_switch     atv *(0x003eab60) +0x225 bit 3 (u32 at +0x224 mask 0x800) = the still camera; 0 in every MD82b row
-atv_camera_dt               atv the camera's dt is 0.03333 (0x3d08850a): alpha = dt / tau in every row
+# atv_follow_fields           atv cam +0x70 viewport (eye +0x140, near +0x19c = 1.0), +0x78 snap, +0x80 target block, +0xb0 distance, +0xb4 yaw, +0xb8 pitch, +0xc4/+0xc8 -> 3 look / 3 position lags, +0xd0 fov lag, +0xd4 spare lag, +0xd8..+0xe4 user zoom/yaw/pitch/fov, +0x108 speed reference 117.3328 (0x42eaaa65), +0x10c height bias 3, +0x110 preset, +0x11c pitch lock, +0x1c4 terrain, +0x1cc lift, +0x1e8/+0x1ec rear fade angles (0x3f860a91, pi/2)
+# atv_follow_target_block     atv target +0x10 point, +0x30 forward, +0x40 up, +0x50 velocity, +0x84 lean, +0xb0 airborne, +0xb4 speed, +0xb8 117.3328
+# atv_camera_still_switch     atv *(0x003eab60) +0x225 bit 3 (u32 at +0x224 mask 0x800) = the still camera; 0 in every MD82b row
+# atv_camera_dt               atv the camera's dt is 0.03333 (0x3d08850a): alpha = dt / tau in every row
