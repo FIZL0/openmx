@@ -631,6 +631,10 @@ pub enum Call {
     SpatialMove { node: bool, centre: Vf, half: Vf, reach: F },
     PartSync(Part),
     Gather(Part),
+    /// What the part sync [`Steps`] runs calls in turn (MD75c2, [`crate::atv_sync::part_sync`]): the
+    /// part's entry (its `+0x18`) moved in the world's spatial database (`atv_spatial_move`) to its box,
+    /// reaching its reach.
+    PartMove { part: Part, centre: Vf, half: Vf, reach: F },
     /// The wreck body's ([`build_wreck_body`], [`swap_rays`], MD65a): a ray-probe part made; its flag
     /// byte set from a flags word; it hung in the quad's scene tree; the wreck rays loaded from
     /// [`WRECK_FILE`] on the quad's scene node, then readied; a part shown in or hidden from the scene,
@@ -1863,8 +1867,15 @@ pub struct Steps<R, G, S = ()> {
 /// The contacts are to have no owner and no vehicle: what a wheel stands on is
 /// [`Bike::ground`]'s ([`crate::atv_wheel::Ground`]), which a contact does not carry, and nobody is
 /// told it was touched. Desert Oasis's ([`crate::atv_search::Oasis`]) belong to neither.
+///
+/// MD75c2: the same world answers [`Call::Gather`], the collision sync's gather of the nearby list
+/// round the active probe, stood at `centre` with its `reach` (`false`: not answered).
 pub trait Sweep {
     fn sweep(&mut self, frame: &crate::ray_probe::Matrix) -> Option<(bool, Vec<Contact>)>;
+
+    fn gather(&mut self, _centre: Vf, _reach: F) -> bool {
+        false
+    }
 }
 
 impl Sweep for () {
@@ -1876,6 +1887,10 @@ impl Sweep for () {
 impl<S: Sweep + ?Sized> Sweep for &mut S {
     fn sweep(&mut self, frame: &crate::ray_probe::Matrix) -> Option<(bool, Vec<Contact>)> {
         (**self).sweep(frame)
+    }
+
+    fn gather(&mut self, centre: Vf, reach: F) -> bool {
+        (**self).gather(centre, reach)
     }
 }
 
@@ -2030,6 +2045,23 @@ impl<R: Moto, G: FnMut(Vf, &mut u8) -> (Vf, Vf), S: Sweep> Moto for Steps<R, G, 
             }
             Call::CollisionSync => {
                 for c in crate::atv_moto::collision_sync(&self.bike.parts.collidables) {
+                    self.call(c, q, body);
+                }
+            }
+            Call::PartSync(p) => {
+                // vt +0xc8: the frame of the part's node (the quad's) in the world, the node brought up
+                // to date first (`atv_node_frame`); then the stand, and the box into the database.
+                let x = &mut self.bike.parts;
+                x.scene.update(0);
+                let frame = x.scene.nodes[0].world;
+                let part = &mut x.collidables.states[crate::atv_sync::slot(p)];
+                if let Some((centre, half, reach)) = crate::atv_sync::part_sync(part, &frame) {
+                    self.rest.call(Call::PartMove { part: p, centre, half, reach }, q, body);
+                }
+            }
+            Call::Gather(p) => {
+                let part = &self.bike.parts.collidables.states[crate::atv_sync::slot(p)];
+                if !self.sweep.gather(part.centre, part.reach) {
                     self.rest.call(c, q, body);
                 }
             }

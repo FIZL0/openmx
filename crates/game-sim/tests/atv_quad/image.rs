@@ -44,6 +44,12 @@ pub struct Image {
     pub area: u32,
     /// The five collidables, in [`COLLIDABLES`]' order (0 for one the quad has none of).
     pub parts: [u32; 5],
+    /// MD75c2: each collidable's tree, bound or mesh, as `(harness, image, length)`, and its database
+    /// (`+0x20`).
+    pub part_blocks: Vec<(u32, u32, u32)>,
+    pub part_dbs: Vec<u32>,
+    /// The bound the harness lays for a collidable of neither kind (it reads as a default probe).
+    pub part_own: Vec<u32>,
     /// Words the ride does not carry whole: the image's address, the bits it carries, and why not the
     /// rest.
     pub gaps: Vec<(u32, u32, String)>,
@@ -62,6 +68,31 @@ fn b(ee: &Ee, a: u32) -> bool {
 }
 fn i(ee: &Ee, a: u32) -> i32 {
     ee.i32_at(a)
+}
+
+/// MD75c2: a collidable as [`lay_collidable`] lays it, read back: a ray probe ([`PART_VTABLE`]) or a mesh
+/// ([`MESH_VTABLE`]); none for any other class (the sweep), whose words are declared gaps.
+pub(super) fn collidable(ee: &Ee, a: u32, gaps: &mut Vec<(u32, u32, String)>) -> game_sim::atv_sync::Collidable {
+    use game_sim::atv_sync::{Collidable, Kind};
+    let xyz = |a: u32| Vf::new(f(ee, a).0, f(ee, a + 4).0, f(ee, a + 8).0, 0.0);
+    let rows = |a: u32| std::array::from_fn(|k| v(ee, a + 0x10 * k as u32));
+    let kind = match ee.u32_at(a + 0xc) {
+        PART_VTABLE => {
+            let (tree, bound) = (ee.u32_at(a + 0x17c), ee.u32_at(a + 0x180));
+            Kind::Rays { tree: (tree != 0).then(|| (xyz(tree + 0xc), xyz(tree + 0x18))), bound: (v(ee, bound), v(ee, bound + 0x10)) }
+        }
+        MESH_VTABLE => {
+            let mesh = ee.u32_at(a + 0x244);
+            Kind::Mesh { local: rows(a + 0x170), centre: xyz(mesh + 0xc), half: xyz(mesh + 0x18), stood: rows(a + 0x1b0), before: rows(a + 0x1f0) }
+        }
+        vt => {
+            for o in [0xc, 0x20, 0x50, 0x54, 0x58, 0x5c, 0x70, 0x174, 0x17c, 0x180].into_iter().chain((0x130..0x170).step_by(4)) {
+                gaps.push((a + o, 0, format!("a collidable of vtable {vt:#010x}: the sync reads neither kind's words of it")));
+            }
+            return Collidable::default();
+        }
+    };
+    Collidable { kind, frame: rows(a + 0x130), centre: v(ee, a + 0x50), reach: f(ee, a + 0x70), spatial: b(ee, a + 0x20) }
 }
 
 /// The scene round the quad's node, breadth first over each node's parent, child and sibling, as
@@ -120,6 +151,22 @@ pub fn read_ride(ee: &Ee, quad: u32, dt: F) -> Result<(Ride, Image), String> {
         at.parts[k] = ee.u32_at(o + off);
     }
     let held_parts = at.parts;
+    let states = std::array::from_fn(|k| if at.parts[k] == 0 { Default::default() } else { collidable(ee, at.parts[k], &mut at.gaps) });
+    for (&c, &p) in COLLIDABLES.iter().zip(&held_parts).filter(|(_, p)| **p != 0) {
+        let to = collidable_at(c);
+        let laid: &[(u32, u32, u32)] = match ee.u32_at(p + 0xc) {
+            PART_VTABLE => &[(0x300, 0x17c, 0x24), (0x340, 0x180, 0x20)],
+            MESH_VTABLE => &[(0x380, 0x244, 0x24)],
+            _ => {
+                at.part_own.push(to + 0x340);
+                &[]
+            }
+        };
+        for &(o, ptr, len) in laid {
+            at.part_blocks.push((to + o, ee.u32_at(p + ptr), len));
+        }
+        at.part_dbs.push(ee.u32_at(p + 0x20));
+    }
     let part = |a: u32, what: &str| -> Result<Option<quad::Part>, String> {
         match a {
             0 => Ok(None),
@@ -502,6 +549,7 @@ pub fn read_ride(ee: &Ee, quad: u32, dt: F) -> Result<(Ride, Image), String> {
             riding: part(ee.u32_at(o + 0xcc), "riding probe (+0xcc)")?,
             frame: part(ee.u32_at(o + 0xd0), "frame mesh (+0xd0)")?,
             active: part(ee.u32_at(o + 0xd8), "active probe (+0xd8)")?,
+            states,
         },
         rear_node: ee.u32_at(o + 0x143c),
     };
@@ -580,6 +628,11 @@ fn blocks(at: &Image) -> Vec<(u32, u32, u32)> {
     for (k, &n) in at.nodes.iter().enumerate() {
         out.push((node_at(k), n, 0x110));
     }
+    // MD75c2: each collidable, and its tree, bound or mesh where the harness lays them.
+    for (&c, &p) in COLLIDABLES.iter().zip(&at.parts).filter(|(_, p)| **p != 0) {
+        out.push((collidable_at(c), p, 0x300));
+    }
+    out.extend(at.part_blocks.iter().copied());
     out.retain(|&(_, image, _)| image != 0);
     out
 }
@@ -592,6 +645,7 @@ fn stand_ins(at: &Image) -> Vec<(u32, u32)> {
     out.extend([(RECORD_VT, at.record_vt), (ACTORS, at.actors), (SEARCH, at.search)]);
     out.extend(at.node_vts.iter().map(|&vt| (NODE_VT, vt)));
     out.extend(at.entries.iter().map(|&e| (ENTRY, e)));
+    out.extend(at.part_dbs.iter().map(|&d| (ENTRY, d)));
     out.extend(COLLIDABLES.iter().zip(&at.parts).filter(|(_, p)| **p != 0).map(|(&c, &p)| (collidable_at(c), p)));
     out
 }
@@ -599,7 +653,12 @@ fn stand_ins(at: &Image) -> Vec<(u32, u32)> {
 /// What the harness lays that is its own and stands for nothing in the image: the record's and the
 /// nodes' hook tables, and the struck thing when the image's record has none.
 fn harness_only(at: &Image, a: u32) -> bool {
-    (RECORD_VT..RECORD_VT + 0x100).contains(&a) || (NODE_VT..NODE_VT + 0x100).contains(&a) || (at.thing == 0 && (THING..THING + 0x100).contains(&a))
+    (RECORD_VT..RECORD_VT + 0x100).contains(&a)
+        || (NODE_VT..NODE_VT + 0x100).contains(&a)
+        || (at.thing == 0 && (THING..THING + 0x100).contains(&a))
+        || at.part_own.iter().any(|&b| (b..b + 0x20).contains(&a))
+        // MD75c2: a collidable the quad has none of is laid as a default one.
+        || COLLIDABLES.iter().zip(&at.parts).any(|(&c, &p)| p == 0 && (collidable_at(c)..collidable_at(c) + COLLIDABLE_SIZE).contains(&a))
 }
 
 /// The image's address of a word the poke wrote, through [`blocks`].

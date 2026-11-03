@@ -472,3 +472,234 @@ fn the_quads_force_body_on_desert_oasis_is_the_originals() {
     };
     on_desert_oasis(0x0086_0002, &picks, ride, &CONTACT_PATHS, 3);
 }
+
+// --- MD75c2: the collision sync on Desert Oasis -----------------------------------------------------
+
+/// The image's frame mesh (quad `+0xd0`); its riding probe is [`PROBE_AT`], the active one too.
+const MESH_AT: u32 = 0x0162_7370;
+
+/// What a list's candidate is on either side (`tests/atv_gather.rs`'s ids): a mesh by its centre's and
+/// reach's bits, a plant by its cell, model and blend; with its distance's bits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Found {
+    Mesh([u32; 4], u32),
+    Plant(u16, u16, u8, i8, u32),
+}
+
+/// The image's list, but for the collidables the port does not build (tallied as left out).
+fn image_list(ee: &Ee, t: &mut BTreeMap<&'static str, u32>) -> Vec<Found> {
+    let (at, n) = (ee.u32_at(IMAGE_LIST), ee.u32_at(IMAGE_LIST + 4));
+    let mut out = Vec::new();
+    for i in 0..n {
+        let (e, d) = (ee.u32_at(at + 8 * i), ee.u32_at(at + 8 * i + 4));
+        match ee.u8_at(e + 2) {
+            2 => {
+                let c = e - 0x18;
+                if ee.u32_at(c + 0xc) == MESH_VTABLE && ee.u32_at(c + at::CATEGORY) == atv_world::MESH {
+                    out.push(Found::Mesh(image_mesh(ee, c), d));
+                } else {
+                    tally(t, "a collidable the port does not build left out");
+                }
+            }
+            3 => out.push(Found::Plant(ee.u16_at(e + 0xc), ee.u16_at(e + 0x10), ee.u8_at(e + 0x12), ee.u8_at(e + 0x15) as i8, d)),
+            k => panic!("a list entry of kind {k}"),
+        }
+    }
+    out
+}
+
+/// The port's list, meshes and plants only (its trigger probe and parts stand for nothing listed).
+fn port_list(w: &atv_world::World, list: &atv_world::Nearby) -> Vec<Found> {
+    let mut out = Vec::new();
+    for c in &list.found {
+        let (o, d) = (c.object, c.distance.0.to_bits());
+        match w.objects[o].class {
+            Class::Object if w.meshes.contains(&o) => out.push(Found::Mesh(port_mesh(w, o), d)),
+            Class::Object => {}
+            _ => {
+                let p = &w.broad.places[o];
+                out.push(Found::Plant(p.cell[0], p.cell[1], p.model, p.blend, d));
+            }
+        }
+    }
+    out
+}
+
+/// A ride's collidable on the image's part at `a`: the words the sync reads and writes (the node the
+/// harness's), its database (`+0x20`, `db` or none) as the ride says, and a probe's tree's half extent.
+/// The rest of its kind's words are the image's.
+fn on_image_part(ee: &mut Ee, a: u32, c: &game_sim::atv_sync::Collidable, db: u32) {
+    use game_sim::atv_sync::Kind;
+    ee.set_u32(a + 0x20, if c.spatial { db } else { 0 });
+    put_v(ee, a + at::CENTRE, c.centre);
+    put_f(ee, a + at::RADIUS, c.reach);
+    let rows = |ee: &mut Ee, o: u32, m: &[Vf; 4]| (0..4).for_each(|k| put_v(ee, a + o + 0x10 * k as u32, m[k]));
+    rows(ee, 0x130, &c.frame);
+    match &c.kind {
+        Kind::Rays { tree, .. } => {
+            ee.set_u32(a + at::NODE, node_at(0));
+            // Its tree's box, which the test may grow.
+            if let Some((_, half)) = tree {
+                let t = ee.u32_at(a + 0x17c);
+                [half.x(), half.y(), half.z()].iter().enumerate().for_each(|(j, h)| put_f(ee, t + 0x18 + 4 * j as u32, F(*h)));
+            }
+        }
+        Kind::Mesh { local, stood, before, .. } => {
+            rows(ee, 0x170, local);
+            rows(ee, 0x1b0, stood);
+            rows(ee, 0x1f0, before);
+            ee.set_u32(a + 0x240, node_at(0));
+        }
+    }
+}
+
+/// **The PostProcess's collision sync on Desert Oasis** (MD75c2): the spawned quad placed at the rows'
+/// frames and the aimed ones, its riding (and active) probe and frame mesh the image's own, and the
+/// vehicle post, its three calls, the part sync and the gather unhooked. The original syncs the parts
+/// and gathers the image's list round the probe; the port syncs [`atv_moto::Collidables::states`] and
+/// [`atv_search::Oasis`] answers the gather. The quad, the scene, both parts, the calls (the parts'
+/// box moves among them) and the list, entry for entry with its distances, are equal.
+#[test]
+fn the_quads_collision_sync_on_desert_oasis_is_the_originals() {
+    use quad::Part;
+    let Some(mut ee) = image() else { return };
+    let Some(d) = desert(&ee) else { return };
+    ee.set(28, GP);
+    assert_eq!(ee.u32_at(image::IMAGE_QUAD + 0xd0), MESH_AT, "the image's frame mesh");
+    let (spawn, held) = image::read_ride(&ee, image::IMAGE_QUAD, F(1.0 / 120.0)).unwrap_or_else(|e| panic!("{e}"));
+    let c = &spawn.bike.parts.collidables;
+    assert_eq!((c.riding, c.frame, c.active), (Some(Part::Riding), Some(Part::Frame), Some(Part::Riding)), "the spawned quad's collidables");
+    assert_eq!((held.parts[0], held.parts[1]), (PROBE_AT, MESH_AT), "the riding probe and the frame mesh");
+    let dbs = [ee.u32_at(PROBE_AT + 0x20), ee.u32_at(MESH_AT + 0x20)];
+    assert!(dbs.iter().all(|&d| d != 0), "both parts are in the database at the spawn");
+
+    let answers: Answers = Rc::default();
+    let echo = Rc::new(Cell::new(false));
+    let log = hook_steps(&mut ee, &[], &answers, &echo);
+    let picks = [POST_STEPS.as_slice(), &[GATHER]].concat();
+    hook_post(&mut ee, &log, &picks);
+    // The parts' own entries (`+0x18`), which the post's hook does not know.
+    let l = log.clone();
+    ee.hooks.insert(
+        SPATIAL_MOVE,
+        Box::new(move |ee| {
+            let v = |a: u64| Vf::new(ee.f32_at(a as u32), ee.f32_at(a as u32 + 4), ee.f32_at(a as u32 + 8), ee.f32_at(a as u32 + 12));
+            let (centre, half, reach) = (v(ee.r(5)), v(ee.r(6)), F(ee.f(12)));
+            l.borrow_mut().push(match ee.r(4) as u32 {
+                OBJ => Call::SpatialMove { node: false, centre, half, reach },
+                n if n == node_at(0) => Call::SpatialMove { node: true, centre, half, reach },
+                n if n == PROBE_AT + 0x18 => Call::PartMove { part: Part::Riding, centre, half, reach },
+                n if n == MESH_AT + 0x18 => Call::PartMove { part: Part::Frame, centre, half, reach },
+                n => panic!("a spatial move of {n:#x}"),
+            });
+        }),
+    );
+    let table = AcosTable::build();
+    let Desert { world, props, eco, trees, rays, search, first_part, rows } = d;
+    let mut oasis = atv_search::Oasis::new(world, &props, &eco, &trees, rays, search, first_part);
+    let frames = [frames(&rows), aimed(&props, &oasis.rays)].concat();
+    let mut g = Gen(0x0075_c202);
+    let mut t = BTreeMap::new();
+    for (k, (name, pos, quat, _)) in frames.iter().enumerate() {
+        let mut r = spawn.clone();
+        place(&mut r, *pos, *quat);
+        let x = &mut r.bike.parts;
+        (x.body_on, x.collidables.sync) = (true, true);
+        r.s.q.active = true;
+        // The mesh missing one time in eight, and out of the database one time in four. The probe stays
+        // in: the gather queries its database (`+0x20`).
+        if g.one_in(8) {
+            x.collidables.frame = None;
+        }
+        x.collidables.states[1].spatial = !g.one_in(4);
+        // The probe's tree's box grown half the time (to a reach past the list's 30), so the gather is
+        // round a reach the image's probe never had.
+        if let game_sim::atv_sync::Kind::Rays { tree: Some((_, half)), .. } = &mut x.collidables.states[0].kind {
+            if g.b() {
+                let k = g.f(1.0, 8.0).0;
+                *half = Vf::new(half.x() * k, half.y() * k, half.z() * k, half.w());
+                tally(&mut t, "the probe's box grown");
+            }
+        }
+        let lay = |ee: &mut Ee, r: &Ride| {
+            reset_all(ee);
+            poke_ride(ee, r);
+            let c = &r.bike.parts.collidables;
+            ee.set_u32(OBJ + 0xcc, PROBE_AT);
+            ee.set_u32(OBJ + 0xd8, PROBE_AT);
+            ee.set_u32(OBJ + 0xd0, if c.frame.is_some() { MESH_AT } else { 0 });
+            ee.set_u32(OBJ + 0xc4, IMAGE_LIST);
+            ee.set_u32(OBJ + 0x1430, TRIGGER);
+            on_image_part(ee, PROBE_AT, &c.states[0], dbs[0]);
+            on_image_part(ee, MESH_AT, &c.states[1], dbs[1]);
+        };
+        log.borrow_mut().clear();
+        *answers.borrow_mut() = r.answers.iter().copied().collect();
+        echo.set(r.echo);
+        lay(&mut ee, &r);
+        ee.call(AIR_STATE, &[u64::from(OBJ)], &[r.s.dt.0], 400_000_000);
+        // The image's parts, read back onto the harness's, where the snap compares them.
+        for (p, a) in [(Part::Riding, PROBE_AT), (Part::Frame, MESH_AT)] {
+            let mut part = image::collidable(&ee, a, &mut Vec::new());
+            part.spatial = ee.u32_at(a + 0x20) != 0;
+            lay_collidable(&mut ee, p, &part);
+        }
+        let was = snap_all(&ee);
+        let want_list = image_list(&ee, &mut t);
+        let want_bound = ee.u32_at(IMAGE_LIST + 0x20);
+        let want_centre: [u32; 4] = std::array::from_fn(|j| ee.u32_at(IMAGE_LIST + 0x10 + 4 * j as u32));
+
+        let mut u = r.clone();
+        let mut queue: std::collections::VecDeque<(Vf, Vf, Option<u8>)> = r.answers.iter().copied().collect();
+        let echo_now = r.echo;
+        let ground = move |q: Vf, record: &mut u8| {
+            let (p, n, r) = queue.pop_front().expect("more ground queries than answers");
+            if let Some(r) = r {
+                *record = r;
+            }
+            (if echo_now { q } else { p }, n)
+        };
+        let mut m = Only { picks: &picks, steps: quad::Steps { bike: u.bike.clone(), rest: Vec::new(), ground, sweep: &mut oasis } };
+        quad::air_state(&mut u.s.q, &mut u.s.body, u.s.dt, &table, &mut m);
+        u.bike = m.steps.bike;
+        let rest = m.steps.rest;
+        lay(&mut ee, &u);
+        for p in [Part::Riding, Part::Frame] {
+            lay_collidable(&mut ee, p, &u.bike.parts.collidables.states[game_sim::atv_sync::slot(p)]);
+        }
+        let now = snap_all(&ee);
+        if let Some(i) = was.iter().zip(&now).position(|(a, b)| a != b) {
+            panic!(
+                "{k} {name}: {} is {:#010x} ({}) in the original and {:#010x} ({}) in the port",
+                where_in_all(i),
+                was[i],
+                f32::from_bits(was[i]),
+                now[i],
+                f32::from_bits(now[i]),
+            );
+        }
+        assert_eq!(*log.borrow(), rest, "{k} {name}: the calls");
+        assert!(oasis.gathered, "{k} {name}: the port gathered");
+        assert_eq!(oasis.list.bound.0.to_bits(), want_bound, "{k} {name}: the list's bound");
+        assert_eq!(oasis.list.centre.map(|f| f.0.to_bits()), want_centre, "{k} {name}: the list's centre");
+        let got_list = port_list(&oasis.world, &oasis.list);
+        assert_eq!(got_list, want_list, "{k} {name}: the list");
+
+        tally(&mut t, if u.bike.parts.collidables.frame.is_some() { "the mesh synced" } else { "no frame mesh" });
+        for c in &rest {
+            if let Call::PartMove { part, .. } = c {
+                tally(&mut t, if *part == Part::Riding { "the probe's box moved" } else { "the mesh's box moved" });
+            }
+        }
+        tally(&mut t, if got_list.is_empty() { "nothing gathered" } else { "something gathered" });
+        if got_list.iter().any(|f| matches!(f, Found::Mesh(..))) {
+            tally(&mut t, "a mesh gathered");
+        }
+        if got_list.iter().any(|f| matches!(f, Found::Plant(..))) {
+            tally(&mut t, "a plant gathered");
+        }
+    }
+    eprintln!("MD75c2: {} frames: {t:?}", frames.len());
+    let want = ["the probe's box grown", "the mesh synced", "no frame mesh", "the probe's box moved", "the mesh's box moved", "something gathered", "a mesh gathered", "a plant gathered"];
+    each_path_seen(&t, &want, 10);
+}

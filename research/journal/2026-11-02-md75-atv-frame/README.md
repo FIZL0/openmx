@@ -41,3 +41,9 @@ the list sub-database's virtuals, the link pool and the overlaps. `atv_spatial::
 `quad::Call::SpatialMove`. `tests/atv_spatial.rs` checks it against the original's move in two ways: on
 12,000 generated databases laid in the image's free RAM, and on the image's own database, run once as it
 is and once with a portal laid in. Everything read back is equal. The quadtree sub-database is not ported.
+
+MD75c2 (`9-part-sync.md`): `atv_part_sync` is ported in `atv_sync.rs`, covering the node frame, the ray
+probe's and the mesh's stands, and both boxes. `quad::Steps` answers `Call::PartSync` and sends the box on as
+`Call::PartMove`, which `atv_spatial::Answers` moves. `Oasis` answers `Call::Gather` round the active part.
+Two tests check it against the original. One uses 10,000 generated parts laid whole. The other uses the
+image's own probe and mesh on Desert Oasis, where the nearby list matches entry for entry.

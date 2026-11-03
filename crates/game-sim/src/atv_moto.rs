@@ -403,13 +403,15 @@ pub struct Bounds {
 /// The quad's collidables as the collision sync sees them (MD75c): the flag that turns it on (bit 0
 /// of the byte before the flag byte, `+0x44`), the riding probe (`+0xcc`), the frame mesh (`+0xd0`)
 /// and the active probe (`+0xd8`, the one the nearby list is gathered round). The riding and the
-/// active probe are the same one but for a moment during a swap.
+/// active probe are the same one but for a moment during a swap. MD75c2's: what each collidable's
+/// sync reads and writes, by [`crate::atv_sync::slot`].
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Collidables {
     pub sync: bool,
     pub riding: Option<crate::quad::Part>,
     pub frame: Option<crate::quad::Part>,
     pub active: Option<crate::quad::Part>,
+    pub states: [crate::atv_sync::Collidable; 5],
 }
 
 const CLEAN: u8 = 0x01;
@@ -421,7 +423,7 @@ const ORIGIN_REACH: u8 = 0x04;
 
 /// `a · b` as the scene graph multiplies frames (`vmulax`, `vmadday`, `vmaddz` a row; the position
 /// row starts from `b`'s with `vaddax` of 0): `a`'s rows in `b`'s space.
-fn frame_mul(a: &[Vf; 4], b: &[Vf; 4]) -> [Vf; 4] {
+pub(crate) fn frame_mul(a: &[Vf; 4], b: &[Vf; 4]) -> [Vf; 4] {
     let row = |r: Vf, acc: Vf| Vf::madd(Vf::madd(Vf::madd(acc, b[0], r.bc(Field::X)), b[1], r.bc(Field::Y)), b[2], r.bc(Field::Z));
     let first = |r: Vf| Vf::madd(Vf::madd(b[0].mul(r.bc(Field::X)), b[1], r.bc(Field::Y)), b[2], r.bc(Field::Z));
     [first(a[0]), first(a[1]), first(a[2]), row(a[3], b[3].add(Vf::ZERO))]
@@ -797,8 +799,8 @@ pub fn vehicle_post(parts: &mut Parts, body: &Body, cofg: Vf) -> Option<bool> {
 /// **The collision sync** (`atv_vehicle_collision_sync`, vt `+0x124`), the vehicle post's last call: with the sync on,
 /// the riding probe brought up to date unless it is the active one, then the frame mesh, then the
 /// active probe and the nearby list gathered round it — each one there. Returns the calls in order:
-/// [`Call::PartSync`] for each collidable (`atv_part_sync`: its record cleared, then its box into the
-/// database), then [`Call::Gather`].
+/// [`Call::PartSync`] for each collidable (`atv_part_sync`: stood at its node's frame, then its box into
+/// the database; [`crate::atv_sync`]), then [`Call::Gather`].
 pub fn collision_sync(c: &Collidables) -> Vec<Call> {
     let mut calls = Vec::new();
     if !c.sync {
