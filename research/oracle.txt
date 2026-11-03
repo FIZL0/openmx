@@ -8564,3 +8564,27 @@ atv_const_up                atv 0x00397000 = UP
 # atv_follow_target_block     atv target +0x10 point, +0x30 forward, +0x40 up, +0x50 velocity, +0x84 lean, +0xb0 airborne, +0xb4 speed, +0xb8 117.3328
 # atv_camera_still_switch     atv *(0x003eab60) +0x225 bit 3 (u32 at +0x224 mask 0x800) = the still camera; 0 in every MD82b row
 # atv_camera_dt               atv the camera's dt is 0.03333 (0x3d08850a): alpha = dt / tau in every row
+
+# P285 -- the ridden bike's non-engine sounds (research/bike-sounds.md, journal bike-ride-sounds).
+# No track sets [Crowd] CrowdPresent (all 54 .aud have it commented out), so the crowd never sounds.
+track_crowd_present_read boot 0x002afd30 the track .aud reader: [Crowd] CrowdPresent -> track+0x534, default 0
+crowd_play boot 0x001fe380 (crowd, kind, position) plays only when the kind's last sound stopped: 0 Oh
+#                          (+0x74, panned), 1 Boo (+0x5c), 2 Cheer (+0x2c, panned), 3 PlayerCheer (+0x44
+#                          stereo stream). Crowd object at game+0xc0, +0x14 Ambient
+bike_place_change_crowd boot 0x0027edb0 (bike vtable 0x455164, thunk 0x281ad0, score-card owner interface)
+#                          gain: card +0xb4 >= 5.0 -> PlayerCheer if card +8 & 4 else Cheer at +0x60;
+#                          loss: Boo when the loser is human, the passer not, and the passer's +0x2c == 1.
+#                          Counters bike+0x12ec/+0x12f0/+0x12f4. No caller on a trick landing
+race_ranking boot 0x00261b80 sorts the score cards by +0x1c, writes place +0x2c, calls the place change
+#                          (player_wreck_entry 0x0027b810 is the third crowd_play caller: Oh at the chassis)
+material_sound_load boot 0x003ea810 loads a material's CollisionSoundFile (+8) into +4
+material_hit_queue boot 0x003ea8a0 the material table's listener (+0x34, vt+8 via thunk 0x3eb620): queues
+#                          owner -> +0x80, struck record -> +0x98, 0 -> +0xb0. vt+0xc 0x3ea8f0 is a no-op
+material_listener_attach boot 0x003eada0 (table interface +0x30) adds the listener to obj+0x1f0's list (vt +0x80)
+material_listener_detach boot 0x003ead60 removes it
+material_hit_play boot 0x003ea900 run by the update 0x3ead10 when queued: speed = |vel| of the owner (+0x80
+#                          -> +0xf4 body +0xb0, else +0xf0 +0x170), repeated pairs keep the faster; material =
+#                          struck +0x89 (0x10 via 0x0026f4b0; struck +0x84 & word 0x00468f48 -> +0x65
+#                          SolidFoliageID); speed >= MinImpulse (+0x114): level clamp(speed/MaxImpulse(+0x118)
+#                          *100, 0, 100), vt+0x30, vt+0x5c position (+0x60), sound_3d 0x00104480 with
+#                          +0x10c/+0x110 distances, vt+0x1c play(4)
