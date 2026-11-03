@@ -8,8 +8,9 @@
 use super::{CAMERA_FOV, CAMERA_SHARE, CameraView, Machine, SEATS_MAX, clean_name};
 
 /// The machines the Camera page has presets of: [`Machine::ALL`], then the helicopter (P216b), whose
-/// camera is its own though the switch row walks it with the cars.
-pub const PAGE: [Machine; 3] = [Machine::Bike, Machine::Biplane, Machine::Helicopter];
+/// camera is its own though the switch row walks it with the cars, then the cars (P264), each on its
+/// own file.
+pub const PAGE: [Machine; 6] = [Machine::Bike, Machine::Biplane, Machine::Helicopter, Machine::Buggy, Machine::Monster, Machine::Baja];
 
 /// One preset's three sliders: the field of view's offset from the disc's, in degrees, and how far
 /// behind and how high above its machine the camera sits, in percent of the disc's.
@@ -27,7 +28,7 @@ impl Look {
     /// A seat's one set over every preset, as it frames `machine`'s.
     pub fn of(view: &CameraView, machine: Machine) -> Look {
         match machine {
-            // A car frames as the bike does until it has camera settings of its own (S149e).
+            // A car's camera takes the bike's one set, as the helicopter's does (S149e, P264).
             Machine::Bike | Machine::Buggy | Machine::Monster | Machine::Baja | Machine::Helicopter => Look { fov: view.fov, distance: view.distance, height: view.height },
             Machine::Biplane => Look { fov: view.fov, distance: view.plane_distance, height: view.plane_height },
         }
@@ -156,9 +157,18 @@ pub struct Seat {
     pub start: [String; 2],
     /// The same for the helicopter's camera (P216b); empty for its own start.
     pub heli_start: String,
+    /// The same for each car's camera (P264), on its own file's presets, in the order they were
+    /// first left; a car not here starts on its file's own first.
+    pub car_start: Vec<(Machine, String)>,
 }
 
 impl Seat {
+    /// The preset `car`'s camera starts on (P264), where its camera button last left it; empty for
+    /// its own start.
+    pub fn car_start(&self, car: Machine) -> &str {
+        self.car_start.iter().find(|(m, _)| *m == car).map_or("", |(_, n)| n.as_str())
+    }
+
     /// The seat's presets but where its rides start, which is all the shell frames by.
     pub fn framing_part(&self) -> (Vec<Own>, Cycle) {
         (self.own.clone(), self.cycle)
@@ -257,6 +267,9 @@ pub fn text(seats: &[Seat; SEATS_MAX]) -> String {
         if s.start.iter().any(|w| !w.is_empty()) || !s.heli_start.is_empty() {
             out += &format!("camera_start = {n} | {} | {}{}\n", s.start[0], s.start[1], heli_start(s));
         }
+        for (car, name) in &s.car_start {
+            out += &format!("camera_car_start = {n} | {} | {name}\n", car.word());
+        }
         if s.cycle != Cycle::default() {
             out += &format!("camera_cycle = {n} | {}\n", s.cycle.word());
         }
@@ -290,6 +303,14 @@ pub fn parse(seats: &mut [Seat; SEATS_MAX], key: &str, v: &str) {
             s.start = [disc_name(bike), disc_name(plane)];
             s.heli_start = disc_name(heli);
         }
+        ("camera_car_start", [car, name]) => {
+            let Some(car) = Machine::from_word(car).filter(|m| matches!(m, Machine::Buggy | Machine::Monster | Machine::Baja)) else { return };
+            let name = disc_name(name);
+            s.car_start.retain(|(m, _)| *m != car);
+            if !name.is_empty() {
+                s.car_start.push((car, name));
+            }
+        }
         ("camera_cycle", [w]) => s.cycle = Cycle::from_word(w).unwrap_or(s.cycle),
         ("camera_preset", [machine, base, name, look]) => {
             let (Some(machine), Some(look)) = (Machine::from_word(machine), Look::parse(look)) else { return };
@@ -321,7 +342,10 @@ impl Pick {
         let machine = match self.machine {
             Machine::Biplane => "Biplane: ",
             Machine::Helicopter => "Helicopter: ",
-            _ => "",
+            Machine::Buggy => "Buggy: ",
+            Machine::Monster => "Monster Truck: ",
+            Machine::Baja => "Baja: ",
+            Machine::Bike => "",
         };
         let mine = if self.custom { " (Mine)" } else { "" };
         format!("{machine}{}{mine}", self.name)
@@ -335,11 +359,12 @@ impl super::Menu {
     }
 
     /// The presets the Preset row offers past every preset's: the disc's that cycle, the bike's, the
-    /// biplane's, then the helicopter's (P216b), and the seat's own after them.
+    /// biplane's, then the helicopter's (P216b) and the cars' (P264), and the seat's own after them.
     pub fn camera_choices(&self) -> Vec<Pick> {
         let set = &self.settings.camera_sets[self.camera_seat()];
         let mut out = Vec::new();
-        for (m, names) in Machine::ALL.into_iter().zip(&self.camera_names).chain([(Machine::Helicopter, &self.heli_camera_names)]) {
+        let cars = self.car_camera_names.iter().map(|(m, names)| (*m, names));
+        for (m, names) in Machine::ALL.into_iter().zip(&self.camera_names).chain([(Machine::Helicopter, &self.heli_camera_names)]).chain(cars) {
             out.extend(names.iter().map(|n| Pick { machine: m, name: n.clone(), custom: false }));
         }
         for m in PAGE {
@@ -408,9 +433,10 @@ impl super::Menu {
         };
         let look = self.camera_look(&pick);
         let disc = match pick.machine {
-            Machine::Bike | Machine::Buggy | Machine::Monster | Machine::Baja => &self.camera_names[0],
+            Machine::Bike => &self.camera_names[0],
             Machine::Biplane => &self.camera_names[1],
             Machine::Helicopter => &self.heli_camera_names,
+            car => self.car_camera_names.iter().find(|(m, _)| *m == car).map_or(&self.camera_names[0], |(_, names)| names),
         };
         let kept = self.settings.camera_sets[seat].save_custom(pick.machine, &base, name, look, disc);
         if let Some(i) = self.camera_choices().iter().position(|p| p.custom && p.machine == pick.machine && p.name == kept) {
@@ -450,10 +476,18 @@ impl super::Menu {
     }
 
     /// The shell's word that the camera button left `seat`'s `machine` on preset `name` (P163): the
-    /// one the seat's next ride on it starts on. Whether that changed anything to save.
+    /// one the seat's next ride on it starts on; a car's is its own file's preset (P264). Whether that
+    /// changed anything to save.
     pub fn camera_left_on(&mut self, seat: usize, machine: Machine, name: &str) -> bool {
         let Some(set) = self.settings.camera_sets.get_mut(seat) else { return false };
         let at = match machine {
+            Machine::Buggy | Machine::Monster | Machine::Baja => match set.car_start.iter().position(|(m, _)| *m == machine) {
+                Some(i) => &mut set.car_start[i].1,
+                None => {
+                    set.car_start.push((machine, String::new()));
+                    &mut set.car_start.last_mut().unwrap().1
+                }
+            },
             Machine::Helicopter => &mut set.heli_start,
             _ => &mut set.start[usize::from(machine == Machine::Biplane)],
         };

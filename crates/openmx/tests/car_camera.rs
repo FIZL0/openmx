@@ -23,7 +23,9 @@ use std::path::PathBuf;
 
 use game_render::disc::Disc;
 use game_sim::camera::{CurveTable, Preset, Race, Ridden, Surface, Switches, Target};
+use game_sim::bindings::Table;
 use game_sim::car::{Car, CarModel, Kind, Machine};
+use game_sim::input::{EventQueue, Pad, REPORT_BYTES, Report};
 use game_sim::track::{Scene, Terrain};
 use game_sim::world::Ground;
 use ps2_float::{F, Vf};
@@ -62,7 +64,12 @@ type Row = HashMap<String, String>;
 
 /// A capture's rows, by column name. `None` without it.
 fn capture(name: &str) -> Option<Vec<Row>> {
-    let text = std::fs::read_to_string(context().join(format!("capture/s246/{name}.csv"))).ok()?;
+    capture_in("s246", name)
+}
+
+/// A capture of `task`'s, by column name. `None` without it.
+fn capture_in(task: &str, name: &str) -> Option<Vec<Row>> {
+    let text = std::fs::read_to_string(context().join(format!("capture/{task}/{name}.csv"))).ok()?;
     let mut lines = text.lines();
     let head: Vec<String> = lines.next()?.split(',').map(str::to_string).collect();
     Some(lines.map(|l| head.iter().cloned().zip(l.split(',').map(str::to_string)).collect()).collect())
@@ -253,7 +260,13 @@ struct Replay {
 /// tick late is held to either of the port's last two eyes, and a row whose block was read a tick
 /// early (last row's point, at speed) is fed to the camera wrong, so the rows a lag would still
 /// remember it by are not compared.
-fn replay(rows: &[Row], presets: Vec<Preset>, mut under: Under) -> Replay {
+fn replay(rows: &[Row], presets: Vec<Preset>, under: Under) -> Replay {
+    replay_with(rows, presets, under, |_, _| ())
+}
+
+/// [`replay`], with `each` given each row and the camera before the camera's frame, as the shell
+/// hands the camera to the look-back command before it updates it.
+fn replay_with(rows: &[Row], presets: Vec<Preset>, mut under: Under, mut each: impl FnMut(&Row, &mut Race)) -> Replay {
     let curve = CurveTable::build();
     let mut cam = Race::new(presets, F(REVERSE_SPEED));
     cam.cam.set_preset(Preset::find(&cam.cam.presets, "Race Cam 1").unwrap());
@@ -278,6 +291,7 @@ fn replay(rows: &[Row], presets: Vec<Preset>, mut under: Under) -> Replay {
             (l.point, l.lift, l.last) = (rider.target.body_point, lift, was);
         }
         was = lift;
+        each(r, &mut cam);
         let view = cam.update(F(num(r, "dt")), &rider, F(NEAR_CLIP), &curve, Switches { no_look_ahead: false, short_viewport: false }, &mut under);
         last = Some(rider);
         let eye = quad(r, "vp_eye");
@@ -343,6 +357,93 @@ fn each_cars_camera_films_the_drive_as_the_original() {
         seen += 1;
     }
     eprintln!("{seen} cars' cameras compared");
+}
+
+/// L2 in the game's button word: the original layout's look-back.
+const L2: u16 = 0x0001;
+
+/// A row's pad, as the report the pad library left it.
+fn report(r: &Row) -> Report {
+    let hex = &r["pad_a"];
+    let mut bytes = [0u8; REPORT_BYTES];
+    for (i, b) in bytes.iter_mut().enumerate().take(hex.len() / 2) {
+        *b = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).unwrap();
+    }
+    Report::from_bytes(bytes)
+}
+
+/// P264: the cars' Lookback Cam. `make_tape.py` (research/journal/2026-11-03-p264-car-camera-presets)
+/// is S149a's drive of each car with L2 held on four stretches: on the straight from rest, through the
+/// full-left turn, under the brake into reverse and on the coast. Captured on the original
+/// (`context/capture/p264/<car>.csv`), each car's camera goes to its file's look-back preset (the
+/// baja's fifth, "Lookback Cam") on the tick L2 goes down and back to "Race Cam 1" on the tick it
+/// comes up. Replayed with each tick's pad through the shell's look-back command
+/// ([`chase::LookBack`] on the shipped table, before the camera's frame as `main.rs` runs it), the
+/// port's camera is on the original's preset on every row and puts the eye and the view where the
+/// original's viewport has them through all eight changes.
+#[test]
+fn the_cars_lookback_cam_films_as_the_original() {
+    let Ok(mut disc) = Disc::open_configured() else {
+        eprintln!("skipped: no disc");
+        return;
+    };
+    let (scene, trn) = free07(&mut disc);
+    let terrain = Terrain::parse(&trn).unwrap();
+    let mut seen = 0;
+    for (name, kind, _) in CARS {
+        let Some(rows) = capture_in("p264", name) else {
+            eprintln!("skipped {name}: no context/capture/p264/{name}.csv");
+            continue;
+        };
+        let file = chase::car_presets(kind);
+        let presets = presets(&mut disc, file).unwrap_or_else(|| panic!("the disc has no {file}"));
+        let back_at = presets.iter().position(|p| p.is_look_back_cam).expect("a look-back preset");
+        eprintln!("{file}: look-back is preset {back_at}, {:?}", presets[back_at].name);
+        let mut pad = Pad::new(0);
+        pad.connected = true;
+        let mut events = EventQueue::new();
+        let mut back = chase::LookBack::default();
+        let (mut on_preset, mut looked_back, mut changes, mut was) = (0, 0, 0, 0usize);
+        // The recorder's read can land after the pad library has written the next frame's buffer and
+        // before the game runs that frame, so a capture's pad is the row's tick's or, all through it,
+        // the next tick's: in the baja's the tape's Cross from tick 15 is in row 14 and its L2 from
+        // tick 60 in row 59, with the camera turning on row 60; in the buggy's the pad and the camera
+        // turn on the same row. That one row is taken off the first press alone; the other seven
+        // changes and every row are held to it.
+        let pads: Vec<Report> = rows.iter().map(report).collect();
+        let press = pads.iter().position(|p| p.buttons() & L2 != 0).expect("a look-back press");
+        let turn = rows.iter().position(|r| num(r, "cam_preset") as usize == back_at).expect("the original looks back");
+        let lead = turn.checked_sub(press).filter(|&d| d <= 1).unwrap_or_else(|| panic!("{name}: pressed on row {press}, turned on {turn}"));
+        eprintln!("{name}: the pad leads the camera by {lead} row");
+        let mut tick = 0usize;
+        let ground = Ground::new(&terrain, &scene.terrain);
+        let lifted = Lifted { ground, point: Vf::new(0.0, 0.0, 0.0, 1.0), lift: F::ZERO, last: F::ZERO };
+        let out = replay_with(&rows, presets, Under::Captured(lifted), |r, cam| {
+            events.clear();
+            let polled = match tick.checked_sub(lead) {
+                Some(row) => pads[row],
+                None => Report::idle(),
+            };
+            tick += 1;
+            pad.poll(F(num(r, "dt")), &polled, &mut events);
+            back.frame(&mut cam.cam, &pad, &Table::SHIPPED, true);
+            let want = num(r, "cam_preset") as usize;
+            assert_eq!(cam.cam.preset, want, "{name} {}: the port's camera is on {:?}", r["frame_counter"], cam.cam.preset().name);
+            on_preset += 1;
+            looked_back += (want == back_at) as usize;
+            changes += (want != was) as usize;
+            was = want;
+        });
+        eprintln!("{name} looking back: {out:?}; {on_preset} rows on the original's preset, {looked_back} looking back, {changes} changes");
+        assert_eq!(on_preset, rows.len());
+        assert_eq!(changes, 8, "{name}: the four holds go down and come up");
+        assert!(looked_back > 150, "{name}: only {looked_back} rows looking back");
+        assert!(out.compared > 450, "{name}: only {} of {} rows compared", out.compared, rows.len());
+        assert!(out.eye.0 < 0.01, "{name}: the eye is {} ft off at row {}", out.eye.0, out.eye.1);
+        assert!(out.view.0 < 1.0e-4, "{name}: the view is turned {} rad off at row {}", out.view.0, out.view.1);
+        seen += 1;
+    }
+    eprintln!("{seen} cars' look-backs compared");
 }
 
 /// The same replay over free07's ground (where S149a drove all three), the ground the shell gives the
@@ -437,4 +538,36 @@ fn a_driven_car_is_followed_by_its_own_camera() {
         assert!(ridden.iter().all(|d| (d - 13.0).abs() < 0.5), "{track}: the bike's camera distances {ridden:?}");
         eprintln!("{track}: the {car} followed at {} ft over {} ticks; {start}", driven[0], driven.len());
     }
+}
+
+/// P264: a ride started from the front end starts each car's camera where the seat's camera button
+/// last left it, from `settings.txt`'s `camera_car_start` lines: the buggy kept on "Race Cam 2" on
+/// free11, where the buggy is parked, starts there; a name the baja's file has no preset of leaves
+/// the baja's on its own first.
+#[test]
+fn a_cars_camera_starts_where_it_was_left() {
+    let iso = match Disc::configured_path() {
+        Ok(p) if p.is_file() => p,
+        _ => {
+            eprintln!("skipped: no disc");
+            return;
+        }
+    };
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("p264-car-start");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("kit.toml"), "[game]\niso = \"disc.iso\"\n").unwrap();
+    std::os::unix::fs::symlink(&iso, dir.join("disc.iso")).unwrap();
+    std::fs::write(dir.join("settings.txt"), "track = free11\ncamera_car_start = 1 | buggy | Race Cam 2\ncamera_car_start = 1 | baja | No Such Cam\n").unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_openmx"))
+        .current_dir(&dir)
+        .args(["--headless", "--menu", "--screen", "pause", "--frames", "2", "--no-sound"])
+        .output()
+        .expect("the shell runs");
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "the shell failed: {}\n{said}", String::from_utf8_lossy(&out.stderr));
+    assert!(said.lines().any(|l| l == "buggy: its camera starts on Race Cam 1, 6 presets in buggycpresets.ini"), "{said}");
+    let kept: Vec<&str> = said.lines().filter(|l| l.contains("starts on") && l.ends_with("where it was left")).collect();
+    assert_eq!(kept, ["camera: the buggy's starts on Race Cam 2, where it was left"], "{said}");
+    let _ = std::fs::remove_dir_all(&dir);
 }
