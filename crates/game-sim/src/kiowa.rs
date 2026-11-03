@@ -1905,6 +1905,161 @@ pub struct Throw {
     pub model: Mat4,
 }
 
+/// The helicopter's model, in its first skin: every skin has the same nodes ([`RotorTree::read`]).
+pub const KIOWA_MODEL: &str = "helicopter\\anim\\kiowa.psg";
+
+/// The nodes the main rotor turns, the four blades' nodes hang under, by their names in the model.
+const SPINDLE: &str = "RotorSpindle";
+const BLADE_NODES: [&str; 4] = ["Blade_Node01", "Blade_Node02", "Blade_Node03", "Blade_Node04"];
+/// The axis the measure turns the spindle about by the rotor's angle: `y`.
+const SPINDLE_AXIS: [f32; 3] = [0.0, 1.0, 0.0];
+
+/// **The helicopter's model tree, as far as the blade throw reads it**: each node's own matrix (its
+/// local rows, as the `.psg` holds them) and its parent, for the root, the main rotor's spindle and
+/// everything between the spindle and the four blades' nodes. The root's own rows are never read:
+/// the body's post writes them ([`Throw::of`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct RotorTree {
+    /// Each node's local rows and its parent's index (`None` for the root), parents first.
+    pub nodes: Vec<(Mat4, Option<usize>)>,
+    /// The spindle's index: its rotation is the rotor's angle, its position the file's.
+    pub spindle: usize,
+    /// `Blade_Node01`..`04`'s indices.
+    pub blades: [usize; 4],
+}
+
+impl RotorTree {
+    /// The tree out of a skin's `.psg` bytes ([`KIOWA_MODEL`]): its 224-byte node records (the name,
+    /// the local rows at byte 128, the parent's index at 220). An error for a file that is no `.psg`,
+    /// lacks the spindle or a blade node, or hangs a blade anywhere but under the spindle.
+    pub fn read(psg: &[u8]) -> Result<RotorTree, String> {
+        const NODES: usize = 12;
+        const RECORD: usize = 224;
+        const NAME: usize = 128;
+        const MATRIX: usize = 128;
+        const PARENT: usize = 220;
+        let word = |at: usize| -> Result<u32, String> {
+            psg.get(at..at + 4)
+                .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .ok_or_else(|| format!(".psg ends at {} before byte {at}", psg.len()))
+        };
+        if psg.get(..4) != Some(b"psg\0".as_slice()) {
+            return Err("not a .psg: no psg\\0 at the front".into());
+        }
+        let count = word(8)? as usize;
+        let at = |i: usize| NODES + i * RECORD;
+        let mut nodes = Vec::with_capacity(count);
+        let mut names = Vec::with_capacity(count);
+        for i in 0..count {
+            let name = psg.get(at(i)..at(i) + NAME).ok_or("a .psg cut short in its nodes")?;
+            names.push(name.iter().take_while(|&&c| c != 0).map(|&c| c as char).collect::<String>());
+            let row = |r: usize| -> Result<Vf, String> {
+                let b = at(i) + MATRIX + r * 16;
+                Ok(Vf::from_bits([word(b)?, word(b + 4)?, word(b + 8)?, word(b + 12)?]))
+            };
+            let local = Mat4([row(0)?, row(1)?, row(2)?, row(3)?]);
+            let parent = match usize::try_from(word(at(i) + PARENT)? as i32) {
+                Ok(p) if p < i => Some(p),
+                Ok(p) => return Err(format!("node {i}'s parent {p} comes after it")),
+                Err(_) => None,
+            };
+            nodes.push((local, parent));
+        }
+        if nodes.first().is_none_or(|n| n.1.is_some()) {
+            return Err("a .psg whose first node is not its root".into());
+        }
+        let find = |want: &str| names.iter().position(|n| n == want).ok_or_else(|| format!("the model has no {want} node"));
+        let spindle = find(SPINDLE)?;
+        let mut blades = [0; 4];
+        for (k, want) in BLADE_NODES.iter().enumerate() {
+            blades[k] = find(want)?;
+            let mut up = nodes[blades[k]].1;
+            while up.is_some_and(|p| p != spindle) {
+                up = up.and_then(|p| nodes[p].1);
+            }
+            if up.is_none() {
+                return Err(format!("{want} does not hang under {SPINDLE}"));
+            }
+        }
+        Ok(RotorTree { nodes, spindle, blades })
+    }
+}
+
+/// **`node_set_rotation`'s matrix** (`axis_rotation_build`): the turn about `axis` (normalised first,
+/// on the FPU) whose angle's cosine and sine are `cos` and `sin`, as VU0 builds it — `v (1 - cos)`
+/// times each of `v`'s lanes, then `cos` on the diagonal and `v sin`'s lanes added and taken off
+/// either side of it. Row 3 is `(0, 0, 0, 1)`. The axis's `w` lane is the sign half of its `z` word,
+/// as the register pair the original moves it in holds it.
+fn axis_turn(axis: [f32; 3], cos: F, sin: F) -> Mat4 {
+    let [x, y, z] = axis.map(F);
+    let len2 = fpu::madd(fpu::adda((x * x).0, (y * y).0), z.0, z.0);
+    let r = F(fpu::rsqrt(1.0, len2));
+    let (x, y, z) = (x * r, y * r, z * r);
+    let w = if z.to_bits() >> 31 != 0 { f32::from_bits(u32::MAX) } else { 0.0 };
+    let v = Vf::new(x.0, y.0, z.0, w);
+    let one_less = Vf::msub(v.add(Vf::VF0.bc(Field::X)), v, Vf::splat(cos.0));
+    let s = v.mul(Vf::splat(sin.0));
+    let [r0, r1, r2] = [Field::X, Field::Y, Field::Z].map(|f| one_less.mul(v.bc(f)));
+    use ps2_float::vu::{add, sub};
+    let (c, sx, sy, sz) = (cos.0, s.x(), s.y(), s.z());
+    let row0 = Vf::new(add(r0.x(), c), add(r0.y(), sz), sub(r0.z(), sy), r0.w());
+    let row1 = Vf::new(sub(r1.x(), sz), add(r1.y(), c), add(r1.z(), sx), r1.w());
+    let row2 = Vf::new(add(r2.x(), sy), sub(r2.y(), sx), add(r2.z(), c), r2.w());
+    Mat4([row0, row1, row2, Vf::new(0.0, 0.0, 0.0, 1.0)])
+}
+
+/// **`transform_rebuild`'s step**: a node's world rows, its local rows carried by its parent's
+/// world rows — each axis row `p0 x + p1 y + p2 z` (accumulated in that order), the origin
+/// `p3 + p0 x + p1 y + p2 z`, every lane.
+fn rebuild(local: &Mat4, parent: &Mat4) -> Mat4 {
+    let [p0, p1, p2, p3] = parent.0;
+    let row = |acc: Vf, l: Vf| Vf::madd(Vf::madd(Vf::madd(acc, p0, l.bc(Field::X)), p1, l.bc(Field::Y)), p2, l.bc(Field::Z));
+    let [l0, l1, l2, l3] = local.0;
+    let axis = |l: Vf| Vf::madd(Vf::madd(p0.mul(l.bc(Field::X)), p1, l.bc(Field::Y)), p2, l.bc(Field::Z));
+    Mat4([axis(l0), axis(l1), axis(l2), row(p3.add(Vf::VF0.bc(Field::X)), l3)])
+}
+
+impl Throw {
+    /// **Where the blades go from, as the MX helicopter's own nodes have it** at the crash test:
+    ///
+    /// * the model's root is where the body's post (the first thing the measure does) put it, the
+    ///   body's last orientation at its last centre of gravity less the turned `CofG`
+    ///   ([`Body::pose`]);
+    /// * the spindle is turned by `rotor_angle` about `y` at the file's position, as the measure's
+    ///   rotor step left it — the frame before's angle, the crash test coming before this frame's
+    ///   step ([`spin_blades`]): `{cos, sin}` off the curve table ([`CurveTable::at`]) into
+    ///   [`axis_turn`];
+    /// * every other node is the file's, and each blade node's world rows are the lazy rebuild's
+    ///   chain from the root down ([`rebuild`]).
+    ///
+    /// A hidden rotor's angle is not run on, and nor is its spindle turned: the angle still names
+    /// the turn the spindle was last given.
+    pub fn of(tree: &RotorTree, body: &Body, rotor_angle: F, curve: &CurveTable) -> Throw {
+        let (quat, origin) = body.pose();
+        let root = quat_to_mat4(quat, origin);
+        let (cos, sin) = curve.at(rotor_angle);
+        let mut spun = axis_turn(SPINDLE_AXIS, cos, sin);
+        let at = tree.nodes[tree.spindle].0.0[3];
+        spun.0[3] = Vf::new(at.x(), at.y(), at.z(), 1.0);
+        let mut worlds: Vec<Option<Mat4>> = vec![None; tree.nodes.len()];
+        worlds[0] = Some(root);
+        fn world(i: usize, tree: &RotorTree, spun: &Mat4, worlds: &mut [Option<Mat4>]) -> Mat4 {
+            if let Some(m) = worlds[i] {
+                return m;
+            }
+            let (local, parent) = &tree.nodes[i];
+            let local = if i == tree.spindle { spun } else { local };
+            // Only the root has no parent, and its rows are set above.
+            let p = world(parent.unwrap_or(0), tree, spun, worlds);
+            let m = rebuild(local, &p);
+            worlds[i] = Some(m);
+            m
+        }
+        let blades = tree.blades.map(|b| world(b, tree, &spun, &mut worlds));
+        Throw { blades, model: root }
+    }
+}
+
 /// What the wreck, the unwreck and the put-back read and write besides [`Ride`].
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Wreckage {

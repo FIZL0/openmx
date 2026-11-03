@@ -2611,3 +2611,152 @@ fn the_ray_tree_build_is_the_originals() {
     assert!(unparted < cases / 10, "{unparted} of {cases} lists no cut parts");
     println!("ray trees: {} lists of 1 to 12 rays built as the original builds them, up to {deepest} nodes ({unparted} no cut parts left out)", cases - unparted);
 }
+
+// --- S270: the throw's rows from the helicopter's own nodes ------------------------------------------
+
+/// A node's local rows, its parent, its name.
+mod node_at {
+    pub const LOCAL: u32 = 0x40;
+    pub const PARENT: u32 = 0x100;
+    pub const NAME: u32 = 0x120;
+}
+
+fn node_name(ee: &Ee, node: u32) -> String {
+    let at = ee.u32_at(node + node_at::NAME);
+    (0..64).map(|k| ee.u8_at(at + k)).take_while(|&c| c != 0).map(|c| c as char).collect()
+}
+
+fn rotor_tree(kit: &Kit, skin: &str) -> Option<game_sim::kiowa::RotorTree> {
+    let psg = machine_file(kit, skin)?;
+    Some(game_sim::kiowa::RotorTree::read(&psg).unwrap_or_else(|e| panic!("{skin}: {e}")))
+}
+
+fn same_rows(what: &str, case: usize, got: &game_sim::math::Mat4, want: [Vf; 4]) {
+    for r in 0..4 {
+        assert_eq!(got.0[r].to_bits(), want[r].to_bits(), "case {case}: {what} row {r} is {:?} in the game, {:?} in the port", want[r].0, got.0[r].0);
+    }
+}
+
+#[test]
+fn the_rotor_tree_is_the_live_helicopters() {
+    let Some(ee) = heli() else { return };
+    let kit = Kit::load().unwrap();
+    let root = ee.u32_at(HELI + wreck_at::MODEL);
+    let spindle_rows = |t: &game_sim::kiowa::RotorTree| t.nodes[t.spindle].0.0[3];
+    let mut first = None;
+    // The `_ss` skins read, but their blade nodes go round the other way and their blades sit a few
+    // bits off: they are not the flown helicopter's.
+    for skin in ["helicopter\\anim\\kiowa_ss.psg", "helicopter\\anim\\kiowa2_ss.psg"] {
+        let Some(_) = rotor_tree(&kit, skin) else { return };
+    }
+    for skin in ["helicopter\\anim\\kiowa.psg", "helicopter\\anim\\kiowa2.psg"] {
+        let Some(tree) = rotor_tree(&kit, skin) else { return };
+        // Both flown skins have the same chain to the blades, rows and all (the shell loads the first).
+        let chain = |b: usize| {
+            let mut out = vec![];
+            let mut at = Some(b);
+            while let Some(i) = at {
+                out.push(i);
+                at = tree.nodes[i].1;
+            }
+            out
+        };
+        let picked: Vec<_> = tree.blades.iter().flat_map(|&b| chain(b)).map(|i| tree.nodes[i].0.0.map(|v| v.to_bits())).collect();
+        match &first {
+            None => first = Some(picked),
+            Some(f) => assert_eq!(f, &picked, "{skin}'s chain to the blades is not kiowa.psg's"),
+        }
+        for k in 0..4 {
+            // The file's chain against the live one, node by node up to the root: the spindle's turn is
+            // the rotor's, so only its position is the file's.
+            let mut node = ee.u32_at(HELI + wreck_at::BLADE_NODES + 4 * k as u32);
+            for (depth, &i) in chain(tree.blades[k]).iter().enumerate() {
+                let what = format!("{skin}: blade {k}'s node {} ({depth} up)", node_name(&ee, node));
+                if i == 0 {
+                    assert_eq!(node, root, "{what} is the root in the file, not in the game");
+                } else if i == tree.spindle {
+                    assert_eq!(node, ee.u32_at(HELI + 0xd04), "{what}: the spindle is not the one the measure turns");
+                    let want = quad(&ee, node + node_at::LOCAL + 0x30);
+                    assert_eq!(spindle_rows(&tree).0[..3].iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                               want.0[..3].iter().map(|x| x.to_bits()).collect::<Vec<_>>(), "{what}'s position");
+                } else {
+                    same_rows(&what, 0, &tree.nodes[i].0, quads(&ee, node + node_at::LOCAL));
+                }
+                node = ee.u32_at(node + node_at::PARENT);
+            }
+            assert_eq!(node, 0, "{skin}: blade {k}'s live chain goes above the root");
+        }
+    }
+    println!("the rotor tree: both flown skins' chains to the blades are the live helicopter's");
+}
+
+#[test]
+fn the_throws_rows_are_the_originals() {
+    use game_sim::kiowa::{Throw, spin_blades};
+    let Some(mut ee) = heli() else { return };
+    let kit = Kit::load().unwrap();
+    let Some(tree) = rotor_tree(&kit, game_sim::kiowa::KIOWA_MODEL) else { return };
+    let curve = the_curve_table(&ee);
+    let b = ee.u32_at(HELI + at::BODY);
+    let live = body_of(&ee, b);
+    // The saved frame's own rows: the post, then the rotor's step, and nothing since.
+    let angle = F(ee.f32_at(HELI + measure_at::ROTOR_ANGLE));
+    let saved = Throw::of(&tree, &live, angle, &curve);
+    let want = throw_of(&ee);
+    same_rows("the saved model", 0, &saved.model, want.model.0);
+    for k in 0..4 {
+        same_rows(&format!("the saved blade {k}"), 0, &saved.blades[k], want.blades[k].0);
+    }
+    // Then generated poses and angles: the pose put as the body's post puts it (S. the biplane's
+    // the_pose_is_put_like_the_original for the origin), the rotor's step, and each blade node's
+    // lazy rebuild after them.
+    let (spin, set_pose, rebuild) = (addr("kiowa_blade_spin").unwrap(), addr("transform_set_pose").unwrap(), addr("transform_rebuild").unwrap());
+    let root = ee.u32_at(HELI + wreck_at::MODEL);
+    let rotor = ee.u32_at(HELI + measure_at::ROTOR_NODE);
+    let blades: [u32; 4] = std::array::from_fn(|k| ee.u32_at(HELI + wreck_at::BLADE_NODES + 4 * k as u32));
+    let mut pick = Pick(0x5270_7a0c_e11d_0001);
+    let mut hidden_cases = 0;
+    for case in 0..CASES {
+        let mut body = live.clone();
+        let q = orientation(&mut pick);
+        body.last_quat = Vf::new(q[0], q[1], q[2], q[3]);
+        let size = if pick.one_in(4) { 30_000.0 } else { 3000.0 };
+        body.last_position = vector(&mut pick, size);
+        if pick.one_in(2) {
+            body.cofg = Vf::new(pick.range(-3.0, 3.0), pick.range(-3.0, 3.0), pick.range(-3.0, 3.0), pick.range(-1.0, 1.0));
+        }
+        let (quat, origin) = body.pose();
+        put(&mut ee, SCRATCH, quat);
+        put(&mut ee, SCRATCH + 0x10, origin);
+        ee.call(set_pose, &[u64::from(root), 0, u64::from(SCRATCH), u64::from(SCRATCH + 0x10)], &[], BUDGET);
+        // A hidden rotor's step does nothing at all: its angle is the one the spindle was last turned
+        // by (only this step and the helicopter's construction write it), so it is left as it is.
+        let hidden = pick.one_in(4);
+        set_bit(&mut ee, rotor + 3, 0x40, hidden);
+        if !hidden {
+            let a = match pick.next() % 5 {
+                0 => 0.0,
+                1 => -pick.range(0.0, 50.0),
+                2 => pick.range(1e5, 1e7),
+                _ => pick.range(0.0, 5000.0),
+            };
+            ee.set_f32(HELI + measure_at::ROTOR_ANGLE, a);
+        }
+        let mut angle = F(ee.f32_at(HELI + measure_at::ROTOR_ANGLE));
+        let dt = if pick.one_in(2) { 1.0 / 30.0 } else { pick.range(0.0, 0.1) };
+        ee.call(spin, &[u64::from(HELI)], &[dt], BUDGET);
+        for &n in blades.iter().chain([root].iter()) {
+            ee.call(rebuild, &[u64::from(n)], &[], BUDGET);
+        }
+        spin_blades(&mut angle, hidden, F(dt));
+        same("the rotor's angle", case, angle, ee.f32_at(HELI + measure_at::ROTOR_ANGLE));
+        let port = Throw::of(&tree, &body, angle, &curve);
+        let want = throw_of(&ee);
+        same_rows("the model", case, &port.model, want.model.0);
+        for k in 0..4 {
+            same_rows(&format!("blade {k}"), case, &port.blades[k], want.blades[k].0);
+        }
+        hidden_cases += usize::from(hidden);
+    }
+    println!("the throw's rows: the saved frame and {CASES} cases, bit-exact ({hidden_cases} hidden)");
+}

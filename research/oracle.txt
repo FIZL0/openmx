@@ -7457,6 +7457,24 @@ kiowa_pilot_request boot 0x00391f10 (heli) the last step of kiowa_measure_mx. Wr
 node_set_rotation boot 0x001b2e50 (node, angle in f12, axis*): replaces the rotation, keeps the position
 node_world_matrix boot 0x001b2a50 (node, 0, out*): the node's world matrix, 4 quads
 node_set_matrix boot 0x001b29c0 (node, matrix*): copies the 4 quads into the node
+# S270 — the blade throw's rows from the model's nodes, research/journal/*-s270-kiowa-throw-rows. Ported as
+# game_sim::kiowa::{RotorTree, Throw::of}; tests/kiowa.rs proves the rows on S148's state (heli 0x007ccae0).
+#   The chain (names at node +0x120, parent +0x100, local rows +0x40, world rows +0x80): heli +0x18c
+#   "Kiowa" (root, no parent) <- +0xd04 "RotorSpindle" <- "Rotor" <- +0xd08..+0xd14 Blade_Node01..04;
+#   +0xd18 TailRotor_Node under the root. +0xd1c/+0xd20..+0xd28/+0xd3c/+0xd40 are roots of their own
+#   whose rows kiowa_blade_spin copies the blade/tail nodes' world rows into.
+#   kiowa_blade_spin: when +0xd1c is hidden it does nothing at all (not even the turn), so +0xe58 is
+#   always the angle the spindle was last turned by (the ctor zeroes it; no other writer in the kiowa
+#   code). The spindle turns about (0,1,0) (0x00426db0), the tail about (1,0,0) (0x00426da0).
+#   The root's rows: body_wrapper_post -> transform_set_pose with body+0x150 and the post's origin,
+#   = math::quat_to_mat4 bit for bit. The four kiowa*.psg skins: kiowa and kiowa2 carry the live
+#   chain's rows bit for bit; the _ss two order their blades the other way, a few bits off.
+node_axis_rotation boot 0x001b2db0 (node, axis x/y/z in f12..f14, angle in f15): node_set_rotation's body:
+#                                 keeps the position, sincos, axis_rotation_build into the local rows
+curve_sincos boot 0x00110ff0 (angle in f12, sin*, cos*): the curve table's pair, = CurveTable::at
+axis_rotation_build boot 0x00110f40 (axis f12..f14, cos f15, sin f16, out*, normalise): the axis-angle
+#                                 matrix on VU0: v(1 - cos) v^T, cos on the diagonal, +-v sin off it;
+#                                 the FPU normalise (adda, madd, rsqrt); row 3 = vf0
 # S220b — the Kiowa's input step and its frame, research/journal/*-s220b-kiowa-input. Ported as
 # game_sim::kiowa (Pad::from_sticks, Kiowa::tick); tests/kiowa.rs proves both on S148's state.
 #   The writers of +0x334..+0x348 (an ELF-wide store scan over 0x0038c000..0x00394000): the base ctor
