@@ -6518,6 +6518,22 @@ atv_ground_query            atv 0x004833c0 = the world's ground query under a po
 atv_wheel_contact_velocity  atv 0x004a1150 = the wheel's contact velocity (a0 wheel; writes +0x170 and +0x180 off the body's velocity and spin)
 atv_wheel_hinge_force       atv 0x004a2aa0 = a steered, balanced wheel's force through its hinge (a0 wheel, a1 force, a2 wheel +0x140, f12 1.0)
 atv_body_add_force_at       atv 0x0049c0b0 = rigid body vt +0x84 (a0 body, a1 force, a2 point, a3 moment scale: the moment into the body's frame by vt +0x78, then vt +0x48)
+# MD74 — the two callees ported (atv_wheel::contact_velocity, hinge_force; tests/atv_wheel.rs runs both off the
+# same image, and the tire-forces test now runs them unhooked). Journal: research/journal/2026-11-02-md74-atv-wheel-callees.
+# Contact velocity, wheel-relative: body point velocity = body +0x80 + turn(body +0x1d0) x (+0x140 - body +0x70).
+# Unless +0x1a0 is set, the ground's velocity (+0x1b0) and its velocity at the contact point +0x120 (+0x1c0):
+# object +0x1f0 (+0x80 cofg, writes +0x90 = cofg into the world) on a body +0xe4 (+0x70, +0x80, +0x190, +0x1d0:
+# arm = unturn(point - (pos + +0x90)), +0x1c0 = turn(spin x arm) + vel) or, with no body, a chassis +0xe0 (+0x180
+# cofg, +0x250 vel, +0x280 spin) through the object's transform +0xe8; else a mover +0x1f4 (vt +0xc4 spin, vt +0xc0
+# vel, asked in that order; transform +0x244, origin +0x180); else both (0,0,0,1). Then +0x1a0 = 1, +0x170 =
+# point vel - +0x1c0, +0x180 = body vel - +0x1b0, +0x190 = +0x180 into the body's frame. The transforms (scene
+# node: rows +0x70..+0x90, origin +0xa0, parent +0xf0, byte +0x100 bit 0 = up to date) are MX Unleashed's.
+# Hinge force: vt +0x84 with scale 0x00396fd0, then +0x60 (steer torque) = 0 + +0x60 + f12 * (unturn((point -
+# +0x150) x force) . +0x8c0 (the hinge axis)).
+atv_node_rotate             atv 0x00195230 = a direction out of a scene node's frame (a0 out, a1 node, a2 in; updates the node first)
+atv_node_unplace            atv 0x001953c0 = a world point into a scene node's frame (a0 out, a1 node, a2 in; updates the node first)
+atv_wheel_hinge_moment      atv 0x004a2b90 = the hinge's moment of a force about the wheel's mount (a0 wheel, a1 force, a2 point, f12 scale)
+atv_wheel_steer_torque_add  atv 0x004a2bf0 = a world moment onto the wheel's steer torque along its hinge axis (a0 wheel, a1 moment, f12 scale)
 # MD40 — what MX vs. ATV's backflip calls and reads (tests/mxvatv_air.rs runs it off a Free Ride RAM image,
 # context/mxvatv-ps2/state04.ee.bin, the bike object of state 4 at 0x00e714e0). The bike's vtable is
 # 0x003d0450, its rigid body's (bike +0xb8) 0x003cd200. The backflip's fields, bike-relative: +0x324 on the

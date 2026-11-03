@@ -1,6 +1,7 @@
 //! **The ATV's wheel suspension and tire forces** (MD37b), ported from MX vs. ATV Unleashed's PS2 ELF
 //! (SLUS-21104): the two per-substep wheel steps the quad's Force body runs on each of its four
-//! wheels. Every proof is against SLUS-21104's own code (`tests/atv_wheel.rs`), not MX Unleashed's;
+//! wheels, and the two the tire forces call (MD74): the contact velocity and the steering hinge's
+//! force. Every proof is against SLUS-21104's own code (`tests/atv_wheel.rs`), not MX Unleashed's;
 //! the field map is research/oracle.txt's (`# MD37b (wheels)`).
 //!
 //! They are MX Unleashed's [`crate::wheel::suspension`] and [`crate::wheel::tire_forces`] rewritten
@@ -23,15 +24,19 @@
 //! | `max_compression` .. `damping_in` | `+0x48` .. `+0x5c` | `+0x3c` .. `+0x50` |
 //! | `probe`, `mount` | `+0x90`, `+0xa0` | `+0x80`, `+0x90` |
 //!
-//! The rest (`+0xd0` .. `+0x180`, `+0x1e0`, `+0x200`, `+0x214`) sit where MX Unleashed has them. The
-//! wheel's body pointer is `+0x1e4`; [`More`] has the two words of the wheel MX Unleashed's view has
-//! no field for.
+//! | `steer_torque` | `+0x6c` | `+0x60` |
 //!
-//! What they call (the ground query, the contact-velocity step, the steering hinge's force) is handed
-//! to closures as [`Call`]s, in the original's order.
+//! The rest (`+0xd0` .. `+0x180`, `+0x1e0`, `+0x200`, `+0x214`) sit where MX Unleashed has them. The
+//! wheel's body pointer is `+0x1e4`; [`More`] has the words of the wheel MX Unleashed's view has no
+//! field for.
+//!
+//! What the two steps call (the ground query, the contact-velocity step, the steering hinge's force)
+//! is handed to closures as [`Call`]s, in the original's order; [`run`] answers the last two with
+//! [`contact_velocity`] and [`hinge_force`].
 
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
+use crate::contact::Node;
 use crate::wheel::{Call, Wheel};
 use ps2_float::vu::{self, Dest, Field};
 use ps2_float::{F, Vf, fpu::Acc};
@@ -58,7 +63,8 @@ const BOTTOM_OUT_REACH: f32 = 2.0;
 const UP: Vf = Vf::new(0.0, 1.0, 0.0, 1.0);
 /// The scale the tire's moment is handed through the body's add-force-at, `0x396fd0`.
 const MOMENT_SCALE: Vf = Vf::new(1.0, 1.0, 1.0, 1.0);
-/// What an unloaded wheel's contact velocity is reset to, `0x396fc0`.
+/// What an unloaded wheel's contact velocity is reset to, `0x396fc0`; also what the ground's own
+/// velocity is taken to be when the wheel stands on nothing that moves.
 const NO_CONTACT_VELOCITY: Vf = Vf::new(0.0, 0.0, 0.0, 1.0);
 
 /// The ATV's rigid body, as far as its wheels read and write it (the wheel's `+0x1e4`).
@@ -66,6 +72,8 @@ const NO_CONTACT_VELOCITY: Vf = Vf::new(0.0, 0.0, 0.0, 1.0);
 pub struct Body {
     /// `+0x70`: the centre of mass in the world. A bottomed-out wheel moves it.
     pub position: Vf,
+    /// `+0x80`: the velocity in the world.
+    pub velocity: Vf,
     /// `+0xa0` and `+0x1b0`: the force and moment accumulators. Only `xyz` is ever added to.
     pub force: Vf,
     pub moment: Vf,
@@ -76,6 +84,8 @@ pub struct Body {
     pub orientation: Vf,
     /// `+0x1a0`: the centre of mass in the body's own frame.
     pub cofg: Vf,
+    /// `+0x1d0`: the angular velocity in the body's own frame.
+    pub spin: Vf,
 }
 
 /// The two words of SLUS-21104's wheel [`Wheel`] has no field for.
@@ -87,6 +97,66 @@ pub struct More {
     /// `+0xc0`: a vector the bottom-out replaces with a zero one when that is the longer. A zero
     /// vector never is, so it never changes; what reads it is not traced.
     pub kept: Vf,
+    /// `+0x190`: [`Wheel::chassis_velocity`] in the body's frame, as the contact velocity leaves it.
+    pub chassis_velocity_local: Vf,
+    /// `+0x1a0`: the ground's velocities below are already known. The contact velocity sets it and
+    /// then reuses them; what clears it is not traced.
+    pub ground_known: i32,
+    /// `+0x1b0` and `+0x1c0`: the velocity of what the wheel stands on, and that thing's velocity at
+    /// the contact point.
+    pub ground_velocity: Vf,
+    pub ground_point_velocity: Vf,
+    /// `+0x8c0`: the steering hinge's axis, in the body's frame.
+    pub steer_axis: Vf,
+}
+
+/// What the wheel stands on, as the contact velocity reads it: the wheel's `+0x1f0` (a collision
+/// object) and, without one, its `+0x1f4` (a moving piece of scenery).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Ground {
+    /// Neither: the ground does not move.
+    #[default]
+    Still,
+    /// A collision object on a body or a vehicle. `cofg` is its own centre of mass (`+0x80`) and
+    /// `cofg_world` (`+0x90`) is that turned into the world, which the contact velocity writes.
+    Object { cofg: Vf, cofg_world: Vf, on: Holder },
+    /// A moving piece of scenery.
+    Mover(Mover),
+}
+
+/// What a collision object under the wheel belongs to.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Holder {
+    /// A rigid body of the quad's own kind (the object's `+0xe4`).
+    Body(Body),
+    /// A vehicle's chassis (`+0xe0`, read only when there is no body), placed by the object's
+    /// transform (`+0xe8`).
+    Chassis(Chassis),
+}
+
+/// A vehicle's chassis under the wheel, as far as the contact velocity reads it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Chassis {
+    /// `+0x180`: the centre of mass in the transform's frame.
+    pub cofg: Vf,
+    /// `+0x250`: the velocity in the world.
+    pub velocity: Vf,
+    /// `+0x280`: the angular velocity in the transform's frame.
+    pub spin: Vf,
+    /// The collision object's transform, already up to date.
+    pub node: Node,
+}
+
+/// A moving piece of scenery under the wheel.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Mover {
+    /// `+0x244`: its transform, already up to date.
+    pub node: Node,
+    /// `+0x180`: the point it turns about, in the transform's frame.
+    pub origin: Vf,
+    /// What its two virtuals answer (`+0xc0` the velocity, `+0xc4` the spin, asked spin first).
+    pub velocity: Vf,
+    pub spin: Vf,
 }
 
 fn rotations(b: &Body) -> crate::quad::Body {
@@ -115,6 +185,11 @@ fn add_xyz(a: Vf, b: Vf) -> Vf {
 
 fn sub_xyz(a: Vf, b: Vf) -> Vf {
     a.merge(Dest::XYZ, a.sub(b))
+}
+
+/// `vopmula a, b` / `vopmsub a ← b, a`, `.xyz`: `a × b`, `w` from `a`.
+fn cross(a: Vf, b: Vf) -> Vf {
+    a.merge(Dest::XYZ, Vf::opmsub(Vf::opmula(a, b), b, a))
 }
 
 /// `a·b` over `xyz` on the FPU's accumulator: `mula`, `madda`, `madd`.
@@ -213,13 +288,14 @@ pub fn add_force_at(b: &mut Body, f: Vf, point: Vf, moment_scale: Vf) {
 /// limit.
 ///
 /// `callee` runs what it calls: [`Call::ContactVelocity`] (which writes the wheel's contact and
-/// chassis velocities) and [`Call::HingeForce`] (the hinge is handed `1.0` in `f12` besides).
+/// chassis velocities) and [`Call::HingeForce`] (the hinge is handed `1.0` in `f12` besides). [`run`]
+/// is the original's.
 pub fn tire_forces(w: &mut Wheel, b: &mut Body, dt: F,
-    callee: &mut impl FnMut(Call, &mut Wheel, &mut Body), x: &mut More) -> Vec<Call> {
+    callee: &mut impl FnMut(Call, &mut Wheel, &mut Body, &mut More), x: &mut More) -> Vec<Call> {
     let mut calls = Vec::new();
-    let mut call = |c: Call, w: &mut Wheel, b: &mut Body| {
+    let mut call = |c: Call, w: &mut Wheel, b: &mut Body, x: &mut More| {
         calls.push(c);
-        callee(c, w, b);
+        callee(c, w, b, x);
     };
     w.compression = F::ZERO;
     w.contact = false;
@@ -242,13 +318,13 @@ pub fn tire_forces(w: &mut Wheel, b: &mut Body, dt: F,
             let lean = rotations(b).to_local(w.contact_normal);
             let lean = normalize(zero_lane(lean, Dest::Z));
             w.compression = w.compression * load_scale(F(lean.y()));
-            call(Call::ContactVelocity, w, b);
+            call(Call::ContactVelocity, w, b, x);
             if !(w.compression <= w.max_compression) {
                 if w.ray_hit != 0 || along < BOTTOM_OUT_REACH {
                     bottom_out(w, x, b);
                 }
                 w.compression = w.max_compression;
-                call(Call::ContactVelocity, w, b);
+                call(Call::ContactVelocity, w, b, x);
             }
             let closing = dot3(w.contact_velocity, w.contact_normal)
                 .max(-w.max_damper_speed)
@@ -257,7 +333,7 @@ pub fn tire_forces(w: &mut Wheel, b: &mut Body, dt: F,
             w.spring_force = F::ZERO.max(Acc::mula(w.spring_rate, w.compression).msub(damping, closing));
             let force = scale(w.contact_normal, w.spring_force);
             if w.steered && w.balancing {
-                call(Call::HingeForce(force, w.load_point), w, b);
+                call(Call::HingeForce(force, w.load_point), w, b, x);
             } else {
                 add_force_at(b, force, w.load_point, MOMENT_SCALE);
             }
@@ -289,4 +365,70 @@ fn bottom_out(w: &Wheel, x: &mut More, b: &mut Body) {
     b.correction = sub_xyz(b.correction, scale(up, into));
     let pressing = -dot3(b.force, w.contact_normal).min(0.0);
     b.force = add_xyz(b.force, scale(w.contact_normal, pressing));
+}
+
+/// What [`tire_forces`] calls, run as SLUS-21104 runs it: the contact velocity on `ground`, and the
+/// hinge with `1.0` for its scale.
+pub fn run(c: Call, w: &mut Wheel, b: &mut Body, x: &mut More, ground: &mut Ground) {
+    match c {
+        Call::ContactVelocity => contact_velocity(w, x, b, ground),
+        Call::HingeForce(force, point) => hinge_force(w, x, b, force, point, F::ONE),
+        _ => unreachable!("the tire forces call nothing else"),
+    }
+}
+
+/// `atv_wheel_contact_velocity`: how fast the wheel's load point moves against the ground under it
+/// ([`Wheel::contact_velocity`]), and the body as a whole against it ([`Wheel::chassis_velocity`],
+/// and [`More::chassis_velocity_local`] in the body's frame).
+///
+/// The body's point velocity is `velocity + to_world(spin) × (load point - position)`. The ground's
+/// is worked out once ([`More::ground_known`]) and kept; the ways it is worked out are MX Unleashed's
+/// owner and mover branches (see [`crate::contact::other_at`]) at SLUS-21104's offsets, except that a
+/// rigid body's arm is taken from the object's centre of mass on it and its spin is turned into the
+/// world after the cross product. The ground's point is the contact point, not the load point.
+pub fn contact_velocity(w: &mut Wheel, x: &mut More, b: &Body, ground: &mut Ground) {
+    let r = rotations(b);
+    let arm = sub_xyz(w.load_point, b.position);
+    let at = add_xyz(b.velocity, cross(r.to_world(b.spin), arm));
+    if x.ground_known == 0 {
+        let (velocity, point) = match ground {
+            Ground::Object { cofg, cofg_world, on: Holder::Body(o) } => {
+                let q = rotations(o);
+                *cofg_world = q.to_world(*cofg);
+                let centre = add_xyz(o.position, *cofg_world);
+                let arm = q.to_local(sub_xyz(w.contact_point, centre));
+                (o.velocity, q.to_world(cross(o.spin, arm)))
+            }
+            Ground::Object { cofg, cofg_world, on: Holder::Chassis(c) } => {
+                *cofg_world = c.node.rotate(*cofg);
+                let local = c.node.unplace(w.contact_point);
+                let arm = sub_xyz(local, add_xyz(c.cofg, *cofg_world));
+                (c.velocity, c.node.rotate(cross(c.spin, arm)))
+            }
+            Ground::Mover(m) => {
+                let arm = sub_xyz(m.node.unplace(w.contact_point), m.origin);
+                (m.velocity, m.node.rotate(cross(m.spin, arm)))
+            }
+            Ground::Still => (NO_CONTACT_VELOCITY, NO_CONTACT_VELOCITY),
+        };
+        x.ground_velocity = velocity;
+        x.ground_point_velocity = match ground {
+            Ground::Still => point,
+            _ => add_xyz(point, velocity),
+        };
+    }
+    x.ground_known = 1;
+    w.contact_velocity = sub_xyz(at, x.ground_point_velocity);
+    w.chassis_velocity = sub_xyz(b.velocity, x.ground_velocity);
+    x.chassis_velocity_local = r.to_local(w.chassis_velocity);
+}
+
+/// `atv_wheel_hinge_force`: a steered wheel's tire force on a quad balanced on it. The force goes into
+/// the body at `point` as any other wheel's does ([`add_force_at`]), and its moment about the wheel's
+/// mount, turned into the body's frame, is added to [`Wheel::steer_torque`] along the hinge's axis
+/// ([`More::steer_axis`]), times `scale` (the tire forces hand it `1.0`).
+pub fn hinge_force(w: &mut Wheel, x: &More, b: &mut Body, force: Vf, point: Vf, scale: F) {
+    add_force_at(b, force, point, MOMENT_SCALE);
+    let moment = rotations(b).to_local(cross(sub_xyz(point, w.mount_world), force));
+    w.steer_torque = Acc::adda(F::ZERO, w.steer_torque).madd(scale, dot3(moment, x.steer_axis));
 }

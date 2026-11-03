@@ -1,16 +1,20 @@
-//! MD37b — the ATV's wheel suspension and tire forces, proved against MX vs. ATV's own code.
+//! MD37b — the ATV's wheel suspension and tire forces, proved against MX vs. ATV's own code; MD74 —
+//! the contact velocity and the steering hinge's force they call.
 //!
 //! The image is `tests/atv_quad.rs`'s (MD37a's `atv-r-spawn.ee.bin`): one wheel and the quad's rigid
 //! body (with the body's own vtable, so its add-force, add-moment and add-force-at run as they are)
 //! are laid out in RAM, a generated state is written into them, SLUS-21104's function runs, the same
 //! state is written again with the port's answer over it, and the two regions are compared word for
-//! word. The original may write nothing else. What the steps call (the ground query, the contact
-//! velocity, the hinge) is hooked: the hooks check the arguments, log the call and serve generated
-//! answers, which the port's closures serve too.
+//! word. The original may write nothing else. The ground query is hooked: the hook checks the
+//! arguments, logs the call and serves generated answers, which the port's closure serves too. The
+//! contact velocity and the hinge run as they are (their hooks only check and log the call, then run
+//! the original's code); what the wheel stands on (a body, a vehicle's chassis with its transform, a
+//! moving piece of scenery with two virtuals hooked to serve generated answers) is laid out in RAM.
 //!
 //! Without the image every test here skips (and says so).
 
-use game_sim::atv_wheel::{self, Body, More};
+use game_sim::atv_wheel::{self, Body, Chassis, Ground, Holder, More, Mover};
+use game_sim::contact::Node;
 use game_sim::wheel::{Call, Wheel};
 use ps2_float::{F, Vf};
 use ps2_oracle::{Ee, Kit, skip};
@@ -22,7 +26,28 @@ const WHEEL: u32 = 0x01c0_8000;
 const BODY: u32 = 0x01c0_2000;
 /// The world the wheel asks for the ground; never read, only handed on.
 const WORLD: u32 = 0x01c0_2400;
-const REGIONS: [(&str, u32, u32); 2] = [("wheel", WHEEL, 0x8b0), ("body", BODY, 0x200)];
+/// What the wheel stands on: a collision object, the body or the chassis it belongs to, their
+/// transform, and a mover.
+const OBJECT: u32 = 0x01c0_3000;
+const OTHER_BODY: u32 = 0x01c0_3400;
+const CHASSIS: u32 = 0x01c0_3800;
+const NODE: u32 = 0x01c0_3c00;
+const MOVER: u32 = 0x01c0_4000;
+const REGIONS: [(&str, u32, u32); 7] = [
+    ("wheel", WHEEL, 0x8d0),
+    ("body", BODY, 0x200),
+    ("object", OBJECT, 0x100),
+    ("other body", OTHER_BODY, 0x200),
+    ("chassis", CHASSIS, 0x300),
+    ("node", NODE, 0x110),
+    ("mover", MOVER, 0x250),
+];
+/// The mover's vtable, and where its velocity and spin virtuals point (hooked, never run).
+const MOVER_VTABLE: u32 = 0x01c0_4400;
+const MOVER_VELOCITY: u32 = 0x01c0_4600;
+const MOVER_SPIN: u32 = 0x01c0_4610;
+/// Where the hinge's force is handed from.
+const ARGS: u32 = 0x01c0_4800;
 
 const BODY_VTABLE: u32 = 0x003c_d200;
 const BODY_WORLD_MOMENT: u32 = 0x0049_c1a0;
@@ -62,8 +87,10 @@ struct State {
     /// The ground query hands the point back as it was given, which puts it exactly level with the
     /// probe's end.
     echo: bool,
-    /// The contact-velocity step's answers: the contact's and the chassis' velocities.
-    velocity: Vec<(Vf, Vf)>,
+    /// What the wheel stands on.
+    ground_under: Ground,
+    /// A collision object is there, and a mover too (which the object hides).
+    also_mover: bool,
 }
 
 fn put_f(ee: &mut Ee, a: u32, v: F) {
@@ -125,6 +152,12 @@ fn poke(ee: &mut Ee, s: &State) {
     put_v(ee, WHEEL + 0x160, w.probe_end_world);
     put_v(ee, WHEEL + 0x170, w.contact_velocity);
     put_v(ee, WHEEL + 0x180, w.chassis_velocity);
+    put_v(ee, WHEEL + 0x190, x.chassis_velocity_local);
+    put_i(ee, WHEEL + 0x1a0, x.ground_known);
+    put_v(ee, WHEEL + 0x1b0, x.ground_velocity);
+    put_v(ee, WHEEL + 0x1c0, x.ground_point_velocity);
+    put_f(ee, WHEEL + 0x60, w.steer_torque);
+    put_v(ee, WHEEL + 0x8c0, x.steer_axis);
     put_v(ee, WHEEL + 0x200, w.ground_normal);
     put_f(ee, WHEEL + 0x214, w.probe_length);
 
@@ -136,6 +169,57 @@ fn poke(ee: &mut Ee, s: &State) {
     put_v(ee, BODY + 0x190, b.orientation);
     put_v(ee, BODY + 0x1a0, b.cofg);
     put_v(ee, BODY + 0x1b0, b.moment);
+    put_v(ee, BODY + 0x80, b.velocity);
+    put_v(ee, BODY + 0x1d0, b.spin);
+
+    let put_node = |ee: &mut Ee, n: &Node| {
+        for (k, r) in n.rows.iter().enumerate() {
+            put_v(ee, NODE + 0x70 + 0x10 * k as u32, *r);
+        }
+        put_v(ee, NODE + 0xa0, n.origin);
+        ee.set_u32(NODE + 0xf0, 0); // no parent
+        ee.set_u32(NODE + 0x100, 1); // up to date
+    };
+    match &s.ground_under {
+        Ground::Still => {}
+        Ground::Object { cofg, cofg_world, on } => {
+            ee.set_u32(WHEEL + 0x1f0, OBJECT);
+            if s.also_mover {
+                ee.set_u32(WHEEL + 0x1f4, MOVER);
+            }
+            put_v(ee, OBJECT + 0x80, *cofg);
+            put_v(ee, OBJECT + 0x90, *cofg_world);
+            match on {
+                Holder::Body(o) => {
+                    ee.set_u32(OBJECT + 0xe4, OTHER_BODY);
+                    // A chassis and transform there too, which the body hides.
+                    ee.set_u32(OBJECT + 0xe0, CHASSIS);
+                    ee.set_u32(OBJECT + 0xe8, NODE);
+                    put_v(ee, OTHER_BODY + 0x70, o.position);
+                    put_v(ee, OTHER_BODY + 0x80, o.velocity);
+                    put_v(ee, OTHER_BODY + 0x190, o.orientation);
+                    put_v(ee, OTHER_BODY + 0x1d0, o.spin);
+                }
+                Holder::Chassis(c) => {
+                    ee.set_u32(OBJECT + 0xe0, CHASSIS);
+                    ee.set_u32(OBJECT + 0xe8, NODE);
+                    put_v(ee, CHASSIS + 0x180, c.cofg);
+                    put_v(ee, CHASSIS + 0x250, c.velocity);
+                    put_v(ee, CHASSIS + 0x280, c.spin);
+                    put_node(ee, &c.node);
+                }
+            }
+        }
+        Ground::Mover(m) => {
+            ee.set_u32(WHEEL + 0x1f4, MOVER);
+            ee.set_u32(MOVER + 4, MOVER_VTABLE);
+            ee.set_u32(MOVER + 0x244, NODE);
+            put_v(ee, MOVER + 0x180, m.origin);
+            put_node(ee, &m.node);
+            ee.set_u32(MOVER_VTABLE + 0xc0, MOVER_VELOCITY);
+            ee.set_u32(MOVER_VTABLE + 0xc4, MOVER_SPIN);
+        }
+    }
 }
 
 fn snap(ee: &Ee) -> Vec<u32> {
@@ -172,14 +256,30 @@ fn texts(calls: &[Call]) -> Vec<String> {
 type Log = Rc<RefCell<Vec<Call>>>;
 type Answers = Rc<RefCell<VecDeque<(Vf, Vf)>>>;
 
+/// Run the original's own `addr` from inside its hook, on the arguments the hook was handed, and leave
+/// the machine as a return from it would: the interpreter files the hook back under `pc`, and the
+/// nested call must not forget what the outer one wrote.
+fn run_inside(ee: &mut Ee, addr: u32) {
+    let (args, floats) = ([ee.r(4), ee.r(5), ee.r(6), ee.r(7)], [ee.f(12)]);
+    let (ra, sp, stack, written) = (ee.r(31), ee.r(29), ee.stack, ee.written.clone());
+    ee.stack = (sp as u32 - 0x40) & !0xf;
+    ee.call(addr, &args, &floats, 100_000);
+    ee.written.extend(written);
+    (ee.stack, ee.pc) = (stack, addr);
+    ee.set(29, sp);
+    ee.set(31, ra);
+}
+
 /// The ground query's answer to `query`.
 fn answer(s: &State, i: usize, query: Vf) -> (Vf, Vf) {
     let (p, n) = s.ground[i];
     (if s.echo { query } else { p }, n)
 }
 
-/// The three callees hooked: each checks what it is handed, logs it and writes the next answer.
-fn hook(ee: &mut Ee, log: &Log, ground: &Answers, echo: bool, velocity: &Answers) {
+/// The callees hooked: the ground query checks what it is handed, logs it and writes the next answer;
+/// the contact velocity and the hinge check and log theirs and run as they are; the mover's two
+/// virtuals answer.
+fn hook(ee: &mut Ee, log: &Log, ground: &Answers, echo: bool, mover: (Vf, Vf), hinge_f12: f32) {
     let (l, g) = (log.clone(), ground.clone());
     ee.hooks.insert(
         GROUND_QUERY,
@@ -195,26 +295,36 @@ fn hook(ee: &mut Ee, log: &Log, ground: &Answers, echo: bool, velocity: &Answers
             put_v(ee, n, normal);
         }),
     );
-    let (l, v) = (log.clone(), velocity.clone());
+    let l = log.clone();
     ee.hooks.insert(
         CONTACT_VELOCITY,
         Box::new(move |ee| {
             assert_eq!(ee.r(4) as u32, WHEEL, "the contact velocity's wheel");
             l.borrow_mut().push(Call::ContactVelocity);
-            let (c, b) = v.borrow_mut().pop_front().expect("more contact velocities than answers");
-            put_v(ee, WHEEL + 0x170, c);
-            put_v(ee, WHEEL + 0x180, b);
+            run_inside(ee, CONTACT_VELOCITY);
         }),
     );
+    for (at, v) in [(MOVER_VELOCITY, mover.0), (MOVER_SPIN, mover.1)] {
+        ee.hooks.insert(
+            at,
+            Box::new(move |ee| {
+                assert_eq!(ee.r(5) as u32, MOVER, "the mover's virtual's object");
+                let out = ee.r(4);
+                put_v(ee, out as u32, v);
+                ee.set(2, out);
+            }),
+        );
+    }
     let l = log.clone();
     ee.hooks.insert(
         HINGE_FORCE,
         Box::new(move |ee| {
             assert_eq!(ee.r(4) as u32, WHEEL, "the hinge's wheel");
-            assert_eq!(ee.f(12).to_bits(), 1.0f32.to_bits(), "the hinge's f12");
+            assert_eq!(ee.f(12).to_bits(), hinge_f12.to_bits(), "the hinge's f12");
             let (f, p) = (get_v(ee, ee.r(5) as u32), get_v(ee, ee.r(6) as u32));
             assert_eq!(ee.r(6) as u32, WHEEL + 0x140, "the hinge's point");
             l.borrow_mut().push(Call::HingeForce(f, p));
+            run_inside(ee, HINGE_FORCE);
         }),
     );
 }
@@ -299,14 +409,7 @@ impl Gen {
         if self.one_in(10) {
             w.max_compression = F::ZERO;
         }
-        let b = Body {
-            position: self.vec(-50.0, 50.0),
-            force: self.vec(-500.0, 500.0),
-            moment: self.vec(-500.0, 500.0),
-            correction: self.vec(-5.0, 5.0),
-            orientation: self.quaternion(),
-            cofg: self.vec(-0.5, 0.5),
-        };
+        let b = self.body();
         // The contact sits around the wheel: somewhere about the body's centre, a few feet down.
         let around = |g: &mut Gen| {
             Vf::new(
@@ -337,9 +440,72 @@ impl Gen {
             };
             w.contact_point = Vf::new(w.contact_point.x(), (F(point.y()) + d).0, w.contact_point.z(), w.contact_point.w());
         }
-        let velocity = (0..2).map(|_| (self.vec(-20.0, 20.0), self.vec(-20.0, 20.0))).collect();
-        let x = More { record: self.bits() as u8, kept: if self.one_in(10) { Vf::ZERO } else { self.vec(-3.0, 3.0) } };
-        State { w, x, b, dt: self.f(0.001, 0.04), ground, echo: self.one_in(8), velocity }
+        let x = More {
+            record: self.bits() as u8,
+            kept: if self.one_in(10) { Vf::ZERO } else { self.vec(-3.0, 3.0) },
+            chassis_velocity_local: self.vec(-5.0, 5.0),
+            ground_known: if self.one_in(5) { 1 } else { 0 },
+            ground_velocity: self.vec(-5.0, 5.0),
+            ground_point_velocity: self.vec(-5.0, 5.0),
+            steer_axis: self.normal(),
+        };
+        w.steer_torque = self.f(-50.0, 50.0);
+        let ground_under = self.ground_under(&w);
+        State { w, x, b, dt: self.f(0.001, 0.04), ground, echo: self.one_in(8), ground_under, also_mover: self.b() }
+    }
+
+    fn node(&mut self) -> Node {
+        let q = Body { orientation: self.quaternion(), ..Body::default() };
+        let r = game_sim::quad::Body { orientation: q.orientation, ..Default::default() };
+        let row = |v: Vf, g: &mut Gen| {
+            let v = r.to_world(v);
+            Vf::new(v.x(), v.y(), v.z(), g.f(-1.0, 1.0).0)
+        };
+        Node {
+            rows: [row(Vf::new(1.0, 0.0, 0.0, 0.0), self), row(Vf::new(0.0, 1.0, 0.0, 0.0), self), row(Vf::new(0.0, 0.0, 1.0, 0.0), self)],
+            origin: self.vec(-50.0, 50.0),
+        }
+    }
+
+    /// A body of the quad's own kind: anywhere, moving and turning.
+    fn body(&mut self) -> Body {
+        Body {
+            position: self.vec(-50.0, 50.0),
+            velocity: self.vec(-30.0, 30.0),
+            force: self.vec(-500.0, 500.0),
+            moment: self.vec(-500.0, 500.0),
+            correction: self.vec(-5.0, 5.0),
+            orientation: self.quaternion(),
+            cofg: self.vec(-0.5, 0.5),
+            spin: self.vec(-5.0, 5.0),
+        }
+    }
+
+    fn ground_under(&mut self, _w: &Wheel) -> Ground {
+        match self.bits() % 4 {
+            0 => Ground::Still,
+            1 => Ground::Object {
+                cofg: self.vec(-2.0, 2.0),
+                cofg_world: self.vec(-2.0, 2.0),
+                on: Holder::Body(self.body()),
+            },
+            2 => Ground::Object {
+                cofg: self.vec(-2.0, 2.0),
+                cofg_world: self.vec(-2.0, 2.0),
+                on: Holder::Chassis(Chassis {
+                    cofg: self.vec(-1.0, 1.0),
+                    velocity: self.vec(-30.0, 30.0),
+                    spin: self.vec(-3.0, 3.0),
+                    node: self.node(),
+                }),
+            },
+            _ => Ground::Mover(Mover {
+                node: self.node(),
+                origin: self.vec(-5.0, 5.0),
+                velocity: self.vec(-30.0, 30.0),
+                spin: self.vec(-3.0, 3.0),
+            }),
+        }
     }
 }
 
@@ -354,15 +520,29 @@ fn each_path_seen(tally: &BTreeMap<&'static str, u32>, paths: &[&str], at_least:
     }
 }
 
+/// The mover's two virtuals' answers in `s` (the velocity and the spin), if there is a mover.
+fn mover_answers(s: &State) -> (Vf, Vf) {
+    match s.ground_under {
+        Ground::Mover(m) => (m.velocity, m.spin),
+        _ => (Vf::ZERO, Vf::ZERO),
+    }
+}
+
 /// Run `addr` on the state, then the port, and compare the regions and the calls.
 fn compare(ee: &mut Ee, k: usize, s: &State, addr: u32, port: impl Fn(&mut State) -> Vec<Call>) {
+    compare_with(ee, k, s, addr, &[u64::from(WHEEL)], &[s.dt.0], port);
+}
+
+fn compare_with(ee: &mut Ee, k: usize, s: &State, addr: u32, ints: &[u64], floats: &[f32],
+    port: impl Fn(&mut State) -> Vec<Call>) {
     let log: Log = Rc::default();
     let ground: Answers = Rc::new(RefCell::new(s.ground.iter().copied().collect()));
-    let velocity: Answers = Rc::new(RefCell::new(s.velocity.iter().copied().collect()));
-    hook(ee, &log, &ground, s.echo, &velocity);
+    // The tire forces hand the hinge 1.0; called straight, it gets what it is handed.
+    let hinge_f12 = if addr == HINGE_FORCE { floats[0] } else { 1.0 };
+    hook(ee, &log, &ground, s.echo, mover_answers(s), hinge_f12);
     reset(ee);
     poke(ee, s);
-    ee.call(addr, &[u64::from(WHEEL)], &[s.dt.0], 50_000);
+    ee.call(addr, ints, floats, 100_000);
     only_touched_the_regions(ee).unwrap_or_else(|e| panic!("state {k}: {e}\n{s:#?}"));
     let was = snap(ee);
     let mut t = s.clone();
@@ -454,14 +634,11 @@ fn the_atv_wheel_tire_forces_are_the_originals() {
     for k in 0..10_000 {
         let mut s = g.state();
         let port = |t: &mut State| {
-            let mut v = t.velocity.clone().into_iter();
-            let mut x = t.x;
-            let calls = atv_wheel::tire_forces(&mut t.w, &mut t.b, t.dt, &mut |c, w, _| {
-                if c == Call::ContactVelocity {
-                    (w.contact_velocity, w.chassis_velocity) = v.next().unwrap();
-                }
+            let (mut x, mut under) = (t.x, t.ground_under);
+            let calls = atv_wheel::tire_forces(&mut t.w, &mut t.b, t.dt, &mut |c, w, b, x| {
+                atv_wheel::run(c, w, b, x, &mut under);
             }, &mut x);
-            t.x = x;
+            (t.x, t.ground_under) = (x, under);
             calls
         };
         // The ties, found by a first run of the port: the contact exactly on the probe's end (no
@@ -526,4 +703,51 @@ fn the_atv_wheel_tire_forces_are_the_originals() {
         ],
         100,
     );
+}
+
+#[test]
+fn the_atv_wheel_contact_velocity_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let mut g = Gen(0x0074_c001);
+    let mut t = BTreeMap::new();
+    for k in 0..10_000 {
+        let s = g.state();
+        tally(&mut t, match (s.x.ground_known, &s.ground_under) {
+            (1, _) => "known",
+            (_, Ground::Still) => "still",
+            (_, Ground::Object { on: Holder::Body(_), .. }) => "a body",
+            (_, Ground::Object { on: Holder::Chassis(_), .. }) => "a chassis",
+            (_, Ground::Mover(_)) => "a mover",
+        });
+        if s.x.ground_known == 0 && s.also_mover && matches!(s.ground_under, Ground::Object { .. }) {
+            tally(&mut t, "an object over a mover");
+        }
+        // Called straight, the original goes through its own hook, which logs it.
+        compare(&mut ee, k, &s, CONTACT_VELOCITY, |t| {
+            atv_wheel::contact_velocity(&mut t.w, &mut t.x, &t.b, &mut t.ground_under);
+            vec![Call::ContactVelocity]
+        });
+    }
+    each_path_seen(&t, &["known", "still", "a body", "a chassis", "a mover", "an object over a mover"], 500);
+}
+
+#[test]
+fn the_atv_wheel_hinge_force_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let mut g = Gen(0x0074_c002);
+    let mut t = BTreeMap::new();
+    for k in 0..10_000 {
+        let s = g.state();
+        let force = g.vec(-3000.0, 3000.0);
+        let scale = if g.one_in(4) { g.f(-2.0, 2.0) } else { F::ONE };
+        tally(&mut t, if scale == F::ONE { "scale one" } else { "other scale" });
+        put_v(&mut ee, ARGS, force);
+        // Called straight, the original goes through its own hook, which logs it.
+        compare_with(&mut ee, k, &s, HINGE_FORCE, &[WHEEL, ARGS, WHEEL + 0x140].map(u64::from), &[scale.0], |t| {
+            let point = t.w.load_point;
+            atv_wheel::hinge_force(&mut t.w, &t.x, &mut t.b, force, point, scale);
+            vec![Call::HingeForce(force, point)]
+        });
+    }
+    each_path_seen(&t, &["scale one", "other scale"], 1000);
 }
