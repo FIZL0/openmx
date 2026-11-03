@@ -268,3 +268,65 @@ passed. Run directly, none of them skip.
 - No capture of the original in play. The image's spheres were moved by hand, by the original and the
   port alike.
 
+
+# MD90: atv_world's refile goes the tree's way
+
+2026-11-03. Task: `./kit plan MD90`.
+
+`atv_world::World::refile` (behind `move_vehicle` and `place_vehicle`) used to clear the sphere from
+every slot of the tree and insert it again. It now does what MD89's `Tree` does on the gather's own tree
+(`broad_phase::Quadtree`):
+
+- `World::filed` keeps the key each vehicle's sphere is filed under (the record's `+0xc`). `add_vehicles`
+  puts the static key there (`0x15` at the origin), as the image has it.
+- The new key is `moving_key` (the pick). If it is the same as the filed one, the sphere stays where it
+  is. The original's move only widens node heights, and the gather's tree keeps no heights.
+- Otherwise `atv_world::take_out`, which is `Tree::take_out`/`unfile` on `broad_phase`'s nodes, takes it
+  out from under the old key. It clears the first chunk that holds it and drops that chunk if it is left
+  empty. A node left with no entries and no children is unhooked from its parent. The sphere then goes
+  in under the new key with `broad_build::insert`, which already was `Tree::put` without heights.
+
+**Why match, not route.** The gather reads `broad_phase::Quadtree`, the static tree MD76a1 proved node for
+node. `atv_spatial::Tree` is a different model with heights, a chunk pool, a query pool and counts. Putting
+the world's tree there would mean a second copy kept in step, or a new gather, for no difference the
+gather can see. An unhooked node stays in `Quadtree::nodes`, empty, where no walk from the root reaches
+it.
+
+## Proof
+
+`tests/atv_gather.rs`, on all three R-quad images:
+
+- `a_vehicles_sphere_is_placed_and_gathered_as_the_originals` now also compares the trees' shape (`same_shape`):
+  - every node reached from the root, by path, must be in both trees;
+  - every node with no scene node in it must hold as many chunks in both.
+
+  This is checked at the start (after the player's move from `0x15` to its `+0xd90` key), on every 50th
+  re-filing, and after the walks. A subtree that holds only scene nodes (class 7, which the port does not
+  file) is left out. There are two of them in MC02 at the start, and fewer once a sphere has been filed
+  into one. Result: each image has 4,271 nodes, the same ones. Its 3,948 re-filings and slots are as
+  before.
+- `a_sphere_moved_under_its_own_key_keeps_its_slot` (no image needed): two spheres share a node, the
+  first leaves it, and the second moves under the same key. It must keep slot 1 and not drop into the
+  hole at slot 0.
+
+Mutations, one at a time:
+
+| Mutation | Result |
+|---|---|
+| an emptied node kept | red (nodes only the port has, call 542) |
+| an emptied chunk kept | red (chunk count, call 1) |
+| a same-key move taken out and put in | red (the new test; green on the walks) |
+| unfile does not stop after the chunk that held it | green |
+
+The last mutation survives because a sphere is never in two chunks of one node.
+
+`./kit check -- -p game-sim --test atv_quad --test atv_gather --test atv_search --test atv_spatial`: 70
+passed. Run directly, none of them skip. This slot had no MD37a images or rider file. The images and
+captures were copied from s3, and `mrider.phy` was read off the iso's `MXVSATV.PSR`, into `context/`.
+
+## Not verified / not 1:1
+
+- Node heights are not kept, so the move's widening has no counterpart. Nothing the gather does reads them.
+- The node and entry counts (`+0x880`, `+0x888`) and the chunk pool's free chain are not kept either.
+- A key that names a corner with a missing node on the way is skipped, as in the original. The walks
+  never take that path.

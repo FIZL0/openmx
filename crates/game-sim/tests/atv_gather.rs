@@ -677,6 +677,67 @@ fn port_holders(w: &World, node: usize, path: String, o: usize, out: &mut Vec<(S
     }
 }
 
+/// Every node the image's tree reaches from `node`, by path, with its chunks' count, or `None` where
+/// a scene node (which the port has no entry for) holds a slot of them. A node whose entries and
+/// whose children's are all scene nodes is left out, the port having no cause to make it; `scene`
+/// counts them. Whether `node` is kept.
+fn image_shape(ee: &Ee, node: u32, path: String, out: &mut BTreeMap<String, Option<usize>>, scene: &mut usize) -> bool {
+    let (mut chunk, mut chunks, mut nodes, mut entries) = (ee.u32_at(node + 4), 0, false, false);
+    while chunk != 0 {
+        for s in 0..4 {
+            let e = ee.u32_at(chunk + 4 + 4 * s);
+            nodes |= e != 0 && image_id(ee, e).is_none();
+            entries |= e != 0 && image_id(ee, e).is_some();
+        }
+        chunks += 1;
+        chunk = ee.u32_at(chunk);
+    }
+    let mut kept = !nodes;
+    let children = ee.u32_at(node);
+    if children != 0 {
+        for i in 0..4 {
+            let c = ee.u32_at(children + 4 * i);
+            if c != 0 {
+                kept |= image_shape(ee, c, format!("{path}{i}"), out, scene);
+            }
+        }
+    }
+    kept |= entries;
+    if kept {
+        out.insert(path, (!nodes).then_some(chunks));
+    } else {
+        *scene += 1;
+    }
+    kept
+}
+
+fn port_shape(w: &World, node: usize, path: String, out: &mut BTreeMap<String, usize>) {
+    let Structure::Tree(t) = &w.broad.structures[0] else { unreachable!() };
+    let n = &t.nodes[node];
+    out.insert(path.clone(), n.chunks.len());
+    for (i, c) in n.children.iter().enumerate() {
+        if let Some(c) = c {
+            port_shape(w, *c, format!("{path}{i}"), out);
+        }
+    }
+}
+
+/// The nodes of the image's tree and the port's are the same ones, and each node free of scene
+/// nodes has as many chunks: a chunk or node the original freed is gone from the port too.
+fn same_shape(ee: &Ee, root: u32, w: &World, port_root: usize, what: &str) -> usize {
+    let (mut want, mut got, mut scene) = (BTreeMap::new(), BTreeMap::new(), 0);
+    image_shape(ee, root, String::new(), &mut want, &mut scene);
+    port_shape(w, port_root, String::new(), &mut got);
+    let (a, b): (Vec<_>, Vec<_>) = (want.keys().collect(), got.keys().collect());
+    let gone: Vec<_> = b.iter().filter(|p| !want.contains_key(**p)).collect();
+    let missing: Vec<_> = a.iter().filter(|p| !got.contains_key(**p)).collect();
+    assert!(gone.is_empty() && missing.is_empty(), "{what}: nodes only the port has {gone:?}, only the original {missing:?}");
+    let counted: Vec<_> = want.iter().filter_map(|(p, c)| c.map(|c| (p, c, got[p]))).filter(|(_, c, g)| c != g).collect();
+    assert!(counted.is_empty(), "{what}: (node, the original's chunks, the port's) {counted:?}");
+    assert!(scene <= 2, "{what}: MC02's nodes holding only scene nodes: {scene}");
+    want.len()
+}
+
 /// MD83b — each vehicle's sphere put where the vehicle goes, again and again, by the original's
 /// place (`atv_vehicle_sphere_place`, which gathers through `atv_vehicle_sphere_gather`) and by
 /// [`World::place_vehicle`]: after every call the sphere's centre, reach, place and sweep top, the
@@ -740,6 +801,7 @@ fn vehicle_walks(mut d: Data, name: &str) {
         port_holders(&d.world, port_root, String::new(), s.object, &mut b);
         assert_eq!(b, a, "{name}: vehicle {v:#x}'s sphere's slots at the start");
     }
+    same_shape(&d.ee, root, &d.world, port_root, &format!("{name}: at the start"));
     // The player's quad's rider, which the test turns off and on again.
     let (rider, riding) = (d.ee.u32_at(QUAD + vehicle::RIDER), d.ee.u32_at(QUAD + vehicle::RIDING));
     assert!(rider != 0 && riding != 0, "the player's quad has its rider");
@@ -811,6 +873,9 @@ fn vehicle_walks(mut d: Data, name: &str) {
                 image_holders(ee, root, String::new(), entry, &mut a);
                 port_holders(w, port_root, String::new(), s.object, &mut b);
                 assert_eq!(b, a, "{what}: the slots it is filed in");
+                if refiled % 50 == 0 {
+                    same_shape(ee, root, w, port_root, &what);
+                }
                 refiled += 1;
                 // A box past the tree's edge is filed nowhere.
                 unfiled += usize::from(a.is_empty());
@@ -838,5 +903,37 @@ fn vehicle_walks(mut d: Data, name: &str) {
         })
         .count();
     assert_eq!(differ, 0, "{name}: nodes differ after the walks");
+    let nodes = same_shape(&d.ee, root, &d.world, port_root, &format!("{name}: after the walks"));
+    println!("{name}: {nodes} nodes, the same ones");
     assert!(refiled > 200 && gathers > 200 && found > 100 && offs > 100, "{name}: the walks filed, gathered and found enough");
+}
+
+/// MD90 — a sphere filed again under the key it is filed under stays in its slot (quadtree vt
+/// `+0x28`, MD89's `Tree::moved`), even when a slot ahead of it in its node has been left empty: it
+/// is not taken out and put in the first empty one. Two spheres share a node; the first leaves it,
+/// then the second moves within it.
+#[test]
+fn a_sphere_moved_under_its_own_key_keeps_its_slot() {
+    let field = ([F(-0.0); 2], [F(5760.0); 2]);
+    let mut w = World::new(Collidable::default(), &[], &[], Vec::new(), atv_world::plant_cell(field), field);
+    let v = w.add_vehicles(2, field.1);
+    let reach = F(atv_world::VEHICLE_REACH);
+    let (a, b) = (v.start, v.start + 1);
+    let Structure::Tree(t) = &w.broad.structures[0] else { unreachable!() };
+    let root = t.root.unwrap();
+    let held = |w: &World, o: usize| {
+        let mut out = Vec::new();
+        port_holders(w, root, String::new(), o, &mut out);
+        out
+    };
+    w.move_vehicle(a, [F(2000.0), F(100.0), F(3000.0)], reach);
+    w.move_vehicle(b, [F(2000.0), F(100.0), F(3000.0)], reach);
+    let (at_a, at_b) = (held(&w, a), held(&w, b));
+    assert!(!at_b.is_empty() && at_a.iter().zip(&at_b).all(|((p, k), (q, l))| p == q && k < l), "both in the same nodes, the first ahead: {at_a:?} {at_b:?}");
+    w.move_vehicle(a, [F(500.0), F(100.0), F(500.0)], reach);
+    assert!(held(&w, a).iter().all(|h| !at_a.contains(h)), "the first left");
+    let key = w.filed[&b];
+    w.move_vehicle(b, [F(2000.5), F(100.25), F(3000.5)], reach);
+    assert_eq!(w.filed[&b], key, "the same key");
+    assert_eq!(held(&w, b), at_b, "the second kept its slots");
 }

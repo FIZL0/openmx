@@ -26,7 +26,9 @@
 //!   `Type=StartZone` (MC02's `Zone_Platform_Machine.col`) is filed a second time, the same box;
 //! - **the vehicles' spheres** ([`World::add_vehicles`], [`World::move_vehicle`]): one per vehicle
 //!   (category 0, the vehicle's own gather probe), filed at the origin and moved by
-//!   `atv_spatial_move` with a box [`VEHICLE_HALF`] each way, which leaves its old slot empty;
+//!   `atv_spatial_move` with a box [`VEHICLE_HALF`] each way: kept in place under the same key,
+//!   else taken out ([`take_out`]: its old slot left empty, a chunk or node it empties freed) and
+//!   put in again (MD90);
 //! - **the moving list** ([`World::put_moving`]): one block of [`MOVING_SLOTS`] slots the space's
 //!   moving table walks after the tree — the quad's frame mesh, its riding probe and its sweep, the
 //!   riders' parts ([`rider_sphere`], [`rider_sweep`]) and two category-0 sweeps ([`owned_sweep`]).
@@ -95,6 +97,8 @@ pub struct World {
     /// Where the scene's meshes are, and the plants' groups.
     pub meshes: std::ops::Range<usize>,
     pub groups: std::ops::Range<usize>,
+    /// The key each vehicle's sphere is filed under in the tree (its record's `+0xc`; 0 in none).
+    pub filed: std::collections::BTreeMap<usize, u32>,
 }
 
 /// The ground-plane box the tree is laid over: from minus the border to the terrain's samples times
@@ -185,7 +189,7 @@ impl World {
             places,
             ..Broad::default()
         };
-        World { broad, objects, meshes: 1..first_group, groups: first_group..first_group + groups.len() }
+        World { broad, objects, meshes: 1..first_group, groups: first_group..first_group + groups.len(), filed: Default::default() }
     }
 
     /// Put the probe at `centre` (`w` 1).
@@ -239,16 +243,18 @@ impl World {
             let origin = [F::ZERO, F::ZERO, F::ZERO, F::ONE];
             let o = self.add(vehicle_sphere(), origin);
             self.broad.places[o].space = Some(0);
-            self.file(o, origin, vehicle_half(), hi);
+            let tree = self.tree();
+            let key = broad_build::key(tree, hi, origin, vehicle_half());
+            broad_build::insert(tree, o, key);
+            self.filed.insert(o, key);
         }
         first..self.objects.len()
     }
 
-    /// A vehicle's sphere `o` moved to `centre` with `reach` (`atv_spatial_move`): taken out of every
-    /// slot it was in, which stay empty, and filed again with the box `centre` ± [`VEHICLE_HALF`].
-    /// The vehicle files it only when it is put ([`World::place_vehicle`]) after a gather that found
-    /// it 10 ft from the last one; between, its centre moves on with the vehicle and the tree is left
-    /// alone.
+    /// A vehicle's sphere `o` moved to `centre` with `reach` (`atv_spatial_move`): filed again with
+    /// the box `centre` ± [`VEHICLE_HALF`] ([`World::refile`]). The vehicle files it only when it is
+    /// put ([`World::place_vehicle`]) after a gather that found it 10 ft from the last one; between,
+    /// its centre moves on with the vehicle and the tree is left alone.
     pub fn move_vehicle(&mut self, o: usize, centre: [F; 3], reach: F) {
         let centre = [centre[0], centre[1], centre[2], F::ONE];
         self.broad.places[o].centre = centre;
@@ -256,20 +262,24 @@ impl World {
         self.refile(o, centre);
     }
 
-    /// `o` taken out of every tree slot it was in, which stay empty, and filed again with the box
-    /// `centre` ± [`VEHICLE_HALF`] under its [`moving_key`]: nowhere unless the box is wholly in the
-    /// tree. Its centre and reach are left as they are.
+    /// `o` filed again with the box `centre` ± [`VEHICLE_HALF`], as `atv_spatial_move` does it in
+    /// the cell's tree (MD89's [`atv_spatial::Tree`] pick, move, out and in): the new key is its
+    /// [`moving_key`] (0, nowhere, unless the box is wholly in the tree). The same key as the one it
+    /// is filed under: moved in place, which only widens the nodes' heights, and this tree keeps
+    /// none. Another: taken out from under the old key ([`take_out`]), which frees a chunk or a node
+    /// it leaves empty, and put in under the new one. Its centre and reach are left as they are.
+    ///
+    /// [`atv_spatial::Tree`]: crate::atv_spatial::Tree
     fn refile(&mut self, o: usize, centre: [F; 4]) {
+        let old = self.filed.get(&o).copied().unwrap_or(0);
         let tree = self.tree();
-        for node in &mut tree.nodes {
-            for slot in node.chunks.iter_mut().flatten() {
-                if *slot == Some(o) {
-                    *slot = None;
-                }
-            }
-        }
         let key = moving_key(tree, centre, vehicle_half());
+        if key == old {
+            return;
+        }
+        take_out(tree, o, old);
         broad_build::insert(tree, o, key);
+        self.filed.insert(o, key);
     }
 
     /// **`atv_vehicle_sphere_place`**: the vehicle's sphere put at `at`. It keeps `at` (all four
@@ -319,6 +329,58 @@ impl World {
         let blocks = l.blocks.get_or_insert_with(|| vec![vec![None; MOVING_SLOTS as usize]]);
         blocks[0][slot] = Some(o);
         l.last = l.last.max(slot as i32 + 1);
+    }
+}
+
+/// **The tree's out** (quadtree vt `+0x2c`, [`atv_spatial::Tree::take_out`]): `o` taken out from
+/// under `key` (nothing for 0). Under each corner the key names, if the nodes down to the key's
+/// level are all there, `o` is cleared from the first of the last one's chunks that holds it (every
+/// slot of that chunk holding it), and the chunk dropped if that left it empty; a node left with no
+/// entries and no children is unhooked from its parent. An unhooked node stays in `nodes`, empty and
+/// out of every walk from the root.
+///
+/// [`atv_spatial::Tree::take_out`]: crate::atv_spatial::Tree::take_out
+pub fn take_out(tree: &mut crate::broad_phase::Quadtree, o: usize, key: u32) {
+    let Some(root) = tree.root else { return };
+    if key == 0 {
+        return;
+    }
+    let level = key & 0xf;
+    let size = 0x4000 >> level;
+    let (x, z) = (((key & 0xfff0_0000) >> 17) as i32, ((key & 0xfff00) >> 5) as i32);
+    for corner in 0..4 {
+        if key & (0x10 << corner) == 0 {
+            continue;
+        }
+        let x = x.wrapping_add(if corner & 2 != 0 { size } else { 0 });
+        let z = z.wrapping_add(if corner & 1 != 0 { size } else { 0 });
+        let (mut node, mut parent, mut i, mut bit) = (Some(root), root, 0, 0x4000);
+        for _ in 0..=level {
+            let Some(n) = node else { break };
+            i = 2 * usize::from(x & bit != 0) + usize::from(z & bit != 0);
+            parent = n;
+            node = tree.nodes[n].children[i];
+            bit >>= 1;
+        }
+        let Some(n) = node else { continue };
+        let leaf = &mut tree.nodes[n];
+        let mut k = 0;
+        while k < leaf.chunks.len() {
+            let chunk = &mut leaf.chunks[k];
+            let found = chunk.contains(&Some(o));
+            chunk.iter_mut().filter(|s| **s == Some(o)).for_each(|s| *s = None);
+            if chunk.iter().all(Option::is_none) {
+                leaf.chunks.remove(k);
+            } else {
+                k += 1;
+            }
+            if found {
+                break;
+            }
+        }
+        if leaf.chunks.is_empty() && leaf.children.iter().all(Option::is_none) {
+            tree.nodes[parent].children[i] = None;
+        }
     }
 }
 
