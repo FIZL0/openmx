@@ -69,8 +69,7 @@ const ARM_SWING: f32 = 1.25;
 pub const SEAT: [&str; 4] = ["Dummy_Foot_L_pos", "Dummy_Foot_R_pos", "Dummy_Hand_L_pos", "Dummy_Hand_R_pos"];
 
 /// Where a pilot's root sits from the middle of the four [`SEAT`] nodes, in the machine's space: the
-/// plane's measured seat (`crate::biplane::PILOT_SEAT`, 0, 3.5, -3) less the middle of its four, the
-/// same to the thousandth as the Kiowa's ([`crate::kiowa::PILOT_SEAT`] to its four).
+/// plane's measured seat (`crate::biplane::PILOT_SEAT`, 0, 3.5, -3) less the middle of its four.
 pub const SEAT_FROM_LIMBS: V3 = v3(0.061, -0.168, -1.176);
 
 /// One tire as the pose reads it.

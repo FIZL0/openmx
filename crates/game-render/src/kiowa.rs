@@ -70,18 +70,22 @@ pub const PRESETS: &str = "helocpresets.ini";
 /// The archive the helicopter's models and textures are in.
 pub const ARCHIVE: &str = "machine.res";
 
-/// The four nodes the helicopter holds a pilot's limbs to: the two feet, then the two hands, as
-/// the plane's ([`crate::biplane::SEAT`]).
+/// The four nodes the model names for a pilot's limbs: the two feet, then the two hands, as the
+/// plane's ([`crate::biplane::SEAT`]). The original does not hold its pilot to them (P216b1): the
+/// helicopter's pilot request never fills its limb targets, which keep the origin point the
+/// constructor left, and the body plays its clips unheld from [`PILOT_SEAT`]. They sit about
+/// the centreline, behind where that puts the body's hands and feet.
 pub const SEAT: [&str; 4] = ["Dummy_Foot_L_pos", "Dummy_Foot_R_pos", "Dummy_Hand_L_pos", "Dummy_Hand_R_pos"];
 
-/// Where the pilot's root sits in the helicopter's own space (P216b), as
-/// [`crate::biplane::PILOT_SEAT`] does in the plane's, the body turned with it. The original loads
-/// the plane's two clips for the helicopter's pilot too. Not read off the original: the root is put
-/// where it stands to the middle of the four [`SEAT`] nodes as the plane's measured root stands to
-/// the middle of the plane's. The feet nodes are at one height in both models, 2.9 ft. `kiowa.phy`'s
-/// `[Animation]` `PelvisBoxPosition` (1.25, -2, 3, with no size) is not the seat: the plane's is
-/// (0, 0, -0.5), a box about the pelvis and not the plane's seat.
-pub const PILOT_SEAT: V3 = v3(-0.107, 3.522, 0.937);
+/// Where the pilot's root sits in the helicopter's own space, the body turned with the helicopter
+/// and not against it (P216b1). The original's body puts its root at the request's base (the rigid
+/// body's centre of mass) plus the request's offset (`kiowa.phy`'s `[Animation]`
+/// `PelvisBoxPosition`, 1.25, -2, 3) turned by the body's rotation; the model's origin is the centre
+/// of mass less the turned `CofG` (0, 5.5, 0), so in the model's space the root is `CofG +
+/// PelvisBoxPosition`, 1.25 ft off the centreline. The same sum gives the plane's measured
+/// [`crate::biplane::PILOT_SEAT`]. On S148's and C14's helicopter states the pilot's root node is at
+/// exactly this point with the helicopter's rotation (`tests/kiowa_pilot_seat.rs`).
+pub const PILOT_SEAT: V3 = v3(1.25, 3.5, 3.0);
 
 /// What the rotors are showing: the angle they are turned by and which of the parts are up.
 #[derive(Clone, Copy, Debug, PartialEq)]

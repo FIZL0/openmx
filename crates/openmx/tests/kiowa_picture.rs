@@ -8,7 +8,7 @@ use std::path::Path;
 use std::process::Command;
 
 /// The root of the pilot's node tree in the Kiowa's space (`game_render::kiowa::PILOT_SEAT`).
-const SEAT: [f32; 3] = [-0.107, 3.522, 0.937];
+const SEAT: [f32; 3] = [1.25, 3.5, 3.0];
 
 /// Cross held for `frames` ticks, switching into the helicopter at tick 10.
 fn tape(frames: usize) -> String {
@@ -99,7 +99,7 @@ fn the_kiowa_slides_between_ticks_with_its_pilot_in_the_seat() {
             }
             let off = [middle[0] - SEAT[0], middle[1] - SEAT[1], middle[2] - SEAT[2]];
             let far = (off[0] * off[0] + off[1] * off[1] + off[2] * off[2]).sqrt();
-            assert!(middle[0].abs() < 0.5 && far < 3.0, "{renderer}: the pilot's body is {far:.2} ft from the seat: {line}");
+            assert!((middle[0] - SEAT[0]).abs() < 0.5 && far < 3.0, "{renderer}: the pilot's body is {far:.2} ft from the seat: {line}");
         }
     }
 }

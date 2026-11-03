@@ -1544,23 +1544,21 @@ fn pilots(seats: &[Seat], rigs: &mut [Rig], plane_drawn: &[Biplane], before: &[O
 
 /// Every seat's helicopter [`Pilot`] (P216b), as [`pilots`] the plane's: the rider's own body posed
 /// by the plane's clips (which the original loads for the helicopter's pilot too), its root at
-/// [`game_render::kiowa::PILOT_SEAT`] and its limbs held to the model's seat nodes
-/// ([`game_render::kiowa::SEAT`]). `None` for a seat not flying one.
-fn heli_pilots(seats: &[Seat], rigs: &mut [Rig], kiowa_drawn: &[Kiowa], assets: &Assets, before: &[Option<(M4, Rotor)>], cut: &[bool], blend: &pace::Blend) -> Vec<Option<Pilot>> {
+/// [`game_render::kiowa::PILOT_SEAT`]. Unlike the plane's, its limbs are not held: the original's
+/// helicopter hands its pilot no limb targets, and the clips are played as they are (P216b1).
+/// `None` for a seat not flying one.
+fn heli_pilots(seats: &[Seat], rigs: &mut [Rig], before: &[Option<(M4, Rotor)>], cut: &[bool], blend: &pace::Blend) -> Vec<Option<Pilot>> {
     seats
         .iter()
         .zip(rigs.iter_mut())
         .enumerate()
         .map(|(p, (seat, rig))| {
             let heli = seat.garage.heli_up()?;
-            let drawn = kiowa_drawn.get(heli.livery).or(kiowa_drawn.first())?;
             let was = before.get(p).copied().flatten().filter(|_| !cut.get(p).copied().unwrap_or(true));
             let (at, _) = heli_drawn(heli, was, blend)?;
             let pelvis = game_render::kiowa::PILOT_SEAT;
-            let loaded = &assets.models.get(&drawn.model)?.model;
-            let anchors = game_render::kiowa::SEAT.map(|n| game_render::kiowa::node_at(loaded, n).map(|v| v.sub(pelvis)));
             let body = rig.body.as_mut()?;
-            let palette = biplane::pilot_palette(body, &anchors, rig.pilot_lean.weights())?;
+            let palette = biplane::pilot_palette(body, &[None; 4], rig.pilot_lean.weights())?;
             let mut root = M4::IDENTITY;
             root.0[3] = [pelvis.x, pelvis.y, pelvis.z, 1.0];
             Some(Pilot { plane: at, at: root.mul(at), palette })
@@ -8044,7 +8042,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 rig.preload_meter.step(preload_sense(seat));
                 match seat.garage.heli_up() {
                     // The helicopter's pilot leans with its stick (P216b).
-                    Some(heli) => rig.pilot_lean.step_heli(dt, heli, seat.said.respawned),
+                    Some(heli) => rig.pilot_lean.step_heli(dt, heli),
                     None => rig.pilot_lean.step(dt, seat.garage.plane_flown(), seat.said.respawned),
                 }
             }
@@ -9031,7 +9029,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         // Each flying player's pilot (V39), posed once for every view and both renderers.
         let pilots = pilots(&world.seats, &mut rigs, &plane_drawn, &before_planes, &cut, &blend);
         // And each flying the helicopter's (P216b).
-        let heli_pilots = heli_pilots(&world.seats, &mut rigs, &kiowa_drawn, &assets, &before_helis, &cut, &blend);
+        let heli_pilots = heli_pilots(&world.seats, &mut rigs, &before_helis, &cut, &blend);
         let car_drivers = car_drivers(&world.seats, &mut rigs, &assets, &before_cars, &cut, &blend);
         if gpu_on {
             // The overlay first: each view's HUD, and the pause over the whole frame.
