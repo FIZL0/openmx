@@ -1,9 +1,10 @@
 //! MD82a: which camera file each MX vs. ATV Unleashed machine follows with, and what SLUS-21104 reads
-//! out of it, against the follow camera's own records in seven RAM images.
+//! out of it, against the follow camera's own records in RAM images.
 //!
 //! The images are MD39a's five car states (`context/mxvatv-ps2/md39a/<car>.ee.bin`), MD37a's ATV at
-//! a spawn and in the air (`md37a/atv-r-spawn`, `atv-s-air`) and the bike in free ride
-//! (`state04.ee.bin`). In each, the follow camera is the object whose vtable word ([`FOLLOW_VTABLE`]) sits
+//! a spawn and in the air (`md37a/atv-r-spawn`, `atv-s-air`), the bike in free ride
+//! (`state04.ee.bin`) and (MD82c) MD80a's four flier states, each model of the biplane and the Kiowa
+//! at the spawn (`md80a/<flight>.ee.bin`, `research/md80a/ram.py`). In each, the follow camera is the object whose vtable word ([`FOLLOW_VTABLE`]) sits
 //! at +4; it holds the file it loaded at +0x128, the preset count at +0x118, the current preset at
 //! +0x110 and the records, 0xa0 bytes each, behind the pointer at +0x124. The files are
 //! `Cam\CameraPresets.res`'s, extracted off the disc into `context/mxvatv-ps2/md82/cam/`
@@ -28,7 +29,7 @@ const FOLLOW_VTABLE: u32 = 0x003c_c6f0;
 const RECORD: usize = 0xa0;
 
 /// Each RAM image and the machine in it.
-const IMAGES: [(&str, ModMachine); 8] = [
+const IMAGES: [(&str, ModMachine); 12] = [
     ("md39a/buggy", ModMachine::Buggy),
     ("md39a/baja", ModMachine::Baja),
     ("md39a/sandrail", ModMachine::Sandrail),
@@ -37,6 +38,10 @@ const IMAGES: [(&str, ModMachine); 8] = [
     ("md37a/atv-r-spawn", ModMachine::Atv),
     ("md37a/atv-s-air", ModMachine::Atv),
     ("state04", ModMachine::Motocross),
+    ("md80a/biplane", ModMachine::Biplane),
+    ("md80a/biplane3", ModMachine::Biplane),
+    ("md80a/kiowa", ModMachine::Helicopter),
+    ("md80a/kiowa3", ModMachine::Helicopter),
 ];
 
 fn context() -> PathBuf {
