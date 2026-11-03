@@ -1,1 +1,11 @@
 <!-- What's new since the last release, for players, in plain English: one "- " line per change. tools/release.sh puts this in the release and empties it. -->
+- **Fixed: the game crashed when a second player joined** (seen on the Steam Deck). Player 2 can now plug in a pad mid-ride, press Cross or Start, and go straight to split screen; a join that can't be set up now says why in the pause menu instead of closing the game
+- A new **Tricks page in the pause menu** lists every trick your ride has, with its buttons and points, and your own rider performs the one you pick live
+- The Kiowa helicopter crashes as the original's does, its pilot sits and leans as in the original, and a rotor strike throws its blades, which are drawn and land on the ground
+- Driven cars lay tire tracks, keep the camera you start them on, appear on the Camera page and have the original's Lookback Cam
+- Online, every car works for both players (buggy, baja and monster truck, both players driving at once), each followed by its own camera
+- The rider no longer leans twice as far as they should in hard turns
+- A braked bike next to the train is no longer shoved by it
+- A crashed bike wakes and knocks the company truck as in the original, and planes flown together in split screen or online knock props
+- Bailing out of a trick into a wreck starts the fall from the trick's pose, as the original does
+- Browser: the game runs on WebGL2 in Firefox, picking the disc no longer waits on Firefox's storage prompt, mod tracks show their pictures, and the mod store no longer hides a mod for an hour after one failed download
