@@ -30,8 +30,11 @@
 //! not ported here: each is a [`Call`] handed to a [`Moto`], in the original's order.
 //!
 //! The quad's [`put_back`] and [`net_unpack`] (MD65): the bike's put-back on four wheels, and a remote
-//! quad set from its network snapshot. The wreck body and the PC slots not yet paired are filed
-//! (MD65a, MD65b).
+//! quad set from its network snapshot. The PC slots not yet paired are filed (MD65b).
+//!
+//! The quad's wreck body (MD65a): the init's last block, [`build_wreck_body`], makes a ray probe off
+//! `WreckATVm.col` that the quad's other collidables ignore, and the wreck entry and the unwreck
+//! [`swap_rays`] the quad's collision between it and the riding rays.
 //!
 //! And the quad's tire reader, [`tire_phy`] (MD64b): `[Front Tire]` and `[Rear Tire]` into the four
 //! wheels ([`TireSetup`]), with the original's left-to-right copies and their quirks.
@@ -601,6 +604,19 @@ pub enum Call {
     SpinIntegrate(usize, F),
     /// What the gravity [`Steps`] runs calls in turn (MD75b): the collision record's virtual, handed 1.
     GravityRecord,
+    /// The wreck body's ([`build_wreck_body`], [`swap_rays`], MD65a): a ray-probe part made; its flag
+    /// byte set from a flags word; it hung in the quad's scene tree; the wreck rays loaded from
+    /// [`WRECK_FILE`] on the quad's scene node, then readied; a part shown in or hidden from the scene,
+    /// taken off the collision world it is in, or put in the quad's world.
+    PartMade(Part),
+    PartFlags(Part, u32),
+    PartHung(Part),
+    PartLoad(Part),
+    PartReady(Part),
+    PartHide(Part),
+    PartShow(Part),
+    PartOffWorld(Part),
+    PartInWorld(Part),
 }
 
 /// Whoever runs the calls the quad's listeners make. A `Vec<Call>` just lists them.
@@ -1988,5 +2004,191 @@ impl<R: Moto, G> Steps<R, G> {
         (qw.max_steer_angle, qw.steer_command, qw.spring) = (w.max_steer_angle, w.steer_angle, w.spring_rate);
         qw.contact_vel = x.chassis_velocity_local;
         (body.position, body.force, body.moment, body.correction) = (wb.position, wb.force, wb.moment, wb.correction);
+    }
+}
+
+// --- MD65a: the wreck body ----------------------------------------------------------------------------
+
+/// The file the quad's wreck rays load from, on its scene node.
+pub const WRECK_FILE: &str = "WreckATVm.col";
+/// The category the wreck rays are in, and the one the trigger probe's category list holds.
+pub const PHYSICS_BODY: &str = "PHYSICSBODY";
+pub const TRIGGER: &str = "TRIGGER";
+
+/// The quad's collidables the wreck body is about: the three the vehicle's own init made (the riding
+/// rays, a ray probe off the bike's `m.col`; the frame mesh; the sweep) and the two the quad's init
+/// adds (a ray probe with no file in the trigger category, and the wreck rays).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Part {
+    Riding,
+    Frame,
+    Sweep,
+    Trigger,
+    Wreck,
+}
+
+/// A collidable's list as the original keeps it: a mode word and its entries, a 0 entry an empty slot.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct List {
+    pub mode: u32,
+    pub list: Vec<u32>,
+}
+
+impl List {
+    /// Another collidable added to an object list: nothing for none (0); nothing if it is listed;
+    /// else into the first empty slot, else on the end.
+    pub fn add_object(&mut self, handle: u32) {
+        if handle != 0 {
+            self.add(handle);
+        }
+    }
+
+    /// A category word added to a category list: as [`List::add_object`], but a 0 is added too (it
+    /// fills no slot, so it is listed once, on the end, if no slot is empty).
+    pub fn add_category(&mut self, word: u32) {
+        self.add(word);
+    }
+
+    fn add(&mut self, x: u32) {
+        if self.list.contains(&x) {
+            return;
+        }
+        match self.list.iter_mut().find(|e| **e == 0) {
+            Some(slot) => *slot = x,
+            None => self.list.push(x),
+        }
+    }
+}
+
+/// One of the quad's collidables: its handle (what the others' lists name it by, never 0) and its
+/// object and category lists.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Col {
+    pub handle: u32,
+    pub objects: List,
+    pub categories: List,
+}
+
+impl Col {
+    /// A part as its constructor leaves it: every list empty, and in mode 1 (ignore what is listed).
+    pub fn made(handle: u32) -> Col {
+        let empty = List { mode: 1, list: Vec::new() };
+        Col { handle, objects: empty.clone(), categories: empty }
+    }
+}
+
+/// The quad's collidables as the wreck body's block reads and leaves them. The field map is
+/// research/oracle.txt's `# MD65a`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WreckBody {
+    pub riding: Col,
+    pub frame: Col,
+    pub sweep: Col,
+    pub trigger: Col,
+    pub wreck: Col,
+    /// The wreck rays' own category word (looked up as [`PHYSICS_BODY`]), and whether they were given
+    /// the quad as their owner and the quad's collision record as theirs: the wreck rays' hits go into
+    /// the record the riding rays' do.
+    pub wreck_category: u32,
+    pub wreck_owned: bool,
+    pub wreck_record: bool,
+    /// Whether the trigger probe was given the quad as its owner.
+    pub trigger_owned: bool,
+    /// The riding rays' handle, kept for the swap back ([`swap_rays`]).
+    pub riding_kept: u32,
+}
+
+/// The flags words the two parts are made with (both leave the flag byte's bit 1 set and the rest
+/// as they were).
+const TRIGGER_FLAGS: u32 = 2;
+const WRECK_FLAGS: u32 = 3;
+
+/// **The quad's init, its last collision block**: the two ray-probe parts made, and every collidable
+/// of the quad told to ignore them, and them the others.
+///
+/// The trigger probe (`trigger`, the handle its allocation gave) is made, flagged, given the quad and
+/// hung in the scene tree; the riding rays are kept. The wreck rays (`wreck`) are made, flagged,
+/// loaded from [`WRECK_FILE`] on the scene node and readied, put in [`PHYSICS_BODY`]'s category,
+/// given the quad and its collision record, and hung. Then the riding rays and the sweep ignore
+/// both; the wreck rays (object mode 1) ignore the trigger probe, the riding rays, the frame and the
+/// sweep; the trigger probe (object mode 1) the riding rays, the frame, the sweep and the wreck rays,
+/// and (category mode 1) [`TRIGGER`]'s category and the quad's own word `actor`. The frame mesh's
+/// list is left alone. `category` answers a name with its category word, in the order asked.
+#[allow(clippy::too_many_arguments)] // the original's inputs, each one a word it reads
+pub fn build_wreck_body(
+    w: &mut WreckBody,
+    trigger: u32,
+    wreck: u32,
+    actor: u32,
+    mut category: impl FnMut(&str) -> u32,
+    q: &mut Quad,
+    body: &mut Body,
+    m: &mut impl Moto,
+) {
+    m.call(Call::PartMade(Part::Trigger), q, body);
+    w.trigger = Col::made(trigger);
+    m.call(Call::PartFlags(Part::Trigger, TRIGGER_FLAGS), q, body);
+    w.trigger_owned = true;
+    m.call(Call::PartHung(Part::Trigger), q, body);
+    w.riding_kept = w.riding.handle;
+    m.call(Call::PartMade(Part::Wreck), q, body);
+    w.wreck = Col::made(wreck);
+    m.call(Call::PartFlags(Part::Wreck, WRECK_FLAGS), q, body);
+    m.call(Call::PartLoad(Part::Wreck), q, body);
+    m.call(Call::PartReady(Part::Wreck), q, body);
+    w.wreck_category = category(PHYSICS_BODY);
+    w.wreck_owned = true;
+    w.wreck_record = true;
+    m.call(Call::PartHung(Part::Wreck), q, body);
+
+    let (t, k) = (w.trigger.handle, w.wreck.handle);
+    let (r, f, s) = (w.riding.handle, w.frame.handle, w.sweep.handle);
+    w.riding.objects.add_object(t);
+    w.riding.objects.add_object(k);
+    w.sweep.objects.add_object(t);
+    w.sweep.objects.add_object(k);
+    w.wreck.objects.mode = 1;
+    for h in [t, r, f, s] {
+        w.wreck.objects.add_object(h);
+    }
+    w.trigger.objects.mode = 1;
+    for h in [r, f, s, k] {
+        w.trigger.objects.add_object(h);
+    }
+    w.trigger.categories.mode = 1;
+    let trigger_word = category(TRIGGER);
+    w.trigger.categories.add_category(trigger_word);
+    w.trigger.categories.add_category(actor);
+}
+
+/// Which rays the quad's collision runs on, as the swap leaves it: the handle in the quad's two
+/// active-rays words and in its collision record's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Rays {
+    pub active: u32,
+    pub active_too: u32,
+    pub record: u32,
+    /// The two candidates: the wreck rays and the riding rays kept ([`WreckBody::riding_kept`]).
+    pub wreck: u32,
+    pub riding: u32,
+}
+
+/// **The swap between the riding and the wreck rays**: the wreck entry's (`wrecked`) and the unwreck's
+/// (not), the bike's two shared virtuals, on the quad's two parts.
+///
+/// The one swapped to goes into the quad's two active-rays words and the collision record's; the
+/// other is hidden from the scene and taken off its collision world. The one swapped to is then
+/// shown and put in the quad's world, unless it is in a world already (`in_world`).
+pub fn swap_rays(r: &mut Rays, wrecked: bool, in_world: bool, q: &mut Quad, body: &mut Body, m: &mut impl Moto) {
+    let (to, to_part, from_part) =
+        if wrecked { (r.wreck, Part::Wreck, Part::Riding) } else { (r.riding, Part::Riding, Part::Wreck) };
+    r.active = to;
+    r.active_too = to;
+    r.record = to;
+    m.call(Call::PartHide(from_part), q, body);
+    m.call(Call::PartOffWorld(from_part), q, body);
+    if !in_world {
+        m.call(Call::PartShow(to_part), q, body);
+        m.call(Call::PartInWorld(to_part), q, body);
     }
 }

@@ -6555,6 +6555,34 @@ atv_actor_moved             atv 0x004f7590 = an actor's listeners told it moved 
 atv_node_orientation        atv 0x00194650 = a scene node turned to a quaternion (a0 node, a1 0, a2 the quaternion)
 atv_node_local              atv 0x00195320 = a quadword in a scene node's frame (a0 out, a1 node, a2 in; updates the node's world frame first, 0x00193b30)
 atv_vehicle_net_post        atv 0x004a8c40 = the vehicle's end of the net unpack (a0 vehicle, f12 dt; vt +0xe4, 0x00196e80 on the node, vt +0x124)
+# MD65a — the quad's wreck body (quad::build_wreck_body and quad::WreckBody, quad::swap_rays and quad::Rays;
+# tests/atv_quad.rs the_quads_wreck_body_is_built_as_the_original_builds_it, the_spawned_quads_wreck_body_
+# is_the_ports, the_quads_ray_swaps_are_the_originals). Journal: research/journal/2026-11-03-md65a-atv-wreck-body.
+# atv_quad_init's last block, 0x004ba03c..0x004ba230 (pc_quad_init's from the second operator_new(400)):
+# +0x1430 = new part (400, line 981; ctor 0x001bb0b0 -> 0x00113ee0 leaves the list modes +0xe0/+0xec/+0xf8
+# 1, flag byte +0x126 bits 1|2), flags(+0x1430, 2), part +0x88 = quad, scene add(quad + 0xc, part + 0x24,
+# 0); +0x1438 = +0xcc (the riding rays, kept); +0x1434 = new part (line 1000), flags(+0x1434, 3), load(part,
+# node +0xe4, "WreckATVm.col", 0), part vt +0xc0, +0x94 = category("PHYSICSBODY") (0x1000 in the image), +0x88
+# = quad, +0x90 = +0xc8 (the record), scene add. Lists (object list +0xe0 mode, +0xe4 entries, +0xe8 count;
+# category list +0xf8/+0xfc/+0x100; add = return if listed, else first 0 slot, else grow; the object add
+# skips 0, the category add does not): +0xcc and +0xd4 add +0x1430, +0x1434; +0x1434 mode 1, adds +0x1430
+# +0xcc +0xd0 +0xd4; +0x1430 mode 1, adds +0xcc +0xd0 +0xd4 +0x1434; category mode 1, adds
+# category("TRIGGER") (0x8000) and quad +0x30c (4 at spawn). +0xd0 (the frame mesh, vtable 0x003b6d00) is
+# not added to. +0xcc is a ray probe (vtable 0x003b6c20, the parts' class), +0xd4 the sweep (0x003b6b40).
+# Flags (a1 bits 8/2/4 -> +0x126 bits 3/1/2): 2 and 3 both leave bit 1 only of those three.
+# The swaps, bike vt +0x48c (from atv_bike_wreck_entry) and +0x490 (from the unwreck), on the quad too:
+# +0xcc = +0xd8 = record(+0xc8) +0x200 = the one swapped to (+0x1434 wreck, +0x1438 riding); the other's
+# scene child (+0x24, vtable 0x003b6c3c) hidden (vt +0x18: +0x21 bits 0 and 1 cleared), atv_detach(other +
+# 0x18); then, if the one swapped to has +0x20 (its world) 0: shown (vt +0x20) and atv_part_in_world(it,
+# quad +0xb4, quad +0xc0, 1). Spawn: riding active, riding +0x20 set, wreck +0x20 0.
+atv_part_flags              atv 0x00114270 = a collidable's flag byte from a flags word (a1 bits 8, 2, 4 -> +0x126 bits 3, 1, 2; reached through 0x001bb1c0)
+atv_part_load               atv 0x001bb770 = a ray-probe part loaded from a .col file on a scene node (a0 part, a1 node, a2 file name, a3 0)
+atv_category_of             atv 0x00113d00 = a category name's word, 1 << its place in the table (a0 the table *0x0038d400, a1 name; appends a new name)
+atv_ignore_object           atv 0x00115600 = a collidable added to another's object list (skips 0; listed, first 0 slot, else grown)
+atv_ignore_category         atv 0x001158a0 = a category word added to a collidable's category list (as the object add, no 0 guard)
+atv_part_in_world           atv 0x001143e0 = a collidable put in a collision world (a0 part, a1 world, a2 class, a3 1)
+atv_swap_to_wreck_rays      atv 0x004e2e10 = the bike's (and quad's) vt +0x48c: the collision onto the wreck rays +0x1434
+atv_swap_to_riding_rays     atv 0x004e2eb0 = the bike's (and quad's) vt +0x490: the collision back onto the riding rays +0x1438
 # MD37b (wheels) — atv_wheel_suspension and atv_wheel_tire_forces ported (crates/game-sim/src/
 # atv_wheel.rs; tests/atv_wheel.rs runs both off MD37a's atv-r-spawn.ee.bin). Journal:
 # research/journal/2026-10-29-md37b-atv-step. The wheel against MX Unleashed's: steered +0x2c, balancing

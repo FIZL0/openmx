@@ -4441,3 +4441,462 @@ fn the_quads_ground_head_runs_every_ported_step() {
     let picks = [INPUT_LIMITER, AUTO_SHIFT, CLUTCH, HEAD_TAIL];
     each_unhooked(0x0075_b00a, 5_000, true, &picks, |_, _| {}, |r| vec![limiter_path(r)], &LIMITER_PATHS, 15);
 }
+
+// --- MD65a: the wreck body -----------------------------------------------------------------------------
+
+/// The quad init's last collision block (from the trigger probe's allocation to the call after the
+/// trigger probe's category mode, where the harness stops it), the bike's two ray swaps, and what
+/// they call. The list adds and list modes are not hooked: they run, and their lists are compared.
+const WRECK_BLOCK_FROM: u32 = 0x004b_a03c;
+const WRECK_BLOCK_TO: u32 = 0x004b_a230;
+const SWAP_TO_WRECK: u32 = 0x004e_2e10;
+const SWAP_TO_RIDING: u32 = 0x004e_2eb0;
+const ALLOC: u32 = 0x001b_7620;
+const REALLOC: u32 = 0x001b_7470;
+const PART_CTOR: u32 = 0x001b_b0b0;
+const PART_FLAGS: u32 = 0x001b_b1c0;
+const SCENE_ADD: u32 = 0x0012_84b0;
+const PART_LOAD: u32 = 0x001b_b770;
+const PART_READY: u32 = 0x001b_cfd0;
+const CATEGORY_OF: u32 = 0x0011_3d00;
+const SCENE_HIDE: u32 = 0x0012_8040;
+const SCENE_SHOW: u32 = 0x0012_8080;
+const IN_WORLD: u32 = 0x0011_43e0;
+/// The ray-probe part's vtable and its scene child's, and where the category table's pointer is.
+const PART_VTABLE: u32 = 0x003b_6c20;
+const PART_CHILD_VTABLE: u32 = 0x003b_6c3c;
+const CATEGORY_TABLE: u32 = 0x0038_d400;
+/// The block's three strings in the image.
+const WRECK_FILE_AT: u32 = 0x0052_7441;
+const PHYSICS_BODY_AT: u32 = 0x0052_744f;
+const TRIGGER_AT: u32 = 0x0052_745b;
+
+/// Where the harness lays the five collidables (the two the block allocates first), their starting
+/// lists, the lists the adds grow into, and the swap's record.
+const PART_AT: [u32; 5] = [0x01d0_0000, 0x01d0_0400, 0x01d0_0800, 0x01d0_0c00, 0x01d0_1000];
+const LIST_AT: u32 = 0x01d0_2000;
+const GROWN_AT: u32 = 0x01d1_0000;
+const SWAP_RECORD: u32 = 0x01d0_3000;
+const WRECK_REGIONS: [(u32, u32); 6] = [
+    (OBJ, 0x1800),
+    (PART_AT[0], 0x1400),
+    (LIST_AT, 0x1000),
+    (GROWN_AT, 0x2_0000),
+    (SWAP_RECORD + 0x200, 4),
+    // the flags call's one global (the scene's dirty byte)
+    (0x003d_d300, 1),
+];
+
+/// The quad's offsets for each [`quad::Part`], and the part at an address.
+const PARTS: [quad::Part; 5] = [quad::Part::Trigger, quad::Part::Wreck, quad::Part::Riding, quad::Part::Frame, quad::Part::Sweep];
+fn part_at(a: u32) -> quad::Part {
+    let i = PART_AT.iter().position(|&p| p == a).unwrap_or_else(|| panic!("a part call handed {a:#x}"));
+    PARTS[i]
+}
+
+fn c_string(ee: &Ee, a: u32) -> String {
+    (a..).map(|x| ee.u8_at(x)).take_while(|&b| b != 0).map(char::from).collect()
+}
+
+fn read_list(ee: &Ee, col: u32, at: u32) -> quad::List {
+    let (ptr, n) = (ee.u32_at(col + at + 4), ee.u32_at(col + at + 8));
+    quad::List { mode: ee.u32_at(col + at), list: (0..n).map(|i| ee.u32_at(ptr + 4 * i)).collect() }
+}
+const OBJECTS: u32 = 0xe0;
+const CATEGORIES: u32 = 0xf8;
+
+fn read_col(ee: &Ee, col: u32) -> quad::Col {
+    quad::Col { handle: col, objects: read_list(ee, col, OBJECTS), categories: read_list(ee, col, CATEGORIES) }
+}
+
+fn only_touched(ee: &Ee, regions: &[(u32, u32)]) -> Result<(), String> {
+    let frame = (ee.stack - 0x2000, ee.stack + 0x40);
+    for (a, b) in ee.written_ranges() {
+        let inside = regions.iter().any(|&(base, len)| a >= base && b <= base + len) || (a >= frame.0 && b <= frame.1);
+        if !inside {
+            return Err(format!("the original wrote {a:#010x}..{b:#010x}, outside the quad's collidables"));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct WreckCase {
+    w: quad::WreckBody,
+    actor: u32,
+    /// The category words the name table answers PHYSICSBODY and TRIGGER with.
+    physics_body: u32,
+    trigger: u32,
+}
+
+impl Gen {
+    fn handle(&mut self) -> u32 {
+        match self.bits() % 8 {
+            0 | 1 => 0,
+            2 => PART_AT[(self.bits() % 5) as usize],
+            _ => 0x0100_0000 | (self.bits() & 0x00ff_fff0),
+        }
+    }
+    fn list(&mut self, handles: bool) -> quad::List {
+        let n = match self.bits() % 4 {
+            0 => 0,
+            _ => self.bits() % 6,
+        };
+        let list = (0..n).map(|_| if handles { self.handle() } else { self.category() }).collect();
+        quad::List { mode: self.bits() % 2, list }
+    }
+    fn category(&mut self) -> u32 {
+        if self.one_in(4) { 0 } else { 1 << (self.bits() % 32) }
+    }
+    fn wreck_case(&mut self) -> WreckCase {
+        let col = |g: &mut Gen, i: usize| quad::Col { handle: PART_AT[i], objects: g.list(true), categories: g.list(false) };
+        let w = quad::WreckBody {
+            riding: col(self, 2),
+            frame: col(self, 3),
+            sweep: col(self, 4),
+            riding_kept: self.bits(),
+            ..Default::default()
+        };
+        let trigger = self.category();
+        let actor = match self.bits() % 4 {
+            0 => 0,
+            1 => trigger,
+            _ => self.category(),
+        };
+        WreckCase { w, actor, physics_body: self.category(), trigger }
+    }
+}
+
+fn lay_list(ee: &mut Ee, col: u32, at: u32, l: &quad::List, buffer: u32) {
+    ee.set_u32(col + at, l.mode);
+    ee.set_u32(col + at + 4, if l.list.is_empty() { 0 } else { buffer });
+    ee.set_u32(col + at + 8, l.list.len() as u32);
+    for (i, &e) in l.list.iter().enumerate() {
+        ee.set_u32(buffer + 4 * i as u32, e);
+    }
+}
+
+fn poke_wreck_block(ee: &mut Ee, c: &WreckCase) {
+    // The grown lists are read only up to their counts, so their room is not cleared.
+    for (base, len) in WRECK_REGIONS.into_iter().take(3) {
+        for o in (0..len).step_by(4) {
+            ee.set_u32(base + o, 0);
+        }
+    }
+    for (k, col) in [&c.w.riding, &c.w.frame, &c.w.sweep].into_iter().enumerate() {
+        let at = PART_AT[2 + k];
+        lay_list(ee, at, OBJECTS, &col.objects, LIST_AT + 0x200 * k as u32);
+        lay_list(ee, at, CATEGORIES, &col.categories, LIST_AT + 0x200 * k as u32 + 0x100);
+    }
+    ee.set_u32(OBJ + 0xcc, PART_AT[2]);
+    ee.set_u32(OBJ + 0xd0, PART_AT[3]);
+    ee.set_u32(OBJ + 0xd4, PART_AT[4]);
+    ee.set_u32(OBJ + 0xc8, RECORD);
+    ee.set_u32(OBJ + 0xe4, NODE);
+    ee.set_u32(OBJ + 0x30c, c.actor);
+    ee.set_u32(OBJ + 0x1438, c.w.riding_kept);
+}
+
+#[test]
+fn the_quads_wreck_body_is_built_as_the_original_builds_it() {
+    let Some(mut ee) = image() else { return };
+    assert_eq!(c_string(&ee, WRECK_FILE_AT), quad::WRECK_FILE);
+    assert_eq!(c_string(&ee, PHYSICS_BODY_AT), quad::PHYSICS_BODY);
+    assert_eq!(c_string(&ee, TRIGGER_AT), quad::TRIGGER);
+    assert_eq!(ee.u32_at(PART_VTABLE + 0xc0), PART_READY, "the part's ready slot");
+
+    let log: Log<Call> = Rc::default();
+    let names: Log<String> = Rc::default();
+    let made = Rc::new(Cell::new(0usize));
+    let grown = Rc::new(Cell::new(GROWN_AT));
+    let answers = Rc::new(Cell::new((0u32, 0u32)));
+    let table = ee.u32_at(CATEGORY_TABLE);
+    {
+        let made = made.clone();
+        ee.hooks.insert(ALLOC, Box::new(move |ee| {
+            assert_eq!(ee.r(4), 400, "the part's size");
+            let i = made.get();
+            made.set(i + 1);
+            ee.set(2, u64::from(PART_AT[i]));
+        }));
+    }
+    {
+        let l = log.clone();
+        ee.hooks.insert(PART_CTOR, Box::new(move |ee| {
+            let a = ee.r(4) as u32;
+            assert_eq!(ee.r(5), 1, "the part constructor's second argument");
+            ee.set_u32(a + 0xc, PART_VTABLE);
+            ee.set_u32(a + 0x28, PART_CHILD_VTABLE);
+            // What the constructor leaves of the lists: each one's mode 1.
+            for m in [OBJECTS, 0xec, CATEGORIES] {
+                ee.set_u32(a + m, 1);
+            }
+            l.borrow_mut().push(Call::PartMade(part_at(a)));
+            ee.set(2, u64::from(a));
+        }));
+    }
+    let l = log.clone();
+    ee.hooks.insert(PART_FLAGS, Box::new(move |ee| l.borrow_mut().push(Call::PartFlags(part_at(ee.r(4) as u32), ee.r(5) as u32))));
+    let l = log.clone();
+    ee.hooks.insert(SCENE_ADD, Box::new(move |ee| {
+        assert_eq!((ee.r(4) as u32, ee.r(6)), (OBJ + 0xc, 0), "the scene add's tree and third argument");
+        l.borrow_mut().push(Call::PartHung(part_at(ee.r(5) as u32 - 0x24)));
+    }));
+    let l = log.clone();
+    ee.hooks.insert(PART_LOAD, Box::new(move |ee| {
+        assert_eq!((ee.r(5) as u32, ee.r(7)), (NODE, 0), "the load's node and fourth argument");
+        assert_eq!(c_string(ee, ee.r(6) as u32), quad::WRECK_FILE);
+        l.borrow_mut().push(Call::PartLoad(part_at(ee.r(4) as u32)));
+    }));
+    let l = log.clone();
+    ee.hooks.insert(PART_READY, Box::new(move |ee| l.borrow_mut().push(Call::PartReady(part_at(ee.r(4) as u32)))));
+    {
+        let (names, answers) = (names.clone(), answers.clone());
+        ee.hooks.insert(CATEGORY_OF, Box::new(move |ee| {
+            assert_eq!(ee.r(4) as u32, table, "the category table");
+            let name = c_string(ee, ee.r(5) as u32);
+            let (pb, tr) = answers.get();
+            ee.set(2, u64::from(if name == quad::PHYSICS_BODY { pb } else { tr }));
+            names.borrow_mut().push(name);
+        }));
+    }
+    {
+        let grown = grown.clone();
+        ee.hooks.insert(REALLOC, Box::new(move |ee| {
+            let (old, size) = (ee.r(4) as u32, ee.r(5) as u32);
+            let to = grown.get();
+            assert!(to + size <= GROWN_AT + 0x2_0000, "the grown lists' room");
+            grown.set(to + (size + 15) / 16 * 16);
+            if old != 0 {
+                for o in (0..size - 4).step_by(4) {
+                    let v = ee.u32_at(old + o);
+                    ee.set_u32(to + o, v);
+                }
+            }
+            ee.set(2, u64::from(to));
+        }));
+    }
+    ee.hooks.insert(WRECK_BLOCK_TO, Box::new(|ee| ee.set(31, DONE as i32 as i64 as u64)));
+
+    let mut g = Gen(0x0065_a001);
+    let mut t = BTreeMap::new();
+    for k in 0..10_000 {
+        let c = g.wreck_case();
+        let wl = &c.w;
+        for (name, l) in [("riding", &wl.riding.objects), ("sweep", &wl.sweep.objects)] {
+            for h in [PART_AT[0], PART_AT[1]] {
+                tally(&mut t, if l.list.contains(&h) {
+                    if name == "riding" { "riding lists a part already" } else { "sweep lists a part already" }
+                } else if l.list.contains(&0) {
+                    "an empty slot"
+                } else {
+                    "a list grown"
+                });
+            }
+        }
+        tally(&mut t, if c.actor == 0 { "no actor word" } else if c.actor == c.trigger { "actor word is the trigger's" } else { "an actor word" });
+        tally(&mut t, if c.trigger == 0 { "trigger word 0" } else { "trigger word" });
+
+        log.borrow_mut().clear();
+        names.borrow_mut().clear();
+        made.set(0);
+        grown.set(GROWN_AT);
+        answers.set((c.physics_body, c.trigger));
+        poke_wreck_block(&mut ee, &c);
+        ee.set(16, u64::from(OBJ));
+        ee.call(WRECK_BLOCK_FROM, &[], &[], 100_000);
+        only_touched(&ee, &WRECK_REGIONS).unwrap_or_else(|e| panic!("case {k}: {e}\n{c:#?}"));
+        assert_eq!(made.get(), 2, "case {k}: two parts made");
+
+        let mut w = c.w.clone();
+        let mut calls = Vec::new();
+        let mut asked = Vec::new();
+        let (mut q, mut body) = (Quad::default(), Body::default());
+        quad::build_wreck_body(&mut w, PART_AT[0], PART_AT[1], c.actor, |n| {
+            asked.push(n.to_string());
+            if n == quad::PHYSICS_BODY { c.physics_body } else { c.trigger }
+        }, &mut q, &mut body, &mut calls);
+
+        let got = quad::WreckBody {
+            riding: read_col(&ee, PART_AT[2]),
+            frame: read_col(&ee, PART_AT[3]),
+            sweep: read_col(&ee, PART_AT[4]),
+            trigger: read_col(&ee, ee.u32_at(OBJ + 0x1430)),
+            wreck: read_col(&ee, ee.u32_at(OBJ + 0x1434)),
+            wreck_category: ee.u32_at(PART_AT[1] + 0x94),
+            wreck_owned: ee.u32_at(PART_AT[1] + 0x88) == OBJ,
+            wreck_record: ee.u32_at(PART_AT[1] + 0x90) == RECORD,
+            trigger_owned: ee.u32_at(PART_AT[0] + 0x88) == OBJ,
+            riding_kept: ee.u32_at(OBJ + 0x1438),
+        };
+        assert!(got == w, "case {k}: the original's collidables\n{got:?}\nthe port's\n{w:?}\n{c:#?}");
+        for (p, at) in [(PART_AT[0], [0x90, 0x94]), (PART_AT[1], [0, 0])] {
+            for o in at.into_iter().filter(|&o| o != 0) {
+                assert_eq!(ee.u32_at(p + o), 0, "case {k}: the trigger probe's +{o:#x} is left alone");
+            }
+        }
+        assert_eq!(*log.borrow(), calls, "case {k}: the calls\n{c:#?}");
+        assert_eq!(*names.borrow(), asked, "case {k}: the names asked");
+    }
+    each_path_seen(
+        &t,
+        &[
+            "riding lists a part already",
+            "sweep lists a part already",
+            "an empty slot",
+            "a list grown",
+            "no actor word",
+            "actor word is the trigger's",
+            "an actor word",
+            "trigger word 0",
+            "trigger word",
+        ],
+        100,
+    );
+}
+
+/// The spawn's own quad, which the block built: its five collidables' lists are what the port builds
+/// from the three it had before (the image's, less the two parts the block added at their ends), with
+/// the image's own category table answering the names, and it rides on the riding rays.
+#[test]
+fn the_spawned_quads_wreck_body_is_the_ports() {
+    let Some(mut ee) = image() else { return };
+    let quad_at = 0x015e_0690;
+    let at = |o: u32| ee.u32_at(quad_at + o);
+    let (trigger, wreck) = (at(0x1430), at(0x1434));
+    let less_parts = |mut c: quad::Col| {
+        c.objects.list.retain(|&h| h != trigger && h != wreck);
+        c
+    };
+    let mut w = quad::WreckBody {
+        riding: less_parts(read_col(&ee, at(0xcc))),
+        frame: read_col(&ee, at(0xd0)),
+        sweep: less_parts(read_col(&ee, at(0xd4))),
+        ..Default::default()
+    };
+    let actor = at(0x30c);
+    let table = ee.u32_at(CATEGORY_TABLE);
+    let mut words = BTreeMap::new();
+    for (name, s) in [(quad::PHYSICS_BODY, PHYSICS_BODY_AT), (quad::TRIGGER, TRIGGER_AT)] {
+        ee.call(CATEGORY_OF, &[u64::from(table), u64::from(s)], &[], 10_000);
+        only_touched(&ee, &[]).unwrap_or_else(|e| panic!("{name} is not in the image's table already: {e}"));
+        words.insert(name, ee.v0() as u32);
+    }
+    let (mut q, mut body) = (Quad::default(), Body::default());
+    quad::build_wreck_body(&mut w, trigger, wreck, actor, |n| words[n], &mut q, &mut body, &mut Vec::new());
+    let at = |o: u32| ee.u32_at(quad_at + o);
+    let got = quad::WreckBody {
+        riding: read_col(&ee, at(0xcc)),
+        frame: read_col(&ee, at(0xd0)),
+        sweep: read_col(&ee, at(0xd4)),
+        trigger: read_col(&ee, trigger),
+        wreck: read_col(&ee, wreck),
+        wreck_category: ee.u32_at(wreck + 0x94),
+        wreck_owned: ee.u32_at(wreck + 0x88) == quad_at,
+        wreck_record: ee.u32_at(wreck + 0x90) == at(0xc8),
+        trigger_owned: ee.u32_at(trigger + 0x88) == quad_at,
+        riding_kept: at(0x1438),
+    };
+    assert_eq!(got, w, "the spawned quad's collidables, then the port's");
+    assert_eq!((words[quad::PHYSICS_BODY], words[quad::TRIGGER]), (0x1000, 0x8000), "the two category words");
+    // Riding: the riding rays active, in a world; the wreck rays in none.
+    let record = at(0xc8);
+    assert_eq!([at(0xcc), at(0xd8), ee.u32_at(record + 0x200)], [at(0x1438); 3], "the active rays");
+    assert_ne!(ee.u32_at(at(0x1438) + 0x20), 0, "the riding rays' world");
+    assert_eq!(ee.u32_at(wreck + 0x20), 0, "the wreck rays' world");
+}
+
+#[derive(Clone, Debug)]
+struct SwapCase {
+    r: quad::Rays,
+    wrecked: bool,
+    /// What the wreck rays' and the riding rays' world words hold (0 none).
+    worlds: [u32; 2],
+    world: u32,
+    class: u32,
+}
+
+fn poke_swap(ee: &mut Ee, c: &SwapCase) {
+    for (base, len) in [(OBJ, 0x1800), (PART_AT[0], 0x1400)] {
+        for o in (0..len).step_by(4) {
+            ee.set_u32(base + o, 0);
+        }
+    }
+    ee.set_u32(OBJ + 0xcc, c.r.active);
+    ee.set_u32(OBJ + 0xd8, c.r.active_too);
+    ee.set_u32(OBJ + 0xc8, SWAP_RECORD);
+    ee.set_u32(SWAP_RECORD + 0x200, c.r.record);
+    ee.set_u32(OBJ + 0x1434, c.r.wreck);
+    ee.set_u32(OBJ + 0x1438, c.r.riding);
+    ee.set_u32(OBJ + 0xb4, c.world);
+    ee.set_u32(OBJ + 0xc0, c.class);
+    for (k, p) in [c.r.wreck, c.r.riding].into_iter().enumerate() {
+        ee.set_u32(p + 0x20, c.worlds[k]);
+        ee.set_u32(p + 0x28, PART_CHILD_VTABLE);
+    }
+}
+
+#[test]
+fn the_quads_ray_swaps_are_the_originals() {
+    let Some(mut ee) = image() else { return };
+    assert_eq!(ee.u32_at(QUAD_VTABLE + 0x48c), SWAP_TO_WRECK, "the quad's wreck-rays slot");
+    assert_eq!(ee.u32_at(QUAD_VTABLE + 0x490), SWAP_TO_RIDING, "the quad's riding-rays slot");
+    assert_eq!(ee.u32_at(PART_CHILD_VTABLE + 0x18), SCENE_HIDE);
+    assert_eq!(ee.u32_at(PART_CHILD_VTABLE + 0x20), SCENE_SHOW);
+    let place: Rc<Cell<(u32, u32)>> = Rc::new(Cell::new((0, 0)));
+    let log = hook_calls(
+        &mut ee,
+        &[
+            (SCENE_HIDE, |ee| Call::PartHide(part_at(ee.r(4) as u32 - 0x24))),
+            (SCENE_SHOW, |ee| Call::PartShow(part_at(ee.r(4) as u32 - 0x24))),
+            (DETACH, |ee| Call::PartOffWorld(part_at(ee.r(4) as u32 - 0x18))),
+        ],
+    );
+    {
+        let (l, place) = (log.clone(), place.clone());
+        ee.hooks.insert(IN_WORLD, Box::new(move |ee| {
+            assert_eq!((ee.r(5) as u32, ee.r(6) as u32, ee.r(7)), (place.get().0, place.get().1, 1), "the world add's world, class and last argument");
+            l.borrow_mut().push(Call::PartInWorld(part_at(ee.r(4) as u32)));
+        }));
+    }
+    let mut g = Gen(0x0065_a002);
+    let mut t = BTreeMap::new();
+    for k in 0..10_000 {
+        let world_word = |g: &mut Gen| if g.b() { 0 } else { 0x0155_0000 | (g.bits() & 0xfff0) };
+        let c = SwapCase {
+            r: quad::Rays {
+                active: g.bits(),
+                active_too: g.bits(),
+                record: g.bits(),
+                wreck: PART_AT[1],
+                riding: PART_AT[2],
+            },
+            wrecked: g.b(),
+            worlds: [world_word(&mut g), world_word(&mut g)],
+            world: g.bits(),
+            class: g.bits() % 4,
+        };
+        let to = usize::from(!c.wrecked);
+        let in_world = c.worlds[to] != 0;
+        tally(&mut t, match (c.wrecked, in_world) {
+            (true, false) => "to the wreck rays",
+            (true, true) => "to the wreck rays, in a world",
+            (false, false) => "to the riding rays",
+            (false, true) => "to the riding rays, in a world",
+        });
+        log.borrow_mut().clear();
+        place.set((c.world, c.class));
+        poke_swap(&mut ee, &c);
+        ee.call(if c.wrecked { SWAP_TO_WRECK } else { SWAP_TO_RIDING }, &[u64::from(OBJ)], &[], 10_000);
+        only_touched(&ee, &[(OBJ + 0xcc, 4), (OBJ + 0xd8, 4), (SWAP_RECORD + 0x200, 4)])
+            .unwrap_or_else(|e| panic!("case {k}: {e}\n{c:#?}"));
+        let got = quad::Rays { active: ee.u32_at(OBJ + 0xcc), active_too: ee.u32_at(OBJ + 0xd8), record: ee.u32_at(SWAP_RECORD + 0x200), ..c.r };
+        let mut r = c.r;
+        let mut calls = Vec::new();
+        let (mut q, mut body) = (Quad::default(), Body::default());
+        quad::swap_rays(&mut r, c.wrecked, in_world, &mut q, &mut body, &mut calls);
+        assert_eq!(got, r, "case {k}: the original's rays, then the port's\n{c:#?}");
+        assert_eq!(*log.borrow(), calls, "case {k}: the calls\n{c:#?}");
+    }
+    each_path_seen(&t, &["to the wreck rays", "to the wreck rays, in a world", "to the riding rays", "to the riding rays, in a world"], 1000);
+}
