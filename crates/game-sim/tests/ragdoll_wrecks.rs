@@ -2387,8 +2387,13 @@ const TWO_P_COLS: [&str; 24] = [
 
 impl TwoP {
     fn load() -> Option<TwoP> {
+        TwoP::load_from("capture/2p/2p.csv")
+    }
+
+    /// A capture made with watch/2p.toml at `rel` under the context folder.
+    fn load_from(rel: &str) -> Option<TwoP> {
         use std::io::BufRead;
-        let file = std::fs::File::open(ctx("capture/2p/2p.csv")?).expect("open the 2p capture");
+        let file = std::fs::File::open(ctx(rel)?).expect("open the 2p capture");
         let mut lines = std::io::BufReader::new(file).lines().map(|l| l.expect("read the 2p capture"));
         let head = lines.next().expect("a header");
         let header: Vec<&str> = head.split(',').collect();
@@ -3466,7 +3471,7 @@ fn whole_frame(ee: &mut Ee, cap: &TwoP, f: u32, clock: &mut f64) {
         set_bytes(ee, PAD_BUFFERS + at, &cap.pad(f - 1, k));
         ee.set_u32(PAD_BUFFERS + at + 0x58, cap.int(f - 1, PAD_STAMPS[k]));
     }
-    let stubs = [addr("interrupts_off").unwrap(), addr("interrupts_on").unwrap(), SIF_SET_DMA, SIF_DMA_STAT, DCACHE_RANGE];
+    let stubs = [addr("interrupts_off").unwrap(), addr("interrupts_on").unwrap(), SIF_SET_DMA, SIF_DMA_STAT, DCACHE_RANGE, addr("sceSifCheckStatRpc").unwrap()];
     ee.hooks.insert(stubs[0], Box::new(|ee: &mut Ee| ee.set(2, 1)));
     ee.hooks.insert(stubs[1], Box::new(|_: &mut Ee| {}));
     // libpad's command DMA to the IOP is the hardware's (the buffers it would fill are laid in
@@ -3474,6 +3479,18 @@ fn whole_frame(ee: &mut Ee, cap: &TwoP, f: u32, clock: &mut f64) {
     ee.hooks.insert(SIF_SET_DMA, Box::new(|ee: &mut Ee| ee.set(2, 1)));
     ee.hooks.insert(SIF_DMA_STAT, Box::new(|ee: &mut Ee| ee.set(2, u64::MAX)));
     ee.hooks.insert(DCACHE_RANGE, Box::new(|_: &mut Ee| {}));
+    // The IOP answers the sound driver's no-wait RPCs within a frame, and nothing here runs it: the
+    // send's wait for its other buffer's last call is told that call is back (it spins for ever on
+    // an image saved with one in flight, as fly_and_collide's are). Other waiters are left alone.
+    let (check, send) = (addr("sceSifCheckStatRpc").unwrap(), addr("iop_rpc_send").unwrap());
+    let send_end = send + IOP_RPC_SEND_LEN;
+    ee.hooks.insert(
+        check,
+        Box::new(move |ee: &mut Ee| {
+            let ra = ee.r(31) as u32;
+            if (send..send_end).contains(&ra) { ee.set(2, 0) } else { through(ee) }
+        }),
+    );
     for at in TIMER_READS {
         let word = ee.u32_at(at);
         assert!(word & 0xffe0_ffff == 0x3c00_1000 || word & 0xffe0_ffff == 0x3c00_0000, "{at:#x} is not a `lui $r, 0x1000`: a different build");
@@ -3521,6 +3538,8 @@ const DCACHE_RANGE: u32 = 0x003f_c8d8;
 /// value nothing keeps, and the listener dispatch's clock.
 const TIMER_READS: [u32; 2] = [0x0016_7dc0, 0x0013_21fc];
 const TIMER_COUNT: u32 = 0;
+/// `iop_rpc_send`'s length in bytes (86 instructions): the return addresses inside it.
+const IOP_RPC_SEND_LEN: u32 = 344;
 
 /// Rider `p`'s chassis centre (bits) and wreck reason in `ee`.
 fn rider_state(ee: &Ee, p: u32) -> ([u32; 3], u32) {
@@ -3639,13 +3658,19 @@ impl WholeRun {
 /// through the rider's update, or between its move and its wreck test, is neither). From C10's
 /// (`states/c10/`) and S155's earlier ones (`states/s155/`), up to eight frames back.
 fn image_ending_a_frame(cap: &TwoP, frame: u32, p: u32) -> Option<(String, Ee, u32)> {
+    image_ending_a_frame_in(cap, frame, p, &[("states/c10", "c10"), ("states/s155", "c10")], 8)
+}
+
+/// [`image_ending_a_frame`] over the images `<dir>/<prefix>-<tick>.ram` of `dirs`, up to `back`
+/// frames before `frame`.
+fn image_ending_a_frame_in(cap: &TwoP, frame: u32, p: u32, dirs: &[(&str, &str)], back: u32) -> Option<(String, Ee, u32)> {
     let kit = Kit::load().ok()?;
     let mut found: Vec<(u32, PathBuf)> = Vec::new();
-    for dir in ["states/c10", "states/s155"] {
+    for &(dir, prefix) in dirs {
         let local = kit.root.join("context").join(dir);
         let at = if local.exists() { local } else { kit.ctx(dir) };
-        for t in frame.saturating_sub(8)..frame - 1 {
-            let path = at.join(format!("c10-{t}.ram"));
+        for t in frame.saturating_sub(back)..frame - 1 {
+            let path = at.join(format!("{prefix}-{t}.ram"));
             if path.exists() {
                 found.push((t, path));
             }
@@ -3733,4 +3758,47 @@ fn judge_whole(cap: &TwoP, ee: &mut Ee, p: u32, image: u32, last: u32) -> WholeR
     ee.hooks.clear();
     let judged = judged.borrow().clone();
     WholeRun { image, states, attitudes, rebuilt, judged }
+}
+
+// --- S228c: fly_and_collide's wrecks through the whole frame ----------------------------------------
+
+/// fly_and_collide's wrecks (research/s228/index.md): the first row holding the reason, the rider and
+/// the reason. A landing crossup, an airborne roll past the limit, and two body rays on scenery (a wall
+/// at 59 ft/s, a trunk at 19 ft/s).
+const FLY_WRECKS: [(u32, u32, u32); 4] = [(137251, 1, 3), (138436, 1, 8), (139446, 1, 1), (139894, 1, 6)];
+
+/// **fly_and_collide's four wrecks, run by the original's whole frame from the image before each
+/// and judged by the port call by call** (S228c), as [`the_2p_wrecks_are_the_originals`] judges the
+/// 2p recording's. S228's images (`context/states/s228/s228-<frame>.ram`, 10..13 frames before each
+/// wreck) were saved with a sound RPC in flight, which [`whole_frame`] now answers. From each, the
+/// run must hold the capture (`context/capture/s228/fly.csv`) through the wreck's row, every call of
+/// the original's wreck test on P1's bike must be answered the same by [`air::wreck_test`] and
+/// [`air::hit_wreck`], and the first wreck must be the original's in the frame the row shows, with
+/// the indexed reason. A skip with a line where the capture or the images are not in this worktree.
+#[test]
+fn fly_and_collides_wrecks_are_the_originals() {
+    let Some(cap) = TwoP::load_from("capture/s228/fly.csv") else { return };
+    let mut missing = Vec::new();
+    for (frame, p, reason) in FLY_WRECKS {
+        assert_eq!((cap.reason(frame - 1, p), cap.reason(frame, p)), (0, reason), "P{p} {frame}: the index's wreck is not in the capture");
+        let Some((image, mut ee, t)) = image_ending_a_frame_in(&cap, frame, p, &[("states/s228", "s228")], 14) else {
+            missing.push(frame);
+            continue;
+        };
+        let run = judge_whole(&cap, &mut ee, p, t, frame + 1);
+        let to = run.held_to(&cap, p);
+        eprintln!("P{p} wreck {reason} at {frame}: from {image}, the capture held to {to}");
+        for j in &run.judged {
+            eprintln!("    {j:?}");
+            assert_eq!(j.port, j.original, "P{p} {frame}: frame {}: the port's wreck test answers {:?}, the original's {:?}", j.row, j.port, j.original);
+        }
+        assert!(to >= frame, "P{p} {frame}: the original's run from {image} left the capture at {to}");
+        let first = run.judged.iter().find(|j| j.held == 0 && !j.original.is_empty());
+        let first = first.unwrap_or_else(|| panic!("P{p} {frame}: the original never wrecked though its run held the capture to {to}"));
+        let shown = run.frames_of(&cap, p, frame);
+        assert!(shown.contains(&first.row) && first.original.last() == Some(&reason), "P{p} {frame}: the original's first wreck {first:?}, the row shows frames {shown:?}");
+    }
+    if !missing.is_empty() {
+        skip(&format!("S228c: no RAM image before fly_and_collide's wrecks at {missing:?} (research/s228/rams.py saves them)"));
+    }
 }
