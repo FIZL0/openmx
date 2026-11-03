@@ -149,23 +149,20 @@ async fn webgpu(canvas: &web_sys::OffscreenCanvas) -> Result<Prepared, String> {
 async fn webgl(canvas: &web_sys::OffscreenCanvas) -> Result<Prepared, String> {
     // wgpu asks for its context with an alpha channel, which the page then composites: whatever the
     // frame leaves below opaque (the sky, the HUD's translucent pills) showed the page's black
-    // behind it. A canvas keeps the context it was first given, whatever a later call asks for, so
-    // it is taken here first, opaque, and wgpu's own ask returns this one.
-    let opts = js_sys::Object::new();
-    for (k, v) in [("alpha", false), ("antialias", false)] {
-        js_sys::Reflect::set(&opts, &k.into(), &v.into()).map_err(|e| format!("{e:?}"))?;
-    }
-    match canvas.get_context_with_context_options("webgl2", &opts) {
-        Ok(Some(_)) => {}
-        Ok(None) => return Err("the canvas gave no webgl2 context".into()),
-        Err(e) => return Err(format!("the canvas refused a webgl2 context: {e:?}")),
-    }
-    let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
-    desc.backends = wgpu::Backends::GL;
-    let instance = wgpu::Instance::new(desc);
-    let surface = instance
-        .create_surface(wgpu::SurfaceTarget::OffscreenCanvas(canvas.clone()))
-        .map_err(|e| format!("no surface: {e}"))?;
+    // behind it. A canvas keeps the context it was first given, but the context cannot be taken
+    // here first and wgpu's own ask left to return it: Firefox's worker throws on a canvas's second
+    // getContext ('Cannot update created context to different thread', B13). So wgpu's one ask is
+    // made opaque instead: while wgpu makes its surface the canvas has its own getContext, which adds
+    // `alpha: false` and calls the real one.
+    let instance = {
+        let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+        desc.backends = wgpu::Backends::GL;
+        wgpu::Instance::new(desc)
+    };
+    let surface = opaque(canvas, || {
+        instance.create_surface(wgpu::SurfaceTarget::OffscreenCanvas(canvas.clone()))
+    })?
+    .map_err(|e| format!("no surface: {e}"))?;
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
@@ -175,6 +172,45 @@ async fn webgl(canvas: &web_sys::OffscreenCanvas) -> Result<Prepared, String> {
         .await
         .map_err(|e| format!("no adapter: {e}"))?;
     finish(Api::WebGl2, canvas, &adapter, surface).await
+}
+
+/// Run `make` with `canvas.getContext` asking for an opaque, unsmoothed context: an own property
+/// that shadows the prototype's while `make` runs, and is gone after it.
+fn opaque<T>(canvas: &web_sys::OffscreenCanvas, make: impl FnOnce() -> T) -> Result<T, String> {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::JsValue;
+    let js = |e: JsValue| format!("{e:?}");
+    let target: JsValue = canvas.clone().into();
+    // The prototype's, read before the canvas has one of its own.
+    let real: js_sys::Function = js_sys::Reflect::get(&target, &"getContext".into())
+        .map_err(js)?
+        .dyn_into()
+        .map_err(|_| "the canvas has no getContext".to_string())?;
+    let this = target.clone();
+    let asked = std::rc::Rc::new(std::cell::Cell::new(false));
+    let seen = asked.clone();
+    type Ask = dyn FnMut(JsValue, JsValue) -> Result<JsValue, JsValue>;
+    let ask = Closure::<Ask>::new(
+        move |id: JsValue, given: JsValue| {
+            let opts = js_sys::Object::new();
+            if given.is_object() {
+                js_sys::Object::assign(&opts, given.unchecked_ref());
+            }
+            for (k, v) in [("alpha", false), ("antialias", false)] {
+                js_sys::Reflect::set(&opts, &k.into(), &v.into())?;
+            }
+            seen.set(true);
+            real.call2(&this, &id, &opts)
+        },
+    );
+    js_sys::Reflect::set(&target, &"getContext".into(), ask.as_ref()).map_err(js)?;
+    let made = make();
+    js_sys::Reflect::delete_property(target.unchecked_ref::<js_sys::Object>(), &"getContext".into()).map_err(js)?;
+    if !asked.get() {
+        crate::web_host::say("gpu: wgpu took the canvas's context without its getContext; the picture may not be opaque");
+    }
+    Ok(made)
 }
 
 async fn finish(

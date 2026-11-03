@@ -615,9 +615,10 @@ fn a_pad_the_browser_shows_on_a_press_rides() {
 /// where [`a_pad_the_browser_shows_on_a_press_rides`]'s pad is a script shaped as chromium's. The
 /// pad is plugged in on the splash and must stay out of `getGamepads()` until it is pressed; that
 /// first Cross makes it 1P, Cross alone reaches a ride with it seated, L2 keeps the speedometer
-/// still and R2 moves it. The profile turns WebGL off (Firefox's WebGL2 path fails in the page, a
-/// bug of its own, B13) and Firefox has no WebGPU on Linux, so the page draws in software. Skips
-/// without the disc or node, or when Firefox can't be fetched (offline with nothing cached).
+/// still and R2 moves it. Firefox has no WebGPU on Linux, so with a display (the gate's) the page
+/// draws on WebGL2, which it must (B13: Firefox's worker refused the canvas's second getContext and
+/// the page never rode), and without one in software. Skips without the disc or node, or when
+/// Firefox can't be fetched (offline with nothing cached).
 #[test]
 fn a_firefox_pad_rides() {
     let iso = match Disc::open_configured() {
@@ -661,6 +662,9 @@ fn a_firefox_pad_rides() {
     let braked: f64 = field("braked").parse().expect("braked");
     let gas: f64 = field("gas").parse().expect("gas");
     println!("speedometer changed {braked} on the brake, {gas} on the gas ({} drawing)", field("gpu"));
+    if std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        assert_eq!(field("gpu"), "webgl2", "Firefox with a display did not draw on WebGL2:\n{log}{text}");
+    }
     assert!(braked < 0.02, "the speedometer moved with L2 held ({braked}):\n{text}");
     assert!(gas > 0.05, "R2 did not move the speedometer ({gas}):\n{text}");
 }

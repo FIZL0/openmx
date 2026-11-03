@@ -98,10 +98,6 @@ const prefs = {
   // index.html's `navigator.storage.persist()` is a prompt in Firefox, which headless nobody answers: granted (B14)
   'dom.storageManager.prompt.testing': true,
   'dom.storageManager.prompt.testing.allow': true,
-  // Software drawing, display or none: with one (the gate's private X) Firefox offers WebGL2, and there the page's
-  // opaque context and then wgpu's own ask throw ("Cannot update created context to different thread"), and the
-  // software fallback finds the canvas taken — no ride at all (B13). This test is the pad's.
-  'webgl.disabled': true,
   // the headless window's size, as gamepad.mjs's chromium (the speedometer crop is a share of it)
   'privacy.window.maxInnerWidth': 1280,
   'privacy.window.maxInnerHeight': 720,
