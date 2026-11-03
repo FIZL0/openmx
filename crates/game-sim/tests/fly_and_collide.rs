@@ -704,8 +704,10 @@ const HEAD: usize = 3;
 const SETTLE: u32 = 30;
 
 /// The riding ticks [`the_drawn_rider_leans_as_the_original_through_the_turns`] compares, and of
-/// those the hard-turn ones (the original's head 0.5 ft or more to a side of its pelvis).
-const DRAWN_TICKS: (usize, usize) = (1952, 280);
+/// those the hard-turn ones (the original's head 0.5 ft or more to a side of its pelvis on each row
+/// the tick may be read against). The hard turns are the original's alone, so the count moves with
+/// [`HELD`] and not with the port's lean (B18).
+const DRAWN_TICKS: (usize, usize) = (1952, 262);
 
 /// **S228a — the drawn rider's lean through the tape's turns, as drawn.** Every stretch of [`HELD`]
 /// that holds past [`SETTLE`] is ridden by [`ride_drawn`], the drawn rider beside it as the shell
@@ -742,12 +744,19 @@ const DRAWN_TICKS: (usize, usize) = (1952, 280);
 /// S228b's donut fix let eight more stretches hold, and their ticks moved the bounds: the worst lean
 /// to a side 0.650 to 0.713, the worst root up 0.195 to 0.283, the hard turns' mean 0.802 to 0.795.
 /// The stretches compared before ride and draw as they did.
+///
+/// B18: the hard turns were the ticks whose *closest* original row (of t+1..t+3, picked against
+/// the port's pose) leaned 0.5 ft, so a better lean moved the count: V121 and S253 each took it
+/// 274 to 276 on their own branches and 278 together, and S253a then 282. A hard turn is now one
+/// the original leans 0.5 ft on every candidate row: 262 ticks, on S228b2's branch (lean 0.786),
+/// S253's merge (0.915) and here alike. On them the lean is 0.969 and the root roll 1.022.
 #[test]
 fn the_drawn_rider_leans_as_the_original_through_the_turns() {
     let Some(bones) = bones() else { return };
     let lean = |p: &[[f32; 3]]| [0, 1, 2].map(|k| p[HEAD][k] - p[PELVIS][k]);
-    // Per tick: (side, whole, up angle, ours to a side, theirs to a side, our root's roll, theirs).
-    let mut rows: Vec<(u32, u32, [f32; 7])> = Vec::new();
+    // Per tick: (side, whole, up angle, ours to a side, theirs to a side, our root's roll, theirs),
+    // and whether it is a hard turn.
+    let mut rows: Vec<(u32, u32, [f32; 7], bool)> = Vec::new();
     for (from, held_ticks) in HELD.iter().copied().filter(|&(_, h)| h > SETTLE as usize) {
         let Some((_, leaned)) = ride_drawn(from, from + held_ticks as u32) else { return };
         for l in leaned.iter().filter(|l| l.t >= from + SETTLE) {
@@ -763,13 +772,16 @@ fn the_drawn_rider_leans_as_the_original_through_the_turns() {
                     [(ours[0] - theirs[0]).abs(), whole, up, ours[0], theirs[0], roll(&l.bike), roll(m)]
                 })
                 .min_by(|a, b| a[1].total_cmp(&b[1]));
+            // A hard turn by the original alone: its head 0.5 ft or more to a side on every row the
+            // tick may be read against, so the set does not move with the port's own lean (B18).
+            let hard = (l.t + 1..=l.t + 3).filter(|&r| bones.riding(r)).all(|r| lean(&bones.parts(r))[0].abs() >= 0.5);
             if let Some(b) = best {
-                rows.push((from, l.t, b));
+                rows.push((from, l.t, b, hard));
             }
         }
     }
     let n = rows.len();
-    let sorted = |k: usize, of: &[&(u32, u32, [f32; 7])]| {
+    let sorted = |k: usize, of: &[&(u32, u32, [f32; 7], bool)]| {
         let mut v: Vec<f32> = of.iter().map(|r| r.2[k]).collect();
         v.sort_by(f32::total_cmp);
         v
@@ -784,7 +796,7 @@ fn the_drawn_rider_leans_as_the_original_through_the_turns() {
     for w in worst.iter().take(5) {
         println!("worst: from {} tick {} {:?}", w.0, w.1, w.2);
     }
-    let hard: Vec<_> = rows.iter().filter(|r| r.2[4].abs() >= 0.5).collect();
+    let hard: Vec<_> = rows.iter().filter(|r| r.3).collect();
     let mean = |k: usize| hard.iter().map(|r| r.2[k].abs()).sum::<f32>() / hard.len() as f32;
     let (leans, rolls) = (mean(3) / mean(4), mean(5) / mean(6));
     println!("{} hard-turn ticks: lean to a side ours {:.3} theirs {:.3} ({leans:.3}); root roll ours {:.3} theirs {:.3} ({rolls:.3})", hard.len(), mean(3), mean(4), mean(5), mean(6));
