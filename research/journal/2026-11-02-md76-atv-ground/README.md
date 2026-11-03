@@ -2,6 +2,8 @@
 
 2026-11-02. Task: `./kit plan MD76`.
 
+MD76a (`2-record-byte-MD76a.md`): the record byte now reaches `atv_wheel::suspension` and `quad::Steps`. This is proved with the suspension running the original's own query over Desert Oasis on all 12,200 captured wheels. The collision sweep is split off as MD76a1 (the collidables and gather) and MD76a2 (the search).
+
 `game_sim::atv_ground` ports two SLUS-21104 functions: the ground query the quad's wheel suspension
 asks under each probe end (`atv_ground_query`), and the terrain's cell reader under it
 (`atv_terrain_cell`). It runs over Desert Oasis's map as the game loads it. `tests/atv_ground.rs` runs

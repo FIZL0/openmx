@@ -8019,3 +8019,16 @@ node_listener_remove  boot 0x002735d0 (list, i): list[i] = list[count-1], count 
 atv_terrain_cell            atv 0x0047b300 = the terrain's cell at a sample (a0 terrain, a1 ix, a2 iz, a3 heights out, t0 normals out, t1 surfaces out, t2 step); 0 = none
 atv_ground_ring             atv 0x00541550 = the ground query's ring of read cells (0x70 bytes each, 10 used)
 atv_normal_table_flag       atv 0x00541518 = the cell reader takes normals from the 256-direction table when set
+# MD76a — the record byte wired (atv_wheel::suspension's ground closure takes wheel +0x110; tests/atv_wheel.rs
+# runs the suspension with atv_ground_query unhooked over 0x0184c7d0 on MD37a's 12,200 captured wheels).
+# Journal: research/journal/2026-11-02-md76-atv-ground/2-record-byte-MD76a.md. The quad's sweep: the search
+# quad +0x1430 (vtable 0x003b6c20: +0xb0 clear, +0xb4 narrow = thunk storing +0x184 to a global then the ray
+# probe pair, +0xc8 record clear, +0xd0 prepare); nearby list quad +0xc4 (+0 entries of 8 bytes collidable,
+# distance; +4 count; +0x40 prepare), empty in all four MD37a images. The palm ahead of the spawn: mesh
+# collidables (vtable 0x003b6d00) 0x00ff9d00 (reach 23.5) and 0x00ff6cd0 (28.6), the rear node in
+# race-wheelie-launch; owner +0x90 and vehicle +0x8c are 0.
+atv_search_clear            atv 0x001bbbc0 = the quad search's vt +0xb0 (clear)
+atv_search_narrow           atv 0x001bbe60 = the quad search's vt +0xb4 (a thunk into atv_ray_probe_pair)
+atv_ray_probe_pair          atv 0x001bc880 = the ray probe against a collidable (MX Unleashed's ray_probe::pair, not compared)
+atv_search_record_clear     atv 0x001bd180 = the quad search's vt +0xc8 (the record cleared)
+atv_search_prepare          atv 0x001bc6e0 = the quad search's vt +0xd0 (prepare)

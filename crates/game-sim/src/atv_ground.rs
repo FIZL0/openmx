@@ -82,11 +82,12 @@ impl<'a> Terrain<'a> {
     }
 
     /// The query as the wheel suspension asks it: on a copy of `at`, the point moved onto the
-    /// ground and the ground's normal, with no record. `normal` is what the caller's buffer held,
-    /// which comes back unchanged where the query writes none.
-    pub fn ground(&self, at: Vf, normal: Vf) -> (Vf, Vf) {
+    /// ground and the ground's normal, and the surface under it into `record` (the wheel's
+    /// `+0x110`). `normal` is what the caller's buffer held, which comes back unchanged where the
+    /// query writes none.
+    pub fn ground(&self, at: Vf, normal: Vf, record: &mut u8) -> (Vf, Vf) {
         let (mut p, mut n) = (at, normal);
-        query(self, &mut p, Some(&mut n), None);
+        query(self, &mut p, Some(&mut n), Some(record));
         (p, n)
     }
 }

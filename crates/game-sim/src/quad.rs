@@ -1763,15 +1763,16 @@ pub struct Bike {
 ///
 /// Every other call, and what those steps call in turn and is not ported (the stunt's start and end,
 /// the wreck, the preload's cue, the wheels' surface drag and spin), goes to `rest` in the original's
-/// order. `ground` is the world's ground query the suspension asks (the probe's end in, the point on
-/// the ground and its normal out). The stunt start always answers yes, as SLUS-21104's does.
+/// order. `ground` is the world's ground query the suspension asks (the probe's end and the wheel's
+/// contact record in, the point on the ground and its normal out; on Desert Oasis,
+/// [`crate::atv_ground::Terrain::ground`]). The stunt start always answers yes, as SLUS-21104's does.
 pub struct Steps<R, G> {
     pub bike: Bike,
     pub rest: R,
     pub ground: G,
 }
 
-impl<R: Moto, G: FnMut(Vf) -> (Vf, Vf)> Moto for Steps<R, G> {
+impl<R: Moto, G: FnMut(Vf, &mut u8) -> (Vf, Vf)> Moto for Steps<R, G> {
     fn call(&mut self, c: Call, q: &mut Quad, body: &mut Body) {
         match c {
             Call::InputLimiter(dt) => self.input_limiter(q, dt),

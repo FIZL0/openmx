@@ -82,8 +82,9 @@ struct State {
     x: More,
     b: Body,
     dt: F,
-    /// The ground query's answers: the point (whole quadword) and the unnormalised normal.
-    ground: Vec<(Vf, Vf)>,
+    /// The ground query's answers: the point (whole quadword), the unnormalised normal, and the
+    /// surface byte it writes into the wheel's record (none: it leaves the record).
+    ground: Vec<(Vf, Vf, Option<u8>)>,
     /// The ground query hands the point back as it was given, which puts it exactly level with the
     /// probe's end.
     echo: bool,
@@ -254,7 +255,7 @@ fn texts(calls: &[Call]) -> Vec<String> {
 }
 
 type Log = Rc<RefCell<Vec<Call>>>;
-type Answers = Rc<RefCell<VecDeque<(Vf, Vf)>>>;
+type Answers = Rc<RefCell<VecDeque<(Vf, Vf, Option<u8>)>>>;
 
 /// Run the original's own `addr` from inside its hook, on the arguments the hook was handed, and leave
 /// the machine as a return from it would: the interpreter files the hook back under `pc`, and the
@@ -271,8 +272,11 @@ fn run_inside(ee: &mut Ee, addr: u32) {
 }
 
 /// The ground query's answer to `query`.
-fn answer(s: &State, i: usize, query: Vf) -> (Vf, Vf) {
-    let (p, n) = s.ground[i];
+fn answer(s: &State, i: usize, query: Vf, record: &mut u8) -> (Vf, Vf) {
+    let (p, n, r) = s.ground[i];
+    if let Some(r) = r {
+        *record = r;
+    }
     (if s.echo { query } else { p }, n)
 }
 
@@ -288,11 +292,14 @@ fn hook(ee: &mut Ee, log: &Log, ground: &Answers, echo: bool, mover: (Vf, Vf), h
             assert_eq!((ee.r(7), ee.r(8) as u32), (0, WHEEL + 0x110), "the ground query's last two arguments");
             let (p, n) = (ee.r(5) as u32, ee.r(6) as u32);
             l.borrow_mut().push(Call::GroundQuery(get_v(ee, p)));
-            let (point, normal) = g.borrow_mut().pop_front().expect("more ground queries than answers");
+            let (point, normal, record) = g.borrow_mut().pop_front().expect("more ground queries than answers");
             if !echo {
                 put_v(ee, p, point);
             }
             put_v(ee, n, normal);
+            if let Some(r) = record {
+                ee.write(WHEEL + 0x110, 1, u128::from(r));
+            }
         }),
     );
     let l = log.clone();
@@ -429,7 +436,10 @@ impl Gen {
         // The same point every time it asks: only the normals move it on.
         let n = self.normal();
         let ground = (0..5)
-            .map(|_| (point, if self.b() { n } else if self.one_in(3) { w.ground_normal } else { self.normal() }))
+            .map(|_| {
+                let n = if self.b() { n } else if self.one_in(3) { w.ground_normal } else { self.normal() };
+                (point, n, if self.one_in(4) { None } else { Some(1 + (self.bits() % 255) as u8) })
+            })
             .collect();
         // A swept contact a tenth either side of the ray's answer, now and then exactly.
         if self.one_in(3) {
@@ -572,10 +582,12 @@ fn the_atv_wheel_suspension_is_the_originals() {
         let s = g.state();
         let mut d = s.clone();
         let mut asked = 0;
-        let calls = atv_wheel::suspension(&mut d.w, &mut d.x, &d.b, &mut |q| {
+        let calls = atv_wheel::suspension(&mut d.w, &mut d.x, &d.b, &mut |q, r| {
             asked += 1;
-            answer(&s, asked - 1, q)
+            answer(&s, asked - 1, q, r)
         });
+        // The record as the last query left it, before a miss under a swept contact zeroes it.
+        let queried = s.ground[..asked].iter().fold(s.x.record, |r, a| a.2.unwrap_or(r));
         tally(&mut t, match asked {
             0 => "no world",
             1 => "one ray",
@@ -585,7 +597,7 @@ fn the_atv_wheel_suspension_is_the_originals() {
         if asked > 0 {
             tally(&mut t, match (d.w.ray_hit, s.w.swept_contact, d.w.swept_contact) {
                 (0, 0, _) => "missed",
-                (0, _, _) if d.x.record != s.x.record => "missed under a swept contact",
+                (0, _, _) if d.x.record != queried => "missed under a swept contact",
                 (0, _, _) if d.w.terrain_wins != s.w.terrain_wins => "swept kept, terrain dropped",
                 (0, _, _) => "swept kept",
                 (_, 0, _) => "ray hit",
@@ -599,9 +611,9 @@ fn the_atv_wheel_suspension_is_the_originals() {
         compare(&mut ee, k, &s, SUSPENSION, |t| {
             let mut i = 0;
             let u = t.clone();
-            atv_wheel::suspension(&mut t.w, &mut t.x, &t.b, &mut |q| {
+            atv_wheel::suspension(&mut t.w, &mut t.x, &t.b, &mut |q, r| {
                 i += 1;
-                answer(&u, i - 1, q)
+                answer(&u, i - 1, q, r)
             })
         });
         assert_eq!(texts(&calls).len(), asked);
@@ -750,4 +762,182 @@ fn the_atv_wheel_hinge_force_is_the_originals() {
         });
     }
     each_path_seen(&t, &["scale one", "other scale"], 1000);
+}
+
+/// MD76a — the terrain object the quad's wheels hold in the image (wheel `+0x1e0`): Desert Oasis's.
+const TERRAIN: u32 = 0x0184_c7d0;
+/// The ground query's ring of cells (32 keys cleared on a cold start) and the terrain object's ring
+/// words, which the original's query writes as it goes.
+const RING: (u32, u32) = (0x0054_1550, 0x0054_1550 + 32 * 0x70);
+const TERRAIN_RING: (u32, u32) = (TERRAIN + 0x9e0, TERRAIN + 0x9e8);
+
+/// One captured wheel: its words (`+0..+0x300`) and its quad's rigid body's (`+0..+0x280`).
+struct Captured {
+    wheel: Vec<u8>,
+    body: Vec<u8>,
+}
+
+/// Desert Oasis's terrain file and every wheel of every row of MD37a's fifteen captures.
+fn desert_oasis() -> Option<(Vec<u8>, Vec<Captured>)> {
+    let kit = Kit::load().map_err(|w| skip(&w)).ok()?;
+    let res = kit.ctx("mxvatv-ps2/md37a").join("mc02.res");
+    if !res.exists() {
+        skip(&format!("{} is not there: Desert Oasis's mc02.res off MX vs. ATV's disc (Env/MC02; journal md76-atv-ground)", res.display()));
+        return None;
+    }
+    let file = std::fs::read(&res).unwrap();
+    let archive = game_sim::archive::Res::parse(&file).unwrap();
+    let trn = archive.read(&file, archive.find("Env\\mc02\\MC02.ps2.trn").expect("mc02.res holds MC02.ps2.trn")).unwrap();
+    let dir = kit.ctx("capture/md37a");
+    let mut names: Vec<_> = std::fs::read_dir(&dir).ok().into_iter().flatten().flatten().map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "csv")).collect();
+    names.sort();
+    if names.len() < 15 {
+        skip(&format!("{} does not hold MD37a's fifteen captures", dir.display()));
+        return None;
+    }
+    let hex = |s: &str| (0..s.len() / 2).map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap()).collect::<Vec<u8>>();
+    let mut out = Vec::new();
+    for name in names {
+        let text = std::fs::read_to_string(&name).unwrap();
+        let mut lines = text.lines();
+        let head: Vec<&str> = lines.next().unwrap().split(',').collect();
+        let col = |n: &str| head.iter().position(|h| *h == n).unwrap();
+        let (body, wheels) = (col("body"), (0..4).map(|i| col(&format!("wheel{i}.raw"))).collect::<Vec<_>>());
+        for line in lines {
+            let f: Vec<&str> = line.split(',').collect();
+            for &c in &wheels {
+                out.push(Captured { wheel: hex(f[c]), body: hex(f[body]) });
+            }
+        }
+    }
+    Some((trn, out))
+}
+
+/// The suspension on Desert Oasis with nothing hooked but a log on the ground query, which then runs
+/// as the original's own over the image's terrain object: every captured wheel of MD37a's rides,
+/// with its own mount, probe, ground normal and contact and its quad's body, against the port's
+/// suspension asking [`atv_ground::Terrain::ground`] over the map file. The record byte (wheel
+/// `+0x110`, the query's `t0`) is compared with the rest of the wheel. Half the wheels get a swept
+/// contact round the ground (the captures have almost none), some are lifted or sunk so the ray
+/// misses or the terrain wins.
+#[test]
+fn the_atv_wheel_suspension_on_desert_oasis_is_the_originals() {
+    use game_sim::atv_ground::Terrain;
+    let Some(mut ee) = image() else { return };
+    let Some((trn, rows)) = desert_oasis() else { return };
+    assert_eq!(ee.u32_at(0x0162_a7e0 + 0x1e0), TERRAIN, "the left front wheel's terrain object");
+    let map = game_sim::track::Terrain::parse(&trn).unwrap();
+    let terrain = Terrain::of(&map);
+    let log: Log = Rc::default();
+    let l = log.clone();
+    ee.hooks.insert(
+        GROUND_QUERY,
+        Box::new(move |ee| {
+            assert_eq!((ee.r(4) as u32, ee.r(7), ee.r(8) as u32), (TERRAIN, 0, WHEEL + 0x110), "the ground query's arguments");
+            l.borrow_mut().push(Call::GroundQuery(get_v(ee, ee.r(5) as u32)));
+            let (args, ra, sp, stack, written) = ([ee.r(4), ee.r(5), ee.r(6), ee.r(7), ee.r(8)], ee.r(31), ee.r(29), ee.stack, ee.written.clone());
+            ee.stack = (sp as u32 - 0x40) & !0xf;
+            ee.call(GROUND_QUERY, &args, &[], 100_000);
+            ee.written.extend(written);
+            (ee.stack, ee.pc) = (stack, GROUND_QUERY);
+            ee.set(29, sp);
+            ee.set(31, ra);
+        }),
+    );
+    let word = |b: &[u8], o: usize| f32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+    let quad = |b: &[u8], o: usize| Vf::new(word(b, o), word(b, o + 4), word(b, o + 8), word(b, o + 12));
+    let int = |b: &[u8], o: usize| i32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+    let mut g = Gen(0x0076_a001);
+    let mut t = BTreeMap::new();
+    for (k, c) in rows.iter().enumerate() {
+        let mut s = g.state();
+        s.ground_under = Ground::Still;
+        let (w, x, b) = (&mut s.w, &mut s.x, &mut s.b);
+        w.has_ground = true;
+        w.mount = quad(&c.wheel, 0x90);
+        w.probe = quad(&c.wheel, 0x80);
+        w.ground_normal = quad(&c.wheel, 0x200);
+        w.probe_length = F(word(&c.wheel, 0x214));
+        w.swept_contact = int(&c.wheel, 0xd4);
+        w.terrain_wins = int(&c.wheel, 0xd8);
+        w.contact_point = quad(&c.wheel, 0x120);
+        w.contact_normal = quad(&c.wheel, 0x130);
+        x.record = c.wheel[0x110];
+        // A record left from elsewhere, for the query to write over; a ground normal off the
+        // terrain's, for the ray to aim again.
+        if g.b() {
+            x.record = 0x80 | g.bits() as u8;
+        }
+        if g.one_in(3) {
+            w.ground_normal = g.normal();
+        }
+        (b.position, b.orientation, b.cofg) = (quad(&c.body, 0x70), quad(&c.body, 0x190), quad(&c.body, 0x1a0));
+        match g.bits() % 6 {
+            0 => b.position = Vf::new(b.position.x(), b.position.y() + g.f(0.5, 3.0).0, b.position.z(), b.position.w()),
+            1 => b.position = Vf::new(b.position.x(), b.position.y() - g.f(0.0, 1.0).0, b.position.z(), b.position.w()),
+            _ => {}
+        }
+        if g.b() {
+            w.swept_contact = 1;
+            w.terrain_wins = i32::from(g.b());
+            let under = point_to_world_of(b, w.mount);
+            w.contact_point = Vf::new(under.x(), under.y() - g.f(0.0, 2.5).0, under.z(), 1.0);
+            w.contact_normal = if g.one_in(4) { g.normal() } else { w.ground_normal };
+        }
+        let mut d = s.clone();
+        let mut asked = 0;
+        atv_wheel::suspension(&mut d.w, &mut d.x, &d.b, &mut |q, r| {
+            asked += 1;
+            terrain.ground(q, Vf::ZERO, r)
+        });
+        tally(&mut t, match (d.w.ray_hit, s.w.swept_contact, d.w.terrain_wins) {
+            (0, 0, _) => "missed",
+            (0, _, _) if d.x.record == 0 && s.x.record != 0 => "missed under a swept contact, record cleared",
+            (0, _, w) if w != s.w.terrain_wins => "swept kept, terrain changed",
+            (0, _, _) => "swept kept",
+            (_, 0, _) => "ray hit",
+            _ => "terrain won",
+        });
+        tally(&mut t, if asked > 1 { "aimed again" } else { "one ray" });
+        if d.x.record != s.x.record {
+            tally(&mut t, "record changed");
+        }
+
+        log.borrow_mut().clear();
+        reset(&mut ee);
+        poke(&mut ee, &s);
+        ee.set_u32(WHEEL + 0x1e0, TERRAIN);
+        ee.call(SUSPENSION, &[u64::from(WHEEL)], &[s.dt.0], 1_000_000);
+        let frame = (ee.stack - 0x2000, ee.stack + 0x40);
+        for (a, z) in ee.written_ranges() {
+            let inside = REGIONS.iter().any(|&(_, base, len)| a >= base && z <= base + len)
+                || (a >= frame.0 && z <= frame.1)
+                || (a >= RING.0 && z <= RING.1)
+                || (a >= TERRAIN_RING.0 && z <= TERRAIN_RING.1);
+            assert!(inside, "row {k}: the original wrote {a:#010x}..{z:#010x}");
+        }
+        let was = snap(&ee);
+        reset(&mut ee);
+        poke(&mut ee, &d);
+        ee.set_u32(WHEEL + 0x1e0, TERRAIN);
+        let now = snap(&ee);
+        if let Some(i) = was.iter().zip(&now).position(|(a, b)| a != b) {
+            panic!("row {k}: {} is {:#010x} ({}) in the original and {:#010x} ({}) in the port", where_is(i), was[i], f32::from_bits(was[i]), now[i], f32::from_bits(now[i]));
+        }
+        let calls: Vec<Call> = (0..asked).map(|_| Call::GroundQuery(Vf::ZERO)).collect();
+        assert_eq!(log.borrow().len(), calls.len(), "row {k}: the ground queries");
+    }
+    each_path_seen(
+        &t,
+        &["missed", "missed under a swept contact, record cleared", "swept kept", "ray hit", "terrain won", "aimed again", "record changed"],
+        30,
+    );
+}
+
+/// A point of the body's own frame into the world, as the suspension puts the mount there.
+fn point_to_world_of(b: &Body, p: Vf) -> Vf {
+    let r = game_sim::quad::Body { orientation: b.orientation, ..Default::default() };
+    let v = r.to_world(Vf::new((F(p.x()) - F(b.cofg.x())).0, (F(p.y()) - F(b.cofg.y())).0, (F(p.z()) - F(b.cofg.z())).0, 0.0));
+    Vf::new((F(v.x()) + F(b.position.x())).0, (F(v.y()) + F(b.position.y())).0, (F(v.z()) + F(b.position.z())).0, 1.0)
 }

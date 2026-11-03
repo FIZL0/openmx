@@ -3102,7 +3102,7 @@ struct Ride {
     tag: u32,
     /// The ground query's answers in the order the four suspensions ask, and whether it hands the
     /// point back as it was given.
-    answers: Vec<(Vf, Vf)>,
+    answers: Vec<(Vf, Vf, Option<u8>)>,
     echo: bool,
 }
 
@@ -3323,7 +3323,8 @@ impl Gen {
             let point = Vf::new(p.x() + self.f(-3.0, 3.0).0, p.y() + self.f(-4.0, 1.0).0, p.z() + self.f(-3.0, 3.0).0, self.f(0.0, 1.0).0);
             let n = self.normal();
             for _ in 0..5 {
-                answers.push((point, if self.b() { n } else if self.one_in(3) { w.ground_normal } else { self.normal() }));
+                let n = if self.b() { n } else if self.one_in(3) { w.ground_normal } else { self.normal() };
+                answers.push((point, n, if self.one_in(4) { None } else { Some(self.bits() as u8) }));
             }
         }
         let bike = quad::Bike {
@@ -3589,7 +3590,7 @@ struct Only<'a, G> {
     steps: quad::Steps<Vec<Call>, G>,
 }
 
-impl<G: FnMut(Vf) -> (Vf, Vf)> quad::Moto for Only<'_, G> {
+impl<G: FnMut(Vf, &mut u8) -> (Vf, Vf)> quad::Moto for Only<'_, G> {
     fn call(&mut self, c: Call, q: &mut Quad, body: &mut Body) {
         if self.picks.contains(&address_of(&c)) {
             self.steps.call(c, q, body);
@@ -3599,7 +3600,7 @@ impl<G: FnMut(Vf) -> (Vf, Vf)> quad::Moto for Only<'_, G> {
     }
 }
 
-type Answers = Rc<RefCell<std::collections::VecDeque<(Vf, Vf)>>>;
+type Answers = Rc<RefCell<std::collections::VecDeque<(Vf, Vf, Option<u8>)>>>;
 
 /// Every callee of the PreProcess and the Force body hooked to log its call (as the two listeners'
 /// tests do), and what the bike steps call in turn: the stunt start (answering yes), its end, the
@@ -3656,11 +3657,14 @@ fn hook_steps(ee: &mut Ee, picks: &[u32], answers: &Answers, echo: &Rc<Cell<bool
         let (p, n) = (ee.r(5) as u32, ee.r(6) as u32);
         let wheel = ee.r(8) as u32 - 0x110;
         assert!(WHEEL.contains(&wheel) && ee.r(7) == 0, "the ground query's last two arguments");
-        let (point, normal) = a.borrow_mut().pop_front().expect("more ground queries than answers");
+        let (point, normal, record) = a.borrow_mut().pop_front().expect("more ground queries than answers");
         if !e.get() {
             put_v(ee, p, point);
         }
         put_v(ee, n, normal);
+        if let Some(r) = record {
+            ee.write(wheel + 0x110, 1, u128::from(r));
+        }
     }));
     for at in picks {
         assert!(ee.hooks.remove(at).is_some(), "{at:#x} was not hooked");
@@ -3711,10 +3715,13 @@ fn each_unhooked(
         let was = snap_all(&ee);
 
         let mut u = r.clone();
-        let mut queue: std::collections::VecDeque<(Vf, Vf)> = r.answers.iter().copied().collect();
+        let mut queue: std::collections::VecDeque<(Vf, Vf, Option<u8>)> = r.answers.iter().copied().collect();
         let echo_now = r.echo;
-        let ground = move |q: Vf| {
-            let (p, n) = queue.pop_front().expect("more ground queries than answers");
+        let ground = move |q: Vf, record: &mut u8| {
+            let (p, n, r) = queue.pop_front().expect("more ground queries than answers");
+            if let Some(r) = r {
+                *record = r;
+            }
             (if echo_now { q } else { p }, n)
         };
         let mut m = Only { picks, steps: quad::Steps { bike: u.bike.clone(), rest: Vec::new(), ground } };

@@ -210,10 +210,11 @@ fn zero_lane(v: Vf, d: Dest) -> Vf {
 /// `atv_wheel_suspension`: the ray down the suspension, aimed along the ground's normal until two
 /// answers agree, and the argument between its answer and the collision sweep's contact.
 ///
-/// `ground` is the world's ground query, handed the probe's end in the world; it
+/// `ground` is the world's ground query, handed the probe's end in the world and the wheel's
+/// contact record ([`More::record`], the original's `t0`), whose surface byte it may write; it
 /// answers with the point moved onto the ground and the ground's normal (not yet normalised).
 pub fn suspension(w: &mut Wheel, x: &mut More, b: &Body,
-    ground: &mut impl FnMut(Vf) -> (Vf, Vf)) -> Vec<Call> {
+    ground: &mut impl FnMut(Vf, &mut u8) -> (Vf, Vf)) -> Vec<Call> {
     let mut calls = Vec::new();
     w.ray_hit = 0;
     if !w.has_ground {
@@ -229,7 +230,7 @@ pub fn suspension(w: &mut Wheel, x: &mut More, b: &Body,
         w.probe_end = add_xyz(w.mount, w.probe);
         w.probe_end_world = point_to_world(b, w.probe_end);
         calls.push(Call::GroundQuery(w.probe_end_world));
-        let (p, n) = ground(w.probe_end_world);
+        let (p, n) = ground(w.probe_end_world, &mut x.record);
         point = p;
         normal = normalize(n);
         agreement = dot3(normal, w.ground_normal);
