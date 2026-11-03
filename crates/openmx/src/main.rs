@@ -1706,10 +1706,10 @@ impl<P: sim_world::World> Game for World<P> {
             if together && flying[me] {
                 let seat = &mut self.seats[me];
                 let controls = seat.pass_front(dt);
-                let ready = controls.as_ref().filter(|_| seat.riding).and_then(|_| seat.garage.ready_plane(&mut seat.sim, dt, &mut self.place));
+                let ready = controls.as_ref().filter(|_| seat.riding).and_then(|_| seat.garage.ready_plane(&mut seat.sim, dt, &mut self.place, props.as_mut()));
                 held.push(Held { me, plane, controls, ready, met, bikes, bump });
                 if order.get(step + 1).is_none_or(|&j| !flying[j]) {
-                    self.fly_held(dt, &spots, std::mem::take(&mut held), &mut struck);
+                    self.fly_held(dt, &spots, std::mem::take(&mut held), &mut struck, props.as_mut());
                 }
                 continue;
             }
@@ -1769,21 +1769,32 @@ impl<P: sim_world::World> World<P> {
 
     /// The flying seats' held passes finished (N22a1): their readied planes flown in one
     /// [`vehicle::fly_together`], in the walk's order, then each seat's settle, markers and fader,
-    /// and what its plane met handed on ([`World::met_after`]).
-    fn fly_held(&mut self, dt: F, spots: &[Spot], mut held: Vec<Held>, struck: &mut [Vec<Vec<game_sim::contact::Contact>>]) {
+    /// and what its plane met handed on ([`World::met_after`]). Among the seats' one prop set
+    /// (S259a) the planes strike it, each named by its seat.
+    fn fly_held(
+        &mut self,
+        dt: F,
+        spots: &[Spot],
+        mut held: Vec<Held>,
+        struck: &mut [Vec<Vec<game_sim::contact::Contact>>],
+        props: Option<&mut game_sim::prop_seats::Shared>,
+    ) {
         {
             let mut seats: Vec<Option<&mut Seat>> = self.seats.iter_mut().map(Some).collect();
             let mut tables = None;
             let mut fleet = Vec::new();
+            let mut flown = Vec::new();
             for h in held.iter_mut().filter(|h| h.ready.is_some()) {
                 let Some(seat) = seats[h.me].take() else { continue };
                 let Some(flight) = seat.garage.readied_flight() else { continue };
                 tables.get_or_insert_with(|| seat.sim.tables.clone());
                 let pad = h.ready.as_ref().expect("filtered on ready").pad;
                 fleet.push(game_sim::flight::Fly { flight, pad, met: h.met.as_mut(), bikes: &h.bikes });
+                flown.push(h.me);
             }
             if let Some(tables) = tables {
-                vehicle::fly_together(dt, &mut fleet, &mut self.place, &tables.ride);
+                let props = props.map(|p| (p.set_mut(), &flown[..]));
+                vehicle::fly_together(dt, &mut fleet, &mut self.place, &tables.ride, props);
             }
         }
         for h in held {

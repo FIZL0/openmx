@@ -752,7 +752,7 @@ impl Flight {
         let mut props = props;
         if let Some((set, me)) = props.as_mut() {
             let first = met.as_deref().map_or(0, |m| m.vehicles.len());
-            bodies = self.knocked(set, *me, first, &posed, knocked);
+            self.knocked(set, *me, first, &posed, knocked, &mut bodies);
         }
         let mut listeners = Listeners { plane: self, ground: Ground(ground), tables, bikes, movers: &movers, met, seam: [0, 0], props: &mut bodies };
         WORLD.step(dt, &mut listeners);
@@ -769,8 +769,17 @@ impl Flight {
     /// Steps 2 and 3 of [`Flight::frame_props`]: the props the search struck (`knocked`, the mirrors
     /// on each of `posed`) woken and their mirrors filed, the props' rays on the hull, and the plane's
     /// entries and the mirrors renamed to the struck bodies' places after the `first` vehicles of
-    /// its resolve. Answers the bodies, in that order.
-    fn knocked(&mut self, set: &mut PropSet, me: usize, first: usize, posed: &[Posed<'_>], knocked: Vec<Vec<contact::Contact>>) -> Vec<crate::prop_contact::Pushed> {
+    /// its resolve. The bodies are added to `bodies`, in that order, but a body already there (one
+    /// another plane of [`frames_together`] struck) keeps its place, so the planes push one copy.
+    fn knocked(
+        &mut self,
+        set: &mut PropSet,
+        me: usize,
+        first: usize,
+        posed: &[Posed<'_>],
+        knocked: Vec<Vec<contact::Contact>>,
+        bodies: &mut Vec<crate::prop_contact::Pushed>,
+    ) {
         let from = self.record.contacts.iter().filter_map(|e| e.other).filter(|&o| o >= KNOCK_FROM).collect::<Vec<_>>();
         // The struck props in the order the plane's entries first name them.
         let mut order: Vec<usize> = Vec::new();
@@ -792,18 +801,27 @@ impl Flight {
                 (posed[k].collection, posed[k].object, mirrors)
             })
             .collect();
-        let mut bodies = set.strike(&crate::prop_contact::Strike { contacts: Vec::new(), struck });
-        for e in &mut self.record.contacts {
-            if let Some(k) = e.other.and_then(|o| o.checked_sub(KNOCK_FROM)) {
-                e.other = order.iter().position(|&j| j == k).map(|i| first + i);
+        let mut places = Vec::with_capacity(order.len());
+        for p in set.strike(&crate::prop_contact::Strike { contacts: Vec::new(), struck }) {
+            match bodies.iter().position(|b| (b.collection, b.object) == (p.collection, p.object)) {
+                Some(i) => places.push(i),
+                None => {
+                    places.push(bodies.len());
+                    bodies.push(p);
+                }
             }
         }
-        let Some(hull) = self.hull.clone().filter(|_| self.rays.is_some()) else { return bodies };
+        for e in &mut self.record.contacts {
+            if let Some(k) = e.other.and_then(|o| o.checked_sub(KNOCK_FROM)) {
+                e.other = order.iter().position(|&j| j == k).map(|i| first + places[i]);
+            }
+        }
+        let Some(hull) = self.hull.clone().filter(|_| self.rays.is_some()) else { return };
         let node = node_of(&self.body);
         let at = [node.rows[0], node.rows[1], node.rows[2], node.origin];
         let on = crate::prop_wreck::struck_on(set, &hull, at, COLLIDABLE, COLLIDES_WITH, me);
         if on.is_empty() {
-            return bodies;
+            return;
         }
         let places: Vec<usize> = on
             .struck
@@ -820,7 +838,6 @@ impl Flight {
         (r.touching, r.on_object, r.touching_other) = (true, true, true);
         let room = r.capacity.saturating_sub(r.contacts.len());
         r.contacts.extend(on.mirrors.iter().map(|e| contact::Contact { other: e.other.map(|i| first + places[i]), ..*e }).take(room));
-        bodies
     }
 
     /// **Over a seam** (MD44, the port's own; [`crate::rider::Rider::wrap_round`]'s for the plane): on
@@ -1728,7 +1745,39 @@ pub fn frames_together(
     ground: &mut dyn world::World,
     tables: &ride::Tables,
 ) -> Vec<(Vec<Option<u32>>, [i8; 2])> {
-    let searched = search_together(dt, fleet, ground);
+    frames_together_props(dt, fleet, ground, tables, None)
+}
+
+/// **[`frames_together`] among the knockable props** (S259a): each plane's frame as
+/// [`Flight::frame_props`] has a lone one's, plane `k` named `me[k]` in its mirrors (its seat, its
+/// place among the props' step's strikers).
+///
+/// 1. every plane's search has the props after the world and after the other planes' hulls
+///    ([`Scene::knocking`]), each prop's record after the planes': its entries name the prop's
+///    record, its mirrors go on the prop's list;
+/// 2. then, plane by plane in `fleet`'s order after the bikes' mirrors, each prop it struck woken
+///    and its mirrors filed at the head of its list ([`PropSet::strike`]), and the props' rays on its
+///    hull (step 3 of [`Flight::frame_props`]);
+/// 3. one world step, each plane's resolve pushing the props its list names after the bikes and the
+///    other planes among its sides. The struck bodies are one list for the fleet, so a prop two
+///    planes strike is one body both push, substep by substep; written back after
+///    ([`PropSet::pushed`]).
+///
+/// The props' own step is the caller's, after this. `None` is [`frames_together`].
+pub fn frames_together_props(
+    dt: F,
+    fleet: &mut [Fly<'_>],
+    ground: &mut dyn world::World,
+    tables: &ride::Tables,
+    props: Option<(&mut PropSet, &[usize])>,
+) -> Vec<(Vec<Option<u32>>, [i8; 2])> {
+    let shapes = props.as_ref().map(|(set, _)| Arc::clone(&set.shapes));
+    let posed = match (&props, &shapes) {
+        (Some((set, _)), Some(shapes)) => knocks(set, shapes),
+        _ => Vec::new(),
+    };
+    let knocks: Vec<flight_search::Knock<'_>> = posed.iter().map(|p| p.knock).collect();
+    let searched = search_together(dt, fleet, ground, &knocks);
     for f in fleet.iter_mut() {
         let p = &mut *f.flight;
         if let Some(m) = f.met.as_deref().filter(|m| !m.mirrors.is_empty() && p.rays.is_some()) {
@@ -1738,12 +1787,31 @@ pub fn frames_together(
             r.contacts.extend(m.mirrors.iter().copied().take(room));
         }
     }
-    let (struck, movers): (Vec<_>, Vec<_>) = searched.into_iter().unzip();
+    let n = fleet.len();
+    let (mut struck, mut movers, mut knocked) = (Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n));
+    for (s, m, k) in searched {
+        struck.push(s);
+        movers.push(m);
+        knocked.push(k);
+    }
+    let mut bodies: Vec<crate::prop_contact::Pushed> = Vec::new();
+    let mut props = props;
+    if let Some((set, me)) = props.as_mut() {
+        for (i, (f, k)) in fleet.iter_mut().zip(knocked).enumerate() {
+            // Its resolve's sides: its met's vehicles, the other planes, then the struck bodies.
+            let first = f.met.as_deref().map_or(0, |m| m.vehicles.len()) + n - 1;
+            f.flight.knocked(set, me[i], first, &posed, k, &mut bodies);
+        }
+    }
     let hulls = fleet.iter().map(|f| f.flight.hull.as_ref().filter(|_| f.flight.rays.is_some()).map(|_| hull_at(f.flight))).collect();
-    let mut listeners = Together { fleet: &mut *fleet, ground: Ground(ground), tables, movers: &movers, hulls, seams: Vec::new() };
+    let mut listeners =
+        Together { fleet: &mut *fleet, ground: Ground(ground), tables, movers: &movers, hulls, seams: Vec::new(), props: &mut bodies };
     listeners.seams = vec![[0, 0]; listeners.fleet.len()];
     WORLD.step(dt, &mut listeners);
     let seams = listeners.seams;
+    if let Some((set, _)) = props {
+        set.pushed(&bodies);
+    }
     for f in fleet.iter_mut() {
         if f.flight.attitude.flown {
             f.flight.pad = f.pad;
@@ -1760,7 +1828,7 @@ pub fn searches_together(
     fleet: &mut [Fly<'_>],
     world: &mut dyn world::World,
 ) -> Vec<Vec<Option<u32>>> {
-    search_together(dt, fleet, world).into_iter().map(|(struck, _)| struck).collect()
+    search_together(dt, fleet, world, &[]).into_iter().map(|(struck, ..)| struck).collect()
 }
 
 /// Where a plane's hull stands: its collision node's matrix ([`Flight::hull`]).
@@ -1775,12 +1843,17 @@ fn rank(i: usize, j: usize) -> usize {
     if j < i { j } else { j - 1 }
 }
 
-/// [`frames_together`]' searches ([`Flight::search`] for each plane, the others' hulls in its world).
+/// [`frames_together`]' searches ([`Flight::search`] for each plane, the others' hulls in its world),
+/// with `knocks` (S259a, [`frames_together_props`]) the knockable props after the world, each one's
+/// record after the other planes': a plane's entry on prop `k` names [`KNOCK_FROM`]` + k`, and the
+/// answer's third list is, for each prop, the mirrors that plane's search filed on its record.
+#[allow(clippy::type_complexity)]
 fn search_together(
     dt: F,
     fleet: &mut [Fly<'_>],
     world: &mut dyn world::World,
-) -> Vec<(Vec<Option<u32>>, Vec<contact::Mover>)> {
+    knocks: &[flight_search::Knock<'_>],
+) -> Vec<(Vec<Option<u32>>, Vec<contact::Mover>, Vec<Vec<contact::Contact>>)> {
     let n = fleet.len();
     for f in fleet.iter_mut() {
         let p = &mut *f.flight;
@@ -1796,7 +1869,7 @@ fn search_together(
         let near_bikes = mesh.as_deref().map(|mesh| Bikes { mesh, bikes });
         let none = vec![None; near_bikes.map_or(0, |b| b.bikes.len())];
         let Some(rays) = fleet[i].flight.rays.clone() else {
-            out.push((none, Vec::new()));
+            out.push((none, Vec::new(), Vec::new()));
             continue;
         };
         let from = fleet[i].flight.body.position;
@@ -1824,15 +1897,21 @@ fn search_together(
         if met.is_some() {
             scene = scene.owned(&velocities);
         }
+        let knocks_from = first + seen.len();
+        if !knocks.is_empty() {
+            scene = scene.knocking(knocks, knocks_from);
+        }
         let mine = me.record.contacts.len();
         let mut records = vec![std::mem::take(&mut me.record)];
         records.extend(velocities.iter().map(|_| contact_search::Record { capacity: crate::rider_contact::CAPACITY, ..contact_search::Record::default() }));
         let before: Vec<usize> = theirs.iter().map(|r| r.contacts.len()).collect();
         records.append(&mut theirs);
+        records.extend(knocks.iter().map(|k| contact_search::Record { capacity: k.capacity, ..contact_search::Record::default() }));
         contact_search::collide(&mut records, 0, Some(&mut me.body), field.as_deref(), &mut scene, dt);
         let movers = contact_search::Search::movers(&scene);
         let struck = std::mem::take(&mut scene.struck);
         drop(scene);
+        let knocked: Vec<Vec<contact::Contact>> = records.split_off(knocks_from).into_iter().map(|r| r.contacts).collect();
         let mut theirs = records.split_off(first);
         let mut records = records.into_iter();
         me.record = records.next().unwrap_or_default();
@@ -1847,6 +1926,7 @@ fn search_together(
         // lists do.
         for e in &mut me.record.contacts[mine..] {
             match e.other {
+                Some(o) if o >= knocks_from => e.other = Some(KNOCK_FROM + o - knocks_from),
                 Some(o) if o >= first => e.other = Some(bases[i] + rank(i, seen[o - first])),
                 Some(o) => {
                     if let Some(m) = met.as_deref_mut() {
@@ -1871,7 +1951,7 @@ fn search_together(
         for (r, &j) in theirs.drain(..).zip(&seen) {
             fleet[j].flight.record = r;
         }
-        out.push((struck, movers));
+        out.push((struck, movers, knocked));
     }
     out
 }
@@ -1886,6 +1966,9 @@ struct Together<'a, 'b> {
     /// its own post moves it.
     hulls: Vec<Option<crate::math::Mat4>>,
     seams: Vec<[i8; 2]>,
+    /// The knockable props' bodies the planes struck (S259a), after the other planes among each
+    /// plane's sides.
+    props: &'a mut [crate::prop_contact::Pushed],
 }
 
 impl Dynamics for Together<'_, '_> {
@@ -1936,8 +2019,11 @@ impl Dynamics for Together<'_, '_> {
             None => Vec::new(),
         };
         others.extend(planes.iter_mut().map(|(collider, body)| contact::Other { collider: &mut **collider, side: contact::Side::Body(body) }));
+        let mut bodies: Vec<(&mut Collider, Weighed<'_>)> = self.props.iter_mut().map(|p| p.weighed()).collect();
+        others.extend(bodies.iter_mut().map(|(collider, body)| contact::Other { collider: &mut **collider, side: contact::Side::Body(body) }));
         flight.forces(h, &mut self.ground, &self.tables.curve, &self.tables.acos, &self.movers[i], &mut others);
         drop(others);
+        drop(bodies);
         drop(planes);
         for (f, (position, last, cofg)) in before.iter_mut().chain(after.iter_mut()).zip(kept) {
             let b = &mut f.flight.body;

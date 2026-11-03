@@ -75,6 +75,22 @@ impl Shared {
         let _ = self.held(sim, dt, world);
     }
 
+    /// The set itself, for planes flown together to strike (S259a,
+    /// [`crate::flight::frames_together_props`]): no seat's traffic holds it then.
+    pub fn set_mut(&mut self) -> &mut PropSet {
+        &mut self.set
+    }
+
+    /// A flying seat's traffic before its plane flies with the others (S259a,
+    /// [`crate::flight::frames_together_props`]): [`crate::traffic::Traffic::frame`] on its own
+    /// empty set, the set's collide pass if no seat ran it yet ([`Shared::held`]), and the set
+    /// kept here for the planes' frame.
+    pub fn traffic(&mut self, sim: &mut Sim, dt: F, world: &mut dyn World) {
+        self.lend(sim, dt, world);
+        self.back(sim);
+        sim.traffic.frame_late(dt, world);
+    }
+
     /// The set back from the seat [`Shared::held`] or [`Shared::lend`] lent it to.
     pub fn back(&mut self, sim: &mut Sim) {
         std::mem::swap(&mut sim.traffic.props, &mut self.set);

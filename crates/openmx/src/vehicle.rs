@@ -1610,13 +1610,24 @@ impl Garage {
     }
 
     /// [`Garage::step_among`] on the plane up to its frame (N22a1): the track's path cars, then
-    /// [`Plane::ready`]. `None` but with the plane up, and then nothing ran.
-    pub fn ready_plane(&mut self, sim: &mut Sim, dt: F, world: &mut dyn World) -> Option<Readied> {
+    /// [`Plane::ready`]. `None` but with the plane up, and then nothing ran. Among seats that share
+    /// one prop set (S259a), the seat's traffic is [`game_sim::prop_seats::Shared::traffic`]'s, and
+    /// the set waits for [`fly_together`].
+    pub fn ready_plane(
+        &mut self,
+        sim: &mut Sim,
+        dt: F,
+        world: &mut dyn World,
+        props: Option<&mut game_sim::prop_seats::Shared>,
+    ) -> Option<Readied> {
         if detour(self.up) || self.up != Kind::Biplane {
             return None;
         }
         let plane = self.plane.as_mut()?;
-        sim.traffic.frame(dt, world);
+        match props {
+            Some(p) => p.traffic(sim, dt, world),
+            None => sim.traffic.frame(dt, world),
+        }
         plane.ready(sim, world)
     }
 
@@ -1646,15 +1657,27 @@ impl Garage {
 /// **The ride's flown planes' frames, together** (N22a1): every [`Plane::ready`]'d plane in one
 /// [`flight::frames_together`], so they strike each other as the original's level node has its
 /// planes meet — one dynamics step, their resolves interleaved substep by substep. One plane alone
-/// flies its own [`Flight::frame_met`], as [`Plane::step_met`] does.
-pub fn fly_together(dt: F, fleet: &mut [flight::Fly<'_>], world: &mut dyn World, tables: &game_sim::ride::Tables) {
-    match fleet {
-        [] => {}
-        [one] => {
+/// flies its own [`Flight::frame_met`], as [`Plane::step_met`] does. Among the seats' one prop set
+/// (S259a, `props`: the set and each plane's seat) they strike it as a lone plane does
+/// ([`flight::frames_together_props`], [`Flight::frame_props`]); the set's step is
+/// [`game_sim::prop_seats::Shared::finish`]'s.
+pub fn fly_together(
+    dt: F,
+    fleet: &mut [flight::Fly<'_>],
+    world: &mut dyn World,
+    tables: &game_sim::ride::Tables,
+    props: Option<(&mut game_sim::prop_set::PropSet, &[usize])>,
+) {
+    match (fleet, props) {
+        ([], _) => {}
+        ([one], None) => {
             let _ = one.flight.frame_met(dt, one.pad, world, tables, one.bikes, one.met.as_deref_mut());
         }
-        _ => {
-            let _ = flight::frames_together(dt, fleet, world, tables);
+        ([one], Some((set, seats))) => {
+            let _ = one.flight.frame_props(dt, one.pad, world, tables, one.bikes, one.met.as_deref_mut(), set, seats[0]);
+        }
+        (fleet, props) => {
+            let _ = flight::frames_together_props(dt, fleet, world, tables, props);
         }
     }
 }
@@ -1924,10 +1947,20 @@ pub fn fly_lane_shared(
 }
 
 /// [`fly_lane_met`] up to the frame (N22a1): the track's path cars, then [`Plane::ready`] on the
-/// seat's flight, which the plane holds until [`settle_lane`]. `None` on the bike.
-pub fn ready_lane(sim: &mut Sim, dt: F, wanted: Wanted, world: &mut dyn World) -> Option<(Plane, Readied)> {
+/// seat's flight, which the plane holds until [`settle_lane`]. `None` on the bike. Among seats that
+/// share one prop set (S259a), as [`Garage::ready_plane`].
+pub fn ready_lane(
+    sim: &mut Sim,
+    dt: F,
+    wanted: Wanted,
+    world: &mut dyn World,
+    props: Option<&mut game_sim::prop_seats::Shared>,
+) -> Option<(Plane, Readied)> {
     let f = sim.plane.take()?;
-    sim.traffic.frame(dt, world);
+    match props {
+        Some(p) => p.traffic(sim, dt, world),
+        None => sim.traffic.frame(dt, world),
+    }
     let mut plane =
         Plane { every_bank: wanted.every_bank, round_stick: wanted.round_stick, dpad: wanted.dpad_rides, ..Plane::around(f) };
     match plane.ready(sim, world) {

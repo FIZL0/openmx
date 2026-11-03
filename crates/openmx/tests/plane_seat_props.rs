@@ -215,3 +215,82 @@ fn a_plane_seat_knocks_the_shared_ball() {
     }
     assert!(ball(&sims[0], at).enabled, "the ball the plane knocked is awake in seat 0's world, which the shell draws");
 }
+
+/// S259a: two seats flying together ([`flight::frames_together_props`], as online's and split
+/// screen's held planes fly through [`vehicle::fly_together`]) strike the seats' one set. Seat 1 flies
+/// S241's plane at ball 0, seat 0 the same plane 2000 ft off; the walk readies seat 1 then seat 0
+/// ([`vehicle::ready_lane`]), flies both in one frame, settles them, and the set steps with both
+/// planes as its strikers. Against seat 1's plane flying alone: the ball and the plane as there, bit
+/// for bit, in both seats.
+#[test]
+fn planes_flown_together_knock_the_shared_ball() {
+    let Ok(kit) = Kit::load().map_err(|why| skip(&why)) else { return };
+    let Some(mut plane) = the_plane(&kit) else { return };
+    let Some((mut set, mut ground)) = free06() else { return };
+    let Some(ee) = image(&kit) else { return };
+    let at = seed(&ee, &mut set);
+    plane.body = body_of(&ee, ee.u32_at(PLANE + 0x160));
+    let dt = F(ee.f32_at(addr("frame_dt").unwrap()));
+    let flying = |plane: &Flight| {
+        let mut s = Sim::new(0x5259);
+        s.plane = Some(plane.clone());
+        s.traffic.props = set.clone();
+        s
+    };
+    let wanted = vehicle::Wanted::default();
+    let ground: &mut dyn World = &mut ground;
+
+    let mut alone = flying(&plane);
+    let mut want = Vec::new();
+    for _ in 0..12 {
+        vehicle::fly_lane_met(&mut alone, dt, wanted, ground, &[], None);
+        want.push((ball(&alone, at), alone.plane.as_ref().unwrap().body));
+    }
+    assert_eq!(want.iter().position(|(b, _)| b.enabled).map(|k| k + 1), Some(3), "alone, ball 0 wakes on the original's tick");
+
+    let mut far = plane.clone();
+    let by = Vf::new(0.0, 0.0, 2000.0, 0.0);
+    (far.body.position, far.body.last_position) = (far.body.position.add(by), far.body.last_position.add(by));
+    far.collider.cofg_world = far.collider.cofg_world.add(by);
+    let mut sims = [flying(&far), flying(&plane)];
+    for (tick, (want_ball, want_plane)) in want.iter().enumerate() {
+        let mut props = game_sim::prop_seats::Shared::take(&mut sims.iter_mut().collect::<Vec<_>>()).expect("two seats, props");
+        let mut held = Vec::new();
+        for seat in [1, 0] {
+            let (plane, ready) = vehicle::ready_lane(&mut sims[seat], dt, wanted, ground, Some(&mut props)).expect("a flying seat");
+            held.push((seat, plane, ready));
+        }
+        {
+            let tables = sims[1].tables.clone();
+            let seats: Vec<usize> = held.iter().map(|(s, ..)| *s).collect();
+            let mut fleet: Vec<flight::Fly<'_>> = held
+                .iter_mut()
+                .map(|(_, p, r)| flight::Fly { flight: p.flight.as_mut().unwrap(), pad: r.pad, met: None, bikes: &[] })
+                .collect();
+            vehicle::fly_together(dt, &mut fleet, ground, &tables.ride, Some((props.set_mut(), &seats)));
+        }
+        for (seat, plane, ready) in held {
+            vehicle::settle_lane(&mut sims[seat], plane, ready);
+        }
+        props.finish(&mut sims.iter_mut().collect::<Vec<_>>(), dt, ground);
+        for (k, s) in sims.iter().enumerate() {
+            let got = ball(s, at);
+            assert_eq!(got.enabled, want_ball.enabled, "tick {}: seat {}'s ball awake as alone", tick + 1, k + 1);
+            assert_eq!(
+                (got.position.to_bits(), got.velocity.to_bits(), got.rates.to_bits()),
+                (want_ball.position.to_bits(), want_ball.velocity.to_bits(), want_ball.rates.to_bits()),
+                "tick {}: seat {}'s ball as alone\ngot {got:?}\nwant {want_ball:?}",
+                tick + 1,
+                k + 1
+            );
+        }
+        let got = sims[1].plane.as_ref().unwrap().body;
+        assert_eq!(
+            (got.position.to_bits(), got.velocity.to_bits(), got.rates.to_bits()),
+            (want_plane.position.to_bits(), want_plane.velocity.to_bits(), want_plane.rates.to_bits()),
+            "tick {}: the plane as alone",
+            tick + 1
+        );
+    }
+    assert!(ball(&sims[0], at).enabled, "the ball the planes knocked is awake in seat 0's world");
+}

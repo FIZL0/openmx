@@ -67,6 +67,7 @@ struct Held {
 /// The held flying seats' steps finished (N22a1): their planes in one [`vehicle::fly_together`], in
 /// the walk's order, then each seat's flight back in its lane, its markers, and its plane's pushes
 /// on the bikes and the mirrors for their lists, as [`Rides::step`] has a lone plane's.
+#[allow(clippy::too_many_arguments)]
 fn fly_held(
     sims: &mut [Sim],
     world: &mut dyn World,
@@ -75,17 +76,23 @@ fn fly_held(
     riding: &[bool],
     mut held: Vec<Held>,
     struck: &mut [Vec<Vec<game_sim::contact::Contact>>],
+    props: Option<&mut game_sim::prop_seats::Shared>,
 ) {
     if let Some(first) = held.first() {
         let tables = sims[first.seat].tables.clone();
+        let mut flown = Vec::new();
         let mut fleet: Vec<game_sim::flight::Fly<'_>> = held
             .iter_mut()
             .filter_map(|h| {
                 let pad = h.ready.pad;
-                Some(game_sim::flight::Fly { flight: h.plane.flight.as_mut()?, pad, met: h.met.as_mut(), bikes: &h.bikes })
+                let flight = h.plane.flight.as_mut()?;
+                flown.push(h.seat);
+                Some(game_sim::flight::Fly { flight, pad, met: h.met.as_mut(), bikes: &h.bikes })
             })
             .collect();
-        vehicle::fly_together(dt, &mut fleet, world, &tables.ride);
+        // Among the seats' one prop set (S259a) the planes strike it, each named by its seat.
+        let props = props.map(|p| (p.set_mut(), &flown[..]));
+        vehicle::fly_together(dt, &mut fleet, world, &tables.ride, props);
     }
     for Held { seat, k, plane, ready, met, wanted, .. } in held {
         let sim = &mut sims[seat];
@@ -152,7 +159,7 @@ impl Game for Rides<'_> {
         let mut held: Vec<Held> = Vec::new();
         for seat in order {
             if !aloft[seat] && !held.is_empty() {
-                fly_held(self.sims, &mut *self.world, dt, &spots, &riding, std::mem::take(&mut held), &mut struck);
+                fly_held(self.sims, &mut *self.world, dt, &spots, &riding, std::mem::take(&mut held), &mut struck, props.as_mut());
             }
             let at = self.sims[seat].rider.ride.transform().0[3];
             let firsts: Vec<Vec<game_sim::contact::Contact>> = struck.iter_mut().map(|s| s.get_mut(seat).map(std::mem::take).unwrap_or_default()).collect();
@@ -204,7 +211,7 @@ impl Game for Rides<'_> {
             // On the plane the bike is not stepped, its markers do not run and its rider's body
             // does not move, as offline (`Seat::pass`); the plane's own markers do (P107).
             if together && aloft[seat]
-                && let Some((readied, ready)) = vehicle::ready_lane(sim, dt, wanted, self.world)
+                && let Some((readied, ready)) = vehicle::ready_lane(sim, dt, wanted, self.world, props.as_mut())
             {
                 held.push(Held { seat, k: plane, plane: readied, ready, met, bikes, wanted });
                 continue;
@@ -246,7 +253,7 @@ impl Game for Rides<'_> {
             }
         }
         if !held.is_empty() {
-            fly_held(self.sims, &mut *self.world, dt, &spots, &riding, held, &mut struck);
+            fly_held(self.sims, &mut *self.world, dt, &spots, &riding, held, &mut struck, props.as_mut());
         }
         if let Some(p) = props {
             p.finish(&mut self.sims.iter_mut().collect::<Vec<_>>(), dt, self.world);
