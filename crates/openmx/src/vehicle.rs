@@ -2346,14 +2346,25 @@ const KIOWA_DROP: f32 = 0.25;
 
 /// The world round a flown helicopter for [`game_sim::kiowa::Kiowa::tick`]: the original's ground
 /// (C14a's [`game_sim::kiowa::Grounded`]: [`game_sim::contact::resolve`] on the collision record,
-/// its touching flag and entries, the rotor's wreck rays' ends in the ground for the strike), and the
-/// wreck and put-back as the port's own until S220a1 ports the original's: a wreck hides the blades
-/// (they go, the tail rotor shows bent) and the put-back stands the helicopter back on the ground
-/// where it is, whole and at rest.
+/// its touching flag and entries, the rotor's wreck rays' ends in the ground for the strike), and what
+/// the crash test asks for done as the original's MX helicopter does it (S220a1's
+/// [`game_sim::kiowa::Wreckage::act`]): the wreck (the reason, the body's damping, inertia and wreck
+/// gravity, the blades thrown with their three `rand()`s each, the nodes swapped), and the put-back
+/// (the body stood still at its place, the unwreck, the spawn copied over the place).
 struct KiowaAround<'a> {
     ground: game_sim::kiowa::Grounded<'a>,
-    /// The put-back asked for, done after the tick (it builds the helicopter again).
-    recover: bool,
+    wreckage: &'a mut game_sim::kiowa::Wreckage,
+    /// The put-back's altitude fraction, if the helicopter was put back: the controls' share
+    /// ([`game_sim::kiowa::Kiowa::put_back_controls`]) is done after the tick.
+    put_back: Option<F>,
+}
+
+/// Where the blades are thrown from: every row the measure's matrix (the model's, as the helicopter
+/// is drawn). The blade nodes' own rows are S270's; while the shell builds no blade bodies (P265)
+/// the rows move nothing, and the throw's `rand()`s are drawn all the same.
+fn kiowa_throw(ride: &game_sim::kiowa::Ride) -> game_sim::kiowa::Throw {
+    let m = ride.measure.matrix;
+    game_sim::kiowa::Throw { blades: [m; 4], model: m }
 }
 
 /// `v` (`xyz`) turned by the unit quaternion `q` (`x, y, z, w`), in plain arithmetic.
@@ -2387,10 +2398,12 @@ impl game_sim::kiowa::Surroundings for KiowaAround<'_> {
     }
     fn crashed(&mut self, asked: &game_sim::kiowa::Crashed, ride: &mut game_sim::kiowa::Ride, rng: &mut game_sim::rng::Rng) {
         self.ground.crashed(asked, ride, rng);
-        if asked.wreck.is_some() {
-            ride.rotor_hidden = true;
+        // A player's helicopter has no owner (S148's has none, +0xb94 0), so the put-back goes to
+        // the spawn: where it was taken.
+        let throw = kiowa_throw(ride);
+        if let Some(f) = self.wreckage.act(asked, ride, &throw, false, rng) {
+            self.put_back = Some(f);
         }
-        self.recover |= asked.recover;
     }
 }
 
@@ -2402,6 +2415,8 @@ pub struct Heli {
     pub ride: game_sim::kiowa::Ride,
     pub collision: game_sim::kiowa::Collision,
     pub rng: game_sim::rng::Rng,
+    /// What its wreck, unwreck and put-back read and write besides the ride (S220a1).
+    pub wreckage: game_sim::kiowa::Wreckage,
 }
 
 impl Heli {
@@ -2530,15 +2545,22 @@ impl KiowaRide {
         };
         let mut collision = game_sim::kiowa::Collision::new(part, &ride.body, KIOWA_INERTIA, self.rays.clone());
         collision.refresh(&ride.body, world);
-        Heli { kiowa, ride, collision, rng: game_sim::rng::Rng::from_seed(0x0216_6b69) }
+        // The body wrapper's place and the MX spawn are where it was built, as S148's helicopter
+        // holds both (equal) where it was set down.
+        let mut wreckage = game_sim::kiowa::Wreckage::new(p, KIOWA_INERTIA, part.mass);
+        wreckage.place = [position, facing, up];
+        wreckage.spawn = wreckage.place;
+        Heli { kiowa, ride, collision, rng: game_sim::rng::Rng::from_seed(0x0216_6b69), wreckage }
     }
 
     /// One frame of the helicopter on `pad` through `table`: the input step
     /// ([`game_sim::kiowa::Pad::from_sticks`], the left stick through the player's range), then its
     /// frame over `world` ([`game_sim::kiowa::Kiowa::tick`], [`KiowaAround`]), its collision object
     /// searched first ([`game_sim::kiowa::Collision::search`]), as the level's collision node searches
-    /// every object before any dynamics world runs. A put-back asked for builds it again on the ground
-    /// where it is, along its heading. Nothing for a helicopter not out.
+    /// every object before any dynamics world runs. What the crash test asks for is done in the tick
+    /// ([`KiowaAround`]); after it, a put-back's share on the controls, and its collision object's
+    /// nearby list gathered again where it was put (the reset's probes put back in). Nothing for a
+    /// helicopter not out.
     pub fn step(&mut self, pad: &game_sim::input::Pad, table: &game_sim::bindings::Table, tables: &game_sim::ride::Tables, dt: F, world: &mut dyn World) {
         use game_sim::input::{Axis, AxisRange};
         let Some(h) = self.flown.as_mut() else { return };
@@ -2546,17 +2568,12 @@ impl KiowaRide {
         let input = game_sim::kiowa::Pad::from_sticks(stick, |c| table.value(pad, c));
         let movers = h.collision.search(&mut h.ride.body, world, dt);
         let ground = game_sim::kiowa::Grounded { collision: &mut h.collision, world: &mut *world, movers: &movers, rotor: &self.phy.wreck_rotor.rays, asked: Vec::new() };
-        let mut around = KiowaAround { ground, recover: false };
+        let mut around = KiowaAround { ground, wreckage: &mut h.wreckage, put_back: None };
         let asked = h.kiowa.tick(&mut h.ride, &KIOWA_WORLD, Some(input), &tables.curve, &tables.acos, &mut h.rng, dt, &mut around);
         self.wrecks += u32::from(asked.wreck.is_some());
-        if around.recover {
-            let rng = h.rng;
-            let (at, forward) = self.place().expect("a flown helicopter has a place");
-            let ground = ground_under(world, at).unwrap_or(at.y());
-            let facing = level(forward).unwrap_or(Vf::new(0.0, 0.0, 1.0, 0.0));
-            let mut fresh = self.built(Vf::new(at.x(), ground + KIOWA_DROP, at.z(), 1.0), facing, world);
-            fresh.rng = rng;
-            self.flown = Some(fresh);
+        if let Some(fraction) = around.put_back {
+            h.kiowa.put_back_controls(fraction);
+            h.collision.refresh(&h.ride.body, world);
         }
     }
 
@@ -2586,7 +2603,7 @@ impl KiowaRide {
     /// wrecked (the tail rotor bent). A parked one's is at rest and whole.
     pub fn rotor(&self) -> (f32, bool, bool) {
         match &self.flown {
-            Some(h) => (h.ride.rotor_angle.0, !h.ride.rotor_hidden, h.ride.crash.reason != 0),
+            Some(h) => (h.ride.rotor_angle.0, !h.ride.rotor_hidden, !h.wreckage.nodes.wrecked),
             None => (0.0, true, false),
         }
     }

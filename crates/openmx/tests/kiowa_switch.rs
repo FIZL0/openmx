@@ -6,6 +6,9 @@
 //! P216a: it stands and lands on the original's ground (its collision record, C14a), and the crash
 //! test's MinWreckSpeed wrecks it: brought down fast and nose-first it wrecks, let straight down on
 //! Square it stands.
+//!
+//! P216a1: the wreck and put-back are the original's (S220a1's `kiowa::Wreckage`): a player's
+//! helicopter has no owner, so the put-back stands it at its spawn, where it was taken.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -133,7 +136,8 @@ const CLIMB: Phase = Phase { frames: 60, buttons: 0xbf, cross: 0xff, square: 0, 
 #[test]
 fn a_landing_at_speed_wrecks() {
     // Up 110 ft, 200 ticks nose down to ~128 ft/s, then down on Square with the stick still
-    // forward: it meets the ground going fast, wrecks, and is put back on its skids.
+    // forward: it meets the ground going fast, wrecks, and is put back on its skids where it was
+    // taken (its spawn).
     let tape = scratch("fast-landing.tape");
     let forward = Phase { frames: 200, stick_y: 0x00, ..REST };
     let down = Phase { frames: 300, buttons: 0x7f, square: 0xff, stick_y: 0x00, ..REST };
@@ -143,6 +147,8 @@ fn a_landing_at_speed_wrecks() {
     let (n, line) = wrecks(&said);
     assert_eq!(n, 1, "a fast landing wrecked it {n} times: {line}\n{said}");
     assert!(line.contains("on its skids"), "it was not put back: {line}");
+    let gone: f32 = line.split_whitespace().nth(1).and_then(|w| w.parse().ok()).unwrap_or_else(|| panic!("no distance in `{line}`"));
+    assert!(gone < 5.0, "it was put back {gone} ft from its spawn: {line}");
 }
 
 #[test]
