@@ -318,3 +318,44 @@ fn a_steady_tick_builds_no_world() {
         assert_eq!(updated - before.1, 2, "tick {t}: the ride's world and the plane's brought up to the cars");
     }
 }
+
+/// Tick `t`'s props with car 2 hidden for its own search, as [`game_sim::traffic::hide`] leaves it:
+/// no triangles, no reach, and not moving.
+fn props_hiding_car_2(t: usize) -> Props {
+    let mut props = props(t);
+    let car = &mut props.props[42];
+    car.mesh.nodes.clear();
+    car.mesh.triangles.clear();
+    car.radius = F::ZERO;
+    car.moving = None;
+    props
+}
+
+/// **A car searching with itself hidden builds no world** (N23): a path car with physics on searches
+/// the world with its own mesh out of it, its moving word cleared, and the bike's searches see it
+/// moving, every tick. Each of the two kept worlds is brought up to its own search's cars rather than
+/// one built afresh at each change, and both are the fresh build's.
+#[test]
+fn a_hidden_car_and_its_unhidden_world_are_both_kept() {
+    let field = fields()[0];
+    let (centre, radius) = (Vf::new(200.0, 3.0, 90.0, 1.0), F(0.5));
+    flight_search::forget_worlds();
+    // The kept search's builds and updates, the fresh build's own build left out of the count.
+    let mut kept_builds = (0, 0);
+    let mut search = |props: &Props, what: &str| {
+        let before = flight_search::world_builds();
+        let kept = flight_search::kept(&props.props, None, None, field, centre, radius, true);
+        let after = flight_search::world_builds();
+        (kept_builds.0, kept_builds.1) = (kept_builds.0 + after.0 - before.0, kept_builds.1 + after.1 - before.1);
+        let fresh = flight_search::world_flown(&props.props, None, None, field, centre, radius);
+        assert!(kept.1 == fresh.1, "{what}: the collidables");
+        assert!(kept.0 == fresh.0, "{what}: the broad phase");
+    };
+    search(&props_hiding_car_2(0), "tick 0, hidden");
+    search(&props(0), "tick 0, seen");
+    for t in 1..10 {
+        search(&props_hiding_car_2(t), &format!("tick {t}, hidden"));
+        search(&props(t), &format!("tick {t}, seen"));
+    }
+    assert_eq!(kept_builds, (2, 18), "one world built for each of the two searches, then each brought up to its cars");
+}

@@ -992,16 +992,25 @@ fn kept_world<R>(
         let k = match kept.iter().position(|w| w.stamp == *stamp) {
             Some(k) => k,
             None => {
-                let near = kept.iter().position(|w| {
-                    w.props_at == at && w.stamp[..at.start] == stamp[..at.start] && w.stamp[at.end..] == stamp[at.end..]
+                // Every kept world laid out alike is tried in turn, not only the newest (N23). A path
+                // car with physics on searches with itself hidden, its moving word cleared
+                // ([`crate::traffic::hide`]), and the bike's searches see it moving, so the newest
+                // world is in the other state at every other search and refuses the update: an older
+                // one kept in this state takes it instead of a build. A refused update leaves its
+                // world as it was.
+                let near = kept.iter_mut().position(|w| {
+                    w.props_at == at
+                        && w.stamp[..at.start] == stamp[..at.start]
+                        && w.stamp[at.end..] == stamp[at.end..]
+                        && w.update(props, field, toys, stamp)
                 });
                 match near {
-                    Some(k) if kept[k].update(props, field, toys, stamp) => {
+                    Some(k) => {
                         let (b, u, g) = BUILDS.get();
                         BUILDS.set((b, u + 1, g));
                         k
                     }
-                    _ => {
+                    None => {
                         kept.insert(0, Kept::build(props, trees, bikes, planes, field, centre, radius, toys, stamp, at));
                         kept.truncate(WORLDS_KEPT);
                         0
