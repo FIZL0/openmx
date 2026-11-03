@@ -353,13 +353,22 @@ impl Sim {
             // L1+R1 had already put back).
             plane.reset_chord(controls.respawn, &self.tables.ride.acos);
             let pad = flight::pad(self.input.pad(0));
+            // A downed rider's wreck bike meets the plane (S276, [`wreck_plane`]): its search with the
+            // hull in its world before the plane's frame, its mirrors on the plane's list, and its
+            // step, the plane's body on its resolve, after. The downed rider is not stepped otherwise.
+            let mut met = flight::Met::default();
+            let mut riders: Vec<&mut crate::rider::Rider> = self.others.iter_mut().map(|p| &mut p.rider).collect();
+            let downed = wreck_plane::search_downed(&mut riders, plane, dt, world, &mut met);
+            let meets = (!downed.is_empty()).then_some(&mut met);
             let (_struck, seam) = if self.traffic.props.is_empty() {
-                plane.frame_seamed(dt, pad, world, &self.tables.ride, &bikes)
+                plane.frame_met(dt, pad, world, &self.tables.ride, &bikes, meets)
             } else {
                 // The plane's rays strike the knockable props, and theirs its hull; its world steps
                 // ahead of theirs, which resolve their mirrors against it as their striker 0 (S241).
-                plane.frame_props(dt, pad, world, &self.tables.ride, &bikes, None, &mut self.traffic.props, 0)
+                plane.frame_props(dt, pad, world, &self.tables.ride, &bikes, meets, &mut self.traffic.props, 0)
             };
+            wreck_plane::step_downed(&mut riders, plane, downed, &mut met, dt, &*world, false);
+            drop(riders);
             let mut weighed = contact::Weighed { body: &mut plane.body, mass: plane.mass };
             let mut strikers = [contact::Other { collider: &mut plane.collider, side: contact::Side::Body(&mut weighed) }];
             self.traffic.props.step_with(dt, &prop_movers, &mut strikers);

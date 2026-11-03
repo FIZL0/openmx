@@ -213,6 +213,13 @@ impl Game for Rides<'_> {
             let flying = self.sims[seat].plane.as_ref().map(|f| f.body.position);
             let bikes = flying.map(|at| rider_contact::plane_bikes(&on, seat, at, &*self.world)).unwrap_or_default();
             drop(on);
+            // A downed rider's wreck bike meets a lone flown plane (S276): its search with the hull in
+            // its world before the plane's frame, the mirrors on the plane's list, and its step after,
+            // which the rider's own step later this tick does not repeat.
+            let downed = match met.as_mut().filter(|_| plane.is_some() && !together) {
+                Some(m) => game_sim::wreck_plane::search_downed_among(self.sims, seat, &touching, dt, &mut *self.world, m),
+                None => game_sim::wreck_plane::Downed::default(),
+            };
             let sim = &mut self.sims[seat];
             let mut reports = [Report::missing(); PADS];
             reports[0] = pads.get(seat).copied().unwrap_or(Report::missing());
@@ -247,6 +254,10 @@ impl Game for Rides<'_> {
             }
             if sim.plane.is_some() {
                 vehicle::fly_lane_shared(sim, dt, wanted, self.world, &bikes, met.as_mut(), props.as_mut().map(|p| (p, seat)));
+                if let Some(m) = met.as_mut() {
+                    game_sim::wreck_plane::step_downed_among(self.sims, seat, &touching, downed, m, dt, &*self.world);
+                }
+                let sim = &mut self.sims[seat];
                 if !wanted.dpad_rides {
                     vehicle::lane_markers(sim, seat, &spots, &riding, self.world);
                 }

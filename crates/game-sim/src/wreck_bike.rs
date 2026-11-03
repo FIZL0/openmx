@@ -270,6 +270,10 @@ pub struct WreckBike {
     /// bodies as its frame pushed them for [`crate::Sim::wreck_pushed_back`] (S244). Not on the wire: it is
     /// made and spent within one tick.
     pub struck: crate::prop_wreck::WreckStrike,
+    /// Its frame ran this tick among a flown plane (S276, [`crate::wreck_plane::step_downed`]), so the
+    /// rider's own [`crate::ride::Crash::step`] skips the body's tick once, and clears it. Not on the
+    /// wire: it is made and spent within one tick.
+    pub flown: bool,
 }
 
 /// The node's dynamics world as the wreck bike sees it: one body, the part's force listener, its
@@ -343,7 +347,7 @@ impl WreckBike {
         };
         let collider = collider(part, part.mass, inv_mass, inertia);
         let record = record(part, node_of(&body));
-        WreckBike { body, mass: part.mass, gravity: part.gravity, collider, record, struck: Default::default() }
+        WreckBike { body, mass: part.mass, gravity: part.gravity, collider, record, struck: Default::default(), flown: false }
     }
 
     /// **One frame**, as the original's world node runs it: the contact list emptied, the search,

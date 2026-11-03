@@ -3522,7 +3522,9 @@ impl Crash {
         // search builds its broad phase afresh from every prop handed over, so a world of tiles
         // hands only the shapes near the body (`World::wooded_near`, V99): its rays reach a few
         // feet, well inside the near set's margin.
-        if !part.collision_enabled {
+        // A flown plane's lane ticked it already this tick, among the plane (S276, [`crate::wreck_plane`]).
+        if std::mem::take(&mut self.bike.flown) {
+        } else if !part.collision_enabled {
             self.bike.tick(dt, None, &mut NoObjects);
         } else {
             match world.wooded_near(self.bike.origin()) {

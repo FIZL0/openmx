@@ -1758,8 +1758,25 @@ impl<P: sim_world::World> Game for World<P> {
                 }
                 continue;
             }
+            // A downed rider's wreck bike meets a lone flown plane (S276): its search with the hull in
+            // its world before the plane's frame, the mirrors on the plane's list, and its step after,
+            // which the rider's own pass later in the walk does not repeat.
+            let downed = match met.as_mut().filter(|_| plane.is_some()) {
+                Some(m) => match flown_among(&mut self.seats, me, &on) {
+                    (mut riders, Some(f)) => game_sim::wreck_plane::search_downed(&mut riders, f, dt, &mut self.place, m),
+                    _ => game_sim::wreck_plane::Downed::default(),
+                },
+                None => game_sim::wreck_plane::Downed::default(),
+            };
             let among = vehicle::Among { bump: bump.as_mut(), rivals: &rivals, bikes: &bikes, met: met.as_mut(), props: props.as_mut().map(|p| (p, me)) };
             self.seats[me].pass(dt, &mut self.place, me, &spots, among);
+            if !downed.is_empty()
+                && let Some(m) = met.as_mut()
+                && let (mut riders, Some(f)) = flown_among(&mut self.seats, me, &on)
+            {
+                game_sim::wreck_plane::step_downed(&mut riders, f, downed, m, dt, &self.place, true);
+                self.seats[me].garage.plane_reposed();
+            }
             self.met_after(plane, met, bump.as_ref(), &mut struck);
         }
         // A flying seat's plane is its striker in the set's step (S259); the garage holds it.
@@ -1773,6 +1790,21 @@ impl<P: sim_world::World> Game for World<P> {
         }
         true
     }
+}
+
+/// Seat `me`'s flown plane and the riders of the other seats `on` holds in the ride (S276,
+/// [`game_sim::wreck_plane`]): the downed among them meet the plane.
+fn flown_among<'s>(seats: &'s mut [Seat], me: usize, on: &[bool]) -> (Vec<&'s mut rider::Rider>, Option<&'s mut game_sim::flight::Flight>) {
+    let mut flight = None;
+    let mut riders = Vec::new();
+    for (j, s) in seats.iter_mut().enumerate() {
+        if j == me {
+            flight = s.garage.flight_flown_mut();
+        } else if on[j] {
+            riders.push(&mut s.sim.rider);
+        }
+    }
+    (riders, flight)
 }
 
 /// **A flying seat's pass, held at its plane's frame** (N22a1): what [`World::fly_held`] needs to
