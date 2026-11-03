@@ -8489,3 +8489,25 @@ atv_ray_tree_pair           atv 0x00108820 = the ray probe's tree against a mesh
 atv_listener_at             atv 0x00117460 = a collidable's listener j
 atv_record_current          atv 0x00116990 = the record's current contact
 pc_quad_collide_search      pc 0x00424350 = the PC's collide_against_search (the quad's search)
+
+# MD82b — MX vs. ATV's follow-camera update (game_sim::camera::ModFollow; tests/mxvatv_camera.rs replays
+# context/capture/md82b, spec research/md82b/cam.toml). Journal: research/journal/2026-11-03-md82b-mxvatv-follow-camera.
+atv_follow_update           atv 0x0048b490 = MXCameraFollow update (vt slot of 0x003cc6f0): nothing but the base frame when the target block (+0x80) is null (a wrecked ATV rider); heading = velocity (y 0) when airborne && !(speed <= 20) && !(|speed - |vel.y|| <= 0.01), else forward; reverse test; swing = (-lean * 0.21) * fov ratio; aim; distance floor; lead point = point + vel * min(0.2, dt); look_at; direction rotate(yaw, UP, rotate(pitch, heading x UP, heading)); position; filter
+atv_follow_aim              atv 0x0048bbd0 = yaw = wrap(fmod(+0xb4 - user yaw)) less swing * Swing * fade(|yaw|, pi/2 0x3fc90fdb .. 2pi/3 0x40060a92, 0 -> 1); pitch clamp as MXU's race camera with no reverse term; low-speed trim then msub(k, |forward.y|); short viewport msub(angle_x, 0.33)
+atv_follow_look_at          atv 0x0048c050 = MXU's race look_at with the look-ahead scaled by rear fade(|yaw|, 0x3f860a91 .. pi/2, 0 -> 1); swing vector rotate(wrap(swing * (-0.7 * LookSwing)), UP, heading)
+atv_follow_position         atv 0x0048c3b0 = eye from the look point back along the direction by +0xb0, as the race camera's
+atv_follow_filter           atv 0x0048c490 = keep-off-ground (lock on); when the lags run, look/position taus = preset's * fade(speed, 0 .. 29.3332 0x41eaaa65, 1 -> rear fade(0.25)); base filter; keep-off-ground (lock off)
+atv_follow_ground_probe     atv 0x0048b3e0 = vt +0x110, the terrain (+0x1c4) under a point
+atv_follow_keep_off_ground  atv 0x0048b0c0 = vt +0x10c, the lift +0x1cc
+atv_camera_lag_set          atv 0x00484a60 = lag (value, tau, alpha) setter; with tau, alpha = 1
+atv_rotate_about            atv 0x00129aa0 = rotate a vector about an axis by an angle
+atv_fmodf                   atv 0x0034ff10 = fmodf
+atv_camera_fov              atv 0x001c4f20 = same as MXU's Follow::field_of_view
+atv_viewport_set_eye        atv 0x00111c30 = eye -> viewport +0x140, normalised directions -> +0x150..
+atv_follow_lag_loaders      atv 0x001c4c40 0x001c4de0 = vt +0x104 / +0x108, the preset's lag constants
+atv_const_w1                atv 0x00396fc0 = (0, 0, 0, 1), the reverse test's stand-in velocity
+atv_const_up                atv 0x00397000 = UP
+atv_follow_fields           atv cam +0x70 viewport (eye +0x140, near +0x19c = 1.0), +0x78 snap, +0x80 target block, +0xb0 distance, +0xb4 yaw, +0xb8 pitch, +0xc4/+0xc8 -> 3 look / 3 position lags, +0xd0 fov lag, +0xd4 spare lag, +0xd8..+0xe4 user zoom/yaw/pitch/fov, +0x108 speed reference 117.3328 (0x42eaaa65), +0x10c height bias 3, +0x110 preset, +0x11c pitch lock, +0x1c4 terrain, +0x1cc lift, +0x1e8/+0x1ec rear fade angles (0x3f860a91, pi/2)
+atv_follow_target_block     atv target +0x10 point, +0x30 forward, +0x40 up, +0x50 velocity, +0x84 lean, +0xb0 airborne, +0xb4 speed, +0xb8 117.3328
+atv_camera_still_switch     atv *(0x003eab60) +0x225 bit 3 (u32 at +0x224 mask 0x800) = the still camera; 0 in every MD82b row
+atv_camera_dt               atv the camera's dt is 0.03333 (0x3d08850a): alpha = dt / tau in every row
