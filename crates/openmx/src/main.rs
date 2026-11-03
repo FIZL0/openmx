@@ -1754,7 +1754,7 @@ impl<P: sim_world::World> Game for World<P> {
                 let ready = controls.as_ref().filter(|_| seat.riding).and_then(|_| seat.garage.ready_plane(&mut seat.sim, dt, &mut self.place, props.as_mut()));
                 held.push(Held { me, plane, controls, ready, met, bikes, bump });
                 if order.get(step + 1).is_none_or(|&j| !flying[j]) {
-                    self.fly_held(dt, &spots, std::mem::take(&mut held), &mut struck, props.as_mut());
+                    self.fly_held(dt, &spots, &on, std::mem::take(&mut held), &mut struck, props.as_mut());
                 }
                 continue;
             }
@@ -1847,11 +1847,15 @@ impl<P: sim_world::World> World<P> {
     /// The flying seats' held passes finished (N22a1): their readied planes flown in one
     /// [`vehicle::fly_together`], in the walk's order, then each seat's settle, markers and fader,
     /// and what its plane met handed on ([`World::met_after`]). Among the seats' one prop set
-    /// (S259a) the planes strike it, each named by its seat.
+    /// (S259a) the planes strike it, each named by its seat. The downed riders of the seats `on` holds
+    /// in the ride meet them (S276a, [`game_sim::wreck_plane::search_downed_by`]): each wreck bike
+    /// searched with every plane's hull before the frame and stepped with every plane's body after,
+    /// which the rider's own pass later in the walk does not repeat.
     fn fly_held(
         &mut self,
         dt: F,
         spots: &[Spot],
+        on: &[bool],
         mut held: Vec<Held>,
         struck: &mut [Vec<Vec<game_sim::contact::Contact>>],
         props: Option<&mut game_sim::prop_seats::Shared>,
@@ -1869,9 +1873,30 @@ impl<P: sim_world::World> World<P> {
                 fleet.push(game_sim::flight::Fly { flight, pad, met: h.met.as_mut(), bikes: &h.bikes });
                 flown.push(h.me);
             }
+            let mut riders: Vec<&mut rider::Rider> =
+                seats.iter_mut().zip(on).filter(|&(_, &o)| o).filter_map(|(s, _)| Some(&mut s.take()?.sim.rider)).collect();
+            let (planes, mut mets): (Vec<&game_sim::flight::Flight>, Vec<&mut game_sim::flight::Met>) = fleet
+                .iter_mut()
+                .filter_map(|f| {
+                    let game_sim::flight::Fly { flight, met, .. } = f;
+                    Some((&**flight, met.as_deref_mut()?))
+                })
+                .unzip();
+            let downed = game_sim::wreck_plane::search_downed_by(&mut riders, &planes, dt, &mut self.place, &mut mets);
+            drop((planes, mets));
             if let Some(tables) = tables {
                 let props = props.map(|p| (p.set_mut(), &flown[..]));
                 vehicle::fly_together(dt, &mut fleet, &mut self.place, &tables.ride, props);
+            }
+            if !downed.is_empty() {
+                let (mut planes, mut mets): (Vec<&mut game_sim::flight::Flight>, Vec<&mut game_sim::flight::Met>) = fleet
+                    .iter_mut()
+                    .filter_map(|f| {
+                        let game_sim::flight::Fly { flight, met, .. } = f;
+                        Some((&mut **flight, met.as_deref_mut()?))
+                    })
+                    .unzip();
+                game_sim::wreck_plane::step_downed_by(&mut riders, &mut planes, downed, &mut mets, dt, &self.place, true);
             }
         }
         for h in held {

@@ -66,7 +66,9 @@ struct Held {
 
 /// The held flying seats' steps finished (N22a1): their planes in one [`vehicle::fly_together`], in
 /// the walk's order, then each seat's flight back in its lane, its markers, and its plane's pushes
-/// on the bikes and the mirrors for their lists, as [`Rides::step`] has a lone plane's.
+/// on the bikes and the mirrors for their lists, as [`Rides::step`] has a lone plane's. The downed
+/// riders of the other seats `touching` holds in the ride meet the planes, as a lone plane's
+/// ([`game_sim::wreck_plane::search_downed_by`]).
 #[allow(clippy::too_many_arguments)]
 fn fly_held(
     sims: &mut [Sim],
@@ -74,12 +76,22 @@ fn fly_held(
     dt: F,
     spots: &[Spot],
     riding: &[bool],
+    touching: &[bool],
     mut held: Vec<Held>,
     struck: &mut [Vec<Vec<game_sim::contact::Contact>>],
     props: Option<&mut game_sim::prop_seats::Shared>,
 ) {
     if let Some(first) = held.first() {
         let tables = sims[first.seat].tables.clone();
+        // The downed riders of the other seats in the ride meet every plane (S276a): their wreck
+        // bikes searched with the hulls before the joint frame and stepped with the bodies after,
+        // which their own steps later this tick do not repeat.
+        let mut riders: Vec<&mut game_sim::rider::Rider> = sims
+            .iter_mut()
+            .enumerate()
+            .filter(|&(j, _)| touching.get(j).copied().unwrap_or(true) && held.iter().all(|h| h.seat != j))
+            .map(|(_, s)| &mut s.rider)
+            .collect();
         let mut flown = Vec::new();
         let mut fleet: Vec<game_sim::flight::Fly<'_>> = held
             .iter_mut()
@@ -91,8 +103,27 @@ fn fly_held(
             })
             .collect();
         // Among the seats' one prop set (S259a) the planes strike it, each named by its seat.
+        let (planes, mut mets): (Vec<&game_sim::flight::Flight>, Vec<&mut game_sim::flight::Met>) = fleet
+            .iter_mut()
+            .filter_map(|f| {
+                let game_sim::flight::Fly { flight, met, .. } = f;
+                Some((&**flight, met.as_deref_mut()?))
+            })
+            .unzip();
+        let downed = game_sim::wreck_plane::search_downed_by(&mut riders, &planes, dt, &mut *world, &mut mets);
+        drop((planes, mets));
         let props = props.map(|p| (p.set_mut(), &flown[..]));
         vehicle::fly_together(dt, &mut fleet, world, &tables.ride, props);
+        if !downed.is_empty() {
+            let (mut planes, mut mets): (Vec<&mut game_sim::flight::Flight>, Vec<&mut game_sim::flight::Met>) = fleet
+                .iter_mut()
+                .filter_map(|f| {
+                    let game_sim::flight::Fly { flight, met, .. } = f;
+                    Some((&mut **flight, met.as_deref_mut()?))
+                })
+                .unzip();
+            game_sim::wreck_plane::step_downed_by(&mut riders, &mut planes, downed, &mut mets, dt, &*world, true);
+        }
     }
     for Held { seat, k, plane, ready, met, wanted, .. } in held {
         let sim = &mut sims[seat];
@@ -175,7 +206,7 @@ impl Game for Rides<'_> {
         let mut held: Vec<Held> = Vec::new();
         for seat in order {
             if !aloft[seat] && !held.is_empty() {
-                fly_held(self.sims, &mut *self.world, dt, &spots, &riding, std::mem::take(&mut held), &mut struck, props.as_mut());
+                fly_held(self.sims, &mut *self.world, dt, &spots, &riding, &touching, std::mem::take(&mut held), &mut struck, props.as_mut());
             }
             let at = self.sims[seat].rider.ride.transform().0[3];
             let firsts: Vec<Vec<game_sim::contact::Contact>> = struck.iter_mut().map(|s| s.get_mut(seat).map(std::mem::take).unwrap_or_default()).collect();
@@ -288,7 +319,7 @@ impl Game for Rides<'_> {
             }
         }
         if !held.is_empty() {
-            fly_held(self.sims, &mut *self.world, dt, &spots, &riding, held, &mut struck, props.as_mut());
+            fly_held(self.sims, &mut *self.world, dt, &spots, &riding, &touching, held, &mut struck, props.as_mut());
         }
         if let Some(p) = props {
             p.finish(&mut self.sims.iter_mut().collect::<Vec<_>>(), dt, self.world);

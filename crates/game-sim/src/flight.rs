@@ -803,7 +803,8 @@ impl Flight {
         knocked: Vec<Vec<contact::Contact>>,
         bodies: &mut Vec<crate::prop_contact::Pushed>,
     ) {
-        let from = self.record.contacts.iter().filter_map(|e| e.other).filter(|&o| o >= KNOCK_FROM).collect::<Vec<_>>();
+        // Names past [`WRECK_FROM`] are the wreck bikes' mirrors (S276), not props.
+        let from = self.record.contacts.iter().filter_map(|e| e.other).filter(|o| (KNOCK_FROM..WRECK_FROM).contains(o)).collect::<Vec<_>>();
         // The struck props in the order the plane's entries first name them.
         let mut order: Vec<usize> = Vec::new();
         for o in from {
@@ -835,7 +836,7 @@ impl Flight {
             }
         }
         for e in &mut self.record.contacts {
-            if let Some(k) = e.other.and_then(|o| o.checked_sub(KNOCK_FROM)) {
+            if let Some(k) = e.other.filter(|&o| o < WRECK_FROM).and_then(|o| o.checked_sub(KNOCK_FROM)) {
                 e.other = order.iter().position(|&j| j == k).map(|i| first + places[i]);
             }
         }
@@ -1864,12 +1865,44 @@ pub fn frames_together_props(
             f.flight.knocked(set, me[i], first, &posed, k, &mut bodies);
         }
     }
+    // The downed riders' wreck bikes (S276a, [`Met::wrecks`]) after the props: one body each for the
+    // fleet, named by its `object`, so a wreck bike under two planes is one body both push, substep
+    // by substep; each plane's mirrors naming [`WRECK_FROM`]` + j` renamed to its place.
+    let at = bodies.len();
+    let mut wrecked: Vec<(usize, Vec<usize>)> = Vec::new();
+    for (i, f) in fleet.iter_mut().enumerate() {
+        let Some(m) = f.met.as_deref_mut().filter(|m| !m.wrecks.is_empty()) else { continue };
+        let first = m.vehicles.len() + n - 1;
+        let places: Vec<usize> = std::mem::take(&mut m.wrecks)
+            .into_iter()
+            .map(|w| match bodies[at..].iter().position(|b| b.object == w.object) {
+                Some(p) => at + p,
+                None => {
+                    bodies.push(w);
+                    bodies.len() - 1
+                }
+            })
+            .collect();
+        for e in &mut f.flight.record.contacts {
+            if let Some(j) = e.other.filter(|&o| e.kind == 1 && o >= WRECK_FROM).map(|o| o - WRECK_FROM) {
+                e.other = places.get(j).map(|&p| first + p);
+            }
+        }
+        wrecked.push((i, places));
+    }
     let hulls = fleet.iter().map(|f| f.flight.hull.as_ref().filter(|_| f.flight.rays.is_some()).map(|_| hull_at(f.flight))).collect();
     let mut listeners =
         Together { fleet: &mut *fleet, ground: Ground(ground), tables, movers: &movers, hulls, seams: Vec::new(), props: &mut bodies };
     listeners.seams = vec![[0, 0]; listeners.fleet.len()];
     WORLD.step(dt, &mut listeners);
     let seams = listeners.seams;
+    // Each plane's met has its wreck bikes' bodies back, as the joint resolve left them.
+    for (i, places) in wrecked {
+        if let Some(m) = fleet[i].met.as_deref_mut() {
+            m.wrecks = places.iter().map(|&p| bodies[p].clone()).collect();
+        }
+    }
+    bodies.truncate(at);
     if let Some((set, _)) = props {
         set.pushed(&bodies);
     }
