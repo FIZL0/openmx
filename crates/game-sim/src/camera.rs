@@ -1849,6 +1849,284 @@ impl Race {
     }
 }
 
+// --- MX vs. ATV's follow camera (MD82b) -------------------------------------------------------------
+
+/// The speed MX vs. ATV's follow camera stops tightening its lags at, in feet a second: twenty miles
+/// an hour. Below it the look and position lags blend from their preset time constants towards the
+/// rear fade's scale as the machine slows.
+const MOD_LAG_SPEED: f32 = 29.3332;
+
+/// What MX vs. ATV's follow camera divides the speed by for its lead, in feet a second: eighty miles
+/// an hour, where MX Unleashed's camera holds one. Every MX vs. ATV camera read live holds it.
+const MOD_SPEED_REFERENCE: f32 = 117.3328;
+
+/// The least the rear fade scales a lag's time constant by, with the camera looking straight along
+/// the heading's side.
+const MOD_LAG_FADE: f32 = 0.25;
+
+/// Where MX vs. ATV's aim fades the preset's `Swing` in, in yaw: none at a quarter turn or less, all
+/// of it from a third of a turn on.
+const MOD_SWING_FADE: [f32; 2] = [HALF_PI, 2.0943952];
+
+/// The camera's own two fade angles, which every MX vs. ATV camera read live holds: a sixth of a turn
+/// (one bit under the nearest `f32`, as the object stores it) and a quarter.
+const MOD_REAR_FADE: [f32; 2] = [f32::from_bits(0x3f86_0a91), HALF_PI];
+
+/// The race camera MX vs. ATV Unleashed (SLUS-21104) follows every machine with — bike, ATV, car,
+/// truck — on the presets [`Preset::read_layout`] reads out of the mod's camera file.
+///
+/// It is MX Unleashed's [`Race`] with a rear fade worked in. The camera keeps two angles,
+/// [`MOD_REAR_FADE`], and measures how far the yaw is past the first towards the second. With the
+/// camera behind the machine (a yaw near a half turn, which is every preset the files hold) every
+/// fade is at its full end and changes nothing; swung round towards the front it takes away:
+///
+/// * the aim's lean swing (the preset's `Swing`, which is zero in every file), over
+///   [`MOD_SWING_FADE`];
+/// * the look-at's lead, to none at the first angle;
+/// * the look and position lags' slowness, to [`MOD_LAG_FADE`] of the preset's at the first angle,
+///   and then that scale is blended back towards one as the machine slows below
+///   [`MOD_LAG_SPEED`] — at any yaw the time constants are rewritten from the preset every frame
+///   the lags run.
+///
+/// And it is simpler than [`Race`] in three places:
+///
+/// * the heading *is* the direction basis — the one vector, the velocity in the air above
+///   [`HEADING_FROM_VEL_SPEED`] while the speed is not all vertical and the forward axis otherwise,
+///   leads the look-at, turns into the direction and decides reverse;
+/// * the follow distance has no reverse offset in it;
+/// * the eye's least height is [`RACE_MIN_HEIGHT`] and it has no ceiling.
+///
+/// What it shares unchanged — the field of view, the target point, the reverse test, the pitch,
+/// the low-speed and short-viewport trims, the lead, the ground probe, the position, the lags
+/// themselves and the eye's floor — is reached through the [`Race`] it holds. The still bit
+/// ([`Switches::no_look_ahead`]) is a different byte in this game, clear in every state read.
+pub struct ModFollow {
+    /// The MX Unleashed race camera this one is built on, which holds the presets and the lags.
+    pub race: Race,
+}
+
+impl ModFollow {
+    /// A camera over the given presets, with the first applied. The reverse speed is never read by
+    /// this frame; the eye's least height is [`RACE_MIN_HEIGHT`], its ceiling none and its speed
+    /// reference [`MOD_SPEED_REFERENCE`].
+    pub fn new(presets: Vec<Preset>) -> Self {
+        let mut race = Race::new(presets, F::ZERO);
+        race.cam.ceiling = F::MAX;
+        race.cam.speed_reference = F(MOD_SPEED_REFERENCE);
+        ModFollow { race }
+    }
+
+    /// The fade between `a` and `b` over `x` from `lo` to `hi`: `a` at `lo` or before, `b` at `hi` or
+    /// after, a straight line between. The original's one blend, inlined at each of its five uses
+    /// with the same instructions: an accumulator add of `a` to zero, a multiply-add of the slope,
+    /// and a clamp to the two ends; and `a` when the two ends meet.
+    fn fade(x: F, lo: F, hi: F, a: F, b: F) -> F {
+        if lo == hi {
+            return a;
+        }
+        let t = (x - lo) / (hi - lo);
+        Acc::adda(F::ZERO, a).madd(t, b - a).max(a.min(b)).min(a.max(b))
+    }
+
+    /// How far the yaw is through the camera's two fade angles, from `a` to one.
+    fn rear(&self, a: F) -> F {
+        let c = &self.race.cam;
+        Self::fade(c.yaw.abs(), F(MOD_REAR_FADE[0]), F(MOD_REAR_FADE[1]), a, F::ONE)
+    }
+
+    /// Yaw and pitch: [`Race::aim`] with the preset's `Swing` faded in from a quarter turn of yaw
+    /// (see [`ModFollow`]), and the yaw wrapped twice — once before the fade reads it and once after
+    /// the swing is taken away.
+    pub fn aim(&mut self, swing: F, speed: F, forward_y: F, short_viewport: bool) {
+        let c = &mut self.race.cam;
+        let (angle_y, angle_x) = (c.preset().angle_y, c.preset().angle_x);
+        let wrap = |a: F| wrap_half_turn(F(libm::fmodf(a.0, TWO_PI)));
+        c.yaw = wrap(angle_y - c.user_yaw);
+        let g = Self::fade(c.yaw.abs(), F(MOD_SWING_FADE[0]), F(MOD_SWING_FADE[1]), F::ZERO, F::ONE);
+        c.yaw = wrap(Acc::adda(F::ZERO, c.yaw).msub(swing, c.camera_swing * g));
+        let cutoff = c.preset().low_speed_angle_x_vel_cutoff;
+        c.pitch = c.user_pitch + angle_x;
+        if c.pitch >= -PITCH_LIMIT {
+            if c.pitch > PITCH_LIMIT {
+                c.pitch = F(PITCH_LIMIT);
+                c.user_pitch = c.pitch - angle_x;
+            }
+        } else {
+            c.pitch = F(-PITCH_LIMIT);
+            c.user_pitch = c.pitch - angle_x;
+        }
+        if speed < cutoff && cutoff != 0.0 {
+            let k = c.preset().low_speed_angle_x_scale_factor;
+            c.pitch = c.pitch * Acc::adda(F::ZERO, k).madd(speed / cutoff, F::ONE - k);
+            c.pitch = Acc::adda(F::ZERO, c.pitch).msub(k, forward_y.abs());
+        }
+        if short_viewport {
+            c.pitch = Acc::adda(F::ZERO, c.pitch).msub(angle_x, F(SHORT_VIEWPORT_PITCH));
+        }
+    }
+
+    /// The follow distance: [`Race::limit_distance`] without the reverse offset, which this camera
+    /// never ramps.
+    pub fn limit_distance(&mut self, near_clip: F) {
+        let c = &mut self.race.cam;
+        let p = c.preset().clone();
+        let floor = p.min_following_distance.max(F(NEAR_CLIP_FLOOR) * near_clip);
+        let want = c.user_zoom + p.following_distance;
+        c.distance = want;
+        if want < floor {
+            c.distance = floor;
+            c.user_zoom = c.distance - p.following_distance;
+        } else if p.max_following_distance < want {
+            c.distance = p.max_following_distance;
+            c.user_zoom = c.distance - p.following_distance;
+        }
+    }
+
+    /// Where the camera looks: [`Race::look_at`] with the lead faded by the rear fade (see
+    /// [`ModFollow`]), and led from the heading.
+    #[allow(clippy::too_many_arguments)]
+    pub fn look_at(
+        &mut self,
+        speed: F,
+        fov_ratio: F,
+        swing: F,
+        target_point: Vf,
+        heading: Vf,
+        vel: Vf,
+        curve: &CurveTable,
+        scene: &mut impl Surface,
+    ) -> Vf {
+        let h = self.rear(F::ZERO);
+        let c = &mut self.race.cam;
+        let pull = (c.distance * fov_ratio) / 90.0 + 1.0;
+        let mut lead =
+            (speed / c.speed_reference) * (pull * ((F(1.8) * (F::ONE - c.distance / 600.0)) * pull));
+        if F(vel.y()) < FALL_SPEED {
+            lead = lead * (F::ONE + (F(vel.y()) / speed) / 1.8);
+        }
+        let p = c.preset();
+        let ahead = if p.is_look_back_cam { F::ZERO } else { F::ZERO.max(lead * p.look_ahead_distance) };
+        let swung = rotate(wrap_half_turn(swing * (F(-0.7) * c.look_swing)), UP, heading, curve);
+        let point = add3(target_point, scale(swung, ahead * h));
+        let rise = F(point.y()) + (F::ONE - fov_ratio) * (F(vel.y()) * 0.25);
+        let lift = c.probe_ground(c.ground_probe_point(swung, target_point), scene);
+        let y = rise + (c.height_bias + lift);
+        Vf::new(point.x(), y.0, point.z(), point.w())
+    }
+
+    /// The lags: [`Race::filter`], with the look and position lags' time constants first rewritten
+    /// from the preset's, scaled by the rear fade and the speed (see [`ModFollow`]), on every frame
+    /// they run. The field of view's and the spare's are left as the preset set them.
+    #[allow(clippy::too_many_arguments)]
+    pub fn filter(
+        &mut self,
+        dt: F,
+        speed: F,
+        near_clip: F,
+        position: &mut Vf,
+        look_at: &mut Vf,
+        fov: &mut F,
+        spare: &mut F,
+        scene: &mut impl Surface,
+    ) {
+        self.race.keep_off_the_ground(position, near_clip, true, scene);
+        let lags = self.race.cam.preset().filter_this_preset && !self.race.cam.snap;
+        if lags {
+            let f = self.rear(F(MOD_LAG_FADE));
+            let s = Self::fade(speed, F::ZERO, F(MOD_LAG_SPEED), F::ONE, f);
+            let c = &mut self.race.cam;
+            let (look, pos) = (c.preset().look_filters, c.preset().pos_filters);
+            for i in 0..3 {
+                c.look_filter[i].set_tau(F(look[i]) * s);
+            }
+            for i in 0..3 {
+                c.pos_filter[i].set_tau(F(pos[i]) * s);
+            }
+        }
+        self.race.cam.filter(dt, position, look_at, fov, spare);
+        if lags {
+            self.race.keep_off_the_ground(position, near_clip, false, scene);
+        }
+    }
+
+    /// One frame of the camera, in the original's order: [`Race::update`] with the differences
+    /// listed on [`ModFollow`]. `rider` is the machine's target block, `near_clip` the viewport's
+    /// near clip (one foot in every state read), and `scene` answers the ground probe and the eye's
+    /// floor.
+    pub fn update(
+        &mut self,
+        dt: F,
+        rider: &Ridden,
+        near_clip: F,
+        curve: &CurveTable,
+        switches: Switches,
+        scene: &mut impl Surface,
+    ) -> View {
+        let t = &rider.target;
+        let c = &mut self.race.cam;
+        let mut fov = c.field_of_view();
+
+        let mut offset = add3(scale(t.forward, F(c.offset.z())), scale(t.up, F(c.offset.y())));
+        if c.offset.x() != 0.0 {
+            offset = add3(offset, scale(cross(t.up, t.forward), F(c.offset.x())));
+        }
+        let target_point = add3(t.body_point, offset);
+
+        // The heading, and the basis: the velocity once the machine is airborne, fast and not
+        // straight up or down, the forward axis otherwise; flattened, with `w` the row's.
+        let along_vel = rider.airborne
+            && !(rider.speed <= HEADING_FROM_VEL_SPEED)
+            && !((rider.speed - F(t.vel.y()).abs()).abs() <= BASIS_DEGENERATE);
+        let from = if along_vel { t.vel } else { t.forward };
+        let heading = normalize(Vf::new(from.x(), 0.0, from.z(), from.w()));
+
+        let mut vel = t.vel;
+        let mut speed = rider.speed;
+        if !(speed <= REVERSE_TEST_SPEED) && !c.preset().is_look_back_cam {
+            let along = Acc::mula(F(heading.x()), F(vel.x()))
+                .madda(F(heading.y()), F(vel.y()))
+                .madd(F(heading.z()), F(vel.z()));
+            if !(along >= 0.0) {
+                vel = Vf::new(0.0, 0.0, 0.0, 1.0);
+                speed = F::ZERO;
+            }
+        }
+        let fov_ratio = fov / c.preset().max_fov;
+        let swing = (-t.lean * F(0.21)) * fov_ratio;
+
+        self.aim(swing, speed, F(t.forward.y()), switches.short_viewport);
+        self.limit_distance(near_clip);
+
+        let (mut look_at, lead_point) = if switches.no_look_ahead || speed < STILL_SPEED {
+            let c = &self.race.cam;
+            let still = Vf::new(
+                target_point.x(),
+                (F(target_point.y()) + c.height_bias).0,
+                target_point.z(),
+                target_point.w(),
+            );
+            (still, target_point)
+        } else {
+            let lead_point = add3(target_point, scale(vel, F(LEAD_STEP_LIMIT).min(dt)));
+            let look_at = self.look_at(speed, fov_ratio, swing, lead_point, heading, vel, curve, scene);
+            (look_at, lead_point)
+        };
+
+        let c = &self.race.cam;
+        let sideways = cross(heading, UP);
+        let direction = rotate(
+            wrap_half_turn(c.yaw),
+            UP,
+            rotate(wrap_half_turn(c.pitch), sideways, heading, curve),
+            curve,
+        );
+        let mut position = self.race.position(dt, speed, direction, lead_point, t.vel);
+        let mut spare = F::ZERO;
+        self.filter(dt, speed, near_clip, &mut position, &mut look_at, &mut fov, &mut spare, scene);
+        View { position, look_at, fov }
+    }
+}
+
 // --- the thrill camera (P157) ----------------------------------------------------------------------
 
 /// How fast the rider has to be going, the length of the target block's velocity in feet a second,

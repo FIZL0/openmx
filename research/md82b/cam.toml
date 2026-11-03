@@ -1,0 +1,136 @@
+# MD82b: MX vs. ATV Unleashed's (SLUS-21104) follow camera every tick, behind a machine driven by
+# MD39a's drive tape. CAM is replaced by the camera object (vtable 0x003cc6f0 at +4); play.sh does that
+# and adds the start trigger. Field map: research/oracle.txt # MD82b.
+[watch]
+name        = "md82b-camera"
+description = "MX vs. ATV (SLUS-21104) follow camera: its target block, its angles, lags and viewport eye per tick"
+every       = 1
+frames      = 900
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "vsync"  # 0x3fa6d8, +2 a tick
+addr = "0x3fa6d8"
+type = "u32"
+
+[[field]]
+name = "cvptr"  # the follow camera's vtable word
+addr = "CAM + 0x4"
+type = "u32"
+
+[[field]]
+name = "still"  # byte +0x225 bit 3 (<< 11 here): the still switch
+addr = "0x3eab60 -> 0x224"
+type = "u32"
+
+[[field]]
+name = "a_point"  # the target block (cam +0x80): +0x10 body point
+addr = "CAM + 0x80 -> 0x10"
+type = "f32x4"
+
+[[field]]
+name = "a_fwd"  # +0x30 forward
+addr = "CAM + 0x80 -> 0x30"
+type = "f32x4"
+
+[[field]]
+name = "a_up"  # +0x40 up
+addr = "CAM + 0x80 -> 0x40"
+type = "f32x4"
+
+[[field]]
+name = "a_vel"  # +0x50 velocity
+addr = "CAM + 0x80 -> 0x50"
+type = "f32x4"
+
+[[field]]
+name = "a_lean"  # +0x84 lean
+addr = "CAM + 0x80 -> 0x80"
+type = "f32x4"
+
+[[field]]
+name = "a_flag"  # +0xb0 airborne (u32), +0xb4 speed
+addr = "CAM + 0x80 -> 0xb0"
+type = "f32x4"
+
+[[field]]
+name = "cam_dyp"  # +0xb0 distance, +0xb4 yaw, +0xb8 pitch, +0xbc collision object
+addr = "CAM + 0xb0"
+type = "f32x4"
+
+[[field]]
+name = "cam_user"  # +0xd8 zoom, +0xdc yaw, +0xe0 pitch, +0xe4 fov
+addr = "CAM + 0xd8"
+type = "f32x4"
+
+[[field]]
+name = "cam_snap"  # +0x78 snap
+addr = "CAM + 0x78"
+type = "u32"
+
+[[field]]
+name = "cam_preset"  # +0x110 current preset
+addr = "CAM + 0x110"
+type = "u32"
+
+[[field]]
+name = "cam_lift"  # +0x1cc ground lift
+addr = "CAM + 0x1cc"
+type = "f32"
+
+[[field]]
+name = "cam_lock"  # +0x11c pitch-down lock
+addr = "CAM + 0x11c"
+type = "u32"
+
+[[field]]
+name = "look0"  # look lags: value, tau, alpha
+addr = "CAM + 0xc4 -> 0x0 -> 0x0"
+type = "f32x4"
+
+[[field]]
+name = "look1"
+addr = "CAM + 0xc4 -> 0x4 -> 0x0"
+type = "f32x4"
+
+[[field]]
+name = "look2"
+addr = "CAM + 0xc4 -> 0x8 -> 0x0"
+type = "f32x4"
+
+[[field]]
+name = "pos0"  # position lags
+addr = "CAM + 0xc8 -> 0x0 -> 0x0"
+type = "f32x4"
+
+[[field]]
+name = "pos1"
+addr = "CAM + 0xc8 -> 0x4 -> 0x0"
+type = "f32x4"
+
+[[field]]
+name = "pos2"
+addr = "CAM + 0xc8 -> 0x8 -> 0x0"
+type = "f32x4"
+
+[[field]]
+name = "fovlag"  # the fov lag
+addr = "CAM + 0xd0 -> 0x0"
+type = "f32x4"
+
+[[field]]
+name = "vp_eye"  # the viewport (cam +0x70): +0x140 eye
+addr = "CAM + 0x70 -> 0x140"
+type = "f32x4"
+
+[[field]]
+name = "vp_dir"  # +0x150 view axis
+addr = "CAM + 0x70 -> 0x150"
+type = "f32x4"
+
+[[field]]
+name = "vp_near"  # +0x19c near clip
+addr = "CAM + 0x70 -> 0x19c"
+type = "f32"
