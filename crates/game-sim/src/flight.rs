@@ -182,6 +182,9 @@ pub struct Flight {
     /// world, its hull struck by their bikes' body rays ([`crate::rider_contact::gather_met`]).
     /// Geometry off the disc, like the rays.
     pub hull: Option<Arc<track::Mesh>>,
+    /// What the material table's listener heard the probe strike in the frame's search (F27a,
+    /// [`crate::material_hit`]): a bike by player. Sound only.
+    pub heard: crate::material_hit::Heard,
 }
 
 /// The plane's collision mesh in the machines' archive (N22a): its collidable's, kind 0, which the
@@ -907,6 +910,7 @@ impl Flight {
         knocks: &[flight_search::Knock<'_>],
     ) -> (Vec<Option<u32>>, Vec<contact::Mover>, Vec<Vec<contact::Contact>>) {
         let none = vec![None; bikes.map_or(0, |b| b.bikes.len())];
+        self.heard = crate::material_hit::Heard::default();
         let Some(rays) = self.rays.clone() else { return (none, Vec::new(), Vec::new()) };
         self.record.node = node_of(&self.body);
         contact_search::clear(&mut self.record, Some(&mut self.body));
@@ -921,11 +925,24 @@ impl Flight {
         if !knocks.is_empty() {
             scene = scene.knocking(knocks, 1 + velocities.len());
         }
+        // The node's file put the material table's listener on the plane's probe (F27a).
+        scene.listen_material();
         let mut records = vec![std::mem::take(&mut self.record)];
         records.extend(velocities.iter().map(|_| contact_search::Record { capacity: crate::rider_contact::CAPACITY, ..contact_search::Record::default() }));
         records.extend(knocks.iter().map(|k| contact_search::Record { capacity: k.capacity, ..contact_search::Record::default() }));
         contact_search::collide(&mut records, 0, Some(&mut self.body), field.as_deref(), &mut scene, dt);
         let movers = contact_search::Search::movers(&scene);
+        let players = met.as_deref().map(|m| m.bikes.clone());
+        self.heard = crate::material_hit::Heard(
+            scene
+                .sounded()
+                .iter()
+                .map(|&s| match s {
+                    crate::material_hit::Struck::Bike(k) => crate::material_hit::Struck::Bike(players.as_ref().and_then(|b| b.get(k).copied()).unwrap_or(k)),
+                    s => s,
+                })
+                .collect(),
+        );
         let mut records = records.into_iter();
         self.record = records.next().unwrap_or_default();
         let owned = velocities.len();

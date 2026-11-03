@@ -1100,6 +1100,8 @@ pub struct Scene<'a> {
     knocks_at: usize,
     knocked_from: usize,
     knock_facets: std::collections::HashMap<usize, Vec<Facet>>,
+    /// What the ray probe's material listener heard it strike ([`Scene::listen_material`], F27a).
+    sounded: Vec<crate::material_hit::Struck>,
 }
 
 /// What the plane's record keeps as struck for a knockable prop's mesh (S241): [`KNOCKED`] and its
@@ -1126,6 +1128,10 @@ pub struct Knock<'a> {
 /// turns it off — and the prop's collection's, which activates the collection whatever was struck.
 pub const HIT_LISTENER: usize = 0;
 pub const COLLECTION_LISTENER: usize = 1;
+/// The material table's listener (F27), which the collision node's file puts on every filed object's
+/// ray probe after its own: it queues each hit for the table's collision sound
+/// ([`crate::material_hit`]). Nothing in the simulation reads what it heard.
+pub const MATERIAL_LISTENER: usize = 2;
 
 /// **A prop's probes as its search sets them** (S200, S243): the ray probe's category list; the sweep
 /// probe's, or `None` for the world's own (every category); the category and the collides-with of the
@@ -1434,6 +1440,42 @@ impl<'a> Scene<'a> {
         self
     }
 
+    /// **The material table's listener on the ray probe** (F27a, [`MATERIAL_LISTENER`]), after the
+    /// probe's own: every hit the probe makes from here on is heard ([`Scene::sounded`]).
+    pub fn listen_material(&mut self) {
+        let ray = &mut self.objects.objects[RAY];
+        if !ray.listeners.contains(&MATERIAL_LISTENER) {
+            ray.listeners.push(MATERIAL_LISTENER);
+        }
+    }
+
+    /// What the material listener heard the ray probe strike, in order: one entry a struck collidable
+    /// a search, as the listener is told of it.
+    pub fn sounded(&self) -> &[crate::material_hit::Struck] {
+        &self.sounded
+    }
+
+    /// Collidable `other` as the material listener names it: a bike by its player, anything else by
+    /// its place here with its material (its mesh's surface byte; a trunk has none) and its category
+    /// against the foliage mask.
+    fn sound_of(&self, objects: &[Collidable], other: usize) -> crate::material_hit::Struck {
+        use crate::material_hit::{Struck, material_of, FOLIAGE_MASK};
+        if let Some(k) = self.bike(other) {
+            return Struck::Bike(k);
+        }
+        let material = if let Some(k) = self.knock(other) {
+            material_of(self.knocks[k].mesh)
+        } else if self.trunk(other).is_some() {
+            0
+        } else if let Some(j) = self.plane(other) {
+            material_of(self.planes[j].mesh)
+        } else {
+            self.prop_at(other).map_or(0, |p| material_of(&p.mesh))
+        };
+        let foliage = objects.get(other).is_some_and(|o| o.category & FOLIAGE_MASK != 0);
+        Struck::Mesh { id: self.id(other) as u32, material, foliage }
+    }
+
     /// What a prop's ray probe's listeners heard in the searches so far ([`Scene::probed`]).
     pub fn heard(&self) -> Heard {
         self.heard
@@ -1522,6 +1564,7 @@ impl<'a> Scene<'a> {
             knocks_at: 0,
             knocked_from: 0,
             knock_facets: std::collections::HashMap::new(),
+            sounded: Vec::new(),
         }
     }
 
@@ -1846,6 +1889,8 @@ impl Narrow for Scene<'_> {
     /// ([`Scene::probed`]): the hit listener wakes an asleep body when `other`'s category is in the
     /// global mask, and the wake's enable puts the probe's category list back to every category,
     /// which the rest of this search's pair filter reads; the collection's listener hears every hit.
+    /// The material table's ([`Scene::listen_material`], on any probe that asks for it) keeps what
+    /// was struck for the collision sound.
     fn heard_hit(&mut self, objects: &mut [Collidable], listener: usize, probe: usize, other: usize) {
         match listener {
             HIT_LISTENER if self.asleep && objects[other].category & WAKE_MASK != 0 => {
@@ -1854,6 +1899,10 @@ impl Narrow for Scene<'_> {
                 objects[probe].categories = any_category();
             }
             COLLECTION_LISTENER => self.heard.struck = true,
+            MATERIAL_LISTENER if probe == RAY => {
+                let s = self.sound_of(objects, other);
+                self.sounded.push(s);
+            }
             _ => {}
         }
     }

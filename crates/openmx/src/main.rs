@@ -8959,6 +8959,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     sound.toys_at(&cars);
                 }
                 sound.frame(&frames, dt.0);
+                // The material table's collision sounds (F27a): what this tick's probes struck.
+                if simulated {
+                    let ride = HeardRide { seats: &world.seats };
+                    let mut queue = game_sim::material_hit::queue(&ride.heard(), &ride);
+                    sound.hits(&mut queue);
+                }
                 hushed = false;
             } else if !hushed {
                 sound.quiet();
@@ -10398,6 +10404,94 @@ fn listener(c: &Camera) -> audio::Listener {
 
 /// What one seat's frame sounds like (P42): the hands and the engine on the bike, the rider's fall
 /// and landing, or the plane's engine note when the plane is up.
+/// **The seats as the material table's queue reads them** (F27a): with more than one seat, each is a
+/// one-player ride and bike `g` is seat `g`'s; with one, bike `g` is its ride's player `g`. The props
+/// are the first seat's, which every seat shares (S197c).
+struct HeardRide<'a> {
+    seats: &'a [Seat],
+}
+
+impl HeardRide<'_> {
+    fn rider(&self, g: usize) -> Option<&game_sim::rider::Rider> {
+        match self.seats {
+            [one] => (g < one.sim.players()).then(|| one.sim.rider_of(g)),
+            seats => seats.get(g).map(|s| &s.sim.rider),
+        }
+    }
+
+    fn flight(&self, s: usize) -> Option<&game_sim::flight::Flight> {
+        let seat = self.seats.get(s).filter(|seat| seat.garage.up == Kind::Biplane)?;
+        seat.garage.plane.as_ref()?.flight.as_ref()
+    }
+
+    /// What every listened probe heard this tick, in the node's order: the bikes', the planes', the
+    /// props'.
+    fn heard(&self) -> Vec<(game_sim::material_hit::Owner, game_sim::material_hit::Struck)> {
+        use game_sim::material_hit::Owner;
+        let mut out = Vec::new();
+        let bikes = match self.seats {
+            [one] if one.riding && one.garage.up == Kind::Bike => one.sim.players(),
+            [_] => 0,
+            seats => seats.len(),
+        };
+        for g in 0..bikes {
+            if self.seats.len() > 1 && !(self.seats[g].riding && self.seats[g].garage.up == Kind::Bike) {
+                continue;
+            }
+            let Some(r) = self.rider(g) else { continue };
+            out.extend(r.ride.heard.0.iter().map(|&s| (Owner::Bike(g), s)));
+        }
+        for s in 0..self.seats.len() {
+            if let Some(f) = self.flight(s).filter(|_| self.seats[s].riding) {
+                out.extend(f.heard.0.iter().map(|&h| (Owner::Plane(s), h)));
+            }
+        }
+        if let Some(seat) = self.seats.first() {
+            for (c, col) in seat.sim.traffic.props.collections.iter().enumerate() {
+                out.extend(col.heard.0.iter().map(|&(k, h)| (Owner::Prop { collection: c, object: k }, h)));
+            }
+        }
+        out
+    }
+
+    fn prop_material(&self, c: usize, k: usize) -> u8 {
+        let shapes = self.seats.first().map(|s| s.sim.traffic.props.shapes.clone());
+        shapes.as_ref().and_then(|s| s.get(c)?.get(k)?.as_ref().map(game_sim::material_hit::material_of)).unwrap_or(0)
+    }
+}
+
+impl game_sim::material_hit::Ride for HeardRide<'_> {
+    fn owner(&self, o: game_sim::material_hit::Owner) -> Option<(u8, Vf, Vf)> {
+        use game_sim::material_hit::{BIKE, Owner};
+        match o {
+            Owner::Bike(g) => {
+                let r = &self.rider(g)?.ride;
+                Some((BIKE, r.chassis.vel, r.position()))
+            }
+            Owner::Plane(s) => {
+                let f = self.flight(s)?;
+                let material = f.hull.as_deref().map_or(0, game_sim::material_hit::material_of);
+                Some((material, f.body.velocity, f.body.position))
+            }
+            Owner::Prop { collection, object } => {
+                let col = self.seats.first()?.sim.traffic.props.collections.get(collection)?;
+                let body = &col.bones.get(object)?.body;
+                Some((self.prop_material(collection, object), body.velocity, body.position))
+            }
+        }
+    }
+
+    fn struck(&self, s: game_sim::material_hit::Struck) -> (u8, bool) {
+        use game_sim::material_hit::{BIKE, Struck};
+        match s {
+            Struck::Bike(_) => (BIKE, false),
+            Struck::Plane(j) => (self.flight(j).and_then(|f| f.hull.as_deref()).map_or(0, game_sim::material_hit::material_of), false),
+            Struck::Prop { collection, object } => (self.prop_material(collection, object), false),
+            Struck::Mesh { material, foliage, .. } => (material, foliage),
+        }
+    }
+}
+
 fn seat_sound(seat: &Seat, area: Option<game_sim::biplane::Area>, land: &dyn sim_world::World) -> audio::SeatFrame {
     let r = &seat.sim.rider.ride;
     // The shootoff's (P85): the edge asked of the chassis' centre, as the throw asks it — none on a

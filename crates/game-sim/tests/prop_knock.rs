@@ -1260,3 +1260,85 @@ fn a_wheel_on_a_prop_does_not_push_it() {
     eprintln!("{tried} placings on a prop, {stood} wheels stood on one, {forced} moved the chassis' force words");
     assert!(tried > 200 && forced * 2 > tried, "{tried} placings, {forced} forced");
 }
+
+// --- F27a: the strike heard by the material table ---------------------------------------------------
+
+/// The material table in the knock states (oracle.txt, F27) and its queue's owners and struck lists.
+const MATERIAL_TABLE: u32 = 0x00e1_7d90;
+
+/// The table's queue after the original's props node ticks `ee`: each entry's owner's record and the
+/// struck collidable's material byte. The table's own update has not run, so nothing is played yet.
+fn queued(ee: &mut Ee) -> Vec<(u32, u8)> {
+    let t = MATERIAL_TABLE;
+    assert_eq!(ee.u32_at(t + 0x34), 0x0045_f694, "the table's listener where F27 found it");
+    assert_eq!(ee.u32_at(t + 0x80), 0, "the queue empty between frames");
+    let dt = ee.f32_at(addr("frame_dt").unwrap());
+    ee.call(NODE_UPDATE, &[u64::from(PROPS_NODE)], &[dt], 2_000_000_000);
+    (0..ee.u32_at(t + 0x80))
+        .map(|k| {
+            let probe = ee.u32_at(ee.u32_at(t + 0x88) + 4 * k);
+            let struck = ee.u32_at(ee.u32_at(t + 0xa0) + 4 * k);
+            (ee.u32_at(probe + 0x80), ee.u8_at(struck + 0x89))
+        })
+        .collect()
+}
+
+/// **The bike's strike is queued as the original queues it** (F27a): knock-2882 one tick on, the
+/// bike's body rays on ball 2. The port's queue is what its listener hears of the bump
+/// ([`rider_contact::heard_struck`]) with the ball's mesh material; the original's, its props node's
+/// tick on the same image. One entry each, the bike's record striking material 21 (the ball), and the
+/// port's plays it — and the props' own searches, the ball's probe, hear nothing in either.
+#[test]
+fn the_strike_is_queued_as_the_original_queues_it() {
+    use game_sim::material_hit::{self, Owner, Struck};
+    let Ok(kit) = Kit::load().map_err(|why| skip(&why)) else { return };
+    let Some(mut ee) = knock_state(&kit, "knock-2882") else { return };
+    let rec = ee.u32_at(the_bike(&ee) + 0x7d0);
+    let want = queued(&mut ee);
+    assert_eq!(want, vec![(rec, 21)], "the original's queue: the bike on ball 2");
+
+    let Some(before) = knock_state(&kit, "knock-2882") else { return };
+    let tables = Tables::build();
+    let Some((phy, col)) = bike_files(&tables) else { return };
+    let Some(mut free) = free09() else { return };
+    let terrain = Terrain::parse(&free.terrain).expect("free09's terrain");
+    let ground = Ground::new(&terrain, &free.scene.terrain);
+    let field = ground.field();
+    seed(&before, &mut free.set);
+    let at = {
+        let n = node_at(&before, before.u32_at(rec + 0xf8));
+        Mat4([n.rows[0], n.rows[1], n.rows[2], n.origin])
+    };
+    let dt = F(before.f32_at(addr("frame_dt").unwrap()));
+    free.set.search(dt, Some(&field), Some(&free.props), None);
+    let strike = prop_contact::strike(&col, &at, &free.set, 0, 1, dt);
+    let pushed = free.set.strike(&strike);
+    let collider = rider_contact::collider(&phy.collisions, phy.mass.mass);
+    let bump = rider_contact::Bump { me: 0, contacts: strike.contacts.clone(), colliders: vec![collider], vehicles: vec![vehicle_at(&before, rec)], movers: Vec::new(), planes: Vec::new(), props: pushed };
+    let mut heard: Vec<(Owner, Struck)> = rider_contact::heard_struck(&bump).into_iter().map(|s| (Owner::Bike(0), s)).collect();
+    for (c, col) in free.set.collections.iter().enumerate() {
+        heard.extend(col.heard.0.iter().map(|&(k, s)| (Owner::Prop { collection: c, object: k }, s)));
+    }
+    assert_eq!(heard, vec![(Owner::Bike(0), Struck::Prop { collection: 2, object: 0 })]);
+
+    struct Knock<'a>(&'a PropSet, Vf);
+    impl material_hit::Ride for Knock<'_> {
+        fn owner(&self, o: Owner) -> Option<(u8, Vf, Vf)> {
+            matches!(o, Owner::Bike(0)).then_some((material_hit::BIKE, self.1, Vf::new(0.0, 0.0, 0.0, 1.0)))
+        }
+        fn struck(&self, s: Struck) -> (u8, bool) {
+            let Struck::Prop { collection, object } = s else { return (0, false) };
+            (self.0.shapes[collection][object].as_ref().map_or(0, material_hit::material_of), false)
+        }
+    }
+    let velocity = vehicle_at(&before, rec).velocity;
+    let mut queue = material_hit::queue(&heard, &Knock(&free.set, velocity));
+    assert_eq!(queue.len(), 1);
+    assert_eq!((queue[0].owner_material, queue[0].struck_material, queue[0].struck_foliage), (16, want[0].1, false));
+    // free09's table: 21 is the ball's, 5/25 ft a second.
+    let rule = [material_hit::Material { id: 21, min_impulse: F(5.0), max_impulse: F(25.0) }];
+    let speed = material_hit::speed(velocity);
+    let played = material_hit::play(&mut queue, &rule, 22);
+    eprintln!("bike speed {speed:?}: {played:?}");
+    assert_eq!(played.len(), usize::from(speed >= F(5.0)));
+}

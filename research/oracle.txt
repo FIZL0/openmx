@@ -8746,3 +8746,7 @@ material_hit_play boot 0x003ea900 run by the update 0x3ead10 when queued: speed 
 #   CollisionMinDistance (+0x10c), CollisionMinImpulse (+0x114, default 0), CollisionMaxImpulse (+0x118,
 #   default 1). [Settings] TerrainMask +0x64, SolidFoliageID +0x65 (22). Every free09 entry 30/125 ft
 #   and 5/25 but 16 (Impact\bikehit1.vag) 2/9; 21 Impact\ball.vag, 22 Impact\treehit.vag.
+# F27a: the props node 0x00e17ef0's update 0x0026f800 queues the table's hits (no table update in it):
+#   knock-2881 queues bike probe 0x00da2ff0 -> ball 2 (struck +0x89 21) and ball 2's probe -> the bike's
+#   frame collidable 0x00da3180 (+0x89 16, +0x84 0x9a048); knock-2882 only the bike's; knock-2883 none.
+#   Foliage mask word 0x00468f48 = 4 (TREE). tests/prop_knock.rs the_strike_is_queued_as_the_original_queues_it.

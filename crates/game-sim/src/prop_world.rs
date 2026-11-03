@@ -347,6 +347,9 @@ pub struct Collection {
     pub countdown: F,
     /// The world's bounds, when it has some.
     pub edge: Option<Edge>,
+    /// What the material table's listener heard each filed object's ray probe strike in this frame's
+    /// searches (F27a, [`crate::material_hit`]), by object. Sound only.
+    pub heard: crate::material_hit::HeardBy,
 }
 
 /// A constraint [`Collection::new`] does not make.
@@ -389,6 +392,7 @@ impl Collection {
             reset_time: pco.reset_time,
             countdown: F(-1.0),
             edge: None,
+            heard: crate::material_hit::HeardBy::default(),
         };
         for k in 0..c.objects.len() {
             c.bones[k].body.enabled = false;
@@ -665,6 +669,7 @@ impl Collection {
         wrecks: &[Wreck<'_>],
         strikes: &mut [crate::prop_wreck::WreckStrike],
     ) {
+        self.heard.0.clear();
         for k in 0..self.objects.len() {
             self.search_object_wrecked(collection, k, dt, rays, field, props, trees, wrecks, strikes);
         }
@@ -708,6 +713,7 @@ impl Collection {
         hull: (u32, u32),
         strikes: &mut [crate::prop_wreck::WreckStrike],
     ) {
+        self.heard.0.clear();
         for k in 0..self.objects.len() {
             self.search_object_hulled(usize::MAX, k, dt, rays, field, props, trees, wrecks, hull, strikes);
         }
@@ -753,7 +759,11 @@ impl Collection {
                     hull: Some(hull),
                     regather: c.regather.take(),
                 };
-                scene = Some(Scene::probed_among(props, trees, &hulls, bounds, tree, &c.record.node, &mut c.nearby, &probe, asleep));
+                let mut s = Scene::probed_among(props, trees, &hulls, bounds, tree, &c.record.node, &mut c.nearby, &probe, asleep);
+                // The node's file put the material table's listener on the probe after the prop's own
+                // two (F27a): a filed object's, awake or detecting collisions asleep.
+                s.listen_material();
+                scene = Some(s);
             }
             let world: &mut dyn Search = match scene.as_mut() {
                 Some(s) => s,
@@ -771,6 +781,9 @@ impl Collection {
                 }
             }
             o.node = std::mem::take(&mut c.record.node);
+            if let Some(s) = &scene {
+                self.heard.0.extend(s.sounded().iter().map(|&struck| (k, struck)));
+            }
             let heard = scene.map(|s| s.heard()).unwrap_or_default();
             if heard.woke {
                 self.enable(k);

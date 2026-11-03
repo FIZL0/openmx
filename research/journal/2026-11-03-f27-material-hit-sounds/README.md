@@ -8,3 +8,5 @@ which of a frame's hits play and how loud, plus the table the audio reads. Feedi
 the ride, and the PCSX2 capture comparison, are F27a.
 
 - `1-material-hit-sounds-FINAL.md`: who carries the listener, the rule, the tests.
+- `2-feeding-the-queue-F27a.md`: the listener on the bikes', props' and plane's probes, the shell's
+  queue and play, the knock-2882 queue compared (F27a).

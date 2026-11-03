@@ -140,3 +140,108 @@ fn drop_pairs(queue: &mut Vec<Hit>, speeds: &mut Vec<F>) {
         i = i.wrapping_add(1);
     }
 }
+
+/// The global mask a struck collidable's category is tested against for the foliage swap: a plant's
+/// trunk ([`crate::flight_search::TREE`]). 4 in `s195-knock-2881`.
+pub const FOLIAGE_MASK: u32 = 4;
+
+/// A mesh collidable's material byte: its surface word's low byte (0 for a file too old to have one).
+pub fn material_of(mesh: &crate::track::Mesh) -> u8 {
+    mesh.surface.map_or(0, |s| s as u8)
+}
+
+/// **What a listened probe struck** (F27a), as the search that heard it names it: one of the ride's
+/// bikes, a plane's hull, a knockable prop's mesh, or a collidable that is never a probe's owner (a
+/// scene mesh, a toy, a trunk), whose material and foliage test are read where it was struck.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Struck {
+    /// The ride's bike, by player.
+    Bike(usize),
+    /// A plane's hull, by its seat.
+    Plane(usize),
+    /// A knockable prop: its collection and its object.
+    Prop { collection: usize, object: usize },
+    /// Anything else: its place in the search that struck it, its material, its category in
+    /// [`FOLIAGE_MASK`].
+    Mesh { id: u32, material: u8, foliage: bool },
+}
+
+/// Who carries a listened probe: the queue entry's owner, whose velocity and place the table's update
+/// reads when it plays.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Owner {
+    Bike(usize),
+    Plane(usize),
+    Prop { collection: usize, object: usize },
+}
+
+impl Struck {
+    /// The collidable's name in the queue: one space for every kind, so the pair test meets an owner
+    /// only as the struck one it is.
+    pub fn id(&self) -> u32 {
+        match *self {
+            Struck::Bike(j) => 1 << 28 | j as u32,
+            Struck::Plane(j) => 2 << 28 | j as u32,
+            Struck::Prop { collection, object } => 3 << 28 | (collection as u32) << 12 | object as u32,
+            Struck::Mesh { id, .. } => 4 << 28 | (id & 0x0fff_ffff),
+        }
+    }
+}
+
+impl Owner {
+    pub fn struck(&self) -> Struck {
+        match *self {
+            Owner::Bike(j) => Struck::Bike(j),
+            Owner::Plane(j) => Struck::Plane(j),
+            Owner::Prop { collection, object } => Struck::Prop { collection, object },
+        }
+    }
+}
+
+/// **The hits a probe's material listener heard** since its owner's last search, in the order heard:
+/// what the queue is filled from. Sound only: nothing in the simulation reads it, so it is equal to
+/// any other (a state compared, hashed or sent leaves it out) and starts empty on a restored one.
+#[derive(Clone, Debug, Default)]
+pub struct Heard(pub Vec<Struck>);
+
+impl PartialEq for Heard {
+    fn eq(&self, _: &Heard) -> bool {
+        true
+    }
+}
+
+/// [`Heard`] for a set of owners (a collection's objects), each entry by its owner's index.
+#[derive(Clone, Debug, Default)]
+pub struct HeardBy(pub Vec<(usize, Struck)>);
+
+impl PartialEq for HeardBy {
+    fn eq(&self, _: &HeardBy) -> bool {
+        true
+    }
+}
+
+/// What the queue reads of an owner or a struck one, from the frame's end state.
+pub trait Ride {
+    /// An owner's collidable's material, its velocity (its body's, else its chassis') and where it
+    /// is; `None` for one no longer there, whose entry is not queued.
+    fn owner(&self, o: Owner) -> Option<(u8, Vf, Vf)>;
+    /// A struck one's material byte and whether its category is in [`FOLIAGE_MASK`].
+    fn struck(&self, s: Struck) -> (u8, bool);
+}
+
+/// **The frame's queue** out of what the listeners heard, in the order given: each entry as
+/// [`play`] reads it, its owner's numbers off `ride`.
+pub fn queue(heard: &[(Owner, Struck)], ride: &dyn Ride) -> Vec<Hit> {
+    heard
+        .iter()
+        .filter_map(|&(o, s)| {
+            let (owner_material, velocity, at) = ride.owner(o)?;
+            let (struck_material, struck_foliage) = match s {
+                Struck::Mesh { material, foliage, .. } => (material, foliage),
+                Struck::Bike(_) => (BIKE, false),
+                _ => ride.struck(s),
+            };
+            Some(Hit { owner: Some(o.struck().id()), owner_material, struck: s.id(), struck_material, struck_foliage, velocity, at })
+        })
+        .collect()
+}

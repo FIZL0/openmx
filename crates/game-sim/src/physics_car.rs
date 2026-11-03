@@ -211,6 +211,7 @@ impl PhysicsCar {
             reset_time: F(-1.0),
             countdown: F(-1.0),
             edge,
+            heard: crate::material_hit::HeardBy::default(),
         };
         Ok(PhysicsCar { set, physical: false, was_physical: false, last: Mat4([Vf::VF0; 4]), rays: Arc::new(rays), shape: Arc::new(shape), tables: Some(Arc::new(Tables::build())) })
     }

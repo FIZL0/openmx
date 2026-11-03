@@ -817,6 +817,9 @@ pub struct Ride {
     /// it gives 0. Sound only: nothing in the simulation reads it, so the state hash and the snapshot
     /// leave it out.
     pub rear_material: u8,
+    /// What the body rays' material listener heard this tick (F27a, [`crate::material_hit`]): the
+    /// collision sound's queue entries this bike owns. Sound only, like [`Ride::rear_material`].
+    pub heard: crate::material_hit::Heard,
     /// A trick is running. The original's airborne control and its wreck test both read one word on
     /// the bike for this (the trick clocks' "in progress"), and the clocks run *after* the ground
     /// step, so what a frame's air code sees is the previous frame's verdict. [`crate::rider`] is
@@ -920,6 +923,7 @@ impl Ride {
             near: F::ONE,
             touching: false,
             rear_material: 0,
+            heard: crate::material_hit::Heard::default(),
             stunt: false,
             drag_halved: false,
             riding_speed_sq: F(BIKE_MAX_SPEED_SQ),
