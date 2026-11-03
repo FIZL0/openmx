@@ -1,10 +1,13 @@
 //! MD82b: MX vs. ATV Unleashed's follow camera ([`ModFollow`]) replayed against SLUS-21104's own, tick
-//! by tick, behind each MD39a car and MD37a's ATV.
+//! by tick, behind each MD39a car and MD37a's ATV, and (MD82c) MD80a's biplane and Kiowa.
 //!
 //! The captures (`context/capture/md82b/<machine>.csv`, `research/md82b/play.sh`) play MD39a's drive
 //! tape from each machine's Desert Oasis Free Ride state and read, every tick, the camera's target block
 //! (cam +0x80: body point, forward, up, velocity, lean, airborne, speed), its distance, yaw and pitch,
-//! the player's four offsets, its ground lift, its eight lags and the viewport's eye.
+//! the player's four offsets, its ground lift, its eight lags and the viewport's eye. MD82c's
+//! (`context/capture/md82c/<flight>.csv`, `research/md82c/fly.sh`) read the same behind the biplane and
+//! the Kiowa, both models, playing MD80a's flight tapes from its Desert Oasis states: the fliers follow
+//! with the same camera and update, from `FC_BiplaneDefault.pb` and `FC_HeliDefault.pb`.
 //!
 //! The replay seeds the port's camera from the first clean row and from then on hands it nothing but
 //! each row's target block (torn, stale and wrecked rows are handled in the loop, and counted). Its presets are the machine's camera file read as [`Preset::read_layout`] reads
@@ -32,15 +35,20 @@ use game_sim::phy::Ini;
 use game_sim::track;
 use ps2_float::{F, Vf};
 
-/// Each capture and the machine in it.
-const CAPTURES: [(&str, ModMachine); 7] = [
-    ("buggy", ModMachine::Buggy),
-    ("baja", ModMachine::Baja),
-    ("sandrail", ModMachine::Sandrail),
-    ("golf", ModMachine::GolfCart),
-    ("truck", ModMachine::MonsterTruck),
-    ("atv-r-spawn", ModMachine::Atv),
-    ("atv-s-spawn", ModMachine::Atv),
+/// Each capture, the folder under `context/capture` it is in, and the machine in it: MD82b's behind
+/// the cars and the ATV, MD82c's (`research/md82c/fly.sh`) behind MD80a's four flights.
+const CAPTURES: [(&str, &str, ModMachine); 11] = [
+    ("md82b", "buggy", ModMachine::Buggy),
+    ("md82b", "baja", ModMachine::Baja),
+    ("md82b", "sandrail", ModMachine::Sandrail),
+    ("md82b", "golf", ModMachine::GolfCart),
+    ("md82b", "truck", ModMachine::MonsterTruck),
+    ("md82b", "atv-r-spawn", ModMachine::Atv),
+    ("md82b", "atv-s-spawn", ModMachine::Atv),
+    ("md82c", "biplane", ModMachine::Biplane),
+    ("md82c", "biplane3", ModMachine::Biplane),
+    ("md82c", "kiowa", ModMachine::Helicopter),
+    ("md82c", "kiowa3", ModMachine::Helicopter),
 ];
 
 /// The frame time the camera is handed: the lags' alpha is this over their time constant in every row.
@@ -60,8 +68,8 @@ struct Capture {
 }
 
 impl Capture {
-    fn read(name: &str) -> Option<Capture> {
-        let text = std::fs::read_to_string(context().join("capture/md82b").join(format!("{name}.csv"))).ok()?;
+    fn read(dir: &str, name: &str) -> Option<Capture> {
+        let text = std::fs::read_to_string(context().join("capture").join(dir).join(format!("{name}.csv"))).ok()?;
         let mut lines = text.lines();
         let columns = lines.next()?.split(',').enumerate().map(|(i, c)| (c.to_string(), i)).collect();
         let rows = lines.map(|l| l.split(',').map(str::to_string).collect()).collect();
@@ -200,9 +208,9 @@ fn each_mod_machines_eye_and_target_replay_slus_21104s() {
     let map = track::Terrain::parse(&trn).unwrap();
     let curve = CurveTable::build();
     let mut checked = 0;
-    for (name, machine) in CAPTURES {
-        let Some(c) = Capture::read(name) else {
-            eprintln!("skip {name}: no context/capture/md82b/{name}.csv");
+    for (dir, name, machine) in CAPTURES {
+        let Some(c) = Capture::read(dir, name) else {
+            eprintln!("skip {name}: no context/capture/{dir}/{name}.csv");
             continue;
         };
         let file = chase::mod_presets(machine);
@@ -271,7 +279,7 @@ fn each_mod_machines_eye_and_target_replay_slus_21104s() {
         checked += 1;
     }
     if checked == 0 {
-        eprintln!("skip: no MD82b capture with its camera file");
+        eprintln!("skip: no MD82b or MD82c capture with its camera file");
     }
 }
 
