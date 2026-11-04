@@ -9434,3 +9434,35 @@ atv_heap_free               atv 0x001b76d0 = free
 #   Along ride-2 and flip-1 the state's kind is 1 on every row; the update runs fade, wreck test, lean,
 #   prepare, ride, sync, snapshot, network, parts and the frame message every row, and rumbles on 34 rows
 #   (soft and strong). It never reaches the wreck steps, fade over, put back, tricks or run over.
+# F31b4b — the bike's wreck around the sim frame: the wreck test, entry, unwreck and put-back
+# (game_sim::handling::wreck; tests/mxvatv_bike_ride.rs). Comment rows only. Journal:
+# research/journal/2026-11-03-f31b-mxvatv-bike-pre-process/6-wreck-FINAL.md.
+#   Bike vtable 0x003d0450: +0x49c wreck test 0x004e24a0(bike, at, f12 dt), +0x368 entry 0x004e2260(bike,
+#   reason), +0x36c unwreck 0x004e2380(bike, kind), +0x398 riding part on/off 0x004e1870(bike, on),
+#   +0x48c record part to the wreck one 0x004e2e10, +0x490 back 0x004e2eb0, +0x3a8 put back
+#   0x004d8940(bike, snap, kind); +0x16c out of bounds, +0x4a8 settle, +0x4b0 stance(i), +0x3a0/+0x39c
+#   kind set/clear, +0x378 sync.
+#   Calls out: bounds 0x0031d410(node +0x3b0, at, out+4, out, 0, f12 150.0); rand 0x003561a8; post
+#   0x00272300(*0x00442eb0, bike+0x674, 8, id, +0xd20, 0) with ids 11 entry, 12 count armed, 13 unwreck,
+#   21 put back; rumble ready 0x0051a250, rumble via rumbler +0x1c vt +0x4c (r, 0, 200, f12 1.0);
+#   body via body +0x110 vt (+0x20, +0x60, +0x68); part on/off via *(part+0x28) +0x20/+0x18 (part+0x24);
+#   unhook 0x0018d540; attach 0x001143e0(part, +0xb4, +0xc0, 1); engine 0x0049f7f0; wheel 0x004a04c0;
+#   rider settle 0x00266c90(+0x1480, +0x1284, 1, 1); bone pose 0x00194e00(bone, 0, buf); place
+#   0x00194da0(part, buf); terrain normal 0x004833c0(terrain, bike+0x50, out, 0, 0); ground 0x00492ca0;
+#   trail 0x004fa760; camera 0x004f7590.
+#   Globals: wrecks on 0x00525350, struck class 0x00542db0, throw scale 0x00526598; rodata origin and
+#   rest 0x00396fc0, rest damping 0x00396fd0.
+#   Words: +0xc80 reason, +0xc84 clock, +0xc88 MaxWreckTime, +0xc8c counting, +0x920 settles, +0xc8
+#   record, +0xb8 body, +0x680 run (+8 bit 0x40000 riding), +0xbc4 state, +0x1434/+0x1438 wreck and
+#   riding parts, +0xcc the record's part (== +0x1434 is wrecked), +0x1440 striker, +0x1110 its mask,
+#   +0x6c4 wrecks, +0xbc0 size (reach 2.9 = 0x4039999a when 0, else 4.5), +0x1418 joust height,
+#   +0x14e4 pose blend (limit 0x3f733333), +0x1260 throw (joust: v - normalize(v)*10 of body +0x80),
+#   +0xd38 put-back spot, lift 0.3 = 0x3e99999a along the terrain normal; +0x1470/+0x1474/+0x1478 bones.
+#   The test: out of bounds enters 13 (unless down for it) and stops. Not down: the clauses, then the
+#   hits and striker run even after a clause entered — one frame can enter two or three times, the last
+#   reason staying. +0x1440 cleared only with wrecks on. Clock windows 2.5 s (13) else 0.5 s.
+#   Throw: 2^-31 (0x30000000) * rand, three draws to body +0x1d0/+0x1d4/+0x1d8, the body re-read each.
+#   MD63f's gravity rewriters 0x004d3f90 / 0x004d40a0 are in vtable 0x003cfad0, used by no state-4
+#   object; the state-4 unwreck only divides *(+0xe8)+4 by the throw scale for a 13.
+#   Along flip-1 the test enters 1 (front) on row 125 and the clock's unwreck puts it back on row 193;
+#   the tail's own put-back (vt +0x3a8 from the update) is never taken on either replay.
