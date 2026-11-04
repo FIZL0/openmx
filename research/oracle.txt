@@ -9508,3 +9508,18 @@ atv_heap_free               atv 0x001b76d0 = free
 #   spot when target+0x138 != 0). Both replays: words +0x870..+0x888 but +0x87c, +0x890..+0x898, +0x920,
 #   +0x930..+0x938, +0x940, +0x950..+0x97c but +0x95c (ride-2: +0x930..+0x938 and +0x940 only; the int at
 #   +0x940 0x38 -> 0x3d).
+
+# F41: what the bike's frame reads of the rider's writes into its record. Journal:
+# research/journal/2026-11-04-f41-rider-writes-into-the-bike/.
+#   Writer: rider 0x010af350's vt slot at 0x003d12f8 = 0x004f28f0 (called inside its world step
+#   0x00505d50 -> 0x00496b70) -> 0x004f1210(rider): record(+0x378)+0x1f0 = rider+0x37c (the flag);
+#   record+0x160 = rider+0x670 quad ((0,0,0,1) 0x00396fc0 when the flag is 0, else 0x004f1c30's);
+#   record+0x200 = (*(rider+0x2a4)+0xa4)+0x70 quad; record+0x1e4's +0x14 block gets rider+0x58c..+0x5ac.
+#   0x004f28f0 then, on record+0x138 != 0, 0x00194c20(*(rider+0xb14), 0, record+0x220) and 0x00194960(..,
+#   record+0x230, record+0x240); rider+0x4f0 = record+0x128.
+#   Flag: 0x004ef320 (from 0x004f1790): rider+0x37c = 1 if any part of the list at +0x5b4 (count +0x5b0) has
+#   +0x14 != 0 (pc 0x4f0004), then +0x380 += dt; else +0x37c = +0x380 = 0 (pc 0x4f0018). Bike+0x920 written
+#   at pc 0x4f1228 every frame; flip-1: 0 on 128 frames, then 1.
+#   Readers (both C15 replays, every read of the frame watched): only bike+0x920, by the wreck clock
+#   (handling::wreck::clock SETTLES), flip-1 rows 125..=140. Nothing else reads, and nothing but the rider
+#   writes, any other byte of bike+0x870..+0x8a0 / +0x920..+0x980. Follow-up S278.
