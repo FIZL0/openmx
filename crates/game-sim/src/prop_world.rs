@@ -734,6 +734,7 @@ impl Collection {
         strikes: &mut [crate::prop_wreck::WreckStrike],
     ) {
         let hulls: Vec<flight_search::Plane<'_>> = wrecks.iter().map(|w| w.hull).collect();
+        self.heard.1.probed.retain(|p| p.0 != k);
         {
             let o = &mut self.objects[k];
             let (true, Some(c)) = (o.filed, o.collision.as_mut()) else { return };
@@ -786,11 +787,14 @@ impl Collection {
             if let Some(s) = &scene {
                 self.heard.0.extend(s.sounded().iter().map(|&struck| (k, struck)));
                 // The ridden bikes' frame collidables are on the original's node too, which the
-                // material listener hears struck (F27a2); here they are heard and nothing more.
+                // material listener hears struck (F27a2), filed behind the prop's own hits.
                 if let (Some(tree), Some(mesh)) = (rays.get(k).and_then(Option::as_ref), self.heard.1.mesh.as_deref()) {
                     let bikes = flight_search::Bikes { mesh, bikes: &self.heard.1.bikes };
-                    let struck = flight_search::bikes_struck(tree, &searched.0, &searched.1, bikes);
-                    self.heard.0.extend(struck.into_iter().map(|j| (k, crate::material_hit::Struck::Bike(j))));
+                    let probed = flight_search::bikes_probed(tree, &searched.0, &searched.1, bikes);
+                    self.heard.0.extend(probed.iter().map(|&(j, _)| (k, crate::material_hit::Struck::Bike(j))));
+                    if self.heard.1.file {
+                        file_on_bikes(&mut c.record, k, probed, &mut self.heard.1.probed);
+                    }
                 }
             }
             let heard = scene.map(|s| s.heard()).unwrap_or_default();
@@ -1276,4 +1280,36 @@ fn ordered(a: f32, b: f32, low: bool) -> f32 {
         return if low { fpu::min(a, b) } else { fpu::max(a, b) };
     }
     if low { vu::mini(a, b) } else { vu::max(a, b) }
+}
+
+/// **A prop's probe's hits on the ridden bikes' frames, on its list** (B29): each ray's an entry
+/// (kind 0) naming the bike by its player, as [`contact_search::collide`] files a hit on a collision
+/// object (the record's flags and its struck one with it, the bike's struck id [`flight_search::BIKES`]
+/// `+ j`), and its mirror (kind 1, the normal turned round) kept in `mirrors` for the bike's list,
+/// which the bike's strike files after its own entries ([`crate::prop_contact::strike`]). f27a1's
+/// image 2904: ball 2's list holds its probe's entry on the bike behind the bike's strike's mirror,
+/// and the bike's the entry's mirror behind its own.
+fn file_on_bikes(rec: &mut Record, k: usize, probed: Vec<(usize, Vec<crate::ray_probe::Contact>)>, mirrors: &mut Vec<(usize, usize, contact::Contact)>) {
+    for (j, hits) in probed {
+        for h in hits {
+            rec.touching = true;
+            rec.on_object = true;
+            contact_search::add(rec, 0, h.from, h.to, h.point, h.normal, contact_search::NO_SURFACE, Some(j), None);
+            rec.struck = Some(flight_search::BIKES + j);
+            rec.touching_other = true;
+            let mirror = contact::Contact {
+                kind: 1,
+                from: h.from,
+                on_body: h.to,
+                normal: contact::negated(h.normal),
+                point: h.point,
+                arm: Vf::VF0,
+                other_arm: Vf::VF0,
+                surface: contact_search::NO_SURFACE,
+                other: None,
+                mover: None,
+            };
+            mirrors.push((k, j, mirror));
+        }
+    }
 }

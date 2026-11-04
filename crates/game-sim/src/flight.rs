@@ -826,7 +826,7 @@ impl Flight {
             })
             .collect();
         let mut places = Vec::with_capacity(order.len());
-        for p in set.strike(&crate::prop_contact::Strike { contacts: Vec::new(), struck }) {
+        for p in set.strike(&crate::prop_contact::Strike { contacts: Vec::new(), struck, ..Default::default() }) {
             match bodies.iter().position(|b| (b.collection, b.object) == (p.collection, p.object)) {
                 Some(i) => places.push(i),
                 None => {

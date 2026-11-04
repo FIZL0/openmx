@@ -285,10 +285,16 @@ fn bike_sphere(mesh: &track::Mesh, t: &Mat4) -> (Vf, F) {
 /// probe's rays placed at `node` — the pair test of [`Scene`]'s bike (its frame collidable, `bikes`'
 /// mesh on its chassis' transform), by player. The original files the ridden bikes' frame
 /// collidables on the props' node, so a prop's probe strikes them and the material table's listener
-/// queues it (s195-knock-2881: ball 2 on the bike, material 16); the port's props meet the bikes only
-/// through the strike's mirrors, so nothing else is made of these hits. The ray test's answer does
-/// not hang on its record, so each bike is tried on its own.
+/// queues it (s195-knock-2881: ball 2 on the bike, material 16). The contacts are filed from
+/// [`bikes_probed`] (B29). The ray test's answer does not hang on its record, so each bike is tried
+/// on its own.
 pub fn bikes_struck(rays: &Rays, node: &Frame, categories: &Categories, bikes: Bikes<'_>) -> Vec<usize> {
+    bikes_probed(rays, node, categories, bikes).into_iter().map(|(k, _)| k).collect()
+}
+
+/// [`bikes_struck`] with what the probe struck on each bike (B29): its ray contacts on that bike's
+/// frame, in the probe's order, one a ray, by player.
+pub fn bikes_probed(rays: &Rays, node: &Frame, categories: &Categories, bikes: Bikes<'_>) -> Vec<(usize, Vec<ray_probe::Contact>)> {
     if !categories.allows(BIKE) || bikes.bikes.iter().all(|b| !b.in_world) {
         return Vec::new();
     }
@@ -299,7 +305,7 @@ pub fn bikes_struck(rays: &Rays, node: &Frame, categories: &Categories, bikes: B
         let target = ray_probe::Mesh { id: 0, transform: b.transform.0, root: 0, nodes: &bikes.mesh.nodes, facets: &facets, vertices: &bikes.mesh.vertices };
         let mut record = ray_probe::Record { listed: true, capacity: rays.segments.len(), one_per_ray: true, ..ray_probe::Record::default() };
         if ray_probe::pair(&probe, &ray_probe::Shape::Mesh(target), &mut record) {
-            out.push(k);
+            out.push((k, record.contacts));
         }
     }
     out

@@ -88,6 +88,16 @@ impl PropSet {
         }
     }
 
+    /// **Whether the props' probes file what they strike on the ridden bikes** (B29): their entries
+    /// name the bikes by player, so this is on where the props' step has the players' chassis for its
+    /// strikers, by player ([`crate::Sim::props_step`], the seats' shared step), and the bikes' strikes
+    /// file the mirrors ([`crate::prop_contact::strike`]). Off, the bikes are heard only (F27a2).
+    pub fn file_ridden(&mut self, on: bool) {
+        for c in &mut self.collections {
+            c.heard.1.file = on;
+        }
+    }
+
     /// The props of a track: `toy` its `.toy`, `track_dir` its directory as the `.pco` paths are made
     /// (`Tracks\Free09\`), `models` the scene's models. `pco` hands back a file by that path, `psg` a
     /// model's `.psg` by its file name (`sign_speedlmt.psg`); `area` is the terrain's extent, the
@@ -209,6 +219,7 @@ impl PropSet {
     fn heard_afresh(&mut self) {
         for c in &mut self.collections {
             c.heard.0.clear();
+            c.heard.1.probed.clear();
         }
     }
 
