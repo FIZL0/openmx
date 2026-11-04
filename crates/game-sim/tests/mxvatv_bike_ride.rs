@@ -233,7 +233,7 @@ fn ticks_land_one_row_later() {
 use game_sim::atv_body::Body;
 use game_sim::biplane::{Dynamics, List, World};
 use game_sim::handling::seed::{self, Seed};
-use ps2_float::F;
+use ps2_float::{F, Vf};
 
 /// The sim frame's pieces (research/oracle.txt `# F31`): the per-frame flag that skips the frame (its
 /// object's `+0x225` bit 3), the `+0x24` list's getter, the tail after the world step, and the `+0x3c`
@@ -1426,6 +1426,628 @@ fn the_bikes_force_body_is_the_originals() {
         "push, rear up",
         "rear pair set",
         "rear pair cleared",
+    ] {
+        let n = t.get(want).copied().unwrap_or(0);
+        assert!(n >= 30, "only {n} bike(s) went down {want:?}: {t:?}");
+    }
+}
+
+// --- F31b3: the bike's PostProcess, the port's ---------------------------------------------------------
+
+/// The bike's PostProcess (research/oracle.txt `# F31b3`): the post list's thunk hands it the bike.
+const AIR_STATE: u32 = 0x004d_9290;
+/// The bike's post element: the bike's `+0x34`.
+const BIKE_POST: u32 = BIKE + 0x34;
+/// Its callees that are not the bike's vtable's: the vehicle's in-world test (also its vt `+0x120`),
+/// the message post and the queue it is handed, and the node's placement, position and bounds.
+const IN_WORLD: u32 = 0x0049_4200;
+const POST_MESSAGE: u32 = 0x0027_2300;
+const POST_QUEUE: u32 = 0x0044_2eb0;
+const NODE_PLACE: u32 = 0x0019_4650;
+const NODE_POSITION: u32 = 0x0019_4c20;
+const NODE_BOUNDS: u32 = 0x0019_6e80;
+/// The rodata `(0, 0, 0, 1)` the no-hander builds its frame at.
+const FRAME_AT: u32 = 0x0039_6fc0;
+/// The bike's vtable slots the PostProcess calls: the put-back, and the vehicle post's body reset,
+/// respawn, spatial update and collision sync.
+const PUT_BACK_SLOT: u32 = 0x3a8;
+const POST_SLOTS: [(u32, Call); 4] =
+    [(0x13c, Call::BodyReset), (0xe8, Call::Respawn), (0xe4, Call::SpatialUpdate), (0x124, Call::CollisionSync)];
+
+/// The bike in RAM as the port's PostProcess sees it: [`StepInRam`]'s words and the [`bike::Post`]'s.
+/// Each call is the original's, run on the bike in RAM with `dt` in `f12`.
+struct PostInRam<'a> {
+    step: StepInRam<'a>,
+    post: bike::Post,
+    post_last: Vec<(u32, u32)>,
+}
+
+impl PostInRam<'_> {
+    fn read(&mut self) -> (Quad, quad::Body) {
+        let out = self.step.read();
+        let ee = &*self.step.ram.ee;
+        self.post = bike::read_post(&|a| ee.u32_at(a), BIKE, self.step.ram.body);
+        self.post_last = bike::post_words(&self.post, BIKE);
+        out
+    }
+
+    fn write(&mut self, q: &Quad, b: &quad::Body) {
+        self.step.write(q, b);
+        let now = bike::post_words(&self.post, BIKE);
+        for (&(a, w), &(_, lw)) in now.iter().zip(&self.post_last) {
+            if w != lw {
+                self.step.ram.ee.set_u32(a, w);
+            }
+        }
+        self.post_last = now;
+    }
+
+    fn run(&mut self, f: u32, ints: &[u64], q: &mut Quad, body: &mut quad::Body) {
+        self.write(q, body);
+        let ee = &mut *self.step.ram.ee;
+        ee.set(28, GP);
+        ee.call(f, ints, &[self.step.dt.0], BUDGET);
+        (*q, *body) = self.read();
+    }
+}
+
+impl Moto for PostInRam<'_> {
+    fn call(&mut self, c: Call, q: &mut Quad, body: &mut quad::Body) {
+        let ee = &*self.step.ram.ee;
+        let node = u64::from(ee.u32_at(BIKE + 0xe4));
+        let (f, ints) = match c {
+            Call::NodeBounds => (NODE_BOUNDS, vec![node]),
+            Call::NodePosition => (NODE_POSITION, vec![node, 0, u64::from(BIKE + 0xbd0)]),
+            c => match POST_SLOTS.iter().find(|s| s.1 == c) {
+                Some(&(slot, _)) => (vt(ee, slot), vec![u64::from(BIKE)]),
+                None => panic!("the bike's PostProcess calls no {c:?}"),
+            },
+        };
+        self.run(f, &ints, q, body);
+    }
+}
+
+impl bike::Rides for PostInRam<'_> {
+    fn rider(&mut self) -> &mut bike::Rider {
+        &mut self.step.rider
+    }
+    fn noise(&mut self, _: F) -> F {
+        panic!("the bike's PostProcess makes no noise")
+    }
+}
+
+impl bike::Posts for PostInRam<'_> {
+    fn post(&mut self) -> &mut bike::Post {
+        &mut self.post
+    }
+    fn out(&mut self, c: bike::Out, q: &mut Quad, body: &mut quad::Body) {
+        let ee = &mut *self.step.ram.ee;
+        let (f, ints) = match c {
+            bike::Out::Place { orientation, at } => {
+                assert_eq!(orientation.to_bits(), body.orientation.to_bits(), "the node is placed with the body's quaternion");
+                let (node, to) = (ee.u32_at(BIKE + 0xe4), ee.scratch(0));
+                for (k, w) in at.to_bits().into_iter().enumerate() {
+                    ee.set_u32(to + 4 * k as u32, w);
+                }
+                (NODE_PLACE, vec![u64::from(node), 0, u64::from(self.step.ram.body + 0x190), u64::from(to)])
+            }
+            bike::Out::OutOfWorld(id) => {
+                let (kind, msg) = bike::OUT_OF_WORLD;
+                (POST_MESSAGE, vec![u64::from(ee.u32_at(POST_QUEUE)), u64::from(BIKE + 0x674), u64::from(kind), u64::from(msg), u64::from(id), 0])
+            }
+            bike::Out::PutBack { place, keep } => (vt(ee, PUT_BACK_SLOT), vec![u64::from(BIKE), u64::from(place), u64::from(keep)]),
+        };
+        self.run(f, &ints, q, body);
+    }
+}
+
+/// [`bike::air_state`] on the bike in RAM, with its callees the original's.
+fn port_post(ee: &mut Ee, dt: F) {
+    let body = ee.u32_at(BIKE + seed::BODY);
+    let (wheels, record) = (the_wheels(ee), ee.u32_at(BIKE + seed::RECORD));
+    let ram = InRam { ee, wheels, record, body, last: Vec::new() };
+    let step = StepInRam { ram, rider: bike::Rider::default(), rider_last: Vec::new(), dt };
+    let mut m = PostInRam { step, post: bike::Post::default(), post_last: Vec::new() };
+    let (mut q, mut b) = m.read();
+    bike::air_state(&mut q, &mut b, dt, &mut m);
+    m.write(&q, &b);
+}
+
+/// A frame as [`PortStep`]'s, the bike's PostProcess the port's ([`port_post`]) as well.
+struct PortPost<'a>(PortStep<'a>, u32);
+
+impl Dynamics for PortPost<'_> {
+    fn count(&self, l: List) -> i32 {
+        self.0.count(l)
+    }
+    fn preforce(&mut self, i: i32, dt: F) {
+        self.0.preforce(i, dt)
+    }
+    fn force(&mut self, i: i32, h: F) {
+        self.0.force(i, h)
+    }
+    fn enabled(&self, b: i32) -> bool {
+        self.0.enabled(b)
+    }
+    fn integrate(&mut self, b: i32, h: F) {
+        self.0.integrate(b, h)
+    }
+    fn end_substep(&mut self, b: i32) {
+        self.0.end_substep(b)
+    }
+    fn constrain(&mut self, b: i32, last: bool) {
+        self.0.constrain(b, last)
+    }
+    fn post(&mut self, i: i32, dt: F) {
+        if self.0.0.0.elt(List::Post, i) != BIKE_POST {
+            return self.0.post(i, dt);
+        }
+        let x = &mut self.0.0.0;
+        for (a, w) in seed::body_words(&x.body, x.at) {
+            x.ee.set_u32(a, w);
+        }
+        port_post(x.ee, dt);
+        x.body = seed::body(&|a| x.ee.u32_at(a), x.at);
+        self.1 += 1;
+    }
+}
+
+/// One sim frame as [`port_step_frame`] runs it, the world step [`PortPost`]'s. Answers how many
+/// times the port's Force body and PostProcess ran.
+fn port_post_frame(ee: &mut Ee, dt: F) -> (u32, u32) {
+    let call = |ee: &mut Ee, f: u32, ints: &[u64], x: F| {
+        ee.set(28, GP);
+        ee.call(f, ints, &[x.0], BUDGET);
+        ee.r(2)
+    };
+    assert_eq!(ee.u8_at(ee.u32_at(SKIP_FLAG) + 0x225) & 8, 0, "the frame is not skipped");
+    for slot in [0x7c, 0x84] {
+        for i in 0..ee.u32_at(SIM + 0x24) {
+            let e = call(ee, LIST24_GET, &[u64::from(SIM + 0x24), u64::from(i)], F::ZERO) as u32;
+            call(ee, ee.u32_at(ee.u32_at(e + 4) + slot), &[u64::from(e)], dt);
+        }
+    }
+    let world = World { iterations: ee.u32_at(WORLD) as i32, rate: F(ee.f32_at(WORLD + 4)) };
+    let at = ee.u32_at(BIKE + seed::BODY);
+    let body = seed::body(&|a| ee.u32_at(a), at);
+    let mut h = PortPost(PortStep(PortHead(Hybrid { ee, body, at, integrated: 0 }), 0), 0);
+    world.step(dt, &mut h);
+    let (body, steps, posts) = (h.0.0.0.body, h.0.1, h.1);
+    for (a, w) in seed::body_words(&body, at) {
+        ee.set_u32(a, w);
+    }
+    call(ee, TAIL, &[u64::from(SIM)], dt);
+    let mut i = 0;
+    while i < ee.u32_at(SIM + 0x3c) {
+        let e = call(ee, LIST3C_GET, &[u64::from(SIM + 0x3c), u64::from(i)], F::ZERO) as u32;
+        if call(ee, ee.u32_at(ee.u32_at(e) + 8), &[u64::from(e)], dt) != 0 {
+            call(ee, LIST3C_REMOVE, &[u64::from(SIM + 0x3c), u64::from(i)], F::ZERO);
+        } else {
+            i += 1;
+        }
+    }
+    (steps, posts)
+}
+
+/// [`replay`] with every frame [`port_post_frame`].
+fn replay_port_post(name: &str) -> Option<Vec<bool>> {
+    let mut ee = hooked(image()?);
+    let rows = rows(name)?;
+    let mut out = Vec::new();
+    for (r, row) in rows.iter().enumerate() {
+        poke(&mut ee, row, &READER);
+        assert_eq!(port_post_frame(&mut ee, F(f32::from_bits(DT))), (4, 1), "the bike's Force body runs every substep, its PostProcess once");
+        let d = diff(&ee, row);
+        assert!(
+            d.is_empty(),
+            "{name} row {r} (vsync {}), the port's head, Force body and PostProcess: {} words differ\n  {}",
+            row["vsync"],
+            d.len(),
+            d.iter().take(40).cloned().collect::<Vec<_>>().join("\n  ")
+        );
+        let w = wrecked(|o| ee.u32_at(BIKE + o));
+        assert_eq!(w, row_wrecked(row), "{name} row {r}: the wreck state");
+        out.push(w);
+        poke(&mut ee, row, &SPOT);
+    }
+    Some(out)
+}
+
+/// **C15's ride, the bike's PreProcess, Force body and PostProcess the port's**: every row of ride-2
+/// word for word.
+#[test]
+fn ride_replays_bit_exact_on_the_ports_post_process() {
+    let Some(w) = replay_port_post("ride-2") else { return };
+    assert_eq!(w.len(), 459);
+    assert!(w.iter().all(|w| !w), "the ride never wrecks");
+}
+
+/// **C15's flip, the bike's PreProcess, Force body and PostProcess the port's**: wrecked on row 125
+/// and put back on row 193, every row word for word.
+#[test]
+fn flip_wrecks_and_is_put_back_bit_exact_on_the_ports_post_process() {
+    let Some(w) = replay_port_post("flip-1") else { return };
+    assert_eq!(w.len(), 465);
+    let changes: Vec<usize> = (1..w.len()).filter(|&r| w[r] != w[r - 1]).collect();
+    assert_eq!(changes, [125, 193], "wrecked on row 125, put back on row 193");
+}
+
+/// A call the PostProcess makes: one of the quad's steps or one of the bike's own.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PostCall {
+    Step(Call),
+    Out(bike::Out),
+}
+
+/// What the node's position answers in the oracle, both sides alike.
+const NODE_SAYS: Vf = Vf::new(812.5, -36.25, 1904.75, 1.0);
+
+/// The port's side of the PostProcess oracle: the calls logged, the rider and the post words held.
+struct PostLogged {
+    calls: Vec<PostCall>,
+    rider: bike::Rider,
+    post: bike::Post,
+}
+
+impl Moto for PostLogged {
+    fn call(&mut self, c: Call, q: &mut Quad, _: &mut quad::Body) {
+        if c == Call::NodePosition {
+            q.node_pos = NODE_SAYS;
+        }
+        self.calls.push(PostCall::Step(c));
+    }
+}
+
+impl bike::Rides for PostLogged {
+    fn rider(&mut self) -> &mut bike::Rider {
+        &mut self.rider
+    }
+    fn noise(&mut self, _: F) -> F {
+        panic!("the bike's PostProcess makes no noise")
+    }
+}
+
+impl bike::Posts for PostLogged {
+    fn post(&mut self) -> &mut bike::Post {
+        &mut self.post
+    }
+    fn out(&mut self, c: bike::Out, _: &mut Quad, _: &mut quad::Body) {
+        self.calls.push(PostCall::Out(c));
+    }
+}
+
+/// **The bike's PostProcess is the original's**: 12 000 bikes, each state 4's with the PostProcess's
+/// inputs drawn at random (the guards, the balance state, the no-hander's keys, both wheels' contact,
+/// ray and sweep words, normals and contact velocities, the rear's donut, the signed speed and lean,
+/// the body's quaternion, velocity, spin, position, centre of gravity and on word, the airborne and
+/// hang time, the flip, spin and authority, the flag byte, the world's floor and box, the post id),
+/// run through SLUS-21104's PostProcess and through [`bike::air_state`] from the same words. Every
+/// word of the bike, its wheels, its body and the record comes out the same, and the calls are made in
+/// the same order with the same arguments. The original's callees outside the bike's own code (the
+/// vtable's, the message post, the node's placement, position and bounds) are hooked to log and do
+/// nothing (the position answers [`NODE_SAYS`]); the no-hander, the in-world test and the math they
+/// call are its own.
+#[test]
+#[allow(clippy::float_arithmetic)]
+fn the_bikes_post_process_is_the_originals() {
+    let Some(mut ee) = image().map(hooked) else { return };
+    assert_eq!(vt(&ee, 0x120), IN_WORLD, "the bike's in-world slot");
+    assert_eq!([0, 4, 8, 12].map(|o| ee.f32_at(FRAME_AT + o)), [0.0, 0.0, 0.0, 1.0], "the no-hander's frame origin");
+    let [front, rear] = the_wheels(&ee);
+    let body = ee.u32_at(BIKE + seed::BODY);
+    let node = ee.u32_at(BIKE + 0xe4);
+    let record = ee.u32_at(BIKE + seed::RECORD);
+    let world = ee.u32_at(BIKE + 0xe8);
+    let log: Rc<RefCell<Vec<PostCall>>> = Rc::default();
+    let mut hooked_at = Vec::new();
+    for (slot, c) in POST_SLOTS {
+        let (l, at) = (log.clone(), vt(&ee, slot));
+        hooked_at.push(at);
+        ee.hooks.insert(at, Box::new(move |ee: &mut Ee| {
+            assert_eq!(ee.r(4) as u32, BIKE, "{c:?} handed something other than the bike");
+            l.borrow_mut().push(PostCall::Step(c));
+        }));
+    }
+    let l = log.clone();
+    hooked_at.push(NODE_BOUNDS);
+    ee.hooks.insert(NODE_BOUNDS, Box::new(move |ee: &mut Ee| {
+        assert_eq!(ee.r(4) as u32, node, "the node's bounds handed another node");
+        l.borrow_mut().push(PostCall::Step(Call::NodeBounds));
+    }));
+    let l = log.clone();
+    hooked_at.push(NODE_POSITION);
+    ee.hooks.insert(NODE_POSITION, Box::new(move |ee: &mut Ee| {
+        assert_eq!((ee.r(4) as u32, ee.r(5), ee.r(6) as u32), (node, 0, BIKE + 0xbd0), "the node position's arguments");
+        for (k, w) in NODE_SAYS.to_bits().into_iter().enumerate() {
+            ee.set_u32(BIKE + 0xbd0 + 4 * k as u32, w);
+        }
+        l.borrow_mut().push(PostCall::Step(Call::NodePosition));
+    }));
+    let l = log.clone();
+    hooked_at.push(NODE_PLACE);
+    ee.hooks.insert(NODE_PLACE, Box::new(move |ee: &mut Ee| {
+        assert_eq!((ee.r(4) as u32, ee.r(5), ee.r(6) as u32), (node, 0, body + 0x190), "the node placement's arguments");
+        let v = |a: u64| seed::Words::v(&|x| ee.u32_at(x), a as u32);
+        l.borrow_mut().push(PostCall::Out(bike::Out::Place { orientation: v(ee.r(6)), at: v(ee.r(7)) }));
+    }));
+    let l = log.clone();
+    hooked_at.push(POST_MESSAGE);
+    ee.hooks.insert(POST_MESSAGE, Box::new(move |ee: &mut Ee| {
+        let (kind, msg) = bike::OUT_OF_WORLD;
+        let want = (u64::from(ee.u32_at(POST_QUEUE)), u64::from(BIKE + 0x674), u64::from(kind), u64::from(msg), 0);
+        assert_eq!((ee.r(4), ee.r(5), ee.r(6), ee.r(7), ee.r(9)), want, "the message's arguments");
+        l.borrow_mut().push(PostCall::Out(bike::Out::OutOfWorld(ee.r(8) as u32)));
+    }));
+    let (l, put_back) = (log.clone(), vt(&ee, PUT_BACK_SLOT));
+    hooked_at.push(put_back);
+    ee.hooks.insert(put_back, Box::new(move |ee: &mut Ee| {
+        assert_eq!(ee.r(4) as u32, BIKE, "the put-back handed something other than the bike");
+        l.borrow_mut().push(PostCall::Out(bike::Out::PutBack { place: ee.r(5) != 0, keep: ee.r(6) != 0 }));
+    }));
+    let mut distinct = hooked_at.clone();
+    distinct.sort_unstable();
+    distinct.dedup();
+    assert_eq!(distinct.len(), hooked_at.len(), "each hooked callee is its own function: {hooked_at:#x?}");
+
+    let mut regions = head_regions(&ee);
+    if !regions.iter().any(|&(at, len)| (at..at + len).contains(&(record + 0x24))) {
+        regions.push((record + 0x24, 4));
+    }
+    let state = ee.u32_at(BIKE + 0xbc4);
+    let kind = ee.u32_at(state + 0x28);
+    let image_words = snap_regions(&ee, &regions);
+    let world_words = [ee.u32_at(world + 0x98), ee.u32_at(world + 0xa8)];
+    let area = ee.scratch(8);
+    let mut g = Gen(0x0031_b003);
+    let mut t = BTreeMap::new();
+    for k in 0..12_000 {
+        restore_regions(&mut ee, &regions, &image_words);
+        let (b, f) = (|ee: &mut Ee, a: u32, v: bool| ee.set_u32(a, u32::from(v)), |ee: &mut Ee, a: u32, v: f32| ee.set_f32(a, v));
+        let v = |ee: &mut Ee, g: &mut Gen, a: u32, r: f32| {
+            for i in 0..3 {
+                let x = g.near(0.0, -r, r);
+                ee.set_f32(a + 4 * i, x);
+            }
+        };
+        // The guards: no state, states 3 and 4, others; the wreck reason; the balance words.
+        match g.bits() % 12 {
+            0 => ee.set_u32(BIKE + 0xbc4, 0),
+            1 => ee.set_u32(state + 0x28, 3),
+            2 => ee.set_u32(state + 0x28, 4),
+            n => ee.set_u32(state + 0x28, [kind, kind, kind, kind, 0, 1, 2, 5, 6][n as usize - 3]),
+        }
+        ee.set_u32(BIKE + 0xc80, if g.one_in(6) { g.bits() | 1 } else { 0 });
+        let bal = g.bits();
+        ee.set_u32(BIKE + 0x1524, bal);
+        ee.set_u32(BIKE + 0x152c, if g.one_in(4) { bal } else { g.bits() });
+        // The balance state the PostProcess clears, and the two words the put out of the world does.
+        for o in [0x14f8, 0x150c, 0x1510, 0x1518, 0x868, 0xc1c, 0xd20] {
+            ee.set_u32(BIKE + o, g.bits());
+        }
+        // The no-hander's keys: the stand-upright speeds (tied a sixth of the time), the roll speed
+        // (zero a sixth), command, gain and donut scale.
+        let s1 = g.f(0.0, 20.0);
+        f(&mut ee, BIKE + 0x1374, s1);
+        f(&mut ee, BIKE + 0x1378, if g.one_in(6) { s1 } else { s1 + g.f(0.5, 30.0) });
+        f(&mut ee, BIKE + 0x1368, if g.one_in(6) { 0.0 } else { g.f(1.0, 60.0) });
+        f(&mut ee, BIKE + 0x1360, g.f(0.0, 1.0));
+        f(&mut ee, BIKE + 0x1370, g.f(0.0, 20.0));
+        f(&mut ee, BIKE + 0x1238, g.f(0.0, 3.0));
+        // The wheels: contact, ray hit and sweep (as words), normal (its `y` at the sweep's 0.17 now
+        // and then), contact velocity; the rear's donut.
+        for w in [front, rear] {
+            b(&mut ee, w + 0xdc, g.bits() % 4 != 0);
+            ee.set_u32(w + 0xd0, if g.one_in(2) { 0 } else { [1, g.bits()][(g.bits() % 2) as usize] });
+            ee.set_u32(w + 0xd4, if g.one_in(3) { 0 } else { 1 });
+            let mut n = [g.f(-0.9, 0.9), g.f(-0.3, 1.0), g.f(-0.9, 0.9)];
+            let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            n = n.map(|x| x / l);
+            if g.one_in(8) {
+                n[1] = f32::from_bits(0x3e2e_147b);
+            }
+            for i in 0..3 {
+                f(&mut ee, w + 0x130 + 4 * i as u32, n[i]);
+            }
+            v(&mut ee, &mut g, w + 0x190, 40.0);
+        }
+        f(&mut ee, rear + 0x38, if g.one_in(2) { g.near(0.0, -1.0, 0.0) } else { g.f(0.0, 1.5) });
+        // The signed speed and the lean.
+        let speed = match g.bits() % 6 {
+            0 => *[0.0, -0.0, 5.0, 15.0, -10.0].get((g.bits() % 5) as usize).unwrap(),
+            1 => g.f(-12.0, 12.0),
+            _ => g.f(-10.0, 50.0),
+        };
+        f(&mut ee, BIKE + 0xc38, speed);
+        f(&mut ee, BIKE + 0x12e8, g.near(0.0, -1.0, 1.0));
+        // The body: on or off, its quaternion (level now and then), velocity (under the crossup's
+        // 10 ft/s a third of the time), spin, position near the world's box, centre of gravity.
+        ee.set_u32(body, u32::from(!g.one_in(8)));
+        let qt = if g.one_in(8) {
+            [0.0, 0.0, 0.0, 1.0]
+        } else {
+            let qt = [g.f(-1.0, 1.0), g.f(-1.0, 1.0), g.f(-1.0, 1.0), g.f(-1.0, 1.0)];
+            let l = qt.iter().map(|x| x * x).sum::<f32>().sqrt();
+            qt.map(|x| x / l)
+        };
+        for i in 0..4 {
+            f(&mut ee, body + 0x190 + 4 * i as u32, qt[i]);
+        }
+        let r = if g.one_in(3) { 6.0 } else { 60.0 };
+        v(&mut ee, &mut g, body + 0x80, r);
+        v(&mut ee, &mut g, body + 0x1d0, 5.0);
+        v(&mut ee, &mut g, body + 0x70, 150.0);
+        let r = if g.one_in(4) { 0.0 } else { 1.0 };
+        v(&mut ee, &mut g, body + 0x1a0, r);
+        // The air: airborne before, hang time, flipping, spinning, the authority and its time.
+        b(&mut ee, BIKE + 0xde0, g.one_in(2));
+        f(&mut ee, BIKE + 0x1190, g.f(0.0, 3.0));
+        b(&mut ee, BIKE + 0x1198, g.one_in(5));
+        b(&mut ee, BIKE + 0x11d4, g.one_in(5));
+        f(&mut ee, BIKE + 0x1188, if g.one_in(2) { g.near(0.0, -1.0, 0.0) } else { g.f(0.0, 2.0) });
+        f(&mut ee, BIKE + 0x118c, if g.one_in(4) { 0.0 } else { g.f(0.1, 2.0) });
+        // The world test: the flag byte's box, floor, bounds and clear bits; the floor; the box or none.
+        let flags = [0x00, 0x01, 0x40, 0x41][(g.bits() % 4) as usize] | (g.bits() & 0x06) as u8 | (g.bits() & 0xb8) as u8;
+        let w44 = ee.u32_at(BIKE + 0x44);
+        ee.set_u32(BIKE + 0x44, (w44 & !0xff00) | u32::from(flags) << 8);
+        f(&mut ee, world + 0x98, g.near(0.0, -150.0, 150.0));
+        if g.one_in(5) {
+            ee.set_u32(world + 0xa8, 0);
+        } else {
+            ee.set_u32(world + 0xa8, area);
+            for (o, sign) in [(0x30, -1.0), (0x40, 1.0)] {
+                for i in 0..4 {
+                    let x = sign * g.f(20.0, 140.0);
+                    ee.set_f32(area + o + 4 * i, x);
+                }
+            }
+        }
+        let dt = if g.one_in(2) { f32::from_bits(DT) } else { g.f(0.002, 0.05) };
+        let before = snap_regions(&ee, &regions);
+
+        let r = |a| ee.u32_at(a);
+        let (mut q, mut qb) = (bike::read_quad(&r, BIKE), quad_body(&ee, body));
+        let rider = bike::read_rider(&r, BIKE, body);
+        let post = bike::read_post(&r, BIKE, body);
+        let (q0, qb0) = (q, qb);
+        let mut m = PostLogged { calls: Vec::new(), rider, post };
+        bike::air_state(&mut q, &mut qb, F(dt), &mut m);
+
+        if !q0.active {
+            tally(&mut t, "off");
+        } else {
+            if q0.control_off {
+                tally(&mut t, "wrecked");
+            } else if q0.balancing {
+                tally(&mut t, "balancing");
+            } else {
+                let grounded = |w: &quad::Wheel, k: usize| w.touching && (post.ray_hit[k] || (post.swept[k] && !(w.normal.y() <= 0.17)));
+                tally(&mut t, if grounded(&q0.wheels[bike::FRONT], 0) {
+                    "no hands, front"
+                } else if grounded(&q0.wheels[bike::REAR], 1) {
+                    "no hands, rear"
+                } else {
+                    "no hands, no ground"
+                });
+                if qb.orientation.to_bits() != qb0.orientation.to_bits() {
+                    tally(&mut t, "rolled");
+                }
+                if post.donut > F::ZERO {
+                    tally(&mut t, "donut");
+                }
+            }
+            if !q0.airborne && q.airborne {
+                tally(&mut t, "took off");
+            }
+            tally(&mut t, if q.airborne { "in the air" } else if q.all_down { "both down" } else { "one down" });
+            if !q0.flipping && !q0.spinning && q.speed_len > F(10.0) {
+                tally(&mut t, "crossup");
+            }
+            if q0.authority > F::ZERO && q0.authority_time != F::ZERO {
+                tally(&mut t, "crossup ramped");
+            }
+            if q.tipped {
+                tally(&mut t, "tipped");
+            }
+            let calls = &m.calls;
+            if calls.iter().any(|c| matches!(c, PostCall::Out(bike::Out::OutOfWorld(_)))) {
+                tally(&mut t, "out of the world");
+            }
+            if !post.body_on {
+                tally(&mut t, "body off");
+            } else if calls.iter().any(|c| matches!(c, PostCall::Out(bike::Out::Place { .. }))) {
+                tally(&mut t, "placed");
+            } else {
+                tally(&mut t, "reset");
+            }
+            if calls.contains(&PostCall::Step(Call::NodeBounds)) {
+                tally(&mut t, "node bounds");
+            }
+            match (post.flags() & 0x41, post.bounds.area) {
+                (0, _) => tally(&mut t, "anywhere"),
+                (f, None) if f & 1 != 0 => tally(&mut t, "no box"),
+                (f, _) if f & 1 != 0 => tally(&mut t, "boxed"),
+                _ => tally(&mut t, "floored"),
+            }
+        }
+
+        let mut want = before.clone();
+        let index = |a: u32| {
+            let mut i = 0;
+            for &(at, len) in &regions {
+                if (at..at + len).contains(&a) {
+                    return i + ((a - at) / 4) as usize;
+                }
+                i += (len / 4) as usize;
+            }
+            panic!("{a:#x} is in none of the regions")
+        };
+        let words = |q: &Quad, b: &quad::Body, r: &bike::Rider, p: &bike::Post| {
+            let mut w = bike::quad_words(q, BIKE, [front, rear], record);
+            w.extend(quad_body_words(b, body));
+            w.extend(bike::rider_words(r, BIKE, body));
+            w.extend(bike::post_words(p, BIKE));
+            w
+        };
+        for ((a, w), (_, w0)) in words(&q, &qb, &m.rider, &m.post).into_iter().zip(words(&q0, &qb0, &rider, &post)) {
+            if w != w0 {
+                want[index(a)] = w;
+            }
+        }
+
+        log.borrow_mut().clear();
+        ee.set(28, GP);
+        ee.call(AIR_STATE, &[u64::from(BIKE)], &[dt], 1_000_000);
+        let got = snap_regions(&ee, &regions);
+        if let Some(i) = (0..got.len()).find(|&i| got[i] != want[i]) {
+            let (mut at, mut base) = (i as u32 * 4, 0);
+            for &(b, len) in &regions {
+                if at < len {
+                    base = b;
+                    break;
+                }
+                at -= len;
+            }
+            panic!(
+                "bike {k}: {:#x}+{at:#x} is {:#010x} ({}) in the original and {:#010x} ({}) in the port (was {:#010x})\n{q0:#?}\n{post:#?}",
+                base,
+                got[i],
+                f32::from_bits(got[i]),
+                want[i],
+                f32::from_bits(want[i]),
+                before[i],
+            );
+        }
+        assert_eq!(*log.borrow(), m.calls, "bike {k}: the calls\n{q0:#?}\n{post:#?}");
+        ee.set_u32(BIKE + 0xbc4, state);
+        ee.set_u32(state + 0x28, kind);
+        ee.set_u32(world + 0x98, world_words[0]);
+        ee.set_u32(world + 0xa8, world_words[1]);
+    }
+    for want in [
+        "off",
+        "wrecked",
+        "balancing",
+        "no hands, front",
+        "no hands, rear",
+        "no hands, no ground",
+        "rolled",
+        "donut",
+        "took off",
+        "in the air",
+        "both down",
+        "one down",
+        "crossup",
+        "crossup ramped",
+        "tipped",
+        "out of the world",
+        "body off",
+        "placed",
+        "reset",
+        "node bounds",
+        "anywhere",
+        "no box",
+        "boxed",
+        "floored",
     ] {
         let n = t.get(want).copied().unwrap_or(0);
         assert!(n >= 30, "only {n} bike(s) went down {want:?}: {t:?}");

@@ -11,7 +11,8 @@
 //!
 //! F31b1: the PreProcess ([`ground_head`]). F31b2: the Force body ([`ground_step`]), with the rider's
 //! controllers ([`crate::handling::step`]'s, MD63b) on the words the quad's types do not carry
-//! ([`Rider`]).
+//! ([`Rider`]). F31b3: the PostProcess ([`air_state`]), with the bike's no-hander ([`no_hander`],
+//! MX Unleashed's [`crate::r#move::no_hander`]) and the vehicle post ([`vehicle_post`]).
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
 use super::seed::{RECORD, WHEELS, Words};
@@ -570,4 +571,318 @@ pub fn quad_words(q: &Quad, bike: u32, wheels: [u32; 2], record: u32) -> Vec<(u3
     put_bool(&mut out, record + 0x24, q.tipped);
     put_v(&mut out, bike + 0xc40, q.node_pos_kept);
     out
+}
+
+// --- F31b3: the PostProcess ---------------------------------------------------------------------------
+
+/// What the bike's PostProcess reads and keeps that [`Quad`] does not carry: the no-hander's keys and
+/// the two words each wheel's ground test reads, and the vehicle's own words the vehicle post and the
+/// world test read and the put out of the world clears.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Post {
+    /// `MinStandUprightSpeed`/`MaxStandUprightSpeed` (`+0x1374`, `+0x1378`), `MaxRollCommand`
+    /// (`+0x1360`), `MaxRollSpeed` (`+0x1368`), `RollGain` (`+0x1370`), `DonutRollAngleScale`
+    /// (`+0x1238`).
+    pub min_stand_upright_speed: F,
+    pub max_stand_upright_speed: F,
+    pub max_roll_command: F,
+    pub max_roll_speed: F,
+    pub roll_gain: F,
+    pub donut_roll_angle_scale: F,
+    /// Each wheel's suspension ray hit (`+0xd0`) and swept contact (`+0xd4`), front then rear: read
+    /// as words, set when not zero.
+    pub ray_hit: [bool; 2],
+    pub swept: [bool; 2],
+    /// The rear wheel's donut (`+0x38`), as the no-hander reads it.
+    pub donut: F,
+    /// The word holding the vehicle's flag byte (`+0x45`, its second byte): bit 0 the world's box,
+    /// bit 6 its floor, bit 1 the node's bounds asked for, bit 2 cleared by the vehicle post.
+    pub flag_word: u32,
+    /// The world's bounds (through `+0xe8`), the in-world test's.
+    pub bounds: crate::atv_moto::Bounds,
+    /// The body is on (its word `+0`): without it the vehicle post does nothing.
+    pub body_on: bool,
+    /// The wreck reason (`+0xc80`) and the two words the put out of the world zeroes with it
+    /// (`+0x868`, `+0xc1c`; not traced further).
+    pub wreck_reason: u32,
+    pub cleared: [u32; 2],
+    /// The bike's post id (`+0xd20`), handed to the put out of the world's message.
+    pub post_id: u32,
+}
+
+impl Post {
+    /// The vehicle's flag byte.
+    pub fn flags(&self) -> u8 {
+        (self.flag_word >> 8) as u8
+    }
+}
+
+/// The bike's own words [`Post`] holds, bike-relative.
+const NO_HANDS: [u32; 6] = [0x1374, 0x1378, 0x1360, 0x1368, 0x1370, 0x1238];
+const FLAG_WORD: u32 = 0x44;
+const CLEARED: [u32; 2] = [0x868, 0xc1c];
+const POST_ID: u32 = 0xd20;
+/// The world's floor and the pointer to its box (world-relative), the box's corners (box-relative).
+const FLOOR: u32 = 0x98;
+const AREA: u32 = 0xa8;
+const AREA_CORNERS: [u32; 2] = [0x30, 0x40];
+
+/// The bike at `bike`'s [`Post`], its body at `body`.
+pub fn read_post(m: &impl Words, bike: u32, body: u32) -> Post {
+    let f = |o: u32| m.f(bike + o);
+    let wheel = |k: usize| m.word(bike + WHEELS[k]);
+    let world = m.word(bike + WORLD);
+    let area = m.word(world + AREA);
+    Post {
+        min_stand_upright_speed: f(NO_HANDS[0]),
+        max_stand_upright_speed: f(NO_HANDS[1]),
+        max_roll_command: f(NO_HANDS[2]),
+        max_roll_speed: f(NO_HANDS[3]),
+        roll_gain: f(NO_HANDS[4]),
+        donut_roll_angle_scale: f(NO_HANDS[5]),
+        ray_hit: [0, 1].map(|k| m.word(wheel(k) + 0xd0) != 0),
+        swept: [0, 1].map(|k| m.word(wheel(k) + 0xd4) != 0),
+        donut: m.f(wheel(1) + 0x38),
+        flag_word: m.word(bike + FLAG_WORD),
+        bounds: crate::atv_moto::Bounds {
+            floor: m.f(world + FLOOR),
+            area: (area != 0).then(|| (m.v(area + AREA_CORNERS[0]), m.v(area + AREA_CORNERS[1]))),
+        },
+        body_on: m.word(body) != 0,
+        wreck_reason: m.word(bike + WRECK_REASON),
+        cleared: CLEARED.map(|o| m.word(bike + o)),
+        post_id: m.word(bike + POST_ID),
+    }
+}
+
+/// [`read_post`]'s inverse for the words the PostProcess writes: the flag word, the wreck reason and
+/// the two cleared with it. (The rest it only reads.)
+pub fn post_words(p: &Post, bike: u32) -> Vec<(u32, u32)> {
+    let mut out = vec![(bike + FLAG_WORD, p.flag_word), (bike + WRECK_REASON, p.wreck_reason)];
+    out.extend(CLEARED.into_iter().zip(p.cleared).map(|(o, w)| (bike + o, w)));
+    out
+}
+
+/// What the bike's PostProcess hands out beyond the quad's steps.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Out {
+    /// The vehicle post's node placed (`atv_node_orientation`: the bike's node, 0, the body's
+    /// quaternion, the origin).
+    Place { orientation: Vf, at: Vf },
+    /// The bike out of the world: the world's message queue handed category 8, message 13, with the
+    /// bike's post id.
+    OutOfWorld(u32),
+    /// The bike's put-back (its vt `+0x3a8`), handed `place` and `keep`.
+    PutBack { place: bool, keep: bool },
+}
+
+/// Whoever runs the bike's PostProcess: the bike's [`Rides`] (the [`Rider`], whose balance state the
+/// PostProcess clears and whose centre of gravity the origin is taken off), the [`Post`] words, and
+/// the calls [`Out`]. The quad's steps it shares go through [`Moto`]: the body's reset and the
+/// respawn, the spatial update, the node's bounds, the collision sync and the node's position.
+pub trait Posts: Rides {
+    fn post(&mut self) -> &mut Post;
+    fn out(&mut self, c: Out, q: &mut Quad, body: &mut Body);
+}
+
+/// The no-hander's outside: the frames off the body's quaternion (`q* v q` on VU0 and
+/// [`crate::math::quat_axes`]'s forward axis), and the node's axes handed back as the body's new
+/// quaternion — the frame built round the forward axis ([`crate::math::basis`] at `(0, 0, 0, 1)`,
+/// orthogonalised, the forward kept) and turned into a quaternion ([`crate::math::mat4_to_quat`]).
+struct Hands<'a>(&'a mut Body);
+
+impl mv::Outside for Hands<'_> {
+    fn unrotate(&mut self, _: mv::Frame, v: Vf) -> Vf {
+        self.0.to_local(v)
+    }
+    fn forward(&mut self, _: mv::Frame) -> Vf {
+        let (f, _) = crate::math::quat_axes(self.0.orientation);
+        Vf::new(f[0].0, f[1].0, f[2].0, 0.0)
+    }
+    fn noise(&mut self, _: F) -> F {
+        unreachable!("the no-hander makes no noise")
+    }
+    fn set_axes(&mut self, forward: Vf, up: Vf) {
+        let m = crate::math::basis(Vf::new(0.0, 0.0, 0.0, 1.0), forward, up, true, true);
+        self.0.orientation = crate::math::mat4_to_quat(&m);
+    }
+}
+
+/// **The bike's no-hander**: MX Unleashed's ([`crate::r#move::no_hander`]) clause for clause — the
+/// ground normal of the first wheel with real ground under it (front, then rear; loaded and either the
+/// ray's hit or a swept contact above 0.17 up), faded from upright by the signed speed between the two
+/// stand-upright speeds, the bike's roll off it, the command off the speed (and the rear's donut) times
+/// the lean, the roll moved towards it at the roll gain, the faded normal turned about the forward axis
+/// — with the frames off the body's quaternion and the result written back as the body's quaternion
+/// ([`Hands`]), where MX Unleashed asks and sets its node.
+///
+/// The original adds the angle onto `0` (`adda.s 0, angle; madd.s`), which makes a `-0` angle `+0`;
+/// [`crate::r#move::no_hander`] adds onto the angle. The two differ only when the step is a `-0` too,
+/// which takes a product that underflows: not folded here (see the journal).
+pub fn no_hander(p: &Post, q: &Quad, body: &mut Body, dt: F) {
+    let keys = mv::Params {
+        min_stand_upright_speed: p.min_stand_upright_speed,
+        max_stand_upright_speed: p.max_stand_upright_speed,
+        max_roll_command: p.max_roll_command,
+        max_roll_speed: p.max_roll_speed,
+        roll_gain: p.roll_gain,
+        donut_roll_angle_scale: p.donut_roll_angle_scale,
+        ..Default::default()
+    };
+    let wheel = |slot: usize, k: usize| {
+        let w = &q.wheels[slot];
+        let mut x = mv::Wheel { contact: w.touching, contact_normal: w.normal, ..Default::default() };
+        x.fresh.scalars[0] = u32::from(p.ray_hit[k]);
+        x.fresh.scalars[1] = u32::from(p.swept[k]);
+        x
+    };
+    let (mut front, mut rear) = (wheel(FRONT, 0), wheel(REAR, 1));
+    rear.donut_scale = p.donut;
+    let (mut ride, mut chassis, mut engine) = (mv::Ride::default(), mv::Chassis::default(), mv::Engine::default());
+    let mut b = mv::Bike { ride: &mut ride, chassis: &mut chassis, front: &mut front, rear: &mut rear, engine: &mut engine };
+    let s = mv::Step { dt, speed: q.speed(), lean: q.lean, ..Default::default() };
+    mv::no_hander(&keys, &mut b, &s, &tables(), &mut Hands(body), dt);
+}
+
+/// The crossup is taken above this speed (ft/s); the tip-over flag is set with the up axis's `y` at or
+/// below `TIPPED_UP`.
+const CROSSUP_SPEED: f32 = 10.0;
+const TIPPED_UP: f32 = 0.25;
+/// `pi/2` as the original's `lui`/`ori` pair holds it.
+const HALF_PI: f32 = f32::from_bits(0x3fc9_0fdb);
+/// The put out of the world's message: category and id.
+pub const OUT_OF_WORLD: (u32, u32) = (8, 13);
+
+/// `[-1, 1]` as the original's compares and moves: anything unordered comes back as 1.
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
+fn clamp_unit(c: F) -> F {
+    if !(c <= F::ONE) {
+        F::ONE
+    } else if c < F(-1.0) {
+        F(-1.0)
+    } else {
+        c
+    }
+}
+
+/// **The bike's vehicle post** (the vehicle's, shared with the quad: `atv_vehicle_post`), the
+/// PostProcess's last call but one: with the body on, the origin (the body's position less its turned
+/// centre of gravity, [`crate::atv_moto::origin`]) tested against the world
+/// ([`crate::atv_moto::in_world`]); inside, the node placed there with the body's orientation
+/// ([`Out::Place`]), outside the body's reset and the respawn. Then the spatial update, the node's
+/// bounds with bit 1 of the flag byte (read after the calls before it), the collision sync, and bit 2
+/// of the flag byte cleared. [`crate::quad::Steps`] runs the same with the scene and the collidables
+/// the quad's types carry.
+pub fn vehicle_post(q: &mut Quad, body: &mut Body, m: &mut impl Posts) {
+    if !m.post().body_on {
+        return;
+    }
+    let at = crate::atv_moto::origin(body, m.rider().cofg);
+    let p = *m.post();
+    if crate::atv_moto::in_world(p.flags(), &p.bounds, at) {
+        m.out(Out::Place { orientation: body.orientation, at }, q, body);
+    } else {
+        m.call(Call::BodyReset, q, body);
+        m.call(Call::Respawn, q, body);
+    }
+    m.call(Call::SpatialUpdate, q, body);
+    if m.post().flags() & 0x02 != 0 {
+        m.call(Call::NodeBounds, q, body);
+    }
+    m.call(Call::CollisionSync, q, body);
+    m.post().flag_word &= !(0x04 << 8);
+}
+
+/// **The bike's PostProcess** (its air state), once a frame after the substeps.
+///
+/// Skipped as the PreProcess is ([`Quad::active`]). With control on and the balance words differing,
+/// the balance's state cleared (its inertia, command, point and noise time, the [`Rider`]'s) and the
+/// [`no_hander`]. Then as the quad's ([`crate::quad::air_state`]) on two wheels: the speed, the
+/// velocity into the bike, the forward and up axes and the euler angles off the quaternion, the spin
+/// into the world; on the ground with either wheel down, all down with both (the quad's front and
+/// rear pair flags are not written); the hang time; the contact velocity the front's if it touches,
+/// else the rear's, else the body's own; the crossup; the tip-over flag. Then, unlike the quad's, the
+/// origin tested against the world ([`crate::atv_moto::in_world`]); outside, the wreck reason and the
+/// two words with it zeroed, the bike's out-of-world message posted ([`Out::OutOfWorld`]) and the
+/// bike put back ([`Out::PutBack`], place and keep). Last, the [`vehicle_post`], the node's position
+/// and its kept copy.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
+pub fn air_state(q: &mut Quad, body: &mut Body, dt: F, m: &mut impl Posts) {
+    use crate::air::{cross, normalize};
+    use ps2_float::fpu;
+    if !q.active {
+        return;
+    }
+    if !q.control_off && !q.balancing {
+        let r = m.rider();
+        (r.balance_noise_time, r.balance_point, r.balance_inertia, r.balance_command) = (F::ZERO, F::ZERO, F::ZERO, F::ZERO);
+        let p = *m.post();
+        no_hander(&p, q, body, dt);
+    }
+    let t = tables();
+    let v = body.velocity;
+    q.speed_len = F(fpu::sqrt(fpu::madd(fpu::madda(fpu::mula(v.x(), v.x()), v.y(), v.y()), v.z(), v.z())));
+    q.local_vel = body.to_local(v);
+    let (fwd, up) = crate::math::quat_axes(body.orientation);
+    q.heading = Vf::new(fwd[0].0, fwd[1].0, fwd[2].0, q.heading.w());
+    q.up = Vf::new(up[0].0, up[1].0, up[2].0, q.up.w());
+    q.euler = crate::math::quat_to_euler(body.orientation, t.acos);
+    q.world_ang_vel = body.to_world(body.ang_vel);
+
+    q.was_airborne = q.airborne;
+    let (front, rear) = (q.wheels[FRONT], q.wheels[REAR]);
+    q.on_ground = front.touching || rear.touching;
+    q.all_down = front.touching && rear.touching;
+    q.airborne = !q.on_ground;
+    if !q.was_airborne && q.airborne {
+        q.hang_time = F::ZERO;
+    }
+    if q.airborne {
+        q.hang_time = q.hang_time + dt;
+    }
+    q.contact_vel = if front.touching {
+        front.contact_vel
+    } else if rear.touching {
+        rear.contact_vel
+    } else {
+        q.local_vel
+    };
+
+    let heading = normalize(Vf::new(q.heading.x(), 0.0, q.heading.z(), 1.0));
+    let mut angle = F::ZERO;
+    if !q.flipping && !q.spinning && !(q.speed_len <= F(CROSSUP_SPEED)) {
+        let vel = normalize(Vf::new(v.x(), 0.0, v.z(), 1.0));
+        let c = cross(heading, vel);
+        let sin = F(fpu::sqrt(fpu::madd(fpu::madda(fpu::mula(c.x(), c.x()), c.y(), c.y()), c.z(), c.z())));
+        let sin = clamp_unit(clamp_unit(clamp_unit(sin)));
+        angle = F(HALF_PI) - t.acos.at(sin);
+        if c.y() < 0.0 {
+            angle = angle * F(-1.0);
+        }
+    }
+    q.crossup = if !(q.authority <= F::ZERO) {
+        if q.authority_time == F::ZERO {
+            F::ZERO
+        } else {
+            map_clamp(q.authority, q.authority_time, F::ZERO, F::ZERO, angle)
+        }
+    } else {
+        angle
+    };
+    q.tipped = q.up.y() <= TIPPED_UP;
+
+    let at = crate::atv_moto::origin(body, m.rider().cofg);
+    let p = *m.post();
+    if !crate::atv_moto::in_world(p.flags(), &p.bounds, at) {
+        let p = m.post();
+        p.wreck_reason = 0;
+        p.cleared = [0; 2];
+        let id = p.post_id;
+        q.control_off = false;
+        m.out(Out::OutOfWorld(id), q, body);
+        m.out(Out::PutBack { place: true, keep: true }, q, body);
+    }
+    vehicle_post(q, body, m);
+    m.call(Call::NodePosition, q, body);
+    q.node_pos_kept = q.node_pos;
 }
