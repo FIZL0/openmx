@@ -263,6 +263,11 @@ pub fn put_back(
 pub const FIRST_FLIP_STUNT: i32 = super::FIRST_FLIP_STUNT + 8;
 /// The idle id in the air, moved up by 8 as the rest ([`super::IDLE_STUNT`]).
 pub const IDLE_STUNT: i32 = super::IDLE_STUNT + 8;
+/// The stunts the backflip and the 360 start, as the bike keeps them (`+0x13c8`, `+0x13cc`, `+0x13d0`):
+/// the stunt table's "backflip", "threesixtyL" and "threesixtyR" (MD93g, off the Free Ride image).
+pub const BACKFLIP_STUNT: i32 = 49;
+pub const THREESIXTY_L_STUNT: i32 = 52;
+pub const THREESIXTY_R_STUNT: i32 = 53;
 
 /// The stick hold a bound backflip button fires with: as if the stick had been flicked at 0.8.
 const BUTTON_HOLD: u32 = 0x3f4c_cccd; // 0.8
@@ -502,7 +507,8 @@ pub struct SpinIn {
     pub arm_button: bool,
     /// Any of the four trick buttons is held: the torque in the air then does not decay.
     pub trick_held: bool,
-    /// The stick's side-to-side as the lip reads it (`+0x12bc`, the reader's copy before the limiter).
+    /// The stick's side-to-side as the lip reads it (`+0x12bc`, the reader's copy of a pad word of its
+    /// own, apart from [`SpinIn::x`]'s; the d-pad overrides both alike).
     pub lip_x: F,
     /// The limited stick's side-to-side (`+0x1298`), which the decay in the air reads.
     pub x: F,
@@ -692,6 +698,13 @@ pub fn spin(
     out
 }
 
+/// The stunt a 360 turning `dir` starts: the bike's `+0x13cc` ([`THREESIXTY_L_STUNT`]) for a direction
+/// under 1, else `+0x13d0` ([`THREESIXTY_R_STUNT`]). A stick left arms direction 1, so it is "R"; a bound
+/// control's left (direction −1) is "L".
+pub fn spin_stunt(dir: i32) -> i32 {
+    if dir < 1 { THREESIXTY_L_STUNT } else { THREESIXTY_R_STUNT }
+}
+
 /// [`spin`] on a ride on Untamed's handling, in the place [`crate::air::three_sixty`] runs on a ride on
 /// a trick pack, over the same state and with the pack's `[Three Sixty]` keys (through the rotation-speed
 /// modifier, as there). The rider's side is as there: the stunt start answers yes (MD59, the clip state
@@ -700,15 +713,30 @@ pub fn spin(
 /// which the rider takes as the 360's wreck whatever `steep` would say. None of the port's own additions
 /// to the 360 (MD20's both at once and the pitch that follows a front flip) run here.
 ///
-/// The input is as [`ride_backflip`]'s (MD93f): the arming button is `trick[2]` (R1, the fourth trick
-/// action's default), a trick is held when any of the three is, both sticks are the step's, the flick is
-/// `flick` (the analogue control the spin hold is bound to by default, as on SLUS-21104), and there is no
-/// bound control (no shipped stunt maps the 360 either).
-/// The rider's stunt id is [`stunt_stand_in`]'s, and its clearing is not kept (the port's rider has no id).
+/// The input is Untamed's shipped controls, as [`ride_backflip`]'s (MD93f, MD93g):
+///
+/// - The arming button (pad record `+24`) is `trick[2]`, R1, the fourth trick action's default. A trick
+///   is held when any of the three is.
+/// - Both sticks are the step's: the lip's x (`+0x12bc`) and the decay's (`+0x1298`) are plain copies
+///   of two pad words. The d-pad overrides both alike.
+/// - The flick is `flick`, the side flick. The spin hold (`+0x12b8`) is bound by default to the
+///   analogue control SLUS-21104's spin hold reads.
+/// - There is no bound control ([`SpinIn::button`] `None`). The 360's "bound" (`0x00252630`) is the
+///   backflip's byte: the stunts loader sets it only from the backflip's own key mapping, and that mapping
+///   is empty in every style. So "bound left/right" (`0x00252690`/`0x002526e0`, matching the pad record
+///   against threesixtyL's/R's classic combo) is never asked. Those two combos are empty too.
+///
+/// The rider's stunt id is the real one while the 360's clip runs: the stunt start sets it to
+/// [`spin_stunt`] unless a trick holds it. Otherwise it is [`stunt_stand_in`]'s. Its clearing is not
+/// kept (the port's rider has no id).
 #[allow(clippy::too_many_arguments)]
 pub fn ride_spin(t: &crate::air::SpinTuning, p: &AirParams, air: &mut Air, s: &mut crate::air::Spin, chassis: &mut Chassis,
                  step: &AirStep, trick: [bool; 3], flick: F, table: &crate::air::AcosTable) {
     let t = t.tuned(p);
+    let stunt_id = match stunt_stand_in(step.stunt, false, s.clip != 0, air.on_ground) {
+        FIRST_FLIP_STUNT => spin_stunt(s.dir),
+        id => id,
+    };
     let inp = SpinIn {
         arm_button: trick[2],
         trick_held: trick.iter().any(|&b| b),
@@ -717,7 +745,7 @@ pub fn ride_spin(t: &crate::air::SpinTuning, p: &AirParams, air: &mut Air, s: &m
         hold: flick,
         button: None,
         forward: step.heading,
-        stunt_id: stunt_stand_in(step.stunt, false, s.clip != 0, air.on_ground),
+        stunt_id,
     };
     let aloft = !air.on_ground && !step.touching;
     let out = spin(&t, p, air, s, chassis, step, &inp, table, |_| true, || false);
