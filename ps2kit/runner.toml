@@ -5,6 +5,9 @@
 [plan]
 
 [run]
+# d: never two running tasks on one file, and a Next (in this order) section one task at a time. agent-runner
+# 0.13.3+ defaults to p (strict plan order, both checks off), which put MD97, P299 and MD95 (all worlds.rs) side by side.
+mode = "d"
 command = "./kit"
 test = "./kit check --all"
 rules = "AGENT.md"
