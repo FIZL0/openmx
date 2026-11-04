@@ -31,6 +31,7 @@ pub mod seed;
 pub mod step;
 pub mod tail;
 pub mod untamed;
+pub mod update;
 pub mod wreck;
 
 /// How the bikes handle (MD40), as `settings.txt`'s `handling` and `--handling` spell it.

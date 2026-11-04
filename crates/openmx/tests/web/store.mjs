@@ -9,7 +9,7 @@
 // Prints one JSON line: { state, files: [OPFS mods/ paths], stamp, left: [OPFS store/ names], zips, ranges, presses,
 // listed, pictured, rode, ride, frames } — `stamp` the installed store.json's sha256, `left` what is still in the downloads folder,
 // `zips` the mod.zip requests the store and its CDN saw, `ranges` how many asked a Range; `listed` the shell's `mods:`
-// line once the install made it read the mods folder again (Free Ride's list), `pictured` its line for the track cards'
+// line once Reload on the finished install's popup made it read the mods folder again (Free Ride's list), `pictured` its line for the track cards'
 // pictures then (P261), `rode` its line for the ride's track,
 // `ride` the page's state through the ride and `frames` the pictures it drew in its last seconds.
 // With OPENMX_STORE_LOG set, each store request is printed to stderr; with OPENMX_STORE_SHOT a path, the page's last
@@ -344,9 +344,17 @@ for (const end = Date.now() + 10000; Date.now() < end; ) {
   await new Promise(r => setTimeout(r, 200));
 }
 d = await data();
-// The install read the mods folder again (P217): Free Ride's list has the track, out of OPFS.
+// The finished batch asks to load the new mods (P293's Reload / Later popup, Reload lit): Space answers Reload, and the
+// shell reads the mods folder again (P217), so Free Ride's list has the track, out of OPFS. A press before the popup is
+// up lands on the installed card, which does nothing, so pressing again is safe here too.
 const said = prefix => logs.find(l => l.startsWith(prefix)) ?? null;
-for (const end = Date.now() + 10000; Date.now() < end && !said('mods: 1 tracks'); ) await new Promise(r => setTimeout(r, 200));
+for (const end = Date.now() + 20000; Date.now() < end && !said('mods: 1 tracks'); ) {
+  await key('keyDown');
+  await new Promise(r => setTimeout(r, 80));
+  await key('keyUp');
+  presses++;
+  for (const next = Date.now() + 1000; Date.now() < next && !said('mods: 1 tracks'); ) await new Promise(r => setTimeout(r, 100));
+}
 const listed = said('mods: 1 tracks');
 // and its card's picture, the zip's previews/0.png out of OPFS (P261)
 for (const end = Date.now() + 10000; Date.now() < end && !said('mods: pictures of'); ) await new Promise(r => setTimeout(r, 200));

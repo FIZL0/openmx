@@ -9476,3 +9476,35 @@ atv_heap_free               atv 0x001b76d0 = free
 #   object; the state-4 unwreck only divides *(+0xe8)+4 by the throw scale for a 13.
 #   Along flip-1 the test enters 1 (front) on row 125 and the clock's unwreck puts it back on row 193;
 #   the tail's own put-back (vt +0x3a8 from the update) is never taken on either replay.
+
+# F39: the bike vehicle update's own callees, ported as game_sim::handling::update. Journal:
+# research/journal/2026-11-04-f39-vehicle-update-callees/.
+#   Bike 0x00e714e0, vtable 0x003d0450 slots: +0x3a4 fade 0x004e1a20(bike, f12 dt), +0x4f0 lean
+#   0x004e5d20(bike, dt), +0x3e4 prepare 0x004dd8f0(bike, dt), +0x35c ride (auto gear) 0x004a7b70(bike,
+#   dt) -> v0, +0x378 sync 0x004e2f50(bike), +0x37c snapshot 0x004d9f30(bike). Network 0x0025e8d0(bike+0x400,
+#   dt) -> v0; parts 0x00494370(bike). Prepare's first call (0x004dd928) is jal 0x004e7bb0, a thunk
+#   (j 0x004a8350): the held vehicle states' net check (vt +0x3e8) and unpack (vt +0x3f0, dt).
+#   Their callees: search 0x001148e0(record, 0); anim stop 0x0013e650(ctrl), play 0x0013eec0(ctrl, clip,
+#   f weight, f fade), blend 0x0013f5e0(ctrl, clip a, clip b, f weight, f mix, f fade), blend4 0x00140720
+#   (dead on state 4); node place 0x001952a0, set 0x00194b10, spin 0x00195210(node, axis, f angle), aim
+#   0x001941b0(node, dir, up, 1,1,1), frame 0x00194e00(node, 0, buf), part from frame 0x00194da0(part,
+#   buf), position 0x00194c20(node, 0, out), axes 0x00194960(node, 0, z, y), point into frame 0x00195320,
+#   rotate 0x00195230; attachment moved 0x00266d30; listener walk 0x00128af0(group, f12 dt). Vt calls:
+#   gear +0x358, trick step +0x4e4 (0x004e49c0, dt), trick end +0x4ac(-1), kind clear +0x39c; trail (vt at
+#   t+4) +0x18 on / +0x20 off; net sender (vt at n+0x38) +0x20(n, *(n+0x34), dt); part (vt at p+0xc)
+#   +0xbc(p, dt). Rodata: (0,0,0,1) 0x00396fc0, turn axis 0x00396ff0, aim up 0x00397000; global pose speed
+#   0x00525378. Stunt ids: riding pose 46 (table of 46 x 12 bytes at +0x18), kept by the replay under 41
+#   or one of +0x13b8/+0x13bc/+0x13c0. Words: +0xde8 fade clock, +0xdec its start, +0x1524 stunt, +0x1528
+#   next, +0x152c last, +0x14d8 stunt clock, +0x1470 hung parts, +0x32c speed, +0xbc4 state, +0xb8 body,
+#   +0xcc record's part.
+#   The frame tail's other listeners on state 4: 0x00eb6420 (step 0x001c9540) leaves the bike and its
+#   physics blocks alone. 0x01ed82d0 (step 0x002cf9f0) is no leaf: a manager that sets its +0x28 list's
+#   +0x384 and +0x3a0 (camera distance), sorts it, and ends with the walk 0x00128af0(itself, f12 dt). Its
+#   own body leaves the bike alone; its walk steps 0x010af350 (step 0x004f2ad0), a rider character whose
+#   +0x378 target is 0x00e71c10 = bike+0x730, the bike's collision record. That rider writes the bike's
+#   +0x920..+0x980 (record +0x1f0..) through its physics world step at its +0x27c: 0x004f1790 ->
+#   0x00505d50 -> 0x00496b70 (a no-op hook on any one of the three stops the write), and on the wreck
+#   +0x870..+0x8a0 (record +0x140..+0x170) in 0x004f2ad0's camera block (copies of +0x660 and a node's
+#   spot when target+0x138 != 0). Both replays: words +0x870..+0x888 but +0x87c, +0x890..+0x898, +0x920,
+#   +0x930..+0x938, +0x940, +0x950..+0x97c but +0x95c (ride-2: +0x930..+0x938 and +0x940 only; the int at
+#   +0x940 0x38 -> 0x3d).
