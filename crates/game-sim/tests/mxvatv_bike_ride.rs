@@ -2305,7 +2305,7 @@ fn nat05_trn() -> Option<Vec<u8>> {
 }
 
 /// One sim frame as [`port_post_frame`] runs it, the bike's collision record's two virtuals the
-/// port's ([`port_record`]). Answers the Force body and PostProcess counts, how many records the port
+/// port's ([`port_record`]) and the tail's walk and the bike's vehicle update too ([`port_tail`]). Answers the Force body and PostProcess counts, how many records the port
 /// ran, and how many terrain queries.
 fn port_record_frame(ee: &mut Ee, dt: F, map: &track::Terrain<'_>) -> (u32, u32, u32, u32) {
     let call = |ee: &mut Ee, f: u32, ints: &[u64], x: F| {
@@ -2340,7 +2340,8 @@ fn port_record_frame(ee: &mut Ee, dt: F, map: &track::Terrain<'_>) -> (u32, u32,
     for (a, w) in seed::body_words(&body, at) {
         ee.set_u32(a, w);
     }
-    call(ee, TAIL, &[u64::from(SIM)], dt);
+    let (bikes, others) = port_tail(ee, dt);
+    assert_eq!((bikes, others.len()), (1, 2), "the tail steps the bike once and two other listeners: {others:#x?}");
     let mut i = 0;
     while i < ee.u32_at(SIM + 0x3c) {
         let e = call(ee, LIST3C_GET, &[u64::from(SIM + 0x3c), u64::from(i)], F::ZERO) as u32;
@@ -2998,5 +2999,796 @@ fn the_other_riders_pre_process_leave_the_bike_alone() {
         assert!(each.iter().all(|&(e, _)| e != BIKE_PREFORCE));
         assert!(each.iter().all(|&(_, f)| f == ran[0].1), "{name}: one PreProcess for the five riders: {each:#x?}");
         eprintln!("{name}: the riders' PreProcess {:#x} over {each:#x?}", ran[0].1);
+    }
+}
+
+// ---- F31b4a: the frame's tail and the bike's vehicle update, ported ----
+
+use game_sim::handling::tail::{self, Listeners, Vehicles};
+
+/// The bike's listener's step (its vt `+0x40`): a thunk to the vehicle update with the bike.
+const VEHICLE_THUNK: u32 = 0x004d_e0a0;
+const VEHICLE_UPDATE: u32 = 0x004d_a210;
+/// The stuck timer (the bike's vt `+0x45c`), which the port runs as its own.
+const STUCK: u32 = 0x004a_ad60;
+/// The vehicle update's callees outside the bike's vtable: the pause lookup's name lookup and its
+/// two names, the pad's rumble test, the network step and the vehicle's parts and listeners.
+const LOOKUP: u32 = 0x0021_4b30;
+const LOOKUP_ARGS: [u64; 3] = [0x0054_23e0, 0x0052_9b0c, 0];
+const RUMBLE_READY: u32 = 0x0051_a250;
+const NETWORK: u32 = 0x0025_e8d0;
+const PARTS: u32 = 0x0049_4370;
+/// The bike's vtable slots the update calls, as the port names them.
+const TAIL_SLOTS: [(u32, tail::Out); 13] = [
+    (0x3a4, tail::Out::Fade),
+    (0x4f8, tail::Out::WreckFirst),
+    (0x4e8, tail::Out::WreckPose),
+    (0x4a0, tail::Out::WreckLast { reason: 0 }),
+    (0x49c, tail::Out::WreckTest),
+    (0x4f0, tail::Out::Lean),
+    (0x3e4, tail::Out::Prepare),
+    (0x35c, tail::Out::Ride),
+    (0x378, tail::Out::Sync),
+    (0x37c, tail::Out::Snapshot),
+    (PUT_BACK_SLOT, tail::Out::PutBack),
+    (0x4b8, tail::Out::TrickStart(0)),
+    (0x4ac, tail::Out::TrickEnd),
+];
+
+fn slot_of(c: tail::Out) -> Option<u32> {
+    TAIL_SLOTS.iter().find(|s| std::mem::discriminant(&s.1) == std::mem::discriminant(&c)).map(|s| s.0)
+}
+
+/// The bike in RAM as the port's vehicle update sees it: [`tail::Vehicle`]'s words, written back
+/// word by word before each call and read again after it. Each call is the original's.
+struct TailInRam<'a> {
+    ee: &'a mut Ee,
+    v: tail::Vehicle,
+    last: Vec<(u32, u32)>,
+}
+
+impl TailInRam<'_> {
+    fn read(&mut self) {
+        let ee = &*self.ee;
+        self.v = tail::read(&|a| ee.u32_at(a), BIKE);
+        self.last = tail::words(&self.v, BIKE);
+    }
+
+    fn write(&mut self) {
+        let now = tail::words(&self.v, BIKE);
+        for (k, &(a, w)) in now.iter().enumerate() {
+            if self.last.get(k) != Some(&(a, w)) {
+                self.ee.set_u32(a, w);
+            }
+        }
+        self.last = now;
+    }
+
+    fn run(&mut self, f: u32, ints: &[u64], x: f32) -> u64 {
+        self.write();
+        self.ee.set(28, GP);
+        self.ee.call(f, ints, &[x], BUDGET);
+        let r = self.ee.r(2);
+        self.read();
+        r
+    }
+}
+
+impl Vehicles for TailInRam<'_> {
+    fn vehicle(&mut self) -> &mut tail::Vehicle {
+        &mut self.v
+    }
+    fn skipped(&mut self) -> bool {
+        self.ee.u8_at(self.ee.u32_at(SKIP_FLAG) + 0x225) & 8 != 0
+    }
+    fn paused(&mut self) -> bool {
+        let m = self.run(LOOKUP, &LOOKUP_ARGS, 0.0);
+        let state = self.ee.u32_at(BIKE + tail::STATE);
+        let g = self.run(self.ee.u32_at(self.ee.u32_at(state + 4) + 0xac), &[u64::from(state), m], 0.0) as u32;
+        let obj = if g == 0 { 0 } else { g - 0x2ec };
+        self.ee.u32_at(self.ee.u32_at(obj + 0x378) + 0x14) != 0
+    }
+    fn rumble_ready(&mut self) -> bool {
+        let state = self.ee.u32_at(BIKE + tail::STATE);
+        self.run(RUMBLE_READY, &[u64::from(self.ee.u32_at(state + 0x6ac))], 0.0) as u32 != 0
+    }
+    fn word(&mut self, at: u32) -> u32 {
+        self.write();
+        self.ee.u32_at(at)
+    }
+    fn out(&mut self, c: tail::Out, dt: F) {
+        use tail::Out;
+        self.write();
+        let ee = &*self.ee;
+        let bike = u64::from(BIKE);
+        let (f, ints, x) = match c {
+            Out::OwnListeners => (TAIL, vec![bike + 0xc], dt.0),
+            Out::WreckLast { reason } => (vt(ee, 0x4a0), vec![bike, u64::from(reason)], dt.0),
+            Out::WreckTest => (vt(ee, 0x49c), vec![bike, 0], dt.0),
+            Out::FadeOver(o) => (ee.u32_at(ee.u32_at(o + 4) + 0x90), vec![u64::from(o)], dt.0),
+            Out::Network => (NETWORK, vec![bike + 0x400], dt.0),
+            Out::Parts => (PARTS, vec![bike], dt.0),
+            Out::PutBack => (vt(ee, PUT_BACK_SLOT), vec![bike, 1, 1], dt.0),
+            Out::TrickStart(id) => (vt(ee, 0x4b8), vec![bike, u64::from(id), 1], dt.0),
+            Out::TrickEnd => (vt(ee, 0x4ac), vec![bike, u64::MAX], dt.0),
+            Out::Rumble { soft, level } => {
+                let o = ee.u32_at(ee.u32_at(BIKE + tail::STATE) + 0x5c);
+                (ee.u32_at(ee.u32_at(o + 0x1c) + 0x4c), vec![u64::from(o), u64::from(soft), level as i64 as u64], tail::RUMBLE_TIME)
+            }
+            Out::RunOver { player, run } => (ee.u32_at(ee.u32_at(BIKE + 0x6a0) + 0x68), vec![bike + 0x680, u64::from(player), u64::from(run)], dt.0),
+            Out::RunOverItem { item, player, run } => (ee.u32_at(ee.u32_at(item + 0x20) + 0x68), vec![u64::from(item), u64::from(player), u64::from(run)], dt.0),
+            Out::RunOverRider { rider, player, run } => (ee.u32_at(ee.u32_at(rider + 0x1c) + 0x7c), vec![u64::from(rider), u64::from(player), u64::from(run)], dt.0),
+            Out::Message(id) => {
+                let (kind, msg) = tail::FRAME_MESSAGE;
+                (POST_MESSAGE, vec![u64::from(ee.u32_at(POST_QUEUE)), bike + 0x674, u64::from(kind), u64::from(msg), u64::from(id), 0], dt.0)
+            }
+            c => (vt(ee, slot_of(c).unwrap()), vec![bike], dt.0),
+        };
+        self.run(f, &ints, x);
+    }
+}
+
+/// How far below the interpreter's stack top the calls' frames reach, at most: RAM there is left out
+/// of the vehicle update's comparison, the port's calls sitting at other depths than the original's.
+const STACK_USE: usize = 0x4_0000;
+
+/// The sim's listener tree in RAM, walked by [`tail::walk`]: a group's step (the walk itself) is the
+/// port's walk one level down, the bike's step is the port's [`tail::vehicle_update`] through
+/// [`TailInRam`], any other listener's step is the original's. Counts the bike's steps.
+///
+/// Every bike step is checked: SLUS-21104's vehicle update runs first on a copy of RAM, and the
+/// port's must leave all of RAM (but the stack) and the scratchpad as it did, byte for byte.
+struct TreeInRam<'a> {
+    ee: &'a mut Ee,
+    bikes: u32,
+    others: Vec<u32>,
+}
+
+impl Listeners for TreeInRam<'_> {
+    fn word(&mut self, at: u32) -> u32 {
+        self.ee.u32_at(at)
+    }
+    fn step(&mut self, e: u32, dt: F) {
+        let f = self.ee.u32_at(self.ee.u32_at(e + 4) + 0x40);
+        if f == TAIL {
+            tail::walk(self, e, dt);
+        } else if e == BIKE + 0xc {
+            assert_eq!(f, VEHICLE_THUNK, "the bike's listener's step");
+            assert_eq!(vt(self.ee, 0x45c), STUCK, "the bike's stuck timer");
+            let (ram, spr) = (self.ee.ram.clone(), self.ee.spr.clone());
+            self.ee.set(28, GP);
+            self.ee.call(VEHICLE_UPDATE, &[u64::from(BIKE)], &[dt.0], BUDGET);
+            let (want, want_spr) = (std::mem::replace(&mut self.ee.ram, ram), std::mem::replace(&mut self.ee.spr, spr));
+            let mut m = TailInRam { ee: &mut *self.ee, v: tail::Vehicle::default(), last: Vec::new() };
+            m.read();
+            tail::vehicle_update(&mut m, dt);
+            m.write();
+            let stack = (self.ee.stack as usize).saturating_sub(STACK_USE)..self.ee.ram.len().min(self.ee.stack as usize + 0x4000);
+            let d: Vec<String> = (0..want.len())
+                .step_by(4)
+                .filter(|a| !stack.contains(a) && want[*a..*a + 4] != self.ee.ram[*a..*a + 4])
+                .map(|a| format!("{a:#x}: port {:#010x}, original {:#010x}", self.ee.u32_at(a as u32), u32::from_le_bytes(want[a..a + 4].try_into().unwrap())))
+                .collect();
+            assert!(d.is_empty(), "the vehicle update: {} words of RAM differ from the original's\n  {}", d.len(), d.iter().take(20).cloned().collect::<Vec<_>>().join("\n  "));
+            assert!(want_spr == self.ee.spr, "the vehicle update: the scratchpad differs from the original's");
+            self.bikes += 1;
+        } else {
+            self.others.push(e);
+            self.ee.set(28, GP);
+            self.ee.call(f, &[u64::from(e)], &[dt.0], BUDGET);
+        }
+    }
+}
+
+/// The frame's tail on the sim, the port's walk and vehicle update ([`TreeInRam`]). Answers how many
+/// times the bike stepped and the other listeners stepped.
+fn port_tail(ee: &mut Ee, dt: F) -> (u32, Vec<u32>) {
+    let mut t = TreeInRam { ee, bikes: 0, others: Vec::new() };
+    tail::walk(&mut t, SIM, dt);
+    (t.bikes, t.others)
+}
+
+/// A call the vehicle update makes outside the bike's own code, as the oracle logs it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TailCall {
+    Out(tail::Out),
+    Paused,
+    Ready,
+}
+
+/// The port's side of the vehicle update's oracle: the calls logged, the answers drawn, the links
+/// read off the RAM the original then runs on.
+struct TailLogged<'a> {
+    ee: &'a Ee,
+    v: tail::Vehicle,
+    calls: Vec<TailCall>,
+    skipped: bool,
+    paused: bool,
+    ready: bool,
+}
+
+impl Vehicles for TailLogged<'_> {
+    fn vehicle(&mut self) -> &mut tail::Vehicle {
+        &mut self.v
+    }
+    fn skipped(&mut self) -> bool {
+        self.skipped
+    }
+    fn paused(&mut self) -> bool {
+        self.calls.push(TailCall::Paused);
+        self.paused
+    }
+    fn rumble_ready(&mut self) -> bool {
+        self.calls.push(TailCall::Ready);
+        self.ready
+    }
+    fn word(&mut self, at: u32) -> u32 {
+        self.ee.u32_at(at)
+    }
+    fn out(&mut self, c: tail::Out, _: F) {
+        self.calls.push(TailCall::Out(c));
+    }
+}
+
+/// **The bike's vehicle update is the original's**: 12 000 bikes, each state 4's with every word the
+/// update, its own update, its base update and its stuck timer read drawn at random (the state and
+/// its kind, the skip, the pause, the rumbler and its answer; the speeds with ties; each wheel's ray,
+/// touch, roughness about the rumble's 0.73 and 0.95, and its surface's hold and limit (−1, ±0,
+/// either sign); the put-back's words and countdown; the free and stuck words; on the ground,
+/// airborne, the hang time about 0.1, the wreck reason; the wheelie and stoppie clocks about 1 and
+/// their times, distances, bests and tricks; the run or none (its flags, step, top speed, landed and
+/// its end's clock about 0, its items) and the player or none (its clock, its riders); the node's
+/// axes, the ahead's `y` at ±1 and past; the body's position and velocity; the run's, lap's, frame's
+/// and fade's clocks, the fade's object or none; the ride's clocks; `dt`), run through SLUS-21104's
+/// vehicle update and through [`tail::vehicle_update`] from the same words. Every word of the bike,
+/// its wheels, body, node and state, the run, the player and their lists comes out the same, and the
+/// calls are made in the same order with the same arguments. The callees outside the four (the bike's
+/// vtable's, the pause's lookups, the rumble's test and the rumbler, the fade's object, the run's,
+/// items' and riders' virtuals, the network step, the parts, the walk, the message) are hooked to log
+/// and do nothing.
+#[test]
+#[allow(clippy::float_arithmetic)]
+fn the_bikes_vehicle_update_is_the_originals() {
+    use std::cell::Cell;
+    use tail::Out;
+    let Some(mut ee) = image().map(hooked) else { return };
+    assert_eq!(ee.u32_at(ee.u32_at(BIKE + 0x10) + 0x40), VEHICLE_THUNK, "the bike's listener's step");
+    assert_eq!(vt(&ee, 0x45c), STUCK, "the bike's stuck timer");
+    let [front, rear] = the_wheels(&ee);
+    let body = ee.u32_at(BIKE + seed::BODY);
+    let node = ee.u32_at(BIKE + seed::NODE);
+    let state = ee.u32_at(BIKE + tail::STATE);
+    let skip_at = ee.u32_at(SKIP_FLAG) + 0x225;
+    let dt_bits = Rc::new(Cell::new(0u32));
+    let (g_says, ready_says) = (Rc::new(Cell::new(0u32)), Rc::new(Cell::new(0u32)));
+    let log: Rc<RefCell<Vec<TailCall>>> = Rc::default();
+    let mut hooked_at = Vec::new();
+    let mut hook = |ee: &mut Ee, at: u32, h: Box<dyn FnMut(&mut Ee)>| {
+        hooked_at.push(at);
+        ee.hooks.insert(at, h);
+    };
+
+    // The fake objects, in scratch: functions, vtables, the run, the player, items, riders.
+    let fns: [u32; 5] = std::array::from_fn(|i| ee.scratch(240) + 4 * i as u32);
+    let [rumble_fn, fade_fn, run_fn, item_fn, rider_fn] = fns;
+    let vtable = |ee: &mut Ee, k: u32, slot: u32, f: u32| {
+        let at = ee.scratch(k);
+        ee.set_u32(at + slot, f);
+        at
+    };
+    let v_rumble = vtable(&mut ee, 200, 0x4c, rumble_fn);
+    let v_fade = vtable(&mut ee, 203, 0x90, fade_fn);
+    let v_run = vtable(&mut ee, 206, 0x68, run_fn);
+    let v_item = vtable(&mut ee, 209, 0x68, item_fn);
+    let v_rider = vtable(&mut ee, 212, 0x7c, rider_fn);
+    let run = ee.scratch(0);
+    let player = ee.scratch(8);
+    let items = [20, 21, 22].map(|k| ee.scratch(k));
+    let riders = [24, 25, 26].map(|k| ee.scratch(k));
+    let rumbler = ee.scratch(28);
+    let fader = ee.scratch(29);
+    let pause_flag = ee.scratch(31);
+    let pauser = ee.scratch(30) - 0x378;
+    let group = ee.scratch(32);
+    const NAME: u64 = 0x00ab_cd00;
+
+    for (slot, c) in TAIL_SLOTS {
+        let (l, d) = (log.clone(), dt_bits.clone());
+        let at = vt(&ee, slot);
+        hook(&mut ee, at, Box::new(move |ee: &mut Ee| {
+            assert_eq!(ee.r(4) as u32, BIKE, "{c:?} handed something other than the bike");
+            let c = match c {
+                Out::WreckLast { .. } => Out::WreckLast { reason: ee.r(5) as u32 },
+                Out::TrickStart(_) => {
+                    assert_eq!(ee.r(6), 1, "the trick start's third argument");
+                    Out::TrickStart(ee.r(5) as u32)
+                }
+                Out::TrickEnd => {
+                    assert_eq!(ee.r(5) as u32, u32::MAX, "the trick end's argument");
+                    c
+                }
+                Out::WreckTest => {
+                    assert_eq!(ee.r(5), 0, "the wreck test's argument");
+                    c
+                }
+                Out::PutBack => {
+                    assert_eq!((ee.r(5), ee.r(6)), (1, 1), "the put-back's arguments");
+                    c
+                }
+                c => c,
+            };
+            if matches!(c, Out::Fade | Out::WreckPose | Out::WreckLast { .. } | Out::WreckTest | Out::Lean | Out::Ride | Out::PutBack) {
+                assert_eq!(ee.f(12).to_bits(), d.get(), "{c:?} handed dt");
+            }
+            l.borrow_mut().push(TailCall::Out(c));
+        }));
+    }
+    for (at, want, c) in [(TAIL, BIKE + 0xc, Out::OwnListeners), (NETWORK, BIKE + 0x400, Out::Network), (PARTS, BIKE, Out::Parts)] {
+        let (l, d) = (log.clone(), dt_bits.clone());
+        hook(&mut ee, at, Box::new(move |ee: &mut Ee| {
+            assert_eq!((ee.r(4) as u32, ee.f(12).to_bits()), (want, d.get()), "{c:?}'s arguments");
+            l.borrow_mut().push(TailCall::Out(c));
+        }));
+    }
+    hook(&mut ee, LOOKUP, Box::new(move |ee: &mut Ee| {
+        assert_eq!([ee.r(4), ee.r(5), ee.r(6)], LOOKUP_ARGS, "the pause lookup's names");
+        ee.set(2, NAME);
+    }));
+    let (l, g) = (log.clone(), g_says.clone());
+    let state_lookup = ee.u32_at(ee.u32_at(state + 4) + 0xac);
+    hook(&mut ee, state_lookup, Box::new(move |ee: &mut Ee| {
+        assert_eq!((ee.r(4) as u32, ee.r(5)), (state, NAME), "the state's lookup's arguments");
+        l.borrow_mut().push(TailCall::Paused);
+        ee.set(2, u64::from(g.get()));
+    }));
+    let (l, r) = (log.clone(), ready_says.clone());
+    hook(&mut ee, RUMBLE_READY, Box::new(move |ee: &mut Ee| {
+        assert_eq!(ee.r(4) as u32, ee.u32_at(state + 0x6ac), "the rumble test's argument");
+        l.borrow_mut().push(TailCall::Ready);
+        ee.set(2, u64::from(r.get()));
+    }));
+    let l = log.clone();
+    hook(&mut ee, rumble_fn, Box::new(move |ee: &mut Ee| {
+        assert_eq!((ee.r(4) as u32, ee.f(12)), (rumbler, tail::RUMBLE_TIME), "the rumbler and the rumble's time");
+        l.borrow_mut().push(TailCall::Out(Out::Rumble { soft: ee.r(5) != 0, level: ee.r(6) as i32 }));
+    }));
+    let l = log.clone();
+    hook(&mut ee, fade_fn, Box::new(move |ee: &mut Ee| l.borrow_mut().push(TailCall::Out(Out::FadeOver(ee.r(4) as u32)))));
+    let l = log.clone();
+    hook(&mut ee, run_fn, Box::new(move |ee: &mut Ee| {
+        assert_eq!(ee.r(4) as u32, BIKE + 0x680, "the run's own virtual's object");
+        l.borrow_mut().push(TailCall::Out(Out::RunOver { player: ee.r(5) as u32, run: ee.r(6) as u32 }));
+    }));
+    let l = log.clone();
+    hook(&mut ee, item_fn, Box::new(move |ee: &mut Ee| {
+        let (item, player, run) = (ee.r(4) as u32, ee.r(5) as u32, ee.r(6) as u32);
+        l.borrow_mut().push(TailCall::Out(Out::RunOverItem { item, player, run }));
+    }));
+    let l = log.clone();
+    hook(&mut ee, rider_fn, Box::new(move |ee: &mut Ee| {
+        let (rider, player, run) = (ee.r(4) as u32, ee.r(5) as u32, ee.r(6) as u32);
+        l.borrow_mut().push(TailCall::Out(Out::RunOverRider { rider, player, run }));
+    }));
+    let l = log.clone();
+    hook(&mut ee, POST_MESSAGE, Box::new(move |ee: &mut Ee| {
+        let (kind, msg) = tail::FRAME_MESSAGE;
+        let want = (u64::from(ee.u32_at(POST_QUEUE)), u64::from(BIKE + 0x674), u64::from(kind), u64::from(msg), 0);
+        assert_eq!((ee.r(4), ee.r(5), ee.r(6), ee.r(7), ee.r(9)), want, "the message's arguments");
+        l.borrow_mut().push(TailCall::Out(Out::Message(ee.r(8) as u32)));
+    }));
+    let mut distinct = hooked_at.clone();
+    distinct.sort_unstable();
+    distinct.dedup();
+    assert_eq!(distinct.len(), hooked_at.len(), "each hooked callee is its own function: {hooked_at:#x?}");
+    assert!(!hooked_at.contains(&STUCK) && !hooked_at.contains(&VEHICLE_UPDATE));
+
+    let regions = vec![
+        (BIKE, 0x1800),
+        (front, 0x920),
+        (rear, 0x920),
+        (body, 0x230),
+        (node, 0x100),
+        (state, 0x6b0),
+        (skip_at & !3, 4),
+        (ee.scratch(0), 33 * 0x40),
+    ];
+    let image_words = snap_regions(&ee, &regions);
+    let kind = ee.u32_at(state + tail::KIND);
+    let mut g = Gen(0x0031_b4a0);
+    let mut t = BTreeMap::new();
+    for k in 0..12_000 {
+        restore_regions(&mut ee, &regions, &image_words);
+        let f = |ee: &mut Ee, a: u32, x: f32| ee.set_f32(a, x);
+        let v3 = |ee: &mut Ee, g: &mut Gen, a: u32, r: f32| {
+            for i in 0..3 {
+                let x = g.near(0.0, -r, r);
+                ee.set_f32(a + 4 * i, x);
+            }
+        };
+        let bit = |g: &mut Gen, n: u32| u32::from(!g.one_in(n));
+        // The state, its kind, the skip, the pause, the rumbler and its answer.
+        match g.bits() % 12 {
+            0 => ee.set_u32(BIKE + tail::STATE, 0),
+            n => ee.set_u32(state + tail::KIND, [kind, kind, kind, kind, kind, 3, 4, 3, 4, 0, 2, 5][n as usize]),
+        }
+        let skip = ee.u8_at(skip_at) & !8 | if g.one_in(6) { 8 } else { 0 };
+        ee.write(skip_at, 1, u128::from(skip));
+        g_says.set(pauser + 0x2ec);
+        ee.set_u32(pauser + 0x378, pause_flag);
+        ee.set_u32(pause_flag + 0x14, if g.one_in(10) { g.bits() | 1 } else { 0 });
+        ee.set_u32(state + 0x5c, if g.one_in(5) { 0 } else { rumbler });
+        ee.set_u32(rumbler + 0x1c, v_rumble);
+        ee.set_u32(state + 0x6ac, g.bits());
+        ready_says.set(if g.one_in(4) { 0 } else { [1, g.bits() | 1][(g.bits() % 2) as usize] });
+        // The speeds.
+        let speed = g.near(0.0, -10.0, 40.0);
+        f(&mut ee, BIKE + 0xc38, speed);
+        let slow = if g.one_in(6) { speed } else { g.f(0.0, 10.0) };
+        f(&mut ee, BIKE + 0x174c, slow);
+        let len = if g.one_in(6) { 10.0 } else { g.f(0.0, 30.0) };
+        f(&mut ee, BIKE + 0x32c, len);
+        // The wheels and their surfaces' entries.
+        for w in [front, rear] {
+            ee.write(w + 0x110, 1, u128::from(g.bits() % 4));
+            ee.set_u32(w + 0xd0, if g.one_in(2) { 0 } else { [1, g.bits() | 1][(g.bits() % 2) as usize] });
+            ee.set_u32(w + 0xdc, bit(&mut g, 3));
+            let rough = match g.bits() % 6 {
+                0 => 0.95,
+                1 => 0.73,
+                _ => g.f(0.0, 1.3),
+            };
+            f(&mut ee, w + 0xf0, rough);
+        }
+        for s in 0..4 {
+            let e = BIKE + 0xdf4 + 12 * s;
+            ee.set_u32(e, if g.one_in(3) { 0 } else { [1, g.bits() | 1][(g.bits() % 2) as usize] });
+            let lim = match g.bits() % 8 {
+                0 | 1 => -1.0,
+                2 => 0.0,
+                3 => -0.0,
+                4 => g.f(-2.0, 0.0),
+                _ => g.f(0.01, 1.0),
+            };
+            f(&mut ee, e + 4, lim);
+        }
+        // The put-back's words, the free and stuck words, the ground and air, the wreck reason.
+        for o in [0x31c, 0x320, 0xc14, 0xc10, 0x324, 0xde0] {
+            ee.set_u32(BIKE + o, if g.one_in(2) { 0 } else { [1, g.bits() | 1][(g.bits() % 2) as usize] });
+        }
+        f(&mut ee, BIKE + 0xdf0, g.f(0.0, 1.0));
+        v3(&mut ee, &mut g, BIKE + 0xc00, 100.0);
+        let hang = g.near(0.1, 0.0, 0.3);
+        f(&mut ee, BIKE + 0x1190, hang);
+        ee.set_u32(BIKE + 0xc80, if g.one_in(6) { g.bits() | 1 } else { 0 });
+        // The wheelie's and stoppie's words.
+        for o in [0x1744, 0x1748] {
+            let x = g.near(1.0, 0.0, 1.5);
+            f(&mut ee, BIKE + o, x);
+        }
+        for o in [0x704, 0x708] {
+            let x = g.near(0.0, -0.5, 3.0);
+            f(&mut ee, BIKE + o, x);
+        }
+        for o in [0x70c, 0x710, 0x714, 0x718, 0x71c, 0x720] {
+            let x = g.f(0.0, 40.0);
+            f(&mut ee, BIKE + o, x);
+        }
+        for o in [0x13c4, 0x13c8] {
+            ee.set_u32(BIKE + o, g.bits());
+        }
+        // The run or none, its words and items; the player or none, its clock and riders.
+        ee.set_u32(BIKE + 0x680, if g.one_in(5) { 0 } else { run });
+        ee.set_u32(BIKE + 0x6a0, v_run);
+        ee.set_u32(run + 8, g.bits() & 0x0040_0200 | g.bits() & 0x0f0f);
+        f(&mut ee, run + 0x18, g.f(0.0, 2.0));
+        let top = g.f(0.0, 60.0);
+        f(&mut ee, run + 0x108, top);
+        f(&mut ee, BIKE + 0x6fc, if g.one_in(6) { top } else { g.f(0.0, 60.0) });
+        ee.set_u32(run + 0x40, bit(&mut g, 2));
+        let left = match g.bits() % 5 {
+            0 => 0.0,
+            1 => g.f(-0.1, 0.0),
+            2 => g.f(0.0, 2.0),
+            _ => g.f(0.0, 0.06),
+        };
+        f(&mut ee, run + 0xc4, left);
+        let n = g.bits() % 4;
+        ee.set_u32(run + 0x1d4, if n > 0 { items[0] } else { 0 });
+        for i in 0..3 {
+            ee.set_u32(items[i] + 0x20, v_item);
+            ee.set_u32(items[i] + 0x1c, if (i as u32) + 1 < n { items[i + 1] } else { 0 });
+        }
+        ee.set_u32(BIKE + 0x684, if g.one_in(5) { 0 } else { player });
+        let clock = g.near(0.0, -1.0, 1.0);
+        f(&mut ee, player + 0x29c, clock);
+        let n = g.bits() % 4;
+        ee.set_u32(player + 0x24, if n > 0 { riders[0] } else { 0 });
+        for i in 0..3 {
+            ee.set_u32(riders[i] + 0x1c, v_rider);
+            let next = if (i as u32) + 1 < n { riders[i + 1] } else { 0 };
+            if i == 0 {
+                ee.set_u32(riders[0] + 4, next);
+                ee.set_u32(riders[0] + 0x18, 0);
+            } else {
+                ee.set_u32(riders[i] + 0x18, next);
+                ee.set_u32(riders[i] + 4, 0);
+            }
+        }
+        for o in [0x6f8, 0x724] {
+            let x = g.f(0.0, 100.0);
+            f(&mut ee, BIKE + o, x);
+        }
+        ee.set_u32(BIKE + 0x6c8, g.bits() % 100);
+        ee.set_u32(BIKE + 0x6cc, bit(&mut g, 2));
+        // The node's axes, the ahead's `y` at and past ±1; the body's position and velocity.
+        v3(&mut ee, &mut g, node + 0x80, 1.0);
+        v3(&mut ee, &mut g, node + 0x90, 1.0);
+        let y = match g.bits() % 6 {
+            0 => -1.0,
+            1 => 1.0,
+            2 => g.f(-1.5, -1.0),
+            3 => g.f(1.0, 1.5),
+            _ => g.f(-1.0, 1.0),
+        };
+        f(&mut ee, node + 0x94, y);
+        v3(&mut ee, &mut g, body + 0x70, 150.0);
+        v3(&mut ee, &mut g, body + 0x80, 40.0);
+        // The lap, frame and fade clocks, the fade's object or none; the ride's clocks.
+        ee.set_u32(BIKE + 0x175c, bit(&mut g, 2));
+        let lap = g.near(0.0, -0.1, 1.0);
+        f(&mut ee, BIKE + 0x1760, lap);
+        f(&mut ee, BIKE + 0x1750, g.f(0.0, 100.0));
+        ee.set_u32(BIKE + 0xd20, g.bits());
+        ee.set_u32(BIKE + 0x1770, [-1i32, 0, 1, 1, 2, 7][(g.bits() % 6) as usize] as u32);
+        let fade = g.near(0.0, -0.1, 0.1);
+        f(&mut ee, BIKE + 0x177c, fade);
+        ee.set_u32(BIKE + 0x1778, group);
+        ee.set_u32(group + 0x30, if g.one_in(3) { 0 } else { fader });
+        ee.set_u32(fader + 4, v_fade);
+        ee.set_u32(BIKE + 0x1650, g.bits());
+        f(&mut ee, BIKE + 0xcf8, g.f(0.0, 100.0));
+        for o in [0xd2c, 0xd30, 0xd34] {
+            let x = g.near(0.0, -1.0, 1.0);
+            f(&mut ee, BIKE + o, x);
+        }
+        for o in [0x12a8, 0x12ac, 0x310, 0x12c0] {
+            ee.set_u32(BIKE + o, g.bits());
+        }
+        let dt = if g.one_in(2) { f32::from_bits(DT) } else { g.f(0.002, 0.05) };
+        dt_bits.set(dt.to_bits());
+        let before = snap_regions(&ee, &regions);
+
+        let v0 = tail::read(&|a| ee.u32_at(a), BIKE);
+        let skipped = ee.u8_at(skip_at) & 8 != 0;
+        let paused = ee.u32_at(pause_flag + 0x14) != 0;
+        let mut m = TailLogged { ee: &ee, v: v0.clone(), calls: Vec::new(), skipped, paused, ready: ready_says.get() != 0 };
+        tail::vehicle_update(&mut m, F(dt));
+        let (v, calls) = (m.v, m.calls);
+
+        let has = |c: &dyn Fn(&TailCall) -> bool| calls.iter().any(c);
+        if v0.state == 0 {
+            tally(&mut t, "no state");
+        } else if paused {
+            tally(&mut t, "paused");
+        } else {
+            tally(&mut t, if skipped { "skipped" } else if has(&|c| *c == TailCall::Out(Out::OwnListeners)) { "down" } else { "wreck test" });
+            if v0.countdown == 1 {
+                tally(&mut t, "countdown over");
+            }
+            if has(&|c| matches!(c, TailCall::Out(Out::FadeOver(_)))) {
+                tally(&mut t, "fade over");
+            } else if !(v0.fade <= F::ZERO) && v.fade == F::ZERO {
+                tally(&mut t, "fade over, no object");
+            }
+            tally(&mut t, if v.free != 0 { "free" } else if has(&|c| *c == TailCall::Out(Out::PutBack)) { "stuck, put back" } else { "stuck" });
+            match calls.iter().find_map(|c| if let TailCall::Out(Out::Rumble { soft, .. }) = c { Some(*soft) } else { None }) {
+                Some(true) => tally(&mut t, "rumble"),
+                Some(false) => tally(&mut t, "rumble, strong"),
+                None if has(&|c| *c == TailCall::Ready) => tally(&mut t, "rumble not ready"),
+                None => {}
+            }
+            if v.wheelie_clock != v0.wheelie_clock && v.wheelie_clock != F::ZERO {
+                tally(&mut t, "wheelie");
+            }
+            if v.stoppie_clock != v0.stoppie_clock && v.stoppie_clock != F::ZERO {
+                tally(&mut t, "stoppie");
+            }
+            if v.best_wheelie_distance != v0.best_wheelie_distance || v.best_stoppie_distance != v0.best_stoppie_distance {
+                tally(&mut t, "best distance");
+            }
+            if has(&|c| matches!(c, TailCall::Out(Out::TrickStart(_)))) {
+                tally(&mut t, "trick start");
+            }
+            if has(&|c| *c == TailCall::Out(Out::TrickEnd)) {
+                tally(&mut t, "trick end");
+            }
+            if v.run != 0 {
+                tally(&mut t, if v0.wheels[0].touching { "distance, speed" } else { "distance, heading" });
+                if v.distance == v0.distance {
+                    tally(&mut t, "no distance");
+                }
+                if v.landings != v0.landings {
+                    tally(&mut t, "landed");
+                }
+            }
+            if has(&|c| matches!(c, TailCall::Out(Out::RunOver { .. }))) {
+                tally(&mut t, "run over");
+            }
+            if has(&|c| matches!(c, TailCall::Out(Out::RunOverItem { .. }))) {
+                tally(&mut t, "items told");
+            }
+            if calls.iter().filter(|c| matches!(c, TailCall::Out(Out::RunOverRider { .. }))).count() > 1 {
+                tally(&mut t, "riders told");
+            }
+            if v0.lap != 0 && v.lap == 0 {
+                tally(&mut t, "lap over");
+            }
+        }
+
+        log.borrow_mut().clear();
+        ee.set(28, GP);
+        ee.call(VEHICLE_UPDATE, &[u64::from(BIKE)], &[dt], BUDGET);
+        let got = snap_regions(&ee, &regions);
+        let mut want = before.clone();
+        let index = |a: u32| {
+            let mut i = 0;
+            for &(at, len) in &regions {
+                if (at..at + len).contains(&a) {
+                    return i + ((a - at) / 4) as usize;
+                }
+                i += (len / 4) as usize;
+            }
+            panic!("{a:#x} is in none of the regions")
+        };
+        for (a, w) in tail::words(&v, BIKE) {
+            want[index(a)] = w;
+        }
+        let at = |i: usize| {
+            let mut i = i;
+            for &(a, len) in &regions {
+                if i < (len / 4) as usize {
+                    return a + 4 * i as u32;
+                }
+                i -= (len / 4) as usize;
+            }
+            unreachable!()
+        };
+        let d: Vec<String> = (0..want.len())
+            .filter(|&i| want[i] != got[i])
+            .map(|i| format!("{:#x}: before {:#010x}, port {:#010x}, original {:#010x}", at(i), before[i], want[i], got[i]))
+            .collect();
+        assert!(d.is_empty(), "bike {k}: {} words differ\n  {}\nport calls {calls:?}\noriginal {:?}", d.len(), d.join("\n  "), log.borrow());
+        assert_eq!(calls, *log.borrow(), "bike {k}: the calls");
+    }
+    eprintln!("{t:#?}");
+    for (path, n) in &t {
+        assert!(*n >= 20, "path {path} taken only {n} times");
+    }
+}
+
+/// What a leaf's step does in the walk's oracle, both sides alike: with its `+0x28` not 0, it sets
+/// its own next to `+0x28` − 1 (the walk reads the next only after the step).
+fn walk_leaf(ee: &mut Ee, e: u32) {
+    let cut = ee.u32_at(e + 0x28);
+    if cut != 0 {
+        ee.set_u32(e + tail::NEXT, cut - 1);
+    }
+}
+
+/// The port's side of the walk's oracle: a group's step is the port's walk, a leaf's is
+/// [`walk_leaf`], logged with its `dt`.
+struct WalkLogged<'a> {
+    ee: &'a mut Ee,
+    log: Vec<(u32, u32)>,
+}
+
+impl Listeners for WalkLogged<'_> {
+    fn word(&mut self, at: u32) -> u32 {
+        self.ee.u32_at(at)
+    }
+    fn step(&mut self, e: u32, dt: F) {
+        if self.ee.u32_at(self.ee.u32_at(e + 4) + 0x40) == TAIL {
+            tail::walk(self, e, dt);
+        } else {
+            walk_leaf(self.ee, e);
+            self.log.push((e, dt.to_bits()));
+        }
+    }
+}
+
+/// **The tail's walk is the original's**: 10 000 listener trees laid out in scratch, a group of up to
+/// six listeners with their state bytes (on, held, gone, the rest) and wants drawn at random, groups
+/// among them (one with up to four of its own, the others empty), the groups' step bits drawn too,
+/// and leaves that cut or end their list as they step. SLUS-21104's walk and [`tail::walk`] step the
+/// same leaves in the same order with the same `dt`, and leave the same words.
+#[test]
+fn the_tails_walk_is_the_originals() {
+    let Some(mut ee) = image().map(hooked) else { return };
+    let leaf_fn = ee.scratch(240);
+    let v_leaf = ee.scratch(20);
+    let v_group = ee.scratch(23);
+    ee.set_u32(v_leaf + 0x40, leaf_fn);
+    ee.set_u32(v_group + 0x40, TAIL);
+    let log: Rc<RefCell<Vec<(u32, u32)>>> = Rc::default();
+    let l = log.clone();
+    ee.hooks.insert(leaf_fn, Box::new(move |ee: &mut Ee| {
+        let e = ee.r(4) as u32;
+        walk_leaf(ee, e);
+        l.borrow_mut().push((e, ee.f(12).to_bits()));
+    }));
+    let root = ee.scratch(0);
+    let top: [u32; 6] = std::array::from_fn(|i| ee.scratch(1 + i as u32));
+    let sub: [u32; 4] = std::array::from_fn(|i| ee.scratch(7 + i as u32));
+    let regions = [(root, 11 * 0x40)];
+    let mut g = Gen(0x0031_b4a1);
+    let mut t = BTreeMap::new();
+    for k in 0..10_000 {
+        let flags = |g: &mut Gen| g.bits() & !2 | if g.one_in(3) { 0 } else { 2 };
+        ee.set_u32(root + tail::GROUP_FLAGS, flags(&mut g));
+        let lay = |ee: &mut Ee, g: &mut Gen, list: &[u32], n: usize| {
+            for i in 0..list.len() {
+                let e = list[i];
+                ee.set_u32(e + 4, v_leaf);
+                ee.set_u32(e + tail::NEXT, if i + 1 < n { list[i + 1] } else { 0 });
+                ee.set_u32(e + tail::FIRST, 0);
+                let mut b = g.bits() & 0xf2;
+                b |= if g.one_in(3) { 0 } else { tail::ON };
+                b |= if g.one_in(6) { tail::HELD } else { 0 };
+                b |= if g.one_in(6) { tail::GONE } else { 0 };
+                ee.set_u32(e + 0x20, g.bits() & 0xffff_00ff | b << 8);
+                ee.set_u32(e + tail::WANTS, g.bits() & !2 | if g.one_in(3) { 0 } else { 2 });
+                let later = if i + 1 < n { list[i + 1..n].to_vec() } else { Vec::new() };
+                let cut = match g.bits() % 8 {
+                    0 => 1,
+                    1 if !later.is_empty() => later[(g.bits() as usize) % later.len()] + 1,
+                    _ => 0,
+                };
+                ee.set_u32(e + 0x28, cut);
+            }
+        };
+        let n = (g.bits() % 7) as usize;
+        ee.set_u32(root + tail::FIRST, if n > 0 { top[0] } else { 0 });
+        lay(&mut ee, &mut g, &top, n);
+        let m = (g.bits() % 5) as usize;
+        lay(&mut ee, &mut g, &sub, m);
+        let mut with_sub = false;
+        for &e in &top[..n] {
+            if g.one_in(4) {
+                ee.set_u32(e + 4, v_group);
+                ee.set_u32(e + tail::GROUP_FLAGS, flags(&mut g));
+                if !with_sub && m > 0 {
+                    ee.set_u32(e + tail::FIRST, sub[0]);
+                    with_sub = true;
+                }
+            }
+        }
+        let dt = F(if g.one_in(2) { f32::from_bits(DT) } else { g.f(0.002, 0.05) });
+        let before = snap_regions(&ee, &regions);
+
+        let mut w = WalkLogged { ee: &mut ee, log: Vec::new() };
+        tail::walk(&mut w, root, dt);
+        let port = std::mem::take(&mut w.log);
+        let port_words = snap_regions(&ee, &regions);
+        restore_regions(&mut ee, &regions, &before);
+        log.borrow_mut().clear();
+        ee.set(28, GP);
+        ee.call(TAIL, &[u64::from(root)], &[dt.0], BUDGET);
+        assert_eq!(port, *log.borrow(), "tree {k}: the leaves stepped");
+        assert_eq!(port_words, snap_regions(&ee, &regions), "tree {k}: the words left");
+
+        tally(&mut t, if port.is_empty() { "nothing stepped" } else { "stepped" });
+        if port.iter().any(|&(e, _)| sub.contains(&e)) {
+            tally(&mut t, "a group's own stepped");
+        }
+        if port.len() > 2 {
+            tally(&mut t, "three or more");
+        }
+        if port.iter().any(|&(e, _)| before[((e - root) / 4 + 10) as usize] != 0) {
+            tally(&mut t, "a stepped leaf cut its list");
+        }
+    }
+    eprintln!("{t:#?}");
+    for (path, n) in &t {
+        assert!(*n >= 20, "path {path} taken only {n} times");
     }
 }

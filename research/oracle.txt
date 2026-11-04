@@ -9406,3 +9406,31 @@ atv_heap_free               atv 0x001b76d0 = free
 #   +0x24 is the PostProcess's tip-over word (F31b3: up.y <= 0.25), so the heightfield rays run only
 #   with the bike on its side: flip-1's 470 queries (F31c's rows), none in ride-2. Along both the sweep
 #   never pushes and the world rays file nothing.
+# F31b4a — the sim frame's tail around the bike: the listeners' walk and the bike's vehicle update
+# (game_sim::handling::tail; tests/mxvatv_bike_ride.rs). Comment rows only. Journal:
+# research/journal/2026-11-03-f31b-mxvatv-bike-pre-process/5-tail-FINAL.md.
+#   Walk 0x00128af0(group, f12 dt): group +0x1c bit 1 -> listeners from +0x10, next at +0xc (read after
+#   the step); a listener steps when its byte +0x21 has bit 0 and neither bit 2 nor bit 3, and its +0x18
+#   has bit 1; step = vt(+0x40) (listener, dt). A group whose +0x40 is the walk itself recurses.
+#   On state 4 the tail steps three leaves: the bike (+0xc, thunk 0x004de0a0 -> update 0x004da210),
+#   0x001c9540 on 0x00eb6420 and 0x002cf9f0 on 0x01ed82d0 (both left in the interpreter).
+#   Update 0x004da210 -> inner 0x004e1b90 -> base 0x004a79c0; stuck timer 0x004aad60; lookup 0x00214b30
+#   (0x005423e0, 0x00529b0c, 0); rumble ready 0x0051a250; network 0x0025e8d0; parts 0x00494370.
+#   Bike vt slots: +0x3a4 fade, +0x4f8 wreck first, +0x4e8 wreck pose, +0x4a0 wreck last (reason),
+#   +0x49c wreck test, +0x4f0 lean, +0x3e4 prepare, +0x35c ride, +0x378 sync, +0x37c snapshot, +0x3a8
+#   put back, +0x4b8 trick start, +0x4ac trick end.
+#   Base: the kind test (state +0xbc4, kind +0x28) is dead: bne k,3 goes to the ride; k == 3 then tests
+#   beq k,4, never taken, so the ride path always runs. Kinds 3/4 are the wreck's.
+#   Words: +0xc38 speed, +0x174c slow below, +0x32c speed length, +0xc20 held, +0x31c/+0x320 put back
+#   due/was, +0xc14 free, +0xc10 stuck, +0xdf0 stuck time, +0xc00 last free point, +0x324 on ground,
+#   +0xde0 airborne, +0x1190 hang time, +0xc80 wreck reason, +0x1744/+0x1748 wheelie/stoppie clocks,
+#   +0x704..+0x720 wheelie, stoppie, distances and bests, +0x13c4/+0x13c8 their tricks, +0x680 run,
+#   +0x684 player, +0x6f8/+0x6fc/+0x724/+0x6c8/+0x6cc run clocks, +0x175c/+0x1760/+0x1750/+0xd20 clocks,
+#   +0x1770/+0x177c/+0x1650 fade, +0xcf8/+0xd2c/+0xd30/+0xd34 ride, +0x12a8/+0x12ac/+0x310/+0x12c0
+#   cleared; surfaces +0xdf4 (12 each: holds byte, stuck limit +4), indexed by the wheel's byte +0x110;
+#   wheel +0xd0 ray hit, +0xdc touching, +0xf0 rough. Run +8 flags, +0x18 step, +0x40 landed, +0xc4
+#   left, +0x108 top speed; player +0x29c left. Riders told through +4 then +0x18 links.
+#   Rumble: the clamps to 95 / 40 cannot be reached (equivalent mutants); RUMBLE_TIME 0.2.
+#   Along ride-2 and flip-1 the state's kind is 1 on every row; the update runs fade, wreck test, lean,
+#   prepare, ride, sync, snapshot, network, parts and the frame message every row, and rumbles on 34 rows
+#   (soft and strong). It never reaches the wreck steps, fade over, put back, tricks or run over.
