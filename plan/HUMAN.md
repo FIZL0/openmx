@@ -421,3 +421,19 @@ fast, and no longer the original bit for bit. Only a rider can say whether it st
    It draws offscreen and leaves your settings alone.
 
 A native build cannot play online with an ordinary one. Each sees the other's lobby as "another version".
+
+## Why iOS ended the app in the background, and does resume work (P298)
+
+P298 pauses the ride, saves where you were and offers it on the next launch ("Resume the ride on
+free06?" on the main menu). Two things only the phone can tell (5 minutes, plus the wait):
+
+1. **Why it was ended.** After a relaunch that should have been a resume: Settings → Privacy & Security →
+   Analytics & Improvements → Analytics Data, and look for `JetsamEvent-<date>` around that time. Open it
+   and search for `openmx`: a `"reason" : "per-process-limit"` or `"highwater"`/`"vm-pageshortage"` line
+   means memory (the ride's GPU world is then worth giving back in the background, P298a); no openmx in
+   it means iOS ended it for another reason, and P298a is moot. Also copy `Documents/openmx-log.txt`'s
+   `iOS UIApplicationDidEnterBackgroundNotification: saved after N ms, memory … MB` and any `iOS memory
+   warning` lines into the task.
+2. **That resume works.** Ride a while, go to the home screen, then swipe the app away in the app switcher
+   (the same as iOS ending it). Open it: past the splash the main menu should ask to resume, and Resume
+   should put you back where you were under the pause. Note anything off in P298a.

@@ -1494,6 +1494,11 @@ impl Pen<'_> {
         if screen == Screen::Main {
             self.corner();
             self.builds(menu);
+            // P298: where the player was when the app was ended away.
+            if let Some((what, row)) = menu.offer.asking() {
+                let ask = self.fit(Weight::Heavy, &format!("Resume {what}?"), 2.3, 26.0);
+                self.popup(&ask, &OFFER_ROWS, row);
+            }
         }
         self.transfers(menu);
     }
