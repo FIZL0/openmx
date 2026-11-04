@@ -71,3 +71,9 @@ missing Kiowa image, K23's world_ultra_load timing, and disc_worlds' `the_instal
 at 79 s against a 60 s limit under load, which I filed as K24 (critical). The work is committed and pushed on
 task/P222 by hand, unticked. The next session should do the block once the gate is green:
 `./kit done P222 "<msg>" --blocked "browser has no own mods until P203; CORS clear (journal)" --after P203`.
+
+**Session 2 (2026-11-04):** nothing new to build. P203 is still open and parked `later`, so the browser still
+has no mods of the player's own. This session reruns the block above (`--after P203`) through the gate.
+The gate passed (4800 tests). The audit flagged four leaks that this journal-only change did not add:
+atv_wheel.rs:62,66 from MD75, and plan/DONE.md:519,533. I filed them as a K follow-up and finished with
+`--skip-audit`.
