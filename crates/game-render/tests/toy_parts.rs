@@ -176,6 +176,22 @@ struct Matched {
 /// The track's toys, built from the disc, against the state: the binding checked, then `ticks`
 /// ticks of the motion. Returns how many of the parts' (tick, part) steps moved.
 fn parts_ride_their_nodes(track: &str, state: &str, toys_want: usize, parts_want: usize, ticks: usize) -> Option<usize> {
+    parts_ride_their_nodes_drawn(track, state, toys_want, parts_want, ticks, &|_| true).map(|(moved, _)| moved)
+}
+
+/// [`parts_ride_their_nodes`] with every toy drawn on the ticks `drawn` says and on no other (S212):
+/// on a tick it is not, the original's toy update stops at its visibility gate, so neither its clip
+/// nor its nodes nor its parts' bodies are stepped, and the port's toy is not seen (its
+/// `AnimateWhenNotVisible` off). Returns how many (tick, part) steps moved, and how many of those were
+/// on a tick that was not drawn.
+fn parts_ride_their_nodes_drawn(
+    track: &str,
+    state: &str,
+    toys_want: usize,
+    parts_want: usize,
+    ticks: usize,
+    drawn: &dyn Fn(usize) -> bool,
+) -> Option<(usize, usize)> {
     let mut archives = archives(track)?;
     let kit = Kit::load().map_err(|w| skip(&w)).ok()?;
     let path = kit.ctx("states").join(state);
@@ -281,10 +297,15 @@ fn parts_ride_their_nodes(track: &str, state: &str, toys_want: usize, parts_want
     let update = addr("kinematic_body_update").unwrap();
     let velocity = addr("path_car_velocity").unwrap();
     let spin = addr("path_car_spin").unwrap();
-    let mut moved = 0;
+    for spec in std::sync::Arc::make_mut(&mut sim.specs) {
+        spec.unseen = false;
+    }
+    let (mut moved, mut unseen_moved) = (0, 0);
     for tick in 0..ticks {
-        // The original: each toy's clip and nodes, then its parts' bodies.
-        for m in &matched {
+        let seen = drawn(tick);
+        sim.seen = vec![seen; sim.specs.len()];
+        // The original: each toy's clip and nodes, then its parts' bodies, past the gate.
+        for m in matched.iter().filter(|_| seen) {
             ee.call(advance, &[u64::from(m.model), 0, 0, 0], &[dt.0], BUDGET);
             for &n in &m.nodes {
                 ee.call(rebuild, &[u64::from(n)], &[], BUDGET);
@@ -313,12 +334,13 @@ fn parts_ride_their_nodes(track: &str, state: &str, toys_want: usize, parts_want
                 assert_eq!(xyz(ours.spin), s, "{}", what("spin"));
                 if ours.velocity.0[..3].iter().chain(&ours.spin.0[..3]).any(|v| *v != 0.0) {
                     moved += 1;
+                    unseen_moved += usize::from(!seen);
                 }
             }
             at_prop += spec.parts.len();
         }
     }
-    Some(moved)
+    Some((moved, unseen_moved))
 }
 
 #[test]
@@ -333,4 +355,22 @@ fn nat11s_gondola_parts_ride_their_nodes() {
     // Eight gondolas, two parts each, on their lift's clips.
     let Some(moved) = parts_ride_their_nodes("nat11", "s133-nat11.ee.bin", 8, 16, NAT11_TICKS) else { return };
     assert_eq!(moved, NAT11_TICKS * 16, "every gondola part moves on every tick");
+}
+
+/// S212: a hierarchy part's body over ticks its toy is not drawn. The body is updated only past the
+/// toy's visibility gate, and its velocity virtual reads its node's world now against the matrix it
+/// kept from the update before last, so on a tick the toy is passed over the part still answers
+/// the last step's motion (at this tick's `1/dt`). Drawn five ticks in seven.
+#[test]
+fn free10s_shovel_parts_answer_their_last_step_when_not_drawn() {
+    let Some((moved, unseen)) = parts_ride_their_nodes_drawn("free10", "s133-free10.ee.bin", 2, 10, 540, &|t| t % 7 < 5) else { return };
+    assert!(moved > 360 && unseen > 100, "the shovel's arm moves: {moved} part-ticks did, {unseen} undrawn");
+}
+
+#[test]
+fn nat11s_gondola_parts_answer_their_last_step_when_not_drawn() {
+    let ticks = NAT11_TICKS * 7 / 5 + 7;
+    let Some((moved, unseen)) = parts_ride_their_nodes_drawn("nat11", "s133-nat11.ee.bin", 8, 16, ticks, &|t| t % 7 < 5) else { return };
+    // The first tick is drawn, so every part has a last step to answer on every tick.
+    assert_eq!((moved, unseen), (ticks * 16, (ticks / 7) * 2 * 16), "every gondola part moves on every tick");
 }
