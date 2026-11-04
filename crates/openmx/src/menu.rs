@@ -2925,13 +2925,18 @@ pub enum LeaveTo {
     Online,
 }
 
-/// The preset a page's Save Over would write over (P229), asked about first.
+/// The preset a page's Save Over would write over (P229), or its Delete Preset would forget (P246),
+/// asked about first.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Over {
     /// The modifier preset at this place in the list.
     Mods(usize),
     /// One of the Camera page's seat's own presets.
     Camera(cameras::Pick),
+    /// Delete Preset on the modifier preset at this place in the list.
+    DeleteMods(usize),
+    /// Delete Preset on one of the Camera page's seat's own presets.
+    DeleteCamera(cameras::Pick),
 }
 
 /// What the pause's confirm (P110) is asking about: its Main Menu row, its Quit row, or its Leave
@@ -4293,22 +4298,44 @@ impl Menu {
         self.changed = true;
     }
 
-    /// A page's Save Over question, if it is up (P229): its question, its two rows, Save Over
-    /// first and Cancel second, and the row it is on.
+    /// Forget modifier preset `i`, Load Preset staying on the place in the list it was on (P246).
+    fn delete_preset(&mut self, i: usize) {
+        if i >= self.settings.presets.len() {
+            return;
+        }
+        self.settings.presets.remove(i);
+        self.mod_preset = self.mod_preset.min(self.settings.presets.len().saturating_sub(1));
+        self.changed = true;
+    }
+
+    /// Forget one of the Camera page's seat's own presets, the page back on its first preset (P246).
+    fn delete_camera_preset(&mut self, pick: &cameras::Pick) {
+        let seat = self.camera_seat();
+        self.settings.camera_sets[seat].remove(pick.machine, &pick.name);
+        self.camera_pick = 0;
+        self.changed = true;
+    }
+
+    /// A page's Save Over (P229) or Delete Preset (P246) question, if it is up: its question, its
+    /// two rows, the doing one first and Cancel second, and the row it is on.
     pub fn overwriting(&self) -> Option<(String, [&'static str; 2], usize)> {
         let (screen, what, row) = self.over.as_ref()?;
         if self.screen() != Some(*screen) {
             return None;
         }
-        let name = match what {
-            Over::Mods(i) => self.settings.presets.get(*i).map_or("", |p| p.0.as_str()),
-            Over::Camera(pick) => pick.name.as_str(),
+        let mods = |i: &usize| self.settings.presets.get(*i).map_or(String::new(), |p| p.0.clone());
+        let (ask, rows) = match what {
+            Over::Mods(i) => (format!("Save over {}?", mods(i)), ["Save Over", "Cancel"]),
+            Over::Camera(pick) => (format!("Save over {}?", pick.name), ["Save Over", "Cancel"]),
+            Over::DeleteMods(i) => (format!("Delete {}?", mods(i)), ["Delete", "Cancel"]),
+            Over::DeleteCamera(pick) => (format!("Delete {}?", pick.name), ["Delete", "Cancel"]),
         };
-        Some((format!("Save over {name}?"), ["Save Over", "Cancel"], *row))
+        Some((ask, rows, *row))
     }
 
-    /// One press on a page's Save Over question: any direction moves between its two rows, Cross
-    /// on the first writes over the preset, and Cross on Cancel, Circle or Start leave it as it was.
+    /// One press on a page's Save Over or Delete Preset question: any direction moves between its
+    /// two rows, Cross on the first writes over or forgets the preset, and Cross on Cancel, Circle or
+    /// Start leave it as it was.
     pub(super) fn answer_over(&mut self, p: Press) {
         let Some((screen, what, row)) = self.over.take() else { return };
         if p.up || p.down || p.left || p.right {
@@ -4317,6 +4344,8 @@ impl Menu {
             match what {
                 Over::Mods(i) => self.save_over_preset(i),
                 Over::Camera(pick) => self.save_camera_over(&pick),
+                Over::DeleteMods(i) => self.delete_preset(i),
+                Over::DeleteCamera(pick) => self.delete_camera_preset(&pick),
             }
         } else if !(p.ok || p.back || p.start) {
             self.over = Some((screen, what, row));
