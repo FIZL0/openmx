@@ -15,6 +15,10 @@
 //!   the disc sets it) and stepped from the state, one of them stood still so that its height
 //!   holds: the path's height, the one before, the hold and the pose, bit for bit.
 //!
+//! S188 runs the same three on S196's free11 image (`s196-free11.ee.bin`) and its twelve cars: two
+//! presample, the other ten ask the ground every frame, and four of those are `HasPhysics` cars
+//! (the subclass, stepped through its own update; none turns physical).
+//!
 //! The state and the disc are game data, git-ignored: absent, the tests skip.
 
 use game_render::disc::{Disc, Res};
@@ -25,7 +29,19 @@ use game_sim::world::Ground;
 use ps2_float::{F, Vf};
 use ps2_oracle::{Ee, Kit, addr, skip};
 
-const STATE: &str = "recording2.p2m2_SaveState.eeMemory.bin";
+/// A track's RAM image, and how many path cars its `.toy` drives.
+struct Case {
+    state: &'static str,
+    /// How the image is made, for the skip.
+    made: &'static str,
+    track: &'static str,
+    cars: usize,
+}
+
+const FREE09: Case = Case { state: "recording2.p2m2_SaveState.eeMemory.bin", made: "`./kit state ram` of recording2.p2m2_SaveState.p2s", track: "free09", cars: 6 };
+
+/// S188: S196's free11 free ride (copy 2's slot 22, `./kit state ram` to `s196-free11.ee.bin`).
+const FREE11: Case = Case { state: "s196-free11.ee.bin", made: "`./kit state ram` of S196's free11 save state", track: "free11", cars: 12 };
 const BUDGET: u64 = 50_000_000;
 /// Long enough for every car to cross keys, and for the trailers' lag to leave the segment the
 /// measuring left their cursors on.
@@ -66,16 +82,20 @@ mod at {
     pub const KEY: u32 = 0x30;
     pub const WORLD: u32 = 0x80;
     pub const VTABLE: u32 = 0x8;
+    /// The vtable's update: the path car's, or the `HasPhysics` subclass's (S127).
+    pub const UPDATE: u32 = 0x38;
+    /// The subclass's flag: its rigid body has taken over.
+    pub const PHYSICAL: u32 = 0x588;
     /// The vtable's measure (`path_car_measure`).
     pub const MEASURE: u32 = 0xd0;
     pub const DT: u32 = 0x344;
 }
 
-fn state() -> Option<Ee> {
+fn state(case: &Case) -> Option<Ee> {
     let kit = Kit::load().map_err(|w| skip(&w)).ok()?;
-    let path = kit.ctx("states").join(STATE);
+    let path = kit.ctx("states").join(case.state);
     if !path.exists() {
-        skip(&format!("{} is not there: `./kit state ram` of recording2.p2m2_SaveState.p2s", path.display()));
+        skip(&format!("{} is not there: {}", path.display(), case.made));
         return None;
     }
     let mut ee = Ee::from_ram(&path).unwrap_or_else(|e| panic!("{e}"));
@@ -105,10 +125,20 @@ fn mat_bits(m: &Mat4) -> [[u32; 4]; 4] {
     m.0.map(bits)
 }
 
-/// The state's path cars, by the vtable eight bytes into each.
+/// The state's path cars, by the vtable eight bytes into each: the path car's, or the `HasPhysics`
+/// subclass's (free11 has both), which drives its path as the path car does until it is struck.
 fn cars(ee: &Ee) -> Vec<u32> {
-    let vtable = addr("path_car_vtable").unwrap();
-    (0..32u32 << 20).step_by(16).filter(|&a| ee.u32_at(a + at::VTABLE) == vtable).collect()
+    let vtables = [addr("path_car_vtable").unwrap(), addr("physics_car_vtable").unwrap()];
+    (0..32u32 << 20).step_by(16).filter(|&a| vtables.contains(&ee.u32_at(a + at::VTABLE))).collect()
+}
+
+/// The car's own update, through its vtable, as the toy world's list calls it.
+fn update_of(ee: &Ee, car: u32) -> u32 {
+    ee.u32_at(ee.u32_at(car + at::VTABLE) + at::UPDATE)
+}
+
+fn is_physics(ee: &Ee, car: u32) -> bool {
+    ee.u32_at(car + at::VTABLE) == addr("physics_car_vtable").unwrap()
 }
 
 fn keys_of(ee: &Ee, car: u32) -> Vec<Key> {
@@ -151,12 +181,12 @@ fn car_of(ee: &Ee, car: u32) -> Car {
     }
 }
 
-/// free09's archives, its ground, and the shell's specs of its cars (built from the `.toy` and the
-/// clips, not yet presampled), for `then`.
-fn on_free09<R>(then: impl FnOnce(&mut Ground<'_>, Vec<Spec>) -> R) -> Option<R> {
+/// The track's archives, its ground, and the shell's specs of its cars (built from the `.toy` and
+/// the clips, not yet presampled), for `then`.
+fn on_track<R>(track: &str, then: impl FnOnce(&mut Ground<'_>, Vec<Spec>) -> R) -> Option<R> {
     let mut disc = Disc::open_configured().map_err(|why| skip(&why)).ok()?;
-    let parts: Vec<Res> = ["Tracks\\free09.res", "Tracks\\free09_2.res"].iter().filter_map(|n| disc.res(n).ok()).collect();
-    let read = |want: &str| parts.iter().find_map(|r| r.read_suffix(want).ok()).unwrap_or_else(|| panic!("no archive of free09 has {want}"));
+    let parts: Vec<Res> = [format!("Tracks\\{track}.res"), format!("Tracks\\{track}_2.res")].iter().filter_map(|n| disc.res(n).ok()).collect();
+    let read = |want: &str| parts.iter().find_map(|r| r.read_suffix(want).ok()).unwrap_or_else(|| panic!("no archive of {track} has {want}"));
     let scene = Scene::parse(&read(".scn")).expect("parse the scene");
     let leaf = scene.terrain_file.to_ascii_lowercase().replace(".trn", ".ps2.trn");
     let bytes = read(leaf.rsplit('\\').next().unwrap());
@@ -164,14 +194,14 @@ fn on_free09<R>(then: impl FnOnce(&mut Ground<'_>, Vec<Spec>) -> R) -> Option<R>
     let mut ground = Ground::new(&terrain, &scene.terrain);
     // The render side's own presample is not what is under test: it gets the flat ground.
     let mut flat = |p: game_render::mat::V3| (p, game_render::mat::v3(0.0, 1.0, 0.0));
-    let traffic = game_render::toy::Traffic::load(&parts, "free09", &mut flat);
+    let traffic = game_render::toy::Traffic::load(&parts, track, &mut flat);
     let specs = traffic.sim(&parts).specs.as_ref().clone();
     Some(then(&mut ground, specs))
 }
 
 /// Which of the shell's specs is this car of the state: the same lag and time scale, the same key
 /// times and the same `x` and `z` on every key (the presample moves only the height).
-fn spec_for<'a>(ee: &Ee, car: u32, specs: &'a [Spec]) -> &'a Spec {
+fn spec_for<'a>(ee: &Ee, car: u32, specs: &'a [Spec], track: &str) -> &'a Spec {
     let keys = keys_of(ee, car);
     let f = |o| ee.u32_at(car + o);
     let same = |s: &&Spec| {
@@ -179,24 +209,28 @@ fn spec_for<'a>(ee: &Ee, car: u32, specs: &'a [Spec]) -> &'a Spec {
             && s.keys.len() == keys.len()
             && s.keys.iter().zip(&keys).all(|(a, b)| a.t.to_bits() == b.t.to_bits() && a.pos.x().to_bits() == b.pos.x().to_bits() && a.pos.z().to_bits() == b.pos.z().to_bits())
     };
-    specs.iter().find(same).unwrap_or_else(|| panic!("{car:#x}: no car of free09's .toy drives this path"))
+    specs.iter().find(same).unwrap_or_else(|| panic!("{car:#x}: no car of {track}'s .toy drives this path"))
 }
 
 #[test]
 fn the_trailers_keys_are_presampled_as_the_originals() {
-    let Some(ee) = state() else { return };
+    keys_are_presampled_as_the_originals(&FREE09);
+}
+
+fn keys_are_presampled_as_the_originals(case: &Case) {
+    let Some(ee) = state(case) else { return };
     let cars = cars(&ee);
-    assert_eq!(cars.len(), 6, "the state's path cars");
+    assert_eq!(cars.len(), case.cars, "the state's path cars");
     for &car in &cars {
-        assert_eq!(ee.u32_at(car + at::PRESAMPLE), 1, "{car:#x} does not presample");
+        assert!(ee.u32_at(car + at::PRESAMPLE) == 1 || case.track != "free09", "{car:#x} does not presample");
         assert_eq!((ee.u32_at(car + at::LEVEL), ee.u32_at(car + at::SOULTREE)), (0, 0), "{car:#x}: PathIsLevel or DriveOnSoultree");
     }
     let mut checked = 0;
-    let Some(()) = on_free09(|ground, specs| {
-        assert_eq!(specs.len(), 6, "free09's .toy cars on clips");
+    let Some(()) = on_track(case.track, |ground, specs| {
+        assert_eq!(specs.len(), case.cars, "{}'s .toy cars on clips", case.track);
         for &car in &cars {
-            let spec = spec_for(&ee, car, &specs);
-            assert!(spec.presample && !spec.level, "{car:#x}: the shell's spec has the wrong switches");
+            let spec = spec_for(&ee, car, &specs, case.track);
+            assert_eq!((spec.presample, spec.level), (ee.u32_at(car + at::PRESAMPLE) != 0, false), "{car:#x}: the shell's spec has the wrong switches");
             let theirs = keys_of(&ee, car);
             for (k, (ours, theirs)) in spec.keys.iter().zip(&theirs).enumerate() {
                 assert_eq!(ours.len.to_bits(), theirs.len.to_bits(), "{car:#x} key {k}: length {} against {}", ours.len.0, theirs.len.0);
@@ -204,7 +238,11 @@ fn the_trailers_keys_are_presampled_as_the_originals() {
             spec.presample(ground);
             for (k, (ours, theirs)) in spec.keys().iter().zip(&theirs).enumerate() {
                 assert_eq!(bits(ours.pos), bits(theirs.pos), "{car:#x} key {k}: position {:?} against {:?}", ours.pos, theirs.pos);
-                assert_eq!(bits(ours.normal), bits(theirs.normal), "{car:#x} key {k}: normal {:?} against {:?}", ours.normal, theirs.normal);
+                // A car that does not presample leaves its keys' normals at the clip's (0, 0, 0, 1)
+                // and never reads them: it asks the ground every frame.
+                if spec.presample {
+                    assert_eq!(bits(ours.normal), bits(theirs.normal), "{car:#x} key {k}: normal {:?} against {:?}", ours.normal, theirs.normal);
+                }
                 checked += 1;
             }
         }
@@ -216,14 +254,17 @@ fn the_trailers_keys_are_presampled_as_the_originals() {
 
 #[test]
 fn the_trailers_drive_from_their_load_as_the_originals_do() {
-    let Some(mut ee) = state() else { return };
+    drive_from_their_load_as_the_originals_do(&FREE09);
+}
+
+fn drive_from_their_load_as_the_originals_do(case: &Case) {
+    let Some(mut ee) = state(case) else { return };
     let cars = cars(&ee);
-    let update = addr("path_car_update").unwrap();
     let dt = F(ee.f32_at(ee.u32_at(addr("app_pointer").unwrap()) + at::DT));
     assert!(dt > F::ZERO, "the state's dt is {}", dt.0);
     let mut stale_ticks = 0;
-    let Some(()) = on_free09(|ground, specs| {
-        let mut specs: Vec<Spec> = cars.iter().map(|&car| spec_for(&ee, car, &specs).clone()).collect();
+    let Some(()) = on_track(case.track, |ground, specs| {
+        let mut specs: Vec<Spec> = cars.iter().map(|&car| spec_for(&ee, car, &specs, case.track).clone()).collect();
         // The first cab lagged half its path's second-to-last segment, in both: its first point is
         // on the segment the measuring left the cursor on, so it rides the measure's tangents.
         let n = specs[0].keys.len();
@@ -240,7 +281,9 @@ fn the_trailers_drive_from_their_load_as_the_originals_do() {
                 let a = table + k as u32 * at::KEY;
                 ee.set_f32(a + 4, 0.0);
                 set_vf(&mut ee, a + 0x10, key.pos);
-                set_vf(&mut ee, a + 0x20, Vf::new(0.0, 1.0, 0.0, 1.0));
+                if spec.presample {
+                    set_vf(&mut ee, a + 0x20, Vf::new(0.0, 1.0, 0.0, 1.0));
+                }
             }
             ee.set_u32(car + at::CURSOR, 0);
             ee.set_u32(car + at::KEY_I, table);
@@ -262,9 +305,10 @@ fn the_trailers_drive_from_their_load_as_the_originals_do() {
         for tick in 0..TICKS {
             for (k, &car) in cars.iter().enumerate() {
                 let stale = ours[k].stale;
-                ee.call(update, &[u64::from(car)], &[dt.0], BUDGET);
+                ee.call(update_of(&ee, car), &[u64::from(car)], &[dt.0], BUDGET);
                 specs[k].step(&mut ours[k], dt, ground);
                 let (ours, theirs) = (&ours[k], car_of(&ee, car));
+                assert!(!is_physics(&ee, car) || ee.u32_at(car + at::PHYSICAL) == 0, "tick {tick}: car {k} ({car:#x}) turned physical");
                 stale_ticks += usize::from(stale && ours.stale);
                 let what = |field: &str| format!("tick {tick}: car {k} ({car:#x}) {field}");
                 assert_eq!(ours.clock.to_bits(), theirs.clock.to_bits(), "{}", what("clock"));
@@ -274,7 +318,7 @@ fn the_trailers_drive_from_their_load_as_the_originals_do() {
                 assert_eq!(bits(ours.normal), bits(theirs.normal), "{}", what("up"));
                 assert_eq!(bits(ours.pose.0[3]), bits(vf(&ee, car + at::POSITION)), "{}", what("position"));
                 assert_eq!(mat_bits(&ours.pose), mat_bits(&theirs.pose), "{}", what("world matrix"));
-                if tick == 0 {
+                if tick == 0 && specs[k].presample {
                     assert_eq!(ee.u32_at(car + at::SAMPLED), 1, "{}", what("the first frame's flag"));
                     for (j, (a, b)) in specs[k].keys().iter().zip(keys_of(&ee, car)).enumerate() {
                         assert_eq!((bits(a.pos), bits(a.normal)), (bits(b.pos), bits(b.normal)), "{}", what(&format!("key {j} presampled")));
@@ -290,12 +334,15 @@ fn the_trailers_drive_from_their_load_as_the_originals_do() {
 
 #[test]
 fn a_level_car_drives_as_the_originals_do() {
-    let Some(mut ee) = state() else { return };
+    level_cars_drive_as_the_originals_do(&FREE09);
+}
+
+fn level_cars_drive_as_the_originals_do(case: &Case) {
+    let Some(mut ee) = state(case) else { return };
     let cars = cars(&ee);
-    let update = addr("path_car_update").unwrap();
     let dt = F(ee.f32_at(ee.u32_at(addr("app_pointer").unwrap()) + at::DT));
     let (mut held, mut riding) = (0, 0);
-    let Some(()) = on_free09(|ground, _| {
+    let Some(()) = on_track(case.track, |ground, _| {
         let mut specs = Vec::new();
         let mut ours = Vec::new();
         for (k, &car) in cars.iter().enumerate() {
@@ -318,7 +365,7 @@ fn a_level_car_drives_as_the_originals_do() {
         }
         for tick in 0..TICKS {
             for (k, &car) in cars.iter().enumerate() {
-                ee.call(update, &[u64::from(car)], &[dt.0], BUDGET);
+                ee.call(update_of(&ee, car), &[u64::from(car)], &[dt.0], BUDGET);
                 specs[k].step(&mut ours[k], dt, ground);
                 let (ours, theirs) = (&ours[k], car_of(&ee, car));
                 let what = |field: &str| format!("tick {tick}: car {k} ({car:#x}) {field}");
@@ -338,4 +385,19 @@ fn a_level_car_drives_as_the_originals_do() {
         return;
     };
     assert!(held > 0 && riding > 0, "{held} held and {riding} riding car-ticks: both branches are not exercised");
+}
+
+#[test]
+fn free11s_keys_are_presampled_as_the_originals() {
+    keys_are_presampled_as_the_originals(&FREE11);
+}
+
+#[test]
+fn free11s_cars_drive_from_their_load_as_the_originals_do() {
+    drive_from_their_load_as_the_originals_do(&FREE11);
+}
+
+#[test]
+fn free11s_cars_drive_level_as_the_originals_do() {
+    level_cars_drive_as_the_originals_do(&FREE11);
 }
