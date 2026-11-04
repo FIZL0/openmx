@@ -6950,14 +6950,15 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // Whether the ride opens to online players once it is down to one local player again (P76).
     let mut opens_alone = false;
     // The pause offers "Open to Online" (N10) on a local freeride of one player on the bike set the
-    // disc's own lookup gives (what a joiner's machine loads for it), outside any lobby.
+    // disc's own lookup gives (what a joiner's machine loads for it), outside any lobby; on a disc
+    // track or a track mod the lobby finds as this ride did (F6), not a world mod.
     if let Some(front) = front.as_deref_mut() {
         let set = args.set.unwrap_or(roster::Set::FREERIDE).word();
         let alone = online.is_none()
             && head.is_none()
             && world.tape.is_none()
             && args.phy.is_none()
-            && modded.is_none()
+            && opens_on_mod(modded.as_ref(), world_mod.is_some(), front.menu.settings.mods.then(|| front.dir.join(track_mods::MODS_DIR)).as_deref(), &args.track)
             && front.menu.lobby.room.is_none()
             && front.network.disc.phy(&set).is_some_and(|b| *b == phy_bytes);
         opens_alone = alone;
@@ -11689,6 +11690,19 @@ fn air_lock(playing: bool, online: bool) -> Option<String> {
     }
 }
 
+/// Whether a ride on `ride` (its track mod, `None` on a disc track) can open to online (F6): a disc
+/// track can, and a track mod can when the lobby's mods folder `mods` (the settings' Mods row's, which
+/// the handshake hashes, `lobby::DiscFiles::track`) finds `track` in the folder the ride was built
+/// from, so a joiner's ride is held to the same files and finds them as the lobby's ride does. A world
+/// mod (MD8, `world_mod`) cannot: the handshake hashes its home tile's folder only.
+fn opens_on_mod(ride: Option<&track_mods::ModTrack>, world_mod: bool, mods: Option<&std::path::Path>, track: &str) -> bool {
+    match ride {
+        None => true,
+        Some(_) if world_mod => false,
+        Some(t) => mods.and_then(|d| track_mods::find(d, track).ok()).is_some_and(|found| found.dir == t.dir),
+    }
+}
+
 /// **The ride takes another set of modifiers, from where it is** (P98): every seat's bike built again
 /// from its stock file `stock[i]` on `to` ([`Mods::rebike`](game_sim::modifiers::Mods::rebike)), its
 /// biplane retuned off the stock `plane` the same way, its cars and helicopter put on `to` off `lot`'s
@@ -13197,4 +13211,46 @@ fn parse_args() -> Result<Option<Args>, String> {
         return Err("--world-sweep goes over the ride's --frames: give --frames too".into());
     }
     Ok(Some(args))
+}
+
+#[cfg(test)]
+mod opens_on_mod {
+    //! F6: a freeride on a track mod opens to online when the lobby's mods folder finds the same
+    //! folder the ride was built from; a world mod's ride, or a mod the lobby's folder lacks, does not.
+    use super::{opens_on_mod, track_mods};
+    use std::path::{Path, PathBuf};
+
+    /// A `mods/` folder holding the track mod `f6_flat`: a `mod.json` and a scene, all `find` reads.
+    fn folder(name: &str) -> PathBuf {
+        let mods = std::env::temp_dir().join(format!("openmx-f6-{}-{name}", std::process::id())).join("mods");
+        let _ = std::fs::remove_dir_all(&mods);
+        let dir = mods.join("tracks/f6_flat");
+        std::fs::create_dir_all(dir.join("Env/F6FLAT")).unwrap();
+        let json = r#"{"standard": 1, "kind": "track", "id": "f6_flat", "name": "F6 Flat",
+            "source": {"game": "none", "data": "written by openmx's F6 test", "date": "2026-11-04"},
+            "version": "1.0.0", "author": "crates/openmx/src/main.rs", "permission": "public-domain", "todo": []}"#;
+        std::fs::write(dir.join("mod.json"), json).unwrap();
+        std::fs::write(dir.join("Env/F6FLAT/F6FLAT.scn"), b"").unwrap();
+        mods
+    }
+
+    #[test]
+    fn a_track_mod_opens_where_the_lobby_finds_it() {
+        let (mine, other) = (folder("mine"), folder("other"));
+        let ride = track_mods::find(&mine, "f6_flat").unwrap();
+        // A disc track (no mod) opens, whatever the Mods row says; a disc world too (P232).
+        assert!(opens_on_mod(None, false, None, "free06"));
+        assert!(opens_on_mod(None, true, Some(&mine), "free06"));
+        // The mod, with the lobby's folder the ride's own.
+        assert!(opens_on_mod(Some(&ride), false, Some(&mine), "f6_flat"));
+        // A world mod's home tile does not; nor does a mod with the Mods row off, another folder's
+        // copy (`--mods DIR`), or a folder without it.
+        assert!(!opens_on_mod(Some(&ride), true, Some(&mine), "f6_flat"));
+        assert!(!opens_on_mod(Some(&ride), false, None, "f6_flat"));
+        assert!(!opens_on_mod(Some(&ride), false, Some(&other), "f6_flat"));
+        assert!(!opens_on_mod(Some(&ride), false, Some(Path::new("/nonexistent/mods")), "f6_flat"));
+        for d in [mine, other] {
+            let _ = std::fs::remove_dir_all(d.parent().unwrap());
+        }
+    }
 }
