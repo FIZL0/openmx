@@ -2053,3 +2053,794 @@ fn the_bikes_post_process_is_the_originals() {
         assert!(n >= 30, "only {n} bike(s) went down {want:?}: {t:?}");
     }
 }
+
+// --- F31b4a: the collision record's pass ---------------------------------------------------------
+
+use game_sim::contact_search::Ground;
+use game_sim::handling::ground;
+use game_sim::handling::record::{self, Collides, Hit, Record, Struck, Swept};
+use game_sim::track;
+
+/// The record's two virtuals the sim's `+0x24` list runs (the record's vt `+0x7c` and `+0x84`).
+const RECORD_CLEAR: u32 = 0x0020_4c30;
+const RECORD_PASS: u32 = 0x0020_51f0;
+/// The record's outside: the node's direction turn, position set and point placement; the sphere
+/// probe's segment set; a probe's placement at its node; the near-field and the global search; the
+/// terrain query.
+const NODE_ROTATE: u32 = 0x0019_5230;
+const NODE_SET: u32 = 0x0019_4b10;
+const NODE_TIP: u32 = 0x0019_52a0;
+const PROBE_SET: u32 = 0x001b_9290;
+const PROBE_PLACE: u32 = 0x0011_4360;
+const SEARCH_NEAR: u32 = 0x0011_51c0;
+const SEARCH_ALL: u32 = 0x0011_48e0;
+const TERRAIN_QUERY: u32 = 0x0048_38f0;
+/// The body's damping setters, its vtable's (`+0x110`) `+0x20` and `+0x68`.
+const BODY_DAMP: [u32; 2] = [0x20, 0x68];
+
+fn vf_at(ee: &Ee, a: u32) -> Vf {
+    seed::Words::v(&|x| ee.u32_at(x), a)
+}
+
+fn set_vf(ee: &mut Ee, a: u32, v: Vf) {
+    for (k, w) in v.to_bits().into_iter().enumerate() {
+        ee.set_u32(a + 4 * k as u32, w);
+    }
+}
+
+/// The record at `at` in the interpreter's RAM as [`record`]'s port sees its outside: each call is the
+/// original's (scratch slots 0..6 hold the arguments), and the other records a world ray hands a
+/// contact to are read on first use and held. With `terrain`, the terrain query is the port's
+/// [`ground::under`]; without, the original's.
+struct RecordInRam<'a, 't> {
+    ee: &'a mut Ee,
+    at: u32,
+    terrain: Option<&'t game_sim::atv_ground::Terrain<'t>>,
+    others: BTreeMap<u32, (Record, Record)>,
+    queries: u32,
+}
+
+impl RecordInRam<'_, '_> {
+    fn run(&mut self, f: u32, ints: &[u64]) {
+        self.ee.set(28, GP);
+        self.ee.call(f, ints, &[], BUDGET);
+    }
+    fn put(&mut self, k: u32, v: Vf) -> u64 {
+        let a = self.ee.scratch(k);
+        set_vf(self.ee, a, v);
+        u64::from(a)
+    }
+    fn word(&self, o: u32) -> u32 {
+        self.ee.u32_at(self.at + o)
+    }
+    /// What the object `obj` is to the record: its record, its mover when a mover's kind is 2, its
+    /// category. Read whatever `obj` is, as the world rays do.
+    fn struck(&self, obj: u32) -> Struck {
+        let ee = &*self.ee;
+        let m = ee.u32_at(obj + 0x8c);
+        let mover = if m != 0 && ee.u32_at(m + 0x1a0) == record::MOVER_KIND { m } else { 0 };
+        Struck { object: obj, other: ee.u32_at(obj + 0x90), mover, category: ee.u32_at(obj + 0x94) }
+    }
+    /// The probe at `probe` searched as the record searches: near-field through `+0xfc`, or global.
+    fn search_with(&mut self, probe: u32, nearby: bool) {
+        let list = self.word(0xfc);
+        if nearby {
+            self.run(SEARCH_NEAR, &[u64::from(probe), u64::from(list), 1]);
+        } else {
+            self.run(SEARCH_ALL, &[u64::from(probe), 0]);
+        }
+    }
+    /// The words of the record (read as `read`) and of the others back into RAM where they changed
+    /// (a flag word that is neither 0 nor 1 stays as RAM has it) and the last segment, and the body at
+    /// `body`.
+    fn finish(self, read: &Record, rec: &Record, body: Option<(&quad::Body, u32)>) {
+        let RecordInRam { ee, at, others, .. } = self;
+        let mut words = Vec::new();
+        for (id, was, now) in std::iter::once((at, read, rec)).chain(others.iter().map(|(&id, (was, now))| (id, was, now))) {
+            let list = ee.u32_at(id + 0xf8);
+            let old: HashMap<u32, u32> = record::words(was, id, list).into_iter().collect();
+            // The segment is in RAM as the glue last put it for the probe, so it goes back whole.
+            let segment = id + 0xc0..id + 0xe0;
+            words.extend(record::words(now, id, list).into_iter().filter(|(a, w)| old.get(a) != Some(w) || segment.contains(a)));
+        }
+        if let Some((b, a)) = body {
+            words.extend(quad_body_words(b, a));
+        }
+        for (a, w) in words {
+            ee.set_u32(a, w);
+        }
+    }
+}
+
+impl Collides for RecordInRam<'_, '_> {
+    fn damp(&mut self, linear: Vf, angular: Vf) {
+        let body = self.word(0xe4);
+        for (slot, v) in BODY_DAMP.into_iter().zip([linear, angular]) {
+            let p = self.put(0, v);
+            let f = self.ee.u32_at(self.ee.u32_at(body + 0x110) + slot);
+            self.run(f, &[u64::from(body), p]);
+        }
+    }
+    fn node_rotate(&mut self, v: Vf) -> Vf {
+        let (out, p) = (self.ee.scratch(1), self.put(0, v));
+        let node = self.word(0xe8);
+        self.run(NODE_ROTATE, &[u64::from(out), u64::from(node), p]);
+        vf_at(self.ee, out)
+    }
+    fn node_position(&mut self) -> Vf {
+        let node = self.word(0xe8);
+        self.run(NODE_POSITION, &[u64::from(node), 0, u64::from(self.at + 0xd0)]);
+        vf_at(self.ee, self.at + 0xd0)
+    }
+    fn node_place(&mut self, v: Vf) -> Vf {
+        let (out, p) = (self.ee.scratch(1), self.put(0, v));
+        let node = self.word(0xe8);
+        self.run(NODE_TIP, &[u64::from(out), u64::from(node), p]);
+        vf_at(self.ee, out)
+    }
+    fn node_move(&mut self, at: Vf) {
+        let p = self.put(0, at);
+        let node = self.word(0xe8);
+        self.run(NODE_SET, &[u64::from(node), 0, p]);
+    }
+    fn node_up(&self) -> [F; 3] {
+        let node = self.word(0xe8);
+        [0x74, 0x84, 0x94].map(|o| F(self.ee.f32_at(node + o)))
+    }
+    fn chassis_velocity(&self) -> Vf {
+        vf_at(self.ee, self.word(0xe0) + 0x250)
+    }
+    fn sweep(&mut self, from: Vf, to: Vf, nearby: bool) -> Option<Swept> {
+        set_vf(self.ee, self.at + 0xc0, from);
+        set_vf(self.ee, self.at + 0xd0, to);
+        let probe = self.word(0x204);
+        self.run(PROBE_SET, &[u64::from(probe), u64::from(self.at + 0xc0), 0]);
+        self.run(PROBE_PLACE, &[u64::from(probe)]);
+        self.search_with(probe, nearby);
+        if self.ee.u8_at(probe + 0x126) & 0x20 == 0 {
+            return None;
+        }
+        let hits = self.ee.u32_at(probe + 0x7c);
+        let obj = self.ee.u32_at(self.ee.u32_at(hits + 0x9c));
+        let struck = if obj == 0 { Struck::default() } else { self.struck(obj) };
+        let normal = vf_at(self.ee, self.ee.u32_at(hits + 0x94));
+        let point = vf_at(self.ee, self.ee.u32_at(hits + 0x98));
+        Some(Swept { normal, point, struck })
+    }
+    fn place_part(&mut self) {
+        let part = self.word(0x200);
+        self.run(PROBE_PLACE, &[u64::from(part)]);
+    }
+    fn part_rays(&self) -> Vec<[Vf; 2]> {
+        let part = self.word(0x200);
+        let (n, rays) = (self.ee.u32_at(part + 0x178) as i32, self.ee.u32_at(part + 0x180));
+        (0..n.max(0) as u32).map(|i| [vf_at(self.ee, rays + 0x20 * i), vf_at(self.ee, rays + 0x20 * i + 0x10)]).collect()
+    }
+    fn search(&mut self, nearby: bool) -> Vec<Hit> {
+        let part = self.word(0x200);
+        self.search_with(part, nearby);
+        let h = self.ee.u32_at(part + 0x7c);
+        let n = self.ee.u32_at(h + 0x8c) as i32;
+        let [rays, normals, points, objects] = [0x90, 0x94, 0x98, 0x9c].map(|o| self.ee.u32_at(h + o));
+        (0..n.max(0) as u32)
+            .map(|i| Hit {
+                from: vf_at(self.ee, rays + 0x20 * i),
+                to: vf_at(self.ee, rays + 0x20 * i + 0x10),
+                normal: vf_at(self.ee, normals + 0x10 * i),
+                point: vf_at(self.ee, points + 0x10 * i),
+                struck: self.struck(self.ee.u32_at(objects + 4 * i)),
+            })
+            .collect()
+    }
+    fn terrain_box(&self) -> [Vf; 2] {
+        let t = self.word(0xec);
+        [vf_at(self.ee, t + 0x30), vf_at(self.ee, t + 0x40)]
+    }
+    fn under(&mut self, g: &mut Ground) {
+        self.queries += 1;
+        if let Some(t) = self.terrain {
+            return ground::under(t, g);
+        }
+        let buf = self.ee.scratch(2);
+        set_vf(self.ee, buf, g.point);
+        set_vf(self.ee, buf + 0x10, g.normal);
+        self.ee.set_u32(buf + 0x20, u32::from_le_bytes(g.surfaces));
+        set_vf(self.ee, buf + 0x30, g.weights);
+        let terrain = self.word(0xec);
+        self.run(TERRAIN_QUERY, &[u64::from(terrain), u64::from(buf)]);
+        g.point = vf_at(self.ee, buf);
+        g.normal = vf_at(self.ee, buf + 0x10);
+        g.surfaces = self.ee.u32_at(buf + 0x20).to_le_bytes();
+        g.weights = vf_at(self.ee, buf + 0x30);
+    }
+    fn velocity(&mut self, s: &Struck) -> Vf {
+        if s.other != 0 {
+            let b = self.ee.u32_at(s.other + 0xe4);
+            return if b != 0 { vf_at(self.ee, b + 0x80) } else { vf_at(self.ee, self.ee.u32_at(s.other + 0xe0) + 0x250) };
+        }
+        let out = self.ee.scratch(1);
+        let f = self.ee.u32_at(self.ee.u32_at(s.mover + 4) + 0xc0);
+        self.run(f, &[u64::from(out), u64::from(s.mover)]);
+        vf_at(self.ee, out)
+    }
+    fn other(&mut self, id: u32) -> &mut Record {
+        let ee = &*self.ee;
+        let o = self.others.entry(id).or_insert_with(|| {
+            let r = record::read(&|a| ee.u32_at(a), id);
+            (r.clone(), r)
+        });
+        &mut o.1
+    }
+}
+
+/// The record at `at`'s virtual `slot` (`+0x7c` or `+0x84`) as the port's: [`record::clear`] or
+/// [`record::pass`] on the record in RAM, its body the quad's off `+0xe4`. Answers how many terrain
+/// queries it made.
+fn port_record(ee: &mut Ee, at: u32, slot: u32, dt: F, terrain: Option<&game_sim::atv_ground::Terrain<'_>>) -> u32 {
+    let mut rec = record::read(&|a| ee.u32_at(a), at);
+    let read = rec.clone();
+    let body_at = ee.u32_at(at + 0xe4);
+    let mut body = (body_at != 0).then(|| quad_body(ee, body_at));
+    let mut w = RecordInRam { ee, at, terrain, others: BTreeMap::new(), queries: 0 };
+    if slot == 0x7c {
+        record::clear(&mut rec, &mut w);
+    } else {
+        record::pass(&mut rec, at, body.as_mut(), dt, &mut w);
+    }
+    let queries = w.queries;
+    w.finish(&read, &rec, body.as_ref().map(|b| (b, body_at)));
+    queries
+}
+
+/// Nat05's terrain map off its `.res`, for the port's terrain query; `None` (with a skip) when it is
+/// not there.
+fn nat05_trn() -> Option<Vec<u8>> {
+    let kit = Kit::load().map_err(|w| skip(&w)).ok()?;
+    let res = kit.ctx("mxvatv-ps2/nat05").join("nat05.res");
+    if !res.exists() {
+        skip(&format!("{} is not there: Nat05's nat05.res off MX vs. ATV's disc (Env/Nat05)", res.display()));
+        return None;
+    }
+    ground::terrain_file(&std::fs::read(&res).unwrap(), "Nat05")
+}
+
+/// One sim frame as [`port_post_frame`] runs it, the bike's collision record's two virtuals the
+/// port's ([`port_record`]). Answers the Force body and PostProcess counts, how many records the port
+/// ran, and how many terrain queries.
+fn port_record_frame(ee: &mut Ee, dt: F, map: &track::Terrain<'_>) -> (u32, u32, u32, u32) {
+    let call = |ee: &mut Ee, f: u32, ints: &[u64], x: F| {
+        ee.set(28, GP);
+        ee.call(f, ints, &[x.0], BUDGET);
+        ee.r(2)
+    };
+    assert_eq!(ee.u8_at(ee.u32_at(SKIP_FLAG) + 0x225) & 8, 0, "the frame is not skipped");
+    let mine = ee.u32_at(BIKE + seed::RECORD);
+    let (mut ported, mut queries) = (0, 0);
+    for (slot, original) in [(0x7c, RECORD_CLEAR), (0x84, RECORD_PASS)] {
+        for i in 0..ee.u32_at(SIM + 0x24) {
+            let e = call(ee, LIST24_GET, &[u64::from(SIM + 0x24), u64::from(i)], F::ZERO) as u32;
+            let f = ee.u32_at(ee.u32_at(e + 4) + slot);
+            if e == mine {
+                assert_eq!(f, original, "the bike's record's vt +{slot:#x}");
+                let t = ee.u32_at(e + 0xec);
+                let terrain = (t != 0).then(|| ground::read_terrain(&|a| ee.u32_at(a), t, Some(map)));
+                queries += port_record(ee, e, slot, dt, terrain.as_ref());
+                ported += 1;
+            } else {
+                call(ee, f, &[u64::from(e)], dt);
+            }
+        }
+    }
+    let world = World { iterations: ee.u32_at(WORLD) as i32, rate: F(ee.f32_at(WORLD + 4)) };
+    let at = ee.u32_at(BIKE + seed::BODY);
+    let body = seed::body(&|a| ee.u32_at(a), at);
+    let mut h = PortPost(PortStep(PortHead(Hybrid { ee, body, at, integrated: 0 }), 0), 0);
+    world.step(dt, &mut h);
+    let (body, steps, posts) = (h.0.0.0.body, h.0.1, h.1);
+    for (a, w) in seed::body_words(&body, at) {
+        ee.set_u32(a, w);
+    }
+    call(ee, TAIL, &[u64::from(SIM)], dt);
+    let mut i = 0;
+    while i < ee.u32_at(SIM + 0x3c) {
+        let e = call(ee, LIST3C_GET, &[u64::from(SIM + 0x3c), u64::from(i)], F::ZERO) as u32;
+        if call(ee, ee.u32_at(ee.u32_at(e) + 8), &[u64::from(e)], dt) != 0 {
+            call(ee, LIST3C_REMOVE, &[u64::from(SIM + 0x3c), u64::from(i)], F::ZERO);
+        } else {
+            i += 1;
+        }
+    }
+    (steps, posts, ported, queries)
+}
+
+/// [`replay`] with every frame [`port_record_frame`]. Answers the wreck state per row and the terrain
+/// queries the port's record made.
+fn replay_port_record(name: &str) -> Option<(Vec<bool>, u32)> {
+    let trn = nat05_trn()?;
+    let map = track::Terrain::parse(&trn).unwrap();
+    let mut ee = hooked(image()?);
+    let rows = rows(name)?;
+    let (mut out, mut queries) = (Vec::new(), 0);
+    for (r, row) in rows.iter().enumerate() {
+        poke(&mut ee, row, &READER);
+        let (steps, posts, ported, q) = port_record_frame(&mut ee, F(f32::from_bits(DT)), &map);
+        assert_eq!((steps, posts, ported), (4, 1, 2), "the Force body every substep, the PostProcess once, the record's two virtuals");
+        queries += q;
+        let d = diff(&ee, row);
+        assert!(
+            d.is_empty(),
+            "{name} row {r} (vsync {}), the port's record pass, head, Force body and PostProcess: {} words differ\n  {}",
+            row["vsync"],
+            d.len(),
+            d.iter().take(40).cloned().collect::<Vec<_>>().join("\n  ")
+        );
+        let w = wrecked(|o| ee.u32_at(BIKE + o));
+        assert_eq!(w, row_wrecked(row), "{name} row {r}: the wreck state");
+        out.push(w);
+        poke(&mut ee, row, &SPOT);
+    }
+    Some((out, queries))
+}
+
+/// **C15's ride, the bike's collision record pass, PreProcess, Force body and PostProcess the
+/// port's**: every row of ride-2 word for word.
+#[test]
+fn ride_replays_bit_exact_on_the_ports_record_pass() {
+    let Some((w, queries)) = replay_port_record("ride-2") else { return };
+    assert_eq!(w.len(), 459);
+    assert!(w.iter().all(|w| !w), "the ride never wrecks");
+    eprintln!("ride-2: {queries} terrain queries by the record");
+}
+
+/// **C15's flip, the record pass the port's as well**: wrecked on row 125 and put back on row 193,
+/// every row word for word.
+#[test]
+fn flip_wrecks_and_is_put_back_bit_exact_on_the_ports_record_pass() {
+    let Some((w, queries)) = replay_port_record("flip-1") else { return };
+    assert_eq!(w.len(), 465);
+    let changes: Vec<usize> = (1..w.len()).filter(|&r| w[r] != w[r - 1]).collect();
+    assert_eq!(changes, [125, 193], "wrecked on row 125, put back on row 193");
+    eprintln!("flip-1: {queries} terrain queries by the record");
+}
+
+/// A call the record makes outside itself, as the oracle's hooks log it: the arguments' words.
+#[derive(Clone, Debug, PartialEq)]
+enum RecordCall {
+    Damp(u32, [u32; 4]),
+    Rotate([u32; 4]),
+    Position,
+    Move([u32; 4]),
+    Tip([u32; 4]),
+    Set([u32; 4], [u32; 4]),
+    Place(u32),
+    Search(u32, bool),
+    Mover(u32),
+    Query([u32; 4]),
+}
+
+/// The mover's velocity virtual in the oracle: no code of the image's, only the hook's address.
+const FAKE_MOVER_VELOCITY: u32 = 0x0000_1000;
+
+fn mix(mut x: u64) -> u64 {
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^ (x >> 31)
+}
+
+/// **The bike's collision record's two virtuals are the original's**: 12 000 records, each state 4's
+/// with every word the virtuals read drawn at random (the switches and touch flags, the rest damping,
+/// the sweep's offset, lead, push and facing cosine, the last segment, body or chassis, the node's
+/// up, the terrain's box or none, the list's count and capacity, near-field or global, the mask, the
+/// active part and sphere probe or none, the part's rays, the probes' hits and what they struck:
+/// objects with a record (the record itself among them), a body or a chassis, a mover of kind 2 or
+/// another, a category), run through SLUS-21104's `+0x7c` then `+0x84` and through
+/// [`record::clear`] then [`record::pass`] (through [`RecordInRam`], the original's callees). Every
+/// word of the record, its list, the other record and its list, and the body comes out the same, and
+/// the outside calls are made in the same order with the same arguments. The callees outside the
+/// record are hooked to log: the node's turn and placement answer a fixed map of their argument, its
+/// position the node's own `+0xa0`, the searches nothing (the hits are laid out beforehand), the
+/// mover its `+0x10`, the terrain query a height near the point and a normal, surfaces and weights
+/// hashed off it. The contact filing and the terrain service are the original's own.
+#[test]
+#[allow(clippy::float_arithmetic)]
+fn the_records_pass_is_the_originals() {
+    let Some(mut ee) = image().map(hooked) else { return };
+    let rec = ee.u32_at(BIKE + seed::RECORD);
+    let (body, node, part, probe) = (ee.u32_at(rec + 0xe4), ee.u32_at(rec + 0xe8), ee.u32_at(rec + 0x200), ee.u32_at(rec + 0x204));
+    assert_eq!(body, ee.u32_at(BIKE + seed::BODY), "the record's body is the bike's");
+    assert_eq!(
+        [0x7c, 0x84].map(|s| ee.u32_at(ee.u32_at(rec + 4) + s)),
+        [RECORD_CLEAR, RECORD_PASS],
+        "the record's two virtuals"
+    );
+    let damp = BODY_DAMP.map(|s| ee.u32_at(ee.u32_at(body + 0x110) + s));
+    let log: Rc<RefCell<Vec<RecordCall>>> = Rc::default();
+    let vf = |ee: &Ee, a: u64| vf_at(ee, a as u32).to_bits();
+    let mut hooked_at = Vec::new();
+    for (slot, at) in BODY_DAMP.into_iter().zip(damp) {
+        let l = log.clone();
+        hooked_at.push(at);
+        ee.hooks.insert(at, Box::new(move |ee: &mut Ee| {
+            assert_eq!(ee.r(4) as u32, body, "the damping set on another body");
+            l.borrow_mut().push(RecordCall::Damp(slot, vf(ee, ee.r(5))));
+        }));
+    }
+    // The node's maps: a turn and a placement of the argument, nothing like the node's own.
+    let turned = |v: [f32; 4]| [v[2] * 0.75 + 0.5, v[0] - 0.25, v[1] * 1.25, v[3]];
+    let placed = |v: [f32; 4], at: Vf| [v[0] * 4.0 + at.x(), v[1] * 4.0 + at.y(), v[2] * 4.0 + at.z(), v[3]];
+    let l = log.clone();
+    hooked_at.push(NODE_ROTATE);
+    ee.hooks.insert(NODE_ROTATE, Box::new(move |ee: &mut Ee| {
+        assert_eq!(ee.r(5) as u32, node, "the turn's node");
+        let v = vf_at(ee, ee.r(6) as u32);
+        set_vf(ee, ee.r(4) as u32, Vf(turned(v.0)));
+        l.borrow_mut().push(RecordCall::Rotate(v.to_bits()));
+    }));
+    let l = log.clone();
+    hooked_at.push(NODE_POSITION);
+    ee.hooks.insert(NODE_POSITION, Box::new(move |ee: &mut Ee| {
+        assert_eq!((ee.r(4) as u32, ee.r(5), ee.r(6) as u32), (node, 0, rec + 0xd0), "the node position's arguments");
+        for o in [0, 4, 8] {
+            let w = ee.u32_at(node + 0xa0 + o);
+            ee.set_u32(rec + 0xd0 + o, w);
+        }
+        l.borrow_mut().push(RecordCall::Position);
+    }));
+    let l = log.clone();
+    hooked_at.push(NODE_SET);
+    ee.hooks.insert(NODE_SET, Box::new(move |ee: &mut Ee| {
+        assert_eq!((ee.r(4) as u32, ee.r(5)), (node, 0), "the node set's arguments");
+        l.borrow_mut().push(RecordCall::Move(vf(ee, ee.r(6))));
+    }));
+    let l = log.clone();
+    hooked_at.push(NODE_TIP);
+    ee.hooks.insert(NODE_TIP, Box::new(move |ee: &mut Ee| {
+        assert_eq!(ee.r(5) as u32, node, "the placement's node");
+        let v = vf_at(ee, ee.r(6) as u32);
+        let at = vf_at(ee, node + 0xa0);
+        set_vf(ee, ee.r(4) as u32, Vf(placed(v.0, at)));
+        l.borrow_mut().push(RecordCall::Tip(v.to_bits()));
+    }));
+    let l = log.clone();
+    hooked_at.push(PROBE_SET);
+    ee.hooks.insert(PROBE_SET, Box::new(move |ee: &mut Ee| {
+        assert_eq!((ee.r(4) as u32, ee.r(6)), (probe, 0), "the sweep's probe");
+        l.borrow_mut().push(RecordCall::Set(vf(ee, ee.r(5)), vf(ee, ee.r(5) + 0x10)));
+    }));
+    let l = log.clone();
+    hooked_at.push(PROBE_PLACE);
+    ee.hooks.insert(PROBE_PLACE, Box::new(move |ee: &mut Ee| l.borrow_mut().push(RecordCall::Place(ee.r(4) as u32))));
+    let l = log.clone();
+    hooked_at.push(SEARCH_NEAR);
+    ee.hooks.insert(SEARCH_NEAR, Box::new(move |ee: &mut Ee| {
+        assert_eq!((ee.r(5) as u32, ee.r(6)), (ee.u32_at(rec + 0xfc), 1), "the near-field search's list");
+        l.borrow_mut().push(RecordCall::Search(ee.r(4) as u32, true));
+    }));
+    let l = log.clone();
+    hooked_at.push(SEARCH_ALL);
+    ee.hooks.insert(SEARCH_ALL, Box::new(move |ee: &mut Ee| {
+        assert_eq!(ee.r(5), 0, "the global search's flag");
+        l.borrow_mut().push(RecordCall::Search(ee.r(4) as u32, false));
+    }));
+    let l = log.clone();
+    hooked_at.push(FAKE_MOVER_VELOCITY);
+    ee.hooks.insert(FAKE_MOVER_VELOCITY, Box::new(move |ee: &mut Ee| {
+        let v = vf_at(ee, ee.r(5) as u32 + 0x10);
+        set_vf(ee, ee.r(4) as u32, v);
+        l.borrow_mut().push(RecordCall::Mover(ee.r(5) as u32));
+    }));
+    let l = log.clone();
+    hooked_at.push(TERRAIN_QUERY);
+    ee.hooks.insert(TERRAIN_QUERY, Box::new(move |ee: &mut Ee| {
+        assert_eq!(ee.r(4) as u32, ee.u32_at(rec + 0xec), "the query's terrain");
+        let buf = ee.r(5) as u32;
+        let p = vf_at(ee, buf);
+        let [x, y, z, w] = p.to_bits();
+        let h = mix(u64::from(x) ^ u64::from(z) << 32 ^ u64::from(y).wrapping_mul(0x9e37_79b9) ^ u64::from(w) << 7);
+        let unit = |k: u32| ((h >> k) & 0xff) as f32 / 255.0;
+        ee.set_f32(buf + 4, p.y() + unit(0) * 2.0 - 1.0);
+        let n = [unit(8) - 0.5, 0.5 + unit(16), unit(24) - 0.5];
+        for (k, c) in n.into_iter().enumerate() {
+            ee.set_f32(buf + 0x10 + 4 * k as u32, c);
+        }
+        ee.set_u32(buf + 0x20, (h >> 32) as u32);
+        let weights = match (h >> 60) % 4 {
+            0 => [0.25; 4],
+            1 => [0.0, unit(40), unit(40), 0.0],
+            _ => [unit(36), unit(44), unit(52), unit(56)],
+        };
+        for (k, c) in weights.into_iter().enumerate() {
+            ee.set_f32(buf + 0x30 + 4 * k as u32, c);
+        }
+        l.borrow_mut().push(RecordCall::Query(p.to_bits()));
+    }));
+    let mut distinct = hooked_at.clone();
+    distinct.sort_unstable();
+    distinct.dedup();
+    assert_eq!(distinct.len(), hooked_at.len(), "each hooked callee is its own function: {hooked_at:#x?}");
+
+    // Scratch: 0..6 the glue's; then the lists, the other record and its body and chassis, the
+    // chassis, the movers and their vtable, the objects, the probes' hit records, the rays, the box.
+    let mut next = 8;
+    let mut take = |bytes: u32| {
+        let a = ee.scratch(next);
+        next += bytes.div_ceil(0x40);
+        a
+    };
+    let (list, other, other_list) = (take(16 * record::CONTACT), take(0x210), take(16 * record::CONTACT));
+    let (other_body, other_chassis, chassis) = (take(0x90), take(0x260), take(0x260));
+    let movers = [take(0x1b0), take(0x1b0)];
+    let mover_vt = take(0xd0);
+    let objects: Vec<u32> = (0..5).map(|_| take(0xa0)).collect();
+    let (sweep_hits, sweep_arrays) = (take(0xa0), take(0xc0));
+    let (part_hits, part_arrays) = (take(0xa0), take(0x300));
+    let (rays, terrain) = (take(8 * 0x20), take(0x60));
+    assert!(next < 240, "{next} scratch slots");
+
+    let regions = vec![(rec, 0x210), (body, 0x230), (part, 0x184), (probe, 0x130), (node, 0xb0), (rec + 0x210, 0)];
+    let regions: Vec<_> = regions.into_iter().filter(|r| r.1 != 0).collect();
+    let image_words = snap_regions(&ee, &regions);
+    let compared = [(rec, 0x210), (list, 16 * record::CONTACT), (other, 0x210), (other_list, 16 * record::CONTACT), (body, 0x230)];
+    let mut g = Gen(0x0031_b04a);
+    let mut t = BTreeMap::new();
+    for k in 0..12_000 {
+        restore_regions(&mut ee, &regions, &image_words);
+        let v = |ee: &mut Ee, g: &mut Gen, a: u32, r: f32| {
+            for i in 0..3 {
+                let x = g.near(0.0, -r, r);
+                ee.set_f32(a + 4 * i, x);
+            }
+            let w = if g.one_in(3) { g.f(-2.0, 2.0) } else { 1.0 };
+            ee.set_f32(a + 12, w);
+        };
+        let flag = |g: &mut Gen, n: u32| u32::from(!g.one_in(n));
+        let junk = |ee: &mut Ee, g: &mut Gen, a: u32, len: u32| {
+            for o in (0..len).step_by(4) {
+                ee.set_u32(a + o, g.bits());
+            }
+        };
+        junk(&mut ee, &mut g, list, 16 * record::CONTACT);
+        junk(&mut ee, &mut g, other_list, 16 * record::CONTACT);
+        // The record: its switches, touch flags, damping, sweep and last segment.
+        for (o, n) in [(0x24, 2), (0x28, 4), (0x2c, 6), (0x30, 4), (0x44, 2)] {
+            let w = flag(&mut g, n);
+            ee.set_u32(rec + o, w);
+        }
+        // (The touch flags are written 0 and 1, and the port holds them as such.)
+        for o in [0x34, 0x38, 0x3c, 0x40] {
+            let w = g.bits() % 2;
+            ee.set_u32(rec + o, w);
+        }
+        for o in [0x48, 0x50] {
+            let x = g.f(0.0, 2.0);
+            ee.set_f32(rec + o, x);
+        }
+        v(&mut ee, &mut g, rec + 0xa0, 2.0);
+        for (o, lo, hi) in [(0xb0, 0.0, 3.0), (0xb4, 0.0, 3.0), (0xb8, -1.0, 1.0)] {
+            let x = g.near(0.0, lo, hi);
+            ee.set_f32(rec + o, x);
+        }
+        v(&mut ee, &mut g, rec + 0xc0, 50.0);
+        v(&mut ee, &mut g, rec + 0xd0, 50.0);
+        // Body or chassis; the body's quaternion, velocity (slow now and then), position.
+        let has_body = !g.one_in(3);
+        ee.set_u32(rec + 0xe4, if has_body { body } else { 0 });
+        ee.set_u32(rec + 0xe0, chassis);
+        let qt = [g.f(-1.0, 1.0), g.f(-1.0, 1.0), g.f(-1.0, 1.0), g.f(-1.0, 1.0)];
+        let len = qt.iter().map(|x| x * x).sum::<f32>().sqrt();
+        for i in 0..4 {
+            ee.set_f32(body + 0x190 + 4 * i, qt[i as usize] / len);
+        }
+        let r = if g.one_in(3) { 1.2 } else { 30.0 };
+        v(&mut ee, &mut g, body + 0x80, r);
+        v(&mut ee, &mut g, chassis + 0x250, r);
+        v(&mut ee, &mut g, body + 0x70, 50.0);
+        // The node: its up and its translation (what the hooks' position and placement read).
+        for o in [0x74, 0x84, 0x94] {
+            let x = g.f(-1.0, 1.0);
+            ee.set_f32(node + o, x);
+        }
+        v(&mut ee, &mut g, node + 0xa0, 50.0);
+        // The terrain's box about the node, or none.
+        if g.one_in(6) {
+            ee.set_u32(rec + 0xec, 0);
+        } else {
+            ee.set_u32(rec + 0xec, terrain);
+            let c = vf_at(&ee, node + 0xa0);
+            for (o, sign) in [(0x30, -1.0), (0x40, 1.0)] {
+                for (i, at) in [(0, c.x()), (2, c.z())] {
+                    let x = at + sign * g.f(-4.0, 14.0);
+                    ee.set_f32(terrain + o + 4 * i, x);
+                }
+            }
+        }
+        // The list: count and capacity (full, past full, none).
+        let cap = [-1, 0, 1, 2, 3, 14, 16][(g.bits() % 7) as usize];
+        ee.set_u32(rec + 0xf4, cap as u32);
+        ee.set_u32(rec + 0xf0, g.bits() % 4);
+        ee.set_u32(rec + 0xf8, list);
+        ee.set_u32(rec + 0xfc, if g.one_in(2) { 0 } else { g.bits() | 0x10 });
+        let mask = if g.one_in(3) { 0 } else { g.bits() };
+        ee.set_u32(rec + 0x108, mask);
+        ee.set_u32(rec + 0x200, if g.one_in(8) { 0 } else { part });
+        ee.set_u32(rec + 0x204, if g.one_in(8) { 0 } else { probe });
+        ee.set_u32(rec + 0x20c, g.bits());
+        // The other record: its flags, list, and body or chassis.
+        junk(&mut ee, &mut g, other, 0x210);
+        for o in [0x34, 0x38, 0x3c, 0x40] {
+            let w = g.bits() % 2;
+            ee.set_u32(other + o, w);
+        }
+        ee.set_u32(other + 0xf0, g.bits() % 3);
+        ee.set_u32(other + 0xf4, [0, 2, 16][(g.bits() % 3) as usize]);
+        ee.set_u32(other + 0xf8, other_list);
+        ee.set_u32(other + 0xe4, if g.one_in(2) { 0 } else { other_body });
+        ee.set_u32(other + 0xe0, other_chassis);
+        v(&mut ee, &mut g, other_body + 0x80, r);
+        v(&mut ee, &mut g, other_chassis + 0x250, r);
+        // The movers, one of kind 2 and one not (now and then both 2), their velocity at +0x10.
+        ee.set_u32(mover_vt + 0xc0, FAKE_MOVER_VELOCITY);
+        for (i, &m) in movers.iter().enumerate() {
+            ee.set_u32(m + 4, mover_vt);
+            ee.set_u32(m + 0x1a0, if i == 0 || g.one_in(4) { 2 } else { g.bits() % 4 });
+            v(&mut ee, &mut g, m + 0x10, r);
+        }
+        // The objects: a record (the other or this one) or none, a mover or none, a category.
+        for &o in &objects {
+            let rc = [0, 0, other, other, rec][(g.bits() % 5) as usize];
+            let m = [0, 0, movers[0], movers[1]][(g.bits() % 4) as usize];
+            ee.set_u32(o + 0x90, rc);
+            ee.set_u32(o + 0x8c, m);
+            ee.set_u32(o + 0x94, if g.one_in(2) { 1 << (g.bits() % 32) } else { 0 });
+        }
+        let object = |g: &mut Gen| objects[(g.bits() % objects.len() as u32) as usize];
+        // The sphere probe's hit: its bit, its record's first normal, point and object (or none).
+        let b126 = ee.u32_at(probe + 0x124) & !0x0020_0000;
+        let hit = g.bits() % 3 != 0;
+        ee.set_u32(probe + 0x124, b126 | if hit { 0x0020_0000 } else { 0 } | (g.bits() & 0x00df_0000));
+        ee.set_u32(probe + 0x7c, sweep_hits);
+        ee.set_u32(sweep_hits + 0x8c, g.bits() % 2);
+        for (i, o) in [0x94, 0x98, 0x9c].into_iter().enumerate() {
+            ee.set_u32(sweep_hits + o, sweep_arrays + 0x40 * i as u32);
+        }
+        let mut n = [g.f(-1.0, 1.0), g.f(-1.0, 1.0), g.f(-1.0, 1.0)];
+        let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        n = n.map(|x| x / l);
+        for i in 0..3 {
+            ee.set_f32(sweep_arrays + 4 * i, n[i as usize]);
+        }
+        v(&mut ee, &mut g, sweep_arrays + 0x40, 50.0);
+        let o = if g.one_in(4) { 0 } else { object(&mut g) };
+        ee.set_u32(sweep_arrays + 0x80, o);
+        // The part: its rays (some pointing up, some down), its hit record.
+        let n_rays = g.bits() % 7;
+        ee.set_u32(part + 0x178, n_rays);
+        ee.set_u32(part + 0x180, rays);
+        for i in 0..n_rays {
+            v(&mut ee, &mut g, rays + 0x20 * i, 2.0);
+            v(&mut ee, &mut g, rays + 0x20 * i + 0x10, 2.0);
+        }
+        ee.set_u32(part + 0x7c, part_hits);
+        let n_hits = g.bits() % 5;
+        ee.set_u32(part_hits + 0x8c, n_hits);
+        for (i, o) in [0x90, 0x94, 0x98, 0x9c].into_iter().enumerate() {
+            ee.set_u32(part_hits + o, part_arrays + 0xc0 * i as u32);
+        }
+        for i in 0..n_hits {
+            v(&mut ee, &mut g, part_arrays + 0x20 * i, 50.0);
+            v(&mut ee, &mut g, part_arrays + 0x20 * i + 0x10, 50.0);
+            v(&mut ee, &mut g, part_arrays + 0xc0 + 0x10 * i, 1.0);
+            v(&mut ee, &mut g, part_arrays + 0x180 + 0x10 * i, 50.0);
+            let o = object(&mut g);
+            ee.set_u32(part_arrays + 0x240 + 4 * i, o);
+        }
+        let dt = if g.one_in(2) { f32::from_bits(DT) } else { g.f(0.002, 0.05) };
+
+        let before: Vec<Vec<u32>> = compared.iter().map(|&r| snap_regions(&ee, &[r])).collect();
+        let r0 = record::read(&|a| ee.u32_at(a), rec);
+        let snapshot = snap_regions(&ee, &regions);
+        let scratch_words = |ee: &Ee| compared.iter().map(|&r| snap_regions(ee, &[r])).collect::<Vec<_>>();
+        // The port first.
+        log.borrow_mut().clear();
+        port_record(&mut ee, rec, 0x7c, F(dt), None);
+        let queries = port_record(&mut ee, rec, 0x84, F(dt), None);
+        let want = scratch_words(&ee);
+        let want_log = std::mem::take(&mut *log.borrow_mut());
+        let r1 = record::read(&|a| ee.u32_at(a), rec);
+        // Then the original, from the same words.
+        restore_regions(&mut ee, &regions, &snapshot);
+        for (&r, w) in compared.iter().zip(&before) {
+            restore_regions(&mut ee, &[r], w);
+        }
+        for f in [RECORD_CLEAR, RECORD_PASS] {
+            ee.set(28, GP);
+            ee.call(f, &[u64::from(rec)], &[dt], 2_000_000);
+        }
+        let got = scratch_words(&ee);
+        for (i, (g_, w_)) in got.iter().zip(&want).enumerate() {
+            if let Some(j) = (0..g_.len()).find(|&j| g_[j] != w_[j]) {
+                panic!(
+                    "record {k}: region {i} ({:#x}) +{:#x} is {:#010x} in the original and {:#010x} in the port (was {:#010x})\n{want_log:x?}\n{r0:#?}",
+                    compared[i].0,
+                    4 * j,
+                    g_[j],
+                    w_[j],
+                    before[i][j],
+                );
+            }
+        }
+        assert_eq!(*log.borrow(), want_log, "record {k}: the calls\n{r0:#?}");
+
+        // The paths.
+        if r0.damp && r0.body {
+            tally(&mut t, "damped");
+        }
+        if r0.sweep && r0.probe {
+            tally(&mut t, if r0.body { "sweep, body" } else { "sweep, chassis" });
+            if want_log.iter().any(|c| matches!(c, RecordCall::Move(_))) {
+                tally(&mut t, "pushed");
+                if want_log.iter().any(|c| matches!(c, RecordCall::Mover(_))) {
+                    tally(&mut t, "pushed past a mover");
+                }
+            } else if hit && o != 0 {
+                tally(&mut t, "flying apart");
+            }
+        }
+        if !r0.part || !r0.rays {
+            tally(&mut t, "no rays");
+        }
+        if queries > 0 {
+            tally(&mut t, "heightfield queried");
+            if r1.on_ground {
+                tally(&mut t, "on the ground");
+            }
+        }
+        if want_log.iter().any(|c| matches!(c, RecordCall::Tip(_))) && queries == 0 {
+            tally(&mut t, "outside the box");
+        }
+        if r1.on_object {
+            tally(&mut t, "on an object");
+        }
+        if r1.contacts.len() > r0.capacity.max(0) as usize || r1.contacts.len() as i32 == r0.capacity && r0.capacity > 0 {
+            tally(&mut t, "list full");
+        }
+        if r1.struck != r0.struck {
+            tally(&mut t, "struck");
+        }
+        if r1.contacts.iter().any(|c| c.kind == 1) {
+            tally(&mut t, "handed itself a contact");
+        }
+        if got[3] != before[3] {
+            tally(&mut t, "handed another a contact");
+        }
+        if r1.contacts.iter().any(|c| c.mover != 0) {
+            tally(&mut t, "filed a mover");
+        }
+        if r1.touching && r1.contacts.is_empty() && r0.mask != 0 {
+            tally(&mut t, "touched, masked");
+        }
+    }
+    for want in [
+        "damped",
+        "sweep, body",
+        "sweep, chassis",
+        "pushed",
+        "pushed past a mover",
+        "flying apart",
+        "no rays",
+        "heightfield queried",
+        "on the ground",
+        "outside the box",
+        "on an object",
+        "list full",
+        "struck",
+        "handed itself a contact",
+        "handed another a contact",
+        "filed a mover",
+        "touched, masked",
+    ] {
+        let n = t.get(want).copied().unwrap_or(0);
+        assert!(n >= 30, "only {n} record(s) went down {want:?}: {t:?}");
+    }
+    eprintln!("{t:?}");
+}

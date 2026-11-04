@@ -9340,3 +9340,45 @@ atv_heap_free               atv 0x001b76d0 = free
 #   Nothing the bike's probes search files a contact along ride-2 or flip-1 (count 0); plant spheres
 #   (cat 0x80, vtable 0x003b6ec0) set only the hit bit. Another object (0x011070d0, list 0x0110c5d0, from
 #   FUN_0049bb00 at ra 0x0049bc3c) also searches and asks the ground around row 215; not the bike's.
+# F31b4 — the bike's collision record's two virtuals on the sim's +0x24 list (game_sim::handling::record;
+# tests/mxvatv_bike_ride.rs). Comment rows only. Journal:
+# research/journal/2026-11-03-f31b-mxvatv-bike-pre-process/4-record-pass-FINAL.md.
+#   Record bike +0xc8 = 0x00ea7570, vtable 0x003b9290 (at +4): vt +0x7c 0x00204c30 clear, +0x80
+#   0x00204ce0 sweep back (f12 dt), +0x84 0x002051f0 pass (calls own +0x80 first). The sim runs every
+#   element's +0x7c, then every element's +0x84 (list get 0x00208390).
+#   Words: +0x24 heightfield rays, +0x28 world rays, +0x2c rays at all, +0x30 sweep, +0x34 touching, +0x38
+#   touching another record, +0x3c on ground, +0x40 on object, +0x44 damp, +0x48/+0x50 rest linear/
+#   angular, +0xa0 offset, +0xb0 lead, +0xb4 push out, +0xb8 facing cosine, +0xc0/+0xd0 segment, +0xe0
+#   chassis (its +0x250 velocity), +0xe4 body, +0xe8 node, +0xec terrain, +0xf0 count, +0xf4 capacity
+#   (signed), +0xf8 contacts (0x90 each), +0xfc nearby list, +0x108 mask, +0x200 active part (riding
+#   0x00ea5970 = bike +0xcc; wreck bike +0x1434 = 0x00eaa450), +0x204 sphere probe 0x00ea7310, +0x20c last
+#   struck object. State 4: 0x3ff at +0x20, +0x24 0, +0x28/+0x2c/+0x30 1, +0x44 0, lead and push 2.0,
+#   facing 0.5253, capacity 14, list 0x00ea7790, nearby 0x01ea72a0, body 0x00e701e0, node 0x00e707a0,
+#   terrain 0x00bbd720.
+#   Clear 0x00204c30: +0xf0 = +0x34 = +0x3c = +0x40 = +0x38 = 0; body and +0x44 -> body vt(+0x110) +0x20
+#   (body, &(l,l,l,1)) then +0x68 (body, &(a,a,a,1)); in state 4 0x00493b20 and 0x00493b00.
+#   File 0x00204b90(rec, kind, from, to, t0 point, t1 normal, t2 surface, t3 other, stack mover): only
+#   when count < capacity; entry +0 kind, +0x10 from, +0x20 to, +0x30 normal, +0x40 point, +0x50 and +0x60
+#   rodata 0x00396fc0 (0,0,0,1), +0x80 surface, +0x84 other, +0x88 mover; count++.
+#   Sweep back 0x00204ce0 (+0x30 and +0x204): body -> r = turn(body +0x190, +0xa0), +0xd0 = body +0x70
+#   then .xyz += r, ours = body +0x80; no body -> 0x00195230(&r, node, +0xa0), 0x00194c20(node, 0,
+#   +0xd0) then .xyz += r, ours = chassis +0x250. +0xc0 = +0xd0 - ours*lead*dt. 0x001b9290(probe, +0xc0,
+#   0), 0x00114360(probe), search 0x001151c0(probe, +0xfc, 1) or 0x001148e0(probe, 0). Hit bit probe
+#   +0x126 bit 5: hits = probe +0x7c, object = (+0x9c)[0]; other = object +0x90, mover = object +0x8c
+#   when its +0x1a0 == 2. With either: theirs = other's body +0x80 / chassis +0x250, else mover vt +0xc0
+#   (&out, mover); both lengths (sqrt.s of the FPU dot) > 1 and unit.unit > facing -> return. Else at =
+#   (+0x98)[0] + (+0x94)[0]*push - r (w the point's); body +0x70 = at; 0x00194b10(node, 0, &at); +0x200
+#   -> 0x00114360(part); +0xd0 = at.
+#   Pass 0x002051f0: own +0x80; return without +0x200 or +0x2c. Heightfield (+0x24 and +0xec): up =
+#   unturn(body +0x190, rodata 0x00397000) or (node +0x74, +0x84, +0x94, 1); per part ray (+0x178 count,
+#   +0x180 rays, 0x20 each, count re-read): (end - start).up < 0 -> tip = 0x001952a0(&tip, node, end);
+#   inside terrain +0x30/+0x40 (x, z, open low edge) -> buf = tip, weights 1 (normal/surface stack junk),
+#   0x004838f0(terrain, buf), service vt +8/+0x10/+0x14/+0x18/+0x1c (F31c), point -= normal*depth; point.y
+#   above tip.y -> +0x34 = +0x3c = 1, file(rec, 0, start, end, point, normal, surface, 0, 0). World rays
+#   (+0x28): search the part as above; hits = part +0x7c (count +0x8c re-read, rays +0x90, normals +0x94,
+#   points +0x98, objects +0x9c); each: +0x34 = +0x40 = 1; (object +0x94 & +0x108) -> next; file(rec, 0,
+#   ray, ray+0x10, point, normal, -1, other, mover kind 2 or 0); +0x20c = object; other -> +0x38 = 1,
+#   other +0x34/+0x40/+0x38 = 1, file(other, 1, ray, ray+0x10, point, neg.s normal (w kept), -1, rec, 0).
+#   +0x24 is the PostProcess's tip-over word (F31b3: up.y <= 0.25), so the heightfield rays run only
+#   with the bike on its side: flip-1's 470 queries (F31c's rows), none in ride-2. Along both the sweep
+#   never pushes and the world rays file nothing.

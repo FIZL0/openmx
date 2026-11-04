@@ -18,3 +18,10 @@ F31b3: the bike's PostProcess is ported as `handling::bike::air_state`, with the
 post. It matches the original on 12 000 random bikes, and it runs in the hybrid frame (with F31b1's head
 and F31b2's Force body) for every row of ride-2 and flip-1, bit-exact. Details in
 3-bike-post-process-FINAL.md.
+
+F31b4: the bike's collision record pass (the sim's `+0x24` list: the clear, the sweep back, the
+heightfield and world rays, the contact filing) is ported as `handling::record`. It matches the original on
+12 000 random records, and it runs in the hybrid frame (with F31b1–F31b3's ports) for every row of ride-2
+and flip-1, bit-exact, flip-1's 470 heightfield queries through `handling::ground::under`. The rest of
+F31b4 is filed as F31b4a (the tail), F31b4b (the wreck and put-back) and F31b4c (MD63e's mass
+properties). Details in 4-record-pass-FINAL.md.
