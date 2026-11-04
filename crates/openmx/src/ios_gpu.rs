@@ -452,6 +452,11 @@ impl GpuWindow {
         &self.clicks
     }
 
+    /// No drag is read here yet (P214): the page and the phone report taps only.
+    pub fn mouse(&self) -> &[crate::window::MouseEvent] {
+        &[]
+    }
+
     /// A phone has no cursor.
     pub fn show_cursor(&self, _shown: bool) {}
 

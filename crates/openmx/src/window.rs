@@ -54,6 +54,8 @@ const REPEAT_MS: u32 = 2;
 const KEY_PRESS: u8 = 2;
 const KEY_RELEASE: u8 = 3;
 const BUTTON_PRESS: u8 = 4;
+const BUTTON_RELEASE: u8 = 5;
+const MOTION_NOTIFY: u8 = 6;
 /// A button event's detail for the mouse's left button.
 const LEFT_BUTTON: u8 = 1;
 const FOCUS_IN: u8 = 9;
@@ -74,8 +76,9 @@ const CW_EVENT_MASK: u32 = 0x0000_0800;
 /// And its properties changing (P165), which says nothing the shell wants but the server's time:
 /// the title the window sets as it opens is the first, so the keys' timestamps are on the shell's
 /// clock from the first key on ([`Stamps`]). And the mouse's buttons going down (P174), for the
-/// pause's music player.
-const EVENT_MASK: u32 = 0x0000_0001 | 0x0000_0002 | 0x0000_0004 | 0x0002_0000 | 0x0020_0000 | 0x0040_0000;
+/// pause's music player. And, for a card dragged on the Controllers screen (P214), the left button
+/// coming up and the pointer moving while it is held (`Button1Motion`).
+const EVENT_MASK: u32 = 0x0000_0001 | 0x0000_0002 | 0x0000_0004 | 0x0000_0008 | 0x0000_0100 | 0x0002_0000 | 0x0020_0000 | 0x0040_0000;
 /// `ChangeWindowAttributes`' value mask for the cursor, and `CreateGC`'s for the foreground.
 const CW_CURSOR: u32 = 0x0000_4000;
 const GC_FOREGROUND: u32 = 0x0000_0004;
@@ -93,6 +96,17 @@ pub fn shell_us() -> u64 {
 
 /// A key going down (`true`) or up, by X keycode, and when on [`shell_us`]'s clock (P165).
 pub type KeyMoment = (u64, u8, bool);
+
+/// What the mouse's left button did (P214): went down, moved while held, came up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mouse {
+    Down,
+    Move,
+    Up,
+}
+
+/// One [`Mouse`] event at a point in the window, in window pixels.
+pub type MouseEvent = (Mouse, i32, i32);
 
 /// A poll this long after the one before is late (P258): a frame the menu stalled, which the
 /// changes it finds fell somewhere inside.
@@ -298,6 +312,9 @@ pub struct Window {
     focused: bool,
     /// Where the mouse's left button went down in the last poll, in window pixels (P174).
     clicks: Vec<(i32, i32)>,
+    /// The left button's goings down and up, and the pointer's moves while it is held, in the last
+    /// poll, in order (P214).
+    mouse: Vec<MouseEvent>,
     /// The blank cursor the window wears while the cursor is hidden, once made.
     blank: Option<u32>,
     /// Requests being assembled, likewise.
@@ -338,6 +355,7 @@ impl Window {
             closed: false,
             focused: true,
             clicks: Vec::new(),
+            mouse: Vec::new(),
             blank: None,
             out: Vec::new(),
         };
@@ -557,6 +575,7 @@ impl Window {
         self.keys.tapped = [false; KEYCODES];
         self.keys.events.clear();
         self.clicks.clear();
+        self.mouse.clear();
         let now = shell_us();
         let mut event = [0u8; 32];
         loop {
@@ -581,6 +600,12 @@ impl Window {
         &self.clicks
     }
 
+    /// The left button's downs and ups and the pointer's moves while it is held, in the last poll, in
+    /// window pixels and in order (P214).
+    pub fn mouse(&self) -> &[MouseEvent] {
+        &self.mouse
+    }
+
     /// The keys that went down and up in the last poll, when they did on the shell's clock (P165),
     /// auto-repeat filtered out as [`Window::held`] has it.
     pub fn key_moments(&self) -> &[KeyMoment] {
@@ -600,7 +625,14 @@ impl Window {
             }
             KEY_PRESS | KEY_RELEASE => self.keys.saw(event),
             // The event's x and y in the window, after the root's (P174).
-            BUTTON_PRESS if event[1] == LEFT_BUTTON => self.clicks.push((le16(event, 24) as i16 as i32, le16(event, 26) as i16 as i32)),
+            BUTTON_PRESS if event[1] == LEFT_BUTTON => {
+                let at = (le16(event, 24) as i16 as i32, le16(event, 26) as i16 as i32);
+                self.clicks.push(at);
+                self.mouse.push((Mouse::Down, at.0, at.1));
+            }
+            // P214: the same x and y as a press's
+            BUTTON_RELEASE if event[1] == LEFT_BUTTON => self.mouse.push((Mouse::Up, le16(event, 24) as i16 as i32, le16(event, 26) as i16 as i32)),
+            MOTION_NOTIFY => self.mouse.push((Mouse::Move, le16(event, 24) as i16 as i32, le16(event, 26) as i16 as i32)),
             // Only for its time, which is the server's clock now (P165).
             PROPERTY_NOTIFY => {
                 self.stamps.note(le32(event, 12), now);
@@ -991,6 +1023,7 @@ mod tests {
             closed: false,
             focused: true,
             clicks: Vec::new(),
+            mouse: Vec::new(),
             blank: None,
             out: Vec::new(),
         };
@@ -1233,5 +1266,24 @@ mod tests {
         w.handle(&button(3, 5, 5), 0);
         w.handle(&button(LEFT_BUTTON, -2, 40), 0);
         assert_eq!(w.clicks(), [(30, 12), (-2, 40)], "the left button only, at the window's x and y");
+    }
+
+    #[test]
+    fn the_left_button_down_its_drag_and_up_are_mouse_events_in_order() {
+        let (mut w, _server) = window_on_a_pair(64, 48, 1);
+        let event = |code: u8, detail: u8, x: i16, y: i16| {
+            let mut e = [0u8; 32];
+            (e[0], e[1]) = (code, detail);
+            e[20..22].copy_from_slice(&900i16.to_le_bytes());
+            e[24..26].copy_from_slice(&x.to_le_bytes());
+            e[26..28].copy_from_slice(&y.to_le_bytes());
+            e
+        };
+        w.handle(&event(BUTTON_PRESS, LEFT_BUTTON, 10, 10), 0);
+        w.handle(&event(MOTION_NOTIFY, 0, 14, 11), 0);
+        w.handle(&event(BUTTON_RELEASE, 3, 1, 1), 0);
+        w.handle(&event(BUTTON_RELEASE, LEFT_BUTTON, 20, -3), 0);
+        assert_eq!(w.mouse(), [(Mouse::Down, 10, 10), (Mouse::Move, 14, 11), (Mouse::Up, 20, -3)]);
+        assert_eq!(w.clicks(), [(10, 10)], "the click is still only the press");
     }
 }

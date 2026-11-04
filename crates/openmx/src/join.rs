@@ -386,6 +386,22 @@ impl<D: Clone + PartialEq> Assign<D> {
         self.moved = true;
     }
 
+    /// Whether `d` may be dropped into column `to` by the mouse (P214): plugged in, a column offered
+    /// and not its own, and not a seat kept for an unplugged device.
+    pub fn may_drop(&self, d: &D, to: usize) -> bool {
+        self.plugged(d) && to <= self.open && to != self.column(d) && self.free_to(to)
+    }
+
+    /// `d` dropped into column `to` by the mouse (P214), swapping with whoever is there, as its own
+    /// presses would move it. Whether it moved.
+    pub fn drop_on(&mut self, d: &D, to: usize) -> bool {
+        if !self.may_drop(d, to) {
+            return false;
+        }
+        self.move_to(d, to);
+        true
+    }
+
     fn start_slide(&mut self, d: &D, from: usize) {
         self.slide.retain(|(s, _, _)| s != d);
         self.slide.push((d.clone(), from, SLIDE_TICKS));

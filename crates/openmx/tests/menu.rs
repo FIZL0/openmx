@@ -7914,6 +7914,140 @@ fn the_controllers_screen_moves_and_swaps_the_seats_the_next_ride_reads() {
     assert_eq!(rig.seats.assigned()[..3], [Some(b), Some(pad::Device::Keys), Some(a)]);
 }
 
+/// P214: on the Controllers screen the mouse drags a card onto another seat. The second pad's card
+/// (3P) dropped on 1P swaps with the keyboard there, the seats have it at once and the next ride reads
+/// it so; the first pad's card dropped on No seat takes it off. A press that barely moves, a drop
+/// off every column and a drop back on its own seat move nothing.
+#[test]
+fn a_card_dragged_onto_another_seat_moves_or_swaps_it() {
+    use menu::Mouse;
+    let _fifos = pad::tests::FIFOS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut rig = Controllers::new("menu-controllers-drag");
+    let (a, b) = (rig.device(0), rig.device(1));
+    rig.open();
+    assert_eq!(rig.m.assign.seats[..3], [Some(Dev::Keys), Some(rig.dev(0)), Some(rig.dev(1))]);
+    let size = (1280, 720);
+    let drag = |rig: &mut Controllers, from: [f32; 2], to: [f32; 2]| {
+        assert!(rig.m.mouse(Mouse::Down, from, size), "the press is on a card");
+        // through the middle, as a pointer goes
+        let mid = [(from[0] + to[0]) / 2.0, (from[1] + to[1]) / 2.0];
+        rig.m.mouse(Mouse::Move, mid, size);
+        assert!(rig.m.card_drag.as_ref().is_some_and(|g| g.lifted), "lifted");
+        rig.m.mouse(Mouse::Move, to, size);
+        rig.m.mouse(Mouse::Up, to, size);
+        assert_eq!(rig.m.card_drag, None);
+        rig.frame(&|_| false);
+    };
+
+    // a wiggle under the drag's distance is no drag
+    let at = rig.m.card_point(&rig.dev(1), size).unwrap();
+    rig.m.mouse(Mouse::Down, at, size);
+    rig.m.mouse(Mouse::Move, [at[0] + 2.0, at[1] + 1.0], size);
+    assert!(rig.m.card_drag.as_ref().is_some_and(|g| !g.lifted));
+    rig.m.mouse(Mouse::Up, rig.m.assign_point(1, size).unwrap(), size);
+    rig.frame(&|_| false);
+    assert_eq!(rig.m.assign.seats[..3], [Some(Dev::Keys), Some(rig.dev(0)), Some(rig.dev(1))], "a click moved nothing");
+
+    // 3P's pad onto 1P: the keyboard goes to 3P
+    let (from, to) = (rig.m.card_point(&rig.dev(1), size).unwrap(), rig.m.assign_point(1, size).unwrap());
+    rig.m.mouse(Mouse::Down, from, size);
+    rig.m.mouse(Mouse::Move, to, size);
+    assert_eq!(rig.m.drop_column(), Some(1), "1P rings as the drop");
+    rig.m.mouse(Mouse::Up, to, size);
+    rig.frame(&|_| false);
+    assert_eq!(rig.m.assign.seats[..3], [Some(rig.dev(1)), Some(rig.dev(0)), Some(Dev::Keys)], "swapped");
+    assert_eq!(rig.seats.assigned()[..3], [Some(b.clone()), Some(a.clone()), Some(pad::Device::Keys)], "and the seats have it at once");
+    assert!(rig.m.assign.slid(&Dev::Keys).is_some(), "the card it swapped with slides over");
+
+    // the first pad's card onto No seat: off
+    let (from, to) = (rig.m.card_point(&rig.dev(0), size).unwrap(), rig.m.assign_point(0, size).unwrap());
+    drag(&mut rig, from, to);
+    assert_eq!(rig.m.assign.seats[..3], [Some(rig.dev(1)), None, Some(Dev::Keys)]);
+    assert_eq!(rig.m.assign.loose(), [rig.dev(0)]);
+    // and back from No seat onto the empty 2P
+    let (from, to) = (rig.m.card_point(&rig.dev(0), size).unwrap(), rig.m.assign_point(2, size).unwrap());
+    drag(&mut rig, from, to);
+    assert_eq!(rig.m.assign.seats[..3], [Some(rig.dev(1)), Some(rig.dev(0)), Some(Dev::Keys)]);
+
+    // let go off every column, or on its own seat: nothing moves
+    for to in [[size.0 as f32 - 2.0, size.1 as f32 - 2.0], [-400.0, -400.0], rig.m.assign_point(2, size).unwrap()] {
+        let from = rig.m.card_point(&rig.dev(0), size).unwrap();
+        rig.m.mouse(Mouse::Down, from, size);
+        rig.m.mouse(Mouse::Move, [from[0] + 30.0, from[1] + 30.0], size);
+        rig.m.mouse(Mouse::Move, to, size);
+        assert_eq!(rig.m.drop_column(), None, "no drop at {to:?}");
+        rig.m.mouse(Mouse::Up, to, size);
+        rig.frame(&|_| false);
+        assert_eq!(rig.m.assign.seats[..3], [Some(rig.dev(1)), Some(rig.dev(0)), Some(Dev::Keys)]);
+    }
+    // a press on an empty seat holds nothing
+    let empty = rig.m.assign_point(5, size).unwrap();
+    assert!(!rig.m.mouse(Mouse::Down, empty, size));
+
+    // the next ride: the second pad on 1P, the first on 2P, the keyboard on 3P
+    rig.cross(1);
+    rig.close();
+    rig.ride(&|_| false);
+    rig.b.button(0, true);
+    rig.a.button(0, true);
+    let now = rig.ride(&|c| c == window::key::LEFT);
+    let has = |s: &pad::SeatInput, c: Control| matches!(s, pad::SeatInput::Playing(r) if r.buttons() & c.mask() != 0);
+    assert!(has(&now[0], Control::Cross), "1P rides the second pad: {:?}", now[0]);
+    assert!(has(&now[1], Control::Cross), "2P rides the first pad: {:?}", now[1]);
+    assert!(has(&now[2], Control::Left), "3P rides the keyboard: {:?}", now[2]);
+    rig.b.button(0, false);
+    rig.a.button(0, false);
+}
+
+/// P214: a drag keeps the pads' rules. A card is not lifted off a pad that is unplugged, nor dropped
+/// on the seat such a pad keeps; online only this machine's seats take one; and off the Controllers
+/// screen the mouse holds nothing.
+#[test]
+fn a_dragged_card_keeps_the_pads_rules() {
+    use menu::Mouse;
+    let (pad1, pad2, gone) = (Dev::Pad("p1".into()), Dev::Pad("p2".into()), Dev::Pad("gone".into()));
+    let names = |ds: &[Dev]| ds.iter().map(|d| (d.clone(), String::new())).collect::<Vec<_>>();
+    let (mut m, _) = fresh();
+    let size = (1920, 1080);
+    assert!(!m.mouse(Mouse::Down, [960.0, 540.0], size), "nothing off the screen");
+    m.open(Screen::Assign);
+    m.controllers(&[Some(Dev::Keys), Some(pad1.clone()), Some(gone.clone())], &names(&[Dev::Keys, pad1.clone(), pad2.clone()]));
+    let drag_to = |m: &mut Menu, d: &Dev, c: usize| {
+        let from = m.card_point(d, size).unwrap();
+        let to = m.assign_point(c, size).unwrap();
+        let held = m.mouse(Mouse::Down, from, size);
+        m.mouse(Mouse::Move, to, size);
+        let ring = m.drop_column();
+        m.mouse(Mouse::Up, to, size);
+        (held, ring)
+    };
+    assert_eq!(drag_to(&mut m, &gone, 1), (false, None), "an unplugged pad's card stays");
+    assert_eq!(drag_to(&mut m, &pad2, 3), (true, None), "the seat kept for it takes nobody");
+    assert_eq!(m.assign.seats[..3], [Some(Dev::Keys), Some(pad1.clone()), Some(gone.clone())]);
+    assert_eq!(drag_to(&mut m, &pad2, 4), (true, Some(4)), "an empty seat does");
+    assert_eq!(m.assign.seats[3], Some(pad2.clone()));
+    assert!(m.take_assigned().is_some(), "the shell is handed the seats");
+
+    // online, two riders here: only 1P and 2P
+    let (mut m, _) = fresh();
+    m.session = true;
+    m.riders = 2;
+    m.open(Screen::Assign);
+    m.controllers(&[Some(Dev::Keys), None], &names(&[Dev::Keys, pad1.clone()]));
+    assert_eq!(m.assign.open, 2);
+    assert_eq!(drag_to(&mut m, &pad1, 3), (true, None), "3P is another machine's");
+    assert_eq!(drag_to(&mut m, &pad1, 2), (true, Some(2)));
+    assert_eq!(m.assign.seats[..2], [Some(Dev::Keys), Some(pad1.clone())]);
+    // the screen closed mid-drag: the hold is let go
+    let from = m.card_point(&pad1, size).unwrap();
+    assert!(m.mouse(Mouse::Down, from, size));
+    m.open(Screen::Main);
+    let to = m.assign_point(1, size).unwrap();
+    assert!(!m.mouse(Mouse::Up, to, size));
+    assert_eq!(m.card_drag, None);
+    assert_eq!(m.assign.seats[..2], [Some(Dev::Keys), Some(pad1.clone())]);
+}
+
 /// P38: a pad pulled out mid-ride keeps its seat. The Controllers screen (the pause's, or the main
 /// menu's after the ride) shows it on that seat, unplugged; another pad stepping that way goes past
 /// it rather than swapping it off; plugged back in, it is on its own seat and rides it.

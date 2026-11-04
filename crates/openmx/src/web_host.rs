@@ -332,6 +332,11 @@ impl Canvas {
         &self.clicks
     }
 
+    /// No drag is read from the page yet (P214): it reports taps only.
+    pub fn mouse(&self) -> &[crate::window::MouseEvent] {
+        &[]
+    }
+
     pub fn key_moments(&self) -> &[KeyMoment] {
         &self.moments
     }

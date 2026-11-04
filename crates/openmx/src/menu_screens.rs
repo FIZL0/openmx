@@ -119,6 +119,49 @@ pub(super) fn fit(size: (usize, usize)) -> (f32, [f32; 2]) {
     (em, [(w - STAGE.0 * em) / 2.0, (h - STAGE.1 * em) / 2.0])
 }
 
+/// Where the Controllers screen (P210) puts things, in stage ems: what it draws and where a mouse
+/// drag (P214) reads its drop.
+pub(super) struct AssignSpots {
+    /// No seat's column, the panel round its cards.
+    pub column: Box4,
+    /// Each seat's box, 1P first.
+    pub seats: Vec<Box4>,
+    /// A card's height in no seat's column, which shrinks as it fills.
+    loose_h: f32,
+}
+
+impl AssignSpots {
+    /// The `k`th place in no seat's column.
+    pub fn loose_box(&self, k: usize) -> Box4 {
+        let [x, y, w, _] = self.column;
+        [x + 0.5, y + 0.5 + 2.4 + (self.loose_h + 0.6) * k as f32, w - 1.0, self.loose_h]
+    }
+
+    /// The column at `p`: 0 for no seat's, else a seat's plus one.
+    pub fn column_at(&self, p: [f32; 2]) -> Option<usize> {
+        let inside = |b: &Box4| p[0] >= b[0] && p[1] >= b[1] && p[0] < b[0] + b[2] && p[1] < b[1] + b[3];
+        if inside(&self.column) {
+            return Some(0);
+        }
+        self.seats.iter().position(inside).map(|i| i + 1)
+    }
+}
+
+/// The Controllers screen's boxes for `a`.
+pub(super) fn assign_spots(a: &join::Assign<Dev>) -> AssignSpots {
+    let top = 8.0;
+    let bottom = STAGE.1 - BAND - 5.0;
+    let gap = 1.2;
+    let (lx, lw) = (3.0, 14.0);
+    let (x0, w) = (lx + lw + 2.0, 77.0 - (lx + lw + 2.0));
+    let cw = (w - gap * 3.0) / 4.0;
+    let lines = a.seats.len().div_ceil(4).max(1);
+    let ch = ((bottom - top - gap * (lines - 1) as f32) / lines as f32).min(14.0);
+    let seats = (0..a.seats.len()).map(|i| [x0 + (cw + gap) * (i % 4) as f32, top + (ch + gap) * (i / 4) as f32, cw, ch]).collect();
+    let loose_h = 4.2f32.min((bottom - top - 2.4) / a.loose().len().max(1) as f32 - 0.6);
+    AssignSpots { column: [lx - 0.5, top - 0.5, lw + 1.0, bottom - top + 1.0], seats, loose_h }
+}
+
 /// [`GARAGE_STAGE`] in a `size` frame's pixels: x, y, width, height.
 pub(super) fn garage_stage(size: (usize, usize)) -> [f32; 4] {
     let (em, o) = fit(size);
@@ -2465,19 +2508,14 @@ impl Pen<'_> {
     fn assign(&mut self, menu: &Menu) {
         self.logo(true);
         let a = &menu.assign;
-        let top = 8.0;
-        let bottom = STAGE.1 - BAND - 5.0;
-        let gap = 1.2;
-        let (lx, lw) = (3.0, 14.0);
-        let (x0, w) = (lx + lw + 2.0, 77.0 - (lx + lw + 2.0));
-        let cw = (w - gap * 3.0) / 4.0;
-        let lines = a.seats.len().div_ceil(4).max(1);
-        let ch = ((bottom - top - gap * (lines - 1) as f32) / lines as f32).min(14.0);
-        let seat_box = |i: usize| [x0 + (cw + gap) * (i % 4) as f32, top + (ch + gap) * (i / 4) as f32, cw, ch];
+        let spots = assign_spots(a);
+        let (top, bottom, ch) = (spots.column[1] + 0.5, spots.column[1] + spots.column[3] - 0.5, spots.seats[0][3]);
+        let [lx, _, lw, _] = spots.column;
+        let (lx, lw) = (lx + 0.5, lw - 1.0);
+        let seat_box = |i: usize| spots.seats[i];
         // No seat's column: a header, and the cards in it under each other.
         let loose = a.loose();
-        let lh = 4.2f32.min((bottom - top - 2.4) / loose.len().max(1) as f32 - 0.6);
-        let loose_box = |k: usize| [lx, top + 2.4 + (lh + 0.6) * k as f32, lw, lh];
+        let loose_box = |k: usize| spots.loose_box(k);
         self.round([lx - 0.5, top - 0.5, lw + 1.0, bottom - top + 1.0], 1.0, [10, 5, 2, 110], [10, 5, 2, 110]);
         self.text(Weight::Heavy, "No seat", lx + lw / 2.0, Pen::mid(top + 0.9, 1.3), 1.3, SLANT, [255, 240, 225, 160], Align::Centre);
         // Where a column's card goes: a seat's box, or the next free place in no seat's column.
@@ -2496,9 +2534,22 @@ impl Pen<'_> {
             self.text(Weight::Heavy, &format!("{}P", i + 1), b[0] + b[2] / 2.0, b[1] + ch * 0.42, big, SLANT, [255, 240, 225, 128], Align::Centre);
             self.fade = 1.0;
         }
-        // Every card at its place, sliding there from the one it left.
+        // P214: the column a card the mouse drags would drop into rings peach.
+        let lifted = menu.card_drag.as_ref().filter(|g| g.lifted);
+        if let Some(c) = menu.drop_column() {
+            let b = if c == 0 { [lx - 0.5, top - 0.5, lw + 1.0, bottom - top + 1.0] } else { seat_box(c - 1) };
+            self.ring([b[0] - 0.35, b[1] - 0.35, b[2] + 0.7, b[3] + 0.7], 1.3, 0.3, PEACH);
+        }
+        // Every card at its place, sliding there from the one it left; the dragged one last, over
+        // the rest, where the pointer has it.
         let mut cards: Vec<Dev> = a.seats.iter().flatten().cloned().collect();
         cards.extend(loose.iter().cloned());
+        if let Some(g) = lifted
+            && let Some(k) = cards.iter().position(|d| *d == g.dev)
+        {
+            let d = cards.remove(k);
+            cards.push(d);
+        }
         for d in &cards {
             let to = home(d);
             let b = match a.slid(d) {
@@ -2508,6 +2559,10 @@ impl Pen<'_> {
                     [mix(0), mix(1), mix(2), mix(3)]
                 }
                 None => to,
+            };
+            let b = match lifted.filter(|g| g.dev == *d) {
+                Some(g) => [b[0] + g.at[0] - g.grab[0], b[1] + g.at[1] - g.grab[1], b[2], b[3]],
+                None => b,
             };
             let gone = !a.plugged(d);
             let glow = a.glow(d);

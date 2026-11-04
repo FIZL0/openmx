@@ -8,7 +8,7 @@
 //! The event loop is pumped, never run: the shell's loop owns the frame, and each [`GpuWindow::poll`]
 //! drains what winit has without waiting.
 
-use crate::window::KEYCODES;
+use crate::window::{KEYCODES, Mouse};
 use game_render::gpu::{Renderer, Target, wgpu};
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,6 +43,10 @@ struct State {
     /// (P174), in window pixels.
     pointer: (f64, f64),
     clicks: Vec<(i32, i32)>,
+    /// Whether the left button is down, and its downs, ups and the pointer's moves while it is,
+    /// since the last poll (P214).
+    left: bool,
+    mouse: Vec<crate::window::MouseEvent>,
 }
 
 impl ApplicationHandler for State {
@@ -105,9 +109,19 @@ impl ApplicationHandler for State {
                 self.focused = false;
             }
             WindowEvent::Focused(true) => self.focused = true,
-            WindowEvent::CursorMoved { position, .. } => self.pointer = (position.x, position.y),
-            WindowEvent::MouseInput { state: ElementState::Pressed, button: winit::event::MouseButton::Left, .. } => {
-                self.clicks.push((self.pointer.0.floor() as i32, self.pointer.1.floor() as i32));
+            WindowEvent::CursorMoved { position, .. } => {
+                self.pointer = (position.x, position.y);
+                if self.left {
+                    self.mouse.push((Mouse::Move, position.x.floor() as i32, position.y.floor() as i32));
+                }
+            }
+            WindowEvent::MouseInput { state, button: winit::event::MouseButton::Left, .. } => {
+                let at = (self.pointer.0.floor() as i32, self.pointer.1.floor() as i32);
+                self.left = state == ElementState::Pressed;
+                if self.left {
+                    self.clicks.push(at);
+                }
+                self.mouse.push((if self.left { Mouse::Down } else { Mouse::Up }, at.0, at.1));
             }
             _ => {}
         }
@@ -168,6 +182,8 @@ impl GpuWindow {
             focused: true,
             pointer: (-1.0, -1.0),
             clicks: Vec::new(),
+            left: false,
+            mouse: Vec::new(),
         };
         // The window is made when the loop first resumes.
         for _ in 0..100 {
@@ -264,6 +280,7 @@ impl GpuWindow {
         self.state.tapped = [false; KEYCODES];
         self.state.moments.clear();
         self.state.clicks.clear();
+        self.state.mouse.clear();
         self.state.arrivals.poll();
         if let PumpStatus::Exit(_) = self.events.pump_app_events(Some(Duration::ZERO), &mut self.state) {
             self.state.closed = true;
@@ -284,6 +301,12 @@ impl GpuWindow {
     /// Where the mouse's left button went down in the last poll, in window pixels (P174).
     pub fn clicks(&self) -> &[(i32, i32)] {
         &self.state.clicks
+    }
+
+    /// The left button's downs and ups and the pointer's moves while it is held, in the last poll
+    /// (P214), in window pixels and in order.
+    pub fn mouse(&self) -> &[crate::window::MouseEvent] {
+        &self.state.mouse
     }
 
     /// Draw the mouse cursor over the window or hide it (P167): winit's own switch, on X11 and
