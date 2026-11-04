@@ -104,8 +104,11 @@ pub struct Online {
     /// of, and the disc's `biplane.phy` before the modifiers, which a change rebuilds it from.
     plane: Option<Flight>,
     stock_plane: Option<game_sim::phy::Plane>,
-    /// Each seat's cars as built, never driven (S249, [`Online::cars_on`]), by seat.
+    /// Each seat's cars as built, never driven (S249, [`Online::cars_on`]), by seat, on its own row of
+    /// the ride's modifiers (P289, [`rides::cars_on`]), and as the disc builds them, which a change
+    /// builds them again from.
     cars: Vec<Vec<crate::vehicle::CarRide>>,
+    stock_cars: Vec<Vec<crate::vehicle::CarRide>>,
     /// Each seat's own bay in the ride's lot (N18), where a seat that starts in the plane stands.
     bays: Vec<Spawn>,
     /// The body's spot and up the original gives each of [`Online::bays`] that is a file bay (B6,
@@ -181,6 +184,7 @@ impl Online {
             plane: None,
             stock_plane: None,
             cars: Vec::new(),
+            stock_cars: Vec::new(),
             bays: Vec::new(),
             bay_bodies: Vec::new(),
             marks: Some(Marks { track: String::new(), bike: String::new(), owed: true, offered: None }),
@@ -246,6 +250,7 @@ impl Online {
             plane: None,
             stock_plane: None,
             cars: Vec::new(),
+            stock_cars: Vec::new(),
             bays: Vec::new(),
             bay_bodies: Vec::new(),
             marks: None,
@@ -284,6 +289,7 @@ impl Online {
             plane: None,
             stock_plane: None,
             cars: Vec::new(),
+            stock_cars: Vec::new(),
             bays: Vec::new(),
             bay_bodies: Vec::new(),
             marks: None,
@@ -322,6 +328,7 @@ impl Online {
             plane: None,
             stock_plane: None,
             cars: Vec::new(),
+            stock_cars: Vec::new(),
             bays: Vec::new(),
             bay_bodies: Vec::new(),
             marks: None,
@@ -338,6 +345,7 @@ impl Online {
         self.time_scale = self.mods.time_scale();
         self.net.mods = self.mods.text();
         self.stock = stock;
+        self.cars = rides::cars_on(&self.stock_cars, &self.mods);
     }
 
     /// The ride's biplane (N17): `stock`, the disc's `biplane.phy`, built on the modifiers the ride
@@ -373,9 +381,11 @@ impl Online {
     }
 
     /// Every seat's cars as built, never driven (S249, [`vehicle::Lot::online_cars`]): what a
-    /// seat's switch to a car takes it from, the same on every machine off the same disc.
+    /// seat's switch to a car takes it from, the same on every machine off the same disc. Each seat's
+    /// are put on its own modifiers of the ride's ([`Online::modifiers`], P289).
     pub fn cars_on(&mut self, cars: Vec<Vec<crate::vehicle::CarRide>>) {
-        self.cars = cars;
+        self.cars = rides::cars_on(&cars, &self.mods);
+        self.stock_cars = cars;
     }
 
     /// Seat `s`'s cars as [`Online::cars_on`] got them.
@@ -911,8 +921,10 @@ impl Online {
                     hands = Some(*c);
                 }
             };
-            let mut rides = Rides { sims: &mut self.sims, world: place, after: Some(&mut after), time_scale: self.time_scale, plane: self.plane.as_mut(), cars: &self.cars };
-            let mut game = Modded { rides: &mut rides, stock: &self.stock, mods: &mut self.mods, stock_plane: self.stock_plane.as_ref() };
+            // The ride steps with the cars Modded holds, which a change of the modifiers builds again.
+            let mut rides = Rides { sims: &mut self.sims, world: place, after: Some(&mut after), time_scale: self.time_scale, plane: self.plane.as_mut(), cars: &[] };
+            let cars = Some((&self.stock_cars[..], &mut self.cars));
+            let mut game = Modded { rides: &mut rides, stock: &self.stock, mods: &mut self.mods, stock_plane: self.stock_plane.as_ref(), cars };
             self.net.frame(&mut game, &local, real);
         }
         self.time_scale = self.mods.time_scale();

@@ -688,3 +688,63 @@ fn the_online_pause_offers_the_cars() {
         assert!(cars.iter().any(|c| Some(c.machine) == to.car()), "the lane has no {to:?}");
     }
 }
+
+/// P289: a seat's car online rides that seat's own car modifiers. Seat 1 switches into the buggy
+/// and drives it on the gas for three seconds through [`rides::Modded`] on a set whose row 1 has the
+/// cars' acceleration at 150% (row 0 at 50%, seat 0 empty): it drives tick for tick as [`Rides`] on
+/// the cars [`rides::cars_on`] builds, and further than on the disc's cars. The host's change back to
+/// the original puts every seat's cars back to the disc's.
+#[test]
+fn a_seats_car_online_rides_its_own_car_modifiers() {
+    use game_sim::modifiers::{Knob, Mods};
+    use net::Game;
+    let Some(mut disc) = disc() else { return };
+    let stock = vec![online_cars(&mut disc); net::SEATS];
+    let mut mods = Mods::original();
+    mods.set(0, Knob::CarAccel, 50);
+    mods.set(1, Knob::CarAccel, 150);
+    let mods = rides::ride_set(&mods);
+    let modded = rides::cars_on(&stock, &mods);
+    let car = |cars: &[CarRide]| cars.iter().find(|c| c.machine == Machine::Buggy).unwrap().car.clone();
+    assert_ne!(car(&modded[1]), car(&stock[1]), "row 1's buggy is the disc's");
+    assert_ne!(car(&modded[0]), car(&modded[1]), "seat 0's buggy is on seat 1's row");
+    assert!(modded[2..].iter().zip(&stock[2..]).all(|(m, s)| car(m) == car(s)), "a seat on the original's has the disc's cars");
+    assert!(rides::cars_on(&stock, &Mods::original()).iter().zip(&stock).all(|(m, s)| m.iter().zip(s).all(|(a, b)| a.car == b.car)));
+
+    let pad = |tick: usize| [Report::missing(), scripted(1, tick, &[(1, 0, Kind::Buggy)])];
+    let bike = Sim::new(0x289);
+    let phys = vec![(*bike.phy).clone()];
+    // Each run: the hashes after every tick, and where seat 1's car got to.
+    let run = |how: u8| -> (Vec<u64>, f32) {
+        let mut sims = vec![bike.clone(), bike.clone()];
+        let mut world = Flat::default();
+        let mut live = modded.clone();
+        let mut hashes = Vec::new();
+        let plain = if how == 1 { &modded[..] } else { &stock[..] };
+        let mut ride = Rides { sims: &mut sims, world: &mut world, after: None, time_scale: None, plane: None, cars: if how == 0 { &[] } else { plain } };
+        let mut m = mods;
+        let mut game = rides::Modded { rides: &mut ride, stock: &phys, mods: &mut m, stock_plane: None, cars: (how == 0).then_some((&stock[..], &mut live)) };
+        for tick in 0..90 {
+            game.step(tick, &pad(tick));
+            hashes.push(game.hash());
+        }
+        let at = sims[1].car.as_ref().expect("seat 1 is in the buggy").machine.matrix.0[3];
+        (hashes, at.x().hypot(at.z()))
+    };
+    let (online, far) = run(0);
+    let (plain, _) = run(1);
+    let (_, disc_far) = run(2);
+    assert_eq!(online, plain, "the modified cars are not the ones the ride drove");
+    assert!(far > disc_far * 1.1, "seat 1's buggy went {far} ft at 150% acceleration, {disc_far} ft on the disc's");
+
+    // The host's change to the original's: every seat's cars the disc's again.
+    let mut sims = vec![bike.clone(), bike.clone()];
+    let mut world = Flat::default();
+    let mut live = modded.clone();
+    let mut ride = Rides { sims: &mut sims, world: &mut world, after: None, time_scale: None, plane: None, cars: &[] };
+    let mut m = mods;
+    let mut game = rides::Modded { rides: &mut ride, stock: &phys, mods: &mut m, stock_plane: None, cars: Some((&stock[..], &mut live)) };
+    game.remodify(&mods.text(), "").unwrap();
+    drop(game);
+    assert!(live.iter().zip(&stock).all(|(m, s)| m.iter().zip(s).all(|(a, b)| a.car == b.car)), "the change left a seat's cars modified");
+}

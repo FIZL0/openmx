@@ -1178,6 +1178,14 @@ fn the_lobby_gathers_every_seats_own_modifiers() {
     let gravity = g.page().into_iter().find(|r| r.key == menu::Key::Knob(Knob::Gravity)).unwrap();
     assert!(gravity.off.is_some(), "{gravity:?}");
     assert!(g.page()[0].off.is_some(), "the guest has no All Players");
+    // The cars' are the guest's own (P289); online rides have no Kiowa to take the Kiowa's.
+    for (machine, knob, held) in [("Cars", Knob::CarGrip, false), ("Kiowa", Knob::KiowaClimb, true)] {
+        while g.page()[g.cursor(Screen::Modifiers)].value != machine {
+            tap(&mut g, &mut gr, Control::Right);
+        }
+        let row = g.page().into_iter().find(|r| r.key == menu::Key::Knob(knob)).unwrap();
+        assert_eq!(row.off.is_some(), held, "{row:?}");
+    }
 }
 
 /// N16: an online ride draws every peer's rider in their own look. Two real lobbies on the LAN, each
