@@ -1140,7 +1140,16 @@ pub struct Scene<'a> {
     knock_facets: std::collections::HashMap<usize, Vec<Facet>>,
     /// What the ray probe's material listener heard it strike ([`Scene::listen_material`], F27a).
     sounded: Vec<crate::material_hit::Struck>,
+    /// The downed wreck bikes' hulls in the plane's search (F35, [`Scene::wrecking`]), as the knocks.
+    wrecks: &'a [Knock<'a>],
+    wrecks_at: usize,
+    wrecked_from: usize,
+    wreck_facets: std::collections::HashMap<usize, Vec<Facet>>,
 }
+
+/// What the plane's record keeps as struck for a downed wreck bike's hull (F35): [`WRECKED`] and its
+/// place in [`Scene::wrecking`]'s list.
+pub const WRECKED: usize = 1 << 20;
 
 /// What the plane's record keeps as struck for a knockable prop's mesh (S241): [`KNOCKED`] and its
 /// place in [`Scene::knocking`]'s list.
@@ -1501,7 +1510,9 @@ impl<'a> Scene<'a> {
         if let Some(k) = self.bike(other) {
             return Struck::Bike(k);
         }
-        let material = if let Some(k) = self.knock(other) {
+        let material = if let Some(j) = self.wreck(other) {
+            material_of(self.wrecks[j].mesh)
+        } else if let Some(k) = self.knock(other) {
             material_of(self.knocks[k].mesh)
         } else if self.trunk(other).is_some() {
             0
@@ -1611,6 +1622,10 @@ impl<'a> Scene<'a> {
             knocked_from: 0,
             knock_facets: std::collections::HashMap::new(),
             sounded: Vec::new(),
+            wrecks: &[],
+            wrecks_at: 0,
+            wrecked_from: 0,
+            wreck_facets: std::collections::HashMap::new(),
         }
     }
 
@@ -1683,6 +1698,42 @@ impl<'a> Scene<'a> {
         scene
     }
 
+    /// **The downed wreck bikes' hulls in the plane's search** (F35): each a collidable after the
+    /// world's (and the knocks'), as the original files the wreck part's mesh collidable — its
+    /// `wreckbikef.col` on the wreck node, category [`crate::wreck_bike::COLLIDABLE`], struck — in the
+    /// flown plane's world (C16's 137864 image: the plane's ray 33 strikes it), a candidate of the
+    /// nearby list after what the broad phase gathered as a knock is ([`Scene::knocking`]). Each a
+    /// [`Knock`]: its mesh where the wreck's node stands it, its sphere, its body's velocity. A hit on
+    /// wreck `j` names `first + j` among the records the search is handed, which takes the mirror,
+    /// and is kept as struck as [`WRECKED`]` + j`.
+    pub fn wrecking(mut self, wrecks: &'a [Knock<'a>], first: usize) -> Scene<'a> {
+        let (centre, _) = reach(self.rays, &self.transform);
+        self.wrecks = wrecks;
+        self.wrecks_at = self.objects.objects.len();
+        self.wrecked_from = first;
+        for (j, n) in wrecks.iter().enumerate() {
+            self.objects.objects.push(Collidable {
+                class: Class::Object,
+                flags: flags::ENABLED,
+                nearby: true,
+                radius: n.radius,
+                category: crate::wreck_bike::COLLIDABLE,
+                collides_with: crate::wreck_bike::COLLIDES_WITH,
+                categories: any_category(),
+                ..Collidable::default()
+            });
+            let distance = length(centre.sub(n.centre)) - n.radius;
+            self.nearby.found.push(world_search::Candidate { object: self.wrecks_at + j, distance });
+        }
+        self
+    }
+
+    /// The downed wreck bike `j`, when `other` is one of [`Scene::wrecking`]'s collidables.
+    fn wreck(&self, other: usize) -> Option<usize> {
+        let j = other.checked_sub(self.wrecks_at).filter(|_| self.wrecks_at != 0)?;
+        (j < self.wrecks.len()).then_some(j)
+    }
+
     /// The knockable prop `k`, when `other` is one of [`Scene::knocking`]'s collidables.
     fn knock(&self, other: usize) -> Option<usize> {
         let k = other.checked_sub(self.knocks_at).filter(|_| self.knocks_at != 0)?;
@@ -1697,6 +1748,9 @@ impl<'a> Scene<'a> {
 
     /// What the plane's record keeps as struck for collidable `other` ([`BIKES`]).
     fn id(&self, other: usize) -> usize {
+        if let Some(j) = self.wreck(other) {
+            return WRECKED + j;
+        }
         if let Some(k) = self.knock(other) {
             return KNOCKED + k;
         }
@@ -1808,8 +1862,26 @@ impl Scene<'_> {
     /// node stands it, as a scenery prop's.
     fn pair_knock(&mut self, probe: usize, other: usize, k: usize) -> bool {
         let n = self.knocks[k];
+        let mut cache = std::mem::take(&mut self.knock_facets);
+        let hit = self.pair_placed(probe, other, &n, cache.entry(k).or_insert_with(|| facets(n.mesh)));
+        self.knock_facets = cache;
+        hit
+    }
+
+    /// A probe's narrow phase against downed wreck bike `j`'s hull, collidable `other` (F35): as a
+    /// knockable prop's.
+    fn pair_wreck(&mut self, probe: usize, other: usize, j: usize) -> bool {
+        let n = self.wrecks[j];
+        let mut cache = std::mem::take(&mut self.wreck_facets);
+        let hit = self.pair_placed(probe, other, &n, cache.entry(j).or_insert_with(|| facets(n.mesh)));
+        self.wreck_facets = cache;
+        hit
+    }
+
+    /// A probe's narrow phase against a mesh `n` placed as a knock, collidable `other`, its ray
+    /// facets `facets`.
+    fn pair_placed(&mut self, probe: usize, other: usize, n: &Knock<'_>, facets: &[Facet]) -> bool {
         if probe == RAY {
-            let facets = self.knock_facets.entry(k).or_insert_with(|| facets(n.mesh));
             let mesh = ray_probe::Mesh {
                 id: other as u32,
                 transform: n.to_world.0,
@@ -1882,6 +1954,9 @@ impl Narrow for Scene<'_> {
     fn prepare(&mut self, _objects: &mut [Collidable], _probe: usize) {}
 
     fn pair(&mut self, _objects: &mut [Collidable], probe: usize, other: usize) -> bool {
+        if let Some(j) = self.wreck(other) {
+            return self.pair_wreck(probe, other, j);
+        }
         if let Some(k) = self.knock(other) {
             return self.pair_knock(probe, other, k);
         }
@@ -1989,6 +2064,9 @@ impl Scene<'_> {
     /// mover of kind 2, so it is struck with its mover — by the prop's index, the order
     /// [`Search::movers`] lists them in. Anything else is only itself ([`struck`]).
     fn struck_of(&self, object: usize) -> Struck {
+        if let Some(j) = object.checked_sub(WRECKED).filter(|&j| j < self.wrecks.len()) {
+            return Struck { other: Some(self.wrecked_from + j), ..struck(object) };
+        }
         if let Some(k) = object.checked_sub(KNOCKED).filter(|&k| k < self.knocks.len()) {
             return Struck { other: Some(self.knocked_from + k), ..struck(object) };
         }
@@ -2046,6 +2124,9 @@ impl Search for Scene<'_> {
     /// A struck prop that moves answers its car's velocity, the mover's `vt+0xb8` (S145), and a struck
     /// bike with its record in the search its chassis' (N22b, [`Scene::owned`]); the rest stand still.
     fn velocity(&self, struck: &Struck) -> Vf {
+        if let Some(j) = struck.object.checked_sub(WRECKED).filter(|&j| j < self.wrecks.len()) {
+            return self.wrecks[j].velocity;
+        }
         if let Some(k) = struck.object.checked_sub(KNOCKED).filter(|&k| k < self.knocks.len()) {
             return self.knocks[k].velocity;
         }
@@ -2076,11 +2157,13 @@ pub fn movers(props: &[Prop]) -> Vec<crate::contact::Mover> {
     props.iter().map(|p| p.moving.map(|m| m.mover()).unwrap_or_default()).collect()
 }
 
-/// The category of what [`Scene`] reports as struck: a knockable prop's ([`KNOCKED`]) is a prop's
-/// collidable's, another plane's ([`PLANES`]) is [`crate::flight::COLLIDABLE`], a trunk's
+/// The category of what [`Scene`] reports as struck: a downed wreck bike's hull ([`WRECKED`]) is
+/// [`crate::wreck_bike::COLLIDABLE`], a knockable prop's ([`KNOCKED`]) is a prop's collidable's, another plane's ([`PLANES`]) is [`crate::flight::COLLIDABLE`], a trunk's
 /// ([`TREES`]) is [`TREE`], a bike's ([`BIKES`]) is [`BIKE`], every prop's is scenery.
 pub fn category(object: usize) -> u32 {
-    if object >= KNOCKED {
+    if object >= WRECKED {
+        crate::wreck_bike::COLLIDABLE
+    } else if object >= KNOCKED {
         crate::prop_world::COLLIDABLE
     } else if object >= PLANES {
         crate::flight::COLLIDABLE

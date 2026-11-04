@@ -54,6 +54,38 @@ use ps2_float::F;
 /// What the wreck bike's search filed on the flown planes: each plane's mirrors, in `planes`' order.
 pub type Mirrors = Vec<Vec<Contact>>;
 
+/// **A downed wreck bike's hull in a flown plane's world** (F35): the wreck part's mesh collidable
+/// (`wreckbikef.col`, category [`crate::wreck_bike::COLLIDABLE`]) where the wreck bike's record's node
+/// stands it, at the copy nearest the plane, its body's velocity (what the plane's sweep reads of it),
+/// and its record's room for contacts. The original files it on the plane's node, so the plane's rays
+/// strike it (C16's tick 137863, research/r31): [`search_downed_by`] puts one in [`Met::hulls`] beside
+/// each body of [`Met::wrecks`], and the plane's search has it in its world
+/// ([`flight_search::Scene::wrecking`]).
+#[derive(Clone, Debug)]
+pub struct Hull {
+    pub mesh: std::sync::Arc<crate::track::Mesh>,
+    pub at: crate::math::Mat4,
+    pub velocity: ps2_float::Vf,
+    pub capacity: usize,
+}
+
+impl Hull {
+    /// The hull as the plane's search places it: a knock's mesh, frame and sphere.
+    pub fn knock(&self) -> flight_search::Knock<'_> {
+        let (to_world, centre, radius) = crate::world::Prop::posed(&self.mesh, &self.at);
+        flight_search::Knock { mesh: &self.mesh, to_world, centre, radius, velocity: self.velocity, capacity: self.capacity }
+    }
+}
+
+/// The mesh `r`'s wreck bike's hull is, in `plane`'s world: its ragdoll kit's (where the props'
+/// worlds take it, [`crate::Sim::wreck_hull`]), else the one the plane carries ([`Flight::wreck`]).
+fn hull_mesh(r: &Rider, plane: &Flight) -> Option<std::sync::Arc<crate::track::Mesh>> {
+    match r.ragdoll_kit.as_ref().and_then(|k| k.bike_mesh.as_ref()) {
+        Some(b) => Some(std::sync::Arc::new(b.mesh.clone())),
+        None => plane.wreck.clone(),
+    }
+}
+
 impl WreckBike {
     /// **The wreck bike's search with the flown planes' hulls in its world**: its list emptied and
     /// searched as [`WreckBike::tick_among`]'s, the hulls (`planes`, each where its collision node
@@ -236,6 +268,7 @@ pub fn search_downed_by(riders: &mut [&mut Rider], planes: &[&Flight], dt: F, wo
     out.planes = hulls.iter().map(|&(k, _)| k).collect();
     let capacity = hulls.iter().map(|(_, h)| h.capacity).max().unwrap_or(0);
     for (i, r) in riders.iter_mut().enumerate().filter(|(_, r)| down(r)) {
+        let meshes: Vec<_> = hulls.iter().map(|&(k, _)| hull_mesh(r, planes[k])).collect();
         let Some(c) = r.crash.as_mut() else { continue };
         let from = c.bike.origin();
         let them: Vec<Plane<'_>> = hulls
@@ -252,12 +285,20 @@ pub fn search_downed_by(riders: &mut [&mut Rider], planes: &[&Flight], dt: F, wo
         let w = out.searched.len();
         let b = &c.bike;
         let mut placed = Vec::with_capacity(hulls.len());
-        for (&(k, _), mirrors) in hulls.iter().zip(&mirrors) {
+        for ((&(k, _), mirrors), mesh) in hulls.iter().zip(&mirrors).zip(meshes) {
             let Some(met) = mets.get_mut(k) else { continue };
             let j = met.wrecks.len();
             let near = planes[k].body.position;
             met.mirrors.extend(mirrors.iter().map(|e| Contact { other: Some(WRECK_FROM + j), point: crate::nearest_copy(&*world, near, e.point), ..*e }));
             met.wrecks.push(Pushed { collection: 0, object: w, collider: b.collider, body: b.body, mass: b.mass });
+            // Its hull in the plane's world (F35), the copy nearest the plane.
+            met.hulls.resize(j, None);
+            met.hulls.push(mesh.map(|mesh| {
+                let n = &b.record.node;
+                let mut at = crate::math::Mat4([n.rows[0], n.rows[1], n.rows[2], n.origin]);
+                at.0[3] = crate::nearest_copy(&*world, near, at.0[3]);
+                Hull { mesh, at, velocity: b.body.velocity, capacity: b.record.capacity }
+            }));
             placed.push((k, j));
         }
         // Its step in the first of its planes' worlds (F32): a copy of the bike, its entries on the

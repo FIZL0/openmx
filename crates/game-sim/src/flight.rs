@@ -182,6 +182,9 @@ pub struct Flight {
     /// world, its hull struck by their bikes' body rays ([`crate::rider_contact::gather_met`]).
     /// Geometry off the disc, like the rays.
     pub hull: Option<Arc<track::Mesh>>,
+    /// The downed wreck bikes' hull mesh (F35, `wreckbikef.col`), for a downed rider with no ragdoll
+    /// kit's mesh ([`crate::wreck_plane::Hull`]). Geometry off the disc, like the rays.
+    pub wreck: Option<Arc<track::Mesh>>,
     /// What the material table's listener heard the probe strike in the frame's search (F27a,
     /// [`crate::material_hit`]): a bike by player. Sound only.
     pub heard: crate::material_hit::Heard,
@@ -226,6 +229,11 @@ pub struct Met {
     /// The wreck bikes stepped in its world (F32, [`crate::wreck_plane::InWorld`]): each a body of the
     /// plane's dynamics world, [`Met::wrecks`]' body, its force listener after the plane's.
     pub downed: Vec<crate::wreck_plane::InWorld>,
+    /// Each of [`Met::wrecks`]' hulls in the plane's world (F35, [`crate::wreck_plane::Hull`]), by the
+    /// same `j`; `None` for one with no mesh to place. The plane's rays strike them: its entry names
+    /// [`WRECK_FROM`]` + j`, and the mirror goes at the head of the wreck bike's list in
+    /// [`Met::downed`].
+    pub hulls: Vec<Option<crate::wreck_plane::Hull>>,
 }
 
 impl Flight {
@@ -474,6 +482,13 @@ impl Flight {
     /// other riders' bikes are in its world.
     pub fn with_bike(mut self, mesh: track::Mesh) -> Flight {
         self.bike = Some(Arc::new(mesh));
+        self
+    }
+
+    /// The plane with the downed wreck bikes' hull mesh (`wreckbikef.col`, F35), so its rays strike a
+    /// downed rider's wreck bike whose rider has no ragdoll kit's mesh.
+    pub fn with_wreck_hull(mut self, mesh: track::Mesh) -> Flight {
+        self.wreck = Some(Arc::new(mesh));
         self
     }
 
@@ -750,7 +765,13 @@ impl Flight {
         };
         let knocks: Vec<flight_search::Knock<'_>> = posed.iter().map(|p| p.knock).collect();
         let mesh = self.bike.clone();
-        let (struck, movers, knocked) = self.search(dt, ground, mesh.as_deref().map(|mesh| Bikes { mesh, bikes }), met.as_deref_mut(), &knocks);
+        // The downed wreck bikes' hulls in its world (F35), by their place in the met's wrecks.
+        let hulls: Vec<(usize, crate::wreck_plane::Hull)> =
+            met.as_deref().map_or(Vec::new(), |m| m.hulls.iter().enumerate().filter_map(|(j, h)| Some((j, h.clone()?))).collect());
+        let wrecks: Vec<flight_search::Knock<'_>> = hulls.iter().map(|(_, h)| h.knock()).collect();
+        let wrecked: Vec<usize> = hulls.iter().map(|&(j, _)| j).collect();
+        let (struck, movers, knocked, hit) =
+            self.search_wrecked(dt, ground, mesh.as_deref().map(|mesh| Bikes { mesh, bikes }), met.as_deref_mut(), &knocks, &wrecks, &wrecked);
         let bikes = mesh.as_deref().map(|mesh| Bikes { mesh, bikes });
         if let Some(m) = met.as_deref().filter(|m| !m.mirrors.is_empty() && self.rays.is_some()) {
             let r = &mut self.record;
@@ -768,8 +789,9 @@ impl Flight {
         let at = bodies.len();
         if !wrecks.is_empty() {
             let first = met.as_deref().map_or(0, |m| m.vehicles.len()) + at;
+            // The wreck bikes' mirrors (kind 1), and since F35 its own entries on their hulls.
             for e in &mut self.record.contacts {
-                if let Some(j) = e.other.filter(|&o| e.kind == 1 && o >= WRECK_FROM).map(|o| o - WRECK_FROM) {
+                if let Some(j) = e.other.filter(|&o| o >= WRECK_FROM).map(|o| o - WRECK_FROM) {
                     e.other = Some(first + j);
                 }
             }
@@ -777,6 +799,20 @@ impl Flight {
         }
         // The wreck bikes stepped in its world (F32), their bodies those after the props.
         let mut downed = met.as_deref_mut().map(|m| std::mem::take(&mut m.downed)).unwrap_or_default();
+        // The mirrors of its strikes on their hulls at the head of their lists (F35): the plane searched
+        // first, before the wreck bike filed its own.
+        for (&j, mirrors) in wrecked.iter().zip(hit).filter(|(_, m)| !m.is_empty()) {
+            let Some(d) = downed.iter_mut().find(|d| d.place == j) else { continue };
+            let plane = d.bike.struck.struck.len();
+            let near = d.bike.origin();
+            let r = &mut d.bike.record;
+            (r.touching, r.on_object, r.touching_other) = (true, true, true);
+            let mut list: Vec<contact::Contact> =
+                mirrors.into_iter().map(|e| contact::Contact { other: Some(plane), point: crate::nearest_copy(&*ground, near, e.point), ..e }).collect();
+            list.append(&mut r.contacts);
+            list.truncate(r.capacity);
+            r.contacts = list;
+        }
         for d in &mut downed {
             d.place += at;
         }
@@ -923,9 +959,27 @@ impl Flight {
         met: Option<&mut Met>,
         knocks: &[flight_search::Knock<'_>],
     ) -> (Vec<Option<u32>>, Vec<contact::Mover>, Vec<Vec<contact::Contact>>) {
+        let (struck, movers, knocked, _) = self.search_wrecked(dt, world, bikes, met, knocks, &[], &[]);
+        (struck, movers, knocked)
+    }
+
+    /// [`Flight::search`] with the downed wreck bikes' hulls in its world after the knocks (F35,
+    /// [`Scene::wrecking`]), each a record after the props': the plane's entry on hull `i` names
+    /// [`WRECK_FROM`]` + wrecked[i]`, and the answer's fourth list is the mirrors each hull's record took.
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
+    fn search_wrecked(
+        &mut self,
+        dt: F,
+        world: &mut dyn world::World,
+        bikes: Option<Bikes<'_>>,
+        met: Option<&mut Met>,
+        knocks: &[flight_search::Knock<'_>],
+        wrecks: &[flight_search::Knock<'_>],
+        wrecked: &[usize],
+    ) -> (Vec<Option<u32>>, Vec<contact::Mover>, Vec<Vec<contact::Contact>>, Vec<Vec<contact::Contact>>) {
         let none = vec![None; bikes.map_or(0, |b| b.bikes.len())];
         self.heard = crate::material_hit::Heard::default();
-        let Some(rays) = self.rays.clone() else { return (none, Vec::new(), Vec::new()) };
+        let Some(rays) = self.rays.clone() else { return (none, Vec::new(), Vec::new(), Vec::new()) };
         self.record.node = node_of(&self.body);
         contact_search::clear(&mut self.record, Some(&mut self.body));
         let (field, props, trees) = flight_search::near_world(world, &rays, &self.record.node, &mut self.nearby);
@@ -939,11 +993,15 @@ impl Flight {
         if !knocks.is_empty() {
             scene = scene.knocking(knocks, 1 + velocities.len());
         }
+        let hulls_from = 1 + velocities.len() + knocks.len();
+        if !wrecks.is_empty() {
+            scene = scene.wrecking(wrecks, hulls_from);
+        }
         // The node's file put the material table's listener on the plane's probe (F27a).
         scene.listen_material();
         let mut records = vec![std::mem::take(&mut self.record)];
         records.extend(velocities.iter().map(|_| contact_search::Record { capacity: crate::rider_contact::CAPACITY, ..contact_search::Record::default() }));
-        records.extend(knocks.iter().map(|k| contact_search::Record { capacity: k.capacity, ..contact_search::Record::default() }));
+        records.extend(knocks.iter().chain(wrecks).map(|k| contact_search::Record { capacity: k.capacity, ..contact_search::Record::default() }));
         contact_search::collide(&mut records, 0, Some(&mut self.body), field.as_deref(), &mut scene, dt);
         let movers = contact_search::Search::movers(&scene);
         let players = met.as_deref().map(|m| m.bikes.clone());
@@ -961,7 +1019,9 @@ impl Flight {
         self.record = records.next().unwrap_or_default();
         let owned = velocities.len();
         for e in &mut self.record.contacts {
-            if let Some(k) = e.other.filter(|&o| o > owned && !knocks.is_empty()) {
+            if let Some(i) = e.other.and_then(|o| o.checked_sub(hulls_from)).filter(|&i| i < wrecks.len()) {
+                e.other = Some(WRECK_FROM + wrecked[i]);
+            } else if let Some(k) = e.other.filter(|&o| o > owned && !knocks.is_empty()) {
                 e.other = Some(KNOCK_FROM + k - 1 - owned);
             }
         }
@@ -980,8 +1040,9 @@ impl Flight {
                 m.struck[p] = bike.contacts.into_iter().map(|e| contact::Contact { other: m.named, ..e }).collect();
             }
         }
-        let knocked = records.map(|r| r.contacts).collect();
-        (scene.struck, movers, knocked)
+        let knocked = records.by_ref().take(knocks.len()).map(|r| r.contacts).collect();
+        let hit = records.map(|r| r.contacts).collect();
+        (scene.struck, movers, knocked, hit)
     }
 
     /// The collision object's search alone ([`Flight::search`], what [`Flight::frame_met`] runs before
