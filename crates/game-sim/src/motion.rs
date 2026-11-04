@@ -397,6 +397,17 @@ impl Blend {
         }
     }
 
+    /// The same blend with no cross-fade left: all of its clips, none of the snapshotted pose (P270's
+    /// put-back cut).
+    pub fn unramped(self) -> Blend {
+        match self {
+            Blend::Free => Blend::Free,
+            Blend::One { phase, clip, .. } => Blend::One { phase, ramp: F::ZERO, clip },
+            Blend::Two { phase, mix, a, b, .. } => Blend::Two { phase, mix, ramp: F::ZERO, a, b },
+            Blend::Three { phase, mix, cross, a, b, c, d, .. } => Blend::Three { phase, mix, cross, ramp: F::ZERO, a, b, c, d },
+        }
+    }
+
     /// The clip the entry point drives the motion object's clock from, and the phase it drives it at.
     ///
     /// Every blend entry takes its clip time from its **first** clip — `phase` of *that* one's

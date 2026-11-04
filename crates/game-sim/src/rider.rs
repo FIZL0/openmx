@@ -199,6 +199,13 @@ impl PutBack {
         }
         self.filled = self.placed;
     }
+
+    /// The body was told of the put-back before the fill could (P270's cut, [`Rider::cut_put_back`]):
+    /// held on a word no fill has copied yet. The cut's put-back tick leaves it; so does a put-back
+    /// after the physics on the tick a hold runs out, which is why the reader asks the switch too.
+    pub fn told_early(&self) -> bool {
+        self.held && self.placed && !self.filled
+    }
 }
 
 /// A bike with somebody on it.
@@ -352,6 +359,15 @@ pub struct Rider {
     /// The put-back's two-tick hold on the body (S74), filled by [`Rider::frame`] and read by
     /// [`Rider::body_frame`].
     pub put_back: PutBack,
+    /// **A put-back draws the rider fresh** (P270, the user's ask: "when poofing it should reset your
+    /// character without animation"): on a tick that puts the bike back, the riding body is started
+    /// afresh on the riding pose rather than sprung over from the trick or the wreck it left, the
+    /// bike's clip starts with no cross-fade from the trick's pose ([`motion::Driver::ramp`]), and a
+    /// wreck's thrown bones are not drawn once more ([`Rider::ragdoll_shown`]). Not the original's,
+    /// whose body springs in from the pose it had (S201) and whose bike fades back from the trick:
+    /// false, the default, is the original; the shell turns it on. A constant of the session, like
+    /// [`Rider::edge_armed`]: not sent with a snapshot, and not hashed itself (the ramp it zeroes is).
+    pub cut_put_back: bool,
     /// The bones as the original still draws them on the tick the wreck clock puts the rider back
     /// (S74): the body's request has not seen the put-back yet, so the body is still down and drawn
     /// thrown for one more tick while the bike is already standing on the put-back record.
@@ -492,6 +508,7 @@ impl Rider {
             edge_armed: off_map::armed(off_map::Built::Player, off_map::League::FreeRide),
             page: wreck_page::Page::default(),
             put_back: PutBack::default(),
+            cut_put_back: false,
             ragdoll_shown: None,
             score: Score::default(),
         }
@@ -1327,6 +1344,26 @@ impl Rider {
         let before = if out.respawned { self.ride.transform() } else { before };
         if out.wreck.is_none() && Self::entry_waits(&self.state, self.crash.as_ref(), self.ragdoll.as_ref(), self.riding.as_deref(), out.respawned) {
             out.separated |= self.enter_late(dt, world);
+        } else if out.respawned && self.cut_put_back {
+            // A put-back that cuts (P270) starts the body at nothing: it is placed next tick off the
+            // skeleton the shell poses after this one, which the hold shows straight on, and not off
+            // the trick or the wreck the skeleton still had at the top of this tick.
+            self.riding = None;
+            // Nor is the wreck drawn once more at the new spot: the body is told of the put-back on
+            // this tick's request and not the next fill's (S74's lag after the wreck clock or page),
+            // so it is held on the bike now rather than thrown, and the thrown bones go.
+            self.ragdoll_shown = None;
+            self.put_back.held = true;
+            self.put_back.wreck = false;
+            // Shown straight on, as a held rider is (S111), from this tick and not the next.
+            self.motion.freeze();
+            self.packed_pose = self.motion.pose;
+            self.packed_fore_aft = self.motion.fore_aft;
+            // And the bike's clip starts on its riding pose: the restart this tick's motion frame made
+            // fades from the trick's pose over a third of a second, which slid the bike, the grips and
+            // the rider held to them back from the trick at the new spot.
+            self.motion.ramp = F::ZERO;
+            self.animation.blend = self.animation.blend.unramped();
         } else {
             self.riding_tick(&before, table, clip, dt, world);
         }
@@ -1459,6 +1496,7 @@ impl Rider {
             wreckage,
             ragdoll,
             put_back,
+            cut_put_back,
             feet,
             ..
         } = self;
@@ -1515,7 +1553,10 @@ impl Rider {
         // velocity's forward lane, all three copied by the request's fill.
         body_request.phase_axis = *packed_pose;
         body_request.mix_axis = *packed_fore_aft;
-        body_request.band = F(ride.air.contact_vel.z());
+        // The band off the bike as the put-back set it down, standing still, on a cut's put-back tick
+        // (P270): the contact speed is still the one the wreck left, which the next physics rewrites,
+        // and it drew the rolling pose for a tick before the standing one.
+        body_request.band = if *cut_put_back && put_back.told_early() { F::ZERO } else { F(ride.air.contact_vel.z()) };
         body_request.progress = tricks.progress;
         body_request.seq = tricks.seq;
         if front {
