@@ -2,7 +2,7 @@
 
 The tape is C16's `context/recordings/c16/fly.p2m2`, with its state, which holds frame 137402. The
 capture is `context/capture/c16/fly.csv`: one row a tick at 60 Hz, 137403..140224. Both were copied from
-slot s2. The events are the plane-0 events in research/c16/index.md.
+slot s2. C25 restored them and the images below to slot s1 (research/c16/index.md, Files). The events are the plane-0 events in research/c16/index.md.
 
 The test is `crates/game-sim/tests/c16_fly.rs`. Run it with
 `cargo test -p game-sim --test c16_fly -- --nocapture`. It prints each run's holds and parting rows.

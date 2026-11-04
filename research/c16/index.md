@@ -12,8 +12,23 @@ The tape was generated, not played by hand: no pad works on this desktop. Nobody
 
 ## Files
 
-Everything under context/ is git-ignored. It lives in this worktree, `openmx-slots/s2`, so copy it
-from there.
+Everything under context/ is git-ignored. It was made in `openmx-slots/s2`. C25 (2026-11-03) restored
+it to `openmx-slots/s1` and keeps a spare copy in `openmx-slots/kept-context/c16`; copy it from either.
+
+- **C25's restore.** By C25 the tape and the capture were gone from every slot, but the saves were not.
+  Kit copy 2's slot 5 (`openmx-slots/s2-slots/pcsx2/s2/PCSX2/savestates`) still held frame 137402, so
+  steps 4 and 5 below were redone from it. The tape is regenerated from the same segments, so it is the
+  same tape on the same state.
+- **The capture.** It was recorded again on kit copy 1 at NominalScalar 0.05.
+- **The s272 images.** Copy 3's slots 10..47 (`openmx-slots/s3-slots/...`) still held S272's 38 saves,
+  each on its tick in research/s272/image_ticks.txt. `research/s272/rams.py` turned them back into
+  `context/states/s272/`. The one image that had survived (`s3/context/states/s272/s272-137910.ram`) is
+  byte for byte the same as slot 17's. The 137402 image is copy 2's slot 5, unpacked with `./kit state ram`.
+- **Checked.** events.py on the new capture gives every event in the table below on the same frame.
+  `cargo test --release -p game-sim --test c16_fly` runs all of it again. It needs the disc's MX.PSR
+  in `context/iso` (`./kit extract --only MX.PSR --out context/iso`), or it skips. Every hold comes out
+  as S272 pinned it. To get there, `fly()` now reads P2's wreck reason from the first row when it seeds
+  from 137402, the state's own frame, which has no row.
 
 - **Tape.** `context/recordings/c16/fly.p2m2` has 2822 fields. It needs its state,
   `fly.p2m2_SaveState.p2s`, which holds frame_counter 137402. So field n is frame 137403 + n.

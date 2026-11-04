@@ -607,7 +607,7 @@ fn fly(from: u32, to: u32, zero: u32) -> Option<([[u32; 3]; 2], Vec<Tick>)> {
     let cap = capture()?;
     let tape = tape()?;
     let dt_of = |t: u32| F(cap.f((t + 1).max(cap.first as u32), "dt"));
-    let reason = cap.u(from, "p2_wreck_reason");
+    let reason = cap.u(from.max(cap.first as u32), "p2_wreck_reason");
     fly_by(from, to, &dt_of, &|t| tape_pad(&tape, t, zero), &|t| chord(&tape, t + 1, zero), reason)
 }
 
