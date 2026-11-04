@@ -67,7 +67,9 @@ pub struct Car {
     pub path_is_level: bool,
     /// `PresampleTerrain`: snap the keys to the ground once instead of the car every frame.
     pub presample: bool,
-    /// `DriveOnSoultree`. Off for every car on the disc; the ground ray it asks for is not ported.
+    /// `DriveOnSoultree` (on where it is missing, as the original's reader has it). Off for every car on
+    /// the disc. Nothing reads it: with it on and `PresampleTerrain` off the original hangs (S187), and
+    /// the port's car rides the terrain alone ([`game_sim::traffic`]).
     pub drive_on_soultree: bool,
     /// `HasPhysics`: the path car's subclass with a rigid body of its own, which wakes when something
     /// strikes the car (S127). Driven along its clip like any other until then.
@@ -114,7 +116,7 @@ fn car(s: &Section) -> Car {
         lag: number("LagDistance").unwrap_or(0.0),
         path_is_level: flag("PathIsLevel"),
         presample: flag("PresampleTerrain"),
-        drive_on_soultree: flag("DriveOnSoultree"),
+        drive_on_soultree: s.get("DriveOnSoultree").is_none_or(ini::switch),
         has_physics: flag("HasPhysics"),
         steer_front: s.get("SteerFrontTires").is_none_or(ini::switch),
         sounds: (1..=s.number("NumberOfSounds").unwrap_or(0.0).max(0.0) as usize)
