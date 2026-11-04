@@ -273,6 +273,106 @@ pub fn focus_notice() -> Option<usize> {
     NOTICE.swap(0, Ordering::Relaxed).checked_sub(1)
 }
 
+// ---- away and back (P298) -------------------------------------------------------------------------
+
+/// How many times the app has gone away (WillResignActive or DidEnterBackground), and how many of
+/// those the shell has answered with [`answered_away`]: the shell's thread pauses and saves where the
+/// player is on each one.
+static AWAY: AtomicUsize = AtomicUsize::new(0);
+static ANSWERED: AtomicUsize = AtomicUsize::new(0);
+/// How many times the app has come back (DidBecomeActive) since the last [`take_back`].
+static BACK: AtomicUsize = AtomicUsize::new(0);
+
+/// How long DidEnterBackground waits on the main thread for the shell to save, of the five seconds
+/// or so iOS gives the app before it is suspended.
+const SAVE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The lifecycle block's body, on the main queue: going away counts one for the shell to answer, and
+/// entering the background waits for that answer, so the save is written before iOS suspends the
+/// app; coming back counts one; a memory warning is logged with the memory then (opentennis's B538:
+/// the last sign before iOS closes the app for memory).
+extern "C" fn on_lifecycle(_: *const Block, note: Id) {
+    pool(|| {
+        let name = text(get(note, c"name"));
+        match name.as_str() {
+            "UIApplicationWillResignActiveNotification" => {
+                AWAY.fetch_add(1, Ordering::Relaxed);
+            }
+            "UIApplicationDidEnterBackgroundNotification" => {
+                let asked = AWAY.fetch_add(1, Ordering::Relaxed) + 1;
+                let start = std::time::Instant::now();
+                while ANSWERED.load(Ordering::Relaxed) < asked && start.elapsed() < SAVE_WAIT {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                let answered = ANSWERED.load(Ordering::Relaxed) >= asked;
+                eprintln!(
+                    "iOS {name}: {} after {} ms, {}",
+                    if answered { "saved" } else { "the shell did not answer" },
+                    start.elapsed().as_millis(),
+                    memory()
+                );
+            }
+            "UIApplicationWillEnterForegroundNotification" => eprintln!("iOS {name}, {}", memory()),
+            "UIApplicationDidBecomeActiveNotification" => {
+                BACK.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => eprintln!("iOS memory warning: {}", memory()),
+        }
+    });
+}
+
+/// Watch the app go to the background and come back, and iOS's memory warnings (P298), for the
+/// life of the process. Call once.
+pub fn watch_lifecycle() {
+    let descriptor = Box::leak(Box::new(BlockDescriptor { reserved: 0, size: std::mem::size_of::<Block>() }));
+    let block: &'static Block = Box::leak(Box::new(Block {
+        // only the address of the runtime's global block class
+        isa: &raw const _NSConcreteGlobalBlock,
+        flags: BLOCK_IS_GLOBAL,
+        reserved: 0,
+        invoke: on_lifecycle,
+        descriptor,
+    }));
+    pool(|| {
+        let center = get(class(c"NSNotificationCenter"), c"defaultCenter");
+        let main = get(class(c"NSOperationQueue"), c"mainQueue");
+        for name in [
+            c"UIApplicationWillResignActiveNotification",
+            c"UIApplicationDidEnterBackgroundNotification",
+            c"UIApplicationWillEnterForegroundNotification",
+            c"UIApplicationDidBecomeActiveNotification",
+            c"UIApplicationDidReceiveMemoryWarningNotification",
+        ] {
+            // SAFETY: as in `watch_focus`: objc_msgSend cast to NSString's and NSNotificationCenter's
+            // signatures; the block lives for the process
+            let observer = unsafe {
+                let string: extern "C" fn(Id, Id, *const std::ffi::c_char) -> Id = std::mem::transmute(objc_msgSend as *const ());
+                let ns = string(class(c"NSString"), sel(c"stringWithUTF8String:"), name.as_ptr());
+                let add: extern "C" fn(Id, Id, Id, Id, Id, *const Block) -> Id = std::mem::transmute(objc_msgSend as *const ());
+                add(center, sel(c"addObserverForName:object:queue:usingBlock:"), ns, std::ptr::null_mut(), main, block)
+            };
+            retain(observer);
+        }
+    });
+}
+
+/// The app has gone away since the shell last answered: the count to hand [`answered_away`] once
+/// the ride is paused and where the player is is saved. Any thread.
+pub fn away() -> Option<usize> {
+    let asked = AWAY.load(Ordering::Relaxed);
+    (asked > ANSWERED.load(Ordering::Relaxed)).then_some(asked)
+}
+
+/// The shell has done what going away asks, up to [`away`]'s count `asked`.
+pub fn answered_away(asked: usize) {
+    ANSWERED.fetch_max(asked, Ordering::Relaxed);
+}
+
+/// Whether the app has come back to the foreground since the last call. Any thread.
+pub fn take_back() -> bool {
+    BACK.swap(0, Ordering::Relaxed) > 0
+}
+
 /// Low Power Mode and the thermal state, for the log (P238): either can hold the picture down.
 pub fn power() -> String {
     pool(|| {

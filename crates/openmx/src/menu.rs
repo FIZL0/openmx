@@ -2927,6 +2927,73 @@ pub const CLAIMED_FRAMES: u32 = 72;
 /// The splash's Quit popup's rows.
 const QUIT_ROWS: [&str; 2] = [QUIT, "Stay"];
 
+/// The main menu's resume popup (P298): where the player was when the app was last ended away,
+/// up once the splash has 1P, until it is answered. The shell sets it at launch ([`Offer::put`]) and
+/// takes its answer ([`Offer::take`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Offer {
+    /// What it offers ("Free Ride on free06"), and its row: 0 Resume, 1 Not Now.
+    asking: Option<(String, usize)>,
+    answer: Option<bool>,
+}
+
+/// The resume popup's rows.
+pub const OFFER_ROWS: [&str; 2] = ["Resume", "Not Now"];
+
+impl Offer {
+    /// Offer `what` on the main menu.
+    pub fn put(&mut self, what: String) {
+        self.asking = Some((what, 0));
+        self.answer = None;
+    }
+
+    /// What it offers and the row it is on, while it is up.
+    pub fn asking(&self) -> Option<(&str, usize)> {
+        self.asking.as_ref().map(|(w, r)| (w.as_str(), *r))
+    }
+
+    /// The answer, once: Resume or not.
+    pub fn take(&mut self) -> Option<bool> {
+        self.answer.take()
+    }
+
+    /// The main menu's press while the popup is up: up and down move the row, Cross answers it,
+    /// Circle is Not Now. Whether it took the press.
+    fn step(&mut self, p: Press) -> bool {
+        let Some((_, row)) = &mut self.asking else { return false };
+        if p.up || p.down {
+            *row = 1 - *row;
+        } else if p.ok || p.start {
+            self.answer = Some(*row == 0);
+            self.asking = None;
+        } else if p.back {
+            self.answer = Some(false);
+            self.asking = None;
+        }
+        true
+    }
+}
+
+impl Screen {
+    /// The screen a resume point opens for this one (P298): the screen itself where it opens alone,
+    /// the screen it is reached from where it needs what the player was doing there (a lobby's room,
+    /// a local game's joins, a typed name), none for the splash and the main menu, which a launch
+    /// shows anyway, and none over a ride, whose point is the ride's.
+    pub fn resumed_as(self) -> Option<Screen> {
+        match self {
+            Screen::Splash | Screen::Main | Screen::Pause | Screen::Tricks | Screen::Audio | Screen::Join | Screen::Split | Screen::Assign => None,
+            Screen::Games | Screen::Lobby => Some(Screen::Online),
+            Screen::Keyboard => Some(Screen::Garage),
+            s => Some(s),
+        }
+    }
+
+    /// The screen's title, as its page heads it.
+    pub fn name(self) -> &'static str {
+        self.title()
+    }
+}
+
 /// Where the pause's Main Menu row takes this machine (P110), as the shell says, which its confirm
 /// is worded for.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -3107,6 +3174,8 @@ pub struct Menu {
     changed: bool,
     /// A line for the ticker, which is how a ride that could not start says why.
     pub note: Option<String>,
+    /// P298: where the player was when the app was last ended away, offered on the main menu.
+    pub offer: Offer,
     /// P193: the newer build the site has (the page's `version.txt`, [`newer_build`]), which the main
     /// menu offers to reload into; never over a ride.
     pub newer: Option<String>,
@@ -3446,6 +3515,7 @@ impl Menu {
             tick: 0,
             changed: false,
             note: None,
+            offer: Offer::default(),
             newer: None,
             updated: None,
             updated_asked: false,
@@ -4792,6 +4862,10 @@ impl Menu {
         };
         if screen == Screen::Main {
             self.builds();
+            // P298: the resume offer's popup takes the press while it is up.
+            if self.offer.step(p) {
+                return Act::Stay;
+            }
         }
         if screen == Screen::Keyboard {
             return self.keyboard(p);

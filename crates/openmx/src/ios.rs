@@ -36,6 +36,8 @@ pub fn main() {
     let _ = std::fs::create_dir_all(&docs);
     openmx_ios::log_to(&docs.join(LOG));
     openmx_ios::watch_focus();
+    // P298: going to the background pauses the ride and saves where the player is.
+    openmx_ios::watch_lifecycle();
     println!(
         "openmx {} ({} build {}{}) on iOS, {}",
         env!("CARGO_PKG_VERSION"),
