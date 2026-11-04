@@ -16,7 +16,8 @@
 //!   too, and the put-back posts its own event (category 8, id 0x15).
 //! - The backflip ([`backflip`], MD93a): SLUS-21104's on Untamed's input. The fourth trick button
 //!   arms it whatever else is held, a bound backflip control fires it on the lip at once, the lip reads
-//!   the stick before the limiter, and a flip's end clears a stunt id over 48 (SLUS-21104: 40).
+//!   a stick word of its own (on the shipped bindings the same axis as the limited stick's, R30), and a
+//!   flip's end clears a stunt id over 48 (SLUS-21104: 40).
 //! - The 360 ([`spin`], MD93b): SLUS-21104's on the same input. The fourth trick button arms it, a
 //!   bound 360 control fires it on the lip at once with torques of its own, the torque decays only with
 //!   no trick button held and the stick off centre, and its end clears a stunt id over 48.
@@ -283,7 +284,9 @@ pub struct FlipIn {
     /// Any of the four trick buttons is held: the flight's torque then does not decay.
     pub trick_held: bool,
     /// The stick's fore-aft as the lip reads it: the reader copies it from a pad word of its own, apart
-    /// from [`AirStep::stick`]'s (which the flight's decay reads); the d-pad overrides both alike.
+    /// from [`AirStep::stick`]'s (which the flight's decay reads); the d-pad overrides both alike. The
+    /// input object fills both words from the axis bound to each one's action, and the shipped bindings
+    /// put both on the same axis (R30).
     pub lip_y: F,
     /// The flick the triggered torque is mapped from (a control of its own, apart from the preload's
     /// [`AirStep::stick_hold`]).
@@ -441,8 +444,12 @@ pub fn stunt_stand_in(trick_held: bool, backflip: bool, spin_clip: bool, on_grou
 ///   style's, the only one the game picks, and none of the shipped stunts map one to the backflip. So
 ///   the stick's down-and-up is always the flip.
 /// - The lip reads the step's stick. In the reader the lip's copy differs from the limited one only by
-///   the pad word it is copied from (the d-pad overrides both alike); what makes those words differ
-///   was not traced.
+///   the pad word it is copied from (the d-pad overrides both alike). The input object fills those
+///   words from the device axis bound to each word's action, and the shipped bindings put the lip's
+///   and the limited stick's actions on the same axis. Neither word is limited, so the step's
+///   unlimited stick with the d-pad applied is right (R30). They differ only where a player's
+///   second device pushes further than the pad: then it replaces the limited words and not the
+///   lip's. No shipped setup has a second device.
 pub fn ride_backflip(p: &AirParams, air: &mut Air, chassis: &mut Chassis, step: &AirStep, trick: [bool; 3],
                      frame: &crate::chassis::Mat3, flip: &mut super::Flip, steep: impl FnOnce() -> bool) {
     if step.stunt {
@@ -508,7 +515,8 @@ pub struct SpinIn {
     /// Any of the four trick buttons is held: the torque in the air then does not decay.
     pub trick_held: bool,
     /// The stick's side-to-side as the lip reads it (`+0x12bc`, the reader's copy of a pad word of its
-    /// own, apart from [`SpinIn::x`]'s; the d-pad overrides both alike).
+    /// own, apart from [`SpinIn::x`]'s; the d-pad overrides both alike). On the shipped bindings both
+    /// words are the same axis (R30).
     pub lip_x: F,
     /// The limited stick's side-to-side (`+0x1298`), which the decay in the air reads.
     pub x: F,
@@ -718,7 +726,8 @@ pub fn spin_stunt(dir: i32) -> i32 {
 /// - The arming button (pad record `+24`) is `trick[2]`, R1, the fourth trick action's default. A trick
 ///   is held when any of the three is.
 /// - Both sticks are the step's: the lip's x (`+0x12bc`) and the decay's (`+0x1298`) are plain copies
-///   of two pad words. The d-pad overrides both alike.
+///   of two pad words. The d-pad overrides both alike. The words are the axes bound to two actions,
+///   which the shipped bindings put on the same axis (R30, as in [`ride_backflip`]).
 /// - The flick is `flick`, the side flick. The spin hold (`+0x12b8`) is bound by default to the
 ///   analogue control SLUS-21104's spin hold reads.
 /// - There is no bound control ([`SpinIn::button`] `None`). The 360's "bound" (`0x00252630`) is the

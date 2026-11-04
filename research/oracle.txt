@@ -9169,6 +9169,32 @@ atv_heap_free               atv 0x001b76d0 = free
 #   Then +0x1548 = stunt for any other stunt, for +0x13c8/cc/d0 only when +0x1548 > 48, for +0x13d4/d8 never.
 #   So while the 360's clip runs, the rider's id is 52/53 unless a trick (<= 48) holds it.
 
+# R30 — what writes Untamed's (SLUS-21701) bike pad record stick words 0xdf..0xe5, on context/untamed/ram/nat_or.bin.
+# Comment rows only. Test: untamed_reworked.rs untamed_lip_stick_is_the_limited_stick. Journal:
+# research/journal/2026-11-03-r30-untamed-lip-stick.
+#   The record is the input object's: its update 0x005203d0 (a0 input object, f12 dt; Ghidra shows the dt as a
+#   first argument) builds it on its stack (sp + 0x50) and hands it to each listener on the input's +0x30 list
+#   (node +0 listener, +8 next; called when input +0x50 != 0 and listener +0x14 != 0) through the listener's
+#   vtable (+0x48) slot +0x20. The bike's slot is the thunk 0x004e1eb0 (this - 0x464) to the reader 0x004fb7d0
+#   (bike sub-object vtable 0x003f0640, base 0x003d5c20 whose slot +0x20 is 0x0050f330).
+#   Input object: +0x54 the player's device (controls[n]) and +0x60 a second one (controls[n + 2]), set by
+#   0x0051f540 (input, ?, n, ?); +0x7c a 32-sample history index. Record: word 0 = n (the index whose controls
+#   entry is +0x54); words 1..0xde = the input's +0x39c.. (0x20 button entries of 0x18 bytes from the devices'
+#   vt +0x18 (dev, i), the second device's only where the first's value +4 is 0; then 5 analogue entries
+#   0x20..0x24 whose value is 0x00520980(0.8, input, input + 0x100 + 0x80i, input + 0x80): the flick over axis
+#   i's history); words 0xdf..0xe5 = input +0x380, +0x384, +0x388, +0x38c, +0x394, +0x398, +0x390.
+#   Those seven are 0x001281c0(device, action) + 8: the device's axis entry +0x714 + 0x20 * bind(action)
+#   (0x00127c00, the same map as the binding lookup), value at +0x71c + 0x20 * axis. Actions: 0xdf <- 0x52,
+#   0xe0 <- 0x51, 0xe1 <- 0x57, 0xe2 <- 0x56, 0xe3 <- 0x54, 0xe4 <- 0x55, 0xe5 <- 0x53. Then, with a second
+#   device, its raw axes 0/1 (0x001281a0(dev, k) + 8) replace +0x380/+0x384 when |theirs| is greater (input
+#   +0x58/+0x5c flag it); the lip's +0x394/+0x398 are not touched.
+#   On the image both devices bind 0x52 -> 0, 0x51 -> 1, 0x54 -> 0, 0x55 -> 1, 0x57 -> 2, 0x56 -> 3, 0x53 -> -1
+#   (so 0xe5, the bike's +0x12b4, reads the device's +0x6fc, the word before axis 0's entry), and controls[2]
+#   and controls[3] are 0. So the bike's +0x1298/+0x129c and the lip's +0x12bc/+0x12c4 are the same two axis
+#   words: neither is limited. Run on the image with axes (0.3, -0.7, 0.5, 0.9) the record's 0xdf..0xe4 read
+#   0.3, -0.7, 0.5, 0.9, 0.3, -0.7; with device 1 as the second device at (-0.95, 0.2), 0xdf reads -0.95 and the
+#   rest are unchanged.
+
 # F31 — SLUS-21104's own bike frame replays C15's ride and flip bit-exact in the interpreter, off state 4's RAM
 # image (context/mxvatv-ps2/state04.ee.bin), proved by crates/game-sim/tests/mxvatv_bike_ride.rs. Comment rows
 # only. Journal: research/journal/2026-11-03-f31-mxvatv-bike-replay.

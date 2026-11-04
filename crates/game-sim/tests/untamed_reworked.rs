@@ -2359,3 +2359,76 @@ fn untamed_ride_spin_input_is_the_shipped_bindings() {
         }
     }
 }
+
+/// R30: what writes the pad record's stick words. The input object's update (`0x005203d0`) fills them
+/// from its device's analogue axes, each by the action bound to it (`0x001281c0`: the axis the action is
+/// bound to, its value at `+8`), and hands the record to each listener's slot `+0x20` (the bike's
+/// reader, through the thunk at `0x004e1eb0`). Words 0xdf/0xe0, which the reader copies to the "limited"
+/// `+0x1298`/`+0x129c`, are actions 0x52/0x51. Words 0xe3/0xe4, the lip's `+0x12bc`/`+0x12c4`, are
+/// actions 0x54/0x55. Device 0 binds 0x52 and 0x54 to axis 0, and 0x51 and 0x55 to axis 1, so the lip's
+/// stick and the limited one are the same two numbers. Neither has been limited: the stick
+/// [`untamed::ride_backflip`]/[`untamed::ride_spin`] feed both from is right.
+///
+/// The one difference is the player's second device (the controls' entry two past the first, `+0x60`):
+/// where its raw axis 0 or 1 is out further, it replaces 0xdf/0xe0 and leaves the lip's words alone. The
+/// image has no second device.
+#[test]
+fn untamed_lip_stick_is_the_limited_stick() {
+    /// The controls manager's pointer, the input object's update, the call it ends on, and the
+    /// device's axes (`+0x714`, 0x20 apart, the value at `+8`).
+    const CONTROLS: u32 = 0x003f_f6b8;
+    const INPUT_UPDATE: u32 = 0x0052_03d0;
+    const INPUT_UPDATE_TAIL: u32 = 0x0012_6c50;
+    const AXES: u32 = 0x71c;
+    /// The input object, its listener list's one node, the listener, its vtable and the slot's
+    /// address, which is hooked.
+    const INPUT: u32 = OBJ;
+    const NODE: u32 = OBJ + 0x1000;
+    const LISTENER: u32 = OBJ + 0x1100;
+    const LISTENER_VTABLE: u32 = OBJ + 0x1200;
+    const LISTEN: u32 = OBJ + 0x1300;
+    let Some(mut ee) = image() else { return };
+    let controls = ee.u32_at(ee.u32_at(CONTROLS));
+    let (pad, pad2) = (ee.u32_at(controls), ee.u32_at(controls + 4));
+    assert_eq!(ee.u32_at(controls + 8), 0, "player 1's second device");
+    assert_eq!(ee.u32_at(controls + 12), 0, "player 2's second device");
+
+    let words = Rc::new(RefCell::new(Vec::<u32>::new()));
+    let log = words.clone();
+    ee.hooks.insert(LISTEN, Box::new(move |ee| {
+        let rec = ee.r(5) as u32;
+        *log.borrow_mut() = (0xdf..=0xe4).map(|w| ee.u32_at(rec + 4 * w)).collect();
+    }));
+    ee.hooks.insert(INPUT_UPDATE_TAIL, Box::new(|_| {}));
+    // The stick at (0.3, -0.7), the right one at (0.5, 0.9); the second device's at (-0.95, 0.2).
+    let axes = [0.3f32, -0.7, 0.5, 0.9];
+    let second = [-0.95f32, 0.2];
+    for (k, v) in axes.into_iter().enumerate() {
+        ee.set_f32(pad + AXES + 0x20 * k as u32, v);
+    }
+    for (k, v) in second.into_iter().enumerate() {
+        ee.set_f32(pad2 + AXES + 0x20 * k as u32, v);
+    }
+    let bits = |v: f32| v.to_bits();
+    for (second_device, want) in [
+        (0, [axes[0], axes[1], axes[2], axes[3], axes[0], axes[1]]),
+        (pad2, [second[0], axes[1], axes[2], axes[3], axes[0], axes[1]]),
+    ] {
+        for o in (0..0x1400).step_by(4) {
+            ee.set_u32(OBJ + o, 0);
+        }
+        ee.set_u32(INPUT + 0x30, NODE);
+        ee.set_u32(INPUT + 0x50, 1);
+        ee.set_u32(INPUT + 0x54, pad);
+        ee.set_u32(INPUT + 0x60, second_device);
+        ee.set_u32(NODE, LISTENER);
+        ee.set_u32(LISTENER + 0x14, 1);
+        ee.set_u32(LISTENER + 0x48, LISTENER_VTABLE);
+        ee.set_u32(LISTENER_VTABLE + 0x20, LISTEN);
+        words.borrow_mut().clear();
+        // (input, dt): Ghidra reads the dt in `$f12` as a first argument.
+        ee.call(INPUT_UPDATE, &[u64::from(INPUT)], &[1.0 / 30.0], 1_000_000);
+        // Words 0xdf, 0xe0, 0xe1, 0xe2, 0xe3, 0xe4.
+        assert_eq!(*words.borrow(), want.map(bits), "second device {second_device:#x}");
+    }
+}
