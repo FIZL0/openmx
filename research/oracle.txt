@@ -5069,6 +5069,21 @@ stunt_countdown_listener    boot 0x003dec80 (listener) thunk to 0x003de8c0: past
 # The out listeners mode 3 calls in this event are no-ops: the card owner (rider +0xf9c, slot 0x18
 #   0x00281b00 -> jr ra), the card's chain (slot 0x18 0x00261170), the activity listener (+0x14
 #   0x00261160).
+# C13 — the same event won live (research/journal/2026-11-04-c13-won-freestyle-event, card total
+#   written past the target mid-event; checked in tests/event.rs a_won_live_event_runs_like_the_port).
+# The warning HUD (player entry +0x58): 0x00366680(hud, on) calls *(hud + 0xb0)'s vtable (at its +0x6c,
+#   0x00453790) slot 0x50 = 0x0022ca80 (sw a1, 0x58(a0)) and slot 0x54 = 0x0022ca90 (sw a1, 0x54(a0)),
+#   both with `on`, then slot 0xbc when +0x58 is 0. So the warning's RAM trace is *(hud + 0xb0) + 0x54
+#   (and +0x58, always equal). The activity's frame 0x003ddf70 makes the call.
+# The announcer (player entry +0x64): 0x00361730(delay, duration, announcer, id, player, 0) queues a
+#   message; announcer +0xac is the queued count, +0xb0 the list. Ids: 5 the target reached (the frame,
+#   duration 3.0, shown "Objective Complete!"), 6 a win, 7 a loss (the end 0x003dd870).
+# The end clears the latch (entry +0xc0 = 0, +0x720 = 0, +0xcc = 1) before the verdict. A win needs
+#   the total *above* the target (and the leader, alone); it sets the UI string STR_FREESTYLE_STUNT_WIN to
+#   "You Win!" ("Tie!" on a tie) and sends "activity win" / "activity lose" to the activity's +0x20
+#   (0x00279990). Outside a career it shows "To complete this Stunt Activity you must be in a career!".
+# The event's card (manager +0x34, 0x01c833c0 in first_recording) is the human's freeride card itself:
+#   C9's free_flags/free_total are its +0x8/+0xdc.
 # --- V42: the speedometer's digital readout, the default in crates/openmx/src/overlay.rs ---
 # speedo_mode's setting is *(*(*(*0x0041f770 + 0x3d4) + 8) + 0x1c), 1 = digital; speedo_update
 #   forces digital when the byte at *(opts + 0xc) + 0x114 (players) is 2 or more. speedo_mode runs
