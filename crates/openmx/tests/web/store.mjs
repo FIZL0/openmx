@@ -344,9 +344,16 @@ for (const end = Date.now() + 10000; Date.now() < end; ) {
   await new Promise(r => setTimeout(r, 200));
 }
 d = await data();
-// The install read the mods folder again (P217): Free Ride's list has the track, out of OPFS.
+// The install read the mods folder again (P217): Free Ride's list has the track, out of OPFS. Since P293 an install
+// waits for the player's word, the Reload / Later popup with Reload lit, so Space answers it; pressed before the popup
+// is up it lands on the store's installed card, which does nothing more.
 const said = prefix => logs.find(l => l.startsWith(prefix)) ?? null;
-for (const end = Date.now() + 10000; Date.now() < end && !said('mods: 1 tracks'); ) await new Promise(r => setTimeout(r, 200));
+for (const end = Date.now() + 20000; Date.now() < end && !said('mods: 1 tracks'); ) {
+  await key('keyDown');
+  await new Promise(r => setTimeout(r, 80));
+  await key('keyUp');
+  await new Promise(r => setTimeout(r, 1000));
+}
 const listed = said('mods: 1 tracks');
 // and its card's picture, the zip's previews/0.png out of OPFS (P261)
 for (const end = Date.now() + 10000; Date.now() < end && !said('mods: pictures of'); ) await new Promise(r => setTimeout(r, 200));

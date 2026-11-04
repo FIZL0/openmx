@@ -222,6 +222,9 @@ mod pad;
 // remembered or a picker, and the per-user data folder.
 #[cfg(not(target_arch = "wasm32"))]
 mod player;
+// The menu's own disc browser (P220), for a player's start with no dialog program and no terminal.
+#[cfg(not(target_arch = "wasm32"))]
+mod disc_browser;
 mod particles;
 mod plane_draw;
 mod kiowa_draw;

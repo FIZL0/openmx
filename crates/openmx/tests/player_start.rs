@@ -84,13 +84,16 @@ fn the_disc_from_the_command_line_then_from_the_path_remembered() {
     assert!(std::fs::read_to_string(data.join("disc.txt")).unwrap().lines().any(|l| l == arg));
 
     // nothing remembered and no picker to ask (stdin is no terminal, the test's PATH may have a
-    // dialog, so empty it): it says how to start it
+    // dialog, so empty it), and no display for the menu's own browser (P220, tests/disc_browser.rs):
+    // it says how to start it
     std::fs::remove_file(data.join("disc.txt")).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_openmx"))
         .arg("--where")
         .current_dir(dir.join("cwd"))
         .env("XDG_DATA_HOME", dir.join("data"))
         .env("PATH", "")
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
         .stdin(std::process::Stdio::null())
         .output()
         .unwrap();

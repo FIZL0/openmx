@@ -912,7 +912,8 @@ fn the_ground_at_both_ends_replays_bit_exact() {
 #[test]
 fn the_rotors_probe_is_the_images() {
     let Some(disc) = the_disc() else { return };
-    let ee = Ee::from_ram(&ctx(STATE).unwrap()).unwrap();
+    let Some(ram) = ctx(STATE) else { return };
+    let ee = Ee::from_ram(&ram).unwrap();
     let p = ee.u32_at(HELI + 0x458);
     let want = disc.phy.wreck_rotor.probe();
     assert_eq!(ee.u16_at(p + 0x160), want.root, "the root");

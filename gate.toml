@@ -31,6 +31,9 @@ tests = [
     "--test fixed_rate::",
     # a desktop peer and headless chromium over a loopback relay: chromium starts slowly under load (P213, 10-29)
     "--test netplay_browser::",
+    # two shells switch cars a moment apart and the lines' order follows the wall clock: at load 47 the host
+    # said monster before baja, alone it passes (P220, 11-04)
+    "::(.*::)?two_online_shells_drive_two_cars_at_once$",
 ]
 
 [alone]
@@ -40,7 +43,10 @@ tests = [
 # one_fps at load 31, 10-27; holding the machine for every run would stall every gate). one_fps and ecosystem's densest view both
 # red in the first parallel merge gate (P128, 10-23 16:16) and are the original's frame-budget and the smooth
 # rule's no-slower checks.
-tests = ["-p openmx --test one_fps", "-p game-render --test ecosystem"]
+# world_ultra_load's first frame within 20 s and its paint updates within a frame's budget: 57 s and 13.24 ms in
+# the pool at load 35-47; the paint passed alone, the first frame came at 20.07 s in a lone run still at load 47
+# from other slots' builds (P220, 11-04).
+tests = ["-p openmx --test one_fps", "-p game-render --test ecosystem", "-p openmx --test world_ultra_load"]
 
 [display]
 # Every window a check's tests open goes to a private headless weston + Xwayland that ends with the check
