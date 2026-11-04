@@ -5851,13 +5851,19 @@ impl Menu {
         }
         let want = if s.track_filter.is_empty() { ALL_GAMES } else { s.track_filter.as_str() };
         let filter_group = groups.iter().position(|(name, _)| name == want).unwrap_or(0);
+        // The lit game's tracks. The worlds' filter lists the disc's worlds before the installed
+        // ones (P280: the user found no MX Unleashed world there), though their rows are the disc's.
+        let mut r: Vec<usize> = Vec::new();
+        if groups[filter_group].0 == pack_name(WORLDS) {
+            r.extend(TRACKS.len()..DISC_PICK);
+        }
+        r.extend(groups[filter_group].1.clone());
         // The categories within the lit game's tracks (MD66).
-        let r = groups[filter_group].1.clone();
         let categories = if count <= DISC_PICK {
             vec![ALL_CATEGORIES.to_string()]
         } else {
             let mut seen: Vec<String> = Vec::new();
-            for i in r.clone() {
+            for &i in &r {
                 if !seen.contains(&categories_of[i]) {
                     seen.push(categories_of[i].clone());
                 }
@@ -5875,8 +5881,8 @@ impl Menu {
         };
         let category_group = if s.track_category.is_empty() { 0 } else { categories.iter().position(|c| *c == s.track_category).unwrap_or(0) };
         let list = match category_group {
-            0 => r.collect(),
-            lit => r.filter(|&i| categories_of[i] == categories[lit]).collect(),
+            0 => r,
+            lit => r.into_iter().filter(|&i| categories_of[i] == categories[lit]).collect(),
         };
         Lists { key, shown, categories_of, groups, filter_group, categories, category_group, list }
     }
@@ -5957,17 +5963,18 @@ impl Menu {
     /// and its tracks' range: with mods listed, All Games (every track) first, then MX Unleashed (the
     /// disc's towns, and a mod made from MX Unleashed after them), the worlds (the combined and ultra
     /// maps) right after (user, 2026-10-23), then each other source game that has a track, by name.
-    /// With none, the disc's alone.
+    /// With none, the disc's alone. A range is the filter's mods: the worlds' lists the disc's
+    /// worlds ([`DISC_WORLDS`]) too, before its own (P280), as [`Menu::track_list`] says.
     pub fn track_groups(&self) -> Vec<(String, Range<usize>)> {
         self.lists().groups.clone()
     }
 
-    /// Which of [`Menu::track_groups`] the pick's track `at` is in: the lit filter where it has it,
-    /// else the first that does.
+    /// Which of [`Menu::track_groups`] the pick's track `at` is in: the lit filter where it has it
+    /// (the worlds' has the disc's worlds too, P280), else the first that does.
     pub fn track_group(&self, at: usize) -> usize {
         let lists = self.lists();
         let lit = lists.filter_group;
-        if lists.groups[lit].1.contains(&at) {
+        if lists.groups[lit].1.contains(&at) || lists.list.contains(&at) {
             return lit;
         }
         lists.groups.iter().position(|(_, r)| r.contains(&at)).unwrap_or(0)

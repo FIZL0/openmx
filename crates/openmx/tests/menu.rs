@@ -4096,14 +4096,18 @@ fn left_and_right_step_the_picks_categories_with_the_worlds_first() {
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Tracks));
     assert_eq!(m.track_filter_group(), 0, "All Games unless the settings say");
-    // Two presses to the worlds (MD11's All Games first).
+    // Two presses to the worlds (MD11's All Games first): the disc's first (P280), then the mods'.
     tap(&mut m, &mut r, Control::Right);
     tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.track_at(m.cursor(Screen::Tracks)).0, "world_mxu");
+    for _ in 0..menu::DISC_WORLDS.len() {
+        tap(&mut m, &mut r, Control::Down);
+    }
     assert_eq!(m.track_at(m.cursor(Screen::Tracks)), ("world_mxvatv", "MX vs. ATV Unleashed: every map"));
     tap(&mut m, &mut r, Control::Down);
     assert_eq!(m.track_at(m.cursor(Screen::Tracks)).0, "world_ultra");
     tap(&mut m, &mut r, Control::Down);
-    assert_eq!(m.track_at(m.cursor(Screen::Tracks)).0, "world_mxvatv", "down wraps inside the worlds");
+    assert_eq!(m.track_at(m.cursor(Screen::Tracks)).0, "world_mxu", "down wraps inside the worlds");
     tap(&mut m, &mut r, Control::Up);
     assert_eq!(m.track_at(m.cursor(Screen::Tracks)).0, "world_ultra");
     // Left from the first category wraps to the last.
@@ -4115,6 +4119,9 @@ fn left_and_right_step_the_picks_categories_with_the_worlds_first() {
         tap(&mut m, &mut r, Control::Right);
     }
     assert_eq!(m.track_filter_group(), 2);
+    for _ in 0..menu::DISC_WORLDS.len() {
+        tap(&mut m, &mut r, Control::Down);
+    }
     let acts = tap(&mut m, &mut r, Control::Cross);
     assert!(acts.contains(&Act::Ride("world_mxvatv".into())), "{acts:?}");
     // Back on the pick it opens on the world, and a category comes back to the ride's track.
@@ -6152,7 +6159,7 @@ fn the_pick_filters_by_each_mods_source_game_and_keeps_the_filter() {
     assert_eq!(all, want, "All Games lists every track");
     let own: [(&str, Vec<String>); 4] = [
         ("MX Unleashed", disc.clone()),
-        ("Worlds", vec!["world_gen".into()]),
+        ("Worlds", ["world_mxu", "world_mxu_free", "world_mxu_nat", "world_gen"].map(String::from).to_vec()),
         ("Game Alpha", ["gen_a1", "gen_a2", "beta_a3"].map(String::from).to_vec()),
         ("Game Beta", ["gen_b1", "gen_b2"].map(String::from).to_vec()),
     ];
@@ -6165,7 +6172,7 @@ fn the_pick_filters_by_each_mods_source_game_and_keeps_the_filter() {
         let mut tracks = tracks.clone();
         tracks.sort();
         assert_eq!(seen, tracks, "{name} lists only its own");
-        assert!(m.track_game(&seen[0]) == *name);
+        assert!(seen.iter().any(|id| m.track_game(id) == *name), "{name}: the disc's worlds stay MX Unleashed's (P280)");
     }
     assert!(m.take_changed());
     // Right from the last is All Games again, which the file does not name.
@@ -8534,5 +8541,75 @@ fn two_choice_rows_toggle_and_only_many_choice_rows_drop() {
         let was = m.settings.vsync;
         tap(&mut m, &mut r, Control::Cross);
         assert_eq!((m.settings.vsync, m.listing()), (!was, None));
+    }
+}
+
+/// P280: the disc's three MX Unleashed worlds are in the pick with or without the mods, an
+/// installed world_mxu, or any other world: in All Games, in MX Unleashed's filter, in World's
+/// category, and in the Worlds filter beside the installed worlds, first, where the user looked for
+/// them and found none (their rows were in the disc's range alone).
+#[test]
+fn the_pick_lists_the_mx_unleashed_worlds_in_every_filter_that_has_worlds() {
+    let disc: Vec<&str> = menu::DISC_WORLDS.iter().map(|w| w.0).collect();
+    assert_eq!(disc, ["world_mxu", "world_mxu_free", "world_mxu_nat"]);
+    let worlds_in = |m: &Menu| -> Vec<String> { m.track_list().into_iter().map(|i| m.track_at(i).0.to_string()).filter(|id| id.starts_with("world")).collect() };
+    let installed = |ids: &[&str]| -> Vec<(String, String)> {
+        let mut t: Vec<(String, String)> = vec![("mxvatv_nat01".into(), "Nat 01".into()), ("untamed_sx_a".into(), "SX A".into())];
+        t.extend(ids.iter().map(|id| (id.to_string(), format!("Installed {id}"))));
+        t
+    };
+    // The user's: world_mxu and world_mxu_free installed beside the other games' worlds.
+    let setups: [&[&str]; 4] = [&[], &["world_ultra"], &["world_mxu", "world_ultra"], &["world_mxu", "world_mxu_free", "world_mxvatv", "world_ultra", "world_untamed"]];
+    for (k, ids) in setups.iter().enumerate() {
+        let (mut m, mut r) = fresh();
+        if k > 0 || !ids.is_empty() {
+            let t = installed(ids);
+            m.set_mod_games(t.iter().map(|(id, _)| (id.clone(), if id.starts_with("world") { "Combined" } else { "Other" }.to_string())).collect());
+            m.set_mod_categories(t.iter().map(|(id, _)| (id.clone(), if id.starts_with("world") { "World" } else { "National" }.to_string())).collect());
+            m.set_mod_tracks(t);
+        }
+        let others: Vec<String> = ids.iter().filter(|id| !disc.contains(id)).map(|id| id.to_string()).collect();
+        // All Games, then each filter of the user's: the disc's worlds in each that lists worlds.
+        assert_eq!(worlds_in(&m)[..3], disc, "{ids:?}: All Games");
+        for (name, _) in m.track_groups() {
+            m.settings.track_filter = if name == menu::ALL_GAMES { String::new() } else { name.clone() };
+            m.settings.track_category = String::new();
+            let got = worlds_in(&m);
+            match name.as_str() {
+                menu::DISC_GAME => assert_eq!(got, disc, "{ids:?}: {name}"),
+                "Worlds" => {
+                    let mut want: Vec<String> = disc.iter().map(|d| d.to_string()).collect();
+                    want.extend(others.iter().cloned());
+                    assert_eq!(got, want, "{ids:?}: {name}");
+                    assert_eq!(m.track_list().len(), want.len(), "{ids:?}: nothing but worlds in {name}");
+                }
+                _ => {}
+            }
+            if m.track_categories().iter().any(|c| c == menu::WORLD) {
+                m.settings.track_category = menu::WORLD.into();
+                assert_eq!(worlds_in(&m)[..3], disc, "{ids:?}: {name} / World");
+            }
+        }
+        assert_eq!(m.track_groups().iter().any(|(n, _)| n == "Worlds"), !others.is_empty(), "{ids:?}");
+        // In the Worlds filter, the pad reaches each and Cross rides it.
+        if others.is_empty() {
+            continue;
+        }
+        m.settings.track_filter = "Worlds".into();
+        m.settings.track_category = String::new();
+        m.settings.track = "free06".into();
+        tap(&mut m, &mut r, Control::Cross);
+        assert_eq!(m.screen(), Some(Screen::Tracks));
+        assert_eq!(m.track_at(m.cursor(Screen::Tracks)).0, "world_mxu", "{ids:?}: the filter opens on its first");
+        assert_eq!(m.track_groups()[m.track_group(m.cursor(Screen::Tracks))].0, "Worlds");
+        for (n, &id) in disc.iter().enumerate() {
+            assert_eq!(m.track_at(m.cursor(Screen::Tracks)).0, id);
+            if n == 1 {
+                let acts = tap(&mut m, &mut r, Control::Cross);
+                assert!(acts.contains(&Act::Ride(id.into())), "{acts:?}");
+                break;
+            }
+            tap(&mut m, &mut r, Control::Down);
+        }
     }
 }
