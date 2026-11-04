@@ -314,8 +314,17 @@ fn repeated(cap: &Capture, frame: u32) -> bool {
 /// recorder wakes on the frame counter, which the main loop steps before it simulates, so such a row
 /// holds the tick before's bones and request under the new counter while the generator has moved on.
 /// The tick ran all the same: the next row holds two steps, the first on a request no row carries.
+/// Where the generator has not moved (the rest of the game drew nothing that tick, side's 3146:
+/// S203), the race clock tells it from a [`repeated`] row: it holds the row before's and the next
+/// row's is two ticks on.
 fn torn(cap: &Capture, frame: u32) -> bool {
-    cap.int(frame, "rng_state") != cap.int(frame - 1, "rng_state")
+    let clock = |f: u32| f32::from_le_bytes(cap.bytes(f, "w05ca1f8")[..4].try_into().unwrap());
+    let skipped = || {
+        cap.has(frame + 1)
+            && clock(frame).to_bits() == clock(frame - 1).to_bits()
+            && clock(frame + 1) - clock(frame) > 1.5 * cap.get(frame, "dt")
+    };
+    (cap.int(frame, "rng_state") != cap.int(frame - 1, "rng_state") || skipped())
         && (0..18).all(|i| BODY.iter().all(|(n, _)| {
             let col = format!("bone{i}.{n}");
             bits(cap.quad(frame, &col)) == bits(cap.quad(frame - 1, &col))
@@ -1635,17 +1644,18 @@ fn the_ports_tick_is_the_originals_to_rest() {
 /// last tick the original's own update holds every captured bone through with the wreck bike's
 /// object and the broad phase's pools laid in (tests/ragdoll_bike.rs) and the bike kept in the
 /// track's tree where the game keeps it (S113: front stopped at 2627 without it). Front's three
-/// torn rows (2889, 2892, 2894: [`torn`]) and the double steps after them are run but not compared,
-/// and the bones laid in from the row after each (S147: front stopped at 2888 without it).
+/// torn rows (2889, 2892, 2894: [`torn`]) and side's one (3146, S203) and the double steps after
+/// them are run but not compared, and the bones laid in from the row after each (S147: front
+/// stopped at 2888 without it, side at 3146).
 const S62: [(&str, u32, u32); 5] =
-    [("front", 2602, 3180), ("side", 2607, 3146), ("back", 2477, 3179), ("tip", 2472, 3179), ("front3", 2630, 2687)];
+    [("front", 2602, 3180), ("side", 2607, 3180), ("back", 2477, 3179), ("tip", 2472, 3179), ("front3", 2630, 2687)];
 
 /// **The port replays each s62 wreck through the bike to the rider at rest** (S62): from each
 /// wreck's first state the port's actor runs on its own state, tick after tick, handed only the
 /// world's answers the original heard (the ground, the scene's hits and what each is with, the
 /// sweeps, the skeleton), and every number the update writes is compared with the original's tick,
 /// bit for bit. Up to the last tick the original holds the capture through, that is the game's own
-/// wreck (side's last 34 ticks run on in the oracle from its own state). A torn row and the one after
+/// wreck. A torn row and the one after
 /// it are the original's ticks on the capture's request, compared with the port but not with the
 /// capture; the port then takes the original's actor with the next row's bones laid in.
 #[test]
@@ -1660,7 +1670,7 @@ fn the_port_replays_the_wrecks_through_the_bike() {
         let settles = went.settles;
         let mut frame = start + 1;
         while cap.has(frame) {
-            if repeated(&cap, frame) {
+            if repeated(&cap, frame) && !torn(&cap, frame) {
                 frame += 1;
                 continue;
             }
@@ -1696,8 +1706,8 @@ fn the_port_replays_the_wrecks_through_the_bike() {
     // Every wreck through to the bones at rest, each settling once (front3's state is from inside its
     // wreck, so four entries), and the hits against the wreck bike's body: told they
     // were with the still scenery instead, the port parts at front's 2611. Front's three torn rows
-    // are the only gaps (S147).
-    assert_eq!(gaps, 3, "the torn rows");
+    // and side's one are the only gaps (S147, S203).
+    assert_eq!(gaps, 4, "the torn rows");
     assert!(went.ticks >= 2600 && exact >= 2500 && went.entries == 4 && went.settles == 5 && went.settled > 2500, "{went:?}, {exact} exact");
     assert!(hits >= 11, "{hits} ticks with a moving hit");
 }
@@ -2047,7 +2057,7 @@ fn every_sphere_test_of_the_wrecks_is_the_bike_meshs() {
         let model = Rc::new(RefCell::new(search_in_ram(&ee, b, spheres[0])));
         let mut frame = start + 1;
         while cap.has(frame) {
-            if repeated(&cap, frame) {
+            if repeated(&cap, frame) && !torn(&cap, frame) {
                 frame += 1;
                 continue;
             }
@@ -2197,8 +2207,9 @@ fn every_sphere_test_of_the_wrecks_is_the_bike_meshs() {
         "{} sphere tests, {} paired with the bike, {} hits; {} gathers, {} rebuilt, {} with the bike listed",
         k.tests, k.paired, k.hits, k.gathers, k.rebuilt, k.listed
     );
+    // Side's torn 3146 runs its tick (S203): six sphere tests more than skipping it.
     let counts = (k.tests, k.paired, k.hits, k.gathers, k.rebuilt, k.listed);
-    assert_eq!(counts, (24822, 852, 84, 367, 12, 230), "tests, paired, hits, gathers, rebuilt, listed");
+    assert_eq!(counts, (24828, 852, 84, 367, 12, 230), "tests, paired, hits, gathers, rebuilt, listed");
     // One gather each wreck after the bike has left the broad phase: the put-back's tick (S108).
     assert_eq!(k.gone, ["front 2681", "side 2686", "back 2556", "tip 2551", "front3 2681"], "the gathers with the bike gone");
 }
@@ -3283,8 +3294,8 @@ fn every_2p_wrecks_bones_are_the_originals() {
 
 /// **Front parts at 2889 because the capture's row was read before the tick** (S147), not because of
 /// a collidable: the bike is out of the broad phase (since 2681) and the tick makes no sphere test.
-/// Front's capture has three torn rows ([`torn`]), 2889, 2892 and 2894, and the other s62 captures
-/// none. Row 2889 is row 2888's word for word, bones, request and the race clock alike, and only the
+/// Front's capture has three torn rows ([`torn`]), 2889, 2892 and 2894, side's one, 3146 (its
+/// generator held: S203), and the other s62 captures none. Row 2889 is row 2888's word for word, bones, request and the race clock alike, and only the
 /// generator has moved on; the next row holds two steps (the clock +2 dt) and its `last_pos` is the
 /// first step's. That step ran on a request no row carries: run on 2888's request (2889's) it
 /// leaves bone 0 short of the capture's 2890 `last_pos`, on 2890's past it. With 2890's bones laid
@@ -3296,7 +3307,12 @@ fn front_2889_is_a_row_read_before_the_tick() {
     for (name, start, _) in S62 {
         let Some(c) = Capture::load_in("s62", name) else { return };
         let rows: Vec<u32> = (start + 2..).take_while(|&f| c.has(f)).filter(|&f| torn(&c, f)).collect();
-        assert_eq!(rows, if name == "front" { vec![2889, 2892, 2894] } else { vec![] }, "{name}: the torn rows");
+        let want = match name {
+            "front" => vec![2889, 2892, 2894],
+            "side" => vec![3146],
+            _ => vec![],
+        };
+        assert_eq!(rows, want, "{name}: the torn rows");
     }
     for col in ["req_area", "req_far", "bike_a", "bike_b", "w05ca1f8"] {
         assert_eq!(cap.text(2889, col), cap.text(2888, col), "{col}: row 2889 is 2888's");
