@@ -9220,3 +9220,15 @@ atv_heap_free               atv 0x001b76d0 = free
 #   in 0x00300000..0x00360000 answer a0, GetThreadId (0x2f) 1 (WaitSema 0x0033ef20 from the heap 0x001b68d0);
 #   bike vt +0x544 = 0x004e7e70, the network snapshot send (reads the T0 counter 0x10000000, packs, sends through
 #   *(bike +0x400) vt +0x28; writes nothing of the bike's).
+# F31a — state 4's bike read into the port (game_sim::handling::seed; tests/mxvatv_bike_ride.rs). Comment rows
+# only. Journal: research/journal/2026-11-03-f31a-mxvatv-bike-seed.
+#   The sim frame 0x00204040 in pieces: skipped while *(0x003eab60) +0x225 bit 3 is set (clear in state 4);
+#   the +0x24 list (getter 0x00208390, a0 list, a1 i; elt vt at elt +4): every elt's vt +0x7c, then every
+#   elt's vt +0x84 (f12 dt); the world step 0x00496b70 on sim +0x6c; the tail 0x00128af0 (a0 sim, f12 dt);
+#   the +0x3c list (getter 0x002080f0; elt vt at elt +0): vt +8 (f12 dt), and one answering non-zero is
+#   taken out by 0x00208040 (a0 list, a1 i) with i kept.
+#   State 4's world 0x00665a4c: bodies 1 (the bike's, 0x00e701e0), force 1, constraints 0, preforce 6, post 1.
+#   World list getters (a0 list, a1 i): array[i] (0x0049cd30 bodies; 0x0049cbd0 force, slot elt +8 -> +0xc;
+#   0x0049c910 preforce and 0x0049c7b0 post, slot elt +0 -> +8; 0x0049ca70 constraints).
+#   The bike's engine 0x00eaa1e0: rpm xs (+0x8c) 0x00eab410 and torque ys (+0x68) 0x00eab450, 10 points (the
+#   16 words the port reads run past them into other words); ratios (+0x70) 0x00eab490, 5 gears.
