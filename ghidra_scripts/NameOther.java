@@ -204,15 +204,30 @@ public class NameOther extends GhidraScript {
         // 5. The oracle's rows for this program (`pc_engine_update pc 0x… note`), matched by hand to
         // the PS2 functions they port: the name goes on as the user's, inside whatever class namespace
         // the vtable pass gave the function, so `./kit fn pc_engine_update -o pc` finds it.
-        int fromOracle = 0;
+        int fromOracle = 0, oracleMade = 0, oracleLabels = 0;
         File oracle = a.length > 1 ? new File(a[1]) : null;
         if (oracle != null && oracle.exists()) {
             for (String line : java.nio.file.Files.readAllLines(oracle.toPath())) {
                 String[] t = line.split("#", 2)[0].trim().split("\\s+");
                 if (t.length < 3 || !t[1].equals(program)) continue;
-                Function f = getFunctionAt(toAddr(Long.parseLong(t[2].replaceFirst("^0[xX]", ""), 16)));
+                Address at = toAddr(Long.parseLong(t[2].replaceFirst("^0[xX]", ""), 16));
+                Function f = getFunctionAt(at);
+                // Code reached only through a vtable is disassembled but has no function: make one. A
+                // row that is no instruction (data, a vtable, bytes never disassembled) gets a label.
+                if (f == null && getInstructionAt(at) != null) {
+                    f = createFunction(at, t[0]);
+                    if (f != null) {
+                        oracleMade++;
+                        continue;
+                    }
+                }
                 if (f == null) {
-                    println("NameOther: " + t[0] + ": no function at " + t[2]);
+                    if (!mem.contains(at)) {
+                        println("NameOther: " + t[0] + ": " + t[2] + " is not in the program's memory");
+                    } else if (getSymbol(t[0], null) == null) {
+                        createLabel(at, t[0], true, SourceType.USER_DEFINED);
+                        oracleLabels++;
+                    }
                     continue;
                 }
                 if (!f.getName().equals(t[0])) {
@@ -246,8 +261,10 @@ public class NameOther extends GhidraScript {
             for (Map.Entry<String, Integer> e : files.entrySet()) w.println(e.getKey() + "\t" + e.getValue());
         }
         println(String.format("NameOther: %d locators, %d vtables, %d slot functions named (%d created), "
-                + "%d newly tagged with a source file, %d files (%d named by file), %d named from the oracle -> %s",
-                cols.size(), vts.size(), named, made, tagged, files.size(), byFile, fromOracle, tsv));
+                + "%d newly tagged with a source file, %d files (%d named by file), %d named from the oracle "
+                + "(%d functions created, %d labels) -> %s",
+                cols.size(), vts.size(), named, made, tagged, files.size(), byFile, fromOracle, oracleMade,
+                oracleLabels, tsv));
     }
 
     /** `.?AVMotocrossRider@@` at type descriptor + 8 → `MotocrossRider`; nested `A@B@@` → `B::A`. */
