@@ -48,7 +48,9 @@ tests = [
 # from other slots' builds (P220, 11-04).
 # world_ultra_load's first-frame (20 s) and paint-update budgets red three gates running at load 40-50 and
 # pass alone (F40, P294, 2026-11-04; K23 is the real fix).
-tests = ["-p openmx --test one_fps", "-p game-render --test ecosystem", "-p openmx --test world_ultra_load"]
+# disc_worlds' rides within 60 s and 480 s: 62-79 s and 518-605 s in the pool at load 48-56, three gates in a
+# row (P222, P226, 11-04); a stopgap until K24 holds them to what they race instead of the wall clock.
+tests = ["-p openmx --test one_fps", "-p game-render --test ecosystem", "-p openmx --test world_ultra_load", "-p openmx --test disc_worlds"]
 
 [display]
 # Every window a check's tests open goes to a private headless weston + Xwayland that ends with the check

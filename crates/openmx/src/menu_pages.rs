@@ -22,6 +22,12 @@ const HANDLING_HELP: &str = "Original is MX Unleashed's bikes. MX vs. ATV rides 
      the mods folder (Handling From names which), and its backflip, which only arms with R1 held as you pull back on the lip. Untamed rides the same files with the steps MX vs. ATV Untamed \
      reworked, as far as they are ported. A lobby you host rides \
      yours (Untamed's as MX vs. ATV's), and only players with the same trick pack can join its ride.";
+/// The Brake Gyro row's help (P226).
+const BRAKE_GYRO_HELP: &str = "MX vs. ATV's option: a brake held in the air spins the bike nose-up. On is that game's default. \
+     Online and in a lobby the bikes keep the default.";
+/// The Gas Gyro row's help (P226).
+const GAS_GYRO_HELP: &str = "MX vs. ATV's option: the throttle held in the air spins the bike nose-down, when Brake Gyro is not \
+     already pitching it. Off is that game's default. Online and in a lobby the bikes keep the default.";
 /// The Handling From row's first choice (MD77).
 const FIRST_TRICK_PACK: &str = "First Pack On";
 /// The Air Wrecks row's help (P138).
@@ -196,6 +202,9 @@ pub enum Key {
     Handling,
     /// The pack MX vs. ATV's handling reads (MD77).
     HandlingPack,
+    /// MX vs. ATV's Brake Gyro and Gas Gyro options (P226).
+    BrakeGyro,
+    GasGyro,
     /// The Original switch (P126), and each departure's under it.
     Original,
     /// The Ride tab's row into the Original Game page (P179).
@@ -619,6 +628,11 @@ impl Menu {
             }
             let why = if folder_off.is_some() { folder_off } else { (s.handling == Handling::Original).then_some("Only with Handling: MX vs. ATV") };
             rows.push(from.off_if(why.is_some(), why.unwrap_or_default()));
+        }
+        // P226: MX vs. ATV's own two gyro options, which Untamed's steps read as well
+        let why = if folder_off.is_some() { folder_off } else { (s.handling == Handling::Original).then_some("Only with Handling: MX vs. ATV or Untamed") };
+        for (key, name, on, help) in [(Key::BrakeGyro, "Brake Gyro", s.gyro.brake, BRAKE_GYRO_HELP), (Key::GasGyro, "Gas Gyro", s.gyro.gas, GAS_GYRO_HELP)] {
+            rows.push(Row::on_off(key, name, on, help).off_if(why.is_some(), why.unwrap_or_default()));
         }
         rows
     }
@@ -1621,6 +1635,8 @@ impl Menu {
             Key::Bays => s.bays = !s.bays,
             Key::Tricks => s.tricks = Tricks::ALL[next(row)],
             Key::Handling => s.handling = game_sim::handling::Handling::ALL[next(row)],
+            Key::BrakeGyro => s.gyro.brake = !s.gyro.brake,
+            Key::GasGyro => s.gyro.gas = !s.gyro.gas,
             Key::TrickPack(i) => {
                 let ids = self.trick_pack_ids();
                 let Some(id) = ids.get(i).cloned() else { return };

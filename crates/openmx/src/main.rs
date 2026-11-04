@@ -2499,6 +2499,12 @@ struct Args {
     /// says, and a ride outside it has the original's. `--online` is always the original's; a ride
     /// from the lobby is its room's ([`Args::room_handling`], N21).
     handling: Option<game_sim::handling::Handling>,
+    /// `--brake-gyro on|off` and `--gas-gyro on|off` (P226): MX vs. ATV's two gyro options, read on its
+    /// handling (and Untamed's) alone. Unset, the front end's Brake Gyro and Gas Gyro rows say, and a
+    /// ride outside it has the game's default, brake on and gas off. A lobby's ride keeps the default,
+    /// as its handshake holds no seat's gyros.
+    brake_gyro: Option<bool>,
+    gas_gyro: Option<bool>,
     /// The pack whose `mx_*.phy` a lobby's ride rides on MX vs. ATV's handling (N21): this machine's
     /// mods folder and the pack's id, as the room names it and the handshake held every seat to.
     /// `None` outside the lobby and on the original's handling.
@@ -3092,6 +3098,8 @@ async fn front_end(args: Args) -> Result<(), String> {
                 a.trick_packs = Some(args.trick_packs.clone().unwrap_or_else(|| shell.front.menu.settings.trick_packs.clone()));
                 a.handling = Some(args.handling.unwrap_or(shell.front.menu.settings.handling));
                 a.handling_pack = Some(args.handling_pack.clone().unwrap_or_else(|| shell.front.menu.settings.handling_pack.clone()));
+                a.brake_gyro = Some(args.brake_gyro.unwrap_or(shell.front.menu.settings.gyro.brake));
+                a.gas_gyro = Some(args.gas_gyro.unwrap_or(shell.front.menu.settings.gyro.gas));
                 a.graphics = Some(args.graphics.unwrap_or(shell.front.menu.settings.graphics));
                 // The Original tab's own two (P126).
                 a.plants = Some(args.plants.unwrap_or(shell.front.menu.settings.plants));
@@ -4278,6 +4286,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let mut stock_phy = handling_phy(handling_pack.as_ref(), &phy_member, &tables.ride.curve, "")
         .unwrap_or_else(|| Phy::read_bytes(&phy_bytes, &tables.ride.curve));
     untamed_handling(&args, &mut stock_phy);
+    gyro_options(&args, &mut stock_phy);
     if !trick_packs.is_empty() {
         println!("{}", trick_packs::lay(&trick_packs, &mut stock_phy, &phy_member));
     }
@@ -4310,6 +4319,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 let mut phy = handling_phy(handling_pack.as_ref(), &member, &tables.ride.curve, &format!("player {}: ", i + 1))
                     .unwrap_or_else(|| Phy::read_bytes(&bytes, &tables.ride.curve));
                 untamed_handling(&args, &mut phy);
+                gyro_options(&args, &mut phy);
                 if !trick_packs.is_empty() {
                     println!("player {}: {}", i + 1, trick_packs::lay(&trick_packs, &mut phy, &member));
                 }
@@ -11191,6 +11201,24 @@ fn untamed_handling(args: &Args, phy: &mut Phy) {
     }
 }
 
+/// MX vs. ATV's Brake Gyro and Gas Gyro options (P226) on a bike read for its handling: `--brake-gyro`
+/// and `--gas-gyro`, each unset the game's default. A lobby's ride keeps the default on every seat.
+fn gyro_options(args: &Args, phy: &mut Phy) {
+    if phy.handling == game_sim::handling::Handling::Original || args.room_handling.is_some() {
+        return;
+    }
+    let d = game_sim::handling::Gyro::default();
+    phy.gyro = game_sim::handling::Gyro { brake: args.brake_gyro.unwrap_or(d.brake), gas: args.gas_gyro.unwrap_or(d.gas) };
+    if phy.gyro != d {
+        println!("handling: brake gyro {}, gas gyro {}", on_off_word(phy.gyro.brake), on_off_word(phy.gyro.gas));
+    }
+}
+
+/// `on` or `off`, as a line says a switch.
+fn on_off_word(on: bool) -> &'static str {
+    if on { "on" } else { "off" }
+}
+
 /// A bike read for MX vs. ATV's handling (MD40) from `pack`'s file for `member`, saying so after
 /// `who`; `None`, with the reason said, rides the disc's file.
 fn handling_phy(pack: Option<&trick_packs::Pack>, member: &str, curve: &game_sim::camera::CurveTable, who: &str) -> Option<Phy> {
@@ -12481,6 +12509,8 @@ fn parse_args() -> Result<Option<Args>, String> {
         room_tricks: None,
         trick_packs: None,
         handling_pack: None,
+        brake_gyro: None,
+        gas_gyro: None,
         markers: None,
         where_only: false,
     };
@@ -12614,6 +12644,17 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--world-sky" => {
                 let word = next("global or per-map")?;
                 args.world_sky = Some(menu::WorldSky::from_word(&word).ok_or_else(|| format!("--world-sky: {word:?} is not global or per-map"))?);
+            }
+            flag @ ("--brake-gyro" | "--gas-gyro") => {
+                let on = match next("on or off")?.as_str() {
+                    "on" => true,
+                    "off" => false,
+                    word => return Err(format!("{flag}: {word:?} is not on or off")),
+                };
+                match flag {
+                    "--brake-gyro" => args.brake_gyro = Some(on),
+                    _ => args.gas_gyro = Some(on),
+                }
             }
             "--minimap" => {
                 args.minimap = Some(match next("on or off")?.as_str() {
@@ -12980,7 +13021,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--ride] [--track free06] [--bike 125sx] [--rider thq1] [--size 640x448]\n\
                             [--scale 1]\n\
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
-                            [--moment FILE OUT.png] [--no-wrecks] [--no-air-wrecks] [--backwards-bail] [--no-vibration] [--overlay hud|none] [--speedometer digital|analog] [--tricks original|mxvatv|ID,ID…] [--handling original|mxvatv|untamed] [--handling-pack ID] [--markers on|off] [--camera NAME]\n\
+                            [--moment FILE OUT.png] [--no-wrecks] [--no-air-wrecks] [--backwards-bail] [--no-vibration] [--overlay hud|none] [--speedometer digital|analog] [--tricks original|mxvatv|ID,ID…] [--handling original|mxvatv|untamed] [--handling-pack ID] [--brake-gyro on|off] [--gas-gyro on|off] [--markers on|off] [--camera NAME]\n\
                             [--minimap on|off] [--show-fps on|off] [--hud-scale 50..150] [--world-sky global|per-map]\n\
                             [--camera-view original|default|FOV,DIST,HEIGHT,PDIST,PHEIGHT]\n\
                             [--modifiers 'gravity=50 bike_speed.2=200']\n\
