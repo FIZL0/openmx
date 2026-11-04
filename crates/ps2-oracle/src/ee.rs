@@ -512,6 +512,7 @@ impl Ee {
                         self.gpr[rt] = v;
                     }
                 }
+                2 if rd == 22 => self.set(rt, sx32(self.q.to_bits())), // cfc2 from Q (the vwaitq after a vdiv)
                 5 => {
                     let v = self.gpr[rt]; // qmtc2
                     self.put_vf(rd, 0xf, std::array::from_fn(|k| f32::from_bits((v >> (32 * k)) as u32)));

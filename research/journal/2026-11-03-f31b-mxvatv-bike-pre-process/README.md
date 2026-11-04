@@ -31,3 +31,8 @@ stuck timer, rumble, tricks, the run) is ported as `handling::tail`. The update 
 12 000 random bikes and the walk on 10 000 random trees. The hybrid frame runs the port's tail for every
 row of ride-2 and flip-1, bit-exact, with a RAM-wide shadow check of the bike's update on every frame.
 Details in 5-tail-FINAL.md.
+
+F31b4c: MX vs. ATV's `[Mass Properties]` reader and the bike loader's re-read are ported as
+`handling::mass`. Every word the reader writes matches the original on 10 000 generated files, state 4's
+134 mass words come out word for word from `mx_race250p.phy`, and ride-2 and flip-1 stay bit-exact on
+them. Details in research/journal/2026-11-04-f31b4c-mass/1-mass-FINAL.md.
