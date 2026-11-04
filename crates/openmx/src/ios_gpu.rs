@@ -47,6 +47,8 @@ struct Shared {
     closed: bool,
     /// In front: not sent away to the home screen.
     focused: bool,
+    /// How many times the app has been sent away since it opened ([`times_away`]).
+    away: u32,
     /// The menus' clicks, in window pixels.
     clicks: Vec<(i32, i32)>,
     /// A finger came down since the last poll (P233's "Tap screen to resume controller").
@@ -64,6 +66,7 @@ static SHARED: Mutex<Shared> = Mutex::new(Shared {
     resized: false,
     closed: false,
     focused: true,
+    away: 0,
     clicks: Vec::new(),
     touched: false,
     rate: None,
@@ -71,6 +74,28 @@ static SHARED: Mutex<Shared> = Mutex::new(Shared {
 
 fn shared() -> MutexGuard<'static, Shared> {
     SHARED.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+impl Shared {
+    /// In front or sent away, and counted when sent away.
+    fn set_focused(&mut self, focused: bool) {
+        if self.focused && !focused {
+            self.away += 1;
+        }
+        self.focused = focused;
+    }
+}
+
+/// The app is in front (MD97): not in the app switcher or behind the home screen. Metal refuses the
+/// GPU work of an app in the background, so the shell's uploads wait for this.
+pub fn in_front() -> bool {
+    shared().focused
+}
+
+/// How many times the app has been sent away since it opened (MD97): what went up to the GPU while
+/// this changed may not have, and is put up again.
+pub fn times_away() -> u32 {
+    shared().away
 }
 
 /// How often the main thread looks at the safe area and which way up the phone is.
@@ -122,7 +147,7 @@ impl Host {
 impl ApplicationHandler for Host {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let mut s = shared();
-        s.focused = true;
+        s.set_focused(true);
         if s.window.is_none() {
             // As opentennis's B623: the home indicator fades while the game is played, and a swipe
             // from an edge is the game's first, the system's only when made again.
@@ -159,7 +184,7 @@ impl ApplicationHandler for Host {
     }
 
     fn suspended(&mut self, _: &ActiveEventLoop) {
-        shared().focused = false;
+        shared().set_focused(false);
         TOUCH.lock().unwrap_or_else(|e| e.into_inner()).reset();
     }
 
@@ -176,7 +201,7 @@ impl ApplicationHandler for Host {
                 drop(s);
                 self.look();
             }
-            WindowEvent::Focused(focused) => shared().focused = focused,
+            WindowEvent::Focused(focused) => shared().set_focused(focused),
             WindowEvent::Touch(t) => {
                 if t.phase == TouchPhase::Started {
                     shared().touched = true;

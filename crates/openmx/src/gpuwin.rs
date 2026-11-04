@@ -162,6 +162,16 @@ fn present_mode(vsync: bool, modes: &[wgpu::PresentMode]) -> wgpu::PresentMode {
     }
 }
 
+/// The app is in front (MD97, `ios_gpu.rs`): always here, where the GPU takes work unfocused too.
+pub fn in_front() -> bool {
+    true
+}
+
+/// How many times the app has been sent away (MD97, `ios_gpu.rs`): never here.
+pub fn times_away() -> u32 {
+    0
+}
+
 impl GpuWindow {
     /// Open a window as [`crate::window::Window::open`] does — for frames of `size` at `scale`, or
     /// the whole screen — and a device to draw into it with, presenting with `vsync` or without.
