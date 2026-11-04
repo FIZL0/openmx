@@ -50,6 +50,9 @@ pub struct Image {
     pub part_dbs: Vec<u32>,
     /// The bound the harness lays for a collidable of neither kind (it reads as a default probe).
     pub part_own: Vec<u32>,
+    /// MD75c3: each node's list of nodes its gather takes in, as `(harness, image, length)`, when every
+    /// one is in the scene.
+    pub node_lists: Vec<(u32, u32, u32)>,
     /// Words the ride does not carry whole: the image's address, the bits it carries, and why not the
     /// rest.
     pub gaps: Vec<(u32, u32, String)>,
@@ -508,7 +511,32 @@ pub fn read_ride(ee: &Ee, quad: u32, dt: F) -> Result<(Ride, Image), String> {
             half: v(ee, a + 0xe0),
             more: ee.u8_at(a + 0x101),
             reach: f(ee, a + 0x108),
+            own_centre: v(ee, a + 0xb0),
+            own_half: v(ee, a + 0xc0),
+            radius: f(ee, a + 0x104),
+            ..atv_moto::Node::default()
         };
+        // MD75c3: the list, if the scene holds every node on it.
+        let (count, list) = (ee.u32_at(a + 0x10c), ee.u32_at(a + 0x144));
+        let members: Option<Vec<usize>> = if count as usize <= SCENE_NODES {
+            (0..count).map(|i| index(ee.u32_at(list + 4 * i))).collect()
+        } else {
+            None
+        };
+        match members {
+            Some(m) => {
+                n.listed = m.len();
+                n.list[..m.len()].copy_from_slice(&m);
+                if !m.is_empty() {
+                    at.node_lists.push((node_at(k) + super::NODE_LIST, list, 4 * count));
+                }
+            }
+            None => {
+                let why = format!("node {k}'s list of {count} at {list:#010x}: the gather's nodes past the {SCENE_NODES} the scene holds");
+                at.gaps.push((a + 0x10c, 0, why.clone()));
+                at.gaps.push((a + 0x144, 0, why));
+            }
+        }
         at.gaps.push((a + 0x100, 0xffff, "the node's two flag bytes; the word's other two are not the ride's".into()));
     }
     let n0 = at.nodes[0];
@@ -626,8 +654,9 @@ fn blocks(at: &Image) -> Vec<(u32, u32, u32)> {
         out.push((WHEEL[k], at.wheels[k], 0x920));
     }
     for (k, &n) in at.nodes.iter().enumerate() {
-        out.push((node_at(k), n, 0x110));
+        out.push((node_at(k), n, 0x148));
     }
+    out.extend(at.node_lists.iter().copied());
     // MD75c2: each collidable, and its tree, bound or mesh where the harness lays them.
     for (&c, &p) in COLLIDABLES.iter().zip(&at.parts).filter(|(_, p)| **p != 0) {
         out.push((collidable_at(c), p, 0x300));

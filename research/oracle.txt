@@ -6990,6 +6990,30 @@ atv_mesh_node_stand         atv 0x001be760 = the mesh's vt +0xc8: atv_node_frame
 atv_mesh_stand              atv 0x001be630 = the mesh stood at a matrix (a0 mesh, a1 matrix): its frames, centre and reach (vt +0xcc)
 atv_mesh_box                atv 0x001be7b0 = the mesh's box in the world (vt +0xc4; a1 centre out, a2 half out)
 atv_ray_probe_box           atv 0x001bd1d0 = the ray probe's box in the world (vt +0xc4; a1 centre out, a2 half out)
+# MD75c3 — atv_node_rebound ported (game-sim atv_moto.rs Scene::rebound; quad::Steps answers
+# quad::Call::NodeRebound, and quad::Quad's node box gathers it inline when stale). Journal:
+# research/journal/2026-11-02-md75-atv-frame/10-node-rebound.md. Proof: tests/atv_quad.rs
+# the_quads_node_rebound_is_the_originals (10,000 generated four-node scenes, the quad's node's vt +0x94 sent
+# to the original's rebound by a j at the hooked stand-in; the frame inverse's scratchpad words allowed).
+# Node fields: +0x100 flags (bit 2 own bounds, bit 4 a sphere, bit 6 bounded, bit 7 stale), +0xb0 own centre,
+# +0xc0 own half, +0x104 radius, +0x108 reach, +0x10c list count, +0x144 list (node pointers).
+# Rebound: world update first. Sphere: own (bit 2) -> c = the own centre through the world frame (w the point's),
+# r = +0x104; else r 0 and c a stack word never written. Each listed node: sphere add (recursion 0). Then +0xd0
+# (all lanes) = c into the node's frame (atv_node_unplace), +0xe0/+0xe4/+0xe8 = r (w kept), +0x108 = r.
+# Sphere add: nothing unless the member's bit 2; p its own centre through its world frame; r <= 0 -> r =
+# member +0x104, c = p; else d = vabs.xyz(p - c), vmaxy.x, vmaxz.x, far = add.s(d.x, member +0x104),
+# !(far <= r) -> r = far. The member's world update in both branches.
+# Box: lo = hi = vf0; own -> lo/hi = +0xb0 -/+ +0xc0 (xyz, w +0xb0's). Each listed node: box add (had, lo, hi,
+# the node's +0x70 world frame; recursion 0): with bit 2, member updated, rel = member world * inverse(node world)
+# (the inverse at 0x70000000..0x70000080, the scratchpad), c = rel . own centre, e = (|r1 e.y| + |r0 e.x|) +
+# |r2 e.z| * 1; l = rel row 0 with xyz c - e, h = rel row 1 with xyz c + e; had -> vmini/vmax with lo/hi, every
+# lane (-0 below +0); had = 1. Centre = (lo + hi).xyz * 0.5 (w lo's), half = (hi - lo).xyz * 0.5 (w hi's), reach
+# = sqrt.s(mula x x, madda y y, madd z z). Both: a reach above 0 sets bit 6.
+# The image's quad node (flags 0xc1) is a box with no own bounds, its list 43 rider-skeleton nodes (flags 0xa5):
+# past atv_moto::NODES, so read_ride gaps +0x10c and +0x144 (MD75e's larger scene).
+atv_node_place              atv 0x001952a0 = a point of a scene node's frame into the world (the node updated first)
+atv_node_sphere_add         atv 0x001963c0 = a listed node's sphere taken into a gathering sphere (a0 node, centre, radius, recurse)
+atv_node_box_add            atv 0x00196550 = a listed node's box taken into gathering corners (a0 node, had, lo, hi, frame, recurse)
 # MD75d — the spawned quad read as a tests/atv_quad.rs Ride (tests/atv_quad/image.rs read_ride; the check
 # pokes it back at the harness's layout and compares 2,654 words with the image). Where atv-r-spawn.ee.bin keeps
 # the quad 0x015e0690's parts: body 0x0159c7f0, world 0x0159be10, vehicle state 0x01ce6410 (+0x28 = 1), record
