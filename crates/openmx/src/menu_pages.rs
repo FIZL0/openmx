@@ -359,6 +359,9 @@ fn hint(key: Key, choice: &str) -> &'static str {
         (Key::MusicPlays, "One Song") => "repeats the Song row's",
         (Key::MusicPlays, "Off") => "no music",
         (Key::CameraPreset, "All Presets") => "every camera at once",
+        (Key::Handling, "Original") => "MX Unleashed's bikes",
+        (Key::Handling, "MX vs. ATV") => "a trick pack's bike files",
+        (Key::Handling, "Untamed") => "those files, Untamed's steps",
         (Key::HandlingPack, FIRST_TRICK_PACK) => "the first switched on",
         _ => "",
     }
