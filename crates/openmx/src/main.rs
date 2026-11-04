@@ -3031,6 +3031,8 @@ async fn front_end(args: Args) -> Result<(), String> {
     if front.menu.screen() == Some(menu::Screen::Store) {
         front.menu.ask_store_listing();
     }
+    // P293's shots: `OPENMX_TRANSFERS` puts made-up downloads and uploads, or the reload, over it.
+    front.menu.transfers_sample();
     let mut shell = Shell { window: Some(window), seats: Some(seats), front };
 
     let frame_size = |window: &Screen| match args.size {
@@ -3407,14 +3409,15 @@ async fn front_end(args: Args) -> Result<(), String> {
                 }
             }
         }
-        // The store's asks and what it did; an install or removal reads the mods folder again, so a
-        // track installed is in Free Ride's pick at once.
+        // The store's asks and what it did; a removal reads the mods folder again, and so does a
+        // batch of installs once it is in and the player says Reload (P293).
         let (rescan, art) = store.as_mut().map_or((false, false), |s| s.frame(&mut shell.front.menu, &mut shell.front.art));
         if art {
             (shown_look, menu_images) = (None, false);
         }
         if shell.front.menu.settings.mods != mods_on || rescan {
             mods_on = shell.front.menu.settings.mods;
+            shell.front.menu.mods_reloaded();
             let listed = mod_tracks(&args, &shell.front.dir, mods_on);
             stills = mod_pictures(&mut shell.front.art, mods_folder(&args, &shell.front.dir, mods_on).as_deref(), &listed);
             shell.front.menu.set_mod_games(mod_games(&args, &shell.front.dir, mods_on, &listed));
@@ -11410,6 +11413,7 @@ impl StoreFront {
         for ask in menu.take_store_asks() {
             match ask {
                 menu::StoreAsk::List { fresh } => self.store.list(fresh),
+                menu::StoreAsk::Reload => rescan = true,
                 menu::StoreAsk::Install(key) => {
                     if let Some(e) = self.entry(&key) {
                         println!("mod store: installing {key} ({}, {} bytes)", e.rev, e.meta.size);
@@ -11451,16 +11455,22 @@ impl StoreFront {
                 modstore::Event::Installed(ref key, ref got) | modstore::Event::Removed(ref key, ref got) => {
                     let (key, got) = (key.clone(), got.clone());
                     let what = name(self, &key);
-                    if let Some(c) = menu.store.cards.iter_mut().find(|c| c.key == key) {
-                        c.progress = None;
+                    let removed = matches!(ev, modstore::Event::Removed(..));
+                    if removed {
+                        if let Some(c) = menu.store.cards.iter_mut().find(|c| c.key == key) {
+                            c.progress = None;
+                        }
+                    } else {
+                        // P293: the batch's last one in asks to reload, which reads the folder
+                        menu.store_installed(&key, got.is_ok());
                     }
-                    let done = if matches!(ev, modstore::Event::Removed(..)) { "Removed" } else { "Installed" };
+                    let done = if removed { "Removed" } else { "Installed" };
                     menu.store.note = Some(match &got {
                         Ok(_) => format!("{done} {what}"),
                         Err(why) => format!("{what}: {why}"),
                     });
                     println!("mod store: {key}: {got:?}");
-                    rescan |= got.is_ok();
+                    rescan |= removed && got.is_ok();
                     self.cards(menu);
                 }
                 modstore::Event::Preview(sha, Some(p)) => {

@@ -106,6 +106,9 @@ pub enum StoreAsk {
     TakeDown(String),
     /// P230: the texture packs in the mods folder, read again (Pack Order opened).
     Packs,
+    /// P293: the mods folder read again, the installs waiting in it loaded (the reload popup's
+    /// Reload, the Reload Mods button).
+    Reload,
 }
 
 /// How an upload or take-down stands.
@@ -198,6 +201,8 @@ pub struct Shop {
     pub arm: Option<String>,
     /// P230: the texture packs, top first, as the shell read them for Pack Order.
     pub packs: Vec<PackRow>,
+    /// P293: the downloads' and uploads' batches, and the reload they end in (`menu_transfers.rs`).
+    pub t: Transfers,
     pub(super) asks: Vec<StoreAsk>,
 }
 
@@ -375,10 +380,14 @@ impl Menu {
                 0 => format!("Every one of the {} is installed already", STORE_TABS[self.store.tab].to_lowercase()),
                 n => format!("Downloading {n} of the {}", STORE_TABS[self.store.tab].to_lowercase()),
             });
+            let n = all.len();
             for i in all {
                 let card = &mut self.store.cards[i];
                 card.progress = Some((0.0, "Waiting to download".into()));
                 self.store.asks.push(StoreAsk::Install(card.key.clone()));
+            }
+            if n > 0 {
+                self.store.queued(n);
             }
             return;
         }
@@ -421,6 +430,7 @@ impl Menu {
         if p.ok && card.progress.is_none() && matches!(card.got, Got::No | Got::Update) {
             card.progress = Some((0.0, "Waiting to download".into()));
             self.store.asks.push(StoreAsk::Install(card.key.clone()));
+            self.store.queued(1);
         } else if p.delete && card.progress.is_none() && matches!(card.got, Got::Installed | Got::Update) {
             self.store.asks.push(StoreAsk::Remove(card.key.clone()));
         }
@@ -493,12 +503,14 @@ impl Menu {
                         shop.locals[i].status = Some((Phase::Busy, "Waiting to upload".into()));
                     }
                     shop.asks.push(StoreAsk::Upload(all.iter().map(|&i| shop.locals[i].id.clone()).collect()));
+                    shop.up_queued(all.len());
                 }
                 Some(UpRow::Mod(i)) => {
                     let l = &mut shop.locals[*i];
                     if !matches!(l.status, Some((Phase::Busy, _))) {
                         l.status = Some((Phase::Busy, "Waiting to upload".into()));
                         shop.asks.push(StoreAsk::Upload(vec![l.id.clone()]));
+                        shop.up_queued(1);
                     }
                 }
                 _ => {}

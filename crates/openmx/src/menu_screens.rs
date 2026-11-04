@@ -1452,6 +1452,7 @@ impl Pen<'_> {
             self.corner();
             self.builds(menu);
         }
+        self.transfers(menu);
     }
 
     /// Which build this is (P189), small in the frame's top right corner, or the stage's when the frame is wider.
@@ -2904,6 +2905,50 @@ impl Row {
             meter: None,
             world: false,
             note: None,
+        }
+    }
+}
+
+impl Pen<'_> {
+    /// P293 (opentennis's M136, M141): the store's downloads and uploads under way, a pill at the top
+    /// middle of any front-end screen, a part a direction with its batch's bar; once they are all
+    /// done with new mods waiting, the Reload Mods button in its place; and the reload popup over it
+    /// all. Neither over a ride's pause.
+    fn transfers(&mut self, menu: &Menu) {
+        if menu.stack.contains(&Screen::Pause) {
+            return;
+        }
+        let strips = menu.store.strips();
+        let top = self.top().max(0.0) + 0.4;
+        if !strips.is_empty() {
+            let b = [25.0, top, 30.0, 2.6];
+            self.round([b[0] + 0.25, b[1] + 0.3, b[2], b[3]], 1.0, SHADOW, SHADOW);
+            self.round(b, 1.0, [0x2a, 0x14, 0x08, 245], [0x12, 0x09, 0x04, 245]);
+            self.ring(b, 1.0, 0.1, RIM);
+            let part = (b[2] - 1.0) / strips.len() as f32;
+            for (k, s) in strips.iter().enumerate() {
+                let x = b[0] + 0.5 + part * k as f32 + 0.6;
+                let w = part - 1.2;
+                let line = self.fit(Weight::Bold, &s.line(), 1.0, w);
+                self.text(Weight::Bold, &line, x, Pen::mid(top + 1.0, 1.0), 1.0, 0.0, CHALK, Align::Left);
+                let bar = [x, top + 1.85, w, 0.3];
+                self.fill(bar, [255, 255, 255, 40]);
+                self.fill([bar[0], bar[1], bar[2] * s.share.clamp(0.0, 1.0), bar[3]], PEACH);
+            }
+        } else if menu.reload_button() {
+            let (size, word) = (1.1, "Reload Mods");
+            let d = 1.15 * size;
+            let bw = self.button_wide(Btn::Select, d);
+            let w = 1.0 + bw + 0.5 + self.wide(Weight::Heavy, word, size) + 1.0;
+            let b = [STAGE.0 / 2.0 - w / 2.0, top, w, 2.6];
+            self.pill(b, 0.25, 0.1);
+            self.button(Btn::Select, b[0] + 1.0 + bw / 2.0, top + 1.3, d);
+            self.text(Weight::Heavy, word, b[0] + 1.0 + bw + 0.5, Pen::mid(top + 1.3, size), size, 0.0, CHALK, Align::Left);
+        }
+        if let Some((ask, rows, row)) = menu.reload_asking() {
+            self.popup(ask, &rows, row);
+            let back = if rows == PLAY_ROWS { "Back" } else { "Later" };
+            self.hints(&[(Btn::Circle, back), (Btn::Cross, "Select")]);
         }
     }
 }

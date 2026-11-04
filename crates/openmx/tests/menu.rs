@@ -8900,3 +8900,103 @@ fn the_pick_lists_the_mx_unleashed_worlds_in_every_filter_that_has_worlds() {
         }
     }
 }
+
+/// P293 (opentennis's M136, M141): the store's downloads under way show their pill over a screen
+/// that is not the store's, and the batch's end asks to reload on the next calm screen — not while
+/// one is still queued, nor over the track pick. Later leaves the Reload Mods button up, and Free
+/// Ride asks again; Reload now reads the mods in and carries on to the pick.
+#[test]
+fn store_downloads_show_on_every_screen_and_end_in_the_reload_popup() {
+    use menu::{Card, Got, Listed, StoreAsk};
+    let (mut m, mut r) = fresh();
+    m.open(Screen::Store);
+    let card = |key: &str| Card { key: key.into(), name: key.into(), got: Got::No, ..Card::default() };
+    m.store.cards = vec![card("a/nat01"), card("a/nat02")];
+    m.store.listed = Listed::Shown;
+    tap(&mut m, &mut r, Control::Select);
+    assert_eq!(m.take_store_asks(), [StoreAsk::Install("a/nat01".into()), StoreAsk::Install("a/nat02".into())]);
+    // the shell's first bar, and out to the main menu
+    m.store.cards[0].progress = Some((0.5, "Downloading 1 / 2 MB".into()));
+    tap(&mut m, &mut r, Control::Circle);
+    assert_eq!(m.screen(), Some(Screen::Main));
+    let lines = |m: &Menu| m.store.strips().iter().map(|s| s.line()).collect::<Vec<_>>();
+    assert_eq!(lines(&m), ["Downloading 1/2: a/nat01"]);
+    assert!((m.store.strips()[0].share - 0.25).abs() < 1e-6);
+    // drawn there: the same main menu without the batch draws less
+    if let Some(art) = game_render::Disc::open_configured().ok().and_then(|mut d| menu::Art::load(&mut d).ok()) {
+        let count = |m: &Menu| {
+            let mut out = Vec::new();
+            art.sprites(m, (1280, 720), 0, &mut out);
+            out.len()
+        };
+        let mut idle = m.clone();
+        idle.store.cards.iter_mut().for_each(|c| c.progress = None);
+        assert!(count(&m) > count(&idle), "the pill over the main menu");
+    }
+    // the first one in: no ask while the second is queued, and Free Ride does not ask
+    m.store_installed("a/nat01", true);
+    m.store.cards[1].progress = Some((0.1, "Downloading 0 / 2 MB".into()));
+    assert_eq!(lines(&m), ["Downloading 2/2: a/nat02"]);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!((m.screen(), m.reload_asking()), (Some(Screen::Tracks), None), "not while queued");
+    // the last one in over the track pick: not there, but back on the main menu
+    m.store_installed("a/nat02", true);
+    assert!(m.store.strips().is_empty());
+    m.step(r.read(&Report::idle()));
+    assert_eq!(m.reload_asking(), None, "not over the pick");
+    tap(&mut m, &mut r, Control::Circle);
+    assert_eq!(m.screen(), Some(Screen::Main));
+    assert_eq!(m.reload_asking(), Some(("Load the new mods?", ["Reload", "Later"], 0)));
+    assert!(!m.reload_button(), "not under the popup");
+    // Later: the button, and Free Ride asks again
+    tap(&mut m, &mut r, Control::Down);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.reload_asking(), None);
+    assert!(m.mods_waiting() && m.reload_button());
+    assert!(!m.take_store_asks().contains(&StoreAsk::Reload));
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Main));
+    assert_eq!(m.reload_asking(), Some(("Load the new mods?", ["Reload now", "Play without them"], 0)));
+    // Reload now: the shell reads the folder, and the pick opens
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.take_store_asks(), [StoreAsk::Reload]);
+    assert_eq!((m.screen(), m.mods_waiting(), m.reload_asking()), (Some(Screen::Tracks), false, None));
+}
+
+/// P293: the Reload Mods button is Select's, and Play without them carries on and asks no more
+/// until the mods change again.
+#[test]
+fn reload_mods_waits_on_select_and_play_without_them_asks_once() {
+    use menu::{Card, StoreAsk};
+    let (mut m, mut r) = fresh();
+    let install = |m: &mut Menu, key: &str| {
+        m.store.cards.push(Card { key: key.into(), name: key.into(), progress: Some((0.0, "Waiting to download".into())), ..Card::default() });
+        m.store_installed(key, true);
+    };
+    install(&mut m, "a/x");
+    m.step(r.read(&Report::idle()));
+    assert!(m.reload_asking().is_some());
+    tap(&mut m, &mut r, Control::Circle);
+    assert_eq!((m.screen(), m.reload_asking()), (Some(Screen::Main), None), "Circle is Later");
+    // Settings is calm: the button is up there too, and Select reloads
+    m.open(Screen::Settings);
+    assert!(m.reload_button());
+    tap(&mut m, &mut r, Control::Select);
+    assert_eq!(m.take_store_asks(), [StoreAsk::Reload]);
+    assert!(!m.mods_waiting() && !m.reload_button());
+    // another in, put off; Free Ride's Play without them goes on to the pick, once
+    m.open(Screen::Main);
+    install(&mut m, "a/y");
+    m.step(r.read(&Report::idle()));
+    tap(&mut m, &mut r, Control::Down);
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.mods_waiting() && m.reload_asking().is_none());
+    tap(&mut m, &mut r, Control::Cross);
+    tap(&mut m, &mut r, Control::Down);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!((m.screen(), m.reload_asking()), (Some(Screen::Tracks), None));
+    assert!(m.mods_waiting() && m.take_store_asks().is_empty());
+    tap(&mut m, &mut r, Control::Circle);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!((m.screen(), m.reload_asking()), (Some(Screen::Tracks), None), "once per change");
+}

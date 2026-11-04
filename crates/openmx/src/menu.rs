@@ -61,6 +61,9 @@ pub mod cameras;
 mod screens;
 #[path = "menu_store.rs"]
 mod store;
+#[path = "menu_transfers.rs"]
+mod transfers;
+pub use transfers::{PLAY_ROWS, Transfers};
 // The pause's Tricks page (P259): the ride's tricks, their gestures and points.
 #[path = "menu_tricks.rs"]
 pub mod trick_list;
@@ -4721,6 +4724,10 @@ impl Menu {
             return self.splash_step(&[(Dev::Keys, p)]);
         }
         self.tick = self.tick.wrapping_add(self.pace.step);
+        // P293: the reload popup takes the press, Select presses Reload Mods, a batch's end asks.
+        if let Some(act) = self.walk_transfers(p) {
+            return act;
+        }
         // A dropdown (P277) left open on a page gone some other way than its own presses.
         if self.listing.is_some_and(|(s, ..)| self.screen() != Some(s)) {
             self.listing = None;
@@ -4814,6 +4821,8 @@ impl Menu {
             // P193: Square reloads the page into the newer build the main menu offers; P191: the
             // desktop's installs it, or opens its release page.
             Screen::Main if p.delete && self.newer.is_some() => self.update_now(),
+            // P293: new mods waiting, put off: Free Ride, Local Game and Online ask first.
+            Screen::Main if (p.ok || p.start) && matches!(at, MAIN_FREE | MAIN_LOCAL | MAIN_ONLINE) && self.play_ask(at) => {}
             Screen::Main => match (p.ok || p.start, p.back, at) {
                 (true, _, MAIN_FREE) => {
                     if self.party.take().is_some() {
