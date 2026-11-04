@@ -539,6 +539,8 @@ fn the_settings_file_reads_back_as_it_was_written() {
         // Two trick packs stacked, and the handling from the second (MD77).
         trick_packs: vec!["mxvatv".into(), "untamed".into()],
         handling_pack: "untamed".into(),
+        // MX vs. ATV's gyros both off its default (P226).
+        gyro: game_sim::handling::Gyro { brake: false, gas: true },
         // The Original tab's picture at the original's (P126); the plants are always ours since
         // 2026-10-29.
         plants: game_render::eco::Lod::Smooth,
@@ -5720,6 +5722,34 @@ fn each_trick_pack_has_a_row_and_they_stack() {
     assert_eq!(row(&m, Key::TrickPack(0)).note.as_deref(), Some(warn.as_str()));
     m.settings.mods = false;
     assert!(row(&m, Key::TrickPack(0)).off.is_some(), "greyed with the mods folder off");
+}
+
+/// P226: MX vs. ATV's Brake Gyro and Gas Gyro rows sit under Handling, greyed on the original's,
+/// and each is saved only off that game's default (brake on, gas off).
+#[test]
+fn gyro_rows_set_mx_vs_atv_gyros() {
+    use menu::Key;
+    let (mut m, mut r) = fresh();
+    m.set_trick_packs(vec![menu::TrickPack { id: "mxvatv".into(), name: "Unleashed tricks".into(), extras: Vec::new() }]);
+    settings_at(&mut m, &mut r, "Ride");
+    let row = |m: &Menu, key: Key| m.page().into_iter().find(|row| row.key == key).unwrap();
+    assert_eq!(row(&m, Key::BrakeGyro).value, "On");
+    assert_eq!(row(&m, Key::GasGyro).value, "Off");
+    assert!(row(&m, Key::GasGyro).off.is_some(), "greyed on the original's handling");
+    m.settings.handling = game_sim::handling::Handling::MxVsAtv;
+    assert!(row(&m, Key::GasGyro).off.is_none());
+    assert!(!m.settings.text().contains("gyro"), "{}", m.settings.text());
+    down_to(&mut m, &mut r, Key::GasGyro);
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.take_changed());
+    assert_eq!(m.settings.gyro, game_sim::handling::Gyro { brake: true, gas: true });
+    down_to(&mut m, &mut r, Key::BrakeGyro);
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.settings.gyro, game_sim::handling::Gyro { brake: false, gas: true });
+    let text = m.settings.text();
+    assert!(text.contains("handling = mxvatv\nbrake_gyro = off\ngas_gyro = on\n"), "{text}");
+    assert_eq!(Settings::parse(&text).gyro, m.settings.gyro);
+    assert_eq!(Settings::parse("brake_gyro = on\ngas_gyro = off\n").gyro, game_sim::handling::Gyro::default());
 }
 
 /// MD30: MD25's 360 Style row is gone. A settings file that still has its `three_sixty` line reads as

@@ -548,6 +548,9 @@ pub struct Settings {
     /// How the bikes handle (MD40): MX Unleashed's, or MX vs. ATV's bikes and steps read from the
     /// trick pack's `mx_*.phy`. The original's unless changed.
     pub handling: game_sim::handling::Handling,
+    /// MX vs. ATV's Brake Gyro and Gas Gyro options (P226), read on its handling alone: the game's
+    /// own default, brake on and gas off, unless changed.
+    pub gyro: game_sim::handling::Gyro,
     /// How the plants change from model to picture (V55): always ours, [`Lod::Smooth`]. The
     /// Original switch's Plant Detail (P126) and the presets' original plants were taken out
     /// (2026-10-29: the original's plant LOD fades in bushes that are not there), and an older
@@ -1394,6 +1397,7 @@ impl Default for Settings {
             trick_packs: Vec::new(),
             handling_pack: String::new(),
             handling: game_sim::handling::Handling::default(),
+            gyro: game_sim::handling::Gyro::default(),
             plants: Lod::default(),
             foliage: Foliage::default(),
             picture: Picture::default(),
@@ -1604,6 +1608,8 @@ impl Settings {
                 "trick_packs" => s.trick_packs = pack_names(v),
                 "handling_pack" => s.handling_pack = pack_names(v).into_iter().next().unwrap_or_default(),
                 "handling" => s.handling = game_sim::handling::Handling::from_word(v).unwrap_or(s.handling),
+                "brake_gyro" => s.gyro.brake = v != "off",
+                "gas_gyro" => s.gyro.gas = v == "on",
                 "mods_off" => {
                     s.mods_off = v.split_whitespace().filter(|w| mod_id(w) || mod_id(&format!("{w}_x"))).map(str::to_string).collect();
                 }
@@ -1944,7 +1950,16 @@ impl Settings {
     /// The handling's line (MD40), only when it is not the original's, as the tricks' is.
     fn handling_text(&self) -> String {
         use game_sim::handling::Handling;
-        if self.handling == Handling::Original { String::new() } else { format!("handling = {}\n", self.handling.word()) }
+        let mut out = if self.handling == Handling::Original { String::new() } else { format!("handling = {}\n", self.handling.word()) };
+        // P226: each gyro only off the game's default, kept while the handling is the original's
+        let mvatv = game_sim::handling::Gyro::default();
+        if self.gyro.brake != mvatv.brake {
+            out += &format!("brake_gyro = {}\n", on_off(self.gyro.brake));
+        }
+        if self.gyro.gas != mvatv.gas {
+            out += &format!("gas_gyro = {}\n", on_off(self.gyro.gas));
+        }
+        out
     }
 
     /// The lobby's seat count (N12), only when it is not the usual [`LOBBY_SEATS`], so a file from
