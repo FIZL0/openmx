@@ -173,7 +173,7 @@ fn the_installed_mx_unleashed_worlds_ride_promptly() {
 
 #[test]
 fn world_mxu_free_is_built_off_the_disc_as_openmx_mods_builds_it() {
-    rides_off_the_disc("world_mxu_free", 5, 38 + 14);
+    rides_off_the_disc("world_mxu_free", 5, 35 + 13);
 }
 
 /// The first ride on `id` off the disc into an empty mods folder: what it said, and the built

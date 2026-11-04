@@ -310,6 +310,54 @@ fn a_world_refuses_offsets_that_could_round() {
     }
 }
 
+/// MD61: a tile may stand at a negative offset where its kept cells start at or past 0 (a deep cut by
+/// a wrapped world's near seam), and not where they would start short of it. Its ground is the tile
+/// alone's at the EE's `world − at`, which can drop the bits the sum has no room for: a point at most
+/// the tile's own last bit short of the world point, never out of the cells it keeps.
+#[test]
+fn a_tile_may_stand_short_of_0_where_it_keeps_nothing() {
+    let s = &SPECS[0];
+    let tile = |at: f32, x0: u32| Tile {
+        name: "a".into(),
+        at: [F(at), F(0.0)],
+        layout: layout(s),
+        spacing: F(9.0),
+        levels: 1,
+        keep: [x0, 0, 56, 63],
+        first_owner: 0,
+    };
+    let source = || Memory { files: vec![bytes(s)], loads: Arc::new(AtomicUsize::new(0)) };
+    assert!(Tiled::new(vec![tile(-81.0, 8)], Box::new(source()), Reach::DESKTOP).is_err(), "kept from -9 ft");
+    assert!(Tiled::new(vec![tile(-72.5, 9)], Box::new(source()), Reach::DESKTOP).is_err(), "not whole");
+    let tiled = Tiled::new(vec![tile(-72.0, 8)], Box::new(source()), Reach::DESKTOP).unwrap();
+    assert_eq!(tiled.area.width.0, 56.0 * 9.0 - 72.0);
+    let file = bytes(s);
+    let terrain = Terrain::parse(&file).unwrap();
+    let alone = Ground::new(&terrain, &layout(s));
+    let mut rng = Lcg(61);
+    let (mut exact, mut near) = (0, 0);
+    for k in 0..6000 {
+        // Some points crowd the seam, where a float holds far finer bits than the tile does.
+        let x = if k % 2 == 0 { (rng.unit() * 432.0) as f32 } else { (rng.unit().powi(8) * 72.0) as f32 };
+        let z = (rng.unit() * 560.0) as f32;
+        let (i, lx, lz) = tiled.owner(F(x), F(z)).unwrap_or_else(|| panic!("({x}, {z}) owned by nothing"));
+        assert_eq!(i, 0);
+        assert_eq!(lz.0, z);
+        // The EE's sum, truncated to its own last bit: never past the world point, never a bit short.
+        let sum = f64::from(x) + 72.0;
+        let bit = f64::from(f32::from_bits(lx.0.to_bits() + 1) - lx.0);
+        assert!(f64::from(lx.0) <= sum && sum - f64::from(lx.0) < bit && lx.0 >= 72.0, "{x}: {}", lx.0);
+        if f64::from(lx.0) == sum {
+            exact += 1;
+        } else {
+            near += 1;
+        }
+        assert!(same_hit(tiled.at(F(x), F(z)), alone.at(lx, lz)), "({x}, {z})");
+    }
+    assert!(exact > 1000 && near > 1000, "{exact} {near}");
+    assert!(tiled.owner(F(-0.01), F(10.0)).is_none(), "nothing short of 0 on a world that does not wrap");
+}
+
 /// The heightfield the plane and the wreck read covers the whole world.
 #[test]
 fn the_worlds_field_is_the_whole_world() {

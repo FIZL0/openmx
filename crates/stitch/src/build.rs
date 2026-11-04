@@ -440,20 +440,24 @@ pub fn plan_widened(tiles: &[Tile], cuts: &[[u32; 4]], gates: &[[f64; 4]], p: &P
         };
         let width = |t: usize| f64::from(cuts[t][axis + 2] - cuts[t][axis]) * tiles[t].spacing;
         let wmax_of = |m: &[usize]| m.iter().map(|&t| width(t)).fold(0.0, f64::max);
-        // The first line starts far enough out that no tile's origin is below 0 (openmx refuses a
-        // negative `at`): a tile cut deep, at its ridge (M23), has its interior far from its origin.
+        // The first line starts far enough out that no tile's origin is below 0 on an axis with edges:
+        // a tile cut deep, at its ridge (M23), has its interior far from its origin. On a wrapped one
+        // the band before it is half of each join across the wrap, so it starts two lattice cells in,
+        // its cut ridge out past the near seam (openmx MD61: game-sim lets a tile stand at a negative
+        // `at` while its kept cells start at or past 0), and the joins across are as wide as they need.
         let first = members(0);
-        let mut cursor = first
-            .iter()
-            .map(|&t| f64::from(cuts[t][axis]) * tiles[t].spacing - (wmax_of(&first) - width(t)) / 2.0)
-            .fold(pad, f64::max);
+        let floor = |t: usize| if wraps[axis] { f64::MIN } else { f64::from(cuts[t][axis]) * tiles[t].spacing };
+        let mut cursor = match wraps[axis] {
+            true => 2.0 * step,
+            false => first.iter().map(|&t| floor(t) - (wmax_of(&first) - width(t)) / 2.0).fold(pad, f64::max),
+        };
         for l in 0..lines {
             let m = members(l);
             let wmax = wmax_of(&m);
             let mut far = cursor;
             for &t in &m {
                 let s = tiles[t].spacing;
-                let want = (cursor + (wmax - width(t)) / 2.0).max(f64::from(cuts[t][axis]) * s);
+                let want = (cursor + (wmax - width(t)) / 2.0).max(floor(t));
                 let (origin, lo, hi) = place_axis(want, s, cuts[t][axis], cuts[t][axis + 2], ratios[t]);
                 at[t][axis] = origin;
                 keep[t][axis] = lo;
@@ -493,11 +497,16 @@ pub fn plan_widened(tiles: &[Tile], cuts: &[[u32; 4]], gates: &[[f64; 4]], p: &P
         }
     }
     // A wrapped axis ends far enough out that each pair across the wrap has its gap: the band past the
-    // last tile and the band before the first together.
+    // last tile and the band before the first together. It has no outer band, so not the open edge's
+    // pad past the last tile either (openmx-mods 3c2c2fd, MD54), only two lattice cells: openmx drops
+    // the lattice's last cell, and the last tile's edge needs a join cell outside it.
     let lo = |t: usize, a: usize| at[t][a] + f64::from(keep[t][a]) * tiles[t].spacing;
     let hi = |t: usize, a: usize| at[t][a] + f64::from(keep[t][a + 2]) * tiles[t].spacing;
     let far = [0, 1].map(|a| (0..tiles.len()).map(|t| hi(t, a)).fold(0.0, f64::max));
-    let tail = [0, 1].map(|a| across[a].iter().map(|&(t, u, g)| hi(t, a) + g - lo(u, a)).fold(far[a] + pad, f64::max) - far[a]);
+    let tail = [0, 1].map(|a| {
+        let open = if wraps[a] { far[a] + 2.0 * step } else { far[a] + pad };
+        across[a].iter().map(|&(t, u, g)| hi(t, a) + g - lo(u, a)).fold(open, f64::max) - far[a]
+    });
     Ok(finish(tiles, gates, p, step, ratios, at, keep, cell, tail, false, widen))
 }
 
@@ -720,9 +729,10 @@ fn units_layout(
     };
     for axis in 0..2 {
         // The world wraps, so any line no tile runs across can be the first. Each is tried and the
-        // shortest world kept: a tile cannot start before its own ground does (no tile origin is below
-        // 0, game-sim's Tiled::new), so a first line of nationals, whose trimmed ground is ~2000 ft
-        // before their interiors, leaves that much more join over the wrap than a freeride map's ridge.
+        // shortest world kept: a tile cannot start before its own ground does (this layout keeps every
+        // tile origin at or past 0, though game-sim allows less since MD61), so a first line of
+        // nationals, whose trimmed ground is ~2000 ft before their interiors, leaves that much more join
+        // over the wrap than a freeride map's ridge.
         let unit = |t: usize| if axis == 0 { cell[t].0 } else { cell[t].1 };
         let lines = (0..n).map(|t| unit(t) + k[t][axis]).max().unwrap_or(1);
         let whole: Vec<usize> = (0..lines).filter(|&r| (0..n).all(|t| !(unit(t) < r && r < unit(t) + k[t][axis]))).collect();
