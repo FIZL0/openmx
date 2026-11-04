@@ -1030,7 +1030,8 @@ fn the_plane_jousts_p2_as_the_original() {
         let m = p2_held(&cap, p2, &ticks);
         let port = ticks.iter().find_map(|k| k.p2_wreck.map(|w| (k.t + 1, w)));
         let theirs = p2_wrecked_from(&cap, from, to);
-        println!("joust from {from}: the plane holds {n}, P2 {m} of {} ticks; P2's wreck port {port:?} (its frame), original {theirs:?} (first row)", ticks.len());
+        let parted = ticks.get(n).map(|k| k.t);
+        println!("joust from {from}: the plane holds {n} (parts on tick {parted:?}), P2 {m} of {} ticks; P2's wreck port {port:?} (its frame), original {theirs:?} (first row)", ticks.len());
         for k in ticks.iter().filter(|k| (137850..137860).contains(&k.t)) {
             let f = |b: [u32; 3]| b.map(f32::from_bits);
             println!("    {} plane vel {:?} p2 vel {:?} wreck {:?}", k.t + 1, f(k.state[0]), f(k.p2[0]), k.p2_wreck);
@@ -1046,20 +1047,22 @@ fn the_plane_jousts_p2_as_the_original() {
 }
 
 /// The joust's runs: from, to, and the ticks the plane and P2 hold. 137910's seeds P2 down
-/// ([`wrecked_p2`]); its wreck bike holds. The plane holds its first tick, row 137911 read after that
-/// tick's first substep ([`held`], T8), and parts on its second (row 137912), the wreck bike's mirror
-/// on its list (S274) pushing it short of the original's (research/s274). Pinned on C25's capture.
-const JOUSTS: [(u32, u32, usize, usize); 3] = [(137810, 137900, 46, 17), (137845, 137900, 11, 55), (137910, 138010, 1, 100)];
+/// ([`wrecked_p2`]); its wreck bike holds, and since F32 the plane too, to the end: the wreck bike is
+/// a body of the plane's world, its resolve after the plane's each substep (research/f30), and its
+/// first tick holds on row 137911, read after that tick's first substep ([`held`], T8). From 137845
+/// the plane holds through the wreck (it parted on tick 137856 before F32) to 18 ticks. Pinned on
+/// C25's capture.
+const JOUSTS: [(u32, u32, usize, usize); 3] = [(137810, 137900, 53, 17), (137845, 137900, 18, 55), (137910, 138010, 100, 100)];
 
 /// The whole tape as images every 100 frames cut it: each stretch from its image to the next, and
-/// how many of its ticks hold (S272's pins). Two part: 137810's on the joust's hit (137853's step), the
-/// Sim's plane lane standing P2 still; and 137910's on its second tick, the plane bouncing on P2's
-/// wreck. Since S276 [`fly`] seeds P2 down there and its wreck bike meets the plane in the Sim's lane
+/// how many of its ticks hold (S272's pins). One parts: 137810's on the joust's hit (137853's step),
+/// the Sim's plane lane standing P2 still. 137910's parted on its second tick, the plane bouncing on
+/// P2's wreck. Since S276 [`fly`] seeds P2 down there and its wreck bike meets the plane in the Sim's lane
 /// ([`the_sim_lane_meets_p2s_wreck_bike`]). Its first tick holds on a row read after the first
-/// substep (T8, [`row_137911_is_the_wreck_bikes_first_substep`]); the second parts, the plane's
-/// resolve against the wreck bike's mirror not yet the original's (S274). Pinned on C25's capture.
+/// substep (T8, [`row_137911_is_the_wreck_bikes_first_substep`]), and since F32, the wreck bike
+/// stepped in the plane's world, the rest of it holds too. Pinned on C25's capture.
 const STRETCHES: [usize; 29] = [
-    8, 100, 100, 100, 100, 43, 1, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100,
+    8, 100, 100, 100, 100, 43, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100,
     100, 100, 100, 100,
 ];
 
@@ -1392,6 +1395,35 @@ fn f30_wreck_bike_images_against_the_port() {
             println!("  {} {n:<13} {x:<58} | {o}", if *x == o { ' ' } else { '*' });
         }
     }
+}
+
+/// **F32: the plane and P2's wreck bike after the wreck are the original's images**: [`fly_two`]
+/// from 137845, the wreck bike stepped in the plane's world (its resolve after the plane's each
+/// substep, research/f30), and the port's plane after each tick 137854..137857 is image `t + 1`'s
+/// body bit for bit, velocity and position, as is the wreck bike's body once P2 is down. Before F32
+/// the plane parted on tick 137856 (-28.609848, -0.08526538, 3.6421182 against the image's
+/// -28.616682, -0.05351289, 3.6458206). Skips without the images (`research/f30/index.md`).
+#[test]
+fn f32_the_plane_and_wreck_bike_are_the_images() {
+    let Some((_, ticks)) = fly_two(137845, 137860, FIELD_ZERO) else { return };
+    let bits = |v: Vf| [0, 1, 2].map(|k| v.0[k].to_bits());
+    let f = |b: [u32; 3]| b.map(f32::from_bits);
+    let mut wrecks = 0;
+    for t in 137854..=137857 {
+        let Some(ee) = image(t + 1) else { return };
+        let mut plane = game_sim::biplane::Body::default();
+        read_body(&ee, ee.u32_at(plane0(&ee) + plane_at::BODY), &mut plane);
+        let port = ticks.iter().find(|k| k.t == t).expect("the tick");
+        assert_eq!(port.state, [bits(plane.velocity), bits(plane.position)], "the plane after {t}: port vel {:?}, image {:?}", f(port.state[0]), f(bits(plane.velocity)));
+        let part = ee.u32_at(p2(&ee) + 0x7a8);
+        let (Some(w), true) = (&port.wreck, part != 0) else { continue };
+        let mut theirs = game_sim::biplane::Body::default();
+        read_body(&ee, ee.u32_at(part + 0x110), &mut theirs);
+        let ours = &w.bike.body;
+        assert_eq!([bits(ours.velocity), bits(ours.position)], [bits(theirs.velocity), bits(theirs.position)], "the wreck bike after {t}");
+        wrecks += 1;
+    }
+    assert!(wrecks >= 2, "P2's wreck bike down on the last ticks");
 }
 
 /// **F30: the original's own tick 137856 off image 137856**, the level's collision node's update run
