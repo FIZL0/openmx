@@ -1627,7 +1627,7 @@ const TWO_PI: f32 = 6.2831855;
 /// A spin angle back within ±π: less the whole turns in it (truncated), then one turn more either
 /// way if it is still past π.
 #[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
-fn wrap_angle(a: F) -> F {
+pub(crate) fn wrap_angle(a: F) -> F {
     let turns = F(fpu::from_i32((F(ONE_OVER_TWO_PI) * a).to_i32()));
     let w = Acc::adda(F::ZERO, a).msub(F(TWO_PI), turns);
     if !(w <= F(PI)) {
