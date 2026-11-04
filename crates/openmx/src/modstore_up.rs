@@ -378,6 +378,25 @@ impl Blob {
     fn all(&self) -> Result<Vec<u8>, String> {
         self.read(0, self.len() as usize)
     }
+
+    /// A PUT's body: the bytes, or the file streamed from disk rather than read whole (P221). Its
+    /// length goes in a Content-Length of the caller's, as S3 refuses a chunked PUT.
+    async fn body(&self) -> Result<reqwest::Body, String> {
+        match self {
+            Blob::Bytes(b) => Ok(b.clone().into()),
+            #[cfg(not(target_arch = "wasm32"))]
+            Blob::File(path, size, _) => {
+                let f = tokio::fs::File::open(path).await.map_err(|e| format!("can't read the zip: {e}"))?;
+                let on_disk = f.metadata().await.map_err(|e| format!("can't read the zip: {e}"))?.len();
+                if on_disk != *size {
+                    return Err(format!("the zip changed while uploading: {on_disk} bytes, not {size}"));
+                }
+                Ok(f.into())
+            }
+            #[cfg(target_arch = "wasm32")]
+            Blob::File(..) => Err("no files to read in the browser".into()),
+        }
+    }
 }
 
 /// A mod packed and checked for the store: its `mod.zip` (removed when this goes), `meta.json`'s meta
@@ -731,7 +750,7 @@ impl Store {
             }
             _ => {
                 tell(format!("Uploading {file} ({mb} MB)"));
-                let mut put = self.client.put(href).body(b.all()?);
+                let mut put = self.client.put(href).header("Content-Length", b.len()).body(b.body().await?);
                 for (k, v) in &header {
                     if let Some(v) = v.as_str() {
                         put = put.header(k.as_str(), v);

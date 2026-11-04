@@ -602,6 +602,33 @@ fn the_maintainers_index_and_card_go_on_main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// P221: a file under the multipart cutoff goes up in one PUT streamed from disk (its Content-Length
+/// set, the fake reads only that many bytes), and the store holds exactly its bytes; a file that is
+/// not the size its Blob says is refused before anything is sent.
+#[test]
+fn a_small_zip_goes_up_in_one_put_from_the_file() {
+    let fake = Fake::start();
+    let (dir, mods) = scratch("one_put");
+    let s = Store::new(&fake.base, &dir, &mods);
+    let bytes: Vec<u8> = (0..500u32).map(|i| (i * 7 + i / 3) as u8).collect();
+    let path = dir.join("small.zip");
+    std::fs::write(&path, &bytes).unwrap();
+    let oid = hex(&Sha256::digest(&bytes));
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let none = |_: String| {};
+    let b = Blob::File(path.clone(), bytes.len() as u64, oid.clone());
+    rt.block_on(s.lfs_put(TOKEN_OK, &oid, &b, "x/small.zip", &none)).unwrap();
+    {
+        let hub = fake.hub.lock().unwrap();
+        assert_eq!(hub.lfs[&oid], bytes);
+        assert_eq!(hub.multipart, 0, "under the cutoff: one PUT");
+    }
+    let short = Blob::File(path, 600, "f".repeat(64));
+    let e = rt.block_on(s.lfs_put(TOKEN_OK, &"f".repeat(64), &short, "x/small.zip", &none)).unwrap_err();
+    assert!(e.contains("changed"), "{e}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// P230: a texture pack of the player's own in `mods/textures/<id>/` is one of their mods, packs into a
 /// zip Install's checks (and `textures`' pack reader) take, and goes up with its biggest texture as its
 /// picture; a pack with no key-named texture doesn't pack.

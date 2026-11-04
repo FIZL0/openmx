@@ -62,10 +62,11 @@ ab_glyph = "0.2"
 # Replaced textures (V84): the key-named PNGs of texture packs, mods/texture-replacements and mods'
 # upscales, read, and --dump-textures' written, as opentennis reads and writes them (its texhash.rs).
 png = "0.18"
-# The mod store's HTTPS (P198) on openmx-net's ring, and a runtime for each of its jobs' threads.
-reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+# The mod store's HTTPS (P198) on openmx-net's ring, and a runtime for each of its jobs' threads;
+# `stream` (and tokio's fs) for an upload's mod.zip sent from the file, not read whole (P221).
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "stream"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
-tokio = { version = "1", features = ["rt"] }
+tokio = { version = "1", features = ["rt", "fs"] }
 # The desktop updater (P191, `src/update.rs`): a release's SHA256SUMS is signed with minisign.
 minisign-verify = "0.3"
 # The sim thread (N23a, `src/sim_thread.rs`): a tick run on a thread of its own, kept for the ride,
