@@ -30,6 +30,8 @@ const GP: u64 = 0x003d_baf0;
 const IMAGE_LIST: u32 = 0x0162_7a40;
 const PROBE_AT: u32 = 0x0159_c500;
 const TRIGGER: u32 = 0x0162_cd30;
+/// What the trigger's stand writes: its centre, its reach and its frame.
+const TRIGGER_STOOD: [(u32, u32); 3] = [(0x50, 0x10), (0x70, 4), (0x130, 0x40)];
 /// The record clear (the search's vt `+0xc8`): `atv_node_frame` of the probe's node, then the stand.
 const RECORD_CLEAR: u32 = 0x001b_d180;
 
@@ -53,14 +55,14 @@ mod at {
 }
 
 /// Desert Oasis's static world, the trigger probe's rays, and MD37a's race captures' rows.
-struct Desert {
-    world: atv_world::World,
-    props: Vec<Prop>,
-    eco: Ecosystem,
-    trees: Trees,
-    rays: Rays,
-    search: usize,
-    first_part: usize,
+pub(super) struct Desert {
+    pub(super) world: atv_world::World,
+    pub(super) props: Vec<Prop>,
+    pub(super) eco: Ecosystem,
+    pub(super) trees: Trees,
+    pub(super) rays: Rays,
+    pub(super) search: usize,
+    pub(super) first_part: usize,
     rows: Vec<Row>,
 }
 
@@ -75,6 +77,14 @@ struct Row {
 }
 
 fn desert(ee: &Ee) -> Option<Desert> {
+    let mut d = desert_world(ee)?;
+    let kit = Kit::load().map_err(|w| skip(&w)).ok()?;
+    d.rows = race_rows(&kit.ctx("capture/md37a"))?;
+    Some(d)
+}
+
+/// MD75e: [`desert`] without MD37a's race rows, which the whole frame does not need.
+pub(super) fn desert_world(ee: &Ee) -> Option<Desert> {
     let kit = Kit::load().map_err(|w| skip(&w)).ok()?;
     let dir = kit.ctx("mxvatv-ps2/md37a");
     let res = dir.join("mc02.res");
@@ -111,8 +121,7 @@ fn desert(ee: &Ee) -> Option<Desert> {
     world.objects.push(collidable(ee, TRIGGER));
     let first_part = world.objects.len();
     world.objects.extend(atv_search::part_collidables(&eco));
-    let rows = race_rows(&kit.ctx("capture/md37a"))?;
-    Some(Desert { world, props: props.props, eco, trees, rays: image_rays(ee), search, first_part, rows })
+    Some(Desert { world, props: props.props, eco, trees, rays: image_rays(ee), search, first_part, rows: Vec::new() })
 }
 
 /// The image's collidable at `c` as the port's (`tests/atv_search.rs`'s): its reach, flags and filter.
@@ -351,7 +360,20 @@ fn on_desert_oasis(seed: u64, picks: &[u32], ride: impl Fn(&mut Gen, &Ride) -> R
             ee.set_f32(PROBE_AT + at::CENTRE + 4 * j, node.0[j as usize]);
         }
         ee.call(GATHER, &[u64::from(IMAGE_LIST), u64::from(PROBE_AT), 3], &[], 50_000_000);
+        // MD75e: the original stands its own trigger probe; the port stands the ride's. The ride's is
+        // laid there first and what the stand left carried back to the harness's.
+        let trigger = collidable_at(quad::Part::Trigger);
+        for (o, len) in TRIGGER_STOOD {
+            for w in (0..len).step_by(4) {
+                ee.set_u32(TRIGGER + o + w, ee.u32_at(trigger + o + w));
+            }
+        }
         ee.call(GROUND_STEP, &[u64::from(OBJ)], &[r.s.dt.0], 400_000_000);
+        for (o, len) in TRIGGER_STOOD {
+            for w in (0..len).step_by(4) {
+                ee.set_u32(trigger + o + w, ee.u32_at(TRIGGER + o + w));
+            }
+        }
         let was = snap_all(&ee);
         let want_hit = ee.u8_at(TRIGGER + at::FLAGS) & 0x20 != 0;
         let want_count = ee.u32_at(ee.u32_at(TRIGGER + at::RECORD) + at::COUNT);
@@ -468,6 +490,9 @@ fn the_quads_force_body_on_desert_oasis_is_the_originals() {
         r.s.vstate = Some(g.bits() % 3);
         r.s.q.active = true;
         r.bike.parts.scene = spawn.bike.parts.scene;
+        // MD75e: the probe the contacts stand is the image's trigger.
+        let k = game_sim::atv_sync::slot(quad::Part::Trigger);
+        r.bike.parts.collidables.states[k] = spawn.bike.parts.collidables.states[k];
         r
     };
     on_desert_oasis(0x0086_0002, &picks, ride, &CONTACT_PATHS, 3);
