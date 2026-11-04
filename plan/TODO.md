@@ -226,7 +226,6 @@ replay hash is unchanged.
 - [ ] **K30** (follow-up, low) lobby.rs: two more tests assert ride progress after a fixed number of rounds, the shape K25 took out of a_second_player_on_an_online_machine_sits_down_and_leaves_again: the_lobby_s_ride_goes_over_the_lobby_s_connection_in_step_and_a_leaver_lets_the_host_ride_on ('only {both} ticks settled on both in 4 s' after 120 rounds) and a_lobby_ride_draws_each_peer_in_their_own_look (60 rounds). Ride each until its condition, the round count only a hang guard, as K25's both() does
 - [ ] **MD97a** (follow-up, low) After the iPhone app was away, rebuild the paint stream's pages and the dress stream's models/textures as MD97's GroundStream::build_again does for the ground (an upload refused in the background leaves a dirt map or a missing prop), and gate the dress stream's GPU uploads on gpuwin::in_front without changing what world_dress::take gives the collision (journal 2026-11-04-md97-app-switcher-ground)
 - [ ] **K35** (follow-up, low) page.mjs (crates/openmx/tests/web) removes its chromium profile with a bare rmSync on exit, which threw ENOTEMPTY under load in online.mjs (K33); give it online.mjs's process-group wait before the removal
-- [ ] **K36** (follow-up, low) The done audit reds on addresses already on main: crates/game-sim/src/atv_wheel.rs:62/66 (0x397000, 0x396fc0) and plan/DONE.md:519/533 (0x00256e50, 0x00493210) now have oracle names; say what they are instead (K33 landed with --skip-audit for it)
 
 
 ### Stretch
