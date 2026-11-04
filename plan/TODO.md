@@ -220,6 +220,7 @@ replay hash is unchanged.
 - [ ] **MD75e1** (follow-up, low) the quad's collision record with contacts: its vt +0x88 (the gravity record, Call::GravityRecord) walks the record's contacts and is handed on by quad::Steps; MD75e's whole frame ran only with the record empty (atv-r-spawn, count 0). Port it and run a whole frame off an image where the quad touches something (journal 11-whole-frame.md).
 - [ ] **MD96** (follow-up, low) openmx-mods: B1 made decode_stereo and Adpcm stop at a stereo .vig's end flag; drop import-music's filler-pair todo line and answer notes/openmx-asks.md's MD7 ask (MX Unleashed's own 51 stereo .vig carry the same one 0x07 filler pair)
 - [ ] **MD97a** (follow-up, low) After the iPhone app was away, rebuild the paint stream's pages and the dress stream's models/textures as MD97's GroundStream::build_again does for the ground (an upload refused in the background leaves a dirt map or a missing prop), and gate the dress stream's GPU uploads on gpuwin::in_front without changing what world_dress::take gives the collision (journal 2026-11-04-md97-app-switcher-ground)
+- [ ] **K30** (follow-up, low) (low) ./kit audit reds on main: retail addresses in crates/game-sim/src/atv_wheel.rs:62,66 (from 012f4c8f) and plan/DONE.md:519,533; move them to research/oracle.txt / the journal (MD97 had to --skip-audit)
 
 
 ### Stretch
