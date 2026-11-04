@@ -622,7 +622,8 @@ pub enum Call {
     NodeBounds,
     CollisionSync,
     /// What those three [`Steps`] runs call in turn (MD75c): the quad's node's bounds gathered again
-    /// (its vt `+0x94`) when they are stale ([`crate::atv_moto::Scene::bounds_stale`]); a box moved in
+    /// (its vt `+0x94`) when they are stale ([`crate::atv_moto::Scene::bounds_stale`]; MD75c3: `Steps`
+    /// runs it, [`crate::atv_moto::Scene::rebound`]); a box moved in
     /// the world's spatial database (`atv_spatial_move`) — the quad's own entry (`node` false: its node's
     /// box, reaching 0) or its node's ([`crate::atv_moto::Scene::database_box`]); and a collidable
     /// brought up to date (`atv_part_sync`) and the nearby list gathered round the active one
@@ -2040,13 +2041,13 @@ impl<R: Moto, G: FnMut(Vf, &mut u8) -> (Vf, Vf), S: Sweep> Moto for Steps<R, G, 
             }
             Call::SpatialUpdate => {
                 if self.bike.parts.spatial {
-                    let (centre, half) = self.node_box(q, body);
+                    let (centre, half) = self.node_box();
                     self.rest.call(Call::SpatialMove { node: false, centre, half, reach: F::ZERO }, q, body);
                 }
             }
             Call::NodeBounds => {
                 if self.bike.parts.scene.nodes[0].spatial {
-                    let (centre, half) = self.node_box(q, body);
+                    let (centre, half) = self.node_box();
                     let (centre, half, reach) = self.bike.parts.scene.database_box(0, centre, half);
                     self.rest.call(Call::SpatialMove { node: true, centre, half, reach }, q, body);
                 }
@@ -2074,6 +2075,8 @@ impl<R: Moto, G: FnMut(Vf, &mut u8) -> (Vf, Vf), S: Sweep> Moto for Steps<R, G, 
                 }
             }
             Call::NodePosition => q.node_pos = self.bike.parts.scene.position(0),
+            // MD75c3: the node's vt +0x94, the quad's node's being `atv_node_rebound`.
+            Call::NodeRebound => self.bike.parts.scene.rebound(0),
             c => self.rest.call(c, q, body),
         }
     }
@@ -2102,10 +2105,11 @@ impl<R: Moto, G, S> Steps<R, G, S> {
     }
 
     /// The quad's node's box in the world (MD75c): its frame brought up to date, its bounds gathered
-    /// again if they are stale, then [`crate::atv_moto::Scene::world_box`].
-    fn node_box(&mut self, q: &mut Quad, body: &mut Body) -> (Vf, Vf) {
+    /// again if they are stale (MD75c3: run here, [`crate::atv_moto::Scene::rebound`]), then
+    /// [`crate::atv_moto::Scene::world_box`].
+    fn node_box(&mut self) -> (Vf, Vf) {
         if self.bike.parts.scene.bounds_stale(0) {
-            self.rest.call(Call::NodeRebound, q, body);
+            self.bike.parts.scene.rebound(0);
             self.bike.parts.scene.rebounded(0);
         }
         self.bike.parts.scene.world_box(0)

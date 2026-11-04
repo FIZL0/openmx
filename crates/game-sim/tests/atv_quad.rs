@@ -3095,6 +3095,10 @@ const PART_SYNC: u32 = 0x0011_4360;
 const GATHER: u32 = 0x001d_6a60;
 const NODE_VT: u32 = 0x01c2_2000;
 const REBOUND_FN: u32 = 0x01cf_0800;
+/// MD75c3: what the quad's node's own vt `+0x94` is (`atv_node_rebound`), which [`REBOUND_FN`] jumps to
+/// when it is unhooked; and where in each node the harness lays its list of nodes the gather takes in.
+const REBOUND: u32 = 0x0018_ce40;
+const NODE_LIST: u32 = 0x180;
 const ENTRY: u32 = 0x01c2_2100;
 const COLLIDABLE_AT: u32 = 0x01c2_2200;
 const COLLIDABLE_SIZE: u32 = 0x400;
@@ -3128,11 +3132,16 @@ fn where_in_all(i: usize) -> String {
     "past the end".into()
 }
 
+/// The scratchpad words `atv_node_rebound`'s box helper uses as its own: written before they are read.
+const SCRATCH: (u32, u32) = (0x7000_0000, 0x7000_0080);
+
 fn only_touched_all(ee: &Ee) -> Result<(), String> {
     let frame = (ee.stack - 0x2000, ee.stack + 0x40);
     for (a, b) in ee.written_ranges() {
         // Word by word: a wheel's steering words run on from its region into the next.
+        // MD75c3: the rebound's box helper keeps the node's inverse and a frame on the scratchpad.
         let inside = (a >= frame.0 && b <= frame.1)
+            || (a >= SCRATCH.0 && b <= SCRATCH.1)
             || (a..b).step_by(4).all(|w| all_regions().any(|(_, base, len)| w >= base && w < base + len));
         if !inside {
             return Err(format!("the original wrote {a:#010x}..{b:#010x}, which is not the quad or the stack"));
@@ -3868,6 +3877,15 @@ fn lay_scene(ee: &mut Ee, x: &game_sim::atv_moto::Parts) {
         put_v(ee, at + 0xe0, n.half);
         tire_set_byte(ee, at + 0x101, n.more);
         put_f(ee, at + 0x108, n.reach);
+        // MD75c3's: the node's own bounds and the nodes its gather takes in.
+        put_v(ee, at + 0xb0, n.own_centre);
+        put_v(ee, at + 0xc0, n.own_half);
+        put_f(ee, at + 0x104, n.radius);
+        ee.set_u32(at + 0x10c, n.listed as u32);
+        ee.set_u32(at + 0x144, if n.listed == 0 { 0 } else { at + NODE_LIST });
+        for (k, &m) in n.list.iter().take(n.listed).enumerate() {
+            ee.set_u32(at + NODE_LIST + 4 * k as u32, node_at(m));
+        }
     }
     ee.set_u32(NODE_VT + 0x94, REBOUND_FN);
     ee.set_u32(OBJ + 8, if x.spatial { ENTRY } else { 0 });
@@ -3934,6 +3952,7 @@ fn address_of(c: &Call) -> u32 {
         Call::Contacts => WHEEL_CONTACTS,
         Call::PartSync(_) => PART_SYNC,
         Call::Gather(_) => GATHER,
+        Call::NodeRebound => REBOUND_FN,
         _ => 0,
     }
 }
@@ -4078,6 +4097,11 @@ fn hook_post(ee: &mut Ee, log: &Log<Call>, picks: &[u32]) {
     }
     for at in picks {
         assert!(ee.hooks.remove(at).is_some(), "{at:#x} was not hooked");
+    }
+    // MD75c3: the rebound unhooked is the node's own, `j REBOUND` and its delay slot.
+    if picks.contains(&REBOUND_FN) {
+        ee.set_u32(REBOUND_FN, 0x0800_0000 | (REBOUND >> 2));
+        ee.set_u32(REBOUND_FN + 4, 0);
     }
 }
 
@@ -4761,6 +4785,7 @@ impl Gen {
             let z = nodes[0].world[2];
             nodes[0].world[2] = Vf::new(c.0.sin(), z.y(), c.0.cos(), z.w());
         }
+        no_stack_centre(&mut nodes);
         b.parts.scene.nodes = nodes;
         let equal = self.one_in(4);
         let t0 = self.f(0.0, 0.5);
@@ -4998,15 +5023,15 @@ fn the_quads_post_process_runs_every_ported_step() {
         p
     };
     let want = ["body off", "boxed", "floored", "placed under a parent", "placed alone", "reset", "bounds", "current", "under two"];
-    let picks = [VEHICLE_POST, SPATIAL_UPDATE, NODE_BOUNDS, COLLISION_SYNC, PART_SYNC, NODE_POSITION];
+    let picks = [VEHICLE_POST, SPATIAL_UPDATE, NODE_BOUNDS, COLLISION_SYNC, PART_SYNC, REBOUND_FN, NODE_POSITION];
     let tweak = |g: &mut Gen, r: &mut Ride| g.md75c(r);
     each_unhooked_in(0x0075_b104, 5_000, Listener::Post, &picks, tweak, paths, &want, 15);
 }
 
-/// The vehicle post and the three calls it makes that [`quad::Steps`] runs inline (MD75c), and the
-/// collision sync's part sync (MD75c2): a test that unhooks the post unhooks them too. The gather goes
-/// on to the log with no world to gather in.
-const POST_STEPS: [u32; 5] = [VEHICLE_POST, SPATIAL_UPDATE, NODE_BOUNDS, COLLISION_SYNC, PART_SYNC];
+/// The vehicle post and the three calls it makes that [`quad::Steps`] runs inline (MD75c), the
+/// collision sync's part sync (MD75c2) and the node's rebound (MD75c3): a test that unhooks the post
+/// unhooks them too. The gather goes on to the log with no world to gather in.
+const POST_STEPS: [u32; 6] = [VEHICLE_POST, SPATIAL_UPDATE, NODE_BOUNDS, COLLISION_SYNC, PART_SYNC, REBOUND_FN];
 
 // --- MD75c: the vehicle post's spatial update, node bounds and collision sync ----------------------------
 
@@ -5026,7 +5051,15 @@ impl Gen {
             n.half = self.vec(-4.0, 4.0);
             n.more = self.bits() as u8;
             n.reach = self.f(0.0, 10.0);
+            // MD75c3's: the node's own bounds (a radius not above 0 a quarter of the time) and the
+            // nodes its gather takes in, any of the scene's, repeats and itself too.
+            n.own_centre = self.vec(-5.0, 5.0);
+            n.own_half = self.vec(-4.0, 4.0);
+            n.radius = if self.one_in(4) { self.f(-1.0, 0.0) } else { self.f(0.0, 6.0) };
+            n.listed = (self.bits() % (SCENE_NODES as u32 + 1)) as usize;
+            n.list = std::array::from_fn(|_| (self.bits() % SCENE_NODES as u32) as usize);
         }
+        no_stack_centre(&mut x.scene.nodes);
         if self.b() {
             x.flags |= 0x02;
         }
@@ -5061,6 +5094,21 @@ impl Gen {
             Kind::Rays { tree, bound: (self.vec(-5.0, 5.0), self.vec(-5.0, 5.0)) }
         };
         Collidable { kind, frame: frame(self), centre: self.vec(-50.0, 50.0), reach: self.f(0.0, 10.0), spatial: self.b() }
+    }
+}
+
+/// MD75c3: a node gathered as a sphere (bit 4) with no bounds of its own (bit 2) and none on a node
+/// it lists has no centre in the original but a stack word it never wrote ([`Scene::rebound`]): it is
+/// given bounds of its own.
+///
+/// [`Scene::rebound`]: game_sim::atv_moto::Scene::rebound
+fn no_stack_centre(nodes: &mut [game_sim::atv_moto::Node]) {
+    for k in 0..nodes.len() {
+        let n = nodes[k];
+        let listed_own = n.list.iter().take(n.listed).any(|&m| nodes[m].flags & 0x04 != 0);
+        if n.flags & 0x14 == 0x10 && !listed_own {
+            nodes[k].flags |= 0x04;
+        }
     }
 }
 
@@ -5109,7 +5157,6 @@ fn the_quads_post_process_callees_are_the_originals() {
         "the node has no entry",
         "the node's box round its origin",
         "the node's box at its reach",
-        "rebound",
         "sync off",
         "no riding probe",
         "riding is active",
@@ -5121,6 +5168,84 @@ fn the_quads_post_process_callees_are_the_originals() {
     ];
     let tweak = |g: &mut Gen, r: &mut Ride| g.md75c(r);
     each_unhooked_in(0x0075_c001, 10_000, Listener::Post, &POST_STEPS, tweak, post_callee_paths, &want, 30);
+}
+
+/// MD75c3: which way the quad's node's bounds are gathered again (`atv_node_rebound`), from its
+/// decompile and its four helpers': as a sphere or a box, with bounds of its own or not, each listed
+/// node taken in or passed over; for a sphere, a listed node replacing a radius not above 0 or
+/// measured against it; for a box, the first box in or one met with the corners so far, and a box
+/// with nothing in it (no reach, bit 6 left).
+fn rebound_paths(r: &Ride) -> Vec<&'static str> {
+    let x = &r.bike.parts;
+    if !r.s.q.active {
+        return vec!["off"];
+    }
+    if !x.body_on {
+        return vec!["body off"];
+    }
+    let s = &x.scene.nodes;
+    let n = &s[0];
+    let (sphere, own) = (n.flags & 0x10 != 0, n.flags & 0x04 != 0);
+    let mut p = vec![if sphere { "a sphere" } else { "a box" }, if own { "its own bounds" } else { "none of its own" }];
+    if n.listed == 0 {
+        p.push("nothing listed");
+    }
+    let (mut positive, mut had) = (own && n.radius > F::ZERO, own);
+    for &m in n.list.iter().take(n.listed) {
+        if s[m].flags & 0x04 == 0 {
+            p.push("a listed node passed over");
+            continue;
+        }
+        p.push("a listed node taken in");
+        if sphere {
+            if positive {
+                p.push("measured against the radius");
+            } else {
+                p.push("the radius replaced");
+                positive = s[m].radius > F::ZERO;
+            }
+        } else {
+            p.push(if had { "a box met" } else { "the first box in" });
+        }
+        had = true;
+    }
+    if !sphere && !had {
+        p.push("an empty box");
+    }
+    p
+}
+
+/// **The quad's node's bounds gathered again are the original's** (MD75c3): MD75c's states with the
+/// quad's database entry there and its node's bounds stale (bits 7 and 3), so that the spatial
+/// update gathers them, as a sphere or a box half the time each and with bounds of its own half the
+/// time. The vehicle post and its calls are unhooked with the rebound, the node's own vt `+0x94`
+/// (`atv_node_rebound`). The gathered box is in the scene's region, and it is what the spatial move
+/// is handed, so the log says it again.
+#[test]
+fn the_quads_node_rebound_is_the_originals() {
+    let want = [
+        "a sphere",
+        "a box",
+        "its own bounds",
+        "none of its own",
+        "nothing listed",
+        "a listed node passed over",
+        "a listed node taken in",
+        "measured against the radius",
+        "the radius replaced",
+        "a box met",
+        "the first box in",
+        "an empty box",
+    ];
+    let tweak = |g: &mut Gen, r: &mut Ride| {
+        g.md75c(r);
+        let x = &mut r.bike.parts;
+        x.spatial = true;
+        let n = &mut x.scene.nodes[0];
+        n.flags = (n.flags & !0x14) | 0x88 | if g.b() { 0x10 } else { 0 } | if g.b() { 0x04 } else { 0 };
+        no_stack_centre(&mut x.scene.nodes);
+    };
+    each_unhooked_in(0x0075_c301, 10_000, Listener::Post, &POST_STEPS, tweak, rebound_paths, &want, 300);
 }
 
 /// MD75c2: each collidable the collision sync brings up to date — a ray probe on its tree or on its

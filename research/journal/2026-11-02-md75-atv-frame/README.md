@@ -52,3 +52,8 @@ probe's and the mesh's stands, and both boxes. `quad::Steps` answers `Call::Part
 `Call::PartMove`, which `atv_spatial::Answers` moves. `Oasis` answers `Call::Gather` round the active part.
 Two tests check it against the original. One uses 10,000 generated parts laid whole. The other uses the
 image's own probe and mesh on Desert Oasis, where the nearby list matches entry for entry.
+
+MD75c3 (`10-node-rebound.md`): `atv_node_rebound` is ported as `atv_moto::Scene::rebound`, both the
+sphere and the box gathered from the node's own bounds and its list. `quad::Steps` answers
+`Call::NodeRebound`, and the quad's node box runs it when stale. Checked against the original on 10,000
+generated four-node scenes: every word equal. The image's 43-node list stays a gap until MD75e.

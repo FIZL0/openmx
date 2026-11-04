@@ -384,6 +384,14 @@ pub struct Node {
     pub half: Vf,
     pub more: u8,
     pub reach: F,
+    /// MD75c3's: the node's own bounds in its frame, a box (`+0xb0` centre, `+0xc0` half extent) or a
+    /// sphere (the same centre, `+0x104` the radius), there with bit 2 of the flag byte; and the nodes
+    /// its gather takes in (the `+0x144` list, `+0x10c` long), as places in [`Scene::nodes`].
+    pub own_centre: Vf,
+    pub own_half: Vf,
+    pub radius: F,
+    pub list: [usize; NODES],
+    pub listed: usize,
 }
 
 /// The scene graph around the quad: node 0 is the quad's (`+0xe4`).
@@ -420,6 +428,40 @@ const BOUNDED: u8 = 0x40;
 const STALE_BOUNDS: u8 = 0x80;
 /// The second flag byte's bit for a database box round the node's origin.
 const ORIGIN_REACH: u8 = 0x04;
+/// The flag byte's bits for the node's own bounds and for bounds gathered as a sphere (MD75c3).
+const OWN_BOX: u8 = 0x04;
+const SPHERE: u8 = 0x10;
+
+/// A point of a node's frame carried into the world (`vaddax` of the position row and 0, then
+/// `vmaddax`, `vmadday`, `vmaddz` of the rows): `xyz`, the `w` the point's.
+fn frame_point(m: &[Vf; 4], p: Vf) -> Vf {
+    let acc = Vf::madd(Vf::madd(m[3].add(Vf::ZERO), m[0], p.bc(Field::X)), m[1], p.bc(Field::Y));
+    p.merge(Dest::XYZ, Vf::madd(acc, m[2], p.bc(Field::Z)))
+}
+
+/// `vmini` / `vmax` (`want_max`) lane by lane, `-0` below `+0`. The ps2-oracle's VU compares the bit
+/// patterns in sign-magnitude order, while `ps2_float`'s `Vf::mini`/`max` hand back the first operand
+/// on a ±0 tie. A box corner at `-0` against the `+0` of `vf0` shows the difference (MD75c3).
+fn pick(a: Vf, b: Vf, want_max: bool) -> Vf {
+    let key = |x: f32| {
+        let i = x.to_bits() as i32;
+        i ^ (i >> 31 & 0x7fff_ffff)
+    };
+    Vf(core::array::from_fn(|i| {
+        let (x, y) = (vu::operand(a.0[i].to_bits()), vu::operand(b.0[i].to_bits()));
+        if (key(x) > key(y)) == want_max { x } else { y }
+    }))
+}
+
+/// A world point brought into a node's frame (MD75c3, the inverse of [`frame_point`]): the position
+/// row taken off (`xyz`), then each lane the row's dot with it, over the 3×3 transposed (`vmulax`,
+/// `vmadday`, `vmaddz`); the `w` the point's.
+fn point_in_frame(m: &[Vf; 4], p: Vf) -> Vf {
+    let d = sub_xyz(p, m[3]);
+    let col = |k: usize| Vf::new(m[0].0[k], m[1].0[k], m[2].0[k], 0.0);
+    let v = Vf::madd(Vf::madd(col(0).mul(d.bc(Field::X)), col(1), d.bc(Field::Y)), col(2), d.bc(Field::Z));
+    d.merge(Dest::XYZ, v)
+}
 
 /// `a · b` as the scene graph multiplies frames (`vmulax`, `vmadday`, `vmaddz` a row; the position
 /// row starts from `b`'s with `vaddax` of 0): `a`'s rows in `b`'s space.
@@ -550,6 +592,92 @@ impl Scene {
         self.update(n);
         let f = self.nodes[n].flags;
         f & STALE_BOUNDS != 0 && (f & OWN_BOUNDS != 0 || f & BOUNDED == 0)
+    }
+
+    /// **The node's bounds gathered again** (`atv_node_rebound`, its vt `+0x94`; MD75c3), its world frame
+    /// brought up to date first. Each listed node with bounds of its own (bit 2) has its world frame
+    /// brought up to date as it is taken in; one without is passed over.
+    ///
+    /// - **As a sphere** (bit 4): the node's own centre in the world with its radius, if it has them
+    ///   (else the radius 0). A listed node's centre in the world ([`frame_point`]) with its radius
+    ///   replaces a radius not above 0; else the radius grows to the centre's farthest lane from it
+    ///   (`vabs`, `vmaxy.x`, `vmaxz.x`) plus that radius, if that is more (`add.s`, `c.ole.s`). The
+    ///   centre goes back into the node's frame ([`point_in_frame`], `w` the centre's); the half
+    ///   extent's `xyz` (its `w` kept) and the reach are the radius.
+    /// - **As a box**: low and high corners from `(0, 0, 0, 1)`, or the node's own box (`xyz`, both
+    ///   `w`s the centre's). A listed node's box is taken through its world frame times the inverse of
+    ///   the node's ([`frame_mul`], `frame_inverse`) as [`Scene::world_box`] takes one; its corners keep
+    ///   the `w`s of that frame's rows `x` and `y`, and after the first box in, they are `vmini` and
+    ///   `vmax` with the corners so far, every lane. The centre is half the corners' sum (`xyz`, `w` the
+    ///   low's), the half extent half their difference (`w` the high's), the reach that half extent's
+    ///   length (`mula`, `madda`, `madd`, `sqrt`).
+    ///
+    /// The reach goes to `+0x108`, and a reach above 0 sets bit 6. A sphere with neither its own
+    /// bounds nor a listed node with them has no centre: the original's is a stack word never written.
+    /// The port takes `(0, 0, 0, 0)`, and the oracle does not make that case.
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
+    pub fn rebound(&mut self, n: usize) {
+        self.update(n);
+        let me = self.nodes[n];
+        let listed = me.list.into_iter().take(me.listed);
+        let reach = if me.flags & SPHERE != 0 {
+            let (mut centre, mut r) = (Vf::ZERO, F::ZERO);
+            if me.flags & OWN_BOX != 0 {
+                (centre, r) = (frame_point(&me.world, me.own_centre), me.radius);
+            }
+            for m in listed {
+                if self.nodes[m].flags & OWN_BOX == 0 {
+                    continue;
+                }
+                self.update(m);
+                let o = &self.nodes[m];
+                let p = frame_point(&o.world, o.own_centre);
+                if r <= F::ZERO {
+                    (centre, r) = (p, o.radius);
+                } else {
+                    let d = sub_xyz(p, centre).abs();
+                    let far = F(vu::max(vu::max(d.x(), d.y()), d.z())) + o.radius;
+                    if !(far <= r) {
+                        r = far;
+                    }
+                }
+            }
+            self.update(n);
+            let node = &mut self.nodes[n];
+            node.centre = point_in_frame(&node.world, centre);
+            node.half = node.half.merge(Dest::XYZ, Vf::splat(r.0));
+            r
+        } else {
+            let (mut lo, mut hi, mut had) = (Vf::VF0, Vf::VF0, false);
+            if me.flags & OWN_BOX != 0 {
+                (lo, hi, had) = (sub_xyz(me.own_centre, me.own_half), add_xyz(me.own_centre, me.own_half), true);
+            }
+            for m in listed {
+                if self.nodes[m].flags & OWN_BOX == 0 {
+                    continue;
+                }
+                self.update(m);
+                let o = &self.nodes[m];
+                let rel = frame_mul(&o.world, &frame_inverse(&self.nodes[n].world));
+                let (c, e) = (frame_point(&rel, o.own_centre), o.own_half);
+                let (hx, hy, hz) = (rel[0].mul(e.bc(Field::X)).abs(), rel[1].mul(e.bc(Field::Y)).abs(), rel[2].mul(e.bc(Field::Z)).abs());
+                let e = Vf::madd(hy.add(hx), hz, Vf::splat(1.0));
+                let (l, h) = (rel[0].merge(Dest::XYZ, c.sub(e)), rel[1].merge(Dest::XYZ, c.add(e)));
+                (lo, hi) = if had { (pick(l, lo, false), pick(h, hi, true)) } else { (l, h) };
+                had = true;
+            }
+            let half_of = |v: Vf, keep: Vf| keep.merge(Dest::XYZ, v.mul(Vf::splat(0.5)));
+            let node = &mut self.nodes[n];
+            node.centre = half_of(lo.add(hi), lo);
+            node.half = half_of(hi.sub(lo), hi);
+            let h = node.half;
+            Acc::mula(F(h.x()), F(h.x())).madda(F(h.y()), F(h.y())).madd(F(h.z()), F(h.z())).sqrt()
+        };
+        let node = &mut self.nodes[n];
+        node.reach = reach;
+        if !(reach <= F::ZERO) {
+            node.flags |= BOUNDED;
+        }
     }
 
     /// The node's bounds gathered: bit 7 cleared.
