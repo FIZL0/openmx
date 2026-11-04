@@ -9562,3 +9562,45 @@ atv_heap_free               atv 0x001b76d0 = free
 #   0x004a0c30(w) x2, contacts 0x004dccd0(bike, dt), suspension 0x004a0cb0(w, dt) x2, tire forces
 #   0x004a16f0(w, dt) x2; +0xde4 = +0xde0, +0x324 either down, +0x1270 both, +0xde0 = !+0x324; net post
 #   0x004a8c40(bike, dt).
+# F31b4c — MX vs. ATV's [Mass Properties]: the rigid-body part reader and the bike loader's re-read
+# (game_sim::handling::mass; tests/mxvatv_mass.rs, tests/mxvatv_bike_ride.rs). Comment rows only.
+# Journal: research/journal/2026-11-04-f31b4c-mass/1-mass-FINAL.md.
+#   Part reader 0x00493210(obj, ini), from the vehicle base read 0x004a7e70. Wrappers: float 0x00144d70
+#   (ini, key, out, f12 default), vector 0x00144df0 (ini, key, default*, out), flag 0x00144cb0 (ini,
+#   key, default, out), float with no default 0x00144af0; flag parse 0x00142ed0: strncasecmp 0x00357958
+#   prefixes "T"/"ON"/"Y" -> 1, "F"/"OFF"/"N" -> 0, else strtol 0x003593c0 base 0.
+#   Keys in order (default): Weight (500), CofG (0,0,0,1), GravityScale (1) -> g+0, InertiaScale
+#   ((1,1,1,1) vmulx.xyz 2 = (2,2,2,1)), Radius (0.5), DefaultVelocityDamping, DefaultAngularRateDamping
+#   (ones), CollisionEnabled (1) -> obj byte +0x44 bit 0, CheckForCollisions (1) -> rec+0x2c whole,
+#   DetectCollisionsWhenDisabled (0) -> +0x44 bit 7, CollisionWeight (Weight), CollisionCofGOffset,
+#   CheckForHighSpeedCollisions (0), HighSpeedRayOffset, HighSpeedRaySpeedScale (2),
+#   HighSpeedUnpenetrationDistance (2), HighSpeedMinCollisionAngle (0), SpringStiffness (10),
+#   SpringDamping (0x3f333333), MaxPenetration (0.25), Restitution (0), the Body four (same), the
+#   sixteen FrictionZone<n> (1), Friction (1), BodyFriction (Friction), Spring/Friction/BodySpring/
+#   BodyFriction MomentScale (ones), AngularImpulseEnabled, BodyAngularImpulseEnabled (1),
+#   BodyAngularImpulseScale (ones), ResetOffEdgeOfWorld (1) -> byte +0x45 bit 0, ResetTime (5) -> g+0xa0,
+#   ResetBelowMinimum (0) -> +0x45 bit 6, MinimumResetHeight (0) -> g+0x98, SpeedThreshold,
+#   AngularRateThreshold (0x3e99999a) -> g+0x80/+0x84, AccelerationThreshold,
+#   AngularAccelerationThreshold, SpeedImpulseThreshold, BodyAngularSpeedImpulseThreshold (FLT_MAX)
+#   -> g+0x88..+0x94. Gravity g+0x40 = (0, neg(scale) * W, 0, 1).
+#   Mass m = 0x3cfe68f1 * W; box 0x001961f0(node obj+0xe4, &lo, &half), dims = half vmulx.xyz 2;
+#   tensor lane = (scale.lane * (m / 12)) * (sum of the other two squares), FPU.
+#   Body vtable 0x003cd200: +0x18 mass (+0x18 m, +0x1c 1/m), +0x60 inertia (caller's w := 1, +0x130 quad,
+#   +0x140.. 1/lane or 0 for a lane <= 0, +0x14c kept), +0x1c radius (abs -> +0x20), +0x5c cofg (+0x1a0;
+#   moves +0x60/+0x70 by the change turned by +0x190), +0x20 damping (+0x30), +0x68 (+0x150), +0x6c
+#   largest rates (+0x210 quad).
+#   Record (if obj+0xc8): 0x00204560(cm, rec, &offset): +0x80 offset; cm <= 0 returns; +0x58 cm, +0x5c
+#   1/cm; chassis rec+0xe0 == 0: +0x60.xyz = body+0x130 vmulx (cm * body+0x1c), w body+0x13c; +0x70 =
+#   (1/x, 1/y FPU, vdiv 1/z, +0x6c) or (0,0,0,1) if a lane <= 0. 0x002046f0 springs (+0x44 := 0;
+#   +0x10c pen, +0x110 k, +0x114 d, +0x118 |32.2 * (k * mb)|, +0x11c (2 d) sqrt(mb * k') or 0,
+#   +0x120 rest; +0x124..+0x138 the body's, -1 = the spring's; mb = (rec+0xe4)+0x18). 0x00204a30 sweep
+#   (+0x30 flag, +0xa0 offset, +0xb0 speed scale, +0xb4 unpenetration, +0xb8 = cos(angle radians): two
+#   wraps, table *0x003eab20 at (pi + a) * [0x003ea9d0], adda(cos).msub([0x003ea9c8], sin * frac)).
+#   0x002048b0 moment scales (+0x160..+0x190; body two = the others when all four words are (-1,-1,-1,1)).
+#   0x00204980 (+0x13c, +0x140), 0x00204990 (+0x150), 0x002049e0 frictions, 0x002049b0 zones.
+#   Bike loader 0x004def40 after the base: Inertia, CofG, WreckCofG, BalanceCofG ((0,0,0,1)) -> bike
+#   +0x1120/+0x1130/+0x1140/+0x1150; CofGTravelForward, CofGTravelBack, BrakeCofGTravelForward (0) ->
+#   +0x1320/+0x1324/+0x132c; YawRateLimit (no default); body +0x60 (bike+0x1120), +0x6c (20, yaw, 20,
+#   stack). The record keeps the box's inertia; the body gets the file's.
+#   State 4 (race250p, 420 lb): the load's half box is (1.4301566, 2.3848903, 3.8156264), worked back
+#   from rec+0x60; the box call on state 4's node now gives a larger one.

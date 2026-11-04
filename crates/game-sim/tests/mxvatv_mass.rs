@@ -10,7 +10,7 @@
 //! Without the image the oracle test skips (and says so).
 
 use game_sim::camera::CurveTable;
-use game_sim::handling::{self, MassPart};
+use game_sim::handling::{self, MassPart, mass};
 use game_sim::phy::{Ini, MAX_SURFACES, number};
 use ps2_float::{F, Vf};
 use ps2_oracle::{Ee, Kit, skip};
@@ -301,4 +301,236 @@ fn an_mx_phy_rides_on_its_gravity_scale_and_friction_zones() {
     // MX Unleashed's own files keep one friction on every surface.
     let mxu = game_sim::phy::Phy::read(&Ini::parse("[Collisions]\nTerrainFriction = 0.7\n"), &CurveTable::build());
     assert_eq!(mxu.collisions.surface_friction, [number("0.7"); MAX_SURFACES]);
+}
+
+// --- F31b4c: every word of the reader ---------------------------------------------------------------
+
+/// The curve table the record's facing reads, and its step.
+const CURVE_TABLE: u32 = 0x003e_ab20;
+const CURVE_STEP: u32 = 0x003e_a9c8;
+const CURVE_INV_STEP: u32 = 0x003e_a9d0;
+
+/// The image's own sine and cosine table, which must be the one the port builds.
+fn curve(ee: &Ee) -> CurveTable {
+    let built = CurveTable::build();
+    assert_eq!(ee.f32_at(CURVE_STEP).to_bits(), 0.0010473721f32.to_bits(), "the curve table's step");
+    assert_eq!(ee.f32_at(CURVE_INV_STEP).to_bits(), 954.77045f32.to_bits(), "the curve table's inverse step");
+    let at = ee.u32_at(CURVE_TABLE);
+    for (i, e) in built.entries().iter().enumerate().take(game_sim::camera::CURVE_ENTRIES) {
+        let got = [ee.f32_at(at + 8 * i as u32), ee.f32_at(at + 8 * i as u32 + 4)];
+        assert_eq!(got.map(f32::to_bits), e.map(f32::to_bits), "curve table entry {i}");
+    }
+    built
+}
+
+#[allow(clippy::float_arithmetic)]
+impl Gen {
+    fn pick<'a>(&mut self, of: &[&'a str]) -> &'a str {
+        of[self.bits() as usize % of.len()]
+    }
+    /// Three or four numbers, comma separated (the file loader takes the blanks out of a line).
+    fn vector(&mut self, lo: f32, hi: f32) -> String {
+        let n = if self.one_in(3) { 4 } else { 3 };
+        let sep = self.pick(&[", ", ","]);
+        (0..n).map(|_| self.number(lo, hi)).collect::<Vec<_>>().join(sep)
+    }
+    fn flag(&mut self) -> String {
+        self.pick(&["True", "False", "true", "FALSE", "T", "f", "On", "Off", "ON", "oFF", "One", "Yes", "no", "N", "1",
+                    "0", "2", "3", "-1", "0x3", "010", "7"])
+            .into()
+    }
+    /// A value of a key a `-1` stands in for the default of.
+    fn or_unset(&mut self, lo: f32, hi: f32) -> String {
+        if self.one_in(3) { "-1".into() } else { self.number(lo, hi) }
+    }
+    /// One `[Mass Properties]` with every key the reader asks for present or not, and the model's
+    /// half box.
+    fn full(&mut self) -> (BTreeMap<String, String>, [f32; 4]) {
+        let mut m = BTreeMap::new();
+        let mut put = |g: &mut Gen, k: &str, v: String| {
+            if !g.one_in(4) {
+                m.insert(k.to_string(), v);
+            }
+        };
+        let w = if self.one_in(10) { self.number(-50.0, 0.0) } else { self.number(30.0, 1200.0) };
+        put(self, "Weight", w);
+        let v = self.vector(-1.0, 3.0);
+        put(self, "CofG", v);
+        let v = self.number(-2.0, 3.0);
+        put(self, "GravityScale", v);
+        let v = self.vector(-0.5, 3.0);
+        put(self, "InertiaScale", v);
+        let v = self.number(-1.0, 2.0);
+        put(self, "Radius", v);
+        for k in ["DefaultVelocityDamping", "DefaultAngularRateDamping", "CollisionCofGOffset", "HighSpeedRayOffset",
+                  "BodyAngularImpulseScale"] {
+            let v = self.vector(-1.0, 3.0);
+            put(self, k, v);
+        }
+        for k in ["CollisionEnabled", "CheckForCollisions", "DetectCollisionsWhenDisabled", "CheckForHighSpeedCollisions",
+                  "AngularImpulseEnabled", "BodyAngularImpulseEnabled", "ResetOffEdgeOfWorld", "ResetBelowMinimum"] {
+            let v = self.flag();
+            put(self, k, v);
+        }
+        let v = if self.one_in(8) { self.number(-50.0, 0.0) } else { self.number(30.0, 1200.0) };
+        put(self, "CollisionWeight", v);
+        let v = self.number(0.0, 4.0);
+        put(self, "HighSpeedRaySpeedScale", v);
+        let v = self.number(0.0, 4.0);
+        put(self, "HighSpeedUnpenetrationDistance", v);
+        let v = self.number(-400.0, 400.0);
+        put(self, "HighSpeedMinCollisionAngle", v);
+        let v = self.number(-2.0, 20.0);
+        put(self, "SpringStiffness", v);
+        let v = self.number(-0.5, 1.5);
+        put(self, "SpringDamping", v);
+        let v = self.number(0.0, 1.0);
+        put(self, "MaxPenetration", v);
+        let v = self.number(0.0, 1.0);
+        put(self, "Restitution", v);
+        let v = self.or_unset(-2.0, 20.0);
+        put(self, "BodySpringStiffness", v);
+        let v = self.or_unset(-0.5, 1.5);
+        put(self, "BodySpringDamping", v);
+        let v = self.or_unset(0.0, 1.0);
+        put(self, "BodyMaxPenetration", v);
+        let v = self.or_unset(0.0, 1.0);
+        put(self, "BodyRestitution", v);
+        for k in 0..MAX_SURFACES {
+            let v = self.number(0.0, 2.0);
+            put(self, &format!("FrictionZone{}", k + 1), v);
+        }
+        let v = self.number(0.0, 2.0);
+        put(self, "Friction", v);
+        let v = self.or_unset(0.0, 2.0);
+        put(self, "BodyFriction", v);
+        for k in ["SpringMomentScale", "FrictionMomentScale", "BodySpringMomentScale", "BodyFrictionMomentScale"] {
+            let v = match self.bits() % 4 {
+                0 => self.pick(&["-1, -1, -1", "-1,-1,-1,1", "-1,-1,-1,-1", "-1, -1, -1, 1.0"]).into(),
+                _ => self.vector(-1.0, 2.0),
+            };
+            put(self, k, v);
+        }
+        let v = self.number(0.0, 10.0);
+        put(self, "ResetTime", v);
+        let v = self.number(-100.0, 100.0);
+        put(self, "MinimumResetHeight", v);
+        for k in ["SpeedThreshold", "AngularRateThreshold", "AccelerationThreshold", "AngularAccelerationThreshold", "SpeedImpulseThreshold",
+                  "BodyAngularSpeedImpulseThreshold"] {
+            let v = self.number(0.0, 100.0);
+            put(self, k, v);
+        }
+        let mut half = [0.0; 4];
+        for h in half.iter_mut() {
+            *h = match self.bits() % 12 {
+                0 => 0.0,
+                1 => -self.unit(),
+                _ => 0.05 + 5.0 * self.unit(),
+            };
+        }
+        (m, half)
+    }
+}
+
+fn full_path(f: &BTreeMap<String, String>, p: &mass::Part) -> Vec<&'static str> {
+    let mut t = vec![];
+    let get = |k: &str| f.get(k).map(String::as_str);
+    t.push(if p.body.mass <= F::ZERO { "no mass" } else { "mass" });
+    t.push(if p.record.mass.is_none() { "no collision mass" } else { "collision mass" });
+    if p.record.inv_inertia.is_some_and(|v| v.to_bits() == Vf::new(0.0, 0.0, 0.0, 1.0).to_bits()) {
+        t.push("record inertia not over 0");
+    }
+    if p.body.inv_inertia.contains(&F::ZERO) {
+        t.push("body inertia lane not over 0");
+    }
+    for k in ["BodySpringStiffness", "BodySpringDamping", "BodyMaxPenetration", "BodyRestitution", "BodyFriction"] {
+        if get(k) == Some("-1") {
+            t.push(k);
+        }
+    }
+    for k in ["BodySpringMomentScale", "BodyFrictionMomentScale"] {
+        if get(k).is_some_and(|v| ["-1, -1, -1", "-1,-1,-1,1", "-1, -1, -1, 1.0"].contains(&v)) {
+            t.push(if k.starts_with("BodySpring") { "body spring moment scale -1" } else { "body friction moment scale -1" });
+        }
+    }
+    if p.record.springs[4] == F::ZERO {
+        t.push("spring damping 0");
+    }
+    if p.record.facing < F::ZERO {
+        t.push("facing behind");
+    }
+    if get("CheckForCollisions") == Some("One") {
+        t.push("ON prefix");
+    }
+    if get("CheckForCollisions").is_some_and(|v| v.starts_with("0")) {
+        t.push("strtol base 0");
+    }
+    t.push(if p.flags.collision_enabled { "collision enabled" } else { "collision disabled" });
+    t
+}
+
+/// F31b4c — SLUS-21104's `[Mass Properties]` reader, [`mass::Part::read`], over 10,000 files with
+/// every key it reads present or not and a model box each: every word of the object, the gravity
+/// block, the collision record and the rigid body, the ones it writes and the ones it leaves alone.
+/// The ini's flag parse is the game's own here (only the string lookup is hooked).
+#[test]
+fn mxvatv_mass_properties_every_word_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let curve = curve(&ee);
+    let file = Rc::new(RefCell::new(BTreeMap::new()));
+    hook_ini(&mut ee, &file);
+    ee.hooks.remove(&INI_FLAG);
+    let half = Rc::new(RefCell::new([0.0f32; 4]));
+    let h = half.clone();
+    ee.hooks.insert(MODEL_BOX, Box::new(move |ee| {
+        for (k, v) in h.borrow().iter().enumerate() {
+            ee.set_f32(ee.r(6) as u32 + 4 * k as u32, *v);
+        }
+    }));
+    let at = mass::Layout { object: OBJ, body: BODY, record: RECORD, gravity: GRAVITY };
+    let mut g = Gen(0xf31b_4c00);
+    let mut tally = BTreeMap::<&str, u32>::new();
+    for k in 0..10_000 {
+        let (f, b) = g.full();
+        *file.borrow_mut() = f.clone();
+        *half.borrow_mut() = b;
+        reset(&mut ee);
+        ee.set_u32(RECORD + 0xe4, BODY);
+        let mut want = BTreeMap::new();
+        for (base, len) in REGIONS {
+            for o in (0..len).step_by(4) {
+                want.insert(base + o, ee.u32_at(base + o));
+            }
+        }
+        ee.call(READER, &[u64::from(OBJ), u64::from(INI)], &[], 2_000_000);
+
+        let ini = Ini::parse(&text(&f));
+        let p = mass::Part::read(&ini.section("Mass Properties"), Vf::new(b[0], b[1], b[2], b[3]), &curve);
+        for t in full_path(&f, &p) {
+            *tally.entry(t).or_default() += 1;
+        }
+        for (a, mask, v) in p.words(at) {
+            let w = want.get_mut(&a).unwrap_or_else(|| panic!("{a:#x} is outside the regions"));
+            *w = *w & !mask | v & mask;
+        }
+        for (&a, &bits) in &want {
+            let was = word(&ee, a);
+            assert_eq!(
+                was,
+                bits,
+                "file {k}: the word at {a:#x} is {was:#010x} ({}) in the original and {bits:#010x} ({}) in the port; box {b:?}\n{}",
+                f32::from_bits(was),
+                f32::from_bits(bits),
+                text(&f)
+            );
+        }
+    }
+    for want in ["mass", "no mass", "collision mass", "no collision mass", "record inertia not over 0",
+                 "body inertia lane not over 0", "BodySpringStiffness", "BodySpringDamping", "BodyMaxPenetration",
+                 "BodyRestitution", "BodyFriction", "body spring moment scale -1", "body friction moment scale -1",
+                 "spring damping 0", "facing behind", "ON prefix", "strtol base 0", "collision enabled",
+                 "collision disabled"] {
+        let n = tally.get(want).copied().unwrap_or(0);
+        assert!(n >= 50, "only {n} file(s) had {want:?}: {tally:?}");
+    }
 }

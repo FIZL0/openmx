@@ -37,3 +37,8 @@ F31b4b: the bike's wreck (the wreck test, entry, unwreck, part swaps and the put
 calls. The hybrid frame runs it for every row of ride-2 and flip-1, bit-exact, flip-1's wreck on row 125
 and put-back on row 193. The original's hits run even after a clause entered; MD63f's gravity is not in
 state 4's wreck. Details in 6-wreck-FINAL.md.
+
+F31b4c: MX vs. ATV's `[Mass Properties]` reader and the bike loader's re-read are ported as
+`handling::mass`. Every word the reader writes matches the original on 10 000 generated files, state 4's
+134 mass words come out word for word from `mx_race250p.phy`, and ride-2 and flip-1 stay bit-exact on
+them. Details in research/journal/2026-11-04-f31b4c-mass/1-mass-FINAL.md.

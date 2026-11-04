@@ -5960,4 +5960,156 @@ fn the_trick_step_gear_and_net_virtuals_are_the_originals() {
         assert!(*n >= 20, "path {path} taken only {n} times");
     }
     assert!(t.len() >= 20, "every path taken: {t:#?}");
+// --- F31b4c: the bike's mass properties, the port's -------------------------------------------------
+
+use game_sim::handling::mass;
+
+/// State 4's bike's file: `mx_race250p.phy` off the disc (`MXVSATV.PSR`, `Veh\mx_race250p.phy`).
+/// Every 420-lb bike's `[Mass Properties]` is the same, byte for byte.
+fn race250p() -> Option<Vec<u8>> {
+    let kit = Kit::load().map_err(|w| skip(&w)).ok()?;
+    let path = kit.ctx("mxvatv-ps2/phy").join("mx_race250p.phy");
+    if !path.exists() {
+        skip(&format!(
+            "{} is not there: Veh\\mx_race250p.phy out of MX vs. ATV's MXVSATV.PSR (F31b4c's journal)",
+            path.display()
+        ));
+        return None;
+    }
+    Some(std::fs::read(path).unwrap())
+}
+
+/// The model box the part reader was handed at load, as `(x, y, z)` sides' halves: the one whose
+/// block inertia ([`mass::block_inertia`], then [`mass::record_inertia`]) is the record's, bit for
+/// bit. The record keeps the load's inertia (the bike's loader puts its own over the body's only);
+/// the box the game's box call gives for the bike's node in state 4 is not it any more (the wheels'
+/// nodes have moved), so it is worked back from the record: the squares solved for, then the floats
+/// around them walked until every lane is the record's.
+fn load_box(part: &mass::Part, want: [u32; 3]) -> Option<Vf> {
+    let (m, (cm, _)) = (part.body.mass, part.record.mass?);
+    let (s, k) = (part.body.inertia_scale, f64::from(cm.0) * f64::from(part.body.inv_mass.0));
+    let m12 = f64::from(m.0) / 12.0;
+    let w = want.map(|b| f64::from(f32::from_bits(b)) / k);
+    let sums = [w[0] / (f64::from(s.x()) * m12), w[1] / (f64::from(s.y()) * m12), w[2] / (f64::from(s.z()) * m12)];
+    // y² + z², x² + z², x² + y²: each square the half of the other two sums less its own.
+    let sq = [(sums[1] + sums[2] - sums[0]) / 2.0, (sums[0] + sums[2] - sums[1]) / 2.0, (sums[0] + sums[1] - sums[2]) / 2.0];
+    let guess = sq.map(|v| (v.sqrt() / 2.0) as f32);
+    let near = |g: f32, d: i32| f32::from_bits((g.to_bits() as i32 + d) as u32);
+    const R: i32 = 48;
+    for dx in -R..=R {
+        for dy in -R..=R {
+            for dz in -R..=R {
+                let half = Vf::new(near(guess[0], dx), near(guess[1], dy), near(guess[2], dz), 1.0);
+                let (i, _) = mass::record_inertia(mass::block_inertia(m, s, half), cm, part.body.inv_mass);
+                if [i.x(), i.y(), i.z()].map(f32::to_bits) == want {
+                    return Some(half);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The port's `[Mass Properties]` words for state 4's bike, as `(address, mask, value)`, each
+/// address once (its last write): the part reader's ([`mass::Part`]) on the load's box
+/// ([`load_box`]), then the bike loader's ([`mass::Bike`]) over them.
+fn mass_words(phy: &[u8]) -> Option<Vec<(u32, u32, u32)>> {
+    let ee = image()?;
+    let ini = game_sim::phy::Ini::parse_bytes(phy);
+    let s = ini.section("Mass Properties");
+    let at = mass::Layout {
+        object: BIKE,
+        body: ee.u32_at(BIKE + seed::BODY),
+        record: ee.u32_at(BIKE + seed::RECORD),
+        gravity: ee.u32_at(BIKE + 0xe8),
+    };
+    let curve = game_sim::camera::CurveTable::build();
+    let probe = mass::Part::read(&s, Vf::new(1.0, 1.0, 1.0, 1.0), &curve);
+    let want = std::array::from_fn(|k| ee.u32_at(at.record + 0x60 + 4 * k as u32));
+    let half = load_box(&probe, want).expect("no box near the solved one gives the record's inertia");
+    eprintln!("the load's half box: {:?}", half.to_bits().map(f32::from_bits));
+    let mut last = BTreeMap::<u32, (u32, u32)>::new();
+    let mut w = mass::Part::read(&s, half, &curve).words(at);
+    w.extend(mass::Bike::read(&s).words(BIKE, at.body));
+    for (a, mask, v) in w {
+        let e = last.entry(a).or_insert((0, 0));
+        *e = (e.0 | mask, e.1 & !mask | v & mask);
+    }
+    Some(last.into_iter().map(|(a, (mask, v))| (a, mask, v)).collect())
+}
+
+/// **F31b4c — state 4's mass words, the port's**: every word the part reader and the bike's loader
+/// write from `mx_race250p.phy`'s `[Mass Properties]` — the body's mass, inertia and centre of
+/// gravity, the record's mass, inertia, springs, sweep and frictions, the gravity block, the flag
+/// bits, the bike's inertia, centres of gravity and travels — is state 4's, word for word.
+#[test]
+fn the_mass_words_are_state4s_word_for_word() {
+    let Some(phy) = race250p() else { return };
+    let Some(words) = mass_words(&phy) else { return };
+    let ee = image().unwrap();
+    let off: Vec<String> = words
+        .iter()
+        .filter(|&&(a, mask, v)| ee.u32_at(a) & mask != v & mask)
+        .map(|&(a, mask, v)| {
+            let was = ee.u32_at(a) & mask;
+            format!("{a:#x} mask {mask:#x}: state 4 {was:#010x} ({}), port {:#010x} ({})", f32::from_bits(was), v & mask,
+                    f32::from_bits(v & mask))
+        })
+        .collect();
+    assert!(off.is_empty(), "{} of {} mass words differ:\n  {}", off.len(), words.len(), off.join("\n  "));
+    assert_eq!(words.len(), 134, "the words the reader and the loader write");
+    // The record keeps the box's inertia, the body the file's.
+    let (body, record) = (ee.u32_at(BIKE + seed::BODY), ee.u32_at(BIKE + seed::RECORD));
+    assert_ne!(ee.u32_at(record + 0x60), ee.u32_at(body + 0x130));
+    eprintln!("{} mass words, every one state 4's", words.len());
+}
+
+/// [`replay_port_record`] with the port's mass words written over the image first.
+fn replay_port_record_massed(name: &str) -> Option<(Vec<bool>, u32)> {
+    let words = mass_words(&race250p()?)?;
+    let trn = nat05_trn()?;
+    let map = track::Terrain::parse(&trn).unwrap();
+    let mut ee = hooked(image()?);
+    for (a, mask, v) in words {
+        ee.set_u32(a, ee.u32_at(a) & !mask | v & mask);
+    }
+    let rows = rows(name)?;
+    let (mut out, mut queries) = (Vec::new(), 0);
+    for (r, row) in rows.iter().enumerate() {
+        poke(&mut ee, row, &READER);
+        let (steps, posts, ported, q) = port_record_frame(&mut ee, F(f32::from_bits(DT)), &map);
+        assert_eq!((steps, posts, ported), (4, 1, 2), "the Force body every substep, the PostProcess once, the record's two virtuals");
+        queries += q;
+        let d = diff(&ee, row);
+        assert!(
+            d.is_empty(),
+            "{name} row {r} (vsync {}), the port's mass words and record pass: {} words differ\n  {}",
+            row["vsync"],
+            d.len(),
+            d.iter().take(40).cloned().collect::<Vec<_>>().join("\n  ")
+        );
+        let w = wrecked(|o| ee.u32_at(BIKE + o));
+        assert_eq!(w, row_wrecked(row), "{name} row {r}: the wreck state");
+        out.push(w);
+        poke(&mut ee, row, &SPOT);
+    }
+    Some((out, queries))
+}
+
+/// **C15's ride on the port's mass words**: every row of ride-2 word for word.
+#[test]
+fn ride_replays_bit_exact_on_the_ports_mass_words() {
+    let Some((w, _)) = replay_port_record_massed("ride-2") else { return };
+    assert_eq!(w.len(), 459);
+    assert!(w.iter().all(|w| !w), "the ride never wrecks");
+}
+
+/// **C15's flip on the port's mass words**: wrecked on row 125 and put back on row 193, every row
+/// word for word.
+#[test]
+fn flip_wrecks_and_is_put_back_bit_exact_on_the_ports_mass_words() {
+    let Some((w, _)) = replay_port_record_massed("flip-1") else { return };
+    assert_eq!(w.len(), 465);
+    let changes: Vec<usize> = (1..w.len()).filter(|&r| w[r] != w[r - 1]).collect();
+    assert_eq!(changes, [125, 193], "wrecked on row 125, put back on row 193");
 }
