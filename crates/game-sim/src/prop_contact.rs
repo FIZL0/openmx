@@ -27,7 +27,10 @@
 //!
 //! A filed prop's own probe striking the bike's frame (B29) is filed in the collide pass, its entry
 //! on the prop's list naming the bike, and its mirror goes on the bike's list behind the bike's own
-//! entries here ([`strike`]): f27a1's image 2904, `tests/knock_launch.rs`.
+//! entries here ([`strike`]): f27a1's image 2904, `tests/knock_launch.rs`. A prop the bike's strike
+//! wakes searches in that same pass (B33, [`PropSet::strike_in`]), as the original's walk re-reads
+//! its filed count and reaches it behind the bike: its entries go after the strike's mirrors, its
+//! probe's mirror on the bike's list after the bike's own (f27a1's image 2902, the tick before).
 //!
 //! What is not here: the rider's ragdoll, the wreck bike and the plane striking a prop's `f.col` (the
 //! other props' rays do: S242, [`crate::prop_props`]); the broad phase's gather, which is every prop with a mesh
@@ -91,6 +94,10 @@ pub struct Strike {
     /// other sides: the probes' mirrors (kind 1) on the bike's list name them, and the bike's resolve
     /// pushes them. Nothing wakes them or touches their lists.
     pub probed: Vec<(usize, usize)>,
+    /// The riding bike that struck (B33), as [`strike`] names it: its player on the mirrors, and where
+    /// its entries' bodies start among its other sides. `None` for a strike that is not a riding
+    /// bike's, which [`PropSet::strike_in`] puts on as [`PropSet::strike`] does.
+    pub by: Option<(usize, usize)>,
 }
 
 /// One prop's collidable mesh, where its node stands it.
@@ -188,6 +195,7 @@ impl Search for Found {
 pub fn strike(col: &BikeCol, at: &Mat4, set: &PropSet, me: usize, first: usize, dt: F) -> Strike {
     let mut strike = rays_strike(col, at, set, me, first, dt);
     probes_struck(&mut strike, set, me, first);
+    strike.by = Some((me, first));
     strike
 }
 
@@ -305,7 +313,7 @@ fn rays_strike(col: &BikeCol, at: &Mat4, set: &PropSet, me: usize, first: usize,
             (posed[k].collection, posed[k].object, mirrors)
         })
         .collect();
-    Strike { contacts, struck, probed: Vec::new() }
+    Strike { contacts, struck, ..Strike::default() }
 }
 
 impl PropSet {
@@ -314,15 +322,55 @@ impl PropSet {
     /// the striker's search sets them. Answers each struck body as the bike's resolve pushes it, in
     /// the strike's order.
     pub fn strike(&mut self, strike: &Strike) -> Vec<Pushed> {
+        self.strike_then(strike, &mut |set, c, o| {
+            // Filed behind the bike, it searches in this pass too: heard only (B28) where the strike
+            // is not put on in the pass ([`PropSet::strike_in`] searches it).
+            let rays = std::sync::Arc::clone(&set.rays);
+            set.collections[c].hear_filed_by_strike(o, &rays[c]);
+        })
+    }
+
+    /// **A riding bike's strike, put on in the props' collide pass** (B33): [`PropSet::strike`], where
+    /// a struck object the strike filed searches at once ([`PropSet::search_late`], in `world`, its
+    /// movers in `movers`), as the original's node walk reaches it at the list's end, behind the
+    /// bike: its terrain, scene and bike-frame entries go on its list after the strike's mirrors, and
+    /// its probe's mirrors on the striking bike's frame (B29) go on `strike`'s entries after the
+    /// bike's own and the earlier props'. A strike that is not a riding bike's ([`Strike::by`]) is
+    /// [`PropSet::strike`].
+    pub fn strike_in(&mut self, strike: &mut Strike, dt: F, world: &mut dyn crate::world::World, movers: &mut crate::prop_set::PropMovers) -> Vec<Pushed> {
+        let Some((me, first)) = strike.by else { return self.strike(strike) };
+        let mut late = Vec::new();
+        let pushed = self.strike_then(strike, &mut |set, c, o| {
+            set.stamp_filed();
+            set.search_late(c, o, dt, world, &[], movers, &mut []);
+            late.push((c, o));
+        });
+        for (c, o) in late {
+            let Some(at) = strike.struck.iter().position(|s| (s.0, s.1) == (c, o)) else { continue };
+            for &(_, _, mirror) in self.collections[c].heard.1.probed.iter().filter(|p| (p.0, p.1) == (o, me)) {
+                if strike.contacts.len() < CAPACITY {
+                    strike.contacts.push(Contact { other: Some(first + at), ..mirror });
+                }
+            }
+        }
+        pushed
+    }
+
+    /// [`PropSet::strike`]'s work: every struck body woken first, as the striker's search wakes them,
+    /// then `filed` for each the strike filed (in the strike's order, the order the node filed them),
+    /// then each one's mirrors at the head of its list.
+    fn strike_then(&mut self, strike: &Strike, filed: &mut dyn FnMut(&mut PropSet, usize, usize)) -> Vec<Pushed> {
+        let fresh: Vec<(usize, usize)> =
+            strike.struck.iter().filter(|(c, o, _)| !self.collections[*c].objects[*o].filed).map(|&(c, o, _)| (c, o)).collect();
+        for (c, o, _) in &strike.struck {
+            self.struck(*c, *o);
+        }
+        for &(c, o) in &fresh {
+            filed(self, c, o);
+        }
         let mut pushed = Vec::with_capacity(strike.struck.len());
         for (c, o, mirrors) in &strike.struck {
             let (c, o) = (*c, *o);
-            let filed = self.collections[c].objects[o].filed;
-            self.struck(c, o);
-            if !filed {
-                // Filed behind the bike, it searches in this pass too: heard only (B28).
-                self.collections[c].hear_filed_by_strike(o, &self.rays[c]);
-            }
             let coll = &mut self.collections[c];
             let bone = &coll.bones[o];
             let Some(col) = coll.objects[o].collision.as_mut() else { continue };
@@ -391,11 +439,19 @@ impl crate::Sim {
         strike(col, &r.ride.transform(), &self.traffic.props, me, first, dt)
     }
 
-    /// `strike` put on the props ([`PropSet::strike`]: the struck woken, the mirrors filed) and in
-    /// `bump`: its entries after the bump's, its struck bodies the bump's to push. [`PropSet::pushed`]
-    /// writes them back after the bike's frame.
-    pub fn strike_into(&mut self, bump: &mut rider_contact::Bump, strike: Strike) {
-        bump.props = self.traffic.props.strike(&strike);
+    /// `strike` put on the props ([`PropSet::strike_in`]: the struck woken, one it filed searched in
+    /// `world` with its movers in the pass's `movers`, the mirrors filed) and in `bump`: its entries
+    /// after the bump's, its struck bodies the bump's to push. [`PropSet::pushed`] writes them back
+    /// after the bike's frame.
+    pub fn strike_into(
+        &mut self,
+        bump: &mut rider_contact::Bump,
+        mut strike: Strike,
+        dt: F,
+        world: &mut dyn crate::world::World,
+        movers: &mut crate::prop_set::PropMovers,
+    ) {
+        bump.props = self.traffic.props.strike_in(&mut strike, dt, world, movers);
         bump.contacts = crate::mover_contact::merged(std::mem::take(&mut bump.contacts), strike.contacts);
     }
 

@@ -321,7 +321,6 @@ impl PropSet {
         let rayed = crate::prop_wreck::wreck_rays_first(self, wrecks);
         self.stamp_filed();
         self.heard_afresh();
-        let mut keys: Vec<Option<[i32; 2]>> = Vec::new();
         // The collections that searched, in order: each puts its listeners on after its search.
         let mut filed = Vec::new();
         for (c, rays) in self.collections.iter_mut().zip(self.rays.iter()) {
@@ -341,10 +340,10 @@ impl PropSet {
             let (field, props, trees) = if key.is_some() { world.wooded_near(at) } else { world.wooded() };
             c.search_wrecked(out.of.len(), dt, rays, field.as_deref(), props, trees, wrecks, &mut strikes);
             filed.push(out.of.len());
-            let set = match keys.iter().position(|k| *k == key) {
+            let set = match out.keys.iter().position(|k| *k == key) {
                 Some(i) => i,
                 None => {
-                    keys.push(key);
+                    out.keys.push(key);
                     out.sets.push(props.map(|p| flight_search::movers(&p.props)).unwrap_or_default());
                     out.near.push(at);
                     out.sets.len() - 1
@@ -356,32 +355,55 @@ impl PropSet {
             self.file_on(c);
         }
         // A prop the props' rays file searches against its collection's set, or one near it (S242).
-        crate::prop_props::strike_props(self, &mut |set, c, k| {
-            let at = set.collections[c].objects[k].node.origin;
-            let s = match out.of[c] {
-                Some(s) => s,
-                None => {
-                    let key = world.near_set(at);
-                    let s = match keys.iter().position(|k| *k == key) {
-                        Some(i) => i,
-                        None => {
-                            let (_, props, _) = if key.is_some() { world.wooded_near(at) } else { world.wooded() };
-                            keys.push(key);
-                            out.sets.push(props.map(|p| flight_search::movers(&p.props)).unwrap_or_default());
-                            out.near.push(at);
-                            out.sets.len() - 1
-                        }
-                    };
-                    out.of[c] = Some(s);
-                    s
-                }
-            };
-            let (field, props, trees) = if keys[s].is_some() { world.wooded_near(out.near[s]) } else { world.wooded() };
-            let rays = Arc::clone(&set.rays);
-            set.collections[c].search_object_wrecked(c, k, dt, &rays[c], field.as_deref(), props, trees, wrecks, &mut strikes);
-        });
+        crate::prop_props::strike_props(self, &mut |set, c, k| set.search_late(c, k, dt, world, wrecks, &mut out, &mut strikes));
         let strikes = crate::prop_wreck::wreck_rays_filed(self, rayed, strikes);
         (out, strikes)
+    }
+
+    /// **An object filed during the props' collide pass, searched in it** (S242, B33): the original's
+    /// node reads its filed count afresh at every step of its walk, so an object a strike files at the
+    /// list's end is searched in the same walk, after every object filed before it. Object `k` of
+    /// collection `c` searches as [`PropSet::search_in_among`]'s collections do: against its
+    /// collection's set of shapes if it searched this pass, or else the set near the object (one
+    /// already handed out, or a new one in `out`), with the wreck bikes' hulls `wrecks`, whose mirrors
+    /// go on `strikes`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn search_late(
+        &mut self,
+        c: usize,
+        k: usize,
+        dt: F,
+        world: &mut dyn crate::world::World,
+        wrecks: &[Wreck<'_>],
+        out: &mut PropMovers,
+        strikes: &mut [WreckStrike],
+    ) {
+        let at = self.collections[c].objects[k].node.origin;
+        if out.of.len() <= c {
+            out.of.resize(self.collections.len(), None);
+        }
+        let s = match out.of[c] {
+            Some(s) => s,
+            None => {
+                let key = world.near_set(at);
+                let s = match out.keys.iter().position(|k| *k == key) {
+                    Some(i) => i,
+                    None => {
+                        let (_, props, _) = if key.is_some() { world.wooded_near(at) } else { world.wooded() };
+                        out.keys.push(key);
+                        out.sets.push(props.map(|p| flight_search::movers(&p.props)).unwrap_or_default());
+                        out.near.push(at);
+                        out.sets.len() - 1
+                    }
+                };
+                out.of[c] = Some(s);
+                s
+            }
+        };
+        let near = out.near[s];
+        let (field, props, trees) = if out.keys.get(s).copied().flatten().is_some() { world.wooded_near(near) } else { world.wooded() };
+        let rays = Arc::clone(&self.rays);
+        self.collections[c].search_object_wrecked(c, k, dt, &rays[c], field.as_deref(), props, trees, wrecks, strikes);
     }
 
     /// [`PropSet::step`] with each collection's movers its own search's ([`PropSet::search_in`]).
@@ -495,6 +517,9 @@ pub struct PropMovers {
     pub of: Vec<Option<usize>>,
     /// Where each set was asked for (S242: a prop the props' rays file searches its collection's set).
     pub near: Vec<Vf>,
+    /// Each set's near-set key ([`crate::world::World::near_set`]), `None` for the whole set: what a
+    /// prop filed later in the pass searches ([`PropSet::search_late`]).
+    pub keys: Vec<Option<[i32; 2]>>,
 }
 
 impl PropMovers {
