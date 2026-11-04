@@ -389,3 +389,64 @@ fn the_level_and_threshold() {
         }
     }
 }
+
+/// **What the table reads as a speed is the frame's impulse** (B27): f27a1's knock, frame by frame. A
+/// body's speed is its shock peak (`+0xb0`), a chassis' its impact accumulator (`+0x170`), both
+/// emptied every frame, so the strike sounds once though the ball and the bike stay queued on the
+/// two frames after it. On 2903 the table's last entry (left in its arrays past the count) is the
+/// ball's probe on the bike's frame, at the ball's shock peak to the bit, and `bbhit` was started
+/// that frame at the level it gives; on 2904..2906 both impulses are under `MinImpulse` and the sound
+/// object plays its one voice on: the same voice, the same place, older by a frame each time. The
+/// port's [`material_hit::play`] on the pair, with those impulses, plays the same: once, then not.
+#[test]
+fn a_knock_sounds_once() {
+    let Ok(kit) = Kit::load().map_err(|w| skip(&w)) else { return };
+    let mut last: Option<(u32, [u32; 3], f32)> = None;
+    for frame in 2903..=2906 {
+        let state = context(&kit, &format!("states/s195-f27a1-{frame}.eeMemory{}", ".bin"));
+        let Ok(ee) = Ee::from_ram(&state).map_err(|why| skip(&format!("{why} — F27a1's knock images (memory: s195 knock captures live in s3)"))) else { return };
+        let t = (0x0010_0000..0x0200_0000u32).step_by(4).find(|&a| ee.u32_at(a) == LISTENER_VT).expect("the table") - table::LISTENER;
+        let (e, ball_mat) = materials(&ee, t).into_iter().find(|(_, m)| m.id == 21).expect("material 21");
+        let sound = ee.u32_at(e + entry::SOUND);
+        assert_eq!(ee.u32_at(t + table::OWNERS), 0, "the queue is empty between frames");
+        // The last entry the update read, left past the count: the ball's probe on the bike's frame.
+        let ball_probe = ee.u32_at(ee.u32_at(t + table::OWNERS + 8) + 4);
+        let bike_frame = ee.u32_at(ee.u32_at(t + table::STRUCK + 8) + 4);
+        assert_eq!(ee.u8_at(bike_frame + 0x89), BIKE);
+        let ball_body = ee.u32_at(ee.u32_at(ball_probe + 0x80) + 0xf4);
+        let bike_rec = ee.u32_at(bike_frame + 0x80);
+        assert_eq!(ee.u32_at(bike_rec + 0xf4), 0, "the bike's record has no body: its chassis is read");
+        let chassis = ee.u32_at(bike_rec + 0xf0);
+        let quad = |a: u32| Vf::new(ee.f32_at(a), ee.f32_at(a + 4), ee.f32_at(a + 8), ee.f32_at(a + 12));
+        let (peak, impact) = (quad(ball_body + 0xb0), quad(chassis + 0x170));
+        let ball_col = ee.u32_at(ee.u32_at(ball_probe + 0x80) + 0x1f8);
+        let pair = [
+            Hit { owner: Some(bike_frame), owner_material: BIKE, struck: ball_col, struck_material: 21, struck_foliage: false, velocity: impact, at: quad(chassis + 0x60) },
+            Hit { owner: Some(ball_col), owner_material: 21, struck: bike_frame, struck_material: BIKE, struck_foliage: false, velocity: peak, at: quad(ball_body + 0x60) },
+        ];
+        let played = material_hit::play(&mut pair.to_vec(), &[ball_mat], 22);
+        let voice = ee.u32_at(sound + 0x34);
+        let at = [0, 4, 8].map(|k| ee.u32_at(sound + 0x70 + k));
+        let age = ee.f32_at(sound + 0x28);
+        eprintln!("{frame}: ball peak {:?}, bike impact {:?}, voice {voice:x} age {age}, played {played:?}", material_hit::speed(peak), material_hit::speed(impact));
+        match last {
+            None => {
+                let speed = ee.f32_at(ee.u32_at(t + table::SPEEDS + 8) + 4);
+                assert_eq!(speed.to_bits(), material_hit::speed(peak).0.to_bits(), "the update's speed is the ball's shock peak");
+                assert_eq!(age, 0.0, "bbhit started this frame");
+                let level = material_hit::level(F(speed), ball_mat.max_impulse);
+                assert_eq!((ee.u32_at(sound + 0x3c) as i32, level), (67, 67));
+                assert_eq!(at, [0, 4, 8].map(|k| ee.u32_at(ball_body + 0x60 + k)), "placed at the ball");
+                assert_eq!(played.len(), 1);
+                assert_eq!((played[0].level, played[0].at.to_bits()), (67, pair[1].at.to_bits()));
+            }
+            Some((v, a, was)) => {
+                assert!(material_hit::speed(peak) < ball_mat.min_impulse && material_hit::speed(impact) < ball_mat.min_impulse);
+                assert_eq!((voice, at), (v, a), "no second play: the one voice, where it was put");
+                assert!(age > was, "playing on, not restarted");
+                assert!(played.is_empty());
+            }
+        }
+        last = Some((voice, at, age));
+    }
+}

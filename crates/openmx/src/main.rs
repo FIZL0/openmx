@@ -10526,18 +10526,19 @@ impl game_sim::material_hit::Ride for HeardRide<'_> {
         use game_sim::material_hit::{BIKE, Owner};
         match o {
             Owner::Bike(g) => {
+                // The chassis' impact accumulator, not its velocity (B27): the table's speed.
                 let r = &self.rider(g)?.ride;
-                Some((BIKE, r.chassis.vel, r.position()))
+                Some((BIKE, r.impact.0, r.position()))
             }
             Owner::Plane(s) => {
                 let f = self.flight(s)?;
                 let material = f.hull.as_deref().map_or(0, game_sim::material_hit::material_of);
-                Some((material, f.body.velocity, f.body.position))
+                Some((material, f.body.shock_peak, f.body.position))
             }
             Owner::Prop { collection, object } => {
                 let col = self.seats.first()?.sim.traffic.props.collections.get(collection)?;
                 let body = &col.bones.get(object)?.body;
-                Some((self.prop_material(collection, object), body.velocity, body.position))
+                Some((self.prop_material(collection, object), body.shock_peak, body.position))
             }
         }
     }

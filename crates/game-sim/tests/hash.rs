@@ -580,7 +580,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // made and spent within a tick, so not walked and not on the wire.
     // 12208 since F27a2: the bikes' frame mesh the props' probes are heard striking
     // (`PropSet::bike_frame`), the disc's, for the sound alone, so not walked and not on the wire.
+    // 12224 since B27: the chassis' impact the material table reads as the bike's speed
+    // (`Ride::impact`), sound only, set each frame, so not walked and not on the wire.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 12208, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 12224, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }

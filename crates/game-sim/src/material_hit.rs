@@ -6,8 +6,12 @@
 //! queued — the probe, the struck collidable — and once a frame the table's update plays the queue and
 //! empties it ([`play`]):
 //!
-//! 1. each entry's speed is the length of its probe's owner's velocity (the owner's body's, or with no
-//!    body its chassis'), taken before anything is dropped;
+//! 1. each entry's speed is the length of its probe's owner's *impulse*, not its velocity (B27): a
+//!    body's shock peak (`+0xb0`, the largest change of velocity the collision response gave it per
+//!    axis since the frame's preforce cleared it), or with no body the chassis' impact accumulator
+//!    (`+0x170`, which the ground step empties at the top of every frame); taken before anything is
+//!    dropped. Both are the frame's own, so a strike sounds on the frame of its shove and a contact
+//!    that goes on without one (a ball the bike leans on the next tick) is under `MinImpulse`;
 //! 2. a pair queued both ways round — A's probe struck B, and B's probe struck A — keeps the faster of
 //!    the two; the slower is swapped out of the queue for its last entry;
 //! 3. the sound is the struck collidable's material; a struck bike ([`BIKE`]) gives the striker's own
@@ -18,7 +22,10 @@
 //!    heard 3D between `CollisionMinDistance` and `CollisionMaxDistance`.
 //!
 //! The sound object is started with the flag that does not stop it first, so a hit while the last
-//! one still sounds plays over it.
+//! one still sounds plays over it. What keeps a knock to one voice is the impulse of rule 1, not the
+//! sound object: free09's knock (f27a1's RAM images) starts its `bbhit` on the strike frame, off the
+//! ball's shock peak (16.81, level 67), and the two queued frames after it read 0 for the ball and
+//! the bike alike, and play nothing.
 //!
 //! Sound only: nothing in the simulation reads a hit's sound, so no state hash or snapshot holds it.
 
@@ -43,7 +50,8 @@ pub struct Hit {
     pub struck_material: u8,
     /// Its category is in the foliage mask (a plant's trunk).
     pub struck_foliage: bool,
-    /// The owner's velocity (its body's, else its chassis'), feet a second.
+    /// What the table reads as the owner's speed, feet a second: its body's shock peak, else its
+    /// chassis' impact accumulator (rule 1 of the module's list). Not the owner's velocity.
     pub velocity: Vf,
     /// Where the owner is (that body's or chassis' origin): where the sound plays.
     pub at: Vf,
@@ -96,7 +104,7 @@ pub fn play(queue: &mut Vec<Hit>, materials: &[Material], foliage: u8) -> Vec<So
     out
 }
 
-/// The owner's speed: its velocity's length, the `mula`/`madda`/`madd` sum.
+/// The owner's speed: its impulse's length ([`Hit::velocity`]), the `mula`/`madda`/`madd` sum.
 pub fn speed(v: Vf) -> F {
     let v = [v.x(), v.y(), v.z()].map(F);
     F::dot(v, v).sqrt()
@@ -210,6 +218,25 @@ impl PartialEq for Heard {
     }
 }
 
+/// **An owner's impulse as the material table reads it** (B27): a bike's chassis impact accumulator
+/// after its frame. Sound only, like [`Heard`]: nothing in the simulation reads it and the next
+/// frame sets it afresh, so it is equal to any other, prints as nothing (a state compared, hashed or
+/// sent leaves it out) and starts at zero on a restored one.
+#[derive(Clone, Copy, Default)]
+pub struct Impact(pub Vf);
+
+impl PartialEq for Impact {
+    fn eq(&self, _: &Impact) -> bool {
+        true
+    }
+}
+
+impl std::fmt::Debug for Impact {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Impact")
+    }
+}
+
 /// [`Heard`] for a set of owners (a collection's objects), each entry by its owner's index; and the
 /// ridden bikes its probes hear this frame ([`Ridden`], F27a2).
 #[derive(Clone, Debug, Default)]
@@ -239,8 +266,9 @@ impl PartialEq for HeardBy {
 
 /// What the queue reads of an owner or a struck one, from the frame's end state.
 pub trait Ride {
-    /// An owner's collidable's material, its velocity (its body's, else its chassis') and where it
-    /// is; `None` for one no longer there, whose entry is not queued.
+    /// An owner's collidable's material, its impulse (its body's shock peak, else its chassis'
+    /// impact accumulator: [`Hit::velocity`]) and where it is; `None` for one no longer there, whose
+    /// entry is not queued.
     fn owner(&self, o: Owner) -> Option<(u8, Vf, Vf)>;
     /// A struck one's material byte and whether its category is in [`FOLIAGE_MASK`].
     fn struck(&self, s: Struck) -> (u8, bool);
