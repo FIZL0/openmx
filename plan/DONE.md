@@ -1040,3 +1040,5 @@ away. Nothing is ever edited by hand here either; `./kit plan <ID>` finds a task
 
 ### Next: the new machines, then their release (in this order)
 - [x] **MD75e1** (follow-up, low) the quad's collision record with contacts: its vt +0x88 (the gravity record, Call::GravityRecord) walks the record's contacts and is handed on by quad::Steps; MD75e's whole frame ran only with the record empty (atv-r-spawn, count 0). Port it and run a whole frame off an image where the quad touches something (journal 11-whole-frame.md).
+### Critical: flaky tests and breakages, side by side with the work below
+- [x] **K34** (follow-up, critical) make the test `-p openmx --test web` robust: it failed under load in MD97's merge gate and passed alone. Find what it races (wall-clock time, shared ports or files, other processes) and remove that, rather than widening a timeout

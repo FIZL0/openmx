@@ -16,8 +16,8 @@
 // The page opened as a player opens it, the disc picked; on the splash the pad is plugged in (`addGamepad`, standard
 // mapping) and a second later its Cross pressed, which must make it Player 1 (`pads: 1P: … the menus and the first
 // seat are its`). Then Cross until a ride seats it, and the ride is watched on its L2 and then its R2: the speedometer
-// still over two seconds of brake, as gamepad.mjs, and the gas read against that braked picture (its 0) 3.5 s in, since
-// in software the ride is slow and two pictures on the gas can show one speed. Prints one JSON line:
+// still over two seconds of brake, as gamepad.mjs, and the gas read against that braked picture (its 0), since in
+// software the ride is slow and two pictures on the gas can show one speed. Prints one JSON line:
 // { state, gpu, listed, first, taps, seated, braked, gas, png } — `listed` whether `getGamepads()` showed the pad
 // before any press (Firefox holds a pad back until one, as chromium does), the rest as gamepad.mjs.
 import http from 'node:http';
@@ -218,9 +218,12 @@ if (typeof added !== 'number') fail(`the test service added no pad (${added}): i
 await wait(1000);
 const listed = await evaluate('navigator.getGamepads().some(g => g)');
 let from = said.length;
-await tap(0);
+// The first Cross is held until the page answers it: a 100 ms tap is over before a frame of a page slowed by load
+// reads the pads (K34), and then the press that showed the pad was never seen at all. Still one press.
 const menus = l => l.startsWith(`pads: 1P: ${PAD}`) && l.includes('the menus');
-const first = await heard(from, menus, 3000);
+await press(0, 1);
+const first = await heard(from, menus, 60000);
+await press(0, 0);
 const seated = l => l.startsWith(`pads: 1P: ${PAD}`) && !l.includes('the menus');
 let taps = 1;
 from = said.length;
@@ -249,17 +252,27 @@ const change = (a, b) => evaluate(`(async () => {
 let braked = null;
 let gas = null;
 if (ride) {
+  // How far the ride gets in a second of wall clock is the page's frame rate, which load sets (K34): so L2 is held
+  // until two pictures 2 s apart show one speed (the bike stopped on the slope), and R2 until the speed differs from
+  // that braked picture, each within a minute, rather than for a fixed time.
   await press(6, 1);
-  await wait(5000);
-  const a = await shot();
-  await wait(2000);
-  const b = await shot();
-  braked = await change(a, b);
+  let a = await shot();
+  let b = a;
+  for (const end = Date.now() + 60000; ; a = b) {
+    await wait(2000);
+    b = await shot();
+    braked = await change(a, b);
+    if (braked < 0.02 || Date.now() > end) break;
+  }
   await press(6, 0);
   await press(7, 1);
-  await wait(3500);
-  const e = await shot();
-  gas = await change(b, e);
+  let e = b;
+  for (const end = Date.now() + 60000; ; ) {
+    await wait(500);
+    e = await shot();
+    gas = await change(b, e);
+    if (gas > 0.05 || Date.now() > end) break;
+  }
   fs.writeFileSync(out.replace(/\.png$/, '-braked.png'), Buffer.from(b, 'base64'));
   fs.writeFileSync(out, Buffer.from(e, 'base64'));
 }
