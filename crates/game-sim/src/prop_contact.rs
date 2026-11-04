@@ -277,7 +277,12 @@ impl PropSet {
         let mut pushed = Vec::with_capacity(strike.struck.len());
         for (c, o, mirrors) in &strike.struck {
             let (c, o) = (*c, *o);
+            let filed = self.collections[c].objects[o].filed;
             self.struck(c, o);
+            if !filed {
+                // Filed behind the bike, it searches in this pass too: heard only (B28).
+                self.collections[c].hear_filed_by_strike(o, &self.rays[c]);
+            }
             let coll = &mut self.collections[c];
             let bone = &coll.bones[o];
             let Some(col) = coll.objects[o].collision.as_mut() else { continue };

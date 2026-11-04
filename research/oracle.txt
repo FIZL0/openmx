@@ -8831,6 +8831,10 @@ material_hit_play boot 0x003ea900 run by the update 0x3ead10 when queued: speed 
 #   knock-2881 queues bike probe 0x00da2ff0 -> ball 2 (struck +0x89 21) and ball 2's probe -> the bike's
 #   frame collidable 0x00da3180 (+0x89 16, +0x84 0x9a048); knock-2882 only the bike's; knock-2883 none.
 #   Foliage mask word 0x00468f48 = 4 (TREE). tests/prop_knock.rs the_strike_is_queued_as_the_original_queues_it.
+# B28: 0x0026f800's collide loop reloads the filed count (+0x30) after every vt+0x7c (0x0026f874), and enable
+#   0x0015b790 files a body that was asleep (0x0026f680 appends to +0x30), so a prop the bike's rays wake is collided
+#   in the same walk: its probe's entry on the bike's frame is queued on the strike tick. Port: PropSet::strike ->
+#   Collection::hear_filed_by_strike (sound only); tests/knock_launch.rs a_struck_ball_is_heard_in_its_strike_tick.
 
 # ---------------------------------------------------------------------------------------------------
 # MD80 — MX vs. ATV's biplane and Kiowa against MX Unleashed's (research/mxvatv-pc.md "The biplane and the

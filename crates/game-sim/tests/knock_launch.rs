@@ -16,7 +16,9 @@
 //! - [`the_balls_probe_pushes_it_off_the_bike`] (ignored, B29): 2903 one tick on, where the original's
 //!   ball probe files a contact on the bike's frame that the port only hears;
 //! - [`the_ball_flies_clear_of_the_bike`]: image 2903 ridden 60 ticks against the capture's rows,
-//!   the bike never touching the ball again, as there.
+//!   the bike never touching the ball again, as there;
+//! - [`a_struck_ball_is_heard_in_its_strike_tick`] (B28): ball 2 put back unwoken under image
+//!   2903's bike, its probe heard on the bike's frame in the tick the bike's rays wake it.
 //!
 //! The images, the capture and the disc are game data, git-ignored: absent, the tests skip.
 
@@ -653,4 +655,51 @@ fn the_ball_flies_clear_of_the_bike() {
         );
     }
     assert!(again.is_empty(), "the bike strikes the ball again on ticks {again:?} after image 2903");
+}
+
+/// **A struck ball is heard in its strike tick** (B28). The original's node re-reads its filed count
+/// at every step of its collide walk, and the bike's strike files the woken ball behind the bike, so
+/// the ball's probe searches in the strike's own tick: f27a1's queue holds the ball's entry on the
+/// bike's frame on the strike tick, at the ball's shock peak. No image before the strike exists, so
+/// this stands one in: image 2903's ride with ball 2 as the track loads it (asleep, unfiled), where
+/// the bike's rays strike it. One step hears the ball's probe on the bike, and the hearing moves
+/// nothing: ball and chassis are bit for bit those of the same step with no bike frame heard.
+#[test]
+fn a_struck_ball_is_heard_in_its_strike_tick() {
+    let tables = Arc::new(Tables::build());
+    let Some(mut free) = free09(&tables) else { return };
+    let props = free.props.take().unwrap();
+    let terrain = Terrain::parse(&free.terrain).expect("free09's terrain");
+    let mut world = Place { ground: Ground::new(&terrain, &free.scene.terrain), props };
+    let Some(ee) = image(2903) else { return };
+    let unwoken = |heard: bool| {
+        let mut sim = seeded(&ee, &free, &tables);
+        let set = &mut sim.traffic.props;
+        set.collections[BALL] = free.set.collections[BALL].clone();
+        set.listeners.retain(|&(c, _)| c != BALL);
+        if !heard {
+            set.bike_frame = None;
+        }
+        let o = &set.collections[BALL].objects[0];
+        assert!(!o.filed && !set.collections[BALL].bones[0].body.enabled, "the ball as loaded: asleep, unfiled");
+        sim
+    };
+    let mut sim = unwoken(true);
+    step(&mut sim, &mut world, &ee);
+    assert!(struck(&sim), "the bike's rays strike the ball");
+    let ball = &sim.traffic.props.collections[BALL];
+    assert!(ball.objects[0].filed, "the strike filed it");
+    assert_eq!(ball.heard.0, vec![(0, game_sim::material_hit::Struck::Bike(0))], "its probe heard on the bike in the strike tick");
+    let mut deaf = unwoken(false);
+    step(&mut deaf, &mut world, &ee);
+    assert!(deaf.traffic.props.collections[BALL].heard.0.is_empty());
+    let (a, b) = (ball.bones[0].body, deaf.traffic.props.collections[BALL].bones[0].body);
+    for (what, p, o) in [
+        ("ball position", a.position, b.position),
+        ("ball velocity", a.velocity, b.velocity),
+        ("ball shock peak", a.shock_peak, b.shock_peak),
+        ("bike velocity", sim.rider.ride.chassis.vel, deaf.rider.ride.chassis.vel),
+    ] {
+        assert_eq!(p.to_bits(), o.to_bits(), "{what}: the hearing moved it");
+    }
 }

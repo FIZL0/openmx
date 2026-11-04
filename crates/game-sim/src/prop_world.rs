@@ -810,6 +810,21 @@ impl Collection {
         }
     }
 
+    /// **A prop the bike's strike filed, heard in the same pass** (B28): the original's node walks its
+    /// filed list reading the count afresh each step, and the strike's wake files the struck object at
+    /// the list's end, behind the bike. So the prop's own probe searches in the tick it is struck, with
+    /// its categories as the wake left them, and the material listener hears the ridden bikes' frames
+    /// it strikes there, where the props' collide pass found them. Here it is heard and nothing more:
+    /// the probe's own contacts wait for the next pass, as before.
+    pub(crate) fn hear_filed_by_strike(&mut self, k: usize, rays: &[Option<Rays>]) {
+        let (Some(tree), Some(mesh)) = (rays.get(k).and_then(Option::as_ref), self.heard.1.mesh.as_deref()) else { return };
+        let o = &self.objects[k];
+        let (true, Some(c)) = (o.filed, o.collision.as_ref()) else { return };
+        let bikes = flight_search::Bikes { mesh, bikes: &self.heard.1.bikes };
+        let struck = flight_search::bikes_struck(tree, &o.node, &c.categories, bikes);
+        self.heard.0.extend(struck.into_iter().map(|j| (k, crate::material_hit::Struck::Bike(j))));
+    }
+
     /// The object listener: says whether it is done.
     fn listen_object(&mut self, k: usize, dt: F) -> bool {
         if !self.objects[k].listens {
