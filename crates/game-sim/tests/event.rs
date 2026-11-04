@@ -11,6 +11,8 @@
 //! 3. **a live event** (C9) — free09's stunt competition ridden in PCSX2, its activity, manager and
 //!    card read every frame, beside the port joined, started and ticked on the capture's totals: the
 //!    join's saved total, the countdown, the clock, the leader, the end and the total put back.
+//! 4. **a won live event** (C13) — the same ride with the card's total written past the target
+//!    mid-event: the last-five-seconds warning, the reached latch and the Win verdict.
 
 use game_sim::event::{self, Competition, Verdict};
 use game_sim::score::Score;
@@ -535,5 +537,186 @@ fn a_live_event_runs_like_the_port() {
     }
     if runs == 0 {
         skip("no C9 capture");
+    }
+}
+
+/// C13's words: C9's fourteen and the last-five-seconds warning (the warning HUD's +0xb0 +0x54,
+/// which its vt+0x54 stores).
+const WON_WORDS: usize = 15;
+/// How many ticks past the last a C13 row may be.
+const AHEAD: usize = 30;
+
+fn won_words_of(row: &Row) -> [u32; WON_WORDS] {
+    let w = words_of(row);
+    std::array::from_fn(|i| if i < 14 { w[i] } else { row.word("p0_warn") })
+}
+
+fn won_words(comp: &Competition) -> [u32; WON_WORDS] {
+    let w = words(comp);
+    std::array::from_fn(|i| if i < 14 { w[i] } else { u32::from(comp.seats[0].warning) })
+}
+
+/// The port followed along a capture's rows, as in [`a_live_event_runs_like_the_port`], but each
+/// tick reads its own total: `total(t)` for the port's tick `t` (1 the first), and a row may be up
+/// to [`AHEAD`] ticks on (C13's run2 lost 12 ticks at once to PINE; the clock moves every tick, so a
+/// row still fits one tick at most). `Err` names the row no tick matches.
+struct Followed {
+    comp: Competition,
+    card: Score,
+    after: Vec<[u32; WON_WORDS]>,
+    k: usize,
+    counts: [usize; 4],
+}
+
+fn follow(rows: &[Row], ridden: F, target: i32, total: &dyn Fn(usize) -> F) -> Result<Followed, String> {
+    let mut card = Score::default();
+    let mut comp = Competition::new(target);
+    comp.join(&mut card);
+    comp.start();
+    comp.seats[0].ridden = ridden;
+    let mut after = vec![won_words(&comp)];
+    let mut k = 0;
+    let (mut exact, mut torn, mut still, mut double) = (0, 0, 0, 0);
+    for (i, row) in rows.iter().enumerate() {
+        let want = won_words_of(row);
+        let dt = F::from_bits(row.word("dt"));
+        let from = k;
+        while after.len() < from + AHEAD + 2 {
+            card.total = total(after.len());
+            comp.tick(dt, &mut [&mut card]);
+            after.push(won_words(&comp));
+        }
+        if let Some(j) = (from..=from + AHEAD).find(|&j| after[j] == want) {
+            k = j;
+            exact += 1;
+        } else if let Some(j) =
+            (from..from + AHEAD).find(|&j| (0..WON_WORDS).all(|w| want[w] == after[j][w] || want[w] == after[j + 1][w]))
+        {
+            k = j;
+            torn += 1;
+        } else {
+            return Err(format!(
+                "frame {}: no tick from {from} on matches\n row  {want:08x?}\n port {:08x?}\n next {:08x?}",
+                row.word("frame_counter"),
+                after[from],
+                after[from + 1]
+            ));
+        }
+        match k - from {
+            0 if i > 0 => still += 1,
+            2.. => double += 1,
+            _ => {}
+        }
+    }
+    Ok(Followed { comp, card, after, k, counts: [exact, torn, still, double] })
+}
+
+/// **A won live event** (C13): C9's ride on free09 again, from the zone's prompt to the end, with
+/// the card's total written past the 100 000 target mid-event over PINE
+/// (`context/capture/c13/run*.csv`, spec and scripts in
+/// `research/journal/2026-11-04-c13-won-freestyle-event/capture/`; the rider sits still, so the total
+/// is 0 until the write and the written value after it). Every row up to the end is the port after
+/// some tick, the warning included, with the port's ticks taking the written total from some tick
+/// on: the latch is set and the warning taken down on that tick. The end clears the latch (the
+/// port's seat has no latch to clear, so the comparison stops there); the manager's flags and clock
+/// when the rider is gone are the port's ended tick, the verdict is **Win** and the freeride total put back is the
+/// original's. The capture also shows the announcer taking a message on the latch's tick and on
+/// the end's (the "Objective Complete!" and "You Win!" seen on screen).
+#[test]
+fn a_won_live_event_runs_like_the_port() {
+    let kit = match Kit::load() {
+        Ok(k) => k,
+        Err(why) => return skip(&why),
+    };
+    let dir = kit.ctx("capture/c13");
+    let mut runs = 0;
+    for name in ["run1.csv", "run2.csv"] {
+        let path = dir.join(name);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            skip(&format!("{} is not there: C13's capture (see its journal)", path.display()));
+            continue;
+        };
+        let mut lines = text.lines();
+        let cols: Vec<&str> = lines.next().expect("a header").split(',').collect();
+        let rows: Vec<Row> = lines.map(|l| Row { cols: &cols, cells: l.split(',').collect() }).collect();
+        let join = rows.iter().position(|r| r.get("act_players") == Some(1)).expect("nobody joined");
+        let gone = join + rows[join..].iter().position(|r| r.get("act_players") == Some(0)).expect("the event never ended");
+        let target = rows[join].word("act_target") as i32;
+        assert_eq!(target, 100_000, "{name}: free09's target");
+        assert_eq!(rows[join].word("p0_saved"), 0, "{name}: nothing to put aside");
+
+        // The written total, and the rows it shows on; before it every total is 0.
+        let poke = join + rows[join..gone].iter().position(|r| r.word("c0_total") != 0).expect("no write");
+        let written = F::from_bits(rows[poke].word("c0_total"));
+        assert!(F(ps2_float::fpu::from_i32(target)) < written, "{name}: {written:?} is past the target");
+        for r in &rows[join..gone] {
+            let t = r.word("c0_total");
+            assert!(t == 0 || t == written.to_bits(), "{name}: the rider scored ({t:#x}) at frame {}", r.word("frame_counter"));
+            assert_eq!(r.word("p0_warn"), r.word("p0_warn2"), "{name}: the warning's two words");
+        }
+        let latched = join + rows[join..gone].iter().position(|r| r.word("p0_reached") == 1).expect("the latch never set");
+        assert!(latched >= poke, "{name}: the latch before the write");
+        // The end clears the latch: compare up to it.
+        let end = latched + rows[latched..=gone].iter().position(|r| r.get("p0_reached") != Some(1)).expect("the latch never cleared");
+        assert!(rows[end].word("mgr_flags") & 0x2000 != 0, "{name}: the latch cleared before the end");
+        assert!(
+            rows[latched].word("p0_ann_queued") > rows[latched - 1].word("p0_ann_queued"),
+            "{name}: no announcement on the latch's row"
+        );
+
+        // The first port tick that reads the written total. The activity's frame (the latch) runs
+        // before the clock steps, and the first row with the total on it has the latch still clear: so
+        // the tick that made that row's clock read 0, and the write is read from the next tick on.
+        // The rows alone may let a neighbouring tick through too, as a row read mid-tick.
+        let ridden = F::from_bits(rows[join].word("c0_ridden"));
+        let with = |p: usize| move |t: usize| if t < p { F::ZERO } else { written };
+        assert_eq!(rows[poke].word("p0_reached"), 0, "{name}: the write's row is already latched");
+        let clocks = follow(&rows[join..poke], ridden, target, &with(usize::MAX)).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let mut made = clocks.after.clone();
+        let mut comp = clocks.comp.clone();
+        let mut card = clocks.card.clone();
+        let dt = F::from_bits(rows[poke].word("dt"));
+        while made.len() < clocks.k + AHEAD + 2 {
+            comp.tick(dt, &mut [&mut card]);
+            made.push(won_words(&comp));
+        }
+        let p = 1 + made.iter().position(|w| w[6] == rows[poke].word("mgr_clock")).expect("no tick made the write row's clock");
+        let fits: Vec<usize> =
+            (p.saturating_sub(3)..p + 4).filter(|&q| follow(&rows[join..end], ridden, target, &with(q)).is_ok()).collect();
+        let mut run = follow(&rows[join..end], ridden, target, &with(p))
+            .unwrap_or_else(|e| panic!("{name}: the write read from tick {p}: {e}"));
+        let up = run.after.iter().filter(|w| w[14] == 1).count();
+        let shown = rows[join..end].iter().filter(|r| r.word("p0_warn") == 1).count();
+        assert_eq!(rows[poke - 1].word("p0_warn") == 1, run.after[p - 1][14] == 1, "{name}: the warning before the write");
+        assert!(run.after[p][12] == 1 && run.after[p][14] == 0, "{name}: the write's tick latches and takes the warning down");
+
+        // The end: as C9's, on the row that cleared the latch.
+        let k = run.k;
+        let ended = (k..run.after.len()).find(|&j| run.after[j][0] & 0x2000 != 0).expect("the port never ended");
+        assert!(ended - k <= 2, "{name}: the port ends {} ticks after the last row", ended - k);
+        // The flags and clock on the row the rider is gone on, as C9's: the row that cleared the
+        // latch can be read inside the end's tick, before its clock moves.
+        assert_eq!(rows[gone].word("mgr_flags") & MGR_BITS, run.after[ended][0], "{name}: the manager's flags at the end");
+        assert_eq!(rows[gone].word("mgr_clock"), run.after[ended][6], "{name}: the clock at the end");
+        assert!(
+            rows[end].word("p0_ann_queued") > rows[end - 1].word("p0_ann_queued"),
+            "{name}: no announcement at the end"
+        );
+        let event = run.card.total;
+        let (verdict, profile) = run.comp.finish(0, &mut run.card);
+        assert_eq!(verdict, Verdict::Win, "{name}: {event:?} is past the target");
+        assert_eq!(run.card.total.to_bits(), rows[gone].word("free_total"), "{name}: the freeride total put back");
+        let [exact, torn, still, double] = run.counts;
+        println!(
+            "{name}: {} rows, {ended} event ticks; write {written:?} read from tick {p} (clock {:?} before it; ticks {fits:?} fit); warning up {up} ticks \
+             ({shown} rows); {exact} rows a tick, {torn} read mid-tick, {still} with no tick, {double} two or more; \
+             {verdict:?}, {profile} to the profile",
+            end - join,
+            F::from_bits(run.after[p - 1][6])
+        );
+        runs += 1;
+    }
+    if runs == 0 {
+        skip("no C13 capture");
     }
 }
