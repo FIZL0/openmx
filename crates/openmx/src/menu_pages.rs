@@ -713,13 +713,7 @@ impl Menu {
         vec![
             preset,
             Row::heading("World"),
-            Row::choice(
-                Key::DrawDistance,
-                "Draw Distance",
-                &Graphics::ALL.map(graphics_label),
-                at(&Graphics::ALL, s.graphics),
-                "Original Fog is the game's haze and far clip. Far Fog is the same haze four times as far out. Whole Map draws everything, with only a light haze far off.",
-            ),
+            self.fog_row(),
             self.departure_row(Departure::Foliage),
             self.departure_row(Departure::Textures),
             // MD9: a combined world's sky and light, one for all of it or each map its own.
@@ -763,6 +757,31 @@ impl Menu {
             Row::choice(Key::FrameLimit, "Frame Limit", &limits, at(&FrameLimit::ALL, s.frame_limit), "The most frames a second. Only the picture's rate; the ride itself always ticks at the game's 30 Hz."),
             Row::on_off(Key::ShowFps, "Show FPS", s.show_fps, "The frame rate in the top right corner while you ride, updated twice a second."),
         ]
+    }
+
+    /// The Fog slider (P276, user 2026-11-03): the original's haze and far clip at its left end, the
+    /// same further out to the right, and the whole map past them. Over a ride it shows how far that
+    /// is on this track, in feet.
+    fn fog_row(&self) -> Row {
+        let g = self.settings.graphics;
+        let at = Graphics::SLIDER.iter().position(|s| *s == g).unwrap_or(0);
+        let value = match (g.multiple(), self.ride_fog.filter(|_| self.stack.first() == Some(&Screen::Pause))) {
+            (Some(k), Some(end)) => format!("{} · {} ft", graphics_label(g), thousands((k * end).round() as u64)),
+            _ => graphics_label(g).to_string(),
+        };
+        let mut r = Row::slider(
+            Key::DrawDistance,
+            "Fog",
+            value,
+            at as f32 / (Graphics::SLIDER.len() - 1) as f32,
+            "How far out the haze and the draw distance are. Original is the game's own; each step right is the same haze further out, up to sixteen times as far, then Whole Map, which draws everything with only a light haze far off.",
+        );
+        r.note = Some(match g.multiple() {
+            Some(k) if k <= 1.0 => "The original game's fog.".into(),
+            Some(k) => format!("{} times as far as the original's.", k as u32),
+            None => "No fog end: the whole map, everywhere.".into(),
+        });
+        r
     }
 
     /// The Original Game page (P126, the Ride tab's since P179): the master switch, and every
@@ -1570,7 +1589,7 @@ impl Menu {
             Key::Minimap => s.minimap = !s.minimap,
             // Cross steps it up and round from the top, as a slider does.
             Key::HudScale => s.hud_scale = hud_scale_step(s.hud_scale, p.left, p.right),
-            Key::DrawDistance => s.graphics = Graphics::ALL[next(row)],
+            Key::DrawDistance => s.graphics = fog_step(s.graphics, p.left, p.right),
             Key::WorldSky => s.world_sky = WorldSky::ALL[next(row)],
             Key::TextureFiltering => s.filtering = Filtering::ALL[next(row)],
             Key::Shadows => s.shadows = Shadows::ALL[next(row)],
@@ -1927,12 +1946,47 @@ impl Departure {
     }
 }
 
-/// Draw Distance's names for the world's four.
+/// The Fog slider's names for its steps (P276): how many times the original's.
 pub fn graphics_label(g: Graphics) -> &'static str {
     match g {
         Graphics::Full => "Whole Map",
-        Graphics::Farther => "Farther Fog",
-        Graphics::Far => "Far Fog",
-        Graphics::Original => "Original Fog",
+        Graphics::Original => "Original",
+        Graphics::Far => "4x",
+        Graphics::Farther => "8x",
+        Graphics::Times(2) => "2x",
+        Graphics::Times(3) => "3x",
+        Graphics::Times(6) => "6x",
+        Graphics::Times(12) => "12x",
+        Graphics::Times(16) => "16x",
+        Graphics::Times(_) => "Custom",
     }
+}
+
+/// The Fog slider a step nearer or further (P276) — or, with neither, a step further and round from
+/// the whole map to the original's, as Cross steps a slider. A value off the slider starts from
+/// its nearest step at or below it.
+pub fn fog_step(g: Graphics, nearer: bool, further: bool) -> Graphics {
+    let steps = Graphics::SLIDER;
+    let k = g.multiple().unwrap_or(f32::INFINITY);
+    let at = steps.iter().rposition(|s| s.multiple().unwrap_or(f32::INFINITY) <= k).unwrap_or(0);
+    let last = steps.len() - 1;
+    steps[match (nearer, further) {
+        (true, _) => at.saturating_sub(1),
+        (_, true) => (at + 1).min(last),
+        _ if at >= last => 0,
+        _ => at + 1,
+    }]
+}
+
+/// `n` with a comma every three digits.
+fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }

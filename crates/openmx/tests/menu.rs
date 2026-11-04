@@ -632,50 +632,130 @@ fn the_settings_offer_the_hud_and_none_alone() {
     assert!(!text.contains("debug") && !text.contains("original") && !text.contains("hud = "), "{text}");
 }
 
-/// The draw distance row on the Graphics tab (P118's name for V-era's graphics row; P128's tab), whose words in
-/// the file are as they were.
+/// The Fog row on the Graphics tab (P276, user 2026-11-03; P118's Draw Distance, V-era's graphics
+/// row): a slider from the original's fog at its left end out to sixteen times as far, then the
+/// whole map, on today's Farther (eight times) unless asked. Its words in the file are as they
+/// were, and the new steps' read back.
 #[test]
-fn the_graphics_row_swaps_the_whole_map_for_the_originals_fog() {
+fn the_fog_slider_runs_from_the_originals_to_the_whole_map() {
     let (mut m, mut r) = fresh();
-    // Auto's High on the desktop: its far fog (P268), the whole map a step away.
+    // Auto's High on the desktop: its far fog (P268).
     assert_eq!(m.settings.graphics, Graphics::Farther, "High's far fog unless asked");
     settings_at(&mut m, &mut r, "Graphics");
     down_to(&mut m, &mut r, menu::Key::DrawDistance);
-    assert_eq!(m.page()[m.cursor(Screen::Settings)].value, "Farther Fog");
-    tap(&mut m, &mut r, Control::Left);
-    assert_eq!(m.settings.graphics, Graphics::Full);
-    assert_eq!(m.page()[m.cursor(Screen::Settings)].value, "Whole Map");
-    // V95's Farther Fog sits between the whole map and Far Fog.
-    tap(&mut m, &mut r, Control::Right);
-    assert_eq!(m.settings.graphics, Graphics::Farther);
-    assert_eq!(m.page()[m.cursor(Screen::Settings)].value, "Farther Fog");
-    tap(&mut m, &mut r, Control::Right);
-    assert_eq!(m.settings.graphics, Graphics::Far);
-    assert_eq!(m.page()[m.cursor(Screen::Settings)].value, "Far Fog");
-    tap(&mut m, &mut r, Control::Right);
-    assert_eq!(m.settings.graphics, Graphics::Original);
-    assert_eq!(m.page()[m.cursor(Screen::Settings)].value, "Original Fog");
-    assert!(m.take_changed());
-    for _ in 0..3 {
+    let row = |m: &Menu| m.page()[m.cursor(Screen::Settings)].clone();
+    assert_eq!(row(&m).label, "Fog");
+    assert_eq!(row(&m).kind, menu::Kind::Slider);
+    assert_eq!(row(&m).value, "8x");
+    assert_eq!(row(&m).note.as_deref(), Some("8 times as far as the original's."));
+    let eight = row(&m).meter.unwrap();
+    assert!(eight > 0.0 && eight < 1.0, "{eight}");
+    // Left to the original's, where it stops.
+    let mut seen = Vec::new();
+    for _ in 0..7 {
         tap(&mut m, &mut r, Control::Left);
+        seen.push((m.settings.graphics, row(&m).value));
     }
-    assert_eq!(m.settings.graphics, Graphics::Full);
-    // Its four are a dropdown (P277): Cross opens it, Down the next, Cross picks it.
-    list_next(&mut m, &mut r);
-    assert_eq!(m.settings.graphics, Graphics::Farther);
-    assert!(Settings::parse(&m.settings.text()).graphics == Graphics::Farther);
-    list_next(&mut m, &mut r);
-    assert_eq!(m.settings.graphics, Graphics::Far);
-    assert!(Settings::parse(&m.settings.text()).graphics == Graphics::Far);
-    list_next(&mut m, &mut r);
+    let shown = |s: &[(Graphics, String)]| s.iter().map(|(g, v)| (*g, v.clone())).collect::<Vec<_>>();
+    let want = |l: &[(Graphics, &str)]| l.iter().map(|(g, v)| (*g, v.to_string())).collect::<Vec<_>>();
+    assert_eq!(
+        shown(&seen),
+        want(&[
+            (Graphics::Times(6), "6x"),
+            (Graphics::Far, "4x"),
+            (Graphics::Times(3), "3x"),
+            (Graphics::Times(2), "2x"),
+            (Graphics::Original, "Original"),
+            (Graphics::Original, "Original"),
+            (Graphics::Original, "Original"),
+        ])
+    );
+    assert_eq!(row(&m).meter, Some(0.0));
+    assert_eq!(row(&m).note.as_deref(), Some("The original game's fog."));
+    assert!(m.is_original(menu::Departure::Fog));
+    assert!(m.take_changed());
+    // Right out past Farther to sixteen times, the whole map, and no further.
+    seen.clear();
+    for _ in 0..10 {
+        tap(&mut m, &mut r, Control::Right);
+        seen.push((m.settings.graphics, row(&m).value));
+    }
+    assert_eq!(
+        shown(&seen[3..]),
+        want(&[
+            (Graphics::Times(6), "6x"),
+            (Graphics::Farther, "8x"),
+            (Graphics::Times(12), "12x"),
+            (Graphics::Times(16), "16x"),
+            (Graphics::Full, "Whole Map"),
+            (Graphics::Full, "Whole Map"),
+            (Graphics::Full, "Whole Map"),
+        ])
+    );
+    assert_eq!(row(&m).meter, Some(1.0));
+    // Cross steps it further and round from the whole map to the original's, as a slider does.
+    tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.settings.graphics, Graphics::Original);
-    assert!(Settings::parse(&m.settings.text()).graphics == Graphics::Original);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.settings.graphics, Graphics::Times(2));
+    // Every step is saved and read back as it was.
+    for g in Graphics::SLIDER {
+        m.settings.graphics = g;
+        assert_eq!(Settings::parse(&m.settings.text()).graphics, g, "{g:?}");
+    }
+    // The old words still read.
+    assert_eq!(Settings::parse("graphics = original\n").graphics, Graphics::Original);
     assert_eq!(Settings::parse("graphics = far\n").graphics, Graphics::Far);
     assert_eq!(Settings::parse("graphics = farther\n").graphics, Graphics::Farther);
     assert_eq!(Settings::parse("graphics = full\nvideo = custom_whole_map\n").graphics, Graphics::Full);
+    assert_eq!(Settings::parse("graphics = x16\n").graphics, Graphics::Times(16));
     // The whole map with the other rows as they come is a file on Auto from before P268: Auto's pick.
     assert_eq!(Settings::parse("graphics = full\n").graphics, Graphics::Farther);
     assert_eq!(Settings::parse("graphics = fancy\n").graphics, Graphics::Farther);
+}
+
+/// P276: over a ride the Fog row says how far its fog ends on that track, in feet, and the fog the
+/// ride lights its views with is the slider's multiple of the original's.
+#[test]
+fn the_fog_slider_shows_its_distance_and_the_ride_fogs_by_it() {
+    use game_render::mat::v3;
+    use game_render::world::Lighting;
+    let (mut m, mut r) = fresh();
+    m.ride_fog = Some(1000.0);
+    // In the front end there is no track to measure it on.
+    settings_at(&mut m, &mut r, "Graphics");
+    down_to(&mut m, &mut r, menu::Key::DrawDistance);
+    assert_eq!(m.page()[m.cursor(Screen::Settings)].value, "8x");
+    let (mut m, mut r) = fresh();
+    m.ride_fog = Some(1000.0);
+    m.pause();
+    tap_until(&mut m, &mut r, Control::Down, |m| m.pause_rows()[m.cursor(Screen::Pause)] == "Settings");
+    tap(&mut m, &mut r, Control::Cross);
+    tab_to(&mut m, &mut r, "Graphics");
+    down_to(&mut m, &mut r, menu::Key::DrawDistance);
+    let value = |m: &Menu| m.page()[m.cursor(Screen::Settings)].value.clone();
+    assert_eq!(value(&m), "8x · 8,000 ft");
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(value(&m), "12x · 12,000 ft");
+    m.settings.graphics = Graphics::Original;
+    assert_eq!(value(&m), "Original · 1,000 ft");
+    m.settings.graphics = Graphics::Full;
+    assert_eq!(value(&m), "Whole Map");
+    // The ride's fog and far clip follow the setting.
+    let light = Lighting { sun: v3(0.0, 1.0, 0.0), sun_color: [1.0; 3], ambient: [0.3; 3], fog_color: [128; 3], fog_near: 280.0, fog_far: 1000.0 };
+    let span = 9000.0;
+    for g in Graphics::SLIDER {
+        let fog = g.fog(&light, span);
+        match g.multiple() {
+            Some(k) => {
+                assert_eq!((fog.near, fog.far, fog.reach, fog.max), (k * 280.0, k * 1000.0, k * 1000.0, 1.0), "{g:?}");
+                assert_eq!(g.far_clip(&light, span), k * 1000.0, "{g:?}");
+            }
+            None => assert_eq!(fog.reach, f32::INFINITY),
+        }
+    }
+    assert_eq!(Graphics::Times(16).fog(&light, span).far, 16_000.0);
+    assert!(Graphics::Times(16).far_clip(&light, span) <= Graphics::Full.far_clip(&light, span), "the far end draws no more than the whole map");
 }
 
 /// V42: the readout unless asked, and the Display tab's row switches it to the dial and back by
@@ -4498,15 +4578,14 @@ fn the_graphics_tab_has_each_graphics_setting_once_under_its_group() {
     for _ in 0..4 {
         tap(&mut m, &mut r, Control::Up);
     }
-    // Draw Distance changed by the pad is the setting, and is saved.
+    // The Fog slider changed by the pad is the setting, and is saved (P276: Right is further).
     assert_eq!(m.settings.graphics, Graphics::Farther);
     tap(&mut m, &mut r, Control::Right);
     assert!(m.take_changed());
-    // V95's Far Fog is next after the Farther
-    assert_eq!(m.settings.graphics, Graphics::Far);
+    assert_eq!(m.settings.graphics, Graphics::Times(12));
     let dir = scratch("graphics-tab");
     menu::save(&dir, &m.settings, &Controls::default()).unwrap();
-    assert_eq!(menu::load(&dir).0.graphics, Graphics::Far);
+    assert_eq!(menu::load(&dir).0.graphics, Graphics::Times(12));
     std::fs::remove_dir_all(&dir).ok();
     // `--screen graphics` opens the same tab.
     assert_eq!(Screen::from_word("graphics"), Some(Screen::Graphics));
@@ -5596,12 +5675,12 @@ fn original_on_sets_every_sub_switch_and_one_turned_back_leaves_the_rest() {
         tap(&mut m, &mut r, Control::Right);
         assert!(!m.some_original(d), "{d:?} back to ours");
         // Aspect Ratio's six (P176) step on from 4:3 to 16:9, another of ours, and Shadow Quality
-        // (V108, user 2026-10-30) from Original to Low. Draw Distance's four wrap from Original Fog
-        // to Whole Map, not the switch's Farther Fog (P268).
+        // (V108, user 2026-10-30) from Original to Low. The Fog slider (P276) steps out from the
+        // original's to twice as far, not the switch's eight times.
         let ours = match d {
             Departure::Picture => "16:9",
             Departure::Shadows => "Low",
-            Departure::Fog => "Whole Map",
+            Departure::Fog => "2x",
             _ => d.choices()[0],
         };
         assert_eq!(value(&m, d.key()), ours, "{d:?}");

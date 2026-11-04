@@ -350,8 +350,9 @@ pub fn cheaper(l: Look) -> Option<Look> {
     let mut c = l;
     if l.shadows == Shadows::All {
         c.shadows = Shadows::On;
-    } else if matches!(l.draw, Graphics::Full | Graphics::Farther) {
-        c.draw = if l.draw == Graphics::Full { Graphics::Farther } else { Graphics::Far };
+    } else if l.draw.multiple().is_none_or(|k| k > game_render::world::FAR_FOG) {
+        // The Fog slider's further steps (P276) come in to Farther, then Far.
+        c.draw = if l.draw.multiple().is_none_or(|k| k > game_render::world::FARTHER_FOG) { Graphics::Farther } else { Graphics::Far };
     } else if l.scale == RenderScale::Full {
         c.scale = RenderScale::ThreeQuarters;
     } else if l.shadows != Shadows::Off && l.shadow_quality == ShadowQuality::High {
