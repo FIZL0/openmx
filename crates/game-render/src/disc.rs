@@ -209,6 +209,29 @@ impl Members for Folder {
     }
 }
 
+/// An archive with one member's bytes swapped for others (V105, [`Res::with_member`]): every other
+/// member is the archive's own, read from it as before.
+struct Swapped {
+    base: Box<dyn Members>,
+    entries: Vec<Entry>,
+    /// The swapped member's index in [`Swapped::entries`], and its new bytes.
+    at: usize,
+    bytes: Vec<u8>,
+}
+
+impl Members for Swapped {
+    fn entries(&self) -> &[Entry] {
+        &self.entries
+    }
+
+    fn bytes(&self, e: &Entry) -> Result<Vec<u8>, String> {
+        match *e == self.entries[self.at] {
+            true => Ok(self.bytes.clone()),
+            false => self.base.bytes(e),
+        }
+    }
+}
+
 /// A `.res` archive, or a folder standing in for one, with its directory in memory.
 pub struct Res {
     members: Box<dyn Members>,
@@ -267,6 +290,20 @@ impl Res {
     /// Every member, in directory order.
     pub fn entries(&self) -> &[Entry] {
         self.members.entries()
+    }
+
+    /// The same archive with the member called `name` (matched as [`Res::read`] matches) holding
+    /// `bytes` instead, in its place in the directory; an error when it has no such member. How a
+    /// split screen rides a track with its `_ss` twin's `.toy` (V105).
+    pub fn with_member(self, name: &str, bytes: Vec<u8>) -> Result<Res, String> {
+        let want = normalise(name);
+        let mut entries = self.entries().to_vec();
+        let at = entries
+            .iter()
+            .position(|e| normalise(&e.name) == want)
+            .ok_or_else(|| format!("the archive has no member {name}"))?;
+        entries[at].size = bytes.len() as u32;
+        Ok(Res { members: Box::new(Swapped { base: self.members, entries, at, bytes }) })
     }
 
     /// One member's bytes, by name, matched without regard to case or slash style.
@@ -505,5 +542,17 @@ mod tests {
         // With no whole name, the first that ends in it, as before.
         assert_eq!(res.read_suffix("thq.psm").unwrap(), b"geom/BaleTHQ.psm");
         assert_eq!(res.read_suffix("bale_single.psg").ok(), None);
+    }
+
+    #[test]
+    fn a_swapped_member_reads_its_new_bytes_and_the_rest_their_own() {
+        let files = ["tracks/free09/free09.toy", "tracks/free09/free09.scn"];
+        let res = Res::files(files.iter().map(|f| (f.to_string(), f.as_bytes().to_vec())).collect()).unwrap();
+        let res = res.with_member("TRACKS\\free09\\FREE09.TOY", b"split".to_vec()).unwrap();
+        assert_eq!(res.read_suffix("free09.toy").unwrap(), b"split");
+        assert_eq!(res.read("tracks\\free09\\free09.scn").unwrap(), b"tracks/free09/free09.scn");
+        let names: Vec<(&str, u32)> = res.entries().iter().map(|e| (e.name.as_str(), e.size)).collect();
+        assert_eq!(names, [("tracks\\free09\\free09.toy", 5), ("tracks\\free09\\free09.scn", 24)], "in its place, its new size");
+        assert!(res.with_member("free09.trn", Vec::new()).is_err(), "no member to swap");
     }
 }
