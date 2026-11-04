@@ -390,11 +390,10 @@ impl PreloadMeter {
     /// How long the movie holds a value at its top.
     const HOLD: u16 = 15;
 
-    /// The strength a preload's shove shows as, `1..=20`: the speedometer's own float steps, and
-    /// its truncation.
+    /// The strength a preload's shove shows as, `1..=20`: the speedometer's own steps, and its
+    /// truncation. A HUD readout that feeds nothing back, so in the host's arithmetic (C27).
     pub fn strength(force: f32, max: f32) -> i16 {
-        use ps2_float::fpu::{add, div, mul, to_i32};
-        let n = to_i32(add(0.5, mul(20.0, div(force, max))));
+        let n = (0.5 + 20.0 * (force / max)) as i32;
         if n < 2 { 1 } else { n.min(i16::MAX as i32) as i16 }
     }
 

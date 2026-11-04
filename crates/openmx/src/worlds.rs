@@ -1644,7 +1644,7 @@ impl WorldMod {
             })
             .collect();
         let side = |a: usize| {
-            let far = |p: &WorldPiece| (p.tile.at[a] + F::from(p.tile.keep[a + 2] as i32) * p.tile.spacing).0;
+            let far = |p: &WorldPiece| p.tile.at[a].0 + p.tile.keep[a + 2] as f32 * p.tile.spacing.0;
             if self.wrap[a] { self.pieces.iter().map(far).fold(0.0, f32::max) } else { 0.0 }
         };
         game_render::terrain::Regions { owned, period: [side(0), side(1)] }
