@@ -23,7 +23,7 @@ CPU time, which does not go up when the shell has to wait for a core:
   (it had to come under 20 s of wall clock). The paint update must stay under 8 ms of thread CPU
   (it was 8 ms of wall clock). The peak-memory bound is unchanged.
 
-gate.toml is unchanged: the binary stays in `[alone]` because it is heavy (1.8 GB, a GPU, about 50 s).
+gate.toml: world_ultra_load leaves `[alone]` (see Gate notes).
 
 Nothing from opentennis applied. It has no CPU-time budget test.
 
@@ -68,9 +68,13 @@ none
 
 ## Gate notes
 
-- `./kit done` ran three times. Twice disc_worlds went red on its own wall-clock limits at load 50-100:
-  world_mxu 561 s and then 505 s, world_mxu_nat 516 s, and the installed world_mxu 73 s. That is K24's
-  work, so I put those figures on K24 as a note. The third run passed (4782 tests).
+- `./kit done` went red three times on disc_worlds' own wall-clock limits at load 50-100: world_mxu at
+  561, 505 and 549 s, world_mxu_nat at 516 s, and the installed world_mxu at 73 s. That is K24's work,
+  so I put those figures on K24 as a note. Once the tests passed (4782 tests) and only the audit
+  stopped it.
 - Done with `--skip-audit`: the audit's four leaks are in crates/game-sim/src/atv_wheel.rs and
   plan/DONE.md, which belong to other tasks and which K23 does not touch. They show up because this
   machine's oracle.txt has names for those addresses. K23's diff adds no addresses.
+- I merged origin/main into task/K23 to pick up P226's disc_worlds `[alone]` stopgap, which the runner's
+  merge gate already has. Then I took world_ultra_load back out of `[alone]` (P294 had put it there as a
+  stopgap until K23), which the K23 line on main asked for. It runs in the pool now.
