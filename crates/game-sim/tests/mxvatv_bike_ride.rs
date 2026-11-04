@@ -397,3 +397,485 @@ fn the_seeded_bikes_first_frame_is_ride2_row_0() {
     assert!(d.is_empty(), "row 0: {} words differ\n  {}", d.len(), d.iter().take(40).cloned().collect::<Vec<_>>().join("\n  "));
     assert_ne!(body, s.body, "the frame moved the bike");
 }
+
+// --- F31b1: the bike's PreProcess, the port's ----------------------------------------------------------
+
+use game_sim::handling::bike;
+use game_sim::quad::{self, Call, Moto, Quad};
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::rc::Rc;
+
+/// The bike's PreProcess (research/oracle.txt `# F31b1`): the preforce list's thunk hands it the bike.
+const GROUND_HEAD: u32 = 0x004d_8b20;
+/// Its callees that are not the body's: the input limiter and the head and tail through the bike's
+/// vtable, the gearbox and the clutch direct.
+const AUTO_SHIFT: u32 = 0x004e_5fe0;
+const CLUTCH: u32 = 0x004e_6a60;
+/// The bike's preforce element: the bike's `+0x30`.
+const BIKE_PREFORCE: u32 = BIKE + 0x30;
+
+fn vt(ee: &Ee, slot: u32) -> u32 {
+    ee.u32_at(ee.u32_at(BIKE + 4) + slot)
+}
+
+fn the_wheels(ee: &Ee) -> [u32; 2] {
+    seed::WHEELS.map(|o| ee.u32_at(BIKE + o))
+}
+
+/// The quad's [`quad::Body`] off the ATV body at `at` (`tests/atv_quad.rs`' map).
+const QUAD_BODY: [u32; 8] = [0xa0, 0x1b0, 0x190, 0x1d0, 0x80, 0xc0, 0x70, 0xd0];
+
+fn quad_body(ee: &Ee, at: u32) -> quad::Body {
+    let v = |o: u32| seed::Words::v(&|a| ee.u32_at(a), at + o);
+    let [force, moment, orientation, ang_vel, velocity, reset_each_frame, position, correction] = QUAD_BODY.map(v);
+    quad::Body { force, moment, orientation, ang_vel, velocity, reset_each_frame, position, correction }
+}
+
+fn quad_body_words(b: &quad::Body, at: u32) -> Vec<(u32, u32)> {
+    let vs = [b.force, b.moment, b.orientation, b.ang_vel, b.velocity, b.reset_each_frame, b.position, b.correction];
+    let mut out = Vec::new();
+    for (o, v) in QUAD_BODY.into_iter().zip(vs) {
+        for (k, w) in v.to_bits().into_iter().enumerate() {
+            out.push((at + o + 4 * k as u32, w));
+        }
+    }
+    out
+}
+
+/// The bike in the interpreter's RAM as the port's head sees it, and the words it last read: the
+/// port's changes go back word by word (a word it holds as it read stays as RAM has it, a flag word
+/// that is neither 0 nor 1 included).
+struct InRam<'a> {
+    ee: &'a mut Ee,
+    wheels: [u32; 2],
+    record: u32,
+    body: u32,
+    last: Vec<(u32, u32)>,
+}
+
+impl InRam<'_> {
+    fn words(&self, q: &Quad, b: &quad::Body) -> Vec<(u32, u32)> {
+        let mut w = bike::quad_words(q, BIKE, self.wheels, self.record);
+        w.extend(quad_body_words(b, self.body));
+        w
+    }
+
+    fn read(&mut self) -> (Quad, quad::Body) {
+        let ee = &*self.ee;
+        let (q, b) = (bike::read_quad(&|a| ee.u32_at(a), BIKE), quad_body(ee, self.body));
+        self.last = self.words(&q, &b);
+        (q, b)
+    }
+
+    fn write(&mut self, q: &Quad, b: &quad::Body) {
+        let now = self.words(q, b);
+        for (&(a, w), &(la, lw)) in now.iter().zip(&self.last) {
+            assert_eq!(a, la);
+            if w != lw {
+                self.ee.set_u32(a, w);
+            }
+        }
+        self.last = now;
+    }
+}
+
+/// Each step the head calls is the original's, run on the bike in RAM.
+impl Moto for InRam<'_> {
+    fn call(&mut self, c: Call, q: &mut Quad, body: &mut quad::Body) {
+        self.write(q, body);
+        let (f, x) = match c {
+            Call::InputLimiter(dt) => (vt(self.ee, 0x34c), vec![dt.0]),
+            Call::AutoShift { dt, inv_radius } => (AUTO_SHIFT, vec![dt.0, inv_radius.0]),
+            Call::Clutch(dt) => (CLUTCH, vec![dt.0]),
+            Call::HeadTail => (vt(self.ee, 0x4d0), vec![]),
+            c => panic!("the bike's head calls no {c:?}"),
+        };
+        self.ee.set(28, GP);
+        self.ee.call(f, &[u64::from(BIKE)], &x, BUDGET);
+        (*q, *body) = self.read();
+    }
+}
+
+/// [`bike::ground_head`] on the bike in RAM, with its callees the original's.
+fn port_head(ee: &mut Ee, dt: F) {
+    let body = ee.u32_at(BIKE + seed::BODY);
+    let (wheels, record) = (the_wheels(ee), ee.u32_at(BIKE + seed::RECORD));
+    let words = |ee: &Ee| (bike::read_params(&|a| ee.u32_at(a), BIKE), bike::read_held(&|a| ee.u32_at(a), BIKE));
+    let (p, held) = words(ee);
+    let mut axes = seed::body(&|a| ee.u32_at(a), body).angular_axes;
+    let was = axes;
+    let mut m = InRam { ee, wheels, record, body, last: Vec::new() };
+    let (mut q, mut b) = m.read();
+    bike::ground_head(&p, &mut q, &mut b, held, &mut axes, dt, &mut m);
+    m.write(&q, &b);
+    for k in 0..3 {
+        if axes[k] != was[k] {
+            m.ee.set_u32(body + 0x120 + 4 * k as u32, u32::from(axes[k]));
+        }
+    }
+}
+
+/// A frame as [`hybrid_frame`]'s, the bike's PreProcess the port's ([`port_head`]) and the other
+/// riders' and the rest of the listeners the original's.
+struct PortHead<'a>(Hybrid<'a>);
+
+impl Dynamics for PortHead<'_> {
+    fn count(&self, l: List) -> i32 {
+        self.0.count(l)
+    }
+    fn preforce(&mut self, i: i32, dt: F) {
+        if self.0.elt(List::Preforce, i) != BIKE_PREFORCE {
+            return self.0.preforce(i, dt);
+        }
+        let h = &mut self.0;
+        for (a, w) in seed::body_words(&h.body, h.at) {
+            h.ee.set_u32(a, w);
+        }
+        port_head(h.ee, dt);
+        h.body = seed::body(&|a| h.ee.u32_at(a), h.at);
+    }
+    fn force(&mut self, i: i32, h: F) {
+        self.0.force(i, h)
+    }
+    fn enabled(&self, b: i32) -> bool {
+        self.0.enabled(b)
+    }
+    fn integrate(&mut self, b: i32, h: F) {
+        self.0.integrate(b, h)
+    }
+    fn end_substep(&mut self, b: i32) {
+        self.0.end_substep(b)
+    }
+    fn constrain(&mut self, b: i32, last: bool) {
+        self.0.constrain(b, last)
+    }
+    fn post(&mut self, i: i32, dt: F) {
+        self.0.post(i, dt)
+    }
+}
+
+/// One sim frame as [`hybrid_frame`] runs it, the world step [`PortHead`]'s. Answers how many times
+/// the port's head ran.
+fn port_head_frame(ee: &mut Ee, dt: F) -> u32 {
+    let call = |ee: &mut Ee, f: u32, ints: &[u64], x: F| {
+        ee.set(28, GP);
+        ee.call(f, ints, &[x.0], BUDGET);
+        ee.r(2)
+    };
+    assert_eq!(ee.u8_at(ee.u32_at(SKIP_FLAG) + 0x225) & 8, 0, "the frame is not skipped");
+    for slot in [0x7c, 0x84] {
+        for i in 0..ee.u32_at(SIM + 0x24) {
+            let e = call(ee, LIST24_GET, &[u64::from(SIM + 0x24), u64::from(i)], F::ZERO) as u32;
+            call(ee, ee.u32_at(ee.u32_at(e + 4) + slot), &[u64::from(e)], dt);
+        }
+    }
+    let world = World { iterations: ee.u32_at(WORLD) as i32, rate: F(ee.f32_at(WORLD + 4)) };
+    let at = ee.u32_at(BIKE + seed::BODY);
+    let body = seed::body(&|a| ee.u32_at(a), at);
+    let mut h = PortHead(Hybrid { ee, body, at, integrated: 0 });
+    let heads = (0..h.count(List::Preforce)).filter(|&i| h.0.elt(List::Preforce, i) == BIKE_PREFORCE).count() as u32;
+    world.step(dt, &mut h);
+    let body = h.0.body;
+    for (a, w) in seed::body_words(&body, at) {
+        ee.set_u32(a, w);
+    }
+    call(ee, TAIL, &[u64::from(SIM)], dt);
+    let mut i = 0;
+    while i < ee.u32_at(SIM + 0x3c) {
+        let e = call(ee, LIST3C_GET, &[u64::from(SIM + 0x3c), u64::from(i)], F::ZERO) as u32;
+        if call(ee, ee.u32_at(ee.u32_at(e) + 8), &[u64::from(e)], dt) != 0 {
+            call(ee, LIST3C_REMOVE, &[u64::from(SIM + 0x3c), u64::from(i)], F::ZERO);
+        } else {
+            i += 1;
+        }
+    }
+    heads
+}
+
+/// [`replay`] with every frame [`port_head_frame`].
+fn replay_port_head(name: &str) -> Option<Vec<bool>> {
+    let mut ee = hooked(image()?);
+    let rows = rows(name)?;
+    let mut out = Vec::new();
+    for (r, row) in rows.iter().enumerate() {
+        poke(&mut ee, row, &READER);
+        assert_eq!(port_head_frame(&mut ee, F(f32::from_bits(DT))), 1, "the bike is filed once");
+        let d = diff(&ee, row);
+        assert!(
+            d.is_empty(),
+            "{name} row {r} (vsync {}), the port's head: {} words differ\n  {}",
+            row["vsync"],
+            d.len(),
+            d.iter().take(40).cloned().collect::<Vec<_>>().join("\n  ")
+        );
+        let w = wrecked(|o| ee.u32_at(BIKE + o));
+        assert_eq!(w, row_wrecked(row), "{name} row {r}: the wreck state");
+        out.push(w);
+        poke(&mut ee, row, &SPOT);
+    }
+    Some(out)
+}
+
+/// **C15's ride, the bike's PreProcess the port's**: every row of ride-2 word for word.
+#[test]
+fn ride_replays_bit_exact_on_the_ports_head() {
+    let Some(w) = replay_port_head("ride-2") else { return };
+    assert_eq!(w.len(), 459);
+    assert!(w.iter().all(|w| !w), "the ride never wrecks");
+}
+
+/// **C15's flip, the bike's PreProcess the port's**: wrecked on row 125 and put back on row 193, every
+/// row word for word.
+#[test]
+fn flip_wrecks_and_is_put_back_bit_exact_on_the_ports_head() {
+    let Some(w) = replay_port_head("flip-1") else { return };
+    assert_eq!(w.len(), 465);
+    let changes: Vec<usize> = (1..w.len()).filter(|&r| w[r] != w[r - 1]).collect();
+    assert_eq!(changes, [125, 193], "wrecked on row 125, put back on row 193");
+}
+
+struct Gen(u64);
+
+#[allow(clippy::float_arithmetic)]
+impl Gen {
+    fn bits(&mut self) -> u32 {
+        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (self.0 >> 32) as u32
+    }
+    fn f(&mut self, lo: f32, hi: f32) -> f32 {
+        lo + (hi - lo) * (self.bits() as f32 / 4294967296.0)
+    }
+    fn one_in(&mut self, n: u32) -> bool {
+        self.bits() % n == 0
+    }
+    /// `at` one time in five, else anywhere in `lo..hi`; a zero comes signed either way.
+    fn near(&mut self, at: f32, lo: f32, hi: f32) -> f32 {
+        let x = if self.one_in(5) { at } else { self.f(lo, hi) };
+        if x == 0.0 && self.one_in(2) { -0.0 } else { x }
+    }
+}
+
+type Log = Rc<RefCell<Vec<Call>>>;
+
+/// The words the bike's head may write: the bike, both wheels and the body.
+fn head_regions(ee: &Ee) -> Vec<(u32, u32)> {
+    let [front, rear] = the_wheels(ee);
+    vec![(BIKE, 0x1800), (front, 0x920), (rear, 0x920), (ee.u32_at(BIKE + seed::BODY), 0x230)]
+}
+
+fn snap_regions(ee: &Ee, regions: &[(u32, u32)]) -> Vec<u32> {
+    regions.iter().flat_map(|&(at, len)| (0..len).step_by(4).map(move |o| ee.u32_at(at + o))).collect()
+}
+
+fn restore_regions(ee: &mut Ee, regions: &[(u32, u32)], words: &[u32]) {
+    let mut w = words.iter();
+    for &(at, len) in regions {
+        for o in (0..len).step_by(4) {
+            ee.set_u32(at + o, *w.next().unwrap());
+        }
+    }
+}
+
+fn tally(t: &mut BTreeMap<&'static str, u32>, path: &'static str) {
+    *t.entry(path).or_insert(0) += 1;
+}
+
+/// **The bike's PreProcess is the original's**: 12 000 bikes, each state 4's with the head's inputs
+/// drawn at random (edges, ties and signed zeros among them), run through SLUS-21104's head and
+/// through [`bike::ground_head`] from the same words. Every word of the bike, its wheels and its body
+/// comes out the same, and the steps are called in the same order with the same arguments. The
+/// original's steps are hooked to log and do nothing; the body's turn-lock virtual is its own.
+#[test]
+#[allow(clippy::float_arithmetic)]
+fn the_bikes_pre_process_is_the_originals() {
+    let Some(mut ee) = image().map(hooked) else { return };
+    let (limiter, head_tail) = (vt(&ee, 0x34c), vt(&ee, 0x4d0));
+    let log: Log = Rc::default();
+    for (at, f) in [
+        (limiter, (|ee: &Ee| Call::InputLimiter(F(ee.f(12)))) as fn(&Ee) -> Call),
+        (AUTO_SHIFT, |ee| Call::AutoShift { dt: F(ee.f(12)), inv_radius: F(ee.f(13)) }),
+        (CLUTCH, |ee| Call::Clutch(F(ee.f(12)))),
+        (head_tail, |_| Call::HeadTail),
+    ] {
+        let l = log.clone();
+        ee.hooks.insert(at, Box::new(move |ee: &mut Ee| {
+            assert_eq!(ee.r(4) as u32, BIKE, "a step handed something other than the bike");
+            l.borrow_mut().push(f(ee));
+        }));
+    }
+    let regions = head_regions(&ee);
+    let state = ee.u32_at(BIKE + 0xbc4);
+    assert_ne!(state, 0, "state 4's bike has a vehicle state");
+    let kind = ee.u32_at(state + 0x28);
+    let image_words = snap_regions(&ee, &regions);
+    let [front, rear] = the_wheels(&ee);
+    let body = ee.u32_at(BIKE + seed::BODY);
+    let mut g = Gen(0x0031_b001);
+    let mut t = BTreeMap::new();
+    let (pi, half_pi) = (std::f32::consts::PI, std::f32::consts::FRAC_PI_2);
+    for k in 0..12_000 {
+        restore_regions(&mut ee, &regions, &image_words);
+        let (b, f) = (|ee: &mut Ee, a: u32, v: bool| ee.set_u32(a, u32::from(v)), |ee: &mut Ee, a: u32, v: f32| ee.set_f32(a, v));
+        // The guards: no state, states 3 and 4, others; the balance words; the wreck reason; the hold.
+        match g.bits() % 8 {
+            0 => ee.set_u32(BIKE + 0xbc4, 0),
+            1 => ee.set_u32(state + 0x28, 3),
+            2 => ee.set_u32(state + 0x28, 4),
+            n => ee.set_u32(state + 0x28, [kind, 0, 1, 2, 5][n as usize - 3]),
+        }
+        let bal = g.bits();
+        ee.set_u32(BIKE + 0x1524, bal);
+        ee.set_u32(BIKE + 0x152c, if g.one_in(4) { bal } else { g.bits() });
+        ee.set_u32(BIKE + 0xc80, if g.one_in(4) { g.bits() | 1 } else { 0 });
+        ee.set_u32(BIKE + 0xddc, u32::from(g.one_in(3)));
+        for a in 0..3 {
+            b(&mut ee, body + 0x120 + 4 * a, g.one_in(2));
+        }
+        b(&mut ee, BIKE + 0x324, g.one_in(2));
+        // The steering: the fade's speeds (tied a sixth of the time), the lock, the full-lock option.
+        let s1 = g.f(0.0, 40.0);
+        f(&mut ee, BIKE + 0x1300, s1);
+        f(&mut ee, BIKE + 0x1308, if g.one_in(6) { s1 } else { g.f(0.0, 80.0) });
+        f(&mut ee, BIKE + 0x1304, g.f(0.0, 1.0));
+        f(&mut ee, BIKE + 0x130c, g.f(0.0, 1.0));
+        f(&mut ee, BIKE + 0xc30 + 8, g.f(-60.0, 60.0));
+        f(&mut ee, front + 0x70, g.f(0.1, 0.8));
+        b(&mut ee, BIKE + 0x12f0, g.one_in(2));
+        f(&mut ee, BIKE + 0x12f4, g.f(0.0, 0.8));
+        f(&mut ee, BIKE + 0x12f8, g.f(0.05, 1.0));
+        let timer = g.near(0.0, 0.0, 1.5);
+        f(&mut ee, BIKE + 0x12fc, timer);
+        let lean = match g.bits() % 6 {
+            0 => g.near(0.987, 0.987, 1.0),
+            1 => -g.near(0.987, 0.987, 1.0),
+            _ => g.near(0.0, -1.0, 1.0),
+        };
+        f(&mut ee, BIKE + 0x12e8, lean);
+        f(&mut ee, BIKE + 0x12cc, g.f(0.0, 1.0));
+        // The donut: the gate open half the time; the ramps' ends at their edges now and then.
+        let open = g.one_in(2);
+        b(&mut ee, BIKE + 0x1270, open || g.one_in(2));
+        let top = g.f(5.0, 30.0);
+        f(&mut ee, BIKE + 0x122c, top);
+        f(&mut ee, BIKE + 0x32c, if open { g.f(0.0, top) } else { g.f(0.0, 40.0) });
+        f(&mut ee, BIKE + 0x12bc, if open { g.near(0.9, 0.9, 1.0) } else { g.f(0.0, 1.0) });
+        f(&mut ee, BIKE + 0x314, if open { g.f(0.05, 1.0) } else { g.near(0.0, 0.0, 1.0) });
+        f(&mut ee, BIKE + 0x1230, g.near(0.0, -half_pi, 0.0));
+        f(&mut ee, BIKE + 0x1234, g.near(-pi, -pi, -half_pi));
+        f(&mut ee, BIKE + 0x12b8, g.near(-half_pi, -3.3, 3.3));
+        // The springs' ends and the speed they map.
+        for o in [0x137c, 0x1380, 0x1384, 0x1388] {
+            f(&mut ee, BIKE + o, g.f(0.0, 20.0));
+        }
+        if g.one_in(4) {
+            f(&mut ee, BIKE + 0x32c, g.near(14.6666, 0.0, 40.0));
+        }
+        f(&mut ee, rear + 0x838, g.f(0.5, 2.0));
+        let dt = if g.one_in(2) { f32::from_bits(DT) } else { g.f(0.005, 0.04) };
+        let before = snap_regions(&ee, &regions);
+
+        let r = |a| ee.u32_at(a);
+        let (p, held) = (bike::read_params(&r, BIKE), bike::read_held(&r, BIKE));
+        let (mut q, mut qb) = (bike::read_quad(&r, BIKE), quad_body(&ee, body));
+        let mut axes = seed::body(&r, body).angular_axes;
+        let (q0, qb0, axes0) = (q, qb, axes);
+        let mut calls = Vec::new();
+        bike::ground_head(&p, &mut q, &mut qb, held, &mut axes, F(dt), &mut calls);
+        if !q0.active {
+            tally(&mut t, "off");
+        } else if q0.balancing {
+            tally(&mut t, if held { "balancing, held" } else { "balancing" });
+        } else if q0.control_off {
+            tally(&mut t, if held { "wrecked, held" } else { "wrecked" });
+        } else {
+            tally(&mut t, match (q0.on_ground, held) {
+                (false, _) => "steer, in the air",
+                (true, false) => "steer, on the ground",
+                (true, true) => "steer, on the ground, held",
+            });
+            tally(&mut t, match (p.full_lock, q0.lean.abs() < F(0.987)) {
+                (false, _) if p.steer_speed_1 == p.steer_speed_2 => "steer, flat fade",
+                (false, _) => "steer, faded",
+                (true, true) => "full lock, let go",
+                (true, false) => "full lock, held",
+            });
+        }
+        if q0.active && q.wheels[bike::REAR].donut != F::ZERO {
+            tally(&mut t, "donut");
+        }
+
+        // The port's words: what it holds changed, written over the words as they were.
+        let mut want = before.clone();
+        let index = |a: u32| {
+            let mut i = 0;
+            for &(at, len) in &regions {
+                if (at..at + len).contains(&a) {
+                    return i + ((a - at) / 4) as usize;
+                }
+                i += (len / 4) as usize;
+            }
+            panic!("{a:#x} is in none of the regions")
+        };
+        let words = |q: &Quad, b: &quad::Body| {
+            let mut w = bike::quad_words(q, BIKE, [front, rear], ee.u32_at(BIKE + seed::RECORD));
+            w.extend(quad_body_words(b, body));
+            w
+        };
+        for ((a, w), (_, w0)) in words(&q, &qb).into_iter().zip(words(&q0, &qb0)) {
+            if w != w0 {
+                want[index(a)] = w;
+            }
+        }
+        for a in 0..3 {
+            if axes[a] != axes0[a] {
+                want[index(body + 0x120 + 4 * a as u32)] = u32::from(axes[a]);
+            }
+        }
+
+        log.borrow_mut().clear();
+        ee.set(28, GP);
+        ee.call(GROUND_HEAD, &[u64::from(BIKE)], &[dt], 1_000_000);
+        let got = snap_regions(&ee, &regions);
+        if let Some(i) = (0..got.len()).find(|&i| got[i] != want[i]) {
+            let (mut at, mut base) = (i as u32 * 4, 0);
+            for &(b, len) in &regions {
+                if at < len {
+                    base = b;
+                    break;
+                }
+                at -= len;
+            }
+            panic!(
+                "bike {k}: {:#x}+{at:#x} is {:#010x} ({}) in the original and {:#010x} ({}) in the port (was {:#010x})\n{q0:#?}\n{p:#?}",
+                base,
+                got[i],
+                f32::from_bits(got[i]),
+                want[i],
+                f32::from_bits(want[i]),
+                before[i],
+            );
+        }
+        assert_eq!(*log.borrow(), calls, "bike {k}: the steps\n{q0:#?}");
+        ee.set_u32(BIKE + 0xbc4, state);
+        ee.set_u32(state + 0x28, kind);
+    }
+    for want in [
+        "off",
+        "balancing",
+        "balancing, held",
+        "wrecked",
+        "wrecked, held",
+        "steer, in the air",
+        "steer, on the ground",
+        "steer, on the ground, held",
+        "steer, flat fade",
+        "steer, faded",
+        "full lock, let go",
+        "full lock, held",
+        "donut",
+    ] {
+        let n = t.get(want).copied().unwrap_or(0);
+        assert!(n >= 30, "only {n} bike(s) went down {want:?}: {t:?}");
+    }
+}

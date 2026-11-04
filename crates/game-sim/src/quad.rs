@@ -771,7 +771,7 @@ pub fn ground_head(p: &Params, q: &mut Quad, body: &mut Body, dt: F, m: &mut imp
 /// The donut's two ramps: nothing at straight ahead up to all of it at the donut angle, all of it
 /// to −π/2, and back down past the back angle to nothing at −π. An empty ramp gives the end it
 /// would have reached.
-fn donut(p: &Params, a: F) -> F {
+pub(crate) fn donut(p: &Params, a: F) -> F {
     let (half, pi) = (F(-HALF_PI), F(-PI));
     if a < half {
         let d = p.donut_angle_back;
