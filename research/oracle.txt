@@ -9232,3 +9232,32 @@ atv_heap_free               atv 0x001b76d0 = free
 #   0x0049c910 preforce and 0x0049c7b0 post, slot elt +0 -> +8; 0x0049ca70 constraints).
 #   The bike's engine 0x00eaa1e0: rpm xs (+0x8c) 0x00eab410 and torque ys (+0x68) 0x00eab450, 10 points (the
 #   16 words the port reads run past them into other words); ratios (+0x70) 0x00eab490, 5 gears.
+# F31c — the ground under C15's rides on Nat05 (game_sim::handling::ground; tests/mxvatv_bike_ground.rs).
+# Comment rows only. Journal: research/journal/2026-11-03-f31c-mxvatv-bike-ground.
+#   State 4's map is Nat05: terrain object 0x00bbd720 (both wheels' +0x1e0) over Env\nat05\Nat05.ps2.trn;
+#   box 0..5760 (y max 692.94), margin 0.01, height scale 4.5, samples per foot 0.2222, split one way,
+#   not coarse; cell reader +0x94 0x00bbe170.
+#   Per substep (4 a frame) the bike's ground step 0x004d90f0 calls bike_wheel_contacts 0x004dccd0:
+#   +0x143c = 0, the trigger probe's (bike +0x1430, 0x00eaa2b0, vtable 0x003b6c20, 2 rays, cat 0x12,
+#   record +0x7c 0x00eaaef0) vt +0xc8 (0x001bd180), then collide_against_search 0x001151c0(probe, bike
+#   +0xc4 nearby list 0x01ea72a0, 1); on the hit bit (+0x126 bit 5) it walks the record (count +0x8c,
+#   rays +0x90 0x20 each, ray z +8 > 0 front else rear, normals +0x94, points +0x98, objects +0x9c)
+#   through set_contact 0x004a0c80. Then wheel_suspension 0x004a0cb0 per wheel -> ground query
+#   0x004833c0(terrain, point, normal, 0, wheel +0x110). Row 0 of ride-2: 8 ground queries, 4 trigger
+#   searches, 1 riding-part search, nothing filed.
+#   The collision record object (bike +0xc8, 0x00ea7570) runs FUN_002051f0 from the sim's +0x24 list:
+#   FUN_00204ce0 first (sphere probe bike +0xd4 0x00ea7310 over the list, ra 0x00204f0c); then, for each
+#   ray of +0x200 (the active part) with direction . up < 0 and its node (0x001952a0) inside the terrain
+#   box, FUN_004838f0(terrain +0xec, buf) and the terrain service *(0x003eab60)+4 (0x0082cdd0) +0x40,
+#   vtable 0x003b3920: +8 0x00127a90 copies point/normal/surface word/weights out, +0xc 0x00127ad0 the
+#   four surface bytes, +0x10 0x00127b20 the surface of the largest weight over 0 (first on a tie),
+#   +0x14 0x00127b70 writes 0, +0x18 0x00127b80 the point, +0x1c 0x00127b90 the normal. Node y under the
+#   ground sets +0x34/+0x3c = 1 and files a contact (FUN_00204b90). Then the rays' search (ra 0x00205560)
+#   over +0xfc (or FUN_001148e0 with none). +0x24 (0 in state 4) and +0x28 (1) switch the branches.
+#   FUN_004838f0's buf: [0..3] point (y written), [4..7] normal, [8] surface word (ring entry +0x5c),
+#   [0xc..0xf] weights (nu.nv, u.nv, nu.v, u.v). No cell: normal = 0x00397000 (up), [8] = 0, ring key
+#   0x7fffffff. Ring 0x00541550 and cell reader 0x0047b300 shared with 0x004833c0; same hold, split and
+#   adda/madda/madd height as 0x004833c0. flip-1 asks it in rows 101-124 and 193 (470 calls).
+#   Nothing the bike's probes search files a contact along ride-2 or flip-1 (count 0); plant spheres
+#   (cat 0x80, vtable 0x003b6ec0) set only the hit bit. Another object (0x011070d0, list 0x0110c5d0, from
+#   FUN_0049bb00 at ra 0x0049bc3c) also searches and asks the ground around row 215; not the bike's.
