@@ -16,25 +16,24 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-/// The most a first ride on a world off the disc may take, its joins built from cold (P260): the user's
-/// MX WORLD that "is not loading". world_mxu was 92 s in a release build on 2026-11-02 (132 s before
-/// its tiles were cut side by side), world_mxu_free some 10 s; the room is for a test build on a
-/// machine that runs three gates at once.
-const COLD: Duration = Duration::from_secs(480);
-/// The most a ride on a built or installed world may take, its joins read back and nothing built, with
-/// `--seams` walking every piece's edges (installed world_mxu's 790 joins: 88 s beside the cold builds).
+/// The most CPU time (user and system, over every thread) a first ride on a world off the disc may
+/// spend, its joins built from cold (P260): the user's MX WORLD that "is not loading". K24: the limits
+/// read the shell's CPU time, not the wall clock, which a busy gate stretches without the shell doing
+/// any more (world_mxu_nat 518 s of wall clock against 480 at load ~48, P226). In the test build at load
+/// 25-55 (K24, 11-04) world_mxu spent 1379-1475 s of CPU (178-296 s of wall clock, its stitcher on every
+/// core) and world_mxu_nat 801-843 s.
+const COLD: Duration = Duration::from_secs(3600);
+/// The most CPU time a ride on a built or installed world may spend, its joins read back and nothing
+/// built, with `--seams` walking every piece's edges: world_mxu_free 29-52 s (K24).
 const WARM: Duration = Duration::from_secs(240);
-/// The most a plain ride on an installed world may take to start (P260): its 27 tiles and every join
-/// read. world_mxu was some 5 s in a release build.
-const INSTALLED: Duration = Duration::from_secs(60);
+/// The most CPU time a plain ride on an installed world may spend to start (P260): its 27 tiles and
+/// every join read. Installed world_mxu spent 43 s (K24) where the wall clock read 15-79 s.
+const INSTALLED: Duration = Duration::from_secs(120);
 
-/// [`shell`], held to `most`.
+/// [`shell`], held to `most` of the shell's CPU time.
 fn shell_within(mods: &Path, track: &str, most: Duration) -> String {
-    let at = Instant::now();
-    let said = shell(mods, track);
-    let took = at.elapsed();
-    eprintln!("{track} from {}: {:.1} s", mods.display(), took.as_secs_f32());
-    assert!(took <= most, "{track} took {:.0} s to ride, at most {:.0}", took.as_secs_f32(), most.as_secs_f32());
+    let (said, cpu) = shell_cpu(mods, track, &["--seams"]);
+    assert!(cpu <= most, "{track} spent {:.0} s of CPU to ride, at most {:.0}", cpu.as_secs_f32(), most.as_secs_f32());
     said
 }
 
@@ -64,17 +63,51 @@ fn shell(mods: &Path, track: &str) -> String {
 }
 
 fn shell_with(mods: &Path, track: &str, more: &[&str]) -> String {
+    shell_cpu(mods, track, more).0
+}
+
+/// The shell riding `track` off `mods` for two frames: what it said, and the CPU time it spent (user
+/// and system over all its threads, from `wait4`'s rusage of that one child, so the other tests'
+/// shells running beside it are not counted). The wall clock is printed beside it, not held to.
+fn shell_cpu(mods: &Path, track: &str, more: &[&str]) -> (String, Duration) {
+    use std::io::Read;
+    use std::process::Stdio;
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let out = Command::new(env!("CARGO_BIN_EXE_openmx"))
+    let at = Instant::now();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_openmx"))
         .current_dir(&root)
         .args(more)
         .args(["--headless", "--no-sound", "--frames", "2", "--track", track, "--mods"])
         .arg(mods)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .expect("the shell runs");
-    let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    assert!(out.status.success(), "the shell failed:\n{said}");
-    said
+    let (mut out, mut err) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
+    let reader = std::thread::spawn(move || {
+        let mut s = Vec::new();
+        out.read_to_end(&mut s).unwrap();
+        s
+    });
+    let mut e = Vec::new();
+    err.read_to_end(&mut e).unwrap();
+    let o = reader.join().unwrap();
+    let (mut status, mut usage) = (0, unsafe { std::mem::zeroed::<libc::rusage>() });
+    let pid = child.id() as libc::pid_t;
+    let reaped = loop {
+        let r = unsafe { libc::wait4(pid, &mut status, 0, &mut usage) };
+        if r == -1 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
+        break r;
+    };
+    assert_eq!(reaped, pid, "wait4 on the shell: {}", std::io::Error::last_os_error());
+    let tv = |t: libc::timeval| Duration::new(t.tv_sec as u64, t.tv_usec as u32 * 1000);
+    let cpu = tv(usage.ru_utime) + tv(usage.ru_stime);
+    let said = format!("{}{}", String::from_utf8_lossy(&o), String::from_utf8_lossy(&e));
+    eprintln!("{track} from {}: {:.1} s of CPU, {:.1} s of wall clock", mods.display(), cpu.as_secs_f32(), at.elapsed().as_secs_f32());
+    assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0, "the shell failed ({status:#x}):\n{said}");
+    (said, cpu)
 }
 
 /// The ride's lines that say what world `id` is: its size and pieces, its wrap, holes and seams.
@@ -160,11 +193,8 @@ fn the_installed_mx_unleashed_worlds_ride_promptly() {
             eprintln!("skipped {id}: not in $OPENMX_WORLDS or the main checkout's mods/");
             continue;
         }
-        let at = Instant::now();
-        let said = shell_with(&installed, id, &[]);
-        let took = at.elapsed();
-        eprintln!("{id} installed: {:.1} s", took.as_secs_f32());
-        assert!(took <= INSTALLED, "the installed {id} took {:.0} s to ride, at most {:.0}", took.as_secs_f32(), INSTALLED.as_secs_f32());
+        let (said, cpu) = shell_cpu(&installed, id, &[]);
+        assert!(cpu <= INSTALLED, "the installed {id} spent {:.0} s of CPU to ride, at most {:.0}", cpu.as_secs_f32(), INSTALLED.as_secs_f32());
         assert!(!said.contains("building its joins"), "the installed world is ridden:\n{said}");
         assert!(said.lines().any(|l| l.starts_with(&format!("world: {id} ("))), "{said}");
         assert!(said.lines().any(|l| l.starts_with("ridden for")), "{said}");

@@ -3628,6 +3628,7 @@ dependencies = [
  "image-webp",
  "iroh-relay",
  "js-sys",
+ "libc",
  "minisign-verify",
  "miniz_oxide 0.8.9",
  "openmx-ios",
