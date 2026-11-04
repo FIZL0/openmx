@@ -37,8 +37,11 @@
 //! its cursor first leaves the segment the measuring left it on, its curve rides that segment on the
 //! tangents of the clip's own keys ([`Car::stale`], [`Spec::measured`]).
 //!
-//! Not here: `DriveOnSoultree`'s ray down onto the props, which every car on the disc sets `FALSE`
-//! (the original's default is `TRUE`); a car that sets it rides the terrain alone.
+//! Not here: `DriveOnSoultree`, which every car on the disc sets `FALSE` (the original's default is
+//! `TRUE`). It asks for a ten-foot ray down through the point, struck against the world, and for the
+//! hit to be taken when higher than the ground. The original builds that ray but never puts it in the
+//! world, so the world search reads its tables through a null link and the game hangs (S187), unless
+//! `PresampleTerrain` is on, which skips the ray. A car that sets it rides the terrain alone here.
 //!
 //! The `HasPhysics` cars (S127) are a subclass of the path car with a rigid body beside it. Until
 //! something strikes the car, the subclass's update is the path car's own and nothing else, so they

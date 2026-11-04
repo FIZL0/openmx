@@ -13,7 +13,11 @@
 //!   ride on the key normals, bit for bit on every tick;
 //! - [`a_level_car_drives_as_the_originals_do`]: the same cars switched to `PathIsLevel` (no car on
 //!   the disc sets it) and stepped from the state, one of them stood still so that its height
-//!   holds: the path's height, the one before, the hold and the pose, bit for bit.
+//!   holds: the path's height, the one before, the hold and the pose, bit for bit;
+//! - [`the_soultree_ray_is_in_no_world`] (S187): the ray `DriveOnSoultree` asks for is in no space, so
+//!   the original's update with the switch on (and `PresampleTerrain` off) walks the world search out
+//!   of RAM, which on PCSX2 hangs the game; and with the ray given its car's space, where it meets
+//!   nothing, the port's car on the terrain alone is the original's, bit for bit.
 //!
 //! The state and the disc are game data, git-ignored: absent, the tests skip.
 
@@ -50,6 +54,9 @@ mod at {
     pub const DIRTY: u32 = 0x4fc;
     /// The cursor's keys, as pointers: the curve reads them, and moves them only with the cursor.
     pub const KEY_I: u32 = 0x500;
+    /// The soultree ray (a ray probe of one segment) and the car's mesh.
+    pub const RAY: u32 = 0x424;
+    pub const MESH: u32 = 0x428;
     pub const KEY_J: u32 = 0x504;
     /// The curve's tangents, kept from when the cursor last moved.
     pub const TANGENTS: u32 = 0x510;
@@ -338,4 +345,77 @@ fn a_level_car_drives_as_the_originals_do() {
         return;
     };
     assert!(held > 0 && riding > 0, "{held} held and {riding} riding car-ticks: both branches are not exercised");
+}
+
+/// A collidable's fields (S44, S45): its space link, its first object list (mode, entries, count) and
+/// its flags.
+mod collidable {
+    pub const SPACE: u32 = 0x04;
+    pub const IGNORE_MODE: u32 = 0xd0;
+    pub const IGNORE: u32 = 0xd4;
+    pub const IGNORE_COUNT: u32 = 0xd8;
+    pub const FLAGS: u32 = 0x116;
+    pub const HIT: u8 = 0x20;
+}
+
+#[test]
+fn the_soultree_ray_is_in_no_world() {
+    let Some(mut ee) = state() else { return };
+    let cars = cars(&ee);
+    let update = addr("path_car_update").unwrap();
+    let dt = F(ee.f32_at(ee.u32_at(addr("app_pointer").unwrap()) + at::DT));
+    for &car in &cars {
+        let (ray, mesh) = (ee.u32_at(car + at::RAY), ee.u32_at(car + at::MESH));
+        assert_eq!(ee.u32_at(ray + collidable::SPACE), 0, "{car:#x}: the soultree ray is in a space");
+        assert_ne!(ee.u32_at(mesh + collidable::SPACE), 0, "{car:#x}: the mesh is in no space");
+        // The init pairs the ray with the car's own mesh, never to strike it.
+        let list = ee.u32_at(ray + collidable::IGNORE);
+        let ignored: Vec<u32> = (0..ee.u32_at(ray + collidable::IGNORE_COUNT)).map(|k| ee.u32_at(list + 4 * k)).collect();
+        assert_eq!((ee.u32_at(ray + collidable::IGNORE_MODE), ignored), (1, vec![mesh]), "{car:#x}: the ray's ignore list");
+    }
+    // The switch on, as a mod `.toy` without the key has it: the world search reads its tables
+    // through the null link and leaves RAM.
+    {
+        let mut ee = state().expect("the state");
+        ee.set_u32(cars[0] + at::SOULTREE, 1);
+        ee.set_u32(cars[0] + at::PRESAMPLE, 0);
+        let fault = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ee.call(update, &[u64::from(cars[0])], &[dt.0], BUDGET)));
+        let why = fault.expect_err("the update with DriveOnSoultree on ran to its end");
+        let why = why.downcast_ref::<String>().map(String::as_str).unwrap_or("");
+        assert!(why.contains("is not RAM"), "the update failed otherwise: {why}");
+    }
+    // Each ray given its car's mesh's space: the search runs, meets nothing on free09's roads, and
+    // the car rides the terrain as the port's does.
+    let mut rode = 0;
+    let Some(()) = on_free09(|ground, _| {
+        let mut specs = Vec::new();
+        let mut ours = Vec::new();
+        for &car in &cars {
+            let (ray, mesh) = (ee.u32_at(car + at::RAY), ee.u32_at(car + at::MESH));
+            ee.set_u32(ray + collidable::SPACE, ee.u32_at(mesh + collidable::SPACE));
+            ee.set_u32(car + at::SOULTREE, 1);
+            ee.set_u32(car + at::PRESAMPLE, 0);
+            let mut spec = spec_of(&ee, car);
+            spec.presample = false;
+            specs.push(spec);
+            ours.push(car_of(&ee, car));
+        }
+        for tick in 0..TICKS {
+            for (k, &car) in cars.iter().enumerate() {
+                ee.call(update, &[u64::from(car)], &[dt.0], BUDGET);
+                specs[k].step(&mut ours[k], dt, ground);
+                let ray = ee.u32_at(car + at::RAY);
+                let what = |field: &str| format!("tick {tick}: car {k} ({car:#x}) {field}");
+                assert_eq!(ee.u8_at(ray + collidable::FLAGS) & collidable::HIT, 0, "{}", what("the ray struck something"));
+                let theirs = car_of(&ee, car);
+                assert_eq!(ours[k].clock.to_bits(), theirs.clock.to_bits(), "{}", what("clock"));
+                assert_eq!(bits(ours[k].normal), bits(theirs.normal), "{}", what("up"));
+                assert_eq!(mat_bits(&ours[k].pose), mat_bits(&theirs.pose), "{}", what("world matrix"));
+                rode += 1;
+            }
+        }
+    }) else {
+        return;
+    };
+    assert_eq!(rode, TICKS * cars.len(), "car-ticks compared");
 }

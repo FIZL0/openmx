@@ -5683,7 +5683,23 @@ toy_cars_read        boot 0x00289710 the .toy's [Cars] reader (above)
 #   level), path +0x10 = its y; equal to +0x568: +0x4d4 = 1, else +0x568 = y. Held: y = path +0x10,
 #   up (0,1,0,1). A level car's basis takes the raw up with no orthogonalising and keeps no filtered up.
 #   DriveOnSoultree: a vertical segment ray through the collidable's move virtual and probe_collide_world
-#   (0x0011a150), the hit taken if higher. Not ported.
+#   (0x0011a150), the hit taken if higher. Not ported: it hangs the original (S187, below).
+# S187 — DriveOnSoultree hangs the original: crates/game-sim/tests/presample.rs
+# the_soultree_ray_is_in_no_world, on recording2's state, and live on PCSX2 copy 3.
+#   Only with +0x4ec (PresampleTerrain) 0 and +0x4d4 (level held) 0. The branch (0x00115a7c..0x00115b94):
+#   0x0013e330(m, car+0x460, (0,0,1,1) at 0x00426dc0, (0,1,0,1) at 0x00426db0, 1, 1); the ray's move
+#   virtual (class vtable 0x00451a90 +0xac = 0x001ec5b0, no calls); probe_collide_world(ray, 0); with
+#   ray+0x116 bit 5: s = 2(1 - rec+0xb0) half - half (sub.s mul.s mul.s sub.s, half +0x54c = 5.0, the
+#   init's constant), hit = point.xyz + (0,1,0).xyz s (vmulx.xyz, vadd.xyz, w the point's); taken when
+#   !(hit.y <= ground y) (c.ole.s), the up = the record's +0x20 quad. A level car writes that height.
+#   The init (0x001147c0) makes the ray (0x001ea830, 0x180 bytes), names the car's mesh in its first
+#   ignore list (mode 1) and the ray in the mesh's, and hangs it under the scene node (0x00132f50), but
+#   puts only the mesh and the m.col in the world (0x00119c60 -> 0x001ab220). So the ray's +0x04 space
+#   link is 0 on every car (the state and live RAM alike), and probe_collide_world's tree query
+#   (0x001bb3e0) reads its table from address 4: the interpreter leaves RAM (0xff5953ac at pc 0x001bb43c).
+#   Live: car 0x01241f40 in recording2's state, +0x4e8 = 1 and +0x4ec = 0 written over PINE, the frame
+#   counter stops within 4 frames, twice; +0x4ec = 0 alone, or +0x4e8 = 1 with +0x4ec = 1, runs on.
+#   With the ray given its mesh's space it runs: 600 ticks of the six trailers meet nothing.
 # S136 — a wheel standing on a path car rides with it: crates/game-sim/src/traffic.rs (Moving) and
 # ride.rs (wheel_contact_velocity, under), proved in crates/game-sim/tests/traffic.rs on s89-along.
 #   path_car_update copies the node's world matrix (node+0x80..0xbc) to car+0x2e0..0x31c (rows x, y, z,
