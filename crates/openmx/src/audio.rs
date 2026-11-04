@@ -84,7 +84,9 @@ pub fn decode_mono(data: &[u8]) -> Vec<i16> {
 }
 
 /// A stereo body, the channels interleaved one block each: left, right, left, right. The samples come
-/// out interleaved as well.
+/// out interleaved as well. It ends with the pair whose block is flagged as the end, as a mono body
+/// does: every stereo `.vig` on the disc, and every song in MX vs. ATV Unleashed's pack, has one
+/// filler pair after it (filter 0, shift 7, every nibble 7: a constant 224) that is not sound.
 pub fn decode_stereo(data: &[u8]) -> Vec<i16> {
     let mut prev = [[0; 2]; 2];
     let mut out = Vec::with_capacity(data.len() / 16 * 28);
@@ -95,8 +97,16 @@ pub fn decode_stereo(data: &[u8]) -> Vec<i16> {
             out.push(l[i]);
             out.push(r[i]);
         }
+        if ends_stereo(pair) {
+            break;
+        }
     }
     out
+}
+
+/// Whether a stereo pair carries the end flag, on either channel's block.
+fn ends_stereo(pair: &[u8]) -> bool {
+    (pair[1] | pair[17]) & 1 != 0
 }
 
 fn be32(b: &[u8], at: usize) -> u32 {
@@ -868,7 +878,8 @@ impl Stream for Adpcm {
         while n * 2 + 1 < out.len() {
             if self.held_at >= self.held.len() {
                 let Some(pair) = self.data.get(self.at..self.at + 32) else { break };
-                self.at += 32;
+                // past the end-flagged pair is filler, not song (decode_stereo)
+                self.at = if ends_stereo(pair) { self.data.len() } else { self.at + 32 };
                 self.held.clear();
                 self.held_at = 0;
                 let l = decode_block(&pair[..16], &mut self.prev[0]);

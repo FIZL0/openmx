@@ -84,6 +84,70 @@ fn a_block_decodes_as_it_does_by_hand() {
     assert_eq!(out[0], 32767);
 }
 
+/// B1 — a stereo `.vig` ends at the pair carrying the end flag, as a mono body does. Every stereo
+/// `.vig` on the disc and in MX vs. ATV Unleashed's songs has one filler pair after its flag (filter
+/// 0, shift 7, nibbles 7: a constant 224), which used to play as 28 frames of a flat 224.
+#[test]
+fn a_stereo_vig_stops_at_its_end_flag() {
+    let mut body = Vec::new();
+    for p in 0..3u8 {
+        for ch in 0..2u8 {
+            let mut b = [0u8; 16];
+            b[0] = 0x1c; // filter 1, shift 12
+            b[1] = if p == 2 { 1 } else { 0 };
+            for (i, x) in b[2..].iter_mut().enumerate() {
+                *x = (i as u8 + p * 3 + ch) & 0x77 | 0x10;
+            }
+            body.extend_from_slice(&b);
+        }
+    }
+    let mut filler = [0x77u8; 16];
+    filler[0] = 0x07;
+    filler[1] = 0;
+    body.extend_from_slice(&filler);
+    body.extend_from_slice(&filler);
+    let mut vig = vec![0u8; 0x800];
+    vig[0x0c..0x10].copy_from_slice(&((body.len() / 2) as u32).to_be_bytes());
+    vig[0x10..0x14].copy_from_slice(&22050u32.to_be_bytes());
+    vig.extend_from_slice(&body);
+
+    // The filler itself decodes to the flat 224 the songs ended on.
+    assert!(audio::decode_block(&filler, &mut [0, 0]).iter().all(|&s| s == 224));
+
+    let whole = audio::decode_stereo(&vig[0x800..]);
+    assert_eq!(whole.len(), 3 * 28 * 2, "three pairs, the flagged one the last");
+    let clip = audio::Clip::vig(&vig).expect("the clip");
+    assert_eq!((clip.channels, clip.frames()), (2, 3 * 28));
+    assert_eq!(clip.pcm, whole);
+
+    // The song player stops there too, in reads of any size.
+    use audio::Stream;
+    let mut song = audio::Adpcm::vig(vig.clone());
+    let mut got = Vec::new();
+    let mut buf = [0i16; 2 * 19];
+    loop {
+        let n = song.read(&mut buf);
+        if n == 0 {
+            break;
+        }
+        got.extend_from_slice(&buf[..n * 2]);
+    }
+    assert_eq!(got, whole);
+    assert_eq!(song.read(&mut buf), 0, "and stays ended");
+
+    // A flag on one channel's block alone ends the pair as well.
+    let mut right_only = vig.clone();
+    right_only[0x800 + 2 * 32 + 1] = 0;
+    assert_eq!(audio::decode_stereo(&right_only[0x800..]).len(), 3 * 28 * 2);
+
+    // The disc's cheer: 5295 pairs, the flag on the 5294th, the last the filler.
+    let Some(disc) = disc() else { return };
+    let mut lib = audio::Library::open(disc).expect("the sound archive");
+    let cheer = lib.clip("Crowd\\cheer.vig").expect("cheer.vig");
+    assert_eq!(cheer.frames(), 5294 * 28);
+    assert!(cheer.pcm[cheer.pcm.len() - 56..].iter().any(|&s| s != 224), "no flat 224 at its end");
+}
+
 /// The disc's sound archive parses to its 279 files, and a wreck and a song decode to sound.
 #[test]
 fn the_discs_sounds_decode() {
