@@ -2312,3 +2312,50 @@ fn untamed_ride_input_is_the_shipped_bindings() {
         assert_eq!(ee.v0(), 0, "the backflip is not bound in style {style}");
     }
 }
+
+/// MD93g: the 360's side of [`untamed_ride_input_is_the_shipped_bindings`]. The bike's stunt words are
+/// the table's "backflip", "threesixtyL" and "threesixtyR", which [`untamed::spin_stunt`] hands in by
+/// direction. "Bound left/right" match the pad record (style, stick direction, buttons) against those
+/// two stunts' classic combos. Both combos are empty, so they would match an idle pad and not one with
+/// R1 held. They are never asked, because the 360's "bound" is the backflip's byte, which is 0.
+#[test]
+fn untamed_ride_spin_input_is_the_shipped_bindings() {
+    /// The Free Ride bike on the image, and the game's debug print, which the matcher calls on a match.
+    const RIDE_BIKE: u32 = 0x01b1_6440;
+    const DEBUG_PRINT: u32 = 0x0012_1d40;
+    let Some(mut ee) = image() else { return };
+    let table = ee.u32_at(RIDE_BIKE + 0x1510);
+    let name = |ee: &Ee, k: u32| -> String {
+        let p = ee.u32_at(table + 0x28 + 0x58 * k);
+        (0..).map(|i| ee.u8_at(p + i)).take_while(|&c| c != 0).map(char::from).collect()
+    };
+    let stunts = [untamed::BACKFLIP_STUNT, untamed::THREESIXTY_L_STUNT, untamed::THREESIXTY_R_STUNT];
+    for ((field, word), (stunt, want)) in [0x18u32, 0x1c, 0x20].into_iter().zip([0x13c8u32, 0x13cc, 0x13d0])
+        .zip(stunts.into_iter().zip(["backflip", "threesixtyL", "threesixtyR"]))
+    {
+        assert_eq!(ee.i32_at(table + field), stunt, "the table's {want}");
+        assert_eq!(ee.i32_at(RIDE_BIKE + word), stunt, "the bike's {want} word");
+        assert_eq!(name(&ee, stunt as u32), want);
+    }
+    assert_eq!(untamed::BACKFLIP_STUNT, untamed::FIRST_FLIP_STUNT);
+    assert_eq!(untamed::spin_stunt(-1), untamed::THREESIXTY_L_STUNT);
+    assert_eq!(untamed::spin_stunt(0), untamed::THREESIXTY_L_STUNT);
+    assert_eq!(untamed::spin_stunt(1), untamed::THREESIXTY_R_STUNT);
+
+    ee.hooks.insert(DEBUG_PRINT, Box::new(|_| {}));
+    // A pad record as the reader fills it: style 3, the stick's direction (0 centred), then the
+    // buttons' bytes (+0x12, +0x14, +0x16, +0x18).
+    let record = OBJ;
+    for (bound, way) in [(BINDING_LEFT, "left"), (BINDING_RIGHT, "right")] {
+        for (dir, r1, want) in [(0, 0, 1), (0, 1, 0), (3, 0, 0)] {
+            for o in (0..0x20).step_by(4) {
+                ee.set_u32(record + o, 0);
+            }
+            ee.set_u32(record, 3);
+            ee.set_u32(record + 4, dir);
+            ee.write(record + 0x18, 1, r1);
+            ee.call(bound, &[u64::from(table), u64::from(record)], &[], 10_000);
+            assert_eq!(ee.v0() & 0xff, want, "bound {way}, direction {dir}, R1 {r1}");
+        }
+    }
+}

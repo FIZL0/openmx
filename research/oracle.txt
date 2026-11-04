@@ -9146,3 +9146,25 @@ atv_heap_free               atv 0x001b76d0 = free
 #   the two sticks differ only in the pad words they come from. Who writes words 0xdf..0xe5 was not found: the
 #   pad device's poll (vt +0x5c = 0x00150780; axes at +0x714 + 0x20i, deadzone remap 0x00116e90, axis bytes
 #   (6, 7, 4, 5, 0), axis 2 inverted) does not lay out a record like this one.
+
+# MD93g — what Untamed's (SLUS-21701) 360 reads from the pad and which stunt it starts, on
+# context/untamed/ram/nat_or.bin. Comment rows only. Journal: research/journal/2026-11-03-md93g-untamed-bike-step.
+#   Bound (0x00252630, byte table+0x24+style) is the backflip's byte for the 360 too: the stunts loader
+#   0x00251e60 sets bytes +0x24..+0x27 (Style1/2/3, Classic non-empty) only on the row whose name is
+#   "backflip"; for "threesixtyL"/"threesixtyR" it keeps only the index (+0x1c/+0x20). So the 360 takes the
+#   bound path exactly when the backflip does. On the image all four bytes are 0: never.
+#   Bound left/right 0x00252690/0x002526e0 (table, record): 0 when the index is -1, else the matcher
+#   0x003a37d0 (combo table+0x30+0x58*idx, record). Matcher by record word +0 (the style): style 3 (classic)
+#   matches when record word +4 == combo +0, and bytes +0x12/+0x14/+0x18 == combo bytes +0xe/+0xf/+0x11
+#   (Circle, Triangle, R1: actions 0x11, 0x12, 0x14; Select +0x16 is not compared); on a match it prints
+#   (0x00121d40). Classic combo parse 0x003a3220: 'C' -> +0xe, 'T' -> +0xf, '1' -> +0x11, one of "HUDLR"
+#   (0x003d45f8) -> +0 its index. Record word +4 is the stick's direction, set by 0x003a25b0 off +0x1298/
+#   +0x129c: |y| < |x| and |x| > 0.5 -> 4 (x > 0) / 3; else |y| > 0.5 -> 2 (y > 0) / 1; else 0. Style 1 only:
+#   Circle and Triangle both held become R1 alone (else R1 is cleared).
+#   On the image stunts 49/52/53 ("backflip"/"threesixtyL"/"threesixtyR") have all-zero combos: called, both
+#   would answer pressed on a centred stick with no button held.
+#   Stunt words: bike +0x13c8/+0x13cc/+0x13d0 = 49/52/53. The 360 starts +0x13cc (threesixtyL) for a direction
+#   under 1 and +0x13d0 (threesixtyR) for 1, through vt +0x4b0 = 0x004fe710 (bike, stunt, 1). It runs when
+#   the bike is airborne (+0x354 == 0) and unwrecked (+0xc70 == 0), or the stunt is one of +0x13c8..+0x13d8.
+#   Then +0x1548 = stunt for any other stunt, for +0x13c8/cc/d0 only when +0x1548 > 48, for +0x13d4/d8 never.
+#   So while the 360's clip runs, the rider's id is 52/53 unless a trick (<= 48) holds it.
