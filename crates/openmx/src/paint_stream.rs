@@ -47,6 +47,10 @@ pub struct PaintStream {
     pub let_go: usize,
     /// The longest a frame's update took, in seconds.
     pub slowest: f32,
+    /// The most CPU time the shell's thread spent in a frame's update, in seconds (K23): what the
+    /// gate's budget reads, the wall clock above taking in the other processes' load. The wall
+    /// clock's where the thread's is not known.
+    pub slowest_cpu: f32,
 }
 
 impl PaintStream {
@@ -91,6 +95,7 @@ impl PaintStream {
             shown: 0,
             let_go: 0,
             slowest: 0.0,
+            slowest_cpu: 0.0,
         }
     }
 
@@ -98,6 +103,7 @@ impl PaintStream {
     /// ask for the maps within reach nearest first, and write a frame's worth of what was read.
     pub fn update(&mut self, near: &[[f32; 2]], r: &mut Renderer) {
         let at = Instant::now();
+        let cpu_at = cpu_time(true);
         let gaps: Vec<f32> = self.owned.iter().map(|o| near.iter().map(|&p| gap(o, p)).fold(f32::INFINITY, f32::min)).collect();
         for i in 0..self.held.len() {
             if gaps[i] > self.reach.drop.0 && matches!(self.held[i], Held::Shown | Held::Writing) {
@@ -161,13 +167,34 @@ impl PaintStream {
         }
         self.most_bytes = self.most_bytes.max(wrote);
         self.bytes += wrote;
-        self.slowest = self.slowest.max(at.elapsed().as_secs_f32());
+        let took = at.elapsed();
+        self.slowest = self.slowest.max(took.as_secs_f32());
+        let cpu = cpu_at.zip(cpu_time(true)).map_or(took, |(a, b)| b.saturating_sub(a));
+        self.slowest_cpu = self.slowest_cpu.max(cpu.as_secs_f32());
     }
 
     /// What the stream did since the shell last took the lines.
     pub fn take_log(&mut self) -> Vec<String> {
         std::mem::take(&mut self.log)
     }
+}
+
+/// The CPU time this process (`thread: false`, every thread summed) or the calling thread has run so
+/// far (K23), as Linux counts it: unlike the wall clock it hardly moves with the other processes'
+/// load, so a budget the gate holds a load or a frame's update to reads it. The process's comes from
+/// `/proc/self/stat`'s user and system ticks (Linux's are 100 a second), the thread's in nanoseconds
+/// from `/proc/thread-self/schedstat`. None where there is no /proc.
+pub fn cpu_time(thread: bool) -> Option<std::time::Duration> {
+    if thread {
+        let stat = std::fs::read_to_string("/proc/thread-self/schedstat").ok()?;
+        return Some(std::time::Duration::from_nanos(stat.split_whitespace().next()?.parse().ok()?));
+    }
+    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+    // The fields after the command's name, which is in brackets and may hold spaces: utime and stime
+    // are the 14th and 15th of the line, the 12th and 13th after the name.
+    let mut after = stat.get(stat.rfind(')')? + 1..)?.split_whitespace().skip(11);
+    let ticks: u64 = after.next()?.parse::<u64>().ok()? + after.next()?.parse::<u64>().ok()?;
+    Some(std::time::Duration::from_millis(ticks * 10))
 }
 
 /// How far `p` is from the rectangle `[x0, z0, x1, z1]`, 0 inside it.

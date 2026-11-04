@@ -9780,7 +9780,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             }
             if !load_said {
                 load_said = true;
-                println!("load: the ride's first frame {:.2} s after launch, memory {}", launched().elapsed().as_secs_f32(), peak_memory());
+                let cpu = match (paint_stream::cpu_time(false), paint_stream::cpu_time(true)) {
+                    (Some(all), Some(main)) => format!("{:.2} s ({:.2} s on this thread)", all.as_secs_f32(), main.as_secs_f32()),
+                    _ => "not known here".to_string(),
+                };
+                println!("load: the ride's first frame {:.2} s after launch, memory {}, cpu {cpu}", launched().elapsed().as_secs_f32(), peak_memory());
             }
             // The Tricks page's rider over the pause (P259), after the frame and before it is read.
             let trick_draw = |r: &mut Renderer, t: &Target| {
@@ -10425,12 +10429,13 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         // And the maps' pages it wrote (P283).
         if let Some(paint) = &paint_stream {
             println!(
-                "world paint: {} maps shown and {} let go in the ride, at most {:.1} MB written in a frame ({:.1} MB in all), slowest update {:.2} ms",
+                "world paint: {} maps shown and {} let go in the ride, at most {:.1} MB written in a frame ({:.1} MB in all), slowest update {:.2} ms, {:.2} ms of cpu",
                 paint.shown,
                 paint.let_go,
                 paint.most_bytes as f32 / 1048576.0,
                 paint.bytes as f32 / 1048576.0,
-                paint.slowest * 1000.0
+                paint.slowest * 1000.0,
+                paint.slowest_cpu * 1000.0
             );
             if let Some((used, shown)) = renderer_of(&mut offscreen, window).and_then(|r| r.world_paint_pool()) {
                 let used: Vec<String> = used.iter().map(|(u, c)| format!("{u} of {c}")).collect();

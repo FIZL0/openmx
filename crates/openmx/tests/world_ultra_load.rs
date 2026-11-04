@@ -19,12 +19,17 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The first frame's time after launch (s) and the peak memory (MB) world_ultra must come under:
-/// before P283 29.9 s and 2671 MB on the desktop, after 4.4 s and ~1910 MB, with room for a busy
-/// machine's slower load.
-const FIRST_FRAME_S: f32 = 20.0;
+/// The CPU time (s) the shell may spend up to the first frame, all its threads' and the shell's own
+/// thread's, and the peak memory (MB) world_ultra must come under: before P283 29.9 s of wall clock
+/// and 2671 MB on the desktop, after 4.4 s and ~1910 MB. CPU time, not the wall clock (K23): with
+/// the other slots' gates at load 44-69 the wall clock read 18.3 to 21.8 s (and 34.7 s at load 76)
+/// while the CPU time held at 48-52 s, 10-12 s of it the shell's thread; the bounds are ~1.6 times
+/// that, and the 24 s of seam reads P283 took out were the shell's thread's.
+const FIRST_FRAME_CPU_S: f32 = 80.0;
+const FIRST_FRAME_THREAD_S: f32 = 20.0;
 const PEAK_MB: u64 = 2300;
-/// The most a paint update may take of a 60 Hz frame, in ms.
+/// The most CPU time a paint update may take of a 60 Hz frame, in ms (K23: the wall clock's 8.69
+/// ms under load was the thread waiting for a core).
 const UPDATE_MS: f32 = 8.0;
 
 fn mods() -> Option<PathBuf> {
@@ -82,8 +87,10 @@ fn world_ultras_first_frame_is_quick_and_small_with_the_far_maps_not_built() {
     let load = line(&said, "load: the ride's first frame");
     eprintln!("{load}");
     let n = numbers(load);
-    let (secs, peak) = (n[0], n[1] as u64);
-    assert!(secs < FIRST_FRAME_S, "the first frame came {secs} s after launch, over {FIRST_FRAME_S} s");
+    assert!(load.contains(" on this thread)"), "no cpu time: {load}");
+    let (peak, cpu, thread) = (n[1] as u64, n[3], n[4]);
+    assert!(cpu < FIRST_FRAME_CPU_S, "the first frame took {cpu} s of cpu, over {FIRST_FRAME_CPU_S} s: {load}");
+    assert!(thread < FIRST_FRAME_THREAD_S, "the first frame took {thread} s of the shell's thread, over {FIRST_FRAME_THREAD_S} s: {load}");
     assert!(peak < PEAK_MB, "the load peaked at {peak} MB, over {PEAK_MB} MB");
     // The far maps on their far pages: a few near the start hold their own.
     let paint = line(&said, "world paint: ");
@@ -121,11 +128,12 @@ fn riding_across_world_ultra_streams_its_maps_in_within_a_frames_budget() {
     let stats = said.lines().find(|l| l.contains("maps shown and")).unwrap_or_else(|| panic!("no paint stream:\n{said}"));
     eprintln!("{stats}");
     let n = numbers(stats);
-    let (shown, let_go, most_mb, slowest_ms) = (n[0] as usize, n[1] as usize, n[2], n[4]);
+    let (shown, let_go, most_mb, slowest_ms) = (n[0] as usize, n[1] as usize, n[2], n[5]);
+    assert!(stats.ends_with("ms of cpu"), "no cpu time: {stats}");
     assert!(shown >= 5 && let_go >= 5, "the sweep showed {shown} maps and let {let_go} go ({ride})");
     // A frame writes 4 MB and finishes the layer it is on: a 256-pixel page and its levels.
     assert!(most_mb <= 4.0 + 0.4, "a frame wrote {most_mb} MB of pages");
-    assert!(slowest_ms < UPDATE_MS, "a paint update took {slowest_ms} ms");
+    assert!(slowest_ms < UPDATE_MS, "a paint update took {slowest_ms} ms of cpu: {stats}");
     // Never more maps held than the start's few and their neighbours.
     let end = numbers(said.lines().find(|l| l.contains("maps on their own pages at the end")).unwrap())[0] as usize;
     assert!(end * 4 < 77, "{end} maps held their pages at the end");
