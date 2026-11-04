@@ -3355,6 +3355,9 @@ async fn front_end(args: Args) -> Result<(), String> {
                 shell.front.menu.step_seat(i, p);
             }
         }
+        // A card dragged on the Controllers screen (P214), drawn over the whole frame here.
+        let (fw, fh) = (frame.width, frame.height);
+        drag_cards(&mut shell.front.menu, window.mouse(), (window.width, window.height, window.scale), (fw, fh), [0, 0, fw, fh]);
         let before = shell.front.menu.p1().cloned();
         shell.front.menu.music_now = shell.front.sound.now();
         act = shell.front.menu.step_devices(&presses);
@@ -3594,6 +3597,20 @@ fn give_controllers(seats: &Seats, menu: &mut Menu) {
         present.push((dev.clone(), dev_name(seats, &dev)));
     }
     menu.controllers(&assigned, &present);
+}
+
+/// The mouse dragging the Controllers screen's cards (P214): `events` in window pixels, into `view`
+/// (x, y, width, height), the part of the `frame` the screen is drawn in.
+fn drag_cards(menu: &mut Menu, events: &[window::MouseEvent], window: (usize, usize, usize), frame: (usize, usize), view: [usize; 4]) {
+    for &(what, x, y) in events {
+        let what = match what {
+            window::Mouse::Down => menu::Mouse::Down,
+            window::Mouse::Move => menu::Mouse::Move,
+            window::Mouse::Up => menu::Mouse::Up,
+        };
+        let [fx, fy] = cursor::onto_frame((x, y), (window.0, window.1), frame, window.2);
+        menu.mouse(what, [fx - view[0] as f32, fy - view[1] as f32], (view[2], view[3]));
+    }
 }
 
 /// The seats the Controllers screen moved, handed to the pads (P210).
@@ -7429,6 +7446,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             // 1P's pause has the Controllers screen up (P210): every device works its own card, the
             // riders' and the ones in no seat alike, and 1P's joint press is not stepped again.
             if front.menu.assigning() {
+                // A card dragged with the mouse (P214), in the view 1P's pause draws the screen in.
+                if let Some(w) = window.as_ref()
+                    && let Some((_, r)) = front.menu.pause_views(&rects, world.seats.len()).into_iter().find(|(v, _)| *v == 0)
+                {
+                    drag_cards(&mut front.menu, w.mouse(), (w.width, w.height, w.scale), (frame.width, frame.height), [r.x, r.y, r.w, r.h]);
+                }
                 let mut each = assign_readers.read_taps(&assign_reports);
                 if esc_now {
                     each.push((Dev::Keys, menu::Press { back: true, ..menu::Press::default() }));

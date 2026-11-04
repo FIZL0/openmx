@@ -145,6 +145,15 @@ impl Screen {
         }
     }
 
+    /// The left button's downs and ups and the pointer's moves while it is held, in the last poll,
+    /// in window pixels and in order (P214).
+    pub fn mouse(&self) -> &[crate::window::MouseEvent] {
+        match &self.inner {
+            Inner::X(w) => w.mouse(),
+            Inner::Gpu(w) => w.mouse(),
+        }
+    }
+
     pub fn resized(&mut self) -> bool {
         let r = match &mut self.inner {
             Inner::X(w) => w.resized(),

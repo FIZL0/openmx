@@ -341,6 +341,11 @@ impl GpuWindow {
         self.input.clicks()
     }
 
+    /// No drag is read here yet (P214): the page and the phone report taps only.
+    pub fn mouse(&self) -> &[crate::window::MouseEvent] {
+        &[]
+    }
+
     pub fn show_cursor(&self, _: bool) {}
 
     pub fn held(&self, code: u8) -> bool {

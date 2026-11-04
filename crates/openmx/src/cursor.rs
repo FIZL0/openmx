@@ -37,3 +37,12 @@ pub fn to_frame(at: (i32, i32), window: (usize, usize), frame: (usize, usize), s
     let (x, y) = (at.0 as i64 - left, at.1 as i64 - top);
     ((0..across).contains(&x) && (0..down).contains(&y)).then(|| [(x as f32 + 0.5) / scale as f32, (y as f32 + 0.5) / scale as f32])
 }
+
+/// [`to_frame`]'s point without its bounds (P214): a mouse dragging a card off the picture still has
+/// a place in the frame's pixels, past its edge.
+pub fn onto_frame(at: (i32, i32), window: (usize, usize), frame: (usize, usize), scale: usize) -> [f32; 2] {
+    let scale = scale.max(1);
+    let (across, down) = ((frame.0 * scale) as i64, (frame.1 * scale) as i64);
+    let (left, top) = ((window.0 as i64 - across).max(0) / 2, (window.1 as i64 - down).max(0) / 2);
+    [((at.0 as i64 - left) as f32 + 0.5) / scale as f32, ((at.1 as i64 - top) as f32 + 0.5) / scale as f32]
+}

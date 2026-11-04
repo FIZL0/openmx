@@ -70,6 +70,10 @@ pub mod trick_list;
 pub use store::{Card, Got, Listed, PACKS_ONLINE, PACKS_TAB, PackRow, Phase, Posted, STORE_COLUMNS, STORE_PAGES, STORE_RULES, STORE_TABS, Shop, StoreAsk, TEXTURES_TAB, UPLOAD_TAB, UpRow, Upload, size_words};
 #[path = "menu_player.rs"]
 mod player;
+#[path = "menu_drag.rs"]
+mod drag;
+#[allow(unused_imports)]
+pub use drag::{CardDrag, Mouse};
 #[path = "video.rs"]
 pub mod video;
 // Where the page's touch pad stands over the frame (P208), for the HUD's and the hints' room.
@@ -3170,6 +3174,8 @@ pub struct Menu {
     /// The Controllers screen (P210): what drives each seat and who is plugged in, which the shell
     /// gives it ([`Menu::controllers`]) and takes back changed ([`Menu::take_assigned`]).
     pub assign: join::Assign<Dev>,
+    /// The Controllers screen's card the mouse has hold of (P214, menu_drag.rs).
+    pub card_drag: Option<CardDrag>,
     /// What each device is called on the Controllers screen's cards, by the shell.
     pub dev_names: Vec<(Dev, String)>,
     /// Every device the shell reads, keyboard first, and the js devices it skips, by name: the
@@ -3460,6 +3466,7 @@ impl Menu {
             join: Join::new(join::ON_SCREEN, Opened::Menu),
             devices: Vec::new(),
             assign: join::Assign::default(),
+            card_drag: None,
             dev_names: Vec::new(),
             heard: Vec::new(),
             skipped: Vec::new(),
