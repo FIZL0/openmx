@@ -2844,3 +2844,159 @@ fn the_records_pass_is_the_originals() {
     }
     eprintln!("{t:?}");
 }
+
+// --- F31b5: the other riders' PreProcess leave the bike alone ----------------------------------------
+
+/// [`PortPost`] with every preforce listener but the bike's watched: the body goes into RAM, the
+/// bike object and its physics blocks are read before and after the listener, and the body the port
+/// holds is read back. Each listener's element and code are kept.
+struct Watched<'a> {
+    inner: PortPost<'a>,
+    bike: u32,
+    ran: Vec<(u32, u32)>,
+}
+
+impl<'a> Watched<'a> {
+    fn hybrid(&mut self) -> &mut Hybrid<'a> {
+        &mut self.inner.0.0.0
+    }
+
+    fn snapshot(&mut self) -> Vec<u32> {
+        let len = self.bike;
+        let h = self.hybrid();
+        let mut out: Vec<u32> = (0..len / 4).map(|i| h.ee.u32_at(BIKE + 4 * i)).collect();
+        for (_, at, n) in physics(h.ee) {
+            out.extend((0..n / 4).map(|i| h.ee.u32_at(at + 4 * i)));
+        }
+        out
+    }
+}
+
+impl Dynamics for Watched<'_> {
+    fn count(&self, l: List) -> i32 {
+        self.inner.count(l)
+    }
+    fn preforce(&mut self, i: i32, dt: F) {
+        let h = self.hybrid();
+        let e = h.elt(List::Preforce, i);
+        if e == BIKE_PREFORCE {
+            return self.inner.preforce(i, dt);
+        }
+        let f = h.ee.u32_at(h.ee.u32_at(e) + 8);
+        for (a, w) in seed::body_words(&h.body, h.at) {
+            h.ee.set_u32(a, w);
+        }
+        let body = h.body;
+        let before = self.snapshot();
+        self.inner.preforce(i, dt);
+        let after = self.snapshot();
+        let parted: Vec<usize> = (0..before.len()).filter(|&k| before[k] != after[k]).collect();
+        assert!(parted.is_empty(), "preforce {i} (element {e:#x}, code {f:#x}) wrote the bike's words {parted:?}");
+        assert_eq!(self.hybrid().body, body, "preforce {i} (element {e:#x}) moved the bike's body");
+        self.ran.push((e, f));
+    }
+    fn force(&mut self, i: i32, h: F) {
+        self.inner.force(i, h)
+    }
+    fn enabled(&self, b: i32) -> bool {
+        self.inner.enabled(b)
+    }
+    fn integrate(&mut self, b: i32, h: F) {
+        self.inner.integrate(b, h)
+    }
+    fn end_substep(&mut self, b: i32) {
+        self.inner.end_substep(b)
+    }
+    fn constrain(&mut self, c: i32, first: bool) {
+        self.inner.constrain(c, first)
+    }
+    fn post(&mut self, i: i32, dt: F) {
+        self.inner.post(i, dt)
+    }
+}
+
+/// One sim frame as [`port_record_frame`] runs it, the world step [`Watched`]'s. Answers the other
+/// preforce listeners that ran, in order.
+fn watched_frame(ee: &mut Ee, dt: F, map: &track::Terrain<'_>, bike: u32) -> Vec<(u32, u32)> {
+    let call = |ee: &mut Ee, f: u32, ints: &[u64], x: F| {
+        ee.set(28, GP);
+        ee.call(f, ints, &[x.0], BUDGET);
+        ee.r(2)
+    };
+    assert_eq!(ee.u8_at(ee.u32_at(SKIP_FLAG) + 0x225) & 8, 0, "the frame is not skipped");
+    let mine = ee.u32_at(BIKE + seed::RECORD);
+    for slot in [0x7c, 0x84] {
+        for i in 0..ee.u32_at(SIM + 0x24) {
+            let e = call(ee, LIST24_GET, &[u64::from(SIM + 0x24), u64::from(i)], F::ZERO) as u32;
+            if e == mine {
+                let t = ee.u32_at(e + 0xec);
+                let terrain = (t != 0).then(|| ground::read_terrain(&|a| ee.u32_at(a), t, Some(map)));
+                port_record(ee, e, slot, dt, terrain.as_ref());
+            } else {
+                call(ee, ee.u32_at(ee.u32_at(e + 4) + slot), &[u64::from(e)], dt);
+            }
+        }
+    }
+    let world = World { iterations: ee.u32_at(WORLD) as i32, rate: F(ee.f32_at(WORLD + 4)) };
+    let at = ee.u32_at(BIKE + seed::BODY);
+    let body = seed::body(&|a| ee.u32_at(a), at);
+    let inner = PortPost(PortStep(PortHead(Hybrid { ee, body, at, integrated: 0 }), 0), 0);
+    let mut h = Watched { inner, bike, ran: Vec::new() };
+    world.step(dt, &mut h);
+    let (body, ran) = (h.inner.0.0.0.body, h.ran);
+    for (a, w) in seed::body_words(&body, at) {
+        ee.set_u32(a, w);
+    }
+    call(ee, TAIL, &[u64::from(SIM)], dt);
+    let mut i = 0;
+    while i < ee.u32_at(SIM + 0x3c) {
+        let e = call(ee, LIST3C_GET, &[u64::from(SIM + 0x3c), u64::from(i)], F::ZERO) as u32;
+        if call(ee, ee.u32_at(ee.u32_at(e) + 8), &[u64::from(e)], dt) != 0 {
+            call(ee, LIST3C_REMOVE, &[u64::from(SIM + 0x3c), u64::from(i)], F::ZERO);
+        } else {
+            i += 1;
+        }
+    }
+    ran
+}
+
+/// [`replay_port_record`] with every frame [`watched_frame`]. Answers the other listeners each frame
+/// ran (the same every frame).
+fn replay_watched(name: &str) -> Option<Vec<(u32, u32)>> {
+    let trn = nat05_trn()?;
+    let map = track::Terrain::parse(&trn).unwrap();
+    let mut ee = hooked(image()?);
+    let rows = rows(name)?;
+    let bike = 4 * obj(&rows[0]).len() as u32;
+    let mut ran = None;
+    for (r, row) in rows.iter().enumerate() {
+        poke(&mut ee, row, &READER);
+        let these = watched_frame(&mut ee, F(f32::from_bits(DT)), &map, bike);
+        assert_eq!(*ran.get_or_insert_with(|| these.clone()), these, "{name} row {r}: the same listeners every frame");
+        let d = diff(&ee, row);
+        assert!(d.is_empty(), "{name} row {r}: {} words differ\n  {}", d.len(), d.iter().take(40).cloned().collect::<Vec<_>>().join("\n  "));
+        assert_eq!(wrecked(|o| ee.u32_at(BIKE + o)), row_wrecked(row), "{name} row {r}: the wreck state");
+        poke(&mut ee, row, &SPOT);
+    }
+    ran
+}
+
+/// **The other five riders' PreProcess never touch the bike**: once a frame on every row of C15
+/// ride-2 and flip-1 (through its wreck and put-back), each preforce listener of state 4's world that
+/// is not the bike's runs as SLUS-21104's code and leaves the bike object, its body, node, record,
+/// wheels and engine word for word as they were; the replay around them is [`port_record_frame`]'s
+/// and stays bit-exact. So F31b5's pure-Rust frame can leave them out of the bike's step.
+#[test]
+fn the_other_riders_pre_process_leave_the_bike_alone() {
+    for name in ["ride-2", "flip-1"] {
+        let Some(ran) = replay_watched(name) else { return };
+        assert_eq!(ran.len(), 5, "{name}: five other listeners a frame: {ran:#x?}");
+        let mut each = ran.clone();
+        each.sort();
+        each.dedup();
+        assert_eq!(each.len(), 5, "{name}: five distinct listeners: {each:#x?}");
+        assert!(each.iter().all(|&(e, _)| e != BIKE_PREFORCE));
+        assert!(each.iter().all(|&(_, f)| f == ran[0].1), "{name}: one PreProcess for the five riders: {each:#x?}");
+        eprintln!("{name}: the riders' PreProcess {:#x} over {each:#x?}", ran[0].1);
+    }
+}
