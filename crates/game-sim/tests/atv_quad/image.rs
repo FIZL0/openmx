@@ -625,6 +625,7 @@ pub fn read_ride(ee: &Ee, quad: u32, dt: F) -> Result<(Ride, Image), String> {
         cofg: v(ee, bo + 0x1a0),
         spins,
         parts,
+        contacts: None,
     };
     let r = Ride { s, bike, gate, class, high: buttons >> 4, tag: ee.u32_at(o + 0xd20), answers: Vec::new(), echo: false, scene: true };
     Ok((r, at))
