@@ -3956,6 +3956,18 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         (None, Ok(member)) => disc.res(member)?,
         (None, Err(e)) => return Err(e.clone()),
     };
+    // Two views on a disc freeride ride its split-screen twin's `.toy` (V105), as the original loads
+    // the whole `<track>_SS` there: free09_ss's windmills turn out of view, free11_ss's trucks and
+    // police car run at their own speeds. Only the `.toy` is the twin's; the rest is still the
+    // track's own. The views at the load decide it: a seat joining mid-ride (P76) keeps the file.
+    // Online every machine reads the one file, whatever its views, as the cars are the session's.
+    let split = Layout::for_players(args.players, args.split).is_ok_and(|l| l != Layout::Full)
+        && args.online.is_none()
+        && lobby_room.is_none();
+    let track_res = match split && modded.is_none() && !disc_world {
+        true => split_screen_toy(&mut disc, track_res, &stem)?,
+        false => track_res,
+    };
     let mut archives: Vec<Res> = vec![track_res, disc.res(&bike_member)?];
     if let Some(name) = &second {
         archives.push(disc.res(name)?);
@@ -11674,6 +11686,58 @@ fn read_tape(path: &std::path::Path, phase: TickPhase) -> Result<PadTape, String
 
 /// The member of `MX.PSR` whose name ends that way — archives are named after the track or bike they
 /// hold, in a directory this code does not need to know.
+/// The track's archive with its `<stem>.toy` swapped for its split-screen twin's, `<stem>_ss.toy`
+/// out of `<stem>_ss.res` (V105). A track with no twin on the disc (the supercross and national
+/// tracks) is handed back as it was.
+fn split_screen_toy(disc: &mut Disc, track: Res, stem: &str) -> Result<Res, String> {
+    let Ok(member) = member_ending(disc, &format!("{stem}_ss.res")) else { return Ok(track) };
+    let twin = disc.res(&member)?.read_suffix(&format!("{stem}_ss.toy"))?;
+    let own = track.find_suffix(&format!("{stem}.toy")).map(|e| e.name.clone()).ok_or(format!("{stem} has no {stem}.toy"))?;
+    println!("split screen: {own} read from {member}");
+    track.with_member(&own, twin)
+}
+
+#[cfg(test)]
+mod split_screen_toy {
+    //! V105: two views read the `_ss` twin's `.toy`, and a track without a twin keeps its own.
+    use super::{Disc, member_ending, split_screen_toy};
+    use game_render::animated_toy::Animated;
+
+    #[test]
+    fn two_views_read_the_twins_toy() {
+        let Ok(mut disc) = Disc::open_configured() else {
+            eprintln!("skipped: no disc configured");
+            return;
+        };
+        let open = |disc: &mut Disc, stem: &str| {
+            let track = disc.res(&member_ending(disc, &format!("{stem}.res")).unwrap()).unwrap();
+            let second = disc.res(&member_ending(disc, &format!("{stem}_2.res")).unwrap()).unwrap();
+            (track, second)
+        };
+        // free09: AnimateWhenNotVisible False on its five windmills, True on free09_ss's.
+        for split in [false, true] {
+            let (track, second) = open(&mut disc, "free09");
+            let track = if split { split_screen_toy(&mut disc, track, "free09").unwrap() } else { track };
+            let animated = Animated::load(&mut vec![track, second], "free09");
+            let unseen: Vec<bool> = animated.sim.specs.iter().map(|s| s.unseen).collect();
+            assert_eq!(unseen, [split; 5], "free09's windmills, split {split}");
+        }
+        // free11: its first three cars' TimeScale, 0.3 alone and 0.5, 0.5, 0.2 in split screen, each
+        // the float at or just below the text, as the reader truncates.
+        for (split, want) in [(false, [0.29999998, 0.29999998, 0.29999998]), (true, [0.5, 0.5, 0.19999999])] {
+            let (track, _) = open(&mut disc, "free11");
+            let track = if split { split_screen_toy(&mut disc, track, "free11").unwrap() } else { track };
+            let text = game_render::ini::text(&track.read_suffix("free11.toy").unwrap());
+            let scales: Vec<f32> = game_render::toy::cars(&text).iter().take(3).map(|c| c.time_scale).collect();
+            assert_eq!(scales, want, "free11's cars, split {split}");
+        }
+        // sx01 has no twin on the disc: its own file, unchanged.
+        let (track, _) = open(&mut disc, "sx01");
+        let own = track.read_suffix("sx01.toy").unwrap();
+        assert_eq!(split_screen_toy(&mut disc, track, "sx01").unwrap().read_suffix("sx01.toy").unwrap(), own);
+    }
+}
+
 fn member_ending(disc: &Disc, suffix: &str) -> Result<String, String> {
     let want = suffix.to_ascii_lowercase();
     // The shortest match, because the menus keep their own copy of a bike one directory deeper and
