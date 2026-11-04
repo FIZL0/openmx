@@ -162,9 +162,12 @@ const tap = async b => {
 if (!(await heard(0, l => l.startsWith('music: playing'), 60000))) fail('no song started: the front end never came up');
 await wait(2000);
 let from = said.length;
-await tap(0);
+// The first Cross is held until the page answers it: a 100 ms tap is over before a frame of a page slowed by load
+// reads the pads (K34), and then the press that showed the pad was never seen at all. Still one press.
 const menus = l => l.startsWith(`pads: 1P: ${PAD}`) && l.includes('the menus');
-const first = await heard(from, menus, 3000);
+await evaluate('openmxTestPad.set(0, 1)');
+const first = await heard(from, menus, 60000);
+await evaluate('openmxTestPad.set(0, 0)');
 // On through the menus with Cross until a ride seats the pad.
 const seated = l => l.startsWith(`pads: 1P: ${PAD}`) && !l.includes('the menus');
 let taps = 1;
@@ -196,19 +199,27 @@ const change = (a, b) => evaluate(`(async () => {
 let braked = null;
 let gas = null;
 if (ride) {
+  // How far the ride gets in a second of wall clock is the page's frame rate, which load sets (K34): so each is held
+  // until its two pictures 2 s apart show it (one speed, then a changing one), within a minute, not for a fixed time.
   await evaluate('openmxTestPad.set(6, 1)');
-  await wait(5000);
-  const a = await shot();
-  await wait(2000);
-  const b = await shot();
-  braked = await change(a, b);
+  let a = await shot();
+  let b = a;
+  for (const end = Date.now() + 60000; ; a = b) {
+    await wait(2000);
+    b = await shot();
+    braked = await change(a, b);
+    if (braked < 0.02 || Date.now() > end) break;
+  }
   await evaluate('openmxTestPad.set(6, 0)');
   await evaluate('openmxTestPad.set(7, 1)');
-  await wait(1500);
-  const c = await shot();
-  await wait(2000);
-  const e = await shot();
-  gas = await change(c, e);
+  let c = await shot();
+  let e = c;
+  for (const end = Date.now() + 60000; ; c = e) {
+    await wait(2000);
+    e = await shot();
+    gas = await change(c, e);
+    if (gas > 0.05 || Date.now() > end) break;
+  }
   fs.writeFileSync(out.replace(/\.png$/, '-braked.png'), Buffer.from(b, 'base64'));
   fs.writeFileSync(out, Buffer.from(e, 'base64'));
 }
