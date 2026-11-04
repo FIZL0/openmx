@@ -10,7 +10,9 @@
 //!    on one record, is [`StillProp::touch`] on the port's props, bit for bit;
 //! 3. **the push-out**: a bone pushed out of a contact on a scene mesh is the port's against the
 //!    still scenery, bit for bit;
-//! 4. **the roof**: a ragdoll dropped on a building's roof lands on it, and falls through it with
+//! 4. **the sweep**: a bone's segment probe through a search listing free06's scene meshes is the
+//!    port's through the same props as [`StillProp::candidate`]s, bit for bit (S209);
+//! 5. **the roof**: a ragdoll dropped on a building's roof lands on it, and falls through it with
 //!    the props out of the world.
 
 use std::collections::HashMap;
@@ -21,7 +23,7 @@ use game_sim::camera::{CURVE_ENTRIES, CurveTable};
 use game_sim::flight_search;
 use game_sim::phy::Wrecks;
 use game_sim::ragdoll_contact::{Against, Contact, Sphere, moving};
-use game_sim::ragdoll_scene::{BikeSearch, Cells, Statics, StillProp, Touch};
+use game_sim::ragdoll_scene::{BikeSearch, Candidate, Cells, Statics, StillProp, Touch, class, sweep_through};
 use game_sim::rng::Rng;
 use game_sim::track::{Scene, Terrain};
 use game_sim::world::{Ground, Place, Props, World};
@@ -621,6 +623,176 @@ fn the_push_out_against_a_prop_is_the_originals() {
             assert_eq!(bits(got), bits(want), "{what}: {field} is {want:?} in the game, {got:?} in the port");
         }
     }
+}
+
+/// A bone collision's sweep fields, its segment probe's, and a search's list
+/// (`tests/ragdoll_cars.rs`, S166).
+mod sweep_at {
+    pub const SCENE: u32 = 0x1c;
+    pub const SWEEP_ON: u32 = 0x24;
+    pub const SWEEP_BACK: u32 = 0x28;
+    pub const OTHER2: u32 = 0x74;
+    pub const SEARCH: u32 = 0x84;
+    pub const PROBE: u32 = 0x8c;
+    pub const MASK_MODE: u32 = 0xe8;
+    pub const MASKS: u32 = 0xec;
+    pub const MASK_COUNT: u32 = 0xf0;
+    pub const LISTENERS: u32 = 0xf4;
+    pub const ON_STRUCK: u32 = 0x110;
+    pub const LIST: u32 = 0x0;
+    pub const COUNT: u32 = 0x4;
+    pub const GRID: u32 = 0x38;
+}
+
+/// A scene that is only the search's list, as a bone's segment probe meets it.
+struct Listed<'a>(Vec<Candidate<'a>>);
+
+impl game_sim::ragdoll_contact::Scene for Listed<'_> {
+    fn sweep(&mut self, from: Vf, to: Vf) -> Option<(Vf, Vf)> {
+        sweep_through(from, to, class::BONE_SWEEP, self.0.iter().copied())
+    }
+}
+
+/// How many segments [`the_bones_sweep_through_the_props_as_the_originals`] sweeps.
+const SEGMENTS: usize = 20_000;
+
+/// **A bone's sweep through the props is the original's** (S209): 20,000 bones on the state's bone
+/// collisions, each moving so that its last `1/15` s crosses a point near one of free06's props
+/// (from a standstill to 120 ft/s, a random way), with the collision's search a list of that prop
+/// alone, it and the prop nearest it, or it twice, at distances that are mostly 0 and sometimes past
+/// the segment's reach. The original's bone collision sweep, its probe's include list the game's
+/// (the scenery's class, which the scene meshes are of), against the port's solve with a scene that
+/// is only that list, each prop its [`StillProp::candidate`]: swept or not, the contact's point and
+/// normal, and the bone's position, velocity and the contact's change of velocity, bit for bit.
+#[test]
+fn the_bones_sweep_through_the_props_as_the_originals() {
+    let Some(mut ee) = state() else { return };
+    let Some(free) = free06() else { return };
+    let props = &free.props.props;
+    let (_, sphere) = bones(&ee);
+    let index = scenery_index(&ee, &free.props, tree_of(&ee, sphere));
+    let of: HashMap<usize, u32> = index.iter().map(|(&o, &i)| (i, o)).collect();
+    let table = curve(&ee);
+    let sweep = addr("bone_collision_sweep").unwrap();
+    let found = collisions(&ee, sphere);
+    assert!(found.len() >= 9, "{} bone collisions in the state", found.len());
+    for &c in &found {
+        let p = ee.u32_at(c + sweep_at::PROBE);
+        let list = (ee.u32_at(p + sweep_at::MASK_MODE), ee.u32_at(p + sweep_at::MASK_COUNT), ee.u32_at(ee.u32_at(p + sweep_at::MASKS)));
+        assert_eq!(list, (0, 1, class::BONE_SWEEP), "{c:#x}'s probe's include list");
+    }
+    for (&o, &i) in &index {
+        assert_ne!(ee.u32_at(o + at::CATEGORY) & class::BONE_SWEEP, 0, "prop {i}'s mesh {o:#x} is not of the scenery's class");
+        assert_eq!((ee.u32_at(o + sweep_at::LISTENERS), ee.u32_at(o + sweep_at::ON_STRUCK)), (0, 0), "prop {i}'s mesh {o:#x}'s listeners");
+    }
+    let still: Vec<StillProp> = props.iter().map(|p| StillProp::of(p, Vf::new(0.0, 0.0, 0.0, 1.0))).collect();
+    let nearest: Vec<usize> = (0..props.len())
+        .map(|i| {
+            let d = |j: usize| {
+                let (a, b) = (still[i].centre, still[j].centre);
+                let v = [a.x() - b.x(), a.y() - b.y(), a.z() - b.z()];
+                (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt() - still[j].radius.0
+            };
+            (0..props.len()).filter(|&j| j != i).min_by(|&a, &b| d(a).total_cmp(&d(b))).unwrap()
+        })
+        .collect();
+    let (search, list) = (0x01f8_0100u32, 0x01f8_0200u32);
+    for k in 0..0x40 {
+        ee.set_u32(search + 4 * k, 0);
+    }
+    ee.set_u32(search + sweep_at::LIST, list);
+    assert_eq!(ee.u32_at(search + sweep_at::GRID), 0);
+    let mut pick = Pick(0x5209_5209_0dd5_eed5);
+    let (mut swept, mut second, mut far) = (0, 0, 0);
+    for case in 0..SEGMENTS {
+        let c = found[pick.upto(found.len() as u64) as usize];
+        let b = ee.u32_at(c + coll::BODY);
+        let k = pick.upto(props.len() as u64) as usize;
+        let order: Vec<usize> = match pick.upto(3) {
+            0 => vec![k],
+            1 => vec![k, nearest[k]],
+            _ => vec![k, k],
+        };
+        // The segment crosses `q`, near the prop's mesh, `u` of the way back from where the bone is.
+        let q = near_vertex(&still[k], &mut pick);
+        let off = pick.unit_vector();
+        let q = Vf::new(q.x() + off.x() * pick.range(0.0, 1.0), q.y() + off.y() * pick.range(0.0, 1.0), q.z() + off.z() * pick.range(0.0, 1.0), 1.0);
+        let d = pick.unit_vector();
+        let length = if pick.chance(20) { 0.0 } else { pick.range(0.0, 8.0) };
+        let u = pick.unit();
+        let pos = Vf::new(q.x() + d.x() * length * u, q.y() + d.y() * length * u, q.z() + d.z() * length * u, if pick.chance(4) { pick.float(2.0) } else { 1.0 });
+        let vel = Vf::new(d.x() * length * 15.0, d.y() * length * 15.0, d.z() * length * 15.0, if pick.chance(4) { pick.float(2.0) } else { 0.0 });
+        let distances: Vec<f32> = order.iter().map(|_| if pick.chance(4) { pick.range(0.0, 4.0) } else { 0.0 }).collect();
+        for (i, (&o, &dist)) in order.iter().zip(&distances).enumerate() {
+            ee.set_u32(list + 8 * i as u32, of[&o]);
+            ee.set_f32(list + 8 * i as u32 + 4, dist);
+        }
+        ee.set_u32(search + sweep_at::COUNT, order.len() as u32);
+
+        ee.set_u32(b + coll::ENABLED, 1);
+        set_vf(&mut ee, b + coll::POSITION, pos);
+        set_vf(&mut ee, b + coll::VELOCITY, vel);
+        ee.set_u32(c + coll::ON, 1);
+        ee.set_u32(c + sweep_at::SWEEP_ON, 1);
+        ee.set_u32(c + sweep_at::SEARCH, search);
+        ee.set_u32(c + coll::OTHER, 0);
+        ee.set_u32(c + sweep_at::OTHER2, 0);
+        ee.set_u32(c + sweep_at::SCENE, 0);
+        ee.set_u32(c + coll::SWEPT, 0);
+        set_vf(&mut ee, c + coll::POINT, pos);
+        set_vf(&mut ee, c + coll::NORMAL, Vf::new(0.0, 1.0, 0.0, 1.0));
+
+        let f = |o: u32| F(ee.f32_at(c + o));
+        let sphere = Sphere {
+            bone: 0,
+            radius: F(ee.f32_at(b + coll::B_RADIUS)),
+            unpenetration: f(coll::UNPENETRATION),
+            rotation: f(coll::ROTATION),
+            restitution: f(coll::RESTITUTION),
+            friction: f(coll::FRICTION),
+            sweep: true,
+            sweep_back: f(sweep_at::SWEEP_BACK),
+        };
+        let mut body = Body {
+            enabled: true,
+            inv_mass: F(ee.f32_at(b + coll::INV_MASS)),
+            position: pos,
+            velocity: vel,
+            inv_inertia: vf(&ee, b + coll::INV_INERTIA),
+            quat: vf(&ee, b + coll::QUAT),
+            rates: vf(&ee, b + coll::RATES),
+            ..Body::default()
+        };
+        let mut contact = Contact { touched: false, ground: false, scene: false, swept: false, point: pos, normal: Vf::new(0.0, 1.0, 0.0, 1.0), dv: vf(&ee, c + coll::DV), surface: 0 };
+        let candidates = order.iter().zip(&distances).map(|(&o, &dist)| Candidate { distance: F(dist), ..still[o].candidate() }).collect();
+        let mut scene = Listed(candidates);
+        contact.solve(true, &sphere, &mut body, None, &mut scene, &table);
+        ee.call(sweep, &[u64::from(c)], &[], BUDGET);
+
+        let hit = ee.u32_at(c + coll::SWEPT) != 0;
+        let what = format!("case {case}: props {order:?} at {distances:?}, bone at {pos:?} moving {vel:?}");
+        assert_eq!(contact.swept, hit, "{what}: swept");
+        assert_eq!(contact.scene, ee.u32_at(c + sweep_at::SCENE) != 0, "{what}: scene");
+        let mut fields = vec![("position", body.position, vf(&ee, b + coll::POSITION)), ("velocity", body.velocity, vf(&ee, b + coll::VELOCITY))];
+        if hit {
+            fields.extend([
+                ("point", contact.point, vf(&ee, c + coll::POINT)),
+                ("normal", contact.normal, vf(&ee, c + coll::NORMAL)),
+                ("dv", contact.dv, vf(&ee, c + coll::DV)),
+            ]);
+        }
+        for (field, got, want) in fields {
+            assert_eq!(bits(got), bits(want), "{what}: {field} is {want:?} in the game, {got:?} in the port");
+        }
+        if hit {
+            swept += 1;
+            second += usize::from(order.len() == 2 && order[0] != order[1]);
+        }
+        far += usize::from(distances.iter().any(|&d| d > 0.0));
+    }
+    eprintln!("{swept} of {SEGMENTS} swept, {second} with two props listed; {far} lists with a prop off at a distance");
+    assert!(swept > SEGMENTS / 10 && swept < SEGMENTS * 9 / 10, "{swept} swept");
+    assert!(second > 300, "{second} two-prop sweeps");
 }
 
 // --- the ride ---------------------------------------------------------------------------------------

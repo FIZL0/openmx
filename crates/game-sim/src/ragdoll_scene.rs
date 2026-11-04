@@ -42,7 +42,9 @@
 //! ([`class::SCENERY`]), and neither the wreck bike nor a path car is of it: the original's bones
 //! never sweep against either, and a bone fast enough to cross a wagon's wall between two frames goes
 //! through it there too. The scene still offers both, with their classes, so that the filter is
-//! what turns them away; S165's props are in the bones' scene but not yet listed to the sweep (S209).
+//! what turns them away. S165's props are of it: the sweep is offered every scene prop the search
+//! lists, wherever its distance, at its place in the list, and a bone that crosses a fence or a
+//! wall between two frames is swept against it (S209, [`StillProp::candidate`]).
 //!
 //! What is not here: the hierarchy class of collision file, which the wreck bike is not; and the bike
 //! leaving the broad phase, which the put-back does (S108) and the caller says
@@ -696,13 +698,24 @@ pub struct StillProp {
     pub frame: Node,
     /// How far the prop's reach is from the probe, measured again each frame.
     pub distance: F,
+    /// The collidable's sphere (`+0x40`, `+0x60`): its box's centre and its reach, which the
+    /// search measures from and a segment probe's pair rejects on (S209).
+    pub centre: Vf,
+    pub radius: F,
 }
 
 impl StillProp {
     /// The prop as the bones see it, measured from `probe`.
     pub fn of(prop: &crate::world::Prop, probe: Vf) -> StillProp {
         let [x, y, z, at] = prop.to_world.0;
-        StillProp { mesh: prop.mesh.clone(), frame: Node { rows: [x, y, z], origin: at }, distance: reach_distance(prop_reach(prop), probe) }
+        let (centre, radius) = prop_reach(prop);
+        StillProp { mesh: prop.mesh.clone(), frame: Node { rows: [x, y, z], origin: at }, distance: reach_distance((centre, radius), probe), centre, radius }
+    }
+
+    /// The prop as a bone's segment probe meets it in the list (S209): a scene mesh, of the one class
+    /// the probe includes.
+    pub fn candidate(&self) -> Candidate<'_> {
+        Candidate { distance: self.distance, class: class::SCENERY, centre: self.centre, radius: self.radius, mesh: &self.mesh, frame: &self.frame }
     }
 
     /// **The listed props a frame's spheres can be paired with**: those of `statics` whose distance
@@ -936,6 +949,10 @@ pub struct WreckBikeScene<'a> {
     /// the list, and where the bike stands among them ([`Statics::bike_at`]).
     pub props: Vec<(usize, StillProp)>,
     pub bike_at: usize,
+    /// The scene props the search lists for the bones' segments (S209): every one in the list, in
+    /// its order with its place, whatever its distance (a segment's reach is half its length, not a
+    /// sphere's radius); the plants and the knockable props at rest are of no class the probe includes.
+    pub swept: Vec<(usize, StillProp)>,
     /// What the last sphere's contact is with: 0 the bike, `k + 1` the car `k` (and past the cars the
     /// knockable props, S240); `None` for nothing
     /// or a static prop, which is the scenery.
@@ -965,6 +982,7 @@ impl<'a> WreckBikeScene<'a> {
             cars: Vec::new(),
             props: Vec::new(),
             bike_at: 0,
+            swept: Vec::new(),
             with: None,
             sphere: None,
             knocked: Vec::new(),
@@ -1051,8 +1069,9 @@ impl Scene for WreckBikeScene<'_> {
         best.map(|t| vec![t.world])
     }
 
-    /// The bone's segment through the same list: the bike when the search lists it, then the cars
-    /// (S166). The probe includes neither class, so it never strikes them.
+    /// The bone's segment through the same list: the scene props and the bike where the walk met it,
+    /// then the cars (S166). The probe includes the props' class (S209) and neither of the others, so
+    /// it strikes only the props.
     fn sweep(&mut self, from: Vf, to: Vf) -> Option<(Vf, Vf)> {
         let search = self.search;
         let bike = self.sphere.filter(|_| search.listed).map(|(centre, radius)| Candidate {
@@ -1071,7 +1090,10 @@ impl Scene for WreckBikeScene<'_> {
             mesh: &car.mesh,
             frame: &car.frame,
         });
-        sweep_through(from, to, class::BONE_SWEEP, bike.into_iter().chain(cars))
+        let bike_at = self.bike_at;
+        let before = self.swept.iter().filter(|(n, _)| *n < bike_at).map(|(_, p)| p.candidate());
+        let after = self.swept.iter().filter(|(n, _)| *n >= bike_at).map(|(_, p)| p.candidate());
+        sweep_through(from, to, class::BONE_SWEEP, before.chain(bike).chain(after).chain(cars))
     }
 
     fn other(&mut self, i: usize) -> Option<usize> {
