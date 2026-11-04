@@ -9232,6 +9232,23 @@ atv_heap_free               atv 0x001b76d0 = free
 #   0x0049c910 preforce and 0x0049c7b0 post, slot elt +0 -> +8; 0x0049ca70 constraints).
 #   The bike's engine 0x00eaa1e0: rpm xs (+0x8c) 0x00eab410 and torque ys (+0x68) 0x00eab450, 10 points (the
 #   16 words the port reads run past them into other words); ratios (+0x70) 0x00eab490, 5 gears.
+# F31b1 — the bike's PreProcess (game_sim::handling::bike::ground_head; tests/mxvatv_bike_ride.rs). Comment
+# rows only. Journal: research/journal/2026-11-03-f31b-mxvatv-bike-pre-process.
+#   State 4's world lists: preforce 6, each fn 0x004de0c0 (thunk: a0 -= 48, jump 0x004d8b20), the bike's own
+#   element 0x00e71510 (bike +0x30), the others 0x00ec24f0 0x00f04bc0 0x00f46590 0x00f88e10 0x00fcb750; post 1,
+#   0x00e71514 fn 0x004de0d0 (thunk: a0 -= 52, jump 0x004d9290); force 1, element 0x00e70440 (vt 0x003cd150)
+#   fn 0x0049bd50 calls *(elt +0xc) vt +8, the bike's ground step 0x004d90f0; +0x24 list 1, the record
+#   0x00ea7570 (vt 0x003b9290: +0x7c 0x00204c30, +0x84 0x002051f0); +0x3c list empty.
+#   0x004d8b20 (a0 bike, f12 dt): guard +0xbc4 != 0 and its +0x28 not 3..4; vt +0x34c (bike vt 0x003d0450:
+#   0x004e3ea0, the quad's input limiter); +0x324 == 0 -> +0x12cc = 0; +0x1524 == +0x152c -> front +0x30 = 1,
+#   +0xddc == 0 -> body vt +0x64 (0x0049bda0, body +0x120..+0x128 = a1..a3)(1,1,1); else front +0x30 = 0 and
+#   +0xc80 != 0 -> front +0x8ac = 0, +0xddc == 0 -> (1,1,1); else the quad's steering into front +0x8ac and
+#   +0x12c8, then (1,1,1) off the ground, (1,1,0) on it, (0,0,0) on it with +0xddc set. Rear +0x38 the quad's
+#   donut; front/rear +0x48 = map_clamp(+0x32c, 14.6666, 29.3332, +0x137c/+0x1380, +0x1384/+0x1388); +0x1250
+#   and body +0xc0 = (0,0,0,1); 0x004e5fe0 (f12 dt, f13 rear +0x838); 0x004e6a60 (f12 dt); vt +0x4d0
+#   (0x004e4190, the quad's head-and-tail). Wheels: front *(+0x17b0), rear *(+0x17b4).
+#   +0xddc: the hold mode; 0x004a6b90 sets it (linear axes (0,1,0), angular (1,0,1)), 0x004a7df0 sets it,
+#   0x004a6c00 clears it.
 # F31c — the ground under C15's rides on Nat05 (game_sim::handling::ground; tests/mxvatv_bike_ground.rs).
 # Comment rows only. Journal: research/journal/2026-11-03-f31c-mxvatv-bike-ground.
 #   State 4's map is Nat05: terrain object 0x00bbd720 (both wheels' +0x1e0) over Env\nat05\Nat05.ps2.trn;
