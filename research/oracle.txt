@@ -7034,6 +7034,19 @@ atv_node_box_add            atv 0x00196550 = a listed node's box taken into gath
 # The trigger 0x0162cd30's search sets bit 0x10 (searched) of +0x126 on the riding 0x0159c500 and the
 # sweep 0x016282b0, both in its reach, before its object list leaves them out. The node place clears bit 0
 # (world current) of +0x100 on 32 of the 40 nodes past the four read_ride holds; nothing else of them moves.
+# MD75e1 — the quad's record's contacts (game_sim::atv_contact; tests/atv_contact.rs, and
+# tests/atv_quad/frame.rs's touching frame; journal research/journal/2026-11-04-md75e1-record-contacts/).
+# MX Unleashed's collision_resolve on the ATV's record: +0xe0 chassis, +0xe4 body, +0xe8 node, +0xf0
+# count, +0xf4 capacity (26), +0xf8 list (0x90 each; +0x70 the relative velocity kept per entry, +0x80
+# surface, +0x84 other record, +0x88 mover), +0x150 the own body's impulse turn mask, +0x1e8 normal
+# speed, +0x1f0 relative, +0x208 collidable (flags +0x94).
+atv_record_resolve          atv 0x00205730 = collision_resolve on the ATV's record (vt +0x88; a0 record, a1 impulses)
+atv_record_relative         atv 0x002058d0 = collision_relative_velocity (also stores entry +0x70)
+atv_record_spring           atv 0x00205f00 = collision_spring
+atv_record_impulse          atv 0x00206320 = collision_impulse (own body's turn x record +0x150 lane by lane)
+atv_record_friction         atv 0x00206c70 = collision_friction
+atv_record_damp             atv 0x00206e60 = collision_damp
+atv_record_apply            atv 0x00207240 = collision_apply
 # MD62 — atv_bike_airborne_control's fields, bike-relative (tests/mxvatv_air.rs runs it off state04 too):
 # +0x1170..+0x117c AirborneControlMoment, +0x1180 damping, +0x1184 control force, +0x1188/+0x118c
 # authority and its time, +0x1194 the backflip's torque in, +0x1198 its ramp (flipping), +0x11d0 the

@@ -3432,6 +3432,7 @@ impl Gen {
             ground: [game_sim::atv_wheel::Ground::Still; 4],
             cofg: self.vec(-0.5, 0.5),
             parts: game_sim::atv_moto::Parts::default(),
+            contacts: None,
             spins: Default::default(),
         };
         let _: &[wheel::Wheel; 4] = &bike.wheels;

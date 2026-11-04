@@ -1841,6 +1841,9 @@ pub struct Bike {
     /// head and tail's poses and travels and the drag are [`Bike::clutch_keys`]', the engine's state
     /// and gearbox [`Bike::engine`]'s.
     pub parts: crate::atv_moto::Parts,
+    /// MD75e1's: the collision record and its contacts, which the gravity's call resolves
+    /// ([`crate::atv_contact::Held`]); `None`, and the call goes to `rest`, as before MD75e1.
+    pub contacts: Option<crate::atv_contact::Held>,
 }
 
 /// The other wheel of each wheel's pair (its `+0xbc`): the left front and left rear, the right front
@@ -1924,10 +1927,18 @@ impl<R: Moto, G: FnMut(Vf, &mut u8) -> (Vf, Vf), S: Sweep> Moto for Steps<R, G, 
     fn body_in(&mut self, b: &crate::atv_body::Body) {
         self.bike.parts.last_position = b.last_position;
         self.bike.parts.body_on = b.enabled;
+        if let Some(h) = &mut self.bike.contacts {
+            h.body = Some(*b);
+        }
     }
 
     fn body_out(&mut self, b: &mut crate::atv_body::Body) {
         b.last_position = self.bike.parts.last_position;
+        // MD75e1: what the record's resolution wrote of the body that the listener's view does not
+        // carry (the view's words are put back already, and are the same in both).
+        if let Some(w) = self.bike.contacts.as_mut().and_then(|h| h.body.take()) {
+            (b.damping, b.ang_damping, b.twist) = (w.damping, w.ang_damping, w.twist);
+        }
     }
 }
 
@@ -2018,7 +2029,17 @@ impl<R: Moto, G: FnMut(Vf, &mut u8) -> (Vf, Vf), S: Sweep> Steps<R, G, S> {
             }
             Call::Gravity => {
                 if crate::atv_moto::gravity(&mut self.bike.parts, q, body) {
-                    self.rest.call(Call::GravityRecord, q, body);
+                    // MD75e1: the record's resolution on the whole body, the listener's view in and out.
+                    let cofg = self.bike.cofg;
+                    let resolved = self.bike.contacts.as_mut().is_some_and(|h| {
+                        let Some(whole) = h.body.as_mut() else { return false };
+                        whole.set_view(body);
+                        h.resolve(cofg)
+                    });
+                    match self.bike.contacts.as_ref().and_then(|h| h.body.as_ref()) {
+                        Some(whole) if resolved => *body = whole.view(),
+                        _ => self.rest.call(Call::GravityRecord, q, body),
+                    }
                 }
             }
             Call::EngineUpdate(dt) => {

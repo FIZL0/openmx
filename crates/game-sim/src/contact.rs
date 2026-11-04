@@ -424,7 +424,7 @@ pub struct Other<'a> {
 /// Do the two objects share the impulse and the spring by their objects' masses? When both have a
 /// collidable, each must collide with the other's; when only the other has one, this one must collide
 /// with it.
-fn mutual(own: &Collider, other: Option<&Collider>) -> bool {
+pub(crate) fn mutual(own: &Collider, other: Option<&Collider>) -> bool {
     let Some(o) = other else { return false };
     let Some(theirs) = o.collidable else { return false };
     match own.collidable {
@@ -503,7 +503,7 @@ pub fn relative_velocity(own: &mut Collider, body: &dyn Rigid, e: &mut Contact, 
     against(own, e, other, mover, mine);
 }
 
-fn relative_velocity_on(own: &mut Collider, side: &Own<'_>, e: &mut Contact, other: Option<&mut Other<'_>>, mover: Option<&Mover>) {
+pub(crate) fn relative_velocity_on(own: &mut Collider, side: &Own<'_>, e: &mut Contact, other: Option<&mut Other<'_>>, mover: Option<&Mover>) {
     let mine = match side {
         Own::Body(body) => on_body(own, &**body, e),
         Own::Vehicle(r) => on_chassis(own, &r.chassis, e),
@@ -611,7 +611,7 @@ pub fn spring(own: &Collider, body: &mut dyn Rigid, e: &Contact, other: Option<&
     spring_on(own, &mut Own::Body(body), e, other, mover, shared);
 }
 
-fn spring_on(own: &Collider, side: &mut Own<'_>, e: &Contact, other: Option<&mut Other<'_>>, mover: bool, shared: bool) {
+pub(crate) fn spring_on(own: &Collider, side: &mut Own<'_>, e: &Contact, other: Option<&mut Other<'_>>, mover: bool, shared: bool) {
     let r = if mover || actor(own, other.as_deref().map(|o| &*o.collider)) { own.actor } else { own.scenery };
     let n = e.normal;
     let (anchor, depth) = if e.kind == 0 {
@@ -658,7 +658,13 @@ pub fn impulse(own: &Collider, body: &mut dyn Rigid, e: &Contact, other: Option<
     impulse_on(own, &mut Own::Body(body), e, other, shared);
 }
 
-fn impulse_on(own: &Collider, side: &mut Own<'_>, e: &Contact, mut other: Option<&mut Other<'_>>, shared: bool) {
+fn impulse_on(own: &Collider, side: &mut Own<'_>, e: &Contact, other: Option<&mut Other<'_>>, shared: bool) {
+    impulse_masked(own, side, e, other, shared, None);
+}
+
+/// [`impulse`] with the own body's turn multiplied lane by lane by `mask` first, when there is one:
+/// SLUS-21104's build ([`crate::atv_contact`]) masks it so; a chassis' turn is never masked.
+pub(crate) fn impulse_masked(own: &Collider, side: &mut Own<'_>, e: &Contact, mut other: Option<&mut Other<'_>>, shared: bool, mask: Option<Vf>) {
     let r = if actor(own, other.as_deref().map(|o| &*o.collider)) { own.actor } else { own.scenery };
     let (m1, i1) = if shared { (own.inv_mass, own.inv_inertia) } else { (side.inv_mass(), side.inv_inertia()) };
     let (m2, i2) = match other.as_deref() {
@@ -686,19 +692,19 @@ fn impulse_on(own: &Collider, side: &mut Own<'_>, e: &Contact, mut other: Option
     let size = (F::ONE / (k2 + (k1 + (m1 + m2)))) * (-(F::ONE + r.restitution) * own.normal_speed);
     let j = scaled(n, size);
     let dv = scaled(j, m1);
-    let dw = r.angular.then(|| times(cross(e.arm, side.local(j)), i1));
+    let turn_by = r.angular.then(|| cross(e.arm, side.local(j)));
     match side {
         Own::Body(body) => {
             body.add_velocity(dv);
-            if let Some(dw) = dw {
-                body.add_rates(dw);
+            if let Some(c) = turn_by {
+                body.add_rates(times(mask.map_or(c, |m| times(m, c)), i1));
             }
         }
         Own::Vehicle(c) => {
             let v = &mut c.chassis;
             v.shock = plus(v.shock, dv);
             v.velocity = plus(v.velocity, dv);
-            if let Some(dw) = dw {
+            if let Some(dw) = turn_by.map(|c| times(c, i1)) {
                 v.twist = plus(v.twist, dw);
                 v.rates = plus(v.rates, dw);
             }
@@ -733,7 +739,7 @@ pub fn friction(own: &Collider, body: &mut dyn Rigid, e: &Contact, other: Option
     friction_on(own, &mut Own::Body(body), e, other);
 }
 
-fn friction_on(own: &Collider, side: &mut Own<'_>, e: &Contact, other: Option<&Collider>) {
+pub(crate) fn friction_on(own: &Collider, side: &mut Own<'_>, e: &Contact, other: Option<&Collider>) {
     let (mu, mask) = if actor(own, other) {
         (own.actor.friction, own.actor.friction_mask)
     } else if e.surface == -1 {
