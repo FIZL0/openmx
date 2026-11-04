@@ -321,7 +321,7 @@ impl Sim {
         // The props' step waits for the bike's strike and push (S197, [`prop_contact`]). A downed
         // rider's wreck bike is on the props' node, struck by their rays in their pass (S243,
         // [`prop_wreck`]); a plane ride has none.
-        let prop_movers = match self.plane {
+        let mut prop_movers = match self.plane {
             Some(_) => {
                 self.hear_ridden();
                 self.traffic.frame_held(dt, world)
@@ -383,7 +383,7 @@ impl Sim {
         // are, before the bike is stepped.
         let cars = self.car_contacts(0, world, dt);
         // And against the knockable props (S197): what they strike is woken, and pushed in the frame.
-        let strike = self.prop_strike(0, dt);
+        let mut strike = self.prop_strike(0, dt);
         let said = if cars.is_empty() && strike.contacts.is_empty() {
             // The wheels stand on the props for the frame (S210, [`prop_wheel`]).
             self.lend_props(0);
@@ -391,7 +391,7 @@ impl Sim {
             self.props_back(0);
             said
         } else {
-            let props = self.traffic.props.strike(&strike);
+            let props = self.traffic.props.strike_in(&mut strike, dt, world, &mut prop_movers);
             let mut bump = self.bump(0, mover_contact::merged(cars, strike.contacts));
             bump.props = props;
             self.lend_props(0);
@@ -494,7 +494,7 @@ impl Sim {
         // The props' step waits for every bike's strike and push (S197a, [`prop_contact`]); every
         // downed rider's wreck bike is on the props' node (S243, [`prop_wreck`]).
         let sides: Vec<(usize, usize)> = (0..self.players()).map(|i| (i, self.players() + i)).collect();
-        let prop_movers = self.frame_held_wrecked(dt, world, &sides);
+        let mut prop_movers = self.frame_held_wrecked(dt, world, &sides);
         self.lend_cars();
         self.event_frame(dt);
         let mut frames = Vec::with_capacity(controls.len());
@@ -515,7 +515,7 @@ impl Sim {
                 .filter(|l| !l.is_empty() || !strike.contacts.is_empty())
                 .map(|l| self.bump_in(i, l, &*world));
             if let Some(b) = bump.as_mut() {
-                self.strike_into(b, strike);
+                self.strike_into(b, strike, dt, world, &mut prop_movers);
             }
             let rivals: Vec<ride::Rival> = (0..self.players())
                 .filter(|&j| j != i)

@@ -106,6 +106,12 @@ impl Shared {
         movers
     }
 
+    /// The movers of the set's collide pass, once a seat has run it ([`Shared::held`]): a prop a
+    /// seat's strike files searches in that pass, its set's movers added there (B33).
+    pub(crate) fn movers_mut(&mut self) -> Option<&mut PropMovers> {
+        self.movers.as_mut()
+    }
+
     /// The set lent to a seat that flies the plane (S259), in its traffic's props for the plane's
     /// frame: [`Shared::held`], the seat's own movers dropped, as its own set is empty.
     pub fn lend(&mut self, sim: &mut Sim, dt: F, world: &mut dyn World) {

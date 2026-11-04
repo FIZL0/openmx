@@ -639,7 +639,7 @@ fn sim_tick(kit: &Kit, run: Run, frame: u32) -> Option<Vec<String>> {
         bad.push("the wreck bike's strike not spent".to_string());
     }
     let n = sim.traffic.props.collections.len();
-    sim.props_step(dt, &PropMovers { sets: vec![movers], of: vec![Some(0); n], near: Vec::new() });
+    sim.props_step(dt, &PropMovers { sets: vec![movers], of: vec![Some(0); n], near: Vec::new(), keys: Vec::new() });
     let ball = &sim.traffic.props.collections[run.ball].bones[0].body;
     bad.extend(bodies_differ("the ball", ball, &ee_body(&after, after.u32_at(object(&after, run.ball) + obj::BODY))));
     bad.extend(bodies_differ("the wreck bike", &sim.rider.crash.as_ref().unwrap().bike.body, &ee_body(&after, WRECK_BODY)));

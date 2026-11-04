@@ -8,9 +8,13 @@
 //! [`Sim::step`] on an idle pad (aim.py's ride has no pad) through free09's ground and scene.
 //!
 //! Image `s195-f27a1-N` is the capture's row N+1 (`context/capture/s195/f27a1.csv`): the strike is
-//! between rows 2903 and 2904, so every image is past it, and the bike pushes the ball on for two
-//! more ticks (27.5, 33.4, then 35.2 ft/s).
+//! between rows 2903 and 2904, and the bike pushes the ball on for two more ticks (27.5, 33.4, then
+//! 35.2 ft/s). Image 2902 is the tick before the strike, ball 2 asleep: made for B33 by re-running
+//! aim.py and knock.py `--at 2902` from the same state (research/s195), its later images f27a1's
+//! word for word.
 //!
+//! - [`the_strike_tick_is_the_originals`] (B33): 2902 one tick on, the bike's rays waking the ball,
+//!   whose probe searches in the same pass: its body, its list and the bike's, bit for bit;
 //! - [`the_launch_goes_on_as_the_original`]: images 2904 and 2905 one tick on, ball 2's body and the
 //!   bike's chassis against the next image, bit for bit;
 //! - [`the_balls_probe_pushes_it_off_the_bike`] (B29): 2903 one tick on, where the ball's probe files
@@ -18,7 +22,7 @@
 //! - [`the_ball_flies_clear_of_the_bike`]: image 2903 ridden 60 ticks against the capture's rows,
 //!   the bike never touching the ball again, as there;
 //! - [`a_struck_ball_is_heard_in_its_strike_tick`] (B28): ball 2 put back unwoken under image
-//!   2903's bike, its probe heard on the bike's frame in the tick the bike's rays wake it.
+//!   2903's bike, its probe heard and filed on the bike's frame in the tick the bike's rays wake it.
 //!
 //! The images, the capture and the disc are game data, git-ignored: absent, the tests skip.
 
@@ -484,7 +488,8 @@ fn seeded(ee: &Ee, free: &Free09, tables: &Arc<Tables>) -> Sim {
     let mut sim = Sim::with_rider(0, Arc::clone(tables), free.phy.clone(), rider);
     sim.traffic.props = free.set.clone();
     let woken = seed(ee, &mut sim.traffic.props);
-    assert!(woken.contains(&BALL), "ball {BALL} woken: {woken:?}");
+    let asleep = ee.u32_at(collections(ee)[BALL] + coll::FLAGS) & coll::ACTIVE == 0;
+    assert!(woken.contains(&BALL) || asleep, "ball {BALL} woken: {woken:?}");
     sim
 }
 
@@ -605,14 +610,16 @@ fn one_tick(from: u32) -> Option<Vec<String>> {
         }
         // The bike's list as its frame resolves it: its entries on the props and the props' probes'
         // mirrors, which the port hands its frame and does not keep, so they are made again on a
-        // second ride off the image, up to its strike. The arms are its resolve's, not checked here.
+        // second ride off the image, up to its strike, with the struck props' own searches (B33).
+        // The arms are its resolve's, not checked here.
         let mut again = seeded(&ee, &free, &tables);
         let bike = game_sim::flight_search::Bike { transform: again.rider.ride.transform(), in_world: true };
         again.traffic.props.hear_ridden(&[bike]);
         again.traffic.props.file_ridden(true);
         let dt = F(ee.f32_at(addr("frame_dt").unwrap()));
-        again.traffic.frame_held(dt, &mut world);
-        let strike = again.prop_strike(0, dt);
+        let mut movers = again.traffic.frame_held(dt, &mut world);
+        let mut strike = again.prop_strike(0, dt);
+        again.traffic.props.strike_in(&mut strike, dt, &mut world, &mut movers);
         let port: Vec<Vec<u32>> = strike.contacts.iter().map(|e| port_bits(e, false)).collect();
         if port != list_bits(&next, next.u32_at(the_bike(&next) + 0x7d0), false) {
             bad.push(format!("{from}: the bike's list"));
@@ -639,6 +646,17 @@ fn the_launch_goes_on_as_the_original() {
 #[test]
 fn the_balls_probe_pushes_it_off_the_bike() {
     let Some(bad) = one_tick(2903) else { return };
+    assert!(bad.is_empty(), "{bad:#?}");
+}
+
+/// **The strike tick** (B33), 2902 -> 2903, off image 2902 (the tick before the strike, B33's run
+/// of f27a1's knock: research/s195/knock.py --at 2902, whose 2903..2906 are f27a1's word for word).
+/// Ball 2 is asleep and unfiled; the bike's rays strike it, the wake files it on the props' node, and
+/// the node's walk collides its probe in the same pass: its list is the strike's mirror, then its own
+/// probe's entries, and its body and the bike's chassis after the step are image 2903's, bit for bit.
+#[test]
+fn the_strike_tick_is_the_originals() {
+    let Some(bad) = one_tick(2902) else { return };
     assert!(bad.is_empty(), "{bad:#?}");
 }
 
@@ -697,13 +715,14 @@ fn the_ball_flies_clear_of_the_bike() {
     assert!(again.is_empty(), "the bike strikes the ball again on ticks {again:?} after image 2903");
 }
 
-/// **A struck ball is heard in its strike tick** (B28). The original's node re-reads its filed count
-/// at every step of its collide walk, and the bike's strike files the woken ball behind the bike, so
-/// the ball's probe searches in the strike's own tick: f27a1's queue holds the ball's entry on the
-/// bike's frame on the strike tick, at the ball's shock peak. No image before the strike exists, so
-/// this stands one in: image 2903's ride with ball 2 as the track loads it (asleep, unfiled), where
-/// the bike's rays strike it. One step hears the ball's probe on the bike, and the hearing moves
-/// nothing: ball and chassis are bit for bit those of the same step with no bike frame heard.
+/// **A struck ball is heard in its strike tick** (B28), and its probe's entry on the bike is filed
+/// there (B33). The original's node re-reads its filed count at every step of its collide walk, and
+/// the bike's strike files the woken ball behind the bike, so the ball's probe searches in the
+/// strike's own tick. Image 2902 checks that bit for bit ([`the_strike_tick_is_the_originals`]);
+/// this stands in where that image is missing: image 2903's ride with ball 2 as the track loads it
+/// (asleep, unfiled), where the bike's rays strike it. One step hears the ball's probe on the bike
+/// and files it on the ball's list behind the strike's mirrors; with no bike frame heard, the list
+/// holds the mirrors alone and the ball ends elsewhere.
 #[test]
 fn a_struck_ball_is_heard_in_its_strike_tick() {
     let tables = Arc::new(Tables::build());
@@ -733,13 +752,11 @@ fn a_struck_ball_is_heard_in_its_strike_tick() {
     let mut deaf = unwoken(false);
     step(&mut deaf, &mut world, &ee);
     assert!(deaf.traffic.props.collections[BALL].heard.0.is_empty());
+    let list = |sim: &Sim| sim.traffic.props.collections[BALL].objects[0].collision.as_ref().unwrap().record.contacts.iter().map(|e| e.kind).collect::<Vec<_>>();
+    let (heard, unheard) = (list(&sim), list(&deaf));
+    assert_eq!(heard.last(), Some(&0), "the ball's probe on the bike, behind the strike's mirrors: {heard:?}");
+    assert_eq!(heard[..heard.len() - 1], unheard[..], "the strike's mirrors first, as with no bike frame heard");
+    assert!(unheard.iter().all(|&k| k == 1), "no bike frame: the mirrors alone");
     let (a, b) = (ball.bones[0].body, deaf.traffic.props.collections[BALL].bones[0].body);
-    for (what, p, o) in [
-        ("ball position", a.position, b.position),
-        ("ball velocity", a.velocity, b.velocity),
-        ("ball shock peak", a.shock_peak, b.shock_peak),
-        ("bike velocity", sim.rider.ride.chassis.vel, deaf.rider.ride.chassis.vel),
-    ] {
-        assert_eq!(p.to_bits(), o.to_bits(), "{what}: the hearing moved it");
-    }
+    assert_ne!(a.position.to_bits(), b.position.to_bits(), "the probe's entry pushes the ball");
 }

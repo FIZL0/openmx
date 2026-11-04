@@ -210,6 +210,7 @@ replay hash is unchanged.
 - [ ] **R29** (follow-up, low) handling::backflip (SLUS-21104's, MD40) writes its lip as chassis.vel.y() > 5.0 && contact_vel.z() > 30.0 where the original branches on c.ole (!(v <= 5)): a NaN goes the other way. Check with a NaN state in tests/mxvatv_air.rs and match the compare if it reds (untamed::backflip has the original's form).
 - [ ] **F33** (follow-up, low) tests/kiowa_capture.rs the_rotors_probe_is_the_images unwraps ctx("states/c14-kiowa.ee.bin") and panics in a slot without the image (s1 lacks it; it is in ../kept-context/*/states). Skip like the file's other tests when the image is missing.
 - [ ] **B32** (follow-up, low) The splash's build label (splash_build, menu_screens.rs) sits at the stage's top, top().max(0), so on a phone held upright it floats mid-screen over the scene, as the hint tab did before P278; pin it to the frame's top edge
+- [ ] **B34** (follow-up, low) B33 follow-up: a prop the riding bike's strike files searches in the same pass (PropSet::strike_in) with its own probe only. Still a tick late or heard only: (1) its rays against the other props (prop_props) in that pass, (2) its entries on downed wreck bikes (search_late gets no wreck hulls there), (3) props struck by the plane (flight.rs) or Kiowa, which still use PropSet::strike (B28 hearing). Each needs an original image the tick before such a strike to prove it; knock.py --at FRAME makes one (journal 2026-11-03-b33-struck-prop-searches-in-its-strike-tick).
 
 
 ### Stretch

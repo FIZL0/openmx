@@ -793,14 +793,14 @@ impl crate::Sim {
         }
         // The props' step waits for the bike's strike and push (S197a, [`crate::prop_contact`]), the
         // wreck bike on their node (S243).
-        let prop_movers = self.frame_held_wrecked(dt, world, &[(0, self.players())]);
+        let mut prop_movers = self.frame_held_wrecked(dt, world, &[(0, self.players())]);
         self.lend_cars();
         let mut bump = bump;
         let cars = self.car_contacts(0, world, dt);
         if let Some(b) = bump.as_deref_mut() {
             b.contacts = crate::mover_contact::merged(std::mem::take(&mut b.contacts), cars);
             let strike = self.prop_strike_seated(b.vehicles.len() + b.planes.len(), dt);
-            self.strike_into(b, strike);
+            self.strike_into(b, strike, dt, world, &mut prop_movers);
         }
         // The wheels stand on the props for the frame (S210, [`crate::prop_wheel`]).
         self.lend_props(0);
@@ -1074,7 +1074,7 @@ impl Sim {
         }
         // The props' step waits for the bike's strike and push (S197a, [`crate::prop_contact`]).
         // Shared, the first seat stepped this tick runs their collide pass, in its traffic's place.
-        let prop_movers = match shared.as_mut() {
+        let mut prop_movers = match shared.as_mut() {
             Some((s, _)) => s.held(self, dt, world),
             None => self.frame_held_wrecked(dt, world, &[(0, self.players())]),
         };
@@ -1100,7 +1100,12 @@ impl Sim {
         };
         let mut bump = bump;
         if let Some(b) = bump.as_deref_mut() {
-            self.strike_into(b, strike);
+            // Shared, the pass's movers are the set's, kept for its step ([`crate::prop_seats::Shared::finish`]).
+            let movers = match shared.as_mut().and_then(|(s, _)| s.movers_mut()) {
+                Some(m) => m,
+                None => &mut prop_movers,
+            };
+            self.strike_into(b, strike, dt, world, movers);
         }
         // Shared, the seat's wreck bike was on the props' node with every seat's (S260): what their
         // rays struck on it goes to its frame; alone, it was on the node too (S243).
