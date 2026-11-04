@@ -584,7 +584,7 @@ fn seeded_rider(ee: &Ee, rider: u32, phy: &Phy, col: &Arc<BikeCol>) -> Rider {
     rider
 }
 /// One tick of the port's flight: the frame it stepped and the plane after it.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Tick {
     t: u32,
     state: [[u32; 3]; 2],
@@ -593,6 +593,10 @@ struct Tick {
     /// does not step P2's rider, a downed P2's wreck bike's body velocity and position, S276).
     p2: [[u32; 3]; 2],
     p2_wreck: Option<u8>,
+    /// P2's wreck after the tick, while P2 is down ([`fly_two`]; F30).
+    wreck: Option<Box<game_sim::ride::Crash>>,
+    /// The plane's contact list after the tick (F30).
+    plane_list: Vec<game_sim::contact::Contact>,
 }
 
 fn three(v: Vf) -> [u32; 3] {
@@ -652,7 +656,7 @@ fn fly_by(
             sim.step(dt, &controls, world);
             let p = sim.plane.as_ref().unwrap();
             let p2 = sim.others[0].rider.crash.as_ref().map_or([[0; 3]; 2], |c| [three(c.bike.body.velocity), three(c.bike.body.position)]);
-            out.push(Tick { t, state: [three(p.body.velocity), three(p.body.position)], crash: p.crash.reason, p2, p2_wreck: None });
+            out.push(Tick { t, state: [three(p.body.velocity), three(p.body.position)], crash: p.crash.reason, p2, p2_wreck: None, wreck: None, plane_list: p.record.contacts.clone() });
         }
         Some((seed, out))
     })
@@ -785,6 +789,8 @@ fn fly_two_by(
                 crash: p.crash.reason,
                 p2: [three(ch.vel), three(ch.cofg_world)],
                 p2_wreck: said.wreck.map(|w| w.0),
+                wreck: seats[1].rider.crash.clone().map(Box::new),
+                plane_list: p.record.contacts.clone(),
             });
         }
         Some((seed, out))
@@ -813,7 +819,26 @@ fn wrecked_p2(ee: &Ee, rider: u32, reason: u32, r: &mut Rider) {
     let wreck = game_sim::trick::Wreck(reason as u8);
     let mut crash = Crash::begin(&r.ride, wreck, &w.part, w.inertia, &w.wrecks, None);
     let bike = &mut crash.bike;
-    let body = &mut bike.body;
+    read_body(ee, b, &mut bike.body);
+    bike.collider.cofg_world = quad(ee, c + 0xa0);
+    bike.collider.normal_speed = F(ee.f32_at(c + 0x1d8));
+    bike.collider.relative = quad(ee, c + 0x1e0);
+    let rec = &mut bike.record;
+    let flag = |o: u32| ee.u32_at(c + o) != 0;
+    (rec.touching, rec.touching_other, rec.on_ground, rec.on_object) = (flag(0x40), flag(0x44), flag(0x48), flag(0x4c));
+    (rec.swept_from, rec.swept_to) = (quad(ee, c + 0xd0), quad(ee, c + 0xe0));
+    let n = ee.u32_at(c + 0xf8);
+    rec.node = game_sim::contact::Node { rows: [0, 1, 2].map(|k| quad(ee, n + 0x80 + 16 * k)), origin: quad(ee, n + 0xb0) };
+    crash.origin = crash.bike.origin();
+    (crash.holding, crash.landed) = (false, true);
+    crash.clock = crash.throw.hand_hold_time;
+    r.state.wreck = Some(wreck);
+    r.crash = Some(crash);
+}
+
+/// The original's rigid body at `b` read into `body` (the plane's and the wreck bike's layout,
+/// [`seeded_plane`]); what the layout does not hold stays as it was.
+fn read_body(ee: &Ee, b: u32, body: &mut game_sim::biplane::Body) {
     body.enabled = ee.u32_at(b) != 0;
     body.inv_mass = F(ee.f32_at(b + 0x10));
     for (v, o) in [
@@ -841,20 +866,6 @@ fn wrecked_p2(ee: &Ee, rider: u32, reason: u32, r: &mut Rider) {
     ] {
         *v = quad(ee, b + o);
     }
-    bike.collider.cofg_world = quad(ee, c + 0xa0);
-    bike.collider.normal_speed = F(ee.f32_at(c + 0x1d8));
-    bike.collider.relative = quad(ee, c + 0x1e0);
-    let rec = &mut bike.record;
-    let flag = |o: u32| ee.u32_at(c + o) != 0;
-    (rec.touching, rec.touching_other, rec.on_ground, rec.on_object) = (flag(0x40), flag(0x44), flag(0x48), flag(0x4c));
-    (rec.swept_from, rec.swept_to) = (quad(ee, c + 0xd0), quad(ee, c + 0xe0));
-    let n = ee.u32_at(c + 0xf8);
-    rec.node = game_sim::contact::Node { rows: [0, 1, 2].map(|k| quad(ee, n + 0x80 + 16 * k)), origin: quad(ee, n + 0xb0) };
-    crash.origin = crash.bike.origin();
-    (crash.holding, crash.landed) = (false, true);
-    crash.clock = crash.throw.hand_hold_time;
-    r.state.wreck = Some(wreck);
-    r.crash = Some(crash);
 }
 
 /// How many of the port's ticks the capture confirms, bit for bit (tests/fly_and_collide.rs's rule):
@@ -1136,7 +1147,7 @@ fn row_137911_is_the_wreck_bikes_first_substep() {
     let digits = |v: Vf| [0, 1, 2].map(|k| format!("{:.5}", v.0[k]));
     let first = |reason| {
         let (flown, kept) = game_sim::flight::substeps(|| fly_by(137910, 137911, &dt, &segment_pad, &|_| false, reason));
-        flown.map(|(_, ticks)| (kept, ticks[0]))
+        flown.map(|(_, ticks)| (kept, ticks[0].clone()))
     };
     let Some((kept, tick)) = first(7) else { return };
     assert_eq!(kept.len(), 2, "two substeps a tick");
@@ -1237,4 +1248,198 @@ fn planes_flown_together_meet_p2s_wreck_bike() {
         let Some(together) = fly_with_far(Some(first)) else { return };
         assert_eq!(together, alone, "plane 0 {} the far plane: as alone", if first { "ahead of" } else { "after" });
     }
+}
+
+/// **F30's probe: P2's wreck bike, the original's images against the port's**, 137854..137858.
+/// Each image holds the state after the tick before its frame ([`fly_by`] seeds tick `from` off
+/// image `from`); the port is [`fly_two`] from 137845. Prints the plane's body and the wreck bike's
+/// (`*(P2 + 0x7a8) + 0x110`) both ways. Run with `--ignored`.
+#[test]
+#[ignore]
+fn f30_wreck_bike_images_against_the_port() {
+    let Some(cap) = capture() else { return };
+    let Some((_, ticks)) = fly_two(137845, 137860, FIELD_ZERO) else { return };
+    if std::env::var_os("F30_CRASH").is_some() {
+        let mut c = ticks.iter().find(|k| k.t == 137855).unwrap().wreck.clone().unwrap();
+        c.bike.record.contacts.clear();
+        println!("{c:#?}");
+    }
+    let v = |x: Vf| format!("({:?}, {:?}, {:?}, {:?})", x.0[0], x.0[1], x.0[2], x.0[3]);
+    for f in 137854..=137858 {
+        let Some(ee) = image(f) else { return };
+        let plane = quad(&ee, ee.u32_at(plane0(&ee) + plane_at::BODY) + 0x70);
+        let part = ee.u32_at(p2(&ee) + 0x7a8);
+        println!("image {f}: plane vel {}; row {f} vel {:?}", v(plane), cap.state(f)[0].map(f32::from_bits));
+        let port = ticks.iter().find(|k| k.t + 1 == f).unwrap();
+        println!("  port after {}: plane vel {:?}", port.t, port.state[0].map(f32::from_bits));
+        if part == 0 {
+            println!("  no wreck part");
+            continue;
+        }
+        let mut theirs = game_sim::biplane::Body::default();
+        read_body(&ee, ee.u32_at(part + 0x110), &mut theirs);
+        let c = ee.u32_at(part + 0x120);
+        if let Some(w) = &port.wreck {
+            let n = ee.u32_at(c + 0xf8);
+            let bits = |x: Vf| x.0.map(f32::to_bits);
+            for k in 0..4 {
+                let theirs = bits(quad(&ee, n + 0x80 + 16 * k));
+                let ours = bits(if k < 3 { w.bike.record.node.rows[k as usize] } else { w.bike.record.node.origin });
+                println!("  {} node row {k}: {theirs:08x?} | {ours:08x?}", if theirs == ours { ' ' } else { '*' });
+            }
+        }
+        if let Some(w) = &port.wreck {
+            let pb = ee.u32_at(plane0(&ee) + plane_at::BODY);
+            let wb = ee.u32_at(part + 0x110);
+            let plane_obj = (0x0010_0000..0x01ff_0000u32).step_by(16).map(|a| a + 0x0).find(|&a| ee.u32_at(a + 0xf4) == pb && ee.u32_at(a + 0x108) != 0);
+            let name = |o: u32| if o == 0 { "-".to_string() } else if o == c { "wreck".into() } else if Some(o) == plane_obj { "plane".into() } else { format!("{o:#x}") };
+            println!("  wreck body {wb:#x} object +0xf4 {:#x}; plane object {plane_obj:x?}", ee.u32_at(c + 0xf4));
+            let show = |what: &str, obj: u32, ours: &[game_sim::contact::Contact]| {
+                let n = ee.u32_at(obj + 0x100);
+                let at = ee.u32_at(obj + 0x108);
+                println!("  {what}'s list: original {n}, port {}", ours.len());
+                for k in 0..n.max(ours.len() as u32) {
+                    if k < n {
+                        let e = at + 0x80 * k;
+                        println!("    orig {k}: kind {} on {} n {} pt {} other {} mover {:#x} surf {}", ee.u32_at(e), v(quad(&ee, e + 0x20)), v(quad(&ee, e + 0x30)), v(quad(&ee, e + 0x40)), name(ee.u32_at(e + 0x74)), ee.u32_at(e + 0x78), ee.u32_at(e + 0x70) as i32);
+                    }
+                    if let Some(o) = ours.get(k as usize) {
+                        println!("    port {k}: kind {} on {} n {} pt {} other {:?} mover {:?} surf {}", o.kind, v(o.on_body), v(o.normal), v(o.point), o.other, o.mover, o.surface);
+                    }
+                }
+            };
+            show("wreck", c, &w.bike.record.contacts);
+            if let Some(po) = plane_obj {
+                show("plane", po, &port.plane_list);
+            }
+        }
+        if std::env::var_os("F30_RAW").is_some() {
+            let n = ee.u32_at(c + 0xf8);
+            for (what, at, len) in [("object", c, 0x200), ("node", n, 0xc0)] {
+                println!("  {what} at {at:#x}:");
+                for o in (0..len).step_by(16) {
+                    let w: Vec<String> = (0..4).map(|k| format!("{:>08x} {:<12}", ee.u32_at(at + o + 4 * k), ee.f32_at(at + o + 4 * k))).collect();
+                    println!("    +{o:#05x} {}", w.join(" "));
+                }
+            }
+        }
+        println!("  wreck object: cofg_world {} touching {} {} relative {}", v(quad(&ee, c + 0xa0)), ee.u32_at(c + 0x40), ee.u32_at(c + 0x44), v(quad(&ee, c + 0x1e0)));
+        let fields = |b: &game_sim::biplane::Body| {
+            let mut out = vec![("enabled", format!("{}", b.enabled)), ("inv_mass", format!("{:?}", b.inv_mass.0))];
+            for (n, x) in [
+                ("damping", b.damping),
+                ("last_position", b.last_position),
+                ("position", b.position),
+                ("velocity", b.velocity),
+                ("last_force", b.last_force),
+                ("force", b.force),
+                ("accel", b.accel),
+                ("shock_peak", b.shock_peak),
+                ("shock", b.shock),
+                ("step", b.step),
+                ("inv_inertia", b.inv_inertia),
+                ("ang_damping", b.ang_damping),
+                ("last_quat", b.last_quat),
+                ("quat", b.quat),
+                ("cofg", b.cofg),
+                ("moment", b.moment),
+                ("last_moment", b.last_moment),
+                ("rates", b.rates),
+                ("ang_accel", b.ang_accel),
+                ("twist_peak", b.twist_peak),
+                ("twist", b.twist),
+            ] {
+                out.push((n, v(x)));
+            }
+            out
+        };
+        let a = fields(&theirs);
+        let b = port.wreck.as_ref().map(|o| fields(&o.bike.body)).unwrap_or_default();
+        for (k, (n, x)) in a.iter().enumerate() {
+            let o = b.get(k).map_or("-", |p| p.1.as_str());
+            println!("  {} {n:<13} {x:<58} | {o}", if *x == o { ' ' } else { '*' });
+        }
+    }
+}
+
+/// **F30: the original's own tick 137856 off image 137856**, the level's collision node's update run
+/// by the oracle (tests/plane_meets_plane.rs's way), each contact resolve logged: whose list, which
+/// substep. The plane's and the wreck bike's bodies after it are image 137857's, bit for bit, and the
+/// wreck bike resolves between the plane's two substeps (F30). Run with `--ignored`; skips without
+/// the images (`research/f30/index.md`).
+#[test]
+#[ignore]
+fn f30_the_originals_tick_137856() {
+    const NODE_UPDATE: u32 = 0x0026_f800;
+    const RESOLVE: u32 = 0x0027_0dc0;
+    let (Some(mut ee), Some(after)) = (image(137856), image(137857)) else { return };
+    let plane_body = ee.u32_at(plane0(&ee) + plane_at::BODY);
+    let part = ee.u32_at(p2(&ee) + 0x7a8);
+    let (wreck_body, wreck_obj) = (ee.u32_at(part + 0x110), ee.u32_at(part + 0x120));
+    // The node: an object list (count at +0x30, the array at +0x38) holding the wreck bike's object.
+    let ram = ee.ram.len() as u32;
+    let array = (0x0010_0000..ram - 4).step_by(4).filter(|&a| ee.u32_at(a) == wreck_obj).collect::<Vec<_>>();
+    let mut node = None;
+    for a in &array {
+        for back in 0..32u32 {
+            let start = a - 4 * back;
+            for n in (0x0010_0000..ram - 0x40).step_by(4) {
+                if ee.u32_at(n + 0x38) == start && (back..back + 16).contains(&ee.u32_at(n + 0x30)) && ee.u32_at(n + 0x30) > back {
+                    node = Some(n);
+                }
+            }
+            if node.is_some() {
+                break;
+            }
+        }
+        if node.is_some() {
+            break;
+        }
+    }
+    let node = node.expect("the node listing the wreck bike's object");
+    let objects: Vec<u32> = (0..ee.u32_at(node + 0x30)).map(|k| ee.u32_at(ee.u32_at(node + 0x38) + 4 * k)).collect();
+    let names = |o: u32| if o == wreck_obj { "wreck".to_string() } else if ee.u32_at(o + 0xf4) == plane_body { "plane".into() } else { format!("{o:#x} (body {:#x})", ee.u32_at(o + 0xf4)) };
+    println!("node {node:#x}: objects {:?}", objects.iter().map(|&o| names(o)).collect::<Vec<_>>());
+    let named: Vec<(u32, String)> = objects.iter().map(|&o| (o, names(o))).collect();
+    let log = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let seen = std::rc::Rc::clone(&log);
+    ee.hooks.insert(RESOLVE, Box::new(move |ee: &mut Ee| {
+        let (r, first) = (ee.r(4) as u32, ee.r(5) as u32);
+        let who = named.iter().find(|(o, _)| *o == r).map_or(format!("{r:#x}"), |(_, n)| n.clone());
+        seen.borrow_mut().push(format!("{who} first {first} list {}", ee.u32_at(r + 0x100)));
+        let (ra, sp, stack) = (ee.r(31), ee.r(29), ee.stack);
+        ee.stack = (sp as u32 - 0x400) & !0xf;
+        ee.call(RESOLVE, &[u64::from(r), u64::from(first)], &[], 50_000_000);
+        ee.stack = stack;
+        ee.set(29, sp);
+        ee.set(31, ra);
+        ee.pc = RESOLVE;
+    }));
+    // The tick's own step is the next image's frame_dt (the frame writes it before its update).
+    let dt = after.f32_at(addr("frame_dt").unwrap());
+    println!("frame_dt {dt:?} ({:#x}); image 137857's {:#x}", dt.to_bits(), after.f32_at(addr("frame_dt").unwrap()).to_bits());
+    ee.call(NODE_UPDATE, &[u64::from(node)], &[dt], 2_000_000_000);
+    ee.hooks.clear();
+    for l in log.borrow().iter() {
+        println!("  resolve {l}");
+    }
+    let v = |x: Vf| format!("({:?}, {:?}, {:?})", x.0[0], x.0[1], x.0[2]);
+    let mut off = Vec::new();
+    for (what, b) in [("plane", plane_body), ("wreck", wreck_body)] {
+        for (n, o) in [("velocity", 0x70), ("position", 0x60), ("rates", 0x1b0), ("quat", 0x170), ("last_force", 0x80), ("last_moment", 0x1a0)] {
+            let (x, y) = (quad(&ee, b + o), quad(&after, b + o));
+            let same = x.0.map(f32::to_bits) == y.0.map(f32::to_bits);
+            println!("  {} {what} {n:<11} oracle {:<52} image {}", if same { ' ' } else { '*' }, v(x), v(y));
+            if !same {
+                off.push(format!("{what} {n}"));
+            }
+        }
+    }
+    // The node's bodies resolve one after another each substep, the wreck bike after the plane:
+    // one dynamics world, not the plane's frame and then the wreck bike's (the port's, S276).
+    let order: Vec<String> = log.borrow().iter().map(|l| l.split(" first").next().unwrap_or("").to_string()).collect();
+    let (pi, wi) = (order.iter().position(|w| w == "plane"), order.iter().position(|w| w == "wreck"));
+    let again = order.iter().skip(wi.map_or(0, |w| w + 1)).position(|w| w == "plane");
+    assert!(pi < wi && again.is_some(), "the wreck bike resolves between the plane's substeps: {order:?}");
+    assert!(off.is_empty(), "the oracle's tick 137856 is image 137857's but for {off:?}");
 }

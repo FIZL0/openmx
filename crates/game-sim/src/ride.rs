@@ -3502,6 +3502,8 @@ impl Crash {
         let (nose, up) = ride.wreck_axes();
         let quat = crate::flight::spawn_turn(nose, up);
         let mut bike = WreckBike::new(part, inertia, math::transform_point(&m, part.cofg), quat);
+        let look = math::basis(Vf::ZERO, nose, up, false, true);
+        bike.record.node.rows = [look.0[0], look.0[1], look.0[2]];
         let still = Vf::new(0.0, 0.0, 0.0, 1.0);
         bike.body.velocity = still.merge(Dest::XYZ, ride.chassis.vel);
         bike.body.rates = still.merge(Dest::XYZ, spin.unwrap_or(ride.chassis.ang_vel));
