@@ -20,6 +20,8 @@
 //! - The 360 ([`spin`], MD93b): SLUS-21104's on the same input. The fourth trick button arms it, a
 //!   bound 360 control fires it on the lip at once with torques of its own, the torque decays only with
 //!   no trick button held and the stick off centre, and its end clears a stunt id over 48.
+//! - The vehicle update ([`vehicle_update`], MD93c): SLUS-21104's, whose calls it reports as
+//!   [`UpdateCall`]s, but a remote bike's cleared stick has its angle and length worked out again.
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
 use crate::air::{Air, Chassis, Params as AirParams, Step as AirStep};
@@ -709,4 +711,121 @@ pub fn ride_spin(t: &crate::air::SpinTuning, p: &AirParams, air: &mut Air, s: &m
     if out.stunt_ended {
         s.came_round = true;
     }
+}
+
+/// What Untamed's vehicle update ([`vehicle_update`], MD93c) calls, in the order it calls them. Each is
+/// handed the bike, and those with a `dt` the frame's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum UpdateCall {
+    /// The ghost's step (vt `+0x3a4`), first, whenever the game-wide skip bit is clear.
+    Ghost(F),
+    /// A local bike's: the wreck test (vt `+0x494`, handed 0) and the stunt idle (vt `+0x4e4`).
+    WreckTest(F),
+    StuntIdle(F),
+    /// A remote bike's (vehicle states 3 and 4), with its inputs cleared: the physics listeners stepped
+    /// (the ones at the bike's `+0x30`), the node put where the body is (vt `+0x4ec`, no `dt`), the stunt
+    /// clocks (vt `+0x4e0`), and the wreck reason handed to the remote's setter (vt `+0x498`).
+    Listeners(F),
+    NodeFromBody,
+    StuntClocks(F),
+    RemoteWreck { dt: F, reason: u32 },
+    /// The timer's object told the timer ran out (its vt `+0x90`; only when there is one).
+    TimerOut,
+    /// The vehicle's own update (the base class's), last; with no vehicle state it is all that runs.
+    VehicleUpdate(F),
+}
+
+/// What Untamed's vehicle update reads and writes on the bike.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Update {
+    /// The vehicle state's kind (its `+0x28`; the state is the bike's `+0xbb4`). `None`: no state.
+    pub vehicle_state: Option<u32>,
+    /// A game-wide bit that skips the ghost, the wreck test and the rest of the rider's half (bit 3 of a
+    /// global flag byte; what sets it was not traced).
+    pub skip: bool,
+    /// The limited stick (`+0x1298`, `+0x129c`), its angle and length (`+0x12a8`, `+0x12ac`), the brake
+    /// (`+0x340`) and one more input word (`+0x12d0`): a remote bike's are cleared.
+    pub stick: (F, F),
+    pub stick_angle: F,
+    pub stick_length: F,
+    pub brake: F,
+    pub input: u32,
+    /// The wreck reason (`+0xc70`), handed to [`UpdateCall::RemoteWreck`].
+    pub wreck_reason: u32,
+    /// Frames until the one-frame request (`+0x34c`) is raised (`+0x17b0`).
+    pub request_countdown: i32,
+    pub request: u32,
+    /// A timer (`+0x17bc`) and whether its object is there (the `+0x30` of what `+0x17b8` points at).
+    pub timer: F,
+    pub timed: bool,
+    /// A word the update zeroes last (`+0x1690`).
+    pub cleared: u32,
+}
+
+/// The vehicle state kinds a remote bike rides on.
+const REMOTE: [u32; 2] = [3, 4];
+
+/// **Untamed's vehicle update** (SLUS-21701's bike override of the vehicle's), once a frame. It is
+/// SLUS-21104's ([`crate::quad::Call::BikeVehicleUpdate`]), on Untamed's fields and slots, with one
+/// addition: a remote bike's stick angle and length are worked out again after its stick is cleared.
+///
+/// With no vehicle state only the vehicle's own update runs. Else, unless the game-wide skip bit is set:
+/// the ghost steps; then, with the vehicle state (read again: the ghost may have changed it) of kind 3
+/// or 4, the stick, the brake and the input word are cleared, the stick's angle (`acos` of `x` over the
+/// length off the arc cosine table, negated for a `y` below 0) and length are set (for the cleared stick,
+/// the table's middle and 0), and the listeners, node, stunt clocks and remote wreck run; any other
+/// bike runs the wreck test and the stunt idle. Then, skipped or not: the request countdown runs, and
+/// raises the request on reaching 0; a running timer counts down, and on running out tells its object
+/// and is zeroed; the vehicle's own update runs; and [`Update::cleared`] is zeroed.
+///
+/// `call` is handed each call with the state, which it may change: the update reads it again after.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
+pub fn vehicle_update(u: &mut Update, dt: F, table: &crate::air::AcosTable, mut call: impl FnMut(UpdateCall, &mut Update)) {
+    if u.vehicle_state.is_none() {
+        call(UpdateCall::VehicleUpdate(dt), u);
+        return;
+    }
+    if !u.skip {
+        call(UpdateCall::Ghost(dt), u);
+        if u.vehicle_state.is_some_and(|k| REMOTE.contains(&k)) {
+            u.stick = (F::ZERO, F::ZERO);
+            let (x, y) = u.stick;
+            let len2 = ps2_float::Acc::mula(x, x).madd(y, y);
+            let c = clamp_unit(clamp_unit(x * F::ONE.rsqrt(len2)));
+            let t = table.entries();
+            let s = (F::ONE + c) * F(ACOS_SCALE);
+            let i = s.to_i32();
+            let frac = s - F(fpu::from_i32(i));
+            let a = F(fpu::madd(fpu::mula(frac.0, t[i as usize + 1]), (F::ONE - frac).0, t[i as usize]));
+            u.stick_angle = if y < F::ZERO { -a } else { a };
+            u.stick_length = len2.sqrt();
+            u.brake = F::ZERO;
+            u.input = 0;
+            call(UpdateCall::Listeners(dt), u);
+            call(UpdateCall::NodeFromBody, u);
+            call(UpdateCall::StuntClocks(dt), u);
+            let reason = u.wreck_reason;
+            call(UpdateCall::RemoteWreck { dt, reason }, u);
+        } else {
+            call(UpdateCall::WreckTest(dt), u);
+            call(UpdateCall::StuntIdle(dt), u);
+        }
+    }
+    if u.request_countdown > 0 {
+        u.request_countdown -= 1;
+        if u.request_countdown == 0 {
+            u.request = 1;
+        }
+    }
+    if !(u.timer <= F::ZERO) {
+        u.timer = u.timer - dt;
+        if u.timer <= F::ZERO {
+            if u.timed {
+                call(UpdateCall::TimerOut, u);
+            }
+            u.timer = F::ZERO;
+        }
+    }
+    call(UpdateCall::VehicleUpdate(dt), u);
+    u.cleared = 0;
 }
