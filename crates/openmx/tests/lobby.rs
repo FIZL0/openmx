@@ -1267,35 +1267,49 @@ fn a_second_player_on_an_online_machine_sits_down_and_leaves_again() {
     let gas = Report::from_buttons(Control::Cross.mask());
     let mut lean = Report::from_buttons(Control::Cross.mask());
     lean.set_axis(2, 0x10);
-    let mut both = |ho: &mut online::Online, go: &mut online::Online, rounds: usize, done: &dyn Fn(&online::Online) -> bool| {
+    // K25: every step rides until what it checks has happened, not a number of rounds: how many
+    // ticks a round runs hangs on how soon the other machine's datagrams come through (ggrs' start
+    // handshake, its resends and the lobby's threads keep wall-clock time), which a busy machine
+    // stretches. `rounds` is only how long to wait before calling it a hang.
+    let mut both = |ho: &mut online::Online, go: &mut online::Online, rounds: usize, done: &dyn Fn(&online::Online, &online::Online) -> bool| {
         for _ in 0..rounds {
             ho.frame(gas, &mut hw, None).unwrap();
             go.frame_seats(&[gas, lean], &mut gw, None).unwrap();
             std::thread::sleep(Duration::from_millis(33));
-            if done(go) {
+            if done(ho, go) {
                 return true;
             }
         }
         false
     };
-    both(&mut ho, &mut go, 45, &|_| false);
+    // the seat's state as the guest's shell draws it
+    let seat = |go: &online::Online, d: usize| {
+        let mut sim = game_sim::Sim::new(1);
+        go.show(d, &mut sim, None).then_some(sim)
+    };
+    // how many ticks both machines have settled
+    let settled = |ho: &online::Online, go: &online::Online| ho.settled().0.len().min(go.settled().0.len());
+    assert!(both(&mut ho, &mut go, 900, &|ho, go| ho.ticks() >= 30 && go.ticks() >= 30), "the ride never got going");
     assert_eq!(go.my_seats(), [1]);
     go.sit(2).unwrap();
-    assert!(both(&mut ho, &mut go, 300, &|go| go.my_seats().len() == 2), "the guest's second player never sat");
+    assert!(both(&mut ho, &mut go, 900, &|_, go| go.my_seats().len() == 2), "the guest's second player never sat");
     // the host has the seat too by now (it made the restart)
     assert_eq!(ho.names()[2].as_deref(), Some("Guesty"), "the host sees the guest's second player, by the guest's name");
     assert_eq!(go.my_seats(), [1, 2]);
     assert_eq!(go.drawn()[..2], [1, 2], "the guest's players lead its shell seats");
     assert!(ho.can_sit() && go.can_sit());
-    both(&mut ho, &mut go, 60, &|_| false);
-    let mut sim = game_sim::Sim::new(1);
-    assert!(go.show(1, &mut sim, None), "the second player's seat is sat in and drawn");
+    let riding = |go: &online::Online| seat(go, 1).is_some_and(|sim| sim.ticks > 30);
+    assert!(both(&mut ho, &mut go, 900, &|_, go| riding(go)), "the second player's seat never rode 30 ticks");
+    let sim = seat(&go, 1).expect("the second player's seat is sat in and drawn");
     assert_eq!(net::rides::preset(&sim), Some(2), "on their own controller preset");
     assert!(sim.ticks > 30, "and riding: {} ticks", sim.ticks);
     // their pause's Leave Session: the guest's local player 2
     go.leave_session(1).unwrap();
-    assert!(both(&mut ho, &mut go, 300, &|go| go.my_seats().len() == 1), "the guest's second player never left");
-    both(&mut ho, &mut go, 60, &|_| false);
+    assert!(both(&mut ho, &mut go, 900, &|_, go| go.my_seats().len() == 1), "the guest's second player never left");
+    // and the two first players ride on: a second past the leave settled on both machines
+    let left = ho.ticks().max(go.ticks()) as usize;
+    let on = |ho: &online::Online, go: &online::Online| ho.names()[2].is_none() && settled(ho, go) > (left + 30).max(100);
+    assert!(both(&mut ho, &mut go, 900, &on), "the ride did not go on past the leave: {} settled from tick {left}", settled(&ho, &go));
     assert_eq!(ho.names()[2], None, "the seat is empty on the host");
     assert!(go.seated() && !go.leaving(), "the guest's first player rides on");
     let ((ha, hd), (ga, gd)) = (ho.settled(), go.settled());
