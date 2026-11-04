@@ -67,3 +67,7 @@ nodes past the four the ride holds. To get there, three port fixes were needed: 
 kept in step with its `Parts` copy, the backflip's node heights refreshed when the node moves, and the
 trigger stood before the sweep. `borrow.rs` proves the partner borrow on an object (on a body or a
 chassis) or a mover inside the quad: 4,000 rides, every region and pointer equal.
+
+MD75 closed (`12-closing-FINAL.md`). Once MD75e and MD75e1 landed, the brief's proof was in place and every
+subtask was ticked. The whole-frame tests were rerun here, and they ran rather than skipped: both frames
+equal on all 2,923 words. No code changed. The open gaps are the ones `11-whole-frame.md` lists.
