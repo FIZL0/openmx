@@ -9079,3 +9079,35 @@ atv_heap_free               atv 0x001b76d0 = free
 #   (14999.5); i = cvt.w.s; frac = s - i; a = mula(frac, t[i+1]) madd(1 - frac, t[i]) off *0x003ff538, negated for
 #   y < 0 (c.olt before the lerp) -> +0x12a8; sqrt.s(len2) -> +0x12ac. For the zeroed stick: t[14999..15000]'s
 #   middle and 0. Timer: c.ole timer, 0 / bc1t skips (an unordered timer runs; the decomp's 0 < timer does not).
+
+# MD93d — Untamed's (SLUS-21701) bike air state (PostProcess) 0x004f1270 (1524 B; f12 dt, a0 bike) against
+# SLUS-21104's 0x004d9290 (1544 B), and the no-hander 0x004f3c70 (1332 B) against 0x004dbd10 (1328 B).
+# The air state is ported as handling::untamed::air_state (calls as untamed::AirCall) and proved by
+# tests/untamed_reworked.rs off context/untamed/ram/nat_or.bin. Comment rows only, as # MD81a. Journal:
+# research/journal/2026-11-03-md93d-untamed-bike-step. Read the same way as # MD93c. Diffed with
+# research/md81a/sdiff.py, with the frame's addiu $sp masked, the MEM regex taking any base register, and the
+# bike register ($s0 in SLUS-21104, $s1 in SLUS-21701) renamed to one name.
+#   No-hander: scheduling only. $f6 <-> $f5 swapped, and one mul/adda/madd len2 block reordered to the same sum.
+#   Fields +0xb8 -> +0xe8 (body), 0xc38 -> 0xc28, 0x1238 -> 0x1228, 0x12e8 -> 0x12f8, 0x1360/68/70/74/78 +0x10,
+#   wheels 0x17b0/b4 -> 0x17f0/f4. Acos table ptr/scale 0x003ea9c0/0x003ea9d8 -> 0x003ff538/0x003ff550. Compare
+#   quadword 0x00396fc0 -> 0x003b5f60. Callees 0x001351d0 -> 0x00132f40 (quat axes), 0x00129aa0 -> 0x00127690,
+#   0x001340b0 -> 0x00131aa0, 0x00135620 -> 0x00132fd0. No port.
+#   Air state frame 144 -> 160 B; $s0 holds body+0x190. Callees (SLUS-21104 -> SLUS-21701):
+#   balance cleared 0x004e65b0 -> 0x004fe950 (zeroes +0x14f8/150c/1510/1518 -> +0x1518/152c/1530/1538; same code);
+#   no-hander 0x004dbd10 -> 0x004f3c70; quat axes 0x001351d0 -> 0x00132f40 (same; xyz of +0xbd0, +0xbe0 only);
+#   quat to euler 0x001358d0 -> 0x00133280 (888 -> 788 B: out-of-line b stubs become bc1fl/bc1tl with mov.s in
+#   the slot, same clamps; writes w); in-world 0x00494200 -> 0x004ba650 (same; its +0x45 -> +0x75, +0xe8 ->
+#   +0x118; a1 the origin); event post 0x00272300 -> 0x0025e740 (a0 *0x00442eb0 -> *0x00475bd0); vehicle post
+#   0x004a4f00 -> 0x004c8b20; node position 0x00194c20 -> 0x00190830 (same, node fields +0x30).
+#   Fields: vehicle state +0xbb4 (+0x28 kind, 3/4 return), reason +0xc70, stunt id +0x1544, balance id +0x154c,
+#   speed +0x35c, local vel +0x380, fwd/up +0xbd0/+0xbe0, euler +0x390, world ang vel +0x370, on ground +0x354,
+#   both +0x1260, airborne +0xdd0 (last +0xdd4), hang time +0x1180, contact vel +0xc20 (wheel +0xdc touching,
+#   +0x190 vel), flipping +0x1188, spin ramp +0x11c4, authority +0x1178/time +0x117c, crossup +0x360 (speed
+#   c.ole 10.0 skips; pi/2 0x3fc90fdb), record +0xf8's +0x24 = up.y c.ole 0.25, tag +0xd10, node +0x114 ->
+#   +0xbc0, kept +0xc30. Body +0x70 pos, +0x80 vel, +0x190 quat, +0x1a0 cofg, +0x1d0 ang vel.
+#   THE CHANGE, in-world test 0: SLUS-21104 zeroes +0xc80, +0x868, +0xc1c, posts (8, 13, tag +0xd20, 0; a1
+#   bike+0x674) and calls vt+0x3a8 = 0x004d8940 (bike, 1, 1) (put-back, snap 1). SLUS-21701 posts (8, 13, tag
+#   +0xd10, 0; a1 bike+0x698) and calls vt+0x36c = 0x004fa4d0 (bike, 1) (unwreck). That unwreck: vt+0x4a0;
+#   quadword 0x003b5f60 -> +0x1240 and body+0xc0; vt+0x4a8(-1); +0x1544/+0x1548 = 255, +0x13f4 = 1; zero +0x1690,
+#   +0x118c, +0x1190, +0x1184; vt+0x488; vt+0x3a8(bike, 0, a1) (put-back, no snap); 0x004c34d0(+0x143c); driver
+#   +0x6a4's +8 |= 0x40000; +0x17c4 = 0; the +0x17b8 record; base unwreck 0x004cbda0(bike, 1).
