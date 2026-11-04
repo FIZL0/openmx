@@ -9146,3 +9146,25 @@ atv_heap_free               atv 0x001b76d0 = free
 #   the two sticks differ only in the pad words they come from. Who writes words 0xdf..0xe5 was not found: the
 #   pad device's poll (vt +0x5c = 0x00150780; axes at +0x714 + 0x20i, deadzone remap 0x00116e90, axis bytes
 #   (6, 7, 4, 5, 0), axis 2 inverted) does not lay out a record like this one.
+
+# F31 — SLUS-21104's own bike frame replays C15's ride and flip bit-exact in the interpreter, off state 4's RAM
+# image (context/mxvatv-ps2/state04.ee.bin), proved by crates/game-sim/tests/mxvatv_bike_ride.rs. Comment rows
+# only. Journal: research/journal/2026-11-03-f31-mxvatv-bike-replay.
+#   The frame: sim object 0x006659e0 (vtable 0x003b9320), vt +0x40 = 0x00204040 (a0 sim, f12 dt): the +0x24
+#   list's vt +0x84(dt) (or vt +0x7c), the physics world (sim +0x6c = 0x00665a4c; 1 iteration at 115/s, its
+#   body list [bike +0xb8]) through 0x00496b70, 0x00128af0, then the +0x3c list's vt +8. dt bits 0x3d08850a, the
+#   same 30 Hz tick as MX Unleashed's (1/30 leaves ulp-level misses; found by search over the body block).
+#   Inputs: the pad reader 0x004e36c0 (vt thunk 0x004bfa80, this - 0x43c) runs outside this frame and stores
+#   +0x14ec (trick byte: R1 4, left 0x10, right 0x20, stick up 0x40, down 0x80), +0x12a0..+0x12b4 (d-pad, stick,
+#   +0x12b0 the flip hold the backflip reads), +0x310/+0x314 brake/gas in, +0x12c0/+0x12c4, +0x14c8, +0x14d4
+#   (the put-back request) and +0x17ac. While wrecked it holds the gas and the trick byte at 0. Tape tick t is on
+#   row t + 1; the wreck state it sees is row t's.
+#   Also outside: the put-back spot +0xd38..+0xd6c (row r's goes into frame r + 1; the put-back moves the bike
+#   there), +0x44 bit 0x400, and obj words the frame never reads (+0x6f8/+0x6fc, +0x790.., +0x870..+0x898,
+#   +0x908/+0x14e4, +0x930..+0x978, +0x940, +0xd90..+0xd98, +0x12b8/+0x12bc).
+#   Wreck state: the collision record +0xcc is +0x1434 (wreck part) or +0x1438 (riding). The flip wrecks on row
+#   125 and is put back on row 193; the ride never wrecks.
+#   Hooks: kernel DIntr 0x00348fa0 / EIntr 0x00348ff0 (mfc0); syscall stubs (addiu v1, zero, n; syscall; jr ra)
+#   in 0x00300000..0x00360000 answer a0, GetThreadId (0x2f) 1 (WaitSema 0x0033ef20 from the heap 0x001b68d0);
+#   bike vt +0x544 = 0x004e7e70, the network snapshot send (reads the T0 counter 0x10000000, packs, sends through
+#   *(bike +0x400) vt +0x28; writes nothing of the bike's).
