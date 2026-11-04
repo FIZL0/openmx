@@ -68,14 +68,36 @@ pub enum Out {
     KindClear,
     /// The ride's gear (vt `+0x358`, an answer: the gear table's index).
     Gear,
-    /// The lean's: the trick step (vt `+0x4e4`, `dt`; an answer, 0 for "no trick"), the trick's end
-    /// (vt `+0x4ac`, −1).
+    /// The lean's: the trick step (vt `+0x4e4`, `dt`; an answer, 0 for "no trick", ported as
+    /// [`trick`]), a trick's end (vt `+0x4ac`, the stunt's id: −1 from the stunt clock, a clip's own
+    /// from the trick step).
     Trick,
-    TrickEnd,
-    /// The prepare's net check (vt `+0x3e8`, an answer) and unpack (vt `+0x3f0`, `dt`), in the held
-    /// vehicle states.
+    TrickEnd(u32),
+    /// The prepare's net check (vt `+0x3e8`, an answer; [`net_check`]) and unpack (vt `+0x3f0`, `dt`;
+    /// [`net_unpack`]), in the held vehicle states.
     NetCheck,
     NetUnpack,
+    /// The trick step's: the remote bike's own (vt `+0x4e8`, `dt`; an answer, which the step gives
+    /// back); a player's stunt mark set or cleared (the run `+0x684`, the player `+0x680`, on, the
+    /// clip's id); the clip held at its end (vt `+0x4ec`, the stunt's table entry, `dt`); whether a
+    /// trick is asked for (vt `+0x4b4`, an answer); a trick started (vt `+0x4b8`, its id, 0).
+    TrickRemote,
+    Mark { run: u32, player: u32, on: u32, id: u32 },
+    TrickHold(u32),
+    TrickWanted,
+    TrickStart(u32),
+    /// The net check's: the bike put between two network snapshots (vt `+0x3ec`, the older and the
+    /// newer snapshot, `t` how far from the older; `dt` as it came).
+    NetInterpolate { older: u32, newer: u32, t: u32 },
+    /// The net unpack's: a node turned to the quaternion at `at` and placed at `pos` (the node, 0,
+    /// `at`, `pos`); a wheel's contacts cleared; the bike's wheel contacts (`dt`); a wheel's suspension
+    /// and its tire forces (`dt`); the vehicle's end of the unpack (`dt`).
+    Orient { node: u32, at: u32, pos: u32 },
+    WheelClear(u32),
+    Contacts,
+    Suspension(u32),
+    TireForces(u32),
+    NetPost,
     /// The rider's animation controller: stopped; one clip played; two blended.
     AnimStop(u32),
     AnimPlay { ctrl: u32, clip: u32, weight: u32, fade: u32 },
@@ -113,7 +135,8 @@ pub enum Out {
 }
 
 /// The callees' outside world: words by address (the bike is `bike`), and their calls. A call's
-/// answer is its `v0`; only [`Out::Gear`], [`Out::Trick`] and [`Out::NetCheck`] have one.
+/// answer is its `v0`; only [`Out::Gear`], [`Out::Trick`], [`Out::NetCheck`], [`Out::TrickRemote`]
+/// and [`Out::TrickWanted`] have one.
 pub trait Updates {
     fn bike(&self) -> u32;
     fn word(&mut self, at: u32) -> u32;
@@ -296,7 +319,7 @@ pub fn stunt_clock(m: &mut impl Updates, dt: F) {
             let hold = hold - dt;
             putf(m, 0x14f4, hold);
             if hold <= F::ZERO {
-                m.out(Out::TrickEnd);
+                m.out(Out::TrickEnd(u32::MAX));
                 put(m, NEXT_STUNT, 0xff);
             }
         }
@@ -710,6 +733,253 @@ pub fn parts(m: &mut impl Updates) {
     }
     let b = m.bike();
     m.out(Out::Walk(b.wrapping_add(0xc)));
+}
+
+/// The trick step's slack past a clip's length, a tuning word (F42).
+pub const TRICK_SLACK: u32 = 0x0052_5370;
+/// The network clock's pointer (its `+0x4cc` the time the net check lags) and the lag's own word.
+pub const NET_CLOCK: u32 = 0x0038_f768;
+pub const NET_LAG: u32 = 0x0052_5258;
+
+/// **The gear** (vt `+0x358`): the rear wheel's (`+0x17b4`) gear byte (`+0x110`), the index into
+/// the gear table the ride's auto gears read.
+pub fn gear(m: &mut impl Updates) -> u32 {
+    let rear = w(m, 0x17b4);
+    byte(m, rear.wrapping_add(0x110))
+}
+
+/// A stunt table's first stunt of a kind: the index of the first of its 46 entries whose kind byte
+/// (`+0x20`, from the table, 12 apart) is `kind`, or none.
+pub fn stunt_of_kind(m: &mut impl Updates, table: u32, kind: u32) -> Option<u32> {
+    (0..RIDING_POSE).find(|&i| byte(m, table.wrapping_add(12 * i).wrapping_add(0x20)) == kind & 0xff)
+}
+
+/// **The trick step** (vt `+0x4e4`, `dt`), what the lean asks for its next stunt: answers whether a
+/// trick runs (1) or not (0).
+///
+/// Its "held" word (`+0x1788`) cleared; a remote bike (`+0x48c`) answers as its own step
+/// ([`Out::TrickRemote`]). Else, with the next stunt (`+0x1528`) in the table: its kind is its
+/// entry's (`+8`, low four bits), or 4 when it is one of the five kept stunts (`+0x13b8..+0x13c8`) and
+/// the bike is driven (`+0x1194` or `+0x11d0`). A clip of the asked kind (`+0x14ec`, low four bits)
+/// with a length (the clip's `+0x44`) and its time (`+0x14d8`) from the length or 0.3 s, which is
+/// less, to the length plus the slack: the player's mark set, and if the time is still at or past
+/// the length, the clip is held at its end, the held word set, and a trick runs. Otherwise the time
+/// runs on by `dt`, the clip's fraction (`+0x14e4`, over the clip's `+0x48`, at most 1) is set and a
+/// trick runs; but for a kept stunt, a clip under its `+0x48` clears the mark and one past it ends
+/// the trick and runs none. Then, with no stunt or its clip run out (`+0x44`), a trick asked for
+/// (vt `+0x4b4`) of the asked kind starts (its clock `+0x14d4` reset), and a trick runs.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
+pub fn trick(m: &mut impl Updates, dt: F) -> u32 {
+    put(m, 0x1788, 0);
+    if w(m, 0x48c) != 0 {
+        return m.out(Out::TrickRemote);
+    }
+    let (table, id) = (w(m, 0x14f0), w(m, NEXT_STUNT));
+    let entry = stunt_entry(table, id);
+    let mut runs = 0;
+    if entry != 0 {
+        let id = w(m, NEXT_STUNT);
+        let kept = [0x13b8, 0x13bc, 0x13c0, 0x13c4, 0x13c8].into_iter().any(|o| id == w(m, o));
+        let special = kept && (w(m, 0x1194) != 0 || w(m, 0x11d0) != 0);
+        let kind = if special { 4 } else { byte(m, entry.wrapping_add(8)) & 0xf };
+        let anim = m.word(entry);
+        let len = f(m, anim.wrapping_add(0x44));
+        let early = len.min(F(0.3));
+        let fits = kind == byte(m, m.bike().wrapping_add(0x14ec)) & 0xf && !(len <= F::ZERO) && {
+            let time = fb(m, 0x14d8);
+            !(time < early) && time <= len + f(m, TRICK_SLACK)
+        };
+        let held = fits && {
+            let (run, player) = (w(m, 0x684), w(m, 0x680));
+            let id = byte(m, anim.wrapping_add(0x58));
+            m.out(Out::Mark { run, player, on: 1, id });
+            let anim = m.word(entry);
+            !(fb(m, 0x14d8) < f(m, anim.wrapping_add(0x44)))
+        };
+        if held {
+            m.out(Out::TrickHold(entry));
+            put(m, 0x1788, 1);
+            return 1;
+        }
+        let time = fb(m, 0x14d8) + dt;
+        putf(m, 0x14d8, time);
+        let anim = m.word(entry);
+        let frac = (fb(m, 0x14d8) / f(m, anim.wrapping_add(0x48))).min(F::ONE);
+        runs = 1;
+        putf(m, 0x14e4, frac);
+        if !special {
+            let anim = m.word(entry);
+            if fb(m, 0x14d8) < f(m, anim.wrapping_add(0x48)) {
+                let (run, player) = (w(m, 0x684), w(m, 0x680));
+                let id = byte(m, anim.wrapping_add(0x58));
+                m.out(Out::Mark { run, player, on: 0, id });
+            } else {
+                let id = byte(m, anim.wrapping_add(0x58));
+                m.out(Out::TrickEnd(id));
+                runs = 0;
+            }
+        }
+    }
+    if entry != 0 {
+        let anim = m.word(entry);
+        if fb(m, 0x14d8) < f(m, anim.wrapping_add(0x44)) {
+            return runs;
+        }
+    }
+    if m.out(Out::TrickWanted) == 0 {
+        return runs;
+    }
+    let table = w(m, 0x14f0);
+    let kind = byte(m, m.bike().wrapping_add(0x14ec));
+    let Some(id) = stunt_of_kind(m, table, kind) else { return runs };
+    m.out(Out::TrickStart(id));
+    put(m, 0x14d4, 0);
+    1
+}
+
+/// **The net check** (vt `+0x3e8`), the remote bike's snapshot interpolation; answers 1. With five
+/// snapshots come (`+0xd04`, unsigned), it wants the network clock's time less the bike's lag
+/// (`+0xd10`) less the lag word, and walks the snapshot slots (`+0xcd4`, `+0xcdc`, … 8 apart, newest
+/// first) while that is before the older one's time, at most four steps — the second slot read
+/// twice, as the original does — then hands the pair and `t` = `(want − older) / (newer − older)`,
+/// clamped to −0.9..1.9, to [`Out::NetInterpolate`]. The quad's twin is
+/// [`crate::quad::base_animate`]'s.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
+pub fn net_check(m: &mut impl Updates) -> u32 {
+    if w(m, 0xd04) < 5 {
+        return 1;
+    }
+    let clock = m.word(NET_CLOCK);
+    let want = f(m, clock.wrapping_add(0x4cc)) - fb(m, 0xd10) - f(m, NET_LAG);
+    let (mut newer, mut older) = (w(m, 0xcd4), w(m, 0xcdc));
+    let mut p = m.bike();
+    for _ in 0..4 {
+        if !(want < f(m, older)) {
+            break;
+        }
+        newer = older;
+        older = m.word(p.wrapping_add(0xcdc));
+        p = p.wrapping_add(8);
+    }
+    let o = f(m, older);
+    let t = (want - o) / (f(m, newer) - o);
+    let t = t.max(F(f32::from_bits(0xbf66_6666))).min(F(f32::from_bits(0x3ff3_3333)));
+    m.out(Out::NetInterpolate { older, newer, t: t.to_bits() });
+    1
+}
+
+/// A quadword copied a word at a time, each read then written (`lwc1`/`swc1`).
+fn copy_words(m: &mut impl Updates, to: u32, from: u32) {
+    for k in [0, 4, 8, 12] {
+        let x = m.word(from.wrapping_add(k));
+        m.set(to.wrapping_add(k), x);
+    }
+}
+
+/// A wheel's spin by its rate: `+0x1d4` = `forward` by the wheel's `+0x838`, `+0x1d0` on by it over
+/// `dt` and wrapped to −π..π. Each step reads the wheel's pointer (`at`) again.
+fn spin_wheel(m: &mut impl Updates, at: u32, forward: F, dt: F) {
+    let wheel = w(m, at);
+    let rate = forward * f(m, wheel.wrapping_add(0x838));
+    m.set(wheel.wrapping_add(0x1d4), rate.to_bits());
+    let wheel = w(m, at);
+    let a = Acc::adda(F::ZERO, f(m, wheel.wrapping_add(0x1d0))).madd(f(m, wheel.wrapping_add(0x1d4)), dt);
+    m.set(wheel.wrapping_add(0x1d0), a.to_bits());
+    let wheel = w(m, at);
+    let a = crate::quad::wrap_angle(f(m, wheel.wrapping_add(0x1d0)));
+    m.set(wheel.wrapping_add(0x1d0), a.to_bits());
+}
+
+/// Whether the wheel at the bike's `o` is down (its `+0xdc`).
+fn down(m: &mut impl Updates, o: u32) -> bool {
+    let wheel = w(m, o);
+    m.word(wheel.wrapping_add(0xdc)) != 0
+}
+
+/// **The net unpack** (vt `+0x3f0`, `dt`): the remote bike put where its network snapshot (`+0xbcc`:
+/// position, quaternion, velocity) says. The body takes the velocity and the quaternion, the bike's
+/// kept position (`+0xc40`) the position; the body's centre (`+0x70`) the position plus its offset
+/// (`+0x1a0`) turned into the world, the position (`+0xbd0`) the kept one, the spin (`+0x1d0`) none,
+/// the speed (`+0x32c`) the velocity's length; the node turned and placed. The wheels spin by the
+/// velocity turned into the body (its `z`); between the two, the front's steer (`+0x8ac`, and the
+/// bike's `+0x12c8`) is filtered (`+0xd1c`: [0] the steer, [1] its time, [2] this frame's fraction)
+/// towards 0.08 of the body's `+0xb0` in the node's frame, held to the front's `+0x74..+0x70`. Then
+/// the wheels run against the ground: both cleared, the contacts, both suspensions, both tire forces;
+/// the air words (`+0xde4` the last `+0xde0`, `+0x324` either wheel down, `+0x1270` both, `+0xde0`
+/// not down) and the vehicle's end of the unpack. The quad's twin is [`crate::quad::net_unpack`].
+pub fn net_unpack(m: &mut impl Updates, dt: F) {
+    let b = m.bike();
+    let (snap, body) = (w(m, 0xbcc), w(m, BODY));
+    let vel = m.word(snap.wrapping_add(8));
+    copy_quad(m, body.wrapping_add(0x80), vel);
+    let (snap, body) = (w(m, 0xbcc), w(m, BODY));
+    let q = m.word(snap.wrapping_add(4));
+    copy_words(m, body.wrapping_add(0x190), q);
+    let snap = w(m, 0xbcc);
+    let pos = m.word(snap);
+    copy_quad(m, b.wrapping_add(0xc40), pos);
+    let body = w(m, BODY);
+    let (q, off) = (quad(m, body.wrapping_add(0x190)), quad(m, body.wrapping_add(0x1a0)));
+    let turned = crate::quad::Body { orientation: vf(q), ..Default::default() }.to_world(vf(off));
+    let turned = xyz(turned, off);
+    let snap = w(m, 0xbcc);
+    let pos = m.word(snap);
+    let pos = quad(m, pos);
+    let centre = xyz(vf(pos).add(vf(turned)), pos);
+    let body = w(m, BODY);
+    set_quad(m, body.wrapping_add(0x70), centre);
+    copy_quad(m, b.wrapping_add(0xbd0), b.wrapping_add(0xc40));
+    let body = w(m, BODY);
+    copy_quad(m, body.wrapping_add(0x1d0), ORIGIN);
+    let body = w(m, BODY);
+    let [x, y, z] = [0x80, 0x84, 0x88].map(|o| f(m, body.wrapping_add(o)));
+    let speed = Acc::mula(x, x).madda(y, y).madd(z, z).sqrt();
+    putf(m, 0x32c, speed);
+    let (node, body) = (w(m, 0xe4), w(m, BODY));
+    m.out(Out::Orient { node, at: body.wrapping_add(0x190), pos: b.wrapping_add(0xbd0) });
+    let body = w(m, BODY);
+    let (q, v) = (quad(m, body.wrapping_add(0x190)), quad(m, body.wrapping_add(0x80)));
+    let forward = F(crate::quad::Body { orientation: vf(q), ..Default::default() }.to_local(vf(v)).z());
+    spin_wheel(m, 0x17b0, forward, dt);
+    let (node, body) = (w(m, 0xe4), w(m, BODY));
+    let local = m.vector(Out::Local { node, at: body.wrapping_add(0xb0) });
+    let front = w(m, 0x17b0);
+    let target = (F(0.08) * F(f32::from_bits(local[0]))).max(f(m, front.wrapping_add(0x74))).min(f(m, front.wrapping_add(0x70)));
+    let s = w(m, 0xd1c);
+    let time = f(m, s.wrapping_add(4));
+    let frac = dt.min(time) / time;
+    m.set(s.wrapping_add(8), frac.to_bits());
+    let steer = f(m, s);
+    let steer = Acc::adda(F::ZERO, steer).madd(frac, target - steer);
+    m.set(s, steer.to_bits());
+    let front = w(m, 0x17b0);
+    m.set(front.wrapping_add(0x8ac), steer.to_bits());
+    let front = w(m, 0x17b0);
+    let x = m.word(front.wrapping_add(0x8ac));
+    put(m, 0x12c8, x);
+    spin_wheel(m, 0x17b4, forward, dt);
+    for o in [0x17b0, 0x17b4] {
+        let wheel = w(m, o);
+        m.out(Out::WheelClear(wheel));
+    }
+    m.out(Out::Contacts);
+    for o in [0x17b0, 0x17b4] {
+        let wheel = w(m, o);
+        m.out(Out::Suspension(wheel));
+    }
+    for o in [0x17b0, 0x17b4] {
+        let wheel = w(m, o);
+        m.out(Out::TireForces(wheel));
+    }
+    let x = w(m, 0xde0);
+    put(m, 0xde4, x);
+    let any = down(m, 0x17b0) || down(m, 0x17b4);
+    put(m, 0x324, u32::from(any));
+    let all = down(m, 0x17b0) && down(m, 0x17b4);
+    put(m, 0x1270, u32::from(all));
+    let up = u32::from(w(m, 0x324) == 0);
+    put(m, 0xde0, up);
+    m.out(Out::NetPost);
 }
 
 #[cfg(test)]

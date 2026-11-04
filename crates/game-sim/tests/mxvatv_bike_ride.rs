@@ -4697,6 +4697,14 @@ const NODE_AIM: u32 = 0x0019_41b0;
 const NODE_AXES: u32 = 0x0019_4960;
 const NODE_LOCAL: u32 = 0x0019_5320;
 const ATTACH_MOVED: u32 = 0x0026_6d30;
+/// F42's: the bike's gear, trick step, net check and net unpack, and the player's stunt mark and the
+/// vehicle's end of the unpack they call (research/oracle.txt `# F42`).
+const GEAR_FN: u32 = 0x004d_aab0;
+const TRICK_FN: u32 = 0x004e_49c0;
+const NET_CHECK_FN: u32 = 0x004a_86f0;
+const NET_UNPACK_FN: u32 = 0x004d_d490;
+const MARK_FN: u32 = 0x0046_b110;
+const NET_POST: u32 = 0x004a_8c40;
 /// The bike's slots F39 ports, each with its function.
 const UPDATE_OWN: [(u32, u32); 6] = [
     (0x3a4, FADE_FN),
@@ -4756,6 +4764,23 @@ impl Updates for UpdateInRam<'_> {
     }
     fn out(&mut self, c: update::Out) -> u32 {
         use update::Out;
+        // F42's four, the port's too.
+        for (k, slot, f) in [(Out::Gear, 0x358, GEAR_FN), (Out::Trick, 0x4e4, TRICK_FN), (Out::NetCheck, 0x3e8, NET_CHECK_FN), (Out::NetUnpack, 0x3f0, NET_UNPACK_FN)] {
+            if c == k {
+                assert_eq!(vt(self.ee, slot), f, "the bike's vt +{slot:#x}");
+            }
+        }
+        let dt = F(self.x);
+        match c {
+            Out::Gear => return update::gear(self),
+            Out::Trick => return update::trick(self, dt),
+            Out::NetCheck => return update::net_check(self),
+            Out::NetUnpack => {
+                update::net_unpack(self, dt);
+                return 0;
+            }
+            _ => {}
+        }
         let (bike, x) = (u64::from(BIKE), self.x);
         let ee = &*self.ee;
         let s = |k: u32| u64::from(ee.scratch(k));
@@ -4764,11 +4789,20 @@ impl Updates for UpdateInRam<'_> {
         let (f, ints, floats) = match c {
             Out::Search(r) => (SEARCH_ALL, vec![u(r), 0], vec![x]),
             Out::KindClear => (vt(ee, 0x39c), vec![bike], vec![x]),
-            Out::Gear => (vt(ee, 0x358), vec![bike], vec![x]),
-            Out::Trick => (vt(ee, 0x4e4), vec![bike], vec![x]),
-            Out::TrickEnd => (vt(ee, 0x4ac), vec![bike, u64::MAX], vec![x]),
-            Out::NetCheck => (vt(ee, 0x3e8), vec![bike], vec![x]),
-            Out::NetUnpack => (vt(ee, 0x3f0), vec![bike], vec![x]),
+            Out::Gear | Out::Trick | Out::NetCheck | Out::NetUnpack => unreachable!("served by the port"),
+            Out::TrickEnd(id) => (vt(ee, 0x4ac), vec![bike, id as i32 as i64 as u64], vec![x]),
+            Out::TrickRemote => (vt(ee, 0x4e8), vec![bike], vec![x]),
+            Out::TrickHold(e) => (vt(ee, 0x4ec), vec![bike, u(e)], vec![x]),
+            Out::TrickWanted => (vt(ee, 0x4b4), vec![bike], vec![x]),
+            Out::TrickStart(id) => (vt(ee, 0x4b8), vec![bike, u(id), 0], vec![x]),
+            Out::Mark { run, player, on, id } => (MARK_FN, vec![u(run), u(player), u(on), u(id), 0], vec![x]),
+            Out::NetInterpolate { older, newer, t } => (vt(ee, 0x3ec), vec![bike, u(older), u(newer)], vec![x, f32::from_bits(t)]),
+            Out::Orient { node, at, pos } => (NODE_PLACE, vec![u(node), 0, u(at), u(pos)], vec![x]),
+            Out::WheelClear(w) => (WHEEL_CLEAR, vec![u(w)], vec![x]),
+            Out::Contacts => (CONTACTS, vec![bike], vec![x]),
+            Out::Suspension(w) => (SUSPENSION, vec![u(w)], vec![x]),
+            Out::TireForces(w) => (TIRE_FORCES, vec![u(w)], vec![x]),
+            Out::NetPost => (NET_POST, vec![bike], vec![x]),
             Out::AnimStop(ctrl) => (ANIM_STOP, vec![u(ctrl), 0, 0, 0, 0], vec![x]),
             Out::AnimPlay { ctrl, clip, weight, fade } => {
                 (ANIM_PLAY, vec![u(ctrl), u(clip), 0, 0, 0, 0, 0, 0], vec![f32::from_bits(weight), f32::from_bits(fade), 0.0])
@@ -4901,6 +4935,9 @@ struct UpSays {
     trick: u32,
     net: u32,
     dt: f32,
+    /// F42's: the remote stunt clocks' and the trick wanted's.
+    remote: u32,
+    wanted: u32,
 }
 
 /// A float's bits off a hash: sign, a power of two from 1/32 to 64, any mantissa.
@@ -4962,6 +4999,8 @@ impl Updates for UpdateLogged<'_> {
             Out::Gear => self.says.gear,
             Out::Trick => self.says.trick,
             Out::NetCheck => self.says.net,
+            Out::TrickRemote => self.says.remote,
+            Out::TrickWanted => self.says.wanted,
             Out::Frame { node, at } => {
                 fake_frame(self.ee, node, at);
                 0
@@ -5039,7 +5078,7 @@ fn update_rig() -> Option<UpdateRig> {
         assert_eq!(ee.f(12).to_bits(), s.borrow().dt.to_bits(), "{what} is handed dt");
     };
     // The bike's own: each logs, three answer.
-    for (slot, c) in [(0x39c, Out::KindClear), (0x358, Out::Gear), (0x4e4, Out::Trick), (0x4ac, Out::TrickEnd), (0x3e8, Out::NetCheck), (0x3f0, Out::NetUnpack)] {
+    for (slot, c) in [(0x39c, Out::KindClear), (0x358, Out::Gear), (0x4e4, Out::Trick), (0x4ac, Out::TrickEnd(u32::MAX)), (0x3e8, Out::NetCheck), (0x3f0, Out::NetUnpack)] {
         let s = says.clone();
         hook(&mut ee, Some((U_VTABLE, slot)), 0, Box::new(move |ee| {
             assert_eq!(ee.r(4) as u32, BIKE, "a bike virtual handed something other than the bike");
@@ -5050,7 +5089,7 @@ fn update_rig() -> Option<UpdateRig> {
                     dt_is(ee, &s, "the trick step");
                     ee.set(2, u64::from(says.trick));
                 }
-                Out::TrickEnd => assert_eq!(ee.r(5) as u32, u32::MAX, "the trick end's id"),
+                Out::TrickEnd(_) => assert_eq!(ee.r(5) as u32, u32::MAX, "the trick end's id"),
                 Out::NetCheck => ee.set(2, u64::from(says.net)),
                 Out::NetUnpack => dt_is(ee, &s, "the net unpack"),
                 _ => {}
@@ -5199,7 +5238,7 @@ impl UpdateRig {
                 .collect();
             panic!("case {k} ({f:#x}): {} words differ\n  {}", d.len(), d.iter().take(20).cloned().collect::<Vec<_>>().join("\n  "));
         }
-        if let Some(v0) = Some(v0).filter(|_| f == RIDE_FN || f == NETWORK) {
+        if let Some(v0) = Some(v0).filter(|_| [RIDE_FN, NETWORK, GEAR_FN, TRICK_FN, NET_CHECK_FN].contains(&f)) {
             assert_eq!(v0, want_v0, "case {k} ({f:#x}): the answer");
         }
         want
@@ -5408,7 +5447,7 @@ fn the_vehicle_updates_callees_are_the_originals() {
             ee.set_f32(e + 8, due);
         }
         word(ee, 0xd4, if g.one_in(3) { 0 } else { U_PART2 });
-        *rig.says.borrow_mut() = UpSays { gear, trick: if g.one_in(2) { 0 } else { 1 + g.bits() % 46 }, net: b(&mut g, 2), dt };
+        *rig.says.borrow_mut() = UpSays { gear, trick: if g.one_in(2) { 0 } else { 1 + g.bits() % 46 }, net: b(&mut g, 2), dt, ..Default::default() };
 
         // Fade, ride, lean, prepare, sync, snapshot, network, parts: each from the last one's words.
         let (x, f) = (dt, F(dt));
@@ -5440,7 +5479,7 @@ fn the_vehicle_updates_callees_are_the_originals() {
         if rig.ee.u32_at(BIKE + 0x14cc) != 0 {
             tally(&mut t, "lean, the clip ran out");
         }
-        if c.contains(&Out::TrickEnd) {
+        if c.contains(&Out::TrickEnd(u32::MAX)) {
             tally(&mut t, "lean, the hold ran out");
         }
         tally(&mut t, match rig.ee.u32_at(BIKE + update::NEXT_STUNT) {
@@ -5505,4 +5544,308 @@ fn the_vehicle_updates_callees_are_the_originals() {
         assert!(*n >= 20, "path {path} taken only {n} times");
     }
     assert!(t.len() >= 28, "every path taken: {t:#?}");
+}
+
+/// F42's fake world, in the F39 rig's area (its own words written each case): the hooked calls'
+/// functions, the network clock, the steer's filter, the snapshot and its three quadwords, the
+/// snapshots' times, the stunt table and its clips.
+const N_FNS: u32 = U_AREA + 0x680;
+const N_CLOCK: u32 = U_AREA + 0xd00;
+const N_FILTER: u32 = U_AREA + 0x1200;
+const N_SNAP: u32 = U_AREA + 0x1210;
+const N_TIMES: u32 = U_AREA + 0x1280;
+const N_TABLE: u32 = U_TABLE;
+const N_ANIMS: u32 = U_ANIMS;
+
+fn set_byte(ee: &mut Ee, at: u32, v: u32) {
+    let a = at & !3;
+    let s = 8 * (at & 3);
+    let w = ee.u32_at(a) & !(0xff << s) | (v & 0xff) << s;
+    ee.set_u32(a, w);
+}
+
+/// **The trick step, the gear and the net check and unpack are the original's**: 10 000 bikes, each
+/// the image's with every word the four read drawn at random — the gear byte; remote or not, the next
+/// stunt (in the table, none, −1, past it), the kept five (it among them or not), driven or not, the
+/// entries' kind bytes (high nibbles among them) and clips, the asked kind, the clips' lengths (zero
+/// and negative among them), their `+0x48`s and ids, the time on each of the step's edges (the length,
+/// 0.3 s, the length plus the slack, the `+0x48`, less `dt`), the slack, the two answers; the snapshot
+/// count (≥ 5 or not, unsigned), the clock, the lags, the snapshots' times about the wanted one (each
+/// of the walk's five ends, `t` past both clamps); the snapshot's position, quaternion and velocity,
+/// the body's offset, the wheels' rates, spins (past ±π), steer limits and down words, the filter's
+/// steer, time (zero among them) — and run through SLUS-21104's four against the port's from the same
+/// words. Every word of the bike, its body, its wheels, the fake world and the three globals comes out
+/// the same, the calls are the same with the same arguments, and the three answers are. The deeper
+/// calls are hooked to log (the node ones through the F39 rig's); the stunt-entry and stunt-of-kind
+/// lookups run as the originals.
+#[test]
+fn the_trick_step_gear_and_net_virtuals_are_the_originals() {
+    use update::Out;
+    let Some(mut rig) = update_rig() else { return };
+    let says = rig.says.clone();
+    let dt_is = move |ee: &Ee, what: &str| {
+        assert_eq!(ee.f(12).to_bits(), says.borrow().dt.to_bits(), "{what} is handed dt");
+    };
+    let mut next = N_FNS;
+    type Hook = Box<dyn Fn(&mut Ee) -> Out>;
+    let mut hook = |ee: &mut Ee, slot: Option<u32>, at: u32, h: Hook, log: Rc<RefCell<Vec<Out>>>| {
+        let at = match slot {
+            Some(slot) => {
+                ee.set_u32(U_VTABLE + slot, next);
+                next += 4;
+                next - 4
+            }
+            None => at,
+        };
+        ee.hooks.insert(at, Box::new(move |ee: &mut Ee| {
+            let c = h(ee);
+            log.borrow_mut().push(c);
+        }));
+    };
+    let bike_is = |ee: &Ee| assert_eq!(ee.r(4) as u32, BIKE, "a bike virtual handed something other than the bike");
+    let (d, s) = (dt_is.clone(), rig.says.clone());
+    hook(&mut rig.ee, Some(0x4e8), 0, Box::new(move |ee| {
+        bike_is(ee);
+        d(ee, "the remote stunt clocks");
+        ee.set(2, u64::from(s.borrow().remote));
+        Out::TrickRemote
+    }), rig.log.clone());
+    let d = dt_is.clone();
+    hook(&mut rig.ee, Some(0x4ec), 0, Box::new(move |ee| {
+        bike_is(ee);
+        d(ee, "the clip hold");
+        Out::TrickHold(ee.r(5) as u32)
+    }), rig.log.clone());
+    let (d, s) = (dt_is.clone(), rig.says.clone());
+    hook(&mut rig.ee, Some(0x4b4), 0, Box::new(move |ee| {
+        bike_is(ee);
+        d(ee, "the trick wanted");
+        ee.set(2, u64::from(s.borrow().wanted));
+        Out::TrickWanted
+    }), rig.log.clone());
+    let d = dt_is.clone();
+    hook(&mut rig.ee, Some(0x4b8), 0, Box::new(move |ee| {
+        bike_is(ee);
+        d(ee, "the stunt start");
+        assert_eq!(ee.r(6), 0, "the stunt start's third argument");
+        Out::TrickStart(ee.r(5) as u32)
+    }), rig.log.clone());
+    let d = dt_is.clone();
+    hook(&mut rig.ee, Some(0x4ac), 0, Box::new(move |ee| {
+        bike_is(ee);
+        d(ee, "the trick end");
+        Out::TrickEnd(ee.r(5) as u32)
+    }), rig.log.clone());
+    hook(&mut rig.ee, Some(0x3ec), 0, Box::new(move |ee| {
+        bike_is(ee);
+        Out::NetInterpolate { older: ee.r(5) as u32, newer: ee.r(6) as u32, t: ee.f(13).to_bits() }
+    }), rig.log.clone());
+    let d = dt_is.clone();
+    hook(&mut rig.ee, None, MARK_FN, Box::new(move |ee| {
+        d(ee, "the stunt mark");
+        assert_eq!(ee.r(8), 0, "the stunt mark's fifth argument");
+        Out::Mark { run: ee.r(4) as u32, player: ee.r(5) as u32, on: ee.r(6) as u32, id: ee.r(7) as u32 }
+    }), rig.log.clone());
+    let d = dt_is.clone();
+    hook(&mut rig.ee, None, NODE_PLACE, Box::new(move |ee| {
+        d(ee, "the node's turn");
+        assert_eq!(ee.r(5), 0, "the node turn's second argument");
+        Out::Orient { node: ee.r(4) as u32, at: ee.r(6) as u32, pos: ee.r(7) as u32 }
+    }), rig.log.clone());
+    for (at, what) in [(WHEEL_CLEAR, "the wheel clear"), (SUSPENSION, "the suspension"), (TIRE_FORCES, "the tire forces")] {
+        let d = dt_is.clone();
+        hook(&mut rig.ee, None, at, Box::new(move |ee| {
+            d(ee, what);
+            let w = ee.r(4) as u32;
+            match at {
+                WHEEL_CLEAR => Out::WheelClear(w),
+                SUSPENSION => Out::Suspension(w),
+                _ => Out::TireForces(w),
+            }
+        }), rig.log.clone());
+    }
+    for (at, c) in [(CONTACTS, Out::Contacts), (NET_POST, Out::NetPost)] {
+        let d = dt_is.clone();
+        hook(&mut rig.ee, None, at, Box::new(move |ee| {
+            bike_is(ee);
+            d(ee, &format!("{c:?}"));
+            c
+        }), rig.log.clone());
+    }
+    rig.regions.extend([(update::TRICK_SLACK, 4), (update::NET_CLOCK, 4), (update::NET_LAG, 4)]);
+    let image_words = snap_regions(&rig.ee, &rig.regions);
+    let (body, [front, rear]) = (rig.body, rig.wheels);
+    let mut g = Gen(0x0000_f42f);
+    let mut t = BTreeMap::new();
+    let bike = u64::from(BIKE);
+    for k in 0..10_000 {
+        let ee = &mut rig.ee;
+        restore_regions(ee, &rig.regions, &image_words);
+        let word = |ee: &mut Ee, o: u32, w: u32| ee.set_u32(BIKE + o, w);
+        let put = |ee: &mut Ee, o: u32, v: f32| ee.set_f32(BIKE + o, v);
+        let dt = if g.one_in(2) { f32::from_bits(DT) } else { g.f(0.002, 0.05) };
+        let (remote, wanted) = (g.bits() % 3, g.bits() % 3);
+        *rig.says.borrow_mut() = UpSays { dt, remote, wanted, ..Default::default() };
+        // The gear.
+        set_byte(ee, rear + 0x110, if g.one_in(4) { g.bits() } else { g.bits() % 6 });
+        // The trick step: the table, its clips, the stunt and the clock.
+        word(ee, 0x48c, u32::from(g.one_in(8)));
+        word(ee, 0x14f0, N_TABLE);
+        let kinds = [0, 1, 2, 3, 4, 5, 0x13, 0x24, 0xf4];
+        let mut anim = |g: &mut Gen, j: u32| {
+            let a = N_ANIMS + 0x60 * j;
+            let len = match g.bits() % 6 {
+                0 => 0.0,
+                1 => -0.5,
+                2 => g.f(0.05, 0.3),
+                _ => g.f(0.3, 2.0),
+            };
+            ee.set_f32(a + 0x44, len);
+            ee.set_f32(a + 0x48, if g.one_in(3) { len } else { g.f(0.0, 2.0) });
+            set_byte(ee, a + 0x58, g.bits());
+            (a, len)
+        };
+        let anims: Vec<(u32, f32)> = (0..8).map(|j| anim(&mut g, j)).collect();
+        for i in 0..47 {
+            // The header's +0xc word is the −1 stunt's clip.
+            let e = if i == 46 { N_TABLE + 0xc } else { N_TABLE + 0x18 + 12 * i };
+            ee.set_u32(e, anims[(g.bits() % 8) as usize].0);
+            set_byte(ee, e + 8, if g.one_in(3) { kinds[(g.bits() % kinds.len() as u32) as usize] } else { 0x40 });
+        }
+        let id = match g.bits() % 8 {
+            0 => 0xff,
+            1 => u32::MAX,
+            2 => 46 + g.bits() % 100,
+            _ => g.bits() % 46,
+        };
+        word(ee, 0x1528, id);
+        for o in [0x13b8, 0x13bc, 0x13c0, 0x13c4, 0x13c8] {
+            word(ee, o, if g.one_in(8) { id } else { g.bits() % 46 });
+        }
+        word(ee, 0x1194, u32::from(g.one_in(2)));
+        word(ee, 0x11d0, u32::from(g.one_in(2)));
+        let entry = if id == u32::MAX { N_TABLE + 0xc } else { N_TABLE + 0x18 + 12 * id.min(46) };
+        let (clip, len) = if id < 46 || id == u32::MAX { anims.iter().copied().find(|a| a.0 == ee.u32_at(entry)).unwrap() } else { (0, 0.0) };
+        let kind = if g.one_in(2) && clip != 0 { ee.u8_at(entry + 8).into() } else { kinds[(g.bits() % kinds.len() as u32) as usize] };
+        set_byte(ee, BIKE + 0x14ec, kind | if g.one_in(3) { 0x30 } else { 0 });
+        let slack = if g.one_in(4) { 0.0 } else { g.f(0.0, 0.5) };
+        ee.set_f32(update::TRICK_SLACK, slack);
+        let plus = if clip != 0 { ee.f32_at(clip + 0x48) } else { 1.0 };
+        let time = match g.bits() % 10 {
+            0 => len,
+            1 => len - dt,
+            2 => len.min(0.3),
+            3 => len.min(0.3) - dt / 4.0,
+            4 => len + slack,
+            5 => len + slack + dt / 4.0,
+            6 => plus - dt,
+            7 => plus,
+            _ => g.f(0.0, 2.5),
+        };
+        put(ee, 0x14d8, time);
+        put(ee, 0x14e4, g.f(0.0, 1.0));
+        word(ee, 0x1788, g.bits() % 3);
+        word(ee, 0x14d4, g.bits());
+        word(ee, 0x684, g.bits());
+        word(ee, 0x680, g.bits());
+        // The net check: the count, the clock and lags, the snapshots' times newest first.
+        word(ee, 0xd04, match g.bits() % 4 {
+            0 => g.bits() % 5,
+            1 => 0x8000_0000 | g.bits(),
+            _ => 5 + g.bits() % 20,
+        });
+        ee.set_u32(update::NET_CLOCK, N_CLOCK);
+        let now = g.f(0.0, 500.0);
+        ee.set_f32(N_CLOCK + 0x4cc, now);
+        let (lag, mine) = (if g.one_in(3) { 0.1 } else { g.f(0.0, 0.3) }, g.f(-0.1, 0.3));
+        ee.set_f32(update::NET_LAG, lag);
+        put(ee, 0xd10, mine);
+        let want = now - mine - lag;
+        let step = g.f(0.01, 0.2);
+        let ends = g.bits() % 7;
+        for i in 0..6u32 {
+            let at = N_TIMES + 16 * i;
+            // Snapshot `ends` the first older than the wanted time (its five slots, two past).
+            let t = want + step * (ends as f32 - i as f32 - 0.5) + if g.one_in(3) { g.f(-step, step) } else { 0.0 };
+            ee.set_f32(at, if g.one_in(20) { want } else { t });
+            word(ee, 0xcd4 + 8 * i, at);
+        }
+        // The unpack: the snapshot, the body, the wheels, the filter.
+        word(ee, 0xbcc, N_SNAP);
+        for (k, at) in [N_SNAP + 0x10, N_SNAP + 0x20, N_SNAP + 0x30].into_iter().enumerate() {
+            ee.set_u32(N_SNAP + 4 * k as u32, at);
+            for c in 0..4 {
+                ee.set_f32(at + 4 * c, g.f(-2.0, 2.0) * if k == 0 { 300.0 } else if k == 2 { 40.0 } else { 1.0 });
+            }
+        }
+        for c in 0..4 {
+            ee.set_f32(body + 0x1a0 + 4 * c, g.f(-2.0, 2.0));
+            ee.set_f32(body + 0xb0 + 4 * c, g.f(-20.0, 20.0));
+        }
+        for w in [front, rear] {
+            ee.set_f32(w + 0x838, g.f(0.1, 1.5));
+            ee.set_f32(w + 0x1d0, g.near(0.0, -4.0, 4.0));
+            let lim = g.f(0.0, 0.7);
+            ee.set_f32(w + 0x70, lim);
+            ee.set_f32(w + 0x74, if g.one_in(5) { lim } else { -g.f(0.0, 0.7) });
+            ee.set_u32(w + 0xdc, if g.one_in(2) { 0 } else { g.bits() | 1 });
+        }
+        word(ee, 0xd1c, N_FILTER);
+        ee.set_f32(N_FILTER, g.f(-0.7, 0.7));
+        ee.set_f32(N_FILTER + 4, if g.one_in(20) { 0.0 } else if g.one_in(3) { dt } else { g.f(0.0, 0.5) });
+        word(ee, 0xde0, g.bits() % 3);
+        word(ee, 0x324, g.bits() % 3);
+        let x = dt;
+        let f = F(dt);
+        let c = rig.check(k, GEAR_FN, &[bike], x, |m| update::gear(m));
+        assert!(c.is_empty(), "case {k}: the gear calls {c:?}");
+        tally(&mut t, if rig.ee.u8_at(rear + 0x110) < 6 { "gear, a gear" } else { "gear, past them" });
+        let c = rig.check(k, TRICK_FN, &[bike], x, |m| update::trick(m, f));
+        let has = |p: &dyn Fn(&Out) -> bool| c.iter().any(p);
+        tally(&mut t, match () {
+            _ if has(&|c| *c == Out::TrickRemote) => "trick, remote",
+            _ if has(&|c| matches!(c, Out::TrickHold(_))) => "trick, held",
+            _ if has(&|c| matches!(c, Out::TrickStart(_))) => "trick, started",
+            _ if has(&|c| matches!(c, Out::TrickEnd(_))) => "trick, ended",
+            _ if has(&|c| matches!(c, Out::Mark { on: 0, .. })) => "trick, runs on",
+            _ if has(&|c| *c == Out::TrickWanted) => "trick, none wanted or of the kind",
+            _ => "trick, a kept stunt runs on",
+        });
+        if has(&|c| matches!(c, Out::Mark { on: 1, .. })) {
+            tally(&mut t, "trick, it fits");
+        }
+        if id >= 46 && id != u32::MAX {
+            tally(&mut t, "trick, no stunt");
+        }
+        let c = rig.check(k, NET_CHECK_FN, &[bike], x, |m| update::net_check(m));
+        tally(&mut t, match c.first() {
+            None => "net check, too few",
+            Some(&Out::NetInterpolate { t, .. }) => match f32::from_bits(t) {
+                t if t == f32::from_bits(0xbf66_6666) => "net check, clamped low",
+                t if t == f32::from_bits(0x3ff3_3333) => "net check, clamped high",
+                _ => "net check, between",
+            },
+            Some(c) => unreachable!("{c:?}"),
+        });
+        if let Some(&Out::NetInterpolate { older, .. }) = c.first() {
+            tally(&mut t, ["net check, older 1", "net check, older 2", "net check, older 3", "net check, older 4", "net check, older 5", "net check, older 6"]
+                [((older - N_TIMES) / 16) as usize]);
+        }
+        let c = rig.check(k, NET_UNPACK_FN, &[bike], x, |m| {
+            update::net_unpack(m, f);
+            0
+        });
+        assert_eq!(c.len(), 10, "case {k}: the unpack's calls {c:?}");
+        let down = [front, rear].map(|w| rig.ee.u32_at(w + 0xdc) != 0);
+        tally(&mut t, match down {
+            [true, true] => "unpack, both down",
+            [false, false] => "unpack, both up",
+            _ => "unpack, one down",
+        });
+    }
+    eprintln!("{t:#?}");
+    for (path, n) in &t {
+        assert!(*n >= 20, "path {path} taken only {n} times");
+    }
+    assert!(t.len() >= 20, "every path taken: {t:#?}");
 }

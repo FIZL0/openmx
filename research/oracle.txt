@@ -9508,3 +9508,28 @@ atv_heap_free               atv 0x001b76d0 = free
 #   spot when target+0x138 != 0). Both replays: words +0x870..+0x888 but +0x87c, +0x890..+0x898, +0x920,
 #   +0x930..+0x938, +0x940, +0x950..+0x97c but +0x95c (ride-2: +0x930..+0x938 and +0x940 only; the int at
 #   +0x940 0x38 -> 0x3d).
+# F42: the bike's trick step, gear, net check and net unpack (F39's vt calls), ported as
+# game_sim::handling::update::{trick, gear, net_check, net_unpack}. Journal:
+# research/journal/2026-11-04-f42-trick-gear-net-virtuals/.
+#   Bike vtable 0x003d0450: +0x358 gear 0x004daab0(bike) -> v0 = *(u8 *)(*(bike+0x17b4) + 0x110);
+#   +0x4e4 trick step 0x004e49c0(bike, f12 dt) -> v0; +0x3e8 net check 0x004a86f0(bike) -> v0 1;
+#   +0x3f0 net unpack 0x004dd490(bike, f12 dt). The step's calls: +0x4e8 0x004e4900(bike, dt) -> v0 (the
+#   remote bike's, +0x48c set), +0x4ec 0x004e4810(bike, entry) (the clip held at its end), +0x4ac
+#   0x004e4db0(bike, id byte) (the trick ends), +0x4b4 0x004e47a0(bike) -> v0 (a trick wanted), +0x4b8
+#   0x004e6370(bike, stunt, 0) (start); stunt mark 0x0046b110(*(bike+0x684), *(bike+0x680), on, clip
+#   +0x58 byte, 0); stunt entry 0x00268c90(table, id) and stunt of kind 0x00268d40(table, kind byte)
+#   (the first of 46 entries whose +8 byte, table+0x20+12i, is it, or none). Slack global 0x00525370
+#   (0.04). Words: +0x1788 held, +0x14f0 table, +0x1528 next stunt, +0x13b8..+0x13c8 kept five, +0x1194 /
+#   +0x11d0 driven, +0x14ec asked kind, +0x14d8 clock, +0x14e4 fraction, +0x14d4 start clock; clip +0x44
+#   length, +0x48 run, +0x58 id; 0.3 s the early edge.
+#   Net check: +0xd04 snapshots come (unsigned, >= 5), clock pointer 0x0038f768 (+0x4cc time), lag global
+#   0x00525258 (0.1), +0xd10 the bike's lag; slots +0xcd4, +0xcdc, ... 8 apart (each a pointer, its first
+#   word the time); clamps 0xbf666666 / 0x3ff33333; then vt +0x3ec 0x004e7bc0(bike, older, newer, f13 t).
+#   Net unpack: snapshot +0xbcc -> (pos, quat, vel) pointers; body +0x80 vel, +0x190 quat, +0x1a0 offset,
+#   +0x70 centre, +0x1d0 spin, +0xb0; bike +0xc40 / +0xbd0 position, +0x32c speed; node turn 0x00194650(
+#   *(bike+0xe4), 0, body+0x190, bike+0xbd0); point into frame 0x00195320; wheels +0x838 rate scale,
+#   +0x1d4 rate, +0x1d0 spin, +0x70 / +0x74 steer limits, +0x8ac steer, +0xdc down; steer filter
+#   *(bike+0xd1c) [steer, time, fraction], 0.08 of the local x; bike +0x12c8 the steer. Then wheel clear
+#   0x004a0c30(w) x2, contacts 0x004dccd0(bike, dt), suspension 0x004a0cb0(w, dt) x2, tire forces
+#   0x004a16f0(w, dt) x2; +0xde4 = +0xde0, +0x324 either down, +0x1270 both, +0xde0 = !+0x324; net post
+#   0x004a8c40(bike, dt).
