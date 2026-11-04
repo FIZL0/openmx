@@ -2270,3 +2270,45 @@ fn untamed_air_state_is_the_originals() {
         100,
     );
 }
+
+/// MD93f: the controls [`untamed::ride_backflip`] and [`untamed::ride_spin`] feed are Untamed's shipped
+/// ones. On the image, device 0's bindings (which the reader's holds always read) put the trick actions
+/// on Circle, Triangle, Select and R1. The first, second and fourth are MX Unleashed's first-preset
+/// TRICK_1..3, so `trick[2]` is the arming button. Both holds are on analogue controls 0 and 1, the
+/// ones SLUS-21104's spin and flip holds read. And no bike's stunts map a control to the backflip in
+/// any style, so its button is `None`.
+#[test]
+fn untamed_ride_input_is_the_shipped_bindings() {
+    use game_sim::bindings::PRESET_CONTROLS;
+    use game_sim::input::Control;
+    /// The controls manager's pointer, the binding lookup (controls, action, 2, 10, device), and the
+    /// stunt table's "is the backflip bound in this style".
+    const CONTROLS: u32 = 0x003f_f6b8;
+    const BINDING: u32 = 0x0011_7c10;
+    const BACKFLIP_BOUND: u32 = 0x0025_2630;
+    /// The Free Ride bike on the image, and its stunt table (`+0x1510`).
+    const RIDE_BIKE: u32 = 0x01b1_6440;
+    let Some(mut ee) = image() else { return };
+    let controls = ee.u32_at(ee.u32_at(CONTROLS));
+    let bound = |ee: &mut Ee, action: u64, device: u64| {
+        ee.call(BINDING, &[u64::from(controls), action, 2, 10, device], &[], 1_000);
+        ee.v0() as i32
+    };
+    let ctl = |c: Control| c as i32;
+    let preset = PRESET_CONTROLS[0];
+    for device in [0, 1] {
+        let tricks: Vec<i32> = (0x11..=0x14).map(|a| bound(&mut ee, a, device)).collect();
+        assert_eq!(tricks, [ctl(preset[5]), ctl(preset[6]), ctl(Control::Select), ctl(preset[7])], "device {device}");
+        assert_eq!(bound(&mut ee, 0x54, device), 0, "the spin hold, device {device}");
+        assert_eq!(bound(&mut ee, 0x55, device), 1, "the flip hold, device {device}");
+        assert_eq!(bound(&mut ee, 0x53, device), -1, "the 360's bound control, device {device}");
+    }
+    let table = ee.u32_at(RIDE_BIKE + 0x1510);
+    assert_eq!(ee.i32_at(table + 0x18), 49, "the backflip's stunt");
+    let name: Vec<u8> = (0..8).map(|k| ee.u8_at(ee.u32_at(table + 0x28 + 0x58 * 49) + k)).collect();
+    assert_eq!(name, b"backflip");
+    for style in 0..4 {
+        ee.call(BACKFLIP_BOUND, &[u64::from(table), style], &[], 1_000);
+        assert_eq!(ee.v0(), 0, "the backflip is not bound in style {style}");
+    }
+}

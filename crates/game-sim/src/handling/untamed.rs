@@ -277,8 +277,8 @@ pub struct FlipIn {
     pub arm_button: bool,
     /// Any of the four trick buttons is held: the flight's torque then does not decay.
     pub trick_held: bool,
-    /// The stick's fore-aft as the lip reads it: the reader's copy taken before the d-pad and the
-    /// limiter have had their say on [`AirStep::stick`] (which the flight's decay reads).
+    /// The stick's fore-aft as the lip reads it: the reader copies it from a pad word of its own, apart
+    /// from [`AirStep::stick`]'s (which the flight's decay reads); the d-pad overrides both alike.
     pub lip_y: F,
     /// The flick the triggered torque is mapped from (a control of its own, apart from the preload's
     /// [`AirStep::stick_hold`]).
@@ -423,9 +423,21 @@ pub fn stunt_stand_in(trick_held: bool, backflip: bool, spin_clip: bool, on_grou
 }
 
 /// [`backflip`] on a ride, as [`super::ride_backflip`] runs SLUS-21104's: the same rider's side, on
-/// Untamed's input. The port's controls have three trick buttons and no backflip binding, so the arming
-/// button is R1 (the one SLUS-21104 arms on), a trick is held when any of the three is, and the lip
-/// reads the step's stick and flick ([`FlipIn::lip_y`], [`FlipIn::hold`]) with no bound control.
+/// Untamed's input as its shipped controls give it (MD93f):
+///
+/// - Untamed's four trick actions are bound by default to Circle, Triangle, Select and R1, in that
+///   order. The first, second and fourth are the port's `trick` (TRICK_1..3 on MX Unleashed's first
+///   preset: Circle, Triangle, R1), so the arming button is `trick[2]`. Select is the port's camera
+///   button, with no trick command, so the third reads unpressed. A trick is held when any of the
+///   three is.
+/// - The flick is the step's ([`AirStep::stick_hold`]): Untamed binds the hold to the same analogue
+///   control as SLUS-21104's hold, which is what the port's flick reads.
+/// - There is no bound control ([`FlipIn::button`] `None`). The binding asked for is the classic
+///   style's, the only one the game picks, and none of the shipped stunts map one to the backflip. So
+///   the stick's down-and-up is always the flip.
+/// - The lip reads the step's stick. In the reader the lip's copy differs from the limited one only by
+///   the pad word it is copied from (the d-pad overrides both alike); what makes those words differ
+///   was not traced.
 pub fn ride_backflip(p: &AirParams, air: &mut Air, chassis: &mut Chassis, step: &AirStep, trick: [bool; 3],
                      frame: &crate::chassis::Mat3, flip: &mut super::Flip, steep: impl FnOnce() -> bool) {
     if step.stunt {
@@ -688,8 +700,10 @@ pub fn spin(
 /// which the rider takes as the 360's wreck whatever `steep` would say. None of the port's own additions
 /// to the 360 (MD20's both at once and the pitch that follows a front flip) run here.
 ///
-/// The input is stood in as [`ride_backflip`]'s (MD93f): the arming button is R1, a trick is held when
-/// any of the three is, both sticks are the step's, the flick is `flick`, and there is no bound control.
+/// The input is as [`ride_backflip`]'s (MD93f): the arming button is `trick[2]` (R1, the fourth trick
+/// action's default), a trick is held when any of the three is, both sticks are the step's, the flick is
+/// `flick` (the analogue control the spin hold is bound to by default, as on SLUS-21104), and there is no
+/// bound control (no shipped stunt maps the 360 either).
 /// The rider's stunt id is [`stunt_stand_in`]'s, and its clearing is not kept (the port's rider has no id).
 #[allow(clippy::too_many_arguments)]
 pub fn ride_spin(t: &crate::air::SpinTuning, p: &AirParams, air: &mut Air, s: &mut crate::air::Spin, chassis: &mut Chassis,

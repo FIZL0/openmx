@@ -9111,3 +9111,38 @@ atv_heap_free               atv 0x001b76d0 = free
 #   quadword 0x003b5f60 -> +0x1240 and body+0xc0; vt+0x4a8(-1); +0x1544/+0x1548 = 255, +0x13f4 = 1; zero +0x1690,
 #   +0x118c, +0x1190, +0x1184; vt+0x488; vt+0x3a8(bike, 0, a1) (put-back, no snap); 0x004c34d0(+0x143c); driver
 #   +0x6a4's +8 |= 0x40000; +0x17c4 = 0; the +0x17b8 record; base unwreck 0x004cbda0(bike, 1).
+
+# MD93f — what Untamed's (SLUS-21701) backflip and 360 read from the pad, traced to the bindings on
+# context/untamed/ram/nat_or.bin. Comment rows only. Journal: research/journal/2026-11-03-md93f-untamed-bike-step.
+#   Corrections to # MD93a: the pad record's word +0 is not the device. 0x003a25b0 stores 3 there (sw 3, 0(rec))
+#   every call, so it is the binding style, always 3 (the classic one). The trick bytes are not debounced: the
+#   "== 3" test before each is always true, and each byte is just (entry value > 0.0).
+#   Binding lookup 0x00117c10 (controls = *(*0x003ff6b8), action, 2, 10, device): map = controls[device], then
+#   0x00127c00 (map, action) = *(map + 0xc + action*4), or -1 when action > 0x5a or there is no map. The result
+#   is a control index into the pad record's 0x18-byte entries (value at +4); an analogue action reads entry
+#   idx + 0x20. The reader's lookups for 0x51..0x55 pass device 0 (move a4, zero).
+#   Control order (device +0x818: flags, +0x81c pressure index, +0x820 mask, 16-byte stride) = MX Unleashed's
+#   input::Control: 0 Triangle, 1 Circle, 2 Cross, 3 Square, 4 L1, 5 R1, 6 L2, 7 R2, 8 Select, 9 Start, 10 R3,
+#   11 L3, 12 Up, 13 Right, 14 Down, 15 Left.
+#   Defaults on the image (device 0 map 0x792490 and device 1 map 0x792dc0, the same): 0x11 Circle, 0x12 Triangle,
+#   0x13 Select, 0x14 R1; 0xe Cross (gas), 0xf Square (brake), 0x10 L1 (clutch), 0x4 Start, 0x21 L3; analogue
+#   0x51 -> 1, 0x52 -> 0, 0x54 -> 0, 0x55 -> 1 (entries 0x21/0x20/0x20/0x21); 0x53 unbound. So the backflip's arming
+#   button (0x14) is R1 = MXU preset 0's TRICK_3, 0x11/0x12 are TRICK_1/2, and 0x13 is Select, which has no trick
+#   command in MXU. The flip hold +0x12c0 (0x55, entry 0x21) and the spin hold +0x12b8 (0x54, entry 0x20) are the
+#   entries SLUS-21104's reader 0x004e36c0 reads for its +0x12b0 (entries + 0x31c) and +0x12b4 (entries + 0x304).
+#   Stunt table *(bike +0x1510) = driver (+0x724) + 0x2a0 (SLUS-21104: +0x14f0 = driver +0x6a4 + 0x2a0), built by
+#   0x00251e60 from the stunts file (init 0x00251d30). +0 = 1; +8 DepreciationPct; +0x10 NumStuntsToRestoreOne;
+#   +0x14 NumStuntsToMaxDepletion; +0x18/+0x1c/+0x20 the stunt indices named "backflip"/"threesixtyL"/
+#   "threesixtyR" (49/52/53 on the image, -1 until found); bytes +0x24/+0x25/+0x26/+0x27 = the backflip's
+#   DefaultKeyMappingStyle1/2/3/Classic is non-empty (+0x27 inits to 1). Then 0x36 stunts of 0x58 bytes from +0x28:
+#   +0 the name, +8 the key-mapping combo the matcher 0x003a37d0 reads. Ini keys per stunt: Name, DisplayName,
+#   HoldTime, SafeTime, Duration, PointValue, HoldPointValue, UsedForBike, HasAnimation, DefaultKeyMapping{Classic,
+#   Style1, Style2, Style3}. 0x00252630 (table, style) = byte +0x24 + style, so with style 3 it reads +0x27;
+#   0x00252640 is 0 when +0x18 is -1, else the matcher on table + 0x30 + 0x58*index; 0x00252690 the same on +0x1c.
+#   On the image every bike's +0x24..+0x27 are 0 (bike 0x1b16440, table 0x8ecd80) and stunt 49's combo is empty:
+#   the shipped game never binds the backflip, and the stick path always runs.
+#   The lip's stick. The reader 0x004fb7d0 copies +0x1298 <- word 0xdf, +0x129c <- 0xe0, +0x12bc <- 0xe3,
+#   +0x12c4 <- 0xe4, +0x12b4 <- 0xe5; the d-pad (actions 0..3) writes ±1 into both pairs alike. So inside the bike
+#   the two sticks differ only in the pad words they come from. Who writes words 0xdf..0xe5 was not found: the
+#   pad device's poll (vt +0x5c = 0x00150780; axes at +0x714 + 0x20i, deadzone remap 0x00116e90, axis bytes
+#   (6, 7, 4, 5, 0), axis 2 inverted) does not lay out a record like this one.
