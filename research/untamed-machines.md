@@ -179,7 +179,7 @@ wreck test's full map is in `crates/game-sim/tests/untamed_step.rs`'s `poke_wrec
 | the wreck test | one change: a trick is a stunt id ≤ 48 (SLUS-21104: ≤ 40). A contact's flag is read as a halfword |
 | the stunt-id bound only | start stunt (41 → 49), airborne control (41 → 49 and 46 → 54, three times) |
 | reworked: new calls, constants, compares | backflip (1148 → 1292 B), spin in the air (2048 → 2104 B), preload (584 → 820 B), vehicle update (428 → 668 B), put back (320 → 424 B), wreck entry (288 → 308 B) |
-| not classified | air state (171 differing lines, no changed constant seen), no-hander (register allocation) |
+| classified by MD93d | no-hander: scheduling only (FPU registers `$f5`/`$f6` swapped, one `mul/adda/madd` reordered to the same sum). Air state: reworked in one branch, out of the world (below) |
 
 **Stunt ids shift by 8.** Every bound on the rider's stunt id moved by +8 (40 → 48, 46 → 54). That is
 the eight stunts Untamed's table has beyond Unleashed's (`untamed_tricks`, 54 stunts). The port does not
@@ -218,7 +218,18 @@ in order. Online, a room names only its pack, so an Untamed host's room rides as
 | put back | the ground snap lifts the bike 0.3 ft along the normal and keeps the normal as up; the driver's respawn only with both first words set; no `+0x60`/`+0x70` restore; the attachment's put-back; post (8, 0x15) | `untamed::put_back` | no (the ride's put-back is the port's own) |
 | backflip, spin in the air | — | MD93a, MD93b | — |
 | vehicle update | a remote bike's (vehicle states 3/4) cleared stick has its angle and length worked out again (the arc cosine table's middle, and 0); otherwise SLUS-21104's on moved fields and slots | `untamed::vehicle_update` (calls as `untamed::UpdateCall`) | no (SLUS-21104's is hooked, not ported: `quad::Call::BikeVehicleUpdate`) |
-| air state, no-hander | still unclassified | MD93d | — |
+| air state (1544 → 1524 B) | out of the world (the in-world test fails on the bike's origin): the event is posted under the moved tag, then the bike's **unwreck** (vt `+0x36c`, handed 1) runs, which ends its stunts and calls the put-back **without** the ground snap. SLUS-21104 clears the wreck reason and two more words and calls the put-back with the snap (vt `+0x3a8`, 1, 1). The rest is SLUS-21104's on moved fields: the bike's pointer moved to another register and the body's orientation is held in one, a 16 B larger frame | `untamed::air_state` (calls as `untamed::AirCall`) | no (SLUS-21104's isn't either: the ride's air step is `air::contact`'s) |
+| no-hander (1328 → 1332 B) | nothing beyond scheduling: two FPU registers swapped and one `len²` sum reordered (the same `mula/madda/madd` result); its fields, table and callees moved | none needed | — |
+
+**The air state and no-hander (MD93d).** MD81a's 171 differing lines in the air state were scheduling:
+the bike moved from `$s0` to `$s1`, `$s0` holds the body's orientation pointer, and the frame grew by
+16 B. With that masked (`sdiff.py` with the frame size and base registers set aside, the bike register
+renamed), the callees were compared pair by pair. The balance clear, quaternion axes, in-world test and node
+position are the same code on moved fields. The quaternion-to-euler conversion swaps its out-of-line `b`
+stubs for branch-likely with the `mov.s` in the delay slot, which gives the same clamps. What remains is the
+out-of-world branch (table above). The no-hander differs only in register allocation. `untamed::air_state`
+is proved by `untamed_air_state_is_the_originals` (20,000 states; every call but the axes and euler angles
+hooked and changing the state). Addresses are in `research/oracle.txt # MD93d`.
 
 The brief's "every stunt-id bound +8" has nothing to do in these three: none of them reads the stunt id.
 The bounds are in the wreck test (proved by MD81a), start stunt and airborne control (the port reads no id

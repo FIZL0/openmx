@@ -22,6 +22,9 @@
 //!   no trick button held and the stick off centre, and its end clears a stunt id over 48.
 //! - The vehicle update ([`vehicle_update`], MD93c): SLUS-21104's, whose calls it reports as
 //!   [`UpdateCall`]s, but a remote bike's cleared stick has its angle and length worked out again.
+//! - The air state ([`air_state`], MD93d): SLUS-21104's, whose calls it reports as [`AirCall`]s, but a
+//!   bike out of the world is unwrecked (no ground snap) where SLUS-21104 put it back with the snap. The
+//!   no-hander it calls is SLUS-21104's with registers swapped, so it has no port here.
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
 use crate::air::{Air, Chassis, Params as AirParams, Step as AirStep};
@@ -828,4 +831,185 @@ pub fn vehicle_update(u: &mut Update, dt: F, table: &crate::air::AcosTable, mut 
     }
     call(UpdateCall::VehicleUpdate(dt), u);
     u.cleared = 0;
+}
+
+/// What Untamed's air state ([`air_state`], MD93d) calls, in the order it calls them. Each is handed
+/// the bike, and those with a `dt` the frame's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum AirCall {
+    /// Not balancing (no wreck reason and a stunt id not the balance's): the balance's four words
+    /// cleared, then the no-hander. Both are SLUS-21104's code on moved fields.
+    BalanceCleared,
+    NoHander(F),
+    /// The vehicle's in-world test (its vt `+0x120`), on the bike's origin: the body's position less its
+    /// centre of gravity turned into the world. The answer is the callback's.
+    InWorld(Vf),
+    /// Out of the world: the event the clock posts (category 8, id 13) under the bike's event tag, then
+    /// the bike's unwreck (vt `+0x36c`, handed 1). SLUS-21104 here clears three words and calls the
+    /// put-back (vt `+0x3a8`, handed 1 and 1) instead.
+    Post { tag: u32 },
+    Unwreck,
+    /// The vehicle's own post step (the base class's PostProcess).
+    VehiclePost(F),
+    /// The scene node's position asked for ([`AirState::node_pos`]); it is kept in a second copy after.
+    NodePosition,
+}
+
+/// What the out-of-world event is posted as (category 8, id 13), as on SLUS-21104.
+pub const OUT_OF_WORLD_EVENT: u32 = 13;
+
+/// What Untamed's air state reads and writes on the bike and its body.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AirState {
+    /// The vehicle state's kind (its `+0x28`; the state is the bike's `+0xbb4`). `None`: no state.
+    pub vehicle_state: Option<u32>,
+    /// The wreck reason (`+0xc70`), the rider's stunt id and the balance's (`+0x1544`, `+0x154c`).
+    pub wreck_reason: u32,
+    pub stunt_id: u32,
+    pub balance_id: u32,
+    /// The rigid body (the bike's `+0xe8`): its velocity, orientation, angular velocity and position,
+    /// and its centre of gravity in its own frame (body `+0x1a0`).
+    pub body: crate::quad::Body,
+    pub cofg: Vf,
+    /// The two wheels' (`+0x17f0`, `+0x17f4`) touching words (their `+0xdc`) and contact velocities
+    /// (their `+0x190`).
+    pub wheel_touching: [u32; 2],
+    pub wheel_contact_vel: [Vf; 2],
+    /// The body's speed (`+0x35c`), velocity in its own frame (`+0x380`), forward and up axes (`+0xbd0`,
+    /// `+0xbe0`; `w` untouched), euler angles (`+0x390`) and angular velocity in the world (`+0x370`).
+    pub speed: F,
+    pub local_vel: Vf,
+    pub heading: Vf,
+    pub up: Vf,
+    pub euler: Vf,
+    pub world_ang_vel: Vf,
+    /// Either wheel down (`+0x354`), both down (`+0x1260`), airborne this frame and last (`+0xdd0`,
+    /// `+0xdd4`), the hang time (`+0x1180`) and the contact velocity (`+0xc20`).
+    pub on_ground: u32,
+    pub both_down: u32,
+    pub airborne: u32,
+    pub was_airborne: u32,
+    pub hang_time: F,
+    pub contact_vel: Vf,
+    /// The backflip's flipping word (`+0x1188`) and the 360's ramp (`+0x11c4`): either set, no crossup.
+    pub flipping: u32,
+    pub spin_ramp: u32,
+    /// The control authority after a flip (`+0x1178`), its time (`+0x117c`), and the crossup (`+0x360`).
+    pub authority: F,
+    pub authority_time: F,
+    pub crossup: F,
+    /// The collision record's (`+0xf8`) tipped word (its `+0x24`).
+    pub tipped: u32,
+    /// The bike's event tag (`+0xd10`).
+    pub event_tag: u32,
+    /// The scene node's position (`+0xbc0`) and its kept copy (`+0xc30`).
+    pub node_pos: Vf,
+    pub node_pos_kept: Vf,
+}
+
+/// Above this speed (ft/s) the crossup is measured.
+const CROSSUP_SPEED: f32 = 10.0;
+/// An up axis whose `y` is at most this is tipped.
+const TIPPED_UP: f32 = 0.25;
+const HALF_PI: f32 = 1.570_796_4;
+
+/// **Untamed's air state** (SLUS-21701's bike PostProcess), once a frame after the ground step. It is
+/// SLUS-21104's on Untamed's fields, with one change: a bike out of the world is unwrecked (vt
+/// `+0x36c`, which ends its stunts and puts it back without the ground snap) where SLUS-21104 clears
+/// the wreck reason and two more words and calls the put-back with the snap.
+///
+/// With no vehicle state, or a remote one (kinds 3 and 4), nothing. Else: when not balancing, the
+/// balance cleared and the no-hander; the body's speed, its velocity into its frame, its axes, euler
+/// angles and angular velocity into the world; on the ground with either wheel down, both down with
+/// both; airborne the other way round, the hang time restarted on leaving the ground and counted while
+/// off it; the contact velocity the first touching wheel's (front, then rear), else the body's own. The
+/// crossup: neither flipping nor spinning and above 10 ft/s, the flattened heading against the
+/// flattened velocity through the arc cosine table, ramped with the authority after a flip. The
+/// collision record told the bike is tipped when its up axis's `y` is at most 0.25. Then the origin's
+/// in-world test, the out-of-world event and unwreck, the vehicle's post step and the node's position,
+/// kept in a second copy.
+///
+/// `call` is handed each call with the state, which it may change; its answer is read only for
+/// [`AirCall::InWorld`] (true: inside).
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
+pub fn air_state(a: &mut AirState, dt: F, table: &crate::air::AcosTable, mut call: impl FnMut(AirCall, &mut AirState) -> bool) {
+    use crate::air::{cross, map_clamp, normalize};
+    use ps2_float::fpu::Acc;
+    match a.vehicle_state {
+        None => return,
+        Some(k) if REMOTE.contains(&k) => return,
+        Some(_) => {}
+    }
+    if a.wreck_reason == 0 && a.stunt_id != a.balance_id {
+        call(AirCall::BalanceCleared, a);
+        call(AirCall::NoHander(dt), a);
+    }
+    let v = a.body.velocity;
+    a.speed = Acc::mula(F(v.x()), F(v.x())).madda(F(v.y()), F(v.y())).madd(F(v.z()), F(v.z())).sqrt();
+    a.local_vel = a.body.to_local(v);
+    let (fwd, up) = crate::math::quat_axes(a.body.orientation);
+    a.heading = Vf::new(fwd[0].0, fwd[1].0, fwd[2].0, a.heading.w());
+    a.up = Vf::new(up[0].0, up[1].0, up[2].0, a.up.w());
+    a.euler = crate::math::quat_to_euler(a.body.orientation, table);
+    a.world_ang_vel = a.body.to_world(a.body.ang_vel);
+
+    a.was_airborne = a.airborne;
+    let [front, rear] = a.wheel_touching.map(|t| t != 0);
+    a.on_ground = u32::from(front || rear);
+    a.both_down = u32::from(front && rear);
+    a.airborne = u32::from(a.on_ground == 0);
+    if a.was_airborne == 0 && a.airborne != 0 {
+        a.hang_time = F::ZERO;
+    }
+    if a.airborne != 0 {
+        a.hang_time = a.hang_time + dt;
+    }
+    a.contact_vel = if front {
+        a.wheel_contact_vel[0]
+    } else if rear {
+        a.wheel_contact_vel[1]
+    } else {
+        a.local_vel
+    };
+
+    let heading = normalize(Vf::new(a.heading.x(), 0.0, a.heading.z(), 1.0));
+    let mut angle = F::ZERO;
+    if a.flipping == 0 && a.spin_ramp == 0 && !(a.speed <= F(CROSSUP_SPEED)) {
+        let vel = normalize(Vf::new(v.x(), 0.0, v.z(), 1.0));
+        let c = cross(heading, vel);
+        let sin = Acc::mula(F(c.x()), F(c.x())).madda(F(c.y()), F(c.y())).madd(F(c.z()), F(c.z())).sqrt();
+        let sin = clamp_unit(clamp_unit(clamp_unit(sin)));
+        let t = table.entries();
+        let s = (F::ONE + sin) * F(ACOS_SCALE);
+        let i = s.to_i32();
+        let frac = s - F(fpu::from_i32(i));
+        let lerp = F(fpu::madd(fpu::mula(frac.0, t[i as usize + 1]), (F::ONE - frac).0, t[i as usize]));
+        angle = F(HALF_PI) - lerp;
+        if c.y() < 0.0 {
+            angle = angle * F(-1.0);
+        }
+    }
+    a.crossup = if !(a.authority <= F::ZERO) {
+        if a.authority_time == F::ZERO { F::ZERO } else { map_clamp(a.authority, a.authority_time, F::ZERO, F::ZERO, angle) }
+    } else {
+        angle
+    };
+    a.tipped = u32::from(a.up.y() <= TIPPED_UP);
+
+    let at = origin(&a.body, a.cofg);
+    if !call(AirCall::InWorld(at), a) {
+        let tag = a.event_tag;
+        call(AirCall::Post { tag }, a);
+        call(AirCall::Unwreck, a);
+    }
+    call(AirCall::VehiclePost(dt), a);
+    call(AirCall::NodePosition, a);
+    a.node_pos_kept = a.node_pos;
+}
+
+/// The bike's origin: the body's position less its centre of gravity (in its own frame) turned into
+/// the world by its orientation, on VU0 as the vehicle's post step does it; `w` the position's.
+fn origin(body: &crate::quad::Body, cofg: Vf) -> Vf {
+    let turned = body.to_world(cofg);
+    body.position.merge(Dest::XYZ, body.position.sub(turned))
 }

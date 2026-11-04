@@ -2,7 +2,7 @@
 //!
 //! MD81a found six of the bike step's functions rewritten from SLUS-21104's (research/untamed-machines.md).
 //! These are the [`handling::untamed`] ports so far: the preload, the wreck entry, the put-back, the backflip (MD93a), the
-//! 360 (MD93b) and the vehicle update (MD93c),
+//! 360 (MD93b), the vehicle update (MD93c) and the air state (MD93d),
 //! each run on an Untamed Free Ride image (`context/untamed/ram/nat_or.bin`, as `tests/untamed_step.rs`) on
 //! the bike laid out at Untamed's offsets. Every call they make out is hooked and logged; the port's calls
 //! must be the same, in the same order, and every word of the bike and its body the same after.
@@ -1831,6 +1831,442 @@ fn untamed_vehicle_update_is_the_originals() {
         &tally,
         &["no state", "skipped", "local", "remote", "the ghost took the state", "the ghost changed the kind",
           "timer out, told", "timer out, alone", "request raised"],
+        100,
+    );
+}
+
+// --- the air state (MD93d) ------------------------------------------------------------------------
+
+/// SLUS-21701's bike air state (its PostProcess) and what it calls: the balance's clear, the
+/// no-hander, the vehicle's in-world test, the vehicle's post step and the scene node's position (the
+/// clock's post and the unwreck, vt `+0x36c`, as above). The quaternion axes and euler angles run.
+const AIR_STATE: u32 = 0x004f_1270;
+const BALANCE_CLEARED: u32 = 0x004f_e950;
+const NO_HANDER: u32 = 0x004f_3c70;
+const IN_WORLD: u32 = 0x004b_a650;
+const VEHICLE_POST: u32 = 0x004c_8b20;
+const NODE_POSITION: u32 = 0x0019_0830;
+/// Where the post's first argument is read from.
+const POST_QUEUE: u32 = 0x0047_5bd0;
+/// The harness's wheels and collision record; the node is only handed on.
+const FRONT: u32 = 0x01c0_6c00;
+const REAR: u32 = 0x01c0_6e00;
+const RECORD: u32 = 0x01c0_7000;
+const NODE: u32 = 0x01c0_7100;
+const AIR_REGIONS: [(&str, u32, u32); 6] = [
+    ("bike", OBJ, 0x1800),
+    ("body", BODY, 0x200),
+    ("vehicle state", VSTATE, 0x40),
+    ("front wheel", FRONT, 0x200),
+    ("rear wheel", REAR, 0x200),
+    ("record", RECORD, 0x40),
+];
+
+#[derive(Clone, Debug)]
+struct AirGen {
+    a: untamed::AirState,
+    dt: F,
+    /// What the hooked calls change, so the reads after them are checked: the balance's clear the
+    /// wheels' touching words, the no-hander the body's velocity and the flipping word, the in-world
+    /// test the event tag (and answers `inside`), the unwreck the crossup and node position (both
+    /// written over after), the vehicle's post step the hang time, and the node its position.
+    touching: Option<[u32; 2]>,
+    velocity: Option<Vf>,
+    flipping: Option<u32>,
+    inside: bool,
+    tag: u32,
+    unwreck: (F, Vf),
+    hang_time: Option<F>,
+    node_pos: Vf,
+}
+
+/// What a hooked call does to the bike, the same on both sides; the answer is the in-world test's.
+fn air_mutate(c: untamed::AirCall, a: &mut untamed::AirState, s: &AirGen) -> bool {
+    use untamed::AirCall as C;
+    match c {
+        C::BalanceCleared => a.wheel_touching = s.touching.unwrap_or(a.wheel_touching),
+        C::NoHander(_) => {
+            a.body.velocity = s.velocity.unwrap_or(a.body.velocity);
+            a.flipping = s.flipping.unwrap_or(a.flipping);
+        }
+        C::InWorld(_) => {
+            a.event_tag = s.tag;
+            return s.inside;
+        }
+        C::Post { .. } => {}
+        C::Unwreck => (a.crossup, a.node_pos) = s.unwreck,
+        C::VehiclePost(_) => a.hang_time = s.hang_time.unwrap_or(a.hang_time),
+        C::NodePosition => a.node_pos = s.node_pos,
+    }
+    true
+}
+
+/// A quaternion whose up axis's `y` comes out exactly 0.25 (as `tests/atv_quad.rs`'s).
+fn up_at_a_quarter() -> Vf {
+    let z0 = F(0.35355339).0.to_bits();
+    for d in 0..200u32 {
+        for z in [z0 + d, z0 - d] {
+            let q = Vf::new(0.5, 0.0, f32::from_bits(z), 0.5);
+            if game_sim::math::quat_axes(q).1[1] == F(0.25) {
+                return q;
+            }
+        }
+    }
+    panic!("no quaternion near x = ½, z = √⅛ has up.y exactly 0.25");
+}
+
+#[allow(clippy::float_arithmetic)]
+impl Gen {
+    fn quat(&mut self) -> Vf {
+        let q = self.v(-1.0, 1.0);
+        let n = (q.x() * q.x() + q.y() * q.y() + q.z() * q.z() + q.w() * q.w()).sqrt().max(1e-3);
+        Vf::new(q.x() / n, q.y() / n, q.z() / n, q.w() / n)
+    }
+    fn flag(&mut self) -> u32 {
+        match self.bits() % 4 {
+            0 | 1 => 0,
+            2 => 1,
+            _ => self.bits(),
+        }
+    }
+    fn velocity(&mut self) -> Vf {
+        match self.bits() % 5 {
+            0 => self.v(-6.0, 6.0),
+            1 => Vf::new(self.f(-0.01, 0.01).0, self.f(-80.0, 80.0).0, self.f(-0.01, 0.01).0, self.f(-1.0, 1.0).0),
+            _ => self.v(-90.0, 90.0),
+        }
+    }
+    fn air(&mut self, quarter: Vf) -> AirGen {
+        let dt = if self.one_in(4) { F(1.0 / 30.0) } else { self.f(0.001, 0.05) };
+        let orientation = match self.bits() % 10 {
+            0 => Vf::new(quarter.x(), quarter.y(), quarter.z(), self.f(-1.0, 1.0).0),
+            1 => Vf::new(0.0, self.f(-1.0, 1.0).0, 0.0, self.f(-1.0, 1.0).0),
+            _ => self.quat(),
+        };
+        let body = game_sim::quad::Body {
+            force: self.v(-100.0, 100.0),
+            moment: self.v(-100.0, 100.0),
+            orientation,
+            ang_vel: self.v(-6.0, 6.0),
+            velocity: self.velocity(),
+            reset_each_frame: self.v(-1.0, 1.0),
+            position: self.v(-3000.0, 3000.0),
+            correction: self.v(-1.0, 1.0),
+        };
+        let stunt_id = self.bits() % 4;
+        let a = untamed::AirState {
+            vehicle_state: if self.one_in(12) { None } else { Some(self.kind()) },
+            wreck_reason: if self.b() { 0 } else { self.bits() % 20 },
+            stunt_id,
+            balance_id: if self.one_in(3) { stunt_id } else { self.bits() % 4 },
+            body,
+            cofg: self.v(-2.0, 2.0),
+            wheel_touching: [self.flag(), self.flag()],
+            wheel_contact_vel: [self.v(-50.0, 50.0), self.v(-50.0, 50.0)],
+            speed: self.f(-5.0, 5.0),
+            local_vel: self.v(-5.0, 5.0),
+            heading: self.v(-5.0, 5.0),
+            up: self.v(-5.0, 5.0),
+            euler: self.v(-5.0, 5.0),
+            world_ang_vel: self.v(-5.0, 5.0),
+            on_ground: self.bits(),
+            both_down: self.bits(),
+            airborne: self.flag(),
+            was_airborne: self.bits(),
+            hang_time: self.f(0.0, 3.0),
+            contact_vel: self.v(-5.0, 5.0),
+            flipping: if self.one_in(4) { self.flag() } else { 0 },
+            spin_ramp: if self.one_in(4) { self.flag() } else { 0 },
+            authority: match self.bits() % 3 {
+                0 => self.near(0.0, -1.0, 0.0),
+                _ => self.f(0.0, 1.0),
+            },
+            authority_time: self.near(0.0, 0.0, 1.0),
+            crossup: self.f(-5.0, 5.0),
+            tipped: self.bits(),
+            event_tag: self.bits(),
+            node_pos: self.v(-5.0, 5.0),
+            node_pos_kept: self.v(-5.0, 5.0),
+        };
+        AirGen {
+            a,
+            dt,
+            touching: if self.one_in(4) { Some([self.flag(), self.flag()]) } else { None },
+            velocity: if self.one_in(4) { Some(self.velocity()) } else { None },
+            flipping: if self.one_in(4) { Some(self.flag()) } else { None },
+            inside: !self.one_in(4),
+            tag: self.bits(),
+            unwreck: (self.f(-5.0, 5.0), self.v(-5.0, 5.0)),
+            hang_time: if self.one_in(3) { Some(self.f(0.0, 3.0)) } else { None },
+            node_pos: self.v(-3000.0, 3000.0),
+        }
+    }
+}
+
+fn air_reset(ee: &mut Ee) {
+    for (_, base, len) in AIR_REGIONS {
+        for o in (0..len).step_by(4) {
+            ee.set_u32(base + o, 0);
+        }
+    }
+    ee.set_u32(OBJ + 0x4, BIKE_VTABLE);
+    ee.set_u32(OBJ + 0xe8, BODY);
+    ee.set_u32(OBJ + 0xf8, RECORD);
+    ee.set_u32(OBJ + 0x114, NODE);
+    ee.set_u32(OBJ + 0x17f0, FRONT);
+    ee.set_u32(OBJ + 0x17f4, REAR);
+}
+
+const AIR_BODY: [u32; 8] = [0xa0, 0x1b0, 0x190, 0x1d0, 0x80, 0xc0, 0x70, 0xd0];
+
+fn poke_air(ee: &mut Ee, a: &untamed::AirState) {
+    match a.vehicle_state {
+        Some(k) => {
+            ee.set_u32(OBJ + 0xbb4, VSTATE);
+            ee.set_u32(VSTATE + 0x28, k);
+        }
+        None => {
+            ee.set_u32(OBJ + 0xbb4, 0);
+            ee.set_u32(VSTATE + 0x28, 0);
+        }
+    }
+    ee.set_u32(OBJ + 0xc70, a.wreck_reason);
+    ee.set_u32(OBJ + 0x1544, a.stunt_id);
+    ee.set_u32(OBJ + 0x154c, a.balance_id);
+    let b = &a.body;
+    let body = [b.force, b.moment, b.orientation, b.ang_vel, b.velocity, b.reset_each_frame, b.position, b.correction];
+    for (o, v) in AIR_BODY.iter().zip(body) {
+        put_v(ee, BODY + o, v);
+    }
+    put_v(ee, BODY + 0x1a0, a.cofg);
+    for (w, at) in [FRONT, REAR].into_iter().enumerate() {
+        ee.set_u32(at + 0xdc, a.wheel_touching[w]);
+        put_v(ee, at + 0x190, a.wheel_contact_vel[w]);
+    }
+    put_f(ee, OBJ + 0x35c, a.speed);
+    put_v(ee, OBJ + 0x380, a.local_vel);
+    put_v(ee, OBJ + 0xbd0, a.heading);
+    put_v(ee, OBJ + 0xbe0, a.up);
+    put_v(ee, OBJ + 0x390, a.euler);
+    put_v(ee, OBJ + 0x370, a.world_ang_vel);
+    ee.set_u32(OBJ + 0x354, a.on_ground);
+    ee.set_u32(OBJ + 0x1260, a.both_down);
+    ee.set_u32(OBJ + 0xdd0, a.airborne);
+    ee.set_u32(OBJ + 0xdd4, a.was_airborne);
+    put_f(ee, OBJ + 0x1180, a.hang_time);
+    put_v(ee, OBJ + 0xc20, a.contact_vel);
+    ee.set_u32(OBJ + 0x1188, a.flipping);
+    ee.set_u32(OBJ + 0x11c4, a.spin_ramp);
+    put_f(ee, OBJ + 0x1178, a.authority);
+    put_f(ee, OBJ + 0x117c, a.authority_time);
+    put_f(ee, OBJ + 0x360, a.crossup);
+    ee.set_u32(RECORD + 0x24, a.tipped);
+    ee.set_u32(OBJ + 0xd10, a.event_tag);
+    put_v(ee, OBJ + 0xbc0, a.node_pos);
+    put_v(ee, OBJ + 0xc30, a.node_pos_kept);
+}
+
+fn peek_air(ee: &Ee) -> untamed::AirState {
+    let f = |a: u32| F::from_bits(ee.u32_at(a));
+    let b = |o: usize| get_v(ee, BODY + AIR_BODY[o]);
+    untamed::AirState {
+        vehicle_state: (ee.u32_at(OBJ + 0xbb4) != 0).then(|| ee.u32_at(VSTATE + 0x28)),
+        wreck_reason: ee.u32_at(OBJ + 0xc70),
+        stunt_id: ee.u32_at(OBJ + 0x1544),
+        balance_id: ee.u32_at(OBJ + 0x154c),
+        body: game_sim::quad::Body {
+            force: b(0),
+            moment: b(1),
+            orientation: b(2),
+            ang_vel: b(3),
+            velocity: b(4),
+            reset_each_frame: b(5),
+            position: b(6),
+            correction: b(7),
+        },
+        cofg: get_v(ee, BODY + 0x1a0),
+        wheel_touching: [ee.u32_at(FRONT + 0xdc), ee.u32_at(REAR + 0xdc)],
+        wheel_contact_vel: [get_v(ee, FRONT + 0x190), get_v(ee, REAR + 0x190)],
+        speed: f(OBJ + 0x35c),
+        local_vel: get_v(ee, OBJ + 0x380),
+        heading: get_v(ee, OBJ + 0xbd0),
+        up: get_v(ee, OBJ + 0xbe0),
+        euler: get_v(ee, OBJ + 0x390),
+        world_ang_vel: get_v(ee, OBJ + 0x370),
+        on_ground: ee.u32_at(OBJ + 0x354),
+        both_down: ee.u32_at(OBJ + 0x1260),
+        airborne: ee.u32_at(OBJ + 0xdd0),
+        was_airborne: ee.u32_at(OBJ + 0xdd4),
+        hang_time: f(OBJ + 0x1180),
+        contact_vel: get_v(ee, OBJ + 0xc20),
+        flipping: ee.u32_at(OBJ + 0x1188),
+        spin_ramp: ee.u32_at(OBJ + 0x11c4),
+        authority: f(OBJ + 0x1178),
+        authority_time: f(OBJ + 0x117c),
+        crossup: f(OBJ + 0x360),
+        tipped: ee.u32_at(RECORD + 0x24),
+        event_tag: ee.u32_at(OBJ + 0xd10),
+        node_pos: get_v(ee, OBJ + 0xbc0),
+        node_pos_kept: get_v(ee, OBJ + 0xc30),
+    }
+}
+
+fn air_snap(ee: &Ee) -> Vec<u32> {
+    AIR_REGIONS.iter().flat_map(|&(_, base, len)| (0..len).step_by(4).map(move |o| base + o)).map(|a| ee.u32_at(a)).collect()
+}
+
+fn air_where(i: usize) -> String {
+    let mut i = 4 * i as u32;
+    for (name, _, len) in AIR_REGIONS {
+        if i < len {
+            return format!("{name} +{i:#x}");
+        }
+        i -= len;
+    }
+    unreachable!()
+}
+
+/// The paths a state goes down, off the original's branches (several per state); `after` is the
+/// port's air state after, `calls` its calls.
+#[allow(clippy::float_arithmetic)]
+fn air_paths(s: &AirGen, after: &untamed::AirState, calls: &[untamed::AirCall]) -> Vec<&'static str> {
+    use untamed::AirCall as C;
+    let a = &s.a;
+    let Some(k) = a.vehicle_state else { return vec!["no state"] };
+    if k == 3 || k == 4 {
+        return vec!["remote"];
+    }
+    let mut p = vec![if calls.contains(&C::BalanceCleared) { "not balancing" } else { "balancing" }];
+    let [front, rear] = after.wheel_touching.map(|t| t != 0);
+    p.push(match (front, rear) {
+        (true, _) => "contact from the front",
+        (false, true) => "contact from the rear",
+        _ => "contact from the body",
+    });
+    if after.airborne != 0 && after.was_airborne == 0 {
+        p.push("takes off");
+    }
+    if after.airborne != 0 && after.was_airborne != 0 {
+        p.push("stays up");
+    }
+    let v = after.body.velocity;
+    let fast = (v.x() * v.x() + v.y() * v.y() + v.z() * v.z()).sqrt() > 10.0;
+    p.push(if after.flipping != 0 || after.spin_ramp != 0 || !fast { "no crossup" } else { "crossup" });
+    p.push(match (a.authority > F::ZERO, a.authority_time == F::ZERO) {
+        (false, _) => "full authority",
+        (true, true) => "no authority time",
+        (true, false) => "authority ramp",
+    });
+    let up = after.up.y();
+    p.push(if up == 0.25 { "up at a quarter" } else if up < 0.25 { "tipped" } else { "upright" });
+    p.push(if calls.contains(&C::Unwreck) { "out of the world" } else { "in the world" });
+    p
+}
+
+/// SLUS-21701's bike air state, the port's [`untamed::air_state`]: 20,000 generated states. Every call
+/// it makes but the axes and euler angles (which run) is hooked, logged with its arguments, and changes
+/// the bike as the port's `call` does ([`air_mutate`]), so the words read after a call must be read
+/// after it on both sides.
+#[test]
+fn untamed_air_state_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let table = air::AcosTable::build();
+    assert_eq!(ee.f32_at(ACOS_SCALE), 14999.5, "the arc cosine table's scale");
+    let at = ee.u32_at(ACOS_PTR);
+    for (i, &e) in table.entries().iter().enumerate() {
+        assert_eq!(ee.f32_at(at + 4 * i as u32).to_bits(), e.to_bits(), "arc cosine entry {i}");
+    }
+    use untamed::AirCall as C;
+    let calls = Rc::new(RefCell::new(Vec::<C>::new()));
+    let current = Rc::new(RefCell::new(None::<AirGen>));
+    let queue = ee.u32_at(POST_QUEUE);
+    let hooked: [(u32, fn(&Ee) -> C); 7] = [
+        (BALANCE_CLEARED, |_| C::BalanceCleared),
+        (NO_HANDER, |ee| C::NoHander(dt(ee))),
+        (IN_WORLD, |ee| C::InWorld(get_v(ee, ee.r(5) as u32))),
+        (POST_EVENT, |ee| {
+            assert_eq!((ee.r(5) as u32, ee.r(6), ee.r(7), ee.r(9)), (OBJ + 0x698, 8, u64::from(untamed::OUT_OF_WORLD_EVENT), 0), "the post's arguments");
+            C::Post { tag: ee.r(8) as u32 }
+        }),
+        (ee.u32_at(BIKE_VTABLE + 0x36c), |ee| {
+            assert_eq!(ee.r(5), 1, "the unwreck is handed 1");
+            C::Unwreck
+        }),
+        (VEHICLE_POST, |ee| C::VehiclePost(dt(ee))),
+        (NODE_POSITION, |ee| {
+            assert_eq!((ee.r(5), ee.r(6) as u32), (0, OBJ + 0xbc0), "the node's arguments");
+            C::NodePosition
+        }),
+    ];
+    for (at, what) in hooked {
+        let log = calls.clone();
+        let s = current.clone();
+        ee.hooks.insert(at, Box::new(move |ee| {
+            let a0 = match at {
+                POST_EVENT => queue,
+                NODE_POSITION => NODE,
+                _ => OBJ,
+            };
+            assert_eq!(ee.r(4) as u32, a0, "{at:#x} called on {a0:#x}");
+            let c = what(ee);
+            log.borrow_mut().push(c);
+            let mut a = peek_air(ee);
+            let inside = air_mutate(c, &mut a, s.borrow().as_ref().unwrap());
+            poke_air(ee, &a);
+            ee.set(2, u64::from(inside));
+        }));
+    }
+    let quarter = up_at_a_quarter();
+    let mut g = Gen(0x0d93_000d);
+    let mut tally = BTreeMap::new();
+    for k in 0..20_000 {
+        let s = g.air(quarter);
+        air_reset(&mut ee);
+        poke_air(&mut ee, &s.a);
+        *current.borrow_mut() = Some(s.clone());
+        calls.borrow_mut().clear();
+        ee.call(AIR_STATE, &[u64::from(OBJ)], &[s.dt.0], 50_000);
+        let frame = (ee.stack - 0x2000, ee.stack + 0x40);
+        for (a, b) in ee.written_ranges() {
+            let inside = AIR_REGIONS.iter().any(|&(_, base, len)| a >= base && b <= base + len) || (a >= frame.0 && b <= frame.1);
+            assert!(inside, "state {k}: the original wrote {a:#010x}..{b:#010x}, which is not the bike or the stack\n{s:#?}");
+        }
+        let was = air_snap(&ee);
+        let got = calls.borrow().clone();
+
+        let mut a = s.a;
+        let port = RefCell::new(Vec::new());
+        untamed::air_state(&mut a, s.dt, &table, |c, a| {
+            port.borrow_mut().push(c);
+            air_mutate(c, a, &s)
+        });
+        let port = port.into_inner();
+        let paths = air_paths(&s, &a, &port);
+        for p in &paths {
+            *tally.entry(*p).or_insert(0u32) += 1;
+        }
+        air_reset(&mut ee);
+        poke_air(&mut ee, &a);
+        let now = air_snap(&ee);
+        if was != now {
+            let i = was.iter().zip(&now).position(|(a, b)| a != b).unwrap();
+            panic!(
+                "state {k} ({paths:?}): {} is {:#010x} ({}) in the original and {:#010x} ({}) in the port\n{s:#?}",
+                air_where(i),
+                was[i],
+                f32::from_bits(was[i]),
+                now[i],
+                f32::from_bits(now[i]),
+            );
+        }
+        assert_eq!(got, port, "state {k} ({paths:?}): the calls\n{s:#?}");
+    }
+    enough(
+        &tally,
+        &["no state", "remote", "balancing", "not balancing", "contact from the front", "contact from the rear",
+          "contact from the body", "takes off", "stays up", "no crossup", "crossup", "full authority",
+          "no authority time", "authority ramp", "up at a quarter", "tipped", "upright", "out of the world",
+          "in the world"],
         100,
     );
 }
