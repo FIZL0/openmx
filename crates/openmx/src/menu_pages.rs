@@ -1203,9 +1203,9 @@ impl Menu {
     /// The knobs that are not this page's to set: the world's for anyone but the host, and online
     /// the biplane's for a guest, every seat flying the host's.
     fn knob_held(&self, knob: Knob) -> Option<&'static str> {
-        // P272: an online ride builds its cars and helicopter off the disc's files alone.
-        if matches!(knob.category(), Category::Kiowa | Category::Cars) && (self.guest || self.lobby.room.is_some()) {
-            return Some("Online rides take the cars and the Kiowa as the disc has them.");
+        // P272: online rides have no helicopter to take (P289 carries the cars' to every seat's own).
+        if knob.category() == Category::Kiowa && (self.guest || self.lobby.room.is_some()) {
+            return Some("Online rides have no Kiowa yet.");
         }
         match self.mods_own() {
             None => None,

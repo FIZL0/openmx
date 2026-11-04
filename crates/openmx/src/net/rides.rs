@@ -447,6 +447,22 @@ pub fn plane_on(stock: &game_sim::phy::Plane, mods: &game_sim::modifiers::Mods, 
     f
 }
 
+/// Every seat's cars for [`Rides::cars`] (P289): `stock`, each seat's copies as the disc builds them
+/// ([`crate::vehicle::Lot::online_cars`]), seat `s`'s on row `s` of the ride's modifiers `mods`
+/// ([`game_sim::modifiers::Mods::car`]), as the shell's `Garage::modify` puts a seat's offline. A
+/// seat past the rows rides the last row's, as its bike does; at every knob's default the stock cars.
+pub fn cars_on(stock: &[Vec<vehicle::CarRide>], mods: &game_sim::modifiers::Mods) -> Vec<Vec<vehicle::CarRide>> {
+    stock
+        .iter()
+        .enumerate()
+        .map(|(seat, cars)| {
+            let mut cars = cars.clone();
+            cars.iter_mut().for_each(|c| mods.car(seat, &mut c.car));
+            cars
+        })
+        .collect()
+}
+
 /// One seat in bytes (N13): its controller preset (P79), which its binding table is built on,
 /// then its state in [`game_sim::snapshot`]'s codec. A seat's preset is a constant of the ride like
 /// its bike, and every machine builds the seat's table on it; it travels with the state because a
@@ -569,6 +585,24 @@ pub struct Modded<'a, 'b> {
     /// The disc's `biplane.phy` before any modifier (N17), which [`Rides::plane`] and every seat's
     /// plane in flight are moved onto a change from; `None` with no plane in the ride.
     pub stock_plane: Option<&'a game_sim::phy::Plane>,
+    /// Every seat's cars as the disc builds them and the ones the ride drives, those on [`Modded::mods`]
+    /// ([`cars_on`], P289), which a change builds again; the ride steps with these, not
+    /// [`Rides::cars`]. `None` steps with [`Rides::cars`] as they are.
+    pub cars: Option<(&'a [Vec<vehicle::CarRide>], &'a mut Vec<Vec<vehicle::CarRide>>)>,
+}
+
+impl Modded<'_, '_> {
+    /// `f` on [`Modded::rides`], its cars the modified ones ([`Modded::cars`]) if there are.
+    fn with<R>(&mut self, f: impl FnOnce(&mut Rides<'_>) -> R) -> R {
+        let Some((_, cars)) = self.cars.as_ref() else { return f(self.rides) };
+        let r = &mut *self.rides;
+        let after: Option<&mut dyn FnMut(usize, F, &mut Sim, &Controls)> = match r.after.as_mut() {
+            Some(a) => Some(&mut **a),
+            None => None,
+        };
+        let mut on = Rides { sims: &mut *r.sims, world: &mut *r.world, after, time_scale: r.time_scale, plane: r.plane.as_deref_mut(), cars: &cars[..] };
+        f(&mut on)
+    }
 }
 
 impl Game for Modded<'_, '_> {
@@ -583,7 +617,7 @@ impl Game for Modded<'_, '_> {
     }
 
     fn step(&mut self, tick: usize, pads: &[Report]) {
-        self.rides.step(tick, pads)
+        self.with(|r| r.step(tick, pads))
     }
 
     fn hash(&self) -> u64 {
@@ -595,11 +629,11 @@ impl Game for Modded<'_, '_> {
     }
 
     fn decode(&mut self, bytes: &[u8]) -> Result<(), String> {
-        self.rides.decode(bytes)
+        self.with(|r| r.decode(bytes))
     }
 
     fn seat(&mut self, seat: usize, spawn: &[u8]) -> Result<(), String> {
-        self.rides.seat(seat, spawn)
+        self.with(|r| r.seat(seat, spawn))
     }
 
     /// Every seat's bike built again from its stock file on `to` and its ride retuned where it is
@@ -624,6 +658,11 @@ impl Game for Modded<'_, '_> {
         // And the plane a switch takes from here built on the new set.
         if let (Some(file), Some(t)) = (self.stock_plane, self.rides.plane.as_deref_mut()) {
             *t = plane_on(file, &to, t);
+        }
+        // And every seat's cars on its own row (P289): a car being driven takes them at its next
+        // step, which reads its file off them.
+        if let Some((stock, cars)) = self.cars.as_mut() {
+            **cars = cars_on(stock, &to);
         }
         *self.mods = to;
         self.rides.time_scale = to.time_scale();

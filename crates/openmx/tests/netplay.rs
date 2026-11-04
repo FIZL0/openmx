@@ -1684,7 +1684,7 @@ impl Machine for ModRide {
     fn frame(&mut self, np: &mut Netplay<rides::State>, local: &[Report]) {
         let time_scale = self.mods.time_scale();
         let mut rides = Rides { sims: &mut self.ride.sims, world: &mut self.ride.world, after: None, time_scale, plane: None, cars: &[] };
-        let mut game = rides::Modded { rides: &mut rides, stock: &self.stock, mods: &mut self.mods, stock_plane: None };
+        let mut game = rides::Modded { rides: &mut rides, stock: &self.stock, mods: &mut self.mods, stock_plane: None, cars: None };
         np.frame(&mut game, local, ROUND.as_secs_f32());
     }
     fn hash(&self) -> u64 {
