@@ -4802,6 +4802,45 @@ fn auto_button_icons_pick_each_pads_family() {
     assert_eq!(m.buttons_of(&pad(cases[2].0)).word(Control::Cross), "A");
 }
 
+/// P292: a seat the on-screen touch pad drives — the browser's (web/touch.js, "Touch controls") or
+/// the iPhone's ("Touch pad") — has PlayStation hints on Auto, in the menus and its ride HUD, as the
+/// pad's own ✕ ○ □ △ are; a real pad or the keyboard pressed after has its own.
+#[test]
+fn a_touch_driven_seats_hints_are_playstation() {
+    use menu::pads::{Glyph, Style};
+    use menu::ButtonIcons;
+    if menu::pads::forced().is_some() {
+        return;
+    }
+    let cross = Press { ok: true, ..Press::default() };
+    let xbox = Dev::Pad("045e:0b12 - usb-5/input0 Microsoft Xbox Series S|X Controller".into());
+    for touch in ["0000:0000   Touch controls", "0000:0000   Touch pad"] {
+        let touch = Dev::Pad(touch.into());
+        let (mut m, _) = fresh();
+        m.controllers(&[Some(touch.clone())], &[(Dev::Keys, "Keyboard".into()), (touch.clone(), "Touch".into())]);
+        // Nothing pressed yet: the touch pad, the one pad there is.
+        assert_eq!(m.buttons().style, Style::PlayStation, "{touch:?}");
+        m.step_devices(&[(touch.clone(), cross)]);
+        let b = m.buttons();
+        assert_eq!(b.style, Style::PlayStation, "{touch:?}");
+        assert_eq!(b.glyph(Control::Cross, true), Some(Glyph::Face(Style::PlayStation, 0)));
+        assert_eq!(b.glyph(Control::R1, true), Some(Glyph::Shoulder("R1")));
+        assert_eq!(b.glyph(Control::Start, true), Some(Glyph::Small("START")));
+        // Its ride's HUD.
+        m.ride_devs = vec![touch.clone()];
+        assert_eq!(m.seat_buttons(0).style, Style::PlayStation, "{touch:?}");
+        m.ride_devs.clear();
+        // A real pad, then the keyboard, pressed after: their own.
+        m.step_devices(&[(xbox.clone(), cross)]);
+        assert_eq!(m.buttons().style, Style::Xbox);
+        m.step_devices(&[(Dev::Keys, cross)]);
+        assert_eq!(m.buttons().style, Style::Keys);
+        // A fixed Button Icons is the touch pad's too, as opentennis's.
+        m.settings.button_icons = ButtonIcons::Switch;
+        assert_eq!(m.buttons_of(&touch).style, Style::Switch);
+    }
+}
+
 /// P118: every row of every Settings tab, of the modifiers page and of the Mods page is reachable by
 /// the d-pad and changes its setting by a press, or opens what it opens; a dimmed row says why and
 /// ignores presses.

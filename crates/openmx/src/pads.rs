@@ -114,9 +114,17 @@ const VALVE: u16 = 0x28de;
 /// maker's pad, so it is a Deck only on a Deck.
 const STEAM_VIRTUAL: u16 = 0x11ff;
 
-/// What `pad.rs`'s `TOUCH_PAD` is called (P210): web/touch.js's and the iPhone's on-screen pad,
-/// whose buttons are ✕ ○ □ △.
+/// What `pad.rs`'s `TOUCH_PAD` is called (P210): web/touch.js's on-screen pad, whose buttons are
+/// ✕ ○ □ △.
 const TOUCH_PAD: &str = "Touch controls";
+/// What `ios.rs`'s `TOUCH_NAME` is called (P292): the iPhone's on-screen pad, touch.js's in the app.
+const IOS_TOUCH_PAD: &str = "Touch pad";
+
+/// Whether pad `id` (a seat's name for it, `vvvv:pppp uniq phys name`) is an on-screen touch pad,
+/// the browser's or the iPhone's (P292).
+pub fn is_touch(id: &str) -> bool {
+    id.contains(TOUCH_PAD) || id.trim_end().strip_suffix(IOS_TOUCH_PAD).is_some_and(|rest| rest.is_empty() || rest.ends_with(' '))
+}
 
 /// A pad's family by its USB ids and its name, Auto's pick: PlayStation by Sony's vendor id or a
 /// Sony name, Switch by Nintendo's, Steam Deck by Valve's (Steam's virtual pad only on a Deck,
@@ -187,7 +195,7 @@ pub fn style_of(icons: ButtonIcons, dev: &Dev) -> Style {
     }
     match dev {
         Dev::Keys => Style::Keys,
-        Dev::Pad(id) => icons.style().unwrap_or_else(|| if id.contains(TOUCH_PAD) { Style::PlayStation } else { identity_family(id, on_steam_deck()) }),
+        Dev::Pad(id) => icons.style().unwrap_or_else(|| if is_touch(id) { Style::PlayStation } else { identity_family(id, on_steam_deck()) }),
     }
 }
 
@@ -351,6 +359,9 @@ mod tests {
         assert_eq!(style_of(ButtonIcons::Xbox, &ds), Style::Xbox);
         assert_eq!(style_of(ButtonIcons::Xbox, &Dev::Keys), Style::Keys);
         assert_eq!(style_of(ButtonIcons::Auto, &Dev::Pad("/dev/input/js0 Touch controls".into())), Style::PlayStation);
+        // The iPhone's touch pad, as `pad.rs` names it (P292), and no other pad of the name's words.
+        assert_eq!(style_of(ButtonIcons::Auto, &Dev::Pad("0000:0000   Touch pad".into())), Style::PlayStation);
+        assert!(!is_touch("045e:028e   Xbox Touch padded"));
     }
 
     #[test]
