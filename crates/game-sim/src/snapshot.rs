@@ -978,8 +978,9 @@ wire!(crate::contact_search::Record { search_ground, search, sweep_back, touchin
 wire!(crate::ride::Ride { mv, chassis, engine, air, front, rear, origin, node, held, spawn, spawn_facing, back, near, touching, stunt, drag_halved, riding_speed_sq, tricks, mxvatv, back_search, nearby }
     // The rear wheel's material is the drive-on sound's, set again in every substep's contacts.
     // The props are lent only for the bike's frame (S210) and are the Sim's between frames. What
-    // the body rays' material listener heard is the collision sound's queue (F27a).
-    skip { rear_material, heard, props });
+    // the body rays' material listener heard is the collision sound's queue (F27a), and the impact
+    // that queue reads as the bike's speed is its too (B27).
+    skip { rear_material, heard, impact, props });
 wire!(crate::back_search::Cache { at, moved, list, world });
 wire!(crate::handling::Flip { clip, wrecked, cut, came_round, struck, stunt, preload_cue, gas_cut, gas_cut_timer, steer_ramp_timer });
 wire!(crate::trick_pack::State { spin, flip_row, side, side_flick, front_watch });

@@ -820,6 +820,12 @@ pub struct Ride {
     /// What the body rays' material listener heard this tick (F27a, [`crate::material_hit`]): the
     /// collision sound's queue entries this bike owns. Sound only, like [`Ride::rear_material`].
     pub heard: crate::material_hit::Heard,
+    /// The chassis' impact accumulator (`+0x170`) as the frame's substeps left it: what the material
+    /// table's update reads as this bike's speed when one of its hits is queued (B27,
+    /// [`crate::material_hit`]). The ground step empties it at the top of every frame, so it is the
+    /// frame's own shoves only, and a bike that strikes something and drives on has none the next
+    /// frame. Sound only, like [`Ride::rear_material`].
+    pub impact: crate::material_hit::Impact,
     /// A trick is running. The original's airborne control and its wreck test both read one word on
     /// the bike for this (the trick clocks' "in progress"), and the clocks run *after* the ground
     /// step, so what a frame's air code sees is the previous frame's verdict. [`crate::rider`] is
@@ -924,6 +930,7 @@ impl Ride {
             touching: false,
             rear_material: 0,
             heard: crate::material_hit::Heard::default(),
+            impact: crate::material_hit::Impact(NOTHING),
             stunt: false,
             drag_halved: false,
             riding_speed_sq: F(BIKE_MAX_SPEED_SQ),
@@ -2305,7 +2312,7 @@ impl Ride {
         }
         let Ride {
             mv: ride, chassis, engine, air, front, rear, origin, node, held, near, touching, stunt,
-            drag_halved, tricks, mxvatv, rear_material, nearby, props, ..
+            drag_halved, tricks, mxvatv, rear_material, nearby, props, impact, ..
         } = self;
         *touching = false;
         // MX vs. ATV's moves (MD16), only for a bike a trick pack is laid over.
@@ -2768,6 +2775,8 @@ impl Ride {
         // The transform is the engine's object and outlives the frame; the rows are what of it the
         // ride has to carry, the origin being `origin` already.
         *node = [out.chassis.0[0], out.chassis.0[1], out.chassis.0[2]];
+        // What the material table's update reads of this bike after the frame (B27).
+        *impact = crate::material_hit::Impact(mvc.accel);
 
         ride.collision_near = s.node_distance <= F(mv::COLLISION_NEAR);
         calls.push(mv::Call::SearchReset);

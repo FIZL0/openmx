@@ -3589,7 +3589,8 @@ impl HitTable {
 
     /// **Plays a frame's hits** ([`game_sim::material_hit::play`]'s sounds): each a new voice at its
     /// level, where its owner is, heard between the material's distances. A hit does not stop the
-    /// last one of its material, so they sound over each other.
+    /// last one of its material, so they sound over each other; a strike is one hit, as its impulse
+    /// is the frame's own ([`game_sim::material_hit`], B27).
     pub fn sound(&self, m: &mut Mixer, hits: &[game_sim::material_hit::Sound]) {
         for h in hits {
             let Some(mat) = self.materials.get(h.material) else { continue };

@@ -8795,12 +8795,16 @@ material_hit_queue boot 0x003ea8a0 the material table's listener (+0x34, vt+8 vi
 #                          owner -> +0x80, struck record -> +0x98, 0 -> +0xb0. vt+0xc 0x3ea8f0 is a no-op
 material_listener_attach boot 0x003eada0 (table interface +0x30) adds the listener to obj+0x1f0's list (vt +0x80)
 material_listener_detach boot 0x003ead60 removes it
-material_hit_play boot 0x003ea900 run by the update 0x3ead10 when queued: speed = |vel| of the owner (+0x80
+material_hit_play boot 0x003ea900 run by the update 0x3ead10 when queued: speed = |impulse| of the owner (+0x80
 #                          -> +0xf4 body +0xb0, else +0xf0 +0x170), repeated pairs keep the faster; material =
 #                          struck +0x89 (0x10 via 0x0026f4b0; struck +0x84 & word 0x00468f48 -> +0x65
 #                          SolidFoliageID); speed >= MinImpulse (+0x114): level clamp(speed/MaxImpulse(+0x118)
 #                          *100, 0, 100), vt+0x30, vt+0x5c position (+0x60), sound_3d 0x00104480 with
 #                          +0x10c/+0x110 distances, vt+0x1c play(4)
+#                          B27: the speed is the body's shock peak (+0xb0, cleared at preforce) or the
+#                          chassis' impact accumulator (+0x170, cleared by the ground step), not |vel|, so
+#                          only the strike frame passes MinImpulse; vt+0x1c start 0x166380 never stops the
+#                          old voice (play(4) always allocates). f27a1 2903: 16.81 -> level 67, 2904-2906: 0
 
 # --- F27: the material table's collision sounds (crates/game-sim/src/material_hit.rs, openmx audio.rs HitTable;
 #   tests/material_hit.rs; journal 2026-11-03-f27-material-hit-sounds)
