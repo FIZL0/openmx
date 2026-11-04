@@ -1227,8 +1227,10 @@ fn p2_wrecks_7_on_the_tapes_pads() {
     assert_eq!(wrecked, [(137855, 7)], "P2's wreck, by tick");
 }
 
-/// What [`fly_with_far`] keeps of a tick: the near plane's speed and spot, P2's wreck bike's.
-type NearTick = ([[u32; 3]; 2], [[u32; 3]; 2]);
+/// What [`fly_with_far`] keeps of a tick: the near plane's speed and spot, P2's wreck bike's, and
+/// whether the near plane's rays struck the wreck bike's hull (F36: an entry of its own naming another
+/// side on its list, and the mirror at the head of the wreck bike's).
+type NearTick = ([[u32; 3]; 2], [[u32; 3]; 2], bool);
 
 /// **P2's wreck bike under plane 0, alone or flown together with a far plane** (S276a), from
 /// 137910's image as [`fly_by`]: P2 down with wreck 7, Cross held, nothing stepping P2 but the
@@ -1236,11 +1238,10 @@ type NearTick = ([[u32; 3]; 2], [[u32; 3]; 2]);
 /// [`Flight::frame_met`], [`game_sim::wreck_plane::step_downed`]); `Some(first)` flies it with a
 /// second plane 400 ft above, out of everyone's reach, in one [`flight::frames_together`]
 /// ([`game_sim::wreck_plane::search_downed_by`], [`game_sim::wreck_plane::step_downed_by`]), plane 0
-/// first among them or second.
-fn fly_with_far(far: Option<bool>) -> Option<Vec<NearTick>> {
+/// first among them or second. From image `from` to tick `to`, P1's pad `pad`.
+fn fly_with_far(from: u32, to: u32, pad: &dyn Fn(u32) -> Report, far: Option<bool>) -> Option<Vec<NearTick>> {
     use game_sim::flight::{Fly, Met};
     use game_sim::wreck_plane;
-    let (from, to) = (137910, 137920);
     let dt = F(1.0 / 60.0);
     let ee = image(from)?;
     let (plane, rays, hull) = machines()?;
@@ -1255,15 +1256,19 @@ fn fly_with_far(far: Option<bool>) -> Option<Vec<NearTick>> {
     wrecked_p2(&ee, p2(&ee), 7, &mut other);
     let me = standing_p2(&ee, &phy, &col);
     let mut sim = Sim::with_rider(0x5272, Arc::clone(&tables), phy, me);
+    let wreck = wreck_hull(&mut disc);
     in_free09_ss(&mut disc, |world, area| {
         let mut near = seeded_plane(&ee, &plane, &rays, &hull, mesh.as_ref(), area, &tables);
+        if let Some(w) = wreck.clone() {
+            near = near.with_wreck_hull(w);
+        }
         let mut high = near.clone();
         let up = near.spawn_origin().add(Vf::new(0.0, 400.0, 0.0, 0.0));
         high.place(up, Vf::new(0.0, 0.0, 1.0, 0.0), &tables.ride.acos);
-        sim.poll(dt, &[cross_held(from - 1), Report::missing()]);
+        sim.poll(dt, &[pad(from - 1), Report::missing()]);
         let mut out = Vec::new();
         for t in from..to {
-            sim.poll(dt, &[cross_held(t), Report::missing()]);
+            sim.poll(dt, &[pad(t), Report::missing()]);
             let pad = flight::pad(sim.input.pad(0));
             let mut riders = vec![&mut other];
             let (mut m0, mut m1) = (Met::default(), Met::default());
@@ -1285,7 +1290,10 @@ fn fly_with_far(far: Option<bool>) -> Option<Vec<NearTick>> {
                 }
             }
             let c = other.crash.as_ref().expect("P2 stays down");
-            out.push(([three(near.body.velocity), three(near.body.position)], [three(c.bike.body.velocity), three(c.bike.body.position)]));
+            let struck = near.record.contacts.iter().any(|e| e.kind == 0 && e.other.is_some());
+            let mirrored = c.bike.record.contacts.first().is_some_and(|e| e.kind == 1);
+            assert_eq!(struck, mirrored, "{t}: the plane's strike on the hull and its mirror at the head of the wreck bike's list");
+            out.push(([three(near.body.velocity), three(near.body.position)], [three(c.bike.body.velocity), three(c.bike.body.position)], struck));
         }
         Some(out)
     })
@@ -1296,16 +1304,25 @@ fn fly_with_far(far: Option<bool>) -> Option<Vec<NearTick>> {
 /// takes them ([`fly_with_far`]), plane 0 first among the fleet or second — the wreck bike's search
 /// with both hulls, its mirror on plane 0's list alone, one body the joint resolve pushes, and its
 /// step with both planes' bodies. That the lone plane meets it at all is
-/// [`the_sim_lane_meets_p2s_wreck_bike`]'s.
+/// [`the_sim_lane_meets_p2s_wreck_bike`]'s. Since F36 the planes' rays meet the wreck bike's hull in
+/// the joint frame as a lone plane's do (F35): from 137856's image on the tape's pads, the plane's ray
+/// strikes it (R31's tick 137863, ray 33), its entry on the plane's list and the mirror at the head of
+/// the wreck bike's, and the two go on as alone.
 #[test]
 fn planes_flown_together_meet_p2s_wreck_bike() {
-    let Some(alone) = fly_with_far(None) else { return };
-    for k in &alone {
-        println!("alone: plane {:?}; wreck bike {:?}", k.0.map(|v| v.map(f32::from_bits)), k.1.map(|v| v.map(f32::from_bits)));
-    }
-    for first in [true, false] {
-        let Some(together) = fly_with_far(Some(first)) else { return };
-        assert_eq!(together, alone, "plane 0 {} the far plane: as alone", if first { "ahead of" } else { "after" });
+    let runs: [(u32, u32, &dyn Fn(u32) -> Report); 2] = [(137910, 137920, &cross_held), (137856, 137870, &segment_pad)];
+    for (from, to, pad) in runs {
+        let Some(alone) = fly_with_far(from, to, pad, None) else { return };
+        for (t, k) in (from..).zip(&alone) {
+            println!("{t} alone: plane {:?}; wreck bike {:?}; struck {}", k.0.map(|v| v.map(f32::from_bits)), k.1.map(|v| v.map(f32::from_bits)), k.2);
+        }
+        if from == 137856 {
+            assert!(alone.iter().any(|k| k.2), "from {from} the plane's rays reach the wreck bike's hull");
+        }
+        for first in [true, false] {
+            let Some(together) = fly_with_far(from, to, pad, Some(first)) else { return };
+            assert_eq!(together, alone, "from {from}, plane 0 {} the far plane: as alone", if first { "ahead of" } else { "after" });
+        }
     }
 }
 
