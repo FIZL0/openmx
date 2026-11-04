@@ -1168,6 +1168,13 @@ fn the_lobby_gathers_every_seats_own_modifiers() {
     }
     tap(&mut g, &mut gr, Control::Cross);
     assert_eq!(g.screen(), Some(Screen::Modifiers));
+    // Gravity is under the World category (P272).
+    while g.page()[g.cursor(Screen::Modifiers)].key != menu::Key::ModsMachine {
+        tap(&mut g, &mut gr, Control::Down);
+    }
+    while g.page()[g.cursor(Screen::Modifiers)].value != "World" {
+        tap(&mut g, &mut gr, Control::Right);
+    }
     let gravity = g.page().into_iter().find(|r| r.key == menu::Key::Knob(Knob::Gravity)).unwrap();
     assert!(gravity.off.is_some(), "{gravity:?}");
     assert!(g.page()[0].off.is_some(), "the guest has no All Players");
