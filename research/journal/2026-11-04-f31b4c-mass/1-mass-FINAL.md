@@ -28,7 +28,7 @@ Task F31b4c. 2026-11-04. Part of the F31b split
     `flip_wrecks_and_is_put_back_bit_exact_on_the_ports_mass_words`.
 - `tests/kiowa_capture.rs`: `the_rotors_probe_is_the_images` unwrapped C14's state, which no slot holds
   any more, so the gate went red wherever the disc was there. It now skips the way the file's other tests
-  do. This is a one-line gate fix and nothing else.
+  do. This is a one-line gate fix and nothing else; it is F33's whole ask, so F33 can be ticked.
 - `research/oracle.txt # F31b4c` has the reader, its setters, the keys, the defaults and the offsets
   (comment rows only).
 - The bike file. State 4's bike is a 420-lb one (mass 13.04348 = 420 × 0.0310559), and all eight
@@ -122,6 +122,13 @@ Task F31b4c. 2026-11-04. Part of the F31b split
   the wreck part's own read, which is not ported here; that is F31b4b's.
 
 ## Next
+
+**Not ticked.** `./kit done F31b4c` was red three times on tests outside this task. Two of those failures
+were world_ultra_load's first-frame time at load 15–45, which passes alone. The other is
+`web.rs the_browser_installs_from_the_store`, red every run, alone too, and red the same way in the merge
+worktree at main's e7ab0128. It is filed as P294 (critical). A red main also refuses `--blocked`, so the
+branch is committed and pushed by hand (origin/main merged in, F31b4b's conflicting appends kept beside
+these). F31b4c can be ticked once P294 is green. Nothing here waits on anything else.
 
 F31b5 can seed its pure-Rust frame's body and record from `mass::Part::words` plus `mass::Bike::words`
 on `mx_race250p.phy` with the box above. MD63e can move `mxvatv_phy` onto `mass::Part`.
