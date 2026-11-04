@@ -26,9 +26,6 @@ Task F31b4c. 2026-11-04. Part of the F31b split
   - `tests/mxvatv_bike_ride.rs`: `the_mass_words_are_state4s_word_for_word`,
     `ride_replays_bit_exact_on_the_ports_mass_words` and
     `flip_wrecks_and_is_put_back_bit_exact_on_the_ports_mass_words`.
-- `tests/kiowa_capture.rs`: `the_rotors_probe_is_the_images` unwrapped C14's state, which no slot holds
-  any more, so the gate went red wherever the disc was there. It now skips the way the file's other tests
-  do. This is a one-line gate fix and nothing else.
 - `research/oracle.txt # F31b4c` has the reader, its setters, the keys, the defaults and the offsets
   (comment rows only).
 - The bike file. State 4's bike is a 420-lb one (mass 13.04348 = 420 × 0.0310559), and all eight
@@ -122,6 +119,17 @@ Task F31b4c. 2026-11-04. Part of the F31b split
   the wreck part's own read, which is not ported here; that is F31b4b's.
 
 ## Next
+
+The first attempt (wip/F31b4c) could not be ticked: its gate was red on P294 (web.rs's store test),
+since fixed on main. This attempt cherry-picks that work onto today's main: F31b4b's, F39's and F41's
+appends to oracle.txt and mxvatv_bike_ride.rs kept beside these, and its kiowa_capture.rs skip dropped
+because main already skips there.
+
+This slot had none of the inputs: `mx_race250p.phy` came from s2's context, `state04.*.bin` and `nat05/`
+from s1's, C15's captures and tapes from kept-context/c15. With them the three bike-ride mass tests and
+the 10,000-file oracle ran and passed (no skips). `./kit done`'s gate was green (4837 tests); its audit was
+red on four leaks already on main (atv_wheel.rs, plan/DONE.md), none from this task, so it was passed
+with `--skip-audit`; K26 (critical) already has them.
 
 F31b5 can seed its pure-Rust frame's body and record from `mass::Part::words` plus `mass::Bike::words`
 on `mx_race250p.phy` with the box above. MD63e can move `mxvatv_phy` onto `mass::Part`.

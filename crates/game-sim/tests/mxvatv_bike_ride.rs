@@ -5960,6 +5960,8 @@ fn the_trick_step_gear_and_net_virtuals_are_the_originals() {
         assert!(*n >= 20, "path {path} taken only {n} times");
     }
     assert!(t.len() >= 20, "every path taken: {t:#?}");
+}
+
 // --- F31b4c: the bike's mass properties, the port's -------------------------------------------------
 
 use game_sim::handling::mass;
