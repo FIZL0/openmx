@@ -9056,3 +9056,26 @@ atv_heap_free               atv 0x001b76d0 = free
 #   unless the min yaw is 0 or less).
 #   The stick path, the torque map (equal times: lo), the 35° clip (0x3f1c61a9), the end and the ramp tail as
 #   SLUS-21104's.
+
+# MD93c — Untamed's (SLUS-21701) bike vehicle update 0x004f9bd0 (668 B; f12 dt, a0 bike; twin of SLUS-21104's
+# 0x004e1b90, 428 B), ported as handling::untamed::vehicle_update (calls as untamed::UpdateCall) and proved by
+# tests/untamed_reworked.rs off context/untamed/ram/nat_or.bin. Comment rows only, as # MD81a. Journal:
+# research/journal/2026-11-03-md93c-untamed-bike-step. Read with `./kit dis -p game` on a scratch KIT_CONFIG
+# (paths.context = context/untamed, an [[overlay]] game at 0x48ea80: context/untamed/elf/game.elf).
+#   Fields (SLUS-21104 -> SLUS-21701): vehicle state +0xbc4 -> +0xbb4 (its +0x28 kind; 3/4 remote, sltiu on
+#   kind - 3), skip bit 3 of byte +0x225 -> +0x11d of *0x003eab60 -> *0x003ff6b8 (clear in both images),
+#   stick +0x12a8/ac -> +0x1298/9c, brake +0x310 -> +0x340, input word +0x12c0 -> +0x12d0, wreck reason +0xc80
+#   -> +0xc70, request countdown +0x1770 -> +0x17b0, request +0x31c -> +0x34c, timer +0x177c -> +0x17bc, its
+#   record +0x1778 -> +0x17b8 (no null test; its +0x30 the object, vt +0x90 on running out), cleared last
+#   +0x1650 -> +0x1690 (not on the no-state return), listeners bike +0xc -> +0x30.
+#   Calls (SLUS-21104 -> SLUS-21701): ghost step vt +0x3a4 (0x004e1a20 -> 0x004f9a60); local: wreck test vt
+#   +0x49c -> +0x494 (dt, 0; 0x004fa5f0), stunt idle +0x4f0 -> +0x4e4 (0x004fdfc0); remote: listeners step
+#   0x00128af0 -> 0x00126c50 (dt, bike+0x30), node from body +0x4f8 -> +0x4ec (0x004dab50 -> 0x004f2ab0, no dt),
+#   stunt clocks +0x4e8 -> +0x4e0 (0x004e4900 -> 0x004fc960), remote wreck setter +0x4a0 -> +0x498 (dt, the
+#   reason read after the stunt clocks; 0x004e2de0 -> 0x004faf10, SLUS-21104's: old reason set and new 0 ->
+#   +0x31c = 1, then store); base update 0x004a79c0 -> 0x004cb340 (dt; alone when there is no state).
+#   New (remote branch, after the stick is zeroed and reloaded): len2 = mula(x, x) madd(y, y); c = x * rsqrt.s(1,
+#   len2) (0 * max = 0), clamped to [-1, 1] twice (c.ole 1 / bc1fl, c.olt -1 / bc1tl); s = (1 + c) * *0x003ff550
+#   (14999.5); i = cvt.w.s; frac = s - i; a = mula(frac, t[i+1]) madd(1 - frac, t[i]) off *0x003ff538, negated for
+#   y < 0 (c.olt before the lerp) -> +0x12a8; sqrt.s(len2) -> +0x12ac. For the zeroed stick: t[14999..15000]'s
+#   middle and 0. Timer: c.ole timer, 0 / bc1t skips (an unordered timer runs; the decomp's 0 < timer does not).

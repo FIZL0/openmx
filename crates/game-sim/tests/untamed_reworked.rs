@@ -1,7 +1,8 @@
 //! MD93 — MX vs. ATV Untamed's (SLUS-21701) reworked bike functions, proved against Untamed's own code.
 //!
 //! MD81a found six of the bike step's functions rewritten from SLUS-21104's (research/untamed-machines.md).
-//! These are the [`handling::untamed`] ports so far: the preload, the wreck entry, the put-back and the backflip (MD93a),
+//! These are the [`handling::untamed`] ports so far: the preload, the wreck entry, the put-back, the backflip (MD93a), the
+//! 360 (MD93b) and the vehicle update (MD93c),
 //! each run on an Untamed Free Ride image (`context/untamed/ram/nat_or.bin`, as `tests/untamed_step.rs`) on
 //! the bike laid out at Untamed's offsets. Every call they make out is hooked and logged; the port's calls
 //! must be the same, in the same order, and every word of the bike and its body the same after.
@@ -1536,4 +1537,300 @@ fn untamed_ride_spin_arms_on_r1_with_another_button() {
     let mut air = Air { on_ground: true, ..Air::default() };
     untamed::ride_spin(&t, &p, &mut air, &mut s, &mut ch, &against, [false; 3], F::ZERO, &table);
     assert!(s.wrecked && !s.cut && s.clip == 0 && !s.active, "{s:?}");
+}
+
+// --- the vehicle update (MD93c) -----------------------------------------------------------------------
+
+/// SLUS-21701's bike vehicle update, the vehicle's own (base) update, and the physics listeners' step.
+const VEHICLE_UPDATE: u32 = 0x004f_9bd0;
+const BASE_UPDATE: u32 = 0x004c_b340;
+const LISTENERS: u32 = 0x0012_6c50;
+/// Where the game keeps the pointer to the flag record whose byte `+0x11d` bit 3 skips the rider's half.
+const FLAGS_PTR: u32 = 0x003f_f6b8;
+/// The harness's vehicle state, the record the timer's object hangs off (`+0x30`), the object, its
+/// vtable, and the address its `+0x90` slot points at (only ever hooked).
+const VSTATE: u32 = 0x01c0_6a00;
+const TIMED: u32 = 0x01c0_6a40;
+const TIMED_OBJ: u32 = 0x01c0_6a80;
+const TIMED_VT: u32 = 0x01c0_6ac0;
+const TIMER_OUT: u32 = 0x01c0_6b80;
+/// The `dt` a hooked call is handed (`$f12`).
+fn dt(ee: &Ee) -> F {
+    F(ee.f(12))
+}
+const UPDATE_REGIONS: [(&str, u32, u32); 2] = [("bike", OBJ, 0x1800), ("vehicle state", VSTATE, 0x40)];
+
+#[derive(Clone, Debug)]
+struct UpdateState {
+    u: untamed::Update,
+    dt: F,
+    /// What the hooked calls change, so the reads after them are checked: the ghost the vehicle state
+    /// (`Some(None)` takes it away), the wreck test and the listeners the countdown, the stunt idle and
+    /// the node the timer, the stunt clocks the reason, the remote wreck the request, the timer's object
+    /// the timer, and the vehicle's own update the cleared word.
+    ghost: Option<Option<u32>>,
+    countdown: Option<i32>,
+    timer: Option<F>,
+    reason: Option<u32>,
+    request: Option<u32>,
+    timer_out: F,
+    cleared: u32,
+}
+
+/// What a hooked call does to the bike, the same on both sides.
+fn update_mutate(c: untamed::UpdateCall, u: &mut untamed::Update, s: &UpdateState) {
+    use untamed::UpdateCall as C;
+    match c {
+        C::Ghost(_) => {
+            if let Some(k) = s.ghost {
+                u.vehicle_state = k;
+            }
+        }
+        C::WreckTest(_) | C::Listeners(_) => u.request_countdown = s.countdown.unwrap_or(u.request_countdown),
+        C::StuntIdle(_) | C::NodeFromBody => u.timer = s.timer.unwrap_or(u.timer),
+        C::StuntClocks(_) => u.wreck_reason = s.reason.unwrap_or(u.wreck_reason),
+        C::RemoteWreck { .. } => u.request = s.request.unwrap_or(u.request),
+        C::TimerOut => u.timer = s.timer_out,
+        C::VehicleUpdate(_) => u.cleared = s.cleared,
+    }
+}
+
+impl Gen {
+    fn kind(&mut self) -> u32 {
+        [0, 1, 2, 3, 4, 5, u32::MAX][(self.bits() % 7) as usize]
+    }
+    fn update(&mut self) -> UpdateState {
+        let dt = if self.one_in(4) { F(1.0 / 30.0) } else { self.f(0.001, 0.05) };
+        let timer = match self.bits() % 6 {
+            0 => F::ZERO,
+            1 => dt,
+            2 => self.f(-1.0, 0.0),
+            3 => self.f(0.0, 0.05),
+            _ => self.f(0.0, 2.0),
+        };
+        let countdown = |g: &mut Gen| match g.bits() % 8 {
+            0 => i32::MIN,
+            1 => i32::MAX,
+            2 => 1,
+            _ => (g.bits() % 7) as i32 - 3,
+        };
+        let u = untamed::Update {
+            vehicle_state: if self.one_in(10) { None } else { Some(self.kind()) },
+            skip: self.one_in(5),
+            stick: (self.f(-1.0, 1.0), self.f(-1.0, 1.0)),
+            stick_angle: self.f(-4.0, 4.0),
+            stick_length: self.f(0.0, 1.5),
+            brake: self.f(0.0, 1.0),
+            input: self.bits(),
+            wreck_reason: self.bits() % 20,
+            request_countdown: countdown(self),
+            request: if self.b() { self.bits() % 2 } else { self.bits() },
+            timer,
+            timed: self.b(),
+            cleared: self.bits(),
+        };
+        UpdateState {
+            u,
+            dt,
+            ghost: match self.bits() % 6 {
+                0 => Some(None),
+                1 => Some(Some(self.kind())),
+                _ => None,
+            },
+            countdown: if self.one_in(3) { Some(countdown(self)) } else { None },
+            timer: if self.one_in(3) { Some(self.f(-0.1, 0.1)) } else { None },
+            reason: if self.one_in(3) { Some(self.bits() % 20) } else { None },
+            request: if self.one_in(3) { Some(self.bits()) } else { None },
+            timer_out: self.f(-1.0, 1.0),
+            cleared: self.bits(),
+        }
+    }
+}
+
+fn update_reset(ee: &mut Ee) {
+    for (_, base, len) in UPDATE_REGIONS {
+        for o in (0..len).step_by(4) {
+            ee.set_u32(base + o, 0);
+        }
+    }
+    ee.set_u32(OBJ + 0x4, BIKE_VTABLE);
+    ee.set_u32(OBJ + 0x17b8, TIMED);
+    ee.set_u32(TIMED_OBJ + 0x4, TIMED_VT);
+    ee.set_u32(TIMED_VT + 0x90, TIMER_OUT);
+}
+
+/// The words a hooked call may change (see [`update_mutate`]).
+fn poke_update_mutable(ee: &mut Ee, u: &untamed::Update) {
+    match u.vehicle_state {
+        Some(k) => {
+            ee.set_u32(OBJ + 0xbb4, VSTATE);
+            ee.set_u32(VSTATE + 0x28, k);
+        }
+        None => {
+            ee.set_u32(OBJ + 0xbb4, 0);
+            ee.set_u32(VSTATE + 0x28, 0);
+        }
+    }
+    ee.set_u32(OBJ + 0x17b0, u.request_countdown as u32);
+    put_f(ee, OBJ + 0x17bc, u.timer);
+    ee.set_u32(OBJ + 0xc70, u.wreck_reason);
+    ee.set_u32(OBJ + 0x34c, u.request);
+    ee.set_u32(OBJ + 0x1690, u.cleared);
+}
+
+fn peek_update(ee: &Ee) -> untamed::Update {
+    let flags = ee.u32_at(FLAGS_PTR) + 0x11d;
+    untamed::Update {
+        vehicle_state: (ee.u32_at(OBJ + 0xbb4) != 0).then(|| ee.u32_at(VSTATE + 0x28)),
+        skip: ee.u8_at(flags) & 8 != 0,
+        stick: (F::from_bits(ee.u32_at(OBJ + 0x1298)), F::from_bits(ee.u32_at(OBJ + 0x129c))),
+        stick_angle: F::from_bits(ee.u32_at(OBJ + 0x12a8)),
+        stick_length: F::from_bits(ee.u32_at(OBJ + 0x12ac)),
+        brake: F::from_bits(ee.u32_at(OBJ + 0x340)),
+        input: ee.u32_at(OBJ + 0x12d0),
+        wreck_reason: ee.u32_at(OBJ + 0xc70),
+        request_countdown: ee.i32_at(OBJ + 0x17b0),
+        request: ee.u32_at(OBJ + 0x34c),
+        timer: F::from_bits(ee.u32_at(OBJ + 0x17bc)),
+        timed: ee.u32_at(TIMED + 0x30) != 0,
+        cleared: ee.u32_at(OBJ + 0x1690),
+    }
+}
+
+fn poke_update(ee: &mut Ee, u: &untamed::Update) {
+    poke_update_mutable(ee, u);
+    put_f(ee, OBJ + 0x1298, u.stick.0);
+    put_f(ee, OBJ + 0x129c, u.stick.1);
+    put_f(ee, OBJ + 0x12a8, u.stick_angle);
+    put_f(ee, OBJ + 0x12ac, u.stick_length);
+    put_f(ee, OBJ + 0x340, u.brake);
+    ee.set_u32(OBJ + 0x12d0, u.input);
+    ee.set_u32(TIMED + 0x30, if u.timed { TIMED_OBJ } else { 0 });
+}
+
+fn update_snap(ee: &Ee) -> Vec<u32> {
+    UPDATE_REGIONS.iter().flat_map(|&(_, base, len)| (0..len).step_by(4).map(move |o| base + o)).map(|a| ee.u32_at(a)).collect()
+}
+
+/// The paths a state goes down, off the original's branches (several per state).
+fn update_paths(s: &UpdateState) -> Vec<&'static str> {
+    let mut p = Vec::new();
+    let Some(_) = s.u.vehicle_state else { return vec!["no state"] };
+    if s.u.skip {
+        p.push("skipped");
+    } else {
+        let k = s.ghost.unwrap_or(s.u.vehicle_state);
+        match s.ghost {
+            Some(None) => p.push("the ghost took the state"),
+            Some(Some(_)) => p.push("the ghost changed the kind"),
+            None => {}
+        }
+        p.push(if k.is_some_and(|k| k == 3 || k == 4) { "remote" } else { "local" });
+    }
+    p
+}
+
+/// SLUS-21701's bike vehicle update, the port's [`untamed::vehicle_update`]: 20,000 generated states.
+/// Every call it makes is hooked, logged with its arguments, and changes the bike as the port's `call`
+/// does ([`update_mutate`]), so the words read after a call must be read after it on both sides.
+#[test]
+fn untamed_vehicle_update_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let table = air::AcosTable::build();
+    assert_eq!(ee.f32_at(ACOS_SCALE), 14999.5, "the arc cosine table's scale");
+    let at = ee.u32_at(ACOS_PTR);
+    for (i, &e) in table.entries().iter().enumerate() {
+        assert_eq!(ee.f32_at(at + 4 * i as u32).to_bits(), e.to_bits(), "arc cosine entry {i}");
+    }
+    use untamed::UpdateCall as C;
+    let calls = Rc::new(RefCell::new(Vec::<C>::new()));
+    let current = Rc::new(RefCell::new(None::<UpdateState>));
+    let slot = |ee: &Ee, at: u32| ee.u32_at(BIKE_VTABLE + at);
+    let hooked: [(u32, u32, fn(&Ee) -> C); 9] = [
+        (slot(&ee, 0x3a4), OBJ, |ee| C::Ghost(dt(ee))),
+        (slot(&ee, 0x494), OBJ, |ee| {
+            assert_eq!(ee.r(5), 0, "the wreck test is handed 0");
+            C::WreckTest(dt(ee))
+        }),
+        (slot(&ee, 0x4e4), OBJ, |ee| C::StuntIdle(dt(ee))),
+        (LISTENERS, OBJ + 0x30, |ee| C::Listeners(dt(ee))),
+        (slot(&ee, 0x4ec), OBJ, |_| C::NodeFromBody),
+        (slot(&ee, 0x4e0), OBJ, |ee| C::StuntClocks(dt(ee))),
+        (slot(&ee, 0x498), OBJ, |ee| C::RemoteWreck { dt: dt(ee), reason: ee.r(5) as u32 }),
+        (TIMER_OUT, TIMED_OBJ, |_| C::TimerOut),
+        (BASE_UPDATE, OBJ, |ee| C::VehicleUpdate(dt(ee))),
+    ];
+    for (at, a0, what) in hooked {
+        let log = calls.clone();
+        let s = current.clone();
+        ee.hooks.insert(at, Box::new(move |ee| {
+            assert_eq!(ee.r(4) as u32, a0, "{at:#x} called on {a0:#x}");
+            let c = what(ee);
+            log.borrow_mut().push(c);
+            let mut u = peek_update(ee);
+            update_mutate(c, &mut u, s.borrow().as_ref().unwrap());
+            poke_update_mutable(ee, &u);
+        }));
+    }
+    let flags = ee.u32_at(FLAGS_PTR) + 0x11d;
+    let mut g = Gen(0x0d93_000c);
+    let mut tally = BTreeMap::new();
+    for k in 0..20_000 {
+        let s = g.update();
+        let mut paths = update_paths(&s);
+        update_reset(&mut ee);
+        poke_update(&mut ee, &s.u);
+        let byte = ee.u8_at(flags) & !8 | if s.u.skip { 8 } else { 0 };
+        ee.write(flags, 1, u128::from(byte));
+        *current.borrow_mut() = Some(s.clone());
+        calls.borrow_mut().clear();
+        ee.call(VEHICLE_UPDATE, &[u64::from(OBJ)], &[s.dt.0], 10_000);
+        let frame = (ee.stack - 0x2000, ee.stack + 0x40);
+        for (a, b) in ee.written_ranges() {
+            let inside = UPDATE_REGIONS.iter().any(|&(_, base, len)| a >= base && b <= base + len) || (a >= frame.0 && b <= frame.1);
+            assert!(inside, "state {k}: the original wrote {a:#010x}..{b:#010x}, which is not the bike or the stack\n{s:#?}");
+        }
+        let was = update_snap(&ee);
+        let got = calls.borrow().clone();
+
+        let mut u = s.u;
+        let port = RefCell::new(Vec::new());
+        untamed::vehicle_update(&mut u, s.dt, &table, |c, u| {
+            port.borrow_mut().push(c);
+            update_mutate(c, u, &s);
+        });
+        let port = port.into_inner();
+        if port.contains(&C::TimerOut) {
+            paths.push("timer out, told");
+        } else if s.u.vehicle_state.is_some() && u.timer == F::ZERO && s.u.timer.to_bits() != 0 && !(s.u.timer <= F::ZERO) {
+            paths.push("timer out, alone");
+        }
+        if u.request_countdown == 0 && u.request == 1 && s.u.vehicle_state.is_some() {
+            paths.push("request raised");
+        }
+        for p in &paths {
+            *tally.entry(*p).or_insert(0u32) += 1;
+        }
+        update_reset(&mut ee);
+        poke_update(&mut ee, &u);
+        let now = update_snap(&ee);
+        if was != now {
+            let i = was.iter().zip(&now).position(|(a, b)| a != b).unwrap();
+            panic!(
+                "state {k} ({paths:?}): word {:#x} of the regions is {:#010x} ({}) in the original and {:#010x} ({}) in the port\n{s:#?}",
+                4 * i,
+                was[i],
+                f32::from_bits(was[i]),
+                now[i],
+                f32::from_bits(now[i]),
+            );
+        }
+        assert_eq!(got, port, "state {k} ({paths:?}): the calls\n{s:#?}");
+    }
+    enough(
+        &tally,
+        &["no state", "skipped", "local", "remote", "the ghost took the state", "the ghost changed the kind",
+          "timer out, told", "timer out, alone", "request raised"],
+        100,
+    );
 }
