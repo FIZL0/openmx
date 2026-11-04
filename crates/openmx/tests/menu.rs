@@ -463,6 +463,8 @@ fn the_settings_file_reads_back_as_it_was_written() {
         backwards_bail: true,
         // Vibration off (P183).
         vibration: false,
+        // Button Icons Xbox (P281).
+        button_icons: menu::ButtonIcons::Xbox,
         track: "free11".into(),
         track_filter: "MX vs. ATV Untamed".into(),
         track_category: "Freestyle".into(),
@@ -4465,6 +4467,84 @@ fn the_display_tab_has_opentennis_aspect_ratios() {
     assert_eq!(m.settings.picture, Picture::Television);
     m.set_departure(Departure::Picture, false);
     assert_eq!(m.settings.picture, Picture::Fill);
+}
+
+/// P281: the Display tab's Button Icons row is opentennis's, Auto by default, steps through its
+/// five choices by the pad and is saved in settings.txt as `button_icons`, written only off Auto.
+#[test]
+fn button_icons_is_auto_by_default_and_saved_in_settings_txt() {
+    use menu::{ButtonIcons, Key};
+    assert_eq!(Settings::default().button_icons, ButtonIcons::Auto);
+    assert!(!Settings::default().text().contains("button_icons"), "Auto is the default, so no line");
+    let (mut m, mut r) = fresh();
+    main_to(&mut m, &mut r, "Settings");
+    tab_to(&mut m, &mut r, "Display");
+    let row = m.page().into_iter().find(|row| row.key == Key::ButtonIcons).expect("a Button Icons row on Display");
+    assert_eq!(row.label, "Button Icons");
+    assert_eq!(row.choices, ["Auto", "PlayStation", "Xbox", "Switch", "Generic"]);
+    assert_eq!(row.value, "Auto");
+    assert_eq!(row.about, "The controller buttons the hints show. Auto: each controller's own (PlayStation, Switch, Steam Deck, else Xbox); or the same set for every controller.");
+    while m.page()[m.cursor(Screen::Settings)].key != Key::ButtonIcons {
+        tap(&mut m, &mut r, Control::Down);
+    }
+    for (want, word) in [(ButtonIcons::PlayStation, "ps"), (ButtonIcons::Xbox, "xbox"), (ButtonIcons::Switch, "switch"), (ButtonIcons::Generic, "generic"), (ButtonIcons::Auto, "auto")] {
+        tap(&mut m, &mut r, Control::Right);
+        assert!(m.take_changed());
+        assert_eq!(m.settings.button_icons, want);
+        let dir = scratch("button-icons-row");
+        menu::save(&dir, &m.settings, &Controls::default()).unwrap();
+        let text = std::fs::read_to_string(dir.join("settings.txt")).unwrap();
+        assert_eq!(text.contains(&format!("button_icons = {word}\n")), want != ButtonIcons::Auto, "{text}");
+        assert_eq!(menu::load(&dir).0.button_icons, want, "{want:?} saved");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+    assert_eq!(Settings::parse("button_icons = switch\n").button_icons, ButtonIcons::Switch);
+    assert_eq!(Settings::parse("button_icons = nonsense\n").button_icons, ButtonIcons::Auto);
+}
+
+/// P281: on Auto each controller's hints are its own family's, by its vendor id or else its name —
+/// Sony's PlayStation, Nintendo's Switch, Valve's Deck, anything else Xbox — and the keyboard's its
+/// keys; a fixed setting is every pad's, and in a split each player's view is their own device's.
+#[test]
+fn auto_button_icons_pick_each_pads_family() {
+    use menu::ButtonIcons;
+    use menu::pads::{Glyph, Style};
+    let (mut m, _) = fresh();
+    let pad = |id: &str| Dev::Pad(id.to_string());
+    let cases = [
+        ("054c:0ce6 aa:bb usb-1/input0 Sony Interactive Entertainment DualSense Wireless Controller", Style::PlayStation),
+        ("054c:05c4 - usb-2/input0 Sony Computer Entertainment Wireless Controller", Style::PlayStation),
+        ("057e:2009 cc:dd usb-3/input0 Nintendo Switch Pro Controller", Style::Switch),
+        ("28de:1205 - usb-4/input0 Steam Deck", Style::Deck),
+        ("045e:0b12 - usb-5/input0 Microsoft Xbox Series S|X Controller", Style::Xbox),
+        ("2dc8:3106 - usb-6/input0 8BitDo Ultimate Wired Controller", Style::Xbox),
+        ("0000:0000 - - PS4 Controller", Style::PlayStation),
+        ("0000:0000 - - Pro Controller", Style::Switch),
+    ];
+    for (id, want) in cases {
+        assert_eq!(m.buttons_of(&pad(id)).style, want, "{id}");
+    }
+    assert_eq!(m.buttons_of(&Dev::Keys).style, Style::Keys);
+    // A keyboard's hints are its keys: the menus' Back is Escape.
+    let keys = m.buttons_of(&Dev::Keys);
+    assert_eq!(keys.glyph(Control::Cross, true), Some(Glyph::Cap("Space".into())));
+    assert_eq!(keys.glyph(Control::Circle, true), Some(Glyph::Cap("Esc".into())));
+    // Each player's own, in a split.
+    m.ride_devs = vec![Dev::Keys, pad(cases[0].0), pad(cases[2].0)];
+    let styles: Vec<Style> = (0..3).map(|v| m.seat_buttons(v).style).collect();
+    assert_eq!(styles, [Style::Keys, Style::PlayStation, Style::Switch]);
+    // A fixed setting is every pad's, not the keyboard's.
+    m.settings.button_icons = ButtonIcons::Xbox;
+    for (id, _) in cases {
+        assert_eq!(m.buttons_of(&pad(id)).style, Style::Xbox, "{id}");
+    }
+    assert_eq!(m.buttons_of(&Dev::Keys).style, Style::Keys);
+    // A Switch's A is on the right; By Label it is Cross.
+    m.settings.button_icons = ButtonIcons::Switch;
+    m.controls.nintendo_positions = true;
+    assert_eq!(m.buttons_of(&pad(cases[2].0)).word(Control::Cross), "B");
+    m.controls.nintendo_positions = false;
+    assert_eq!(m.buttons_of(&pad(cases[2].0)).word(Control::Cross), "A");
 }
 
 /// P118: every row of every Settings tab, of the modifiers page and of the Mods page is reachable by

@@ -152,6 +152,8 @@ fn lines(sim: &Sim, tracker: &mut Tracker, now: Instant) -> Vec<String> {
         around: [None; 4],
         join: false,
         event: e,
+        buttons: Default::default(),
+        join_buttons: Default::default(),
     };
     let mut out = Vec::new();
     ride_hud::sprites(&mut out, 0, [0.0, 0.0, 1920.0, 1080.0], &shown, tracker, now).event.into_iter().map(|l| l.text).collect()

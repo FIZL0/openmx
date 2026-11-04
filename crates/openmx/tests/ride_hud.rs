@@ -82,6 +82,8 @@ fn shown<'a>(g: &'a Gauges, riders: &'a [Dot], blips: &'a [Blip], markers: Optio
         around: [None; 4],
         join: false,
         event: None,
+        buttons: Default::default(),
+        join_buttons: Default::default(),
     }
 }
 
@@ -215,6 +217,32 @@ fn a_split_view_draws_its_own_hud() {
         assert!(b[0] >= view[0] - 1.0 && b[2] <= view[0] + view[2] + 1.0, "{view:?}: drawn across {b:?}");
         assert!(b[1] >= view[1] - 1.0 && b[3] <= view[1] + view[3] + 1.0, "{view:?}: drawn down {b:?}");
     }
+}
+
+/// P281: the join cue's Cross and the switch prompt's Circle are drawn in the view's Button Icons
+/// style: an Xbox pad's green A, a keyboard's Space key, the PlayStation's ✕ as before.
+#[test]
+fn the_hud_prompts_draw_each_styles_buttons() {
+    use menu::pads::{Buttons, Style};
+    let g = gauges(Speedometer::Digital);
+    let t = Tracker::default();
+    let now = Instant::now();
+    let mut pills = Vec::new();
+    for (style, word) in [(Style::PlayStation, "\u{2715}"), (Style::Xbox, "A"), (Style::Switch, "B"), (Style::Deck, "A"), (Style::Generic, "Bottom"), (Style::Keys, "Space")] {
+        let mut shown = shown(&g, &[], &[], None);
+        shown.join = true;
+        shown.buttons = Buttons::of(style);
+        shown.join_buttons = Buttons::of(style);
+        let mut frame = Frame::new(1920, 1080, [0, 0, 0]);
+        let d = ride_hud::draw(&mut frame, &shown, &t, now);
+        let join = d.join.expect("a join cue");
+        assert_eq!(join.text, format!("Press {word} {}", ride_hud::JOIN_WORDS), "{style:?}");
+        let green = count(&frame, [join.rect[0], join.rect[1] - 30.0, join.rect[2], join.rect[3] + 30.0], [0x46, 0xaa, 0x3c, 255]);
+        assert_eq!(green > 20, style == Style::Xbox, "{style:?}: {green} green pixels round the join cue");
+        pills.push(d.prompts[0].rect[2] - d.prompts[0].rect[0]);
+    }
+    // Whatever the button, the switch prompt's question is the same width.
+    assert!(pills.iter().all(|w| near(*w, pills[0], 0.5)), "{pills:?}");
 }
 
 /// web/touch.js's controls along the bottom (P197) in a `window`'s pixels, laid out here from its

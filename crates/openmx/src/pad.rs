@@ -2367,6 +2367,20 @@ impl Bindings {
         self.lines[layout_at(scheme)].iter().flatten().any(|x| *x == Input::Key(code))
     }
 
+    /// The first key on each control's line under `scheme`, by [`Control::ALL`]'s order, as the
+    /// Controls screen names it: the keycaps the hints draw (P281). A Shift, Control or Alt is only
+    /// the cap where the line has no other key (L1 is Q beside E, not Shift). A control with no key
+    /// is "".
+    pub fn key_caps(&self, scheme: Scheme) -> [String; 16] {
+        let lines = &self.lines[layout_at(scheme)];
+        let caps = |i: usize| lines[i].iter().filter(|x| matches!(x, Input::Key(_))).map(|x| key_label(x.name())).collect::<Vec<_>>();
+        let modifier = |k: &String| ["Shift", "Control", "Alt"].contains(&k.as_str());
+        std::array::from_fn(|i| {
+            let caps = caps(i);
+            caps.iter().find(|k| !modifier(k)).or(caps.first()).cloned().unwrap_or_default()
+        })
+    }
+
     /// The keyboard's layout under `scheme`, as the Controls screen lists it (P54): what each key
     /// does in a ride, as `(what, keys)` pairs, from these bindings — so a `controls.txt` that moved
     /// a key shows where it moved to. The pad's buttons are not here.
@@ -3048,6 +3062,11 @@ impl Seats {
         self.wiring.schemes[self.slots.keys().unwrap_or(0)]
     }
 
+    /// The keycaps the hints draw (P281): [`Bindings::key_caps`] under the keyboard seat's layout.
+    pub fn key_caps(&self) -> [String; 16] {
+        self.bindings.key_caps(self.keys_scheme())
+    }
+
     /// Whether `code` is a key the keyboard rides with, under the layout its seat rides: the
     /// shell's own keys (the overlay's H, which the new layout's right stick has) stand aside for
     /// it (P54).
@@ -3487,6 +3506,14 @@ pub(crate) mod tests {
     use game_sim::input::{AXIS_CENTRE_RAW, AxisRange, Manager, PADS};
     use game_sim::ride::Controls;
     use ps2_float::F;
+
+    /// P281: the keycaps the hints draw are the bound keys, a letter before a modifier.
+    #[test]
+    fn the_hints_keycaps_are_the_bound_keys() {
+        let caps = Bindings::default().key_caps(Scheme::New);
+        let cap = |c: Control| caps[c as usize].as_str();
+        assert_eq!([cap(Control::Cross), cap(Control::Circle), cap(Control::L1), cap(Control::R1), cap(Control::Start)], ["Space", "F", "Q", "E", "Enter"]);
+    }
 
     #[test]
     fn a_centred_stick_is_the_centre_byte() {
