@@ -591,6 +591,8 @@ impl Down {
             let props = props.map_or(&[][..], |p| &p.props[..]);
             b.props = crate::ragdoll_scene::StillProp::near_wooded(props, trees, &self.statics, probe, reach);
             b.bike_at = self.statics.bike_at;
+            // The bones' segments are offered every scene prop listed, however far (S209).
+            b.swept = crate::ragdoll_scene::StillProp::near(props, &self.statics, probe, F(f32::MAX));
             // And the knockable props: those at rest the list holds (F7), at their places in it, then
             // the awake ones (S240), every one listed; measured from the same probe.
             if let Some(set) = knockable.as_deref() {
