@@ -9476,3 +9476,10 @@ atv_heap_free               atv 0x001b76d0 = free
 #   object; the state-4 unwreck only divides *(+0xe8)+4 by the throw scale for a 13.
 #   Along flip-1 the test enters 1 (front) on row 125 and the clock's unwreck puts it back on row 193;
 #   the tail's own put-back (vt +0x3a8 from the update) is never taken on either replay.
+# B35 — the typed step's wreck test runs the hits after a clause's entry, as F31b4b's word port does
+# (game_sim::handling::step::wreck_entries; tests/mxvatv_step.rs). Comment rows only.
+#   The entry 0x004e2260 run whole and unhooked on state04's bike 0x00e714e0 (reason 4) keeps +0xc8,
+#   the record's +0x34 touched and +0xf0 count; it writes only the record's +0x200 (the part). MX
+#   Unleashed's entry clears the record (S191a), SLUS-21104's does not, so its hit loop answers after
+#   a clause. MD63c's oracle hook had swapped +0xc8 to an empty record; with no swap, 382 of 10 000
+#   states enter twice (197 clause then joust, 185 clause then scenery), reasons and +0x1260 matching.
