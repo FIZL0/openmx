@@ -227,3 +227,173 @@ fn ticks_land_one_row_later() {
         assert!(own < n - 1, "{name}: the tape also fits its own row");
     }
 }
+
+// --- F31a: a Handling::MxVsAtv ride seeded from state 4's bike ---------------------------------------
+
+use game_sim::atv_body::Body;
+use game_sim::biplane::{Dynamics, List, World};
+use game_sim::handling::seed::{self, Seed};
+use ps2_float::F;
+
+/// The sim frame's pieces (research/oracle.txt `# F31`): the per-frame flag that skips the frame (its
+/// object's `+0x225` bit 3), the `+0x24` list's getter, the tail after the world step, and the `+0x3c`
+/// list's getter and its remove.
+const SKIP_FLAG: u32 = 0x003e_ab60;
+const LIST24_GET: u32 = 0x0020_8390;
+const TAIL: u32 = 0x0012_8af0;
+const LIST3C_GET: u32 = 0x0020_80f0;
+const LIST3C_REMOVE: u32 = 0x0020_8040;
+/// The physics world (the sim's `+0x6c`).
+const WORLD: u32 = SIM + 0x6c;
+const BUDGET: u64 = 400_000_000;
+
+/// The seed: every word it stands for is the image's.
+#[test]
+fn the_seed_is_state4s_bike_word_for_word() {
+    let Some(ee) = image() else { return };
+    let s = seed::read(&|a| ee.u32_at(a), BIKE);
+    assert_eq!(s.at.body, ee.u32_at(BIKE + 0xb8));
+    let words = s.words();
+    let bad: Vec<String> = words
+        .iter()
+        .filter(|&&(a, w)| ee.u32_at(a) != w)
+        .map(|&(a, w)| format!("{a:#010x}: {w:#010x}, the image {:#010x}", ee.u32_at(a)))
+        .collect();
+    assert!(bad.is_empty(), "{} of {} words differ:\n  {}", bad.len(), words.len(), bad.join("\n  "));
+    // It is the riding bike of C15's rides: on its wheels, in gear, the engine turning.
+    assert!(s.body.enabled && s.wheels.iter().all(|w| w.contact && w.has_ground), "{:#?}", s.wheels);
+    assert!(s.engine.gear >= 1 && s.engine.rpm > F::ZERO, "{:#?}", s.engine);
+}
+
+/// The world's lists, as SLUS-21104's world step reads them (`# MD75`): each `{count, _, array}`.
+fn list(ee: &Ee, l: List) -> (u32, u32) {
+    let at = WORLD
+        + match l {
+            List::Bodies => 0x50,
+            List::Force => 0x68,
+            List::Constraints => 0x80,
+            List::Preforce => 0x98,
+            List::Post => 0xb0,
+        };
+    (ee.u32_at(at), ee.u32_at(at + 8))
+}
+
+/// The world step over the seeded body: [`World::step`] and [`Body`]'s integrate and end of substep
+/// are the port's; the listeners on the world's lists (the bike's PreProcess, Force and PostProcess,
+/// and the others the game files there) are still the original's code, run by the interpreter on the
+/// body the port holds. The body goes into RAM before each listener and is read back after it.
+struct Hybrid<'a> {
+    ee: &'a mut Ee,
+    body: Body,
+    at: u32,
+    integrated: u32,
+}
+
+impl Hybrid<'_> {
+    fn run(&mut self, f: u32, a0: u32, x: F) {
+        for (a, w) in seed::body_words(&self.body, self.at) {
+            self.ee.set_u32(a, w);
+        }
+        self.ee.set(28, GP);
+        self.ee.call(f, &[u64::from(a0)], &[x.0], BUDGET);
+        self.body = seed::body(&|a| self.ee.u32_at(a), self.at);
+    }
+
+    fn elt(&self, l: List, i: i32) -> u32 {
+        self.ee.u32_at(list(self.ee, l).1 + 4 * i as u32)
+    }
+}
+
+impl Dynamics for Hybrid<'_> {
+    fn count(&self, l: List) -> i32 {
+        list(self.ee, l).0 as i32
+    }
+    fn preforce(&mut self, i: i32, dt: F) {
+        let e = self.elt(List::Preforce, i);
+        self.run(self.ee.u32_at(self.ee.u32_at(e) + 8), e, dt);
+    }
+    fn force(&mut self, i: i32, h: F) {
+        let e = self.elt(List::Force, i);
+        self.run(self.ee.u32_at(self.ee.u32_at(e + 8) + 0xc), e, h);
+    }
+    fn enabled(&self, b: i32) -> bool {
+        assert_eq!(self.elt(List::Bodies, b), self.at, "the world's body is the bike's");
+        self.body.enabled
+    }
+    fn integrate(&mut self, _: i32, h: F) {
+        self.body.integrate(h);
+        self.integrated += 1;
+    }
+    fn end_substep(&mut self, _: i32) {
+        self.body.end_substep();
+    }
+    fn constrain(&mut self, _: i32, _: bool) {
+        panic!("state 4's world has no constraints");
+    }
+    fn post(&mut self, i: i32, dt: F) {
+        let e = self.elt(List::Post, i);
+        self.run(self.ee.u32_at(self.ee.u32_at(e) + 8), e, dt);
+    }
+}
+
+/// One sim frame (the sim's vt `+0x40`, `0x00204040`) with the world step the port's: the `+0x24`
+/// list's vt `+0x7c` on each, then its vt `+0x84(dt)` on each; the world step ([`Hybrid`]); the tail;
+/// the `+0x3c` list's vt `+8(dt)` on each, one that answers non-zero taken out. Answers how many
+/// times the port integrated the body.
+fn hybrid_frame(ee: &mut Ee, s: &Seed, dt: F) -> (Body, u32) {
+    let call = |ee: &mut Ee, f: u32, ints: &[u64], x: F| {
+        ee.set(28, GP);
+        ee.call(f, ints, &[x.0], BUDGET);
+        ee.r(2)
+    };
+    assert_eq!(ee.u8_at(ee.u32_at(SKIP_FLAG) + 0x225) & 8, 0, "the frame is not skipped");
+    for slot in [0x7c, 0x84] {
+        for i in 0..ee.u32_at(SIM + 0x24) {
+            let e = call(ee, LIST24_GET, &[u64::from(SIM + 0x24), u64::from(i)], F::ZERO) as u32;
+            call(ee, ee.u32_at(ee.u32_at(e + 4) + slot), &[u64::from(e)], F(f32::from_bits(DT)));
+        }
+    }
+    let world = World { iterations: ee.u32_at(WORLD) as i32, rate: F(ee.f32_at(WORLD + 4)) };
+    let body = seed::body(&|a| ee.u32_at(a), s.at.body);
+    let mut h = Hybrid { ee, body, at: s.at.body, integrated: 0 };
+    assert_eq!(h.body, s.body, "the seed is the body in RAM");
+    world.step(dt, &mut h);
+    let (body, n) = (h.body, h.integrated);
+    for (a, w) in seed::body_words(&body, s.at.body) {
+        ee.set_u32(a, w);
+    }
+    call(ee, TAIL, &[u64::from(SIM)], dt);
+    let mut i = 0;
+    while i < ee.u32_at(SIM + 0x3c) {
+        let e = call(ee, LIST3C_GET, &[u64::from(SIM + 0x3c), u64::from(i)], F::ZERO) as u32;
+        if call(ee, ee.u32_at(ee.u32_at(e) + 8), &[u64::from(e)], dt) != 0 {
+            call(ee, LIST3C_REMOVE, &[u64::from(SIM + 0x3c), u64::from(i)], F::ZERO);
+        } else {
+            i += 1;
+        }
+    }
+    (body, n)
+}
+
+/// **The seeded bike's first frame is C15 ride-2's row 0**: the body the seed read, stepped by the
+/// port's world step and integrate at the game's tick, is row 0's body block word for word, and the
+/// node, collision record, wheels and engine the original's listeners leave around it are row 0's too.
+/// The listeners are SLUS-21104's own code here (F31b ports them).
+#[test]
+fn the_seeded_bikes_first_frame_is_ride2_row_0() {
+    let (Some(mut ee), Some(rows)) = (image().map(hooked), rows("ride-2")) else { return };
+    let s = seed::read(&|a| ee.u32_at(a), BIKE);
+    poke(&mut ee, &rows[0], &READER);
+    let (body, n) = hybrid_frame(&mut ee, &s, F(f32::from_bits(DT)));
+    assert_eq!(n, 4, "four substeps at 115 a second");
+    let want = hex_words(&rows[0]["body"]);
+    let parted: Vec<String> = seed::body_words(&body, s.at.body)
+        .into_iter()
+        .filter(|&(a, w)| want[((a - s.at.body) / 4) as usize] != w)
+        .map(|(a, w)| format!("body+{:#x}: {w:#010x} want {:#010x}", a - s.at.body, want[((a - s.at.body) / 4) as usize]))
+        .collect();
+    assert!(parted.is_empty(), "the port's body is not row 0's:\n  {}", parted.join("\n  "));
+    let d = diff(&ee, &rows[0]);
+    assert!(d.is_empty(), "row 0: {} words differ\n  {}", d.len(), d.iter().take(40).cloned().collect::<Vec<_>>().join("\n  "));
+    assert_ne!(body, s.body, "the frame moved the bike");
+}
