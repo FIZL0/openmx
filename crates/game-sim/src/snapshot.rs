@@ -335,6 +335,7 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
                 f.rays = rays.clone();
                 f.bike = bike.clone();
                 f.hull = hull.clone();
+                f.wreck = sim.plane.as_ref().and_then(|here| here.wreck.clone());
             }
         }
     }
@@ -345,6 +346,7 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         p.rays = here.rays.clone();
         p.bike = here.bike.clone();
         p.hull = here.hull.clone();
+        p.wreck = here.wreck.clone();
     }
     let here = &sim.rider;
     rider.set = here.set.clone();
@@ -889,7 +891,7 @@ wire!(crate::rider_anim::Clocked { played, snapshot });
 /// rider's set; [`decode`] puts this machine's back.
 impl Wire for crate::flight::Flight {
     fn put(&self, out: &mut Vec<u8>) {
-        let Self { joystick, autopilot, engine, aero, body, measure, tires, cg_braking, max_g, max_g_roll, pad, surfaces, attitude, air, crash, gravity, gravity_scale, mass, inv_inertia, edge_scale, wrecks, spawn, spawn_up, area, noise, rng, collider, record, rays: _, nearby, bike: _, hull: _, heard: _ } = self;
+        let Self { joystick, autopilot, engine, aero, body, measure, tires, cg_braking, max_g, max_g_roll, pad, surfaces, attitude, air, crash, gravity, gravity_scale, mass, inv_inertia, edge_scale, wrecks, spawn, spawn_up, area, noise, rng, collider, record, rays: _, nearby, bike: _, hull: _, heard: _, wreck: _ } = self;
         joystick.put(out);
         autopilot.put(out);
         engine.put(out);
@@ -955,6 +957,7 @@ impl Wire for crate::flight::Flight {
             bike: None,
             hull: None,
             heard: Default::default(),
+            wreck: None,
         })
     }
 }

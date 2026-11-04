@@ -4562,6 +4562,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         let bytes = res.read(&e.name).ok()?;
         game_sim::track::Mesh::parse(&bytes).map_err(|e| eprintln!("biplane: {}: {e}", game_sim::flight::HULL)).ok()
     });
+    // And the wreck bike's hull (F35), which the plane's rays strike on a downed rider's wreck bike.
+    let wreck_hull = archives.iter().find_map(|a| a.read_suffix("wreckbikef.col").ok()).and_then(|b| game_sim::ragdoll_scene::Bike::parse(&b)).map(|b| b.mesh);
     // One of each machine per player (P87): the file's two spots for the first two, beside them for
     // the rest, every second copy in the alternate livery. Only the plane is ported, so the lot's
     // other machines are counted and not stood up.
@@ -4649,6 +4651,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let flight_for = {
         let (plane_phy, plane_rays, bike_box, t) = (plane_phy.clone(), plane_rays.clone(), bike_box.clone(), place.terrain.clone());
         let plane_hull = plane_hull.clone();
+        let wreck_hull = wreck_hull.clone();
         move |seat: usize| {
             plane_phy.as_ref().map(|bytes| {
                 let mut plane = phy::Plane::read_bytes(bytes);
@@ -4662,6 +4665,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 }
                 if let Some(mesh) = &plane_hull {
                     flight = flight.with_hull(mesh.clone());
+                }
+                if let Some(mesh) = &wreck_hull {
+                    flight = flight.with_wreck_hull(mesh.clone());
                 }
                 flight.area = Some(Area::new(F(t.width as f32), F(t.breadth as f32), t.width_scale, t.breadth_scale));
                 if let Some(area) = world_area {

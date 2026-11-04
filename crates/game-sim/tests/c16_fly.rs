@@ -249,6 +249,14 @@ fn bike_box(disc: &mut Disc) -> Option<track::Mesh> {
     track::Mesh::parse(&bytes).ok()
 }
 
+/// The wreck bike's hull mesh (`wreckbikef.col`), as the shell's ragdoll kit parses it: the plane's
+/// rays strike a downed rider's (F35, [`Flight::with_wreck_hull`]), whose rider here has no kit.
+fn wreck_hull(disc: &mut Disc) -> Option<track::Mesh> {
+    let names: Vec<String> = disc.entries().iter().map(|e| e.name.clone()).filter(|n| n.to_ascii_lowercase().ends_with(".res")).collect();
+    let bytes = names.iter().find_map(|n| disc.res(n).ok()?.read_suffix("wreckbikef.col").ok())?;
+    game_sim::ragdoll_scene::Bike::parse(&bytes).map(|b| b.mesh)
+}
+
 /// The split free09 as the shell reads it (S157's: terrain, props out of both archives, the
 /// ecosystem's trunks) and the terrain's extent for the plane's edge, handed to `then`.
 fn in_free09_ss<R>(disc: &mut Disc, then: impl FnOnce(&mut Wooded<Place<'_>>, Area) -> R) -> R {
@@ -654,8 +662,13 @@ fn fly_by(
     let me = standing_p2(&ee, &phy, &col);
     let mut sim = Sim::with_rider(0x5272, Arc::clone(&tables), phy.clone(), me);
     sim.add_player(phy, other);
+    let wreck = wreck_hull(&mut disc);
     in_free09_ss(&mut disc, |world, area| {
-        sim.plane = Some(seeded_plane(&ee, &plane, &rays, &hull, mesh.as_ref(), area, &tables));
+        let flight = seeded_plane(&ee, &plane, &rays, &hull, mesh.as_ref(), area, &tables);
+        sim.plane = Some(match wreck.clone() {
+            Some(w) => flight.with_wreck_hull(w),
+            None => flight,
+        });
         // The pad the image's tick read, so the first tick's presses are not edges.
         sim.poll(dt_of(from - 1), &[pad_of(from - 1), Report::missing()]);
         let p = sim.plane.as_ref().unwrap();
@@ -725,8 +738,13 @@ fn fly_two_by(
     if reason != 0 {
         wrecked_p2(&ee, p2(&ee), reason, &mut seats[1].rider);
     }
+    let wreck = wreck_hull(&mut disc);
     in_free09_ss(&mut disc, |world, area| {
-        seats[0].plane = Some(seeded_plane(&ee, &plane, &rays, &hull, mesh.as_ref(), area, &tables));
+        let flight = seeded_plane(&ee, &plane, &rays, &hull, mesh.as_ref(), area, &tables);
+        seats[0].plane = Some(match wreck.clone() {
+            Some(w) => flight.with_wreck_hull(w),
+            None => flight,
+        });
         let pads = |t: u32| [pad_of(t), Report::missing()];
         let p2_pads = |t: u32| [p2_pad_of(t), Report::missing()];
         seats[0].poll(dt_of(from - 1), &pads(from - 1));
@@ -1021,8 +1039,9 @@ fn p2_wrecked_from(cap: &Rows, t: u32, to: u32) -> Option<(u32, u32)> {
 /// and frame against the first row that reads it. Here the rows lag a frame more than the taxi's: the
 /// port's state after 137855's step is row 137857's, the wreck's row. Pinned ([`JOUSTS`]): from
 /// 137845 P2 holds to the end, through the hit (P2's ray reaching 4.58 on the plane's hull, past the
-/// 50cc limit: rider_contact::wreck_contacts) and the wreck, and the plane to the tick after the
-/// wreck; from 137810 P2, standing, parts at 137827.
+/// 50cc limit: rider_contact::wreck_contacts) and the wreck, and the plane to the end (F35: its rays
+/// strike P2's wreck bike's hull); from 137810 P2, standing, parts at 137827, and the plane holds to
+/// the end.
 #[test]
 fn the_plane_jousts_p2_as_the_original() {
     let Some(cap) = capture() else { return };
@@ -1053,9 +1072,11 @@ fn the_plane_jousts_p2_as_the_original() {
 /// ([`wrecked_p2`]); its wreck bike holds, and since F32 the plane too, to the end: the wreck bike is
 /// a body of the plane's world, its resolve after the plane's each substep (research/f30), and its
 /// first tick holds on row 137911, read after that tick's first substep ([`held`], T8). From 137845
-/// the plane holds through the wreck (it parted on tick 137856 before F32) to 18 ticks. Pinned on
-/// C25's capture.
-const JOUSTS: [(u32, u32, usize, usize); 3] = [(137810, 137900, 53, 17), (137845, 137900, 18, 55), (137910, 138010, 100, 100)];
+/// the plane holds through the wreck (it parted on tick 137856 before F32), and since F35 to the end:
+/// it parted on tick 137863 (18), where its ray 33 strikes P2's wreck bike's hull (research/r31),
+/// which is in its world now. From 137810 it holds to the end too (53 before F35). Pinned on C25's
+/// capture.
+const JOUSTS: [(u32, u32, usize, usize); 3] = [(137810, 137900, 90, 17), (137845, 137900, 55, 55), (137910, 138010, 100, 100)];
 
 /// The whole tape as images every 100 frames cut it: each stretch from its image to the next, and
 /// how many of its ticks hold (S272's pins). One parts: 137810's on the joust's hit (137853's step),

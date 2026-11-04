@@ -84,3 +84,6 @@ inside the wreck bike's box.
 
 F35: put each downed wreck bike's hull in the flown plane's search world. Its entries and mirrors go in
 the order above. Proof: this probe bit for bit on 137863, and the joust's pin moving past 18.
+
+Landed in F35 (journal 2026-11-03-f35-plane-rays-strike-the-wreck-hull): the probe is bit for bit
+through image 137866, and both joust runs hold the plane to the end. Planes flown together: F36.
