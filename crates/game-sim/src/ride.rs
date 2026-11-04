@@ -2595,7 +2595,12 @@ impl Ride {
                     astep.spinning = t.spin.applied;
                     astep.spin_active = t.spin.active;
                     air::unleashed_rotate(&p.air, &mut t.flip_row, air, &mut ac, &astep);
-                    air::three_sixty(&moves.spin, &p.air, air, &mut t.spin, &mut ac, &astep, t.side_flick, &tables.acos);
+                    // Untamed's own 360 (MD93b) on its handling.
+                    if p.handling == crate::handling::Handling::Untamed {
+                        crate::handling::untamed::ride_spin(&moves.spin, &p.air, air, &mut t.spin, &mut ac, &astep, c.trick, t.side_flick, &tables.acos);
+                    } else {
+                        air::three_sixty(&moves.spin, &p.air, air, &mut t.spin, &mut ac, &astep, t.side_flick, &tables.acos);
+                    }
                     astep.spinning = t.spin.applied;
                     astep.spin_ramp = t.spin.ramp;
                 }
