@@ -98,6 +98,14 @@ name = "wreck_reason"    # +0x748: 0 while riding
 addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x748"
 type = "u32"
 
+# The bike's own clock (S194): the player update (0x0027c890) adds the frame's dt to +0x13fc as its last
+# store, after the physics, on every tick, so a row's clock says which tick its bike is at even when the
+# recorder read it after the bike's update and not before (replay.rs `quarter_ticks`).
+[[field]]
+name = "bike_clock"      # +0x13fc
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x8 -> 0x0 -> 0x13fc"
+type = "f32"
+
 # --- the chassis the solver moves (rider +0x7a4) ------------------------------------------------------
 [[field]]
 name = "ch_accel"        # +0x70: the acceleration `g_peak` unrotates
