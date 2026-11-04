@@ -9249,6 +9249,20 @@ atv_heap_free               atv 0x001b76d0 = free
 #   (0x004e4190, the quad's head-and-tail). Wheels: front *(+0x17b0), rear *(+0x17b4).
 #   +0xddc: the hold mode; 0x004a6b90 sets it (linear axes (0,1,0), angular (1,0,1)), 0x004a7df0 sets it,
 #   0x004a6c00 clears it.
+# F31b2 — the bike's Force body (game_sim::handling::bike::ground_step; tests/mxvatv_bike_ride.rs). Comment
+# rows only. Journal: research/journal/2026-11-03-f31b-mxvatv-bike-pre-process/2-bike-force-body-FINAL.md.
+#   The force element 0x00e70440's +0xc is bike +0x3c (0x00e7151c); its vt +8 thunks (a0 -= 60) to
+#   0x004d90f0 (a0 bike, f12 dt, passed on in f12 to every call): guard +0xbc4 != 0 and its +0x28 not 3..4;
+#   gravity thunk 0x004a4ef0 (a0 bike). +0xc80 == 0: stand-upright 0x004dc970; +0x1524 == +0x152c ->
+#   balance 0x004dc240; roll/pitch 0x004dc4f0; preload 0x004e60d0, backflip 0x004e4f20, air spin
+#   0x004e53d0 (a0 bike); engine 0x0049fbb0 (a0 *(+0x142c)); air drag 0x004e6c00 (drag *(*(+0xe8)+4), as
+#   the quad's); air control 0x004e65d0; push 0x004dcc80: rear *(+0x17b4) +0xdc and +0x12c4 != 0 ->
+#   0x004e5e00: +0xdd8 -> body vt +0x74 (local force) (0, 0, +0x1240*(+0x123c - +0xc38), 1). Then, either
+#   way: wheel clear 0x004a0c30 (a0 wheel) front *(+0x17b0) then rear; contacts 0x004dccd0; suspension
+#   0x004a0cb0 x2; tire forces 0x004a16f0 x2; rear +0xb4 = front +0xdc && !rear +0xdc; wheel integrate
+#   0x004a1680 x2; rev limit 0x0049ff40 (a0 engine); peak rates 0x004e6c90 (the quad's).
+#   Balance 0x004dc240: inertia 0x004dc274, command 0x004dc2ac/0x004dc2e0, point 0x004dc318 each
+#   adda.s $f3(=+0), x then madd.s: a -0 accumulator comes back +0. Smooth noise 0x00134580 (f12 in, f0 out).
 # F31c — the ground under C15's rides on Nat05 (game_sim::handling::ground; tests/mxvatv_bike_ground.rs).
 # Comment rows only. Journal: research/journal/2026-11-03-f31c-mxvatv-bike-ground.
 #   State 4's map is Nat05: terrain object 0x00bbd720 (both wheels' +0x1e0) over Env\nat05\Nat05.ps2.trn;

@@ -9,12 +9,15 @@
 //! the two the quad pairs as the bike's own wheel pair is paired. The quad's right-hand wheels stay
 //! untouched.
 //!
-//! F31b1: the PreProcess ([`ground_head`]).
+//! F31b1: the PreProcess ([`ground_head`]). F31b2: the Force body ([`ground_step`]), with the rider's
+//! controllers ([`crate::handling::step`]'s, MD63b) on the words the quad's types do not carry
+//! ([`Rider`]).
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
 use super::seed::{RECORD, WHEELS, Words};
 use crate::quad::{Body, Call, Moto, Params, Quad};
-use ps2_float::{Acc, F, Vf};
+use crate::r#move as mv;
+use ps2_float::{Acc, Dest, F, Vf};
 
 /// The bike's two wheels, in the quad's slots.
 pub const FRONT: usize = crate::quad::LEFT_FRONT;
@@ -125,6 +128,254 @@ pub fn ground_head(p: &Params, q: &mut Quad, body: &mut Body, held: bool, axes: 
     m.call(Call::AutoShift { dt, inv_radius }, q, body);
     m.call(Call::Clutch(dt), q, body);
     m.call(Call::HeadTail, q, body);
+}
+
+// --- F31b2: the Force body ------------------------------------------------------------------------
+
+/// What the bike's rider controllers read and keep that the quad's types do not carry: the balance's
+/// keys and its four accumulators, the stick's raw `x` (before the input limiter) and the body's
+/// centre of gravity, whose `x` the balance writes.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Rider {
+    pub balance_inertia_rate: F,
+    pub min_balance_inertia: F,
+    pub max_balance_inertia: F,
+    pub input_inertia: F,
+    pub balance_noise_amplitude: F,
+    pub balance_noise_time_scale: F,
+    pub max_balance_point: F,
+    pub max_roll_rate_disturbance: F,
+    pub roll_control_gain: F,
+    pub roll_control_rate_gain: F,
+    pub roll_control_max_cg: F,
+    pub balance_inertia: F,
+    pub balance_command: F,
+    pub balance_point: F,
+    pub balance_noise_time: F,
+    pub stick_x: F,
+    pub cofg: Vf,
+}
+
+/// Whoever runs the bike's Force body: the quad's steps ([`Moto`]), and the two things only the
+/// bike's own controllers ask for — the [`Rider`] words, kept with the rest of the bike's, and the
+/// engine's smooth noise the balance walks along (a call out, as the original's is; the port's
+/// [`crate::ride::noise`] is a stand-in for MX Unleashed's, not this).
+pub trait Rides: Moto {
+    fn rider(&mut self) -> &mut Rider;
+    fn noise(&mut self, t: F) -> F;
+}
+
+/// The engine's sine/cosine curve and the arc cosine table the balance reads, built once.
+fn tables() -> mv::Tables<'static> {
+    static ACOS: std::sync::OnceLock<crate::air::AcosTable> = std::sync::OnceLock::new();
+    static CURVE: std::sync::OnceLock<crate::camera::CurveTable> = std::sync::OnceLock::new();
+    mv::Tables { acos: ACOS.get_or_init(crate::air::AcosTable::build), curve: CURVE.get_or_init(crate::camera::CurveTable::build) }
+}
+
+/// The controllers' outside: the frames come off the body's quaternion ([`crate::handling::step`]
+/// answers them), so only the noise is asked, of the bike's [`Rides`].
+struct Noise<'a, M>(&'a mut M);
+
+impl<M: Rides> mv::Outside for Noise<'_, M> {
+    fn unrotate(&mut self, _: mv::Frame, _: Vf) -> Vf {
+        unreachable!("the bike's controllers rotate by the body's quaternion")
+    }
+    fn forward(&mut self, _: mv::Frame) -> Vf {
+        unreachable!("the bike's controllers take the forward axis from the body's quaternion")
+    }
+    fn noise(&mut self, t: F) -> F {
+        self.0.noise(t)
+    }
+    fn set_axes(&mut self, _: Vf, _: Vf) {
+        unreachable!("the bike's Force body does not point the node")
+    }
+}
+
+/// **The bike's rider controllers**, the Force body's first three with control on: the stand-upright
+/// (it guards itself: both wheels down, not balancing, off the throttle, under 10 ft/s), the balance
+/// when the two balance words agree, and the wheelie and stoppie. They are
+/// [`crate::handling::step`]'s ports (MD63b), run on the bike's words: the front wheel's contact,
+/// normal and steering, the rear's contact and normal, the signed speed, the levers, the body's
+/// force, moment, local angular velocity, quaternion and centre of gravity.
+fn controllers(p: &Params, q: &mut Quad, body: &mut Body, dt: F, m: &mut impl Rides) {
+    let r = *m.rider();
+    let keys = mv::Params {
+        gravity: q.gravity,
+        balance_inertia_rate: r.balance_inertia_rate,
+        min_balance_inertia: r.min_balance_inertia,
+        max_balance_inertia: r.max_balance_inertia,
+        input_inertia: r.input_inertia,
+        balance_noise_amplitude: r.balance_noise_amplitude,
+        balance_noise_time_scale: r.balance_noise_time_scale,
+        max_balance_point: r.max_balance_point,
+        max_roll_rate_disturbance: r.max_roll_rate_disturbance,
+        roll_control_gain: r.roll_control_gain,
+        roll_control_rate_gain: r.roll_control_rate_gain,
+        roll_control_max_cg: r.roll_control_max_cg,
+        max_pitch_command: p.max_pitch_command,
+        pitch_gain: p.pitch_gain,
+        pitch_rate_gain: p.pitch_rate_gain,
+        inv_wheelie_top_speed: p.inv_wheelie_top_speed,
+        max_stoppie_pitch_command: p.max_stoppie_pitch_command,
+        stoppie_pitch_gain: p.stoppie_pitch_gain,
+        stoppie_yaw_rate_scale: p.stoppie_yaw_rate_scale,
+        stoppie_top_speed: p.stoppie_top_speed,
+        ..Default::default()
+    };
+    let mut ride = mv::Ride {
+        balance_inertia: r.balance_inertia,
+        balance_command: r.balance_command,
+        balance_point: r.balance_point,
+        balance_noise_time: r.balance_noise_time,
+        pitch_integral: q.pitch_integral,
+        stoppie: q.stoppie,
+        clutch_in: q.clutch_in,
+        ..Default::default()
+    };
+    let mut chassis = mv::Chassis {
+        force: body.force,
+        torque: body.moment,
+        cofg: r.cofg,
+        euler: q.euler,
+        world_ang_vel: q.world_ang_vel,
+        ang_vel: body.ang_vel,
+        ..Default::default()
+    };
+    let wheel = |w: &crate::quad::Wheel| mv::Wheel { contact: w.touching, contact_normal: w.normal, steered: w.steered, ..Default::default() };
+    let (mut front, mut rear) = (wheel(&q.wheels[FRONT]), wheel(&q.wheels[REAR]));
+    let mut engine = mv::Engine::default();
+    let s = mv::Step {
+        dt,
+        on_ground: q.on_ground,
+        both_wheels: q.all_down,
+        balancing: q.balancing,
+        gas: q.gas,
+        brake: q.brake,
+        speed: q.speed(),
+        stick_x: r.stick_x,
+        lean: q.lean,
+        lean_fore_aft: q.lean_fore_aft,
+        gas_rate_limited: q.gas_limited,
+        front_brake: q.front_brake,
+        rear_brake: q.rear_brake,
+        ..Default::default()
+    };
+    let orientation = body.orientation;
+    {
+        let mut b = mv::Bike { ride: &mut ride, chassis: &mut chassis, front: &mut front, rear: &mut rear, engine: &mut engine };
+        crate::handling::step::stand_upright(&keys, &mut b, &s, &mut Noise(m), orientation);
+        if q.balancing {
+            crate::handling::step::balance(&keys, &mut b, &s, &tables(), &mut Noise(m), orientation, dt);
+        }
+        crate::handling::step::roll_pitch(&keys, &mut b, &s, orientation, dt);
+    }
+    (body.force, body.moment) = (chassis.force, chassis.torque);
+    (q.pitch_integral, q.stoppie) = (ride.pitch_integral, ride.stoppie);
+    q.wheels[FRONT].steered = front.steered;
+    let r = m.rider();
+    (r.balance_inertia, r.balance_command, r.balance_point, r.balance_noise_time) =
+        (ride.balance_inertia, ride.balance_command, ride.balance_point, ride.balance_noise_time);
+    r.cofg = chassis.cofg;
+}
+
+/// **The bike's ground push**: with the rear wheel touching (the wheel's own flag, where the quad
+/// reads its rear-down) and the push's gate open, the bike's push — with its flag set, a force
+/// `gain·(target − speed)` along the bike's own `z`, taken into the world.
+fn ground_push(q: &Quad, body: &mut Body) {
+    if !q.wheels[REAR].touching || q.push_gate == F::ZERO || !q.push {
+        return;
+    }
+    let z = q.push_gain * (q.push_target - q.speed());
+    body.add_local_force(NOTHING.merge(Dest::Z, Vf::new(0.0, 0.0, z.0, 0.0)));
+}
+
+/// **The bike's Force body** (its ground substep), once a substep.
+///
+/// Skipped as the PreProcess is ([`Quad::active`]). The vehicle's gravity first. With control on
+/// (no wreck reason, [`Quad::control_off`]): the rider's controllers ([`controllers`]: the
+/// stand-upright, the balance while the balance words agree, the wheelie and stoppie), the preload,
+/// backflip, air spin, engine, air drag and airborne control, then the ground push. Then, control or
+/// not: both wheels cleared, the contacts spread, both suspensions, both tire forces, the rear's
+/// pair flag (set with the front touching and the rear not, cleared otherwise), both wheels
+/// integrated, the rev limiter and the peak rates. Every round goes front, then rear.
+///
+/// The quad's ([`crate::quad::ground_step`]) runs four wheels and its own stand-upright and
+/// roll/pitch, no balance, and gates its push on its rear-down flag.
+pub fn ground_step(p: &Params, q: &mut Quad, body: &mut Body, dt: F, m: &mut impl Rides) {
+    if !q.active {
+        return;
+    }
+    m.call(Call::Gravity, q, body);
+    if !q.control_off {
+        controllers(p, q, body, dt, m);
+        for c in [Call::Preload(dt), Call::Backflip(dt), Call::SpinAir(dt), Call::EngineUpdate(dt), Call::AirDrag(dt), Call::AirborneControl(dt)] {
+            m.call(c, q, body);
+        }
+        ground_push(q, body);
+    }
+    for w in [FRONT, REAR] {
+        m.call(Call::WheelClear(w), q, body);
+    }
+    m.call(Call::Contacts, q, body);
+    for w in [FRONT, REAR] {
+        m.call(Call::Suspension(w, dt), q, body);
+    }
+    for w in [FRONT, REAR] {
+        m.call(Call::TireForces(w, dt), q, body);
+    }
+    q.wheels[REAR].rear_pair = q.wheels[FRONT].touching && !q.wheels[REAR].touching;
+    for w in [FRONT, REAR] {
+        m.call(Call::WheelIntegrate(w, dt), q, body);
+    }
+    m.call(Call::RevLimit, q, body);
+    m.call(Call::PeakRates, q, body);
+}
+
+/// The [`Rider`] words, bike-relative (the balance's keys and accumulators, the raw stick `x`), and
+/// the centre of gravity, body-relative.
+const RIDER_KEYS: [u32; 11] = [0x14fc, 0x1500, 0x1504, 0x1508, 0x1514, 0x151c, 0x1520, 0x1398, 0x138c, 0x1390, 0x1394];
+const RIDER_STATE: [u32; 4] = [0x14f8, 0x150c, 0x1510, 0x1518];
+const STICK_X: u32 = 0x12a8;
+const COFG: u32 = 0x1a0;
+
+fn rider_fields(r: &mut Rider) -> [&mut F; 16] {
+    let Rider {
+        balance_inertia_rate, min_balance_inertia, max_balance_inertia, input_inertia, balance_noise_amplitude,
+        balance_noise_time_scale, max_balance_point, max_roll_rate_disturbance, roll_control_gain,
+        roll_control_rate_gain, roll_control_max_cg, balance_inertia, balance_command, balance_point,
+        balance_noise_time, stick_x, ..
+    } = r;
+    [
+        balance_inertia_rate, min_balance_inertia, max_balance_inertia, input_inertia, balance_noise_amplitude,
+        balance_noise_time_scale, max_balance_point, max_roll_rate_disturbance, roll_control_gain,
+        roll_control_rate_gain, roll_control_max_cg, balance_inertia, balance_command, balance_point,
+        balance_noise_time, stick_x,
+    ]
+}
+
+fn rider_offsets() -> impl Iterator<Item = u32> {
+    RIDER_KEYS.into_iter().chain(RIDER_STATE).chain([STICK_X])
+}
+
+/// The bike at `bike`'s [`Rider`], its body at `body`.
+pub fn read_rider(m: &impl Words, bike: u32, body: u32) -> Rider {
+    let mut r = Rider { cofg: m.v(body + COFG), ..Default::default() };
+    for (f, o) in rider_fields(&mut r).into_iter().zip(rider_offsets()) {
+        *f = m.f(bike + o);
+    }
+    r
+}
+
+/// [`read_rider`]'s inverse.
+pub fn rider_words(r: &Rider, bike: u32, body: u32) -> Vec<(u32, u32)> {
+    let mut r = *r;
+    let mut out = Vec::new();
+    let cofg = r.cofg;
+    for (f, o) in rider_fields(&mut r).into_iter().zip(rider_offsets()) {
+        put_f(&mut out, bike + o, *f);
+    }
+    put_v(&mut out, body + COFG, cofg);
+    out
 }
 
 // --- the bike's words (F31b1) ------------------------------------------------------------------------
