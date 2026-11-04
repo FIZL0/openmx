@@ -40,7 +40,9 @@ tests = [
 # one_fps at load 31, 10-27; holding the machine for every run would stall every gate). one_fps and ecosystem's densest view both
 # red in the first parallel merge gate (P128, 10-23 16:16) and are the original's frame-budget and the smooth
 # rule's no-slower checks.
-tests = ["-p openmx --test one_fps", "-p game-render --test ecosystem"]
+# world_ultra_load's first-frame (20 s) and paint-update budgets red three gates running at load 40-50 and
+# pass alone (F40, P294, 2026-11-04; K23 is the real fix).
+tests = ["-p openmx --test one_fps", "-p game-render --test ecosystem", "-p openmx --test world_ultra_load"]
 
 [display]
 # Every window a check's tests open goes to a private headless weston + Xwayland that ends with the check
