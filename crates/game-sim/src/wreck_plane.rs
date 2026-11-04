@@ -21,7 +21,10 @@
 //! Wired (S276): before a flown plane's frame [`search_downed`] searches every downed rider's wreck
 //! bike with the hull in its world and puts the mirrors and the wreck bikes' bodies in the plane's
 //! [`Met`]; after it [`step_downed`] takes the bodies back as the plane's resolve left them and steps
-//! each wreck bike with the plane's body on its resolve. The Sim's plane lane ([`crate::Sim::step`])
+//! each wreck bike with the plane's body on its resolve. Since F32 the wreck bike is stepped inside the
+//! plane's frame instead, as the original's is (research/f30): one dynamics world holds both bodies,
+//! and each substep the wreck bike's force listener runs after the plane's, then both integrate
+//! ([`InWorld`], [`Met::downed`]); [`step_downed`] hands the stepped bike back. The Sim's plane lane ([`crate::Sim::step`])
 //! does it for the other players (who are not stepped otherwise while a plane flies), the shell's
 //! split screen and online seats for a lone flown plane, where the downed rider's own step later in
 //! the walk skips the wreck bike's tick ([`WreckBike::flown`]). Planes flown together (S276a,
@@ -123,6 +126,68 @@ impl WreckBike {
 /// What a wreck bike's entry on flown plane `j` names between its search and its step: `PLANES + j`.
 pub const PLANES: usize = flight_search::PLANES;
 
+/// **A downed wreck bike in a flown plane's dynamics world** (F32): the original's wreck bike is a
+/// body of the plane's world (research/f30), so each substep its force listener runs after the
+/// planes' (gravity, and its list resolved against the props it struck, then the planes' bodies),
+/// and it is integrated beside them; its preforce clears its shock peak and its post puts its
+/// transform where its body is, as its own world's do ([`WreckBike::tick`]).
+///
+/// [`search_downed_by`] files one in the first of its planes' [`Met::downed`]; the plane's frame
+/// ([`crate::flight::Flight::frame_met`], [`crate::flight::frames_together`]) steps it, its body the
+/// one the planes' resolve pushes ([`Met::wrecks`]); [`step_downed_by`] hands it back to its rider.
+#[derive(Clone, Debug, Default)]
+pub struct InWorld {
+    /// The rider's wreck bike after its search, its entries on plane `j` renamed to the props it
+    /// struck plus `j`, the props' bodies in [`WreckBike::struck`].
+    pub bike: WreckBike,
+    pub movers: Vec<contact::Mover>,
+    /// Where its body is: in the met its place in [`Met::wrecks`]; within the frame its place among
+    /// the frame's pushed bodies.
+    pub place: usize,
+    /// The planes on its resolve, after the props, by their place among the planes its search had
+    /// (the fleet's planes with a met, in order; a lone plane's frame has only `0`).
+    pub planes: Vec<usize>,
+    /// Its frame ran in the plane's world. A plane whose frame never ran leaves it to
+    /// [`step_downed_by`], which steps it after as before F32 ([`WreckBike::step_flown`]).
+    pub stepped: bool,
+}
+
+impl InWorld {
+    /// Its preforce listener, `body` its body in the frame.
+    pub fn preforce(&mut self, body: &mut Pushed) {
+        body.body.clear_shock_peak();
+    }
+
+    /// Its force listener, after the planes': the part's gravity and its list resolved against the
+    /// props it struck then `planes` (each its copy nearest the bike, [`crate::flight::Flight::flown`]),
+    /// which the caller writes back. `body` is its body in the frame, which the planes' resolve
+    /// pushed this substep.
+    pub fn force(&mut self, body: &mut Pushed, planes: &mut [Flown]) {
+        (self.bike.collider, self.bike.body) = (body.collider, body.body);
+        let WreckBike { body: b, mass, gravity, collider, record, struck, .. } = &mut self.bike;
+        let mut props: Vec<_> = struck.struck.iter_mut().map(Pushed::weighed).collect();
+        let mut flown: Vec<_> = planes.iter_mut().map(|p| (&mut p.collider, contact::Weighed { body: &mut p.body, mass: p.mass })).collect();
+        let mut others: Vec<contact::Other<'_>> = props
+            .iter_mut()
+            .chain(flown.iter_mut())
+            .map(|(collider, body)| contact::Other { collider: &mut **collider, side: contact::Side::Body(body) })
+            .collect();
+        let movers = &self.movers;
+        crate::biplane::collision_force(b, *gravity, |body| {
+            let mut rigid = contact::Weighed { body, mass: *mass };
+            contact::resolve(collider, &mut rigid, &mut record.contacts, &mut others, movers, true);
+        });
+        drop(others);
+        (body.collider, body.body) = (self.bike.collider, self.bike.body);
+    }
+
+    /// Its post listener: the transform where `body` (its body in the frame) is.
+    pub fn post(&mut self, body: &Pushed) {
+        self.bike.record.node = crate::wreck_bike::node_of(&body.body);
+        self.stepped = true;
+    }
+}
+
 /// **The downed riders' wreck bikes searched among the flown planes**, before their frame (S276,
 /// S276a): what [`step_downed`] needs after it. Each searched rider, by its place in the riders
 /// handed over, its search's movers, and where its body went in each plane's [`Met::wrecks`] (the
@@ -130,7 +195,7 @@ pub const PLANES: usize = flight_search::PLANES;
 /// the searches, in their order there.
 #[derive(Debug, Default)]
 pub struct Downed {
-    searched: Vec<(usize, Vec<contact::Mover>, Vec<(usize, usize)>)>,
+    searched: Vec<(usize, Vec<contact::Mover>, Vec<(usize, usize)>, Option<(usize, usize)>)>,
     planes: Vec<usize>,
 }
 
@@ -195,7 +260,23 @@ pub fn search_downed_by(riders: &mut [&mut Rider], planes: &[&Flight], dt: F, wo
             met.wrecks.push(Pushed { collection: 0, object: w, collider: b.collider, body: b.body, mass: b.mass });
             placed.push((k, j));
         }
-        out.searched.push((i, movers, placed));
+        // Its step in the first of its planes' worlds (F32): a copy of the bike, its entries on the
+        // hulls renamed to their places on its resolve, after the props it struck.
+        let held = placed.first().and_then(|&(k, j)| {
+            let met = mets.get_mut(k)?;
+            let mut bike = b.clone();
+            let struck = std::mem::take(&mut bike.struck);
+            let first = struck.struck.len();
+            for e in &mut bike.record.contacts {
+                if let Some(o) = e.other.filter(|&o| o >= PLANES) {
+                    e.other = Some(first + o - PLANES);
+                }
+            }
+            bike.struck.struck = struck.struck;
+            met.downed.push(InWorld { bike, movers: movers.clone(), place: j, planes: out.planes.clone(), stepped: false });
+            Some((k, met.downed.len() - 1))
+        });
+        out.searched.push((i, movers, placed, held));
     }
     out
 }
@@ -212,8 +293,10 @@ pub fn step_downed(riders: &mut [&mut Rider], plane: &mut Flight, downed: Downed
 
 /// [`step_downed`] after the planes' joint frame (S276a): each wreck bike [`search_downed_by`]
 /// searched takes back one body, the joint resolve's (the first of its planes' [`Met::wrecks`], which
-/// all hold the same), then steps its world with every searched plane's body on its resolve, in the
-/// search's order, each written back to its plane. `planes` and `mets` as the search's.
+/// all hold the same). Since F32 the frame stepped it in the planes' world ([`InWorld`]), and it takes
+/// that bike back whole; one whose frame did not run steps its world after, as before, with every
+/// searched plane's body on its resolve, in the search's order, each written back to its plane.
+/// `planes` and `mets` as the search's.
 pub fn step_downed_by(
     riders: &mut [&mut Rider],
     planes: &mut [&mut Flight],
@@ -224,17 +307,25 @@ pub fn step_downed_by(
     own_step: bool,
 ) {
     let wrecks: Vec<Vec<Pushed>> = mets.iter_mut().map(|m| std::mem::take(&mut m.wrecks)).collect();
-    for (i, movers, placed) in downed.searched {
+    let mut held: Vec<Vec<InWorld>> = mets.iter_mut().map(|m| std::mem::take(&mut m.downed)).collect();
+    for (i, movers, placed, at) in downed.searched {
         let r = &mut *riders[i];
         let Some(c) = r.crash.as_mut() else { continue };
+        let stepped = at.and_then(|(k, d)| held.get_mut(k)?.get_mut(d)).filter(|d| d.stepped).map(std::mem::take);
+        let in_world = stepped.is_some();
+        if let Some(d) = stepped {
+            c.bike = d.bike;
+        }
         if let Some(w) = placed.first().and_then(|&(k, j)| wrecks.get(k)?.get(j)) {
             (c.bike.collider, c.bike.body) = (w.collider, w.body);
         }
-        let from = c.bike.origin();
-        let mut flown: Vec<Flown> = downed.planes.iter().map(|&k| planes[k].flown(k, from, world)).collect();
-        c.bike.step_flown(dt, &movers, &mut flown);
-        for (&k, f) in downed.planes.iter().zip(&flown) {
-            planes[k].pushed(f);
+        if !in_world {
+            let from = c.bike.origin();
+            let mut flown: Vec<Flown> = downed.planes.iter().map(|&k| planes[k].flown(k, from, world)).collect();
+            c.bike.step_flown(dt, &movers, &mut flown);
+            for (&k, f) in downed.planes.iter().zip(&flown) {
+                planes[k].pushed(f);
+            }
         }
         c.bike.flown = own_step;
         c.origin = c.bike.origin();

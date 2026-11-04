@@ -223,6 +223,9 @@ pub struct Met {
     /// the mirrors in [`Met::mirrors`] naming [`WRECK_FROM`]` + j` push against, after the vehicles and
     /// the props among its resolve's other sides; written back as its resolve left them.
     pub wrecks: Vec<crate::prop_contact::Pushed>,
+    /// The wreck bikes stepped in its world (F32, [`crate::wreck_plane::InWorld`]): each a body of the
+    /// plane's dynamics world, [`Met::wrecks`]' body, its force listener after the plane's.
+    pub downed: Vec<crate::wreck_plane::InWorld>,
 }
 
 impl Flight {
@@ -772,12 +775,22 @@ impl Flight {
             }
             bodies.extend(wrecks);
         }
-        let mut listeners = Listeners { plane: self, ground: Ground(ground), tables, bikes, movers: &movers, met, seam: [0, 0], props: &mut bodies };
+        // The wreck bikes stepped in its world (F32), their bodies those after the props.
+        let mut downed = met.as_deref_mut().map(|m| std::mem::take(&mut m.downed)).unwrap_or_default();
+        for d in &mut downed {
+            d.place += at;
+        }
+        let mut listeners = Listeners { plane: self, ground: Ground(ground), tables, bikes, movers: &movers, met, seam: [0, 0], props: &mut bodies, downed };
         WORLD.step(dt, &mut listeners);
         let seam = listeners.seam;
         let pushed = listeners.props[at..].to_vec();
+        let mut downed = std::mem::take(&mut listeners.downed);
         if let Some(m) = listeners.met {
             m.wrecks = pushed;
+            for d in &mut downed {
+                d.place -= at;
+            }
+            m.downed = downed;
         }
         bodies.truncate(at);
         if let Some((set, _)) = props {
@@ -1393,6 +1406,8 @@ struct Listeners<'a> {
     seam: [i8; 2],
     /// The knockable props' bodies its list names (S241), after the vehicles among its other sides.
     props: &'a mut [crate::prop_contact::Pushed],
+    /// The wreck bikes in its world (F32), bodies `1..` of its lists, their bodies among `props`.
+    downed: Vec<crate::wreck_plane::InWorld>,
 }
 
 thread_local! {
@@ -1414,13 +1429,29 @@ impl Dynamics for Listeners<'_> {
     fn count(&self, list: List) -> i32 {
         match list {
             List::Constraints => 0,
-            _ => 1,
+            _ => 1 + self.downed.len() as i32,
         }
     }
-    fn preforce(&mut self, _: i32, dt: F) {
+    fn preforce(&mut self, i: i32, dt: F) {
+        if i > 0 {
+            let d = &mut self.downed[i as usize - 1];
+            d.preforce(&mut self.props[d.place]);
+            return;
+        }
         self.plane.preforce(dt);
     }
-    fn force(&mut self, _: i32, h: F) {
+    fn force(&mut self, i: i32, h: F) {
+        if i > 0 {
+            // A wreck bike's, after the plane's: the plane's body on its resolve.
+            let d = &mut self.downed[i as usize - 1];
+            let from = d.bike.origin();
+            let mut flown: Vec<_> = d.planes.iter().map(|&k| self.plane.flown(k, from, &*self.ground.0)).collect();
+            d.force(&mut self.props[d.place], &mut flown);
+            for f in &flown {
+                self.plane.pushed(f);
+            }
+            return;
+        }
         let mut bodies: Vec<(&mut Collider, Weighed<'_>)> = self.props.iter_mut().map(|p| p.weighed()).collect();
         let mut others: Vec<contact::Other<'_>> = match self.met.as_deref_mut() {
             Some(m) => m
@@ -1434,13 +1465,24 @@ impl Dynamics for Listeners<'_> {
         others.extend(bodies.iter_mut().map(|(collider, body)| contact::Other { collider: &mut **collider, side: contact::Side::Body(body) }));
         self.plane.forces(h, &mut self.ground, &self.tables.curve, &self.tables.acos, self.movers, &mut others);
     }
-    fn enabled(&self, _: i32) -> bool {
-        self.plane.body.enabled
+    fn enabled(&self, i: i32) -> bool {
+        match i {
+            0 => self.plane.body.enabled,
+            _ => self.props[self.downed[i as usize - 1].place].body.enabled,
+        }
     }
-    fn integrate(&mut self, _: i32, h: F) {
+    fn integrate(&mut self, i: i32, h: F) {
+        if i > 0 {
+            self.props[self.downed[i as usize - 1].place].body.integrate(h);
+            return;
+        }
         self.plane.body.integrate(h);
     }
-    fn end_substep(&mut self, _: i32) {
+    fn end_substep(&mut self, i: i32) {
+        if i > 0 {
+            self.props[self.downed[i as usize - 1].place].body.end_substep();
+            return;
+        }
         self.plane.body.end_substep();
         SUBSTEPS.with_borrow_mut(|kept| {
             if let Some(kept) = kept {
@@ -1449,7 +1491,12 @@ impl Dynamics for Listeners<'_> {
         });
     }
     fn constrain(&mut self, _: i32, _: bool) {}
-    fn post(&mut self, _: i32, dt: F) {
+    fn post(&mut self, i: i32, dt: F) {
+        if i > 0 {
+            let d = &mut self.downed[i as usize - 1];
+            d.post(&self.props[d.place]);
+            return;
+        }
         // Over a seam (MD44), first: the refill gathers where the plane now is.
         let seam = self.plane.wrap_round(&*self.ground.0, &self.tables.acos);
         self.seam = [self.seam[0] + seam[0], self.seam[1] + seam[1]];
@@ -1890,16 +1937,45 @@ pub fn frames_together_props(
         }
         wrecked.push((i, places));
     }
+    // The wreck bikes stepped in the planes' world (F32): each its body's place among the bodies, and
+    // its planes by their place in the fleet (the search's planes are the fleet's with a met).
+    let with_met: Vec<usize> = (0..n).filter(|&i| fleet[i].met.is_some()).collect();
+    let mut downed = Vec::new();
+    let mut kept = Vec::new();
+    for (i, places) in &wrecked {
+        let Some(m) = fleet[*i].met.as_deref_mut() else { continue };
+        for mut d in std::mem::take(&mut m.downed) {
+            kept.push((*i, d.place, std::mem::take(&mut d.planes)));
+            d.place = places.get(d.place).copied().unwrap_or(usize::MAX);
+            d.planes = kept.last().map(|k| k.2.iter().filter_map(|&k| with_met.get(k).copied()).collect()).unwrap_or_default();
+            downed.push(d);
+        }
+    }
     let hulls = fleet.iter().map(|f| f.flight.hull.as_ref().filter(|_| f.flight.rays.is_some()).map(|_| hull_at(f.flight))).collect();
-    let mut listeners =
-        Together { fleet: &mut *fleet, ground: Ground(ground), tables, movers: &movers, hulls, seams: Vec::new(), props: &mut bodies };
+    let mut listeners = Together {
+        fleet: &mut *fleet,
+        ground: Ground(ground),
+        tables,
+        movers: &movers,
+        hulls,
+        seams: Vec::new(),
+        props: &mut bodies,
+        downed: &mut downed,
+    };
     listeners.seams = vec![[0, 0]; listeners.fleet.len()];
     WORLD.step(dt, &mut listeners);
     let seams = listeners.seams;
-    // Each plane's met has its wreck bikes' bodies back, as the joint resolve left them.
+    // Each plane's met has its wreck bikes' bodies back, as the joint resolve left them, and the
+    // wreck bikes its search filed there, stepped.
     for (i, places) in wrecked {
         if let Some(m) = fleet[i].met.as_deref_mut() {
             m.wrecks = places.iter().map(|&p| bodies[p].clone()).collect();
+        }
+    }
+    for (mut d, (i, place, planes)) in downed.into_iter().zip(kept) {
+        (d.place, d.planes) = (place, planes);
+        if let Some(m) = fleet[i].met.as_deref_mut() {
+            m.downed.push(d);
         }
     }
     bodies.truncate(at);
@@ -2063,20 +2139,38 @@ struct Together<'a, 'b> {
     /// The knockable props' bodies the planes struck (S259a), after the other planes among each
     /// plane's sides.
     props: &'a mut [crate::prop_contact::Pushed],
+    /// The wreck bikes in the planes' world (F32), bodies after the fleet's, their bodies among
+    /// `props`.
+    downed: &'a mut [crate::wreck_plane::InWorld],
 }
 
 impl Dynamics for Together<'_, '_> {
     fn count(&self, list: List) -> i32 {
         match list {
             List::Constraints => 0,
-            _ => self.fleet.len() as i32,
+            _ => (self.fleet.len() + self.downed.len()) as i32,
         }
     }
     fn preforce(&mut self, i: i32, dt: F) {
+        if let Some(d) = self.downed.get_mut((i as usize).wrapping_sub(self.fleet.len())) {
+            d.preforce(&mut self.props[d.place]);
+            return;
+        }
         self.fleet[i as usize].flight.preforce(dt);
     }
     fn force(&mut self, i: i32, h: F) {
         let i = i as usize;
+        if let Some(d) = self.downed.get_mut(i.wrapping_sub(self.fleet.len())) {
+            // A wreck bike's, after every plane's: their bodies on its resolve.
+            let from = d.bike.origin();
+            let world = &*self.ground.0;
+            let mut flown: Vec<_> = d.planes.iter().map(|&k| self.fleet[k].flight.flown(k, from, world)).collect();
+            d.force(&mut self.props[d.place], &mut flown);
+            for (&k, f) in d.planes.iter().zip(&flown) {
+                self.fleet[k].flight.pushed(f);
+            }
+            return;
+        }
         let (before, rest) = self.fleet.split_at_mut(i);
         let (me, after) = rest.split_first_mut().expect("a plane of the fleet");
         let from = me.flight.body.position;
@@ -2128,17 +2222,30 @@ impl Dynamics for Together<'_, '_> {
         }
     }
     fn enabled(&self, i: i32) -> bool {
-        self.fleet[i as usize].flight.body.enabled
+        match self.downed.get((i as usize).wrapping_sub(self.fleet.len())) {
+            Some(d) => self.props[d.place].body.enabled,
+            None => self.fleet[i as usize].flight.body.enabled,
+        }
     }
     fn integrate(&mut self, i: i32, h: F) {
-        self.fleet[i as usize].flight.body.integrate(h);
+        match self.downed.get((i as usize).wrapping_sub(self.fleet.len())) {
+            Some(d) => self.props[d.place].body.integrate(h),
+            None => self.fleet[i as usize].flight.body.integrate(h),
+        }
     }
     fn end_substep(&mut self, i: i32) {
-        self.fleet[i as usize].flight.body.end_substep();
+        match self.downed.get((i as usize).wrapping_sub(self.fleet.len())) {
+            Some(d) => self.props[d.place].body.end_substep(),
+            None => self.fleet[i as usize].flight.body.end_substep(),
+        }
     }
     fn constrain(&mut self, _: i32, _: bool) {}
     fn post(&mut self, i: i32, dt: F) {
         let i = i as usize;
+        if let Some(d) = self.downed.get_mut(i.wrapping_sub(self.fleet.len())) {
+            d.post(&self.props[d.place]);
+            return;
+        }
         let plane = &mut *self.fleet[i].flight;
         let seam = plane.wrap_round(&*self.ground.0, &self.tables.acos);
         self.seams[i] = [self.seams[i][0] + seam[0], self.seams[i][1] + seam[1]];

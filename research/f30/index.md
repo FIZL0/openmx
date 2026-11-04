@@ -53,3 +53,19 @@ plane's whole frame with the wreck body as a mirror side. It then steps the wrec
 against the plane's post-frame body. Making the port match means stepping the downed wreck bikes as
 bodies of the plane's world: their force listener after the planes', and their integrate in the same
 substep. That is F32.
+
+## F32: done
+
+The wreck bike is now a body of the plane's world (`wreck_plane::InWorld`, `flight::Met::downed`).
+`search_downed_by` files a copy of each searched wreck bike in its first plane's met. The plane's frame
+(`Flight::frame_met`/`frame_props`, and `frames_together_props` for planes flown together) counts it among
+its bodies. Each substep its force listener (gravity, its list resolved against the props it struck, then
+the planes' bodies) runs after the planes', and its body is integrated with theirs. Its preforce clears
+its shock peak, and its post sets its transform. `step_downed_by` hands the stepped bike back. A frame that
+never ran leaves the bike to the old step after.
+
+`tests/c16_fly.rs` `f32_the_plane_and_wreck_bike_are_the_images` pins it: after ticks 137854..137857, the
+port's plane body is image `t + 1`'s bit for bit, velocity and position, and so is the wreck bike's. Row
+137858 is (-28.616682, -0.05351289, 3.6458206). The joust from 137845 now holds 18 ticks (11 before) and
+parts on tick 137863. From 137810 it holds 53 (46 before). From 137910 the plane holds all 100 (1
+before), and so does the tape's 137910 stretch.
