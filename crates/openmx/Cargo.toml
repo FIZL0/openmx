@@ -127,3 +127,5 @@ iroh-relay = { version = "1.3", features = ["server"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 # tests/audio.rs runs the original's engine note over a save state (P49)
 ps2-oracle = { path = "../ps2-oracle" }
+# tests/disc_worlds.rs holds its shells to their CPU time: wait4's rusage of the one child (K24)
+libc = "0.2"

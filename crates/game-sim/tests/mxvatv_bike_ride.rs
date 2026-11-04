@@ -5506,3 +5506,115 @@ fn the_vehicle_updates_callees_are_the_originals() {
     }
     assert!(t.len() >= 28, "every path taken: {t:#?}");
 }
+
+/// **F41: of the rider's writes into the bike, the bike's frame reads one word.** The tail's rider
+/// ([`OTHER_LEAVES`]' third) writes two windows of the bike's collision record, the bike's
+/// `+0x870..+0x8a0` and `+0x920..+0x980`, which the port does not write. Both C15 replays run whole in
+/// the interpreter with every byte the rider's step writes into those windows marked; a read of a
+/// marked byte outside the rider's own step, by the rest of that frame or any later one, before
+/// something else writes it again, is the bike's frame depending on the rider. Every read in the frame
+/// counts: the original's code and the interpreter's hooks. The rider's own reads are counted apart.
+///
+/// The ride: none. The flip: only `+0x920` (the record's `+0x1f0`), and only from the wreck row
+/// (125) until the put-back clock starts counting (row 140): it is the rider's "a ragdoll part is
+/// touching" flag, which the wreck clock ([`wreck::clock`]'s `SETTLES`) waits on. That word is not the
+/// port's yet: it needs the rider's ragdoll (research/oracle.txt `# F41`). Nothing else writes any
+/// marked byte again.
+#[test]
+fn the_riders_writes_into_the_bike_are_read_by_the_wreck_clock_alone() {
+    for (name, n) in [("ride-2", 459), ("flip-1", 465)] {
+        let Some(t) = riders_writes_read(name) else { return };
+        eprintln!("{name}: {} frames, {} steps, {} bytes marked, {} read back by the rider, {} reads by the frame", t.frames, t.steps, t.marked, t.own_reads, t.read.len());
+        assert_eq!(t.frames, n);
+        assert_eq!(t.steps, n, "the rider steps once a frame");
+        assert!(t.marked > 0, "{name}: the rider wrote the windows");
+        assert_eq!(t.overwritten, 0, "{name}: nothing but the rider writes the windows");
+        let words: std::collections::BTreeSet<u32> = t.read.iter().map(|&(_, a)| (a - BIKE) & !3).collect();
+        let frames: std::collections::BTreeSet<usize> = t.read.iter().map(|&(r, _)| r).collect();
+        if name == "ride-2" {
+            assert!(t.read.is_empty(), "{name}: the rider's writes read by the bike's frame: {words:#x?}");
+        } else {
+            assert_eq!(words.into_iter().collect::<Vec<_>>(), [wreck::SETTLES], "{name}: the words of the rider's read by the bike's frame");
+            assert_eq!(frames.into_iter().collect::<Vec<_>>(), (125..=140).collect::<Vec<_>>(), "{name}: the rows the wreck clock reads it");
+        }
+    }
+}
+
+/// What [`riders_writes_read`] saw over a replay: the frames, the rider's steps, the bytes of the
+/// windows its steps wrote (summed over them), how many of those something else wrote again before
+/// the next step, how many the rider itself read back, and every read of a marked byte by anything
+/// else (frame, address).
+#[derive(Debug, Default)]
+struct RiderReads {
+    frames: usize,
+    steps: usize,
+    marked: usize,
+    overwritten: usize,
+    own_reads: usize,
+    read: Vec<(usize, u32)>,
+}
+
+/// [`replay`] with the rider's step hooked to run as itself in between two read watches
+/// ([`RiderReads`]).
+fn riders_writes_read(name: &str) -> Option<RiderReads> {
+    let (rider, step, windows) = OTHER_LEAVES[2];
+    let windows: Vec<std::ops::Range<u32>> = windows.iter().map(|r| BIKE + r.start..BIKE + r.end).collect();
+    let mut ee = hooked(image()?);
+    let rows = rows(name)?;
+    let t: Rc<RefCell<(RiderReads, std::collections::BTreeSet<u32>)>> = Rc::default();
+    // The reads and writes since the last mark, checked against the marked bytes and then clearing
+    // them; the frame's index for the report.
+    let settle = |t: &mut (RiderReads, std::collections::BTreeSet<u32>), ee: &mut Ee, frame: usize| {
+        let reads = ee.reads.replace(Some(Default::default())).unwrap_or_default();
+        let (r, marked) = t;
+        r.read.extend(reads.intersection(marked).map(|&a| (frame, a)));
+        let gone: Vec<u32> = ee.written.intersection(marked).copied().collect();
+        r.overwritten += gone.len();
+        for a in gone {
+            marked.remove(&a);
+        }
+        ee.written.clear();
+    };
+    let frame: Rc<RefCell<usize>> = Rc::default();
+    let (h, at) = (t.clone(), frame.clone());
+    ee.hooks.insert(
+        step,
+        Box::new(move |ee: &mut Ee| {
+            assert_eq!(ee.r(4) as u32, rider, "the rider step's listener");
+            let mut t = h.borrow_mut();
+            settle(&mut t, ee, *at.borrow());
+            let (args, x, ra, sp, stack) = ([ee.r(4), ee.r(5), ee.r(6), ee.r(7)], ee.f(12), ee.r(31), ee.r(29), ee.stack);
+            ee.stack = (sp as u32 - 0x40) & !0xf;
+            ee.call(step, &args, &[x], BUDGET);
+            // The interpreter files the hook back under the `pc` it leaves, so leave it here.
+            (ee.stack, ee.pc) = (stack, step);
+            ee.set(29, sp);
+            ee.set(31, ra);
+            let reads = ee.reads.replace(Some(Default::default())).unwrap_or_default();
+            let (r, marked) = &mut *t;
+            r.steps += 1;
+            r.own_reads += reads.intersection(marked).count();
+            let wrote: Vec<u32> = ee.written.iter().copied().filter(|a| windows.iter().any(|w| w.contains(a))).collect();
+            r.marked += wrote.len();
+            marked.extend(wrote);
+            ee.written.clear();
+        }),
+    );
+    for (r, row) in rows.iter().enumerate() {
+        poke(&mut ee, row, &READER);
+        *frame.borrow_mut() = r;
+        ee.written.clear();
+        *ee.reads.borrow_mut() = Some(Default::default());
+        ee.set(28, GP);
+        ee.call(FRAME, &[u64::from(SIM)], &[f32::from_bits(DT)], 400_000_000);
+        settle(&mut t.borrow_mut(), &mut ee, r);
+        *ee.reads.borrow_mut() = None;
+        let d = diff(&ee, row);
+        assert!(d.is_empty(), "{name} row {r} (vsync {}): {} words differ\n  {}", row["vsync"], d.len(), d.iter().take(40).cloned().collect::<Vec<_>>().join("\n  "));
+        t.borrow_mut().0.frames += 1;
+        poke(&mut ee, row, &SPOT);
+    }
+    ee.hooks.remove(&step);
+    let (r, _) = Rc::try_unwrap(t).ok().unwrap().into_inner();
+    Some(r)
+}
