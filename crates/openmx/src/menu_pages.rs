@@ -119,6 +119,8 @@ pub enum Key {
     Updates,
     /// The Display tab's Aspect Ratio (P176): the Picture departure's row, as Draw Distance is the fog's.
     AspectRatio,
+    /// The Display tab's Button Icons (P281): Auto, or one style for every controller.
+    ButtonIcons,
     RenderScale,
     VSync,
     FrameLimit,
@@ -314,6 +316,11 @@ fn hint(key: Key, choice: &str) -> &'static str {
         (Key::AspectRatio, "16:10") => "a laptop's shape",
         (Key::AspectRatio, "21:9") => "ultrawide",
         (Key::AspectRatio, "Stretch") => "fills, as Auto",
+        (Key::ButtonIcons, "Auto") => "each controller's own",
+        (Key::ButtonIcons, "PlayStation") => "Cross, Circle, Square, Triangle",
+        (Key::ButtonIcons, "Xbox") => "A, B, X, Y",
+        (Key::ButtonIcons, "Switch") => "Nintendo's B, A, Y, X",
+        (Key::ButtonIcons, "Generic") => "where each button sits",
         (Key::VideoPreset, "Auto") => "picks and tunes itself",
         (Key::VideoPreset, "High") => "every shadow, far fog",
         (Key::VideoPreset, "Medium") => "High with speed-ups",
@@ -673,6 +680,8 @@ impl Menu {
             .off_if(s.overlay == Overlay::None, "The HUD is off"),
             // P176: opentennis's Aspect Ratio, the Picture departure's switch.
             Row::choice(Key::AspectRatio, "Aspect Ratio", &Picture::ALL.map(Picture::label), at(&Picture::ALL, s.picture), ASPECT_HELP),
+            // P281: opentennis's Button Icons, Auto by default.
+            Row::choice(Key::ButtonIcons, "Button Icons", &ButtonIcons::ALL.map(ButtonIcons::label), at(&ButtonIcons::ALL, s.button_icons), super::pads::HELP),
         ]
     }
 
@@ -1565,6 +1574,7 @@ impl Menu {
             Key::ShadowQuality => s.shadow_quality = ShadowQuality::ALL[next(row)],
             Key::Updates => s.updates = Updates::ALL[next(row)],
             Key::AspectRatio => s.picture = Picture::ALL[next(row)],
+            Key::ButtonIcons => s.button_icons = ButtonIcons::ALL[next(row)],
             Key::RenderScale => s.render_scale = RenderScale::ALL[next(row)],
             Key::VSync => s.vsync = !s.vsync,
             Key::ShowFps => s.show_fps = !s.show_fps,

@@ -9,6 +9,7 @@
 //! the column and the band reach the frame's edges whatever its shape.
 
 use super::ink::{self, Box4, SLANT, Weight};
+use super::pads::{self, Glyph, Style};
 use super::touch_room::Room;
 use super::*;
 
@@ -104,6 +105,11 @@ pub(super) struct Pen<'a> {
     /// Everything drawn is this opaque (a dimmed row).
     fade: f32,
     pub(super) parts: Vec<Part>,
+    /// The buttons the hints draw (P281): the device driving this view's, under Button Icons.
+    pub(super) buttons: super::pads::Buttons,
+    /// The buttons are a ride's, not the menus' (a trick's gesture): the keyboard's Circle is its
+    /// bound key and not Escape.
+    ride_keys: bool,
 }
 
 /// The stage in a `size` frame: an em's pixels, and where the stage's corner is.
@@ -262,7 +268,7 @@ impl<'a> Pen<'a> {
     pub(super) fn new(art: &'a Art, out: &'a mut Vec<Sprite>, base: usize, size: (usize, usize)) -> Pen<'a> {
         let (w, h) = (size.0.max(1) as f32, size.1.max(1) as f32);
         let (em, o) = fit(size);
-        Pen { art, out, base, em, o, size: [w, h], fade: 1.0, parts: Vec::new() }
+        Pen { art, out, base, em, o, size: [w, h], fade: 1.0, parts: Vec::new(), buttons: Default::default(), ride_keys: false }
     }
 
     // ---- coordinates -------------------------------------------------------------------------
@@ -519,8 +525,109 @@ impl<'a> Pen<'a> {
         self.parts.push(Part::Line([lx, ly - height, (x - start) * self.em, height]));
     }
 
-    /// A button `d` ems across centred on `(x, y)`.
+    /// The control a button hint stands for, where it is one ([`Btn::L1R1`] is two, the arrows
+    /// none).
+    fn control(b: Btn) -> Option<Control> {
+        Some(match b {
+            Btn::Cross => Control::Cross,
+            Btn::Circle => Control::Circle,
+            Btn::Square => Control::Square,
+            Btn::Triangle => Control::Triangle,
+            Btn::Start => Control::Start,
+            Btn::Select => Control::Select,
+            Btn::R1 => Control::R1,
+            _ => return None,
+        })
+    }
+
+    /// The word on a shoulder's chip in this view's style (P281): L1, LB, L, or the keyboard's key.
+    fn shoulder_word(&self, c: Control) -> String {
+        self.buttons.word(c)
+    }
+
+    /// The glyphs button `b` is drawn as in this view's style (P281); empty for the arrows, which
+    /// every style draws alike, and for the PlayStation's, drawn as they always were.
+    fn glyphs(&self, b: Btn) -> Vec<Glyph> {
+        if self.buttons.style == Style::PlayStation {
+            return Vec::new();
+        }
+        let menus = !self.ride_keys;
+        match b {
+            Btn::L1R1 => [Control::L1, Control::R1].into_iter().filter_map(|c| self.buttons.glyph(c, menus)).collect(),
+            b => Pen::control(b).and_then(|c| self.buttons.glyph(c, menus)).into_iter().collect(),
+        }
+    }
+
+    /// How wide glyph `g` is drawn `d` across.
+    fn glyph_wide(&self, g: &Glyph, d: f32) -> f32 {
+        match g {
+            Glyph::Face(..) => d,
+            Glyph::Cap(k) => (self.wide(Weight::Heavy, k, d * 0.48) + d * 0.5).max(d * 0.9),
+            Glyph::Shoulder(w) | Glyph::Small(w) => self.wide(Weight::Heavy, w, d * 0.5) + d * 0.6,
+        }
+    }
+
+    /// Glyph `g`, `d` across, centred on `(x, y)` (P281).
+    fn glyph(&mut self, g: &Glyph, x: f32, y: f32, d: f32) {
+        let r = d / 2.0;
+        match g {
+            Glyph::Face(Style::PlayStation, i) => {
+                let b = [Btn::Cross, Btn::Circle, Btn::Square, Btn::Triangle][*i as usize & 3];
+                self.button_ps(b, x, y, d);
+            }
+            Glyph::Face(Style::Generic, i) => {
+                self.disc(x, y, r, CHALK);
+                self.disc(x, y, r * 0.9, PAD_PART);
+                for (k, [dx, dy]) in pads::GENERIC_DOTS.into_iter().enumerate() {
+                    let (cx, cy) = (x + dx * r, y + dy * r);
+                    if k == *i as usize {
+                        self.disc(cx, cy, r * 0.24, CHALK);
+                    } else {
+                        self.ring([cx - r * 0.2, cy - r * 0.2, r * 0.4, r * 0.4], r * 0.2, r * 0.07, DUST);
+                    }
+                }
+            }
+            Glyph::Face(style, i) => {
+                let (fill, ink) = pads::face_colours(*style, *i);
+                self.disc(x, y, r, fill);
+                self.ring([x - r, y - r, d, d], r, d * 0.04, [255, 255, 255, 70]);
+                let size = d * 0.6;
+                self.text(Weight::Heavy, pads::face_letter(*style, *i), x, Pen::mid(y, size), size, 0.0, ink, Align::Centre);
+            }
+            Glyph::Cap(k) => {
+                let w = self.glyph_wide(g, d);
+                self.round([x - w / 2.0, y - r * 0.84, w, d * 0.84], d * 0.18, CHALK, BONE);
+                let size = d * 0.48;
+                self.text(Weight::Heavy, k, x, Pen::mid(y - d * 0.04, size), size, 0.0, INK, Align::Centre);
+            }
+            Glyph::Shoulder(w) | Glyph::Small(w) => {
+                let bw = self.glyph_wide(g, d);
+                let round = if matches!(g, Glyph::Small(_)) { d * 0.4 } else { d * 0.25 };
+                self.round([x - bw / 2.0, y - r * 0.8, bw, d * 0.8], round, SHOULDER, SHOULDER);
+                let size = d * 0.5;
+                self.text(Weight::Heavy, w, x, Pen::mid(y, size), size, 0.0, CHALK, Align::Centre);
+            }
+        }
+    }
+
+    /// A button `d` ems across centred on `(x, y)`, in this view's style (P281).
     fn button(&mut self, b: Btn, x: f32, y: f32, d: f32) {
+        let glyphs = self.glyphs(b);
+        if glyphs.is_empty() {
+            return self.button_ps(b, x, y, d);
+        }
+        let gap = d * 0.15;
+        let total = self.button_wide(b, d);
+        let mut at = x - total / 2.0;
+        for g in &glyphs {
+            let w = self.glyph_wide(g, d);
+            self.glyph(g, at + w / 2.0, y, d);
+            at += w + gap;
+        }
+    }
+
+    /// A button as the PlayStation's pad has it, the look before P281.
+    fn button_ps(&mut self, b: Btn, x: f32, y: f32, d: f32) {
         let r = d / 2.0;
         let (colour, stroke) = match b {
             Btn::Cross => ([0x4a, 0x7b, 0xe0, 255], d * 0.07),
@@ -599,6 +706,10 @@ impl<'a> Pen<'a> {
 
     /// How wide a button is drawn `d` across.
     fn button_wide(&self, b: Btn, d: f32) -> f32 {
+        let glyphs = self.glyphs(b);
+        if !glyphs.is_empty() {
+            return glyphs.iter().map(|g| self.glyph_wide(g, d)).sum::<f32>() + d * 0.15 * (glyphs.len() - 1) as f32;
+        }
         match b {
             Btn::Start => self.wide(Weight::Heavy, "START", d * 0.5) + d * 0.6,
             Btn::Select => self.wide(Weight::Heavy, "SELECT", d * 0.5) + d * 0.6,
@@ -931,7 +1042,10 @@ impl<'a> Pen<'a> {
                 x -= 1.2 * v;
                 self.text(Weight::Bold, &r.value, x, base, v, 0.0, CHALK, Align::Right);
             }
-            Kind::Action if r.value.is_empty() => self.button(Btn::Cross, x - 0.58 * v, mid, 1.15 * v),
+            Kind::Action if r.value.is_empty() => {
+                let bw = self.button_wide(Btn::Cross, 1.15 * v);
+                self.button(Btn::Cross, x - 0.58 * v - (bw - 1.15 * v) / 2.0, mid, 1.15 * v);
+            }
             _ => {
                 let w = self.wide(Weight::Bold, &r.value, v);
                 self.text(Weight::Bold, &r.value, x, base, v, 0.0, CHALK, Align::Right);
@@ -1087,10 +1201,16 @@ impl<'a> Pen<'a> {
         let c = p(94.0, 70.0);
         self.fill([c[0] - 12.0 * k, c[1] - 4.0 * k, 24.0 * k, 8.0 * k], SHOULDER);
         self.fill([c[0] - 4.0 * k, c[1] - 12.0 * k, 8.0 * k, 24.0 * k], SHOULDER);
+        // The face buttons in the pad's style (P281); a keyboard's are the PlayStation's.
+        let style = self.buttons.style;
+        if style == Style::Keys {
+            self.buttons.style = Style::PlayStation;
+        }
         for (bx, by, b) in [(222.0, 58.0, Btn::Triangle), (236.0, 72.0, Btn::Circle), (208.0, 72.0, Btn::Square), (222.0, 86.0, Btn::Cross)] {
             let o = p(bx, by);
             self.button(b, o[0], o[1], 12.0 * k);
         }
+        self.buttons.style = style;
         for sx in [122.0, 178.0] {
             let o = p(sx, 100.0);
             self.disc(o[0], o[1], 13.0 * k, CHALK);
@@ -1444,7 +1564,10 @@ impl Pen<'_> {
         }
         // Another controller can ride in from here (P76). Spelt out (P171): the menu's type has no ✕.
         if menu.seats_open && menu.riders < crate::join::IN_RIDE {
-            chips.push("*Cross* on a free controller joins".into());
+            // In the free pad's word (P281); the keyboard is no free controller, so it says Cross.
+            let join = menu.join_buttons();
+            let word = if join.style == Style::Keys { "Cross".to_string() } else { join.word(Control::Cross) };
+            chips.push(format!("*{word}* on a free controller joins"));
         }
         self.chips(&chips, x, y + 1.0, w);
         let title = if menu.riders > 1 { format!("{}P Paused", menu.pauser + 1) } else { "Paused".into() };
@@ -1510,6 +1633,7 @@ impl Pen<'_> {
             }
             let d = 1.3;
             let mut gx = how_x;
+            self.ride_keys = true;
             for g in &r.how {
                 if *g == Glyph::Then {
                     let tw = self.wide(Weight::Bold, "then", 0.8);
@@ -1522,6 +1646,7 @@ impl Pen<'_> {
                 self.button(btn, gx + bw / 2.0, mid, d);
                 gx += bw + if is_button(*g) { 0.3 } else { 0.25 };
             }
+            self.ride_keys = false;
             let pc = if lit { CHALK } else { PEACH };
             self.text(Weight::Heavy, &r.points, points_x, Pen::mid(mid, 1.05), 1.05, 0.0, pc, Align::Right);
             y += row_h + gap;
@@ -1606,11 +1731,11 @@ impl Pen<'_> {
             match d {
                 Deck::Hold => self.button(Btn::Square, x, hy, 1.05),
                 _ => {
-                    let word = if d == Deck::Back { "L1" } else { "R1" };
+                    let word = self.shoulder_word(if d == Deck::Back { Control::L1 } else { Control::R1 });
                     let size = 0.55;
-                    let w = self.wide(Weight::Heavy, word, size) + 0.65;
+                    let w = self.wide(Weight::Heavy, &word, size) + 0.65;
                     self.round([x - w / 2.0, hy - 0.42, w, 0.84], 0.27, SHOULDER, SHOULDER);
-                    self.text(Weight::Heavy, word, x, Pen::mid(hy, size), size, 0.0, CHALK, Align::Centre);
+                    self.text(Weight::Heavy, &word, x, Pen::mid(hy, size), size, 0.0, CHALK, Align::Centre);
                 }
             }
         }
@@ -1726,7 +1851,8 @@ impl Pen<'_> {
     /// past the page's strip (Settings' six since P128).
     fn tabs(&mut self, tabs: &[&str], on: usize, x: f32, top: f32) {
         let chip = 0.95;
-        let shoulders: f32 = ["L1", "R1"].iter().map(|w| self.wide(Weight::Heavy, w, chip) + 1.1 * chip).sum();
+        let (l1, r1) = (self.shoulder_word(Control::L1), self.shoulder_word(Control::R1));
+        let shoulders: f32 = [&l1, &r1].iter().map(|w| self.wide(Weight::Heavy, w, chip) + 1.1 * chip).sum();
         let per: f32 = tabs.iter().map(|t| self.wide(Weight::Heavy, t, 1.0) + 1.6).sum();
         let room = 40.6 - x - shoulders - 0.3 * (tabs.len() + 1) as f32;
         let size = if per > 0.0 { (room / per).min(1.3) } else { 1.3 };
@@ -1740,7 +1866,7 @@ impl Pen<'_> {
             pen.text(Weight::Heavy, word, at + w / 2.0, Pen::mid(mid, chip), chip, 0.0, CHALK, Align::Centre);
             w
         };
-        at += shoulder(self, "L1", at) + 0.3;
+        at += shoulder(self, &l1, at) + 0.3;
         for (i, t) in tabs.iter().enumerate() {
             let lit = i == on;
             let (w, c, s) = if lit { (Weight::Heavy, CHALK, SLANT) } else { (Weight::Bold, BONE, 0.0) };
@@ -1754,7 +1880,7 @@ impl Pen<'_> {
             self.text(w, t, at + tw / 2.0, Pen::mid(mid, size), size, s, c, Align::Centre);
             at += tw + 0.3;
         }
-        shoulder(self, "R1", at);
+        shoulder(self, &r1, at);
     }
 
     /// The garage's number plate: the player's number over their name.
@@ -1800,7 +1926,8 @@ impl Pen<'_> {
         if cats.len() > 1 {
             let lit = &cats[lists.category_group];
             let pill_top = if groups.len() > 1 { top - 0.9 } else { top };
-            self.filter_pill(lit, 3.8, pill_top, 20.4, true, Some(("L1", "R1")));
+            let (l1, r1) = (self.shoulder_word(Control::L1), self.shoulder_word(Control::R1));
+            self.filter_pill(lit, 3.8, pill_top, 20.4, true, Some((&l1, &r1)));
             top = pill_top + 3.8;
         }
         let tag_of = |id: &str| menu.track_game(id);
@@ -2265,10 +2392,11 @@ impl Pen<'_> {
                     let y = cy + ch * 0.68;
                     let pw = self.wide(Weight::Bold, "Press", 1.2);
                     let jw = self.wide(Weight::Bold, "to join", 1.2);
-                    let total = pw + 0.4 + 1.5 + 0.4 + jw;
+                    let xw = self.button_wide(Btn::Cross, 1.5);
+                    let total = pw + 0.4 + xw + 0.4 + jw;
                     let lx = mid - total / 2.0;
                     self.text(Weight::Bold, "Press", lx, Pen::mid(y, 1.2), 1.2, 0.0, BONE, Align::Left);
-                    self.button(Btn::Cross, lx + pw + 0.4 + 0.75, y, 1.5);
+                    self.button(Btn::Cross, lx + pw + 0.4 + xw / 2.0, y, 1.5);
                     self.text(Weight::Bold, "to join", lx + pw + 2.3, Pen::mid(y, 1.2), 1.2, 0.0, BONE, Align::Left);
                 }
                 join::Seat::Taken(d) | join::Seat::Gone(d) => {
@@ -2623,7 +2751,8 @@ impl Pen<'_> {
             let d = 3.0;
             let (press, or) = (self.wide(Weight::Heavy, "Press", size), self.wide(Weight::Heavy, "or", size));
             let sw = self.button_wide(Btn::Start, d);
-            let total = press + 1.0 + sw + 1.0 + or + 1.0 + d;
+            let cw = self.button_wide(Btn::Cross, d);
+            let total = press + 1.0 + sw + 1.0 + or + 1.0 + cw;
             let mut x = 40.0 - total / 2.0;
             let mid = 26.0;
             let base = Pen::mid(mid, size);
@@ -2633,7 +2762,7 @@ impl Pen<'_> {
             x += sw + 1.0;
             self.text(Weight::Heavy, "or", x, base, size, SLANT, CHALK, Align::Left);
             x += or + 1.0;
-            self.button(Btn::Cross, x + d / 2.0, mid, d);
+            self.button(Btn::Cross, x + cw / 2.0, mid, d);
             self.fade = 1.0;
             self.text(Weight::Bold, "Enter or Space on the keyboard", 40.0, 31.0, 1.35, 0.0, BONE, Align::Centre);
             self.text(Weight::Bold, "Whoever presses it rides as Player 1", 40.0, 33.2, 1.35, 0.0, BONE, Align::Centre);

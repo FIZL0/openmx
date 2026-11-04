@@ -931,6 +931,9 @@ struct RideHud<'a> {
     simulated: bool,
     /// Whether this view carries the join cue (P171).
     join: bool,
+    /// Each view's buttons, and the join cue's (P281).
+    buttons: &'a [menu::pads::Buttons],
+    join_buttons: &'a menu::pads::Buttons,
 }
 
 impl RideHud<'_> {
@@ -987,6 +990,8 @@ impl RideHud<'_> {
             around,
             join: self.join,
             event: ride_hud::EventShown::of(&seat.sim.event, 0, &seat.sim.rider.score),
+            buttons: self.buttons.get(v).cloned().unwrap_or_default(),
+            join_buttons: self.join_buttons.clone(),
         };
         rig.ride_hud.note_event(now, shown.event.as_ref());
         draw(&shown, &rig.ride_hud, now);
@@ -3318,6 +3323,7 @@ async fn front_end(args: Args) -> Result<(), String> {
         let seated = (0..roster::SEATS).rposition(|i| seat_dev(i).is_some() || seats.slots.waiting(i));
         shell.front.menu.seated = seated.map_or(1, |i| i + 1);
         shell.front.menu.keys_seat = (0..roster::SEATS).find(|&i| seats.on_keys(i));
+        shell.front.menu.key_caps = seats.key_caps();
         // The join screen's controllers (P43) are the pad seats: which are in, and what each is.
         let present: Vec<usize> = (0..roster::SEATS).filter(|&i| seat_dev(i).is_some()).collect();
         shell.front.menu.present(&present);
@@ -7161,6 +7167,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     if let Some(front) = front.as_deref_mut() {
                         took_over(seats, &mut front.menu, first);
                         give_controllers(seats, &mut front.menu);
+                        // Whose buttons each view's hints draw (P281): its player's pad seat's.
+                        let dev = |k: usize| seats.slots.held.get(k).cloned().flatten().map_or(Dev::Keys, Dev::Pad);
+                        front.menu.ride_devs = ride.iter().map(|&k| dev(k)).collect();
+                        front.menu.key_caps = seats.key_caps();
+                        front.menu.free_dev = (0..seats.slots.held.len()).filter(|k| !ride.contains(k)).find_map(|k| seats.slots.held[k].clone()).map(Dev::Pad);
                     }
                     for (i, input) in now.iter().enumerate() {
                         let dev = match (&seats.slots.held[i], input) {
@@ -9374,6 +9385,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         // And each flying the helicopter's (P216b).
         let heli_pilots = heli_pilots(&world.seats, &mut rigs, &before_helis, &cut, &blend);
         let car_drivers = car_drivers(&world.seats, &mut rigs, &assets, &before_cars, &cut, &blend);
+        // Each view's buttons and the join cue's, under Button Icons (P281).
+        let hud_buttons: Vec<menu::pads::Buttons> = (0..world.seats.len()).map(|v| front.as_deref().map(|f| f.menu.seat_buttons(v)).unwrap_or_default()).collect();
+        let join_buttons = front.as_deref().map(|f| f.menu.join_buttons()).unwrap_or_default();
         if gpu_on {
             // The overlay first: each view's HUD, and the pause over the whole frame.
             let draw_at = Instant::now();
@@ -9391,7 +9405,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     let marker = shown_markers.get(v).and_then(Option::as_ref);
                     let view = [at.x as f32, at.y as f32, at.w as f32, at.h as f32];
                     let join = join_view == Some(v);
-                    let ctx = RideHud { ridden: &ridden, art: &hud_art, span: radar_span, maps: &map_names, wrap: hud_wrap, speedometer, names: &names, table: &table, simulated, join };
+                    let ctx = RideHud { ridden: &ridden, art: &hud_art, span: radar_span, maps: &map_names, wrap: hud_wrap, speedometer, names: &names, table: &table, simulated, join, buttons: &hud_buttons, join_buttons: &join_buttons };
                     ctx.with(seat, rig, v, marker, |shown, tracker, now| {
                         // clear of the page's touch pad while it is up (P208)
                         let pad = menu::touch_room::Room::of((frame.width, frame.height));
@@ -10103,7 +10117,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             if overlay_mode == menu::Overlay::Hud {
                 let marker = shown_markers.get(v).and_then(Option::as_ref);
                 let join = join_view == Some(v);
-                let ctx = RideHud { ridden: &ridden, art: &hud_art, span: radar_span, maps: &map_names, wrap: hud_wrap, speedometer, names: &names, table: &table, simulated, join };
+                let ctx = RideHud { ridden: &ridden, art: &hud_art, span: radar_span, maps: &map_names, wrap: hud_wrap, speedometer, names: &names, table: &table, simulated, join, buttons: &hud_buttons, join_buttons: &join_buttons };
                 ctx.with(seat, rig, v, marker, |shown, tracker, now| {
                     ride_hud::draw(target, shown, tracker, now);
                 });

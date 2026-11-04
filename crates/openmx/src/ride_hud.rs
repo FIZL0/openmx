@@ -18,6 +18,7 @@
 //! camera toast — is a [`Tracker`] a view, fed the rider's score card each frame.
 
 use crate::menu::Speedometer;
+use crate::menu::pads::{self, Buttons, Glyph, Style};
 use crate::menu::ink::{self, Box4, Type, Weight};
 use crate::menu::touch_room::Room;
 use crate::overlay::{self, Activity, Blip, Gauges, Icon};
@@ -25,6 +26,7 @@ use crate::vehicle::Machine;
 use game_render::gpu::{Shape, Sprite};
 use game_render::{Frame, Texture};
 use game_sim::markers::{HOLD_MS, MAX_SLOTS, Pick};
+use game_sim::input::Control;
 use game_sim::score::Score;
 use std::f32::consts::{FRAC_PI_2, TAU};
 use std::time::Duration;
@@ -183,6 +185,10 @@ pub struct Shown<'a> {
     pub join: bool,
     /// The freestyle event while one is on (P155).
     pub event: Option<EventShown>,
+    /// The buttons this view's prompts draw (P281): its rider's controller's, under Button Icons;
+    /// and the join cue's, a free controller's.
+    pub buttons: Buttons,
+    pub join_buttons: Buttons,
 }
 
 /// The freestyle event as a view shows it (P155): [`EventShown::of`] off the ride's event and the
@@ -1231,6 +1237,62 @@ fn map_names(pen: &mut Pen, shown: &Shown, turn: f32, drawn: &mut Drawn) {
     }
 }
 
+/// How wide control `c` is drawn `d` across in `buttons`' style (P281): a key's cap is as wide as
+/// its name.
+fn button_wide(buttons: &Buttons, c: Control, d: f32) -> f32 {
+    match buttons.glyph(c, false) {
+        Some(Glyph::Cap(k)) => (Pen::measure(Face::Words, Weight::Heavy, &k, 0.48 * d) + 0.5 * d).max(0.9 * d),
+        Some(Glyph::Shoulder(w) | Glyph::Small(w)) => Pen::measure(Face::Words, Weight::Heavy, w, 0.5 * d) + 0.6 * d,
+        _ => d,
+    }
+}
+
+/// Control `c`, [`button_wide`] across and `d` high, centred on `at`, in `buttons`' style (P281):
+/// the PlayStation's as the HUD always drew it.
+fn button(pen: &mut Pen, buttons: &Buttons, c: Control, at: (f32, f32), d: f32) {
+    let r = d / 2.0;
+    match buttons.glyph(c, false) {
+        Some(Glyph::Face(Style::PlayStation, _)) | None if c == Control::Circle => circle_button(pen, at, d),
+        Some(Glyph::Face(Style::PlayStation, _)) | None if c == Control::Cross => cross_button(pen, at, d),
+        // The HUD has only Circle's and Cross's PlayStation glyphs.
+        Some(Glyph::Face(Style::PlayStation, _)) | None => {}
+        Some(Glyph::Face(Style::Generic, i)) => {
+            pen.disc(at, r, [0x1b, 0x14, 0x10, 255]);
+            pen.circle(at, r, 0.1 * d / 1.6, [255, 255, 255, 153]);
+            for (k, [dx, dy]) in pads::GENERIC_DOTS.into_iter().enumerate() {
+                let p = (at.0 + dx * r, at.1 + dy * r);
+                if k == i as usize {
+                    pen.disc(p, 0.22 * r, WHITE);
+                } else {
+                    pen.circle(p, 0.18 * r, 0.06 * r, [255, 255, 255, 140]);
+                }
+            }
+        }
+        Some(Glyph::Face(style, i)) => {
+            let (fill, ink) = pads::face_colours(style, i);
+            pen.disc(at, r, fill);
+            pen.circle(at, r, 0.1 * d / 1.6, [255, 255, 255, 153]);
+            let (letter, size) = (pads::face_letter(style, i), 0.6 * d);
+            let lw = Pen::measure(Face::Words, Weight::Heavy, letter, size);
+            pen.text(Face::Words, Weight::Heavy, letter, (at.0 - lw / 2.0, at.1 + Pen::cap(Face::Words, size) / 2.0), size, 0.0, ink);
+        }
+        Some(Glyph::Cap(k)) => {
+            let w = button_wide(buttons, c, d);
+            pen.round([at.0 - w / 2.0, at.1 - 0.42 * d, w, 0.84 * d], 0.18 * d, [0xf5, 0xf0, 0xe8, 255], [0xd8, 0xcf, 0xc2, 255]);
+            let size = 0.48 * d;
+            let kw = Pen::measure(Face::Words, Weight::Heavy, &k, size);
+            pen.text(Face::Words, Weight::Heavy, &k, (at.0 - kw / 2.0, at.1 + Pen::cap(Face::Words, size) / 2.0), size, 0.0, INK);
+        }
+        Some(Glyph::Shoulder(word) | Glyph::Small(word)) => {
+            let w = button_wide(buttons, c, d);
+            pen.round([at.0 - w / 2.0, at.1 - 0.4 * d, w, 0.8 * d], 0.3 * d, [0x1b, 0x14, 0x10, 255], [0x1b, 0x14, 0x10, 255]);
+            let size = 0.5 * d;
+            let ww = Pen::measure(Face::Words, Weight::Heavy, word, size);
+            pen.text(Face::Words, Weight::Heavy, word, (at.0 - ww / 2.0, at.1 + Pen::cap(Face::Words, size) / 2.0), size, 0.0, WHITE);
+        }
+    }
+}
+
 /// A Circle button centred on `at`, `d` across.
 fn circle_button(pen: &mut Pen, at: (f32, f32), d: f32) {
     pen.disc(at, d / 2.0, [0x1b, 0x14, 0x10, 255]);
@@ -1249,9 +1311,11 @@ fn prompts(pen: &mut Pen, shown: &Shown, drawn: &mut Drawn) {
     let height = pill_h + 2.0 * pad;
     // Each prompt's width and how to draw it from its left.
     let mut parts: Vec<(f32, Box<dyn Fn(&mut Pen, f32, f32) -> Line>)> = Vec::new();
-    let pill = |words: &str| btn + 0.25 * act + 0.35 * act + Pen::measure(Face::Words, Weight::Heavy, words, act) + 0.8 * act;
+    let bw = button_wide(&shown.buttons, Control::Circle, btn);
+    let pill = |words: &str| bw + 0.25 * act + 0.35 * act + Pen::measure(Face::Words, Weight::Heavy, words, act) + 0.8 * act;
     if let Some(m) = shown.offer {
         let q = crate::vehicle::offer_text(m).to_string();
+        let buttons = shown.buttons.clone();
         let qw = Pen::measure(Face::Words, Weight::Heavy, &q, EM);
         let w = pad + 0.35 * EM + qw + 0.6 * EM + pill("Accept") + pad;
         parts.push((
@@ -1260,13 +1324,14 @@ fn prompts(pen: &mut Pen, shown: &Shown, drawn: &mut Drawn) {
                 pen.round([x, top, w, height], 0.8 * EM, shade(115), shade(115));
                 let mid = top + height / 2.0;
                 let r = pen.text(Face::Words, Weight::Heavy, &q, (x + pad + 0.35 * EM, mid + Pen::cap(Face::Words, EM) / 2.0), EM, ink::SLANT, WHITE);
-                act_pill(pen, x + pad + 0.35 * EM + qw + 0.6 * EM, mid, "Accept", None);
+                act_pill(pen, &buttons, x + pad + 0.35 * EM + qw + 0.6 * EM, mid, "Accept", None);
                 Line { text: q.clone(), rect: r, colour: WHITE }
             }),
         ));
     }
     if let Some(c) = shown.challenge.clone() {
         let ico = 1.9 * 0.95 * EM;
+        let buttons = shown.buttons.clone();
         let nw = Pen::measure(Face::Words, Weight::Heavy, &c.name, EM).max(Pen::measure(Face::Words, Weight::Bold, &c.goal, 0.72 * EM));
         let w = pad + ico + 0.6 * EM + nw + 0.6 * EM + pill("Hold to start") + pad;
         parts.push((
@@ -1288,7 +1353,7 @@ fn prompts(pen: &mut Pen, shown: &Shown, drawn: &mut Drawn) {
                 let nx = x + pad + ico + 0.6 * EM;
                 let r = pen.text(Face::Words, Weight::Heavy, &c.name, (nx, mid - 0.05 * EM), EM, ink::SLANT, WHITE);
                 pen.text(Face::Words, Weight::Bold, &c.goal, (nx, mid + 0.85 * EM), 0.72 * EM, ink::SLANT, BONE);
-                act_pill(pen, nx + nw + 0.6 * EM, mid, "Hold to start", Some(c.hold));
+                act_pill(pen, &buttons, nx + nw + 0.6 * EM, mid, "Hold to start", Some(c.hold));
                 Line { text: c.name.clone(), rect: r, colour: WHITE }
             }),
         ));
@@ -1309,14 +1374,15 @@ fn prompts(pen: &mut Pen, shown: &Shown, drawn: &mut Drawn) {
 
 /// The black pill with the Circle and its word, its left at `x` and its middle at `mid`; a hold's
 /// ring round the button, filled to `hold`.
-fn act_pill(pen: &mut Pen, x: f32, mid: f32, words: &str, hold: Option<f32>) {
+fn act_pill(pen: &mut Pen, buttons: &Buttons, x: f32, mid: f32, words: &str, hold: Option<f32>) {
     let act = 0.85 * EM;
     let btn = 1.6 * act;
+    let bw = button_wide(buttons, Control::Circle, btn);
     let h = btn + 0.4 * act;
-    let w = 0.25 * act + btn + 0.35 * act + Pen::measure(Face::Words, Weight::Heavy, words, act) + 0.8 * act;
+    let w = 0.25 * act + bw + 0.35 * act + Pen::measure(Face::Words, Weight::Heavy, words, act) + 0.8 * act;
     pen.round([x, mid - h / 2.0, w, h], h / 2.0, shade(255), shade(255));
-    let at = (x + 0.25 * act + btn / 2.0, mid);
-    circle_button(pen, at, btn);
+    let at = (x + 0.25 * act + bw / 2.0, mid);
+    button(pen, buttons, Control::Circle, at, btn);
     if let Some(k) = hold {
         // The ring: short dashes round the button, as far as the hold has come.
         let r = btn / 2.0 + 0.22 * act;
@@ -1327,7 +1393,7 @@ fn act_pill(pen: &mut Pen, x: f32, mid: f32, words: &str, hold: Option<f32>) {
             pen.bar(p(a), p(b), 0.12 * act, 0.12 * act, CHALK);
         }
     }
-    let tx = x + 0.25 * act + btn + 0.35 * act;
+    let tx = x + 0.25 * act + bw + 0.35 * act;
     pen.text(Face::Words, Weight::Heavy, words, (tx, mid + Pen::cap(Face::Words, act) / 2.0), act, ink::SLANT, WHITE);
 }
 
@@ -1354,7 +1420,7 @@ fn top_right(pen: &mut Pen, shown: &Shown, tracker: &Tracker, now: Instant, draw
         top += h + 0.5 * EM;
     }
     if shown.join {
-        drawn.join = Some(join_cue(pen, right, top));
+        drawn.join = Some(join_cue(pen, &shown.join_buttons, right, top));
     }
 }
 
@@ -1363,9 +1429,10 @@ pub const JOIN_WORDS: &str = "to join";
 
 /// The join cue (P171), its right edge at `right` and its top at `top`: a dark pill holding
 /// "Press", the Cross button and [`JOIN_WORDS`] — the join screen's open seat's words.
-fn join_cue(pen: &mut Pen, right: f32, top: f32) -> Line {
+fn join_cue(pen: &mut Pen, buttons: &Buttons, right: f32, top: f32) -> Line {
     let size = 0.95 * EM;
-    let btn = 1.45 * size;
+    let d = 1.45 * size;
+    let btn = button_wide(buttons, Control::Cross, d);
     let gap = 0.35 * size;
     let (pw, jw) = (Pen::measure(Face::Words, Weight::Heavy, "Press", size), Pen::measure(Face::Words, Weight::Heavy, JOIN_WORDS, size));
     let w = 0.9 * EM + pw + gap + btn + gap + jw + 0.9 * EM;
@@ -1374,9 +1441,10 @@ fn join_cue(pen: &mut Pen, right: f32, top: f32) -> Line {
     pen.round([left, top, w, h], h / 2.0, shade(128), shade(128));
     let (mid, base) = (top + h / 2.0, top + h / 2.0 + Pen::cap(Face::Words, size) / 2.0);
     let first = pen.text(Face::Words, Weight::Heavy, "Press", (left + 0.9 * EM, base), size, ink::SLANT, WHITE);
-    cross_button(pen, (left + 0.9 * EM + pw + gap + btn / 2.0, mid), btn);
+    button(pen, buttons, Control::Cross, (left + 0.9 * EM + pw + gap + btn / 2.0, mid), d);
     let last = pen.text(Face::Words, Weight::Heavy, JOIN_WORDS, (left + 0.9 * EM + pw + gap + btn + gap, base), size, ink::SLANT, WHITE);
-    Line { text: format!("Press \u{2715} {JOIN_WORDS}"), rect: [first[0], first[1].min(last[1]), last[2], first[3].max(last[3])], colour: WHITE }
+    let word = if buttons.style == Style::PlayStation { "\u{2715}".to_string() } else { buttons.word(Control::Cross) };
+    Line { text: format!("Press {word} {JOIN_WORDS}"), rect: [first[0], first[1].min(last[1]), last[2], first[3].max(last[3])], colour: WHITE }
 }
 
 /// The Cross button, `d` across, as the Circle's is drawn: a black disc, its rim and the blue X.
@@ -1390,19 +1458,19 @@ fn cross_button(pen: &mut Pen, at: (f32, f32), d: f32) {
 
 /// The join cue alone (P171) in view `view`'s top right, for a ride drawn under the original's HUD,
 /// which has none of the ride HUD's pieces to stand among: as sprites into `out`, [`images`] counted
-/// from `base`, at the HUD scale `scale`.
-pub fn join_sprites(out: &mut Vec<Sprite>, base: usize, view: [f32; 4], scale: f32) -> Line {
+/// from `base`, at the HUD scale `scale`, its Cross in `buttons`' style.
+pub fn join_sprites(out: &mut Vec<Sprite>, base: usize, view: [f32; 4], scale: f32, buttons: &Buttons) -> Line {
     let s = scale_of(view[2], view[3], scale);
     let mut pen = Pen { out, view, s, base, corner: Corner::TopRight, alpha: 1.0 };
     let (right, top) = TOP_RIGHT;
-    join_cue(&mut pen, right, top)
+    join_cue(&mut pen, buttons, right, top)
 }
 
 /// [`join_sprites`] drawn into `frame`, which is the view's picture, on the CPU.
-pub fn join_draw(frame: &mut Frame, scale: f32) -> Line {
+pub fn join_draw(frame: &mut Frame, scale: f32, buttons: &Buttons) -> Line {
     let mut out = Vec::new();
     let view = [0.0, 0.0, frame.width as f32, frame.height as f32];
-    let line = join_sprites(&mut out, 0, view, scale);
+    let line = join_sprites(&mut out, 0, view, scale, buttons);
     ink::raster(frame, &out, &images());
     line
 }

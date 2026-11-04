@@ -72,6 +72,10 @@ pub mod video;
 // Where the page's touch pad stands over the frame (P208), for the HUD's and the hints' room.
 #[path = "touch_room.rs"]
 pub mod touch_room;
+// The Button Icons setting and each controller's buttons as the hints draw them (P281).
+#[path = "pads.rs"]
+pub mod pads;
+pub use pads::ButtonIcons;
 #[allow(unused_imports)]
 pub use player::{Deck, deck_point};
 #[allow(unused_imports)] // the tests' and the shell's, not every includer's
@@ -545,6 +549,9 @@ pub struct Settings {
     pub foliage: Foliage,
     /// The ride's picture's shape (P126): the window's own, or the original's 4:3 with bars.
     pub picture: Picture,
+    /// The Display tab's Button Icons (P281): the buttons the hints draw, each controller's own on
+    /// Auto, the default.
+    pub button_icons: ButtonIcons,
     /// Whether the world's textures are taken from texture packs, `mods/texture-replacements/` and
     /// mods' own `textures/upscaled/` (V84) over the disc's. On unless turned off; Original is the
     /// disc's alone.
@@ -1379,6 +1386,7 @@ impl Default for Settings {
             plants: Lod::default(),
             foliage: Foliage::default(),
             picture: Picture::default(),
+            button_icons: ButtonIcons::Auto,
             textures: true,
             texture_packs: Vec::new(),
             texture_packs_off: Vec::new(),
@@ -1595,6 +1603,7 @@ impl Settings {
                 "plants" => s.plants = Lod::Smooth,
                 "foliage" => s.foliage = Foliage::from_word(v).unwrap_or(s.foliage),
                 "picture" => s.picture = Picture::from_word(v).unwrap_or(s.picture),
+                "button_icons" => s.button_icons = ButtonIcons::from_word(v).unwrap_or(s.button_icons),
                 "textures" => s.textures = v != "original",
                 "texture_packs" => s.texture_packs = pack_names(v),
                 "texture_packs_off" => s.texture_packs_off = pack_names(v),
@@ -1716,6 +1725,7 @@ impl Settings {
             + &self.vibration_text()
             + if self.store_rules { "store_rules = agreed\n" } else { "" }
             + &self.hud_text()
+            + &self.button_icons_text()
             + &self.original_text()
             + &self.filtering_text()
             + &self.updates_text()
@@ -1773,6 +1783,11 @@ impl Settings {
             n => format!("hud_scale = {n}\n"),
         };
         minimap + fps + &scale
+    }
+
+    /// Button Icons (P281), only when not Auto, so a file from before it is written as it was.
+    fn button_icons_text(&self) -> String {
+        if self.button_icons == ButtonIcons::Auto { String::new() } else { format!("button_icons = {}\n", self.button_icons.word()) }
     }
 
     /// The Original switch's own settings (P126), only where they are not ours, so a file from
@@ -3094,6 +3109,16 @@ pub struct Menu {
     /// The player riding the keyboard rather than a pad, if one is (P178): the Controls tab shows
     /// that player the keyboard's keys and every other the pad. The shell fills it.
     pub keys_seat: Option<usize>,
+    /// The device whose press last moved the menus (P281): the hints draw its buttons.
+    last_dev: Option<Dev>,
+    /// The device each player of the ride plays on, the shell's word for it (P281); empty out of
+    /// a ride.
+    pub ride_devs: Vec<Dev>,
+    /// The first controller plugged in that no player plays on, the join cue's (P281).
+    pub free_dev: Option<Dev>,
+    /// The keyboard's key on each control, in [`Control`]'s order, for the hints' keycaps (P281):
+    /// the shell fills it from the bindings.
+    pub key_caps: [String; 16],
     /// The picks changed since [`Menu::take_picks_changed`] last said so.
     picks_changed: bool,
     /// The saved looks (P86), as `riders.txt` keeps them.
@@ -3397,6 +3422,10 @@ impl Menu {
             garages: Vec::new(),
             seated: 1,
             keys_seat: None,
+            last_dev: None,
+            ride_devs: Vec::new(),
+            free_dev: None,
+            key_caps: pads::default_keys(),
             picks_changed: false,
             looks: roster::Presets::default(),
             looks_changed: false,
@@ -3706,6 +3735,68 @@ impl Menu {
         self.quit.as_ref().map(|q| q.1)
     }
 
+    /// The last device among `presses` that pressed anything (P281), for the hints.
+    fn note_dev(&mut self, presses: &[(Dev, Press)]) {
+        if let Some((d, _)) = presses.iter().rev().find(|(_, p)| *p != Press::default()) {
+            self.last_dev = Some(d.clone());
+        }
+    }
+
+    /// The device a screen's hints draw the buttons of (P281): another player's pause its seat's,
+    /// else the one that last pressed, else the first pad plugged in, else the keyboard.
+    pub fn hint_dev(&self) -> Dev {
+        if self.screen() == Some(Screen::Pause) && self.pauser > 0 {
+            return self.seat_dev(self.pauser);
+        }
+        self.host_dev()
+    }
+
+    /// The device seat `seat` plays on (P281), as far as the menu knows: past 1P the keyboard's
+    /// seat or the pad the join screen sat there; 1P's is [`Menu::host_dev`].
+    pub fn seat_dev(&self, seat: usize) -> Dev {
+        if let Some(d) = self.ride_devs.get(seat) {
+            return d.clone();
+        }
+        if seat > 0 {
+            if self.keys_seat == Some(seat) {
+                return Dev::Keys;
+            }
+            if let Some(Some(d)) = self.assign.seats.get(seat) {
+                return d.clone();
+            }
+        }
+        self.host_dev()
+    }
+
+    /// The device to show 1P's buttons for: the one that last pressed, else the first pad plugged
+    /// in, else the keyboard.
+    fn host_dev(&self) -> Dev {
+        if let Some(d) = &self.last_dev {
+            return d.clone();
+        }
+        self.dev_names.iter().map(|(d, _)| d).find(|d| matches!(d, Dev::Pad(_))).cloned().unwrap_or(Dev::Keys)
+    }
+
+    /// How the hints draw their buttons now (P281): [`Menu::hint_dev`]'s under Button Icons.
+    pub fn buttons(&self) -> pads::Buttons {
+        self.buttons_of(&self.hint_dev())
+    }
+
+    /// How seat `seat`'s HUD draws its buttons (P281).
+    pub fn seat_buttons(&self, seat: usize) -> pads::Buttons {
+        self.buttons_of(&self.seat_dev(seat))
+    }
+
+    /// How the join cue draws its Cross (P281): the free controller's, else 1P's.
+    pub fn join_buttons(&self) -> pads::Buttons {
+        self.free_dev.as_ref().map_or_else(|| self.seat_buttons(0), |d| self.buttons_of(d))
+    }
+
+    /// How `dev`'s buttons are drawn under Button Icons (P281).
+    pub fn buttons_of(&self, dev: &Dev) -> pads::Buttons {
+        pads::Buttons { style: pads::style_of(self.settings.button_icons, dev), keys: self.key_caps.clone(), labels: !self.controls.nintendo_positions }
+    }
+
     /// Whether `dev` drives the menus: 1P's device and the keyboard, or anyone before there is a 1P.
     pub fn hosts(&self, dev: &Dev) -> bool {
         match &self.p1 {
@@ -3718,6 +3809,7 @@ impl Menu {
     /// or Enter on the keyboard, which its bindings make the same two) is 1P, and anything else
     /// moves nothing; past it, 1P's and the keyboard's presses together drive the screen.
     pub fn step_devices(&mut self, presses: &[(Dev, Press)]) -> Act {
+        self.note_dev(presses);
         if self.screen() == Some(Screen::Splash) {
             let any = presses.iter().fold(Press::default(), |p, (_, q)| p.or(*q));
             return self.cued(any, |m| m.splash_step(presses));
@@ -3733,6 +3825,7 @@ impl Menu {
     /// Circle or Start closes it. Over a ride the shell calls it with every device's, the riders'
     /// and the ones in no seat alike, while 1P's pause has the screen up.
     pub fn step_assign(&mut self, presses: &[(Dev, Press)]) -> Act {
+        self.note_dev(presses);
         let any = presses.iter().fold(Press::default(), |p, (_, q)| p.or(*q));
         self.cued(any, |m| {
             m.tick = m.tick.wrapping_add(m.pace.step);
@@ -6169,6 +6262,7 @@ impl Art {
 
     fn layout(&self, menu: &Menu, size: (usize, usize), base: usize, out: &mut Vec<Sprite>) -> Vec<Part> {
         let mut pen = screens::Pen::new(self, out, base, size);
+        pen.buttons = menu.buttons();
         pen.screen(menu);
         pen.parts
     }
