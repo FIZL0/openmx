@@ -1729,6 +1729,38 @@ fn the_hints_and_the_band_stand_clear_of_the_touch_pad() {
     assert!(covered > 0, "the pad covered nothing with no room made for it, so this proves nothing");
 }
 
+/// P278: the splash has no band, so its hint tab sits on the frame's bottom edge: the gap under its
+/// buttons and words is less than their own height at 16:9, the Deck's 16:10, a phone held either
+/// way and a wide screen (it was the band's 4.6 ems more, the tab floating over the scene), and the
+/// main menu's tab still sits on its band.
+#[test]
+fn the_splash_hints_sit_on_the_bottom_edge() {
+    let mut disc = match game_render::Disc::open_configured() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    let art = menu::Art::load(&mut disc).expect("the menus' art");
+    let hints = |m: &Menu, w: usize, h: usize| -> menu::Bounds {
+        let parts = art.parts(m, &mut game_render::Frame::new(w, h, [90, 90, 90]));
+        let found: Vec<_> = parts.iter().filter_map(|p| if let menu::Part::Hints(b) = p { Some(*b) } else { None }).collect();
+        assert_eq!(found.len(), 1, "at {w}x{h}: one hint tab");
+        found[0]
+    };
+    for (w, h) in [(1920, 1080), (1280, 800), (390, 844), (844, 390), (2520, 1080)] {
+        let (mut m, _) = fresh();
+        m.open(Screen::Splash);
+        let b = hints(&m, w, h);
+        let under = h as f32 - (b[1] + b[3]);
+        assert!(under >= 0.0 && under < b[3], "at {w}x{h}: the splash's hints {b:?} float {under} px over the bottom edge");
+        m.open(Screen::Main);
+        let main = hints(&m, w, h);
+        assert!(h as f32 - (main[1] + main[3]) > main[3], "at {w}x{h}: the main menu's hints {main:?} left the band");
+    }
+}
+
 /// V111: on the Online screen every row's words, and the cursor's pill, sit inside the list's
 /// plate, with the network on LAN Only and on Internet + LAN, and the four rows above it do not move
 /// when the last one's word changes.

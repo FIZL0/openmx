@@ -725,6 +725,12 @@ impl<'a> Pen<'a> {
     /// edge. The tab ends square at the frame's edge, and the hints shrink to fit a narrow one, so a
     /// split's pause keeps them in its own view (P172).
     fn hints(&mut self, hints: &[(Btn, &str)]) {
+        self.hints_on(hints, STAGE.1 - BAND);
+    }
+
+    /// [`Pen::hints`] with the tab's foot at `foot` (stage ems): the band's top, or the frame's
+    /// bottom edge on the splash, which has no band for it to sit on (P278).
+    fn hints_on(&mut self, hints: &[(Btn, &str)], foot: f32) {
         let spacing = 1.6 * hints.len().saturating_sub(1) as f32;
         let widths_at = |pen: &Self, size: f32| -> Vec<f32> {
             let (d, gap) = (1.15 * size, 0.45 * size);
@@ -743,7 +749,7 @@ impl<'a> Pen<'a> {
         let widths = widths_at(self, size);
         let content: f32 = widths.iter().sum::<f32>() + spacing;
         let x0 = right - 2.0 - content - 4.0;
-        let (top, h) = (STAGE.1 - BAND - 3.4, 3.4);
+        let (top, h) = (foot - 3.4, 3.4);
         let pb = self.b([x0, top, self.right() - x0, h]);
         let c = self.c(INK);
         ink::tab(self.out, pb, 3.0 / 3.4, c);
@@ -2803,7 +2809,10 @@ impl Pen<'_> {
                 hints.push((Btn::Square, update_button()));
             }
             hints.push((Btn::Cross, "Start"));
-            self.hints(&hints);
+            // P278: with no band under it, the tab sits on the frame's bottom edge, not over the
+            // scene at the band's height.
+            let foot = self.bottom();
+            self.hints_on(&hints, foot);
         }
         if let Some(row) = menu.quitting() {
             self.popup(QUIT_ASK, &QUIT_ROWS, row);
