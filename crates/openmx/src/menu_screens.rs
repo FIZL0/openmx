@@ -1371,6 +1371,19 @@ fn lit_track(menu: &Menu, list: &[usize]) -> usize {
     if list.contains(&at) { at } else { list[0] }
 }
 
+impl Menu {
+    /// The track pick's setup strip for its lit track `id` (P279): its chips — Favourite where the
+    /// track is one, and the modifiers; no Wrecks, which are the settings' — and Triangle's hint.
+    pub fn pick_strip(&self, id: &str) -> (Vec<String>, &'static str) {
+        let favourite = self.is_favourite(id);
+        let mut chips = vec![format!("Modifiers *{}*", modifiers_word(self))];
+        if favourite {
+            chips.insert(0, "*Favourite*".to_string());
+        }
+        (chips, if favourite { "Unfavourite" } else { "Favourite" })
+    }
+}
+
 /// The ems the lit track's title has beside its `count`; a long one stops short of it.
 fn title_room(count: &str) -> f32 {
     PICK_SIDE.1 - ink::ink().measure(Weight::Bold, count, 1.2) - 2.0
@@ -1951,12 +1964,13 @@ impl Pen<'_> {
             y += 0.35 + PICK_TEXT * 1.05;
         }
         self.text(Weight::Bold, &count, x + w - 1.0, b[1] + b[3] + 1.0 + CAP * 1.2, 1.2, 0.0, EYEBROW, Align::Right);
-        // The setup strip: the wrecks and the modifiers. Every ride starts on the bike (P177); the
-        // machine is switched from the pause or at a bay.
-        let chips = vec![format!("Wrecks *{}*", if menu.settings.wrecks { "On" } else { "Off" }), format!("Modifiers *{}*", modifiers_word(menu))];
+        // The setup strip: the modifiers, and Favourite where the track is one (P279: the wrecks are
+        // the settings' now). Every ride starts on the bike (P177); the machine is switched from
+        // the pause or at a bay.
+        let (chips, triangle) = menu.pick_strip(id);
         self.chips(&chips, x, y + 1.0, w);
         self.title(Screen::Tracks.title());
-        let mut hints = vec![(Btn::Circle, "Back"), (Btn::Triangle, "Wrecks")];
+        let mut hints = vec![(Btn::Circle, "Back"), (Btn::Triangle, triangle)];
         if groups.len() > 1 {
             hints.push((Btn::LeftRight, "Game"));
         }
@@ -2025,6 +2039,8 @@ impl Pen<'_> {
                 text.to_string()
             } else if menu.settings.track == id {
                 "Last ridden".to_string()
+            } else if menu.is_favourite(id) {
+                "Favourite".to_string()
             } else {
                 tag_of(id)
             };

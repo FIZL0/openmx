@@ -468,6 +468,8 @@ fn the_settings_file_reads_back_as_it_was_written() {
         track: "free11".into(),
         track_filter: "MX vs. ATV Untamed".into(),
         track_category: "Freestyle".into(),
+        // The pick's favourites (P279).
+        favourites: vec!["world_mxu".into(), "mxvatv_nat01".into()],
         split: split::Split::SideBySide,
         music: "disc:headstrong".into(),
         music_volume: 35,
@@ -4076,6 +4078,52 @@ fn the_controls_row_offers_the_originals_presets() {
     assert_eq!(menu::keyboard_at(n, 2, false), 0);
     assert_eq!(menu::keyboard_at(n, 2, true), 1, "P80's home row (P207)");
     assert_eq!((0..4).map(|p| menu::keyboard_at(o, p, true)).collect::<Vec<_>>(), [2, 3, 4, 5]);
+}
+
+/// P279: the track pick has no Wrecks (Triangle marks the lit track a favourite instead, and the
+/// strip has no Wrecks chip); a favourite, a disc town, a disc world or a mod's track, lists first in
+/// its filter, the cursor staying on it, and the favourites survive the settings file.
+#[test]
+fn the_pick_marks_favourites_in_place_of_wrecks() {
+    let (mut m, mut r) = fresh();
+    m.set_mod_tracks(vec![("mxvatv_nat01".into(), "Nat 01".into()), ("mxvatv_nat02".into(), "Nat 02".into())]);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Tracks));
+    let first = m.track_at(m.track_list()[0]).0.to_string();
+    let (chips, triangle) = m.pick_strip(&first);
+    assert!(!chips.iter().any(|c| c.contains("Wrecks")), "{chips:?}");
+    assert_eq!(triangle, "Favourite");
+    // The last track listed, a mod's, marked: Triangle leaves the wrecks and the screen alone.
+    tap_until(&mut m, &mut r, Control::Down, |m| m.track_at(m.cursor(Screen::Tracks)).0 == "mxvatv_nat02");
+    let at = m.cursor(Screen::Tracks);
+    let wrecks = m.settings.wrecks;
+    let acts = tap(&mut m, &mut r, Control::Triangle);
+    assert!(acts.iter().all(|a| *a == Act::Stay), "{acts:?}");
+    assert_eq!(m.screen(), Some(Screen::Tracks));
+    assert_eq!(m.settings.wrecks, wrecks, "Triangle is no longer Wrecks");
+    assert_eq!(m.settings.favourites, ["mxvatv_nat02"]);
+    assert_eq!(m.cursor(Screen::Tracks), at, "the cursor stays on the track");
+    assert_eq!(m.track_list()[0], at, "a favourite lists first");
+    let (chips, triangle) = m.pick_strip("mxvatv_nat02");
+    assert!(chips.iter().any(|c| c.contains("Favourite")) && triangle == "Unfavourite", "{chips:?} {triangle}");
+    // A disc world too: the favourites first, in the pick's own order.
+    let world = menu::DISC_WORLDS[0].0;
+    m.toggle_favourite(world);
+    let ids: Vec<String> = m.track_list().iter().map(|&i| m.track_at(i).0.to_string()).collect();
+    assert_eq!(ids[..2], [world.to_string(), "mxvatv_nat02".to_string()]);
+    assert_eq!(ids.len(), m.track_count(), "nothing left out or listed twice");
+    // Through the file and back, then into a new menu: listed first there too.
+    let read = Settings::parse(&m.settings.text());
+    assert_eq!(read.favourites, ["mxvatv_nat02", world]);
+    let mut again = Menu::new(read, Controls::default());
+    again.set_mod_tracks(vec![("mxvatv_nat01".into(), "Nat 01".into()), ("mxvatv_nat02".into(), "Nat 02".into())]);
+    assert_eq!(again.track_at(again.track_list()[1]).0, "mxvatv_nat02");
+    // Triangle again unmarks.
+    tap(&mut m, &mut r, Control::Triangle);
+    assert_eq!(m.settings.favourites, [world]);
+    assert_eq!(m.track_at(m.track_list()[0]).0, world);
+    assert!(!Settings::parse(&Settings::default().text()).favourites.iter().any(|_| true), "none unless marked");
+    assert!(!Settings::default().text().contains("favourites"), "a file from before is written as it was");
 }
 
 /// Left and Right step the pick's categories: the disc's towns, the worlds right after them, then

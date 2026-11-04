@@ -101,7 +101,7 @@ pub struct Press {
     /// L1 and R1: the tabs of Settings and the Garage, and the Free Ride strip's player (P118).
     pub l1: bool,
     pub r1: bool,
-    /// Triangle alone, which is also [`Press::back`]: the Free Ride strip's Wrecks (P118).
+    /// Triangle alone, which is also [`Press::back`]: the Free Ride pick's Favourite (P279).
     pub triangle: bool,
     /// Select (Tab on the keyboard): the mod store's Download All.
     pub select: bool,
@@ -525,6 +525,9 @@ pub struct Settings {
     /// (Freestyle, Supercross, …, Other): a [`Menu::track_categories`] name, empty for All
     /// Categories. One the lit game does not list now shows All and is kept.
     pub track_category: String,
+    /// The tracks and worlds marked favourites on the pick (P279), by id, in the order marked; the
+    /// pick lists them first in each filter, in its own order. Kept for a track no mod lists now.
+    pub favourites: Vec<String>,
     /// Whose tricks a ride has (MD16): the original's, or MX vs. ATV's read from a trick pack in the
     /// mods folder. The original's unless changed.
     pub tricks: Tricks,
@@ -1379,6 +1382,7 @@ impl Default for Settings {
             mods_off: Vec::new(),
             track_filter: String::new(),
             track_category: String::new(),
+            favourites: Vec::new(),
             tricks: Tricks::default(),
             trick_packs: Vec::new(),
             handling_pack: String::new(),
@@ -1598,6 +1602,7 @@ impl Settings {
                 }
                 "track_filter" => s.track_filter = clean_filter(v),
                 "track_category" => s.track_category = clean_filter(v),
+                "favourites" => s.favourites = v.split_whitespace().map(str::to_string).collect(),
                 // The original's plant detail is no longer offered (2026-10-29: it fades in bushes
                 // that are not there): an older file's `plants = original` reads as ours.
                 "plants" => s.plants = Lod::Smooth,
@@ -1864,6 +1869,10 @@ impl Settings {
         // Its category (MD66), only when it is not All Categories.
         if !self.track_category.is_empty() {
             out += &format!("track_category = {}\n", self.track_category);
+        }
+        // The pick's favourites (P279), only when there are some.
+        if !self.favourites.is_empty() {
+            out += &format!("favourites = {}\n", self.favourites.join(" "));
         }
         out
     }
@@ -4842,10 +4851,11 @@ impl Menu {
                 }
             }
             Screen::Tracks => {
-                // Triangle is the strip's Wrecks; it is also Back, so it goes first.
+                // Triangle marks the lit track a favourite, or no longer (P279; the wrecks are the
+                // settings', the pause's and the lobby's since); it is also Back, so it goes first.
                 if p.triangle {
-                    self.settings.wrecks = !self.settings.wrecks;
-                    self.changed = true;
+                    let id = self.track_at(at).0.to_string();
+                    self.toggle_favourite(&id);
                     return Act::Stay;
                 }
                 if p.ok || p.start {
@@ -5773,6 +5783,7 @@ struct ListsKey {
     mods_off: Vec<String>,
     track_filter: String,
     track_category: String,
+    favourites: Vec<String>,
 }
 
 /// [`Lists`] kept, and how many times they were made (P254). Equal to any other, as it is only
@@ -5807,7 +5818,7 @@ impl Menu {
     pub(crate) fn lists(&self) -> std::sync::Arc<Lists> {
         let mut kept = self.lists.lists.lock().unwrap_or_else(|e| e.into_inner());
         let s = &self.settings;
-        if let Some(l) = kept.as_ref().filter(|l| l.key.mods_off == s.mods_off && l.key.track_filter == s.track_filter && l.key.track_category == s.track_category) {
+        if let Some(l) = kept.as_ref().filter(|l| l.key.mods_off == s.mods_off && l.key.track_filter == s.track_filter && l.key.track_category == s.track_category && l.key.favourites == s.favourites) {
             return l.clone();
         }
         let made = std::sync::Arc::new(self.make_lists());
@@ -5825,7 +5836,7 @@ impl Menu {
 
     fn make_lists(&self) -> Lists {
         let s = &self.settings;
-        let key = ListsKey { mods_off: s.mods_off.clone(), track_filter: s.track_filter.clone(), track_category: s.track_category.clone() };
+        let key = ListsKey { mods_off: s.mods_off.clone(), track_filter: s.track_filter.clone(), track_category: s.track_category.clone(), favourites: s.favourites.clone() };
         let shown: Vec<usize> = (self.mod_tracks.iter().enumerate())
             .filter(|(_, (id, _))| !s.mods_off.iter().any(|p| p == pack_of(id)) && !DISC_WORLDS.iter().any(|w| w.0 == id))
             .map(|(i, _)| i)
@@ -5880,10 +5891,13 @@ impl Menu {
             }
         };
         let category_group = if s.track_category.is_empty() { 0 } else { categories.iter().position(|c| *c == s.track_category).unwrap_or(0) };
-        let list = match category_group {
+        let list: Vec<usize> = match category_group {
             0 => r,
             lit => r.into_iter().filter(|&i| categories_of[i] == categories[lit]).collect(),
         };
+        // The favourites first (P279), each part in its order.
+        let (mut list, rest): (Vec<usize>, Vec<usize>) = list.into_iter().partition(|&i| s.favourites.iter().any(|f| f == id_at(i)));
+        list.extend(rest);
         Lists { key, shown, categories_of, groups, filter_group, categories, category_group, list }
     }
 
@@ -5913,6 +5927,21 @@ impl Menu {
     pub fn track_index(&self) -> usize {
         let lists = self.lists();
         lists.list.iter().copied().find(|&i| self.track_at(i).0 == self.settings.track).unwrap_or(lists.list[0])
+    }
+
+    /// Whether the pick's track `id` is a favourite (P279).
+    pub fn is_favourite(&self, id: &str) -> bool {
+        self.settings.favourites.iter().any(|f| f == id)
+    }
+
+    /// Marks the pick's track `id` a favourite, or no longer one (P279); the cursor stays on it.
+    pub fn toggle_favourite(&mut self, id: &str) {
+        if self.is_favourite(id) {
+            self.settings.favourites.retain(|f| f != id);
+        } else {
+            self.settings.favourites.push(id.to_string());
+        }
+        self.changed = true;
     }
 
     /// The tracks the pick lists now (MD66), in its order: the lit game filter's, less those not

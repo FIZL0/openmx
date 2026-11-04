@@ -352,7 +352,7 @@ impl Menu {
             return;
         }
         let lit = self.store_lit();
-        // Triangle is also back: Report before it, as Free Ride's Wrecks is
+        // Triangle is also back: Report before it, as Free Ride's Favourite is
         if p.triangle {
             if let Some(i) = lit {
                 self.store.asks.push(StoreAsk::Report(self.store.cards[i].key.clone()));
