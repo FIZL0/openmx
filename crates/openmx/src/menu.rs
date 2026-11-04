@@ -855,7 +855,7 @@ impl Departure {
         match self {
             Departure::Controls => ["New", "Original"],
             Departure::Cameras => ["Further Out", "Original"],
-            Departure::Fog => ["Farther Fog", "Original Fog"],
+            Departure::Fog => ["8x", "Original"],
             Departure::Foliage => ["Crisp", "Original"],
             Departure::Picture => ["Auto", "4:3"],
             Departure::Filtering => ["16x", "Off"],
@@ -870,7 +870,7 @@ impl Departure {
         match self {
             Departure::Controls => "Every player's bike buttons and plane stick. Original is the disc's own layout, on each player's controller preset.",
             Departure::Cameras => "Every player's follow cameras. Further Out sits a little back and higher; Original is the disc's.",
-            Departure::Fog => "Original Fog is the game's haze and far clip. Farther Fog is the same haze eight times as far out; Draw Distance has Whole Map too.",
+            Departure::Fog => "Original is the game's haze and far clip. Ours is the same haze eight times as far out; the Fog slider goes further, to the whole map.",
             Departure::Foliage => "How leaves lie over what is behind them. Crisp cuts each leaf out, so trees show through each other's gaps; Original blends them as the game did, and a near tree's soft edges can hide the trees behind it.",
             Departure::Picture => ASPECT_HELP,
             Departure::Filtering => FILTERING_HELP,
@@ -3044,6 +3044,9 @@ pub struct Menu {
     /// The ride's tricks as the pause's Tricks page lists them (P259), set by the shell at the ride's
     /// start ([`trick_list::rows`]); empty in the front end.
     pub trick_rows: Vec<trick_list::TrickRow>,
+    /// Where the original's fog ends on the ride, in feet (P276), set by the shell at the ride's
+    /// start: the Fog slider shows its distance from it over the pause.
+    pub ride_fog: Option<f32>,
     /// Open screens, the one shown last. Empty is a ride with nothing over it.
     stack: Vec<Screen>,
     /// Each screen's row, in [`Screen::ALL`]'s order.
@@ -3396,6 +3399,7 @@ impl Menu {
             mod_games: Vec::new(),
             mod_categories: Vec::new(),
             trick_rows: Vec::new(),
+            ride_fog: None,
             stack: vec![Screen::Main],
             cursor,
             typing: String::new(),

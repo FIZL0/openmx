@@ -2454,8 +2454,9 @@ struct Args {
     /// `--renderer gpu|software`: what draws the picture (P44); the GPU unless asked.
     renderer: Backend,
     /// `--graphics original|far|farther|full` (V32): the original's fog and far clip, the same four times as
-    /// far, eight times as far (V95), or the whole map with a haze; the front end's setting when not
-    /// given. Only the GPU draws `far`, `farther` and `full`.
+    /// far, eight times as far (V95), or the whole map with a haze, and the Fog slider's other steps
+    /// (`x2`, `x3`, `x6`, `x12`, `x16`, P276); the front end's setting when not given. Only the GPU
+    /// draws any but `original`.
     graphics: Option<Graphics>,
     /// `--render-scale auto|F`: the fraction of the frame the GPU draws the 3D at (V30); `None` is
     /// auto, picked from the frames' time in a window and whole offscreen.
@@ -5375,6 +5376,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     if let Some(s) = shell.as_deref_mut() {
         s.front.menu.trick_rows = menu::trick_list::rows(&stunts, phy.tricks.as_ref());
         println!("tricks page: {} tricks", s.front.menu.trick_rows.len());
+        // The Fog slider's feet (P276): the original's fog end here.
+        s.front.menu.ride_fog = Some(look.fog_far);
     }
     // And its rider, loaded the first time a view shows the page: `Some(None)` when it could not be.
     let mut trick_stage: Option<Option<trick_view::TrickView>> = None;
@@ -12512,7 +12515,7 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--graphics" => {
                 let word = next("original, far, farther or full")?;
                 let graphics = Graphics::from_word(&word)
-                    .ok_or_else(|| format!("--graphics: {word:?} is not original, far, farther or full"))?;
+                    .ok_or_else(|| format!("--graphics: {word:?} is not original, x2, x3, far, x6, farther, x12, x16 or full"))?;
                 args.graphics = Some(graphics);
             }
             "--renderer" => args.renderer = Backend::parse(&next("gpu or software")?)?,
@@ -12868,7 +12871,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--pads k,0,1,-] [--controls new|original|new,original,...]\n\
                             [--biplane-controls new|screen|original|new,original,...]\n\
                             [--preset 0..3|0,2,...]\n\
-                            [--bindings FILE] [--renderer gpu|software] [--graphics full|farther|far|original] [--fps]\n\
+                            [--bindings FILE] [--renderer gpu|software] [--graphics original|x2|x3|far|x6|farther|x12|x16|full] [--fps]\n\
                             [--render-scale auto|0.5..1]\n\
                             [--video-preset high|medium|low|deck|phone] [--shadows off|on|all]\n\
                             [--shadow-quality original|low|high] [--detail full|reduced]\n\

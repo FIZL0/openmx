@@ -664,6 +664,10 @@ pub enum Graphics {
     Far,
     /// The original's fog and far clip, [`FARTHER_FOG`] times as far out.
     Farther,
+    /// The original's fog and far clip, this many times as far out (P276): the Fog slider's steps
+    /// that have no name of their own. Made by [`Graphics::times`], which gives 1, [`FAR_FOG`] and
+    /// [`FARTHER_FOG`] their names, so one distance is one value.
+    Times(u8),
 }
 
 /// How many times further than the original's `Graphics::Far` starts its fog, ends it and clips.
@@ -671,6 +675,11 @@ pub const FAR_FOG: f32 = 4.0;
 
 /// How many times further than the original's `Graphics::Farther` starts its fog, ends it and clips.
 pub const FARTHER_FOG: f32 = 8.0;
+
+/// How many times the original's the Fog slider's furthest fog is (P276), short of the whole map:
+/// twice [`FARTHER_FOG`], a far clip of 16,000 ft on a 1,000 ft fog, inside the whole map's own
+/// reach of twice a map's span, so the GPU's cull and streaming draw no more than they do for it.
+pub const FOG_MOST: u8 = 16;
 
 /// The most of the fog's colour `Graphics::Full`'s haze mixes into anything, however far.
 pub const HAZE_MAX: f32 = 0.3;
@@ -688,6 +697,41 @@ pub struct Fog {
 impl Graphics {
     pub const ALL: [Graphics; 4] = [Graphics::Full, Graphics::Farther, Graphics::Far, Graphics::Original];
 
+    /// The Fog slider's steps (P276), nearest first: the original's, then further out up to
+    /// [`FOG_MOST`] times as far, then the whole map.
+    pub const SLIDER: [Graphics; 9] = [
+        Graphics::Original,
+        Graphics::Times(2),
+        Graphics::Times(3),
+        Graphics::Far,
+        Graphics::Times(6),
+        Graphics::Farther,
+        Graphics::Times(12),
+        Graphics::Times(FOG_MOST),
+        Graphics::Full,
+    ];
+
+    /// The original's fog `k` times as far out, by its name where it has one.
+    pub const fn times(k: u8) -> Graphics {
+        match k {
+            0 | 1 => Graphics::Original,
+            4 => Graphics::Far,
+            8 => Graphics::Farther,
+            k => Graphics::Times(k),
+        }
+    }
+
+    /// How many times the original's its fog and far clip are, or `None` for the whole map's.
+    pub fn multiple(self) -> Option<f32> {
+        match self {
+            Graphics::Original => Some(1.0),
+            Graphics::Full => None,
+            Graphics::Far => Some(FAR_FOG),
+            Graphics::Farther => Some(FARTHER_FOG),
+            Graphics::Times(k) => Some(f32::from(k.max(1))),
+        }
+    }
+
     /// `--graphics`' word, and the settings file's.
     pub fn word(self) -> &'static str {
         match self {
@@ -695,11 +739,20 @@ impl Graphics {
             Graphics::Full => "full",
             Graphics::Far => "far",
             Graphics::Farther => "farther",
+            Graphics::Times(2) => "x2",
+            Graphics::Times(3) => "x3",
+            Graphics::Times(6) => "x6",
+            Graphics::Times(12) => "x12",
+            Graphics::Times(16) => "x16",
+            // Only the slider's steps are ever made; the nearest named one otherwise.
+            Graphics::Times(k) if k < 8 => "far",
+            Graphics::Times(_) => "farther",
         }
     }
 
+    /// The word's, any of [`Graphics::ALL`]'s or the slider's.
     pub fn from_word(w: &str) -> Option<Graphics> {
-        Graphics::ALL.into_iter().find(|g| g.word() == w)
+        Graphics::ALL.into_iter().chain(Graphics::SLIDER).find(|g| g.word() == w)
     }
 
     /// The settings screen's name for it.
@@ -709,6 +762,7 @@ impl Graphics {
             Graphics::Full => "Whole map",
             Graphics::Far => "Far fog",
             Graphics::Farther => "Farther fog",
+            Graphics::Times(_) => "Farther fog",
         }
     }
 
@@ -719,33 +773,23 @@ impl Graphics {
     /// `Far` is `Original` with its start, end and reach [`FAR_FOG`] times as far, `Farther` with them
     /// [`FARTHER_FOG`] times.
     pub fn fog(self, light: &Lighting, span: f32) -> Fog {
-        let scaled = |k: f32| Fog { near: k * light.fog_near, far: k * light.fog_far, max: 1.0, reach: k * light.fog_far };
-        match self {
-            Graphics::Original => Fog {
-                near: light.fog_near,
-                far: light.fog_far,
-                max: 1.0,
-                reach: light.fog_far,
-            },
-            Graphics::Full => Fog {
+        match self.multiple() {
+            Some(k) => Fog { near: k * light.fog_near, far: k * light.fog_far, max: 1.0, reach: k * light.fog_far },
+            None => Fog {
                 near: light.fog_far,
                 far: light.fog_far + span.max(1.0),
                 max: HAZE_MAX,
                 reach: f32::INFINITY,
             },
-            Graphics::Far => scaled(FAR_FOG),
-            Graphics::Farther => scaled(FARTHER_FOG),
         }
     }
 
     /// Where the projection's far plane goes: the original's far clip, or past anything on a map
     /// `span` feet across, seen from anywhere on it.
     pub fn far_clip(self, light: &Lighting, span: f32) -> f32 {
-        match self {
-            Graphics::Original => light.fog_far,
-            Graphics::Full => (2.0 * span).max(light.fog_far).max(10_000.0),
-            Graphics::Far => FAR_FOG * light.fog_far,
-            Graphics::Farther => FARTHER_FOG * light.fog_far,
+        match self.multiple() {
+            Some(k) => k * light.fog_far,
+            None => (2.0 * span).max(light.fog_far).max(10_000.0),
         }
     }
 }
