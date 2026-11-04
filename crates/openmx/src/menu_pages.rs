@@ -1774,13 +1774,16 @@ impl Menu {
                 let Some(pick) = self.camera_picked() else { return };
                 self.step_camera_look(&pick, i, p.left, p.right);
             }
-            Key::CameraFollow | Key::CameraDelete if p.ok => {
+            Key::CameraFollow if p.ok => {
                 let Some(pick) = self.camera_picked() else { return };
                 let seat = self.camera_seat();
                 self.settings.camera_sets[seat].remove(pick.machine, &pick.name);
-                if row.key == Key::CameraDelete {
-                    self.camera_pick = 0;
-                }
+            }
+            // P246: asked first, on Cancel.
+            Key::CameraDelete if p.ok => {
+                let (Some(page), Some(pick)) = (self.screen(), self.camera_picked()) else { return };
+                self.over = Some((page, super::Over::DeleteCamera(pick), 1));
+                return;
             }
             Key::CameraSave if p.ok => {
                 self.type_for(Typing::Camera);
@@ -1839,10 +1842,11 @@ impl Menu {
                 self.over = Some((page, super::Over::Mods(self.mod_preset.min(n - 1)), 1));
                 return;
             }
+            // P246: asked first, on Cancel.
             Key::DeletePreset if p.ok => {
-                let n = self.settings.presets.len();
-                self.settings.presets.remove(self.mod_preset.min(n - 1));
-                self.mod_preset = self.mod_preset.min(self.settings.presets.len().saturating_sub(1));
+                let (Some(page), n) = (self.screen(), self.settings.presets.len()) else { return };
+                self.over = Some((page, super::Over::DeleteMods(self.mod_preset.min(n - 1)), 1));
+                return;
             }
             Key::ResetMods if p.ok => {
                 self.load_mods(&Mods::original());

@@ -8546,6 +8546,82 @@ fn save_over_replaces_a_custom_camera_in_place() {
     std::fs::remove_dir_all(dir).ok();
 }
 
+/// P246: Delete Preset on Game Modifiers asks first, on Cancel, as Save Over does: Cancel and
+/// Circle forget nothing, and only the yes forgets the preset Load Preset is on.
+#[test]
+fn delete_preset_asks_before_forgetting_a_modifier_preset() {
+    use menu::Key;
+    let (mut m, mut r) = fresh();
+    settings_at(&mut m, &mut r, "Ride");
+    down_to(&mut m, &mut r, Key::Modifiers);
+    tap(&mut m, &mut r, Control::Cross);
+    for name in ["low", "high"] {
+        down_to(&mut m, &mut r, Key::SavePreset);
+        tap(&mut m, &mut r, Control::Cross);
+        type_keys(&mut m, &mut r, name);
+        tap(&mut m, &mut r, Control::Start);
+    }
+    let names = |m: &Menu| m.settings.presets.iter().map(|p| p.0.clone()).collect::<Vec<_>>();
+    assert_eq!(names(&m), ["Low", "High"]);
+    down_to(&mut m, &mut r, Key::LoadPreset);
+    tap_until(&mut m, &mut r, Control::Right, |m| m.page()[m.cursor(Screen::Modifiers)].value == "Low");
+    m.take_changed();
+
+    down_to(&mut m, &mut r, Key::DeletePreset);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.overwriting(), Some(("Delete Low?".to_string(), ["Delete", "Cancel"], 1)));
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!((m.overwriting(), names(&m)), (None, vec!["Low".to_string(), "High".to_string()]), "Cancel forgets nothing");
+    assert!(!m.take_changed());
+    tap(&mut m, &mut r, Control::Cross);
+    tap(&mut m, &mut r, Control::Circle);
+    assert_eq!((m.overwriting(), m.screen()), (None, Some(Screen::Modifiers)));
+    assert_eq!(names(&m), ["Low", "High"], "Circle forgets nothing");
+
+    tap(&mut m, &mut r, Control::Cross);
+    tap(&mut m, &mut r, Control::Up);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!((m.overwriting(), names(&m)), (None, vec!["High".to_string()]));
+    assert!(m.take_changed());
+    assert_eq!(m.page().into_iter().find(|r| r.key == Key::LoadPreset).unwrap().value, "High");
+}
+
+/// P246: Delete Preset on the Camera page asks first, on Cancel; only the yes forgets the player's
+/// own preset, and the page goes back to its first preset.
+#[test]
+fn delete_preset_asks_before_forgetting_a_custom_camera() {
+    use menu::Key;
+    use menu::cameras::Look;
+    let (mut m, mut r) = fresh();
+    m.camera_names = [vec!["Race Cam 1".into(), "Freestyle Cam".into()], vec!["Flight Cam 1".into()]];
+    settings_at(&mut m, &mut r, "Camera");
+    let set = &mut m.settings.camera_sets[0];
+    set.save_custom(Machine::Bike, "Race Cam 1", "Low", Look::ORIGINAL, &[]);
+    set.save_custom(Machine::Bike, "Race Cam 1", "High", Look::ORIGINAL, &[]);
+    let own = |m: &Menu| m.settings.camera_sets[0].own.iter().map(|o| o.name.clone()).collect::<Vec<_>>();
+    down_to(&mut m, &mut r, Key::CameraPreset);
+    tap_until(&mut m, &mut r, Control::Right, |m| m.camera_picked().is_some_and(|p| p.name == "High"));
+    m.take_changed();
+
+    down_to(&mut m, &mut r, Key::CameraDelete);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.overwriting(), Some(("Delete High?".to_string(), ["Delete", "Cancel"], 1)));
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!((m.overwriting(), own(&m)), (None, vec!["Low".to_string(), "High".to_string()]), "Cancel forgets nothing");
+    assert!(!m.take_changed());
+    tap(&mut m, &mut r, Control::Cross);
+    tap(&mut m, &mut r, Control::Circle);
+    assert_eq!((m.overwriting(), m.screen()), (None, Some(Screen::Settings)));
+    assert_eq!(own(&m), ["Low", "High"], "Circle forgets nothing");
+
+    tap(&mut m, &mut r, Control::Cross);
+    tap(&mut m, &mut r, Control::Down);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!((m.overwriting(), own(&m)), (None, vec!["Low".to_string()]));
+    assert!(m.take_changed());
+    assert_eq!(m.camera_picked(), None, "back on All Presets");
+}
+
 /// A menu standing still on the track pick makes its lists once (P254): on the Deck the front end
 /// spent most of its CPU making the pick's games, categories and filters again every frame. A mod
 /// installed, or a filter stepped, makes them again, and the pick lists what it should.

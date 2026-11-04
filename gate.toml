@@ -47,6 +47,7 @@ tests = [
 # clock it read before crossed 20 s.
 # disc_worlds' rides within 60 s and 480 s: 62-79 s and 518-605 s in the pool at load 48-56, three gates in a
 # row (P222, P226, 11-04); a stopgap until K24 holds them to what they race instead of the wall clock.
+# The cold world_mxu / world_mxu_nat builds took 519-636 s and the installed ride 71 s at load ~30-57 (P246, 11-04).
 tests = ["-p openmx --test one_fps", "-p game-render --test ecosystem", "-p openmx --test disc_worlds"]
 
 [display]
