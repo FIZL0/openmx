@@ -421,3 +421,23 @@ fast, and no longer the original bit for bit. Only a rider can say whether it st
    It draws offscreen and leaves your settings alone.
 
 A native build cannot play online with an ordinary one. Each sees the other's lobby as "another version".
+
+## Ground missing after the app switcher on the iPhone (MD97)
+
+MD97 found that the desktop's world_mxvatv draws all of its ground, so what you saw is iPhone-only.
+Its likely cause: while the app was in the app switcher, the load kept uploading the ground. iOS
+refuses GPU work from an app in the background. A refused upload left a piece empty, and so did a
+refused page copy, which also empties every piece uploaded before it. Now the load waits until the
+app is in front again. On return, the ride also builds every piece it holds again. Check it on a
+build with MD97 in it (about 5 min):
+
+1. Pick world_mxvatv in Free Ride. While it loads, swipe up to the app switcher and wait 5 s. Then
+   come back.
+2. Ride a minute in a few directions. The ground should be whole.
+3. Go to the app switcher again mid-ride, then come back. The ground stays whole. The coarse
+   stand-in may show for a moment while each piece is built again.
+4. Documents/openmx-log.txt (Files → On My iPhone → openMX) should have lines
+   `loading: … waited … s for the app to be in front again` and
+   `world ground: back in front at tick …, … pieces built again`. If any ground is still missing,
+   send that log back (LocalSend into the repo's context/), with where you rode, and name it in
+   MD97's journal.

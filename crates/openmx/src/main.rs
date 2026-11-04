@@ -3759,6 +3759,19 @@ fn load_in_front<'env, T: Send + 'env>(
 
 /// One loading frame where the front end has one, between two steps of a ride's load (P127): what
 /// to leave the ride for, if anything. A cancel puts the pick back.
+/// Wait while the app is away from the front (MD97: on the iPhone, the app switcher mid-load left
+/// ground out for good, the GPU work made in the background refused): `what` says which upload waits.
+fn wait_in_front(what: &str) {
+    if gpuwin::in_front() {
+        return;
+    }
+    let at = Instant::now();
+    while !gpuwin::in_front() {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    println!("loading: {what} waited {:.1} s for the app to be in front again", at.elapsed().as_secs_f32());
+}
+
 async fn load_tick(
     window: &mut Option<Screen>,
     seats: &mut Option<Seats>,
@@ -6058,6 +6071,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     }
     // A world's ground on the GPU (MD17): the pieces near the start now, the rest as the riders come.
     let mut ground_stream: Option<worlds::GroundStream> = None;
+    // How many times the app had been sent away when the ground's uploads began (MD97).
+    let mut ground_away = gpuwin::times_away();
     // And its maps' pages, near the riders (P283).
     let mut paint_stream: Option<paint_stream::PaintStream> = None;
     // The most ground chunks a frame of the ride handed the GPU, how many in all, and in how many
@@ -6137,6 +6152,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             }
         };
         progress.reach(loading::Stage::Upload)?;
+        wait_in_front("the upload");
         let r = renderer_of(&mut offscreen, window).expect("checked");
         r.forget_assets();
         r.set_scene(&look);
@@ -6186,6 +6202,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             // The whole world at its coarsest under it, where a piece is not loaded yet, and its
             // props and plants faded out by the reach they come in at (V92).
             if args.world_stand_in {
+                wait_in_front("the stand-in");
                 r.set_prop_fade(Some([reach.load.0, PROP_FADE_BAND.min(reach.load.0 * 0.5)]));
                 let at = Instant::now();
                 match worlds::stand_in(w, t, cells).and_then(|s| {
@@ -6200,6 +6217,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             let (mut built, mut failed) = (0, Ok(()));
             let mut stream = worlds::GroundStream::start_into(w, cells, reach, args.world_fine, &starts, args.world_ground_all, &mut |i, made| {
                 if failed.is_ok() {
+                    wait_in_front("the world's ground");
                     failed = r.add_ground_piece_of(i as u32, made);
                     r.show_ground_piece(i as u32, 0.0);
                     built += 1;
@@ -6239,6 +6257,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                         splat.shadow = None;
                     }
                 }
+                wait_in_front("the world's paint");
                 let stream = paint_stream::PaintStream::start(w, reach, r);
                 if let Some((used, shown)) = r.world_paint_pool() {
                     let used: Vec<String> = used.iter().map(|(u, c)| format!("{u} of {c}")).collect();
@@ -6260,6 +6279,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             if let Some(leave) = load_tick(window, pad_seats, front.as_deref_mut(), &args, &progress, &mut load_screen).await? {
                 return Ok(leave);
             }
+            wait_in_front("the models");
             renderer_of(&mut offscreen, window).expect("checked").upload_models(&assets, slice);
         }
         let r = renderer_of(&mut offscreen, window).expect("checked");
@@ -8471,8 +8491,18 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     println!("{line}");
                 }
             }
-            // Its ground on the GPU, the same way (MD17).
-            if let Some(stream) = &mut ground_stream {
+            // Its ground on the GPU, the same way (MD17), but not while the iPhone app is away (MD97):
+            // the pieces wait, and those held are built again once it is back, as what went up
+            // while it went may not have.
+            let in_front = gpuwin::in_front();
+            if let Some(stream) = &mut ground_stream
+                && in_front
+                && gpuwin::times_away() != ground_away
+            {
+                ground_away = gpuwin::times_away();
+                println!("world ground: back in front at tick {}, {} pieces built again", pacer.ticks(), stream.build_again());
+            }
+            if let Some(stream) = ground_stream.as_mut().filter(|_| in_front) {
                 let near: Vec<[f32; 2]> = match (args.world_sweep, args.frames) {
                     (Some([x0, z0, x1, z1]), Some(n)) => {
                         let t = (pacer.ticks() as f32 / n.max(1) as f32).min(1.0);

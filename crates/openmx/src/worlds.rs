@@ -307,6 +307,9 @@ pub fn read_watched(dir: &Path, id: &str, json: &Json, mut disc: Option<DiscTile
         let (res, folder, origin) = match disc.as_mut() {
             None => {
                 let folder = dir.join("tiles").join(&tile);
+                if !folder.is_dir() {
+                    return Err(format!("{id}: {tile} is not installed: the world needs {}'s files", needs(json)));
+                }
                 (Res::folder(&folder).map_err(|e| format!("{id}: {tile}: {e}"))?, folder, Origin::Folder)
             }
             Some(open) => {
@@ -402,6 +405,21 @@ pub fn read_watched(dir: &Path, id: &str, json: &Json, mut disc: Option<DiscTile
         }
     }
     Ok(world)
+}
+
+/// The game whose files a world's tiles are (MD97), from its `mod.json`'s `source`: its `games`, or
+/// its `game`, or "another game" where it says neither.
+fn needs(json: &Json) -> String {
+    let source = json.get("source");
+    let games: Vec<&str> = match source.and_then(|s| s.get("games")) {
+        Some(Json::Arr(a)) => a.iter().filter_map(Json::str).collect(),
+        _ => Vec::new(),
+    };
+    match (games.is_empty(), source.and_then(|s| s.get("game")).and_then(Json::str)) {
+        (false, _) => games.join(" and "),
+        (true, Some(game)) => game.to_string(),
+        (true, None) => "another game".to_string(),
+    }
 }
 
 /// The world file's `wrap` (MD29): which axes of the world come round, `[x, z]`. Absent, `null`,
@@ -1104,6 +1122,9 @@ pub struct GroundStream {
     asked: Vec<Option<bool>>,
     /// The pieces whose files would not build: not asked again, as they do not change under a ride.
     failed: Vec<bool>,
+    /// The pieces held whose ground may not have reached the GPU (MD97: iOS refuses GPU work from an
+    /// app sent to the background), built and handed over again as they are.
+    redo: Vec<bool>,
     /// What the builder has to do, nearest last (each piece at full detail or not), and whether it
     /// should stop.
     work: Arc<(Mutex<(Vec<(usize, bool)>, bool)>, Condvar)>,
@@ -1179,6 +1200,7 @@ impl GroundStream {
             held: vec![None; n],
             asked: vec![None; n],
             failed: vec![false; n],
+            redo: vec![false; n],
             tiles,
             reach,
             fine,
@@ -1251,11 +1273,13 @@ impl GroundStream {
                 let coarse = if full { "" } else { " coarse" };
                 self.log.push(format!("world ground: {name} built{coarse}, {} chunks", piece.chunks.len()));
                 self.held[i] = Some(full);
+                self.redo[i] = false;
                 Some(piece)
             }
             Err(e) => {
                 self.log.push(format!("world ground: {name} not drawn: {e}"));
                 self.failed[i] = true;
+                self.redo[i] = false;
                 None
             }
         }
@@ -1285,7 +1309,7 @@ impl GroundStream {
             }
             let mut want: Vec<(usize, bool)> = (0..self.tiles.len())
                 .filter(|&i| self.asked[i].is_none())
-                .filter_map(|i| self.wanted(i, gaps[i]).filter(|&full| self.held[i] != Some(full)).map(|full| (i, full)))
+                .filter_map(|i| self.wanted(i, gaps[i]).filter(|&full| self.held[i] != Some(full) || self.redo[i]).map(|full| (i, full)))
                 .collect();
             want.sort_by(|a, b| order[b.0].total_cmp(&order[a.0]));
             for &(i, full) in &want {
@@ -1336,6 +1360,7 @@ impl GroundStream {
             if self.held[i].is_some() && gaps[i] > self.reach.drop.0 {
                 self.pending.retain(|p| p.0 != i);
                 self.held[i] = None;
+                self.redo[i] = false;
                 self.log.push(format!("world ground: {} dropped", self.tiles[i].name));
                 out.push(Change::Drop(i));
             }
@@ -1373,6 +1398,20 @@ impl GroundStream {
                     .fold(f32::MAX, f32::min)
             })
             .collect()
+    }
+
+    /// Build every piece held again and hand it over as it comes, in place of what the GPU has of it
+    /// (MD97): after the iPhone app was sent away, when the uploads made as it went may have been
+    /// refused. What is drawn stays until each piece's own replaces it. The number of pieces asked.
+    pub fn build_again(&mut self) -> usize {
+        let mut n = 0;
+        for (redo, held) in self.redo.iter_mut().zip(&self.held) {
+            if held.is_some() {
+                *redo = true;
+                n += 1;
+            }
+        }
+        n
     }
 
     /// How many pieces are held now.
@@ -2203,6 +2242,138 @@ mod tests {
         let _ = std::fs::remove_dir_all(mods.parent().unwrap());
     }
 
+    /// A generated world of two tiles of their own hills and a join, with `source` its mod.json's
+    /// (MD97).
+    fn two_tile_world(mods: &Path, id: &str, source: &str) {
+        let world = mods.join("tracks").join(id);
+        let mut listed = Vec::new();
+        for (n, (name, [x, z])) in [("t0", [0, 0]), ("t1", [600, 0])].into_iter().enumerate() {
+            let stem = name.to_uppercase();
+            let dir = world.join("tiles").join(name);
+            let scene = format!("[SceneInfo]\r\nSceneName={name}\r\nDefaultStartPosition=60.00,10.00,60.00\r\nDefaultStartDirection=1.00,0.00,0.00\r\n[Environment]\r\nTerrainFile={stem}.trn\r\nTerrainWidth=3\r\nTerrainBreadth=3\r\nTerrainWidthScale=9\r\nTerrainBreadthScale=9\r\n");
+            write(&dir, &format!("Env/{stem}/{stem}.scn"), scene);
+            let k = 1.0 + n as f64;
+            let height = |sx: u32, sz: u32| 200.0 + 40.0 * (f64::from(sx) * 0.1 * k).sin() + f64::from((sx * 13 + sz * 7) % 5);
+            write(&dir, &format!("Env/{stem}/{stem}.ps2.trn"), generate::terrain(name, (3, 3), 9.0, height, |_, _| 1));
+            listed.push(format!(r#"{{"tile": "{name}", "at": [{x}.0, {z}.0], "keep": [0, 0, 47, 47]}}"#));
+        }
+        write(&world, "joins/j0/j0.ps2.trn", generate::terrain("j0", (1, 3), 9.0, |_, _| 150.0, |_, _| 1));
+        write(
+            &world,
+            "mod.json",
+            format!(r#"{{"kind": "world", "id": "{id}", "name": "MD97", "source": {source}, "tiles": [{}], "joins": [{{"join": "j0", "at": [440.0, 0.0]}}]}}"#, listed.join(", ")),
+        );
+    }
+
+    /// MD97: a world one of whose tiles' folders is not there is refused, and says which game's
+    /// files it needs — not ridden with a hole where the tile was.
+    #[test]
+    fn a_world_whose_tile_files_are_missing_is_refused_with_the_game_it_needs() {
+        let mods = std::env::temp_dir().join(format!("openmx-md97-missing-{}", std::process::id())).join("mods");
+        let _ = std::fs::remove_dir_all(&mods);
+        two_tile_world(&mods, "md97_world", r#"{"game": "Combined", "games": ["MX vs. ATV Unleashed"]}"#);
+        assert_eq!(find(&mods, "md97_world").expect("whole, it reads").tile_count, 2);
+        std::fs::remove_dir_all(mods.join("tracks/md97_world/tiles/t1")).unwrap();
+        let e = find(&mods, "md97_world").err().expect("a world missing a tile is refused");
+        assert_eq!(e, "md97_world: t1 is not installed: the world needs MX vs. ATV Unleashed's files");
+        let _ = std::fs::remove_dir_all(mods.parent().unwrap());
+    }
+
+    /// MD97: after the iPhone app was sent away, every piece the stream held is built and handed
+    /// over again — each as it was, at its detail — and nothing past them; the pieces then rest.
+    #[test]
+    fn the_ground_held_is_built_again_after_the_app_was_away() {
+        let mods = std::env::temp_dir().join(format!("openmx-md97-again-{}", std::process::id())).join("mods");
+        let _ = std::fs::remove_dir_all(&mods);
+        two_tile_world(&mods, "md97_again", r#"{"game": "Real elevation"}"#);
+        let w = find(&mods, "md97_again").unwrap();
+        let corners = |made: &GroundPiece| -> Vec<[u32; 3]> { made.chunks.iter().flat_map(|c| c.vertices.iter().map(|v| v.pos.map(f32::to_bits))).collect() };
+        let reach = Reach { load: F(5000.0), drop: F(6000.0) };
+        let near = [[60.0f32, 60.0]];
+        let mut first = std::collections::BTreeMap::new();
+        let mut s = GroundStream::start_into(&w, 16, reach, None, &near, false, &mut |i, made| {
+            first.insert(i, corners(&made));
+        });
+        assert_eq!(first.len(), w.pieces.len(), "every piece is in reach");
+        assert!(s.update(&near).is_empty(), "nothing more before the app goes away");
+        assert_eq!(s.build_again(), w.pieces.len());
+        let mut again = std::collections::BTreeMap::new();
+        let mut shown = std::collections::BTreeSet::new();
+        let until = Instant::now() + std::time::Duration::from_secs(60);
+        while shown.len() < w.pieces.len() && Instant::now() < until {
+            for change in s.update(&near) {
+                match change {
+                    Change::Add(i, made) => assert!(again.insert(i, corners(&made)).is_none(), "piece {i} handed over twice"),
+                    Change::More(i, _) => panic!("piece {i} in more than one part"),
+                    Change::Drop(i) => panic!("piece {i} dropped"),
+                    Change::Show(i) => _ = shown.insert(i),
+                }
+            }
+            std::thread::yield_now();
+        }
+        assert_eq!(again, first, "every piece again, the same ground");
+        assert_eq!(s.held(), w.pieces.len());
+        for _ in 0..3 {
+            assert!(s.update(&near).is_empty(), "built again once, not every frame");
+        }
+        let _ = std::fs::remove_dir_all(mods.parent().unwrap());
+    }
+
+    /// MD97 on the installed world_mxvatv: everywhere the ride has ground — every 40 feet over
+    /// the world, wherever a piece owns the point ([`Tiled::owner`]) — that piece's drawn chunks
+    /// cover it, and every tile's corners are not all at one height. A join all of whose ground
+    /// the tiles own draws nothing, and that is no hole.
+    #[test]
+    #[ignore = "needs the stitched worlds in $OPENMX_WORLDS/tracks"]
+    fn every_tile_of_the_installed_world_mxvatv_has_ground() {
+        let mods = PathBuf::from(std::env::var_os("OPENMX_WORLDS").expect("OPENMX_WORLDS names a mods folder"));
+        let w = find(&mods, "world_mxvatv").unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(w.tile_count, 27);
+        let reach = Reach { load: F(1500.0), drop: F(2000.0) };
+        let tiled = Tiled::new(w.pieces.iter().map(|p| p.tile.clone()).collect(), Box::new(Files { pieces: w.pieces.clone() }), reach).unwrap();
+        let owners = Tiled::new(w.pieces.iter().map(|p| p.tile.clone()).collect(), Box::new(Files { pieces: w.pieces.clone() }), reach).unwrap();
+        let mut b = Builder { files: Files { pieces: w.pieces.clone() }, tiled: Some(tiled), cells: 32 };
+        let mut wrong = Vec::new();
+        // Each piece's chunks' rectangles, [x0, z0, x1, z1].
+        let mut drawn: Vec<Vec<[f32; 4]>> = Vec::new();
+        for (i, p) in w.pieces.iter().enumerate() {
+            let piece = b.build(i, true).unwrap_or_else(|e| panic!("{}: {e}", p.tile.name));
+            let ys: Vec<f32> = piece.chunks.iter().flat_map(|c| c.vertices.iter().map(|v| v.pos[1])).collect();
+            let (lo, hi) = ys.iter().fold((f32::MAX, f32::MIN), |(l, h), &y| (l.min(y), h.max(y)));
+            if i < w.tile_count && !(hi - lo > 1.0) {
+                wrong.push(format!("{}: {} chunks, heights {lo}..{hi}", p.tile.name, piece.chunks.len()));
+            }
+            drawn.push(
+                piece
+                    .chunks
+                    .iter()
+                    .map(|c| c.vertices.iter().fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |r, v| [r[0].min(v.pos[0]), r[1].min(v.pos[2]), r[2].max(v.pos[0]), r[3].max(v.pos[2])]))
+                    .collect(),
+            );
+        }
+        let all = w.pieces.iter().map(|p| rect(&p.tile, 0.0)).fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |r, t| [r[0].min(t[0]), r[1].min(t[1]), r[2].max(t[2]), r[3].max(t[3])]);
+        let (mut owned, mut holes) = (0usize, Vec::new());
+        let mut z = all[1];
+        while z < all[3] {
+            let mut x = all[0];
+            while x < all[2] {
+                if let Some((o, _, _)) = owners.owner(F(x), F(z)) {
+                    owned += 1;
+                    if !drawn[o].iter().any(|r| r[0] <= x && x <= r[2] && r[1] <= z && z <= r[3]) {
+                        holes.push(format!("{} at {x:.0},{z:.0}", w.pieces[o].tile.name));
+                    }
+                }
+                x += 40.0;
+            }
+            z += 40.0;
+        }
+        assert!(owned > 10_000, "{owned} points with ground");
+        if !holes.is_empty() {
+            wrong.push(format!("{} of {owned} points with ground undrawn: {:?}", holes.len(), &holes[..holes.len().min(20)]));
+        }
+        assert_eq!(wrong, Vec::<String>::new());
+    }
+
     /// MD56 on the installed worlds: every tile of each reads the same heights as that map alone.
     /// The user's flat "maps" were the joins between them (see [`crate::hud::OFF_MAP`]).
     #[test]
@@ -2235,6 +2406,7 @@ mod heading_order {
             held: vec![None; tiles.len()],
             asked: vec![None; tiles.len()],
             failed: vec![false; tiles.len()],
+            redo: vec![false; tiles.len()],
             tiles,
             reach,
             fine: None,
@@ -2373,6 +2545,7 @@ mod far_ring {
             held: vec![None],
             asked: vec![None],
             failed: vec![false],
+            redo: vec![false],
             tiles: vec![tile],
             reach: Reach { load: F(6000.0), drop: F(9000.0) },
             fine: Some(Reach { load: F(2500.0), drop: F(3500.0) }),

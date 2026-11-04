@@ -95,6 +95,16 @@ pub fn riding() {
     RODE.store(true, Ordering::Relaxed);
 }
 
+/// The app is in front (MD97, `ios_gpu.rs`): always here, where the GPU takes work unfocused too.
+pub fn in_front() -> bool {
+    true
+}
+
+/// How many times the app has been sent away (MD97, `ios_gpu.rs`): never here.
+pub fn times_away() -> u32 {
+    0
+}
+
 /// Make the surface on `canvas` and the renderer for it: WebGPU first, unless `webgl2` asks for
 /// WebGL2 only, then WebGL2. The API that drew, or why neither could.
 pub async fn prepare(canvas: web_sys::OffscreenCanvas, webgl2: bool) -> Result<Api, String> {
