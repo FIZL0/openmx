@@ -70,16 +70,48 @@ const chrome = spawn('chromium', ['--headless=new', '--remote-debugging-port=0',
   '--no-first-run', '--no-default-browser-check', '--disable-extensions', '--disable-component-extensions-with-background-pages',
   '--disable-background-networking', '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1',
   '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows',
-  ...flags, 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
+  ...flags, 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'], detached: true });
+// Chromium's own processes (its GPU, network and storage services) outlive its browser process by a moment and are
+// still writing into the profile as it exits: a removal on the browser's exit found the profile refilled under it
+// (ENOTEMPTY with eight of these at once, K33), and threw on a ride that had passed. So chromium runs in a process group
+// of its own (`detached`), and the profile goes once that whole group has: the browser told to close, the group waited
+// for, and only what has not gone in ten seconds killed. The verdict is the ride's alone; a profile that still will
+// not go is left to the test, which removes the scratch dir.
+const gone = () => {
+  try {
+    process.kill(-chrome.pid, 0);
+    return false;
+  } catch {
+    return true;
+  }
+};
+let quitting = false;
+// the DevTools connection, once it is up: the browser's own Browser.close is the orderly way out
+let ws;
 const quit = code => {
-  const done = () => {
-    server.close();
-    fs.rmSync(profile, { recursive: true, force: true });
-    process.exit(code);
+  if (quitting) return;
+  quitting = true;
+  server.close();
+  const until = async (ok, ms) => {
+    for (const end = Date.now() + ms; !ok() && Date.now() < end; ) await new Promise(r => setTimeout(r, 50));
   };
-  if (chrome.exitCode !== null || chrome.signalCode !== null) done();
-  chrome.on('exit', done);
-  chrome.kill();
+  (async () => {
+    if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ id: 1e9, method: 'Browser.close' }));
+    else chrome.kill();
+    await until(gone, 10000);
+    if (!gone()) {
+      try {
+        process.kill(-chrome.pid, 'SIGKILL');
+      } catch {}
+      await until(gone, 5000);
+    }
+    try {
+      fs.rmSync(profile, { recursive: true, force: true });
+    } catch (e) {
+      console.error(`the profile stays for the test to remove: ${e.message}`);
+    }
+    process.exit(code);
+  })();
 };
 const fail = why => {
   console.error(why);
@@ -99,7 +131,7 @@ const wsUrl = await new Promise(resolve => {
     }
   });
 });
-const ws = new WebSocket(wsUrl);
+ws = new WebSocket(wsUrl);
 await new Promise(r => ws.addEventListener('open', r));
 
 // What each page's console said, by page; and when anything last moved on.
@@ -242,7 +274,11 @@ for (const end = Date.now() + 120000; !codes.size; ) {
   if (Date.now() > end) fail('host: no code on the code server in two minutes');
   await wait(100);
 }
-const code = host.lines.filter(l => l.startsWith('lobby: code ')).map(l => l.slice('lobby: code '.length).trim()).at(-1);
+// and the page's word for it: the put reaches this server straight from the page's worker, its console line through
+// DevTools after it, so under load the put can come first (K33: the line not there yet read as no code at all). The
+// room line that names the code comes after the put on the page's side ("Waiting for riders."), so it is the one taken.
+const [roomed] = await heard(host, l => /^lobby: room \S+ /.test(l), 0, 'its room with its code');
+const code = roomed.split(' ')[2];
 if (!code || !/^[2-9A-HJ-NP-Z]{4}$/.test(code)) fail(`host: no room code (${code})`);
 console.error(`the host's room code: ${code}`);
 

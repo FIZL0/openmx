@@ -63,6 +63,14 @@ const RESOLVE: Duration = Duration::from_secs(40);
 const SHAKE_WAIT: Duration = Duration::from_secs(10);
 /// A riding guest whose host has said nothing for this long (it pings every 2 s) takes it as gone (N11).
 const HOST_GONE: Duration = Duration::from_secs(6);
+/// How long a guest gives a host from the ride's start to its first datagram (K33): the host is loading the world,
+/// which in a browser takes its whole thread — pings and all — for as long as the load runs (8-10 s at load 100). As
+/// long as the ride itself gives a peer it has not heard yet (openmx's `recover::LOADING`).
+const HOST_LOADING: Duration = Duration::from_secs(60);
+/// A host-gone wait that ends this much past its time ended late because this machine was not running (K33): a
+/// browser guest's own world load, or a hidden tab. The host's messages since are still to be read, so the wait
+/// starts again rather than taking the host as gone.
+const LATE: Duration = Duration::from_secs(1);
 /// How long a guest the room was handed to keeps the others' seats for them to dial it (N11), and how
 /// long each of them tries one successor before the next.
 const COME_BACK: Duration = Duration::from_secs(20);
@@ -1224,15 +1232,20 @@ async fn join(cx: &Ctx, code: &str, picks: Vec<Pick>, cmds: &mut amp::UnboundedR
     let mut host_peer = HOST.to_string();
     let mut room: Option<Room> = None;
     let mut heard = Instant::now();
+    // from the ride's start until the host's ride is heard (a datagram, a ride message): it is loading ([`HOST_LOADING`])
+    let mut loading = false;
     let hello_wait = n0_future::time::sleep(Duration::from_secs(20));
     tokio::pin!(hello_wait);
     cx.say(Event::Status("Connected: waiting for the host's lobby...".into()));
     loop {
         // the host gone mid-ride (N11): to whom the room goes, if anyone told
         let mut lost: Option<Option<String>> = None;
-        let gone = heard + HOST_GONE;
+        let gone = heard + if loading { HOST_LOADING } else { HOST_GONE };
         tokio::select! {
-            _ = n0_future::time::sleep_until(gone), if riding => lost = Some(None),
+            _ = n0_future::time::sleep_until(gone), if riding => match Instant::now() > gone + LATE {
+                true => heard = Instant::now(),
+                false => lost = Some(None),
+            },
             _ = &mut hello_wait, if !seated => {
                 cx.say(Event::Failed("The host didn't answer (no lobby after 20 s).".into()));
                 conn.close(0u32.into(), b"left");
@@ -1260,11 +1273,13 @@ async fn join(cx: &Ctx, code: &str, picks: Vec<Pick>, cmds: &mut amp::UnboundedR
                 }
                 Ok(Msg::Go(r)) => {
                     riding = true;
+                    loading = true;
                     room = Some(r.clone());
                     cx.say(Event::Start(r, me.clone()));
                 }
                 Ok(Msg::DropIn(r)) => {
                     riding = true;
+                    loading = true;
                     room = Some(r.clone());
                     cx.say(Event::Status("In the ride: waiting for the host to take you on...".into()));
                     cx.say(Event::DropIn(r, me.clone()));
@@ -1279,7 +1294,10 @@ async fn join(cx: &Ctx, code: &str, picks: Vec<Pick>, cmds: &mut amp::UnboundedR
                 Ok(Msg::Note(s)) => cx.say(Event::Status(s)),
                 Ok(Msg::Ping(t)) => link.send(&Msg::Pong(t)),
                 Ok(Msg::Chat { from, name, text }) if seated => cx.say(Event::Chat { from, name, text }),
-                Ok(Msg::Ride { from, data }) if riding => cx.say(Event::Ride(from, data)),
+                Ok(Msg::Ride { from, data }) if riding => {
+                    loading = false;
+                    cx.say(Event::Ride(from, data));
+                }
                 Ok(Msg::Refused(why)) => {
                     cx.say(Event::Failed(format!("Refused: {why}")));
                     conn.close(0u32.into(), b"refused");
@@ -1293,6 +1311,9 @@ async fn join(cx: &Ctx, code: &str, picks: Vec<Pick>, cmds: &mut amp::UnboundedR
                 }
             },
             Some(d) = dgrams.recv() => if riding && let Some((from, data)) = undatagram(&d) {
+                if loading {
+                    (loading, heard) = (false, Instant::now());
+                }
                 cx.say(Event::Datagram(from, data.to_vec()));
             },
             c = cmds.recv() => match c {
