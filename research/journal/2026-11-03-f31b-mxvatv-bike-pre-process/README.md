@@ -13,3 +13,8 @@ F31b2 (the next session): the bike's Force body is ported as `handling::bike::gr
 the original on 12 000 random bikes, and it runs in the hybrid frame (with F31b1's head) for every row of
 ride-2 and flip-1, bit-exact. It found and fixed a `−0` in MD63b's balance. Details in
 2-bike-force-body-FINAL.md.
+
+F31b3: the bike's PostProcess is ported as `handling::bike::air_state`, with the no-hander and the vehicle
+post. It matches the original on 12 000 random bikes, and it runs in the hybrid frame (with F31b1's head
+and F31b2's Force body) for every row of ride-2 and flip-1, bit-exact. Details in
+3-bike-post-process-FINAL.md.

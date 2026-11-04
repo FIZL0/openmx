@@ -9263,6 +9263,23 @@ atv_heap_free               atv 0x001b76d0 = free
 #   0x004a1680 x2; rev limit 0x0049ff40 (a0 engine); peak rates 0x004e6c90 (the quad's).
 #   Balance 0x004dc240: inertia 0x004dc274, command 0x004dc2ac/0x004dc2e0, point 0x004dc318 each
 #   adda.s $f3(=+0), x then madd.s: a -0 accumulator comes back +0. Smooth noise 0x00134580 (f12 in, f0 out).
+# F31b3 — the bike's PostProcess (game_sim::handling::bike::{air_state, vehicle_post, no_hander};
+# tests/mxvatv_bike_ride.rs). Comment rows only. Journal:
+# research/journal/2026-11-03-f31b-mxvatv-bike-pre-process/3-bike-post-process-FINAL.md.
+#   The post element bike +0x34 (0x00e71514) thunks to atv_bike_air_state 0x004d9290 (a0 bike, f12 dt):
+#   guard as the head's; +0xc80 == 0 and +0x1524 != +0x152c -> balance clear 0x004e65b0 (zeroes +0x1518,
+#   +0x1510, +0x14f8, +0x150c) and the no-hander 0x004dbd10 (a0 bike, f12 dt; the frame at rodata
+#   0x00396fc0 = (0,0,0,1); mat4_to_quat into body +0x190; its keys +0x1374/+0x1378 stand-upright speeds,
+#   +0x1360 roll command, +0x1368 roll speed, +0x1370 roll gain, +0x1238 donut scale; per wheel +0xd0 ray
+#   hit, +0xd4 swept, rear +0x38 donut). Then the quad's air state on wheels *(+0x17b0), *(+0x17b4)
+#   (front/rear down not written); record +0x24 = up.y <= 0.25. Origin = position - to_world(cofg) ->
+#   jal 0x00494200 (vehicle in-world, also vt +0x120; flag byte +0x45, world *(+0xe8) floor +0x98, box
+#   *(+0xa8) +0x30/+0x40). Outside: +0xc80 = +0x868 = +0xc1c = 0; 0x00272300(*(0x00442eb0), bike +0x674,
+#   8, 13, t0 *(+0xd20), t1 0); vt +0x3a8(bike, 1, 1). Then vehicle post 0x004a4f00 (j 0x004940b0, f12
+#   dt): body word 0 == 0 -> return; inside: 0x00194650(node *(+0xe4), 0, body +0x190, &origin); outside:
+#   vt +0x13c, vt +0xe8; vt +0xe4; byte +0x45 bit 1 -> 0x00196e80(node); vt +0x124; byte +0x45 &= ~4.
+#   Last 0x00194c20(node, 0, bike +0xbd0), +0xbd0 -> +0xc40.
+#   No-hander 0x004dbd10 has adda.s 0, f7 where move::no_hander adds: differs only on a -0 product.
 # F31c — the ground under C15's rides on Nat05 (game_sim::handling::ground; tests/mxvatv_bike_ground.rs).
 # Comment rows only. Journal: research/journal/2026-11-03-f31c-mxvatv-bike-ground.
 #   State 4's map is Nat05: terrain object 0x00bbd720 (both wheels' +0x1e0) over Env\nat05\Nat05.ps2.trn;

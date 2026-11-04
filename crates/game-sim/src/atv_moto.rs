@@ -749,7 +749,7 @@ pub fn spin_air(b: &mut Bike, q: &mut Quad, body: &mut Body, dt: F, steep: bool)
 
 /// The quad's origin as the vehicle post sets the node to it: the body's position less its centre of
 /// mass turned into the world (`q c q*` as two `vopmula`/`vmadd*`/`vopmsub` rounds), `w` the position's.
-fn origin(body: &Body, cofg: Vf) -> Vf {
+pub fn origin(body: &Body, cofg: Vf) -> Vf {
     let q = body.orientation;
     let acc = Vf::madd(Vf::opmula(q, cofg), cofg, q.bc(Field::W));
     let t = Vf::opmsub(acc, cofg, q);
@@ -763,7 +763,7 @@ fn origin(body: &Body, cofg: Vf) -> Vf {
 /// The vehicle's in-world test (quad vt `+0x120`, `atv_vehicle_in_world`): with bit 0 of the flag byte, inside
 /// the box in `x` and `z` (no box, inside); else with bit 6, not under the floor; else inside.
 #[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
-fn in_world(flags: u8, bounds: &Bounds, at: Vf) -> bool {
+pub fn in_world(flags: u8, bounds: &Bounds, at: Vf) -> bool {
     let (x, y, z) = (F(at.x()), F(at.y()), F(at.z()));
     if flags & 0x01 != 0 {
         match bounds.area {
