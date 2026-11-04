@@ -63,6 +63,7 @@ impl Shared {
             .map(|s| crate::flight_search::Bike { transform: s.rider.ride.transform(), in_world: s.plane.is_none() && s.rider.state.wreck.is_none() && !s.rider.ghost.on })
             .collect();
         set.hear_ridden(&ridden);
+        set.file_ridden(true);
         for s in sims.iter_mut().skip(1) {
             s.traffic.props = PropSet::default();
         }

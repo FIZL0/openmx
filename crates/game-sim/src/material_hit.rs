@@ -244,17 +244,25 @@ pub struct HeardBy(pub Vec<(usize, Struck)>, pub Ridden);
 
 /// **The ridden bikes as the props' probes hear them** (F27a2): the bikes' frame collidable mesh
 /// ([`crate::flight_search::BIKE_COLLISION`]) and each player's chassis where the props' collide pass
-/// finds it, by player. Sound only, like [`HeardBy`]: a prop's probe that strikes one is heard
-/// striking [`Struck::Bike`], and nothing else comes of it ([`crate::flight_search::bikes_struck`]).
+/// finds it, by player. A prop's probe that strikes one is heard striking [`Struck::Bike`]
+/// ([`crate::flight_search::bikes_struck`]); where the bikes `file`, it also puts its entry on the
+/// prop's list and keeps the mirror for the bike's ([`Ridden::probed`], B29).
 #[derive(Clone, Default)]
 pub struct Ridden {
     pub mesh: Option<std::sync::Arc<crate::track::Mesh>>,
     pub bikes: Vec<crate::flight_search::Bike>,
+    /// The bikes are the props' step's strikers, by player, so a probe's entry on one can name it:
+    /// off where the props' step has other strikers (the plane lane's plane) or none.
+    pub file: bool,
+    /// What this collide pass's probes struck on the bikes, for the bikes' strikes
+    /// ([`crate::prop_contact::strike`]): the object, the bike's player and the mirror (kind 1, its
+    /// other side not yet named) that goes on the bike's list. Emptied at every pass.
+    pub probed: Vec<(usize, usize, crate::contact::Contact)>,
 }
 
 impl std::fmt::Debug for Ridden {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Ridden").field("mesh", &self.mesh.is_some()).field("bikes", &self.bikes).finish()
+        f.debug_struct("Ridden").field("mesh", &self.mesh.is_some()).field("bikes", &self.bikes).field("file", &self.file).field("probed", &self.probed).finish()
     }
 }
 

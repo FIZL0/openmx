@@ -13,8 +13,8 @@
 //!
 //! - [`the_launch_goes_on_as_the_original`]: images 2904 and 2905 one tick on, ball 2's body and the
 //!   bike's chassis against the next image, bit for bit;
-//! - [`the_balls_probe_pushes_it_off_the_bike`] (ignored, B29): 2903 one tick on, where the original's
-//!   ball probe files a contact on the bike's frame that the port only hears;
+//! - [`the_balls_probe_pushes_it_off_the_bike`] (B29): 2903 one tick on, where the ball's probe files
+//!   an entry on the bike's frame and its mirror on the bike's list;
 //! - [`the_ball_flies_clear_of_the_bike`]: image 2903 ridden 60 ticks against the capture's rows,
 //!   the bike never touching the ball again, as there;
 //! - [`a_struck_ball_is_heard_in_its_strike_tick`] (B28): ball 2 put back unwoken under image
@@ -518,6 +518,29 @@ fn list_at(ee: &Ee, r: u32) -> Vec<String> {
         .collect()
 }
 
+/// A list entry's words, bit for bit: kind, from, on_body, normal, point, then the arm and the other
+/// arm (left out with `arms` false: what a list holds before its resolve writes them), and the
+/// surface.
+fn entry_bits(kind: u32, vecs: [Vf; 6], surface: u32, arms: bool) -> Vec<u32> {
+    let n = if arms { 6 } else { 4 };
+    std::iter::once(kind).chain(vecs[..n].iter().flat_map(|v| v.to_bits())).chain([surface]).collect()
+}
+
+/// [`list_at`]'s entries as [`entry_bits`].
+fn list_bits(ee: &Ee, r: u32, arms: bool) -> Vec<Vec<u32>> {
+    let (n, at) = (ee.u32_at(r + 0x100), ee.u32_at(r + 0x108));
+    (0..n)
+        .map(|k| {
+            let e = at + 0x80 * k;
+            entry_bits(ee.u32_at(e), [0x10, 0x20, 0x30, 0x40, 0x50, 0x60].map(|o| quad(ee, e + o)), ee.u32_at(e + 0x70), arms)
+        })
+        .collect()
+}
+
+fn port_bits(e: &game_sim::contact::Contact, arms: bool) -> Vec<u32> {
+    entry_bits(e.kind, [e.from, e.on_body, e.normal, e.point, e.arm, e.other_arm], e.surface as u32, arms)
+}
+
 fn len3(v: Vf) -> f32 {
     (v.x() * v.x() + v.y() * v.y() + v.z() * v.z()).sqrt()
 }
@@ -576,6 +599,24 @@ fn one_tick(from: u32) -> Option<Vec<String>> {
                 bad.push(format!("{from}: {what} port {:?} original {:?}", p.0, o.0));
             }
         }
+        let port: Vec<Vec<u32>> = rc.contacts.iter().map(|e| port_bits(e, true)).collect();
+        if port != list_bits(&next, next.u32_at(ball_object(&next) + obj::COLLISION), true) {
+            bad.push(format!("{from}: ball {BALL}'s list"));
+        }
+        // The bike's list as its frame resolves it: its entries on the props and the props' probes'
+        // mirrors, which the port hands its frame and does not keep, so they are made again on a
+        // second ride off the image, up to its strike. The arms are its resolve's, not checked here.
+        let mut again = seeded(&ee, &free, &tables);
+        let bike = game_sim::flight_search::Bike { transform: again.rider.ride.transform(), in_world: true };
+        again.traffic.props.hear_ridden(&[bike]);
+        again.traffic.props.file_ridden(true);
+        let dt = F(ee.f32_at(addr("frame_dt").unwrap()));
+        again.traffic.frame_held(dt, &mut world);
+        let strike = again.prop_strike(0, dt);
+        let port: Vec<Vec<u32>> = strike.contacts.iter().map(|e| port_bits(e, false)).collect();
+        if port != list_bits(&next, next.u32_at(the_bike(&next) + 0x7d0), false) {
+            bad.push(format!("{from}: the bike's list"));
+        }
     }
     Some(bad)
 }
@@ -592,11 +633,10 @@ fn the_launch_goes_on_as_the_original() {
 }
 
 /// 2903 -> 2904, the tick after the strike: the original's ball 2 also has its own probe's entry on
-/// the bike's frame collidable (kind 0, normal up out of the bike) and the bike its mirror, which
-/// throws the ball up (vy 19.31). The port only hears that hit (F27a2) and files no contact, so its
-/// ball leaves at vy 13.88. B29.
+/// the bike's frame collidable (kind 0, normal up out of the bike) behind the strike's mirror, and the
+/// bike its mirror behind its own entry, which throws the ball up (vy 19.31). Heard only (F27a2), the
+/// port's ball left at vy 13.88; filed (B29), lists, ball and chassis are the original's.
 #[test]
-#[ignore = "B29: the ball's probe on the bike's frame files no contact"]
 fn the_balls_probe_pushes_it_off_the_bike() {
     let Some(bad) = one_tick(2903) else { return };
     assert!(bad.is_empty(), "{bad:#?}");

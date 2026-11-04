@@ -25,9 +25,12 @@
 //! the props' step last ([`crate::Sim::step`]). S195's knock is the proof: `tests/prop_knock.rs`
 //! `the_bike_strikes_the_ball`.
 //!
+//! A filed prop's own probe striking the bike's frame (B29) is filed in the collide pass, its entry
+//! on the prop's list naming the bike, and its mirror goes on the bike's list behind the bike's own
+//! entries here ([`strike`]): f27a1's image 2904, `tests/knock_launch.rs`.
+//!
 //! What is not here: the rider's ragdoll, the wreck bike and the plane striking a prop's `f.col` (the
-//! other props' rays do: S242, [`crate::prop_props`]); the prop's own rays striking the bike's frame (an entry on the prop's list naming
-//! the bike, and its mirror on the bike's); the broad phase's gather, which is every prop with a mesh
+//! other props' rays do: S242, [`crate::prop_props`]); the broad phase's gather, which is every prop with a mesh
 //! in collection and object order, each by its distance from the rays' centre.
 //!
 //! Every step path strikes (S197a): [`crate::Sim::step`]'s one bike; [`crate::Sim::step_all`]'s
@@ -83,6 +86,11 @@ pub struct Strike {
     /// Each struck body, in the order the rays first met it: its collection, its object, and the
     /// mirrored entries (kind 1) that go on its list, naming the striker by its player.
     pub struck: Vec<(usize, usize, Vec<Contact>)>,
+    /// The bodies whose own probes struck the bike's frame in the props' collide pass and that the
+    /// rays did not strike (B29), by collection and object, after [`Strike::struck`] among the bike's
+    /// other sides: the probes' mirrors (kind 1) on the bike's list name them, and the bike's resolve
+    /// pushes them. Nothing wakes them or touches their lists.
+    pub probed: Vec<(usize, usize)>,
 }
 
 /// One prop's collidable mesh, where its node stands it.
@@ -178,6 +186,38 @@ impl Search for Found {
 /// mirrors' other side; `first` where the struck bodies start among the bike's other sides (the
 /// session's player count). At most [`CAPACITY`] entries, one per ray.
 pub fn strike(col: &BikeCol, at: &Mat4, set: &PropSet, me: usize, first: usize, dt: F) -> Strike {
+    let mut strike = rays_strike(col, at, set, me, first, dt);
+    probes_struck(&mut strike, set, me, first);
+    strike
+}
+
+/// **The props' probes' hits on bike `me`'s frame, on its list** (B29): the original's node files the
+/// bike ahead of the props, so a filed prop's probe searches after the bike's rays, and each hit's
+/// mirror (kind 1, kept by the collide pass, [`crate::material_hit::Ridden::probed`]) goes on the
+/// bike's list behind the bike's own entries, naming the prop's body among its other sides: the
+/// struck one's place, or one of [`Strike::probed`] after them. The list keeps at most [`CAPACITY`].
+fn probes_struck(strike: &mut Strike, set: &PropSet, me: usize, first: usize) {
+    for (c, coll) in set.collections.iter().enumerate() {
+        for &(o, _, mirror) in coll.heard.1.probed.iter().filter(|p| p.1 == me) {
+            let at = match strike.struck.iter().position(|s| (s.0, s.1) == (c, o)) {
+                Some(at) => at,
+                None => {
+                    let k = strike.probed.iter().position(|&p| p == (c, o)).unwrap_or_else(|| {
+                        strike.probed.push((c, o));
+                        strike.probed.len() - 1
+                    });
+                    strike.struck.len() + k
+                }
+            };
+            if strike.contacts.len() < CAPACITY {
+                strike.contacts.push(Contact { other: Some(first + at), ..mirror });
+            }
+        }
+    }
+}
+
+/// [`strike`]'s body rays alone.
+fn rays_strike(col: &BikeCol, at: &Mat4, set: &PropSet, me: usize, first: usize, dt: F) -> Strike {
     let posed: Vec<Posed<'_>> = set
         .collections
         .iter()
@@ -265,7 +305,7 @@ pub fn strike(col: &BikeCol, at: &Mat4, set: &PropSet, me: usize, first: usize, 
             (posed[k].collection, posed[k].object, mirrors)
         })
         .collect();
-    Strike { contacts, struck }
+    Strike { contacts, struck, probed: Vec::new() }
 }
 
 impl PropSet {
@@ -292,6 +332,13 @@ impl PropSet {
             r.touching = true;
             r.on_object = true;
             r.touching_other = true;
+            pushed.push(Pushed { collection: c, object: o, collider: col.collider, body: bone.body, mass: bone.mass });
+        }
+        // The bodies only the props' probes' mirrors name (B29), after the struck.
+        for &(c, o) in &strike.probed {
+            let coll = &self.collections[c];
+            let bone = &coll.bones[o];
+            let Some(col) = coll.objects[o].collision.as_ref() else { continue };
             pushed.push(Pushed { collection: c, object: o, collider: col.collider, body: bone.body, mass: bone.mass });
         }
         pushed

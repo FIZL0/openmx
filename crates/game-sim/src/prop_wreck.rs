@@ -577,6 +577,8 @@ impl crate::Sim {
             .map(|(i, r)| flight_search::Bike { transform: r.ride.transform(), in_world: !(i == 0 && flying) && r.state.wreck.is_none() && !r.ghost.on })
             .collect();
         self.traffic.props.hear_ridden(&bikes);
+        // The plane lane's props' step has the plane for its one striker.
+        self.traffic.props.file_ridden(!flying);
     }
 
     /// **Player `i`'s wreck bike as a hull on the props' node** (S243): its mesh, where its record's
