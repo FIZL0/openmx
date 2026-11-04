@@ -1043,17 +1043,20 @@ pub fn ride_out(cam: &mut game_sim::camera::Race, view: &mut game_sim::camera::V
     if c.presets.is_empty() || !c.preset().filter_this_preset {
         return;
     }
+    // Ours, not the original's, and nothing reads the camera back: the host's arithmetic (C27).
+    let dt = dt.0;
     let behind = |lag: &mut game_sim::camera::Lag, d: f32| -> f32 {
-        let a = (if dt < lag.tau { dt } else { lag.tau }) / lag.tau;
-        if !(a.0 > 0.0) {
+        let tau = lag.tau.0;
+        let a = dt.min(tau) / tau;
+        if !(a > 0.0) {
             return 0.0;
         }
-        let k = F(d) * (F::ONE - a) / a;
-        lag.value = lag.value - k;
-        k.0
+        let k = d * (1.0 - a) / a;
+        lag.value = F(lag.value.0 - k);
+        k
     };
     for i in 0..3 {
-        let d = (F(vel[i]) * dt).0;
+        let d = vel[i] * dt;
         view.look_at[i] -= behind(&mut c.look_filter[i], d);
         view.position[i] -= behind(&mut c.pos_filter[i], d);
     }
