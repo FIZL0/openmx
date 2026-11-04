@@ -2341,7 +2341,7 @@ fn port_record_frame(ee: &mut Ee, dt: F, map: &track::Terrain<'_>) -> (u32, u32,
         ee.set_u32(a, w);
     }
     let (bikes, others) = port_tail(ee, dt);
-    assert_eq!((bikes, others.len()), (1, 2), "the tail steps the bike once and two other listeners: {others:#x?}");
+    assert_eq!((bikes, others.len()), (1, 3), "the tail steps the bike once, its two other leaves and the second's rider: {others:#x?}");
     let mut i = 0;
     while i < ee.u32_at(SIM + 0x3c) {
         let e = call(ee, LIST3C_GET, &[u64::from(SIM + 0x3c), u64::from(i)], F::ZERO) as u32;
@@ -3041,7 +3041,8 @@ fn slot_of(c: tail::Out) -> Option<u32> {
 
 /// The bike in RAM as the port's vehicle update sees it: [`tail::Vehicle`]'s words, written back
 /// word by word before each call and read again after it. Each call is the original's but the wreck
-/// test's and the put-back's, which are the port's ([`port_wreck`]).
+/// test's and the put-back's, which are the port's ([`port_wreck`]), and the fade's, lean's,
+/// prepare's, ride's, sync's, snapshot's, network's and parts' (F39, [`port_update`]).
 struct TailInRam<'a> {
     ee: &'a mut Ee,
     v: tail::Vehicle,
@@ -3102,6 +3103,11 @@ impl Vehicles for TailInRam<'_> {
         self.write();
         if matches!(c, Out::WreckTest | Out::PutBack) {
             port_wreck(self.ee, c, dt);
+            self.read();
+            return;
+        }
+        if matches!(c, Out::Fade | Out::Lean | Out::Prepare | Out::Ride | Out::Sync | Out::Snapshot | Out::Network | Out::Parts) {
+            port_update(self.ee, c, dt);
             self.read();
             return;
         }
@@ -3179,11 +3185,60 @@ impl Listeners for TreeInRam<'_> {
             assert!(want_spr == self.ee.spr, "the vehicle update: the scratchpad differs from the original's");
             self.bikes += 1;
         } else {
+            let Some(&(_, _, writes)) = OTHER_LEAVES.iter().find(|l| (l.0, l.1) == (e, f)) else {
+                panic!("a tail leaf other than the known: {e:#x}, step {f:#x}")
+            };
+            let before = bike_and_blocks(self.ee);
             self.others.push(e);
             self.ee.set(28, GP);
-            self.ee.call(f, &[u64::from(e)], &[dt.0], BUDGET);
+            let walks = f == MANAGER_STEP;
+            if walks {
+                // Its own work first, its closing walk stood in for; then that walk, the port's.
+                let walked: Rc<RefCell<Vec<(u32, u32)>>> = Rc::default();
+                let w = walked.clone();
+                self.ee.hooks.insert(TAIL, Box::new(move |ee: &mut Ee| w.borrow_mut().push((ee.r(4) as u32, ee.f(12).to_bits()))));
+                self.ee.call(f, &[u64::from(e)], &[dt.0], BUDGET);
+                self.ee.hooks.remove(&TAIL);
+                assert_eq!(*walked.borrow(), [(e, dt.to_bits())], "the manager's closing walk");
+            } else {
+                self.ee.call(f, &[u64::from(e)], &[dt.0], BUDGET);
+            }
+            let after = bike_and_blocks(self.ee);
+            let parted: Vec<String> = before
+                .iter()
+                .zip(&after)
+                .filter(|((at, b), (_, a))| b != a && !writes.iter().any(|r| r.contains(&at.wrapping_sub(BIKE))))
+                .map(|((at, b), (_, a))| format!("{at:#x}: {b:#010x} -> {a:#010x}"))
+                .collect();
+            assert!(parted.is_empty(), "tail leaf {e:#x} (step {f:#x}) wrote the bike's words:\n  {}", parted.join("\n  "));
+            if walks {
+                tail::walk(self, e, dt);
+            }
         }
     }
+}
+
+/// The tail's listeners on state 4 other than the bike, as (listener, step, the bike's words it may
+/// write): F39 watches each ([`TreeInRam`]). The first two are the sim's other two leaves, and leave
+/// the bike and its blocks alone; the second's own walk steps the third, the rider, whose target is
+/// the bike's record at `+0x730`, and whose step writes two windows of that record and nothing else
+/// of the bike or its physics blocks: its `+0x1f0..+0x250` (the bike's `+0x920..+0x980`, through the
+/// rider's own physics world's step) and, on the wreck, its `+0x140..+0x170` (the bike's
+/// `+0x870..+0x8a0`: the rider's camera spots). Both replays together write exactly these words of
+/// them: `+0x870..+0x888` but `+0x87c`, `+0x890..+0x898`, `+0x920`, `+0x930..+0x938`, `+0x940`,
+/// and `+0x950..+0x97c` but `+0x95c`.
+const OTHER_LEAVES: [(u32, u32, &[std::ops::Range<u32>]); 3] =
+    [(0x00eb_6420, 0x001c_9540, &[]), (0x01ed_82d0, MANAGER_STEP, &[]), (0x010a_f350, 0x004f_2ad0, &[0x870..0x8a0, 0x920..0x980])];
+/// The second leaf's step: its own work, then the walk of its own listeners.
+const MANAGER_STEP: u32 = 0x002c_f9f0;
+
+/// The bike object's words and its physics blocks' ([`physics`]), each with its address.
+fn bike_and_blocks(ee: &Ee) -> Vec<(u32, u32)> {
+    let mut out: Vec<(u32, u32)> = (0..0x1800).step_by(4).map(|o| (BIKE + o, ee.u32_at(BIKE + o))).collect();
+    for (_, at, n) in physics(ee) {
+        out.extend((0..n).step_by(4).map(|o| (at + o, ee.u32_at(at + o))));
+    }
+    out
 }
 
 /// The frame's tail on the sim, the port's walk and vehicle update ([`TreeInRam`]). Answers how many
@@ -4617,4 +4672,837 @@ fn the_wrecks_virtuals_are_the_originals() {
 
 fn calls_normal(c: &[wreck::Out]) -> bool {
     c.iter().any(|c| matches!(c, wreck::Out::Normal { .. }))
+}
+
+// --- F39: the vehicle update's callees -----------------------------------------------------------------
+
+use game_sim::handling::update::{self, Updates};
+
+/// The vehicle update's callees in SLUS-21104 (research/oracle.txt `# F39`): the bike's slots (the
+/// prepare's first call is a thunk to its held states' half), then the deeper calls they make.
+const FADE_FN: u32 = 0x004e_1a20;
+const LEAN_FN: u32 = 0x004e_5d20;
+const PREPARE_FN: u32 = 0x004d_d8f0;
+const PREPARE_THUNK: u32 = 0x004e_7bb0;
+const PREPARE_HELD: u32 = 0x004a_8350;
+const RIDE_FN: u32 = 0x004a_7b70;
+const SYNC_FN: u32 = 0x004e_2f50;
+const SNAPSHOT_FN: u32 = 0x004d_9f30;
+const ANIM_STOP: u32 = 0x0013_e650;
+const ANIM_PLAY: u32 = 0x0013_eec0;
+const ANIM_BLEND: u32 = 0x0013_f5e0;
+const ANIM_BLEND4: u32 = 0x0014_0720;
+const NODE_SPIN: u32 = 0x0019_5210;
+const NODE_AIM: u32 = 0x0019_41b0;
+const NODE_AXES: u32 = 0x0019_4960;
+const NODE_LOCAL: u32 = 0x0019_5320;
+const ATTACH_MOVED: u32 = 0x0026_6d30;
+/// The bike's slots F39 ports, each with its function.
+const UPDATE_OWN: [(u32, u32); 6] = [
+    (0x3a4, FADE_FN),
+    (0x4f0, LEAN_FN),
+    (0x3e4, PREPARE_FN),
+    (0x35c, RIDE_FN),
+    (0x378, SYNC_FN),
+    (0x37c, SNAPSHOT_FN),
+];
+/// The scratch slots the port's calls hand out: the seat placed (out), the seat set (in), the aim's
+/// direction, the two bone buffers, the local point (out), a vector in, the rotated one (out).
+const U_PLACED: u32 = 70;
+const U_SEAT: u32 = 71;
+const U_DIR: u32 = 72;
+const U_POSES: u32 = 73;
+const U_LOCAL: u32 = 75;
+const U_IN: u32 = 76;
+const U_ROTATED: u32 = 77;
+
+/// The bike in RAM as the update's callees' port sees it: every word read and written in place, each
+/// call out the original's.
+struct UpdateInRam<'a> {
+    ee: &'a mut Ee,
+    /// What `$f12` is handed with the calls that take no float of their own (`dt`).
+    x: f32,
+}
+
+impl UpdateInRam<'_> {
+    fn call(&mut self, f: u32, ints: &[u64], floats: &[f32]) -> u32 {
+        self.ee.set(28, GP);
+        self.ee.call(f, ints, floats, BUDGET);
+        self.ee.r(2) as u32
+    }
+    fn put_quad(&mut self, at: u32, q: update::Quad) {
+        for (k, w) in q.into_iter().enumerate() {
+            self.ee.set_u32(at + 4 * k as u32, w);
+        }
+    }
+    fn quad(&self, at: u32) -> update::Quad {
+        [0, 4, 8, 12].map(|k| self.ee.u32_at(at + k))
+    }
+    fn own(&self, slot: u32) {
+        let f = UPDATE_OWN.iter().find(|s| s.0 == slot).unwrap().1;
+        assert_eq!(vt(self.ee, slot), f, "the bike's vt +{slot:#x}");
+    }
+}
+
+impl Updates for UpdateInRam<'_> {
+    fn bike(&self) -> u32 {
+        BIKE
+    }
+    fn word(&mut self, at: u32) -> u32 {
+        self.ee.u32_at(at)
+    }
+    fn set(&mut self, at: u32, w: u32) {
+        self.ee.set_u32(at, w);
+    }
+    fn out(&mut self, c: update::Out) -> u32 {
+        use update::Out;
+        let (bike, x) = (u64::from(BIKE), self.x);
+        let ee = &*self.ee;
+        let s = |k: u32| u64::from(ee.scratch(k));
+        let obj_fn = |o: u32, at: u32, slot: u32| ee.u32_at(ee.u32_at(o + at) + slot);
+        let u = u64::from;
+        let (f, ints, floats) = match c {
+            Out::Search(r) => (SEARCH_ALL, vec![u(r), 0], vec![x]),
+            Out::KindClear => (vt(ee, 0x39c), vec![bike], vec![x]),
+            Out::Gear => (vt(ee, 0x358), vec![bike], vec![x]),
+            Out::Trick => (vt(ee, 0x4e4), vec![bike], vec![x]),
+            Out::TrickEnd => (vt(ee, 0x4ac), vec![bike, u64::MAX], vec![x]),
+            Out::NetCheck => (vt(ee, 0x3e8), vec![bike], vec![x]),
+            Out::NetUnpack => (vt(ee, 0x3f0), vec![bike], vec![x]),
+            Out::AnimStop(ctrl) => (ANIM_STOP, vec![u(ctrl), 0, 0, 0, 0], vec![x]),
+            Out::AnimPlay { ctrl, clip, weight, fade } => {
+                (ANIM_PLAY, vec![u(ctrl), u(clip), 0, 0, 0, 0, 0, 0], vec![f32::from_bits(weight), f32::from_bits(fade), 0.0])
+            }
+            Out::AnimBlend { ctrl, clips, weight, mix, fade } => (
+                ANIM_BLEND,
+                vec![u(ctrl), u(clips[0]), u(clips[1]), 0, 0, 0, 0, 0],
+                vec![f32::from_bits(weight), f32::from_bits(mix), f32::from_bits(fade)],
+            ),
+            Out::NodeSet { node, at } => {
+                let i = s(U_SEAT);
+                self.put_quad(i as u32, at);
+                (NODE_SET, vec![u(node), 0, i], vec![x])
+            }
+            Out::Spin { node, axis, angle } => (NODE_SPIN, vec![u(node), u(axis)], vec![f32::from_bits(angle)]),
+            Out::Aim { node, dir, up } => {
+                let i = s(U_DIR);
+                self.put_quad(i as u32, dir);
+                (NODE_AIM, vec![u(node), i, u(up), 1, 1, 1], vec![x])
+            }
+            Out::Pose { node, buf } => (BONE_POSE, vec![u(node), 0, s(U_POSES + buf)], vec![x]),
+            Out::Place { part, buf } => (BONE_PLACE, vec![u(part), s(U_POSES + buf)], vec![x]),
+            Out::Frame { node, at } => (BONE_POSE, vec![u(node), 0, u(at)], vec![x]),
+            Out::Position { node, at } => (NODE_POSITION, vec![u(node), 0, u(at)], vec![x]),
+            Out::Moved(a) => (ATTACH_MOVED, vec![u(a)], vec![x]),
+            Out::Axes { node, z, y } => (NODE_AXES, vec![u(node), 0, u(z), u(y)], vec![x]),
+            Out::TrailOn(t) => (obj_fn(t, 4, 0x18), vec![u(t)], vec![x]),
+            Out::TrailOff(t) => (obj_fn(t, 4, 0x20), vec![u(t)], vec![x]),
+            Out::Send { net, arg } => (obj_fn(net, 0x38, 0x20), vec![u(net), u(arg)], vec![x]),
+            Out::Part(p) => (obj_fn(p, 0xc, 0xbc), vec![u(p)], vec![x]),
+            Out::Walk(g) => (TAIL, vec![u(g)], vec![x]),
+            Out::NodePlace { .. } | Out::Local { .. } | Out::Rotate { .. } => unreachable!("asked through vector()"),
+        };
+        self.call(f, &ints, &floats)
+    }
+    fn vector(&mut self, c: update::Out) -> update::Quad {
+        use update::Out;
+        let x = self.x;
+        let s = |k: u32| self.ee.scratch(k);
+        let (out, inp, rot) = (s(U_PLACED), s(U_IN), s(U_ROTATED));
+        let local = s(U_LOCAL);
+        let u = u64::from;
+        match c {
+            Out::NodePlace { node, at } => {
+                self.put_quad(inp, at);
+                self.call(NODE_TIP, &[u(out), u(node), u(inp)], &[x]);
+                self.quad(out)
+            }
+            Out::Local { node, at } => {
+                self.call(NODE_LOCAL, &[u(local), u(node), u(at)], &[x]);
+                self.quad(local)
+            }
+            Out::Rotate { node, v } => {
+                self.put_quad(inp, v);
+                self.call(NODE_ROTATE, &[u(rot), u(node), u(inp)], &[x]);
+                self.quad(rot)
+            }
+            c => unreachable!("{c:?} writes no vector"),
+        }
+    }
+}
+
+/// One of the vehicle update's F39 callees as the port's, on the bike in RAM.
+fn port_update(ee: &mut Ee, c: tail::Out, dt: F) {
+    let mut m = UpdateInRam { ee, x: dt.0 };
+    match c {
+        tail::Out::Fade => {
+            m.own(0x3a4);
+            update::fade(&mut m, dt);
+        }
+        tail::Out::Lean => {
+            m.own(0x4f0);
+            update::lean(&mut m, dt);
+        }
+        tail::Out::Prepare => {
+            m.own(0x3e4);
+            update::prepare(&mut m, dt);
+        }
+        tail::Out::Ride => {
+            m.own(0x35c);
+            update::ride(&mut m, dt);
+        }
+        tail::Out::Sync => {
+            m.own(0x378);
+            update::sync(&mut m);
+        }
+        tail::Out::Snapshot => {
+            m.own(0x37c);
+            update::snapshot(&mut m);
+        }
+        tail::Out::Network => {
+            update::network(&mut m, BIKE + update::NET, dt);
+        }
+        tail::Out::Parts => update::parts(&mut m),
+        c => unreachable!("{c:?}"),
+    }
+}
+
+/// The F39 oracle's fake world, at `U_AREA` (past the wreck's): the bike's vtable, the functions the
+/// hooks stand for, the parts', trail's and sender's vtables, and the objects the bike's words point
+/// at.
+const U_AREA: u32 = 0x01c0_6000;
+const U_VTABLE: u32 = U_AREA;
+const U_FNS: u32 = U_AREA + 0x600;
+const U_PART_VT: u32 = U_AREA + 0x700;
+const U_TRAIL_VT: u32 = U_AREA + 0x7c0;
+const U_NET_VT: u32 = U_AREA + 0x800;
+const U_STATE: u32 = U_AREA + 0x900;
+const U_RECORD: u32 = U_AREA + 0x940;
+const U_PART2: u32 = U_AREA + 0xa80;
+const U_CTRL: u32 = U_AREA + 0xb00;
+const U_MODEL: u32 = U_AREA + 0xb40;
+const U_HUNG: u32 = U_AREA + 0xd00;
+const U_KINDS: u32 = U_AREA + 0xd20;
+const U_HUNGS: u32 = U_AREA + 0xd40;
+const U_TABLE: u32 = U_AREA + 0x1400;
+const U_ANIMS: u32 = U_AREA + 0x1700;
+const U_CLIPS: u32 = U_AREA + 0x1b00;
+const U_CLIPDATA: u32 = U_AREA + 0x1b80;
+const U_TRAIL: u32 = U_AREA + 0x1e00;
+const U_RUN: u32 = U_AREA + 0x1e40;
+const U_TIMER_LIST: u32 = U_AREA + 0x2200;
+const U_TIMERS: u32 = U_AREA + 0x2240;
+const U_LEN: u32 = 0x2300;
+
+/// What the hooked calls answer, and the `dt` they are to be handed.
+#[derive(Clone, Copy, Debug, Default)]
+struct UpSays {
+    gear: u32,
+    trick: u32,
+    net: u32,
+    dt: f32,
+}
+
+/// A float's bits off a hash: sign, a power of two from 1/32 to 64, any mantissa.
+fn fake_float(h: u64) -> u32 {
+    let h = h as u32;
+    (h & 0x8000_0000) | ((0x7a + (h >> 23) % 12) << 23) | (h & 0x7f_ffff)
+}
+
+/// The vector a hooked node call writes: a hash of what it is (`tag`), the node and the vector in.
+fn fake_quad(tag: u64, node: u32, v: update::Quad) -> update::Quad {
+    let s = v.iter().fold(mix(tag << 32 ^ u64::from(node)), |s, &w| mix(s ^ u64::from(w)));
+    [0u64, 1, 2, 3].map(|k| fake_float(mix(s.wrapping_add(k))))
+}
+
+fn put_fake(ee: &mut Ee, at: u32, q: update::Quad) {
+    for (k, w) in q.into_iter().enumerate() {
+        ee.set_u32(at + 4 * k as u32, w);
+    }
+}
+
+/// The node writes the hooks make: a frame (64 bytes), a position, two axes.
+fn fake_frame(ee: &mut Ee, node: u32, at: u32) {
+    for k in 0..4 {
+        put_fake(ee, at + 16 * k, fake_quad(4, node, [k, 0, 0, 0]));
+    }
+}
+
+fn fake_position(ee: &mut Ee, node: u32, at: u32) {
+    put_fake(ee, at, fake_quad(5, node, [0; 4]));
+}
+
+fn fake_axes(ee: &mut Ee, node: u32, z: u32, y: u32) {
+    put_fake(ee, z, fake_quad(6, node, [0; 4]));
+    put_fake(ee, y, fake_quad(7, node, [0; 4]));
+}
+
+/// The port's side of the F39 oracle: words in RAM, the calls logged, the answers [`UpSays`]', the
+/// node writes the hooks' fakes.
+struct UpdateLogged<'a> {
+    ee: &'a mut Ee,
+    log: Vec<update::Out>,
+    says: UpSays,
+}
+
+impl Updates for UpdateLogged<'_> {
+    fn bike(&self) -> u32 {
+        BIKE
+    }
+    fn word(&mut self, at: u32) -> u32 {
+        self.ee.u32_at(at)
+    }
+    fn set(&mut self, at: u32, w: u32) {
+        self.ee.set_u32(at, w);
+    }
+    fn out(&mut self, c: update::Out) -> u32 {
+        use update::Out;
+        self.log.push(c);
+        match c {
+            Out::Gear => self.says.gear,
+            Out::Trick => self.says.trick,
+            Out::NetCheck => self.says.net,
+            Out::Frame { node, at } => {
+                fake_frame(self.ee, node, at);
+                0
+            }
+            Out::Position { node, at } => {
+                fake_position(self.ee, node, at);
+                0
+            }
+            Out::Axes { node, z, y } => {
+                fake_axes(self.ee, node, z, y);
+                0
+            }
+            _ => 0,
+        }
+    }
+    fn vector(&mut self, c: update::Out) -> update::Quad {
+        use update::Out;
+        self.log.push(c);
+        match c {
+            Out::NodePlace { node, at } => fake_quad(1, node, at),
+            Out::Local { node, at } => fake_quad(2, node, [0, 4, 8, 12].map(|k| self.ee.u32_at(at + k))),
+            Out::Rotate { node, v } => fake_quad(3, node, v),
+            c => unreachable!("{c:?} writes no vector"),
+        }
+    }
+}
+
+/// The F39 oracle rig: the image with every call the callees make hooked to log (answer as
+/// [`UpSays`] says, and write the fakes), the bike's vtable the fake one at [`U_AREA`].
+struct UpdateRig {
+    ee: Ee,
+    log: Rc<RefCell<Vec<update::Out>>>,
+    says: Rc<RefCell<UpSays>>,
+    regions: Vec<(u32, u32)>,
+    body: u32,
+    wheels: [u32; 2],
+}
+
+fn update_rig() -> Option<UpdateRig> {
+    use update::Out;
+    let mut ee = hooked(image()?);
+    for (slot, f) in UPDATE_OWN {
+        assert_eq!(vt(&ee, slot), f, "the bike's vt +{slot:#x}");
+    }
+    assert_eq!(ee.u32_at(PREPARE_FN + 0x38), 0x0c00_0000 | PREPARE_THUNK >> 2, "the prepare's first call");
+    assert_eq!(ee.u32_at(PREPARE_THUNK), 0x0800_0000 | PREPARE_HELD >> 2, "the prepare's thunk's target");
+    let body = ee.u32_at(BIKE + update::BODY);
+    let wheels = [ee.u32_at(BIKE + 0x17b0), ee.u32_at(BIKE + 0x17b4)];
+    for o in (0..U_LEN).step_by(4) {
+        ee.set_u32(U_AREA + o, 0);
+    }
+    let log: Rc<RefCell<Vec<Out>>> = Rc::default();
+    let says: Rc<RefCell<UpSays>> = Rc::default();
+    let poses: Rc<RefCell<Vec<u32>>> = Rc::default();
+    let stack = ee.stack;
+    let mut next = U_FNS;
+    let mut hook = |ee: &mut Ee, vtable: Option<(u32, u32)>, at: u32, h: Box<dyn Fn(&mut Ee) -> Out>| {
+        let at = match vtable {
+            Some((vt, slot)) => {
+                let f = next;
+                next += 4;
+                ee.set_u32(vt + slot, f);
+                f
+            }
+            None => at,
+        };
+        let l = log.clone();
+        ee.hooks.insert(at, Box::new(move |ee: &mut Ee| {
+            let c = h(ee);
+            l.borrow_mut().push(c);
+        }));
+    };
+    let quad_at = |ee: &Ee, at: u64| -> update::Quad { [0, 4, 8, 12].map(|k| ee.u32_at(at as u32 + k)) };
+    let dt_is = |ee: &Ee, s: &Rc<RefCell<UpSays>>, what: &str| {
+        assert_eq!(ee.f(12).to_bits(), s.borrow().dt.to_bits(), "{what} is handed dt");
+    };
+    // The bike's own: each logs, three answer.
+    for (slot, c) in [(0x39c, Out::KindClear), (0x358, Out::Gear), (0x4e4, Out::Trick), (0x4ac, Out::TrickEnd), (0x3e8, Out::NetCheck), (0x3f0, Out::NetUnpack)] {
+        let s = says.clone();
+        hook(&mut ee, Some((U_VTABLE, slot)), 0, Box::new(move |ee| {
+            assert_eq!(ee.r(4) as u32, BIKE, "a bike virtual handed something other than the bike");
+            let says = *s.borrow();
+            match c {
+                Out::Gear => ee.set(2, u64::from(says.gear)),
+                Out::Trick => {
+                    dt_is(ee, &s, "the trick step");
+                    ee.set(2, u64::from(says.trick));
+                }
+                Out::TrickEnd => assert_eq!(ee.r(5) as u32, u32::MAX, "the trick end's id"),
+                Out::NetCheck => ee.set(2, u64::from(says.net)),
+                Out::NetUnpack => dt_is(ee, &s, "the net unpack"),
+                _ => {}
+            }
+            c
+        }));
+    }
+    // The parts', the trail's, the sender's.
+    let s = says.clone();
+    hook(&mut ee, Some((U_PART_VT, 0xbc)), 0, Box::new(move |ee| {
+        dt_is(ee, &s, "a part's step");
+        Out::Part(ee.r(4) as u32)
+    }));
+    hook(&mut ee, Some((U_TRAIL_VT, 0x18)), 0, Box::new(|ee| Out::TrailOn(ee.r(4) as u32)));
+    hook(&mut ee, Some((U_TRAIL_VT, 0x20)), 0, Box::new(|ee| Out::TrailOff(ee.r(4) as u32)));
+    let s = says.clone();
+    hook(&mut ee, Some((U_NET_VT, 0x20)), 0, Box::new(move |ee| {
+        dt_is(ee, &s, "the send");
+        Out::Send { net: ee.r(4) as u32, arg: ee.r(5) as u32 }
+    }));
+    // The functions.
+    hook(&mut ee, None, SEARCH_ALL, Box::new(|ee| {
+        assert_eq!(ee.r(5), 0, "the search's second argument");
+        Out::Search(ee.r(4) as u32)
+    }));
+    hook(&mut ee, None, ANIM_STOP, Box::new(|ee| {
+        assert_eq!([5, 6, 7, 8].map(|r| ee.r(r)), [0; 4], "the stop's arguments");
+        Out::AnimStop(ee.r(4) as u32)
+    }));
+    hook(&mut ee, None, ANIM_PLAY, Box::new(|ee| {
+        assert_eq!([6, 7, 8, 9, 10, 11].map(|r| ee.r(r)), [0; 6], "the play's arguments");
+        assert_eq!(ee.f(14).to_bits(), 0, "the play's third float");
+        Out::AnimPlay { ctrl: ee.r(4) as u32, clip: ee.r(5) as u32, weight: ee.f(12).to_bits(), fade: ee.f(13).to_bits() }
+    }));
+    hook(&mut ee, None, ANIM_BLEND, Box::new(|ee| {
+        assert_eq!([7, 8, 9, 10, 11].map(|r| ee.r(r)), [0; 5], "the blend's arguments");
+        Out::AnimBlend {
+            ctrl: ee.r(4) as u32,
+            clips: [ee.r(5) as u32, ee.r(6) as u32],
+            weight: ee.f(12).to_bits(),
+            mix: ee.f(13).to_bits(),
+            fade: ee.f(14).to_bits(),
+        }
+    }));
+    hook(&mut ee, None, ANIM_BLEND4, Box::new(|_| panic!("the four-clip blend is called")));
+    hook(&mut ee, None, NODE_TIP, Box::new(move |ee| {
+        let (node, at) = (ee.r(5) as u32, quad_at(ee, ee.r(6)));
+        let out = ee.r(4) as u32;
+        put_fake(ee, out, fake_quad(1, node, at));
+        Out::NodePlace { node, at }
+    }));
+    hook(&mut ee, None, NODE_SET, Box::new(move |ee| {
+        assert_eq!(ee.r(5), 0, "the set's second argument");
+        Out::NodeSet { node: ee.r(4) as u32, at: quad_at(ee, ee.r(6)) }
+    }));
+    hook(&mut ee, None, NODE_SPIN, Box::new(|ee| Out::Spin { node: ee.r(4) as u32, axis: ee.r(5) as u32, angle: ee.f(12).to_bits() }));
+    hook(&mut ee, None, NODE_AIM, Box::new(move |ee| {
+        assert_eq!([7, 8, 9].map(|r| ee.r(r)), [1; 3], "the aim's flags");
+        Out::Aim { node: ee.r(4) as u32, dir: quad_at(ee, ee.r(5)), up: ee.r(6) as u32 }
+    }));
+    let p = poses.clone();
+    hook(&mut ee, None, BONE_POSE, Box::new(move |ee| {
+        assert_eq!(ee.r(5), 0, "the pose's second argument");
+        let (node, at) = (ee.r(4) as u32, ee.r(6) as u32);
+        if (stack - 0x1_0000..stack).contains(&at) {
+            let mut p = p.borrow_mut();
+            p.push(at);
+            Out::Pose { node, buf: p.len() as u32 - 1 }
+        } else {
+            fake_frame(ee, node, at);
+            Out::Frame { node, at }
+        }
+    }));
+    let p = poses.clone();
+    hook(&mut ee, None, BONE_PLACE, Box::new(move |ee| {
+        let buf = p.borrow().iter().position(|&b| b == ee.r(5) as u32).map_or(99, |i| i as u32);
+        Out::Place { part: ee.r(4) as u32, buf }
+    }));
+    hook(&mut ee, None, NODE_POSITION, Box::new(|ee| {
+        assert_eq!(ee.r(5), 0, "the position's second argument");
+        let (node, at) = (ee.r(4) as u32, ee.r(6) as u32);
+        fake_position(ee, node, at);
+        Out::Position { node, at }
+    }));
+    hook(&mut ee, None, ATTACH_MOVED, Box::new(|ee| Out::Moved(ee.r(4) as u32)));
+    hook(&mut ee, None, NODE_AXES, Box::new(|ee| {
+        assert_eq!(ee.r(5), 0, "the axes' second argument");
+        let (node, z, y) = (ee.r(4) as u32, ee.r(6) as u32, ee.r(7) as u32);
+        fake_axes(ee, node, z, y);
+        Out::Axes { node, z, y }
+    }));
+    hook(&mut ee, None, NODE_LOCAL, Box::new(move |ee| {
+        let (out, node, at) = (ee.r(4) as u32, ee.r(5) as u32, ee.r(6) as u32);
+        let q = fake_quad(2, node, quad_at(ee, u64::from(at)));
+        put_fake(ee, out, q);
+        Out::Local { node, at }
+    }));
+    hook(&mut ee, None, NODE_ROTATE, Box::new(move |ee| {
+        let (out, node, v) = (ee.r(4) as u32, ee.r(5) as u32, quad_at(ee, ee.r(6)));
+        put_fake(ee, out, fake_quad(3, node, v));
+        Out::Rotate { node, v }
+    }));
+    let s = says.clone();
+    hook(&mut ee, None, TAIL, Box::new(move |ee| {
+        dt_is(ee, &s, "the walk");
+        Out::Walk(ee.r(4) as u32)
+    }));
+    // The fakes in place, and the poses' list cleared with every log.
+    ee.set_u32(BIKE + 4, U_VTABLE);
+    ee.set_u32(U_RECORD + 0xc, U_PART_VT);
+    ee.set_u32(U_PART2 + 0xc, U_PART_VT);
+    ee.set_u32(U_TRAIL + 4, U_TRAIL_VT);
+    let p = poses;
+    let l = log.clone();
+    ee.hooks.insert(U_AREA + 0x6fc, Box::new(move |_: &mut Ee| {
+        p.borrow_mut().clear();
+        l.borrow_mut().clear();
+    }));
+    let regions = vec![(BIKE, 0x1820), (body, 0x230), (wheels[0], 0x920), (wheels[1], 0x920), (U_AREA, U_LEN), (update::POSE_SPEED, 4)];
+    Some(UpdateRig { ee, log, says, regions, body, wheels })
+}
+
+impl UpdateRig {
+    /// Runs the original's `f` and then the port's `port` from the same words and answers; asserts
+    /// the words, the calls and the answer (`v0`) the same.
+    fn check(&mut self, k: usize, f: u32, ints: &[u64], x: f32, port: impl FnOnce(&mut UpdateLogged) -> u32) -> Vec<update::Out> {
+        let before = snap_regions(&self.ee, &self.regions);
+        let says = *self.says.borrow();
+        self.ee.call(U_AREA + 0x6fc, &[], &[], 10);
+        self.ee.set(28, GP);
+        self.ee.call(f, ints, &[x], BUDGET);
+        let want_v0 = self.ee.r(2) as u32;
+        let want = std::mem::take(&mut *self.log.borrow_mut());
+        let want_words = snap_regions(&self.ee, &self.regions);
+        restore_regions(&mut self.ee, &self.regions, &before);
+        let mut m = UpdateLogged { ee: &mut self.ee, log: Vec::new(), says };
+        let v0 = port(&mut m);
+        let got = m.log;
+        assert_eq!(format!("{got:?}"), format!("{want:?}"), "case {k} ({f:#x}): the calls");
+        let got_words = snap_regions(&self.ee, &self.regions);
+        if got_words != want_words {
+            let names: Vec<(u32, u32)> = self.regions.iter().flat_map(|&(at, len)| (0..len).step_by(4).map(move |o| (at, o))).collect();
+            let d: Vec<String> = (0..got_words.len())
+                .filter(|&i| got_words[i] != want_words[i])
+                .map(|i| format!("{:#x}+{:#x}: port {:#010x}, original {:#010x}", names[i].0, names[i].1, got_words[i], want_words[i]))
+                .collect();
+            panic!("case {k} ({f:#x}): {} words differ\n  {}", d.len(), d.iter().take(20).cloned().collect::<Vec<_>>().join("\n  "));
+        }
+        if let Some(v0) = Some(v0).filter(|_| f == RIDE_FN || f == NETWORK) {
+            assert_eq!(v0, want_v0, "case {k} ({f:#x}): the answer");
+        }
+        want
+    }
+}
+
+#[allow(clippy::float_arithmetic)]
+fn vu_add(a: f32, b: f32) -> f32 {
+    a + b
+}
+
+/// **The vehicle update's callees are the original's**: 10 000 bikes, each state 4's with every word
+/// the callees read drawn at random — the fade's clock and start (running out this frame among them),
+/// the record and its held bit, the hung parts (−1 to 4, kinds 0-2); the auto gears, the gear's
+/// entries (no wait, down or up), speeds about 5 and 10 ft/s, the clock about the wait; the stunt ids
+/// (in the table, the riding pose, none, −1), the clip's length and time, loads, the pose speed, the
+/// hold about `dt`, down, the trick step's answer; the vehicle state's kind (0-5) and the net check's
+/// answer, the fade's rate, the new stunt, the clips (zero length among them), the fore-aft and cross
+/// blends about their halves, the suspension's and head's words, the seat, look and lean quadwords;
+/// the flags and the camera's, replay's, trail's and body's masks, take-off, trail on and off, the
+/// wreck, the kept stunts, the run or none; the sender's flags, clock, timers (−1 to 4, due on the
+/// clock among them); the parts or none — and run through SLUS-21104's fade, ride, lean, prepare,
+/// sync, snapshot, network and parts in that order, each against the port's from the same words.
+/// Every word of the bike, its body, its wheels and the fake world comes out the same, the calls are
+/// the same, in order, with the same arguments, and the ride's and network's answers are. The deeper
+/// callees are hooked to log; the node calls write hashed vectors and frames, the same in the port's
+/// mirror.
+#[test]
+fn the_vehicle_updates_callees_are_the_originals() {
+    use update::Out;
+    let Some(mut rig) = update_rig() else { return };
+    let image_words = snap_regions(&rig.ee, &rig.regions);
+    let mut g = Gen(0x0000_f39f);
+    let mut t = BTreeMap::new();
+    let bike = u64::from(BIKE);
+    for k in 0..10_000 {
+        let ee = &mut rig.ee;
+        restore_regions(ee, &rig.regions, &image_words);
+        let b = |g: &mut Gen, n: u32| u32::from(g.one_in(n));
+        let put = |ee: &mut Ee, o: u32, v: f32| ee.set_f32(BIKE + o, v);
+        let word = |ee: &mut Ee, o: u32, w: u32| ee.set_u32(BIKE + o, w);
+        let dt = if g.one_in(2) { f32::from_bits(DT) } else { g.f(0.002, 0.05) };
+        // The fade.
+        let fading = !g.one_in(4);
+        let fade = if !fading {
+            [0.0, -0.0, -0.5][(g.bits() % 3) as usize]
+        } else {
+            match g.bits() % 4 {
+                0 => dt,
+                1 => g.f(0.0, 2.0 * dt),
+                _ => g.f(0.0, 3.0),
+            }
+        };
+        put(ee, update::FADE, fade);
+        let start = if g.one_in(5) { 0.0 } else { g.f(0.5, 3.0) };
+        put(ee, update::FADE_START, start);
+        word(ee, update::RECORD, if !fading && g.one_in(3) { 0 } else { U_RECORD });
+        wreck_words(ee, &mut g, U_RECORD + 0x124, 1);
+        wreck_words(ee, &mut g, U_RECORD + 0xf8, 1);
+        word(ee, 0x1428, U_CTRL);
+        ee.set_u32(U_CTRL + 0x24, U_MODEL);
+        word(ee, 0x1470, if g.one_in(15) { u32::MAX } else { g.bits() % 5 });
+        word(ee, 0x1474, U_HUNG);
+        word(ee, 0x1478, U_KINDS);
+        for i in 0..4 {
+            ee.set_u32(U_HUNG + 4 * i, U_HUNGS + 0x180 * i);
+            ee.set_u32(U_KINDS + 4 * i, g.bits() % 3);
+        }
+        // The ride.
+        word(ee, 0x10d4, 1 - b(&mut g, 4));
+        let gear = g.bits() % 4;
+        let mut waits = [0.0f32; 4];
+        for (i, w) in waits.iter_mut().enumerate() {
+            let e = BIKE + 0xec0 + 32 * i as u32;
+            *w = if g.one_in(4) { [0.0, -0.0][(g.bits() % 2) as usize] } else { g.f(0.0, 1.0) };
+            ee.set_f32(e, *w);
+            let step = g.f(0.5, 2.0);
+            ee.set_f32(e + 4, step);
+            ee.set_u32(e + 8, b(&mut g, 2));
+        }
+        let speed = match g.bits() % 4 {
+            0 => 5.0,
+            1 => 10.0,
+            2 => g.f(-5.0, 15.0),
+            _ => g.f(0.0, 60.0),
+        };
+        put(ee, 0x32c, speed);
+        let clock = if g.one_in(2) { vu_sub(waits[gear as usize], dt) } else { g.f(0.0, 1.0) };
+        put(ee, 0x10d0, clock);
+        let (now, top) = (g.f(0.0, 5.0), g.f(1.0, 5.0));
+        put(ee, 0x10cc, now);
+        put(ee, 0x10d8, top);
+        // The lean: the stunt table, the anims, the clips.
+        word(ee, 0x14f0, U_TABLE);
+        for id in -1i32..46 {
+            let e = (U_TABLE as i32 + 0x18 + 12 * id) as u32;
+            ee.set_u32(e, U_ANIMS + 0x80 * (g.bits() % 8));
+        }
+        for i in 0..8 {
+            let a = U_ANIMS + 0x80 * i;
+            let len = g.f(0.0, 3.0);
+            ee.set_f32(a + 0x40, len);
+            ee.set_u32(a + 0x58, if g.one_in(2) { 0 } else { g.bits() });
+            ee.set_u32(U_CLIPS + 0x10 * i + 4, U_CLIPDATA + 0x50 * i);
+            let len = if g.one_in(8) { 0.0 } else { g.f(0.1, 5.0) };
+            ee.set_f32(U_CLIPDATA + 0x50 * i + 0x44, len);
+        }
+        for o in (0x1530..0x15f8).step_by(4) {
+            word(ee, o, U_CLIPS + 0x10 * (g.bits() % 8));
+        }
+        let pose = 46;
+        let id = [4, pose, 0xff, u32::MAX, g.bits() % 46, g.bits() % 46][(g.bits() % 6) as usize];
+        word(ee, update::STUNT, id);
+        word(ee, 0x152c, if g.one_in(2) { id } else { [pose, 4][(g.bits() % 2) as usize] });
+        let entry = update::stunt_entry(U_TABLE, id);
+        let clip_len = if entry == 0 { 1.0 } else { ee.f32_at(ee.u32_at(entry) + 0x40) };
+        let time = if g.one_in(4) { clip_len } else { g.f(0.0, 3.0) };
+        put(ee, 0x14d8, time);
+        for o in [0x704, 0x708] {
+            let x = if g.one_in(2) { g.near(0.0, -1.0, 0.0) } else { g.f(0.0, 1.0) };
+            put(ee, o, x);
+        }
+        word(ee, 0xbbc, g.bits() % 3);
+        let pose_speed = g.f(2.0, 8.0);
+        ee.set_f32(update::POSE_SPEED, pose_speed);
+        if g.one_in(4) {
+            put(ee, 0x32c, pose_speed);
+        }
+        word(ee, 0x324, 1 - b(&mut g, 2));
+        let hold = match g.bits() % 4 {
+            0 => dt,
+            1 => -0.0,
+            2 => g.f(0.0, 2.0 * dt),
+            _ => g.f(0.0, 1.0),
+        };
+        put(ee, 0x14f4, hold);
+        word(ee, 0xc80, [0, 0, 0, 7, 1, 3][(g.bits() % 6) as usize]);
+        word(ee, 0x31c, b(&mut g, 3));
+        // The prepare.
+        word(ee, update::STATE, U_STATE);
+        ee.set_u32(U_STATE + 0x28, g.bits() % 6);
+        let rate = g.f(-0.2, 1.2);
+        put(ee, 0x14bc, rate);
+        let rate = g.f(0.0, 10.0);
+        put(ee, 0x14c0, rate);
+        let next = if g.one_in(2) { id } else { [4, pose, 0xff, u32::MAX, g.bits() % 46, g.bits() % 60][(g.bits() % 6) as usize] };
+        word(ee, update::NEXT_STUNT, next);
+        word(ee, 0x1650, b(&mut g, 4));
+        for (o, at, lo, hi) in [(0x12ec, 0.0, -1.2, 1.2), (0x14b0, 0.0, 0.0, 2.0), (0x330, 0.0, -3.0, 3.0), (0x14b4, 0.5, -0.2, 1.2), (0x14b8, 0.5, -0.2, 1.2), (0x141c, 0.5, -0.2, 1.2), (0x12e8, 0.0, -1.2, 1.2), (0x1810, 0.0, -1.0, 1.0)] {
+            let x = g.near(at, lo, hi);
+            put(ee, o, x);
+        }
+        for o in [0x1800, 0x17e0, 0x17f0] {
+            wreck_quad(ee, &mut g, BIKE + o, 5.0);
+        }
+        for w in rig.wheels {
+            wreck_quad(ee, &mut g, w + 0x90, 5.0);
+            wreck_quad(ee, &mut g, w + 0xc0, 1.0);
+            for o in [0xf0, 0x1d0, 0x8ac] {
+                let x = g.f(-1.0, 1.0);
+                ee.set_f32(w + o, x);
+            }
+        }
+        // The sync and the snapshot.
+        word(ee, 0x444, g.bits());
+        for o in [0x9c4, 0xa94, 0x734, 0xb54] {
+            word(ee, o, if g.one_in(8) { 0 } else { 1 << (g.bits() % 32) });
+        }
+        word(ee, 0xa70, b(&mut g, 2));
+        for o in [0x70, 0x80, 0x190] {
+            wreck_quad(ee, &mut g, rig.body + o, 30.0);
+        }
+        for o in [0xbd0, 0x340, 0xda0, 0xb20, 0x1260] {
+            wreck_quad(ee, &mut g, BIKE + o, 30.0);
+        }
+        for o in [0x1194, 0x11d0, 0xb34, 0x944] {
+            word(ee, o, b(&mut g, 2));
+        }
+        for o in [0x368, 0x12c8, 0xd08, 0x318, 0x12cc, 0x12d4, 0x12c4, 0x14e4, 0xd0, 0x16d4] {
+            wreck_words(ee, &mut g, BIKE + o, 1);
+        }
+        word(ee, 0x10dc, U_TRAIL);
+        word(ee, 0x868, if g.one_in(3) { g.bits() % 8 } else { 0 });
+        for o in [0x13b8, 0x13bc, 0x13c0] {
+            word(ee, o, if g.one_in(4) { next } else { 41 + g.bits() % 20 });
+        }
+        word(ee, 0x684, if g.one_in(4) { 0 } else { U_RUN });
+        wreck_words(ee, &mut g, U_RUN + 0x50, 1);
+        wreck_words(ee, &mut g, U_RUN + 0x2c0, 1);
+        // The sender and the parts.
+        let net = BIKE + update::NET;
+        wreck_words(ee, &mut g, net + 0x14, 1);
+        let net_clock = g.f(0.0, 10.0);
+        ee.set_f32(net + 0x18, net_clock);
+        ee.set_u32(net + 0x1c, if g.one_in(15) { u32::MAX } else { g.bits() % 5 });
+        ee.set_u32(net + 0x24, U_TIMER_LIST);
+        wreck_words(ee, &mut g, net + 0x34, 1);
+        ee.set_u32(net + 0x38, U_NET_VT);
+        for i in 0..4 {
+            let e = U_TIMERS + 0x10 * i;
+            ee.set_u32(U_TIMER_LIST + 4 * i, e);
+            ee.set_u32(e, g.bits() & 0xff);
+            let period = g.f(0.0, 2.0);
+            ee.set_f32(e + 4, period);
+            let due = if g.one_in(3) { vu_add(net_clock, dt) } else { g.f(0.0, 12.0) };
+            ee.set_f32(e + 8, due);
+        }
+        word(ee, 0xd4, if g.one_in(3) { 0 } else { U_PART2 });
+        *rig.says.borrow_mut() = UpSays { gear, trick: if g.one_in(2) { 0 } else { 1 + g.bits() % 46 }, net: b(&mut g, 2), dt };
+
+        // Fade, ride, lean, prepare, sync, snapshot, network, parts: each from the last one's words.
+        let (x, f) = (dt, F(dt));
+        let c = rig.check(k, FADE_FN, &[bike], x, |m| {
+            update::fade(m, f);
+            0
+        });
+        tally(&mut t, match () {
+            _ if !fading => "fade off",
+            _ if c.contains(&Out::KindClear) => "fade over",
+            _ if start == 0.0 => "fade, no start",
+            _ => "fade, alpha",
+        });
+        if fading && rig.ee.u8_at(U_RECORD + 0x126) & 0x20 != 0 {
+            tally(&mut t, "fade held");
+        }
+        let c = rig.check(k, RIDE_FN, &[bike], x, |m| update::ride(m, f));
+        let moved = rig.ee.u32_at(BIKE + 0x10d0) != clock.to_bits() || rig.ee.f32_at(BIKE + 0x10cc).to_bits() != now.to_bits();
+        tally(&mut t, match () {
+            _ if !c.contains(&Out::Gear) => "ride, manual",
+            _ if moved && rig.ee.u32_at(BIKE + 0x10d0) == 0 => "ride, shifted or dropped",
+            _ if moved => "ride, counting",
+            _ => "ride, slow",
+        });
+        let c = rig.check(k, LEAN_FN, &[bike], x, |m| {
+            update::lean(m, f);
+            0
+        });
+        if rig.ee.u32_at(BIKE + 0x14cc) != 0 {
+            tally(&mut t, "lean, the clip ran out");
+        }
+        if c.contains(&Out::TrickEnd) {
+            tally(&mut t, "lean, the hold ran out");
+        }
+        tally(&mut t, match rig.ee.u32_at(BIKE + update::NEXT_STUNT) {
+            46 => "lean, the riding pose",
+            0xff => "lean, no stunt",
+            _ => "lean, a trick",
+        });
+        let c = rig.check(k, PREPARE_FN, &[bike], x, |m| {
+            update::prepare(m, f);
+            0
+        });
+        for (has, name) in [
+            (c.contains(&Out::NetUnpack), "prepare, net unpack"),
+            (c.iter().any(|c| matches!(c, Out::AnimStop(_))), "prepare, stopped"),
+            (c.iter().any(|c| matches!(c, Out::AnimBlend { .. })), "prepare, the pose's blend"),
+            (c.iter().any(|c| matches!(c, Out::AnimPlay { clip, .. } if *clip != rig.ee.u32_at(BIKE + 0x15f0))), "prepare, a stunt's clip"),
+            (c.iter().filter(|c| matches!(c, Out::Spin { .. })).count() == 3, "prepare, the bars turned"),
+            (c.iter().any(|c| matches!(c, Out::Place { .. })), "prepare, a part placed"),
+        ] {
+            if has {
+                tally(&mut t, name);
+            }
+        }
+        let c = rig.check(k, SYNC_FN, &[bike], x, |m| {
+            update::sync(m);
+            0
+        });
+        for (has, name) in [
+            (c.iter().any(|c| matches!(c, Out::Local { .. })), "sync, the camera's"),
+            (c.iter().any(|c| matches!(c, Out::TrailOn(_))), "sync, trail on"),
+            (c.iter().any(|c| matches!(c, Out::TrailOff(_))), "sync, trail off"),
+            (c.iter().any(|c| matches!(c, Out::Rotate { .. })), "sync, the trail's spot"),
+            (rig.ee.u32_at(BIKE + 0xb30) == 1, "sync, the wreck's flag"),
+        ] {
+            if has {
+                tally(&mut t, name);
+            }
+        }
+        let c = rig.check(k, SNAPSHOT_FN, &[bike], x, |m| {
+            update::snapshot(m);
+            0
+        });
+        if !c.is_empty() {
+            tally(&mut t, if rig.ee.u32_at(BIKE + 0x868) == 7 { "snapshot, thrown" } else { "snapshot" });
+            tally(&mut t, if rig.ee.u8_at(BIKE + 0x904) == 0xff { "snapshot, no stunt kept" } else { "snapshot, a stunt kept" });
+        }
+        let c = rig.check(k, NETWORK, &[u64::from(net)], x, |m| update::network(m, net, f));
+        let fired = rig.ee.u32_at(net + 0x14) & 1 != 0;
+        tally(&mut t, match () {
+            _ if !c.is_empty() => "network, sent",
+            _ if fired => "network, due but held",
+            _ => "network, nothing due",
+        });
+        let c = rig.check(k, PARTS, &[bike], x, |m| {
+            update::parts(m);
+            0
+        });
+        tally(&mut t, if c.len() == 3 { "parts, both" } else { "parts, fewer" });
+    }
+    eprintln!("{t:#?}");
+    for (path, n) in &t {
+        assert!(*n >= 20, "path {path} taken only {n} times");
+    }
+    assert!(t.len() >= 28, "every path taken: {t:#?}");
 }
