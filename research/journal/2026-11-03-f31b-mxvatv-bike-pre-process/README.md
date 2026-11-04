@@ -32,6 +32,12 @@ stuck timer, rumble, tricks, the run) is ported as `handling::tail`. The update 
 row of ride-2 and flip-1, bit-exact, with a RAM-wide shadow check of the bike's update on every frame.
 Details in 5-tail-FINAL.md.
 
+F31b4b: the bike's wreck (the wreck test, entry, unwreck, part swaps and the put-back) is ported as
+`handling::wreck`. The test matches the original on 12 000 random bikes and the virtuals on 12 000 random
+calls. The hybrid frame runs it for every row of ride-2 and flip-1, bit-exact, flip-1's wreck on row 125
+and put-back on row 193. The original's hits run even after a clause entered; MD63f's gravity is not in
+state 4's wreck. Details in 6-wreck-FINAL.md.
+
 F31b4c: MX vs. ATV's `[Mass Properties]` reader and the bike loader's re-read are ported as
 `handling::mass`. Every word the reader writes matches the original on 10 000 generated files, state 4's
 134 mass words come out word for word from `mx_race250p.phy`, and ride-2 and flip-1 stay bit-exact on

@@ -3040,7 +3040,8 @@ fn slot_of(c: tail::Out) -> Option<u32> {
 }
 
 /// The bike in RAM as the port's vehicle update sees it: [`tail::Vehicle`]'s words, written back
-/// word by word before each call and read again after it. Each call is the original's.
+/// word by word before each call and read again after it. Each call is the original's but the wreck
+/// test's and the put-back's, which are the port's ([`port_wreck`]).
 struct TailInRam<'a> {
     ee: &'a mut Ee,
     v: tail::Vehicle,
@@ -3099,6 +3100,11 @@ impl Vehicles for TailInRam<'_> {
     fn out(&mut self, c: tail::Out, dt: F) {
         use tail::Out;
         self.write();
+        if matches!(c, Out::WreckTest | Out::PutBack) {
+            port_wreck(self.ee, c, dt);
+            self.read();
+            return;
+        }
         let ee = &*self.ee;
         let bike = u64::from(BIKE);
         let (f, ints, x) = match c {
@@ -3791,6 +3797,826 @@ fn the_tails_walk_is_the_originals() {
     for (path, n) in &t {
         assert!(*n >= 20, "path {path} taken only {n} times");
     }
+}
+
+// --- F31b4b: the bike's wreck around the sim frame -----------------------------------------------------
+
+use game_sim::handling::wreck::{self, Wrecks};
+
+/// The wreck's functions in SLUS-21104 (research/oracle.txt `# F31b4b`): the bike's virtuals, then
+/// the calls out they make.
+const WRECK_TEST: u32 = 0x004e_24a0;
+const WRECK_ENTER: u32 = 0x004e_2260;
+const UNWRECK: u32 = 0x004e_2380;
+const PART_TOGGLE: u32 = 0x004e_1870;
+const TO_WRECK: u32 = 0x004e_2e10;
+const TO_RIDE: u32 = 0x004e_2eb0;
+const PUT_BACK: u32 = 0x004d_8940;
+const RAND: u32 = 0x0035_61a8;
+const BOUNDS: u32 = 0x0031_d410;
+const UNHOOK: u32 = 0x0018_d540;
+const ATTACH: u32 = 0x0011_43e0;
+const ENGINE_RESET: u32 = 0x0049_f7f0;
+const WHEEL_RESET: u32 = 0x004a_04c0;
+const RIDER_SETTLE: u32 = 0x0026_6c90;
+const BONE_POSE: u32 = 0x0019_4e00;
+const BONE_PLACE: u32 = 0x0019_4da0;
+const TERRAIN_NORMAL: u32 = 0x0048_33c0;
+const GROUND_RESET: u32 = 0x0049_2ca0;
+const TRAIL_RESET: u32 = 0x004f_a760;
+const CAMERA_RESET: u32 = 0x004f_7590;
+/// The bike's vtable slots the wreck calls, the port's own first (each with its function).
+const WRECK_OWN: [(u32, u32); 7] = [
+    (0x49c, WRECK_TEST),
+    (0x368, WRECK_ENTER),
+    (0x36c, UNWRECK),
+    (0x398, PART_TOGGLE),
+    (0x48c, TO_WRECK),
+    (0x490, TO_RIDE),
+    (PUT_BACK_SLOT, PUT_BACK),
+];
+/// The scratch slots the port's calls hand out for their buffers: the body's quadword, the terrain's
+/// normal, the bounds test's two words, the put-back's two bone buffers.
+const WRECK_SCRATCH: [u32; 5] = [61, 62, 63, 64, 65];
+
+/// The bike in RAM as the wreck's port sees it: every word read and written in place, each call out
+/// the original's, the bike's own virtuals among the wreck's the port's.
+struct WreckInRam<'a> {
+    ee: &'a mut Ee,
+    /// What `$f12` is handed with the calls that take no float of their own.
+    x: f32,
+}
+
+impl WreckInRam<'_> {
+    fn call(&mut self, f: u32, ints: &[u64], x: f32) -> u32 {
+        self.ee.set(28, GP);
+        self.ee.call(f, ints, &[x], BUDGET);
+        self.ee.r(2) as u32
+    }
+    fn own(&self, slot: u32) {
+        let f = WRECK_OWN.iter().find(|s| s.0 == slot).unwrap().1;
+        assert_eq!(vt(self.ee, slot), f, "the bike's vt +{slot:#x}");
+    }
+}
+
+impl Wrecks for WreckInRam<'_> {
+    fn bike(&self) -> u32 {
+        BIKE
+    }
+    fn word(&mut self, at: u32) -> u32 {
+        self.ee.u32_at(at)
+    }
+    fn set(&mut self, at: u32, w: u32) {
+        self.ee.set_u32(at, w);
+    }
+    fn normal(&mut self, terrain: u32, at: u32) -> Vf {
+        let out = self.ee.scratch(WRECK_SCRATCH[1]);
+        self.call(TERRAIN_NORMAL, &[u64::from(terrain), u64::from(at), u64::from(out), 0, 0], self.x);
+        Vf::from_bits([0, 4, 8, 12].map(|k| self.ee.u32_at(out + k)))
+    }
+    fn out(&mut self, c: wreck::Out) -> u32 {
+        use wreck::Out;
+        let bike = u64::from(BIKE);
+        let x = self.x;
+        let ee = &*self.ee;
+        let slot = |s: u32| vt(ee, s);
+        let body = ee.u32_at(BIKE + wreck::BODY);
+        let body_fn = |s: u32| ee.u32_at(ee.u32_at(body + 0x110) + s);
+        let part_fn = |p: u32, s: u32| ee.u32_at(ee.u32_at(p + 0x28) + s);
+        let (f, ints, x) = match c {
+            Out::Enter(r) => {
+                self.own(0x368);
+                wreck::enter(self, r);
+                return 0;
+            }
+            Out::Unwreck(kind) => {
+                self.own(0x36c);
+                wreck::unwreck(self, kind);
+                return 0;
+            }
+            Out::Part(on) => {
+                self.own(0x398);
+                wreck::part(self, on);
+                return 0;
+            }
+            Out::ToWreck | Out::ToRide => {
+                self.own(if c == Out::ToWreck { 0x48c } else { 0x490 });
+                wreck::swap(self, c == Out::ToWreck);
+                return 0;
+            }
+            Out::PutBack { snap, kind } => {
+                self.own(PUT_BACK_SLOT);
+                wreck::put_back(self, snap, kind);
+                return 0;
+            }
+            Out::OutOfBounds => (slot(0x16c), vec![bike], x),
+            Out::Bounds { node, at } => {
+                let out = u64::from(ee.scratch(WRECK_SCRATCH[2]));
+                (BOUNDS, vec![u64::from(node), u64::from(at), out + 4, out, 0], 150.0)
+            }
+            Out::Settle => (slot(0x4a8), vec![bike], x),
+            Out::Stance(i) => (slot(0x4b0), vec![bike, i as i64 as u64], x),
+            Out::Rand => (RAND, vec![], x),
+            Out::Post { id, arg } => (POST_MESSAGE, vec![u64::from(ee.u32_at(POST_QUEUE)), bike + 0x674, 8, u64::from(id), u64::from(arg), 0], x),
+            Out::RumbleReady(at) => (RUMBLE_READY, vec![u64::from(at)], x),
+            Out::Rumble(r) => (ee.u32_at(ee.u32_at(r + 0x1c) + 0x4c), vec![u64::from(r), 0, 200], 1.0),
+            Out::BodyAt { slot, at } => (body_fn(slot), vec![u64::from(body), u64::from(at)], x),
+            Out::BodyQuad { slot, q } => {
+                let at = ee.scratch(WRECK_SCRATCH[0]);
+                let f = body_fn(slot);
+                for (k, w) in q.to_bits().into_iter().enumerate() {
+                    self.ee.set_u32(at + 4 * k as u32, w);
+                }
+                (f, vec![u64::from(body), u64::from(at)], x)
+            }
+            Out::PartOn(p) => (part_fn(p, 0x20), vec![u64::from(p + 0x24)], x),
+            Out::PartOff(p) => (part_fn(p, 0x18), vec![u64::from(p + 0x24)], x),
+            Out::Unhook(at) => (UNHOOK, vec![u64::from(at)], x),
+            Out::Attach { part, a, b } => (ATTACH, vec![u64::from(part), u64::from(a), u64::from(b), 1], x),
+            Out::Engine(at) => (ENGINE_RESET, vec![u64::from(at)], x),
+            Out::Wheel(at) => (WHEEL_RESET, vec![u64::from(at)], x),
+            Out::Rider { a, b } => (RIDER_SETTLE, vec![u64::from(a), u64::from(b), 1, 1], x),
+            Out::Pose { bone, buf } => (BONE_POSE, vec![u64::from(bone), 0, u64::from(ee.scratch(WRECK_SCRATCH[3] + buf))], x),
+            Out::Place { part, buf } => (BONE_PLACE, vec![u64::from(part), u64::from(ee.scratch(WRECK_SCRATCH[3] + buf))], x),
+            Out::Ground => (GROUND_RESET, vec![bike], x),
+            Out::Kind(set) => (slot(if set { 0x3a0 } else { 0x39c }), vec![bike], x),
+            Out::Trail(at) => (TRAIL_RESET, vec![u64::from(at)], x),
+            Out::Sync => (slot(0x378), vec![bike], x),
+            Out::Camera(at) => (CAMERA_RESET, vec![u64::from(at)], x),
+            Out::Normal { .. } => unreachable!("asked through normal()"),
+        };
+        self.call(f, &ints, x)
+    }
+}
+
+/// The vehicle update's wreck test (with no position) or put-back (snap and kind 1) as the port's,
+/// on the bike in RAM.
+fn port_wreck(ee: &mut Ee, c: tail::Out, dt: F) {
+    let mut m = WreckInRam { ee, x: dt.0 };
+    match c {
+        tail::Out::WreckTest => {
+            m.own(0x49c);
+            wreck::wreck_test(&mut m, 0, dt);
+        }
+        tail::Out::PutBack => {
+            m.own(PUT_BACK_SLOT);
+            wreck::put_back(&mut m, 1, 1);
+        }
+        c => unreachable!("{c:?}"),
+    }
+}
+
+/// The wreck's oracle's fake world, at `WRECK_AREA`: the bike's vtable, the functions the hooks
+/// stand for, the body's, parts' and rumbler's vtables, and the objects the bike's words point at.
+const WRECK_AREA: u32 = 0x01c0_0000;
+const W_VTABLE: u32 = WRECK_AREA;
+const W_FNS: u32 = WRECK_AREA + 0x800;
+const W_BODY_VT: u32 = WRECK_AREA + 0x900;
+const W_PART_VT: u32 = WRECK_AREA + 0x980;
+const W_RUMBLE_VT: u32 = WRECK_AREA + 0x9c0;
+const W_DRIVER: u32 = WRECK_AREA + 0x1000;
+const W_STATE: u32 = WRECK_AREA + 0x1100;
+const W_RECORD: u32 = WRECK_AREA + 0x1800;
+const W_OBJECT: u32 = WRECK_AREA + 0x1a40;
+const W_STRIKER: u32 = WRECK_AREA + 0x1b40;
+const W_RUN: u32 = WRECK_AREA + 0x1c40;
+const W_AT: u32 = WRECK_AREA + 0x1d40;
+const W_THROW: u32 = WRECK_AREA + 0x1d80;
+const W_G: u32 = WRECK_AREA + 0x1e00;
+const W_H: u32 = WRECK_AREA + 0x1e40;
+const W_PARTS: [u32; 2] = [WRECK_AREA + 0x2100, WRECK_AREA + 0x2140];
+const W_KINDS: u32 = WRECK_AREA + 0x2200;
+const W_PLACED: u32 = WRECK_AREA + 0x2240;
+const W_RUMBLER: u32 = WRECK_AREA + 0x2300;
+const W_CONTACTS: u32 = WRECK_AREA + 0x3000;
+const W_ACTORS: u32 = WRECK_AREA + 0x4000;
+const W_LEN: u32 = 0x5000;
+
+/// What the hooked calls answer: out of bounds, the position's test, the rumble's test, `rand` (a
+/// seed and how many it has drawn), the terrain's normal.
+#[derive(Clone, Copy, Debug, Default)]
+struct Says {
+    oob: u32,
+    bounds: u32,
+    ready: u32,
+    seed: u64,
+    drawn: u64,
+    normal: [u32; 4],
+}
+
+impl Says {
+    fn rand(&mut self) -> u32 {
+        self.drawn += 1;
+        let r = mix(self.seed.wrapping_add(self.drawn)) as u32;
+        if self.seed & 1 == 0 { r & 0x7fff_ffff } else { r }
+    }
+}
+
+/// The port's side of the wreck's oracles: words in RAM, the calls logged, the answers [`Says`]'.
+struct WreckLogged<'a> {
+    ee: &'a mut Ee,
+    log: Vec<wreck::Out>,
+    says: Says,
+}
+
+impl Wrecks for WreckLogged<'_> {
+    fn bike(&self) -> u32 {
+        BIKE
+    }
+    fn word(&mut self, at: u32) -> u32 {
+        self.ee.u32_at(at)
+    }
+    fn set(&mut self, at: u32, w: u32) {
+        self.ee.set_u32(at, w);
+    }
+    fn normal(&mut self, terrain: u32, at: u32) -> Vf {
+        self.log.push(wreck::Out::Normal { terrain, at });
+        Vf::from_bits(self.says.normal)
+    }
+    fn out(&mut self, c: wreck::Out) -> u32 {
+        use wreck::Out;
+        self.log.push(c);
+        match c {
+            Out::OutOfBounds => self.says.oob,
+            Out::Bounds { .. } => self.says.bounds,
+            Out::RumbleReady(_) => self.says.ready,
+            Out::Rand => self.says.rand(),
+            _ => 0,
+        }
+    }
+}
+
+/// The wreck's oracle rig: the image with every call the wreck makes hooked to log (and answer as
+/// [`Says`] says), the bike's vtable, its body's and its parts' the fake ones at [`WRECK_AREA`].
+struct WreckRig {
+    ee: Ee,
+    log: Rc<RefCell<Vec<wreck::Out>>>,
+    says: Rc<RefCell<Says>>,
+    regions: Vec<(u32, u32)>,
+    body: u32,
+}
+
+fn wreck_rig() -> Option<WreckRig> {
+    use wreck::Out;
+    let mut ee = hooked(image()?);
+    for (slot, f) in WRECK_OWN {
+        assert_eq!(vt(&ee, slot), f, "the bike's vt +{slot:#x}");
+    }
+    let body = ee.u32_at(BIKE + wreck::BODY);
+    for o in (0..W_LEN).step_by(4) {
+        ee.set_u32(WRECK_AREA + o, 0);
+    }
+    let log: Rc<RefCell<Vec<Out>>> = Rc::default();
+    let says: Rc<RefCell<Says>> = Rc::default();
+    let poses: Rc<RefCell<Vec<u32>>> = Rc::default();
+    let stack = ee.stack;
+    let mut next = W_FNS;
+    let mut hook = |ee: &mut Ee, vtable: Option<(u32, u32)>, at: u32, h: Box<dyn Fn(&mut Ee) -> Out>| {
+        let at = match vtable {
+            Some((vt, slot)) => {
+                let f = next;
+                next += 4;
+                ee.set_u32(vt + slot, f);
+                f
+            }
+            None => at,
+        };
+        let l = log.clone();
+        ee.hooks.insert(at, Box::new(move |ee: &mut Ee| {
+            let c = h(ee);
+            l.borrow_mut().push(c);
+        }));
+    };
+    let bike_slot = |ee: &Ee| assert_eq!(ee.r(4) as u32, BIKE, "a bike virtual handed something other than the bike");
+    // The bike's own: each logs, and three answer.
+    let s = says.clone();
+    hook(&mut ee, Some((W_VTABLE, 0x16c)), 0, Box::new(move |ee| {
+        bike_slot(ee);
+        ee.set(2, u64::from(s.borrow().oob));
+        Out::OutOfBounds
+    }));
+    for (slot, c) in [
+        (0x368, Out::Enter(0)),
+        (0x36c, Out::Unwreck(0)),
+        (0x398, Out::Part(false)),
+        (0x48c, Out::ToWreck),
+        (0x490, Out::ToRide),
+        (PUT_BACK_SLOT, Out::PutBack { snap: 0, kind: 0 }),
+        (0x4a8, Out::Settle),
+        (0x4b0, Out::Stance(0)),
+        (0x3a0, Out::Kind(true)),
+        (0x39c, Out::Kind(false)),
+        (0x378, Out::Sync),
+    ] {
+        hook(&mut ee, Some((W_VTABLE, slot)), 0, Box::new(move |ee| {
+            bike_slot(ee);
+            let (a1, a2) = (ee.r(5) as u32, ee.r(6) as u32);
+            match c {
+                Out::Enter(_) => Out::Enter(a1),
+                Out::Unwreck(_) => Out::Unwreck(a1),
+                Out::Part(_) => Out::Part(a1 != 0),
+                Out::PutBack { .. } => Out::PutBack { snap: a1, kind: a2 },
+                Out::Stance(_) => Out::Stance(a1 as i32),
+                c => c,
+            }
+        }));
+    }
+    // The body's, the parts', the rumbler's.
+    for slot in [0x20, 0x68, 0x60] {
+        hook(&mut ee, Some((W_BODY_VT, slot)), 0, Box::new(move |ee| {
+            assert_eq!(ee.r(4) as u32, body, "the body's virtual's object");
+            let at = ee.r(5) as u32;
+            if (stack - 0x1_0000..stack).contains(&at) {
+                Out::BodyQuad { slot, q: Vf::from_bits([0, 4, 8, 12].map(|k| ee.u32_at(at + k))) }
+            } else {
+                Out::BodyAt { slot, at }
+            }
+        }));
+    }
+    hook(&mut ee, Some((W_PART_VT, 0x20)), 0, Box::new(|ee| Out::PartOn(ee.r(4) as u32 - 0x24)));
+    hook(&mut ee, Some((W_PART_VT, 0x18)), 0, Box::new(|ee| Out::PartOff(ee.r(4) as u32 - 0x24)));
+    hook(&mut ee, Some((W_RUMBLE_VT, 0x4c)), 0, Box::new(|ee| {
+        assert_eq!((ee.r(5), ee.r(6), ee.f(12)), (0, 200, 1.0), "the rumble's level, time and scale");
+        Out::Rumble(ee.r(4) as u32)
+    }));
+    // The functions.
+    let s = says.clone();
+    hook(&mut ee, None, RAND, Box::new(move |ee| {
+        let r = s.borrow_mut().rand();
+        ee.set(2, u64::from(r));
+        Out::Rand
+    }));
+    let s = says.clone();
+    hook(&mut ee, None, BOUNDS, Box::new(move |ee| {
+        assert_eq!((ee.r(8), ee.f(12)), (0, 150.0), "the bounds test's flag and reach");
+        ee.set(2, u64::from(s.borrow().bounds));
+        Out::Bounds { node: ee.r(4) as u32, at: ee.r(5) as u32 }
+    }));
+    hook(&mut ee, None, POST_MESSAGE, Box::new(|ee| {
+        let want = (u64::from(ee.u32_at(POST_QUEUE)), u64::from(BIKE + 0x674), 8, 0);
+        assert_eq!((ee.r(4), ee.r(5), ee.r(6), ee.r(9)), want, "the post's queue, sender, category and last word");
+        Out::Post { id: ee.r(7) as u32, arg: ee.r(8) as u32 }
+    }));
+    let s = says.clone();
+    hook(&mut ee, None, RUMBLE_READY, Box::new(move |ee| {
+        ee.set(2, u64::from(s.borrow().ready));
+        Out::RumbleReady(ee.r(4) as u32)
+    }));
+    hook(&mut ee, None, UNHOOK, Box::new(|ee| Out::Unhook(ee.r(4) as u32)));
+    hook(&mut ee, None, ATTACH, Box::new(|ee| {
+        assert_eq!(ee.r(7), 1, "the attach's last argument");
+        Out::Attach { part: ee.r(4) as u32, a: ee.r(5) as u32, b: ee.r(6) as u32 }
+    }));
+    hook(&mut ee, None, ENGINE_RESET, Box::new(|ee| Out::Engine(ee.r(4) as u32)));
+    hook(&mut ee, None, WHEEL_RESET, Box::new(|ee| Out::Wheel(ee.r(4) as u32)));
+    hook(&mut ee, None, RIDER_SETTLE, Box::new(|ee| {
+        assert_eq!((ee.r(6), ee.r(7)), (1, 1), "the rider settle's flags");
+        Out::Rider { a: ee.r(4) as u32, b: ee.r(5) as u32 }
+    }));
+    let p = poses.clone();
+    hook(&mut ee, None, BONE_POSE, Box::new(move |ee| {
+        assert_eq!(ee.r(5), 0, "the pose's second argument");
+        let mut p = p.borrow_mut();
+        p.push(ee.r(6) as u32);
+        Out::Pose { bone: ee.r(4) as u32, buf: p.len() as u32 - 1 }
+    }));
+    let p = poses.clone();
+    hook(&mut ee, None, BONE_PLACE, Box::new(move |ee| {
+        let buf = p.borrow().iter().position(|&b| b == ee.r(5) as u32).map_or(99, |i| i as u32);
+        Out::Place { part: ee.r(4) as u32, buf }
+    }));
+    hook(&mut ee, None, GROUND_RESET, Box::new(move |ee| {
+        bike_slot(ee);
+        Out::Ground
+    }));
+    hook(&mut ee, None, TRAIL_RESET, Box::new(|ee| Out::Trail(ee.r(4) as u32)));
+    hook(&mut ee, None, CAMERA_RESET, Box::new(|ee| Out::Camera(ee.r(4) as u32)));
+    let s = says.clone();
+    hook(&mut ee, None, TERRAIN_NORMAL, Box::new(move |ee| {
+        assert_eq!((ee.r(7), ee.r(8)), (0, 0), "the normal's last two arguments");
+        let out = ee.r(6) as u32;
+        for (k, w) in s.borrow().normal.into_iter().enumerate() {
+            ee.set_u32(out + 4 * k as u32, w);
+        }
+        Out::Normal { terrain: ee.r(4) as u32, at: ee.r(5) as u32 }
+    }));
+    // The fakes in place, and the poses' list cleared with every log.
+    ee.set_u32(BIKE + 4, W_VTABLE);
+    ee.set_u32(body + 0x110, W_BODY_VT);
+    for p in W_PARTS {
+        ee.set_u32(p + 0x28, W_PART_VT);
+    }
+    ee.set_u32(W_RUMBLER + 0x1c, W_RUMBLE_VT);
+    let p = poses;
+    let l = log.clone();
+    ee.hooks.insert(WRECK_AREA + 0x7fc, Box::new(move |_: &mut Ee| {
+        p.borrow_mut().clear();
+        l.borrow_mut().clear();
+    }));
+    let regions = vec![
+        (BIKE, 0x1800),
+        (body, 0x230),
+        (WRECK_AREA, W_LEN),
+        (wreck::WRECKS_ON, 4),
+        (wreck::STRUCK_CLASS, 4),
+        (wreck::THROW_SCALE, 4),
+    ];
+    Some(WreckRig { ee, log, says, regions, body })
+}
+
+impl WreckRig {
+    /// Runs the original's `f` and then the port's `port` from the same words and answers; asserts
+    /// the words and the calls the same, and answers the calls.
+    fn check(&mut self, k: usize, f: u32, ints: &[u64], x: f32, port: impl FnOnce(&mut WreckLogged)) -> Vec<wreck::Out> {
+        let before = snap_regions(&self.ee, &self.regions);
+        let says = *self.says.borrow();
+        self.ee.call(WRECK_AREA + 0x7fc, &[], &[], 10);
+        self.ee.set(28, GP);
+        self.ee.call(f, ints, &[x], BUDGET);
+        let want = std::mem::take(&mut *self.log.borrow_mut());
+        let want_words = snap_regions(&self.ee, &self.regions);
+        restore_regions(&mut self.ee, &self.regions, &before);
+        let mut m = WreckLogged { ee: &mut self.ee, log: Vec::new(), says };
+        port(&mut m);
+        let got = m.log;
+        assert_eq!(format!("{got:?}"), format!("{want:?}"), "case {k} ({f:#x}): the calls");
+        let got_words = snap_regions(&self.ee, &self.regions);
+        if got_words != want_words {
+            let names: Vec<(u32, u32)> = self.regions.iter().flat_map(|&(at, len)| (0..len).step_by(4).map(move |o| (at, o))).collect();
+            let d: Vec<String> = (0..got_words.len())
+                .filter(|&i| got_words[i] != want_words[i])
+                .map(|i| format!("{:#x}+{:#x}: port {:#010x}, original {:#010x}", names[i].0, names[i].1, got_words[i], want_words[i]))
+                .collect();
+            panic!("case {k} ({f:#x}): {} words differ\n  {}", d.len(), d.iter().take(20).cloned().collect::<Vec<_>>().join("\n  "));
+        }
+        want
+    }
+}
+
+/// `n` random words at `at`.
+fn wreck_words(ee: &mut Ee, g: &mut Gen, at: u32, n: u32) {
+    for i in 0..n {
+        let x = g.bits();
+        ee.set_u32(at + 4 * i, x);
+    }
+}
+
+fn wreck_quad(ee: &mut Ee, g: &mut Gen, at: u32, r: f32) {
+    for i in 0..4 {
+        let x = g.near(0.0, -r, r);
+        ee.set_f32(at + 4 * i, x);
+    }
+}
+
+/// **The wreck test is the original's**: 12 000 bikes, each state 4's with every word the wreck test
+/// reads drawn at random — the driver and the state's kind, wrecks on or off (the game's and the
+/// bike's), the out-of-bounds check, the reason it is down for (mostly none, 13 among them), a
+/// position handed in or none (the origin among them) and the two bounds answers; MD63c's limits,
+/// loads, pitch and roll, air words, stunt ids, pose blend and up; the record (touching, its object
+/// and class), its contacts (mirrored, reaching about the size's 2.9 or 4.5, an actor higher or not
+/// than the joust height, or scenery); the striker and its mask; the clock about the 0.5 and 2.5
+/// windows less `dt`, `MaxWreckTime`, counting and settled; the run or none, the wreck count — run
+/// through SLUS-21104's wreck test and through [`wreck::wreck_test`] from the same words. Every word
+/// of the bike, its body and the fake world comes out the same, and the calls (the entries among
+/// them, two and three in a frame) are made in the same order with the same arguments. The callees
+/// are hooked to log and do nothing.
+#[test]
+fn the_wreck_test_is_the_originals() {
+    let Some(mut rig) = wreck_rig() else { return };
+    let image_words = snap_regions(&rig.ee, &rig.regions);
+    let mut g = Gen(0x0031_b4b0);
+    let mut t = BTreeMap::new();
+    for k in 0..12_000 {
+        let ee = &mut rig.ee;
+        restore_regions(ee, &rig.regions, &image_words);
+        let b = |g: &mut Gen, n: u32| u32::from(g.one_in(n));
+        let put = |ee: &mut Ee, o: u32, v: f32| ee.set_f32(BIKE + o, v);
+        // Who drives, wrecks on, out of bounds, the reason it is down for.
+        ee.set_u32(BIKE + 0x48c, if g.one_in(5) { 0 } else { W_DRIVER });
+        ee.set_u32(W_DRIVER + 0xe4, if g.one_in(6) { 0 } else { g.bits() | 1 });
+        ee.set_u32(BIKE + wreck::STATE, if g.one_in(3) { 0 } else { W_STATE });
+        ee.set_u32(W_STATE + 0x28, [1, 1, 0, 3][(g.bits() % 4) as usize]);
+        ee.set_u32(wreck::WRECKS_ON, 1 - b(&mut g, 12));
+        ee.set_u32(BIKE + 0xc1c, 1 - b(&mut g, 12));
+        ee.set_u32(BIKE + 0x308, b(&mut g, 4));
+        ee.set_u32(BIKE + 0x3b0, g.bits());
+        let reason = if g.one_in(2) { 0 } else { [13, 13, 7, 14, 4, 15, 1, 5][(g.bits() % 8) as usize] };
+        ee.set_u32(BIKE + wreck::REASON, reason);
+        let at = match g.bits() % 4 {
+            0 | 1 => 0,
+            2 => wreck::ORIGIN,
+            _ => {
+                for (i, w) in [0, 0, 0, 0x3f80_0000].into_iter().enumerate() {
+                    let w = if g.one_in(3) { w ^ 1 } else { w };
+                    ee.set_u32(W_AT + 4 * i as u32, w);
+                }
+                W_AT
+            }
+        };
+        // MD63c's limits, loads, attitude and air words (about the Free Ride image's limits).
+        let lims = [
+            (0x13e8, 18.333, 10.0, 30.0),
+            (0x13ec, 22.0, 10.0, 30.0),
+            (0x13f0, 19.067, 10.0, 30.0),
+            (0x13f4, 70.4, 40.0, 90.0),
+            (0x13f8, 70.4, 40.0, 90.0),
+            (0x13fc, 1.309, 0.8, 1.6),
+            (0x1400, 1.309, 0.8, 1.6),
+            (0x1404, 1.484, 1.0, 1.7),
+            (0x1408, 1.553, 1.0, 1.7),
+            (0x140c, 1.553, 1.0, 1.7),
+            (0x1410, 29.333, 20.0, 40.0),
+            (0x1414, 0.5, 0.2, 0.9),
+            (0x1418, 2.0, 0.5, 3.0),
+            (0x1420, 0.99, 0.8, 1.0),
+            (0x1424, 0.75, 0.3, 1.2),
+        ];
+        let mut lim = [0.0f32; 16];
+        for (i, &(o, at, lo, hi)) in lims.iter().enumerate() {
+            lim[i] = g.near(at, lo, hi);
+            put(ee, o, lim[i]);
+        }
+        let calm = g.one_in(3);
+        let load = |g: &mut Gen, lo: f32, hi: f32| {
+            if calm {
+                g.f(-5.0, 5.0)
+            } else if g.one_in(14) {
+                hi + g.f(0.0, 10.0)
+            } else if g.one_in(13) {
+                -lo - g.f(0.0, 10.0)
+            } else if g.one_in(12) {
+                if g.one_in(2) { hi } else { -lo }
+            } else {
+                g.f(-lo, hi)
+            }
+        };
+        let fore_aft = load(&mut g, lim[0], lim[1]);
+        let side = load(&mut g, lim[2], lim[2]);
+        put(ee, 0x1258, fore_aft);
+        put(ee, 0x1250, side);
+        let vertical = if calm { g.f(-5.0, 5.0) } else if g.one_in(4) { g.f(20.0, 100.0) } else { g.f(-20.0, 20.0) };
+        put(ee, 0x1254, vertical);
+        let on_ground = g.one_in(2);
+        let airborne = !on_ground && !g.one_in(4);
+        ee.set_u32(BIKE + 0x324, u32::from(on_ground));
+        ee.set_u32(BIKE + 0xde0, u32::from(airborne));
+        let was = if calm { airborne } else if airborne { g.one_in(3) } else { !g.one_in(3) };
+        ee.set_u32(BIKE + 0xde4, u32::from(was));
+        let hang = g.near(lim[14], 0.0, 2.0);
+        put(ee, 0x1190, hang);
+        ee.set_u32(BIKE + 0x1194, if calm { 0 } else { b(&mut g, 6) });
+        ee.set_u32(BIKE + 0x11d0, if calm { 0 } else { b(&mut g, 6) });
+        let angle = |g: &mut Gen, l: f32| if calm { g.f(-0.5, 0.5) } else if g.one_in(8) { l } else if g.one_in(3) { g.f(-2.0, 2.0) } else { g.f(-0.8, 0.8) };
+        let pitch = if g.one_in(2) { angle(&mut g, lim[8]) } else { -angle(&mut g, lim[5]) };
+        put(ee, 0x360, pitch);
+        let roll = angle(&mut g, lim[9]);
+        put(ee, 0x368, roll);
+        let crossup = if g.one_in(3) { g.f(0.0, 1.0) } else { g.near(0.5, 0.0, 0.02) };
+        put(ee, 0x141c, crossup);
+        let balance = 4;
+        let id = if calm { 255 } else { [balance, 41, 255, 40, g.bits() % 60, g.bits() % 60][(g.bits() % 6) as usize] };
+        let wanted = if calm { 0xfe } else if g.one_in(2) { id } else if g.one_in(2) { 0xfe } else { g.bits() % 60 };
+        ee.set_u32(BIKE + 0x1524, id);
+        ee.set_u32(BIKE + 0x152c, balance);
+        ee.set_u32(BIKE + 0x1530, wanted);
+        let blend = g.near(0.95, 0.5, 1.0);
+        put(ee, 0x14e4, blend);
+        ee.set_u32(BIKE + 0x14cc, b(&mut g, 4));
+        ee.set_u32(BIKE + 0x146c, u32::from(g.one_in(2)));
+        let up = g.near(lim[11], -1.0, 1.0);
+        put(ee, 0xbf4, up);
+        wreck_quad(ee, &mut g, BIKE + 0x1260, 1.0);
+        let body = rig.body;
+        let v = [g.f(-40.0, 40.0), g.f(-20.0, 20.0), g.f(-40.0, 40.0), g.f(-1.0, 1.0)];
+        for (i, x) in v.into_iter().enumerate() {
+            ee.set_f32(body + 0x80 + 4 * i as u32, if g.one_in(10) { 0.0 } else { x });
+        }
+        let height = g.f(-5.0, 5.0);
+        ee.set_f32(body + 0x74, height);
+        // The record, its object, its contacts.
+        ee.set_u32(BIKE + wreck::RECORD, W_RECORD);
+        let touching = g.one_in(2);
+        ee.set_u32(W_RECORD + 0x34, if touching { g.bits() | 1 } else { 0 });
+        ee.set_u32(W_RECORD + 0x20c, if g.one_in(3) { 0 } else { W_OBJECT });
+        ee.set_u32(W_OBJECT + 0x94, [0x20, 0x10, 0x21, 0][(g.bits() % 4) as usize]);
+        ee.set_u32(wreck::STRUCK_CLASS, 0x20);
+        let small = g.one_in(2);
+        ee.set_u32(BIKE + 0xbc0, if small { 0 } else { 2 });
+        let n = if g.one_in(30) { u32::MAX } else { g.bits() % 5 };
+        ee.set_u32(W_RECORD + 0xf0, n);
+        ee.set_u32(W_RECORD + 0xf8, W_CONTACTS);
+        for i in 0..5 {
+            let e = W_CONTACTS + 0x90 * i;
+            ee.set_u32(e, b(&mut g, 4));
+            let reach = if g.one_in(5) { if small { f32::from_bits(0x4039_999a) } else { 4.5 } } else { g.f(0.0, 7.0) };
+            ee.set_f32(e + 0x24, reach);
+            let actor = W_ACTORS + 0x200 * i;
+            ee.set_u32(e + 0x84, if g.one_in(2) { 0 } else { actor });
+            ee.set_u32(actor + 0xe4, actor + 0x100);
+            let theirs = if g.one_in(5) { height + lim[12] } else { height + g.f(-4.0, 6.0) };
+            ee.set_f32(actor + 0x174, theirs);
+            wreck_quad(ee, &mut g, actor + 0x180, 30.0);
+        }
+        // The striker, the clock, the run.
+        ee.set_u32(BIKE + 0x1440, if g.one_in(4) { W_STRIKER } else { 0 });
+        ee.set_u32(W_STRIKER + 0x94, g.bits() & 0x0f);
+        ee.set_u32(BIKE + 0x1110, g.bits() & 0x0f);
+        let dt = if g.one_in(2) { f32::from_bits(DT) } else { g.f(0.002, 0.05) };
+        let window = if reason == 13 { 2.5 } else { 0.5 };
+        let max = g.near(3.0, 0.0, 6.0);
+        put(ee, wreck::MAX_WRECK_TIME, max);
+        let clock = match g.bits() % 4 {
+            0 => vu_sub(window, dt),
+            1 => vu_sub(max, dt),
+            _ => g.near(0.0, 0.0, 6.0),
+        };
+        put(ee, wreck::CLOCK, clock);
+        ee.set_u32(BIKE + wreck::COUNTING, u32::from(g.one_in(2)));
+        ee.set_u32(BIKE + wreck::SETTLES, 1 - b(&mut g, 3));
+        ee.set_u32(BIKE + wreck::RUN, if g.one_in(4) { 0 } else { W_RUN });
+        wreck_words(ee, &mut g, W_RUN + 8, 2);
+        wreck_words(ee, &mut g, BIKE + 0x6c4, 1);
+        let seed = u64::from(g.bits());
+        *rig.says.borrow_mut() = Says { oob: b(&mut g, 8), bounds: b(&mut g, 3), seed, ..Says::default() };
+
+        let calls = rig.check(k, WRECK_TEST, &[u64::from(BIKE), u64::from(at)], dt, |m| wreck::wreck_test(m, at, F(dt)));
+
+        let enters: Vec<u32> = calls.iter().filter_map(|c| if let wreck::Out::Enter(r) = c { Some(*r) } else { None }).collect();
+        if enters.is_empty() {
+            tally(&mut t, "no entry");
+        }
+        for r in 1..16 {
+            if enters.contains(&r) {
+                tally(&mut t, ["", "1 front", "2 left", "3 right", "4 back", "5 flat or struck", "6 scenery", "7 joust", "8 nose dive", "9", "10", "11 tail", "12 no-hander", "13 out of bounds", "14 no control", "15 struck"][r as usize]);
+            }
+        }
+        assert!(enters.iter().all(|r| ![0, 9, 10].contains(r) && *r < 16), "case {k}: entered {enters:?}");
+        if enters.len() == 2 {
+            tally(&mut t, "two entries in a frame");
+        }
+        if enters.len() > 2 {
+            tally(&mut t, "three entries in a frame");
+        }
+        if calls.contains(&wreck::Out::Post { id: 12, arg: 0 }) {
+            tally(&mut t, "the count armed");
+        }
+        if calls.contains(&wreck::Out::Unwreck(1)) {
+            tally(&mut t, "unwrecked");
+        }
+        if calls.iter().any(|c| matches!(c, wreck::Out::Bounds { .. })) {
+            tally(&mut t, "a position's bounds asked");
+        }
+    }
+    eprintln!("{t:#?}");
+    for (path, n) in &t {
+        assert!(*n >= 20, "path {path} taken only {n} times");
+    }
+    assert!(t.len() >= 19, "every path taken: {t:#?}");
+}
+
+#[allow(clippy::float_arithmetic)]
+fn vu_sub(a: f32, b: f32) -> f32 {
+    a - b
+}
+
+/// **The wreck's virtuals are the original's**: 12 000 calls, each one of the entry (reasons 13, 0
+/// and others), the unwreck (kind 0 or 1, down for 13 or not), the riding part on or off, the record's
+/// part to the wreck one or back, and the put-back (snap and kind each 0 or 1), on state 4's bike with
+/// every word it reads drawn at random — the state, its kind, rumbler and the rumble's answer; the
+/// size word (0, 1, 2, 3); the damping quadwords and the post's word; the throw's target and scale;
+/// the 0x1778 chain (each link there or not); the part bits, parts and their `+0x20`; the flags byte;
+/// the put-back's spots, the run's two spots (each word there or not), the terrain and its normal, the
+/// trail, the bone list (counts −1 to 4, kinds 0, 1 and 2) — through SLUS-21104's and the port's. Every
+/// word of the bike, its body and the fake world comes out the same, and the calls are the same. The
+/// callees are hooked to log and do nothing (`rand` and the tests answer).
+#[test]
+fn the_wrecks_virtuals_are_the_originals() {
+    let Some(mut rig) = wreck_rig() else { return };
+    let image_words = snap_regions(&rig.ee, &rig.regions);
+    let mut g = Gen(0x0031_b4b1);
+    let mut t = BTreeMap::new();
+    for k in 0..12_000 {
+        let ee = &mut rig.ee;
+        restore_regions(ee, &rig.regions, &image_words);
+        let b = |g: &mut Gen, n: u32| u32::from(g.one_in(n));
+        let bike = u64::from(BIKE);
+        // The words they all may read.
+        ee.set_u32(BIKE + wreck::STATE, if g.one_in(4) { 0 } else { W_STATE });
+        ee.set_u32(W_STATE + 0x28, [1, 1, 0, 3][(g.bits() % 4) as usize]);
+        ee.set_u32(W_STATE + 0x5c, if g.one_in(4) { 0 } else { W_RUMBLER });
+        wreck_words(ee, &mut g, W_STATE + 0x6ac, 1);
+        ee.set_u32(BIKE + 0xbbc, g.bits() % 4);
+        for o in [0xca0, 0xcb0, 0xcc0, 0xd40, 0xd50, 0xd60, 0x50] {
+            wreck_quad(ee, &mut g, BIKE + o, 10.0);
+        }
+        for o in [0xd20, 0x6e4, 0x142c, 0xb4, 0xc0, 0x17b0, 0x17b4, 0x1480, 0x1284, 0x1104, 0x1108, 0xdec, 0x173c, 0x1740, 0xd78] {
+            wreck_words(ee, &mut g, BIKE + o, 1);
+        }
+        let reason = if g.one_in(2) { 13 } else { g.bits() % 16 };
+        ee.set_u32(BIKE + wreck::REASON, reason);
+        ee.set_u32(BIKE + 0xe8, W_THROW);
+        let throw = g.f(-5.0, 5.0);
+        ee.set_f32(W_THROW + 4, throw);
+        let scale = if g.one_in(10) { 0.0 } else { g.f(0.5, 3.0) };
+        ee.set_f32(wreck::THROW_SCALE, scale);
+        ee.set_u32(BIKE + 0x1778, if g.one_in(3) { 0 } else { W_G });
+        ee.set_u32(W_G + 0x34, if g.one_in(3) { 0 } else { W_H });
+        ee.set_u32(BIKE + wreck::RECORD, W_RECORD);
+        ee.set_u32(BIKE + wreck::RUN, if g.one_in(4) { 0 } else { W_RUN });
+        wreck_words(ee, &mut g, W_RUN + 8, 2);
+        ee.set_u32(BIKE + 0xd70, if g.one_in(3) { 0 } else { g.bits() | 1 });
+        ee.set_u32(BIKE + 0xd74, if g.one_in(3) { 0 } else { g.bits() | 1 });
+        ee.set_u32(BIKE + 0x1738, if g.one_in(3) { 0 } else { g.bits() | 1 });
+        // The parts.
+        let flags = g.bits();
+        ee.set_u32(BIKE + 0x44, flags);
+        ee.set_u32(BIKE + 0xd0, if g.one_in(4) { 0 } else { W_PARTS[(g.bits() % 2) as usize] });
+        let [wp, rp] = if g.one_in(2) { W_PARTS } else { [W_PARTS[1], W_PARTS[0]] };
+        ee.set_u32(BIKE + wreck::WRECK_PART, wp);
+        ee.set_u32(BIKE + wreck::RIDE_PART, rp);
+        for p in W_PARTS {
+            ee.set_u32(p + 0x20, b(&mut g, 3));
+        }
+        // The put-back's terrain, trail and bones.
+        ee.set_u32(BIKE + 0x3b4, if g.one_in(3) { 0 } else { g.bits() | 1 });
+        ee.set_u32(BIKE + 0x10dc, if g.one_in(3) { 0 } else { g.bits() | 1 });
+        let n = if g.one_in(20) { u32::MAX } else { g.bits() % 5 };
+        ee.set_u32(BIKE + 0x1470, n);
+        ee.set_u32(BIKE + 0x1478, W_KINDS);
+        ee.set_u32(BIKE + 0x1474, W_PLACED);
+        for i in 0..4 {
+            ee.set_u32(W_KINDS + 4 * i, g.bits() % 3);
+            wreck_words(ee, &mut g, W_PLACED + 4 * i, 1);
+        }
+        let mut normal = [0u32; 4];
+        for x in &mut normal {
+            *x = g.f(-1.0, 1.0).to_bits();
+        }
+        let seed = u64::from(g.bits());
+        *rig.says.borrow_mut() = Says { ready: b(&mut g, 2), seed, normal, ..Says::default() };
+        let (snap, kind) = (u32::from(g.one_in(2)), u32::from(g.one_in(2)));
+        let x = g.f(0.0, 0.05);
+
+        let (path, calls) = match g.bits() % 6 {
+            0 => {
+                let r = [13, 13, 0, 1, 5, 7, 14, 15][(g.bits() % 8) as usize];
+                let c = rig.check(k, WRECK_ENTER, &[bike, u64::from(r)], x, |m| wreck::enter(m, r));
+                (if r == 13 { "entry, 13" } else if r == 0 { "entry, 0" } else { "entry" }, c)
+            }
+            1 => {
+                let c = rig.check(k, UNWRECK, &[bike, u64::from(kind)], x, |m| wreck::unwreck(m, kind));
+                (if reason == 13 { "unwreck, 13" } else { "unwreck" }, c)
+            }
+            2 => {
+                let on = g.one_in(2);
+                let c = rig.check(k, PART_TOGGLE, &[bike, u64::from(on)], x, |m| wreck::part(m, on));
+                (if on { "part on" } else { "part off" }, c)
+            }
+            3 | 4 => {
+                let to = g.one_in(2);
+                let c = rig.check(k, if to { TO_WRECK } else { TO_RIDE }, &[bike], x, |m| wreck::swap(m, to));
+                (if to { "to the wreck part" } else { "to the riding part" }, c)
+            }
+            _ => {
+                let c = rig.check(k, PUT_BACK, &[bike, u64::from(snap), u64::from(kind)], x, |m| wreck::put_back(m, snap, kind));
+                (if snap != 0 && calls_normal(&c) { "put back, snapped" } else { "put back" }, c)
+            }
+        };
+        tally(&mut t, path);
+        use wreck::Out;
+        for (c, name) in [
+            (Out::Rand, "rand drawn"),
+            (Out::Ground, "ground reset"),
+        ] {
+            if calls.contains(&c) {
+                tally(&mut t, name);
+            }
+        }
+        if calls.iter().any(|c| matches!(c, Out::Rumble(_))) {
+            tally(&mut t, "rumbled");
+        }
+        if calls.iter().any(|c| matches!(c, Out::BodyQuad { .. })) {
+            tally(&mut t, "the body's wreck damping");
+        }
+        if calls.iter().any(|c| matches!(c, Out::Attach { .. })) {
+            tally(&mut t, "a part attached");
+        }
+        if calls.iter().any(|c| matches!(c, Out::Place { .. })) {
+            tally(&mut t, "a bone placed");
+        }
+        if calls.iter().any(|c| matches!(c, Out::Trail(_))) {
+            tally(&mut t, "the trail reset");
+        }
+    }
+    eprintln!("{t:#?}");
+    for (path, n) in &t {
+        assert!(*n >= 20, "path {path} taken only {n} times");
+    }
+    assert!(t.len() >= 18, "every path taken: {t:#?}");
+}
+
+fn calls_normal(c: &[wreck::Out]) -> bool {
+    c.iter().any(|c| matches!(c, wreck::Out::Normal { .. }))
 }
 
 // --- F31b4c: the bike's mass properties, the port's -------------------------------------------------

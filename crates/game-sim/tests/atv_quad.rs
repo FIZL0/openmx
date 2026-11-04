@@ -6178,3 +6178,11 @@ fn the_quads_wheel_spin_is_the_originals() {
     each_unhooked(0x0075_0001, 10_000, false, &picks, |_, _| {}, wheel_spin_paths, &want, 100);
 }
 
+
+/// MD75e: the whole frame off the image.
+#[path = "atv_quad/frame.rs"]
+mod frame;
+
+/// MD75e: the partner borrow on objects and movers.
+#[path = "atv_quad/borrow.rs"]
+mod borrow;
