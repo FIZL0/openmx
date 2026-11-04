@@ -601,6 +601,8 @@ struct Tick {
     wreck: Option<Box<game_sim::ride::Crash>>,
     /// The plane's contact list after the tick (F30).
     plane_list: Vec<game_sim::contact::Contact>,
+    /// The plane's whole body after the tick (R31).
+    plane_body: game_sim::biplane::Body,
 }
 
 /// The plane's state after the first of the substeps [`game_sim::flight::substeps`] kept, and their
@@ -668,7 +670,7 @@ fn fly_by(
             let p2 = sim.others[0].rider.crash.as_ref().map_or([[0; 3]; 2], |c| [three(c.bike.body.velocity), three(c.bike.body.position)]);
             let state = [three(p.body.velocity), three(p.body.position)];
             let (first, substeps) = first_substep(&kept, state);
-            out.push(Tick { t, state, crash: p.crash.reason, p2, p2_wreck: None, first, substeps, wreck: None, plane_list: p.record.contacts.clone() });
+            out.push(Tick { t, state, crash: p.crash.reason, p2, p2_wreck: None, first, substeps, wreck: None, plane_list: p.record.contacts.clone(), plane_body: p.body });
         }
         Some((seed, out))
     })
@@ -809,6 +811,7 @@ fn fly_two_by(
                 substeps,
                 wreck: seats[1].rider.crash.clone().map(Box::new),
                 plane_list: p.record.contacts.clone(),
+                plane_body: p.body,
             });
         }
         Some((seed, out))
@@ -1506,4 +1509,116 @@ fn f30_the_originals_tick_137856() {
     let again = order.iter().skip(wi.map_or(0, |w| w + 1)).position(|w| w == "plane");
     assert!(pi < wi && again.is_some(), "the wreck bike resolves between the plane's substeps: {order:?}");
     assert!(off.is_empty(), "the oracle's tick 137856 is image 137857's but for {off:?}");
+}
+
+/// The original's body at `b` and the port's `ours`, field by field ([`read_body`]'s layout): each
+/// line `*` where the bits differ. Returns the fields that differ.
+fn body_diff(ee: &Ee, b: u32, ours: &game_sim::biplane::Body, show: bool) -> Vec<&'static str> {
+    let mut theirs = game_sim::biplane::Body::default();
+    read_body(ee, b, &mut theirs);
+    let v = |x: Vf| format!("({:?}, {:?}, {:?}, {:?})", x.0[0], x.0[1], x.0[2], x.0[3]);
+    let fields = |b: &game_sim::biplane::Body| {
+        [
+            ("velocity", b.velocity),
+            ("position", b.position),
+            ("last_position", b.last_position),
+            ("last_force", b.last_force),
+            ("force", b.force),
+            ("accel", b.accel),
+            ("shock_peak", b.shock_peak),
+            ("shock", b.shock),
+            ("quat", b.quat),
+            ("last_quat", b.last_quat),
+            ("moment", b.moment),
+            ("last_moment", b.last_moment),
+            ("rates", b.rates),
+            ("ang_accel", b.ang_accel),
+            ("twist_peak", b.twist_peak),
+            ("twist", b.twist),
+        ]
+    };
+    let mut off = Vec::new();
+    for ((n, x), (_, o)) in fields(&theirs).into_iter().zip(fields(ours)) {
+        // the w lanes are not the port's to keep on every field: x, y, z only
+        let same = (0..3).all(|k| x.0[k].to_bits() == o.0[k].to_bits());
+        if !same {
+            off.push(n);
+        }
+        if show && !same {
+            println!("    * {n:<13} image {:<58} port {}", v(x), v(o));
+        }
+    }
+    off
+}
+
+/// **R31's probe: the joust from 137845 against images 137855..137866.** [`fly_two`] from 137845;
+/// after each tick `t` the port's plane body and P2's wreck bike's body against image `t + 1`, field by
+/// field, and the two contact lists' lengths and kinds. Run with `--ignored`; skips without the images
+/// (`research/r31/index.md`).
+#[test]
+#[ignore]
+fn r31_the_joust_against_images_to_137866() {
+    let Some(cap) = capture() else { return };
+    let Some((_, ticks)) = fly_two(137845, 137866, FIELD_ZERO) else { return };
+    let v = |x: Vf| format!("({:?}, {:?}, {:?})", x.0[0], x.0[1], x.0[2]);
+    // The plane's ray segments with an end at x = -7.5, where the original's 137863 strike on the
+    // wreck bike stands on the plane (-7.5, 2.3962276, -1.6266332).
+    let Some((_, rays, _)) = machines() else { return };
+    for (k, s) in rays.segments.iter().enumerate().filter(|(_, s)| s.from.0[0] == -7.5 || s.to.0[0] == -7.5) {
+        println!("plane ray {k}: {} -> {}", v(s.from), v(s.to));
+    }
+    // What the ray strikes: the wreck part's mesh collidable (class 2, shape kind 0, its record the
+    // wreck part's collision object), its mesh's root box against the disc's two bike meshes.
+    if let (Some(ee), Ok(mut disc)) = (image(137864), Disc::open_configured()) {
+        let c = ee.u32_at(ee.u32_at(p2(&ee) + 0x7a8) + 0x120);
+        let ram = ee.ram.len() as u32;
+        for a in (0x0010_0000..ram - 0x300).step_by(4).filter(|&a| ee.u32_at(a + 0x80) == c && ee.ram[a as usize + 2] == 2 && ee.u32_at(a + 0x68) == 0) {
+            let mesh = ee.u32_at(a + 0x234);
+            println!("wreck mesh collidable {a:#x}: category {:#x}, flags {:#x}, root centre {} half {}", ee.u32_at(a + 0x84), ee.ram[a as usize + 0x116], v(quad(&ee, mesh + 0xc)), v(quad(&ee, mesh + 0x18)));
+        }
+        let names: Vec<String> = disc.entries().iter().map(|e| e.name.clone()).filter(|n| n.to_ascii_lowercase().ends_with(".res")).collect();
+        for file in ["wreckbikef.col", "bike\\col\\bikef.col"] {
+            let Some(m) = names.iter().find_map(|n| disc.res(n).ok()?.read_suffix(file).ok()).and_then(|b| track::Mesh::parse(&b).ok()) else { continue };
+            let n = &m.nodes[0];
+            println!("{file}: {} vertices, root centre {:?} half {:?}", m.vertices.len(), n.centre.map(|x| x.0), n.half_extent.map(|x| x.0));
+        }
+    }
+    for t in 137854..=137865u32 {
+        let Some(ee) = image(t + 1) else { continue };
+        let port = ticks.iter().find(|k| k.t == t).expect("the tick");
+        let pb = ee.u32_at(plane0(&ee) + plane_at::BODY);
+        let plane_off = body_diff(&ee, pb, &port.plane_body, true);
+        println!("after {t} (image {}): plane {} | row {} vel {:?}", t + 1, if plane_off.is_empty() { "bit for bit".into() } else { format!("{plane_off:?}") }, t + 1, cap.state(t + 1)[0].map(f32::from_bits));
+        let part = ee.u32_at(p2(&ee) + 0x7a8);
+        match (&port.wreck, part) {
+            (None, 0) => println!("  no wreck either side"),
+            (None, _) => println!("  the original has a wreck part, the port none"),
+            (Some(_), 0) => println!("  the port has a wreck, the original no part"),
+            (Some(w), _) => {
+                let off = body_diff(&ee, ee.u32_at(part + 0x110), &w.bike.body, true);
+                println!("  wreck bike {}", if off.is_empty() { "bit for bit".into() } else { format!("{off:?}") });
+                let c = ee.u32_at(part + 0x120);
+                let plane_obj = (0x0010_0000..0x01ff_0000u32).step_by(16).find(|&a| ee.u32_at(a + 0xf4) == pb && ee.u32_at(a + 0x108) != 0);
+                let name = |o: u32| if o == 0 { "-".to_string() } else if o == c { "wreck".into() } else if Some(o) == plane_obj { "plane".into() } else { format!("{o:#x}") };
+                let show = |what: &str, obj: u32, ours: &[game_sim::contact::Contact]| {
+                    let n = ee.u32_at(obj + 0x100);
+                    let at = ee.u32_at(obj + 0x108);
+                    println!("  {what}'s list: original {n}, port {}", ours.len());
+                    for k in 0..n.max(ours.len() as u32) {
+                        if k < n {
+                            let e = at + 0x80 * k;
+                            println!("    orig {k}: kind {} on {} n {} pt {} other {} surf {}", ee.u32_at(e), v(quad(&ee, e + 0x20)), v(quad(&ee, e + 0x30)), v(quad(&ee, e + 0x40)), name(ee.u32_at(e + 0x74)), ee.u32_at(e + 0x70) as i32);
+                        }
+                        if let Some(o) = ours.get(k as usize) {
+                            println!("    port {k}: kind {} on {} n {} pt {} other {:?} surf {}", o.kind, v(o.on_body), v(o.normal), v(o.point), o.other, o.surface);
+                        }
+                    }
+                };
+                show("wreck", c, &w.bike.record.contacts);
+                if let Some(po) = plane_obj {
+                    show("plane", po, &port.plane_list);
+                }
+            }
+        }
+    }
 }

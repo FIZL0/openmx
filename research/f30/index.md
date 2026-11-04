@@ -67,5 +67,5 @@ never ran leaves the bike to the old step after.
 `tests/c16_fly.rs` `f32_the_plane_and_wreck_bike_are_the_images` pins it: after ticks 137854..137857, the
 port's plane body is image `t + 1`'s bit for bit, velocity and position, and so is the wreck bike's. Row
 137858 is (-28.616682, -0.05351289, 3.6458206). The joust from 137845 now holds 18 ticks (11 before) and
-parts on tick 137863. From 137810 it holds 53 (46 before). From 137910 the plane holds all 100 (1
+parts on tick 137863 (why: research/r31, the plane's ray on the wreck bike's hull). From 137810 it holds 53 (46 before). From 137910 the plane holds all 100 (1
 before), and so does the tape's 137910 stretch.
