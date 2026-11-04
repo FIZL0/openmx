@@ -3,7 +3,8 @@
 //! The disc is the shell's first argument when it has one (a file dropped on the binary arrives the
 //! same way); else, in a dev checkout, `kit.toml`'s `[game] iso` as always; else the path the last run
 //! remembered; else a file dialog asks (zenity or kdialog, PowerShell's on Windows, AppleScript's on a
-//! Mac), or the terminal when there is no dialog to show. With no `kit.toml` above the working
+//! Mac), or the terminal when there is no dialog to show, or with neither the menu's own browser
+//! ([`crate::disc_browser`], P220). With no `kit.toml` above the working
 //! directory the shell's own files — `settings.txt`, `controls.txt`, `mods/`, the picks and markers —
 //! live in the per-user data folder ([`data_dir`]), and the disc's path is remembered there in
 //! [`REMEMBERED`].
@@ -183,7 +184,16 @@ pub fn ask() -> Option<PathBuf> {
     }
     // a dialog that was shown and cancelled is the player's answer: no terminal question after it
     use std::io::{BufRead, IsTerminal, Write};
-    if shown || !std::io::stdin().is_terminal() {
+    if shown {
+        return None;
+    }
+    // no dialog and no terminal, a launcher's start: the menu's own browser (P220). Unix only, where
+    // [`restart`] runs a fresh process after it, which can open the game's window — a second event
+    // loop in this one cannot.
+    if !std::io::stdin().is_terminal() {
+        #[cfg(all(unix, not(target_os = "ios"), not(target_os = "android")))]
+        return crate::disc_browser::browse(opens);
+        #[cfg(not(all(unix, not(target_os = "ios"), not(target_os = "android"))))]
         return None;
     }
     print!("{title}\nits path: ");
