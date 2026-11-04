@@ -1059,6 +1059,92 @@ pub fn ride_out(cam: &mut game_sim::camera::Race, view: &mut game_sim::camera::V
     }
 }
 
+// --- the plane kept in the picture (P275) -----------------------------------------------------------
+
+/// How far into its view [`keep_in_view`] keeps the plane: this share of the view's half-width and
+/// half-height, as tangents, so the plane's body still has room round its centre.
+pub const IN_VIEW: f32 = 0.7;
+
+/// The steepest the look may point, from level, in radians: 80 degrees. The renderer builds its view
+/// on the world's up, and looking straight up or down leaves that view no sideways axis.
+pub const STEEPEST_LOOK: f32 = 1.396_263_4;
+
+/// The plane's follow camera, with the plane kept in the picture (P275). The camera is the original's
+/// race camera, on the plane's own presets (V29), and it is ported to the bit. But it builds its eye and
+/// its look-at on the plane's heading flattened to the ground, and lags both. So when the plane pulls
+/// up into a steep climb or a loop, the look-at stays near the horizon while the plane climbs out of
+/// the top of the picture. The original does the same thing: in V29's capture of its own camera, the
+/// plane is 46 degrees above the middle of an 85-degree view at the top of the climb, and off the
+/// screen.
+///
+/// This turns the look the least it takes to keep `point`, the plane's centre of mass, inside
+/// [`IN_VIEW`] of a view with vertical field of view `fov` (radians) and shape `aspect` (width over
+/// height). It is never steeper than [`STEEPEST_LOOK`]. Wherever the original's camera already has
+/// the plane inside that box, the view is left alone to the bit. The eye does not move, and the
+/// camera's own state (its lags, its angles) is not touched, so the next frame's camera is the
+/// original's again. Only the picture differs.
+pub fn keep_in_view(view: &mut game_sim::camera::View, point: Vf, fov: f32, aspect: f32) {
+    let eye = v3(view.position);
+    let at = v3(view.look_at);
+    let reach = length(sub(at, eye));
+    let to = sub(v3(point), eye);
+    if !(reach > 0.0) || !(length(to) > 0.0) {
+        return;
+    }
+    let half_y = (fov * 0.5).tan();
+    let edge = [(IN_VIEW * half_y * aspect).atan(), (IN_VIEW * half_y).atan()];
+    // Is the plane inside the box, looking along `z`?
+    let inside = |z: [f32; 3]| {
+        let x = unit(cross([0.0, 1.0, 0.0], z));
+        let y = cross(z, x);
+        let depth = dot(to, z);
+        depth > 0.0 && dot(to, x).atan2(depth).abs() <= edge[0] && dot(to, y).atan2(depth).abs() <= edge[1]
+    };
+    let angles = |z: [f32; 3]| (z[0].atan2(z[2]), z[1].clamp(-1.0, 1.0).asin().clamp(-STEEPEST_LOOK, STEEPEST_LOOK));
+    let look = |(yaw, pitch): (f32, f32)| [pitch.cos() * yaw.sin(), pitch.sin(), pitch.cos() * yaw.cos()];
+    let start = unit(sub(at, eye));
+    let from = angles(start);
+    if inside(start) && start[1].abs() <= STEEPEST_LOOK.sin() {
+        return;
+    }
+    // The way from the camera's look to the plane, in yaw and pitch: the least of it that has the
+    // plane inside, or all of it (the plane in the middle, or as near as the steepest look gets).
+    let towards = angles(unit(to));
+    let mut turn = towards.0 - from.0;
+    if turn > std::f32::consts::PI {
+        turn -= std::f32::consts::TAU;
+    } else if turn < -std::f32::consts::PI {
+        turn += std::f32::consts::TAU;
+    }
+    let along = |t: f32| look((from.0 + turn * t, from.1 + (towards.1 - from.1) * t));
+    let z = if inside(along(0.0)) {
+        along(0.0)
+    } else if !inside(along(1.0)) {
+        along(1.0)
+    } else {
+        let (mut out, mut is_in) = (0.0, 1.0);
+        for _ in 0..24 {
+            let mid = 0.5 * (out + is_in);
+            if inside(along(mid)) {
+                is_in = mid;
+            } else {
+                out = mid;
+            }
+        }
+        along(is_in)
+    };
+    let at = add(eye, mul(z, reach));
+    view.look_at = Vf::new(at[0], at[1], at[2], view.look_at.w());
+}
+
+fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+}
+
 // --- a seat's own pause (P172) ----------------------------------------------------------------------
 
 /// What a seat's camera does this frame over its own pause (P172).

@@ -8889,6 +8889,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     chase::ride_out(follow, &mut view, rider.target.vel, dt);
                 }
                 view.fov = fov_ease.ease(view.fov, dt.0);
+                // The plane kept in the picture through a climb or a loop (P275), which the original's
+                // camera, looking along the plane's flattened heading, loses off the top.
+                if flying {
+                    let fov = aspect::fov(view.fov.0, view_w, view_h);
+                    chase::keep_in_view(&mut view, rider.target.body_point, fov, view_w as f32 / view_h.max(1) as f32);
+                }
                 Some(view)
             };
             let view = match (view, &wreck_targets) {
