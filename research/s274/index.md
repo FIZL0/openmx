@@ -30,3 +30,10 @@ Journal: `research/journal/2026-11-03-s274-wreck-bike-meets-the-plane`. This is 
   them skips. The s272 images remain. `segment_pad` in `tests/c16_fly.rs` rebuilds the tape's P1 pads
   from research/c16's segment list. With them, `fly_two_by` from 137845 wrecks P2 with 7 on tick
   137855, as the capture does.
+- **T8: `held()` takes the first substep.** Each `Tick` keeps the plane after its tick's first substep
+  (`game_sim::flight::substeps`), and a row may read that state, or be torn between it and either end.
+  On C25's re-recorded capture, 137910's stretch holds 1 tick, not 0 (JOUSTS and STRETCHES[6]). It
+  parts on row 137912: the port's vel is (-24.667921, 8.345952, 2.0563095) and the row's is
+  (-24.762869, 8.420688, 2.1121182). C25's capture starts at row 137403, so s272-137402.ram is
+  `./kit state ram` of the tape's own `fly.p2m2_SaveState.p2s` (frame_counter 137402). Every other pin
+  holds unchanged on the new capture.

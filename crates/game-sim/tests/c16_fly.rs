@@ -593,6 +593,16 @@ struct Tick {
     /// does not step P2's rider, a downed P2's wreck bike's body velocity and position, S276).
     p2: [[u32; 3]; 2],
     p2_wreck: Option<u8>,
+    /// The plane's velocity and position after the tick's first substep, and how many substeps it
+    /// took ([`game_sim::flight::substeps`]): where a row PINE read inside the frame stands (T8).
+    first: [[u32; 3]; 2],
+    substeps: usize,
+}
+
+/// The plane's state after the first of the substeps [`game_sim::flight::substeps`] kept, and their
+/// count; the tick's end if it kept none.
+fn first_substep(kept: &[game_sim::biplane::Body], end: [[u32; 3]; 2]) -> ([[u32; 3]; 2], usize) {
+    (kept.first().map_or(end, |b| [three(b.velocity), three(b.position)]), kept.len())
 }
 
 fn three(v: Vf) -> [u32; 3] {
@@ -607,7 +617,7 @@ fn fly(from: u32, to: u32, zero: u32) -> Option<([[u32; 3]; 2], Vec<Tick>)> {
     let cap = capture()?;
     let tape = tape()?;
     let dt_of = |t: u32| F(cap.f((t + 1).max(cap.first as u32), "dt"));
-    let reason = cap.u(from, "p2_wreck_reason");
+    let reason = cap.u(from.max(cap.first as u32), "p2_wreck_reason");
     fly_by(from, to, &dt_of, &|t| tape_pad(&tape, t, zero), &|t| chord(&tape, t + 1, zero), reason)
 }
 
@@ -649,10 +659,12 @@ fn fly_by(
             let dt = dt_of(t);
             let mut controls = sim.poll(dt, &[pad_of(t), Report::missing()]);
             controls.respawn = respawn_of(t);
-            sim.step(dt, &controls, world);
+            let (_, kept) = game_sim::flight::substeps(|| sim.step(dt, &controls, world));
             let p = sim.plane.as_ref().unwrap();
             let p2 = sim.others[0].rider.crash.as_ref().map_or([[0; 3]; 2], |c| [three(c.bike.body.velocity), three(c.bike.body.position)]);
-            out.push(Tick { t, state: [three(p.body.velocity), three(p.body.position)], crash: p.crash.reason, p2, p2_wreck: None });
+            let state = [three(p.body.velocity), three(p.body.position)];
+            let (first, substeps) = first_substep(&kept, state);
+            out.push(Tick { t, state, crash: p.crash.reason, p2, p2_wreck: None, first, substeps });
         }
         Some((seed, out))
     })
@@ -727,6 +739,7 @@ fn fly_two_by(
             // P2's wreck bike's search, plane 0's hull in its world (S274): its mirrors go on the plane's list.
             // The flying seat: its plane among the bikes, and P2's wreck bike's search with its hull
             // in the wreck bike's world before the plane's frame, its step after (S274, S276).
+            let first;
             let mut struck = {
                 let m = mirrors.get_mut(0).map(std::mem::take).unwrap_or_default();
                 let at = seats[0].plane.as_ref().unwrap().body.position;
@@ -745,7 +758,8 @@ fn fly_two_by(
                 let pad = flight::pad(s.input.pad(0));
                 let f = s.plane.as_mut().unwrap();
                 f.reset_chord(controls.respawn, &tables.ride.acos);
-                f.frame_met(dt, pad, world, &tables.ride, &bikes, Some(&mut met));
+                let (_, kept) = game_sim::flight::substeps(|| f.frame_met(dt, pad, world, &tables.ride, &bikes, Some(&mut met)));
+                first = kept;
                 rider_contact::pushed_among(&mut seats, &met);
                 // P2's own step comes after: its crash skips the wreck bike's tick (WreckBike::flown).
                 let (me, others) = seats.split_at_mut(1);
@@ -779,12 +793,16 @@ fn fly_two_by(
             }
             let p = seats[0].plane.as_ref().unwrap();
             let ch = &seats[1].rider.ride.chassis;
+            let state = [three(p.body.velocity), three(p.body.position)];
+            let (first, substeps) = first_substep(&first, state);
             out.push(Tick {
                 t,
-                state: [three(p.body.velocity), three(p.body.position)],
+                state,
                 crash: p.crash.reason,
                 p2: [three(ch.vel), three(ch.cofg_world)],
                 p2_wreck: said.wreck.map(|w| w.0),
+                first,
+                substeps,
             });
         }
         Some((seed, out))
@@ -860,10 +878,12 @@ fn wrecked_p2(ee: &Ee, rider: u32, reason: u32, r: &mut Rider) {
 /// How many of the port's ticks the capture confirms, bit for bit (tests/fly_and_collide.rs's rule):
 /// each row from the image's frame on reads one of the port's states in order, the image's then each
 /// tick's, or repeats the one before, or skips one, or is torn between two axis by axis. A row that is
-/// none of those parts the run.
+/// none of those parts the run. A row may also be read inside a tick's frame, after its first substep
+/// (T8: row 137911 is the plane after 137910's first, S274), or torn between that and either end.
 fn held(cap: &Rows, seed: [[u32; 3]; 2], ticks: &[Tick]) -> usize {
     let states: Vec<[[u32; 3]; 2]> = std::iter::once(seed).chain(ticks.iter().map(|k| k.state)).collect();
-    held_by(cap, &states, ticks[0].t, ticks.last().unwrap().t, |r| cap.state(r))
+    let firsts: Vec<[[u32; 3]; 2]> = std::iter::once(seed).chain(ticks.iter().map(|k| k.first)).collect();
+    held_in(cap, &states, &firsts, ticks[0].t, ticks.last().unwrap().t, |r| cap.state(r))
 }
 
 /// [`held`] on P2's chassis, velocity and centre.
@@ -873,6 +893,18 @@ fn p2_held(cap: &Rows, seed: [[u32; 3]; 2], ticks: &[Tick]) -> usize {
 }
 
 fn held_by(cap: &Rows, states: &[[[u32; 3]; 2]], from: u32, last: u32, read: impl Fn(u32) -> [[u32; 3]; 2]) -> usize {
+    held_in(cap, states, states, from, last, read)
+}
+
+/// [`held_by`], where state `j`'s tick also stands at `firsts[j]` inside its frame.
+fn held_in(
+    cap: &Rows,
+    states: &[[[u32; 3]; 2]],
+    firsts: &[[[u32; 3]; 2]],
+    from: u32,
+    last: u32,
+    read: impl Fn(u32) -> [[u32; 3]; 2],
+) -> usize {
     let mut at = 0;
     for r in from..=last + 2 {
         if cap.row(r).is_none() {
@@ -880,7 +912,7 @@ fn held_by(cap: &Rows, states: &[[[u32; 3]; 2]], from: u32, last: u32, read: imp
         }
         let row = read(r);
         let reads = |j: usize| {
-            let pair = [states[j.saturating_sub(1)], states[j]];
+            let pair = [states[j.saturating_sub(1)], firsts[j], states[j]];
             (0..2).all(|v| (0..3).all(|a| pair.iter().any(|s| s[v][a] == row[v][a])))
         };
         // A row read between a put-back's placing and its integrate: the velocity zeroed, the
@@ -1003,18 +1035,20 @@ fn the_plane_jousts_p2_as_the_original() {
 }
 
 /// The joust's runs: from, to, and the ticks the plane and P2 hold. 137910's seeds P2 down
-/// ([`wrecked_p2`]); its wreck bike holds, the plane parts on its first tick, the wreck bike's mirror
-/// on its list (S274) pushing it short of the original's (research/s274).
-const JOUSTS: [(u32, u32, usize, usize); 3] = [(137810, 137900, 46, 17), (137845, 137900, 11, 55), (137910, 138010, 0, 100)];
+/// ([`wrecked_p2`]); its wreck bike holds. The plane holds its first tick, row 137911 read after that
+/// tick's first substep ([`held`], T8), and parts on its second (row 137912), the wreck bike's mirror
+/// on its list (S274) pushing it short of the original's (research/s274). Pinned on C25's capture.
+const JOUSTS: [(u32, u32, usize, usize); 3] = [(137810, 137900, 46, 17), (137845, 137900, 11, 55), (137910, 138010, 1, 100)];
 
 /// The whole tape as images every 100 frames cut it: each stretch from its image to the next, and
 /// how many of its ticks hold (S272's pins). Two part: 137810's on the joust's hit (137853's step), the
-/// Sim's plane lane standing P2 still; and 137910's on its first tick, the plane bouncing on P2's
+/// Sim's plane lane standing P2 still; and 137910's on its second tick, the plane bouncing on P2's
 /// wreck. Since S276 [`fly`] seeds P2 down there and its wreck bike meets the plane in the Sim's lane
-/// ([`the_sim_lane_meets_p2s_wreck_bike`]), but the plane's resolve against the wreck bike's mirror is
-/// not yet the original's (S274), so it still parts on its first tick.
+/// ([`the_sim_lane_meets_p2s_wreck_bike`]). Its first tick holds on a row read after the first
+/// substep (T8, [`row_137911_is_the_wreck_bikes_first_substep`]); the second parts, the plane's
+/// resolve against the wreck bike's mirror not yet the original's (S274). Pinned on C25's capture.
 const STRETCHES: [usize; 29] = [
-    8, 100, 100, 100, 100, 43, 0, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100,
+    8, 100, 100, 100, 100, 43, 1, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100,
     100, 100, 100, 100,
 ];
 
@@ -1128,22 +1162,20 @@ fn the_sim_lane_meets_p2s_wreck_bike() {
 /// first substep ([`game_sim::flight::substeps`]) is the original's row 137911 to the capture's printed
 /// digits, at the image's `frame_dt` (0x3c888882; 0x3c88ce6a and 1/60 land there too), and the tick's end is not: the row is torn, PINE reading between the frame's two steps
 /// (S196's three phases). With P2 standing the substep is not on it, so the mirror's push is the
-/// original's. Why JOUSTS' 137910 stretch "parts on its first tick": [`held`] wants the tick's end.
+/// original's. Why [`held`] takes a row read after a tick's first substep (T8).
 #[test]
 fn row_137911_is_the_wreck_bikes_first_substep() {
     let dt = |_| F(f32::from_bits(0x3c888882));
     let row = ["-24.94349", "8.60006", "2.21980"];
     let digits = |v: Vf| [0, 1, 2].map(|k| format!("{:.5}", v.0[k]));
-    let first = |reason| {
-        let (flown, kept) = game_sim::flight::substeps(|| fly_by(137910, 137911, &dt, &segment_pad, &|_| false, reason));
-        flown.map(|(_, ticks)| (kept, ticks[0]))
-    };
-    let Some((kept, tick)) = first(7) else { return };
-    assert_eq!(kept.len(), 2, "two substeps a tick");
-    assert_eq!(digits(kept[0].velocity), row, "the first substep, P2 down");
-    assert_ne!(tick.state[0].map(f32::from_bits).map(|v| format!("{v:.5}")), row, "the tick's end is past the row");
-    let Some((standing, _)) = first(0) else { return };
-    assert_ne!(digits(standing[0].velocity), row, "the first substep, P2 standing");
+    let first = |reason| fly_by(137910, 137911, &dt, &segment_pad, &|_| false, reason).map(|(_, ticks)| ticks[0]);
+    let vel = |bits: [u32; 3]| digits(Vf::new(f32::from_bits(bits[0]), f32::from_bits(bits[1]), f32::from_bits(bits[2]), 0.0));
+    let Some(tick) = first(7) else { return };
+    assert_eq!(tick.substeps, 2, "two substeps a tick");
+    assert_eq!(vel(tick.first[0]), row, "the first substep, P2 down");
+    assert_ne!(vel(tick.state[0]), row, "the tick's end is past the row");
+    let Some(standing) = first(0) else { return };
+    assert_ne!(vel(standing.first[0]), row, "the first substep, P2 standing");
 }
 
 /// **P2's wreck 7 by the tape's pads** (S274): from 137845's image, P1's pads the tape's segments
