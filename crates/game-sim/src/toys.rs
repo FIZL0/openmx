@@ -507,9 +507,14 @@ impl Toys {
     /// Toy `k`'s joints' world matrices where its clock stands, sampled with a copy of the hints, so
     /// the step that follows samples as it would have without it.
     fn worlds_now(&self, k: usize) -> Vec<Mat4> {
+        self.worlds_at(k, self.clocks[k].time)
+    }
+
+    /// Toy `k`'s joints' world matrices at clip time `time`, sampled with a copy of the hints.
+    fn worlds_at(&self, k: usize, time: F) -> Vec<Mat4> {
         let spec = &self.specs[k];
         let mut hints = self.hints[self.base[spec.motion]..].to_vec();
-        let locals = pose(&self.motions[spec.motion], &spec.rig, self.clocks[k].time, &mut hints);
+        let locals = pose(&self.motions[spec.motion], &spec.rig, time, &mut hints);
         self.worlds(k, &locals)
     }
 
@@ -551,8 +556,12 @@ impl Toys {
     /// of kind 2) whose update keeps the joint's world matrix and the one before, and whose two
     /// virtuals are the path car's. The matrix before is the joint's at the clock the step started
     /// from, so it is made again from state. A clip that has finished stands still, and so does a
-    /// toy the visibility gate passes over ([`Toys::steps`]): nothing of it is stepped. A toy with
-    /// `UpdateSearch` off steps its clip but leaves its parts where they stand.
+    /// toy the visibility gate passes over ([`Toys::steps`]): nothing of it is stepped. Its parts'
+    /// bodies are not updated either, and a body's velocity reads its node's world now against the
+    /// matrix it kept from the update before last, so a passed-over part still answers its last
+    /// step's motion, from the joint at the clock that step started from ([`Clock::prev`]) to where
+    /// it stands, at this tick's `1/dt` (S212). A toy with `UpdateSearch` off steps its clip but
+    /// leaves its parts where they stand.
     ///
     /// A `.col` mesh is told the same of the placement, which never moves (S167). Until its toy has
     /// stepped twice since the load, the body's matrix before is the identity ([`Toys::bodies`]), for
@@ -600,10 +609,14 @@ impl Toys {
                     }
                 }
             } else if let (Some(props), Some(a), Some(b)) = (props.as_deref_mut(), at, before.as_ref()) {
+                // Passed over: the last step's pair. A finished clip's last step moved nothing.
+                let clock = self.clocks[k];
+                let last = (!steps && !clock.finished).then(|| self.worlds_at(k, clock.prev));
                 for (p, part) in spec.parts.iter().enumerate() {
                     if let Some(prop) = props.props.get_mut(a + p) {
                         let place = spec.at(part, b);
-                        prop.moving = Some(crate::traffic::Moving::of(&was(place), &place, inv_dt));
+                        let from = was(last.as_ref().map_or(place, |l| spec.at(part, l)));
+                        prop.moving = Some(crate::traffic::Moving::of(&from, &place, inv_dt));
                     }
                 }
             }
