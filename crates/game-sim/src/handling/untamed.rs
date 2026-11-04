@@ -17,6 +17,9 @@
 //! - The backflip ([`backflip`], MD93a): SLUS-21104's on Untamed's input. The fourth trick button
 //!   arms it whatever else is held, a bound backflip control fires it on the lip at once, the lip reads
 //!   the stick before the limiter, and a flip's end clears a stunt id over 48 (SLUS-21104: 40).
+//! - The 360 ([`spin`], MD93b): SLUS-21104's on the same input. The fourth trick button arms it, a
+//!   bound 360 control fires it on the lip at once with torques of its own, the torque decays only with
+//!   no trick button held and the stick off centre, and its end clears a stunt id over 48.
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
 use crate::air::{Air, Chassis, Params as AirParams, Step as AirStep};
@@ -452,5 +455,258 @@ pub fn ride_backflip(p: &AirParams, air: &mut Air, chassis: &mut Chassis, step: 
     }
     if out.stunt_ended {
         flip.came_round = true;
+    }
+}
+
+// --- the 360 (MD93b) ----------------------------------------------------------------------------------
+
+/// How far over the stick has to go to arm and fire the 360, as on SLUS-21104.
+const SPIN_HELD: f32 = 0.7;
+/// The seconds a fired 360 has to get the wheels off the ground.
+const SPIN_GRACE: u32 = 0x3f66_6666; // 0.9
+/// 35°: the turn from the take-off heading past which the clip starts, and back under which it stops.
+const SPIN_CLIP: u32 = 0x3f1c_61a9;
+const PI: u32 = 0x4049_0fdb;
+const TWO_PI: u32 = 0x40c9_0fdb;
+/// The arc cosine table's lookup scale (the ELF's `0x003ff550`).
+const ACOS_SCALE: f32 = 14999.5;
+/// What a bound 360 control fires with: constants in the ELF (`0x0053d3e8`, `0x0053d3f0`), not the
+/// bike's `[Three Sixty]` keys. The yaw is times the direction (see [`spin`]); the pitch is +200 where
+/// the stick's is the negated map.
+const BUTTON_YAW: u32 = 0x4489_8000; // 1100
+const BUTTON_PITCH: u32 = 0x4348_0000; // 200
+
+/// Untamed's 360: what it reads beyond MX Unleashed's [`AirStep`]. The buttons and the bound control are
+/// read off the input reader's pad record as [`FlipIn`]'s are.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SpinIn {
+    /// The fourth trick button is held: what arms the 360 on the lip with the stick over (the others
+    /// may be held with it; SLUS-21104 wants R1 alone).
+    pub arm_button: bool,
+    /// Any of the four trick buttons is held: the torque in the air then does not decay.
+    pub trick_held: bool,
+    /// The stick's side-to-side as the lip reads it (`+0x12bc`, the reader's copy before the limiter).
+    pub lip_x: F,
+    /// The limited stick's side-to-side (`+0x1298`), which the decay in the air reads.
+    pub x: F,
+    /// The sideways flick the fired torque is mapped from (`+0x12b8`).
+    pub hold: F,
+    /// The 360 as a bound control: `None` when this device has no binding for it (the stick is the
+    /// 360), else which way the binding is pressed: −1 left (asked first), 1 right, 0 neither.
+    pub button: Option<i32>,
+    /// The bike frame's forward axis (its node's third row), which the heading is read off.
+    pub forward: Vf,
+    /// The rider's current stunt id: a 360 that ends clears one at or past [`FIRST_FLIP_STUNT`] (to 255).
+    pub stunt_id: i32,
+}
+
+/// What one call of [`spin`] asked of the rest of the bike, as [`super::FlipOut`] for the backflip.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SpinOut {
+    /// The 360's stunt was asked to start (the clip went to 1 only if it did).
+    pub stunt_started: bool,
+    /// The 360's stunt was asked to end (the clip came round: 2 to 0).
+    pub stunt_ended: bool,
+    /// The rider's stunt id was cleared (at or past [`FIRST_FLIP_STUNT`], set to 255) as the 360 ended.
+    pub stunt_cleared: bool,
+    /// The 360 ended with its clip running: the wreck, `0xb`, or `0xf` when `steep` answered yes.
+    pub wreck: Option<u8>,
+}
+
+/// `[-1, 1]` as two compares and two moves: anything unordered comes back as `1.0`.
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
+fn clamp_unit(c: F) -> F {
+    if !(c <= F::ONE) {
+        F::ONE
+    } else if c < F(-1.0) {
+        F(-1.0)
+    } else {
+        c
+    }
+}
+
+/// The heading of the forward axis flattened (`y` 0, normalised through `vrsqrt`), off the arc cosine
+/// table: `acos(z)` (clamped twice; `mula(frac, hi)`, `madd(1 - frac, lo)`), and `(π − a) + π` for an
+/// `x` below 0.
+fn spin_heading(forward: Vf, table: &crate::air::AcosTable) -> F {
+    let v = crate::air::normalize(forward.merge(Dest::Y, Vf::ZERO));
+    let z = clamp_unit(clamp_unit(F(v.z())));
+    let t = table.entries();
+    let s = (F::ONE + z) * F(ACOS_SCALE);
+    let i = s.to_i32();
+    let frac = s - F(fpu::from_i32(i));
+    let a = F(fpu::madd(fpu::mula(frac.0, t[i as usize + 1]), (F::ONE - frac).0, t[i as usize]));
+    if F(v.x()) < F::ZERO { (F::from_bits(PI) - a) + F::from_bits(PI) } else { a }
+}
+
+/// The fired 360's torque off the flick: the low end when the two times are equal, else the flick mapped
+/// from the times onto the two torques and clamped between them.
+fn spin_torque(t: &crate::air::SpinTuning, hold: F, lo: F, hi: F) -> F {
+    if t.min_time == t.max_time { lo } else { crate::air::map_clamp(hold.abs(), t.min_time, t.max_time, lo, hi) }
+}
+
+/// One substep of Untamed's 360 (SLUS-21701's spin in the air, called after its backflip), over
+/// MX vs. ATV's 360 state ([`crate::air::Spin`]; only its original's words: the port's latches are left
+/// alone). It is SLUS-21104's on Untamed's input:
+///
+/// - On a lip (on the ground, no backflip torque in or triggered, rising faster than 5 and faster than
+///   30 forward, the brake off) a bound 360 control, when this device has one, takes the stick's place.
+///   Pressed either way it fires at once, a yaw of 1100 times the direction the 360 had *before* (the
+///   word is read before the press's direction is stored) and a pitch of +200, with the grace 0.9.
+/// - Otherwise an armed 360 whose lip stick is over past 0.7 its own way fires with the torques mapped
+///   off the flick, and the fourth trick button (others may be held) with the lip stick past 0.7 arms it,
+///   to the left (direction 1) for a stick left. Off a lip it is disarmed.
+/// - In the air it is SLUS-21104's, but the torque decays only with none of the four trick buttons held
+///   and the limited stick off centre (SLUS-21104: at centre too, which reads as pushed right) and
+///   against the turn. A 360 that ends clears a stunt id over 48 (SLUS-21104: 40).
+///
+/// `start_stunt` is handed the direction (the stunt it starts is the bike's left or right 360 by it)
+/// and answers whether the stunt started; `steep` is the mid-clip wreck's reason test. Both are called
+/// only where the original calls them.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares: a NaN goes the far way
+#[allow(clippy::too_many_arguments)]
+pub fn spin(
+    t: &crate::air::SpinTuning,
+    p: &AirParams,
+    air: &mut Air,
+    s: &mut crate::air::Spin,
+    chassis: &mut Chassis,
+    step: &AirStep,
+    inp: &SpinIn,
+    table: &crate::air::AcosTable,
+    start_stunt: impl FnOnce(i32) -> bool,
+    steep: impl FnOnce() -> bool,
+) -> SpinOut {
+    let mut out = SpinOut::default();
+    let sign = |x: F| if x < F::ZERO { -1 } else { 1 };
+    s.applied = false;
+    if !s.active {
+        let lip = air.on_ground
+            && !air.flip_torque_applied
+            && !air.flip_active
+            && !(chassis.vel.y() <= 5.0)
+            && !(air.contact_vel.z() <= 30.0)
+            && step.brake == F::ZERO;
+        if !lip {
+            s.active = false;
+            s.armed = false;
+        } else if let Some(way) = inp.button {
+            if way != 0 {
+                let yaw = F(fpu::from_i32(s.dir)) * F::from_bits(BUTTON_YAW);
+                s.torque = s.torque.merge(Dest::Y, Vf::splat(yaw.0)).merge(Dest::X, Vf::splat(f32::from_bits(BUTTON_PITCH)));
+                s.grace = F::from_bits(SPIN_GRACE);
+                s.active = true;
+                s.armed = false;
+                s.dir = way;
+            }
+        } else if s.armed && !(inp.lip_x.abs() <= F(SPIN_HELD)) && sign(inp.lip_x) == s.dir {
+            let yaw = F(fpu::from_i32(s.dir)) * spin_torque(t, inp.hold, t.min_torque_y, t.max_torque_y);
+            let pitch = -spin_torque(t, inp.hold, t.min_torque_x, t.max_torque_x);
+            s.torque = s.torque.merge(Dest::Y, Vf::splat(yaw.0)).merge(Dest::X, Vf::splat(pitch.0));
+            s.armed = false;
+            s.active = true;
+            s.grace = F::from_bits(SPIN_GRACE);
+        } else if inp.arm_button {
+            if inp.lip_x < F(-SPIN_HELD) {
+                (s.armed, s.dir) = (true, 1);
+            } else if !(inp.lip_x <= F(SPIN_HELD)) {
+                (s.armed, s.dir) = (true, -1);
+            }
+        }
+    } else if !s.armed {
+        if air.on_ground {
+            s.grace = s.grace - step.dt;
+            if s.grace <= F::ZERO {
+                s.active = false;
+                s.armed = false;
+            }
+        } else {
+            s.armed = true;
+            s.start = spin_heading(inp.forward, table);
+        }
+    } else {
+        let now = spin_heading(inp.forward, table);
+        let off = (s.start - now).abs().min(((F::from_bits(TWO_PI) + s.start) - now).abs());
+        if air.on_ground || step.touching || F(s.torque.y()).abs() < t.min_torque_y {
+            s.active = false;
+            s.armed = false;
+            if inp.stunt_id >= FIRST_FLIP_STUNT {
+                out.stunt_cleared = true;
+            }
+            if s.clip != 0 {
+                s.clip = 0;
+                out.wreck = Some(if steep() { 0xf } else { 0xb });
+            }
+        } else {
+            let x = inp.x;
+            if !inp.trick_held && x != F::ZERO && s.dir != sign(x) {
+                let d = F(fpu::from_i32(s.dir));
+                let by = t.rate_decrease * (d * x.abs());
+                let yaw = F(fpu::msub(fpu::adda(0.0, s.torque.y()), step.dt.0, by.0));
+                let by = x * t.rate_decrease;
+                let pitch = F(fpu::msub(fpu::adda(0.0, s.torque.x()), step.dt.0, by.0));
+                s.torque = s.torque.merge(Dest::Y, Vf::splat(yaw.0)).merge(Dest::X, Vf::splat(pitch.0));
+            }
+            chassis.moment = chassis.moment.merge(Dest::XYZ, chassis.moment.add(s.torque));
+            s.applied = true;
+            s.ramp = true;
+            let past = F::from_bits(SPIN_CLIP);
+            if s.clip == 0 {
+                if !(off <= past) {
+                    out.stunt_started = start_stunt(s.dir);
+                    if out.stunt_started {
+                        s.clip = 1;
+                    }
+                }
+            } else if off < past {
+                if s.clip == 2 {
+                    out.stunt_ended = true;
+                    s.clip = 0;
+                }
+            } else if s.clip == 1 {
+                s.clip = 2;
+            }
+        }
+    }
+    if s.ramp && air.on_ground {
+        s.ramp = false;
+        air.authority = p.control_authority_time;
+    }
+    out
+}
+
+/// [`spin`] on a ride on Untamed's handling, in the place [`crate::air::three_sixty`] runs on a ride on
+/// a trick pack, over the same state and with the pack's `[Three Sixty]` keys (through the rotation-speed
+/// modifier, as there). The rider's side is as there: the stunt start answers yes (MD59, the clip state
+/// runs whether or not the rider has the clip), the clip coming round latches [`crate::air::Spin::came_round`],
+/// and a mid-clip end latches [`crate::air::Spin::wrecked`] (and [`crate::air::Spin::cut`] off the ground),
+/// which the rider takes as the 360's wreck whatever `steep` would say. None of the port's own additions
+/// to the 360 (MD20's both at once and the pitch that follows a front flip) run here.
+///
+/// The input is stood in as [`ride_backflip`]'s (MD93f): the arming button is R1, a trick is held when
+/// any of the three is, both sticks are the step's, the flick is `flick`, and there is no bound control.
+/// The rider's stunt id is [`stunt_stand_in`]'s, and its clearing is not kept (the port's rider has no id).
+#[allow(clippy::too_many_arguments)]
+pub fn ride_spin(t: &crate::air::SpinTuning, p: &AirParams, air: &mut Air, s: &mut crate::air::Spin, chassis: &mut Chassis,
+                 step: &AirStep, trick: [bool; 3], flick: F, table: &crate::air::AcosTable) {
+    let t = t.tuned(p);
+    let inp = SpinIn {
+        arm_button: trick[2],
+        trick_held: trick.iter().any(|&b| b),
+        lip_x: step.stick.0,
+        x: step.stick.0,
+        hold: flick,
+        button: None,
+        forward: step.heading,
+        stunt_id: stunt_stand_in(step.stunt, false, s.clip != 0, air.on_ground),
+    };
+    let aloft = !air.on_ground && !step.touching;
+    let out = spin(&t, p, air, s, chassis, step, &inp, table, |_| true, || false);
+    if out.wreck.is_some() {
+        s.wrecked = true;
+        s.cut = aloft;
+    }
+    if out.stunt_ended {
+        s.came_round = true;
     }
 }

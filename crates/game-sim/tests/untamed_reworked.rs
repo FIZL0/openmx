@@ -1066,3 +1066,474 @@ fn untamed_ride_backflip_arms_on_r1_with_another_button() {
     assert_eq!(untamed::stunt_stand_in(false, false, false, true), 0xff);
     assert_eq!(untamed::stunt_stand_in(true, true, false, false), 0);
 }
+
+// --- the 360 (MD93b) ----------------------------------------------------------------------------------
+
+/// The 360 and what it calls beyond the backflip's: the frame node's axes (hooked: it answers the
+/// forward axis), and the bound control's "pressed left" and "pressed right".
+const SPIN: u32 = 0x004f_d630;
+const NODE_AXES: u32 = 0x0019_0580;
+const BINDING_LEFT: u32 = 0x0025_2690;
+const BINDING_RIGHT: u32 = 0x0025_26e0;
+/// Where the game keeps its arc cosine table and its lookup scale.
+const ACOS_PTR: u32 = 0x003f_f538;
+const ACOS_SCALE: u32 = 0x003f_f550;
+
+#[derive(Clone, Debug)]
+struct SpinState {
+    t: air::SpinTuning,
+    p: Params,
+    air: Air,
+    spin: air::Spin,
+    ch: Chassis,
+    st: air::Step,
+    inp: untamed::SpinIn,
+    /// The four trick buttons, the device and the binding byte, as the backflip's [`FlipState`].
+    buttons: [u8; 4],
+    device: u32,
+    bound: u8,
+    /// The binding pressed left and right (only asked when bound; right only when not left).
+    left: bool,
+    right: bool,
+    /// The two 360 stunt words (`+0x13cc` for a direction under 1, `+0x13d0` else).
+    stunts: [u32; 2],
+    start_answer: bool,
+    steep_answer: bool,
+}
+
+#[derive(Default, Debug)]
+struct SpinCalls {
+    forward: Vf,
+    start_answer: bool,
+    steep_answer: bool,
+    left_answer: bool,
+    right_answer: bool,
+    axes: u32,
+    left: u32,
+    right: u32,
+    started: Vec<(u32, u32)>,
+    ended: Vec<u32>,
+    steep: u32,
+    wrecks: Vec<u32>,
+}
+
+impl Gen {
+    fn spin(&mut self) -> SpinState {
+        let min_time = if self.one_in(4) { F::ZERO } else { self.f(0.0, 30.0) };
+        let mut s = SpinState {
+            t: air::SpinTuning {
+                min_time,
+                max_time: if self.one_in(8) { min_time } else { self.f(10.0, 80.0) },
+                min_torque_x: self.f(-200.0, 900.0),
+                max_torque_x: self.f(300.0, 1400.0),
+                min_torque_y: self.f(200.0, 1200.0),
+                max_torque_y: self.f(600.0, 2000.0),
+                rate_increase: self.f(0.0, 1000.0),
+                rate_decrease: self.f(0.0, 3000.0),
+            },
+            p: zero_params(),
+            air: Air::default(),
+            spin: air::Spin::default(),
+            ch: Chassis::default(),
+            st: air::Step::default(),
+            inp: untamed::SpinIn::default(),
+            buttons: [0; 4],
+            device: self.bits() % 4,
+            bound: 0,
+            left: self.one_in(3),
+            right: self.one_in(3),
+            stunts: [self.bits() % 64, self.bits() % 64],
+            start_answer: self.b(),
+            steep_answer: self.b(),
+        };
+        s.p.control_authority_time = self.f(0.0, 2.0);
+
+        let a = &mut s.air;
+        a.on_ground = self.b();
+        a.flip_torque_applied = self.one_in(8);
+        a.flip_active = self.one_in(8);
+        a.authority = self.f(-0.5, 2.0);
+        a.contact_vel = Vf::new(self.f(-5.0, 5.0).0, self.f(-5.0, 5.0).0, self.near(30.0, 20.0, 60.0).0, 0.0);
+
+        let sp = &mut s.spin;
+        sp.applied = self.b();
+        sp.ramp = self.b();
+        sp.active = self.b();
+        sp.armed = self.b();
+        sp.grace = self.near(0.0, -0.1, 0.95);
+        sp.dir = match self.bits() % 8 {
+            0 => 0,
+            1 => 2,
+            k => if k % 2 == 0 { 1 } else { -1 },
+        };
+        sp.start = self.f(0.0, 6.2831855);
+        let yaw = if self.one_in(6) { s.t.min_torque_y } else { self.f(0.0, 2000.0) };
+        sp.torque = Vf::new(self.f(-1400.0, 1400.0).0, (if self.b() { -yaw } else { yaw }).0, self.f(-50.0, 50.0).0, self.f(-2.0, 2.0).0);
+        sp.clip = (self.bits() % 3) as u8;
+
+        let c = &mut s.ch;
+        c.vel = Vf::new(self.f(-10.0, 10.0).0, self.near(5.0, -5.0, 15.0).0, self.f(-40.0, 40.0).0, 0.0);
+        c.moment = self.v(-500.0, 500.0);
+
+        let st = &mut s.st;
+        st.dt = self.f(0.005, 0.04);
+        st.brake = if self.one_in(4) { self.f(0.0, 1.0) } else { F::ZERO };
+        st.touching = self.one_in(6);
+
+        // Half the idle states are on a lip that takes a 360, the branches that arm and fire it.
+        if !s.spin.active && self.b() {
+            s.air.on_ground = true;
+            s.air.flip_torque_applied = false;
+            s.air.flip_active = false;
+            s.st.brake = F::ZERO;
+            s.ch.vel = Vf::new(s.ch.vel.x(), self.f(5.5, 15.0).0, s.ch.vel.z(), 0.0);
+            s.air.contact_vel = Vf::new(s.air.contact_vel.x(), s.air.contact_vel.y(), self.f(30.5, 60.0).0, 0.0);
+        }
+        // Each button held a third of the time, with any non-zero byte for held.
+        for b in s.buttons.iter_mut() {
+            *b = if self.one_in(3) { 1 + (self.bits() % 255) as u8 } else { 0 };
+        }
+        // Half the turning states are in the air with nothing held, the branch that decays the torque.
+        if s.spin.active && s.spin.armed && self.b() {
+            s.air.on_ground = false;
+            s.buttons = [0; 4];
+        }
+        s.bound = if self.one_in(4) { 1 + (self.bits() % 255) as u8 } else { 0 };
+        let stick = |g: &mut Gen| match g.bits() % 6 {
+            0 => F(if g.b() { 0.7 } else { -0.7 }),
+            1 => F(if g.b() { 0.71 } else { -0.71 }),
+            2 => F::ZERO,
+            _ => g.f(-1.2, 1.2),
+        };
+        let lip_x = stick(self);
+        // With the 360 on, a third of the sticks are back at centre, where the torque does not decay.
+        let x = if s.spin.active && self.one_in(3) { F::ZERO } else { stick(self) };
+        // The forward axis: any way round, sometimes along an axis or upright.
+        let forward = match self.bits() % 8 {
+            0 => Vf::new(0.0, 1.0, 0.0, 0.0),
+            1 => Vf::new(0.0, self.f(-1.0, 1.0).0, if self.b() { 1.0 } else { -1.0 }, 0.0),
+            2 => Vf::new(if self.b() { 1.0 } else { -1.0 }, self.f(-1.0, 1.0).0, 0.0, 0.0),
+            _ => Vf::new(self.f(-1.0, 1.0).0, self.f(-1.0, 1.0).0, self.f(-1.0, 1.0).0, 0.0),
+        };
+        s.inp = untamed::SpinIn {
+            arm_button: s.buttons[3] != 0,
+            trick_held: s.buttons.iter().any(|&b| b != 0),
+            lip_x,
+            x,
+            hold: self.f(-70.0, 70.0),
+            button: (s.bound != 0).then_some(if s.left { -1 } else if s.right { 1 } else { 0 }),
+            forward,
+            stunt_id: match self.bits() % 4 {
+                0 => 48,
+                1 => 49,
+                _ => (self.bits() % 80) as i32,
+            },
+        };
+        s
+    }
+}
+
+fn poke_spin(ee: &mut Ee, s: &SpinState) {
+    ee.set_u32(OBJ + 0xf8, COLL);
+    ee.set_u32(OBJ + 0x114, FRAME);
+    ee.set_u32(OBJ + 0x1510, BINDING);
+
+    let (t, a, sp, c, st, inp) = (&s.t, &s.air, &s.spin, &s.ch, &s.st, &s.inp);
+    put_f(ee, OBJ + 0x11d0, t.min_time);
+    put_f(ee, OBJ + 0x11d4, t.max_time);
+    put_f(ee, OBJ + 0x11dc, t.min_torque_x);
+    put_f(ee, OBJ + 0x11e0, t.max_torque_x);
+    put_f(ee, OBJ + 0x11e4, t.min_torque_y);
+    put_f(ee, OBJ + 0x11e8, t.max_torque_y);
+    put_f(ee, OBJ + 0x11ec, t.rate_increase);
+    put_f(ee, OBJ + 0x11f0, t.rate_decrease);
+    put_f(ee, OBJ + 0x117c, s.p.control_authority_time);
+
+    put_b(ee, OBJ + 0x354, a.on_ground);
+    put_v(ee, OBJ + 0xc20, a.contact_vel);
+    put_f(ee, OBJ + 0x1178, a.authority);
+    put_b(ee, OBJ + 0x1184, a.flip_torque_applied);
+    put_b(ee, OBJ + 0x118c, a.flip_active);
+
+    put_b(ee, OBJ + 0x11c0, sp.applied);
+    put_b(ee, OBJ + 0x11c4, sp.ramp);
+    put_b(ee, OBJ + 0x11c8, sp.active);
+    put_b(ee, OBJ + 0x11cc, sp.armed);
+    put_f(ee, OBJ + 0x11d8, sp.grace);
+    put_v(ee, OBJ + 0x1200, sp.torque);
+    put_f(ee, OBJ + 0x1210, sp.start);
+    ee.set_u32(OBJ + 0x1214, sp.dir as u32);
+    ee.set_u32(OBJ + 0x1798, u32::from(sp.clip));
+
+    put_v(ee, BODY + 0x80, c.vel);
+    put_v(ee, BODY + 0x1b0, c.moment);
+    put_f(ee, OBJ + 0x340, st.brake);
+    put_b(ee, COLL + 0x34, st.touching);
+
+    put_f(ee, OBJ + 0x12bc, inp.lip_x);
+    put_f(ee, OBJ + 0x1298, inp.x);
+    put_f(ee, OBJ + 0x12b8, inp.hold);
+    ee.set_u32(OBJ + 0x14f4, s.device);
+    for (k, &b) in s.buttons.iter().enumerate() {
+        ee.write(OBJ + 0x14f4 + 18 + 2 * k as u32, 1, u128::from(b));
+    }
+    ee.write(BINDING + 36 + s.device, 1, u128::from(s.bound));
+    ee.set_u32(OBJ + 0x1548, inp.stunt_id as u32);
+    ee.set_u32(OBJ + 0x13cc, s.stunts[0]);
+    ee.set_u32(OBJ + 0x13d0, s.stunts[1]);
+}
+
+/// Which way a state went, from the disassembly's branches and not the port's.
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
+fn spin_path(s: &SpinState) -> &'static str {
+    let (a, sp, st, inp) = (&s.air, &s.spin, &s.st, &s.inp);
+    let sign = |x: F| if x < F::ZERO { -1 } else { 1 };
+    if !sp.active {
+        let lip = a.on_ground
+            && !a.flip_torque_applied
+            && !a.flip_active
+            && !(s.ch.vel.y() <= 5.0)
+            && !(a.contact_vel.z() <= 30.0)
+            && st.brake == 0.0;
+        if !lip {
+            "off the lip"
+        } else if s.bound != 0 {
+            if s.left {
+                "bound, left"
+            } else if s.right {
+                "bound, right"
+            } else {
+                "bound, neither"
+            }
+        } else if sp.armed && !(inp.lip_x.abs() <= F(0.7)) && sign(inp.lip_x) == sp.dir {
+            "fired"
+        } else if s.buttons[3] != 0 && inp.lip_x < F(-0.7) {
+            "arming left"
+        } else if s.buttons[3] != 0 && !(inp.lip_x <= F(0.7)) {
+            "arming right"
+        } else {
+            "waiting"
+        }
+    } else if !sp.armed {
+        if a.on_ground { "in the grace" } else { "off the lip in time" }
+    } else if a.on_ground || st.touching || F(sp.torque.y()).abs() < s.t.min_torque_y {
+        if sp.clip != 0 { "ended mid-clip" } else { "ended" }
+    } else if s.buttons.iter().all(|&b| b == 0) && inp.x != 0.0 && sign(inp.x) != sp.dir {
+        "turning, decaying"
+    } else if s.buttons.iter().all(|&b| b == 0) && inp.x == 0.0 {
+        "turning, stick centred"
+    } else {
+        "turning"
+    }
+}
+
+#[test]
+fn untamed_spin_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    // The table and scale the original reads are the ones the game built at startup: they must be the port's.
+    let table = air::AcosTable::build();
+    assert_eq!(ee.f32_at(ACOS_SCALE), 14999.5, "the arc cosine table's scale");
+    let at = ee.u32_at(ACOS_PTR);
+    for (i, &e) in table.entries().iter().enumerate() {
+        assert_eq!(ee.f32_at(at + 4 * i as u32).to_bits(), e.to_bits(), "arc cosine entry {i}");
+    }
+    let calls = Rc::new(RefCell::new(SpinCalls::default()));
+    let c = calls.clone();
+    ee.hooks.insert(NODE_AXES, Box::new(move |ee| {
+        assert_eq!((ee.r(4) as u32, ee.r(5)), (FRAME, 0), "the node's arguments");
+        let mut c = c.borrow_mut();
+        c.axes += 1;
+        put_v(ee, ee.r(6) as u32, c.forward);
+        put_v(ee, ee.r(7) as u32, Vf::new(0.0, 1.0, 0.0, 0.0));
+    }));
+    let c = calls.clone();
+    ee.hooks.insert(START_STUNT, Box::new(move |ee| {
+        assert_eq!(ee.r(4) as u32, OBJ);
+        let mut c = c.borrow_mut();
+        c.started.push((ee.r(5) as u32, ee.r(6) as u32));
+        ee.set(2, u64::from(c.start_answer));
+    }));
+    let c = calls.clone();
+    ee.hooks.insert(END_STUNT, Box::new(move |ee| c.borrow_mut().ended.push(ee.r(5) as u32)));
+    let c = calls.clone();
+    ee.hooks.insert(WRECK_ENTRY, Box::new(move |ee| c.borrow_mut().wrecks.push(ee.r(5) as u32)));
+    let c = calls.clone();
+    ee.hooks.insert(STEEP, Box::new(move |ee| {
+        let mut c = c.borrow_mut();
+        c.steep += 1;
+        ee.set(2, u64::from(c.steep_answer));
+    }));
+    let c = calls.clone();
+    ee.hooks.insert(BINDING_LEFT, Box::new(move |ee| {
+        assert_eq!((ee.r(4) as u32, ee.r(5) as u32), (BINDING, OBJ + 0x14f4), "the binding's arguments");
+        let mut c = c.borrow_mut();
+        c.left += 1;
+        ee.set(2, u64::from(c.left_answer));
+    }));
+    let c = calls.clone();
+    ee.hooks.insert(BINDING_RIGHT, Box::new(move |ee| {
+        assert_eq!((ee.r(4) as u32, ee.r(5) as u32), (BINDING, OBJ + 0x14f4), "the binding's arguments");
+        let mut c = c.borrow_mut();
+        c.right += 1;
+        ee.set(2, u64::from(c.right_answer));
+    }));
+
+    let mut g = Gen(0x0d93_b001);
+    let mut tally = BTreeMap::new();
+    for k in 0..20_000 {
+        let s = g.spin();
+        let path = spin_path(&s);
+        *tally.entry(path).or_insert(0u32) += 1;
+        flip_reset(&mut ee);
+        poke_spin(&mut ee, &s);
+        *calls.borrow_mut() = SpinCalls {
+            forward: s.inp.forward,
+            start_answer: s.start_answer,
+            steep_answer: s.steep_answer,
+            left_answer: s.left,
+            right_answer: s.right,
+            ..SpinCalls::default()
+        };
+        ee.call(SPIN, &[u64::from(OBJ)], &[s.st.dt.0], 20_000);
+        let frame = (ee.stack - 0x2000, ee.stack + 0x40);
+        for (a, b) in ee.written_ranges() {
+            let inside = FLIP_REGIONS.iter().any(|&(_, base, len)| a >= base && b <= base + len) || (a >= frame.0 && b <= frame.1);
+            assert!(inside, "state {k}: the original wrote {a:#010x}..{b:#010x}, which is not the bike or the stack\n{s:#?}");
+        }
+        let was = flip_snap(&ee);
+        let orig = std::mem::take(&mut *calls.borrow_mut());
+
+        let mut t = s.clone();
+        let (mut started, mut steeped) = (None, false);
+        let out = untamed::spin(&t.t, &t.p, &mut t.air, &mut t.spin, &mut t.ch, &t.st, &t.inp, &table, |dir| {
+            started = Some(dir);
+            s.start_answer
+        }, || {
+            steeped = true;
+            s.steep_answer
+        });
+        if out.stunt_cleared {
+            t.inp.stunt_id = 255;
+        }
+        flip_reset(&mut ee);
+        poke_spin(&mut ee, &t);
+        let now = flip_snap(&ee);
+        if was != now {
+            let i = was.iter().zip(&now).position(|(a, b)| a != b).unwrap();
+            panic!(
+                "state {k} ({path}): {} is {:#010x} ({}) in the original and {:#010x} ({}) in the port\n{s:#?}",
+                flip_where(i),
+                was[i],
+                f32::from_bits(was[i]),
+                now[i],
+                f32::from_bits(now[i]),
+            );
+        }
+        let word = |dir: i32| s.stunts[usize::from(dir >= 1)];
+        let want_started: Vec<(u32, u32)> = started.map(|d| (word(d), 1)).into_iter().collect();
+        assert_eq!(orig.started, want_started, "state {k} ({path}): the stunt start");
+        assert_eq!(out.stunt_started, started.is_some() && s.start_answer, "state {k}");
+        let want_ended: Vec<u32> = if out.stunt_ended { vec![word(s.spin.dir)] } else { vec![] };
+        assert_eq!(orig.ended, want_ended, "state {k} ({path}): the stunt end");
+        assert_eq!(orig.steep, u32::from(steeped), "state {k} ({path}): the steep test");
+        assert_eq!(orig.wrecks, out.wreck.map(u32::from).into_iter().collect::<Vec<_>>(), "state {k} ({path}): the wreck");
+        // The node is asked on every call with the 360 on; the binding only on a lip with the 360 bound,
+        // right only when left is not pressed.
+        assert_eq!(orig.axes, u32::from(s.spin.active), "state {k} ({path}): the node asked");
+        let bound = path.starts_with("bound");
+        assert_eq!((orig.left, orig.right), (u32::from(bound), u32::from(bound && !s.left)), "state {k} ({path}): the binding asked");
+        for clip_path in [(s.spin.clip, t.spin.clip, out.stunt_started, out.stunt_ended)] {
+            let name = match clip_path {
+                (0, 1, true, _) => Some("clip started"),
+                (1, 2, ..) => Some("clip playing"),
+                (2, 0, _, true) => Some("clip came round"),
+                _ => None,
+            };
+            if let Some(n) = name {
+                *tally.entry(n).or_insert(0u32) += 1;
+            }
+        }
+    }
+    enough(
+        &tally,
+        &[
+            "off the lip",
+            "bound, left",
+            "bound, right",
+            "bound, neither",
+            "fired",
+            "arming left",
+            "arming right",
+            "waiting",
+            "in the grace",
+            "off the lip in time",
+            "ended",
+            "ended mid-clip",
+            "turning, decaying",
+            "turning, stick centred",
+            "turning",
+            "clip started",
+            "clip playing",
+            "clip came round",
+        ],
+        100,
+    );
+}
+
+/// MD93b's wiring: [`untamed::ride_spin`] arms on a lip with R1 and another trick button held, where
+/// MX vs. ATV's ([`air::three_sixty`], R1 alone) does not; in the air with the stick against the turn
+/// Untamed's torque decays only with no trick button held, and a landing mid-clip is the 360's wreck as
+/// on the pack ride.
+#[test]
+fn untamed_ride_spin_arms_on_r1_with_another_button() {
+    let table = air::AcosTable::build();
+    let p = zero_params();
+    let t = air::SpinTuning {
+        min_time: F::ZERO,
+        max_time: F(30.0),
+        min_torque_x: F(600.0),
+        max_torque_x: F(1100.0),
+        min_torque_y: F(500.0),
+        max_torque_y: F(1500.0),
+        rate_increase: F::ZERO,
+        rate_decrease: F(1000.0),
+    };
+    let lip = || {
+        let mut air = Air::default();
+        air.on_ground = true;
+        air.contact_vel = Vf::new(0.0, 0.0, 40.0, 0.0);
+        let ch = Chassis { vel: Vf::new(0.0, 8.0, 30.0, 0.0), ..Chassis::default() };
+        (air, ch)
+    };
+    let st = air::Step { stick: (F(-1.0), F::ZERO), heading: Vf::new(0.0, 0.0, 1.0, 0.0), ..air::Step::default() };
+    let both = [true, false, true];
+    let (mut air, mut ch) = lip();
+    let mut s = air::Spin::default();
+    untamed::ride_spin(&t, &p, &mut air, &mut s, &mut ch, &st, both, F(10.0), &table);
+    assert!(s.armed && s.dir == 1, "Untamed arms on R1 with another button: {s:?}");
+    let (mut air, mut ch) = lip();
+    let mut s = air::Spin::default();
+    let mxvatv = air::Step { modifier: false, ..st };
+    air::three_sixty(&t, &p, &mut air, &mut s, &mut ch, &mxvatv, F(10.0), &table);
+    assert!(!s.armed, "MX vs. ATV's does not");
+
+    // Turning in the air, the stick against the turn: a trick button held keeps the torque, none decays it.
+    let turning = air::Spin { active: true, armed: true, dir: -1, torque: Vf::new(-700.0, -1000.0, 0.0, 0.0), ..air::Spin::default() };
+    let against = air::Step { dt: F(0.01), stick: (F(1.0), F::ZERO), heading: Vf::new(0.0, 0.0, 1.0, 0.0), ..air::Step::default() };
+    let mut s = turning;
+    let (mut air, mut ch) = (Air::default(), Chassis::default());
+    untamed::ride_spin(&t, &p, &mut air, &mut s, &mut ch, &against, [true, false, false], F::ZERO, &table);
+    assert_eq!(s.torque.to_bits(), turning.torque.to_bits(), "a button held: no decay");
+    assert!(s.applied && s.ramp);
+    assert_eq!(ch.moment.y(), -1000.0, "the torque went in");
+    let mut s = turning;
+    let (mut air, mut ch) = (Air::default(), Chassis::default());
+    untamed::ride_spin(&t, &p, &mut air, &mut s, &mut ch, &against, [false; 3], F::ZERO, &table);
+    assert!(s.torque.y() > -1000.0 && s.torque.x() < -700.0, "nothing held: the torque decays, {:?}", s.torque);
+
+    // Half way round with the clip playing and then down: the 360's wreck, not cut short in the air.
+    let mut s = air::Spin { clip: 2, ..turning };
+    let mut air = Air { on_ground: true, ..Air::default() };
+    untamed::ride_spin(&t, &p, &mut air, &mut s, &mut ch, &against, [false; 3], F::ZERO, &table);
+    assert!(s.wrecked && !s.cut && s.clip == 0 && !s.active, "{s:?}");
+}

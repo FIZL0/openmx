@@ -9027,3 +9027,28 @@ atv_heap_free               atv 0x001b76d0 = free
 #   skipped; 0x00252640 (table, +0x14f4) (-1 at table+24 -> 0, else the matcher 0x003a37d0 on table+48+88*idx)
 #   non-zero -> fires with hold 0.8 (0x3f4ccccd, abs), active 1, grace 0x3f19999a; armed untouched.
 #   The torque map, the equal-times delay-slot answer, the grace, the end and the flipping/authority tail as SLUS-21104's.
+# MD93b — Untamed's (SLUS-21701) spin in the air 0x004fd630 (2104 B; a0 bike, f12 dt; twin of SLUS-21104's
+# 0x004e53d0, 2048 B), ported as handling::untamed::spin and proved by tests/untamed_reworked.rs off
+# context/untamed/ram/nat_or.bin. Comment rows only, as # MD81a. Journal: research/journal/2026-11-03-md93b-untamed-bike-step.
+#   Fields (SLUS-21701; SLUS-21104's are 0x10 up, as # MD81a's spin applied +0x11d0 -> +0x11c0): applied +0x11c0,
+#   ramp +0x11c4, active +0x11c8, armed +0x11cc, Min/MaxSpinTime +0x11d0/d4, grace +0x11d8, min/max pitch torque
+#   +0x11dc/e0, min/max yaw torque +0x11e4/e8, rate inc +0x11ec (not read), rate dec +0x11f0, torque +0x1200
+#   (x pitch, y yaw), start heading +0x1210, direction +0x1214, stunt words +0x13cc (dir <= 0) / +0x13d0, clip
+#   +0x1798 (stored through vt +0x534, 0x004ffde0: sw a1, +0x1798), stunt id +0x1548 (slti 49: an end sets an
+#   id >= 49 to 255), authority/ControlAuthorityTime +0x1178/7c, backflip applied/active +0x1184/+0x118c, brake
+#   +0x340, on ground +0x354, contact speed +0xc28, body +0xe8 (its +0x84 rise; vt +0x78 adds the torque),
+#   collision +0xf8 (+0x34 touching), frame node +0x114. Calls: 0x00190580 (node, 0, &fwd, &tmp) for the forward
+#   axis (+0xc0..c8, w 0) on every call with the 360 active; start stunt vt +0x4b0 (bike, word, 1), end stunt
+#   vt +0x4a4 (bike, word), wreck entry vt +0x368 (0xf on steep 0x00500880, else 0xb). Arc cosine table
+#   *0x003ff538, scale 0x003ff550 = 14999.5, both AcosTable::build()'s; lookup mula(frac, hi) madd(1 - frac, lo).
+#   Input, reworked as the backflip's (# MD93a): arm on 0x003a2e40 (lbu +24 of the record +0x14f4) alone, others
+#   may be held; the decay needs 0x003a2c60 (any of the four) == 0, the stick x +0x1298 != 0 and its sign !=
+#   the direction; the lip reads x +0x12bc (the reader's copy before the limiter) and hold +0x12b8. A stick x of
+#   exactly 0 never decays, but the decay would subtract dt * rate * 0 anyway: not observable.
+#   New on the lip: bound (0x00252630, byte table+36+device) skips the stick path; 0x00252690 (table, +0x14f4)
+#   pressed -> -1, else 0x002526e0 pressed -> 1, else nothing. Non-zero: yaw = cvt(the OLD direction) * 1100.0
+#   (0x0053d3e8), pitch 200.0 (0x0053d3f0), grace 0x3f666666, active 1, armed 0, and only then the direction
+#   is set: a bound 360 turns the way the last one did (from a direction of 0 it has no yaw, and ends once armed
+#   unless the min yaw is 0 or less).
+#   The stick path, the torque map (equal times: lo), the 35° clip (0x3f1c61a9), the end and the ramp tail as
+#   SLUS-21104's.
