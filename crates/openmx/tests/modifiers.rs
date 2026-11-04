@@ -411,6 +411,10 @@ fn every_modifier_off_its_default_reaches_the_ride() {
             match knob {
                 Knob::TimeScale => assert!(time && !bike, "{knob:?} at {pct}"),
                 Knob::PlaneSpeed | Knob::PlaneAccel | Knob::PlaneTopSpeed | Knob::PlaneTurn | Knob::PlaneCeiling | Knob::PlaneMaxG => assert!(!bike && (flown || plane.is_none()), "{knob:?} at {pct}"),
+                // The Kiowa's and the cars' (P272) reach their own machines (tests/machine_modifiers.rs).
+                Knob::KiowaSpeed | Knob::KiowaClimb | Knob::KiowaTurn | Knob::KiowaCeiling | Knob::CarSpeed | Knob::CarAccel | Knob::CarGrip | Knob::CarSuspension => {
+                    assert!(!bike && !time && !flown, "{knob:?} at {pct} reached the bike or the biplane")
+                }
                 _ => assert!(bike && !time, "{knob:?} at {pct} left the bike alone"),
             }
         }

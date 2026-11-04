@@ -546,6 +546,17 @@ impl Surface {
 }
 
 impl Engine {
+    /// First gear as the loader puts the box in it, off these ratios and the table's redline: what
+    /// [`Engine::first`] holds, worked out again after a ratio is moved (P272's car top speed).
+    pub fn first_gear(&self) -> Option<FirstGear> {
+        self.gear_ratios.first().map(|&g| {
+            let ratio = self.final_gear_ratio * g;
+            let inv_ratio = F::ONE / ratio;
+            let redline = self.max_rpm.unwrap_or(F::ZERO);
+            FirstGear { ratio, inv_ratio, top_wheel_speed: redline * RPM_TO_RAD * inv_ratio }
+        })
+    }
+
     fn read(s: &Section) -> Engine {
         let zero = |key: &str| s.float_or(key, F::ZERO);
         let drive_train = s.int("DriveTrain").unwrap_or(0);

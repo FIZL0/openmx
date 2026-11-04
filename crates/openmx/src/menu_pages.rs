@@ -3,6 +3,7 @@
 //! it has, what it does and, dimmed, why it does not apply — the side panel draws all of it.
 
 use super::*;
+use game_sim::modifiers::Category;
 
 /// Settings' tabs, which L1 and R1 step through, round from either end.
 /// Display is the screen's HUD and its aspect ratio (P176); Graphics (P128) the world's draw, the picture and its rate, under
@@ -171,6 +172,8 @@ pub enum Key {
     CameraCycle,
     Garage(roster::Row),
     Knob(Knob),
+    /// The modifiers page's Machine row (P272): whose knobs show under it.
+    ModsMachine,
     LoadPreset,
     SavePreset,
     /// The preset Load Preset is on, kept over with the set now (P229).
@@ -1200,6 +1203,10 @@ impl Menu {
     /// The knobs that are not this page's to set: the world's for anyone but the host, and online
     /// the biplane's for a guest, every seat flying the host's.
     fn knob_held(&self, knob: Knob) -> Option<&'static str> {
+        // P272: an online ride builds its cars and helicopter off the disc's files alone.
+        if matches!(knob.category(), Category::Kiowa | Category::Cars) && (self.guest || self.lobby.room.is_some()) {
+            return Some("Online rides take the cars and the Kiowa as the disc has them.");
+        }
         match self.mods_own() {
             None => None,
             Some(_) if !knob.per_seat() => Some("The world's: only the host sets it."),
@@ -1248,8 +1255,9 @@ impl Menu {
             (Some(Screen::Pause), None) => "Changes take when the pause closes.".into(),
             _ => "Changes are the next ride's.".into(),
         });
-        let mut rows = vec![player];
-        for knob in Knob::MENU {
+        let mut rows = vec![player, self.mods_machine_row()];
+        let category = self.mods_category();
+        for knob in category.knobs() {
             let v = self.knob_value(knob);
             let shown = v.unwrap_or_else(|| self.settings.modifiers.get(0, knob));
             let meter = match knob {
@@ -1274,7 +1282,10 @@ impl Menu {
             let lock = held.as_deref().or(self.knob_held(knob));
             rows.push(r.off_if(lock.is_some(), lock.unwrap_or("")));
         }
-        rows.extend(self.wrecks_rows());
+        // The wrecks' switches are the rider's on the bike.
+        if category == Category::Bike {
+            rows.extend(self.wrecks_rows());
+        }
         rows.push(Row::heading("Presets"));
         let names: Vec<&str> = self.settings.presets.iter().map(|(n, _)| n.as_str()).collect();
         let none = names.is_empty();
@@ -1305,6 +1316,56 @@ impl Menu {
         };
         rows.push(Row::action(Key::ResetMods, "Reset to Original", reset).off_if(held.is_some(), held.as_deref().unwrap_or("")));
         rows
+    }
+
+    /// The categories the modifiers page's Machine row offers (P272): each machine the game has, then
+    /// the world's. A mod machine's goes in here, while its addition is on, once it has knobs.
+    pub fn mods_categories(&self) -> Vec<Category> {
+        Category::ALL.to_vec()
+    }
+
+    /// The category the modifiers page shows: the one picked, or the first if that one is gone.
+    pub fn mods_category(&self) -> Category {
+        let all = self.mods_categories();
+        if all.contains(&self.mods_category) { self.mods_category } else { all[0] }
+    }
+
+    /// The Machine row (P272): whose knobs show under it, each choice saying how many of its own
+    /// are off the original's.
+    fn mods_machine_row(&self) -> Row {
+        let all = self.mods_categories();
+        let names: Vec<&str> = all.iter().map(|c| c.label()).collect();
+        let now = all.iter().position(|c| *c == self.mods_category()).unwrap_or(0);
+        let mut r = Row::choice(
+            Key::ModsMachine,
+            "Machine",
+            &names,
+            now,
+            "Whose modifiers show below: one machine's at a time, or the world's. Every one is kept, shown or not, and a preset holds them all.",
+        );
+        let m = &self.settings.modifiers;
+        r.tips = all
+            .iter()
+            .map(|c| {
+                let mut n = c.knobs().into_iter().filter(|&k| (0..SEATS_MAX).any(|s| m.get(s, k) != game_sim::modifiers::ORIGINAL)).count();
+                if *c == Category::Bike {
+                    n += self.wrecks_changed();
+                }
+                if n == 0 { "Original".into() } else { format!("{n} changed") }
+            })
+            .collect();
+        r
+    }
+
+    /// The category the page opens on (P272): under the pause, the machine the pausing player is on.
+    fn mods_category_for_pause(&self) -> Option<Category> {
+        use super::Machine as M;
+        (self.stack.first() == Some(&Screen::Pause)).then(|| match self.up[self.pauser.min(SEATS_MAX - 1)] {
+            M::Bike => Category::Bike,
+            M::Biplane => Category::Biplane,
+            M::Buggy | M::Monster | M::Baja => Category::Cars,
+            M::Helicopter => Category::Kiowa,
+        })
     }
 
     /// The knobs a preset or a reset moves from the page: the seat's own, and the world's for the host.
@@ -1360,6 +1421,9 @@ impl Menu {
 
     /// Open the Game Modifiers page on its Player row, from the Ride tab, the pause or the lobby.
     pub(super) fn open_modifiers(&mut self) {
+        if let Some(c) = self.mods_category_for_pause() {
+            self.mods_category = c;
+        }
         self.push(Screen::Modifiers);
         self.cursor[Screen::Modifiers.index()] = 0;
     }
@@ -1723,6 +1787,11 @@ impl Menu {
             }
             Key::Garage(g) => {
                 self.change_garage(g, p);
+                return;
+            }
+            Key::ModsMachine => {
+                let all = self.mods_categories();
+                self.mods_category = all[next(row).min(all.len() - 1)];
                 return;
             }
             Key::Knob(knob) => {

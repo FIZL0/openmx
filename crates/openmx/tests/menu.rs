@@ -157,8 +157,21 @@ fn list_next(m: &mut Menu, r: &mut Reader) {
 /// Down an option page to the row that is `key`, round from the bottom if it is above.
 fn down_to(m: &mut Menu, r: &mut Reader, key: menu::Key) {
     let screen = m.screen().unwrap();
+    // P272: a modifier shows under its machine's category on the Machine row.
+    if let menu::Key::Knob(k) = key
+        && !m.page().iter().any(|row| row.key == key)
+        && m.page().iter().any(|row| row.key == menu::Key::ModsMachine)
+    {
+        pick_category(m, r, k.category());
+    }
     assert!(m.page().iter().any(|row| row.key == key), "{screen:?} has no {key:?} row");
     tap_until(m, r, Control::Down, |m| m.page()[m.cursor(screen)].key == key);
+}
+
+/// The modifiers page's Machine row onto `category` (P272), stepped right.
+fn pick_category(m: &mut Menu, r: &mut Reader, category: game_sim::modifiers::Category) {
+    down_to(m, r, menu::Key::ModsMachine);
+    tap_until(m, r, Control::Right, |m| m.page()[m.cursor(Screen::Modifiers)].value == category.label());
 }
 
 /// Type `text` on the menu's keyboard: down to each character's row, right to its key, Cross. The
@@ -3232,6 +3245,69 @@ fn a_nintendo_pad_s_bottom_button_confirms_until_its_row_says_labels() {
     std::fs::remove_dir_all(&root).unwrap();
 }
 
+/// P272: the Game Modifiers page by machine. Its Machine row, under Player, picks Bike, Biplane,
+/// Kiowa, Cars or World, and the page shows only that one's knobs (the wrecks with the bike's); a
+/// preset still holds every machine's; and under a pause the page opens on the pausing player's.
+#[test]
+fn the_modifiers_page_shows_one_machines_knobs_at_a_time() {
+    use game_sim::modifiers::Category;
+    use menu::Key;
+    let (mut m, mut r) = fresh();
+    settings_at(&mut m, &mut r, "Ride");
+    down_to(&mut m, &mut r, Key::Modifiers);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Modifiers));
+    assert_eq!((m.page()[0].key, m.page()[1].key), (Key::Player, Key::ModsMachine));
+    // No mod machine is rideable yet (the ATV, MX vs. ATV's cars): the original's four and the world.
+    assert_eq!(m.page()[1].choices, Category::ALL.map(|c| c.label().to_string()).to_vec());
+    assert_eq!(m.page()[1].value, "Bike");
+    let mut seen = Vec::new();
+    for c in Category::ALL {
+        pick_category(&mut m, &mut r, c);
+        let knobs: Vec<Knob> = m.page().iter().filter_map(|row| match row.key { Key::Knob(k) => Some(k), _ => None }).collect();
+        assert_eq!(knobs, c.knobs(), "{c:?}");
+        assert!(knobs.iter().all(|k| k.category() == c));
+        assert_eq!(m.page().iter().any(|row| row.label == "Wrecks"), c == Category::Bike, "{c:?}");
+        assert_eq!(m.page().last().unwrap().label, "Reset to Original", "{c:?}");
+        seen.extend(knobs);
+    }
+    seen.sort_by_key(|k| Knob::MENU.iter().position(|m| m == k));
+    assert_eq!(seen, Knob::MENU.to_vec(), "every knob is under one machine");
+    for k in [Knob::KiowaSpeed, Knob::KiowaClimb, Knob::KiowaTurn, Knob::KiowaCeiling, Knob::CarSpeed, Knob::CarAccel, Knob::CarGrip, Knob::CarSuspension] {
+        assert_eq!(Knob::from_word(k.word()), Some(k));
+    }
+
+    // A Kiowa knob and a car knob, from their machines' pages, and the machine row counts them.
+    down_to(&mut m, &mut r, Key::Knob(Knob::KiowaClimb));
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.page()[1].value, "Kiowa");
+    down_to(&mut m, &mut r, Key::Knob(Knob::CarGrip));
+    tap(&mut m, &mut r, Control::Left);
+    assert_eq!((m.settings.modifiers.get(0, Knob::KiowaClimb), m.settings.modifiers.get(3, Knob::CarGrip)), (110, 90));
+    assert!(m.page()[1].tips.iter().any(|t| t.contains("1 changed")), "{:?}", m.page()[1].tips);
+    // Saved from the Cars page, the preset holds the Kiowa's too; Reset puts both back, and loading it both again.
+    down_to(&mut m, &mut r, Key::SavePreset);
+    tap(&mut m, &mut r, Control::Cross);
+    tap(&mut m, &mut r, Control::Cross);
+    tap(&mut m, &mut r, Control::Start);
+    assert_eq!(m.screen(), Some(Screen::Modifiers));
+    let preset = m.settings.presets[0].1;
+    assert_eq!((preset.get(0, Knob::KiowaClimb), preset.get(0, Knob::CarGrip)), (110, 90));
+    down_to(&mut m, &mut r, Key::ResetMods);
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.settings.modifiers.is_original());
+    assert_eq!(m.page()[1].value, "Cars", "a reset keeps the machine");
+
+    // Under the pause the page opens on the pausing player's machine.
+    let (mut m, mut r) = fresh();
+    m.up[0] = Machine::Helicopter;
+    m.pause();
+    tap_until(&mut m, &mut r, Control::Down, |m| m.pause_rows()[m.cursor(Screen::Pause)] == "Game Modifiers");
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.page()[1].value, "Kiowa");
+    assert!(m.page().iter().any(|row| row.key == Key::Knob(Knob::KiowaCeiling)));
+}
+
 /// P55: the Ride tab's Game Modifiers row opens the modifiers; the arrows step a modifier by ten
 /// percent, the world's for everyone and the rest for the Player row's player; a preset saved by
 /// name loads back; and Reset to Original puts every modifier back, which writes the settings file
@@ -3246,7 +3322,9 @@ fn the_game_modifiers_screen_sets_saves_and_resets() {
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Modifiers));
     let rows = m.page();
-    assert_eq!(rows.len(), 1 + Knob::MENU.len() + 4 + 1 + 5, "{rows:?}");
+    // Player, Machine (on the bike), the bike's knobs, the wrecks' heading and three, Presets' heading and five.
+    let bike = game_sim::modifiers::Category::Bike.knobs().len();
+    assert_eq!(rows.len(), 2 + bike + 4 + 1 + 5, "{rows:?}");
     assert_eq!(rows.last().unwrap().label, "Reset to Original");
     assert!(rows.iter().filter(|r| r.world).all(|r| !matches!(r.key, Key::Knob(k) if k.per_seat())));
 
@@ -3577,7 +3655,6 @@ fn a_guests_page_changes_only_its_own_seat_and_not_the_world() {
     assert_eq!(row(&m.view(1), Key::Player).value, "2P");
     assert!(row(&m.view(1), Key::Player).off.is_some(), "only the host picks another player");
     assert!(!row(&m.view(1), Key::Player).choices.iter().any(|c| c == "All Players"));
-    assert!(row(&m.view(1), Key::Knob(Knob::Gravity)).off.is_some(), "the world's is the host's");
     assert!(row(&m.view(1), Key::Knob(Knob::BikeSpeed)).off.is_none());
     let to = |m: &mut Menu, readers: &mut [Reader], garages: &mut [Garage], key: Key| {
         for _ in 0..40 {
@@ -3593,6 +3670,15 @@ fn a_guests_page_changes_only_its_own_seat_and_not_the_world() {
     tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Right);
     assert_eq!(m.settings.modifiers.get(1, Knob::BikeSpeed), 110);
     assert_eq!(m.settings.modifiers.get(0, Knob::BikeSpeed), 100, "1P's own is 1P's");
+    // The world's knobs are under World (P272), and the host's.
+    to(&mut m, &mut readers, &mut garages, Key::ModsMachine);
+    for _ in 0..8 {
+        if row(&m.view(1), Key::ModsMachine).value == "World" {
+            break;
+        }
+        tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Right);
+    }
+    assert!(row(&m.view(1), Key::Knob(Knob::Gravity)).off.is_some(), "the world's is the host's");
     to(&mut m, &mut readers, &mut garages, Key::Knob(Knob::Gravity));
     tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Left);
     assert_eq!(m.settings.modifiers.get(0, Knob::Gravity), 100, "2P moved the world");
@@ -3615,7 +3701,10 @@ fn a_guests_page_changes_only_its_own_seat_and_not_the_world() {
     down_to(&mut m, &mut r, Key::Knob(Knob::Gravity));
     tap(&mut m, &mut r, Control::Left);
     assert_eq!(m.settings.modifiers.get(0, Knob::Gravity), 100);
+    pick_category(&mut m, &mut r, game_sim::modifiers::Category::Biplane);
     assert!(row(&m, Key::Knob(Knob::PlaneTopSpeed)).off.is_some(), "online every seat flies the host's biplane");
+    pick_category(&mut m, &mut r, game_sim::modifiers::Category::Kiowa);
+    assert!(row(&m, Key::Knob(Knob::KiowaSpeed)).off.is_some(), "online the Kiowa is the disc's");
     down_to(&mut m, &mut r, Key::Knob(Knob::Grip));
     tap(&mut m, &mut r, Control::Right);
     assert_eq!(m.settings.modifiers.get(0, Knob::Grip), 110);

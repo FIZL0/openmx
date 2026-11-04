@@ -4728,6 +4728,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let mut garage = Garage::new(args.vehicle, plane)?;
     garage.cars = lot.cars_for(0);
     garage.heli = lot.heli_for(0);
+    garage.modify(&lot, &mods, 0);
     if !garage.cars.is_empty() {
         let names: Vec<&str> = garage.cars.iter().map(|c| c.machine.section()).collect();
         let parked: Vec<&str> = garage.cars.iter().filter(|c| c.bay.is_some()).map(|c| c.machine.section()).collect();
@@ -6568,6 +6569,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 let mut garage = Garage::new(up, plane)?;
                 garage.cars = lot.cars_for(i + 1);
                 garage.heli = lot.heli_for(i + 1);
+                garage.modify(&lot, &mods, i + 1);
                 garage
             },
             riding: front.as_ref().is_none_or(|f| !f.menu.paused(i + 1)),
@@ -7089,7 +7091,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         // The recording changed the modifiers before the frame it hands out next (P98): the ride
         // takes them there, as it did when it was made.
         if let Some(to) = head.as_ref().and_then(Head::change) {
-            remodify(&mut world.seats, &mut rigs, &stock_phys, stock_plane.as_ref(), &mods, &to, Race::ceiling_for_fog(F(look.fog_far)));
+            remodify(&mut world.seats, &mut rigs, &stock_phys, stock_plane.as_ref(), &lot, &mods, &to, Race::ceiling_for_fog(F(look.fog_far)));
             mods = to;
             engine.time_scale = mods.time_scale();
             if let Some(front) = front.as_deref_mut() {
@@ -7665,6 +7667,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                         let mut garage = Garage::new(Kind::Bike, lot.plane(i, flight_for(i)))?;
                         garage.cars = lot.cars_for(i);
                         garage.heli = lot.heli_for(i);
+                        garage.modify(&lot, &mods, i);
                         let body = match &rider_member {
                             Some(member) => Body::load(vec![disc.res(member)?], &args.rider, Sex::Male, "", &table.stunts, phy.motion()).ok(),
                             None => None,
@@ -7869,7 +7872,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                         Err(e) => front.menu.note = Some(format!("The modifiers did not change: {e}")),
                     }
                 } else if front.menu.mods_lock.is_none() && to != mods {
-                    remodify(&mut world.seats, &mut rigs, &stock_phys, stock_plane.as_ref(), &mods, &to, Race::ceiling_for_fog(F(look.fog_far)));
+                    remodify(&mut world.seats, &mut rigs, &stock_phys, stock_plane.as_ref(), &lot, &mods, &to, Race::ceiling_for_fog(F(look.fog_far)));
                     mods = to;
                     engine.time_scale = mods.time_scale();
                     front.menu.modified = !mods.is_original();
@@ -11590,7 +11593,8 @@ fn air_lock(playing: bool, online: bool) -> Option<String> {
 
 /// **The ride takes another set of modifiers, from where it is** (P98): every seat's bike built again
 /// from its stock file `stock[i]` on `to` ([`Mods::rebike`](game_sim::modifiers::Mods::rebike)), its
-/// biplane retuned off the stock `plane` the same way, and the HUD's mark said again. `was` is the set
+/// biplane retuned off the stock `plane` the same way, its cars and helicopter put on `to` off `lot`'s
+/// stock files ([`Garage::modify`], P272), and the HUD's mark said again. `was` is the set
 /// the ride had. Nothing is moved, stopped or put back. Each plane camera's eye takes `fog`, the
 /// scene's ceiling for it, or none if the seat's plane has no ceiling (P136).
 fn remodify(
@@ -11598,6 +11602,7 @@ fn remodify(
     rigs: &mut [Rig],
     stock: &[Phy],
     plane: Option<&phy::Plane>,
+    lot: &Lot,
     was: &game_sim::modifiers::Mods,
     to: &game_sim::modifiers::Mods,
     fog: F,
@@ -11606,6 +11611,7 @@ fn remodify(
         if let Some(file) = stock.get(i) {
             to.resim(was, i, file, &mut seat.sim);
         }
+        seat.garage.modify(lot, to, i);
         if let (Some(file), Some(flight)) = (plane, seat.garage.plane.as_mut().and_then(|p| p.flight.as_mut())) {
             to.replane(i, file, flight);
         }

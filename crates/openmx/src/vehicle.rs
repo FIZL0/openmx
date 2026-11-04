@@ -3014,6 +3014,33 @@ fn detour(kind: Kind) -> bool {
     kind.car().is_some() || kind == Kind::Kiowa
 }
 
+impl Garage {
+    /// **Player `seat`'s modifiers on their cars and helicopter** (P272): each car's file and the
+    /// helicopter's are `lot`'s stock ones with `mods` on them ([`game_sim::modifiers::Mods::car`],
+    /// [`game_sim::modifiers::Mods::kiowa`]), so moving onto a set and back leaves the stock file. The
+    /// helicopter being flown takes the new controller, rotor and aerodynamics at once (the step reads
+    /// nothing else of the file); a car being driven takes its tires' grip and springs at once, which
+    /// it reads off the file every step, and its engine and gearing, which its drivetrain copied when
+    /// it was taken, at its next take. With every knob at its default the files are the stock ones.
+    pub fn modify(&mut self, lot: &Lot, mods: &game_sim::modifiers::Mods, seat: usize) {
+        for car in &mut self.cars {
+            if let Some(stock) = lot.cars.iter().find(|c| c.machine == car.machine && c.livery == car.livery) {
+                car.car = stock.car.clone();
+                mods.car(seat, &mut car.car);
+            }
+        }
+        if let (Some(heli), Some(stock)) = (self.heli.as_mut(), lot.kiowa.as_ref()) {
+            heli.phy = stock.phy.clone();
+            mods.kiowa(seat, &mut heli.phy);
+            if let Some(flown) = heli.flown.as_mut() {
+                flown.kiowa.controller = heli.phy.controller;
+                flown.kiowa.rotor = heli.phy.rotor;
+                flown.kiowa.aero = heli.phy.aero;
+            }
+        }
+    }
+}
+
 impl Lot {
     /// Player `copy`'s helicopter: the disc's ([`Lot::kiowa`]) in their livery, parked in their bay.
     pub fn heli_for(&self, copy: usize) -> Option<KiowaRide> {

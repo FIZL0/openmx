@@ -3198,6 +3198,8 @@ pub struct Menu {
     /// The modifiers page's Player row is on All Players (P134), the host's head of the row: a
     /// modifier set there is every seat's. Where the page opens: every player's, unless a player is picked.
     mods_all: bool,
+    /// The machine whose knobs the modifiers page shows under its Machine row, or the world's (P272).
+    mods_category: game_sim::modifiers::Category,
     /// The modifiers the host set through All Players since the shell last took them
     /// ([`Menu::take_mods_all`]): online every seat's, not only this machine's (P134).
     mods_all_set: Vec<Knob>,
@@ -3466,6 +3468,7 @@ impl Menu {
             tab: [0; Screen::ALL.len()],
             player: 0,
             mods_all: true,
+            mods_category: Default::default(),
             mods_all_set: Vec::new(),
             guest: false,
             pad_kept: None,

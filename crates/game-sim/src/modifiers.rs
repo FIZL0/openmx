@@ -36,6 +36,13 @@
 //! has one step past [`MOST`], [`UNCAPPED`] ([`Knob::most`]): no fade at all, and the plane camera's
 //! eye no longer held under the race setup's 200 ft cap ([`Mods::plane_eye_ceiling`]).
 //!
+//! P272 sorted the knobs by machine ([`Category`]): the bike's, the biplane's, the Kiowa's, the cars'
+//! and the world's, and gave the two machines that had none their own — the helicopter's on its
+//! `kiowa.phy` ([`Mods::kiowa`]: [`Knob::KiowaSpeed`], [`Knob::KiowaClimb`], [`Knob::KiowaTurn`],
+//! [`Knob::KiowaCeiling`]) and the three cars' on theirs ([`Mods::car`]: [`Knob::CarSpeed`],
+//! [`Knob::CarAccel`], [`Knob::CarGrip`], [`Knob::CarSuspension`]), each skipped at its default as
+//! every other one is. Gravity, air drag and the time scale stay the bike's and the biplane's.
+//!
 //! The text form ([`Mods::text`], [`Mods::parse`]) is what a tape, a preset and the online lobby
 //! carry: `word=percent` for a world modifier, `word.N=percent` for player N's, only the ones off
 //! their default. An empty text is the original game.
@@ -45,6 +52,7 @@ use crate::MAX_PLAYERS;
 use crate::air;
 use crate::phy::{self, Phy};
 use crate::r#move as mv;
+use crate::{car, kiowa};
 use crate::off_map;
 use crate::ride::Ride;
 use ps2_float::F;
@@ -72,10 +80,18 @@ pub enum Knob {
     Gravity,
     AirDrag,
     TimeScale,
+    KiowaSpeed,
+    KiowaClimb,
+    KiowaTurn,
+    KiowaCeiling,
+    CarSpeed,
+    CarAccel,
+    CarGrip,
+    CarSuspension,
 }
 
 /// How many modifiers there are.
-pub const KNOBS: usize = 19;
+pub const KNOBS: usize = 27;
 
 /// A modifier's default, which leaves its fields untouched: 100%.
 pub const ORIGINAL: u16 = 100;
@@ -91,6 +107,38 @@ pub const UNCAPPED: u16 = MOST + STEP;
 /// [`ORIGINAL`], is no limit at all. P148 raised the top from 9 g to 15 g, which still bites on the
 /// fastest plane the speed knobs make (a full pull at 500% top speed and acceleration goes well past it).
 pub const MAX_G: (u16, u16) = (3, 15);
+
+/// What a knob is for, the Game Modifiers page's categories (P272): a machine's, or the world's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum Category {
+    #[default]
+    Bike,
+    Biplane,
+    Kiowa,
+    Cars,
+    World,
+}
+
+impl Category {
+    /// In the page's order: the disc's machines, then the world.
+    pub const ALL: [Category; 5] = [Category::Bike, Category::Biplane, Category::Kiowa, Category::Cars, Category::World];
+
+    /// The menu's name for it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Category::Bike => "Bike",
+            Category::Biplane => "Biplane",
+            Category::Kiowa => "Kiowa",
+            Category::Cars => "Cars",
+            Category::World => "World",
+        }
+    }
+
+    /// Its knobs, in [`Knob::MENU`]'s order.
+    pub fn knobs(self) -> Vec<Knob> {
+        Knob::MENU.into_iter().filter(|k| k.category() == self).collect()
+    }
+}
 
 impl Knob {
     pub const ALL: [Knob; KNOBS] = [
@@ -113,6 +161,14 @@ impl Knob {
         Knob::Gravity,
         Knob::AirDrag,
         Knob::TimeScale,
+        Knob::KiowaSpeed,
+        Knob::KiowaClimb,
+        Knob::KiowaTurn,
+        Knob::KiowaCeiling,
+        Knob::CarSpeed,
+        Knob::CarAccel,
+        Knob::CarGrip,
+        Knob::CarSuspension,
     ];
 
     /// The ones the menu has a row for, in its order: all but [`Knob::PlaneSpeed`], which P95 split
@@ -136,7 +192,35 @@ impl Knob {
         Knob::Gravity,
         Knob::AirDrag,
         Knob::TimeScale,
+        Knob::KiowaSpeed,
+        Knob::KiowaClimb,
+        Knob::KiowaTurn,
+        Knob::KiowaCeiling,
+        Knob::CarSpeed,
+        Knob::CarAccel,
+        Knob::CarGrip,
+        Knob::CarSuspension,
     ];
+
+    /// The machine it is for, or the world (P272): the menu's category it shows under.
+    pub fn category(self) -> Category {
+        match self {
+            Knob::BikeSpeed
+            | Knob::BikeAccel
+            | Knob::BikePower
+            | Knob::Grip
+            | Knob::Suspension
+            | Knob::AirControl
+            | Knob::SpinRate
+            | Knob::Rotation
+            | Knob::Jump
+            | Knob::CrashTolerance => Category::Bike,
+            Knob::PlaneSpeed | Knob::PlaneAccel | Knob::PlaneTopSpeed | Knob::PlaneTurn | Knob::PlaneCeiling | Knob::PlaneMaxG => Category::Biplane,
+            Knob::KiowaSpeed | Knob::KiowaClimb | Knob::KiowaTurn | Knob::KiowaCeiling => Category::Kiowa,
+            Knob::CarSpeed | Knob::CarAccel | Knob::CarGrip | Knob::CarSuspension => Category::Cars,
+            Knob::Gravity | Knob::AirDrag | Knob::TimeScale => Category::World,
+        }
+    }
 
     fn index(self) -> usize {
         Knob::ALL.iter().position(|k| *k == self).expect("every knob is in ALL")
@@ -164,6 +248,14 @@ impl Knob {
             Knob::Gravity => "gravity",
             Knob::AirDrag => "air_drag",
             Knob::TimeScale => "time_scale",
+            Knob::KiowaSpeed => "kiowa_speed",
+            Knob::KiowaClimb => "kiowa_climb",
+            Knob::KiowaTurn => "kiowa_turn",
+            Knob::KiowaCeiling => "kiowa_ceiling",
+            Knob::CarSpeed => "car_speed",
+            Knob::CarAccel => "car_accel",
+            Knob::CarGrip => "car_grip",
+            Knob::CarSuspension => "car_suspension",
         }
     }
 
@@ -193,6 +285,14 @@ impl Knob {
             Knob::Gravity => "Gravity",
             Knob::AirDrag => "Air drag",
             Knob::TimeScale => "Time scale",
+            Knob::KiowaSpeed => "Kiowa top speed",
+            Knob::KiowaClimb => "Kiowa climb",
+            Knob::KiowaTurn => "Kiowa turn speed",
+            Knob::KiowaCeiling => "Kiowa max height",
+            Knob::CarSpeed => "Car top speed",
+            Knob::CarAccel => "Car acceleration",
+            Knob::CarGrip => "Car tire grip",
+            Knob::CarSuspension => "Car suspension",
         }
     }
 
@@ -272,6 +372,14 @@ impl Knob {
             Knob::Gravity => "gravity, bike and biplane",
             Knob::AirDrag => "air drag, bike and biplane",
             Knob::TimeScale => "how fast the game runs",
+            Knob::KiowaSpeed => "the Kiowa's top speed, stick held forward",
+            Knob::KiowaClimb => "how fast the Kiowa climbs and comes down on the collective",
+            Knob::KiowaTurn => "how fast the Kiowa yaws on the pedals and rolls into a bank",
+            Knob::KiowaCeiling => "how high the Kiowa's collective still climbs",
+            Knob::CarSpeed => "the cars' top speed, not the pull off the line",
+            Knob::CarAccel => "how fast the cars get up to speed, not their top",
+            Knob::CarGrip => "every car tire's grip on every surface",
+            Knob::CarSuspension => "the cars' spring stiffness, damped alike",
         }
     }
 
@@ -301,6 +409,14 @@ impl Knob {
             Knob::Gravity => "bike [Mass Properties] Gravity (the gravity force), biplane GravityScale x k",
             Knob::AirDrag => "bike [Aerodynamics] Drag, biplane CD0 x k",
             Knob::TimeScale => "the engine's time-scale object: dt + (k - 1) dt",
+            Knob::KiowaSpeed => "kiowa [Flight Controller] Max/MinSpeedCommand, SpeedCommandRate, Min/MaxPitchRateFeedForwardSpeed x k, SpeedGain / k; [Aerodynamics] CD0 / k^2",
+            Knob::KiowaClimb => "kiowa [Flight Controller] ClimbRateGain, DescentRateGain x k; above 100%, [Main Rotor] MaxCollectivePitchAngle x k^(1/2)",
+            Knob::KiowaTurn => "kiowa [Flight Controller] MaxRateCommand (yaw, roll), MinRateCommand (roll) x k; [Main/Tail Rotor] MaxRotorMoment (yaw, roll) x k",
+            Knob::KiowaCeiling => "kiowa [Flight Controller] MaxAltitude x k",
+            Knob::CarSpeed => "car [Engine] torque curve, PumpTorqueScale, MaxPumpTorque x k; FinalGearRatio / k; [Aerodynamics] AeroSurfaceArea / k^2",
+            Knob::CarAccel => "car [Engine] torque curve, PumpTorqueScale, MaxPumpTorque x k; [Aerodynamics] AeroSurfaceArea, every tire surface's WheelFriction x k",
+            Knob::CarGrip => "car every tire surface's FrictionPeak x k",
+            Knob::CarSuspension => "car every tire's Spring x k; BounceDamping, ReboundDamping x k^(1/2)",
         }
     }
 }
@@ -736,6 +852,96 @@ impl Mods {
         }
     }
 
+    /// Player `seat`'s helicopter, on the loaded `kiowa.phy`, before it is taken (P272). The step reads
+    /// the controller, the rotor and the aerodynamics as the file left them, so a knob is those
+    /// numbers moved and nothing else.
+    pub fn kiowa(&self, seat: usize, phy: &mut kiowa::Phy) {
+        let c = &mut phy.controller;
+        if let Some(k) = self.factor(seat, Knob::KiowaSpeed) {
+            // The stick asks for a ground speed up to MaxSpeedCommand, and the speed error asks for a
+            // pitch through SpeedGain, held to MaxPitchCommand. k times the command (reached in the
+            // file's time, SpeedCommandRate x k), the gain / k so k times the error asks for the
+            // file's pitch, the turn's feed-forward over k times the speeds, and the body's drag
+            // CD0 / k^2 so k times the speed costs the file's drag: the rotor tilted as far holds k
+            // times the speed.
+            c.max_speed_command = c.max_speed_command * k;
+            c.min_speed_command = c.min_speed_command * k;
+            c.speed_command_rate = c.speed_command_rate * k;
+            c.speed_gain = c.speed_gain / k;
+            c.min_feed_forward_speed = c.min_feed_forward_speed * k;
+            c.max_feed_forward_speed = c.max_feed_forward_speed * k;
+            phy.aero.cd0 = phy.aero.cd0 / (k * k);
+        }
+        if let Some(k) = self.factor(seat, Knob::KiowaClimb) {
+            // The climb and descent rates the collective's loop chases. Above 100% the rotor needs
+            // more pitch to give the climb's thrust: the blade's thrust goes with its pitch, and the
+            // climb's extra over the hover's with its square root (the inflow it climbs into).
+            c.climb_rate = c.climb_rate * k;
+            c.descent_rate = c.descent_rate * k;
+            if k > F::ONE {
+                phy.rotor.max_collective = phy.rotor.max_collective * k.sqrt();
+            }
+        }
+        if let Some(k) = self.factor(seat, Knob::KiowaTurn) {
+            // The pedals ask for a yaw rate (MaxRateCommand's yaw) and the bank comes in at the roll
+            // rate limits; the rotors' moments at full pedal and full lateral cyclic go up alike, so
+            // the asked-for rate is reached as hard.
+            for i in [1, 2] {
+                c.max_rate[i] = c.max_rate[i] * k;
+                phy.rotor.max_moment[i] = phy.rotor.max_moment[i] * k;
+            }
+            c.min_rate[2] = c.min_rate[2] * k;
+        }
+        if let Some(k) = self.factor(seat, Knob::KiowaCeiling) {
+            // No climbing above MaxAltitude: k times as high.
+            c.max_altitude = c.max_altitude * k;
+        }
+    }
+
+    /// Player `seat`'s car, any of the three, on its loaded `.phy` before it is taken (P272).
+    pub fn car(&self, seat: usize, car: &mut car::Car) {
+        if let Some(k) = self.factor(seat, Knob::CarAccel) {
+            // k times the engine and its converter, and k times what holds the car back on the flat
+            // (the air on its wings, the tires' rolling friction): the force left over is k times
+            // the file's at every speed below the top, and the top is where it was.
+            car_power(&mut car.engine, k);
+            car.aero.aero_surface_area = car.aero.aero_surface_area * k;
+            for t in &mut car.tires {
+                for s in &mut t.surfaces {
+                    s.wheel_friction = s.wheel_friction * k;
+                }
+            }
+        }
+        if let Some(k) = self.factor(seat, Knob::CarSpeed) {
+            // As the bike's: k times the torque on the final drive / k is the file's force at the
+            // wheel at any revs, the wheel turning k times as fast for them (and the redline's top
+            // wheel speed k times); the wings' area / k^2 leaves k times the speed the file's lift
+            // and drag. The pull off the line is the file's.
+            car_power(&mut car.engine, k);
+            let e = &mut car.engine;
+            e.final_gear_ratio = e.final_gear_ratio / k;
+            e.first = e.first_gear();
+            car.aero.aero_surface_area = car.aero.aero_surface_area / (k * k);
+        }
+        if let Some(k) = self.factor(seat, Knob::CarGrip) {
+            for t in &mut car.tires {
+                for s in &mut t.surfaces {
+                    s.friction_peak = s.friction_peak * k;
+                }
+            }
+        }
+        if let Some(k) = self.factor(seat, Knob::CarSuspension) {
+            // The dampers are the file's ratios of critical damping turned into rates against the
+            // spring (`phy::damping`, which goes with its square root): stiffer, damped as much.
+            let d = k.sqrt();
+            for t in &mut car.tires {
+                t.spring = t.spring * k;
+                t.bounce_damping = t.bounce_damping * d;
+                t.rebound_damping = t.rebound_damping * d;
+            }
+        }
+    }
+
     /// Player `seat`'s biplane has no ceiling: [`Knob::PlaneCeiling`] at its top step, [`UNCAPPED`].
     pub fn uncapped(&self, seat: usize) -> bool {
         self.get(seat, Knob::PlaneCeiling) == UNCAPPED
@@ -766,6 +972,16 @@ fn engine_power(phy: &mut Phy, k: F) {
     phy.peak.torque = phy.peak.torque * k;
     phy.engine.clutch_static = phy.engine.clutch_static * k;
     phy.engine.clutch_kinetic = phy.engine.clutch_kinetic * k;
+}
+
+/// A car's engine `k` times: its torque curve, and the converter that passes it, so it slips by the
+/// file's revs.
+fn car_power(e: &mut car::Engine, k: F) {
+    for t in &mut e.torque {
+        *t = *t * k;
+    }
+    e.pump_torque_scale = e.pump_torque_scale * k;
+    e.max_pump_torque = e.max_pump_torque * k;
 }
 
 /// The driven tire's grip along itself, `k` times: the force it passes before it spins, and the
