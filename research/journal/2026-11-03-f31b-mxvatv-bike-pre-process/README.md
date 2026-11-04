@@ -25,3 +25,9 @@ heightfield and world rays, the contact filing) is ported as `handling::record`.
 and flip-1, bit-exact, flip-1's 470 heightfield queries through `handling::ground::under`. The rest of
 F31b4 is filed as F31b4a (the tail), F31b4b (the wreck and put-back) and F31b4c (MD63e's mass
 properties). Details in 4-record-pass-FINAL.md.
+
+F31b4a: the frame's tail (the listeners' walk and the bike's vehicle update: fade, wreck test, ride,
+stuck timer, rumble, tricks, the run) is ported as `handling::tail`. The update matches the original on
+12 000 random bikes and the walk on 10 000 random trees. The hybrid frame runs the port's tail for every
+row of ride-2 and flip-1, bit-exact, with a RAM-wide shadow check of the bike's update on every frame.
+Details in 5-tail-FINAL.md.
