@@ -1,4 +1,4 @@
-# 1 — ios background gpu (PART)
+# 1 — ios background gpu (READY)
 
 Task P298a. 2026-11-04.
 
