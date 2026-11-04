@@ -1350,6 +1350,12 @@ fn trace_picture(
         p3(camera.eye),
         p3(camera.at),
     );
+    // And the rider's drawn nodes on the bike, each its spot in the bike's frame (P270): what a test
+    // reads a put-back's pose by, whatever the bike turned through.
+    if let Some(nodes) = shown.body.as_ref().filter(|b| !b.is_empty()) {
+        let at: Vec<String> = nodes.iter().map(|m| format!("{:.3} {:.3} {:.3}", m.0[3][0], m.0[3][1], m.0[3][2])).collect();
+        println!("picture pose: tick {tick} cut {} nodes {} {}", cut as u8, nodes.len(), at.join(" "));
+    }
     // And the plane while it is flown, as its draw takes it: from the tick before to this one, and
     // slid between them unless the seat cuts.
     if let Some(plane) = seat.garage.plane_flown() {
@@ -4965,6 +4971,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let new_rider = |phy: &Phy, at: Vf, heading: Vf| -> Rider {
         let mut rider = Rider::new(phy, mounts, at, heading, stunts.clone());
         rider.edge_armed &= !stadium;
+        // A put-back draws the rider at once on the riding pose (P270, the user's ask), not sprung
+        // over from the trick or the wreck.
+        rider.cut_put_back = true;
         // The fork the front wheel steers about, from the model's shocks to its handlebars, which is the
         // axis the bike's loader gives the front wheel (P33). Left straight up with no such nodes.
         if let (Some(h), Some(s)) = (node_at("Handlebars"), node_at("Shocks")) {
@@ -8754,8 +8763,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 _ => (&mut rig.camera, &mut rig.fov_ease.0, &mut rig.look_back.0),
             };
             // The original's plane reset (the chord, a wreck's recovery) snaps the plane's camera onto
-            // the spawn rather than letting it fly the whole way back (V29).
-            if seat.garage.up == Kind::Biplane && seat.said.respawned {
+            // the spawn rather than letting it fly the whole way back (V29). The bike's put-back does
+            // too (P270, the user's ask): the chord mid-trick left the camera chasing the bike for a
+            // second and more from where it had been in the air.
+            if matches!(seat.garage.up, Kind::Biplane | Kind::Bike) && seat.said.respawned {
                 follow.cam.snap = true;
             }
             // A jump the flight makes between two ticks (P125) — a marker's Up putting the plane

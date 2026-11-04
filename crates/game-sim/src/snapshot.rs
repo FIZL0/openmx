@@ -360,6 +360,7 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
     rider.holds = here.holds.clone();
     rider.body_numbers = here.body_numbers;
     rider.edge_armed = here.edge_armed;
+    rider.cut_put_back = here.cut_put_back;
     if others_riders.len() != sim.others.len() {
         return Err(format!("{} players in the state, {} here", 1 + others_riders.len(), sim.players()));
     }
@@ -376,6 +377,7 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         r.holds = p.rider.holds.clone();
         r.body_numbers = p.rider.body_numbers;
         r.edge_armed = p.rider.edge_armed;
+        r.cut_put_back = p.rider.cut_put_back;
         p.rider = r;
     }
     *sim = Sim {
@@ -682,6 +684,7 @@ impl Wire for Rider {
             edge_armed: _,
             page,
             put_back,
+            cut_put_back: _,
             ragdoll_shown: _,
             score,
         } = self;
@@ -753,6 +756,7 @@ impl Wire for Rider {
             edge_armed: false,
             page: Wire::take(r)?,
             put_back: Wire::take(r)?,
+            cut_put_back: false,
             ragdoll_shown: None,
             score: Wire::take(r)?,
         })
