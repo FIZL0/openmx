@@ -57,3 +57,13 @@ MD75c3 (`10-node-rebound.md`): `atv_node_rebound` is ported as `atv_moto::Scene:
 sphere and the box gathered from the node's own bounds and its list. `quad::Steps` answers
 `Call::NodeRebound`, and the quad's node box runs it when stale. Checked against the original on 10,000
 generated four-node scenes: every word equal. The image's 43-node list stays a gap until MD75e.
+
+MD75e (`11-whole-frame.md`): the whole frame. SLUS-21104's world step runs over the image's physics world
+with only the ground query hooked. That covers four substeps, the trigger's sweep through MD86's search,
+the world's other listeners and the whole scene. `quad::frame` runs on `read_ride`'s read of the same
+image. All 2,923 compared words are equal, and so is the whole rigid body. Every word the step changed is
+compared, except two: the search's searched bit on the quad's own probes, and the stale mark on 32 scene
+nodes past the four the ride holds. To get there, three port fixes were needed: the body's last position
+kept in step with its `Parts` copy, the backflip's node heights refreshed when the node moves, and the
+trigger stood before the sweep. `borrow.rs` proves the partner borrow on an object (on a body or a
+chassis) or a mover inside the quad: 4,000 rides, every region and pointer equal.

@@ -633,7 +633,7 @@ pub fn read_ride(ee: &Ee, quad: u32, dt: F) -> Result<(Ride, Image), String> {
 /// The harness's layout against the image's: each test-side block, the image's block it stands for,
 /// and its length. Words the poke writes are compared through these, and a pointer the poke lays is
 /// equal to the image's if it is the same place in its block.
-fn blocks(at: &Image) -> Vec<(u32, u32, u32)> {
+pub(super) fn blocks(at: &Image) -> Vec<(u32, u32, u32)> {
     let mut out = vec![
         (OBJ, at.quad, 0x1800),
         (BODY, at.body, 0x230),
@@ -669,7 +669,7 @@ fn blocks(at: &Image) -> Vec<(u32, u32, u32)> {
 /// Pointers the harness lays to a stand-in of its own: the ground every wheel stands on is [`WORLD`],
 /// the record's and the nodes' vtables are the harness's hook tables, the database entries are
 /// [`ENTRY`], and each collidable is at [`collidable_at`].
-fn stand_ins(at: &Image) -> Vec<(u32, u32)> {
+pub(super) fn stand_ins(at: &Image) -> Vec<(u32, u32)> {
     let mut out: Vec<(u32, u32)> = at.ground.iter().map(|&g| (WORLD, g)).collect();
     out.extend([(RECORD_VT, at.record_vt), (ACTORS, at.actors), (SEARCH, at.search)]);
     out.extend(at.node_vts.iter().map(|&vt| (NODE_VT, vt)));
@@ -681,7 +681,7 @@ fn stand_ins(at: &Image) -> Vec<(u32, u32)> {
 
 /// What the harness lays that is its own and stands for nothing in the image: the record's and the
 /// nodes' hook tables, and the struck thing when the image's record has none.
-fn harness_only(at: &Image, a: u32) -> bool {
+pub(super) fn harness_only(at: &Image, a: u32) -> bool {
     (RECORD_VT..RECORD_VT + 0x100).contains(&a)
         || (NODE_VT..NODE_VT + 0x100).contains(&a)
         || (at.thing == 0 && (THING..THING + 0x100).contains(&a))
@@ -691,13 +691,13 @@ fn harness_only(at: &Image, a: u32) -> bool {
 }
 
 /// The image's address of a word the poke wrote, through [`blocks`].
-fn image_at(blocks: &[(u32, u32, u32)], t: u32) -> Option<u32> {
+pub(super) fn image_at(blocks: &[(u32, u32, u32)], t: u32) -> Option<u32> {
     blocks.iter().find(|&&(tb, _, len)| (tb..tb + len).contains(&t)).map(|&(tb, ib, _)| ib + (t - tb))
 }
 
 /// Every word [`poke_ride`] writes of `r`, compared with `image`'s through `at`: the mismatches, as
 /// `(test address, image address, poked, image's)`, and how many words were compared.
-fn compare(image: &Ee, fresh: &mut Ee, r: &Ride, at: &Image) -> (Vec<(u32, u32, u32, u32)>, usize) {
+pub(super) fn compare(image: &Ee, fresh: &mut Ee, r: &Ride, at: &Image) -> (Vec<(u32, u32, u32, u32)>, usize) {
     reset_all(fresh);
     for (_, base, len) in [("vt", RECORD_VT, 0x100), ("thing", THING, 0x100), ("gate", GATE, 0x200), ("node vt", NODE_VT, 0x100), ("box", BOX, 0x100)] {
         for o in (0..len).step_by(4) {

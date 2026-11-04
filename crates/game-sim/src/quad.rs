@@ -676,6 +676,10 @@ pub enum Call {
 /// Whoever runs the calls the quad's listeners make. A `Vec<Call>` just lists them.
 pub trait Moto {
     fn call(&mut self, c: Call, q: &mut Quad, body: &mut Body);
+    /// MD75e: the frame's whole rigid body before a listener runs, and after, for the words of it a
+    /// runner keeps a copy of (the last position, the enabled flag).
+    fn body_in(&mut self, _b: &crate::atv_body::Body) {}
+    fn body_out(&mut self, _b: &mut crate::atv_body::Body) {}
 }
 
 impl Moto for Vec<Call> {
@@ -1711,8 +1715,10 @@ impl<M: Moto> Frame<'_, M> {
     /// A listener on what it reads of the body, written back after.
     fn listen(&mut self, f: impl FnOnce(&Params, &mut Quad, &mut Body, &crate::air::AcosTable, &mut M)) {
         let mut b = self.body.view();
+        self.m.body_in(self.body);
         f(self.p, self.q, &mut b, self.table, self.m);
         self.body.set_view(&b);
+        self.m.body_out(self.body);
     }
 }
 
@@ -1905,6 +1911,29 @@ impl<S: Sweep + ?Sized> Sweep for &mut S {
 
 impl<R: Moto, G: FnMut(Vf, &mut u8) -> (Vf, Vf), S: Sweep> Moto for Steps<R, G, S> {
     fn call(&mut self, c: Call, q: &mut Quad, body: &mut Body) {
+        // MD75e: the backflip reads the node's right and up rows' heights where the node keeps them
+        // (`+0x84`, `+0x94`), so a call that brings the node's world frame up to date moves them too.
+        let rows = self.bike.parts.scene.nodes[0].world;
+        self.answer(c, q, body);
+        let w = self.bike.parts.scene.nodes[0].world;
+        if w[1].to_bits() != rows[1].to_bits() || w[2].to_bits() != rows[2].to_bits() {
+            (self.bike.right_y, self.bike.up_y) = (F(w[1].y()), F(w[2].y()));
+        }
+    }
+
+    fn body_in(&mut self, b: &crate::atv_body::Body) {
+        self.bike.parts.last_position = b.last_position;
+        self.bike.parts.body_on = b.enabled;
+    }
+
+    fn body_out(&mut self, b: &mut crate::atv_body::Body) {
+        b.last_position = self.bike.parts.last_position;
+    }
+}
+
+impl<R: Moto, G: FnMut(Vf, &mut u8) -> (Vf, Vf), S: Sweep> Steps<R, G, S> {
+    /// What [`Moto::call`] answers.
+    fn answer(&mut self, c: Call, q: &mut Quad, body: &mut Body) {
         match c {
             Call::InputLimiter(dt) => self.input_limiter(q, dt),
             Call::Clutch(dt) => {
@@ -2012,6 +2041,9 @@ impl<R: Moto, G: FnMut(Vf, &mut u8) -> (Vf, Vf), S: Sweep> Moto for Steps<R, G, 
                     return self.rest.call(c, q, body);
                 };
                 self.bike.parts.scene = scene;
+                // MD75e: the probe is the quad's trigger, stood at the frame it was swept from.
+                let trigger = &mut self.bike.parts.collidables.states[crate::atv_sync::slot(Part::Trigger)];
+                crate::atv_sync::stand(trigger, &scene.nodes[0].world);
                 self.contacts(q, look, &cs);
             }
             Call::RevLimit => crate::atv_moto::rev_limit(&self.bike.engine, &mut self.bike.parts.drive, self.bike.parts.driven),

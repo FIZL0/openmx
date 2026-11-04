@@ -7024,6 +7024,16 @@ atv_node_box_add            atv 0x00196550 = a listed node's box taken into gath
 # skeleton: at least 40 nodes, 0x130 apart, vtable 0x003b56e0), collidables +0xcc = +0xd8 = +0x1438
 # 0x0159c500 (riding), +0xd0 0x01627370 (frame), +0xd4 0x016282b0, +0x1430 0x0162cd30, +0x1434 0x0162cef0.
 # +0x14ec is 0x636f6c00 (text, not buttons); +0x44 is 0x74730567 (bit 0 the sync, +0x45 flags 0x05).
+# MD75e — the whole physics frame off atv-r-spawn.ee.bin (tests/atv_quad/frame.rs; journal
+# research/journal/2026-11-02-md75-atv-frame/11-whole-frame.md). atv_world_step 0x00496b70 (a0 0x0065bc0c,
+# f12 1/30, gp 0x003dbaf0) with only atv_ground_query 0x004833c0 hooked (a0 the terrain 0x0184c7d0, a1 point,
+# a2 normal, a3 0, t0 record byte): 63,073 instructions, 16 ground queries (4 wheels x 4 substeps). The
+# world's lists: bodies [0x0159c7f0]; force [0x0159bee0]; preforce [0x015e06c0 (the quad's), 0x016570c0,
+# 0x019b8820, 0x01a05d20, 0x01a485e0, 0x01a8af00]; post [0x015e06c4]. The quad's record 0x016286d0
+# (vtable 0x003b9290) has vt +0x88 = 0x00205730, which walks the record's contacts (count +0xf0, 0 here).
+# The trigger 0x0162cd30's search sets bit 0x10 (searched) of +0x126 on the riding 0x0159c500 and the
+# sweep 0x016282b0, both in its reach, before its object list leaves them out. The node place clears bit 0
+# (world current) of +0x100 on 32 of the 40 nodes past the four read_ride holds; nothing else of them moves.
 # MD62 — atv_bike_airborne_control's fields, bike-relative (tests/mxvatv_air.rs runs it off state04 too):
 # +0x1170..+0x117c AirborneControlMoment, +0x1180 damping, +0x1184 control force, +0x1188/+0x118c
 # authority and its time, +0x1194 the backflip's torque in, +0x1198 its ramp (flipping), +0x11d0 the
