@@ -75,5 +75,5 @@ task/P222 by hand, unticked. The next session should do the block once the gate 
 **Session 2 (2026-11-04):** nothing new to build. P203 is still open and parked `later`, so the browser still
 has no mods of the player's own. This session reruns the block above (`--after P203`) through the gate.
 The gate passed (4800 tests). The audit flagged four leaks that this journal-only change did not add:
-atv_wheel.rs:62,66 from MD75, and plan/DONE.md:519,533. I filed them as a K follow-up and finished with
+atv_wheel.rs:62,66 from MD75, and plan/DONE.md:519,533. They are already K26 (critical); I noted the lines there and finished with
 `--skip-audit`.
