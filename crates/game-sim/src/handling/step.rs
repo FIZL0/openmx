@@ -308,8 +308,16 @@ pub fn stand_upright(p: &Params, b: &mut Bike<'_>, s: &Step, o: &mut dyn Outside
 ///
 /// The original spells its integrations `0 + x`, then `madd`, sums the flattened normal's squares
 /// `y·y` first and weighs the arc cosine's upper entry first; each of those is the same one add of
-/// the same rounded product as MX Unleashed's order, so the arithmetic is shared.
+/// the same rounded product as MX Unleashed's order, so the arithmetic is shared — but for a `-0`:
+/// `0 + x` makes the inertia, command or point `+0` before its `madd` (F31b2's oracle), so a `-0` is
+/// folded to `+0` here first, on the front wheel down where the original reaches its integrations.
 pub fn balance(p: &Params, b: &mut Bike<'_>, s: &Step, t: &Tables<'_>, o: &mut dyn Outside, orientation: Vf, dt: F) {
+    if b.front.contact {
+        let r = &mut *b.ride;
+        for x in [&mut r.balance_inertia, &mut r.balance_command, &mut r.balance_point] {
+            *x = F::ZERO + *x;
+        }
+    }
     crate::r#move::balance(p, b, s, t, &mut Oriented { q: orientation, o }, dt);
 }
 

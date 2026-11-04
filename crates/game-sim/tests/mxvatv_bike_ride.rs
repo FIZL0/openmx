@@ -879,3 +879,555 @@ fn the_bikes_pre_process_is_the_originals() {
         assert!(n >= 30, "only {n} bike(s) went down {want:?}: {t:?}");
     }
 }
+
+// --- F31b2: the bike's Force body, the port's -----------------------------------------------------------
+
+/// The bike's Force body (research/oracle.txt `# F31b2`), and what it calls: the vehicle's gravity
+/// (through its thunk), the bike's air and engine steps, the wheels' steps, the contacts, the rev
+/// limiter and the peak rates. Its own controllers (the stand-upright, the balance, the roll/pitch)
+/// and the push are not here: the port runs those.
+const GROUND_STEP: u32 = 0x004d_90f0;
+const GRAVITY: u32 = 0x004a_4ef0;
+const PRELOAD: u32 = 0x004e_60d0;
+const BACKFLIP: u32 = 0x004e_4f20;
+const SPIN_AIR: u32 = 0x004e_53d0;
+const ENGINE_UPDATE: u32 = 0x0049_fbb0;
+const AIR_DRAG: u32 = 0x004e_6c00;
+const AIRBORNE_CONTROL: u32 = 0x004e_65d0;
+const WHEEL_CLEAR: u32 = 0x004a_0c30;
+const CONTACTS: u32 = 0x004d_ccd0;
+const SUSPENSION: u32 = 0x004a_0cb0;
+const TIRE_FORCES: u32 = 0x004a_16f0;
+const WHEEL_INTEGRATE: u32 = 0x004a_1680;
+const REV_LIMIT: u32 = 0x0049_ff40;
+const PEAK_RATES: u32 = 0x004e_6c90;
+/// The engine's smooth noise, which the balance calls.
+const SMOOTH_NOISE: u32 = 0x0013_4580;
+/// The force listener's element hands the bike's step `+0x3c` of the bike.
+const BIKE_FORCE: u32 = BIKE + 0x3c;
+
+/// The callee of `c`, and what it is handed in `a0`: the bike, a wheel or the engine.
+fn step_callee(ee: &Ee, c: Call) -> (u32, u32) {
+    let [front, rear] = the_wheels(ee);
+    let wheel = |w: usize| match w {
+        bike::FRONT => front,
+        bike::REAR => rear,
+        w => panic!("the bike has no wheel {w}"),
+    };
+    let engine = ee.u32_at(BIKE + seed::ENGINE);
+    match c {
+        Call::Gravity => (GRAVITY, BIKE),
+        Call::Preload(_) => (PRELOAD, BIKE),
+        Call::Backflip(_) => (BACKFLIP, BIKE),
+        Call::SpinAir(_) => (SPIN_AIR, BIKE),
+        Call::EngineUpdate(_) => (ENGINE_UPDATE, engine),
+        Call::AirDrag(_) => (AIR_DRAG, BIKE),
+        Call::AirborneControl(_) => (AIRBORNE_CONTROL, BIKE),
+        Call::WheelClear(w) => (WHEEL_CLEAR, wheel(w)),
+        Call::Contacts => (CONTACTS, BIKE),
+        Call::Suspension(w, _) => (SUSPENSION, wheel(w)),
+        Call::TireForces(w, _) => (TIRE_FORCES, wheel(w)),
+        Call::WheelIntegrate(w, _) => (WHEEL_INTEGRATE, wheel(w)),
+        Call::RevLimit => (REV_LIMIT, engine),
+        Call::PeakRates => (PEAK_RATES, BIKE),
+        c => panic!("the bike's Force body calls no {c:?}"),
+    }
+}
+
+/// The bike in RAM as the port's Force body sees it: [`InRam`]'s words and the [`bike::Rider`]'s.
+/// Each step is the original's, run on the bike in RAM, but for the two whose `quad::Steps` port
+/// needs nothing the quad's types do not hold: the air drag (its drag the mass part's `+4`) and the
+/// peak rates ([`game_sim::atv_moto`]'s). The noise is the original's too.
+struct StepInRam<'a> {
+    ram: InRam<'a>,
+    rider: bike::Rider,
+    rider_last: Vec<(u32, u32)>,
+    /// The substep's `dt`, which the original leaves in `f12` for the calls that do not take it.
+    dt: F,
+}
+
+impl StepInRam<'_> {
+    fn read(&mut self) -> (Quad, quad::Body) {
+        let out = self.ram.read();
+        let ee = &*self.ram.ee;
+        self.rider = bike::read_rider(&|a| ee.u32_at(a), BIKE, self.ram.body);
+        self.rider_last = bike::rider_words(&self.rider, BIKE, self.ram.body);
+        out
+    }
+
+    fn write(&mut self, q: &Quad, b: &quad::Body) {
+        self.ram.write(q, b);
+        let now = bike::rider_words(&self.rider, BIKE, self.ram.body);
+        for (&(a, w), &(_, lw)) in now.iter().zip(&self.rider_last) {
+            if w != lw {
+                self.ram.ee.set_u32(a, w);
+            }
+        }
+        self.rider_last = now;
+    }
+}
+
+impl Moto for StepInRam<'_> {
+    fn call(&mut self, c: Call, q: &mut Quad, body: &mut quad::Body) {
+        match c {
+            Call::AirDrag(_) => {
+                let drag = F(self.ram.ee.f32_at(self.ram.ee.u32_at(BIKE + 0xe8) + 4));
+                return game_sim::atv_moto::air_drag(drag, q, body);
+            }
+            Call::PeakRates => return game_sim::atv_moto::peak_rates(q, body),
+            _ => {}
+        }
+        self.write(q, body);
+        let (f, a0) = step_callee(self.ram.ee, c);
+        let dt = match c {
+            Call::Preload(x) | Call::Backflip(x) | Call::SpinAir(x) | Call::EngineUpdate(x) | Call::AirborneControl(x) => x,
+            Call::Suspension(_, x) | Call::TireForces(_, x) | Call::WheelIntegrate(_, x) => x,
+            _ => self.dt,
+        };
+        self.ram.ee.set(28, GP);
+        self.ram.ee.call(f, &[u64::from(a0)], &[dt.0], BUDGET);
+        (*q, *body) = self.read();
+    }
+}
+
+impl bike::Rides for StepInRam<'_> {
+    fn rider(&mut self) -> &mut bike::Rider {
+        &mut self.rider
+    }
+    fn noise(&mut self, t: F) -> F {
+        self.ram.ee.set(28, GP);
+        self.ram.ee.call(SMOOTH_NOISE, &[], &[t.0], BUDGET);
+        F(self.ram.ee.f(0))
+    }
+}
+
+/// [`bike::ground_step`] on the bike in RAM, with its callees the original's.
+fn port_step(ee: &mut Ee, dt: F) {
+    let body = ee.u32_at(BIKE + seed::BODY);
+    let (wheels, record) = (the_wheels(ee), ee.u32_at(BIKE + seed::RECORD));
+    let p = bike::read_params(&|a| ee.u32_at(a), BIKE);
+    let ram = InRam { ee, wheels, record, body, last: Vec::new() };
+    let mut m = StepInRam { ram, rider: bike::Rider::default(), rider_last: Vec::new(), dt };
+    let (mut q, mut b) = m.read();
+    bike::ground_step(&p, &mut q, &mut b, dt, &mut m);
+    m.write(&q, &b);
+}
+
+/// A frame as [`PortHead`]'s, the bike's Force body the port's ([`port_step`]) as well.
+struct PortStep<'a>(PortHead<'a>, u32);
+
+impl Dynamics for PortStep<'_> {
+    fn count(&self, l: List) -> i32 {
+        self.0.count(l)
+    }
+    fn preforce(&mut self, i: i32, dt: F) {
+        self.0.preforce(i, dt)
+    }
+    fn force(&mut self, i: i32, h: F) {
+        let e = self.0.0.elt(List::Force, i);
+        if self.0.0.ee.u32_at(e + 0xc) != BIKE_FORCE {
+            return self.0.force(i, h);
+        }
+        let x = &mut self.0.0;
+        for (a, w) in seed::body_words(&x.body, x.at) {
+            x.ee.set_u32(a, w);
+        }
+        port_step(x.ee, h);
+        x.body = seed::body(&|a| x.ee.u32_at(a), x.at);
+        self.1 += 1;
+    }
+    fn enabled(&self, b: i32) -> bool {
+        self.0.enabled(b)
+    }
+    fn integrate(&mut self, b: i32, h: F) {
+        self.0.integrate(b, h)
+    }
+    fn end_substep(&mut self, b: i32) {
+        self.0.end_substep(b)
+    }
+    fn constrain(&mut self, b: i32, last: bool) {
+        self.0.constrain(b, last)
+    }
+    fn post(&mut self, i: i32, dt: F) {
+        self.0.post(i, dt)
+    }
+}
+
+/// One sim frame as [`port_head_frame`] runs it, the world step [`PortStep`]'s. Answers how many
+/// times the port's Force body ran.
+fn port_step_frame(ee: &mut Ee, dt: F) -> u32 {
+    let call = |ee: &mut Ee, f: u32, ints: &[u64], x: F| {
+        ee.set(28, GP);
+        ee.call(f, ints, &[x.0], BUDGET);
+        ee.r(2)
+    };
+    assert_eq!(ee.u8_at(ee.u32_at(SKIP_FLAG) + 0x225) & 8, 0, "the frame is not skipped");
+    for slot in [0x7c, 0x84] {
+        for i in 0..ee.u32_at(SIM + 0x24) {
+            let e = call(ee, LIST24_GET, &[u64::from(SIM + 0x24), u64::from(i)], F::ZERO) as u32;
+            call(ee, ee.u32_at(ee.u32_at(e + 4) + slot), &[u64::from(e)], dt);
+        }
+    }
+    let world = World { iterations: ee.u32_at(WORLD) as i32, rate: F(ee.f32_at(WORLD + 4)) };
+    let at = ee.u32_at(BIKE + seed::BODY);
+    let body = seed::body(&|a| ee.u32_at(a), at);
+    let mut h = PortStep(PortHead(Hybrid { ee, body, at, integrated: 0 }), 0);
+    world.step(dt, &mut h);
+    let (body, steps) = (h.0.0.body, h.1);
+    for (a, w) in seed::body_words(&body, at) {
+        ee.set_u32(a, w);
+    }
+    call(ee, TAIL, &[u64::from(SIM)], dt);
+    let mut i = 0;
+    while i < ee.u32_at(SIM + 0x3c) {
+        let e = call(ee, LIST3C_GET, &[u64::from(SIM + 0x3c), u64::from(i)], F::ZERO) as u32;
+        if call(ee, ee.u32_at(ee.u32_at(e) + 8), &[u64::from(e)], dt) != 0 {
+            call(ee, LIST3C_REMOVE, &[u64::from(SIM + 0x3c), u64::from(i)], F::ZERO);
+        } else {
+            i += 1;
+        }
+    }
+    steps
+}
+
+/// [`replay`] with every frame [`port_step_frame`].
+fn replay_port_step(name: &str) -> Option<Vec<bool>> {
+    let mut ee = hooked(image()?);
+    let rows = rows(name)?;
+    let mut out = Vec::new();
+    for (r, row) in rows.iter().enumerate() {
+        poke(&mut ee, row, &READER);
+        assert_eq!(port_step_frame(&mut ee, F(f32::from_bits(DT))), 4, "the bike's Force body runs every substep");
+        let d = diff(&ee, row);
+        assert!(
+            d.is_empty(),
+            "{name} row {r} (vsync {}), the port's head and Force body: {} words differ\n  {}",
+            row["vsync"],
+            d.len(),
+            d.iter().take(40).cloned().collect::<Vec<_>>().join("\n  ")
+        );
+        let w = wrecked(|o| ee.u32_at(BIKE + o));
+        assert_eq!(w, row_wrecked(row), "{name} row {r}: the wreck state");
+        out.push(w);
+        poke(&mut ee, row, &SPOT);
+    }
+    Some(out)
+}
+
+/// **C15's ride, the bike's PreProcess and Force body the port's**: every row of ride-2 word for word.
+#[test]
+fn ride_replays_bit_exact_on_the_ports_force_body() {
+    let Some(w) = replay_port_step("ride-2") else { return };
+    assert_eq!(w.len(), 459);
+    assert!(w.iter().all(|w| !w), "the ride never wrecks");
+}
+
+/// **C15's flip, the bike's PreProcess and Force body the port's**: wrecked on row 125 and put back on
+/// row 193, every row word for word.
+#[test]
+fn flip_wrecks_and_is_put_back_bit_exact_on_the_ports_force_body() {
+    let Some(w) = replay_port_step("flip-1") else { return };
+    assert_eq!(w.len(), 465);
+    let changes: Vec<usize> = (1..w.len()).filter(|&r| w[r] != w[r - 1]).collect();
+    assert_eq!(changes, [125, 193], "wrecked on row 125, put back on row 193");
+}
+
+/// A stand-in for the smooth noise, both sides alike (`tests/mxvatv_step.rs`'), reaching `±1`.
+fn fake_noise(x: f32) -> f32 {
+    const WAVE: [f32; 8] = [0.0, 1.0, -1.0, 0.5, -0.25, 0.937_5, -0.812_5, 0.125];
+    WAVE[(x.to_bits() >> 3) as usize & 7]
+}
+
+/// The port's side of the oracle: the steps logged, the rider held, the noise [`fake_noise`].
+struct Logged {
+    calls: Vec<Call>,
+    rider: bike::Rider,
+}
+
+impl Moto for Logged {
+    fn call(&mut self, c: Call, _: &mut Quad, _: &mut quad::Body) {
+        self.calls.push(c);
+    }
+}
+
+impl bike::Rides for Logged {
+    fn rider(&mut self) -> &mut bike::Rider {
+        &mut self.rider
+    }
+    fn noise(&mut self, t: F) -> F {
+        F(fake_noise(t.0))
+    }
+}
+
+/// **The bike's Force body is the original's**: 12 000 bikes, each state 4's with the body's inputs
+/// drawn at random (the guards, the balance words, the rider's balance keys and state, the pitch
+/// keys, the levers and speed, the wheels' contacts, normals and steering, the body's force, moment,
+/// spin, quaternion and centre of gravity, the push), run through SLUS-21104's Force body and
+/// through [`bike::ground_step`] from the same words. Every word of the bike, its wheels and its body
+/// comes out the same, and the steps are called in the same order, on the same thing, with the same
+/// `dt`. The original's steps are hooked to log and do nothing, and its noise to [`fake_noise`]; its
+/// controllers, push and the body's local force virtual are its own.
+#[test]
+#[allow(clippy::float_arithmetic)]
+fn the_bikes_force_body_is_the_originals() {
+    let Some(mut ee) = image().map(hooked) else { return };
+    let [front, rear] = the_wheels(&ee);
+    let engine = ee.u32_at(BIKE + seed::ENGINE);
+    let log: Log = Rc::default();
+    let wheel = move |ee: &Ee| match ee.r(4) as u32 {
+        a if a == front => bike::FRONT,
+        a if a == rear => bike::REAR,
+        a => panic!("a wheel step handed {a:#x}"),
+    };
+    let on = |a0: u32, ee: &Ee, what: &str| assert_eq!(ee.r(4) as u32, a0, "{what} handed something else");
+    type Step = Box<dyn Fn(&Ee) -> Call>;
+    let steps: Vec<(u32, Step)> = vec![
+        (GRAVITY, Box::new(move |ee| (on(BIKE, ee, "the gravity"), Call::Gravity).1)),
+        (PRELOAD, Box::new(move |ee| (on(BIKE, ee, "the preload"), Call::Preload(F(ee.f(12)))).1)),
+        (BACKFLIP, Box::new(move |ee| (on(BIKE, ee, "the backflip"), Call::Backflip(F(ee.f(12)))).1)),
+        (SPIN_AIR, Box::new(move |ee| (on(BIKE, ee, "the air spin"), Call::SpinAir(F(ee.f(12)))).1)),
+        (ENGINE_UPDATE, Box::new(move |ee| (on(engine, ee, "the engine"), Call::EngineUpdate(F(ee.f(12)))).1)),
+        (AIR_DRAG, Box::new(move |ee| (on(BIKE, ee, "the air drag"), Call::AirDrag(F(ee.f(12)))).1)),
+        (AIRBORNE_CONTROL, Box::new(move |ee| (on(BIKE, ee, "the air control"), Call::AirborneControl(F(ee.f(12)))).1)),
+        (WHEEL_CLEAR, Box::new(move |ee| Call::WheelClear(wheel(ee)))),
+        (CONTACTS, Box::new(move |ee| (on(BIKE, ee, "the contacts"), Call::Contacts).1)),
+        (SUSPENSION, Box::new(move |ee| Call::Suspension(wheel(ee), F(ee.f(12))))),
+        (TIRE_FORCES, Box::new(move |ee| Call::TireForces(wheel(ee), F(ee.f(12))))),
+        (WHEEL_INTEGRATE, Box::new(move |ee| Call::WheelIntegrate(wheel(ee), F(ee.f(12))))),
+        (REV_LIMIT, Box::new(move |ee| (on(engine, ee, "the rev limiter"), Call::RevLimit).1)),
+        (PEAK_RATES, Box::new(move |ee| (on(BIKE, ee, "the peak rates"), Call::PeakRates).1)),
+    ];
+    for (at, f) in steps {
+        let l = log.clone();
+        ee.hooks.insert(at, Box::new(move |ee: &mut Ee| l.borrow_mut().push(f(ee))));
+    }
+    ee.hooks.insert(SMOOTH_NOISE, Box::new(|ee: &mut Ee| {
+        let x = ee.f(12);
+        ee.set_f(0, fake_noise(x));
+    }));
+    let regions = head_regions(&ee);
+    let state = ee.u32_at(BIKE + 0xbc4);
+    let kind = ee.u32_at(state + 0x28);
+    let image_words = snap_regions(&ee, &regions);
+    let body = ee.u32_at(BIKE + seed::BODY);
+    let mut g = Gen(0x0031_b002);
+    let mut t = BTreeMap::new();
+    for k in 0..12_000 {
+        restore_regions(&mut ee, &regions, &image_words);
+        let (b, f) = (|ee: &mut Ee, a: u32, v: bool| ee.set_u32(a, u32::from(v)), |ee: &mut Ee, a: u32, v: f32| ee.set_f32(a, v));
+        let v = |ee: &mut Ee, g: &mut Gen, a: u32, r: f32| {
+            for i in 0..3 {
+                let x = g.near(0.0, -r, r);
+                ee.set_f32(a + 4 * i, x);
+            }
+        };
+        // The guards: no state, states 3 and 4, others; the wreck reason; the balance words.
+        match g.bits() % 12 {
+            0 => ee.set_u32(BIKE + 0xbc4, 0),
+            1 => ee.set_u32(state + 0x28, 3),
+            2 => ee.set_u32(state + 0x28, 4),
+            n => ee.set_u32(state + 0x28, [kind, kind, kind, kind, 0, 1, 2, 5, 6][n as usize - 3]),
+        }
+        ee.set_u32(BIKE + 0xc80, if g.one_in(6) { g.bits() | 1 } else { 0 });
+        let bal = g.bits();
+        ee.set_u32(BIKE + 0x1524, bal);
+        ee.set_u32(BIKE + 0x152c, if g.one_in(3) { bal } else { g.bits() });
+        // The rider's balance keys and state, and the stick.
+        for (o, lo, hi) in [
+            (0x14fc, 0.0, 20.0),
+            (0x1500, 0.1, 2.0),
+            (0x1504, 2.0, 10.0),
+            (0x1508, 0.0, 5.0),
+            (0x1514, 0.0, 1.0),
+            (0x151c, 0.0, 3.0),
+            (0x1520, 0.0, 2.0),
+            (0x1398, 0.0, 5.0),
+            (0x138c, 0.0, 100.0),
+            (0x1390, 0.0, 50.0),
+            (0x1394, 0.0, 1.0),
+            (0x14f8, 0.0, 10.0),
+            (0x150c, -1.2, 1.2),
+            (0x1510, -2.0, 2.0),
+            (0x1518, 0.0, 30.0),
+            (0x12a8, -1.0, 1.0),
+        ] {
+            let x = g.near(0.0, lo, hi);
+            f(&mut ee, BIKE + o, x);
+        }
+        // The pitch keys and state, the clutch.
+        for (o, lo, hi) in [
+            (0x139c, 0.0, 3.0),
+            (0x13a0, 0.0, 200.0),
+            (0x13a4, 0.0, 50.0),
+            (0x13a8, 0.0, 0.2),
+            (0x13cc, 0.0, 3.0),
+            (0x13d0, 0.0, 200.0),
+            (0x13d4, 0.0, 5.0),
+            (0x13d8, 0.0, 20.0),
+            (0x13ac, -50.0, 50.0),
+        ] {
+            let x = g.f(lo, hi);
+            f(&mut ee, BIKE + o, x);
+        }
+        b(&mut ee, BIKE + 0x13b0, g.one_in(2));
+        f(&mut ee, BIKE + 0x12d4, if g.one_in(4) { g.f(0.0, 1.0) } else { 0.0 });
+        // The step's words: on the ground, both wheels, the levers, the signed speed, the leans.
+        b(&mut ee, BIKE + 0x324, !g.one_in(8));
+        b(&mut ee, BIKE + 0x1270, !g.one_in(4));
+        f(&mut ee, BIKE + 0x314, if g.one_in(4) { g.f(0.0, 1.0) } else { 0.0 });
+        f(&mut ee, BIKE + 0x310, if g.one_in(2) { g.f(0.0, 1.0) } else { 0.0 });
+        let speed = match g.bits() % 6 {
+            0 => *[5.0, 15.0, 7.0, -10.0].get((g.bits() % 4) as usize).unwrap(),
+            1 => g.f(-12.0, 12.0),
+            _ => g.f(-10.0, 50.0),
+        };
+        f(&mut ee, BIKE + 0xc38, speed);
+        f(&mut ee, BIKE + 0x12e8, g.f(-1.0, 1.0));
+        let fore_aft = match g.bits() % 7 {
+            5 | 6 => -1.0,
+            0 => *[0.5, -1.0, -0.1].get((g.bits() % 3) as usize).unwrap(),
+            1 => g.f(0.5, 1.0),
+            2 => g.f(-1.0, -0.1),
+            _ => g.f(-1.0, 1.0),
+        };
+        f(&mut ee, BIKE + 0x12ec, fore_aft);
+        f(&mut ee, BIKE + 0x318, if g.one_in(4) { 0.0 } else { g.f(0.0, 1.0) });
+        f(&mut ee, BIKE + 0x12cc, if g.one_in(2) { g.f(0.0, 1.0) } else { 0.0 });
+        f(&mut ee, BIKE + 0x12d0, if g.one_in(4) { g.f(0.0, 1.0) } else { 0.0 });
+        // The wheels: contact, normal, steering, the rear's pair flag as it was.
+        for w in [front, rear] {
+            b(&mut ee, w + 0xdc, g.bits() % 4 != 0);
+            let n = [g.f(-0.5, 0.5), g.f(0.5, 1.0), g.f(-0.5, 0.5)];
+            let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            for i in 0..3 {
+                f(&mut ee, w + 0x130 + 4 * i as u32, n[i] / l);
+            }
+            b(&mut ee, w + 0x2c, g.one_in(2));
+        }
+        b(&mut ee, rear + 0xb4, g.one_in(2));
+        // The body and the bike's frames.
+        v(&mut ee, &mut g, body + 0xa0, 500.0);
+        v(&mut ee, &mut g, body + 0x1b0, 500.0);
+        v(&mut ee, &mut g, body + 0x1a0, 1.0);
+        v(&mut ee, &mut g, body + 0x1d0, 5.0);
+        v(&mut ee, &mut g, BIKE + 0x360, 1.0);
+        v(&mut ee, &mut g, BIKE + 0x340, 5.0);
+        let qt = [g.f(-1.0, 1.0), g.f(-1.0, 1.0), g.f(-1.0, 1.0), g.f(-1.0, 1.0)];
+        let l = qt.iter().map(|x| x * x).sum::<f32>().sqrt();
+        for i in 0..4 {
+            f(&mut ee, body + 0x190 + 4 * i as u32, qt[i] / l);
+        }
+        // The push: its flag, gate, gain and target.
+        b(&mut ee, BIKE + 0xdd8, g.one_in(2));
+        f(&mut ee, BIKE + 0x12c4, if g.one_in(3) { 0.0 } else { g.f(0.0, 1.0) });
+        f(&mut ee, BIKE + 0x1240, g.f(0.0, 200.0));
+        f(&mut ee, BIKE + 0x123c, g.f(0.0, 30.0));
+        let dt = if g.one_in(2) { f32::from_bits(DT) / 4.0 } else { g.f(0.002, 0.02) };
+        let before = snap_regions(&ee, &regions);
+
+        let r = |a| ee.u32_at(a);
+        let p = bike::read_params(&r, BIKE);
+        let (mut q, mut qb) = (bike::read_quad(&r, BIKE), quad_body(&ee, body));
+        let rider = bike::read_rider(&r, BIKE, body);
+        let (q0, qb0) = (q, qb);
+        let mut m = Logged { calls: Vec::new(), rider };
+        bike::ground_step(&p, &mut q, &mut qb, F(dt), &mut m);
+        if !q0.active {
+            tally(&mut t, "off");
+        } else if q0.control_off {
+            tally(&mut t, "wrecked");
+        } else {
+            tally(&mut t, if q0.balancing { "balancing" } else { "riding" });
+            if q0.balancing && !q0.wheels[bike::REAR].touching {
+                tally(&mut t, "balancing, rear up");
+            }
+            if !q0.on_ground {
+                tally(&mut t, "in the air");
+            }
+            match (q0.stoppie, q.stoppie) {
+                (false, true) => tally(&mut t, "stoppie on"),
+                (true, false) => tally(&mut t, "stoppie ended"),
+                (true, true) => tally(&mut t, "stoppie held"),
+                _ => {}
+            }
+            if q.pitch_integral != q0.pitch_integral {
+                tally(&mut t, "wheelie");
+            }
+            if q0.push && q0.push_gate != F::ZERO {
+                tally(&mut t, if q0.wheels[bike::REAR].touching { "pushed" } else { "push, rear up" });
+            }
+        }
+        if q0.active {
+            tally(&mut t, if q.wheels[bike::REAR].rear_pair { "rear pair set" } else { "rear pair cleared" });
+        }
+
+        let mut want = before.clone();
+        let index = |a: u32| {
+            let mut i = 0;
+            for &(at, len) in &regions {
+                if (at..at + len).contains(&a) {
+                    return i + ((a - at) / 4) as usize;
+                }
+                i += (len / 4) as usize;
+            }
+            panic!("{a:#x} is in none of the regions")
+        };
+        let words = |q: &Quad, b: &quad::Body, r: &bike::Rider| {
+            let mut w = bike::quad_words(q, BIKE, [front, rear], ee.u32_at(BIKE + seed::RECORD));
+            w.extend(quad_body_words(b, body));
+            w.extend(bike::rider_words(r, BIKE, body));
+            w
+        };
+        for ((a, w), (_, w0)) in words(&q, &qb, &m.rider).into_iter().zip(words(&q0, &qb0, &rider)) {
+            if w != w0 {
+                want[index(a)] = w;
+            }
+        }
+
+        log.borrow_mut().clear();
+        ee.set(28, GP);
+        ee.call(GROUND_STEP, &[u64::from(BIKE)], &[dt], 1_000_000);
+        let got = snap_regions(&ee, &regions);
+        if let Some(i) = (0..got.len()).find(|&i| got[i] != want[i]) {
+            let (mut at, mut base) = (i as u32 * 4, 0);
+            for &(b, len) in &regions {
+                if at < len {
+                    base = b;
+                    break;
+                }
+                at -= len;
+            }
+            panic!(
+                "bike {k}: {:#x}+{at:#x} is {:#010x} ({}) in the original and {:#010x} ({}) in the port (was {:#010x})\n{q0:#?}\n{rider:#?}",
+                base,
+                got[i],
+                f32::from_bits(got[i]),
+                want[i],
+                f32::from_bits(want[i]),
+                before[i],
+            );
+        }
+        assert_eq!(*log.borrow(), m.calls, "bike {k}: the steps\n{q0:#?}");
+        ee.set_u32(BIKE + 0xbc4, state);
+        ee.set_u32(state + 0x28, kind);
+    }
+    for want in [
+        "off",
+        "wrecked",
+        "riding",
+        "balancing",
+        "balancing, rear up",
+        "in the air",
+        "stoppie on",
+        "stoppie ended",
+        "stoppie held",
+        "wheelie",
+        "pushed",
+        "push, rear up",
+        "rear pair set",
+        "rear pair cleared",
+    ] {
+        let n = t.get(want).copied().unwrap_or(0);
+        assert!(n >= 30, "only {n} bike(s) went down {want:?}: {t:?}");
+    }
+}
