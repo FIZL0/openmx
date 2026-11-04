@@ -439,20 +439,6 @@ fn frame_point(m: &[Vf; 4], p: Vf) -> Vf {
     p.merge(Dest::XYZ, Vf::madd(acc, m[2], p.bc(Field::Z)))
 }
 
-/// `vmini` / `vmax` (`want_max`) lane by lane, `-0` below `+0`. The ps2-oracle's VU compares the bit
-/// patterns in sign-magnitude order, while `ps2_float`'s `Vf::mini`/`max` hand back the first operand
-/// on a ±0 tie. A box corner at `-0` against the `+0` of `vf0` shows the difference (MD75c3).
-fn pick(a: Vf, b: Vf, want_max: bool) -> Vf {
-    let key = |x: f32| {
-        let i = x.to_bits() as i32;
-        i ^ (i >> 31 & 0x7fff_ffff)
-    };
-    Vf(core::array::from_fn(|i| {
-        let (x, y) = (vu::operand(a.0[i].to_bits()), vu::operand(b.0[i].to_bits()));
-        if (key(x) > key(y)) == want_max { x } else { y }
-    }))
-}
-
 /// A world point brought into a node's frame (MD75c3, the inverse of [`frame_point`]): the position
 /// row taken off (`xyz`), then each lane the row's dot with it, over the 3×3 transposed (`vmulax`,
 /// `vmadday`, `vmaddz`); the `w` the point's.
@@ -663,7 +649,7 @@ impl Scene {
                 let (hx, hy, hz) = (rel[0].mul(e.bc(Field::X)).abs(), rel[1].mul(e.bc(Field::Y)).abs(), rel[2].mul(e.bc(Field::Z)).abs());
                 let e = Vf::madd(hy.add(hx), hz, Vf::splat(1.0));
                 let (l, h) = (rel[0].merge(Dest::XYZ, c.sub(e)), rel[1].merge(Dest::XYZ, c.add(e)));
-                (lo, hi) = if had { (pick(l, lo, false), pick(h, hi, true)) } else { (l, h) };
+                (lo, hi) = if had { (l.mini(lo), h.max(hi)) } else { (l, h) };
                 had = true;
             }
             let half_of = |v: Vf, keep: Vf| keep.merge(Dest::XYZ, v.mul(Vf::splat(0.5)));

@@ -1166,15 +1166,23 @@ impl Vu0 {
 
 /// `vmax` on one lane: a compare and a select — no rounding, no flags, and the operands are read the
 /// way a VU reads them ([`operand`]), so an `Inf` pattern compares as `±max` and a denormal as zero.
+/// The compare is of the bit patterns in sign-magnitude order (PCSX2's `fp_max`), so `-0` sorts below
+/// `+0`: `vmax(-0, +0)` is `+0` and `vmini` of them `-0`, whichever way round they come (MD94).
 pub fn max(a: f32, b: f32) -> f32 {
     let (a, b) = (vu(a), vu(b));
-    if a >= b { a } else { b }
+    if order(a) >= order(b) { a } else { b }
 }
 
 /// `vmini` on one lane.
 pub fn mini(a: f32, b: f32) -> f32 {
     let (a, b) = (vu(a), vu(b));
-    if a <= b { a } else { b }
+    if order(a) <= order(b) { a } else { b }
+}
+
+/// A float's bits as a sign-magnitude integer: the floats' own order, with `-0` one below `+0`.
+fn order(x: f32) -> i32 {
+    let i = x.to_bits() as i32;
+    i ^ (i >> 31 & 0x7fff_ffff)
 }
 
 /// `vabs` on one lane: the sign bit cleared, nothing else touched.

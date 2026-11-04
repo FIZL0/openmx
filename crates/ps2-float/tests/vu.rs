@@ -251,8 +251,14 @@ fn min_and_max_select_without_rounding_or_flags() {
     // the operands are read the way a VU reads any operand
     assert_eq!(vu::max(f32::from_bits(0x7f80_0000), 1.0), vu::MAX, "an Inf pattern is just a big number");
     assert_eq!(vu::mini(f32::from_bits(0x0040_0000), 1.0), 0.0, "a denormal is zero");
-    // a tie between the two zeros: the reference emulator compares as floats and keeps the first
-    assert_eq!(vu::max(-0.0, 0.0).to_bits(), 0x8000_0000);
+    // the two zeros: the reference emulator (PCSX2's `fp_max`/`fp_min`) compares the bit patterns in
+    // sign-magnitude order, so `-0` is below `+0` whichever way round they come (MD94)
+    assert_eq!(vu::max(-0.0, 0.0).to_bits(), 0);
+    assert_eq!(vu::max(0.0, -0.0).to_bits(), 0);
+    assert_eq!(vu::mini(0.0, -0.0).to_bits(), 0x8000_0000);
+    assert_eq!(vu::mini(-0.0, 0.0).to_bits(), 0x8000_0000);
+    assert_eq!(Vf::splat(-0.0).max(Vf::ZERO).0.map(f32::to_bits), [0; 4]);
+    assert_eq!(Vf::ZERO.mini(Vf::splat(-0.0)).0.map(f32::to_bits), [0x8000_0000; 4]);
 
     // The game materialises 1.0 in all four lanes with `vmaxw.xyzw fd, vf0, vf0w`, because vf0 is
     // (0, 0, 0, 1) — and it does so in the middle of a flag-sensitive sequence, which is safe because
