@@ -1,15 +1,1 @@
 <!-- What's new since the last release, for players, in plain English: one "- " line per change. tools/release.sh puts this in the release and empties it. -->
-- **Big worlds load far faster and use less memory.** "Every game: one world" starts riding in about 4 seconds instead of 30, and needs about 1.9 GB instead of 2.7 GB; the other combined worlds load about four times faster. Far-off ground is drawn at lower detail and streams in as you ride, so a Steam Deck no longer runs out of memory on them
-- Track and world pictures in the track pick are made once and kept, instead of being re-shot in the background (which could take a big world's worth of memory)
-- **Fog is now one slider**, from the original's distance out to the whole map, showing how far you can see
-- Settings with three or more choices open a dropdown list
-- A **Button Icons** setting (Auto by default) picks which controller's button pictures the game shows
-- The track pick has a **Favourites** filter in place of Wrecks, and the Worlds filter now lists MX Unleashed's own disc worlds
-- **Game Modifiers by machine:** pick Bike, Biplane, Kiowa, Cars or World and see only that machine's settings; online, the cars' modifiers reach every player's cars
-- A new **Untamed handling** choice rides the bike with MX vs. ATV Untamed's tuning, backflip and 360s
-- Holding R1 with Cross or Square now does the plain trick when there's no R1 version of it, instead of nothing
-- Driven cars bump into the riders' bikes in split screen and online, and a crashed rider's bike gets hit by planes flown into it
-- Knocking props about makes their collision sounds, as in the original
-- A reset (L1+R1 or a wreck's put-back) shows the rider at the new spot at once, camera and all
-- The biplane camera keeps the plane in view through a climb or a loop
-- The splash screen's button hint no longer floats above the bottom of the screen
