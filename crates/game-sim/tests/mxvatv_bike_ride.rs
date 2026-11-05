@@ -6561,3 +6561,623 @@ fn flip_replays_bit_exact_on_quad_steps() {
     let handed: Vec<(&str, u32)> = all.iter().filter(|(k, _)| k.starts_with("> ")).map(|(k, &n)| (&k[2..], n)).collect();
     assert_eq!(handed, [("GravityRecord", 1860), ("PreloadCue", 1), ("StartStunt", 1)]);
 }
+
+// ---------------------------------------------------------------------------------------------
+// F31b5b: the PostProcess's and the collision record's callees Rust's, on the bike read by
+// handling::steps.
+// ---------------------------------------------------------------------------------------------
+
+/// The bike's collidables' classes: a ray probe's vtable and a mesh's.
+const RAYS_VTABLE: u32 = 0x003b_6c20;
+const MESH_VTABLE: u32 = 0x003b_6d00;
+const KINDS: steps::Kinds = steps::Kinds { rays: RAYS_VTABLE, mesh: MESH_VTABLE };
+/// What the collision sync hands on: a collidable's box into the spatial database (its entry
+/// `+0x18`, the centre and half extent, the reach in `f12`), and the gather of the nearby list
+/// (`+0xc4`) round the active probe (kind 3).
+const SPATIAL_MOVE: u32 = 0x0018_d690;
+const GATHER: u32 = 0x001d_6a60;
+
+/// The words `now` names that differ from `last` into RAM, each word as the last of its writes has
+/// it (`now` may name words `last` does not: the node's children, marked).
+fn set_changed(ee: &mut Ee, now: &[(u32, u32)], last: &[(u32, u32)]) {
+    let last: HashMap<u32, u32> = last.iter().copied().collect();
+    let now: BTreeMap<u32, u32> = now.iter().copied().collect();
+    for (a, w) in now {
+        if last.get(&a) != Some(&w) {
+            ee.set_u32(a, w);
+        }
+    }
+}
+
+/// The node's right and up rows' heights, which the bike keeps as the backflip's where the node
+/// keeps them, off its world frame (as [`quad::Steps`] keeps them).
+fn rows_heights(k: &mut quad::Bike) {
+    let w = k.parts.scene.nodes[0].world;
+    (k.right_y, k.up_y) = (F(w[1].y()), F(w[2].y()));
+}
+
+/// `f` on the bike's scene as [`steps::read`] reads it out of RAM, the scene's words put back where
+/// they changed.
+fn on_scene<R>(ee: &mut Ee, f: impl FnOnce(&mut game_sim::atv_moto::Scene) -> R) -> R {
+    let m = |a| ee.u32_at(a);
+    let (mut k, at) = steps::read(&m, BIKE).unwrap_or_else(|e| panic!("the bike's words: {e}"));
+    let last = steps::words(&k, &at, &m);
+    let r = f(&mut k.parts.scene);
+    rows_heights(&mut k);
+    let now = steps::words(&k, &at, &|a| ee.u32_at(a));
+    set_changed(ee, &now, &last);
+    r
+}
+
+/// The bike in RAM as [`PostInRam`] keeps it, the PostProcess's callees Rust's: the spatial update,
+/// the node's bounds, the collision sync and the node's position [`quad::Steps`]' on the bike
+/// [`steps::read_post`] reads, the node's placement [`game_sim::atv_moto::Scene::place`]. What the
+/// sync hands on (a collidable's database move, the gather) is the original's, and so are the body
+/// reset, the respawn, the out-of-world message and the put-back.
+struct PostsInRam<'a, 'm> {
+    inner: PostInRam<'a>,
+    answered: &'m mut BTreeMap<String, u32>,
+}
+
+impl PostsInRam<'_, '_> {
+    fn count(&mut self, what: String) {
+        *self.answered.entry(what).or_default() += 1;
+    }
+
+    /// `c` the steps', on the bike read out of RAM and its words put back where they changed; what
+    /// they hand on the original's.
+    fn steps(&mut self, c: Call, q: &mut Quad, body: &mut quad::Body) {
+        self.count(call_name(&c));
+        self.inner.write(q, body);
+        let ee = &*self.inner.step.ram.ee;
+        let m = |a| ee.u32_at(a);
+        let (k, at, parts) = steps::read_post(&m, BIKE, KINDS).unwrap_or_else(|e| panic!("{c:?}: the bike's words: {e}"));
+        let last = steps::post_words(&k, &at, &parts, &m);
+        let mut s = quad::Steps {
+            bike: k,
+            rest: Vec::<Call>::new(),
+            ground: |_: Vf, _: &mut u8| -> (Vf, Vf) { panic!("the bike's PostProcess asks for no ground") },
+            sweep: (),
+        };
+        s.call(c, q, body);
+        let quad::Steps { bike: k, rest, .. } = s;
+        let ee = &mut *self.inner.step.ram.ee;
+        let now = steps::post_words(&k, &at, &parts, &|a| ee.u32_at(a));
+        set_changed(ee, &now, &last);
+        self.inner.write(q, body);
+        let dt = self.inner.step.dt;
+        for r in rest {
+            self.count(format!("> {}", call_name(&r)));
+            let ee = &mut *self.inner.step.ram.ee;
+            ee.set(28, GP);
+            match r {
+                Call::PartMove { part, centre, half, reach } => {
+                    let (c, h) = (ee.scratch(0), ee.scratch(1));
+                    set_vf(ee, c, centre);
+                    set_vf(ee, h, half);
+                    let entry = parts[game_sim::atv_sync::slot(part)] + 0x18;
+                    ee.call(SPATIAL_MOVE, &[u64::from(entry), u64::from(c), u64::from(h)], &[reach.0], BUDGET);
+                }
+                Call::Gather(p) => {
+                    let ints = [ee.u32_at(BIKE + 0xc4), parts[game_sim::atv_sync::slot(p)], 3].map(u64::from);
+                    ee.call(GATHER, &ints, &[dt.0], BUDGET);
+                }
+                r => panic!("the PostProcess's steps hand on no {r:?}"),
+            }
+        }
+        (*q, *body) = self.inner.read();
+    }
+}
+
+impl Moto for PostsInRam<'_, '_> {
+    fn call(&mut self, c: Call, q: &mut Quad, body: &mut quad::Body) {
+        match c {
+            Call::SpatialUpdate | Call::NodeBounds | Call::CollisionSync | Call::NodePosition => self.steps(c, q, body),
+            c => {
+                self.count(format!("> {}", call_name(&c)));
+                self.inner.call(c, q, body)
+            }
+        }
+    }
+}
+
+impl bike::Rides for PostsInRam<'_, '_> {
+    fn rider(&mut self) -> &mut bike::Rider {
+        self.inner.rider()
+    }
+    fn noise(&mut self, t: F) -> F {
+        self.inner.noise(t)
+    }
+}
+
+impl bike::Posts for PostsInRam<'_, '_> {
+    fn post(&mut self) -> &mut bike::Post {
+        self.inner.post()
+    }
+    fn out(&mut self, c: bike::Out, q: &mut Quad, body: &mut quad::Body) {
+        match c {
+            bike::Out::Place { orientation, at } => {
+                self.count("Place".into());
+                assert_eq!(orientation.to_bits(), body.orientation.to_bits(), "the node is placed with the body's quaternion");
+                self.inner.write(q, body);
+                on_scene(self.inner.step.ram.ee, |s| s.place(0, orientation, at));
+                (*q, *body) = self.inner.read();
+            }
+            c => {
+                let s = format!("{c:?}");
+                self.count(format!("> {}", s.split(['(', ' ']).next().unwrap()));
+                self.inner.out(c, q, body)
+            }
+        }
+    }
+}
+
+/// [`port_post`] with its callees [`PostsInRam`]'s.
+fn posts_post(ee: &mut Ee, dt: F, answered: &mut BTreeMap<String, u32>) {
+    let body = ee.u32_at(BIKE + seed::BODY);
+    let (wheels, record) = (the_wheels(ee), ee.u32_at(BIKE + seed::RECORD));
+    let ram = InRam { ee, wheels, record, body, last: Vec::new() };
+    let step = StepInRam { ram, rider: bike::Rider::default(), rider_last: Vec::new(), dt };
+    let inner = PostInRam { step, post: bike::Post::default(), post_last: Vec::new() };
+    let mut m = PostsInRam { inner, answered };
+    let (mut q, mut b) = m.inner.read();
+    bike::air_state(&mut q, &mut b, dt, &mut m);
+    m.inner.write(&q, &b);
+}
+
+/// The bike's collision record as [`RecordInRam`] sees its outside, the bike's scene node's
+/// transforms Rust's (on the scene [`steps::read`] reads) and the body's damping too; the probes'
+/// searches and the terrain query as [`RecordInRam`]'s.
+struct RecordsInRam<'a, 't, 'm> {
+    inner: RecordInRam<'a, 't>,
+    answered: &'m mut BTreeMap<String, u32>,
+}
+
+impl RecordsInRam<'_, '_, '_> {
+    fn scene<R>(&mut self, what: &str, f: impl FnOnce(&mut game_sim::atv_moto::Scene) -> R) -> R {
+        *self.answered.entry(format!("record {what}")).or_default() += 1;
+        let node = self.inner.word(0xe8);
+        assert_eq!(node, self.inner.ee.u32_at(BIKE + 0xe4), "the record's node is the bike's");
+        on_scene(self.inner.ee, f)
+    }
+}
+
+impl Collides for RecordsInRam<'_, '_, '_> {
+    fn damp(&mut self, linear: Vf, angular: Vf) {
+        *self.answered.entry("record damp".into()).or_default() += 1;
+        let at = self.inner.word(0xe4);
+        let ee = &mut *self.inner.ee;
+        let mut b = seed::body(&|a| ee.u32_at(a), at);
+        (b.damping, b.ang_damping) = (linear, angular);
+        for (a, w) in seed::body_words(&b, at) {
+            ee.set_u32(a, w);
+        }
+    }
+    fn node_rotate(&mut self, v: Vf) -> Vf {
+        self.scene("node_rotate", |s| s.turn(0, v))
+    }
+    fn node_position(&mut self) -> Vf {
+        let p = self.scene("node_position", |s| s.position(0));
+        set_vf(self.inner.ee, self.inner.at + 0xd0, p);
+        p
+    }
+    fn node_place(&mut self, v: Vf) -> Vf {
+        self.scene("node_place", |s| s.tip(0, v))
+    }
+    fn node_move(&mut self, at: Vf) {
+        self.scene("node_move", |s| s.set_position(0, at)).expect("the bike's node has no parent");
+    }
+    fn node_up(&self) -> [F; 3] {
+        self.inner.node_up()
+    }
+    fn chassis_velocity(&self) -> Vf {
+        self.inner.chassis_velocity()
+    }
+    fn sweep(&mut self, from: Vf, to: Vf, nearby: bool) -> Option<Swept> {
+        *self.answered.entry("> record sweep".into()).or_default() += 1;
+        self.inner.sweep(from, to, nearby)
+    }
+    fn place_part(&mut self) {
+        *self.answered.entry("> record place_part".into()).or_default() += 1;
+        self.inner.place_part()
+    }
+    fn part_rays(&self) -> Vec<[Vf; 2]> {
+        self.inner.part_rays()
+    }
+    fn search(&mut self, nearby: bool) -> Vec<Hit> {
+        *self.answered.entry("> record search".into()).or_default() += 1;
+        self.inner.search(nearby)
+    }
+    fn terrain_box(&self) -> [Vf; 2] {
+        self.inner.terrain_box()
+    }
+    fn under(&mut self, g: &mut Ground) {
+        self.inner.under(g)
+    }
+    fn velocity(&mut self, s: &Struck) -> Vf {
+        *self.answered.entry("> record velocity".into()).or_default() += 1;
+        self.inner.velocity(s)
+    }
+    fn other(&mut self, id: u32) -> &mut Record {
+        self.inner.other(id)
+    }
+}
+
+/// [`port_record`] with its outside [`RecordsInRam`]'s.
+fn posts_record(ee: &mut Ee, at: u32, slot: u32, dt: F, terrain: Option<&game_sim::atv_ground::Terrain<'_>>, answered: &mut BTreeMap<String, u32>) {
+    let mut rec = record::read(&|a| ee.u32_at(a), at);
+    let read = rec.clone();
+    let body_at = ee.u32_at(at + 0xe4);
+    let mut body = (body_at != 0).then(|| quad_body(ee, body_at));
+    let inner = RecordInRam { ee, at, terrain, others: BTreeMap::new(), queries: 0 };
+    let mut w = RecordsInRam { inner, answered };
+    if slot == 0x7c {
+        record::clear(&mut rec, &mut w);
+    } else {
+        record::pass(&mut rec, at, body.as_mut(), dt, &mut w);
+    }
+    w.inner.finish(&read, &rec, body.as_ref().map(|b| (b, body_at)));
+}
+
+/// A frame as [`PortSteps`]', the bike's PostProcess [`posts_post`]'s.
+struct PortPosts<'a, 'm>(PortSteps<'a, 'm>);
+
+impl Dynamics for PortPosts<'_, '_> {
+    fn count(&self, l: List) -> i32 {
+        self.0.count(l)
+    }
+    fn preforce(&mut self, i: i32, dt: F) {
+        self.0.preforce(i, dt)
+    }
+    fn force(&mut self, i: i32, h: F) {
+        self.0.force(i, h)
+    }
+    fn enabled(&self, b: i32) -> bool {
+        self.0.enabled(b)
+    }
+    fn integrate(&mut self, b: i32, h: F) {
+        self.0.integrate(b, h)
+    }
+    fn end_substep(&mut self, b: i32) {
+        self.0.end_substep(b)
+    }
+    fn constrain(&mut self, b: i32, last: bool) {
+        self.0.constrain(b, last)
+    }
+    fn post(&mut self, i: i32, dt: F) {
+        let s = &mut self.0;
+        if s.post.0.0.0.elt(List::Post, i) != BIKE_POST {
+            return s.post(i, dt);
+        }
+        let x = &mut s.post.0.0.0;
+        for (a, w) in seed::body_words(&x.body, x.at) {
+            x.ee.set_u32(a, w);
+        }
+        posts_post(x.ee, dt, &mut s.answered);
+        x.body = seed::body(&|a| x.ee.u32_at(a), x.at);
+        s.post.1 += 1;
+    }
+}
+
+/// [`steps_frame`] with the bike's record's outside [`RecordsInRam`]'s and its PostProcess's
+/// callees [`PostsInRam`]'s. Answers as [`steps_frame`] does, the record's and the PostProcess's
+/// calls counted in with the steps'.
+fn posts_frame(ee: &mut Ee, dt: F, map: &track::Terrain<'_>, noise: &mut Option<SmoothNoise>) -> (u32, u32, u32, BTreeMap<String, u32>) {
+    let call = |ee: &mut Ee, f: u32, ints: &[u64], x: F| {
+        ee.set(28, GP);
+        ee.call(f, ints, &[x.0], BUDGET);
+        ee.r(2)
+    };
+    assert_eq!(ee.u8_at(ee.u32_at(SKIP_FLAG) + 0x225) & 8, 0, "the frame is not skipped");
+    let mine = ee.u32_at(BIKE + seed::RECORD);
+    let mut answered = BTreeMap::new();
+    for (slot, original) in [(0x7c, RECORD_CLEAR), (0x84, RECORD_PASS)] {
+        for i in 0..ee.u32_at(SIM + 0x24) {
+            let e = call(ee, LIST24_GET, &[u64::from(SIM + 0x24), u64::from(i)], F::ZERO) as u32;
+            let f = ee.u32_at(ee.u32_at(e + 4) + slot);
+            if e == mine {
+                assert_eq!(f, original, "the bike's record's vt +{slot:#x}");
+                let t = ee.u32_at(e + 0xec);
+                let terrain = (t != 0).then(|| ground::read_terrain(&|a| ee.u32_at(a), t, Some(map)));
+                posts_record(ee, e, slot, dt, terrain.as_ref(), &mut answered);
+            } else {
+                call(ee, f, &[u64::from(e)], dt);
+            }
+        }
+    }
+    let world = World { iterations: ee.u32_at(WORLD) as i32, rate: F(ee.f32_at(WORLD + 4)) };
+    let at = ee.u32_at(BIKE + seed::BODY);
+    let body = seed::body(&|a| ee.u32_at(a), at);
+    let post = PortPost(PortStep(PortHead(Hybrid { ee, body, at, integrated: 0 }), 0), 0);
+    let mut h = PortPosts(PortSteps { post, map, noise, answered, heads: 0, steps: 0 });
+    world.step(dt, &mut h);
+    let PortPosts(h) = h;
+    let (body, heads, steps, posts, answered) = (h.post.0.0.0.body, h.heads, h.steps, h.post.1, h.answered);
+    for (a, w) in seed::body_words(&body, at) {
+        ee.set_u32(a, w);
+    }
+    let (bikes, others) = port_tail(ee, dt);
+    assert_eq!((bikes, others.len()), (1, 3), "the tail steps the bike once, its two other leaves and the second's rider: {others:#x?}");
+    let mut i = 0;
+    while i < ee.u32_at(SIM + 0x3c) {
+        let e = call(ee, LIST3C_GET, &[u64::from(SIM + 0x3c), u64::from(i)], F::ZERO) as u32;
+        if call(ee, ee.u32_at(ee.u32_at(e) + 8), &[u64::from(e)], dt) != 0 {
+            call(ee, LIST3C_REMOVE, &[u64::from(SIM + 0x3c), u64::from(i)], F::ZERO);
+        } else {
+            i += 1;
+        }
+    }
+    (heads, steps, posts, answered)
+}
+
+/// Where two RAMs differ outside the interpreter's stack and scratch (the 256 KiB under `stack`
+/// and the 1 KiB over it), as `start..end` ranges.
+fn bytes_differ(a: &[u8], b: &[u8], stack: u32) -> Vec<String> {
+    let stack = (stack.saturating_sub(0x4_0000) as usize)..(stack as usize + 0x400);
+    let mut out = Vec::new();
+    let mut run: Option<(usize, usize)> = None;
+    for i in (0..a.len()).step_by(4) {
+        let off = !stack.contains(&i) && a[i..i + 4] != b[i..i + 4];
+        match (&mut run, off) {
+            (Some((_, e)), true) if *e == i => *e = i + 4,
+            (_, true) => {
+                out.extend(run.take().map(|(s, e)| format!("{s:#x}..{e:#x}")));
+                run = Some((i, i + 4));
+            }
+            _ => {}
+        }
+    }
+    out.extend(run.map(|(s, e)| format!("{s:#x}..{e:#x}")));
+    out
+}
+
+/// [`bytes_differ`] on two interpreters' RAMs, and their scratchpads.
+fn ram_differs(a: &Ee, b: &Ee) -> Vec<String> {
+    let mut out = bytes_differ(&a.ram, &b.ram, a.stack);
+    if a.spr != b.spr {
+        out.push("the scratchpad".into());
+    }
+    out
+}
+
+/// **F31b5b — the callees Rust's, in lockstep with F31b5a's**: C15's `name` replayed twice, once by
+/// [`steps_frame`] (its record's outside and its PostProcess's callees the original's) and once by
+/// [`posts_frame`]; every row word for word against C15, and the two RAMs alike after every frame
+/// outside the stack. Answers the wreck state per row and what the second run's callees answered.
+fn replay_posts(name: &str) -> Option<(Vec<bool>, BTreeMap<String, u32>)> {
+    let words = mass_words(&race250p()?)?;
+    let trn = nat05_trn()?;
+    let map = track::Terrain::parse(&trn).unwrap();
+    let mut a = hooked(image()?);
+    for (at, mask, v) in words {
+        a.set_u32(at, a.u32_at(at) & !mask | v & mask);
+    }
+    let mut b = hooked(image()?);
+    b.ram.clone_from(&a.ram);
+    let (mut noise_a, mut noise_b) = (None, None);
+    let rows = rows(name)?;
+    let dt = F(f32::from_bits(DT));
+    let (mut out, mut all) = (Vec::new(), BTreeMap::<String, u32>::new());
+    for (r, row) in rows.iter().enumerate() {
+        poke(&mut a, row, &READER);
+        poke(&mut b, row, &READER);
+        steps_frame(&mut a, dt, &map, &mut noise_a);
+        let (heads, steps, posts, answered) = posts_frame(&mut b, dt, &map, &mut noise_b);
+        assert_eq!((heads, steps, posts), (1, 4, 1), "the head once, the Force body every substep, the PostProcess once");
+        for (k, n) in answered {
+            *all.entry(k).or_default() += n;
+        }
+        let d = diff(&b, row);
+        assert!(
+            d.is_empty(),
+            "{name} row {r} (vsync {}), the callees Rust's: {} words differ\n  {}",
+            row["vsync"],
+            d.len(),
+            d.iter().take(40).cloned().collect::<Vec<_>>().join("\n  ")
+        );
+        let off = ram_differs(&a, &b);
+        assert!(off.is_empty(), "{name} row {r}: RAM differs from F31b5a's run at {} ranges\n  {}", off.len(), off.iter().take(40).cloned().collect::<Vec<_>>().join("\n  "));
+        let w = wrecked(|o| b.u32_at(BIKE + o));
+        assert_eq!(w, row_wrecked(row), "{name} row {r}: the wreck state");
+        out.push(w);
+        poke(&mut a, row, &SPOT);
+        poke(&mut b, row, &SPOT);
+    }
+    eprintln!("{name}: the callees answered {all:?}");
+    Some((out, all))
+}
+
+/// **F31b5b — state 4's bike for its PostProcess, read and written back**: [`steps::read_post`]'s
+/// bike, put back by [`steps::post_words`], is state 4's at every word it names; the riding probe is
+/// the active one, both a ray probe, the frame a mesh; neither the bike nor its node is in the
+/// database.
+#[test]
+fn state4s_bike_reads_back_for_its_postprocess() {
+    let Some(ee) = image() else { return };
+    let m = |a| ee.u32_at(a);
+    let (k, at, parts) = steps::read_post(&m, BIKE, KINDS).unwrap();
+    let w = steps::post_words(&k, &at, &parts, &m);
+    let off: Vec<String> =
+        w.iter().filter(|&&(a, v)| ee.u32_at(a) != v).map(|&(a, v)| format!("{a:#x}: state 4 {:#010x}, words {v:#010x}", ee.u32_at(a))).collect();
+    assert!(off.is_empty(), "{} of {} words differ:\n  {}", off.len(), w.len(), off.join("\n  "));
+    let c = &k.parts.collidables;
+    assert!(c.sync, "the collision sync is on");
+    assert_eq!((c.riding, c.frame, c.active), (Some(quad::Part::Riding), Some(quad::Part::Frame), Some(quad::Part::Riding)));
+    use game_sim::atv_sync::{Kind, slot};
+    assert!(matches!(c.states[slot(quad::Part::Riding)].kind, Kind::Rays { .. }));
+    assert!(matches!(c.states[slot(quad::Part::Frame)].kind, Kind::Mesh { .. }));
+    assert!(!k.parts.spatial && !k.parts.scene.nodes[0].spatial, "neither the bike nor its node is in the database");
+    assert_ne!(ee.u32_at(at.node + 0xf4), 0, "the bike's node has children (the rider's)");
+}
+
+/// A node with no parent and no children, its frame and flags off `pick`, for the transforms'
+/// oracle tests: written into RAM at `node` and read back as the scene's node 0.
+fn random_node(ee: &mut Ee, node: u32, pick: &mut impl FnMut() -> u32) -> game_sim::atv_moto::Scene {
+    let mut f = || F(((pick() % 4001) as f32 - 2000.0) / 1000.0);
+    for o in (0x30..0xb0).step_by(4) {
+        let v = f();
+        ee.set_u32(node + o, v.0.to_bits());
+    }
+    // Clean or not, its bounds stale or not.
+    let flags = ee.u32_at(node + 0x100) & !0x81 | [0x00, 0x01, 0x80, 0x81][(pick() % 4) as usize];
+    ee.set_u32(node + 0x100, flags);
+    let m = |a| ee.u32_at(a);
+    steps::read(&m, BIKE).unwrap().0.parts.scene
+}
+
+/// A run of numbers off a seed, for the oracle tests.
+fn picker(mut s: u32) -> impl FnMut() -> u32 {
+    move || {
+        s = s.wrapping_mul(1_103_515_245).wrapping_add(12345);
+        s >> 8
+    }
+}
+
+/// **F31b5b — the node's transforms are the original's**: on state 4's bike's node, its frame and
+/// flags drawn at random 10,000 times, [`game_sim::atv_moto::Scene::turn`], `tip`, `position` and
+/// `set_position` answer the original's rotate, point, position and set (no parent), bit for bit,
+/// and leave the node's words as the original leaves them.
+#[test]
+fn the_node_transforms_are_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let node = ee.u32_at(BIKE + 0xe4);
+    let mut pick = picker(0x5eed);
+    let (mut off, mut marked) = (Vec::new(), 0);
+    let base = ee.ram.clone();
+    for k in 0..10_000 {
+        let mut scene = random_node(&mut ee, node, &mut pick);
+        let mut f = || f32::from_bits(((pick() % 4001) as f32 / 100.0 - 20.0).to_bits());
+        let v = Vf::new(f(), f(), f(), f());
+        let (out, p) = (ee.scratch(1), ee.scratch(0));
+        set_vf(&mut ee, p, v);
+        let snapshot = ee.ram.clone();
+        let (want, got, name) = match k % 4 {
+            0 => {
+                ee.set(28, GP);
+                ee.call(NODE_ROTATE, &[u64::from(out), u64::from(node), u64::from(p)], &[], BUDGET);
+                (vf_at(&ee, out), scene.turn(0, v), "rotate")
+            }
+            1 => {
+                ee.set(28, GP);
+                ee.call(NODE_TIP, &[u64::from(out), u64::from(node), u64::from(p)], &[], BUDGET);
+                (vf_at(&ee, out), scene.tip(0, v), "point")
+            }
+            2 => {
+                ee.set(28, GP);
+                ee.call(NODE_POSITION, &[u64::from(node), 0, u64::from(out)], &[], BUDGET);
+                (vf_at(&ee, out), scene.position(0), "position")
+            }
+            _ => {
+                ee.set(28, GP);
+                ee.call(NODE_SET, &[u64::from(node), 0, u64::from(p)], &[], BUDGET);
+                scene.set_position(0, v).unwrap();
+                (Vf::ZERO, Vf::ZERO, "set")
+            }
+        };
+        if want.to_bits() != got.to_bits() {
+            off.push(format!("{k} {name}: original {:x?}, port {:x?}", want.to_bits(), got.to_bits()));
+        }
+        // RAM: the original's after its call, the port's the scene's words put back.
+        let after = std::mem::replace(&mut ee.ram, snapshot);
+        let m = |a| ee.u32_at(a);
+        let (mut b, at) = steps::read(&m, BIKE).unwrap();
+        let last = steps::words(&b, &at, &m);
+        b.parts.scene = scene;
+        rows_heights(&mut b);
+        let now = steps::words(&b, &at, &m);
+        set_changed(&mut ee, &now, &last);
+        if name == "set" {
+            marked += usize::from(ee.u8_at(ee.u32_at(node + 0xf4) + 0x100) & 1 == 0);
+        }
+        off.extend(bytes_differ(&after, &ee.ram, ee.stack).into_iter().map(|r| format!("{k} {name}: RAM differs at {r}")));
+        ee.ram.clone_from(&base);
+    }
+    assert!(marked > 500, "the set marked the node's children out of date {marked} times");
+    assert!(off.is_empty(), "{} differ:\n  {}", off.len(), off.iter().take(30).cloned().collect::<Vec<_>>().join("\n  "));
+}
+
+/// **F31b5b — the record's damping setters are its port's**: the body's virtuals `+0x20` and `+0x68`
+/// on random `(d, d, d, 1)` write the body's damping and its angular damping, and nothing else.
+#[test]
+fn the_damping_setters_are_the_ports() {
+    let Some(mut ee) = image() else { return };
+    let body = ee.u32_at(ee.u32_at(BIKE + seed::RECORD) + 0xe4);
+    assert_eq!(body, ee.u32_at(BIKE + seed::BODY), "the record's body is the bike's");
+    let mut pick = picker(0xda4f);
+    let mut off = Vec::new();
+    for k in 0..2000 {
+        let d = ((pick() % 20001) as f32 - 10000.0) / 997.0;
+        let (lin, ang) = (Vf::new(d, d, d, 1.0), Vf::new(d * 0.5, d * 0.5, d * 0.5, 1.0));
+        let before = ee.ram.clone();
+        for (slot, v) in BODY_DAMP.into_iter().zip([lin, ang]) {
+            let p = ee.scratch(0);
+            set_vf(&mut ee, p, v);
+            let f = ee.u32_at(ee.u32_at(body + 0x110) + slot);
+            ee.set(28, GP);
+            ee.call(f, &[u64::from(body), u64::from(p)], &[], BUDGET);
+        }
+        let after = ee.ram.clone();
+        ee.ram.clone_from(&before);
+        let mut b = seed::body(&|a| ee.u32_at(a), body);
+        (b.damping, b.ang_damping) = (lin, ang);
+        for (a, w) in seed::body_words(&b, body) {
+            ee.set_u32(a, w);
+        }
+        let stack = (ee.stack - 0x4_0000) as usize..(ee.stack + 0x400) as usize;
+        for i in (0..after.len()).step_by(4) {
+            if !stack.contains(&i) && after[i..i + 4] != ee.ram[i..i + 4] {
+                off.push(format!("{k}: {i:#x} original {:02x?}, port {:02x?}", &after[i..i + 4], &ee.ram[i..i + 4]));
+            }
+        }
+        ee.ram = after;
+    }
+    assert!(off.is_empty(), "{} differ:\n  {}", off.len(), off.iter().take(30).cloned().collect::<Vec<_>>().join("\n  "));
+}
+
+/// **F31b5b — C15's ride, the callees Rust's**: ride-2 in lockstep with F31b5a's run. The spatial
+/// update, the collision sync, the node's position and placement and the record's node transforms
+/// answered every frame; what is handed on is the sync's gather and the record's probe searches.
+#[test]
+fn ride_replays_bit_exact_with_rust_callees() {
+    let Some((w, all)) = replay_posts("ride-2") else { return };
+    assert_eq!(w.len(), 459);
+    assert!(w.iter().all(|w| !w), "the ride never wrecks");
+    for c in ["SpatialUpdate", "CollisionSync", "NodePosition", "Place"] {
+        assert_eq!(all.get(c).copied(), Some(459), "{c} answered every frame: {all:?}");
+    }
+    // Handed on: the gravity's record call (the steps'), the riding probe's and the frame mesh's
+    // database moves and the gather every frame, and the record's two probe searches.
+    let handed: Vec<(&str, u32)> = all.iter().filter(|(k, _)| k.starts_with("> ")).map(|(k, &n)| (&k[2..], n)).collect();
+    assert_eq!(handed, [("Gather", 459), ("GravityRecord", 1836), ("PartMove", 918), ("record search", 459), ("record sweep", 459)]);
+}
+
+/// **F31b5b — C15's flip, the callees Rust's**: flip-1 in lockstep with F31b5a's run, wrecked on row
+/// 125 and put back on row 193; the record's node point answered too.
+#[test]
+fn flip_replays_bit_exact_with_rust_callees() {
+    let Some((w, all)) = replay_posts("flip-1") else { return };
+    assert_eq!(w.len(), 465);
+    let changes: Vec<usize> = (1..w.len()).filter(|&r| w[r] != w[r - 1]).collect();
+    assert_eq!(changes, [125, 193], "wrecked on row 125, put back on row 193");
+    assert!(all.get("record node_place").copied().unwrap_or(0) > 0, "{all:?}");
+    let handed: Vec<(&str, u32)> = all.iter().filter(|(k, _)| k.starts_with("> ")).map(|(k, &n)| (&k[2..], n)).collect();
+    let answered: Vec<(&str, u32)> = all.iter().filter(|(k, _)| k.starts_with("record ") || ["SpatialUpdate", "CollisionSync", "NodePosition", "Place"].contains(&k.as_str())).map(|(k, &n)| (k.as_str(), n)).collect();
+    // The record's node point 470 times; the database moves the riding probe's every frame and the
+    // frame mesh's on 306 (out of the database on the other 159).
+    assert_eq!(
+        answered,
+        [("CollisionSync", 465), ("NodePosition", 465), ("Place", 465), ("SpatialUpdate", 465), ("record node_place", 470)]
+    );
+    assert_eq!(
+        handed,
+        [
+            ("Gather", 465),
+            ("GravityRecord", 1860),
+            ("PartMove", 771),
+            ("PreloadCue", 1),
+            ("StartStunt", 1),
+            ("record search", 465),
+            ("record sweep", 465)
+        ]
+    );
+}
