@@ -8486,17 +8486,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 seat.paused = on.paused(d);
                 seat.riding = !seat.paused;
                 // A seat in a car (S249) is drawn in its own copy of it, the one its session seat
-                // drives; the car left says where it was left, as offline's switch does.
+                // drives.
                 if let Some(car) = on.drawn().get(d).and_then(|&s| vehicle::lane_car(&seat.sim, on.cars(s)))
                     && !seat.garage.cars.iter().any(|c| c.machine == car.machine && c.livery == car.livery)
                 {
                     seat.garage.cars.retain(|c| c.machine != car.machine);
                     seat.garage.cars.push(vehicle::CarRide { driven: None, struck: None, ..car });
-                }
-                if seat.sim.car.is_none()
-                    && let Some(said) = seat.garage.car_up().and_then(vehicle::CarRide::report)
-                {
-                    println!("{said}");
                 }
                 // Its machine is its `Sim`'s (N17): the garage follows, and a switch the session
                 // made snaps the camera onto the machine taken, as offline. Not before every seat's
@@ -8510,6 +8505,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                         front.menu.switched(0, menu::Machine::from_word(up.name()).unwrap_or_default());
                     }
                 }
+            }
+            // The cars left say where they were left, as offline's switch does: at the tick the
+            // session switched off them once it is settled here, not the frame drawn (K27).
+            for said in on.settled_cars() {
+                println!("{said}");
             }
             // The host's change of the modifiers, or a guest's of its own seat's (P134), taken by
             // every machine at one tick (P100): the seats came back on it above; the biplane, the
