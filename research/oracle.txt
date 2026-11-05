@@ -6769,6 +6769,10 @@ atv_ground_query            atv 0x004833c0 = the world's ground query under a po
 atv_wheel_contact_velocity  atv 0x004a1150 = the wheel's contact velocity (a0 wheel; writes +0x170 and +0x180 off the body's velocity and spin)
 atv_wheel_hinge_force       atv 0x004a2aa0 = a steered, balanced wheel's force through its hinge (a0 wheel, a1 force, a2 wheel +0x140, f12 1.0)
 atv_body_add_force_at       atv 0x0049c0b0 = rigid body vt +0x84 (a0 body, a1 force, a2 point, a3 moment scale: the moment into the body's frame by vt +0x78, then vt +0x48)
+# MD37b (ride chain) — tests/atv_quad/frame.rs chains MD75e's whole frame over rides (ride_pad 240 frames, at_the_palm
+# 300): atv_world_step over the world 0x0065bc0c each frame at dt bits 0x3d08850a, only atv_ground_query hooked; raw levers
+# +0x314/+0x310 and stick +0x12a8/+0x12ac laid before each frame. The world step does not strike the palm (0 contacts, +0x6e4
+# 0). The image's sim object is F31's: 0x0065bba0 (vtable 0x003b9320 at +4), vt +0x40 = 0x00204040, +0x6c = the world (MD104).
 # MD74 — the two callees ported (atv_wheel::contact_velocity, hinge_force; tests/atv_wheel.rs runs both off the
 # same image, and the tire-forces test now runs them unhooked). Journal: research/journal/2026-11-02-md74-atv-wheel-callees.
 # Contact velocity, wheel-relative: body point velocity = body +0x80 + turn(body +0x1d0) x (+0x140 - body +0x70).
