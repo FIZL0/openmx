@@ -33,8 +33,8 @@ import sys, time
 sys.path.insert(0, {root!r})
 from ps2kit import checks
 mode, hold = sys.argv[1], float(sys.argv[2])
-checks._take_slot()
-print('took', time.time(), flush=True)
+checks._take_slot(first=mode == 'first')
+print('took', time.time(), checks._jobs(), flush=True)
 if mode == 'alone':
     with checks.alone():
         print('alone+', time.time(), flush=True)
@@ -54,11 +54,11 @@ def gate(env, mode: str, hold: float) -> sp.Popen:
 
 def stamps(p: sp.Popen) -> dict[str, float]:
     out, _ = p.communicate(timeout=60)
-    return {k: float(v) for k, v in (l.split() for l in out.splitlines())}
+    return {k: float(v[0]) for k, *v in (l.split() for l in out.splitlines())}
 
 
 def wait_took(p: sp.Popen) -> float:
-    k, v = p.stdout.readline().split()
+    k, v, _ = p.stdout.readline().split()
     assert k == 'took'
     return float(v)
 
@@ -108,7 +108,33 @@ def test_alone() -> None:
             check(False, 'one slot: the solo phase never ran')
 
 
+def test_first() -> None:
+    """The merge gate (`./kit check --all`) takes the next free slot ahead of the slots' own checks."""
+    with tempfile.TemporaryDirectory() as tmp:
+        env = {**os.environ, 'XDG_RUNTIME_DIR': tmp, 'KIT_CHECK_SLOTS': '1'}
+        env.pop('KIT_PCSX2', None)
+        busy = gate(env, 'hold', 1.0)
+        wait_took(busy)
+        slot = gate(env, 'hold', 0.1)  # a slot's own check, waiting first
+        time.sleep(0.3)
+        merge = gate(env, 'first', 0.5)  # the merge gate, waiting after it
+        try:
+            b, s_, m = stamps(busy), stamps(slot), stamps(merge)
+            check(m['took'] >= b['gave'] and s_['took'] >= m['took'],
+                  "the merge gate takes the freed slot ahead of a slot's check that waited longer")
+        except sp.TimeoutExpired:
+            for x in (busy, slot, merge):
+                x.kill()
+            check(False, 'the merge gate and a waiting check deadlocked')
+        three = {**env, 'KIT_CHECK_SLOTS': '3'}
+        out = lambda mode: gate(three, mode, 0).communicate(timeout=60)[0].split()
+        jobs, cores = int(out('first')[2]), os.cpu_count() or 2
+        check(jobs == min(cores, max(1, cores // 3) * 2) and int(out('hold')[2]) == max(1, cores // 3),
+              f'and runs with twice a slot\'s share of the cores ({jobs} of {cores})')
+
+
 if __name__ == '__main__':
     test_alone()
+    test_first()
     print(f'\n{ok} passed, {fail} failed')
     sys.exit(1 if fail else 0)

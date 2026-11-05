@@ -61,8 +61,12 @@ def _slots() -> int:
         return 3
 
 
-def _slot(block: bool = True):
+def _slot(block: bool = True, first: bool = False):
     """Take one of KIT_CHECK_SLOTS test slots, shared across the main checkout and every worktree.
+
+    `first`: the run's merge gate (`./kit check --all`). Every finished task waits on that one gate, so it
+    takes the next slot that comes free ahead of the slots' own checks, which hold off while it waits (the
+    `check-first` lock), and it runs with twice a slot's share of the cores (`_jobs`).
 
     Why a gate at all: an unattended run has N agents in N worktrees, and every one of them thinks it owns
     the machine. Five uncapped `cargo test -j$(nproc)` at once on the same box took about thirty minutes
@@ -72,18 +76,28 @@ def _slot(block: bool = True):
     spot, so each run takes a slot and is given `cores / slots` jobs.
     """
     n = _slots()
+    ahead = _check_lock('check-first', 'another merge gate, which goes first')
+    if first and not ahead.take(block=block):
+        return None
     waited = False
-    while True:
-        for i in range(n):
-            l = _check_lock(f'check{i}')
-            if l.take(block=False):
-                return l
-        if not block:
-            return None
-        if not waited:
-            print(f'waiting: {n} test runs already going (KIT_CHECK_SLOTS={n})', file=sys.stderr, flush=True)
-            waited = True
-        time.sleep(5)
+    try:
+        while True:
+            if first or not ahead.held_by_other():
+                for i in range(n):
+                    l = _check_lock(f'check{i}')
+                    if l.take(block=False):
+                        return l
+            if not block:
+                return None
+            if not waited:
+                print(f'waiting: {n} test runs already going (KIT_CHECK_SLOTS={n})' +
+                      ('' if first or not ahead.held_by_other() else ', and a merge gate goes first'),
+                      file=sys.stderr, flush=True)
+                waited = True
+            time.sleep(5)
+    finally:
+        if first:
+            ahead.release()
 
 
 def _check_lock(name: str, note: str = '') -> plat.Lock:
@@ -97,10 +111,13 @@ def _check_lock(name: str, note: str = '') -> plat.Lock:
 
 # The check slot this process holds, if it took one: `alone` gives it up and takes another after.
 _HOLD: list[plat.Lock] = []
+_FIRST = [False]  # this process is the merge gate: `_slot(first=True)`, and twice the jobs
 
 
-def _take_slot() -> None:
-    _HOLD[:] = [_slot()]
+def _take_slot(first: bool | None = None) -> None:
+    if first is not None:
+        _FIRST[0] = first
+    _HOLD[:] = [_slot(first=_FIRST[0])]
 
 
 def _release_slot() -> None:
@@ -149,7 +166,9 @@ def alone():
 
 
 def _jobs() -> int:
-    return max(1, (os.cpu_count() or 2) // _slots())
+    cores = os.cpu_count() or 2
+    share = max(1, cores // _slots())
+    return min(cores, share * 2) if _FIRST[0] and _slots() > 1 else share
 
 
 # --- the build-directory size cap ---------------------------------------------
@@ -350,7 +369,7 @@ def cmd_check(argv: list[str]) -> int:
     cwd = Path.cwd() if (Path.cwd() / '.git').exists() else ROOT
     log = _log_path()
     if not a.no_gate:
-        _take_slot()
+        _take_slot(first=a.all)  # --all is the run's merge gate, which every finished task waits on
     try:
         _cap_build_dirs(cwd)
         if len(a.rerun) > 1:
