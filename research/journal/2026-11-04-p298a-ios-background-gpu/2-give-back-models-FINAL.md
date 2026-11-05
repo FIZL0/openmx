@@ -97,4 +97,4 @@ with `OPENMX_WORLDS` set to an empty folder, which skips that comparison only.
 
 The second run's tests passed (4806). `./kit audit` failed on four leaks already on main, none in a
 file this branch touched: `crates/game-sim/src/atv_wheel.rs` lines 62 and 66 (MD75) and `plan/DONE.md`
-lines 519 and 533 (P299's merge). Done ran with `--skip-audit`, and the leaks are filed as their own task.
+lines 519 and 533 (P299's merge). Done ran with `--skip-audit`, and the leaks were already filed as K36 (a note on it now says it blocks every done).
