@@ -489,4 +489,4 @@ P301 in it:
 3. If iOS closes the app again, send that JetsamEvent too (Settings → Privacy & Security → Analytics &
    Improvements → Analytics Data).
 
-Over ~2000 MB anywhere is P301a's to cut. Whether the GPU or the rest grows tells which part to cut.
+Over ~2000 MB anywhere is P301b's to cut (P301a has held the ground lean on a phone since). Whether the GPU or the rest grows tells which part to cut.

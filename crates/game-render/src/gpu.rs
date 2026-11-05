@@ -99,6 +99,33 @@ const PROP_PIXELS: f32 = 0.5;
 /// a sprite's picture is read by its texels, and a font page halved showed other glyphs' pieces.
 pub static TEXTURE_CAP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
+/// Whether a world's ground is held lean on the GPU from now on (P301a, a phone): its page arrays'
+/// layers no bigger than [`LEAN_PAGE`] a side, its detail maps no bigger than [`LEAN_DETAIL`], and
+/// its vertex pages no bigger than [`LEAN_VERTEX_PAGE`] bytes, so a grow copies and wastes no more
+/// than that. Set before the world loads. An iPhone 15 Pro was closed in a world ride at a 5.2 GiB
+/// footprint, the GPU's memory counted in it; on the desktop the pages' pool was 301-384 MB, the
+/// detail array 97 MB (world_ultra) and the vertex pages up to 238 MB of a world ride's GPU memory.
+pub static WORLD_LEAN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// A lean world's biggest page side (P301a): the disc maps' baked pages' size, half a mod map's 256.
+pub const LEAN_PAGE: u32 = 128;
+/// A lean world's biggest detail map side (P301a): half the 512 a mod map brings.
+pub const LEAN_DETAIL: u32 = 256;
+/// A lean world's biggest vertex page (P301a).
+pub const LEAN_VERTEX_PAGE: u64 = 32 << 20;
+
+fn world_lean() -> bool {
+    WORLD_LEAN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// `(w, h)` halved till neither side is over `cap` (0 for none), as a mip level of it is.
+pub fn capped_size((w, h): (u32, u32), cap: u32) -> (u32, u32) {
+    let (mut w, mut h) = (w.max(1), h.max(1));
+    while cap > 0 && w.max(h) > cap {
+        (w, h) = ((w / 2).max(1), (h / 2).max(1));
+    }
+    (w, h)
+}
+
 /// How much an actor's bounding sphere is grown by before it is culled against a view (P223): a
 /// posed rider reaches past the bind pose's sphere, an arm or a leg thrown out in a wreck.
 const ACTOR_CULL_GROWTH: f32 = 1.5;
@@ -604,9 +631,15 @@ impl PagedPaint {
 /// One page as a world's page array holds it (P283): resampled to the array's layer size where it
 /// is not that size, as [`upload_array`] does, and its mip levels. For a stream's worker to make
 /// off the frame, and [`Renderer::world_paint_write`] to write.
+/// A page bigger than the layer by halves (a lean world's, P301a) is its own mip chain from the
+/// level that size down, not resampled.
 pub fn page_layer_mips(t: &Texture, (w, h): (u32, u32)) -> Vec<(u32, u32, Vec<u8>)> {
-    if (t.width as u32, t.height as u32) == (w, h) && t.rgba.len() == (w * h * 4) as usize {
-        return mips(t);
+    let own = (t.width as u32, t.height as u32);
+    if t.rgba.len() == (own.0 * own.1 * 4) as usize && own.0 >= w && own.1 >= h {
+        let mut levels = mips(t);
+        if let Some(k) = levels.iter().position(|l| (l.0, l.1) == (w, h)) {
+            return levels.split_off(k);
+        }
     }
     let t = Texture {
         width: w as usize,
@@ -1755,9 +1788,15 @@ fn upload_pages(device: &wgpu::Device, queue: &wgpu::Queue, p: &Pages) -> [wgpu:
 /// a world's mod maps at its disc map's baked size); at least two layers, so no backend takes it for
 /// a plain 2D texture.
 fn upload_array(device: &wgpu::Device, queue: &wgpu::Queue, label: &str, layers: &[&Texture]) -> wgpu::TextureView {
+    upload_array_shaped(device, queue, label, layers, array_shape(layers))
+}
+
+/// [`upload_array`] as `shape`: a lean world's detail maps ([`world_detail_shape`]) at a mip level
+/// of their own size.
+fn upload_array_shaped(device: &wgpu::Device, queue: &wgpu::Queue, label: &str, layers: &[&Texture], shape: ArrayShape) -> wgpu::TextureView {
     let blank = Texture { width: 1, height: 1, rgba: vec![0; 4] };
     let first = layers.first().copied().unwrap_or(&blank);
-    let ArrayShape { width: w, height: h, layers: count, mips: levels } = array_shape(layers);
+    let ArrayShape { width: w, height: h, layers: count, mips: levels } = shape;
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
         size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: count },
@@ -1770,15 +1809,7 @@ fn upload_array(device: &wgpu::Device, queue: &wgpu::Queue, label: &str, layers:
     });
     for layer in 0..count as usize {
         let t = layers.get(layer).copied().unwrap_or(first);
-        let t = match (t.width as u32, t.height as u32) == (w, h) && t.rgba.len() == (w * h * 4) as usize {
-            true => t.clone(),
-            false => Texture {
-                width: w as usize,
-                height: h as usize,
-                rgba: (0..(w * h) as usize).flat_map(|i| t.sample_smooth(((i % w as usize) as f32 + 0.5) / w as f32, ((i / w as usize) as f32 + 0.5) / h as f32)).collect(),
-            },
-        };
-        for (level, (lw, lh, px)) in mips(&t).iter().enumerate() {
+        for (level, (lw, lh, px)) in page_layer_mips(t, (w, h)).iter().enumerate().take(levels as usize) {
             write_layer(queue, &texture, level as u32, layer as u32, (*lw, *lh), 4, px);
         }
     }
@@ -1817,9 +1848,27 @@ fn array_shape(layers: &[&Texture]) -> ArrayShape {
 /// A world's paint as [`Renderer::set_ground_streamed`] uploads it (MD31): each page array, by its
 /// number ([`Packed::array`]), and the detail array.
 pub fn world_paint_arrays(w: &WorldPaint, packed: &[Option<Packed>]) -> (Vec<ArrayShape>, ArrayShape) {
-    let pages = world_page_layers(w, packed).iter().map(|l| array_shape(l)).collect();
+    let pages = world_page_layers(w, packed).iter().map(|l| world_page_shape(array_shape(l))).collect();
     let details: Vec<&Texture> = w.tiles.iter().zip(packed).filter(|(_, at)| at.is_some()).filter_map(|(t, _)| t.pages.as_ref()?.detail.as_ref()).collect();
-    (pages, array_shape(&details))
+    (pages, world_detail_shape(array_shape(&details)))
+}
+
+/// A page array's shape, its layers no bigger than [`LEAN_PAGE`] in a lean world (P301a).
+fn world_page_shape(a: ArrayShape) -> ArrayShape {
+    lean_shape(a, LEAN_PAGE)
+}
+
+/// The detail array's shape, its layers no bigger than [`LEAN_DETAIL`] in a lean world (P301a).
+fn world_detail_shape(a: ArrayShape) -> ArrayShape {
+    lean_shape(a, LEAN_DETAIL)
+}
+
+fn lean_shape(a: ArrayShape, cap: u32) -> ArrayShape {
+    if !world_lean() {
+        return a;
+    }
+    let (width, height) = capped_size((a.width, a.height), cap);
+    ArrayShape { width, height, layers: array_layers(a.layers, width, height), mips: 32 - width.max(height).leading_zeros() }
 }
 
 /// The pages of a world's maps (MD31) as [`upload_world_paged`] lays them out: the layers of each
@@ -1951,7 +2000,8 @@ fn upload_world_paged(device: &wgpu::Device, queue: &wgpu::Queue, w: &WorldPaint
     }
     // Each array, its layers the size of its pages.
     let mut arrays = Vec::new();
-    for (k, &(pw, ph)) in sizes.iter().enumerate() {
+    for (k, &size) in sizes.iter().enumerate() {
+        let (pw, ph) = if world_lean() { capped_size(size, LEAN_PAGE) } else { size };
         let layers = array_layers(pool.get(k).copied().unwrap_or(1).max(1), pw, ph);
         let mips = 32 - pw.max(ph).leading_zeros();
         let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -2008,7 +2058,7 @@ fn upload_world_paged(device: &wgpu::Device, queue: &wgpu::Queue, w: &WorldPaint
     // The details, every packed map's, and the splat layers, as before.
     let placed: Vec<(&Pages, Packed)> = w.tiles.iter().zip(packed).filter_map(|(t, p)| Some((t.pages.as_ref()?, (*p)?))).collect();
     let details: Vec<&Texture> = placed.iter().filter_map(|(p, _)| p.detail.as_ref()).collect();
-    let details = upload_array(device, queue, "world ground detail", &details);
+    let details = upload_array_shaped(device, queue, "world ground detail", &details, world_detail_shape(array_shape(&details)));
     let (splats, _) = world_splat_layers(w, packed);
     let splats = (!splats.is_empty()).then(|| upload_array(device, queue, "world splat layers", &splats));
     // The far atlas.
@@ -3060,7 +3110,9 @@ impl Renderer {
         let fading = ground_pipeline(&self.device, &module, &pipeline_layout, self.format, "fs_fade");
         self.ground = Some(GpuGround {
             pages: vec![vertex_buffer],
-            per_page: ((self.device.limits().max_buffer_size / (u64::from((cells + 1) * (cells + 1)) * std::mem::size_of::<GroundVertex>() as u64))
+            per_page: ((self.device.limits().max_buffer_size.min(if world_lean() { LEAN_VERTEX_PAGE } else { u64::MAX })
+                / (u64::from((cells + 1) * (cells + 1)) * std::mem::size_of::<GroundVertex>() as u64))
+                .max(1)
                 .min(u64::from(u32::MAX / ((cells + 1) * (cells + 1))))) as u32,
             capacity: 1,
             free: vec![0],
@@ -5880,6 +5932,23 @@ mod tests {
         assert_eq!(levels_over(&mips.0, 512), 1);
         assert_eq!(levels_over(&mips.0, 0), 0);
         assert_eq!(levels_over(&mips.0[mips.0.len() - 1..], 1), 0, "the smallest level stays");
+    }
+
+    /// A lean world's page (P301a) is held at a level of its own mip chain: a 256 page in a 128
+    /// layer is the chain from its 128 level down, the same bytes, not a resample; one the
+    /// layer's size is its whole chain, and one smaller is still resampled up to it.
+    #[test]
+    fn a_lean_page_is_its_own_smaller_level() {
+        assert_eq!((capped_size((256, 256), 128), capped_size((512, 256), 256), capped_size((128, 128), 128), capped_size((256, 256), 0)), ((128, 128), (256, 128), (128, 128), (256, 256)));
+        let rgba: Vec<u8> = (0..256 * 256 * 4).map(|i| (i * 7 % 251) as u8).collect();
+        let t = Texture { width: 256, height: 256, rgba };
+        let whole = mips(&t);
+        let lean = page_layer_mips(&t, (128, 128));
+        assert_eq!(lean.len(), whole.len() - 1);
+        assert!(lean.iter().zip(&whole[1..]).all(|(a, b)| a == b), "the 128 level and on, as they are");
+        assert_eq!(page_layer_mips(&t, (256, 256)), whole);
+        let up = page_layer_mips(&Texture { width: 64, height: 64, rgba: vec![9; 64 * 64 * 4] }, (128, 128));
+        assert_eq!((up[0].0, up[0].1, up.len()), (128, 128, 8));
     }
 
     use super::*;
