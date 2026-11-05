@@ -7268,6 +7268,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         println!("world shapes: near sets cut in {:.2} ms", near_at.elapsed().as_secs_f64() * 1000.0);
         stages.skip();
     }
+    // The near sets cut so far, and whether the ride's first frame has said what it built (K43).
+    let near_cut_at_load = world.place.tiled().map_or(0, |t| t.near_cuts());
+    let mut first_said = false;
     perf.begin();
     // Whether the last time round ran a tick and drew nothing (P205).
     let mut ticked = false;
@@ -10114,6 +10117,13 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             // The GPU's whole frame, its ground's choosing and drawing among it, is its present.
             stages.mark(stages::Stage::Present);
             if let Some(d) = out {
+                // The work P150's warm-up moves to the load, as counts, which wall time under load
+                // cannot show (K43): near sets the ride's ticks cut, ground parts this frame wrote.
+                if args.timings && !first_said {
+                    first_said = true;
+                    let cut = world.place.tiled().map_or(0, |t| t.near_cuts()) - near_cut_at_load;
+                    println!("first frame: at tick {}, near sets cut in the ride {cut}, ground parts written {}", pacer.ticks(), d.ground_written);
+                }
                 stages.shift(stages::Stage::Present, stages::Stage::Ground, d.ground_time);
                 ground_visits = (ground_visits.0 + d.ground_visits, ground_visits.1.max(d.ground_visits), ground_visits.2 + 1);
                 for (v, tris) in d.triangles.iter().enumerate() {

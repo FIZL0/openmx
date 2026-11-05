@@ -26,7 +26,6 @@ Prefixes: `D` disc · `R` decompilation · `C` the frame and captures · `F` ari
 `P` the playable shell and how it rides · `N` online play.
 
 ### Critical: flaky tests and breakages, side by side with the work below
-- [ ] **K43** (follow-up, critical) make the test `-p openmx --test world_first_frame` robust: it failed under load in P304's merge gate and passed alone. Find what it races (wall-clock time, shared ports or files, other processes) and remove that, rather than widening a timeout
 
 ### Next: the new machines, then their release (in this order)
 - [ ] **MD80c** SLUS-21104's Kiowa step bit-exact on MD80a's captures (after MD80a, MD75): kiowa.phy's ModelOne/ModelTwo pelvis box, MaxWreckTime and [Camera] behind an MX vs. ATV switch; atv_kiowa_aero_step as rewritten (scalar cross products, min/max clamps, no 0.5/0.3), atv_kiowa_flight_controller (fused, the -30), the wreck check (unpaired: find it), the rotor as MX Unleashed's if the oracle agrees; read each in the PC exe (MXVehicleHelicopter, HelicopterAeroModel) first → crates/game-sim/src/kiowa.rs | t: crates/game-sim tests: MD80a's Kiowa flights replay bit-exact; MX Unleashed's Kiowa replays (C14, C21) keep their hashes | j: mxvatv-kiowa-step

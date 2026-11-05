@@ -246,6 +246,8 @@ pub struct Tiled {
     /// from it lately, newest last ([`World::wooded_near`], MD28).
     boxes: Vec<[F; 4]>,
     near: Vec<([i32; 2], Props)>,
+    /// How many near sets have been cut, kept or not ([`Tiled::near_cuts`]).
+    cuts: usize,
 }
 
 /// How many near sets a world keeps cut: one for each rider of a full local ride, and their moves
@@ -329,6 +331,7 @@ impl Tiled {
             wrap: [false, false],
             boxes: Vec::new(),
             near: Vec::new(),
+            cuts: 0,
         })
     }
 
@@ -350,6 +353,12 @@ impl Tiled {
         self.wrap = wrap;
         self.every = None;
         Ok(self)
+    }
+
+    /// How many near sets this world has cut since it was built (K43): a count of the work
+    /// [`Tiled::prepare_near`] moves to the load, which a test reads where wall time would race.
+    pub fn near_cuts(&self) -> usize {
+        self.cuts
     }
 
     /// Which axes wrap, `[x, z]`.
@@ -781,6 +790,7 @@ impl Tiled {
             if NEAR_KEPT <= self.near.len() {
                 self.near.remove(0);
             }
+            self.cuts += 1;
             self.near.push((key, Props { props }));
         }
         &self.near.last().expect("just kept").1

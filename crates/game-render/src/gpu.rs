@@ -941,6 +941,9 @@ pub struct Drawn {
     /// The nodes of the ground's quadtrees looked at choosing them, over every view (V65): what the
     /// choice cost, which grows with what is in view, not with the ground held.
     pub ground_visits: usize,
+    /// The ground parts whose indices this frame wrote, over every view (K43): none when the
+    /// frame before drew the same picks, as a warm frame does.
+    pub ground_written: usize,
     /// Props drawn, over every view.
     pub props: usize,
     /// What choosing the ground's chunks and writing their indices took on the CPU, over every view
@@ -4036,6 +4039,7 @@ impl Renderer {
             draws: 0,
             ground_levels: Vec::new(),
             ground_visits: 0,
+            ground_written: 0,
             props: 0,
             ground_time: std::time::Duration::ZERO,
             actors: views.iter().map(|v| vec![0; v.actors.len()]).collect(),
@@ -4459,6 +4463,7 @@ impl Renderer {
                 }
                 part.count = indices.len() as u32;
                 part.key = Some(run.to_vec());
+                drawn.ground_written += 1;
             }
         }
         // What this frame did not pick is not drawn.
