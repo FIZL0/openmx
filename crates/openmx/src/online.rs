@@ -235,7 +235,7 @@ impl Online {
         let net = Netplay::new(lineup.clone(), &me, Timing::default(), crate::net::desync::dumps())?;
         let card: Vec<u8> = (0..lineup.mine(&me).len()).map(|i| if i == 0 { preset | if plane { udp::PLANE } else { 0 } } else { 0 }).collect();
         let udp = Udp::bind(at, peers, &card)?;
-        println!("online: {me} on {at}, seat {} of {} ({})", seat + 1, lineup.seats.len(), lineup.text());
+        println!("online: {me} on {}, seat {} of {} ({})", udp.at(), seat + 1, lineup.seats.len(), lineup.text());
         Ok(Online {
             net,
             wire: Wire::Udp(udp),

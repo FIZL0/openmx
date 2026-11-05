@@ -2357,7 +2357,8 @@ struct Args {
     /// `--trace-switch N`: under `--trace-feel`, ride the first N frames on the throttle alone and only
     /// then take the controls the other flags ask for — a full brake from top speed, or a turn at speed.
     trace_switch: Option<u32>,
-    /// `--online-script F:WORD,...`: online, from this machine's frame `F` on, its first player picks
+    /// `--online-script F:WORD,...`: online, from the session's tick `F` on (K29: the tick, as
+    /// `--frames` counts online, not the shell's frame, which waits on a peer), its first player picks
     /// the machine `WORD` names (bike, biplane, buggy, monster, baja) as the M key or the pause's
     /// switch would, or holds Cross down (`gas`) or lets it go (`lift`) — a played tape's switch and
     /// throttle for a ride that rides no tape (S249's two-shell test).
@@ -7091,6 +7092,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     }
     let mut online_want: Option<Kind> = None;
     let mut online_frames = 0u32;
+    // How many of `--online-script`'s words have gone (K29).
+    let mut online_scripted = 0usize;
     let mut online_gas = false;
     // In the browser (P204): the last ten seconds of the ride settled here that the page's console
     // was told of (`Online::settled_line`).
@@ -8264,8 +8267,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         let dt: F;
         (dt, simulated) = if let Some(on) = &mut online {
             online_frames += 1;
-            // `--online-script`'s picks and throttle for this frame (S249).
-            for (_, word) in args.online_script.iter().filter(|(f, _)| *f == online_frames) {
+            // `--online-script`'s picks and throttle up to the tick these pads go out on (S249), each
+            // once: on the session's ticks, as `--frames` counts (K29), since a frame waiting on a
+            // peer runs none, and a frame catching up runs several.
+            let due = args.online_script[online_scripted..].iter().take_while(|(f, _)| u64::from(*f) <= on.ticks() + 1).count();
+            online_scripted += due;
+            for (_, word) in &args.online_script[online_scripted - due..online_scripted] {
                 match (word.as_str(), Kind::parse(word)) {
                     ("gas", _) => online_gas = true,
                     ("lift", _) => online_gas = false,
@@ -13023,6 +13030,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                     }
                     args.online_script.push((f.trim().parse().map_err(|_| bad())?, word.to_string()));
                 }
+                args.online_script.sort_by_key(|&(f, _)| f);
             }
             "--trace-switch" => {
                 args.trace_switch = Some(
@@ -13402,7 +13410,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                      --trace-air prints the chassis' attitude and its rates instead;\n\
                      --trace-switch N rides the throttle alone for N frames first;\n\
                      --online-script F:WORD,... online, picks a machine (bike, biplane, buggy,\n\
-                     monster, baja) at frame F, or holds Cross (gas) or lets it go (lift);\n\
+                     monster, baja) at session tick F, or holds Cross (gas) or lets it go (lift);\n\
                      --trace-stick-y F:Y,... sets the stick's y from frame F on, each until\n\
                      the next, and adds the backflip's columns to --trace-feel's line;\n\
                      --trace-camera prints each view's camera a frame (preset, distance, pitch,\n\

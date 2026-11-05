@@ -1,5 +1,7 @@
 //! The shell's transport until N3's: plain UDP between addresses given on the command line. One
-//! socket, non-blocking; a datagram from an address nobody named is dropped.
+//! socket, non-blocking; a datagram from an address nobody named is dropped. A peer named with port
+//! 0 (`g@127.0.0.1:0`, K29) is the first address on its host to write this path's bytes, which it
+//! keeps: a test binds each machine's own port and none is picked free and rebound later.
 //!
 //! Every datagram carries this build's id ahead of the session's bytes (N7): [`MAGIC`], the id's
 //! length, the id (the lobby's, `openmx_net::handshake::build`, which names the ride's tick). Two
@@ -236,7 +238,9 @@ impl Udp {
         let mut got = Vec::new();
         let mut buf = [0u8; 2048];
         while let Ok((n, from)) = self.sock.recv_from(&mut buf) {
-            let Some((p, _)) = self.peers.iter().find(|p| p.1 == from) else { continue };
+            let known = self.peers.iter().position(|p| p.1 == from);
+            let Some(i) = known.or_else(|| learn(&mut self.peers, from, &buf[..n])) else { continue };
+            let p = &self.peers[i].0;
             let tag = untagged(&buf[..n]).map(|t| (false, t)).or_else(|| tagged(MARKS, &buf[..n]).map(|t| (true, t)));
             let refused = match tag {
                 Some((piece, (id, card, data))) if id == mine => {
@@ -276,6 +280,18 @@ impl Udp {
         }
         Ok(got)
     }
+}
+
+/// The peer in `peers` named with port 0 on `from`'s host (K29) that has not been heard yet, which
+/// takes `from` from now on, if `d` starts as this path's datagrams do (any build's, so another
+/// build is still told why); `None` leaves `from` a stranger.
+fn learn(peers: &mut [(String, SocketAddr)], from: SocketAddr, d: &[u8]) -> Option<usize> {
+    if ![MAGIC, MARKS, NO_CARD, NO_MARKERS].iter().any(|m| d.starts_with(*m)) {
+        return None;
+    }
+    let i = peers.iter().position(|p| p.1.port() == 0 && p.1.ip() == from.ip())?;
+    peers[i].1 = from;
+    Some(i)
 }
 
 #[cfg(test)]
@@ -475,6 +491,22 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(g.theirs.get("host").and_then(Gathered::whole), Some(&b"the host's"[..]));
+    }
+
+    #[test]
+    fn a_peer_named_on_port_0_is_the_first_to_write_from_its_host() {
+        let mut a = Udp::bind_as(local(), vec![("g".into(), "127.0.0.1:0".parse().unwrap())], "0.1.0 dev, 30 Hz", &[0]).unwrap();
+        let stranger = UdpSocket::bind(local()).unwrap();
+        stranger.send_to(b"anything", a.at()).unwrap();
+        assert_eq!(wait(&mut a), Ok(Vec::new()));
+        let mut g = Udp::bind_as(local(), vec![("a".into(), a.at())], "0.1.0 dev, 30 Hz", &[0]).unwrap();
+        g.send("a", b"hello");
+        assert_eq!(wait(&mut a), Ok(vec![("g".to_string(), b"hello".to_vec())]));
+        // and it is answered there, and the stranger is still nobody
+        a.send("g", b"back");
+        assert_eq!(wait(&mut g), Ok(vec![("a".to_string(), b"back".to_vec())]));
+        stranger.send_to(&[&a.head[..], b"me too"].concat(), a.at()).unwrap();
+        assert_eq!(wait(&mut a), Ok(Vec::new()));
     }
 
     #[test]
