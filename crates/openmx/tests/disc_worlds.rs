@@ -21,8 +21,10 @@ use std::time::{Duration, Instant};
 /// read the shell's CPU time, not the wall clock, which a busy gate stretches without the shell doing
 /// any more (world_mxu_nat 518 s of wall clock against 480 at load ~48, P226). In the test build at load
 /// 25-55 (K24, 11-04) world_mxu spent 1379-1475 s of CPU (178-296 s of wall clock, its stitcher on every
-/// core) and world_mxu_nat 801-843 s.
-const COLD: Duration = Duration::from_secs(3600);
+/// core) and world_mxu_nat 801-843 s. P299: each starts where its last pass began
+/// (`crates/stitch/worlds/<id>.start.json`) and builds in that pass alone: world_mxu 1312 s of CPU in a
+/// release build at load ~60 from cold, 208 s from its start, world_mxu_nat 729 s and 291 s.
+const COLD: Duration = Duration::from_secs(900);
 /// The most CPU time a ride on a built or installed world may spend, its joins read back and nothing
 /// built, with `--seams` walking every piece's edges: world_mxu_free 29-52 s (K24).
 const WARM: Duration = Duration::from_secs(240);
@@ -117,6 +119,19 @@ fn world_lines(said: &str, id: &str) -> Vec<String> {
     said.lines().filter(|l| keep.iter().any(|k| l.starts_with(k))).map(str::to_string).collect()
 }
 
+/// P299: the first ride on `id` built its joins in one pass, from the start its spec's
+/// `<id>.start.json` keeps for this disc and stitcher, and the start the build kept in `built` is
+/// that file's. A stitcher that builds other joins (a new `stitch::VERSION`) or ends at another start
+/// passes from cold, minutes on a phone: copy the kept one over the file.
+fn started_where_it_ended(said: &str, id: &str, built: &Path) {
+    let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("../stitch/worlds").join(format!("{id}.start.json"));
+    let kept = built.join("start.json");
+    let fix = format!("copy {} to {}", kept.display(), file.display());
+    assert!(!said.contains(&format!("{id}: no start kept")), "{id} built from cold: its start file is stale ({fix})\n{said}");
+    assert!(said.contains(&format!("{id}: joins built in 1 passes")), "{id} took more than its last pass ({fix}):\n{said}");
+    assert_eq!(std::fs::read_to_string(&kept).unwrap(), std::fs::read_to_string(&file).unwrap(), "{id}'s start ({fix})");
+}
+
 /// Every file under `dir`, by its path from there, with its bytes.
 fn files(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     let mut out = Vec::new();
@@ -154,6 +169,7 @@ fn rides_off_the_disc(id: &str, tiles: usize, joins: usize) {
     let keys: Vec<PathBuf> = std::fs::read_dir(mods.join("cache/stitch").join(id)).unwrap().flatten().map(|e| e.path()).collect();
     assert_eq!(keys.len(), 1, "one build kept: {keys:?}");
     let built = &keys[0];
+    started_where_it_ended(&first, id, built);
 
     // The second reads it back.
     let second = shell_within(&mods, id, WARM);
@@ -219,6 +235,7 @@ fn first_ride(id: &str) -> Option<(String, String, PathBuf)> {
     assert!(said.contains(&format!("{id}: building its joins")), "{said}");
     let keys: Vec<PathBuf> = std::fs::read_dir(mods.join("cache/stitch").join(id)).unwrap().flatten().map(|e| e.path()).collect();
     assert_eq!(keys.len(), 1, "one build kept: {keys:?}");
+    started_where_it_ended(&said, id, &keys[0]);
     let json = std::fs::read_to_string(keys[0].join("mod.json")).unwrap();
     Some((said, json, mods))
 }
