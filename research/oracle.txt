@@ -9740,3 +9740,22 @@ atv_heap_free               atv 0x001b76d0 = free
 #   Unleashed's entry clears the record (S191a), SLUS-21104's does not, so its hit loop answers after
 #   a clause. MD63c's oracle hook had swapped +0xc8 to an empty record; with no swap, 382 of 10 000
 #   states enter twice (197 clause then joust, 185 clause then scenery), reasons and +0x1260 matching.
+# F31b5g — the calls quad::Steps hands on, in Rust (game_sim::handling::record::held/held_words,
+# update::stunt_start/trick_end; tests/mxvatv_bike_ride.rs). Journal:
+# research/journal/2026-11-05-f31b5g-nothing-handed-on/.
+#   Gravity's record call: state 4's record 0x00ea7570 (vt 0x003b9290) +0x88 = 0x00205730 (MD75e1's
+#   resolution) given (record, 1); list 0x00ea7790, capacity 14, count 0 on the image.
+#   Stunt start vt +0x4b8 0x004e6370(bike, id, arg): kept = id in +0x13b8..+0x13c8, late = the last two;
+#   (+0x324 || +0xc80) && !kept -> 1; +0x1528 = id if !kept || (+0x1528 >= 41 signed && !late); +0x14d8
+#   +0x14e8 +0x14dc = 0, +0x1650 = 1; with run +0x684 and player +0x680: !kept -> walk player+0xc8 (next
+#   +0x24) while [0]&0x10 and [1] not kept, vt +0x4ac(bike, [1]); player+8 bit 5 clear -> 0x0046a5b0(run);
+#   entry 0x00268c90(+0x14f0, id); 0x0046aae0(run, player, id, 12; f12 max(*(e)+0x50*e[1], 10), f13 0,
+#   f14 max(*(e)+0x54*e[1], 10), f15 f16 1.0); 0x0046b110(run, player, arg, id, 0) (the stunt mark). 1.
+#   Trick end vt +0x4ac 0x004e4db0(bike, id): run, player, player+8 bit 5, else nothing; id == -1 (64-bit
+#   beq, so sign-extended) -> 0x0046b4c0(f12 1.0; run, player, 1), 0x0046a760(f12 cvt.s.w(player+0xcc);
+#   run, player, 1); else 0x0046acf0(f12 1.0; run, player, 1, id, 0). Writes nothing itself. 1.
+#   Wreck vt +0x368 = 0x004e2260 (wreck::enter). Preload cue 0x00272300(0x00442eb0's word, bike+0x674, 8,
+#   14, +0xd20, 0), dropped: flip-1 row 72 its only write off the stack is 0x00851fec.
+#   flip-1 row 94 (the stunt start, run calls dropped): run 0x00e6d270+0x3c, player 0x00e6d6c0+8, +0xc8,
+#   and 0x012ad6c0..d8, 0x012ad6e0..e8, 0x01e694d4..dc differ; row 125 0x008520e4..f0, 0x012ad6e0,
+#   0x016ad02c..34. The bike and blocks equal on every row.

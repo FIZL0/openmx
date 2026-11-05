@@ -14,7 +14,8 @@
 //! penalty, the wheels' ground and brake pointers, the engine's driven wheels, the scene's links.
 //! The struck thing's class is the caller's ([`crate::quad::Bike::struck_class`]: the mask it is
 //! tested against is a word of the game's, not of the bike's), as is the collision record's
-//! resolution ([`crate::quad::Bike::contacts`] is `None`: the gravity's record call is handed on).
+//! resolution ([`crate::quad::Bike::contacts`] is `None`: the gravity's record call is handed on
+//! unless the caller holds the record, [`super::record::held`]).
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
 use super::seed::{BODY, ENGINE, NODE, RECORD, WHEELS, Words};
