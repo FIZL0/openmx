@@ -9024,6 +9024,44 @@ atv_smooth_noise            atv 0x00134580 = the shared smooth noise (f12 time -
 atv_powf                    atv 0x0034ff40 = powf
 atv_curve_table_ptr         atv 0x003eab20 = the pointer to the sine/cosine curve table the autopilot reads
 
+# MD80c — SLUS-21104's Kiowa step ported behind the MX vs. ATV switch (game_sim::kiowa *_mxvatv, Mxvatv, Pedal,
+# MxvatvPhy, Phy::read_mxvatv); proofs tests/mxvatv_kiowa.rs on MD80a's images (heli 0x01ab7d20 in kiowa, model
+# word +0x1340 = 1; 0x014c8f00 in kiowa3, model two; vtable 0x003cfad0, $gp 0x003dbaf0). Journal research/journal/
+# 2026-11-05-md80c-mxvatv-kiowa-step. atv_kiowa_flight_controller above is a `j 0x004a7990` thunk; the step the
+# Kiowa's vtable +0x474 (0x003cff44) calls is atv_kiowa_controller_step.
+# Forces atv_kiowa_forces: if +0xc80 == 0 vt+0x474 (f12 dt); the collision wrapper 0x004a4ef0; then if +0xc80 == 0
+#   and *(+0x684) != 0 and (*(+0x684)+0x50)&1: rotor step(*(+0x11c0)), aero step(*(+0x11c4)), each f12 dt.
+# Heli fields: +0x1124 flown, +0x10f0/+0x10f4 climb/descend, +0x10f8 altitude fraction, +0x10fc/+0x1100/+0x1104
+#   pad lateral/longitudinal/pedal, +0x1108..+0x1118 collective/lateral/longitudinal/pedal/filtered commands,
+#   +0x111c last stick, +0x1128..+0x1190 the [Controller] keys (MXU's order: gains lat/long/pedal, MaxAltitude,
+#   hold 0x1138 / timer 0x113c / delay 0x1140, CollectiveGain, climb, descent, hold gain, integral 0x1154, ig,
+#   MinCollective, MaxPitch, MaxRoll, PitchGain, RollGain, speed command 0x1170, rate, min, max, SpeedGain, the four
+#   feed-forward words), +0x1194 MinWreckSpeed, +0x11a0 MinRateCommand, +0x11b0 MaxRateCommand, +0x11c0 rotor,
+#   +0x11c4 aero, +0x11d8 the collective filter (+0 value, +4 time, +8 step); +0x358 airspeed, +0x360 pitch, +0x368
+#   roll, +0xc8 collision record (+0x34 touching), +0xe8 gravity record (+0 the controller's scale).
+# Controller: forward = atv_node_local(sp+64, *(+0xe4), body+0x80).z; ground = sign(forward) sqrt(mula(vz,vz).
+#   madd(vx,vx)); speed command fused and clamped max(-30).min(MaxSpeedCommand); no high-speed-aero pitch branch;
+#   feed-forward gated by !(airspeed <= min) with |ground|; roll wrap the unfused one (mul.s, sub.s).
+# Rotor *(+0x11c0): MXU's kiowa_rotor_step float for float; +0x2c..+0x38 command ptrs (lateral, longitudinal,
+#   collective, pedal), +0x3c.. max pitches, +0x4c.. blade, +0xb0 MaxMoment, +0xc0/+0xc4 pitches, +0xd0/+0xd8 tilt,
+#   +0xf0 thrust, +0x100 force; body *(+0xe4).
+# Aero *(+0x11c4) (the pedal time is 5 in the image's +0xa8; its constructor not looked for): +0x24 density, +0x28 chord, +0x2c span, +0x30 area, +0x3c CLalpha, +0x54 CD0, +0x5c CYbeta,
+#   +0x68 Clbeta, +0x6c Clp, +0x74 Clda, +0x78 CM0, +0x7c CMalpha, +0x80 CMq, +0x84 CMde, +0x88 Cnbeta, +0x90 Cnr,
+#   +0x94 Cndr, +0x98/+0x9c/+0xa0 CYbeta/Cnbeta/CnrPedal, +0xa4 pedal timer, +0xa8 its time (5), +0xf4
+#   LowSpeedDrag, +0xfc/+0x100 Low/HighSpeedAero; ptrs +0x104 speed (heli+0x32c), +0x108 alpha (+0x334), +0x10c
+#   beta (+0x330), +0x110..+0x118 pad, +0x11c rates, +0x120 heli (local velocity +0x350), +0x124 body; outs
+#   +0x128.. fade, CL, CD, CY, Cl, CM, Cn. With the longitudinal stick <= 0 a low-speed drag of local *
+#   lsd*(area*((0.5*(1-fade))*density)) comes off the force.
+# Crash test (vt +0x47c): if +0xc80 != 13 the wreck check (vt +0x16c) -> wreck 13; then MXU's clocks: +0xc84
+#   clock, +0xc88 MaxWreckTime, +0xc8c down; blades vt +0x478, put-back vt +0x36c, wreck vt +0x368, sound
+#   atv_post_event. Reader atv_kiowa_read_phy: Model{One,Two}PelvisBoxPosition/Size +0x1350/+0x1360,
+#   [Camera] (atv_kiowa_read_camera) shoulders +0x980/+0x990, FP camera +0xda0.
+atv_kiowa_controller_step   atv 0x004d4600 = the Kiowa's flight controller (vtable +0x474)
+atv_kiowa_crash_test        atv 0x004d5410 = the Kiowa's crash test (vtable +0x47c): the wreck check, then the clocks
+atv_kiowa_read_camera       atv 0x004d30e0 = the Kiowa's [Camera] reader: shoulder and model camera offsets
+pc_kiowa_aero_step          pc 0x00450dd0 = HelicopterAeroModel's step (beside its vf0 0x00450d40): read first; the PS2 step's terms, pedal branch and low-speed drag
+pc_kiowa_controller_step    pc 0x005f0b50 = the flight controller (MXVehicleHelicopter::vf85): read first; the -30 floor, no high-speed pitch branch
+
 # MD89 — the quadtree sub-database's moving-entry virtuals (game-sim atv_spatial.rs Tree; atv_spatial's Database
 # dispatches List/Tree). Journal: research/journal/2026-11-02-md75-atv-frame/8-spatial-move.md "MD89". Proof:
 # tests/atv_spatial.rs (generated trees laid at 0x01f80000 in atv-r-spawn.ee.bin; the image's own tree 0x006547c0).
