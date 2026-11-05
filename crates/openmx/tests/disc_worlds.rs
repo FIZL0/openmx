@@ -150,9 +150,9 @@ fn files(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     out
 }
 
-fn rides_off_the_disc(id: &str, tiles: usize, joins: usize) {
+fn rides_off_the_disc(id: &str, tiles: usize, joins: usize) -> Option<String> {
     if !disc() {
-        return;
+        return None;
     }
     let mods = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("p232-{id}"));
     let _ = std::fs::remove_dir_all(&mods);
@@ -179,7 +179,7 @@ fn rides_off_the_disc(id: &str, tiles: usize, joins: usize) {
     // It is openmx-mods' world, and riding that one installed is the same ride.
     let Some(installed) = reference().filter(|r| r.join("tracks").join(id).join("mod.json").is_file()) else {
         eprintln!("skipped the comparison: no {id} in $OPENMX_WORLDS or the main checkout's mods/");
-        return;
+        return Some(first);
     };
     let want = installed.join("tracks").join(id);
     assert_eq!(std::fs::read(built.join("mod.json")).unwrap(), std::fs::read(want.join("mod.json")).unwrap(), "mod.json");
@@ -193,6 +193,7 @@ fn rides_off_the_disc(id: &str, tiles: usize, joins: usize) {
     assert!(!theirs.contains("building its joins"), "the installed world is ridden:\n{theirs}");
     assert_eq!(world_lines(&theirs, id), lines, "the installed {id}'s ride");
     let _ = std::fs::remove_dir_all(&mods);
+    Some(first)
 }
 
 /// P260: the worlds the user has installed (the main checkout's mods/, where openmx-mods puts them)
@@ -217,9 +218,33 @@ fn the_installed_mx_unleashed_worlds_ride_promptly() {
     }
 }
 
+/// MD95: the five freeride maps are one row round the wrap, so no cell of the world is empty. The
+/// 3 x 2 grid left one, a map's width of join north of Dallas and west of Cleveland, which the user
+/// rode as "Cleveland flattened": Bridgeport crossed 6,606 ft of it to Cleveland over the wrap.
 #[test]
 fn world_mxu_free_is_built_off_the_disc_as_openmx_mods_builds_it() {
-    rides_off_the_disc("world_mxu_free", 5, 38 + 14);
+    let Some(said) = rides_off_the_disc("world_mxu_free", 5, 36 + 16) else { return };
+    assert!(after(&said, "world: world_mxu_free ").contains(", 5 tiles and 52 joins, 28503 x 6462 feet,"), "{said}");
+    let crossings = crossings(&said);
+    assert_eq!(crossings.len(), 5, "each map crosses along the row to the next: {crossings:?}");
+    for (a, b, seam, ft) in &crossings {
+        let most = if *seam { 2900.0 } else { 1800.0 };
+        assert!(*ft <= most, "{a} > {b}: {ft} ft of join (at most {most})");
+    }
+}
+
+/// Each "world crossing: x A > B[ across the seam], N ft of join, ..." line of `said`: A, B, whether
+/// it crosses the wrap, and the feet of join.
+fn crossings(said: &str) -> Vec<(&str, &str, bool, f64)> {
+    said.lines()
+        .filter_map(|l| {
+            let rest = l.strip_prefix("world crossing: ")?.get(2..)?;
+            let (pair, rest) = rest.split_once(", ")?;
+            let (a, b) = pair.split_once(" > ")?;
+            let (b, seam) = b.strip_suffix(" across the seam").map_or((b, false), |b| (b, true));
+            Some((a, b, seam, rest.split(" ft").next()?.parse().ok()?))
+        })
+        .collect()
 }
 
 /// The first ride on `id` off the disc into an empty mods folder: what it said, and the built

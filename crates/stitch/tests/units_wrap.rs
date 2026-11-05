@@ -74,3 +74,26 @@ fn a_unit_layouts_ground_meets_itself_round_the_wrap() {
         assert!(j.to.is_some() && j.width < 1500.0, "{}'s side {} is {:.0} ft from {:?}", tiles[j.tile].id, j.side, j.width, j.to);
     }
 }
+
+/// MD95: world_mxu_free's spec lays its five maps out with no empty cell. Its old 3 x 2 grid left one,
+/// a map's width of join north of Dallas and west of Cleveland, ridden as "Cleveland flattened": on
+/// five maps of the same size every side now faces a map, its own round the wrap or another, across
+/// at most a narrow join.
+#[test]
+fn world_mxu_frees_spec_leaves_no_empty_cell() {
+    let spec = stitch::json::Json::parse(include_str!("../worlds/world_mxu_free.json")).unwrap();
+    let mut p = Params::from_spec(&spec).unwrap();
+    p.threads = 8;
+    let root = scratch("free");
+    let dirs: Vec<PathBuf> = (0..5).map(|i| tile(&root, &format!("free{i}"), 256, 100.0 + 15.0 * f64::from(i))).collect();
+    let tiles: Vec<stitch::Tile> = dirs.iter().map(|d| stitch::Tile::load(d).unwrap()).collect();
+    let plan = layout(&tiles, &p).unwrap();
+    // One row round the x wrap: each map's north and south face its own other side round the z wrap,
+    // which join_widths does not count as facing a map.
+    assert!(plan.placed.iter().all(|t| t.cell.1 == 0), "{:?}", plan.placed.iter().map(|t| t.cell).collect::<Vec<_>>());
+    let widths = plan.join_widths(p.wrap.as_deref());
+    assert_eq!(widths.len(), 5 * 4);
+    for j in widths.iter().filter(|j| j.side % 2 == 0) {
+        assert!(j.to.is_some() && j.width < 1500.0, "{}'s side {} is {:.0} ft from {:?}", tiles[j.tile].id, j.side, j.width, j.to);
+    }
+}
