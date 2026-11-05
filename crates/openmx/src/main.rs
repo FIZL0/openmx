@@ -8307,7 +8307,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     pad
                 })
                 .collect();
-            if let Err(end) = on.frame_seats(&pads, &mut world.place, rigs[0].body.as_ref()) {
+            let ended = on.frame_seats(&pads, &mut world.place, rigs[0].body.as_ref());
+            // The cars left on the ticks settled now, as offline's switch says them (N25).
+            for said in on.cars_left(false) {
+                println!("{said}");
+            }
+            if let Err(end) = ended {
                 println!("{end}");
                 if front.is_some() {
                     leave = Leave::Menu;
@@ -8506,17 +8511,13 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 seat.paused = on.paused(d);
                 seat.riding = !seat.paused;
                 // A seat in a car (S249) is drawn in its own copy of it, the one its session seat
-                // drives; the car left says where it was left, as offline's switch does.
+                // drives. The car left says where it was left from the settled ticks (N25,
+                // `Online::cars_left`), not from this frame's, which can be a prediction.
                 if let Some(car) = on.drawn().get(d).and_then(|&s| vehicle::lane_car(&seat.sim, on.cars(s)))
                     && !seat.garage.cars.iter().any(|c| c.machine == car.machine && c.livery == car.livery)
                 {
                     seat.garage.cars.retain(|c| c.machine != car.machine);
                     seat.garage.cars.push(vehicle::CarRide { driven: None, struck: None, ..car });
-                }
-                if seat.sim.car.is_none()
-                    && let Some(said) = seat.garage.car_up().and_then(vehicle::CarRide::report)
-                {
-                    println!("{said}");
                 }
                 // Its machine is its `Sim`'s (N17): the garage follows, and a switch the session
                 // made snaps the camera onto the machine taken, as offline. Not before every seat's
@@ -10735,6 +10736,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         front.menu.opening = menu::Opening::No;
     }
     if let Some(on) = &mut online {
+        // And any left on ticks run but not settled when the ride ended.
+        for said in on.cars_left(true) {
+            println!("{said}");
+        }
         println!("{}", on.summary());
         // What the lobby said while the ride ran (a drop, the lobby as it is now, chat) is the menu's.
         if let Some(front) = front.as_deref_mut() {

@@ -49,7 +49,7 @@ use ps2_float::F;
 use crate::net::rides::{self, Modded, Rides};
 use crate::vehicle::{self, Spawn};
 use crate::net::udp::{self, Udp};
-use crate::net::{Lineup, Netplay, Timing};
+use crate::net::{Game, Lineup, Netplay, Timing};
 
 /// The biggest session datagram sent as a datagram over the lobby: iroh's QUIC path at its smallest
 /// MTU carries a little over 1100 bytes, less the peer's name the host relays it under.
@@ -121,6 +121,79 @@ pub struct Online {
     /// joiners it takes on if that happens.
     handed: bool,
     spare: Option<Vec<u8>>,
+    /// N25: each seat's car after each tick run and not yet reported settled ([`CarAfter`]), by
+    /// tick; a re-run writes its ticks again. What [`Online::cars_left`] says a car left from.
+    car_ticks: std::collections::BTreeMap<usize, Vec<Option<CarAfter>>>,
+}
+
+/// N25: a seat's car out after a tick (S249): which car, where its lane took it, and the car as it
+/// stood. Kept per tick so the car left is the one on the settled ticks, never a prediction a
+/// rollback has since undone.
+#[derive(Clone)]
+struct CarAfter {
+    kind: game_sim::car::Kind,
+    taken_at: ps2_float::Vf,
+    machine: game_sim::car::Machine,
+}
+
+/// The session's game with each seat's car noted after every tick it runs ([`Online::car_ticks`]).
+struct Watched<'a, G> {
+    game: G,
+    sims: fn(&G) -> &[Sim],
+    ticks: &'a mut std::collections::BTreeMap<usize, Vec<Option<CarAfter>>>,
+}
+
+impl<G: Game> Game for Watched<'_, G> {
+    type State = G::State;
+
+    fn save(&self) -> G::State {
+        self.game.save()
+    }
+
+    fn restore(&mut self, s: &G::State) {
+        self.game.restore(s)
+    }
+
+    fn step(&mut self, tick: usize, pads: &[Report]) {
+        self.game.step(tick, pads);
+        let before = tick.checked_sub(1).and_then(|t| self.ticks.get(&t));
+        let taken: Vec<Option<(game_sim::car::Kind, ps2_float::Vf)>> =
+            before.map_or_else(Vec::new, |b| b.iter().map(|c| c.as_ref().map(|c| (c.kind, c.taken_at))).collect());
+        let now = (self.sims)(&self.game)
+            .iter()
+            .enumerate()
+            .map(|(seat, sim)| {
+                let lane = sim.car.as_ref()?;
+                // where it was taken: the tick before's, the same car still out, or here on its first
+                let was = taken.get(seat).copied().flatten().filter(|c| c.0 == lane.kind);
+                let at = lane.machine.matrix.0[3];
+                let taken_at = was.map_or(ps2_float::Vf::new(at.x(), at.y(), at.z(), 1.0), |c| c.1);
+                Some(CarAfter { kind: lane.kind, taken_at, machine: lane.machine.clone() })
+            })
+            .collect();
+        self.ticks.split_off(&tick);
+        self.ticks.insert(tick, now);
+    }
+
+    fn hash(&self) -> u64 {
+        self.game.hash()
+    }
+
+    fn encode(&self) -> Option<Vec<u8>> {
+        self.game.encode()
+    }
+
+    fn decode(&mut self, bytes: &[u8]) -> Result<(), String> {
+        self.game.decode(bytes)
+    }
+
+    fn seat(&mut self, seat: usize, spawn: &[u8]) -> Result<(), String> {
+        self.game.seat(seat, spawn)
+    }
+
+    fn remodify(&mut self, was: &str, to: &str) -> Result<(), String> {
+        self.game.remodify(was, to)
+    }
 }
 
 /// `--peer`s' saved markers (P105): the track and bike they are read back for, whether every
@@ -190,6 +263,7 @@ impl Online {
             marks: Some(Marks { track: String::new(), bike: String::new(), owed: true, offered: None }),
             handed: false,
             spare: None,
+            car_ticks: Default::default(),
         })
     }
 
@@ -256,6 +330,7 @@ impl Online {
             marks: None,
             handed: false,
             spare: None,
+            car_ticks: Default::default(),
         })
     }
 
@@ -295,6 +370,7 @@ impl Online {
             marks: None,
             handed: false,
             spare: None,
+            car_ticks: Default::default(),
         })
     }
 
@@ -334,6 +410,7 @@ impl Online {
             marks: None,
             handed: false,
             spare,
+            car_ticks: Default::default(),
         })
     }
 
@@ -876,6 +953,41 @@ impl Online {
         self.net.lineup.seats[seat].is_some()
     }
 
+    /// N25: the cars left on the ticks settled since the last call, as [`vehicle::CarRide::report`]
+    /// says them, in seat order: a seat whose car was out after one tick and not after the next
+    /// left it as it stood after the first. Read off the settled ticks (every seat's own pads, re-runs
+    /// done), so every machine says the same car in the same place; the frame shown may still be a
+    /// prediction. `all`: the ticks run but not settled too (the ride is over).
+    pub fn cars_left(&mut self, all: bool) -> Vec<String> {
+        let settled = self.net.settled();
+        let upto = match self.car_ticks.last_key_value() {
+            Some((&last, _)) if all => last,
+            _ if settled < 0 => return Vec::new(),
+            _ => settled as usize,
+        };
+        let mut said = Vec::new();
+        let ticks: Vec<usize> = self.car_ticks.range(..=upto).map(|(&t, _)| t).collect();
+        for pair in ticks.windows(2) {
+            let (was, now) = (&self.car_ticks[&pair[0]], &self.car_ticks[&pair[1]]);
+            for (seat, before) in was.iter().enumerate() {
+                let Some(c) = before else { continue };
+                if now.get(seat).and_then(Option::as_ref).is_some_and(|n| n.kind == c.kind) {
+                    continue;
+                }
+                let Some(template) = self.cars.get(seat).and_then(|cs| cs.iter().find(|r| r.machine.car_physics() == Some(c.kind))) else {
+                    continue;
+                };
+                let left = vehicle::CarRide { driven: Some(c.machine.clone()), struck: None, taken_at: c.taken_at, ..template.clone() };
+                said.extend(left.report());
+            }
+        }
+        // the last tick looked at stays, the one the next settled tick is held against
+        if let Some(&last) = ticks.last() {
+            self.car_ticks = self.car_ticks.split_off(&last);
+        }
+        said
+    }
+
     /// One frame: `pad` rides this machine's first seat; [`Online::show`] reads every seat after.
     /// `body` is any rider's, for the clip table the body's machine reads. `Err` is why the ride is
     /// over.
@@ -924,7 +1036,8 @@ impl Online {
             // The ride steps with the cars Modded holds, which a change of the modifiers builds again.
             let mut rides = Rides { sims: &mut self.sims, world: place, after: Some(&mut after), time_scale: self.time_scale, plane: self.plane.as_mut(), cars: &[] };
             let cars = Some((&self.stock_cars[..], &mut self.cars));
-            let mut game = Modded { rides: &mut rides, stock: &self.stock, mods: &mut self.mods, stock_plane: self.stock_plane.as_ref(), cars };
+            let game = Modded { rides: &mut rides, stock: &self.stock, mods: &mut self.mods, stock_plane: self.stock_plane.as_ref(), cars };
+            let mut game = Watched { game, sims: |m| &m.rides.sims[..], ticks: &mut self.car_ticks };
             self.net.frame(&mut game, &local, real);
         }
         self.time_scale = self.mods.time_scale();
