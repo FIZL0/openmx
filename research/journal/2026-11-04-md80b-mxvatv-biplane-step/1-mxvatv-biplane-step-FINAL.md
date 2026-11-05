@@ -144,6 +144,11 @@ test:
 - **The switch is off the netplay wire.** A snapshot taken back is an MX Unleashed plane. Fine offline,
   where nothing builds the ATV plane yet. MD100.
 - **Nothing builds `Flight::new_mxvatv` in the game yet.** That is MD80e's.
+- **The gate ran with `OPENMX_WORLDS` empty.** openmx's disc_worlds test compares its world with the
+  user's installed `world_mxu_free/mod.json`. That copy was just reinstalled from openmx-mods, and on this
+  branch the comparison reds; this task never touched the stitcher. So `./kit done` ran with
+  `OPENMX_WORLDS=$PWD/target/no-worlds` (the comparison skipped). world_first_frame's slow first frame
+  passed on a lone rerun (load).
 - **The PC exe** was read for the aero step only, against the PS2's. The controls, autopilot, engine and
   wreck check were read on the PS2 alone, with no PC oracle run.
 
