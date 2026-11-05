@@ -1,4 +1,4 @@
-//! MD101 — MD80a's SLUS-21104 biplane flights, replayed.
+//! MD101 — MD80a's SLUS-21104 biplane flights, replayed; MD101a — and flown by the port.
 //!
 //! The captures (`context/capture/md80a/{biplane,biplane3}.csv`, re-recorded by MD101 with
 //! `research/md80a/fly.sh` from MD80a's Desert Oasis states) hold, every 30 Hz tick, the plane object,
@@ -11,10 +11,24 @@
 //! The input step runs outside the frame, from the game's input pass. Every other word is the
 //! interpreter's, and each row's body, engine, aero and tires must come out word for word.
 //!
+//! **The port** (MD101a) flies them two ways:
+//!
+//! - its body step ([`Body::integrate_mxvatv`], [`Body::end_substep_mxvatv`]) in the interpreter's
+//!   frame, in place of SLUS-21104's own on the plane's body: every row must still agree;
+//! - a whole [`flight::Flight::new_mxvatv`] seeded off the interpreter's RAM every [`STRETCH`] frames
+//!   and flown beside it on the same input words, its body word for word against the game's after
+//!   each frame, as far as [`BIPLANE_AGREES_THROUGH`] and [`BIPLANE3_AGREES_THROUGH`] pin.
+//!
 //! Skips without the images or the captures.
 
+use game_sim::biplane::{self, Body};
+use game_sim::flight;
+use game_sim::ride;
+use game_sim::world::Flat;
 use game_sim::input::{PlaneCommand, PlaneInput};
-use ps2_float::F;
+use ps2_float::{F, Vf};
+use std::cell::Cell;
+use std::rc::Rc;
 use ps2_oracle::{Ee, Kit, skip};
 use std::collections::HashMap;
 
@@ -204,8 +218,12 @@ struct Verdict {
 
 /// Replays a flight in the interpreter from its image, frame by frame, with the input step's words
 /// off the tape ([`feed`]); every row present is compared with the frame it shows.
-fn interpret(f: &Flight) -> Option<Verdict> {
+fn interpret(f: &Flight, body: Stepper) -> Option<Verdict> {
     let mut ee = hooked(image(f.name)?);
+    let body_at = ee.u32_at(f.plane + 0xb8);
+    if let Stepper::Port(calls) = &body {
+        port_body(&mut ee, body_at, calls.clone());
+    }
     let (rows, ticks) = (rows(f.name)?, tape(f.name)?);
     assert_eq!(ee.u32_at(f.plane + 4), BIPLANE_VTABLE, "{}: no biplane at {:#x}", f.name, f.plane);
     let s = sim(&ee);
@@ -260,8 +278,9 @@ fn interpret(f: &Flight) -> Option<Verdict> {
     Some(v)
 }
 
-fn interpreted(f: &Flight) {
-    let Some(v) = interpret(f) else { return };
+/// Whether it ran (it skips without the images, the captures or the tapes).
+fn interpreted(f: &Flight, body: Stepper) -> bool {
+    let Some(v) = interpret(f, body) else { return false };
     println!("{}: {} rows agree, stale rows {:?}, late rows {:?}", f.name, v.agreed, v.stale, v.late);
     if let Some((r, d)) = &v.parted {
         panic!(
@@ -276,16 +295,141 @@ fn interpreted(f: &Flight) {
     // their frames; biplane's take (recorded at a load of ~90) has 118 of 1058, biplane3's none.
     assert!(v.stale.len() <= 2, "{}: {} stale rows: re-record it", f.name, v.stale.len());
     assert!(v.late.len() <= v.rows / 5, "{}: {} late rows of {}: re-record it", f.name, v.late.len(), v.rows);
+    true
 }
 
 #[test]
 fn the_interpreter_flies_biplane_bit_exact() {
-    interpreted(&BIPLANE);
+    interpreted(&BIPLANE, Stepper::Game);
 }
 
 #[test]
 fn the_interpreter_flies_biplane3_bit_exact() {
-    interpreted(&BIPLANE3);
+    interpreted(&BIPLANE3, Stepper::Game);
+}
+
+// --- the port's body in the original's frame (MD101a) ------------------------------------------------
+
+/// SLUS-21104's rigid body integrate and end of substep (the body vtable's +0x54 and +0x40, `# MD75`).
+const BODY_INTEGRATE: u32 = 0x0049_6240;
+const BODY_END_SUBSTEP: u32 = 0x0049_bde0;
+
+/// Who steps the plane's body in an interpreter replay: the game's own code, or the port's
+/// ([`Body::integrate_mxvatv`], [`Body::end_substep_mxvatv`]) in its place, counting the calls.
+enum Stepper {
+    Game,
+    Port(Rc<Cell<(usize, usize)>>),
+}
+
+fn quad(ee: &Ee, a: u32) -> Vf {
+    Vf([0, 4, 8, 12].map(|k| ee.f32_at(a + k)))
+}
+
+fn put_quad(ee: &mut Ee, a: u32, v: Vf) {
+    for k in 0..4 {
+        ee.set_u32(a + 4 * k as u32, v.0[k].to_bits());
+    }
+}
+
+/// The plane's body's quadwords in SLUS-21104's layout (`# MD75`) as [`Body`]'s fields: the
+/// correction and its peak are the shock's.
+const BODY_QUADS: [(u32, fn(&mut Body) -> &mut Vf); 20] = [
+    (0x30, |b| &mut b.damping),
+    (0x60, |b| &mut b.last_position),
+    (0x70, |b| &mut b.position),
+    (0x80, |b| &mut b.velocity),
+    (0x90, |b| &mut b.last_force),
+    (0xa0, |b| &mut b.force),
+    (0xb0, |b| &mut b.accel),
+    (0xc0, |b| &mut b.shock_peak),
+    (0xd0, |b| &mut b.shock),
+    (0x140, |b| &mut b.inv_inertia),
+    (0x150, |b| &mut b.ang_damping),
+    (0x170, |b| &mut b.last_quat),
+    (0x190, |b| &mut b.quat),
+    (0x1a0, |b| &mut b.cofg),
+    (0x1b0, |b| &mut b.moment),
+    (0x1c0, |b| &mut b.last_moment),
+    (0x1d0, |b| &mut b.rates),
+    (0x1e0, |b| &mut b.ang_accel),
+    (0x1f0, |b| &mut b.twist_peak),
+    (0x200, |b| &mut b.twist),
+];
+
+/// The plane's body off the image at `at`, after asserting the words the port holds as constants
+/// (every axis free, the limits [`biplane::MXVATV_MAX_SPEED`] and [`biplane::MXVATV_MAX_RATE`], no
+/// acceleration limits).
+fn read_body(ee: &Ee, at: u32) -> Body {
+    let max = f32::MAX.to_bits();
+    let fixed = [(0x4, 1), (0x8, 1), (0xc, 1), (0x120, 1), (0x124, 1), (0x128, 1), (0xe4, max), (0x220, max)]
+        .into_iter()
+        .chain([0xe0].map(|o| (o, biplane::MXVATV_MAX_SPEED.to_bits())))
+        .chain([0x210, 0x214, 0x218].map(|o| (o, biplane::MXVATV_MAX_RATE.to_bits())));
+    for (o, w) in fixed {
+        assert_eq!(ee.u32_at(at + o), w, "body +{o:#x}: the port holds {w:#x}");
+    }
+    let mut b = Body { enabled: ee.u32_at(at) != 0, inv_mass: F(ee.f32_at(at + 0x1c)), ..Body::default() };
+    for (o, field) in BODY_QUADS {
+        *field(&mut b) = quad(ee, at + o);
+    }
+    b
+}
+
+fn put_body(ee: &mut Ee, at: u32, b: &Body) {
+    let mut b = *b;
+    ee.set_u32(at, u32::from(b.enabled));
+    ee.set_u32(at + 0x1c, b.inv_mass.to_bits());
+    for (o, field) in BODY_QUADS {
+        put_quad(ee, at + o, *field(&mut b));
+    }
+}
+
+/// The game's body step on the plane's body at `at` replaced by the port's: each call reads the body
+/// off RAM, steps it in the port, and writes it back. Any other body through either call fails.
+fn port_body(ee: &mut Ee, at: u32, calls: Rc<Cell<(usize, usize)>>) {
+    let c = calls.clone();
+    ee.hooks.insert(BODY_INTEGRATE, Box::new(move |ee: &mut Ee| {
+        assert_eq!(ee.r(4) as u32, at, "a body that is not the plane's is integrated");
+        let mut b = read_body(ee, at);
+        b.integrate_mxvatv(F(ee.f(12)));
+        put_body(ee, at, &b);
+        c.set((c.get().0 + 1, c.get().1));
+    }));
+    ee.hooks.insert(BODY_END_SUBSTEP, Box::new(move |ee: &mut Ee| {
+        assert_eq!(ee.r(4) as u32, at, "a body that is not the plane's ends a substep");
+        let mut b = read_body(ee, at);
+        b.end_substep_mxvatv();
+        put_body(ee, at, &b);
+        calls.set((calls.get().0, calls.get().1 + 1));
+    }));
+}
+
+/// A flight replayed with the port's body step in the game's place, which must come out as the
+/// game's own replay does: four substeps a frame, every row's body, engine, aero and tires word for
+/// word.
+fn port_bodied(f: &Flight) {
+    let calls = Rc::new(Cell::new((0, 0)));
+    if !interpreted(f, Stepper::Port(calls.clone())) {
+        return;
+    }
+    let (integrated, ended) = calls.get();
+    println!("{}: the port stepped the body {integrated} times", f.name);
+    assert!(integrated > 0, "{}: the game never integrated the plane's body", f.name);
+    assert_eq!(integrated, ended, "{}: integrates against ends", f.name);
+    assert_eq!(integrated % 4, 0, "{}: {integrated} substeps is not four a frame", f.name);
+}
+
+/// **The port's body flies biplane3** (MD101a): SLUS-21104's frame with [`Body::integrate_mxvatv`] and
+/// [`Body::end_substep_mxvatv`] stepping the plane's body agrees with all 2338 rows.
+#[test]
+fn the_port_body_flies_biplane3_bit_exact() {
+    port_bodied(&BIPLANE3);
+}
+
+/// **And biplane**, with its late rows as the game's own replay has them.
+#[test]
+fn the_port_body_flies_biplane_bit_exact() {
+    port_bodied(&BIPLANE);
 }
 
 // --- the input step ---------------------------------------------------------------------------------
@@ -390,4 +534,244 @@ fn the_input_step_is_mx_unleasheds() {
             assert_eq!(got, w.to_bits(), "case {case} ({x:e}, {y:e}, player {player}): {name} {got:#x} in the game, {:#x} in the port", w.to_bits());
         }
     }
+}
+
+// --- the port flies them (MD101a) --------------------------------------------------------------------
+
+/// Frames between seeds: the port is seeded off the interpreter's RAM every so many frames of the
+/// flight (the first seed is the image itself) and flown on until the next.
+const STRETCH: usize = 100;
+
+/// **How far the port flies each stretch** with every body word equal to the game's, frame by frame
+/// (a ratchet: raise it as the port gains the original's ground, tires and wreck machine; MD101b,
+/// MD101c). One entry per stretch, `STRETCH` the most. Every stretch seeded in the air agrees to its
+/// end; those seeded on the ground part on their first frame (the port's tires stand on no ground),
+/// and the two that land part where the wheels meet the ground (biplane's frame 1258, biplane3's
+/// 2059).
+const BIPLANE_AGREES_THROUGH: &[usize] = &[0, 0, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 58, 0, 0, 0, 0];
+const BIPLANE3_AGREES_THROUGH: &[usize] =
+    &[0, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 59, 0, 0, 0];
+
+/// MX vs. ATV's `Veh\biplane.phy` (MD80b's copy).
+fn phy_file() -> Option<Vec<u8>> {
+    let path = Kit::load().ok()?.ctx("mxvatv-ps2/md80b").join("biplane.phy");
+    let bytes = std::fs::read(&path).ok();
+    if bytes.is_none() {
+        skip(&format!("no {} (the disc's Veh\\biplane.phy)", path.display()));
+    }
+    bytes
+}
+
+/// The plane's words a [`flight::Flight`] holds in its own fields (`# MD80b`), as offsets.
+mod at {
+    pub const BACK: u32 = 0x310;
+    pub const FORWARD: u32 = 0x314;
+    pub const THROTTLE: u32 = 0x318;
+    pub const GROUNDED: u32 = 0x324;
+    pub const WRECK: u32 = 0xc80;
+    pub const WRECK_CLOCK: u32 = 0xc84;
+    pub const FLOWN: u32 = 0x10f0;
+    pub const STICKS: u32 = 0x10f4;
+    pub const BRAKE: u32 = 0x1100;
+    pub const SURFACES: u32 = 0x1104;
+    pub const INTEGRAL: u32 = 0x12e0;
+    pub const ENGINE: u32 = 0x1164;
+    pub const AERO: u32 = 0x1168;
+    pub const MODEL: u32 = 0x1320;
+}
+
+/// The input step's five words as the plane's frame reads them.
+fn pad_of(ee: &Ee, plane: u32) -> biplane::Pad {
+    let w = |o: u32| F(ee.f32_at(plane + o));
+    biplane::Pad {
+        forward: w(at::FORWARD),
+        back: w(at::BACK),
+        elevator: w(at::STICKS),
+        aileron: w(at::STICKS + 4),
+        rudder: w(at::STICKS + 8),
+    }
+}
+
+/// **A [`flight::Flight::new_mxvatv`] off the game's RAM**: built from `biplane.phy` as the plane's model
+/// word picks, then the body (MD75's layout, [`read_body`]), the pad, the surfaces, the flown gate,
+/// the engine's words, the aero model's true-speed switch and the wreck word and clock, then
+/// measured. The tires, the ground under them and the game's `rand()` and smooth noise are not
+/// SLUS-21104's (MD101b, MD101c): the tires are as built, over no ground.
+fn seeded(ee: &Ee, plane: u32, phy: &[u8], tables: &ride::Tables) -> flight::Flight {
+    let p = game_sim::phy::Plane::read_mxvatv_bytes(phy, ee.u32_at(plane + at::MODEL) == 1);
+    let mut f = flight::Flight::new_mxvatv(&p);
+    let w = |o: u32| F(ee.f32_at(plane + o));
+    f.body = read_body(ee, ee.u32_at(plane + 0xb8));
+    f.pad = pad_of(ee, plane);
+    let s = &mut f.surfaces;
+    (s.throttle, s.brake, s.pitch_integral) = (w(at::THROTTLE), w(at::BRAKE), w(at::INTEGRAL));
+    (s.elevator, s.elevator_command, s.aileron) = (w(at::SURFACES), w(at::SURFACES + 4), w(at::SURFACES + 8));
+    (s.rudder, s.steer) = (w(at::SURFACES + 12), w(at::SURFACES + 16));
+    f.attitude.flown = ee.u32_at(plane + at::FLOWN) != 0;
+    let e = ee.u32_at(plane + at::ENGINE);
+    let ew = |k: u32| F(ee.f32_at(e + 0x30 + 4 * k));
+    let en = &mut f.engine;
+    (en.min_efficiency, en.full_efficiency_speed, en.prop_rpm, en.prop_angle) = (ew(0), ew(1), ew(2), ew(3));
+    (en.max_power, en.fade_altitude, en.max_altitude) = (ew(4), ew(5), ew(6));
+    (en.power, en.rpm, en.idle_rpm, en.max_rpm) = (ew(8), ew(9), ew(10), ew(11));
+    (en.thrust, en.note, en.clock) = (ew(12), ew(13), ew(14));
+    f.aero.true_speed = ee.u32_at(ee.u32_at(plane + at::AERO) + 0x24) != 0;
+    f.crash.reason = ee.u32_at(plane + at::WRECK);
+    f.crash.clock = w(at::WRECK_CLOCK);
+    if f.crash.reason == 0 {
+        f.inv_inertia = f.body.inv_inertia;
+    }
+    f.remeasure(&tables.acos);
+    f
+}
+
+/// The body's words where the port's and the game's differ, by offset.
+fn body_diff(got: &Body, want: &Body) -> Vec<String> {
+    let (mut got, mut want) = (*got, *want);
+    let mut out = Vec::new();
+    if (got.enabled, got.inv_mass.to_bits()) != (want.enabled, want.inv_mass.to_bits()) {
+        out.push(format!("enabled/inv_mass {:?} want {:?}", (got.enabled, got.inv_mass), (want.enabled, want.inv_mass)));
+    }
+    for (o, field) in BODY_QUADS {
+        let (g, w) = (*field(&mut got), *field(&mut want));
+        for k in 0..4 {
+            if g.0[k].to_bits() != w.0[k].to_bits() {
+                out.push(format!("body+{:#x}: {:#010x} ({}) want {:#010x} ({})", o + 4 * k as u32, g.0[k].to_bits(), g.0[k], w.0[k].to_bits(), w.0[k]));
+            }
+        }
+    }
+    out
+}
+
+/// A stretch flown: its first frame, how many frames the port's body agreed through, and the
+/// first frame's differences where it parted (none if it agreed through to the end).
+struct Stretch {
+    from: usize,
+    agreed: usize,
+    grounded: bool,
+    parted: Vec<String>,
+    /// The first frame (from the stretch's start) on which a word the port keeps outside the body
+    /// differed while the body still agreed ([`others_diff`]), and those words: where a parting
+    /// starts.
+    drift: Option<(usize, Vec<String>)>,
+}
+
+/// The surfaces, the engine's words and the aero model's last coefficients where the port's and
+/// the game's differ. Not the engine's note: its wobble reads the game's smooth noise, whose tables
+/// the port builds off its own `rand()` (it moves no body word).
+fn others_diff(p: &flight::Flight, ee: &Ee, plane: u32) -> Vec<String> {
+    let (e, a) = (ee.u32_at(plane + at::ENGINE), ee.u32_at(plane + at::AERO));
+    let s = &p.surfaces;
+    let en = &p.engine;
+    let words = [
+        ("throttle", s.throttle, plane + at::THROTTLE),
+        ("brake", s.brake, plane + at::BRAKE),
+        ("elevator", s.elevator, plane + at::SURFACES),
+        ("elevator command", s.elevator_command, plane + at::SURFACES + 4),
+        ("aileron", s.aileron, plane + at::SURFACES + 8),
+        ("rudder", s.rudder, plane + at::SURFACES + 12),
+        ("steer", s.steer, plane + at::SURFACES + 16),
+        ("pitch integral", s.pitch_integral, plane + at::INTEGRAL),
+        ("prop angle", en.prop_angle, e + 0x3c),
+        ("power", en.power, e + 0x50),
+        ("rpm", en.rpm, e + 0x54),
+        ("thrust", en.thrust, e + 0x60),
+        ("clock", en.clock, e + 0x68),
+        ("lift", p.aero.lift, a + 0xdc),
+        ("drag", p.aero.drag, a + 0xe0),
+        ("side", p.aero.side, a + 0xe4),
+        ("roll", p.aero.roll, a + 0xe8),
+        ("pitch", p.aero.pitch, a + 0xec),
+    ];
+    words
+        .into_iter()
+        .filter(|&(_, v, at)| v.to_bits() != ee.u32_at(at))
+        .map(|(name, v, at)| format!("{name}: {:#010x} ({}) want {:#010x} ({})", v.to_bits(), v.0, ee.u32_at(at), ee.f32_at(at)))
+        .collect()
+}
+
+/// The interpreter replays the flight from its image as [`interpret`] does (fed off the tape); at
+/// every [`STRETCH`]th frame a port plane is seeded off its RAM ([`seeded`]) and flown on beside it
+/// on the same pad words, its body compared with the game's after each frame.
+fn port_flies(f: &Flight) -> Option<Vec<Stretch>> {
+    let (phy, mut ee, ticks) = (phy_file()?, hooked(image(f.name)?), tape(f.name)?);
+    // Every frame up to the last row's (and the one after, for a late last row).
+    let frames = by_frame(&ee, f.plane, &rows(f.name)?).iter().map(|&(j, _)| j).max()? + 1;
+    let tables = ride::Tables::build();
+    let s = sim(&ee);
+    let body_at = ee.u32_at(f.plane + 0xb8);
+    let dt = F(f32::from_bits(DT));
+    let mut ground = Flat { y: F(-1.0e4), ..Flat::default() };
+    let mut out: Vec<Stretch> = Vec::new();
+    let mut port: Option<flight::Flight> = None;
+    for j in 1..=frames {
+        if (j - 1) % STRETCH == 0 {
+            port = Some(seeded(&ee, f.plane, &phy, &tables));
+            out.push(Stretch { from: j - 1, agreed: 0, grounded: ee.u32_at(f.plane + at::GROUNDED) != 0, parted: Vec::new(), drift: None });
+        }
+        feed(&mut ee, f.plane, &ticks, j);
+        let pad = pad_of(&ee, f.plane);
+        ee.set(28, GP);
+        ee.call(FRAME, &[u64::from(s)], &[f32::from_bits(DT)], BUDGET);
+        if let Some(p) = port.as_mut() {
+            // The game's input step writes the plane's words before the frame that reads them; the
+            // port keeps the pad a frame is handed for the next one, so it is put in first too.
+            p.pad = pad;
+            p.frame(dt, pad, &mut ground, &tables);
+            let d = body_diff(&p.body, &read_body(&ee, body_at));
+            let last = out.last_mut().unwrap();
+            if d.is_empty() {
+                last.agreed += 1;
+                if last.drift.is_none() {
+                    let o = others_diff(p, &ee, f.plane);
+                    if !o.is_empty() {
+                        last.drift = Some((last.agreed, o));
+                    }
+                }
+            } else {
+                last.parted = d;
+                let b = read_body(&ee, body_at);
+                last.parted.push(format!("(the game's body at {:?}, grounded word {})", b.position, ee.u32_at(f.plane + at::GROUNDED)));
+                last.parted.extend(others_diff(p, &ee, f.plane));
+                port = None;
+            }
+        }
+    }
+    Some(out)
+}
+
+fn port_flown(f: &Flight, pinned: &[usize]) {
+    let Some(stretches) = port_flies(f) else { return };
+    for s in &stretches {
+        println!(
+            "{} from frame {} ({}): {} frames agree{}",
+            f.name,
+            s.from,
+            if s.grounded { "grounded" } else { "flying" },
+            s.agreed,
+            s.parted.first().map(|d| format!(", then {d}")).unwrap_or_default()
+        );
+        if let Some((k, d)) = &s.drift {
+            println!("  frame {k}: {}", d.join("; "));
+        }
+    }
+    let got: Vec<usize> = stretches.iter().map(|s| s.agreed).collect();
+    for (k, (&g, &p)) in got.iter().zip(pinned).enumerate() {
+        assert!(g >= p, "{} stretch {k} (from frame {}): {g} frames agree, pinned {p}\n  {}", f.name, stretches[k].from, stretches[k].parted.join("\n  "));
+    }
+    assert_eq!(got.len(), pinned.len(), "{}: stretches {got:?}, pinned {pinned:?}: re-pin", f.name);
+    assert_eq!(got, pinned, "{}: the port flies further than pinned: raise the ratchet", f.name);
+}
+
+/// **The port flies biplane** (MD101a): [`flight::Flight::new_mxvatv`] off the game's RAM at each
+/// stretch, as far as [`BIPLANE_AGREES_THROUGH`].
+#[test]
+fn the_port_flies_biplane() {
+    port_flown(&BIPLANE, BIPLANE_AGREES_THROUGH);
+}
+
+/// **And biplane3**, as far as [`BIPLANE3_AGREES_THROUGH`].
+#[test]
+fn the_port_flies_biplane3() {
+    port_flown(&BIPLANE3, BIPLANE3_AGREES_THROUGH);
 }

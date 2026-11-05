@@ -190,7 +190,8 @@ pub struct Flight {
     pub heard: crate::material_hit::Heard,
     /// MX vs. ATV's plane (MD80b, [`Flight::new_mxvatv`]): the controls, the autopilot, the engine,
     /// the aerodynamics and the edge test and throw are SLUS-21104's twins of MX Unleashed's
-    /// ([`biplane::controls_mxvatv`] and the rest). Off, as every MX Unleashed plane is built. Not in
+    /// ([`biplane::controls_mxvatv`] and the rest), and the body steps as SLUS-21104's later body
+    /// ([`Body::integrate_mxvatv`], MD101a). Off, as every MX Unleashed plane is built. Not in
     /// the hash walk nor on the netplay wire, so MX Unleashed's hashes and snapshots are unchanged; a
     /// snapshot taken back is MX Unleashed's.
     pub mxvatv: bool,
@@ -1566,14 +1567,22 @@ impl Dynamics for Listeners<'_> {
             self.props[self.downed[i as usize - 1].place].body.integrate(h);
             return;
         }
-        self.plane.body.integrate(h);
+        if self.plane.mxvatv {
+            self.plane.body.integrate_mxvatv(h);
+        } else {
+            self.plane.body.integrate(h);
+        }
     }
     fn end_substep(&mut self, i: i32) {
         if i > 0 {
             self.props[self.downed[i as usize - 1].place].body.end_substep();
             return;
         }
-        self.plane.body.end_substep();
+        if self.plane.mxvatv {
+            self.plane.body.end_substep_mxvatv();
+        } else {
+            self.plane.body.end_substep();
+        }
         SUBSTEPS.with_borrow_mut(|kept| {
             if let Some(kept) = kept {
                 kept.push(self.plane.body);
@@ -2368,12 +2377,14 @@ impl Dynamics for Together<'_, '_> {
     fn integrate(&mut self, i: i32, h: F) {
         match self.downed.get((i as usize).wrapping_sub(self.fleet.len())) {
             Some(d) => self.props[d.place].body.integrate(h),
+            None if self.fleet[i as usize].flight.mxvatv => self.fleet[i as usize].flight.body.integrate_mxvatv(h),
             None => self.fleet[i as usize].flight.body.integrate(h),
         }
     }
     fn end_substep(&mut self, i: i32) {
         match self.downed.get((i as usize).wrapping_sub(self.fleet.len())) {
             Some(d) => self.props[d.place].body.end_substep(),
+            None if self.fleet[i as usize].flight.mxvatv => self.fleet[i as usize].flight.body.end_substep_mxvatv(),
             None => self.fleet[i as usize].flight.body.end_substep(),
         }
     }

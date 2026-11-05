@@ -9085,6 +9085,17 @@ atv_front_end_ptr           atv 0x003eab60 = the pointer to the pointer to the f
 atv_delay_thread            atv 0x0033ff58 = DelayThread (kernel Status check, alarm, WaitSema)
 atv_sound_iop_call          atv 0x00182c90 = the sound driver's SIF RPC to the IOP (waits for its reply)
 
+# MD101a — the plane's body under Flight::new_mxvatv steps as atv_body (biplane::Body::integrate_mxvatv /
+# end_substep_mxvatv); tests/mxvatv_biplane_replay.rs (journal research/journal/2026-11-05-md101a-mxvatv-biplane-
+# port). The plane's body *(plane+0xb8) is MD75's layout; atv_body_integrate 0x00496240 (vt+0x54) and
+# atv_body_end_substep 0x0049bde0 (vt+0x40) are called on it four times a frame, a0 = the body. In both images
+# and every row of both flights: axes +4/+8/+c and +0x120/124/128 all 1, +0xe0 max speed 300.0, +0x210/214/218
+# max rates 12.0, +0xe4 and +0x220 FLT_MAX (no clamp is ever reached). The writer of +0xe0/+0x210 was not traced.
+# Hooking both calls to the port keeps every row of both flights bit-exact. A whole port Flight seeded off an
+# image flies every airborne 100-frame stretch bit-exact; ground contact parts (tires, MD101b). The game's input
+# step's words are read by the frame they precede; Flight keeps the pad it is handed for the next frame, so the
+# replay sets Flight::pad before each frame.
+
 # MD89 — the quadtree sub-database's moving-entry virtuals (game-sim atv_spatial.rs Tree; atv_spatial's Database
 # dispatches List/Tree). Journal: research/journal/2026-11-02-md75-atv-frame/8-spatial-move.md "MD89". Proof:
 # tests/atv_spatial.rs (generated trees laid at 0x01f80000 in atv-r-spawn.ee.bin; the image's own tree 0x006547c0).
