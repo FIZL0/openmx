@@ -401,6 +401,8 @@ struct Routes {
     no_ranges: bool,
     /// B12: the next this-many GETs of a path hang up without an answer.
     drops: HashMap<String, usize>,
+    /// K45: GETs wait unanswered while this is set.
+    held: bool,
 }
 
 struct Fake {
@@ -429,6 +431,9 @@ impl Fake {
                     let line = head.lines().next().unwrap_or("").to_string();
                     let path = line.split(' ').nth(1).unwrap_or("").to_string();
                     let range = head.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("range: bytes=")?.strip_suffix('-')?.parse::<u64>().ok());
+                    while r.lock().unwrap().held {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
                     let mut routes = r.lock().unwrap();
                     routes.asked.push(path.clone());
                     if let Some(n) = routes.drops.get_mut(&path).filter(|n| **n > 0) {
@@ -733,6 +738,9 @@ fn a_failed_meta_fails_the_listing() {
     let _ = (std::fs::remove_dir_all(&dir), std::fs::remove_dir_all(&dir2));
 }
 
+/// B339: installs run [`PARALLEL`] at a time, and one asked for again while it is queued or running
+/// is left to finish. K45: the store holds its answers while they are queued, so no install can end
+/// between the two asks (one that did was installed twice and counted twice under load).
 #[test]
 fn installs_run_a_few_at_a_time() {
     let fake = Fake::start();
@@ -747,19 +755,25 @@ fn installs_run_a_few_at_a_time() {
             entry(m, "main", None)
         })
         .collect();
+    fake.routes.lock().unwrap().held = true;
     for e in &all {
         s.install(e);
         s.install(e);
     }
     assert!(s.busy());
-    let mut done = 0;
+    assert_eq!(s.shared.jobs.lock().unwrap().running, PARALLEL);
+    fake.routes.lock().unwrap().held = false;
+    let mut done = Vec::new();
     let end = Instant::now() + Duration::from_secs(30);
-    while done < all.len() && Instant::now() < end {
+    while done.len() < all.len() && Instant::now() < end {
         assert!(s.shared.jobs.lock().unwrap().running <= PARALLEL);
-        done += s.take().iter().filter(|e| matches!(e, Event::Installed(_, Ok(_)))).count();
+        done.extend(s.take().into_iter().filter_map(|e| if let Event::Installed(k, got) = e { Some((k, got)) } else { None }));
         std::thread::sleep(Duration::from_millis(2));
     }
-    assert_eq!(done, all.len());
+    assert!(!s.busy());
+    done.extend(s.take().into_iter().filter_map(|e| if let Event::Installed(k, got) = e { Some((k, got)) } else { None }));
+    done.sort();
+    assert_eq!(done, all.iter().map(|e| (e.key(), Ok(e.meta.name.clone()))).collect::<Vec<_>>());
     assert_eq!(track_mods::music_packs(&mods).len(), all.len());
     let _ = std::fs::remove_dir_all(&dir);
 }
