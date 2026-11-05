@@ -652,7 +652,11 @@ impl Flight {
     /// what a frame's listeners read. A caller that has moved the body by hand (a fixture's start, a
     /// spawn) calls this before the next frame.
     pub fn remeasure(&mut self, acos: &AcosTable) {
-        self.measure.flight(&self.body, acos);
+        if self.mxvatv {
+            self.measure.flight_mxvatv(&self.body, acos);
+        } else {
+            self.measure.flight(&self.body, acos);
+        }
         self.attitude = self.measure.attitude(self.attitude.flown, &self.body);
         self.air = self.measure.air(&self.surfaces, &self.body);
     }
@@ -1158,7 +1162,11 @@ impl Flight {
             t.probe(ground, &mount);
         }
         for t in &mut self.tires {
-            t.force(&mut self.body, &mount, h);
+            if self.mxvatv {
+                t.force_mxvatv(&mut self.body, &mount, h);
+            } else {
+                t.force(&mut self.body, &mount, h);
+            }
         }
         // The Biplane acceleration modifier's harder braking (P116), through the centre of gravity:
         // k times the force at the contacts would pitch the plane onto its nose against a gravity that

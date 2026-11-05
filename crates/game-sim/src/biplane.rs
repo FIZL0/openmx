@@ -1671,6 +1671,9 @@ impl WheelBody for Body {
     fn add_velocity(&mut self, v: Vf) {
         Body::add_velocity(self, v);
     }
+    fn add_velocity_quiet(&mut self, v: Vf) {
+        self.velocity = add_xyz(self.velocity, v);
+    }
     fn add_force(&mut self, f: Vf) {
         Body::add_force(self, f);
     }
@@ -1880,6 +1883,18 @@ impl Measure {
         self.up = self.up.merge(Dest::XYZ, self.matrix.0[1]);
     }
 
+    /// SLUS-21104's [`Measure::flight`] (MD101b): the same, but the matrix is MX vs. ATV's
+    /// quaternion frame ([`crate::atv_moto::quat_frame`]: the diagonal `1 - (2a² + 2b²)` where MX
+    /// Unleashed's is `2w² - 1 + 2a²`), and the forward and up rows its. The tires read the frame
+    /// (their hub and lean, [`Tire::probe`]).
+    pub fn flight_mxvatv(&mut self, body: &Body, table: &AcosTable) {
+        self.flight(body, table);
+        let origin = self.matrix.0[3];
+        self.matrix = Mat4(crate::atv_moto::quat_frame(body.quat, origin));
+        self.forward = self.forward.merge(Dest::XYZ, self.matrix.0[2]);
+        self.up = self.up.merge(Dest::XYZ, self.matrix.0[1]);
+    }
+
     /// What [`controls`] and [`autopilot`] read, off this measure and the body.
     pub fn attitude(&self, flown: bool, body: &Body) -> Attitude {
         Attitude {
@@ -1930,6 +1945,11 @@ pub trait WheelBody {
     fn set_position(&mut self, at: Vf);
     /// An instant change of velocity.
     fn add_velocity(&mut self, v: Vf);
+    /// An instant change of velocity written straight into the body, nothing else told: SLUS-21104's
+    /// strut (MD101b). A body with nothing beside its velocity to tell takes [`WheelBody::add_velocity`].
+    fn add_velocity_quiet(&mut self, v: Vf) {
+        self.add_velocity(v);
+    }
     /// A world-frame force through the centre of mass.
     fn add_force(&mut self, f: Vf);
     /// A world-frame force at a world point, its moment masked lane by lane.
@@ -2138,6 +2158,23 @@ impl Tire {
     /// into the ground, but it clamps the compression first and then takes the excess from the clamped
     /// value, so the position moves by `normal · 0`; the velocity and force parts do happen.
     pub fn strut(&mut self, body: &mut impl WheelBody, m: &Mount, dt: F) {
+        self.strut_with(body, m, dt, false);
+    }
+
+    /// [`Tire::force`] as SLUS-21104 runs it (MD101b): [`Tire::strut_mxvatv`], then the friction.
+    pub fn force_mxvatv(&mut self, body: &mut impl WheelBody, m: &Mount, dt: F) {
+        self.strut_mxvatv(body, m, dt);
+        self.roll(body, m, dt);
+    }
+
+    /// [`Tire::strut`] as SLUS-21104 runs it: past full compression the velocity into the ground is
+    /// written straight into the body's ([`WheelBody::add_velocity_quiet`]), so the body's shock words
+    /// never see a landing.
+    pub fn strut_mxvatv(&mut self, body: &mut impl WheelBody, m: &Mount, dt: F) {
+        self.strut_with(body, m, dt, true);
+    }
+
+    fn strut_with(&mut self, body: &mut impl WheelBody, m: &Mount, dt: F, quiet: bool) {
         self.compression = F::ZERO;
         self.touching = false;
         if self.below || self.held {
@@ -2166,7 +2203,12 @@ impl Tire {
                     let excess = self.compression - self.max_compression;
                     let pos = body.position();
                     body.set_position(plus(pos, scaled(n, F(PUSH_OUT) * excess)));
-                    body.add_velocity(scaled(n, -dot(body.velocity(), n).min(F::ZERO)));
+                    let kill = scaled(n, -dot(body.velocity(), n).min(F::ZERO));
+                    if quiet {
+                        body.add_velocity_quiet(kill);
+                    } else {
+                        body.add_velocity(kill);
+                    }
                     body.add_force(scaled(n, -dot(body.force(), n).min(F::ZERO)));
                 }
                 let lever = minus(self.contact, body.position());

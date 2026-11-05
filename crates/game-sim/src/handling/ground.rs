@@ -154,3 +154,36 @@ pub fn surface(g: &Ground) -> u8 {
     }
     g.surfaces[corner]
 }
+
+/// **SLUS-21104's terrain as a [`crate::world::World`]** (MD101b): the ground MX vs. ATV's biplane's
+/// tires stand on, for a [`crate::flight::Flight::new_mxvatv`] over a map's terrain.
+///
+/// The plane's tire probe hands the terrain object (the tire's `+0x134`) the bottom of the tire and
+/// gets back the point moved onto the ground, the normal into its `+0xd0` and the surface into its
+/// record byte (`+0xb0`): the wheels' ground query ([`atv_ground::query`]). [`World::ground`] is that
+/// query, its normal buffer starting straight up; [`World::surface`] asks it again at the ground
+/// point and answers the record (none where the query writes none: 0).
+///
+/// Nothing solid: the plane's collision record and the props are not SLUS-21104's yet.
+///
+/// [`World::ground`]: crate::world::World::ground
+/// [`World::surface`]: crate::world::World::surface
+#[derive(Clone, Copy, Debug)]
+pub struct Under<'a>(pub Terrain<'a>);
+
+impl crate::world::World for Under<'_> {
+    fn ground(&mut self, at: Vf) -> (Vf, Vf) {
+        let mut record = 0;
+        self.0.ground(at, UP, &mut record)
+    }
+
+    fn surface(&mut self, at: Vf) -> u8 {
+        let mut record = 0;
+        self.0.ground(at, UP, &mut record);
+        record
+    }
+
+    fn solid(&mut self, _bundle: &crate::collide::Bundle, _record: &mut crate::collide::Record) -> bool {
+        false
+    }
+}
