@@ -327,14 +327,15 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         s.record.rays.clone_from(&h.record.rays);
     }
     // A plane's marker keeps no ray probe or bike mesh, as the plane does not: this machine's.
-    let probe = sim.plane.as_ref().map(|here| (here.rays.clone(), here.bike.clone(), here.hull.clone()));
-    if let Some((rays, bike, hull)) = &probe {
+    let probe = sim.plane.as_ref().map(|here| (here.rays.clone(), here.bike.clone(), here.hull.clone(), here.mxvatv));
+    if let Some((rays, bike, hull, mxvatv)) = &probe {
         let sets = std::iter::once(&mut markers.slots).chain(markers.away.iter_mut().map(|s| &mut s.slots));
         for slot in sets.flatten().flatten() {
             if let crate::markers::Mark::Plane(f) = &mut **slot {
                 f.rays = rays.clone();
                 f.bike = bike.clone();
                 f.hull = hull.clone();
+                f.mxvatv = *mxvatv;
                 f.wreck = sim.plane.as_ref().and_then(|here| here.wreck.clone());
             }
         }
@@ -347,6 +348,9 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         p.bike = here.bike.clone();
         p.hull = here.hull.clone();
         p.wreck = here.wreck.clone();
+        // Which game's steps fly it (MD100) is the machine's, as its probe is: off the wire, so MX
+        // Unleashed's bytes are unchanged, and this machine's again.
+        p.mxvatv = here.mxvatv;
     }
     let here = &sim.rider;
     rider.set = here.set.clone();
@@ -892,7 +896,8 @@ wire!(crate::wreck_sound::Clocks { voice, clank, clank_last, was });
 wire!(crate::rider_anim::Clocked { played, snapshot });
 
 /// The plane by hand: its ray probe's geometry (S48's) is a constant of the disc, kept local like the
-/// rider's set; [`decode`] puts this machine's back.
+/// rider's set, and so is which game's steps fly it ([`crate::flight::Flight::mxvatv`], the machine's
+/// skin's); [`decode`] puts this machine's back.
 impl Wire for crate::flight::Flight {
     fn put(&self, out: &mut Vec<u8>) {
         let Self { joystick, autopilot, engine, aero, body, measure, tires, cg_braking, max_g, max_g_roll, pad, surfaces, attitude, air, crash, gravity, gravity_scale, mass, inv_inertia, edge_scale, wrecks, spawn, spawn_up, area, noise, rng, collider, record, rays: _, nearby, bike: _, hull: _, heard: _, wreck: _, mxvatv: _ } = self;

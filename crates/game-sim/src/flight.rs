@@ -192,8 +192,8 @@ pub struct Flight {
     /// the aerodynamics and the edge test and throw are SLUS-21104's twins of MX Unleashed's
     /// ([`biplane::controls_mxvatv`] and the rest), and the body steps as SLUS-21104's later body
     /// ([`Body::integrate_mxvatv`], MD101a). Off, as every MX Unleashed plane is built. Not in
-    /// the hash walk nor on the netplay wire, so MX Unleashed's hashes and snapshots are unchanged; a
-    /// snapshot taken back is MX Unleashed's.
+    /// the hash walk nor on the netplay wire, so MX Unleashed's hashes and snapshots are unchanged: a
+    /// snapshot taken back, and a marker put back, take this machine's (MD100), as the ray probe.
     pub mxvatv: bool,
 }
 
@@ -446,6 +446,7 @@ impl Flight {
         }
         back.rays = self.rays.clone();
         back.bike = self.bike.clone();
+        back.mxvatv = self.mxvatv;
         *self = back;
     }
 

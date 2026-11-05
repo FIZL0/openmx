@@ -511,3 +511,47 @@ fn the_sync_test_catches_state_that_is_not_saved() {
     let m = sync_test(&mut game, 120, 2).expect_err("a leak the sync test did not see");
     assert!(!m.mismatched_frames.is_empty() && m.current_frame > 2, "{m:?}");
 }
+
+/// MD100: which game's steps fly the plane ([`game_sim::flight::Flight::mxvatv`]) is the machine's,
+/// as its ray probe is: off the wire, so a ride's bytes are the same with it on or off, and a
+/// snapshot taken back, its plane markers and a marker put back keep this machine's.
+#[test]
+fn an_mxvatv_planes_switch_is_this_machines_through_a_snapshot() {
+    use game_sim::flight::Flight;
+    use game_sim::markers::{Mark, Set, Vehicle};
+    use game_sim::phy::Plane;
+    let flying = |mxvatv: bool| {
+        let mut sim = players::start();
+        let plane = Flight::new(&Plane::read_bytes(b""));
+        let mark = Mark::Plane(plane.clone());
+        let mut slots = vec![None; game_sim::markers::SLOTS];
+        slots[1] = Some(Box::new(mark));
+        sim.markers.put(Set { on: Vehicle::Plane, slots, at: 1 });
+        sim.plane = Some(Flight { mxvatv, ..plane });
+        sim
+    };
+    let (on, off) = (flying(true), flying(false));
+    let bytes = snapshot::encode(&on);
+    // MX Unleashed's bytes: the switch adds none.
+    assert_eq!(bytes, snapshot::encode(&off), "the switch is on the wire");
+    let marked = |sim: &Sim| sim.markers.slots_of(Vehicle::Plane).unwrap()[1].as_ref().and_then(|m| m.flight()).unwrap().mxvatv;
+    for here in [true, false] {
+        let mut there = flying(here);
+        snapshot::decode(&mut there, &bytes).unwrap();
+        assert_eq!(there.plane.as_ref().unwrap().mxvatv, here, "decoded onto a plane with the switch {here}");
+        assert_eq!(marked(&there), here, "a plane marker decoded onto a plane with the switch {here}");
+        assert_eq!(snapshot::encode(&there), bytes, "re-encoded differently with the switch {here}");
+        // and the restore of a saved state, the rollback's
+        let mut back = flying(here);
+        let saved = snapshot::save(&back);
+        back.plane.as_mut().unwrap().mxvatv = !here;
+        snapshot::restore(&mut back, &saved);
+        assert_eq!(back.plane.as_ref().unwrap().mxvatv, here, "restored with the switch {here}");
+    }
+    // A marker read off the wire (or a file) is MX Unleashed's; put back, the plane flies on as this one.
+    let mut plane = Flight { mxvatv: true, ..Flight::new(&Plane::read_bytes(b"")) };
+    let mark = snapshot::decode_flights(&snapshot::encode_flights(&[Some(Box::new(plane.clone()))])).unwrap().remove(0).unwrap();
+    assert!(!mark.mxvatv);
+    plane.put_back(&mark);
+    assert!(plane.mxvatv, "a marker put back flies MX Unleashed's steps");
+}

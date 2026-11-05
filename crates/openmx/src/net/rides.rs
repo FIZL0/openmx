@@ -419,6 +419,8 @@ impl Rides<'_> {
             && f.rays.is_none()
         {
             f.rays = t.rays.clone();
+            // And which game's steps fly it (MD100), the ride's plane's too.
+            f.mxvatv = t.mxvatv;
         }
         // And a seat decoded in a car (S249) whose collision came without its ray probe, the car's
         // `m.col`, another constant the codec leaves out: any seat's copy's, the file being the car's.
