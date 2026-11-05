@@ -671,3 +671,50 @@ pub fn put_back(m: &mut impl Wrecks, snap: u32, kind: u32) {
     }
     m.out(Out::Camera(b + 0x43c));
 }
+
+/// The wheel's rest frame the wheel reset puts back on its four frames that are not the origin
+/// (0, 1, 0, 1): rodata.
+pub const WHEEL_REST: u32 = 0x0039_7000;
+
+/// **The engine's reset** ([`Out::Engine`], on the engine): the revs to idle (`+0xa0` from `+0x54`),
+/// `+0xa4` and `+0xa8` zero, then [`engine_gear`] 1.
+pub fn engine_reset(m: &mut impl Wrecks, engine: u32) {
+    let idle = m.word(engine + 0x54);
+    m.set(engine + 0xa0, idle);
+    m.set(engine + 0xa4, 0);
+    m.set(engine + 0xa8, 0);
+    engine_gear(m, engine, 1);
+}
+
+/// The engine put in gear `g`: for `0 < g <= gears` (`+0x6c`, signed), the gear (`+0x5c`), the
+/// overall ratio (`+0x74`: the final drive `+0x34` times the gear's ratio in the table at `+0x70`)
+/// and its reciprocal (`+0x78`). Out of range it does nothing. [`crate::r#move::set_gear`] on
+/// the engine's words.
+pub fn engine_gear(m: &mut impl Wrecks, engine: u32, g: i32) {
+    if g <= 0 || (m.word(engine + 0x6c) as i32) < g {
+        return;
+    }
+    m.set(engine + 0x5c, g as u32);
+    let table = m.word(engine + 0x70);
+    let drive = f(m, engine + 0x34);
+    let gear = m.word(engine + 0x5c);
+    let r = drive * f(m, (gear << 2).wrapping_add(table).wrapping_sub(4));
+    m.set(engine + 0x74, r.to_bits());
+    m.set(engine + 0x78, (F::ONE / r).to_bits());
+}
+
+/// **A wheel's reset** ([`Out::Wheel`], on the wheel): its ray, touch and roughness words zero
+/// (`+0xd0`, `+0xd4`, `+0x1d4`, `+0x224`, `+0x228`, `+0x210`, `+0xf0`, `+0xf8`), six frames to the
+/// origin (`+0x140`, `+0x170`, `+0x180`, `+0x190`, `+0x840`, `+0x850`) and two to [`WHEEL_REST`]
+/// (`+0x130`, `+0x200`).
+pub fn wheel_reset(m: &mut impl Wrecks, wheel: u32) {
+    for o in [0xd0, 0xd4, 0x1d4, 0x224, 0x228, 0x210, 0xf0, 0xf8] {
+        m.set(wheel + o, 0);
+    }
+    for o in [0x140, 0x170, 0x180, 0x190, 0x840, 0x850] {
+        copy_quad(m, wheel + o, ORIGIN);
+    }
+    for o in [0x130, 0x200] {
+        copy_quad(m, wheel + o, WHEEL_REST);
+    }
+}
