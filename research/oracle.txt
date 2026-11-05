@@ -9024,6 +9024,26 @@ atv_smooth_noise            atv 0x00134580 = the shared smooth noise (f12 time -
 atv_powf                    atv 0x0034ff40 = powf
 atv_curve_table_ptr         atv 0x003eab20 = the pointer to the sine/cosine curve table the autopilot reads
 
+# MD101 — MD80a's biplane flights re-recorded (research/md80a/fly.sh) and replayed whole in the interpreter
+# (tests/mxvatv_biplane_replay.rs; journal research/journal/2026-11-05-md101-mxvatv-biplane-replay). Frame
+# 0x00204040 on the sim object (vtable 0x003b9320 at +4: 0x0065bcc0 in biplane.ee.bin), dt 0x3d08850a, $gp
+# 0x003dbaf0. Hooks: DIntr/EIntr, the net send 0x004e7e70, the syscall stubs (0x2f -> 1, else a0), the
+# thread delay 0x0033ff58 (mfc0 Status, then an alarm and WaitSema) and the sound driver's IOP call
+# 0x00182c90 (spins on 0x00390320/0x00390328 until the IOP's reply) -> 0.
+# Phase: vsync 0x003fa6d8 (+2 a frame; images 27579 biplane, 29999 biplane3). Tape tick t's input is read
+# by frame t + 2 from the image. biplane3's row 0 is frame 1; biplane's row 0 is the image itself (every
+# biplane row one frame behind its vsync). Late rows: under load the recorder reads the vsync a frame
+# before the blocks, so the row holds the next frame (biplane: 118 of 1058).
+# Input step atv_biplane_input: gate plane +0xbc4 (the local player's) and atv_vehicle_live() == 1; each
+# command's control is the binding lookup's slot in the controls array (idx*0x18, +4 the strength); stores
+# +0x310/+0x314/+0x10f4/+0x10f8/+0x10fc as MX Unleashed's PlaneInput::from_sticks. Commands: bank left 0,
+# right 1, dive 2, climb 3, throttle up 0x14, down 0x15, rudder left 0x16, right 0x17.
+atv_vehicle_live            atv 0x00249330 = 1 while the vehicle takes input
+atv_binding_lookup          atv 0x00118e10 = (front end, command, 2, 10, player) -> the control slot
+atv_front_end_ptr           atv 0x003eab60 = the pointer to the pointer to the front end the lookup takes
+atv_delay_thread            atv 0x0033ff58 = DelayThread (kernel Status check, alarm, WaitSema)
+atv_sound_iop_call          atv 0x00182c90 = the sound driver's SIF RPC to the IOP (waits for its reply)
+
 # MD89 — the quadtree sub-database's moving-entry virtuals (game-sim atv_spatial.rs Tree; atv_spatial's Database
 # dispatches List/Tree). Journal: research/journal/2026-11-02-md75-atv-frame/8-spatial-move.md "MD89". Proof:
 # tests/atv_spatial.rs (generated trees laid at 0x01f80000 in atv-r-spawn.ee.bin; the image's own tree 0x006547c0).

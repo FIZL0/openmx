@@ -1299,3 +1299,21 @@ impl PlaneInput {
         PlaneInput::from_sticks(stick, |c| table.value(pad, crate::bindings::Command(c as u8)))
     }
 }
+
+impl PlaneCommand {
+    /// The command's number in MX vs. ATV Unleashed's binding table (MD101): its biplane's input step
+    /// is MX Unleashed's ([`PlaneInput::from_sticks`], proved word for word on SLUS-21104's own) but
+    /// looks the throttle up as 0x14 and 0x15 and the rudder as 0x16 and 0x17.
+    pub const fn mxvatv(self) -> u8 {
+        match self {
+            PlaneCommand::BankLeft => 0x00,
+            PlaneCommand::BankRight => 0x01,
+            PlaneCommand::Dive => 0x02,
+            PlaneCommand::Climb => 0x03,
+            PlaneCommand::ThrottleUp => 0x14,
+            PlaneCommand::ThrottleDown => 0x15,
+            PlaneCommand::RudderLeft => 0x16,
+            PlaneCommand::RudderRight => 0x17,
+        }
+    }
+}
