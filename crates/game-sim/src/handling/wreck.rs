@@ -40,8 +40,8 @@
 //! caller that wants the port serves them with this module's functions.
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
-use crate::air::normalize;
-use ps2_float::vu::Dest;
+use crate::air::{cross, normalize};
+use ps2_float::vu::{Dest, Field};
 use ps2_float::{F, Vf, fpu};
 
 /// The quadword the wreck test compares a handed-in position with, and the unwreck's rest (0, 0, 0,
@@ -134,6 +134,28 @@ pub enum Out {
     /// The terrain's normal under a spot (the ground query: the terrain, the spot, out, 0, 0), asked
     /// through [`Wrecks::normal`].
     Normal { terrain: u32, at: u32 },
+    /// F31b5e, the ground reset's ([`ground`]): the node hung back in the bike's scene (the node, the
+    /// bike's `+0xb0`, 1, 1), and the bike's orient (its vt `+0xf0`: the position, forward and up
+    /// quadwords, [`orient`]).
+    Rehang { node: u32, to: u32 },
+    Orient { at: u32, forward: u32, up: u32 },
+    /// The body's (its vt at `+0x110`) staged position (`+0x10`) and velocity (`+0x14`) from a
+    /// quadword in RAM, its orientation and spin (`+0x58`: the quaternion handed, the spin in RAM), and
+    /// the staged state made its own (`+0x3c`): [`body_position`], [`body_velocity`],
+    /// [`body_orientation`], [`body_commit`].
+    BodyPosition(u32),
+    BodyVelocity(u32),
+    BodyOrientation { q: Vf, spin: u32 },
+    BodyCommit,
+    /// The orient's: the node's position set in the world (no frame of reference), the node turned
+    /// along the forward and up (no frame of reference, the axes as they are), the bike's spatial
+    /// update (its vt `+0xe4`), the node's bounds brought up to date, and a collidable brought to its
+    /// node (the part sync).
+    NodeSet { node: u32, at: Vf },
+    NodeAim { node: u32, forward: Vf, up: Vf },
+    Spatial,
+    NodeBounds(u32),
+    PartSync(u32),
 }
 
 /// The wreck's outside world: words by address (the bike is `bike`), and its calls. A call's answer
@@ -716,5 +738,158 @@ pub fn wheel_reset(m: &mut impl Wrecks, wheel: u32) {
     }
     for o in [0x130, 0x200] {
         copy_quad(m, wheel + o, WHEEL_REST);
+    }
+}
+
+/// The body's staged position (vt `+0x10`): the quadword at `at` to its `+0x40`.
+pub fn body_position(m: &mut impl Wrecks, body: u32, at: u32) {
+    copy_quad(m, body + 0x40, at);
+}
+
+/// The body's staged velocity (vt `+0x14`): the quadword at `at` to its `+0x50`.
+pub fn body_velocity(m: &mut impl Wrecks, body: u32, at: u32) {
+    copy_quad(m, body + 0x50, at);
+}
+
+/// The body's staged orientation (vt `+0x58`): the quaternion to its `+0x180` (four words), the
+/// quadword at `spin` to its `+0x160`.
+pub fn body_orientation(m: &mut impl Wrecks, body: u32, q: Vf, spin: u32) {
+    for (k, x) in q.to_bits().into_iter().enumerate() {
+        m.set(body + 0x180 + 4 * k as u32, x);
+    }
+    copy_quad(m, body + 0x160, spin);
+}
+
+/// `v` turned by the quaternion `q` as the body's VU0 code does it: `t = q × v + q.w v`, then
+/// `q × t + q (q.x v.x) + q (q.y v.y) + q (q.z v.z) + q.w t` (`vopmula`, `vmadda*`, `vopmsub`, in
+/// that order); the `w` `v`'s.
+pub fn turned(q: Vf, v: Vf) -> Vf {
+    let t = Vf::opmsub(Vf::madd(Vf::opmula(q, v), v, q.bc(Field::W)), v, q);
+    let p = q.mul(v);
+    let acc = Vf::madd(Vf::madd(Vf::madd(Vf::opmula(q, t), q, p.bc(Field::X)), q, p.bc(Field::Y)), q, p.bc(Field::Z));
+    v.merge(Dest::XYZ, Vf::opmsub(Vf::madd(acc, t, q.bc(Field::W)), t, q))
+}
+
+/// **The body's staged state made its own** (vt `+0x3c`): the centre (`+0x60`, `+0x70`) at the staged
+/// position (`+0x40`), the velocity (`+0x80`) the staged one (`+0x50`), the accumulators (`+0x90`
+/// .. `+0xd0`) to [`ORIGIN`]; the orientation (`+0x170`, `+0x190`) the staged one (`+0x180`), the spin
+/// (`+0x1d0`) the staged one (`+0x160`); the centre moved by the centre of gravity's offset (`+0x1a0`)
+/// turned by it ([`turned`], `xyz`), `+0x60` the same; then `+0x1b0`, `+0x1c0`, `+0x1e0`, `+0x1f0`,
+/// `+0x200` to [`ORIGIN`].
+pub fn body_commit(m: &mut impl Wrecks, body: u32) {
+    for (to, from) in [(0x60, 0x40), (0x70, 0x40), (0x80, 0x50)] {
+        copy_quad(m, body + to, body + from);
+    }
+    for o in [0xa0, 0x90, 0xc0, 0xd0, 0xb0] {
+        copy_quad(m, body + o, ORIGIN);
+    }
+    for to in [0x170, 0x190] {
+        for k in 0..4 {
+            let x = m.word(body + 0x180 + 4 * k);
+            m.set(body + to + 4 * k, x);
+        }
+    }
+    copy_quad(m, body + 0x1d0, body + 0x160);
+    let r = turned(quad(m, body + 0x190), quad(m, body + 0x1a0));
+    let c = quad(m, body + 0x70);
+    set_quad(m, body + 0x70, c.merge(Dest::XYZ, c.add(r)));
+    copy_quad(m, body + 0x60, body + 0x70);
+    for o in [0x1b0, 0x1c0, 0x1e0, 0x1f0, 0x200] {
+        copy_quad(m, body + o, ORIGIN);
+    }
+}
+
+/// **The bike's orient** (its vt `+0xf0`, [`Out::Orient`]), on its position, forward and up
+/// quadwords: the up made square to the forward (`(forward × up) × forward`, its `w` the forward's)
+/// and both normalized ([`normalize`]), the position's `w` 1.0; the body staged there
+/// ([`Out::BodyPosition`]) and turned to the frame's quaternion ([`crate::math::basis`] then
+/// [`crate::math::mat4_to_quat`]; [`Out::BodyOrientation`] with no spin, [`ORIGIN`]), and made so
+/// ([`Out::BodyCommit`]). The node is set at the body's centre less its turned centre-of-gravity
+/// offset (`xyz`, the centre's `w`) and turned along the two axes; the spatial update, the node's
+/// bounds with bit 1 of the flag byte `+0x45`, and with bit 0 of `+0x44` the part sync of the frame
+/// (`+0xd0`) and the riding part (`+0xcc`), each there.
+pub fn orient(m: &mut impl Wrecks, at: u32, forward: u32, up: u32) {
+    let (a, b) = (quad(m, forward), quad(m, up));
+    let t = a.merge(Dest::XYZ, cross(a, b));
+    set_quad(m, up, t.merge(Dest::XYZ, cross(t, a)));
+    for o in [forward, up] {
+        let v = quad(m, o);
+        set_quad(m, o, normalize(v));
+    }
+    m.set(at + 0xc, F::ONE.to_bits());
+    let (a, b) = (quad(m, forward), quad(m, up));
+    let q = crate::math::mat4_to_quat(&crate::math::basis(quad(m, ORIGIN), a, b, false, true));
+    m.out(Out::BodyPosition(at));
+    m.out(Out::BodyOrientation { q, spin: ORIGIN });
+    m.out(Out::BodyCommit);
+    let body = w(m, BODY);
+    let r = turned(quad(m, body + 0x190), quad(m, body + 0x1a0));
+    let c = quad(m, body + 0x70);
+    let node = w(m, 0xe4);
+    m.out(Out::NodeSet { node, at: c.merge(Dest::XYZ, c.sub(r)) });
+    let node = w(m, 0xe4);
+    let (forward, up) = (quad(m, forward), quad(m, up));
+    m.out(Out::NodeAim { node, forward, up });
+    m.out(Out::Spatial);
+    let b = m.bike();
+    if byte(m, b + 0x45) & 2 != 0 {
+        let node = w(m, 0xe4);
+        m.out(Out::NodeBounds(node));
+    }
+    if byte(m, b + 0x44) & 1 != 0 {
+        for o in [0xd0, 0xcc] {
+            let p = w(m, o);
+            if p != 0 {
+                m.out(Out::PartSync(p));
+            }
+        }
+    }
+}
+
+/// **The ground reset** ([`Out::Ground`], the put-back's): with bit 1 of the flag byte `+0x45` the
+/// node unhooked; the frame's (`+0xd0`) database entry (its `+0x18`) unhooked if there is a frame, the
+/// riding part's (`+0xcc`) and `+0xd4`'s if there is a riding part; the body's staged velocity to
+/// [`ORIGIN`] ([`Out::BodyVelocity`]); the bike's orient on `+0x50`, `+0x60`, `+0x70` ([`Out::Orient`]);
+/// with that bit the node hung back on `+0xb0`; and with bit 0 of `+0x44` each of the frame, the
+/// riding part and `+0xd4` (the last two with the riding part) turned on and attached in the world
+/// (`+0xb4`, `+0xc0`).
+pub fn ground(m: &mut impl Wrecks) {
+    let b = m.bike();
+    if byte(m, b + 0x45) & 2 != 0 {
+        let node = w(m, 0xe4);
+        m.out(Out::Unhook(node));
+    }
+    let frame = w(m, 0xd0);
+    if frame != 0 {
+        m.out(Out::Unhook(frame + 0x18));
+    }
+    let riding = w(m, 0xcc);
+    if riding != 0 {
+        m.out(Out::Unhook(riding + 0x18));
+        let p = w(m, 0xd4);
+        m.out(Out::Unhook(p.wrapping_add(0x18)));
+    }
+    m.out(Out::BodyVelocity(ORIGIN));
+    m.out(Out::Orient { at: b + 0x50, forward: b + 0x60, up: b + 0x70 });
+    if byte(m, b + 0x45) & 2 != 0 {
+        let (node, to) = (w(m, 0xe4), w(m, 0xb0));
+        m.out(Out::Rehang { node, to });
+    }
+    if byte(m, b + 0x44) & 1 == 0 {
+        return;
+    }
+    fn on(m: &mut impl Wrecks, o: u32) {
+        let part = w(m, o);
+        m.out(Out::PartOn(part));
+        let part = w(m, o);
+        let (a, b) = (w(m, 0xb4), w(m, 0xc0));
+        m.out(Out::Attach { part, a, b });
+    }
+    if w(m, 0xd0) != 0 {
+        on(m, 0xd0);
+    }
+    if w(m, 0xcc) != 0 {
+        on(m, 0xcc);
+        on(m, 0xd4);
     }
 }

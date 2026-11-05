@@ -601,6 +601,27 @@ impl Scene {
         Some(())
     }
 
+    /// **The node turned along two axes** (F31b5e: `atv_node_aim` with no frame of reference and its
+    /// axes taken as they are, the put-back's): the frame of [`crate::math::basis`] (the rows the up
+    /// and forward normalized, `x` their cross, `w` 0) at the own frame's position, taken into the
+    /// parent's (its world frame brought up to date first, then inverted) if there is one; the position
+    /// row's `xyz` then put back to what it was (its `w` 1, or the product's with a parent), and
+    /// [`Scene::moved`].
+    pub fn aim(&mut self, n: usize, forward: Vf, up: Vf) {
+        let pos = self.nodes[n].local[3];
+        let m = crate::math::basis(pos, forward, up, false, true).0;
+        self.nodes[n].local = match self.nodes[n].parent {
+            Some(p) => {
+                self.update(p);
+                frame_mul(&m, &frame_inverse(&self.nodes[p].world))
+            }
+            None => m,
+        };
+        let row = &mut self.nodes[n].local[3];
+        *row = row.merge(Dest::XYZ, pos);
+        self.moved(n);
+    }
+
     /// **The node's bounds are to be gathered again** (MD75c), after its world frame is brought up to
     /// date: they are stale (bit 7), and the node has its own (bit 3) or none yet (bit 6 clear). The
     /// caller then makes the node's gather (its vt `+0x94`) and clears bit 7 ([`Scene::rebounded`]).
