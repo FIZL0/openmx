@@ -5071,6 +5071,9 @@ impl Updates for UpdateInRam<'_> {
             Out::NetDelta(a) => (vt(ee, 0x404), vec![bike, u(a)], vec![x]),
             Out::Walk(g) => (TAIL, vec![u(g)], vec![x]),
             Out::NodePlace { .. } | Out::Local { .. } | Out::Rotate { .. } => unreachable!("asked through vector()"),
+            Out::RunOpen(_) | Out::RunScore { .. } | Out::RunClose { .. } | Out::RunTally { .. } | Out::RunEnd { .. } => {
+                unreachable!("the stunt's start and end are the original's here")
+            }
         };
         self.call(f, &ints, &floats)
     }
@@ -6613,12 +6616,14 @@ fn call_name(c: &Call) -> String {
 /// [`steps::read`] reads before each: what the steps hand on (the gravity's record call, the
 /// preload's cue, a stunt's start and end, a wreck) the original's, run after the step's words are
 /// back, and the contacts the original's too. The noise is [`SmoothNoise::at_accumulated`] on the
-/// original's tables.
+/// original's tables. F31b5g: the gravity's record call is answered by the record's resolution
+/// ([`record::held`]); with `pure`, the rest are Rust's ([`StepsInRam::in_rust`]).
 struct StepsInRam<'a, 'm> {
     inner: StepInRam<'a>,
     map: &'m track::Terrain<'m>,
     noise: &'m mut Option<SmoothNoise>,
     answered: &'m mut BTreeMap<String, u32>,
+    pure: bool,
 }
 
 impl StepsInRam<'_, '_> {
@@ -6667,6 +6672,83 @@ impl StepsInRam<'_, '_> {
             c => panic!("the bike's steps hand on no {c:?}"),
         }
     }
+
+    /// F31b5g — what the steps hand on, with nothing handed to the interpreter: the preload's cue
+    /// dropped (a post no listener of the bike's reads: F31b5f's, and
+    /// [`replay_pure`]); the stunt's start and end
+    /// [`update::stunt_start`]'s and [`update::trick_end`]'s, the player's run's calls dropped
+    /// ([`RunDropped`]); the wreck [`wreck::enter`]'s. Answers whether it answered `c`.
+    fn in_rust(&mut self, c: Call, from: Call, k: &quad::Bike) -> bool {
+        let dt = self.inner.dt;
+        let ee = &mut *self.inner.ram.ee;
+        match c {
+            Call::PreloadCue => {}
+            Call::StartStunt(id) => {
+                assert_eq!(vt(ee, 0x4b8), STUNT_START_FN, "the bike's vt +0x4b8");
+                assert_eq!(update::stunt_start(&mut RunDropped { ee }, id, 1), 1);
+            }
+            Call::EndStunt => {
+                let id = match from {
+                    Call::Backflip(_) => k.flip_stunt,
+                    Call::SpinAir(_) => {
+                        let s = &k.parts.spin;
+                        if s.dir > 0 { s.stunt_left } else { s.stunt_right }
+                    }
+                    c => panic!("{c:?} ends no stunt"),
+                };
+                assert_eq!(vt(ee, 0x4ac), TRICK_END_FN, "the bike's vt +0x4ac");
+                update::trick_end(&mut RunDropped { ee }, id);
+            }
+            Call::Wreck(r) => {
+                assert_eq!(vt(ee, 0x368), WRECK_ENTER, "the bike's vt +0x368");
+                wreck::enter(&mut WreckInRam { ee, x: dt.0 }, u32::from(r));
+            }
+            _ => return false,
+        }
+        true
+    }
+}
+
+/// The bike's stunt start and trick end (vt `+0x4b8`, `+0x4ac`), and the player's run's calls they
+/// make (F31b5g).
+const STUNT_START_FN: u32 = 0x004e_6370;
+const TRICK_END_FN: u32 = 0x004e_4db0;
+const RUN_OPEN: u32 = 0x0046_a5b0;
+const RUN_SCORE: u32 = 0x0046_aae0;
+const RUN_CLOSE: u32 = 0x0046_b4c0;
+const RUN_TALLY: u32 = 0x0046_a760;
+const RUN_END: u32 = 0x0046_acf0;
+
+/// [`update::stunt_start`] and [`update::trick_end`] on the bike in RAM, the start's trick ends
+/// [`update::trick_end`]'s, the player's run's calls dropped.
+struct RunDropped<'a> {
+    ee: &'a mut Ee,
+}
+
+impl Updates for RunDropped<'_> {
+    fn bike(&self) -> u32 {
+        BIKE
+    }
+    fn word(&mut self, at: u32) -> u32 {
+        self.ee.u32_at(at)
+    }
+    fn set(&mut self, at: u32, w: u32) {
+        self.ee.set_u32(at, w);
+    }
+    fn out(&mut self, c: update::Out) -> u32 {
+        use update::Out;
+        match c {
+            Out::TrickEnd(id) => update::trick_end(self, id),
+            Out::Mark { .. } | Out::RunOpen(_) | Out::RunScore { .. } | Out::RunClose { .. } | Out::RunTally { .. } | Out::RunEnd { .. } => 0,
+            c => panic!("the stunt's start and end call no {c:?}"),
+        }
+    }
+    fn vector(&mut self, c: update::Out) -> update::Quad {
+        panic!("the stunt's start and end ask no vector of {c:?}")
+    }
+    fn noise(&mut self, _: F) -> F {
+        panic!("the stunt's start and end ask no noise")
+    }
 }
 
 impl Moto for StepsInRam<'_, '_> {
@@ -6687,6 +6769,11 @@ impl Moto for StepsInRam<'_, '_> {
             let t = if t[0] != 0 { t[0] } else { t[1] };
             (t != 0).then(|| ground::read_terrain(&m, t, Some(self.map)))
         };
+        // F31b5g: the gravity's record call answered by the record's resolution.
+        let record_at = ee.u32_at(BIKE + seed::RECORD);
+        if matches!(c, Call::Gravity) {
+            k.contacts = record::held(&m, record_at);
+        }
         let mut s = quad::Steps {
             bike: k,
             rest: Vec::<Call>::new(),
@@ -6704,11 +6791,20 @@ impl Moto for StepsInRam<'_, '_> {
                 set.push((a, w));
             }
         }
+        // The record's words and the whole body as the resolution left them (as read, when it did not
+        // run), then the listener's view of the body over them.
+        if let Some(h) = &k.contacts {
+            set.extend(record::held_words(h, record_at, &|a| ee.u32_at(a)));
+        }
         for (a, w) in set {
             self.inner.ram.ee.set_u32(a, w);
         }
         self.inner.write(q, body);
         for r in rest {
+            if self.pure && self.in_rust(r, c, &k) {
+                *self.answered.entry(format!("= {}", call_name(&r))).or_default() += 1;
+                continue;
+            }
             *self.answered.entry(format!("> {}", call_name(&r))).or_default() += 1;
             self.hand_on(r, c, &k);
         }
@@ -6726,7 +6822,7 @@ impl bike::Rides for StepsInRam<'_, '_> {
 }
 
 /// [`port_head`] with its steps [`StepsInRam`]'s.
-fn steps_head(ee: &mut Ee, dt: F, map: &track::Terrain<'_>, noise: &mut Option<SmoothNoise>, answered: &mut BTreeMap<String, u32>) {
+fn steps_head(ee: &mut Ee, dt: F, map: &track::Terrain<'_>, noise: &mut Option<SmoothNoise>, answered: &mut BTreeMap<String, u32>, pure: bool) {
     let body = ee.u32_at(BIKE + seed::BODY);
     let (wheels, record) = (the_wheels(ee), ee.u32_at(BIKE + seed::RECORD));
     let words = |ee: &Ee| (bike::read_params(&|a| ee.u32_at(a), BIKE), bike::read_held(&|a| ee.u32_at(a), BIKE));
@@ -6735,7 +6831,7 @@ fn steps_head(ee: &mut Ee, dt: F, map: &track::Terrain<'_>, noise: &mut Option<S
     let was = axes;
     let ram = InRam { ee, wheels, record, body, last: Vec::new() };
     let inner = StepInRam { ram, rider: bike::Rider::default(), rider_last: Vec::new(), dt };
-    let mut m = StepsInRam { inner, map, noise, answered };
+    let mut m = StepsInRam { inner, map, noise, answered, pure };
     let (mut q, mut b) = m.inner.read();
     bike::ground_head(&p, &mut q, &mut b, held, &mut axes, dt, &mut m);
     m.inner.write(&q, &b);
@@ -6747,13 +6843,13 @@ fn steps_head(ee: &mut Ee, dt: F, map: &track::Terrain<'_>, noise: &mut Option<S
 }
 
 /// [`port_step`] with its steps [`StepsInRam`]'s.
-fn steps_step(ee: &mut Ee, dt: F, map: &track::Terrain<'_>, noise: &mut Option<SmoothNoise>, answered: &mut BTreeMap<String, u32>) {
+fn steps_step(ee: &mut Ee, dt: F, map: &track::Terrain<'_>, noise: &mut Option<SmoothNoise>, answered: &mut BTreeMap<String, u32>, pure: bool) {
     let body = ee.u32_at(BIKE + seed::BODY);
     let (wheels, record) = (the_wheels(ee), ee.u32_at(BIKE + seed::RECORD));
     let p = bike::read_params(&|a| ee.u32_at(a), BIKE);
     let ram = InRam { ee, wheels, record, body, last: Vec::new() };
     let inner = StepInRam { ram, rider: bike::Rider::default(), rider_last: Vec::new(), dt };
-    let mut m = StepsInRam { inner, map, noise, answered };
+    let mut m = StepsInRam { inner, map, noise, answered, pure };
     let (mut q, mut b) = m.inner.read();
     bike::ground_step(&p, &mut q, &mut b, dt, &mut m);
     m.inner.write(&q, &b);
@@ -6768,6 +6864,8 @@ struct PortSteps<'a, 'm> {
     answered: BTreeMap<String, u32>,
     heads: u32,
     steps: u32,
+    /// F31b5g: the steps hand nothing on ([`StepsInRam::in_rust`]).
+    pure: bool,
 }
 
 impl Dynamics for PortSteps<'_, '_> {
@@ -6784,7 +6882,7 @@ impl Dynamics for PortSteps<'_, '_> {
         for (a, w) in seed::body_words(&h.body, h.at) {
             h.ee.set_u32(a, w);
         }
-        steps_head(h.ee, dt, map, noise, &mut answered);
+        steps_head(h.ee, dt, map, noise, &mut answered, self.pure);
         h.body = seed::body(&|a| h.ee.u32_at(a), h.at);
         self.answered = answered;
         self.heads += 1;
@@ -6800,7 +6898,7 @@ impl Dynamics for PortSteps<'_, '_> {
         for (a, w) in seed::body_words(&x.body, x.at) {
             x.ee.set_u32(a, w);
         }
-        steps_step(x.ee, h, map, noise, &mut answered);
+        steps_step(x.ee, h, map, noise, &mut answered, self.pure);
         x.body = seed::body(&|a| x.ee.u32_at(a), x.at);
         self.answered = answered;
         self.steps += 1;
@@ -6850,7 +6948,7 @@ fn steps_frame(ee: &mut Ee, dt: F, map: &track::Terrain<'_>, noise: &mut Option<
     let at = ee.u32_at(BIKE + seed::BODY);
     let body = seed::body(&|a| ee.u32_at(a), at);
     let post = PortPost(PortStep(PortHead(Hybrid { ee, body, at, integrated: 0 }), 0), 0);
-    let mut h = PortSteps { post, map, noise, answered: BTreeMap::new(), heads: 0, steps: 0 };
+    let mut h = PortSteps { post, map, noise, answered: BTreeMap::new(), heads: 0, steps: 0, pure: false };
     world.step(dt, &mut h);
     let (body, heads, steps, posts, answered) = (h.post.0.0.0.body, h.heads, h.steps, h.post.1, h.answered);
     for (a, w) in seed::body_words(&body, at) {
@@ -6969,7 +7067,8 @@ fn ride_replays_bit_exact_on_quad_steps() {
     assert_eq!(w.len(), 459);
     assert!(w.iter().all(|w| !w), "the ride never wrecks");
     let handed: Vec<(&str, u32)> = all.iter().filter(|(k, _)| k.starts_with("> ")).map(|(k, &n)| (&k[2..], n)).collect();
-    assert_eq!(handed, [("GravityRecord", 1836)], "the gravity's record call, every substep");
+    // F31b5g: the gravity's record call is the record's resolution's ([`record::held`]).
+    assert_eq!(handed, [], "nothing handed on");
     for c in ["InputLimiter", "Clutch", "AutoShift", "HeadTail", "Gravity", "EngineUpdate", "Suspension", "TireForces", "WheelIntegrate"] {
         assert!(all.get(c).copied().unwrap_or(0) > 0, "the steps answered no {c}: {all:?}");
     }
@@ -6987,7 +7086,7 @@ fn flip_replays_bit_exact_on_quad_steps() {
     // Handed on: the preload's cue and the backflip's stunt once each; no stunt ends and no wreck
     // the steps ask for (the wreck on row 125 is the wreck test's).
     let handed: Vec<(&str, u32)> = all.iter().filter(|(k, _)| k.starts_with("> ")).map(|(k, &n)| (&k[2..], n)).collect();
-    assert_eq!(handed, [("GravityRecord", 1860), ("PreloadCue", 1), ("StartStunt", 1)]);
+    assert_eq!(handed, [("PreloadCue", 1), ("StartStunt", 1)]);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -7290,7 +7389,7 @@ impl Dynamics for PortPosts<'_, '_> {
 /// [`steps_frame`] with the bike's record's outside [`RecordsInRam`]'s and its PostProcess's
 /// callees [`PostsInRam`]'s. Answers as [`steps_frame`] does, the record's and the PostProcess's
 /// calls counted in with the steps'.
-fn posts_frame(ee: &mut Ee, dt: F, map: &track::Terrain<'_>, noise: &mut Option<SmoothNoise>) -> (u32, u32, u32, BTreeMap<String, u32>) {
+fn posts_frame(ee: &mut Ee, dt: F, map: &track::Terrain<'_>, noise: &mut Option<SmoothNoise>, pure: bool) -> (u32, u32, u32, BTreeMap<String, u32>) {
     let call = |ee: &mut Ee, f: u32, ints: &[u64], x: F| {
         ee.set(28, GP);
         ee.call(f, ints, &[x.0], BUDGET);
@@ -7317,7 +7416,7 @@ fn posts_frame(ee: &mut Ee, dt: F, map: &track::Terrain<'_>, noise: &mut Option<
     let at = ee.u32_at(BIKE + seed::BODY);
     let body = seed::body(&|a| ee.u32_at(a), at);
     let post = PortPost(PortStep(PortHead(Hybrid { ee, body, at, integrated: 0 }), 0), 0);
-    let mut h = PortPosts(PortSteps { post, map, noise, answered, heads: 0, steps: 0 });
+    let mut h = PortPosts(PortSteps { post, map, noise, answered, heads: 0, steps: 0, pure });
     world.step(dt, &mut h);
     let PortPosts(h) = h;
     let (body, heads, steps, posts, answered) = (h.post.0.0.0.body, h.heads, h.steps, h.post.1, h.answered);
@@ -7390,7 +7489,7 @@ fn replay_posts(name: &str) -> Option<(Vec<bool>, BTreeMap<String, u32>)> {
         poke(&mut a, row, &READER);
         poke(&mut b, row, &READER);
         steps_frame(&mut a, dt, &map, &mut noise_a);
-        let (heads, steps, posts, answered) = posts_frame(&mut b, dt, &map, &mut noise_b);
+        let (heads, steps, posts, answered) = posts_frame(&mut b, dt, &map, &mut noise_b, false);
         assert_eq!((heads, steps, posts), (1, 4, 1), "the head once, the Force body every substep, the PostProcess once");
         for (k, n) in answered {
             *all.entry(k).or_default() += n;
@@ -7573,10 +7672,10 @@ fn ride_replays_bit_exact_with_rust_callees() {
     for c in ["SpatialUpdate", "CollisionSync", "NodePosition", "Place"] {
         assert_eq!(all.get(c).copied(), Some(459), "{c} answered every frame: {all:?}");
     }
-    // Handed on: the gravity's record call (the steps'), the riding probe's and the frame mesh's
-    // database moves and the gather every frame, and the record's two probe searches.
+    // Handed on: the riding probe's and the frame mesh's database moves and the gather every frame,
+    // and the record's two probe searches (the gravity's record call the resolution's, F31b5g).
     let handed: Vec<(&str, u32)> = all.iter().filter(|(k, _)| k.starts_with("> ")).map(|(k, &n)| (&k[2..], n)).collect();
-    assert_eq!(handed, [("Gather", 459), ("GravityRecord", 1836), ("PartMove", 918), ("record search", 459), ("record sweep", 459)]);
+    assert_eq!(handed, [("Gather", 459), ("PartMove", 918), ("record search", 459), ("record sweep", 459)]);
 }
 
 /// **F31b5b — C15's flip, the callees Rust's**: flip-1 in lockstep with F31b5a's run, wrecked on row
@@ -7600,7 +7699,6 @@ fn flip_replays_bit_exact_with_rust_callees() {
         handed,
         [
             ("Gather", 465),
-            ("GravityRecord", 1860),
             ("PartMove", 771),
             ("PreloadCue", 1),
             ("StartStunt", 1),
@@ -7608,6 +7706,624 @@ fn flip_replays_bit_exact_with_rust_callees() {
             ("record sweep", 465)
         ]
     );
+}
+
+/// **F31b5g — the steps hand nothing on**: C15's `name` replayed twice in lockstep by
+/// [`posts_frame`], once handing the steps' calls on to the original and once with them Rust's
+/// ([`StepsInRam::in_rust`]: the preload's cue and the player's run's calls dropped); every row of
+/// the second word for word against C15, and the bike and its blocks the first's after every frame.
+/// Answers the wreck state per row, what the second run answered, and the RAM ranges where the two
+/// came to differ (the dropped calls' writes, none the bike's).
+fn replay_pure(name: &str) -> Option<(Vec<bool>, BTreeMap<String, u32>, Vec<String>)> {
+    let words = mass_words(&race250p()?)?;
+    let trn = nat05_trn()?;
+    let map = track::Terrain::parse(&trn).unwrap();
+    let mut a = hooked(image()?);
+    for (at, mask, v) in words {
+        a.set_u32(at, a.u32_at(at) & !mask | v & mask);
+    }
+    let mut b = hooked(image()?);
+    b.ram.clone_from(&a.ram);
+    let (mut noise_a, mut noise_b) = (None, None);
+    let rows = rows(name)?;
+    let dt = F(f32::from_bits(DT));
+    let (mut out, mut all, mut off) = (Vec::new(), BTreeMap::<String, u32>::new(), Vec::<String>::new());
+    for (r, row) in rows.iter().enumerate() {
+        poke(&mut a, row, &READER);
+        poke(&mut b, row, &READER);
+        posts_frame(&mut a, dt, &map, &mut noise_a, false);
+        let (heads, steps, posts, answered) = posts_frame(&mut b, dt, &map, &mut noise_b, true);
+        assert_eq!((heads, steps, posts), (1, 4, 1), "the head once, the Force body every substep, the PostProcess once");
+        for (k, n) in answered {
+            *all.entry(k).or_default() += n;
+        }
+        let d = diff(&b, row);
+        assert!(d.is_empty(), "{name} row {r} (vsync {}), nothing handed on: {} words differ\n  {}", row["vsync"], d.len(), d.iter().take(40).cloned().collect::<Vec<_>>().join("\n  "));
+        let (wa, wb) = (bike_and_blocks(&a), bike_and_blocks(&b));
+        let words: Vec<String> = wa.iter().zip(&wb).filter(|(x, y)| x != y).map(|(x, y)| format!("{:#x}: {:#010x} / {:#010x}", x.0, x.1, y.1)).collect();
+        assert!(words.is_empty(), "{name} row {r}: the bike and its blocks differ from the handing run's at {} words\n  {}", words.len(), words.iter().take(40).cloned().collect::<Vec<_>>().join("\n  "));
+        for x in ram_differs(&a, &b) {
+            if !off.contains(&x) {
+                eprintln!("{name} row {r}: RAM first differs at {x}");
+                off.push(x);
+            }
+        }
+        let w = wrecked(|o| b.u32_at(BIKE + o));
+        assert_eq!(w, row_wrecked(row), "{name} row {r}: the wreck state");
+        out.push(w);
+        poke(&mut a, row, &SPOT);
+        poke(&mut b, row, &SPOT);
+    }
+    eprintln!("{name}: nothing handed on answered {all:?}");
+    Some((out, all, off))
+}
+
+/// The steps' calls [`replay_pure`]'s second run answered in Rust (`= `) and handed on (`> `, none
+/// of the steps' own: F46's PostProcess and record calls stay).
+fn steps_handed(all: &BTreeMap<String, u32>) -> (Vec<(&str, u32)>, Vec<(&str, u32)>) {
+    let steps = ["GravityRecord", "PreloadCue", "StartStunt", "EndStunt", "Wreck"];
+    let pick = |p: &str| all.iter().filter(|(k, _)| k.starts_with(p) && steps.contains(&&k[2..])).map(|(k, &n)| (&k[2..], n)).collect();
+    (pick("= "), pick("> "))
+}
+
+/// **F31b5g — C15's ride with nothing handed on**: ride-2 bit-exact, the steps handing nothing to
+/// the interpreter (the gravity's record call the resolution's every substep).
+#[test]
+fn ride_replays_bit_exact_with_nothing_handed_on() {
+    let Some((w, all, _)) = replay_pure("ride-2") else { return };
+    assert_eq!(w.len(), 459);
+    assert!(w.iter().all(|w| !w), "the ride never wrecks");
+    let (rust, handed) = steps_handed(&all);
+    assert_eq!((rust, handed), (vec![], vec![]));
+}
+
+/// **F31b5g — C15's flip with nothing handed on**: flip-1 bit-exact, wrecked on row 125 and put back
+/// on row 193; the preload's cue dropped and the backflip's stunt started in Rust, once each.
+#[test]
+fn flip_replays_bit_exact_with_nothing_handed_on() {
+    let Some((w, all, _)) = replay_pure("flip-1") else { return };
+    assert_eq!(w.len(), 465);
+    let changes: Vec<usize> = (1..w.len()).filter(|&r| w[r] != w[r - 1]).collect();
+    assert_eq!(changes, [125, 193], "wrecked on row 125, put back on row 193");
+    let (rust, handed) = steps_handed(&all);
+    assert_eq!((rust, handed), (vec![("PreloadCue", 1), ("StartStunt", 1)], vec![]));
+}
+
+/// The record's resolution (its vt `+0x88`), which the gravity calls with 1.
+const RECORD_RESOLVE: u32 = 0x0020_5730;
+
+/// What the last call wrote outside the interpreter's stack and scratch and outside `regions`
+/// (`(start, len)`), as `start..end` ranges.
+fn written_outside(ee: &Ee, regions: &[(u32, u32)]) -> Vec<String> {
+    let stack = ee.stack.saturating_sub(0x4_0000)..ee.stack + 0x400;
+    let inside = |a: u32| stack.contains(&a) || regions.iter().any(|&(at, n)| (at..at + n).contains(&a));
+    ee.written_ranges().into_iter().filter(|&(s, e)| (s..e).any(|a| !inside(a))).map(|(s, e)| format!("{s:#x}..{e:#x}")).collect()
+}
+
+/// **F31b5g — the gravity's record call is the record's resolution**: 10 000 records, each state 4's
+/// bike's with every word the resolution reads drawn at random (the record's damping switch and
+/// levels, masses, inertia, centres, responses, masks and frictions, its junk normal speed and
+/// relative velocity; the body's masses, damping, position, velocities, forces, corrections, inertia,
+/// orientation, centre, moment, rates and twist; 0 to 14 contacts on a surface or
+/// none, of kind 0: a kind-1 contact is always with another record, and none is held), run through SLUS-21104's `+0x88` handed 1 and through
+/// [`record::held`], [`game_sim::atv_contact::Held::resolve`] on the body's centre of mass and
+/// [`record::held_words`]. Every word of the record, its list and the body comes out the same, and
+/// the original writes nothing else.
+#[test]
+#[allow(clippy::float_arithmetic)]
+fn the_gravitys_record_call_is_the_records_resolution() {
+    let Some(mut ee) = image() else { return };
+    let rec = ee.u32_at(BIKE + seed::RECORD);
+    let body = ee.u32_at(rec + 0xe4);
+    assert_eq!(body, ee.u32_at(BIKE + seed::BODY), "the record's body is the bike's");
+    assert_eq!(ee.u32_at(ee.u32_at(rec + 4) + 0x88), RECORD_RESOLVE, "the record's vt +0x88");
+    assert_eq!(ee.u32_at(body + 0xe8), 0, "the body has no listeners");
+    let list = ee.u32_at(rec + 0xf8);
+    let collidable = ee.u32_at(rec + 0x208);
+    assert_ne!(collidable, 0);
+    let regions = [(rec, 0x210), (list, 14 * record::CONTACT), (body, 0x230), (collidable + 0x94, 4)];
+    let image_words = snap_regions(&ee, &regions);
+    let mut g = Gen(0x0031_b5a7);
+    let mut t = BTreeMap::new();
+    let quad = |ee: &mut Ee, g: &mut Gen, a: u32, s: f32, w: Option<f32>| {
+        for i in 0..3 {
+            let x = g.near(0.0, -s, s);
+            ee.set_f32(a + 4 * i, x);
+        }
+        let w = w.unwrap_or_else(|| g.near(0.0, -2.0, 2.0));
+        ee.set_f32(a + 12, w);
+    };
+    let around = |g: &mut Gen, x: f32| match g.bits() % 16 {
+        0 => 0.0,
+        1 => -x,
+        2 => x,
+        _ => x * g.f(0.5, 1.5),
+    };
+    for k in 0..10_000 {
+        restore_regions(&mut ee, &regions, &image_words);
+        // The record.
+        ee.set_u32(rec + 0x44, u32::from(!g.one_in(4)));
+        for at in [0x4c, 0x54] {
+            let x = match g.bits() % 4 {
+                0 => 1.0,
+                1 => g.f(0.0, 1.0),
+                2 => g.f(1.0, 3.0),
+                _ => g.f(-0.5, 1.5),
+            };
+            ee.set_f32(rec + at, x);
+        }
+        let x = around(&mut g, 13.0435);
+        ee.set_f32(rec + 0x58, x);
+        let x = if g.one_in(8) { 0.0 } else { around(&mut g, 0.0767) };
+        ee.set_f32(rec + 0x5c, x);
+        quad(&mut ee, &mut g, rec + 0x70, 0.1, None);
+        quad(&mut ee, &mut g, rec + 0x80, 4.0, None);
+        quad(&mut ee, &mut g, rec + 0x90, 50.0, None);
+        for at in [0x100, 0x104] {
+            let x = if g.one_in(4) { 0xffff_ffff } else { g.bits() % 16 };
+            ee.set_u32(rec + at, x);
+        }
+        let x = g.bits() % 16;
+        ee.set_u32(collidable + 0x94, x);
+        let x = around(&mut g, 0.5);
+        ee.set_f32(rec + 0x10c, x);
+        for at in [0x118, 0x130] {
+            let (s, d) = (around(&mut g, 1500.0), around(&mut g, 200.0));
+            let r = if g.one_in(3) { 0.0 } else { g.f(0.0, 1.0) };
+            ee.set_f32(rec + at, s);
+            ee.set_f32(rec + at + 4, d);
+            ee.set_f32(rec + at + 8, r);
+        }
+        for at in [0x13c, 0x140] {
+            ee.set_u32(rec + at, u32::from(!g.one_in(4)));
+        }
+        for at in [0x150, 0x160, 0x170, 0x180, 0x190] {
+            match g.bits() % 4 {
+                0 | 1 => quad(&mut ee, &mut g, rec + at, 0.0, Some(1.0)),
+                2 => {
+                    for i in 0..4 {
+                        let x = if g.one_in(2) { 0.0 } else { 1.0 };
+                        ee.set_f32(rec + at + 4 * i, x);
+                    }
+                }
+                _ => quad(&mut ee, &mut g, rec + at, 2.0, None),
+            }
+            if ee.f32_at(rec + at) == 0.0 && ee.f32_at(rec + at + 4) == 0.0 && g.one_in(2) {
+                for i in 0..3 {
+                    ee.set_f32(rec + at + 4 * i, 1.0);
+                }
+            }
+        }
+        for i in 0..18 {
+            let x = around(&mut g, 0.5);
+            ee.set_f32(rec + 0x1a0 + 4 * i, x);
+        }
+        let x = g.f(-50.0, 50.0);
+        ee.set_f32(rec + 0x1e8, x);
+        quad(&mut ee, &mut g, rec + 0x1f0, 50.0, None);
+        // The body.
+        let x = around(&mut g, 13.0435);
+        ee.set_f32(body + 0x18, x);
+        let x = if g.one_in(8) { 0.0 } else { around(&mut g, 0.0767) };
+        ee.set_f32(body + 0x1c, x);
+        for (at, s) in [(0x70, 20.0), (0x80, 30.0), (0xa0, 1000.0), (0xd0, 10.0), (0x1b0, 1000.0), (0x1d0, 3.0), (0x200, 10.0)] {
+            quad(&mut ee, &mut g, body + at, s, None);
+        }
+        quad(&mut ee, &mut g, body + 0x140, 0.1, None);
+        for at in [0x30, 0x150] {
+            if g.one_in(3) {
+                quad(&mut ee, &mut g, body + at, 0.0, Some(1.0));
+                for i in 0..3 {
+                    ee.set_f32(body + at + 4 * i, 1.0);
+                }
+            } else {
+                for i in 0..4 {
+                    let x = g.f(0.0, 2.0);
+                    ee.set_f32(body + at + 4 * i, x);
+                }
+            }
+        }
+        let q = match g.bits() % 12 {
+            0 => [0.0, 0.0, 0.0, 1.0],
+            1 => [0.0, 1.0, 0.0, 0.0],
+            _ => {
+                let q = [0; 4].map(|_| g.f(-1.0, 1.0));
+                let n = q.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-3) * g.f(0.999, 1.001);
+                q.map(|x| x / n)
+            }
+        };
+        for (i, x) in q.into_iter().enumerate() {
+            ee.set_f32(body + 0x190 + 4 * i as u32, x);
+        }
+        if g.one_in(4) {
+            set_vf(&mut ee, body + 0x1a0, Vf::new(0.0, 0.5, -0.5, 1.0));
+        } else {
+            quad(&mut ee, &mut g, body + 0x1a0, 4.0, None);
+        }
+        // The contacts.
+        let n = if g.one_in(6) { 0 } else if g.one_in(6) { 14 } else { 1 + g.bits() % 13 };
+        ee.set_u32(rec + 0xf0, n);
+        for i in 0..n {
+            let e = list + record::CONTACT * i;
+            ee.set_u32(e, 0);
+            quad(&mut ee, &mut g, e + 0x10, 3.0, None);
+            quad(&mut ee, &mut g, e + 0x20, 3.0, None);
+            let w = if g.one_in(3) { 0.0 } else { g.f(-2.0, 2.0) };
+            match g.bits() % 8 {
+                0 => set_vf(&mut ee, e + 0x30, Vf::new(0.0, 1.0, 0.0, w)),
+                1 => set_vf(&mut ee, e + 0x30, Vf::new(-1.0, 0.0, -0.0, w)),
+                2 => quad(&mut ee, &mut g, e + 0x30, 1.5, None),
+                _ => {
+                    let v = [0; 3].map(|_| g.f(-1.0, 1.0));
+                    let l = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-3);
+                    set_vf(&mut ee, e + 0x30, Vf::new(v[0] / l, v[1] / l, v[2] / l, w));
+                }
+            }
+            for at in [0x40, 0x50, 0x60, 0x70] {
+                quad(&mut ee, &mut g, e + at, 20.0, None);
+            }
+            let s = if g.one_in(4) { u32::MAX } else { g.bits() % 16 };
+            ee.set_u32(e + 0x80, s);
+            ee.set_u32(e + 0x84, 0);
+            ee.set_u32(e + 0x88, 0);
+        }
+        let m = |a| ee.u32_at(a);
+        let mut h = record::held(&m, rec).unwrap_or_else(|| panic!("record {k}: not held"));
+        let cofg = vf_at(&ee, body + 0x1a0);
+        let before = snap_regions(&ee, &regions);
+        ee.set(28, GP);
+        ee.call(RECORD_RESOLVE, &[u64::from(rec), 1], &[], BUDGET);
+        let stray = written_outside(&ee, &regions);
+        assert!(stray.is_empty(), "record {k}: the original wrote outside the record, its list and the body: {stray:?}");
+        let want = snap_regions(&ee, &regions);
+        assert!(h.resolve(cofg), "record {k}: the port resolved nothing");
+        restore_regions(&mut ee, &regions, &before);
+        let m = |a| ee.u32_at(a);
+        let words = record::held_words(&h, rec, &m);
+        for (a, w) in words {
+            ee.set_u32(a, w);
+        }
+        let got = snap_regions(&ee, &regions);
+        if got != want {
+            let mut off = Vec::new();
+            let mut i = 0;
+            for &(at, len) in &regions {
+                for o in (0..len).step_by(4) {
+                    if got[i] != want[i] {
+                        off.push(format!("{:#x}: port {:#010x}, original {:#010x}", at + o, got[i], want[i]));
+                    }
+                    i += 1;
+                }
+            }
+            panic!("record {k} ({n} contacts): {} words differ\n  {}", off.len(), off.iter().take(40).cloned().collect::<Vec<_>>().join("\n  "));
+        }
+        tally(&mut t, if n == 0 { "no contacts" } else if n == 14 { "the list full" } else { "some contacts" });
+        if ee.u32_at(rec + 0x44) != 0 && n > 0 {
+            tally(&mut t, "damped");
+        }
+        if (0..n).any(|i| ee.u32_at(list + record::CONTACT * i + 0x80) == u32::MAX) {
+            tally(&mut t, "off any surface");
+        }
+        if before[..0x210 / 4] != want[..0x210 / 4] {
+            tally(&mut t, "the record written");
+        }
+        let b0 = 0x210 / 4 + 14 * record::CONTACT as usize / 4;
+        if before[b0 + 0x80 / 4..b0 + 0x90 / 4] != want[b0 + 0x80 / 4..b0 + 0x90 / 4] {
+            tally(&mut t, "the velocity changed");
+        }
+        if before[b0 + 0x1d0 / 4..b0 + 0x1e0 / 4] != want[b0 + 0x1d0 / 4..b0 + 0x1e0 / 4] {
+            tally(&mut t, "the rates changed");
+        }
+    }
+    eprintln!("the record's resolution: {t:?}");
+    for want in ["no contacts", "the list full", "some contacts", "damped", "off any surface", "the record written", "the velocity changed", "the rates changed"] {
+        assert!(t.get(want).copied().unwrap_or(0) >= 50, "path {want:?} taken {} times: {t:?}", t.get(want).copied().unwrap_or(0));
+    }
+}
+
+/// The run's calls a hooked original makes, as [`update::Out`]s, their fixed arguments checked;
+/// with `ends`, the bike's trick end too (answering 1).
+fn hook_run_calls(ee: &mut Ee, log: &Rc<RefCell<Vec<update::Out>>>, ends: bool) {
+    use update::Out;
+    let one = 1.0f32.to_bits();
+    let l = log.clone();
+    ee.hooks.insert(RUN_OPEN, Box::new(move |ee: &mut Ee| {
+        l.borrow_mut().push(Out::RunOpen(ee.r(4) as u32));
+        ee.set(2, 0);
+    }));
+    let l = log.clone();
+    ee.hooks.insert(RUN_SCORE, Box::new(move |ee: &mut Ee| {
+        assert_eq!(ee.r(7), 12, "the score's fourth argument");
+        assert_eq!([13, 15, 16].map(|i| ee.f(i).to_bits()), [0, one, one], "the score's f13, f15, f16");
+        let (run, player, id) = (ee.r(4) as u32, ee.r(5) as u32, ee.r(6) as u32);
+        l.borrow_mut().push(Out::RunScore { run, player, id, scores: [ee.f(12).to_bits(), ee.f(14).to_bits()] });
+        ee.set(2, 0);
+    }));
+    let l = log.clone();
+    ee.hooks.insert(MARK_FN, Box::new(move |ee: &mut Ee| {
+        assert_eq!(ee.r(8), 0, "the mark's fifth argument");
+        l.borrow_mut().push(Out::Mark { run: ee.r(4) as u32, player: ee.r(5) as u32, on: ee.r(6) as u32, id: ee.r(7) as u32 });
+        ee.set(2, 0);
+    }));
+    let l = log.clone();
+    ee.hooks.insert(RUN_CLOSE, Box::new(move |ee: &mut Ee| {
+        assert_eq!((ee.r(6), ee.f(12).to_bits()), (1, one), "the close's third argument and f12");
+        l.borrow_mut().push(Out::RunClose { run: ee.r(4) as u32, player: ee.r(5) as u32 });
+        ee.set(2, 0);
+    }));
+    let l = log.clone();
+    ee.hooks.insert(RUN_TALLY, Box::new(move |ee: &mut Ee| {
+        assert_eq!(ee.r(6), 1, "the tally's third argument");
+        l.borrow_mut().push(Out::RunTally { run: ee.r(4) as u32, player: ee.r(5) as u32, count: ee.f(12).to_bits() });
+        ee.set(2, 0);
+    }));
+    let l = log.clone();
+    ee.hooks.insert(RUN_END, Box::new(move |ee: &mut Ee| {
+        assert_eq!((ee.r(6), ee.r(8), ee.f(12).to_bits()), (1, 0, one), "the end's third and fifth arguments and f12");
+        l.borrow_mut().push(Out::RunEnd { run: ee.r(4) as u32, player: ee.r(5) as u32, id: ee.r(7) as u32 });
+        ee.set(2, 0);
+    }));
+    if ends {
+        let l = log.clone();
+        ee.hooks.insert(TRICK_END_FN, Box::new(move |ee: &mut Ee| {
+            assert_eq!(ee.r(4) as u32, BIKE, "a trick end on another bike");
+            l.borrow_mut().push(Out::TrickEnd(ee.r(5) as u32));
+            ee.set(2, 1);
+        }));
+    }
+}
+
+/// [`update::stunt_start`] and [`update::trick_end`] on the bike in RAM, every call logged (a trick
+/// end answering 1, the rest 0); a word set outside the bike fails.
+struct RunLogged<'a> {
+    ee: &'a mut Ee,
+    log: Vec<update::Out>,
+}
+
+impl Updates for RunLogged<'_> {
+    fn bike(&self) -> u32 {
+        BIKE
+    }
+    fn word(&mut self, at: u32) -> u32 {
+        self.ee.u32_at(at)
+    }
+    fn set(&mut self, at: u32, w: u32) {
+        assert!((BIKE..BIKE + 0x1800).contains(&at), "a word set outside the bike: {at:#x}");
+        self.ee.set_u32(at, w);
+    }
+    fn out(&mut self, c: update::Out) -> u32 {
+        self.log.push(c);
+        u32::from(matches!(c, update::Out::TrickEnd(_)))
+    }
+    fn vector(&mut self, c: update::Out) -> update::Quad {
+        panic!("the stunt's start and end ask no vector of {c:?}")
+    }
+    fn noise(&mut self, _: F) -> F {
+        panic!("the stunt's start and end ask no noise")
+    }
+}
+
+/// **F31b5g — the stunt start is the original's**: 10 000 bikes, each state 4's with the start's
+/// words drawn at random (off the ground or held or neither, the five kept stunts, the next stunt
+/// round 41, the clip's clocks, the run and the player or none, the player's run flag, its list of
+/// running stunts in scratch, the stunt table's scores and scale for the id), started on an id among
+/// the kept five or the table's 46 (the game's are; past it the original reads through address 0)
+/// with the third argument 0 or 1, the id handed sign-extended as a `lw` leaves it, through
+/// SLUS-21104's vt `+0x4b8` and [`update::stunt_start`]. The answer, every word of the bike, the
+/// player and the table comes out the same, nothing else is written, and the trick ends and the run's
+/// calls (hooked to log) are made in the same order with the same arguments.
+#[test]
+#[allow(clippy::float_arithmetic)]
+fn the_stunt_start_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    assert_eq!(vt(&ee, 0x4b8), STUNT_START_FN, "the bike's vt +0x4b8");
+    assert_eq!(vt(&ee, 0x4ac), TRICK_END_FN, "the bike's vt +0x4ac");
+    let (run0, player0, table) = (ee.u32_at(BIKE + 0x684), ee.u32_at(BIKE + 0x680), ee.u32_at(BIKE + 0x14f0));
+    assert!(run0 != 0 && player0 != 0 && table != 0);
+    let log: Rc<RefCell<Vec<update::Out>>> = Rc::default();
+    hook_run_calls(&mut ee, &log, true);
+    let nodes: Vec<u32> = (0..5).map(|k| ee.scratch(16 + k)).collect();
+    let mut regions = vec![(BIKE, 0x1800), (player0, 0xd0), (table, 0x18 + 46 * 12)];
+    let scored: Vec<u32> = (0..46).map(|i| ee.u32_at(table + 0x18 + 12 * i)).filter(|&e| e != 0).collect();
+    regions.extend(scored.iter().map(|&e| (e + 0x50, 8)));
+    regions.extend(nodes.iter().map(|&n| (n, 0x28)));
+    let image_words = snap_regions(&ee, &regions);
+    let kept0 = [0x13b8, 0x13bc, 0x13c0, 0x13c4, 0x13c8].map(|o| ee.u32_at(BIKE + o));
+    let mut g = Gen(0x0031_b5a8);
+    let mut t = BTreeMap::new();
+    for k in 0..10_000 {
+        restore_regions(&mut ee, &regions, &image_words);
+        let either = |g: &mut Gen| if g.one_in(2) { 0 } else if g.one_in(2) { 1 } else { g.bits() };
+        let (air, held) = (either(&mut g), either(&mut g));
+        ee.set_u32(BIKE + 0x324, air);
+        ee.set_u32(BIKE + 0xc80, held);
+        let mut kept = kept0;
+        if g.one_in(4) {
+            kept = kept.map(|x| if g.one_in(3) { g.bits() % 46 } else { x });
+        }
+        for (i, x) in kept.into_iter().enumerate() {
+            ee.set_u32(BIKE + 0x13b8 + 4 * i as u32, x);
+        }
+        let id = if g.one_in(2) { kept[(g.bits() % 5) as usize] } else { g.bits() % 46 };
+        let next = match g.bits() % 5 {
+            0 => 40,
+            1 => 41,
+            2 => 0xff,
+            3 => g.bits(),
+            _ => g.bits() % 60,
+        };
+        ee.set_u32(BIKE + 0x1528, next);
+        for o in [0x14d8, 0x14e8, 0x14dc, 0x1650] {
+            let x = g.bits();
+            ee.set_u32(BIKE + o, x);
+        }
+        let run = if g.one_in(6) { 0 } else { run0 };
+        let player = if g.one_in(6) { 0 } else { player0 };
+        ee.set_u32(BIKE + 0x684, run);
+        ee.set_u32(BIKE + 0x680, player);
+        let flags = g.bits();
+        ee.set_u32(player0 + 8, flags);
+        let n = g.bits() % 6;
+        for i in 0..n as usize {
+            let f = if g.one_in(5) { g.bits() & !0x10 } else { g.bits() | 0x10 };
+            let s = if g.one_in(6) { kept[(g.bits() % 5) as usize] } else { g.bits() % 50 };
+            let to = if i + 1 < n as usize { nodes[i + 1] } else { 0 };
+            ee.set_u32(nodes[i], f);
+            ee.set_u32(nodes[i] + 4, s);
+            ee.set_u32(nodes[i] + 0x24, to);
+        }
+        ee.set_u32(player0 + 0xc8, if n > 0 { nodes[0] } else { 0 });
+        if id < 46 {
+            let e = table + 0x18 + 12 * id;
+            let scale = match g.bits() % 4 {
+                0 => 1.0,
+                1 => -0.0,
+                _ => g.f(-2.0, 3.0),
+            };
+            ee.set_f32(e + 4, scale);
+            let def = ee.u32_at(e);
+            if def != 0 {
+                for o in [0x50, 0x54] {
+                    let x = match g.bits() % 5 {
+                        0 => 10.0,
+                        1 => 0.0,
+                        _ => g.f(-20.0, 60.0),
+                    };
+                    ee.set_f32(def + o, x);
+                }
+            }
+        }
+        let arg = g.bits() % 2;
+        let before = snap_regions(&ee, &regions);
+        log.borrow_mut().clear();
+        ee.set(28, GP);
+        ee.call(STUNT_START_FN, &[u64::from(BIKE), id as i32 as i64 as u64, u64::from(arg)], &[], BUDGET);
+        let answer = ee.r(2) as u32;
+        let stray = written_outside(&ee, &regions);
+        assert!(stray.is_empty(), "bike {k}: the original wrote outside the bike: {stray:?}");
+        let want = snap_regions(&ee, &regions);
+        let want_log = log.borrow().clone();
+        restore_regions(&mut ee, &regions, &before);
+        let mut m = RunLogged { ee: &mut ee, log: Vec::new() };
+        let got_answer = update::stunt_start(&mut m, id, arg);
+        let got_log = std::mem::take(&mut m.log);
+        assert_eq!(got_answer, answer, "bike {k}: the answer");
+        assert_eq!(got_log, want_log, "bike {k}: the calls (id {id:#x})");
+        let got = snap_regions(&ee, &regions);
+        if got != want {
+            let mut off = Vec::new();
+            let mut i = 0;
+            for &(at, len) in &regions {
+                for o in (0..len).step_by(4) {
+                    if got[i] != want[i] {
+                        off.push(format!("{:#x}: port {:#010x}, original {:#010x}", at + o, got[i], want[i]));
+                    }
+                    i += 1;
+                }
+            }
+            panic!("bike {k} (id {id:#x}): {} words differ\n  {}", off.len(), off.join("\n  "));
+        }
+        // The paths.
+        let is_kept = kept.contains(&id);
+        if (air != 0 || held != 0) && !is_kept {
+            tally(&mut t, "not started");
+            continue;
+        }
+        tally(&mut t, if is_kept { "a kept stunt" } else { "a stunt" });
+        let written = ee.u32_at(BIKE + 0x1528) == id && next != id;
+        if is_kept {
+            tally(&mut t, if written { "kept, the next written" } else { "kept, the next kept" });
+        }
+        if run == 0 || player == 0 {
+            tally(&mut t, "no run or player");
+            continue;
+        }
+        let ends = want_log.iter().filter(|c| matches!(c, update::Out::TrickEnd(_))).count();
+        if ends > 0 {
+            tally(&mut t, "running stunts ended");
+        }
+        if !is_kept && ends < n as usize {
+            tally(&mut t, "the list stopped short");
+        }
+        tally(&mut t, if flags & 0x20 == 0 { "the run opened" } else { "the run open" });
+        if let Some(update::Out::RunScore { scores, .. }) = want_log.iter().find(|c| matches!(c, update::Out::RunScore { .. })) {
+            if scores.contains(&10.0f32.to_bits()) {
+                tally(&mut t, "a score at the least");
+            }
+        }
+    }
+    eprintln!("the stunt start: {t:?}");
+    for want in [
+        "not started",
+        "a kept stunt",
+        "a stunt",
+        "kept, the next written",
+        "kept, the next kept",
+        "no run or player",
+        "running stunts ended",
+        "the list stopped short",
+        "the run opened",
+        "the run open",
+        "a score at the least",
+    ] {
+        assert!(t.get(want).copied().unwrap_or(0) >= 20, "path {want:?} taken {} times: {t:?}", t.get(want).copied().unwrap_or(0));
+    }
+}
+
+/// **F31b5g — the trick end is the original's**: 10 000 bikes, each state 4's with the run and the
+/// player or none, the player's flags and stunt count drawn at random, ending −1 or one stunt (the
+/// id sign-extended: the original's −1 is a 64-bit compare), through SLUS-21104's vt `+0x4ac` and [`update::trick_end`]. The answer and the run's calls
+/// (hooked to log) are the same, and neither writes a word.
+#[test]
+fn the_trick_end_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    assert_eq!(vt(&ee, 0x4ac), TRICK_END_FN, "the bike's vt +0x4ac");
+    let (run0, player0) = (ee.u32_at(BIKE + 0x684), ee.u32_at(BIKE + 0x680));
+    let log: Rc<RefCell<Vec<update::Out>>> = Rc::default();
+    hook_run_calls(&mut ee, &log, false);
+    let regions = [(BIKE, 0x1800), (player0, 0xd0)];
+    let image_words = snap_regions(&ee, &regions);
+    let mut g = Gen(0x0031_b5a9);
+    let mut t = BTreeMap::new();
+    for k in 0..10_000 {
+        restore_regions(&mut ee, &regions, &image_words);
+        let run = if g.one_in(6) { 0 } else { run0 };
+        let player = if g.one_in(6) { 0 } else { player0 };
+        ee.set_u32(BIKE + 0x684, run);
+        ee.set_u32(BIKE + 0x680, player);
+        let flags = g.bits();
+        ee.set_u32(player0 + 8, flags);
+        let count = match g.bits() % 4 {
+            0 => 0,
+            1 => g.bits() % 10,
+            2 => g.bits() | 0x8000_0000,
+            _ => g.bits(),
+        };
+        ee.set_u32(player0 + 0xcc, count);
+        let id = if g.one_in(2) { u32::MAX } else { g.bits() % 60 };
+        log.borrow_mut().clear();
+        ee.set(28, GP);
+        ee.call(TRICK_END_FN, &[u64::from(BIKE), id as i32 as i64 as u64], &[], BUDGET);
+        let answer = ee.r(2) as u32;
+        let stray = written_outside(&ee, &[]);
+        assert!(stray.is_empty(), "bike {k}: the original wrote {stray:?}");
+        let want_log = log.borrow().clone();
+        let mut m = RunLogged { ee: &mut ee, log: Vec::new() };
+        let got_answer = update::trick_end(&mut m, id);
+        let got_log = std::mem::take(&mut m.log);
+        assert_eq!((got_answer, got_log), (answer, want_log.clone()), "bike {k} (id {id:#x})");
+        tally(&mut t, match want_log.first() {
+            None if run == 0 || player == 0 => "no run or player",
+            None => "the run not open",
+            Some(update::Out::RunClose { .. }) => "closed and tallied",
+            Some(update::Out::RunEnd { .. }) => "one ended",
+            Some(c) => panic!("{c:?}"),
+        });
+    }
+    eprintln!("the trick end: {t:?}");
+    for want in ["no run or player", "the run not open", "closed and tallied", "one ended"] {
+        assert!(t.get(want).copied().unwrap_or(0) >= 100, "path {want:?} taken {} times: {t:?}", t.get(want).copied().unwrap_or(0));
+    }
 }
 
 // F31b5c — the tail's, wreck's and update's callees left in the interpreter, watched.

@@ -25,6 +25,9 @@
 //! - The virtuals those three call out on state 4's objects (F44): the trail's on and off
 //!   ([`trail_on`], [`trail_off`]) and the scene node's walk of its children ([`shown`], [`hidden`]);
 //!   the net sender's send, the bike's ([`send`]); a part's step ([`part_step`]).
+//! - [`stunt_start`] (vt `+0x4b8`) and [`trick_end`] (vt `+0x4ac`), which the bike's steps, the
+//!   tail and the trick step call (F31b5g): the next stunt and the clip's clocks, and the player's
+//!   run told ([`Out::RunScore`] and the rest).
 //!
 //! The quad's twin of [`prepare`]'s animation half is [`crate::quad::animate`]; this one reads and
 //! writes the bike's words as the original does, in its order.
@@ -145,6 +148,17 @@ pub enum Out {
     /// ([`super::tail::walk`]; `dt`).
     Part(u32),
     Walk(u32),
+    /// The player's run's calls (F31b5g; [`stunt_start`], [`trick_end`]), each with the run
+    /// (`+0x684`) and the player (`+0x680`): the run opened (the run only) when the player's `+8`
+    /// bit 5 is clear; a stunt scored (the id, 12, `$f12` and `$f14` the entry's two scores, `$f13` 0,
+    /// `$f15` and `$f16` 1.0; the stunt's mark then [`Out::Mark`]'s, on the start's third argument); and
+    /// at a trick's end, the run closed (1.0, 1), then tallied (the player's `+0xcc` as a float, 1), or one
+    /// stunt ended (1.0, 1, the id, 0).
+    RunOpen(u32),
+    RunScore { run: u32, player: u32, id: u32, scores: [u32; 2] },
+    RunClose { run: u32, player: u32 },
+    RunTally { run: u32, player: u32, count: u32 },
+    RunEnd { run: u32, player: u32, id: u32 },
 }
 
 /// The callees' outside world: words by address (the bike is `bike`), and their calls. A call's
@@ -1099,6 +1113,93 @@ pub fn net_unpack(m: &mut impl Updates, dt: F) {
     let up = u32::from(w(m, 0x324) == 0);
     put(m, 0xde0, up);
     m.out(Out::NetPost);
+}
+
+/// The bike's five ids of the stunts a start keeps running (`+0x13b8`..`+0x13c8`); a start of the
+/// last two leaves a queued next stunt of its own.
+const KEPT: [u32; 5] = [0x13b8, 0x13bc, 0x13c0, 0x13c4, 0x13c8];
+/// The least a stunt's score is handed on as.
+const LEAST_SCORE: F = F(10.0);
+
+/// **The stunt start** (vt `+0x4b8`: the stunt `id`, `arg` handed on to the run; F31b5g). A stunt
+/// starts when the bike is off the ground (`+0x324`) and not held (`+0xc80`), or when it is one of
+/// the [`KEPT`] five. The next stunt ([`NEXT_STUNT`]) becomes `id` unless `id` is one of the five
+/// and either the next is under 41 (signed) or `id` is one of the last two. The clip's clocks
+/// (`+0x14d8`, `+0x14e8`, `+0x14dc`) go to 0 and `+0x1650` to 1. With a run and a player: a stunt
+/// other than the five first ends each of the player's running stunts (its list at `+0xc8`, next at
+/// `+0x24`, while a stunt's `+0` has bit 4 and its id `+4` is none of the five, vt `+0x4ac`); then
+/// the run's calls ([`Out::RunOpen`], [`Out::RunScore`] off the stunt table's entry `+0x14f0`, its
+/// two scores times the entry's scale, at least [`LEAST_SCORE`]; [`Out::Mark`], on `arg`). Answers 1.
+pub fn stunt_start(m: &mut impl Updates, id: u32, arg: u32) -> u32 {
+    let late = w(m, 0x13c4) == id || w(m, 0x13c8) == id;
+    let kept = w(m, 0x13b8) == id || w(m, 0x13bc) == id || w(m, 0x13c0) == id || late;
+    if (w(m, 0x324) != 0 || w(m, 0xc80) != 0) && !kept {
+        return 1;
+    }
+    if !kept || (w(m, NEXT_STUNT) as i32 >= KEPT_STUNTS && !late) {
+        put(m, NEXT_STUNT, id);
+    }
+    put(m, 0x14d8, 0);
+    put(m, 0x14e8, 0);
+    put(m, 0x14dc, 0);
+    put(m, 0x1650, 1);
+    if w(m, 0x684) == 0 {
+        return 1;
+    }
+    let player = w(m, 0x680);
+    if player == 0 {
+        return 1;
+    }
+    if !kept {
+        let mut s = m.word(player.wrapping_add(0xc8));
+        while s != 0 && m.word(s) & 0x10 != 0 {
+            let running = m.word(s.wrapping_add(4));
+            if KEPT.iter().any(|&o| w(m, o) == running) {
+                break;
+            }
+            m.out(Out::TrickEnd(running));
+            s = m.word(s.wrapping_add(0x24));
+        }
+    }
+    let player = w(m, 0x680);
+    if m.word(player.wrapping_add(8)) & 0x20 == 0 {
+        let run = w(m, 0x684);
+        m.out(Out::RunOpen(run));
+    }
+    let table = w(m, 0x14f0);
+    let e = stunt_entry(table, id);
+    let entry = m.word(e);
+    let scale = f(m, e.wrapping_add(4));
+    let a = (f(m, entry.wrapping_add(0x50)) * scale).max(LEAST_SCORE);
+    let b = (f(m, entry.wrapping_add(0x54)) * scale).max(LEAST_SCORE);
+    let (run, player) = (w(m, 0x684), w(m, 0x680));
+    m.out(Out::RunScore { run, player, id, scores: [a.to_bits(), b.to_bits()] });
+    let (run, player) = (w(m, 0x684), w(m, 0x680));
+    m.out(Out::Mark { run, player, on: arg, id });
+    1
+}
+
+/// **The trick end** (vt `+0x4ac`: the stunt `id`, −1 for every one; F31b5g): with a run and a
+/// player whose `+8` bit 5 is set, the run closed and tallied ([`Out::RunClose`], [`Out::RunTally`])
+/// for −1, else the one stunt ended ([`Out::RunEnd`]). Writes no word of the bike. Answers 1.
+pub fn trick_end(m: &mut impl Updates, id: u32) -> u32 {
+    let run = w(m, 0x684);
+    if run == 0 {
+        return 1;
+    }
+    let player = w(m, 0x680);
+    if player == 0 || m.word(player.wrapping_add(8)) & 0x20 == 0 {
+        return 1;
+    }
+    if id != u32::MAX {
+        m.out(Out::RunEnd { run, player, id });
+        return 1;
+    }
+    m.out(Out::RunClose { run, player });
+    let (player, run) = (w(m, 0x680), w(m, 0x684));
+    let count = F(fpu::from_i32(m.word(player.wrapping_add(0xcc)) as i32));
+    m.out(Out::RunTally { run, player, count: count.to_bits() });
+    1
 }
 
 #[cfg(test)]

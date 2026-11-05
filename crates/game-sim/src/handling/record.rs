@@ -20,6 +20,10 @@
 //! The probes' searches, the scene node's transforms and the body's damping setters are the outside
 //! world's, through [`Collides`]. The terrain query itself is [`super::ground::under`], called through
 //! [`Collides::under`].
+//!
+//! [`held`] and [`held_words`] (F31b5g) read and write the record as its third virtual, the
+//! contacts' resolution the gravity calls every substep (vt `+0x88`), holds it:
+//! [`crate::atv_contact::Held`].
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
 use super::ground;
@@ -383,4 +387,103 @@ pub fn pass(rec: &mut Record, me: u32, mut body: Option<&mut Body>, dt: F, w: &m
             file(o, Contact { kind: 1, from, to, normal, point, surface: NO_SURFACE, other: me, mover: 0 });
         }
     }
+}
+
+/// The resolution's fields of the record (vt `+0x88`, [`crate::atv_contact::resolve`]; research/
+/// oracle.txt `# MD75e1`): the damping it lowers to, the mass and inertia it shares, its centre of
+/// mass (`+0x80`) and that turned into the world (`+0x90`), the collidable flags, the deepest
+/// contact, the scenery's and the actors' responses, the friction by surface, the last contact's
+/// normal speed (`+0x1e8`) and relative velocity (`+0x1f0`), the own impulse's mask (`+0x150`).
+fn collider(w: &impl Words, at: u32) -> crate::atv_contact::Record {
+    use crate::contact::{Collider, Response};
+    let response = |s: u32, angular: u32, spring: u32, friction_mask: u32, friction: u32| Response {
+        stiffness: w.f(at + s),
+        damping: w.f(at + s + 4),
+        restitution: w.f(at + s + 8),
+        angular: w.b(at + angular),
+        friction: w.f(at + friction),
+        spring_mask: w.v(at + spring),
+        friction_mask: w.v(at + friction_mask),
+    };
+    let c = w.word(at + 0x208);
+    let collider = Collider {
+        damp: w.b(at + 0x44),
+        damp_linear: w.f(at + 0x4c),
+        damp_angular: w.f(at + 0x54),
+        mass: w.f(at + 0x58),
+        inv_mass: w.f(at + 0x5c),
+        inv_inertia: w.v(at + 0x70),
+        cofg: w.v(at + 0x80),
+        cofg_world: w.v(at + 0x90),
+        actors: w.word(at + 0x100),
+        collides_with: w.word(at + 0x104),
+        collidable: (c != 0).then(|| w.word(c + 0x94)),
+        max_depth: w.f(at + 0x10c),
+        scenery: response(0x118, 0x13c, 0x160, 0x170, 0x1a0),
+        actor: response(0x130, 0x140, 0x180, 0x190, 0x1a4),
+        surfaces: core::array::from_fn(|k| w.f(at + 0x1a8 + 4 * k as u32)),
+        normal_speed: w.f(at + 0x1e8),
+        relative: w.v(at + 0x1f0),
+    };
+    crate::atv_contact::Record { collider, impulse_mask: w.v(at + 0x150) }
+}
+
+/// **The record at `at` as its resolution holds it** (F31b5g; the gravity's call, vt `+0x88` handed
+/// 1, answered by [`crate::atv_contact::Held::resolve`]): its fields, its `+0xf0` contacts, the
+/// body at `+0xe4` whole and its mass (`+0x18`). `None` when a contact is with another record
+/// (`+0x84`) or a mover (`+0x88`): the mover's velocity and spin are its virtuals', and another
+/// record is not held; the call is then not answered. A record with no body is held with none, and
+/// [`crate::atv_contact::Held::resolve`] does not answer it either.
+pub fn held(w: &impl Words, at: u32) -> Option<crate::atv_contact::Held> {
+    let list = w.word(at + 0xf8);
+    let mut entries = Vec::new();
+    for i in 0..w.i(at + 0xf0).max(0) as u32 {
+        let e = list + CONTACT * i;
+        if w.word(e + 0x84) != 0 || w.word(e + 0x88) != 0 {
+            return None;
+        }
+        let contact = crate::contact::Contact {
+            kind: w.word(e),
+            from: w.v(e + 0x10),
+            on_body: w.v(e + 0x20),
+            normal: w.v(e + 0x30),
+            point: w.v(e + 0x40),
+            arm: w.v(e + 0x50),
+            other_arm: w.v(e + 0x60),
+            surface: w.i(e + 0x80),
+            other: None,
+            mover: None,
+        };
+        entries.push(crate::atv_contact::Entry { contact, relative: w.v(e + 0x70) });
+    }
+    let b = w.word(at + 0xe4);
+    Some(crate::atv_contact::Held {
+        record: collider(w, at),
+        entries,
+        movers: Vec::new(),
+        mass: if b != 0 { w.f(b + 0x18) } else { F::ZERO },
+        body: (b != 0).then(|| super::seed::body(w, b)),
+    })
+}
+
+/// [`held`]'s words the resolution writes, address and value, for the record at `at` (its list and
+/// body pointers read off `w`): the centre of mass in the world, the normal speed and the relative
+/// velocity; each contact's two arms and its relative velocity; and every word of the body
+/// [`super::seed::body`] reads.
+pub fn held_words(h: &crate::atv_contact::Held, at: u32, w: &impl Words) -> Vec<(u32, u32)> {
+    let mut out = vec![(at + 0x1e8, h.record.collider.normal_speed.to_bits())];
+    let mut v = |a: u32, x: Vf| out.extend(x.to_bits().into_iter().enumerate().map(|(k, x)| (a + 4 * k as u32, x)));
+    v(at + 0x90, h.record.collider.cofg_world);
+    v(at + 0x1f0, h.record.collider.relative);
+    let list = w.word(at + 0xf8);
+    for (i, e) in h.entries.iter().enumerate() {
+        let a = list + CONTACT * i as u32;
+        v(a + 0x50, e.contact.arm);
+        v(a + 0x60, e.contact.other_arm);
+        v(a + 0x70, e.relative);
+    }
+    if let Some(b) = &h.body {
+        out.extend(super::seed::body_words(b, w.word(at + 0xe4)));
+    }
+    out
 }
