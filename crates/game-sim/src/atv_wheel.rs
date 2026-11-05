@@ -59,11 +59,11 @@ const LEAN_HI: f32 = 0.64;
 const BOTTOM_OUT_PUSH: f32 = 0.9;
 /// How far along the suspension line a contact the ray did not find may be and still shove.
 const BOTTOM_OUT_REACH: f32 = 2.0;
-/// The body's own up, `0x397000`.
+/// The body's own up, a constant vector the wheel step loads.
 const UP: Vf = Vf::new(0.0, 1.0, 0.0, 1.0);
-/// The scale the tire's moment is handed through the body's add-force-at, `0x396fd0`.
+/// The scale the tire's moment is handed through the body's add-force-at (a constant all-ones vector).
 const MOMENT_SCALE: Vf = Vf::new(1.0, 1.0, 1.0, 1.0);
-/// What an unloaded wheel's contact velocity is reset to, `0x396fc0`; also what the ground's own
+/// What an unloaded wheel's contact velocity is reset to (a constant zero vector); also what the ground's own
 /// velocity is taken to be when the wheel stands on nothing that moves.
 const NO_CONTACT_VELOCITY: Vf = Vf::new(0.0, 0.0, 0.0, 1.0);
 
