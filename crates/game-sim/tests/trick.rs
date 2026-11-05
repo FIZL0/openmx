@@ -1767,9 +1767,9 @@ fn r1_over_an_extra_falls_back_to_the_extra_alone() {
     use game_sim::trick::{EXTRA_SLOTS, Gesture, extra_of, group_with};
     let named = |n: String| Stunt { name: n.to_lowercase(), display_name: n, duration: F(1.0), ..Stunt::default() };
     let original: Vec<Stunt> = (0..SLOTS).map(|i| named(format!("Trick{i}"))).collect();
-    // The first stunt of each extra slot through Cross + Square (groups 7..=9), so every R1 combo
-    // (16, 23, 30) is empty; then the same with every slot filled.
-    let short = Set::new(original.clone()).with_extras((0..12).map(|k| named(format!("Extra{k}"))).collect());
+    // A stunt on each slot of Cross and Square alone (groups 7 and 8, the first two filled since
+    // P306), so every R1 combo (16, 23, 30) is empty; then the same with every slot filled.
+    let short = Set::new(original.clone()).with_extras((0..8).map(|k| named(format!("Extra{k}"))).collect());
     let full = Set::new(original).with_extras((0..EXTRA_SLOTS).map(|k| named(format!("Extra{k}"))).collect());
     let ask = |set: &Set, trick: [bool; 3], extra: [bool; 2], dir: Dir| {
         let mut t = Tricks::default();
@@ -1784,8 +1784,8 @@ fn r1_over_an_extra_falls_back_to_the_extra_alone() {
             assert_eq!(ask(&short, r1, extra, dir), extra_trick(alone, dir), "{extra:?} + R1 {dir:?}, empty combo");
             assert_eq!(ask(&full, r1, extra, dir), extra_trick(combo, dir), "{extra:?} + R1 {dir:?}, filled combo");
         }
-        // Both extras with R1: both together, as the pack has them.
-        assert_eq!(ask(&short, r1, [true, true], dir), extra_trick(9, dir));
+        // Both extras with R1, and both together empty too: Cross alone.
+        assert_eq!(ask(&short, r1, [true, true], dir), extra_trick(7, dir));
         // Cross + Circle, empty: Circle's own, the original's trick for the original's button.
         assert_eq!(ask(&short, [true, false, false], [true, false], dir), Some(Trick(slot_of(1, dir).unwrap() as u8)));
         // Extras up: the original's groups, unchanged, and R1 alone none of them.
@@ -1799,4 +1799,36 @@ fn r1_over_an_extra_falls_back_to_the_extra_alone() {
     let none = Set::new((0..SLOTS).map(|i| named(format!("Trick{i}"))).collect()).with_extras(vec![named("Only".into())]);
     assert_eq!(ask(&none, r1, [true, false], Dir::Down), None);
     assert_eq!(ask(&none, r1, [true, false], Dir::Up), extra_trick(7, Dir::Up));
+}
+
+/// **P306:** a pack's extras take the gestures of one face button first. With MX vs. ATV's 19, the
+/// first 12 — and the four after — sit on Cross, Square, Cross + R1 and Square + R1, the last three
+/// on Cross + Square + R1, and none needs two face buttons while a one-face-button gesture is free.
+/// The original's 24 stay where they were.
+#[test]
+fn extras_take_one_face_button_before_two() {
+    use game_sim::trick::{EXTRA_SLOTS, extra_gesture, extra_group_name, extra_of};
+    let named = |n: String| Stunt { name: n.to_lowercase(), display_name: n, duration: F(1.0), ..Stunt::default() };
+    let original: Vec<Stunt> = (0..SLOTS).map(|i| named(format!("Trick{i}"))).collect();
+    let set = Set::new(original.clone()).with_extras((0..19).map(|k| named(format!("Extra{k}"))).collect());
+    for (slot, stunt) in original.iter().enumerate() {
+        assert_eq!(set.stunt(Trick(slot as u8)).unwrap().name, stunt.name, "the original's slot {slot}");
+    }
+    let held = |k: usize| extra_group_name(extra_gesture(k).unwrap().0).unwrap();
+    let firsts: Vec<String> = (0..12).map(held).collect();
+    for want in ["Cross", "Square", "Cross + R1"] {
+        assert_eq!(firsts.iter().filter(|g| *g == want).count(), 4, "{want} in the first 12: {firsts:?}");
+    }
+    assert_eq!((12..16).map(held).collect::<Vec<_>>(), ["Square + R1"; 4]);
+    assert_eq!((16..19).map(held).collect::<Vec<_>>(), ["Cross + Square + R1"; 3]);
+    // Every stunt sits on the gesture extra_of names, and the tricks page reads the same one.
+    for k in 0..19 {
+        let (group, dir) = extra_gesture(k).unwrap();
+        let id = Trick(Trick::EXTRA + extra_of(group, dir).unwrap() as u8);
+        assert_eq!(set.stunt(id).unwrap().name, format!("extra{k}"));
+    }
+    // No two-face-button gesture is filled while a one-face-button one is free, at any count.
+    let faces = |k: usize| held(k).split(" + ").filter(|b| *b != "R1").count();
+    let one: Vec<usize> = (0..EXTRA_SLOTS).filter(|&k| faces(k) == 1).collect();
+    assert_eq!(one, (0..16).collect::<Vec<_>>(), "the one-face-button slots come first");
 }

@@ -142,9 +142,9 @@ pub fn rows(set: &Set, moves: Option<&Moves>) -> Vec<TrickRow> {
     for (k, s) in set.stunts.iter().enumerate().skip(SLOTS).take(EXTRA_SLOTS) {
         let k = k - SLOTS;
         let Some(name) = named(s) else { continue };
-        let group = 7 + (k / 4) as u8;
+        let Some((group, dir)) = trick::extra_gesture(k) else { continue };
         let mut how = buttons(group);
-        how.push(dir_glyph(DIRS[k % 4]));
+        how.push(dir_glyph(dir));
         out.push(TrickRow {
             name,
             how,

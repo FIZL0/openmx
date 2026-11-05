@@ -276,8 +276,8 @@ impl Set {
         self.stunts.get(trick.slot().or_else(|| trick.extra().map(|k| SLOTS + k))?)
     }
 
-    /// The 24 with the extra slots' records after them (MD16), in [`extra_of`]'s order. A set with
-    /// none is the original's.
+    /// The 24 with the extra slots' records after them (MD16), in [`extra_of`]'s order, so the first
+    /// extras take the one-face-button gestures (P306). A set with none is the original's.
     pub fn with_extras(mut self, extras: Vec<Stunt>) -> Set {
         self.stunts.truncate(SLOTS);
         self.stunts.resize_with(SLOTS, Stunt::default);
@@ -625,14 +625,28 @@ pub fn group_with(trick: [bool; TRICK_BUTTONS], extra: [bool; EXTRA_BUTTONS]) ->
     }
 }
 
-/// The extra slot (0..[`EXTRA_SLOTS`]) a group of 7..=[`LAST_GROUP`] and a direction name, in the
-/// order [`slot_of`] numbers the original's: up, down, left, right within a group, the groups in
-/// [`group_with`]'s order.
+/// The order a pack's extras fill the groups of 7..=[`LAST_GROUP`] in (P306): one face button
+/// before two. Cross and Square alone (7, 8), then each with R1 (16, 23), then both with R1 (30);
+/// only then Cross + Square (9) and the extras over Circle and Triangle, in [`group_with`]'s order.
+/// The group numbers are [`group_with`]'s; only where a stunt lands changes.
+const EXTRA_ORDER: [u8; EXTRA_GROUPS] =
+    [7, 8, 16, 23, 30, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 24, 25, 26, 27, 28, 29];
+
+/// The extra slot (0..[`EXTRA_SLOTS`]) a group of 7..=[`LAST_GROUP`] and a direction name: up,
+/// down, left, right within a group, as [`slot_of`] numbers the original's, the groups in
+/// [`EXTRA_ORDER`] — the order [`Set::with_extras`] fills them in.
 pub fn extra_of(group: u8, dir: Dir) -> Option<usize> {
-    if !(7..=LAST_GROUP).contains(&group) || dir == Dir::None {
+    if dir == Dir::None {
         return None;
     }
-    Some((group as usize - 7) * 4 + (dir as usize - 1))
+    let at = EXTRA_ORDER.iter().position(|&g| g == group)?;
+    Some(at * 4 + (dir as usize - 1))
+}
+
+/// The group and direction extra slot `k` is held on: [`extra_of`] backwards.
+pub fn extra_gesture(k: usize) -> Option<(u8, Dir)> {
+    let group = *EXTRA_ORDER.get(k / 4)?;
+    Some((group, [Dir::Up, Dir::Down, Dir::Left, Dir::Right][k % 4]))
 }
 
 /// The buttons a group of 7..=[`LAST_GROUP`] is held on, as the pad names them (`Cross + R1`), for
@@ -1294,8 +1308,14 @@ mod tests {
         groups.dedup();
         assert_eq!(groups, (7..=LAST_GROUP).collect::<Vec<_>>());
         let dirs = [Dir::Up, Dir::Down, Dir::Left, Dir::Right];
-        let slots: Vec<usize> = (7..=LAST_GROUP).flat_map(|g| dirs.map(|d| extra_of(g, d).unwrap())).collect();
-        assert_eq!(slots, (0..EXTRA_SLOTS).collect::<Vec<_>>());
+        let mut slots: Vec<usize> = (7..=LAST_GROUP).flat_map(|g| dirs.map(|d| extra_of(g, d).unwrap())).collect();
+        slots.sort_unstable();
+        assert_eq!(slots, (0..EXTRA_SLOTS).collect::<Vec<_>>(), "every gesture its own extra slot");
+        for k in 0..EXTRA_SLOTS {
+            let (g, d) = extra_gesture(k).unwrap();
+            assert_eq!(extra_of(g, d), Some(k), "extra_gesture is extra_of backwards");
+        }
+        assert_eq!(extra_gesture(EXTRA_SLOTS), None);
         assert_eq!(extra_of(LAST_GROUP + 1, Dir::Up), None);
         assert!(usize::from(Trick::EXTRA) + EXTRA_SLOTS <= usize::from(u8::MAX), "every extra has a trick id");
     }
