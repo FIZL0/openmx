@@ -317,3 +317,181 @@ fn whole_frame(touching: bool) {
     let (bad, _) = image::compare(&ee, &mut fresh, &wrong, &at);
     assert_eq!(bad.len(), 1, "one word changed, {} red:\n{}", bad.len(), show(&bad));
 }
+
+/// The quad's pad words as the port holds them and the image's offsets from the quad: the gas and
+/// brake levers (`+0x314`, `+0x310`) and the stick (`+0x12a8`, `+0x12ac`). Both sides are given
+/// the same raw controls before each frame; the input limiter in the frame takes them from there.
+#[derive(Clone, Copy, Debug, Default)]
+struct Pad {
+    gas: f32,
+    brake: f32,
+    x: f32,
+    y: f32,
+}
+
+/// MD37b — the ride the chain is driven through: gas from rest, a left then a right lock at speed,
+/// the stick forward and back, then the brake to a stop and nothing.
+fn ride_pad(k: usize) -> Pad {
+    let mut p = Pad::default();
+    match k {
+        0..=59 => p.gas = 1.0,
+        60..=89 => (p.gas, p.x) = (1.0, -1.0),
+        90..=119 => (p.gas, p.x) = (1.0, 1.0),
+        120..=139 => (p.gas, p.y) = (1.0, 1.0),
+        140..=159 => (p.gas, p.y) = (0.6, -1.0),
+        160..=209 => p.brake = 1.0,
+        _ => {}
+    }
+    p
+}
+
+const RIDE_FRAMES: usize = 240;
+
+fn lay_pad(ee: &mut Ee, quad: u32, p: Pad) {
+    for (o, v) in [(0x314, p.gas), (0x310, p.brake), (0x12a8, p.x), (0x12ac, p.y)] {
+        ee.set_u32(quad + o, v.to_bits());
+    }
+}
+
+/// MD37b — **the spawned quad's ride, frame after frame, is the original's**: MD75e's whole frame
+/// chained. SLUS-21104's world step runs [`RIDE_FRAMES`] frames off `atv-r-spawn.ee.bin` at the
+/// game's 30 Hz tick (`0x3d08850a`, F31's), only the ground query hooked, with [`ride_pad`]'s
+/// controls laid into the quad before each; the port's [`quad::frame`] runs as many on the image's
+/// ride with the same controls, its [`quad::Steps`] and Desert Oasis world kept from frame to
+/// frame. After every frame every word [`image::compare`] reads of the quad, body, wheels, nodes
+/// and collidables, and every word of the rigid body, equals the original's.
+#[test]
+fn the_spawned_quads_ride_is_the_originals_frame_after_frame() {
+    let Some(seen) = chain(|k, _, _| ride_pad(k), RIDE_FRAMES) else { return };
+    assert!(seen.top > 10.0, "the quad never got going: the controls did not reach the frame ({seen:?})");
+    assert!(seen.airborne > 0 && seen.steered > 0, "the ride left a path out: {seen:?}");
+}
+
+/// MD37b — **the same, with gas, steered at the palm ahead of the spawn** ([`at_the_palm`]), every
+/// frame the original's. MD37a's race-wheelie-launch strikes the palm at ~79 ft/s, but the world
+/// step alone does not: on both sides the quad runs through it with no contact in its record and
+/// no wreck. The strike is in the rest of the game's frame (MD104), which then turns these
+/// asserts round.
+#[test]
+fn the_spawned_quads_run_into_the_palm_is_the_originals_frame_after_frame() {
+    let Some(seen) = chain(at_the_palm, PALM_FRAMES) else { return };
+    assert!(seen.top > 10.0, "the quad never got going ({seen:?})");
+    assert!(seen.nearest < 2.0, "the ride missed the palm: {seen:?}");
+    assert_eq!((seen.contacts, seen.wrecked), (0, None), "the world step struck the palm: {seen:?}");
+}
+
+const PALM_FRAMES: usize = 300;
+
+/// The palm ahead of the spawn (MD37a's notes: the obstacle at x 2965, z 3258).
+const PALM: (f32, f32) = (2965.0, 3258.0);
+
+/// Gas, and the stick steering the quad's velocity toward [`PALM`] (the original's position and
+/// velocity before the frame; both sides get the same pad).
+fn at_the_palm(_: usize, at: Vf, vel: Vf) -> Pad {
+    let (dx, dz) = (PALM.0 - at.x(), PALM.1 - at.z());
+    let cross = vel.x() * dz - vel.z() * dx;
+    let dot = vel.x() * dx + vel.z() * dz;
+    let turn = cross.atan2(dot);
+    Pad { gas: 1.0, x: (STEER_SIGN * 2.0 * turn).clamp(-1.0, 1.0), ..Pad::default() }
+}
+
+/// The stick's x against the turn toward the palm: right is a negative turn here.
+const STEER_SIGN: f32 = -1.0;
+
+/// What a chained ride went through: its top speed, frames with a wheel off the ground, frames
+/// steered, the first frame the wreck word (`+0x6e4`) was set, and the vehicle states it was in.
+#[derive(Debug, Default)]
+struct Seen {
+    top: f32,
+    airborne: usize,
+    steered: usize,
+    wrecked: Option<usize>,
+    states: std::collections::BTreeSet<u32>,
+    contacts: usize,
+    nearest: f32,
+}
+
+fn chain(pad: impl Fn(usize, Vf, Vf) -> Pad, frames: usize) -> Option<Seen> {
+    let pre = image()?;
+    let mut ee = image()?;
+    let trn = terrain_file()?;
+    let d = oasis::desert_world(&pre)?;
+    let trn: &'static [u8] = Box::leak(trn.into_boxed_slice());
+    let map: &'static game_sim::track::Terrain<'static> = Box::leak(Box::new(game_sim::track::Terrain::parse(trn).unwrap()));
+    let terrain = atv_ground::Terrain::of(map);
+    let dt = F::from_bits(0x3d08_850a);
+    let (mut r, at) = image::read_ride(&pre, image::IMAGE_QUAD, dt).unwrap_or_else(|e| panic!("{e}"));
+    let quad = image::IMAGE_QUAD;
+
+    let asked = Rc::new(Cell::new(0u32));
+    let (a, t) = (asked.clone(), terrain.clone());
+    ee.hooks.insert(GROUND_QUERY, Box::new(move |ee| {
+        assert_eq!((ee.r(4) as u32, ee.r(7)), (TERRAIN, 0), "the ground query's world and fourth argument");
+        let (p, n, rec) = (ee.r(5) as u32, ee.r(6) as u32, ee.r(8) as u32);
+        let mut record = ee.u8_at(rec);
+        let (point, normal) = t.ground(get_v(ee, p), Vf::ZERO, &mut record);
+        put_v(ee, p, point);
+        put_v(ee, n, normal);
+        ee.write(rec, 1, u128::from(record));
+        a.set(a.get() + 1);
+    }));
+
+    let mut body = seed::body(&|a| pre.u32_at(a), at.body);
+    let oasis::Desert { world, props, eco, trees, rays, search, first_part, .. } = d;
+    let mut oasis = atv_search::Oasis::new(world, &props, &eco, &trees, rays, search, first_part);
+    oasis.gathered = true;
+    let port_asked = Cell::new(0u32);
+    let ground = |q: Vf, record: &mut u8| {
+        port_asked.set(port_asked.get() + 1);
+        terrain.ground(q, Vf::ZERO, record)
+    };
+    let table = AcosTable::build();
+    let mut m = quad::Steps { bike: r.bike.clone(), rest: Vec::<Call>::new(), ground, sweep: &mut oasis };
+    let mut fresh = image().unwrap();
+    let (mut seen, mut steps) = (Seen { nearest: f32::MAX, ..Seen::default() }, 0u64);
+    for k in 0..frames {
+        let p = pad(k, get_v(&ee, at.body + 0x70), get_v(&ee, at.body + 0x80));
+        lay_pad(&mut ee, quad, p);
+        (r.s.q.gas, r.s.q.brake) = (F(p.gas), F(p.brake));
+        (m.bike.stick.x, m.bike.stick.y) = (F(p.x), F(p.y));
+        ee.set(28, GP);
+        ee.call(WORLD_STEP, &[u64::from(IMAGE_WORLD)], &[dt.0], 50_000_000);
+        assert!(ee.steps > 10_000, "frame {k}: the world step ran only {} instructions", ee.steps);
+        steps += ee.steps;
+        m.rest.clear();
+        quad::frame(&GAME_WORLD, &r.s.p, &mut r.s.q, &mut body, dt, &table, &mut m);
+        let named: Vec<String> = m.rest.iter().map(|c| format!("{c:?}").split([' ', '(']).next().unwrap().to_string()).collect();
+        assert!(named.iter().all(|n| n == "GravityRecord" || n == "PartMove"), "frame {k}: handed on {:?}", m.rest);
+        assert_eq!(port_asked.get(), asked.get(), "frame {k}: the ground queries");
+        r.bike = m.bike.clone();
+        r.s.body = body.view();
+        let (bad, n) = image::compare(&ee, &mut fresh, &r, &at);
+        let show = bad
+            .iter()
+            .take(20)
+            .map(|&(t, ia, p, w)| format!("  test {t:#010x} = image {ia:#010x} (quad +{:#x}): port {p:#010x}, original {w:#010x}", ia.wrapping_sub(quad)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(bad.is_empty(), "frame {k} ({p:?}): {} of {n} words differ from the original's:\n{show}", bad.len());
+        let body_bad: Vec<String> = seed::body_words(&body, at.body)
+            .into_iter()
+            .filter(|&(a, v)| ee.u32_at(a) != v)
+            .map(|(a, v)| format!("  body +{:#x}: port {v:#010x}, original {:#010x}", a - at.body, ee.u32_at(a)))
+            .collect();
+        assert!(body_bad.is_empty(), "frame {k}: the rigid body differs:\n{}", body_bad.join("\n"));
+        seen.top = seen.top.max(r.s.q.speed_len.0.abs());
+        seen.airborne += usize::from(!r.s.q.all_down);
+        seen.steered += usize::from(r.s.q.steer_command != F::ZERO);
+        if seen.wrecked.is_none() && ee.u32_at(quad + 0x6e4) != 0 {
+            seen.wrecked = Some(k);
+        }
+        if at.state != 0 {
+            seen.states.insert(ee.u32_at(at.state + 0x28));
+        }
+        seen.contacts += usize::from(ee.u32_at(at.record + 0xf0) != 0);
+        let c = get_v(&ee, at.body + 0x70);
+        seen.nearest = seen.nearest.min(((PALM.0 - c.x()).powi(2) + (PALM.1 - c.z()).powi(2)).sqrt());
+    }
+    eprintln!("MD37b: {frames} frames, {steps} instructions, {} ground queries; {seen:?}", asked.get());
+    Some(seen)
+}
