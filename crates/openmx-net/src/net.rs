@@ -447,6 +447,8 @@ struct Ctx {
     codes: Codes,
     lan: Lan,
     lan_on: bool,
+    /// The hosted room's code listing on its own mDNS service (K42).
+    coded: board::CodeListing,
     ev: mpsc::Sender<Event>,
     name: String,
     disc: Arc<dyn Disc>,
@@ -542,7 +544,12 @@ async fn run(cfg: Online, mut cmds: amp::UnboundedReceiver<Cmd>, ev: mpsc::Sende
         }
     };
     let lan_on = mdns.is_some();
-    let mut cx = Ctx { ep, codes: Codes::new(dht, cfg.servers()), lan: board::watch_lan(mdns), lan_on, ev, name: cfg.name.clone(), disc, relays: cfg.relay != Relay::Off };
+    let coded = board::CodeListing::default();
+    #[cfg(not(target_arch = "wasm32"))]
+    if lan_on && let Ok(l) = ep.address_lookup() {
+        l.add(coded.clone());
+    }
+    let mut cx = Ctx { ep, codes: Codes::new(dht, cfg.servers()), lan: board::watch_lan(mdns), lan_on, coded, ev, name: cfg.name.clone(), disc, relays: cfg.relay != Relay::Off };
     cx.say(Event::Status("Online.".into()));
     let private = cfg.private;
     while let Some(c) = cmds.recv().await {
@@ -710,6 +717,15 @@ struct Shaking {
 
 /// Hosts `room` as peer `me`: [`HOST`], or a guest the room was handed to (N11), its ride under way and
 /// its code kept, whose other guests dial it again.
+/// Takes the hosted room's code listing (K42) down however [`host`] ends.
+struct Unlist<'a>(&'a Ctx);
+
+impl Drop for Unlist<'_> {
+    fn drop(&mut self) {
+        self.0.coded.list(self.0.ep.id(), None);
+    }
+}
+
 async fn host(cx: &Ctx, mut room: Room, cmds: &mut amp::UnboundedReceiver<Cmd>, me: &str) {
     let taken = me != HOST;
     if room.name.is_empty() {
@@ -724,6 +740,7 @@ async fn host(cx: &Ctx, mut room: Room, cmds: &mut amp::UnboundedReceiver<Cmd>, 
     }
     cx.say(Event::Room(room.clone()));
     let ep = cx.ep.clone();
+    let _unlist = Unlist(cx);
     addressed(&ep, cx.relays).await;
     cx.say(Event::Code(ticket(&ep)));
     // the code shown at once, checked and published in the background (re-rolled if taken); on a LAN with nowhere
@@ -778,6 +795,9 @@ async fn host(cx: &Ctx, mut room: Room, cmds: &mut amp::UnboundedReceiver<Cmd>, 
             listed = Some(Instant::now());
             let listing = Listing::of(&ep.id().to_string(), &room);
             ep.set_user_data_for_address_lookup(if room.private { None } else { board::lan_data(&listing) });
+            if cx.lan_on {
+                cx.coded.list(ep.id(), Some(room.short.as_str()).filter(|c| !room.private && !c.is_empty()));
+            }
             if let Some(dht) = cx.codes.dht.clone().filter(|_| !room.private) {
                 let (key, r) = (ep.secret_key().clone(), room.clone());
                 n0_future::task::spawn(async move { board::announce(&dht, &key, &r).await.inspect_err(|e| eprintln!("{e}")) });
@@ -1161,6 +1181,8 @@ async fn resolve(cx: &Ctx, code: &str) -> Result<EndpointAddr, String> {
         });
     }
     let until = Instant::now() + if online { RESOLVE } else { LAN_CODE_WAIT };
+    // the host answers alone on its code's own service, where the busy LAN-wide one can hold its answer back (K42)
+    let mut coded = if cx.lan_on { board::watch_code(cx.ep.id(), &code) } else { amp::unbounded_channel().1 };
     let mut last = Ok(None);
     loop {
         if let Some(id) = board::lan_code(&cx.lan, &code).and_then(|l| l.id.parse::<EndpointId>().ok()) {
@@ -1170,6 +1192,7 @@ async fn resolve(cx: &Ctx, code: &str) -> Result<EndpointAddr, String> {
             return Err(codes::missed(&code, last));
         }
         tokio::select! {
+            Some(addr) = coded.recv() => return Ok(addr),
             Some(r) = rx.recv() => {
                 if let Ok(Some((t, seq))) = &r && codes::fresh(*seq) && let Ok(t) = t.parse::<EndpointTicket>() {
                     return Ok(t.into());
