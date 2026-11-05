@@ -144,6 +144,9 @@ pub trait Updates {
     fn out(&mut self, c: Out) -> u32;
     /// The vector [`Out::NodePlace`], [`Out::Local`] or [`Out::Rotate`] writes back.
     fn vector(&mut self, c: Out) -> Quad;
+    /// The engine's shared smooth noise at `t` ([`crate::noise::SmoothNoise::at_accumulated`] on its
+    /// tables), which [`trick_hold`] shakes the held clip by.
+    fn noise(&mut self, t: F) -> F;
 }
 
 fn w(m: &mut impl Updates, o: u32) -> u32 {
@@ -835,6 +838,34 @@ pub fn trick(m: &mut impl Updates, dt: F) -> u32 {
     m.out(Out::TrickStart(id));
     put(m, 0x14d4, 0);
     1
+}
+
+/// The trick hold's shake at its widest: 0.07 of the clip's run.
+pub const HOLD_SHAKE: u32 = 0x3d8f_5c29;
+
+/// **The clip held at its end** (vt `+0x4ec`, the stunt's table entry, `dt`), what the trick step
+/// does with a clip of the asked kind held past its length ([`Out::TrickHold`]).
+///
+/// The hold's own clock (`+0x14dc`) ramps the shake from 0 to [`HOLD_SHAKE`] over its first half
+/// second, clamped; the shake is that times the smooth noise at twice the noise clock (`+0x14e0`).
+/// The noise clock, the hold clock and a third clock (`+0x14e8`) run on by `dt`, and the clip's
+/// fraction (`+0x14e4`, which the wreck test reads) is the stunt clock (`+0x14d8`) plus the shake,
+/// over the clip's run (`+0x48`). The original's ramp is a lerp from 0 over 0 to 0.5 s (the
+/// accumulator's `adda`/`madd`), its clamp `max` then `min` by the ends' `min` and `max`.
+pub fn trick_hold(m: &mut impl Updates, entry: u32, dt: F) {
+    let (lo, hi) = (F::ZERO, F(f32::from_bits(HOLD_SHAKE)));
+    let at = (fb(m, 0x14dc) - lo) / (F(0.5) - lo);
+    let ramp = Acc::adda(F::ZERO, lo).madd(at, hi - lo);
+    let ramp = ramp.max(lo.min(hi)).min(lo.max(hi));
+    let t = F(2.0) * fb(m, 0x14e0);
+    let shake = ramp * m.noise(t);
+    for o in [0x14e0, 0x14dc, 0x14e8] {
+        let c = fb(m, o) + dt;
+        putf(m, o, c);
+    }
+    let anim = m.word(entry);
+    let frac = (fb(m, 0x14d8) + shake) / f(m, anim.wrapping_add(0x48));
+    putf(m, 0x14e4, frac);
 }
 
 /// **The net check** (vt `+0x3e8`), the remote bike's snapshot interpolation; answers 1. With five

@@ -3896,6 +3896,8 @@ const WRECK_OWN: [(u32, u32); 7] = [
 /// The scratch slots the port's calls hand out for their buffers: the body's quadword, the terrain's
 /// normal, the bounds test's two words, the put-back's two bone buffers.
 const WRECK_SCRATCH: [u32; 5] = [61, 62, 63, 64, 65];
+/// The settle's zero word, handed to each listener it tells (F31b5f).
+const TOLD_SCRATCH: u32 = 66;
 
 /// The bike in RAM as the wreck's port sees it: every word read and written in place, each call out
 /// the original's, the bike's own virtuals among the wreck's the port's, and the engine's and wheels' resets and the
@@ -3989,8 +3991,18 @@ impl Wrecks for WreckInRam<'_> {
                 let out = u64::from(ee.scratch(WRECK_SCRATCH[2]));
                 (BOUNDS, vec![u64::from(node), u64::from(at), out + 4, out, 0], 150.0)
             }
-            Out::Settle => (slot(0x4a8), vec![bike], x),
+            Out::Settle => {
+                assert_eq!((slot(0x4a8), slot(0x53c), slot(0x540)), (SETTLE_FN, FLIP_CLIP_SET, FLIP_NEXT_SET), "the bike's vt +0x4a8, +0x53c and +0x540");
+                wreck::settle(self);
+                return 0;
+            }
             Out::Stance(i) => (slot(0x4b0), vec![bike, i as i64 as u64], x),
+            Out::Told(l) => {
+                let zero = ee.scratch(TOLD_SCRATCH);
+                let f = ee.u32_at(ee.u32_at(l + 0x20) + 0xa0);
+                self.ee.set_u32(zero, 0);
+                (f, vec![u64::from(l), 5, u64::from(zero), 0, 0], x)
+            }
             Out::Rand => (RAND, vec![], x),
             Out::Post { id, arg } => (POST_MESSAGE, vec![u64::from(ee.u32_at(POST_QUEUE)), bike + 0x674, 8, u64::from(id), u64::from(arg), 0], x),
             Out::RumbleReady(at) => (RUMBLE_READY, vec![u64::from(at)], x),
@@ -4722,6 +4734,8 @@ const TRICK_FN: u32 = 0x004e_49c0;
 const NET_CHECK_FN: u32 = 0x004a_86f0;
 const NET_UNPACK_FN: u32 = 0x004d_d490;
 const MARK_FN: u32 = 0x0046_b110;
+/// F31b5f's: the clip held at its end (vt `+0x4ec`).
+const TRICK_HOLD_FN: u32 = 0x004e_4810;
 const NET_POST: u32 = 0x004a_8c40;
 /// The bike's slots F39 ports, each with its function.
 const UPDATE_OWN: [(u32, u32); 6] = [
@@ -4798,6 +4812,12 @@ impl Updates for UpdateInRam<'_> {
                 update::net_unpack(self, dt);
                 return 0;
             }
+            // F31b5f's.
+            Out::TrickHold(entry) => {
+                assert_eq!(vt(self.ee, 0x4ec), TRICK_HOLD_FN, "the bike's vt +0x4ec");
+                update::trick_hold(self, entry, dt);
+                return 0;
+            }
             _ => {}
         }
         let (bike, x) = (u64::from(BIKE), self.x);
@@ -4808,10 +4828,9 @@ impl Updates for UpdateInRam<'_> {
         let (f, ints, floats) = match c {
             Out::Search(r) => (SEARCH_ALL, vec![u(r), 0], vec![x]),
             Out::KindClear => (vt(ee, 0x39c), vec![bike], vec![x]),
-            Out::Gear | Out::Trick | Out::NetCheck | Out::NetUnpack => unreachable!("served by the port"),
+            Out::Gear | Out::Trick | Out::NetCheck | Out::NetUnpack | Out::TrickHold(_) => unreachable!("served by the port"),
             Out::TrickEnd(id) => (vt(ee, 0x4ac), vec![bike, id as i32 as i64 as u64], vec![x]),
             Out::TrickRemote => (vt(ee, 0x4e8), vec![bike], vec![x]),
-            Out::TrickHold(e) => (vt(ee, 0x4ec), vec![bike, u(e)], vec![x]),
             Out::TrickWanted => (vt(ee, 0x4b4), vec![bike], vec![x]),
             Out::TrickStart(id) => (vt(ee, 0x4b8), vec![bike, u(id), 0], vec![x]),
             Out::Mark { run, player, on, id } => (MARK_FN, vec![u(run), u(player), u(on), u(id), 0], vec![x]),
@@ -4882,6 +4901,9 @@ impl Updates for UpdateInRam<'_> {
             }
             c => unreachable!("{c:?} writes no vector"),
         }
+    }
+    fn noise(&mut self, t: F) -> F {
+        noise_at(self.ee, &mut None, t)
     }
 }
 
@@ -5045,6 +5067,9 @@ impl Updates for UpdateLogged<'_> {
             Out::Rotate { node, v } => fake_quad(3, node, v),
             c => unreachable!("{c:?} writes no vector"),
         }
+    }
+    fn noise(&mut self, _: F) -> F {
+        unreachable!("the trick hold is logged, not run, on the F39 and F42 rigs")
     }
 }
 
@@ -7445,7 +7470,7 @@ const RIDE_CALLEES: [&str; 23] = [
     "wreck OutOfBounds",
 ];
 /// The callees flip-1 leaves in the interpreter: ride-2's, the trick's, the wreck's and the put-back's.
-const FLIP_CALLEES: [&str; 44] = [
+const FLIP_CALLEES: [&str; 42] = [
     "tail Message",
     "tail Paused",
     "tail Rumble",
@@ -7470,7 +7495,6 @@ const FLIP_CALLEES: [&str; 44] = [
     "update Send",
     "update Spin",
     "update TrickEnd",
-    "update TrickHold",
     "update TrickWanted",
     "update Walk",
     "wreck Attach",
@@ -7486,7 +7510,6 @@ const FLIP_CALLEES: [&str; 44] = [
     "wreck Rider",
     "wreck Rumble",
     "wreck RumbleReady",
-    "wreck Settle",
     "wreck Stance",
     "wreck Trail",
     "wreck Unhook",
@@ -7841,5 +7864,317 @@ fn the_bikes_frame_without_the_other_listeners_is_bit_exact() {
             want = (0x870..0x88c).step_by(4).filter(|&o| o != 0x87c).chain([0x890, 0x894, 0x898, 0x920]).chain(want).chain((0x950..0x980).step_by(4).filter(|&o| o != 0x95c)).collect();
         }
         assert_eq!(parted.into_iter().collect::<Vec<_>>(), want, "{name}: the words that part are the rider's");
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// F31b5f: the bike words the tail's, wreck's and update's interpreter callees write
+// ---------------------------------------------------------------------------------------------
+
+/// **F31b5f — the clip held at its end is the original's**: 10 000 cases on state 4's bike, the hold's
+/// four clocks (`+0x14d8`, `+0x14dc`, `+0x14e0`, `+0x14e8`), the clip's run and `dt` drawn at random
+/// (the hold clock mostly about its half-second ramp, either side of it and inside, the rest zeros,
+/// tiny, huge and any bits), run through SLUS-21104's vt `+0x4ec` and through [`update::trick_hold`]
+/// from the same words. The bike's words, the clip and the noise's knot come out word for word, the
+/// noise on the original's tables.
+#[test]
+fn the_trick_hold_is_the_originals() {
+    let Some(mut ee) = image().map(hooked) else { return };
+    assert_eq!(vt(&ee, 0x4ec), TRICK_HOLD_FN, "the bike's vt +0x4ec");
+    let (entry, clip) = (WRECK_AREA, WRECK_AREA + 0x40);
+    let regions = [(BIKE + 0x14d0, 0x20), (entry, 0x100), (NOISE_KNOT, 4)];
+    let image_words = snap_regions(&ee, &regions);
+    let mut g = Gen(0x0031_b5f0);
+    let mut t = BTreeMap::new();
+    for k in 0..10_000 {
+        restore_regions(&mut ee, &regions, &image_words);
+        ee.set_u32(entry, clip);
+        let hold = if g.one_in(4) { reset_float(&mut g) } else { g.f(-0.3, 0.8).to_bits() };
+        ee.set_u32(BIKE + 0x14dc, hold);
+        for o in [0x14d8, 0x14e0, 0x14e4, 0x14e8] {
+            ee.set_u32(BIKE + o, if g.one_in(3) { reset_float(&mut g) } else { g.f(-5.0, 5.0).to_bits() });
+        }
+        ee.set_u32(clip + 0x48, if g.one_in(4) { reset_float(&mut g) } else { g.f(0.05, 3.0).to_bits() });
+        let dt = if g.one_in(5) { f32::from_bits(reset_float(&mut g)) } else { f32::from_bits(DT) };
+        let h = F(f32::from_bits(hold));
+        tally(&mut t, if !(h > F::ZERO) { "hold at or under 0" } else if h < F(0.5) { "hold on the ramp" } else { "hold past the ramp" });
+        let before = snap_regions(&ee, &regions);
+        ee.set(28, GP);
+        ee.call(TRICK_HOLD_FN, &[u64::from(BIKE), u64::from(entry)], &[dt], BUDGET);
+        let want = snap_regions(&ee, &regions);
+        restore_regions(&mut ee, &regions, &before);
+        let mut m = UpdateInRam { ee: &mut ee, x: dt };
+        update::trick_hold(&mut m, entry, F(dt));
+        let got = snap_regions(&ee, &regions);
+        let off: Vec<String> = (0..want.len()).filter(|&i| want[i] != got[i]).map(|i| format!("word {i}: original {:#010x}, port {:#010x}", want[i], got[i])).collect();
+        assert!(off.is_empty(), "case {k} (hold {hold:#010x}, dt {dt}): {}", off.join("\n  "));
+    }
+    eprintln!("{t:?}");
+    assert!(t.values().all(|&n| n >= 1000), "{t:?}");
+}
+
+/// **F31b5f — the settle is the original's**: 10 000 cases on state 4's bike, the run and the player
+/// (`+0x684`, `+0x680`) each there or not, the player's listener list 0 to 4 long, the six clocks'
+/// words and the flip's two drawn at random, run through SLUS-21104's vt `+0x4a8` and through
+/// [`wreck::settle`] from the same words. The stance's call (vt `+0x4b0`) and each listener's
+/// (its vt `+0xa0`: the listener, 5, a zero word, 0, 0) are logged on both sides, the same calls in
+/// the same order; the bike's words come out word for word.
+#[test]
+fn the_settle_is_the_originals() {
+    use wreck::Out;
+    let Some(mut ee) = image().map(hooked) else { return };
+    assert_eq!((vt(&ee, 0x4a8), vt(&ee, 0x53c), vt(&ee, 0x540)), (SETTLE_FN, FLIP_CLIP_SET, FLIP_NEXT_SET), "the bike's vt +0x4a8, +0x53c and +0x540");
+    let (player, listeners, fake_vt, fake_fn) = (WRECK_AREA + 0x400, WRECK_AREA + 0x600, WRECK_AREA + 0x800, WRECK_AREA + 0x900);
+    let log: Rc<RefCell<Vec<Out>>> = Rc::default();
+    let l = log.clone();
+    ee.hooks.insert(vt(&ee, 0x4b0), Box::new(move |ee: &mut Ee| {
+        assert_eq!(ee.r(4) as u32, BIKE, "the stance's bike");
+        l.borrow_mut().push(Out::Stance(ee.r(5) as u32 as i32));
+    }));
+    let l = log.clone();
+    ee.hooks.insert(fake_fn, Box::new(move |ee: &mut Ee| {
+        assert_eq!((ee.r(5), ee.u32_at(ee.r(6) as u32), ee.r(7), ee.r(8)), (5, 0, 0, 0), "a listener's word");
+        l.borrow_mut().push(Out::Told(ee.r(4) as u32));
+    }));
+    let regions = [(BIKE + 0x680, 0x10), (BIKE + 0x700, 0x20), (BIKE + 0x1740, 0x20), (WRECK_AREA, 0xa00)];
+    let image_words = snap_regions(&ee, &regions);
+    let mut g = Gen(0x0031_b5f1);
+    let mut t = BTreeMap::new();
+    for k in 0..10_000 {
+        restore_regions(&mut ee, &regions, &image_words);
+        let on = !g.one_in(4);
+        ee.set_u32(BIKE + 0x684, if on || g.one_in(2) { g.bits() | 1 } else { 0 });
+        ee.set_u32(BIKE + 0x680, if on || g.one_in(2) { player } else { 0 });
+        for o in [0x1744, 0x1748, 0x704, 0x708, 0x70c, 0x710, 0x1754, 0x1758, 0x174c, 0x1750, 0x700, 0x714] {
+            ee.set_u32(BIKE + o, g.bits());
+        }
+        let n = g.bits() % 5;
+        ee.set_u32(player + 0x1d4, if n == 0 { 0 } else { listeners });
+        for i in 0..n {
+            let at = listeners + 0x40 * i;
+            ee.set_u32(at + 0x1c, if i + 1 == n { 0 } else { at + 0x40 });
+            ee.set_u32(at + 0x20, fake_vt);
+        }
+        ee.set_u32(fake_vt + 0xa0, fake_fn);
+        let settles = ee.u32_at(BIKE + 0x684) != 0 && ee.u32_at(BIKE + 0x680) != 0;
+        tally(&mut t, if !settles { "no run or player" } else if n == 0 { "settles, no listeners" } else { "settles, listeners" });
+        let before = snap_regions(&ee, &regions);
+        log.borrow_mut().clear();
+        ee.set(28, GP);
+        ee.call(SETTLE_FN, &[u64::from(BIKE)], &[0.0], BUDGET);
+        let (want, want_log) = (snap_regions(&ee, &regions), log.take());
+        restore_regions(&mut ee, &regions, &before);
+        let mut m = WreckLogged { ee: &mut ee, log: Vec::new(), says: Says::default() };
+        wreck::settle(&mut m);
+        let got_log = std::mem::take(&mut m.log);
+        let got = snap_regions(&ee, &regions);
+        assert_eq!(got_log, want_log, "case {k}: the calls");
+        let off: Vec<String> = (0..want.len()).filter(|&i| want[i] != got[i]).map(|i| format!("word {i}: original {:#010x}, port {:#010x}", want[i], got[i])).collect();
+        assert!(off.is_empty(), "case {k}: {}", off.join("\n  "));
+    }
+    eprintln!("{t:?}");
+    assert!(t.values().all(|&n| n >= 1000), "{t:?}");
+}
+
+/// One of the callees whose bike words F31b5f watches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Writer {
+    /// The clip held at its end (vt `+0x4ec`), ported as [`update::trick_hold`].
+    TrickHold,
+    /// The kind set (vt `+0x3a0`), the put-back's with a kind.
+    KindSet,
+    /// The event post (every one: the wreck's, the put-back's and the preload's cue).
+    Post,
+    /// The settle (vt `+0x4a8`), first in the wreck's entry and the unwreck.
+    Settle,
+}
+
+/// The kind set and the settle (the bike's vt `+0x3a0` and `+0x4a8` on state 4).
+const KIND_SET_FN: u32 = 0x004e_19a0;
+const SETTLE_FN: u32 = 0x004e_4cd0;
+/// The bike's vt `+0x53c` and `+0x540`, the settle's last two calls: a store of `a1` into `+0x1754`,
+/// one into `+0x1758`.
+const FLIP_CLIP_SET: u32 = 0x004e_7a30;
+const FLIP_NEXT_SET: u32 = 0x004e_7a40;
+const WRITERS: [(u32, Writer); 4] = [(TRICK_HOLD_FN, Writer::TrickHold), (KIND_SET_FN, Writer::KindSet), (POST_MESSAGE, Writer::Post), (SETTLE_FN, Writer::Settle)];
+
+/// What [`writers_flow`] saw over a replay.
+#[derive(Debug, Default)]
+struct Writes {
+    /// Each writer's runs, and the rows it ran on.
+    ran: BTreeMap<Writer, std::collections::BTreeSet<usize>>,
+    /// Each writer's words of the bike object it wrote, and the rows.
+    wrote: BTreeMap<(Writer, u32), std::collections::BTreeSet<usize>>,
+    /// Every byte of the bike object a writer wrote that nothing else has written since, and who.
+    marked: BTreeMap<u32, Writer>,
+    /// Every read of a marked word: (the word, its writer, who read it: a writer or the rest of the
+    /// frame) and the rows.
+    read: BTreeMap<(u32, Writer, Option<Writer>), std::collections::BTreeSet<usize>>,
+    depth: u32,
+    row: usize,
+    /// The bike object and its blocks after every frame ([`bike_and_blocks`]).
+    after: Vec<Vec<(u32, u32)>>,
+}
+
+impl Writes {
+    /// The reads and writes since the last settle, `by` whom (none: the rest of the frame).
+    fn settle(&mut self, ee: &mut Ee, by: Option<Writer>) {
+        let reads = ee.reads.replace(Some(Default::default())).unwrap_or_default();
+        for a in reads {
+            if let Some(&w) = self.marked.get(&a) {
+                self.read.entry((a.wrapping_sub(BIKE) & !3, w, by)).or_default().insert(self.row);
+            }
+        }
+        if by.is_none() {
+            for a in std::mem::take(&mut ee.written) {
+                self.marked.remove(&a);
+            }
+        }
+    }
+}
+
+/// C15's `name` replayed whole in the interpreter as [`replay`] does, every row's blocks and wreck
+/// state bit-exact against the capture, with the [`WRITERS`] hooked: watched (each runs as itself, its
+/// writes into the bike object marked and every later read of a marked byte noted, as
+/// [`listeners_flow`]'s are) or, with `skip`, the kind set and the posts returning at once. A writer
+/// reached inside another one is the outer one's.
+fn writers_flow(name: &str, skip: bool) -> Option<Writes> {
+    let mut ee = hooked(image()?);
+    let rows = rows(name)?;
+    assert_eq!((vt(&ee, 0x3a0), vt(&ee, 0x4a8), vt(&ee, 0x4ec)), (KIND_SET_FN, SETTLE_FN, TRICK_HOLD_FN), "the bike's vt +0x3a0, +0x4a8 and +0x4ec");
+    let t: Rc<RefCell<Writes>> = Rc::default();
+    for (f, who) in WRITERS {
+        let h = t.clone();
+        ee.hooks.insert(
+            f,
+            Box::new(move |ee: &mut Ee| {
+                let row = h.borrow().row;
+                h.borrow_mut().ran.entry(who).or_default().insert(row);
+                if skip && matches!(who, Writer::KindSet | Writer::Post) {
+                    ee.set(2, 0);
+                    return;
+                }
+                if skip || h.borrow().depth > 0 {
+                    return run_as_itself(ee, f);
+                }
+                h.borrow_mut().settle(ee, None);
+                let before = std::mem::take(&mut ee.written);
+                h.borrow_mut().depth += 1;
+                run_as_itself(ee, f);
+                let w = &mut *h.borrow_mut();
+                w.depth -= 1;
+                w.settle(ee, Some(who));
+                let wrote = std::mem::replace(&mut ee.written, before);
+                for a in wrote {
+                    let o = a.wrapping_sub(BIKE);
+                    if o < 0x1800 {
+                        w.marked.insert(a, who);
+                        w.wrote.entry((who, o & !3)).or_default().insert(row);
+                    } else {
+                        ee.written.insert(a);
+                    }
+                }
+            }),
+        );
+    }
+    for (r, row) in rows.iter().enumerate() {
+        poke(&mut ee, row, &READER);
+        t.borrow_mut().row = r;
+        ee.written.clear();
+        if !skip {
+            *ee.reads.borrow_mut() = Some(Default::default());
+        }
+        ee.set(28, GP);
+        ee.call(FRAME, &[u64::from(SIM)], &[f32::from_bits(DT)], BUDGET);
+        if !skip {
+            t.borrow_mut().settle(&mut ee, None);
+            *ee.reads.borrow_mut() = None;
+        }
+        t.borrow_mut().after.push(bike_and_blocks(&ee));
+        let d = diff(&ee, row);
+        assert!(d.is_empty(), "{name} row {r} (vsync {}): {} words differ\n  {}", row["vsync"], d.len(), d.iter().take(40).cloned().collect::<Vec<_>>().join("\n  "));
+        assert_eq!(wrecked(|o| ee.u32_at(BIKE + o)), row_wrecked(row), "{name} row {r}: the wreck state");
+        poke(&mut ee, row, &SPOT);
+    }
+    drop(ee);
+    Some(Rc::try_unwrap(t).ok().unwrap().into_inner())
+}
+
+fn rows_of(s: &std::collections::BTreeSet<usize>) -> String {
+    format!("{} rows {:?}..={:?}", s.len(), s.first().unwrap(), s.last().unwrap())
+}
+
+/// **F31b5f — the kind set's and the posts' bike words are unread; the trick hold's and the settle's
+/// are read, and both are ported**: C15 ride-2 and flip-1 replayed whole in the interpreter, every row
+/// bit-exact, with the trick hold, the kind set, every event post and the settle watched
+/// ([`writers_flow`]). Every word of the bike object each one stores (changed or not):
+/// - the trick hold ([`update::trick_hold`]): its clocks and the clip's fraction, `+0x14dc..+0x14e8`
+///   (rows 113..=124); the fraction is read by the rest of the frame, the clocks by the hold itself;
+/// - the settle ([`wreck::settle`]): `+0x704..+0x710`, `+0x1744`, `+0x1748`, `+0x1754`, `+0x1758`
+///   (rows 125 and 193); `+0x704` and `+0x708` are read by the frame;
+/// - the kind set: `+0x9a8` (row 193), never read before the frame stores it again;
+/// - the posts (their listener the camera's controller): `+0x460`, `+0x468` (row 125), read by
+///   nothing but a later post; and `+0x444` (rows 125 and 193), the bike's flags, stored back as they
+///   were (the F31b5c census sees no change) and read by the frame.
+#[test]
+fn the_kind_sets_and_posts_bike_words_are_unread() {
+    for name in ["ride-2", "flip-1"] {
+        let Some(w) = writers_flow(name, false) else { return };
+        for (who, rows) in &w.ran {
+            eprintln!("{name}: {who:?} ran on {}", rows_of(rows));
+        }
+        for ((who, o), rows) in &w.wrote {
+            eprintln!("{name}: {who:?} wrote bike+{o:#x} on {}", rows_of(rows));
+        }
+        for ((o, who, by), rows) in &w.read {
+            eprintln!("{name}: bike+{o:#x}, {who:?}'s, read by {} on {}", by.map_or("the frame".into(), |b| format!("{b:?}")), rows_of(rows));
+        }
+        let wrote: Vec<(Writer, u32)> = w.wrote.keys().copied().collect();
+        let mut want: Vec<(Writer, u32)> = Vec::new();
+        if name == "flip-1" {
+            want.extend([0x14dc, 0x14e0, 0x14e4, 0x14e8].map(|o| (Writer::TrickHold, o)));
+            want.push((Writer::KindSet, 0x9a8));
+            want.extend([0x444, 0x460, 0x468].map(|o| (Writer::Post, o)));
+            want.extend([0x704, 0x708, 0x70c, 0x710, 0x1744, 0x1748, 0x1754, 0x1758].map(|o| (Writer::Settle, o)));
+        }
+        assert_eq!(wrote, want, "{name}: the bike words the callees store");
+        let unported: Vec<_> = w.read.keys().filter(|&&(o, who, by)| match who {
+            Writer::KindSet => true,
+            Writer::Post => !(by == Some(Writer::Post) || by.is_none() && o == 0x444),
+            Writer::TrickHold | Writer::Settle => false,
+        }).collect();
+        assert!(unported.is_empty(), "{name}: reads of the kind set's or the posts' words: {unported:x?}");
+    }
+}
+
+/// **F31b5f — the frame without the kind set and the posts is bit-exact**: C15 ride-2 and flip-1
+/// replayed whole in the interpreter with every event post and the kind set returning at once
+/// ([`writers_flow`] with `skip`): every row's blocks and wreck state are C15's, and after every
+/// frame the whole bike object and its physics blocks are the full frame's ([`listeners_flow`],
+/// [`Others::Run`]) but for `+0x460` and `+0x468` (the posts', from row 125). The kind set's `+0x9a8`
+/// is stored again within its frame, and the flags at `+0x444` the posts store back stay as they were.
+#[test]
+fn the_frame_without_the_kind_set_and_posts_is_bit_exact() {
+    for (name, n) in [("ride-2", 459), ("flip-1", 465)] {
+        let (Some(run), Some(dropped)) = (listeners_flow(name, Others::Run), writers_flow(name, true)) else { return };
+        assert_eq!((run.after.len(), dropped.after.len()), (n, n));
+        let mut parted = std::collections::BTreeSet::new();
+        for (r, (a, b)) in run.after.iter().zip(&dropped.after).enumerate() {
+            assert_eq!(a.len(), b.len(), "{name} row {r}: the same blocks");
+            for (&(at, x), &(at2, y)) in a.iter().zip(b) {
+                assert_eq!(at, at2, "{name} row {r}: the same blocks");
+                if x != y {
+                    let o = at.wrapping_sub(BIKE);
+                    assert!([0x9a8, 0x460, 0x468].contains(&o), "{name} row {r}: {at:#x} (bike+{o:#x}) {x:#010x} with them, {y:#010x} without");
+                    parted.insert(o);
+                }
+            }
+        }
+        eprintln!("{name}: without them, the bike's words that part: {parted:#x?}");
+        let want: &[u32] = if name == "flip-1" { &[0x460, 0x468] } else { &[] };
+        assert_eq!(parted.into_iter().collect::<Vec<_>>(), want, "{name}: the words that part");
+        let ran: Vec<(Writer, usize)> = dropped.ran.iter().map(|(&k, v)| (k, v.len())).collect();
+        let want: Vec<(Writer, usize)> = if name == "flip-1" { vec![(Writer::TrickHold, 12), (Writer::KindSet, 1), (Writer::Post, 465), (Writer::Settle, 2)] } else { vec![(Writer::Post, 459)] };
+        assert_eq!(ran, want, "{name}: the rows each callee is reached on");
     }
 }
