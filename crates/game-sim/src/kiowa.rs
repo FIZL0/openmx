@@ -1149,6 +1149,8 @@ struct Lists<'a, S: Surroundings> {
     acos: &'a AcosTable,
     rng: &'a mut Rng,
     asked: Crashed,
+    /// SLUS-21104's steps in place of MX Unleashed's ([`Kiowa::tick_mxvatv`]).
+    mxvatv: Option<&'a mut Mxvatv>,
 }
 
 impl<S: Surroundings> crate::biplane::Dynamics for Lists<'_, S> {
@@ -1165,9 +1167,15 @@ impl<S: Surroundings> crate::biplane::Dynamics for Lists<'_, S> {
         let r = self.ride.measure.readings(self.ride.flown, self.around.touching(), self.ride.gravity_scale);
         self.kiowa.wrecked = self.ride.crash.reason != 0;
         let (gravity, around) = (self.ride.gravity, &mut *self.around);
-        self.kiowa.force(&r, &mut self.ride.body, self.curve, h, |b| {
+        let wrapper = |b: &mut Body| {
             crate::biplane::collision_force(b, gravity, |b| around.resolve(b));
-        });
+        };
+        if let Some(m) = self.mxvatv.as_deref_mut() {
+            let (row, local) = (self.ride.measure.matrix.0[2], self.ride.measure.velocity);
+            self.kiowa.force_mxvatv(m, &r, row, local, &mut self.ride.body, self.curve, h, wrapper);
+            return;
+        }
+        self.kiowa.force(&r, &mut self.ride.body, self.curve, h, wrapper);
     }
     fn enabled(&self, _: i32) -> bool {
         self.ride.body.enabled
@@ -1187,9 +1195,12 @@ impl<S: Surroundings> crate::biplane::Dynamics for Lists<'_, S> {
         let c = CrashContact { touching, ignored: self.around.ignored(), speed: ride.measure.speed };
         let (around, matrix) = (&mut *self.around, ride.measure.matrix);
         let b = &mut ride.body;
-        self.asked = ride.crash.step(&c, ride.area.as_ref(), b.position, &mut b.velocity, &mut b.rates, &mut ride.throw_scale, self.rng, dt, || {
-            around.strike(&matrix)
-        });
+        let strike = || around.strike(&matrix);
+        self.asked = if self.mxvatv.is_some() {
+            ride.crash.step_mxvatv(&c, ride.area.as_ref(), b.position, &mut b.velocity, &mut b.rates, &mut ride.throw_scale, self.rng, dt, strike)
+        } else {
+            ride.crash.step(&c, ride.area.as_ref(), b.position, &mut b.velocity, &mut b.rates, &mut ride.throw_scale, self.rng, dt, strike)
+        };
         self.around.crashed(&self.asked, ride, self.rng);
         let entries = self.around.entries();
         if ride.measure.touchdown(touching, entries) && ride.touchdown_sound {
@@ -1236,7 +1247,7 @@ impl Kiowa {
         if let Some(pad) = pad {
             self.pad = pad;
         }
-        let lists = Lists { kiowa: self, ride, around, curve, acos, rng, asked: Crashed::default() };
+        let lists = Lists { kiowa: self, ride, around, curve, acos, rng, asked: Crashed::default(), mxvatv: None };
         let mut shared = Shared { lists };
         world.step(dt, &mut shared);
         shared.lists.asked
@@ -2790,5 +2801,399 @@ impl Kiowa {
     pub fn put_back_controls(&mut self, altitude_fraction: F) {
         self.unwreck_controls();
         self.commands.altitude_fraction = altitude_fraction;
+    }
+}
+
+// --- MX vs. ATV's Kiowa (MD80c) ----------------------------------------------------------------------
+
+/// How long the pedals' yaw terms take to fade back in once the pedals are let go: no key of the file
+/// sets it (it is 5 in the loaded game, tests/mxvatv_kiowa.rs).
+const PEDAL_TIME: f32 = 5.0;
+/// The lowest speed command SLUS-21104's controller keeps: the stick backs the helicopter up to
+/// 30 ft/s, whatever `MaxSpeedCommand` is.
+const SPEED_COMMAND_FLOOR: f32 = -30.0;
+
+/// SLUS-21104's pedals in the aerodynamics: while a pedal is held, the side force and the yaw moment
+/// take the file's three `Pedal` keys in place of `CYbeta`, `Cnbeta` and `Cnr`; once it is let go,
+/// `Cnbeta` and `Cnr` come back in over [`Pedal::time`] seconds.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Pedal {
+    /// `CYbetaPedal`, `CnbetaPedal`, `CnrPedal`.
+    pub cy_beta: F,
+    pub cn_beta: F,
+    pub cn_r: F,
+    /// The fade's length (5 s), and the time left in it.
+    pub time: F,
+    pub timer: F,
+}
+
+/// What SLUS-21104's helicopter carries besides MX Unleashed's [`Kiowa`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Mxvatv {
+    pub pedal: Pedal,
+}
+
+/// The sign of the velocity along the model's forward row, as SLUS-21104's controller works it: the
+/// row times the velocity through VU0 (`x` first, then `y` and `z` fused on).
+pub fn forward_mxvatv(row: Vf, velocity: Vf) -> F {
+    use ps2_float::Lane;
+    let along = (Lane(row.x()) * Lane(velocity.x())).madd(row.y(), velocity.y()).madd(row.z(), velocity.z());
+    F(along.to_f32())
+}
+
+impl Controller {
+    /// [`Controller::step`] as SLUS-21104 has it. The ground speed it flies to is signed, negative
+    /// while the helicopter moves against its forward row (`forward`, [`forward_mxvatv`]), so the
+    /// stick can back it up; the speed command goes no lower than −30 ft/s; the stick always asks for
+    /// speed (no slow-speed pitch branch); and the speed command, the pitch rate, the collective and
+    /// its integral and the filter are each one fused multiply-add.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_mxvatv(
+        &self,
+        pad: &Pad,
+        at: &Flight,
+        forward: F,
+        state: &mut Loop,
+        out: &mut Commands,
+        table: &CurveTable,
+        dt: F,
+    ) {
+        if !at.flown {
+            out.lateral = F(0.0);
+            out.longitudinal = F(0.0);
+            out.pedal = F(0.0);
+            out.collective = F(0.0);
+            return;
+        }
+        let sign = if forward < F::ZERO { F(-1.0) } else { F::ONE };
+        let [vx, vy, vz] = at.velocity;
+        let ground = sign * Acc::mula(vz, vz).madd(vx, vx).sqrt();
+
+        // The speed command.
+        let stick = pad.longitudinal;
+        if stick != 0.0 || state.last_longitudinal.abs() <= 0.0 {
+            state.speed_command = Acc::adda(F::ZERO, state.speed_command).madd(dt, stick * self.speed_command_rate);
+        } else {
+            state.speed_command = ground;
+        }
+        state.speed_command = state.speed_command.max(F(SPEED_COMMAND_FLOOR)).min(self.max_speed_command);
+        state.last_longitudinal = stick;
+        let command = state.speed_command;
+        let error = if command.abs() < self.min_speed_command && stick == 0.0 { -ground } else { command - ground };
+
+        // The pitch angle asked for, and the turn's pitch rate.
+        let pitch = (self.speed_gain * error).max(-self.max_pitch).min(self.max_pitch);
+        let feed_forward = if !(at.airspeed <= self.min_feed_forward_speed) {
+            let (cos, sin) = curve(wrap(wrap(at.roll)), table);
+            let turn = F(G) * at.gravity_scale * sin / at.airspeed;
+            let ff = -turn * (sin / cos);
+            let (lo_speed, hi_speed) = (self.min_feed_forward_speed, self.max_feed_forward_speed);
+            let (lo, hi) = (self.min_feed_forward_scale, self.max_feed_forward_scale);
+            let scale = if lo_speed == hi_speed {
+                lo
+            } else {
+                let t = (ground.abs() - lo_speed) / (hi_speed - lo_speed);
+                Acc::adda(F(0.0), lo).madd(t, hi - lo).max(lo.min(hi)).min(lo.max(hi))
+            };
+            ff * scale
+        } else {
+            F(0.0)
+        };
+
+        // The three rate commands, then the errors against the body's.
+        let q = Acc::adda(F::ZERO, feed_forward)
+            .madd(self.pitch_gain, pitch - at.pitch)
+            .max(-self.max_rate[0])
+            .min(self.max_rate[0]);
+        let y = -pad.pedal * self.max_rate[1];
+        let r = -self.roll_gain * (-pad.lateral * self.max_roll - at.roll);
+        let limit = if pad.lateral == 0.0 { self.min_rate[2] } else { self.max_rate[2] };
+        let r = r.max(-limit).min(limit);
+        let e = Vf::new(q.to_f32(), y.to_f32(), r.to_f32(), 0.0).sub(at.rates);
+        out.lateral = (self.lateral_cyclic_gain * F(e.z())).max(-1.0).min(1.0);
+        out.longitudinal = (self.longitudinal_cyclic_gain * F(e.x())).max(-1.0).min(1.0);
+        out.pedal = (self.pedal_gain * F(e.y())).max(-1.0).min(1.0);
+
+        // The collective.
+        if at.pilot_flag && pad.climb == 0.0 {
+            out.altitude_fraction = at.height / self.max_altitude;
+            out.collective = F(0.0);
+            return;
+        }
+        let (rate, target) = if pad.climb != 0.0 && at.height < self.max_altitude {
+            state.hold_timer = self.hold_delay;
+            state.integral = F(INTEGRAL_RESTART);
+            (self.climb_rate, F(1.0))
+        } else if pad.descend != 0.0 {
+            state.hold_timer = self.hold_delay;
+            state.integral = F(INTEGRAL_RESTART);
+            (self.descent_rate, F(0.0))
+        } else {
+            if !(state.hold_timer <= 0.0) {
+                state.hold_altitude = at.height;
+                state.hold_timer = state.hold_timer - dt;
+            }
+            (self.altitude_hold_gain * (state.hold_altitude - at.height), F(HOLD_TARGET))
+        };
+        let e = rate - vy;
+        let c = Acc::adda(F::ZERO, state.integral).madd(self.collective_gain, e);
+        out.collective = if !(c <= 1.0) {
+            F(1.0)
+        } else if c < self.min_collective {
+            self.min_collective
+        } else {
+            state.integral = Acc::adda(F::ZERO, state.integral)
+                .madd(dt, self.integrator_gain * e)
+                .max(self.min_collective)
+                .min(1.0);
+            c
+        };
+        let f = &mut state.filter;
+        f.step = dt.min(f.time) / f.time;
+        f.value = Acc::adda(F::ZERO, f.value).madd(f.step, target - f.value);
+        out.filtered = f.value;
+    }
+}
+
+impl Aero {
+    /// [`Aero::step`] as SLUS-21104 has it. The moments' sums are fused in the original's order; a held
+    /// pedal swaps in the [`Pedal`] terms (and restarts their fade), a released one fades `Cnbeta` and
+    /// `Cnr` back in; and the slow-speed drag is one rule: with the stick not pushed forward
+    /// (`longitudinal <= 0`), the body-frame velocity the measure left (`local`, all of it, not only
+    /// the level part) is dragged by `LowSpeedDrag` times what the fade leaves out.
+    pub fn step_mxvatv(&self, pedal: &mut Pedal, pad: &Pad, air: &Airflow, local: Vf, s: &mut AeroState, dt: F) -> (Vf, Vf) {
+        use crate::contact::{minus, scaled};
+        let beta = air.beta.max(F(-MAX_BETA)).min(F(MAX_BETA));
+        let v = air.velocity;
+        let ground = Acc::mula(F(v.z()), F(v.z())).madd(F(v.x()), F(v.x())).sqrt();
+        let speed = air.speed.abs();
+
+        s.fade = if self.low_speed_aero == self.high_speed_aero {
+            F::ZERO
+        } else {
+            let t = (ground - self.low_speed_aero) / (self.high_speed_aero - self.low_speed_aero);
+            Acc::adda(F::ZERO, F::ZERO).madd(t, F::ONE - F::ZERO).max(F::ZERO).min(F::ONE)
+        };
+        let q = self.area * (speed * (F(0.5) * self.density * speed));
+        let (pitch_k, roll_k) = if speed <= 1.0 {
+            (F::ZERO, F::ZERO)
+        } else {
+            let h = F(0.5) / speed;
+            (self.chord * h, self.span * h)
+        };
+        let rates = air.rates;
+        s.lift = self.cl_alpha * air.alpha;
+        s.drag = self.cd0;
+        s.roll = Acc::mula(roll_k, self.cl_p * F(rates.z())).madda(self.cl_beta, beta).madd(self.cl_da, pad.lateral);
+        s.pitch = Acc::adda(F::ZERO, self.cm0)
+            .madda(self.cm_alpha, air.alpha)
+            .madda(pitch_k, self.cm_q * F(rates.x()))
+            .madd(self.cm_de, pad.longitudinal);
+        if !(pad.pedal.abs() <= 0.0) {
+            s.side = pedal.cy_beta * beta;
+            let turn = Acc::adda(F::ZERO, pedal.cn_r * F(rates.y())).madd(pedal.cn_beta, beta);
+            s.yaw = Acc::adda(F::ZERO, turn).madd(self.cn_dr, pad.pedal);
+            pedal.timer = pedal.time;
+        } else {
+            let mut back = F::ONE;
+            if !(pedal.timer <= 0.0) {
+                pedal.timer = pedal.timer - dt;
+                back = if pedal.time == F::ZERO {
+                    F::ZERO
+                } else {
+                    let t = (pedal.timer - pedal.time) / (F::ZERO - pedal.time);
+                    Acc::adda(F::ZERO, F::ZERO).madd(t, F::ONE - F::ZERO).max(F::ZERO).min(F::ONE)
+                };
+            }
+            s.side = self.cy_beta * beta;
+            s.yaw = Acc::mula(F(rates.y()), back * self.cn_r).madda(beta, back * self.cn_beta).madd(self.cn_dr, pad.pedal);
+        }
+
+        let sign = if air.speed < F::ZERO { F(-1.0) } else { F::ONE };
+        let mut force = Vf::new(
+            (q * (s.fade * s.side)).to_f32(),
+            (q * (s.fade * s.lift)).to_f32(),
+            (q * (s.drag * (-s.fade * sign))).to_f32(),
+            1.0,
+        );
+        let moment = Vf::new(
+            (self.chord * (q * (s.fade * s.pitch))).to_f32(),
+            (self.span * (q * (s.fade * s.yaw))).to_f32(),
+            (self.span * (q * (s.fade * s.roll))).to_f32(),
+            1.0,
+        );
+        if pad.longitudinal <= 0.0 {
+            let k = self.low_speed_drag * (self.area * (F(0.5) * (F::ONE - s.fade) * self.density));
+            force = minus(force, scaled(local, k));
+        }
+        (force, moment)
+    }
+}
+
+impl Kiowa {
+    /// [`Kiowa::force`] with SLUS-21104's controller and aerodynamics: the controller is handed the
+    /// sign row (`row`, the model's forward row as the last measure left it) and the aerodynamics the
+    /// body-frame velocity the last measure left (`local`) and the substep's `h` for the pedals' fade.
+    #[allow(clippy::too_many_arguments)]
+    pub fn force_mxvatv(
+        &mut self,
+        m: &mut Mxvatv,
+        r: &Readings,
+        row: Vf,
+        local: Vf,
+        body: &mut Body,
+        table: &CurveTable,
+        h: F,
+        wrapper: impl FnOnce(&mut Body),
+    ) {
+        if !self.wrecked {
+            let at = Flight {
+                flown: r.flown,
+                pilot_flag: r.pilot_flag,
+                height: F(body.position.y()),
+                velocity: [F(body.velocity.x()), F(body.velocity.y()), F(body.velocity.z())],
+                rates: body.rates,
+                airspeed: r.airspeed,
+                pitch: r.pitch,
+                roll: r.roll,
+                gravity_scale: r.gravity_scale,
+                high_speed_aero: self.aero.high_speed_aero,
+            };
+            let forward = forward_mxvatv(row, body.velocity);
+            self.controller.step_mxvatv(&self.pad, &at, forward, &mut self.control, &mut self.commands, table, h);
+        }
+        wrapper(body);
+        if self.wrecked {
+            return;
+        }
+        let (f, mo) = self.rotor.step(&self.commands, &mut self.rotor_state, table);
+        body.add_force_local(f);
+        body.add_moment_local(mo);
+        let air = Airflow {
+            speed: r.speed,
+            alpha: r.alpha,
+            beta: r.beta,
+            velocity: body.velocity,
+            quat: body.quat,
+            rates: body.rates,
+        };
+        let (f, mo) = self.aero.step_mxvatv(&mut m.pedal, &self.pad, &air, local, &mut self.aero_state, h);
+        body.add_force_local(f);
+        body.add_moment_local(mo);
+    }
+
+    /// [`Kiowa::tick`] with SLUS-21104's steps: [`Kiowa::force_mxvatv`] in the force listener and
+    /// [`Crash::step_mxvatv`] in the measure's crash test. The measure is MX Unleashed's.
+    #[allow(clippy::too_many_arguments)]
+    pub fn tick_mxvatv(
+        &mut self,
+        m: &mut Mxvatv,
+        ride: &mut Ride,
+        world: &crate::biplane::World,
+        pad: Option<Pad>,
+        curve: &CurveTable,
+        acos: &AcosTable,
+        rng: &mut Rng,
+        dt: F,
+        around: &mut impl Surroundings,
+    ) -> Crashed {
+        if let Some(pad) = pad {
+            self.pad = pad;
+        }
+        let lists = Lists { kiowa: self, ride, around, curve, acos, rng, asked: Crashed::default(), mxvatv: Some(m) };
+        let mut shared = Shared { lists };
+        world.step(dt, &mut shared);
+        shared.lists.asked
+    }
+}
+
+impl Crash {
+    /// [`Crash::step`] with MX vs. ATV's edge test and throw in place of MX Unleashed's (MXVehicle's
+    /// wreck check, [`crate::biplane::throw_mxvatv`]); the rest of the Kiowa's test (the strike, the
+    /// contact speed, the clocks and the put-back) is [`Crash::step`]'s.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_mxvatv(
+        &mut self,
+        c: &CrashContact,
+        area: Option<&Area>,
+        position: Vf,
+        velocity: &mut Vf,
+        rates: &mut Vf,
+        throw_scale: &mut F,
+        rng: &mut Rng,
+        dt: F,
+        strike: impl FnOnce() -> Strike,
+    ) -> Crashed {
+        let mut thrown = None;
+        if let Some(area) = area.filter(|a| self.reason != THROWN && a.outside_mxvatv(position, F(EDGE))) {
+            crate::biplane::throw_mxvatv(area, position, velocity, rates, throw_scale, rng);
+            self.wreck(THROWN, thrown.get_or_insert_with(Crashed::default));
+        }
+        let out = self.step(c, None, position, velocity, rates, throw_scale, rng, dt, strike);
+        match thrown {
+            Some(t) => Crashed { wreck: t.wreck, ..out },
+            None => out,
+        }
+    }
+}
+
+/// **MX vs. ATV's `kiowa.phy`** (`Veh\kiowa.phy`), as SLUS-21104's helicopter reads it: [`Phy::read`]'s
+/// sections and keys, with MXVehicle's wreck keys and two models in one file.
+///
+/// * `[Wrecks]`: MXVehicle's loader takes `MaxWreckTime` (default 5), `WreckGravity` (default 3),
+///   `WreckDamping` (default ones) and `WreckInertia` (default `(0, 0, 0, 1)`); the helicopter's own
+///   reader `MinWreckSpeed`, `WreckRotorRadius` and `WreckRotorHeight`. An MX Unleashed `WreckTime` is
+///   not read.
+/// * `[Animation]`: `ModelOnePelvisBoxPosition`/`Size` or `ModelTwo…`, by the model.
+/// * `[Camera]`, by the helicopter's override: the two first-person shoulder offsets and the model's
+///   `FPCameraOffset`, defaulting to `(0, 0, 0, 1)`, then `FCamFileName` (not kept).
+/// * The three `[Aerodynamics]` `Pedal` keys go to the aerodynamics ([`Pedal`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct MxvatvPhy {
+    pub phy: Phy,
+    pub pedal: Pedal,
+    pub fp_camera_offset: Vf,
+    pub left_shoulder_offset: Vf,
+    pub right_shoulder_offset: Vf,
+}
+
+impl Phy {
+    /// Read MX vs. ATV's file out of its bytes, as model one or model two.
+    pub fn read_mxvatv_bytes(bytes: &[u8], model_one: bool) -> MxvatvPhy {
+        Phy::read_mxvatv(&Ini::parse_bytes(bytes), model_one)
+    }
+
+    /// Load MX vs. ATV's file as SLUS-21104's helicopter does ([`MxvatvPhy`]).
+    pub fn read_mxvatv(ini: &Ini, model_one: bool) -> MxvatvPhy {
+        let model = if model_one { "ModelOne" } else { "ModelTwo" };
+        let key = |k: &str| format!("{model}{k}");
+        let mut phy = Phy::read(ini);
+
+        let s = ini.section("Wrecks");
+        phy.wrecks.wreck_time = s.float_or("MaxWreckTime", F(5.0));
+        phy.wrecks.wreck_gravity = s.float_or("WreckGravity", F(3.0));
+        phy.wrecks.wreck_damping = s.vector("WreckDamping", Vf::new(1.0, 1.0, 1.0, 1.0));
+        phy.wrecks.wreck_inertia = s.vector("WreckInertia", ORIGIN);
+
+        let s = ini.section("Animation");
+        phy.pelvis_box_position = s.vector(&key("PelvisBoxPosition"), ORIGIN);
+        phy.pelvis_box_size = s.vector(&key("PelvisBoxSize"), ORIGIN);
+
+        let k = &phy.aero_keys;
+        let pedal = Pedal {
+            cy_beta: k.cy_beta_pedal,
+            cn_beta: k.cn_beta_pedal,
+            cn_r: k.cn_r_pedal,
+            time: F(PEDAL_TIME),
+            timer: F::ZERO,
+        };
+        let s = ini.section("Camera");
+        MxvatvPhy {
+            pedal,
+            fp_camera_offset: s.vector(&key("FPCameraOffset"), ORIGIN),
+            left_shoulder_offset: s.vector("Left1stPerShoulderOffset", ORIGIN),
+            right_shoulder_offset: s.vector("Right1stPerShoulderOffset", ORIGIN),
+            phy,
+        }
     }
 }
