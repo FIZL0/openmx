@@ -22,6 +22,9 @@
 //!   frame, and the send.
 //! - [`parts`] ([`super::tail::Out::Parts`]): the collision record's and the second part's steps, then
 //!   the bike's own listeners' walk.
+//! - The virtuals those three call out on state 4's objects (F44): the trail's on and off
+//!   ([`trail_on`], [`trail_off`]) and the scene node's walk of its children ([`shown`], [`hidden`]);
+//!   the net sender's send, the bike's ([`send`]); a part's step ([`part_step`]).
 //!
 //! The quad's twin of [`prepare`]'s animation half is [`crate::quad::animate`]; this one reads and
 //! writes the bike's words as the original does, in its order.
@@ -123,12 +126,22 @@ pub enum Out {
     Axes { node: u32, z: u32, y: u32 },
     Local { node: u32, at: u32 },
     Rotate { node: u32, v: Quad },
-    /// The trail's on and off (its vt `+0x18` / `+0x20`, on its vt at `+4`).
+    /// The trail's on and off (its vt `+0x18` / `+0x20`, on its vt at `+4`; the scene node's own are
+    /// [`trail_on`] and [`trail_off`]), and a node's shown and hidden (vt `+0x28` / `+0x2c`: the scene
+    /// node's own are [`shown`] and [`hidden`]).
     TrailOn(u32),
     TrailOff(u32),
-    /// The net sender's send (its vt `+0x20`, the vt at `+0x38`: the sender, its `+0x34`; `dt`).
+    Shown(u32),
+    Hidden(u32),
+    /// The net sender's send (its vt `+0x20`, the vt at `+0x38`: the sender, its `+0x34`; `dt`; the
+    /// bike's own is [`send`]), and the bike's three packets it makes (the sender's `+0x34`, `dt`):
+    /// the stunt's (vt `+0x544`), the whole state (vt `+0x400`) and the change since (vt `+0x404`).
     Send { net: u32, arg: u32 },
-    /// A part's step (its vt `+0xbc`, the vt at `+0xc`; `dt`) and the listener walk of a group
+    NetStunt(u32),
+    NetFull(u32),
+    NetDelta(u32),
+    /// A part's step (its vt `+0xbc`, the vt at `+0xc`; `dt`; the record's and the second part's
+    /// own is [`part_step`]) and the listener walk of a group
     /// ([`super::tail::walk`]; `dt`).
     Part(u32),
     Walk(u32),
@@ -736,6 +749,81 @@ pub fn parts(m: &mut impl Updates) {
     }
     let b = m.bike();
     m.out(Out::Walk(b.wrapping_add(0xc)));
+}
+
+/// **A scene node's on** (the trail's vt `+0x18`, F44): its two hidden bits (`+0x21` bits 0 and 1)
+/// cleared, one store each, then its own shown (vt `+0x28`).
+pub fn trail_on(m: &mut impl Updates, node: u32) {
+    let at = node.wrapping_add(0x21);
+    for bit in [1, 2] {
+        let b = byte(m, at) & !bit;
+        set_byte(m, at, b);
+    }
+    m.out(Out::Shown(node));
+}
+
+/// **A scene node's off** (vt `+0x20`): the two bits set, then its own hidden (vt `+0x2c`).
+pub fn trail_off(m: &mut impl Updates, node: u32) {
+    let at = node.wrapping_add(0x21);
+    for bit in [1, 2] {
+        let b = byte(m, at) | bit;
+        set_byte(m, at, b);
+    }
+    m.out(Out::Hidden(node));
+}
+
+/// **A scene node's shown** (vt `+0x28`): each child (the first at `+0x10`, the next at its `+0xc`)
+/// not kept apart (`+0x21` bit 3 clear) shown in turn.
+pub fn shown(m: &mut impl Updates, node: u32) {
+    children(m, node, Out::Shown);
+}
+
+/// **A scene node's hidden** (vt `+0x2c`): the same walk, each child hidden.
+pub fn hidden(m: &mut impl Updates, node: u32) {
+    children(m, node, Out::Hidden);
+}
+
+fn children(m: &mut impl Updates, node: u32, each: fn(u32) -> Out) {
+    let mut c = m.word(node.wrapping_add(0x10));
+    while c != 0 {
+        if byte(m, c.wrapping_add(0x21)) & 8 == 0 {
+            m.out(each(c));
+        }
+        c = m.word(c.wrapping_add(0xc));
+    }
+}
+
+/// **The bike's send** (the net sender's vt `+0x20`, a thunk to the bike; `arg` the sender's `+0x34`;
+/// answers 1): with the sender on (`+0x414` bit 8), the stunt's packet on the beats 3, 6 and 9 of the
+/// ten (`+0xcfc`); then, the sender read again, the whole state on beat 0, the change on 1-9, and the
+/// beat on by one, mod 10.
+pub fn send(m: &mut impl Updates, arg: u32) -> u32 {
+    if w(m, 0x414) & 0x100 != 0 && matches!(w(m, 0xcfc), 3 | 6 | 9) {
+        m.out(Out::NetStunt(arg));
+    }
+    if w(m, 0x414) & 0x100 != 0 {
+        match w(m, 0xcfc) {
+            0 => {
+                m.out(Out::NetFull(arg));
+            }
+            1..=9 => {
+                m.out(Out::NetDelta(arg));
+            }
+            _ => {}
+        }
+        let beat = (w(m, 0xcfc).wrapping_add(1) as i32).wrapping_rem(10);
+        put(m, 0xcfc, beat as u32);
+    }
+    1
+}
+
+/// **A part's step** (vt `+0xbc`, `dt`; the collision record's and the second part's alike): its
+/// `+0x126` bit 4 cleared, then the walk of its listeners (`+0x24`).
+pub fn part_step(m: &mut impl Updates, part: u32) {
+    let at = part.wrapping_add(0x126);
+    let b = byte(m, at) & !0x10;
+    set_byte(m, at, b);
+    m.out(Out::Walk(part.wrapping_add(0x24)));
 }
 
 /// The trick step's slack past a clip's length, a tuning word (F42).

@@ -4895,6 +4895,15 @@ const MARK_FN: u32 = 0x0046_b110;
 /// F31b5f's: the clip held at its end (vt `+0x4ec`).
 const TRICK_HOLD_FN: u32 = 0x004e_4810;
 const NET_POST: u32 = 0x004a_8c40;
+/// F44's: the scene node's on, off, shown and hidden (the trail's vt `+0x18`, `+0x20`, `+0x28`,
+/// `+0x2c`), the net sender's send (a thunk to the bike's), and the record's and the second part's
+/// steps (research/oracle.txt `# F44`).
+const NODE_ON: u32 = 0x0012_8040;
+const NODE_OFF: u32 = 0x0012_8080;
+const NODE_SHOWN: u32 = 0x0012_7f60;
+const NODE_HIDDEN: u32 = 0x0012_7fd0;
+const SEND_THUNK: u32 = 0x004b_fa30;
+const PART_STEPS: [u32; 2] = [0x001b_cfa0, 0x001b_acd0];
 /// The bike's slots F39 ports, each with its function.
 const UPDATE_OWN: [(u32, u32); 6] = [
     (0x3a4, FADE_FN),
@@ -4978,6 +4987,18 @@ impl Updates for UpdateInRam<'_> {
             }
             _ => {}
         }
+        // F44's: the port where the object's slot holds the original it stands for.
+        let ee = &*self.ee;
+        let slot = |o: u32, at: u32, slot: u32| ee.u32_at(ee.u32_at(o + at) + slot);
+        match c {
+            Out::TrailOn(t) if slot(t, 4, 0x18) == NODE_ON => return void(update::trail_on(self, t)),
+            Out::TrailOff(t) if slot(t, 4, 0x20) == NODE_OFF => return void(update::trail_off(self, t)),
+            Out::Shown(n) if slot(n, 4, 0x28) == NODE_SHOWN => return void(update::shown(self, n)),
+            Out::Hidden(n) if slot(n, 4, 0x2c) == NODE_HIDDEN => return void(update::hidden(self, n)),
+            Out::Send { net, arg } if net == BIKE + update::NET && slot(net, 0x38, 0x20) == SEND_THUNK => return update::send(self, arg),
+            Out::Part(p) if PART_STEPS.contains(&slot(p, 0xc, 0xbc)) => return void(update::part_step(self, p)),
+            _ => {}
+        }
         let (bike, x) = (u64::from(BIKE), self.x);
         let ee = &*self.ee;
         let s = |k: u32| u64::from(ee.scratch(k));
@@ -5029,6 +5050,11 @@ impl Updates for UpdateInRam<'_> {
             Out::TrailOff(t) => (obj_fn(t, 4, 0x20), vec![u(t)], vec![x]),
             Out::Send { net, arg } => (obj_fn(net, 0x38, 0x20), vec![u(net), u(arg)], vec![x]),
             Out::Part(p) => (obj_fn(p, 0xc, 0xbc), vec![u(p)], vec![x]),
+            Out::Shown(n) => (obj_fn(n, 4, 0x28), vec![u(n)], vec![x]),
+            Out::Hidden(n) => (obj_fn(n, 4, 0x2c), vec![u(n)], vec![x]),
+            Out::NetStunt(a) => (vt(ee, 0x544), vec![bike, u(a)], vec![x]),
+            Out::NetFull(a) => (vt(ee, 0x400), vec![bike, u(a)], vec![x]),
+            Out::NetDelta(a) => (vt(ee, 0x404), vec![bike, u(a)], vec![x]),
             Out::Walk(g) => (TAIL, vec![u(g)], vec![x]),
             Out::NodePlace { .. } | Out::Local { .. } | Out::Rotate { .. } => unreachable!("asked through vector()"),
         };
@@ -5063,6 +5089,11 @@ impl Updates for UpdateInRam<'_> {
     fn noise(&mut self, t: F) -> F {
         noise_at(self.ee, &mut None, t)
     }
+}
+
+/// A port that answers nothing, as a call's `v0` of 0.
+fn void(_: ()) -> u32 {
+    0
 }
 
 /// One of the vehicle update's F39 callees as the port's, on the bike in RAM.
@@ -6163,6 +6194,179 @@ fn the_trick_step_gear_and_net_virtuals_are_the_originals() {
         assert!(*n >= 20, "path {path} taken only {n} times");
     }
     assert!(t.len() >= 20, "every path taken: {t:#?}");
+}
+
+/// F44's fake world: up to [`V_NODES`] scene nodes hung under the trail, 0x30 apart, and a node
+/// class whose shown and hidden are hooks.
+const V_AREA: u32 = 0x01c1_0000;
+const V_NODES: u32 = 14;
+const V_VT: u32 = V_AREA + 0x400;
+const V_FNS: u32 = V_AREA + 0x480;
+const V_LEN: u32 = 0x500;
+
+/// **The trail's, the net sender's and the parts' virtuals are the original's** (F44): 10 000
+/// cases on state 4's objects, each run through SLUS-21104's and then the port's from the same words.
+/// The trail on or off, with a random tree of nodes under it (state 4's node class, or one whose
+/// shown and hidden are hooks; the kept-apart bit 3 and the rest of `+0x20` at random); the bike's
+/// send with the sender on or off and its beat −2 to 12 or anything, the packets hooked to log and to
+/// change the sender's bit and the beat now and then (so the re-reads count); the record's and the
+/// second part's steps, `+0x124` at random, the walk hooked. Every word of the bike, the trail, the
+/// tree and both parts comes out the same, the calls are the same, in order, with the same arguments
+/// (each hook also asserts f12 = `dt`), and so is the send's answer.
+#[test]
+fn the_trail_sender_and_part_virtuals_are_the_originals() {
+    use update::Out;
+    let Some(mut ee) = image().map(hooked) else { return };
+    let net = BIKE + update::NET;
+    let trail = ee.u32_at(BIKE + 0x10dc);
+    let parts = [ee.u32_at(BIKE + update::RECORD), ee.u32_at(BIKE + 0xd4)];
+    let class = ee.u32_at(ee.u32_at(trail + 0x10) + 4);
+    let slot = |ee: &Ee, o: u32, at: u32, s: u32| ee.u32_at(ee.u32_at(o + at) + s);
+    for (o, f) in [(trail, [NODE_ON, NODE_OFF]), (ee.u32_at(trail + 0x10), [NODE_ON, NODE_OFF])] {
+        assert_eq!([0x18, 0x20].map(|s| slot(&ee, o, 4, s)), f, "state 4's node on and off");
+        assert_eq!([0x28, 0x2c].map(|s| slot(&ee, o, 4, s)), [NODE_SHOWN, NODE_HIDDEN], "state 4's node shown and hidden");
+    }
+    assert_eq!(slot(&ee, net, 0x38, 0x20), SEND_THUNK, "the sender's send");
+    assert_eq!(parts.map(|p| slot(&ee, p, 0xc, 0xbc)), PART_STEPS, "the parts' steps");
+    for o in (0..V_LEN).step_by(4) {
+        ee.set_u32(V_AREA + o, 0);
+    }
+    let log: Rc<RefCell<Vec<Out>>> = Rc::default();
+    let dt = Rc::new(RefCell::new(0f32));
+    type Says = Box<dyn Fn(&mut Ee) -> Out>;
+    let mut hook = |ee: &mut Ee, at: u32, h: Says| {
+        let (l, d) = (log.clone(), dt.clone());
+        ee.hooks.insert(at, Box::new(move |ee: &mut Ee| {
+            assert_eq!(ee.f(12).to_bits(), d.borrow().to_bits(), "a hooked call is handed dt");
+            let c = h(ee);
+            l.borrow_mut().push(c);
+        }));
+    };
+    ee.set_u32(V_VT + 0x28, V_FNS);
+    ee.set_u32(V_VT + 0x2c, V_FNS + 4);
+    hook(&mut ee, V_FNS, Box::new(|ee| Out::Shown(ee.r(4) as u32)));
+    hook(&mut ee, V_FNS + 4, Box::new(|ee| Out::Hidden(ee.r(4) as u32)));
+    // The packets: each may turn the sender off or on and move the beat, from the words it finds.
+    let packet = |ee: &mut Ee, c: fn(u32) -> Out| {
+        assert_eq!(ee.r(4) as u32, BIKE, "a packet of something other than the bike");
+        let h = mix(u64::from(ee.u32_at(BIKE + 0x414)) << 32 ^ u64::from(ee.u32_at(BIKE + 0xcfc)) ^ u64::from(ee.r(5) as u32));
+        if h % 5 == 0 {
+            ee.set_u32(BIKE + 0x414, ee.u32_at(BIKE + 0x414) ^ 0x100);
+        }
+        if h / 5 % 4 == 0 {
+            ee.set_u32(BIKE + 0xcfc, ((h >> 8) as u32 % 14).wrapping_sub(2));
+        }
+        c(ee.r(5) as u32)
+    };
+    for (s, c) in [(0x544, Out::NetStunt as fn(u32) -> Out), (0x400, Out::NetFull), (0x404, Out::NetDelta)] {
+        let at = vt(&ee, s);
+        hook(&mut ee, at, Box::new(move |ee| packet(ee, c)));
+    }
+    hook(&mut ee, TAIL, Box::new(|ee| Out::Walk(ee.r(4) as u32)));
+    let regions = vec![(BIKE, 0x1820), (trail, 0x40), (V_AREA, V_LEN), (parts[0], 0x130), (parts[1], 0x130)];
+    let image_words = snap_regions(&ee, &regions);
+    let mut g = Gen(0x0000_f44f);
+    let mut t = BTreeMap::new();
+    for k in 0..10_000 {
+        restore_regions(&mut ee, &regions, &image_words);
+        let x = g.f(0.0, 0.05);
+        *dt.borrow_mut() = x;
+        let (f, ints, c) = match g.bits() % 4 {
+            kind @ (0 | 1) => {
+                ee.set_u32(trail + 0x20, g.bits());
+                ee.set_u32(trail + 0x10, 0);
+                let n = g.bits() % (V_NODES + 1);
+                let mut last = [0u32; V_NODES as usize + 1];
+                for i in 0..n {
+                    let at = V_AREA + 0x30 * i;
+                    ee.set_u32(at + 4, if g.one_in(4) { V_VT } else { class });
+                    ee.set_u32(at + 0x20, g.bits());
+                    let p = g.bits() % (i + 1);
+                    let parent = if p == 0 { trail } else { V_AREA + 0x30 * (p - 1) };
+                    match last[p as usize] {
+                        0 => ee.set_u32(parent + 0x10, at),
+                        prev => ee.set_u32(prev + 0xc, at),
+                    }
+                    last[p as usize] = at;
+                }
+                tally(&mut t, if n == 0 { "trail, no nodes" } else { "trail, a tree" });
+                if kind == 0 {
+                    (NODE_ON, vec![u64::from(trail)], Out::TrailOn(trail))
+                } else {
+                    (NODE_OFF, vec![u64::from(trail)], Out::TrailOff(trail))
+                }
+            }
+            2 => {
+                let on = if g.one_in(2) { 0x100 } else { 0 };
+                ee.set_u32(BIKE + 0x414, g.bits() & !0x100 | on);
+                let beat = if g.one_in(8) { g.bits() } else if g.one_in(4) { 0 } else { (g.bits() % 15).wrapping_sub(2) };
+                ee.set_u32(BIKE + 0xcfc, beat);
+                let arg = g.bits();
+                (SEND_THUNK, vec![u64::from(net), u64::from(arg)], Out::Send { net, arg })
+            }
+            _ => {
+                let p = parts[g.bits() as usize % 2];
+                ee.set_u32(p + 0x124, g.bits());
+                tally(&mut t, if p == parts[0] { "part, the record's" } else { "part, the second" });
+                (slot(&ee, p, 0xc, 0xbc), vec![u64::from(p)], Out::Part(p))
+            }
+        };
+        let before = snap_regions(&ee, &regions);
+        log.borrow_mut().clear();
+        ee.set(28, GP);
+        ee.call(f, &ints, &[x], BUDGET);
+        let want_v0 = ee.r(2) as u32;
+        let want = std::mem::take(&mut *log.borrow_mut());
+        let want_words = snap_regions(&ee, &regions);
+        restore_regions(&mut ee, &regions, &before);
+        let v0 = UpdateInRam { ee: &mut ee, x }.out(c);
+        let got = std::mem::take(&mut *log.borrow_mut());
+        assert_eq!(format!("{got:?}"), format!("{want:?}"), "case {k} ({c:?}): the calls");
+        let got_words = snap_regions(&ee, &regions);
+        if got_words != want_words {
+            let names: Vec<(u32, u32)> = regions.iter().flat_map(|&(at, len)| (0..len).step_by(4).map(move |o| (at, o))).collect();
+            let d: Vec<String> = (0..got_words.len())
+                .filter(|&i| got_words[i] != want_words[i])
+                .map(|i| format!("{:#x}+{:#x}: port {:#010x}, original {:#010x}", names[i].0, names[i].1, got_words[i], want_words[i]))
+                .collect();
+            panic!("case {k} ({c:?}): {} words differ\n  {}", d.len(), d.iter().take(20).cloned().collect::<Vec<_>>().join("\n  "));
+        }
+        let shown = want.iter().filter(|c| matches!(c, Out::Shown(_) | Out::Hidden(_))).count();
+        if shown > 0 {
+            tally(&mut t, "trail, hooked nodes reached");
+        }
+        if matches!(c, Out::TrailOn(_) | Out::TrailOff(_)) {
+            let skipped = (0..V_NODES).any(|i| ee.u32_at(V_AREA + 0x30 * i + 4) != 0 && ee.u32_at(V_AREA + 0x30 * i + 0x20) & 0x800 != 0);
+            if skipped {
+                tally(&mut t, "trail, a node kept apart");
+            }
+            if want_words == before {
+                tally(&mut t, "trail, no change");
+            }
+        }
+        if let Out::Send { .. } = c {
+            assert_eq!(v0, want_v0, "case {k}: the send's answer");
+            for (p, what) in [(Out::NetStunt(0), "send, the stunt's"), (Out::NetFull(0), "send, the whole"), (Out::NetDelta(0), "send, the change")] {
+                if want.iter().any(|c| std::mem::discriminant(c) == std::mem::discriminant(&p)) {
+                    tally(&mut t, what);
+                }
+            }
+            let beat = before[0xcfc / 4];
+            if before[0x414 / 4] & 0x100 == 0 {
+                tally(&mut t, "send, off");
+            } else if beat >= 10 {
+                tally(&mut t, "send, beat out of range");
+            }
+            if want.len() > 1 {
+                tally(&mut t, "send, stunt then another");
+            }
+        }
+    }
+    eprintln!("{t:#?}");
+    for (path, n) in &t {
+        assert!(*n >= 100, "path {path:?} taken only {n} times");
+    }
+    assert_eq!(t.len(), 13, "every path taken");
 }
 
 // --- F31b4c: the bike's mass properties, the port's -------------------------------------------------
@@ -7578,8 +7782,8 @@ fn census_writers(c: &BTreeMap<String, Callee>) -> Vec<(&str, usize, Vec<&String
 /// **F31b5c — C15's ride, the tail's, wreck's and update's callees watched**: on every row of
 /// ride-2, each callee the port's vehicle update, wreck and update callees still hand the
 /// interpreter (the pause lookup, the rumble, the frame message, the out-of-bounds test, the
-/// rider's animation and nodes, the parts' and sender's virtuals, the walk) leaves every word of the
-/// bike's physics blocks as it found it.
+/// rider's animation and nodes, the bike's net packets, the walk; F44 made the parts' and sender's
+/// virtuals Rust) leaves every word of the bike's physics blocks as it found it.
 #[test]
 fn the_rides_tail_callees_leave_the_physics_alone() {
     let Some(c) = census_of("ride-2") else { return };
@@ -7605,7 +7809,7 @@ fn the_flips_tail_callees_leave_the_physics_alone() {
 }
 
 /// The callees ride-2 leaves in the interpreter, by label ([`label`]).
-const RIDE_CALLEES: [&str; 23] = [
+const RIDE_CALLEES: [&str; 24] = [
     "tail Message",
     "tail Paused",
     "tail Rumble",
@@ -7618,20 +7822,21 @@ const RIDE_CALLEES: [&str; 23] = [
     "update Frame",
     "update Local",
     "update Moved",
+    "update NetDelta",
+    "update NetFull",
+    "update NetStunt",
     "update NodePlace",
     "update NodeSet",
-    "update Part",
     "update Place",
     "update Pose",
     "update Position",
-    "update Send",
     "update Spin",
     "update TrickWanted",
     "update Walk",
     "wreck OutOfBounds",
 ];
 /// The callees flip-1 leaves in the interpreter: ride-2's, the trick's, the wreck's and the put-back's.
-const FLIP_CALLEES: [&str; 41] = [
+const FLIP_CALLEES: [&str; 42] = [
     "tail Message",
     "tail Paused",
     "tail Rumble",
@@ -7646,14 +7851,15 @@ const FLIP_CALLEES: [&str; 41] = [
     "update Local",
     "update Mark",
     "update Moved",
+    "update NetDelta",
+    "update NetFull",
+    "update NetStunt",
     "update NodePlace",
     "update NodeSet",
-    "update Part",
     "update Place",
     "update Pose",
     "update Position",
     "update Search",
-    "update Send",
     "update Spin",
     "update TrickEnd",
     "update TrickWanted",

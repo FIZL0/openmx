@@ -9717,3 +9717,24 @@ atv_heap_free               atv 0x001b76d0 = free
 #   Unleashed's entry clears the record (S191a), SLUS-21104's does not, so its hit loop answers after
 #   a clause. MD63c's oracle hook had swapped +0xc8 to an empty record; with no swap, 382 of 10 000
 #   states enter twice (197 clause then joust, 185 clause then scenery), reasons and +0x1260 matching.
+# F44 — the virtuals F39's sync, network and parts call out, on state 4's objects (game_sim::handling::
+# update::{trail_on, trail_off, shown, hidden, send, part_step}; tests/mxvatv_bike_ride.rs). Journal:
+# research/journal/2026-11-05-f44-trail-sender-part-virtuals/.
+#   Trail bike+0x10dc = 0x00eb58f0, vt (at +4) 0x003d1900; its children's classes 0x003d22dc, 0x003d0fa0,
+#   0x003bbb6c, 0x003d177c all share the slots: +0x18 on 0x00128040 (byte +0x21 &= ~1, then &= ~2, two
+#   stores; tail jump vt +0x28), +0x20 off 0x00128080 (|= 1, |= 2; vt +0x2c); +0x28 shown 0x00127f60 /
+#   +0x2c hidden 0x00127fd0: for c = +0x10; c; c = c+0xc (read after the call): byte +0x21 bit 3 clear
+#   -> c's vt +0x28 / +0x2c (c). State 4 only ever reaches these through the walk, so they write the
+#   root's +0x21 alone. On both C15 replays the sync never takes the trail's path (flags +0x444 0x18,
+#   +0xa94 0x20): 0 calls.
+#   Net sender bike+0x400, vt (at +0x38) 0x003d05c0, +0x20 = 0x004bfa30: j 0x004e7de0 with a0 -= 0x400.
+#   0x004e7de0(bike, a1 = sender+0x34 = 0x0084ada0): +0x414 bit 8 and +0xcfc in {9, 6, 3} -> bike vt
+#   +0x544 0x004e7e70(bike, a1) (the stunt packet: reads RCNT0, so hooked() stubs it); then jal
+#   0x004a8d90(bike, a1): +0x414 bit 8 (read again): +0xcfc (sltiu 10, table 0x00526630) 0 -> vt +0x400
+#   0x004a8e30 (whole state: memcpy 0x00354310, quantise 0x00267910), 1..9 -> vt +0x404 0x004a90c0 (the
+#   change: 0x00267590), else none; +0xcfc re-read, = (it + 1) rem 10 (div/mfhi, signed); v0 1. Both
+#   packets end in the sender's vt +0x28 0x0025e9d0(sender, a1, buf, len, 0, 0). State 4: +0x414 0x131,
+#   +0xcfc 3. ride-2: 153 sends, each beat 0-9 15-16 times (a temporary print); flip-1: 47 stunt packets.
+#   Parts: bike+0xcc 0x00ea5970 (vt at +0xc 0x003b6c20, +0xbc 0x001bcfa0) and bike+0xd4 0x00ea7310 (vt
+#   0x003b6b40, +0xbc 0x001bacd0), the same code: byte +0x126 &= ~0x10, then j 0x00128af0(part+0x24,
+#   f12 dt). Every replay frame steps both.
