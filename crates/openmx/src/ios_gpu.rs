@@ -114,6 +114,11 @@ struct Host {
     next_look: Instant,
     /// The rate the screen was last asked for.
     rate: Option<f32>,
+    /// Whether the window was landscape at the last look: a turn re-asks UIKit for the deferred
+    /// edges (P305, as opentennis 6815b2ce).
+    landscape: Option<bool>,
+    /// What the view controller last reported for them, logged when it changes.
+    gestures: Option<openmx_ios::Gestures>,
 }
 
 impl Host {
@@ -137,6 +142,16 @@ impl Host {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .layout((size.0 as f32, size.1 as f32), safe.map(|v| v as f32));
+        // Until the view controller is the window's root it reports nothing, so this asks again each
+        // look until it does, then after each turn.
+        if self.landscape != Some(size.0 > size.1) || self.gestures.is_none() {
+            self.landscape = Some(size.0 > size.1);
+            let gestures = openmx_ios::defer_gestures(&window);
+            if let Some(g) = gestures.filter(|&g| Some(g) != self.gestures) {
+                println!("ios: {g}");
+            }
+            self.gestures = gestures;
+        }
         let (device, gravity) = openmx_ios::device_turn();
         let now = self.started.elapsed().as_secs_f32();
         if let Some(hold) = self.holder.step(now, device, gravity, size.0 > size.1) {
@@ -154,11 +169,13 @@ impl ApplicationHandler for Host {
         let mut s = shared();
         s.set_focused(true);
         if s.window.is_none() {
-            // As opentennis's B623: the home indicator fades while the game is played, and a swipe
-            // from an edge is the game's first, the system's only when made again.
+            // A swipe from an edge is the game's first, the system's only when made again (P240,
+            // opentennis's B623). The home indicator stays (dimmed): with it auto-hidden, iOS let
+            // the first swipe up leave mid-ride in 0.10.3 (P305), as it ignores the bottom edge's
+            // deferral while the indicator is hidden.
             let attributes = Window::default_attributes()
                 .with_title("openMX")
-                .with_prefers_home_indicator_hidden(true)
+                .with_prefers_home_indicator_hidden(false)
                 .with_preferred_screen_edges_deferring_system_gestures(ScreenEdge::ALL);
             match event_loop.create_window(attributes) {
                 Ok(w) => {
@@ -252,7 +269,7 @@ pub fn run_on_main(game: impl FnOnce() + Send + 'static) {
     let now = Instant::now();
     let was_locked = std::fs::exists(openmx_ios::rotation_lock_mark()).unwrap_or(false);
     let holder = openmx_ios::Holder::remembering(was_locked);
-    let mut host = Host { game: Some(Box::new(game)), holder, started: now, next_look: now, rate: None };
+    let mut host = Host { game: Some(Box::new(game)), holder, started: now, next_look: now, rate: None, landscape: None, gestures: None };
     if let Err(e) = events.run_app(&mut host) {
         println!("ios: the event loop ended: {e}");
     }
