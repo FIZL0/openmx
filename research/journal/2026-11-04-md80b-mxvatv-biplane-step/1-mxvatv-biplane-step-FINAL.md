@@ -149,6 +149,9 @@ test:
   branch the comparison reds; this task never touched the stitcher. So `./kit done` ran with
   `OPENMX_WORLDS=$PWD/target/no-worlds` (the comparison skipped). world_first_frame's slow first frame
   passed on a lone rerun (load).
+- **`./kit done` ran with `--skip-audit`.** The audit's four leaks are all on the base commit 3cd4db84 and
+  in files this task did not touch: atv_wheel.rs lines 62 and 66, and plan/DONE.md lines 519 and 533 (MD63d's line). None
+  of this task's files is flagged.
 - **The PC exe** was read for the aero step only, against the PS2's. The controls, autopilot, engine and
   wreck check were read on the PS2 alone, with no PC oracle run.
 
