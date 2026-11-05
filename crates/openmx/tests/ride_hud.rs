@@ -320,6 +320,90 @@ fn the_speedometer_and_the_radar_stand_clear_of_the_touch_pad() {
     assert_eq!(format!("{a:?}"), format!("{b:?}"), "the top view moved");
 }
 
+/// Every one of the touch pad's controls (P197's touch.js, and the iPhone's `touch_pad.rs` laid out
+/// as it), in a `window`'s pixels, its pad laid out from the `safe` insets' edges (left, top, right,
+/// bottom) and sized in the whole window's `u`: the seven along the bottom right and the stick's base
+/// at rest, as [`touch_controls`] has them, and the three small ones along the top — CLUTCH under the
+/// score bar, CAMERA and PAUSE either side of the middle — each with its 0.15 `u` of slop.
+fn every_touch_control((w, h): (f32, f32), [l, t, r, b]: [f32; 4]) -> Vec<[f32; 4]> {
+    let u = (0.07 * w).min(0.125 * h);
+    let slop = 0.15 * u;
+    let mut boxes: Vec<[f32; 4]> = touch_controls((w - l - r, h - t - b)).into_iter().map(|c| [c[0] + l, c[1] + t, c[2] + l, c[3] + t]).collect();
+    // touch_controls sizes by the room it is given; the pad sizes by the whole window
+    let room_u = (0.07 * (w - l - r)).min(0.125 * (h - t - b));
+    assert!((room_u - u).abs() < 1e-3, "{w}x{h}: the room's u is not the window's");
+    let small = |x: f32, y: f32| [x - slop, y - slop, x + 1.6 * u + slop, y + 0.7 * u + slop];
+    boxes.push(small(l + 0.4 * u, t + 0.12 * h));
+    boxes.push(small(w / 2.0 - 2.6 * u, t + 0.3 * u));
+    boxes.push(small(w / 2.0 - 0.8 * u, t + 0.3 * u));
+    boxes
+}
+
+/// P304: while the touch pad is shown, the speedometer — either style — and the preload meter are
+/// drawn in the top-right quarter of the frame (the rect inside the kept insets, so clear of the
+/// island), under none of the pad's ten controls, and the top-right column starts under them; on the
+/// page's phones and on an iPhone whose pad stands in from the island's insets. With a real pad (no
+/// pad shown) they are drawn where they always were, bottom right.
+#[test]
+fn with_the_touch_pad_up_the_meters_sit_top_right_clear_of_its_buttons() {
+    let t = Tracker::default();
+    let now = Instant::now();
+    // (window, kept insets, frame pixels a window pixel is): three of the page's, and an iPhone 15
+    // Pro's 2556x1179 at 3x with the island's 177 kept each side (the home bar's foot is not kept)
+    let cases = [
+        ((844.0, 390.0), [0.0; 4], 1.0),
+        ((932.0, 430.0), [0.0; 4], 1.0),
+        ((1180.0, 820.0), [0.0; 4], 1.0),
+        ((2556.0, 1179.0), [177.0, 0.0, 177.0, 0.0], 3.0),
+    ];
+    for ((ww, wh), safe, k) in cases {
+        let room = (ww - safe[0] - safe[2], wh - safe[1] - safe[3]);
+        let (w, h) = (room.0 / k, room.1 / k);
+        let controls: Vec<[f32; 4]> =
+            every_touch_control((ww, wh), safe).into_iter().map(|c| [(c[0] - safe[0]) / k, (c[1] - safe[1]) / k, (c[2] - safe[0]) / k, (c[3] - safe[1]) / k]).collect();
+        let pad = menu::touch_room::Room { window: room, frame: (w, h) };
+        let view = [0.0, 0.0, w, h];
+        for style in [Speedometer::Digital, Speedometer::Analog] {
+            let at = format!("{ww}x{wh} {style:?}");
+            let g = gauges(style);
+            let mut sh = shown(&g, &[], &[], None);
+            (sh.offer, sh.minimap) = (None, false);
+            let (mut plain, mut padded) = (Vec::new(), Vec::new());
+            let before = ride_hud::sprites(&mut plain, 0, view, &sh, &t, now);
+            // a real pad: as they were
+            let none = ride_hud::sprites_clear_of(&mut Vec::new(), 0, view, None, &sh, &t, now);
+            assert_eq!(format!("{before:?}"), format!("{none:?}"), "{at}: no pad moved the HUD");
+            let m = before.meter.unwrap();
+            assert!(m[0] > w / 2.0 && m[1] > h / 2.0, "{at}: the meter was not bottom right to start with: {m:?}");
+            let d = ride_hud::sprites_clear_of(&mut padded, 0, view, Some(pad), &sh, &t, now);
+            assert_eq!(plain.len(), padded.len(), "{at}");
+            assert_eq!(d.score_bar, before.score_bar, "{at}");
+            // what moved is the meters, the dial with them; nothing else moved
+            let moved: Vec<&Sprite> = plain.iter().zip(&padded).filter(|(a, b)| a.corners != b.corners).map(|(_, b)| b).collect();
+            let meters = d.meter.unwrap();
+            assert!(moved.len() > 2 && meters[1] < m[1], "{at}: the meters did not move up");
+            match style {
+                Speedometer::Digital => assert!(d.speed.as_ref().unwrap().rect[3] < h / 2.0, "{at}"),
+                Speedometer::Analog => assert!(d.dial.as_ref().unwrap().0[1] < h / 2.0, "{at}"),
+            }
+            let b = bounds(moved.iter().copied());
+            assert!(b[0] >= w / 2.0 && b[2] <= w + 0.5 && b[1] >= 0.0 && b[3] <= h / 2.0, "{at}: the meters at {b:?}, not in the top-right quarter of {w}x{h}");
+            for s in &moved {
+                let sb = bounds(std::iter::once(*s));
+                if let Some(c) = controls.iter().find(|c| sb[0] < c[2] && c[0] < sb[2] && sb[1] < c[3] && c[1] < sb[3]) {
+                    panic!("{at}: a meter sprite at {sb:?} is under the pad's control at {c:?}");
+                }
+            }
+            // the marker menu starts under them
+            let mut sh = shown(&g, &[], &[], Some(panel(Pick::Slot(0), vec![], 0)));
+            (sh.offer, sh.minimap) = (None, false);
+            let d = ride_hud::sprites_clear_of(&mut Vec::new(), 0, view, Some(pad), &sh, &t, now);
+            let menu_rect = d.markers.unwrap().rect;
+            assert!(menu_rect[1] >= b[3], "{at}: the marker menu at {menu_rect:?} is over the meters, down to {}", b[3]);
+        }
+    }
+}
+
 /// How many of `frame`'s pixels in `r` are `colour`'s, near enough.
 fn count(frame: &Frame, r: [f32; 4], colour: [u8; 4]) -> usize {
     let (x0, y0) = (r[0].max(0.0) as usize, r[1].max(0.0) as usize);
