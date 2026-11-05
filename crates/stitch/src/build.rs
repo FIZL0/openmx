@@ -46,6 +46,63 @@ pub struct Params {
     /// Give each point only the tiles that can have a say there (the spatial grid, [`Plan::bins`]).
     /// Off, every tile is a candidate everywhere; the ground is the same either way (C7's test).
     pub prune: bool,
+    /// Where the passes start (P299): a build that ended at this [`Start`] before, from the same tiles
+    /// and stitcher, does its last pass alone and writes the same joins. None, from the narrowest gaps
+    /// and the whole relief.
+    pub start: Option<Start>,
+}
+
+/// The state a build's pass starts from (P299): how wide the gaps are made, the relief's scale, and
+/// where it has been lowered. A build passes until its join ground holds, widening and lowering as it
+/// goes, and [`Built::start`] is where its last pass began; handed back as [`Params::start`], the same
+/// tiles build in that one pass, to the byte. MX Unleashed: WORLD's cold build passes 30 times and
+/// solves ten of them, a phone's minutes, for joins its last pass alone makes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Start {
+    pub widen: Widen,
+    pub relief_scale: f64,
+    pub dented: Vec<[f64; 2]>,
+}
+
+impl Start {
+    /// A cold build's: every gap its narrowest, the relief whole and lowered nowhere.
+    pub fn cold() -> Start {
+        Start { widen: Widen::all(1.0), relief_scale: 1.0, dented: Vec::new() }
+    }
+
+    /// As JSON, every number written so it reads back to the same bits.
+    pub fn to_json(&self) -> String {
+        let n = |v: f64| format!("{v:?}");
+        let list = |v: &[f64]| v.iter().map(|x| n(*x)).collect::<Vec<_>>().join(", ");
+        let dents = self.dented.iter().map(|d| format!("[{}, {}]", n(d[0]), n(d[1]))).collect::<Vec<_>>().join(", ");
+        format!(
+            "{{\"all\": {}, \"after_x\": [{}], \"after_z\": [{}], \"relief_scale\": {}, \"dented\": [{dents}]}}",
+            n(self.widen.all),
+            list(&self.widen.after[0]),
+            list(&self.widen.after[1]),
+            n(self.relief_scale)
+        )
+    }
+
+    /// What [`Start::to_json`] wrote.
+    pub fn from_json(j: &Json) -> Result<Start, String> {
+        let num = |k: &str| j.get(k).and_then(Json::f64).ok_or_else(|| format!("start: no {k}"));
+        let nums = |v: &Json| -> Result<Vec<f64>, String> {
+            v.arr().unwrap_or_default().iter().map(|x| x.f64().ok_or_else(|| "start: not a number".to_string())).collect()
+        };
+        let list = |k: &str| j.get(k).ok_or_else(|| format!("start: no {k}")).and_then(nums);
+        let dented = j
+            .get("dented")
+            .and_then(Json::arr)
+            .unwrap_or_default()
+            .iter()
+            .map(|d| match nums(d)?[..] {
+                [x, z] => Ok([x, z]),
+                _ => Err("start: a dent is [x, z]".to_string()),
+            })
+            .collect::<Result<_, String>>()?;
+        Ok(Start { widen: Widen { all: num("all")?, after: [list("after_x")?, list("after_z")?] }, relief_scale: num("relief_scale")?, dented })
+    }
 }
 
 impl Params {
@@ -66,6 +123,7 @@ impl Params {
             units: false,
             threads: 0,
             prune: true,
+            start: None,
         }
     }
 
@@ -1919,6 +1977,9 @@ pub struct Built {
     pub far_slope: f64,
     pub near_slope: f64,
     pub plan: Plan,
+    /// Where the last pass started ([`Params::start`]), and how many passes there were.
+    pub start: Start,
+    pub passes: usize,
 }
 
 /// The relief's scale a step lower ([`Plan::relief_scale`]): 0 once it is too small to show.
@@ -2010,11 +2071,12 @@ pub fn build_watched(
     let t0 = std::time::Instant::now();
     let step = lattice_spacing(&tiles);
     let base = 2.0 * step + 3.0 * p.fade;
-    let gates: Vec<[f64; 4]> = tiles
-        .iter()
-        .zip(&cuts)
-        .map(|(t, k)| watch(Step::Measuring).map(|()| cut_source(t, *k, step, p).gates))
-        .collect::<Result<_, _>>()?;
+    // Side by side too (P299: 1.2 s of world_mxu's build on one thread once its passes were one).
+    let gates: Vec<[f64; 4]> = std::thread::scope(|sc| {
+        let jobs: Vec<_> =
+            tiles.iter().zip(&cuts).map(|(t, k)| sc.spawn(move || watch(Step::Measuring).map(|()| cut_source(t, *k, step, p).gates))).collect();
+        jobs.into_iter().map(|j| j.join().expect("gates")).collect::<Result<_, _>>()
+    })?;
     for (t, g) in tiles.iter().zip(&gates) {
         if g.iter().any(|v| *v > base) {
             eprintln!("stitch: {}: seam gates {:?} ft (C1's {base:.0}): its edges stay steep that far out", t.id, g.map(|v| v.round()));
@@ -2040,13 +2102,16 @@ pub fn build_watched(
         eprintln!("stitch: {}: relief {:.1} ft spread, {:.1} kept (steepest {:.3}, at {:.2})", t.id, r.spread, r.kept, r.slope, r.gain);
     }
     eprintln!("stitch: relief read in {:.1} s", t0.elapsed().as_secs_f64());
-    let mut widen = Widen::all(1.0);
-    let mut relief_scale = 1.0f64;
+    let start = p.start.clone().unwrap_or_else(Start::cold);
+    let mut widen = start.widen;
+    let mut relief_scale = start.relief_scale;
     // Where the relief has been lowered ([`Room::dent`]), kept over a rebuild of the same plan.
-    let mut dented: Vec<[f64; 2]> = Vec::new();
+    let mut dented: Vec<[f64; 2]> = start.dented;
     let mut pass = 0;
+    let mut last;
     let (plan, results) = loop {
         pass += 1;
+        last = Start { widen: widen.clone(), relief_scale, dented: dented.clone() };
         watch(Step::Planning { pass })?;
         let t0 = std::time::Instant::now();
         let mut plan = plan_widened(tiles, &cuts, &gates, p, &widen)?;
@@ -2461,5 +2526,31 @@ pub fn build_watched(
         kv.insert(at, ("wrap".into(), s(w)));
     }
     std::fs::write(dir.join("mod.json"), meta.pretty()).map_err(|e| format!("{}: {e}", dir.display()))?;
-    Ok(Built { dir, pieces: results.len(), drops: drops_n, far_slope, near_slope, plan })
+    Ok(Built { dir, pieces: results.len(), drops: drops_n, far_slope, near_slope, plan, start: last, passes: pass })
+}
+
+#[cfg(test)]
+mod start_tests {
+    use super::*;
+
+    /// P299: a build's start reads back from its JSON to the bit, a cold one too.
+    #[test]
+    fn a_start_reads_back_to_the_bit() {
+        let s = Start {
+            widen: Widen { all: 1.5625, after: [vec![1.0, 3.0517578125, 0.1 + 0.2], vec![1.953125]] },
+            relief_scale: 0.8 * 0.8,
+            dented: vec![[12818.25, 4326.75], [1.0 / 3.0, -0.0]],
+        };
+        for s in [s, Start::cold()] {
+            let back = Start::from_json(&Json::parse(&s.to_json()).unwrap()).unwrap();
+            assert_eq!(back.to_json(), s.to_json());
+            let bits = |s: &Start| {
+                let mut v = vec![s.widen.all.to_bits(), s.relief_scale.to_bits()];
+                v.extend(s.widen.after.iter().flatten().map(|x| x.to_bits()));
+                v.extend(s.dented.iter().flatten().map(|x| x.to_bits()));
+                v
+            };
+            assert_eq!(bits(&back), bits(&s));
+        }
+    }
 }

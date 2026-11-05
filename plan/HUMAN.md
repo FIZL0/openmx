@@ -456,3 +456,20 @@ free06?" on the main menu). Two things only the phone can tell (5 minutes, plus 
 2. **That resume works.** Ride a while, go to the home screen, then swipe the app away in the app switcher
    (the same as iOS ending it). Open it: past the splash the main menu should ask to resume, and Resume
    should put you back where you were under the pause. Note anything off in P298a.
+
+## How long MX World takes to build on the iPhone (P299)
+
+P299 cut MX Unleashed: WORLD's first-time build: it now starts from the pass the build ends on, so it
+plans and solves once where it planned 30 times and solved ten. On the desktop the first ride went from
+182 s to 20 s; on a phone that is roughly 6-7 minutes down to 1, but nobody has timed it on one. If it
+is still too long there, the other route is the joins as a store download (P241's world mod) offered
+on phones in place of building. To time it (about 5 min, on a build with P299 in it):
+
+1. Files → On My iPhone → openMX → mods → cache → stitch: delete the `world_mxu` folder, if there is one,
+   so the build starts from nothing.
+2. Free Ride → MX Unleashed: WORLD. Wait for the ride, then ride a few seconds and quit to the menu.
+3. Pick it again (this one should read the cache and build nothing).
+4. Send `Documents/openmx-log.txt` (LocalSend into the repo's context/). The lines that matter:
+   `world_mxu: joins built in 1 passes, N s` (the build), and the two `load: the ride's first frame …
+   s after launch` lines (cold, then warm). A `world_mxu: no start kept for key …` line means the build
+   went from cold after all: say so in P299's follow-up.

@@ -9,11 +9,15 @@
 //!
 //! **The joins** are the stitcher's (`crates/stitch`), made from the world specs in
 //! `crates/stitch/worlds/` exactly as openmx-mods' `stitch` makes them from imported tile folders —
-//! the same tile cuts, the same blend, the same files. Making them is a minute or two for `world_mxu`
-//! (its 1222 joins), so they are written once under the mods folder, `cache/stitch/<id>/<key>/`
-//! (`mod.json` and `joins/`), and read from there after. The key is [`stitch::VERSION`], the spec and
-//! every tile's scene and terrain bytes, hashed: a new stitcher or another disc builds afresh and the
-//! old key's folder goes.
+//! the same tile cuts, the same blend, the same files. They are written once under the mods folder,
+//! `cache/stitch/<id>/<key>/` (`mod.json` and `joins/`), and read from there after. The key is
+//! [`stitch::VERSION`], the spec and every tile's scene and terrain bytes, hashed: a new stitcher or
+//! another disc builds afresh and the old key's folder goes; an app update with the same stitcher
+//! keeps them (on iOS the mods folder is in Documents, which updates leave alone).
+//!
+//! A build from cold widens and re-solves until its join ground holds, three minutes and 1,300 s of
+//! CPU for `world_mxu` (30 plans, ten whole solves), so each world's build starts where its last pass
+//! began for this key ([`STARTS`], P299): one plan, one solve, 20 s and 210 s of CPU, the same bytes.
 //!
 //! An installed `mods/tracks/<id>` world of the same id is ridden in place of this one (the shell
 //! asks [`crate::worlds::is_world`] first), and mods go on making worlds of their own.
@@ -30,6 +34,32 @@ pub const SPECS: [(&str, &str); 3] = [
     ("world_mxu_free", include_str!("../../stitch/worlds/world_mxu_free.json")),
     ("world_mxu_nat", include_str!("../../stitch/worlds/world_mxu_nat.json")),
 ];
+
+/// Where each world's build starts (P299), `(id, start)`: `{"key", "start"}`, the [`stitch::build::Start`]
+/// a cold build of that cache key ended at, written by a build into its cache folder as `start.json`.
+/// With the key this disc and stitcher make, the build does that last pass alone and writes the same
+/// joins (MX Unleashed: WORLD's 30 plans and ten solves are one of each); with another key, an older
+/// file or another disc, it passes from cold. `tests/disc_worlds.rs` holds them to the key.
+pub const STARTS: [(&str, &str); 3] = [
+    ("world_mxu", include_str!("../../stitch/worlds/world_mxu.start.json")),
+    ("world_mxu_free", include_str!("../../stitch/worlds/world_mxu_free.start.json")),
+    ("world_mxu_nat", include_str!("../../stitch/worlds/world_mxu_nat.start.json")),
+];
+
+/// The build's start for world `id` from its [`STARTS`] file, where that file was written for `key`.
+fn start_for(id: &str, key: &str) -> Option<stitch::build::Start> {
+    let (_, text) = STARTS.iter().find(|(w, _)| *w == id)?;
+    let j = Json::parse(text).ok()?;
+    if j.get("key").and_then(Json::str) != Some(key) {
+        return None;
+    }
+    stitch::build::Start::from_json(j.get("start")?).ok()
+}
+
+/// A [`STARTS`] file's text: the build of `key` ended at `start`.
+pub fn start_file(key: &str, start: &stitch::build::Start) -> String {
+    format!("{{\"key\": \"{key}\", \"start\": {}}}\n", start.to_json())
+}
 
 /// `free_all`, P71's "Every free ride", as a word `--track` and a saved setting may still hold: it is
 /// `world_mxu_free` now.
@@ -176,20 +206,31 @@ pub fn world_watched(disc: &mut Disc, mods: &Path, id: &str, say: &mut dyn FnMut
                 stitch::Tile::from_parts(&m.tile, meta(&m.tile), &m.scene_file, m.scene.clone(), &m.terrain_file, &m.terrain)
             })
             .collect::<Result<_, _>>()?;
-        let params = stitch::build::Params::from_spec(&spec_json).map_err(|e| format!("{id}.json: {e}"))?;
+        let mut params = stitch::build::Params::from_spec(&spec_json).map_err(|e| format!("{id}.json: {e}"))?;
+        params.start = start_for(id, &key);
+        if params.start.is_none() {
+            say(&format!("{id}: no start kept for key {key}: every pass from cold"));
+        }
         let part = root.join(format!("{key}.part-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&part);
         forget_dead_parts(&root);
+        let built_at = std::time::Instant::now();
         let built = stitch::build::build_watched(&tiles, &part, &params, false, &|step| match step {
             stitch::build::Step::Measuring => watch(JOINING, 0, 0),
             stitch::build::Step::Planning { pass } => watch(&format!("{JOINING}, pass {pass}"), 0, 0),
             stitch::build::Step::Solving { pass, done, of } => watch(&format!("{JOINING}, pass {pass}"), done, of),
         });
         // A stopped build's half (a cancel, P260) is nobody's: it goes.
-        if let Err(e) = built {
-            let _ = std::fs::remove_dir_all(&part);
-            return Err(e);
-        }
+        let built = match built {
+            Ok(b) => b,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&part);
+                return Err(e);
+            }
+        };
+        say(&format!("{id}: joins built in {} passes, {:.1} s", built.passes, built_at.elapsed().as_secs_f64()));
+        // Where its last pass began, for STARTS (P299).
+        let _ = std::fs::write(part.join(id).join("start.json"), start_file(&key, &built.start));
         // Other keys' joins are another disc's or another stitcher's: they go.
         if let Ok(list) = std::fs::read_dir(&root) {
             for e in list.flatten() {
