@@ -11,6 +11,8 @@
 use super::{Filtering, FrameLimit, RenderScale, Settings};
 use game_render::shadow::{ShadowQuality, Shadows};
 use game_render::world::Graphics;
+use game_sim::tiles::Reach;
+use ps2_float::F;
 
 /// How detailed the models are drawn (P223, opentennis's Mesh, B364): the disc's own level-of-detail
 /// pick, or its coarser models at half the distance.
@@ -338,6 +340,16 @@ pub fn texture_cap(d: &Device) -> u32 {
     if d.touch { 512 } else { 0 }
 }
 
+/// How far a world's tiles, paint and ground are held from a rider on `d`, and how near its ground is
+/// built at full detail (P301), or None for the desktop's (6000/9000 ft, fine to 2500/3500). A phone
+/// or tablet holds half that: an iPhone 15 Pro was closed at a 5.2 GiB footprint in a world ride,
+/// with the GPU's memory counted in it. On the desktop the shorter reach took world_mxvatv's load
+/// from 2233 to 1644 MB (RSS and GPU) and world_ultra's from 3351 to 2774 MB, and the ride's hash
+/// stayed the same: past the load reach the stand-in's coarse ground is drawn.
+pub fn world_reach(d: &Device) -> Option<(Reach, Reach)> {
+    d.touch.then_some((Reach { load: F(3000.0), drop: F(4500.0) }, Reach { load: F(1500.0), drop: F(2200.0) }))
+}
+
 /// One step cheaper, or `None` at the bottom: the speed-ups first (Shadows All to On, the movers'
 /// alone), then the fog in to Far, a fixed scale down to 75%, Shadow Quality High to Low, filtering
 /// down to 4x, coarser models, half scale, 2x (Phone to Low), Shadow Quality Low to the original's,
@@ -523,6 +535,9 @@ mod tests {
         assert_eq!(thirteen.scale, RenderScale::Half);
         // The textures: 512 on a phone, as they come on the desktop and the Deck.
         assert_eq!((texture_cap(&phone), texture_cap(&Device::default()), texture_cap(&Device { steam_deck: true, ..Device::default() })), (512, 0, 0));
+        // P301: a phone holds a world to half the desktop's reach; the desktop and the Deck keep theirs.
+        assert_eq!(world_reach(&phone).map(|(r, f)| (r.load.0, r.drop.0, f.load.0, f.drop.0)), Some((3000.0, 4500.0, 1500.0, 2200.0)));
+        assert_eq!((world_reach(&Device::default()), world_reach(&Device { steam_deck: true, ..Device::default() })), (None, None));
 
         // The ladder from High to the bottom: every row once, no 30 cap, Medium on the way, and
         // never the original's near fog nor no shadows (2026-10-29): pixels go first.

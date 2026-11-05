@@ -473,3 +473,20 @@ on phones in place of building. To time it (about 5 min, on a build with P299 in
    `world_mxu: joins built in 1 passes, N s` (the build), and the two `load: the ride's first frame …
    s after launch` lines (cold, then warm). A `world_mxu: no start kept for key …` line means the build
    went from cold after all: say so in P299's follow-up.
+
+## What a world ride holds on the iPhone (P301, P301a)
+
+P301 gives the phone log memory on the `load:` line and on every line a second, and holds a world nearer
+on a phone (3000 ft instead of 6000). Nobody has run it on a phone. About 10 minutes, on a build with
+P301 in it:
+
+1. Free Ride → MX vs. ATV Unleashed: every open map (or MX Unleashed: WORLD, the ride the 5.2 GiB
+   JetsamEvent came from). Ride about five minutes, crossing a map's edge or two, then quit to the menu.
+2. Send `Documents/openmx-log.txt` back (LocalSend into the repo's context/). The lines that matter:
+   - `load: … memory peak N MB, now N MB (N MB of it the GPU's), N MB left before iOS closes the app`;
+   - the seconds' `, memory N MB (N MB left, GPU N MB)`;
+   - the `memory:` line at the end.
+3. If iOS closes the app again, send that JetsamEvent too (Settings → Privacy & Security → Analytics &
+   Improvements → Analytics Data).
+
+Over ~2000 MB anywhere is P301a's to cut. Whether the GPU or the rest grows tells which part to cut.
