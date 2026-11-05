@@ -9895,3 +9895,22 @@ atv_heap_free               atv 0x001b76d0 = free
 #   flip-1 row 94 (the stunt start, run calls dropped): run 0x00e6d270+0x3c, player 0x00e6d6c0+8, +0xc8,
 #   and 0x012ad6c0..d8, 0x012ad6e0..e8, 0x01e694d4..dc differ; row 125 0x008520e4..f0, 0x012ad6e0,
 #   0x016ad02c..34. The bike and blocks equal on every row.
+# F31b5h — the player's run's calls in Rust (game_sim::handling::run; tests/mxvatv_bike_ride.rs
+# the_run_*_is_the_originals, flip/ride_replays_bit_exact_with_nothing_handed_on). Journal:
+# research/journal/2026-11-05-f31b5h-run-calls-in-rust/.
+#   State 4: run 0x00e6d270 (+0x50 0x4001, +0x24 group 0x00e6d584 vt 0x003d35f8, +0x3c free list
+#   0x012ad6c0..., +0x2a8 1.0, +0x300 -1); player 0x00e6d6c0 (+8 0x40606, +4 watcher bike+0x680 vt
+#   0x003d06d0, +0x1d4 0, +0xc8 0). Group owner = group-0x364 = 0x00e6d220 (+0x3d4 settings 0x00713fd0,
+#   +0x3dc gauges 0, +0x3e0 0).
+#   Open 0x0046a5b0(run, player); its list free 0x0046a700(run, &player+0xc8). Score 0x0046aae0(run,
+#   player, id, kind; f12..f16). Mark 0x0046b110(run, player, on, id, node). End 0x0046acf0(f12; run,
+#   player, flag, id, node). Close 0x0046b4c0(f12; run, player, flag). Tally 0x0046a760(f12; run,
+#   player, flag). Listeners: group vt +0x1c slots open +0x3c 0x0046a6f0 / tally +0x40 0x0051b250 ->
+#   0x00519210 / score +0x44 0x0051b240 -> 0x00519ab0 / end +0x48 0x0046afe0 (thunks a0 -= 0x364; the
+#   two direct ones `jr ra; v0 = 0`); watcher vt +0x20 slots open +0x40 0x004bfc40 -> 0x004e7240 /
+#   tally +0x44 0x004bfc30 -> 0x004e73f0 / score +0x48 0x004bfc20 -> 0x004e72b0 / end +0x4c 0x004bfc10
+#   -> 0x004e7340 (a0 -= 0x680: the bike). Gauge kick 0x0051a950(g; f12 kick, f13 level). Stunt
+#   repeat scale 0x00268de0(table, id). Posts 0x00272300 (the preload cue's function; a0 0x00442eb0's
+#   word): watcher (bike+0x674, 8, 5..8, bike+0xd24's record, 0 or cvt.w.s(x)), group tally
+#   (owner+0x384, 1, 10, player, flag). Dropped in the pure frame: flip-1's whole RAM then equals the
+#   handing run's on every row but 0x00851fec..f0.
