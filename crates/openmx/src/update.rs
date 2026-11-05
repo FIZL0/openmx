@@ -54,6 +54,9 @@ const ASSET: Option<&str> = if cfg!(all(target_os = "linux", target_arch = "x86_
     Some("openmx-linux-x86_64")
 } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
     Some("openmx-windows-x86_64.exe")
+} else if cfg!(target_os = "android") {
+    // P308: one .apk for every Android phone (arm64, and x86_64 for the emulator), opentennis's M140.
+    Some("openmx-android.apk")
 } else {
     None
 };
@@ -274,9 +277,18 @@ fn steams(exe: &Path) -> bool {
     exe.components().any(|c| c.as_os_str().eq_ignore_ascii_case("steamapps"))
 }
 
-/// The game file a found release installs over, or none: its page instead.
+/// The game file a found release installs over, or none: its page instead. On Android (P308,
+/// opentennis's M140) the .apk to download into the files folder and hand to the system's
+/// installer, unless Google Play installed the app (its rules: its updates only).
 fn target(f: &Found) -> Option<PathBuf> {
     f.files.as_ref()?;
+    #[cfg(target_os = "android")]
+    {
+        static PLAY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let play = *PLAY.get_or_init(openmx_android::from_store);
+        return (!play).then(|| std::env::current_dir().ok()).flatten().map(|d| d.join("update.apk"));
+    }
+    #[allow(unreachable_code)]
     let exe = exe()?;
     (std::env::var_os("FLATPAK_ID").is_none() && !steams(&exe) && writable()).then_some(exe)
 }
@@ -301,6 +313,20 @@ fn act() {
     std::thread::spawn(move || {
         let job = |says: String| STATE.lock().unwrap().job = Some(says);
         let shown = |got: u64, total: u64| job(format!("Downloading {}... {} / {} MB", f.tag, got >> 20, total.max(got) >> 20));
+        #[cfg(target_os = "android")]
+        {
+            let said = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(rt) => apk(&rt, &files, &exe, &f.tag, &shown, &job),
+                Err(e) => Err(e.to_string()),
+            };
+            job(said.unwrap_or_else(|e| {
+                println!("update: {e}");
+                format!("Update failed: {e}")
+            }));
+            STATE.lock().unwrap().busy = false;
+            return;
+        }
+        #[allow(unreachable_code)]
         let done = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(rt) => rt.block_on(install(&files, &exe, PUBLIC_KEY, &shown)),
             Err(e) => Err(e.to_string()),
@@ -321,6 +347,40 @@ fn act() {
         }
         STATE.lock().unwrap().busy = false;
     });
+}
+
+/// Android (P308, opentennis's M140): the release's .apk downloaded to `to` in the files folder,
+/// checked as [`install`] checks a binary, and handed to the system's installer; then its answer,
+/// while the player confirms (an install that goes through ends the app: the system replaces it).
+/// The last words to show.
+#[cfg(target_os = "android")]
+fn apk(
+    rt: &tokio::runtime::Runtime,
+    files: &[String; 3],
+    to: &Path,
+    tag: &str,
+    shown: &dyn Fn(u64, u64),
+    job: &dyn Fn(String),
+) -> Result<String, String> {
+    rt.block_on(verified(files, to, PUBLIC_KEY, shown))?;
+    openmx_android::install_apk(to)?;
+    job(format!("Install {tag}: confirm on the screen..."));
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        match openmx_android::install_status() {
+            None => continue,
+            Some(0) => return Ok(format!("Installed {tag}: open the game again.")),
+            // `PackageInstaller.STATUS_FAILURE_ABORTED`: the player said no
+            Some(3) => {
+                let _ = std::fs::remove_file(to);
+                return Ok(format!("{tag} wasn't installed."));
+            }
+            Some(n) => {
+                let _ = std::fs::remove_file(to);
+                return Err(format!("the installer turned it down (status {n})"));
+            }
+        }
+    }
 }
 
 fn page(url: &str) {
