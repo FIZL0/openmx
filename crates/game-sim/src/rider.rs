@@ -1114,9 +1114,9 @@ impl Rider {
             if !allowed.landing {
                 return None;
             }
-            // The hit is asked second, and only when no landing clause entered a wreck: the
-            // entry takes the riding bike's collision record out of the world, and clears it as
-            // it does, so the hit loop's "anything touched" gate is shut (S191a).
+            // The hit is asked second, and on MX Unleashed's handling only when no landing clause
+            // entered a wreck: the entry takes the riding bike's collision record out of the world,
+            // and clears it as it does, so the hit loop's "anything touched" gate is shut (S191a).
             let landed = match &mxvatv {
                 Some(w) => crate::handling::step::wreck_test(&p.air, air, &chassis, &step, &loads, w, allowed.air),
                 None => air::wreck_test_in(&p.air, air, &chassis, &step, &loads, allowed.air),
@@ -1126,7 +1126,12 @@ impl Rider {
             let landed = landed.or_else(|| allowed.backwards.then(|| air::backwards_landing(&p.air, air, &chassis, forward)).flatten());
             // A 50cc bike's lower limit when the shell said the file was one (S157): its body
             // rays' own scenery entries carry the rays that reach above it.
-            let hit = if landed.is_some() {
+            // SLUS-21104's entry leaves the record touched, so on MX vs. ATV's handling the hits run
+            // after a clause's entry too and a hit is the frame's second entry, the one that stays
+            // (B35, [`crate::handling::step::wreck_entries`]).
+            let hit = if mxvatv.is_some() && p.handling == crate::handling::Handling::MxVsAtv {
+                crate::handling::step::hit_wreck(&p.air, air, touched, *fifty, height, &loads, &hits)
+            } else if landed.is_some() {
                 None
             } else if mxvatv.is_some() {
                 crate::handling::step::hit_wreck(&p.air, air, touched, *fifty, height, &loads, &hits)
@@ -1134,7 +1139,7 @@ impl Rider {
                 air::hit_wreck(&p.air, air, touched, *fifty, mass, height, &hits)
             };
             let spun = spun.filter(|_| allowed.air || !spun_aloft);
-            landed.or(hit).or(spun).map(Wreck::from)
+            hit.or(landed).or(spun).map(Wreck::from)
         };
         let verdict = if mxvatv.is_some() {
             // MX vs. ATV's clock and put-back (MD71): one limit, the bike's own unwreck, no page.

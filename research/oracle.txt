@@ -9689,3 +9689,31 @@ atv_heap_free               atv 0x001b76d0 = free
 #   stack). The record keeps the box's inertia; the body gets the file's.
 #   State 4 (race250p, 420 lb): the load's half box is (1.4301566, 2.3848903, 3.8156264), worked back
 #   from rec+0x60; the box call on state 4's node now gives a larger one.
+
+# F31b5f — the bike words the tail's, wreck's and update's interpreter callees write, on C15 ride-2 and
+# flip-1 (game_sim::handling::update::trick_hold, wreck::settle; tests/mxvatv_bike_ride.rs). Journal:
+# research/journal/2026-11-05-f31b5f-callee-bike-words/.
+#   Trick hold vt +0x4ec 0x004e4810(bike, entry, f12 dt): t = (+0x14dc - 0) / (0.5 - 0); r = adda(0, 0)
+#   madd t*(0.07 - 0) (0.07 = 0x3d8f5c29), max by min(0, 0.07), min by max(0, 0.07); noise 0x00134580(2.0 *
+#   +0x14e0); +0x14e0, +0x14dc, +0x14e8 += dt (that order); +0x14e4 = (+0x14d8 + r*noise) / *(entry)+0x48.
+#   Settle vt +0x4a8 0x004e4cd0(bike): +0x684 && +0x680, else nothing; vt +0x4b0(-1); +0x1744 +0x1748
+#   +0x704 +0x708 +0x70c +0x710 = 0; *(+0x680)+0x1d4 list (next +0x1c): vt(at l+0x20) +0xa0(l, 5, &0, 0, 0)
+#   (empty on state 4); vt +0x53c 0x004e7a30 (+0x1754 = a1) and +0x540 0x004e7a40 (+0x1758 = a1), a1 0.
+#   Kind set vt +0x3a0 0x004e19a0: hung parts (+0x1470/+0x1474) 0x0018d170(0.5, part), then 0x004a7350
+#   (part off vt +0x398(0), the record's parts' 0x001155f0 / 0x001158a0 names); writes bike +0x9a8 only.
+#   Post 0x00272300's registration for bike+0x674 on state 4: 11 listeners; the one that writes the bike is
+#   0x00491270 -> 0x00490e60 (a0 - 0x38), the camera's controller (ids 0x15, 7, 6, 0xd, 0xc, 0xb ->
+#   0x00490770), through which bike +0x444 (the flags), +0x460, +0x468.
+#   Watched on both replays, every store into the bike object and every later read before the frame's own
+#   store: trick hold +0x14dc..+0x14e8 rows 113..=124 (+0x14e4 read by the frame, the clocks by the hold);
+#   settle the eight words rows 125, 193 (+0x704/+0x708 read by the frame); kind set +0x9a8 row 193, unread;
+#   posts +0x460/+0x468 row 125, read only by the next post (row 193); +0x444 rows 125, 193, stored back
+#   unchanged, read by the frame. Posts and kind set dropped: both replays bit-exact, the bike object and
+#   blocks the full frame's but +0x460/+0x468.
+# B35 — the typed step's wreck test runs the hits after a clause's entry, as F31b4b's word port does
+# (game_sim::handling::step::wreck_entries; tests/mxvatv_step.rs). Comment rows only.
+#   The entry 0x004e2260 run whole and unhooked on state04's bike 0x00e714e0 (reason 4) keeps +0xc8,
+#   the record's +0x34 touched and +0xf0 count; it writes only the record's +0x200 (the part). MX
+#   Unleashed's entry clears the record (S191a), SLUS-21104's does not, so its hit loop answers after
+#   a clause. MD63c's oracle hook had swapped +0xc8 to an empty record; with no swap, 382 of 10 000
+#   states enter twice (197 clause then joust, 185 clause then scenery), reasons and +0x1260 matching.

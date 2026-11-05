@@ -93,9 +93,12 @@ pub enum Out {
     /// test: the bike's `+0x3b0`, the position, two words out, 0, 150 ft). Each answers yes or no.
     OutOfBounds,
     Bounds { node: u32, at: u32 },
-    /// The bike's vt `+0x4a8` and `+0x4b0` (−1), first in the entry and the unwreck.
+    /// The bike's vt `+0x4a8` and `+0x4b0` (−1), first in the entry and the unwreck; the settle's
+    /// ([`settle`]) word to each of the player's listeners (its vt at `+0x20`, `+0xa0`: the listener,
+    /// 5, a zero word, 0, 0).
     Settle,
     Stance(i32),
+    Told(u32),
     /// `rand`: its answer.
     Rand,
     /// The event post (on the game's event queue, from the bike's `+0x674`, category 8):
@@ -433,6 +436,30 @@ pub fn wreck_test(m: &mut impl Wrecks, at: u32, dt: F) {
         let n = w(m, 0x6c4).wrapping_add(1);
         put(m, 0x6c4, n);
     }
+}
+
+/// **The settle** (vt `+0x4a8`, [`Out::Settle`]), the stunts' end with a player on the bike (the run
+/// `+0x684` and the player `+0x680`): the stance's (vt `+0x4b0`, −1), the wheelie's and stoppie's
+/// clocks (`+0x1744`, `+0x1748`) and their four words past (`+0x704..+0x710`) to 0, each of the
+/// player's listeners (the list at its `+0x1d4`, on through each one's `+0x1c`) told, and the flip's
+/// clip and the word after it (`+0x1754`, `+0x1758`) to 0: the bike's vt `+0x53c` and `+0x540`, a
+/// store each.
+pub fn settle(m: &mut impl Wrecks) {
+    if w(m, 0x684) == 0 || w(m, 0x680) == 0 {
+        return;
+    }
+    m.out(Out::Stance(-1));
+    for o in [0x1744, 0x1748, 0x704, 0x708, 0x70c, 0x710] {
+        put(m, o, 0);
+    }
+    let player = w(m, 0x680);
+    let mut l = m.word(player.wrapping_add(0x1d4));
+    while l != 0 {
+        m.out(Out::Told(l));
+        l = m.word(l.wrapping_add(0x1c));
+    }
+    put(m, 0x1754, 0);
+    put(m, 0x1758, 0);
 }
 
 /// The event post with the bike's word `+0xd20` after the id.

@@ -55,9 +55,19 @@ pub fn placed(ride: &Ride) -> M4 {
 pub fn wrecked(crash: &game_sim::ride::Crash) -> M4 {
     // The transform's orientation, which is the body's at the start of its last substep, as the
     // origin is.
-    let (forward, up) = game_sim::math::quat_axes(crash.bike.body.last_quat);
-    let axis = |v: [ps2_float::F; 3]| v3(v[0].0, v[1].0, v[2].0);
-    M4::placement(at(crash.origin), axis(forward), axis(up))
+    let (forward, up) = quat_axes(crash.bike.body.last_quat);
+    M4::placement(at(crash.origin), forward, up)
+}
+
+/// A unit quaternion's `+Z` and `+Y` axes, `(forward, up)`, in host floats: what
+/// [`game_sim::math::quat_axes`] answers in the PS2's (C26). The bike is drawn from these every
+/// frame and nothing reads them back, so the last bit is the picture's to lose.
+fn quat_axes(q: Vf) -> (V3, V3) {
+    let (x, y, z, w) = (q.x(), q.y(), q.z(), q.w());
+    let (x2, y2, z2) = (x * 2.0, y * 2.0, z * 2.0);
+    let forward = v3(x * z2 + w * y2, y * z2 - w * x2, 1.0 - (x * x2 + y * y2));
+    let up = v3(x * y2 - w * z2, 1.0 - (x * x2 + z * z2), y * z2 + w * x2);
+    (forward, up)
 }
 
 /// A simulation vector as the renderer's own.
@@ -244,4 +254,36 @@ fn held(body: &Body, targets: &Anchors) -> [Option<f32>; 4] {
 /// The names of the four limbs, for a failure message that says which one let go.
 pub fn limb_names() -> [&'static str; 4] {
     [LIMBS[0].anchor, LIMBS[1].anchor, LIMBS[2].anchor, LIMBS[3].anchor]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The drawn axes against the sim's own over 10,000 unit quaternions, a turn of every size: the
+    /// same rows within a few ULPs of a unit vector.
+    #[test]
+    fn the_drawn_axes_are_the_sims() {
+        let mut s = 0x2545_f491_u32;
+        let mut r = || {
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            s as f32 / u32::MAX as f32 * 2.0 - 1.0
+        };
+        let mut worst = 0.0f32;
+        for _ in 0..10_000 {
+            let q = [r(), r(), r(), r()];
+            let n = q.iter().map(|v| v * v).sum::<f32>().sqrt();
+            let q = Vf::new(q[0] / n, q[1] / n, q[2] / n, q[3] / n);
+            let (forward, up) = quat_axes(q);
+            let (sf, su) = game_sim::math::quat_axes(q);
+            for (ours, theirs) in [(forward, sf), (up, su)] {
+                for (a, b) in [ours.x, ours.y, ours.z].into_iter().zip(theirs) {
+                    worst = worst.max((a - b.0).abs());
+                }
+            }
+        }
+        assert!(worst < 1e-6, "the axes are {worst} off the sim's");
+    }
 }

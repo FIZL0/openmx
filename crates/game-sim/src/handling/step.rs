@@ -19,7 +19,8 @@
 //!   angle comes out `+0`.
 //! - The wreck test ([`wreck_test`], [`hit_wreck`], MD63c): reason 15 first, the 360's torque beside the
 //!   backflip's, no no-hander term in the trick endings' gate, and the hits' own reach (2.9 / 4.5),
-//!   rider-only throws and a scenery hit that needs the g loads past their limits.
+//!   rider-only throws and a scenery hit that needs the g loads past their limits. The hits run after
+//!   a clause's entry too ([`wreck_entries`], B35), and the last entry stays.
 //! - The ride machine's clock and put-back ([`machine`], MD71): the clock adds before the settle window
 //!   is asked, one limit for every reason, and the put-back is the bike's own unwreck — no page, and
 //!   the clock back to zero.
@@ -514,14 +515,14 @@ pub const HIT_REACH_SMALL: F = F(2.9);
 pub const HIT_REACH: F = F(4.5);
 
 /// **MX vs. ATV's hits** (the wreck test's loop over the collision record's contacts, after
-/// [`wreck_test`] and asked by the caller only when that let the bike go, as
-/// [`crate::air::hit_wreck`]): the first of the bike's own contacts with a ray reaching above
+/// [`wreck_test`] whatever it answered, [`wreck_entries`]): the first of the bike's own contacts with a ray reaching above
 /// [`HIT_REACH`] ([`HIT_REACH_SMALL`] when `small`, the size word 0) decides, and ends the search:
 ///
 /// - another rider is a [`Wreck::Joust`] if their body stands higher than this one's by more than
 ///   [`AirParams::joust_wreck_height`], their velocity the throw;
 /// - scenery is a [`Wreck::Scenery`] only with the g loads past the back, front or side limits — which
-///   the clauses before it have already wrecked on, so it answers nothing in the ride;
+///   the clauses before it have already wrecked on, so in the ride it is a second entry that takes
+///   the clause's place;
 /// - there is no heavier-object case: an actor is asked by height only, so an
 ///   [`Other::Object`] (no height here; the port never makes one) answers nothing.
 ///
@@ -541,6 +542,22 @@ pub fn hit_wreck(p: &AirParams, air: &mut Air, touched: bool, small: bool, heigh
         Other::Scenery if !loads_within(p, loads) => Some(Wreck::Scenery),
         _ => None,
     }
+}
+
+/// **SLUS-21104's wreck test and hits together** (B35): the clauses ([`wreck_test`]), then the hits
+/// ([`hit_wreck`]) **whether or not a clause entered**. MX vs. ATV's entry leaves the collision record
+/// where it is (it swaps the record's part, not the record, and clears nothing on it), so the hit loop
+/// still sees what the bike touched; MX Unleashed's entry clears the record and its hits answer nothing
+/// after a clause ([`crate::air::hit_wreck`], S191a). The frame enters both, in that order, and the
+/// second entry's reason is the one that stays, with the throw the last of them wrote: a joust's hit
+/// writes its own, a scenery hit leaves the clause's. The answer is the two entries, clause first;
+/// [`crate::handling::wreck::wreck_test`] is the same frame word for word (its striker's third entry
+/// has no typed field here).
+pub fn wreck_entries(p: &AirParams, air: &mut Air, chassis: &Chassis, step: &AirStep, loads: &Loads, w: &WreckIn,
+                     in_air: bool, small: bool, height: F, contacts: &[Contact]) -> (Option<Wreck>, Option<Wreck>) {
+    let landed = wreck_test(p, air, chassis, step, loads, w, in_air);
+    let hit = hit_wreck(p, air, step.touching, small, height, loads, contacts);
+    (landed, hit)
 }
 
 // --- the wreck clock and put-back (MD71) ----------------------------------------------------------------

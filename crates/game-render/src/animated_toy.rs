@@ -322,24 +322,107 @@ pub fn shown_time(clock: &toys::Clock, timing: &game_sim::motion::Clip, by: f32)
     if timing.looping && length > 0.0 && t >= length { t - length } else { t }
 }
 
-/// One toy's joints in its model's space at the picture's moment ([`shown_time`]): the sim's own
-/// sample of its clip there, from a copy of its hints, composed down the model's chain in host
-/// floats. What the GPU's palette and the software skin both take.
+/// One toy's joints in its model's space at the picture's moment ([`shown_time`]): the sim's clip
+/// sampled there and composed down the model's chain, all in host floats. What the GPU's palette and
+/// the software skin both take.
+///
+/// The picture's own sample and not the sim's (C26): the sim's ([`toys::pose`], [`toys::compose`]) is
+/// the PS2's arithmetic and is what the toys' collision turns with, a tick at a time; this one runs
+/// every drawn frame at a time between two ticks, and nothing reads it back. So it is [`skin`]'s
+/// sampler — its key decode, its slerp, its rotation rows — over the same keys, with no hint (a
+/// search from the ends, which finds the same pair), and lands within a few ULPs of the sim's
+/// (`tests/animated_toy.rs`).
 pub fn palette(sim: &Toys, k: usize, by: f32) -> Vec<M4> {
     let spec = &sim.specs[k];
     let motion = &sim.motions[spec.motion];
     let time = shown_time(&sim.clocks[k], &motion.timing, by);
-    let mut hints = sim.hints[sim.base[spec.motion]..].to_vec();
-    let locals = toys::pose(motion, &spec.rig, F(time), &mut hints);
+    let rig = &spec.rig;
+    let joint = |name: u32| match rig.map.get(name as usize) {
+        Some(&j) if j != skin::SKIP && (j as usize) < rig.rest.len() => Some(j as usize),
+        _ => None,
+    };
+    let mut locals: Vec<M4> = rig.rest.iter().map(m4).collect();
+    for ch in &motion.rotation {
+        let Some(j) = joint(ch.name) else { continue };
+        if let Some(q) = ch.on.then(|| shown_rotation(&ch.keys, time)).flatten() {
+            let m = skin::rotation(q);
+            locals[j].0[..3].copy_from_slice(&m.0[..3]);
+        }
+    }
+    for ch in &motion.position {
+        let Some(j) = joint(ch.name) else { continue };
+        if let Some(p) = ch.on.then(|| shown_position(&ch.keys, time)).flatten() {
+            let w = locals[j].0[3][3];
+            locals[j].0[3] = [p[0], p[1], p[2], w];
+        }
+    }
     let mut out: Vec<M4> = Vec::with_capacity(locals.len());
     for (j, local) in locals.iter().enumerate() {
-        let local = m4(local);
-        out.push(match spec.rig.parents[j] {
+        out.push(match rig.parents[j] {
             Some(p) if p < j => local.mul(out[p]),
-            _ => local,
+            _ => *local,
         });
     }
     out
+}
+
+/// A rotation channel's quaternion at `time` in host floats, as [`toys::sample_rotation`] answers:
+/// one or two keys blend the first and the last; otherwise the pair the time falls between, the last
+/// key held past the end and key 1 before the start (the original's fall-back index).
+fn shown_rotation(keys: &toys::RotKeys, time: f32) -> Option<[f32; 4]> {
+    let t = |i: usize| match keys {
+        toys::RotKeys::Wide(k) => k[i].t.0,
+        toys::RotKeys::Narrow(k) => k[i].t.0,
+    };
+    let q = |i: usize| match keys {
+        toys::RotKeys::Wide(k) => skin::decode(&skin::RotKey { t: k[i].t.0, turn: k[i].turn, axis: k[i].axis }),
+        toys::RotKeys::Narrow(k) => skin::decode_narrow(&skin::NarrowKey { t: k[i].t.0, turn: k[i].turn, axis: k[i].axis }),
+    };
+    let n = keys.len();
+    let last = n.checked_sub(1)?;
+    if last < 2 {
+        let u = if last == 1 { (time - t(0)) / (t(1) - t(0)) } else { 0.0 };
+        return Some(skin::slerp(u, q(0), q(last), true));
+    }
+    if time > t(last) {
+        return Some(q(last));
+    }
+    if time < t(0) {
+        return Some(q(1));
+    }
+    // The first key at or past the time, never key 0, by halves: the pair is `i - 1` and `i`.
+    let (mut lo, mut hi) = (1, last);
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if t(mid) < time { lo = mid + 1 } else { hi = mid }
+    }
+    let i = lo;
+    let u = (time - t(i - 1)) / (t(i) - t(i - 1));
+    Some(skin::slerp(u, q(i - 1), q(i), true))
+}
+
+/// A position channel's translation at `time` in host floats, as [`toys::sample_position`] answers:
+/// nothing for fewer than two keys; inside, the blend of the pair the time falls between; at or past
+/// the last key, the last pair's slope carried on; before the first, the first pair.
+fn shown_position(k: &[toys::PosKey], time: f32) -> Option<[f32; 3]> {
+    let n = k.len();
+    if n < 2 {
+        return None;
+    }
+    let (a, b, inside) = if time >= k[n - 1].t.0 {
+        (n - 2, n - 1, false)
+    } else {
+        // The last key at or before the time, and the one after it.
+        let i = k.partition_point(|key| key.t.0 <= time).clamp(1, n - 1);
+        (i - 1, i, true)
+    };
+    let (ta, tb) = (k[a].t.0, k[b].t.0);
+    let u = if inside { (time - ta) / (tb - ta) } else { (time - tb) / (tb - ta) };
+    let (pa, pb) = (k[a].p.map(|v| v.0), k[b].p.map(|v| v.0));
+    Some(std::array::from_fn(|c| {
+        let base = if inside { pa[c] } else { pb[c] };
+        base + u * (pb[c] - pa[c])
+    }))
 }
 
 /// One toy's placement, model space to world.
@@ -443,5 +526,83 @@ mod tests {
         assert!((shown_time(&clock, &timing, 0.0) - 0.9).abs() < 1e-6);
         let done = toys::Clock { time: F::ZERO, prev: F(0.95), finished: true };
         assert_eq!(shown_time(&done, &game_sim::motion::Clip { duration: F(1.0), ..Default::default() }, 0.3), 1.0);
+    }
+
+    /// The picture's sample (host floats, no hint) against the sim's ([`toys::pose`], the PS2's
+    /// arithmetic with its hint) composed as the picture always composed it, over generated clips of
+    /// both key kinds on a five-joint chain and 2,000 times each from before the first key to past the
+    /// last: the same joints within 2e-5 of each row's size, whatever the hint walked.
+    #[test]
+    fn the_drawn_pose_is_the_sims() {
+        let mut s = 0x9e37_79b9_u32;
+        let mut r = move || {
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            s
+        };
+        let mut worst = 0.0f32;
+        for clip in 0..20 {
+            let n = 1 + (r() % 12) as usize;
+            let times: Vec<F> = {
+                let mut t = 0.0f32;
+                (0..n).map(|_| { let at = t; t += 0.05 + (r() % 100) as f32 / 400.0; F(at) }).collect()
+            };
+            // A unit axis, as the file's are, scaled to the key's range.
+            let axis = |r: &mut dyn FnMut() -> u32, scale: f32| {
+                let v = [0, 1, 2].map(|_| (r() % 2001) as f32 / 1000.0 - 1.0);
+                let n = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-3);
+                v.map(|x| (x / n * scale).round() as i32)
+            };
+            let rotation: Vec<toys::RotChannel> = (0..5u32)
+                .map(|j| toys::RotChannel {
+                    name: j,
+                    on: true,
+                    keys: if (clip + j) % 2 == 0 {
+                        toys::RotKeys::Wide(times.iter().map(|&t| toys::RotKey { t, turn: (r() % 4096) as u16, axis: axis(&mut r, 32767.0).map(|a| a as i16) }).collect())
+                    } else {
+                        toys::RotKeys::Narrow(times.iter().map(|&t| toys::NarrowKey { t, turn: r() as u8, axis: axis(&mut r, 127.0).map(|a| a as i8) }).collect())
+                    },
+                })
+                .collect();
+            let position: Vec<toys::PosChannel> = (0..5u32)
+                .map(|j| toys::PosChannel {
+                    name: j,
+                    on: true,
+                    keys: times.iter().map(|&t| toys::PosKey { t, p: [0, 1, 2].map(|_| F((r() % 2000) as f32 / 100.0 - 10.0)) }).collect(),
+                })
+                .collect();
+            let length = times[n - 1].0;
+            let motion = Motion { timing: game_sim::motion::Clip { duration: F(length.max(0.1)), looping: false, ..Default::default() }, rotation, position };
+            let rest = (0..5).map(|j| Mat4([Vf::new(1.0, 0.0, 0.0, 0.0), Vf::new(0.0, 1.0, 0.0, 0.0), Vf::new(0.0, 0.0, 1.0, 0.0), Vf::new(j as f32, 2.0, 0.0, 1.0)])).collect();
+            let rig = Rig { parents: vec![None, Some(0), Some(1), Some(1), Some(3)], rest, map: vec![0, 1, 2, 3, skin::SKIP] };
+            let spec = Spec { motion: 0, rig, place: Mat4::IDENTITY, start: F::ZERO, mesh: None, parts: Vec::new(), unseen: true, search: true };
+            let mut sim = Toys::new(vec![motion], vec![spec]);
+            let mut hints = sim.hints.clone();
+            for step in 0..2000 {
+                let time = -0.2 + (length + 0.4) * step as f32 / 2000.0;
+                sim.clocks[0] = toys::Clock { time: F(time), prev: F(time), finished: false };
+                let ours = palette(&sim, 0, 1.0);
+                let locals = toys::pose(&sim.motions[0], &sim.specs[0].rig, F(time), &mut hints);
+                let mut theirs: Vec<M4> = Vec::new();
+                for (j, l) in locals.iter().enumerate() {
+                    theirs.push(match sim.specs[0].rig.parents[j] {
+                        Some(p) if p < j => m4(l).mul(theirs[p]),
+                        _ => m4(l),
+                    });
+                }
+                for (j, (a, b)) in ours.iter().zip(&theirs).enumerate() {
+                    for (row, (ra, rb)) in a.0.iter().zip(&b.0).enumerate() {
+                        // A translation row carries its parents' rotation error times their reach.
+                        let size = rb.iter().fold(1.0f32, |m, v| m.max(v.abs()));
+                        for (x, y) in ra.iter().zip(rb) {
+                            let d = (x - y).abs() / size;
+                            assert!(d < 2e-5, "clip {clip} ({n} keys {times:?}) at {time}: joint {j} row {row} {ra:?} against {rb:?}");
+                            worst = worst.max(d);
+                        }
+                    }
+                }
+            }
+        }
     }
 }
