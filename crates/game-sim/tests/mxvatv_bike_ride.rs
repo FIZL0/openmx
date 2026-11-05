@@ -6115,3 +6115,449 @@ fn flip_wrecks_and_is_put_back_bit_exact_on_the_ports_mass_words() {
     let changes: Vec<usize> = (1..w.len()).filter(|&r| w[r] != w[r - 1]).collect();
     assert_eq!(changes, [125, 193], "wrecked on row 125, put back on row 193");
 }
+
+// ---------------------------------------------------------------------------------------------
+// F31b5a: the head's and Force body's steps quad::Steps', on the bike read by handling::steps.
+// ---------------------------------------------------------------------------------------------
+
+use game_sim::handling::steps;
+use game_sim::noise::SmoothNoise;
+
+/// The smooth noise's tables (its permutation, its gradients), the flag that says they are not built
+/// yet, and the word it leaves its knot in.
+const NOISE_PERM: u32 = 0x003f_3540;
+const NOISE_G1: u32 = 0x003f_6580;
+const NOISE_UNBUILT: u32 = 0x0038_f708;
+const NOISE_KNOT: u32 = 0x003f_6d88;
+/// What builds the noise's tables, off the C library's `rand()`, whose state is the doubleword
+/// `+0xa8` of the block the word at [`RAND_BLOCK`] points to.
+const NOISE_BUILD: u32 = 0x0013_4680;
+const RAND_BLOCK: u32 = 0x0039_3a90;
+/// The word the struck thing's class (its `+0x94`) is tested against.
+const STRUCK_MASK: u32 = 0x0054_2db0;
+/// The preload's cue (`a0` the word at [`CUE_ON`]).
+const PRELOAD_CUE: u32 = 0x0027_2300;
+const CUE_ON: u32 = 0x0044_2eb0;
+
+fn rand_state(ee: &Ee) -> u64 {
+    ee.read(ee.u32_at(RAND_BLOCK) + 0xa8, 8) as u64
+}
+
+/// One sample of the smooth noise as the original takes it: the tables built first if they are not
+/// (the original's builder, run where the original runs it), then [`SmoothNoise::at_accumulated`]
+/// on them, its knot left where the original leaves it.
+fn noise_at(ee: &mut Ee, noise: &mut Option<SmoothNoise>, t: F) -> F {
+    if ee.u32_at(NOISE_UNBUILT) != 0 {
+        ee.set_u32(NOISE_UNBUILT, 0);
+        ee.set(28, GP);
+        ee.call(NOISE_BUILD, &[], &[], BUDGET);
+        *noise = None;
+    }
+    let n = noise.get_or_insert_with(|| noise_tables(ee));
+    ee.set_u32(NOISE_KNOT, (F(4096.0) + t).to_i32() as u32);
+    n.at_accumulated(t)
+}
+
+fn noise_tables(ee: &Ee) -> SmoothNoise {
+    assert_eq!(ee.u32_at(NOISE_UNBUILT), 0, "the noise's tables are built");
+    let perm = std::array::from_fn(|k| ee.u32_at(NOISE_PERM + 4 * k as u32));
+    let g1 = std::array::from_fn(|k| F(ee.f32_at(NOISE_G1 + 4 * k as u32)));
+    SmoothNoise::from_tables(&perm, &g1)
+}
+
+/// The struck thing's class as the steep test reads it: the record touching, and the thing it
+/// touches of the class the mask names.
+fn struck_class(ee: &Ee) -> bool {
+    let record = ee.u32_at(BIKE + seed::RECORD);
+    if record == 0 || ee.u32_at(record + 0x34) == 0 {
+        return false;
+    }
+    let thing = ee.u32_at(record + 0x20c);
+    thing != 0 && ee.u32_at(thing + 0x94) & ee.u32_at(STRUCK_MASK) != 0
+}
+
+fn call_name(c: &Call) -> String {
+    let s = format!("{c:?}");
+    s.split(['(', ' ']).next().unwrap().to_string()
+}
+
+/// The bike in RAM as [`StepInRam`] keeps it, its steps [`quad::Steps`]' on the bike
+/// [`steps::read`] reads before each: what the steps hand on (the gravity's record call, the
+/// preload's cue, a stunt's start and end, a wreck) the original's, run after the step's words are
+/// back, and the contacts the original's too. The noise is [`SmoothNoise::at_accumulated`] on the
+/// original's tables.
+struct StepsInRam<'a, 'm> {
+    inner: StepInRam<'a>,
+    map: &'m track::Terrain<'m>,
+    noise: &'m mut Option<SmoothNoise>,
+    answered: &'m mut BTreeMap<String, u32>,
+}
+
+impl StepsInRam<'_, '_> {
+    fn run(&mut self, f: u32, ints: &[u32], x: F) -> u32 {
+        let ee = &mut *self.inner.ram.ee;
+        ee.set(28, GP);
+        ee.call(f, &ints.iter().map(|&i| u64::from(i)).collect::<Vec<_>>(), &[x.0], BUDGET);
+        ee.r(2) as u32
+    }
+
+    /// What the steps handed on, the original's; `from` the call it came from (for the stunt that
+    /// ends: the backflip's, or the air spin's side's), `k` the bike after it.
+    fn hand_on(&mut self, c: Call, from: Call, k: &quad::Bike) {
+        let dt = self.inner.dt;
+        let ee = &*self.inner.ram.ee;
+        match c {
+            Call::GravityRecord => {
+                let record = ee.u32_at(BIKE + seed::RECORD);
+                let f = ee.u32_at(ee.u32_at(record + 4) + 0x88);
+                self.run(f, &[record, 1], dt);
+            }
+            Call::PreloadCue => {
+                let ints = [ee.u32_at(CUE_ON), BIKE + 0x674, 8, 14, ee.u32_at(BIKE + 0xd20), 0];
+                self.run(PRELOAD_CUE, &ints, dt);
+            }
+            Call::StartStunt(id) => {
+                let f = vt(ee, 0x4b8);
+                assert_ne!(self.run(f, &[BIKE, id, 1], dt), 0, "the stunt starts");
+            }
+            Call::EndStunt => {
+                let id = match from {
+                    Call::Backflip(_) => k.flip_stunt,
+                    Call::SpinAir(_) => {
+                        let s = &k.parts.spin;
+                        if s.dir > 0 { s.stunt_left } else { s.stunt_right }
+                    }
+                    c => panic!("{c:?} ends no stunt"),
+                };
+                let f = vt(ee, 0x4ac);
+                self.run(f, &[BIKE, id], dt);
+            }
+            Call::Wreck(r) => {
+                let f = vt(ee, 0x368);
+                self.run(f, &[BIKE, u32::from(r)], dt);
+            }
+            c => panic!("the bike's steps hand on no {c:?}"),
+        }
+    }
+}
+
+impl Moto for StepsInRam<'_, '_> {
+    fn call(&mut self, c: Call, q: &mut Quad, body: &mut quad::Body) {
+        if matches!(c, Call::Contacts) {
+            return self.inner.call(c, q, body);
+        }
+        *self.answered.entry(call_name(&c)).or_default() += 1;
+        self.inner.write(q, body);
+        let ee = &*self.inner.ram.ee;
+        let m = |a| ee.u32_at(a);
+        let (mut k, at) = steps::read(&m, BIKE).unwrap_or_else(|e| panic!("{c:?}: the bike's words: {e}"));
+        k.struck_class = struck_class(ee);
+        let last = steps::words(&k, &at, &m);
+        let terrain = {
+            let t = at.wheels.map(|w| ee.u32_at(w + 0x1e0));
+            assert!(t[0] == t[1] || t[0] == 0 || t[1] == 0, "the wheels stand on one terrain: {t:#x?}");
+            let t = if t[0] != 0 { t[0] } else { t[1] };
+            (t != 0).then(|| ground::read_terrain(&m, t, Some(self.map)))
+        };
+        let mut s = quad::Steps {
+            bike: k,
+            rest: Vec::<Call>::new(),
+            ground: |p: Vf, rec: &mut u8| terrain.as_ref().expect("a wheel with ground has a terrain").ground(p, Vf::ZERO, rec),
+            sweep: (),
+        };
+        s.call(c, q, body);
+        let quad::Steps { bike: k, rest, .. } = s;
+        let ee = &*self.inner.ram.ee;
+        let now = steps::words(&k, &at, &|a| ee.u32_at(a));
+        let mut set = Vec::new();
+        for (&(a, w), &(la, lw)) in now.iter().zip(&last) {
+            assert_eq!(a, la);
+            if w != lw {
+                set.push((a, w));
+            }
+        }
+        for (a, w) in set {
+            self.inner.ram.ee.set_u32(a, w);
+        }
+        self.inner.write(q, body);
+        for r in rest {
+            *self.answered.entry(format!("> {}", call_name(&r))).or_default() += 1;
+            self.hand_on(r, c, &k);
+        }
+        (*q, *body) = self.inner.read();
+    }
+}
+
+impl bike::Rides for StepsInRam<'_, '_> {
+    fn rider(&mut self) -> &mut bike::Rider {
+        &mut self.inner.rider
+    }
+    fn noise(&mut self, t: F) -> F {
+        noise_at(self.inner.ram.ee, self.noise, t)
+    }
+}
+
+/// [`port_head`] with its steps [`StepsInRam`]'s.
+fn steps_head(ee: &mut Ee, dt: F, map: &track::Terrain<'_>, noise: &mut Option<SmoothNoise>, answered: &mut BTreeMap<String, u32>) {
+    let body = ee.u32_at(BIKE + seed::BODY);
+    let (wheels, record) = (the_wheels(ee), ee.u32_at(BIKE + seed::RECORD));
+    let words = |ee: &Ee| (bike::read_params(&|a| ee.u32_at(a), BIKE), bike::read_held(&|a| ee.u32_at(a), BIKE));
+    let (p, held) = words(ee);
+    let mut axes = seed::body(&|a| ee.u32_at(a), body).angular_axes;
+    let was = axes;
+    let ram = InRam { ee, wheels, record, body, last: Vec::new() };
+    let inner = StepInRam { ram, rider: bike::Rider::default(), rider_last: Vec::new(), dt };
+    let mut m = StepsInRam { inner, map, noise, answered };
+    let (mut q, mut b) = m.inner.read();
+    bike::ground_head(&p, &mut q, &mut b, held, &mut axes, dt, &mut m);
+    m.inner.write(&q, &b);
+    for k in 0..3 {
+        if axes[k] != was[k] {
+            m.inner.ram.ee.set_u32(body + 0x120 + 4 * k as u32, u32::from(axes[k]));
+        }
+    }
+}
+
+/// [`port_step`] with its steps [`StepsInRam`]'s.
+fn steps_step(ee: &mut Ee, dt: F, map: &track::Terrain<'_>, noise: &mut Option<SmoothNoise>, answered: &mut BTreeMap<String, u32>) {
+    let body = ee.u32_at(BIKE + seed::BODY);
+    let (wheels, record) = (the_wheels(ee), ee.u32_at(BIKE + seed::RECORD));
+    let p = bike::read_params(&|a| ee.u32_at(a), BIKE);
+    let ram = InRam { ee, wheels, record, body, last: Vec::new() };
+    let inner = StepInRam { ram, rider: bike::Rider::default(), rider_last: Vec::new(), dt };
+    let mut m = StepsInRam { inner, map, noise, answered };
+    let (mut q, mut b) = m.inner.read();
+    bike::ground_step(&p, &mut q, &mut b, dt, &mut m);
+    m.inner.write(&q, &b);
+}
+
+/// A frame as [`PortPost`]'s, the bike's PreProcess [`steps_head`] and its Force body
+/// [`steps_step`].
+struct PortSteps<'a, 'm> {
+    post: PortPost<'a>,
+    map: &'m track::Terrain<'m>,
+    noise: &'m mut Option<SmoothNoise>,
+    answered: BTreeMap<String, u32>,
+    heads: u32,
+    steps: u32,
+}
+
+impl Dynamics for PortSteps<'_, '_> {
+    fn count(&self, l: List) -> i32 {
+        self.post.count(l)
+    }
+    fn preforce(&mut self, i: i32, dt: F) {
+        if self.post.0.0.0.elt(List::Preforce, i) != BIKE_PREFORCE {
+            return self.post.preforce(i, dt);
+        }
+        let (map, noise) = (self.map, &mut *self.noise);
+        let mut answered = std::mem::take(&mut self.answered);
+        let h = &mut self.post.0.0.0;
+        for (a, w) in seed::body_words(&h.body, h.at) {
+            h.ee.set_u32(a, w);
+        }
+        steps_head(h.ee, dt, map, noise, &mut answered);
+        h.body = seed::body(&|a| h.ee.u32_at(a), h.at);
+        self.answered = answered;
+        self.heads += 1;
+    }
+    fn force(&mut self, i: i32, h: F) {
+        let x = &mut self.post.0.0.0;
+        let e = x.elt(List::Force, i);
+        if x.ee.u32_at(e + 0xc) != BIKE_FORCE {
+            return self.post.force(i, h);
+        }
+        let (map, noise) = (self.map, &mut *self.noise);
+        let mut answered = std::mem::take(&mut self.answered);
+        for (a, w) in seed::body_words(&x.body, x.at) {
+            x.ee.set_u32(a, w);
+        }
+        steps_step(x.ee, h, map, noise, &mut answered);
+        x.body = seed::body(&|a| x.ee.u32_at(a), x.at);
+        self.answered = answered;
+        self.steps += 1;
+    }
+    fn enabled(&self, b: i32) -> bool {
+        self.post.enabled(b)
+    }
+    fn integrate(&mut self, b: i32, h: F) {
+        self.post.integrate(b, h)
+    }
+    fn end_substep(&mut self, b: i32) {
+        self.post.end_substep(b)
+    }
+    fn constrain(&mut self, b: i32, last: bool) {
+        self.post.constrain(b, last)
+    }
+    fn post(&mut self, i: i32, dt: F) {
+        self.post.post(i, dt)
+    }
+}
+
+/// [`port_record_frame`] with the world step [`PortSteps`]'. Answers the heads and Force bodies the
+/// steps ran, the PostProcesses, and the calls they answered (`> ` those they handed on).
+fn steps_frame(ee: &mut Ee, dt: F, map: &track::Terrain<'_>, noise: &mut Option<SmoothNoise>) -> (u32, u32, u32, BTreeMap<String, u32>) {
+    let call = |ee: &mut Ee, f: u32, ints: &[u64], x: F| {
+        ee.set(28, GP);
+        ee.call(f, ints, &[x.0], BUDGET);
+        ee.r(2)
+    };
+    assert_eq!(ee.u8_at(ee.u32_at(SKIP_FLAG) + 0x225) & 8, 0, "the frame is not skipped");
+    let mine = ee.u32_at(BIKE + seed::RECORD);
+    for (slot, original) in [(0x7c, RECORD_CLEAR), (0x84, RECORD_PASS)] {
+        for i in 0..ee.u32_at(SIM + 0x24) {
+            let e = call(ee, LIST24_GET, &[u64::from(SIM + 0x24), u64::from(i)], F::ZERO) as u32;
+            let f = ee.u32_at(ee.u32_at(e + 4) + slot);
+            if e == mine {
+                assert_eq!(f, original, "the bike's record's vt +{slot:#x}");
+                let t = ee.u32_at(e + 0xec);
+                let terrain = (t != 0).then(|| ground::read_terrain(&|a| ee.u32_at(a), t, Some(map)));
+                port_record(ee, e, slot, dt, terrain.as_ref());
+            } else {
+                call(ee, f, &[u64::from(e)], dt);
+            }
+        }
+    }
+    let world = World { iterations: ee.u32_at(WORLD) as i32, rate: F(ee.f32_at(WORLD + 4)) };
+    let at = ee.u32_at(BIKE + seed::BODY);
+    let body = seed::body(&|a| ee.u32_at(a), at);
+    let post = PortPost(PortStep(PortHead(Hybrid { ee, body, at, integrated: 0 }), 0), 0);
+    let mut h = PortSteps { post, map, noise, answered: BTreeMap::new(), heads: 0, steps: 0 };
+    world.step(dt, &mut h);
+    let (body, heads, steps, posts, answered) = (h.post.0.0.0.body, h.heads, h.steps, h.post.1, h.answered);
+    for (a, w) in seed::body_words(&body, at) {
+        ee.set_u32(a, w);
+    }
+    let (bikes, others) = port_tail(ee, dt);
+    assert_eq!((bikes, others.len()), (1, 3), "the tail steps the bike once, its two other leaves and the second's rider: {others:#x?}");
+    let mut i = 0;
+    while i < ee.u32_at(SIM + 0x3c) {
+        let e = call(ee, LIST3C_GET, &[u64::from(SIM + 0x3c), u64::from(i)], F::ZERO) as u32;
+        if call(ee, ee.u32_at(ee.u32_at(e) + 8), &[u64::from(e)], dt) != 0 {
+            call(ee, LIST3C_REMOVE, &[u64::from(SIM + 0x3c), u64::from(i)], F::ZERO);
+        } else {
+            i += 1;
+        }
+    }
+    (heads, steps, posts, answered)
+}
+
+/// [`replay_port_record_massed`] with every frame [`steps_frame`]. Answers the wreck state per row
+/// and what the steps answered over the replay.
+fn replay_steps(name: &str) -> Option<(Vec<bool>, BTreeMap<String, u32>)> {
+    let words = mass_words(&race250p()?)?;
+    let trn = nat05_trn()?;
+    let map = track::Terrain::parse(&trn).unwrap();
+    let mut ee = hooked(image()?);
+    for (a, mask, v) in words {
+        ee.set_u32(a, ee.u32_at(a) & !mask | v & mask);
+    }
+    let mut noise = None;
+    let rows = rows(name)?;
+    let (mut out, mut all) = (Vec::new(), BTreeMap::<String, u32>::new());
+    for (r, row) in rows.iter().enumerate() {
+        poke(&mut ee, row, &READER);
+        let (heads, steps, posts, answered) = steps_frame(&mut ee, F(f32::from_bits(DT)), &map, &mut noise);
+        assert_eq!((heads, steps, posts), (1, 4, 1), "the head once, the Force body every substep, the PostProcess once");
+        for (k, n) in answered {
+            *all.entry(k).or_default() += n;
+        }
+        let d = diff(&ee, row);
+        assert!(
+            d.is_empty(),
+            "{name} row {r} (vsync {}), the steps quad::Steps': {} words differ\n  {}",
+            row["vsync"],
+            d.len(),
+            d.iter().take(40).cloned().collect::<Vec<_>>().join("\n  ")
+        );
+        let w = wrecked(|o| ee.u32_at(BIKE + o));
+        assert_eq!(w, row_wrecked(row), "{name} row {r}: the wreck state");
+        out.push(w);
+        poke(&mut ee, row, &SPOT);
+    }
+    eprintln!("{name}: the steps answered {all:?}");
+    Some((out, all))
+}
+
+/// **F31b5a — state 4's bike, read and written back**: [`steps::read`]'s bike, put back by
+/// [`steps::words`], is state 4's at every word it names, and a changed field moves its word only.
+#[test]
+fn state4s_bike_reads_back_word_for_word() {
+    let Some(ee) = image() else { return };
+    let m = |a| ee.u32_at(a);
+    let (k, at) = steps::read(&m, BIKE).unwrap();
+    let w = steps::words(&k, &at, &m);
+    let off: Vec<String> =
+        w.iter().filter(|&&(a, v)| ee.u32_at(a) != v).map(|&(a, v)| format!("{a:#x}: state 4 {:#010x}, words {v:#010x}", ee.u32_at(a))).collect();
+    assert!(off.is_empty(), "{} of {} words differ:\n  {}", off.len(), w.len(), off.join("\n  "));
+    let mut seen = std::collections::BTreeSet::new();
+    let twice: Vec<u32> = w.iter().map(|&(a, _)| a).filter(|&a| !seen.insert(a)).collect();
+    eprintln!("{} words, {} addresses, named twice: {twice:#x?}", w.len(), seen.len());
+    // Read back from the words, the bike is the same bike.
+    let mut img: HashMap<u32, u32> = HashMap::new();
+    let mut k2 = k.clone();
+    k2.engine.rpm = k2.engine.rpm + F::ONE;
+    for (a, v) in steps::words(&k2, &at, &m) {
+        img.insert(a, v);
+    }
+    let m2 = |a| img.get(&a).copied().unwrap_or_else(|| ee.u32_at(a));
+    let moved: Vec<u32> = steps::words(&k2, &at, &m2).iter().filter(|&&(a, v)| ee.u32_at(a) != v).map(|&(a, _)| a).collect();
+    assert_eq!(moved.len(), 1, "one field moves one word: {moved:#x?}");
+}
+
+/// **F31b5a — the original's noise**: state 4's tables are not built yet; [`SmoothNoise::build`] off
+/// state 4's `rand()` builds the original's, and leaves the generator where the original leaves it;
+/// [`SmoothNoise::at_accumulated`] on them is the original's sample, bit for bit, over the knots and
+/// between them.
+#[test]
+fn the_accumulated_noise_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    assert_ne!(ee.u32_at(NOISE_UNBUILT), 0, "state 4's noise is not built yet");
+    let mut rng = game_sim::rng::Rng::from_state(rand_state(&ee));
+    let built = SmoothNoise::build(&mut rng);
+    let mut noise = None;
+    noise_at(&mut ee, &mut noise, F::ZERO);
+    let noise = noise.unwrap();
+    assert!(built == noise, "the port's tables are the original's");
+    assert_eq!(rng.state(), rand_state(&ee), "the build takes the original's draws");
+    let mut off = Vec::new();
+    for k in 0..4000 {
+        let t = F(-300.0 + k as f32 * 0.173);
+        ee.set(28, GP);
+        ee.call(SMOOTH_NOISE, &[], &[t.0], BUDGET);
+        let (want, got) = (ee.f(0).to_bits(), noise.at_accumulated(t).to_bits());
+        if want != got || ee.u32_at(NOISE_KNOT) != (F(4096.0) + t).to_i32() as u32 {
+            off.push(format!("t {}: original {want:#010x}, port {got:#010x}", t.0));
+        }
+    }
+    assert!(off.is_empty(), "{} of 4000 differ:\n  {}", off.len(), off.iter().take(20).cloned().collect::<Vec<_>>().join("\n  "));
+}
+
+/// **F31b5a — C15's ride on the steps quad::Steps'**: every row of ride-2 word for word, the head's
+/// and the Force body's steps answered by [`quad::Steps`].
+#[test]
+fn ride_replays_bit_exact_on_quad_steps() {
+    let Some((w, all)) = replay_steps("ride-2") else { return };
+    assert_eq!(w.len(), 459);
+    assert!(w.iter().all(|w| !w), "the ride never wrecks");
+    let handed: Vec<(&str, u32)> = all.iter().filter(|(k, _)| k.starts_with("> ")).map(|(k, &n)| (&k[2..], n)).collect();
+    assert_eq!(handed, [("GravityRecord", 1836)], "the gravity's record call, every substep");
+    for c in ["InputLimiter", "Clutch", "AutoShift", "HeadTail", "Gravity", "EngineUpdate", "Suspension", "TireForces", "WheelIntegrate"] {
+        assert!(all.get(c).copied().unwrap_or(0) > 0, "the steps answered no {c}: {all:?}");
+    }
+}
+
+/// **F31b5a — C15's flip on the steps quad::Steps'**: wrecked on row 125 and put back on row 193,
+/// every row word for word, the backflip's stunt handed on.
+#[test]
+fn flip_replays_bit_exact_on_quad_steps() {
+    let Some((w, all)) = replay_steps("flip-1") else { return };
+    assert_eq!(w.len(), 465);
+    let changes: Vec<usize> = (1..w.len()).filter(|&r| w[r] != w[r - 1]).collect();
+    assert_eq!(changes, [125, 193], "wrecked on row 125, put back on row 193");
+    assert!(all.get("Backflip").copied().unwrap_or(0) > 0, "{all:?}");
+    // Handed on: the preload's cue and the backflip's stunt once each; no stunt ends and no wreck
+    // the steps ask for (the wreck on row 125 is the wreck test's).
+    let handed: Vec<(&str, u32)> = all.iter().filter(|(k, _)| k.starts_with("> ")).map(|(k, &n)| (&k[2..], n)).collect();
+    assert_eq!(handed, [("GravityRecord", 1860), ("PreloadCue", 1), ("StartStunt", 1)]);
+}
