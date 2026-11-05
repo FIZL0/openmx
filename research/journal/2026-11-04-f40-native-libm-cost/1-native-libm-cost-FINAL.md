@@ -1,4 +1,4 @@
-# 1 — native libm cost (PART)
+# 1 — native libm cost (FINAL)
 
 Task F40. 2026-11-04.
 
@@ -78,19 +78,6 @@ share being small.
 
 ## Next
 
-The work is done, but the task is not ticked. `./kit done` could not pass the gate on 2026-11-04, for
-two reasons this task did not cause (its commit changes only this journal):
-
-- `web.rs` `the_browser_installs_from_the_store` is red on main since P293 (46624303). A finished
-  store install now asks to reload instead of re-reading `mods/`. It fails alone in 30 s. Filed as
-  **P294** (critical).
-- `world_ultra_load`'s two tests red at load 50–76 (first frame 21.6 s and 34.7 s against a 20 s
-  limit), and pass alone. Filed as **K23** (critical).
-
-Also, in this slot only (git-ignored data): `kiowa_capture` needed `context/states/c14-kiowa.*`,
-which I copied from `kept-context/s4`. `machine_packs` needed a current atv pack, which I copied
-from s3's `mods/machines/mxvatv_atv` (the old one is in `target/tmp/mxvatv_atv.old`).
-
-Once P294 lands, run `./kit done F40 "<msg>"` again. Nothing else is left to do. If libm ever does
-show up in a native profile, `powf` is the one to replace first: it is ~68 ns, against ~10–25 ns
-for the others.
+Done 2026-11-05. P294 and K23 have both landed, and `./kit done` passed the gate (4887 tests). Nothing
+is left to do. If libm ever does show up in a native profile, replace `powf` first: it takes ~68 ns,
+against ~10–25 ns for the others.
