@@ -89,13 +89,10 @@ fn line_with<'a>(said: &'a str, part: &str) -> &'a str {
 /// Two shells riding `track` online for `frames` ticks, host's and guest's on `scripts`: each one's
 /// output.
 fn ride_online(track: &str, frames: u32, scripts: [Option<&str>; 2]) -> [String; 2] {
-    // Two ports the system has free now (machines_everywhere's way).
-    let port = || std::net::UdpSocket::bind("127.0.0.1:0").and_then(|s| s.local_addr()).expect("a free port").port();
-    let (hp, mut gp) = (port(), port());
-    while gp == hp {
-        gp = port();
-    }
-    let (h, g) = (format!("host@127.0.0.1:{hp}"), format!("g@127.0.0.1:{gp}"));
+    // Each shell binds a port of its own (port 0) and keeps it: a port picked free here and bound
+    // by the shell after its load was a window another slot's test could take it in (K29). The
+    // host says its port; the guest is started on it; the host takes the guest's from its first
+    // datagram (`net::udp`'s port-0 peer).
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let frames = frames.to_string();
     let ride = |me: &str, peer: &str, script: Option<&str>| {
@@ -108,18 +105,38 @@ fn ride_online(track: &str, frames: u32, scripts: [Option<&str>; 2]) -> [String;
         if let Some(s) = script {
             shell.args(["--online-script", s]);
         }
-        shell.spawn().expect("the shell starts")
-    };
-    // A shell that fails takes its peer down with it: the peer would wait for its pads for ever.
-    let mut kids = [ride(&h, &g, scripts[0]), ride(&g, &h, scripts[1])];
-    let readers = kids.each_mut().map(|c| {
-        let mut out = c.stdout.take().expect("piped stdout");
-        std::thread::spawn(move || {
+        let mut kid = shell.spawn().expect("the shell starts");
+        // Its output, each line also sent on as it comes (the host's port).
+        let mut out = std::io::BufReader::new(kid.stdout.take().expect("piped stdout"));
+        let (lines, heard) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
             let mut said = String::new();
-            std::io::Read::read_to_string(&mut out, &mut said).ok();
+            let mut line = String::new();
+            while std::io::BufRead::read_line(&mut out, &mut line).is_ok_and(|n| n > 0) {
+                let _ = lines.send(line.clone());
+                said.push_str(&line);
+                line.clear();
+            }
             said
-        })
-    });
+        });
+        (kid, reader, heard)
+    };
+    let (mut host, host_said, heard) = ride("host@127.0.0.1:0", "g@127.0.0.1:0", scripts[0]);
+    let at = loop {
+        match heard.recv_timeout(std::time::Duration::from_secs(600)) {
+            Ok(l) if l.starts_with("online: host on ") => break l["online: host on ".len()..].split(',').next().unwrap().to_string(),
+            Ok(_) => {}
+            Err(_) => {
+                let _ = host.kill();
+                let _ = host.wait();
+                panic!("the host said no port:\n{}", host_said.join().unwrap_or_default());
+            }
+        }
+    };
+    let (guest, guest_said, _) = ride("g@127.0.0.1:0", &format!("host@{at}"), scripts[1]);
+    // A shell that fails takes its peer down with it: the peer would wait for its pads for ever.
+    let mut kids = [host, guest];
+    let readers = [host_said, guest_said];
     let started = std::time::Instant::now();
     let mut ended = [false; 2];
     while !ended.iter().all(|&e| e) {
