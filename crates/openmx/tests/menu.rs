@@ -9240,3 +9240,60 @@ fn reload_mods_waits_on_select_and_play_without_them_asks_once() {
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!((m.screen(), m.reload_asking()), (Some(Screen::Tracks), None), "once per change");
 }
+
+/// P295: past the splash 1P's pad and the keyboard drive the menus as one (P109), and the hints
+/// follow whichever pressed last — the pad's style once its button or stick moves the menus, the
+/// keyboard's caps once a key does, and back — as main.rs reads them, through [`Readers`]; and the
+/// same push the keyboard reports a frame behind the pad (a pad a desktop maps to keys) leaves the
+/// pad's.
+#[test]
+fn a_pad_press_after_a_key_press_switches_the_hints_to_the_pads_style_and_back() {
+    use menu::pads::Style;
+    if menu::pads::forced().is_some() {
+        return;
+    }
+    let xbox = pad("045e:0b12 - usb-5/input0 Microsoft Xbox Series S|X Controller");
+    let (mut m, mut readers) = on_the_splash();
+    let frame = |m: &mut Menu, readers: &mut Readers, keys: Report, pad: Report| {
+        let with = [(Dev::Keys, keys, 0), (xbox.clone(), pad, 0)];
+        let shown = m.clone();
+        let presses = readers.read_hosted(&with, &|d: &Dev| shown.screen() != Some(Screen::Splash) && shown.hosts(d));
+        m.step_devices(&presses);
+        while let Some(more) = readers.more() {
+            m.step_devices(&more);
+        }
+    };
+    let idle = Report::idle();
+    frame(&mut m, &mut readers, idle, idle);
+    frame(&mut m, &mut readers, idle, cross());
+    assert_eq!(m.p1(), Some(&xbox));
+    for _ in 0..CLAIMED_FRAMES + 2 {
+        frame(&mut m, &mut readers, idle, idle);
+    }
+    assert_eq!(m.screen(), Some(Screen::Main));
+    let down = Report::from_buttons(Control::Down.mask());
+    let mut stick = Report::idle();
+    stick.set_axis(3, 0xff);
+    let mut row = m.cursor(Screen::Main);
+    let mut push = |m: &mut Menu, readers: &mut Readers, keys: Report, pad: Report, style: Style, what: &str| {
+        frame(m, readers, keys, pad);
+        // Past the bounce time, so the next push is a press of its own.
+        for _ in 0..30 {
+            frame(m, readers, idle, idle);
+        }
+        assert_eq!(m.buttons().style, style, "{what}");
+        assert_ne!(m.cursor(Screen::Main), row, "{what} moved the menu");
+        row = m.cursor(Screen::Main);
+    };
+    push(&mut m, &mut readers, down, idle, Style::Keys, "a key");
+    push(&mut m, &mut readers, idle, down, Style::Xbox, "the pad's d-pad after a key");
+    push(&mut m, &mut readers, down, idle, Style::Keys, "a key after the pad");
+    push(&mut m, &mut readers, idle, stick, Style::Xbox, "the pad's stick after a key");
+    push(&mut m, &mut readers, down, down, Style::Xbox, "the pad and a key on one frame");
+    // The pad's push, and the keyboard's echo of it a frame behind: one row, still the pad's.
+    frame(&mut m, &mut readers, idle, down);
+    frame(&mut m, &mut readers, down, down);
+    frame(&mut m, &mut readers, down, idle);
+    frame(&mut m, &mut readers, idle, idle);
+    assert_eq!(m.buttons().style, Style::Xbox, "the keyboard's echo of the pad's push");
+}

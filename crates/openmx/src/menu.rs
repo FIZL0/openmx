@@ -2795,7 +2795,7 @@ pub enum Dev {
 /// A [`Reader`] per device, so each one's presses are its own edges: a second pad's held stick is
 /// not the first one's press, and a pad plugged in holding a button does not press it.
 #[derive(Clone, Debug, Default)]
-pub struct Readers(Vec<(Dev, Reader)>, Reader, Vec<(Dev, bool)>);
+pub struct Readers(Vec<(Dev, Reader)>, Reader, Vec<(Dev, bool)>, Option<Dev>);
 
 impl Readers {
     pub fn new() -> Readers {
@@ -2807,6 +2807,7 @@ impl Readers {
         self.0.clear();
         self.1.reset();
         self.2.clear();
+        self.3 = None;
     }
 
     /// This frame's reports, a device each, as presses. A device missing from them is forgotten.
@@ -2823,7 +2824,8 @@ impl Readers {
 
     /// [`Readers::read_taps`], with the devices that drive the menu together — `hosted`, 1P's and
     /// the keyboard past the splash ([`Menu::hosts`]) — read as one ([`Reader::read_joint`], P109):
-    /// the first of them carries their press and the rest none, so one push both report, a frame
+    /// the one whose push it is carries their press (else the one whose last push was, else the
+    /// first: the hints follow it, P295) and the rest none, so one push both report, a frame
     /// apart or in the same one, is one press under [`Menu::step_devices`]. Every device is still
     /// read on its own as well, for the splash, which asks who pressed.
     pub fn read_hosted(&mut self, reports: &[(Dev, Report, u16)], hosted: &dyn Fn(&Dev) -> bool) -> Vec<(Dev, Press)> {
@@ -2882,26 +2884,39 @@ impl Readers {
                 self.1.read_joint(&untimed)
             }
         };
-        let mut first = true;
+        // The hosted device that made the push carries it, not merely the first listed, so the
+        // menu's last device (`Menu::note_dev`) is the pad when the pad pressed (P295). Only a push
+        // moves it: the same push a frame later on the other (a pad a desktop maps to keys, P109) is
+        // no press. A pad pressing on the same frame as the keyboard is the pad, whose push it was.
+        if joint != Press::default() {
+            let pressed = |d: &Dev, p: &Press| hosted(d) && *p != Press::default();
+            let by = presses.iter().find(|(d, p)| matches!(d, Dev::Pad(_)) && pressed(d, p)).or_else(|| presses.iter().find(|(d, p)| pressed(d, p)));
+            if let Some((d, _)) = by {
+                self.3 = Some(d.clone());
+            }
+        }
+        let carrier = match &self.3 {
+            Some(d) if presses.iter().any(|(e, _)| e == d && hosted(e)) => d.clone(),
+            _ => presses.iter().find(|(d, _)| hosted(d)).map(|(d, _)| d.clone()).expect("a hosted device"),
+        };
         for (d, p) in &mut presses {
             if hosted(d) {
-                *p = if first { joint } else { Press::default() };
-                first = false;
+                *p = if *d == carrier { joint } else { Press::default() };
             }
         }
         presses
     }
 
     /// The last frame's next presses past the first (P165, [`Reader::more`]), every device's in the
-    /// order [`Readers::read_at`] gave them, the hosted ones' together on the first of them; `None`
-    /// once there are none left.
+    /// order [`Readers::read_at`] gave them, the hosted ones' together on the one that carried the
+    /// frame's first; `None` once there are none left.
     pub fn more(&mut self) -> Option<Vec<(Dev, Press)>> {
         let mut any = false;
-        let mut first = true;
+        let carrier = self.3.as_ref().filter(|c| self.2.iter().any(|(d, h)| *h && d == *c)).or_else(|| self.2.iter().find(|(_, h)| *h).map(|(d, _)| d)).cloned();
         let mut out = Vec::with_capacity(self.2.len());
         for (dev, hosted) in &self.2 {
             let p = if *hosted {
-                if std::mem::take(&mut first) { self.1.more() } else { None }
+                if carrier.as_ref() == Some(dev) { self.1.more() } else { None }
             } else {
                 self.0.iter_mut().find(|(d, _)| d == dev).and_then(|(_, r)| r.more())
             };
