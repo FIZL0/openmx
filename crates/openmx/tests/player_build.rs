@@ -54,11 +54,11 @@ fn the_page_the_app_and_the_beta_are_native() {
     assert!(ipa.contains("--bin openmx $features"), "tools/ios-ipa.sh drops the features");
 
     // P308: the Android app, native and with `ship` (B492: no dev variables on a phone); build.sh android passes
-    // --exact-sim on
+    // --exact-sim on, and nothing else (P284: it once passed `--features native-sim`, which apk.sh refuses)
     let apk = read("tools/apk.sh");
     assert!(apk.contains("features=\"--features android,ship,native-sim\""), "the Android app is not native, or not ship");
     assert!(apk.contains("--example openmx $features"), "tools/apk.sh drops the features");
-    assert!(read("tools/build.sh").contains("android) tools/apk.sh ${features:---exact-sim} ;;"), "build.sh android drops --exact-sim");
+    assert!(read("tools/build.sh").contains("android) tools/apk.sh $([ -n \"$features\" ] || echo --exact-sim) ;;"), "build.sh android drops --exact-sim");
 
     let pages = read(".github/workflows/pages.yml");
     assert!(pages.contains("cargo build --locked --release -p openmx --bin openmx $(bash tools/build.sh features)"), "the beta's Linux build is not build.sh's");
