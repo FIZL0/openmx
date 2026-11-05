@@ -356,10 +356,31 @@ fn lan_with_tricks(name: &str, mods: &std::path::Path) -> Net {
     Net::start(cfg, Arc::new(files))
 }
 
-/// [`pump`], naming the trick pack in the host's room as `lobby::Network::pump` does (MD19).
-fn pump_tricks(m: &mut Menu, net: &Net, mods: &std::path::Path) -> Vec<Act> {
+/// [`pump`], naming the trick pack in the host's room as `lobby::Network::pump` does (MD19). The host's ticket
+/// (`Event::Code`) is kept in `ticket`, and a join the menu asks for by room code dials that ticket instead, as a
+/// pasted ticket would: the ticket carries the host's addresses, so the join needs no mDNS. On the machine's one
+/// mDNS group every LAN test of every slot answers at once, and under that a guest could miss the host's listing
+/// for `LAN_CODE_WAIT` (K38: 2 of 16 copies run together); finding a room by its code on the LAN is
+/// [`a_host_s_menu_and_a_joiner_s_find_each_other_by_room_code_on_the_lan_and_ride`]'s to prove.
+fn pump_tricks(m: &mut Menu, net: &Net, mods: &std::path::Path, ticket: &mut String) -> Vec<Act> {
     lobby::name_tricks(&mut m.lobby.out, &m.settings, Some(mods));
-    pump(m, net)
+    for c in &mut m.lobby.out {
+        if let Cmd::Join(code, _) = c {
+            assert!(!ticket.is_empty(), "the host's ticket is out before its room code");
+            *code = ticket.clone();
+        }
+    }
+    for c in std::mem::take(&mut m.lobby.out) {
+        if matches!(c, Cmd::Host(_) | Cmd::Join(..) | Cmd::Quick(_)) {
+            net.send(Cmd::Name(m.settings.name.clone()));
+        }
+        net.send(c);
+    }
+    let events = net.poll();
+    if let Some(Event::Code(t)) = events.iter().find(|e| matches!(e, Event::Code(_))) {
+        ticket.clone_from(t);
+    }
+    events.into_iter().map(|e| m.heard(e)).collect()
 }
 
 /// MD19: a host on MX vs. ATV's tricks names its pack in the room; a guest with the same pack's
@@ -374,12 +395,13 @@ fn every_seat_of_an_online_ride_has_the_hosts_trick_pack() {
         h.settings.tricks = menu::Tricks::MxVsAtv;
         to_online(&mut h, &mut hr);
         taps(&mut h, &mut hr, &[Control::Down, Control::Cross]);
-        let both = |h: &mut Menu, g: &mut Menu, what: &str, done: &mut dyn FnMut(&Menu, &Menu, &[Act], &[Act]) -> bool| {
+        let mut ticket = String::new();
+        let mut both = |h: &mut Menu, g: &mut Menu, what: &str, done: &mut dyn FnMut(&Menu, &Menu, &[Act], &[Act]) -> bool| {
             let end = Instant::now() + Duration::from_secs(30);
             let (mut ha, mut ga) = (Vec::new(), Vec::new());
             while Instant::now() < end {
-                ha.extend(pump_tricks(h, &hn, &hm));
-                ga.extend(pump_tricks(g, &gn, &gm));
+                ha.extend(pump_tricks(h, &hn, &hm, &mut ticket));
+                ga.extend(pump_tricks(g, &gn, &gm, &mut ticket));
                 if done(h, g, &ha, &ga) {
                     return;
                 }
