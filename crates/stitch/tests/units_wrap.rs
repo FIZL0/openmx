@@ -97,3 +97,24 @@ fn world_mxu_frees_spec_leaves_no_empty_cell() {
         assert!(j.to.is_some() && j.width < 1500.0, "{}'s side {} is {:.0} ft from {:?}", tiles[j.tile].id, j.side, j.width, j.to);
     }
 }
+
+/// MD99: world_mxu_nat's spec lays its 22 maps out with no empty cell, as MD95 did world_mxu_free's.
+/// plan()'s 5 x 5 grid left three, each a map's width of flat join; on 22 maps of the same size the
+/// unit layout fills an 11 x 2 grid, so every side faces a map across at most a narrow join.
+#[test]
+fn world_mxu_nats_spec_leaves_no_empty_cell() {
+    let spec = stitch::json::Json::parse(include_str!("../worlds/world_mxu_nat.json")).unwrap();
+    let mut p = Params::from_spec(&spec).unwrap();
+    p.threads = 8;
+    let root = scratch("nat");
+    let dirs: Vec<PathBuf> = (0..22).map(|i| tile(&root, &format!("nat{i}"), 128, 100.0 + 3.0 * f64::from(i))).collect();
+    let tiles: Vec<stitch::Tile> = dirs.iter().map(|d| stitch::Tile::load(d).unwrap()).collect();
+    let plan = layout(&tiles, &p).unwrap();
+    let mut cells: Vec<(usize, usize)> = plan.placed.iter().map(|t| t.cell).collect();
+    cells.sort();
+    let full: Vec<(usize, usize)> = (0..11).flat_map(|x| (0..2).map(move |z| (x, z))).collect();
+    assert_eq!(cells, full, "an 11 x 2 grid, every cell a map");
+    for j in plan.join_widths(p.wrap.as_deref()) {
+        assert!(j.to.is_some() && j.width < 1500.0, "{}'s side {} is {:.0} ft from {:?}", tiles[j.tile].id, j.side, j.width, j.to);
+    }
+}

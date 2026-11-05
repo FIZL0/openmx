@@ -355,6 +355,10 @@ fn world_mxu_has_every_freeride_and_national_with_the_freerides_together() {
 }
 
 /// P253: MX Unleashed: every national is the 22 national tracks, ridden from nat01's archives.
+///
+/// MD99: they lie in the unit layout, so no cell of the world is empty. plan()'s 5 x 5 grid left
+/// three, each a map's width of flat join like world_mxu_free's "Cleveland flattened" (MD95); now
+/// every crossing is within MD95's caps.
 #[test]
 fn world_mxu_nat_is_the_22_nationals() {
     let Some((said, json, mods)) = first_ride("world_mxu_nat") else { return };
@@ -365,5 +369,11 @@ fn world_mxu_nat_is_the_22_nationals() {
     assert!(after(&said, "world spawn: ").starts_with("mxu_nat"), "{said}");
     assert!(after(&said, "radar maps: ").starts_with("22: "), "{said}");
     assert!(said.lines().any(|l| l.starts_with("world seams:") && l.contains("no gaps")), "{said}");
+    let crossings = crossings(&said);
+    assert_eq!(crossings.len(), 2 * 22, "{said}");
+    for (a, b, seam, ft) in &crossings {
+        let most = if *seam { 2900.0 } else { 1800.0 };
+        assert!(*ft <= most, "{a} > {b}: {ft} ft of join (at most {most})");
+    }
     let _ = std::fs::remove_dir_all(&mods);
 }
