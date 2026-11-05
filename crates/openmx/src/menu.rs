@@ -551,6 +551,12 @@ pub struct Settings {
     /// MX vs. ATV's Brake Gyro and Gas Gyro options (P226), read on its handling alone: the game's
     /// own default, brake on and gas off, unless changed.
     pub gyro: game_sim::handling::Gyro,
+    /// MX vs. ATV's biplane and Kiowa (MD80e): the machine pack's models flown on SLUS-21104's steps
+    /// in place of MX Unleashed's, offline. Off unless changed.
+    pub fliers: bool,
+    /// Which of MX vs. ATV's four skins of each the first player's fliers wear (0..4, the garage's
+    /// order); the second copy wears the other skin of the same model (`vehicle::mxvatv_skin`).
+    pub flier_skin: usize,
     /// How the plants change from model to picture (V55): always ours, [`Lod::Smooth`]. The
     /// Original switch's Plant Detail (P126) and the presets' original plants were taken out
     /// (2026-10-29: the original's plant LOD fades in bushes that are not there), and an older
@@ -1398,6 +1404,8 @@ impl Default for Settings {
             handling_pack: String::new(),
             handling: game_sim::handling::Handling::default(),
             gyro: game_sim::handling::Gyro::default(),
+            fliers: false,
+            flier_skin: 0,
             plants: Lod::default(),
             foliage: Foliage::default(),
             picture: Picture::default(),
@@ -1610,6 +1618,8 @@ impl Settings {
                 "handling" => s.handling = game_sim::handling::Handling::from_word(v).unwrap_or(s.handling),
                 "brake_gyro" => s.gyro.brake = v != "off",
                 "gas_gyro" => s.gyro.gas = v == "on",
+                "fliers" => s.fliers = v == "mxvatv",
+                "flier_skin" => s.flier_skin = v.parse::<usize>().ok().filter(|n| (1..=4).contains(n)).map_or(s.flier_skin, |n| n - 1),
                 "mods_off" => {
                     s.mods_off = v.split_whitespace().filter(|w| mod_id(w) || mod_id(&format!("{w}_x"))).map(str::to_string).collect();
                 }
@@ -1753,6 +1763,7 @@ impl Settings {
             + &self.mods_text()
             + &self.tricks_text()
             + &self.handling_text()
+            + &self.fliers_text()
             + &self.lobby_seats_text()
             + &self.cameras_text()
             + &cameras::text(&self.camera_sets)
@@ -1958,6 +1969,16 @@ impl Settings {
         }
         if self.gyro.gas != mvatv.gas {
             out += &format!("gas_gyro = {}\n", on_off(self.gyro.gas));
+        }
+        out
+    }
+
+    /// MX vs. ATV's fliers' lines (MD80e), each only off its default, so a file from before them is
+    /// written as it was.
+    fn fliers_text(&self) -> String {
+        let mut out = if self.fliers { "fliers = mxvatv\n".to_string() } else { String::new() };
+        if self.flier_skin != 0 {
+            out += &format!("flier_skin = {}\n", self.flier_skin + 1);
         }
         out
     }
@@ -6531,5 +6552,27 @@ mod tests {
                 assert_eq!(round(y), y.round() as u8, "{y}");
             }
         }
+    }
+
+    #[test]
+    fn the_fliers_setting_is_off_by_default_and_kept() {
+        use super::Settings;
+        // MD80e: off, and a default file says nothing of it, so files from before it stay as they were.
+        let s = Settings::default();
+        assert!(!s.fliers);
+        assert_eq!(s.flier_skin, 0);
+        assert!(!s.text().contains("flier"), "{}", s.text());
+        for skin in 0..4 {
+            let s = Settings { fliers: true, flier_skin: skin, ..Settings::default() };
+            let back = Settings::parse(&s.text());
+            assert!(back.fliers);
+            assert_eq!(back.flier_skin, skin);
+        }
+        // A skin out of 1..=4 or a switch word it does not know reads as the default.
+        let s = Settings::parse("fliers = sideways
+flier_skin = 9
+");
+        assert!(!s.fliers);
+        assert_eq!(s.flier_skin, 0);
     }
 }
