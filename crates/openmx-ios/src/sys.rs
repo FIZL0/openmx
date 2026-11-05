@@ -232,7 +232,8 @@ extern "C" fn on_focus(_: *const Block, note: Id) {
 /// shell's "Tap screen to resume controller"). Observes UIApplicationUserDidTakeScreenshotNotification,
 /// WillResignActive and DidBecomeActive on the main queue, for the life of the process; only the
 /// screenshot one reaches [`focus_notice`], the other two are logged. Low Power Mode and thermal
-/// changes are logged with [`power`] too (P238). Call once.
+/// changes are logged with [`power`] too (P238), and controllers connecting and going (P297). Call
+/// once.
 pub fn watch_focus() {
     let descriptor = Box::leak(Box::new(BlockDescriptor { reserved: 0, size: std::mem::size_of::<Block>() }));
     let block: &'static Block = Box::leak(Box::new(Block {
@@ -252,6 +253,10 @@ pub fn watch_focus() {
             c"UIApplicationDidBecomeActiveNotification",
             c"NSProcessInfoPowerStateDidChangeNotification",
             c"NSProcessInfoThermalStateDidChangeNotification",
+            // P297: iOS drops and lists again the controllers around a trip out of the app; the
+            // pad layer reads `controllers` afresh every frame ([`pads`]), so these are only logged.
+            c"GCControllerDidConnectNotification",
+            c"GCControllerDidDisconnectNotification",
         ] {
             // SAFETY: objc_msgSend cast to `id (id, SEL, const char *)` and to
             // `id (id, SEL, NSString *, id, NSOperationQueue *, block)`, as NSString and
@@ -641,7 +646,8 @@ const AXES: [&[&CStr]; 4] = [
 /// One controller as it is now, in the Gamepad API's standard mapping.
 #[derive(Clone, Debug)]
 pub struct PadState {
-    /// The controller object's address: the same for as long as it stays connected.
+    /// The controller object's address: the same for as long as it stays connected. A pad iOS lists
+    /// again after a trip out of the app can be a new object, so a new address (P297).
     pub id: usize,
     pub name: String,
     pub buttons: [f32; 17],

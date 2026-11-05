@@ -158,9 +158,9 @@ fn no_disc_page(w: usize, h: usize) -> game_render::raster::Frame {
 
 // ---- pads -----------------------------------------------------------------------------------------
 
-/// The GameController pads seen so far, by their controller object: the place each was given, so a
-/// pad keeps its number while it is connected.
-static PLACES: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+/// The GameController pads' places ([`crate::pad::Places`]): a pad keeps its number while it is
+/// connected, and takes it again when iOS lists it anew (P297).
+static PLACES: LazyLock<Mutex<crate::pad::Places>> = LazyLock::new(Default::default);
 
 /// A standard-mapping snapshot of one pad.
 #[derive(Clone, Copy, PartialEq)]
@@ -193,18 +193,11 @@ pub fn touch_seat(in_use: bool, riding: bool) {
 /// whenever no controller is connected, or one joined the touch player mid-ride ([`touch_seat`]). The touch pad is read (its taps let go) only with `read`.
 fn snapshot(read: bool) -> Vec<(u32, Pad)> {
     let pads = openmx_ios::pads();
-    let mut places = PLACES.lock().unwrap_or_else(|e| e.into_inner());
-    places.retain(|id| pads.iter().any(|p| p.id == *id));
+    let listed: Vec<(usize, &str)> = pads.iter().map(|p| (p.id, p.name.as_str())).collect();
+    let at = PLACES.lock().unwrap_or_else(|e| e.into_inner()).place(&listed, TOUCH_INDEX as usize);
     let mut out = Vec::new();
-    for p in &pads {
-        let at = match places.iter().position(|id| *id == p.id) {
-            Some(at) => at,
-            None if places.len() < TOUCH_INDEX as usize => {
-                places.push(p.id);
-                places.len() - 1
-            }
-            None => continue,
-        };
+    for (p, at) in pads.iter().zip(at) {
+        let Some(at) = at else { continue };
         out.push((at as u32, Pad { buttons: p.buttons, axes: p.axes }));
     }
     let mut touch = TOUCH.lock().unwrap_or_else(|e| e.into_inner());
@@ -241,9 +234,7 @@ pub fn pad_name(node: &str) -> String {
     if i == TOUCH_INDEX {
         return TOUCH_NAME.into();
     }
-    let places = PLACES.lock().unwrap_or_else(|e| e.into_inner());
-    let id = places.get(i as usize).copied();
-    drop(places);
+    let id = PLACES.lock().unwrap_or_else(|e| e.into_inner()).id(i as usize);
     openmx_ios::pads().into_iter().find(|p| Some(p.id) == id).map(|p| p.name).unwrap_or_default()
 }
 
@@ -254,8 +245,7 @@ pub fn rumble(node: u32, r: crate::pad::Rumble) {
     let to = if node == TOUCH_INDEX {
         openmx_ios::Haptics::Phone
     } else {
-        let places = PLACES.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(&id) = places.get(node as usize) else { return };
+        let Some(id) = PLACES.lock().unwrap_or_else(|e| e.into_inner()).id(node as usize) else { return };
         openmx_ios::Haptics::Controller(id)
     };
     openmx_ios::rumble(to, r.intensity(), r.seconds);
