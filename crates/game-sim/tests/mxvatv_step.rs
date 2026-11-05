@@ -1666,11 +1666,12 @@ fn wreck_path(s: &WreckState, landed: Option<air::Wreck>, hit: Option<air::Wreck
     }
 }
 
-/// SLUS-21104's wreck test on a driven bike not yet down, the port's [`step::wreck_test`] then
-/// [`step::hit_wreck`]: 10,000 states through the original with its own vtable, the wreck entry
-/// hooked to log the reason and do the record swap its collision call does (the riding record out,
-/// the wreck record, empty, in). The reasons entered, in order, and the throw at `+0x1260` must be the
-/// port's.
+/// SLUS-21104's wreck test on a driven bike not yet down, the port's [`step::wreck_entries`] (its
+/// [`step::wreck_test`] then [`step::hit_wreck`] whatever the first answered): 10,000 states through
+/// the original with its own vtable, the wreck entry hooked to log the reason and set the reason
+/// words. The hook leaves the record where it is, as the original's entry does
+/// ([`an_entry_leaves_the_record_touched`], B35), so a clause and a hit both enter. The reasons
+/// entered, in order, and the throw at `+0x1260` must be the port's.
 #[test]
 fn mxvatv_wreck_test_is_the_originals() {
     let Some(mut ee) = image() else { return };
@@ -1684,8 +1685,6 @@ fn mxvatv_wreck_test_is_the_originals() {
             ee.set_u32(OBJ + 0xc80, reason);
             ee.set_u32(OBJ + 0xc84, 0);
             ee.set_u32(OBJ + 0xc8c, 0);
-            let swap = ee.u32_at(OBJ + 0x1434);
-            ee.set_u32(OBJ + 0xc8, swap);
         }));
     }
     let mut g = Gen(0x0d63_c002);
@@ -1707,18 +1706,19 @@ fn mxvatv_wreck_test_is_the_originals() {
         let impact: Vec<u32> = (0..4).map(|i| ee.u32_at(OBJ + 0x1260 + 4 * i)).collect();
 
         let mut air = s.air.clone();
-        let landed = step::wreck_test(&s.p, &mut air, &s.chassis, &s.step, &s.loads, &s.w, true);
-        let hit = if landed.is_some() {
-            None
-        } else {
-            step::hit_wreck(&s.p, &mut air, s.step.touching, s.small, s.height, &s.loads, &s.contacts)
-        };
+        let (landed, hit) =
+            step::wreck_entries(&s.p, &mut air, &s.chassis, &s.step, &s.loads, &s.w, true, s.small, s.height, &s.contacts);
         let path = wreck_path(&s, landed, hit);
-        let want: Vec<u32> = landed.or(hit).map(|w| w as u32).into_iter().collect();
+        let want: Vec<u32> = landed.into_iter().chain(hit).map(|w| w as u32).collect();
         assert_eq!(got, want, "state {k} ({path}): the reasons\n{s:#?}");
         let port: Vec<u32> = air.wreck_impact.0.iter().map(|v| v.to_bits()).collect();
         assert_eq!(impact, port, "state {k} ({path}): the throw\n{s:#?}");
         *tally.entry(path).or_insert(0u32) += 1;
+        if want.len() == 2 {
+            *tally.entry(if hit == Some(air::Wreck::Joust) { "a clause, then a joust" } else { "a clause, then scenery" })
+                .or_insert(0) += 1;
+        }
+        let want: Vec<u32> = want.last().copied().into_iter().collect();
         // MX Unleashed's test on the same state, its 360 the applied one: how often it answers otherwise.
         let mut mxu = s.air.clone();
         let st = air::Step { spinning: s.w.spin_applied, ..s.step.clone() };
@@ -1742,10 +1742,82 @@ fn mxvatv_wreck_test_is_the_originals() {
         ],
         50,
     );
+    enough(&tally, &["a clause, then a joust", "a clause, then scenery"], 10);
     // What SLUS-21104 changed is in the states: reason 15, the 360's torque, the trick endings' gate
     // and the hits' reach.
     enough(&mxu_differs, &["15 in the air", "15 on the loads", "torqued touch", "mid trick", "touched, rides on"], 50);
     enough(&mxu_differs, &["hit from above", "hit from above, small"], 10);
+}
+
+/// B35: SLUS-21104's whole wreck entry, run unhooked on the Free Ride image's own bike (its record
+/// given a touch and a contact), leaves the record where it was, touching, its contact count kept: it
+/// writes the record's part word (`+0x200`) and nothing else on it. MX Unleashed's entry clears both
+/// (S191a); this is why SLUS-21104's hits still answer after a clause's entry.
+#[test]
+fn an_entry_leaves_the_record_touched() {
+    const BIKE: u32 = 0x00e7_14e0;
+    const GP: u64 = 0x003d_baf0;
+    let Some(mut ee) = image() else { return };
+    ee.hooks.insert(0x0034_8fa0, Box::new(|ee: &mut Ee| ee.set(2, 0)));
+    ee.hooks.insert(0x0034_8ff0, Box::new(|ee: &mut Ee| ee.set(2, 0)));
+    ee.hooks.insert(0x004e_7e70, Box::new(|_: &mut Ee| {}));
+    // Every `addiu $3, $zero, n; syscall; jr $ra`: the answer is a0, the thread id (0x2f) 1.
+    for a in (0x0030_0000..0x0036_0000u32).step_by(4) {
+        if ee.u32_at(a) >> 16 == 0x2403 && ee.u32_at(a + 4) == 0x0000_000c && ee.u32_at(a + 8) == 0x03e0_0008 {
+            let n = ee.u32_at(a) & 0xffff;
+            ee.hooks.insert(a, Box::new(move |ee: &mut Ee| {
+                let v = if n == 0x2f { 1 } else { ee.r(4) };
+                ee.set(2, v);
+            }));
+        }
+    }
+    assert_eq!(ee.u32_at(BIKE + 4), BIKE_VTABLE, "the image's bike");
+    assert_eq!(ee.u32_at(BIKE + 0xc80), 0, "the image's bike is up");
+    let rec = ee.u32_at(BIKE + 0xc8);
+    ee.set_u32(rec + 0x34, 1);
+    ee.set_u32(rec + 0xf0, 1);
+    let before: Vec<u32> = (0..0x300).step_by(4).map(|o| ee.u32_at(rec + o)).collect();
+    ee.set(28, GP);
+    ee.call(WRECK_ENTRY, &[u64::from(BIKE), 4], &[], 50_000_000);
+    assert_eq!(ee.u32_at(BIKE + 0xc80), 4, "the entry ran");
+    assert_eq!(ee.u32_at(BIKE + 0xc8), rec, "the record stays");
+    assert_eq!(ee.u32_at(BIKE + 0xcc), ee.u32_at(BIKE + 0x1434), "the record's part is the wreck one");
+    for (i, w) in before.iter().enumerate() {
+        let o = 4 * i as u32;
+        let want = if o == 0x200 { ee.u32_at(BIKE + 0x1434) } else { *w };
+        assert_eq!(ee.u32_at(rec + o), want, "the record's +{o:#x}");
+    }
+}
+
+/// B35, the typed step on its own: a frame where a clause and a hit both hold enters twice and ends on
+/// the hit, as [`game_sim::handling::wreck::wreck_test`] does. Loads past the back limit (a 4) and a
+/// rider landing on the bike from above end on the joust and its throw; the same loads and scenery
+/// end on the scenery hit, the throw left as it was.
+#[test]
+fn a_clause_then_a_hit_ends_on_the_hit() {
+    let mut p = zero_params();
+    p.front_wreck_speed_limit = F(18.0);
+    p.back_wreck_speed_limit = F(22.0);
+    p.side_wreck_speed_limit = F(19.0);
+    p.racing_down_wreck_speed_limit = F(70.0);
+    p.freestyle_down_wreck_speed_limit = F(70.0);
+    p.no_hander_wreck_speed_limit = F(70.0);
+    p.joust_wreck_height = F(1.0);
+    let loads = air::Loads { fore_aft: F(30.0), pose: 41, pose_wanted: 42, ..Default::default() };
+    let step = air::Step { touching: true, ..Default::default() };
+    let w = step::WreckIn { spin_applied: false, struck_class: false };
+    let (chassis, before) = (Chassis::default(), Vf::new(1.0, 2.0, 3.0, 4.0));
+    let vel = Vf::new(5.0, -6.0, 7.0, 0.0);
+    for (other, hit, throw) in [
+        (air::Other::Rider { height: F(3.0), vel }, air::Wreck::Joust, vel),
+        (air::Other::Scenery, air::Wreck::Scenery, before),
+    ] {
+        let mut a = Air { on_ground: true, wreck_impact: before, ..Default::default() };
+        let contacts = [air::Contact { mirrored: false, reach: F(5.0), other }];
+        let entries = step::wreck_entries(&p, &mut a, &chassis, &step, &loads, &w, true, false, F(0.5), &contacts);
+        assert_eq!(entries, (Some(air::Wreck::Back), Some(hit)));
+        assert_eq!(a.wreck_impact, throw, "{hit:?}'s throw");
+    }
 }
 
 /// Reason 14, the bike with no driver (no AI driving it, `+0x48c`'s `+0xe4`, and no vehicle state of
