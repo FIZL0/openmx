@@ -108,7 +108,7 @@ windows() {
 case $what in
     linux) linux ;;
     windows) windows ;;
-    android) tools/apk.sh ${features:---exact-sim} ;;
+    android) tools/apk.sh $([ -n "$features" ] || echo --exact-sim) ;;  # apk.sh builds native unless told --exact-sim
     all) linux; windows ;;
     *) echo "usage: tools/build.sh [linux|windows|android|all|features] [--exact-sim]" >&2; exit 2 ;;
 esac
