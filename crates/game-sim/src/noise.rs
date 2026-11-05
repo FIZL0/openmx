@@ -16,7 +16,7 @@
 #![deny(clippy::float_arithmetic)]
 
 use crate::rng::Rng;
-use ps2_float::{F, fpu};
+use ps2_float::{Acc, F, fpu};
 
 /// How many knots the tables hold before they repeat.
 pub const KNOTS: usize = 256;
@@ -77,5 +77,20 @@ impl SmoothNoise {
         let u = f * a;
         let v = (f - F::ONE) * b;
         u + ease * (v - u)
+    }
+
+    /// One sample as SLUS-21104 (MX vs. ATV) takes it, the bike's balance's: [`SmoothNoise::at`]'s
+    /// order, but `3 − 2f` and the blend on the accumulator (`adda`/`msub`, then `adda`/`madd` onto
+    /// `u`).
+    pub fn at_accumulated(&self, t: F) -> F {
+        let shifted = F(4096.0) + t;
+        let knot = shifted.to_i32();
+        let f = shifted - F(fpu::from_i32(knot));
+        let i = (knot & 0xff) as usize;
+        let (a, b) = (self.g1[usize::from(self.perm[i])], self.g1[usize::from(self.perm[(i + 1) & 0xff])]);
+        let u = f * a;
+        let ease = Acc::adda(F::ZERO, F(3.0)).msub(F(2.0), f) * (f * f);
+        let v = (f - F::ONE) * b;
+        Acc::adda(F::ZERO, u).madd(ease, v - u)
     }
 }
