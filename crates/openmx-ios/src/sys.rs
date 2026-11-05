@@ -282,6 +282,9 @@ static AWAY: AtomicUsize = AtomicUsize::new(0);
 static ANSWERED: AtomicUsize = AtomicUsize::new(0);
 /// How many times the app has come back (DidBecomeActive) since the last [`take_back`].
 static BACK: AtomicUsize = AtomicUsize::new(0);
+/// How many times the app has entered the background (DidEnterBackground), not just gone inactive:
+/// counted before the going away it asks the shell to answer, so the answer sees it (P298a).
+static BACKGROUNDS: AtomicUsize = AtomicUsize::new(0);
 
 /// How long DidEnterBackground waits on the main thread for the shell to save, of the five seconds
 /// or so iOS gives the app before it is suspended.
@@ -299,6 +302,7 @@ extern "C" fn on_lifecycle(_: *const Block, note: Id) {
                 AWAY.fetch_add(1, Ordering::Relaxed);
             }
             "UIApplicationDidEnterBackgroundNotification" => {
+                BACKGROUNDS.fetch_add(1, Ordering::Relaxed);
                 let asked = AWAY.fetch_add(1, Ordering::Relaxed) + 1;
                 let start = std::time::Instant::now();
                 while ANSWERED.load(Ordering::Relaxed) < asked && start.elapsed() < SAVE_WAIT {
@@ -366,6 +370,13 @@ pub fn away() -> Option<usize> {
 /// The shell has done what going away asks, up to [`away`]'s count `asked`.
 pub fn answered_away(asked: usize) {
     ANSWERED.fetch_max(asked, Ordering::Relaxed);
+}
+
+/// How many times the app has entered the background since it opened (P298a): one more than the
+/// shell last saw means the app is on its way to being suspended, where its memory is jetsam's
+/// first pick. Any thread.
+pub fn backgrounds() -> usize {
+    BACKGROUNDS.load(Ordering::Relaxed)
 }
 
 /// Whether the app has come back to the foreground since the last call. Any thread.
