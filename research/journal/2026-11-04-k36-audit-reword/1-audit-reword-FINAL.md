@@ -1,4 +1,4 @@
-# 1 — audit reword (PART)
+# 1 — audit reword (FINAL)
 
 Task K36. 2026-11-04.
 
