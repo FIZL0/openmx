@@ -497,18 +497,57 @@ unsafe extern "C" {
     fn os_proc_available_memory() -> usize;
 }
 
-/// The memory iOS counts against the app (its phys footprint) and what is left before iOS closes
-/// it (opentennis B538), for the log.
-pub fn memory() -> String {
-    // task_vm_info_data_t as u64s: phys_footprint is the 19th
+/// The memory iOS counts against the app, in bytes (P301): its phys footprint now, the most it has
+/// been (the kernel's ledger, 0 on a kernel too old to keep one), and what is left before iOS
+/// closes the app. None when the kernel will not say.
+#[derive(Clone, Copy, Debug)]
+pub struct Footprint {
+    pub now: u64,
+    pub peak: u64,
+    pub left: u64,
+}
+
+/// [`Footprint`] as it is now.
+pub fn footprint() -> Option<Footprint> {
+    // task_vm_info_data_t as u64s: phys_footprint is the 19th, ledger_phys_footprint_peak the 22nd
     let mut info = [0u64; 48];
     let mut count = (std::mem::size_of_val(&info) / 4) as u32;
     const TASK_VM_INFO: i32 = 22;
-    // SAFETY: `info` holds `count` natural_t's; the kernel writes at most that many
+    // SAFETY: `info` holds `count` natural_t's; the kernel writes at most that many and says how many
     let ok = unsafe { task_info(mach_task_self_, TASK_VM_INFO, info.as_mut_ptr().cast(), &mut count) } == 0;
     // SAFETY: a plain query (iOS 13+)
     let left = unsafe { os_proc_available_memory() } as u64;
-    format!("memory {} MB, {} MB left before iOS closes the app", if ok { info[18] >> 20 } else { 0 }, left >> 20)
+    // `count` natural_t's written: the peak is there only from the struct's third revision on
+    let peak = if count as usize >= 22 * 2 { info[21] } else { 0 };
+    ok.then(|| Footprint { now: info[18], peak: peak.max(info[18]), left })
+}
+
+#[link(name = "Metal", kind = "framework")]
+unsafe extern "C" {
+    fn MTLCreateSystemDefaultDevice() -> Id;
+}
+
+/// The bytes Metal holds for the app's buffers and textures (P301): the system device's
+/// `currentAllocatedSize`, the device wgpu draws with, so the GPU's share of [`Footprint`]. None
+/// without a device.
+pub fn gpu_bytes() -> Option<u64> {
+    static DEVICE: AtomicUsize = AtomicUsize::new(0);
+    let mut device = DEVICE.load(Ordering::Relaxed) as Id;
+    if device.is_null() {
+        // SAFETY: a plain call; the device it returns is retained, and kept for the process
+        device = unsafe { MTLCreateSystemDefaultDevice() };
+        DEVICE.store(device as usize, Ordering::Relaxed);
+    }
+    (!device.is_null()).then(|| int(device, c"currentAllocatedSize") as u64)
+}
+
+/// The memory iOS counts against the app (its phys footprint) and what is left before iOS closes
+/// it (opentennis B538), for the log.
+pub fn memory() -> String {
+    let f = footprint();
+    // SAFETY: a plain query (iOS 13+)
+    let left = f.map_or_else(|| unsafe { os_proc_available_memory() } as u64, |f| f.left);
+    format!("memory {} MB, {} MB left before iOS closes the app", f.map_or(0, |f| f.now >> 20), left >> 20)
 }
 
 /// The device's model identifier (`iPhone16,1`), which the Auto video preset picks by (P223,

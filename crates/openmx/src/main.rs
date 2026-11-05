@@ -1479,14 +1479,34 @@ fn launched() -> Instant {
 }
 
 /// The most memory the shell has held so far and holds now (P283), as Linux counts it
-/// (`/proc/self/status`'s VmHWM and VmRSS): what a Steam Deck's log shows of a world's load.
+/// (`/proc/self/status`'s VmHWM and VmRSS): what a Steam Deck's log shows of a world's load. On an
+/// iPhone (P301) it is the footprint iOS closes the app by, which counts the GPU's memory too, and
+/// what is left of it.
 fn peak_memory() -> String {
+    #[cfg(target_os = "ios")]
+    if let Some(f) = openmx_ios::footprint() {
+        let gpu = openmx_ios::gpu_bytes().map(|b| format!(" ({} MB of it the GPU's)", b >> 20)).unwrap_or_default();
+        return format!("peak {} MB, now {} MB{gpu}, {} MB left before iOS closes the app", f.peak >> 20, f.now >> 20, f.left >> 20);
+    }
     let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
     let kb = |key: &str| status.lines().find_map(|l| l.strip_prefix(key)?.trim().strip_suffix("kB")?.trim().parse::<u64>().ok());
     match (kb("VmHWM:"), kb("VmRSS:")) {
         (Some(peak), Some(now)) => format!("peak {} MB, now {} MB", peak / 1024, now / 1024),
         _ => "not known here".to_string(),
     }
+}
+
+/// The memory held now, for the line a second (P301): an iPhone's footprint, what is left before iOS
+/// closes the app, and the GPU's share. None elsewhere: Linux's figure is a file read, and a ride
+/// reads nothing after its first frame (`one_fps`).
+fn memory_now() -> Option<String> {
+    #[cfg(target_os = "ios")]
+    {
+        let gpu = openmx_ios::gpu_bytes().map(|b| format!(", GPU {} MB", b >> 20)).unwrap_or_default();
+        openmx_ios::footprint().map(|f| format!("{} MB ({} MB left{gpu})", f.now >> 20, f.left >> 20))
+    }
+    #[cfg(not(target_os = "ios"))]
+    None
 }
 
 /// The points a world's pieces are streamed in around (MD17), with each point's copies one width
@@ -10472,7 +10492,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         if window_of_frames.0.elapsed() >= Duration::from_secs(1) {
             let (since, frames, triangles) = window_of_frames;
             println!(
-                "{:>3.0}s {:>4.1} fps, {:>6} triangles a frame, {:>5.1} mph{}{}{}",
+                "{:>3.0}s {:>4.1} fps, {:>6} triangles a frame, {:>5.1} mph{}{}{}{}",
                 clock.elapsed().as_secs_f32(),
                 frames as f32 / since.elapsed().as_secs_f32(),
                 triangles / frames.max(1) as usize,
@@ -10491,6 +10511,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     (true, Phase::Riding) if bike_up => rider_left_out(rider_frames),
                     _ => String::new(),
                 },
+                memory_now().map(|m| format!(", memory {m}")).unwrap_or_default(),
                 match args.players {
                     1 => String::new(),
                     n => format!(", {n} views"),
@@ -12743,6 +12764,11 @@ fn parse_args() -> Result<Option<Args>, String> {
         markers: None,
         where_only: false,
     };
+    // A phone's world is held nearer (P301); `--world-reach` and `--world-fine` still say otherwise.
+    if let Some((reach, fine)) = menu::video::world_reach(&menu::video::Device::here()) {
+        args.world_reach = Some(reach);
+        args.world_fine = Some(fine);
+    }
     let mut argv = argv().into_iter();
     while let Some(a) = argv.next() {
         let mut next = |what: &str| argv.next().ok_or(format!("{a} wants {what}"));
