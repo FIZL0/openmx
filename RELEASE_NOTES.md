@@ -1,17 +1,1 @@
 <!-- What's new since the last release, for players, in plain English: one "- " line per change. tools/release.sh puts this in the release and empties it. -->
-- **New machines: MX vs. ATV Unleashed's biplane and Kiowa.** Turn them on in Settings → Ride: set **Fliers** to *MX vs. ATV* and pick one of the four looks under **Flier Skin** (skins 1–2 are the familiar shape, 3–4 a second model with its own handling). The garage and the pause menu's Switch To Machine then give you that game's own planes and helicopters, flown with its own physics. They need your own copy of *MX vs. ATV Unleashed* (PS2): build the fliers pack from it with [openmx-mods](https://github.com/FIZL0/openmx-mods)' `import-atv fliers` and put it in the game's `mods/machines/` folder (with Read the Mods Folder on). Off by default, and offline only: online rides and rooms still fly MX Unleashed's
-- **Android**: openMX now comes as an Android app (Android 8+, `openmx-android.apk`). Install it, pick your ISO on first start, and play with touch controls or a controller; the game offers its own updates
-- On phones and in the browser with the touch controls, the speedometer and preload meter now sit at the top right, out of your thumbs' way
-- Phones hold the big combined worlds with far less memory, and on the iPhone a world that was loading while you switched apps now finishes its ground when you come back instead of leaving holes
-- MX World's first ride builds about nine times faster (about 20 seconds instead of 3 minutes)
-- The combined Free Ride and Nationals worlds no longer have flat empty patches between maps, and a wrapped world's seam is as narrow as the joins between its maps
-- On the iPhone: the game plays with the ring/silent switch on and alongside other apps' music, its sound comes back after a call or a trip to the home screen, it no longer burns battery while in the background, and a controller keeps its seat after you switch apps
-- Trick packs' extra tricks now go on the simplest buttons first (Cross, Square, then with R1)
-- Delete Preset on Game Modifiers and Cameras now asks before deleting
-- Joining a LAN room by its code no longer sometimes misses the host
-- Uploading a big mod to the mod store no longer reads the whole file into memory first
-- On the Controllers screen you can now drag a controller's card with the mouse onto another seat to move it there, or swap it with the controller already on it.
-- On the iPhone, the menu and ride hints now show PlayStation buttons (✕ ○ □ △) while you play on the on-screen touch controls, as the browser's already did
-- Mod store downloads and uploads now show in a bar at the top of every menu screen, and when they finish you are asked to reload the new mods (now, later with Select on Reload Mods, or when you press Play)
-- With a controller plugged in on desktop, in the browser or on the iPhone, the menu hints now show that controller's buttons once you use it, instead of the keyboard's keys
-- On the iPhone, a swipe up from the bottom of the screen during a ride or in the menus no longer leaves the game straight away: the first swipe only brings up the home bar, and a second one leaves
