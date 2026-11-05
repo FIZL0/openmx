@@ -232,7 +232,7 @@ pub fn set(m: &mut impl Ram, n: u32, p: Quad) {
 }
 
 /// The own position row's `xyz` the point's, then [`moved`].
-fn set_position(m: &mut impl Ram, n: u32, p: Quad) {
+pub(crate) fn set_position(m: &mut impl Ram, n: u32, p: Quad) {
     for (k, &x) in p.iter().take(3).enumerate() {
         m.set(n + POSITION + 4 * k as u32, x);
     }

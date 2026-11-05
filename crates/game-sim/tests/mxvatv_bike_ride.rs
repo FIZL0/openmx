@@ -4864,7 +4864,9 @@ fn calls_normal(c: &[wreck::Out]) -> bool {
 
 // --- F39: the vehicle update's callees -----------------------------------------------------------------
 
-use game_sim::handling::node;
+use game_sim::air::AcosTable;
+use game_sim::handling::{anim, node};
+use game_sim::toys::Turns;
 use game_sim::handling::update::{self, Updates};
 
 /// The vehicle update's callees in SLUS-21104 (research/oracle.txt `# F39`): the bike's slots (the
@@ -4881,6 +4883,13 @@ const ANIM_STOP: u32 = 0x0013_e650;
 const ANIM_PLAY: u32 = 0x0013_eec0;
 const ANIM_BLEND: u32 = 0x0013_f5e0;
 const ANIM_BLEND4: u32 = 0x0014_0720;
+/// F43a's: the two channel kinds' samplers (a rotation's, a position's: the vtable's `+0x10` and
+/// `+0x14`), and the heap the stop makes its two saved-pose buffers from (with the source file's name
+/// and the two lines it passes).
+const ANIM_TURNS: u32 = 0x0012_c550;
+const ANIM_MOVES: u32 = 0x0012_db50;
+const HEAP_ALLOC: u32 = 0x001b_7340;
+const HEAP_FILE: u32 = 0x0039_7180;
 const NODE_SPIN: u32 = 0x0019_5210;
 const NODE_AIM: u32 = 0x0019_41b0;
 const NODE_AXES: u32 = 0x0019_4960;
@@ -4973,6 +4982,28 @@ impl Updates for UpdateInRam<'_> {
             }
             _ => {}
         }
+        // F43a's animation controller, the port's.
+        match c {
+            Out::AnimStop(ctrl) => {
+                anim::stop(&mut NodeRam(self.ee), ctrl);
+                return 0;
+            }
+            Out::AnimPlay { clip, .. } => kinds(self.ee, &[clip]),
+            Out::AnimBlend { clips, .. } => kinds(self.ee, &clips),
+            _ => {}
+        }
+        let t = anim::Tables { turns: Turns::get(), acos: acos() };
+        match c {
+            Out::AnimPlay { ctrl, clip, weight, fade } => {
+                anim::play(&mut NodeRam(self.ee), &t, ctrl, clip, F::from_bits(weight), F::from_bits(fade));
+                return 0;
+            }
+            Out::AnimBlend { ctrl, clips, weight, mix, fade } => {
+                anim::blend(&mut NodeRam(self.ee), &t, ctrl, clips, F::from_bits(weight), F::from_bits(mix), F::from_bits(fade));
+                return 0;
+            }
+            _ => {}
+        }
         // F43's scene-node calls, the port's.
         let pose = match c {
             Out::Pose { buf, .. } | Out::Place { buf, .. } => self.ee.scratch(U_POSES + buf),
@@ -5047,15 +5078,7 @@ impl Updates for UpdateInRam<'_> {
             Out::Suspension(w) => (SUSPENSION, vec![u(w)], vec![x]),
             Out::TireForces(w) => (TIRE_FORCES, vec![u(w)], vec![x]),
             Out::NetPost => (NET_POST, vec![bike], vec![x]),
-            Out::AnimStop(ctrl) => (ANIM_STOP, vec![u(ctrl), 0, 0, 0, 0], vec![x]),
-            Out::AnimPlay { ctrl, clip, weight, fade } => {
-                (ANIM_PLAY, vec![u(ctrl), u(clip), 0, 0, 0, 0, 0, 0], vec![f32::from_bits(weight), f32::from_bits(fade), 0.0])
-            }
-            Out::AnimBlend { ctrl, clips, weight, mix, fade } => (
-                ANIM_BLEND,
-                vec![u(ctrl), u(clips[0]), u(clips[1]), 0, 0, 0, 0, 0],
-                vec![f32::from_bits(weight), f32::from_bits(mix), f32::from_bits(fade)],
-            ),
+            Out::AnimStop(_) | Out::AnimPlay { .. } | Out::AnimBlend { .. } => unreachable!("served by the port"),
             Out::NodeSet { .. } | Out::Spin { .. } | Out::Aim { .. } | Out::Pose { .. } | Out::Place { .. } | Out::Frame { .. } | Out::Position { .. } | Out::Axes { .. } => {
                 unreachable!("served by the port")
             }
@@ -5107,6 +5130,37 @@ impl node::Ram for NodeRam<'_> {
     fn set(&mut self, at: u32, w: u32) {
         self.0.set_u32(at, w);
     }
+}
+
+impl anim::Anim for NodeRam<'_> {
+    fn alloc(&mut self, bytes: u32, buffer: anim::Saved) -> u32 {
+        let line = match buffer {
+            anim::Saved::Rotations => 0x52a,
+            anim::Saved::Positions => 0x52d,
+        };
+        self.0.set(28, GP);
+        census(self.0, |ee| ee.call(HEAP_ALLOC, &[u64::from(bytes), u64::from(HEAP_FILE), line], &[], BUDGET));
+        self.0.r(2) as u32
+    }
+}
+
+/// Every channel of the clips one of the two kinds the port samples.
+fn kinds(ee: &Ee, clips: &[u32]) {
+    for &clip in clips {
+        let data = ee.u32_at(clip + 4);
+        for (list, count, slot, f) in [(0x1c, 0x28, 0x10, ANIM_TURNS), (0x18, 0x24, 0x14, ANIM_MOVES)] {
+            for k in 0..ee.u32_at(data + count) {
+                let ch = ee.u32_at(ee.u32_at(data + list) + 4 * k);
+                assert_eq!(ee.u32_at(ee.u32_at(ch + 0x10) + slot), f, "clip {clip:#x}'s channel {ch:#x}");
+            }
+        }
+    }
+}
+
+/// The arc cosine table the slerps read, built ([`AcosTable::build`] is the image's).
+fn acos() -> &'static AcosTable {
+    static A: std::sync::OnceLock<AcosTable> = std::sync::OnceLock::new();
+    A.get_or_init(AcosTable::build)
 }
 
 /// The sine table the spin reads, built ([`CurveTable::build`] is the image's, S104).
@@ -8546,14 +8600,11 @@ fn the_flips_tail_callees_leave_the_physics_alone() {
 }
 
 /// The callees ride-2 leaves in the interpreter, by label ([`label`]).
-const RIDE_CALLEES: [&str; 14] = [
+const RIDE_CALLEES: [&str; 11] = [
     "tail Message",
     "tail Paused",
     "tail Rumble",
     "tail RumbleReady",
-    "update AnimBlend",
-    "update AnimPlay",
-    "update AnimStop",
     "update Moved",
     "update NetDelta",
     "update NetFull",
@@ -8563,14 +8614,11 @@ const RIDE_CALLEES: [&str; 14] = [
     "wreck OutOfBounds",
 ];
 /// The callees flip-1 leaves in the interpreter: ride-2's, the trick's, the wreck's and the put-back's.
-const FLIP_CALLEES: [&str; 32] = [
+const FLIP_CALLEES: [&str; 29] = [
     "tail Message",
     "tail Paused",
     "tail Rumble",
     "tail RumbleReady",
-    "update AnimBlend",
-    "update AnimPlay",
-    "update AnimStop",
     "update KindClear",
     "update Mark",
     "update Moved",
@@ -9501,5 +9549,340 @@ fn the_spins_sine_and_cosine_are_the_originals() {
         ee.call(SIN_COS, &[u64::from(s), u64::from(c)], &[angle], BUDGET);
         let (sin, cos) = node::sin_cos(F(angle), curve());
         assert_eq!([ee.u32_at(s), ee.u32_at(c)], [sin.to_bits(), cos.to_bits()], "angle {angle} ({:#010x})", angle.to_bits());
+    }
+}
+
+// --- F43a: the rider's animation controller the bike's update calls, ported ----------------------
+
+/// Where the image keeps the turn table the rotation keys are read through (4352 entries of two
+/// words), and the arc cosine table's pointer and scale.
+const TURNS_AT: u32 = 0x003d_3de0;
+const ACOS_AT: u32 = 0x003e_a9c0;
+const ACOS_SCALE_AT: u32 = 0x003e_a9d8;
+
+/// **F43a — the key tables are the image's**: the turn table ([`Turns`], wide then narrow) and the arc
+/// cosine table ([`AcosTable`]) the slerps read, word for word the ones the image built at startup.
+#[test]
+fn the_anim_key_tables_are_the_images() {
+    let Some(ee) = image() else { return };
+    let turns = Turns::get();
+    for (i, e) in turns.wide.iter().chain(&turns.narrow).enumerate() {
+        let at = TURNS_AT + 8 * i as u32;
+        assert_eq!([ee.u32_at(at), ee.u32_at(at + 4)], e.map(F::to_bits), "turn {i}");
+    }
+    assert_eq!(turns.wide.len() + turns.narrow.len(), 4352);
+    let table = ee.u32_at(ACOS_AT);
+    for (i, e) in acos().entries().iter().enumerate() {
+        assert_eq!(ee.u32_at(table + 4 * i as u32), e.to_bits(), "arc cosine {i}");
+    }
+    assert_eq!(ee.f32_at(ACOS_SCALE_AT), 14999.5);
+}
+
+/// Where the oracle lays its controller, bones, clips, channels and keys: past the node forest, clear
+/// of the image's data and of the stack (the writes check holds it).
+const ANIM: u32 = 0x01e0_8000;
+const ANIM_END: u32 = ANIM + 0x4400;
+const A_BONES: u32 = ANIM + 0x300;
+const A_SAVED: [u32; 2] = [ANIM + 0x500, ANIM + 0x580];
+const A_MASK: u32 = ANIM + 0x600;
+const A_VT: u32 = ANIM + 0x620;
+const A_OUT: u32 = ANIM + 0x680;
+const A_CLIPS: [u32; 2] = [ANIM + 0x700, ANIM + 0x708];
+const A_CHANNELS: u32 = ANIM + 0x1000;
+const A_KEYS: u32 = ANIM + 0x2000;
+/// The two buffers the oracle's heap hands a stop that has none (the heap itself waits on a semaphore
+/// the interpreter has not got).
+const A_HEAP: [u32; 2] = [ANIM_END, ANIM_END + 0x100];
+
+/// The calls, in the update's shapes, and the two channel samplers on their own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AnimCall {
+    Stop,
+    Play,
+    Blend,
+    Rotation,
+    Position,
+}
+
+/// The oracle's controller RAM: the interpreter's, with the saved buffers the original made handed
+/// back to the port.
+struct GivenRam<'a>(&'a mut Ee, [u32; 2]);
+
+impl node::Ram for GivenRam<'_> {
+    fn word(&mut self, at: u32) -> u32 {
+        self.0.u32_at(at)
+    }
+    fn set(&mut self, at: u32, w: u32) {
+        self.0.set_u32(at, w);
+    }
+}
+
+impl anim::Anim for GivenRam<'_> {
+    fn alloc(&mut self, _bytes: u32, buffer: anim::Saved) -> u32 {
+        self.1[(buffer == anim::Saved::Positions) as usize]
+    }
+}
+
+/// A rotation key's quaternion words: mostly a unit axis's (so slerps mostly take the arc), now and
+/// then any halves; the turn always in the table.
+fn rotation_key(r: &mut impl FnMut() -> u64) -> [u32; 2] {
+    let x = r();
+    let turn = (x % 4352) as u32;
+    let axis: [i32; 3] = if x % 4 == 0 {
+        [r() as i16, r() as i16, r() as i16].map(i32::from)
+    } else {
+        let v = [0, 1, 2].map(|_| (r() >> 40) as f32 / (1u64 << 24) as f32 * 2.0 - 1.0);
+        let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-3);
+        v.map(|c| (c / l * 32767.0) as i32)
+    };
+    [turn | (axis[0] as u32) << 16, axis[1] as u32 & 0xffff | (axis[2] as u32) << 16]
+}
+
+/// One random controller laid into RAM: every word random first, then the bones (on the forest's
+/// nodes), the saved buffers (or none), the fade list (or none), two clips of up to four rotation and
+/// three position channels, each on or off with -1 (a rotation's only) to 20 keys at rising times (now and then two the
+/// same) and a cursor from -1 to the last key (the game stores 1 to the last; past it the original
+/// reads a key off the end).
+fn lay_controller(ee: &mut Ee, seed: u64) -> (u32, u32) {
+    let mut k = 0u64;
+    let mut r = || {
+        k += 1;
+        mix(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ k ^ 0xa43a)
+    };
+    for o in (ANIM..ANIM_END).step_by(4) {
+        let x = r();
+        ee.set_u32(o, if x % 3 == 0 { x as u32 } else { node_float(x) });
+    }
+    let ctrl = ANIM;
+    let bones = (r() % 7) as u32;
+    ee.set_u32(ctrl + 0x1f8, bones);
+    ee.set_u32(ctrl + 0x1fc, A_BONES);
+    for b in 0..6 {
+        ee.set_u32(A_BONES + 0x40 * b, FOREST + (r() % u64::from(FOREST_NODES)) as u32 * NODE_SIZE);
+    }
+    for (i, at) in [0x208, 0x20c].into_iter().enumerate() {
+        ee.set_u32(ctrl + at, if r() % 6 == 0 { 0 } else { A_SAVED[i] });
+    }
+    for b in 0..6 {
+        if r() % 4 != 0 {
+            // A unit quaternion, as a stop leaves.
+            let v = [0, 1, 2, 3].map(|_| (r() >> 40) as f32 / (1u64 << 24) as f32 * 2.0 - 1.0);
+            let l = v.iter().map(|c| c * c).sum::<f32>().sqrt().max(1e-3);
+            for (c, x) in v.iter().enumerate() {
+                ee.set_f32(A_SAVED[0] + 16 * b + 4 * c as u32, x / l);
+            }
+        }
+    }
+    ee.set_u32(ctrl + 0x210, if r() % 2 == 0 { 0 } else { A_MASK });
+    for b in 0..6 {
+        ee.set_u32(A_MASK + 4 * b, if r() % 2 == 0 { 0 } else { r() as u32 | 1 });
+    }
+    ee.set_u32(A_VT + 0x10, ANIM_TURNS);
+    ee.set_u32(A_VT + 0x14, ANIM_MOVES);
+    let length = match r() % 6 {
+        0 => 1.0,
+        1 => 0.0,
+        _ => 0.25 + (r() >> 40) as f32 / (1u64 << 24) as f32 * 2.0,
+    };
+    let mut ch = A_CHANNELS;
+    let mut keys = A_KEYS;
+    for c in 0..2u32 {
+        let clip = A_CLIPS[c as usize];
+        let map = ANIM + 0x800 + 0x100 * c;
+        let data = ANIM + 0xa00 + 0x100 * c;
+        let lists = [ANIM + 0xc00 + 0x40 * c, ANIM + 0xc20 + 0x40 * c];
+        ee.set_u32(clip, map);
+        ee.set_u32(clip + 4, data);
+        for i in 0..0x10 {
+            let b = if r() % 5 == 0 { 0xff } else { (r() % 6) as u32 };
+            let w = ee.u32_at(map + (i & !3));
+            ee.set_u32(map + (i & !3), w & !(0xff << (8 * (i & 3))) | b << (8 * (i & 3)));
+        }
+        ee.set_u32(data + 0x1c, lists[0]);
+        ee.set_u32(data + 0x18, lists[1]);
+        ee.set_u32(data + 0x28, (r() % 5) as u32);
+        ee.set_u32(data + 0x24, (r() % 4) as u32);
+        ee.set_f32(data + 0x44, if c == 0 || r() % 2 == 0 { length } else { length * 0.5 });
+        for (kind, list, count) in [(0u32, lists[0], 4u32), (1, lists[1], 3)] {
+            for j in 0..count {
+                ee.set_u32(list + 4 * j, ch);
+                // A position channel's search never ends on a count below zero: the original's too.
+                let n: i32 = match r() % 12 {
+                    0 if kind == 0 => -1,
+                    0 => 0,
+                    1 => 0,
+                    2 => 1,
+                    3 => 2,
+                    4 => 3 + (r() % 18) as i32,
+                    _ => 3 + (r() % 6) as i32,
+                };
+                ee.set_u32(ch, (r() % 0x10) as u32);
+                ee.set_u32(ch + 4, if r() % 6 == 0 { 0 } else { r() as u32 | 1 });
+                ee.set_u32(ch + 8, n as u32);
+                ee.set_u32(ch + 0x10, A_VT);
+                ee.set_u32(ch + 0x14, keys + 0x10);
+                ee.set_u32(ch + 0x18, ((r() % (n.max(0) as u64 + 1)) as u32).wrapping_sub(1));
+                let size = if kind == 0 { 12 } else { 16 };
+                let mut t = length * ((r() >> 40) as f32 / (1u64 << 24) as f32 * 0.6 - 0.3);
+                for i in 0..n.max(0) as u32 {
+                    let at = keys + 0x10 + size * i;
+                    ee.set_f32(at, t);
+                    if kind == 0 {
+                        let q = rotation_key(&mut r);
+                        ee.set_u32(at + 4, q[0]);
+                        ee.set_u32(at + 8, q[1]);
+                    }
+                    if r() % 16 != 0 {
+                        t += length * (r() >> 40) as f32 / (1u64 << 24) as f32 * 0.3;
+                    }
+                }
+                ch += 0x20;
+                keys += 0x180;
+            }
+        }
+    }
+    let x = r();
+    let flags = ee.u32_at(ctrl + 0x2c);
+    ee.set_u32(ctrl + 0x2c, flags & !0xffff | (x as u32 & 0xffff));
+    (ctrl, (r() % 7) as u32)
+}
+
+/// A weight, mix or fade: mostly in 0..1, sometimes past either end, sometimes exactly 0 or 1.
+fn anim_float(x: u64) -> f32 {
+    match x % 10 {
+        0 => 0.0,
+        1 => 1.0,
+        2 => -((x >> 40) as f32 / (1u64 << 24) as f32) * 0.3,
+        3 => 1.0 + (x >> 40) as f32 / (1u64 << 24) as f32 * 0.3,
+        _ => (x >> 40) as f32 / (1u64 << 24) as f32,
+    }
+}
+
+/// **F43a — the anim controller's calls are the original's**: 10 000 random controllers
+/// ([`lay_controller`]: bones on a random node forest, two clips, their channels and keys), each with
+/// a stop, a play, a blend or one channel sampled — the original in the interpreter (its stack zeroed
+/// first), then the port on the same RAM; every word of the controller, its clips and the forest the
+/// same, the saved buffers the original made as well (from a heap that hands out two fixed ones), and
+/// the original writes nothing else outside its stack.
+#[test]
+fn the_anim_controller_calls_are_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let mut tally: BTreeMap<String, u32> = BTreeMap::new();
+    let mut t = |s: String| *tally.entry(s).or_default() += 1;
+    let snap = |ee: &Ee| -> Vec<u32> { (FOREST..FOREST_END).chain(ANIM..ANIM_END).step_by(4).map(|o| ee.u32_at(o)).collect() };
+    let stack = ee.stack;
+    let tables = anim::Tables { turns: Turns::get(), acos: acos() };
+    ee.hooks.insert(
+        HEAP_ALLOC,
+        Box::new(|ee: &mut Ee| {
+            assert_eq!(ee.r(5) as u32, HEAP_FILE);
+            assert_eq!(ee.r(4) as u32, ee.u32_at(ANIM + 0x1f8) << 4);
+            let line = ee.r(6);
+            assert!(line == 0x52a || line == 0x52d, "line {line:#x}");
+            ee.set(2, u64::from(A_HEAP[(line == 0x52d) as usize]));
+        }),
+    );
+    let calls = [AnimCall::Stop, AnimCall::Play, AnimCall::Play, AnimCall::Blend, AnimCall::Blend, AnimCall::Rotation, AnimCall::Position];
+    for k in 0..10_000u64 {
+        lay_forest(&mut ee, k ^ 0xa43);
+        let (ctrl, pick) = lay_controller(&mut ee, k);
+        let x = mix(k ^ 0x00f4_3a00);
+        let c = calls[(x % 7) as usize];
+        let (weight, mix_, fade) = (anim_float(mix(x ^ 1)), anim_float(mix(x ^ 2)), if mix(x ^ 3) % 4 == 0 { 0.0 } else { anim_float(mix(x ^ 4)) });
+        let ch = A_CHANNELS + 0x20 * (if c == AnimCall::Position { 4 + pick % 3 } else { pick % 4 } + 7 * (pick & 1));
+        let time = {
+            let data = ee.u32_at(A_CLIPS[0] + 4);
+            ee.f32_at(data + 0x44) * (anim_float(mix(x ^ 5)) * 1.4 - 0.2)
+        };
+        // The path, by what the call is handed.
+        let flags = ee.u32_at(ctrl + 0x2c);
+        let mut path = format!("{c:?}");
+        match c {
+            AnimCall::Stop => {
+                if ee.u32_at(ctrl + 0x208) == 0 || ee.u32_at(ctrl + 0x20c) == 0 {
+                    path += " made buffers";
+                }
+            }
+            AnimCall::Play | AnimCall::Blend => {
+                path += if fade > 0.0 { " faded" } else { " not faded" };
+                t(format!("{c:?}{}", if flags & 0x10 != 0 && ee.u32_at(ctrl + 0x210) != 0 { " a fade list" } else { " no fade list" }));
+                t(format!("{c:?} nodes {}", (flags >> 12) & 3));
+            }
+            AnimCall::Rotation | AnimCall::Position => {
+                let n = ee.u32_at(ch + 8) as i32;
+                let keys = ee.u32_at(ch + 0x14);
+                let size = if c == AnimCall::Rotation { 12 } else { 16 };
+                path += if ee.u32_at(ch + 4) == 0 { " off" } else { " on" };
+                path += &match n {
+                    ..=0 => " no keys".to_string(),
+                    1 | 2 => format!(" {n} keys"),
+                    _ if time < ee.f32_at(keys) => " before the first".to_string(),
+                    _ if time > ee.f32_at(keys + size * (n as u32 - 1)) => " past the last".to_string(),
+                    _ => " inside".to_string(),
+                };
+            }
+        }
+        t(path.clone());
+        for o in (stack - 0x2000..stack).step_by(4) {
+            ee.set_u32(o, 0);
+        }
+        let before = snap(&ee);
+        let u = u64::from;
+        let (f, ints, floats): (u32, Vec<u64>, Vec<f32>) = match c {
+            AnimCall::Stop => (ANIM_STOP, vec![u(ctrl), 0, 0, 0, 0], vec![]),
+            AnimCall::Play => (ANIM_PLAY, vec![u(ctrl), u(A_CLIPS[0]), 0, 0, 0, 0, 0, 0], vec![weight, fade, 0.0]),
+            AnimCall::Blend => (ANIM_BLEND, vec![u(ctrl), u(A_CLIPS[0]), u(A_CLIPS[1]), 0, 0, 0, 0, 0], vec![weight, mix_, fade]),
+            AnimCall::Rotation => (ANIM_TURNS, vec![u(ch), u(A_OUT)], vec![time]),
+            AnimCall::Position => (ANIM_MOVES, vec![u(ch), u(A_OUT)], vec![time]),
+        };
+        ee.set(28, GP);
+        ee.call(f, &ints, &floats, BUDGET);
+        let given = [ee.u32_at(ctrl + 0x208), ee.u32_at(ctrl + 0x20c)];
+        let made = path.ends_with("made buffers");
+        let off: Vec<u32> = ee.written.iter().copied().filter(|&w| !(FOREST..FOREST_END).contains(&w) && !(ANIM..A_HEAP[1] + 0x100).contains(&w) && !(stack - 0x1_0000..stack + 0x4000).contains(&w)).collect();
+        assert!(off.is_empty(), "case {k} ({path}): the original wrote outside the controller: {:#x?}", &off[..off.len().min(8)]);
+        let buffers = |ee: &Ee| -> Vec<u32> {
+            let n = if made { ee.u32_at(ctrl + 0x1f8) } else { 0 };
+            given.iter().flat_map(|&b| (0..4 * n).map(move |j| b + 4 * j)).map(|a| ee.u32_at(a)).collect()
+        };
+        let (want, want_buf) = (snap(&ee), buffers(&ee));
+        for (o, w) in (FOREST..FOREST_END).chain(ANIM..ANIM_END).step_by(4).zip(&before) {
+            ee.set_u32(o, *w);
+        }
+        let m = &mut GivenRam(&mut ee, given);
+        match c {
+            AnimCall::Stop => anim::stop(m, ctrl),
+            AnimCall::Play => anim::play(m, &tables, ctrl, A_CLIPS[0], F(weight), F(fade)),
+            AnimCall::Blend => anim::blend(m, &tables, ctrl, A_CLIPS, F(weight), F(mix_), F(fade)),
+            AnimCall::Rotation => {
+                if let Some(q) = anim::rotation(m, &tables, ch, F(time)) {
+                    for (j, w) in q.into_iter().enumerate() {
+                        m.0.set_u32(A_OUT + 4 * j as u32, w);
+                    }
+                }
+            }
+            AnimCall::Position => {
+                let mut q = [0, 4, 8, 12].map(|j| m.0.u32_at(A_OUT + j));
+                anim::position(m, ch, F(time), &mut q);
+                for (j, w) in q.into_iter().enumerate() {
+                    m.0.set_u32(A_OUT + 4 * j as u32, w);
+                }
+            }
+        }
+        let (got, got_buf) = (snap(&ee), buffers(&ee));
+        let names = |j: usize| if j < ((FOREST_END - FOREST) / 4) as usize { format!("forest +{:#x}", 4 * j) } else { format!("controller +{:#x}", 4 * j - (FOREST_END - FOREST) as usize) };
+        let diff: Vec<String> = (0..want.len()).filter(|&j| want[j] != got[j]).map(|j| format!("{}: original {:#010x}, port {:#010x}", names(j), want[j], got[j])).take(12).collect();
+        assert!(diff.is_empty(), "case {k} ({path}, weight {weight}, mix {mix_}, fade {fade}, time {time}): {}", diff.join("\n  "));
+        assert_eq!(want_buf, got_buf, "case {k} ({path}): the saved buffers");
+    }
+    eprintln!("{tally:#?}");
+    let want = [
+        "Stop", "Stop made buffers", "Play faded", "Play not faded", "Play a fade list", "Play no fade list", "Play nodes 0", "Play nodes 1", "Play nodes 2", "Play nodes 3",
+        "Blend faded", "Blend not faded", "Blend a fade list", "Blend no fade list", "Blend nodes 0", "Blend nodes 3",
+        "Rotation off no keys", "Rotation on no keys", "Rotation on 1 keys", "Rotation on 2 keys", "Rotation on before the first", "Rotation on past the last", "Rotation on inside",
+        "Position off inside", "Position on no keys", "Position on 1 keys", "Position on 2 keys", "Position on before the first", "Position on past the last", "Position on inside",
+    ];
+    for p in want {
+        assert!(tally.get(p).is_some_and(|&n| n >= 20), "{p}: {tally:#?}");
     }
 }

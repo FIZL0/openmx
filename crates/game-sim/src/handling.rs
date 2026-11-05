@@ -24,6 +24,7 @@ use crate::air::{Air, Chassis, Step};
 use ps2_float::vu::Dest;
 use ps2_float::{F, Vf, fpu};
 
+pub mod anim;
 pub mod bike;
 pub mod ground;
 pub mod mass;
