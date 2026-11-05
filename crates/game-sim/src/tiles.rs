@@ -17,9 +17,17 @@
 //! the point is at or past it on both axes, and below 2²⁴ feet a whole number is a multiple of the
 //! point's own last bit, so the difference is a multiple of that bit no larger than the point —
 //! which a float holds exactly, and which the EE's truncating subtract therefore gives exactly.
-//! [`Tiled::new`] refuses a world whose offsets are not whole, negative or past 2²⁴ feet.
+//! [`Tiled::new`] refuses a world whose offsets are not whole or past 2²⁴ feet either way.
 //! `tests/tiles.rs` checks the move against exact arithmetic and every tile's ground against the
 //! tile alone, bit for bit.
+//!
+//! **A negative offset** (MD61) is let stand where the tile's kept cells start at or past 0: a tile
+//! cut deep at its ridge (Dallas, 792 ft in) can then have its kept edge by a wrapped world's near
+//! seam, the cut ridge out past it, and its wrap join is as narrow as a stitched one. The move is then
+//! `world + |at|`, which can need more bits than the world point has, and the EE's truncating add
+//! drops them: the tile is asked a point at most its own last bit short of the world point (`1/8192`
+//! ft at 1,000 ft), never out of the cells it keeps. That is a point the tile alone holds, the
+//! ground a ride on the tile alone would have there, which holds no finer bits either.
 //!
 //! What a world is *not* exact to is a ride on the tile alone. The rider's own position is in world
 //! feet, and far from the origin a float holds fewer of its bits: 1/128 ft at the ultra map's
@@ -252,9 +260,10 @@ fn bucket(x: F, z: F) -> (i32, i32) {
 impl Tiled {
     /// A world of `tiles` (tiles, then joins, in the world file's order), read through `source`.
     ///
-    /// Refuses an offset that is not a whole number of feet, is negative or is past 2²⁴ feet — the
-    /// three things that would let the move into a tile's coordinates round — a spacing that is not
-    /// positive, and a `keep` larger than its terrain.
+    /// Refuses an offset that is not a whole number of feet or is past 2²⁴ feet either way — the
+    /// things that would let the move into a tile's coordinates round past the point's own last bit
+    /// — a negative one whose kept cells start short of 0 (see the module note, MD61), a spacing that
+    /// is not positive, and a `keep` larger than its terrain.
     pub fn new(tiles: Vec<Tile>, source: Box<dyn Source>, reach: Reach) -> Result<Tiled, String> {
         if tiles.is_empty() {
             return Err("a world with no tiles".into());
@@ -263,8 +272,8 @@ impl Tiled {
         let (mut width, mut depth, mut finest) = (F::ZERO, F::ZERO, F(f32::MAX));
         for (i, t) in tiles.iter().enumerate() {
             for a in t.at {
-                if !(a >= F::ZERO && a < F(MAX_AT)) || F::from(a.to_i32()) != a {
-                    return Err(format!("{}: at {} is not a whole number of feet from 0 to 2^24", t.name, a.0));
+                if !(a > F(-MAX_AT) && a < F(MAX_AT)) || F::from(a.to_i32()) != a {
+                    return Err(format!("{}: at {} is not a whole number of feet from -2^24 to 2^24", t.name, a.0));
                 }
             }
             if !(t.spacing > F::ZERO) {
@@ -276,6 +285,9 @@ impl Tiled {
                 return Err(format!("{}: keep {:?} in a terrain of {sx} x {sz} samples", t.name, t.keep));
             }
             let owned = t.owned();
+            if !(owned[0] >= F::ZERO && owned[1] >= F::ZERO) {
+                return Err(format!("{}: at {:?} puts its kept cells short of 0, at {}, {}", t.name, t.at.map(|a| a.0), owned[0].0, owned[1].0));
+            }
             width = width.max(owned[2]);
             depth = depth.max(owned[3]);
             finest = finest.min(t.spacing);
