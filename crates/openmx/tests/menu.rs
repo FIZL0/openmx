@@ -541,6 +541,9 @@ fn the_settings_file_reads_back_as_it_was_written() {
         handling_pack: "untamed".into(),
         // MX vs. ATV's gyros both off its default (P226).
         gyro: game_sim::handling::Gyro { brake: false, gas: true },
+        // MX vs. ATV's fliers, its fourth skin (MD80e).
+        fliers: true,
+        flier_skin: 3,
         // The Original tab's picture at the original's (P126); the plants are always ours since
         // 2026-10-29.
         plants: game_render::eco::Lod::Smooth,

@@ -304,8 +304,8 @@ impl Machine {
     }
 }
 
-/// MX vs. ATV Unleashed's fliers (MD80d): the same two machines, four skins each over two models.
-/// Nothing picks a skin yet (MD80e), so only the tests read these.
+/// MX vs. ATV Unleashed's fliers (MD80d): the same two machines, four skins each over two models,
+/// which the Fliers setting picks from (MD80e, [`MxvatvFliers`]).
 #[allow(dead_code)]
 impl Machine {
     /// Its four MX vs. ATV skins, `Veh\Anim\<name>.psg` in openmx-mods' `mxvatv_fliers` pack (its
@@ -348,6 +348,91 @@ impl Machine {
             n => format!("{stem}{}", n + 1),
         })
     }
+}
+
+/// The skin, of MX vs. ATV's four ([`Machine::mxvatv_skins`]), a flier in `livery` wears when the
+/// player picked `pick` (MD80e): `pick` itself for livery 0, and for livery 1, the second copy's, the
+/// other skin of the same model, so every copy flies the same model's figures and the second still
+/// looks different, as MX Unleashed's alternate livery does.
+pub fn mxvatv_skin(pick: usize, livery: usize) -> usize {
+    let pick = pick.min(3);
+    (pick & !1) | ((pick ^ livery) & 1)
+}
+
+/// **MX vs. ATV's biplane and Kiowa in the ride** (MD80e): openmx-mods' `mxvatv_fliers` machine pack
+/// (MD80d), where the Fliers setting is on, and the skin picked. With it the ride's planes are built
+/// off the pack's `biplane.phy` as SLUS-21104 reads it for the skin's model
+/// ([`game_sim::phy::Plane::read_mxvatv`]) and fly its steps ([`Flight::new_mxvatv`], MD80b), its
+/// helicopters off its `kiowa.phy` ([`game_sim::kiowa::Phy::read_mxvatv`]) on its steps
+/// ([`game_sim::kiowa::Kiowa::tick_mxvatv`], MD80c), each with the skin's own collision pair and
+/// drawn in the skin's models. Without it nothing here is read and the fliers are MX Unleashed's.
+#[allow(dead_code)]
+pub struct MxvatvFliers {
+    /// The pack's `mod.json` id.
+    pub id: String,
+    /// The pack's files, by their disc paths.
+    pub files: game_render::disc::Res,
+    /// The skin picked, 0..4 ([`mxvatv_skin`]).
+    pub skin: usize,
+}
+
+#[allow(dead_code)]
+impl MxvatvFliers {
+    /// The `machine` a fliers pack's `mod.json` names.
+    pub const MACHINE: &'static str = "fliers";
+
+    pub fn new(id: String, files: game_render::disc::Res, skin: usize) -> MxvatvFliers {
+        MxvatvFliers { id, files, skin: skin.min(3) }
+    }
+
+    /// The pack's member whose path ends in `name`, at a folder boundary.
+    pub fn read(&self, name: &str) -> Option<Vec<u8>> {
+        self.files.read_suffix(name).ok()
+    }
+
+    /// Whether the picked skin is model one, MX Unleashed's machine: what both `.phy` readers key by.
+    pub fn model_one(&self) -> bool {
+        Machine::mxvatv_model(self.skin) == 1
+    }
+
+    /// The model `machine` is drawn in, in `livery`: `biplane3`, `kiowa4`.
+    pub fn model(&self, machine: Machine, livery: usize) -> Option<&'static str> {
+        Some(machine.mxvatv_skins()?[mxvatv_skin(self.skin, livery)])
+    }
+
+    /// The picked skin's hull, `Veh\Col\<stem>F.col`, which the world meets.
+    pub fn hull(&self, machine: Machine) -> Option<Vec<u8>> {
+        self.read(&format!("Col\\{}F.col", machine.mxvatv_col(self.skin)?))
+    }
+
+    /// The picked skin's ray probe, `Veh\Col\<stem>M.col`, which it meets the world with.
+    pub fn rays(&self, machine: Machine) -> Option<Vec<u8>> {
+        self.read(&format!("Col\\{}M.col", machine.mxvatv_col(self.skin)?))
+    }
+
+    /// The picked skin's model's bytes, `Veh\Anim\<skin>.psg`.
+    pub fn psg(&self, machine: Machine) -> Option<Vec<u8>> {
+        self.read(&format!("Anim\\{}.psg", self.model(machine, 0)?))
+    }
+
+    /// The pack's `biplane.phy`.
+    pub fn plane_phy(&self) -> Option<Vec<u8>> {
+        self.read("Veh\\biplane.phy")
+    }
+
+    /// The pack's `kiowa.phy`.
+    pub fn kiowa_phy(&self) -> Option<Vec<u8>> {
+        self.read("Veh\\kiowa.phy")
+    }
+}
+
+/// The plane's flight off MX vs. ATV's `biplane.phy` bytes (MD80e): read for model one or two, with
+/// `modify` on the plane it shares with MX Unleashed's (the Game Modifiers, P272), flown on
+/// SLUS-21104's steps.
+pub fn mxvatv_flight(phy: &[u8], model_one: bool, modify: impl FnOnce(&mut game_sim::phy::Plane)) -> Flight {
+    let mut plane = game_sim::phy::Plane::read_mxvatv_bytes(phy, model_one);
+    modify(&mut plane.plane);
+    Flight::new_mxvatv(&plane)
 }
 
 /// How many liveries the disc has of each machine: the factory's skins 0 and 1. Its 2 and 3 are the
@@ -522,6 +607,9 @@ pub struct Lot {
     /// What an online seat's car is taken from and stepped with ([`switch_lane_among`],
     /// [`drive_lane`]). Empty offline and without the files.
     pub online_cars: Vec<Vec<CarRide>>,
+    /// The models MX vs. ATV's helicopter is drawn in (MD80e), one a livery ([`MxvatvFliers::model`]):
+    /// empty for MX Unleashed's, drawn in [`game_render::kiowa::MODELS`].
+    pub mxvatv_kiowa: Vec<&'static str>,
 }
 
 impl Lot {
@@ -535,7 +623,7 @@ impl Lot {
     /// [`Lot::new`] over spots already found, one list a machine in [`Machine::ALL`]'s order: a
     /// world's ([`world_spots`]).
     pub fn around(file: Vec<Vec<Spawn>>, players: usize, ground: &mut dyn FnMut(Vf) -> f32) -> Lot {
-        let mut lot = Lot { file, bays: Vec::new(), lift: None, ground_heights: Vec::new(), cars: Vec::new(), kiowa: None, online_cars: Vec::new() };
+        let mut lot = Lot { file, bays: Vec::new(), lift: None, ground_heights: Vec::new(), cars: Vec::new(), kiowa: None, online_cars: Vec::new(), mxvatv_kiowa: Vec::new() };
         lot.resize(players, ground);
         lot
     }
@@ -2680,6 +2768,9 @@ pub struct Heli {
     pub rng: game_sim::rng::Rng,
     /// What its wreck, unwreck and put-back read and write besides the ride (S220a1).
     pub wreckage: game_sim::kiowa::Wreckage,
+    /// What SLUS-21104's helicopter carries besides (MD80e): there for MX vs. ATV's, which then flies
+    /// [`game_sim::kiowa::Kiowa::tick_mxvatv`]; `None` for MX Unleashed's.
+    pub mxvatv: Option<game_sim::kiowa::Mxvatv>,
 }
 
 impl Heli {
@@ -2715,13 +2806,24 @@ pub struct KiowaRide {
     /// The four blades its wreck throws, as built ([`KiowaRide::with_blades`]): each helicopter
     /// taken gets a copy, with the world's edge ([`KiowaRide::built`]).
     pub blades: Option<game_sim::kiowa::Blades>,
+    /// MX vs. ATV's pedal figures (MD80e, [`KiowaRide::new_mxvatv`]): there, each helicopter taken flies
+    /// SLUS-21104's steps.
+    pub mxvatv: Option<game_sim::kiowa::Pedal>,
 }
 
 impl KiowaRide {
     /// The helicopter off `kiowa.phy`'s bytes, in `livery`, parked at `bay`.
     pub fn new(phy: &[u8], livery: usize, bay: Option<Spawn>) -> KiowaRide {
         let rays = game_sim::flight_search::Rays::default();
-        KiowaRide { phy: game_sim::kiowa::Phy::read_bytes(phy), livery, bay, flown: None, taken_at: Vf::default(), rays, wrecks: 0, tree: None, blades: None }
+        KiowaRide { phy: game_sim::kiowa::Phy::read_bytes(phy), livery, bay, flown: None, taken_at: Vf::default(), rays, wrecks: 0, tree: None, blades: None, mxvatv: None }
+    }
+
+    /// MX vs. ATV's helicopter (MD80e) off its `kiowa.phy`'s bytes, read for model one or two
+    /// ([`game_sim::kiowa::Phy::read_mxvatv`]), in `livery`, parked at `bay`: flown on SLUS-21104's
+    /// steps.
+    pub fn new_mxvatv(phy: &[u8], model_one: bool, livery: usize, bay: Option<Spawn>) -> KiowaRide {
+        let read = game_sim::kiowa::Phy::read_mxvatv_bytes(phy, model_one);
+        KiowaRide { phy: read.phy, mxvatv: Some(read.pedal), ..KiowaRide::new(&[], livery, bay) }
     }
 
     /// It with its collision object's ray probe off `kiowam.col`'s bytes
@@ -2858,7 +2960,8 @@ impl KiowaRide {
             blades.set.edge = world.area().map(|a| game_sim::prop_world::Edge { min: [F::ZERO, F::ZERO], max: [a.width, a.depth] });
             wreckage.blades = blades;
         }
-        Heli { kiowa, ride, collision, rng: game_sim::rng::Rng::from_seed(0x0216_6b69), wreckage }
+        let mxvatv = self.mxvatv.map(|pedal| game_sim::kiowa::Mxvatv { pedal });
+        Heli { kiowa, ride, collision, rng: game_sim::rng::Rng::from_seed(0x0216_6b69), wreckage, mxvatv }
     }
 
     /// One frame of the helicopter on `pad` through `table`: the input step
@@ -2897,7 +3000,10 @@ impl KiowaRide {
         let ground = game_sim::kiowa::Grounded { collision: &mut h.collision, world: &mut *world, movers: &movers, rotor: &self.phy.wreck_rotor.rays, asked: Vec::new() };
         let mut around =
             KiowaAround { ground, wreckage: &mut h.wreckage, put_back: None, tree: self.tree.as_ref(), curve: &tables.curve, blade_movers: &blade_movers };
-        let asked = h.kiowa.tick(&mut h.ride, &KIOWA_WORLD, Some(input), &tables.curve, &tables.acos, &mut h.rng, dt, &mut around);
+        let asked = match h.mxvatv.as_mut() {
+            Some(m) => h.kiowa.tick_mxvatv(m, &mut h.ride, &KIOWA_WORLD, Some(input), &tables.curve, &tables.acos, &mut h.rng, dt, &mut around),
+            None => h.kiowa.tick(&mut h.ride, &KIOWA_WORLD, Some(input), &tables.curve, &tables.acos, &mut h.rng, dt, &mut around),
+        };
         self.wrecks += u32::from(asked.wreck.is_some());
         let put_back = around.put_back;
         if blades_out || h.wreckage.blades.started.iter().any(|s| s.out) {
@@ -3086,6 +3192,39 @@ mod tests {
         assert_eq!(Machine::Biplane.mxvatv_col(0).as_deref(), Some("Biplane"));
         assert_eq!(Machine::Helicopter.mxvatv_col(3).as_deref(), Some("Kiowa4"));
         assert_eq!(Machine::Buggy.mxvatv_skins(), None);
+    }
+
+    #[test]
+    fn a_second_copy_of_an_mxvatv_flier_wears_the_other_skin_of_its_model() {
+        // MD80e: livery 0 is the pick, livery 1 its model's other skin, so both fly one model.
+        let pairs: Vec<[usize; 2]> = (0..4).map(|pick| [mxvatv_skin(pick, 0), mxvatv_skin(pick, 1)]).collect();
+        assert_eq!(pairs, [[0, 1], [1, 0], [2, 3], [3, 2]]);
+        for pick in 0..4 {
+            for l in 0..2 {
+                assert_eq!(Machine::mxvatv_model(mxvatv_skin(pick, l)), Machine::mxvatv_model(pick));
+            }
+        }
+        assert_eq!(mxvatv_skin(9, 0), 3, "a pick past the four is the last");
+    }
+
+    #[test]
+    fn mxvatv_fliers_fly_slus_21104s_steps_and_mx_unleasheds_do_not() {
+        // MD80e: the plane built off MX vs. ATV's file carries the switch MD80b's steps branch on, and
+        // the helicopter the pedal MD80c's do; MX Unleashed's builds carry neither.
+        use game_sim::world::Flat;
+        let plane = "[Aero]\nChord = 4\nModelOneChord = 5\nModelTwoChord = 6\n";
+        let one = mxvatv_flight(plane.as_bytes(), true, |_| {});
+        let two = mxvatv_flight(plane.as_bytes(), false, |_| {});
+        assert!(one.mxvatv && two.mxvatv);
+        assert!(!Flight::new(&game_sim::phy::Plane::read_bytes(plane.as_bytes())).mxvatv);
+        let heli = "[Mass Properties]\nMass = 10\n";
+        let mut floor = Flat::default();
+        let at = Vf::new(0.0, 0.0, 0.0, 1.0);
+        let forward = Vf::new(0.0, 0.0, 1.0, 0.0);
+        let atv = KiowaRide::new_mxvatv(heli.as_bytes(), false, 0, None);
+        assert!(atv.mxvatv.is_some() && atv.built(at, forward, &mut floor).mxvatv.is_some());
+        let mxu = KiowaRide::new(heli.as_bytes(), 0, None);
+        assert!(mxu.mxvatv.is_none() && mxu.built(at, forward, &mut floor).mxvatv.is_none());
     }
 
     #[test]

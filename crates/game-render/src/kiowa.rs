@@ -130,7 +130,12 @@ impl Kiowa {
     /// Load skin `skin` of the helicopter and its four blade parts into `assets`, from the first of
     /// `archives` to hold each file. `None` if the model is not there.
     pub fn load(assets: &mut Assets, archives: &[Res], skin: usize) -> Option<Kiowa> {
-        let model = MODELS.get(skin).copied().unwrap_or(MODELS[0]);
+        Kiowa::load_model(assets, archives, MODELS.get(skin).copied().unwrap_or(MODELS[0]))
+    }
+
+    /// [`Kiowa::load`] of the helicopter's model `model` by name (`kiowa3`, MX vs. ATV's second
+    /// model, MD80e), with the same rotor parts.
+    pub fn load_model(assets: &mut Assets, archives: &[Res], model: &str) -> Option<Kiowa> {
         if !assets.load(archives, model) {
             return None;
         }
@@ -146,13 +151,17 @@ impl Kiowa {
                 }
             }
         }
-        Kiowa::found(assets, skin)
+        Kiowa::found_model(assets, model)
     }
 
     /// Skin `skin` of the helicopter as [`Kiowa::load`] left it in `assets`, without reading
     /// anything. `None` if it was not loaded.
     pub fn found(assets: &Assets, skin: usize) -> Option<Kiowa> {
-        let model = MODELS.get(skin).copied().unwrap_or(MODELS[0]);
+        Kiowa::found_model(assets, MODELS.get(skin).copied().unwrap_or(MODELS[0]))
+    }
+
+    /// [`Kiowa::found`] of the model `model` by name.
+    pub fn found_model(assets: &Assets, model: &str) -> Option<Kiowa> {
         let loaded = &assets.models.get(model)?.model;
         let find = |name: &str| loaded.nodes.iter().position(|n| n.name.eq_ignore_ascii_case(name));
         Some(Kiowa { model: model.to_string(), spindle: find(SPINDLE), blades: BLADES.map(find), tail: find(TAIL) })

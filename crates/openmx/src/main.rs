@@ -2528,6 +2528,13 @@ struct Args {
     /// as its handshake holds no seat's gyros.
     brake_gyro: Option<bool>,
     gas_gyro: Option<bool>,
+    /// `--fliers original|mxvatv` (MD80e): whose biplane and Kiowa the ride has. Unset, the front
+    /// end's Fliers row says, and a ride outside it has MX Unleashed's. `--online` always has MX
+    /// Unleashed's.
+    fliers: Option<bool>,
+    /// `--flier-skin 1..4` (MD80e): which of MX vs. ATV's four skins the first player's fliers wear.
+    /// Unset, the front end's Flier Skin row says, else the first.
+    flier_skin: Option<usize>,
     /// The pack whose `mx_*.phy` a lobby's ride rides on MX vs. ATV's handling (N21): this machine's
     /// mods folder and the pack's id, as the room names it and the handshake held every seat to.
     /// `None` outside the lobby and on the original's handling.
@@ -3155,6 +3162,8 @@ async fn front_end(args: Args) -> Result<(), String> {
                 a.handling_pack = Some(args.handling_pack.clone().unwrap_or_else(|| shell.front.menu.settings.handling_pack.clone()));
                 a.brake_gyro = Some(args.brake_gyro.unwrap_or(shell.front.menu.settings.gyro.brake));
                 a.gas_gyro = Some(args.gas_gyro.unwrap_or(shell.front.menu.settings.gyro.gas));
+                a.fliers = Some(args.fliers.unwrap_or(shell.front.menu.settings.fliers));
+                a.flier_skin = Some(args.flier_skin.unwrap_or(shell.front.menu.settings.flier_skin));
                 a.graphics = Some(args.graphics.unwrap_or(shell.front.menu.settings.graphics));
                 // The Original tab's own two (P126).
                 a.plants = Some(args.plants.unwrap_or(shell.front.menu.settings.plants));
@@ -3257,6 +3266,8 @@ async fn front_end(args: Args) -> Result<(), String> {
                 // machine's mods folder.
                 a.handling = Some(if room.handling.is_empty() { game_sim::handling::Handling::Original } else { game_sim::handling::Handling::MxVsAtv });
                 a.room_handling = (!room.handling.is_empty()).then(|| (shell.front.dir.join(track_mods::MODS_DIR), room.handling.clone()));
+                // MX Unleashed's fliers (MD80e): the room's handshake names no machine pack.
+                a.fliers = Some(false);
                 let overlay = args.overlay.unwrap_or(shell.front.menu.settings.overlay);
                 a.overlay = Some(overlay);
                 a.speedometer = Some(args.speedometer.unwrap_or(shell.front.menu.settings.speedometer));
@@ -4757,15 +4768,30 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // original builds it. Without the file the plane is parked and stays parked. The flyable area is
     // the terrain's extent, which only the map-edge throw reads; the pairing of the layout's four
     // fields with the area's is S37's reading, not checked against this track.
-    let plane_phy = machine_res.as_ref().and_then(|res| {
-        let e = res.find_suffix(phy::BIPLANE_PHY)?;
-        res.read(&e.name).ok()
-    });
+    // MX vs. ATV's fliers (MD80e), where the Fliers setting is on and the pack is there: the plane's
+    // file, collision pair and model off the pack, in place of the disc's, and its flight on
+    // SLUS-21104's steps; `plane_mxvatv` is whether it is model one. Off, nothing below changes.
+    let fliers = ride_fliers(&args);
+    let plane_mxvatv = fliers.as_ref().filter(|f| f.plane_phy().is_some()).map(|f| f.model_one());
+    let plane_phy = match fliers.as_ref().and_then(|f| f.plane_phy()) {
+        Some(bytes) => Some(bytes),
+        None => machine_res.as_ref().and_then(|res| {
+            let e = res.find_suffix(phy::BIPLANE_PHY)?;
+            res.read(&e.name).ok()
+        }),
+    };
+    // The plane's stock file the modifiers go on: MX vs. ATV's read for the skin's model.
+    let read_plane = move |b: &[u8]| match plane_mxvatv {
+        Some(one) => phy::Plane::read_mxvatv_bytes(b, one).plane,
+        None => phy::Plane::read_bytes(b),
+    };
     // And its collision object's ray probe (S48), which is what it strikes the ground and the
     // track's meshes with; without it the plane meets the world only with its wheels.
     let plane_rays = machine_res.as_ref().and_then(|res| {
-        let e = res.find_suffix(game_sim::flight_search::BIPLANE_RAYS)?;
-        let bytes = res.read(&e.name).ok()?;
+        let bytes = match fliers.as_ref().and_then(|f| f.rays(Machine::Biplane)) {
+            Some(bytes) => bytes,
+            None => res.read(&res.find_suffix(game_sim::flight_search::BIPLANE_RAYS)?.name).ok()?,
+        };
         match game_sim::track::Rays::parse(&bytes) {
             Ok(r) => Some(game_sim::flight_search::Rays::of(&r)),
             Err(e) => {
@@ -4782,8 +4808,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     });
     // And the plane's own hull (N22a), which the riders' bikes strike while a player flies it.
     let plane_hull = machine_res.as_ref().and_then(|res| {
-        let e = res.find_suffix(game_sim::flight::HULL)?;
-        let bytes = res.read(&e.name).ok()?;
+        let bytes = match fliers.as_ref().and_then(|f| f.hull(Machine::Biplane)) {
+            Some(bytes) => bytes,
+            None => res.read(&res.find_suffix(game_sim::flight::HULL)?.name).ok()?,
+        };
         game_sim::track::Mesh::parse(&bytes).map_err(|e| eprintln!("biplane: {}: {e}", game_sim::flight::HULL)).ok()
     });
     // And the wreck bike's hull (F35), which the plane's rays strike on a downed rider's wreck bike.
@@ -4799,7 +4827,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     };
     // A home tile's spot its own ground does not reach stands the plane on its wheels (MD55).
     let spot_rest = plane_phy.as_deref().map_or(0.0, |b| {
-        let mut plane = phy::Plane::read_bytes(b);
+        let mut plane = read_plane(b);
         mods.plane(0, &mut plane);
         vehicle::wheels_height(&Flight::new(&plane))
     });
@@ -4822,8 +4850,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // model's bounds, off its own `.psg`.
     let mut lot = lot;
     lot.lift = machine_res.as_ref().and_then(|res| {
-        let e = res.find_suffix(game_sim::flight::BIPLANE_MODEL)?;
-        let bytes = res.read(&e.name).ok()?;
+        let bytes = match fliers.as_ref().and_then(|f| f.psg(Machine::Biplane)) {
+            Some(bytes) => bytes,
+            None => res.read(&res.find_suffix(game_sim::flight::BIPLANE_MODEL)?.name).ok()?,
+        };
         game_sim::flight::spawn_lift(&bytes).map_err(|e| eprintln!("biplane: {}: {e}", game_sim::flight::BIPLANE_MODEL)).ok()
     });
     // And whether each file bay is put on the ground there (S205).
@@ -4846,16 +4876,29 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     }
     // And the helicopter's (P216): `kiowa.phy`, which every player's garage flies a copy of.
     lot.kiowa = machine_res.as_ref().and_then(|res| {
-        let bytes = res.read(&res.find_suffix(game_sim::kiowa::KIOWA_PHY)?.name).ok()?;
-        let heli = vehicle::KiowaRide::new(&bytes, 0, None);
+        // MX vs. ATV's (MD80e): the pack's file, collision pair and model, where the Fliers setting
+        // has it; the thrown blades' own files stay the disc's, which the pack has not.
+        let pack = fliers.as_ref().filter(|f| f.kiowa_phy().is_some());
+        let heli = match pack {
+            Some(f) => vehicle::KiowaRide::new_mxvatv(&f.kiowa_phy()?, f.model_one(), 0, None),
+            None => vehicle::KiowaRide::new(&res.read(&res.find_suffix(game_sim::kiowa::KIOWA_PHY)?.name).ok()?, 0, None),
+        };
         // And its collision object's ray probe (P216a), what it stands on the ground and strikes
         // the world with.
-        let heli = match res.find_suffix(game_sim::kiowa::KIOWA_RAYS).and_then(|e| res.read(&e.name).ok()) {
+        let rays = match pack {
+            Some(f) => f.rays(Machine::Helicopter),
+            None => res.find_suffix(game_sim::kiowa::KIOWA_RAYS).and_then(|e| res.read(&e.name).ok()),
+        };
+        let heli = match rays {
             Some(col) => heli.with_rays(&col),
             None => heli,
         };
         // And its model's nodes (S270), where its wreck throws the blades from.
-        let heli = match res.find_suffix(game_sim::kiowa::KIOWA_MODEL).and_then(|e| res.read(&e.name).ok()) {
+        let psg = match pack {
+            Some(f) => f.psg(Machine::Helicopter),
+            None => res.find_suffix(game_sim::kiowa::KIOWA_MODEL).and_then(|e| res.read(&e.name).ok()),
+        };
+        let heli = match psg {
             Some(psg) => heli.with_model(&psg),
             None => heli,
         };
@@ -4866,7 +4909,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             _ => heli,
         };
         // And the hull those blades meet (C21).
-        Some(match read(game_sim::kiowa::KIOWA_HULL) {
+        let hull = match pack {
+            Some(f) => f.hull(Machine::Helicopter),
+            None => read(game_sim::kiowa::KIOWA_HULL),
+        };
+        Some(match hull {
             Some(col) => heli.with_hull(&col),
             None => heli,
         })
@@ -4878,9 +4925,15 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         let wreck_hull = wreck_hull.clone();
         move |seat: usize| {
             plane_phy.as_ref().map(|bytes| {
-                let mut plane = phy::Plane::read_bytes(bytes);
-                mods.plane(seat, &mut plane);
-                let mut flight = Flight::new(&plane);
+                let mut flight = match plane_mxvatv {
+                    // MX vs. ATV's (MD80e), on SLUS-21104's steps
+                    Some(one) => vehicle::mxvatv_flight(bytes, one, |plane| mods.plane(seat, plane)),
+                    None => {
+                        let mut plane = phy::Plane::read_bytes(bytes);
+                        mods.plane(seat, &mut plane);
+                        Flight::new(&plane)
+                    }
+                };
                 if let Some(rays) = &plane_rays {
                     flight = flight.with_rays(rays.clone());
                 }
@@ -4927,7 +4980,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         None => (Vec::new(), Vec::new()),
     };
     // And the biplane's, for the same (P98).
-    let stock_plane = plane_phy.as_deref().map(phy::Plane::read_bytes);
+    let stock_plane = plane_phy.as_deref().map(read_plane);
     if machines.is_some() {
         let parked: Vec<String> = Machine::ALL
             .iter()
@@ -4939,7 +4992,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         println!("machines: {} for {} players", parked.join(", "), args.players.max(1));
     }
     if machines.is_some() {
-        println!("biplane: {}", if plane_phy.is_some() { "flies on its biplane.phy" } else { "no biplane.phy, parked" });
+        println!("biplane: {}", match (plane_phy.is_some(), plane_mxvatv) {
+            (true, Some(_)) => "flies on MX vs. ATV's biplane.phy, on its steps",
+            (true, None) => "flies on its biplane.phy",
+            (false, _) => "no biplane.phy, parked",
+        });
     }
     match (&machines, plane.as_ref().filter(|_| lot.bay(Machine::Biplane, 0).is_some())) {
         (Some((name, _)), Some(p)) => println!(
@@ -5001,13 +5058,22 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     };
     // The Kiowa's skins and rotor parts (V113), where the lot parks one: one skin a livery, as the
     // plane's, out of the machines' archive. The frame finds them in `assets` ([`Kiowa::found`]).
+    // MX vs. ATV's (MD80e) in the skin's models off the pack, its rotor parts the pack's too.
+    let kiowa_pack = fliers.as_ref().filter(|_| lot.kiowa.as_ref().is_some_and(|k| k.mxvatv.is_some()));
+    lot.mxvatv_kiowa = kiowa_pack.map_or_else(Vec::new, |f| (0..vehicle::LIVERIES).filter_map(|l| f.model(Machine::Helicopter, l)).collect());
     if let (Some(res), true) = (machine_res.as_ref(), lot.of(Machine::Helicopter).next().is_some() || garage.heli.is_some()) {
         let liveries = args.players.clamp(1, vehicle::LIVERIES);
-        let loaded = (0..liveries).filter(|&l| Kiowa::load(&mut assets, std::slice::from_ref(res), l).is_some()).count();
+        let loaded = match kiowa_pack {
+            Some(f) => lot.mxvatv_kiowa[..liveries].iter().filter(|m| Kiowa::load_model(&mut assets, std::slice::from_ref(&f.files), m).is_some()).count(),
+            None => (0..liveries).filter(|&l| Kiowa::load(&mut assets, std::slice::from_ref(res), l).is_some()).count(),
+        };
         let presets = archives.iter().find_map(|a| a.read_suffix(game_render::kiowa::PRESETS).ok());
         let cameras = presets.map_or(0, |b| Preset::read_bytes(&b, "").len());
         let flown = if garage.heli.is_some() { "flown from the pause or its bay" } else { "parked, no kiowa.phy to fly" };
         println!("kiowa: {loaded} of {liveries} skins loaded, {flown}; {cameras} camera presets in {}", game_render::kiowa::PRESETS);
+        if kiowa_pack.is_some() {
+            println!("kiowa: MX vs. ATV's, on its steps, drawn in {}", lot.mxvatv_kiowa[..liveries].join(", "));
+        }
     }
     // The cars' models (S245), one a livery in play, out of the machines' archive: every car the
     // garage can switch to, parked here or not. The frame finds them in `assets` ([`Car::found`]).
@@ -5024,12 +5090,22 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // Its model and both prop cones, out of the machines' archive, where its textures are too (V21):
     // one model a livery the lot parks (P87), the first copy's plain and the second's the disc's
     // alternate, so a plane is drawn in `plane_drawn[plane.livery]`.
+    // MX vs. ATV's (MD80e) in the skin's models off the pack, where its plane flies.
+    let plane_pack = fliers.as_ref().filter(|_| plane_mxvatv.is_some());
     let plane_drawn: Vec<Biplane> = match (&garage.plane, machine_res) {
         (Some(_), Some(res)) => {
             let own = vec![res];
             let liveries = args.players.clamp(1, vehicle::LIVERIES);
-            let drawn: Vec<Biplane> = (0..liveries).map_while(|l| Biplane::load(&mut assets, &own, l)).collect();
+            let drawn: Vec<Biplane> = match plane_pack {
+                Some(f) => (0..liveries)
+                    .map_while(|l| Biplane::load_model(&mut assets, std::slice::from_ref(&f.files), f.model(Machine::Biplane, l)?))
+                    .collect(),
+                None => (0..liveries).map_while(|l| Biplane::load(&mut assets, &own, l)).collect(),
+            };
             println!("biplane: {} of {liveries} liveries loaded", drawn.len());
+            if plane_pack.is_some() {
+                println!("biplane: MX vs. ATV's, drawn in {}", drawn.iter().map(|d| d.model.as_str()).collect::<Vec<_>>().join(", "));
+            }
             drawn
         }
         _ => Vec::new(),
@@ -5622,7 +5698,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         (_, Some(terrain)) => Some(Land::Track(Place { ground: sim_world::Ground::new(terrain, &place.terrain), props: Default::default() })),
     };
     // The Kiowa's skins the load put in `assets` (V113), one a livery.
-    let kiowa_drawn: Vec<Kiowa> = (0..vehicle::LIVERIES).map_while(|l| Kiowa::found(&assets, l)).collect();
+    let kiowa_drawn: Vec<Kiowa> = match lot.mxvatv_kiowa.is_empty() {
+        true => (0..vehicle::LIVERIES).map_while(|l| Kiowa::found(&assets, l)).collect(),
+        // MX vs. ATV's (MD80e), in the skin's models
+        false => lot.mxvatv_kiowa.iter().map_while(|m| Kiowa::found_model(&assets, m)).collect(),
+    };
     // And the cars' models (S245), each car in each livery the load put there.
     let car_models: Vec<game_render::car::Car> = Machine::ALL
         .iter()
@@ -11451,6 +11531,40 @@ fn ride_handling_pack(args: &Args, tricks: &[trick_packs::Pack]) -> Result<Optio
     }
 }
 
+/// MX vs. ATV's biplane and Kiowa (MD80e): the machine pack of kind `fliers` in the mods folder, with
+/// `--fliers mxvatv` or the Fliers row's MX vs. ATV, never on `--online` (no handshake holds every
+/// seat to it, and the plane's switch is off the wire, MD100), and the skin the first player's wear.
+/// `None`, with the line saying why, flies MX Unleashed's.
+fn ride_fliers(args: &Args) -> Option<vehicle::MxvatvFliers> {
+    if args.fliers != Some(true) {
+        return None;
+    }
+    if args.online.is_some() || args.room_handling.is_some() || args.room_tricks.is_some() {
+        println!("fliers: MX Unleashed's online, which has no handshake to hold every seat to MX vs. ATV's");
+        return None;
+    }
+    let Some(dir) = mods_dir(args) else {
+        println!("fliers: the mods folder is off, so MX Unleashed's");
+        return None;
+    };
+    let (packs, why) = machine_packs::find(&dir);
+    for w in &why {
+        println!("fliers: {w}");
+    }
+    let skin = args.flier_skin.unwrap_or(0).min(3);
+    match packs.into_iter().find(|p| p.machine == vehicle::MxvatvFliers::MACHINE) {
+        Some(pack) => {
+            let fliers = vehicle::MxvatvFliers::new(pack.id, pack.files, skin);
+            println!("fliers: MX vs. ATV's, from {}, skin {} (model {})", fliers.id, skin + 1, Machine::mxvatv_model(skin));
+            Some(fliers)
+        }
+        None => {
+            println!("fliers: no fliers pack in {}; MX Unleashed's", dir.join(machine_packs::MACHINES_DIR).display());
+            None
+        }
+    }
+}
+
 /// Untamed's handling (MD93): a bike read for MX vs. ATV's rides Untamed's reworked steps with
 /// `--handling untamed` or the Handling row's Untamed. Online it stays MX vs. ATV's, as a room names
 /// only its pack.
@@ -12777,6 +12891,8 @@ fn parse_args() -> Result<Option<Args>, String> {
         mod_store: None,
         tricks: None,
         handling: None,
+        fliers: None,
+        flier_skin: None,
         room_handling: None,
         room_tricks: None,
         trick_packs: None,
@@ -12916,6 +13032,19 @@ fn parse_args() -> Result<Option<Args>, String> {
                 });
             }
             "--handling-pack" => args.handling_pack = Some(next("a trick pack id")?),
+            "--fliers" => {
+                let word = next("original or mxvatv")?;
+                args.fliers = Some(match word.as_str() {
+                    "original" => false,
+                    "mxvatv" => true,
+                    _ => return Err(format!("--fliers: {word:?} is not original or mxvatv")),
+                });
+            }
+            "--flier-skin" => {
+                let word = next("a skin, 1 to 4")?;
+                let n = word.parse::<usize>().ok().filter(|n| (1..=4).contains(n)).ok_or_else(|| format!("--flier-skin: {word:?} is not 1, 2, 3 or 4"))?;
+                args.flier_skin = Some(n - 1);
+            }
             "--speedometer" => {
                 let word = next("digital or analog")?;
                 let style = menu::Speedometer::from_word(&word)
@@ -13304,7 +13433,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--ride] [--track free06] [--bike 125sx] [--rider thq1] [--size 640x448]\n\
                             [--scale 1]\n\
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
-                            [--moment FILE OUT.png] [--no-wrecks] [--no-air-wrecks] [--backwards-bail] [--no-vibration] [--overlay hud|none] [--speedometer digital|analog] [--tricks original|mxvatv|ID,ID…] [--handling original|mxvatv|untamed] [--handling-pack ID] [--brake-gyro on|off] [--gas-gyro on|off] [--markers on|off] [--camera NAME]\n\
+                            [--moment FILE OUT.png] [--no-wrecks] [--no-air-wrecks] [--backwards-bail] [--no-vibration] [--overlay hud|none] [--speedometer digital|analog] [--tricks original|mxvatv|ID,ID…] [--handling original|mxvatv|untamed] [--handling-pack ID] [--fliers original|mxvatv] [--flier-skin 1-4] [--brake-gyro on|off] [--gas-gyro on|off] [--markers on|off] [--camera NAME]\n\
                             [--minimap on|off] [--show-fps on|off] [--hud-scale 50..150] [--world-sky global|per-map]\n\
                             [--camera-view original|default|FOV,DIST,HEIGHT,PDIST,PHEIGHT]\n\
                             [--modifiers 'gravity=50 bike_speed.2=200']\n\

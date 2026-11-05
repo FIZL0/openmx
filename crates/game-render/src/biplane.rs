@@ -100,7 +100,12 @@ impl Biplane {
     /// Load livery `livery` of the plane and both prop cones into `assets`, from the first of
     /// `archives` to hold each file. `None` if the plane's model is not there.
     pub fn load(assets: &mut Assets, archives: &[Res], livery: usize) -> Option<Biplane> {
-        let model = MODELS.get(livery).copied().unwrap_or(MODELS[0]);
+        Biplane::load_model(assets, archives, MODELS.get(livery).copied().unwrap_or(MODELS[0]))
+    }
+
+    /// [`Biplane::load`] of the plane's model `model` by name (`biplane3`, MX vs. ATV's second model,
+    /// MD80e), with the same prop cones.
+    pub fn load_model(assets: &mut Assets, archives: &[Res], model: &str) -> Option<Biplane> {
         if !assets.load(archives, model) {
             return None;
         }

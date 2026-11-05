@@ -28,6 +28,20 @@ const BRAKE_GYRO_HELP: &str = "MX vs. ATV's option: a brake held in the air spin
 /// The Gas Gyro row's help (P226).
 const GAS_GYRO_HELP: &str = "MX vs. ATV's option: the throttle held in the air spins the bike nose-down, when Brake Gyro is not \
      already pitching it. Off is that game's default. Online and in a lobby the bikes keep the default.";
+/// The Fliers row's choices (MD80e).
+const FLIERS: [&str; 2] = ["MX Unleashed", "MX vs. ATV"];
+
+/// The Fliers row's help (MD80e).
+const FLIERS_HELP: &str = "Whose biplane and Kiowa the garage and Switch To Machine give you. MX vs. ATV flies that game's own models and \
+     figures, out of the fliers' machine pack in the mods folder (openmx-mods' import-atv fliers), on its own steps. Offline only.";
+
+/// The Flier Skin row's choices (MD80e): MX vs. ATV's four of each, in its garage's order.
+const FLIER_SKINS: [&str; 4] = ["Skin 1", "Skin 2", "Skin 3", "Skin 4"];
+
+/// The Flier Skin row's help (MD80e).
+const FLIER_SKIN_HELP: &str = "Which of MX vs. ATV's four skins your biplane and Kiowa wear. Skins 1 and 2 are MX Unleashed's machine, 3 and 4 \
+     a second model with its own collision and figures. A second player wears the other skin of the same model.";
+
 /// The Handling From row's first choice (MD77).
 const FIRST_TRICK_PACK: &str = "First Pack On";
 /// The Air Wrecks row's help (P138).
@@ -205,6 +219,9 @@ pub enum Key {
     /// MX vs. ATV's Brake Gyro and Gas Gyro options (P226).
     BrakeGyro,
     GasGyro,
+    /// MX vs. ATV's biplane and Kiowa (MD80e), and the skin they wear.
+    Fliers,
+    FlierSkin,
     /// The Original switch (P126), and each departure's under it.
     Original,
     /// The Ride tab's row into the Original Game page (P179).
@@ -634,6 +651,13 @@ impl Menu {
         for (key, name, on, help) in [(Key::BrakeGyro, "Brake Gyro", s.gyro.brake, BRAKE_GYRO_HELP), (Key::GasGyro, "Gas Gyro", s.gyro.gas, GAS_GYRO_HELP)] {
             rows.push(Row::on_off(key, name, on, help).off_if(why.is_some(), why.unwrap_or_default()));
         }
+        // MD80e: MX vs. ATV's biplane and Kiowa, from the machine pack
+        let fliers = Row::choice(Key::Fliers, "Fliers", &FLIERS, usize::from(s.fliers), FLIERS_HELP);
+        rows.push(fliers.off_if(folder_off.is_some(), "Needs the fliers' machine pack in the mods folder"));
+        let mut skin = Row::choice(Key::FlierSkin, "Flier Skin", &FLIER_SKINS, s.flier_skin.min(FLIER_SKINS.len() - 1), FLIER_SKIN_HELP);
+        skin.note = Some(if s.flier_skin < 2 { "Model one, MX Unleashed's machine".into() } else { "Model two, its own shape and figures".into() });
+        let why = if folder_off.is_some() { folder_off } else { (!s.fliers).then_some("Only with Fliers: MX vs. ATV") };
+        rows.push(skin.off_if(why.is_some(), why.unwrap_or_default()));
         rows
     }
 
@@ -1637,6 +1661,8 @@ impl Menu {
             Key::Handling => s.handling = game_sim::handling::Handling::ALL[next(row)],
             Key::BrakeGyro => s.gyro.brake = !s.gyro.brake,
             Key::GasGyro => s.gyro.gas = !s.gyro.gas,
+            Key::Fliers => s.fliers = !s.fliers,
+            Key::FlierSkin => s.flier_skin = next(row),
             Key::TrickPack(i) => {
                 let ids = self.trick_pack_ids();
                 let Some(id) = ids.get(i).cloned() else { return };
