@@ -4866,7 +4866,7 @@ fn calls_normal(c: &[wreck::Out]) -> bool {
 // --- F39: the vehicle update's callees -----------------------------------------------------------------
 
 use game_sim::air::AcosTable;
-use game_sim::handling::{anim, node};
+use game_sim::handling::{anim, attach, node};
 use game_sim::toys::Turns;
 use game_sim::handling::update::{self, Updates};
 
@@ -4896,6 +4896,24 @@ const NODE_AIM: u32 = 0x0019_41b0;
 const NODE_AXES: u32 = 0x0019_4960;
 const NODE_LOCAL: u32 = 0x0019_5320;
 const ATTACH_MOVED: u32 = 0x0026_6d30;
+/// F43b's: the attachment move's database (research/oracle.txt `# F43b`): the list's and the tree's
+/// vtables, the tree node's class and the one it passes through, the link pool's and the current
+/// tree's globals, and the heap's calls with the file names and lines each site passes.
+const LIST_VT: u32 = 0x003b_5510;
+const TREE_VT: u32 = 0x003b_6700;
+const TREE_NODE_VT: u32 = 0x003b_66e0;
+const TREE_NODE_BASE: u32 = 0x003b_52b0;
+const LINK_POOL: u32 = 0x0040_c460;
+const CURRENT_TREE: u32 = 0x0040_c198;
+const HEAP_ALLOC_IN: u32 = 0x001b_73d0;
+const HEAP_REALLOC: u32 = 0x001b_7470;
+const HEAP_NEW: u32 = 0x001b_7620;
+const HEAP_FREE: u32 = 0x001b_76d0;
+const LIST_FILE: u32 = 0x0039_99f8;
+const POOL_FILE: u32 = 0x0039_66e0;
+const TREE_FILE: u32 = 0x0039_98a8;
+const NODE_FILE: u32 = 0x0039_a520;
+const ATTACH_GLOBALS: attach::Globals = attach::Globals { links: LINK_POOL, current: CURRENT_TREE, node_class: TREE_NODE_VT, node_base: TREE_NODE_BASE };
 /// F42's: the bike's gear, trick step, net check and net unpack, and the player's stunt mark and the
 /// vehicle's end of the unpack they call (research/oracle.txt `# F42`).
 const GEAR_FN: u32 = 0x004d_aab0;
@@ -5005,6 +5023,11 @@ impl Updates for UpdateInRam<'_> {
             }
             _ => {}
         }
+        // F43b's: the attachment moved in its database, the port's.
+        if let Out::Moved(a) = c {
+            attach::moved(&mut NodeRam(self.ee), &ATTACH_GLOBALS, a);
+            return 0;
+        }
         // F43's scene-node calls, the port's.
         let pose = match c {
             Out::Pose { buf, .. } | Out::Place { buf, .. } => self.ee.scratch(U_POSES + buf),
@@ -5083,7 +5106,7 @@ impl Updates for UpdateInRam<'_> {
             Out::NodeSet { .. } | Out::Spin { .. } | Out::Aim { .. } | Out::Pose { .. } | Out::Place { .. } | Out::Frame { .. } | Out::Position { .. } | Out::Axes { .. } => {
                 unreachable!("served by the port")
             }
-            Out::Moved(a) => (ATTACH_MOVED, vec![u(a)], vec![x]),
+            Out::Moved(_) => unreachable!("served by the port"),
             Out::TrailOn(t) => (obj_fn(t, 4, 0x18), vec![u(t)], vec![x]),
             Out::TrailOff(t) => (obj_fn(t, 4, 0x20), vec![u(t)], vec![x]),
             Out::Send { net, arg } => (obj_fn(net, 0x38, 0x20), vec![u(net), u(arg)], vec![x]),
@@ -5142,6 +5165,51 @@ impl anim::Anim for NodeRam<'_> {
         self.0.set(28, GP);
         census(self.0, |ee| ee.call(HEAP_ALLOC, &[u64::from(bytes), u64::from(HEAP_FILE), line], &[], BUDGET));
         self.0.r(2) as u32
+    }
+}
+
+impl NodeRam<'_> {
+    /// An interpreter call the attachment move makes (the heap's, a pool's constructor), its census
+    /// under `heap Moved`.
+    fn heap(&mut self, f: u32, ints: &[u32]) -> u32 {
+        let ints: Vec<u64> = ints.iter().map(|&a| u64::from(a)).collect();
+        label("heap Moved");
+        self.0.set(28, GP);
+        census(self.0, |ee| ee.call(f, &ints, &[], BUDGET));
+        label("update Moved");
+        self.0.r(2) as u32
+    }
+}
+
+impl attach::Space for NodeRam<'_> {
+    fn class(&mut self, sub: u32) -> attach::Class {
+        match self.0.u32_at(sub + 4) {
+            LIST_VT => attach::Class::List,
+            TREE_VT => attach::Class::Tree,
+            _ => attach::Class::Other,
+        }
+    }
+    fn alloc(&mut self, bytes: u32, site: attach::Site) -> u32 {
+        match site {
+            attach::Site::Block => self.heap(HEAP_ALLOC, &[bytes, LIST_FILE, 94]),
+            attach::Site::Chunk => self.heap(HEAP_ALLOC, &[bytes, POOL_FILE, 0xad]),
+            attach::Site::ChunkIn(h) => self.heap(HEAP_ALLOC_IN, &[h, bytes, POOL_FILE, 0xaa]),
+            attach::Site::Node => self.heap(HEAP_NEW, &[bytes, NODE_FILE, 0x5b]),
+            s => unreachable!("{s:?} reallocates"),
+        }
+    }
+    fn realloc(&mut self, at: u32, bytes: u32, site: attach::Site) -> u32 {
+        match site {
+            attach::Site::Blocks => self.heap(HEAP_REALLOC, &[at, bytes, LIST_FILE, 91]),
+            attach::Site::Grow => self.heap(HEAP_REALLOC, &[at, bytes, TREE_FILE, 0x6d8]),
+            s => unreachable!("{s:?} allocates"),
+        }
+    }
+    fn free(&mut self, at: u32) {
+        self.heap(HEAP_FREE, &[at]);
+    }
+    fn construct(&mut self, ctor: u32, link: u32) {
+        self.heap(ctor, &[link]);
     }
 }
 
@@ -8688,13 +8756,14 @@ fn the_flips_tail_callees_leave_the_physics_alone() {
     assert_eq!(c.keys().map(String::as_str).collect::<Vec<_>>(), FLIP_CALLEES, "the callees left in the interpreter");
 }
 
-/// The callees ride-2 leaves in the interpreter, by label ([`label`]).
+/// The callees ride-2 leaves in the interpreter, by label ([`label`]). F43b: the attachment move is
+/// the port's, the heap it allocates from the original's (`heap Moved`).
 const RIDE_CALLEES: [&str; 11] = [
+    "heap Moved",
     "tail Message",
     "tail Paused",
     "tail Rumble",
     "tail RumbleReady",
-    "update Moved",
     "update NetDelta",
     "update NetFull",
     "update NetStunt",
@@ -8704,13 +8773,13 @@ const RIDE_CALLEES: [&str; 11] = [
 ];
 /// The callees flip-1 leaves in the interpreter: ride-2's, the trick's, the wreck's and the put-back's.
 const FLIP_CALLEES: [&str; 29] = [
+    "heap Moved",
     "tail Message",
     "tail Paused",
     "tail Rumble",
     "tail RumbleReady",
     "update KindClear",
     "update Mark",
-    "update Moved",
     "update NetDelta",
     "update NetFull",
     "update NetStunt",

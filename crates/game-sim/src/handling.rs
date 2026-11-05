@@ -25,6 +25,7 @@ use ps2_float::vu::Dest;
 use ps2_float::{F, Vf, fpu};
 
 pub mod anim;
+pub mod attach;
 pub mod bike;
 pub mod ground;
 pub mod mass;
