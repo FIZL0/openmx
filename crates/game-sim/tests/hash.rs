@@ -584,7 +584,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // (`Ride::impact`), sound only, set each frame, so not walked and not on the wire.
     // 12232 since F35: the plane's wreck bikes' hull mesh (`Flight::wreck`), the disc's geometry like
     // its bike mesh and hull, so not walked and not on the wire.
+    // 12240 since MD80b: the plane's MX vs. ATV switch (`Flight::mxvatv`), fixed when the plane is
+    // made, so not walked and not on the wire.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 12232, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 12240, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }

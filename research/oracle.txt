@@ -8990,6 +8990,40 @@ atv_kiowa_blade_spin        atv 0x004d3510 = kiowa_blade_spin's twin (0.95)
 #   *(+0x11c0) 0x150 bytes, aero *(+0x11c4). Rotor +0xc0 blade pitch (0.2618 = 15 deg climbing), +0xd0/+0xd8
 #   tilt, +0xf4 thrust, +0x100..+0x108 thrust along the tilted axis (value: +0x104 = +0xf4 hovering).
 #   Aero +0x128 a 0..1 fade with speed, +0x134/+0x140 on the ground -0.5236/0.0785 (-30 deg / 4.5 deg).
+# MD80b — SLUS-21104's biplane step ported behind the MX vs. ATV switch (game_sim::biplane *_mxvatv, phy
+# Plane::read_mxvatv, Flight::new_mxvatv); proofs tests/mxvatv_biplane.rs on MD80a's images (plane 0x014de810
+# in biplane, model one; 0x01b13790 in biplane3, model two; $gp 0x003dbaf0). Journal research/journal/
+# 2026-11-04-md80b-mxvatv-biplane-step. Read in the PC exe first (pc_biplane_aero_step 0x0040a750: the same
+# terms, fields and the -(v<0?-1:1) sign branch); the PS2 code is what the proofs run.
+# Plane fields: +0x10f0 flown, +0x310/+0x314 back/forward, +0x318 throttle, +0x324 grounded, +0x10f4..+0x10fc
+#   the elevator/aileron/rudder sticks, +0x1100 brake, +0x1104 elevator, +0x1108 elevator command, +0x110c
+#   aileron, +0x1110 rudder, +0x1114 tail-wheel steer, +0x1118.. [Joystick] (MXU's twelve words in MXU's order),
+#   +0x1148.. [Autopilot] (six), +0x12e0 pitch integral, +0x330/+0x334 beta/alpha, +0x358 speed, +0x368 roll,
+#   +0xbe4 nose y, +0xb8 body (+0x70 position, +0x80 velocity, +0x1d0 rates; vtable *(+0x110), force +0x74,
+#   moment +0x78), +0x3b0 terrain, +0x308 the wreck check's gate, +0xe8 the gravity record (+4 the scale).
+#   Engine *(+0x1164): +0x24 throttle ptr, +0x2c nose-y ptr, +0x30..+0x68 MXU's fifteen words, body +0x4c.
+#   Aero *(+0x1168): +0x24 true speed, +0x28..+0xb8 MXU's 37 constants, +0xbc speed, +0xc0 alpha, +0xc4 beta,
+#   +0xc8/+0xcc/+0xd0 command/aileron/rudder, +0xd4 rates ptrs, +0xd8 body, +0xdc..+0xec CL..CM.
+# Loader: atv_vehicle_phy_load's [Wrecks] go to +0xc88 MaxWreckTime, +0xc90 WreckGravity, +0xca0 WreckDamping,
+#   +0xcb0 WreckInertia. The plane's [Camera] override (vtable +0x370): Left/Right1stPerShoulderOffset +0x980/
+#   +0x990, ModelOne/ModelTwoFPCameraOffset +0xda0, FCamFileName +0xdb0; [Animation] PelvisBoxPosition +0x1330,
+#   PelvisBoxSize +0x1340. The part loader also reads CheckForCollisions, HighSpeedMinCollisionAngle and
+#   BodySpring{Stiffness,Damping,MaxPenetration,Restitution} (not ported).
+# Rounding: controls' throttle step adda(0,thr).madd/msub(inc,dt); autopilot error mula(ff,turn).madd(elev,
+#   max rate) - rate, integral adda(0,i).madd(dt, ig*err), command adda(0,i).madd(gain,err), the roll wrapped
+#   twice by the fused wrap (n = cvt.w(a/2pi), adda(0,a).msub(2pi,n)); engine prop adda(0,angle).madd(k*rpm,dt)
+#   wrapped, note wobble adda(0,note).madd(0.05|0.2, noise); every adda(0,x) turns a -0 into +0.
+# Wreck check atv_vehicle_wreck_check: 0 when +0x308 is 0; atv_terrain_edge(terrain, body+0x70, &w, &d, 0,
+#   f12 150) -> 1 and the extents when x<m || w-m<x || z<m || d-m<z (terrain+0x43c's +0x40/+0x48); throw
+#   toward (w/2, y, d/2), rsqrt(1, |d|^2) or (0,0,0,1), speed min(2073.6, w/2)/k, k = 2 sqrt(14.906832), lift
+#   adda(0, 240/k).madd(16.1, k), gravity scale *0.5, spins (0.5,0.4,0.7) * 2^-31 * atv_rand(), w 1; returns 1.
+atv_biplane_read_camera     atv 0x004c22e0 = the plane's [Camera] reader (vtable +0x370): shoulder and model camera offsets
+atv_terrain_edge            atv 0x0031d410 = whether a point is within a margin of the terrain's edge (and its extents)
+atv_rand                    atv 0x003561a8 = rand(): 0..2^31-1
+atv_smooth_noise            atv 0x00134580 = the shared smooth noise (f12 time -> f0)
+atv_powf                    atv 0x0034ff40 = powf
+atv_curve_table_ptr         atv 0x003eab20 = the pointer to the sine/cosine curve table the autopilot reads
+
 # MD89 — the quadtree sub-database's moving-entry virtuals (game-sim atv_spatial.rs Tree; atv_spatial's Database
 # dispatches List/Tree). Journal: research/journal/2026-11-02-md75-atv-frame/8-spatial-move.md "MD89". Proof:
 # tests/atv_spatial.rs (generated trees laid at 0x01f80000 in atv-r-spawn.ee.bin; the image's own tree 0x006547c0).

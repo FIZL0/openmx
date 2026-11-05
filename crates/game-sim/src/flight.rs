@@ -188,6 +188,12 @@ pub struct Flight {
     /// What the material table's listener heard the probe strike in the frame's search (F27a,
     /// [`crate::material_hit`]): a bike by player. Sound only.
     pub heard: crate::material_hit::Heard,
+    /// MX vs. ATV's plane (MD80b, [`Flight::new_mxvatv`]): the controls, the autopilot, the engine,
+    /// the aerodynamics and the edge test and throw are SLUS-21104's twins of MX Unleashed's
+    /// ([`biplane::controls_mxvatv`] and the rest). Off, as every MX Unleashed plane is built. Not in
+    /// the hash walk nor on the netplay wire, so MX Unleashed's hashes and snapshots are unchanged; a
+    /// snapshot taken back is MX Unleashed's.
+    pub mxvatv: bool,
 }
 
 /// The plane's collision mesh in the machines' archive (N22a): its collidable's, kind 0, which the
@@ -360,6 +366,12 @@ impl Flight {
         };
         f.record = contact_search::Record { rays: None, capacity: 0, ..wreck_bike::record(m, node_of(&f.body)) };
         f
+    }
+
+    /// MX vs. ATV's plane (MD80b): [`Flight::new`] off the model's half of MX vs. ATV's file
+    /// ([`phy::Plane::read_mxvatv`]), flown by SLUS-21104's steps ([`Flight::mxvatv`]).
+    pub fn new_mxvatv(plane: &phy::MxvatvPlane) -> Flight {
+        Flight { mxvatv: true, ..Flight::new(&plane.plane) }
     }
 
     /// **The plane's numbers changed under a flight going on** (P98): what [`Flight::new`] took off
@@ -1086,7 +1098,11 @@ impl Flight {
     /// The preforce listener.
     fn preforce(&mut self, dt: F) {
         self.body.clear_shock_peak();
-        controls(&mut self.pad, &mut self.surfaces, &self.joystick, &self.attitude, dt);
+        if self.mxvatv {
+            biplane::controls_mxvatv(&mut self.pad, &mut self.surfaces, &self.joystick, &self.attitude, dt);
+        } else {
+            controls(&mut self.pad, &mut self.surfaces, &self.joystick, &self.attitude, dt);
+        }
         for t in &mut self.tires {
             t.clear();
         }
@@ -1108,17 +1124,26 @@ impl Flight {
         });
         if self.crash.reason == 0 {
             self.attitude = self.measure.attitude(self.attitude.flown, &self.body);
-            autopilot(&self.pad, &mut self.surfaces, &self.joystick, &self.autopilot, &self.attitude, curve, h);
+            if self.mxvatv {
+                biplane::autopilot_mxvatv(&self.pad, &mut self.surfaces, &self.joystick, &self.autopilot, &self.attitude, curve, h);
+            } else {
+                autopilot(&self.pad, &mut self.surfaces, &self.joystick, &self.autopilot, &self.attitude, curve, h);
+            }
             let (noise, rng) = (&mut self.noise, &mut self.rng);
             let mut sample = |t: F| noise.get_or_insert_with(|| SmoothNoise::build(rng)).at(t);
             let b = &self.body;
-            let thrust = self.engine.step(self.surfaces.throttle, b.velocity, F(b.position.y()), F(self.measure.forward.y()), h, &mut sample);
+            let (throttle, altitude, nose_y) = (self.surfaces.throttle, F(b.position.y()), F(self.measure.forward.y()));
+            let thrust = if self.mxvatv {
+                self.engine.step_mxvatv(throttle, b.velocity, altitude, nose_y, h, &mut sample)
+            } else {
+                self.engine.step(throttle, b.velocity, altitude, nose_y, h, &mut sample)
+            };
             self.body.add_force_local(thrust);
             self.air = self.measure.air(&self.surfaces, &self.body);
             if self.max_g != F::ZERO {
                 self.hold_g(F(thrust.z()), h, acos);
             }
-            let (force, moment) = self.aero.forces(&self.air);
+            let (force, moment) = if self.mxvatv { self.aero.forces_mxvatv(&self.air) } else { self.aero.forces(&self.air) };
             self.body.add_force_local(force);
             self.body.add_moment_local(moment);
         }
@@ -1209,7 +1234,11 @@ impl Flight {
         let c = CrashContact { touching: self.record.touching, ignored, grounded: m.grounded, speed: m.airspeed, up_y: F(m.up.y()), holed, bare };
         let b = &mut self.body;
         let edge = self.area.filter(|a| wrap == [false, false] || holed || crate::off_map::outside_axes(a, wrap, b.position, F(crate::biplane::EDGE)));
-        let out = self.crash.step_in(&c, edge.as_ref(), b.position, &mut b.velocity, &mut b.rates, &mut self.edge_scale, &mut self.rng, dt);
+        let out = if self.mxvatv {
+            self.crash.step_mxvatv(&c, edge.as_ref(), b.position, &mut b.velocity, &mut b.rates, &mut self.edge_scale, &mut self.rng, dt)
+        } else {
+            self.crash.step_in(&c, edge.as_ref(), b.position, &mut b.velocity, &mut b.rates, &mut self.edge_scale, &mut self.rng, dt)
+        };
         if out.wreck.is_some() {
             self.wreck();
         }

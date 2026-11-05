@@ -714,6 +714,188 @@ impl Aero {
     }
 }
 
+// --- MX vs. ATV's (MD80b) ----------------------------------------------------------------------------
+//
+// SLUS-21104's biplane is MX Unleashed's, built again by a compiler that fuses multiplies into adds
+// (research/oracle.txt # MD80b; the PC exe's twins have the same terms and constants). These four are
+// the port's first four with that rounding, picked by [`crate::flight::Flight::mxvatv`]; nothing else
+// in them changed. Each is proved against the original's own on a RAM image of a flown plane
+// (tests/mxvatv_biplane.rs).
+
+/// [`wrap`] as SLUS-21104 does it: the whole turns taken off by one fused multiply-subtract.
+fn wrap_mxvatv(angle: F) -> F {
+    let n = F(fpu::from_i32((angle * INV_TWO_PI).to_i32()));
+    let a = Acc::adda(F::ZERO, angle).msub(F(TWO_PI), n);
+    if a <= PI {
+        if a < -PI { F(TWO_PI) + a } else { a }
+    } else {
+        a - TWO_PI
+    }
+}
+
+/// [`controls`] as SLUS-21104 has it: the throttle opens and closes by one fused multiply-add.
+pub fn controls_mxvatv(pad: &mut Pad, s: &mut Surfaces, j: &Joystick, at: &Attitude, dt: F) {
+    if !at.flown {
+        controls(pad, s, j, at, dt);
+        return;
+    }
+    let aileron_step = j.aileron_rate * dt;
+    let elevator_step = j.elevator_rate * dt;
+    let rudder_step = j.rudder_rate * dt;
+    let roll = at.roll.abs();
+    let fade = if at.nose_y.abs() < STEEP_NOSE {
+        if roll <= FRAC_PI_2 {
+            remap(roll, j.ramp_off_roll, j.off_roll, F::ONE, j.min_elevator)
+        } else {
+            remap(roll, F(PI) - j.off_roll, F(PI) - j.ramp_off_roll, j.min_elevator, F::ONE)
+        }
+    } else {
+        F::ONE
+    };
+    s.elevator = toward(s.elevator, pad.elevator * fade, elevator_step);
+    s.aileron = toward(s.aileron, pad.aileron * j.max_aileron, aileron_step);
+    s.rudder = toward(s.rudder, pad.rudder * j.max_rudder, rudder_step);
+    s.steer = toward(s.steer, pad.rudder, rudder_step);
+
+    if pad.forward != 0.0 && pad.back != 0.0 && at.grounded {
+        if s.throttle <= 0.0 {
+            s.throttle = j.reverse_throttle;
+        }
+        s.brake = F::ZERO;
+    } else {
+        if s.throttle < 0.0 {
+            s.throttle = F::ZERO;
+        }
+        if pad.forward != 0.0 {
+            s.throttle = Acc::adda(F::ZERO, s.throttle).madd(j.throttle_increment, dt);
+        } else if pad.back != 0.0 {
+            s.throttle = Acc::adda(F::ZERO, s.throttle).msub(j.throttle_increment, dt);
+        }
+        s.brake = pad.back;
+    }
+    s.throttle = s.throttle.max(j.reverse_throttle).min(F::ONE);
+}
+
+/// [`autopilot`] as SLUS-21104 has it: the roll wrapped by [`wrap_mxvatv`], the feed-forward term
+/// taken first into the pitch-rate demand, and the integrator's step and the output each one fused
+/// multiply-add.
+pub fn autopilot_mxvatv(pad: &Pad, s: &mut Surfaces, j: &Joystick, ap: &Autopilot, at: &Attitude, table: &CurveTable, dt: F) {
+    if !(pad.aileron.abs() < ap.aileron_dead_zone) {
+        s.elevator_command = s.elevator * j.max_elevator;
+        return;
+    }
+    let limit = ap.max_roll;
+    let roll = if at.roll.abs() <= F(PI) - limit {
+        at.roll.max(-limit).min(limit)
+    } else if at.roll <= 0.0 {
+        at.roll.min(F(-PI) + limit)
+    } else {
+        at.roll.max(F(PI) - limit)
+    };
+    let turn = if at.nose_y.abs() < TURN_NOSE {
+        let angle = wrap_mxvatv(wrap_mxvatv(roll));
+        let (_, sin) = curve(angle, table);
+        let yaw_rate = F(G) * sin / at.speed;
+        let (cos, sin) = curve(angle, table);
+        -yaw_rate * (sin / cos)
+    } else {
+        F::ZERO
+    };
+    let error = Acc::mula(ap.feed_forward, turn).madd(s.elevator, ap.max_pitch_rate) - at.pitch_rate;
+    let max = j.max_elevator;
+    s.pitch_integral = Acc::adda(F::ZERO, s.pitch_integral).madd(dt, ap.integrator_gain * error).max(-max).min(max);
+    s.elevator_command = Acc::adda(F::ZERO, s.pitch_integral).madd(ap.gain, error).max(-max).min(max);
+}
+
+impl Engine {
+    /// [`Engine::step`] as SLUS-21104 has it: the prop's angle advanced and wrapped, and the note's
+    /// wobble added, each by a fused multiply-add.
+    pub fn step_mxvatv(&mut self, throttle: F, velocity: Vf, altitude: F, nose_y: F, dt: F, noise: &mut impl FnMut(F) -> F) -> Vf {
+        self.power = self.max_power * throttle;
+        self.rpm = remap(throttle, F::ZERO, F::ONE, self.idle_rpm, self.max_rpm);
+        let v = [0, 1, 2].map(|k| F(velocity[k]));
+        let speed = Acc::mula(v[0], v[0]).madda(v[1], v[1]).madd(v[2], v[2]).sqrt();
+        let thin = remap(altitude, self.fade_altitude, self.max_altitude, F::ONE, F::ZERO);
+        let efficiency = remap(speed, F::ZERO, self.full_efficiency_speed, self.min_efficiency, F::ONE);
+        self.thrust = F(HP) * self.power * (thin * efficiency) / speed.max(F::ONE);
+        let force = Vf::new(0.0, 0.0, self.thrust.to_f32(), 1.0);
+
+        self.prop_angle = wrap_mxvatv(Acc::adda(F::ZERO, self.prop_angle).madd(F(RPM_TO_RAD) * self.prop_rpm, dt));
+        self.note = remap(self.rpm, self.idle_rpm, self.max_rpm, F(0.1), F(0.9));
+        if !(self.note <= 0.75) {
+            self.note = Acc::adda(F::ZERO, self.note).madd(F(0.05), noise(F(0.5) * self.clock));
+        } else if self.note < 0.101 {
+            self.note = Acc::adda(F::ZERO, self.note).madd(F(0.2), noise(F(0.5) * self.clock));
+        }
+        self.clock = self.clock + dt;
+        self.note = self.note + remap(nose_y, F(-1.0), F::ONE, F(0.1), F(-0.1));
+        self.note = remap(self.note, F::ZERO, F::ONE, F::ZERO, self.max_rpm);
+        force
+    }
+}
+
+impl Aero {
+    /// [`Aero::forces`] as SLUS-21104 has it: the same terms, each coefficient one chain of fused
+    /// multiply-adds in its own order, and the drag's sign `-(v < 0 ? -1 : 1)` made from an integer.
+    pub fn forces_mxvatv(&mut self, air: &Air) -> (Vf, Vf) {
+        let alpha = air.alpha + self.default_alpha;
+        let v = air.speed;
+        let beta = air.beta;
+        let yaw_speed = if self.true_speed { v } else { F(MIN_DYNAMIC_SPEED).max(v) };
+        let (c2v, b2v) = if v <= 1.0 {
+            (F::ZERO, F::ZERO)
+        } else {
+            let half = F(0.5) / v;
+            (self.chord * half, self.span * half)
+        };
+        let w = [0, 1, 2].map(|k| F(air.rates[k]));
+        let (elevator, aileron, rudder) = (air.elevator, air.aileron, air.rudder);
+
+        let round = F(libm::powf((alpha * (self.lift_round_off * self.lift_angle_scale)).abs().to_f32(),
+                                 self.lift_drop_off.to_f32()));
+        let curve = alpha * (self.lift_scale * self.lift_angle_scale) / (F::ONE + round);
+        self.lift = Acc::adda(F::ZERO, curve)
+            .madda(self.lift_alpha, alpha)
+            .madda(c2v, self.lift_q * w[0])
+            .madd(self.lift_de, elevator);
+        self.drag = Acc::adda(F::ZERO, self.drag0).madda(self.lift, self.drag1 * self.lift).madd(self.drag_de, elevator.abs());
+        self.side = Acc::mula(self.side_da, aileron)
+            .madda(self.side_beta, beta)
+            .madda(self.side_dr, rudder)
+            .madda(b2v, self.side_p * w[2])
+            .madd(b2v, self.side_r * w[1]);
+        self.roll = Acc::mula(b2v, self.cl_p * w[2])
+            .madda(self.cl_beta, beta)
+            .madda(b2v, self.cl_r * w[1])
+            .madda(self.cl_da, aileron)
+            .madd(self.cl_dr, rudder);
+        self.pitch = Acc::adda(F::ZERO, self.cm0)
+            .madda(self.cm_alpha, alpha)
+            .madda(c2v, self.cm_q * w[0])
+            .madd(self.cm_de, elevator);
+        if !(alpha.abs() <= self.cm_break_alpha) && alpha.abs() < F(2.0) * self.cm_break_alpha {
+            self.pitch = Acc::adda(F::ZERO, self.pitch).madd(alpha, self.cm_stall * (alpha.abs() - self.cm_break_alpha));
+        }
+
+        let half_rho_v = F(0.5) * self.density * v;
+        let yaw_slow = Acc::mula(b2v, self.cn_r * w[1]).madda(self.cn_beta, beta).madd(self.cn_dr, rudder);
+        let yaw_fast = Acc::mula(self.cn_da, aileron).madd(b2v, self.cn_p * w[2]);
+        let q = v * half_rho_v;
+        let sq = self.area * q;
+        let sq_slow = self.area * (yaw_speed * half_rho_v);
+        let back = if v < 0.0 { F::ONE } else { F(-1.0) };
+        let yaw = Acc::mula(yaw_fast, sq).madd(yaw_slow, sq_slow);
+        let force = Vf::new((self.side * sq).to_f32(), (self.lift * sq).to_f32(), (sq * (self.drag * back)).to_f32(), 1.0);
+        let moment = Vf::new(
+            (self.chord * (self.pitch * sq)).to_f32(),
+            (self.span * yaw).to_f32(),
+            (self.span * (self.roll * sq)).to_f32(),
+            1.0,
+        );
+        (force, moment)
+    }
+}
+
 // --- the crash ---------------------------------------------------------------------------------------
 
 
@@ -2152,4 +2334,72 @@ impl Crash {
         }
         out
     }
+}
+
+// --- MX vs. ATV's edge test (MD80b) ------------------------------------------------------------------
+
+impl Area {
+    /// The edge test SLUS-21104's vehicles share: `x < m`, `width - m < x`, `z < m`, `depth - m < z`,
+    /// any one. The same as [`Area::outside`] but for `NaN`, which this one counts as inside.
+    pub fn outside_mxvatv(&self, at: Vf, margin: F) -> bool {
+        let (x, z) = (F(at.x()), F(at.z()));
+        x < margin || self.width - margin < x || z < margin || self.depth - margin < z
+    }
+}
+
+impl Crash {
+    /// [`Crash::step_in`] with MX vs. ATV's edge test and throw in place of MX Unleashed's: MXVehicle's
+    /// wreck check, which every SLUS-21104 vehicle's vtable names. The throw is MX Unleashed's but for
+    /// its lift, `240/k` loaded into the accumulator and `16.1·k` fused onto it; the edge test is
+    /// [`Area::outside_mxvatv`]. The rest of the test (the contact rule, the clocks, the recovery) is
+    /// [`Crash::step_in`]'s.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_mxvatv(
+        &mut self,
+        c: &CrashContact,
+        area: Option<&Area>,
+        position: Vf,
+        velocity: &mut Vf,
+        rates: &mut Vf,
+        gravity_scale: &mut F,
+        rng: &mut Rng,
+        dt: F,
+    ) -> Crashed {
+        let mut thrown = None;
+        if let Some(area) = area.filter(|a| self.reason != THROWN && (a.outside_mxvatv(position, F(EDGE)) || c.holed)) {
+            throw_mxvatv(area, position, velocity, rates, gravity_scale, rng);
+            self.wreck(THROWN, thrown.get_or_insert_with(Crashed::default));
+        }
+        let out = self.step_in(c, None, position, velocity, rates, gravity_scale, rng, dt);
+        match thrown {
+            Some(t) => Crashed { wreck: t.wreck, recover: out.recover },
+            None => out,
+        }
+    }
+}
+
+/// MXVehicle's throw back from the edge: toward the middle of the area at the body's height, as fast
+/// as half the width (at most [`THROW_CAP`]) over the arc's time, plus the arc's lift, the gravity
+/// scale halved, and a random spin of `rand() · 2⁻³¹` times `(0.5, 0.4, 0.7)`.
+pub fn throw_mxvatv(area: &Area, position: Vf, velocity: &mut Vf, rates: &mut Vf, gravity_scale: &mut F, rng: &mut Rng) {
+    let half_width = F(0.5) * area.width;
+    let target = Vf::new(half_width.to_f32(), position.y(), (F(0.5) * area.depth).to_f32(), 1.0);
+    let mut toward = minus(target, position);
+    let length = dot(toward, toward);
+    if F::ZERO == length {
+        toward = Vf::VF0;
+    } else {
+        let r = F::ONE.rsqrt(length);
+        toward = Vf::new((F(toward.x()) * r).to_f32(), (F(toward.y()) * r).to_f32(), (F(toward.z()) * r).to_f32(), toward.w());
+    }
+    let k = F(2.0) * F(THROW_FALL).sqrt();
+    let speed = F(THROW_CAP).min(half_width) / k;
+    let lift = Acc::adda(F::ZERO, F(THROW_LIFT) / k).madd(F(THROW_UP), k);
+    *velocity = scaled(toward, speed);
+    velocity[1] = (F(velocity.y()) + lift).to_f32();
+    *gravity_scale = *gravity_scale * 0.5;
+    for (lane, spin) in THROW_SPIN.into_iter().enumerate() {
+        rates[lane] = (F(spin) * rng.unit()).to_f32();
+    }
+    rates[3] = 1.0;
 }

@@ -1768,3 +1768,105 @@ impl Gear {
         }
     }
 }
+
+// --- MX vs. ATV's biplane file (MD80b) ---------------------------------------------------------------
+
+/// **MX vs. ATV's `biplane.phy`** (`Veh\biplane.phy`), as SLUS-21104's plane reads it: MX Unleashed's
+/// sections and keys, but two models in one file and the wreck keys of MXVehicle, the base class every
+/// vehicle of that game shares.
+///
+/// * The plane is model one or model two, by the skin it is given ([`mxvatv_model_one`]), and the
+///   keys that differ between the two are spelled `ModelOne…` and `ModelTwo…`: `[Aerodynamics]`'
+///   `Chord`, `Span`, `SurfaceArea`, `AspectRatio`, `DefaultAngleOfAttack`, `MaxElevator`,
+///   `MaxAileron` and `MaxRudder`; each tire's `TireRadius` and `BodyTireCenter`; `[Animation]`'s
+///   `PelvisBoxPosition` and `PelvisBoxSize`; `[Camera]`'s `FPCameraOffset`. Every other key is read
+///   unprefixed, with MX Unleashed's defaults and conversions ([`Plane`]).
+/// * `[Wrecks]` is read twice. MXVehicle's loader takes `MaxWreckTime` (default 5), `WreckGravity`
+///   (default 3), `WreckDamping` (default ones) and `WreckInertia` (default `(0, 0, 0, 1)`); the
+///   plane's own then takes `MinWreckSpeed` alone. So [`PlaneWrecks::wreck_time`] is `MaxWreckTime`
+///   here; an MX Unleashed `WreckTime` is not read.
+/// * `[Camera]` is read after the rest, by the plane's override: the two first-person shoulder
+///   offsets and the model's camera offset, all defaulting to `(0, 0, 0, 1)`, and `FCamFileName`,
+///   a name the camera loads (not kept here).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MxvatvPlane {
+    /// What the plane shares with MX Unleashed's, read with the model's keys.
+    pub plane: Plane,
+    /// `ModelOneFPCameraOffset` or `ModelTwoFPCameraOffset`.
+    pub fp_camera_offset: Vf,
+    /// `Left1stPerShoulderOffset`, `Right1stPerShoulderOffset`.
+    pub left_shoulder_offset: Vf,
+    pub right_shoulder_offset: Vf,
+}
+
+/// Whether SLUS-21104's plane is model one, from its skin's name form: the spawn record's form word,
+/// which its init switches on. Forms 1 (`"%s%s"`), 2 and 7 (`"%s%d"`) and 6 (`"%s_ss"`) are model one;
+/// 3, 4 and 5 (`"%s%d"`) and 8, 9 and 10 (`"%s%d_ss"`) model two. The garage's skins `biplane` and
+/// `biplane2` are model one, `biplane3` and `biplane4` model two. A form the switch has no case for
+/// leaves the word as constructed, zero: model two.
+pub fn mxvatv_model_one(form: u32) -> bool {
+    matches!(form, 1 | 2 | 6 | 7)
+}
+
+impl Plane {
+    /// Read MX vs. ATV's file out of its bytes, as model one or model two.
+    pub fn read_mxvatv_bytes(bytes: &[u8], model_one: bool) -> MxvatvPlane {
+        Plane::read_mxvatv(&Ini::parse_bytes(bytes), model_one)
+    }
+
+    /// Load MX vs. ATV's file as SLUS-21104's plane does: [`Plane::read`]'s sections in its order,
+    /// with the model's keys where the file has two, and the wrecks and the camera as [`MxvatvPlane`]
+    /// says.
+    pub fn read_mxvatv(ini: &Ini, model_one: bool) -> MxvatvPlane {
+        let model = if model_one { "ModelOne" } else { "ModelTwo" };
+        let key = |k: &str| format!("{model}{k}");
+        let mut plane = Plane::read(ini);
+
+        let s = ini.section("Wrecks");
+        plane.wrecks.wreck_time = s.float_or("MaxWreckTime", F(5.0));
+        plane.wrecks.wreck_gravity = s.float_or("WreckGravity", F(3.0));
+        plane.wrecks.wreck_damping = s.vector("WreckDamping", ONES);
+        plane.wrecks.wreck_inertia = s.vector("WreckInertia", UNIT_W);
+
+        let s = ini.section("Aerodynamics");
+        let f = |k: &str| s.float_or(&key(k), F::ZERO);
+        let (chord, span, aspect_ratio) = (f("Chord"), f("Span"), f("AspectRatio"));
+        let a = &mut plane.aero;
+        a.chord = if chord == F::ZERO && aspect_ratio > F::ZERO { span / aspect_ratio } else { chord };
+        a.span = span;
+        a.surface_area = f("SurfaceArea");
+        a.aspect_ratio = aspect_ratio;
+        a.default_angle_of_attack = f("DefaultAngleOfAttack") * DEG;
+        let sf = &mut plane.surfaces;
+        sf.max_elevator = f("MaxElevator") * DEG;
+        sf.max_aileron = f("MaxAileron") * DEG;
+        sf.max_rudder = f("MaxRudder") * DEG;
+
+        for (gear, name) in plane.gear.iter_mut().zip(["FrontLeft Tire", "FrontRight Tire", "Rear Tire"]) {
+            let s = ini.section(name);
+            let tire_radius = s.float_or(&key("TireRadius"), F::ONE);
+            let body_tire_center = s.vector(&key("BodyTireCenter"), UNIT_W);
+            gear.tire_radius = tire_radius;
+            gear.inv_tire_radius = if tire_radius > F::ZERO { F::ONE / tire_radius } else { F::ZERO };
+            gear.body_tire_center = body_tire_center;
+            gear.contact = Vf::new(
+                body_tire_center.x(),
+                (F(body_tire_center.y()) - tire_radius).0,
+                body_tire_center.z(),
+                body_tire_center.w(),
+            );
+        }
+
+        let s = ini.section("Animation");
+        plane.pelvis_box =
+            PelvisBox { position: s.vector(&key("PelvisBoxPosition"), UNIT_W), size: s.vector(&key("PelvisBoxSize"), UNIT_W) };
+
+        let s = ini.section("Camera");
+        MxvatvPlane {
+            plane,
+            fp_camera_offset: s.vector(&key("FPCameraOffset"), UNIT_W),
+            left_shoulder_offset: s.vector("Left1stPerShoulderOffset", UNIT_W),
+            right_shoulder_offset: s.vector("Right1stPerShoulderOffset", UNIT_W),
+        }
+    }
+}
