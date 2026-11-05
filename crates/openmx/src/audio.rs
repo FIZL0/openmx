@@ -286,6 +286,11 @@ impl Library {
         got
     }
 
+    /// How many sounds are decoded and kept, and their samples' bytes (P298a).
+    pub fn held(&self) -> (usize, usize) {
+        self.cache.values().flatten().fold((0, 0), |(n, b), c| (n + 1, b + c.pcm.len() * 2))
+    }
+
     /// A member of another `.res` (an `.aud` or `music.pb`) as text.
     pub fn text(&mut self, res: &str, member: &str) -> Option<String> {
         let r = self.disc.res(res).ok()?;
@@ -4667,6 +4672,8 @@ impl Sound {
         sound.shootoff = read.shootoff(events_res.unwrap_or(track_res));
         sound.drive_on = read.drive_on(track_res);
         sound.hits = read.hits(track_res);
+        let (clips, bytes) = lib.held();
+        println!("sound: {clips} clips decoded, {:.1} MB", bytes as f64 / (1 << 20) as f64);
         Ok(sound)
     }
 }

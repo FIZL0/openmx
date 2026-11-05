@@ -6212,6 +6212,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let mut ground_stream: Option<worlds::GroundStream> = None;
     // How many times the app had been sent away when the ground's uploads began (MD97).
     let mut ground_away = gpuwin::times_away();
+    // How many times the app had entered the background when the ride last gave its models back
+    // (P298a).
+    let mut backgrounded = resume::backgrounds();
     // And its maps' pages, near the riders (P283).
     let mut paint_stream: Option<paint_stream::PaintStream> = None;
     // The most ground chunks a frame of the ride handed the GPU, how many in all, and in how many
@@ -7295,6 +7298,17 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     f.menu.pause();
                 }
                 keep_resume_point(&f.dir, ride_resume_point(&args, &world, head.is_some(), f.menu.lobby.start.is_some()).as_ref());
+                // On its way to being suspended (P298a: a 5.2 GiB ride was jetsam's first pick), the
+                // ride's models and their textures go back before the answer lets iOS suspend it.
+                // The window draws nothing till it is in front again, and that frame, under the
+                // pause, uploads what it draws from the assets still held.
+                if resume::backgrounds() != backgrounded {
+                    backgrounded = resume::backgrounds();
+                    if let Some(r) = renderer_of(&mut offscreen, window) {
+                        let (models, materials, textures) = r.give_back_models();
+                        println!("resume: gave back {models} models, {materials} materials and {textures} textures in the background");
+                    }
+                }
                 resume::answered(asked);
             }
             if resume::back() {

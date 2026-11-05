@@ -158,6 +158,15 @@ pub fn answered(asked: usize) {
     let _ = asked;
 }
 
+/// How many times the app has entered the background (iOS's DidEnterBackground, on its way to being
+/// suspended) since it opened: never elsewhere (P298a).
+pub fn backgrounds() -> usize {
+    #[cfg(target_os = "ios")]
+    return openmx_ios::backgrounds();
+    #[cfg(not(target_os = "ios"))]
+    0
+}
+
 /// Whether the app came back to the foreground since the last call: its point is not needed.
 pub fn back() -> bool {
     #[cfg(target_os = "ios")]

@@ -3492,6 +3492,31 @@ impl Renderer {
         self.view_lights.clear();
     }
 
+    /// Give the GPU back every model, material and texture uploaded so far, and the depth target,
+    /// while keeping what the views draw (P298a: the iPhone app in the background). Unlike
+    /// [`Renderer::forget_assets`], the scene's and the owners' props and groves, the skies, the
+    /// ground and its paint stay. Each model is uploaded again from the same assets the first time a
+    /// frame asks for it, so the next frame draws the same picture. Returns how many models,
+    /// materials and textures were let go.
+    pub fn give_back_models(&mut self) -> (usize, usize, usize) {
+        let let_go = self.uploaded();
+        self.models.clear();
+        self.model_ids.clear();
+        self.materials.clear();
+        self.material_ids.clear();
+        self.textures.clear();
+        self.statics.truncate(1);
+        self.statics_written = 0;
+        for p in &mut self.props {
+            p.model = None;
+        }
+        self.depth = None;
+        self.sun.world.generation += 1;
+        // Freed once the device has seen that no submission still holds them; no GPU work is made.
+        let _ = self.device.poll(wgpu::PollType::Poll);
+        let_go
+    }
+
     /// Wait for everything submitted so far to be drawn.
     pub fn finish(&self) {
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
