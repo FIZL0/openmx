@@ -7181,3 +7181,355 @@ fn flip_replays_bit_exact_with_rust_callees() {
         ]
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// F31b5d: every other listener on state 4's sim shown inert on both replays
+// ---------------------------------------------------------------------------------------------
+
+/// The preforce list's thunk (its elements' vt `+8`), the bike's and the five riders' alike: it hands
+/// its element's owner to the owner's PreProcess.
+const PREFORCE_THUNK: u32 = 0x004d_e0c0;
+/// The force list's code (its element's `+8`'s `+0xc`) and the post list's (its element's vt `+8`),
+/// the bike's on state 4.
+const FORCE_THUNK: u32 = 0x0049_bd50;
+const POST_THUNK: u32 = 0x004d_e0d0;
+
+/// A listener of state 4's sim that is not the bike's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Other {
+    /// One of the five other riders' PreProcess, by its place among them on the preforce list.
+    PreProcess(u32),
+    /// The tail's first other leaf.
+    Leaf,
+    /// The tail's second, the manager: its own work and walk but its rider's step.
+    Manager,
+    /// The manager's rider, whose target is the bike's record.
+    Rider,
+}
+
+/// How [`listeners_flow`] runs the other listeners.
+#[derive(Clone, Copy, PartialEq)]
+enum Others {
+    /// As themselves, watched: their writes marked, and every read of a marked byte by the rest of the
+    /// frame noted ([`Flow`]).
+    Watched,
+    /// As themselves, unhooked.
+    Run,
+    /// Not at all: their hooks return at once. The rider's one word the frame reads ([`wreck::SETTLES`])
+    /// is fed from the capture instead, row r's into frame r + 1, as the put-back spot is.
+    Dropped,
+}
+
+/// What [`listeners_flow`] saw over a replay.
+#[derive(Debug, Default)]
+struct Flow {
+    /// Each other listener's runs.
+    ran: BTreeMap<Other, usize>,
+    /// Every byte an other listener wrote that nothing else has written since, and who wrote it.
+    marked: BTreeMap<u32, Other>,
+    /// The bytes marked during the current outermost other listener by one nested in it.
+    nested: std::collections::BTreeSet<u32>,
+    /// How deep in other listeners the interpreter is.
+    depth: u32,
+    /// Every read of a marked byte by anything but an other listener: (row, byte, its writer, the
+    /// stretch of the frame that read it).
+    read: Vec<(usize, u32, Other, &'static str)>,
+    /// The stretch of the frame running: one of the bike's listeners, or the rest of the frame.
+    stage: &'static str,
+    /// Every byte of the bike object or its physics blocks an other listener wrote outside the windows
+    /// it is known to write ([`OTHER_LEAVES`]): (row, byte, the listener).
+    wrote_bike: Vec<(usize, u32, Other)>,
+    /// The bike object's and its blocks' ranges, this row's.
+    bike: Vec<std::ops::Range<u32>>,
+    /// The elements the `+0x24` and `+0x3c` lists' getters answered, this frame.
+    got24: Vec<u32>,
+    got3c: Vec<u32>,
+    /// The row being run.
+    row: usize,
+    /// The bike object and its blocks after every frame ([`bike_and_blocks`]).
+    after: Vec<Vec<(u32, u32)>>,
+}
+
+impl Flow {
+    /// The reads and writes since the last settle: reads of marked bytes are the frame depending on
+    /// an other listener; marked bytes written are the frame's again. A byte written and then read
+    /// in one stretch counts as read too: the reads are a set, so this errs towards reporting.
+    fn settle(&mut self, ee: &mut Ee) {
+        let reads = ee.reads.replace(Some(Default::default())).unwrap_or_default();
+        for a in reads {
+            if let Some(&w) = self.marked.get(&a) {
+                self.read.push((self.row, a, w, self.stage));
+            }
+        }
+        for a in std::mem::take(&mut ee.written) {
+            self.marked.remove(&a);
+        }
+    }
+}
+
+/// Runs the hooked function `f` as itself, from inside its hook, with the arguments the hook was
+/// reached with.
+fn run_as_itself(ee: &mut Ee, f: u32) {
+    let (args, x, ra, sp, stack) = ([ee.r(4), ee.r(5), ee.r(6), ee.r(7)], ee.f(12), ee.r(31), ee.r(29), ee.stack);
+    ee.stack = (sp as u32 - 0x40) & !0xf;
+    ee.call(f, &args, &[x], BUDGET);
+    // The interpreter files the hook back under the `pc` it leaves, so leave it here.
+    (ee.stack, ee.pc) = (stack, f);
+    ee.set(29, sp);
+    ee.set(31, ra);
+}
+
+/// A part of the frame's own code hooked to look at: it runs as itself, its writes kept in the
+/// frame's.
+fn run_as_frame(ee: &mut Ee, f: u32) {
+    let before = std::mem::take(&mut ee.written);
+    run_as_itself(ee, f);
+    ee.written.extend(before);
+}
+
+/// One of the bike's listeners, its reads told apart as `stage`'s.
+fn run_as_stage(ee: &mut Ee, f: u32, stage: &'static str, flow: &RefCell<Flow>) {
+    let outer = {
+        let mut t = flow.borrow_mut();
+        t.settle(ee);
+        std::mem::replace(&mut t.stage, stage)
+    };
+    run_as_itself(ee, f);
+    let mut t = flow.borrow_mut();
+    t.settle(ee);
+    t.stage = outer;
+}
+
+/// An other listener, watched: the frame's reads and writes so far settled, then it runs as itself,
+/// its reads its own, its writes marked (those into the bike outside its windows noted). The
+/// interpreter's stack is left unmarked: a frame on it is written before it is read.
+fn run_as_other(ee: &mut Ee, f: u32, who: Other, flow: &RefCell<Flow>) {
+    if flow.borrow().depth == 0 {
+        flow.borrow_mut().settle(ee);
+    }
+    let before = std::mem::take(&mut ee.written);
+    flow.borrow_mut().depth += 1;
+    run_as_itself(ee, f);
+    let t = &mut *flow.borrow_mut();
+    t.depth -= 1;
+    let wrote = std::mem::replace(&mut ee.written, before);
+    let windows: &[std::ops::Range<u32>] = if who == Other::Rider { OTHER_LEAVES[2].2 } else { &[] };
+    let stack = (ee.stack - STACK_USE as u32)..(ee.stack + 0x400);
+    let wrote: Vec<u32> = wrote.into_iter().filter(|a| !stack.contains(a)).collect();
+    for &a in &wrote {
+        if t.bike.iter().any(|r| r.contains(&a)) && !t.nested.contains(&a) && !windows.iter().any(|r| r.contains(&a.wrapping_sub(BIKE))) {
+            t.wrote_bike.push((t.row, a, who));
+        }
+    }
+    if t.depth == 0 {
+        // Its reads are its own; the bytes a nested listener wrote stay that one's.
+        ee.reads.replace(Some(Default::default()));
+        for a in wrote {
+            if !t.nested.contains(&a) {
+                t.marked.insert(a, who);
+            }
+        }
+        t.nested.clear();
+    } else {
+        for a in wrote {
+            t.marked.insert(a, who);
+            t.nested.insert(a);
+            ee.written.insert(a);
+        }
+    }
+}
+
+/// C15's `name` replayed whole in the interpreter as [`replay`] does, every row's blocks bit-exact
+/// against the capture, the other listeners of state 4's sim run as `others` says: the five other
+/// riders' PreProcess (the preforce thunk on any element but the bike's) and the tail's other leaves
+/// ([`OTHER_LEAVES`]). On every frame the world's lists are the bike's body, its PreProcess and the
+/// riders', its Force and its PostProcess alone, before and after; the `+0x24` list's getter hands
+/// the frame the bike's record alone, once a pass, and the `+0x3c` list's nothing.
+fn listeners_flow(name: &str, others: Others) -> Option<Flow> {
+    let mut ee = hooked(image()?);
+    let rows = rows(name)?;
+    let mine = ee.u32_at(BIKE + seed::RECORD);
+    let lists = |ee: &Ee| -> Vec<Vec<u32>> {
+        [List::Bodies, List::Preforce, List::Force, List::Constraints, List::Post]
+            .into_iter()
+            .map(|l| {
+                let (n, arr) = list(ee, l);
+                (0..n).map(|i| ee.u32_at(arr + 4 * i)).collect()
+            })
+            .collect()
+    };
+    let want = lists(&ee);
+    let riders: Vec<u32> = want[1].iter().copied().filter(|&e| e != BIKE_PREFORCE).collect();
+    assert_eq!(want[0], [ee.u32_at(BIKE + 0xb8)], "{name}: one body, the bike's");
+    assert_eq!((want[1].len(), riders.len()), (6, 5), "{name}: the bike's PreProcess and five riders': {:#x?}", want[1]);
+    assert!(want[1].iter().all(|&e| ee.u32_at(ee.u32_at(e) + 8) == PREFORCE_THUNK), "{name}: the preforce list's code is the one thunk");
+    assert_eq!(want[2].len(), 1, "{name}: one Force");
+    assert_eq!((ee.u32_at(want[2][0] + 0xc), ee.u32_at(ee.u32_at(want[2][0] + 8) + 0xc)), (BIKE_FORCE, FORCE_THUNK), "{name}: the Force is the bike's");
+    assert!(want[3].is_empty(), "{name}: no constraints");
+    assert_eq!(want[4], [BIKE_POST], "{name}: one PostProcess, the bike's");
+    assert_eq!(ee.u32_at(ee.u32_at(BIKE_POST) + 8), POST_THUNK);
+    let t: Rc<RefCell<Flow>> = Rc::default();
+    t.borrow_mut().stage = "frame";
+    if others != Others::Run {
+        let h = t.clone();
+        ee.hooks.insert(
+            PREFORCE_THUNK,
+            Box::new(move |ee: &mut Ee| {
+                let e = ee.r(4) as u32;
+                if e == BIKE_PREFORCE {
+                    return run_as_stage(ee, PREFORCE_THUNK, "PreProcess", &h);
+                }
+                let k = riders.iter().position(|&r| r == e).unwrap_or_else(|| panic!("a preforce element not on the list: {e:#x}"));
+                let who = Other::PreProcess(k as u32);
+                *h.borrow_mut().ran.entry(who).or_default() += 1;
+                if others == Others::Watched {
+                    run_as_other(ee, PREFORCE_THUNK, who, &h);
+                }
+            }),
+        );
+        for ((e, step, _), who) in OTHER_LEAVES.into_iter().zip([Other::Leaf, Other::Manager, Other::Rider]) {
+            let h = t.clone();
+            ee.hooks.insert(
+                step,
+                Box::new(move |ee: &mut Ee| {
+                    assert_eq!(ee.r(4) as u32, e, "{who:?}'s step's listener");
+                    *h.borrow_mut().ran.entry(who).or_default() += 1;
+                    if others == Others::Watched {
+                        run_as_other(ee, step, who, &h);
+                    }
+                }),
+            );
+        }
+        for (f, stage) in [(RECORD_CLEAR, "record clear"), (RECORD_PASS, "record pass"), (FORCE_THUNK, "Force"), (POST_THUNK, "PostProcess"), (VEHICLE_THUNK, "vehicle update")] {
+            let h = t.clone();
+            ee.hooks.insert(f, Box::new(move |ee: &mut Ee| run_as_stage(ee, f, stage, &h)));
+        }
+    }
+    for (get, three_c) in [(LIST24_GET, false), (LIST3C_GET, true)] {
+        let h = t.clone();
+        ee.hooks.insert(
+            get,
+            Box::new(move |ee: &mut Ee| {
+                run_as_frame(ee, get);
+                let mut t = h.borrow_mut();
+                let e = ee.r(2) as u32;
+                if three_c { t.got3c.push(e) } else { t.got24.push(e) }
+            }),
+        );
+    }
+    for (r, row) in rows.iter().enumerate() {
+        poke(&mut ee, row, &READER);
+        {
+            let mut t = t.borrow_mut();
+            t.row = r;
+            t.bike = std::iter::once(BIKE..BIKE + 0x1800).chain(physics(&ee).into_iter().map(|(_, at, n)| at..at + n)).collect();
+            t.got24.clear();
+            t.got3c.clear();
+        }
+        assert_eq!(lists(&ee), want, "{name} row {r}: the world's lists before the frame");
+        ee.written.clear();
+        if others == Others::Watched {
+            *ee.reads.borrow_mut() = Some(Default::default());
+        }
+        ee.set(28, GP);
+        ee.call(FRAME, &[u64::from(SIM)], &[f32::from_bits(DT)], BUDGET);
+        if others == Others::Watched {
+            let mut t = t.borrow_mut();
+            t.settle(&mut ee);
+            assert_eq!(t.stage, "frame");
+            *ee.reads.borrow_mut() = None;
+        }
+        assert_eq!(lists(&ee), want, "{name} row {r}: the world's lists after the frame");
+        {
+            let mut t = t.borrow_mut();
+            assert_eq!(t.got24, [mine, mine], "{name} row {r}: the +0x24 list is the bike's record alone, for each of its two passes");
+            assert!(t.got3c.is_empty(), "{name} row {r}: the +0x3c list hands the frame nothing: {:#x?}", t.got3c);
+            assert_eq!(ee.u32_at(SIM + 0x3c), 0, "{name} row {r}: the +0x3c list is empty");
+            t.after.push(bike_and_blocks(&ee));
+        }
+        let d = diff(&ee, row);
+        assert!(d.is_empty(), "{name} row {r} (vsync {}): {} words differ\n  {}", row["vsync"], d.len(), d.iter().take(40).cloned().collect::<Vec<_>>().join("\n  "));
+        assert_eq!(wrecked(|o| ee.u32_at(BIKE + o)), row_wrecked(row), "{name} row {r}: the wreck state");
+        poke(&mut ee, row, &SPOT);
+        if others == Others::Dropped {
+            poke(&mut ee, row, &[(wreck::SETTLES, 4)]);
+        }
+    }
+    drop(ee);
+    Some(Rc::try_unwrap(t).ok().unwrap().into_inner())
+}
+
+/// **F31b5d — of the other listeners, only the tail's rider writes anything the bike's frame reads**:
+/// C15 ride-2 and flip-1 replayed whole in the interpreter, every row bit-exact, with each listener of
+/// state 4's sim that is not the bike's watched ([`listeners_flow`]): the five other riders'
+/// PreProcess, the tail's first other leaf, its manager and the manager's rider, each once a frame;
+/// the `+0x24` list the bike's record alone and the `+0x3c` list empty on every frame, the world's
+/// force and post lists the bike's alone. None of them writes a byte of the bike object or its physics
+/// blocks outside the rider's two windows ([`OTHER_LEAVES`]); and of every byte they write, the only
+/// ones the rest of the frame (or a later one) reads before writing them itself are the rider's. The
+/// reads are a set per stretch of the frame, so a byte the frame writes and then reads in one stretch
+/// counts as read: the rider's list errs long. That the frame needs none of them but the rider's
+/// `+0x920` is [`the_bikes_frame_without_the_other_listeners_is_bit_exact`]'s.
+#[test]
+fn only_the_riders_writes_are_read_by_the_bikes_frame() {
+    for (name, n) in [("ride-2", 459), ("flip-1", 465)] {
+        let Some(t) = listeners_flow(name, Others::Watched) else { return };
+        assert_eq!(t.after.len(), n);
+        let every: Vec<Other> = (0..5).map(Other::PreProcess).chain([Other::Leaf, Other::Manager, Other::Rider]).collect();
+        assert_eq!(t.ran.keys().copied().collect::<Vec<_>>(), every, "{name}: the other listeners");
+        assert!(t.ran.values().all(|&k| k == n), "{name}: each once a frame: {:?}", t.ran);
+        assert!(t.wrote_bike.is_empty(), "{name}: {} bytes of the bike written by the others, the first {:x?}", t.wrote_bike.len(), &t.wrote_bike[..t.wrote_bike.len().min(20)]);
+        let mut by: BTreeMap<(Other, &str), (std::collections::BTreeSet<u32>, usize, usize)> = BTreeMap::new();
+        for &(r, a, w, st) in &t.read {
+            let e = by.entry((w, st)).or_insert((Default::default(), r, r));
+            e.0.insert(a & !3);
+            (e.1, e.2) = (e.1.min(r), e.2.max(r));
+        }
+        for ((w, st), (words, f, l)) in &by {
+            eprintln!("{name}: {w:?}'s writes read by {st}: {} words, {:#x}..={:#x}, rows {f}..={l}", words.len(), words.first().unwrap(), words.last().unwrap());
+        }
+        let writers: std::collections::BTreeSet<Other> = t.read.iter().map(|&(_, _, w, _)| w).collect();
+        assert_eq!(writers.into_iter().collect::<Vec<_>>(), [Other::Rider], "{name}: whose writes the bike's frame reads");
+    }
+}
+
+/// **F31b5d — the bike's frame without the other listeners is bit-exact**: C15 ride-2 and flip-1
+/// replayed whole in the interpreter twice, once with every other listener of state 4's sim run and
+/// once with none of them run at all ([`Others::Dropped`]: the five other riders' PreProcess and the
+/// tail's first two other leaves return at once, the second's walk and so the third, the rider, with
+/// it; the `+0x24` and `+0x3c` lists and the world's force and
+/// post lists hold nothing else on any frame, [`listeners_flow`]'s checks). The one word of the rider's
+/// the frame needs, its "a ragdoll part is touching" flag at the bike's [`wreck::SETTLES`] (F41), is
+/// fed from the capture as the put-back spot is. Every row's body, node, record, wheels and engine are
+/// C15's word for word, the wreck at row 125 and the put-back at 193; and after every frame the whole
+/// bike object and its physics blocks are the full frame's, but for the rider's own windows of the
+/// record, exactly the words of them the rider writes ([`OTHER_LEAVES`]; `+0x920`, fed, a frame
+/// late). So the pure frame steps the bike alone.
+#[test]
+fn the_bikes_frame_without_the_other_listeners_is_bit_exact() {
+    for (name, n) in [("ride-2", 459), ("flip-1", 465)] {
+        let (Some(run), Some(dropped)) = (listeners_flow(name, Others::Run), listeners_flow(name, Others::Dropped)) else { return };
+        assert_eq!((run.after.len(), dropped.after.len()), (n, n));
+        // The rider is stepped by the manager's own walk, so it goes with it.
+        assert!(dropped.ran.values().all(|&k| k == n) && dropped.ran.len() == 7 && !dropped.ran.contains_key(&Other::Rider), "{name}: each other listener dropped once a frame: {:?}", dropped.ran);
+        let windows = OTHER_LEAVES[2].2;
+        let mut parted = std::collections::BTreeSet::new();
+        for (r, (a, b)) in run.after.iter().zip(&dropped.after).enumerate() {
+            assert_eq!(a.len(), b.len(), "{name} row {r}: the same blocks");
+            for (&(at, x), &(at2, y)) in a.iter().zip(b) {
+                assert_eq!(at, at2, "{name} row {r}: the same blocks");
+                if x != y {
+                    let o = at.wrapping_sub(BIKE);
+                    assert!(o < 0x1800 && windows.iter().any(|w| w.contains(&o)), "{name} row {r}: {at:#x} (bike+{o:#x}) {x:#010x} with the others, {y:#010x} without");
+                    parted.insert(o);
+                }
+            }
+        }
+        eprintln!("{name}: without the others, the bike's words that part from the full frame's: {parted:#x?}");
+        let mut want: Vec<u32> = vec![0x930, 0x934, 0x938, 0x940];
+        if name == "flip-1" {
+            want = (0x870..0x88c).step_by(4).filter(|&o| o != 0x87c).chain([0x890, 0x894, 0x898, 0x920]).chain(want).chain((0x950..0x980).step_by(4).filter(|&o| o != 0x95c)).collect();
+        }
+        assert_eq!(parted.into_iter().collect::<Vec<_>>(), want, "{name}: the words that part are the rider's");
+    }
+}

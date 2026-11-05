@@ -9571,6 +9571,17 @@ atv_heap_free               atv 0x001b76d0 = free
 #   (handling::wreck::clock SETTLES), flip-1 rows 125..=140. Nothing else reads, and nothing but the rider
 #   writes, any other byte of bike+0x870..+0x8a0 / +0x920..+0x980. Follow-up S278.
 
+# F31b5d: state 4's sim listeners that are not the bike's, shown inert on C15 ride-2 and flip-1. Journal:
+# research/journal/2026-11-05-f31b5d-other-listeners-inert/.
+#   Lists every frame: sim+0x24 = the bike's record alone (getter 0x00208390 answers it once a pass); sim+0x3c
+#   empty; world bodies = the bike's; preforce = bike+0x30 and five riders, all thunk 0x004de0c0 (vt +8);
+#   force = one element (+0xc = bike+0x3c), code 0x0049bd50; constraints none; post = bike+0x34, 0x004de0d0.
+#   Writes the frame reads: none of the five PreProcess', leaf 0x00eb6420's or manager 0x01ed82d0's own; the
+#   rider 0x010af350's (stepped by the manager's walk), read by the Force, PostProcess, record pass, vehicle
+#   update and the rest (an upper bound: reads are a set per stretch). With 0x004de0c0 (but the bike's),
+#   0x001c9540 and 0x002cf9f0 returning at once and bike+0x920 fed from the capture both replays stay
+#   bit-exact, and the bike object and its blocks part from the full frame's only in the rider's words.
+
 # F42: the bike's trick step, gear, net check and net unpack (F39's vt calls), ported as
 # game_sim::handling::update::{trick, gear, net_check, net_unpack}. Journal:
 # research/journal/2026-11-04-f42-trick-gear-net-virtuals/.
