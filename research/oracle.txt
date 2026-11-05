@@ -9523,6 +9523,29 @@ atv_heap_free               atv 0x001b76d0 = free
 #   object; the state-4 unwreck only divides *(+0xe8)+4 by the throw scale for a 13.
 #   Along flip-1 the test enters 1 (front) on row 125 and the clock's unwreck puts it back on row 193;
 #   the tail's own put-back (vt +0x3a8 from the update) is never taken on either replay.
+# F31b5c — the tail's, wreck's and update's callees left in the interpreter, watched on ride-2 and flip-1
+# (game_sim::handling::wreck::engine_reset/engine_gear/wheel_reset; tests/mxvatv_bike_ride.rs' census).
+# Comment rows only. Journal: research/journal/2026-11-05-f31b5c-tail-callees-watched/.
+#   Engine reset 0x0049f7f0(engine): +0xa0 = +0x54, +0xa4 = +0xa8 = 0, then j 0x0049fb50(engine, 1):
+#   blez g / slt +0x6c,g -> nothing; else +0x5c = g, r = +0x34 * (*(+0x70) + 4*(+0x5c) - 4) (mul.s),
+#   +0x74 = r, +0x78 = 1.0 / r (div.s). Wheel reset 0x004a04c0(wheel): +0xd0 +0xd4 +0x1d4 +0x224 +0x228
+#   +0x210 +0xf0 +0xf8 = 0; +0x140 +0x170 +0x180 +0x190 +0x840 +0x850 = (0,0,0,1) from 0x00396fc0;
+#   +0x130 +0x200 = (0,1,0,1) from 0x00397000.
+#   Ground reset 0x00492ca0(bike), left in the interpreter: byte +0x45 bit 1 (clear on state 4) gates the
+#   node unhook 0x0018d540(+0xe4) and 0x00196c10(+0xe4, +0xb0, 1, 1); unhooks +0xd0+0x18, +0xcc+0x18,
+#   +0xd4+0x18; body vt(+0x110) +0x14 = 0x00492b70 (body+0x50 = quad); bike vt +0xf0 = 0x00492e50(bike,
+#   +0x50, +0x60, +0x70); byte +0x44 bit 0 (set): parts +0xd0/+0xcc/+0xd4 on (vt at p+0x28, +0x20, p+0x24)
+#   and attached 0x001143e0(p, +0xb4, +0xc0, 1). Orient 0x00492e50: the axes crossed and normalized (VU
+#   opmula/opmsub, rsqrt), +0xc = 1.0, 0x00135860(out, a, b), body vt +0x10 = 0x00492b90 (body+0x40 =
+#   quad), +0x58 = 0x00492b30 (body+0x180 = a1's four, body+0x160 = a2's quad), +0x3c = 0x00493070 (the
+#   body's rest: 0x00493200 x8 then VU), node set 0x00194b10(+0xe4, 0), node 0x00194260(+0xe4, 0, a, b,
+#   0, 1, 0), bike vt +0xe4 = 0x00492c40 (node world box 0x00196820, spatial move 0x0018d690), probe
+#   place 0x00114360 for +0xd0 and +0xcc.
+#   Along ride-2 and flip-1 the only interpreter callee that changes the physics blocks is the ground
+#   reset (body +0x40..+0x1f8, node +0x30..+0xa8; bike +0x60..+0x7c), on row 193. Others write bike words
+#   only: node frame/position/axes outputs (+0x750..+0x7c8, +0x7f0..+0x828, +0x9f0..+0xa08), the sender
+#   +0xcfc, trick hold vt +0x4ec +0x14dc..+0x14e8, kind set vt +0x3a0 +0x9a8, post 0x00272300 +0x460/
+#   +0x468 (row 125), settle vt +0x4a8 +0x1754.
 
 # F39: the bike vehicle update's own callees, ported as game_sim::handling::update. Journal:
 # research/journal/2026-11-04-f39-vehicle-update-callees/.

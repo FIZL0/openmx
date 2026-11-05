@@ -3069,7 +3069,7 @@ impl TailInRam<'_> {
     fn run(&mut self, f: u32, ints: &[u64], x: f32) -> u64 {
         self.write();
         self.ee.set(28, GP);
-        self.ee.call(f, ints, &[x], BUDGET);
+        census(self.ee, |ee| ee.call(f, ints, &[x], BUDGET));
         let r = self.ee.r(2);
         self.read();
         r
@@ -3084,6 +3084,7 @@ impl Vehicles for TailInRam<'_> {
         self.ee.u8_at(self.ee.u32_at(SKIP_FLAG) + 0x225) & 8 != 0
     }
     fn paused(&mut self) -> bool {
+        label("tail Paused");
         let m = self.run(LOOKUP, &LOOKUP_ARGS, 0.0);
         let state = self.ee.u32_at(BIKE + tail::STATE);
         let g = self.run(self.ee.u32_at(self.ee.u32_at(state + 4) + 0xac), &[u64::from(state), m], 0.0) as u32;
@@ -3091,6 +3092,7 @@ impl Vehicles for TailInRam<'_> {
         self.ee.u32_at(self.ee.u32_at(obj + 0x378) + 0x14) != 0
     }
     fn rumble_ready(&mut self) -> bool {
+        label("tail RumbleReady");
         let state = self.ee.u32_at(BIKE + tail::STATE);
         self.run(RUMBLE_READY, &[u64::from(self.ee.u32_at(state + 0x6ac))], 0.0) as u32 != 0
     }
@@ -3100,6 +3102,7 @@ impl Vehicles for TailInRam<'_> {
     }
     fn out(&mut self, c: tail::Out, dt: F) {
         use tail::Out;
+        label(&format!("tail {c:?}"));
         self.write();
         if matches!(c, Out::WreckTest | Out::PutBack) {
             port_wreck(self.ee, c, dt);
@@ -3895,7 +3898,8 @@ const WRECK_OWN: [(u32, u32); 7] = [
 const WRECK_SCRATCH: [u32; 5] = [61, 62, 63, 64, 65];
 
 /// The bike in RAM as the wreck's port sees it: every word read and written in place, each call out
-/// the original's, the bike's own virtuals among the wreck's the port's.
+/// the original's, the bike's own virtuals among the wreck's the port's, and the engine's and wheels' resets and the
+/// sync too (F31b5c, F39).
 struct WreckInRam<'a> {
     ee: &'a mut Ee,
     /// What `$f12` is handed with the calls that take no float of their own.
@@ -3905,7 +3909,7 @@ struct WreckInRam<'a> {
 impl WreckInRam<'_> {
     fn call(&mut self, f: u32, ints: &[u64], x: f32) -> u32 {
         self.ee.set(28, GP);
-        self.ee.call(f, ints, &[x], BUDGET);
+        census(self.ee, |ee| ee.call(f, ints, &[x], BUDGET));
         self.ee.r(2) as u32
     }
     fn own(&self, slot: u32) {
@@ -3926,11 +3930,13 @@ impl Wrecks for WreckInRam<'_> {
     }
     fn normal(&mut self, terrain: u32, at: u32) -> Vf {
         let out = self.ee.scratch(WRECK_SCRATCH[1]);
+        label("wreck Normal");
         self.call(TERRAIN_NORMAL, &[u64::from(terrain), u64::from(at), u64::from(out), 0, 0], self.x);
         Vf::from_bits([0, 4, 8, 12].map(|k| self.ee.u32_at(out + k)))
     }
     fn out(&mut self, c: wreck::Out) -> u32 {
         use wreck::Out;
+        label(&format!("wreck {c:?}"));
         let bike = u64::from(BIKE);
         let x = self.x;
         let ee = &*self.ee;
@@ -3964,6 +3970,20 @@ impl Wrecks for WreckInRam<'_> {
                 wreck::put_back(self, snap, kind);
                 return 0;
             }
+            // F31b5c's: the engine's and wheels' resets, and the sync (F39's).
+            Out::Engine(at) => {
+                wreck::engine_reset(self, at);
+                return 0;
+            }
+            Out::Wheel(at) => {
+                wreck::wheel_reset(self, at);
+                return 0;
+            }
+            Out::Sync => {
+                assert_eq!(vt(self.ee, 0x378), SYNC_FN, "the bike's vt +0x378");
+                update::sync(&mut UpdateInRam { ee: &mut *self.ee, x });
+                return 0;
+            }
             Out::OutOfBounds => (slot(0x16c), vec![bike], x),
             Out::Bounds { node, at } => {
                 let out = u64::from(ee.scratch(WRECK_SCRATCH[2]));
@@ -3988,15 +4008,13 @@ impl Wrecks for WreckInRam<'_> {
             Out::PartOff(p) => (part_fn(p, 0x18), vec![u64::from(p + 0x24)], x),
             Out::Unhook(at) => (UNHOOK, vec![u64::from(at)], x),
             Out::Attach { part, a, b } => (ATTACH, vec![u64::from(part), u64::from(a), u64::from(b), 1], x),
-            Out::Engine(at) => (ENGINE_RESET, vec![u64::from(at)], x),
-            Out::Wheel(at) => (WHEEL_RESET, vec![u64::from(at)], x),
+            Out::Engine(_) | Out::Wheel(_) | Out::Sync => unreachable!("the port's"),
             Out::Rider { a, b } => (RIDER_SETTLE, vec![u64::from(a), u64::from(b), 1, 1], x),
             Out::Pose { bone, buf } => (BONE_POSE, vec![u64::from(bone), 0, u64::from(ee.scratch(WRECK_SCRATCH[3] + buf))], x),
             Out::Place { part, buf } => (BONE_PLACE, vec![u64::from(part), u64::from(ee.scratch(WRECK_SCRATCH[3] + buf))], x),
             Out::Ground => (GROUND_RESET, vec![bike], x),
             Out::Kind(set) => (slot(if set { 0x3a0 } else { 0x39c }), vec![bike], x),
             Out::Trail(at) => (TRAIL_RESET, vec![u64::from(at)], x),
-            Out::Sync => (slot(0x378), vec![bike], x),
             Out::Camera(at) => (CAMERA_RESET, vec![u64::from(at)], x),
             Out::Normal { .. } => unreachable!("asked through normal()"),
         };
@@ -4735,7 +4753,7 @@ struct UpdateInRam<'a> {
 impl UpdateInRam<'_> {
     fn call(&mut self, f: u32, ints: &[u64], floats: &[f32]) -> u32 {
         self.ee.set(28, GP);
-        self.ee.call(f, ints, floats, BUDGET);
+        census(self.ee, |ee| ee.call(f, ints, floats, BUDGET));
         self.ee.r(2) as u32
     }
     fn put_quad(&mut self, at: u32, q: update::Quad) {
@@ -4764,6 +4782,7 @@ impl Updates for UpdateInRam<'_> {
     }
     fn out(&mut self, c: update::Out) -> u32 {
         use update::Out;
+        label(&format!("update {c:?}"));
         // F42's four, the port's too.
         for (k, slot, f) in [(Out::Gear, 0x358, GEAR_FN), (Out::Trick, 0x4e4, TRICK_FN), (Out::NetCheck, 0x3e8, NET_CHECK_FN), (Out::NetUnpack, 0x3f0, NET_UNPACK_FN)] {
             if c == k {
@@ -4840,6 +4859,7 @@ impl Updates for UpdateInRam<'_> {
     }
     fn vector(&mut self, c: update::Out) -> update::Quad {
         use update::Out;
+        label(&format!("update {c:?}"));
         let x = self.x;
         let s = |k: u32| self.ee.scratch(k);
         let (out, inp, rot) = (s(U_PLACED), s(U_IN), s(U_ROTATED));
@@ -7181,3 +7201,293 @@ fn flip_replays_bit_exact_with_rust_callees() {
         ]
     );
 }
+
+// F31b5c — the tail's, wreck's and update's callees left in the interpreter, watched.
+
+/// One interpreter callee of [`TailInRam`], [`WreckInRam`] or [`UpdateInRam`] over a replay: how
+/// often it ran, on how many rows, and each word of the bike's physics blocks ([`physics`]) and of
+/// the bike object it changed, with the rows it changed them on.
+#[derive(Default, Debug)]
+struct Callee {
+    calls: u32,
+    rows: std::collections::BTreeSet<usize>,
+    blocks: BTreeMap<String, std::collections::BTreeSet<usize>>,
+    bike: BTreeMap<u32, std::collections::BTreeSet<usize>>,
+}
+
+/// The census of one replay, while it is taken: the row, the label of the call being made, and the
+/// callees by label.
+#[derive(Default)]
+struct Census {
+    row: usize,
+    label: String,
+    callees: BTreeMap<String, Callee>,
+}
+
+thread_local! {
+    static CENSUS: RefCell<Option<Census>> = const { RefCell::new(None) };
+}
+
+/// Names the interpreter calls that follow, by their `Out`'s variant (its arguments dropped).
+fn label(l: &str) {
+    CENSUS.with(|c| {
+        if let Some(c) = c.borrow_mut().as_mut() {
+            c.label = l.split(['(', ' ', '{']).take(2).collect::<Vec<_>>().join(" ");
+        }
+    });
+}
+
+/// Runs an interpreter call; while a census is taken, logs what it changed of the bike's physics
+/// blocks and the bike object under the current label.
+fn census(ee: &mut Ee, call: impl FnOnce(&mut Ee)) {
+    if CENSUS.with(|c| c.borrow().is_none()) {
+        return call(ee);
+    }
+    let blocks = physics(ee);
+    let snap = |ee: &Ee| -> Vec<u32> {
+        let mut w: Vec<u32> = (0..0x1800).step_by(4).map(|o| ee.u32_at(BIKE + o)).collect();
+        for &(_, at, n) in &blocks {
+            w.extend((0..n).step_by(4).map(|o| ee.u32_at(at + o)));
+        }
+        w
+    };
+    let before = snap(ee);
+    call(ee);
+    let after = snap(ee);
+    CENSUS.with(|c| {
+        let mut c = c.borrow_mut();
+        let c = c.as_mut().unwrap();
+        let row = c.row;
+        let e = c.callees.entry(c.label.clone()).or_default();
+        e.calls += 1;
+        e.rows.insert(row);
+        for (k, (b, a)) in before.iter().zip(&after).enumerate() {
+            if b == a {
+                continue;
+            }
+            if k < 0x600 {
+                e.bike.entry(4 * k as u32).or_default().insert(row);
+            } else {
+                let mut i = k - 0x600;
+                for &(name, _, n) in &blocks {
+                    if i < n as usize / 4 {
+                        e.blocks.entry(format!("{name}+{:#x}", 4 * i)).or_default().insert(row);
+                        break;
+                    }
+                    i -= n as usize / 4;
+                }
+            }
+        }
+    });
+}
+
+/// [`replay_steps`] with the census taken: answers its callees by label.
+fn census_of(name: &str) -> Option<BTreeMap<String, Callee>> {
+    let words = mass_words(&race250p()?)?;
+    let trn = nat05_trn()?;
+    let map = track::Terrain::parse(&trn).unwrap();
+    let mut ee = hooked(image()?);
+    for (a, mask, v) in words {
+        ee.set_u32(a, ee.u32_at(a) & !mask | v & mask);
+    }
+    let mut noise = None;
+    let rows = rows(name)?;
+    CENSUS.with(|c| *c.borrow_mut() = Some(Census::default()));
+    for (r, row) in rows.iter().enumerate() {
+        CENSUS.with(|c| c.borrow_mut().as_mut().unwrap().row = r);
+        poke(&mut ee, row, &READER);
+        steps_frame(&mut ee, F(f32::from_bits(DT)), &map, &mut noise);
+        let d = diff(&ee, row);
+        assert!(d.is_empty(), "{name} row {r}: {} words differ\n  {}", d.len(), d.iter().take(40).cloned().collect::<Vec<_>>().join("\n  "));
+        poke(&mut ee, row, &SPOT);
+    }
+    let c = CENSUS.with(|c| c.borrow_mut().take()).unwrap();
+    Some(c.callees)
+}
+
+fn show(name: &str, callees: &BTreeMap<String, Callee>) {
+    for (l, c) in callees {
+        let rows = |s: &std::collections::BTreeSet<usize>| format!("{} rows {:?}..{:?}", s.len(), s.first(), s.last());
+        eprintln!("{name} {l}: {} calls, {}", c.calls, rows(&c.rows));
+        for (w, s) in &c.blocks {
+            eprintln!("    block {w}: {}", rows(s));
+        }
+        for (w, s) in &c.bike {
+            eprintln!("    bike +{w:#x}: {}", rows(s));
+        }
+    }
+}
+
+/// A random float for the resets' oracle: zeros of either sign, ones, tiny, huge and the PS2's
+/// largest among the plain ones.
+fn reset_float(g: &mut Gen) -> u32 {
+    match g.bits() % 8 {
+        0 => 0,
+        1 => 0x8000_0000,
+        2 => 0x3f80_0000,
+        3 => g.bits() & 0x807f_ffff,
+        4 => 0x7f7f_ffff | (g.bits() & 0x8000_0000),
+        5 => g.bits(),
+        _ => g.f(-50.0, 50.0).to_bits(),
+    }
+}
+
+/// **F31b5c — the engine's and a wheel's resets are the originals**: 10 000 of each on state 4's
+/// engine and wheels, every word they read drawn at random (the idle revs, the gear count about 1 and
+/// signed, the final drive and the gear table's ratios with zeros, tiny and huge ones; every word of
+/// the wheel), run through SLUS-21104's resets and through [`wreck::engine_reset`] and
+/// [`wreck::wheel_reset`] from the same words. The engine, its table and the wheel come out word for
+/// word.
+#[test]
+fn the_engine_and_wheel_resets_are_the_originals() {
+    let Some(mut ee) = image().map(hooked) else { return };
+    let engine = ee.u32_at(BIKE + 0x142c);
+    let wheels = the_wheels(&ee);
+    let table = WRECK_AREA;
+    let regions = [(engine, 0x100), (table, 0x40), (wheels[0], 0x920), (wheels[1], 0x920)];
+    let image_words = snap_regions(&ee, &regions);
+    let mut g = Gen(0x0031_b5c0);
+    let mut t = BTreeMap::new();
+    for k in 0..20_000 {
+        restore_regions(&mut ee, &regions, &image_words);
+        let (f, at, path) = if k % 2 == 0 {
+            for o in [0x54, 0xa0, 0xa4, 0xa8, 0x5c, 0x74, 0x78] {
+                ee.set_u32(engine + o, g.bits());
+            }
+            ee.set_u32(engine + 0x34, reset_float(&mut g));
+            let gears = if g.one_in(5) { [0, -1, i32::MIN, 1][(g.bits() % 4) as usize] } else { (g.bits() % 7) as i32 };
+            ee.set_u32(engine + 0x6c, gears as u32);
+            ee.set_u32(engine + 0x70, table);
+            ee.set_u32(table, reset_float(&mut g));
+            (ENGINE_RESET, engine, if gears >= 1 { "engine, in first" } else { "engine, no gears" })
+        } else {
+            let wheel = wheels[(g.bits() % 2) as usize];
+            for o in (0..0x920).step_by(4) {
+                ee.set_u32(wheel + o, g.bits());
+            }
+            (WHEEL_RESET, wheel, "wheel")
+        };
+        tally(&mut t, path);
+        let before = snap_regions(&ee, &regions);
+        ee.set(28, GP);
+        ee.call(f, &[u64::from(at)], &[0.0], BUDGET);
+        let want = snap_regions(&ee, &regions);
+        restore_regions(&mut ee, &regions, &before);
+        let mut m = WreckInRam { ee: &mut ee, x: 0.0 };
+        if f == ENGINE_RESET {
+            wreck::engine_reset(&mut m, at);
+        } else {
+            wreck::wheel_reset(&mut m, at);
+        }
+        let got = snap_regions(&ee, &regions);
+        let off: Vec<String> = (0..want.len()).filter(|&i| want[i] != got[i]).map(|i| format!("word {i}: original {:#010x}, port {:#010x}", want[i], got[i])).collect();
+        assert!(off.is_empty(), "case {k} ({path}): {}", off.join("\n  "));
+    }
+    eprintln!("{t:?}");
+    assert!(t.values().all(|&n| n >= 1000), "{t:?}");
+}
+
+/// The interpreter callees the census allows to change the bike's physics blocks: none.
+fn census_writers(c: &BTreeMap<String, Callee>) -> Vec<(&str, usize, Vec<&String>)> {
+    c.iter().filter(|(_, e)| !e.blocks.is_empty()).map(|(l, e)| (l.as_str(), e.blocks.len(), e.blocks.keys().take(4).collect())).collect()
+}
+
+/// **F31b5c — C15's ride, the tail's, wreck's and update's callees watched**: on every row of
+/// ride-2, each callee the port's vehicle update, wreck and update callees still hand the
+/// interpreter (the pause lookup, the rumble, the frame message, the out-of-bounds test, the
+/// rider's animation and nodes, the parts' and sender's virtuals, the walk) leaves every word of the
+/// bike's physics blocks as it found it.
+#[test]
+fn the_rides_tail_callees_leave_the_physics_alone() {
+    let Some(c) = census_of("ride-2") else { return };
+    show("ride-2", &c);
+    assert_eq!(census_writers(&c), [], "callees that wrote the physics blocks");
+    assert_eq!(c.keys().map(String::as_str).collect::<Vec<_>>(), RIDE_CALLEES, "the callees left in the interpreter");
+}
+
+/// **F31b5c — C15's flip, watched the same**: on every row of flip-1, wreck and put-back among
+/// them, the callees left in the interpreter leave the physics blocks alone but one: the put-back's
+/// ground reset, on row 193, which F31b5c1 ports.
+#[test]
+fn the_flips_tail_callees_leave_the_physics_alone_but_the_ground_reset() {
+    let Some(c) = census_of("flip-1") else { return };
+    show("flip-1", &c);
+    let w = census_writers(&c);
+    assert_eq!(w.iter().map(|w| w.0).collect::<Vec<_>>(), ["wreck Ground"], "callees that wrote the physics blocks: {w:?}");
+    assert_eq!(c["wreck Ground"].rows.iter().copied().collect::<Vec<_>>(), [193], "the ground reset runs on the put-back's row");
+    assert_eq!(c.keys().map(String::as_str).collect::<Vec<_>>(), FLIP_CALLEES, "the callees left in the interpreter");
+}
+
+/// The callees ride-2 leaves in the interpreter, by label ([`label`]).
+const RIDE_CALLEES: [&str; 23] = [
+    "tail Message",
+    "tail Paused",
+    "tail Rumble",
+    "tail RumbleReady",
+    "update Aim",
+    "update AnimBlend",
+    "update AnimPlay",
+    "update AnimStop",
+    "update Axes",
+    "update Frame",
+    "update Local",
+    "update Moved",
+    "update NodePlace",
+    "update NodeSet",
+    "update Part",
+    "update Place",
+    "update Pose",
+    "update Position",
+    "update Send",
+    "update Spin",
+    "update TrickWanted",
+    "update Walk",
+    "wreck OutOfBounds",
+];
+/// The callees flip-1 leaves in the interpreter: ride-2's, the trick's, the wreck's and the put-back's.
+const FLIP_CALLEES: [&str; 44] = [
+    "tail Message",
+    "tail Paused",
+    "tail Rumble",
+    "tail RumbleReady",
+    "update Aim",
+    "update AnimBlend",
+    "update AnimPlay",
+    "update AnimStop",
+    "update Axes",
+    "update Frame",
+    "update KindClear",
+    "update Local",
+    "update Mark",
+    "update Moved",
+    "update NodePlace",
+    "update NodeSet",
+    "update Part",
+    "update Place",
+    "update Pose",
+    "update Position",
+    "update Search",
+    "update Send",
+    "update Spin",
+    "update TrickEnd",
+    "update TrickHold",
+    "update TrickWanted",
+    "update Walk",
+    "wreck Attach",
+    "wreck Camera",
+    "wreck Ground",
+    "wreck Kind",
+    "wreck OutOfBounds",
+    "wreck PartOff",
+    "wreck PartOn",
+    "wreck Place",
+    "wreck Pose",
+    "wreck Post",
+    "wreck Rider",
+    "wreck Rumble",
+    "wreck RumbleReady",
+    "wreck Settle",
+    "wreck Stance",
+    "wreck Trail",
+    "wreck Unhook",
+];
