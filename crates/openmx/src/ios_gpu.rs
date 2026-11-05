@@ -101,6 +101,11 @@ pub fn times_away() -> u32 {
 /// How often the main thread looks at the safe area and which way up the phone is.
 const LOOK: Duration = Duration::from_millis(100);
 
+/// The longest one [`GpuWindow::draw`] rests while the app is away (P302): the loops still poll,
+/// answer going away and run what ticks are owed ten times a second, and DidBecomeActive ends the
+/// rest at once.
+const AWAY_REST: Duration = Duration::from_millis(100);
+
 /// The main thread's side.
 struct Host {
     game: Option<Box<dyn FnOnce() + Send>>,
@@ -285,6 +290,8 @@ pub struct GpuWindow {
     layer: Option<Layer>,
     /// "Tap screen to resume controller" is up (P233).
     needs_tap: NeedsTap,
+    /// Since when the frame loop has rested while the app is away (P302), for the log.
+    resting: Option<Instant>,
 }
 
 /// As `gpuwin.rs`'s.
@@ -404,6 +411,7 @@ impl GpuWindow {
             clicks: Vec::new(),
             layer: None,
             needs_tap: NeedsTap::default(),
+            resting: None,
         };
         w.poll();
         w.resized = false;
@@ -512,7 +520,7 @@ impl GpuWindow {
         height: usize,
         draw: impl FnOnce(&mut Renderer, &Target) -> T,
     ) -> Result<Option<T>, String> {
-        if !self.focused {
+        if self.rest() || !self.focused {
             return Ok(None);
         }
         let size = self.size;
@@ -556,6 +564,26 @@ impl GpuWindow {
         self.renderer.queue.present(texture);
         self.waited += present.elapsed();
         Ok(Some(out))
+    }
+
+    /// Whether the app is away (P302): inactive (WillResignActive: the app switcher, Control Center)
+    /// or in the background, iOS hands the surface no drawable and nothing paces the loop, which drew
+    /// nothing at 3700-13556 fps in the user's 0.10.3 logs. Away, wait for it to come back, at most
+    /// [`AWAY_REST`], and draw nothing.
+    fn rest(&mut self) -> bool {
+        openmx_ios::rest_while_away(AWAY_REST);
+        // Back while it rested: this frame is drawn.
+        if openmx_ios::is_away() {
+            if self.resting.is_none() {
+                println!("ios: away, the frame loop rests");
+            }
+            self.resting.get_or_insert_with(Instant::now);
+            return true;
+        }
+        if let Some(since) = self.resting.take() {
+            println!("ios: back, the frame loop rested {:.1} s", since.elapsed().as_secs_f32());
+        }
+        false
     }
 
     pub fn present(&mut self, rgb: &[u8], width: usize, height: usize) -> Result<(), String> {

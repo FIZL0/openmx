@@ -290,6 +290,8 @@ static BACK: AtomicUsize = AtomicUsize::new(0);
 /// How many times the app has entered the background (DidEnterBackground), not just gone inactive:
 /// counted before the going away it asks the shell to answer, so the answer sees it (P298a).
 static BACKGROUNDS: AtomicUsize = AtomicUsize::new(0);
+/// Away from WillResignActive or DidEnterBackground to DidBecomeActive: the shell's loops rest (P302).
+static REST: crate::Rest = crate::Rest::new();
 
 /// How long DidEnterBackground waits on the main thread for the shell to save, of the five seconds
 /// or so iOS gives the app before it is suspended.
@@ -304,10 +306,12 @@ extern "C" fn on_lifecycle(_: *const Block, note: Id) {
         let name = text(get(note, c"name"));
         match name.as_str() {
             "UIApplicationWillResignActiveNotification" => {
+                REST.go();
                 AWAY.fetch_add(1, Ordering::Relaxed);
             }
             "UIApplicationDidEnterBackgroundNotification" => {
                 BACKGROUNDS.fetch_add(1, Ordering::Relaxed);
+                REST.go();
                 let asked = AWAY.fetch_add(1, Ordering::Relaxed) + 1;
                 let start = std::time::Instant::now();
                 while ANSWERED.load(Ordering::Relaxed) < asked && start.elapsed() < SAVE_WAIT {
@@ -324,6 +328,7 @@ extern "C" fn on_lifecycle(_: *const Block, note: Id) {
             "UIApplicationWillEnterForegroundNotification" => eprintln!("iOS {name}, {}", memory()),
             "UIApplicationDidBecomeActiveNotification" => {
                 BACK.fetch_add(1, Ordering::Relaxed);
+                REST.come_back();
             }
             _ => eprintln!("iOS memory warning: {}", memory()),
         }
@@ -387,6 +392,18 @@ pub fn backgrounds() -> usize {
 /// Whether the app has come back to the foreground since the last call. Any thread.
 pub fn take_back() -> bool {
     BACK.swap(0, Ordering::Relaxed) > 0
+}
+
+/// While the app is away, wait for it to come back, `most` at the longest (P302): inactive, iOS gives
+/// the shell no drawable and nothing else paces its loop. How long it waited. Any thread but the main
+/// one, which brings the wake.
+pub fn rest_while_away(most: std::time::Duration) -> std::time::Duration {
+    REST.rest(most)
+}
+
+/// Whether the app is away now: inactive or in the background, not yet active again (P302).
+pub fn is_away() -> bool {
+    REST.is_away()
 }
 
 /// Low Power Mode and the thermal state, for the log (P238): either can hold the picture down.

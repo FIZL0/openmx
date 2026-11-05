@@ -5,12 +5,14 @@
 //! rotation lock's landscape hold.
 //!
 //! Every Objective-C and C call is here, behind safe functions, so `crates/openmx` goes on forbidding
-//! unsafe code. Only [`Hold`]'s decision and the log's keeping ([`keep_previous_log`]) are built
+//! unsafe code. Only [`Hold`]'s decision, the loop's [`Rest`] and the log's keeping ([`keep_previous_log`]) are built
 //! everywhere: they are plain logic, and the desktop's tests prove them.
 
 mod hold;
 pub use hold::{Hold, Holder};
 mod log;
+mod rest;
+pub use rest::Rest;
 pub use log::{keep_previous_log, previous_log};
 
 #[cfg(target_os = "ios")]
