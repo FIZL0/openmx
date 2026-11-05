@@ -161,7 +161,7 @@ impl Arrivals {
     /// A poll's key moments, each stamped as it arrived, put where [`Arrivals`] says: in a late poll
     /// every one early, a step apart in their order, but a push that is its key's last. The phone
     /// reads no keys.
-    #[cfg_attr(target_os = "ios", allow(dead_code))]
+    #[cfg_attr(any(target_os = "ios", target_os = "android"), allow(dead_code))]
     pub fn restamp(&self, moments: &mut [KeyMoment]) {
         if self.early(0) == self.now {
             return;

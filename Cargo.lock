@@ -3631,6 +3631,7 @@ dependencies = [
  "libc",
  "minisign-verify",
  "miniz_oxide 0.8.9",
+ "openmx-android",
  "openmx-ios",
  "openmx-net",
  "png",
@@ -3650,6 +3651,16 @@ dependencies = [
  "web-sys",
  "web-time",
  "windows 0.62.2",
+ "winit",
+]
+
+[[package]]
+name = "openmx-android"
+version = "0.10.3"
+dependencies = [
+ "jni 0.22.4",
+ "libc",
+ "rustls-platform-verifier",
  "winit",
 ]
 

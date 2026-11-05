@@ -4263,7 +4263,7 @@ pub struct Output {
 }
 
 impl Output {
-    #[cfg_attr(any(target_arch = "wasm32", target_os = "ios", windows), allow(unreachable_code))]
+    #[cfg_attr(any(target_arch = "wasm32", target_os = "ios", target_os = "android", windows), allow(unreachable_code))]
     pub fn start(mixer: Arc<Mutex<Mixer>>) -> Result<Output, String> {
         // The iPhone (P200): no players to pipe to; an AudioQueue pulls the mix as it plays, kept
         // by a thread that waits for the stop, so dropping this stops it as on the desktop. P296:
@@ -4312,12 +4312,12 @@ impl Output {
             });
             return Ok(Output { stop, thread: Some(thread), player: "an AudioQueue".into() });
         }
-        // Windows (P192) and Linux: cpal pulls the mix as the device plays it, as the iPhone's
+        // Windows (P192), Linux and Android (P308, AAudio): cpal pulls the mix as the device plays it, as the iPhone's
         // AudioQueue does. Linux used to pipe to a player paced by the wall clock, which piled up
         // in the pipe (up to ~340 ms) whenever the sound card's clock ran slower; the players stay
         // as the fallback when cpal can't open a device. The stream is opened and kept on the
         // thread, which a stream need not be able to leave.
-        #[cfg(any(windows, target_os = "linux"))]
+        #[cfg(any(windows, target_os = "linux", target_os = "android"))]
         {
             let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let quit = stop.clone();
@@ -4340,9 +4340,9 @@ impl Output {
             });
             match opened.recv().map_err(|e| e.to_string())? {
                 None => return Ok(Output { stop, thread: Some(thread), player: "cpal".into() }),
-                #[cfg(windows)]
+                #[cfg(any(windows, target_os = "android"))]
                 Some(why) => return Err(why),
-                #[cfg(not(windows))]
+                #[cfg(not(any(windows, target_os = "android")))]
                 Some(why) => {
                     let _ = thread.join();
                     println!("sound: cpal: {why}; piping to a player instead");
@@ -4415,10 +4415,10 @@ impl Output {
 /// (PipeWire's) on Linux). The device's own mix format is taken (float, its rate, its channels), so
 /// the mix is rendered at `rate` stereo and resampled to it. A small fixed buffer keeps the
 /// effects' latency low; a device that won't take it gets its default.
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", target_os = "android"))]
 pub struct DeviceSound(#[allow(dead_code)] cpal::Stream);
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", target_os = "android"))]
 impl DeviceSound {
     /// Frames per period asked for: ~11 ms at 48 kHz (ALSA keeps two periods).
     // ponytail: fixed 512; make it a setting if a device crackles at this size
@@ -4846,7 +4846,7 @@ pub fn stereo(l: &Clip, r: &Clip) -> Clip {
 }
 
 /// The mix at one rate read out at another, by straight lines between its frames (the cpal sound, P192).
-#[cfg(any(windows, target_os = "linux", test))]
+#[cfg(any(windows, target_os = "linux", target_os = "android", test))]
 pub struct Resample {
     /// The mix's frames per device frame.
     step: f64,
@@ -4858,7 +4858,7 @@ pub struct Resample {
     used: usize,
 }
 
-#[cfg(any(windows, target_os = "linux", test))]
+#[cfg(any(windows, target_os = "linux", target_os = "android", test))]
 impl Resample {
     pub fn new(from: u32, to: u32) -> Resample {
         Resample { step: from as f64 / to as f64, at: 1.0, prev: [0.0; 2], next: [0.0; 2], buf: vec![0; 512 * 2], used: 512 }

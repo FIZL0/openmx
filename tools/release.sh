@@ -1,5 +1,5 @@
 #!/bin/bash
-# tools/release.sh VERSION [notes.md] [publish] — a full release (v1.0.0, "openMX 1.0.0"), as opentennis's tools/release.sh:
+# tools/release.sh VERSION [notes.md] [publish|--dry-run] — a full release (v1.0.0, "openMX 1.0.0"), as opentennis's tools/release.sh:
 # set the workspace's version to VERSION (a "Release vVERSION" commit if it changes), build every platform tools/build.sh
 # builds (Linux, Windows) and the website (tools/web.sh), every one on the native sim (P262; the notes say so), sign SHA256SUMS with the minisign key
 # (~/.config/openmx/release.key, asks its password unless ~/.config/openmx/release.pass holds it) and upload to GitHub:
@@ -10,6 +10,9 @@
 #   openmx-linux-x86_64          the bare binary, for the in-game updater (P191, crates/openmx/src/update.rs) to fetch
 #   openmx-windows-x86_64.exe    the same for Windows
 #   openmx-ios.ipa               P201: the unsigned iPhone / iPad app (tools/ios-ipa.sh; needs the iOS SDK, tools/ios-sdk.py)
+#   openmx-android.apk           P308: the Android app (tools/build.sh android, tools/apk.sh; needs ~/Android/Sdk), signed with
+#                                this machine's ~/.android/debug.keystore: keep that file, a phone only takes an update (the
+#                                in-game updater's too, M140) signed with the same key
 #   altstore-source.json         P201: that app as an AltStore / SideStore / Feather source (tools/ios-source.sh). FIZL0's
 #                                shared source (github.com/FIZL0/apps) merges it; players add https://fizl0.github.io/apps/source.json
 #                                (web/ios.html), which a published release rebuilds at once (`gh workflow run source -R FIZL0/apps`)
@@ -20,6 +23,8 @@
 # and if that has no bullets either, the commit subjects since the last v* tag (required for the first release). A draft
 # unless `publish` is given: check it on GitHub and publish there. Publishing it puts its website on openmx.dev
 # (pages.yml's release run). Every push to main is a beta (pages.yml: the `beta` release and beta.openmx.dev), not made here.
+# --dry-run (P308): no key, builds, commit or upload; lists the assets a release uploads and writes its notes into
+# dist/release-dry/notes.md.
 set -e
 cd "$(dirname "$0")/.."
 key=~/.config/openmx/release.key
@@ -27,10 +32,11 @@ pubfile=~/.config/openmx/release.pub
 repo=FIZL0/openmx
 # where the release commits go: main, or OPENMX_RELEASE_BRANCH (an agent's task branch, which reaches main by its merge)
 branch=${OPENMX_RELEASE_BRANCH:-main}
-notes= publish=--draft version=
+notes= publish=--draft version= dry=
 for a; do
     case $a in
         publish) publish=--latest ;;
+        --dry-run) dry=1 ;;
         v[0-9]*|[0-9]*) version=${a#v} ;;
         *) notes=$a ;;
     esac
@@ -47,6 +53,14 @@ command -v zip >/dev/null || { echo "zip missing: sudo pacman -S zip" >&2; exit 
 command -v jq >/dev/null || { echo "jq missing: sudo pacman -S jq" >&2; exit 1; }
 sdk=${OPENMX_IOS_SDK:-$HOME/.local/share/hst-ios/iPhoneOS.sdk}
 [ -d "$sdk" ] || { echo "no iOS SDK at $sdk (the release carries openmx-ios.ipa): run tools/ios-sdk.py Xcode.xip" >&2; exit 1; }
+[ -d "${ANDROID_HOME:-$HOME/Android/Sdk}" ] || { echo "no Android SDK (the release carries openmx-android.apk): see tools/apk.sh" >&2; exit 1; }
+# what the release uploads, in dist/release
+assets=(openmx-linux-x86_64.tar.gz openmx-windows-x86_64.zip openmx-ios.ipa openmx-android.apk openmx-linux-x86_64
+    openmx-windows-x86_64.exe web.tar.gz SHA256SUMS SHA256SUMS.sig altstore-source.json)
+if [ -n "$dry" ]; then
+    out=dist/release-dry pub=$(tail -1 "$pubfile" 2>/dev/null || echo "<the key in $pubfile>")
+    rm -rf "$out" && mkdir -p "$out"
+else
 command -v minisign >/dev/null || { echo "minisign missing: sudo pacman -S minisign" >&2; exit 1; }
 [ -f "$key" ] && [ -f "$pubfile" ] || { echo "no signing key at $key (once: mkdir -p ~/.config/openmx && minisign -G -p $pubfile -s $key)" >&2; exit 1; }
 pub=$(tail -1 "$pubfile")
@@ -76,6 +90,8 @@ cp dist/linux/openmx "$out/openmx-linux-x86_64"
 (cd dist/windows && zip -q "../release/openmx-windows-x86_64.zip" openmx.exe)
 cp dist/windows/openmx.exe "$out/openmx-windows-x86_64.exe"
 tools/ios-ipa.sh "$out/openmx-ios.ipa"
+tools/build.sh android
+cp dist/openmx.apk "$out/openmx-android.apk"
 # P201: the sideloading source, at a URL that always serves the latest release's copy (FIZL0/apps reads it there)
 tools/ios-source.sh "$version" "$out/openmx-ios.ipa" >/dev/null
 tools/web.sh
@@ -87,6 +103,7 @@ minisign -V -P "$pub" -m "$out/SHA256SUMS" -x "$out/SHA256SUMS.sig" -q || { echo
 upd=crates/openmx/src/update.rs
 minisign -V -P "$(sed -n 's/^pub const PUBLIC_KEY: &str = "\(.*\)";/\1/p' $upd)" -m "$out/SHA256SUMS" -x "$out/SHA256SUMS.sig" -q \
     || { echo "SHA256SUMS.sig doesn't match $upd's PUBLIC_KEY: wrong key?" >&2; exit 1; }
+fi
 
 body=$out/notes.md
 {
@@ -101,6 +118,7 @@ body=$out/notes.md
     echo "| **Windows** 10/11 | [\`openmx-windows-x86_64.zip\`](https://github.com/$repo/releases/download/$tag/openmx-windows-x86_64.zip) | Unzip, then drop your ISO on \`openmx.exe\` once; start \`openmx.exe\` after |"
     echo "| **Linux** / **Steam Deck** | [\`openmx-linux-x86_64.tar.gz\`](https://github.com/$repo/releases/download/$tag/openmx-linux-x86_64.tar.gz) | Unpack, run \`./openmx your.iso\` (or drop the ISO on it) once; \`./openmx\` after. For Steam (with artwork): run \`add-to-steam.sh\` |"
     echo "| **iPhone** / **iPad** (iOS 15+) | [add the source in one tap](https://openmx.dev/ios.html) | Easiest: add the source in one tap (Feather, AltStore, SideStore), or add \`https://fizl0.github.io/apps/source.json\` under Sources by hand; install openMX from it and updates arrive there. Then put your ISO in Files → On My iPhone → openMX. Touch controls or a controller. Signing it yourself instead: [\`openmx-ios.ipa\`](https://github.com/$repo/releases/download/$tag/openmx-ios.ipa) (unsigned; Sideloadly, AltStore…) |"
+    echo "| **Android** 8+ | [\`openmx-android.apk\`](https://github.com/$repo/releases/download/$tag/openmx-android.apk) | Install it (allow unknown apps), then pick your ISO on first start. Touch controls or a controller; the game offers its updates |"
     echo "| **Browser** | [openmx.dev](https://openmx.dev/) | Nothing to install |"
     echo
     # P262: which sim the downloads run (tools/build.sh, tools/web.sh and tools/ios-ipa.sh build the player builds native)
@@ -127,9 +145,14 @@ body=$out/notes.md
     echo
     echo "Want the newest changes before the next release? Try the [beta](https://github.com/$repo/releases/tag/beta) or [beta.openmx.dev](https://beta.openmx.dev/)."
 } > "$body"
+if [ -n "$dry" ]; then
+    echo "$tag would upload, from dist/release:"; printf '  %s\n' "${assets[@]}"
+    echo "its notes: $body"
+    exit 0
+fi
 git push -q origin HEAD:$branch
 gh release create "$tag" -R $repo --target "$(git rev-parse HEAD)" --title "openMX $version" \
-    --notes-file "$body" $pre $publish "$out"/openmx-* "$out"/web.tar.gz "$out"/SHA256SUMS "$out"/SHA256SUMS.sig "$out"/altstore-source.json
+    --notes-file "$body" $pre $publish "${assets[@]/#/$out/}"
 # the shared FIZL0 source (github.com/FIZL0/apps) picks up this release now, not at its next hourly poll
 [ "$publish" = --latest ] && { gh workflow run source -R FIZL0/apps || echo "FIZL0/apps did not rebuild; it will within the hour" >&2; }
 if [ "$notes" = RELEASE_NOTES.md ]; then
