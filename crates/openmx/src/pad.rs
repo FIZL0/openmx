@@ -1713,6 +1713,9 @@ pub struct PadSlots<P> {
     /// ([`PadSlots::set_riding`]). A pad in one of them never takes 1P over.
     placed: [bool; SEATS],
     riding: Vec<usize>,
+    /// The controller whose seats the touch pad took when it went (P297): it takes them back when
+    /// it is listed again, in a ride too, where a controller nobody had would join beside it.
+    handed: Option<P>,
 }
 
 /// A device a seat can be given: the keyboard or a pad.
@@ -1734,6 +1737,7 @@ impl<P> Default for PadSlots<P> {
             off: Vec::new(),
             placed: [false; SEATS],
             riding: Vec::new(),
+            handed: None,
         }
     }
 }
@@ -1843,6 +1847,41 @@ impl<P: Clone + PartialEq> PadSlots<P> {
         }
         if self.first == Some(Device::Pad(from.clone())) {
             self.first = Some(Device::Pad(to.clone()));
+        }
+    }
+
+    /// The touch pad `touch` and the controllers hand the touch player's seats to each other (P212),
+    /// `present` being every pad listed: a controller turning up while the touch pad is not listed
+    /// takes the seats the touch pad had, and the touch pad, listed again once every controller is
+    /// gone, takes the seats they were waiting in. The controller it took them from takes them back
+    /// when it is listed again, even beside the touch pad mid-ride (P297): iOS drops the controllers
+    /// around a trip out of the app and back, and the touch pad shows in the gap, so it is 1P's own
+    /// controller coming back and not a second player. Any other controller turning up mid-ride,
+    /// with the touch pad kept beside it ([`crate::ios`]'s `touch_seat`), joins as one.
+    pub fn touch_swap(&mut self, touch: &P, present: &[P]) {
+        if !self.in_use(touch) {
+            self.handed = None;
+        }
+        let back = self.handed.clone().filter(|p| present.contains(p) && !self.in_use(p));
+        let new = back.clone().or_else(|| present.iter().find(|p| !self.in_use(p)).cloned());
+        if self.in_use(touch) && (!present.contains(touch) || back.is_some()) {
+            if let Some(pad) = new {
+                self.hand_over(touch, &pad);
+                if back.is_some() {
+                    // Still listed this poll: no seat for it while it goes.
+                    self.off.push(touch.clone());
+                }
+                self.handed = None;
+            }
+        } else if new.as_ref() == Some(touch) {
+            let mut gone = self.held.iter().chain(&self.last).flatten().chain(match &self.first {
+                Some(Device::Pad(p)) => Some(p),
+                _ => None,
+            });
+            if let Some(pad) = gone.find(|p| !present.contains(p)).cloned() {
+                self.hand_over(&pad, touch);
+                self.handed = Some(pad);
+            }
         }
     }
 
@@ -2559,6 +2598,56 @@ const RESCAN_SECONDS: f32 = 0.5;
 #[cfg(target_arch = "wasm32")]
 const RESCAN_SECONDS: f32 = 0.0;
 
+/// The phone's controllers' places, `gamepad/<place>` to the pad layer (P297): each controller
+/// object (`id`) keeps its place while it is listed, a place a controller leaves is kept for it by
+/// its name, and a controller listed again — iOS lists a new object for the same pad around a trip
+/// out of the app and back — takes the place its name had. A place is never shifted down to fill
+/// a gap, which would hand the pad behind it the gone pad's node and so its seat; a place another
+/// pad left goes to a new name only once every place is used.
+#[derive(Default)]
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+pub struct Places {
+    /// Each place's controller now (`None`: it left), and the name of the one it had last.
+    at: Vec<(Option<usize>, String)>,
+}
+
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+impl Places {
+    /// `listed` is every controller now, `(id, name)`, in the framework's order: each one's place, or
+    /// `None` for one beyond the `room` places there are.
+    pub fn place(&mut self, listed: &[(usize, &str)], room: usize) -> Vec<Option<usize>> {
+        for (id, _) in &mut self.at {
+            if id.is_some_and(|i| !listed.iter().any(|(l, _)| *l == i)) {
+                *id = None;
+            }
+        }
+        listed
+            .iter()
+            .map(|&(id, name)| {
+                if let Some(at) = self.at.iter().position(|(i, _)| *i == Some(id)) {
+                    return Some(at);
+                }
+                let at = self
+                    .at
+                    .iter()
+                    .position(|(i, n)| i.is_none() && n == name)
+                    .or_else(|| (self.at.len() < room).then(|| {
+                        self.at.push((None, String::new()));
+                        self.at.len() - 1
+                    }))
+                    .or_else(|| self.at.iter().position(|(i, _)| i.is_none()))?;
+                self.at[at] = (Some(id), name.to_string());
+                Some(at)
+            })
+            .collect()
+    }
+
+    /// The controller at place `at` now.
+    pub fn id(&self, at: usize) -> Option<usize> {
+        self.at.get(at).and_then(|(i, _)| *i)
+    }
+}
+
 /// Every seat, and every pad plugged in: the hot-plug half of opentennis's controls over the
 /// kernel's `/dev/input/js*`.
 ///
@@ -2830,29 +2919,14 @@ impl Seats {
         self.slots.update(&present);
     }
 
-    /// The touch pad and the first controller hand the touch player's seat to each other (P212,
-    /// [`PadSlots::hand_over`]): a controller connecting in the menus takes the seats the touch pad
-    /// had, and the touch pad, back once every controller is gone, takes the seats they were
-    /// waiting in. A controller connecting mid-ride is a second player instead: the touch pad stays
-    /// listed ([`crate::ios::touch_seat`]) and keeps its seat, and the controller joins beside it.
+    /// The touch pad and the controllers hand the touch player's seats to each other
+    /// ([`PadSlots::touch_swap`]), and the pad layer tells the touch pad whether it is still wanted
+    /// ([`crate::ios::touch_seat`]).
     #[cfg(target_os = "ios")]
     fn touch_hand_over(&mut self, present: &[String], riding: bool) {
         let touch = DeviceInfo { name: crate::ios::TOUCH_NAME.into(), ..DeviceInfo::default() }.identity(std::path::Path::new(""));
+        self.slots.touch_swap(&touch, present);
         crate::ios::touch_seat(self.slots.wanted(&touch), riding);
-        let new = present.iter().find(|p| !self.slots.in_use(p)).cloned();
-        if !present.contains(&touch) && self.slots.in_use(&touch) {
-            if let Some(pad) = new {
-                self.slots.hand_over(&touch, &pad);
-            }
-        } else if new.as_ref() == Some(&touch) {
-            let mut gone = self.slots.held.iter().chain(&self.slots.last).flatten().chain(match self.slots.first() {
-                Some(Device::Pad(p)) => Some(p),
-                _ => None,
-            });
-            if let Some(pad) = gone.find(|p| !present.contains(p)).cloned() {
-                self.slots.hand_over(&pad, &touch);
-            }
-        }
     }
 
     /// A menu frame (P46): every device's own report, the keyboard's first and then each pad
@@ -4044,6 +4118,91 @@ pub(crate) mod tests {
         s.update(&[touch]);
         assert_eq!(s.held[..2], [Some(touch), None]);
         assert_eq!(s.first(), Some(&Device::Pad(touch)));
+    }
+
+    /// P297: iOS drops the controller around a trip out of the app and lists it again as a new
+    /// object, so a new place, a moment after the shell is back — mid-ride, with the touch pad
+    /// shown in the gap and kept for 1P. The pad keeps its seat all the same.
+    #[test]
+    fn a_pad_that_drops_and_reconnects_with_a_new_index_keeps_its_seat() {
+        let touch = "touch".to_string();
+        let (a, b) = ("0000:0000   DualSense".to_string(), "0000:0000   Xbox".to_string());
+        let mut s = PadSlots::<String>::default();
+        s.set_first(Some(Device::Pad(touch.clone())));
+        s.touch_swap(&touch, &[touch.clone()]);
+        s.update(&[touch.clone()]);
+        // The controller connects in the menus and takes 1P; a second one joins as 2P.
+        for present in [vec![a.clone()], vec![a.clone(), b.clone()]] {
+            s.touch_swap(&touch, &present);
+            s.update(&present);
+        }
+        assert_eq!(s.held[..3], [Some(a.clone()), Some(b.clone()), None]);
+        s.set_riding(&[0, 1]);
+        // Away and back: every controller is gone, the touch pad is listed and stands in for 1P,
+        // 2P waits.
+        s.touch_swap(&touch, &[touch.clone()]);
+        s.update(&[touch.clone()]);
+        assert_eq!(s.held[..2], [Some(touch.clone()), None]);
+        assert!(s.waiting(1));
+        // The controllers are listed again with the touch pad still shown (kept mid-ride): each
+        // takes its own seat back, and the touch pad none, not even for the poll it is still listed.
+        let present = [b.clone(), a.clone(), touch.clone()];
+        s.touch_swap(&touch, &present);
+        s.update(&present);
+        assert_eq!(s.held[..3], [Some(a.clone()), Some(b.clone()), None]);
+        assert_eq!(s.first(), Some(&Device::Pad(a.clone())));
+        assert!(!s.wanted(&touch), "the touch pad hides");
+        // And it is gone the poll after, leaving no seat waiting for it.
+        let present = [b.clone(), a.clone()];
+        s.touch_swap(&touch, &present);
+        s.update(&present);
+        assert_eq!(s.held[..3], [Some(a.clone()), Some(b), None]);
+        assert!(!(0..SEATS).any(|i| s.waiting(i)));
+        assert!(!s.in_use(&touch));
+    }
+
+    /// P297: but a controller nobody had, connecting mid-ride beside the touch pad, is a second
+    /// player, as P212 has it: the touch pad keeps 1P.
+    #[test]
+    fn a_new_controller_mid_ride_still_joins_beside_the_touch_pad() {
+        let (touch, a, c) = ("touch".to_string(), "a".to_string(), "c".to_string());
+        let mut s = PadSlots::<String>::default();
+        s.set_first(Some(Device::Pad(touch.clone())));
+        s.touch_swap(&touch, &[touch.clone()]);
+        s.update(&[touch.clone()]);
+        s.touch_swap(&touch, &[a.clone()]);
+        s.update(&[a.clone()]);
+        // `a` goes and the touch pad takes 1P; then `c`, not `a`, connects.
+        s.touch_swap(&touch, &[touch.clone()]);
+        s.update(&[touch.clone()]);
+        let present = [touch.clone(), c.clone()];
+        s.touch_swap(&touch, &present);
+        s.update(&present);
+        assert_eq!(s.held[..2], [Some(touch.clone()), Some(c.clone())]);
+        // `a` back later still takes 1P back from the touch pad.
+        let present = [touch.clone(), c.clone(), a.clone()];
+        s.touch_swap(&touch, &present);
+        s.update(&present);
+        assert_eq!(s.held[0], Some(a));
+    }
+
+    #[test]
+    fn a_controller_listed_anew_takes_its_old_place() {
+        let mut p = Places::default();
+        assert_eq!(p.place(&[(10, "DualSense"), (20, "Xbox")], 16), [Some(0), Some(1)]);
+        // The first goes: the second keeps place 1, and is not shifted down onto the gone pad's.
+        assert_eq!(p.place(&[(20, "Xbox")], 16), [Some(1)]);
+        assert_eq!(p.id(0), None);
+        assert_eq!(p.id(1), Some(20));
+        // A pad not seen yet does not take the place kept for the DualSense.
+        assert_eq!(p.place(&[(20, "Xbox"), (30, "Switch Pro")], 16), [Some(1), Some(2)]);
+        // The DualSense listed again as a new object, first in the list: its own place.
+        assert_eq!(p.place(&[(11, "DualSense"), (20, "Xbox"), (30, "Switch Pro")], 16), [Some(0), Some(1), Some(2)]);
+        assert_eq!(p.id(0), Some(11));
+        // Out of room: a free place goes to whoever comes, and nothing beyond it.
+        let mut p = Places::default();
+        assert_eq!(p.place(&[(1, "a"), (2, "b")], 2), [Some(0), Some(1)]);
+        assert_eq!(p.place(&[(2, "b"), (3, "c"), (4, "d")], 2), [Some(1), Some(0), None]);
     }
 
     #[test]
