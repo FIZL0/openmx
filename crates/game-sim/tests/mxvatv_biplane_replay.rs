@@ -17,14 +17,17 @@
 //!   frame, in place of SLUS-21104's own on the plane's body: every row must still agree;
 //! - a whole [`flight::Flight::new_mxvatv`] seeded off the interpreter's RAM every [`STRETCH`] frames
 //!   and flown beside it on the same input words, its body word for word against the game's after
-//!   each frame, as far as [`BIPLANE_AGREES_THROUGH`] and [`BIPLANE3_AGREES_THROUGH`] pin.
+//!   each frame, as far as [`BIPLANE_AGREES_THROUGH`] and [`BIPLANE3_AGREES_THROUGH`] pin. Since
+//!   MD101b it stands on Desert Oasis's ground ([`ground::Under`] over MC02's terrain, the object the
+//!   tires' `+0x134` points at), and its tires are compared too, word for word.
 //!
 //! Skips without the images or the captures.
 
 use game_sim::biplane::{self, Body};
 use game_sim::flight;
 use game_sim::ride;
-use game_sim::world::Flat;
+use game_sim::handling::ground;
+use game_sim::track;
 use game_sim::input::{PlaneCommand, PlaneInput};
 use ps2_float::{F, Vf};
 use std::cell::Cell;
@@ -542,15 +545,29 @@ fn the_input_step_is_mx_unleasheds() {
 /// flight (the first seed is the image itself) and flown on until the next.
 const STRETCH: usize = 100;
 
-/// **How far the port flies each stretch** with every body word equal to the game's, frame by frame
-/// (a ratchet: raise it as the port gains the original's ground, tires and wreck machine; MD101b,
-/// MD101c). One entry per stretch, `STRETCH` the most. Every stretch seeded in the air agrees to its
-/// end; those seeded on the ground part on their first frame (the port's tires stand on no ground),
-/// and the two that land part where the wheels meet the ground (biplane's frame 1258, biplane3's
-/// 2059).
-const BIPLANE_AGREES_THROUGH: &[usize] = &[0, 0, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 58, 0, 0, 0, 0];
+/// **How far the port flies each stretch** with every body and tire word equal to the game's, frame by
+/// frame (a ratchet: raise it as the port gains the original's ground collision and wreck machine;
+/// MD101c). One entry per stretch, `STRETCH` the most; the last stretch of each flight ends with its
+/// capture (biplane's 30 frames, biplane3's 39). Since MD101b the tires stand on MC02's ground and
+/// every stretch agrees to its end but two of biplane3's: at frame 2059 the game's body takes a push
+/// and a shock no tire gives (its tires agree on that frame), the hull meeting the terrain, and the
+/// stretch from 2100 is seeded in that contact.
+const BIPLANE_AGREES_THROUGH: &[usize] = &[100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 30];
 const BIPLANE3_AGREES_THROUGH: &[usize] =
-    &[0, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 59, 0, 0, 0];
+    &[100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 59, 0, 100, 39];
+
+/// The tire's terrain object (`+0x134`), the one its probe hands the ground query.
+const TIRE_TERRAIN: u32 = 0x134;
+
+/// Desert Oasis's `mc02.res` off MX vs. ATV's disc (MD37a's copy), whose terrain file the tires stand on.
+fn mc02_res() -> Option<Vec<u8>> {
+    let path = Kit::load().ok()?.ctx("mxvatv-ps2/md37a").join("mc02.res");
+    let bytes = std::fs::read(&path).ok();
+    if bytes.is_none() {
+        skip(&format!("no {} (Desert Oasis's Env/MC02 off MX vs. ATV's disc; memory: md37a ATV states live in s2)", path.display()));
+    }
+    bytes
+}
 
 /// MX vs. ATV's `Veh\biplane.phy` (MD80b's copy).
 fn phy_file() -> Option<Vec<u8>> {
@@ -578,6 +595,7 @@ mod at {
     pub const ENGINE: u32 = 0x1164;
     pub const AERO: u32 = 0x1168;
     pub const MODEL: u32 = 0x1320;
+    pub const TIRES: u32 = 0x116c;
 }
 
 /// The input step's five words as the plane's frame reads them.
@@ -595,8 +613,8 @@ fn pad_of(ee: &Ee, plane: u32) -> biplane::Pad {
 /// **A [`flight::Flight::new_mxvatv`] off the game's RAM**: built from `biplane.phy` as the plane's model
 /// word picks, then the body (MD75's layout, [`read_body`]), the pad, the surfaces, the flown gate,
 /// the engine's words, the aero model's true-speed switch and the wreck word and clock, then
-/// measured. The tires, the ground under them and the game's `rand()` and smooth noise are not
-/// SLUS-21104's (MD101b, MD101c): the tires are as built, over no ground.
+/// measured, and the three tires' words off `*(plane + 0x116c + 4k)` ([`read_tire`], MD101b). The
+/// game's `rand()` and smooth noise are not SLUS-21104's (MD101c).
 fn seeded(ee: &Ee, plane: u32, phy: &[u8], tables: &ride::Tables) -> flight::Flight {
     let p = game_sim::phy::Plane::read_mxvatv_bytes(phy, ee.u32_at(plane + at::MODEL) == 1);
     let mut f = flight::Flight::new_mxvatv(&p);
@@ -620,6 +638,9 @@ fn seeded(ee: &Ee, plane: u32, phy: &[u8], tables: &ride::Tables) -> flight::Fli
     f.crash.clock = w(at::WRECK_CLOCK);
     if f.crash.reason == 0 {
         f.inv_inertia = f.body.inv_inertia;
+    }
+    for (k, t) in f.tires.iter_mut().enumerate() {
+        read_tire(ee, ee.u32_at(plane + at::TIRES + 4 * k as u32), t);
     }
     f.remeasure(&tables.acos);
     f
@@ -690,6 +711,102 @@ fn others_diff(p: &flight::Flight, ee: &Ee, plane: u32) -> Vec<String> {
         .collect()
 }
 
+/// The tire's quadwords in its object (`# S39`'s layout, which SLUS-21104's tire keeps: its probe
+/// reads and writes the same offsets) as [`biplane::Tire`]'s fields.
+const TIRE_QUADS: [(u32, fn(&mut biplane::Tire) -> &mut Vf); 15] = [
+    (0x50, |t| &mut t.offset),
+    (0x60, |t| &mut t.center),
+    (0xa0, |t| &mut t.bottom),
+    (0xc0, |t| &mut t.ground),
+    (0xd0, |t| &mut t.normal),
+    (0xe0, |t| &mut t.contact),
+    (0xf0, |t| &mut t.hub),
+    (0x100, |t| &mut t.low),
+    (0x110, |t| &mut t.contact_velocity),
+    (0x140, |t| &mut t.last_normal),
+    (0x170, |t| &mut t.slip),
+    (0x180, |t| &mut t.friction),
+    (0x190, |t| &mut t.frame[0]),
+    (0x1a0, |t| &mut t.frame[1]),
+    (0x1b0, |t| &mut t.frame[2]),
+];
+
+/// The tire's single words as [`biplane::Tire`]'s fields: the `.phy`'s and the strut's. The strut's
+/// five `.phy` words sit 0xc lower than MX Unleashed's (`+0x30..+0x40`, after the brake and steer
+/// pointers at `+0x24`/`+0x28`); the rest are where `# S39` has them.
+const TIRE_WORDS: [(u32, fn(&mut biplane::Tire) -> &mut F); 16] = [
+    (0x30, |t| &mut t.max_compression),
+    (0x34, |t| &mut t.max_decompression_rate),
+    (0x38, |t| &mut t.spring),
+    (0x3c, |t| &mut t.bounce),
+    (0x40, |t| &mut t.rebound),
+    (0x8c, |t| &mut t.compression),
+    (0x90, |t| &mut t.last_compression),
+    (0x94, |t| &mut t.spring_force),
+    (0x120, |t| &mut t.angle),
+    (0x124, |t| &mut t.spin),
+    (0x150, |t| &mut t.radius),
+    (0x154, |t| &mut t.inv_radius),
+    (0x158, |t| &mut t.max_braking),
+    (0x15c, |t| &mut t.side_force),
+    (0x160, |t| &mut t.brake_friction),
+    (0x164, |t| &mut t.steering_moment),
+];
+
+/// The tire's flags as [`biplane::Tire`]'s fields.
+const TIRE_FLAGS: [(u32, fn(&mut biplane::Tire) -> &mut bool); 3] =
+    [(0x80, |t| &mut t.below), (0x84, |t| &mut t.held), (0x88, |t| &mut t.touching)];
+
+/// The tire at `at` in the game's RAM onto the port's `t`: every state word, the `.phy`'s words
+/// and the record byte (the brake and steer switches are the port's own).
+fn read_tire(ee: &Ee, at: u32, t: &mut biplane::Tire) {
+    for (o, field) in TIRE_QUADS {
+        *field(t) = quad(ee, at + o);
+    }
+    for (o, field) in TIRE_WORDS {
+        *field(t) = F(ee.f32_at(at + o));
+    }
+    for (o, field) in TIRE_FLAGS {
+        *field(t) = ee.u32_at(at + o) != 0;
+    }
+    t.surface = ee.u32_at(at + 0xb0) as u8;
+}
+
+/// The words where the port's tire and the game's at `at` differ, by offset.
+fn tire_diff(name: &str, t: &biplane::Tire, ee: &Ee, at: u32) -> Vec<String> {
+    let mut t = *t;
+    let mut out = Vec::new();
+    let mut word = |o: u32, got: u32| {
+        let want = ee.u32_at(at + o);
+        if got != want {
+            out.push(format!("{name}+{o:#x}: {got:#010x} ({}) want {want:#010x} ({})", f32::from_bits(got), f32::from_bits(want)));
+        }
+    };
+    for (o, field) in TIRE_QUADS {
+        let v = *field(&mut t);
+        for k in 0..4 {
+            word(o + 4 * k as u32, v.0[k].to_bits());
+        }
+    }
+    for (o, field) in TIRE_WORDS {
+        word(o, field(&mut t).to_bits());
+    }
+    for (o, field) in TIRE_FLAGS {
+        word(o, u32::from(*field(&mut t)));
+    }
+    let got = u32::from(t.surface);
+    let want = ee.u32_at(at + 0xb0) & 0xff;
+    if got != want {
+        out.push(format!("{name}+0xb0 (record byte): {got} want {want}"));
+    }
+    out
+}
+
+/// The three tires' differences, the port's `tires[k]` against `*(plane + 0x116c + 4k)`.
+fn tires_diff(p: &flight::Flight, ee: &Ee, plane: u32) -> Vec<String> {
+    (0..3).flat_map(|k| tire_diff(&format!("tire{k}"), &p.tires[k], ee, ee.u32_at(plane + at::TIRES + 4 * k as u32))).collect()
+}
+
 /// The interpreter replays the flight from its image as [`interpret`] does (fed off the tape); at
 /// every [`STRETCH`]th frame a port plane is seeded off its RAM ([`seeded`]) and flown on beside it
 /// on the same pad words, its body compared with the game's after each frame.
@@ -701,7 +818,17 @@ fn port_flies(f: &Flight) -> Option<Vec<Stretch>> {
     let s = sim(&ee);
     let body_at = ee.u32_at(f.plane + 0xb8);
     let dt = F(f32::from_bits(DT));
-    let mut ground = Flat { y: F(-1.0e4), ..Flat::default() };
+    let (res, plane_ee) = (mc02_res()?, &ee);
+    let trn = ground::terrain_file(&res, "mc02").expect("mc02.res holds Env\\mc02\\MC02.ps2.trn");
+    let map = track::Terrain::parse(&trn).unwrap();
+    let mut ground = ground::Under(ground::terrain(&map));
+    // Every tire stands on the one terrain object, the one SLUS-21104 builds over the map's file.
+    let terrain_at = plane_ee.u32_at(plane_ee.u32_at(f.plane + at::TIRES) + TIRE_TERRAIN);
+    for k in 0..3 {
+        assert_eq!(plane_ee.u32_at(plane_ee.u32_at(f.plane + at::TIRES + 4 * k) + TIRE_TERRAIN), terrain_at, "{}: tire {k}'s terrain", f.name);
+    }
+    let read = ground::read_terrain(&|a| plane_ee.u32_at(a), terrain_at, Some(&map));
+    assert_eq!(ground::terrain_words(&read, terrain_at), ground::terrain_words(&ground.0, terrain_at), "{}: the terrain object", f.name);
     let mut out: Vec<Stretch> = Vec::new();
     let mut port: Option<flight::Flight> = None;
     for j in 1..=frames {
@@ -718,7 +845,8 @@ fn port_flies(f: &Flight) -> Option<Vec<Stretch>> {
             // port keeps the pad a frame is handed for the next one, so it is put in first too.
             p.pad = pad;
             p.frame(dt, pad, &mut ground, &tables);
-            let d = body_diff(&p.body, &read_body(&ee, body_at));
+            let mut d = body_diff(&p.body, &read_body(&ee, body_at));
+            d.extend(tires_diff(p, &ee, f.plane));
             let last = out.last_mut().unwrap();
             if d.is_empty() {
                 last.agreed += 1;

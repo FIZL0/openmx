@@ -9106,6 +9106,21 @@ atv_sound_iop_call          atv 0x00182c90 = the sound driver's SIF RPC to the I
 # step's words are read by the frame they precede; Flight keeps the pad it is handed for the next frame, so the
 # replay sets Flight::pad before each frame.
 
+# MD101b — the biplane's tires on MC02's ground (handling::ground::Under over atv_ground's Terrain; tests/
+# mxvatv_biplane_replay.rs, journal research/journal/2026-11-05-md101b-mxvatv-biplane-ground). Tires at
+# *(plane+0x116c/0x1170/0x1174); the layout is MXU's # S39 tire's but the strut's .phy words sit 0xc lower
+# (+0x30 max compression, +0x34 max decompression rate, +0x38 spring, +0x3c bounce, +0x40 rebound) and the
+# brake/steer pointers are +0x24/+0x28. +0x128 the plane, +0x12c the body, +0x134 the terrain object (the same one
+# for all three tires; atv_ground's Terrain::of words). The plane matrix plane+0x370..0x3a0 the tires read is
+# atv_quat_frame 0x00134940 of the body's quat (not MXU's quat_to_mat4: 1 ulp apart; biplane::Measure::
+# flight_mxvatv). atv_biplane_tire_strut 0x0049d720's clamp branch writes the body's velocity +0x80 directly
+# (no add-velocity call, so the shock words +0xc0.. stay 0 on a landing; Tire::strut_mxvatv) and calls body
+# vt+0x80 = 0x00493ff0, a thunk to *(body+0x110)+0x48 = 0x00494000: force +0xa0 += f (xyz), then the body's
+# listeners (count +0xe8, each's vt+8 (listener, body, &f)) = Body::add_force. Spring force via vt+0x84
+# (atv_body_add_force_at). Every stretch of both flights agrees to its end, tires included, but biplane3's
+# frame 2059 (a push and shock no tire gives, tires equal: the hull on the terrain, not ported) and the stretch
+# seeded at 2100 in that contact.
+
 # MD89 — the quadtree sub-database's moving-entry virtuals (game-sim atv_spatial.rs Tree; atv_spatial's Database
 # dispatches List/Tree). Journal: research/journal/2026-11-02-md75-atv-frame/8-spatial-move.md "MD89". Proof:
 # tests/atv_spatial.rs (generated trees laid at 0x01f80000 in atv-r-spawn.ee.bin; the image's own tree 0x006547c0).
