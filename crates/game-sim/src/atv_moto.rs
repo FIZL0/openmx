@@ -571,6 +571,36 @@ impl Scene {
         self.nodes[n].world[3].merge(Dest::W, Vf::new(0.0, 0.0, 0.0, 1.0))
     }
 
+    /// **A direction turned into the world** (F31b5b: `atv_node_rotate`): the world frame brought up to
+    /// date, then the rows' `xyz` times the direction's lanes (`vmulax`, `vmadday`, `vmaddz`); the `w`
+    /// the direction's.
+    pub fn turn(&mut self, n: usize, v: Vf) -> Vf {
+        self.update(n);
+        let m = &self.nodes[n].world;
+        v.merge(Dest::XYZ, Vf::madd(Vf::madd(m[0].mul(v.bc(Field::X)), m[1], v.bc(Field::Y)), m[2], v.bc(Field::Z)))
+    }
+
+    /// **A point carried into the world** (F31b5b: `atv_node_point`): the world frame brought up to
+    /// date, then [`frame_point`].
+    pub fn tip(&mut self, n: usize, p: Vf) -> Vf {
+        self.update(n);
+        frame_point(&self.nodes[n].world, p)
+    }
+
+    /// **The node's position set in the world** (F31b5b: `atv_node_set_position` with no frame of
+    /// reference, on a node with no parent): the own frame's position row's `xyz` the point's (its `w`
+    /// kept), then [`Scene::moved`]. A node with a parent takes the point into the parent's frame
+    /// first, which the scene does not hold: `None`, and nothing is set.
+    pub fn set_position(&mut self, n: usize, at: Vf) -> Option<()> {
+        if self.nodes[n].parent.is_some() {
+            return None;
+        }
+        let row = &mut self.nodes[n].local[3];
+        *row = row.merge(Dest::XYZ, at);
+        self.moved(n);
+        Some(())
+    }
+
     /// **The node's bounds are to be gathered again** (MD75c), after its world frame is brought up to
     /// date: they are stale (bit 7), and the node has its own (bit 3) or none yet (bit 6 clear). The
     /// caller then makes the node's gather (its vt `+0x94`) and clears bit 7 ([`Scene::rebounded`]).

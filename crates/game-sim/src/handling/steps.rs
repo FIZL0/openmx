@@ -547,9 +547,182 @@ pub fn read(m: &impl Words, bike: u32) -> Result<(Bike, At), String> {
 
 /// [`read`]'s inverse: every word [`fields`] read, as `k` has it, `m` the memory the masked words'
 /// other bits come from.
+///
+/// F31b5b: the node's children are not the scene's, but its move marks them: a node current in `m`
+/// and out of date in `k` has had them marked out of date too ([`children_out_of_date`]), and their
+/// flag words are put back after.
 pub fn words(k: &Bike, at: &At, m: &impl Words) -> Vec<(u32, u32)> {
     let mut k = k.clone();
     let mut w = Write { m, out: Vec::new() };
     fields(&mut k, at, &mut w);
-    w.out
+    let mut out = w.out;
+    if m.word(at.node + FLAGS) & CLEAN != 0 && k.parts.scene.nodes[0].flags & CLEAN as u8 == 0 {
+        children_out_of_date(m, m.word(at.node + CHILD), &mut out);
+    }
+    out
+}
+
+/// A scene node's flag word (its first byte's bit 0: its world frame current), its first child and
+/// its next sibling.
+const FLAGS: u32 = 0x100;
+const CLEAN: u32 = 0x01;
+const CHILD: u32 = 0xf4;
+const SIBLING: u32 = 0xf8;
+
+/// **The nodes under a moved one marked out of date** (`atv_node_out_of_date`, as
+/// [`crate::atv_moto::Scene`] marks its own): down the sibling list from `first`, each current node
+/// marked, and its children after it; under a node already out of date nothing is marked. The flag
+/// words, into `out`.
+fn children_out_of_date(m: &impl Words, first: u32, out: &mut Vec<(u32, u32)>) {
+    let mut at = first;
+    while at != 0 {
+        let w = m.word(at + FLAGS);
+        if w & CLEAN != 0 {
+            out.push((at + FLAGS, w & !CLEAN));
+            children_out_of_date(m, m.word(at + CHILD), out);
+        }
+        at = m.word(at + SIBLING);
+    }
+}
+
+// --- F31b5b: the PostProcess's parts -------------------------------------------------------------
+
+/// The vtables a collidable's kind is told by: a ray probe's and a mesh's. They are the game's, so
+/// whoever knows the game hands them in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Kinds {
+    pub rays: u32,
+    pub mesh: u32,
+}
+
+/// Where the bike's collidables are, by [`crate::atv_sync::slot`] (0 for none).
+pub type PartsAt = [u32; 5];
+
+/// The bike's riding probe, frame mesh and active probe (bike-relative), and the byte holding the
+/// collision sync's bit (bit 0).
+const RIDING: u32 = 0xcc;
+const FRAME: u32 = 0xd0;
+const ACTIVE: u32 = 0xd8;
+const SYNC: u32 = 0x44;
+/// The bike's and its node's spatial database entries (`+8`).
+const ENTRY: u32 = 0x8;
+
+/// **The bike at `bike` as [`read`] reads it, with what its PostProcess's sync and spatial update
+/// read besides**: the bike's and its node's database entries (there or not), the node's box and
+/// own bounds, the collision sync's bit, and the collidables, each a ray probe or a mesh by `kinds`.
+/// The bike's riding probe (`+0xcc`) is [`crate::quad::Part::Riding`], its frame mesh (`+0xd0`)
+/// [`crate::quad::Part::Frame`]; its active probe (`+0xd8`) is the riding one, or else
+/// [`crate::quad::Part::Wreck`].
+///
+/// Refused: a collidable of another kind, and a bike or node in the database whose node's bounds
+/// gather takes in other nodes (its `+0x10c` list), which the scene does not hold; out of the
+/// database the node's box is never asked for.
+pub fn read_post(m: &impl Words, bike: u32, kinds: Kinds) -> Result<(Bike, At, PartsAt), String> {
+    use crate::atv_sync::slot;
+    use crate::quad::Part;
+    let (mut k, at) = read(m, bike)?;
+    if m.word(at.node + 0x10c) != 0 && (m.b(bike + ENTRY) || m.b(at.node + ENTRY)) {
+        return Err(format!("the bike's node {:#010x} is in the database and gathers its bounds off other nodes", at.node));
+    }
+    let mut parts = [0; 5];
+    let (riding, frame, active) = (m.word(bike + RIDING), m.word(bike + FRAME), m.word(bike + ACTIVE));
+    let c = &mut k.parts.collidables;
+    if riding != 0 {
+        parts[slot(Part::Riding)] = riding;
+        c.riding = Some(Part::Riding);
+    }
+    if frame != 0 {
+        parts[slot(Part::Frame)] = frame;
+        c.frame = Some(Part::Frame);
+    }
+    c.active = match active {
+        0 => None,
+        a if a == riding => Some(Part::Riding),
+        a => {
+            parts[slot(Part::Wreck)] = a;
+            Some(Part::Wreck)
+        }
+    };
+    for (s, &a) in parts.iter().enumerate() {
+        if a == 0 {
+            continue;
+        }
+        let xyz = |p: u32| Vf::new(m.f(p + 0xc).0, m.f(p + 0x10).0, m.f(p + 0x14).0, 0.0);
+        let half = |p: u32| Vf::new(m.f(p + 0x18).0, m.f(p + 0x1c).0, m.f(p + 0x20).0, 0.0);
+        let rows = |p: u32| std::array::from_fn(|r| m.v(p + 0x10 * r as u32));
+        let vt = m.word(a + 0xc);
+        k.parts.collidables.states[s].kind = if vt == kinds.rays {
+            let (tree, bound) = (m.word(a + 0x17c), m.word(a + 0x180));
+            crate::atv_sync::Kind::Rays { tree: (tree != 0).then(|| (xyz(tree), half(tree))), bound: (m.v(bound), m.v(bound + 0x10)) }
+        } else if vt == kinds.mesh {
+            let mesh = m.word(a + 0x244);
+            crate::atv_sync::Kind::Mesh { local: rows(a + 0x170), centre: xyz(mesh), half: half(mesh), stood: [Vf::ZERO; 4], before: [Vf::ZERO; 4] }
+        } else {
+            return Err(format!("the bike's collidable {a:#010x} is neither a ray probe nor a mesh (vtable {vt:#010x})"));
+        };
+    }
+    // The database entries are pointers the sync reads only: there or not.
+    k.parts.spatial = m.b(bike + ENTRY);
+    k.parts.scene.nodes[0].spatial = m.b(at.node + ENTRY);
+    for (c, &a) in k.parts.collidables.states.iter_mut().zip(&parts) {
+        c.spatial = a != 0 && m.b(a + 0x20);
+    }
+    post_fields(&mut k, &at, &parts, &mut Read(m));
+    Ok((k, at, parts))
+}
+
+/// [`read_post`]'s inverse: [`words`], then the words [`read_post`] read besides (the database
+/// entries, a kind's box and a mesh's frame on the node only read).
+pub fn post_words(k: &Bike, at: &At, parts: &PartsAt, m: &impl Words) -> Vec<(u32, u32)> {
+    let mut out = words(k, at, m);
+    let mut k = k.clone();
+    // The sync's bit shares a word with what [`words`] wrote: masked over that, not over RAM.
+    let over = Over { m, out: &out };
+    let mut w = Write { m: &over, out: Vec::new() };
+    post_fields(&mut k, at, parts, &mut w);
+    out.extend(w.out);
+    out
+}
+
+/// RAM with words written over it, the last write of a word the one read.
+struct Over<'a, M> {
+    m: &'a M,
+    out: &'a [(u32, u32)],
+}
+
+impl<M: Words> Words for Over<'_, M> {
+    fn word(&self, at: u32) -> u32 {
+        self.out.iter().rev().find(|w| w.0 == at).map_or_else(|| self.m.word(at), |w| w.1)
+    }
+}
+
+fn post_fields(k: &mut Bike, at: &At, parts: &PartsAt, v: &mut impl Visit) {
+    let p = &mut k.parts;
+    let mut sync = u32::from(p.collidables.sync);
+    v.masked(at.bike + SYNC, 1, &mut sync);
+    p.collidables.sync = sync != 0;
+    let n = &mut p.scene.nodes[0];
+    v.v(at.node + 0xb0, &mut n.own_centre);
+    v.v(at.node + 0xc0, &mut n.own_half);
+    v.v(at.node + 0xd0, &mut n.centre);
+    v.v(at.node + 0xe0, &mut n.half);
+    v.f(at.node + 0x104, &mut n.radius);
+    v.byte(at.node + 0x101, &mut n.more);
+    v.f(at.node + 0x108, &mut n.reach);
+    for (c, &a) in p.collidables.states.iter_mut().zip(parts) {
+        if a == 0 {
+            continue;
+        }
+        v.v(a + 0x50, &mut c.centre);
+        v.f(a + 0x70, &mut c.reach);
+        for r in 0..4 {
+            v.v(a + 0x130 + 0x10 * r as u32, &mut c.frame[r]);
+        }
+        if let crate::atv_sync::Kind::Mesh { stood, before, .. } = &mut c.kind {
+            for r in 0..4 {
+                v.v(a + 0x1b0 + 0x10 * r as u32, &mut stood[r]);
+                v.v(a + 0x1f0 + 0x10 * r as u32, &mut before[r]);
+            }
+        }
+    }
 }
