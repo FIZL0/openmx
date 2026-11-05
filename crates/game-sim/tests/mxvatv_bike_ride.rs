@@ -4864,6 +4864,7 @@ fn calls_normal(c: &[wreck::Out]) -> bool {
 
 // --- F39: the vehicle update's callees -----------------------------------------------------------------
 
+use game_sim::handling::node;
 use game_sim::handling::update::{self, Updates};
 
 /// The vehicle update's callees in SLUS-21104 (research/oracle.txt `# F39`): the bike's slots (the
@@ -4904,15 +4905,8 @@ const UPDATE_OWN: [(u32, u32); 6] = [
     (0x378, SYNC_FN),
     (0x37c, SNAPSHOT_FN),
 ];
-/// The scratch slots the port's calls hand out: the seat placed (out), the seat set (in), the aim's
-/// direction, the two bone buffers, the local point (out), a vector in, the rotated one (out).
-const U_PLACED: u32 = 70;
-const U_SEAT: u32 = 71;
-const U_DIR: u32 = 72;
+/// The scratch slots the port's calls hand out: the two bone buffers.
 const U_POSES: u32 = 73;
-const U_LOCAL: u32 = 75;
-const U_IN: u32 = 76;
-const U_ROTATED: u32 = 77;
 
 /// The bike in RAM as the update's callees' port sees it: every word read and written in place, each
 /// call out the original's.
@@ -4927,14 +4921,6 @@ impl UpdateInRam<'_> {
         self.ee.set(28, GP);
         census(self.ee, |ee| ee.call(f, ints, floats, BUDGET));
         self.ee.r(2) as u32
-    }
-    fn put_quad(&mut self, at: u32, q: update::Quad) {
-        for (k, w) in q.into_iter().enumerate() {
-            self.ee.set_u32(at + 4 * k as u32, w);
-        }
-    }
-    fn quad(&self, at: u32) -> update::Quad {
-        [0, 4, 8, 12].map(|k| self.ee.u32_at(at + k))
     }
     fn own(&self, slot: u32) {
         let f = UPDATE_OWN.iter().find(|s| s.0 == slot).unwrap().1;
@@ -4978,9 +4964,50 @@ impl Updates for UpdateInRam<'_> {
             }
             _ => {}
         }
+        // F43's scene-node calls, the port's.
+        let pose = match c {
+            Out::Pose { buf, .. } | Out::Place { buf, .. } => self.ee.scratch(U_POSES + buf),
+            _ => 0,
+        };
+        let n = &mut NodeRam(self.ee);
+        match c {
+            Out::NodeSet { node, at } => {
+                node::set(n, node, at);
+                return 0;
+            }
+            Out::Spin { node, axis, angle } => {
+                node::spin(n, node, axis, F::from_bits(angle), curve());
+                return 0;
+            }
+            Out::Aim { node, dir, up } => {
+                let up = [0, 4, 8, 12].map(|k| n.0.u32_at(up + k));
+                node::aim(n, node, dir, up);
+                return 0;
+            }
+            Out::Pose { node, .. } => {
+                node::frame(n, node, pose);
+                return 0;
+            }
+            Out::Place { part, .. } => {
+                node::set_frame(n, part, pose);
+                return 0;
+            }
+            Out::Frame { node, at } => {
+                node::frame(n, node, at);
+                return 0;
+            }
+            Out::Position { node, at } => {
+                node::position(n, node, at);
+                return 0;
+            }
+            Out::Axes { node, z, y } => {
+                node::axes(n, node, z, y);
+                return 0;
+            }
+            _ => {}
+        }
         let (bike, x) = (u64::from(BIKE), self.x);
         let ee = &*self.ee;
-        let s = |k: u32| u64::from(ee.scratch(k));
         let obj_fn = |o: u32, at: u32, slot: u32| ee.u32_at(ee.u32_at(o + at) + slot);
         let u = u64::from;
         let (f, ints, floats) = match c {
@@ -5008,23 +5035,10 @@ impl Updates for UpdateInRam<'_> {
                 vec![u(ctrl), u(clips[0]), u(clips[1]), 0, 0, 0, 0, 0],
                 vec![f32::from_bits(weight), f32::from_bits(mix), f32::from_bits(fade)],
             ),
-            Out::NodeSet { node, at } => {
-                let i = s(U_SEAT);
-                self.put_quad(i as u32, at);
-                (NODE_SET, vec![u(node), 0, i], vec![x])
+            Out::NodeSet { .. } | Out::Spin { .. } | Out::Aim { .. } | Out::Pose { .. } | Out::Place { .. } | Out::Frame { .. } | Out::Position { .. } | Out::Axes { .. } => {
+                unreachable!("served by the port")
             }
-            Out::Spin { node, axis, angle } => (NODE_SPIN, vec![u(node), u(axis)], vec![f32::from_bits(angle)]),
-            Out::Aim { node, dir, up } => {
-                let i = s(U_DIR);
-                self.put_quad(i as u32, dir);
-                (NODE_AIM, vec![u(node), i, u(up), 1, 1, 1], vec![x])
-            }
-            Out::Pose { node, buf } => (BONE_POSE, vec![u(node), 0, s(U_POSES + buf)], vec![x]),
-            Out::Place { part, buf } => (BONE_PLACE, vec![u(part), s(U_POSES + buf)], vec![x]),
-            Out::Frame { node, at } => (BONE_POSE, vec![u(node), 0, u(at)], vec![x]),
-            Out::Position { node, at } => (NODE_POSITION, vec![u(node), 0, u(at)], vec![x]),
             Out::Moved(a) => (ATTACH_MOVED, vec![u(a)], vec![x]),
-            Out::Axes { node, z, y } => (NODE_AXES, vec![u(node), 0, u(z), u(y)], vec![x]),
             Out::TrailOn(t) => (obj_fn(t, 4, 0x18), vec![u(t)], vec![x]),
             Out::TrailOff(t) => (obj_fn(t, 4, 0x20), vec![u(t)], vec![x]),
             Out::Send { net, arg } => (obj_fn(net, 0x38, 0x20), vec![u(net), u(arg)], vec![x]),
@@ -5037,32 +5051,39 @@ impl Updates for UpdateInRam<'_> {
     fn vector(&mut self, c: update::Out) -> update::Quad {
         use update::Out;
         label(&format!("update {c:?}"));
-        let x = self.x;
-        let s = |k: u32| self.ee.scratch(k);
-        let (out, inp, rot) = (s(U_PLACED), s(U_IN), s(U_ROTATED));
-        let local = s(U_LOCAL);
-        let u = u64::from;
+        // F43: the port's.
+        let n = &mut NodeRam(self.ee);
         match c {
-            Out::NodePlace { node, at } => {
-                self.put_quad(inp, at);
-                self.call(NODE_TIP, &[u(out), u(node), u(inp)], &[x]);
-                self.quad(out)
-            }
+            Out::NodePlace { node, at } => node::place(n, node, at),
             Out::Local { node, at } => {
-                self.call(NODE_LOCAL, &[u(local), u(node), u(at)], &[x]);
-                self.quad(local)
+                let at = [0, 4, 8, 12].map(|k| n.0.u32_at(at + k));
+                node::local(n, node, at)
             }
-            Out::Rotate { node, v } => {
-                self.put_quad(inp, v);
-                self.call(NODE_ROTATE, &[u(rot), u(node), u(inp)], &[x]);
-                self.quad(rot)
-            }
+            Out::Rotate { node, v } => node::rotate(n, node, v),
             c => unreachable!("{c:?} writes no vector"),
         }
     }
     fn noise(&mut self, t: F) -> F {
         noise_at(self.ee, &mut None, t)
     }
+}
+
+/// The RAM the scene-node ports ([`node`]) read and write: the interpreter's.
+struct NodeRam<'a>(&'a mut Ee);
+
+impl node::Ram for NodeRam<'_> {
+    fn word(&mut self, at: u32) -> u32 {
+        self.0.u32_at(at)
+    }
+    fn set(&mut self, at: u32, w: u32) {
+        self.0.set_u32(at, w);
+    }
+}
+
+/// The sine table the spin reads, built ([`CurveTable::build`] is the image's, S104).
+fn curve() -> &'static game_sim::camera::CurveTable {
+    static C: std::sync::OnceLock<game_sim::camera::CurveTable> = std::sync::OnceLock::new();
+    C.get_or_init(game_sim::camera::CurveTable::build)
 }
 
 /// One of the vehicle update's F39 callees as the port's, on the bike in RAM.
@@ -7605,56 +7626,36 @@ fn the_flips_tail_callees_leave_the_physics_alone() {
 }
 
 /// The callees ride-2 leaves in the interpreter, by label ([`label`]).
-const RIDE_CALLEES: [&str; 23] = [
+const RIDE_CALLEES: [&str; 13] = [
     "tail Message",
     "tail Paused",
     "tail Rumble",
     "tail RumbleReady",
-    "update Aim",
     "update AnimBlend",
     "update AnimPlay",
     "update AnimStop",
-    "update Axes",
-    "update Frame",
-    "update Local",
     "update Moved",
-    "update NodePlace",
-    "update NodeSet",
     "update Part",
-    "update Place",
-    "update Pose",
-    "update Position",
     "update Send",
-    "update Spin",
     "update TrickWanted",
     "update Walk",
     "wreck OutOfBounds",
 ];
 /// The callees flip-1 leaves in the interpreter: ride-2's, the trick's, the wreck's and the put-back's.
-const FLIP_CALLEES: [&str; 41] = [
+const FLIP_CALLEES: [&str; 31] = [
     "tail Message",
     "tail Paused",
     "tail Rumble",
     "tail RumbleReady",
-    "update Aim",
     "update AnimBlend",
     "update AnimPlay",
     "update AnimStop",
-    "update Axes",
-    "update Frame",
     "update KindClear",
-    "update Local",
     "update Mark",
     "update Moved",
-    "update NodePlace",
-    "update NodeSet",
     "update Part",
-    "update Place",
-    "update Pose",
-    "update Position",
     "update Search",
     "update Send",
-    "update Spin",
     "update TrickEnd",
     "update TrickWanted",
     "update Walk",
@@ -8336,5 +8337,247 @@ fn the_frame_without_the_kind_set_and_posts_is_bit_exact() {
         let ran: Vec<(Writer, usize)> = dropped.ran.iter().map(|(&k, v)| (k, v.len())).collect();
         let want: Vec<(Writer, usize)> = if name == "flip-1" { vec![(Writer::TrickHold, 12), (Writer::KindSet, 1), (Writer::Post, 465), (Writer::Settle, 2)] } else { vec![(Writer::Post, 459)] };
         assert_eq!(ran, want, "{name}: the rows each callee is reached on");
+    }
+}
+
+// --- F43: the scene-node calls the bike's update makes, ported ----------------------------------
+
+/// The sine and cosine of an angle off the curve table (`a0` the sine, `a1` the cosine, `$f12` the
+/// angle), and where the table's pointer is.
+const SIN_COS: u32 = 0x0011_0180;
+const CURVE_AT: u32 = 0x003e_ab20;
+/// Where the oracle lays its node forests and the calls' in and out quads: clear of the image's data
+/// and of the stack the calls run on (the writes check holds it).
+const FOREST: u32 = 0x01e0_0000;
+const FOREST_NODES: u32 = 6;
+const NODE_SIZE: u32 = 0x120;
+const FOREST_IN: u32 = FOREST + 0x1000;
+const FOREST_OUT: u32 = FOREST + 0x1100;
+const FOREST_END: u32 = FOREST + 0x1200;
+
+/// A float word for a frame, a point or an angle: mostly small, sometimes exact, sometimes any
+/// exponent, now and then any bits at all.
+fn node_float(x: u64) -> u32 {
+    let unit = (x >> 40) as f32 / (1u64 << 24) as f32 * 2.0 - 1.0;
+    match x % 20 {
+        0 => 0,
+        1 => 0x8000_0000,
+        2 => 1f32.to_bits(),
+        3 => (-1f32).to_bits(),
+        4..=6 => (x >> 8) as u32 & 0x807f_ffff | (((x >> 33) % 60 + 100) as u32) << 23,
+        7 => (x >> 13) as u32,
+        _ => (unit * 4.0).to_bits(),
+    }
+}
+
+/// One random forest of [`FOREST_NODES`] nodes laid into RAM: every word of each random, then the
+/// parent, child and sibling links of a forest, and flag bytes either kept in order (a node out of
+/// date has its subtree out of date) or any.
+fn lay_forest(ee: &mut Ee, seed: u64) {
+    let mut k = 0u64;
+    let mut r = || {
+        k += 1;
+        mix(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ k)
+    };
+    for o in (FOREST..FOREST_END).step_by(4) {
+        let x = r();
+        ee.set_u32(o, if x % 3 == 0 { x as u32 } else { node_float(x) });
+    }
+    let node = |i: u32| FOREST + i * NODE_SIZE;
+    let mut parent = [None; FOREST_NODES as usize];
+    for i in 1..FOREST_NODES {
+        if r() % 10 < 7 {
+            parent[i as usize] = Some((r() % u64::from(i)) as u32);
+        }
+    }
+    let ordered = r() % 10 < 7;
+    let mut current = [false; FOREST_NODES as usize];
+    for i in 0..FOREST_NODES {
+        let n = node(i);
+        let p = parent[i as usize];
+        ee.set_u32(n + 0xf0, p.map_or(0, node));
+        let kids: Vec<u32> = (0..FOREST_NODES).filter(|&c| parent[c as usize] == Some(i)).collect();
+        ee.set_u32(n + 0xf4, kids.first().map_or(0, |&c| node(c)));
+        // A node's siblings: the next of its parent's children (roots have none).
+        let sib = p.and_then(|p| (i + 1..FOREST_NODES).find(|&c| parent[c as usize] == Some(p)));
+        ee.set_u32(n + 0xf8, sib.map_or(0, node));
+        let on = r() % 2 == 0 && (!ordered || p.is_none_or(|p| current[p as usize]));
+        current[i as usize] = on;
+        let w = ee.u32_at(n + 0x100);
+        let byte = (r() as u32 & 0x7e) | u32::from(on) | if r() % 2 == 0 { 0x80 } else { 0 };
+        ee.set_u32(n + 0x100, w & !0xff | byte);
+    }
+}
+
+/// The ten calls, in the shapes the bike's update makes them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum NodeCall {
+    Place,
+    Rotate,
+    Local,
+    Position,
+    Axes,
+    Frame,
+    PartFromFrame,
+    Set,
+    Aim,
+    Spin,
+}
+
+const NODE_CALLS: [NodeCall; 10] =
+    [NodeCall::Place, NodeCall::Rotate, NodeCall::Local, NodeCall::Position, NodeCall::Axes, NodeCall::Frame, NodeCall::PartFromFrame, NodeCall::Set, NodeCall::Aim, NodeCall::Spin];
+
+/// Runs one call on node `n`, the original in the interpreter or the port on its RAM; the quads a
+/// call hands back land at [`FOREST_OUT`].
+fn node_call(ee: &mut Ee, c: NodeCall, n: u32, angle: f32, original: bool) {
+    let q = |ee: &Ee, at: u32| [0, 4, 8, 12].map(|k| ee.u32_at(at + k));
+    let (inp, up, out) = (FOREST_IN, FOREST_IN + 0x10, FOREST_OUT);
+    let u = u64::from;
+    if original {
+        let (f, ints, floats): (u32, Vec<u64>, Vec<f32>) = match c {
+            NodeCall::Place => (NODE_TIP, vec![u(out), u(n), u(inp)], vec![]),
+            NodeCall::Rotate => (NODE_ROTATE, vec![u(out), u(n), u(inp)], vec![]),
+            NodeCall::Local => (NODE_LOCAL, vec![u(out), u(n), u(inp)], vec![]),
+            NodeCall::Position => (NODE_POSITION, vec![u(n), 0, u(out)], vec![]),
+            NodeCall::Axes => (NODE_AXES, vec![u(n), 0, u(out), u(out + 0x10)], vec![]),
+            NodeCall::Frame => (BONE_POSE, vec![u(n), 0, u(out)], vec![]),
+            NodeCall::PartFromFrame => (BONE_PLACE, vec![u(n), u(inp)], vec![]),
+            NodeCall::Set => (NODE_SET, vec![u(n), 0, u(inp)], vec![]),
+            NodeCall::Aim => (NODE_AIM, vec![u(n), u(inp), u(up), 1, 1, 1], vec![]),
+            NodeCall::Spin => (NODE_SPIN, vec![u(n), u(inp)], vec![angle]),
+        };
+        ee.set(28, GP);
+        ee.call(f, &ints, &floats, BUDGET);
+        return;
+    }
+    let (d, upq) = (q(ee, inp), q(ee, up));
+    let m = &mut NodeRam(ee);
+    let back = match c {
+        NodeCall::Place => Some(node::place(m, n, d)),
+        NodeCall::Rotate => Some(node::rotate(m, n, d)),
+        NodeCall::Local => Some(node::local(m, n, d)),
+        NodeCall::Position => {
+            node::position(m, n, out);
+            None
+        }
+        NodeCall::Axes => {
+            node::axes(m, n, out, out + 0x10);
+            None
+        }
+        NodeCall::Frame => {
+            node::frame(m, n, out);
+            None
+        }
+        NodeCall::PartFromFrame => {
+            node::set_frame(m, n, inp);
+            None
+        }
+        NodeCall::Set => {
+            node::set(m, n, d);
+            None
+        }
+        NodeCall::Aim => {
+            node::aim(m, n, d, upq);
+            None
+        }
+        NodeCall::Spin => {
+            node::spin(m, n, inp, F(angle), curve());
+            None
+        }
+    };
+    if let Some(back) = back {
+        for (k, w) in back.into_iter().enumerate() {
+            ee.set_u32(out + 4 * k as u32, w);
+        }
+    }
+}
+
+/// **F43 — the scene-node calls are the original's**: 10 000 random forests (six nodes, every word
+/// of each random, the links a forest's, the flags in order or not), each with one of the ten calls
+/// on a random node of it — the original in the interpreter, then the port on the same RAM; every
+/// word of the forest and of the quads handed in and out the same, and the original writes nothing
+/// else outside its stack.
+#[test]
+fn the_scene_node_calls_are_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let mut t: BTreeMap<String, u32> = BTreeMap::new();
+    let snap = |ee: &Ee| -> Vec<u32> { (FOREST..FOREST_END).step_by(4).map(|o| ee.u32_at(o)).collect() };
+    let stack = ee.stack;
+    for k in 0..10_000u64 {
+        lay_forest(&mut ee, k);
+        let x = mix(k ^ 0x00f4_3000);
+        let c = NODE_CALLS[(x % 10) as usize];
+        let i = ((x >> 8) % u64::from(FOREST_NODES)) as u32;
+        let n = FOREST + i * NODE_SIZE;
+        let a = mix(x);
+        let angle = match a % 8 {
+            0 => (a >> 11) as u32 as i32 as f32 / 2e5,
+            1 => [0.0, -0.0, std::f32::consts::PI, -std::f32::consts::PI, std::f32::consts::TAU][(a >> 9) as usize % 5],
+            _ => (a >> 40) as f32 / (1u64 << 24) as f32 * 16.0 - 8.0,
+        };
+        let before = snap(&ee);
+        let parent = ee.u32_at(n + 0xf0);
+        let current = ee.u32_at(n + 0x100) & 1 == 1;
+        let up_stale = std::iter::successors(Some(parent), |&p| (p != 0).then(|| ee.u32_at(p + 0xf0))).take_while(|&p| p != 0).any(|p| ee.u32_at(p + 0x100) & 1 == 0);
+        let kids = ee.u32_at(n + 0xf4) != 0;
+        let mut path = format!("{c:?}{}{}", if parent != 0 { " parent" } else { " root" }, if current { " current" } else { " stale" });
+        if up_stale {
+            *t.entry(format!("{c:?} a stale parent")).or_default() += 1;
+        }
+        if kids && current && matches!(c, NodeCall::PartFromFrame | NodeCall::Set | NodeCall::Aim | NodeCall::Spin) {
+            *t.entry(format!("{c:?} children put out of date")).or_default() += 1;
+        }
+        if c == NodeCall::Spin && ee.u32_at(FOREST_IN + 8) >> 31 == 1 {
+            path += " z<0";
+        }
+        *t.entry(path.clone()).or_default() += 1;
+        node_call(&mut ee, c, n, angle, true);
+        let off: Vec<u32> = ee.written.iter().copied().filter(|&w| !(FOREST..FOREST_END).contains(&w) && !(stack - 0x1_0000..stack + 0x4000).contains(&w)).collect();
+        assert!(off.is_empty(), "case {k} ({path}): the original wrote outside the forest: {:#x?}", &off[..off.len().min(8)]);
+        let want = snap(&ee);
+        for (o, w) in (FOREST..FOREST_END).step_by(4).zip(&before) {
+            ee.set_u32(o, *w);
+        }
+        node_call(&mut ee, c, n, angle, false);
+        let got = snap(&ee);
+        let diff: Vec<String> =
+            (0..want.len()).filter(|&j| want[j] != got[j]).map(|j| format!("+{:#x}: original {:#010x}, port {:#010x}", 4 * j, want[j], got[j])).take(12).collect();
+        assert!(diff.is_empty(), "case {k} ({path}, node {i}, angle {angle}): {}", diff.join("\n  "));
+    }
+    eprintln!("{t:#?}");
+    for c in NODE_CALLS {
+        for p in [" root current", " root stale", " parent current", " parent stale"] {
+            assert!(t.get(&format!("{c:?}{p}")).is_some_and(|&n| n >= 50), "{c:?}{p}: {t:?}");
+        }
+        assert!(t.get(&format!("{c:?} a stale parent")).is_some_and(|&n| n >= 50), "{c:?} a stale parent: {t:?}");
+    }
+    for c in [NodeCall::PartFromFrame, NodeCall::Set, NodeCall::Aim, NodeCall::Spin] {
+        assert!(t.get(&format!("{c:?} children put out of date")).is_some_and(|&n| n >= 50), "{c:?}: {t:?}");
+    }
+}
+
+/// **F43 — the sine table is the image's and the sine and cosine the original's**: the built table
+/// ([`CurveTable::build`]) word for word the one the image's pointer names, and 100 000 angles' sine
+/// and cosine (small, round, out to ±10 000) the same words.
+#[test]
+fn the_spins_sine_and_cosine_are_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let table = ee.u32_at(CURVE_AT);
+    for (i, e) in curve().entries().iter().enumerate() {
+        let at = table + 8 * i as u32;
+        assert_eq!([ee.u32_at(at), ee.u32_at(at + 4)], e.map(f32::to_bits), "entry {i}");
+    }
+    let (s, c) = (ee.scratch(0), ee.scratch(1));
+    for k in 0..100_000u64 {
+        let a = mix(k ^ 0x5143);
+        let angle = match a % 4 {
+            0 => (a >> 11) as u32 as i32 as f32 / 2e5,
+            1 => (k as f32 - 50_000.0) * std::f32::consts::FRAC_PI_4,
+            _ => (a >> 40) as f32 / (1u64 << 24) as f32 * 16.0 - 8.0,
+        };
+        ee.set(28, GP);
+        ee.call(SIN_COS, &[u64::from(s), u64::from(c)], &[angle], BUDGET);
+        let (sin, cos) = node::sin_cos(F(angle), curve());
+        assert_eq!([ee.u32_at(s), ee.u32_at(c)], [sin.to_bits(), cos.to_bits()], "angle {angle} ({:#010x})", angle.to_bits());
     }
 }

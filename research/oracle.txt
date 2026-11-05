@@ -9647,6 +9647,29 @@ atv_heap_free               atv 0x001b76d0 = free
 #   0x004a0c30(w) x2, contacts 0x004dccd0(bike, dt), suspension 0x004a0cb0(w, dt) x2, tire forces
 #   0x004a16f0(w, dt) x2; +0xde4 = +0xde0, +0x324 either down, +0x1270 both, +0xde0 = !+0x324; net post
 #   0x004a8c40(bike, dt).
+
+# F43: the scene-node calls the bike's vehicle update makes (F39's), ported as
+# game_sim::handling::node. Journal: research/journal/2026-11-05-f43-scene-node-calls/.
+#   Node: own frame +0x30 (position row +0x60), world frame +0x70 (position row +0xa0), parent +0xf0,
+#   first child +0xf4, next sibling +0xf8, flag byte +0x100 (bit 0 world current, bit 7 bounds stale).
+#   Update (inside each reader): not current -> the non-current parents gathered, top down world = own
+#   (root: lq/sq, words kept) or own x parent world (VU0), bit 0 set. Moved 0x00193d10: current only ->
+#   stale bounds 0x00195a40 (bit 7 on it and every parent), bit 0 off, out of date 0x00193d70 on the
+#   child (the sibling first, then a current one cleared and its child).
+#   Calls (the update's shapes): place 0x001952a0(out, node, in) world point, w the in's word; rotate
+#   0x00195230(out, node, in) vmulax/vmadday/vmaddz of the world rows, w kept; point into frame
+#   0x00195320(out, node, in) over the 3x3 transposed (pextlw/pcpyld), w kept; position 0x00194c20(node,
+#   0, out) world +0xa0 xyz, w 1; axes 0x00194960(node, 0, z, y) world +0x90 / +0x80 xyz, w 0; frame
+#   0x00194e00(node, 0, out) world's 16 words; part from frame 0x00194da0(node, in) 16 words to +0x30,
+#   moved; set 0x00194b10(node, 0, p): parent -> unplace 0x001953c0 into its world frame, then
+#   0x00194af0 xyz into +0x60, moved; aim 0x001941b0(node, dir, up, 1, 1, 1) basis 0x001340b0 at +0x60
+#   (orthogonalised, forward kept; parent ignored; xyz words kept), moved; spin 0x00195210(node, axis,
+#   f12 angle) -> 0x00195170: axis normalized (mula y, madda x, madd z; rsqrt), sin/cos 0x00110180(&sin,
+#   &cos, f12) (two wraps, table *0x003eab20, step 0x003ea9c8, 1/step 0x003ea9d0), rotation 0x001100d0
+#   (axis w lane = mfc1-sign-extended z: all ones when z < 0), position xyz put back, moved.
+#   Left in the interpreter for F43a/F43b: anim stop 0x0013e650, play 0x0013eec0, blend 0x0013f5e0;
+#   search 0x001148e0; attachment moved 0x00266d30.
+
 # F31b4c — MX vs. ATV's [Mass Properties]: the rigid-body part reader and the bike loader's re-read
 # (game_sim::handling::mass; tests/mxvatv_mass.rs, tests/mxvatv_bike_ride.rs). Comment rows only.
 # Journal: research/journal/2026-11-04-f31b4c-mass/1-mass-FINAL.md.

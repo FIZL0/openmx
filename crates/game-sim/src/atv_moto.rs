@@ -434,7 +434,7 @@ const SPHERE: u8 = 0x10;
 
 /// A point of a node's frame carried into the world (`vaddax` of the position row and 0, then
 /// `vmaddax`, `vmadday`, `vmaddz` of the rows): `xyz`, the `w` the point's.
-fn frame_point(m: &[Vf; 4], p: Vf) -> Vf {
+pub(crate) fn frame_point(m: &[Vf; 4], p: Vf) -> Vf {
     let acc = Vf::madd(Vf::madd(m[3].add(Vf::ZERO), m[0], p.bc(Field::X)), m[1], p.bc(Field::Y));
     p.merge(Dest::XYZ, Vf::madd(acc, m[2], p.bc(Field::Z)))
 }
@@ -442,7 +442,7 @@ fn frame_point(m: &[Vf; 4], p: Vf) -> Vf {
 /// A world point brought into a node's frame (MD75c3, the inverse of [`frame_point`]): the position
 /// row taken off (`xyz`), then each lane the row's dot with it, over the 3×3 transposed (`vmulax`,
 /// `vmadday`, `vmaddz`); the `w` the point's.
-fn point_in_frame(m: &[Vf; 4], p: Vf) -> Vf {
+pub(crate) fn point_in_frame(m: &[Vf; 4], p: Vf) -> Vf {
     let d = sub_xyz(p, m[3]);
     let col = |k: usize| Vf::new(m[0].0[k], m[1].0[k], m[2].0[k], 0.0);
     let v = Vf::madd(Vf::madd(col(0).mul(d.bc(Field::X)), col(1), d.bc(Field::Y)), col(2), d.bc(Field::Z));

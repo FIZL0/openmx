@@ -27,6 +27,7 @@ use ps2_float::{F, Vf, fpu};
 pub mod bike;
 pub mod ground;
 pub mod mass;
+pub mod node;
 pub mod record;
 pub mod seed;
 pub mod step;
