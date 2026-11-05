@@ -172,7 +172,9 @@ fn two_online_shells_see_the_host_switch_into_the_monster_truck_and_back() {
 }
 
 /// T2: what two online shells' runs must both say — the load's bike and then `switched`, every
-/// seat's, in the order the session made them; 0 desyncs; each car of `left` left gone more than 20
+/// seat's, in any order (K27: two seats' picks a moment apart land on ticks the two shells' wall
+/// clocks choose, and a machine draws the other's a few frames late; each seat's own come in its
+/// order, which `left`'s distances hold); 0 desyncs; each car of `left` left gone more than 20
 /// ft from where it was taken, at the same place on both; the same state before tick 300; and the
 /// cars the pause offers (the garage's, which the pause's `menu.cars` is set from).
 fn both_agree(said: &[String; 2], switched: &[&str], left: &[&str]) {
@@ -183,7 +185,10 @@ fn both_agree(said: &[String; 2], switched: &[&str], left: &[&str]) {
             .map(|l| &l["vehicle: ".len()..])
             .collect();
         assert_eq!(saw[0], "bike", "{who}:\n{s}");
-        assert_eq!(saw[1..], *switched, "{who}:\n{s}");
+        let (mut saw, mut want) = (saw[1..].to_vec(), switched.to_vec());
+        saw.sort_unstable();
+        want.sort_unstable();
+        assert_eq!(saw, want, "{who}:\n{s}");
         assert!(line_with(s, "desyncs").contains(" 0 desyncs"), "{who}:\n{s}");
         let offered = line_with(s, "(switch from the pause)");
         assert!(["buggy", "monster", "baja"].iter().all(|c| offered.contains(c)), "{who}: {offered}");
