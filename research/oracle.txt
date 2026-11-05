@@ -8781,6 +8781,16 @@ atv_car_listener_60         atv 0x004cbb60 = a car listener at this-60 (the bugg
 # the hand brake), +0x1138 hand brake, +0x113c/+0x1140 steer scaled by speed, +0x11c8 stick steer,
 # +0x11d0 it slewed, +0x8d0 (stick + 1) / 2 slewed. The gas does not reach the car block. +0x308/+0x30c
 # are ints 1 and 4.
+# MD39b — the car field map proved on MD39a's buggy, baja and truck RAM images (tests/mxvatv_car_fields.rs, every
+# loader word of game_sim::car::Car::read_mxvatv at its address, 1271..1283 words a car, bit-exact). Journal:
+# research/journal/2026-11-05-md39b-mxvatv-car-step. Corrections to # MD39: the tire's first block (MXU +0x3c..+0x60,
+# MaxCompression..MaxTireScale) moves -0xc (+0x30..+0x54), the rest -0x10 (MaxTireAngleRate +0x94, ABSEnabled +0x98,
+# slips +0x9c/+0xa0, radius block +0x1e8, surfaces from +0x5a4, CamberRollRatio +0x9b0; first's wheel speed +0x90).
+# Preload +0xc5c/+0xc64/+0xc68/+0xc6c; clutch +0x1170..+0x1178; joystick rate limits +0x11d4..+0x11e4, steer
+# tables +0x11e8, rear steer +0x1230, SquareSteeringInput +0x11c0, NumberOfWings +0x11b4. MXVehicle's [Wrecks]:
+# MaxWreckTime +0xc88, WreckGravity +0xc90, WreckDamping +0xca0, WreckInertia +0xcb0 (defaults ones and (0,0,0,1)
+# at 0x396fd0/0x396fc0). [Camera]: shoulders +0x980/+0x990 (default (0,0,0,1)), FPCameraOffset +0xda0 (default
+# (0,5.1,-0.6,1), the quad's (0,4.1,-0.6,1) by kind word +0xbbc == 1), FCamFileName +0xdb0 (snprintf into 0x20).
 # S271 — the Kiowa's thrown blades collide, research/journal/2026-11-03-s271-kiowa-blades-collide.
 # game_sim::kiowa::{Blades::shape, Blades::knocks, Blades::search}; tests/kiowa.rs
 # thrown_blades_land_and_sleep_as_the_originals.
