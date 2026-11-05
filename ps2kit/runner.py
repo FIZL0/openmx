@@ -51,6 +51,7 @@ def settings() -> dict:
         'notes': f'{context}/notes',
         # relative paths only: agent-runner links each one relative to the checkout
         'links': [p for p in (context, '*.iso', iso) if p and not os.path.isabs(p)],
+        'copies': ['kit.toml'],  # the Rust tests read it from the worktree's root, not KIT_CONFIG
         'joinable': [f'{plan}/*.md', f'{journal}/*.md', oracle],
         'join': {oracle: './kit oracle join {union} {out}'},
         'fix_merges': c.fix_merges, 'fix_timeout': c.fix_timeout, 'fix_model': c.fix_model,
