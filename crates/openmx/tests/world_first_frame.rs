@@ -6,10 +6,15 @@
 //! the window still shows the loading screen, and cuts the near shapes about each rider at the load
 //! (`--warm on|off`, on by default).
 //!
-//! What is proved: a headless ride on a generated nine-tile world with `--timings` has no slow frame
-//! at tick 1 and says it drew the warm frame, and the ride is the same to the bit with the warm-up
-//! and without it. The ignored test rides the user's world_mxu as MD28 measured it. The rides skip
-//! without the disc.
+//! What is proved: a headless ride on a generated nine-tile world with `--timings` says it drew the
+//! warm frame before the ride's first, its ticks cut no near set the load had not, and its first
+//! frame wrote no ground part the warm frame had not; with `--warm off` they do both, so the counts
+//! see the work. The ride is the same to the bit with the warm-up and without it. The ignored test
+//! rides the user's world_mxu as MD28 measured it, by wall time. The rides skip without the disc.
+//!
+//! K43: this test once judged tick 1 by its wall time, as the ignored one still does, and a gate
+//! with every slot riding made tick 1 slow with the warm-up on. The work is counted instead, which
+//! no other process can change; the wall time is only said.
 
 use game_sim::tiles::generate;
 use std::path::{Path, PathBuf};
@@ -158,8 +163,22 @@ fn a_worlds_first_frame_is_not_slow_and_the_ride_is_the_same() {
     let drew = line(&warm, "warm frame:");
     let first = warm.lines().position(|l| l.contains("ms a frame") || l.contains("slow frame")).expect("timings");
     assert!(warm.lines().position(|l| l == drew).unwrap() < first, "the warm frame comes before the ride's first");
-    let slow = slow_at_tick_1(&warm);
-    assert!(slow.is_empty(), "the first frame is slow with the warm-up:\n{}", slow.join("\n"));
+    eprintln!("tick 1 with the warm-up: {:?}", slow_at_tick_1(&warm));
+    let (warm_first, cold_first) = (first_frame(&warm), first_frame(&cold));
+    assert_eq!(warm_first, (0, 0), "with the warm-up the first frame did the load's work: {:?}", line(&warm, "first frame:"));
+    assert!(cold_first.0 > 0, "without the warm-up tick 1 cut no near set: {:?}", line(&cold, "first frame:"));
+    assert!(cold_first.1 > 0, "without the warm-up the first frame wrote no ground part: {:?}", line(&cold, "first frame:"));
+}
+
+/// The first frame's line: the near sets the ride's ticks cut before it, and the ground parts it
+/// wrote.
+fn first_frame(said: &str) -> (usize, usize) {
+    let l = line(said, "first frame:");
+    let count = |after: &str| -> usize {
+        let rest = &l[l.find(after).unwrap_or_else(|| panic!("no {after:?} in {l:?}")) + after.len()..];
+        rest.trim_start().split(|c: char| !c.is_ascii_digit()).next().unwrap().parse().unwrap()
+    };
+    (count("near sets cut in the ride"), count("ground parts written"))
 }
 
 /// The user's world_mxu as MD28 measured it, headless at 1920x1080: no slow frame at tick 1.
