@@ -1,6 +1,6 @@
 //! The iPhone's side of the shell (P200), as opentennis's `hst-base/src/ios.rs` (M91, M105, M144, B694):
 //! the app's Documents folder and the log in it, the crash reports a phone with no Mac attached has
-//! no other way to show, the memory iOS counts, the safe area, the sound out through an AudioQueue,
+//! no other way to show, the memory iOS counts, the safe area, the sound out through an AudioQueue and its audio session (P296),
 //! the GameController framework's pads, their rumble and the phone's (P183, CoreHaptics), and the
 //! rotation lock's landscape hold.
 //!
@@ -14,6 +14,7 @@ mod log;
 mod rest;
 pub use rest::Rest;
 pub use log::{keep_previous_log, previous_log};
+pub mod session;
 
 #[cfg(target_os = "ios")]
 mod sys;

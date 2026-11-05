@@ -467,6 +467,9 @@ pub struct Mixer {
     /// The front end's own music (P65), the original's `UI\UI_001` pair: one stereo loop, under the
     /// music slider, playing while [`Mixer::front_end`] is on in place of the songs.
     pub menu_music: Option<Arc<Clip>>,
+    /// Another app's music is playing (P296, iOS's secondary-audio hint): the songs and the menu's
+    /// loop are silent, and the engine, effects, crowd and menu clicks are not.
+    pub other_audio: bool,
     /// The front end is up: the menu's loop plays and the songs hold where they are, silent even
     /// before the loop has loaded. Off, the ride's songs play. A change fades over [`MENU_FADE`].
     pub front_end: bool,
@@ -500,6 +503,7 @@ impl Mixer {
             music_edge: None,
             rendered: 0,
             menu_music: None,
+            other_audio: false,
             front_end: false,
             menu_fade: 0.0,
             menu_pos: 0.0,
@@ -656,6 +660,9 @@ impl Mixer {
     /// music's for the rest — the original's split, where the songs past the disc's thirteen take the
     /// ripped music's volume and the rest the music's.
     pub fn music_gain(&self) -> f32 {
+        if self.other_audio {
+            return 0.0;
+        }
         let base = match self.music.now() {
             // A music pack's songs are other games' (MD7), the User Soundtracks' as well.
             Some(id) if id.starts_with(FOLDER) || id.starts_with(MOD) => self.folder_volume,
@@ -708,7 +715,7 @@ impl Mixer {
         let step = clip.rate as f64 / RATE as f64;
         let back = if (MENU_LOOP_FROM as usize) < n - 1 { MENU_LOOP_FROM } else { 0.0 };
         for f in 0..frames {
-            let g = self.music_volume * at(f);
+            let g = if self.other_audio { 0.0 } else { self.music_volume } * at(f);
             let i = self.menu_pos as usize;
             let t = (self.menu_pos - i as f64) as f32;
             let j = if i + 1 < n { i + 1 } else { back as usize };
@@ -4259,19 +4266,47 @@ impl Output {
     #[cfg_attr(any(target_arch = "wasm32", target_os = "ios", windows), allow(unreachable_code))]
     pub fn start(mixer: Arc<Mutex<Mixer>>) -> Result<Output, String> {
         // The iPhone (P200): no players to pipe to; an AudioQueue pulls the mix as it plays, kept
-        // by a thread that only waits for the stop, so dropping this stops it as on the desktop.
+        // by a thread that waits for the stop, so dropping this stops it as on the desktop. P296:
+        // the music is silent while another app's plays, and the thread starts a new queue each
+        // time the audio session asks (an interruption over, the app back), so sound always returns.
         #[cfg(target_os = "ios")]
         {
-            let fill = Box::new(move |out: &mut [i16]| match mixer.lock() {
-                Ok(mut m) => m.render(out),
-                Err(_) => out.fill(0),
-            });
-            let sound = openmx_ios::Sound::start(RATE, fill)?;
+            let fill = |mixer: Arc<Mutex<Mixer>>| -> Box<dyn FnMut(&mut [i16]) + Send> {
+                Box::new(move |out: &mut [i16]| match mixer.lock() {
+                    Ok(mut m) => {
+                        m.other_audio = openmx_ios::other_audio();
+                        m.render(out)
+                    }
+                    Err(_) => out.fill(0),
+                })
+            };
+            let mut done = openmx_ios::audio_restarts();
+            let mut sound = Some(openmx_ios::Sound::start(RATE, fill(mixer.clone()))?);
             let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let quit = stop.clone();
             let thread = std::thread::spawn(move || {
+                // a failed start is tried again a second on, not every wake
+                let mut wait = 0u32;
                 while !quit.load(std::sync::atomic::Ordering::Relaxed) {
                     std::thread::park_timeout(std::time::Duration::from_millis(50));
+                    wait = wait.saturating_sub(1);
+                    let want = openmx_ios::audio_restarts();
+                    if (want == done && sound.is_some()) || wait > 0 {
+                        continue;
+                    }
+                    drop(sound.take());
+                    let active = openmx_ios::activate_audio();
+                    match openmx_ios::Sound::start(RATE, fill(mixer.clone())) {
+                        Ok(s) => {
+                            sound = Some(s);
+                            done = want;
+                            println!("sound: the AudioQueue started again ({want}, session {})", if active { "active" } else { "not active" });
+                        }
+                        Err(e) => {
+                            wait = 20;
+                            println!("sound: starting again: {e}");
+                        }
+                    }
                 }
                 drop(sound);
             });
