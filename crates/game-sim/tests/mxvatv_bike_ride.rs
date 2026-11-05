@@ -401,6 +401,7 @@ fn the_seeded_bikes_first_frame_is_ride2_row_0() {
 // --- F31b1: the bike's PreProcess, the port's ----------------------------------------------------------
 
 use game_sim::handling::bike;
+use game_sim::handling::run;
 use game_sim::quad::{self, Call, Moto, Quad};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -6676,8 +6677,8 @@ impl StepsInRam<'_, '_> {
     /// F31b5g — what the steps hand on, with nothing handed to the interpreter: the preload's cue
     /// dropped (a post no listener of the bike's reads: F31b5f's, and
     /// [`replay_pure`]); the stunt's start and end
-    /// [`update::stunt_start`]'s and [`update::trick_end`]'s, the player's run's calls dropped
-    /// ([`RunDropped`]); the wreck [`wreck::enter`]'s. Answers whether it answered `c`.
+    /// [`update::stunt_start`]'s and [`update::trick_end`]'s, the player's run's calls [`run`]'s
+    /// (F31b5h: [`RunServed`], their event posts dropped as the cue); the wreck [`wreck::enter`]'s. Answers whether it answered `c`.
     fn in_rust(&mut self, c: Call, from: Call, k: &quad::Bike) -> bool {
         let dt = self.inner.dt;
         let ee = &mut *self.inner.ram.ee;
@@ -6685,7 +6686,7 @@ impl StepsInRam<'_, '_> {
             Call::PreloadCue => {}
             Call::StartStunt(id) => {
                 assert_eq!(vt(ee, 0x4b8), STUNT_START_FN, "the bike's vt +0x4b8");
-                assert_eq!(update::stunt_start(&mut RunDropped { ee }, id, 1), 1);
+                assert_eq!(update::stunt_start(&mut RunServed { ee }, id, 1), 1);
             }
             Call::EndStunt => {
                 let id = match from {
@@ -6697,7 +6698,7 @@ impl StepsInRam<'_, '_> {
                     c => panic!("{c:?} ends no stunt"),
                 };
                 assert_eq!(vt(ee, 0x4ac), TRICK_END_FN, "the bike's vt +0x4ac");
-                update::trick_end(&mut RunDropped { ee }, id);
+                update::trick_end(&mut RunServed { ee }, id);
             }
             Call::Wreck(r) => {
                 assert_eq!(vt(ee, 0x368), WRECK_ENTER, "the bike's vt +0x368");
@@ -6720,12 +6721,12 @@ const RUN_TALLY: u32 = 0x0046_a760;
 const RUN_END: u32 = 0x0046_acf0;
 
 /// [`update::stunt_start`] and [`update::trick_end`] on the bike in RAM, the start's trick ends
-/// [`update::trick_end`]'s, the player's run's calls dropped.
-struct RunDropped<'a> {
+/// [`update::trick_end`]'s, the player's run's calls [`run`]'s ([`serve_run`], F31b5h).
+struct RunServed<'a> {
     ee: &'a mut Ee,
 }
 
-impl Updates for RunDropped<'_> {
+impl Updates for RunServed<'_> {
     fn bike(&self) -> u32 {
         BIKE
     }
@@ -6739,8 +6740,7 @@ impl Updates for RunDropped<'_> {
         use update::Out;
         match c {
             Out::TrickEnd(id) => update::trick_end(self, id),
-            Out::Mark { .. } | Out::RunOpen(_) | Out::RunScore { .. } | Out::RunClose { .. } | Out::RunTally { .. } | Out::RunEnd { .. } => 0,
-            c => panic!("the stunt's start and end call no {c:?}"),
+            c => serve_run(&mut RunInRam { ee: &mut *self.ee, posts: 0 }, c),
         }
     }
     fn vector(&mut self, c: update::Out) -> update::Quad {
@@ -6748,6 +6748,89 @@ impl Updates for RunDropped<'_> {
     }
     fn noise(&mut self, _: F) -> F {
         panic!("the stunt's start and end ask no noise")
+    }
+}
+
+/// F31b5h — one of the run's calls the stunt's start and end hand out, made by [`run`]'s port with
+/// the original's arguments (the open's player the bike's, as the start leaves it in `a1`).
+fn serve_run(m: &mut impl run::Runs, c: update::Out) -> u32 {
+    use update::Out;
+    let one = F::ONE;
+    match c {
+        Out::RunOpen(r) => {
+            let player = m.word(BIKE + 0x680);
+            run::open(m, r, player)
+        }
+        Out::RunScore { run: r, player, id, scores: [a, b] } => run::score(m, r, player, id, 12, F(f32::from_bits(a)), F::ZERO, F(f32::from_bits(b)), one, one),
+        Out::Mark { run: r, player, on, id } => run::mark(m, r, player, on, id, 0),
+        Out::RunClose { run: r, player } => run::close(m, one, r, player, 1),
+        Out::RunTally { run: r, player, count } => run::tally(m, F(f32::from_bits(count)), r, player, 1),
+        Out::RunEnd { run: r, player, id } => run::end(m, one, r, player, 1, id, 0),
+        c => panic!("the stunt's start and end call no {c:?}"),
+    }
+}
+
+/// F31b5h — the run's listeners state 4 has: the group's open and end (answering 0, nothing else),
+/// its tally and score, and the bike's watcher's four, the last six behind thunks (`j` with `a0`
+/// moved back to the listener's owner).
+const GROUP_OPEN_FN: u32 = 0x0046_a6f0;
+const GROUP_END_FN: u32 = 0x0046_afe0;
+const GROUP_TALLY_FN: u32 = 0x0051_9210;
+const GROUP_SCORE_FN: u32 = 0x0051_9ab0;
+const WATCH_OPEN_FN: u32 = 0x004e_7240;
+const WATCH_SCORE_FN: u32 = 0x004e_72b0;
+const WATCH_END_FN: u32 = 0x004e_7340;
+const WATCH_TALLY_FN: u32 = 0x004e_73f0;
+/// The event post (the preload's cue's).
+const POST_FN: u32 = PRELOAD_CUE;
+
+/// A listener thunk at `f` told `to`: its target and the owner it hands on (`to` plus its `addiu`).
+fn thunk(m: &mut impl run::Runs, f: u32, to: u32) -> (u32, u32) {
+    let (j, a) = (m.word(f), m.word(f.wrapping_add(4)));
+    assert!(j >> 26 == 2 && a >> 16 == 0x2484, "{f:#x} is no listener thunk: {j:#010x} {a:#010x}");
+    (f & 0xf000_0000 | (j & 0x03ff_ffff) << 2, to.wrapping_add(a as u16 as i16 as i32 as u32))
+}
+
+/// A listener told, by its vtable's function: the ports of the ones state 4 has.
+fn told(m: &mut impl run::Runs, c: run::Out) {
+    use run::Heard;
+    let run::Out::Tell { to, vt, player, heard } = c else { panic!("{c:?} tells no listener") };
+    let table = m.word(to.wrapping_add(vt));
+    let f = m.word(table.wrapping_add(heard.slot(vt)));
+    if matches!(f, GROUP_OPEN_FN | GROUP_END_FN) {
+        return;
+    }
+    let (target, owner) = thunk(m, f, to);
+    match (target, heard) {
+        (GROUP_SCORE_FN, Heard::Score(n)) => run::group_score(m, owner, player, n),
+        (GROUP_TALLY_FN, Heard::Tally { flag, .. }) => run::group_tally(m, owner, player, flag),
+        (WATCH_OPEN_FN, Heard::Open) => run::watch_open(m, owner, player),
+        (WATCH_SCORE_FN, Heard::Score(n)) => run::watch_score(m, owner, player, n),
+        (WATCH_END_FN, Heard::End { flag, node, .. }) => run::watch_end(m, owner, player, flag, node),
+        (WATCH_TALLY_FN, Heard::Tally { x, flag }) => run::watch_tally(m, owner, F(f32::from_bits(x)), player, flag),
+        _ => panic!("{to:#x} told {heard:?} through {f:#x} -> {target:#x}: no port"),
+    };
+}
+
+/// The run's words in RAM, its listeners [`told`], its event posts dropped and counted (as the
+/// preload's cue: no listener of theirs on state 4 writes the bike).
+struct RunInRam<'a> {
+    ee: &'a mut Ee,
+    posts: u32,
+}
+
+impl run::Runs for RunInRam<'_> {
+    fn word(&mut self, at: u32) -> u32 {
+        self.ee.u32_at(at)
+    }
+    fn set(&mut self, at: u32, w: u32) {
+        self.ee.set_u32(at, w);
+    }
+    fn out(&mut self, c: run::Out) {
+        match c {
+            run::Out::Tell { .. } => told(self, c),
+            run::Out::Post { .. } => self.posts += 1,
+        }
     }
 }
 
@@ -7710,10 +7793,10 @@ fn flip_replays_bit_exact_with_rust_callees() {
 
 /// **F31b5g — the steps hand nothing on**: C15's `name` replayed twice in lockstep by
 /// [`posts_frame`], once handing the steps' calls on to the original and once with them Rust's
-/// ([`StepsInRam::in_rust`]: the preload's cue and the player's run's calls dropped); every row of
+/// ([`StepsInRam::in_rust`]: the preload's cue and the run's event posts dropped, F31b5h: the run's calls ported); every row of
 /// the second word for word against C15, and the bike and its blocks the first's after every frame.
 /// Answers the wreck state per row, what the second run answered, and the RAM ranges where the two
-/// came to differ (the dropped calls' writes, none the bike's).
+/// came to differ (the dropped posts' writes, none the bike's).
 fn replay_pure(name: &str) -> Option<(Vec<bool>, BTreeMap<String, u32>, Vec<String>)> {
     let words = mass_words(&race250p()?)?;
     let trn = nat05_trn()?;
@@ -7767,10 +7850,12 @@ fn steps_handed(all: &BTreeMap<String, u32>) -> (Vec<(&str, u32)>, Vec<(&str, u3
 }
 
 /// **F31b5g — C15's ride with nothing handed on**: ride-2 bit-exact, the steps handing nothing to
-/// the interpreter (the gravity's record call the resolution's every substep).
+/// the interpreter (the gravity's record call the resolution's every substep); F31b5h: the whole
+/// RAM the handing run's after every frame.
 #[test]
 fn ride_replays_bit_exact_with_nothing_handed_on() {
-    let Some((w, all, _)) = replay_pure("ride-2") else { return };
+    let Some((w, all, off)) = replay_pure("ride-2") else { return };
+    assert_eq!(off, Vec::<String>::new(), "the RAM is the handing run's");
     assert_eq!(w.len(), 459);
     assert!(w.iter().all(|w| !w), "the ride never wrecks");
     let (rust, handed) = steps_handed(&all);
@@ -7779,9 +7864,13 @@ fn ride_replays_bit_exact_with_nothing_handed_on() {
 
 /// **F31b5g — C15's flip with nothing handed on**: flip-1 bit-exact, wrecked on row 125 and put back
 /// on row 193; the preload's cue dropped and the backflip's stunt started in Rust, once each.
+/// F31b5h: the run's calls the stunt's start and end make [`run`]'s, so the whole RAM is the handing
+/// run's after every frame but for the one word the dropped cue writes (the run's dropped event
+/// posts write no other).
 #[test]
 fn flip_replays_bit_exact_with_nothing_handed_on() {
-    let Some((w, all, _)) = replay_pure("flip-1") else { return };
+    let Some((w, all, off)) = replay_pure("flip-1") else { return };
+    assert_eq!(off, ["0x851fec..0x851ff0"], "the RAM differs only at the cue's write");
     assert_eq!(w.len(), 465);
     let changes: Vec<usize> = (1..w.len()).filter(|&r| w[r] != w[r - 1]).collect();
     assert_eq!(changes, [125, 193], "wrecked on row 125, put back on row 193");
@@ -9502,4 +9591,479 @@ fn the_spins_sine_and_cosine_are_the_originals() {
         let (sin, cos) = node::sin_cos(F(angle), curve());
         assert_eq!([ee.u32_at(s), ee.u32_at(c)], [sin.to_bits(), cos.to_bits()], "angle {angle} ({:#010x})", angle.to_bits());
     }
+}
+
+// F31b5h — the player's run's calls, in Rust.
+
+/// One of the run's six calls an oracle case makes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum RunCall {
+    Open,
+    Score,
+    Mark,
+    End,
+    Close,
+    Tally,
+}
+
+/// Where a fake listener's told calls land: the hooked stubs (`+ slot`, never run) for a group's
+/// vtable and a watcher's.
+const STUB_GROUP: u32 = 0x100;
+const STUB_WATCH: u32 = 0x200;
+
+/// What a listener with its vtable at `vt` hears through `slot`, its arguments in the registers.
+fn heard_at(ee: &Ee, vt: u32, slot: u32) -> run::Heard {
+    use run::Heard;
+    let (x, flag, a3) = (ee.f(12).to_bits(), ee.r(6) as u32, ee.r(7) as u32);
+    let all = [Heard::Open, Heard::Tally { x, flag }, Heard::Score(flag), Heard::End { x, flag, node: a3 }];
+    all.into_iter().find(|h| h.slot(vt) == slot).unwrap_or_else(|| panic!("no call through slot {slot:#x}"))
+}
+
+/// The run's ports on RAM, with the fake listeners' (their vtable one of `fakes`) calls and every
+/// event post logged, the rest of the listeners [`told`].
+struct RunOracle<'a> {
+    ee: &'a mut Ee,
+    fakes: [u32; 2],
+    log: Vec<run::Out>,
+}
+
+impl run::Runs for RunOracle<'_> {
+    fn word(&mut self, at: u32) -> u32 {
+        self.ee.u32_at(at)
+    }
+    fn set(&mut self, at: u32, w: u32) {
+        self.ee.set_u32(at, w);
+    }
+    fn out(&mut self, c: run::Out) {
+        match c {
+            run::Out::Tell { to, vt, .. } if self.fakes.contains(&self.ee.u32_at(to.wrapping_add(vt))) => self.log.push(c),
+            run::Out::Tell { .. } => told(self, c),
+            run::Out::Post { .. } => self.log.push(c),
+        }
+    }
+}
+
+/// A chain of `n` of `nodes` (next at `+0x24`), each with random words and a flag word from
+/// `flags`, its ids among `ids`; answers its head.
+fn chain(ee: &mut Ee, g: &mut Gen, nodes: &[u32], n: usize, ids: &[u32]) -> u32 {
+    for i in 0..n {
+        let at = nodes[i];
+        ee.set_u32(at, g.bits() & 0x3f | if g.one_in(8) { g.bits() } else { 0 });
+        ee.set_u32(at + 4, ids[(g.bits() as usize) % ids.len()]);
+        for o in [0xc, 0x10, 0x14, 0x18] {
+            let x = g.f(-50.0, 200.0);
+            ee.set_f32(at + o, x);
+        }
+        let s = match g.bits() % 4 {
+            0 => 0.0,
+            1 => g.f(0.0, 1000.0).round(),
+            _ => g.near(25.0, -100.0, 1000.0),
+        };
+        ee.set_f32(at + 8, s);
+        let step = match g.bits() % 5 {
+            0 => 0.0,
+            1 => -0.0,
+            2 => -5.0,
+            3 => 10.0,
+            _ => g.f(0.1, 50.0),
+        };
+        ee.set_f32(at + 0x20, step);
+        ee.set_u32(at + 0x24, if i + 1 < n { nodes[i + 1] } else { 0 });
+    }
+    if n > 0 { nodes[0] } else { 0 }
+}
+
+/// **F31b5h — one of the run's calls is the original's**: 10 000 cases on state 4's run and player,
+/// their words drawn at random (the run's flags, step and history length, its free list the image's
+/// or a short one or none, the player's flags, its stunts and history as chains of 0 to 5 nodes in
+/// scratch, its counts and scores), told to the image's group and the bike's watcher or to fakes in
+/// scratch (a group with 0 to 2 members, a watcher, 0 to 2 more on the player's list) or to none,
+/// the group's owner sometimes holding 0 to 3 gauges, the bike's watcher's words (its best combo,
+/// time, kept stunts and the stunt table's repeat scales) drawn too; made with random arguments (ids
+/// sign-extended) through SLUS-21104's call and [`run`]'s port. The answer, every word of the run,
+/// the player, the nodes, the bike, its record, the table and the gauges comes out the same, nothing
+/// else is written, and the fakes' calls (hooked stubs) and the event posts (hooked) are made in the
+/// same order with the same arguments. Answers the paths taken.
+#[allow(clippy::float_arithmetic)]
+fn run_oracle(which: RunCall, seed: u64) -> Option<BTreeMap<&'static str, u32>> {
+    let mut ee = image()?;
+    let (run0, player0) = (ee.u32_at(BIKE + 0x684), ee.u32_at(BIKE + 0x680));
+    let (group0, watch0) = (ee.u32_at(run0 + 0x24), ee.u32_at(player0 + 4));
+    assert_eq!(watch0, BIKE + 0x680, "the player's watcher is the bike's");
+    let owner = group0 - 0x364;
+    let settings = ee.u32_at(owner + 0x3d4);
+    let (record, table) = (ee.u32_at(BIKE + 0xd24), ee.u32_at(BIKE + 0x14f0));
+    let mut free0 = Vec::new();
+    let mut n = ee.u32_at(run0 + 0x3c);
+    while n != 0 && free0.len() < 4 {
+        free0.push(n);
+        n = ee.u32_at(n + 0x24);
+    }
+    let block = |k: u32| ee.scratch(k);
+    let nodes: Vec<u32> = (16..22).map(block).collect();
+    let history: Vec<u32> = (22..26).map(block).collect();
+    let spare: Vec<u32> = (26..29).map(block).collect();
+    let (gvt, wvt) = (block(29), block(31));
+    let (fake_group, members, fake_watch, listed) = (block(33), [block(34), block(35)], block(36), [block(37), block(38)]);
+    let gauges = block(39);
+    let gauge: Vec<u32> = [40, 42, 44].map(block).to_vec();
+    for slot in (0x3c..0x50).step_by(4) {
+        ee.set_u32(gvt + slot, STUB_GROUP + slot);
+        ee.set_u32(wvt + slot, STUB_WATCH + slot);
+    }
+    for &l in [fake_group].iter().chain(&members) {
+        ee.set_u32(l + 0x1c, gvt);
+    }
+    for &l in [fake_watch].iter().chain(&listed) {
+        ee.set_u32(l + 0x20, wvt);
+    }
+    let log: Rc<RefCell<Vec<run::Out>>> = Rc::default();
+    for (base, vt) in [(STUB_GROUP, run::GROUP_VT), (STUB_WATCH, run::WATCH_VT)] {
+        for slot in (0x3c..0x50).step_by(4) {
+            if vt == run::GROUP_VT && slot == 0x4c || vt == run::WATCH_VT && slot == 0x3c {
+                continue;
+            }
+            let l = log.clone();
+            ee.hooks.insert(base + slot, Box::new(move |ee: &mut Ee| {
+                let heard = heard_at(ee, vt, slot);
+                l.borrow_mut().push(run::Out::Tell { to: ee.r(4) as u32, vt, player: ee.r(5) as u32, heard });
+                ee.set(2, 0);
+            }));
+        }
+    }
+    let l = log.clone();
+    ee.hooks.insert(POST_FN, Box::new(move |ee: &mut Ee| {
+        assert_eq!(ee.r(4) as u32, ee.u32_at(CUE_ON), "the post's queue");
+        let [on, kind, id, data, x] = [5, 6, 7, 8, 9].map(|i| ee.r(i) as u32);
+        l.borrow_mut().push(run::Out::Post { on, kind, id, data, x });
+        ee.set(2, 0);
+    }));
+    let mut regions = vec![(run0, 0x310), (player0, 0x1e0), (group0, 0x20), (owner + 0x3d0, 0x14), (BIKE, 0x1800), (record, 0x24), (table, 0x1c + 46 * 12)];
+    regions.extend(free0.iter().map(|&n| (n, 0x28)));
+    regions.extend(nodes.iter().chain(&history).chain(&spare).map(|&n| (n, 0x28)));
+    regions.push((gauges, 0x10));
+    regions.extend(gauge.iter().map(|&g| (g, 0x64)));
+    let image_words = snap_regions(&ee, &regions);
+    let mut g = Gen(seed);
+    let mut t = BTreeMap::new();
+    let ids: Vec<u32> = (0..6).map(|_| g.bits() % 46).collect();
+    for k in 0..10_000 {
+        restore_regions(&mut ee, &regions, &image_words);
+        // The run.
+        let rf = g.bits() & 0xffff | if g.one_in(2) { 1 } else { 0 } & !if g.one_in(3) { 8 } else { 0 };
+        let rf = if g.one_in(3) { rf & !8 | 1 } else { rf };
+        ee.set_u32(run0 + 0x50, rf);
+        let step = match g.bits() % 4 {
+            0 => 1.0,
+            1 => 10.0,
+            2 => 0.5,
+            _ => g.f(0.1, 100.0),
+        };
+        ee.set_f32(run0 + 0x2a8, step);
+        ee.set_u32(run0 + 0x300, match g.bits() % 4 {
+            0 => u32::MAX,
+            1 => g.bits(),
+            _ => g.bits() % 7,
+        });
+        let free = match g.bits() % 4 {
+            0 => 0,
+            1 => {
+                let n = 1 + (g.bits() % 3) as usize;
+                chain(&mut ee, &mut g, &spare, n, &ids)
+            }
+            _ => free0[0],
+        };
+        ee.set_u32(run0 + 0x3c, free);
+        let group = match g.bits() % 4 {
+            0 => 0,
+            1 => fake_group,
+            _ => group0,
+        };
+        ee.set_u32(run0 + 0x24, group);
+        let m = (g.bits() % 3) as usize;
+        let to = if m > 0 { members[0] } else { 0 };
+        ee.set_u32(group + 4, to);
+        ee.set_u32(members[0] + 0x18, if m > 1 { members[1] } else { 0 });
+        ee.set_u32(members[1] + 0x18, 0);
+        // The gauges.
+        if group == group0 && g.one_in(2) {
+            let count = match g.bits() % 5 {
+                0 => g.bits() | 0x8000_0000,
+                n => n - 1,
+            };
+            ee.set_u32(owner + 0x3dc, gauges);
+            ee.set_u32(owner + 0x3e0, count);
+            for (i, &at) in gauge.iter().enumerate() {
+                ee.set_u32(gauges + 4 * i as u32, at);
+                ee.set_u32(at + 0x20, g.bits());
+                for o in [0x50, 0x58, 0x5c, 0x60] {
+                    let x = g.near(0.0, -3.0, 3.0);
+                    ee.set_f32(at + o, x);
+                }
+            }
+            for o in [0x58c, 0x594, 0x59c] {
+                let x = g.near(1.0, -3.0, 3.0);
+                ee.set_f32(settings + o, x);
+            }
+        }
+        // The player.
+        let player = if g.one_in(10) { 0 } else { player0 };
+        let pf = g.bits() & !0x63 | g.bits() & 0x63;
+        let pf = if g.one_in(2) { pf | 0x20 } else { pf };
+        let pf = if which == RunCall::Open && g.one_in(2) { pf & !1 | 2 } else { pf };
+        ee.set_u32(player0 + 8, pf);
+        let watch = match g.bits() % 4 {
+            0 => 0,
+            1 => fake_watch,
+            _ => watch0,
+        };
+        ee.set_u32(player0 + 4, watch);
+        let l = (g.bits() % 3) as usize;
+        ee.set_u32(player0 + 0x1d4, if l > 0 { listed[0] } else { 0 });
+        ee.set_u32(listed[0] + 0x1c, if l > 1 { listed[1] } else { 0 });
+        ee.set_u32(listed[1] + 0x1c, 0);
+        let n = (g.bits() % 6) as usize;
+        let head = chain(&mut ee, &mut g, &nodes, n, &ids);
+        ee.set_u32(player0 + 0xc8, head);
+        // The tally walks its history by the counts: they are the chains' there, as the game keeps them.
+        let off = which != RunCall::Tally && g.one_in(4);
+        ee.set_u32(player0 + 0xcc, if off { g.bits() % 10 } else { n as u32 });
+        let h = (g.bits() % 5) as usize;
+        let past = chain(&mut ee, &mut g, &history, h, &ids);
+        ee.set_u32(player0 + 0xd0, past);
+        ee.set_u32(player0 + 0xd4, if off { g.bits() % 8 } else { h as u32 });
+        let score = match g.bits() % 4 {
+            0 => 1_000_000.0,
+            1 => g.f(999_000.0, 1_001_000.0),
+            _ => g.f(0.0, 50_000.0),
+        };
+        ee.set_f32(player0 + 0xdc, score);
+        for o in [0xd8, 0xe0] {
+            let x = g.f(0.0, 1000.0);
+            ee.set_f32(player0 + o, x);
+        }
+        // The bike's watcher's words.
+        let combo = g.near(0.0, 0.0, 2000.0);
+        ee.set_f32(BIKE + 0x6f0, combo);
+        let best = match g.bits() % 3 {
+            0 => -1.0,
+            _ => g.f(0.0, 60.0),
+        };
+        ee.set_f32(BIKE + 0x6f4, best);
+        let now = g.f(0.0, 60.0);
+        ee.set_f32(BIKE + 0x1750, now);
+        for o in [0x13b8, 0x13bc, 0x13c0] {
+            let x = g.bits() % 46;
+            ee.set_u32(BIKE + o, x);
+        }
+        ee.set_u32(table, if g.one_in(4) { 0 } else { 1 });
+        for o in [4, 8, 0xc] {
+            let x = g.near(1.0, 0.1, 1.5);
+            ee.set_f32(table + o, x);
+        }
+        for i in 0..46 {
+            let x = if g.one_in(3) { 1.0 } else { g.f(0.0, 1.2) };
+            ee.set_f32(table + 0x1c + 12 * i, x);
+        }
+        // The call.
+        let x = match g.bits() % 3 {
+            0 => 1.0,
+            _ => g.near(1.0, -2.0, 30.0),
+        };
+        let flag = match g.bits() % 3 {
+            0 => 0,
+            1 => 1,
+            _ => g.bits(),
+        };
+        let id = if g.one_in(3) { u32::MAX } else if g.one_in(4) { g.bits() % 46 } else { ids[(g.bits() as usize) % ids.len()] };
+        let node = if g.one_in(2) || n == 0 { 0 } else { nodes[(g.bits() as usize) % n] };
+        let kind = if g.one_in(2) { 12 } else { g.bits() };
+        let fs: [f32; 5] = std::array::from_fn(|_| g.near(1.0, -20.0, 60.0));
+        let sx = |v: u32| v as i32 as i64 as u64;
+        let (r, p) = (u64::from(run0), u64::from(player));
+        let (f, ints, floats): (u32, Vec<u64>, Vec<f32>) = match which {
+            RunCall::Open => (RUN_OPEN, vec![r, p], vec![]),
+            RunCall::Score => (RUN_SCORE, vec![r, p, sx(id), sx(kind)], fs.to_vec()),
+            RunCall::Mark => (MARK_FN, vec![r, p, u64::from(flag), sx(id), u64::from(node)], vec![]),
+            RunCall::End => (RUN_END, vec![r, p, u64::from(flag), sx(id), u64::from(node)], vec![x]),
+            RunCall::Close => (RUN_CLOSE, vec![r, p, u64::from(flag)], vec![x]),
+            RunCall::Tally => (RUN_TALLY, vec![r, p, u64::from(flag)], vec![x]),
+        };
+        let before = snap_regions(&ee, &regions);
+        log.borrow_mut().clear();
+        ee.set(28, GP);
+        ee.call(f, &ints, &floats, BUDGET);
+        let answer = ee.r(2) as u32;
+        let stray = written_outside(&ee, &regions);
+        assert!(stray.is_empty(), "case {k}: the original wrote outside the run's words: {stray:?}");
+        let want = snap_regions(&ee, &regions);
+        let want_log = log.borrow().clone();
+        restore_regions(&mut ee, &regions, &before);
+        let mut m = RunOracle { ee: &mut ee, fakes: [gvt, wvt], log: Vec::new() };
+        let [f12, f13, f14, f15, f16] = fs.map(F);
+        let got_answer = match which {
+            RunCall::Open => run::open(&mut m, run0, player),
+            RunCall::Score => run::score(&mut m, run0, player, id, kind, f12, f13, f14, f15, f16),
+            RunCall::Mark => run::mark(&mut m, run0, player, flag, id, node),
+            RunCall::End => run::end(&mut m, F(x), run0, player, flag, id, node),
+            RunCall::Close => run::close(&mut m, F(x), run0, player, flag),
+            RunCall::Tally => run::tally(&mut m, F(x), run0, player, flag),
+        };
+        let got_log = std::mem::take(&mut m.log);
+        assert_eq!(got_answer, answer, "case {k}: the answer");
+        assert_eq!(got_log, want_log, "case {k}: the calls");
+        let got = snap_regions(&ee, &regions);
+        if got != want {
+            let mut off = Vec::new();
+            let mut i = 0;
+            for &(at, len) in &regions {
+                for o in (0..len).step_by(4) {
+                    if got[i] != want[i] {
+                        off.push(format!("{:#x}: port {:#010x}, original {:#010x}", at + o, got[i], want[i]));
+                    }
+                    i += 1;
+                }
+            }
+            panic!("case {k} ({which:?}): {} words differ\n  {}", off.len(), off.join("\n  "));
+        }
+        // The paths.
+        let word = |a: u32| {
+            let i = regions.iter().scan(0usize, |s, &(at, len)| {
+                let i = *s;
+                *s += len as usize / 4;
+                Some((at, len, i))
+            });
+            i.into_iter().find(|&(at, len, _)| (at..at + len).contains(&a)).map(|(at, _, i)| (before[i + ((a - at) / 4) as usize], want[i + ((a - at) / 4) as usize])).unwrap()
+        };
+        let changed = |a: u32| {
+            let (b, w) = word(a);
+            b != w
+        };
+        if player == 0 {
+            tally(&mut t, "no player");
+            continue;
+        }
+        let posts = want_log.iter().filter(|c| matches!(c, run::Out::Post { .. })).count();
+        let fakes = want_log.len() - posts;
+        if posts > 0 {
+            tally(&mut t, "posted");
+        }
+        if fakes > 0 {
+            tally(&mut t, "fakes told");
+        }
+        if gauge.iter().any(|&a| changed(a + 0x58) || changed(a + 0x5c) || changed(a + 0x60)) {
+            tally(&mut t, "a gauge kicked");
+        }
+        let node_flags_changed = nodes[..n].iter().filter(|&&a| changed(a)).count();
+        match which {
+            RunCall::Open => {
+                tally(&mut t, if changed(player0 + 8) { "opened" } else { "left" });
+                if changed(player0 + 8) && head != 0 {
+                    tally(&mut t, "stunts freed");
+                }
+            }
+            RunCall::Score => {
+                tally(&mut t, if answer == 0 { if pf & 0x20 == 0 { "no run open" } else { "no free node" } } else { "scored" });
+                if answer != 0 && free == free0[0] {
+                    tally(&mut t, "off the image's free list");
+                }
+            }
+            RunCall::Mark => tally(&mut t, match node_flags_changed {
+                0 => "nothing marked",
+                _ if flag != 0 => "marked",
+                _ => "unmarked",
+            }),
+            RunCall::End => {
+                if answer == 0 {
+                    tally(&mut t, "nothing running");
+                    continue;
+                }
+                tally(&mut t, if node_flags_changed == 0 { "no node" } else if flag == 0 { "unscored" } else { "scored" });
+                if nodes[..n].iter().any(|&a| changed(a + 8)) {
+                    tally(&mut t, "the score scaled");
+                }
+                if word(player0 + 8).1 & 0x40 != 0 {
+                    tally(&mut t, "still running");
+                }
+            }
+            RunCall::Close => tally(&mut t, match node_flags_changed {
+                0 => "none ended",
+                1 => "one ended",
+                _ => "some ended",
+            }),
+            RunCall::Tally => {
+                if answer == 0 {
+                    tally(&mut t, "no run open");
+                    continue;
+                }
+                tally(&mut t, if rf & 0x8000 == 0 { "the stunts freed" } else if (ee.u32_at(run0 + 0x300) as i32) < 0 { "the history dropped" } else { "the history kept" });
+                if changed(player0 + 0xd4) && word(player0 + 0xd4).1 != word(player0 + 0xd4).0 && rf & 0x8000 != 0 && word(player0 + 0xd4).1 == ee.u32_at(run0 + 0x300) {
+                    tally(&mut t, "the history cut");
+                }
+                if changed(BIKE + 0x6f0) {
+                    tally(&mut t, "a best combo");
+                }
+                if changed(BIKE + 0x6f4) {
+                    tally(&mut t, "a best time");
+                }
+                if (0..46).any(|i| changed(table + 0x1c + 12 * i)) {
+                    tally(&mut t, "repeats scaled");
+                }
+                if changed(player0 + 0xdc) {
+                    tally(&mut t, "the score moved");
+                }
+            }
+        }
+    }
+    eprintln!("{which:?}: {t:?}");
+    Some(t)
+}
+
+/// [`run_oracle`]'s `paths` each taken at least `least` times.
+fn run_paths(which: RunCall, seed: u64, paths: &[&str], least: u32) {
+    let Some(t) = run_oracle(which, seed) else { return };
+    for want in paths {
+        assert!(t.get(want).copied().unwrap_or(0) >= least, "{which:?}: path {want:?} taken {} times: {t:?}", t.get(want).copied().unwrap_or(0));
+    }
+}
+
+/// **F31b5h — the run's open is the original's** ([`run_oracle`]).
+#[test]
+fn the_run_open_is_the_originals() {
+    run_paths(RunCall::Open, 0x31b5_0001, &["no player", "opened", "left", "stunts freed", "posted", "fakes told"], 50);
+}
+
+/// **F31b5h — a stunt's score is the original's** ([`run_oracle`]).
+#[test]
+fn the_run_score_is_the_originals() {
+    run_paths(RunCall::Score, 0x31b5_0002, &["no player", "no run open", "no free node", "scored", "off the image's free list", "posted", "fakes told", "a gauge kicked"], 50);
+}
+
+/// **F31b5h — a stunt's mark is the original's** ([`run_oracle`]).
+#[test]
+fn the_run_mark_is_the_originals() {
+    run_paths(RunCall::Mark, 0x31b5_0003, &["no player", "nothing marked", "marked", "unmarked"], 50);
+}
+
+/// **F31b5h — a stunt's end is the original's** ([`run_oracle`]).
+#[test]
+fn the_run_end_is_the_originals() {
+    run_paths(RunCall::End, 0x31b5_0004, &["no player", "nothing running", "no node", "unscored", "scored", "the score scaled", "still running", "posted", "fakes told"], 50);
+}
+
+/// **F31b5h — the run's close is the original's** ([`run_oracle`]).
+#[test]
+fn the_run_close_is_the_originals() {
+    run_paths(RunCall::Close, 0x31b5_0005, &["no player", "none ended", "one ended", "some ended", "posted", "fakes told"], 50);
+}
+
+/// **F31b5h — the run's tally is the original's** ([`run_oracle`]).
+#[test]
+fn the_run_tally_is_the_originals() {
+    run_paths(
+        RunCall::Tally,
+        0x31b5_0006,
+        &["no player", "no run open", "the stunts freed", "the history dropped", "the history kept", "the history cut", "a best combo", "a best time", "repeats scaled", "the score moved", "posted", "fakes told"],
+        50,
+    );
 }
