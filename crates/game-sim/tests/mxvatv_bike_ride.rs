@@ -3881,6 +3881,16 @@ const BONE_POSE: u32 = 0x0019_4e00;
 const BONE_PLACE: u32 = 0x0019_4da0;
 const TERRAIN_NORMAL: u32 = 0x0048_33c0;
 const GROUND_RESET: u32 = 0x0049_2ca0;
+/// F31b5e: the ground reset's and the orient's (research/oracle.txt `# F31b5c`): the bike's orient
+/// (vt +0xf0) and spatial update (vt +0xe4), the body's staged position, velocity and orientation
+/// and their commit (its vt +0x10, +0x14, +0x58, +0x3c), and the node hung back in the scene.
+const ORIENT: u32 = 0x0049_2e50;
+const SPATIAL_UPDATE: u32 = 0x0049_2c40;
+const BODY_POSITION: u32 = 0x0049_2b90;
+const BODY_VELOCITY: u32 = 0x0049_2b70;
+const BODY_ORIENTATION: u32 = 0x0049_2b30;
+const BODY_COMMIT: u32 = 0x0049_3070;
+const REHANG: u32 = 0x0019_6c10;
 const TRAIL_RESET: u32 = 0x004f_a760;
 const CAMERA_RESET: u32 = 0x004f_7590;
 /// The bike's vtable slots the wreck calls, the port's own first (each with its function).
@@ -4012,13 +4022,99 @@ impl Wrecks for WreckInRam<'_> {
             Out::Rider { a, b } => (RIDER_SETTLE, vec![u64::from(a), u64::from(b), 1, 1], x),
             Out::Pose { bone, buf } => (BONE_POSE, vec![u64::from(bone), 0, u64::from(ee.scratch(WRECK_SCRATCH[3] + buf))], x),
             Out::Place { part, buf } => (BONE_PLACE, vec![u64::from(part), u64::from(ee.scratch(WRECK_SCRATCH[3] + buf))], x),
-            Out::Ground => (GROUND_RESET, vec![bike], x),
+            // F31b5e's: the ground reset, the orient and the body's and node's calls they make.
+            Out::Ground => {
+                wreck::ground(self);
+                return 0;
+            }
+            Out::Orient { at, forward, up } => {
+                assert_eq!(vt(self.ee, 0xf0), ORIENT, "the bike's vt +0xf0");
+                wreck::orient(self, at, forward, up);
+                return 0;
+            }
+            Out::BodyPosition(_) | Out::BodyVelocity(_) | Out::BodyOrientation { .. } | Out::BodyCommit => {
+                let (slot, f) = match c {
+                    Out::BodyPosition(_) => (0x10, BODY_POSITION),
+                    Out::BodyVelocity(_) => (0x14, BODY_VELOCITY),
+                    Out::BodyOrientation { .. } => (0x58, BODY_ORIENTATION),
+                    _ => (0x3c, BODY_COMMIT),
+                };
+                assert_eq!(body_fn(slot), f, "the body's vt +{slot:#x}");
+                match c {
+                    Out::BodyPosition(at) => wreck::body_position(self, body, at),
+                    Out::BodyVelocity(at) => wreck::body_velocity(self, body, at),
+                    Out::BodyOrientation { q, spin } => wreck::body_orientation(self, body, q, spin),
+                    _ => wreck::body_commit(self, body),
+                }
+                return 0;
+            }
+            Out::NodeSet { node, at } => {
+                assert_eq!(node, ee.u32_at(BIKE + 0xe4), "the bike's node");
+                on_scene(self.ee, |s| s.set_position(0, at)).expect("the bike's node has no parent");
+                return 0;
+            }
+            Out::NodeAim { node, forward, up } => {
+                assert_eq!(node, ee.u32_at(BIKE + 0xe4), "the bike's node");
+                on_scene(self.ee, |s| s.aim(0, forward, up));
+                return 0;
+            }
+            Out::Spatial | Out::NodeBounds(_) | Out::PartSync(_) => {
+                let call = match c {
+                    Out::Spatial => {
+                        assert_eq!(slot(0xe4), SPATIAL_UPDATE, "the bike's vt +0xe4");
+                        Call::SpatialUpdate
+                    }
+                    Out::NodeBounds(node) => {
+                        assert_eq!(node, ee.u32_at(BIKE + 0xe4), "the bike's node");
+                        Call::NodeBounds
+                    }
+                    Out::PartSync(p) if p == ee.u32_at(BIKE + 0xd0) => Call::PartSync(quad::Part::Frame),
+                    Out::PartSync(p) if p == ee.u32_at(BIKE + 0xcc) => Call::PartSync(quad::Part::Riding),
+                    c => panic!("{c:?}: neither the frame nor the riding part"),
+                };
+                wreck_steps(self.ee, call, x);
+                return 0;
+            }
+            Out::Rehang { node, to } => (REHANG, vec![u64::from(node), u64::from(to), 1, 1], x),
             Out::Kind(set) => (slot(if set { 0x3a0 } else { 0x39c }), vec![bike], x),
             Out::Trail(at) => (TRAIL_RESET, vec![u64::from(at)], x),
             Out::Camera(at) => (CAMERA_RESET, vec![u64::from(at)], x),
             Out::Normal { .. } => unreachable!("asked through normal()"),
         };
         self.call(f, &ints, x)
+    }
+}
+
+/// F31b5e: `c` (the spatial update, the node's bounds or a part sync) as [`quad::Steps`]' on the bike
+/// [`steps::read_post`] reads, its words put back where they changed; a collidable's database move
+/// it hands on the original's.
+fn wreck_steps(ee: &mut Ee, c: Call, dt: f32) {
+    let m = |a| ee.u32_at(a);
+    let (k, at, parts) = steps::read_post(&m, BIKE, KINDS).unwrap_or_else(|e| panic!("{c:?}: the bike's words: {e}"));
+    let last = steps::post_words(&k, &at, &parts, &m);
+    let mut s = quad::Steps {
+        bike: k,
+        rest: Vec::<Call>::new(),
+        ground: |_: Vf, _: &mut u8| -> (Vf, Vf) { panic!("the ground reset asks for no ground") },
+        sweep: (),
+    };
+    s.call(c, &mut Quad::default(), &mut quad::Body::default());
+    let quad::Steps { bike: k, rest, .. } = s;
+    let now = steps::post_words(&k, &at, &parts, &|a| ee.u32_at(a));
+    set_changed(ee, &now, &last);
+    for r in rest {
+        match r {
+            Call::PartMove { part, centre, half, reach } => {
+                label("wreck PartMove");
+                let (c, h) = (ee.scratch(0), ee.scratch(1));
+                set_vf(ee, c, centre);
+                set_vf(ee, h, half);
+                let entry = parts[game_sim::atv_sync::slot(part)] + 0x18;
+                ee.set(28, GP);
+                census(ee, |ee| ee.call(SPATIAL_MOVE, &[u64::from(entry), u64::from(c), u64::from(h)], &[reach.0], BUDGET));
+            }
+            r => panic!("the ground reset's steps hand on no {r:?} (dt {dt})"),
+        }
     }
 }
 
@@ -4037,6 +4133,68 @@ fn port_wreck(ee: &mut Ee, c: tail::Out, dt: F) {
         }
         c => unreachable!("{c:?}"),
     }
+}
+
+/// **F31b5e — the ground reset is the original's**: 10,000 times on state 4's bike, its spot,
+/// forward and up (`+0x50`, `+0x60`, `+0x70`, every lane, the axes anywhere but parallel), its
+/// body's offset (`+0x1a0`) and its parts' flag (`+0x44` bit 0) drawn at random, and the riding
+/// part there or not — SLUS-21104's ground reset in the interpreter, and
+/// [`wreck::ground`] served as the replays serve it (the orient, the body's and the node's calls,
+/// the spatial update and the part syncs the ports'). Every word of RAM, and the scratchpad, come
+/// out the same.
+#[test]
+#[allow(clippy::float_arithmetic)]
+fn the_ground_reset_is_the_originals() {
+    let Some(mut ee) = image().map(hooked) else { return };
+    let base = ee.ram.clone();
+    let mut g = Gen(0x0031_b5e0);
+    let mut t = BTreeMap::new();
+    let mut off = Vec::new();
+    let body = ee.u32_at(BIKE + wreck::BODY);
+    let riding = ee.u32_at(BIKE + 0xcc);
+    for k in 0..10_000 {
+        ee.ram.clone_from(&base);
+        let quad = |ee: &mut Ee, at: u32, v: [f32; 4]| {
+            for (i, x) in v.into_iter().enumerate() {
+                ee.set_f32(at + 4 * i as u32, x);
+            }
+        };
+        let r = |g: &mut Gen, s: f32| [g.f(-s, s), g.f(-s, s), g.f(-s, s), g.near(1.0, -2.0, 2.0)];
+        let at = r(&mut g, 500.0);
+        let (fwd, up) = loop {
+            let (a, b) = (r(&mut g, 3.0), r(&mut g, 3.0));
+            let c = [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+            let n = |v: &[f32]| v[..3].iter().map(|x| x * x).sum::<f32>();
+            if n(&c) > 0.01 * n(&a) * n(&b) && n(&a) > 0.01 && n(&b) > 0.01 {
+                break (a, b);
+            }
+        };
+        quad(&mut ee, BIKE + 0x50, at);
+        quad(&mut ee, BIKE + 0x60, fwd);
+        quad(&mut ee, BIKE + 0x70, up);
+        let off_by = r(&mut g, 1.5);
+        quad(&mut ee, body + 0x1a0, off_by);
+        // The node hung (`+0x45` bit 1) is not drawn: state 4's is not, and the unhook runs off it.
+        let (on, ride) = (g.one_in(2), !g.one_in(4));
+        let b44 = ee.u8_at(BIKE + 0x44) & !1 | u8::from(on);
+        set_byte(&mut ee, BIKE + 0x44, u32::from(b44));
+        assert_eq!(ee.u8_at(BIKE + 0x45) & 2, 0, "state 4's node is not hung");
+        ee.set_u32(BIKE + 0xcc, if ride { riding } else { 0 });
+        tally(&mut t, if on { "parts on" } else { "parts left" });
+        tally(&mut t, if ride { "riding part" } else { "no riding part" });
+        let (before, spr) = (ee.ram.clone(), ee.spr.clone());
+        ee.set(28, GP);
+        ee.call(GROUND_RESET, &[u64::from(BIKE)], &[0.0], BUDGET);
+        let (want, want_spr) = (std::mem::replace(&mut ee.ram, before), std::mem::replace(&mut ee.spr, spr));
+        wreck::ground(&mut WreckInRam { ee: &mut ee, x: 0.0 });
+        let d = bytes_differ(&want, &ee.ram, ee.stack);
+        if !d.is_empty() || want_spr != ee.spr {
+            off.push(format!("{k} (on {on}, riding {ride}): RAM differs at {d:?}, scratchpad same {}", want_spr == ee.spr));
+        }
+    }
+    eprintln!("{t:#?}");
+    assert!(t.values().all(|n| *n >= 1000), "every path taken: {t:#?}");
+    assert!(off.is_empty(), "{} differ:\n  {}", off.len(), off.iter().take(30).cloned().collect::<Vec<_>>().join("\n  "));
 }
 
 /// The wreck's oracle's fake world, at `WRECK_AREA`: the bike's vtable, the functions the hooks
@@ -7406,15 +7564,18 @@ fn the_rides_tail_callees_leave_the_physics_alone() {
 }
 
 /// **F31b5c — C15's flip, watched the same**: on every row of flip-1, wreck and put-back among
-/// them, the callees left in the interpreter leave the physics blocks alone but one: the put-back's
-/// ground reset, on row 193, which F31b5c1 ports.
+/// them, the callees left in the interpreter leave the physics blocks alone. F31b5e: with the
+/// put-back's ground reset Rust ([`wreck::ground`]: its orient, the body's and the node's calls, the
+/// spatial update and the part syncs), none of them is left a writer; what the reset still hands on
+/// (the unhooks, the parts on and attached) changes no word of them.
 #[test]
-fn the_flips_tail_callees_leave_the_physics_alone_but_the_ground_reset() {
+fn the_flips_tail_callees_leave_the_physics_alone() {
     let Some(c) = census_of("flip-1") else { return };
     show("flip-1", &c);
-    let w = census_writers(&c);
-    assert_eq!(w.iter().map(|w| w.0).collect::<Vec<_>>(), ["wreck Ground"], "callees that wrote the physics blocks: {w:?}");
-    assert_eq!(c["wreck Ground"].rows.iter().copied().collect::<Vec<_>>(), [193], "the ground reset runs on the put-back's row");
+    assert_eq!(census_writers(&c), [], "callees that wrote the physics blocks");
+    for l in ["wreck Unhook", "wreck PartOn", "wreck Attach"] {
+        assert!(c[l].rows.contains(&193), "{l} runs on the put-back's row");
+    }
     assert_eq!(c.keys().map(String::as_str).collect::<Vec<_>>(), FLIP_CALLEES, "the callees left in the interpreter");
 }
 
@@ -7445,7 +7606,7 @@ const RIDE_CALLEES: [&str; 23] = [
     "wreck OutOfBounds",
 ];
 /// The callees flip-1 leaves in the interpreter: ride-2's, the trick's, the wreck's and the put-back's.
-const FLIP_CALLEES: [&str; 44] = [
+const FLIP_CALLEES: [&str; 43] = [
     "tail Message",
     "tail Paused",
     "tail Rumble",
@@ -7475,7 +7636,6 @@ const FLIP_CALLEES: [&str; 44] = [
     "update Walk",
     "wreck Attach",
     "wreck Camera",
-    "wreck Ground",
     "wreck Kind",
     "wreck OutOfBounds",
     "wreck PartOff",

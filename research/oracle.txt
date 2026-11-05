@@ -9546,6 +9546,23 @@ atv_heap_free               atv 0x001b76d0 = free
 #   only: node frame/position/axes outputs (+0x750..+0x7c8, +0x7f0..+0x828, +0x9f0..+0xa08), the sender
 #   +0xcfc, trick hold vt +0x4ec +0x14dc..+0x14e8, kind set vt +0x3a0 +0x9a8, post 0x00272300 +0x460/
 #   +0x468 (row 125), settle vt +0x4a8 +0x1754.
+# F31b5e — the put-back's ground reset in Rust (game_sim::handling::wreck::ground/orient/body_*/turned,
+# game_sim::atv_moto::Scene::aim; tests/mxvatv_bike_ride.rs' WreckInRam). Comment rows only.
+# Journal: research/journal/2026-11-05-f31b5e-ground-reset-in-rust/.
+#   Body vts (vtable at body +0x110): +0x10 0x00492b90 body+0x40 = quad; +0x14 0x00492b70 body+0x50 =
+#   quad; +0x58 0x00492b30 body+0x180 = a1's four words, body+0x160 = a2's quad; +0x3c 0x00493070:
+#   +0x60,+0x70 = +0x40; +0x80 = +0x50; +0xa0,+0x90,+0xc0,+0xd0,+0xb0 = origin 0x00396fc0; +0x170,+0x190 =
+#   +0x180; +0x1d0 = +0x160; +0x70.xyz += q(+0x190) turning +0x1a0 (VU opmula/opmsub/madd chain, w kept);
+#   +0x60 = +0x70; +0x1b0,+0x1c0,+0x1e0,+0x1f0,+0x200 = origin.
+#   Orient 0x00492e50: up = (a with xyz a x b) x a, both normalized, at +0xc = 1.0; q = 0x00135860 of the
+#   basis (origin, fwd, up); body +0x10(at), +0x58(q, origin), +0x3c; node set 0x00194b10(+0xe4, 0,
+#   body+0x70 - q(+0x190) turning +0x1a0); aim 0x00194260(node, 0, fwd, up, 0, 1, 0) = basis at the node's
+#   own position, with a parent update(parent) then times the inverse of its world, xyz position kept,
+#   then moved; vt +0xe4 0x00492c40 (bike +8 database entry: none on state 4 and C15); +0x45 bit 1 node
+#   bounds; +0x44 bit 0: probe place 0x00114360 for +0xd0 then +0xcc (each if non-zero).
+#   On C15 the put-back clears +0x45 bit 1 before the reset (flag byte 0x05), so the node unhook, rehang
+#   0x00196c10 and node bounds are not reached; on state 4 the node unhook reads past RAM (not hung).
+#   flip-1 with the reset in Rust: all 465 rows bit-exact, no interpreter callee writes the physics blocks.
 
 # F39: the bike vehicle update's own callees, ported as game_sim::handling::update. Journal:
 # research/journal/2026-11-04-f39-vehicle-update-callees/.
