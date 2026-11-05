@@ -1,0 +1,17 @@
+sleep 15t
+down cross
+down r1
+sleep 40t
+up r1
+sleep 50t
+stick l 0 1
+sleep 45t
+stick l 0 0
+sleep 15t
+stick l 0 -1
+sleep 150t
+stick l 0 0
+up cross
+sleep 450t
+release
+sleep 10t

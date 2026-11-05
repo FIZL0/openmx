@@ -9121,6 +9121,30 @@ atv_sound_iop_call          atv 0x00182c90 = the sound driver's SIF RPC to the I
 # frame 2059 (a push and shock no tire gives, tires equal: the hull on the terrain, not ported) and the stretch
 # seeded at 2100 in that contact.
 
+atv_biplane_crash_test      atv 0x004c4110 = the plane's crash test once a frame (a0 plane, f12 dt; biplane vt+0x49c, called from 0x004c3974)
+atv_biplane_wreck           atv 0x004c0cc0 = the plane's wreck entry (a0 plane, a1 reason; biplane vt+0x368)
+atv_biplane_unwreck         atv 0x004c4350 = the plane's recovery (a0 plane; biplane vt+0x36c)
+atv_vehicle_wreck           atv 0x004a83d0 = MXVehicle's wreck entry (a0 vehicle, a1 reason)
+atv_vehicle_unwreck         atv 0x004a8500 = MXVehicle's recovery (a0 vehicle)
+atv_car_crash_test          atv 0x004cd110 = the car's crash test (a0 car, f12 dt; the MaxWreckTime - 2.0 one)
+# MD101c — the biplane's wreck/recover machine (biplane::Crash::step_mxvatv; tests/mxvatv_biplane_wreck.rs,
+# journal research/journal/2026-11-05-md101c-mxvatv-biplane-wreck). Plane words: +0xc80 reason, +0xc84 clock,
+# +0xc88 MaxWreckTime, +0xc8c the thrown plane's landed latch, +0x1160 MinWreckSpeed, +0x32c speed, +0x324
+# grounded, +0xbf4 up.y, +0x30c the crash mask (0x4 in biplane3), +0xc8 the collision record (+0x34 touching,
+# +0x20c the struck object, its +0x94 class). atv_biplane_crash_test: reason != 13 and vt+0x16c
+# (atv_vehicle_wreck_check) -> wreck 13; reason 0: touching and not (struck & class&mask) and !(speed <= min)
+# -> wreck 1, else touching and up.y < 0 -> wreck 1; else clock += dt, then 13 & !latch & !(clock <= 2.5) &
+# (grounded | touching) -> latch 1, clock 0, post (8, 12); 13 & latch & !(clock <= max) -> velocity.xyz *= 0.3
+# (vmulx), unwreck; 1 & !(clock <= max) -> unwreck. MX Unleashed's machine with WreckTime = MaxWreckTime: the
+# task's "recovery at MaxWreckTime - 2.0" is atv_car_crash_test's (wreck 14, a flipped car starts its clock at
+# max - 2.0; velocity * 0.06, speed < 10), not the plane's. atv_biplane_wreck: atv_vehicle_wreck (reason, clock
+# 0, latch 0, rumble when atv_rumble_on, the body's vt+0x20/+0x68/+0x60 unless +0xbbc is 0 or 1, post (8, 11)
+# via atv_post_event), rates.xyz *= 4 (vmulx), gravity -WreckGravity*mass*32.2, +0x318 0, engine +100 0,
+# *(+0x12e8) vt+0x94. atv_biplane_unwreck: gravity from the scale, *(+0x12e8) vt+0x90, vt+0xe8, then
+# atv_vehicle_unwreck (13 divides the scale by the throw's; reason 0, clock 0, latch kept). 0x00490ecc reads
+# max - clock. Crash capture: context/capture/md80a/biplane3crash.csv (research/md80a/biplane3crash.pad from
+# biplane3.ee.bin): reason 1 at row 297 (frame 298), back to 0 at row 448 (frame 449).
+
 # MD89 — the quadtree sub-database's moving-entry virtuals (game-sim atv_spatial.rs Tree; atv_spatial's Database
 # dispatches List/Tree). Journal: research/journal/2026-11-02-md75-atv-frame/8-spatial-move.md "MD89". Proof:
 # tests/atv_spatial.rs (generated trees laid at 0x01f80000 in atv-r-spawn.ee.bin; the image's own tree 0x006547c0).

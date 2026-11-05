@@ -2480,7 +2480,10 @@ impl Crash {
     /// wreck check, which every SLUS-21104 vehicle's vtable names. The throw is MX Unleashed's but for
     /// its lift, `240/k` loaded into the accumulator and `16.1·k` fused onto it; the edge test is
     /// [`Area::outside_mxvatv`]. The rest of the test (the contact rule, the clocks, the recovery) is
-    /// [`Crash::step_in`]'s.
+    /// [`Crash::step_in`]'s: the plane's crash test (MD101c) is MX Unleashed's machine on MXVehicle's
+    /// words — the reason, the clock, the thrown plane's landed latch and `MaxWreckTime` — with
+    /// MXVehicle's wreck entry, which starts the clock again at zero on every wreck (a crashed plane
+    /// thrown from the edge waits its 2.5 s from the throw, not from the crash).
     #[allow(clippy::too_many_arguments)]
     pub fn step_mxvatv(
         &mut self,
@@ -2497,8 +2500,12 @@ impl Crash {
         if let Some(area) = area.filter(|a| self.reason != THROWN && (a.outside_mxvatv(position, F(EDGE)) || c.holed)) {
             throw_mxvatv(area, position, velocity, rates, gravity_scale, rng);
             self.wreck(THROWN, thrown.get_or_insert_with(Crashed::default));
+            self.clock = F::ZERO;
         }
         let out = self.step_in(c, None, position, velocity, rates, gravity_scale, rng, dt);
+        if out.wreck.is_some() {
+            self.clock = F::ZERO;
+        }
         match thrown {
             Some(t) => Crashed { wreck: t.wreck, recover: out.recover },
             None => out,
