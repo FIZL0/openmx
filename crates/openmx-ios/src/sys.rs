@@ -628,6 +628,37 @@ pub fn hold(window: &winit::window::Window, hold: crate::Hold) {
     }
 }
 
+/// Asks UIKit to read the window's deferred edges and home indicator again
+/// (`setNeedsUpdateOf…`, as opentennis 6815b2ce after a turn), then says what the view controller
+/// it reads them from reports: the window's root, or the child that one hands the question to.
+/// Main thread only; `None` elsewhere or before the view is in a window.
+pub fn defer_gestures(window: &winit::window::Window) -> Option<crate::Gestures> {
+    let (view, Some(vc)) = view_of(window).filter(|_| main_thread())? else { return None };
+    let root = get(get(view, c"window"), c"rootViewController");
+    if root.is_null() {
+        return None;
+    }
+    // SAFETY: on the main thread; `vc` and `root` are live view controllers; objc_msgSend cast to
+    // each message's signature (no-argument void, BOOL and NSUInteger getters, respondsToSelector:)
+    unsafe {
+        let responds: extern "C" fn(Id, Id, Id) -> bool = std::mem::transmute(objc_msgSend as *const ());
+        let void: extern "C" fn(Id, Id) = std::mem::transmute(objc_msgSend as *const ());
+        for name in [c"setNeedsUpdateOfScreenEdgesDeferringSystemGestures", c"setNeedsUpdateOfHomeIndicatorAutoHidden"] {
+            if responds(root, sel(c"respondsToSelector:"), sel(name)) {
+                void(root, sel(name));
+            }
+        }
+        let child = get(root, c"childViewControllerForScreenEdgesDeferringSystemGestures");
+        let asked = if child.is_null() { root } else { child };
+        let flag: extern "C" fn(Id, Id) -> bool = std::mem::transmute(objc_msgSend as *const ());
+        Some(crate::Gestures {
+            deferred: int(asked, c"preferredScreenEdgesDeferringSystemGestures") as usize,
+            indicator_hidden: flag(asked, sel(c"prefersHomeIndicatorAutoHidden")),
+            ours: asked == vc,
+        })
+    }
+}
+
 /// CoreMotion's `CMAcceleration`, in g along the device's axes (x right, y up the screen held upright).
 #[repr(C)]
 #[derive(Clone, Copy)]
