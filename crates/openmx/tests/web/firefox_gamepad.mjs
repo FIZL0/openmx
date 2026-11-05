@@ -18,12 +18,13 @@
 // seat are its`). Then Cross until a ride seats it, and the ride is watched on its L2 and then its R2: the speedometer
 // still over two seconds of brake, as gamepad.mjs, and the gas read against that braked picture (its 0), since in
 // software the ride is slow and two pictures on the gas can show one speed. Prints one JSON line:
-// { state, gpu, listed, first, taps, seated, braked, gas, png } — `listed` whether `getGamepads()` showed the pad
+// { state, gpu, listed, first, taps, seated, braked, gas, frames, png } — `listed` whether `getGamepads()` showed the pad
 // before any press (Firefox holds a pad back until one, as chromium does), the rest as gamepad.mjs.
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { WORKER, PAGE, frames } from './frames.mjs';
 
 const [firefox, webdir, iso, profile, out] = process.argv.slice(2);
 const PKG = process.env.OPENMX_GPU_PKG;
@@ -43,6 +44,8 @@ const server = http.createServer((req, res) => {
     }
     // OPFS refused, as gamepad.mjs: the picked file is read where it is, and nothing is copied
     if (p === '/index.html') b = Buffer.from(String(b).replace('opfs = true;', 'opfs = false;'));
+    // the worker's frames counted, for the taps below (frames.mjs)
+    if (p === '/worker.js') b = Buffer.concat([Buffer.from(WORKER), b]);
     res.writeHead(200, { 'content-type': types[path.extname(f)] ?? 'application/octet-stream' });
     res.end(b);
   });
@@ -180,6 +183,7 @@ const until = async (good, ms) => {
 };
 
 await ok('browsingContext.navigate', { context, url, wait: 'complete' });
+await evaluate(`${PAGE}\ntrue`);
 let d = await until(d => ['asking', 'failed'].includes(d.state), 60000);
 if (d.state !== 'asking') fail(`the page did not ask for the disc: ${JSON.stringify(d)}`);
 const pick = await send('script.evaluate', { expression: "document.querySelector('#pick')", target: { context },
@@ -200,10 +204,13 @@ const heard = async (from, test, ms) => {
 };
 // The pad's buttons go through the service; `pad` is the index addGamepad gave.
 const press = (b, v) => evaluate(`openmxTestService.newButtonValueEvent(openmxTestIndex, ${b}, ${v > 0.5}, ${v > 0}, ${v}), true`);
-const tap = async b => {
-  await press(b, 1);
-  await wait(100);
-  await press(b, 0);
+// Cross down and then up, each held until the worker has had three frames of it, as gamepad.mjs (K39).
+const { held, within } = frames(async () => JSON.parse((await evaluate('JSON.stringify(window.openmxTestSeen)')) ?? 'null'), wait);
+const tap = async () => {
+  await press(0, 1);
+  await held(1, 3, 60000);
+  await press(0, 0);
+  await held(0, 3, 60000);
 };
 if (!(await heard(0, l => l.startsWith('music: playing'), 60000))) fail('no song started: the front end never came up');
 await wait(2000);
@@ -224,11 +231,13 @@ const menus = l => l.startsWith(`pads: 1P: ${PAD}`) && l.includes('the menus');
 await press(0, 1);
 const first = await heard(from, menus, 60000);
 await press(0, 0);
+await held(0, 3, 60000);
 const seated = l => l.startsWith(`pads: 1P: ${PAD}`) && !l.includes('the menus');
 let taps = 1;
 from = said.length;
-while (!(await heard(from, seated, 1500)) && taps < 12) {
-  await tap(0);
+// a tap each 90 of the worker's frames, however long those take (gamepad.mjs)
+while (!(await within(90, () => said.slice(from).some(seated), 60000)) && taps < 12) {
+  await tap();
   taps++;
 }
 const ride = said.slice(from).some(seated);
@@ -277,7 +286,8 @@ if (ride) {
   fs.writeFileSync(out, Buffer.from(e, 'base64'));
 }
 d = await data();
-console.log(JSON.stringify({ state: d.state, gpu: d.gpu, listed, first, taps, seated: ride, braked, gas, png: out }));
+const counted = JSON.parse((await evaluate("JSON.stringify(window.openmxTestSeen)")) ?? "null");
+console.log(JSON.stringify({ state: d.state, gpu: d.gpu, listed, first, taps, seated: ride, braked, gas, frames: counted?.[0], png: out }));
 done = true;
 fox.kill();
 await exited;

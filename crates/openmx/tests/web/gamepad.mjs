@@ -12,13 +12,14 @@
 // (the console's `pads: 1P: … the menus and the first seat are its`). Then Cross until a ride seats the pad
 // (`pads: 1P: <pad>`), and the ride is watched on the pad's brake and then its gas. With OPENMX_GPU_PKG set the page's
 // pkg/ is served from there. Prints one JSON line:
-// { state, first, taps, seated, braked, gas, png } — `first` whether the first press made the pad Player 1, `taps` how
+// { state, first, taps, seated, braked, gas, frames, png } — `first` whether the first press made the pad Player 1, `taps` how
 // many Cross presses it took to reach a ride, `braked` and `gas` the share of the speedometer that changed over two
-// seconds on L2 and on R2. The last picture is <out.png>, the braked one beside it.
+// seconds on L2 and on R2, `frames` the worker's frames (frames.mjs). The last picture is <out.png>, the braked one beside it.
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { WORKER, PAGE, frames } from './frames.mjs';
 
 const [webdir, iso, profile, out, ...flags] = process.argv.slice(2);
 const PKG = process.env.OPENMX_GPU_PKG;
@@ -38,6 +39,8 @@ const server = http.createServer((req, res) => {
     }
     // OPFS refused, as chromium.mjs's --no-opfs: the picked file is read where it is, and nothing is copied
     if (p === '/index.html') b = Buffer.from(String(b).replace('opfs = true;', 'opfs = false;'));
+    // the worker's frames counted, for the taps below (frames.mjs)
+    if (p === '/worker.js') b = Buffer.concat([Buffer.from(WORKER), b]);
     res.writeHead(200, { 'content-type': types[path.extname(f)] ?? 'application/octet-stream' });
     res.end(b);
   });
@@ -130,7 +133,8 @@ await send('Page.addScriptToEvaluateOnNewDocument', { source: `{
       }
     },
   };
-}` });
+}
+${PAGE}` });
 await send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true });
 await send('Page.navigate', { url });
 let d = await until(d => ['asking', 'failed'].includes(d.state), 60000);
@@ -152,11 +156,13 @@ const heard = async (from, test, ms) => {
     await wait(50);
   }
 };
-// A press as a hand makes one: down for a few of the page's frames, then up.
-const tap = async b => {
-  await evaluate(`openmxTestPad.set(${b}, 1)`);
-  await wait(100);
-  await evaluate(`openmxTestPad.set(${b}, 0)`);
+// A press as a hand makes one, Cross down and then up, each held until the worker has had three frames of it (K39).
+const { held, within } = frames(() => evaluate('window.openmxTestSeen'), wait);
+const tap = async () => {
+  await evaluate('openmxTestPad.set(0, 1)');
+  await held(1, 3, 60000);
+  await evaluate('openmxTestPad.set(0, 0)');
+  await held(0, 3, 60000);
 };
 // The splash: the front end is up once the menus' song plays; a moment more for its first frames.
 if (!(await heard(0, l => l.startsWith('music: playing'), 60000))) fail('no song started: the front end never came up');
@@ -168,12 +174,14 @@ const menus = l => l.startsWith(`pads: 1P: ${PAD}`) && l.includes('the menus');
 await evaluate('openmxTestPad.set(0, 1)');
 const first = await heard(from, menus, 60000);
 await evaluate('openmxTestPad.set(0, 0)');
-// On through the menus with Cross until a ride seats the pad.
+await held(0, 3, 60000);
+// On through the menus with Cross until a ride seats the pad: a tap each 90 of the worker's frames (1.5 s at 60 Hz),
+// however long those take (K39: 1.5 s of wall clock ran out at a twentieth of the frames).
 const seated = l => l.startsWith(`pads: 1P: ${PAD}`) && !l.includes('the menus');
 let taps = 1;
 from = said.length;
-while (!(await heard(from, seated, 1500)) && taps < 12) {
-  await tap(0);
+while (!(await within(90, () => said.slice(from).some(seated), 60000)) && taps < 12) {
+  await tap();
   taps++;
 }
 const ride = said.slice(from).some(seated);
@@ -223,7 +231,7 @@ if (ride) {
   fs.writeFileSync(out.replace(/\.png$/, '-braked.png'), Buffer.from(b, 'base64'));
   fs.writeFileSync(out, Buffer.from(e, 'base64'));
 }
-console.log(JSON.stringify({ state: (await data()).state, first, taps, seated: ride, braked, gas, png: out }));
+console.log(JSON.stringify({ state: (await data()).state, first, taps, seated: ride, braked, gas, frames: (await evaluate('window.openmxTestSeen'))?.[0], png: out }));
 chrome.kill();
 await new Promise(r => chrome.on('exit', r));
 server.close();
