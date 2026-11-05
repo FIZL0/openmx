@@ -30,6 +30,7 @@ pub mod mass;
 pub mod record;
 pub mod seed;
 pub mod step;
+pub mod steps;
 pub mod tail;
 pub mod untamed;
 pub mod update;
