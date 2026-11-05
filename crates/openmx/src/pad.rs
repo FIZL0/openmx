@@ -45,13 +45,14 @@ const PAD_DIR: &str = "/dev/input";
 
 /// A joystick device as it is read: a `/dev/input/js*` node, or in the browser one of the page's
 /// gamepads put out as the same events (P196, [`crate::web_host::PadNode`]).
-#[cfg(not(any(target_arch = "wasm32", target_os = "ios", windows)))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "ios", target_os = "android", windows)))]
 type Node = std::fs::File;
 #[cfg(target_arch = "wasm32")]
 type Node = crate::web_host::PadNode;
-// The iPhone's GameController pads and its touch pad, put out as the same events (P200).
-#[cfg(target_os = "ios")]
-type Node = crate::ios::PadNode;
+// The iPhone's GameController pads and its touch pad, put out as the same events (P200),
+// and the Android phone's (P308).
+#[cfg(any(target_os = "ios", target_os = "android"))]
+type Node = crate::phone::PadNode;
 // Windows' XInput pads through gilrs, put out as the same events (P192).
 #[cfg(windows)]
 type Node = crate::win::PadNode;
@@ -59,6 +60,8 @@ const PAD_SYS: &str = "/sys/class/input";
 
 /// `O_NONBLOCK`, so a frame with no pad event does not wait for one. The value is Linux's, and this
 /// is the one place the shell needs a number from a header rather than from std.
+// Android reads no js nodes (`android.rs`).
+#[cfg_attr(target_os = "android", allow(dead_code))]
 const O_NONBLOCK: i32 = 0o4000;
 
 /// One joystick event: a millisecond stamp, a value, a type and which control it is.
@@ -892,11 +895,13 @@ impl Rumble {
     }
 
     /// How long the host's motor runs, in the kernel's milliseconds.
+    #[cfg_attr(target_os = "android", allow(dead_code))]
     pub fn millis(self) -> u16 {
         (self.seconds * 1000.0).round() as u16
     }
 
     /// The level on the kernel's scale for a rumble's strong motor, `0..=0xffff`.
+    #[cfg_attr(target_os = "android", allow(dead_code))]
     pub fn magnitude(self) -> u16 {
         u16::from(self.level) * 257
     }
@@ -1571,13 +1576,13 @@ fn has_key(bitmap: &str, code: usize) -> bool {
 impl DeviceInfo {
     /// `sys/<node>/device/…`, as much of it as is there. A node with no sysfs entry (a test's fifo,
     /// or a container with no `/sys`) is known by its path alone.
-    #[cfg_attr(any(target_os = "ios", windows), allow(unreachable_code, unused_variables))]
+    #[cfg_attr(any(target_os = "ios", target_os = "android", windows), allow(unreachable_code, unused_variables))]
     fn read(sys: &std::path::Path, node: &str) -> DeviceInfo {
         // A page's gamepad has a name and nothing else (P196).
         #[cfg(target_arch = "wasm32")]
         return DeviceInfo { name: crate::web_host::pad_name(node), ..DeviceInfo::default() };
-        #[cfg(target_os = "ios")]
-        return DeviceInfo { name: crate::ios::pad_name(node), ..DeviceInfo::default() };
+        #[cfg(any(target_os = "ios", target_os = "android"))]
+        return DeviceInfo { name: crate::phone::pad_name(node), ..DeviceInfo::default() };
         #[cfg(windows)]
         return DeviceInfo { name: crate::win::pad_name(node), ..DeviceInfo::default() };
         let dir = sys.join(node).join("device");
@@ -2605,13 +2610,13 @@ const RESCAN_SECONDS: f32 = 0.0;
 /// a gap, which would hand the pad behind it the gone pad's node and so its seat; a place another
 /// pad left goes to a new name only once every place is used.
 #[derive(Default)]
-#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "ios", target_os = "android")), allow(dead_code))]
 pub struct Places {
     /// Each place's controller now (`None`: it left), and the name of the one it had last.
     at: Vec<(Option<usize>, String)>,
 }
 
-#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "ios", target_os = "android")), allow(dead_code))]
 impl Places {
     /// `listed` is every controller now, `(id, name)`, in the framework's order: each one's place, or
     /// `None` for one beyond the `room` places there are.
@@ -2767,11 +2772,11 @@ impl Seats {
         self.since_scan = Some(crate::clock::Instant::now());
         #[cfg(target_arch = "wasm32")]
         let mut found = crate::web_host::pads();
-        #[cfg(target_os = "ios")]
-        let mut found = crate::ios::pads();
+        #[cfg(any(target_os = "ios", target_os = "android"))]
+        let mut found = crate::phone::pads();
         #[cfg(windows)]
         let mut found = crate::win::pads();
-        #[cfg(not(any(target_arch = "wasm32", target_os = "ios", windows)))]
+        #[cfg(not(any(target_arch = "wasm32", target_os = "ios", target_os = "android", windows)))]
         let mut found: Vec<(u32, std::path::PathBuf)> = match &self.only {
             Some(path) => vec![(0, path.clone())],
             None => std::fs::read_dir(&self.dir)
@@ -2800,15 +2805,15 @@ impl Seats {
                 });
                 continue;
             }
-            #[cfg(not(any(target_arch = "wasm32", target_os = "ios", windows)))]
+            #[cfg(not(any(target_arch = "wasm32", target_os = "ios", target_os = "android", windows)))]
             use std::os::unix::fs::OpenOptionsExt;
-            #[cfg(not(any(target_arch = "wasm32", target_os = "ios", windows)))]
+            #[cfg(not(any(target_arch = "wasm32", target_os = "ios", target_os = "android", windows)))]
             let Ok(file) = std::fs::OpenOptions::new().read(true).custom_flags(O_NONBLOCK).open(&path)
             else {
                 continue;
             };
-            #[cfg(any(target_arch = "wasm32", target_os = "ios", windows))]
-            #[cfg_attr(any(target_os = "ios", windows), allow(unused_mut))]
+            #[cfg(any(target_arch = "wasm32", target_os = "ios", target_os = "android", windows))]
+            #[cfg_attr(any(target_os = "ios", target_os = "android", windows), allow(unused_mut))]
             let Ok(mut file) = Node::open(&path) else { continue };
             #[cfg(target_arch = "wasm32")]
             let fresh = started;
@@ -2912,9 +2917,9 @@ impl Seats {
             self.scan();
         }
         let present: Vec<String> = self.joined.iter().map(|j| j.id.clone()).collect();
-        #[cfg(target_os = "ios")]
+        #[cfg(any(target_os = "ios", target_os = "android"))]
         self.touch_hand_over(&present, riding);
-        #[cfg(not(target_os = "ios"))]
+        #[cfg(not(any(target_os = "ios", target_os = "android")))]
         let _ = riding;
         self.slots.update(&present);
     }
@@ -2922,11 +2927,11 @@ impl Seats {
     /// The touch pad and the controllers hand the touch player's seats to each other
     /// ([`PadSlots::touch_swap`]), and the pad layer tells the touch pad whether it is still wanted
     /// ([`crate::ios::touch_seat`]).
-    #[cfg(target_os = "ios")]
+    #[cfg(any(target_os = "ios", target_os = "android"))]
     fn touch_hand_over(&mut self, present: &[String], riding: bool) {
-        let touch = DeviceInfo { name: crate::ios::TOUCH_NAME.into(), ..DeviceInfo::default() }.identity(std::path::Path::new(""));
+        let touch = DeviceInfo { name: crate::phone::TOUCH_NAME.into(), ..DeviceInfo::default() }.identity(std::path::Path::new(""));
         self.slots.touch_swap(&touch, present);
-        crate::ios::touch_seat(self.slots.wanted(&touch), riding);
+        crate::phone::touch_seat(self.slots.wanted(&touch), riding);
     }
 
     /// A menu frame (P46): every device's own report, the keyboard's first and then each pad

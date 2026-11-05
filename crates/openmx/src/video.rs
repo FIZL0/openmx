@@ -247,7 +247,7 @@ impl Device {
         // Filled in further on a browser and an iPhone.
         #[allow(unused_mut)]
         let mut d = Device {
-            touch: cfg!(target_os = "ios"),
+            touch: cfg!(any(target_os = "ios", target_os = "android")),
             steam_deck: std::env::var("SteamDeck").is_ok_and(|v| v == "1"),
             cores: std::thread::available_parallelism().map_or(0, |n| n.get() as u32),
             ..Device::default()
@@ -258,6 +258,14 @@ impl Device {
         {
             d.model = openmx_ios::model();
             d.ram_mb = openmx_ios::memory_mb();
+        }
+        // The Android phone's (P308): its model, and the memory /proc says it has.
+        #[cfg(target_os = "android")]
+        {
+            d.model = openmx_android::model();
+            let info = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
+            let kb = info.lines().find_map(|l| l.strip_prefix("MemTotal:")?.trim().strip_suffix("kB")?.trim().parse::<u64>().ok());
+            d.ram_mb = kb.map_or(0, |k| (k / 1024) as _);
         }
         d
     }

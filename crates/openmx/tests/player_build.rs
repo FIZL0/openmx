@@ -1,6 +1,6 @@
 //! P262: the builds players download run the native sim (openmx's `native-sim`, F15), and the gate's do not.
 //! Player builds come out of tools/build.sh (Linux, the Steam Deck's, Windows), tools/web.sh (the page),
-//! tools/ios-ipa.sh (the iPhone app, the release's alone), and .github/workflows/pages.yml (the beta, which builds
+//! tools/ios-ipa.sh (the iPhone app, the release's alone), tools/apk.sh (the Android app, P308), and .github/workflows/pages.yml (the beta, which builds
 //! Linux without build.sh); tools/release.sh runs the first three. Plain `cargo build`/`cargo run`, the ./kit check gate,
 //! ci.yml and `tools/web.sh --check` (the tests' page) stay exact.
 
@@ -53,6 +53,13 @@ fn the_page_the_app_and_the_beta_are_native() {
     assert!(ipa.contains("features=\"--features native-sim\""), "the iPhone app is not native");
     assert!(ipa.contains("--bin openmx $features"), "tools/ios-ipa.sh drops the features");
 
+    // P308: the Android app, native and with `ship` (B492: no dev variables on a phone); build.sh android passes
+    // --exact-sim on
+    let apk = read("tools/apk.sh");
+    assert!(apk.contains("features=\"--features android,ship,native-sim\""), "the Android app is not native, or not ship");
+    assert!(apk.contains("--example openmx $features"), "tools/apk.sh drops the features");
+    assert!(read("tools/build.sh").contains("android) tools/apk.sh ${features:---exact-sim} ;;"), "build.sh android drops --exact-sim");
+
     let pages = read(".github/workflows/pages.yml");
     assert!(pages.contains("cargo build --locked --release -p openmx --bin openmx $(bash tools/build.sh features)"), "the beta's Linux build is not build.sh's");
     assert!(pages.contains("tools/build.sh windows\n"), "the beta's Windows build is not build.sh's default");
@@ -62,6 +69,7 @@ fn the_page_the_app_and_the_beta_are_native() {
     let release = read("tools/release.sh");
     assert!(release.contains("tools/build.sh all\n") && release.contains("tools/web.sh\n"), "the release does not take the default builds");
     assert!(release.contains("native sim"), "the release notes do not say which sim");
+    assert!(release.contains("tools/build.sh android\n") && release.contains("openmx-android.apk"), "the release has no Android app");
     assert!(!release.contains("--exact-sim\n") && !release.contains("ios-ipa.sh \"$out/openmx-ios.ipa\" --exact-sim"));
 }
 

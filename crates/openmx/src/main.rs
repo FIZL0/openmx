@@ -165,7 +165,11 @@
 //! the disc's is the order of the three trick buttons, because that order is what numbers the six
 //! groups and so which stunt a gesture names.
 
-#![forbid(unsafe_code)]
+// The Android app's one exception (P308): `android.rs`'s `android_main`, the symbol the
+// NativeActivity looks up by name, which `#[unsafe(no_mangle)]` makes. Every JNI call is in
+// `openmx-android`.
+#![cfg_attr(not(target_os = "android"), forbid(unsafe_code))]
+#![cfg_attr(target_os = "android", deny(unsafe_code))]
 
 // The shell's modules, crate-visible: the browser's build (P196, `web.rs`) mounts this file as a module of
 // its own and takes them up to its root, where their `crate::` paths look for them.
@@ -189,10 +193,14 @@ mod dress;
 // The browser's GPU window is the page's canvas (P48).
 #[cfg_attr(target_arch = "wasm32", path = "web_gpu.rs")]
 #[cfg_attr(target_os = "ios", path = "ios_gpu.rs")]
+#[cfg_attr(target_os = "android", path = "android_gpu.rs")]
 mod gpuwin;
 // The iPhone app (P200).
 #[cfg(target_os = "ios")]
 mod ios;
+// The Android app (P308).
+#[cfg(target_os = "android")]
+mod android;
 // The Windows build's pads and sound (P192).
 #[cfg(windows)]
 mod win;
@@ -224,6 +232,8 @@ mod pad;
 mod player;
 // The menu's own disc browser (P220), for a player's start with no dialog program and no terminal.
 #[cfg(not(target_arch = "wasm32"))]
+// Android picks its disc with the system's picker (`android.rs`).
+#[cfg_attr(target_os = "android", allow(dead_code))]
 mod disc_browser;
 mod particles;
 mod plane_draw;
@@ -267,6 +277,11 @@ mod touch_pad;
 mod vehicle;
 mod window;
 }
+// The phone's pads and touch pad, for the pad layer: the iPhone's or the Android phone's.
+#[cfg(target_os = "ios")]
+use ios as phone;
+#[cfg(target_os = "android")]
+use android as phone;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -398,6 +413,8 @@ const STUNT_ARCHIVE: &str = "appstart.res";
 const STUNT_TABLE: &str = "stunts.ini";
 
 #[cfg_attr(target_os = "ios", allow(unreachable_code))]
+// On Android the shell is a library the activity loads, and `android_main` its entry.
+#[cfg_attr(target_os = "android", allow(dead_code))]
 fn main() {
     launched();
     // The iPhone runs UIKit on this thread and the shell on another (P200).

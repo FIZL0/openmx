@@ -1450,7 +1450,9 @@ pub fn open(url: &str) -> Result<(), String> {
     }
     #[cfg(target_os = "ios")]
     return openmx_ios::open_url(url);
-    #[cfg(not(any(target_arch = "wasm32", target_os = "ios")))]
+    #[cfg(target_os = "android")]
+    return openmx_android::open_url(url);
+    #[cfg(not(any(target_arch = "wasm32", target_os = "ios", target_os = "android")))]
     {
         let opener = if cfg!(target_os = "macos") { "open" } else if cfg!(windows) { "explorer" } else { "xdg-open" };
         std::process::Command::new(opener).arg(url).spawn().map(|_| ()).map_err(|e| format!("{opener}: {e}"))

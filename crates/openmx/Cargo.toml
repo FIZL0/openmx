@@ -9,10 +9,29 @@ publish.workspace = true
 name = "openmx"
 path = "src/main.rs"
 
+# The Android app's library (P308, `tools/apk.sh`), as opentennis's is: the shell built as a cdylib the
+# NativeActivity loads, starting at `android.rs`'s `android_main`. src/android_so.rs is a symlink to
+# main.rs (opentennis's B618: the same file under its own name, or Cargo warns that main.rs is in two
+# build targets on every build).
+[[example]]
+name = "openmx"
+path = "src/android_so.rs"
+crate-type = ["cdylib"]
+required-features = ["android"]
+test = false
+
 # The iPhone's build (P200): the UIKit, GameController, CoreMotion and AudioToolbox calls, which
 # are unsafe, in a crate of their own so this one goes on forbidding unsafe code.
 [target.'cfg(target_os = "ios")'.dependencies]
 openmx-ios = { path = "../openmx-ios" }
+
+# The Android build (P308): the JNI and libc calls in a crate of their own, as the iPhone's are;
+# winit's NativeActivity backend (the patched winit's gamepad queue and lifecycle hook with it), and
+# the sound through cpal's AAudio.
+[target.'cfg(target_os = "android")'.dependencies]
+openmx-android = { path = "../openmx-android" }
+winit = { version = "0.30", features = ["android-native-activity"] }
+cpal = "0.16"
 
 # The browser's build (N4): the part of the shell a web page runs, as a WebAssembly module with no
 # bindings crate (`tools/web.sh`). An rlib as well, so the desktop's tests can draw the same frame.
@@ -120,6 +139,12 @@ pollster = "1"
 # peer, and its tapes say `sim native`.
 [features]
 native-sim = ["ps2-float/native"]
+# The Android .so (`tools/apk.sh`, the `openmx` example).
+android = []
+# opentennis's B492: a build players get. On Android (`tools/apk.sh`) the developers' OPENMX_*
+# variables are dropped before anything reads them (`android.rs`); the desktop's player builds do
+# not take it yet.
+ship = []
 
 [dev-dependencies]
 # tests/netplay_browser.rs's local relay: iroh's own relay server, as crates/openmx-net's tests run it

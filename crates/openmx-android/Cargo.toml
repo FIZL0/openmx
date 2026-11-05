@@ -1,0 +1,19 @@
+[package]
+name = "openmx-android"
+description = "The Android phone's side of the shell (P308): JNI calls behind a safe face, so the shell keeps forbidding unsafe code"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+# Everything here is for the APK (tools/apk.sh); on the desktop only the plain logic (the pads' mapping) is built.
+[target.'cfg(target_os = "android")'.dependencies]
+# The activity's Java side (crates/openmx/android/…/MxActivity.java): the disc's file picker, the safe area,
+# the input devices and the updater's install, through the jni android-activity builds.
+jni = "0.22"
+# The log's pipe and the fatal signals' handlers.
+libc = "0.2"
+# The AndroidApp android_main is given, as winit re-exports it (the workspace's patched copy).
+winit = { version = "0.30", features = ["android-native-activity"] }
+# B418: HTTPS certificates checked by the phone; reqwest's rustls uses this verifier, which must be handed the
+# activity before the first request (`init_tls`).
+rustls-platform-verifier = "0.7"
