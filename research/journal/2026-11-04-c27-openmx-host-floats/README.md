@@ -2,5 +2,5 @@
 
 2026-11-04. Task: `./kit plan C27`.
 
-One paragraph: what this task was, and how it came out. Details in the numbered files; the newest one's
-suffix says whose move it is (FINAL · PART · READY).
+Sorted the 86 openmx files naming ps2_float: nearly all use F/Vf only as game_sim API types and stay;
+audio, particles and the camera target blocks are compared bit for bit and stay. chase::ride_out, the HUD preload meter and the render regions wrap period went to host f32. Frame time unchanged (noise). FINAL in 2.
