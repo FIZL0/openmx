@@ -240,9 +240,10 @@ thread_local! {
 }
 
 /// This test's joins look the room code up on the LAN, over mDNS, as a player's would. Only
-/// [`a_host_s_menu_and_a_joiner_s_find_each_other_by_room_code_on_the_lan_and_ride`] does: on the machine's one mDNS
-/// group every LAN test of every slot answers at once, and under that a guest can miss the host's listing for
-/// `LAN_CODE_WAIT` (K38, K38a: 4-7 of 8 lobby binaries run together). Every other test joins by the host's ticket.
+/// [`a_host_s_menu_and_a_joiner_s_find_each_other_by_room_code_on_the_lan_and_ride`] does. On the machine's one mDNS
+/// group every LAN test of every slot answers at once, and swarm-discovery let only two answers out a round, so a
+/// guest missed the host's listing for `LAN_CODE_WAIT` (K38, K38a); since K42 the host also answers alone on its
+/// code's own service (`board::code_service`), which the lookup asks. Every other test joins by the host's ticket.
 fn by_room_code() {
     TICKET.with(|t| *t.borrow_mut() = None);
 }
