@@ -463,6 +463,164 @@ impl Car {
     }
 }
 
+// --- MX vs. ATV's car files (MD39b) ------------------------------------------------------------------
+
+/// MX vs. ATV's five cars, by the machine kind word its vehicle table gives them (4 to 8). The PC
+/// factory builds the buggy, the baja and the sand rail with one class, the golf cart and the monster
+/// truck with their own; all three derive from MX Unleashed's car class and read its file with its
+/// loader ([`Car::read`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MxvatvMachine {
+    Buggy,
+    MonsterTruck,
+    Baja,
+    GolfCart,
+    Sandrail,
+}
+
+/// `(0, 5.1, -0.6, 1)`: `FPCameraOffset`'s default for every machine but the quad, whose is `4.1` up.
+const FP_CAMERA_OFFSET: Vf = Vf([0.0, 5.1, -0.6, 1.0]);
+/// `(1, 1, 1, 1)`: `WreckDamping`'s default.
+const ONES: Vf = Vf([1.0, 1.0, 1.0, 1.0]);
+/// The string getter's buffer: the name keeps at most this many bytes less its terminator.
+const CAMERA_FILE_LEN: usize = 0x20;
+
+impl MxvatvMachine {
+    /// All five, in kind-word order.
+    pub const ALL: [MxvatvMachine; 5] = [
+        MxvatvMachine::Buggy,
+        MxvatvMachine::MonsterTruck,
+        MxvatvMachine::Baja,
+        MxvatvMachine::GolfCart,
+        MxvatvMachine::Sandrail,
+    ];
+
+    /// The machine kind word, which also names the file's `vehicletype_<n>.res`.
+    pub fn kind_word(self) -> u32 {
+        match self {
+            MxvatvMachine::Buggy => 4,
+            MxvatvMachine::MonsterTruck => 5,
+            MxvatvMachine::Baja => 6,
+            MxvatvMachine::GolfCart => 7,
+            MxvatvMachine::Sandrail => 8,
+        }
+    }
+
+    /// The file inside that `.res`, as the archive spells it.
+    pub fn phy(self) -> &'static str {
+        match self {
+            MxvatvMachine::Buggy => "Veh\\buggy.phy",
+            MxvatvMachine::MonsterTruck => "Veh\\monstertruck.phy",
+            MxvatvMachine::Baja => "Veh\\baja.phy",
+            MxvatvMachine::GolfCart => "Veh\\golfcart.phy",
+            MxvatvMachine::Sandrail => "Veh\\sandrail.phy",
+        }
+    }
+
+    /// What [`Car::read`] reads it as. Only the truck's class reads anything past the car's loader
+    /// that the step keeps (`RearTireSteerScale`); the golf cart's rider boxes are the picture's.
+    pub fn kind(self) -> Kind {
+        match self {
+            MxvatvMachine::MonsterTruck => Kind::MonsterTruck,
+            MxvatvMachine::Baja => Kind::Baja,
+            MxvatvMachine::Buggy | MxvatvMachine::GolfCart | MxvatvMachine::Sandrail => Kind::Buggy,
+        }
+    }
+
+    /// The follow camera's file before `[Camera]` is read, set from the kind word when the machine is
+    /// made.
+    pub fn default_camera_file(self) -> &'static str {
+        match self {
+            MxvatvMachine::Buggy => "FC_BuggyDefault.pb",
+            MxvatvMachine::MonsterTruck => "FC_MonsterDefault.pb",
+            MxvatvMachine::Baja => "FC_BajaDefault.pb",
+            MxvatvMachine::GolfCart => "FC_GolfCartDefault.pb",
+            MxvatvMachine::Sandrail => "FC_SandrailDefault.pb",
+        }
+    }
+}
+
+/// **MX vs. ATV's car file**, as SLUS-21104's car loads it: MX Unleashed's car loader with the same
+/// keys, defaults and order ([`Car::read`]), wrapped by the two loaders every MX vs. ATV machine
+/// shares.
+///
+/// * Before the car's own keys, MXVehicle's base loader reads `[Mass Properties]` through the part
+///   reader and then `[Wrecks]`: `MaxWreckTime` (default 5), `WreckGravity` (3), `WreckDamping`
+///   (ones) and `WreckInertia` (`(0, 0, 0, 1)`). `MaxWreckTime` is read there and only there, so
+///   [`Car::max_wreck_time`] is the same key with the same default, read first.
+/// * After them, the machine's camera loader reads `[Camera]`: the two first-person shoulder offsets
+///   (`(0, 0, 0, 1)`), `FPCameraOffset` (`(0, 5.1, -0.6, 1)` for a car) and `FCamFileName`, which keeps
+///   [`MxvatvMachine::default_camera_file`] when the key is missing.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MxvatvCar {
+    pub machine: MxvatvMachine,
+    pub car: Car,
+    pub wrecks: MxvatvWrecks,
+    pub camera: MxvatvCamera,
+}
+
+/// MXVehicle's `[Wrecks]` keys past `MaxWreckTime` (which is [`Car::max_wreck_time`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MxvatvWrecks {
+    /// `WreckGravity`: the gravity scale while wrecked.
+    pub wreck_gravity: F,
+    /// `WreckDamping`, `WreckInertia`: per-axis quadwords for the wrecked body.
+    pub wreck_damping: Vf,
+    pub wreck_inertia: Vf,
+}
+
+/// `[Camera]`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MxvatvCamera {
+    /// `Left1stPerShoulderOffset`, `Right1stPerShoulderOffset`.
+    pub left_shoulder_offset: Vf,
+    pub right_shoulder_offset: Vf,
+    /// `FPCameraOffset`.
+    pub fp_camera_offset: Vf,
+    /// `FCamFileName`: the follow camera's presets file in `Cam\CameraPresets.res`.
+    pub camera_file: String,
+}
+
+impl Car {
+    /// Read MX vs. ATV's file out of its bytes, for one of its five cars.
+    pub fn read_mxvatv_bytes(bytes: &[u8], machine: MxvatvMachine) -> MxvatvCar {
+        Car::read_mxvatv(&Ini::parse_bytes(bytes), machine)
+    }
+
+    /// Load MX vs. ATV's file as SLUS-21104's car does ([`MxvatvCar`]). With MX Unleashed's files
+    /// nothing changes: [`Car::read`] is the switch's other side.
+    pub fn read_mxvatv(ini: &Ini, machine: MxvatvMachine) -> MxvatvCar {
+        let s = ini.section("Wrecks");
+        let max_wreck_time = s.float_or("MaxWreckTime", F(5.0));
+        let wrecks = MxvatvWrecks {
+            wreck_gravity: s.float_or("WreckGravity", F(3.0)),
+            wreck_damping: s.vector("WreckDamping", ONES),
+            wreck_inertia: s.vector("WreckInertia", UNIT_W),
+        };
+        let mut car = Car::read(ini, machine.kind());
+        car.max_wreck_time = max_wreck_time;
+
+        let s = ini.section("Camera");
+        let camera_file = match s.text("FCamFileName") {
+            Some(name) => {
+                let mut end = name.len().min(CAMERA_FILE_LEN - 1);
+                while !name.is_char_boundary(end) {
+                    end -= 1;
+                }
+                name[..end].to_string()
+            }
+            None => machine.default_camera_file().to_string(),
+        };
+        let camera = MxvatvCamera {
+            left_shoulder_offset: s.vector("Left1stPerShoulderOffset", UNIT_W),
+            right_shoulder_offset: s.vector("Right1stPerShoulderOffset", UNIT_W),
+            fp_camera_offset: s.vector("FPCameraOffset", FP_CAMERA_OFFSET),
+            camera_file,
+        };
+        MxvatvCar { machine, car, wrecks, camera }
+    }
+}
+
 impl Tire {
     /// One tire section and its surfaces, against the car's collision mass. `surfaces` is the
     /// count carried over from the tire before.

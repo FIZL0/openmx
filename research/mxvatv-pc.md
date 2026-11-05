@@ -288,11 +288,14 @@ CofG +0x230 → +0x10f0, the joystick/handbrake/clutch block +0xd3c, preload +0x
 move), and all five carry the three wreck keys. Against the buggy: the baja has TireWidth and no
 GearRatio5; the golf cart the rider boxes; the truck RearTireSteerScale, MaxTireAngleRate, TireWidth,
 RearSteer*, CofGAI and CofGTravel*; the sandrail CofGTravelBack. `game_sim::car::Car::read` takes all five
-as they are (tests/mxvatv_car_phy.rs); it does not yet read the wreck or `[Camera]` keys.
+as they are (tests/mxvatv_car_phy.rs), and `Car::read_mxvatv` adds the wreck and `[Camera]` keys (MD39b).
 
-Not done: there is no SLUS-21104 car capture and no RAM image with a car in it, and SLUS-21104's frame
-driver (MD75) is not ported, so nothing here is proved against a drive. MD39a captures each car, MD39b
-ports the step on them, MD39c puts them in the game off by default.
+**The field map is proved** (MD39b, tests/mxvatv_car_fields.rs) on MD39a's buggy, baja and truck RAM
+images: every word the loaders write, at its SLUS-21104 address, bit for bit (research/oracle.txt `# MD39b`;
+the tire's first block moves −0xc, the rest −0x10).
+
+Not done: the step. No drive is replayed yet; MD39b's subtasks port MXVehicleCar's listeners on SLUS-21104's
+frame driver and replay the five drives. MD39c puts the cars in the game off by default.
 
 ## The biplane and the Kiowa (MD80)
 
