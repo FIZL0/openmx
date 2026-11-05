@@ -149,12 +149,15 @@ const visit = async (query, last) => {
   await evaluate('openmxRecheck()');
   return d;
 };
-const key = async (code, key, vk) => {
-  for (const type of ['keyDown', 'keyUp']) {
-    await send('Input.dispatchKeyEvent', { type, code, key, windowsVirtualKeyCode: vk });
-    // the menus drop a re-press after under 35 ms up (P109)
-    await rest(120);
-  }
+// A key held down until `done()` says the game took it, then let go (K31): the menus read presses as edges, so a held
+// key is one press however slow the frames come, where a tap pressed again on a clock can land a screen too far (an
+// Enter that the main menu takes as Free Ride, after which Square does nothing). False if `ms` passed first.
+const hold = async (code, key, vk, done, ms) => {
+  await send('Input.dispatchKeyEvent', { type: 'keyDown', code, key, windowsVirtualKeyCode: vk });
+  let ok = false;
+  for (const t = Date.now(); !(ok = await done()) && Date.now() - t < ms; ) await rest(100);
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', code, key, windowsVirtualKeyCode: vk });
+  return ok;
 };
 
 // The ride: nothing over it, from the page or the game.
@@ -171,22 +174,28 @@ if (process.env.OPENMX_SPLASH_SHOT) {
   fs.writeFileSync(process.env.OPENMX_SPLASH_SHOT, Buffer.from((await send('Page.captureScreenshot', { format: 'png' })).result.data, 'base64'));
 }
 const splashSaid = [...splash];
-for (let t = Date.now(); Date.now() - t < 30000 && said.length < 2; ) {
-  await key('Enter', 'Enter', 13);
-  await rest(1500);
-}
+// Start (Enter) held past the splash until the main menu has said both its lines
+await hold('Enter', 'Enter', 13, async () => said.length >= 2, 60000);
 if (process.env.OPENMX_UPDATE_SHOT) {
   await rest(500);
   fs.writeFileSync(process.env.OPENMX_UPDATE_SHOT, Buffer.from((await send('Page.captureScreenshot', { format: 'png' })).result.data, 'base64'));
 }
 const menu = { state: (await data()).state, banner: await banner(), said: [...said], splash: splashSaid, stored: await evaluate("localStorage.getItem('openmx.build')") };
 // Square (V on the default keyboard, the modern layout's delete) on the main menu reloads the page into the newer build: a new document, whose footer names it.
+// Held until a document without the old one's mark has its footer: the mark and the footer read in one evaluate, whose
+// answer is null in the old document and nothing at all when it fails (the context going with the reload, or an answer
+// lost with it), so a failed read is never taken for the new document (K31).
 await evaluate('window.openmxBefore = 1');
-await key('KeyV', 'v', 86);
 let reloaded = '';
-for (let t = Date.now(); Date.now() - t < 20000; await rest(200)) {
-  if ((await evaluate('window.openmxBefore')) === undefined && (reloaded = (await evaluate("document.getElementById('build')?.textContent ?? ''")) ?? '')) break;
-}
+const fresh = async () => {
+  const v = await Promise.race([
+    evaluate("window.openmxBefore === undefined ? (document.getElementById('build')?.textContent ?? '') : null"),
+    rest(2000),
+  ]);
+  if (typeof v === 'string' && v) reloaded = v;
+  return !!reloaded;
+};
+await hold('KeyV', 'v', 86, fresh, 60000);
 menu.reloaded = reloaded;
 
 console.log(JSON.stringify({ ride, menu }));
