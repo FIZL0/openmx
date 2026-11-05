@@ -233,15 +233,58 @@ fn lan(name: &str, race125p: u64) -> Net {
     Net::start(cfg, Arc::new(Bikes(race125p)))
 }
 
-/// What the shell's `lobby::Network::pump` does a frame: the menu's commands out, the events in.
+thread_local! {
+    /// The last host's ticket (`Event::Code`) [`pump`] heard on this test's thread, and whether a join goes by
+    /// room code over mDNS instead (`None`: [`by_room_code`]).
+    static TICKET: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(Some(String::new()));
+}
+
+/// This test's joins look the room code up on the LAN, over mDNS, as a player's would. Only
+/// [`a_host_s_menu_and_a_joiner_s_find_each_other_by_room_code_on_the_lan_and_ride`] does: on the machine's one mDNS
+/// group every LAN test of every slot answers at once, and under that a guest can miss the host's listing for
+/// `LAN_CODE_WAIT` (K38, K38a: 4-7 of 8 lobby binaries run together). Every other test joins by the host's ticket.
+fn by_room_code() {
+    TICKET.with(|t| *t.borrow_mut() = None);
+}
+
+/// A join by `code` as this test makes it: the host's ticket in its place, as a pasted ticket, unless
+/// [`by_room_code`]. The ticket carries the host's addresses, so the join needs no mDNS.
+fn join(code: String, picks: Vec<Pick>) -> Cmd {
+    match TICKET.with(|t| t.borrow().clone()) {
+        Some(ticket) => {
+            assert!(!ticket.is_empty(), "the host's ticket is out before its room code");
+            Cmd::Join(ticket, picks)
+        }
+        None => Cmd::Join(code, picks),
+    }
+}
+
+/// Keeps a host's ticket out of `events` for [`join`].
+fn keep_ticket(events: &[Event]) {
+    if let Some(Event::Code(c)) = events.iter().find(|e| matches!(e, Event::Code(_))) {
+        TICKET.with(|t| {
+            if let Some(t) = t.borrow_mut().as_mut() {
+                t.clone_from(c);
+            }
+        });
+    }
+}
+
+/// What the shell's `lobby::Network::pump` does a frame: the menu's commands out, the events in. A join the
+/// menu asks for by room code goes by the host's ticket ([`join`]).
 fn pump(m: &mut Menu, net: &Net) -> Vec<Act> {
     for c in std::mem::take(&mut m.lobby.out) {
         if matches!(c, Cmd::Host(_) | Cmd::Join(..) | Cmd::Quick(_)) {
             net.send(Cmd::Name(m.settings.name.clone()));
         }
-        net.send(c);
+        net.send(match c {
+            Cmd::Join(code, picks) => join(code, picks),
+            c => c,
+        });
     }
-    net.poll().into_iter().map(|e| m.heard(e)).collect()
+    let events = net.poll();
+    keep_ticket(&events);
+    events.into_iter().map(|e| m.heard(e)).collect()
 }
 
 /// Pumps both menus until `done` says so, for up to 30 s.
@@ -277,6 +320,7 @@ fn host_and_join(h: &mut Menu, hr: &mut Reader, hn: &Net, g: &mut Menu, gr: &mut
 
 #[test]
 fn a_host_s_menu_and_a_joiner_s_find_each_other_by_room_code_on_the_lan_and_ride() {
+    by_room_code();
     let (hn, gn) = (lan("Hosty", 1), lan("Guesty", 1));
     let (mut h, mut hr) = fresh("Hosty", "thq1");
     let (mut g, mut gr) = fresh("Guesty", "thq2");
@@ -356,31 +400,10 @@ fn lan_with_tricks(name: &str, mods: &std::path::Path) -> Net {
     Net::start(cfg, Arc::new(files))
 }
 
-/// [`pump`], naming the trick pack in the host's room as `lobby::Network::pump` does (MD19). The host's ticket
-/// (`Event::Code`) is kept in `ticket`, and a join the menu asks for by room code dials that ticket instead, as a
-/// pasted ticket would: the ticket carries the host's addresses, so the join needs no mDNS. On the machine's one
-/// mDNS group every LAN test of every slot answers at once, and under that a guest could miss the host's listing
-/// for `LAN_CODE_WAIT` (K38: 2 of 16 copies run together); finding a room by its code on the LAN is
-/// [`a_host_s_menu_and_a_joiner_s_find_each_other_by_room_code_on_the_lan_and_ride`]'s to prove.
-fn pump_tricks(m: &mut Menu, net: &Net, mods: &std::path::Path, ticket: &mut String) -> Vec<Act> {
+/// [`pump`], naming the trick pack in the host's room as `lobby::Network::pump` does (MD19).
+fn pump_tricks(m: &mut Menu, net: &Net, mods: &std::path::Path) -> Vec<Act> {
     lobby::name_tricks(&mut m.lobby.out, &m.settings, Some(mods));
-    for c in &mut m.lobby.out {
-        if let Cmd::Join(code, _) = c {
-            assert!(!ticket.is_empty(), "the host's ticket is out before its room code");
-            *code = ticket.clone();
-        }
-    }
-    for c in std::mem::take(&mut m.lobby.out) {
-        if matches!(c, Cmd::Host(_) | Cmd::Join(..) | Cmd::Quick(_)) {
-            net.send(Cmd::Name(m.settings.name.clone()));
-        }
-        net.send(c);
-    }
-    let events = net.poll();
-    if let Some(Event::Code(t)) = events.iter().find(|e| matches!(e, Event::Code(_))) {
-        ticket.clone_from(t);
-    }
-    events.into_iter().map(|e| m.heard(e)).collect()
+    pump(m, net)
 }
 
 /// MD19: a host on MX vs. ATV's tricks names its pack in the room; a guest with the same pack's
@@ -395,13 +418,12 @@ fn every_seat_of_an_online_ride_has_the_hosts_trick_pack() {
         h.settings.tricks = menu::Tricks::MxVsAtv;
         to_online(&mut h, &mut hr);
         taps(&mut h, &mut hr, &[Control::Down, Control::Cross]);
-        let mut ticket = String::new();
-        let mut both = |h: &mut Menu, g: &mut Menu, what: &str, done: &mut dyn FnMut(&Menu, &Menu, &[Act], &[Act]) -> bool| {
+        let both = |h: &mut Menu, g: &mut Menu, what: &str, done: &mut dyn FnMut(&Menu, &Menu, &[Act], &[Act]) -> bool| {
             let end = Instant::now() + Duration::from_secs(30);
             let (mut ha, mut ga) = (Vec::new(), Vec::new());
             while Instant::now() < end {
-                ha.extend(pump_tricks(h, &hn, &hm, &mut ticket));
-                ga.extend(pump_tricks(g, &gn, &gm, &mut ticket));
+                ha.extend(pump_tricks(h, &hn, &hm));
+                ga.extend(pump_tricks(g, &gn, &gm));
                 if done(h, g, &ha, &ga) {
                     return;
                 }
@@ -1073,7 +1095,9 @@ fn a_drop_in_whose_setup_picked_the_plane_rides_in_flying() {
     let code = loop {
         assert!(Instant::now() < end, "no room code in 30 s");
         ho.frame(gas, &mut hw, None).unwrap();
-        if let Some(code) = ho.kept().into_iter().find_map(|e| match e {
+        let kept = ho.kept();
+        keep_ticket(&kept);
+        if let Some(code) = kept.into_iter().find_map(|e| match e {
             Event::Room(r) if !r.short.is_empty() => Some(r.short),
             _ => None,
         }) {
@@ -1084,7 +1108,7 @@ fn a_drop_in_whose_setup_picked_the_plane_rides_in_flying() {
     // the guest's pick says the plane, as `Lobby::set_machine` puts the setup's machine in it
     let pick = Pick { machine: vehicle::Kind::Biplane.name().to_string(), ..Pick::new("thq2", "race125p") };
     gn.send(Cmd::Name("Flyer".into()));
-    gn.send(Cmd::Join(code, vec![pick]));
+    gn.send(join(code, vec![pick]));
     let mut go = loop {
         assert!(Instant::now() < end, "the guest never dropped in");
         ho.frame(gas, &mut hw, None).unwrap();
@@ -1363,7 +1387,9 @@ fn a_peer_who_drops_in_is_drawn_in_their_own_look() {
     let code = loop {
         assert!(Instant::now() < end, "no room code in 30 s");
         ho.frame(gas, &mut hw, None).unwrap();
-        if let Some(code) = ho.kept().into_iter().find_map(|e| match e {
+        let kept = ho.kept();
+        keep_ticket(&kept);
+        if let Some(code) = kept.into_iter().find_map(|e| match e {
             Event::Room(r) if !r.short.is_empty() => Some(r.short),
             _ => None,
         }) {
@@ -1375,7 +1401,7 @@ fn a_peer_who_drops_in_is_drawn_in_their_own_look() {
     let mut host_dress = peer_looks::Dressed::default();
     assert_eq!(ho.seat_of().0, 1);
     gn.send(Cmd::Name("Dropper".into()));
-    gn.send(Cmd::Join(code, vec![Pick { look: guest_look.into(), model: "250sx".into(), ..Pick::new("thq2", "race125p") }]));
+    gn.send(join(code, vec![Pick { look: guest_look.into(), model: "250sx".into(), ..Pick::new("thq2", "race125p") }]));
     let mut go = loop {
         assert!(Instant::now() < end, "the guest never dropped in");
         ho.frame(gas, &mut hw, None).unwrap();
