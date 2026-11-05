@@ -228,7 +228,13 @@ def _du_gb(d: Path) -> float:
 # --- running and summarising ---------------------------------------------------
 
 def _log_path() -> Path:
-    return cfg(False).ctx('notes/check.log')
+    """notes/check.log, or notes/check-<worktree>.log in a worktree (s1, merge, ...): the worktrees share the
+    main checkout's context/ through a symlink, and two runs at once wrote over each other's log."""
+    log = cfg(False).ctx('notes/check.log')
+    here = Path(__file__).resolve().parent.parent
+    if here != log.resolve().parent.parent.parent:
+        log = log.with_name(f'check-{here.name}.log')
+    return log
 
 
 # What the last whole-workspace run left out or reran (see ps2kit/cargo_gate.py), said under its verdict.
