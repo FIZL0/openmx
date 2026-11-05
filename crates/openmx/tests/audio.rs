@@ -310,6 +310,61 @@ fn the_music_sources_are_listed_and_switched() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// P296 — iOS's secondary-audio hint (another app's music playing): the songs and the menu's loop go
+/// silent, the effects keep their volume, and both are heard again when it ends.
+#[test]
+fn another_apps_music_silences_only_ours() {
+    let dir = std::env::temp_dir().join(format!("openmx-p296-music-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("song.wav"), tone_wav(220.0, 0.5, 44100)).unwrap();
+    let mut music = Music::new(vec![Arc::new(audio::FolderMusic::scan(&dir))], 7);
+    music.wait = true;
+    let mut mixer = Mixer::new(music);
+    mixer.folder_volume = 1.0;
+    mixer.effects_volume = 1.0;
+    mixer.music.set_pick(Pick::Track("folder:song.wav".into()));
+    let song = rms(&listen(&mut mixer));
+    assert!(song > 3000.0, "the song plays: rms {song}");
+
+    mixer.other_audio = true;
+    assert_eq!(mixer.music_gain(), 0.0);
+    assert_eq!(rms(&listen(&mut mixer)), 0.0, "the song is silent from the first buffer");
+    assert_eq!((mixer.folder_volume, mixer.effects_volume), (1.0, 1.0), "the sliders are left be");
+    // An effect started under the hint is heard at its own volume: all the mix is it.
+    let effect = mixer.play(tone(9000.0, 1.0), audio::Play { looping: true, ..Default::default() });
+    let alone = rms(&listen(&mut mixer));
+    assert!(alone > 3000.0, "the effect plays: rms {alone}");
+    assert_eq!(mixer.bus_volume(audio::Bus::Effects), 1.0);
+    assert_eq!(mixer.music.now(), Some("folder:song.wav"), "the song is still the one picked");
+
+    // The other app stops: the song is back under the effect, which is as loud as it was.
+    mixer.other_audio = false;
+    assert_eq!(mixer.music_gain(), 1.0);
+    let both = rms(&listen(&mut mixer));
+    assert!(both > alone + 500.0, "the song is heard again: {both} with it, {alone} without");
+    mixer.stop(effect);
+    for _ in 0..2 {
+        listen(&mut mixer);
+    }
+    let back = rms(&listen(&mut mixer));
+    assert!(back > 3000.0, "the song alone again: rms {back}");
+
+    // The menus' loop is music too.
+    let mut menu = Mixer::new(Music::new(Vec::new(), 7));
+    menu.music_volume = 1.0;
+    menu.menu_music = Some(tone(9000.0, 1.0));
+    menu.front_end = true;
+    for _ in 0..12 {
+        listen(&mut menu);
+    }
+    assert!(rms(&listen(&mut menu)) > 3000.0, "the menu's loop plays");
+    menu.other_audio = true;
+    assert_eq!(rms(&listen(&mut menu)), 0.0, "the menu's loop is silent under the hint");
+    menu.other_audio = false;
+    assert!(rms(&listen(&mut menu)) > 3000.0, "and back after it");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn the_music_goes_back_a_song_and_holds_where_it_is() {
     // A folder of its own: the other music test empties its folder when it starts and ends.

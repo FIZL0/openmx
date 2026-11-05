@@ -47,6 +47,9 @@ pub fn main() {
         openmx_ios::memory()
     );
     println!("ios: the screen up to {} fps, {}", openmx_ios::ask_frame_rate(), openmx_ios::power());
+    // P296: sound with the silent switch on, another app's music mixed with ours (which then goes
+    // quiet, the game's other sounds not), and the output started again after an interruption.
+    println!("ios: audio session {}", openmx_ios::start_audio_session());
     if let Err(e) = std::env::set_current_dir(&docs) {
         println!("openmx: no Documents folder ({e})");
     }

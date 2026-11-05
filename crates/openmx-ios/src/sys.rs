@@ -1085,3 +1085,182 @@ extern "C" fn open_on_main(ctx: *mut c_void) {
         open(app, sel(c"openURL:options:completionHandler:"), u, options, std::ptr::null_mut());
     });
 }
+
+// ---- the audio session (P296) ---------------------------------------------------------------------
+
+#[link(name = "AVFAudio", kind = "framework")]
+unsafe extern "C" {
+    static AVAudioSessionCategoryPlayback: Id;
+    static AVAudioSessionInterruptionNotification: Id;
+    static AVAudioSessionInterruptionTypeKey: Id;
+    static AVAudioSessionMediaServicesWereResetNotification: Id;
+    static AVAudioSessionSilenceSecondaryAudioHintNotification: Id;
+    static AVAudioSessionSilenceSecondaryAudioHintTypeKey: Id;
+}
+
+/// The session as its notices leave it: [`other_audio`] and [`audio_restarts`] read it.
+static SESSION: std::sync::Mutex<crate::session::Session> = std::sync::Mutex::new(crate::session::Session::START);
+
+fn hear(event: crate::session::Event) {
+    SESSION.lock().unwrap_or_else(|e| e.into_inner()).on(event);
+}
+
+fn audio_session() -> Id {
+    get(class(c"AVAudioSession"), c"sharedInstance")
+}
+
+/// `secondaryAudioShouldBeSilencedHint`: another app (one that does not mix) is playing.
+fn other_audio_hint() -> bool {
+    flag(audio_session(), c"secondaryAudioShouldBeSilencedHint")
+}
+
+/// Playback, mixing with others ([`crate::session`]), and the category and options read back, for
+/// the log: what the session holds now.
+fn set_category() -> String {
+    pool(|| {
+        let s = audio_session();
+        // SAFETY: objc_msgSend cast to `BOOL (id, SEL, NSString *, NSUInteger, NSError **)`, as
+        // AVAudioSession declares `setCategory:withOptions:error:`; the category is AVFAudio's constant
+        let ok = unsafe {
+            let set: extern "C" fn(Id, Id, Id, usize, *mut Id) -> bool = std::mem::transmute(objc_msgSend as *const ());
+            set(s, sel(c"setCategory:withOptions:error:"), AVAudioSessionCategoryPlayback, crate::session::OPTIONS, std::ptr::null_mut())
+        };
+        let category = text(get(s, c"category"));
+        let options = int(s, c"categoryOptions") as usize;
+        let held = category == crate::session::CATEGORY && options == crate::session::OPTIONS;
+        format!(
+            "{}{category} with options {options:#x}{}",
+            if ok { "" } else { "setting the category failed; " },
+            if held { "" } else { " (not the Playback, MixWithOthers asked for)" }
+        )
+    })
+}
+
+/// `setActive:YES`, and the secondary-audio hint read again: it is not sent to an app that was not
+/// active when it changed.
+pub fn activate_audio() -> bool {
+    let ok = pool(|| {
+        // SAFETY: objc_msgSend cast to `BOOL (id, SEL, BOOL, NSError **)`, AVAudioSession's `setActive:error:`
+        unsafe {
+            let set: extern "C" fn(Id, Id, bool, *mut Id) -> bool = std::mem::transmute(objc_msgSend as *const ());
+            set(audio_session(), sel(c"setActive:error:"), true, std::ptr::null_mut())
+        }
+    });
+    hear(crate::session::Event::OtherAudio(pool(other_audio_hint)));
+    ok
+}
+
+/// Another app's music is playing: the game's music is to be silent, the rest of its sound not. Any thread.
+pub fn other_audio() -> bool {
+    SESSION.lock().unwrap_or_else(|e| e.into_inner()).other_audio
+}
+
+/// How many times the sound's output is to have been started again (an interruption over, the app
+/// back): the output starts a new one, after [`activate_audio`], each time this moves. Any thread.
+pub fn audio_restarts() -> usize {
+    SESSION.lock().unwrap_or_else(|e| e.into_inner()).restarts
+}
+
+/// A notice's `userInfo[key]` as an `NSUInteger`; `None` when it is not there.
+fn info_number(note: Id, key: Id) -> Option<usize> {
+    let info = get(note, c"userInfo");
+    if info.is_null() {
+        return None;
+    }
+    // SAFETY: objc_msgSend cast to `id (id, SEL, id)`, NSDictionary's `objectForKey:`
+    let n = unsafe {
+        let at: extern "C" fn(Id, Id, Id) -> Id = std::mem::transmute(objc_msgSend as *const ());
+        at(info, sel(c"objectForKey:"), key)
+    };
+    (!n.is_null()).then(|| int(n, c"unsignedIntegerValue") as usize)
+}
+
+/// The audio block's body, on the main queue: each notice into [`SESSION`], and into the log.
+extern "C" fn on_audio(_: *const Block, note: Id) {
+    use crate::session::Event;
+    pool(|| {
+        let name = text(get(note, c"name"));
+        // SAFETY: AVFAudio's constants, NSStrings for the life of the process
+        let (interruption, reset, hint, interruption_key, hint_key) = unsafe {
+            (
+                text(AVAudioSessionInterruptionNotification),
+                text(AVAudioSessionMediaServicesWereResetNotification),
+                text(AVAudioSessionSilenceSecondaryAudioHintNotification),
+                AVAudioSessionInterruptionTypeKey,
+                AVAudioSessionSilenceSecondaryAudioHintTypeKey,
+            )
+        };
+        let event = if name == interruption {
+            // AVAudioSessionInterruptionTypeBegan is 1, Ended 0
+            match info_number(note, interruption_key) {
+                Some(1) => Event::InterruptionBegan,
+                _ => Event::InterruptionEnded,
+            }
+        } else if name == hint {
+            // AVAudioSessionSilenceSecondaryAudioHintTypeBegin is 1, End 0
+            Event::OtherAudio(info_number(note, hint_key) == Some(1))
+        } else if name == reset {
+            // every audio object is new: the category is set again before the output restarts
+            eprintln!("audio: {}", set_category());
+            Event::ServicesReset
+        } else if name == "UIApplicationDidEnterBackgroundNotification" {
+            Event::Background
+        } else {
+            hear(Event::OtherAudio(other_audio_hint()));
+            Event::Active
+        };
+        hear(event);
+        let s = *SESSION.lock().unwrap_or_else(|e| e.into_inner());
+        eprintln!("audio: {name} ({event:?}): other audio {}, restart {}", s.other_audio, s.restarts);
+    });
+}
+
+/// The audio session at launch (P296): Playback, so the game sounds with the ring/silent switch on,
+/// mixing with others, so another app's music plays along rather than interrupting ours (iOS's
+/// default, SoloAmbient, let it stop our session, and nothing started it again). Watches the
+/// interruptions, the secondary-audio hint, a media-services reset and the app going away and
+/// coming back, for the life of the process. Before the sound starts; call once. Returns the log's line.
+pub fn start_audio_session() -> String {
+    let line = set_category();
+    let active = activate_audio();
+    let descriptor = Box::leak(Box::new(BlockDescriptor { reserved: 0, size: std::mem::size_of::<Block>() }));
+    let block: &'static Block = Box::leak(Box::new(Block {
+        // only the address of the runtime's global block class
+        isa: &raw const _NSConcreteGlobalBlock,
+        flags: BLOCK_IS_GLOBAL,
+        reserved: 0,
+        invoke: on_audio,
+        descriptor,
+    }));
+    pool(|| {
+        let center = get(class(c"NSNotificationCenter"), c"defaultCenter");
+        let main = get(class(c"NSOperationQueue"), c"mainQueue");
+        let string = |name: &CStr| {
+            // SAFETY: objc_msgSend cast to `id (id, SEL, const char *)`, NSString's `stringWithUTF8String:`
+            unsafe {
+                let f: extern "C" fn(Id, Id, *const std::ffi::c_char) -> Id = std::mem::transmute(objc_msgSend as *const ());
+                f(class(c"NSString"), sel(c"stringWithUTF8String:"), name.as_ptr())
+            }
+        };
+        // SAFETY: AVFAudio's constants, NSStrings for the life of the process
+        let names = unsafe {
+            [
+                AVAudioSessionInterruptionNotification,
+                AVAudioSessionSilenceSecondaryAudioHintNotification,
+                AVAudioSessionMediaServicesWereResetNotification,
+                string(c"UIApplicationDidEnterBackgroundNotification"),
+                string(c"UIApplicationDidBecomeActiveNotification"),
+            ]
+        };
+        for ns in names {
+            // SAFETY: as in `watch_focus`: NSNotificationCenter's `addObserverForName:object:queue:usingBlock:`;
+            // the block lives for the process
+            let observer = unsafe {
+                let add: extern "C" fn(Id, Id, Id, Id, Id, *const Block) -> Id = std::mem::transmute(objc_msgSend as *const ());
+                add(center, sel(c"addObserverForName:object:queue:usingBlock:"), ns, std::ptr::null_mut(), main, block)
+            };
+            retain(observer);
+        }
+    });
+    format!("{line}, {}, other audio {}", if active { "active" } else { "not made active" }, other_audio())
+}
