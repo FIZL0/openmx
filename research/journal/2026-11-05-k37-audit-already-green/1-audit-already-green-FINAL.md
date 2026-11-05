@@ -1,4 +1,4 @@
-# 1 — audit already green (PART)
+# 1 — audit already green (FINAL)
 
 Task K37. 2026-11-05.
 
