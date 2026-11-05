@@ -9708,6 +9708,39 @@ atv_heap_free               atv 0x001b76d0 = free
 #   Left in the interpreter for F43a/F43b: anim stop 0x0013e650, play 0x0013eec0, blend 0x0013f5e0;
 #   search 0x001148e0; attachment moved 0x00266d30.
 
+# F43a: the rider's anim controller stop, play and blend the bike's update calls (F39's prepare), with
+# their callees, ported as game_sim::handling::anim. Journal: research/journal/2026-11-05-f43a-anim-controller/.
+#   Controller: +0x2c flags (bit 4 fade list in use), +0x2d (bit 5 turn nodes, bit 4 place nodes), +0x2e
+#   channel-mask byte, +0x30 mirror axis, +0x3c cleared by play/blend, +0x44 last clip, +0x48 last time,
+#   +0x58 alternate start, +0x1f8 bone count, +0x1fc bones (0x40: +0 node, +0x10 position, +0x20 quat),
+#   +0x200 mirror map, +0x208 saved quats, +0x20c saved positions (16 bytes a bone), +0x210 fade list.
+#   Clip: +0 byte map (bone = map[channel name]), +4 data (+0x18 position list, +0x1c rotation list,
+#   +0x24/+0x28 their counts, +0x44 length). Channel: +0 name, +4 on, +8 key count (signed), +0x10
+#   vtable (+0x10 rotation sampler, +0x14 position sampler), +0x14 keys, +0x18 rotation cursor.
+#   Stop 0x0013e650(ctrl, 0, 0, 0, 0): null +0x208/+0x20c -> heap 0x001b7340(count<<4, file 0x00397180,
+#   line 0x52a / 0x52d); +0x2c bit 4 off (a1 != 0 sets it, 0x00141510); per bone 0x00194a90(node, out)
+#   = 0x00135620 quat of the own frame +0x30, 0x00194bf0(node, out) = +0x60 xyz words, w 1.
+#   Play 0x0013eec0(f12 weight, f13 fade, ctrl, clip, 0 x6): t = weight * length; rotation channels with
+#   a bone sampled into sp+464, fade (list off/unnamed, !(fade <= 0), +0x208) = slerp 0x00134b90(q, q,
+#   saved, 1, fade), stored at bone +0x20, bit 5 -> 0x001945b0(node, q, 0) (quat_to_mat4 rows 0..2, w 0,
+#   moved 0x00193d10); position channels sampled into bone +0x10, fade vsub/vmulx/vadd xyz, w kept,
+#   bit 4 -> 0x00194af0. End: +0x44 clip, +0x48 t. (a3 mirror, t1 saved override, t2 alternate, t3
+#   events and the a2 mask list are the update's zeros.)
+#   Blend 0x0013f5e0(f12 weight, f13 mix, f14 fade, ctrl, a, b, 0 x5): t = a.length * weight; rotation k:
+#   a's into sp+512, b's into sp+496, slerp(496, 496, 512, 1, mix); bone = a's map; the fade copies the
+#   saved quat into sp+512 first. Position k: b's into sp+480, a's into bone +0x10, bone = 480 -
+#   (480 - bone) * mix xyz (w 480's), stored before the 0xff check; the fade copies the saved position
+#   into sp+480 first. Counts are a's; channels paired by list place.
+#   Rotation sampler 0x0012c550(f12 t, ch, out): off or n <= 0 -> nothing written. n 1: key 0 slerped
+#   with itself; n 2: u = (t - word(keys - 12)) / (t1 - t0). n >= 3: cursor walk (q1 = (n-1)>>2, q3 =
+#   ((n-1)>>1) + q1; c > q3 and t < kt(q1) -> 1; c < q1 and !(t <= kt(q3)) -> n-1), forward, back;
+#   slerp 0x00134d80(out, a+4, b+4, u) = decode both, 0x00134b90; ran off -> decode 0x001004c0(b+4, out).
+#   Decode: table 0x003d3de0 (4352 x [scale sin, cos]); xyz itof(halves) * (scale ^ sign cos), w |cos|.
+#   Position sampler 0x0012db50(f12 t, ch, out): on and n >= 2 -> bracket 0x0012dd90 (binary search),
+#   adda(0, a or past-end b).madd(u, b - a) a lane; else the held key: out[0] = key.x, out[1] = key.y,
+#   out[0] = key.z (z left). out[3] = 1. A negative count never ends the search.
+#   Slerp guard !(|dot| < 1) at 0x0038f710 -> from; arc cosine table *0x003ea9c0, scale 0x003ea9d8.
+
 # F31b4c — MX vs. ATV's [Mass Properties]: the rigid-body part reader and the bike loader's re-read
 # (game_sim::handling::mass; tests/mxvatv_mass.rs, tests/mxvatv_bike_ride.rs). Comment rows only.
 # Journal: research/journal/2026-11-04-f31b4c-mass/1-mass-FINAL.md.

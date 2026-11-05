@@ -97,7 +97,7 @@ impl Turns {
     /// A wide key's entry. The original indexes without a mask, and the narrow table lies straight
     /// after the wide one, so the 256 indices past the end are the narrow table's; past those it reads
     /// whatever follows, which here wraps instead (no key on the disc gets there).
-    fn wide_at(&self, turn: u16) -> [F; 2] {
+    pub(crate) fn wide_at(&self, turn: u16) -> [F; 2] {
         let n = turn as usize;
         match self.wide.get(n) {
             Some(e) => *e,
