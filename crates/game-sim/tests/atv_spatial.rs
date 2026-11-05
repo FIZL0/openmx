@@ -22,6 +22,7 @@
 
 use game_sim::atv_spatial::{self, Cell, Chunk, Database, Extra, Item, Link, LinkAt, List, Node, Place, Pool, Portal, Record, Slot, SlotAt, Sub, Tree};
 use game_sim::quad::{Body, Call, Moto, Quad};
+use game_sim::handling::{attach, node};
 use ps2_float::{F, Vf};
 use ps2_oracle::{Ee, Kit, skip};
 use std::cell::RefCell;
@@ -1375,4 +1376,403 @@ fn the_images_tree_moves_as_the_original() {
     for t in &tally {
         println!("{t}");
     }
+}
+
+// --- F43b: the move as a word-level port on RAM (`handling::attach`) -------------------------------------
+
+/// The heap's allocation in a heap of the caller's (a pool's `+0x30`).
+const ALLOC_IN: u32 = 0x001b_73d0;
+/// The heap's file name each allocation site hands in: the list's, the pool's, the tree's grow, the
+/// tree's new node.
+const LIST_FILE: u32 = 0x0039_99f8;
+const POOL_FILE: u32 = 0x0039_66e0;
+const TREE_FILE: u32 = 0x0039_98a8;
+const NODE_FILE: u32 = 0x0039_a520;
+/// The class a tree node's constructor and destructor pass through.
+const NODE_BASE: u32 = 0x003b_52b0;
+/// The attachment's box and the attachment move (the bike's update's call).
+const BOX: u32 = 0x0026_7120;
+const ATTACH: u32 = 0x0026_6d30;
+
+const GLOBALS: attach::Globals = attach::Globals { links: POOL_AT, current: CURRENT, node_class: NODE_VT, node_base: NODE_BASE };
+
+/// The heap calls made, each its function and arguments.
+type Calls = Rc<RefCell<Vec<(u32, Vec<u32>)>>>;
+
+/// A heap call served from the test's heap, as [`hook_heap`] serves it.
+fn serve(ee: &mut Ee, heap: &Shared, f: u32, a: &[u32]) -> u32 {
+    match f {
+        ALLOC | NEW => heap.borrow_mut().alloc(a[0]),
+        ALLOC_IN => heap.borrow_mut().alloc(a[1]),
+        REALLOC => {
+            let (old, n) = (a[0], a[1]);
+            let at = heap.borrow_mut().alloc(n);
+            if old != 0 {
+                let had = heap.borrow().sizes.get(&old).copied().unwrap_or(n);
+                for k in (0..had.min(n)).step_by(4) {
+                    let w = ee.u32_at(old + k);
+                    ee.set_u32(at + k, w);
+                }
+            }
+            at
+        }
+        FREE => 0,
+        f => panic!("no heap call {f:#x}"),
+    }
+}
+
+/// The heap's calls hooked, served by [`serve`] and logged.
+fn hook_logged_heap(ee: &mut Ee, heap: &Shared, calls: &Calls) {
+    for (f, n) in [(ALLOC, 3), (NEW, 3), (ALLOC_IN, 4), (REALLOC, 4), (FREE, 1)] {
+        let (h, c) = (heap.clone(), calls.clone());
+        ee.hooks.insert(
+            f,
+            Box::new(move |ee| {
+                let a: Vec<u32> = (0..n).map(|k| ee.r(4 + k) as u32).collect();
+                c.borrow_mut().push((f, a.clone()));
+                let v = serve(ee, &h, f, &a);
+                ee.set(2, v as u64);
+            }),
+        );
+    }
+}
+
+/// The heap call each of the port's sites is.
+fn site_call(site: attach::Site, at: u32, bytes: u32) -> (u32, Vec<u32>) {
+    match site {
+        attach::Site::Blocks => (REALLOC, vec![at, bytes, LIST_FILE, 91]),
+        attach::Site::Block => (ALLOC, vec![bytes, LIST_FILE, 94]),
+        attach::Site::Chunk => (ALLOC, vec![bytes, POOL_FILE, 0xad]),
+        attach::Site::ChunkIn(h) => (ALLOC_IN, vec![h, bytes, POOL_FILE, 0xaa]),
+        attach::Site::Grow => (REALLOC, vec![at, bytes, TREE_FILE, 0x6d8]),
+        attach::Site::Node => (NEW, vec![bytes, NODE_FILE, 0x5b]),
+    }
+}
+
+/// The interpreter's RAM as the port's: the classes by vtable, the heap the test's, logged.
+struct OnRam<'a> {
+    ee: &'a mut Ee,
+    heap: Shared,
+    calls: Calls,
+}
+
+impl OnRam<'_> {
+    fn call(&mut self, f: u32, a: Vec<u32>) -> u32 {
+        let v = serve(self.ee, &self.heap, f, &a);
+        self.calls.borrow_mut().push((f, a));
+        v
+    }
+}
+
+impl node::Ram for OnRam<'_> {
+    fn word(&mut self, at: u32) -> u32 {
+        self.ee.u32_at(at)
+    }
+    fn set(&mut self, at: u32, w: u32) {
+        self.ee.set_u32(at, w);
+    }
+}
+
+impl attach::Space for OnRam<'_> {
+    fn class(&mut self, sub: u32) -> attach::Class {
+        match self.ee.u32_at(sub + 4) {
+            LIST_VT => attach::Class::List,
+            TREE_VT => attach::Class::Tree,
+            _ => attach::Class::Other,
+        }
+    }
+    fn alloc(&mut self, bytes: u32, site: attach::Site) -> u32 {
+        let (f, a) = site_call(site, 0, bytes);
+        self.call(f, a)
+    }
+    fn realloc(&mut self, at: u32, bytes: u32, site: attach::Site) -> u32 {
+        let (f, a) = site_call(site, at, bytes);
+        self.call(f, a)
+    }
+    fn free(&mut self, at: u32) {
+        self.call(FREE, vec![at]);
+    }
+    fn construct(&mut self, ctor: u32, link: u32) {
+        panic!("pool constructor {ctor:#x} on {link:#x}: no laid pool has one");
+    }
+}
+
+/// The original (`original`) and the port (`port`) run from the same RAM and heap: every byte either
+/// wrote (the stack aside) must be the other's, and so must the heap calls. Only `keep` is put back
+/// between the two, so the original must write nothing else. The bytes written.
+fn twin(
+    ee: &mut Ee,
+    heap: &Shared,
+    calls: &Calls,
+    keep: &[(u32, u32)],
+    original: impl FnOnce(&mut Ee),
+    port: impl FnOnce(&mut OnRam),
+) -> Result<(usize, Vec<(u32, Vec<u32>)>), String> {
+    let saved: Vec<Vec<u8>> = keep.iter().map(|&(a, b)| ee.ram[a as usize..b as usize].to_vec()).collect();
+    let was = |a: u32| -> Option<u8> {
+        keep.iter().zip(&saved).find(|((lo, hi), _)| (*lo..*hi).contains(&a)).map(|((lo, _), s)| s[(a - lo) as usize])
+    };
+    let (next, sizes) = (heap.borrow().next, heap.borrow().sizes.clone());
+    calls.borrow_mut().clear();
+    ee.set(28, GP);
+    original(ee);
+    let want_calls = calls.take();
+    let low = ee.stack - 0x1_0000;
+    let mask = |a: u32| a & 0x01ff_ffff;
+    let want: BTreeMap<u32, u8> =
+        ee.written.iter().map(|&a| mask(a)).filter(|&a| a < low).map(|a| (a, ee.ram[a as usize])).collect();
+    if let Some(a) = want.keys().find(|&&a| was(a).is_none()) {
+        return Err(format!("the original wrote {a:#x}, outside what is put back"));
+    }
+    for (&(a, b), s) in keep.iter().zip(&saved) {
+        ee.ram[a as usize..b as usize].copy_from_slice(s);
+    }
+    {
+        let mut h = heap.borrow_mut();
+        h.next = next;
+        h.sizes = sizes;
+    }
+    ee.written.clear();
+    port(&mut OnRam { ee, heap: heap.clone(), calls: calls.clone() });
+    let got_calls = calls.take();
+    let got: Vec<u32> = ee.written.iter().map(|&a| mask(a)).collect();
+    let mut wrong = vec![];
+    for a in want.keys().copied().chain(got.iter().copied()).collect::<std::collections::BTreeSet<u32>>() {
+        let Some(before) = was(a) else { return Err(format!("the port wrote {a:#x}, outside what is put back")) };
+        let w = want.get(&a).copied().unwrap_or(before);
+        if ee.ram[a as usize] != w {
+            wrong.push((a, w, ee.ram[a as usize]));
+        }
+    }
+    if !wrong.is_empty() {
+        let words: std::collections::BTreeSet<u32> = wrong.iter().map(|&(a, ..)| a & !3).collect();
+        let show: Vec<String> = words
+            .iter()
+            .take(24)
+            .map(|&a| {
+                let w = |f: &dyn Fn(u32) -> u8| u32::from_le_bytes(std::array::from_fn(|k| f(a + k as u32)));
+                format!("{a:#x}: want {:#010x} got {:#010x}", w(&|b| want.get(&b).copied().or(was(b)).unwrap_or(0)), w(&|b| ee.ram[b as usize]))
+            })
+            .collect();
+        return Err(format!("{} words differ:\n  {}", words.len(), show.join("\n  ")));
+    }
+    if want_calls != got_calls {
+        return Err(format!("the heap calls differ:\n  want {want_calls:x?}\n  got  {got_calls:x?}"));
+    }
+    Ok((want.len(), want_calls))
+}
+
+/// The original's move and the port's on RAM ([`attach::spatial_move`]), from the same words.
+fn twin_move(ee: &mut Ee, heap: &Shared, calls: &Calls, keep: &[(u32, u32)], entry: u32, centre: Vf, half: Vf, reach: F) -> Result<(usize, Vec<(u32, Vec<u32>)>), String> {
+    set_vf(ee, CENTRE, centre);
+    set_vf(ee, HALF, half);
+    twin(
+        ee,
+        heap,
+        calls,
+        keep,
+        |ee| ee.call(MOVE, &[entry as u64, CENTRE as u64, HALF as u64], &[reach.0], BUDGET),
+        |m| attach::spatial_move(m, &GLOBALS, entry, centre, half, reach),
+    )
+}
+
+/// MD75c1's 12,000 generated databases (the same seed, so the same cases and paths, which
+/// [`the_spatial_move_is_the_originals`] tallies), each moved by the original and by the port on RAM
+/// from the same words: every byte of the area and the current tree's word the same, and the heap
+/// calls (each function, size, file and line) the same.
+#[test]
+fn the_spatial_move_on_ram_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let heap: Shared = Rc::default();
+    let calls: Calls = Rc::default();
+    hook_logged_heap(&mut ee, &heap, &calls);
+    let mut g = Gen(0x75c1_0001);
+    let mut tally: BTreeMap<String, u32> = BTreeMap::new();
+    let keep = [(AREA, AREA_END), (CURRENT, CURRENT + 4)];
+    const N: usize = 12_000;
+    for k in 0..N {
+        let c = case(&mut g);
+        lay(&mut ee, &heap, &c.db, &c.rec, c.mover);
+        ee.set_u32(CURRENT, 0);
+        match twin_move(&mut ee, &heap, &calls, &keep, item_addr(c.mover), c.centre, c.half, c.reach) {
+            Ok((n, made)) => {
+                *tally.entry(if n == 0 { "wrote nothing" } else { "wrote" }.into()).or_default() += 1;
+                for (f, a) in made {
+                    let name = match f {
+                        ALLOC => "alloc",
+                        ALLOC_IN => "alloc in",
+                        REALLOC => "realloc",
+                        NEW => "new",
+                        _ => "free",
+                    };
+                    let line = if f == FREE { name.to_string() } else { format!("{name} line {}", a[a.len() - 1]) };
+                    *tally.entry(line).or_default() += 1;
+                }
+            }
+            Err(e) => panic!("case {k}: the port's move on RAM is not the original's: {e}"),
+        }
+    }
+    for want in ["wrote", "wrote nothing", "alloc line 94", "alloc line 173", "realloc line 91", "realloc line 1752", "new line 91", "free"] {
+        assert!(tally.get(want).copied().unwrap_or(0) >= 10, "only {:?} of {want:?}: {tally:?}", tally.get(want));
+    }
+    println!("{N} generated moves on RAM, the original's and the port's the same: {tally:?}");
+}
+
+/// The portal [`the_images_own_database_moves_as_the_original`] lays a foot along +x of `entry`'s last
+/// centre, linking its cell and another; the centre beyond it and the reach back.
+fn lay_image_portal(ee: &mut Ee, entry: u32) -> (Vf, F) {
+    let rec_at = ee.u32_at(entry + 8);
+    let home = ee.u32_at(rec_at + 4);
+    let last = vf_at(ee, rec_at + 0x10);
+    let other = *IMAGE_CELLS.iter().find(|&&c| c != home && ee.u32_at(c + 0x2c) != 0).unwrap();
+    let l = v3(last);
+    let at = add(l, [1.0, 0.0, 0.0]);
+    let corners = [[0.0, -4.0, -4.0], [0.0, 4.0, -4.0], [0.0, 4.0, 4.0], [0.0, -4.0, 4.0]].map(|c| vf(add(at, c), 1.0));
+    let p = Portal {
+        corners,
+        normal: vf([1.0, 0.0, 0.0], 0.0),
+        plane: F(at[0] as f32),
+        edges: [[0.0, 0.0, -1.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]].map(|e| vf(e, 0.0)),
+    };
+    lay_portal(ee, IMAGE_PORTAL, &p);
+    for (k, (from, to)) in [(home, other), (other, home)].into_iter().enumerate() {
+        let link = IMAGE_LINKS + 0x10 * k as u32;
+        ee.set_u32(link, ee.u32_at(from + 0x24));
+        ee.set_u32(link + 4, to);
+        ee.set_u32(link + 8, IMAGE_PORTAL);
+        ee.set_u32(from + 0x24, link);
+    }
+    (vf(add(l, [1.5, 0.25, -0.5]), last.w()), F(2.0))
+}
+
+/// The image's own moves, by the original and by the port on RAM from the same image: every byte of
+/// RAM the same, and the heap calls. The two entries of [`the_images_own_database_moves_as_the_original`]
+/// (nudged, and through a laid portal) and the vehicles' spheres of [`the_images_tree_moves_as_the_original`].
+/// None of the five is an attachment (no node at `+0x34`): [`attach::moved`] whole is the replays'
+/// (tests/mxvatv_bike_ride.rs).
+#[test]
+fn the_images_moves_on_ram_are_the_originals() {
+    let Some(base) = image() else { return };
+    let keep = [(0, base.ram.len() as u32)];
+    let fresh = || {
+        let mut ee = Ee::with_ram(base.ram.clone());
+        let heap: Shared = Rc::new(RefCell::new(Heap { next: IMAGE_HEAP, end: AREA_END, sizes: BTreeMap::new() }));
+        let calls: Calls = Rc::default();
+        hook_logged_heap(&mut ee, &heap, &calls);
+        (ee, heap, calls)
+    };
+    let mut tally = vec![];
+    let mut check = |what: String, r: Result<(usize, Vec<(u32, Vec<u32>)>), String>| match r {
+        Ok((n, calls)) => tally.push(format!("{what}: {n} bytes, heap calls {calls:x?}")),
+        Err(e) => panic!("{what}: the port on RAM is not the original: {e}"),
+    };
+    for &entry in &IMAGE_ENTRIES {
+        for laid in [false, true] {
+            let (mut ee, heap, calls) = fresh();
+            let (centre, reach) = if laid {
+                lay_image_portal(&mut ee, entry)
+            } else {
+                let last = vf_at(&ee, ee.u32_at(entry + 8) + 0x10);
+                (vf(add(v3(last), [0.0, 0.125, 0.0]), last.w()), F::ZERO)
+            };
+            let r = twin_move(&mut ee, &heap, &calls, &keep, entry, centre, vf([1.0, 1.0, 1.0], 0.0), reach);
+            check(format!("entry {entry:#x} portal {laid}"), r);
+        }
+    }
+    let vehicles: Vec<u32> = IMAGE_VEHICLES.iter().map(|&v| base.u32_at(v + 0xd80) + 0x18).collect();
+    let player = v3(vf_at(&base, base.u32_at(IMAGE_VEHICLES[0] + 0xd80) + 0x160));
+    for (v, &entry) in vehicles.iter().enumerate() {
+        let last = v3(vf_at(&base, base.u32_at(entry + 8) + 0x10));
+        let tos = if v == 0 {
+            vec![add(last, [0.0, 0.5, 0.0]), add(last, [300.0, 20.0, -150.0]), add(last, [0.0, 900.0, 0.0])]
+        } else {
+            vec![last, player]
+        };
+        for to in tos {
+            let (mut ee, heap, calls) = fresh();
+            let r = twin_move(&mut ee, &heap, &calls, &keep, entry, vf(to, 1.0), vf([40.0, 40.0, 40.0], 0.0), F(40.0));
+            check(format!("vehicle {v} to {to:?}"), r);
+        }
+    }
+    for t in &tally {
+        println!("{t}");
+    }
+}
+
+/// The attachment's box ([`attach::bounds`]) against the original's on random nodes (a parent or
+/// none, every word random but the flags and links, signed zeros among the lanes), and the whole
+/// attachment move with no record ([`attach::moved`]): the original's and the port's writes the same.
+#[test]
+fn the_attachment_box_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let heap: Shared = Rc::default();
+    let calls: Calls = Rc::default();
+    hook_logged_heap(&mut ee, &heap, &calls);
+    let mut g = Gen(0xf43b_0001);
+    const ENTRY: u32 = AREA;
+    const NODE: u32 = AREA + 0x200;
+    const PARENT: u32 = AREA + 0x400;
+    let lane = |g: &mut Gen| -> u32 {
+        match g.below(8) {
+            0 => 0,
+            1 => 0x8000_0000,
+            2 => 0x3f80_0000,
+            _ => F((g.signed() * 50.0) as f32).0.to_bits(),
+        }
+    };
+    let keep = [(AREA, AREA + 0x1000)];
+    const N: usize = 4000;
+    let (mut with_parent, mut dirty, mut no_record) = (0, 0, 0);
+    for k in 0..N {
+        ee.ram[AREA as usize..(AREA + 0x1000) as usize].fill(0);
+        for n in [NODE, PARENT] {
+            for o in (0..0x100).step_by(4) {
+                let w = lane(&mut g);
+                ee.set_u32(n + o, w);
+            }
+        }
+        let parent = g.chance(0.5);
+        with_parent += parent as u32;
+        // The node's parent (+0xf0) and flag byte (+0x100, bit 0 its world frame current) as
+        // node::update reads them: no parent's parent; each current or not.
+        for (n, up) in [(NODE, if parent { PARENT } else { 0 }), (PARENT, 0)] {
+            ee.set_u32(n + 0xf0, up);
+            let current = g.chance(0.5);
+            dirty += !current as u32;
+            ee.set_u32(n + 0x100, current as u32);
+        }
+        for o in (0x40..0x70).step_by(4) {
+            let w = lane(&mut g);
+            ee.set_u32(ENTRY + o, w);
+        }
+        ee.set_u32(ENTRY + 0x34, NODE);
+        let rec = g.chance(0.5);
+        no_record += !rec as u32;
+        ee.set(28, GP);
+        if rec {
+            let r = twin(
+                &mut ee,
+                &heap,
+                &calls,
+                &keep,
+                |ee| ee.call(BOX, &[ENTRY as u64, CENTRE as u64, HALF as u64], &[], BUDGET),
+                |m| {
+                    let (c, h) = attach::bounds(m, ENTRY);
+                    for (k, w) in c.to_bits().into_iter().chain(h.to_bits()).enumerate() {
+                        node::Ram::set(m, CENTRE + 4 * k as u32, w);
+                    }
+                },
+            );
+            if let Err(e) = r {
+                panic!("case {k}: the attachment's box is not the original's: {e}");
+            }
+        } else {
+            match twin(&mut ee, &heap, &calls, &keep, |ee| ee.call(ATTACH, &[ENTRY as u64], &[], BUDGET), |m| attach::moved(m, &GLOBALS, ENTRY)) {
+                Ok((0, c)) if c.is_empty() => {}
+                Ok((n, _)) => panic!("case {k}: the attachment move with no record wrote {n} bytes"),
+                Err(e) => panic!("case {k}: the attachment move with no record is not the original's: {e}"),
+            }
+        }
+    }
+    assert!(with_parent >= 100 && dirty >= 100 && no_record >= 100, "{with_parent} {dirty} {no_record}");
 }

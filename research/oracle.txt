@@ -9785,6 +9785,43 @@ atv_heap_free               atv 0x001b76d0 = free
 #   out[0] = key.z (z left). out[3] = 1. A negative count never ends the search.
 #   Slerp guard !(|dot| < 1) at 0x0038f710 -> from; arc cosine table *0x003ea9c0, scale 0x003ea9d8.
 
+# F43b: the attachment move the bike's update hands the interpreter (F39's Moved), ported word for word on
+# RAM as game_sim::handling::attach (tests/atv_spatial.rs *_on_ram, the_attachment_box_is_the_originals;
+# the rig in tests/mxvatv_bike_ride.rs). MD75c1's atv_spatial model is the same move on structs. The
+# collision record's search is F49. Journal: research/journal/2026-11-05-f43b-attachment-move/.
+#   Attachment 0x00266d30(entry): *(entry+8) == 0 -> nothing; box 0x00267120(entry, sp+48, sp+32), then
+#   0x0018d690(entry, centre, half, f12 *(entry+0x60)) = j 0x0018ffc0(rec *(entry+8), entry, centre, half).
+#   Box: node update 0x00193b30(*(entry+0x34)); rows world +0x70/+0x80/+0x90, position +0xa0; local entry+0x40,
+#   half entry+0x50. centre = adda(pos, 0).madd(r0, lx).madd(r1, ly).madd(r2, lz); half = adda(|r1 hy|,
+#   |r0 hx|).madd(|r2 hz|, 1). 1.0 stored to both +0xc first, then the whole quadwords (xyz only computed):
+#   w = local.w, half.w.
+#   Move 0x0018ffc0: rec +0 extras, +4 cell (0 -> nothing), +8 sub, +0xc slot, +0x10 last centre (all four
+#   lanes, last). Walk: links of the cell (+0x24: +0 next, +4 to, +8 portal), skip to == from; portal
+#   crossed (rec+0x10 -> centre) -> from = cell, cell = to, restart. Same cell: pick; equal -> moved, else
+#   out old, put new, +0xc. New cell: out old; each extra out of its sub, read next, given to the link pool;
+#   +0 = 0, +4 = cell, +8 = cell's sub of the old sub's kind (*(old+8)), pick(0), put. Overlaps: cells in
+#   reach (35-cell stack array), extras found shift (+0xc) and are crossed off, others out and unchained
+#   (prev.next = e.next) and given; each remaining cell's sub of the carried kind (the carried sub chains
+#   through), pick(0) == 0 -> skip, else put, link from *0x0040c460: [0] rec[0], [1] cell, [2] sub, [3] slot.
+#   Link pool: take: (i32)+0x18 < (i32)+8 -> +0x28 (+= +0x1c, +0x18++); else free head +0x24; else chunk
+#   0x00105e70: a set-aside +0x14 chained (+0x14 = *it), else heap 0x001b7340(+0x20 + +0x38, 0x003966e0,
+#   0xad) or with +0x30 0x001b73d0(+0x30, bytes, 0x003966e0, 0xaa) (0 -> 0), ctor +0x2c on each link; chain
+#   (+0xc first, +0x10 last, *(+0x10) = 0); first = chunk + +0x38, +0x28 = first + stride, +0x18 = 1.
+#   Give 0x00105f40: stride > 4 (unsigned) -> link+0 = +0x24, +0x24 = link. Reset 0x00106130.
+#   List (vt 0x003b5510): pick current, else free +0x38, else (last +0x30 == size +0x28 -> blocks realloc
+#   0x001b7470(+0x2c, (count+1)*4, 0x003999f8, 91), block 0x001b7340(size*4, 0x003999f8, 94), count++, last
+#   0) blocks[count-1] + last*4. Put: slot == free -> free = *free & ~3, else last++; *slot = entry. Out:
+#   *slot = free | 2, free = slot.
+#   Tree (vt 0x003b6700): pick = atv_quadtree_pick. Put 0x00180290: key 0 nothing; close; +0x888++;
+#   *0x0040c198 = tree; entry's low half 0; per corner widen the root then each level: grow 0x001b7470(node,
+#   0x24, 0x003998a8, 0x6d8) (root +0x8c updated, parent's child set), child new 0x001b7620(0x14, 0x0039a520,
+#   0x5b) (vt 0x003b52b0 then 0x003b66e0, +0 +4 +8 0, +0xc 0xff7fffff, tree +0x880++), widen; file
+#   0x00180b60. Moved: no null check on a child (reads address 8 then). Out 0x001807f0 / unfile
+#   0x00180c80: after giving an emptied chunk the walk reads its +0 (the pool's free head by then; the
+#   model's continue-to-next differs only on an empty chunk without the entry, which the game never
+#   leaves). Node delete (vt +8, 1) 0x001aff00: first chunk read before the children; chunks to *(+0x90)
+#   unless +0x98 bit 0; +0x880--; free 0x001b76d0.
+
 # F31b4c — MX vs. ATV's [Mass Properties]: the rigid-body part reader and the bike loader's re-read
 # (game_sim::handling::mass; tests/mxvatv_mass.rs, tests/mxvatv_bike_ride.rs). Comment rows only.
 # Journal: research/journal/2026-11-04-f31b4c-mass/1-mass-FINAL.md.
