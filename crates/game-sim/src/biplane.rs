@@ -1348,6 +1348,13 @@ impl State for Plane {
 /// `q' = q ⊗ (w, 0) / 2` with the scalar half's minus sign folded in.
 const HALF: Vf = Vf([0.5, 0.5, 0.5, -0.5]);
 
+/// MX vs. ATV's plane body's top speed, feet a second, and each rate's limit either way, radians a
+/// second (body `+0xe0`, `+0x210..`): what both of MD80a's Desert Oasis images and every row of
+/// MD101's two flights hold. Neither is a key of `biplane.phy`; the top acceleration and the top
+/// angular acceleration are the later body's "no limit".
+pub const MXVATV_MAX_SPEED: F = F(300.0);
+pub const MXVATV_MAX_RATE: F = F(12.0);
+
 /// The rigid body the plane flies on: the engine's generic dynamics body, not the bike's chassis.
 ///
 /// Everything is in the world frame except the moment, the inverse inertia and the rates, which are
@@ -1550,6 +1557,85 @@ impl Body {
         self.last_moment = self.moment;
         self.moment = CLEAR;
         self.twist = CLEAR;
+    }
+
+    /// The body as SLUS-21104's later build of it holds it ([`crate::atv_body::Body`], MD75), with the
+    /// limits MX vs. ATV's plane is built with ([`MXVATV_MAX_SPEED`], [`MXVATV_MAX_RATE`]) and every
+    /// axis free. The shock accumulator and its peak are its correction's; [`Body::step`] and
+    /// [`Body::cofg`] are not the later body's to step.
+    pub fn atv(&self) -> crate::atv_body::Body {
+        crate::atv_body::Body {
+            enabled: self.enabled,
+            linear_axes: [true; 3],
+            inv_mass: self.inv_mass,
+            damping: self.damping,
+            last_position: self.last_position,
+            position: self.position,
+            velocity: self.velocity,
+            last_force: self.last_force,
+            force: self.force,
+            accel: self.accel,
+            correction_peak: self.shock_peak,
+            correction: self.shock,
+            max_speed: MXVATV_MAX_SPEED,
+            max_accel: F(f32::MAX),
+            angular_axes: [true; 3],
+            inv_inertia: self.inv_inertia,
+            ang_damping: self.ang_damping,
+            last_quat: self.last_quat,
+            quat: self.quat,
+            moment: self.moment,
+            last_moment: self.last_moment,
+            rates: self.rates,
+            ang_accel: self.ang_accel,
+            twist_peak: self.twist_peak,
+            twist: self.twist,
+            max_rates: [MXVATV_MAX_RATE; 3],
+            max_ang_accel: F(f32::MAX),
+        }
+    }
+
+    /// What SLUS-21104's body step left, put back ([`Body::atv`]'s fields; the limits are constants).
+    pub fn set_atv(&mut self, b: &crate::atv_body::Body) {
+        self.enabled = b.enabled;
+        self.inv_mass = b.inv_mass;
+        self.damping = b.damping;
+        self.last_position = b.last_position;
+        self.position = b.position;
+        self.velocity = b.velocity;
+        self.last_force = b.last_force;
+        self.force = b.force;
+        self.accel = b.accel;
+        self.shock_peak = b.correction_peak;
+        self.shock = b.correction;
+        self.inv_inertia = b.inv_inertia;
+        self.ang_damping = b.ang_damping;
+        self.last_quat = b.last_quat;
+        self.quat = b.quat;
+        self.moment = b.moment;
+        self.last_moment = b.last_moment;
+        self.rates = b.rates;
+        self.ang_accel = b.ang_accel;
+        self.twist_peak = b.twist_peak;
+        self.twist = b.twist;
+    }
+
+    /// One substep of motion as SLUS-21104 integrates its plane (MD101a): the later body's step
+    /// ([`crate::atv_body::Body::integrate`]: the acceleration kept and clamped, the speed held to
+    /// [`MXVATV_MAX_SPEED`], each rate to [`MXVATV_MAX_RATE`], `|q'|^2` on the FPU) in place of
+    /// [`Body::integrate`].
+    pub fn integrate_mxvatv(&mut self, h: F) {
+        let mut b = self.atv();
+        b.integrate(h);
+        self.set_atv(&b);
+    }
+
+    /// SLUS-21104's end of a substep ([`crate::atv_body::Body::end_substep`]), which keeps the peaks
+    /// and empties the accumulators as [`Body::end_substep`] does.
+    pub fn end_substep_mxvatv(&mut self) {
+        let mut b = self.atv();
+        b.end_substep();
+        self.set_atv(&b);
     }
 
     /// Where the model is put after the substeps: the orientation and the centre of mass as they were
