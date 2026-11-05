@@ -2082,6 +2082,7 @@ fn vf_at(ee: &Ee, a: u32) -> Vf {
     seed::Words::v(&|x| ee.u32_at(x), a)
 }
 
+
 fn set_vf(ee: &mut Ee, a: u32, v: Vf) {
     for (k, w) in v.to_bits().into_iter().enumerate() {
         ee.set_u32(a + 4 * k as u32, w);
@@ -7228,10 +7229,16 @@ impl PostsInRam<'_, '_> {
         self.inner.write(q, body);
         let dt = self.inner.step.dt;
         for r in rest {
-            self.count(format!("> {}", call_name(&r)));
+            let name = call_name(&r);
+            let rust = in_rust(&name);
+            self.count(if rust { name } else { format!("> {name}") });
             let ee = &mut *self.inner.step.ram.ee;
             ee.set(28, GP);
             match r {
+                Call::PartMove { part, centre, half, reach } if rust => {
+                    let entry = parts[game_sim::atv_sync::slot(part)] + 0x18;
+                    spatial_move_in_ram(ee, entry, centre, half, reach);
+                }
                 Call::PartMove { part, centre, half, reach } => {
                     let (c, h) = (ee.scratch(0), ee.scratch(1));
                     set_vf(ee, c, centre);
@@ -9885,4 +9892,362 @@ fn the_anim_controller_calls_are_the_originals() {
     for p in want {
         assert!(tally.get(p).is_some_and(|&n| n >= 20), "{p}: {tally:#?}");
     }
+}
+
+
+// --- F46: the record's searches and the sync's database half in Rust ----------------------------------
+
+use game_sim::atv_spatial::{self, Cell as DbCell, Database, Extra, Item, Link, LinkAt, List as DbList, Place, Pool, Slot, SlotAt, Sub};
+
+/// The global holding the database's link pool, and the list sub-database's vtable (MD75c1's).
+const DB_POOL_AT: u32 = 0x0040_c460;
+const DB_LIST_VT: u32 = 0x003b_5510;
+
+thread_local! {
+    /// The handed-on calls [`posts_frame`] answers in Rust, by [`call_name`] (`PartMove`): counted
+    /// without the `> `.
+    static IN_RUST: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+}
+
+fn in_rust(name: &str) -> bool {
+    IN_RUST.with(|r| r.borrow().contains(&name))
+}
+
+/// Where the database [`DbInRam::read`] read is in RAM: its cells', portals' and sub-databases'
+/// addresses (in the model's order), each list's blocks, the entries by item, the link pool's
+/// chunks and stride.
+struct DbInRam {
+    cells: Vec<u32>,
+    portals: Vec<u32>,
+    subs: Vec<u32>,
+    blocks: Vec<Vec<u32>>,
+    items: Vec<u32>,
+    chunks: Vec<u32>,
+    stride: u32,
+    capacity: u32,
+}
+
+impl DbInRam {
+    fn index(list: &[u32], a: u32, what: &str) -> usize {
+        list.iter().position(|&x| x == a).unwrap_or_else(|| panic!("{what} {a:#x} is none of the database's"))
+    }
+
+    fn item(&mut self, a: u32) -> Item {
+        self.items.iter().position(|&x| x == a).unwrap_or_else(|| {
+            self.items.push(a);
+            self.items.len() - 1
+        })
+    }
+
+    fn slot_at(&self, sub: usize, a: u32, size: u32) -> SlotAt {
+        for (b, &base) in self.blocks[sub].iter().enumerate() {
+            if (base..base + 4 * size).contains(&a) {
+                assert_eq!((a - base) % 4, 0, "a slot {a:#x} off its block's words");
+                return SlotAt { block: b, index: ((a - base) / 4) as usize };
+            }
+        }
+        panic!("slot {a:#x} is in none of sub-database {sub}'s blocks");
+    }
+
+    fn slot_addr(&self, sub: usize, s: SlotAt) -> u32 {
+        self.blocks[sub][s.block] + 4 * s.index as u32
+    }
+
+    fn link_at(&self, a: u32) -> LinkAt {
+        for (c, &base) in self.chunks.iter().enumerate() {
+            let first = base + 4;
+            if (first..first + self.capacity * self.stride).contains(&a) {
+                assert_eq!((a - first) % self.stride, 0, "a link {a:#x} off its chunk's stride");
+                return LinkAt { chunk: c, index: ((a - first) / self.stride) as usize };
+            }
+        }
+        panic!("link {a:#x} is in none of the pool's chunks");
+    }
+
+    fn place(&self, ee: &Ee, sub: usize, a: u32) -> Place {
+        assert_eq!(ee.u32_at(self.subs[sub] + 4), DB_LIST_VT, "a place {a:#x} in sub-database {:#x}, not a list", self.subs[sub]);
+        Place::Slot(self.slot_at(sub, a, ee.u32_at(self.subs[sub] + 0x28)))
+    }
+
+    /// The link pool at `p`, as the move takes and gives its links.
+    fn pool(&mut self, ee: &Ee, p: u32) -> Pool {
+        let mut c = ee.u32_at(p + 0xc);
+        while c != 0 {
+            self.chunks.push(c);
+            assert!(self.chunks.len() < 64, "the pool's chunk chain does not end");
+            c = ee.u32_at(c);
+        }
+        (self.capacity, self.stride) = (ee.u32_at(p + 8), ee.u32_at(p + 0x1c));
+        let mut free = vec![];
+        let mut f = ee.u32_at(p + 0x24);
+        while f != 0 {
+            free.push(self.link_at(f));
+            assert!(free.len() < 4096, "the pool's free chain does not end");
+            f = ee.u32_at(f);
+        }
+        free.reverse();
+        let mut spare = 0;
+        let mut s = ee.u32_at(p + 0x14);
+        while s != 0 {
+            spare += 1;
+            assert!(spare < 4096, "the pool's set-aside chain does not end");
+            s = ee.u32_at(s);
+        }
+        Pool { capacity: ee.i32_at(p + 8), stride: self.stride, used: ee.i32_at(p + 0x18), chunks: self.chunks.len(), spare, free }
+    }
+
+    /// The database `entry` (a collidable's `+0x18`) is in, as [`atv_spatial`] models it, and the
+    /// entry's record (its `+8`); the entry is item 0. The cells are the record's and those its links
+    /// reach; their lists are read slot by slot, any other sub-database (the quadtree the gather
+    /// reads) by its kind alone, which a move into it would refuse.
+    fn read(ee: &Ee, entry: u32) -> (DbInRam, Database, atv_spatial::Record) {
+        let mut m = DbInRam { cells: vec![], portals: vec![], subs: vec![], blocks: vec![], items: vec![entry], chunks: vec![], stride: 0, capacity: 0 };
+        let pool = m.pool(ee, ee.u32_at(DB_POOL_AT));
+        let rec = ee.u32_at(entry + 8);
+        let home = ee.u32_at(rec + 4);
+        let mut db = Database { pool, ..Default::default() };
+        if home == 0 {
+            return (m, db, atv_spatial::Record { last: vf_at(ee, rec + 0x10), ..Default::default() });
+        }
+        m.cells.push(home);
+        let mut k = 0;
+        while k < m.cells.len() {
+            let c = m.cells[k];
+            let mut l = ee.u32_at(c + 0x24);
+            while l != 0 {
+                let (to, portal) = (ee.u32_at(l + 4), ee.u32_at(l + 8));
+                if !m.cells.contains(&to) {
+                    m.cells.push(to);
+                }
+                if !m.portals.contains(&portal) {
+                    m.portals.push(portal);
+                }
+                l = ee.u32_at(l);
+            }
+            for o in [0x28, 0x2c] {
+                let s = ee.u32_at(c + o);
+                if s != 0 && !m.subs.contains(&s) {
+                    m.subs.push(s);
+                }
+            }
+            k += 1;
+        }
+        for &c in &m.cells {
+            let mut links = vec![];
+            let mut l = ee.u32_at(c + 0x24);
+            while l != 0 {
+                links.push(Link { cell: DbInRam::index(&m.cells, ee.u32_at(l + 4), "a link's cell"), portal: DbInRam::index(&m.portals, ee.u32_at(l + 8), "a link's portal") });
+                l = ee.u32_at(l);
+            }
+            let sub = |o: u32| match ee.u32_at(c + o) {
+                0 => None,
+                s => Some(DbInRam::index(&m.subs, s, "a cell's sub-database")),
+            };
+            db.cells.push(DbCell { links, subs: [sub(0x28), sub(0x2c)] });
+        }
+        db.portals = m
+            .portals
+            .iter()
+            .map(|&a| atv_spatial::Portal {
+                corners: std::array::from_fn(|i| vf_at(ee, a + 0x30 + 0x10 * i as u32)),
+                normal: vf_at(ee, a + 0x70),
+                plane: F(ee.f32_at(a + 0xc4)),
+                edges: std::array::from_fn(|i| vf_at(ee, a + 0x80 + 0x10 * i as u32)),
+            })
+            .collect();
+        for k in 0..m.subs.len() {
+            let s = m.subs[k];
+            let kind = ee.u32_at(s + 8);
+            if ee.u32_at(s + 4) != DB_LIST_VT {
+                m.blocks.push(vec![]);
+                db.subs.push(Sub::Other { kind });
+                continue;
+            }
+            let (size, last, arr) = (ee.i32_at(s + 0x28), ee.i32_at(s + 0x30), ee.u32_at(s + 0x34));
+            m.blocks.push((0..ee.u32_at(s + 0x2c)).map(|b| ee.u32_at(arr + 4 * b)).collect());
+            let n = m.blocks[k].len();
+            let mut blocks = vec![];
+            for b in 0..n {
+                let base = m.blocks[k][b];
+                let handed = if b + 1 == n { last } else { size } as usize;
+                let mut slots = vec![None; size as usize];
+                for (i, slot) in slots.iter_mut().enumerate().take(handed) {
+                    let v = ee.u32_at(base + 4 * i as u32);
+                    *slot = Some(if v & 2 != 0 {
+                        let next = v & !3;
+                        Slot::Free((next != 0).then(|| m.slot_at(k, next, size as u32)))
+                    } else {
+                        Slot::Item(m.item(v))
+                    });
+                }
+                blocks.push(slots);
+            }
+            let free = match ee.u32_at(s + 0x38) {
+                0 => None,
+                f => Some(m.slot_at(k, f, size as u32)),
+            };
+            db.subs.push(Sub::List(DbList { kind, size, last, blocks, free }));
+        }
+        let sub = DbInRam::index(&m.subs, ee.u32_at(rec + 8), "the record's sub-database");
+        let mut record = atv_spatial::Record { cell: Some(0), sub, slot: m.place(ee, sub, ee.u32_at(rec + 0xc)), last: vf_at(ee, rec + 0x10), extras: vec![] };
+        let mut l = ee.u32_at(rec);
+        while l != 0 {
+            let sub = DbInRam::index(&m.subs, ee.u32_at(l + 8), "an extra's sub-database");
+            record.extras.push(Extra { at: m.link_at(l), cell: DbInRam::index(&m.cells, ee.u32_at(l + 4), "an extra's cell"), sub, slot: m.place(ee, sub, ee.u32_at(l + 0xc)) });
+            assert!(record.extras.len() < 64, "the record's extras do not end");
+            l = ee.u32_at(l);
+        }
+        (m, db, record)
+    }
+
+    fn place_word(&self, sub: usize, p: Place) -> u32 {
+        match p {
+            Place::Slot(s) => self.slot_addr(sub, s),
+            Place::Key(k) => k,
+        }
+    }
+
+    /// The move's outcome (`now`, read as `was`) written back where it changed: the record's words
+    /// and each list's slots, count and free chain. What a move here never changes — the cells, a
+    /// list's blocks, the link pool, the extras — must not have changed.
+    fn write(&self, ee: &mut Ee, entry: u32, was: (&Database, &atv_spatial::Record), now: (&Database, &atv_spatial::Record)) {
+        assert_eq!(was.0.cells, now.0.cells, "the cells changed");
+        assert_eq!(was.0.pool, now.0.pool, "the link pool changed: not written back");
+        assert_eq!(was.1.extras, now.1.extras, "the record's extras changed: not written back");
+        for (k, (a, b)) in was.0.subs.iter().zip(&now.0.subs).enumerate() {
+            let (Sub::List(a), Sub::List(b)) = (a, b) else {
+                assert_eq!(a, b, "sub-database {:#x} is no list and changed", self.subs[k]);
+                continue;
+            };
+            assert_eq!(a.blocks.len(), b.blocks.len(), "list {:#x} grew a block: not written back", self.subs[k]);
+            for (bl, (x, y)) in a.blocks.iter().zip(&b.blocks).enumerate() {
+                for (i, (x, y)) in x.iter().zip(y).enumerate() {
+                    if x == y {
+                        continue;
+                    }
+                    let w = match y.expect("a slot handed out is handed out still") {
+                        Slot::Item(it) => self.items[it],
+                        Slot::Free(n) => n.map_or(0, |n| self.slot_addr(k, n)) | 2,
+                    };
+                    ee.set_u32(self.slot_addr(k, SlotAt { block: bl, index: i }), w);
+                }
+            }
+            let s = self.subs[k];
+            ee.set_u32(s + 0x30, b.last as u32);
+            ee.set_u32(s + 0x38, b.free.map_or(0, |f| self.slot_addr(k, f)));
+        }
+        let rec = ee.u32_at(entry + 8);
+        let r = now.1;
+        if r.cell.is_some() {
+            ee.set_u32(rec + 4, self.cells[r.cell.unwrap()]);
+            ee.set_u32(rec + 8, self.subs[r.sub]);
+            ee.set_u32(rec + 0xc, self.place_word(r.sub, r.slot));
+        }
+        set_vf(ee, rec + 0x10, r.last);
+    }
+}
+
+/// **F46a — a collidable's spatial-database move in Rust**: `entry`'s database read out of RAM,
+/// moved by [`atv_spatial::spatial_move`], and written back.
+fn spatial_move_in_ram(ee: &mut Ee, entry: u32, centre: Vf, half: Vf, reach: F) {
+    let (m, mut db, mut rec) = DbInRam::read(ee, entry);
+    let (was_db, was_rec) = (db.clone(), rec.clone());
+    atv_spatial::spatial_move(&mut db, &mut rec, 0, centre, half, reach);
+    m.write(ee, entry, (&was_db, &was_rec), (&db, &rec));
+}
+
+/// **F46 — the handed-on calls in Rust, in lockstep with [`posts_frame`]**: C15's `name` replayed
+/// twice by [`posts_frame`], once handing its calls on to the original and once with those `rust`
+/// names Rust's ([`IN_RUST`]); every row of the second word for word against C15, and the two RAMs
+/// alike after every frame outside the stack. Answers the wreck state per row and what the second
+/// run answered.
+fn replay_in_rust(name: &str, rust: &[&'static str]) -> Option<(Vec<bool>, BTreeMap<String, u32>)> {
+    let words = mass_words(&race250p()?)?;
+    let trn = nat05_trn()?;
+    let map = track::Terrain::parse(&trn).unwrap();
+    let mut a = hooked(image()?);
+    for (at, mask, v) in words {
+        a.set_u32(at, a.u32_at(at) & !mask | v & mask);
+    }
+    let mut b = hooked(image()?);
+    b.ram.clone_from(&a.ram);
+    let (mut noise_a, mut noise_b) = (None, None);
+    let rows = rows(name)?;
+    let dt = F(f32::from_bits(DT));
+    let (mut out, mut all) = (Vec::new(), BTreeMap::<String, u32>::new());
+    for (r, row) in rows.iter().enumerate() {
+        poke(&mut a, row, &READER);
+        poke(&mut b, row, &READER);
+        posts_frame(&mut a, dt, &map, &mut noise_a, false);
+        IN_RUST.with(|x| *x.borrow_mut() = rust.to_vec());
+        let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| posts_frame(&mut b, dt, &map, &mut noise_b, false)));
+        IN_RUST.with(|x| x.borrow_mut().clear());
+        let (_, _, _, answered) = ran.unwrap_or_else(|e| std::panic::resume_unwind(e));
+        for (k, n) in answered {
+            *all.entry(k).or_default() += n;
+        }
+        let d = diff(&b, row);
+        assert!(d.is_empty(), "{name} row {r} (vsync {}), {rust:?} Rust's: {} words differ\n  {}", row["vsync"], d.len(), d.iter().take(40).cloned().collect::<Vec<_>>().join("\n  "));
+        let off = ram_differs(&a, &b);
+        assert!(off.is_empty(), "{name} row {r}: {rust:?} Rust's, RAM differs from the handing run's at {} ranges\n  {}", off.len(), off.iter().take(40).cloned().collect::<Vec<_>>().join("\n  "));
+        let w = wrecked(|o| b.u32_at(BIKE + o));
+        assert_eq!(w, row_wrecked(row), "{name} row {r}: the wreck state");
+        out.push(w);
+        poke(&mut a, row, &SPOT);
+        poke(&mut b, row, &SPOT);
+    }
+    eprintln!("{name}: {rust:?} Rust's, answered {all:?}");
+    Some((out, all))
+}
+
+/// The handed-on calls of a [`replay_in_rust`] answer (`> `), and how often `names` were answered.
+fn handed_and(all: &BTreeMap<String, u32>, names: &[&str]) -> (Vec<(String, u32)>, Vec<(String, u32)>) {
+    let handed = all.iter().filter(|(k, _)| k.starts_with("> ")).map(|(k, &n)| (k[2..].to_string(), n)).collect();
+    let rust = names.iter().map(|&k| (k.to_string(), all.get(k).copied().unwrap_or(0))).collect();
+    (handed, rust)
+}
+
+/// **F46a — state 4's database as the move sees it**: the riding probe's and the frame mesh's
+/// records in one cell with no links, in its list of moving entries (one block of 1024, 141 handed
+/// out), with no extra cells; read and written back unchanged, RAM is state 4's.
+#[test]
+fn state4s_database_reads_back_word_for_word() {
+    let Some(ee) = image() else { return };
+    for entry in [0x00ea_63b8, 0x00ea_5988] {
+        let (m, db, rec) = DbInRam::read(&ee, entry);
+        assert_eq!((m.cells.len(), m.portals.len(), m.subs.len()), (1, 0, 2), "entry {entry:#x}: one cell, no portal, two sub-databases");
+        let Sub::List(l) = &db.subs[rec.sub] else { panic!("entry {entry:#x} is in no list") };
+        assert_eq!((l.size, l.last, l.blocks.len(), rec.extras.len()), (0x400, 0x8d, 1, 0), "entry {entry:#x}'s list");
+        assert!(matches!(db.subs[1 - rec.sub], Sub::Other { .. }), "the cell's other sub-database is the quadtree, read by its kind");
+        let mut b = Ee::with_ram(ee.ram.clone());
+        m.write(&mut b, entry, (&db, &rec), (&db, &rec));
+        let off = bytes_differ(&ee.ram, &b.ram, ee.stack);
+        assert!(off.is_empty(), "entry {entry:#x}: written back, RAM differs at {off:?}");
+    }
+}
+
+/// **F46a — C15's ride, the database moves Rust's**: ride-2 in lockstep with [`posts_frame`]'s
+/// handing run, the riding probe's and the frame mesh's moves [`atv_spatial::spatial_move`]'s every
+/// frame, RAM alike.
+#[test]
+fn ride_replays_with_the_database_moves_in_rust() {
+    let Some((w, all)) = replay_in_rust("ride-2", &["PartMove"]) else { return };
+    assert_eq!(w.len(), 459);
+    assert!(w.iter().all(|w| !w), "the ride never wrecks");
+    let (handed, rust) = handed_and(&all, &["PartMove"]);
+    assert_eq!(rust, [("PartMove".to_string(), 918)]);
+    assert!(handed.iter().all(|(k, _)| k != "PartMove"), "{handed:?}");
+}
+
+/// **F46a — C15's flip, the database moves Rust's**: flip-1 in lockstep, wrecked on row 125 and put
+/// back on row 193; the riding probe moved every frame and the frame mesh on 306.
+#[test]
+fn flip_replays_with_the_database_moves_in_rust() {
+    let Some((w, all)) = replay_in_rust("flip-1", &["PartMove"]) else { return };
+    assert_eq!(w.len(), 465);
+    let changes: Vec<usize> = (1..w.len()).filter(|&r| w[r] != w[r - 1]).collect();
+    assert_eq!(changes, [125, 193], "wrecked on row 125, put back on row 193");
+    let (handed, rust) = handed_and(&all, &["PartMove"]);
+    assert_eq!(rust, [("PartMove".to_string(), 771)]);
+    assert!(handed.iter().all(|(k, _)| k != "PartMove"), "{handed:?}");
 }
