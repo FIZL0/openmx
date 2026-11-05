@@ -3,6 +3,9 @@
 #   KIT_CONFIG=<SLUS-21104 kit.toml> KIT_PCSX2=N bash research/md80a/fly.sh PID NAME KIND PAD OBJ [OUT]
 # KIND is biplane or kiowa (the spec and the vtable), PAD the pad script (research/md80a/*.pad), OBJ the
 # player's flier object (hex, ram.py's moving one). The tape goes to context/recordings/md80a/PADNAME.p2m2.
+# MD101: start the copy with QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1 QT_ACCESSIBILITY=1 (else play.sh's AT-SPI
+# steps find no app for the pid). Under a heavy load the recorder misses and tears rows: set the copy's
+# NominalScalar (inis/PCSX2.ini) to 0.3 first; MD101's replay counts late rows (the vsync read a frame early).
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
