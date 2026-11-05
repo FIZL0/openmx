@@ -350,6 +350,14 @@ pub fn world_reach(d: &Device) -> Option<(Reach, Reach)> {
     d.touch.then_some((Reach { load: F(3000.0), drop: F(4500.0) }, Reach { load: F(1500.0), drop: F(2200.0) }))
 }
 
+/// Whether a world's ground is held lean on the GPU on `d` (P301a, [`game_render::gpu::WORLD_LEAN`]):
+/// on a phone or tablet, its pages at 128 px and its detail maps at 256 at most, and its vertex
+/// pages 32 MiB at most. On the desktop that took the GPU's share of a world ride at the phone's
+/// reach down by a quarter or so (journal P301a); the ride's hash is the same.
+pub fn world_lean(d: &Device) -> bool {
+    d.touch
+}
+
 /// One step cheaper, or `None` at the bottom: the speed-ups first (Shadows All to On, the movers'
 /// alone), then the fog in to Far, a fixed scale down to 75%, Shadow Quality High to Low, filtering
 /// down to 4x, coarser models, half scale, 2x (Phone to Low), Shadow Quality Low to the original's,
@@ -538,6 +546,7 @@ mod tests {
         // P301: a phone holds a world to half the desktop's reach; the desktop and the Deck keep theirs.
         assert_eq!(world_reach(&phone).map(|(r, f)| (r.load.0, r.drop.0, f.load.0, f.drop.0)), Some((3000.0, 4500.0, 1500.0, 2200.0)));
         assert_eq!((world_reach(&Device::default()), world_reach(&Device { steam_deck: true, ..Device::default() })), (None, None));
+        assert_eq!((world_lean(&phone), world_lean(&Device::default()), world_lean(&Device { steam_deck: true, ..Device::default() })), (true, false, false));
 
         // The ladder from High to the bottom: every row once, no 30 cap, Medium on the way, and
         // never the original's near fog nor no shadows (2026-10-29): pixels go first.

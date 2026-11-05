@@ -12781,6 +12781,10 @@ fn parse_args() -> Result<Option<Args>, String> {
         args.world_reach = Some(reach);
         args.world_fine = Some(fine);
     }
+    // And its ground held lean on the GPU (P301a); `--world-lean` does it anywhere.
+    if menu::video::world_lean(&menu::video::Device::here()) {
+        game_render::gpu::WORLD_LEAN.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     let mut argv = argv().into_iter();
     while let Some(a) = argv.next() {
         let mut next = |what: &str| argv.next().ok_or(format!("{a} wants {what}"));
@@ -13174,6 +13178,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                 }
                 args.world_reach = Some(game_sim::tiles::Reach { load: F(load), drop: F(drop) });
             }
+            "--world-lean" => game_render::gpu::WORLD_LEAN.store(true, std::sync::atomic::Ordering::Relaxed),
             "--world-fine" => {
                 let w = next("load,drop or off")?;
                 args.world_fine = if w == "off" {
@@ -13295,7 +13300,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--modifiers 'gravity=50 bike_speed.2=200']\n\
                             [--shot-frame N] [--shot-pose x,y,z,yaw,pitch,fov]... [--overview] [--vehicle bike|biplane]\n\
                             [--players 1..8] [--split h|v] [--headless] [--frames N] [--timings]\n\
-                            [--world-ground all|near] [--world-reach LOAD,DROP] [--world-fine LOAD,DROP|off] [--world-chunks N]\n\
+                            [--world-ground all|near] [--world-reach LOAD,DROP] [--world-fine LOAD,DROP|off] [--world-lean] [--world-chunks N]\n\
                             [--world-sweep X0,Z0,X1,Z1] [--world-stand-in on|off] [--warm on|off]\n\
                             [--draw-fps N] [--steady-clock] [--sim-thread auto|on|off] [--vsync on|off] [--fps-limit off|N|refresh]\n\
                             [--record TAPE] [--play TAPE|RECORDING.p2m2 [--phase second]]\n\
