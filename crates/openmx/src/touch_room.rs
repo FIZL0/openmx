@@ -1,5 +1,6 @@
 //! Where the page's on-screen pad (P197, `web/touch.js`) stands over the frame, so the ride HUD's
-//! speedometer and radar and the front end's hints are drawn clear of it (P208).
+//! radar and the front end's hints are drawn clear of it (P208), and the speedometer moves up to the
+//! top right while it is shown (P304).
 //!
 //! The page lists the pad among its gamepads only while it is shown, by the name `Touch controls`
 //! ([`crate::pad::TOUCH_PAD`]); the canvas's poll ([`set`]) notes the window it is laid out in
@@ -16,8 +17,9 @@ thread_local! {
     static WINDOW: Cell<Option<(usize, usize)>> = const { Cell::new(None) };
 }
 
-/// The pad is shown over a window of `window` pixels, or (`None`) is not shown.
-#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+/// The pad is shown over a window of `window` pixels, or (`None`) is not shown: the page's, or the
+/// iPhone's own pad (P304, `touch_pad.rs`), laid out alike, over the room inside its kept insets.
+#[cfg_attr(not(any(target_arch = "wasm32", target_os = "ios")), allow(dead_code))]
 pub fn set(window: Option<(usize, usize)>) {
     WINDOW.with(|w| w.set(window.map(|(x, y)| (x.max(1), y.max(1)))));
 }
@@ -34,10 +36,14 @@ const GAP: f32 = 0.15 + 0.2;
 /// (0.35 + 2.5 up from the bottom), the tallest of the three pedals.
 const PEDALS_LEFT: f32 = 6.45 + GAP;
 const PEDALS_TOP: f32 = 2.85 + GAP;
-/// Over MODIFIER and left of the face diamond and BRAKE: □'s left edge is 4.0 in from the right and
-/// BRAKE's 4.1, and MODIFIER's top 1.55 up.
-const FACES_LEFT: f32 = 4.1 + GAP;
-const MODIFIER_TOP: f32 = 1.55 + GAP;
+/// Up the right side, the face diamond: △'s top (5.3 + 1.15 up) and left edge (1.6 + 1.15 in), and
+/// □'s, beside ○ under it (4.2 + 1.15 up, 2.85 + 1.15 in).
+const TRIANGLE_TOP: f32 = 6.45 + GAP;
+const TRIANGLE_LEFT: f32 = 2.75 + GAP;
+const SQUARE_TOP: f32 = 5.35 + GAP;
+const SQUARE_LEFT: f32 = 4.0 + GAP;
+/// Along the top, PAUSE's right edge: 0.8 + 1.6 right of the middle.
+const PAUSE_RIGHT: f32 = 0.8 + 1.6 + GAP;
 /// The stick's base at rest: 2.6 across, centred 1.8 in from the bottom left corner.
 const STICK_EDGE: f32 = 1.8 + 1.3 + 0.2;
 
@@ -79,17 +85,36 @@ impl Room {
         ((u * self.unit() - y) / k).max(0.0)
     }
 
-    /// How far in from the frame's bottom right corner something there stands clear of every
-    /// right-hand control, in frame pixels (from the right, from the bottom): over MODIFIER, left of
-    /// the faces and BRAKE.
-    pub fn over_the_pedals(self) -> (f32, f32) {
-        (self.across(FACES_LEFT), self.up(MODIFIER_TOP))
-    }
-
     /// How far in from the frame's right edge something along the bottom stands clear of the
     /// pedals, and how far up from the bottom that holds: left of MODIFIER, up to GAS's top.
     pub fn left_of_the_pedals(self) -> (f32, f32) {
         (self.across(PEDALS_LEFT), self.up(PEDALS_TOP))
+    }
+
+    /// How far down from the frame's top something in its top right corner stands clear of the
+    /// face diamond under it, in frame pixels: over △.
+    pub fn over_the_faces(self) -> f32 {
+        self.frame.1 - self.up(TRIANGLE_TOP)
+    }
+
+    /// How far down from the frame's top something left of △ stands clear of the faces: over □.
+    pub fn over_the_square(self) -> f32 {
+        self.frame.1 - self.up(SQUARE_TOP)
+    }
+
+    /// How far in from the frame's right edge something in its top right corner reaching `down`
+    /// frame pixels from the top stands clear of the faces: left of △, or of □ once it reaches as
+    /// low as □'s top.
+    pub fn left_of_the_faces(self, down: f32) -> f32 {
+        let wide = down > self.over_the_square();
+        self.across(if wide { SQUARE_LEFT } else { TRIANGLE_LEFT })
+    }
+
+    /// How far in from the frame's left edge something along the top stands clear of the small
+    /// buttons there: right of PAUSE.
+    pub fn right_of_the_top(self) -> f32 {
+        let (k, (x, _)) = self.fit();
+        ((self.window.0 / 2.0 + PAUSE_RIGHT * self.unit() - x) / k).max(0.0)
     }
 
     /// How far in from the frame's left edge something along the bottom stands clear of the
@@ -117,19 +142,22 @@ mod tests {
     #[test]
     fn the_places_are_the_pads_on_a_phone() {
         let r = phone();
-        let (x, y) = r.over_the_pedals();
-        assert!((x - 4.45 * 48.75).abs() < 1e-3 && (y - 1.9 * 48.75).abs() < 1e-3, "{x} {y}");
         let (x, y) = r.left_of_the_pedals();
         assert!((x - 6.8 * 48.75).abs() < 1e-3 && (y - 3.2 * 48.75).abs() < 1e-3, "{x} {y}");
         let (x, _) = r.right_of_the_stick();
         assert!((x - 3.3 * 48.75).abs() < 1e-3, "{x}");
+        let y = r.over_the_faces();
+        assert!((y - (390.0 - 6.8 * 48.75)).abs() < 1e-3, "{y}");
+        assert!((r.left_of_the_faces(y) - 3.1 * 48.75).abs() < 1e-3);
+        assert!((r.left_of_the_faces(390.0 - 5.7 * 48.75 + 1.0) - 4.35 * 48.75).abs() < 1e-3);
+        assert!((r.right_of_the_top() - (422.0 + 2.75 * 48.75)).abs() < 1e-3);
     }
 
     #[test]
     fn a_smaller_frame_scales_and_a_barred_one_starts_in_from_the_bars() {
         // half the window's pixels: every place is half as many frame pixels
         let half = Room { window: (844.0, 390.0), frame: (422.0, 195.0) };
-        assert!((half.over_the_pedals().0 - phone().over_the_pedals().0 / 2.0).abs() < 1e-3);
+        assert!((half.left_of_the_pedals().0 - phone().left_of_the_pedals().0 / 2.0).abs() < 1e-3);
         // 4:3 in 844x390: 520x390 centred, its sides 162 in from the window's
         let barred = Room { window: (844.0, 390.0), frame: (520.0, 390.0) };
         assert!((barred.left_of_the_pedals().0 - (6.8 * 48.75 - 162.0)).abs() < 1e-3);

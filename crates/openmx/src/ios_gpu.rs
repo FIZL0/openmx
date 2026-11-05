@@ -487,6 +487,10 @@ impl GpuWindow {
         let [l, t, r, b] = self.safe;
         self.width = self.size.0.saturating_sub(l + r).max(1) as usize;
         self.height = self.size.1.saturating_sub(t + b).max(1) as usize;
+        // The touch pad up or not, for the ride HUD to stand clear of it as the page's does (P304,
+        // P208): it is laid out from the kept insets' edges, the room the frame is centred in.
+        let shown = TOUCH.lock().unwrap_or_else(|e| e.into_inner()).shown;
+        crate::menu::touch_room::set(shown.then_some((self.width, self.height)));
     }
 
     pub fn closed(&self) -> bool {

@@ -748,8 +748,8 @@ pub fn sprites(out: &mut Vec<Sprite>, base: usize, view: [f32; 4], shown: &Shown
 }
 
 /// [`sprites`], with the page's touch pad over the frame (P208) where `pad` says it is: the radar
-/// right of the stick's resting base and the speedometer over the pedals, in a view at those
-/// corners of the frame.
+/// right of the stick's resting base, and the speedometer and the preload meter up in the top right
+/// corner (P304), clear of the pad's buttons, in a view at those corners of the frame.
 #[allow(clippy::too_many_arguments)]
 pub fn sprites_clear_of(out: &mut Vec<Sprite>, base: usize, view: [f32; 4], pad: Option<Room>, shown: &Shown, tracker: &Tracker, now: Instant) -> Drawn {
     let s = scale_of(view[2], view[3], shown.scale);
@@ -763,13 +763,21 @@ pub fn sprites_clear_of(out: &mut Vec<Sprite>, base: usize, view: [f32; 4], pad:
         pen.view = view;
     }
     score(&mut pen, shown, tracker, now, &mut drawn);
+    let mut below = None;
     if let Some(room) = pad {
-        pen.view = over_the_pedals(view, extent(&pen, |p, d| speedometer(p, shown, d)), room);
+        let meters = |k: f32| {
+            let mut aside = Vec::new();
+            let at = Pen { out: &mut aside, view, s: s * k, base, corner: Corner::TopLeft, alpha: 1.0 };
+            extent(&at, |p, d| speedometer(p, shown, d))
+        };
+        if let Some((moved, k, bottom)) = to_the_top_right(view, s, room, meters) {
+            (pen.view, pen.s, below) = (moved, s * k, Some(bottom));
+        }
     }
     speedometer(&mut pen, shown, &mut drawn);
-    pen.view = view;
+    (pen.view, pen.s) = (view, s);
     prompts(&mut pen, shown, &mut drawn);
-    top_right(&mut pen, shown, tracker, now, &mut drawn);
+    top_right(&mut pen, shown, tracker, now, below, &mut drawn);
     if let Some(e) = &shown.event {
         event(&mut pen, e, tracker, now, &mut drawn);
     }
@@ -802,15 +810,42 @@ fn extent(pen: &Pen, part: impl FnOnce(&mut Pen, &mut Drawn)) -> Option<[f32; 4]
     })
 }
 
-/// `view`, moved for what draws at `drawn` in its bottom right corner to stand over the touch pad's
-/// pedals and left of its faces (P208), in a view whose corner is the frame's.
-fn over_the_pedals(view: [f32; 4], drawn: Option<[f32; 4]>, room: Room) -> [f32; 4] {
+/// Where the speedometer and the preload meter, which `meters` says draw in `view`'s bottom right
+/// corner at a share of its scale `s`, stand in the top right instead while the touch pad is up
+/// (P304), in a view whose bottom right corner is the frame's — the one the pad's buttons cover: the
+/// view to draw them in, the share of `s` to draw them at, and the frame y they reach down to, for
+/// the top-right column to start under. Their top is level with the score bar's; their right edge
+/// stays where it was if they fit over the face diamond's △, else stands left of △ (over □), else
+/// left of □ — and their left right of PAUSE along the top. Whichever of the three takes them
+/// biggest: at full size where one fits, else shrunk to fit it. The frame is inside the island's
+/// inset, so they are too.
+fn to_the_top_right(view: [f32; 4], s: f32, room: Room, meters: impl Fn(f32) -> Option<[f32; 4]>) -> Option<([f32; 4], f32, f32)> {
     let [vx, vy, w, h] = view;
     let (fw, fh) = room.frame;
-    let Some(b) = drawn.filter(|_| (vx + w - fw).abs() < 1.0 && (vy + h - fh).abs() < 1.0) else { return view };
-    let (right, up) = room.over_the_pedals();
-    let (dx, dy) = ((right - (fw - b[2])).max(0.0), (up - (fh - b[3])).max(0.0));
-    [vx, vy, w - dx, h - dy]
+    if (vx + w - fw).abs() >= 1.0 || (vy + h - fh).abs() >= 1.0 {
+        return None;
+    }
+    let b = meters(1.0)?;
+    let (bw, bh) = (b[2] - b[0], b[3] - b[1]);
+    let top = vy + SCORE_BAR[1] * s;
+    let left_end = room.right_of_the_top();
+    // Each place: its right edge and how low it may reach, frame pixels.
+    let places = [
+        (b[2], room.over_the_faces()),
+        (fw - room.left_of_the_faces(0.0), room.over_the_square()),
+        (fw - room.left_of_the_faces(fh), vy + h / 2.0),
+    ];
+    let fit = |(right, low): (f32, f32)| ((low - top) / bh).min((right.min(b[2]) - left_end) / bw).min(1.0);
+    let mut best = places[0];
+    for p in &places[1..] {
+        if fit(*p) > fit(best) + 1e-4 {
+            best = *p;
+        }
+    }
+    let k = fit(best).max(0.1);
+    let b = meters(k)?;
+    let (dx, dy) = ((b[2] - best.0).max(0.0), b[1] - top);
+    Some(([vx, vy - dy, w - dx, h], k, b[3] - dy))
 }
 
 /// `view`, moved for what draws at `drawn` in its bottom left corner to stand right of the touch
@@ -1398,9 +1433,13 @@ fn act_pill(pen: &mut Pen, buttons: &Buttons, x: f32, mid: f32, words: &str, hol
 }
 
 /// The top right: the marker menu while it is up, and under it the camera toast.
-fn top_right(pen: &mut Pen, shown: &Shown, tracker: &Tracker, now: Instant, drawn: &mut Drawn) {
+/// `below`, a frame y the column starts under: the meters', moved up here for the touch pad (P304).
+fn top_right(pen: &mut Pen, shown: &Shown, tracker: &Tracker, now: Instant, below: Option<f32>, drawn: &mut Drawn) {
     pen.corner = Corner::TopRight;
     let (right, mut top) = TOP_RIGHT;
+    if let Some(y) = below {
+        top = top.max((y - pen.view[1]) / pen.s + 0.7 * EM);
+    }
     if let Some(p) = &shown.markers {
         // Never nearer than an EM to the score bar's right (P139), in this corner's layout x.
         let least = overlay::LAYOUT.0 - pen.view[2] / pen.s + SCORE_BAR[0] + SCORE_BAR[2] + EM;
