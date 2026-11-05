@@ -131,7 +131,13 @@ fn poke(ee: &mut Ee, row: &Row, words: &[(u32, u32)]) {
 fn hooked(mut ee: Ee) -> Ee {
     ee.hooks.insert(0x0034_8fa0, Box::new(|ee: &mut Ee| ee.set(2, 0)));
     ee.hooks.insert(0x0034_8ff0, Box::new(|ee: &mut Ee| ee.set(2, 0)));
-    ee.hooks.insert(0x004e_7e70, Box::new(|_: &mut Ee| {}));
+    // F44a: the stunt packet's read of RCNT0's count (`lui $2, 0x1000` .. `lw $16, 0($2)`) reads the
+    // counter's stand-in word instead (0 unless a test sets it), so the packet runs.
+    let at = ee.scratch(COUNTER_K);
+    assert_eq!([ee.u32_at(COUNTER_LUI), ee.u32_at(COUNTER_LW)], [0x3c02_1000, 0x8c50_0000], "the stunt packet's counter read");
+    ee.set_u32(COUNTER_LUI, 0x3c02_0000 | (at.wrapping_add(0x8000) >> 16));
+    ee.set_u32(COUNTER_LW, 0x8c50_0000 | (at & 0xffff));
+    ee.set_u32(at, 0);
     // Every `addiu $3, $zero, n; syscall; jr $ra`: the answer is a0, the thread id (0x2f) 1.
     for a in (0x0030_0000..0x0036_0000u32).step_by(4) {
         if ee.u32_at(a) >> 16 == 0x2403 && ee.u32_at(a + 4) == 0x0000_000c && ee.u32_at(a + 8) == 0x03e0_0008 {
@@ -4934,6 +4940,28 @@ const NODE_SHOWN: u32 = 0x0012_7f60;
 const NODE_HIDDEN: u32 = 0x0012_7fd0;
 const SEND_THUNK: u32 = 0x004b_fa30;
 const PART_STEPS: [u32; 2] = [0x001b_cfa0, 0x001b_acd0];
+/// F44a's: the bike's three packets (vt `+0x544`, `+0x400`, `+0x404`), the sender's own send (its vt
+/// `+0x28`) and the connection's queue it ends in, the quantiser table's lookup, keep and quantise,
+/// state 4's hash and key test, the interrupts off and on (research/oracle.txt `# F44a`).
+const STUNT_FN: u32 = 0x004e_7e70;
+const FULL_FN: u32 = 0x004a_8e30;
+const DELTA_FN: u32 = 0x004a_90c0;
+const SENDER_SEND: u32 = 0x0025_e9d0;
+const NET_QUEUE: u32 = 0x0028_2190;
+const Q_LOOKUP: u32 = 0x0026_7ba0;
+const Q_KEEP: u32 = 0x0026_7910;
+const Q_QUANTISE: u32 = 0x0026_7590;
+const KEY_HASH: u32 = 0x001c_3820;
+const KEY_SAME: u32 = 0x001c_38d0;
+const IRQ_OFF: u32 = 0x0034_8fa0;
+const IRQ_ON: u32 = 0x0034_8ff0;
+/// The stunt packet's two instructions that read RCNT0, and the scratch slots of the counter's
+/// stand-in word, the queue's header and its packet.
+const COUNTER_LUI: u32 = 0x004e_7f44;
+const COUNTER_LW: u32 = 0x004e_7f50;
+const COUNTER_K: u32 = 250;
+const HEAD_K: u32 = 251;
+const PACKET_K: u32 = 252;
 /// The bike's slots F39 ports, each with its function.
 const UPDATE_OWN: [(u32, u32); 6] = [
     (0x3a4, FADE_FN),
@@ -5083,6 +5111,39 @@ impl Updates for UpdateInRam<'_> {
             Out::Part(p) if PART_STEPS.contains(&slot(p, 0xc, 0xbc)) => return void(update::part_step(self, p)),
             _ => {}
         }
+        // F44a's: the same, where no oracle hooks the original.
+        let ported = |f: u32| !ee.hooks.contains_key(&f);
+        match c {
+            Out::NetStunt(a) if vt(ee, 0x544) == STUNT_FN && ported(STUNT_FN) => return void(update::net_stunt(self, a)),
+            Out::NetFull(a) if vt(ee, 0x400) == FULL_FN && ported(FULL_FN) => return void(update::net_full(self, a)),
+            Out::NetDelta(a) if vt(ee, 0x404) == DELTA_FN && ported(DELTA_FN) => return void(update::net_delta(self, a)),
+            Out::SenderSend { sender, arg, packet } if slot(sender, 0x38, 0x28) == SENDER_SEND && ported(SENDER_SEND) => {
+                return void(update::sender_send(self, sender, arg, packet, 0, 0));
+            }
+            Out::Hash { f, key } if f == KEY_HASH && ported(KEY_HASH) => return update::decimal_hash(self, key),
+            Out::SameKey { f, a, b } if f == KEY_SAME && ported(KEY_SAME) => return update::same_key(a, b),
+            // RCNT0 is hardware: its stand-in word, as the original's patched read ([`hooked`]).
+            Out::Counter => return ee.u32_at(ee.scratch(COUNTER_K)),
+            _ => {}
+        }
+        let packet_at = |ee: &mut Ee, p: &update::Packet| {
+            let at = ee.scratch(PACKET_K);
+            for (k, &b) in p.data().iter().enumerate() {
+                ee.write(at + k as u32, 1, u128::from(b));
+            }
+            at
+        };
+        let (buf, head) = match c {
+            Out::SenderSend { packet, .. } => (packet_at(self.ee, &packet), 0),
+            Out::NetQueue { head, packet, .. } => {
+                let buf = packet_at(self.ee, &packet);
+                let at = self.ee.scratch(HEAD_K);
+                self.ee.write(at, 2, u128::from(u16::from_le_bytes(head)));
+                self.ee.set_u32(at + 4, buf);
+                (buf, at)
+            }
+            _ => (0, 0),
+        };
         let (bike, x) = (u64::from(BIKE), self.x);
         let ee = &*self.ee;
         let obj_fn = |o: u32, at: u32, slot: u32| ee.u32_at(ee.u32_at(o + at) + slot);
@@ -5118,6 +5179,13 @@ impl Updates for UpdateInRam<'_> {
             Out::NetFull(a) => (vt(ee, 0x400), vec![bike, u(a)], vec![x]),
             Out::NetDelta(a) => (vt(ee, 0x404), vec![bike, u(a)], vec![x]),
             Out::Walk(g) => (TAIL, vec![u(g)], vec![x]),
+            Out::SenderSend { sender, arg, packet } => (obj_fn(sender, 0x38, 0x28), vec![u(sender), u(arg), u(buf), u(packet.len), 0, 0], vec![x]),
+            Out::NetQueue { conn, flags, .. } => (NET_QUEUE, vec![u(conn), u(head), u(flags)], vec![x]),
+            Out::Hash { f, key } => (f, vec![u(key)], vec![x]),
+            Out::SameKey { f, a, b } => (f, vec![u(a), u(b)], vec![x]),
+            Out::IrqOff => (IRQ_OFF, vec![], vec![x]),
+            Out::IrqOn => (IRQ_ON, vec![], vec![x]),
+            Out::Counter => unreachable!("the stand-in word"),
             Out::NodePlace { .. } | Out::Local { .. } | Out::Rotate { .. } => unreachable!("asked through vector()"),
             Out::RunOpen(_) | Out::RunScore { .. } | Out::RunClose { .. } | Out::RunTally { .. } | Out::RunEnd { .. } => {
                 unreachable!("the stunt's start and end are the original's here")
@@ -5952,6 +6020,10 @@ fn the_riders_writes_into_the_bike_are_read_by_the_wreck_clock_alone() {
         assert_eq!(t.overwritten, 0, "{name}: nothing but the rider writes the windows");
         let words: std::collections::BTreeSet<u32> = t.read.iter().map(|&(_, a)| (a - BIKE) & !3).collect();
         let frames: std::collections::BTreeSet<usize> = t.read.iter().map(|&(r, _)| r).collect();
+        // F44a: the stunt packet (no longer stubbed) sends the rider's +0x940, and nothing else of it.
+        let sent: std::collections::BTreeSet<u32> = t.sent.iter().map(|&(_, a)| (a - BIKE) & !3).collect();
+        eprintln!("{name}: {} bytes of the rider's sent by the stunt packet, on {} frames", t.sent.len(), t.sent.iter().map(|&(r, _)| r).collect::<std::collections::BTreeSet<_>>().len());
+        assert_eq!(sent.into_iter().collect::<Vec<_>>(), [0x940], "{name}: the rider's words the stunt packet sends");
         if name == "ride-2" {
             assert!(t.read.is_empty(), "{name}: the rider's writes read by the bike's frame: {words:#x?}");
         } else {
@@ -5973,6 +6045,8 @@ struct RiderReads {
     overwritten: usize,
     own_reads: usize,
     read: Vec<(usize, u32)>,
+    /// F44a: the reads of marked bytes by the stunt packet, which sends them (frame, address).
+    sent: Vec<(usize, u32)>,
 }
 
 /// [`replay`] with the rider's step hooked to run as itself in between two read watches
@@ -6021,6 +6095,28 @@ fn riders_writes_read(name: &str) -> Option<RiderReads> {
             ee.written.clear();
         }),
     );
+    // F44a: the stunt packet, run as itself between two read watches the same, its reads apart.
+    let (h, at) = (t.clone(), frame.clone());
+    ee.hooks.insert(
+        STUNT_FN,
+        Box::new(move |ee: &mut Ee| {
+            let mut t = h.borrow_mut();
+            settle(&mut t, ee, *at.borrow());
+            let (args, ra, sp, stack) = ([ee.r(4), ee.r(5)], ee.r(31), ee.r(29), ee.stack);
+            ee.stack = (sp as u32 - 0x40) & !0xf;
+            ee.call(STUNT_FN, &args, &[], BUDGET);
+            (ee.stack, ee.pc) = (stack, STUNT_FN);
+            ee.set(29, sp);
+            ee.set(31, ra);
+            let reads = ee.reads.replace(Some(Default::default())).unwrap_or_default();
+            let (r, marked) = &mut *t;
+            let frame = *at.borrow();
+            r.sent.extend(reads.intersection(marked).map(|&a| (frame, a)));
+            let gone: Vec<u32> = ee.written.intersection(marked).copied().collect();
+            r.overwritten += gone.len();
+            ee.written.clear();
+        }),
+    );
     for (r, row) in rows.iter().enumerate() {
         poke(&mut ee, row, &READER);
         *frame.borrow_mut() = r;
@@ -6036,6 +6132,7 @@ fn riders_writes_read(name: &str) -> Option<RiderReads> {
         poke(&mut ee, row, &SPOT);
     }
     ee.hooks.remove(&step);
+    ee.hooks.remove(&STUNT_FN);
     let (r, _) = Rc::try_unwrap(t).ok().unwrap().into_inner();
     Some(r)
 }
@@ -6515,6 +6612,253 @@ fn the_trail_sender_and_part_virtuals_are_the_originals() {
         assert!(*n >= 100, "path {path:?} taken only {n} times");
     }
     assert_eq!(t.len(), 13, "every path taken");
+}
+
+/// **F44a — the bike's three net packets, their quantisers and the sender's own send, the
+/// originals**: on the state04 image, 10 000 cases each run the original from the same words and then
+/// the port through [`UpdateInRam`] (so its slot checks run too), the connection's queue hooked under
+/// both. The stunt's, the whole state's and the change's packet off random words, counter and clock;
+/// the sender's send, state 4's hash, the table's lookup, keep and quantise called alone. Every word of
+/// the bike, the table and its entries, the net record and its vectors matches, and so do the queued
+/// packets byte for byte and every answer.
+#[test]
+fn the_bikes_net_packets_are_the_originals() {
+    use update::{Out, Packet};
+    let Some(mut ee) = image().map(hooked) else { return };
+    let net = BIKE + update::NET;
+    assert_eq!([0x544, 0x400, 0x404].map(|s| vt(&ee, s)), [STUNT_FN, FULL_FN, DELTA_FN], "the bike's three packets");
+    assert_eq!(ee.u32_at(ee.u32_at(net + 0x38) + 0x28), SENDER_SEND, "the sender's own send");
+    let table = ee.u32_at(BIKE + update::QUANTISERS);
+    assert_eq!([ee.u32_at(table + 0x10), ee.u32_at(table + 0x14)], [KEY_HASH, KEY_SAME], "state 4's hash and key test");
+    let entries = ee.u32_at(table + 0x30);
+    let rec = ee.u32_at(BIKE + update::NET_FIELDS);
+    let vecs = [0, 4, 8].map(|o| ee.u32_at(rec + o));
+    let keys: Vec<u32> = [vecs[0], vecs[2], vecs[1]].iter().flat_map(|&v| [v, v + 4, v + 8]).collect();
+    let clock = ee.u32_at(update::NET_CLOCK) + 0x4cc;
+    let (counter, alt, out) = (ee.scratch(COUNTER_K), ee.scratch(248), ee.scratch(249));
+    let log: Rc<RefCell<Vec<Out>>> = Rc::default();
+    let l = log.clone();
+    ee.hooks.insert(NET_QUEUE, Box::new(move |ee: &mut Ee| {
+        let h = ee.r(5) as u32;
+        let head = [ee.u8_at(h), ee.u8_at(h + 1)];
+        let buf = ee.u32_at(h + 4);
+        let mut packet = Packet { len: u32::from(head[1]), ..Packet::EMPTY };
+        for k in 0..usize::from(head[1]) {
+            packet.bytes[k] = ee.u8_at(buf + k as u32);
+        }
+        l.borrow_mut().push(Out::NetQueue { conn: ee.r(4) as u32, head, packet, flags: ee.r(6) as u32 });
+        ee.set(2, 1);
+    }));
+    let regions = vec![
+        (BIKE, 0x1820),
+        (table, 0x38),
+        (entries, 9 * 0x18),
+        (rec, 0x28),
+        (vecs[1], 0x10),
+        (vecs[2], 0x10),
+        (update::TIMER_COUNTS, 4),
+        (clock, 4),
+        (counter, 4),
+        (alt, 0x10),
+        (out, 0x10),
+    ];
+    let image_words = snap_regions(&ee, &regions);
+    let mut g = Gen(0x0000_f44a);
+    let val = |g: &mut Gen| if g.one_in(16) { g.bits() } else { g.near(0.0, -300.0, 300.0).to_bits() };
+    let mut t = BTreeMap::new();
+    for k in 0..10_000 {
+        restore_regions(&mut ee, &regions, &image_words);
+        let kind = g.bits() % 8;
+        // The words the packets read: the nine, the second vector's w, the stunt's five, the levers.
+        if kind < 3 {
+            for &key in &keys {
+                ee.set_u32(key, val(&mut g));
+            }
+            ee.set_u32(vecs[1] + 0xc, val(&mut g));
+            for o in [0x10, 0x14, 0x18, 0x1c, 0x20] {
+                ee.set_u32(ee.u32_at(rec + o), g.bits());
+            }
+            ee.set_f32(BIKE + 0x14e8, g.near(0.0, -2.0, 2.0));
+            ee.set_f32(BIKE + 0x318, g.near(0.1, 0.0, 0.2));
+            ee.set_u32(clock, g.bits());
+            ee.set_u32(update::TIMER_COUNTS, if g.one_in(2) { g.bits() % 100_000 } else { g.bits() });
+            ee.set_u32(counter, g.bits());
+            ee.set_u32(net, g.bits());
+            ee.set_u32(net + 0x10, g.bits());
+            for i in 0..4 {
+                ee.set_u32(alt + 4 * i, val(&mut g));
+            }
+            if g.one_in(6) {
+                ee.set_u32(rec + 4 * (g.bits() % 3), alt);
+            }
+        }
+        // The quantisers: their last, scale, step and dead band.
+        if kind == 2 || kind >= 5 {
+            for i in 0..9 {
+                let e = entries + 0x18 * i;
+                let key = keys[ee.u32_at(e) as usize % 9];
+                let x = f32::from_bits(ee.u32_at(key));
+                let last = if g.one_in(3) { x + g.f(-0.01, 0.01) } else { g.near(0.0, -300.0, 300.0) };
+                ee.set_f32(e + 4, last);
+                let scale = (1u32 << (g.bits() % 26)) as f32 * g.f(0.5, 1.0);
+                ee.set_f32(e + 0xc, scale);
+                ee.set_f32(e + 0x10, g.f(0.5, 1.5) / scale);
+                ee.set_f32(e + 0x14, if g.one_in(3) { 0.0 } else { g.f(0.0, 0.02) });
+            }
+        }
+        let arg = g.bits();
+        let key = match g.bits() % 4 {
+            0 | 1 => keys[(g.bits() % 9) as usize],
+            2 => keys[(g.bits() % 9) as usize] ^ 4 << (g.bits() % 4),
+            _ => g.bits(),
+        };
+        let x = f32::from_bits(val(&mut g));
+        let max = (g.bits() % 6).wrapping_sub(1);
+        if kind == 7 && g.one_in(2) {
+            for i in 0..9 {
+                ee.set_f32(entries + 0x18 * i + 4, x + g.f(-0.01, 0.01));
+            }
+        }
+        // Exactly on and beside the byte-size thresholds: scale 1 from a last of 0.
+        let x = if kind == 7 && g.one_in(4) {
+            for i in 0..9 {
+                let e = entries + 0x18 * i;
+                ee.set_f32(e + 4, 0.0);
+                ee.set_f32(e + 0xc, 1.0);
+                ee.set_f32(e + 0x10, 1.0);
+                ee.set_f32(e + 0x14, 0.0);
+            }
+            let edge = [0x80, 0x8000, 0x80_0000][(g.bits() % 3) as usize] as f32 - (g.bits() % 2) as f32;
+            if g.one_in(2) { -edge } else { edge }
+        } else {
+            x
+        };
+        let (a4, a5) = (if g.one_in(2) { 0 } else { g.bits() }, g.bits());
+        let len = g.bits() % 65;
+        if kind == 3 {
+            for i in 0..len {
+                ee.write(ee.scratch(PACKET_K) + i, 1, u128::from(g.bits() as u8));
+            }
+        }
+        let u = u64::from;
+        let (f, ints, floats) = match kind {
+            0 => (STUNT_FN, vec![u(BIKE), u(arg)], vec![]),
+            1 => (FULL_FN, vec![u(BIKE), u(arg)], vec![]),
+            2 => (DELTA_FN, vec![u(BIKE), u(arg)], vec![]),
+            3 => (SENDER_SEND, vec![u(net), u(arg), u(ee.scratch(PACKET_K)), u(len), u(a4), u(a5)], vec![]),
+            4 => (KEY_HASH, vec![key as i32 as i64 as u64], vec![]),
+            5 => (Q_LOOKUP, vec![u(table), u(key), u(out)], vec![]),
+            6 => (Q_KEEP, vec![u(table), u(key)], vec![x]),
+            _ => (Q_QUANTISE, vec![u(table), u(key), u(out), max as i32 as i64 as u64], vec![x]),
+        };
+        let before = snap_regions(&ee, &regions);
+        log.borrow_mut().clear();
+        ee.set(28, GP);
+        ee.call(f, &ints, &floats, BUDGET);
+        let want_v0 = ee.r(2) as u32;
+        let want = std::mem::take(&mut *log.borrow_mut());
+        let want_words = snap_regions(&ee, &regions);
+        restore_regions(&mut ee, &regions, &before);
+        let mut m = UpdateInRam { ee: &mut ee, x: 0.0 };
+        let v0 = match kind {
+            0 => m.out(Out::NetStunt(arg)),
+            1 => m.out(Out::NetFull(arg)),
+            2 => m.out(Out::NetDelta(arg)),
+            3 => {
+                let mut packet = Packet { len, ..Packet::EMPTY };
+                for i in 0..len {
+                    packet.bytes[i as usize] = m.ee.u8_at(m.ee.scratch(PACKET_K) + i);
+                }
+                update::sender_send(&mut m, net, arg, packet, a4, a5);
+                want_v0
+            }
+            4 => m.out(Out::Hash { f: KEY_HASH, key }),
+            5 => match update::lookup(&mut m, table, key) {
+                Some(i) => {
+                    m.ee.set_u32(out, i);
+                    1
+                }
+                None => 0,
+            },
+            6 => update::keep(&mut m, x.to_bits(), table, key),
+            _ => {
+                let mut b: [u8; 4] = std::array::from_fn(|i| m.ee.u8_at(out + i as u32));
+                let n = update::quantise(&mut m, x.to_bits(), table, key, &mut b, max);
+                for (i, &b) in b.iter().enumerate() {
+                    m.ee.write(out + i as u32, 1, u128::from(b));
+                }
+                n
+            }
+        };
+        let got = std::mem::take(&mut *log.borrow_mut());
+        assert_eq!(format!("{got:?}"), format!("{want:?}"), "case {k} (kind {kind}): the queued packets");
+        if kind >= 4 {
+            assert_eq!(v0, want_v0, "case {k} (kind {kind}): the answer");
+        }
+        let got_words = snap_regions(&ee, &regions);
+        if got_words != want_words {
+            let names: Vec<(u32, u32)> = regions.iter().flat_map(|&(at, len)| (0..len).step_by(4).map(move |o| (at, o))).collect();
+            let d: Vec<String> = (0..got_words.len())
+                .filter(|&i| got_words[i] != want_words[i])
+                .map(|i| format!("{:#x}+{:#x}: port {:#010x}, original {:#010x}", names[i].0, names[i].1, got_words[i], want_words[i]))
+                .collect();
+            panic!("case {k} (kind {kind}): {} words differ\n  {}", d.len(), d.iter().take(20).cloned().collect::<Vec<_>>().join("\n  "));
+        }
+        let missing = (0..3).any(|i| before[regions[..3].iter().map(|r| r.1 / 4).sum::<u32>() as usize + i] == alt);
+        let sent = |n: usize| match &want[..] {
+            [Out::NetQueue { packet, .. }] => packet.bytes[n],
+            _ => panic!("case {k}: one packet queued, not {want:?}"),
+        };
+        match kind {
+            0 => {
+                tally(&mut t, if sent(0) & 4 != 0 { "stunt, up" } else { "stunt, down" });
+                if sent(4) & 0x80 != 0 {
+                    tally(&mut t, "stunt, stamp past 2^31");
+                }
+            }
+            1 | 2 => {
+                let what = if kind == 1 { ["whole, every key", "whole, a key missing", "whole, turned"] } else { ["change, every key", "change, a key missing", "change, turned"] };
+                tally(&mut t, if missing { what[1] } else { what[0] });
+                let turned = if kind == 1 { sent(0) & 4 != 0 } else { sent(2) & 0x10 != 0 };
+                if turned {
+                    tally(&mut t, what[2]);
+                }
+                if kind == 2 {
+                    let mask = u32::from(sent(0)) | u32::from(sent(1)) << 8 | u32::from(sent(2)) << 16;
+                    if mask & 0x40_0000 != 0 {
+                        tally(&mut t, "change, fast");
+                    }
+                    if !missing {
+                        for i in 0..9 {
+                            tally(&mut t, ["change, 1 byte", "change, 2 bytes", "change, 3 bytes", "change, 4 bytes"][(mask >> (2 + 2 * i) & 3) as usize]);
+                        }
+                    }
+                }
+            }
+            3 => tally(&mut t, if a4 == 0 { "sender, its own flags" } else { "sender, flags handed" }),
+            4 => tally(&mut t, if (key as i32) < 0 { "hash, negative" } else { "hash, positive" }),
+            5 | 6 => tally(&mut t, match (kind, want_v0) {
+                (5, 0) => "lookup, missed",
+                (5, _) => "lookup, found",
+                (_, 0) => "keep, missed",
+                _ => "keep, found",
+            }),
+            _ => {
+                let e_changed = want_words != before;
+                tally(&mut t, match want_v0 {
+                    0 if (max as i32) < 4 && keys.contains(&key) => "quantise, no room",
+                    0 => "quantise, missed",
+                    1 if !e_changed => "quantise, dead band",
+                    _ => "quantise, sent",
+                });
+            }
+        }
+    }
+    eprintln!("{t:#?}");
+    for (path, n) in &t {
+        assert!(*n >= 100, "path {path:?} taken only {n} times");
+    }
+    assert_eq!(t.len(), 26, "every path taken");
 }
 
 // --- F31b4c: the bike's mass properties, the port's -------------------------------------------------
@@ -8771,9 +9115,9 @@ const RIDE_CALLEES: [&str; 11] = [
     "tail Paused",
     "tail Rumble",
     "tail RumbleReady",
-    "update NetDelta",
-    "update NetFull",
-    "update NetStunt",
+    "update IrqOff",
+    "update IrqOn",
+    "update NetQueue",
     "update TrickWanted",
     "update Walk",
     "wreck OutOfBounds",
@@ -8785,11 +9129,11 @@ const FLIP_CALLEES: [&str; 29] = [
     "tail Paused",
     "tail Rumble",
     "tail RumbleReady",
+    "update IrqOff",
+    "update IrqOn",
     "update KindClear",
     "update Mark",
-    "update NetDelta",
-    "update NetFull",
-    "update NetStunt",
+    "update NetQueue",
     "update Search",
     "update TrickEnd",
     "update TrickWanted",

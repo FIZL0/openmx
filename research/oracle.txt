@@ -9928,6 +9928,34 @@ atv_heap_free               atv 0x001b76d0 = free
 #   Parts: bike+0xcc 0x00ea5970 (vt at +0xc 0x003b6c20, +0xbc 0x001bcfa0) and bike+0xd4 0x00ea7310 (vt
 #   0x003b6b40, +0xbc 0x001bacd0), the same code: byte +0x126 &= ~0x10, then j 0x00128af0(part+0x24,
 #   f12 dt). Every replay frame steps both.
+# F44a — the bike's three net packets, their quantisers and the sender's own send (game_sim::handling::
+# update::{net_stunt, net_full, net_delta, lookup, keep, quantise, decimal_hash, same_key, sender_send};
+# tests/mxvatv_bike_ride.rs the_bikes_net_packets_are_the_originals). Journal:
+# research/journal/2026-11-05-f44a-net-packets/.
+#   Stunt 0x004e7e70(bike, a1): rec = bike+0xbcc (state 4 0x00eb5230); bytes from rec's pointers +0x1c
+#   (1 -> [5]), +0x20 (1 -> [6]), +0x18 (1 -> [7]), +0x10 (4 -> [8]), +0x14 (4 -> [12]); [0] = 2 | 4 if
+#   !(bike+0x14e8 <= 0). DI 0x00348fa0, count word 0x003fce18, RCNT0 (lui $2,0x1000 at 0x004e7f44, lw
+#   $16,0($2) at 0x004e7f50, delay slot before EI 0x00348ff0). Stamp = 256000*u2f(count)/147456000
+#   (0x4d0ca000) + u2f(counts*100), to unsigned (>= 2^31 0x4f000000: cvt(t-2^31) | 0x80000000) -> [1..5].
+#   Length 16. State 4's pointers: bike+0x14b4, +0x14b8, +0xc80, +0x1528, +0x940 (the rider's word: F41's
+#   watch now logs the stunt's reads apart).
+#   Whole 0x004a8e30, length 41: [0] 4 if rec[1]+0xc < 0; [1..5] clock *(0x0038f768)+0x4cc; [5..41] 12
+#   bytes each of rec[0], rec[2], rec[1]; then nine keeps 0x00267910(table bike+0xbc8, key = the field's
+#   address; f12 value): lookup 0x00267ba0, then 0x00267980 (entry+8 = old +4, +4 = value).
+#   Change 0x004a90c0: nine quantises 0x00267590 (lookup + 0x00267620) packed from [7]; mask 1 | (len-1)
+#   << (2+2k), 0x100000 turned, 1<<22 if !(bike+0x318 <= 0.1 0x3dcccccd); mask's low 3 bytes [0..3],
+#   clock [3..7].
+#   Quantiser 0x00267620: d = x - e+4; |d| < e+0x14 -> one zero byte, 1. Else e+8 = e+4, e+4 = x (raw);
+#   q = cvt(mula(0.5*sign) + d*e+0xc); e+4 = adda(0, x).madd(float q, e+0x10) - d; size 4/3/2/1 by
+#   +-0x800000 / +-0x8000 / +-0x80; max < size -> 0, else q's low bytes.
+#   Lookup 0x00267ba0: h = table+0x10(key), bucket = |h| rem table+4, nodes [idx, hash, key, next] from
+#   table+0; hash equal and table+0x14(node key, key) -> idx; entry table+0x30 + idx*0x18. State 4 table
+#   0x00eb54a0: 20 buckets, hash 0x001c3820 (snprintf "%d" 0x0039a9d0, h = h<<1 ^ tolower 0x003596a0,
+#   ctype 0x003ae419 bit 0 -> +0x20), eq 0x001c38d0 (a == b), entries 0x00eb54f0, 9.
+#   Sender send vt +0x28 0x0025e9d0(sender, conn, buf, len, a4, a5): header [sender+0 byte, len, -, buf];
+#   flags a4 == 0 ? sender+0x10 : a5; -> 0x00282190(conn 0x0084ada0, &header, flags) (queue 0x00282ea0
+#   copies 2 header bytes and len data). ride-2's record pass runs 46 stunt, 15 whole, 138 change ports
+#   (a temporary count).
 # F31b5g — the calls quad::Steps hands on, in Rust (game_sim::handling::record::held/held_words,
 # update::stunt_start/trick_end; tests/mxvatv_bike_ride.rs). Journal:
 # research/journal/2026-11-05-f31b5g-nothing-handed-on/.

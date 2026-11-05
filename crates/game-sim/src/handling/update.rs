@@ -148,6 +148,20 @@ pub enum Out {
     /// ([`super::tail::walk`]; `dt`).
     Part(u32),
     Walk(u32),
+    /// The packets' (F44a; [`net_stunt`], [`net_full`], [`net_delta`]): the net sender's own send
+    /// (its vt `+0x28`: the sender, the sender's `+0x34`, the packet, its length, 0, 0; the bike's
+    /// sender's is [`sender_send`]); the connection's queue it ends in (the connection, the two
+    /// header bytes, the packet, the flags); the quantiser table's hash of a key (its `+0x10`, an
+    /// answer; state 4's is [`decimal_hash`]) and its test of two keys (its `+0x14`, an answer;
+    /// [`same_key`]); and the stunt's stamp: the interrupts held off, the hardware's RCNT0 count read
+    /// (an answer), the interrupts on again.
+    SenderSend { sender: u32, arg: u32, packet: Packet },
+    NetQueue { conn: u32, head: [u8; 2], packet: Packet, flags: u32 },
+    Hash { f: u32, key: u32 },
+    SameKey { f: u32, a: u32, b: u32 },
+    IrqOff,
+    Counter,
+    IrqOn,
     /// The player's run's calls (F31b5g; [`stunt_start`], [`trick_end`]), each with the run
     /// (`+0x684`) and the player (`+0x680`): the run opened (the run only) when the player's `+8`
     /// bit 5 is clear; a stunt scored (the id, 12, `$f12` and `$f14` the entry's two scores, `$f13` 0,
@@ -159,6 +173,32 @@ pub enum Out {
     RunClose { run: u32, player: u32 },
     RunTally { run: u32, player: u32, count: u32 },
     RunEnd { run: u32, player: u32, id: u32 },
+}
+
+/// The longest packet [`Packet`] holds: the change's is at most 43 bytes, the whole state's 41.
+pub const PACKET: usize = 64;
+
+/// A net packet as the original builds it on its stack: its first `len` bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Packet {
+    pub len: u32,
+    pub bytes: [u8; PACKET],
+}
+
+impl Packet {
+    pub const EMPTY: Packet = Packet { len: 0, bytes: [0; PACKET] };
+
+    /// The packet's bytes.
+    pub fn data(&self) -> &[u8] {
+        &self.bytes[..self.len as usize]
+    }
+
+    /// `n` bytes of `w`, low first, at `at`.
+    fn put(&mut self, at: usize, w: u32, n: usize) {
+        for k in 0..n {
+            self.bytes[at + k] = (w >> (8 * k)) as u8;
+        }
+    }
 }
 
 /// The callees' outside world: words by address (the bike is `bike`), and their calls. A call's
@@ -838,6 +878,260 @@ pub fn part_step(m: &mut impl Updates, part: u32) {
     let b = byte(m, at) & !0x10;
     set_byte(m, at, b);
     m.out(Out::Walk(part.wrapping_add(0x24)));
+}
+
+/// The word the stunt packet's stamp takes the timer's whole counts from, and the character table
+/// the quantiser table's hash lowers a key's characters by (bit 0: a capital), indexed by the
+/// character.
+pub const TIMER_COUNTS: u32 = 0x003f_ce18;
+pub const CTYPE: u32 = 0x003a_e419;
+/// The bike's net words: the quantiser table and the record of the words the packets send.
+pub const QUANTISERS: u32 = 0xbc8;
+pub const NET_FIELDS: u32 = 0xbcc;
+
+/// An operand off RAM, as the FPU reads it.
+fn fo(m: &mut impl Updates, at: u32) -> F {
+    F::from_bits(m.word(at))
+}
+
+/// `n` bytes from `src` into the packet at `at` (the original's copy, a byte at a time under 32).
+fn copy_in(m: &mut impl Updates, p: &mut Packet, at: usize, src: u32, n: usize) {
+    for k in 0..n {
+        p.bytes[at + k] = byte(m, src.wrapping_add(k as u32)) as u8;
+    }
+}
+
+/// An unsigned int as the compiler turns one into a float (the halved value converted and doubled).
+fn float_of(v: u32) -> F {
+    F(fpu::from_u32(v))
+}
+
+/// **The stunt's packet** (the bike's vt `+0x544`; `arg` the sender's `+0x34`), 16 bytes: a flag
+/// byte (2, and 4 while `+0x14e8` is over 0), the stamp, then three bytes and two words through the
+/// net record's (`+0xbcc`) pointers `+0x1c`, `+0x20`, `+0x18`, `+0x10`, `+0x14`. The stamp is the
+/// timer's whole counts (read with the interrupts held off, with RCNT0's count) in hundreds plus the
+/// count scaled by 256000 / 147456000, as an unsigned int. Handed to the sender's send.
+pub fn net_stunt(m: &mut impl Updates, arg: u32) {
+    let rec = w(m, NET_FIELDS);
+    let mut p = Packet { len: 16, ..Packet::EMPTY };
+    for (at, o, n) in [(5, 0x1c, 1), (6, 0x20, 1), (7, 0x18, 1), (8, 0x10, 4), (12, 0x14, 4)] {
+        let src = m.word(rec.wrapping_add(o));
+        copy_in(m, &mut p, at, src, n);
+    }
+    let b = m.bike();
+    let up = !(fo(m, b.wrapping_add(0x14e8)) <= F::ZERO);
+    p.bytes[0] = 2 | u8::from(up) << 2;
+    m.out(Out::IrqOff);
+    let counts = m.word(TIMER_COUNTS);
+    let count = m.out(Out::Counter);
+    m.out(Out::IrqOn);
+    let t = F(256000.0) * float_of(count) / F::from_bits(0x4d0c_a000) + float_of(counts.wrapping_mul(100));
+    let top = F::from_bits(0x4f00_0000);
+    let stamp = if top <= t { (t - top).to_i32() as u32 | 0x8000_0000 } else { t.to_i32() as u32 };
+    p.put(1, stamp, 4);
+    m.out(Out::SenderSend { sender: b.wrapping_add(NET), arg, packet: p });
+}
+
+/// The three vectors the whole state and the change send, in their order: the net record's first
+/// (`+0`), third (`+8`) and second (`+4`) pointers, three words each.
+const NET_VECTORS: [u32; 3] = [0, 8, 4];
+
+/// The net record's second vector's `w` under 0 (its sign, as the two packets test it).
+fn turned(m: &mut impl Updates) -> bool {
+    let rec = w(m, NET_FIELDS);
+    let v = m.word(rec.wrapping_add(4));
+    fo(m, v.wrapping_add(0xc)) < F::ZERO
+}
+
+/// The network clock's time, the word both packets stamp.
+fn net_time(m: &mut impl Updates) -> u32 {
+    let clock = m.word(NET_CLOCK);
+    m.word(clock.wrapping_add(0x4cc))
+}
+
+/// **The whole state's packet** (the bike's vt `+0x400`, beat 0), 41 bytes: a flag byte (4 when the
+/// second vector's `w` is under 0), the network clock's time, the nine words as they are; then each
+/// word kept as its quantiser's last ([`keep`]). Handed to the sender's send.
+pub fn net_full(m: &mut impl Updates, arg: u32) {
+    let mut p = Packet { len: 41, ..Packet::EMPTY };
+    for (i, o) in NET_VECTORS.into_iter().enumerate() {
+        for k in 0..3 {
+            let rec = w(m, NET_FIELDS);
+            let v = m.word(rec.wrapping_add(o));
+            copy_in(m, &mut p, 5 + 12 * i + 4 * k, v.wrapping_add(4 * k as u32), 4);
+        }
+    }
+    if turned(m) {
+        p.bytes[0] = 4;
+    }
+    let time = net_time(m);
+    p.put(1, time, 4);
+    for o in NET_VECTORS {
+        for k in 0..3 {
+            let rec = w(m, NET_FIELDS);
+            let key = m.word(rec.wrapping_add(o)).wrapping_add(4 * k);
+            let x = m.word(key);
+            let table = w(m, QUANTISERS);
+            keep(m, x, table, key);
+        }
+    }
+    let b = m.bike();
+    m.out(Out::SenderSend { sender: b.wrapping_add(NET), arg, packet: p });
+}
+
+/// **The change's packet** (the bike's vt `+0x404`, beats 1-9): each of the nine words quantised
+/// against its last ([`quantise`], at most 4 bytes each, packed from byte 7), with a 3-byte mask
+/// first: 1, each word's byte count less one in two bits from bit 2, bit 20 when the second
+/// vector's `w` is under 0, bit 22 while `+0x318` is over 0.1; then the network clock's time.
+/// Handed to the sender's send.
+pub fn net_delta(m: &mut impl Updates, arg: u32) {
+    let mut p = Packet::EMPTY;
+    let (mut mask, mut at) = (1u32, 7usize);
+    let mut shift = 2;
+    for o in NET_VECTORS {
+        for k in 0..3 {
+            let rec = w(m, NET_FIELDS);
+            let key = m.word(rec.wrapping_add(o)).wrapping_add(4 * k);
+            let table = w(m, QUANTISERS);
+            let x = m.word(key);
+            let mut out = [0u8; 4];
+            let n = quantise(m, x, table, key, &mut out, 4);
+            p.bytes[at..at + n as usize].copy_from_slice(&out[..n as usize]);
+            at += n as usize;
+            mask |= n.wrapping_sub(1) << shift;
+            shift += 2;
+        }
+    }
+    if turned(m) {
+        mask |= 0x10_0000;
+    }
+    let b = m.bike();
+    let fast = !(fo(m, b.wrapping_add(0x318)) <= F::from_bits(0x3dcc_cccd));
+    mask |= u32::from(fast) << 22;
+    p.put(0, mask, 3);
+    let time = net_time(m);
+    p.put(3, time, 4);
+    p.len = at as u32;
+    m.out(Out::SenderSend { sender: b.wrapping_add(NET), arg, packet: p });
+}
+
+/// **The quantiser table's lookup**: the key's hash (the table's `+0x10`), its bucket (the hash's
+/// magnitude rem the bucket count `+4`, of the buckets at `+0`), then down the bucket's chain (next
+/// `+0xc`) for an entry with the same hash (`+4`) whose key (`+8`) the table's test (`+0x14`) finds
+/// the same; answers that entry's index (`+0`).
+pub fn lookup(m: &mut impl Updates, table: u32, key: u32) -> Option<u32> {
+    let f = m.word(table.wrapping_add(0x10));
+    let h = m.out(Out::Hash { f, key });
+    let n = m.word(table.wrapping_add(4)) as i32;
+    let a = (h as i32).wrapping_abs();
+    let bucket = if n == 0 { a } else { a.wrapping_rem(n) };
+    let buckets = m.word(table);
+    let mut e = m.word(buckets.wrapping_add((bucket as u32).wrapping_shl(2)));
+    while e != 0 {
+        if m.word(e.wrapping_add(4)) == h {
+            let a = m.word(e.wrapping_add(8));
+            let f = m.word(table.wrapping_add(0x14));
+            if m.out(Out::SameKey { f, a, b: key }) != 0 {
+                return Some(m.word(e));
+            }
+        }
+        e = m.word(e.wrapping_add(0xc));
+    }
+    None
+}
+
+/// A key's quantiser: the table's entries (`+0x30`, 0x18 bytes each) at the lookup's index.
+fn quantiser(m: &mut impl Updates, table: u32, key: u32) -> Option<u32> {
+    let i = lookup(m, table, key)?;
+    Some(m.word(table.wrapping_add(0x30)).wrapping_add(i.wrapping_mul(0x18)))
+}
+
+/// **A word kept as its quantiser's last** (the whole state's): `x` (its bits) into the entry's
+/// `+8` and `+4`. Answers 1, or 0 for a key the table lacks.
+pub fn keep(m: &mut impl Updates, x: u32, table: u32, key: u32) -> u32 {
+    let Some(e) = quantiser(m, table, key) else { return 0 };
+    m.set(e.wrapping_add(8), x);
+    m.set(e.wrapping_add(4), x);
+    1
+}
+
+/// **A word quantised against its last** (the change's; `x` its bits, `max` the room in `out`): a
+/// move from the entry's last (`+4`) under its dead band (`+0x14`) is one zero byte. Else the last
+/// goes to `+8`, the move times the scale (`+0xc`) rounded half away from zero is the step count,
+/// sent in the fewest of 1-4 bytes that hold it (none if `max` is less), and the new last is `x`
+/// plus the steps times the step (`+0x10`), less the move. Answers the bytes written, 0 for a key the
+/// table lacks.
+pub fn quantise(m: &mut impl Updates, x: u32, table: u32, key: u32, out: &mut [u8], max: u32) -> u32 {
+    let Some(e) = quantiser(m, table, key) else { return 0 };
+    let last = m.word(e.wrapping_add(4));
+    let v = F::from_bits(x);
+    let d = v - F::from_bits(last);
+    if d.abs() < fo(m, e.wrapping_add(0x14)) {
+        out[0] = 0;
+        return 1;
+    }
+    m.set(e.wrapping_add(8), last);
+    m.set(e.wrapping_add(4), x);
+    let scale = fo(m, e.wrapping_add(0xc));
+    let sign = F::from(if d < F::ZERO { -1 } else { 1 });
+    let q = Acc::mula(F(0.5), sign).madd(d, scale).to_i32();
+    let step = fo(m, e.wrapping_add(0x10));
+    let to = Acc::adda(F::ZERO, v).madd(F::from(q), step) - d;
+    m.set(e.wrapping_add(4), to.to_bits());
+    let n = match q {
+        ..-0x80_0000 | 0x80_0000.. => 4,
+        ..-0x8000 | 0x8000.. => 3,
+        ..-0x80 | 0x80.. => 2,
+        _ => 1,
+    };
+    if (max as i32) < n {
+        return 0;
+    }
+    for (k, b) in out.iter_mut().take(n as usize).enumerate() {
+        *b = (q >> (8 * k)) as u8;
+    }
+    n as u32
+}
+
+/// **State 4's quantiser hash** (the table's `+0x10`): the key printed in decimal (as a signed
+/// int), and over its characters, each lowered by [`CTYPE`], `h = h << 1 ^ c`.
+pub fn decimal_hash(m: &mut impl Updates, key: u32) -> u32 {
+    let mut digits = [0u8; 11];
+    let mut n = 0;
+    let mut v = (key as i32).unsigned_abs();
+    loop {
+        digits[n] = b'0' + (v % 10) as u8;
+        n += 1;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    if (key as i32) < 0 {
+        digits[n] = b'-';
+        n += 1;
+    }
+    let mut h = 0u32;
+    for &c in digits[..n].iter().rev() {
+        let c = c as i8 as i32 as u32;
+        let lower = if byte(m, CTYPE.wrapping_add(c)) & 1 != 0 { c.wrapping_add(0x20) } else { c };
+        h = h << 1 ^ lower;
+    }
+    h
+}
+
+/// **State 4's quantiser key test** (the table's `+0x14`): the two keys equal.
+pub fn same_key(a: u32, b: u32) -> u32 {
+    u32::from(a == b)
+}
+
+/// **The net sender's own send** (its vt `+0x28`; `a4`, `a5` the caller's last two, 0 and 0 from
+/// the bike's packets): the header (the sender's `+0` low byte, the length's) and the packet into
+/// the connection's queue (`arg`), with the flags `a5`, or the sender's `+0x10` when `a4` is 0.
+pub fn sender_send(m: &mut impl Updates, sender: u32, arg: u32, packet: Packet, a4: u32, a5: u32) {
+    let id = m.word(sender) as u8;
+    let flags = if a4 == 0 { m.word(sender.wrapping_add(0x10)) } else { a5 };
+    m.out(Out::NetQueue { conn: arg, head: [id, packet.len as u8], packet, flags });
 }
 
 /// The trick step's slack past a clip's length, a tuning word (F42).
