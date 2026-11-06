@@ -793,6 +793,16 @@ pub fn vehicle_post(q: &mut Quad, body: &mut Body, m: &mut impl Posts) {
     m.post().flag_word &= !(0x04 << 8);
 }
 
+/// **The vehicle's end of the net unpack** (F45a), what [`super::update::net_unpack`] does last with
+/// a remote bike: the spatial update, the node's bounds and the collision sync, as
+/// [`vehicle_post`] makes them, but with no place, no out-of-world test and the node's bounds asked
+/// whatever the flags say.
+pub fn net_post(q: &mut Quad, body: &mut Body, m: &mut impl Moto) {
+    m.call(Call::SpatialUpdate, q, body);
+    m.call(Call::NodeBounds, q, body);
+    m.call(Call::CollisionSync, q, body);
+}
+
 /// **The bike's PostProcess** (its air state), once a frame after the substeps.
 ///
 /// Skipped as the PreProcess is ([`Quad::active`]). With control on and the balance words differing,

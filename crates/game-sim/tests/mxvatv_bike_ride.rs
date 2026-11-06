@@ -5172,6 +5172,28 @@ impl Updates for UpdateInRam<'_> {
                 node::orient(&mut NodeRam(self.ee), node, q, p);
                 return 0;
             }
+            // F45a's: the net interpolate, its put-back the bike's own in the interpreter.
+            Out::NetInterpolate { older, newer, t } if vt(ee, 0x3ec) == NET_INTERPOLATE_FN && ported(NET_INTERPOLATE_FN) => {
+                served("NetInterpolate");
+                net_interpolate_in_ram(self.ee, older, newer, F(f32::from_bits(t)), dt);
+                return 0;
+            }
+            // F45a's: the wheel clear, suspension and tire forces, quad::Steps' on Nat05's ground.
+            Out::WheelClear(_) | Out::Suspension(_) | Out::TireForces(_) if unpack_map().is_some() && [WHEEL_CLEAR, SUSPENSION, TIRE_FORCES].iter().all(|&f| ported(f)) => {
+                served(match c {
+                    Out::WheelClear(_) => "WheelClear",
+                    Out::Suspension(_) => "Suspension",
+                    _ => "TireForces",
+                });
+                unpack_wheel_in_ram(self.ee, c, dt, unpack_map().unwrap());
+                return 0;
+            }
+            // F45a's: the net post, [`bike::net_post`] with its calls [`PostsInRam`]'s.
+            Out::NetPost if [NET_POST, NODE_BOUNDS, vt(ee, 0xe4), vt(ee, 0x124)].iter().all(|&f| ported(f)) => {
+                served("NetPost");
+                net_post_in_ram(self.ee, dt);
+                return 0;
+            }
             _ => {}
         }
         let packet_at = |ee: &mut Ee, p: &update::Packet| {
@@ -13703,4 +13725,527 @@ fn the_bone_collisions_touch_as_the_originals() {
         let first = got.flags.iter().position(|r| r.iter().any(|f| f[0] != 0));
         assert_eq!(first, Some(if name == "flip-1" { 127 } else { 216 }), "{name}: the first row a part touches");
     }
+}
+
+use game_sim::quad::{Anim, Lag, NetSmooth, Remote, Snapshot};
+
+/// The bike's net interpolate (vt `+0x3ec`): the quad's own, which ends in the biplane's.
+const NET_INTERPOLATE_FN: u32 = 0x004e_7bc0;
+
+/// Where the net interpolate reads and writes, off the bike's pointers (the quad's map,
+/// tests/atv_quad/interpolate.rs): the snapshot's nine places (`*(+0xbcc)`), the eight lags (position
+/// x, y, z `*(+0xd14)`; velocity x, y, z `*(+0xd18)`; crossup `+0x1790`; fore and aft `+0x178c`) and the
+/// world's area (`*(+0x3b0) +0x3b4`, its `+0x550`).
+#[derive(Clone, Copy, Debug)]
+struct NetPlaces {
+    snap: [u32; 9],
+    lags: [u32; 8],
+    area: u32,
+}
+
+impl NetPlaces {
+    fn of(ee: &Ee, bike: u32) -> NetPlaces {
+        let table = ee.u32_at(bike + 0xbcc);
+        let (pos, vel) = (ee.u32_at(bike + 0xd14), ee.u32_at(bike + 0xd18));
+        let mut lags = [0; 8];
+        for k in 0..3 {
+            lags[k] = ee.u32_at(pos + 4 * k as u32);
+            lags[3 + k] = ee.u32_at(vel + 4 * k as u32);
+        }
+        lags[6] = ee.u32_at(bike + 0x1790);
+        lags[7] = ee.u32_at(bike + 0x178c);
+        NetPlaces { snap: std::array::from_fn(|k| ee.u32_at(table + 4 * k as u32)), lags, area: ee.u32_at(ee.u32_at(bike + 0x3b0) + 0x3b4) + 0x550 }
+    }
+}
+
+fn net_snapshot(ee: &Ee, a: u32) -> Snapshot {
+    Snapshot {
+        time: F(ee.f32_at(a)),
+        position: vf_at(ee, a + 0x10),
+        velocity: vf_at(ee, a + 0x20),
+        orientation: vf_at(ee, a + 0x30),
+        crossup_blend: F(ee.f32_at(a + 0x40)),
+        fore_aft_blend: F(ee.f32_at(a + 0x44)),
+        wreck: ee.u32_at(a + 0x48),
+        stunt: ee.u32_at(a + 0x4c) as i32,
+        word: ee.u32_at(a + 0x50),
+    }
+}
+
+/// What the net interpolate keeps, read off the bike.
+struct NetWords {
+    s: NetSmooth,
+    r: Remote,
+    a: Anim,
+    q: Quad,
+}
+
+fn net_words(ee: &Ee, bike: u32, p: &NetPlaces) -> NetWords {
+    let lag = |k: usize| {
+        let a = p.lags[k];
+        Lag { value: F(ee.f32_at(a)), time: F(ee.f32_at(a + 4)), fraction: F(ee.f32_at(a + 8)) }
+    };
+    let s = NetSmooth {
+        position: [lag(0), lag(1), lag(2)],
+        velocity: [lag(3), lag(4), lag(5)],
+        crossup: lag(6),
+        fore_aft: lag(7),
+        put_back_at: vf_at(ee, bike + 0xd40),
+        velocity_change: vf_at(ee, p.snap[3]),
+        wreck: ee.u32_at(p.snap[6]),
+        word: ee.u32_at(p.snap[8]),
+    };
+    let r = Remote { position: vf_at(ee, p.snap[0]), orientation: vf_at(ee, p.snap[1]), velocity: vf_at(ee, p.snap[2]), ..Remote::default() };
+    let a = Anim {
+        crossup_blend: F(ee.f32_at(p.snap[4])),
+        fore_aft_blend: F(ee.f32_at(p.snap[5])),
+        next_stunt: ee.u32_at(p.snap[7]) as i32,
+        ..Anim::default()
+    };
+    NetWords { s, r, a, q: Quad { speed_len: F(ee.f32_at(bike + 0x32c)), ..Quad::default() } }
+}
+
+/// Every word the net interpolate may write, put back on the bike.
+fn put_net_words(ee: &mut Ee, bike: u32, p: &NetPlaces, w: &NetWords) {
+    let lags = [w.s.position[0], w.s.position[1], w.s.position[2], w.s.velocity[0], w.s.velocity[1], w.s.velocity[2], w.s.crossup, w.s.fore_aft];
+    for (k, l) in lags.iter().enumerate() {
+        let a = p.lags[k];
+        for (o, x) in [(0, l.value), (4, l.time), (8, l.fraction)] {
+            ee.set_u32(a + o, x.to_bits());
+        }
+    }
+    ee.set_u32(p.snap[4], w.a.crossup_blend.to_bits());
+    ee.set_u32(p.snap[5], w.a.fore_aft_blend.to_bits());
+    ee.set_u32(p.snap[7], w.a.next_stunt as u32);
+    ee.set_u32(p.snap[8], w.s.word);
+    ee.set_u32(p.snap[6], w.s.wreck);
+    set_vf(ee, bike + 0xd40, w.s.put_back_at);
+    set_vf(ee, p.snap[0], w.r.position);
+    set_vf(ee, p.snap[3], w.s.velocity_change);
+    set_vf(ee, p.snap[2], w.r.velocity);
+    ee.set_u32(bike + 0x32c, w.q.speed_len.to_bits());
+    set_vf(ee, p.snap[1], w.r.orientation);
+}
+
+/// **F45a — the bike's net interpolate (vt `+0x3ec`) on its RAM**, through
+/// [`quad::net_interpolate_head`] and [`quad::net_interpolate_tail`]: the head's words are written
+/// first; when it asks for a put-back, the bike's own (vt `+0x3a8`, the bike, 0, 0; `dt` in `$f12`)
+/// runs in the interpreter on them, and the tail starts from the words the put-back left.
+fn net_interpolate_in_ram(ee: &mut Ee, older: u32, newer: u32, t: F, dt: F) {
+    let p = NetPlaces::of(ee, BIKE);
+    let (o, n) = (net_snapshot(ee, older), net_snapshot(ee, newer));
+    let area = [0, 4, 8, 12].map(|k| F(ee.f32_at(p.area + k)));
+    let mut w = net_words(ee, BIKE, &p);
+    let l = quad::net_interpolate_head(&o, &n, t, dt, area, &mut w.s, &w.r, &mut w.a, acos());
+    let (p, mut w) = if l.put_back {
+        put_net_words(ee, BIKE, &p, &w);
+        let f = vt(ee, PUT_BACK_SLOT);
+        ee.set(28, GP);
+        census(ee, |ee| ee.call(f, &[u64::from(BIKE), 0, 0], &[dt.0], BUDGET));
+        let p = NetPlaces::of(ee, BIKE);
+        let w = net_words(ee, BIKE, &p);
+        (p, w)
+    } else {
+        (p, w)
+    };
+    quad::net_interpolate_tail(&l, dt, &mut w.s, &mut w.r, &mut w.q);
+    put_net_words(ee, BIKE, &p, &w);
+}
+
+/// The generated cases' two snapshots.
+const NET_OLDER: u32 = WRECK_AREA + 0x400;
+const NET_NEWER: u32 = WRECK_AREA + 0x480;
+
+#[allow(clippy::float_arithmetic)]
+impl Gen {
+    fn unit_quaternion(&mut self) -> Vf {
+        let v: [f32; 4] = std::array::from_fn(|_| self.f(-1.0, 1.0));
+        let n = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2] + v[3] * v[3]).sqrt().max(1e-3);
+        Vf::new(v[0] / n, v[1] / n, v[2] / n, v[3] / n)
+    }
+
+    fn net_snapshot(&mut self, position: Vf, orientation: Vf) -> Snapshot {
+        let mut velocity = Vf::new(self.f(-60.0, 60.0), self.f(-60.0, 60.0), self.f(-60.0, 60.0), self.f(-1.0, 1.0));
+        if self.one_in(30) {
+            velocity.0[(self.bits() % 3) as usize] = f32::MAX;
+        }
+        Snapshot {
+            time: F(self.f(0.0, 500.0)),
+            position,
+            velocity,
+            orientation,
+            crossup_blend: F(self.f(-0.5, 1.5)),
+            fore_aft_blend: F(self.near(0.5, -0.5, 1.5)),
+            wreck: if self.one_in(2) { 0 } else { self.bits() % 16 },
+            stunt: if self.one_in(2) { 46 } else { self.bits() as i32 },
+            word: self.bits(),
+        }
+    }
+
+    fn net_t(&mut self) -> F {
+        F(match self.bits() % 9 {
+            0 => 0.0,
+            1 => 1.0,
+            2 => f32::from_bits(0xbf66_6666),
+            3 => f32::from_bits(0x3ff3_3333),
+            4 => self.f(-0.9, 0.0),
+            5 => self.f(1.0, 1.9),
+            _ => self.f(0.0, 1.0),
+        })
+    }
+}
+
+fn put_net_snapshot(ee: &mut Ee, a: u32, s: &Snapshot) {
+    ee.set_u32(a, s.time.to_bits());
+    set_vf(ee, a + 0x10, s.position);
+    set_vf(ee, a + 0x20, s.velocity);
+    set_vf(ee, a + 0x30, s.orientation);
+    ee.set_u32(a + 0x40, s.crossup_blend.to_bits());
+    ee.set_u32(a + 0x44, s.fore_aft_blend.to_bits());
+    ee.set_u32(a + 0x48, s.wreck);
+    ee.set_u32(a + 0x4c, s.stunt as u32);
+    ee.set_u32(a + 0x50, s.word);
+}
+
+/// RAM's bytes at `at` put back to `base`'s.
+fn reset_bytes(ee: &mut Ee, base: &[u8], at: impl IntoIterator<Item = u32>) {
+    for a in at {
+        ee.ram[a as usize] = base[a as usize];
+    }
+}
+
+/// **F45a — the bike's net interpolate is the original's, put-back and all**: 10 000 snapshot pairs
+/// on state 4's bike (its own pointers, lags and world area), each run through SLUS-21104's vt
+/// `+0x3ec` and through [`net_interpolate_in_ram`] from the same RAM. The pairs sit about where the
+/// snapshot last put the bike, a little way off, or far (the put-back, which runs the bike's whole
+/// vt `+0x3a8` in the interpreter on both sides), now and then past the world's edge, with `FLT_MAX`
+/// lanes, and `t` at and between its clamps; every byte either side writes outside the stack comes
+/// out the same.
+#[test]
+#[allow(clippy::float_arithmetic)]
+fn the_bikes_net_interpolate_is_the_originals() {
+    let Some(mut ee) = image().map(hooked) else { return };
+    assert_eq!(vt(&ee, 0x3ec), NET_INTERPOLATE_FN, "the bike's vt +0x3ec is the quad's net interpolate");
+    let p = NetPlaces::of(&ee, BIKE);
+    eprintln!("the bike's net places: snapshot {:x?}, lags {:x?}, area at {:#x}", p.snap, p.lags, p.area);
+    let area = [0, 4, 8, 12].map(|k| ee.f32_at(p.area + k));
+    let home = vf_at(&ee, p.snap[0]);
+    let base = ee.ram.clone();
+    let mut dirty = std::collections::BTreeSet::new();
+    let mut g = Gen(0x0000_f45a);
+    let mut t = BTreeMap::new();
+    for k in 0..10_000 {
+        reset_bytes(&mut ee, &base, std::mem::take(&mut dirty));
+        ee.written.clear();
+        // Where the snapshot last put the bike: the image's, or anywhere in the world.
+        let last = if g.one_in(4) { Vf::new(g.f(area[0], area[1]), g.f(-100.0, 300.0), g.f(area[2], area[3]), 1.0) } else { home };
+        set_vf(&mut ee, p.snap[0], last);
+        let (reach, path) = match g.bits() % 3 {
+            0 => (3.0, "near"),
+            1 => (12.0, "lags set"),
+            _ => (100.0, "put back"),
+        };
+        let pos = Vf::new(last.x() + g.f(-reach, reach), last.y() + g.f(-reach, reach), last.z() + g.f(-reach, reach), g.f(-1.0, 1.0));
+        let pos = if g.one_in(10) { Vf::new(area[0] + g.f(-50.0, 50.0), pos.y(), area[3] + g.f(-50.0, 50.0), pos.w()) } else { pos };
+        let next = Vf::new(pos.x() + g.f(-5.0, 5.0), pos.y() + g.f(-5.0, 5.0), pos.z() + g.f(-5.0, 5.0), g.f(-1.0, 1.0));
+        let o0 = if g.one_in(3) { vf_at(&ee, p.snap[1]) } else { g.unit_quaternion() };
+        let o1 = match g.bits() % 4 {
+            0 => o0,
+            1 => Vf::new(-o0.x(), -o0.y(), -o0.z(), -o0.w()),
+            _ => g.unit_quaternion(),
+        };
+        let (older, newer) = (g.net_snapshot(pos, o0), g.net_snapshot(next, o1));
+        put_net_snapshot(&mut ee, NET_OLDER, &older);
+        put_net_snapshot(&mut ee, NET_NEWER, &newer);
+        for (j, &a) in p.lags.iter().enumerate() {
+            let around = if j < 3 { 3000.0 } else if j < 6 { 60.0 } else { 1.5 };
+            ee.set_u32(a, g.f(-around, around).to_bits());
+            ee.set_u32(a + 4, if g.one_in(30) { 0 } else { g.near(0.05, 0.005, 0.5).to_bits() });
+            ee.set_u32(a + 8, g.f(0.0, 1.0).to_bits());
+        }
+        let (tt, dt) = (g.net_t(), F(if g.one_in(4) { f32::from_bits(DT) } else { g.f(0.0, 0.2) }));
+        let off = both_ways(
+            &mut ee,
+            &base,
+            &mut dirty,
+            |_| false,
+            |ee| ee.call(NET_INTERPOLATE_FN, &[u64::from(BIKE), u64::from(NET_OLDER), u64::from(NET_NEWER)], &[dt.0, tt.0], BUDGET),
+            |ee| net_interpolate_in_ram(ee, NET_OLDER, NET_NEWER, tt, dt),
+        );
+        assert!(off.is_empty(), "case {k} ({path}, t {tt:?}, dt {dt:?}): {} bytes differ\n  {}", off.len(), off.iter().take(24).cloned().collect::<Vec<_>>().join("\n  "));
+        let far = {
+            let l = quad::net_interpolate_head(&older, &newer, tt, dt, area.map(F), &mut net_words(&ee, BIKE, &p).s, &Remote { position: last, ..Remote::default() }, &mut Anim::default(), acos());
+            l.put_back
+        };
+        tally(&mut t, if far { "put back" } else { path });
+        tally(&mut t, if tt.0 <= 0.0 { "t at or before" } else if tt.0 < 1.0 { "t between" } else { "t at or past" });
+    }
+    reset_bytes(&mut ee, &base, dirty);
+    eprintln!("{t:?}");
+    assert!(t.values().all(|&n| n >= 500), "{t:?}");
+}
+
+/// The original (`original`) and the port (`port`) run from the same RAM: what the case laid since
+/// `ee.written` was last cleared, on `base`. Answers each byte outside the stack (and outside what
+/// `skip` names) the two leave differently; `dirty` gains every byte either wrote, for the next case
+/// to put back.
+fn both_ways(
+    ee: &mut Ee,
+    base: &[u8],
+    dirty: &mut std::collections::BTreeSet<u32>,
+    skip: impl Fn(u32) -> bool,
+    original: impl FnOnce(&mut Ee),
+    port: impl FnOnce(&mut Ee),
+) -> Vec<String> {
+    let stack = ee.stack;
+    let in_stack = |a: &u32| (stack - 0x1_0000..stack + 0x4000).contains(a) || skip(*a);
+    let laid: Vec<(u32, u8)> = ee.written.iter().map(|&a| (a, ee.u8_at(a))).collect();
+    ee.written.clear();
+    ee.set(28, GP);
+    original(ee);
+    let by_original = std::mem::take(&mut ee.written);
+    let want: Vec<(u32, u8)> = by_original.iter().map(|&a| (a, ee.u8_at(a))).collect();
+    reset_bytes(ee, base, by_original.iter().copied());
+    for &(a, b) in &laid {
+        ee.ram[a as usize] = b;
+    }
+    ee.written.clear();
+    port(ee);
+    let by_port = std::mem::take(&mut ee.written);
+    let mut off = Vec::new();
+    for &(a, b) in want.iter().filter(|(a, _)| !in_stack(a)) {
+        if ee.u8_at(a) != b {
+            off.push(format!("{a:#010x}: original {b:#04x}, port {:#04x}", ee.u8_at(a)));
+        }
+    }
+    for &a in by_port.iter().filter(|a| !in_stack(a) && !by_original.contains(a)) {
+        if ee.u8_at(a) != base_or_laid(base, &laid, a) {
+            off.push(format!("{a:#010x}: only the port wrote it ({:#04x})", ee.u8_at(a)));
+        }
+    }
+    dirty.extend(by_original);
+    dirty.extend(by_port);
+    dirty.extend(laid.iter().map(|&(a, _)| a));
+    off
+}
+
+fn base_or_laid(base: &[u8], laid: &[(u32, u8)], a: u32) -> u8 {
+    laid.iter().find(|&&(x, _)| x == a).map_or(base[a as usize], |&(_, b)| b)
+}
+
+/// **F45a — the bike's whole net check is the original's, its interpolate served**: 3 000 cases on
+/// state 4's bike with six snapshots in its slots (`+0xcd4`, `+0xcdc`, … 8 apart, newest first, their
+/// times round the lagged network clock so the walk stops at each step or runs out), run through
+/// SLUS-21104's vt `+0x3e8` and through [`update::net_check`] on [`UpdateInRam`], which serves the vt
+/// `+0x3ec` it hands on with [`net_interpolate_in_ram`] (F45a; the put-back the bike's own in both).
+/// The answer and every byte outside the stack come out the same. Now and then the bike has fewer
+/// than five snapshots come (`+0xd04`), and nothing is interpolated.
+#[test]
+#[allow(clippy::float_arithmetic)]
+fn the_bikes_net_check_is_the_originals_with_the_interpolate_in_rust() {
+    let Some(mut ee) = image().map(hooked) else { return };
+    assert_eq!((vt(&ee, 0x3e8), vt(&ee, 0x3ec)), (NET_CHECK_FN, NET_INTERPOLATE_FN), "the bike's vt +0x3e8 and +0x3ec");
+    let p = NetPlaces::of(&ee, BIKE);
+    let home = vf_at(&ee, p.snap[0]);
+    let want_at = F(ee.f32_at(ee.u32_at(update::NET_CLOCK) + 0x4cc)) - F(ee.f32_at(BIKE + 0xd10)) - F(ee.f32_at(update::NET_LAG));
+    eprintln!("the lagged clock {want_at:?}");
+    let base = ee.ram.clone();
+    let mut dirty = std::collections::BTreeSet::new();
+    let mut g = Gen(0x0000_f45b);
+    let mut t = BTreeMap::new();
+    let snaps: [u32; 6] = std::array::from_fn(|k| WRECK_AREA + 0x400 + 0x80 * k as u32);
+    for k in 0..3_000 {
+        reset_bytes(&mut ee, &base, std::mem::take(&mut dirty));
+        ee.written.clear();
+        let come = if g.one_in(10) { g.bits() % 5 } else { 5 + g.bits() % 40 };
+        ee.set_u32(BIKE + 0xd04, come);
+        // The walk stops after `stop` steps: the newest `stop + 1` snapshots after the lagged clock.
+        let stop = g.bits() % 6;
+        let step = g.f(0.02, 0.2);
+        let mut at = Vf::new(home.x() + g.f(-30.0, 30.0), home.y() + g.f(-30.0, 30.0), home.z() + g.f(-30.0, 30.0), 1.0);
+        let mut o = if g.one_in(2) { vf_at(&ee, p.snap[1]) } else { g.unit_quaternion() };
+        for (j, &a) in snaps.iter().enumerate() {
+            let mut s = g.net_snapshot(at, o);
+            let ahead = stop as f32 - j as f32;
+            s.time = F(want_at.0 + step * ahead - if ahead == 0.0 && g.one_in(3) { 0.0 } else { g.f(0.0, step) });
+            if g.one_in(20) {
+                s.time = F(want_at.0);
+            }
+            put_net_snapshot(&mut ee, a, &s);
+            ee.set_u32(BIKE + 0xcd4 + 8 * j as u32, a);
+            at = Vf::new(at.x() - g.f(-3.0, 3.0), at.y() - g.f(-3.0, 3.0), at.z() - g.f(-3.0, 3.0), 1.0);
+            o = if g.one_in(3) { g.unit_quaternion() } else { o };
+        }
+        for (j, &a) in p.lags.iter().enumerate() {
+            let around = if j < 3 { 3000.0 } else if j < 6 { 60.0 } else { 1.5 };
+            ee.set_u32(a, g.f(-around, around).to_bits());
+            ee.set_u32(a + 4, if g.one_in(30) { 0 } else { g.near(0.05, 0.005, 0.5).to_bits() });
+            ee.set_u32(a + 8, g.f(0.0, 1.0).to_bits());
+        }
+        let dt = if g.one_in(4) { f32::from_bits(DT) } else { g.f(0.0, 0.2) };
+        let (mut back, mut got) = (0, 0);
+        F45_SERVED.with(|s| s.borrow_mut().clear());
+        let off = both_ways(
+            &mut ee,
+            &base,
+            &mut dirty,
+            |_| false,
+            |ee| {
+                ee.call(NET_CHECK_FN, &[u64::from(BIKE)], &[dt], BUDGET);
+                back = ee.v0() as u32;
+            },
+            |ee| got = update::net_check(&mut UpdateInRam { ee, x: dt }),
+        );
+        assert!(off.is_empty(), "case {k} ({come} come, stop {stop}): {} bytes differ\n  {}", off.len(), off.iter().take(24).cloned().collect::<Vec<_>>().join("\n  "));
+        assert_eq!(got, back, "case {k}: the answer");
+        let served = F45_SERVED.with(|s| s.borrow().get("NetInterpolate").copied().unwrap_or(0));
+        assert_eq!(served, u32::from(come >= 5), "case {k}: the interpolate served");
+        tally(&mut t, if come < 5 { "under five" } else { ["stop 0", "stop 1", "stop 2", "stop 3", "stop 4", "stop 5"][stop as usize] });
+    }
+    reset_bytes(&mut ee, &base, dirty);
+    eprintln!("{t:?}");
+    assert!(t.values().all(|&n| n >= 150), "{t:?}");
+}
+
+thread_local! {
+    /// F45a: Nat05's ground, which the state 4 bike stands on, for the net unpack's wheel steps
+    /// ([`unpack_wheel_in_ram`]); `None` without the disc's file.
+    static UNPACK_MAP: std::cell::OnceCell<Option<&'static track::Terrain<'static>>> = const { std::cell::OnceCell::new() };
+}
+
+fn unpack_map() -> Option<&'static track::Terrain<'static>> {
+    UNPACK_MAP.with(|m| {
+        *m.get_or_init(|| {
+            let trn: &'static [u8] = Box::leak(nat05_trn()?.into_boxed_slice());
+            Some(&*Box::leak(Box::new(track::Terrain::parse(trn).unwrap())))
+        })
+    })
+}
+
+/// **F45a — one of the net unpack's wheel calls** (a wheel's clear, suspension or tire forces: `c`
+/// on the wheel at `wheel`) on the bike in RAM, through [`quad::Steps`] on the ground of `map` as
+/// [`StepsInRam`] serves the Force body's.
+fn unpack_wheel_in_ram(ee: &mut Ee, c: update::Out, dt: F, map: &track::Terrain<'_>) {
+    use update::Out;
+    let body = ee.u32_at(BIKE + seed::BODY);
+    let (wheels, record) = (the_wheels(ee), ee.u32_at(BIKE + seed::RECORD));
+    let i = |w: u32| match wheels.iter().position(|&x| x == w) {
+        Some(0) => bike::FRONT,
+        Some(_) => bike::REAR,
+        None => panic!("{w:#x} is none of the bike's wheels {wheels:#x?}"),
+    };
+    let c = match c {
+        Out::WheelClear(w) => Call::WheelClear(i(w)),
+        Out::Suspension(w) => Call::Suspension(i(w), dt),
+        Out::TireForces(w) => Call::TireForces(i(w), dt),
+        c => panic!("the unpack's wheel calls are no {c:?}"),
+    };
+    let ram = InRam { ee, wheels, record, body, last: Vec::new() };
+    let inner = StepInRam { ram, rider: bike::Rider::default(), rider_last: Vec::new(), dt };
+    let (mut noise, mut answered) = (None, BTreeMap::new());
+    let mut m = StepsInRam { inner, map, noise: &mut noise, answered: &mut answered, pure: true };
+    let (mut q, mut b) = m.inner.read();
+    m.call(c, &mut q, &mut b);
+    m.inner.write(&q, &b);
+    assert!(answered.keys().all(|k| !k.starts_with('>') && !k.starts_with('=')), "{c:?} handed on {answered:?}");
+}
+
+/// **F45a — the bike's whole net unpack is the original's, its wheel steps in Rust**: 2 000 cases on
+/// state 4's bike on Nat05, the snapshot's position (about the image's, a foot or two up or down, so
+/// the wheels are down, half down or up), quaternion (the image's or tipped) and velocity drawn, the
+/// steer filter's time and `dt` too, run through SLUS-21104's vt `+0x3f0` and through
+/// [`update::net_unpack`] on [`UpdateInRam`]: the node turn [`node::orient`]'s, the wheel clears,
+/// suspensions and tire forces [`unpack_wheel_in_ram`]'s (F45a); the contacts and the net post
+/// still the original's. Every byte outside the stack comes out the same.
+#[test]
+#[allow(clippy::float_arithmetic)]
+fn the_bikes_net_unpack_is_the_originals_with_the_wheels_in_rust() {
+    let Some(mut ee) = image().map(hooked) else { return };
+    if unpack_map().is_none() {
+        return;
+    }
+    assert_eq!(vt(&ee, 0x3f0), NET_UNPACK_FN, "the bike's vt +0x3f0");
+    let p = NetPlaces::of(&ee, BIKE);
+    let (home, turned, filter) = (vf_at(&ee, p.snap[0]), vf_at(&ee, p.snap[1]), ee.u32_at(BIKE + 0xd1c));
+    let wheels = the_wheels(&ee);
+    // The original's ground query keeps a cache of the cells it read; the port reads the map.
+    let terrain = ee.u32_at(wheels[0] + 0x1e0);
+    assert_ne!(terrain, 0, "the wheels' terrain");
+    let cache = |a: u32| (GROUND_RING..GROUND_RING + 0x70 * 10).contains(&a) || (terrain + 0x9e0..terrain + 0x9e8).contains(&a);
+    let base = ee.ram.clone();
+    let mut dirty = std::collections::BTreeSet::new();
+    let mut g = Gen(0x0000_f45c);
+    let (mut t, mut posts) = (BTreeMap::new(), BTreeMap::new());
+    for k in 0..2_000 {
+        reset_bytes(&mut ee, &base, std::mem::take(&mut dirty));
+        ee.written.clear();
+        let up = g.f(-1.0, 2.5);
+        set_vf(&mut ee, p.snap[0], Vf::new(home.x() + g.f(-3.0, 3.0), home.y() + up, home.z() + g.f(-3.0, 3.0), home.w()));
+        let q = if g.one_in(3) {
+            turned
+        } else {
+            let v: [f32; 4] = std::array::from_fn(|j| turned.0[j] + g.f(-0.15, 0.15));
+            let n = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2] + v[3] * v[3]).sqrt();
+            Vf::new(v[0] / n, v[1] / n, v[2] / n, v[3] / n)
+        };
+        set_vf(&mut ee, p.snap[1], q);
+        set_vf(&mut ee, p.snap[2], Vf::new(g.f(-30.0, 30.0), g.f(-10.0, 10.0), g.f(-30.0, 30.0), g.f(-1.0, 1.0)));
+        ee.set_u32(filter, g.f(-0.5, 0.5).to_bits());
+        ee.set_u32(filter + 4, if g.one_in(20) { 0 } else { g.near(0.1, 0.01, 0.5).to_bits() });
+        let dt = if g.one_in(4) { f32::from_bits(DT) } else { g.f(0.001, 0.05) };
+        F45_SERVED.with(|s| s.borrow_mut().clear());
+        let off = both_ways(
+            &mut ee,
+            &base,
+            &mut dirty,
+            cache,
+            |ee| ee.call(NET_UNPACK_FN, &[u64::from(BIKE)], &[dt], BUDGET),
+            |ee| update::net_unpack(&mut UpdateInRam { ee, x: dt }, F(dt)),
+        );
+        assert!(off.is_empty(), "case {k} (up {up}, dt {dt}): {} bytes differ\n  {}", off.len(), off.iter().take(24).cloned().collect::<Vec<_>>().join("\n  "));
+        let served = F45_SERVED.with(|s| std::mem::take(&mut *s.borrow_mut()));
+        for c in ["WheelClear", "Suspension", "TireForces"] {
+            assert_eq!(served.get(c), Some(&2), "case {k}: {c} served twice ({served:?})");
+        }
+        assert_eq!(served.get("NetPost"), Some(&1), "case {k}: the net post served ({served:?})");
+        if k == 0 {
+            eprintln!("served: {served:?}");
+        }
+        for (c, n) in served.iter().filter(|(c, _)| c.starts_with("post ")) {
+            *posts.entry(*c).or_insert(0) += n;
+        }
+        let down = wheels.map(|w| ee.u32_at(w + 0xdc) != 0);
+        tally(&mut t, match down {
+            [true, true] => "both down",
+            [false, false] => "both up",
+            [true, false] => "front down",
+            [false, true] => "rear down",
+        });
+    }
+    reset_bytes(&mut ee, &base, dirty);
+    eprintln!("{t:?}\nthe net post's calls: {posts:?}");
+    assert!(t.values().all(|&n| n >= 100) && t.len() >= 3, "{t:?}");
+}
+
+/// **F45a — the net unpack's end** ([`bike::net_post`]) on the bike in RAM, its spatial update, node
+/// bounds and collision sync [`PostsInRam`]'s as the PostProcess's are (what the sync hands on, the
+/// collidables' database moves and the gather, the original's unless [`in_rust`] names them). Every
+/// call it answered is counted in [`F45_SERVED`] as `post <name>`.
+fn net_post_in_ram(ee: &mut Ee, dt: F) {
+    let body = ee.u32_at(BIKE + seed::BODY);
+    let (wheels, record) = (the_wheels(ee), ee.u32_at(BIKE + seed::RECORD));
+    let ram = InRam { ee, wheels, record, body, last: Vec::new() };
+    let step = StepInRam { ram, rider: bike::Rider::default(), rider_last: Vec::new(), dt };
+    let inner = PostInRam { step, post: bike::Post::default(), post_last: Vec::new() };
+    let mut answered = BTreeMap::new();
+    let mut m = PostsInRam { inner, answered: &mut answered };
+    let (mut q, mut b) = m.inner.read();
+    bike::net_post(&mut q, &mut b, &mut m);
+    m.inner.write(&q, &b);
+    F45_SERVED.with(|s| {
+        let mut s = s.borrow_mut();
+        for (k, n) in answered {
+            *s.entry(Box::leak(format!("post {k}").into_boxed_str())).or_default() += n;
+        }
+    });
 }

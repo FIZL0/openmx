@@ -2778,7 +2778,6 @@ fn net_lerp_xyz(a: Vf, b: Vf, t: F) -> Vf {
 /// one); the velocity's change is kept, the velocity (`w` zero) goes to [`Remote::velocity`] unlagged
 /// and its length to [`Quad::speed_len`]; the orientation to [`Remote::orientation`].
 #[allow(clippy::too_many_arguments)] // the original's inputs, each one a word it reads
-#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
 pub fn net_interpolate(
     older: &Snapshot,
     newer: &Snapshot,
@@ -2793,6 +2792,40 @@ pub fn net_interpolate(
     table: &crate::air::AcosTable,
     m: &mut impl Moto,
 ) {
+    let l = net_interpolate_head(older, newer, t, dt, area, s, r, a, table);
+    if l.put_back {
+        m.call(Call::NetPutBack, q, body);
+    }
+    net_interpolate_tail(&l, dt, s, r, q);
+}
+
+/// What [`net_interpolate_head`] hands its tail: the lerped position (held inside the area), the
+/// lerped velocity and the slerped orientation, and whether the quad is to be put back first.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NetLerp {
+    pub position: Vf,
+    pub velocity: Vf,
+    pub orientation: Vf,
+    pub put_back: bool,
+}
+
+/// [`net_interpolate`] up to its put-back: the blends, the stunt id, the wreck and untraced words, the
+/// lerps and slerp, the area hold, and the lags set (and [`NetSmooth::put_back_at`] kept) when far.
+/// A caller with the quad in RAM writes these words, runs the put-back when [`NetLerp::put_back`]
+/// asks for it, reads the words back and finishes with [`net_interpolate_tail`].
+#[allow(clippy::too_many_arguments)] // the original's inputs, each one a word it reads
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
+pub fn net_interpolate_head(
+    older: &Snapshot,
+    newer: &Snapshot,
+    t: F,
+    dt: F,
+    area: [F; 4],
+    s: &mut NetSmooth,
+    r: &Remote,
+    a: &mut Anim,
+    table: &crate::air::AcosTable,
+) -> NetLerp {
     a.crossup_blend = s.crossup.run(dt, net_lerp(older.crossup_blend, newer.crossup_blend, t));
     a.fore_aft_blend = s.fore_aft.run(dt, net_lerp(older.fore_aft_blend, newer.fore_aft_blend, t));
     a.next_stunt = newer.stunt;
@@ -2811,6 +2844,7 @@ pub fn net_interpolate(
     }
     let d = sub_xyz(r.position, p);
     let far = F(fpu::sqrt(dot3(d, d).0));
+    let mut put_back = false;
     if !(far <= F(NET_NEAR)) {
         for k in 0..3 {
             if F(p.0[k]) != F(f32::MAX) {
@@ -2824,15 +2858,22 @@ pub fn net_interpolate(
         }
         if !(far <= F(NET_FAR)) {
             s.put_back_at = p;
-            m.call(Call::NetPutBack, q, body);
+            put_back = true;
         }
     }
+    NetLerp { position: p, velocity: v, orientation: o, put_back }
+}
+
+/// [`net_interpolate`] after its put-back: the position through its lags into [`Remote::position`],
+/// the velocity's change, the velocity and its length, and the orientation.
+pub fn net_interpolate_tail(l: &NetLerp, dt: F, s: &mut NetSmooth, r: &mut Remote, q: &mut Quad) {
+    let (p, v) = (l.position, l.velocity);
     let lagged = [0, 1, 2].map(|k| s.position[k].run(dt, F(p.0[k])).0);
     r.position = Vf::new(lagged[0], lagged[1], lagged[2], 1.0);
     s.velocity_change = sub_xyz(v, r.velocity);
     r.velocity = Vf::new(v.x(), v.y(), v.z(), 0.0);
     q.speed_len = F(fpu::sqrt(dot3(v, v).0));
-    r.orientation = o;
+    r.orientation = l.orientation;
 }
 
 /// What the animation driver asks of the rider's stunt clips: whether the rider's animation set has a
