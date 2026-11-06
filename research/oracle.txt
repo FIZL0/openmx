@@ -461,6 +461,7 @@ acos_table_ptr boot 0x0046a688 the 30000-entry acos table (a pointer, gp-relativ
 acos_table_scale boot 0x0046a6a0 14999.5: the acos table's index scale
 curve_table_ptr boot 0x0046a7f0 the 6000-entry {cos, sin} table (a pointer)
 curve_table_invstep boot 0x0046a698 954.77045 (= 5999/2pi): the curve table's index scale
+curve_table_step boot 0x0046a690 0.0010473721 (= 2pi/5999): the step the curve table's helpers scale the leftover by (S12b)
 wreck_enabled_flag boot 0x00420bc0 zero disables the whole wreck test
 mem_alloc boot 0x001e4e90 (size, file, line) -> the game's malloc; hook it to hand the table
 #                         builders a buffer, because the heap an oracle run starts with is empty
@@ -1099,6 +1100,38 @@ ai_update_vehicle           boot 0x002858d0 VehicleAI.cpp's: both build the look
 #                                           that suppress it. A third test, (flags&0xc0) == 0, admits
 #                                           the type-3 scenery objects
 ai_tick_flag                boot 0x00383580 sets and clears the per-tick bit 0x80 of the same flags
+#                                           (S12b: it is also MXVehicleAI's route follower, 5936
+#                                           bytes: path queries 0x0026b410/0x0026e0c0, rand, 0x003832f0)
+ai_controls                 boot 0x00283ef0 (ai) VehicleAI's ground controller, MXVehicleAI vt+0x90 via
+#                                           ai_controls_dispatch: target direction +0x1d0 against
+#                                           forward +0xb0 / up +0xa0 -> angles +0x1f0/+0x1f4/+0x1f8,
+#                                           steer +0xf0, lean +0xf4, throttle +0xe0, brake +0xe4;
+#                                           returns 1. Ported bit-exact as ai::controls (S12b)
+ai_controls_dispatch        boot 0x00385af0 MXVehicleAI vt+0x90 (slot 0x0045c530): zeroes the outputs
+#                                           unless (+0xd4)&2; switches on the interface's type
+#                                           *(+0x40)+4: 4 and 5 fly, every other type -> ai_controls
+ai_update                   boot 0x00383000 MXVehicleAI::Update(dt): stuck timer +0x3f0 (types
+#                                           1/2/3/6, throttle > 0, speed < 10, 5 s -> interface
+#                                           vt+0x40); mode +0xd0 == 5: interface vt+0x8 (ai_feed),
+#                                           ai_tick_flag, vt+0x90, the type-1 climb rule (+0x390
+#                                           hold, +0x394 forward.y limit, +0x30c speed, +0x398 timer),
+#                                           interface vt+0xc; other modes 0x00282af0
+ai_route_follow             boot 0x00283a10 VehicleAI's own route follower: path position +0x1b0 and
+#                                           direction +0x1d0 (0x0026e4f0 / 0x0026e630), wobble and
+#                                           drift +0x164..+0x198, target speed +0x1e0 off waypoint
+#                                           +0x44 (-1 -> 150)
+ai_feed                     boot 0x0027fbd0 MXVehicleAIInterface vt+0x8: bike frame (+0x18's
+#                                           +0x80..+0xbc) into ai +0x90..+0xcc, body velocity/spin
+#                                           into +0x50/+0x60/+0x70, |v| into +0x80, ground normal
+#                                           +0x2c0 and height +0x204, on-ground flag 0x20
+ai_character_read           boot 0x00384f00 reads AIChrctr.aip section AI_<skill>: the controller's
+#                                           gains (SteeringGain +0x208, OversteerCorrectionGain
+#                                           +0x21c, PitchGain +0x2d4, PitchJitterDeadZone +0x2d8,
+#                                           PitchControlDistance +0x2b4, LandingPitchAngle +0x2ec,
+#                                           SpeedMin/MaxTolerance +0x260/+0x264), Min/Max pairs
+#                                           lerped by the event's difficulty
+ai_rsqrt                    boot 0x00284b80 (x) rsqrt.s 1.0 / sqrt(x)
+ai_acos                     boot 0x002849d0 (x) clamp twice, then fine_acos_table: acos(x)
 vehicle_wreck               boot 0x00252ca0 Wreck(reason), vtable slot +0xfc: sets vehicle+0xb7c = 1
 #                                           and hands the body to the ragdoll subsystem at +0x7a8,
 #                                           which is integrating Wreckbike.phy from the build. The
