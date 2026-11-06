@@ -9966,3 +9966,32 @@ atv_heap_free               atv 0x001b76d0 = free
 #   word): watcher (bike+0x674, 8, 5..8, bike+0xd24's record, 0 or cvt.w.s(x)), group tally
 #   (owner+0x384, 1, 10, player, flag). Dropped in the pure frame: flip-1's whole RAM then equals the
 #   handing run's on every row but 0x00851fec..f0.
+# F47 — the bike PostProcess's paths C15 never takes, in Rust (game_sim::handling::reset, node::bounds /
+# owner_box / world_box / rebound / bounds_stale; tests/mxvatv_bike_ride.rs the_body_reset_*,
+# the_respawn_*, the_event_post_*, the_node_box_in_the_database_*, the_post_process_out_of_the_world_*,
+# the_records_parented_node_*). Journal: research/journal/2026-11-05-f47-out-of-the-world/.
+#   Body reset vt +0x13c 0x00494ae0(bike): body +0xb8 word0 == 0 -> nothing; else list removes
+#   0x00495170/0x00495030/0x00494db0 (same code: first match <- last, count--) of the body from
+#   world(+0xe0)+0x50, +0xbc from +0x68, bike+0x34 from +0xb0; body on word via body+0x110 vt +0xc
+#   0x00492b20 (`sw a1, 0(a0)`) with 0; owner +0xdc && record +0xc8: byte +0x44 bit 7 -> riding +0xcc:
+#   0x00115890 (+0xf8 = 0), 0x001158a0 add_unique(riding, *(+0xe8 + 0xa4)) (array +0xfc, count +0x100,
+#   grows by 0x001b7470(+0xfc, (count+1)*4, 0x0039683e, 0x54a)); else 0x00203f40(owner, record); bit 6
+#   -> +0x24 &= ~2.
+#   Respawn vt +0xe8 0x004a4c60(bike): jal 0x00492ca0 (the ground reset, F31b5e) then +0x31c = 1.
+#   Out-of-world message: 0x00272300(*(0x00442eb0), bike+0x674, 8, 13, +0xd20, 0); the message on its
+#   stack as [a2, a3, t1, t0]; registrations queue+0x24 count / +0x2c array, e[0]==0 && e[0x10]==poster
+#   && e[4]==*poster; 0x00272d40 tells e+0x30 (re-read each pass) / e+0x38 listeners l[0]==0 via
+#   (*(l[0x10]+8))+0xc(l[0x10], e[0x10], &msg). State 4: queue 0x00799b50, 72 registrations; the bike's
+#   is entry 17 at 0x00e6e080 (tag 0, 11 listeners), *(bike+0x674) = 0.
+#   Put-back vt +0x3a8 0x004d8940 (F31b5c's wreck::put_back).
+#   Node bounds 0x00196e80(node): +8 == 0 -> nothing; update 0x00193b30, world box 0x00196820 (stale:
+#   bit 7 && (bit 3 || !bit 6) -> vt +0x94 0x0018ce40 rebound, bit 7 cleared), +0x101 bit 2 -> the reach
+#   round the origin; 0x0018d690(node, c, h; f12 reach) = 0x0018ffc0(*(node+8), ...). Spatial update vt
+#   +0xe4 0x00492c40(bike): bike+8 -> world box -> 0x0018d690(bike, c, h; f12 0). The rebound's box
+#   gather 0x00196550 leaves the node's inverse at 0x70000000 and the listed node's frame in it at
+#   0x70000040 (sphere gather 0x001963c0). State 4's node 0x00e707a0: +0x10c 22 (+0x144 its skeleton).
+#   Database: state 4's 0x00672cd0 (bike +0xb4, +0xc0 = 2); bike add vt +0xe0 0x00492bb0(bike, db, 2);
+#   node add 0x00196c10(node, db, 1, 1); remove 0x0018d540(x) (0x00190640 entry, 0x0018fe20 free, +8 = 0);
+#   insert 0x0018d590. State 4's bike +0xb0 = 0 (the ground reset hangs the node back on it).
+#   Parented node set 0x00194b10 (F43's node::set); the record's node calls with a parent: turn 0x00195230,
+#   position 0x00194c20, placement 0x001952a0, move 0x00194b10.
