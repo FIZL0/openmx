@@ -956,6 +956,8 @@ struct RideHud<'a> {
     /// Each view's buttons, and the join cue's (P281).
     buttons: &'a [menu::pads::Buttons],
     join_buttons: &'a menu::pads::Buttons,
+    /// Whether the Show FPS line is up (P323).
+    fps: bool,
 }
 
 impl RideHud<'_> {
@@ -1014,6 +1016,7 @@ impl RideHud<'_> {
             event: ride_hud::EventShown::of(&seat.sim.event, 0, &seat.sim.rider.score),
             buttons: self.buttons.get(v).cloned().unwrap_or_default(),
             join_buttons: self.join_buttons.clone(),
+            fps: self.fps,
         };
         rig.ride_hud.note_event(now, shown.event.as_ref());
         draw(&shown, &rig.ride_hud, now);
@@ -9785,7 +9788,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     let marker = shown_markers.get(v).and_then(Option::as_ref);
                     let view = [at.x as f32, at.y as f32, at.w as f32, at.h as f32];
                     let join = join_view == Some(v);
-                    let ctx = RideHud { ridden: &ridden, art: &hud_art, span: radar_span, maps: &map_names, wrap: hud_wrap, speedometer, names: &names, table: &table, simulated, join, buttons: &hud_buttons, join_buttons: &join_buttons };
+                    let ctx = RideHud { ridden: &ridden, art: &hud_art, span: radar_span, maps: &map_names, wrap: hud_wrap, speedometer, names: &names, table: &table, simulated, join, buttons: &hud_buttons, join_buttons: &join_buttons, fps: show_fps };
                     ctx.with(seat, rig, v, marker, |shown, tracker, now| {
                         // clear of the page's touch pad while it is up (P208)
                         let pad = menu::touch_room::Room::of((frame.width, frame.height));
@@ -10510,7 +10513,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             if overlay_mode == menu::Overlay::Hud {
                 let marker = shown_markers.get(v).and_then(Option::as_ref);
                 let join = join_view == Some(v);
-                let ctx = RideHud { ridden: &ridden, art: &hud_art, span: radar_span, maps: &map_names, wrap: hud_wrap, speedometer, names: &names, table: &table, simulated, join, buttons: &hud_buttons, join_buttons: &join_buttons };
+                let ctx = RideHud { ridden: &ridden, art: &hud_art, span: radar_span, maps: &map_names, wrap: hud_wrap, speedometer, names: &names, table: &table, simulated, join, buttons: &hud_buttons, join_buttons: &join_buttons, fps: show_fps };
                 ctx.with(seat, rig, v, marker, |shown, tracker, now| {
                     ride_hud::draw(target, shown, tracker, now);
                 });
