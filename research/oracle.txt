@@ -10255,3 +10255,20 @@ atv_heap_free               atv 0x001b76d0 = free
 # ride-2 + flip-1: 924 sweeps, all nearby, 1 segment, list +0x40 grid 0, reach <= 2.75; no kind 2 candidate
 # in reach; kind 3 (plants) in reach 394 times but +0x126 = 0x13 (NO_GROUPS) skips them; never a hit.
 # Global search 0x001148e0 never runs.
+# F45a — the bike's net interpolate, the unpack's wheels and the net post in Rust (game_sim::quad::
+# net_interpolate_head / net_interpolate_tail, handling::bike::net_post; tests/mxvatv_bike_ride.rs
+# the_bikes_net_interpolate_is_the_originals, the_bikes_net_check_is_the_originals_with_the_interpolate_
+# in_rust, the_bikes_net_unpack_is_the_originals_with_the_wheels_in_rust). Journal:
+# research/journal/2026-11-06-f45a-net-unpack-in-rust/.
+#   Net interpolate vt +0x3ec = 0x004e7bc0 (ends in 0x004a87c0): on the bike's RAM the put-back vt +0x3a8
+#   = 0x004d8940(bike, 0, 0; f12 dt) runs between head and tail; the head's pose must be in RAM first and
+#   the tail must re-read the body after it (the put-back changes the body velocity). 10 000 cases,
+#   whole-RAM bytes: near 2954, lags set 2436, put back 4610.
+#   Net check vt +0x3e8 = 0x004a86f0 with the interpolate served: 3 000 cases, six snapshot slots,
+#   stops 0..5, fewer than five snapshots.
+#   Net unpack vt +0x3f0 = 0x004dd490 on Nat05: wheel clear 0x004a0c30, suspension 0x004a0cb0, tire forces
+#   0x004a16f0 served (2 each per case); contacts 0x004dccd0 still the original's. 2 000 cases: both down
+#   645, both up 1023, front 193, rear 139. The ground query's cell cache 0x00541550 (10 x 0x70) and
+#   terrain +0x9e0..+0x9e8 are skipped: the port keeps no cache.
+#   Net post 0x004a8c40 = vt +0xe4(bike), 0x00196e80(*(bike+0xe4)), vt +0x124(bike); served 2000 cases,
+#   Gather x2000 and PartMove x4000 handed on; no SpatialMove (the bike is not in the database here).
