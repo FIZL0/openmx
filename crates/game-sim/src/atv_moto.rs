@@ -459,7 +459,7 @@ pub(crate) fn frame_mul(a: &[Vf; 4], b: &[Vf; 4]) -> [Vf; 4] {
 
 /// A rigid frame's inverse, as the frame set takes it of the parent's: the 3×3 transposed (each
 /// moved lane `0 + x`, the `w`s left), the position `0 - x·rx - y·ry - z·rz` over the transposed rows.
-fn frame_inverse(m: &[Vf; 4]) -> [Vf; 4] {
+pub(crate) fn frame_inverse(m: &[Vf; 4]) -> [Vf; 4] {
     let lane = |v: Vf, d: Dest, x: f32| v.merge(d, Vf::splat(vu::add(0.0, x)));
     let r0 = lane(lane(m[0], Dest::Z, m[2].x()), Dest::Y, m[1].x());
     let r1 = lane(lane(m[1], Dest::Z, m[2].y()), Dest::X, m[0].y());

@@ -619,12 +619,20 @@ const ENTRY: u32 = 0x8;
 /// gather takes in other nodes (its `+0x10c` list), which the scene does not hold; out of the
 /// database the node's box is never asked for.
 pub fn read_post(m: &impl Words, bike: u32, kinds: Kinds) -> Result<(Bike, At, PartsAt), String> {
-    use crate::atv_sync::slot;
-    use crate::quad::Part;
-    let (mut k, at) = read(m, bike)?;
+    let (k, at, parts) = read_sync(m, bike, kinds)?;
     if m.word(at.node + 0x10c) != 0 && (m.b(bike + ENTRY) || m.b(at.node + ENTRY)) {
         return Err(format!("the bike's node {:#010x} is in the database and gathers its bounds off other nodes", at.node));
     }
+    Ok((k, at, parts))
+}
+
+/// **[`read_post`] without its refusal of a node in the database that gathers other nodes** (F47):
+/// for the collision sync and the node's position, which read the node's own frame only; its box
+/// is then [`super::node::bounds`]' and [`super::node::owner_box`]'s, on RAM.
+pub fn read_sync(m: &impl Words, bike: u32, kinds: Kinds) -> Result<(Bike, At, PartsAt), String> {
+    use crate::atv_sync::slot;
+    use crate::quad::Part;
+    let (mut k, at) = read(m, bike)?;
     let mut parts = [0; 5];
     let (riding, frame, active) = (m.word(bike + RIDING), m.word(bike + FRAME), m.word(bike + ACTIVE));
     let c = &mut k.parts.collidables;

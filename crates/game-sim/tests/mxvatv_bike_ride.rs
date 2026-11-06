@@ -4109,8 +4109,11 @@ impl Wrecks for WreckInRam<'_> {
 /// [`steps::read_post`] reads, its words put back where they changed; a collidable's database move
 /// it hands on the original's.
 fn wreck_steps(ee: &mut Ee, c: Call, dt: f32) {
+    if node_box_on_ram(ee, c) {
+        return;
+    }
     let m = |a| ee.u32_at(a);
-    let (k, at, parts) = steps::read_post(&m, BIKE, KINDS).unwrap_or_else(|e| panic!("{c:?}: the bike's words: {e}"));
+    let (k, at, parts) = steps::read_sync(&m, BIKE, KINDS).unwrap_or_else(|e| panic!("{c:?}: the bike's words: {e}"));
     let last = steps::post_words(&k, &at, &parts, &m);
     let mut s = quad::Steps {
         bike: k,
@@ -7688,9 +7691,12 @@ fn on_scene<R>(ee: &mut Ee, f: impl FnOnce(&mut game_sim::atv_moto::Scene) -> R)
 
 /// The bike in RAM as [`PostInRam`] keeps it, the PostProcess's callees Rust's: the spatial update,
 /// the node's bounds, the collision sync and the node's position [`quad::Steps`]' on the bike
-/// [`steps::read_post`] reads, the node's placement [`game_sim::atv_moto::Scene::place`]. What the
-/// sync hands on (a collidable's database move, the gather) is the original's, and so are the body
-/// reset, the respawn, the out-of-world message and the put-back.
+/// [`steps::read_sync`] reads, the node's placement [`game_sim::atv_moto::Scene::place`]. What the
+/// sync hands on (a collidable's database move, the gather) is the original's. F47: the body reset
+/// and the respawn [`reset`]'s, the out-of-world message [`reset::post`] (its listeners the
+/// original's), the put-back [`wreck::put_back`], and the spatial update and the node's bounds of a
+/// bike or node in the database whose node gathers other nodes [`node::owner_box`] and
+/// [`node::bounds`] on RAM (the database move the original's).
 struct PostsInRam<'a, 'm> {
     inner: PostInRam<'a>,
     answered: &'m mut BTreeMap<String, u32>,
@@ -7708,7 +7714,7 @@ impl PostsInRam<'_, '_> {
         self.inner.write(q, body);
         let ee = &*self.inner.step.ram.ee;
         let m = |a| ee.u32_at(a);
-        let (k, at, parts) = steps::read_post(&m, BIKE, KINDS).unwrap_or_else(|e| panic!("{c:?}: the bike's words: {e}"));
+        let (k, at, parts) = steps::read_sync(&m, BIKE, KINDS).unwrap_or_else(|e| panic!("{c:?}: the bike's words: {e}"));
         let last = steps::post_words(&k, &at, &parts, &m);
         let mut s = quad::Steps {
             bike: k,
@@ -7752,10 +7758,62 @@ impl PostsInRam<'_, '_> {
     }
 }
 
+/// F47: whether the bike or its node is in the database with a node that gathers other nodes'
+/// bounds (the scene [`steps::read_sync`] reads holds the node alone).
+fn gathers_in_database(ee: &Ee) -> bool {
+    let node = ee.u32_at(BIKE + 0xe4);
+    ee.u32_at(node + 0x10c) != 0 && (ee.u32_at(BIKE + 8) != 0 || ee.u32_at(node + 8) != 0)
+}
+
+/// F47: with [`gathers_in_database`], the spatial update (the bike's entry moved to its node's box,
+/// reach 0) or the node's bounds (its entry moved to them) on RAM, the move the original's; whether
+/// `c` was one of them, so served.
+fn node_box_on_ram(ee: &mut Ee, c: Call) -> bool {
+    if !matches!(c, Call::SpatialUpdate | Call::NodeBounds) || !gathers_in_database(ee) {
+        return false;
+    }
+    let node = ee.u32_at(BIKE + 0xe4);
+    let m = &mut NodeRam(ee);
+    let moved = match c {
+        Call::SpatialUpdate => node::owner_box(m, BIKE, node).map(|(c, h)| (BIKE, c, h, F::ZERO)),
+        _ => node::bounds(m, node).map(|(c, h, r)| (node, c, h, r)),
+    };
+    if let Some((entry, centre, half, reach)) = moved {
+        let (c, h) = (ee.scratch(0), ee.scratch(1));
+        set_vf(ee, c, centre);
+        set_vf(ee, h, half);
+        ee.set(28, GP);
+        ee.call(SPATIAL_MOVE, &[u64::from(entry), u64::from(c), u64::from(h)], &[reach.0], BUDGET);
+    }
+    true
+}
+
+impl PostsInRam<'_, '_> {
+    fn node_box(&mut self, c: Call, q: &mut Quad, body: &mut quad::Body) {
+        self.count(format!("{} gathered", call_name(&c)));
+        self.inner.write(q, body);
+        assert!(node_box_on_ram(self.inner.step.ram.ee, c), "{c:?} gathered");
+        (*q, *body) = self.inner.read();
+    }
+}
+
 impl Moto for PostsInRam<'_, '_> {
     fn call(&mut self, c: Call, q: &mut Quad, body: &mut quad::Body) {
         match c {
+            Call::SpatialUpdate | Call::NodeBounds if gathers_in_database(self.inner.step.ram.ee) => self.node_box(c, q, body),
             Call::SpatialUpdate | Call::NodeBounds | Call::CollisionSync | Call::NodePosition => self.steps(c, q, body),
+            Call::BodyReset | Call::Respawn => {
+                self.count(call_name(&c));
+                self.inner.write(q, body);
+                let m = &mut ResetInRam(self.inner.step.ram.ee);
+                if c == Call::BodyReset {
+                    reset::body_reset(m, BIKE);
+                } else {
+                    assert_eq!(vt(m.0, RESPAWN.0), RESPAWN.1, "the bike's vt +0xe8");
+                    reset::respawn(m, BIKE);
+                }
+                (*q, *body) = self.inner.read();
+            }
             c => {
                 self.count(format!("> {}", call_name(&c)));
                 self.inner.call(c, q, body)
@@ -7786,10 +7844,23 @@ impl bike::Posts for PostsInRam<'_, '_> {
                 on_scene(self.inner.step.ram.ee, |s| s.place(0, orientation, at));
                 (*q, *body) = self.inner.read();
             }
-            c => {
-                let s = format!("{c:?}");
-                self.count(format!("> {}", s.split(['(', ' ']).next().unwrap()));
-                self.inner.out(c, q, body)
+            bike::Out::OutOfWorld(id) => {
+                self.count("OutOfWorld".into());
+                self.inner.write(q, body);
+                let ee = &mut *self.inner.step.ram.ee;
+                let (kind, msg) = bike::OUT_OF_WORLD;
+                let queue = ee.u32_at(POST_QUEUE);
+                reset::post(&mut ResetInRam(ee), queue, BIKE + 0x674, [kind, msg, 0, id]);
+                (*q, *body) = self.inner.read();
+            }
+            bike::Out::PutBack { place, keep } => {
+                self.count("PutBack".into());
+                self.inner.write(q, body);
+                let x = self.inner.step.dt.0;
+                let m = &mut WreckInRam { ee: self.inner.step.ram.ee, x };
+                assert_eq!(vt(m.ee, PUT_BACK_SLOT), PUT_BACK, "the bike's vt +0x3a8");
+                wreck::put_back(m, u32::from(place), u32::from(keep));
+                (*q, *body) = self.inner.read();
             }
         }
     }
@@ -7825,6 +7896,19 @@ impl RecordsInRam<'_, '_, '_> {
     }
 }
 
+impl RecordsInRam<'_, '_, '_> {
+    /// F47: the record's node and its RAM, if the node has a parent (which the scene
+    /// [`steps::read`] reads does not hold): the node transforms then [`node`]'s on RAM.
+    fn parented(&mut self, what: &str) -> Option<(u32, NodeRam<'_>)> {
+        let n = self.inner.word(0xe8);
+        if self.inner.ee.u32_at(n + NODE_PARENT) == 0 {
+            return None;
+        }
+        *self.answered.entry(format!("record {what}, parented")).or_default() += 1;
+        Some((n, NodeRam(self.inner.ee)))
+    }
+}
+
 impl Collides for RecordsInRam<'_, '_, '_> {
     fn damp(&mut self, linear: Vf, angular: Vf) {
         *self.answered.entry("record damp".into()).or_default() += 1;
@@ -7837,17 +7921,32 @@ impl Collides for RecordsInRam<'_, '_, '_> {
         }
     }
     fn node_rotate(&mut self, v: Vf) -> Vf {
+        if let Some((n, mut m)) = self.parented("node_rotate") {
+            return Vf::from_bits(node::rotate(&mut m, n, v.to_bits()));
+        }
         self.scene("node_rotate", |s| s.turn(0, v))
     }
     fn node_position(&mut self) -> Vf {
+        let out = self.inner.at + 0xd0;
+        if let Some((n, mut m)) = self.parented("node_position") {
+            node::position(&mut m, n, out);
+            return vf_at(self.inner.ee, out);
+        }
         let p = self.scene("node_position", |s| s.position(0));
-        set_vf(self.inner.ee, self.inner.at + 0xd0, p);
+        set_vf(self.inner.ee, out, p);
         p
     }
     fn node_place(&mut self, v: Vf) -> Vf {
+        if let Some((n, mut m)) = self.parented("node_place") {
+            return Vf::from_bits(node::place(&mut m, n, v.to_bits()));
+        }
         self.scene("node_place", |s| s.tip(0, v))
     }
     fn node_move(&mut self, at: Vf) {
+        if let Some((n, mut m)) = self.parented("node_move") {
+            node::set(&mut m, n, at.to_bits());
+            return;
+        }
         self.scene("node_move", |s| s.set_position(0, at)).expect("the bike's node has no parent");
     }
     fn node_up(&self) -> [F; 3] {
@@ -11226,4 +11325,665 @@ fn flip_replays_with_the_database_moves_in_rust() {
     let (handed, rust) = handed_and(&all, &["PartMove"]);
     assert_eq!(rust, [("PartMove".to_string(), 771)]);
     assert!(handed.iter().all(|(k, _)| k != "PartMove"), "{handed:?}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// F47: the PostProcess's paths C15 never takes — the body reset, the respawn, the out-of-world
+// message's post and the node's box for a bike or node in the spatial database — each against the
+// original over random bikes (research/oracle.txt `# F47`).
+// ---------------------------------------------------------------------------------------------
+
+use game_sim::handling::reset::{self, Resets};
+
+/// The bike's vtable slots and their functions on state 4: the body reset and the respawn; the
+/// body's on word (its second vtable's `+0xc`); the collision record handed back to its owner; the
+/// node's bounds gather (its vt `+0x94`); the file and line the riding part's list grows with.
+const BODY_RESET: (u32, u32) = (0x13c, 0x0049_4ae0);
+const RESPAWN: (u32, u32) = (0xe8, 0x004a_4c60);
+const BODY_ON: u32 = 0x0049_2b20;
+const RELEASE: u32 = 0x0020_3f40;
+const NODE_REBOUND: u32 = 0x0018_ce40;
+const GROW_FILE: (u64, u64) = (0x0039_683e, 0x54a);
+/// State 4's spatial database (the bike's parts' entries', its `+0xb4`) and the word its parts were
+/// added with (`+0xc0`); the bike's add (its vt `+0xe0`) and the node's (as the ground reset hangs it
+/// back).
+const DATABASE: (u32, u32) = (0x0067_2cd0, 2);
+const BIKE_ADD: (u32, u32) = (0xe0, 0x0049_2bb0);
+const NODE_ADD: u32 = 0x0019_6c10;
+/// A scene node's parent (`+0xf0`) and flag byte (`+0x100`).
+const NODE_PARENT: u32 = 0xf0;
+/// A run of RAM state 4 leaves zero, for the oracles' fake lists, queues and listeners.
+const F47_AREA: u32 = 0x0009_0000;
+/// The scratch slot the port lays the event's message in.
+const MESSAGE_SCRATCH: u32 = 5;
+
+/// The bike's RAM as [`reset`]'s port sees it: each call out the original's but the body's on word
+/// (the port's, its slot checked), and the ground reset ([`wreck::ground`], served as the replays
+/// serve it).
+struct ResetInRam<'a>(&'a mut Ee);
+
+impl Resets for ResetInRam<'_> {
+    fn word(&mut self, at: u32) -> u32 {
+        self.0.u32_at(at)
+    }
+    fn set(&mut self, at: u32, w: u32) {
+        self.0.set_u32(at, w);
+    }
+    fn out(&mut self, c: reset::Out) -> u32 {
+        let ee = &mut *self.0;
+        let u = u64::from;
+        let (f, ints) = match c {
+            reset::Out::BodyOn { body, on } => {
+                assert_eq!(ee.u32_at(ee.u32_at(body + 0x110) + 0xc), BODY_ON, "the body's on word's virtual");
+                reset::body_on(self, body, on);
+                return 0;
+            }
+            reset::Out::Ground => {
+                wreck::ground(&mut WreckInRam { ee, x: 0.0 });
+                return 0;
+            }
+            reset::Out::Message(words) => {
+                let at = ee.scratch(MESSAGE_SCRATCH);
+                for (k, w) in words.into_iter().enumerate() {
+                    ee.set_u32(at + 4 * k as u32, w);
+                }
+                return at;
+            }
+            reset::Out::Release { owner, record } => (RELEASE, vec![u(owner), u(record)]),
+            reset::Out::Grow { at, bytes } => (HEAP_REALLOC, vec![u(at), u(bytes), GROW_FILE.0, GROW_FILE.1]),
+            reset::Out::Tell { to, from, message } => (ee.u32_at(ee.u32_at(to + 8) + 0xc), vec![u(to), u(from), u(message)]),
+        };
+        ee.set(28, GP);
+        ee.call(f, &ints, &[0.0], BUDGET);
+        ee.r(2) as u32
+    }
+}
+
+/// What a hooked call was handed: its address, then its arguments' words.
+type Calls = Rc<RefCell<Vec<(u32, Vec<u32>)>>>;
+
+/// `at` hooked to log its first `ints` integer arguments, the quads at the arguments `quads` point
+/// to, and `$f12` with `float`; it answers `v0`.
+fn log_hook(ee: &mut Ee, at: u32, ints: usize, quads: &'static [usize], float: bool, v0: u32, log: &Calls) {
+    let log = log.clone();
+    ee.hooks.insert(at, Box::new(move |ee: &mut Ee| {
+        let mut w: Vec<u32> = (0..ints).map(|k| ee.r(4 + k) as u32).collect();
+        for &q in quads {
+            let p = ee.r(4 + q) as u32;
+            w.extend([0, 4, 8, 12].map(|k| ee.u32_at(p + k)));
+        }
+        if float {
+            w.push(ee.f(12).to_bits());
+        }
+        log.borrow_mut().push((at, w));
+        ee.set(2, u64::from(v0));
+    }));
+}
+
+/// The original's run of `f` and the port's from the same RAM: where RAM differs, and whether
+/// the hooked calls differ.
+fn f47_compare(ee: &mut Ee, log: &Calls, original: impl FnOnce(&mut Ee), port: impl FnOnce(&mut Ee)) -> Vec<String> {
+    let (before, spr) = (ee.ram.clone(), ee.spr.clone());
+    log.borrow_mut().clear();
+    original(ee);
+    let want_log = std::mem::take(&mut *log.borrow_mut());
+    let (want, want_spr) = (std::mem::replace(&mut ee.ram, before), std::mem::replace(&mut ee.spr, spr));
+    port(ee);
+    let got_log = std::mem::take(&mut *log.borrow_mut());
+    // The glue's scratch slots over the stack (the out-parameters it hands the original's callees,
+    // [`WRECK_SCRATCH`]'s the highest) are not the game's.
+    let mut want = want;
+    let slots = ee.stack as usize..ee.scratch(WRECK_SCRATCH[4] + 1) as usize;
+    want[slots.clone()].copy_from_slice(&ee.ram[slots]);
+    let mut d: Vec<String> = bytes_differ(&want, &ee.ram, ee.stack).into_iter().map(|r| format!("RAM at {r}")).collect();
+    if want_spr != ee.spr {
+        let at: Vec<usize> = (0..want_spr.len()).filter(|&i| want_spr[i] != ee.spr[i]).collect();
+        d.push(format!("the scratchpad at {:x?} ({} bytes)", &at[..at.len().min(8)], at.len()));
+    }
+    if want_log != got_log {
+        d.push(format!("calls: original {want_log:x?}, port {got_log:x?}"));
+    }
+    d
+}
+
+fn f47_report(t: &BTreeMap<&'static str, u32>, off: &[String], floor: u32) {
+    eprintln!("{t:#?}");
+    assert!(off.is_empty(), "{} differ:\n  {}", off.len(), off.iter().take(30).cloned().collect::<Vec<_>>().join("\n  "));
+    assert!(t.values().all(|n| *n >= floor), "every path taken {floor} times: {t:#?}");
+}
+
+/// **F47 — the body reset is the original's**: 10,000 times on state 4's bike, its body on or off,
+/// the physics world's three lists (count, where the bike's entry is, if anywhere) drawn, the
+/// record's owner, the record and the riding part there or not, the flag byte's bits 7 and 6, and
+/// the riding part's list (count, the world's word in it, an empty slot or neither, so that it
+/// grows) — SLUS-21104's body reset (the bike's vt `+0x13c`) in the interpreter, and
+/// [`reset::body_reset`] with the record's release and the list's growth the original's. The
+/// allocator is hooked (it logs and answers a fixed block). Every word of RAM and the calls come
+/// out the same.
+#[test]
+fn the_body_reset_is_the_originals() {
+    let Some(mut ee) = image().map(hooked) else { return };
+    assert_eq!(vt(&ee, BODY_RESET.0), BODY_RESET.1, "the bike's vt +0x13c");
+    let log: Calls = Rc::default();
+    log_hook(&mut ee, HEAP_REALLOC, 4, &[], false, F47_AREA + 0x800, &log);
+    let base = ee.ram.clone();
+    let mut g = Gen(0x0f47_0001);
+    let (mut t, mut off) = (BTreeMap::new(), Vec::new());
+    let (body, world, owner, record, riding, bounds) = [reset::BODY, reset::WORLD, reset::OWNER, reset::RECORD, reset::RIDING, reset::BOUNDS].map(|o| ee.u32_at(BIKE + o)).into();
+    let second = ee.u32_at(BIKE + reset::SECOND);
+    for k in 0..10_000 {
+        ee.ram.clone_from(&base);
+        let on = !g.one_in(8);
+        ee.set_u32(body, if on { if g.one_in(2) { 1 } else { g.bits() | 1 } } else { 0 });
+        tally(&mut t, if on { "body on" } else { "body off" });
+        for (i, (&list, x)) in reset::LISTS.iter().zip([body, second, BIKE + reset::POST]).enumerate() {
+            let items = F47_AREA + 0x100 * i as u32;
+            let count = (g.bits() % 8) as i32 - 1;
+            ee.set_u32(world + list, count as u32);
+            ee.set_u32(world + list + 8, items);
+            for j in 0..8 {
+                ee.set_u32(items + 4 * j, if g.one_in(3) { 0 } else { g.bits() });
+            }
+            if count > 0 && !g.one_in(4) {
+                ee.set_u32(items + 4 * (g.bits() % count as u32), x);
+                if i == 0 {
+                    tally(&mut t, "the body listed");
+                }
+            }
+        }
+        let (has_owner, has_record, has_riding) = (!g.one_in(4), !g.one_in(4), !g.one_in(4));
+        ee.set_u32(BIKE + reset::OWNER, if has_owner { owner } else { 0 });
+        ee.set_u32(BIKE + reset::RECORD, if has_record { record } else { 0 });
+        ee.set_u32(BIKE + reset::RIDING, if has_riding { riding } else { 0 });
+        let bits = g.bits() & 0xc0;
+        let b = u32::from(ee.u8_at(BIKE + reset::FLAG_BYTE)) & !0xc0 | bits;
+        set_byte(&mut ee, BIKE + reset::FLAG_BYTE, b);
+        ee.set_u32(BIKE + reset::FLAG_WORD, g.bits());
+        let x = if g.one_in(2) { 0x800 } else { g.bits() };
+        ee.set_u32(bounds + 0xa4, x);
+        let (count, items) = ((g.bits() % 6) as i32 - 1, F47_AREA + 0x400);
+        ee.set_u32(riding + 0x100, count as u32);
+        ee.set_u32(riding + 0xfc, items);
+        ee.set_u32(riding + 0xf8, g.bits());
+        for j in 0..6 {
+            ee.set_u32(items + 4 * j, g.bits() | 1);
+        }
+        if count > 0 {
+            match g.bits() % 3 {
+                0 => ee.set_u32(items + 4 * (g.bits() % count as u32), x),
+                1 => ee.set_u32(items + 4 * (g.bits() % count as u32), 0),
+                _ => {}
+            }
+        }
+        if on && has_owner && has_record {
+            tally(&mut t, match (bits & 0x80 != 0, has_riding) {
+                (true, true) => "the riding part's list",
+                (true, false) => "no riding part",
+                _ => "the record released",
+            });
+        }
+        tally(&mut t, if bits & 0x40 != 0 { "bit 6" } else { "no bit 6" });
+        let d = f47_compare(
+            &mut ee,
+            &log,
+            |ee| {
+                ee.set(28, GP);
+                ee.call(BODY_RESET.1, &[u64::from(BIKE)], &[0.0], BUDGET);
+            },
+            |ee| reset::body_reset(&mut ResetInRam(ee), BIKE),
+        );
+        off.extend(d.into_iter().map(|d| format!("{k}: {d}")));
+    }
+    f47_report(&t, &off, 300);
+}
+
+/// **F47 — the respawn is the original's**: 10,000 times on state 4's bike, drawn as
+/// [`the_ground_reset_is_the_originals`] draws it (its spot, forward and up, the body's offset, the
+/// parts' flag and the riding part there or not) and its respawned word — SLUS-21104's respawn (the
+/// bike's vt `+0xe8`) and [`reset::respawn`], the ground reset [`wreck::ground`].
+#[test]
+#[allow(clippy::float_arithmetic)]
+fn the_respawn_is_the_originals() {
+    let Some(mut ee) = image().map(hooked) else { return };
+    assert_eq!(vt(&ee, RESPAWN.0), RESPAWN.1, "the bike's vt +0xe8");
+    let log: Calls = Rc::default();
+    let base = ee.ram.clone();
+    let mut g = Gen(0x0f47_0002);
+    let (mut t, mut off) = (BTreeMap::new(), Vec::new());
+    let body = ee.u32_at(BIKE + wreck::BODY);
+    let riding = ee.u32_at(BIKE + 0xcc);
+    for k in 0..10_000 {
+        ee.ram.clone_from(&base);
+        let r = |g: &mut Gen, s: f32| [g.f(-s, s), g.f(-s, s), g.f(-s, s), g.near(1.0, -2.0, 2.0)];
+        let quad = |ee: &mut Ee, at: u32, v: [f32; 4]| {
+            for (i, x) in v.into_iter().enumerate() {
+                ee.set_f32(at + 4 * i as u32, x);
+            }
+        };
+        let at = r(&mut g, 500.0);
+        let (fwd, up) = loop {
+            let (a, b) = (r(&mut g, 3.0), r(&mut g, 3.0));
+            let c = [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+            let n = |v: &[f32]| v[..3].iter().map(|x| x * x).sum::<f32>();
+            if n(&c) > 0.01 * n(&a) * n(&b) && n(&a) > 0.01 && n(&b) > 0.01 {
+                break (a, b);
+            }
+        };
+        quad(&mut ee, BIKE + 0x50, at);
+        quad(&mut ee, BIKE + 0x60, fwd);
+        quad(&mut ee, BIKE + 0x70, up);
+        let off_by = r(&mut g, 1.5);
+        quad(&mut ee, body + 0x1a0, off_by);
+        let (on, ride) = (g.one_in(2), !g.one_in(4));
+        let b44 = ee.u8_at(BIKE + 0x44) & !1 | u8::from(on);
+        set_byte(&mut ee, BIKE + 0x44, u32::from(b44));
+        ee.set_u32(BIKE + 0xcc, if ride { riding } else { 0 });
+        ee.set_u32(BIKE + reset::RESPAWNED, g.bits());
+        tally(&mut t, if on { "parts on" } else { "parts left" });
+        tally(&mut t, if ride { "riding part" } else { "no riding part" });
+        let d = f47_compare(
+            &mut ee,
+            &log,
+            |ee| {
+                ee.set(28, GP);
+                ee.call(RESPAWN.1, &[u64::from(BIKE)], &[0.0], BUDGET);
+            },
+            |ee| reset::respawn(&mut ResetInRam(ee), BIKE),
+        );
+        off.extend(d.into_iter().map(|d| format!("{k}: {d}")));
+    }
+    f47_report(&t, &off, 1000);
+}
+
+/// **F47 — the event post is the original's**: 10,000 posts, nine in ten on a queue drawn in
+/// [`F47_AREA`] (up to six registrations, live or not, the poster's or another's, its tag or
+/// another; up to six listeners each, live or not, some of which change their registration's count
+/// when told), one in ten the out-of-world message on state 4's own queue from the bike's post
+/// element to its 11 listeners — SLUS-21104's post in the interpreter and [`reset::post`], the
+/// listeners the original's (the drawn ones hooked to log what they are told). Every word of RAM
+/// outside the stack and the calls come out the same.
+#[test]
+fn the_event_post_is_the_originals() {
+    let Some(mut ee) = image().map(hooked) else { return };
+    let log: Calls = Rc::default();
+    // The drawn listeners' class: a vtable whose `+0xc` logs (the listener, the poster's word, the
+    // message) and moves the count its listener names by the step it holds.
+    let (vtable, tell) = (F47_AREA + 0xf00, F47_AREA + 0xf80);
+    ee.set_u32(vtable + 0xc, tell);
+    let l = log.clone();
+    ee.hooks.insert(tell, Box::new(move |ee: &mut Ee| {
+        let (to, from, msg) = (ee.r(4) as u32, ee.r(5) as u32, ee.r(6) as u32);
+        let mut w = vec![to, from];
+        w.extend([0, 4, 8, 12].map(|k| ee.u32_at(msg + k)));
+        l.borrow_mut().push((tell, w));
+        let (step, count) = (ee.u32_at(to + 0x20), ee.u32_at(to + 0x24));
+        if step != 0 {
+            let c = ee.u32_at(count);
+            ee.set_u32(count, c.wrapping_add(step));
+        }
+    }));
+    let base = ee.ram.clone();
+    let mut g = Gen(0x0f47_0003);
+    let (mut t, mut off) = (BTreeMap::new(), Vec::new());
+    let poster = F47_AREA + 0x1000;
+    for k in 0..10_000 {
+        ee.ram.clone_from(&base);
+        let (queue, from, message) = if g.one_in(10) {
+            tally(&mut t, "state 4's queue");
+            let id = ee.u32_at(BIKE + 0xd20);
+            let (kind, msg) = bike::OUT_OF_WORLD;
+            (ee.u32_at(POST_QUEUE), BIKE + 0x674, [kind, msg, 0, id])
+        } else {
+            let q = F47_AREA;
+            let tag = if g.one_in(3) { 0 } else { g.bits() };
+            ee.set_u32(poster, tag);
+            let regs = (g.bits() % 8) as i32 - 1;
+            ee.set_u32(q + 0x24, regs as u32);
+            ee.set_u32(q + 0x2c, q + 0x40);
+            let mut mine = false;
+            for j in 0..6u32 {
+                let e = q + 0x100 + 0x40 * j;
+                ee.set_u32(q + 0x40 + 4 * j, e);
+                let live = !g.one_in(3);
+                let me = !g.one_in(3);
+                let tagged = !g.one_in(4);
+                ee.set_u32(e, if live { 0 } else { 1 + g.bits() % 3 });
+                ee.set_u32(e + 0x10, if me { poster } else { g.bits() });
+                ee.set_u32(e + 4, if tagged { tag } else { tag ^ (1 + g.bits() % 0xff) });
+                mine |= (j as i32) < regs && live && me && tagged;
+                let n = (g.bits() % 8) as i32 - 1;
+                ee.set_u32(e + 0x30, n as u32);
+                let items = F47_AREA + 0x400 + 0x40 * j;
+                ee.set_u32(e + 0x38, items);
+                for i in 0..8u32 {
+                    let rec = F47_AREA + 0x800 + 0x100 * j + 0x20 * i;
+                    ee.set_u32(items + 4 * i, rec);
+                    ee.set_u32(rec, if g.one_in(4) { 1 } else { 0 });
+                    let obj = F47_AREA + 0x2000 + 0x400 * j + 0x40 * i;
+                    ee.set_u32(rec + 0x10, obj);
+                    ee.set_u32(obj + 8, vtable);
+                    let step = match g.bits() % 8 {
+                        0 => 1,
+                        1 => u32::MAX,
+                        _ => 0,
+                    };
+                    ee.set_u32(obj + 0x20, step);
+                    ee.set_u32(obj + 0x24, e + 0x30);
+                }
+            }
+            tally(&mut t, if mine { "a registration" } else { "none registered" });
+            (q, poster, [g.bits() % 16, g.bits() % 32, g.bits(), g.bits()])
+        };
+        let [kind, id, last, data] = message;
+        let d = f47_compare(
+            &mut ee,
+            &log,
+            |ee| {
+                ee.set(28, GP);
+                let ints = [queue, from, kind, id, data, last].map(u64::from);
+                ee.call(POST_MESSAGE, &ints, &[0.0], BUDGET);
+            },
+            |ee| reset::post(&mut ResetInRam(ee), queue, from, message),
+        );
+        off.extend(d.into_iter().map(|d| format!("{k}: {d}")));
+    }
+    f47_report(&t, &off, 900);
+}
+
+/// **F47 — the node's box for a bike or node in the spatial database is the original's**: 10,000
+/// times on state 4's bike, its and its node's database entries set, the node's flag bits (current,
+/// own bounds, a box of its own, a sphere, bounded, stale) and second byte's bit 2 drawn, its own
+/// centre, half extent and radius and its position drawn, and how many of the 22 skeleton nodes its
+/// gather takes in, each current or not and with bounds of its own or not, theirs drawn too —
+/// SLUS-21104's node bounds and spatial update (the bike's vt `+0xe4`) in the interpreter, and
+/// [`node::bounds`] and [`node::world_box`] on RAM, the database move hooked (it logs its entry,
+/// centre, half extent and reach). Every word of RAM and the moves come out the same.
+#[test]
+#[allow(clippy::float_arithmetic)]
+fn the_node_box_in_the_database_is_the_originals() {
+    let Some(mut ee) = image().map(hooked) else { return };
+    let node = ee.u32_at(BIKE + 0xe4);
+    assert_eq!(ee.u32_at(ee.u32_at(node + 4) + 0x94), NODE_REBOUND, "the node's vt +0x94");
+    assert_eq!(vt(&ee, 0xe4), SPATIAL_UPDATE, "the bike's vt +0xe4");
+    let log: Calls = Rc::default();
+    log_hook(&mut ee, SPATIAL_MOVE, 1, &[1, 2], true, 0, &log);
+    let listed = ee.u32_at(node + 0x10c);
+    let list = ee.u32_at(node + 0x144);
+    assert_eq!(listed, 22, "state 4's node gathers its 22 skeleton nodes");
+    let skeleton: Vec<u32> = (0..listed).map(|k| ee.u32_at(list + 4 * k)).collect();
+    let base = ee.ram.clone();
+    let mut g = Gen(0x0f47_0004);
+    let (mut t, mut off) = (BTreeMap::new(), Vec::new());
+    let quad = |ee: &mut Ee, at: u32, v: [f32; 4]| {
+        for (i, x) in v.into_iter().enumerate() {
+            ee.set_f32(at + 4 * i as u32, x);
+        }
+    };
+    for k in 0..10_000 {
+        ee.ram.clone_from(&base);
+        let r = |g: &mut Gen, s: f32| [g.near(0.0, -s, s), g.near(0.0, -s, s), g.near(0.0, -s, s), g.near(1.0, -2.0, 2.0)];
+        ee.set_u32(BIKE + 8, F47_AREA | 0x10);
+        ee.set_u32(node + 8, if g.one_in(8) { 0 } else { F47_AREA | 0x20 });
+        let n = g.bits() % (listed + 1);
+        ee.set_u32(node + 0x10c, n);
+        let mut own_listed = false;
+        for (i, &s) in skeleton.iter().enumerate() {
+            let fl = u32::from(ee.u8_at(s + 0x100)) & !0x05 | g.bits() & 0x05;
+            set_byte(&mut ee, s + 0x100, fl);
+            quad(&mut ee, s + 0xb0, r(&mut g, 2.0));
+            quad(&mut ee, s + 0xc0, r(&mut g, 1.5));
+            ee.set_f32(s + 0x104, g.near(0.0, -0.5, 2.0));
+            own_listed |= (i as u32) < n && fl & 0x04 != 0;
+        }
+        let mut fl = u32::from(ee.u8_at(node + 0x100)) & !0xdd | g.bits() & 0xdd;
+        let stale = fl & 0x80 != 0 && (fl & 0x08 != 0 || fl & 0x40 == 0);
+        // A sphere with nothing to gather has no centre (the original's stack word): not drawn.
+        if stale && fl & 0x10 != 0 && fl & 0x04 == 0 && !own_listed {
+            fl |= 0x04;
+        }
+        set_byte(&mut ee, node + 0x100, fl);
+        let more = u32::from(ee.u8_at(node + 0x101)) & !0x04 | g.bits() & 0x04;
+        set_byte(&mut ee, node + 0x101, more);
+        quad(&mut ee, node + 0xb0, r(&mut g, 2.0));
+        quad(&mut ee, node + 0xc0, r(&mut g, 1.5));
+        ee.set_f32(node + 0x104, g.near(0.0, -0.5, 2.0));
+        ee.set_f32(node + 0x108, g.near(0.0, -1.0, 4.0));
+        if g.one_in(2) {
+            let p = r(&mut g, 300.0);
+            quad(&mut ee, node + 0x60, [p[0], p[1], p[2], 1.0]);
+        }
+        tally(&mut t, if stale { if fl & 0x10 != 0 { "gathered as a sphere" } else { "gathered as a box" } } else { "not gathered" });
+        tally(&mut t, if more & 0x04 != 0 { "round the origin" } else { "the box's reach" });
+        let what = k % 3;
+        tally(&mut t, ["the node's bounds", "the spatial update", "both"][what as usize]);
+        let d = f47_compare(
+            &mut ee,
+            &log,
+            |ee| {
+                ee.set(28, GP);
+                if what != 1 {
+                    ee.call(NODE_BOUNDS, &[u64::from(node)], &[0.0], BUDGET);
+                }
+                if what != 0 {
+                    ee.call(SPATIAL_UPDATE, &[u64::from(BIKE)], &[0.0], BUDGET);
+                }
+            },
+            |ee| {
+                let mut moved = Vec::new();
+                let m = &mut NodeRam(ee);
+                if what != 1 {
+                    if let Some((c, h, reach)) = node::bounds(m, node) {
+                        moved.push((node, c, h, reach));
+                    }
+                }
+                if what != 0 {
+                    if let Some((c, h)) = node::owner_box(m, BIKE, node) {
+                        moved.push((BIKE, c, h, F::ZERO));
+                    }
+                }
+                for (a, c, h, reach) in moved {
+                    let mut w = vec![a];
+                    w.extend(c.to_bits());
+                    w.extend(h.to_bits());
+                    w.push(reach.to_bits());
+                    log.borrow_mut().push((SPATIAL_MOVE, w));
+                }
+            },
+        );
+        off.extend(d.into_iter().map(|d| format!("{k}: {d}")));
+    }
+    f47_report(&t, &off, 1000);
+}
+
+/// **F47 — the PostProcess off C15's paths is the original's**: 10,000 times on state 4's bike, its
+/// body's position, the world's floor and box and the flag byte drawn (as
+/// [`the_bikes_post_process_is_the_originals`] draws them, so that about half the bikes are out of
+/// the world), the body on or off, the flag byte `+0x44`'s bits 7 and 6, the bike and its node put in
+/// state 4's spatial database or not (by the game's own adds; bit 1 of `+0x45` with the node's), and
+/// the node's stale bits — SLUS-21104's PostProcess in the interpreter, and [`bike::air_state`] with
+/// its callees [`PostsInRam`]'s: the body reset, the respawn, the message's post, the put-back and the
+/// node's box in the database the F47 ports, the database's own calls the original's in both. Every
+/// word of RAM outside the stack comes out the same.
+#[test]
+#[allow(clippy::float_arithmetic)]
+fn the_post_process_out_of_the_world_is_the_originals() {
+    let Some(mut ee) = image().map(hooked) else { return };
+    assert_eq!(vt(&ee, BIKE_ADD.0), BIKE_ADD.1, "the bike's vt +0xe0");
+    assert_eq!([0xb4, 0xc0].map(|o| ee.u32_at(BIKE + o)), [DATABASE.0, DATABASE.1], "state 4's database");
+    let log: Calls = Rc::default();
+    let body = ee.u32_at(BIKE + seed::BODY);
+    let node = ee.u32_at(BIKE + 0xe4);
+    let world = ee.u32_at(BIKE + 0xe8);
+    let area = F47_AREA + 0x3000;
+    let base = ee.ram.clone();
+    let mut g = Gen(0x0f47_0005);
+    let (mut t, mut off) = (BTreeMap::new(), Vec::new());
+    let mut answered = BTreeMap::new();
+    for k in 0..10_000 {
+        ee.ram.clone_from(&base);
+        let v = |ee: &mut Ee, g: &mut Gen, a: u32, r: f32| {
+            for i in 0..3 {
+                let x = g.near(0.0, -r, r);
+                ee.set_f32(a + 4 * i, x);
+            }
+        };
+        v(&mut ee, &mut g, body + 0x70, 150.0);
+        ee.set_u32(body, u32::from(!g.one_in(8)));
+        let flags = [0x00, 0x01, 0x40, 0x41][(g.bits() % 4) as usize] | (g.bits() & 0x06) as u8 | (g.bits() & 0xb8) as u8;
+        let (in_bike, in_node) = (g.one_in(2), g.one_in(2));
+        // Bit 1: the node is in the database.
+        set_byte(&mut ee, BIKE + 0x45, u32::from(flags & !0x02) | if in_node { 0x02 } else { 0 });
+        let low = u32::from(ee.u8_at(BIKE + 0x44)) & !0xc0 | g.bits() & 0xc0;
+        set_byte(&mut ee, BIKE + 0x44, low);
+        ee.set_f32(world + 0x98, g.near(0.0, -150.0, 150.0));
+        if g.one_in(5) {
+            ee.set_u32(world + 0xa8, 0);
+        } else {
+            ee.set_u32(world + 0xa8, area);
+            for (o, sign) in [(0x30, -1.0), (0x40, 1.0)] {
+                for i in 0..4 {
+                    let x = sign * g.f(20.0, 140.0);
+                    ee.set_f32(area + o + 4 * i, x);
+                }
+            }
+        }
+        let nf = u32::from(ee.u8_at(node + 0x100)) & !0xc8 | g.bits() & 0xc8;
+        set_byte(&mut ee, node + 0x100, nf);
+        // Into the database as the game puts them there (the node's world box gathered on the way).
+        ee.set(28, GP);
+        if in_bike {
+            ee.call(BIKE_ADD.1, &[BIKE, DATABASE.0, DATABASE.1].map(u64::from), &[0.0], BUDGET);
+        }
+        if in_node {
+            ee.set_u32(BIKE + 0xb0, DATABASE.0);
+            ee.call(NODE_ADD, &[node, DATABASE.0, 1, 1].map(u64::from), &[0.0], BUDGET);
+            let nf = u32::from(ee.u8_at(node + 0x100)) & !0xc8 | g.bits() & 0xc8;
+            set_byte(&mut ee, node + 0x100, nf);
+        }
+        assert_eq!((ee.u32_at(BIKE + 8) != 0, ee.u32_at(node + 8) != 0), (in_bike, in_node), "{k}: the database entries");
+        tally(&mut t, match (in_bike, in_node) {
+            (false, false) => "out of the database",
+            (true, false) => "the bike in the database",
+            (false, true) => "the node in the database",
+            (true, true) => "both in the database",
+        });
+        let before = answered.clone();
+        let d = f47_compare(
+            &mut ee,
+            &log,
+            |ee| {
+                ee.set(28, GP);
+                ee.call(AIR_STATE, &[u64::from(BIKE)], &[f32::from_bits(DT)], BUDGET);
+            },
+            |ee| posts_post(ee, F(f32::from_bits(DT)), &mut answered),
+        );
+        let ran = |w: &str| answered.get(w).copied().unwrap_or(0) > before.get(w).copied().unwrap_or(0);
+        tally(&mut t, if ran("OutOfWorld") { "out of the world" } else { "in the world" });
+        if ran("BodyReset") {
+            tally(&mut t, "body reset");
+        }
+        if ran("NodeBounds gathered") {
+            tally(&mut t, "node bounds gathered");
+        }
+        off.extend(d.into_iter().map(|d| format!("{k}: {d}")));
+    }
+    eprintln!("{answered:#?}");
+    f47_report(&t, &off, 500);
+}
+
+/// **F47 — the record's node with a parent is the original's**: 10,000 times on state 4's bike, its
+/// node hung under a parent drawn in [`F47_AREA`] (state 4's node's words, its own frame, its world
+/// frame and whether that is current drawn, no parent of its own), the node's own frame and whether
+/// it is current drawn, and one of the four node calls the record's pass makes (the turn of the
+/// sweep's offset, the position, the placement, the move to the swept point) with a drawn argument —
+/// through [`RecordInRam`] (SLUS-21104's node functions) and through [`RecordsInRam`] (F43's
+/// [`node`] ports on RAM, as F47 serves a parented node). Every word of RAM and the answers come out
+/// the same.
+#[test]
+#[allow(clippy::float_arithmetic)]
+fn the_records_parented_node_is_the_originals() {
+    let Some(mut ee) = image().map(hooked) else { return };
+    let rec = ee.u32_at(BIKE + seed::RECORD);
+    let node = ee.u32_at(rec + 0xe8);
+    assert_eq!(node, ee.u32_at(BIKE + 0xe4), "the record's node is the bike's");
+    assert_eq!(ee.u32_at(node + NODE_PARENT), 0, "state 4's node has no parent");
+    let parent = F47_AREA + 0x4000;
+    let log: Calls = Rc::default();
+    let base = ee.ram.clone();
+    let mut g = Gen(0x0f47_0006);
+    let (mut t, mut off) = (BTreeMap::new(), Vec::new());
+    let mut answered = BTreeMap::new();
+    let frame = |ee: &mut Ee, g: &mut Gen, at: u32| {
+        for r in 0..4u32 {
+            for c in 0..4u32 {
+                let x = match (r, c) {
+                    (3, 3) => 1.0,
+                    (3, _) => g.near(0.0, -200.0, 200.0),
+                    (_, 3) => 0.0,
+                    _ if r == c => g.near(1.0, -1.2, 1.2),
+                    _ => g.near(0.0, -1.0, 1.0),
+                };
+                ee.set_f32(at + 0x10 * r + 4 * c, x);
+            }
+        }
+    };
+    for k in 0..10_000 {
+        ee.ram.clone_from(&base);
+        for o in (0..0x150).step_by(4) {
+            let w = ee.u32_at(node + o);
+            ee.set_u32(parent + o, w);
+        }
+        for o in [NODE_PARENT, 0xf4, 0xf8, 0x10c] {
+            ee.set_u32(parent + o, 0);
+        }
+        ee.set_u32(node + NODE_PARENT, parent);
+        frame(&mut ee, &mut g, parent + 0x30);
+        frame(&mut ee, &mut g, parent + 0x70);
+        frame(&mut ee, &mut g, node + 0x30);
+        let (pc, nc) = (g.one_in(2), g.one_in(2));
+        for (n, current) in [(parent, pc), (node, nc)] {
+            let f = u32::from(ee.u8_at(n + 0x100)) & !1 | u32::from(current);
+            set_byte(&mut ee, n + 0x100, f);
+        }
+        tally(&mut t, match (pc, nc) {
+            (true, true) => "both current",
+            (true, false) => "the node out of date",
+            (false, true) => "the parent out of date",
+            (false, false) => "neither current",
+        });
+        let v = Vf::new(g.near(0.0, -50.0, 50.0), g.near(0.0, -50.0, 50.0), g.near(0.0, -50.0, 50.0), g.near(1.0, -2.0, 2.0));
+        let what = k % 4;
+        tally(&mut t, ["the turn", "the position", "the placement", "the move"][what as usize]);
+        let run = |c: &mut dyn Collides| match what {
+            0 => Some(c.node_rotate(v)),
+            1 => Some(c.node_position()),
+            2 => Some(c.node_place(v)),
+            _ => {
+                c.node_move(v);
+                None
+            }
+        };
+        let said = |log: &Calls, r: Option<Vf>| {
+            if let Some(r) = r {
+                log.borrow_mut().push((what, r.to_bits().to_vec()));
+            }
+        };
+        let d = f47_compare(
+            &mut ee,
+            &log,
+            |ee| {
+                let mut c = RecordInRam { ee, at: rec, terrain: None, others: BTreeMap::new(), queries: 0 };
+                said(&log, run(&mut c));
+            },
+            |ee| {
+                let inner = RecordInRam { ee, at: rec, terrain: None, others: BTreeMap::new(), queries: 0 };
+                let mut c = RecordsInRam { inner, answered: &mut answered };
+                said(&log, run(&mut c));
+            },
+        );
+        off.extend(d.into_iter().map(|d| format!("{k}: {d}")));
+    }
+    eprintln!("{answered:#?}");
+    assert_eq!(answered.values().sum::<u32>(), 10_000, "every call served parented: {answered:#?}");
+    f47_report(&t, &off, 2000);
 }
