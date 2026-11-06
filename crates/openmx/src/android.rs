@@ -340,26 +340,9 @@ struct Pad {
     axes: [f32; 4],
 }
 
-/// What the pad layer last said of the touch pad's player (P212), as `ios.rs` keeps it.
-struct TouchSeat {
-    in_use: bool,
-    riding: bool,
-    kept: bool,
-}
-
-static SEAT: Mutex<TouchSeat> = Mutex::new(TouchSeat { in_use: false, riding: false, kept: false });
-
-/// The pad layer, each frame: whether the touch pad's player has a seat, and whether this is a ride
-/// (`ios.rs`'s `touch_seat`: a controller joining mid-ride is a second player).
-pub fn touch_seat(in_use: bool, riding: bool) {
-    let mut seat = SEAT.lock().unwrap_or_else(|e| e.into_inner());
-    seat.in_use = in_use;
-    seat.riding = riding;
-}
-
 /// Every pad now, by its place: the controllers, then the touch pad while it is shown — whenever no
-/// controller is connected, or one joined the touch player mid-ride. The touch pad is read (its taps
-/// let go) only with `read`.
+/// controller is connected ([`crate::pad::touch_listed`]). The touch pad is read (its taps let go)
+/// only with `read`.
 fn snapshot(read: bool) -> Vec<(u32, Pad)> {
     let pads = controllers();
     let listed: Vec<(usize, &str)> = pads.iter().map(|p| (p.0 as usize, p.1.as_str())).collect();
@@ -371,13 +354,7 @@ fn snapshot(read: bool) -> Vec<(u32, Pad)> {
         out.push((at as u32, Pad { buttons, axes }));
     }
     let mut touch = TOUCH.lock().unwrap_or_else(|e| e.into_inner());
-    let mut seat = SEAT.lock().unwrap_or_else(|e| e.into_inner());
-    if pads.is_empty() || !seat.in_use {
-        seat.kept = false;
-    } else if touch.shown && seat.riding {
-        seat.kept = true;
-    }
-    let shown = pads.is_empty() || seat.kept;
+    let shown = crate::pad::touch_listed(pads.len());
     if shown != touch.shown {
         touch.shown = shown;
         touch.reset();
