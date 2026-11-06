@@ -245,8 +245,8 @@ mod ride_hud;
 // N8: the one-seat online ride against the offline one, tick for tick.
 #[cfg(test)]
 mod same_ride;
-// P298: where the player was when the app went away, offered on the next launch.
-mod resume;
+// P298: the app going away (iOS's background) and coming back.
+mod away;
 // The desktop updater (P191): a newer release found, downloaded, checked and swapped in.
 #[cfg(not(target_arch = "wasm32"))]
 mod update;
@@ -2856,17 +2856,6 @@ struct Front {
     sound: audio::Speakers,
     /// `--mods` was given (MD7): the music packs are its folder's whatever the Mods row says.
     mods_asked: bool,
-    /// P298: the resume point the main menu offers until it is answered, the ride it was answered
-    /// with, and that ride's state, for the next ride to put over its first seat.
-    resume: Resume,
-}
-
-/// [`Front::resume`].
-#[derive(Default)]
-struct Resume {
-    offered: Option<resume::Point>,
-    ride: Option<resume::Ride>,
-    state: Option<Vec<u8>>,
 }
 
 impl Front {
@@ -3100,7 +3089,6 @@ async fn front_end(args: Args) -> Result<(), String> {
         network,
         sound,
         mods_asked: args.mods_asked,
-        resume: Resume::default(),
     };
     front.menu.music_choices = front.sound.choices();
     front.menu.camera_names = camera_names;
@@ -3164,24 +3152,6 @@ async fn front_end(args: Args) -> Result<(), String> {
     }
     // P293's shots: `OPENMX_TRANSFERS` puts made-up downloads and uploads, or the reload, over it.
     front.menu.transfers_sample();
-    // P298: the app was ended while it was away; where the player was is offered past the splash.
-    if resume::ON && let Some((point, said)) = resume::load(&front.dir, BUILD_ID) {
-        if let Some(said) = said {
-            println!("resume: {said}");
-        }
-        let what = match &point {
-            resume::Point::Screen(word) => menu::Screen::from_word(word).map(|s| s.name().to_string()),
-            resume::Point::Ride(r) => Some(format!("the ride on {}", r.track)),
-        };
-        match what {
-            Some(what) => {
-                println!("resume: offering {what}");
-                front.menu.offer.put(what);
-                front.resume.offered = Some(point);
-            }
-            None => resume::clear(&front.dir),
-        }
-    }
     let mut shell = Shell { window: Some(window), seats: Some(seats), front };
 
     let frame_size = |window: &Screen| match args.size {
@@ -3220,8 +3190,6 @@ async fn front_end(args: Args) -> Result<(), String> {
         if let Act::Ride(track) = &act {
             shell.front.reader.reset();
             let mut picked = false;
-            // P298: a resumed ride is on the pick it was ridden on, every restart of it too.
-            let mut resumed = shell.front.resume.ride.take();
             loop {
                 let mut a = args.clone();
                 a.track = track.clone();
@@ -3285,10 +3253,6 @@ async fn front_end(args: Args) -> Result<(), String> {
                 // What every seat picked in the garage is what the ride loads (P37).
                 if let Some(picks) = shell.front.menu.ride_picks(a.players) {
                     apply_picks(&mut a, &picks);
-                }
-                if let Some(r) = resumed.as_mut() {
-                    resume_pick(&mut a, r);
-                    shell.front.resume.state = r.state.take();
                 }
                 shell.front.note_clear();
                 // No still of a mod's map is shot beside the ride, loading or running (P282).
@@ -3407,46 +3371,16 @@ async fn front_end(args: Args) -> Result<(), String> {
         if window.closed() {
             break;
         }
-        // P298: the resume offer answered, the app gone away or come back.
-        if let Some(yes) = shell.front.menu.offer.take() {
-            resume::clear(&shell.front.dir);
-            match shell.front.resume.offered.take().filter(|_| yes) {
-                Some(resume::Point::Screen(word)) => {
-                    println!("resume: back on {word}");
-                    if let Some(screen) = menu::Screen::from_word(&word) {
-                        shell.front.menu.open(screen);
-                    }
-                }
-                Some(resume::Point::Ride(r)) => {
-                    println!("resume: back on {}, {}", r.track, if r.state.is_some() { "where the ride was" } else { "from its start" });
-                    act = Act::Ride(r.track.clone());
-                    shell.front.resume.ride = Some(r);
-                    (shown_look, menu_images) = (None, false);
-                    garage.uploaded = false;
-                    continue;
-                }
-                None => println!("resume: not now"),
-            }
-        }
-        if let Some(asked) = resume::away() {
-            let point = match &shell.front.resume.offered {
-                // Ended again before the offer was answered: the offer stays.
-                Some(offered) => Some(offered.clone()),
-                None => shell.front.menu.screen().and_then(menu::Screen::resumed_as).map(|s| resume::Point::Screen(s.word().into())),
-            };
-            keep_resume_point(&shell.front.dir, point.as_ref());
-            // What the menu draws with that is built again when it is next drawn, given back: the
-            // Garage's models and the menu's pictures on the GPU.
+        // P298: gone away, what the menu draws with that is built again when it is next drawn is given
+        // back: the Garage's models and the menu's pictures on the GPU.
+        if let Some(asked) = away::away() {
             if let Some(w) = window.gpu() {
                 w.renderer.forget_assets();
                 (shown_look, menu_images) = (None, false);
                 garage.uploaded = false;
             }
-            resume::answered(asked);
-            println!("resume: away on {:?}", shell.front.menu.screen());
-        }
-        if resume::back() && shell.front.resume.offered.is_none() {
-            resume::clear(&shell.front.dir);
+            away::answered(asked);
+            println!("away: on {:?}", shell.front.menu.screen());
         }
         window.show_cursor(cursor::shown(cursor::Showing::Front, window.focused()));
         if window.resized() {
@@ -3948,56 +3882,6 @@ fn load_in_front<'env, T: Send + 'env>(
     }
 }
 
-/// P298: `args`'s ride as a resume point, its first seat in `state` ([`resume::Ride::state`]).
-fn resume_point(args: &Args, state: Option<Vec<u8>>) -> resume::Point {
-    resume::Point::Ride(resume::Ride {
-        track: args.track.clone(),
-        bike: args.bike.clone(),
-        set: args.set.unwrap_or(roster::Set::FREERIDE).word(),
-        rider: args.rider.clone(),
-        look: args.look.text(),
-        state,
-    })
-}
-
-/// P298: a resumed ride's pick on `args`, its first seat's: the bike, the set, the rider and the look
-/// it was ridden on.
-fn resume_pick(args: &mut Args, r: &resume::Ride) {
-    if r.bike.is_empty() {
-        return;
-    }
-    args.bike = r.bike.clone();
-    args.rider = r.rider.clone();
-    if let Some(set) = roster::Set::from_word(&r.set) {
-        args.set = Some(set.ridden());
-    }
-    args.look = roster::Look::parse(&r.look);
-}
-
-/// P298: a ride's resume point: online, none — the room is gone by the next launch, and the online
-/// screen is where the player goes back to it; a local ride of one player on the bike with its state;
-/// any other (a split screen, a played tape, a seat on another machine) from the track's start.
-fn ride_resume_point<P>(args: &Args, world: &World<P>, played: bool, lobby: bool) -> Option<resume::Point> {
-    if args.online.is_some() || lobby {
-        return Some(resume::Point::Screen(menu::Screen::Online.word().into()));
-    }
-    let alone = world.seats.len() == 1 && !played && world.seats[0].garage.up == Kind::Bike;
-    Some(resume_point(args, alone.then(|| net::rides::seat_bytes(&world.seats[0].sim))))
-}
-
-/// P298: `point` written beside the settings in `dir` as where the player is, or none there.
-fn keep_resume_point(dir: &std::path::Path, point: Option<&resume::Point>) {
-    match point {
-        Some(point) => match resume::save(dir, point, BUILD_ID) {
-            Ok(()) => println!("resume: saved {}", match point {
-                resume::Point::Screen(w) => w.clone(),
-                resume::Point::Ride(r) => format!("the ride on {}{}", r.track, if r.state.is_some() { "" } else { ", from its start" }),
-            }),
-            Err(e) => println!("resume: {e}"),
-        },
-        None => resume::clear(dir),
-    }
-}
 
 /// One loading frame where the front end has one, between two steps of a ride's load (P127): what
 /// to leave the ride for, if anything. A cancel puts the pick back.
@@ -4071,14 +3955,9 @@ async fn loading_frame(
     if window.closed() {
         return Ok(Wait::Quit);
     }
-    // P298: away while a ride loads: the ride it is loading, and the state it will be put in.
-    if let Some(asked) = resume::away() {
-        let point = (args.online.is_none() && front.menu.lobby.start.is_none()).then(|| resume_point(args, front.resume.state.clone()));
-        keep_resume_point(&front.dir, point.as_ref());
-        resume::answered(asked);
-    }
-    if resume::back() {
-        resume::clear(&front.dir);
+    // P298: away while a ride loads: nothing to pause yet.
+    if let Some(asked) = away::away() {
+        away::answered(asked);
     }
     window.show_cursor(cursor::shown(cursor::Showing::Front, window.focused()));
     let (width, height) = match args.size {
@@ -6403,7 +6282,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let mut ground_away = gpuwin::times_away();
     // How many times the app had entered the background when the ride last gave its models back
     // (P298a).
-    let mut backgrounded = resume::backgrounds();
+    let mut backgrounded = away::backgrounds();
     // And its maps' pages, near the riders (P283).
     let mut paint_stream: Option<paint_stream::PaintStream> = None;
     // The most ground chunks a frame of the ride handed the GPU, how many in all, and in how many
@@ -7041,20 +6920,6 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     }
     seats.iter_mut().for_each(|s| s.sim.event = stunt.clone());
     let mut world = World { place: sim, seats, tape: recorder, played_dt: None };
-    // P298: a resumed ride's first seat put where it was, as a resync puts a host's state over a
-    // joiner's, under the pause it went away with.
-    if let Some(state) = front.as_deref_mut().and_then(|f| f.resume.state.take()) {
-        match net::rides::from_seat_bytes(&mut world.seats[0].sim, &state) {
-            Ok(()) if world.seats.len() == 1 => {
-                println!("resume: the ride is where it was, tick {}", world.seats[0].sim.ticks);
-                if let Some(f) = front.as_deref_mut() {
-                    f.menu.pause();
-                }
-            }
-            Ok(()) => println!("resume: the ride is where it was (seat 1 of {})", world.seats.len()),
-            Err(e) => println!("resume: the ride's state: {e}; riding from the start"),
-        }
-    }
     // `--fly-at` (V96): the first seat's plane flying high over the world from the first tick, at
     // the biplane's cruise.
     if let Some([x, z, deg, ft]) = args.fly_at {
@@ -7488,28 +7353,24 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             let showing = cursor::Showing::Ride(front.as_deref().map(|f| &f.menu));
             window.show_cursor(cursor::shown(showing, window.focused()));
         }
-        // P298: gone away, the ride is paused and where it is saved; back, the save is not needed.
+        // P298: gone away, the ride is paused.
         if let Some(f) = front.as_deref_mut() {
-            if let Some(asked) = resume::away() {
+            if let Some(asked) = away::away() {
                 if !f.menu.paused(0) {
                     f.menu.pause();
                 }
-                keep_resume_point(&f.dir, ride_resume_point(&args, &world, head.is_some(), f.menu.lobby.start.is_some()).as_ref());
                 // On its way to being suspended (P298a: a 5.2 GiB ride was jetsam's first pick), the
                 // ride's models and their textures go back before the answer lets iOS suspend it.
                 // The window draws nothing till it is in front again, and that frame, under the
                 // pause, uploads what it draws from the assets still held.
-                if resume::backgrounds() != backgrounded {
-                    backgrounded = resume::backgrounds();
+                if away::backgrounds() != backgrounded {
+                    backgrounded = away::backgrounds();
                     if let Some(r) = renderer_of(&mut offscreen, window) {
                         let (models, materials, textures) = r.give_back_models();
-                        println!("resume: gave back {models} models, {materials} materials and {textures} textures in the background");
+                        println!("away: gave back {models} models, {materials} materials and {textures} textures in the background");
                     }
                 }
-                resume::answered(asked);
-            }
-            if resume::back() {
-                resume::clear(&f.dir);
+                away::answered(asked);
             }
         }
         // A window that changed size gets a frame of its new size rather than the old one stretched
