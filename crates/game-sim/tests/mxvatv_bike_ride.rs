@@ -6009,9 +6009,10 @@ fn the_vehicle_updates_callees_are_the_originals() {
 ///
 /// The ride: none. The flip: only `+0x920` (the record's `+0x1f0`), and only from the wreck row
 /// (125) until the put-back clock starts counting (row 140): it is the rider's "a ragdoll part is
-/// touching" flag, which the wreck clock ([`wreck::clock`]'s `SETTLES`) waits on. That word is not the
-/// port's yet: it needs the rider's ragdoll (research/oracle.txt `# F41`). Nothing else writes any
-/// marked byte again.
+/// touching" flag, which the wreck clock ([`wreck::clock`]'s `SETTLES`) waits on. S278 ports the flag
+/// and its hand-over ([`rider`]); the parts' touched words it is made from are still the original
+/// ragdoll world's (S278a; research/oracle.txt `# F41`, `# S278`). Nothing else writes any marked byte
+/// again.
 #[test]
 fn the_riders_writes_into_the_bike_are_read_by_the_wreck_clock_alone() {
     for (name, n) in [("ride-2", 459), ("flip-1", 465)] {
@@ -11986,4 +11987,365 @@ fn the_records_parented_node_is_the_originals() {
     eprintln!("{answered:#?}");
     assert_eq!(answered.values().sum::<u32>(), 10_000, "every call served parented: {answered:#?}");
     f47_report(&t, &off, 2000);
+}
+
+// S278: the rider's "a ragdoll part is touching" flag (handling::rider), the one word of the rider's the
+// bike's frame reads (F41).
+use game_sim::handling::rider;
+
+/// The tail's rider ([`OTHER_LEAVES`]' third) and its mode machine's ground ask, the call just before the
+/// wreck arm's walk of the part list; its parts' clear; its hand-over into the record.
+const RIDER: u32 = 0x010a_f350;
+const RIDER_GROUND_ASK: u32 = 0x001d_6a60;
+const PART_CLEAR: u32 = 0x0049_ae10;
+const HAND_OVER: u32 = 0x004f_1210;
+/// The hand-over's fake part block (its holder, then the nine words) and the main body's node holder
+/// moved off its node by 4 (the quadword load drops it).
+const S_HOLDER: u32 = U_AREA + 0x3000;
+const S_BLOCK: u32 = U_AREA + 0x3040;
+
+/// The rider's words through the interpreter's RAM, writes kept apart in an overlay when it has one.
+struct RiderRam<'a> {
+    ee: &'a mut Ee,
+    overlay: Option<HashMap<u32, u32>>,
+}
+
+impl node::Ram for RiderRam<'_> {
+    fn word(&mut self, at: u32) -> u32 {
+        self.overlay.as_ref().and_then(|o| o.get(&at).copied()).unwrap_or_else(|| self.ee.u32_at(at))
+    }
+    fn set(&mut self, at: u32, w: u32) {
+        match self.overlay.as_mut() {
+            Some(o) => {
+                o.insert(at, w);
+            }
+            None => self.ee.set_u32(at, w),
+        }
+    }
+}
+
+/// The regions the hand-over and the clear may touch: the rider, the bike's record, the rider's parts
+/// (the list's and the named), the main body's node, the fake block.
+fn rider_regions(ee: &Ee) -> Vec<(u32, u32)> {
+    let mut out = vec![(RIDER, 0x700), (ee.u32_at(RIDER + rider::RECORD), 0x260), (S_HOLDER, 0x80)];
+    let n = ee.u32_at(RIDER + rider::PARTS_COUNT);
+    let list = ee.u32_at(RIDER + rider::PARTS);
+    let mut parts: Vec<u32> = (0..n).map(|i| ee.u32_at(list + 4 * i)).collect();
+    parts.extend(rider::NAMED.iter().map(|&o| ee.u32_at(RIDER + o)));
+    parts.sort();
+    parts.dedup();
+    out.extend(parts.into_iter().map(|p| (p, 0x80)));
+    let main = ee.u32_at(ee.u32_at(RIDER + rider::MAIN) + 0xa4);
+    out.push((main & !0xf, 0x90));
+    out
+}
+
+/// **The rider's hand-over into the bike's record and a part's clear are the original's**: 10 000
+/// calls of each on state 4's rider, with every word they read drawn at random — the flag (0, 1, any
+/// other bits), each of the nine named parts any of the rider's parts, each part's touched word (0 or
+/// not) and velocity change (signed zeros among them), the impact left from before, the main body's
+/// node position (its holder's pointer off by 4 one time in four), the part block's holder (none or a
+/// fake one) — through SLUS-21104's and the port's. Every word of the rider, the record, the parts, the
+/// node and the block comes out the same, and neither writes anywhere else.
+#[test]
+fn the_riders_hand_over_and_part_clear_are_the_originals() {
+    let Some(mut ee) = image().map(hooked) else { return };
+    let regions = rider_regions(&ee);
+    let image_words = snap_regions(&ee, &regions);
+    let list = ee.u32_at(RIDER + rider::PARTS);
+    let parts: Vec<u32> = (0..ee.u32_at(RIDER + rider::PARTS_COUNT)).map(|i| ee.u32_at(list + 4 * i)).collect();
+    let main_holder = ee.u32_at(RIDER + rider::MAIN);
+    let main = ee.u32_at(main_holder + 0xa4);
+    assert_eq!(main & 0xf, 0, "the main body's node is aligned");
+    let record = ee.u32_at(RIDER + rider::RECORD);
+    assert_eq!(record, BIKE + 0x730, "the rider's record is the bike's");
+    let mut g = Gen(0x0027_8001);
+    let mut t = BTreeMap::new();
+    for k in 0..20_000 {
+        restore_regions(&mut ee, &regions, &image_words);
+        let f = |g: &mut Gen| {
+            let x = g.near(0.0, -40.0, 40.0);
+            if g.one_in(9) { -x } else { x }
+        };
+        let flag = match g.bits() % 3 {
+            0 => 0,
+            1 => 1,
+            _ => g.bits() | 2,
+        };
+        ee.set_u32(RIDER + rider::TOUCHING, flag);
+        for o in rider::NAMED {
+            ee.set_u32(RIDER + o, parts[(g.bits() as usize) % parts.len()]);
+        }
+        for &p in &parts {
+            ee.set_u32(p + rider::TOUCHED, if g.one_in(2) { 0 } else { g.bits() | 1 });
+            for i in 0..4 {
+                let v = f(&mut g);
+                ee.set_f32(p + rider::DV + 4 * i, v);
+                ee.set_u32(p + 0x18 + 4 * i, g.bits());
+            }
+        }
+        for i in 0..4 {
+            let (a, b) = (f(&mut g), f(&mut g));
+            ee.set_f32(RIDER + rider::IMPACT + 4 * i, a);
+            ee.set_f32(main + 0x70 + 4 * i, b);
+            ee.set_u32(record + rider::R_IMPACT + 4 * i, g.bits());
+        }
+        ee.set_u32(main_holder + 0xa4, if g.one_in(4) { main + 4 } else { main });
+        let block = !g.one_in(3);
+        ee.set_u32(record + rider::R_BLOCK, if block { S_HOLDER } else { 0 });
+        ee.set_u32(S_HOLDER + 0x14, S_BLOCK);
+        let clear = g.one_in(2);
+        let target = parts[(g.bits() as usize) % parts.len()];
+        let given = snap_regions(&ee, &regions);
+
+        ee.set(28, GP);
+        ee.written.clear();
+        if clear {
+            ee.call(PART_CLEAR, &[u64::from(target)], &[], BUDGET);
+        } else {
+            ee.call(HAND_OVER, &[u64::from(RIDER)], &[], BUDGET);
+        }
+        let stack = ee.stack;
+        let outside: Vec<u32> = ee.written.iter().copied().filter(|&a| !(stack - 0x4_0000..stack + 0x1000).contains(&a) && !regions.iter().any(|&(at, n)| (at..at + n).contains(&a))).collect();
+        assert!(outside.is_empty(), "case {k}: the original wrote outside the regions: {:#x?}", &outside[..outside.len().min(8)]);
+        let want = snap_regions(&ee, &regions);
+
+        restore_regions(&mut ee, &regions, &given);
+        ee.written.clear();
+        let mut m = RiderRam { ee: &mut ee, overlay: None };
+        if clear {
+            rider::clear(&mut m, target);
+        } else {
+            rider::hand_over(&mut m, RIDER);
+        }
+        let outside: Vec<u32> = ee.written.iter().copied().filter(|&a| !regions.iter().any(|&(at, n)| (at..at + n).contains(&a))).collect();
+        assert!(outside.is_empty(), "case {k}: the port wrote outside the regions");
+        let got = snap_regions(&ee, &regions);
+        let addrs: Vec<u32> = regions.iter().flat_map(|&(at, n)| (0..n).step_by(4).map(move |o| at + o)).collect();
+        for ((w, gw), at) in want.iter().zip(&got).zip(&addrs) {
+            assert_eq!(gw, w, "case {k} ({}): the word at {at:#x}", if clear { "clear" } else { "hand-over" });
+        }
+        if clear {
+            tally(&mut t, "a part cleared");
+        } else {
+            tally(&mut t, if flag == 0 { "flag off: the rest quadword" } else { "flag on: the impact" });
+            tally(&mut t, if block { "the part block written" } else { "no part block" });
+            if flag != 0 {
+                let touched = rider::NAMED.iter().filter(|&&o| ee.u32_at(ee.u32_at(RIDER + o) + rider::TOUCHED) != 0).count();
+                tally(&mut t, ["no named part touched", "one touched", "some touched", "some touched", "some touched", "some touched", "some touched", "some touched", "some touched", "all nine touched"][touched]);
+            }
+            if ee.u32_at(main_holder + 0xa4) != main {
+                tally(&mut t, "the node's pointer unaligned");
+            }
+        }
+    }
+    eprintln!("{t:#?}");
+    for (path, n) in &t {
+        assert!(*n >= 20, "path {path} taken only {n} times");
+    }
+    assert!(t.len() >= 10, "every path taken: {t:#?}");
+}
+
+/// What [`rider_flag_replay`] saw: frames, the wreck arm's walks (and of them those that set the flag),
+/// clears, hand-overs, and every row's `SETTLES` as the port handed it over.
+#[derive(Debug, Default)]
+struct RiderFlag {
+    walks: usize,
+    set: usize,
+    clears: usize,
+    hand_overs: usize,
+    settles: Vec<u32>,
+}
+
+/// [`replay`] with the rider's part clear and hand-over served by the port ([`rider::clear`],
+/// [`rider::hand_over`]), and the wreck arm's walk checked against [`rider::touching`]: the port's flag
+/// and clock, worked out from the parts' touched words where the walk reads them (just after the
+/// mode machine's ground ask, which only the wreck arm makes) and the frame's `dt`, are what the
+/// original's walk leaves at the first clear after it. Every row is still checked bit-exact, and the
+/// bike's `SETTLES` the port handed over against the row's.
+fn rider_flag_replay(name: &str) -> Option<RiderFlag> {
+    let mut ee = hooked(image()?);
+    let rows = rows(name)?;
+    let t: Rc<RefCell<(RiderFlag, Option<HashMap<u32, u32>>)>> = Rc::default();
+    let h = t.clone();
+    ee.hooks.insert(
+        RIDER_GROUND_ASK,
+        Box::new(move |ee: &mut Ee| {
+            let (args, x, ra, sp, stack) = ([ee.r(4), ee.r(5), ee.r(6), ee.r(7)], ee.f(12), ee.r(31), ee.r(29), ee.stack);
+            let ours = ee.r(4) as u32 == ee.u32_at(RIDER + 0x5b8);
+            ee.stack = (sp as u32 - 0x40) & !0xf;
+            ee.call(RIDER_GROUND_ASK, &args, &[x], BUDGET);
+            (ee.stack, ee.pc) = (stack, RIDER_GROUND_ASK);
+            ee.set(29, sp);
+            ee.set(31, ra);
+            if ours {
+                // The walk is next, its dt the mode machine's (f20, kept across the call).
+                let dt = F(ee.f(20));
+                let mut m = RiderRam { ee, overlay: Some(HashMap::new()) };
+                rider::touching(&mut m, RIDER, dt);
+                h.borrow_mut().1 = m.overlay;
+            }
+        }),
+    );
+    let h = t.clone();
+    ee.hooks.insert(
+        PART_CLEAR,
+        Box::new(move |ee: &mut Ee| {
+            let mut t = h.borrow_mut();
+            if let Some(o) = t.1.take() {
+                for at in [rider::TOUCHING, rider::TOUCHING_TIME] {
+                    assert_eq!(ee.u32_at(RIDER + at), o[&(RIDER + at)], "the wreck arm's walk: rider +{at:#x}");
+                }
+                t.0.walks += 1;
+                t.0.set += usize::from(ee.u32_at(RIDER + rider::TOUCHING) != 0);
+            }
+            t.0.clears += 1;
+            let part = ee.r(4) as u32;
+            rider::clear(&mut RiderRam { ee, overlay: None }, part);
+        }),
+    );
+    let h = t.clone();
+    ee.hooks.insert(
+        HAND_OVER,
+        Box::new(move |ee: &mut Ee| {
+            assert_eq!(ee.r(4) as u32, RIDER, "the hand-over's rider");
+            h.borrow_mut().0.hand_overs += 1;
+            rider::hand_over(&mut RiderRam { ee, overlay: None }, RIDER);
+        }),
+    );
+    for (r, row) in rows.iter().enumerate() {
+        poke(&mut ee, row, &READER);
+        ee.set(28, GP);
+        ee.call(FRAME, &[u64::from(SIM)], &[f32::from_bits(DT)], 400_000_000);
+        let d = diff(&ee, row);
+        assert!(d.is_empty(), "{name} row {r} (vsync {}): {} words differ\n  {}", row["vsync"], d.len(), d.iter().take(40).cloned().collect::<Vec<_>>().join("\n  "));
+        let o = obj(row);
+        let settles = ee.u32_at(BIKE + wreck::SETTLES);
+        assert_eq!(settles, o[wreck::SETTLES as usize / 4], "{name} row {r}: the bike's SETTLES");
+        let w = wrecked(|o| ee.u32_at(BIKE + o));
+        assert_eq!(w, row_wrecked(row), "{name} row {r}: the wreck state");
+        t.borrow_mut().0.settles.push(settles);
+        poke(&mut ee, row, &SPOT);
+    }
+    assert!(t.borrow().1.is_none(), "a walk left unchecked");
+    for a in [RIDER_GROUND_ASK, PART_CLEAR, HAND_OVER] {
+        ee.hooks.remove(&a);
+    }
+    Some(Rc::try_unwrap(t).ok().unwrap().into_inner().0)
+}
+
+/// **The rider's flag in the port's hands, both C15 replays bit-exact**: the rider's part clear and
+/// hand-over are the port's, and the wreck arm's walk is checked against the port's on every frame it
+/// runs ([`rider_flag_replay`]). The ride: no walk, `SETTLES` 0 throughout. The flip: the walk from the
+/// wreck on, the flag set from row 128 (three rows after the wreck) on every row after, and the
+/// clock's put-back on row 193 as before. What sets the parts' touched words is still the original's
+/// ragdoll world (S278a).
+#[test]
+fn the_riders_flag_reaches_the_wreck_clock_through_the_port() {
+    for (name, n) in [("ride-2", 459usize), ("flip-1", 465)] {
+        let Some(t) = rider_flag_replay(name) else { return };
+        eprintln!("{name}: {} walks ({} set), {} clears, {} hand-overs", t.walks, t.set, t.clears, t.hand_overs);
+        assert_eq!(t.settles.len(), n);
+        assert_eq!(t.hand_overs, n, "{name}: one hand-over a frame");
+        let first = t.settles.iter().position(|&s| s != 0);
+        if name == "ride-2" {
+            assert_eq!(t.walks, 0, "{name}: the ride never reaches the wreck arm");
+            assert_eq!(first, None);
+        } else {
+            assert!(t.walks > 0 && t.set > 0 && t.set < t.walks, "{name}: walks both ways");
+            assert_eq!(first, Some(128), "{name}: the first row SETTLES is set");
+            assert!(t.settles[128..].iter().all(|&s| s == 1), "{name}: SETTLES stays set");
+        }
+    }
+}
+
+/// The wreck arm's walk and the mode machine's clear loop, as runs of the mode machine's own
+/// instructions (the rider in `s2`, `dt` in `f20`): each from its first instruction to the one after
+/// it, where a hook ends the call.
+const WALK: (u32, u32) = (0x004e_ffb4, 0x004f_0020);
+const CLEAR_LOOP: (u32, u32) = (0x004f_0274, 0x004f_02b0);
+/// A fake part list of up to twelve and its parts, in the F39 rig's area.
+const S_LIST: u32 = U_AREA + 0x3100;
+const S_PARTS: u32 = U_AREA + 0x3200;
+
+/// **The wreck arm's walk and the clear loop are the original's**: 10 000 runs of each stretch of the
+/// mode machine on state 4's rider, its list a fake one — the count −2 to 12, each part's four flags
+/// (touched 0 or not, at any place in the list or none), the flag and its clock left from before
+/// (signed zeros among them), `dt` the game's or any — against [`rider::touching`] and
+/// [`rider::clear_all`]. The rider's, the list's and the parts' words come out the same, and neither
+/// writes anywhere else.
+#[test]
+fn the_riders_walk_and_clear_loop_are_the_originals() {
+    let Some(mut ee) = image().map(hooked) else { return };
+    for (_, end) in [WALK, CLEAR_LOOP] {
+        // The loop's own calls leave `ra` theirs: the end goes back to the call's.
+        ee.hooks.insert(end, Box::new(|ee: &mut Ee| ee.set(31, u64::from(ps2_oracle::DONE) | 0xffff_ffff_0000_0000)));
+    }
+    let regions = vec![(RIDER, 0x700), (S_LIST, 0x40), (S_PARTS, 0x80 * 12)];
+    let image_words = snap_regions(&ee, &regions);
+    let mut g = Gen(0x0027_8002);
+    let mut t = BTreeMap::new();
+    for k in 0..20_000 {
+        restore_regions(&mut ee, &regions, &image_words);
+        let walk = k % 2 == 0;
+        let n = (g.bits() % 15) as i32 - 2;
+        ee.set_u32(RIDER + rider::PARTS_COUNT, n as u32);
+        ee.set_u32(RIDER + rider::PARTS, S_LIST);
+        let first = if g.one_in(3) { 99 } else { g.bits() % 12 };
+        for i in 0..12 {
+            let p = S_PARTS + 0x80 * i;
+            ee.set_u32(S_LIST + 4 * i, p);
+            let touched = if i == first { g.bits() | 1 } else if i > first && g.one_in(2) { g.bits() } else { 0 };
+            ee.set_u32(p + rider::TOUCHED, touched);
+            for o in [0x18, 0x1c, 0x20] {
+                ee.set_u32(p + o, g.bits());
+            }
+        }
+        ee.set_u32(RIDER + rider::TOUCHING, if g.one_in(2) { 0 } else { g.bits() });
+        let clock = g.near(0.0, -1.0, 9.0);
+        ee.set_f32(RIDER + rider::TOUCHING_TIME, clock);
+        let dt = if g.one_in(2) { f32::from_bits(DT) } else { g.near(0.0, -0.05, 0.05) };
+        let given = snap_regions(&ee, &regions);
+
+        let (start, _) = if walk { WALK } else { CLEAR_LOOP };
+        ee.set(28, GP);
+        ee.set(18, u64::from(RIDER));
+        ee.set_f(20, dt);
+        ee.written.clear();
+        ee.call(start, &[], &[], BUDGET);
+        let stack = ee.stack;
+        let outside: Vec<u32> = ee.written.iter().copied().filter(|&a| !(stack - 0x4_0000..stack + 0x1000).contains(&a) && !regions.iter().any(|&(at, n)| (at..at + n).contains(&a))).collect();
+        assert!(outside.is_empty(), "case {k}: the original wrote outside the regions: {:#x?}", &outside[..outside.len().min(8)]);
+        let want = snap_regions(&ee, &regions);
+
+        restore_regions(&mut ee, &regions, &given);
+        ee.written.clear();
+        let mut m = RiderRam { ee: &mut ee, overlay: None };
+        if walk {
+            rider::touching(&mut m, RIDER, F(dt));
+        } else {
+            rider::clear_all(&mut m, RIDER);
+        }
+        let outside = ee.written.iter().filter(|&&a| !regions.iter().any(|&(at, n)| (at..at + n).contains(&a))).count();
+        assert_eq!(outside, 0, "case {k}: the port wrote outside the regions");
+        let got = snap_regions(&ee, &regions);
+        let addrs: Vec<u32> = regions.iter().flat_map(|&(at, n)| (0..n).step_by(4).map(move |o| at + o)).collect();
+        for ((w, gw), at) in want.iter().zip(&got).zip(&addrs) {
+            assert_eq!(gw, w, "case {k} ({}, count {n}): the word at {at:#x}", if walk { "walk" } else { "clear loop" });
+        }
+        let set = ee.u32_at(RIDER + rider::TOUCHING) != 0;
+        tally(&mut t, match (walk, n) {
+            (true, n) if n < 0 => "walk, a negative count",
+            (true, 0) => "walk, no parts",
+            (true, _) if set => "walk, a part touched",
+            (true, _) => "walk, none touched",
+            (false, n) if n <= 0 => "clear loop, nothing to clear",
+            (false, _) => "clear loop, parts cleared",
+        });
+    }
+    eprintln!("{t:#?}");
+    for (path, n) in &t {
+        assert!(*n >= 20, "path {path} taken only {n} times");
+    }
+    assert_eq!(t.len(), 6, "every path taken: {t:#?}");
 }

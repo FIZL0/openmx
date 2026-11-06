@@ -9732,6 +9732,35 @@ atv_heap_free               atv 0x001b76d0 = free
 #   (handling::wreck::clock SETTLES), flip-1 rows 125..=140. Nothing else reads, and nothing but the rider
 #   writes, any other byte of bike+0x870..+0x8a0 / +0x920..+0x980. Follow-up S278.
 
+# S278: the rider's "a ragdoll part is touching" flag, ported as game_sim::handling::rider (touching,
+# clear, clear_all, impact, hand_over; tests/mxvatv_bike_ride.rs). Journal:
+# research/journal/2026-11-05-s278-rider-touching-flag/.
+#   Rider 0x010af350 (vtable 0x003d11b0): +0x378 record (bike+0x730), +0x37c flag, +0x380 its clock,
+#   +0x5b0/+0x5b4 part list (9 on state 4: 0x0102ff00, 0x01107020, 0x01108b50, 0x011092b0, 0x01109a10,
+#   0x0110a170, 0x0110a8d0, 0x0110b030, 0x0110b790), +0x58c..+0x5ac the nine named parts, +0x670 impact,
+#   +0x2a4 main body holder (+0xa4 its node), +0x5b8 the ground ask's first argument, +0x27c its world.
+#   Walk 0x004effb4..0x004f0020 (in 0x004ef320's wreck arm, after the ground ask 0x001d6a60(+0x5b8,
+#   *(list[0])+0x88, 3); s2 rider, f20 dt): count read once; first part with +0x14 != 0 stops it; stopped
+#   short (a negative count too) -> +0x37c = 1, +0x380 = add.s(+0x380, dt); else both 0.
+#   Clear loop 0x004f0274..0x004f02b0 (every mode): count re-read each part, 0x0049ae10(part): +0x14,
+#   +0x18, +0x1c, +0x20 = 0.
+#   Hand-over 0x004f1210 (via the rider's vt slot 0x003d12f8 = 0x004f28f0 inside the world step):
+#   rec+0x1f0 = +0x37c; flag 0: +0x670 = (0,0,0,1) 0x00396fc0, else 0x004f1c30: +0x670 = (0,0,0,1), then for
+#   +0x58c..+0x5ac in order, touched: vadd.xyz +0x60 (lqc2/sqc2 each); rec+0x160 = +0x670; rec+0x200 =
+#   *(+0x2a4)+0xa4 node +0x70 (lq: low 4 bits dropped); rec+0x1e4 holder: its +0x14 block's nine words =
+#   +0x5a8, +0x5ac, +0x58c..+0x5a4.
+#   Touched writers (flip-1, write watch on all nine +0x14): 1 at pc 0x0049b258 (0x0049b220, the bone
+#   collision's push-out, from its solve 0x0049bb00 at ra 0x0049bbfc), 0 at 0x0049ae14 (the clear loop),
+#   once at pc 0x004ef108 (the mode machine). The parts are the rider world's type-8 constraints (vtable
+#   0x003cd080: +8 0x0049abb0, +0x18 solve 0x0049bb00, +0x28 0x0049a810), MX Unleashed's bone collision
+#   layout (# S52: +0x14 touched, +0x18 ground, +0x1c scene, +0x20 swept, +0x60 dv, +0x78 terrain, +0x7c
+#   body, +0x84 search pool, +0x88 sphere).
+#   Rider world 0x010cc6f0: 3 iterations, rate word 27.0; 18 bodies (vt +0x110 0x003cd200); force
+#   0x01005790 (wrapper vt 0x003cd150) and 0x010c0840 (vt 0x003cd1b0, +0xc = rider+0x660); 35
+#   constraints: 21 of vtable 0x003cd0e0 (+0x18 0x00498c10), the 9 parts, 5 of 0x003cd0c0 (+0x18
+#   0x00499e20); no pre or post lists. Follow-ups S278a (the world) and S278b (the mode machine).
+#   flip-1: the walk on 68 frames (3 unset, rows 125..127), SETTLES 1 from row 128 to the end.
+
 # F31b5d: state 4's sim listeners that are not the bike's, shown inert on C15 ride-2 and flip-1. Journal:
 # research/journal/2026-11-05-f31b5d-other-listeners-inert/.
 #   Lists every frame: sim+0x24 = the bike's record alone (getter 0x00208390 answers it once a pass); sim+0x3c
