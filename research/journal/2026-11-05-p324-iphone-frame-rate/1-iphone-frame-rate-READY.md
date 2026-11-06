@@ -63,10 +63,13 @@ Task P324. 2026-11-05.
   - the touch pad layer (it draws nothing with a controller connected);
   - rumble (only on a wreck);
   - `openmx_ios::pads()` (runs in an autorelease pool, once a frame a pad, riding or paused alike).
-- Built the iPhone app with the change locally (`tools/ios-ipa.sh`, 4 min 38 s, exit 0). The unsigned IPA
-  (12.9 MB, on top of 0b82dca3 with this change uncommitted) is in the s1 worktree's git-ignored
-  `target/openmx-ios-p324.ipa`. Nothing was uploaded: this run publishes nothing beyond git, so the user
-  signs and installs it, or a release carries it.
+- Built the iPhone app with the change locally (`tools/ios-ipa.sh`, 4 min 38 s, exit 0, a 12.9 MB unsigned
+  IPA). Nothing was uploaded: this run publishes nothing beyond git. The gate's build-dir cap then cleaned
+  `target/` (81 GB over the 80 cap), and the copy there went with it. So the human builds it again with
+  `PATH=$HOME/.cargo/bin:$PATH tools/ios-ipa.sh` on 8abe3caf or later.
+- The first `./kit done` failed `hud.rs` `the_pause_menu_keeps_the_hud_under_it`. The cause was the
+  `settings.txt` and `controls.txt` my desktop `--menu` runs had written into the worktree root (world_mxu_free,
+  render scale 0.75), which the test rides. With them removed it passed, and so did the gate (5083 tests).
 
 ## What the original does
 
