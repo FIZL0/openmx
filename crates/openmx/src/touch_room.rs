@@ -1,6 +1,6 @@
 //! Where the page's on-screen pad (P197, `web/touch.js`) stands over the frame, so the ride HUD's
-//! radar and the front end's hints are drawn clear of it (P208), and the speedometer moves up to the
-//! top right while it is shown (P304).
+//! radar and the front end's hints are drawn clear of it (P208), and the speedometer and the Show
+//! FPS line move up to the top left while it is shown (P323; P304 had them top right).
 //!
 //! The page lists the pad among its gamepads only while it is shown, by the name `Touch controls`
 //! ([`crate::pad::TOUCH_PAD`]); the canvas's poll ([`set`]) notes the window it is laid out in
@@ -36,14 +36,19 @@ const GAP: f32 = 0.15 + 0.2;
 /// (0.35 + 2.5 up from the bottom), the tallest of the three pedals.
 const PEDALS_LEFT: f32 = 6.45 + GAP;
 const PEDALS_TOP: f32 = 2.85 + GAP;
-/// Up the right side, the face diamond: △'s top (5.3 + 1.15 up) and left edge (1.6 + 1.15 in), and
-/// □'s, beside ○ under it (4.2 + 1.15 up, 2.85 + 1.15 in).
-const TRIANGLE_TOP: f32 = 6.45 + GAP;
+/// Up the right side, the face diamond: △'s left edge (1.6 + 1.15 in), and □'s top and left edge,
+/// beside ○ under △ (4.2 + 1.15 up, 2.85 + 1.15 in).
 const TRIANGLE_LEFT: f32 = 2.75 + GAP;
 const SQUARE_TOP: f32 = 5.35 + GAP;
 const SQUARE_LEFT: f32 = 4.0 + GAP;
-/// Along the top, PAUSE's right edge: 0.8 + 1.6 right of the middle.
-const PAUSE_RIGHT: f32 = 0.8 + 1.6 + GAP;
+/// Along the top, CAMERA's left edge, 2.6 left of the middle, and the bottom of it and PAUSE beside
+/// it: 0.3 + 0.7 down.
+const CAMERA_LEFT: f32 = 2.6 + GAP;
+const TOP_BOTTOM: f32 = 0.3 + 0.7 + GAP;
+/// CLUTCH under the score bar, 12vh down: its right edge (0.4 + 1.6 in) and its bottom (0.7 tall).
+const CLUTCH_RIGHT: f32 = 0.4 + 1.6 + GAP;
+const CLUTCH_DOWN: f32 = 0.12;
+const CLUTCH_BOTTOM: f32 = 0.7 + GAP;
 /// The stick's base at rest: 2.6 across, centred 1.8 in from the bottom left corner.
 const STICK_EDGE: f32 = 1.8 + 1.3 + 0.2;
 
@@ -91,30 +96,38 @@ impl Room {
         (self.across(PEDALS_LEFT), self.up(PEDALS_TOP))
     }
 
-    /// How far down from the frame's top something in its top right corner stands clear of the
-    /// face diamond under it, in frame pixels: over △.
-    pub fn over_the_faces(self) -> f32 {
-        self.frame.1 - self.up(TRIANGLE_TOP)
-    }
-
     /// How far down from the frame's top something left of △ stands clear of the faces: over □.
     pub fn over_the_square(self) -> f32 {
         self.frame.1 - self.up(SQUARE_TOP)
     }
 
-    /// How far in from the frame's right edge something in its top right corner reaching `down`
-    /// frame pixels from the top stands clear of the faces: left of △, or of □ once it reaches as
-    /// low as □'s top.
+    /// How far in from the frame's right edge something reaching `down` frame pixels from the top
+    /// stands clear of the faces: left of △, or of □ once it reaches as low as □'s top.
     pub fn left_of_the_faces(self, down: f32) -> f32 {
         let wide = down > self.over_the_square();
         self.across(if wide { SQUARE_LEFT } else { TRIANGLE_LEFT })
     }
 
-    /// How far in from the frame's left edge something along the top stands clear of the small
-    /// buttons there: right of PAUSE.
-    pub fn right_of_the_top(self) -> f32 {
+    /// How far down from the frame's top something along the top stands clear of CAMERA and PAUSE:
+    /// under them (P323).
+    pub fn under_the_top(self) -> f32 {
+        let (k, (_, y)) = self.fit();
+        ((TOP_BOTTOM * self.unit() - y) / k).max(0.0)
+    }
+
+    /// How far in from the frame's left edge something along the top reaching right stands clear of
+    /// CAMERA beside the middle: left of it (P323).
+    pub fn left_of_the_camera(self) -> f32 {
         let (k, (x, _)) = self.fit();
-        ((self.window.0 / 2.0 + PAUSE_RIGHT * self.unit() - x) / k).max(0.0)
+        ((self.window.0 / 2.0 - CAMERA_LEFT * self.unit() - x) / k).max(0.0)
+    }
+
+    /// CLUTCH's corner under the score bar: how far in from the frame's left edge its right edge
+    /// stands, and how far down from the top its bottom, room past both kept (P323).
+    pub fn clutch(self) -> (f32, f32) {
+        let (k, (_, y)) = self.fit();
+        let bottom = CLUTCH_DOWN * self.window.1 + CLUTCH_BOTTOM * self.unit();
+        (self.across(CLUTCH_RIGHT), ((bottom - y) / k).max(0.0))
     }
 
     /// How far in from the frame's left edge something along the bottom stands clear of the
@@ -146,11 +159,12 @@ mod tests {
         assert!((x - 6.8 * 48.75).abs() < 1e-3 && (y - 3.2 * 48.75).abs() < 1e-3, "{x} {y}");
         let (x, _) = r.right_of_the_stick();
         assert!((x - 3.3 * 48.75).abs() < 1e-3, "{x}");
-        let y = r.over_the_faces();
-        assert!((y - (390.0 - 6.8 * 48.75)).abs() < 1e-3, "{y}");
-        assert!((r.left_of_the_faces(y) - 3.1 * 48.75).abs() < 1e-3);
+        assert!((r.left_of_the_faces(390.0 - 6.8 * 48.75) - 3.1 * 48.75).abs() < 1e-3);
         assert!((r.left_of_the_faces(390.0 - 5.7 * 48.75 + 1.0) - 4.35 * 48.75).abs() < 1e-3);
-        assert!((r.right_of_the_top() - (422.0 + 2.75 * 48.75)).abs() < 1e-3);
+        assert!((r.under_the_top() - 1.35 * 48.75).abs() < 1e-3);
+        assert!((r.left_of_the_camera() - (422.0 - 2.95 * 48.75)).abs() < 1e-3);
+        let (x, y) = r.clutch();
+        assert!((x - 2.35 * 48.75).abs() < 1e-3 && (y - (46.8 + 1.05 * 48.75)).abs() < 1e-3, "{x} {y}");
     }
 
     #[test]

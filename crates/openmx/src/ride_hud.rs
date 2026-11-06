@@ -748,8 +748,9 @@ pub fn sprites(out: &mut Vec<Sprite>, base: usize, view: [f32; 4], shown: &Shown
 }
 
 /// [`sprites`], with the page's touch pad over the frame (P208) where `pad` says it is: the radar
-/// right of the stick's resting base, and the speedometer and the preload meter up in the top right
-/// corner (P304), clear of the pad's buttons, in a view at those corners of the frame.
+/// right of the stick's resting base, and the speedometer and the preload meter up in the top left
+/// corner under the Show FPS line (P323), clear of the pad's buttons, in a view at those corners of
+/// the frame.
 #[allow(clippy::too_many_arguments)]
 pub fn sprites_clear_of(out: &mut Vec<Sprite>, base: usize, view: [f32; 4], pad: Option<Room>, shown: &Shown, tracker: &Tracker, now: Instant) -> Drawn {
     let s = scale_of(view[2], view[3], shown.scale);
@@ -763,21 +764,20 @@ pub fn sprites_clear_of(out: &mut Vec<Sprite>, base: usize, view: [f32; 4], pad:
         pen.view = view;
     }
     score(&mut pen, shown, tracker, now, &mut drawn);
-    let mut below = None;
     if let Some(room) = pad {
         let meters = |k: f32| {
             let mut aside = Vec::new();
             let at = Pen { out: &mut aside, view, s: s * k, base, corner: Corner::TopLeft, alpha: 1.0 };
             extent(&at, |p, d| speedometer(p, shown, d))
         };
-        if let Some((moved, k, bottom)) = to_the_top_right(view, s, room, meters) {
-            (pen.view, pen.s, below) = (moved, s * k, Some(bottom));
+        if let Some((moved, k)) = to_the_top_left(view, s, room, meters) {
+            (pen.view, pen.s) = (moved, s * k);
         }
     }
     speedometer(&mut pen, shown, &mut drawn);
     (pen.view, pen.s) = (view, s);
     prompts(&mut pen, shown, &mut drawn);
-    top_right(&mut pen, shown, tracker, now, below, &mut drawn);
+    top_right(&mut pen, shown, tracker, now, &mut drawn);
     if let Some(e) = &shown.event {
         event(&mut pen, e, tracker, now, &mut drawn);
     }
@@ -811,15 +811,15 @@ fn extent(pen: &Pen, part: impl FnOnce(&mut Pen, &mut Drawn)) -> Option<[f32; 4]
 }
 
 /// Where the speedometer and the preload meter, which `meters` says draw in `view`'s bottom right
-/// corner at a share of its scale `s`, stand in the top right instead while the touch pad is up
-/// (P304), in a view whose bottom right corner is the frame's — the one the pad's buttons cover: the
-/// view to draw them in, the share of `s` to draw them at, and the frame y they reach down to, for
-/// the top-right column to start under. Their top is level with the score bar's; their right edge
-/// stays where it was if they fit over the face diamond's △, else stands left of △ (over □), else
-/// left of □ — and their left right of PAUSE along the top. Whichever of the three takes them
-/// biggest: at full size where one fits, else shrunk to fit it. The frame is inside the island's
-/// inset, so they are too.
-fn to_the_top_right(view: [f32; 4], s: f32, room: Room, meters: impl Fn(f32) -> Option<[f32; 4]>) -> Option<([f32; 4], f32, f32)> {
+/// corner at a share of its scale `s`, stand in the top left instead while the touch pad is up
+/// (P323), in a view whose bottom right corner is the frame's — the one the pad's buttons cover: the
+/// view to draw them in and the share of `s` to draw them at. In a view at the frame's top, their
+/// left edge is the Show FPS line's ([`fps_by_the_score`], whether it is shown or not) and their top
+/// just under it, or, when they would reach CAMERA beside the middle from there, under CAMERA and
+/// PAUSE; in a lower view, right of its score bar and level with it. Whichever place takes them
+/// biggest, shrunk only if neither takes them whole, kept in the view's top-left quarter and out of
+/// the face diamond. The frame is inside the island's inset, so they are too.
+fn to_the_top_left(view: [f32; 4], s: f32, room: Room, meters: impl Fn(f32) -> Option<[f32; 4]>) -> Option<([f32; 4], f32)> {
     let [vx, vy, w, h] = view;
     let (fw, fh) = room.frame;
     if (vx + w - fw).abs() >= 1.0 || (vy + h - fh).abs() >= 1.0 {
@@ -827,25 +827,23 @@ fn to_the_top_right(view: [f32; 4], s: f32, room: Room, meters: impl Fn(f32) -> 
     }
     let b = meters(1.0)?;
     let (bw, bh) = (b[2] - b[0], b[3] - b[1]);
-    let top = vy + SCORE_BAR[1] * s;
-    let left_end = room.right_of_the_top();
-    // Each place: its right edge and how low it may reach, frame pixels.
-    let places = [
-        (b[2], room.over_the_faces()),
-        (fw - room.left_of_the_faces(0.0), room.over_the_square()),
-        (fw - room.left_of_the_faces(fh), vy + h / 2.0),
-    ];
-    let fit = |(right, low): (f32, f32)| ((low - top) / bh).min((right.min(b[2]) - left_end) / bw).min(1.0);
-    let mut best = places[0];
-    for p in &places[1..] {
-        if fit(*p) > fit(best) + 1e-4 {
-            best = *p;
-        }
-    }
+    let low = vy + h / 2.0;
+    let faces = (fw - room.left_of_the_faces(low)).min(vx + w / 2.0);
+    // Each place: its top, and the right edge it may reach, frame pixels.
+    let (left, places) = if vy < 1.0 {
+        let f = fps_by_the_score([0.0, 0.0, fw, fh], s, room);
+        let under = f[3] + 0.4 * EM * s;
+        (f[0], [(under, room.left_of_the_camera()), (under.max(room.under_the_top()), faces)])
+    } else {
+        let top = vy + SCORE_BAR[1] * s;
+        (vx + (SCORE_BAR[0] + SCORE_BAR[2] + 0.8 * EM) * s, [(top, faces), (top, faces)])
+    };
+    let fit = |(top, right): (f32, f32)| ((low - top) / bh).min((right - left) / bw).min(1.0);
+    let best = if fit(places[1]) > fit(places[0]) + 1e-4 { places[1] } else { places[0] };
     let k = fit(best).max(0.1);
     let b = meters(k)?;
-    let (dx, dy) = ((b[2] - best.0).max(0.0), b[1] - top);
-    Some(([vx, vy - dy, w - dx, h], k, b[3] - dy))
+    let (dx, dy) = (b[0] - left, b[1] - best.0);
+    Some(([vx, vy - dy, w - dx, h], k))
 }
 
 /// `view`, moved for what draws at `drawn` in its bottom left corner to stand right of the touch
@@ -1433,13 +1431,9 @@ fn act_pill(pen: &mut Pen, buttons: &Buttons, x: f32, mid: f32, words: &str, hol
 }
 
 /// The top right: the marker menu while it is up, and under it the camera toast.
-/// `below`, a frame y the column starts under: the meters', moved up here for the touch pad (P304).
-fn top_right(pen: &mut Pen, shown: &Shown, tracker: &Tracker, now: Instant, below: Option<f32>, drawn: &mut Drawn) {
+fn top_right(pen: &mut Pen, shown: &Shown, tracker: &Tracker, now: Instant, drawn: &mut Drawn) {
     pen.corner = Corner::TopRight;
     let (right, mut top) = TOP_RIGHT;
-    if let Some(y) = below {
-        top = top.max((y - pen.view[1]) / pen.s + 0.7 * EM);
-    }
     if let Some(p) = &shown.markers {
         // Never nearer than an EM to the score bar's right (P139), in this corner's layout x.
         let least = overlay::LAYOUT.0 - pen.view[2] / pen.s + SCORE_BAR[0] + SCORE_BAR[2] + EM;
@@ -1556,16 +1550,49 @@ impl FpsMeter {
 /// above [`TOP_RIGHT`]'s pieces, small, in the frame's own corner and not a split view's.
 const FPS_AT: (f32, f32) = (640.0 - 0.9 * EM, 2.0 * EM);
 
+/// The counter's size, in the disc's 640x448.
+const FPS_SIZE: f32 = 1.1 * EM;
+
+/// Where the counter stands in the frame `view` at the HUD's `s` while the touch pad is up (P323):
+/// the frame box (left, top, right, bottom) kept for its widest, "000 FPS", the speedometer under
+/// it ([`to_the_top_left`]). Right of the score bar and level with its words where that is left of
+/// CAMERA, else under CAMERA and PAUSE, right of the score bar and of CLUTCH under it.
+fn fps_by_the_score(view: [f32; 4], s: f32, room: Room) -> [f32; 4] {
+    let [x, y, w, h] = SCORE_BAR;
+    let wide = (Pen::measure(Face::Words, Weight::Heavy, "000 FPS", FPS_SIZE) + 0.2 * EM) * s;
+    let cap = Pen::cap(Face::Words, FPS_SIZE) * s;
+    let left = view[0] + (x + w + 0.8 * EM) * s;
+    let base = view[1] + (y + h / 2.0 + Pen::cap(Face::Words, EM) / 2.0) * s;
+    if left + wide <= room.left_of_the_camera() {
+        return [left, base - cap, left + wide, base + 0.2 * EM * s];
+    }
+    let (clutch, _) = room.clutch();
+    let (left, top) = (left.max(clutch), room.under_the_top().max(base - cap));
+    [left, top, left + wide, top + cap + 0.2 * EM * s]
+}
+
 /// The Show FPS counter `text` (a [`FpsMeter::text`]) in frame `view`'s top right, as sprites into
 /// `out`, [`images`] counted from `base`, at the HUD scale `scale`: once over the whole frame, after
 /// every view's HUD, on the GPU and (by [`fps_draw`]) the software path alike.
 pub fn fps_sprites(out: &mut Vec<Sprite>, base: usize, view: [f32; 4], scale: f32, text: &str) -> Line {
+    fps_sprites_clear_of(out, base, view, None, scale, text)
+}
+
+/// [`fps_sprites`], with the touch pad over the frame where `pad` says it is: then top left, right
+/// of the score bar, the speedometer under it (P323).
+pub fn fps_sprites_clear_of(out: &mut Vec<Sprite>, base: usize, view: [f32; 4], pad: Option<Room>, scale: f32, text: &str) -> Line {
     let s = scale_of(view[2], view[3], scale);
-    let mut pen = Pen { out, view, s, base, corner: Corner::TopRight, alpha: 1.0 };
-    let size = 1.1 * EM;
-    let (right, base_y) = FPS_AT;
-    let w = Pen::measure(Face::Words, Weight::Heavy, text, size);
-    let rect = pen.edged(Face::Words, Weight::Heavy, text, (right - w, base_y), size, 0.0, CHALK, shade(200), 0.08 * EM);
+    let w = Pen::measure(Face::Words, Weight::Heavy, text, FPS_SIZE);
+    let (corner, at) = match pad {
+        Some(room) => {
+            let b = fps_by_the_score(view, s, room);
+            let cap = Pen::cap(Face::Words, FPS_SIZE);
+            (Corner::TopLeft, ((b[0] - view[0]) / s, (b[1] - view[1]) / s + cap))
+        }
+        None => (Corner::TopRight, (FPS_AT.0 - w, FPS_AT.1)),
+    };
+    let mut pen = Pen { out, view, s, base, corner, alpha: 1.0 };
+    let rect = pen.edged(Face::Words, Weight::Heavy, text, at, FPS_SIZE, 0.0, CHALK, shade(200), 0.08 * EM);
     Line { text: text.to_string(), rect, colour: CHALK }
 }
 

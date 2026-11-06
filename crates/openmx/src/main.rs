@@ -9911,7 +9911,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             // The Show FPS counter (2026-10-29), once over the whole frame, under the pause.
             if show_fps {
                 let whole = [0.0, 0.0, frame.width as f32, frame.height as f32];
-                ride_hud::fps_sprites(&mut gpu_sprites, hud_base, whole, f32::from(hud_scale) / 100.0, &fps_meter.text());
+                // top left by the score while the touch pad is up (P323)
+                let pad = menu::touch_room::Room::of((frame.width, frame.height));
+                ride_hud::fps_sprites_clear_of(&mut gpu_sprites, hud_base, whole, pad, f32::from(hud_scale) / 100.0, &fps_meter.text());
             }
             if let Some(front) = front.as_deref_mut() {
                 // As sprites (V30), after the HUDs' and so over them; the patches go under both. Over a
