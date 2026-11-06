@@ -2682,6 +2682,65 @@ fn argv() -> Vec<String> {
     return crate::page_args();
 }
 
+/// A phone (P324): its line a second says where the frame went, as `--timings` does on the desktop.
+const PHONE: bool = cfg!(any(target_os = "ios", target_os = "android"));
+
+/// The second's frames for the line a second (P324): the widest gap between two frames' ends —
+/// the frame a rider sees stall, which waits on the display as well as on the work — and the GPU's
+/// own time for each frame it timed, the average and the dearest.
+#[derive(Default)]
+struct FrameSecond {
+    last: Option<Instant>,
+    widest: Duration,
+    gpu: Duration,
+    gpu_worst: Duration,
+    timed: u32,
+    /// Whether the renderer has timestamps at all, for saying so rather than nothing.
+    timer: bool,
+    /// The present stage's wait on the window — a phone's acquire and present, the rest of that
+    /// stage its draw's encoding — and the frames it counts over.
+    waited: Duration,
+    frames: u32,
+    /// The most sprites a frame drew over the views (the HUD and the pause).
+    sprites: usize,
+}
+
+impl FrameSecond {
+    fn frame(&mut self, now: Instant, waited: Duration, sprites: usize) {
+        self.waited += waited;
+        self.frames += 1;
+        self.sprites = self.sprites.max(sprites);
+        if let Some(last) = self.last {
+            self.widest = self.widest.max(now.duration_since(last));
+        }
+        self.last = Some(now);
+    }
+
+    fn gpu(&mut self, timer: bool, times: &[(Duration, f32)]) {
+        self.timer = timer;
+        for (t, _) in times {
+            self.gpu += *t;
+            self.gpu_worst = self.gpu_worst.max(*t);
+            self.timed += 1;
+        }
+    }
+
+    /// `widest gap 25.0 ms, waited 6.10 ms a frame, 420 sprites, gpu 9.10 ms a frame (worst
+    /// 12.40)`, and start again.
+    fn line(&mut self) -> String {
+        let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+        let gpu = match (self.timer, self.timed) {
+            (false, _) => "gpu not timed here".to_string(),
+            (true, 0) => "gpu no frame timed".to_string(),
+            (true, n) => format!("gpu {:.2} ms a frame (worst {:.2})", ms(self.gpu) / f64::from(n), ms(self.gpu_worst)),
+        };
+        let waited = ms(self.waited) / f64::from(self.frames.max(1));
+        let line = format!("widest gap {:.1} ms, waited {waited:.2} ms a frame, {} sprites, {gpu}", ms(self.widest), self.sprites);
+        *self = FrameSecond { last: self.last, timer: self.timer, ..FrameSecond::default() };
+        line
+    }
+}
+
 /// A `--timings` line: standard output on the desktop; in the browser, whose standard output goes
 /// nowhere, the page's console (P205: the ride's profile in headless chromium).
 fn timing(line: String) {
@@ -7308,6 +7367,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // What each stage of the frame costs (P47), for `--timings` and for the line the session ends on.
     let mut stages = Stages::new();
     let mut stages_since = Instant::now();
+    // The phone's line a second (P324): the frame's stages, the widest gap between two frames and
+    // the GPU's own time, which `--timings` gives the desktop.
+    let mut second = FrameSecond::default();
     // The disc reads, texture decodes and bytes read by the end of the first frame: none should
     // follow.
     let mut loaded: Option<(game_render::tally::Tally, Option<u64>)> = None;
@@ -9474,6 +9536,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         // nothing below writes the simulation.
         let blend = pace::Blend(pacer.blend(moment));
         let drawing_at = Instant::now();
+        // The window's wait this frame, for the line a second (P324).
+        let mut frame_waited = Duration::ZERO;
         // A tick sent off above runs on the sim thread while this picture is drawn (N23a).
         let drawn = sim_thread::beside(sim_worker.as_ref().zip(flight.as_mut()), Ticking::run, || -> Result<(), String> {
         // A world's pieces fading in over their stand-in (V92), on the picture's own clock.
@@ -10177,6 +10241,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     // Judged on the GPU's own time where it has timestamps (V122); without, on the
                     // draw's wall time, leaving out frames the CPU made late.
                     let gpu_times = w.renderer.gpu_times();
+                    second.gpu(w.renderer.timed(), &gpu_times);
                     let cpu = scale_frame_at.map_or(Duration::ZERO, |(t, w)| spent.duration_since(t).saturating_sub(w));
                     scale_frame_at = Some((spent, waited));
                     if render_scale.is_none() {
@@ -10202,6 +10267,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             };
             perf.add(Stage::Draw, draw_at.elapsed().saturating_sub(waited));
             perf.add(Stage::Present, waited);
+            frame_waited = waited;
             if let Some(front) = front.as_deref_mut().filter(|f| tuning && f.menu.settings.video_auto) {
                 let now = Instant::now();
                 let dt = tune_at.map_or(0.0, |t| now.duration_since(t).as_secs_f32());
@@ -10697,8 +10763,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         if let Some(slow) = stages.take_slow().filter(|_| args.timings) {
             timing(format!("     {slow} at tick {}", pacer.ticks()));
         }
+        second.frame(Instant::now(), frame_waited, if gpu_on { gpu_sprites.len() } else { 0 });
         if args.timings && stages_since.elapsed() >= Duration::from_secs(1) {
-            timing(format!("     {}; {}", stages.line(), stages.worst_line()));
+            timing(format!("     {}; {}; {}", stages.line(), stages.worst_line(), second.line()));
+            stages_since = Instant::now();
+        } else if PHONE && stages_since.elapsed() >= Duration::from_secs(1) {
+            println!("     {}; {}", stages.brief(), second.line());
             stages_since = Instant::now();
         }
         top = Instant::now();

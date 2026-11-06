@@ -490,3 +490,18 @@ P301 in it:
    Improvements → Analytics Data).
 
 Over ~2000 MB anywhere is P301b's to cut (P301a has held the ground lean on a phone since). Whether the GPU or the rest grows tells which part to cut.
+
+## Where the iPhone's frame goes (P324)
+
+P324 makes the phone's line a second say where each frame's time goes. The fps line is followed by
+`ms a frame: … ; worst … ; widest gap N ms, waited N ms a frame, N sprites, gpu …`. The desktop holds 60 in
+the ride and in the pause, so only a phone log can say what costs the phone. About 10 minutes, on a build with
+P324 in it:
+
+1. Ride world_mxu_free (or any track) for two or three minutes with the controller connected.
+2. Open the pause and leave it up for about 20 s. Close it, ride a minute more, and open it once more for 20 s.
+   If it drops to 40 fps, open the screens you usually visit (Controllers, Settings, Tricks) while it is slow.
+3. Send `Documents/openmx-log.txt` back (LocalSend into the repo's context/, or research/p324/).
+
+The lines that matter are the `ms a frame:` lines under the 40 fps pause seconds and under the riding seconds
+that read 57–59 fps.
