@@ -3481,10 +3481,12 @@ async fn front_end(args: Args) -> Result<(), String> {
             })
             .collect();
         // The touch pad handed 1P to a controller, or took it back (P212, PadSlots::hand_over): the
-        // menus follow, rather than lose 1P and bring the splash back.
-        #[cfg(target_os = "ios")]
+        // menus follow, rather than lose 1P and bring the splash back. The phones' and, since P321,
+        // the page's touch pad, which a pad connecting mid-ride takes 1P from.
+        #[cfg(any(target_os = "ios", target_os = "android", target_arch = "wasm32"))]
         if let (Some(Dev::Pad(was)), Some(Device::Pad(to))) = (shell.front.menu.p1().cloned(), seats.first().cloned())
             && was != to
+            && (cfg!(not(target_arch = "wasm32")) || pad::is_touch(&was) || pad::is_touch(&to))
         {
             let dev = Dev::Pad(to);
             let name = dev_name(seats, &dev);

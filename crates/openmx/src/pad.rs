@@ -1859,10 +1859,11 @@ impl<P: Clone + PartialEq> PadSlots<P> {
     /// `present` being every pad listed: a controller turning up while the touch pad is not listed
     /// takes the seats the touch pad had, and the touch pad, listed again once every controller is
     /// gone, takes the seats they were waiting in. The controller it took them from takes them back
-    /// when it is listed again, even beside the touch pad mid-ride (P297): iOS drops the controllers
-    /// around a trip out of the app and back, and the touch pad shows in the gap, so it is 1P's own
-    /// controller coming back and not a second player. Any other controller turning up mid-ride,
-    /// with the touch pad kept beside it ([`crate::ios`]'s `touch_seat`), joins as one.
+    /// when it is listed again, even beside the touch pad (P297): iOS drops the controllers around a
+    /// trip out of the app and back, and the touch pad shows in the gap, so it is 1P's own controller
+    /// coming back and not a second player. The touch pad is never listed beside a controller
+    /// ([`touch_listed`]), so the first controller takes the touch player's seats mid-ride as in the
+    /// menus, with no split beside the touch pad (P321); a second joins as 2P as usual.
     pub fn touch_swap(&mut self, touch: &P, present: &[P]) {
         if !self.in_use(touch) {
             self.handed = None;
@@ -1890,15 +1891,19 @@ impl<P: Clone + PartialEq> PadSlots<P> {
         }
     }
 
+    /// The first pad `which` picks that holds a seat, waits in one, or is 1P's device.
+    #[cfg(target_arch = "wasm32")]
+    pub fn in_use_by(&self, which: &dyn Fn(&P) -> bool) -> Option<P> {
+        let first = match &self.first {
+            Some(Device::Pad(p)) => Some(p),
+            _ => None,
+        };
+        self.held.iter().chain(&self.last).flatten().chain(first).find(|p| which(p)).cloned()
+    }
+
     /// Whether `p` holds a seat, waits in one, or is 1P's device.
     pub fn in_use(&self, p: &P) -> bool {
         self.claimed(p) || self.first == Some(Device::Pad(p.clone()))
-    }
-
-    /// Whether `p` is in use and not taken off every seat by the Controllers screen: the touch pad's
-    /// test for staying on the screen ([`crate::ios::touch_seat`]).
-    pub fn wanted(&self, p: &P) -> bool {
-        self.in_use(p) && !self.off.contains(p)
     }
 
     /// Whether a pad already has a seat, or is the pad a waiting seat is waiting for, or was taken
@@ -2585,6 +2590,14 @@ pub fn is_touch(id: &str) -> bool {
     id.contains(TOUCH_PAD)
 }
 
+/// Whether the phone lists its touch pad beside `controllers` connected ones (P321): only beside
+/// none. The first controller takes the touch player's seat ([`PadSlots::touch_swap`]), in the menus
+/// and mid-ride alike, and the touch controls go; never a split with the touch pad as a player.
+#[cfg(any(target_os = "ios", target_os = "android", test))]
+pub fn touch_listed(controllers: usize) -> bool {
+    controllers == 0
+}
+
 /// How long 1P's pad sits untouched before a keyboard press takes 1P back (P210).
 pub const IDLE_US: u64 = 5_000_000;
 
@@ -2908,7 +2921,7 @@ impl Seats {
     }
 
     /// Read every pad, and notice the ones that went and the ones that came.
-    fn poll(&mut self, riding: bool) {
+    fn poll(&mut self) {
         for j in &mut self.joined {
             j.pads.drain();
         }
@@ -2917,21 +2930,29 @@ impl Seats {
             self.scan();
         }
         let present: Vec<String> = self.joined.iter().map(|j| j.id.clone()).collect();
-        #[cfg(any(target_os = "ios", target_os = "android"))]
-        self.touch_hand_over(&present, riding);
-        #[cfg(not(any(target_os = "ios", target_os = "android")))]
-        let _ = riding;
+        #[cfg(any(target_os = "ios", target_os = "android", target_arch = "wasm32"))]
+        self.touch_hand_over(&present);
         self.slots.update(&present);
     }
 
     /// The touch pad and the controllers hand the touch player's seats to each other
-    /// ([`PadSlots::touch_swap`]), and the pad layer tells the touch pad whether it is still wanted
-    /// ([`crate::ios::touch_seat`]).
+    /// ([`PadSlots::touch_swap`]).
     #[cfg(any(target_os = "ios", target_os = "android"))]
-    fn touch_hand_over(&mut self, present: &[String], riding: bool) {
+    fn touch_hand_over(&mut self, present: &[String]) {
         let touch = DeviceInfo { name: crate::phone::TOUCH_NAME.into(), ..DeviceInfo::default() }.identity(std::path::Path::new(""));
         self.slots.touch_swap(&touch, present);
-        crate::phone::touch_seat(self.slots.wanted(&touch), riding);
+    }
+
+    /// The page's touch pad (web/touch.js), listed only while riding with no real pad connected,
+    /// hands its seats over as the phone's does (P321): a pad connecting mid-ride takes 1P from it
+    /// rather than ride 2P beside a 1P paused for it. Its id is whichever one [`is_touch`] knows,
+    /// listed now or holding a seat.
+    #[cfg(target_arch = "wasm32")]
+    fn touch_hand_over(&mut self, present: &[String]) {
+        let touch = present.iter().find(|p| is_touch(p)).cloned().or_else(|| self.slots.in_use_by(&|p: &String| is_touch(p)));
+        if let Some(touch) = touch {
+            self.slots.touch_swap(&touch, present);
+        }
     }
 
     /// A menu frame (P46): every device's own report, the keyboard's first and then each pad
@@ -2941,7 +2962,7 @@ impl Seats {
     /// Each comes with its presses since the last frame ([`Pads::taps`]), which the report also
     /// holds down: a press and release inside one slow frame still reaches the menus (P53).
     pub fn devices(&mut self, held: &dyn Fn(u8) -> bool) -> Vec<(Device<String>, Report, u16)> {
-        self.poll(false);
+        self.poll();
         self.keyboard_alone = None;
         self.keys.scheme = self.keys_scheme();
         let keys = self.keys.report(held);
@@ -3209,7 +3230,7 @@ impl Seats {
     /// This frame: read every pad, notice the ones that went and the ones that came, and build each
     /// seat's report. `held` is the keyboard.
     pub fn frame(&mut self, held: &dyn Fn(u8) -> bool) -> [SeatInput; SEATS] {
-        self.poll(true);
+        self.poll();
 
         // The keyboard can take a waiting seat over: Start on its keys lets the seat's pad go and
         // rides on, as opentennis's keyboard plays on for a 1P whose pad is out.
@@ -4127,7 +4148,7 @@ pub(crate) mod tests {
 
     /// P297: iOS drops the controller around a trip out of the app and lists it again as a new
     /// object, so a new place, a moment after the shell is back — mid-ride, with the touch pad
-    /// shown in the gap and kept for 1P. The pad keeps its seat all the same.
+    /// shown in the gap for 1P. The pad keeps its seat all the same.
     #[test]
     fn a_pad_that_drops_and_reconnects_with_a_new_index_keeps_its_seat() {
         let touch = "touch".to_string();
@@ -4149,15 +4170,8 @@ pub(crate) mod tests {
         s.update(&[touch.clone()]);
         assert_eq!(s.held[..2], [Some(touch.clone()), None]);
         assert!(s.waiting(1));
-        // The controllers are listed again with the touch pad still shown (kept mid-ride): each
-        // takes its own seat back, and the touch pad none, not even for the poll it is still listed.
-        let present = [b.clone(), a.clone(), touch.clone()];
-        s.touch_swap(&touch, &present);
-        s.update(&present);
-        assert_eq!(s.held[..3], [Some(a.clone()), Some(b.clone()), None]);
-        assert_eq!(s.first(), Some(&Device::Pad(a.clone())));
-        assert!(!s.wanted(&touch), "the touch pad hides");
-        // And it is gone the poll after, leaving no seat waiting for it.
+        // The controllers are listed again, the touch pad off the list (P321): each takes its own
+        // seat back, leaving no seat waiting for the touch pad.
         let present = [b.clone(), a.clone()];
         s.touch_swap(&touch, &present);
         s.update(&present);
@@ -4166,29 +4180,48 @@ pub(crate) mod tests {
         assert!(!s.in_use(&touch));
     }
 
-    /// P297: but a controller nobody had, connecting mid-ride beside the touch pad, is a second
-    /// player, as P212 has it: the touch pad keeps 1P.
+    /// P321: a controller nobody had, connecting mid-ride while the touch pad is 1P, takes 1P — no
+    /// split with the touch pad as one of the players, and the touch pad goes off the list (the
+    /// touch controls hide). Its disconnect gives 1P back to the touch pad; a second controller
+    /// joins as 2P as usual.
     #[test]
-    fn a_new_controller_mid_ride_still_joins_beside_the_touch_pad() {
-        let (touch, a, c) = ("touch".to_string(), "a".to_string(), "c".to_string());
+    fn a_controller_mid_ride_takes_1p_from_the_touch_pad() {
+        let (touch, c, d) = ("touch".to_string(), "c".to_string(), "d".to_string());
+        // The phone's list: the controllers, and the touch pad only beside none.
+        let listed = |pads: &[&String]| -> Vec<String> {
+            let mut out: Vec<String> = pads.iter().map(|p| (*p).clone()).collect();
+            if touch_listed(pads.len()) {
+                out.push(touch.clone());
+            }
+            out
+        };
         let mut s = PadSlots::<String>::default();
         s.set_first(Some(Device::Pad(touch.clone())));
-        s.touch_swap(&touch, &[touch.clone()]);
-        s.update(&[touch.clone()]);
-        s.touch_swap(&touch, &[a.clone()]);
-        s.update(&[a.clone()]);
-        // `a` goes and the touch pad takes 1P; then `c`, not `a`, connects.
-        s.touch_swap(&touch, &[touch.clone()]);
-        s.update(&[touch.clone()]);
-        let present = [touch.clone(), c.clone()];
-        s.touch_swap(&touch, &present);
-        s.update(&present);
-        assert_eq!(s.held[..2], [Some(touch.clone()), Some(c.clone())]);
-        // `a` back later still takes 1P back from the touch pad.
-        let present = [touch.clone(), c.clone(), a.clone()];
-        s.touch_swap(&touch, &present);
-        s.update(&present);
-        assert_eq!(s.held[0], Some(a));
+        let poll = |s: &mut PadSlots<String>, present: &[String]| {
+            s.touch_swap(&touch, present);
+            s.update(present);
+        };
+        poll(&mut s, &listed(&[]));
+        assert_eq!(s.held[..2], [Some(touch.clone()), None]);
+        s.set_riding(&[0]);
+        // `c` connects mid-ride: the touch pad is off the list the same poll, and `c` holds 1P.
+        let present = listed(&[&c]);
+        assert!(!present.contains(&touch), "the touch controls hide");
+        poll(&mut s, &present);
+        assert_eq!(s.held[..2], [Some(c.clone()), None], "no split");
+        assert_eq!(s.first(), Some(&Device::Pad(c.clone())));
+        assert!(!(0..SEATS).any(|i| s.waiting(i)), "nobody waits for the touch pad");
+        assert!(!s.in_use(&touch));
+        // A second controller joins as 2P.
+        poll(&mut s, &listed(&[&c, &d]));
+        assert_eq!(s.held[..3], [Some(c.clone()), Some(d.clone()), None]);
+        // Both go: the touch pad is listed again and is 1P; 2P waits for `d`.
+        let present = listed(&[]);
+        assert_eq!(present, [touch.clone()]);
+        poll(&mut s, &present);
+        assert_eq!(s.held[0], Some(touch.clone()));
+        assert_eq!(s.first(), Some(&Device::Pad(touch.clone())));
+        assert!(!s.waiting(0));
     }
 
     #[test]
@@ -4208,22 +4241,6 @@ pub(crate) mod tests {
         let mut p = Places::default();
         assert_eq!(p.place(&[(1, "a"), (2, "b")], 2), [Some(0), Some(1)]);
         assert_eq!(p.place(&[(2, "b"), (3, "c"), (4, "d")], 2), [Some(1), Some(0), None]);
-    }
-
-    #[test]
-    fn a_touch_pad_taken_off_every_seat_is_not_wanted() {
-        // The touch pad (16) kept for 1P beside a controller (0) that joined mid-ride; the
-        // Controllers screen gives 1P the controller and the touch pad no seat, so it hides.
-        let (touch, pad) = (16u32, 0);
-        let mut s = PadSlots::<u32>::default();
-        s.set_first(Some(Device::Pad(touch)));
-        s.update(&[touch, pad]);
-        assert!(s.wanted(&touch));
-        let mut seats = std::array::from_fn(|_| None);
-        seats[0] = Some(Device::Pad(pad));
-        s.assign(&seats, &[touch, pad]);
-        assert!(s.in_use(&touch) && !s.wanted(&touch), "off every seat");
-        assert!(s.wanted(&pad));
     }
 
     #[test]
