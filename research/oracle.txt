@@ -505,6 +505,18 @@ stunt_ai_choice             boot 0x00280df0 (airtime in f12, obj in a0, out in a
 #                                           and whose name is not "throwaway", picked with rand()
 ai_gesture_gate             boot 0x00280f30 (obj) the AI's wrapper: read the pad only when no trick is
 #                                           being restarted and none is in progress
+#                                           (+0x10d0 non-zero: the AI brain pointer; S12d)
+ai_ask_for                  boot 0x00280f00 (obj, slot) -> 1 for slot 0..23: requested = slot,
+#                                           restart = 1, armed = 0. Vtable-only (thunk 0x00281bd0)
+ai_stunt_vtable             boot 0x004550e4 the rider's AI-interface vtable (the sub-object at rider
+#                                           +0x10d0, vptr at its +8): +0x14 ask_for, +0x24 the choice,
+#                                           both through thunks that take 0x10d0 off `this`
+ai_trick_plan               boot 0x00283660 (dt in f12, brain in a0) the AI brain's trick decision:
+#                                           +0x40 the interface, +0x30 flags, +0x224 route node (+4
+#                                           flags, 0x20 jump; +0x48 air time), +0x158 cool-down, +0x15c
+#                                           since, +0x160 chance, +0x19c estimate, +0x1a0 slot, +0x200
+#                                           air clock, +0x54 vertical speed, +0xc4 height, +0x204 ground
+#                                           (copied by 0x0027fb30)
 #
 # The clocks and the landing. Both call the motion library through the rider's vtable, so neither is a
 # pure function of RAM; both are proved anyway, by aiming the vtable at a table of hooked addresses. The

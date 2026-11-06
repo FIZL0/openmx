@@ -20,11 +20,18 @@
 //! [`controls`] is an AI rider's per-tick ground controller (S12b): the bar, lean, throttle and brake
 //! that take its bike the way and at the speed the route follower asks for. The route follower, the
 //! character file its [`Tuning`] comes from and the tick around it are later pieces of S12.
+//!
+//! [`plan_trick`] is when an AI rider asks for a trick and which (S12d): once a frame, off the ground
+//! and with its cool-down spent, it estimates how long it has left in the air, rolls its trick
+//! chance, and hands the estimate to the trick table's own chooser ([`Set::ai_choice`]); what that
+//! picks is asked for with [`ask_for`]. [`gesture_gate`] is the AI rider's side of the trick request:
+//! while an asked-for trick is starting or running it does not read the pad at all.
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
 use crate::camera::CurveTable;
 use crate::ragdoll::{FineAcos, Tables};
 use crate::rng::Rng;
+use crate::trick::{Bike, Params, SLOTS, Set, Trick, Tricks};
 use ps2_float::{Dest, F, Vf, fpu, vu};
 
 /// The first rider-database entry an AI rider can be. The entries before it are never drawn.
@@ -235,6 +242,18 @@ pub mod flag {
     pub const CRUISE: u64 = 0x1000_0000;
     /// Grade the brake by how far over the target speed the bike is.
     pub const GRADED_BRAKE: u64 = 0x2000_0000;
+    /// The rider may trick at all. The AI's set-up turns it on.
+    pub const TRICKS: u64 = 0x2;
+    /// The rider has been on the ground since its last flight's trick roll, so this flight may roll.
+    /// Cleared by a failed roll or an unspent cool-down; a roll that picks a trick leaves it set.
+    pub const TRICK_READY: u64 = 0x8;
+    /// Holds tricks off, as [`ON_GROUND`] does. Nothing traced sets it (see the S12d journal).
+    pub const NO_TRICKS: u64 = 0x10;
+    /// Estimate the air time from the vertical speed and the height over the ground rather than from
+    /// the route's jump. The AI's set-up turns it on.
+    pub const BALLISTIC: u64 = 0x2000;
+    /// A trick was asked for in this flight: the landing restarts the cool-down.
+    pub const TRICKED: u64 = 0x8_0000;
 }
 
 const PI: f32 = 3.1415927;
@@ -410,6 +429,144 @@ pub fn controls(tables: &Tables, at: &Situation, tune: &Tuning) -> Controls {
         roll,
         flat_forward: p,
         target_speed,
+    }
+}
+
+/// The route node the AI rider is heading for, as far as the trick decision reads it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Jump {
+    /// The node's flag word: [`JUMP`] marks a take-off.
+    pub flags: u32,
+    /// How long the route's jump keeps the bike in the air.
+    pub airtime: F,
+}
+
+/// A route node's flag bit: the node is a jump's take-off.
+pub const JUMP: u32 = 0x20;
+
+/// An AI rider's trick clocks and the dice it rolls against.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TrickPlan {
+    /// The shortest time from one trick's landing to the next roll (10 s from the AI's set-up).
+    pub cooldown: F,
+    /// The time since the last trick's landing. Only runs on the frames the rider cannot roll.
+    pub since: F,
+    /// The chance of a trick each frame a roll is made, in percent (10 from the AI's set-up).
+    pub chance: F,
+    /// The air time the last roll expected.
+    pub estimate: F,
+    /// The slot the chooser last picked. A chooser that finds nothing leaves it alone.
+    pub slot: i32,
+    /// The time in the air in this flight.
+    pub air: F,
+}
+
+/// What the trick decision reads off the rider.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Flight {
+    /// The bike's vertical speed.
+    pub vertical_speed: F,
+    /// The bike's height, and the ground's under it.
+    pub height: F,
+    pub ground: F,
+    /// The route node it is heading for, if it has one.
+    pub jump: Option<Jump>,
+}
+
+/// The rider's "do this trick" call: any of the 24 gesture slots is asked for at once, as though its
+/// gesture had been made, and the gesture is disarmed. Anything else is refused.
+pub fn ask_for(tricks: &mut Tricks, slot: i32) -> bool {
+    if !(0..SLOTS as i32).contains(&slot) {
+        return false;
+    }
+    tricks.requested = Trick(slot as u8);
+    tricks.restart = true;
+    tricks.gesture.armed = false;
+    true
+}
+
+/// Whether the AI rider's trick request holds without reading the pad: an AI-driven rider with a trick
+/// asked for and not yet started, or one running.
+pub fn gate_holds(ai_driven: bool, tricks: &Tricks) -> bool {
+    ai_driven && (tricks.restart || tricks.in_progress)
+}
+
+/// The AI rider's trick request: [`gate_holds`], or the human rider's [`Tricks::request`] from the pad.
+/// Returns whether a trick is wanted or running.
+pub fn gesture_gate(ai_driven: bool, tricks: &mut Tricks, set: &Set, bike: Bike, params: Params) -> bool {
+    gate_holds(ai_driven, tricks) || tricks.request(set, bike, params)
+}
+
+/// One frame of the AI rider's trick decision.
+///
+/// A rider (`rider` is `None` when the AI has none attached) rolls when it may trick, is in the air
+/// with [`flag::TRICK_READY`] set and nothing holding tricks off, and is either over a jump's take-off
+/// or estimating ballistically:
+///
+/// * with less than `cooldown` since the last trick's landing, it gives up for this flight;
+/// * the estimate is the route jump's air time less the time already in the air, or — ballistic —
+///   a sixteenth of the vertical speed while rising, and while falling a thirty-second of it plus the
+///   root of a sixteenth of the height over the ground;
+/// * `100 × unit()` over `chance` gives up for this flight; otherwise the chooser gets the estimate
+///   less half a second, and a trick it picks is asked for and marks the flight [`flag::TRICKED`].
+///
+/// A frame that does not roll runs `since`, and on the ground re-readies the next flight. Last, the air
+/// clock runs off the ground; on it, it stops, and a tricked flight's landing zeroes `since`.
+///
+/// A roll that picks a trick leaves the flight ready, so the next frame in the air rolls again and may
+/// ask for another — the original's, and kept.
+pub fn plan_trick(
+    dt: F,
+    flags: &mut u64,
+    plan: &mut TrickPlan,
+    at: Flight,
+    rider: Option<(&Set, &mut Tricks)>,
+    rng: &mut Rng,
+) {
+    let f = *flags;
+    let over_jump = at.jump.is_some_and(|j| j.flags & JUMP != 0);
+    let rolls = rider.is_some()
+        && f & flag::TRICK_READY != 0
+        && f & flag::TRICKS != 0
+        && f & (flag::NO_TRICKS | flag::ON_GROUND) == 0
+        && (over_jump || f & flag::BALLISTIC != 0);
+    if !rolls {
+        plan.since = plan.since + dt;
+        if *flags & flag::ON_GROUND != 0 {
+            *flags |= flag::TRICK_READY;
+        }
+    } else if plan.since < plan.cooldown {
+        *flags &= !flag::TRICK_READY;
+    } else {
+        plan.estimate = if f & flag::BALLISTIC == 0 {
+            // Only reached over a jump: the ballistic flag is the other way in.
+            at.jump.map_or(F::ZERO, |j| j.airtime) - plan.air
+        } else if at.vertical_speed <= F::ZERO {
+            let fall = (F(0.0625) * (at.height - at.ground)).sqrt();
+            F(0.03125) * at.vertical_speed + fall
+        } else {
+            F(0.0625) * at.vertical_speed
+        };
+        let roll = F(100.0) * rng.unit();
+        if !(roll <= plan.chance) {
+            *flags &= !flag::TRICK_READY;
+        } else if let Some((set, tricks)) = rider {
+            if let Some(slot) = set.ai_choice(plan.estimate - F(0.5), rng) {
+                plan.slot = slot as i32;
+                ask_for(tricks, plan.slot);
+                *flags |= flag::TRICKED;
+            }
+        }
+    }
+
+    if *flags & flag::ON_GROUND == 0 {
+        plan.air = plan.air + dt;
+    } else {
+        if *flags & flag::TRICKED != 0 {
+            plan.since = F::ZERO;
+            *flags &= !flag::TRICKED;
+        }
+        plan.air = F::ZERO;
     }
 }
 
