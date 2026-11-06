@@ -898,3 +898,159 @@ fn a_ridden_flip_shows_only_once_the_watch_comes_round() {
     assert_eq!(told, None, "a backflip's start was told: the original's rider tells none");
     assert_eq!(total, score::BACKFLIP_POINTS, "the landed flip banked {}", total.0);
 }
+
+/// What one of R35's captures (`capture/r35/`, research/r35's tapes: recording2's first backflip with
+/// its torque bled off by a forward stick from a chosen field) did, and what the port's card did
+/// beside it, driven by the captured wheels, air, attitude, wreck and trick clocks as
+/// [`recording2s_points`] drives it.
+struct Partial {
+    rows: usize,
+    /// Rows that match the port at none of the three read phases.
+    torn: Vec<String>,
+    /// The highest backflip watch stage: the capture's, the port's.
+    stage: (i64, u8),
+    /// The banks, (frame, total).
+    banks: Vec<(i64, f32)>,
+    /// Did a backflip node (24) ever go on the card: the capture's, the port's.
+    flipped: (bool, bool),
+}
+
+fn partial(name: &str) -> Option<Partial> {
+    let Ok(kit) = Kit::load() else {
+        skip("no kit.toml: R35's partial backflips are unchecked");
+        return None;
+    };
+    let path = kit.ctx("capture").join("r35").join(name);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        skip(&format!("no {} — play research/r35's tape for it (research/r35/README.md)", path.display()));
+        return None;
+    };
+    let cap = replay::Capture::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let col = |name: &str| {
+        cap.columns.iter().position(|c| c == name).unwrap_or_else(|| panic!("no column {name} in {}", path.display()))
+    };
+    let cell = |k: usize, c: usize| cap.rows[k][c].as_str();
+    let int = |k: usize, c: usize| -> i64 { cell(k, c).parse().unwrap_or_else(|_| panic!("row {k}: {:?}", cell(k, c))) };
+    let float = |k: usize, c: usize| -> f32 { cell(k, c).parse().unwrap_or_else(|_| panic!("row {k}: {:?}", cell(k, c))) };
+    let [frame, dt, wreck, airborne] = ["frame", "dt", "wreck_reason", "airborne"].map(|n| col(n));
+    let [id, running, elapsed] = ["trick_id", "trick_running", "trick_elapsed"].map(|n| col(n));
+    let [front, rear, speed, hang, up, fwd] =
+        ["front_contact", "rear_contact", "contact_speed", "hang_time", "body_up_y", "body_fwd_y"].map(|n| col(n));
+    let [flip, flags, count, total, combo] =
+        ["flip_stage", "card_flags", "card_count", "card_total", "card_combo"].map(|n| col(n));
+    let [node_id, node_points, clock] = ["node_id", "node_points", "mgr_clock"].map(|n| col(n));
+    let n = cap.rows.len();
+    for k in 1..n {
+        assert_eq!(int(k, frame), int(k - 1, frame) + 1, "{}: a gap before row {k}: re-record it slower", path.display());
+    }
+    let shown = |k: usize| {
+        let node =
+            if cell(k, node_id).is_empty() { "-".to_string() } else { format!("{}:{}", int(k, node_id), float(k, node_points)) };
+        format!(
+            "flags {:x} count {} total {} combo {} head {node} flip {}",
+            int(k, flags) & 0xe0,
+            int(k, count),
+            float(k, total),
+            float(k, combo),
+            int(k, flip)
+        )
+    };
+    let ours = |s: &Score| {
+        let node = s.nodes.first().map_or("-".to_string(), |h| format!("{}:{}", h.id, h.points.0));
+        let f = u32::from(s.combo) * 0x20 | u32::from(s.scoring) * 0x40 | u32::from(s.growing) * 0x80;
+        format!(
+            "flags {f:x} count {} total {} combo {} head {node} flip {}",
+            s.nodes.len(),
+            s.total.0,
+            s.combo_points.0,
+            s.flip
+        )
+    };
+    assert_eq!(float(0, total), 0.0, "{}: the capture does not start on an empty card", path.display());
+    let mut port = Score::default();
+    let mut out = Partial { rows: n, torn: Vec::new(), stage: (0, 0), banks: Vec::new(), flipped: (false, false) };
+    for k in 1..n {
+        let d = F(float(k, dt));
+        let sense = |wrecked: bool| Sense {
+            front: int(k, front) != 0,
+            rear: int(k, rear) != 0,
+            airborne: int(k, airborne) != 0,
+            hang_time: F(float(k, hang)),
+            slow: float(k - 1, speed) < 5.0,
+            wrecked,
+            up_y: F(float(k, up)),
+            forward_y: F(float(k, fwd)),
+        };
+        let (was, now) = (int(k - 1, wreck) != 0, int(k, wreck) != 0);
+        // The trick clocks, read off the trick columns as recording2s_points reads them.
+        let trick = int(k, id);
+        let started = trick < 24 && (trick != int(k - 1, id) || float(k, elapsed) < float(k - 1, elapsed));
+        if started && int(k - 1, running) != 0 {
+            port.finished();
+        }
+        if started {
+            port.start(trick as u8, &sense(was));
+        }
+        let held = !started
+            && trick < 24
+            && trick == int(k - 1, id)
+            && float(k, elapsed) == float(k - 1, elapsed)
+            && float(k, clock) != float(k - 1, clock)
+            && (k + 1..n)
+                .take_while(|&j| int(j, id) == trick && int(j, running) != 0)
+                .all(|j| float(j, elapsed) == float(k, elapsed));
+        if int(k - 1, running) != 0 && (held || int(k, running) == 0) && int(k - 1, id) < 24 {
+            port.finished();
+        }
+        if now && !was {
+            port.wrecked();
+        }
+        let before = ours(&port);
+        let banked = port.total;
+        port.frame(d, &sense(now));
+        let mid = ours(&port);
+        port.grow(d);
+        if port.total != banked {
+            out.banks.push((int(k, frame), port.total.0));
+        }
+        out.stage = (out.stage.0.max(int(k, flip)), out.stage.1.max(port.flip));
+        out.flipped.0 |= !cell(k, node_id).is_empty() && int(k, node_id) == i64::from(score::BACKFLIP);
+        out.flipped.1 |= port.nodes.iter().any(|n| n.id == score::BACKFLIP);
+        let want = shown(k);
+        if want != ours(&port) && want != mid && want != before {
+            out.torn.push(format!("frame {}:\n  game {want}\n  port {}\n  mid  {mid}", int(k, frame), ours(&port)));
+        }
+    }
+    Some(out)
+}
+
+/// R35 (the user, 2026-11-05: 'a backflip stopped before its actually a backflip gives no points,
+/// check what the original does'): it gives none either. recording2's first backflip, its torque
+/// bled off by a forward stick from field 272 (the bike tips back but never past level), 300 (the
+/// watch reaches 1, the bike comes back the right way up in the air and the watch drops to 0, then
+/// it lands into a wreck) and 330 (the watch reaches 2, upside down, and it lands on its back into a
+/// wreck): the original's card has no backflip node, no combo points and banks nothing from it, and
+/// the port's card is the original's row for row. Beside them the flip left to come round (field
+/// 360, the human's Taunt kept) banks recording2's 24 160, at 2605 rather than recording2's 2595: the
+/// stick pushed from field 360 brings it down later.
+#[test]
+fn a_backflip_stopped_short_scores_nothing_as_the_original() {
+    // (capture, the watch's highest stage, the banks)
+    let cases: [(&str, i64, &[(i64, f32)]); 4] = [
+        ("stage0.csv", 0, &[]),
+        ("stage1.csv", 1, &[]),
+        ("stage2.csv", 2, &[]),
+        ("round.csv", 3, &[(2605, 24160.0)]),
+    ];
+    for (name, stage, banks) in cases {
+        let Some(p) = partial(name) else { continue };
+        println!("{name}: {} rows, stage {:?}, banks {:?}, {} torn:\n{}", p.rows, p.stage, p.banks, p.torn.len(), p.torn.join("\n"));
+        // Rows read inside one of the card's functions (a push before its hold, a close before the
+        // nodes are freed) or a trick stop taken a row early off its clock, as in recording2s_points.
+        assert!(p.torn.len() <= 3, "{name}: {} rows match the port at no phase:\n{}", p.torn.len(), p.torn.join("\n"));
+        assert_eq!(p.stage, (stage, stage as u8), "{name}: the watch's highest stage, the game's and the port's");
+        assert_eq!(p.flipped, (stage == 3, stage == 3), "{name}: a backflip went on the card (game, port)");
+        // Stage 0's ride lands clean; its later cancan banks only past the capture's end.
+        assert_eq!(p.banks, banks, "{name}: the banks");
+    }
+}
