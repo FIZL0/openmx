@@ -2960,7 +2960,7 @@ impl KiowaRide {
             blades.set.edge = world.area().map(|a| game_sim::prop_world::Edge { min: [F::ZERO, F::ZERO], max: [a.width, a.depth] });
             wreckage.blades = blades;
         }
-        let mxvatv = self.mxvatv.map(|pedal| game_sim::kiowa::Mxvatv { pedal });
+        let mxvatv = self.mxvatv.map(|pedal| game_sim::kiowa::Mxvatv { pedal, unmanned: false });
         Heli { kiowa, ride, collision, rng: game_sim::rng::Rng::from_seed(0x0216_6b69), wreckage, mxvatv }
     }
 
