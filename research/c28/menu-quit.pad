@@ -1,0 +1,22 @@
+# C28: from M21's state 04 (a Free Ride bike): pause, Return to Main Menu, YES, the load. Save at the main menu.
+sleep 1000
+down start
+sleep 200
+up start
+sleep 1500
+down up
+sleep 200
+up up
+sleep 1500
+down cross
+sleep 200
+up cross
+sleep 1500
+down up
+sleep 200
+up up
+sleep 1500
+down cross
+sleep 200
+up cross
+sleep 25000
