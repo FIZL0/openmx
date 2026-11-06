@@ -26,15 +26,22 @@
 //! ([`holds`]), the lean ([`lean`]), the pose follow ([`follow`]), the wreck arm, [`clear_all`], and
 //! the record's words copied in ([`frame_end`]).
 //!
-//! What is not here: the world step (3); the wreck arm's body, of which only [`touching`] is ported
-//! (its implementor's [`Call::WreckArm`]); and the calls in [`Call`]. The `touched` words this reads
+//! The wreck arm ([`wreck_arm`], S285) runs the impact aim and its force, the holds let go, the
+//! nearby gather, [`touching`], the bike's collidable released by the parts once clear of it, the
+//! ground under the rider, and the three pose-target clauses ([`pose_targets`]).
+//!
+//! What is not here: the world step (3); and the calls in [`Call`]. The `touched` words this reads
 //! come from the original's ragdoll world until that is ported.
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
+use super::ground;
 use super::node::{self, Ram};
 use super::wreck::turned;
+use crate::track;
+use core::cell::RefCell;
 use ps2_float::vu::Dest;
-use ps2_float::{F, Vf, fpu};
+use ps2_float::fpu::{self, Acc};
+use ps2_float::{F, Vf};
 
 /// The rider's words: its target collision record (the bike's, at bike `+0x730`), the flag and how
 /// long it has been set, the part list's count and array, the impact, the main body's node holder.
@@ -210,11 +217,15 @@ pub enum Call {
     /// bodies settled.
     Pose,
     Settle,
-    /// A part's on/off virtual (its vt at `+0x10`, slot `+0x10`): the part, on or off.
+    /// A part's on/off virtual (its vt at `+0x10`, slot `+0x10`): the part, on or off. The wreck
+    /// arm's aim force (`+0x5bc`) is switched off by the same call, its vt at `+8`.
     Switch { part: u32, on: u32 },
-    /// The wreck arm's body (all of mode 2's frame up to the clear loop; [`touching`] is its ported
-    /// walk).
-    WreckArm,
+    /// The wreck arm's nearby gather: the rider's list (`+0x5b8`) refilled from the broad phase
+    /// around the first part's sphere, kind 3 (the quad's [`crate::atv_world`] gather on RAM).
+    Gather { list: u32, probe: u32, kind: u32 },
+    /// A ragdoll body's vt `+0x68`: its `+0x150` quadword from `from` (on the rider's own bodies,
+    /// [`body_target`]).
+    BodyTarget { body: u32, from: u32 },
 }
 
 /// The mode machine's RAM and calls; [`Rider::call`]'s answer is `v0` (only [`Call::Rand`]'s is read).
@@ -582,17 +593,279 @@ pub fn frame_end(m: &mut impl Ram, rider: u32) {
     m.set(rider + KIND_KEPT, k);
 }
 
+// --- S285: the wreck arm ----------------------------------------------------------------------------
+
+/// The wreck arm's words. The impact aim (`+0x660`: where the aim force, `+0x5bc`, pulls) and its
+/// clock (`+0x640`), taken from `+0x650` as it is (`+0x62c`), turned by the main body's orientation
+/// (`+0x630`) or by the record's; the holds' let-go clock (`+0x644`) and the two holds it lets go
+/// (`+0x550`, `+0x554`); the nearby list (`+0x5b8`); the bike's collidable released (`+0x634`, the
+/// record's `+0x1dc`); the rider's terrain (`+0x26c`); the clauses' two latches (`+0x63c` high,
+/// `+0x638` slow), the height (`+0x850`), the settle time (`+0x854`) and the speed (`+0x858`) they
+/// test; the pose-target point (`+0x840`); the fade (`+0x5d8`, from `+0x5d4`).
+pub const AIM: u32 = 0x660;
+pub const AIM_FROM: u32 = 0x650;
+pub const AIM_TIME: u32 = 0x640;
+pub const AIM_AS_IS: u32 = 0x62c;
+pub const AIM_BY_BODY: u32 = 0x630;
+pub const AIM_FORCE: u32 = 0x5bc;
+pub const LET_GO_TIME: u32 = 0x644;
+pub const LET_GO: [u32; 2] = [0x550, 0x554];
+pub const NEARBY: u32 = 0x5b8;
+pub const RELEASED: u32 = 0x634;
+pub const R_COLLIDABLE: u32 = 0x1dc;
+pub const TERRAIN: u32 = 0x26c;
+pub const HIGH: u32 = 0x63c;
+pub const SLOW: u32 = 0x638;
+pub const HIGH_AT: u32 = 0x850;
+pub const SLOW_AFTER: u32 = 0x854;
+pub const SLOW_UNDER: u32 = 0x858;
+pub const TARGET: u32 = 0x840;
+pub const FADE: u32 = 0x5d8;
+pub const FADE_FROM: u32 = 0x5d4;
+/// The pose targets' words: the latch (`+0x264`), the body count (`+0x290`), the pose list (`+0x3a8`,
+/// `0x60` an entry: the wreck's target at `+0x40`, the standing one at `+0x50`); the body holders
+/// (`+0x2a4`, `0xb0` apart, each body at `+0xa4`).
+pub const TARGETED: u32 = 0x264;
+pub const BODIES: u32 = 0x290;
+pub const POSES: u32 = 0x3a8;
+/// A body's position, velocity and orientation; a part's sphere; a shape's ignore list and count.
+const B_POSITION: u32 = 0x70;
+const B_VELOCITY: u32 = 0x80;
+const B_QUAT: u32 = 0x190;
+const SPHERE: u32 = 0x88;
+const S_IGNORE: u32 = 0xe4;
+const S_IGNORE_COUNT: u32 = 0xe8;
+
+/// A float word as the FPU's compares read it (exponent 255 the saturated maximum, denormals 0).
+fn op(m: &mut impl Ram, at: u32) -> f32 {
+    fpu::operand(m.word(at))
+}
+
+/// The rider's main body: the first holder's.
+fn main_body(m: &mut impl Ram, rider: u32) -> u32 {
+    let holder = m.word(rider + MAIN);
+    m.word(holder + 0xa4)
+}
+
+/// `|v.xyz|` on the FPU: `mula`, `madda`, `madd`, `sqrt.s`.
+fn length(v: Vf) -> f32 {
+    fpu::sqrt(Acc::mula(F(v.x()), F(v.x())).madda(F(v.y()), F(v.y())).madd(F(v.z()), F(v.z())).0)
+}
+
+/// **A collidable taken off a shape's ignore list**: the first entry that is it, of the count read
+/// once, set to 0.
+pub fn release(m: &mut impl Ram, shape: u32, collidable: u32) {
+    let n = m.word(shape + S_IGNORE_COUNT) as i32;
+    let list = m.word(shape + S_IGNORE);
+    for i in 0..n.max(0) as u32 {
+        if m.word(list + 4 * i) == collidable {
+            m.set(list + 4 * i, 0);
+            return;
+        }
+    }
+}
+
+/// **The rider's bodies' vt `+0x68`** (every one of state 4's): the body's `+0x150` quadword the one
+/// at `from`.
+pub fn body_target(m: &mut impl Ram, body: u32, from: u32) {
+    copy_quad(m, body + 0x150, from);
+}
+
+/// **The pose targets** set (`on`) or cleared: on, the latch set, the fade started (`+0x5d8` the
+/// `+0x5d4`), and each body's target the pose list's wreck one, or its standing one when the record's
+/// wreck kind is 13; off, the latch cleared and each body's target the standing one. The count is
+/// re-read after each body.
+pub fn pose_targets(m: &mut impl Rider, rider: u32, on: bool, dt: F) {
+    let at = if on {
+        m.set(rider + TARGETED, 1);
+        let f = m.word(rider + FADE_FROM);
+        m.set(rider + FADE, f);
+        let rec = m.word(rider + RECORD);
+        if m.word(rec + R_KIND) == KIND_AGAIN { 0x50 } else { 0x40 }
+    } else {
+        m.set(rider + TARGETED, 0);
+        0x50
+    };
+    let mut i = 0;
+    while i < m.word(rider + BODIES) as i32 {
+        let holder = m.word(rider + MAIN);
+        let poses = m.word(rider + POSES);
+        let body = m.word(holder.wrapping_add(0xb0 * i as u32) + 0xa4);
+        let from = poses.wrapping_add(0x60 * i as u32) + at;
+        m.call(Call::BodyTarget { body, from }, dt);
+        i += 1;
+    }
+}
+
+/// The impact aim: while its clock runs, `+0x660` is `+0x650` as it is, turned by the main body's
+/// orientation, or turned by the record's, and the clock runs down by `dt`; once it has run out, an
+/// aim force still on is pointed at `(0, 0, 0, 1)` and switched off.
+fn aim(m: &mut impl Rider, rider: u32, dt: F) {
+    if op(m, rider + AIM_TIME) <= 0.0 {
+        let force = m.word(rider + AIM_FORCE);
+        if m.word(force) != 0 {
+            copy_quad(m, rider + AIM, ORIGIN);
+            let force = m.word(rider + AIM_FORCE);
+            m.call(Call::Switch { part: force, on: 0 }, dt);
+        }
+        return;
+    }
+    if m.word(rider + AIM_AS_IS) != 0 {
+        copy_quad(m, rider + AIM, rider + AIM_FROM);
+    } else {
+        let q = if m.word(rider + AIM_BY_BODY) != 0 {
+            let body = main_body(m, rider);
+            quad(m, body + B_QUAT)
+        } else {
+            let rec = m.word(rider + RECORD);
+            quad(m, rec + 0x1c0)
+        };
+        let v = quad(m, rider + AIM_FROM);
+        put_quad(m, rider + AIM, turned(q, v));
+    }
+    let t = fpu::sub(fw(m, rider + AIM_TIME), dt.0);
+    put_f(m, rider + AIM_TIME, t);
+}
+
+/// The holds let go: while the clock runs it runs down by `dt`; once it has run out, both holds are
+/// switched off if either is still on.
+fn let_go(m: &mut impl Rider, rider: u32, dt: F) {
+    let t = op(m, rider + LET_GO_TIME);
+    if !(t <= 0.0) {
+        put_f(m, rider + LET_GO_TIME, fpu::sub(t, dt.0));
+        return;
+    }
+    let a = m.word(rider + LET_GO[0]);
+    let on = m.word(a + 4) != 0 || {
+        let b = m.word(rider + LET_GO[1]);
+        m.word(b + 4) != 0
+    };
+    if on {
+        m.call(Call::Switch { part: a, on: 0 }, dt);
+        let b = m.word(rider + LET_GO[1]);
+        m.call(Call::Switch { part: b, on: 0 }, dt);
+    }
+}
+
+/// The bike let go of: once, when the main body is further from the record's collidable's centre
+/// (`+0x50`) than its radius (`+0x70`) plus 1, every part's sphere takes it off its ignore list.
+fn release_bike(m: &mut impl Ram, rider: u32) {
+    let rec = m.word(rider + RECORD);
+    if m.word(rider + RELEASED) != 0 || m.word(rec + R_COLLIDABLE) == 0 {
+        return;
+    }
+    let c = m.word(rec + R_COLLIDABLE);
+    let body = main_body(m, rider);
+    let p = quad(m, body + B_POSITION);
+    let d = p.merge(Dest::XYZ, p.sub(quad(m, c + 0x50)));
+    let dist = length(d);
+    let rec = m.word(rider + RECORD);
+    let c = m.word(rec + R_COLLIDABLE);
+    let reach = fpu::add(1.0, fw(m, c + 0x70));
+    if dist <= reach {
+        return;
+    }
+    m.set(rider + RELEASED, 1);
+    let mut i = 0;
+    while i < m.word(rider + PARTS_COUNT) as i32 {
+        let list = m.word(rider + PARTS);
+        let rec = m.word(rider + RECORD);
+        let part = m.word(list.wrapping_add(4 * i as u32));
+        let sphere = m.word(part + SPHERE);
+        let c = m.word(rec + R_COLLIDABLE);
+        release(m, sphere, c);
+        i += 1;
+    }
+}
+
+/// The ground's height under the main body: the rider's terrain's query on a copy of its position
+/// (no normal, no surface); the position's own `y` where the terrain has no map.
+fn ground_y(m: &mut impl Ram, rider: u32, map: Option<&track::Terrain<'_>>) -> f32 {
+    let body = main_body(m, rider);
+    let mut p = quad(m, body + B_POSITION);
+    let t = m.word(rider + TERRAIN);
+    let map = if m.word(t + 0x94) != 0 { map } else { None };
+    let terrain = {
+        let r = RefCell::new(&mut *m);
+        ground::read_terrain(&|a: u32| r.borrow_mut().word(a), t, map)
+    };
+    crate::atv_ground::query(&terrain, &mut p, None, None);
+    p.y()
+}
+
+/// **The wreck arm** (mode 2's frame before the clear loop): the impact aim ([`aim`]), the holds
+/// let go ([`let_go`]), the nearby gather ([`Call::Gather`]), [`touching`], the bike let go of
+/// ([`release_bike`]), the ground under the main body, then the pose-target clauses on the flag's
+/// clock `t`:
+///
+/// - `t` 0, both clocks run out, not yet high, and the main body more than `+0x850` over the
+///   ground: the targets set ([`pose_targets`]), high on, slow off;
+/// - else, `t` above 0 and high: the targets cleared, high off;
+/// - else, `t` past `+0x854` or the main body slower than `+0x858`, and not yet slow: slow on, the
+///   targets set, and the main body's target `+0x840`.
+///
+/// Then the fade (`+0x5d8`) runs down by `dt` while above 0.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
+pub fn wreck_arm(m: &mut impl Rider, rider: u32, dt: F, map: Option<&track::Terrain<'_>>) {
+    aim(m, rider, dt);
+    let_go(m, rider, dt);
+    let list = m.word(rider + PARTS);
+    let nearby = m.word(rider + NEARBY);
+    let first = m.word(list);
+    let probe = m.word(first + SPHERE);
+    m.call(Call::Gather { list: nearby, probe, kind: 3 }, dt);
+    touching(m, rider, dt);
+    release_bike(m, rider);
+    let y = ground_y(m, rider, map);
+    clauses(m, rider, y, dt);
+    let f = op(m, rider + FADE);
+    if !(f <= 0.0) {
+        put_f(m, rider + FADE, fpu::sub(f, dt.0));
+    }
+}
+
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
+fn clauses(m: &mut impl Rider, rider: u32, y: f32, dt: F) {
+    let t = op(m, rider + TOUCHING_TIME);
+    if t == 0.0 && op(m, rider + LET_GO_TIME) <= 0.0 && op(m, rider + AIM_TIME) <= 0.0 && m.word(rider + HIGH) == 0 {
+        let body = main_body(m, rider);
+        let h = fpu::sub(op(m, body + B_POSITION + 4), y);
+        if !(h <= op(m, rider + HIGH_AT)) {
+            pose_targets(m, rider, true, dt);
+            m.set(rider + HIGH, 1);
+            m.set(rider + SLOW, 0);
+            return;
+        }
+    }
+    if !(t <= 0.0) && m.word(rider + HIGH) != 0 {
+        pose_targets(m, rider, false, dt);
+        m.set(rider + HIGH, 0);
+        return;
+    }
+    let slow = !(t <= op(m, rider + SLOW_AFTER)) || {
+        let body = main_body(m, rider);
+        let v = quad(m, body + B_VELOCITY);
+        length(v) < op(m, rider + SLOW_UNDER)
+    };
+    if slow && m.word(rider + SLOW) == 0 {
+        m.set(rider + SLOW, 1);
+        pose_targets(m, rider, true, dt);
+        let body = main_body(m, rider);
+        m.call(Call::BodyTarget { body, from: rider + TARGET }, dt);
+    }
+}
+
 /// **The mode machine** (the rider's frame runs it while its record is ridden): [`choose`],
-/// [`switch`], [`holds`], [`lean`], [`follow`], in mode 2 the wreck arm ([`Call::WreckArm`]),
-/// [`clear_all`], [`frame_end`].
-pub fn modes(m: &mut impl Rider, rider: u32, dt: F) {
+/// [`switch`], [`holds`], [`lean`], [`follow`], in mode 2 the wreck arm ([`wreck_arm`]),
+/// [`clear_all`], [`frame_end`]. `map` is the rider's terrain's cell reader, the map's tree.
+pub fn modes(m: &mut impl Rider, rider: u32, dt: F, map: Option<&track::Terrain<'_>>) {
     choose(m, rider);
     switch(m, rider, dt);
     holds(m, rider, dt);
     lean(m, rider);
     follow(m, rider, dt);
     if m.word(rider + MODE) == 2 {
-        m.call(Call::WreckArm, dt);
+        wreck_arm(m, rider, dt, map);
     }
     clear_all(m, rider);
     frame_end(m, rider);
