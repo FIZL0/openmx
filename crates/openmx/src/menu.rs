@@ -551,12 +551,10 @@ pub struct Settings {
     /// MX vs. ATV's Brake Gyro and Gas Gyro options (P226), read on its handling alone: the game's
     /// own default, brake on and gas off, unless changed.
     pub gyro: game_sim::handling::Gyro,
-    /// MX vs. ATV's biplane and Kiowa (MD80e): the machine pack's models flown on SLUS-21104's steps
-    /// in place of MX Unleashed's, offline. Off unless changed.
-    pub fliers: bool,
-    /// Which of MX vs. ATV's four skins of each the first player's fliers wear (0..4, the garage's
-    /// order); the second copy wears the other skin of the same model (`vehicle::mxvatv_skin`).
-    pub flier_skin: usize,
+    /// An older file's Fliers and Flier Skin rows (MD80e), read and never written again (P315): with
+    /// `fliers = mxvatv`, the skin (0..) the first seat's Garage picks of each flier kind become, in
+    /// the first machine pack with fliers ([`Menu::set_fliers`]).
+    pub old_fliers: Option<usize>,
     /// How the plants change from model to picture (V55): always ours, [`Lod::Smooth`]. The
     /// Original switch's Plant Detail (P126) and the presets' original plants were taken out
     /// (2026-10-29: the original's plant LOD fades in bushes that are not there), and an older
@@ -1404,8 +1402,7 @@ impl Default for Settings {
             handling_pack: String::new(),
             handling: game_sim::handling::Handling::default(),
             gyro: game_sim::handling::Gyro::default(),
-            fliers: false,
-            flier_skin: 0,
+            old_fliers: None,
             plants: Lod::default(),
             foliage: Foliage::default(),
             picture: Picture::default(),
@@ -1557,6 +1554,8 @@ impl Settings {
     /// an older or hand-edited file still opens.
     pub fn parse(text: &str) -> Settings {
         let mut s = Settings::default();
+        // An old Flier Skin line may come before its Fliers line.
+        let mut old_skin = None;
         // A file from before P56 has no mix, and its two sliders count to 10.
         let tens = !pairs(text).any(|(k, _)| k == "mix");
         let level = |v: &str, was: u8| match v.parse::<u8>() {
@@ -1618,8 +1617,12 @@ impl Settings {
                 "handling" => s.handling = game_sim::handling::Handling::from_word(v).unwrap_or(s.handling),
                 "brake_gyro" => s.gyro.brake = v != "off",
                 "gas_gyro" => s.gyro.gas = v == "on",
-                "fliers" => s.fliers = v == "mxvatv",
-                "flier_skin" => s.flier_skin = v.parse::<usize>().ok().filter(|n| (1..=4).contains(n)).map_or(s.flier_skin, |n| n - 1),
+                "fliers" => s.old_fliers = (v == "mxvatv").then(|| s.old_fliers.unwrap_or(0)),
+                "flier_skin" => {
+                    if let Some(n) = v.parse::<usize>().ok().filter(|n| (1..=4).contains(n)) {
+                        old_skin = Some(n - 1);
+                    }
+                }
                 "mods_off" => {
                     s.mods_off = v.split_whitespace().filter(|w| mod_id(w) || mod_id(&format!("{w}_x"))).map(str::to_string).collect();
                 }
@@ -1692,6 +1695,7 @@ impl Settings {
         if !s.video_auto && !pairs(text).any(|(k, v)| k == "video" && v == "custom_whole_map") {
             video::Look::of(&s).renewed().apply(&mut s);
         }
+        s.old_fliers = s.old_fliers.map(|k| old_skin.unwrap_or(k));
         s
     }
 
@@ -1763,7 +1767,6 @@ impl Settings {
             + &self.mods_text()
             + &self.tricks_text()
             + &self.handling_text()
-            + &self.fliers_text()
             + &self.lobby_seats_text()
             + &self.cameras_text()
             + &cameras::text(&self.camera_sets)
@@ -1969,16 +1972,6 @@ impl Settings {
         }
         if self.gyro.gas != mvatv.gas {
             out += &format!("gas_gyro = {}\n", on_off(self.gyro.gas));
-        }
-        out
-    }
-
-    /// MX vs. ATV's fliers' lines (MD80e), each only off its default, so a file from before them is
-    /// written as it was.
-    fn fliers_text(&self) -> String {
-        let mut out = if self.fliers { "fliers = mxvatv\n".to_string() } else { String::new() };
-        if self.flier_skin != 0 {
-            out += &format!("flier_skin = {}\n", self.flier_skin + 1);
         }
         out
     }
@@ -3356,6 +3349,9 @@ pub struct Menu {
     /// The trick packs in the mods folder (MD77), in the folder's order, for the Ride tab's rows; set
     /// with [`Menu::set_trick_packs`].
     trick_seen: Vec<TrickPack>,
+    /// The fliers on offer (P315): MX Unleashed's and every installed machine pack's skins, as the
+    /// shell reads them off the manifests ([`Menu::set_fliers`]).
+    flier_offer: Vec<roster::Flier>,
     /// The ride under the menu has a modifier off the original game's, as the shell tells it: the
     /// pause says so.
     pub modified: bool,
@@ -3616,6 +3612,7 @@ impl Menu {
             mods_seen: Vec::new(),
             music_seen: Vec::new(),
             trick_seen: Vec::new(),
+            flier_offer: roster::original_fliers(),
             modified: false,
             mods_lock: None,
             air_lock: None,
@@ -6280,6 +6277,36 @@ impl Menu {
     }
 
     /// The trick packs the Ride tab lists (MD77).
+    /// The fliers on offer (P315), as the shell reads them off the installed machine packs'
+    /// manifests; MX Unleashed's are always among them. An older settings file's Fliers row
+    /// ([`Settings::old_fliers`]) becomes the first seat's picks here, of the first pack with fliers,
+    /// where the seat has none of its own yet; the settings are then written without it.
+    pub fn set_fliers(&mut self, mut offer: Vec<roster::Flier>) {
+        if !offer.iter().any(|f| f.pack == roster::ORIGINAL_PACK) {
+            offer.splice(0..0, roster::original_fliers());
+        }
+        self.flier_offer = offer;
+        let Some(skin) = self.settings.old_fliers else { return };
+        let pack = self.flier_offer.iter().find(|f| f.pack != roster::ORIGINAL_PACK && f.why.is_none()).map(|f| f.pack.clone());
+        let Some(pack) = pack else { return };
+        if self.picks.0[0].fliers.is_empty() {
+            for kind in roster::flier_kinds(&self.flier_offer) {
+                let skins: Vec<roster::Flier> = self.flier_offer.iter().filter(|f| f.pack == pack && f.machine == kind && f.why.is_none()).cloned().collect();
+                if let Some(f) = skins.get(skin.min(skins.len().saturating_sub(1))) {
+                    self.picks.0[0].set_flier(f);
+                    self.picks_changed = true;
+                }
+            }
+        }
+        self.settings.old_fliers = None;
+        self.changed = true;
+    }
+
+    /// The fliers on offer (P315).
+    pub fn fliers(&self) -> &[roster::Flier] {
+        &self.flier_offer
+    }
+
     pub fn trick_packs(&self) -> &[TrickPack] {
         &self.trick_seen
     }
@@ -6592,24 +6619,22 @@ mod tests {
     }
 
     #[test]
-    fn the_fliers_setting_is_off_by_default_and_kept() {
+    fn an_old_fliers_setting_is_read_and_never_written() {
         use super::Settings;
-        // MD80e: off, and a default file says nothing of it, so files from before it stay as they were.
+        // P315: the Fliers and Flier Skin rows are gone; an older file's become the Garage's picks.
         let s = Settings::default();
-        assert!(!s.fliers);
-        assert_eq!(s.flier_skin, 0);
+        assert_eq!(s.old_fliers, None);
         assert!(!s.text().contains("flier"), "{}", s.text());
         for skin in 0..4 {
-            let s = Settings { fliers: true, flier_skin: skin, ..Settings::default() };
-            let back = Settings::parse(&s.text());
-            assert!(back.fliers);
-            assert_eq!(back.flier_skin, skin);
+            let s = Settings::parse(&format!("fliers = mxvatv\nflier_skin = {}\n", skin + 1));
+            assert_eq!(s.old_fliers, Some(skin));
+            assert!(!s.text().contains("flier"), "{}", s.text());
         }
-        // A skin out of 1..=4 or a switch word it does not know reads as the default.
-        let s = Settings::parse("fliers = sideways
-flier_skin = 9
-");
-        assert!(!s.fliers);
-        assert_eq!(s.flier_skin, 0);
+        assert_eq!(Settings::parse("flier_skin = 3\nfliers = mxvatv\n").old_fliers, Some(2), "either order");
+        assert_eq!(Settings::parse("fliers = mxvatv\n").old_fliers, Some(0));
+        // Off, a skin out of 1..=4, or a switch word it does not know: nothing to carry.
+        assert_eq!(Settings::parse("fliers = original\nflier_skin = 3\n").old_fliers, None);
+        assert_eq!(Settings::parse("fliers = sideways\n").old_fliers, None);
+        assert_eq!(Settings::parse("fliers = mxvatv\nflier_skin = 9\n").old_fliers, Some(0));
     }
 }

@@ -541,9 +541,8 @@ fn the_settings_file_reads_back_as_it_was_written() {
         handling_pack: "untamed".into(),
         // MX vs. ATV's gyros both off its default (P226).
         gyro: game_sim::handling::Gyro { brake: false, gas: true },
-        // MX vs. ATV's fliers, its fourth skin (MD80e).
-        fliers: true,
-        flier_skin: 3,
+        // An older file's Fliers row (MD80e) is read but never written (P315).
+        old_fliers: None,
         // The Original tab's picture at the original's (P126); the plants are always ours since
         // 2026-10-29.
         plants: game_render::eco::Lod::Smooth,
@@ -2111,6 +2110,79 @@ fn the_garage_rows_carry_the_originals_names() {
     tab_to(&mut m, r, "Rider");
     row(&m, "Gear Set");
     row(&m, "Jersey/Pants");
+}
+
+/// P315: the Garage's Fliers tab lists every kind on offer, MX Unleashed's skins first and then a
+/// renamed machine pack's under the names its manifest gives; left and right step a seat's pick over
+/// the skins openmx cannot fly, a kind it cannot fly at all is greyed with why, and the pick is the
+/// seat's when the Garage closes. An older settings file's Fliers row becomes 1P's picks once.
+#[test]
+fn the_fliers_tab_picks_a_renamed_packs_skins_per_seat() {
+    use menu::Key;
+    use roster::{Catalogue, Flier, Picks};
+    let mut disc = match game_render::Disc::open_configured() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    let catalogue = Catalogue::read(&mut disc).unwrap();
+    let flier = |machine: &str, skin: &str, name: &str, why: Option<&str>| Flier {
+        pack: "renamed".into(),
+        game: "Some Game".into(),
+        machine: machine.into(),
+        skin: skin.into(),
+        name: name.into(),
+        model: 2,
+        about: "Its own.".into(),
+        why: why.map(Into::into),
+    };
+    let offer = vec![
+        flier("biplane", "biplane3", "Red Baron", None),
+        flier("biplane", "biplane4", "Broken", Some("The pack has no biplane .phy")),
+        flier("kiowa", "kiowa3", "Night Hawk", None),
+        flier("hovercraft", "hover1", "Hover", Some("openmx cannot fly a hovercraft yet")),
+    ];
+    let mut reader = Reader::new();
+    let mut m = Menu::new(Settings::default(), Controls::default()).with_garage(catalogue.clone(), Picks::default());
+    m.set_fliers(offer.clone());
+    assert!(!m.take_picks_changed(), "no old setting, no picks");
+    assert_eq!(m.fliers().iter().filter(|f| f.pack == roster::ORIGINAL_PACK).count(), 4, "MX Unleashed's are always offered");
+    m.step(reader.read(&Report::idle()));
+    let r = &mut reader;
+    main_to(&mut m, r, "Garage");
+    tab_to(&mut m, r, "Fliers");
+    let labels: Vec<String> = m.page().iter().map(|row| row.label.clone()).collect();
+    assert_eq!(labels, ["Player", "Plane", "Helicopter", "Hovercraft"]);
+    let row = |m: &Menu, i: usize| m.page().iter().find(|row| row.key == Key::Flier(i)).cloned().unwrap();
+    assert_eq!(row(&m, 0).value, "Biplane");
+    assert_eq!(row(&m, 0).choices, ["Biplane", "Biplane, Second Livery", "Red Baron", "Broken (cannot fly)"]);
+    assert_eq!(row(&m, 2).off.as_deref(), Some("openmx cannot fly a hovercraft yet"));
+    down_to(&mut m, r, Key::Flier(0));
+    tap(&mut m, r, Control::Right);
+    tap(&mut m, r, Control::Right);
+    assert_eq!(row(&m, 0).value, "Red Baron");
+    assert_eq!(row(&m, 0).note.as_deref(), Some("Some Game. Its own."));
+    tap(&mut m, r, Control::Right);
+    assert_eq!(row(&m, 0).value, "Biplane", "Broken is stepped over");
+    tap(&mut m, r, Control::Left);
+    tap(&mut m, r, Control::Circle);
+    assert!(m.take_picks_changed());
+    let picked = m.picks.0[0].flier("biplane").expect("a plane picked");
+    assert_eq!((picked.pack.as_str(), picked.skin.as_str()), ("renamed", "biplane3"));
+    assert!(m.picks.0[0].flier("kiowa").is_none() && m.picks.0[1].fliers.is_empty());
+
+    // MD80e's Fliers: MX vs. ATV and its Flier Skin, read off an older file: the pack's skins of
+    // that place (or its last) for 1P, and the settings written without them.
+    let old = Settings::parse("fliers = mxvatv\nflier_skin = 2\n");
+    let mut m = Menu::new(old, Controls::default()).with_garage(catalogue, Picks::default());
+    m.set_fliers(offer);
+    assert!(m.take_picks_changed());
+    assert_eq!(m.picks.0[0].flier("biplane").map(|f| f.skin.as_str()), Some("biplane3"), "the only flyable plane");
+    assert_eq!(m.picks.0[0].flier("kiowa").map(|f| f.skin.as_str()), Some("kiowa3"));
+    assert_eq!(m.settings.old_fliers, None);
+    assert!(!m.settings.text().contains("flier"));
 }
 
 #[test]
@@ -4591,20 +4663,20 @@ fn l1_and_r1_walk_every_tab_round_from_either_end() {
         tap(&mut m, &mut r, Control::L1);
         assert_eq!(here(&m, Screen::Settings), (i, first[i]));
     }
-    // The Garage: Rider, Bike, Gear, each with its Player row first.
+    // The Garage: Rider, Bike, Gear and Fliers (P315), each with its Player row first.
     tap(&mut m, &mut r, Control::Circle);
     main_to(&mut m, &mut r, "Garage");
     assert_eq!(m.screen(), Some(Screen::Garage));
     assert_eq!(m.tabs(Screen::Garage), menu::GARAGE_TABS);
-    assert_eq!(menu::GARAGE_TABS, ["Rider", "Bike", "Gear"]);
-    for i in [0, 1, 2, 0] {
+    assert_eq!(menu::GARAGE_TABS, ["Rider", "Bike", "Gear", "Fliers"]);
+    for i in [0, 1, 2, 3, 0] {
         assert_eq!(here(&m, Screen::Garage), (i, Key::Player));
         tap(&mut m, &mut r, Control::R1);
     }
     assert_eq!(m.tab(Screen::Garage), 1);
     tap(&mut m, &mut r, Control::L1);
     tap(&mut m, &mut r, Control::L1);
-    assert_eq!(here(&m, Screen::Garage), (2, Key::Player), "L1 from Rider is Gear");
+    assert_eq!(here(&m, Screen::Garage), (3, Key::Player), "L1 from Rider is Fliers");
 }
 
 /// P128: Settings' Graphics tab, reached by L1 and R1 from either side and by `--screen graphics`,

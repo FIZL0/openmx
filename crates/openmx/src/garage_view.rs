@@ -68,7 +68,7 @@ const SETTLE: std::time::Duration = std::time::Duration::from_millis(150);
 /// What of a pick the stage shows: its bike, rider and look. The Driving Model and the preset's name
 /// change nothing on it, so stepping them dresses nothing.
 fn shown_of(pick: &roster::Pick) -> roster::Pick {
-    roster::Pick { set: roster::Pick::default().set, preset: String::new(), ..pick.clone() }
+    roster::Pick { set: roster::Pick::default().set, preset: String::new(), fliers: Vec::new(), ..pick.clone() }
 }
 
 /// The stage the Garage shows its seat's pick on.

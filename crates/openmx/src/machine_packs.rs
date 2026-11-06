@@ -38,6 +38,9 @@ pub const MACHINES_DIR: &str = "machines";
 pub struct Pack {
     pub id: String,
     pub name: String,
+    /// The game its files came off, `source.game` (P315): what the machine picker groups its skins
+    /// under. The pack's name where the manifest has none.
+    pub game: String,
     /// The machine it is to be ridden as (`atv`).
     pub machine: String,
     pub folder: PathBuf,
@@ -71,6 +74,10 @@ pub struct Skin {
     pub machine: String,
     /// The skin's model name: `biplane`, `biplane2`, … `kiowa4`.
     pub skin: String,
+    /// What the picker calls it and says it is (P315), `name` and `about`: empty where the
+    /// manifest does not say, and the picker names it by its kind and place.
+    pub name: String,
+    pub about: String,
     /// 1 or 2: which of the `.phy`'s `ModelOne`/`ModelTwo` keys it flies on.
     pub model: u32,
     pub psg: String,
@@ -162,6 +169,8 @@ pub fn read(folder: &Path) -> Result<Option<Pack>, String> {
             skins.push(Skin {
                 machine: s(k.get("machine")),
                 skin: s(k.get("skin")),
+                name: s(k.get("name")),
+                about: s(k.get("about")),
                 model,
                 psg: s(k.get("psg")),
                 ui: s(k.get("ui")),
@@ -192,8 +201,10 @@ pub fn read(folder: &Path) -> Result<Option<Pack>, String> {
         Some(Json::Arr(list)) => list.iter().filter_map(Json::str).map(str::to_owned).collect(),
         _ => Vec::new(),
     };
+    let name = s(json.get("name"));
     Ok(Some(Pack {
-        name: s(json.get("name")),
+        game: json.get("source").and_then(|j| j.get("game")).and_then(Json::str).map_or_else(|| name.clone(), str::to_owned),
+        name,
         machine: s(json.get("machine")),
         files: Res::folder(folder)?,
         folder: folder.to_owned(),

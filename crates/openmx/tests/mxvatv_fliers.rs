@@ -1,5 +1,5 @@
-//! MD80e: MX vs. ATV's biplane and Kiowa in the shell, off by default. With `--fliers mxvatv` (the
-//! Fliers row) and openmx-mods' `mxvatv_fliers` machine pack in the mods folder, the plane and the
+//! MD80e: MX vs. ATV's biplane and Kiowa in the shell, off by default. With `--fliers mxvatv` (since
+//! P315 the Garage's Fliers tab picks them per seat) and openmx-mods' `mxvatv_fliers` machine pack in the mods folder, the plane and the
 //! helicopter the garage and Switch To Machine give are built off the pack's `biplane.phy` and
 //! `kiowa.phy` for the picked skin's model, drawn in its models, and flown on SLUS-21104's steps
 //! (MD80b, MD80c). Without the switch the ride is MX Unleashed's: no pack is read, and the
@@ -86,7 +86,7 @@ fn off_by_default_the_fliers_are_mx_unleasheds() {
     let Some(said) = ride(260, &heli, &[]) else { return };
     let Some(asked) = ride(260, &heli, &["--fliers", "original"]) else { return };
     for s in [&said, &asked] {
-        assert!(!s.contains("MX vs. ATV's"), "a ride without the switch read the fliers pack:\n{s}");
+        assert!(!s.contains("MX vs. ATV's") && !s.contains("mxvatv_fliers's"), "a ride without the switch read the fliers pack:\n{s}");
         assert!(!s.contains("fliers:"), "\n{s}");
     }
     // The same helicopter flown the same way, unset or asked for: MX Unleashed's step's climb.
@@ -112,7 +112,7 @@ fn on_the_kiowa_is_mx_vs_atvs_on_both_models() {
     let mut lines = Vec::new();
     for (skin, model) in [("2", "kiowa2"), ("3", "kiowa3")] {
         let Some(said) = ride(260, &heli, &["--fliers", "mxvatv", "--flier-skin", skin]) else { return };
-        assert!(said.contains(&format!("kiowa: MX vs. ATV's, on its steps, drawn in {model}\n")), "skin {skin}:\n{said}");
+        assert!(said.contains(&format!("kiowa: mxvatv_fliers's, on its steps, drawn in {model}\n")), "skin {skin}:\n{said}");
         let vehicles: Vec<&str> = said.lines().filter(|l| l.starts_with("vehicle: ")).collect();
         assert_eq!(vehicles, ["vehicle: bike", "vehicle: helicopter", "vehicle: bike"], "\n{said}");
         // Cross climbs it straight up, as it does MX Unleashed's, but on SLUS-21104's controller.
@@ -136,7 +136,7 @@ fn on_the_biplane_is_mx_vs_atvs_on_both_models() {
     for (skin, model) in [("1", "biplane"), ("4", "biplane4")] {
         let Some(said) = ride(420, &plane, &["--fliers", "mxvatv", "--flier-skin", skin]) else { return };
         assert!(said.contains("biplane: flies on MX vs. ATV's biplane.phy, on its steps"), "skin {skin}:\n{said}");
-        assert!(said.contains(&format!("biplane: MX vs. ATV's, drawn in {model}\n")), "skin {skin}:\n{said}");
+        assert!(said.contains(&format!("biplane: mxvatv_fliers's, drawn in {model}\n")), "skin {skin}:\n{said}");
         let vehicles: Vec<&str> = said.lines().filter(|l| l.starts_with("vehicle: ")).collect();
         assert_eq!(vehicles, ["vehicle: bike", "vehicle: biplane", "vehicle: bike"], "\n{said}");
         hashes.push(plane_hash(&said).to_string());
