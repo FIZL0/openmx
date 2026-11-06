@@ -212,7 +212,7 @@ fn negate(v: Vf) -> Vf {
 /// `a ⊗ b`, the quaternion product, in the chassis' own instruction order: the vector half as an
 /// `vopmula`/`vopmsub` cross product with both scalar terms folded into the accumulator, and the
 /// scalar half as `w - x - y - z` over the lane-by-lane product.
-fn quat_mul(a: Vf, b: Vf) -> Vf {
+pub(crate) fn quat_mul(a: Vf, b: Vf) -> Vf {
     let p = a.mul(b);
     let acc = Vf::opmula(a, b);
     let acc = Vf::madd(acc, a, b.bc(Field::W));
