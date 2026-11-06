@@ -1,0 +1,6 @@
+# C28: from START EVENT: Cross, then the load to the spawn. Save at the spawn.
+sleep 1000
+down cross
+sleep 300
+up cross
+sleep 40000
