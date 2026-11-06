@@ -3,12 +3,16 @@
 //!
 //! The original's machine runs whole in the interpreter with its outside calls hooked to log and do
 //! nothing (rand answers a drawn word): the riding reset, the wreck entry, the rider's pose and settle
-//! virtuals, the hold parts' on/off virtual, and the wreck arm's body (a hook on its first pc that
-//! resumes at the clear loop). The port runs from the same words with a [`rider::Rider`] that logs the
-//! same way. Every word either side writes, outside the stack, comes out the same, and the calls are
-//! the same, in the same order, with the same arguments. Skips without the image.
+//! virtuals, the hold parts' and the aim force's on/off virtuals, and the wreck arm's nearby gather.
+//! The wreck arm's ground query (on Nat05's map), its release and its bodies' vt `+0x68` run as they
+//! are (S285). The port runs from the same words with a [`rider::Rider`] that logs the same way and
+//! serves the bodies' vt `+0x68` with [`rider::body_target`]. Every word either side writes, outside
+//! the stack and the ground query's ring, comes out the same, and the calls are the same, in the same
+//! order, with the same arguments. Skips without the image or the map.
 
-use game_sim::handling::node;
+use game_sim::handling::{ground, node};
+use game_sim::{atv_ground, track};
+use ps2_float::Vf;
 use game_sim::handling::rider::{self, Call};
 use ps2_float::F;
 use ps2_oracle::{Ee, Kit, skip};
@@ -29,8 +33,12 @@ const RIDING_RESET: u32 = 0x004e_ef40;
 const WRECK_ENTRY: u32 = 0x004e_d700;
 const POSE: u32 = 0x0050_5720;
 const SETTLE: u32 = 0x0050_5710;
-/// The wreck arm's body: its first pc after the mode test, and the clear loop's first.
-const WRECK_ARM: (u32, u32) = (0x004e_fe10, 0x004f_0274);
+/// The wreck arm's nearby gather; the ground query's ring of read cells (0x70 bytes, 32 keys) and the
+/// terrain's two words that keep it.
+const GATHER: u32 = 0x001d_6a60;
+const RING: (u32, u32) = (0x0054_1550, 0x0054_1550 + 0x70 * 32);
+/// The rider's bodies' vt `+0x68` (vtable `0x003cd200`), run as it is.
+const BODY_TARGET: u32 = 0x0049_3b00;
 /// The fake points the record's pointers aim at (free RAM past F39's fake world).
 const FAKE: u32 = 0x01c0_a000;
 
@@ -102,9 +110,16 @@ impl node::Ram for Port<'_> {
 impl rider::Rider for Port<'_> {
     fn call(&mut self, c: Call, dt: F) -> u32 {
         assert_eq!(dt.0.to_bits(), DT, "{c:?}: dt");
-        self.log.borrow_mut().push(c);
+        // The bodies' vt +0x68 runs as it is in the original, unlogged; its writes are compared.
+        if !matches!(c, Call::BodyTarget { .. }) {
+            self.log.borrow_mut().push(c);
+        }
         match c {
             Call::Rand => self.rands.pop_front().expect("rand asked once more than the original did"),
+            Call::BodyTarget { body, from } => {
+                rider::body_target(self, body, from);
+                0
+            }
             _ => 0,
         }
     }
@@ -153,10 +168,20 @@ fn hook_calls(ee: &mut Ee, log: &Log, answers: &Rc<RefCell<VecDeque<u32>>>, swit
         }));
     }
     let l = log.clone();
-    ee.hooks.insert(WRECK_ARM.0, Box::new(move |ee: &mut Ee| {
-        l.borrow_mut().push(Call::WreckArm);
-        ee.set(31, u64::from(WRECK_ARM.1) | 0xffff_ffff_0000_0000);
+    ee.hooks.insert(GATHER, Box::new(move |ee: &mut Ee| {
+        l.borrow_mut().push(Call::Gather { list: ee.r(4) as u32, probe: ee.r(5) as u32, kind: ee.r(6) as u32 });
     }));
+}
+
+/// Nat05's terrain map off its `.res` (state 4 rides Nat05), for the port's ground query.
+fn nat05_trn() -> Option<Vec<u8>> {
+    let kit = Kit::load().map_err(|w| skip(&w)).ok()?;
+    let res = kit.ctx("mxvatv-ps2/nat05").join("nat05.res");
+    if !res.exists() {
+        skip(&format!("{} is not there: Nat05's nat05.res off MX vs. ATV's disc (Env/Nat05)", res.display()));
+        return None;
+    }
+    ground::terrain_file(&std::fs::read(&res).unwrap(), "Nat05")
 }
 
 fn word_of(ram: &[u8], at: u32) -> u32 {
@@ -164,10 +189,16 @@ fn word_of(ram: &[u8], at: u32) -> u32 {
     u32::from_le_bytes([ram[i], ram[i + 1], ram[i + 2], ram[i + 3]])
 }
 
-/// The words written, outside the stack.
-fn written_words(ee: &Ee) -> BTreeSet<u32> {
+/// The words written, outside the stack and the ground query's ring (with the terrain's two words
+/// that keep it): the port keeps no ring.
+fn written_words(ee: &Ee, terrain: u32) -> BTreeSet<u32> {
     let stack = ee.stack;
-    ee.written.iter().map(|&a| a & !3).filter(|a| !(stack - 0x4_0000..stack + 0x1000).contains(a)).collect()
+    ee.written
+        .iter()
+        .map(|&a| a & !3)
+        .filter(|a| !(stack - 0x4_0000..stack + 0x1000).contains(a))
+        .filter(|a| !(RING.0..RING.1).contains(a) && *a != terrain + 0x9e0 && *a != terrain + 0x9e4)
+        .collect()
 }
 
 /// **The rider's mode machine is the original's**: 60 000 frames of state 4's rider, each with the
@@ -181,12 +212,46 @@ fn written_words(ee: &Ee) -> BTreeSet<u32> {
 #[allow(clippy::float_arithmetic)]
 fn the_riders_mode_machine_is_the_originals() {
     let Some(mut ee) = image() else { return };
+    let Some(trn) = nat05_trn() else { return };
+    let map = track::Terrain::parse(&trn).unwrap();
     let rec = ee.u32_at(RIDER + rider::RECORD);
     let holder = ee.u32_at(RIDER + rider::MAIN);
     let pose_slot = ee.u32_at(RIDER + 0x1fc).wrapping_add(ee.u32_at(holder + 0x40) << 6).wrapping_add(0x20);
     let follow = ee.u32_at(RIDER + 0x30c);
-    let holds = [rider::HOLD_L, rider::HOLD_R, rider::FREE_L, rider::FREE_R].map(|o| ee.u32_at(RIDER + o));
-    let switches: BTreeSet<u32> = holds.iter().map(|&p| ee.u32_at(ee.u32_at(p + 0x10) + 0x10)).collect();
+    let holds = [rider::HOLD_L, rider::HOLD_R, rider::FREE_L, rider::FREE_R, rider::LET_GO[0], rider::LET_GO[1]]
+        .map(|o| ee.u32_at(RIDER + o));
+    let mut switches: BTreeSet<u32> = holds.iter().map(|&p| ee.u32_at(ee.u32_at(p + 0x10) + 0x10)).collect();
+    // The wreck arm's aim force: its vtable at +8.
+    let force = ee.u32_at(RIDER + rider::AIM_FORCE);
+    switches.insert(ee.u32_at(ee.u32_at(force + 8) + 0x10));
+    // The wreck arm's words.
+    let terrain = ee.u32_at(RIDER + rider::TERRAIN);
+    let body = ee.u32_at(holder + 0xa4);
+    let bodies = ee.u32_at(RIDER + rider::BODIES);
+    let poses = ee.u32_at(RIDER + rider::POSES);
+    let parts: Vec<u32> = (0..ee.u32_at(RIDER + rider::PARTS_COUNT))
+        .map(|i| ee.u32_at(ee.u32_at(RIDER + rider::PARTS) + 4 * i))
+        .collect();
+    for i in 0..bodies {
+        let b = ee.u32_at(ee.u32_at(RIDER + rider::MAIN) + 0xb0 * i + 0xa4);
+        assert_eq!(ee.u32_at(ee.u32_at(b + 0x110) + 0x68), BODY_TARGET, "body {i}'s vt +0x68");
+    }
+    let home = [0, 4, 8].map(|k| f32::from_bits(ee.u32_at(body + 0x70 + k)));
+    let ground_at = |x: f32, z: f32| {
+        let t = ground::read_terrain(&|a: u32| ee.u32_at(a), terrain, Some(&map));
+        let mut p = Vf::new(x, 0.0, z, 1.0);
+        atv_ground::query(&t, &mut p, None, None);
+        p.y()
+    };
+    let mut grounds = Vec::new();
+    {
+        let mut g = Gen(0x0285_0001);
+        for _ in 0..64 {
+            let (x, z) = (home[0] + g.f(-40.0, 40.0), home[2] + g.f(-40.0, 40.0));
+            grounds.push((x, z, ground_at(x, z)));
+        }
+    }
+    eprintln!("terrain {terrain:#x}, main body {body:#x}, {bodies} bodies, pose list {poses:#x}, {} parts", parts.len());
     let real_parts = ee.u32_at(RIDER + 0x3ac);
     eprintln!("record {rec:#x}, holder {holder:#x}, switch fns {switches:#x?}, pose list {real_parts}");
     let log: Log = Rc::new(RefCell::new(Vec::new()));
@@ -239,10 +304,87 @@ fn the_riders_mode_machine_is_the_originals() {
                 put(&mut ee, RIDER + o + 4 * i, f(x));
             }
         }
-        for o in [0x63c, 0x638, 0x380, 0x640] {
-            let x = g.bits();
-            put(&mut ee, RIDER + o, x);
+        // The wreck arm's: the aim and its force, the let-go, the touched parts, the bike's
+        // collidable and the spheres' ignore lists, the main body over the ground, the clauses'
+        // limits and latches, the pose list and the fade.
+        let clock = |g: &mut Gen| match g.bits() % 4 {
+            0 => g.pick(&[0, 0, 0x8000_0000, DT]),
+            _ => f(g.near(0.0, -0.1, 0.2)),
+        };
+        let aim_t = clock(&mut g);
+        put(&mut ee, RIDER + rider::AIM_TIME, aim_t);
+        let let_t = clock(&mut g);
+        put(&mut ee, RIDER + rider::LET_GO_TIME, let_t);
+        put(&mut ee, RIDER + rider::AIM_AS_IS, if g.one_in(3) { 1 } else { 0 });
+        put(&mut ee, RIDER + rider::AIM_BY_BODY, if g.one_in(2) { 1 } else { 0 });
+        for i in 0..4 {
+            let x = g.near(0.0, -2.0, 2.0);
+            put(&mut ee, RIDER + rider::AIM_FROM + 4 * i, f(x));
         }
+        put(&mut ee, force, if g.one_in(2) { 1 } else { 0 });
+        for o in rider::LET_GO {
+            let p = ee.u32_at(RIDER + o);
+            put(&mut ee, p + 4, if g.one_in(2) { 1 } else { 0 });
+        }
+        let few = g.one_in(2);
+        for &p in &parts {
+            put(&mut ee, p + rider::TOUCHED, if few && g.one_in(6) { 1 } else { 0 });
+        }
+        let old_t = if g.one_in(3) { 0.0 } else { g.near(0.75, 0.0, 1.5) };
+        put(&mut ee, RIDER + rider::TOUCHING_TIME, f(old_t));
+        let (x, z, gy) = grounds[g.bits() as usize % grounds.len()];
+        let high_at = g.near(3.0, 0.5, 5.0);
+        put(&mut ee, RIDER + rider::HIGH_AT, f(high_at));
+        let y = if g.one_in(5) { gy + high_at } else { gy + g.f(-1.0, 8.0) };
+        for (i, v) in [x, y, z, 1.0].into_iter().enumerate() {
+            put(&mut ee, body + 0x70 + 4 * i as u32, f(v));
+        }
+        let under = g.near(0.0, 0.0, 3.0);
+        put(&mut ee, RIDER + rider::SLOW_UNDER, f(under));
+        put(&mut ee, RIDER + rider::SLOW_AFTER, f(g.near(0.75, 0.0, 1.5)));
+        let sp = g.f(0.0, 4.0);
+        for i in 0..4 {
+            put(&mut ee, body + 0x80 + 4 * i, f(sp * g.f(-1.0, 1.0)));
+        }
+        put(&mut ee, RIDER + rider::HIGH, if g.one_in(2) { 1 } else { 0 });
+        put(&mut ee, RIDER + rider::SLOW, if g.one_in(2) { 1 } else { 0 });
+        put(&mut ee, RIDER + rider::RELEASED, if g.one_in(2) { 1 } else { 0 });
+        let collidable = FAKE + 0x1000;
+        let c = if g.one_in(4) { 0 } else { collidable };
+        put(&mut ee, rec + rider::R_COLLIDABLE, c);
+        let radius = g.f(0.5, 3.0);
+        put(&mut ee, collidable + 0x70, f(radius));
+        let reach = if g.one_in(5) { radius + 1.0 } else { g.f(0.0, 2.0 * (radius + 1.0)) };
+        let (dx, dy) = (g.f(-1.0, 1.0), g.f(-1.0, 1.0));
+        let dz = (1.0 - dx * dx - dy * dy).max(0.0).sqrt();
+        for (i, v) in [x - dx * reach, y - dy * reach, z - dz * reach, 1.0].into_iter().enumerate() {
+            put(&mut ee, collidable + 0x50 + 4 * i as u32, f(v));
+        }
+        for (k, &p) in parts.iter().enumerate() {
+            let sphere = ee.u32_at(p + 0x88);
+            let list = FAKE + 0x2000 + 0x10 * k as u32;
+            put(&mut ee, sphere + 0xe4, list);
+            put(&mut ee, sphere + 0xe8, g.pick(&[0, 1, 2, 3, 4, 0xffff_ffff]));
+            for i in 0..4 {
+                let w = g.pick(&[collidable, collidable, 0, FAKE + 0x1100]);
+                put(&mut ee, list + 4 * i, w);
+            }
+        }
+        for i in 0..bodies {
+            for o in [0x40, 0x50] {
+                for k in 0..4 {
+                    let x = g.near(0.0, -9.0, 9.0);
+                    put(&mut ee, poses + 0x60 * i + o + 4 * k, f(x));
+                }
+            }
+        }
+        for k in 0..4 {
+            let x = g.near(0.0, -9.0, 9.0);
+            put(&mut ee, RIDER + rider::TARGET + 4 * k, f(x));
+        }
+        put(&mut ee, RIDER + rider::FADE, f(g.near(0.0, -0.1, 0.5)));
+        put(&mut ee, RIDER + rider::FADE_FROM, f(g.near(0.0, 0.0, 2.0)));
+        put(&mut ee, RIDER + rider::TARGETED, if g.one_in(2) { 1 } else { 0 });
         // The record's orientation (and the reference pose's), its points and pairs.
         for at in [rec + 0x1c0, pose_slot] {
             for i in 0..4 {
@@ -284,7 +426,7 @@ fn the_riders_mode_machine_is_the_originals() {
         *answers.borrow_mut() = rands.iter().copied().collect();
         ee.set(28, GP);
         ee.call(MODES, &[u64::from(RIDER)], &[f32::from_bits(DT)], BUDGET);
-        let w1 = written_words(&ee);
+        let w1 = written_words(&ee, terrain);
         let want: HashMap<u32, u32> = w1.iter().map(|&a| (a, ee.u32_at(a))).collect();
         let calls = log.borrow().clone();
         let mode = ee.u32_at(RIDER + rider::MODE);
@@ -300,8 +442,8 @@ fn the_riders_mode_machine_is_the_originals() {
         log.borrow_mut().clear();
         ee.written.clear();
         let mut port = Port { ee: &mut ee, log: log.clone(), rands: rands.iter().copied().collect() };
-        rider::modes(&mut port, RIDER, F(f32::from_bits(DT)));
-        let w2 = written_words(&ee);
+        rider::modes(&mut port, RIDER, F(f32::from_bits(DT)), Some(&map));
+        let w2 = written_words(&ee, terrain);
         let got_calls = log.borrow().clone();
         assert_eq!(got_calls, calls, "case {k}: the calls");
         for &a in w1.union(&w2) {
@@ -330,16 +472,50 @@ fn the_riders_mode_machine_is_the_originals() {
         });
         // Which holds arm: the parts switched, in order (L/R hold, l/r free), on or off, and whether a
         // fade ran.
-        let seq: String = calls
+        let switched: Vec<String> = calls
             .iter()
             .filter_map(|c| match *c {
+                Call::Switch { part, .. } if part == force => Some("F".to_string()),
                 Call::Switch { part, on } => {
                     let i = holds.iter().position(|&h| h == part).expect("a part not among the holds");
-                    Some(format!("{}{on}", ["L", "R", "l", "r"][i]))
+                    Some(format!("{}{on}", ["L", "R", "l", "r", "A", "B"][i]))
                 }
                 _ => None,
             })
             .collect();
+        let seq: String = switched.iter().filter(|s| "LRlr".contains(&s[..1])).cloned().collect();
+        if mode == 2 {
+            let arm: String = switched.iter().filter(|s| "FAB".contains(&s[..1])).cloned().collect();
+            tally(format!("arm: switched {arm}"));
+            let gv = |a: u32| given.iter().rev().find(|(at, _)| *at == a).unwrap().1;
+            let now = |a: u32| want.get(&a).copied().unwrap_or_else(|| gv(a));
+            if f32::from_bits(gv(RIDER + rider::AIM_TIME)) > 0.0 {
+                let how = if gv(RIDER + rider::AIM_AS_IS) != 0 { "as is" } else if gv(RIDER + rider::AIM_BY_BODY) != 0 { "by body" } else { "by record" };
+                tally(format!("arm: aim {how}"));
+            }
+            if gv(RIDER + rider::RELEASED) == 0 && now(RIDER + rider::RELEASED) == 1 {
+                tally("arm: released".into());
+                if (0..parts.len() as u32).any(|k| (0..4).any(|i| want.contains_key(&(FAKE + 0x2000 + 0x10 * k + 4 * i)))) {
+                    tally("arm: released off a list".into());
+                }
+            }
+            let latch = |a: u32| (gv(RIDER + a), now(RIDER + a));
+            match (latch(rider::HIGH), latch(rider::SLOW)) {
+                ((0, 1), _) => tally("arm: high set".into()),
+                ((1, 0), _) => tally("arm: high cleared".into()),
+                (_, (0, 1)) => {
+                    let late = f32::from_bits(now(RIDER + rider::TOUCHING_TIME)) > f32::from_bits(gv(RIDER + rider::SLOW_AFTER));
+                    tally(if late { "arm: slow set, late".into() } else { "arm: slow set, slow".into() });
+                }
+                _ => tally("arm: no clause".into()),
+            }
+            if gv(RIDER + rider::TARGETED) == 0 && now(RIDER + rider::TARGETED) == 1 && gv(rec + rider::R_KIND) == 13 {
+                tally("arm: targets set, kind 13".into());
+            }
+            if f32::from_bits(gv(RIDER + rider::FADE)) > 0.0 && want.contains_key(&(RIDER + rider::FADE)) {
+                tally("arm: fade ran".into());
+            }
+        }
         let fades: Vec<u32> = [rider::FADE_R, rider::FADE_L].iter().map(|o| RIDER + o).collect();
         let faded = fades.iter().any(|a| want.get(a).is_some_and(|&v| v != pre[a]));
         tally(format!("holds: {seq}"));
@@ -356,3 +532,4 @@ fn the_riders_mode_machine_is_the_originals() {
         assert!(*n >= 20, "path {path} taken only {n} times");
     }
 }
+

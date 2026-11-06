@@ -9869,6 +9869,34 @@ atv_heap_free               atv 0x001b76d0 = free
 #   world's 0x00496a70); the hold/free parts' vt +0x10 slot +0x10 = 0x0049bd30 on state 4 (a1 on/off).
 #   Oracle: 60 000 drawn frames of state 4's rider, the whole function against the port, every written
 #   word and the call log equal; every switch and holds arm taken (fewest: holds "L0l1R1r0" ~56).
+# S285: the rider's wreck arm body 0x004efe10..0x004f0274 (in 0x004ef320, mode 2), ported as
+# game_sim::handling::rider::wreck_arm (aim, let_go, release_bike, ground_y, clauses; release, pose_targets,
+# body_target). tests/mxvatv_rider_modes.rs (the S278b oracle, the arm no longer skipped). Journal:
+# research/journal/2026-11-06-s285-rider-wreck-arm/.
+#   Aim 0x004efe10: +0x640 clock > 0: +0x660 = +0x650 (lq/sq) when +0x62c, else turned (wreck::turned's
+#   VU0 sequence, w kept) by the main body's +0x190 when +0x630, else by record +0x1c0; +0x640 -= dt.
+#   Clock run out: force +0x5bc (0x010c0840 on state 4, vt at +8 0x003cd1b0, slot +0x10 0x0049bd80, its
+#   +0xc = rider+0x660) with its +0 word set: +0x660 = (0,0,0,1) 0x00396fc0, then that slot (a0 force, a1 0).
+#   Let go 0x004eff34: +0x644 > 0: -= dt; else +0x550 (0x0110d660) or +0x554 (0x0110d410) +4 set: both
+#   off via their vt +0x10 slot +0x10 (0x0049bd30, a1 0).
+#   Gather 0x001d6a60(*(+0x5b8) 0x0110c5d0, *(list[0])+0x88, 3) (atv_gather_nearby), then S278's walk.
+#   Release 0x004f0020: +0x634 0 and record +0x1dc set: d = body+0x70 - c+0x50 (vsub.xyz), |d| by
+#   mula/madda/madd/sqrt.s; !(|d| <= 1 + c+0x70): +0x634 = 1, each part (count re-read) 0x001156f0(
+#   part+0x88 sphere, c): the first of the sphere's +0xe4 list (count +0xe8, both read once) that is c = 0.
+#   Ground 0x004f00f8: 0x004833c0(*(+0x26c) terrain 0x00bbd720, sp copy of body+0x70, 0, 0, 0) = the MD76
+#   query (a2 normal, t0 surface byte; a3 unused), v0 unread; only the copy's y is read back.
+#   Clauses 0x004f0120 (t = +0x380 after the walk): t == 0, +0x644 <= 0, +0x640 <= 0, +0x63c 0 and
+#   !(body y - ground y <= +0x850 (3.0)): 0x004eedc0(rider, 1), +0x63c = 1, +0x638 = 0. Else !(t <= 0) and
+#   +0x63c: 0x004eedc0(rider, 0), +0x63c = 0. Else (!(t <= +0x854 (0.75)) or |body+0x80| < +0x858 (0))
+#   and +0x638 0: +0x638 = 1 (delay slot), 0x004eedc0(rider, 1), body vt +0x68(body, rider+0x840).
+#   Fade 0x004f0254: !(+0x5d8 <= 0): -= dt.
+#   0x004eedc0(rider, on): on: +0x264 = 1, +0x5d8 = +0x5d4 (lwc1/swc1), the record kind 13 -> offset 0x50,
+#   else 0x40; off: +0x264 = 0, offset 0x50 (Ghidra drops the off store). For i < +0x290 (re-read after
+#   each): body = *(*(+0x2a4) + 0xb0 i + 0xa4), its vt (+0x110) +0x68(body, *(+0x3a8) + 0x60 i + offset).
+#   Body vt +0x68 0x00493b00 (vtable 0x003cd200, vtable-only: kit dis): body+0x150 = the quad at a1.
+#   Oracle: the S278b 60 000 frames, ~25 000 in mode 2, nothing in the arm hooked but the gather (and the
+#   switches); the query run on Nat05's map on both sides, its ring 0x00541550 and terrain +0x9e0/+0x9e4
+#   left out of the compare. Every clause, aim way and release taken (fewest: slow set late 886).
 
 # F31b5d: state 4's sim listeners that are not the bike's, shown inert on C15 ride-2 and flip-1. Journal:
 # research/journal/2026-11-05-f31b5d-other-listeners-inert/.
