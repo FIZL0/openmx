@@ -181,6 +181,14 @@ pub fn local(m: &mut impl Ram, n: u32, q: Quad) -> Quad {
     keep_w(d.merge(Dest::XYZ, Vf::madd(Vf::madd(col(0).mul(d.bc(Field::X)), col(1), d.bc(Field::Y)), col(2), d.bc(Field::Z))).to_bits(), q)
 }
 
+/// **A world point into the node's frame** (brought up to date first, S278a): the world position row
+/// off (`xyz`), then each lane the dot of a world row with it, over the 3×3 transposed; the `w` the
+/// point's. [`place`]'s inverse.
+pub fn unplace(m: &mut impl Ram, n: u32, p: Quad) -> Quad {
+    update(m, n);
+    point_in_frame(&rows(m, n + WORLD), Vf::from_bits(p)).to_bits()
+}
+
 /// **Where the node is in the world** (brought up to date first): the world position row's `xyz`,
 /// `w` 1, into the 4 words at `out`.
 pub fn position(m: &mut impl Ram, n: u32, out: u32) {
