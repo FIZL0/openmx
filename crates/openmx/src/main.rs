@@ -7890,6 +7890,13 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     act = front.menu.step_idle(d, p);
                 }
             }
+            // A player whose controller the Controllers screen took off (P322) leaves the ride, as
+            // the pause's Leave Session row does; the screen stays up for 1P.
+            if act == Act::Stay
+                && let Some(kick) = front.menu.kick()
+            {
+                act = kick;
+            }
             // A click on a pause's music player (P174), in the view that pause is drawn in.
             if let Some(w) = window.as_ref() {
                 for &at in w.clicks() {

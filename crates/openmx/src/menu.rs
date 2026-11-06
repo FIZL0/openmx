@@ -3299,6 +3299,9 @@ pub struct Menu {
     /// The Controllers screen (P210): what drives each seat and who is plugged in, which the shell
     /// gives it ([`Menu::controllers`]) and takes back changed ([`Menu::take_assigned`]).
     pub assign: join::Assign<Dev>,
+    /// The pad seats the Controllers screen over a ride took a player's controller off (P322),
+    /// waiting for [`Menu::kick`] to send that player out of the ride.
+    pub kicks: Vec<usize>,
     /// The Controllers screen's card the mouse has hold of (P214, menu_drag.rs).
     pub card_drag: Option<CardDrag>,
     /// What each device is called on the Controllers screen's cards, by the shell.
@@ -3592,6 +3595,7 @@ impl Menu {
             join: Join::new(join::ON_SCREEN, Opened::Menu),
             devices: Vec::new(),
             assign: join::Assign::default(),
+            kicks: Vec::new(),
             card_drag: None,
             dev_names: Vec::new(),
             heard: Vec::new(),
@@ -4063,6 +4067,39 @@ impl Menu {
     /// `Seats` to hand out (P210).
     pub fn take_assigned(&mut self) -> Option<Vec<Option<Dev>>> {
         self.assign.take()
+    }
+
+    /// A player whose controller the Controllers screen over a ride took off onto no seat (P322),
+    /// out of the ride: [`Act::Leave`] on a local ride, [`Act::LeaveSession`] online, which the
+    /// shell takes as the pause's Leave Session row (P76, N11). One a call, so each is read on the
+    /// players as the last one left them. Not 1P: the screen does not close without a controller
+    /// on 1P (and online 1P's Leave Session takes every seat of this machine's), so 1P's rider
+    /// waits for one; nor the last player.
+    pub fn kick(&mut self) -> Option<Act> {
+        let over = self.stack.contains(&Screen::Pause);
+        for s in self.assign.take_let_go() {
+            if over && !self.kicks.contains(&s) {
+                self.kicks.push(s);
+            }
+        }
+        if !over {
+            self.kicks.clear();
+            return None;
+        }
+        while !self.kicks.is_empty() {
+            let s = self.kicks.remove(0);
+            // put back on a controller meanwhile: nobody leaves
+            if self.assign.seats.get(s).is_some_and(Option::is_some) {
+                continue;
+            }
+            let Some(i) = self.ride_devices().iter().position(|&d| d == s) else { continue };
+            if i == 0 || self.riders <= 1 {
+                continue;
+            }
+            self.note = Some(format!("Player {} has no controller: out of the ride.", i + 1));
+            return Some(if self.session { Act::LeaveSession(i) } else { Act::Leave(i) });
+        }
+        None
     }
 
     /// Whether 1P's view has the Controllers screen up over a ride (P210): the shell then gives it

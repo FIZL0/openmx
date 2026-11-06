@@ -320,11 +320,14 @@ pub struct Assign<D> {
     /// Whether the shell gave the screen its seats ([`Assign::with`]): until it has, the screen takes
     /// the next ones it is given.
     pub given: bool,
+    /// The seats a device was taken off onto no seat (P322), oldest first, until the menu asks
+    /// ([`Assign::take_let_go`]): over a ride, that seat's player leaves it.
+    pub let_go: Vec<usize>,
 }
 
 impl<D: Clone + PartialEq> Default for Assign<D> {
     fn default() -> Assign<D> {
-        Assign { seats: vec![None; MOST], present: Vec::new(), open: MOST, flash: Vec::new(), slide: Vec::new(), moved: false, given: false }
+        Assign { seats: vec![None; MOST], present: Vec::new(), open: MOST, flash: Vec::new(), slide: Vec::new(), moved: false, given: false, let_go: Vec::new() }
     }
 }
 
@@ -375,6 +378,9 @@ impl<D: Clone + PartialEq> Assign<D> {
         let other = if to == 0 { None } else { self.seats[to - 1].take() };
         if from > 0 {
             self.seats[from - 1] = other.clone();
+            if to == 0 && !self.let_go.contains(&(from - 1)) {
+                self.let_go.push(from - 1);
+            }
         }
         if to > 0 {
             self.seats[to - 1] = Some(d.clone());
@@ -467,6 +473,13 @@ impl<D: Clone + PartialEq> Assign<D> {
         let (_, from, t) = self.slide.iter().find(|(s, _, _)| s == d)?;
         let x = 1.0 - *t as f32 / SLIDE_TICKS as f32;
         Some((*from, 1.0 - (1.0 - x) * (1.0 - x)))
+    }
+
+    /// The seats taken off onto no seat since the last time this was asked, and still empty: a
+    /// seat filled again since (a device put back on it, or another's) is not one.
+    pub fn take_let_go(&mut self) -> Vec<usize> {
+        let seats = &self.seats;
+        std::mem::take(&mut self.let_go).into_iter().filter(|&i| seats.get(i).is_some_and(Option::is_none)).collect()
     }
 
     /// The seats, once a press moved one since the last time this was asked.

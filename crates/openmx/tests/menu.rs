@@ -6817,6 +6817,12 @@ impl DropIn {
                 act = self.m.step_idle(d, p);
             }
         }
+        // a controller the Controllers screen took off (P322), as main.rs takes it
+        if act == Act::Stay
+            && let Some(kick) = self.m.kick()
+        {
+            act = kick;
+        }
         let change = match act {
             Act::Join(d) => Some(join::Change::Join(d)),
             Act::Leave(i) => Some(join::Change::Leave(i)),
@@ -7025,6 +7031,122 @@ fn players_drop_into_a_running_freeride_and_leave_it_and_the_others_ride_on() {
     let acts = r.tap(0, Control::Cross);
     assert!(acts.contains(&Act::MainMenu), "{acts:?}");
     assert_eq!(r.m.screen(), Some(Screen::Main));
+}
+
+/// P322: two seats riding, and 2P's pad taken off onto no seat on the Controllers screen from 1P's
+/// pause: 2P is out of the ride, which carries on with one seat and one view. 1P's seat cannot be
+/// emptied this way (the screen keeps it until a controller is on it), nor the last one's. Online
+/// the same move is the pause's Leave Session for that local player (N11).
+#[test]
+fn a_pad_taken_off_on_the_controllers_screen_kicks_its_player_out_of_the_ride() {
+    let (a, b) = (Dev::Pad("a".into()), Dev::Pad("b".into()));
+    let names = |ds: &[Dev]| ds.iter().map(|d| (d.clone(), String::new())).collect::<Vec<_>>();
+    let all = [0, 1, 2, 3];
+    let (mut m, mut rd) = fresh_with(4);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
+    let acts = tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
+    assert!(acts.iter().any(|a| matches!(a, Act::Ride(_))), "{acts:?}");
+    m.seats_open = true;
+    let first = rd.remove(0);
+    let mut lot = vehicle::Lot::new(MACHINES.as_bytes(), 1, &mut |_| 0.0);
+    let garage = Garage::new(Kind::Bike, lot.plane(0, None)).unwrap();
+    let mut r = DropIn {
+        m,
+        readers: vec![first],
+        idle: (0..4).map(|_| Reader::new()).collect(),
+        rides: vec![(0, game_sim::Sim::new(0x88))],
+        garages: vec![garage],
+        lot,
+        ticks: Default::default(),
+        frames: Vec::new(),
+        joined: [(0, 0)].into(),
+    };
+    for _ in 0..10 {
+        r.frame(&[]);
+    }
+    assert!(r.tap(1, Control::Cross).contains(&Act::Join(1)));
+    assert_eq!(r.views(), (split::Layout::SideBySide, 2));
+    for _ in 0..10 {
+        r.frame(&[]);
+    }
+    // 1P's pause, its Controllers row
+    r.tap(0, Control::Start);
+    let row = r.m.pause_rows().iter().position(|row| row == "Controllers").unwrap();
+    for _ in 0..row {
+        r.tap(0, Control::Down);
+    }
+    r.tap(0, Control::Cross);
+    assert!(r.m.assigning());
+    r.m.controllers(&[Some(a.clone()), Some(b.clone())], &names(&[a.clone(), b.clone()]));
+    // 1P's pad off: it is the screen's to keep, nobody leaves
+    r.m.step_assign(&[(a.clone(), Press { delete: true, ..Press::default() })]);
+    assert_eq!(r.m.assign.seats[0], None);
+    for _ in 0..3 {
+        assert_eq!(r.frame(&[]), Act::Stay);
+    }
+    assert_eq!(r.ids(), vec![0, 1]);
+    r.m.step_assign(&[(a.clone(), Press { ok: true, ..Press::default() })]);
+    assert_eq!(r.m.assign.seats[0], Some(a.clone()));
+    // a pad taken off and put back before the ride reads it: nobody leaves either
+    r.m.step_assign(&[(b.clone(), Press { delete: true, ..Press::default() })]);
+    r.m.step_assign(&[(b.clone(), Press { ok: true, ..Press::default() })]);
+    assert_eq!(r.m.assign.seats[1], Some(b.clone()));
+    assert_eq!(r.frame(&[]), Act::Stay);
+    assert_eq!(r.ids(), vec![0, 1]);
+
+    // 2P's pad onto no seat: 2P is out, one seat and one view, the screen still up for 1P
+    r.m.step_assign(&[(b.clone(), Press { delete: true, ..Press::default() })]);
+    assert!(r.m.assign.loose().contains(&b));
+    assert_eq!(r.frame(&[]), Act::Leave(1));
+    assert_eq!(r.ids(), vec![0]);
+    assert_eq!(r.m.riders, 1);
+    assert_eq!(r.views(), (split::Layout::Full, 1));
+    assert!(r.m.assigning(), "the Controllers screen stays up");
+    assert_eq!(r.m.note.as_deref(), Some("Player 2 left the ride."));
+    assert_eq!(r.frame(&[]), Act::Stay, "once");
+    // closed, the pause resumed: the ride carries on with the one player
+    r.m.step_assign(&[(a.clone(), Press { back: true, ..Press::default() })]);
+    assert_eq!(r.m.screen(), Some(Screen::Pause));
+    r.tap(0, Control::Start);
+    assert!(r.m.riding());
+    let before = r.ticks[&0].len();
+    for _ in 0..10 {
+        r.frame(&[]);
+    }
+    assert_eq!(r.ticks[&0].len(), before + 10, "1P rides on");
+
+    // Online, two players on this machine: the same move is 2P's Leave Session.
+    let (mut m, _) = fresh();
+    m.session = true;
+    m.riders = 2;
+    m.set_p1(Dev::Keys);
+    m.pause();
+    let row = m.pause_rows().iter().position(|row| row == "Controllers").unwrap();
+    let key = |m: &mut Menu, p: Press| {
+        m.step_devices(&[(Dev::Keys, p)]);
+        for _ in 0..3 {
+            m.step_devices(&[]);
+        }
+    };
+    for _ in 0..row {
+        key(&mut m, Press { down: true, ..Press::default() });
+    }
+    key(&mut m, Press { ok: true, ..Press::default() });
+    assert!(m.assigning(), "{:?}", m.screen());
+    m.controllers(&[Some(a.clone()), Some(b.clone())], &names(&[a.clone(), b.clone()]));
+    m.step_assign(&[(a.clone(), Press { delete: true, ..Press::default() })]);
+    assert_eq!(m.kick(), None, "1P online would take every seat of this machine's");
+    m.step_assign(&[(a.clone(), Press { ok: true, ..Press::default() })]);
+    m.step_assign(&[(b.clone(), Press { delete: true, ..Press::default() })]);
+    assert_eq!(m.kick(), Some(Act::LeaveSession(1)));
+    assert_eq!(m.kick(), None);
+    // and off a ride (the main menu's screen) nobody is kicked
+    let (mut m, _) = fresh();
+    m.riders = 2;
+    m.open(Screen::Assign);
+    m.controllers(&[Some(a.clone()), Some(b.clone())], &names(&[a.clone(), b.clone()]));
+    m.step_assign(&[(b.clone(), Press { delete: true, ..Press::default() })]);
+    assert_eq!(m.kick(), None);
 }
 
 /// A ride of one under way on `menu` (P171), its rider on pad seat `device`, as the shell's loop
