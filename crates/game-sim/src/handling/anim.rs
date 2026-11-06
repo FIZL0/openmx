@@ -109,7 +109,7 @@ fn node_rotation(m: &mut impl Ram, n: u32) -> Quad {
 
 /// The node's own rotation set from a quaternion: the three rotation rows [`math::quat_to_mat4`]'s
 /// (`w` 0), the position row left; then [`node::moved`].
-fn turn_node(m: &mut impl Ram, n: u32, q: Quad) {
+pub(crate) fn turn_node(m: &mut impl Ram, n: u32, q: Quad) {
     let rows = math::quat_to_mat4(Vf::from_bits(q), Vf::ZERO).0;
     for (r, row) in rows.iter().take(3).enumerate() {
         put_quad(m, n + 0x30 + 0x10 * r as u32, row.to_bits());

@@ -9772,6 +9772,32 @@ atv_heap_free               atv 0x001b76d0 = free
 #   0x00499e20); no pre or post lists. Follow-ups S278a (the world) and S278b (the mode machine).
 #   flip-1: the walk on 68 frames (3 unset, rows 125..127), SETTLES 1 from row 128 to the end.
 
+# S278b: the rest of the rider's mode machine 0x004ef320 (from the rider frame 0x004f1790), ported as
+# game_sim::handling::rider::modes (choose, switch, place_parts, holds, lean, follow, frame_end; the
+# outside calls behind rider::Rider). tests/mxvatv_rider_modes.rs. Journal:
+# research/journal/2026-11-05-s278b-rider-mode-machine/.
+#   Rider +0x368 mode, +0x36c acted mode, +0x370 kind kept, +0x8f8 respawn frames, +0x3a4 (0/1 -> 3 or 2
+#   frames, else 1), +0x86d/+0x86e bytes (>= 46 riding; 0x38), +0x8ac, +0x874 (-1 = holds run), +0x894,
+#   +0x8a0, +0x8a8 (rand * 2^-31 * 0.5), +0x5c8/+0x5cc fades, +0x558/+0x55c hold parts, +0x5a8/+0x5ac free
+#   parts, +0x3ac/+0x3b0 pose list (0x50 each: +4 node, +8 body; 17 on state 4), +0x38c, +0x258, +0x25c,
+#   +0x384, +0x388, +0x30c (+0x28 == 2: follow), +0x600 -> +0x5f0 lean, +0x1fc reference poses (holder+0x40
+#   << 6, +0x20), +0x400/+0x410 offsets, +0x420..+0x53c the frame-end copies.
+#   Record (+0x378): +0x8 ridden, +0xc respawn ask, +0x138 wreck kind (13 = entered again), +0x170 hold,
+#   +0x12c, +0x130, +0x19c, +0x1a0 (0.3/0.7), +0x1a8, +0xb4 (|.| < 1.5), +0x1b0 point, +0x1c0 quat, +0x100..
+#   +0x124 five pointer pairs, +0x60..+0x9c, +0xa0..+0xf0.
+#   Stretches: choose 0x004ef33c..0x004ef3e0; switch 0x004ef3e0..0x004ef750; holds 0x004ef750..0x004efc60
+#   (up from 0x001351d0's y row); lean 0x004efc60..0x004efd5c (main node +0x190 = the record quat times the
+#   reference pose, the +0x190 node product as chassis quat_mul); follow 0x004efd5c..0x004efe00; mode-2 test 0x004efe00;
+#   wreck arm body 0x004efe10..0x004f0274 (not ported but its walk, S278); clear loop 0x004f0274
+#   (the wreck arm's "ground ask": the nearby gather 0x001d6a60(+0x5b8, ..., 3), S278's name for it, and
+#   the ground query 0x004833c0, which Ghidra wrongly calls non-returning; S281)
+#   Frame end 0x004f02b0..0x004f0580. Place parts 0x004f05a0. Node turn 0x001945b0 (a2 0).
+#   Outside calls: rand 0x003561a8; riding reset 0x004eef40 (a0 rider, f12 dt); wreck entry 0x004ed700
+#   (a1 record +0x138, f12 dt); vt +0xd0 0x00505720 (pose: f12 dt, a1 0); vt +0xcc 0x00505710 (settle, the
+#   world's 0x00496a70); the hold/free parts' vt +0x10 slot +0x10 = 0x0049bd30 on state 4 (a1 on/off).
+#   Oracle: 60 000 drawn frames of state 4's rider, the whole function against the port, every written
+#   word and the call log equal; every switch and holds arm taken (fewest: holds "L0l1R1r0" ~56).
+
 # F31b5d: state 4's sim listeners that are not the bike's, shown inert on C15 ride-2 and flip-1. Journal:
 # research/journal/2026-11-05-f31b5d-other-listeners-inert/.
 #   Lists every frame: sim+0x24 = the bike's record alone (getter 0x00208390 answers it once a pass); sim+0x3c
