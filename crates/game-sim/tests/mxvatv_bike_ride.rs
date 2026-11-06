@@ -4933,6 +4933,14 @@ const NET_UNPACK_FN: u32 = 0x004d_d490;
 const MARK_FN: u32 = 0x0046_b110;
 /// F31b5f's: the clip held at its end (vt `+0x4ec`).
 const TRICK_HOLD_FN: u32 = 0x004e_4810;
+thread_local! {
+    /// F45 — the calls [`UpdateInRam`] served with the ports since the last take, by name.
+    static F45_SERVED: RefCell<BTreeMap<&'static str, u32>> = RefCell::default();
+}
+
+/// The bike's remote stunt clocks (vt `+0x4e8`) and trick wanted (vt `+0x4b4`), F45's.
+const STUNT_CLOCKS_FN: u32 = 0x004e_4900;
+const TRICK_WANTED_FN: u32 = 0x004e_47a0;
 const NET_POST: u32 = 0x004a_8c40;
 /// F44's: the scene node's on, off, shown and hidden (the trail's vt `+0x18`, `+0x20`, `+0x28`,
 /// `+0x2c`), the net sender's send (a thunk to the bike's), and the record's and the second part's
@@ -5129,6 +5137,43 @@ impl Updates for UpdateInRam<'_> {
             Out::Counter => return ee.u32_at(ee.scratch(COUNTER_K)),
             _ => {}
         }
+        // F45's: the trick step's calls and the unpack's node turn, the ports where the bike's slot holds
+        // the original and no oracle hooks it; the run's calls the stunt's start and end make [`run`]'s,
+        // their event posts the original's ([`RunHanded`]).
+        let served = |what: &'static str| F45_SERVED.with(|s| *s.borrow_mut().entry(what).or_default() += 1);
+        match c {
+            Out::TrickRemote if vt(ee, 0x4e8) == STUNT_CLOCKS_FN && ported(STUNT_CLOCKS_FN) => {
+                served("TrickRemote");
+                return update::stunt_clocks(self, dt);
+            }
+            Out::TrickWanted if vt(ee, 0x4b4) == TRICK_WANTED_FN && ported(TRICK_WANTED_FN) => {
+                served("TrickWanted");
+                return update::trick_wanted(self);
+            }
+            Out::TrickEnd(id) if vt(ee, 0x4ac) == TRICK_END_FN && ported(TRICK_END_FN) => {
+                served("TrickEnd");
+                return update::trick_end(self, id);
+            }
+            Out::TrickStart(id) if vt(ee, 0x4b8) == STUNT_START_FN && ported(STUNT_START_FN) => {
+                served("TrickStart");
+                return update::stunt_start(self, id, 0);
+            }
+            Out::Mark { .. } if ported(MARK_FN) => {
+                served("Mark");
+                return serve_run(&mut RunHanded { ee: &mut *self.ee }, c);
+            }
+            Out::RunOpen(_) | Out::RunScore { .. } | Out::RunClose { .. } | Out::RunTally { .. } | Out::RunEnd { .. } => {
+                served("Run");
+                return serve_run(&mut RunHanded { ee: &mut *self.ee }, c);
+            }
+            Out::Orient { node, at, pos } if ported(NODE_PLACE) => {
+                served("Orient");
+                let (q, p) = ([0, 4, 8, 12].map(|k| ee.u32_at(at + k)), [0, 4, 8, 12].map(|k| ee.u32_at(pos + k)));
+                node::orient(&mut NodeRam(self.ee), node, q, p);
+                return 0;
+            }
+            _ => {}
+        }
         let packet_at = |ee: &mut Ee, p: &update::Packet| {
             let at = ee.scratch(PACKET_K);
             for (k, &b) in p.data().iter().enumerate() {
@@ -5191,7 +5236,7 @@ impl Updates for UpdateInRam<'_> {
             Out::Counter => unreachable!("the stand-in word"),
             Out::NodePlace { .. } | Out::Local { .. } | Out::Rotate { .. } => unreachable!("asked through vector()"),
             Out::RunOpen(_) | Out::RunScore { .. } | Out::RunClose { .. } | Out::RunTally { .. } | Out::RunEnd { .. } => {
-                unreachable!("the stunt's start and end are the original's here")
+                unreachable!("served by the port")
             }
         };
         self.call(f, &ints, &floats)
@@ -7222,6 +7267,31 @@ impl Updates for RunServed<'_> {
     }
 }
 
+/// F45 — the run's words in RAM, its listeners [`told`], its event posts handed to the original
+/// (the post on the queue word at [`CUE_ON`]), for the stunt's start and end [`UpdateInRam`] serves.
+struct RunHanded<'a> {
+    ee: &'a mut Ee,
+}
+
+impl run::Runs for RunHanded<'_> {
+    fn word(&mut self, at: u32) -> u32 {
+        self.ee.u32_at(at)
+    }
+    fn set(&mut self, at: u32, w: u32) {
+        self.ee.set_u32(at, w);
+    }
+    fn out(&mut self, c: run::Out) {
+        match c {
+            run::Out::Tell { .. } => told(self, c),
+            run::Out::Post { on, kind, id, data, x } => {
+                let q = self.ee.u32_at(CUE_ON);
+                self.ee.set(28, GP);
+                census(self.ee, |ee| ee.call(POST_FN, &[q, on, kind, id, data, x].map(u64::from), &[], BUDGET));
+            }
+        }
+    }
+}
+
 /// F31b5h — one of the run's calls the stunt's start and end hand out, made by [`run`]'s port with
 /// the original's arguments (the open's player the bike's, as the start leaves it in `a1`).
 fn serve_run(m: &mut impl run::Runs, c: update::Out) -> u32 {
@@ -7626,6 +7696,33 @@ fn ride_replays_bit_exact_on_quad_steps() {
     for c in ["InputLimiter", "Clutch", "AutoShift", "HeadTail", "Gravity", "EngineUpdate", "Suspension", "TireForces", "WheelIntegrate"] {
         assert!(all.get(c).copied().unwrap_or(0) > 0, "the steps answered no {c}: {all:?}");
     }
+}
+
+/// **F45 — C15's rides with the trick step's calls in Rust**: ride-2 and flip-1 in lockstep, the
+/// vehicle update's whole RAM the original's after every frame ([`port_tail`]), with the remote stunt
+/// clocks, trick wanted, trick end, stunt start, stunt mark, the run's calls and the node turn
+/// [`UpdateInRam`]'s ports wherever the update reaches them. Answers what was served, by name.
+fn replay_trick_calls(name: &str) -> Option<BTreeMap<&'static str, u32>> {
+    F45_SERVED.with(|s| s.borrow_mut().clear());
+    replay_steps(name)?;
+    let served = F45_SERVED.with(|s| std::mem::take(&mut *s.borrow_mut()));
+    eprintln!("{name}: F45 served {served:?}");
+    Some(served)
+}
+
+#[test]
+fn ride_replays_with_the_trick_calls_in_rust() {
+    let Some(served) = replay_trick_calls("ride-2") else { return };
+    // The trick wanted every frame (the step asks it, the bike on the ground, so it answers 0).
+    assert_eq!(served, BTreeMap::from([("TrickWanted", 459)]));
+}
+
+#[test]
+fn flip_replays_with_the_trick_calls_in_rust() {
+    let Some(served) = replay_trick_calls("flip-1") else { return };
+    // The backflip's stunt marked through its clip and ended once; a local bike reaches no stunt
+    // clocks and no node turn, and the step starts no trick of its own.
+    assert_eq!(served, BTreeMap::from([("Mark", 21), ("TrickEnd", 1), ("TrickWanted", 367)]));
 }
 
 /// **F31b5a — C15's flip on the steps quad::Steps'**: wrecked on row 125 and put back on row 193,
@@ -9211,8 +9308,9 @@ fn the_flips_tail_callees_leave_the_physics_alone() {
 }
 
 /// The callees ride-2 leaves in the interpreter, by label ([`label`]). F43b: the attachment move is
-/// the port's, the heap it allocates from the original's (`heap Moved`).
-const RIDE_CALLEES: [&str; 11] = [
+/// the port's, the heap it allocates from the original's (`heap Moved`). F45: the trick wanted is
+/// the port's.
+const RIDE_CALLEES: [&str; 10] = [
     "heap Moved",
     "tail Message",
     "tail Paused",
@@ -9221,12 +9319,12 @@ const RIDE_CALLEES: [&str; 11] = [
     "update IrqOff",
     "update IrqOn",
     "update NetQueue",
-    "update TrickWanted",
     "update Walk",
     "wreck OutOfBounds",
 ];
 /// The callees flip-1 leaves in the interpreter: ride-2's, the trick's, the wreck's and the put-back's.
-const FLIP_CALLEES: [&str; 29] = [
+/// F45: the stunt mark, trick end and trick wanted are the ports'.
+const FLIP_CALLEES: [&str; 26] = [
     "heap Moved",
     "tail Message",
     "tail Paused",
@@ -9235,11 +9333,8 @@ const FLIP_CALLEES: [&str; 29] = [
     "update IrqOff",
     "update IrqOn",
     "update KindClear",
-    "update Mark",
     "update NetQueue",
     "update Search",
-    "update TrickEnd",
-    "update TrickWanted",
     "update Walk",
     "wreck Attach",
     "wreck Camera",
@@ -10161,6 +10256,198 @@ fn the_spins_sine_and_cosine_are_the_originals() {
         ee.call(SIN_COS, &[u64::from(s), u64::from(c)], &[angle], BUDGET);
         let (sin, cos) = node::sin_cos(F(angle), curve());
         assert_eq!([ee.u32_at(s), ee.u32_at(c)], [sin.to_bits(), cos.to_bits()], "angle {angle} ({:#010x})", angle.to_bits());
+    }
+}
+
+// --- F45: the trick step's last calls and the unpack's node turn, ported ---------------------------
+
+/// **F45 — the remote bike's stunt clocks are the original's**: 10 000 cases on state 4's bike, a stunt
+/// table laid in the scratch area (every entry naming one clip), the next stunt's id under 46, past it
+/// or a small negative, the hold flag (`+0x1788`), the clocks, the clip's run and `dt` drawn at random,
+/// run through SLUS-21104's vt `+0x4e8` and through [`update::stunt_clocks`] from the same words (the
+/// hold it hands to the original's on one side, [`update::trick_hold`] on the other). The answer, the
+/// bike's words, the table, the clip and the noise's knot come out word for word, and the original
+/// writes nothing else outside its stack but the noise's tables, built on first use.
+#[test]
+fn the_stunt_clocks_are_the_originals() {
+    let Some(mut ee) = image().map(hooked) else { return };
+    assert_eq!((vt(&ee, 0x4e8), vt(&ee, 0x4ec)), (STUNT_CLOCKS_FN, TRICK_HOLD_FN), "the bike's vt +0x4e8 and +0x4ec");
+    let (table, clip) = (WRECK_AREA + 0x100, WRECK_AREA + 0x800);
+    let regions = [(BIKE + 0x14d0, 0x30), (BIKE + 0x1528, 4), (BIKE + 0x1788, 4), (WRECK_AREA, 0x1000), (NOISE_KNOT, 4)];
+    let image_words = snap_regions(&ee, &regions);
+    let stack = ee.stack;
+    let mut g = Gen(0x0000_f450);
+    let mut t = BTreeMap::new();
+    for k in 0..10_000 {
+        restore_regions(&mut ee, &regions, &image_words);
+        ee.set_u32(BIKE + 0x14f0, table);
+        for id in -4i32..46 {
+            ee.set_u32(update::stunt_entry(table, id as u32), clip);
+        }
+        let id = match g.bits() % 8 {
+            0 => 46 + g.bits() % 4,
+            // Any id past the table (a big negative one names a word outside RAM in the original too).
+            1 => (g.bits() >> 1).max(46),
+            2 => (-1 - (g.bits() % 4) as i32) as u32,
+            _ => g.bits() % 46,
+        };
+        ee.set_u32(BIKE + update::NEXT_STUNT, id);
+        let held = g.one_in(4);
+        ee.set_u32(BIKE + 0x1788, if held { g.bits() | 1 } else { 0 });
+        for o in [0x14d8, 0x14dc, 0x14e0, 0x14e4, 0x14e8] {
+            ee.set_u32(BIKE + o, if g.one_in(4) { reset_float(&mut g) } else { g.f(-1.0, 3.0).to_bits() });
+        }
+        ee.set_u32(clip + 0x48, if g.one_in(4) { reset_float(&mut g) } else { g.f(0.05, 3.0).to_bits() });
+        let dt = if g.one_in(5) { f32::from_bits(reset_float(&mut g)) } else { f32::from_bits(DT) };
+        let entry = update::stunt_entry(table, id);
+        let path = if entry == 0 {
+            "no entry"
+        } else if held {
+            "held"
+        } else {
+            let frac = (F(ee.f32_at(BIKE + 0x14d8)) + F(dt)) / F(ee.f32_at(clip + 0x48));
+            if frac.min(F::ONE) < F::ONE { "running" } else { "run out" }
+        };
+        tally(&mut t, path);
+        let before = snap_regions(&ee, &regions);
+        ee.set(28, GP);
+        ee.call(STUNT_CLOCKS_FN, &[u64::from(BIKE)], &[dt], BUDGET);
+        let back = ee.v0() as u32;
+        // The hold's noise builds its tables on first use: its flag, its tables and `rand()`'s state.
+        let rand = ee.u32_at(RAND_BLOCK) + 0xa8;
+        let noise = |w: &u32| (NOISE_PERM..NOISE_KNOT).contains(w) || (NOISE_UNBUILT..NOISE_UNBUILT + 4).contains(w) || (rand..rand + 8).contains(w);
+        let inside = |w: &u32| regions.iter().any(|&(at, len)| (at..at + len).contains(w)) || (stack - 0x1_0000..stack + 0x4000).contains(w) || noise(w);
+        let off: Vec<u32> = ee.written.iter().copied().filter(|w| !inside(w)).collect();
+        assert!(off.is_empty(), "case {k} ({path}): the original wrote elsewhere: {:#x?}", &off[..off.len().min(8)]);
+        let want = snap_regions(&ee, &regions);
+        restore_regions(&mut ee, &regions, &before);
+        let mut m = UpdateInRam { ee: &mut ee, x: dt };
+        let got_back = update::stunt_clocks(&mut m, F(dt));
+        let got = snap_regions(&ee, &regions);
+        let diff: Vec<String> = (0..want.len()).filter(|&i| want[i] != got[i]).map(|i| format!("word {i}: original {:#010x}, port {:#010x}", want[i], got[i])).collect();
+        assert!(diff.is_empty(), "case {k} ({path}, id {id:#x}, dt {dt}): {}", diff.join("\n  "));
+        assert_eq!(got_back, back, "case {k} ({path}): the answer");
+    }
+    eprintln!("{t:?}");
+    assert_eq!(t.len(), 4, "{t:?}");
+    assert!(t.values().all(|&n| n >= 1000), "{t:?}");
+}
+
+/// **F45 — whether a trick is wanted is the original's**: 10 000 cases on state 4's bike, each word the
+/// answer reads (`+0x324`, the object at `+0xc8` and its `+0x34`, `+0x14d4`, the kind byte `+0x14ec`'s
+/// two nibbles, `+0x13e4`) zero or not at random, run through SLUS-21104's vt `+0x4b4` and through
+/// [`update::trick_wanted`]: the same answer, and the original writes nothing outside its stack.
+#[test]
+fn the_trick_wanted_is_the_originals() {
+    let Some(mut ee) = image().map(hooked) else { return };
+    assert_eq!(vt(&ee, 0x4b4), TRICK_WANTED_FN, "the bike's vt +0x4b4");
+    let object = WRECK_AREA;
+    let regions = [(BIKE + 0x324, 4), (BIKE + 0xc8, 4), (BIKE + 0x14d4, 4), (BIKE + 0x14ec, 4), (BIKE + 0x13e4, 4), (WRECK_AREA, 0x100)];
+    let image_words = snap_regions(&ee, &regions);
+    let stack = ee.stack;
+    let mut g = Gen(0x0000_f451);
+    let mut t = BTreeMap::new();
+    for k in 0..10_000 {
+        restore_regions(&mut ee, &regions, &image_words);
+        let mut word = |g: &mut Gen| if g.one_in(2) { 0 } else { g.bits() | 1 << (g.bits() % 32) };
+        let (a, b, c, d) = (word(&mut g), word(&mut g), word(&mut g), word(&mut g));
+        ee.set_u32(BIKE + 0x324, a);
+        ee.set_u32(BIKE + 0xc8, object);
+        ee.set_u32(object + 0x34, b);
+        ee.set_u32(BIKE + 0x14d4, c);
+        ee.set_u32(BIKE + 0x13e4, d);
+        let lo = if g.one_in(4) { 0 } else { 1 + g.bits() % 15 };
+        let hi = if g.one_in(4) { 0 } else { 1 + g.bits() % 15 };
+        let kind = g.bits() & !0xff | hi << 4 | lo;
+        ee.set_u32(BIKE + 0x14ec, kind);
+        let path = if a != 0 {
+            "+0x324 set"
+        } else if b != 0 {
+            "the object's +0x34 set"
+        } else if c == 0 {
+            "+0x14d4 clear"
+        } else if lo == 0 {
+            "no low nibble"
+        } else if hi == 0 {
+            "no high nibble"
+        } else if d != 0 {
+            "+0x13e4 set"
+        } else {
+            "wanted"
+        };
+        tally(&mut t, path);
+        ee.set(28, GP);
+        ee.call(TRICK_WANTED_FN, &[u64::from(BIKE)], &[], BUDGET);
+        let want = ee.v0() as u32;
+        let off: Vec<u32> = ee.written.iter().copied().filter(|w| !(stack - 0x1_0000..stack + 0x4000).contains(w)).collect();
+        assert!(off.is_empty(), "case {k} ({path}): the original wrote {:#x?}", &off[..off.len().min(8)]);
+        let got = update::trick_wanted(&mut UpdateInRam { ee: &mut ee, x: 0.0 });
+        assert_eq!(got, want, "case {k} ({path})");
+    }
+    eprintln!("{t:?}");
+    assert_eq!(t.len(), 7, "{t:?}");
+    assert!(t.values().all(|&n| n >= 200), "{t:?}");
+}
+
+/// **F45 — the node turned to a quaternion at a point is the original's**: 10 000 random forests (as
+/// F43's), a random node of each turned by SLUS-21104's node placement with no frame of reference
+/// (the unpack's call: the node, 0, the quaternion, the position) and by [`node::orient`], the
+/// quaternion a unit one, near one or any words, the position any. Every word of the forest and of
+/// the quads handed in the same, and the original writes nothing else outside its stack.
+#[test]
+fn the_node_turn_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let mut t: BTreeMap<String, u32> = BTreeMap::new();
+    let snap = |ee: &Ee| -> Vec<u32> { (FOREST..FOREST_END).step_by(4).map(|o| ee.u32_at(o)).collect() };
+    let stack = ee.stack;
+    let (at, pos) = (FOREST_IN, FOREST_IN + 0x10);
+    let mut g = Gen(0x0000_f452);
+    for k in 0..10_000u64 {
+        lay_forest(&mut ee, k ^ 0x00f4_5000);
+        let i = g.bits() % FOREST_NODES;
+        let n = FOREST + i * NODE_SIZE;
+        let q = match g.bits() % 4 {
+            0 | 1 => {
+                let v = [g.f(-1.0, 1.0), g.f(-1.0, 1.0), g.f(-1.0, 1.0), g.f(-1.0, 1.0)];
+                let l = F(v[0]) * F(v[0]) + F(v[1]) * F(v[1]) + F(v[2]) * F(v[2]) + F(v[3]) * F(v[3]);
+                let l = l.sqrt();
+                if l > F(1e-3) { v.map(|x| (F(x) / l).to_bits()) } else { [0, 0, 0, 1f32.to_bits()] }
+            }
+            2 => [0, 0, 0, 0].map(|_: u32| g.f(-1.1, 1.1).to_bits()),
+            _ => [0, 0, 0, 0].map(|_: u32| reset_float(&mut g)),
+        };
+        for (j, w) in q.into_iter().enumerate() {
+            ee.set_u32(at + 4 * j as u32, w);
+        }
+        for j in 0..4 {
+            ee.set_u32(pos + 4 * j, if g.one_in(4) { reset_float(&mut g) } else { g.f(-500.0, 500.0).to_bits() });
+        }
+        let parent = ee.u32_at(n + 0xf0);
+        let up_stale = std::iter::successors(Some(parent), |&p| (p != 0).then(|| ee.u32_at(p + 0xf0))).take_while(|&p| p != 0).any(|p| ee.u32_at(p + 0x100) & 1 == 0);
+        let path = format!("{}{}", if parent != 0 { "parent" } else { "root" }, if up_stale { ", a stale parent" } else { "" });
+        *t.entry(path.clone()).or_default() += 1;
+        if ee.u32_at(n + 0xf4) != 0 {
+            *t.entry("children".into()).or_default() += 1;
+        }
+        let before = snap(&ee);
+        ee.set(28, GP);
+        ee.call(NODE_PLACE, &[u64::from(n), 0, u64::from(at), u64::from(pos)], &[], BUDGET);
+        let off: Vec<u32> = ee.written.iter().copied().filter(|&w| !(FOREST..FOREST_END).contains(&w) && !(stack - 0x1_0000..stack + 0x4000).contains(&w)).collect();
+        assert!(off.is_empty(), "case {k} ({path}): the original wrote outside the forest: {:#x?}", &off[..off.len().min(8)]);
+        let want = snap(&ee);
+        for (o, w) in (FOREST..FOREST_END).step_by(4).zip(&before) {
+            ee.set_u32(o, *w);
+        }
+        let (qw, pw) = ([0, 4, 8, 12].map(|j| ee.u32_at(at + j)), [0, 4, 8, 12].map(|j| ee.u32_at(pos + j)));
+        node::orient(&mut NodeRam(&mut ee), n, qw, pw);
+        let got = snap(&ee);
+        let diff: Vec<String> =
+            (0..want.len()).filter(|&j| want[j] != got[j]).map(|j| format!("+{:#x}: original {:#010x}, port {:#010x}", 4 * j, want[j], got[j])).take(12).collect();
+        assert!(diff.is_empty(), "case {k} ({path}, node {i}): {}", diff.join("\n  "));
+    }
+    eprintln!("{t:#?}");
+    for p in ["root", "parent", "parent, a stale parent", "children"] {
+        assert!(t.get(p).is_some_and(|&n| n >= 500), "{p}: {t:?}");
     }
 }
 

@@ -13,11 +13,12 @@
 //!   everything current under it marked out of date.
 //! - [`place`], [`rotate`], [`local`], [`position`], [`axes`], [`frame`]: a point or a direction
 //!   carried out of the node's world frame or into it, its position, two of its rows, the whole frame.
-//! - [`set`], [`spin`], [`aim`], [`set_frame`]: the node's own frame changed, then [`moved`].
+//! - [`set`], [`spin`], [`aim`], [`set_frame`], [`orient`]: the node's own frame changed, then
+//!   [`moved`].
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
 use super::update::Quad;
-use crate::atv_moto::{frame_inverse, frame_mul, frame_point, point_in_frame};
+use crate::atv_moto::{frame_inverse, frame_mul, frame_point, point_in_frame, quat_frame};
 use crate::camera::CurveTable;
 use ps2_float::vu::{Dest, Field};
 use ps2_float::{F, Vf, fpu, fpu::Acc, vu};
@@ -257,6 +258,30 @@ pub fn aim(m: &mut impl Ram, n: u32, dir: Quad, up: Quad) {
     // The position row's `xyz` go back as words: a denormal stays one.
     for (k, &x) in pos.iter().take(3).enumerate() {
         m.set(n + POSITION + 4 * k as u32, x);
+    }
+    moved(m, n);
+}
+
+/// **The node turned to a quaternion at a point** (F45; the original's call with no frame of
+/// reference and a position): the quaternion's frame at the position
+/// ([`crate::atv_moto::quat_frame`]), taken into the parent's (its world frame brought up to date
+/// first, then inverted) if there is one, as the node's own frame; then [`moved`]. A root's position
+/// row is the position's `xyz` words as they are (copied, not computed: a denormal stays one) and 1.
+/// [`crate::atv_moto::Scene::place`] is its twin on the quad's struct.
+pub fn orient(m: &mut impl Ram, n: u32, q: Quad, pos: Quad) {
+    let f = quat_frame(Vf::from_bits(q), Vf::from_bits(pos));
+    match m.word(n + PARENT) {
+        0 => {
+            put_rows(m, n + LOCAL, &f);
+            for (k, &x) in pos.iter().take(3).enumerate() {
+                m.set(n + POSITION + 4 * k as u32, x);
+            }
+        }
+        parent => {
+            update(m, parent);
+            let f = frame_mul(&f, &frame_inverse(&rows(m, parent + WORLD)));
+            put_rows(m, n + LOCAL, &f);
+        }
     }
     moved(m, n);
 }
