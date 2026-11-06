@@ -1181,16 +1181,28 @@ impl<S: Surroundings> crate::biplane::Dynamics for Lists<'_, S> {
         self.ride.body.enabled
     }
     fn integrate(&mut self, _: i32, h: F) {
-        self.ride.body.integrate(h);
+        if self.mxvatv.is_some() {
+            self.ride.body.integrate_mxvatv(h);
+        } else {
+            self.ride.body.integrate(h);
+        }
     }
     fn end_substep(&mut self, _: i32) {
-        self.ride.body.end_substep();
+        if self.mxvatv.is_some() {
+            self.ride.body.end_substep_mxvatv();
+        } else {
+            self.ride.body.end_substep();
+        }
     }
     fn constrain(&mut self, _: i32, _: bool) {}
     fn post(&mut self, _: i32, dt: F) {
         let ride = &mut *self.ride;
         self.around.post(&ride.body);
-        ride.measure.flight(&ride.body, self.acos);
+        if self.mxvatv.is_some() {
+            ride.measure.flight_mxvatv(&ride.body, self.acos);
+        } else {
+            ride.measure.flight(&ride.body, self.acos);
+        }
         let touching = self.around.touching();
         let c = CrashContact { touching, ignored: self.around.ignored(), speed: ride.measure.speed };
         let (around, matrix) = (&mut *self.around, ride.measure.matrix);
@@ -2831,6 +2843,50 @@ pub struct Pedal {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Mxvatv {
     pub pedal: Pedal,
+    /// No player is aboard: the vehicle's player record is missing or its flags' bit 0 is clear.
+    /// The forces then run the controller and the body wrapper but not the rotor or the
+    /// aerodynamics ([`Kiowa::force_mxvatv`]). Off while the player flies it.
+    pub unmanned: bool,
+}
+
+/// SLUS-21104's numbers for the helicopter's four own commands in its binding table: each is MX
+/// Unleashed's ([`command`]) two on. The d-pad's four are the same in both games.
+pub mod command_mxvatv {
+    use crate::bindings::Command;
+    pub const CLIMB: Command = Command(0x1c);
+    pub const DESCEND: Command = Command(0x1d);
+    pub const PEDAL_LEFT: Command = Command(0x1e);
+    pub const PEDAL_RIGHT: Command = Command(0x1f);
+}
+
+impl Pad {
+    /// SLUS-21104's input step: [`Pad::from_sticks`] word for word, with the helicopter's own four
+    /// commands looked up under [`command_mxvatv`]'s numbers.
+    pub fn from_sticks_mxvatv(stick: (F, F), value: impl Fn(crate::bindings::Command) -> F) -> Pad {
+        Pad::from_sticks(stick, |c| {
+            let c = match c {
+                command::CLIMB => command_mxvatv::CLIMB,
+                command::DESCEND => command_mxvatv::DESCEND,
+                command::PEDAL_LEFT => command_mxvatv::PEDAL_LEFT,
+                command::PEDAL_RIGHT => command_mxvatv::PEDAL_RIGHT,
+                c => c,
+            };
+            value(c)
+        })
+    }
+}
+
+impl Measure {
+    /// SLUS-21104's [`Measure::flight`]: the same figures, but the matrix is MX vs. ATV's quaternion
+    /// frame ([`crate::atv_moto::quat_frame`]), as the biplane's
+    /// ([`crate::biplane::Measure::flight_mxvatv`]), and the forward and up rows its.
+    pub fn flight_mxvatv(&mut self, body: &Body, table: &AcosTable) {
+        self.flight(body, table);
+        let origin = self.matrix.0[3];
+        self.matrix = Mat4(crate::atv_moto::quat_frame(body.quat, origin));
+        self.forward = self.forward.merge(Dest::XYZ, self.matrix.0[2]);
+        self.up = self.up.merge(Dest::XYZ, self.matrix.0[1]);
+    }
 }
 
 /// The sign of the velocity along the model's forward row, as SLUS-21104's controller works it: the
@@ -3063,7 +3119,7 @@ impl Kiowa {
             self.controller.step_mxvatv(&self.pad, &at, forward, &mut self.control, &mut self.commands, table, h);
         }
         wrapper(body);
-        if self.wrecked {
+        if self.wrecked || m.unmanned {
             return;
         }
         let (f, mo) = self.rotor.step(&self.commands, &mut self.rotor_state, table);
@@ -3082,8 +3138,9 @@ impl Kiowa {
         body.add_moment_local(mo);
     }
 
-    /// [`Kiowa::tick`] with SLUS-21104's steps: [`Kiowa::force_mxvatv`] in the force listener and
-    /// [`Crash::step_mxvatv`] in the measure's crash test. The measure is MX Unleashed's.
+    /// [`Kiowa::tick`] with SLUS-21104's steps: [`Kiowa::force_mxvatv`] in the force listener, the
+    /// body's own step ([`Body::integrate_mxvatv`], [`Body::end_substep_mxvatv`]), and
+    /// [`Measure::flight_mxvatv`] with [`Crash::step_mxvatv`] in the measure.
     #[allow(clippy::too_many_arguments)]
     pub fn tick_mxvatv(
         &mut self,
