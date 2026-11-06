@@ -281,25 +281,22 @@ pub fn focus_notice() -> Option<usize> {
 // ---- away and back (P298) -------------------------------------------------------------------------
 
 /// How many times the app has gone away (WillResignActive or DidEnterBackground), and how many of
-/// those the shell has answered with [`answered_away`]: the shell's thread pauses and saves where the
-/// player is on each one.
+/// those the shell has answered with [`answered_away`]: the shell's thread pauses the ride on each one.
 static AWAY: AtomicUsize = AtomicUsize::new(0);
 static ANSWERED: AtomicUsize = AtomicUsize::new(0);
-/// How many times the app has come back (DidBecomeActive) since the last [`take_back`].
-static BACK: AtomicUsize = AtomicUsize::new(0);
 /// How many times the app has entered the background (DidEnterBackground), not just gone inactive:
 /// counted before the going away it asks the shell to answer, so the answer sees it (P298a).
 static BACKGROUNDS: AtomicUsize = AtomicUsize::new(0);
 /// Away from WillResignActive or DidEnterBackground to DidBecomeActive: the shell's loops rest (P302).
 static REST: crate::Rest = crate::Rest::new();
 
-/// How long DidEnterBackground waits on the main thread for the shell to save, of the five seconds
-/// or so iOS gives the app before it is suspended.
+/// How long DidEnterBackground waits on the main thread for the shell to answer (the ride paused, its
+/// models given back), of the five seconds or so iOS gives the app before it is suspended.
 const SAVE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// The lifecycle block's body, on the main queue: going away counts one for the shell to answer, and
-/// entering the background waits for that answer, so the save is written before iOS suspends the
-/// app; coming back counts one; a memory warning is logged with the memory then (opentennis's B538:
+/// entering the background waits for that answer, so the ride is paused and its memory given back
+/// before iOS suspends the app; a memory warning is logged with the memory then (opentennis's B538:
 /// the last sign before iOS closes the app for memory).
 extern "C" fn on_lifecycle(_: *const Block, note: Id) {
     pool(|| {
@@ -320,16 +317,13 @@ extern "C" fn on_lifecycle(_: *const Block, note: Id) {
                 let answered = ANSWERED.load(Ordering::Relaxed) >= asked;
                 eprintln!(
                     "iOS {name}: {} after {} ms, {}",
-                    if answered { "saved" } else { "the shell did not answer" },
+                    if answered { "answered" } else { "the shell did not answer" },
                     start.elapsed().as_millis(),
                     memory()
                 );
             }
             "UIApplicationWillEnterForegroundNotification" => eprintln!("iOS {name}, {}", memory()),
-            "UIApplicationDidBecomeActiveNotification" => {
-                BACK.fetch_add(1, Ordering::Relaxed);
-                REST.come_back();
-            }
+            "UIApplicationDidBecomeActiveNotification" => REST.come_back(),
             _ => eprintln!("iOS memory warning: {}", memory()),
         }
     });
@@ -371,7 +365,7 @@ pub fn watch_lifecycle() {
 }
 
 /// The app has gone away since the shell last answered: the count to hand [`answered_away`] once
-/// the ride is paused and where the player is is saved. Any thread.
+/// the ride is paused. Any thread.
 pub fn away() -> Option<usize> {
     let asked = AWAY.load(Ordering::Relaxed);
     (asked > ANSWERED.load(Ordering::Relaxed)).then_some(asked)
@@ -387,11 +381,6 @@ pub fn answered_away(asked: usize) {
 /// first pick. Any thread.
 pub fn backgrounds() -> usize {
     BACKGROUNDS.load(Ordering::Relaxed)
-}
-
-/// Whether the app has come back to the foreground since the last call. Any thread.
-pub fn take_back() -> bool {
-    BACK.swap(0, Ordering::Relaxed) > 0
 }
 
 /// While the app is away, wait for it to come back, `most` at the longest (P302): inactive, iOS gives
