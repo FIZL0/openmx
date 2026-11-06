@@ -8097,8 +8097,18 @@ impl Collides for RecordsInRam<'_, '_, '_> {
         self.inner.part_rays()
     }
     fn search(&mut self, nearby: bool) -> Vec<Hit> {
-        *self.answered.entry("> record search".into()).or_default() += 1;
-        self.inner.search(nearby)
+        // F46d: the nearby search Rust's; the global one (never on C15) still the original's.
+        if !(nearby && in_rust("record search")) {
+            *self.answered.entry("> record search".into()).or_default() += 1;
+            return self.inner.search(nearby);
+        }
+        *self.answered.entry("record search".into()).or_default() += 1;
+        let (part, list) = (self.inner.word(0x200), self.inner.word(0xfc));
+        let contacts = part_search_in_ram(self.inner.ee, part, list, self.answered);
+        contacts
+            .iter()
+            .map(|c| Hit { from: c.from, to: c.to, normal: c.normal, point: c.point, struck: self.inner.struck(c.object) })
+            .collect()
     }
     fn terrain_box(&self) -> [Vf; 2] {
         self.inner.terrain_box()
@@ -11554,6 +11564,7 @@ fn spatial_move_in_ram(ee: &mut Ee, entry: u32, centre: Vf, half: Vf, reach: F) 
 use game_sim::atv_world;
 use game_sim::broad_phase as bp;
 use game_sim::world_search as ws;
+use game_sim::{atv_part, ray_probe};
 
 /// F46b: the gather's globals — the stamp queries hand entries out under (a halfword), the
 /// quadtree last queried, world units per tree cell, the table every global query ends with, the
@@ -12143,6 +12154,311 @@ fn sweep_in_ram(ee: &mut Ee, rec: u32, probe: u32, list: u32, from: Vf, to: Vf) 
     hit
 }
 
+/// A ray probe's or a mesh's tree as it sits in RAM, 36 bytes a node (the key, the two child words
+/// at `+8`, the centre at `+0xc`, the half extents at `+0x18`), read from `root` down; and one past
+/// its highest leaf.
+fn tree_in_ram(ee: &Ee, nodes: u32, root: u16) -> (Vec<track::Node>, usize) {
+    let blank = track::Node { volume: F::ZERO, centre: [F::ZERO; 3], half_extent: [F::ZERO; 3], children: [0, 0] };
+    let (mut out, mut leaves, mut todo) = (Vec::new(), 0, vec![root]);
+    while let Some(w) = todo.pop() {
+        if w & 0x8000 != 0 {
+            leaves = leaves.max(usize::from(w & 0x7fff) + 1);
+            continue;
+        }
+        let n = nodes + 36 * u32::from(w);
+        if out.len() <= usize::from(w) {
+            out.resize(usize::from(w) + 1, blank);
+        }
+        let three = |a: u32| [0, 4, 8].map(|k| word_f(ee, a + k));
+        let children = [ee.u16_at(n + 8), ee.u16_at(n + 10)];
+        out[usize::from(w)] = track::Node { volume: word_f(ee, n), centre: three(n + 12), half_extent: three(n + 24), children };
+        todo.extend(children);
+    }
+    (out, leaves)
+}
+
+fn matrix_at(ee: &Ee, a: u32) -> ray_probe::Matrix {
+    [0, 1, 2, 3].map(|k| vf_at(ee, a + 0x10 * k))
+}
+
+/// A mesh collidable (kind 0) as the part's pair reads it: its frame (`+0x130`), its tree's root
+/// (`+0x23c`), nodes (`+0x244`) and triangles (`+0x248`, 0x14 bytes each: three vertex shorts, the
+/// packed normal at `+0xc`), and its vertices through the descriptor at `+0x230` (the array, and at
+/// `+8` whether they are packed shorts).
+struct MeshInRam {
+    id: u32,
+    transform: ray_probe::Matrix,
+    root: u16,
+    nodes: Vec<track::Node>,
+    facets: Vec<ray_probe::Facet>,
+    vertices: track::Points,
+}
+
+impl MeshInRam {
+    fn read(ee: &Ee, c: u32) -> MeshInRam {
+        assert_eq!(ee.u32_at(c + 0x78), 0, "{c:#x} is not a mesh");
+        let root = ee.u16_at(c + 0x23c);
+        let (nodes, count) = tree_in_ram(ee, ee.u32_at(c + 0x244), root);
+        let at = ee.u32_at(c + 0x248);
+        let facets: Vec<ray_probe::Facet> = (0..count as u32)
+            .map(|i| {
+                let f = at + 0x14 * i;
+                ray_probe::Facet { vertices: [0, 2, 4].map(|k| ee.u16_at(f + k)), normal: [0, 2, 4].map(|k| ee.u16_at(f + 0xc + k) as i16) }
+            })
+            .collect();
+        let corners = facets.iter().flat_map(|f| f.vertices).max().map_or(0, |m| u32::from(m) + 1);
+        let d = c + 0x230;
+        let array = ee.u32_at(d);
+        let vertices = if ee.u32_at(d + 8) != 0 {
+            track::Points::Packed((0..corners).map(|i| [0, 2, 4].map(|k| ee.u16_at(array + 6 * i + k) as i16)).collect())
+        } else {
+            track::Points::Wide((0..corners).map(|i| [0, 4, 8].map(|k| word_f(ee, array + 12 * i + k))).collect())
+        };
+        MeshInRam { id: c, transform: matrix_at(ee, c + 0x130), root, nodes, facets, vertices }
+    }
+
+    fn mesh(&self) -> ray_probe::Mesh<'_> {
+        ray_probe::Mesh { id: self.id, transform: self.transform, root: self.root, nodes: &self.nodes, facets: &self.facets, vertices: &self.vertices }
+    }
+}
+
+/// A plant group's part `i` stood at the plant (`(group entry, i)`, answers the part or 0).
+const ECO_PART: u32 = 0x0046_d3c0;
+
+/// The world of a part search in RAM: what each item is to the pair, read from RAM at each pair (a
+/// mesh, kind 0; a hierarchy, kind 1, not read: C15 never pairs one; anything else nothing struck),
+/// and a plant group's parts, each stood at the plant by the original ([`ECO_PART`], handed on).
+/// Counts the pairs by kind, and the stands.
+struct PartWorldInRam<'e> {
+    ee: &'e mut Ee,
+    items: Vec<u32>,
+    mesh: Option<MeshInRam>,
+    kinds: BTreeMap<String, u32>,
+    /// The listeners and the callbacks the collidables name ([`ws::Collidable::listeners`], `on_hit`,
+    /// `on_struck` index these), each called in the original (handed on).
+    listeners: Vec<u32>,
+    callbacks: Vec<u32>,
+}
+
+impl PartWorldInRam<'_> {
+    /// Calls the original's `f` with `args` (collidables by item, as their bases), counted as `what`,
+    /// the probe's and the other's flags written first (the hit bit is up when they run). A listener
+    /// must leave both listener lists as they were: the search's are read once.
+    fn hand_on(&mut self, objects: &[ws::Collidable], what: &str, f: u32, this: u32, a: usize, b: usize) {
+        *self.kinds.entry(format!("> record search {what}")).or_default() += 1;
+        let [ca, cb] = [a, b].map(|k| self.items[k] - 0x18);
+        for (k, c) in [(a, ca), (b, cb)] {
+            set_u8(self.ee, c + 0x126, objects[k].flags);
+        }
+        let counts = [ca, cb].map(|c| self.ee.u32_at(c + 0x104));
+        self.ee.set(28, GP);
+        let args: Vec<u64> = if this == 0 { vec![u64::from(ca), u64::from(cb)] } else { vec![u64::from(this), u64::from(ca), u64::from(cb)] };
+        self.ee.call(f, &args, &[], BUDGET);
+        assert_eq!([ca, cb].map(|c| self.ee.u32_at(c + 0x104)), counts, "{what} changed a listener list");
+    }
+
+    /// The listeners (`+0x104` the count, `+0x10c` the array) and the callbacks (`+0x11c` on a hit,
+    /// `+0x120` on being struck) of the collidable at `c`, into `o`.
+    fn hear(&mut self, o: &mut ws::Collidable, c: u32) {
+        let (n, arr) = (self.ee.u32_at(c + 0x104), self.ee.u32_at(c + 0x10c));
+        for j in 0..n {
+            o.listeners.push(self.listeners.len());
+            self.listeners.push(self.ee.u32_at(arr + 4 * j));
+        }
+        for (slot, at) in [(&mut o.on_hit, 0x11c), (&mut o.on_struck, 0x120)] {
+            let f = self.ee.u32_at(c + at);
+            if f != 0 {
+                *slot = Some(self.callbacks.len());
+                self.callbacks.push(f);
+            }
+        }
+    }
+
+    /// The species' parts of the plant group at entry `g` (0 where it has none).
+    fn species_parts(ee: &Ee, g: u32) -> Vec<u32> {
+        let sp = ee.u32_at(ee.u32_at(ee.u32_at(ECO_AT) + 0x84) + 4 * u32::from(ee.u8_at(g + 0x12)));
+        (0..ee.u32_at(sp + 0x194)).map(|i| ee.u32_at(ee.u32_at(sp + 0x19c) + 4 * i)).collect()
+    }
+}
+
+impl atv_part::Outside for PartWorldInRam<'_> {
+    fn shape(&mut self, other: usize) -> ray_probe::Shape<'_> {
+        let c = self.items[other] - 0x18;
+        let kind = self.ee.u32_at(c + 0x78);
+        *self.kinds.entry(format!("record search pair, kind {kind}")).or_default() += 1;
+        match kind {
+            0 => ray_probe::Shape::Mesh(self.mesh.insert(MeshInRam::read(self.ee, c)).mesh()),
+            1 => panic!("the part search paired a hierarchy ({c:#x}): its parts are not read"),
+            5 => unreachable!("a sphere is the part's own test"),
+            6 => panic!("the part search paired a kind 6 ({c:#x}): its test is not Rust's"),
+            _ => ray_probe::Shape::Never,
+        }
+    }
+    fn sphere(&mut self, other: usize) -> Option<atv_part::Sphere> {
+        let c = self.items[other] - 0x18;
+        (self.ee.u32_at(c + 0x78) == 5).then(|| {
+            *self.kinds.entry("record search pair, kind 5".into()).or_default() += 1;
+            atv_part::Sphere { centre: vf_at(self.ee, c + 0x50), radius: word_f(self.ee, c + 0x180), radius2: word_f(self.ee, c + 0x184) }
+        })
+    }
+}
+
+impl ws::Narrow for PartWorldInRam<'_> {
+    fn clear(&mut self, _: &mut [ws::Collidable], _: usize) {
+        unreachable!("the part's own clear")
+    }
+    fn prepare(&mut self, _: &mut [ws::Collidable], _: usize) {
+        panic!("the part search prepared a grid")
+    }
+    fn pair(&mut self, _: &mut [ws::Collidable], _: usize, _: usize) -> bool {
+        unreachable!("the part's own pair")
+    }
+    fn parts(&mut self, _: &mut [ws::Collidable], group: usize) -> usize {
+        Self::species_parts(self.ee, self.items[group]).len()
+    }
+    fn part(&mut self, _: &mut [ws::Collidable], group: usize, i: usize) -> Option<usize> {
+        *self.kinds.entry("> record search part stand".into()).or_default() += 1;
+        self.ee.set(28, GP);
+        self.ee.call(ECO_PART, &[u64::from(self.items[group]), i as u64], &[], BUDGET);
+        let p = self.ee.v0() as u32;
+        (p != 0).then(|| self.items.iter().position(|&e| e == p + 0x18).expect("a stood part the search did not list"))
+    }
+    fn heard_hit(&mut self, objects: &mut [ws::Collidable], l: usize, probe: usize, other: usize) {
+        let l = self.listeners[l];
+        let f = self.ee.u32_at(self.ee.u32_at(l) + 8);
+        self.hand_on(objects, "heard_hit", f, l, probe, other);
+    }
+    fn heard_struck(&mut self, objects: &mut [ws::Collidable], l: usize, struck: usize, probe: usize) {
+        let l = self.listeners[l];
+        let f = self.ee.u32_at(self.ee.u32_at(l) + 0xc);
+        self.hand_on(objects, "heard_struck", f, l, struck, probe);
+    }
+    fn on_hit(&mut self, objects: &mut [ws::Collidable], c: usize, probe: usize, other: usize) {
+        let f = self.callbacks[c];
+        self.hand_on(objects, "on_hit", f, 0, probe, other);
+    }
+    fn on_struck(&mut self, objects: &mut [ws::Collidable], c: usize, struck: usize, probe: usize) {
+        let f = self.callbacks[c];
+        self.hand_on(objects, "on_struck", f, 0, struck, probe);
+    }
+}
+
+/// The part's record (`+0x7c`) in RAM: what the clear leaves (the nearest normal and point, the
+/// pair's first point, the struck part, the flags) and the list's shape (capacity `+0x88`, the rays
+/// `+0x90` or none, one contact a ray `+0xbc`).
+fn part_record_in_ram(ee: &Ee, r: u32) -> ray_probe::Record {
+    ray_probe::Record {
+        normal: vf_at(ee, r + 0x20),
+        point: vf_at(ee, r + 0x30),
+        first_point: vf_at(ee, r + 0x70),
+        part: ee.u32_at(r + 0x84),
+        listed: ee.u32_at(r + 0x90) != 0,
+        capacity: ee.u32_at(r + 0x88) as usize,
+        one_per_ray: ee.u8_at(r + 0xbc) != 0,
+        flags: ee.u8_at(r + 0xb8),
+        nearest: F::ONE,
+        ..ray_probe::Record::default()
+    }
+}
+
+/// The smooth-flag global the part's pair sets from the probe's `+0x184`.
+const PART_SMOOTH_AT: u32 = 0x003d_c610;
+
+/// **F46d — the record's part search in Rust**: the ray probe `part` (the riding or wreck rays) searched
+/// over the nearby list `list` ([`atv_search::search`] with [`atv_part::PartRays`]: the clear and the
+/// pair [`ray_probe`]'s, the meshes read from RAM), and everything written back: the flags, the
+/// globals, the record. Answers the record's contacts; counts the pairs by kind into `kinds`.
+fn part_search_in_ram(ee: &mut Ee, part: u32, list: u32, kinds: &mut BTreeMap<String, u32>) -> Vec<ray_probe::Contact> {
+    use game_sim::atv_search;
+    assert_eq!(ee.u32_at(part + 0x188), 0, "the part has a ray filter: its reset and test are not Rust's");
+    assert_eq!(ee.u32_at(list + 0x40), 0, "the nearby list has a grid: the search would prepare it");
+    let (mut items, mut objects, found) = sweep_world_in_ram(ee, part, list);
+    // The plant groups' parts, as collidables of their own (the search tests them unfiltered).
+    for k in 0..objects.len() {
+        if objects[k].class != ws::Class::Group {
+            continue;
+        }
+        for p in PartWorldInRam::species_parts(ee, items[k]) {
+            if p != 0 && !items.contains(&(p + 0x18)) {
+                items.push(p + 0x18);
+                objects.push(ws::Collidable { class: ws::Class::from_byte(ee.u8_at(p + 0x18 + 2)), flags: ee.u8_at(p + 0x126), ..Default::default() });
+            }
+        }
+    }
+    let root = ee.u16_at(part + 0x170);
+    let (nodes, _) = tree_in_ram(ee, ee.u32_at(part + 0x17c), root);
+    let segs = ee.u32_at(part + 0x180);
+    let segments: Vec<ray_probe::Segment> =
+        (0..ee.u32_at(part + 0x178)).map(|i| ray_probe::Segment { from: vf_at(ee, segs + 0x20 * i), to: vf_at(ee, segs + 0x20 * i + 0x10) }).collect();
+    let probe = ray_probe::RayProbe { transform: matrix_at(ee, part + 0x130), root, nodes: &nodes, segments: &segments };
+    let r = ee.u32_at(part + 0x7c);
+    let record = part_record_in_ram(ee, r);
+    let retired: Vec<bool> = items.iter().map(|&e| ee.u32_at(e - 0x18) == 1).collect();
+    let mut world = PartWorldInRam { ee: &mut *ee, items: items.clone(), mesh: None, kinds: BTreeMap::new(), listeners: vec![], callbacks: vec![] };
+    for (o, &e) in objects.iter_mut().zip(&items) {
+        if o.class == ws::Class::Object {
+            world.hear(o, e - 0x18);
+        }
+    }
+    let was = objects.clone();
+    let mut n = atv_part::PartRays { probe, record, world: &mut world, pairs: 0 };
+    let hit = atv_search::search(&mut objects, 0, &found, &|o| retired[o], &mut n);
+    let (record, pairs) = (n.record, n.pairs);
+    for (k, v) in std::mem::take(&mut world.kinds) {
+        *kinds.entry(k).or_default() += v;
+    }
+    for (k, (a, b)) in was.iter().zip(&objects).enumerate() {
+        assert_eq!(ws::Collidable { flags: b.flags, group: b.group, ..a.clone() }, *b, "item {k} changed beyond its flags and group");
+        if let Some(g) = b.group {
+            ee.set_u32(items[k] - 0x18 + 0x88, items[g]);
+        }
+        if a.flags != b.flags {
+            assert_eq!(a.class, ws::Class::Object, "item {k}'s flags");
+            set_u8(ee, items[k] - 0x18 + 0x126, b.flags);
+        }
+    }
+    // The clear's globals, and the pairs' smooth flag and per-contact words.
+    for a in SWEEP_ZEROED {
+        ee.set_u32(a, 0);
+    }
+    ee.set_u32(SWEEP_RECORD_AT, r);
+    if pairs > 0 {
+        ee.set_u32(PART_SMOOTH_AT, ee.u32_at(part + 0x184));
+        let zeroed = ee.u32_at(r + 0xac);
+        for i in 0..record.capacity as u32 {
+            ee.set_u32(zeroed + 4 * i, 0);
+        }
+    }
+    // The record.
+    let quads = [record.from, record.to, record.normal, record.point, record.push, record.low, record.high, record.first_point];
+    for (i, q) in quads.into_iter().enumerate() {
+        set_vf(ee, r + 0x10 * i as u32, q);
+    }
+    ee.set_u32(r + 0x80, record.first.0.to_bits());
+    ee.set_u32(r + 0x84, record.part);
+    ee.set_u32(r + 0x8c, record.contacts.len() as u32);
+    ee.set_u32(r + 0xb4, record.nearest.0.to_bits());
+    set_u8(ee, r + 0xb8, record.flags);
+    let [rays, normals, points, objs, placed, fractions, words] = [0x90, 0x94, 0x98, 0x9c, 0xa0, 0xa8, 0xb0].map(|o| ee.u32_at(r + o));
+    for (i, c) in record.contacts.iter().enumerate() {
+        let i = i as u32;
+        set_vf(ee, rays + 0x20 * i, c.from);
+        set_vf(ee, rays + 0x20 * i + 0x10, c.to);
+        set_vf(ee, normals + 0x10 * i, c.normal);
+        set_vf(ee, points + 0x10 * i, c.point);
+        ee.set_u32(objs + 4 * i, c.object);
+        ee.set_u32(placed + 4 * i, u32::from(c.placed));
+        ee.set_u32(fractions + 4 * i, c.fraction.0.to_bits());
+        let w = words + 2 * i;
+        let word = ee.u32_at(w & !3);
+        let shift = (w & 2) * 8;
+        ee.set_u32(w & !3, word & !(0xffff << shift) | u32::from(c.segment) << shift);
+    }
+    // A sphere struck leaves no contact: the hit bit alone says it.
+    assert!(hit || record.contacts.is_empty(), "contacts without the hit bit");
+    record.contacts
+}
+
 /// **F46 — the handed-on calls in Rust, in lockstep with [`posts_frame`]**: C15's `name` replayed
 /// twice by [`posts_frame`], once handing its calls on to the original and once with those `rust`
 /// names Rust's ([`IN_RUST`]); every row of the second word for word against C15, and the two RAMs
@@ -12329,6 +12645,110 @@ fn flip_replays_with_the_sweep_in_rust() {
     let (handed, rust) = handed_and(&all, &names);
     assert_eq!(rust, [("PartMove".to_string(), 771), ("Gather".to_string(), 465), ("record sweep".to_string(), 465)]);
     assert!(handed.iter().all(|(k, _)| !names.contains(&k.as_str())), "{handed:?}");
+}
+
+/// **F46d — C15's ride, the part search Rust's**: ride-2 in lockstep with [`posts_frame`]'s handing
+/// run, every search of the riding part [`part_search_in_ram`]'s (all of them nearby, none hitting),
+/// RAM alike.
+#[test]
+fn ride_replays_with_the_part_search_in_rust() {
+    let Some((w, all)) = replay_in_rust("ride-2", &["record search"]) else { return };
+    assert_eq!(w.len(), 459);
+    let (handed, rust) = handed_and(&all, &["record search"]);
+    assert_eq!(rust, [("record search".to_string(), 459)]);
+    assert!(handed.iter().all(|(k, _)| k != "record search"), "{handed:?}");
+    let pairs: Vec<(&String, &u32)> = all.iter().filter(|(k, _)| k.starts_with("record search pair")).collect();
+    assert_eq!(pairs, [(&"record search pair, kind 5".to_string(), &432)], "ride-2's pairs: plant spheres alone");
+    // Two listeners hear each of the 141 spheres struck (heard by RAM alike: a miss logs nothing).
+    assert_eq!(all.get("> record search heard_hit"), Some(&282));
+}
+
+/// **F46d — C15's flip, all four of F46 Rust's**: flip-1 in lockstep, the riding part searched
+/// until row 125, the wreck part from there to row 193, the riding part again after; the moves, the
+/// gather, the sweep and the part search all Rust's.
+#[test]
+fn flip_replays_with_the_part_search_in_rust() {
+    let names = ["PartMove", "Gather", "record sweep", "record search"];
+    let Some((w, all)) = replay_in_rust("flip-1", &names) else { return };
+    assert_eq!(w.len(), 465);
+    let (handed, rust) = handed_and(&all, &names);
+    assert_eq!(rust.iter().map(|(_, n)| *n).collect::<Vec<_>>(), [771, 465, 465, 465], "{rust:?}");
+    assert!(handed.iter().all(|(k, _)| !names.contains(&k.as_str())), "{handed:?}");
+    let pairs: Vec<(&String, &u32)> = all.iter().filter(|(k, _)| k.starts_with("record search pair")).collect();
+    assert_eq!(pairs, [(&"record search pair, kind 5".to_string(), &161)], "flip-1's pairs: plant spheres alone");
+    assert_eq!(all.get("> record search heard_hit"), Some(&110));
+}
+
+/// SLUS-21104's ray probe against a sphere, its two tests (research/oracle.txt `# F46d`): a world
+/// segment, and a node's box in a frame.
+const SPHERE_SEGMENT: u32 = 0x0010_6180;
+const SPHERE_NODE: u32 = 0x0010_6e30;
+
+/// **F46d — the sphere tests are the original's**: 40 000 segments and 40 000 node boxes against
+/// spheres, drawn round each other (eighths, with now and then a low bit flipped, a zero signed, a
+/// zero-length segment, a radius squared that is an end's own distance squared), through
+/// [`atv_part::segment_reaches_sphere`] and [`atv_part::node_reaches_sphere`] and the original's;
+/// the same answer every time, and both answers seen.
+#[test]
+fn sphere_tests_are_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let mut n = 0u64;
+    let mut draw = |span: i64| -> f32 {
+        n += 1;
+        let r = mix(0xf46d ^ n.wrapping_mul(0x9e37_79b9));
+        let x = ((r % (2 * span as u64 * 8 + 1)) as i64 - span * 8) as f32 / 8.0;
+        match r >> 60 {
+            0 => f32::from_bits(x.to_bits() ^ (r >> 32 & 3) as u32),
+            1 => -0.0,
+            _ => x,
+        }
+    };
+    let quad = |ee: &mut Ee, a: u32, v: Vf| set_vf(ee, a, v);
+    let mut seen = [0u32; 2];
+    for i in 0..40_000 {
+        let centre = Vf([draw(4), draw(4), draw(4), draw(1)]);
+        let from = Vf([draw(8), draw(8), draw(8), 1.0]);
+        let to = if i % 50 == 0 { from } else { Vf([draw(8), draw(8), draw(8), 1.0]) };
+        let mut r2 = F(draw(16).abs());
+        if i % 7 == 0 {
+            let d: Vec<f32> = (0..3).map(|k| centre.0[k] - from.0[k]).collect();
+            r2 = F(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+        }
+        let [a, b, c, out] = [0, 1, 2, 3].map(|k| ee.scratch(k));
+        quad(&mut ee, a, from);
+        quad(&mut ee, b, to);
+        quad(&mut ee, c, centre);
+        ee.set(28, GP);
+        ee.call(SPHERE_SEGMENT, &[u64::from(a), u64::from(b), u64::from(c), u64::from(out)], &[r2.0], BUDGET);
+        let want = ee.v0() != 0;
+        let got = atv_part::segment_reaches_sphere(from, to, centre, r2);
+        assert_eq!(got, want, "segment {i}: {from:?} to {to:?}, centre {centre:?}, r2 {r2:?}");
+        seen[usize::from(want)] += 1;
+    }
+    assert!(seen.iter().all(|&k| k > 1000), "segments struck and missed: {seen:?}");
+    let mut seen = [0u32; 2];
+    for i in 0..40_000 {
+        let c = [F(draw(4)), F(draw(4)), F(draw(4))];
+        let h = [F(draw(3).abs()), F(draw(3).abs()), F(draw(3).abs())];
+        let m: ray_probe::Matrix = core::array::from_fn(|k| Vf([draw(2), draw(2), draw(2), if k == 3 { 1.0 } else { 0.0 }]));
+        let radius = F(draw(4).abs());
+        let radius2 = if i % 3 == 0 { F(draw(16).abs()) } else { radius * radius };
+        let s = atv_part::Sphere { centre: Vf([draw(6), draw(6), draw(6), 1.0]), radius, radius2 };
+        let [a, b, sc, frame] = [0, 1, 2, 3].map(|k| ee.scratch(k));
+        quad(&mut ee, a, Vf([c[0].0, c[1].0, c[2].0, draw(1)]));
+        quad(&mut ee, b, Vf([h[0].0, h[1].0, h[2].0, draw(1)]));
+        quad(&mut ee, sc, s.centre);
+        for (k, row) in m.iter().enumerate() {
+            quad(&mut ee, frame + 0x10 * k as u32, *row);
+        }
+        ee.set(28, GP);
+        ee.call(SPHERE_NODE, &[u64::from(a), u64::from(b), u64::from(sc), u64::from(frame)], &[radius.0, radius2.0], BUDGET);
+        let want = ee.v0() != 0;
+        let got = atv_part::node_reaches_sphere(c, h, &s, &m);
+        assert_eq!(got, want, "node {i}: centre {c:?}, half {h:?}, frame {m:?}, sphere {s:?}");
+        seen[usize::from(want)] += 1;
+    }
+    assert!(seen.iter().all(|&k| k > 1000), "nodes reached and not: {seen:?}");
 }
 
 // ---------------------------------------------------------------------------------------------
