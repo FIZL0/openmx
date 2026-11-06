@@ -1236,6 +1236,55 @@ pub fn trick(m: &mut impl Updates, dt: F) -> u32 {
     1
 }
 
+/// **The remote bike's stunt clocks** (vt `+0x4e8`, `dt`), what [`trick`] answers for a bike the
+/// network drives (F45). With the next stunt (`+0x1528`) in the table: a held clip (the step's
+/// `+0x1788`) is held at its end ([`Out::TrickHold`]) and a trick runs; else the stunt clock
+/// (`+0x14d8`) runs on by `dt`, the clip's fraction (`+0x14e4`, over its `+0x48`, at most 1) is set,
+/// and a trick runs while the fraction is under 1. Otherwise — no stunt, or its clip run through —
+/// the three clocks (`+0x14d8`, `+0x14e8`, `+0x14dc`) go to 0 and no trick runs.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
+pub fn stunt_clocks(m: &mut impl Updates, dt: F) -> u32 {
+    let (table, id) = (w(m, 0x14f0), w(m, NEXT_STUNT));
+    let entry = stunt_entry(table, id);
+    if entry != 0 {
+        if w(m, 0x1788) != 0 {
+            m.out(Out::TrickHold(entry));
+            return 1;
+        }
+        let time = fb(m, 0x14d8) + dt;
+        putf(m, 0x14d8, time);
+        let anim = m.word(entry);
+        let frac = (fb(m, 0x14d8) / f(m, anim.wrapping_add(0x48))).min(F::ONE);
+        putf(m, 0x14e4, frac);
+        if frac < F::ONE {
+            return 1;
+        }
+    }
+    for o in [0x14d8, 0x14e8, 0x14dc] {
+        put(m, o, 0);
+    }
+    0
+}
+
+/// **Whether a trick is asked for** (vt `+0x4b4`), what [`trick`] asks before it starts one (F45):
+/// 1 with the bike off the ground (`+0x324` clear), its `+0xc8` object's `+0x34` clear, the start
+/// clock (`+0x14d4`) not zero as a word, both halves of the asked kind (`+0x14ec`, its low and high
+/// four bits) set, and the bike not wrecking (`+0x13e4`); else 0.
+pub fn trick_wanted(m: &mut impl Updates) -> u32 {
+    if w(m, 0x324) != 0 {
+        return 0;
+    }
+    let o = w(m, 0xc8);
+    if m.word(o.wrapping_add(0x34)) != 0 || w(m, 0x14d4) == 0 {
+        return 0;
+    }
+    let kind = byte(m, m.bike().wrapping_add(0x14ec));
+    if kind & 0xf == 0 || kind & 0xf0 == 0 || w(m, 0x13e4) != 0 {
+        return 0;
+    }
+    1
+}
+
 /// The trick hold's shake at its widest: 0.07 of the clip's run.
 pub const HOLD_SHAKE: u32 = 0x3d8f_5c29;
 

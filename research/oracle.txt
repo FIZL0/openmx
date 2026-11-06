@@ -10186,3 +10186,19 @@ atv_heap_free               atv 0x001b76d0 = free
 # List nodes [next, tree node] taken in collect 0x001810b0 (bump +0x28 while +0x18 < +8, else free +0x24, else
 # chunk 0x00105e70); state 4's pool chunk 0x00ea7f80 (header 4, stride 8). The list: begin 0x0018dae0, next
 # 0x0018db40 (+0x3c block, +0x40 entry), end 0x0018dcf0. 0x0040c198 the tree last queried; stamp 0x003d3b88 (lhu).
+# F45 — the trick step's last calls and the unpack's node turn in Rust (game_sim::handling::update::
+# stunt_clocks / trick_wanted, node::orient; tests/mxvatv_bike_ride.rs the_stunt_clocks_*,
+# the_trick_wanted_*, the_node_turn_*, ride/flip_replays_with_the_trick_calls_in_rust). Journal:
+# research/journal/2026-11-06-f45-trick-calls-in-rust/.
+#   Stunt clocks vt +0x4e8 = 0x004e4900(bike; f12 dt): entry = stunt entry(bike+0x14f0, bike+0x1528)
+#   (id < 46 signed -> table + 0x18 + 12 id); entry 0 -> clears; +0x1788 != 0 -> vt +0x4ec(bike, entry,
+#   f12 dt) = 0x004e4810, v0 1; else +0x14d8 += dt, +0x14e4 = min(+0x14d8 / (*entry)+0x48, 1), < 1 -> v0
+#   1; else +0x14d8, +0x14e8, +0x14dc = 0 (in that order), v0 0.
+#   Trick wanted vt +0x4b4 = 0x004e47a0(bike) (vtable-only: `kit dis`): +0x324 != 0 -> 0; (+0xc8)+0x34
+#   != 0 -> 0; +0x14d4 == 0 -> 0; lbu +0x14ec &0xf == 0 or &0xf0 == 0 -> 0; +0x13e4 != 0 -> 0; else 1.
+#   Node turn 0x00194650(node, frame, q, pos): frame 0 and pos != 0 -> quat frame 0x00134940(out, q, pos)
+#   (pos row = pos's words via ldc2/sdc2, w by vmove.w vf0: a denormal kept), parent (+0xf0) -> its
+#   world update 0x00193b30, frame times the inverted parent world (+0x70) to +0x30; no parent -> the
+#   frame lq/sq'd to +0x30 as it is; then moved 0x00193d10. The frame != 0 and pos == 0 paths unported.
+#   Replays: ride-2 TrickWanted x459; flip-1 TrickWanted x367, Mark x21, TrickEnd x1 (run-open bit
+#   clear: no Run* call); TrickRemote, TrickStart, Orient never reached (no remote bike, no start).
