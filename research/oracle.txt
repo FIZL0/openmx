@@ -10103,3 +10103,14 @@ atv_heap_free               atv 0x001b76d0 = free
 #   (take-off ground, the landings at kiowa frame 1092 / kiowa3 1191): MD112.
 # For MD112: the body wrapper's force 0x004a4ef0 jumps to 0x00493f60: if the body is enabled, body vt +0x80(gravity
 #   *(+0xe8)+0x40), then the record's resolve vt +0x88(record, 1).
+# F46b — the collision sync's gather (atv_gather_nearby) on state 4 in Rust (tests/mxvatv_bike_ride.rs
+# gather_in_ram; journal research/journal/2026-11-05-f46b-gather-in-rust). State 4: the riding probe 0x00ea63a0
+# and frame mesh 0x00ea5970 (entries +0x18) in space link 0x01efa350 -> cell 0x00672cd0 (no subs +0x38/+0x3c,
+# global table 0x0040c440 = 0); cell +0x28 the quadtree 0x00672e10, +0x2c the moving list 0x00674430; the
+# bike's list +0xc4 = 0x01ea72a0 (array 0x00ea6b00). Tree walk state: +0xc bit 0 open, +0x890 busy,
+# +0x8a0..+0x8ac cells x0 z0 x1 z1, +0x94 its query pool (0x006742a0), +0x9c list head, +0xa0 at, +0xa4 slot,
+# +0xa8 chunk (end leaves it), +0xac zeroed by begin / restart / end. Next vt +0x38 = 0x00181530, restart
+# vt +0x3c = 0x00181d70 (at = head, slot 0, +0xac 0, stamp + 1), end vt +0x40 = 0x00181d90 (pool reset 0x00106130).
+# List nodes [next, tree node] taken in collect 0x001810b0 (bump +0x28 while +0x18 < +8, else free +0x24, else
+# chunk 0x00105e70); state 4's pool chunk 0x00ea7f80 (header 4, stride 8). The list: begin 0x0018dae0, next
+# 0x0018db40 (+0x3c block, +0x40 entry), end 0x0018dcf0. 0x0040c198 the tree last queried; stamp 0x003d3b88 (lhu).
