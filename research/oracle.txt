@@ -10223,3 +10223,19 @@ atv_heap_free               atv 0x001b76d0 = free
 # List nodes [next, tree node] taken in collect 0x001810b0 (bump +0x28 while +0x18 < +8, else free +0x24, else
 # chunk 0x00105e70); state 4's pool chunk 0x00ea7f80 (header 4, stride 8). The list: begin 0x0018dae0, next
 # 0x0018db40 (+0x3c block, +0x40 entry), end 0x0018dcf0. 0x0040c198 the tree last queried; stamp 0x003d3b88 (lhu).
+# F46c — the record's sweep (set, place, near search) on C15 in Rust (tests/mxvatv_bike_ride.rs sweep_in_ram;
+# src atv_sweep; journal research/journal/2026-11-06-f46c-sweep-in-rust). The record's probe (+0x204) is
+# 0x00ea7310, vtable 0x003b6b40. Set 0x001b9290(probe, points, nodes): +0x134 node pointers (nodes ? nodes[i]
+# : 0) and +0x138 quads for 2 * +0x130; the box (vmini/vmax xyzw from (+-MAX x3, 1), end 1 then end 0, ends
+# through node +0x70/+0x80/+0x90 rows and +0xa0) -> +0x50 centre, +0x170 and +0x70 reach. Place 0x00114360:
+# vt +0xc8 = 0x00115a30 (jr ra), then 0x00114480: with +0x20, vt +0xc4 = 0x001bad00 (the same box; half to
+# a2, centre to a1 and +0x50, reach +0x70) and 0x0018d690(+0x18, centre, half, reach). Near search
+# 0x001151c0 = atv_search::search; its clear vt +0xb0 = 0x001b95f0: +0x126 &= ~0x20, 0x003dce28 = 0,
+# 0x003dce20 = 0, then per segment +0x144 length (4-byte), +0x148 start, +0x14c dir (vdiv/vmulq.xyz, or the
+# (0,0,0,1) at 0x00396fc0 when length <= 0); +0x160/+0x50 centre, +0x170/+0x70 radius; 0x00116990(+0x7c)
+# -> 0x003dc618 (rewritten later in the frame, so a missed write is not seen); record +0, +0x10 =
+# (0,0,0,1), +0xb4 = 1.0, +0x8c = 0 — MX's sweep_probe clear moved +0x10, no 16 cap. Pair vt +0xb4 =
+# 0x001b9a60 (0x003dc610 = +0x174; j 0x001ba4a0: sphere, then 0x0010e570 on kinds 0/1) not ported. C15
+# ride-2 + flip-1: 924 sweeps, all nearby, 1 segment, list +0x40 grid 0, reach <= 2.75; no kind 2 candidate
+# in reach; kind 3 (plants) in reach 394 times but +0x126 = 0x13 (NO_GROUPS) skips them; never a hit.
+# Global search 0x001148e0 never runs.
