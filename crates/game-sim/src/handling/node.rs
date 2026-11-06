@@ -17,7 +17,7 @@
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
 use super::update::Quad;
-use crate::atv_moto::{frame_mul, frame_point, point_in_frame};
+use crate::atv_moto::{frame_inverse, frame_mul, frame_point, point_in_frame};
 use crate::camera::CurveTable;
 use ps2_float::vu::{Dest, Field};
 use ps2_float::{F, Vf, fpu, fpu::Acc, vu};
@@ -318,4 +318,175 @@ pub fn sin_cos(angle: F, curve: &CurveTable) -> (F, F) {
     let d = CURVE_STEP * (s - F(fpu::from_i32(i)));
     let [cos, sin] = curve.entries()[i as usize];
     (Acc::adda(F::ZERO, F(sin)).madd(d, F(cos)), Acc::adda(F::ZERO, F(cos)).msub(d, F(sin)))
+}
+
+// --- F47: the node's box, for a node in the spatial database --------------------------------------
+
+/// The node's bounds words: its own bounds' centre and half extent, the box's centre and half extent
+/// in its frame, the second flag byte, its own radius, its reach, and the nodes its gather takes in
+/// (how many, and where their list is); its spatial database entry.
+const OWN_CENTRE: u32 = 0xb0;
+const OWN_HALF: u32 = 0xc0;
+const CENTRE: u32 = 0xd0;
+const HALF: u32 = 0xe0;
+const RADIUS: u32 = 0x104;
+const REACH: u32 = 0x108;
+const LISTED: u32 = 0x10c;
+const LIST: u32 = 0x144;
+const ENTRY: u32 = 0x8;
+/// The flag byte's bits: own bounds (a box, or with [`SPHERE`] a sphere), bounds of the node's own
+/// to gather, bounds gathered as a sphere, a reach above 0; the second byte's: the database box round
+/// the node's origin.
+const OWN_BOX: u32 = 0x04;
+const OWN_BOUNDS: u32 = 0x08;
+const SPHERE: u32 = 0x10;
+const BOUNDED: u32 = 0x40;
+const ORIGIN_REACH: u32 = 0x04;
+
+fn f(m: &mut impl Ram, at: u32) -> F {
+    F(f32::from_bits(m.word(at)))
+}
+
+fn xyz_of(a: Vf, b: Vf) -> Vf {
+    a.merge(Dest::XYZ, b)
+}
+
+/// **The node's bounds are to be gathered again** (as [`crate::atv_moto::Scene::bounds_stale`]),
+/// its world frame brought up to date first: stale (bit 7), and its own to gather (bit 3) or none
+/// yet (bit 6 clear).
+pub fn bounds_stale(m: &mut impl Ram, n: u32) -> bool {
+    update(m, n);
+    let fl = flags(m, n);
+    fl & STALE_BOUNDS != 0 && (fl & OWN_BOUNDS != 0 || fl & BOUNDED == 0)
+}
+
+/// Where a listed node's box gather leaves its frames: the gathering node's inverse, then the listed
+/// node's in it (the scratchpad's first 0x80 bytes).
+const SCRATCHPAD: u32 = 0x7000_0000;
+
+/// **The node's bounds gathered** (its vt `+0x94`, as [`crate::atv_moto::Scene::rebound`] gathers
+/// them, here over the nodes in RAM): its world frame brought up to date, then its own bounds (bit 2)
+/// and each listed node's that has its own (each brought up to date as it is taken in) as one sphere
+/// (bit 4) or one box in the node's frame. The centre and half extent go to the box words, the reach
+/// to `+0x108`, and a reach above 0 sets bit 6.
+///
+/// A sphere with neither its own bounds nor a listed node with them has no centre: the original's is
+/// a stack word never written. The port takes `(0, 0, 0, 0)`, as the scene's does.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
+pub fn rebound(m: &mut impl Ram, n: u32) {
+    update(m, n);
+    let fl = flags(m, n);
+    let (own_centre, own_half, radius) = (v(m, n + OWN_CENTRE), v(m, n + OWN_HALF), f(m, n + RADIUS));
+    let count = m.word(n + LISTED);
+    let list = m.word(n + LIST);
+    let listed: Vec<u32> = (0..count).map(|k| m.word(list.wrapping_add(4 * k))).collect();
+    let reach = if fl & SPHERE != 0 {
+        let (mut centre, mut r) = (Vf::ZERO, F::ZERO);
+        if fl & OWN_BOX != 0 {
+            let world = rows(m, n + WORLD);
+            (centre, r) = (frame_point(&world, own_centre), radius);
+        }
+        for o in listed {
+            if flags(m, o) & OWN_BOX == 0 {
+                continue;
+            }
+            update(m, o);
+            let p = frame_point(&rows(m, o + WORLD), v(m, o + OWN_CENTRE));
+            let or = f(m, o + RADIUS);
+            if r <= F::ZERO {
+                (centre, r) = (p, or);
+            } else {
+                let d = xyz_of(p, p.sub(centre)).abs();
+                let far = F(vu::max(vu::max(d.x(), d.y()), d.z())) + or;
+                if !(far <= r) {
+                    r = far;
+                }
+            }
+        }
+        update(m, n);
+        let c = point_in_frame(&rows(m, n + WORLD), centre);
+        put_v(m, n + CENTRE, c);
+        let half = v(m, n + HALF);
+        put_v(m, n + HALF, xyz_of(half, Vf::splat(r.0)));
+        r
+    } else {
+        let (mut lo, mut hi, mut had) = (Vf::VF0, Vf::VF0, false);
+        if fl & OWN_BOX != 0 {
+            (lo, hi, had) = (xyz_of(own_centre, own_centre.sub(own_half)), xyz_of(own_centre, own_centre.add(own_half)), true);
+        }
+        for o in listed {
+            if flags(m, o) & OWN_BOX == 0 {
+                continue;
+            }
+            update(m, o);
+            let inverse = frame_inverse(&rows(m, n + WORLD));
+            put_rows(m, SCRATCHPAD, &inverse);
+            let rel = frame_mul(&rows(m, o + WORLD), &inverse);
+            put_rows(m, SCRATCHPAD + 0x40, &rel);
+            let (c, e) = (frame_point(&rel, v(m, o + OWN_CENTRE)), v(m, o + OWN_HALF));
+            let (hx, hy, hz) = (rel[0].mul(e.bc(Field::X)).abs(), rel[1].mul(e.bc(Field::Y)).abs(), rel[2].mul(e.bc(Field::Z)).abs());
+            let e = Vf::madd(hy.add(hx), hz, Vf::splat(1.0));
+            let (l, h) = (rel[0].merge(Dest::XYZ, c.sub(e)), rel[1].merge(Dest::XYZ, c.add(e)));
+            (lo, hi) = if had { (l.mini(lo), h.max(hi)) } else { (l, h) };
+            had = true;
+        }
+        let half_of = |x: Vf, keep: Vf| keep.merge(Dest::XYZ, x.mul(Vf::splat(0.5)));
+        let (c, h) = (half_of(lo.add(hi), lo), half_of(hi.sub(lo), hi));
+        put_v(m, n + CENTRE, c);
+        put_v(m, n + HALF, h);
+        Acc::mula(F(h.x()), F(h.x())).madda(F(h.y()), F(h.y())).madd(F(h.z()), F(h.z())).sqrt()
+    };
+    m.set(n + REACH, reach.to_bits());
+    if !(reach <= F::ZERO) {
+        let fl = flags(m, n);
+        put_flags(m, n, fl | BOUNDED);
+    }
+}
+
+/// **The node's box in the world** (as [`crate::atv_moto::Scene::world_box`]), its bounds gathered
+/// first if they are stale ([`bounds_stale`], [`rebound`], bit 7 cleared): the centre carried
+/// through the world frame, the half extent the rows times its lanes made positive; `xyz`, the `w`s
+/// the box's own.
+pub fn world_box(m: &mut impl Ram, n: u32) -> (Vf, Vf) {
+    if bounds_stale(m, n) {
+        rebound(m, n);
+        let fl = flags(m, n);
+        put_flags(m, n, fl & !STALE_BOUNDS);
+    }
+    let (w, c, e) = (rows(m, n + WORLD), v(m, n + CENTRE), v(m, n + HALF));
+    let (hx, hy, hz) = (w[0].mul(e.bc(Field::X)).abs(), w[1].mul(e.bc(Field::Y)).abs(), w[2].mul(e.bc(Field::Z)).abs());
+    let acc = Vf::madd(Vf::madd(w[3].add(Vf::ZERO), w[0], c.bc(Field::X)), w[1], c.bc(Field::Y));
+    (xyz_of(c, Vf::madd(acc, w[2], c.bc(Field::Z))), xyz_of(e, Vf::madd(hy.add(hx), hz, Vf::splat(1.0))))
+}
+
+/// **The node's bounds into the spatial database** (`atv_node_bounds`, as
+/// [`crate::atv_moto::Scene::database_box`] on [`world_box`]): nothing for a node with no entry
+/// (`+8`); else the world box, round the node's origin with bit 2 of the second flag byte (the half
+/// extent grown by `|centre - origin|`, the reach its length), or as it is with the node's reach.
+/// The centre, half extent and reach the database move is handed.
+pub fn bounds(m: &mut impl Ram, n: u32) -> Option<(Vf, Vf, F)> {
+    if m.word(n + ENTRY) == 0 {
+        return None;
+    }
+    update(m, n);
+    let (centre, half) = world_box(m, n);
+    if (m.word(n + FLAGS) >> 8) & ORIGIN_REACH == 0 {
+        return Some((centre, half, f(m, n + REACH)));
+    }
+    update(m, n);
+    let origin = v(m, n + WORLD + 0x30).merge(Dest::W, Vf::splat(1.0));
+    let d = xyz_of(centre, centre.sub(origin));
+    let d = Vf(d.0.map(|x| f32::from_bits(x.to_bits() & 0x7fff_ffff)));
+    let half = xyz_of(half, half.add(d));
+    let reach = Acc::mula(F(half.x()), F(half.x())).madda(F(half.y()), F(half.y())).madd(F(half.z()), F(half.z())).sqrt();
+    Some((origin, half, reach))
+}
+
+/// **The spatial update's box** (the vehicle's vt `+0xe4`): nothing for an owner with no database
+/// entry (`+8`); else its node's [`world_box`], which the database move is handed with reach 0.
+pub fn owner_box(m: &mut impl Ram, owner: u32, n: u32) -> Option<(Vf, Vf)> {
+    if m.word(owner + ENTRY) == 0 {
+        return None;
+    }
+    Some(world_box(m, n))
 }
