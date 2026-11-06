@@ -987,6 +987,10 @@ pub mod atv_spatial;
 /// node's frame, and its box handed to the world's spatial database — answered in [`quad::Steps`].
 pub mod atv_sync;
 
+/// The bike's sweep probe (F46c): SLUS-21104's sweep probe set, placed and searched as the collision
+/// record sweeps back — MX Unleashed's [`sweep_probe`] clear on its moved fields.
+pub mod atv_sweep;
+
 /// The quad's collision record's contacts (MD75e1): SLUS-21104's resolution of them (the record's vt
 /// `+0x88`, the gravity's call), MX Unleashed's [`contact`] resolution on the ATV's record and body.
 pub mod atv_contact;

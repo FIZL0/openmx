@@ -8057,8 +8057,15 @@ impl Collides for RecordsInRam<'_, '_, '_> {
         self.inner.chassis_velocity()
     }
     fn sweep(&mut self, from: Vf, to: Vf, nearby: bool) -> Option<Swept> {
-        *self.answered.entry("> record sweep".into()).or_default() += 1;
-        self.inner.sweep(from, to, nearby)
+        // F46c: the nearby sweep Rust's; the global one (never on C15) still the original's.
+        if !(nearby && in_rust("record sweep")) {
+            *self.answered.entry("> record sweep".into()).or_default() += 1;
+            return self.inner.sweep(from, to, nearby);
+        }
+        *self.answered.entry("record sweep".into()).or_default() += 1;
+        let (at, probe, list) = (self.inner.at, self.inner.word(0x204), self.inner.word(0xfc));
+        assert!(!sweep_in_ram(self.inner.ee, at, probe, list, from, to), "the record's sweep hit: its pair test is not Rust's");
+        None
     }
     fn place_part(&mut self) {
         *self.answered.entry("> record place_part".into()).or_default() += 1;
@@ -11967,6 +11974,153 @@ fn gather_in_ram(ee: &mut Ee, list: u32, probe: u32, kind: u32) -> &'static str 
     m.write(ee, list, (&was_o, &was_b), (&objects, &broad, &near), &begun)
 }
 
+/// F46c: the sweep probe's clear's globals — the two words it zeroes, and where it notes the
+/// probe's record.
+const SWEEP_ZEROED: [u32; 2] = [0x003d_ce28, 0x003d_ce20];
+const SWEEP_RECORD_AT: u32 = 0x003d_c618;
+
+/// The sweep's narrow phase past its clear, none of it Rust's: on C15 no pair is tested and no group
+/// is searched (the probe's `NO_GROUPS`), so none of it is reached.
+struct Unported;
+
+impl ws::Narrow for Unported {
+    fn clear(&mut self, _: &mut [ws::Collidable], _: usize) {
+        unreachable!("the sweep's own clear")
+    }
+    fn prepare(&mut self, _: &mut [ws::Collidable], _: usize) {
+        panic!("the sweep prepared a grid")
+    }
+    fn pair(&mut self, _: &mut [ws::Collidable], _: usize, other: usize) -> bool {
+        panic!("the sweep tested a pair (item {other}): its pair test is not Rust's")
+    }
+    fn parts(&mut self, _: &mut [ws::Collidable], group: usize) -> usize {
+        panic!("the sweep searched a group (item {group})")
+    }
+    fn part(&mut self, _: &mut [ws::Collidable], group: usize, _: usize) -> Option<usize> {
+        panic!("the sweep searched a group (item {group})")
+    }
+    fn heard_hit(&mut self, _: &mut [ws::Collidable], _: usize, _: usize, _: usize) {
+        panic!("a listener heard the sweep hit")
+    }
+    fn heard_struck(&mut self, _: &mut [ws::Collidable], _: usize, _: usize, _: usize) {
+        panic!("a listener heard the sweep strike")
+    }
+    fn on_hit(&mut self, _: &mut [ws::Collidable], _: usize, _: usize, _: usize) {
+        panic!("the sweep called on a hit")
+    }
+    fn on_struck(&mut self, _: &mut [ws::Collidable], _: usize, _: usize, _: usize) {
+        panic!("the sweep called on a strike")
+    }
+}
+
+/// The nearby search's world round `probe` (a collidable): the probe as item 0, the nearby list at
+/// `list`'s candidates, and the collidables their object lists name, with the filter's fields; and
+/// the candidates by item. Answers the entries by item too.
+fn sweep_world_in_ram(ee: &Ee, probe: u32, list: u32) -> (Vec<u32>, Vec<ws::Collidable>, Vec<ws::Candidate>) {
+    let mut m = GatherInRam::default();
+    m.item(probe + 0x18);
+    let (arr, n) = (ee.u32_at(list), ee.u32_at(list + 4));
+    let found = (0..n).map(|i| ws::Candidate { object: m.item(ee.u32_at(arr + 8 * i)), distance: word_f(ee, arr + 8 * i + 4) }).collect();
+    let mut objects = vec![];
+    let mut k = 0;
+    while k < m.items.len() {
+        let e = m.items[k];
+        let mut o = ws::Collidable { class: ws::Class::from_byte(ee.u8_at(e + 2)), ..Default::default() };
+        if o.class == ws::Class::Object {
+            let c = e - 0x18;
+            o.flags = ee.u8_at(c + 0x126);
+            o.nearby = ee.u8_at(c + 0x45) & 1 != 0;
+            o.radius = word_f(ee, c + 0x70);
+            o.category = ee.u32_at(c + 0x94);
+            o.collides_with = ee.u32_at(c + 0xdc);
+            o.objects = m.objects(ee, c + 0xe0);
+            o.more_objects = m.objects(ee, c + 0xec);
+            let cs = c + 0xf8;
+            o.categories = ws::Categories { mode: ee.u32_at(cs), list: (0..ee.u32_at(cs + 8)).map(|i| ee.u32_at(ee.u32_at(cs + 4) + 4 * i)).collect() };
+        }
+        objects.push(o);
+        k += 1;
+    }
+    (m.items, objects, found)
+}
+
+/// **F46c — the record's sweep in Rust**: the segment from `from` to `to` set on the record `rec`'s
+/// sweep probe `probe` ([`atv_sweep::set`]), the probe placed (its box, and its database entry
+/// moved, [`spatial_move_in_ram`]), and searched over the nearby list `list`
+/// ([`atv_search::search`] with [`atv_sweep::Sweep`]'s clear); everything written back. Answers the
+/// hit bit.
+fn sweep_in_ram(ee: &mut Ee, rec: u32, probe: u32, list: u32, from: Vf, to: Vf) -> bool {
+    use game_sim::atv_search;
+    use game_sim::atv_sweep;
+    set_vf(ee, rec + 0xc0, from);
+    set_vf(ee, rec + 0xd0, to);
+    // The set: the record's segment the probe's, no nodes.
+    let n = ee.u32_at(probe + 0x130);
+    let points: Vec<[Vf; 2]> = (0..n).map(|i| [vf_at(ee, rec + 0xc0 + 0x20 * i), vf_at(ee, rec + 0xd0 + 0x20 * i)]).collect();
+    let (segments, b) = atv_sweep::set(&points, None);
+    let (nodes, quads) = (ee.u32_at(probe + 0x134), ee.u32_at(probe + 0x138));
+    for (i, s) in segments.iter().enumerate() {
+        let i = i as u32;
+        for k in 0..2 {
+            ee.set_u32(nodes + 4 * (2 * i + k), 0);
+            set_vf(ee, quads + 0x10 * (2 * i + k), s.ends[k as usize]);
+        }
+    }
+    set_vf(ee, probe + 0x50, b.centre);
+    for o in [0x170, 0x70] {
+        ee.set_u32(probe + o, b.reach.0.to_bits());
+    }
+    // The place: its box again, and its entry moved.
+    if ee.u32_at(probe + 0x20) != 0 {
+        let b = atv_sweep::bounds(&segments);
+        set_vf(ee, probe + 0x50, b.centre);
+        ee.set_u32(probe + 0x70, b.reach.0.to_bits());
+        spatial_move_in_ram(ee, probe + 0x18, b.centre, b.half, b.reach);
+    }
+    // The search.
+    assert_eq!(ee.u32_at(list + 0x40), 0, "the nearby list has a grid: the sweep would prepare it");
+    let (items, mut objects, found) = sweep_world_in_ram(ee, probe, list);
+    let was = objects.clone();
+    let retired = |o: usize| ee.u32_at(items[o] - 0x18) == 1;
+    let mut rest = Unported;
+    let mut sweep = atv_sweep::Sweep::new(segments, &mut rest);
+    let hit = atv_search::search(&mut objects, 0, &found, &retired, &mut sweep);
+    for (k, (a, b)) in was.iter().zip(&objects).enumerate() {
+        assert_eq!(ws::Collidable { flags: b.flags, radius: b.radius, ..a.clone() }, *b, "item {k} changed beyond its flags and reach");
+        if a.flags != b.flags {
+            assert_eq!(a.class, ws::Class::Object, "item {k}'s flags");
+            set_u8(ee, items[k] - 0x18 + 0x126, b.flags);
+        }
+    }
+    // The clear's world form and the record's reset.
+    let w = &sweep.probe.world;
+    let [lengths, starts, dirs] = [0x144, 0x148, 0x14c].map(|o| ee.u32_at(probe + o));
+    for (i, p) in w.probes[..w.count].iter().enumerate() {
+        let i = i as u32;
+        ee.set_u32(lengths + 4 * i, p.length.0.to_bits());
+        set_vf(ee, starts + 0x10 * i, p.origin);
+        set_vf(ee, dirs + 0x10 * i, p.dir);
+    }
+    for o in [0x160, 0x50] {
+        set_vf(ee, probe + o, w.centre);
+    }
+    assert_eq!(objects[0].radius, w.radius);
+    for o in [0x170, 0x70] {
+        ee.set_u32(probe + o, w.radius.0.to_bits());
+    }
+    for a in SWEEP_ZEROED {
+        ee.set_u32(a, 0);
+    }
+    let r = ee.u32_at(probe + 0x7c);
+    ee.set_u32(SWEEP_RECORD_AT, r);
+    let answer = &sweep.probe.answer;
+    set_vf(ee, r, answer.head[0]);
+    set_vf(ee, r + 0x10, answer.head[1]);
+    ee.set_u32(r + 0xb4, answer.record.nearest.0.to_bits());
+    ee.set_u32(r + 0x8c, answer.record.hits as u32);
+    hit
+}
+
 /// **F46 — the handed-on calls in Rust, in lockstep with [`posts_frame`]**: C15's `name` replayed
 /// twice by [`posts_frame`], once handing its calls on to the original and once with those `rust`
 /// names Rust's ([`IN_RUST`]); every row of the second word for word against C15, and the two RAMs
@@ -12127,6 +12281,32 @@ fn flip_replays_with_the_gather_in_rust() {
     let (handed, rust) = handed_and(&all, &["PartMove", "Gather"]);
     assert_eq!(rust, [("PartMove".to_string(), 771), ("Gather".to_string(), 465)]);
     assert!(handed.iter().all(|(k, _)| k != "PartMove" && k != "Gather"), "{handed:?}");
+}
+
+/// **F46c — C15's ride, the record's sweep Rust's**: ride-2 in lockstep with [`posts_frame`]'s
+/// handing run, every sweep of the bike's collision record [`sweep_in_ram`]'s (all of them nearby,
+/// none hitting), RAM alike.
+#[test]
+fn ride_replays_with_the_sweep_in_rust() {
+    let Some((w, all)) = replay_in_rust("ride-2", &["record sweep"]) else { return };
+    assert_eq!(w.len(), 459);
+    let (handed, rust) = handed_and(&all, &["record sweep"]);
+    assert_eq!(rust, [("record sweep".to_string(), 459)]);
+    assert!(handed.iter().all(|(k, _)| k != "record sweep"), "{handed:?}");
+}
+
+/// **F46c — C15's flip, the sweep, the gather and the moves Rust's**: flip-1 in lockstep, wrecked on
+/// row 125 and put back on row 193, the record swept on every row.
+#[test]
+fn flip_replays_with_the_sweep_in_rust() {
+    let names = ["PartMove", "Gather", "record sweep"];
+    let Some((w, all)) = replay_in_rust("flip-1", &names) else { return };
+    assert_eq!(w.len(), 465);
+    let changes: Vec<usize> = (1..w.len()).filter(|&r| w[r] != w[r - 1]).collect();
+    assert_eq!(changes, [125, 193], "wrecked on row 125, put back on row 193");
+    let (handed, rust) = handed_and(&all, &names);
+    assert_eq!(rust, [("PartMove".to_string(), 771), ("Gather".to_string(), 465), ("record sweep".to_string(), 465)]);
+    assert!(handed.iter().all(|(k, _)| !names.contains(&k.as_str())), "{handed:?}");
 }
 
 // ---------------------------------------------------------------------------------------------
