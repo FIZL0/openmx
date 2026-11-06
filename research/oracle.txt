@@ -8888,7 +8888,7 @@ atv_race_camera_vtable      atv 0x003cc180 = the race camera's vtable: update 0x
 atv_ray_probe_stand         atv 0x001bcfe0 = the ray probe stood at a matrix (a0 probe, a1 matrix): its frame, centre and reach (vt +0xcc)
 atv_eco_part_count          atv 0x0046d390 = a plant group's part count (the species' +0x194)
 atv_eco_part                atv 0x0046d3c0 = a plant group's part i, stood at the plant
-atv_ray_sphere              atv 0x001095d0 = the ray probe against a sphere (hit bit only; not ported)
+atv_ray_sphere              atv 0x001095d0 = the ray probe against a sphere (hit bit only; F46d atv_part::sphere_reaches)
 atv_ray_mesh_leaf           atv 0x00107a20 = the ray probe's leaf against a mesh's facet
 atv_ray_tree_pair           atv 0x00108820 = the ray probe's tree against a mesh's tree
 atv_listener_at             atv 0x00117460 = a collidable's listener j
@@ -10255,3 +10255,29 @@ atv_heap_free               atv 0x001b76d0 = free
 # ride-2 + flip-1: 924 sweeps, all nearby, 1 segment, list +0x40 grid 0, reach <= 2.75; no kind 2 candidate
 # in reach; kind 3 (plants) in reach 394 times but +0x126 = 0x13 (NO_GROUPS) skips them; never a hit.
 # Global search 0x001148e0 never runs.
+# F46d — the record's part search (posts_frame's > record search) on C15 in Rust (tests/mxvatv_bike_ride.rs
+# part_search_in_ram, PartWorldInRam; src atv_part; journal research/journal/2026-11-06-f46d-part-search-in-
+# rust). The part is record +0x200: riding 0x00ea5970 (bike +0xcc), wreck 0x00eaa450 (bike +0x1434), vtable
+# 0x003b6c20, MX's ray probe moved +0x10: +0x130 frame, +0x170 root u16, +0x178 ray count, +0x17c nodes (36 B),
+# +0x180 rays (0x20), +0x184 smooth flag, +0x188 filter (0 on C15), +0x7c record. Clear vt +0xb0 = 0x001bbbc0:
+# ray_probe::clear + 0x003dce20/0x003dce28 = 0, 0x00116990(record) -> 0x003dc618, filter set -> 0x00203460.
+# Pair vt +0xb4 = 0x001bbe60: 0x003dc610 = +0x184, j 0x001bc880: memset record +0xac (+0x88 words), +0x80 =
+# 1.0, switch other +0x78 (table 0x0039a880): 0 mesh 0x00108820 (mesh +0x130/+0x23c/+0x244/+0x248/+0x230;
+# with filter 0x00357638), 1 hierarchy gate 0x001bbc80, 5 sphere 0x001095d0(a0 sphere +0x50, a1 probe +0x170,
+# a2 &{+0x17c, +0x180}, a3 probe +0x130, $8 0, f12 sphere +0x180 radius, f13 +0x184 r2), 6 0x0010a100, else 0.
+# 0x001095d0: leaf (w & 0x8000) -> segment (w & 0x7fff)*0x20, both ends through the frame (vaddax m3, vmaddax
+# m0, vmadday m1, vmaddz m2; xyz), 0x00106180(from, to, centre, out, f12 r2); node -> 0x00106e30(&node+12,
+# &node+24, centre, frame, f12 r, f13 r2), then child +8, child +10 only if +8 missed. 0x00106180: d0 = c -
+# from, d1 = c - to (vsub.xyz); |d|2 by mula/madda/madd; d0 or d1 <= r2 -> 1; u = normalize(to - from) (vmul,
+# vadday, vmaddz by vf0w-max, vrsqrt); t = d0.u (FPU); t < 0 -> 0; (|d0|2 - r2) <= t*t and not |to-from|2 <=
+# t*t -> 1, else 0. 0x00106e30: frame plainly transposed, local = R^T (s - m3) (vmulax/vmadday/vmaddz), d =
+# |local - c| (pand), (d - h) - r (vsub, vsubx) all <= 0 else 0; q = d - vmini(d, h); q.q (FPU) < r2.
+# Search 0x001151c0: the riding part's +0x126 = 0x02 (no NO_GROUPS): groups' parts via 0x0046d390/0x0046d3c0
+# (stood at the plant, kept the original's); hit -> probe listeners (+0x104 count, +0x10c array, j via
+# 0x00117460) vt +8 (l, probe, other); struck's vt +0xc (l, struck, probe); probe +0x11c(probe, other); struck
+# +0x120(struck, probe). Riding part listeners (array 0x01e9e9b0): 0x00e71518 (vtable 0x003d04f4, vt +8 =
+# 0x004956a0 -> 0x00493cf0, this-0x38), 0x0065e268 (vtable 0x003bc63c, vt +8 = 0x0025b950 -> 0x0025a350,
+# this-0x28: {probe, struck, 0, kind} pushed to this+0x3c8 via 0x0025b620; kind 1 if struck +0x94 & this+0x2c,
+# 2 if & this+0x30). C15: every pair is a plant sphere (kind 5; e.g. 0x01cca670, radius 4, r2 16, category
+# 0x80): ride-2 432 pairs / 141 struck, flip-1 161 / 55; never a mesh, hierarchy or kind 6; no struck
+# listeners or callbacks; 0x00106180 and 0x00106e30 = atv_part's over 40 000 random each.

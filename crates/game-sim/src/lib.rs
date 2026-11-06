@@ -991,6 +991,10 @@ pub mod atv_sync;
 /// record sweeps back — MX Unleashed's [`sweep_probe`] clear on its moved fields.
 pub mod atv_sweep;
 
+/// The bike's part search (F46d): SLUS-21104's ray probe (the riding or wreck part) searched over the
+/// collision record's nearby list — MX Unleashed's [`ray_probe`] clear and pair on its moved fields.
+pub mod atv_part;
+
 /// The quad's collision record's contacts (MD75e1): SLUS-21104's resolution of them (the record's vt
 /// `+0x88`, the gravity's call), MX Unleashed's [`contact`] resolution on the ATV's record and body.
 pub mod atv_contact;
