@@ -304,125 +304,97 @@ impl Machine {
     }
 }
 
-/// MX vs. ATV Unleashed's fliers (MD80d): the same two machines, four skins each over two models,
-/// which the Fliers setting picks from (MD80e, [`MxvatvFliers`]).
-#[allow(dead_code)]
 impl Machine {
-    /// Its four MX vs. ATV skins, `Veh\Anim\<name>.psg` in openmx-mods' `mxvatv_fliers` pack (its
-    /// `skins[].skin`), in the garage's order (`UI\Res\Veh_BiPlane1-4.res`, `Veh_Helicopter1-4.res`).
-    /// MX vs. ATV has no `_ss` skins: its 3 and 4 are a second model. `None` for the cars, which
-    /// MD39 brings.
-    pub fn mxvatv_skins(self) -> Option<[&'static str; 4]> {
+    /// The word a machine pack's `mod.json` gives its kind (`skins[].machine`, `fliers.<kind>`), and a
+    /// seat's flier pick names it by (P315): the fliers', as openmx-mods' importers write it. `None` for
+    /// the cars, which no pack brings yet.
+    pub fn pack_word(self) -> Option<&'static str> {
         match self {
-            Machine::Biplane => Some(["biplane", "biplane2", "biplane3", "biplane4"]),
-            Machine::Helicopter => Some(["kiowa", "kiowa2", "kiowa3", "kiowa4"]),
+            Machine::Biplane => Some("biplane"),
+            Machine::Helicopter => Some("kiowa"),
             Machine::Buggy | Machine::Monster | Machine::Baja => None,
         }
     }
-
-    /// The model MX vs. ATV's skin `skin` (an index into [`Machine::mxvatv_skins`]) is: 1, MX
-    /// Unleashed's machine, for the first two; 2 for the others. The `.phy` keys it reads are
-    /// `ModelOne<Key>` or `ModelTwo<Key>` by it (`research/mxvatv-pc.md`, "The biplane and the Kiowa").
-    pub fn mxvatv_model(skin: usize) -> u32 {
-        if skin < 2 { 1 } else { 2 }
-    }
-
-    /// The `.phy` key the skin's model reads for `key`: `ModelOneChord`, `ModelTwoPelvisBoxSize`.
-    pub fn mxvatv_key(skin: usize, key: &str) -> String {
-        match Machine::mxvatv_model(skin) {
-            1 => format!("ModelOne{key}"),
-            _ => format!("ModelTwo{key}"),
-        }
-    }
-
-    /// Skin `skin`'s collision pair stem, `Veh\Col\<stem>F.col` (the hull) and `<stem>M.col` (the
-    /// ray probe): `Biplane`, `Biplane2`, … `Kiowa4`.
-    pub fn mxvatv_col(self, skin: usize) -> Option<String> {
-        let stem = match self {
-            Machine::Biplane => "Biplane",
-            Machine::Helicopter => "Kiowa",
-            Machine::Buggy | Machine::Monster | Machine::Baja => return None,
-        };
-        Some(match skin {
-            0 => stem.to_string(),
-            n => format!("{stem}{}", n + 1),
-        })
-    }
 }
 
-/// The skin, of MX vs. ATV's four ([`Machine::mxvatv_skins`]), a flier in `livery` wears when the
-/// player picked `pick` (MD80e): `pick` itself for livery 0, and for livery 1, the second copy's, the
-/// other skin of the same model, so every copy flies the same model's figures and the second still
-/// looks different, as MX Unleashed's alternate livery does.
-pub fn mxvatv_skin(pick: usize, livery: usize) -> usize {
-    let pick = pick.min(3);
-    (pick & !1) | ((pick ^ livery) & 1)
-}
-
-/// **MX vs. ATV's biplane and Kiowa in the ride** (MD80e): openmx-mods' `mxvatv_fliers` machine pack
-/// (MD80d), where the Fliers setting is on, and the skin picked. With it the ride's planes are built
-/// off the pack's `biplane.phy` as SLUS-21104 reads it for the skin's model
-/// ([`game_sim::phy::Plane::read_mxvatv`]) and fly its steps ([`Flight::new_mxvatv`], MD80b), its
-/// helicopters off its `kiowa.phy` ([`game_sim::kiowa::Phy::read_mxvatv`]) on its steps
-/// ([`game_sim::kiowa::Kiowa::tick_mxvatv`], MD80c), each with the skin's own collision pair and
-/// drawn in the skin's models. Without it nothing here is read and the fliers are MX Unleashed's.
-#[allow(dead_code)]
-pub struct MxvatvFliers {
+/// **A flier off a machine pack in the ride** (MD80e, P315): the skin a seat picked of one flier kind
+/// (the Garage's Fliers tab) in a pack the mods folder has, every file of it named by the pack's
+/// `mod.json` and none by this code: its `.phy` (`fliers.<kind>.phy`), read as SLUS-21104 reads it for
+/// the skin's model ([`game_sim::phy::Plane::read_mxvatv`], [`game_sim::kiowa::Phy::read_mxvatv`]) and
+/// flown on its steps ([`Flight::new_mxvatv`], [`game_sim::kiowa::Kiowa::tick_mxvatv`]), the skin's
+/// collision pair and its model. MX Unleashed's own skins are not this: they are the disc's.
+pub struct PackFlier {
     /// The pack's `mod.json` id.
     pub id: String,
     /// The pack's files, by their disc paths.
     pub files: game_render::disc::Res,
-    /// The skin picked, 0..4 ([`mxvatv_skin`]).
-    pub skin: usize,
+    /// The `.phy` of the kind, as the manifest names it.
+    pub phy: String,
+    /// The skin's model name (`biplane3`), and the one a second copy wears ([`PackFlier::model`]).
+    pub skin: String,
+    pub second: String,
+    /// 1 or 2: the `.phy`'s `ModelOne` or `ModelTwo` figures.
+    pub model_number: u32,
+    /// The skin's model, its hull (`…F.col`, what the world meets) and its ray probe (`…M.col`).
+    pub psg: String,
+    pub hull: String,
+    pub rays: String,
 }
 
-#[allow(dead_code)]
-impl MxvatvFliers {
-    /// The `machine` a fliers pack's `mod.json` names.
-    pub const MACHINE: &'static str = "fliers";
-
-    pub fn new(id: String, files: game_render::disc::Res, skin: usize) -> MxvatvFliers {
-        MxvatvFliers { id, files, skin: skin.min(3) }
-    }
-
-    /// The pack's member whose path ends in `name`, at a folder boundary.
+impl PackFlier {
+    /// The pack's member at `name`, a manifest's path (`/` or `\` between folders).
     pub fn read(&self, name: &str) -> Option<Vec<u8>> {
-        self.files.read_suffix(name).ok()
+        self.files.read(&name.replace('/', "\\")).ok()
     }
 
-    /// Whether the picked skin is model one, MX Unleashed's machine: what both `.phy` readers key by.
+    /// Whether the skin is model one, MX Unleashed's machine: what both `.phy` readers key by.
     pub fn model_one(&self) -> bool {
-        Machine::mxvatv_model(self.skin) == 1
+        self.model_number == 1
     }
 
-    /// The model `machine` is drawn in, in `livery`: `biplane3`, `kiowa4`.
-    pub fn model(&self, machine: Machine, livery: usize) -> Option<&'static str> {
-        Some(machine.mxvatv_skins()?[mxvatv_skin(self.skin, livery)])
+    /// The model it is drawn in, in `livery`: the pick for the first copy; for the second, the other
+    /// skin of the same model (MD80e), so every copy flies the same figures and the second still
+    /// looks different, as MX Unleashed's alternate livery does.
+    pub fn model(&self, livery: usize) -> &str {
+        if livery % 2 == 0 { &self.skin } else { &self.second }
     }
 
-    /// The picked skin's hull, `Veh\Col\<stem>F.col`, which the world meets.
-    pub fn hull(&self, machine: Machine) -> Option<Vec<u8>> {
-        self.read(&format!("Col\\{}F.col", machine.mxvatv_col(self.skin)?))
+    pub fn hull(&self) -> Option<Vec<u8>> {
+        self.read(&self.hull)
     }
 
-    /// The picked skin's ray probe, `Veh\Col\<stem>M.col`, which it meets the world with.
-    pub fn rays(&self, machine: Machine) -> Option<Vec<u8>> {
-        self.read(&format!("Col\\{}M.col", machine.mxvatv_col(self.skin)?))
+    pub fn rays(&self) -> Option<Vec<u8>> {
+        self.read(&self.rays)
     }
 
-    /// The picked skin's model's bytes, `Veh\Anim\<skin>.psg`.
-    pub fn psg(&self, machine: Machine) -> Option<Vec<u8>> {
-        self.read(&format!("Anim\\{}.psg", self.model(machine, 0)?))
+    pub fn psg(&self) -> Option<Vec<u8>> {
+        self.read(&self.psg)
     }
 
-    /// The pack's `biplane.phy`.
-    pub fn plane_phy(&self) -> Option<Vec<u8>> {
-        self.read("Veh\\biplane.phy")
+    pub fn phy_bytes(&self) -> Option<Vec<u8>> {
+        self.read(&self.phy)
     }
+}
 
-    /// The pack's `kiowa.phy`.
-    pub fn kiowa_phy(&self) -> Option<Vec<u8>> {
-        self.read("Veh\\kiowa.phy")
+/// The ride's fliers (P315), the first player's picks: each kind off its pack ([`PackFlier`]), or
+/// MX Unleashed's, the disc's, in the livery picked first.
+#[derive(Default)]
+pub struct Fliers {
+    pub plane: Option<PackFlier>,
+    pub kiowa: Option<PackFlier>,
+    /// The disc's livery the first copy wears where the kind is MX Unleashed's: 0, or 1 for its
+    /// second livery picked. The second copy wears the other.
+    pub original: [usize; 2],
+}
+
+impl Fliers {
+    /// The disc livery copy livery `livery` of `machine` is drawn in, where it is MX Unleashed's.
+    pub fn original_livery(&self, machine: Machine, livery: usize) -> usize {
+        let first = match machine {
+            Machine::Helicopter => self.original[1],
+            _ => self.original[0],
+        };
+        (livery + first) % LIVERIES
     }
 }
 
@@ -607,9 +579,9 @@ pub struct Lot {
     /// What an online seat's car is taken from and stepped with ([`switch_lane_among`],
     /// [`drive_lane`]). Empty offline and without the files.
     pub online_cars: Vec<Vec<CarRide>>,
-    /// The models MX vs. ATV's helicopter is drawn in (MD80e), one a livery ([`MxvatvFliers::model`]):
-    /// empty for MX Unleashed's, drawn in [`game_render::kiowa::MODELS`].
-    pub mxvatv_kiowa: Vec<&'static str>,
+    /// The models the helicopter is drawn in, one a livery: a pack's ([`PackFlier::model`], MD80e)
+    /// or the disc's in the livery order picked (P315).
+    pub mxvatv_kiowa: Vec<String>,
 }
 
 impl Lot {
@@ -3182,29 +3154,13 @@ mod tests {
     }
 
     #[test]
-    fn mx_vs_atvs_fliers_have_four_skins_over_two_models() {
-        // Skins 1 and 2 are model one, MX Unleashed's own names; 3 and 4 model two.
-        assert_eq!(Machine::Biplane.mxvatv_skins().unwrap()[..2], Machine::Biplane.models()[..2]);
-        assert_eq!(Machine::Helicopter.mxvatv_skins().unwrap()[..2], Machine::Helicopter.models()[..2]);
-        assert_eq!((0..4).map(Machine::mxvatv_model).collect::<Vec<_>>(), [1, 1, 2, 2]);
-        assert_eq!(Machine::mxvatv_key(3, "PelvisBoxPosition"), "ModelTwoPelvisBoxPosition");
-        assert_eq!(Machine::mxvatv_key(1, "Chord"), "ModelOneChord");
-        assert_eq!(Machine::Biplane.mxvatv_col(0).as_deref(), Some("Biplane"));
-        assert_eq!(Machine::Helicopter.mxvatv_col(3).as_deref(), Some("Kiowa4"));
-        assert_eq!(Machine::Buggy.mxvatv_skins(), None);
-    }
-
-    #[test]
-    fn a_second_copy_of_an_mxvatv_flier_wears_the_other_skin_of_its_model() {
-        // MD80e: livery 0 is the pick, livery 1 its model's other skin, so both fly one model.
-        let pairs: Vec<[usize; 2]> = (0..4).map(|pick| [mxvatv_skin(pick, 0), mxvatv_skin(pick, 1)]).collect();
-        assert_eq!(pairs, [[0, 1], [1, 0], [2, 3], [3, 2]]);
-        for pick in 0..4 {
-            for l in 0..2 {
-                assert_eq!(Machine::mxvatv_model(mxvatv_skin(pick, l)), Machine::mxvatv_model(pick));
-            }
-        }
-        assert_eq!(mxvatv_skin(9, 0), 3, "a pick past the four is the last");
+    fn mx_unleasheds_first_copy_wears_the_livery_picked_and_the_second_the_other() {
+        // P315: the disc's second livery picked swaps the two copies' liveries.
+        let f = Fliers { original: [1, 0], ..Fliers::default() };
+        assert_eq!([f.original_livery(Machine::Biplane, 0), f.original_livery(Machine::Biplane, 1)], [1, 0]);
+        assert_eq!([f.original_livery(Machine::Helicopter, 0), f.original_livery(Machine::Helicopter, 1)], [0, 1]);
+        assert_eq!(Machine::Helicopter.pack_word(), Some("kiowa"));
+        assert_eq!(Machine::Buggy.pack_word(), None);
     }
 
     #[test]

@@ -28,20 +28,6 @@ const BRAKE_GYRO_HELP: &str = "MX vs. ATV's option: a brake held in the air spin
 /// The Gas Gyro row's help (P226).
 const GAS_GYRO_HELP: &str = "MX vs. ATV's option: the throttle held in the air spins the bike nose-down, when Brake Gyro is not \
      already pitching it. Off is that game's default. Online and in a lobby the bikes keep the default.";
-/// The Fliers row's choices (MD80e).
-const FLIERS: [&str; 2] = ["MX Unleashed", "MX vs. ATV"];
-
-/// The Fliers row's help (MD80e).
-const FLIERS_HELP: &str = "Whose biplane and Kiowa the garage and Switch To Machine give you. MX vs. ATV flies that game's own models and \
-     figures, out of the fliers' machine pack in the mods folder (openmx-mods' import-atv fliers), on its own steps. Offline only.";
-
-/// The Flier Skin row's choices (MD80e): MX vs. ATV's four of each, in its garage's order.
-const FLIER_SKINS: [&str; 4] = ["Skin 1", "Skin 2", "Skin 3", "Skin 4"];
-
-/// The Flier Skin row's help (MD80e).
-const FLIER_SKIN_HELP: &str = "Which of MX vs. ATV's four skins your biplane and Kiowa wear. Skins 1 and 2 are MX Unleashed's machine, 3 and 4 \
-     a second model with its own collision and figures. A second player wears the other skin of the same model.";
-
 /// The Handling From row's first choice (MD77).
 const FIRST_TRICK_PACK: &str = "First Pack On";
 /// The Air Wrecks row's help (P138).
@@ -57,7 +43,7 @@ pub const TAB_AUDIO: usize = 3;
 pub const TAB_CONTROLS: usize = 4;
 pub const TAB_CAMERA: usize = 5;
 /// The Garage's tabs, each starting with the same Player row.
-pub const GARAGE_TABS: [&str; 3] = ["Rider", "Bike", "Gear"];
+pub const GARAGE_TABS: [&str; 4] = ["Rider", "Bike", "Gear", "Fliers"];
 
 /// The players a Player row steps through: the concept's 1P to 4P.
 pub const PLAYERS: usize = 4;
@@ -219,9 +205,9 @@ pub enum Key {
     /// MX vs. ATV's Brake Gyro and Gas Gyro options (P226).
     BrakeGyro,
     GasGyro,
-    /// MX vs. ATV's biplane and Kiowa (MD80e), and the skin they wear.
-    Fliers,
-    FlierSkin,
+    /// A flier kind's row on the Garage's Fliers tab (P315), by its place in
+    /// [`roster::flier_kinds`].
+    Flier(usize),
     /// The Original switch (P126), and each departure's under it.
     Original,
     /// The Ride tab's row into the Original Game page (P179).
@@ -319,7 +305,7 @@ impl Row {
     /// Whether the row is a dropdown (P277, opentennis's B498): a choice of [`LIST`] or more. A row
     /// that picks something for a press to do (Load Preset, Save Over) keeps its left and right.
     pub fn many(&self) -> bool {
-        self.kind == Kind::Choice && self.choices.len() >= LIST && !matches!(self.key, Key::LoadPreset | Key::CameraSaveOver | Key::Garage(_))
+        self.kind == Kind::Choice && self.choices.len() >= LIST && !matches!(self.key, Key::LoadPreset | Key::CameraSaveOver | Key::Garage(_) | Key::Flier(_))
     }
 
     /// Whether Cross opens the row's dropdown now: a [`Row::many`] row that is not dimmed.
@@ -651,13 +637,6 @@ impl Menu {
         for (key, name, on, help) in [(Key::BrakeGyro, "Brake Gyro", s.gyro.brake, BRAKE_GYRO_HELP), (Key::GasGyro, "Gas Gyro", s.gyro.gas, GAS_GYRO_HELP)] {
             rows.push(Row::on_off(key, name, on, help).off_if(why.is_some(), why.unwrap_or_default()));
         }
-        // MD80e: MX vs. ATV's biplane and Kiowa, from the machine pack
-        let fliers = Row::choice(Key::Fliers, "Fliers", &FLIERS, usize::from(s.fliers), FLIERS_HELP);
-        rows.push(fliers.off_if(folder_off.is_some(), "Needs the fliers' machine pack in the mods folder"));
-        let mut skin = Row::choice(Key::FlierSkin, "Flier Skin", &FLIER_SKINS, s.flier_skin.min(FLIER_SKINS.len() - 1), FLIER_SKIN_HELP);
-        skin.note = Some(if s.flier_skin < 2 { "Model one, MX Unleashed's machine".into() } else { "Model two, its own shape and figures".into() });
-        let why = if folder_off.is_some() { folder_off } else { (!s.fliers).then_some("Only with Fliers: MX vs. ATV") };
-        rows.push(skin.off_if(why.is_some(), why.unwrap_or_default()));
         rows
     }
 
@@ -1188,11 +1167,47 @@ impl Menu {
                 rows.push(row(G::Livery, "Paint", "The bike's livery."));
                 rows.push(row(G::Tier, "Driving Model", "Race Physics, or Pro Physics: faster bikes."));
             }
-            _ => {
+            2 => {
                 rows.push(row(G::Piece(Piece::Helmet), "Helmet", "The helmet, in the rider's colours."));
                 rows.push(row(G::Piece(Piece::Goggles), "Goggles", "The goggles."));
                 rows.push(row(G::Piece(Piece::Gloves), "Gloves", "The gloves."));
                 rows.push(row(G::Piece(Piece::Boots), "Boots", "The boots."));
+            }
+            _ => rows.extend(self.flier_rows(seat)),
+        }
+        rows
+    }
+
+    /// The Garage's Fliers tab (P315): a row per kind of flier on offer, stepping through every
+    /// installed pack's skins of it after MX Unleashed's, grouped by the game they come from. A skin
+    /// openmx cannot fly is listed, greyed with why, and stepped over.
+    fn flier_rows(&self, seat: usize) -> Vec<Row> {
+        let offer = self.fliers();
+        let pick = self.garages.get(seat).map(|g| g.pick.clone()).unwrap_or_default();
+        let mut rows = Vec::new();
+        for (i, kind) in roster::flier_kinds(offer).iter().enumerate() {
+            let label = roster::flier_label(kind);
+            let choices = roster::flier_choices(offer, kind);
+            let about = format!("The {} the garage and Switch To Machine give this player. Left and right step its skins, every installed machine pack's after MX Unleashed's.", label.to_lowercase());
+            let mut r = Row::new(Key::Flier(i), Kind::Choice, &label, &about);
+            r.choices = choices.iter().map(|f| if f.why.is_some() { format!("{} (cannot fly)", f.name) } else { f.name.clone() }).collect();
+            match roster::flier_of(offer, &pick, kind) {
+                Some(f) => {
+                    r.now = choices.iter().position(|c| std::ptr::eq(*c, f));
+                    r.value = f.name.clone();
+                    r.note = Some(format!("{}. {}", f.game, f.about));
+                    rows.push(r);
+                }
+                None => {
+                    let why = choices.iter().find_map(|f| f.why.clone()).unwrap_or_default();
+                    r.value = choices.first().map(|f| f.name.clone()).unwrap_or_default();
+                    rows.push(r.off_if(true, &why));
+                }
+            }
+        }
+        if offer.iter().all(|f| f.pack == roster::ORIGINAL_PACK) {
+            if let Some(last) = rows.last_mut() {
+                last.note = Some(format!("{} More come in machine packs in the mods folder's machines/.", last.note.clone().unwrap_or_default()).trim().to_string());
             }
         }
         rows
@@ -1661,8 +1676,6 @@ impl Menu {
             Key::Handling => s.handling = game_sim::handling::Handling::ALL[next(row)],
             Key::BrakeGyro => s.gyro.brake = !s.gyro.brake,
             Key::GasGyro => s.gyro.gas = !s.gyro.gas,
-            Key::Fliers => s.fliers = !s.fliers,
-            Key::FlierSkin => s.flier_skin = next(row),
             Key::TrickPack(i) => {
                 let ids = self.trick_pack_ids();
                 let Some(id) = ids.get(i).cloned() else { return };
@@ -1832,6 +1845,14 @@ impl Menu {
             }
             Key::Garage(g) => {
                 self.change_garage(g, p);
+                return;
+            }
+            Key::Flier(i) => {
+                let seat = self.garage_seat();
+                let offer = self.flier_offer.clone();
+                let Some(kind) = roster::flier_kinds(&offer).get(i).cloned() else { return };
+                let Some(g) = self.garages.get_mut(seat) else { return };
+                roster::step_flier(&offer, &mut g.pick, &kind, by(p));
                 return;
             }
             Key::ModsMachine => {

@@ -470,6 +470,7 @@ impl Catalogue {
             rider: rider.map_or(pick.rider.clone(), |r| r.archive.clone()),
             look: self.wardrobe.fit(&pick.look),
             preset: pick.preset.clone(),
+            fliers: pick.fliers.clone(),
         }
     }
 
@@ -495,13 +496,16 @@ pub struct Pick {
     pub look: Look,
     /// The saved look this seat last loaded or saved, by [`Presets::key`], or empty.
     pub preset: String,
+    /// The flier skin it picked of each flier kind (P315), by the kind's word; a kind it has not
+    /// picked flies MX Unleashed's first skin.
+    pub fliers: Vec<FlierPick>,
 }
 
 impl Default for Pick {
     /// The shell as it was before there was a garage: the `125sx`, on the freeride's set, in the stock
     /// gear.
     fn default() -> Pick {
-        Pick { bike: "125sx".into(), set: Set::FREERIDE, rider: "thq1".into(), look: Look::default(), preset: String::new() }
+        Pick { bike: "125sx".into(), set: Set::FREERIDE, rider: "thq1".into(), look: Look::default(), preset: String::new(), fliers: Vec::new() }
     }
 }
 
@@ -509,6 +513,20 @@ impl Pick {
     /// The disc members a ride on this pick opens: the bike's archive and the rider's.
     pub fn members(&self) -> (String, String) {
         (format!("Bike\\{}.res", self.bike), format!("Rider\\{}.res", self.rider))
+    }
+
+    /// The seat's pick of flier kind `machine` (P315), if it made one.
+    pub fn flier(&self, machine: &str) -> Option<&FlierPick> {
+        self.fliers.iter().find(|f| f.machine == machine)
+    }
+
+    /// Pick `flier` for its kind, in place of the one before.
+    pub fn set_flier(&mut self, flier: &Flier) {
+        let pick = FlierPick { machine: flier.machine.clone(), pack: flier.pack.clone(), skin: flier.skin.clone() };
+        match self.fliers.iter_mut().find(|f| f.machine == flier.machine) {
+            Some(f) => *f = pick,
+            None => self.fliers.push(pick),
+        }
     }
 }
 
@@ -551,6 +569,15 @@ impl Picks {
                     pick.look = Look::parse(v);
                     continue;
                 }
+                // P315: `seat<n>.flier = <kind> <pack> <skin>`, one line a kind.
+                "flier" => {
+                    let w: Vec<Option<String>> = v.split_whitespace().map(clean).collect();
+                    if let [Some(machine), Some(pack), Some(skin)] = &w[..] {
+                        pick.fliers.retain(|f| f.machine != *machine);
+                        pick.fliers.push(FlierPick { machine: machine.clone(), pack: pack.clone(), skin: skin.clone() });
+                    }
+                    continue;
+                }
                 "preset" => {
                     // A key is a name and a number: longer than a name alone.
                     let ok = |c: char| c.is_ascii_alphanumeric() || " -'.&".contains(c);
@@ -584,6 +611,9 @@ impl Picks {
             if !p.preset.is_empty() {
                 out.push_str(&format!("seat{}.preset = {}\n", i + 1, p.preset));
             }
+            for f in &p.fliers {
+                out.push_str(&format!("seat{}.flier = {} {} {}\n", i + 1, f.machine, f.pack, f.skin));
+            }
         }
         out
     }
@@ -600,6 +630,130 @@ impl Picks {
         crate::files::write(&part, self.text()).map_err(|e| format!("{}: {e}", part.display()))?;
         crate::files::rename(&part, &path).map_err(|e| format!("{}: {e}", path.display()))
     }
+}
+
+// ---- the fliers on offer (P315) ---------------------------------------------------------------------
+
+/// The pack MX Unleashed's own fliers go by in the picks and on the lines: the disc's, described here
+/// as one more pack ([`original_fliers`]), every other one coming off a machine pack's `mod.json`.
+pub const ORIGINAL_PACK: &str = "original";
+
+/// The flier kinds openmx flies, by the word a pack's `mod.json` gives them (`skins[].machine`), and
+/// the Garage row each is picked on. A pack's skin of any other kind is listed, greyed, with why.
+pub const FLIER_KINDS: [(&str, &str); 2] = [("biplane", "Plane"), ("kiowa", "Helicopter")];
+
+/// One flier skin a seat can pick (P315): MX Unleashed's own, or one an installed machine pack's
+/// `mod.json` lists.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Flier {
+    /// The pack's `mod.json` id, or [`ORIGINAL_PACK`].
+    pub pack: String,
+    /// The game it comes from, the pack's `source.game`: what the picker groups by.
+    pub game: String,
+    /// Its kind, the pack's word: `biplane`, `kiowa`.
+    pub machine: String,
+    /// Its model's name, `biplane3`: what the picks save and the ride draws.
+    pub skin: String,
+    /// What the picker calls it: the pack's `skins[].name`, else the kind and its place.
+    pub name: String,
+    /// 1 or 2: which of its `.phy`'s `ModelOne`/`ModelTwo` figures it flies on.
+    pub model: u32,
+    /// What it is, under the row: the pack's `skins[].about`, else what its model says.
+    pub about: String,
+    /// Why openmx cannot fly it, where it cannot: listed greyed with this.
+    pub why: Option<String>,
+}
+
+/// A seat's pick of one flier kind, as `garage.txt` keeps it: the kind, the pack, the skin.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FlierPick {
+    pub machine: String,
+    pub pack: String,
+    pub skin: String,
+}
+
+/// What a flier's model is, where its pack does not say: model one is MX Unleashed's machine, model
+/// two a machine of its own (`ModelTwo` keys: its own shape, collision and flight figures).
+pub fn model_about(model: u32) -> &'static str {
+    match model {
+        1 => "Model one: MX Unleashed's shape and flight figures.",
+        _ => "Model two: its own shape, collision and flight figures.",
+    }
+}
+
+/// The Garage row of a flier kind: its [`FLIER_KINDS`] label, or the pack's word in capitals.
+pub fn flier_label(machine: &str) -> String {
+    match FLIER_KINDS.iter().find(|(m, _)| *m == machine) {
+        Some((_, label)) => label.to_string(),
+        None => {
+            let mut c = machine.chars();
+            c.next().map_or(String::new(), |f| f.to_ascii_uppercase().to_string() + c.as_str())
+        }
+    }
+}
+
+/// MX Unleashed's own fliers, the disc's two liveries of each, as a pack's would be listed.
+pub fn original_fliers() -> Vec<Flier> {
+    let skin = |machine: &str, skin: &str, name: &str| Flier {
+        pack: ORIGINAL_PACK.into(),
+        game: "MX Unleashed".into(),
+        machine: machine.into(),
+        skin: skin.into(),
+        name: name.into(),
+        model: 1,
+        about: "MX Unleashed's own.".into(),
+        why: None,
+    };
+    vec![
+        skin("biplane", "biplane", "Biplane"),
+        skin("biplane", "biplane2", "Biplane, Second Livery"),
+        skin("kiowa", "kiowa", "Kiowa"),
+        skin("kiowa", "kiowa2", "Kiowa, Second Livery"),
+    ]
+}
+
+/// The flier kinds on offer, in the order they are first listed: MX Unleashed's first.
+pub fn flier_kinds(offer: &[Flier]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for f in offer {
+        if !out.contains(&f.machine) {
+            out.push(f.machine.clone());
+        }
+    }
+    out
+}
+
+/// Every skin of kind `machine` on offer, grouped by game in the order the games are first listed
+/// and in each pack's own order within it.
+pub fn flier_choices<'a>(offer: &'a [Flier], machine: &str) -> Vec<&'a Flier> {
+    let mut games: Vec<&str> = Vec::new();
+    for f in offer.iter().filter(|f| f.machine == machine) {
+        if !games.contains(&f.game.as_str()) {
+            games.push(&f.game);
+        }
+    }
+    games.iter().flat_map(|g| offer.iter().filter(move |f| f.machine == machine && f.game == *g)).collect()
+}
+
+/// The skin of kind `machine` a seat flies: its pick where that is on offer and can fly, else the
+/// kind's first that can.
+pub fn flier_of<'a>(offer: &'a [Flier], pick: &Pick, machine: &str) -> Option<&'a Flier> {
+    let choices = flier_choices(offer, machine);
+    let want = pick.flier(machine);
+    choices
+        .iter()
+        .find(|f| f.why.is_none() && want.is_some_and(|w| w.pack == f.pack && w.skin == f.skin))
+        .or_else(|| choices.iter().find(|f| f.why.is_none()))
+        .copied()
+}
+
+/// Left (`-1`) or right (`1`) on a kind's row: the next skin of it that can fly.
+pub fn step_flier(offer: &[Flier], pick: &mut Pick, machine: &str, by: i32) {
+    let choices: Vec<&Flier> = flier_choices(offer, machine).into_iter().filter(|f| f.why.is_none()).collect();
+    let Some(now) = flier_of(offer, pick, machine) else { return };
+    let at = choices.iter().position(|f| *f == now).unwrap_or(0);
+    let next = choices[wrap(at, by, choices.len())].clone();
+    pick.set_flier(&next);
 }
 
 // ---- the look (P86) ----------------------------------------------------------------------------------
@@ -1229,7 +1383,9 @@ impl Garage {
             None => 0,
         };
         if let Some(p) = presets.find(keys[next]) {
-            self.pick = c.fit(p);
+            // A saved look is the rider and the bike: the seat's fliers stay its own (P315).
+            let fliers = std::mem::take(&mut self.pick.fliers);
+            self.pick = Pick { fliers, ..c.fit(p) };
         }
     }
 
@@ -1237,7 +1393,8 @@ impl Garage {
     pub fn load_preset(&mut self, c: &Catalogue, presets: &Presets, key: &str) -> bool {
         match presets.find(key) {
             Some(p) => {
-                self.pick = c.fit(p);
+                let fliers = std::mem::take(&mut self.pick.fliers);
+                self.pick = Pick { fliers, ..c.fit(p) };
                 true
             }
             None => false,
@@ -1328,6 +1485,59 @@ impl Garage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pack's flier as `flier_offers` lists one, for the tests below (P315).
+    fn pack_flier(pack: &str, game: &str, machine: &str, skin: &str, why: Option<&str>) -> Flier {
+        Flier { pack: pack.into(), game: game.into(), machine: machine.into(), skin: skin.into(), name: skin.into(), model: 1, about: String::new(), why: why.map(Into::into) }
+    }
+
+    #[test]
+    fn a_seats_flier_picks_are_saved_and_read_back() {
+        let mut picks = Picks::default();
+        picks.0[1].set_flier(&pack_flier("renamed", "Some Game", "biplane", "biplane3", None));
+        picks.0[1].set_flier(&pack_flier("renamed", "Some Game", "kiowa", "kiowa4", None));
+        // A second pick of a kind replaces the first.
+        picks.0[1].set_flier(&pack_flier("other", "Some Game", "kiowa", "kiowa2", None));
+        let text = picks.text();
+        assert!(text.contains("seat2.flier = biplane renamed biplane3\n"), "{text}");
+        assert!(text.contains("seat2.flier = kiowa other kiowa2\n"), "{text}");
+        assert!(!text.contains("seat1.flier"), "{text}");
+        let back = Picks::parse(&text);
+        assert_eq!(back.0[1].fliers, picks.0[1].fliers);
+        assert!(back.0[0].fliers.is_empty());
+        assert_eq!(back.0[1].flier("kiowa").map(|f| f.skin.as_str()), Some("kiowa2"));
+    }
+
+    #[test]
+    fn fliers_list_by_game_and_step_over_the_unflyable() {
+        let mut offer = original_fliers();
+        offer.push(pack_flier("b", "Game B", "biplane", "b1", None));
+        offer.push(pack_flier("a", "MX Unleashed", "biplane", "a1", None));
+        offer.push(pack_flier("b", "Game B", "biplane", "b2", Some("cannot")));
+        offer.push(pack_flier("b", "Game B", "biplane", "b3", None));
+        offer.push(pack_flier("b", "Game B", "truck", "t1", Some("openmx cannot fly a truck yet")));
+        assert_eq!(flier_kinds(&offer), ["biplane", "kiowa", "truck"]);
+        let names: Vec<&str> = flier_choices(&offer, "biplane").iter().map(|f| f.skin.as_str()).collect();
+        assert_eq!(names, ["biplane", "biplane2", "a1", "b1", "b2", "b3"], "grouped by game, first listed first");
+
+        let mut pick = Pick::default();
+        assert_eq!(flier_of(&offer, &pick, "biplane").map(|f| f.skin.as_str()), Some("biplane"), "no pick flies the first");
+        assert_eq!(flier_of(&offer, &pick, "truck"), None, "nothing of the kind flies");
+        let mut seen = Vec::new();
+        for _ in 0..6 {
+            step_flier(&offer, &mut pick, "biplane", 1);
+            seen.push(flier_of(&offer, &pick, "biplane").unwrap().skin.clone());
+        }
+        assert_eq!(seen, ["biplane2", "a1", "b1", "b3", "biplane", "biplane2"], "b2 is stepped over");
+        step_flier(&offer, &mut pick, "biplane", -1);
+        step_flier(&offer, &mut pick, "biplane", -1);
+        assert_eq!(pick.flier("biplane").map(|f| f.skin.as_str()), Some("b3"));
+
+        // A pick of a pack no longer installed flies the first again; the pick is kept.
+        let gone: Vec<Flier> = offer.iter().filter(|f| f.pack != "b").cloned().collect();
+        assert_eq!(flier_of(&gone, &pick, "biplane").map(|f| f.skin.as_str()), Some("biplane"));
+        assert_eq!(pick.flier("biplane").map(|f| f.pack.as_str()), Some("b"));
+    }
 
     fn tiny() -> Catalogue {
         let bike = |archive: &str, engine| {

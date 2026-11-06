@@ -34,6 +34,8 @@ pub fn garage_pick(pick: &Pick, own: &roster::Pick) -> roster::Pick {
         rider: if pick.rider.trim().is_empty() { own.rider.clone() } else { pick.rider.trim().to_ascii_lowercase() },
         look: roster::Look::parse(&pick.look),
         preset: String::new(),
+        // Online fliers are MX Unleashed's for every seat until the handshake holds packs (P318).
+        fliers: Vec::new(),
     }
 }
 
