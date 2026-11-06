@@ -12349,3 +12349,557 @@ fn the_riders_walk_and_clear_loop_are_the_originals() {
     }
     assert_eq!(t.len(), 6, "every path taken: {t:#?}");
 }
+
+// --- S278a: the rider ragdoll world's bone collision ----------------------------------------------
+
+use game_sim::camera::CurveTable;
+use game_sim::handling::bone;
+
+/// The bone collision's solve and push-out, and the scene's calls they make: the sphere moved, a
+/// shape's virtual (the sphere's `vt +200`), the probe's segment set and the probe brought up to date,
+/// the search in a pool and in the whole scene.
+const BONE_SOLVE: u32 = 0x0049_bb00;
+const BONE_PUSH_OUT: u32 = 0x0049_b220;
+const SHAPE_PLACE: u32 = 0x001c_1e90;
+const SHAPE_VT_REFRESH: u32 = 200;
+const SHAPE_SEGMENT: u32 = 0x001b_9290;
+const SHAPE_REFRESH: u32 = 0x0011_4360;
+const SHAPE_SEARCH: u32 = 0x0011_51c0;
+const SHAPE_SEARCH_ALL: u32 = 0x0011_48e0;
+/// A mover's two virtuals, spin and velocity (each writing a quadword to `a0`).
+/// The ground query's cache of read cells, ten of 0x70 bytes (with the terrain's `+0x9e0` set-up flag
+/// and `+0x9e4` index): keyed by the sample and filled from the map, so the port, reading the map,
+/// keeps none.
+const GROUND_RING: u32 = 0x0054_1550;
+const MOVER_SPIN_VT: u32 = 0xc4;
+const MOVER_VELOCITY_VT: u32 = 0xc0;
+/// The fake objects of the bone collision oracle, in the F39 rig's area past S278's: a body to turn,
+/// a collidable, its collision object, the object's dynamics body and chassis, a node and its parent,
+/// a mover, its vtable and two functions in it (hooked: never run), what they answer, two hit records
+/// (the sphere's, the probe's) and the probe's swept point and normal: in the 12 KiB at `0x01cb_b000`,
+/// the only free words of state 4 near the others.
+const B_AREA: u32 = 0x01cb_b000;
+const B_TURNED: u32 = B_AREA;
+const B_COLL: u32 = B_AREA + 0x200;
+const B_OBJECT: u32 = B_AREA + 0x300;
+const B_BODY2: u32 = B_AREA + 0x400;
+const B_CHASSIS: u32 = B_AREA + 0x600;
+const B_NODE: u32 = B_AREA + 0x900;
+const B_MOVER: u32 = B_AREA + 0xb00;
+const B_VT: u32 = B_AREA + 0xe00;
+const B_SPIN_FN: u32 = B_AREA + 0xf00;
+const B_VEL_FN: u32 = B_AREA + 0xf10;
+const B_SPIN: u32 = B_AREA + 0xf20;
+const B_VEL: u32 = B_AREA + 0xf30;
+const B_HITS: u32 = B_AREA + 0x1000;
+const B_SWEPT_HITS: u32 = B_AREA + 0x1100;
+const B_SWEPT_AT: u32 = B_AREA + 0x1200;
+const B_PARENT: u32 = B_AREA + 0x1300;
+const B_END: u32 = B_AREA + 0x1500;
+
+/// Where a hook's nested calls take and leave their quadwords: the 64 bytes under the hooked call's
+/// `sp`, above the nested calls' stack ([`call_from_hook`]).
+fn hook_scratch(ee: &Ee) -> u32 {
+    (ee.r(29) as u32 - 0x40) & !0xf
+}
+
+/// Calls `f` from inside a hook, on the stack below the hooked call's and [`hook_scratch`], and puts
+/// the hook's `ra`, `sp` and `pc` back after.
+fn call_from_hook(ee: &mut Ee, f: u32, ints: &[u64]) {
+    let (pc, ra, sp, stack) = (ee.pc, ee.r(31), ee.r(29), ee.stack);
+    ee.stack = (sp as u32 - 0x80) & !0xf;
+    ee.set(28, GP);
+    ee.call(f, ints, &[], BUDGET);
+    (ee.stack, ee.pc) = (stack, pc);
+    ee.set(29, sp);
+    ee.set(31, ra);
+}
+
+/// What the oracle's fake scene was asked, and what it answers: per shape, a hit or not and the hit
+/// record it leaves.
+#[derive(Default)]
+struct Asked {
+    log: Vec<String>,
+    hit: HashMap<u32, (bool, u32)>,
+}
+
+/// A search's answer: the shape's hit bit and its hit record.
+fn answer(m: &mut impl node::Ram, asked: &Asked, shape: u32) {
+    let (hit, rec) = asked.hit.get(&shape).copied().unwrap_or((false, 0));
+    let (at, s) = ((shape + bone::S_HIT_BYTE) & !3, 8 * ((shape + bone::S_HIT_BYTE) & 3));
+    let w = m.word(at);
+    m.set(at, w & !(bone::S_HIT_BIT << s) | u32::from(hit) * bone::S_HIT_BIT << s);
+    m.set(shape + bone::S_RECORD, rec);
+}
+
+fn quad_bits(m: &mut impl node::Ram, at: u32) -> [u32; 4] {
+    [0, 4, 8, 12].map(|k| m.word(at + k))
+}
+
+/// The fake scene on the port's side: the same log and answers as the hooks on the original's.
+struct FakeScene(Rc<RefCell<Asked>>);
+
+impl<'a> bone::Scene<RiderRam<'a>> for FakeScene {
+    fn place(&mut self, _: &mut RiderRam<'a>, sphere: u32, at: u32) {
+        let mut a = self.0.borrow_mut();
+        a.log.push(format!("place {sphere:#x} at {at:#x}"));
+        a.log.push(format!("refresh {sphere:#x}"));
+    }
+    fn segment(&mut self, _: &mut RiderRam<'a>, probe: u32, from: Vf, to: Vf) {
+        let mut a = self.0.borrow_mut();
+        a.log.push(format!("segment {probe:#x} {:08x?} {:08x?}", from.to_bits(), to.to_bits()));
+        a.log.push(format!("refresh {probe:#x}"));
+    }
+    fn search(&mut self, m: &mut RiderRam<'a>, shape: u32, pool: u32) {
+        let a = &mut *self.0.borrow_mut();
+        a.log.push(format!("search {shape:#x} in {pool:#x}"));
+        answer(m, a, shape);
+    }
+    fn search_all(&mut self, m: &mut RiderRam<'a>, shape: u32) {
+        let a = &mut *self.0.borrow_mut();
+        a.log.push(format!("search {shape:#x}"));
+        answer(m, a, shape);
+    }
+    fn spin(&mut self, m: &mut RiderRam<'a>, mover: u32) -> Vf {
+        self.0.borrow_mut().log.push(format!("spin {mover:#x}"));
+        Vf::from_bits(quad_bits(m, B_SPIN))
+    }
+    fn velocity(&mut self, m: &mut RiderRam<'a>, mover: u32) -> Vf {
+        self.0.borrow_mut().log.push(format!("velocity {mover:#x}"));
+        Vf::from_bits(quad_bits(m, B_VEL))
+    }
+}
+
+/// The scene on the interpreter's: each call the original's own, from inside the solve's hook.
+struct OriginalScene;
+
+impl<'a> bone::Scene<RiderRam<'a>> for OriginalScene {
+    fn place(&mut self, m: &mut RiderRam<'a>, sphere: u32, at: u32) {
+        call_from_hook(m.ee, SHAPE_PLACE, &[u64::from(sphere), u64::from(at), 0]);
+        let f = m.ee.u32_at(m.ee.u32_at(sphere + 0xc) + SHAPE_VT_REFRESH);
+        call_from_hook(m.ee, f, &[u64::from(sphere)]);
+    }
+    fn segment(&mut self, m: &mut RiderRam<'a>, probe: u32, from: Vf, to: Vf) {
+        let out = hook_scratch(m.ee);
+        for (k, w) in from.to_bits().into_iter().chain(to.to_bits()).enumerate() {
+            m.ee.set_u32(out + 4 * k as u32, w);
+        }
+        call_from_hook(m.ee, SHAPE_SEGMENT, &[u64::from(probe), u64::from(out), 0]);
+        call_from_hook(m.ee, SHAPE_REFRESH, &[u64::from(probe)]);
+    }
+    fn search(&mut self, m: &mut RiderRam<'a>, shape: u32, pool: u32) {
+        call_from_hook(m.ee, SHAPE_SEARCH, &[u64::from(shape), u64::from(pool), 1]);
+    }
+    fn search_all(&mut self, m: &mut RiderRam<'a>, shape: u32) {
+        call_from_hook(m.ee, SHAPE_SEARCH_ALL, &[u64::from(shape), 0]);
+    }
+    fn spin(&mut self, m: &mut RiderRam<'a>, mover: u32) -> Vf {
+        let (f, out) = (m.ee.u32_at(m.ee.u32_at(mover + 4) + MOVER_SPIN_VT), hook_scratch(m.ee));
+        call_from_hook(m.ee, f, &[u64::from(out), u64::from(mover)]);
+        Vf::from_bits(quad_bits(m, out))
+    }
+    fn velocity(&mut self, m: &mut RiderRam<'a>, mover: u32) -> Vf {
+        let (f, out) = (m.ee.u32_at(m.ee.u32_at(mover + 4) + MOVER_VELOCITY_VT), hook_scratch(m.ee));
+        call_from_hook(m.ee, f, &[u64::from(out), u64::from(mover)]);
+        Vf::from_bits(quad_bits(m, out))
+    }
+}
+
+/// The rider's ragdoll parts (the rider's list), in state 4.
+fn rider_parts(ee: &Ee) -> Vec<u32> {
+    let list = ee.u32_at(RIDER + rider::PARTS);
+    (0..ee.u32_at(RIDER + rider::PARTS_COUNT)).map(|i| ee.u32_at(list + 4 * i)).collect()
+}
+
+/// **The bone collision's push-out and solve are the original's**: 24 000 calls on state 4's rider
+/// parts, half of each, through SLUS-21104's and the port's, with the scene's calls answered by a fake
+/// scene on both sides (hooks on the original's, [`FakeScene`] on the port's: each call logged, each
+/// search's hit and hit record drawn per case) and every word they read drawn at random: the part's
+/// flags, factors, scratch and the body it turns (none, its own, another), the body's position near
+/// its own, velocity, radius, mass and frame; the point and normal; the other side (none, a
+/// collidable with nothing, with a dynamics body, with a vehicle's chassis and node — the node current
+/// or not, under a parent or not —, with a mover of class 2 or not, both); and for the solve, the part
+/// on or not, its body there and enabled or not, the terrain there or not and the point in its box or
+/// at or past its edge, the body above or below the ground, the scene's hit with −1 to 3 contacts, the
+/// sweep on or not, its probe there and its hit, the pool there or not, `dt` the game's, half of it or
+/// any. Every word of the parts, their bodies, shapes and the fakes comes out the same, the scene is
+/// asked the same in the same order, and neither writes anywhere else.
+#[test]
+fn the_bone_collision_is_the_originals() {
+    let Some(mut ee) = image().map(hooked) else { return };
+    let Some(trn) = nat05_trn() else { return };
+    let map = track::Terrain::parse(&trn).unwrap();
+    let curve = CurveTable::build();
+    let parts = rider_parts(&ee);
+    assert_eq!(parts.len(), 9, "the rider's parts");
+    for a in (B_AREA..B_END).step_by(4) {
+        assert_eq!(ee.u32_at(a), 0, "the fakes' area is free at {a:#x}");
+    }
+    let asked: Rc<RefCell<Asked>> = Rc::default();
+    let mut regions = vec![(B_AREA, B_END - B_AREA)];
+    let mut shapes = Vec::new();
+    for &p in &parts {
+        let b = ee.u32_at(p + bone::BODY);
+        assert_eq!((p & 0xf, b & 0xf), (0, 0), "the part and its body are aligned");
+        regions.push((p, 0xa0));
+        regions.push((b, 0x1e0));
+        for o in [bone::SPHERE, bone::PROBE] {
+            let s = ee.u32_at(p + o);
+            assert_ne!(s, 0);
+            shapes.push(s);
+            regions.push((s & !0xf, 0x130));
+        }
+    }
+    regions.sort();
+    regions.dedup();
+    // The original's side of the fake scene.
+    let log = |name: &'static str, quads: bool| {
+        let a = asked.clone();
+        Box::new(move |ee: &mut Ee| {
+            let (a0, a1) = (ee.r(4) as u32, ee.r(5) as u32);
+            let line = match name {
+                "place" => format!("place {a0:#x} at {a1:#x}"),
+                "segment" if quads => format!("segment {a0:#x} {:08x?} {:08x?}", quad_bits(&mut RiderRam { ee, overlay: None }, a1), quad_bits(&mut RiderRam { ee, overlay: None }, a1 + 16)),
+                "search" => format!("search {a0:#x} in {a1:#x}"),
+                "search all" => format!("search {a0:#x}"),
+                "spin" | "velocity" => {
+                    let from = if name == "spin" { B_SPIN } else { B_VEL };
+                    for k in 0..4 {
+                        let w = ee.u32_at(from + 4 * k);
+                        ee.set_u32(a0 + 4 * k, w);
+                    }
+                    format!("{name} {a1:#x}")
+                }
+                _ => format!("refresh {a0:#x}"),
+            };
+            let mut a = a.borrow_mut();
+            a.log.push(line);
+            if name.starts_with("search") {
+                assert!(name != "search" || ee.r(6) == 1, "the pool search's third argument");
+                answer(&mut RiderRam { ee, overlay: None }, &a, a0);
+            }
+        }) as Box<dyn FnMut(&mut Ee)>
+    };
+    ee.hooks.insert(SHAPE_PLACE, log("place", false));
+    ee.hooks.insert(SHAPE_SEGMENT, log("segment", true));
+    ee.hooks.insert(SHAPE_REFRESH, log("refresh", false));
+    ee.hooks.insert(SHAPE_SEARCH, log("search", false));
+    ee.hooks.insert(SHAPE_SEARCH_ALL, log("search all", false));
+    ee.hooks.insert(B_SPIN_FN, log("spin", false));
+    ee.hooks.insert(B_VEL_FN, log("velocity", false));
+    for &s in &shapes {
+        let f = ee.u32_at(ee.u32_at(s + 0xc) + SHAPE_VT_REFRESH);
+        ee.hooks.entry(f).or_insert_with(|| log("refresh", false));
+    }
+    let image_words = snap_regions(&ee, &regions);
+    let addrs: Vec<u32> = regions.iter().flat_map(|&(at, n)| (0..n).step_by(4).map(move |o| at + o)).collect();
+    let mut g = Gen(0x0278_a001);
+    let mut t = BTreeMap::new();
+    for k in 0..24_000 {
+        restore_regions(&mut ee, &regions, &image_words);
+        let solve = k % 2 == 1;
+        let p = parts[(g.bits() as usize) % parts.len()];
+        let b = ee.u32_at(p + bone::BODY);
+        let sv = |g: &mut Gen, lo: f32, hi: f32| g.near(0.0, lo, hi);
+        let put = |ee: &mut Ee, at: u32, v: [f32; 4]| {
+            for (i, x) in v.into_iter().enumerate() {
+                ee.set_f32(at + 4 * i as u32, x);
+            }
+        };
+        let quat = |g: &mut Gen| [sv(g, -1.0, 1.0), sv(g, -1.0, 1.0), sv(g, -1.0, 1.0), sv(g, -1.0, 1.0)];
+        let vec = |g: &mut Gen, r: f32| [sv(g, -r, r), sv(g, -r, r), sv(g, -r, r), if g.one_in(4) { sv(g, -r, r) } else { 1.0 }];
+        // The body: near where it is, any velocity, frame and mass.
+        let at = [0, 4, 8].map(|o| ee.f32_at(b + bone::B_POSITION + o));
+        let body = |ee: &mut Ee, g: &mut Gen, b: u32, at: [f32; 3]| {
+            let w = if g.one_in(4) { g.f(-2.0, 2.0) } else { 1.0 };
+            put(ee, b + bone::B_POSITION, [at[0] + g.f(-1.5, 1.5), at[1] + g.f(-3.0, 3.0), at[2] + g.f(-1.5, 1.5), w]);
+            put(ee, b + bone::B_VELOCITY, vec(g, 15.0));
+            put(ee, b + bone::B_QUAT, quat(g));
+            put(ee, b + bone::B_RATES, vec(g, 8.0));
+            put(ee, b + bone::B_INV_INERTIA, [g.f(0.0, 6.0), g.f(0.0, 6.0), g.f(0.0, 6.0), sv(g, -1.0, 1.0)]);
+            ee.set_f32(b + bone::B_INV_MASS, g.f(0.05, 4.0));
+            ee.set_f32(b + bone::B_RADIUS, g.f(0.02, 1.0));
+        };
+        body(&mut ee, &mut g, b, at);
+        body(&mut ee, &mut g, B_TURNED, at);
+        body(&mut ee, &mut g, B_BODY2, [at[0] + 1.0, at[1], at[2]]);
+        let turned = match g.bits() % 6 {
+            0 => 0,
+            1 | 2 => B_TURNED,
+            _ => b,
+        };
+        ee.set_u32(p + bone::TURNED, turned);
+        ee.set_u32(p + bone::SWEPT, u32::from(g.one_in(4)));
+        for (o, lo, hi) in [(bone::UNPENETRATION, 0.0, 1.5), (bone::ROTATION, 0.0, 2.0), (bone::RESTITUTION, 0.0, 1.0), (bone::FRICTION, 0.0, 1.0)] {
+            ee.set_f32(p + o, g.near(0.0, lo, hi));
+        }
+        put(&mut ee, p + bone::DV, vec(&mut g, 5.0));
+        put(&mut ee, p + bone::SCRATCH, [g.f(0.0, 4.0), 0.0, 0.0, if g.one_in(4) { sv(&mut g, -0.5, 0.5) } else { 0.0 }]);
+        put(&mut ee, p + bone::POINT, [at[0] + g.f(-1.5, 1.5), at[1] + g.f(-1.5, 1.5), at[2] + g.f(-1.5, 1.5), 1.0]);
+        put(&mut ee, p + bone::NORMAL, vec(&mut g, 1.0));
+        // The other side.
+        let other = |ee: &mut Ee, g: &mut Gen| -> (u32, &'static str) {
+            if g.one_in(4) {
+                return (0, "against nothing");
+            }
+            let mover = !g.one_in(3);
+            let object = g.bits() % 3;
+            ee.set_u32(B_COLL + bone::C_MOVER, if mover { B_MOVER } else { 0 });
+            ee.set_u32(B_COLL + bone::C_OBJECT, if object == 0 { 0 } else { B_OBJECT });
+            ee.set_u32(B_OBJECT + bone::O_BODY, if object == 1 { B_BODY2 } else { 0 });
+            let class = ee.u32_at(B_MOVER + bone::MOVER_CLASS);
+            (
+                B_COLL,
+                match (object, mover, class == bone::MOVER_IS) {
+                    (1, ..) => "against a dynamics body",
+                    (2, ..) => "against a vehicle",
+                    (_, true, true) => "against a mover",
+                    (_, true, false) => "against a mover not of class 2",
+                    (_, false, _) => "against a collidable with neither",
+                },
+            )
+        };
+        ee.set_u32(B_MOVER + bone::MOVER_CLASS, if g.one_in(4) { 1 } else { bone::MOVER_IS });
+        ee.set_u32(B_MOVER + 4, B_VT);
+        ee.set_u32(B_VT + MOVER_SPIN_VT, B_SPIN_FN);
+        ee.set_u32(B_VT + MOVER_VELOCITY_VT, B_VEL_FN);
+        ee.set_u32(B_MOVER + bone::MOVER_NODE, B_NODE);
+        put(&mut ee, B_MOVER + bone::MOVER_ORIGIN, vec(&mut g, 2.0));
+        put(&mut ee, B_SPIN, vec(&mut g, 5.0));
+        put(&mut ee, B_VEL, vec(&mut g, 15.0));
+        ee.set_u32(B_OBJECT + bone::O_NODE, B_NODE);
+        ee.set_u32(B_OBJECT + bone::O_CHASSIS, B_CHASSIS);
+        put(&mut ee, B_OBJECT + bone::O_COFG, vec(&mut g, 1.0));
+        put(&mut ee, B_OBJECT + bone::O_COFG_WORLD, vec(&mut g, 1.0));
+        put(&mut ee, B_CHASSIS + bone::CH_COFG, vec(&mut g, 1.0));
+        put(&mut ee, B_CHASSIS + bone::CH_VELOCITY, vec(&mut g, 15.0));
+        put(&mut ee, B_CHASSIS + bone::CH_RATES, vec(&mut g, 5.0));
+        for n in [B_NODE, B_PARENT] {
+            for r in 0..8 {
+                let mut v = vec(&mut g, 1.0);
+                if r == 3 || r == 7 {
+                    v = [at[0] + g.f(-3.0, 3.0), at[1] + g.f(-3.0, 3.0), at[2] + g.f(-3.0, 3.0), 1.0];
+                }
+                put(&mut ee, n + 0x30 + 0x10 * r, v);
+            }
+        }
+        let parented = g.one_in(2);
+        ee.set_u32(B_NODE + 0xf0, if parented { B_PARENT } else { 0 });
+        ee.set_u32(B_NODE + 0x100, if g.one_in(2) { 1 } else { 0 });
+        ee.set_u32(B_PARENT + 0x100, 1);
+        let (coll, against) = other(&mut ee, &mut g);
+        ee.set_u32(p + bone::OTHER, coll);
+        tally(&mut t, against);
+        // The solve's words and the fake scene's answers.
+        let dt = match g.bits() % 3 {
+            0 => f32::from_bits(DT),
+            1 => f32::from_bits(0x3c88_850a),
+            _ => g.f(0.0, 0.1),
+        };
+        if solve {
+            ee.set_u32(p + bone::ON, u32::from(!g.one_in(12)));
+            if g.one_in(16) {
+                ee.set_u32(b + bone::B_ENABLED, 0);
+            }
+            if g.one_in(24) {
+                ee.set_u32(p + bone::BODY, 0);
+            }
+            let terrain = ee.u32_at(p + bone::TERRAIN);
+            match g.bits() % 10 {
+                0 => {
+                    ee.set_u32(p + bone::TERRAIN, 0);
+                    tally(&mut t, "solve: no terrain");
+                }
+                1 => {
+                    tally(&mut t, "solve: at or past the terrain's edge");
+                    let edge = [0x30, 0x40, 0x38, 0x48][(g.bits() % 4) as usize];
+                    let x = ee.f32_at(terrain + edge) + if g.one_in(2) { 0.0 } else if edge < 0x40 { -1.0 } else { 1.0 };
+                    ee.set_f32(b + bone::B_POSITION + (edge & 8), x);
+                }
+                _ => {}
+            }
+            ee.set_u32(p + bone::SWEEP, u32::from(!g.one_in(4)));
+            if g.one_in(6) {
+                ee.set_u32(p + bone::PROBE, 0);
+            }
+            if g.one_in(3) {
+                ee.set_u32(p + bone::POOL, 0);
+            }
+            ee.set_u32(B_HITS + bone::R_COUNT, ((g.bits() % 5) as i32 - 1) as u32);
+            for i in 0..3 {
+                put(&mut ee, B_HITS + bone::R_POINTS + 0x10 * i, [at[0] + g.f(-1.0, 1.0), at[1] + g.f(-1.0, 1.0), at[2] + g.f(-1.0, 1.0), 1.0]);
+                put(&mut ee, B_HITS + bone::R_NORMALS + 0x10 * i, vec(&mut g, 1.0));
+                let (c, _) = other(&mut ee, &mut g);
+                ee.set_u32(B_HITS + bone::R_OTHERS + 4 * i, c);
+            }
+            ee.set_u32(B_SWEPT_HITS + bone::R_SWEPT_POINT, B_SWEPT_AT);
+            ee.set_u32(B_SWEPT_HITS + bone::R_SWEPT_NORMAL, B_SWEPT_AT + 0x10);
+            put(&mut ee, B_SWEPT_AT, [at[0] + g.f(-1.0, 1.0), at[1] + g.f(-1.0, 1.0), at[2] + g.f(-1.0, 1.0), 1.0]);
+            put(&mut ee, B_SWEPT_AT + 0x10, vec(&mut g, 1.0));
+            let mut a = asked.borrow_mut();
+            a.hit.clear();
+            a.hit.insert(ee.u32_at(p + bone::SPHERE), (g.one_in(3), B_HITS));
+            if ee.u32_at(p + bone::PROBE) != 0 {
+                a.hit.insert(ee.u32_at(p + bone::PROBE), (g.one_in(2), B_SWEPT_HITS));
+            }
+        }
+        let given = snap_regions(&ee, &regions);
+
+        asked.borrow_mut().log.clear();
+        ee.set(28, GP);
+        ee.written.clear();
+        if solve {
+            ee.call(BONE_SOLVE, &[u64::from(p)], &[dt], BUDGET);
+        } else {
+            ee.call(BONE_PUSH_OUT, &[u64::from(p), u64::from(p + bone::POINT), u64::from(p + bone::NORMAL)], &[dt], BUDGET);
+        }
+        let stack = ee.stack;
+        let terrain = ee.u32_at(p + bone::TERRAIN);
+        let cache = |a: u32| (GROUND_RING..GROUND_RING + 0x70 * 10).contains(&a) || (terrain + 0x9e0..terrain + 0x9e8).contains(&a);
+        let outside: Vec<u32> = ee.written.iter().copied().filter(|&a| !(stack - 0x4_0000..stack + 0x1000).contains(&a) && !cache(a) && !regions.iter().any(|&(at, n)| (at..at + n).contains(&a))).collect();
+        let mut quads: Vec<u32> = outside.iter().map(|a| a & !0xf).collect();
+        quads.dedup();
+        assert!(outside.is_empty(), "case {k}: the original wrote outside the regions: {quads:#x?} (log {:?})", asked.borrow().log);
+        let want = snap_regions(&ee, &regions);
+        let want_log = std::mem::take(&mut asked.borrow_mut().log);
+
+        restore_regions(&mut ee, &regions, &given);
+        ee.written.clear();
+        let mut scene = FakeScene(asked.clone());
+        let mut m = RiderRam { ee: &mut ee, overlay: None };
+        if solve {
+            bone::solve(&mut m, &mut scene, p, F(dt), Some(&map), &curve);
+        } else {
+            bone::push_out(&mut m, &mut scene, p, p + bone::POINT, p + bone::NORMAL, &curve);
+        }
+        let outside: Vec<u32> = ee.written.iter().copied().filter(|&a| !regions.iter().any(|&(at, n)| (at..at + n).contains(&a))).collect();
+        assert!(outside.is_empty(), "case {k}: the port wrote outside the regions: {:#x?}", &outside[..outside.len().min(8)]);
+        let got = snap_regions(&ee, &regions);
+        let got_log = std::mem::take(&mut asked.borrow_mut().log);
+        assert_eq!(got_log, want_log, "case {k} ({}): the scene's calls", if solve { "solve" } else { "push-out" });
+        for ((w, gw), at) in want.iter().zip(&got).zip(&addrs) {
+            assert_eq!(gw, w, "case {k} ({}, part {p:#x}): the word at {at:#x}", if solve { "solve" } else { "push-out" });
+        }
+        let flag = |o: u32| ee.u32_at(p + o) != 0;
+        if solve {
+            let on = given[addrs.iter().position(|&a| a == p + bone::ON).unwrap()] != 0;
+            let has_body = ee.u32_at(p + bone::BODY) != 0 && ee.u32_at(ee.u32_at(p + bone::BODY)) != 0;
+            if !on || !has_body {
+                tally(&mut t, if on { "solve: no body or disabled" } else { "solve: off" });
+                continue;
+            }
+            tally(&mut t, if flag(bone::GROUND) { "solve: ground pushed" } else { "solve: no ground push" });
+            let n = ee.u32_at(B_HITS + bone::R_COUNT) as i32;
+            tally(&mut t, match (flag(bone::SCENE), flag(bone::SWEPT), n) {
+                (true, true, _) => "solve: swept hit",
+                (true, false, n) if n <= 0 => "solve: scene hit, no contacts",
+                (true, false, _) => "solve: scene contacts",
+                (false, _, _) => "solve: no scene, no sweep hit",
+            });
+            if want_log.iter().any(|l| l.starts_with("segment")) {
+                tally(&mut t, "solve: swept");
+            }
+        } else {
+            tally(&mut t, if turned == 0 || flag(bone::SWEPT) { "push-out: straight" } else { "push-out: impulse" });
+            if parented {
+                tally(&mut t, "push-out: node under a parent");
+            }
+        }
+    }
+    eprintln!("{t:#?}");
+    for (path, n) in &t {
+        assert!(*n >= 20, "path {path} taken only {n} times");
+    }
+    assert!(t.len() >= 16, "every path taken: {t:#?}");
+}
+
+/// What [`bone_replay`] saw: every hand-over's parts' four flags (touched, ground, scene, swept, in the
+/// rider's list order), and with the port's solve, its calls and what they did.
+#[derive(Debug, Default, PartialEq)]
+struct BoneRun {
+    flags: Vec<Vec<[u32; 4]>>,
+    solves: usize,
+    ground: usize,
+    scene: usize,
+    swept: usize,
+}
+
+/// [`replay`] with every hand-over's parts' flags kept, and with `port`, every bone collision solve
+/// (the rider ragdoll world's part vtable's) [`bone::solve`]'s on the map, the scene's calls the
+/// original's ([`OriginalScene`]). Every row is still checked bit-exact.
+fn bone_replay(name: &str, port: bool) -> Option<BoneRun> {
+    let mut ee = hooked(image()?);
+    let rows = rows(name)?;
+    let trn: &'static [u8] = Box::leak(nat05_trn()?.into_boxed_slice());
+    let map: &'static track::Terrain = Box::leak(Box::new(track::Terrain::parse(trn).unwrap()));
+    let curve: &'static CurveTable = Box::leak(Box::new(CurveTable::build()));
+    let t: Rc<RefCell<BoneRun>> = Rc::default();
+    let h = t.clone();
+    ee.hooks.insert(
+        HAND_OVER,
+        Box::new(move |ee: &mut Ee| {
+            let flags = rider_parts(ee).into_iter().map(|p| [0, 4, 8, 12].map(|k| ee.u32_at(p + bone::TOUCHED + k))).collect();
+            h.borrow_mut().flags.push(flags);
+            run_as_itself(ee, HAND_OVER);
+        }),
+    );
+    if port {
+        let h = t.clone();
+        ee.hooks.insert(
+            BONE_SOLVE,
+            Box::new(move |ee: &mut Ee| {
+                let (part, dt) = (ee.r(4) as u32, F(ee.f(12)));
+                bone::solve(&mut RiderRam { ee, overlay: None }, &mut OriginalScene, part, dt, Some(map), curve);
+                ee.pc = BONE_SOLVE;
+                let mut t = h.borrow_mut();
+                t.solves += 1;
+                t.ground += usize::from(ee.u32_at(part + bone::GROUND) != 0);
+                t.scene += usize::from(ee.u32_at(part + bone::SCENE) != 0);
+                t.swept += usize::from(ee.u32_at(part + bone::SWEPT) != 0);
+            }),
+        );
+    }
+    for (r, row) in rows.iter().enumerate() {
+        poke(&mut ee, row, &READER);
+        ee.set(28, GP);
+        ee.call(FRAME, &[u64::from(SIM)], &[f32::from_bits(DT)], 400_000_000);
+        let d = diff(&ee, row);
+        assert!(d.is_empty(), "{name} row {r} (vsync {}, port {port}): {} words differ\n  {}", row["vsync"], d.len(), d.iter().take(40).cloned().collect::<Vec<_>>().join("\n  "));
+        poke(&mut ee, row, &SPOT);
+    }
+    for a in [HAND_OVER, BONE_SOLVE] {
+        ee.hooks.remove(&a);
+    }
+    Some(Rc::try_unwrap(t).ok().unwrap().into_inner())
+}
+
+/// **The rider's bone collisions in the port's hands, both C15 replays bit-exact** (S278a): every
+/// solve of the rider ragdoll world's parts is [`bone::solve`]'s (its ground, push-outs and impulses
+/// the port's, the scene's search the original's), every row of ride-2 and flip-1 comes out word for
+/// word, and every part's touched, ground, scene and swept words at every frame's hand-over are the
+/// original-only run's. On C15 every push-out is against the ground: no scene or swept hit, no other
+/// side. The ride's parts first touch on row 216 (26 rows of 459, 12 393 solves), the flip's on row
+/// 127, the row before its `SETTLES` (76 rows of 465, 289 touches, 1 118 ground arms of 12 303 solves).
+#[test]
+fn the_bone_collisions_touch_as_the_originals() {
+    for (name, n) in [("ride-2", 459usize), ("flip-1", 465)] {
+        let Some(want) = bone_replay(name, false) else { return };
+        let Some(got) = bone_replay(name, true) else { return };
+        eprintln!("{name}: {} solves, {} ground, {} scene, {} swept", got.solves, got.ground, got.scene, got.swept);
+        assert_eq!(want.flags.len(), n, "{name}: one hand-over a frame");
+        assert_eq!(want.solves, 0);
+        assert!(got.solves >= 9 * n, "{name}: every part solved every frame");
+        for (r, (w, g)) in want.flags.iter().zip(&got.flags).enumerate() {
+            assert_eq!(g, w, "{name} row {r}: the parts' flags at the hand-over");
+        }
+        assert_eq!(got.flags.len(), n);
+        let touched = |b: &BoneRun| b.flags.iter().flatten().filter(|f| f[0] != 0).count();
+        assert_eq!(touched(&got), touched(&want));
+        if name == "flip-1" {
+            assert!(got.ground > 0 && touched(&got) > 0, "{name}: the ragdoll touches the ground");
+        }
+        assert_eq!((got.scene, got.swept), (0, 0), "{name}: no scene or swept hit on C15");
+        let first = got.flags.iter().position(|r| r.iter().any(|f| f[0] != 0));
+        assert_eq!(first, Some(if name == "flip-1" { 127 } else { 216 }), "{name}: the first row a part touches");
+    }
+}

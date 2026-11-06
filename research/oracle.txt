@@ -9761,6 +9761,34 @@ atv_heap_free               atv 0x001b76d0 = free
 #   0x00499e20); no pre or post lists. Follow-ups S278a (the world) and S278b (the mode machine).
 #   flip-1: the walk on 68 frames (3 unset, rows 125..127), SETTLES 1 from row 128 to the end.
 
+# S278a: the rider ragdoll world's bone collision (vtable 0x003cd080), ported as game_sim::handling::bone
+# (solve, sweep, moving, push_out, impulse, sin_cos; node::unplace) with the scene's calls behind its Scene
+# trait; tests/mxvatv_bike_ride.rs. Journal: research/journal/2026-11-05-s278a-bone-collision/.
+#   Part (MX Unleashed's bone collision, # S52, in MX vs. ATV's layout): +0x04 on,
+#   +0x14 touched, +0x18 ground, +0x1c scene, +0x20 swept, +0x24 sweep on, +0x28 sweep back (2.0 on state 4),
+#   +0x2c unpenetration, +0x30 rotation scale, +0x34 restitution, +0x38 friction, +0x3c surface byte, +0x40
+#   point, +0x50 normal, +0x60 dv, +0x70 other, +0x74 other hit, +0x78 terrain (0x00bbd720 on state 4, nat05),
+#   +0x7c body, +0x80 body to turn, +0x84 pool, +0x88 sphere, +0x8c probe, +0x90 scratch (x inv mass, w base).
+#   Body: +0 enabled, +0x1c inv mass, +0x20 radius, +0x70 position, +0x80 velocity, +0x140 inv inertia,
+#   +0x190 quat, +0x1d0 rates.
+#   Solve 0x0049bb00(part, f12 dt): gate on +0x04, body, body+0; other = swept = 0, point = position; the
+#   terrain's box strict (x vs +0x40/+0x30, z vs +0x48/+0x38); the ground query (# MD76, its ring 0x00541550
+#   and terrain +0x9e0/+0x9e4 a cache) with the surface byte; below point.y + radius: ground = 1, push-out.
+#   Then 0x001c1e90(sphere, body+0x70, 0), sphere vt+200 (refresh), the search 0x001151c0(sphere, pool, 1)
+#   or with no pool 0x001148e0(sphere, 0); shape +0x126 bit 0x20 = hit, +0x7c record (+4 count re-read
+#   each, +0x30 normals, +0x60 points, +0x90 others, 16-byte strides). No hit: the sweep.
+#   Sweep 0x0049b9a0: gate on +0x24, probe; k = dt * +0x28; segment (pos - vel k, pos) through
+#   0x001b9290(probe, seg, 0), 0x00114360(probe), the same search; hit: scene = swept = 1, point/normal
+#   from record +0x98/+0x94 pointers, push-out.
+#   Push-out 0x0049b220(part, point, normal) = MX Unleashed's 0x001f6c40 in this layout; straight when
+#   +0x80 == 0 or +0x20 != 0, else two impulses 0x0049ae30 on the +0x80 body (= 0x001f6860, sin/cos by the
+#   table *0x003eab20, step 0x003ea9c8, inv step 0x003ea9d0, entries [cos, sin]). The other's velocity:
+#   collidable +0x8c mover (+0x1a0 class 2, +4 vtable: +0xc4 spin, +0xc0 velocity into a0; +0x180 origin,
+#   +0x244 node), +0x90 object (+0x80 cofg, +0x90 cofg world, +0xe0 chassis: +0x180 cofg, +0x250 velocity,
+#   +0x280 rates; +0xe4 body; +0xe8 node); a point into a node's frame 0x001953c0 (update 0x00193b30).
+#   C15 (both replays served by the port, bit-exact): ride-2 12,393 solves, touched on 26 rows from 216;
+#   flip-1 12,303 solves, 1,118 ground arms, 289 touches on 76 rows from 127; no scene, swept or other.
+
 # F31b5d: state 4's sim listeners that are not the bike's, shown inert on C15 ride-2 and flip-1. Journal:
 # research/journal/2026-11-05-f31b5d-other-listeners-inert/.
 #   Lists every frame: sim+0x24 = the bike's record alone (getter 0x00208390 answers it once a pass); sim+0x3c
