@@ -1085,6 +1085,11 @@ spawn_racers                boot 0x00207b20 spawns the humans first, then Number
 #                                           skill range from the event's +0x117 (90, the MXEvent
 #                                           constructor default, maps to [4, 4]). Humans first is why
 #                                           the player manager's list head is the human
+player_construct            boot 0x00369b00 the player constructor spawn_racers calls on each new player:
+#                                           +0x08 vtable, +0x6b0 number -1, +0x6b4/+0x6b8 human id and
+#                                           AI identity entry 0, +0x6bc skill 1, +0x6c0 0. The spawn then
+#                                           calls vt+0xb8 (player, kind 1 human/2 AI/3 ghost) and the
+#                                           manager's vt+0x74 add (S12a)
 ai_update_mx                boot 0x00386d30 MXVehicleAI.cpp per-tick update, and
 ai_update_vehicle           boot 0x002858d0 VehicleAI.cpp's: both build the look-ahead feeler fan and
 #                                           run the per-rider avoidance scan when

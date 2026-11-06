@@ -748,6 +748,10 @@ pub mod actor;
 /// rider to stay on. Half of how riding around feels is in here.
 pub mod air;
 
+/// The opponent riders (S12): the roster the world start draws — which rider-database entries race
+/// and at what skill, from the event's AI difficulty.
+pub mod ai;
+
 /// The disc's two archive formats: the one container holding the game, and the compressed containers
 /// holding each track, bike and menu. Pure parsing over byte slices — see the module's own docs for why
 /// it hands back offsets instead of reading files.
