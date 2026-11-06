@@ -229,6 +229,26 @@ impl Stages {
         line
     }
 
+    /// The phone's line a second (P324), shorter than [`Stages::line`] and [`Stages::worst_line`]
+    /// together and starting both again: `ms a frame: sim 0.48 ground 0.83 present 5.78, all 7.40;
+    /// worst …` — only the stages that cost a twentieth of a millisecond or more, since a log a
+    /// phone sends is read a line a second for minutes.
+    pub fn brief(&mut self) -> String {
+        let frames = f64::from(self.frames.max(1));
+        let mut parts = Vec::new();
+        let mut sum = 0.0;
+        for (stage, d) in STAGES.iter().zip(self.spent) {
+            let ms = d.as_secs_f64() * 1000.0 / frames;
+            sum += ms;
+            if ms >= 0.05 {
+                parts.push(format!("{} {ms:.2}", stage.name()));
+            }
+        }
+        self.spent = [Duration::ZERO; STAGES.len()];
+        self.frames = 0;
+        format!("ms a frame: {}, all {sum:.2}; {}", parts.join(" "), self.worst_line())
+    }
+
     /// The same line over the whole session.
     pub fn session(&self) -> String {
         Stages::format(&self.total, self.total_frames)
@@ -278,5 +298,18 @@ mod tests {
         assert!(line.ends_with(", all 5.00"), "{line}");
         // And it starts again.
         assert!(s.line().ends_with(", all 0.00"));
+    }
+
+    /// P324: the phone's line names only the stages that cost something, adds up all of them, and
+    /// starts again.
+    #[test]
+    fn a_brief_line_names_the_stages_that_cost() {
+        let mut s = Stages::new();
+        s.spent[2] = Duration::from_millis(4);
+        s.spent[0] = Duration::from_micros(40);
+        s.frames = 2;
+        let line = s.brief();
+        assert!(line.starts_with("ms a frame: sim 2.00, all 2.02; worst "), "{line}");
+        assert!(s.brief().starts_with("ms a frame: , all 0.00; "));
     }
 }
