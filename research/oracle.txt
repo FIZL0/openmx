@@ -8953,6 +8953,12 @@ atv_biplane_find_bones      atv 0x004c3d60 = biplane_find_bones's twin (1.00)
 atv_biplane_pose_flaps      atv 0x004c3f30 = biplane_animate's twin (0.84)
 atv_biplane_audio           atv 0x004c23c0 = biplane_audio's twin (0.79)
 atv_biplane_pilot_request   atv 0x004c1340 = biplane_pilot_request's twin (0.98)
+# P316 (research/journal/*-p316-mxvatv-pilot-seat; proof crates/openmx/tests/mxvatv_pilot_seat.rs on MD80a's images):
+#   the request block is at plane +0x730; base +0x8e0 = plane +0xc40, the model matrix's position (the matrix is
+#   +0x370, copied to +0x750), NOT the body's centre of mass as MX Unleashed's; +0x8f0 body quat (+0x190);
+#   +0x830/+0x834 = &PelvisBoxPosition +0x1330 / &PelvisBoxSize +0x1340; dummies +0x7f0..+0x820; held +0x73c =
+#   +0x31c; phase +0x8d0 = 0.5*(1 - +0x10f8), mix +0x8d4 = 0.5*(1 + +0x10f4). So the root in model space is the
+#   model's PelvisBoxPosition. The Kiowa (model matrix heli +0x370, pelvis box +0x1350) shows the same in RAM.
 atv_biplane_camera_target   atv 0x004c1150 = plane_camera_target's twin (0.90)
 atv_vehicle_wreck_check     atv 0x004a4f20 = biplane_wreck_check's nearest (0.70, 157 against 245 instructions; in the biplane's vtable at 0x003ce91c, an MXVehicle slot: the 2.5 and 0.3 constants are gone)
 atv_biplane_gear_springs    atv 0x0049d3a0 = biplane_gear_springs's twin (0.80)
