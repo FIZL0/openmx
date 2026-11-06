@@ -40,6 +40,11 @@
 //! of height comes from was not traced. With the clip's limbs from that root, the feet land half a
 //! foot from the plane's foot anchors and the hands a fifth of a foot from its hand anchors.
 //!
+//! MX vs. ATV's planes (P316) are seated otherwise: SLUS-21104's pilot request hands the body the
+//! model's origin as its base, not the centre of mass, so the root is the skin's model's
+//! `PelvisBoxPosition` itself in the plane's space ([`mxvatv_seat`], [`Biplane::with_seat`]): (0, 3.2,
+//! -3.0) for model one, (0, 4.4, 0.7) for model two, the Spitfire.
+//!
 //! **The effects.** `tracks\biplaneparticles.dat` attaches the plane's emitters to its nodes; it is read
 //! here ([`Emitter`]) so the list is the disc's own, and the shell's `particles.rs` emits and draws from
 //! it (P58).
@@ -80,6 +85,15 @@ pub const PILOT_CLIPS: [&str; 2] = ["biplane_roll_fwd", "biplane_roll_bck"];
 /// cockpit. Read off the original (see the module docs), not out of a file.
 pub const PILOT_SEAT: V3 = v3(0.0, 3.5, -3.0);
 
+/// Where SLUS-21104 puts a flier's pilot's root, in the model's own space, for the skin's model's
+/// `[Animation]` `PelvisBoxPosition` (P316). Its plane's and its helicopter's pilot requests both take
+/// the model's matrix as the base (MX Unleashed's take the rigid body's centre of mass), and the body
+/// puts its root at the base plus the turned offset: so the root is the pelvis box, with the model's
+/// rotation. Seen on MD80a's four flier images, the root node within 3e-4 ft of it in each.
+pub fn mxvatv_seat(pelvis_box: ps2_float::Vf) -> V3 {
+    v3(pelvis_box.x(), pelvis_box.y(), pelvis_box.z())
+}
+
 /// The emitter list the plane's particles are attached by.
 pub const PARTICLES: &str = "biplaneparticles.dat";
 
@@ -90,8 +104,11 @@ pub struct Biplane {
     /// `PropDummy`'s transform in the plane's own space, where the model has the node.
     pub prop: Option<M4>,
     /// Where the plane wants a pilot's feet and hands, in the pilot's own space — the plane's four
-    /// seat nodes, less [`PILOT_SEAT`] — which is the space the body is skinned in.
+    /// seat nodes, less [`Biplane::seat`] — which is the space the body is skinned in.
     pub anchors: Anchors,
+    /// Where the pilot's root goes in the plane's own space: [`PILOT_SEAT`], or an MX vs. ATV
+    /// model's [`mxvatv_seat`] ([`Biplane::with_seat`]).
+    pub seat: V3,
     /// `PropDummy`'s index among the model's nodes: where a [`Biplane::pose`] has the turned prop.
     pub prop_node: Option<usize>,
 }
@@ -128,7 +145,17 @@ impl Biplane {
             prop: node(loaded, PROP_NODE),
             anchors: SEAT.map(|name| node(loaded, name).map(|m| m.point(v3(0.0, 0.0, 0.0)).sub(PILOT_SEAT))),
             prop_node: loaded.nodes.iter().position(|n| n.name.eq_ignore_ascii_case(PROP_NODE)),
+            seat: PILOT_SEAT,
         })
+    }
+
+    /// It with its pilot's root at `seat` in the plane's space (P316), the four anchors moved to be
+    /// the same nodes less the new seat.
+    pub fn with_seat(mut self, seat: V3) -> Biplane {
+        let shift = self.seat.sub(seat);
+        self.anchors = self.anchors.map(|a| a.map(|a| a.add(shift)));
+        self.seat = seat;
+        self
     }
 
     /// What to draw for a plane placed at `at`: the plane, and the cone that goes with whether it
@@ -166,11 +193,11 @@ impl Biplane {
         out
     }
 
-    /// Where to draw the pilot for a plane placed at `at`: its root in the seat, turned with the
-    /// plane.
+    /// Where to draw the pilot for a plane placed at `at`: its root in [`Biplane::seat`], turned
+    /// with the plane.
     pub fn pilot(&self, at: M4) -> M4 {
         let mut seat = M4::IDENTITY;
-        seat.0[3] = [PILOT_SEAT.x, PILOT_SEAT.y, PILOT_SEAT.z, 1.0];
+        seat.0[3] = [self.seat.x, self.seat.y, self.seat.z, 1.0];
         seat.mul(at)
     }
 }

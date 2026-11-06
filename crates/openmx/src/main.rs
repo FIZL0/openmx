@@ -1626,7 +1626,7 @@ fn pilots(seats: &[Seat], rigs: &mut [Rig], plane_drawn: &[Biplane], before: &[O
 
 /// Every seat's helicopter [`Pilot`] (P216b), as [`pilots`] the plane's: the rider's own body posed
 /// by the plane's clips (which the original loads for the helicopter's pilot too), its root at
-/// [`game_render::kiowa::PILOT_SEAT`]. Unlike the plane's, its limbs are not held: the original's
+/// [`game_render::kiowa::PILOT_SEAT`] (an MX vs. ATV one's at its model's pelvis box, P316). Unlike the plane's, its limbs are not held: the original's
 /// helicopter hands its pilot no limb targets, and the clips are played as they are (P216b1).
 /// `None` for a seat not flying one.
 fn heli_pilots(seats: &[Seat], rigs: &mut [Rig], before: &[Option<(M4, Rotor)>], cut: &[bool], blend: &pace::Blend) -> Vec<Option<Pilot>> {
@@ -1638,7 +1638,11 @@ fn heli_pilots(seats: &[Seat], rigs: &mut [Rig], before: &[Option<(M4, Rotor)>],
             let heli = seat.garage.heli_up()?;
             let was = before.get(p).copied().flatten().filter(|_| !cut.get(p).copied().unwrap_or(true));
             let (at, _) = heli_drawn(heli, was, blend)?;
-            let pelvis = game_render::kiowa::PILOT_SEAT;
+            // MX vs. ATV's sits on its model's pelvis box, as SLUS-21104 seats it (P316).
+            let pelvis = match heli.mxvatv {
+                Some(_) => biplane::mxvatv_seat(heli.phy.pelvis_box_position),
+                None => game_render::kiowa::PILOT_SEAT,
+            };
             let body = rig.body.as_mut()?;
             let palette = biplane::pilot_palette(body, &[None; 4], rig.pilot_lean.weights())?;
             let mut root = M4::IDENTITY;
@@ -5114,9 +5118,17 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             let own = vec![res];
             let liveries = args.players.clamp(1, vehicle::LIVERIES);
             let drawn: Vec<Biplane> = match plane_pack {
-                Some(f) => (0..liveries)
-                    .map_while(|l| Biplane::load_model(&mut assets, std::slice::from_ref(&f.files), f.model(Machine::Biplane, l)?))
-                    .collect(),
+                // Its pilot sits on the skin's model's pelvis box, as SLUS-21104 seats it (P316).
+                Some(f) => {
+                    let seat = f.plane_phy().map(|b| biplane::mxvatv_seat(phy::Plane::read_mxvatv_bytes(&b, f.model_one()).plane.pelvis_box.position));
+                    (0..liveries)
+                        .map_while(|l| Biplane::load_model(&mut assets, std::slice::from_ref(&f.files), f.model(Machine::Biplane, l)?))
+                        .map(|d| match seat {
+                            Some(seat) => d.with_seat(seat),
+                            None => d,
+                        })
+                        .collect()
+                }
                 None => (0..liveries).map_while(|l| Biplane::load(&mut assets, &own, l)).collect(),
             };
             println!("biplane: {} of {liveries} liveries loaded", drawn.len());
