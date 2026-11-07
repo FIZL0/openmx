@@ -662,6 +662,10 @@ pub struct Flier {
     pub about: String,
     /// Why openmx cannot fly it, where it cannot: listed greyed with this.
     pub why: Option<String>,
+    /// What the Garage's stage turns of it (P315a): the pack's folder and the model's path in it,
+    /// its `_ui` garage model where the pack has one, else the one it rides in. `None` for MX
+    /// Unleashed's, drawn in the disc's own model of the skin.
+    pub preview: Option<(std::path::PathBuf, String)>,
 }
 
 /// A seat's pick of one flier kind, as `garage.txt` keeps it: the kind, the pack, the skin.
@@ -703,6 +707,7 @@ pub fn original_fliers() -> Vec<Flier> {
         model: 1,
         about: "MX Unleashed's own.".into(),
         why: None,
+        preview: None,
     };
     vec![
         skin("biplane", "biplane", "Biplane"),
@@ -1488,7 +1493,7 @@ mod tests {
 
     /// A pack's flier as `flier_offers` lists one, for the tests below (P315).
     fn pack_flier(pack: &str, game: &str, machine: &str, skin: &str, why: Option<&str>) -> Flier {
-        Flier { pack: pack.into(), game: game.into(), machine: machine.into(), skin: skin.into(), name: skin.into(), model: 1, about: String::new(), why: why.map(Into::into) }
+        Flier { pack: pack.into(), game: game.into(), machine: machine.into(), skin: skin.into(), name: skin.into(), model: 1, about: String::new(), why: why.map(Into::into), preview: None }
     }
 
     #[test]

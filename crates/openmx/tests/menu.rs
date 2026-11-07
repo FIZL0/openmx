@@ -2137,6 +2137,7 @@ fn the_fliers_tab_picks_a_renamed_packs_skins_per_seat() {
         model: 2,
         about: "Its own.".into(),
         why: why.map(Into::into),
+        preview: None,
     };
     let offer = vec![
         flier("biplane", "biplane3", "Red Baron", None),
@@ -2166,12 +2167,32 @@ fn the_fliers_tab_picks_a_renamed_packs_skins_per_seat() {
     assert_eq!(row(&m, 0).note.as_deref(), Some("Some Game. Its own."));
     tap(&mut m, r, Control::Right);
     assert_eq!(row(&m, 0).value, "Biplane", "Broken is stepped over");
+    // P315a: the stage turns the row's pick, and its arrows step it, as left and right do.
+    assert_eq!(m.garage_flier().map(|f| f.skin.as_str()), Some("biplane"), "the stage shows the plane row's pick");
+    let size = (1280, 720);
+    let arrow = |m: &Menu, side: usize| m.flier_arrow_point(side, size).expect("the Fliers tab's stage has its arrows");
+    assert!(m.click(arrow(&m, 1), size));
+    assert_eq!(row(&m, 0).value, "Biplane, Second Livery", "the right arrow steps the skin");
+    assert_eq!(m.garage_flier().map(|f| f.skin.as_str()), Some("biplane2"));
+    let ahead: Vec<String> = m.garage_flier_neighbours().iter().map(|f| f.skin.clone()).collect();
+    assert_eq!(ahead, ["biplane3", "biplane"], "its neighbours, dressed ahead");
+    assert!(m.click(arrow(&m, 0), size));
+    assert_eq!(row(&m, 0).value, "Biplane", "the left arrow steps it back");
+    tap(&mut m, r, Control::Down);
+    assert_eq!(m.garage_flier().map(|f| f.skin.as_str()), Some("kiowa"), "on the helicopter row it shows the helicopter");
+    assert!(m.click(arrow(&m, 1), size));
+    assert_eq!(row(&m, 1).value, "Kiowa, Second Livery", "and the arrows step the helicopter");
+    assert!(m.click(arrow(&m, 0), size));
+    tap(&mut m, r, Control::Up);
+    assert_eq!(m.page()[m.cursor(Screen::Garage)].key, Key::Flier(0));
     tap(&mut m, r, Control::Left);
     tap(&mut m, r, Control::Circle);
     assert!(m.take_picks_changed());
     let picked = m.picks.0[0].flier("biplane").expect("a plane picked");
     assert_eq!((picked.pack.as_str(), picked.skin.as_str()), ("renamed", "biplane3"));
-    assert!(m.picks.0[0].flier("kiowa").is_none() && m.picks.0[1].fliers.is_empty());
+    // the arrows stepped the helicopter there and back
+    assert_eq!(m.picks.0[0].flier("kiowa").map(|f| f.skin.as_str()), Some("kiowa"));
+    assert!(m.picks.0[1].fliers.is_empty());
 
     // MD80e's Fliers: MX vs. ATV and its Flier Skin, read off an older file: the pack's skins of
     // that place (or its last) for 1P, and the settings written without them.
