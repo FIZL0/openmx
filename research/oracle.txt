@@ -760,6 +760,20 @@ hit_freeride_attach         boot 0x00330630 the vtable's per-actor attach (vtabl
 # The race activities (S13, stretch). Moved here out of plan/TODO.md, which is committed and must not
 # carry addresses; kit.toml's [symbols] is untracked, so this file is the only committed record.
 activity_supercross         boot 0x002f9b70 the "Supercross" / "Nationals" activity class, 0x4e0 bytes
+#                                           (ctor; vtable 0x004585d0 at +0x44, 0x0045861c at +0x58,
+#                                           0x00458690 at +0x17c, 0x00458784 at +0x3a0). Its own
+#                                           slots in the first: 0x002f7f30, 0x002f8070, 0x002f80a0,
+#                                           0x002fb2e0 (1716 bytes; calls the race reset 0x002fd570),
+#                                           0x002fa520 (1256)
+race_manager_tick           boot 0x002fcff0 (dt f12, race) the race manager's tick (vtable 0x004587a4):
+#                                           the +0x4c0 countdown, the start gate watch (gate +0x3dc,
+#                                           cards on +0x84 / +0x1c8, entities on card +4 / +0x1c,
+#                                           message vt+0x94 1 = the entity's object, 2 = push by a
+#                                           vector; card +0x70 = +0x60, +0x60 = object +0x30, then
+#                                           start_gate_crossed(gate, +0x60, +0x70) == 1: push object
+#                                           +0x20 xyz times -5 - 5*unit, card +0x1c0 = 1 + unit),
+#                                           the +0x410 countdown, then score_manager_tick(dt, +0x50).
+#                                           S13a: race::Gate::watch, tests/race.rs
 
 # ---------------------------------------------------------------------------------------------------
 # D7 — which bike a freeride area loads. The vehicle build loader names two physics files from the

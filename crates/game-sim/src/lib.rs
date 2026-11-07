@@ -1229,6 +1229,9 @@ mod tests {
 /// target and the verdict, around the freeride card's points.
 pub mod event;
 
+/// The race activities (S13): the gates a race is counted through — the start gate and its penalty.
+pub mod race;
+
 /// The four-wheeled machines (S149): the monster truck's, the buggy's and the baja's shared `.phy`
 /// loader — part, tires and their surfaces, engine and gearbox, airborne controls, steer tables.
 pub mod car;
