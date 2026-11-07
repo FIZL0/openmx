@@ -12663,6 +12663,23 @@ fn ride_replays_with_the_part_search_in_rust() {
     assert_eq!(all.get("> record search heard_hit"), Some(&282));
 }
 
+/// **F46 — C15's ride, all four of F46 Rust's**: ride-2 in lockstep with [`posts_frame`]'s handing
+/// run, the database moves, the gather, the record's sweep and the part search all Rust's every
+/// frame, none of them handed on, RAM alike.
+#[test]
+fn ride_replays_with_the_searches_and_the_database_in_rust() {
+    let names = ["PartMove", "Gather", "record sweep", "record search"];
+    let Some((w, all)) = replay_in_rust("ride-2", &names) else { return };
+    assert_eq!(w.len(), 459);
+    assert!(w.iter().all(|w| !w), "the ride never wrecks");
+    let (handed, rust) = handed_and(&all, &names);
+    assert_eq!(rust.iter().map(|(_, n)| *n).collect::<Vec<_>>(), [918, 459, 459, 459], "{rust:?}");
+    assert!(handed.iter().all(|(k, _)| !names.contains(&k.as_str())), "{handed:?}");
+    let pairs: Vec<(&String, &u32)> = all.iter().filter(|(k, _)| k.starts_with("record search pair")).collect();
+    assert_eq!(pairs, [(&"record search pair, kind 5".to_string(), &432)], "ride-2's pairs: plant spheres alone");
+    assert_eq!(all.get("> record search heard_hit"), Some(&282));
+}
+
 /// **F46d — C15's flip, all four of F46 Rust's**: flip-1 in lockstep, the riding part searched
 /// until row 125, the wreck part from there to row 193, the riding part again after; the moves, the
 /// gather, the sweep and the part search all Rust's.
