@@ -189,6 +189,9 @@ pub struct Shown<'a> {
     /// and the join cue's, a free controller's.
     pub buttons: Buttons,
     pub join_buttons: Buttons,
+    /// Whether the Show FPS line is up over the frame: with the touch pad up the meters stand under
+    /// it in the top right, and in its place without it (P323).
+    pub fps: bool,
 }
 
 /// The freestyle event as a view shows it (P155): [`EventShown::of`] off the ride's event and the
@@ -770,7 +773,9 @@ pub fn sprites_clear_of(out: &mut Vec<Sprite>, base: usize, view: [f32; 4], pad:
             let at = Pen { out: &mut aside, view, s: s * k, base, corner: Corner::TopLeft, alpha: 1.0 };
             extent(&at, |p, d| speedometer(p, shown, d))
         };
-        if let Some((moved, k, bottom)) = to_the_top_right(view, s, room, meters) {
+        let line = fps_line(room.frame, shown.scale);
+        let top = if shown.fps { line[3] + FPS_GAP * scale_of(room.frame.0, room.frame.1, shown.scale) } else { line[1] };
+        if let Some((moved, k, bottom)) = to_the_top_right(view, top, room, meters) {
             (pen.view, pen.s, below) = (moved, s * k, Some(bottom));
         }
     }
@@ -814,12 +819,13 @@ fn extent(pen: &Pen, part: impl FnOnce(&mut Pen, &mut Drawn)) -> Option<[f32; 4]
 /// corner at a share of its scale `s`, stand in the top right instead while the touch pad is up
 /// (P304), in a view whose bottom right corner is the frame's — the one the pad's buttons cover: the
 /// view to draw them in, the share of `s` to draw them at, and the frame y they reach down to, for
-/// the top-right column to start under. Their top is level with the score bar's; their right edge
-/// stays where it was if they fit over the face diamond's △, else stands left of △ (over □), else
-/// left of □ — and their left right of PAUSE along the top. Whichever of the three takes them
-/// biggest: at full size where one fits, else shrunk to fit it. The frame is inside the island's
-/// inset, so they are too.
-fn to_the_top_right(view: [f32; 4], s: f32, room: Room, meters: impl Fn(f32) -> Option<[f32; 4]>) -> Option<([f32; 4], f32, f32)> {
+/// the top-right column to start under. Their top is frame y `top`, directly under the Show FPS
+/// line or up in its place when it is off, and their right edge stays where it was, under the line's
+/// (P323, user 2026-11-06: 'top right below fps'); their foot clear over the face diamond's △ and
+/// their left right of PAUSE along the top: at full size where they fit, else shrunk to fit. (P304
+/// stood them left of △ or □ at full size; the user wants them under the fps line.) The frame is
+/// inside the island's inset, so they are too.
+fn to_the_top_right(view: [f32; 4], top: f32, room: Room, meters: impl Fn(f32) -> Option<[f32; 4]>) -> Option<([f32; 4], f32, f32)> {
     let [vx, vy, w, h] = view;
     let (fw, fh) = room.frame;
     if (vx + w - fw).abs() >= 1.0 || (vy + h - fh).abs() >= 1.0 {
@@ -827,25 +833,11 @@ fn to_the_top_right(view: [f32; 4], s: f32, room: Room, meters: impl Fn(f32) -> 
     }
     let b = meters(1.0)?;
     let (bw, bh) = (b[2] - b[0], b[3] - b[1]);
-    let top = vy + SCORE_BAR[1] * s;
     let left_end = room.right_of_the_top();
-    // Each place: its right edge and how low it may reach, frame pixels.
-    let places = [
-        (b[2], room.over_the_faces()),
-        (fw - room.left_of_the_faces(0.0), room.over_the_square()),
-        (fw - room.left_of_the_faces(fh), vy + h / 2.0),
-    ];
-    let fit = |(right, low): (f32, f32)| ((low - top) / bh).min((right.min(b[2]) - left_end) / bw).min(1.0);
-    let mut best = places[0];
-    for p in &places[1..] {
-        if fit(*p) > fit(best) + 1e-4 {
-            best = *p;
-        }
-    }
-    let k = fit(best).max(0.1);
+    let k = ((room.over_the_faces() - top) / bh).min((b[2] - left_end) / bw).clamp(0.1, 1.0);
     let b = meters(k)?;
-    let (dx, dy) = ((b[2] - best.0).max(0.0), b[1] - top);
-    Some(([vx, vy - dy, w - dx, h], k, b[3] - dy))
+    let dy = b[1] - top;
+    Some(([vx, vy - dy, w, h], k, b[3] - dy))
 }
 
 /// `view`, moved for what draws at `drawn` in its bottom left corner to stand right of the touch
@@ -1555,6 +1547,17 @@ impl FpsMeter {
 /// Where the counter's right edge and baseline are, in the disc's 640x448 held to the top right:
 /// above [`TOP_RIGHT`]'s pieces, small, in the frame's own corner and not a split view's.
 const FPS_AT: (f32, f32) = (640.0 - 0.9 * EM, 2.0 * EM);
+/// Layout pixels between the Show FPS line and the meters under it on a touch layout (P323).
+const FPS_GAP: f32 = 0.3 * EM;
+
+/// The frame box (left, top, right, bottom) the Show FPS line takes in a `frame` (width, height) at
+/// the HUD scale `scale`, its outline in: as [`fps_sprites`] draws it, at its widest reading.
+pub fn fps_line(frame: (f32, f32), scale: f32) -> [f32; 4] {
+    let mut out = Vec::new();
+    let line = fps_sprites(&mut out, 0, [0.0, 0.0, frame.0, frame.1], scale, "000 FPS");
+    let corners = out.iter().flat_map(|s| s.corners);
+    corners.fold(line.rect, |[l, t, r, b], [x, y]| [l.min(x), t.min(y), r.max(x), b.max(y)])
+}
 
 /// The Show FPS counter `text` (a [`FpsMeter::text`]) in frame `view`'s top right, as sprites into
 /// `out`, [`images`] counted from `base`, at the HUD scale `scale`: once over the whole frame, after

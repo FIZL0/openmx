@@ -84,6 +84,7 @@ fn shown<'a>(g: &'a Gauges, riders: &'a [Dot], blips: &'a [Blip], markers: Optio
         event: None,
         buttons: Default::default(),
         join_buttons: Default::default(),
+        fps: false,
     }
 }
 
@@ -1118,5 +1119,51 @@ fn a_chain_waiting_out_the_crash_lockout_plays_out_as_the_crash_decides() {
         t.update(after, &Score { lockout: true, ..card(&[], false, if crashed { 0.0 } else { 500.0 }) }, name);
         let p = t.popup(after).expect("the pop-up plays out");
         assert_eq!(p.outcome, Some(!crashed), "{crashed}: the crash is not what the pop-up shows");
+    }
+}
+
+/// P323: with the touch pad up the meters stand in the top right directly under the Show FPS line,
+/// their right edge under its right and their top a hair under its bottom, clear of it, and up in its place, their top at its top,
+/// when it is off; on the page's phones and an iPhone's inset frame alike. With no pad they are where
+/// they were, fps or not.
+#[test]
+fn with_the_touch_pad_up_the_meters_sit_under_the_fps_line() {
+    let t = Tracker::default();
+    let now = Instant::now();
+    for (w, h) in [(844.0, 390.0), (932.0, 430.0), (1180.0, 820.0), (734.0, 393.0)] {
+        let pad = menu::touch_room::Room { window: (w, h), frame: (w, h) };
+        let view = [0.0, 0.0, w, h];
+        let line = ride_hud::fps_line((w, h), 1.0);
+        for style in [Speedometer::Digital, Speedometer::Analog] {
+            let at = format!("{w}x{h} {style:?}");
+            let g = gauges(style);
+            let mut sh = shown(&g, &[], &[], None);
+            (sh.offer, sh.minimap) = (None, false);
+            let mut tops = Vec::new();
+            for fps in [true, false] {
+                sh.fps = fps;
+                let mut out = Vec::new();
+                let d = ride_hud::sprites_clear_of(&mut out, 0, view, Some(pad), &sh, &t, now);
+                let mut plain = Vec::new();
+                ride_hud::sprites_clear_of(&mut plain, 0, view, Some(pad), &Shown { fps: !fps, ..sh.clone() }, &t, now);
+                let moved: Vec<&Sprite> = out.iter().zip(&plain).filter(|(a, b)| a.corners != b.corners).map(|(a, _)| a).collect();
+                let b = bounds(moved.iter().copied());
+                assert!(b[0] > w / 2.0 && b[3] < h / 2.0, "{at} fps {fps}: the meters at {b:?} not top right");
+                assert!((b[2] - line[2]).abs() < 0.03 * w, "{at} fps {fps}: the meters' right {} not under the fps line's {}", b[2], line[2]);
+                if fps {
+                    assert!(b[1] >= line[3] && b[1] - line[3] <= 0.02 * h, "{at}: the meters' top {} not just under the fps line's bottom {}", b[1], line[3]);
+                } else {
+                    assert!((b[1] - line[1]).abs() < 0.5, "{at}: the meters' top {} not at the fps line's top {}", b[1], line[1]);
+                }
+                assert!(d.meter.is_some(), "{at}");
+                tops.push(b[1]);
+            }
+            assert!(tops[1] < tops[0], "{at}: the meters did not move up with the fps line off");
+            // no pad: fps or not, as they always were
+            let (mut on, mut off) = (Vec::new(), Vec::new());
+            ride_hud::sprites_clear_of(&mut on, 0, view, None, &Shown { fps: true, ..sh.clone() }, &t, now);
+            ride_hud::sprites_clear_of(&mut off, 0, view, None, &Shown { fps: false, ..sh.clone() }, &t, now);
+            assert_eq!(format!("{on:?}"), format!("{off:?}"), "{at}: the fps line moved the desktop HUD");
+        }
     }
 }
