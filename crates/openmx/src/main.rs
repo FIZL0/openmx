@@ -3499,6 +3499,12 @@ async fn front_end(args: Args) -> Result<(), String> {
         // A card dragged on the Controllers screen (P214), drawn over the whole frame here.
         let (fw, fh) = (frame.width, frame.height);
         drag_cards(&mut shell.front.menu, window.mouse(), (window.width, window.height, window.scale), (fw, fh), [0, 0, fw, fh]);
+        // A click or a tap on an option page (P277): its rows, and the Fliers tab's stage arrows (P315a).
+        for &at in window.clicks() {
+            if let Some(p) = cursor::to_frame(at, (window.width, window.height), (fw, fh), window.scale) {
+                shell.front.menu.click(p, (fw, fh));
+            }
+        }
         let before = shell.front.menu.p1().cloned();
         shell.front.menu.music_now = shell.front.sound.now();
         act = shell.front.menu.step_devices(&presses);
@@ -3629,8 +3635,16 @@ async fn front_end(args: Args) -> Result<(), String> {
         let shooting = shot.is_some() && shown >= args.shot_frame;
         // The Garage's pick, dressed again when it changes, and how far round its stand is (P213).
         let stage = garage_view::rect(&shell.front.menu, (frame.width, frame.height));
-        match garage_view::shown_pick(&shell.front.menu) {
-            Some(pick) => {
+        match (garage_view::shown_flier(&shell.front.menu), garage_view::shown_pick(&shell.front.menu)) {
+            // The Fliers tab turns the seat's flier (P315a), its skins either side made ahead.
+            (Some(flier), _) => {
+                garage.dress_flier(flier);
+                garage.ahead_fliers(&shell.front.menu.garage_flier_neighbours());
+                if shot.is_some() {
+                    garage.settle();
+                }
+            }
+            (None, Some(pick)) => {
                 // Off the menu's thread (P258): the stage shows the last pick it has until this one
                 // is dressed, and dresses the row's neighbours ahead.
                 garage.dress(pick);
@@ -3639,7 +3653,7 @@ async fn front_end(args: Args) -> Result<(), String> {
                     garage.settle();
                 }
             }
-            None => garage.leave(),
+            (None, None) => garage.leave(),
         }
         // A shot stands it where the stand starts, so two shots of two picks compare.
         let turn = garage_view::Stage::turn(if shot.is_some() { 0 } else { shell.front.menu.tick });
@@ -11549,6 +11563,8 @@ fn flier_offers(packs: &[machine_packs::Pack]) -> Vec<roster::Flier> {
                 model: k.model,
                 about: if k.about.is_empty() { roster::model_about(k.model).to_string() } else { k.about.clone() },
                 why,
+                // The garage's own `_ui` model where the pack has it (P315a), else the ride's.
+                preview: [&k.ui, &k.psg].into_iter().find(|f| !f.is_empty() && pack.folder.join(f).is_file()).map(|f| (pack.folder.clone(), f.clone())),
             });
         }
     }

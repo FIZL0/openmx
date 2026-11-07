@@ -8,6 +8,9 @@
 //!
 //! The dressing runs off the menu thread (P258), neighbours ahead: the stage keeps the last dressed
 //! pick on show until the asked one is ready, and never shows a pick no longer asked.
+//!
+//! On the Fliers tab (P315a) it turns the seat's flier instead: a pack's in its `_ui` garage model
+//! where the pack has one (else the model it rides in), MX Unleashed's in the disc's own.
 
 use game_render::disc::Disc;
 use game_render::gpu::{Actor, Mips, Renderer, Scene3, Target, View};
@@ -20,6 +23,7 @@ use game_render::ini;
 use game_sim::vehicle_anim::Blend;
 use ps2_float::F;
 
+use crate::vehicle::Machine;
 use crate::{dress, member_ending, menu::Menu, roster};
 
 /// How fast the stand turns, in radians a second: once round in about sixteen seconds, by eye.
@@ -53,8 +57,26 @@ struct Tools {
     kit: Option<dress::Kit>,
 }
 
-/// A dress under way (P258): its pick, and the worker that hands back the tools and what it made.
-type Job = (roster::Pick, crate::thread::JoinHandle<(Tools, Option<Dressed>)>);
+/// What the stage shows: a seat's bike and rider, as [`shown_of`] has its pick, or a flier (P315a).
+#[derive(Clone, Debug, PartialEq)]
+enum Shown {
+    Ride(roster::Pick),
+    Flier(roster::Flier),
+}
+
+impl Shown {
+    /// What a line says it is.
+    fn said(&self) -> String {
+        match self {
+            Shown::Ride(p) => format!("{} on {}", p.rider, p.bike),
+            Shown::Flier(f) => format!("{} from {}", f.skin, f.pack),
+        }
+    }
+}
+
+/// A dress under way (P258): what it shows, and the worker that hands back the tools and what it
+/// made.
+type Job = (Shown, crate::thread::JoinHandle<(Tools, Option<Dressed>)>);
 
 /// How many dressed picks the stage keeps besides the one it shows: the row's two neighbours, made
 /// ahead, and the last few shown, so stepping back and forth over a row draws at once.
@@ -85,16 +107,16 @@ pub struct Stage {
     tools: Tools,
     /// The dress under way.
     job: Option<Job>,
-    /// The pick asked for, as [`shown_of`] has it, and since when.
-    wanted: Option<(roster::Pick, crate::clock::Instant)>,
-    /// The picks to dress ahead while nothing else is to be, nearest first.
-    ahead: Vec<roster::Pick>,
-    /// The pick the stage shows, and what it came to; a pick that failed to dress is kept too, so it
-    /// is not tried again every frame.
-    pick: Option<roster::Pick>,
+    /// What is asked for, and since when.
+    wanted: Option<(Shown, crate::clock::Instant)>,
+    /// What to dress ahead while nothing else is to be, nearest first.
+    ahead: Vec<Shown>,
+    /// What the stage shows, and what it came to; one that failed to dress is kept too, so it is not
+    /// tried again every frame.
+    pick: Option<Shown>,
     dressed: Option<Dressed>,
-    /// Dressed picks not shown, oldest first.
-    kept: Vec<(roster::Pick, Option<Dressed>)>,
+    /// Dressed ones not shown, oldest first.
+    kept: Vec<(Shown, Option<Dressed>)>,
     /// Whether the GPU holds this dress's models (it forgets them for a ride's).
     pub uploaded: bool,
     /// The software frame's pixels under the stage, as the menu drew them, and where.
@@ -105,7 +127,15 @@ impl Stage {
     /// Ask for the stage in `pick`. It shows it at once if it has it dressed, and otherwise starts
     /// dressing it, showing what it showed until that is done. Answers whether what it shows changed.
     pub fn dress(&mut self, pick: &roster::Pick) -> bool {
-        let pick = shown_of(pick);
+        self.show(Shown::Ride(shown_of(pick)))
+    }
+
+    /// [`Stage::dress`] for a flier, the Fliers tab's (P315a).
+    pub fn dress_flier(&mut self, flier: &roster::Flier) -> bool {
+        self.show(Shown::Flier(flier.clone()))
+    }
+
+    fn show(&mut self, pick: Shown) -> bool {
         if self.wanted.as_ref().is_none_or(|(p, _)| *p != pick) {
             self.wanted = Some((pick.clone(), crate::clock::Instant::now()));
         }
@@ -132,7 +162,15 @@ impl Stage {
         if cfg!(target_arch = "wasm32") {
             return;
         }
-        self.ahead = picks.iter().map(shown_of).collect();
+        self.ahead = picks.iter().map(|p| Shown::Ride(shown_of(p))).collect();
+    }
+
+    /// [`Stage::ahead`] for the fliers either side on the Fliers tab (P315a).
+    pub fn ahead_fliers(&mut self, fliers: &[roster::Flier]) {
+        if cfg!(target_arch = "wasm32") {
+            return;
+        }
+        self.ahead = fliers.iter().cloned().map(Shown::Flier).collect();
     }
 
     /// Off the Garage: what was dressed ahead goes, and nothing more is started. The shown pick stays,
@@ -152,7 +190,10 @@ impl Stage {
     /// The pick the stage shows, as [`shown_of`] has it.
     #[cfg(test)]
     fn shows(&self) -> Option<&roster::Pick> {
-        self.pick.as_ref()
+        match self.pick.as_ref() {
+            Some(Shown::Ride(p)) => Some(p),
+            _ => None,
+        }
     }
 
     /// A finished dress's tools back, and what it made into the kept ones.
@@ -168,7 +209,7 @@ impl Stage {
             }
             // The tools went with it: the next dress opens them again.
             Err(_) => {
-                println!("garage: the dress of {} on {} stopped", pick.rider, pick.bike);
+                println!("garage: the dress of {} stopped", pick.said());
                 None
             }
         };
@@ -176,7 +217,7 @@ impl Stage {
     }
 
     /// `pick` among the kept ones, the oldest let go past [`KEPT`].
-    fn keep(&mut self, pick: roster::Pick, dressed: Option<Dressed>) {
+    fn keep(&mut self, pick: Shown, dressed: Option<Dressed>) {
         self.kept.retain(|(p, _)| *p != pick);
         self.kept.push((pick, dressed));
         if self.kept.len() > KEPT {
@@ -190,7 +231,7 @@ impl Stage {
         if self.job.is_some() {
             return;
         }
-        let have = |p: &roster::Pick| self.pick.as_ref() == Some(p) || self.kept.iter().any(|(k, _)| k == p);
+        let have = |p: &Shown| self.pick.as_ref() == Some(p) || self.kept.iter().any(|(k, _)| k == p);
         let next = match &self.wanted {
             Some((p, _since)) if !have(p) => {
                 // The browser's dress is the menu's frame: one when the presses stop.
@@ -212,7 +253,7 @@ impl Stage {
             let dressed = match dress_in(&mut tools, &pick) {
                 Ok(d) => Some(d),
                 Err(e) => {
-                    println!("garage: no model of {} on {}: {e}", pick.rider, pick.bike);
+                    println!("garage: no model of {}: {e}", pick.said());
                     None
                 }
             };
@@ -236,7 +277,7 @@ impl Stage {
             {
                 self.wanted = Some((pick.clone(), crate::clock::Instant::now() - SETTLE));
             }
-            self.dress(&pick);
+            self.show(pick.clone());
             if self.pick.as_ref() == Some(&pick) {
                 return;
             }
@@ -244,8 +285,87 @@ impl Stage {
     }
 }
 
-/// Dress `pick` with `tools`, opening them if they are not yet.
-fn dress_in(tools: &mut Tools, pick: &roster::Pick) -> Result<Dressed, String> {
+/// Dress what is shown with `tools`, opening them if they are not yet.
+fn dress_in(tools: &mut Tools, shown: &Shown) -> Result<Dressed, String> {
+    match shown {
+        Shown::Ride(pick) => dress_ride(tools, pick),
+        Shown::Flier(flier) => dress_flier(tools, flier),
+    }
+}
+
+/// The name the stage keeps a flier's model by.
+const FLIER: &str = "garage-flier";
+
+/// A flier turning on the stage (P315a): a pack's skin off its folder, in the model its offer names
+/// ([`roster::Flier::preview`]: its `_ui` garage model where the pack has one), or MX Unleashed's in
+/// the disc's own model of the skin in the machines' archive. Its rotor or prop stands still: the
+/// garage shows it parked.
+fn dress_flier(tools: &mut Tools, flier: &roster::Flier) -> Result<Dressed, String> {
+    let mut assets = Assets::default();
+    match &flier.preview {
+        Some((folder, file)) => {
+            let res = [game_render::disc::Res::folder(folder)?];
+            let path = file.replace('/', "\\");
+            let stem = path.strip_suffix(".psg").or_else(|| path.strip_suffix(".PSG")).unwrap_or(&path);
+            if !assets.load_as(&res, stem, FLIER) {
+                return Err(format!("no {file} in {}", folder.display()));
+            }
+        }
+        None => {
+            if tools.disc.is_none() {
+                tools.disc = Some(Disc::open_configured()?);
+            }
+            let disc = tools.disc.as_mut().expect("opened above");
+            let machine = [Machine::Biplane, Machine::Helicopter]
+                .into_iter()
+                .find(|m| m.pack_word() == Some(flier.machine.as_str()))
+                .ok_or_else(|| format!("the disc has no {}", flier.machine))?;
+            let member = member_ending(disc, "machine.res")?;
+            let res = [disc.res(&member)?];
+            let name = format!("{}\\anim\\{}", machine.dir(), flier.skin);
+            if !assets.load_as(&res, &name, FLIER) {
+                return Err(format!("no {name}.psg in {member}"));
+            }
+        }
+    }
+    let (min, max) = bounds(&assets, FLIER);
+    let centre = min.add(max).scale(0.5);
+    // A flier is flat, wings or rotor across its height: its box's corners are well outside what the
+    // camera sees of it, so it stands nearer than a bike's would (by eye).
+    let radius = max.sub(min).len() / 2.0 * 0.8;
+    let mips = mips_of(&assets);
+    Ok(Dressed { assets, bike: FLIER.to_string(), parts: Vec::new(), body: None, centre, radius, mips })
+}
+
+/// The corners of the box round model `name`'s triangles.
+fn bounds(assets: &Assets, name: &str) -> (V3, V3) {
+    assets.models[name]
+        .tris
+        .iter()
+        .flat_map(|t| t.v.iter())
+        .fold((v3(f32::MAX, f32::MAX, f32::MAX), v3(f32::MIN, f32::MIN, f32::MIN)), |(lo, hi), v| {
+            (v3(lo.x.min(v.pos.x), lo.y.min(v.pos.y), lo.z.min(v.pos.z)), v3(hi.x.max(v.pos.x), hi.y.max(v.pos.y), hi.z.max(v.pos.z)))
+        })
+}
+
+/// Each texture's levels as the GPU takes them, by texture and cut-out ([`Dressed::mips`]).
+fn mips_of(assets: &Assets) -> Vec<(usize, u8, Mips)> {
+    let mut mips: Vec<(usize, u8, Mips)> = Vec::new();
+    for loaded in assets.models.values() {
+        for m in 0..loaded.model.materials.len().max(1) {
+            let Some(t) = loaded.textures.get(m).copied().flatten().filter(|&t| t < assets.textures.len()) else { continue };
+            let surface = loaded.surfaces.get(m).copied().unwrap_or_default();
+            let keep = if surface.keep_coverage { surface.cutoff } else { 0 };
+            if !mips.iter().any(|&(at, k, _)| (at, k) == (t, keep)) {
+                mips.push((t, keep, Mips::of(&assets.textures[t], keep)));
+            }
+        }
+    }
+    mips
+}
+
+/// Dress `pick`'s bike and rider with `tools`, opening them if they are not yet.
+fn dress_ride(tools: &mut Tools, pick: &roster::Pick) -> Result<Dressed, String> {
     if tools.disc.is_none() {
         tools.disc = Some(Disc::open_configured()?);
     }
@@ -278,13 +398,7 @@ fn dress_in(tools: &mut Tools, pick: &roster::Pick) -> Result<Dressed, String> {
             parts.push((name, at));
         }
     }
-    let (min, max) = assets.models[&bike]
-        .tris
-        .iter()
-        .flat_map(|t| t.v.iter())
-        .fold((v3(f32::MAX, f32::MAX, f32::MAX), v3(f32::MIN, f32::MIN, f32::MIN)), |(lo, hi), v| {
-            (v3(lo.x.min(v.pos.x), lo.y.min(v.pos.y), lo.z.min(v.pos.z)), v3(hi.x.max(v.pos.x), hi.y.max(v.pos.y), hi.z.max(v.pos.z)))
-        });
+    let (min, max) = bounds(&assets, &bike);
     // The rider in its gear and the pick's colours, posed on the bike.
     let body = match member_ending(disc, &format!("{}.res", pick.rider)) {
         Ok(rider) => {
@@ -321,17 +435,7 @@ fn dress_in(tools: &mut Tools, pick: &roster::Pick) -> Result<Dressed, String> {
         centre.y += 0.12 * radius;
         radius *= 1.1;
     }
-    let mut mips: Vec<(usize, u8, Mips)> = Vec::new();
-    for loaded in assets.models.values() {
-        for m in 0..loaded.model.materials.len().max(1) {
-            let Some(t) = loaded.textures.get(m).copied().flatten().filter(|&t| t < assets.textures.len()) else { continue };
-            let surface = loaded.surfaces.get(m).copied().unwrap_or_default();
-            let keep = if surface.keep_coverage { surface.cutoff } else { 0 };
-            if !mips.iter().any(|&(at, k, _)| (at, k) == (t, keep)) {
-                mips.push((t, keep, Mips::of(&assets.textures[t], keep)));
-            }
-        }
-    }
+    let mips = mips_of(&assets);
     Ok(Dressed { assets, bike, parts, body, centre, radius, mips })
 }
 
@@ -474,6 +578,11 @@ pub fn shown_pick(menu: &Menu) -> Option<&roster::Pick> {
     menu.garage_pick()
 }
 
+/// The flier the Garage shows on its Fliers tab (P315a), in place of the pick's bike and rider.
+pub fn shown_flier(menu: &Menu) -> Option<&roster::Flier> {
+    menu.garage_flier()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,6 +598,33 @@ mod tests {
                 n.pick
             })
             .collect()
+    }
+
+    /// P315a: a flier dresses for the stage, MX Unleashed's off the disc and a pack's off its own
+    /// folder in its `_ui` garage model, each with triangles, textures and a size to stand back for.
+    #[test]
+    fn fliers_dress_off_the_disc_and_a_packs_garage_model() {
+        if let Err(e) = Disc::open_configured() {
+            return println!("skipped: no disc ({e})");
+        }
+        let mut tools = Tools::default();
+        let mut offer = roster::original_fliers();
+        let pack = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../mods/machines/mxvatv_fliers");
+        if pack.join("Veh/Anim/biplane3_ui.psg").is_file() {
+            let mut f = offer[0].clone();
+            (f.pack, f.skin, f.preview) = ("mxvatv_fliers".into(), "biplane3".into(), Some((pack.clone(), "Veh/Anim/biplane3_ui.psg".into())));
+            offer.push(f);
+        } else {
+            println!("no MX vs. ATV fliers pack at {}: the disc's alone", pack.display());
+        }
+        for f in &offer {
+            let d = dress_flier(&mut tools, f).unwrap_or_else(|e| panic!("{}: {e}", f.skin));
+            let loaded = &d.assets.models[FLIER];
+            assert!(!loaded.tris.is_empty(), "{} has triangles", f.skin);
+            assert!(loaded.textures.iter().any(Option::is_some), "{} has textures", f.skin);
+            assert!(d.radius > 0.5 && d.body.is_none() && d.parts.is_empty(), "{}: radius {}", f.skin, d.radius);
+            println!("{} from {}: {} triangles, radius {:.2}", f.skin, f.pack, loaded.tris.len(), d.radius);
+        }
     }
 
     /// P258: ten quick Paint presses, three frames apart, leave the stage on the tenth pick; no
@@ -507,13 +643,13 @@ mod tests {
         g.row = roster::ROWS.iter().position(|r| *r == roster::Row::Livery).unwrap();
         // What one dress costs on this thread: the frame a step was, before.
         let mut tools = Tools::default();
-        dress_in(&mut tools, &g.pick).unwrap();
+        dress_ride(&mut tools, &g.pick).unwrap();
         let mut once = Vec::new();
         for by in [1, 1, -1, -1] {
             let mut n = g.clone();
             n.turn(&c, by);
             let t = crate::clock::Instant::now();
-            dress_in(&mut tools, &n.pick).unwrap();
+            dress_ride(&mut tools, &n.pick).unwrap();
             once.push(t.elapsed());
         }
         println!("a dress on the menu's thread: {once:?}");

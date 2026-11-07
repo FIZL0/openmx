@@ -44,6 +44,8 @@ pub const TAB_CONTROLS: usize = 4;
 pub const TAB_CAMERA: usize = 5;
 /// The Garage's tabs, each starting with the same Player row.
 pub const GARAGE_TABS: [&str; 4] = ["Rider", "Bike", "Gear", "Fliers"];
+/// The Garage's Fliers tab (P315), whose stage shows a flier rather than the bike (P315a).
+pub const TAB_FLIERS: usize = 3;
 
 /// The players a Player row steps through: the concept's 1P to 4P.
 pub const PLAYERS: usize = 4;
@@ -1122,6 +1124,58 @@ impl Menu {
                 (next.pick != *pick).then_some(next.pick)
             })
             .collect()
+    }
+
+    /// The flier kind the Garage's stage shows on its Fliers tab (P315a): the row under the cursor,
+    /// else the first kind. None off the tab.
+    fn garage_flier_kind(&self) -> Option<String> {
+        if self.screen() != Some(Screen::Garage) || self.tab(Screen::Garage) != TAB_FLIERS {
+            return None;
+        }
+        let kinds = roster::flier_kinds(&self.flier_offer);
+        let page = self.page_of(Screen::Garage);
+        let at = match page.get(self.cursor(Screen::Garage)).map(|r| r.key) {
+            Some(Key::Flier(i)) => i,
+            _ => 0,
+        };
+        kinds.get(at).cloned()
+    }
+
+    /// The flier the Garage's stage turns on its Fliers tab (P315a): the seat's pick of the kind
+    /// [`Menu::garage_flier_kind`] says, or, for a kind none of whose skins can fly, its first.
+    pub fn garage_flier(&self) -> Option<&roster::Flier> {
+        let kind = self.garage_flier_kind()?;
+        let pick = self.garage_pick()?;
+        roster::flier_of(&self.flier_offer, pick, &kind).or_else(|| roster::flier_choices(&self.flier_offer, &kind).first().copied())
+    }
+
+    /// The fliers one step either side of the shown one (P315a), for the stage to dress ahead.
+    pub fn garage_flier_neighbours(&self) -> Vec<roster::Flier> {
+        let (Some(kind), Some(pick), Some(shown)) = (self.garage_flier_kind(), self.garage_pick(), self.garage_flier()) else { return Vec::new() };
+        [1, -1]
+            .into_iter()
+            .filter_map(|by| {
+                let mut next = pick.clone();
+                roster::step_flier(&self.flier_offer, &mut next, &kind, by);
+                roster::flier_of(&self.flier_offer, &next, &kind).filter(|f| *f != shown).cloned()
+            })
+            .collect()
+    }
+
+    /// The stage's arrows on the Fliers tab (P315a), `-1` left or `1` right: the shown kind's next
+    /// skin for the seat, as left and right on its row step it. Whether there was one to step.
+    pub(super) fn step_garage_flier(&mut self, by: i32) -> bool {
+        let Some(kind) = self.garage_flier_kind() else { return false };
+        let seat = self.garage_seat();
+        let offer = self.flier_offer.clone();
+        let Some(g) = self.garages.get_mut(seat) else { return false };
+        let was = g.pick.clone();
+        roster::step_flier(&offer, &mut g.pick, &kind, by);
+        let moved = g.pick != was;
+        if moved {
+            self.changed = true;
+        }
+        moved
     }
 
     /// Where the Garage stands its pick in a `size` frame, in pixels: x, y, width, height. None off
