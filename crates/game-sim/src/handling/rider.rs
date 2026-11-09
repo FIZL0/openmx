@@ -34,6 +34,9 @@
 //! [`settle`] (S286): the ragdoll's bodies started where the skeleton's bones are, then made to be
 //! there.
 //!
+//! After the frame, the rider's listener step copies the wreck's two spots into the record
+//! ([`wreck_spots`], F31b5i): with [`hand_over`], every word the rider writes into the bike's record.
+//!
 //! What is not here: the world step (3); and the rest of the calls in [`Call`]. The `touched` words this reads
 //! come from the original's ragdoll world until that is ported.
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
@@ -175,6 +178,37 @@ pub fn hand_over(m: &mut impl Ram, rider: u32) {
             let block = m.word(holder + 0x14);
             m.set(block + 4 * k as u32, p);
         }
+    }
+}
+
+/// The record's two quadwords the rider's listener step writes after its frame while the record is
+/// wrecked (the bike's camera spots on the wreck): the impact aim, and the main body's node's
+/// `+0x80`.
+pub const R_SPOT_AIM: u32 = 0x140;
+pub const R_SPOT_MAIN: u32 = 0x150;
+
+/// **The wreck's spots into the record** (the rider's listener step, after the rider's frame): with
+/// a record whose wreck kind is set, the impact aim (`+0x660`) to the record's `+0x140`, then the
+/// main body's node's `+0x80` to its `+0x150`; the record pointer read again for the second. Both
+/// are `lq`/`sq` moves: words as they are, the addresses' low four bits dropped.
+pub fn wreck_spots(m: &mut impl Ram, rider: u32) {
+    let record = m.word(rider + RECORD);
+    if record == 0 || m.word(record + R_KIND) == 0 {
+        return;
+    }
+    copy_words(m, record + R_SPOT_AIM, rider + AIM);
+    let holder = m.word(rider + MAIN);
+    let record = m.word(rider + RECORD);
+    let main = m.word(holder + 0xa4);
+    copy_words(m, record + R_SPOT_MAIN, main + 0x80);
+}
+
+/// A quadword moved as `lq`/`sq` move it: four words as they are, the addresses' low four bits
+/// dropped.
+fn copy_words(m: &mut impl Ram, to: u32, from: u32) {
+    for k in [0, 4, 8, 12] {
+        let w = m.word((from & !0xf) + k);
+        m.set((to & !0xf) + k, w);
     }
 }
 

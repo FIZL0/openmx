@@ -3225,6 +3225,8 @@ impl Listeners for TreeInRam<'_> {
                 self.ee.call(f, &[u64::from(e)], &[dt.0], BUDGET);
                 self.ee.hooks.remove(&TAIL);
                 assert_eq!(*walked.borrow(), [(e, dt.to_bits())], "the manager's closing walk");
+            } else if e == RIDER && in_rust("rider leaf") {
+                rider_leaf(self.ee, dt);
             } else {
                 self.ee.call(f, &[u64::from(e)], &[dt.0], BUDGET);
             }
@@ -14953,4 +14955,254 @@ fn net_post_in_ram(ee: &mut Ee, dt: F) {
             *s.entry(Box::leak(format!("post {k}").into_boxed_str())).or_default() += n;
         }
     });
+}
+
+// F31b5i: the rider leaf of the frame's tail on the ports: its mode machine (rider::modes, S278b and
+// S285), its bone collision solves (bone::solve, S278a), its part clear and hand-over (S278), and the
+// leaf's own wreck spots into the bike's record (rider::wreck_spots).
+
+/// The rider's listener step's three calls: the rider's frame (the mode machine, then the rider's
+/// world step and its vt `+0x148`), the copy after it, and the step run while the rider's `+0xd34` is
+/// set. The frame's mode machine; the machine's outside calls (S278b's oracle's addresses).
+const RIDER_FRAME: u32 = 0x004f_1790;
+const RIDER_AFTER: u32 = 0x004f_2970;
+const RIDER_EXTRA: u32 = 0x004f_2d50;
+const RIDER_MODES: u32 = 0x004e_f320;
+const RIDER_RESET: u32 = 0x004e_ef40;
+const RIDER_WRECK_ENTRY: u32 = 0x004e_d700;
+const RIDER_POSE: u32 = 0x0050_5720;
+const RIDER_SETTLE_VT: u32 = 0x0050_5710;
+const RIDER_BODY_TARGET: u32 = 0x0049_3b00;
+
+thread_local! {
+    /// What [`rider_leaf`] served in Rust, by name, over a replay.
+    static LEAF_SERVED: RefCell<BTreeMap<&'static str, u32>> = const { RefCell::new(BTreeMap::new()) };
+}
+
+fn leaf_served(what: &'static str) {
+    LEAF_SERVED.with(|s| *s.borrow_mut().entry(what).or_default() += 1);
+}
+
+/// Nat05's map, for the rider's ground queries (the tail's walk has no map of its own).
+fn nat05_map() -> &'static track::Terrain<'static> {
+    thread_local! {
+        static M: &'static track::Terrain<'static> = {
+            let trn: &'static [u8] = Box::leak(nat05_trn().expect("Nat05's map").into_boxed_slice());
+            Box::leak(Box::new(track::Terrain::parse(trn).unwrap()))
+        };
+    }
+    M.with(|m| *m)
+}
+
+/// `f` called from inside a hook with `ints` and `dt`, the hooked call's `pc`, `sp`, `ra` and stack
+/// put back after (the interpreter files the hook under the `pc` it leaves); answers `v0`.
+fn call_from_hook_dt(ee: &mut Ee, f: u32, ints: &[u64], dt: F) -> u64 {
+    let (pc, ra, sp, stack) = (ee.pc, ee.r(31), ee.r(29), ee.stack);
+    ee.stack = (sp as u32 - 0x80) & !0xf;
+    ee.set(28, GP);
+    ee.call(f, ints, &[dt.0], BUDGET);
+    let v = ee.r(2);
+    (ee.stack, ee.pc) = (stack, pc);
+    ee.set(29, sp);
+    ee.set(31, ra);
+    v
+}
+
+/// The mode machine's outside calls from inside its hook: the bodies' vt `+0x68` the port's
+/// ([`rider::body_target`]), every other the original's (S286-S289 port them).
+struct LeafRider<'a> {
+    ee: &'a mut Ee,
+}
+
+impl node::Ram for LeafRider<'_> {
+    fn word(&mut self, at: u32) -> u32 {
+        self.ee.u32_at(at)
+    }
+    fn set(&mut self, at: u32, w: u32) {
+        self.ee.set_u32(at, w)
+    }
+}
+
+impl rider::Rider for LeafRider<'_> {
+    fn call(&mut self, c: rider::Call, dt: F) -> u32 {
+        use rider::Call as C;
+        let r = u64::from(RIDER);
+        let vt = |ee: &Ee, holder: u32, slot: u32| ee.u32_at(ee.u32_at(holder) + slot);
+        let v = match c {
+            C::Rand => call_from_hook_dt(self.ee, RAND, &[], dt),
+            C::RidingReset => call_from_hook_dt(self.ee, RIDER_RESET, &[r], dt),
+            C::WreckEntry(kind) => call_from_hook_dt(self.ee, RIDER_WRECK_ENTRY, &[r, u64::from(kind)], dt),
+            C::Pose => {
+                assert_eq!(vt(self.ee, RIDER + 4, 0xd0), RIDER_POSE, "the rider's vt +0xd0");
+                call_from_hook_dt(self.ee, RIDER_POSE, &[r, 0], dt)
+            }
+            C::Settle => {
+                assert_eq!(vt(self.ee, RIDER + 4, 0xcc), RIDER_SETTLE_VT, "the rider's vt +0xcc");
+                call_from_hook_dt(self.ee, RIDER_SETTLE_VT, &[r], dt)
+            }
+            C::Switch { part, on } => {
+                // The aim force keeps its vtable at +8, the parts at +0x10.
+                let at = if part == self.ee.u32_at(RIDER + rider::AIM_FORCE) { 8 } else { 0x10 };
+                let f = vt(self.ee, part + at, 0x10);
+                call_from_hook_dt(self.ee, f, &[u64::from(part), u64::from(on)], dt)
+            }
+            C::Gather { list, probe, kind } => call_from_hook_dt(self.ee, GATHER, &[u64::from(list), u64::from(probe), u64::from(kind)], dt),
+            C::BodyTarget { body, from } => {
+                assert_eq!(vt(self.ee, body + 0x110, 0x68), RIDER_BODY_TARGET, "the body's vt +0x68");
+                rider::body_target(self, body, from);
+                0
+            }
+        };
+        let name = match c {
+            C::Rand => "> rand",
+            C::RidingReset => "> riding reset",
+            C::WreckEntry(_) => "> wreck entry",
+            C::Pose => "> pose",
+            C::Settle => "> settle",
+            C::Switch { .. } => "> switch",
+            C::Gather { .. } => "> gather",
+            C::BodyTarget { .. } => "= body target",
+        };
+        leaf_served(name);
+        v as u32
+    }
+}
+
+/// **The rider's listener step** on the ports ([`TreeInRam`] when [`in_rust`] names `rider leaf`):
+/// the rider's frame runs in the interpreter with its mode machine [`rider::modes`]'s, its bone
+/// collision solves [`bone::solve`]'s (the scene's calls the original's), its part clears and
+/// hand-over [`rider::clear`]'s and [`rider::hand_over`]'s; then the wreck spots
+/// ([`rider::wreck_spots`]); then the copy after and, with `+0xd34` set, the extra step, both the
+/// original's. The bike's record gets every word the rider writes into it from the port.
+fn rider_leaf(ee: &mut Ee, dt: F) {
+    let map = nat05_map();
+    let curve = curve();
+    ee.hooks.insert(
+        RIDER_MODES,
+        Box::new(move |ee: &mut Ee| {
+            assert_eq!(ee.r(4) as u32, RIDER, "the mode machine's rider");
+            let dt = F(ee.f(12));
+            let (pc, ra, sp) = (ee.pc, ee.r(31), ee.r(29));
+            rider::modes(&mut LeafRider { ee }, RIDER, dt, Some(map));
+            ee.pc = pc;
+            ee.set(29, sp);
+            ee.set(31, ra);
+            leaf_served("= modes");
+        }),
+    );
+    ee.hooks.insert(
+        BONE_SOLVE,
+        Box::new(move |ee: &mut Ee| {
+            let (part, dt) = (ee.r(4) as u32, F(ee.f(12)));
+            bone::solve(&mut RiderRam { ee, overlay: None }, &mut OriginalScene, part, dt, Some(map), curve);
+            ee.pc = BONE_SOLVE;
+            leaf_served("= bone solve");
+        }),
+    );
+    ee.hooks.insert(
+        PART_CLEAR,
+        Box::new(|ee: &mut Ee| {
+            let part = ee.r(4) as u32;
+            rider::clear(&mut RiderRam { ee, overlay: None }, part);
+            leaf_served("= part clear");
+        }),
+    );
+    ee.hooks.insert(
+        HAND_OVER,
+        Box::new(|ee: &mut Ee| {
+            assert_eq!(ee.r(4) as u32, RIDER, "the hand-over's rider");
+            rider::hand_over(&mut RiderRam { ee, overlay: None }, RIDER);
+            leaf_served("= hand-over");
+        }),
+    );
+    ee.set(28, GP);
+    ee.call(RIDER_FRAME, &[u64::from(RIDER)], &[dt.0], BUDGET);
+    for a in [RIDER_MODES, BONE_SOLVE, PART_CLEAR, HAND_OVER] {
+        ee.hooks.remove(&a);
+    }
+    rider::wreck_spots(&mut RiderRam { ee, overlay: None }, RIDER);
+    leaf_served("= wreck spots");
+    ee.set(28, GP);
+    ee.call(RIDER_AFTER, &[u64::from(RIDER)], &[], BUDGET);
+    if ee.u32_at(RIDER + 0xd34) != 0 {
+        ee.set(28, GP);
+        ee.call(RIDER_EXTRA, &[u64::from(RIDER)], &[dt.0], BUDGET);
+        leaf_served("> extra step");
+    }
+}
+
+/// [`replay_whole`]'s ports with the rider leaf's too ([`rider_leaf`]). Answers what
+/// [`replay_pure`] answers, what the leaf served, and the interpreter's census.
+#[allow(clippy::type_complexity)]
+fn replay_with_rider_leaf(name: &str) -> Option<(Vec<bool>, Vec<String>, BTreeMap<&'static str, u32>, BTreeMap<String, u64>)> {
+    INTERPRETED.with(|m| m.borrow_mut().clear());
+    LEAF_SERVED.with(|s| s.borrow_mut().clear());
+    let ran = replay_pure(name, &["PartMove", "Gather", "record sweep", "record search", "rider leaf"]);
+    let census = INTERPRETED.with(|m| std::mem::take(&mut *m.borrow_mut()));
+    let served = LEAF_SERVED.with(|s| std::mem::take(&mut *s.borrow_mut()));
+    let (w, _, off) = ran?;
+    eprintln!("{name}: the rider leaf served {served:?}\n  the interpreter ran {census:?}");
+    Some((w, off, served, census))
+}
+
+/// **F31b5i — C15's ride with the rider leaf on the ports**: ride-2 bit-exact, every port at once
+/// and the rider's mode machine, bone solves, clears, hand-over and wreck spots Rust's.
+#[test]
+fn ride_replays_with_the_rider_leaf_on_the_ports() {
+    let Some((w, off, served, census)) = replay_with_rider_leaf("ride-2") else { return };
+    assert_eq!(w.len(), 459);
+    assert!(w.iter().all(|w| !w), "the ride never wrecks");
+    assert_eq!(leaf_off(&off), Vec::<String>::new(), "the RAM is the handing run's but the ground query's ring");
+    assert_eq!(
+        served.into_iter().collect::<Vec<_>>(),
+        [("= bone solve", 12393), ("= hand-over", 459), ("= modes", 459), ("= wreck spots", 459), ("> extra step", 459), ("> switch", 1836)],
+        "{census:?}"
+    );
+}
+
+/// **F31b5i — C15's flip with the rider leaf on the ports**: flip-1 bit-exact, wrecked on row 125
+/// and put back on row 193, the rider's writes into the bike's record the port's.
+#[test]
+fn flip_replays_with_the_rider_leaf_on_the_ports() {
+    let Some((w, off, served, census)) = replay_with_rider_leaf("flip-1") else { return };
+    assert_eq!(w.len(), 465);
+    let changes: Vec<usize> = (1..w.len()).filter(|&r| w[r] != w[r - 1]).collect();
+    assert_eq!(changes, [125, 193], "wrecked on row 125, put back on row 193");
+    assert_eq!(leaf_off(&off), ["0x851fec..0x851ff0"], "the RAM differs only at the cue's write and the ground query's ring");
+    assert_eq!(
+        served.into_iter().collect::<Vec<_>>(),
+        [
+            ("= body target", 19),
+            ("= bone solve", 12303),
+            ("= hand-over", 465),
+            ("= modes", 465),
+            ("= wreck spots", 465),
+            ("> extra step", 465),
+            ("> gather", 68),
+            ("> pose", 2),
+            ("> riding reset", 1),
+            ("> settle", 2),
+            ("> switch", 1463),
+            ("> wreck entry", 1)
+        ],
+        "{census:?}"
+    );
+}
+
+/// The rider's terrain, whose two words (`+0x9e0`, `+0x9e4`) keep the ground query's ring.
+const RIDER_TERRAIN: u32 = 0x00bb_d720;
+
+/// `off`'s ranges but those inside the ground query's ring ([`GROUND_RING`], 32 cells: S278b's
+/// oracle's) and its terrain's two words (S278a, S285: the port's query reads the map and keeps no
+/// ring).
+fn leaf_off(off: &[String]) -> Vec<String> {
+    let kept = |a: u32| (GROUND_RING..GROUND_RING + 0x70 * 32).contains(&a) || (RIDER_TERRAIN + 0x9e0..RIDER_TERRAIN + 0x9e8).contains(&a);
+    off.iter()
+        .filter(|x| {
+            let (s, e) = x.split_once("..").unwrap();
+            let p = |t: &str| u32::from_str_radix(t.trim_start_matches("0x"), 16).unwrap();
+            !(p(s)..p(e)).all(kept)
+        })
+        .cloned()
+        .collect()
 }
