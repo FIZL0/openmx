@@ -179,7 +179,11 @@ fn switch_from_the_pause(
     assert_eq!(m.view(seat).pause_rows()[2], format!("Switch To Machine: {}", offered.label()));
     tap_seat(m, readers, garages, sims, world, seat, Control::Down);
     tap_seat(m, readers, garages, sims, world, seat, Control::Down);
-    let acts = tap_seat(m, readers, garages, sims, world, seat, Control::Cross);
+    let mut acts = tap_seat(m, readers, garages, sims, world, seat, Control::Cross);
+    // the first two seats' Cross into a flier opens its skin picker, and Cross on that switches (P315g)
+    if m.view(seat).flier_picker().is_some() {
+        acts = tap_seat(m, readers, garages, sims, world, seat, Control::Cross);
+    }
     assert!(acts.contains(&Act::Switch(seat, offered)), "seat {seat}: {acts:?}");
     assert!(m.riding());
 }

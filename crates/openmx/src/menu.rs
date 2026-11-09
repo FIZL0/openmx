@@ -2745,6 +2745,9 @@ const MAIN_CONTROLLERS: usize = 6;
 pub const PAUSE: [&str; 9] =
     ["Resume", "Restart", "Switch To Machine", "Settings", "Controllers", "Game Modifiers", "Tricks", "Main Menu", QUIT];
 const PAUSE_SWITCH: usize = 2;
+/// The seats that fly fliers of their own picking (P315g): a ride builds one flier a livery, and a
+/// seat past them wears the first's or the second's (the shell's `vehicle::LIVERIES`).
+const OWN_FLIERS: usize = 2;
 const PAUSE_SETTINGS: usize = 3;
 const PAUSE_CONTROLLERS: usize = 4;
 const PAUSE_MODIFIERS: usize = 5;
@@ -3203,6 +3206,9 @@ pub struct Menu {
     /// The pause's confirm (P110): what its leave row asks, and its row, 1 being Stay. The pauser
     /// alone answers it, as they alone drive the pause.
     leaving: Option<(Leaving, usize)>,
+    /// The pause's flier picker (P315g), up over the pause: the flier kind its switch row goes to
+    /// (the pack word, `biplane`, `kiowa`), and its row, 1 being Switch.
+    picking: Option<(String, usize)>,
     /// Where the pause's Main Menu row goes, as the shell says.
     pub leave_to: LeaveTo,
     /// The ride under the pause is online (N11), as the shell says: its Leave Session row.
@@ -3384,6 +3390,7 @@ struct Side {
     pauser: usize,
     switch_pick: Option<Machine>,
     leaving: Option<(Leaving, usize)>,
+    picking: Option<(String, usize)>,
     typing: String,
     typing_for: Typing,
     key: (usize, usize),
@@ -3401,6 +3408,7 @@ impl Side {
             pauser: seat,
             switch_pick: None,
             leaving: None,
+            picking: None,
             typing: String::new(),
             typing_for: Typing::Name,
             key: (0, 0),
@@ -3511,6 +3519,7 @@ impl Menu {
             claimed: None,
             quit: None,
             leaving: None,
+            picking: None,
             leave_to: LeaveTo::Main,
             session: false,
             seats_open: false,
@@ -4191,6 +4200,7 @@ impl Menu {
         std::mem::swap(&mut self.pauser, &mut side.pauser);
         std::mem::swap(&mut self.switch_pick, &mut side.switch_pick);
         std::mem::swap(&mut self.leaving, &mut side.leaving);
+        std::mem::swap(&mut self.picking, &mut side.picking);
         std::mem::swap(&mut self.typing, &mut side.typing);
         std::mem::swap(&mut self.typing_for, &mut side.typing_for);
         std::mem::swap(&mut self.key, &mut side.key);
@@ -4236,6 +4246,7 @@ impl Menu {
         self.ride_stack.clear();
         self.pauser = self.focus;
         self.leaving = None;
+        self.picking = None;
         self.close_sides();
     }
 
@@ -4277,6 +4288,7 @@ impl Menu {
         self.cursor[Screen::Pause.index()] = 0;
         self.switch_pick = None;
         self.leaving = None;
+        self.picking = None;
     }
 
     /// The pause's confirm, if it is up (P110): its question, its two rows, the leaving one first
@@ -4317,6 +4329,58 @@ impl Menu {
             };
         } else if p.ok || p.back || p.start {
             self.leaving = None;
+        }
+        Act::Stay
+    }
+
+    /// The flier kind (its pack word) the pause's switch row would put its player in, where that
+    /// player picks its skin there (P315g): the plane or the helicopter, on a ride that is not online
+    /// (P318 holds online seats to MX Unleashed's), for a seat that flies its own picks — the first
+    /// two, as a ride builds one flier a livery and a third seat wears the first's.
+    fn switch_flier(&self) -> Option<String> {
+        if self.session || self.opening == Opening::Open || self.pauser >= OWN_FLIERS {
+            return None;
+        }
+        let kind = match self.switch_to()? {
+            Machine::Biplane => "biplane",
+            Machine::Helicopter => "kiowa",
+            _ => return None,
+        };
+        (!roster::flier_choices(&self.flier_offer, kind).is_empty()).then(|| kind.to_string())
+    }
+
+    /// The pause's flier picker, if it is up (P315g): the kind's label, the pauser's skin of it (the
+    /// one the switch flies), every skin of the kind on offer as the Garage's Fliers tab lists them
+    /// ([`roster::flier_choices`], greyed ones with why), and the row it is on, 1 being Switch.
+    pub fn flier_picker(&self) -> Option<(String, Option<&roster::Flier>, Vec<&roster::Flier>, usize)> {
+        let (kind, row) = self.picking.as_ref().filter(|_| self.screen() == Some(Screen::Pause))?;
+        let pick = self.picks.0.get(self.pauser)?;
+        let choices = roster::flier_choices(&self.flier_offer, kind);
+        Some((roster::flier_label(kind), roster::flier_of(&self.flier_offer, pick, kind), choices, *row))
+    }
+
+    /// One press on the pause's flier picker (P315g): up and down move between the skin and Switch,
+    /// left and right (or L1 and R1) step the skin past the ones that cannot fly, saved in the
+    /// seat's picks as the Garage saves them; Cross switches, Circle goes back to the pause.
+    fn pick_flier(&mut self, p: Press) -> Act {
+        let Some((kind, row)) = self.picking.clone() else { return Act::Stay };
+        if p.up || p.down {
+            self.picking = Some((kind, 1 - row));
+        } else if p.left || p.right || p.l1 || p.r1 {
+            let offer = self.flier_offer.clone();
+            if let Some(pick) = self.picks.0.get_mut(self.pauser) {
+                let was = pick.clone();
+                roster::step_flier(&offer, pick, &kind, if p.left || p.l1 { -1 } else { 1 });
+                self.picks_changed |= *pick != was;
+            }
+        } else if p.ok {
+            self.picking = None;
+            if let Some(to) = self.switch_to() {
+                self.stack.clear();
+                return Act::Switch(self.pauser, to);
+            }
+        } else if p.back || p.start {
+            self.picking = None;
         }
         Act::Stay
     }
@@ -4898,6 +4962,9 @@ impl Menu {
         if screen == Screen::Pause && self.leaving.is_some() {
             return self.confirm(p);
         }
+        if screen == Screen::Pause && self.picking.is_some() {
+            return self.pick_flier(p);
+        }
         let rows = self.rows(screen);
         // The lobby's and the list's rows come and go with what the network says.
         let at = self.cursor(screen).min(rows - 1);
@@ -5067,6 +5134,8 @@ impl Menu {
                             self.stack.clear();
                             return Act::Restart;
                         }
+                        // A flier's skin is picked first (P315g).
+                        Some(PauseRow::Fixed(PAUSE_SWITCH)) if self.switch_flier().is_some() => self.picking = self.switch_flier().map(|k| (k, 1)),
                         Some(PauseRow::Fixed(PAUSE_SWITCH)) => {
                             if let Some(to) = self.switch_to() {
                                 self.stack.clear();

@@ -207,3 +207,74 @@ fn p1_and_p2_fly_their_own_picks() {
         assert!(said.lines().any(|l| l == line), "no `{line}`:\n{said}");
     }
 }
+
+/// `frames` ticks of Cross held, as [`tape`]'s, with its own `switches` (`(frame, word)`).
+fn switching_tape(name: &str, frames: usize, switches: &[(usize, &str)]) -> PathBuf {
+    let mut text = format!("# game-sim pad tape: {frames} frames\nformat 1\ntape Cross held\n");
+    let report = format!("0079ff{:02x}7f7f7f7f000000000000{:02x}{}", 0xbf, 0xff, "00".repeat(17));
+    for _ in 0..frames {
+        text += &format!("frame 0x3d08850a 0x{report} -\n");
+    }
+    for (at, word) in switches {
+        text += &format!("switch {at} {word}\n");
+    }
+    let path = scratch(name);
+    std::fs::write(&path, text).expect("the tape is written");
+    path
+}
+
+#[test]
+fn the_switch_flies_the_skin_picked_mid_ride() {
+    // P315g: the pause's Switch To Machine picks the flier's skin and the ride rebuilds it there; a
+    // tape keeps the skin with each switch (`biplane@pack/skin`). A ride loaded on MX Unleashed's
+    // planes switches into the pack's model two, out, into its other skin, out, and into the disc's
+    // second livery, and the ride lines name each skin flown.
+    if !pack() {
+        return;
+    }
+    let steps = switching_tape(
+        "p315g-steps.tape",
+        400,
+        &[
+            (30, "biplane@mxvatv_fliers/biplane3"),
+            (110, "bike"),
+            (140, "biplane@mxvatv_fliers/biplane"),
+            (220, "bike"),
+            (250, "biplane@original/biplane2"),
+            (330, "bike"),
+            (350, "helicopter@mxvatv_fliers/kiowa4"),
+            (390, "bike"),
+        ],
+    );
+    let Some(said) = ride(420, &steps, &[]) else { return };
+    let skins: Vec<&str> = said.lines().filter(|l| l.starts_with("skin: ")).collect();
+    assert_eq!(
+        skins,
+        [
+            "skin: P1 biplane Plane (3) (biplane3) from mxvatv_fliers (the tape's)",
+            "skin: P1 biplane Plane (1) (biplane) from mxvatv_fliers (the tape's)",
+            "skin: P1 biplane Biplane, Second Livery (biplane2) from MX Unleashed (the tape's)",
+            "skin: P1 kiowa Helicopter (4) (kiowa4) from mxvatv_fliers (the tape's)",
+        ],
+        "\n{said}"
+    );
+    let vehicles: Vec<&str> = said.lines().filter(|l| l.starts_with("vehicle: ")).collect();
+    assert_eq!(vehicles, ["vehicle: bike", "vehicle: biplane", "vehicle: bike", "vehicle: biplane", "vehicle: bike", "vehicle: biplane", "vehicle: bike", "vehicle: helicopter", "vehicle: bike"], "\n{said}");
+
+    // The plane rebuilt mid-ride is the one a ride loaded on that skin flies: the same tape's flight
+    // hashes alike, switched into the pack's biplane4 off MX Unleashed's or loaded on it.
+    let rebuilt = switching_tape("p315g-rebuilt.tape", 400, &[(30, "biplane@mxvatv_fliers/biplane4"), (380, "bike")]);
+    let loaded = tape("p315g-loaded.tape", 400, "biplane", 30, 380);
+    let Some(rebuilt) = ride(420, &rebuilt, &[]) else { return };
+    let Some(loaded) = ride(420, &loaded, &["--fliers", "mxvatv", "--flier-skin", "3"]) else { return };
+    let Some(mxu) = ride(420, &tape("p315g-mxu.tape", 400, "biplane", 30, 380), &[]) else { return };
+    assert_eq!(plane_hash(&rebuilt), plane_hash(&loaded), "\n{rebuilt}");
+    assert_ne!(plane_hash(&rebuilt), plane_hash(&mxu), "the switch flew MX Unleashed's plane");
+
+    // And a tape written off it keeps the skin with the switch.
+    let again = scratch("p315g-again.tape");
+    let Some(_) = ride(420, &steps, &["--record", again.to_str().expect("a path")]) else { return };
+    let text = std::fs::read_to_string(&again).expect("the tape was written");
+    let words: Vec<&str> = text.lines().filter(|l| l.starts_with("switch ")).map(|l| l.split_whitespace().nth(2).unwrap_or("")).collect();
+    assert_eq!(words, ["biplane@mxvatv_fliers/biplane3", "bike", "biplane@mxvatv_fliers/biplane", "bike", "biplane@original/biplane2", "bike", "helicopter@mxvatv_fliers/kiowa4", "bike"], "\n{text}");
+}
