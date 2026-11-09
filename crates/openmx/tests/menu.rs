@@ -2206,6 +2206,61 @@ fn the_fliers_tab_picks_a_renamed_packs_skins_per_seat() {
     assert!(!m.settings.text().contains("flier"));
 }
 
+/// P315f: L2 and R2 step the shown machine's skin on the Machines tab — the flier on a flier row,
+/// the bike's paint off them — while L1 and R1 stay the Garage's tabs, as on every page; on the
+/// other tabs L2 and R2 do nothing.
+#[test]
+fn l2_and_r2_step_the_machines_tabs_skin_and_l1_r1_stay_the_tabs() {
+    use menu::{GARAGE_TABS, Key};
+    use roster::{Catalogue, Picks, Row as G};
+    let mut disc = match game_render::Disc::open_configured() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    let catalogue = Catalogue::read(&mut disc).unwrap();
+    let mut reader = Reader::new();
+    let mut m = Menu::new(Settings::default(), Controls::default()).with_garage(catalogue, Picks::default());
+    m.step(reader.read(&Report::idle()));
+    let r = &mut reader;
+    main_to(&mut m, r, "Garage");
+    tab_to(&mut m, r, "Machines");
+    let row = |m: &Menu, key: Key| m.page().iter().find(|row| row.key == key).cloned().unwrap().value;
+    let on = |m: &Menu| m.page()[m.cursor(Screen::Garage)].key;
+
+    // A flier row: R2 and L2 step its skin, the cursor staying put.
+    down_to(&mut m, r, Key::Flier(0));
+    assert_eq!(m.garage_flier().map(|f| f.skin.as_str()), Some("biplane"));
+    tap(&mut m, r, Control::R2);
+    assert_eq!(m.garage_flier().map(|f| f.skin.as_str()), Some("biplane2"), "R2 steps the plane's skin");
+    assert_eq!(row(&m, Key::Flier(0)), "Biplane, Second Livery");
+    assert_eq!(on(&m), Key::Flier(0));
+    tap(&mut m, r, Control::L2);
+    assert_eq!(m.garage_flier().map(|f| f.skin.as_str()), Some("biplane"), "L2 steps it back");
+
+    // Off the flier rows the stage shows the bike, and they step its paint, as the arrows do.
+    down_to(&mut m, r, Key::Garage(G::Class));
+    let paint = row(&m, Key::Garage(G::Livery));
+    tap(&mut m, r, Control::R2);
+    assert_ne!(row(&m, Key::Garage(G::Livery)), paint, "R2 steps the bike's paint");
+    assert_eq!(row(&m, Key::Garage(G::Class)), "125cc", "and not the row the cursor is on");
+    tap(&mut m, r, Control::L2);
+    assert_eq!(row(&m, Key::Garage(G::Livery)), paint);
+
+    // L1 and R1 are still the tabs, and L2 and R2 are nothing on the other tabs.
+    tap(&mut m, r, Control::R1);
+    assert_eq!(GARAGE_TABS[m.tab(Screen::Garage)], "Gear");
+    let gear = m.page();
+    tap(&mut m, r, Control::R2);
+    tap(&mut m, r, Control::L2);
+    assert_eq!(m.page(), gear, "L2 and R2 change nothing on the Gear tab");
+    assert_eq!(GARAGE_TABS[m.tab(Screen::Garage)], "Gear");
+    tap(&mut m, r, Control::L1);
+    assert_eq!(GARAGE_TABS[m.tab(Screen::Garage)], "Machines");
+}
+
 /// P315c: the Garage's machine picker is one tab — the bike's class, model and paint, its driving
 /// model and every flier kind — with an installed pack's bikes listed by class and game beside the
 /// disc's, greyed and stepped over, and a quad pack's row greyed with why. The stage's arrows step

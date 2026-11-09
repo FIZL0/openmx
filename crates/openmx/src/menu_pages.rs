@@ -1367,7 +1367,7 @@ impl Menu {
         for (i, kind) in roster::flier_kinds(offer).iter().enumerate() {
             let label = roster::flier_label(kind);
             let choices = roster::flier_choices(offer, kind);
-            let about = format!("The {} the garage and Switch To Machine give this player. Left and right step its skins, every installed machine pack's after MX Unleashed's.", label.to_lowercase());
+            let about = format!("The {} the garage and Switch To Machine give this player. Left and right, or L2 and R2, step its skins, every installed machine pack's after MX Unleashed's.", label.to_lowercase());
             let mut r = Row::new(Key::Flier(i), Kind::Choice, &label, &about);
             r.choices = choices.iter().map(|f| if f.why.is_some() { format!("{} (cannot fly)", f.name) } else { f.name.clone() }).collect();
             match roster::flier_of(offer, &pick, kind) {
@@ -1772,6 +1772,12 @@ impl Menu {
             return;
         }
         let i = screen.index();
+        // P315f: L2 and R2 step the shown machine's skin on the Machines tab, from any row of it,
+        // as the stage's arrows do; L1 and R1 stay the tabs, as on every other page.
+        if screen == Screen::Garage && self.on_machines() && (p.l2 || p.r2) {
+            self.step_garage_machine(if p.l2 { -1 } else { 1 });
+            return;
+        }
         let tabs = self.tabs(screen).len();
         if tabs > 0 && (p.l1 || p.r1) {
             self.tab[i] = cycle(self.tab[i], if p.l1 { -1 } else { 1 }, tabs);

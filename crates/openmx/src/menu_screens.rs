@@ -81,6 +81,8 @@ enum Btn {
     Start,
     Select,
     L1R1,
+    /// L2 and R2, the Machines tab's skin step (P315f).
+    L2R2,
     /// The d-pad's left and right.
     LeftRight,
     /// R1 alone, the original's trick modifier (P259).
@@ -622,6 +624,7 @@ impl<'a> Pen<'a> {
         let menus = !self.ride_keys;
         match b {
             Btn::L1R1 => [Control::L1, Control::R1].into_iter().filter_map(|c| self.buttons.glyph(c, menus)).collect(),
+            Btn::L2R2 => [Control::L2, Control::R2].into_iter().filter_map(|c| self.buttons.glyph(c, menus)).collect(),
             b => Pen::control(b).and_then(|c| self.buttons.glyph(c, menus)).into_iter().collect(),
         }
     }
@@ -702,7 +705,7 @@ impl<'a> Pen<'a> {
             Btn::Circle => ([0xe0, 0x47, 0x3f, 255], d * 0.07),
             Btn::Square => ([0xd8, 0x72, 0xb8, 255], d * 0.07),
             Btn::Triangle => ([0x3c, 0xbf, 0x93, 255], d * 0.07),
-            Btn::Start | Btn::Select | Btn::L1R1 => {
+            Btn::Start | Btn::Select | Btn::L1R1 | Btn::L2R2 => {
                 let word = match b {
                     Btn::Start => "START",
                     Btn::Select => "SELECT",
@@ -716,7 +719,8 @@ impl<'a> Pen<'a> {
                         self.text(Weight::Heavy, word, x, Pen::mid(y, size), size, 0.0, CHALK, Align::Centre);
                     }
                     _ => {
-                        for (i, word) in ["L1", "R1"].iter().enumerate() {
+                        let pair = if b == Btn::L2R2 { ["L2", "R2"] } else { ["L1", "R1"] };
+                        for (i, word) in pair.iter().enumerate() {
                             let cx = x + (i as f32 - 0.5) * (w + d * 0.15);
                             self.round([cx - w / 2.0, y - r * 0.8, w, d * 0.8], d * 0.25, SHOULDER, SHOULDER);
                             self.text(Weight::Heavy, word, cx, Pen::mid(y, size), size, 0.0, CHALK, Align::Centre);
@@ -782,6 +786,7 @@ impl<'a> Pen<'a> {
             Btn::Start => self.wide(Weight::Heavy, "START", d * 0.5) + d * 0.6,
             Btn::Select => self.wide(Weight::Heavy, "SELECT", d * 0.5) + d * 0.6,
             Btn::L1R1 => 2.0 * (self.wide(Weight::Heavy, "L1", d * 0.5) + d * 0.6) + d * 0.15,
+            Btn::L2R2 => 2.0 * (self.wide(Weight::Heavy, "L2", d * 0.5) + d * 0.6) + d * 0.15,
             Btn::LeftRight => 2.0 * d * 0.8 + d * 0.15,
             Btn::R1 => self.wide(Weight::Heavy, "R1", d * 0.5) + d * 0.6,
             Btn::Up | Btn::Down | Btn::Left | Btn::Right => d * 0.9,
@@ -1928,6 +1933,9 @@ impl Pen<'_> {
         let mut hints = vec![(Btn::Circle, "Back")];
         if !tabs.is_empty() {
             hints.push((Btn::L1R1, "Tabs"));
+        }
+        if screen == Screen::Garage && menu.on_machines() {
+            hints.push((Btn::L2R2, "Skin"));
         }
         hints.push((Btn::Cross, ok));
         // A Save Over's question (P229), over the page.

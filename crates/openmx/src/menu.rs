@@ -108,6 +108,10 @@ pub struct Press {
     /// L1 and R1: the tabs of Settings and the Garage, and the Free Ride strip's player (P118).
     pub l1: bool,
     pub r1: bool,
+    /// L2 and R2: the Garage's Machines tab steps the shown machine's skin with them (P315f), the
+    /// shoulders the user asked for while L1 and R1 stay every page's tabs.
+    pub l2: bool,
+    pub r2: bool,
     /// Triangle alone, which is also [`Press::back`]: the Free Ride pick's Favourite (P279).
     pub triangle: bool,
     /// Select (Tab on the keyboard): the mod store's Download All.
@@ -128,6 +132,8 @@ impl Press {
             start: self.start || o.start,
             l1: self.l1 || o.l1,
             r1: self.r1 || o.r1,
+            l2: self.l2 || o.l2,
+            r2: self.r2 || o.r2,
             triangle: self.triangle || o.triangle,
             select: self.select || o.select,
         }
@@ -241,6 +247,8 @@ fn press_of(edge: u16) -> Press {
         start: on(Control::Start),
         l1: on(Control::L1),
         r1: on(Control::R1),
+        l2: on(Control::L2),
+        r2: on(Control::R2),
         triangle: on(Control::Triangle),
         select: on(Control::Select),
     }
@@ -3606,7 +3614,7 @@ impl Menu {
             Cue::Accept
         } else if p.up || p.down {
             Cue::Move
-        } else if p.left || p.right || p.l1 || p.r1 {
+        } else if p.left || p.right || p.l1 || p.r1 || p.l2 || p.r2 {
             Cue::Side
         } else if p.ok || p.start || p.delete || p.triangle {
             Cue::Accept
