@@ -902,7 +902,38 @@ score_race_tick             boot 0x00262aa0 (dt f12, mgr) the score manager's ra
 #                                           line (score_lap_line) when +0x10 is under track +0x38, the
 #                                           off-track clock +0xc0 against mgr+0xd4, the time limit
 #                                           +0xc4, then the 30 s (mgr+0x9c) finish countdown, ranking,
-#                                           0x00261b80 / 0x002628f0. Only the lap line is ported (S13c).
+#                                           0x00261b80 / 0x002628f0. The lap line is ported (S13c), the finish (S294; below).
+# S294 — the race handler's finish, oracled as stretches of score_race_tick (each stretch called at its
+# first pc with $16 = card, $19 = mgr, $f25 = dt, $f24 = 0, its end pc hooked with ra = DONE):
+score_race_over_end         boot 0x00262b90 the opening over check's end (call the handler, hook here):
+#                                           kind (+0x60) not 2/3 -> mgr |= 2, cleared by the first card
+#                                           with 2, no 0x4001, 0x8004 and no 0x400000.
+#                                           race::LapRules::check_over
+score_race_clocks           boot 0x00263478 a racing card's clocks: +0x70..+0x78 = +0x60..; over (mgr 2,
+#                                           kind not 3) and not done -> +0xb4 = head +0xb4 + +0xbc,
+#                                           +0x48 = (+0xbc + +0x4c) / (float)(mgr+0x94 - +0x30), best
+#                                           +0x50, clamp to +0xb4 / laps, +0x30 = laps, |= 1; else the
+#                                           race and lap clocks (+0x10000 holds); kind 4 and 0x200:
+#                                           +0x168 += dt. race::LapRules::clocks
+score_race_clocks_end       boot 0x00263610 the clocks' end
+score_race_time_limit       boot 0x00263bd0 the time limit: mgr+0xa0 > 0 and +0xc4 > 0, racing: +0xc4
+#                                           -= dt unless 0x40000; <= 0 -> |= 0x4000, +0xc4 = 0, owner/chain
+#                                           vt+0x64, listener vt+0x74. race::LapRules::time_limit
+score_race_card_end         boot 0x00263d60 the card loop's step to the next card (+0x1c8)
+score_race_close            boot 0x00263d70 after the card loop: the finish countdown (mgr+0x98 against
+#                                           +0x9c), the end told once (0x2000): rand 0x0040fd40 * 2^-31
+#                                           pushes a next card's +0xb4 above this one's; owner/chain
+#                                           vt+0x1c, listener vt+0x18; then score_rank / score_gaps or
+#                                           score_ghost_gaps. race::LapRules::close
+score_race_exit             boot 0x00263fbc the handler's epilogue (v0 = its answer)
+score_rank                  boot 0x00261b80 (mgr) -> 0 with no cards or track: the sort on +0x1c and
+#                                           the places +0x2c, owner/chain vt+0x34 (card, other, 1 lost /
+#                                           0 gained), listener vt+0x2c; the lead vt+0x38, listener
+#                                           vt+0x30 gated on its +0x10/+0x14. race::LapRules::rank
+score_gaps                  boot 0x002628f0 (mgr) the gaps +0xbc behind the head at its pace; the head's
+#                                           = -second's. race::gaps
+score_ghost_gaps            boot 0x002629d0 (mgr) a ghost race's gap of each player's card (4) to its
+#                                           owner's (+4) ghost card (+8). race::LapRules::ghost_gap
 # C31 — two live sx01 races (research/c31, context/capture/c31; journal 2026-11-09-c31-sx01-laps-capture):
 # * mgr+0x60 is NOT the event's activity type. S196's image (event type 1 Practice, 5 laps) has +0x60 = 2;
 #   C31's boot (event type 2 SingleRace, 4 racers, 3 laps) has +0x60 = 1. The handler switch in

@@ -32,6 +32,14 @@
 //! a race that ends at the line, and a ghost race's run starting over — with what it tells the
 //! presentation as [`LineNotice`]s.
 //!
+//! The race's finish (S294) is the rest of the score manager's race handler around the cards' path
+//! work: [`LapRules::check_over`] opens each tick (the race is over once no player is racing),
+//! [`LapRules::clocks`] and [`LapRules::time_limit`] run each card's clocks — a card still out on the
+//! track when the race ends gets its finish made up from its gap — and [`LapRules::close`] ends it: the
+//! finish countdown once a player is done, the finishers' times drawn apart once, then the ranking
+//! ([`LapRules::rank`]) and the gaps ([`gaps`], or a ghost race's [`LapRules::ghost_gap`]), with what
+//! they tell as [`FinishNotice`]s.
+//!
 //! Where the gates stand comes off the disc (S13e): every track carries a race file, which
 //! [`TrackFile::parse`] reads as the track object's loader does — its paths of nodes with their spans
 //! and links, the checkpoint records and their parts, the grid gate, the finish line and a third gate.
@@ -622,20 +630,38 @@ pub mod card_flags {
     /// The card takes part in the race; the race kind's handler skips a card without it. A ghost race
     /// sets it on the ghost's card once the ghost has a lap to show.
     pub const TAKING_PART: u64 = 0x02;
+    /// A player's card (by its uses: a ghost race measures its gap to the ghost, and its finish starts
+    /// the race's finish countdown). What sets it was not traced.
+    pub const PLAYER: u64 = 0x04;
     /// The card takes no line test: [`super::LapRules::line`] answers yes without looking (what sets
     /// it was not traced).
     pub const NO_LINE: u64 = 0x10;
     /// Cleared by every lap a fast-lap attack counts (what it means there was not traced).
     pub const FAST_LAP: u64 = 0x100;
+    /// A fast-lap attack runs the card's attack clock (what sets it was not traced).
+    pub const ATTACK_CLOCK: u64 = 0x200;
+    /// The card's time limit ran out ([`super::LapRules::time_limit`]); it is out of the race like
+    /// [`OUT`].
+    pub const TIMED_OUT: u64 = 0x4000;
+    /// Counts as a player's card for the finish, like [`PLAYER`] (what sets it was not traced).
+    pub const PLAYER_TOO: u64 = 0x8000;
     /// The rider is behind the line it starts from: its first crossing starts the race and counts no
     /// lap.
     pub const BEHIND_LINE: u64 = 0x1_0000;
     /// This lap cannot be the best lap; every crossing that passes the line clears it.
     pub const NO_BEST: u64 = 0x2_0000;
+    /// The card's time limit is held: it does not run down.
+    pub const CLOCK_HELD: u64 = 0x4_0000;
+    /// A player's card that does not keep the race open (what sets it was not traced).
+    pub const STANDS_ASIDE: u64 = 0x40_0000;
 }
 
 /// The score manager's flag bits (its `+0x5c` word) as the lap line reads and writes them.
 pub mod race_flags {
+    /// The race is over: no player's card is still racing, or the finish countdown ran out.
+    pub const OVER: u32 = 0x02;
+    /// A player's card is done: the finish countdown runs.
+    pub const PLAYER_DONE: u32 = 0x04;
     /// A card has finished by the line.
     pub const FINISHED: u32 = 0x10;
     /// Every counted lap is kept in the card's list of lap records.
@@ -644,13 +670,19 @@ pub mod race_flags {
     pub const ALL_OUT: u32 = 0x02;
     /// A rider the race waits for has finished by the line (S293).
     pub const PLAYER_OUT: u32 = 0x04;
+    /// The race's end has been told: the finishers' times are drawn apart once.
+    pub const OVER_TOLD: u32 = 0x2000;
+    /// The cards are ranked every tick.
+    pub const RANKED: u32 = 0x4000;
 }
 
-/// The score manager's race kind (its `+0x60`). The numbers are the event's activity types; the sx01
-/// single race holds 2.
+/// The score manager's race kind (its `+0x60`). Not the event's activity type: a live sx01 single race
+/// (activity type 2) holds 1 and a practice (activity type 1) holds 2 (C31).
 pub mod race_kind {
-    pub const PRACTICE: i32 = 1;
-    pub const SINGLE_RACE: i32 = 2;
+    /// A race that ends at its laps: the lap line finishes each card on its last lap.
+    pub const RACE: i32 = 1;
+    /// Laps with no end: the lap line never finishes a card, and the race is never over by itself.
+    pub const PRACTICE: i32 = 2;
     /// A ghost race: every lap starts the rider's run over, and the card's owner carries the ghost's
     /// card.
     pub const GHOST_RACE: i32 = 3;
@@ -715,6 +747,15 @@ pub struct LapCard {
     /// The race clock (`+0xb4`) and the lap's own clock (`+0xb8`).
     pub race_time: F,
     pub lap_clock: F,
+    /// How far behind the leader the card is, in seconds (`+0xbc`): the leader's own is less the
+    /// second card's.
+    pub gap: F,
+    /// How long the rider has been off the track (`+0xc0`).
+    pub off_track: F,
+    /// What is left of the card's time limit (`+0xc4`; 0 for none).
+    pub time_left: F,
+    /// A fast-lap attack's clock (`+0x168`).
+    pub attack_clock: F,
     /// `+0x108`, copied into each lap record.
     pub record_word: u32,
     /// One word per line on the track (`+0xe4`, the manager's line count long), cleared by every
@@ -748,6 +789,12 @@ pub struct LapRules {
     /// `+0x58`).
     pub record_limit: i32,
     pub free_records: u32,
+    /// The finish countdown: how long it runs once a player is done (`+0x9c`, 30 s on sx01; 0 none)
+    /// and how far it has run (`+0x98`).
+    pub finish_wait: F,
+    pub finish_clock: F,
+    /// Whether the cards' time limits run (`+0xa0` above 0).
+    pub time_limit: F,
 }
 
 /// What the lap line tells the card's listeners, in the order it tells them. The race's presentation
@@ -833,7 +880,7 @@ impl LapRules {
         if self.flags & race_flags::KEEP_LAPS != 0 {
             self.keep_lap(card);
         }
-        if self.kind != race_kind::GHOST_RACE && self.kind != race_kind::SINGLE_RACE && self.laps <= card.laps {
+        if self.kind != race_kind::GHOST_RACE && self.kind != race_kind::PRACTICE && self.laps <= card.laps {
             card.flags |= card_flags::OUT;
             self.flags |= race_flags::FINISHED;
             said.push(LineNotice::Finished);
@@ -1613,12 +1660,12 @@ pub enum RaceNotice {
 }
 
 impl RaceRules {
-    /// What the race handler does before its cards, outside a single or ghost race: the manager's
+    /// What the race handler does before its cards, outside a practice or ghost race: the manager's
     /// [`race_flags::ALL_OUT`] is set unless some card (by its flags) is a rider the race waits for
     /// that is still racing.
     pub fn look_for_waited_for(&mut self, cards: impl IntoIterator<Item = u64>) {
         use race_card_flags as rf;
-        if self.lap.kind == race_kind::SINGLE_RACE || self.lap.kind == race_kind::GHOST_RACE {
+        if self.lap.kind == race_kind::PRACTICE || self.lap.kind == race_kind::GHOST_RACE {
             return;
         }
         self.lap.flags |= race_flags::ALL_OUT;
@@ -1856,6 +1903,265 @@ impl RaceRules {
             said.push(RaceNotice::OffTooLong);
         }
     }
+}
+
+// --- the race's finish (S294) -----------------------------------------------------------------------
+
+/// What the race's finish and its ranking tell the cards' listeners. `card` is the card's index in the
+/// list as it stands when told (place order once ranked). The card's owner and its chain hear each,
+/// then the manager's listener, as with [`LineNotice`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FinishNotice {
+    /// The race is over (told once, to every card in list order, then to the manager's listener).
+    Over { card: usize },
+    /// The card's time limit ran out.
+    TimeUp { card: usize },
+    /// The card lost a place to the card now ahead of it (`None` at the head of the list).
+    PlaceLost { card: usize, ahead: Option<usize> },
+    /// The card gained a place on the card now behind it (`None` at the tail).
+    PlaceGained { card: usize, behind: Option<usize> },
+    /// The card took the lead. The manager's listeners hear it only when their own gate lets them
+    /// (their `+0x10` not above 0, or under their `+0x14`, which they clear): that state is theirs.
+    Lead { card: usize },
+}
+
+/// `a < b` as `c.olt.s` reads the two words.
+fn lt(a: F, b: F) -> bool {
+    read(a).0 < read(b).0
+}
+
+/// `a <= b` as `c.ole.s` reads the two words.
+fn le(a: F, b: F) -> bool {
+    read(a).0 <= read(b).0
+}
+
+/// Whether a card is still in the race: taking part, neither done nor out of time.
+fn racing(flags: u64) -> bool {
+    flags & card_flags::TAKING_PART != 0 && flags & (card_flags::OUT | card_flags::TIMED_OUT) == 0
+}
+
+impl LapRules {
+    /// The race handler's first look each tick: in a race (not a practice or a ghost race) the race is
+    /// [`race_flags::OVER`] unless some player's card is still racing — taking part, not done or out of
+    /// time, [`card_flags::PLAYER`] or [`card_flags::PLAYER_TOO`], and not
+    /// [`card_flags::STANDS_ASIDE`]. `cards` in list order.
+    pub fn check_over(&mut self, cards: &[LapCard]) {
+        if self.kind == race_kind::PRACTICE || self.kind == race_kind::GHOST_RACE {
+            return;
+        }
+        self.flags |= race_flags::OVER;
+        let keeps_open = |f: u64| {
+            racing(f)
+                && f & (card_flags::PLAYER | card_flags::PLAYER_TOO) != 0
+                && f & card_flags::STANDS_ASIDE == 0
+        };
+        if cards.iter().any(|c| keeps_open(c.flags)) {
+            self.flags &= !race_flags::OVER;
+        }
+    }
+
+    /// A racing card's clocks, after its path and line tests each tick: where it was seen moves on to
+    /// where it is now, and then — once the race is over, for a card that has not finished — its finish
+    /// is made up from its gap: its race time the leader's (`leader_time`, the list head's race time)
+    /// plus its gap, its lap time the gap and its lap's start spread over the laps it had left, a best
+    /// lap if that is quicker (or none yet) and no quicker than the race time over the race's laps
+    /// allows, and the card done on the race's laps. A card still racing runs its race clock (not in a
+    /// ghost race while behind its line) and its lap clock (not while behind its line); a fast-lap
+    /// attack runs the attack clock.
+    pub fn clocks(&self, dt: F, card: &mut LapCard, leader_time: F) {
+        card.seen.last = card.seen.last.merge(Dest::XYZ, card.seen.now);
+        let out = card.flags & card_flags::OUT != 0;
+        if self.kind != race_kind::GHOST_RACE && self.flags & race_flags::OVER != 0 && !out {
+            card.race_time = F(fpu::add(leader_time.0, card.gap.0));
+            let left = F(fpu::from_i32(self.laps.wrapping_sub(card.laps)));
+            card.lap_time = F(fpu::div(fpu::add(card.gap.0, card.lap_start.0), left.0));
+            if lt(card.lap_time, card.best_lap) || is_zero(card.best_lap) {
+                card.best_lap = card.lap_time;
+            }
+            let laps = F(fpu::from_i32(self.laps));
+            if lt(card.race_time, F(fpu::mul(laps.0, card.best_lap.0))) {
+                card.best_lap = F(fpu::div(card.race_time.0, laps.0));
+            }
+            card.laps = self.laps;
+            card.flags |= card_flags::OUT;
+        } else if !out {
+            let behind = card.flags & card_flags::BEHIND_LINE != 0;
+            if self.kind != race_kind::GHOST_RACE || !behind {
+                card.race_time = F(fpu::add(card.race_time.0, dt.0));
+            }
+            if !behind {
+                card.lap_clock = F(fpu::add(card.lap_clock.0, dt.0));
+            }
+        }
+        if self.kind == race_kind::FAST_LAP && card.flags & card_flags::ATTACK_CLOCK != 0 {
+            card.attack_clock = F(fpu::add(card.attack_clock.0, dt.0));
+        }
+    }
+
+    /// A card's time limit, once a tick: while the race has time limits and the card has time left, a
+    /// racing card's runs down (unless [`card_flags::CLOCK_HELD`]); at 0 the card is
+    /// [`card_flags::TIMED_OUT`] (true: tell it [`FinishNotice::TimeUp`]).
+    pub fn time_limit(&self, dt: F, card: &mut LapCard) -> bool {
+        if le(self.time_limit, F::ZERO) || le(card.time_left, F::ZERO) || !racing(card.flags) {
+            return false;
+        }
+        if card.flags & card_flags::CLOCK_HELD == 0 {
+            card.time_left = F(fpu::sub(card.time_left.0, dt.0));
+        }
+        if !le(card.time_left, F::ZERO) {
+            return false;
+        }
+        card.flags |= card_flags::TIMED_OUT;
+        card.time_left = F::ZERO;
+        true
+    }
+
+    /// The race handler's close each tick, after every card's own work. Once a player's card is
+    /// [`race_flags::PLAYER_DONE`] the finish countdown runs (not in a ghost race, not once over, and
+    /// only with a wait set): when it has run its wait the race is [`race_flags::OVER`] and every card
+    /// done. The first tick the race is over its end is told: each card in list order whose next card's
+    /// race time is below its own pushes the next one's to its own plus one `rand()` scaled to `[0, 1)`
+    /// (so the times run in list order), and every card hears [`FinishNotice::Over`]. Then a ghost race
+    /// not yet finished measures each card's gap to its ghost (`ghosts`, the card's owner's ghost card
+    /// where it has one; [`LapRules::ghost_gap`]); any other race ranks the cards if it ranks them
+    /// ([`race_flags::RANKED`]; [`LapRules::rank`]) and, unless a card has finished, measures the gaps
+    /// ([`gaps`]). `cards` in list order, and not empty (with none the handler does nothing at all).
+    pub fn close(
+        &mut self,
+        dt: F,
+        cards: &mut Vec<LapCard>,
+        ghosts: &[Option<&LapCard>],
+        rng: &mut Rng,
+    ) -> Vec<FinishNotice> {
+        let mut said = Vec::new();
+        if self.kind != race_kind::GHOST_RACE
+            && self.flags & race_flags::PLAYER_DONE != 0
+            && self.flags & race_flags::OVER == 0
+            && !le(self.finish_wait, F::ZERO)
+        {
+            if lt(self.finish_clock, self.finish_wait) {
+                self.finish_clock = F(fpu::add(self.finish_clock.0, dt.0));
+            } else {
+                self.flags |= race_flags::OVER;
+                for c in cards.iter_mut() {
+                    c.flags |= card_flags::OUT;
+                }
+            }
+        }
+        if self.flags & race_flags::OVER != 0 && self.flags & race_flags::OVER_TOLD == 0 {
+            self.flags |= race_flags::OVER_TOLD;
+            for k in 0..cards.len() {
+                if k + 1 < cards.len() && !le(cards[k].race_time, cards[k + 1].race_time) {
+                    let draw = rng.unit();
+                    cards[k + 1].race_time = F(fpu::add(cards[k].race_time.0, draw.0));
+                }
+                said.push(FinishNotice::Over { card: k });
+            }
+        }
+        if self.kind == race_kind::GHOST_RACE {
+            if self.flags & race_flags::FINISHED == 0 {
+                for (c, g) in cards.iter_mut().zip(ghosts) {
+                    if let Some(g) = g {
+                        Self::ghost_gap(c, g);
+                    }
+                }
+            }
+        } else {
+            if self.flags & race_flags::RANKED != 0 {
+                said.extend(Self::rank(cards));
+            }
+            if self.flags & race_flags::FINISHED == 0 {
+                gaps(cards);
+            }
+        }
+        said
+    }
+
+    /// The ranking: the cards sorted by how far into the race they are, furthest first, and each given
+    /// its place. The sort is the original's own, a pass per place that pulls any card further on than
+    /// the one in the place up into it — stepping over the card after the one it pulled, and leaving a
+    /// done card where it stands (with what is behind it). Then each card's place is counted from 1: a
+    /// card further back than before hears [`FinishNotice::PlaceLost`] (the card ahead of it), one
+    /// further on [`FinishNotice::PlaceGained`] (the card behind it), and a new leader
+    /// [`FinishNotice::Lead`]. A card with no place yet (0) is told nothing but the lead.
+    pub fn rank(cards: &mut Vec<LapCard>) -> Vec<FinishNotice> {
+        let n = cards.len();
+        let mut p = 0;
+        while p + 1 < n {
+            if cards[p].flags & card_flags::OUT == 0 {
+                let mut q = p + 1;
+                while q < n {
+                    if lt(cards[p].progress, cards[q].progress) {
+                        let c = cards.remove(q);
+                        cards.insert(p, c);
+                        q += 2;
+                    } else {
+                        q += 1;
+                    }
+                }
+            }
+            p += 1;
+        }
+        let mut said = Vec::new();
+        for k in 0..n {
+            let place = k as i32 + 1;
+            let was = cards[k].place;
+            cards[k].place = place;
+            if was != 0 && place > was {
+                said.push(FinishNotice::PlaceLost { card: k, ahead: k.checked_sub(1) });
+            } else if place < was {
+                said.push(FinishNotice::PlaceGained { card: k, behind: (k + 1 < n).then_some(k + 1) });
+            }
+            if place == 1 && was != 1 {
+                said.push(FinishNotice::Lead { card: k });
+            }
+        }
+        said
+    }
+
+    /// A ghost race's gap: a player's card, while its lap is no slower than its ghost's best and the
+    /// ghost is taking part, is as far behind the ghost as the race time it took to get where it is,
+    /// less the ghost's time to get there at the ghost's pace (0 while the ghost has gone nowhere).
+    pub fn ghost_gap(card: &mut LapCard, ghost: &LapCard) {
+        if card.flags & card_flags::PLAYER == 0
+            || ghost.flags & card_flags::TAKING_PART == 0
+            || !le(card.lap_clock, ghost.best_lap)
+        {
+            return;
+        }
+        card.gap = if lt(F::ZERO, ghost.progress) {
+            behind(card, ghost.race_time, fpu::div(1.0, ghost.progress.0))
+        } else {
+            F::ZERO
+        };
+    }
+}
+
+/// How far behind the pace a card is: its race time less the time the pace (`per_foot` seconds a
+/// foot, over `pace_time`'s whole) takes to its progress.
+fn behind(card: &LapCard, pace_time: F, per_foot: f32) -> F {
+    F(fpu::sub(card.race_time.0, fpu::mul(per_foot, fpu::mul(pace_time.0, card.progress.0))))
+}
+
+/// The gaps, each tick of a race nobody has finished: every card behind the leader not yet done is as
+/// far behind as its race time less the leader's time to its progress at the leader's pace (none
+/// below 0; with the leader nowhere yet, its race time); the leader's own gap is the second card's,
+/// negated (0 alone). `cards` in list order, not empty.
+pub fn gaps(cards: &mut [LapCard]) {
+    let Some((lead, rest)) = cards.split_first_mut() else { return };
+    let per_foot = if lt(F::ZERO, lead.progress) { fpu::div(1.0, lead.progress.0) } else { 0.0 };
+    for c in rest.iter_mut() {
+        if c.flags & card_flags::OUT == 0 {
+            c.gap = behind(c, lead.race_time, per_foot);
+            if lt(c.gap, F::ZERO) {
+                c.gap = F::ZERO;
+            }
+        }
+    }
+    lead.gap = match rest.first() {
+        Some(second) => F(fpu::neg(second.gap.0)),
+        None => F::ZERO,
+    };
 }
 
 // --- the track's race file (S13e) -------------------------------------------------------------------
