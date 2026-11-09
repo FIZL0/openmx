@@ -146,3 +146,64 @@ fn on_the_biplane_is_mx_vs_atvs_on_both_models() {
     assert_ne!(hashes[0], hashes[1], "model one and two flew alike");
     assert!(hashes.iter().all(|h| h != plane_hash(&mxu)), "{hashes:?} against MX Unleashed's {}", plane_hash(&mxu));
 }
+
+/// Ride free09 headless for two players on `garage`, a `garage.txt` beside a link to the disc in a
+/// scratch folder of its own (the shell keeps its files beside the disc it was given), or `None`
+/// with no disc to ride.
+fn ride_two(name: &str, garage: &str) -> Option<String> {
+    let iso = match game_render::disc::Disc::configured_path() {
+        Ok(iso) => iso,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return None;
+        }
+    };
+    let dir = scratch(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch folder");
+    let link = dir.join("disc.iso");
+    std::os::unix::fs::symlink(std::path::absolute(&iso).expect("a path"), &link).expect("the disc is linked");
+    std::fs::write(dir.join("garage.txt"), garage).expect("the garage is written");
+    let out = Command::new(env!("CARGO_BIN_EXE_openmx"))
+        .current_dir(root())
+        .arg(&link)
+        .args(["--headless", "--track", "free09", "--frames", "10", "--steady-clock", "--mods", "mods", "--players", "2", "--garage"])
+        .output()
+        .expect("the shell runs");
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "the shell failed: {}\n{said}", String::from_utf8_lossy(&out.stderr));
+    Some(said)
+}
+
+#[test]
+fn p1_and_p2_fly_their_own_picks() {
+    // P315b: each seat's garage picks build its own plane and helicopter, pack or disc, model one or two.
+    if !pack() {
+        return;
+    }
+    let garage = "seat1.flier = biplane mxvatv_fliers biplane3\nseat1.flier = kiowa original kiowa2\n\
+                  seat2.flier = biplane mxvatv_fliers biplane\nseat2.flier = kiowa mxvatv_fliers kiowa3\n";
+    let Some(said) = ride_two("p315b-own", garage) else { return };
+    for line in [
+        "biplane: P1 mxvatv_fliers's, drawn in biplane3",
+        "biplane: P2 mxvatv_fliers's, drawn in biplane",
+        "biplane: P2 flies on MX vs. ATV's biplane.phy as model one, on its steps",
+        "kiowa: P1 MX Unleashed's, drawn in kiowa2",
+        "kiowa: P2 mxvatv_fliers's, on its steps, drawn in kiowa3",
+    ] {
+        assert!(said.lines().any(|l| l == line), "no `{line}`:\n{said}");
+    }
+    let seat_lines: Vec<&str> = said.lines().filter(|l| l.starts_with("fliers: P")).collect();
+    assert!(seat_lines.iter().any(|l| l.starts_with("fliers: P1 biplane ") && l.ends_with("(biplane3), from mxvatv_fliers, model 2")), "{seat_lines:?}");
+    assert!(seat_lines.iter().any(|l| l.starts_with("fliers: P2 biplane ") && l.ends_with("(biplane), from mxvatv_fliers, model 1")), "{seat_lines:?}");
+    assert!(seat_lines.iter().any(|l| l.starts_with("fliers: P2 kiowa ") && l.ends_with("(kiowa3), from mxvatv_fliers, model 2")), "{seat_lines:?}");
+    assert!(!seat_lines.iter().any(|l| l.starts_with("fliers: P1 kiowa ")), "P1's helicopter is MX Unleashed's: {seat_lines:?}");
+
+    // Both on one skin: the second wears the other skin of the same model, as the original's second
+    // player's machine wears the alternate livery.
+    let same = "seat1.flier = biplane mxvatv_fliers biplane4\nseat2.flier = biplane mxvatv_fliers biplane4\n";
+    let Some(said) = ride_two("p315b-same", same) else { return };
+    for line in ["biplane: P1 mxvatv_fliers's, drawn in biplane4", "biplane: P2 mxvatv_fliers's, drawn in biplane3"] {
+        assert!(said.lines().any(|l| l == line), "no `{line}`:\n{said}");
+    }
+}
