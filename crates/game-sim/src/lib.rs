@@ -143,6 +143,10 @@ pub struct Sim {
     /// one starts, stepped at the top of every tick before the riders. A ride without zones never
     /// starts one, and a fresh event is not walked or sent ([`event::Event::fresh`]).
     pub event: event::Event,
+    /// A race's start (S13b): the start gate, its watch over the riders while it is closed and the
+    /// countdown that drops it, stepped at the top of every tick before the riders, after the event.
+    /// `None` — every ride but a race — steps, walks and encodes as before ([`race::Race`]).
+    pub race: Option<Box<race::Race>>,
 }
 
 /// On a world that wraps (MD29), the copy of the point `at` nearest `from`, one width over on each
@@ -250,6 +254,7 @@ impl Sim {
             home: Arc::default(),
             traffic: traffic::Traffic::default(),
             event: event::Event::default(),
+            race: None,
         }
     }
 
@@ -330,6 +335,7 @@ impl Sim {
         };
         self.lend_cars();
         self.event_frame(dt);
+        self.race_frame(dt);
         if self.plane.is_some() {
             // The other riders' bikes, where they stand, are in the plane's world (S95). Player 1's
             // own bike is not: the original takes it out of the world when its rider switches to the
@@ -435,6 +441,30 @@ impl Sim {
         self.event.tick(dt, &riders, &mut cards);
     }
 
+    /// The race manager's tick (S13b, [`race::Race::tick`]): every rider where the last tick left
+    /// them, in player order; a rider the closed gate caught is thrown back ([`race::push`]) and gets
+    /// its penalty on its card, and on the drop every rider is let go ([`race::release`]).
+    fn race_frame(&mut self, dt: F) {
+        if self.race.is_none() {
+            return;
+        }
+        let riders: Vec<(Vf, Vf)> = (0..self.players())
+            .map(|i| {
+                let m = self.rider_of(i).ride.transform();
+                (m.0[3], m.0[2])
+            })
+            .collect();
+        let frame = self.race.as_mut().expect("a race").tick(dt, &riders);
+        let mut all: Vec<&mut Rider> = std::iter::once(&mut self.rider).chain(self.others.iter_mut().map(|p| &mut p.rider)).collect();
+        for (i, hit) in frame.caught {
+            race::push(&mut all[i].ride.chassis, hit.push);
+            all[i].score.gate_penalty = hit.penalty;
+        }
+        if frame.dropped {
+            all.iter_mut().for_each(|r| race::release(&mut r.ride.chassis));
+        }
+    }
+
     /// How many riders the session holds: player 1 and the others.
     pub fn players(&self) -> usize {
         1 + self.others.len()
@@ -497,6 +527,7 @@ impl Sim {
         let mut prop_movers = self.frame_held_wrecked(dt, world, &sides);
         self.lend_cars();
         self.event_frame(dt);
+        self.race_frame(dt);
         let mut frames = Vec::with_capacity(controls.len());
         // Rider against rider (S78): every bike's contacts, from where the last tick left them all.
         // On a world that wraps (MD44), each bike against every other's nearest copy.
@@ -652,6 +683,7 @@ impl Clone for Sim {
             home: Arc::clone(&self.home),
             traffic: self.traffic.clone(),
             event: self.event.clone(),
+            race: self.race.clone(),
         }
     }
 }

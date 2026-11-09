@@ -77,7 +77,7 @@ const MAGIC: [u8; 4] = *b"OMX1";
 pub fn encode(sim: &Sim) -> Vec<u8> {
     let mut out = Vec::with_capacity(16 * 1024);
     out.extend_from_slice(&MAGIC);
-    let Sim { ticks, rng, tables: _, phy: _, bindings: _, input, rider, plane, car, others, markers, home: _, traffic, event } = sim;
+    let Sim { ticks, rng, tables: _, phy: _, bindings: _, input, rider, plane, car, others, markers, home: _, traffic, event, race } = sim;
     ticks.put(&mut out);
     rng.put(&mut out);
     input.put(&mut out);
@@ -138,8 +138,16 @@ pub fn encode(sim: &Sim) -> Vec<u8> {
         CAR_LANE.put(&mut out);
         car.put(&mut out);
     }
+    // A race's start (S13b) the same way, behind its own.
+    if let Some(race) = race {
+        RACE.put(&mut out);
+        race.put(&mut out);
+    }
     out
 }
+
+/// What begins [`encode`]'s race section.
+const RACE: u64 = u64::from_le_bytes(*b"S13brace");
 
 /// What begins [`encode`]'s driven car section.
 const CAR_LANE: u64 = u64::from_le_bytes(*b"S249car\0");
@@ -187,7 +195,7 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
     let tagged = |r: &Reader<'_>| r.bytes.get(r.at..r.at + 8) == Some(&MARKERS.to_le_bytes()[..]);
     // No players' list ahead of any tagged section (S131: the props' tag was read as one; P155: nor
     // the event's).
-    let section = |r: &Reader<'_>| [MARKERS, CARS, TOYS, PROPS, PHYSICS, EVENT, CAR_LANE].iter().any(|t| r.bytes.get(r.at..r.at + 8) == Some(&t.to_le_bytes()[..]));
+    let section = |r: &Reader<'_>| [MARKERS, CARS, TOYS, PROPS, PHYSICS, EVENT, CAR_LANE, RACE].iter().any(|t| r.bytes.get(r.at..r.at + 8) == Some(&t.to_le_bytes()[..]));
     let mut others_riders: Vec<Rider> =
         if r.at < bytes.len() && !section(&r) { Wire::take(&mut r)? } else { Vec::new() };
     let mut markers = crate::markers::Markers::default();
@@ -317,6 +325,11 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         r.at += 8;
         car = Some(Box::new(Wire::take(&mut r)?));
     }
+    let mut race: Option<Box<crate::race::Race>> = None;
+    if r.bytes.get(r.at..r.at + 8) == Some(&RACE.to_le_bytes()[..]) {
+        r.at += 8;
+        race = Some(Box::new(Wire::take(&mut r)?));
+    }
     // The collision's ray probe is the car's `m.col`, a constant of the disc: this machine's, where
     // this seat drives the same car here; otherwise left empty for the shell to put back.
     if let (Some(c), Some(here)) = (car.as_mut(), sim.car.as_ref())
@@ -399,6 +412,7 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         home: Arc::clone(&sim.home),
         traffic,
         event,
+        race,
     };
     Ok(())
 }
@@ -1035,6 +1049,10 @@ wire!(crate::r#move::Ride { g_peak, clutch_timer, clutch_scale_start, clutch_cof
 wire!(crate::ride::Wheel { mv, w, surface, inv_inertia, steer_axis, slip, gyro, angle, chassis_local_velocity, local_velocity, local_force, frame, side_per_load });
 wire!(crate::tire::Slip { spinning, locked, sliding });
 wire!(crate::rng::Rng { state });
+wire!(crate::race::Race { gate, cards, music_in, music_held, tip_in, stage, tip_armed, countdown, scene_clock, rng });
+wire!(crate::race::Gate { flags, centre, normal, across, width, height, reach_sq });
+wire!(crate::race::Seen { now, last });
+wire!(crate::race::Countdown { length, elapsed, running });
 wire_enum!(crate::state::Kind { Plain, Wrecked });
 wire!(crate::wreck_page::Page { fade, updates });
 wire_enum!(crate::wreck_page::Fade { Off, Out, In });

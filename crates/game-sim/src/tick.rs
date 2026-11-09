@@ -784,6 +784,11 @@ impl Engine {
 /// The pads: the fixed update's own `input` is one sampled [`Input`], which is what a fixture
 /// carries, so that is what this path rebuilds a pad report out of ([`crate::Sim::reports`]). A
 /// shell that has the real 32-byte reports hands them over itself rather than through here.
+///
+/// The generator: the Sim's subsystems keep their own, each drawing what its part of the scene walk
+/// draws in the original — the race's start included (S13b): its manager's tick runs ahead of the
+/// riders in the walk, its gate's watch draws for every rider it catches and its drop draws once
+/// ([`crate::race::Race::tick`]) — so the fixed update's is not handed on.
 impl Game for crate::Sim {
     fn simulate(&mut self, dt: F, input: Input, _rng: &mut Rng) -> bool {
         self.tick_at(dt, input);

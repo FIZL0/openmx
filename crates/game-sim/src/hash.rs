@@ -547,6 +547,45 @@ impl State for Sim {
         if !self.event.fresh() {
             w.field("event", &self.event);
         }
+        // A race's start (S13b), on a race: a walk without one is what it was.
+        if let Some(race) = &self.race {
+            w.field("race", &**race);
+        }
+    }
+}
+
+impl State for crate::race::Race {
+    /// The gate as it stands, the cards' memory of the riders, the clocks, the countdown and the
+    /// race's generator.
+    fn walk(&self, w: &mut Walk<'_>) {
+        let g = &self.gate;
+        w.group("gate", |w| {
+            w.u32("flags", g.flags);
+            w.vf("centre", g.centre);
+            w.vf("normal", g.normal);
+            w.vf("across", g.across);
+            w.f("width", g.width);
+            w.f("height", g.height);
+            w.f("reach_sq", g.reach_sq);
+        });
+        w.u32("cards", self.cards.len() as u32);
+        for c in &self.cards {
+            w.vf("now", c.now);
+            w.vf("last", c.last);
+        }
+        w.f("music_in", self.music_in);
+        w.bool("music_held", self.music_held);
+        w.f("tip_in", self.tip_in);
+        w.bool("stage", self.stage.is_some());
+        if let Some(s) = self.stage {
+            w.f("stage_length", s);
+        }
+        w.bool("tip_armed", self.tip_armed);
+        w.f("countdown.length", self.countdown.length);
+        w.f("countdown.elapsed", self.countdown.elapsed);
+        w.bool("countdown.running", self.countdown.running);
+        w.f("scene_clock", self.scene_clock);
+        w.field("rng", &self.rng);
     }
 }
 

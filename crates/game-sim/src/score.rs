@@ -124,7 +124,7 @@ pub struct Score {
     /// **The start-gate penalty (P158),** seconds (the card's `+0x1c0`): while it is above 0 the bike's
     /// tick cuts the gas ([`crate::ride::Controls::gas_cut`]), and the manager's tick runs it down.
     /// The original's race sets it to 1 + a random fraction when a rider crosses its closed start
-    /// gate; nothing in the port sets it yet, and the card's join sets it to 0.
+    /// gate ([`crate::race::Race::tick`], S13b), and the card's join sets it to 0.
     pub gate_penalty: F,
     /// **The port's own (P243): a crash locks the trick out.** The original banks a combo the frame
     /// both wheels touch, and a wreck a few ticks later on the same landing — the body slamming down,
