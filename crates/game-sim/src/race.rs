@@ -674,6 +674,8 @@ pub mod race_flags {
     pub const OVER_TOLD: u32 = 0x2000;
     /// The cards are ranked every tick.
     pub const RANKED: u32 = 0x4000;
+    /// The zone list is live: the handlers ask [`super::zone_crossings`] of every rider's step (S292).
+    pub const ZONES: u32 = 0x200;
 }
 
 /// The score manager's race kind (its `+0x60`). Not the event's activity type: a live sx01 single race
@@ -763,6 +765,12 @@ pub struct LapCard {
     pub lines_passed: Vec<u32>,
     /// The kept laps (`+0x1bc`), newest first.
     pub records: Vec<LapRecord>,
+    /// The gate race's next gate to pass, an index into its chain of gates (`+0x80`; `None` for none),
+    /// the gates passed this lap (`+0x84`) and in the whole run (`+0x38`). Only
+    /// [`LapRules::gate_line`] reads them.
+    pub gate: Option<usize>,
+    pub gates_this_lap: i32,
+    pub gates_passed: i32,
 }
 
 /// The track as the lap line reads it: the line, the spot on the path where it stands, and the
@@ -819,6 +827,8 @@ pub enum LineNotice {
     GhostReady,
     /// A lap was counted.
     Lap,
+    /// The rider went through the gate race's next gate ([`LapRules::gate_line`] only).
+    Gate,
 }
 
 /// A real-valued word compared as the FPU reads it.
@@ -961,6 +971,135 @@ impl LapRules {
 
 /// How far past the line's own spot a card set back on the line is put, so that it stands beyond it.
 const LINE_NUDGE: F = F(1e-5);
+
+// --- the gate race's line and the zones (S292) ------------------------------------------------------
+
+impl LapRules {
+    /// The gate race's line (the score manager's machine-race handler, and four activities of their
+    /// own, call it once a tick per card): the course is a chain of gates, `gates` in order, and the
+    /// card waits at [`LapCard::gate`]. True unless the card waits at no gate, or the lap could not be
+    /// counted because the clock ran backwards.
+    ///
+    /// Through the gate, the path length of the laps behind the card grows by the straight distance
+    /// from that gate to the next one (to the first one from the last), and the card waits at the
+    /// next. Through the last gate a lap is counted much as [`LapRules::line`] counts one — its time,
+    /// a best lap when it is quicker or the card has none (zero or less), the lap's start, a lap
+    /// record — but no flag holds the lap back, and a ghost race starts the run over from the first
+    /// gate with the lap's length behind it (see [`LapRules::gate_run_over`]). Through any other gate,
+    /// a fast-lap attack clears [`card_flags::FAST_LAP`]. Beside the gate only tells the listeners.
+    /// Whatever the step did (but a backwards clock), in a race that ends at the line a card with its
+    /// laps is [`card_flags::OUT`] again, and the listeners hear it again, every call.
+    pub fn gate_line(&mut self, card: &mut LapCard, ghost: Option<&mut LapCard>, gates: &[Gate]) -> (bool, Vec<LineNotice>) {
+        let mut said = Vec::new();
+        let Some(at) = card.gate else { return (false, said) };
+        // The race clock is read before anything is told.
+        let race_time = card.race_time;
+        match gates[at].crossed(card.seen.now, card.seen.last) {
+            Crossing::Through => {
+                said.push(LineNotice::Through);
+                let next = (at + 1 < gates.len()).then_some(at + 1);
+                let to = gates[next.unwrap_or(0)].centre.sub(gates[at].centre);
+                card.laps_length = F(fpu::add(card.laps_length.0, fpu::sqrt(dot3(to, to).0)));
+                card.gate = next;
+                card.gates_this_lap = card.gates_this_lap.wrapping_add(1);
+                card.gates_passed = card.gates_passed.wrapping_add(1);
+                said.push(LineNotice::Gate);
+                if next.is_none() {
+                    card.gate = Some(0);
+                    card.gates_this_lap = 0;
+                    card.laps = card.laps.wrapping_add(1);
+                    card.lap_clock = F::ZERO;
+                    let time = F(fpu::sub(race_time.0, card.lap_start.0));
+                    card.lap_time = time;
+                    if time < F::ZERO {
+                        card.lap_time = F::ZERO;
+                        return (false, said);
+                    }
+                    if time < read(card.best_lap) || read(card.best_lap) <= F::ZERO {
+                        card.best_lap = time;
+                        card.best_lap_no =
+                            if self.kind == race_kind::GHOST_RACE { card.runs } else { card.laps.wrapping_sub(1) };
+                        said.push(LineNotice::BestLap);
+                    }
+                    card.lap_start = race_time;
+                    if self.flags & race_flags::KEEP_LAPS != 0 {
+                        self.keep_lap(card);
+                    }
+                    if self.kind == race_kind::GHOST_RACE {
+                        if let Some(g) = ghost {
+                            self.gate_run_over(card, g, &mut said);
+                        }
+                    }
+                    said.push(LineNotice::Lap);
+                } else if self.kind == race_kind::FAST_LAP {
+                    card.flags &= !card_flags::FAST_LAP;
+                }
+            }
+            Crossing::Beside => said.push(LineNotice::Beside),
+            _ => {}
+        }
+        if self.kind != race_kind::PRACTICE && self.kind != race_kind::GHOST_RACE && self.laps <= card.laps {
+            card.flags |= card_flags::OUT;
+            self.flags |= race_flags::FINISHED;
+            said.push(LineNotice::Finished);
+        }
+        (true, said)
+    }
+
+    /// A ghost race's lap in the gate race. Unlike the line's ([`LapRules::line`]), the card keeps its
+    /// last lap's time and starts the run with its lap length already behind it, the ghost's card
+    /// takes the rider's lap length as its own laps behind it and is not moved, and the ghost counts
+    /// once the runs are in whether or not it has a best time.
+    fn gate_run_over(&mut self, card: &mut LapCard, g: &mut LapCard, said: &mut Vec<LineNotice>) {
+        card.lap_clock = F::ZERO;
+        card.lap_start = F::ZERO;
+        card.race_time = F::ZERO;
+        card.progress = F::ZERO;
+        card.laps_length = card.lap_length;
+        card.laps = 0;
+        card.runs = card.runs.wrapping_add(1);
+        card.gate = Some(0);
+        card.gates_passed = 0;
+        said.push(LineNotice::RunOver);
+        let best = read(card.best_lap);
+        if (best < read(g.best_lap) || is_zero(g.best_lap)) && !is_zero(card.best_lap) {
+            g.best_lap = card.best_lap;
+            said.push(LineNotice::GhostBest);
+        }
+        g.lap_time = F::ZERO;
+        g.lap_clock = F::ZERO;
+        g.lap_start = F::ZERO;
+        g.race_time = F::ZERO;
+        g.progress = F::ZERO;
+        g.laps_length = card.lap_length;
+        g.gate = Some(0);
+        g.gates_passed = 0;
+        g.laps = 0;
+        if card.runs >= self.ghost_runs {
+            g.flags |= card_flags::TAKING_PART;
+            said.push(LineNotice::GhostReady);
+        }
+    }
+}
+
+/// The zones a rider's step went through or past (the score manager's zone list, read with its
+/// [`race_flags`] zone bit by the machine-race and the stunt-mode handlers): each live zone in list
+/// order, with [`Crossing::Through`] or [`Crossing::Beside`]; the listeners are told each. Nothing
+/// else is kept.
+///
+/// The stunt-mode handler copies the rider's place into the tick before's ([`Seen::last`] =
+/// [`Seen::now`]) before it asks, so there the step never moves and no zone is ever crossed.
+pub fn zone_crossings(seen: Seen, zones: &[Gate]) -> Vec<(usize, Crossing)> {
+    zones
+        .iter()
+        .enumerate()
+        .filter(|(_, z)| z.flags & flags::CLOSED != 0)
+        .filter_map(|(k, z)| match z.crossed(seen.now, seen.last) {
+            c @ (Crossing::Through | Crossing::Beside) => Some((k, c)),
+            _ => None,
+        })
+        .collect()
+}
 
 // --- the track's paths, as the race asks them (S293) ------------------------------------------------
 
