@@ -42,11 +42,31 @@
 //!     node heights and a flag the walk after the load clears).
 //! 13. **The gates on their props**: the same image's grid gate, start gate and finish line against
 //!     [`Supercross::place_drop_gate`] and [`Supercross::place_finish_line`] on the image's own props.
+//! 14. **The track's paths** (S293), each on 20,000 generated courses of one to seven linked paths
+//!     (stray words, kept-off and unreached paths, short pools, signed-zero and denormal spots) laid
+//!     out as the track object holds them: the spot's point and the way ahead
+//!     ([`TrackPaths::spot_point`], [`TrackPaths::path_ahead`]); reach, distance, the route search, the
+//!     walk along a route and its release ([`TrackPaths::distance`], [`TrackPaths::route`],
+//!     [`TrackPaths::route_walk`], [`TrackPaths::free_route`]), compared on the answers, the lists, every
+//!     path's flags, distance and best link and the pools; the ring test ([`race::ring_holds`]).
+//! 15. **The spot search**: the track's own search for a rider's spot on the same courses, from any
+//!     kept spot, any reach (negative too) and lists of paths to come by, against
+//!     [`TrackPaths::find_spot`] on the answer (all three kinds), the spot, the distance, the paths and
+//!     the pools.
+//! 16. **The load's reach walk**: the walk from a path that clears the unreached mark, short pools and
+//!     stray marks included, against [`TrackPaths::mark_reached`].
+//! 17. **The race handler, per card**: the score manager's whole race tick on one card, 20,000
+//!     generated cards, courses and lines (every race kind, ghost cards, lap records, done and
+//!     waited-for cards, the off-track and time limits, steps through the line), its listeners hooked
+//!     and the manager's work after its cards held off, against [`RaceRules::look_for_waited_for`] and
+//!     [`RaceRules::card`], compared on every listener call in order, every word of the card and the
+//!     ghost's card, the manager's flags, the free records, and every path's words and the pools.
 
 use game_sim::chassis::{Chassis, Deriv};
 use game_sim::race::{
     self, CheckPart, Checkpoint, Course, Crossing, Gate, GridStart, LANES, LapCard, LapRecord, LapRules, LineNotice, Link,
-    PathNode, Prop, Race, RacePath, Refused, Seen, Spot, Supercross, TrackFile, TrackPath, TrackPaths, card_flags, flags, race_flags, race_kind,
+    PathNode, Prop, Race, RaceCard, RaceNotice, RacePath, RaceRules, Refused, Seen, Spot, Supercross, TrackFile, TrackPath, TrackPaths, card_flags,
+    flags, race_card_flags, race_flags, race_kind,
 };
 use game_sim::rng::Rng;
 use ps2_float::{F, Vf, fpu};
@@ -2204,10 +2224,18 @@ fn sx01s_race_file_off_the_disc_is_the_track_object_in_the_image() {
     assert_eq!(gate_words(&t.third.expect("a third gate")), gate_words(&ram.third.expect("a third gate")), "the third gate");
     assert!(t.grid.is_some() && t.line.is_some(), "the file has a grid gate and a line");
 
+    // The race's paths, the load's walk done: the image's flags exactly.
+    let walked = TrackPaths::new(&t).expect("sx01's paths walk");
+    assert_eq!(
+        walked.paths.iter().map(|p| p.flags).collect::<Vec<_>>(),
+        ram.paths.iter().map(|p| p.as_ref().expect("the image's path").flags).collect::<Vec<_>>(),
+        "the paths' flags after the walk"
+    );
     // The paths: every word but the points' heights, which the activity's loader puts on the ground.
     for (k, (a, b)) in t.paths.iter().zip(&ram.paths).enumerate() {
         let (a, b) = (a.as_ref().expect("the file's path"), b.as_ref().expect("the image's path"));
-        // The walk from path 0 after the load takes 0x80 off every path it reaches (unported).
+        // The walk from path 0 after the load takes 0x80 off every path it reaches (checked below,
+        // through `TrackPaths::new`).
         assert_eq!(
             (a.flags & !0x80, a.length.0.to_bits(), a.word_0c, a.checkpoint_count, &a.links),
             (b.flags & !0x80, b.length.0.to_bits(), b.word_0c, b.checkpoint_count, &b.links),
@@ -2825,4 +2853,330 @@ fn the_spot_search_matches_the_track_objects() {
         moved += usize::from(got != 0 && out != start);
     }
     assert!(answers.iter().all(|&k| k > 200) && moved > 3000, "{answers:?} {moved}");
+}
+
+/// A race card back out of RAM, its spots read back as path and node indices (see `put_t_spot`).
+fn race_card_at(ee: &Ee, at: u32, lines: usize) -> RaceCard {
+    let mut lap = lap_card_at(ee, at, lines);
+    lap.spot = t_spot_at(ee, at + 0x88);
+    lap.kept_spot = t_spot_at(ee, at + 0x94);
+    RaceCard {
+        lap,
+        on_path: f32_at(ee, at + 0x18),
+        odometer: f32_at(ee, at + 0x20),
+        aim: t_spot_at(ee, at + 0xa0),
+        split: f32_at(ee, at + 0xbc),
+        off_clock: f32_at(ee, at + 0xc0),
+        time_left: f32_at(ee, at + 0xc4),
+        look: quad(ee, at + 0x120),
+        ahead: quad(ee, at + 0x140),
+        fast_lap_clock: f32_at(ee, at + 0x168),
+        to_track: quad(ee, at + 0x180),
+    }
+}
+
+/// A race card into RAM at `at`, its spots pointing into the track `put_paths` lays out.
+fn put_race_card(ee: &mut Ee, at: u32, c: &RaceCard, lines: u32, records: u32) {
+    put_lap_card(ee, at, &c.lap, lines, records);
+    put_t_spot(ee, at + 0x88, c.lap.spot);
+    put_t_spot(ee, at + 0x94, c.lap.kept_spot);
+    put_t_spot(ee, at + 0xa0, c.aim);
+    for (o, x) in [(0x18, c.on_path), (0x20, c.odometer), (0xbc, c.split), (0xc0, c.off_clock), (0xc4, c.time_left), (0x168, c.fast_lap_clock)] {
+        put_f(ee, at + o, x);
+    }
+    put_quad(ee, at + 0x120, c.look);
+    put_quad(ee, at + 0x140, c.ahead);
+    put_quad(ee, at + 0x180, c.to_track);
+}
+
+fn race_card_words(c: &RaceCard) -> Vec<u64> {
+    let f = |x: F| u64::from(x.0.to_bits());
+    let mut v = lap_card_words(&c.lap);
+    v.extend([f(c.on_path), f(c.odometer), u64::from(c.aim.path), u64::from(c.aim.piece), f(c.aim.along)]);
+    v.extend([f(c.split), f(c.off_clock), f(c.time_left), f(c.fast_lap_clock)]);
+    for q in [c.look, c.ahead, c.to_track] {
+        v.extend(q.to_bits().map(u64::from));
+    }
+    v
+}
+
+/// Who hears a race notice, by listener slot, as `told` gives the lap line's.
+fn race_told(n: RaceNotice, owner: bool, chain: bool) -> Vec<(u32, u32)> {
+    let fan = |listener_first: bool, o: u32, l: u32| {
+        let mut v = Vec::new();
+        if listener_first {
+            v.push((TO_LISTENER, l));
+        }
+        if owner {
+            v.push((OWNER, o));
+        }
+        if chain {
+            v.push((CHAIN, o));
+        }
+        if !listener_first {
+            v.push((TO_LISTENER, l));
+        }
+        v
+    };
+    match n {
+        RaceNotice::Line(n) => told(n, owner, chain),
+        RaceNotice::Aim { .. } => {
+            let mut v = fan(false, 0x20, 0);
+            v.pop();
+            v
+        }
+        RaceNotice::OffTrack => fan(true, 0x5c, 0x6c),
+        RaceNotice::OffTooLong => fan(true, 0x60, 0x70),
+        RaceNotice::OutOfTime => fan(false, 0x64, 0x74),
+    }
+}
+
+/// A line standing across one of the paths, at a spot on it, facing along it (or any way).
+fn line_on(p: &mut Pick, t: &TrackPaths) -> (Gate, Spot) {
+    let mut s = t_spot_on(p, t);
+    let mut at = Vf::ZERO;
+    let mut ahead = Vf::ZERO;
+    if !t.spot_point(&mut s, &mut at) {
+        let (i, n) = s.at().unwrap();
+        at = t.paths[i].nodes[n].points[0];
+    }
+    let mut g = finish_line(p);
+    if p.below(4) != 0 {
+        if !t.path_ahead(s, &mut ahead) || p.below(5) == 0 {
+            let a = p.range(0.0, 6.3);
+            ahead = Vf([a.sin(), 0.0, a.cos(), 0.0]);
+        }
+        g.centre = Vf([at.x(), at.y() - 1.0, at.z(), 1.0]);
+        g.normal = Vf([ahead.x(), 0.0, ahead.z(), 0.0]);
+        g.across = Vf([ahead.z(), 0.0, -ahead.x(), 0.0]);
+        if p.below(3) != 0 {
+            g.width = F(p.range(3.0, 12.0));
+        }
+    }
+    (g, s)
+}
+
+#[test]
+fn the_race_handler_matches_the_score_managers_per_card() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let tick = match addr("score_race_tick") {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    let heard: Rc<RefCell<Vec<(u32, u32)>>> = Rc::default();
+    for who in [OWNER, CHAIN, TO_LISTENER] {
+        for slot in (0..0x80).step_by(4) {
+            let at = L_HOOKS + who * 0x100 + slot;
+            ee.set_u32(L_VT + who * 0x100 + slot, at);
+            let heard = heard.clone();
+            ee.hooks.insert(at, Box::new(move |_| heard.borrow_mut().push((who, slot))));
+        }
+    }
+    let mut p = Pick(0x7d02_c4e9_15ab_3f68);
+    let mut said = [0usize; 5];
+    let (mut laps, mut progressed, mut timed_off, mut ticked_off) = (0, 0, 0, 0);
+    for case in 0..20_000 {
+        let mut t = t_paths(&mut p);
+        let (g, line_spot) = line_on(&mut p, &t);
+        let course = Course { line: g, line_spot, lap_length: t.lap_length };
+        let lines = p.below(4) as usize;
+        let kind = [race_kind::PRACTICE, race_kind::SINGLE_RACE, race_kind::GHOST_RACE, race_kind::FAST_LAP, 0][p.below(5) as usize];
+        // The manager's own work after its cards stays out of the way: no countdown, its end-of-race
+        // calls made already, a finished race (which returns before the next handlers), no ranking.
+        let mut lap_flags = (p.next() as u32 & !0x7e56) | race_flags::FINISHED | 0x2000;
+        if p.below(2) == 0 {
+            lap_flags |= race_flags::KEEP_LAPS;
+        }
+        let mut rules = RaceRules {
+            lap: LapRules {
+                flags: lap_flags,
+                kind,
+                laps: 1 + p.below(6) as i32,
+                ghost_runs: p.below(5) as i32,
+                record_limit: p.below(12) as i32,
+                free_records: p.below(4) as u32,
+            },
+            below_limit: match p.below(3) {
+                0 => F::ZERO,
+                1 => F(-p.range(0.0, 3.0)),
+                _ => F(p.range(0.5, 6.0)),
+            },
+            time_limit: if p.below(3) == 0 { F::ZERO } else { F(p.range(10.0, 300.0)) },
+            off_limit: F(p.range(0.0, 5.0)),
+            aim_reach: F(p.range(0.0, 2.0)),
+        };
+        let mut lap = lap_card(&mut p, lines);
+        for (bit, odds) in [
+            (race_card_flags::WAITED_FOR, 2),
+            (race_card_flags::WAITED_FOR_TOO, 4),
+            (race_card_flags::FAST_LAP_CLOCK, 2),
+            (race_card_flags::OUT_OF_TIME, 12),
+            (race_card_flags::CLOCK_HELD, 6),
+            (race_card_flags::OFF_TRACK_LIMIT, 2),
+            (race_card_flags::NOT_WAITED_FOR, 8),
+        ] {
+            if p.below(odds) == 0 { lap.flags |= bit } else { lap.flags &= !bit }
+        }
+        lap.flags |= card_flags::TAKING_PART;
+        if p.below(8) == 0 {
+            lap.flags &= !card_flags::TAKING_PART;
+        }
+        if p.below(2) == 0 {
+            lap.flags &= !card_flags::OUT;
+        }
+        lap.kept_spot = t_spot_on(&mut p, &t);
+        lap.spot = if p.below(3) == 0 { lap.kept_spot } else { t_spot_on(&mut p, &t) };
+        let (now, last) = match p.below(4) {
+            0 => {
+                let (i, n) = lap.kept_spot.at().unwrap();
+                let q = t.paths[i].nodes[n].points[0];
+                let now = Vf([q.x() + p.range(-15.0, 15.0), q.y() + p.range(-8.0, 3.0), q.z() + p.range(-15.0, 15.0), 1.0]);
+                (now, Vf([now.x() + p.range(-3.0, 3.0), now.y(), now.z() + p.range(-3.0, 3.0), p.range(0.0, 1.0)]))
+            }
+            _ => {
+                // A step at the line, the card kept on the path just short of it.
+                if p.below(4) != 0 {
+                    let along = if p.below(3) == 0 { line_spot.along } else { F(line_spot.along.0 * p.unit()) };
+                    lap.kept_spot = Spot { along, ..line_spot };
+                    lap.spot = lap.kept_spot;
+                }
+                if p.below(2) == 0 {
+                    step(&mut p, &g)
+                } else {
+                    // Straight through the middle of the line, a short step.
+                    let side = p.range(-0.4, 0.4) * g.width.0.clamp(0.0, 60.0);
+                    let up = p.range(0.2, 3.0);
+                    let (len, t) = (p.range(0.3, 6.0), p.unit());
+                    let (n, a, c) = (g.normal, g.across, g.centre);
+                    let on = [0, 1, 2].map(|i| c.0[i] + a.0[i] * side + if i == 1 { up } else { 0.0 });
+                    let to = [0, 1, 2].map(|i| on[i] - n.0[i] * len * t);
+                    let from = [0, 1, 2].map(|i| on[i] + n.0[i] * len * (1.0 - t));
+                    (Vf([from[0], from[1], from[2], 1.0]), Vf([to[0], to[1], to[2], p.unit()]))
+                }
+            }
+        };
+        lap.seen = Seen { now, last };
+        let lap_no = if kind == race_kind::GHOST_RACE { lap.runs + 1 } else { lap.laps + 1 };
+        if lap_no >= rules.lap.record_limit && lap.records.is_empty() {
+            lap.records.push(record(&mut p));
+        }
+        let dt = F([1.0 / 30.0, 1.0 / 60.0, 0.0, 0.1][p.below(4) as usize]);
+        let mut card = RaceCard {
+            lap,
+            on_path: time_word(&mut p, 150.0),
+            odometer: time_word(&mut p, 5000.0),
+            aim: t_spot_on(&mut p, &t),
+            split: time_word(&mut p, 30.0),
+            off_clock: if p.below(3) == 0 { F(p.range(4.0, 6.0)) } else { time_word(&mut p, 5.0) },
+            time_left: match p.below(4) {
+                0 => F::ZERO,
+                1 => F(p.range(0.0, 0.05)),
+                _ => time_word(&mut p, 100.0),
+            },
+            look: p.quad([0.0, 0.0, 0.0]),
+            ahead: p.quad([0.0, 0.0, 0.0]),
+            fast_lap_clock: time_word(&mut p, 90.0),
+            to_track: p.quad([0.0, 0.0, 0.0]),
+        };
+        let owner = p.below(5) != 0;
+        let chain = p.below(3) == 0;
+        let mut ghost = (owner && p.below(5) != 0).then(|| {
+            let mut g = lap_card(&mut p, lines);
+            g.spot = t_spot_on(&mut p, &t);
+            g.kept_spot = t_spot_on(&mut p, &t);
+            g
+        });
+        let leader = card.lap.race_time;
+
+        put_paths(&mut ee, &mut p, &t);
+        ee.set_u32(T_TRACK + 0x5c, L_LINE);
+        put_gate(&mut ee, L_LINE, &g);
+        put_t_spot(&mut ee, L_LINE + 0x94, line_spot);
+        ee.set_u32(L_MGR + 0x30, L_LISTENER);
+        ee.set_u32(L_MGR + 0x34, L_CARD);
+        ee.set_u32(L_MGR + 0x4c, rules.lap.record_limit as u32);
+        ee.set_u32(L_MGR + 0x5c, rules.lap.flags);
+        ee.set_u32(L_MGR + 0x60, kind as u32);
+        ee.set_u32(L_MGR + 0x68, T_TRACK);
+        ee.set_u32(L_MGR + 0x88, lines as u32);
+        ee.set_u32(L_MGR + 0x94, rules.lap.laps as u32);
+        put_f(&mut ee, L_MGR + 0x98, F::ZERO);
+        put_f(&mut ee, L_MGR + 0x9c, F::ZERO);
+        put_f(&mut ee, L_MGR + 0xa0, rules.time_limit);
+        put_f(&mut ee, L_MGR + 0xb8, rules.below_limit);
+        put_f(&mut ee, L_MGR + 0xd4, rules.off_limit);
+        put_f(&mut ee, L_MGR + 0xd8, rules.aim_reach);
+        ee.set_u32(L_MGR + 0xf0, rules.lap.ghost_runs as u32);
+        for k in 0..rules.lap.free_records {
+            let next = if k + 1 < rules.lap.free_records { L_POOL + 0x20 * (k + 1) } else { 0 };
+            put_record(&mut ee, L_POOL + 0x20 * k, &record(&mut p), next);
+        }
+        ee.set_u32(L_MGR + 0x58, if rules.lap.free_records == 0 { 0 } else { L_POOL });
+        ee.set_u32(L_LISTENER + 4, 0);
+        ee.set_u32(L_LISTENER + 0x1c, L_VT + TO_LISTENER * 0x100);
+        put_race_card(&mut ee, L_CARD, &card, L_LINES, L_RECORDS);
+        ee.set_u32(L_CARD + 4, if owner { L_OWNER } else { 0 });
+        ee.set_u32(L_CARD + 0x1c4, if chain { L_CHAIN } else { 0 });
+        ee.set_u32(L_CARD + 0x1c8, 0);
+        ee.set_u32(L_OWNER + 8, if ghost.is_some() { L_GHOST } else { 0 });
+        ee.set_u32(L_OWNER + 0x1c, 0);
+        ee.set_u32(L_OWNER + 0x20, L_VT + OWNER * 0x100);
+        ee.set_u32(L_CHAIN + 0x1c, 0);
+        ee.set_u32(L_CHAIN + 0x20, L_VT + CHAIN * 0x100);
+        if let Some(gc) = &ghost {
+            put_lap_card(&mut ee, L_GHOST, gc, L_GHOST_LINES, L_RECORDS + 0x400);
+            put_t_spot(&mut ee, L_GHOST + 0x88, gc.spot);
+            put_t_spot(&mut ee, L_GHOST + 0x94, gc.kept_spot);
+        }
+        // The route list the handler never sets (see `RaceRules::card`), and low memory's words.
+        let stale = ee.stack - 4;
+        ee.set_u32(stale, 0);
+        ee.set_u32(0x14, 0);
+        ee.set_u32(0x54, 0);
+        heard.borrow_mut().clear();
+        ee.call(tick, &[u64::from(L_MGR)], &[dt.0], BUDGET * 20);
+        let answer = ee.v0() as u32;
+
+        let before = card.clone();
+        rules.look_for_waited_for([card.lap.flags]);
+        let notices = rules.card(dt, &mut card, ghost.as_mut(), &mut t, &course, leader);
+        let what = format!("case {case}: kind {kind}, {:?} -> {notices:?}", before.lap.flags);
+        assert_eq!(answer, 1, "{what}: the answer");
+        let mut want: Vec<(u32, u32)> = if owner { vec![(OWNER, 8)] } else { vec![] };
+        want.extend(notices.iter().flat_map(|&n| race_told(n, owner, chain)));
+        assert_eq!(*heard.borrow(), want, "{what}: the listeners");
+        assert_eq!(race_card_words(&race_card_at(&ee, L_CARD, lines)), race_card_words(&card), "{what}: the card");
+        if let Some(gc) = &ghost {
+            let mut got = lap_card_at(&ee, L_GHOST, lines);
+            got.spot = t_spot_at(&ee, L_GHOST + 0x88);
+            got.kept_spot = t_spot_at(&ee, L_GHOST + 0x94);
+            assert_eq!(lap_card_words(&got), lap_card_words(gc), "{what}: the ghost's card");
+        }
+        assert_eq!(ee.u32_at(L_MGR + 0x5c), rules.lap.flags, "{what}: the manager's flags");
+        check_paths(&ee, &t, &what);
+        let mut free = 0;
+        let mut r = ee.u32_at(L_MGR + 0x58);
+        while r != 0 && free < 64 {
+            free += 1;
+            r = ee.u32_at(r + 0x14);
+        }
+        assert_eq!(free, rules.lap.free_records, "{what}: the free records");
+        for n in &notices {
+            said[match n {
+                RaceNotice::Line(_) => 0,
+                RaceNotice::Aim { .. } => 1,
+                RaceNotice::OffTrack => 2,
+                RaceNotice::OffTooLong => 3,
+                RaceNotice::OutOfTime => 4,
+            }] += 1;
+        }
+        laps += usize::from(notices.contains(&RaceNotice::Line(LineNotice::Lap)));
+        progressed += usize::from(card.lap.progress.0.to_bits() != before.lap.progress.0.to_bits());
+        timed_off += usize::from(card.lap.flags & card_flags::OUT != 0 && before.lap.flags & card_flags::OUT == 0 && card.lap.laps == rules.lap.laps);
+        ticked_off += usize::from(card.off_clock != before.off_clock);
+    }
+    assert!(
+        said.iter().all(|&k| k > 200) && laps > 300 && progressed > 1000 && timed_off > 300 && ticked_off > 3000,
+        "{said:?} laps {laps} progressed {progressed} out {timed_off} off-clock {ticked_off}"
+    );
 }

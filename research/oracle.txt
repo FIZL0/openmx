@@ -903,6 +903,13 @@ score_race_tick             boot 0x00262aa0 (dt f12, mgr) the score manager's ra
 #                                           off-track clock +0xc0 against mgr+0xd4, the time limit
 #                                           +0xc4, then the 30 s (mgr+0x9c) finish countdown, ranking,
 #                                           0x00261b80 / 0x002628f0. Only the lap line is ported (S13c).
+#                                           S293: per card as RaceRules::card (+ look_for_waited_for for
+#                                           the opening flag-2 scan); the finish estimate (mgr flag 2,
+#                                           card not out) times off *(mgr+0x34)+0xb4 + card +0xbc. The
+#                                           route list sp+0x15c is never set (stale stack). Not ported:
+#                                           0x00267d90 (card 0x80000), the line lists, 0x00268350 /
+#                                           0x00268660 (mgr 0x800/0x1000), the computer aim 0x0026d780
+#                                           (card 0x800000), and everything after the card loop.
 # S13e: the track's race file. Not in Tracks\sx01.res: it is tracks\sx01\sx01.tdf inside
 # Tracks\sx01_2.res (with sx01ai.tdf, supercross.aty, sx01.wpt, hit.dat).
 track_ctor                  boot 0x002693c0 (track) the track object (the score manager's +0x68 =
