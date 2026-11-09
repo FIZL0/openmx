@@ -22,6 +22,7 @@ use std::time::Duration;
 use crate::clock::Instant;
 
 use game_render::mat::{M4, V3};
+use game_render::scene::Placement;
 use game_render::world::Camera;
 use game_sim::tick::{Engine, Timer0, clock_ms};
 
@@ -321,6 +322,14 @@ impl Blend {
             out.0[i][3] = self.f(a.0[i][3], b.0[i][3]);
         }
         out
+    }
+
+    /// A scene prop's placement (V126): its transform blended as [`Blend::at`] does, a jump not
+    /// blended, and read back as a place, a facing and an up.
+    pub fn placement(&self, a: &Placement, b: &Placement) -> Placement {
+        let m = self.at(a.transform(), b.transform());
+        let row = |i: usize| V3 { x: m.0[i][0], y: m.0[i][1], z: m.0[i][2] };
+        Placement { model: b.model.clone(), pos: row(3), look: row(2), up: row(1) }
     }
 
     /// A pose: every node's matrix blended as [`Blend::at`] does, when the two are poses of the same
@@ -821,5 +830,31 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A knocked ball rolling (V126): drawn at blend 0.5 halfway between its two ticks' places,
+    /// turned halfway with its axes kept whole, and a jump (a reset) drawn where it lands.
+    #[test]
+    fn a_rolling_prop_is_drawn_between_its_ticks() {
+        let v = |x: f32, y: f32, z: f32| V3 { x, y, z };
+        let at = |pos: V3, look: V3, up: V3| Placement { model: "ball".into(), pos, look, up };
+        let (s, c) = (0.5f32.sin(), 0.5f32.cos());
+        // A quarter-radian roll about x apart, and two feet down the hill.
+        let before = at(v(10.0, 5.0, 20.0), v(0.0, 0.0, 1.0), v(0.0, 1.0, 0.0));
+        let now = at(v(10.0, 4.0, 22.0), v(0.0, -s, c), v(0.0, c, s));
+        let mid = Blend(0.5).placement(&before, &now);
+        assert_eq!(mid.model, "ball");
+        assert!(mid.pos.sub(v(10.0, 4.5, 21.0)).len() < 1e-5, "{:?}", mid.pos);
+        let (s4, c4) = (0.25f32.sin(), 0.25f32.cos());
+        let m = mid.transform();
+        let row = |i: usize| v(m.0[i][0], m.0[i][1], m.0[i][2]);
+        assert!(row(2).sub(v(0.0, -s4, c4)).len() < 1e-5, "{:?}", row(2));
+        assert!(row(1).sub(v(0.0, c4, s4)).len() < 1e-5, "{:?}", row(1));
+        // The ends are the two ticks.
+        assert!(Blend(0.0).placement(&before, &now).pos.sub(before.pos).len() < 1e-6);
+        assert!(Blend(1.0).placement(&before, &now).pos.sub(now.pos).len() < 1e-6);
+        // Put back past SNAP: not slid across.
+        let reset = at(v(10.0 + SNAP * 2.0, 5.0, 20.0), v(0.0, 0.0, 1.0), v(0.0, 1.0, 0.0));
+        assert_eq!(Blend(0.5).placement(&now, &reset).pos, reset.pos);
     }
 }
