@@ -10528,3 +10528,27 @@ atv_heap_free               atv 0x001b76d0 = free
 # 2 if & this+0x30). C15: every pair is a plant sphere (kind 5; e.g. 0x01cca670, radius 4, r2 16, category
 # 0x80): ride-2 432 pairs / 141 struck, flip-1 161 / 55; never a mesh, hierarchy or kind 6; no struck
 # listeners or callbacks; 0x00106180 and 0x00106e30 = atv_part's over 40 000 random each.
+# S287: the rider's riding reset 0x004eef40 (a0 rider, f12 dt; the mode machine's into 1 and into 4),
+# ported as game_sim::handling::rider::riding_reset (ignore = 0x00115600; body_mass, body_inertia,
+# body_at, body_target = the bodies' vt +0x18/+0x60/+0x20/+0x68). tests/mxvatv_rider_modes.rs. Journal:
+# research/journal/2026-11-09-s287-riding-reset/.
+#   +0x25c 0: vt +0xd0 (a1 0, dt kept in f12), vt +0xcc. World *(+0x27c): +0 = +0x544 (lw/sw), +4 =
+#   +0x54c (lwc1/swc1); state 4: 3, 27.0 (already so). Switch slot (part+0x10 vt +0x10, 0x0049bd30) on 1:
+#   +0x550, +0x554, +0x558, +0x55c, +0x578; then +0x57c..+0x588 on (+0x4f0 != 0); force +0x5bc (vt at +8,
+#   0x0049bd80) off. Parts i < +0x5b0 (re-read): switch 0, +0x14 = 0, record +0x378 != 0:
+#   0x00115600(part+0x88 sphere, record+0x1dc).
+#   0x00115600(shape, c): c 0 returns; n = +0xe8 read once; n > 0: list +0xe4 (read at each loop's start)
+#   holds c -> return; else first 0 entry = c, return; else +0xe4 = 0x001b7470(+0xe4, (n+1)*4, 0x0039683e,
+#   0x4cf) (the heap's resize), +0xe4[+0xe8] = c, +0xe8 += 1 (each re-read).
+#   Joints: i < +0x3ac (re-read), e = +0x3b0 + 0x50 i, j = e+8: j+0x80 = 0; f3 = e+0xc; lq e+0x10 ->
+#   j+0xe0, e+0x20 -> j+0xf0; per axis k: j+0x100+4k = mul(mul(2.0, j+0xf0+4k), sqrt.s(mul(*(j+0x7c)+0x130+4k,
+#   j+0xe0+4k))), *(j+0x7c) re-read each axis; j+0xd4 = f3. State 4: 17 joints, the +0x7c's are bodies
+#   (their +0x130 the inertia vt +0x60 sets).
+#   Bodies: i < +0x290 (re-read), body = *(*(+0x2a4) + 0xb0 i + 0xa4), e = +0x3a8 + 0x60 i: vt (+0x110)
+#   +0x18 0x00493cc0 (f12 = e+0: +0x18 = f12, +0x1c = div(1, +0x18)); +0x60 0x00493bf0 (a1 e+0x10: a1+0xc =
+#   1.0 (sw), lq a1 -> +0x130, per axis +0x140+4k = a1[k] <= 0 (c.ole.s) ? 0 : div(1, a1[k])); +0x68
+#   0x00493b00 (a1 e+0x30); +0x20 0x00493b20 (+0x30 = lq 0x00396fd0, rodata (1,1,1,1)).
+#   Then +0x38c = +0x264 = +0x254 = 1.
+#   Oracle: 20 000 cases of state 4's rider, the whole function in the interpreter (pose, settle and the
+#   switch slots hooked to log, the resize hooked to a fake on both sides), every written word and the call
+#   log equal; flip-1's put back (row 193) replays bit-exact with the reset served by the port.

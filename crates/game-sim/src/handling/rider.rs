@@ -34,6 +34,10 @@
 //! [`settle`] (S286): the ragdoll's bodies started where the skeleton's bones are, then made to be
 //! there.
 //!
+//! The riding reset the machine calls into modes 1 and 4 ([`Call::RidingReset`]) is
+//! [`riding_reset`] (S287): the holds and parts switched back for riding, the parts ignoring the bike
+//! again ([`ignore`]), the joints' springs and the bodies' masses, inertias and targets put back.
+//!
 //! After the frame, the rider's listener step copies the wreck's two spots into the record
 //! ([`wreck_spots`], F31b5i): with [`hand_over`], every word the rider writes into the bike's record.
 //!
@@ -264,6 +268,15 @@ pub enum Call {
     /// A ragdoll body's vt `+0x68`: its `+0x150` quadword from `from` (on the rider's own bodies,
     /// [`body_target`]).
     BodyTarget { body: u32, from: u32 },
+    /// The riding reset's (S287): a body's vt `+0x18`, its mass (the float's bits, in `f12`)
+    /// ([`body_mass`]); its vt `+0x60`, its inertia from the quadword at `from` ([`body_inertia`]); its
+    /// vt `+0x20`, its `+0x30` from the quadword at `from` ([`body_at`]).
+    BodyMass { body: u32, mass: u32 },
+    BodyInertia { body: u32, from: u32 },
+    BodyAt { body: u32, from: u32 },
+    /// The heap's resize of a shape's ignore list (`list` to `bytes`, [`ignore`]): its answer the
+    /// list's new address, the old entries in it.
+    Grow { list: u32, bytes: u32 },
 }
 
 /// The mode machine's RAM and calls; [`Rider::call`]'s answer is `v0` (only [`Call::Rand`]'s is read).
@@ -283,9 +296,10 @@ fn byte(m: &mut impl Ram, at: u32) -> u32 {
     (m.word(at & !3) >> (8 * (at & 3))) & 0xff
 }
 
+/// A quadword moved as `lq`/`sq` move it: the raw words (S287: through [`Vf`] a denormal would come
+/// out flushed).
 fn copy_quad(m: &mut impl Ram, to: u32, from: u32) {
-    let v = quad(m, from);
-    put_quad(m, to, v);
+    copy_words(m, to, from);
 }
 
 /// The respawn count's start: 1 if the rider's `+0x3a4` is 0 or 1, else `other`.
@@ -1020,4 +1034,173 @@ pub fn settle(m: &mut impl Ram, rider: u32) {
         bike_wreck::body_commit(&mut Bodies(m), body);
         i += 1;
     }
+}
+
+// --- S287: the riding reset -------------------------------------------------------------------------
+
+/// The riding reset's words: the ragdoll left as it is (`+0x25c`, else posed and settled first); the
+/// world's iterations and rate for riding (`+0x544`, `+0x54c`, into the world's `+0` and `+4`); the
+/// parts always switched on (the four holds, `+0x550..+0x55c`, and `+0x578`) and the four switched on
+/// only with `+0x4f0` (`+0x57c..+0x588`); the three latches set at the end (`+0x38c`, `+0x264`
+/// [`TARGETED`], `+0x254`). The pose list's entries (`+0x3b0`, `0x50` each) hand their joint (`+8`)
+/// its strength (`+0x10`), its damping ratio (`+0x20`) and `+0xc`; the body list's (`+0x3a8`, `0x60`
+/// each) hand their body its mass (`+0`), inertia (`+0x10`) and target (`+0x30`).
+pub const LEFT_AS_IS: u32 = 0x25c;
+pub const RIDE_ITERATIONS: u32 = 0x544;
+pub const RIDE_RATE: u32 = 0x54c;
+pub const RIDE_ON: [u32; 5] = [0x550, 0x554, 0x558, 0x55c, 0x578];
+pub const RIDE_EXTRA: u32 = 0x4f0;
+pub const RIDE_EXTRA_PARTS: [u32; 4] = [0x57c, 0x580, 0x584, 0x588];
+/// The quadword the reset puts at every body's `+0x30`: rodata's `(1, 1, 1, 1)`, after [`ORIGIN`].
+pub const ONES: u32 = 0x0039_6fd0;
+
+/// **The rider put back on the bike** (the mode machine's [`Call::RidingReset`], into modes 1 and 4):
+/// unless `+0x25c`, the ragdoll posed ([`Call::Pose`]) and settled ([`Call::Settle`]); the world's
+/// iterations and rate the riding ones; the holds and `+0x578` switched on, the four extra parts on or
+/// off by `+0x4f0`, the aim force off; every part of the list off, its touched flag 0, and with a
+/// record its sphere ignoring the record's collidable ([`ignore`]); every joint of the pose list
+/// stopped (`+0x80` 0) and given its entry's strength, damping ratio and damping (ratio × 2 ×
+/// √(its second body's (`+0x7c`) inertia × strength), per axis) and `+0xd4`; every body given its mass, inertia, target and
+/// `(1, 1, 1, 1)` at its `+0x30` (its vt `+0x18`, `+0x60`, `+0x68`, `+0x20`); then `+0x38c`, `+0x264` and `+0x254`
+/// set. Every count is re-read after each entry.
+pub fn riding_reset(m: &mut impl Rider, rider: u32, dt: F) {
+    if m.word(rider + LEFT_AS_IS) == 0 {
+        m.call(Call::Pose, dt);
+        m.call(Call::Settle, dt);
+    }
+    let it = m.word(rider + RIDE_ITERATIONS);
+    let world = m.word(rider + WORLD);
+    m.set(world, it);
+    let rate = m.word(rider + RIDE_RATE);
+    let world = m.word(rider + WORLD);
+    m.set(world + 4, rate);
+    for o in RIDE_ON {
+        switch_part(m, rider, o, 1, dt);
+    }
+    let on = u32::from(m.word(rider + RIDE_EXTRA) != 0);
+    for o in RIDE_EXTRA_PARTS {
+        switch_part(m, rider, o, on, dt);
+    }
+    switch_part(m, rider, AIM_FORCE, 0, dt);
+    let mut i = 0u32;
+    while (i as i32) < m.word(rider + PARTS_COUNT) as i32 {
+        let part = part_at(m, rider, i);
+        m.call(Call::Switch { part, on: 0 }, dt);
+        let part = part_at(m, rider, i);
+        m.set(part + TOUCHED, 0);
+        let rec = m.word(rider + RECORD);
+        if rec != 0 {
+            let part = part_at(m, rider, i);
+            let sphere = m.word(part + SPHERE);
+            let c = m.word(rec + R_COLLIDABLE);
+            ignore(m, sphere, c, dt);
+        }
+        i += 1;
+    }
+    let mut i = 0u32;
+    while (i as i32) < m.word(rider + 0x3ac) as i32 {
+        let e = m.word(rider + 0x3b0).wrapping_add(i.wrapping_mul(0x50));
+        let joint = m.word(e + 8);
+        m.set(joint + 0x80, 0);
+        let e = m.word(rider + 0x3b0).wrapping_add(i.wrapping_mul(0x50));
+        let joint = m.word(e + 8);
+        let d4 = m.word(e + 0xc);
+        copy_quad(m, joint + 0xe0, e + 0x10);
+        copy_quad(m, joint + 0xf0, e + 0x20);
+        for k in 0..3 {
+            let other = m.word(joint + 0x7c);
+            let ratio = fpu::mul(2.0, fw(m, joint + 0xf0 + 4 * k));
+            let mk = fpu::mul(fw(m, other + 0x130 + 4 * k), fw(m, joint + 0xe0 + 4 * k));
+            put_f(m, joint + 0x100 + 4 * k, fpu::mul(ratio, fpu::sqrt(mk)));
+        }
+        m.set(joint + 0xd4, d4);
+        i += 1;
+    }
+    let mut i = 0u32;
+    while (i as i32) < m.word(rider + BODIES) as i32 {
+        let body = body_of(m, rider, i);
+        let e = poses(m, rider, i);
+        let mass = m.word(e);
+        m.call(Call::BodyMass { body, mass }, dt);
+        let (body, e) = (body_of(m, rider, i), poses(m, rider, i));
+        m.call(Call::BodyInertia { body, from: e + 0x10 }, dt);
+        let (body, e) = (body_of(m, rider, i), poses(m, rider, i));
+        m.call(Call::BodyTarget { body, from: e + 0x30 }, dt);
+        let body = body_of(m, rider, i);
+        m.call(Call::BodyAt { body, from: ONES }, dt);
+        i += 1;
+    }
+    m.set(rider + 0x38c, 1);
+    m.set(rider + TARGETED, 1);
+    m.set(rider + 0x254, 1);
+}
+
+/// The `i`th part of the list.
+fn part_at(m: &mut impl Ram, rider: u32, i: u32) -> u32 {
+    let list = m.word(rider + PARTS);
+    m.word(list.wrapping_add(4 * i))
+}
+
+/// The body of the `i`th holder, and the `i`th entry of the body list.
+fn body_of(m: &mut impl Ram, rider: u32, i: u32) -> u32 {
+    let holder = m.word(rider + MAIN).wrapping_add(i.wrapping_mul(0xb0));
+    m.word(holder + H_BODY)
+}
+
+fn poses(m: &mut impl Ram, rider: u32, i: u32) -> u32 {
+    m.word(rider + POSES).wrapping_add(i.wrapping_mul(0x60))
+}
+
+/// **A collidable put on a shape's ignore list** (not 0, and not there already): the count read once;
+/// the first empty entry takes it, else the list grows by one entry ([`Call::Grow`]) and it goes last.
+pub fn ignore(m: &mut impl Rider, shape: u32, collidable: u32, dt: F) {
+    if collidable == 0 {
+        return;
+    }
+    let n = m.word(shape + S_IGNORE_COUNT);
+    if n as i32 > 0 {
+        let list = m.word(shape + S_IGNORE);
+        if (0..n).any(|i| m.word(list.wrapping_add(4 * i)) == collidable) {
+            return;
+        }
+        let list = m.word(shape + S_IGNORE);
+        if let Some(i) = (0..n).find(|&i| m.word(list.wrapping_add(4 * i)) == 0) {
+            m.set(list.wrapping_add(4 * i), collidable);
+            return;
+        }
+    }
+    let list = m.word(shape + S_IGNORE);
+    let new = m.call(Call::Grow { list, bytes: n.wrapping_add(1).wrapping_mul(4) }, dt);
+    m.set(shape + S_IGNORE, new);
+    let n = m.word(shape + S_IGNORE_COUNT);
+    let list = m.word(shape + S_IGNORE);
+    m.set(list.wrapping_add(n.wrapping_mul(4)), collidable);
+    let n = m.word(shape + S_IGNORE_COUNT);
+    m.set(shape + S_IGNORE_COUNT, n.wrapping_add(1));
+}
+
+/// **A ragdoll body's vt `+0x18`: its mass** (the float's bits) at `+0x18`, and `1 / mass` at `+0x1c`.
+pub fn body_mass(m: &mut impl Ram, body: u32, mass: u32) {
+    m.set(body + 0x18, mass);
+    let x = fw(m, body + 0x18);
+    put_f(m, body + 0x1c, fpu::div(1.0, x));
+}
+
+/// **A ragdoll body's vt `+0x60`: its inertia** from the quadword at `from`: `from`'s `w` set to 1
+/// first, the quadword copied to the body's `+0x130`, and each of `x`, `y`, `z`'s inverse (0 where it
+/// is not above 0) to its `+0x140`.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
+pub fn body_inertia(m: &mut impl Ram, body: u32, from: u32) {
+    m.set(from + 0xc, 0x3f80_0000);
+    copy_quad(m, body + 0x130, from);
+    for k in 0..3 {
+        let x = op(m, from + 4 * k);
+        let inv = if x <= 0.0 { 0.0 } else { fpu::div(1.0, x) };
+        put_f(m, body + 0x140 + 4 * k, inv);
+    }
+}
+
+/// **A ragdoll body's vt `+0x20`**: its `+0x30` quadword the one at `from`.
+pub fn body_at(m: &mut impl Ram, body: u32, from: u32) {
+    copy_quad(m, body + 0x30, from);
 }

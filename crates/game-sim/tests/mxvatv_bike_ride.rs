@@ -15143,6 +15143,11 @@ const RIDER_WRECK_ENTRY: u32 = 0x004e_d700;
 const RIDER_POSE: u32 = 0x0050_5720;
 const RIDER_SETTLE_VT: u32 = 0x0050_5710;
 const RIDER_BODY_TARGET: u32 = 0x0049_3b00;
+/// The riding reset's (S287): the bodies' vt `+0x18`, `+0x60`, `+0x20`, and the heap's resize.
+const RIDER_BODY_MASS: u32 = 0x0049_3cc0;
+const RIDER_BODY_INERTIA: u32 = 0x0049_3bf0;
+const RIDER_BODY_AT: u32 = 0x0049_3b20;
+const HEAP_RESIZE: u32 = 0x001b_7470;
 
 thread_local! {
     /// What [`rider_leaf`] served in Rust, by name, over a replay.
@@ -15178,8 +15183,10 @@ fn call_from_hook_dt(ee: &mut Ee, f: u32, ints: &[u64], dt: F) -> u64 {
     v
 }
 
-/// The mode machine's outside calls from inside its hook: the bodies' vt `+0x68` the port's
-/// ([`rider::body_target`]), every other the original's (S286-S289 port them).
+/// The mode machine's outside calls from inside its hook: the riding reset the port's
+/// ([`rider::riding_reset`], S287) and the bodies' virtuals ([`rider::body_target`],
+/// [`rider::body_mass`], [`rider::body_inertia`], [`rider::body_at`]), every other the original's
+/// (S286-S289 port them).
 struct LeafRider<'a> {
     ee: &'a mut Ee,
 }
@@ -15200,7 +15207,10 @@ impl rider::Rider for LeafRider<'_> {
         let vt = |ee: &Ee, holder: u32, slot: u32| ee.u32_at(ee.u32_at(holder) + slot);
         let v = match c {
             C::Rand => call_from_hook_dt(self.ee, RAND, &[], dt),
-            C::RidingReset => call_from_hook_dt(self.ee, RIDER_RESET, &[r], dt),
+            C::RidingReset => {
+                rider::riding_reset(self, RIDER, dt);
+                0
+            }
             C::WreckEntry(kind) => call_from_hook_dt(self.ee, RIDER_WRECK_ENTRY, &[r, u64::from(kind)], dt),
             C::Pose => {
                 assert_eq!(vt(self.ee, RIDER + 4, 0xd0), RIDER_POSE, "the rider's vt +0xd0");
@@ -15222,16 +15232,36 @@ impl rider::Rider for LeafRider<'_> {
                 rider::body_target(self, body, from);
                 0
             }
+            C::BodyMass { body, mass } => {
+                assert_eq!(vt(self.ee, body + 0x110, 0x18), RIDER_BODY_MASS, "the body's vt +0x18");
+                rider::body_mass(self, body, mass);
+                0
+            }
+            C::BodyInertia { body, from } => {
+                assert_eq!(vt(self.ee, body + 0x110, 0x60), RIDER_BODY_INERTIA, "the body's vt +0x60");
+                rider::body_inertia(self, body, from);
+                0
+            }
+            C::BodyAt { body, from } => {
+                assert_eq!(vt(self.ee, body + 0x110, 0x20), RIDER_BODY_AT, "the body's vt +0x20");
+                rider::body_at(self, body, from);
+                0
+            }
+            C::Grow { list, bytes } => call_from_hook_dt(self.ee, HEAP_RESIZE, &[u64::from(list), u64::from(bytes), 0x0039_683e, 0x4cf], dt),
         };
         let name = match c {
             C::Rand => "> rand",
-            C::RidingReset => "> riding reset",
+            C::RidingReset => "= riding reset",
             C::WreckEntry(_) => "> wreck entry",
             C::Pose => "> pose",
             C::Settle => "> settle",
             C::Switch { .. } => "> switch",
             C::Gather { .. } => "> gather",
             C::BodyTarget { .. } => "= body target",
+            C::BodyMass { .. } => "= body mass",
+            C::BodyInertia { .. } => "= body inertia",
+            C::BodyAt { .. } => "= body at",
+            C::Grow { .. } => "> heap resize",
         };
         leaf_served(name);
         v as u32
@@ -15331,7 +15361,8 @@ fn ride_replays_with_the_rider_leaf_on_the_ports() {
 }
 
 /// **F31b5i — C15's flip with the rider leaf on the ports**: flip-1 bit-exact, wrecked on row 125
-/// and put back on row 193, the rider's writes into the bike's record the port's.
+/// and put back on row 193, the rider's writes into the bike's record the port's; the put back's
+/// riding reset the port's too (S287).
 #[test]
 fn flip_replays_with_the_rider_leaf_on_the_ports() {
     let Some((w, off, served, census)) = replay_with_rider_leaf("flip-1") else { return };
@@ -15342,17 +15373,20 @@ fn flip_replays_with_the_rider_leaf_on_the_ports() {
     assert_eq!(
         served.into_iter().collect::<Vec<_>>(),
         [
-            ("= body target", 19),
+            ("= body at", 18),
+            ("= body inertia", 18),
+            ("= body mass", 18),
+            ("= body target", 37),
             ("= bone solve", 12303),
             ("= hand-over", 465),
             ("= modes", 465),
+            ("= riding reset", 1),
             ("= wreck spots", 465),
             ("> extra step", 465),
             ("> gather", 68),
-            ("> pose", 2),
-            ("> riding reset", 1),
-            ("> settle", 2),
-            ("> switch", 1463),
+            ("> pose", 3),
+            ("> settle", 3),
+            ("> switch", 1482),
             ("> wreck entry", 1)
         ],
         "{census:?}"

@@ -738,3 +738,298 @@ fn the_riders_pose_and_settle_are_the_originals() {
         assert!(*n >= 20, "path {path} taken only {n} times");
     }
 }
+
+/// The riding reset's bodies' virtuals (vt `+0x18` mass, `+0x60` inertia, `+0x68` target, `+0x20`
+/// position), run as they are; the heap's resize, hooked on both sides to the same fake.
+const RESET_BODY_SLOTS: [(u32, u32); 4] = [(0x18, 0x0049_3cc0), (0x60, 0x0049_3bf0), (0x68, BODY_TARGET), (0x20, 0x0049_3b20)];
+const HEAP_RESIZE: u32 = 0x001b_7470;
+/// Where the fake resize puts the `n`th grown list (`0x40` apart, past the lists the cases draw).
+const GROWN: u32 = FAKE + 0x4000;
+
+/// The fake resize: the `n`th call's list at `GROWN + 0x40 n`, the old list's first `bytes − 4`
+/// bytes copied in.
+fn grow(ee: &mut Ee, n: u32, list: u32, bytes: u32) -> u32 {
+    let to = GROWN + 0x40 * n;
+    for k in (0..bytes.saturating_sub(4).min(0x3c)).step_by(4) {
+        let w = ee.u32_at(list + k);
+        ee.set_u32(to + k, w);
+    }
+    to
+}
+
+/// The port's side of the riding reset: the bodies' virtuals served by the ports, unlogged; the heap's
+/// resize by [`grow`]; every other call logged.
+struct ResetPort<'a> {
+    ee: &'a mut Ee,
+    log: Log,
+    grown: u32,
+}
+
+impl node::Ram for ResetPort<'_> {
+    fn word(&mut self, at: u32) -> u32 {
+        self.ee.u32_at(at)
+    }
+    fn set(&mut self, at: u32, w: u32) {
+        self.ee.set_u32(at, w)
+    }
+}
+
+impl rider::Rider for ResetPort<'_> {
+    fn call(&mut self, c: Call, dt: F) -> u32 {
+        assert_eq!(dt.0.to_bits(), DT, "{c:?}: dt");
+        match c {
+            Call::BodyMass { body, mass } => rider::body_mass(self, body, mass),
+            Call::BodyInertia { body, from } => rider::body_inertia(self, body, from),
+            Call::BodyTarget { body, from } => rider::body_target(self, body, from),
+            Call::BodyAt { body, from } => rider::body_at(self, body, from),
+            Call::Grow { list, bytes } => {
+                self.log.borrow_mut().push(c);
+                let n = self.grown;
+                self.grown += 1;
+                return grow(self.ee, n, list, bytes);
+            }
+            _ => self.log.borrow_mut().push(c),
+        }
+        0
+    }
+}
+
+/// **The riding reset is the original's** (S287): 20 000 cases of state 4's rider, each running
+/// 0x004eef40 whole in the interpreter (the pose and settle virtuals and every part's on/off virtual
+/// hooked to log, the heap's resize to [`grow`]; the bodies' four virtuals as they are) against
+/// [`rider::riding_reset`] from the same words. Drawn: `+0x25c`, the world's riding iterations and
+/// rate, `+0x4f0`; the part, pose-list and body counts (the real one, 0, −1); the parts' touched
+/// flags; the record (none) and its collidable (none, one already listed, one not); each part's
+/// sphere's ignore list (counts 0..4 and −1, entries the collidable, 0 or another); the pose list's
+/// strengths, damping ratios and `+0xc`, and the bodies' masses and inertias (signed zeros,
+/// negatives, denormals). Every word either side writes, off the stack, comes out the same, and the
+/// same calls are made in the same order.
+#[test]
+#[allow(clippy::float_arithmetic)]
+fn the_riding_reset_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let rec = ee.u32_at(RIDER + rider::RECORD);
+    let holder = ee.u32_at(RIDER + rider::MAIN);
+    let bodies = ee.u32_at(RIDER + rider::BODIES);
+    let poses = ee.u32_at(RIDER + rider::POSES);
+    let joints_n = ee.u32_at(RIDER + 0x3ac);
+    let joints_at = ee.u32_at(RIDER + 0x3b0);
+    let parts: Vec<u32> = (0..ee.u32_at(RIDER + rider::PARTS_COUNT))
+        .map(|i| ee.u32_at(ee.u32_at(RIDER + rider::PARTS) + 4 * i))
+        .collect();
+    for i in 0..bodies {
+        let b = ee.u32_at(holder + 0xb0 * i + 0xa4);
+        for (slot, code) in RESET_BODY_SLOTS {
+            assert_eq!(ee.u32_at(ee.u32_at(b + 0x110) + slot), code, "body {i}'s vt {slot:#x}");
+        }
+    }
+    let force = ee.u32_at(RIDER + rider::AIM_FORCE);
+    let mut switched: Vec<u32> = rider::RIDE_ON.iter().chain(&rider::RIDE_EXTRA_PARTS).map(|&o| ee.u32_at(RIDER + o)).collect();
+    switched.extend(&parts);
+    let mut switches: BTreeSet<u32> = switched.iter().map(|&p| ee.u32_at(ee.u32_at(p + 0x10) + 0x10)).collect();
+    switches.insert(ee.u32_at(ee.u32_at(force + 8) + 0x10));
+    eprintln!(
+        "record {rec:#x}, {} parts, {joints_n} joints at {joints_at:#x}, {bodies} bodies, switch fns {switches:#x?}, zero quad {:#x?}, \
+         world {:#x}: iterations {:#x}, rate {:#x}, riding {:#x} {:#x}, +0x25c {}, +0x4f0 {}",
+        parts.len(),
+        [0, 4, 8, 12].map(|k| ee.u32_at(rider::ONES + k)),
+        ee.u32_at(RIDER + rider::WORLD),
+        ee.u32_at(ee.u32_at(RIDER + rider::WORLD)),
+        ee.u32_at(ee.u32_at(RIDER + rider::WORLD) + 4),
+        ee.u32_at(RIDER + rider::RIDE_ITERATIONS),
+        ee.u32_at(RIDER + rider::RIDE_RATE),
+        ee.u32_at(RIDER + rider::LEFT_AS_IS),
+        ee.u32_at(RIDER + rider::RIDE_EXTRA),
+    );
+    let joints: Vec<u32> = (0..joints_n).map(|i| ee.u32_at(joints_at + 0x50 * i + 8)).collect();
+    let others: BTreeSet<u32> = joints.iter().map(|&j| ee.u32_at(j + 0x7c)).collect();
+    let body_list: Vec<u32> = (0..bodies).map(|i| ee.u32_at(holder + 0xb0 * i + 0xa4)).collect();
+    // A written word named by what holds it, for the failure message.
+    let name = |a: u32| -> String {
+        let near = |xs: &[u32], what: &str| xs.iter().position(|&b| (b..b + 0x200).contains(&a)).map(|i| format!("{what} {i} +{:#x}", a - xs[i]));
+        near(&joints, "joint").or_else(|| near(&body_list, "body")).or_else(|| near(&[RIDER], "rider")).unwrap_or_default()
+    };
+    let log: Log = Rc::new(RefCell::new(Vec::new()));
+    hook_calls(&mut ee, &log, &Rc::new(RefCell::new(VecDeque::new())), &switches);
+    ee.hooks.remove(&RIDING_RESET);
+    let grown = Rc::new(RefCell::new(0u32));
+    {
+        let (l, n) = (log.clone(), grown.clone());
+        ee.hooks.insert(HEAP_RESIZE, Box::new(move |ee: &mut Ee| {
+            assert_eq!((ee.r(6), ee.r(7)), (0x0039_683e, 0x4cf), "the resize's file and line");
+            let (list, bytes) = (ee.r(4) as u32, ee.r(5) as u32);
+            l.borrow_mut().push(Call::Grow { list, bytes });
+            let k = *n.borrow();
+            *n.borrow_mut() += 1;
+            let to = grow(ee, k, list, bytes);
+            ee.set(2, u64::from(to));
+        }));
+    }
+    let snapshot = ee.ram.clone();
+    let mut g = Gen(0x0287_0001);
+    let mut t: BTreeMap<String, u32> = BTreeMap::new();
+    let mut tally = |path: String| *t.entry(path).or_insert(0) += 1;
+    for k in 0..20_000 {
+        let mut given: Vec<(u32, u32)> = Vec::new();
+        let mut put = |ee: &mut Ee, at: u32, v: u32| {
+            ee.set_u32(at, v);
+            given.push((at, v));
+        };
+        let f = |x: f32| x.to_bits();
+        // A float drawn for the strengths, ratios, masses and inertias: signed zeros, negatives and
+        // denormals among them.
+        let any = |g: &mut Gen| match g.bits() % 10 {
+            0 => g.pick(&[0, 0x8000_0000, 0x0000_0001, 0x8040_0000, 0x7f80_0000]),
+            1 => f(g.f(-50.0, 0.0)),
+            _ => f(g.f(0.0, 80.0)),
+        };
+        put(&mut ee, RIDER + rider::LEFT_AS_IS, if g.one_in(2) { 0 } else { 1 });
+        put(&mut ee, RIDER + rider::RIDE_ITERATIONS, g.bits() % 8);
+        put(&mut ee, RIDER + rider::RIDE_RATE, any(&mut g));
+        put(&mut ee, RIDER + rider::RIDE_EXTRA, if g.one_in(2) { 0 } else { g.bits() | 1 });
+        let n_parts = parts.len() as u32;
+        put(&mut ee, RIDER + rider::PARTS_COUNT, g.pick(&[n_parts, n_parts, n_parts, 0, 0xffff_ffff]));
+        put(&mut ee, RIDER + 0x3ac, g.pick(&[joints_n, joints_n, joints_n, 0, 0xffff_ffff]));
+        put(&mut ee, RIDER + rider::BODIES, g.pick(&[bodies, bodies, bodies, 0, 0xffff_ffff]));
+        let collidable = FAKE + 0x1000;
+        let has_rec = !g.one_in(5);
+        put(&mut ee, RIDER + rider::RECORD, if has_rec { rec } else { 0 });
+        let c = if g.one_in(5) { 0 } else { collidable };
+        put(&mut ee, rec + rider::R_COLLIDABLE, c);
+        for &p in &parts {
+            put(&mut ee, p + rider::TOUCHED, if g.one_in(2) { 1 } else { 0 });
+        }
+        for (k, &p) in parts.iter().enumerate() {
+            let sphere = ee.u32_at(p + 0x88);
+            let list = FAKE + 0x2000 + 0x10 * k as u32;
+            put(&mut ee, sphere + 0xe4, list);
+            put(&mut ee, sphere + 0xe8, g.pick(&[0, 1, 2, 3, 4, 0xffff_ffff]));
+            for i in 0..4 {
+                let w = g.pick(&[collidable, 0, FAKE + 0x1100, FAKE + 0x1100, FAKE + 0x1200]);
+                put(&mut ee, list + 4 * i, w);
+            }
+        }
+        for i in 0..joints_n {
+            let e = joints_at + 0x50 * i;
+            put(&mut ee, e + 0xc, any(&mut g));
+            for o in [0x10, 0x20] {
+                for c in 0..4 {
+                    let v = any(&mut g);
+                    put(&mut ee, e + o + 4 * c, v);
+                }
+            }
+        }
+        for &o in &others {
+            for c in 0..3 {
+                let v = any(&mut g);
+                put(&mut ee, o + 0x130 + 4 * c, v);
+            }
+        }
+        for i in 0..bodies {
+            let e = poses + 0x60 * i;
+            for o in [0x0, 0x10, 0x14, 0x18, 0x1c, 0x30, 0x34, 0x38, 0x3c] {
+                let v = any(&mut g);
+                put(&mut ee, e + o, v);
+            }
+        }
+
+        // The original.
+        log.borrow_mut().clear();
+        *grown.borrow_mut() = 0;
+        ee.written.clear();
+        ee.set(28, GP);
+        ee.call(RIDING_RESET, &[u64::from(RIDER)], &[f32::from_bits(DT)], BUDGET);
+        let w1 = written_words(&ee, 0);
+        let want: HashMap<u32, u32> = w1.iter().map(|&a| (a, ee.u32_at(a))).collect();
+        let calls = log.borrow().clone();
+
+        for &a in &w1 {
+            ee.set_u32(a, word_of(&snapshot, a));
+        }
+        for &(a, v) in &given {
+            ee.set_u32(a, v);
+        }
+        let pre: HashMap<u32, u32> = w1.iter().map(|&a| (a, ee.u32_at(a))).collect();
+        log.borrow_mut().clear();
+        ee.written.clear();
+        let mut port = ResetPort { ee: &mut ee, log: log.clone(), grown: 0 };
+        rider::riding_reset(&mut port, RIDER, F(f32::from_bits(DT)));
+        let w2 = written_words(&ee, 0);
+        let got_calls = log.borrow().clone();
+        assert_eq!(got_calls, calls, "case {k}: the calls");
+        for &a in w1.union(&w2) {
+            let w = want.get(&a).copied().unwrap_or_else(|| pre.get(&a).copied().unwrap_or_else(|| ee.u32_at(a)));
+            let before = pre.get(&a).copied().unwrap_or(word_of(&snapshot, a));
+            assert_eq!(ee.u32_at(a), w, "case {k}: the word at {a:#x} ({}, was {before:#x}, {})", name(a), if w2.contains(&a) { "the port wrote it" } else { "only the original wrote it" });
+        }
+
+        let gv = |a: u32| given.iter().rev().find(|(at, _)| *at == a).unwrap().1;
+        tally(format!("posed: {}", calls.contains(&Call::Pose)));
+        tally(format!("extra parts on: {}", gv(RIDER + rider::RIDE_EXTRA) != 0));
+        let grows = calls.iter().filter(|c| matches!(c, Call::Grow { .. })).count();
+        if gv(RIDER + rider::PARTS_COUNT) as i32 > 0 {
+            if !has_rec {
+                tally("ignore: no record".into());
+            } else if c == 0 {
+                tally("ignore: no collidable".into());
+            } else {
+                let mut listed = 0;
+                let mut filled = 0;
+                for (k, &p) in parts.iter().enumerate() {
+                    let sphere = word_of(&snapshot, p + 0x88);
+                    let n = gv(sphere + 0xe8) as i32;
+                    let list = FAKE + 0x2000 + 0x10 * k as u32;
+                    let entries: Vec<u32> = (0..n.max(0) as u32).map(|i| gv(list + 4 * i)).collect();
+                    if entries.contains(&c) {
+                        listed += 1;
+                    } else if entries.contains(&0) {
+                        filled += 1;
+                    }
+                }
+                if listed > 0 {
+                    tally("ignore: listed already".into());
+                }
+                if filled > 0 {
+                    tally("ignore: an empty entry".into());
+                }
+                if grows > 0 {
+                    tally("ignore: grown".into());
+                }
+            }
+        }
+        let jn = gv(RIDER + 0x3ac) as i32;
+        tally(format!("joints: {}", if jn > 0 { "some" } else { "none" }));
+        if jn > 0 && joints.iter().any(|&j| (0..3).any(|c| want.get(&(j + 0x100 + 4 * c)).is_some_and(|&w| w == 0 || w == 0x8000_0000))) {
+            tally("joints: a zero damping".into());
+        }
+        let bn = gv(RIDER + rider::BODIES) as i32;
+        tally(format!("bodies: {}", if bn > 0 { "some" } else { "none" }));
+        if bn > 0 {
+            for i in 0..bodies {
+                let e = poses + 0x60 * i;
+                for c in 0..3 {
+                    let x = fpu_operand(gv(e + 0x10 + 4 * c));
+                    tally(if x <= 0.0 { "bodies: an inertia not above 0".into() } else { "bodies: an inertia above 0".into() });
+                }
+            }
+        }
+        for a in w1.union(&w2).copied().chain(given.iter().map(|(a, _)| *a)) {
+            ee.set_u32(a, word_of(&snapshot, a));
+        }
+        *grown.borrow_mut() = 0;
+    }
+    eprintln!("{t:#?}");
+    for path in ["posed: true", "posed: false", "extra parts on: true", "extra parts on: false", "ignore: no record", "ignore: no collidable",
+        "ignore: listed already", "ignore: an empty entry", "ignore: grown", "joints: some", "joints: none", "joints: a zero damping",
+        "bodies: some", "bodies: none", "bodies: an inertia not above 0", "bodies: an inertia above 0"] {
+        assert!(t.contains_key(path), "path {path} never taken");
+    }
+    for (path, n) in &t {
+        assert!(*n >= 20, "path {path} taken only {n} times");
+    }
+}
+
+/// A float word as the FPU's compares read it.
+fn fpu_operand(w: u32) -> f32 {
+    ps2_float::fpu::operand(w)
+}
