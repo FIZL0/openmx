@@ -54,6 +54,8 @@ Prefixes: `D` disc · `R` decompilation · `C` the frame and captures · `F` ari
 - [ ] **MD37e** online seats agree on the ATV (after MD37d, MD6): the handshake carries each seat's machine and the ATV pack's id and file hash as MD6 does for a mod track; a peer without the pack, or with another version, is not seated and is told which pack → crates/openmx-net/src/handshake.rs · crates/openmx/src/lobby.rs | t: crates/openmx tests — two peers ride ATVs online; one without the pack is refused with the pack named | j: atv-online
 - [~] **P309** Second machines release, split off P284 (user 2026-11-05 'release sooner'): once the ATV (MD37d, P287, MD37e) and its five cars (MD39c, P288) ride, release them as P284 did, 0.12.0, Android APK too if P308 has landed BLOCKED: (after MD37d, P287, MD39c, P288, MD37e) the ATV and its cars ride in the game — P284 (0.11.0) shipped MX vs. ATV's fliers only: Untamed's MD81a bikes were already in 0.10.3 (Untamed handling); MD81b-f (race ATV, monster truck, baja, golf cart, sandrail) and MD82d had not landed, so they go in this release if they have by then (P284's 'file the next one for them') — the races release (2026-11-09) takes 0.13.0; this one takes the next version
 
+### Next: the race's AI riders, beside the race above (in this order)
+
 ### Next (in this order)
 
 The first four phases are tooling and feel like a detour from the port. They are the difference between a
