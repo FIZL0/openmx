@@ -640,46 +640,7 @@ pub fn put_back(m: &mut impl Wrecks, snap: u32, kind: u32) {
         set_byte(m, b + 0x45, flags & !2);
         held = true;
     }
-    // The base.
-    copy_quad(m, b + 0x50, b + 0xd40);
-    let run = w(m, RUN);
-    if run != 0 {
-        let at = w(m, 0xd70);
-        if at != 0 && w(m, 0xd74) != 0 {
-            m.set(run + 0x94, at);
-            let x = w(m, 0xd74);
-            m.set(run + 0x98, x);
-            let x = w(m, 0xd78);
-            m.set(run + 0x9c, x);
-        }
-    }
-    let terrain = w(m, 0x3b4);
-    if snap != 0 && terrain != 0 {
-        let n = m.normal(terrain, b + 0x50);
-        let lift = n.merge(Dest::XYZ, n.mul_q(f32::from_bits(0x3e99_999a)));
-        let at = quad(m, b + 0x50);
-        set_quad(m, b + 0x50, at.merge(Dest::XYZ, at.add(lift)));
-        copy_quad(m, b + 0x60, b + 0xd50);
-        set_quad(m, b + 0x70, n);
-    } else {
-        copy_quad(m, b + 0x60, b + 0xd50);
-        copy_quad(m, b + 0x70, b + 0xd60);
-    }
-    m.out(Out::Ground);
-    put(m, 0x31c, 1);
-    if kind != 0 {
-        let x = w(m, 0xdec);
-        put(m, 0xde8, x);
-        m.out(Out::Kind(true));
-    } else {
-        put(m, 0xde8, 0);
-        m.out(Out::Kind(false));
-    }
-    let trail = w(m, 0x10dc);
-    if trail != 0 {
-        m.out(Out::Trail(trail));
-    }
-    post(m, 21);
+    put_back_base(m, snap, kind);
     if held {
         let flags = byte(m, b + 0x45);
         set_byte(m, b + 0x45, flags & !2 | 2);
@@ -719,6 +680,52 @@ pub fn put_back(m: &mut impl Wrecks, snap: u32, kind: u32) {
         }
     }
     m.out(Out::Camera(b + 0x43c));
+}
+
+/// **The vehicle's put-back** (the base class's, under [`put_back`] and the quad's): the bike to its
+/// spot, the run's spot from `+0xd70`, the ground reset, the kind set or cleared, the trail reset and
+/// the put-back's message.
+pub fn put_back_base(m: &mut impl Wrecks, snap: u32, kind: u32) {
+    let b = m.bike();
+    copy_quad(m, b + 0x50, b + 0xd40);
+    let run = w(m, RUN);
+    if run != 0 {
+        let at = w(m, 0xd70);
+        if at != 0 && w(m, 0xd74) != 0 {
+            m.set(run + 0x94, at);
+            let x = w(m, 0xd74);
+            m.set(run + 0x98, x);
+            let x = w(m, 0xd78);
+            m.set(run + 0x9c, x);
+        }
+    }
+    let terrain = w(m, 0x3b4);
+    if snap != 0 && terrain != 0 {
+        let n = m.normal(terrain, b + 0x50);
+        let lift = n.merge(Dest::XYZ, n.mul_q(f32::from_bits(0x3e99_999a)));
+        let at = quad(m, b + 0x50);
+        set_quad(m, b + 0x50, at.merge(Dest::XYZ, at.add(lift)));
+        copy_quad(m, b + 0x60, b + 0xd50);
+        set_quad(m, b + 0x70, n);
+    } else {
+        copy_quad(m, b + 0x60, b + 0xd50);
+        copy_quad(m, b + 0x70, b + 0xd60);
+    }
+    m.out(Out::Ground);
+    put(m, 0x31c, 1);
+    if kind != 0 {
+        let x = w(m, 0xdec);
+        put(m, 0xde8, x);
+        m.out(Out::Kind(true));
+    } else {
+        put(m, 0xde8, 0);
+        m.out(Out::Kind(false));
+    }
+    let trail = w(m, 0x10dc);
+    if trail != 0 {
+        m.out(Out::Trail(trail));
+    }
+    post(m, 21);
 }
 
 /// The wheel's rest frame the wheel reset puts back on its four frames that are not the origin
