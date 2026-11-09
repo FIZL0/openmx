@@ -950,6 +950,48 @@ score_ghost_gaps            boot 0x002629d0 (mgr) a ghost race's gap of each pla
 #                                           0x00267d90 (card 0x80000), the line lists, 0x00268350 /
 #                                           0x00268660 (mgr 0x800/0x1000), the computer aim 0x0026d780
 #                                           (card 0x800000), and everything after the card loop.
+# S292: the other handlers' line tests. Mode (+0x64) 1 is the machine race (S92's store scan), 3 the
+#   freeride/stunt mode; 4, 5 and 6 are never stored (S92), so their gate tests (0x00265040 twice,
+#   0x00265c70, 0x00266750) are dead and not ported.
+score_gate_line             boot 0x002611c0 (mgr, card) -> 0 for no card / no gate (+0x80) or a backwards
+#                                           clock, else 1: the gate race's line. start_gate_crossed(
+#                                           +0x80, +0x60, +0x70); 1: owner/chain vt+0x24, listener
+#                                           +0x1c; +0x24 += |next+0x40 - gate+0x40| (vsub.xyz, mula/
+#                                           madda/madd, sqrt.s; next = gate+0x90 or mgr+0x70); +0x80 =
+#                                           next, +0x84++, +0x38++, vt+0x14/+0x10. Next null: +0x80 =
+#                                           mgr+0x70, +0x84 = 0, laps++, +0xb8 = 0, +0x48 = +0xb4 (read
+#                                           first) - +0x4c, < 0 -> 0 and return 0; (lap < best or best
+#                                           <= 0) best, number, owner/chain +0x10 then listener +0xc
+#                                           TWICE (loop from the listener itself); +0x4c; keep_lap;
+#                                           kind 3 + owner+8: card run over (+0x24 = +0x28), ghost
+#                                           listener +0x54/+0x58, ghost +0x24 = card +0x28, ghost |= 2
+#                                           on runs >= mgr+0xf0 with no best test (+0x50); vt+0xc/+8.
+#                                           Not wrapped and kind 4: card &= ~0x100. 2: +0x28/+0x20.
+#                                           Then every call (not on the backwards return): kind not
+#                                           2/3 and mgr+0x94 <= laps -> card |= 1, mgr |= 0x10, +0x18/
+#                                           +0x14. No 0x10/0x10000/0x20000 tests. Also called by
+#                                           0x00393420, 0x003a1d80, 0x003e3150 and code at 0x003560a0.
+#                                           S292: race::LapRules::gate_line, tests/race.rs
+score_machine_race_tick     boot 0x002640c0 (dt f12, mgr) mode 1's handler: needs mgr+0x34 and +0x70;
+#                                           per card (taking part, not 0x4001, kind 4 needs 0x100):
+#                                           odometer +0x20, 0x00267d90 on 0x80000, then only when card
+#                                           +0x70 (last x) >= 0 score_gate_line (0 -> the handler
+#                                           returns 0), mgr |= 4 for a waited-for card out, the zone
+#                                           list; distances to the gate +0x10/+0x14, the aim +0x180
+#                                           (50 ft, 0.02), listener +0x6c, owner +0x5c, progress, last
+#                                           = now (xyz only), clocks... Only the line and the zones
+#                                           are ported (S292); the rest is S292a.
+score_machine_zones         boot 0x00264338 inside score_machine_race_tick: the zone list (mgr flag 0x200,
+#                                           list mgr+0x78, next +0x90, live flag 1), $16 card, $18 mgr;
+#                                           1 -> owner/chain vt+0x2c, listener +0x24; 2 -> +0x30/+0x28.
+#                                           race::zone_crossings
+score_machine_zones_end     boot 0x00264520 the pc after the zone list
+#   score_mode3's own zone list (0x00268fb4) runs after it copies +0x60 into +0x70, so its step never
+#   moves and no zone is ever crossed (tests/race.rs proves it on the whole handler).
+#   The vtable-only caller 0x00285090 (vtables 0x0045542c, 0x0045c53c) is an AI driver's steering
+#   (+0xd4 its card, +0xdc the track): with its +0x30 bit 0x40000000 it tests the card's next gate
+#   (+0x80) and on 2 (beside) sets +0x30 |= 0xffffffff80000000, which sends it back along the path
+#   (0x0026e0c0, 0x0026d780). AI, not lap bookkeeping: not ported (S292b).
 # S13e: the track's race file. Not in Tracks\sx01.res: it is tracks\sx01\sx01.tdf inside
 # Tracks\sx01_2.res (with sx01ai.tdf, supercross.aty, sx01.wpt, hit.dat).
 track_ctor                  boot 0x002693c0 (track) the track object (the score manager's +0x68 =
@@ -1406,7 +1448,24 @@ ai_feed                     boot 0x0027fbd0 MXVehicleAIInterface vt+0x8: bike fr
 #                                           +0x80..+0xbc) into ai +0x90..+0xcc, body velocity/spin
 #                                           into +0x50/+0x60/+0x70, |v| into +0x80, ground normal
 #                                           +0x2c0 and height +0x204, on-ground flag 0x20
-ai_character_read           boot 0x00384f00 reads AIChrctr.aip section AI_<skill>: the controller's
+#                                           S12e: `this` is the rider (brain at +0x10d0, 0 -> return
+#                                           0, no draw). Brain +0x290 = old +0xc0 first; +0x50 body
+#                                           +0x260 velocity, +0x60 body +0x70, +0x70 body +0x290;
+#                                           |v| = mula/madda/madd x,y,z then sqrt.s. Normal query at
+#                                           (pos.x + v.x*rider+0x11d0, pos.y, pos.z + v.z*+0x11d0,
+#                                           stack w); height query at +0xc0. Flag 0x10 = rider
+#                                           +0xa0c (trick running). Second word +0x38 bits 1|2 set
+#                                           when +0x574 && body +0x264 > 5 && body +0x278 > 30 &&
+#                                           100*(2^-31*rand()) <= rider +0x1100, else both cleared
+#                                           (rand only past the three tests). Ported as ai::feed,
+#                                           oracled over 10,000 frames (tests/ai.rs)
+#   the rider assist,         boot 0x0027fb30, rider vtable slot 0x004551bc (beside stunt_ai_choice
+#                                           and ai_ask_for): body +0x284 = mula(brain +0x1f4,
+#                                           w) + madd(+0x284, 1-w), w = rider +0x1138; on the ground
+#                                           also body velocity x/z toward brain +0x1c0/+0x1c8 by
+#                                           rider +0x113c. Returns 1. Not ported (S281 note); the
+#                                           brief's "rider-to-brain copy (0x0027fb30)" was ai_feed
+ai_character_read          boot 0x00384f00 reads AIChrctr.aip section AI_<skill>: the controller's
 #                                           gains (SteeringGain +0x208, OversteerCorrectionGain
 #                                           +0x21c, PitchGain +0x2d4, PitchJitterDeadZone +0x2d8,
 #                                           PitchControlDistance +0x2b4, LandingPitchAngle +0x2ec,
@@ -7108,6 +7167,20 @@ atv_body_add_force_at       atv 0x0049c0b0 = rigid body vt +0x84 (a0 body, a1 fo
 # +0x40) vt +8 0x00127a90, which copies the buffer into the service: point +0, normal +0x10, surface word
 # +0x20, weights +0x30. The globals 0x003dce40 and 0x003dce48 hold pointers into a caller's stack frame
 # (first seen frame 81). The ground ring 0x00541550 and terrain 0x0184c7d0 +0x9e0/+0x9e4 are the ring's.
+# MD105a — the frame's tail on the quad in Rust (tests/atv_quad/sim_tail.rs, run by sim_frame.rs's palm with
+# tail = true; journal research/journal/2026-11-09-md105a-atv-sim-tail/). Comment rows only. The tail 0x00128af0
+# walks the sim 0x0065bba0; the quad's listener is quad +0xc, its step (vt +0x40) 0x004bf9a0 = j 0x004ba9f0
+# (the quad's update, quad::update), stepped once a frame on the palm ride. The update's rider hold: name lookup
+# 0x00214b30(0x005423e0, 0x005274f3, 0), the vehicle state's vt +0xac(state, name), 0 or rider = v0 - 0x2ec,
+# held = *(*(rider+0x378)+0x14); the rumble's on 0x0051a250(*(state+0x6ac)). BikeVehicleUpdate 0x004e1b90 is
+# tail::inner on the quad (the bike's vehicle map holds on the quad). Quad vt slots the ports stand for: +0x45c
+# 0x004aad60 (hazard clock, tail::stuck), +0x49c 0x004e24a0 (wreck test), +0x368 0x004e2260 (enter), +0x36c
+# 0x004e2380 (unwreck), +0x398 0x004e1870 (part), +0x48c 0x004e2e10 / +0x490 0x004e2eb0 (the ray swaps,
+# quad::swap_rays), +0x3a8 0x004b8e30 (put-back, quad::put_back over wreck::put_back_base), +0x3e4 0x004be3c0
+# (animate). Inner-update slots run as the original's: +0x3a4 fade, +0x4f8, +0x4e8, +0x4f0 lean, +0x35c ride,
+# +0x378 sync, +0x37c snapshot, +0x4a0 wreck last; network 0x0025e8d0(quad+0x400), parts 0x00494370(quad).
+# Over the 300 frames: 2 entries, 1 unwreck, 3 swaps, 1 put-back (4 wheel resets), rumble 4 frames, every RAM
+# word outside the stack and the ground ring equal to the whole frame's after each frame.
 # MD74 — the two callees ported (atv_wheel::contact_velocity, hinge_force; tests/atv_wheel.rs runs both off the
 # same image, and the tire-forces test now runs them unhooked). Journal: research/journal/2026-11-02-md74-atv-wheel-callees.
 # Contact velocity, wheel-relative: body point velocity = body +0x80 + turn(body +0x1d0) x (+0x140 - body +0x70).
@@ -10479,6 +10552,21 @@ atv_heap_free               atv 0x001b76d0 = free
 #   flags a4 == 0 ? sender+0x10 : a5; -> 0x00282190(conn 0x0084ada0, &header, flags) (queue 0x00282ea0
 #   copies 2 header bytes and len data). ride-2's record pass runs 46 stunt, 15 whole, 138 change ports
 #   (a temporary count).
+# F31b5k — the connection's queue the sender's send ends in (game_sim::handling::update::{net_queue,
+# queue_push}; tests/mxvatv_bike_ride.rs the_connections_queue_is_the_originals). Journal:
+# research/journal/2026-11-09-f31b5k-net-queue/.
+#   0x00282190(conn, hdr, flags): flags&2 -> push +0xfc; else flags&0x10 -> push +0x11c only if +0x2c != 0
+#   && +0x28 >= 0, v0 1 always; else push +0xdc. A failed push, connection up: memcpy 0x00354310(0x00445cc0,
+#   q+4, q+8 - q+4), 0x002845f0(+0x28, -1, 0x00445cc0, len, 1/0, 1000/0) (bit 1 / plain); >= 0 -> memset
+#   0x003544c8(q+0, 0, 1), q+8 = q+4 + 1; then push the pair's second (+0x10c / +0xec), v0 its answer.
+#   Ghidra drops a1 (the header) on the queue calls; it is $5 throughout.
+#   Push 0x00282ea0(q, hdr): q = {count byte address, start, end, room}, messages [id, len, data] from
+#   start+1. need = hdr[1]+2; room < need + (end-start) -> walk from start+1: n++, got = (this one's
+#   len+2) + (room-used) (not cumulative), stop at n >= count (signed) or got >= need; got < need -> 0;
+#   n < count -> memcpy down (forward, lq/sq or bytes: memmove when dst < src) and count -= n, else
+#   end = start+1 and count 0. Then hdr's 2 bytes, len data bytes, count+1; v0 1.
+#   State 4's conn 0x0084ada0 (bike+0x400's +0x34): +0x28 -1, +0x2c 0 (offline: no flush); queues'
+#   buffers 0x0084af20, 0x0084b450, 0x0084b980, 0x0084c3e0, 0x0084c910, room 0x514, +0xdc holding one.
 # F31b5g — the calls quad::Steps hands on, in Rust (game_sim::handling::record::held/held_words,
 # update::stunt_start/trick_end; tests/mxvatv_bike_ride.rs). Journal:
 # research/journal/2026-11-05-f31b5g-nothing-handed-on/.
@@ -10683,3 +10771,15 @@ atv_heap_free               atv 0x001b76d0 = free
 #   Oracle: 20 000 cases of state 4's rider, the whole function in the interpreter (pose, settle and the
 #   switch slots hooked to log, the resize hooked to a fake on both sides), every written word and the call
 #   log equal; flip-1's put back (row 193) replays bit-exact with the reset served by the port.
+# F31b5m — the sim lists' accessors in Rust (game_sim::handling::tail::{list_get, list_remove};
+# tests/mxvatv_bike_ride.rs), and the frame's other listeners left out of the pure frame. Comment rows only.
+# Journal: research/journal/2026-11-09-f31b5m-other-listeners-dropped.
+#   Lists {count (signed), _, array}: sim +0x24 getter 0x00208390, sim +0x3c getter 0x002080f0 (both
+#   lw a0+8; sll a1,2; addu; lw: no checks), +0x3c remove 0x00208040 (count <= 0, array 0 or a1 >= count
+#   (slt, signed) answer 0; else array[a1] = array[count - 1], count re-read, minus 1, answer 1).
+#   Oracle: 10 000 lists (count -3..40, array or none, the list inside its own array), both getters and the
+#   remove; answers and the 0x200 bytes around equal, nothing written outside.
+#   Left out with "other listeners dropped": records on +0x24 but the bike's (none on state 4), the world's
+#   preforce elements but the bike's +0x30 (five riders, thunk 0x004de0c0), the tail's leaf 0x00eb6420
+#   (step 0x001c9540) and the manager 0x01ed82d0's own work (step 0x002cf9f0; its closing walk 0x00128af0,
+#   which steps the rider 0x010af350, kept).

@@ -19,6 +19,9 @@ use game_sim::handling::record::{self, Collides, Hit, Record, Struck, Swept};
 use game_sim::handling::seed;
 use game_sim::track;
 
+#[path = "sim_tail.rs"]
+mod sim_tail;
+
 /// The image's sim object (vtable `0x003b9320` at `+4`) and its frame (vt `+0x40`). Its world is the
 /// object's `+0x6c` on, the update list at `+0x24`, the timer list at `+0x3c`.
 const SIM: u32 = 0x0065_bba0;
@@ -102,7 +105,7 @@ fn run(ee: &mut Ee, f: u32, ints: &[u64], x: F) -> u32 {
 /// taken out). With `port`, the record at `port`'s two virtuals are [`port_record`]'s (with `spoil`,
 /// its first contact's normal one bit off in each lane). Answers the
 /// update list's elements, and the terrain queries the port's record made.
-fn frame_in_pieces(ee: &mut Ee, dt: F, port: Option<(u32, &track::Terrain<'_>)>, spoil: bool) -> (Vec<u32>, u32) {
+fn frame_in_pieces(ee: &mut Ee, dt: F, port: Option<(u32, &track::Terrain<'_>)>, spoil: bool, tail: bool) -> (Vec<u32>, u32) {
     assert_eq!(ee.u8_at(ee.u32_at(SKIP_FLAG) + 0x225) & 8, 0, "the frame is not skipped");
     let (mut elements, mut queries) = (Vec::new(), 0);
     for (slot, original) in [(0x7c, RECORD_CLEAR), (0x84, RECORD_PASS)] {
@@ -126,7 +129,12 @@ fn frame_in_pieces(ee: &mut Ee, dt: F, port: Option<(u32, &track::Terrain<'_>)>,
         }
     }
     run(ee, WORLD_STEP, &[u64::from(SIM + 0x6c)], dt);
-    run(ee, TAIL, &[u64::from(SIM)], dt);
+    if tail {
+        let (quads, _) = sim_tail::port_tail(ee, image::IMAGE_QUAD, dt);
+        assert_eq!(quads, 1, "the quad's listener steps once a frame");
+    } else {
+        run(ee, TAIL, &[u64::from(SIM)], dt);
+    }
     let mut i = 0;
     while i < ee.u32_at(SIM + 0x3c) {
         let e = run(ee, LIST3C_GET, &[u64::from(SIM + 0x3c), u64::from(i)], F::ZERO);
@@ -424,7 +432,7 @@ impl Palm {
 /// frame `spoil`, spoiled, and the run stops there with the words that differ), every RAM word outside
 /// the stack equal to the first's after every frame. Both get [`at_the_palm`]'s pad off the first's
 /// body before each frame.
-fn palm(frames: usize, port: Option<bool>, spoil: Option<usize>) -> Option<Palm> {
+fn palm(frames: usize, port: Option<bool>, spoil: Option<usize>, tail: bool) -> Option<Palm> {
     let pre = image()?;
     let trn = terrain_file()?;
     let trn: &'static [u8] = Box::leak(trn.into_boxed_slice());
@@ -457,7 +465,7 @@ fn palm(frames: usize, port: Option<bool>, spoil: Option<usize>) -> Option<Palm>
         run(&mut ee, SIM_FRAME, &[u64::from(SIM)], dt);
         if let Some(t) = twin.as_mut() {
             lay_pad(t, quad, p);
-            let (elements, q) = frame_in_pieces(t, dt, (port == Some(true)).then_some((at.record, map)), spoil == Some(k));
+            let (elements, q) = frame_in_pieces(t, dt, (port == Some(true)).then_some((at.record, map)), spoil == Some(k), tail);
             assert!(elements.contains(&at.record), "frame {k}: the quad's record is not on the update list: {elements:#x?}");
             seen.port_queries += q;
             let bad = ram_differs(&ee, t);
@@ -501,7 +509,7 @@ const PALM_RIDE: usize = 300;
 /// every frame.
 #[test]
 fn the_quads_whole_sim_frame_strikes_the_palm_wrecks_and_is_put_back() {
-    let Some(seen) = palm(PALM_RIDE, Some(false), None) else { return };
+    let Some(seen) = palm(PALM_RIDE, Some(false), None, false) else { return };
     check_palm(&seen);
 }
 
@@ -521,7 +529,7 @@ fn check_palm(seen: &Palm) {
 /// the palm's contacts filed by the port.
 #[test]
 fn the_quads_record_is_the_ports_through_the_palm_strike_wreck_and_put_back() {
-    let Some(seen) = palm(PALM_RIDE, Some(true), None) else { return };
+    let Some(seen) = palm(PALM_RIDE, Some(true), None, false) else { return };
     check_palm(&seen);
 }
 
@@ -530,10 +538,22 @@ fn the_quads_record_is_the_ports_through_the_palm_strike_wreck_and_put_back() {
 /// list, and in the quad the same frame's world step pushes with it.
 #[test]
 fn a_spoiled_contact_on_the_strike_goes_red() {
-    let Some(seen) = palm(90, Some(true), Some(89)) else { return };
+    let Some(seen) = palm(90, Some(true), Some(89), false) else { return };
     let pre = image().unwrap();
     let list = pre.u32_at(image::read_ride(&pre, image::IMAGE_QUAD, F::ZERO).unwrap().1.record + 0xf8);
     let normal: Vec<u32> = (0..4).map(|k| list + 0x30 + 4 * k).collect();
     assert!(normal.iter().all(|a| seen.spoiled.contains(a)), "the spoiled normal's words are not red: {:#x?}", seen.spoiled);
     assert!(seen.spoiled.iter().any(|&a| (image::IMAGE_QUAD..image::IMAGE_QUAD + 0x1800).contains(&a)), "the push did not reach the quad");
+}
+
+/// MD105a — **the quad's frame tail is the port's through the strike, wreck and put-back**: the palm
+/// ride with the tail ([`sim_tail::port_tail`]: the walk, the quad's update and under it the vehicle's
+/// inner update, the hazard clock, the wreck test, entry and unwreck, the ray swaps, the put-back and
+/// the animation driver) run in Rust on the quad in RAM, beside the port's record, against the
+/// original's whole frame: every RAM word outside the stack and the ground ring equal after every one
+/// of the 300 frames.
+#[test]
+fn the_quads_tail_is_the_ports_through_the_palm_strike_wreck_and_put_back() {
+    let Some(seen) = palm(PALM_RIDE, Some(true), None, true) else { return };
+    check_palm(&seen);
 }
