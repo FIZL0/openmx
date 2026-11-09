@@ -205,6 +205,9 @@ pub enum Msg {
         picks: Vec<Pick>,
         #[serde(default)]
         ticket: String,
+        /// Every pack the joiner's mods folder holds (P318), for the room's offer.
+        #[serde(default)]
+        packs: Vec<crate::handshake::Pack>,
     },
     Room(Room),
     Refused(String),
@@ -345,6 +348,9 @@ pub enum Cmd {
     /// on them ([`crate::Room::modifiers`]).
     Modifiers(String),
     Private(bool),
+    /// The host: the packs a seat rides now (P318, [`crate::Room::in_use`], `kind/id`), as its ride
+    /// last switched them: a peer dropping in must hold each.
+    InUse(Vec<String>),
     /// The host opens this many seats (N12: 2 to [`crate::SEATS`]), in the lobby or in a ride that
     /// takes peers on (N14).
     Seats(usize),
@@ -654,7 +660,7 @@ async fn addressed(ep: &Endpoint, relays: bool) {
 
 /// A joiner's side, inside the host task.
 enum Guest {
-    In { peer: String, name: String, picks: Vec<Pick>, build: String, ticket: String, link: Link, conn: Connection },
+    In { peer: String, name: String, picks: Vec<Pick>, build: String, ticket: String, packs: Vec<crate::handshake::Pack>, link: Link, conn: Connection },
     Said(String, Msg),
     Gone(String),
     /// A datagram from the first peer for the second.
@@ -662,11 +668,11 @@ enum Guest {
 }
 
 async fn guest(gtx: amp::UnboundedSender<Guest>, peer: String, conn: Connection, link: Link, mut inbox: Inbox) {
-    let Some(Ok(Msg::Hello { build, name, picks, ticket })) = inbox.msgs.recv().await else {
+    let Some(Ok(Msg::Hello { build, name, picks, ticket, packs })) = inbox.msgs.recv().await else {
         conn.close(0u32.into(), b"no hello");
         return;
     };
-    let _ = gtx.send(Guest::In { peer: peer.clone(), name, picks, build, ticket, link, conn });
+    let _ = gtx.send(Guest::In { peer: peer.clone(), name, picks, build, ticket, packs, link, conn });
     loop {
         tokio::select! {
             m = inbox.msgs.recv() => match m {
@@ -735,6 +741,7 @@ async fn host(cx: &Ctx, mut room: Room, cmds: &mut amp::UnboundedReceiver<Cmd>, 
         cx.say(Event::HandedOver(me.into()));
     } else {
         room.names.insert(HOST.into(), cx.name.clone());
+        room.packs.insert(HOST.into(), cx.disc.packs());
         cx.say(Event::Hosting);
         cx.say(Event::Me(HOST.into()));
     }
@@ -846,7 +853,7 @@ async fn host(cx: &Ctx, mut room: Room, cmds: &mut amp::UnboundedReceiver<Cmd>, 
                 Err(why) => cx.say(Event::Status(format!("No room code ({why}): share the ticket instead."))),
             },
             Some(g) = guests.recv() => match g {
-                Guest::In { peer, name, picks, build, ticket, link, conn } => {
+                Guest::In { peer, name, picks, build, ticket, packs, link, conn } => {
                     if build != handshake::build() {
                         refuse(&link, conn, version_differs(handshake::build(), &build));
                     } else if let Some(i) = back.iter().position(|b| b.0 == peer) {
@@ -855,6 +862,7 @@ async fn host(cx: &Ctx, mut room: Room, cmds: &mut amp::UnboundedReceiver<Cmd>, 
                         if !ticket.is_empty() {
                             room.tickets.insert(peer.clone(), ticket);
                         }
+                        room.packs.insert(peer.clone(), packs);
                         joined.push(Joined { peer, link, conn });
                         broadcast(&joined, &Msg::Room(room.clone()));
                         cx.say(Event::Room(room.clone()));
@@ -867,6 +875,7 @@ async fn host(cx: &Ctx, mut room: Room, cmds: &mut amp::UnboundedReceiver<Cmd>, 
                         if !ticket.is_empty() {
                             room.tickets.insert(peer.clone(), ticket);
                         }
+                        room.packs.insert(peer.clone(), packs);
                         if room.riding {
                             // into the ride under way: its handshake first, on the room as it is now
                             link.send(&Msg::Start(room.clone()));
@@ -1009,6 +1018,13 @@ async fn host(cx: &Ctx, mut room: Room, cmds: &mut amp::UnboundedReceiver<Cmd>, 
                     room.modifiers = m;
                     broadcast(&joined, &Msg::Room(room.clone()));
                     cx.say(Event::Room(room.clone()));
+                }
+                Some(Cmd::InUse(keys)) => {
+                    if room.in_use != keys {
+                        room.in_use = keys;
+                        broadcast(&joined, &Msg::Room(room.clone()));
+                        cx.say(Event::Room(room.clone()));
+                    }
                 }
                 Some(Cmd::Private(p)) => {
                     room.private = p;
@@ -1244,7 +1260,7 @@ async fn join(cx: &Ctx, code: &str, picks: Vec<Pick>, cmds: &mut amp::UnboundedR
     }
     let Some((mut conn, mut link, inbox)) = connect(cx, code).await else { return false };
     let me = cx.ep.id().to_string();
-    let hello = Msg::Hello { build: handshake::build().into(), name: cx.name.clone(), picks, ticket: ticket(&cx.ep) };
+    let hello = Msg::Hello { build: handshake::build().into(), name: cx.name.clone(), picks, ticket: ticket(&cx.ep), packs: cx.disc.packs() };
     link.send(&hello);
     cx.say(Event::Me(me.clone()));
     let Inbox { mut msgs, mut dgrams } = inbox;

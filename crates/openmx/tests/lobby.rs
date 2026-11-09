@@ -1458,3 +1458,35 @@ fn a_ride_names_its_players_not_their_peer_ids() {
     assert_eq!(online::name_of(Some(&room), "someone_else"), "", "unknown: the display's P2");
     assert_eq!(online::name_of(None, id), "");
 }
+
+/// P318: every pack in the mods folder, of whatever kind, by its manifest's kind and id and a hash of
+/// its files — a kind no code knows is read like the rest — with its name and what makes one, the
+/// hash kept while nothing changes and read again when a file does.
+#[test]
+fn every_installed_pack_is_said_by_kind_id_and_hash() {
+    let mods = std::env::temp_dir().join(format!("openmx-p318-{}", std::process::id())).join("mods");
+    let _ = std::fs::remove_dir_all(&mods);
+    let fliers = mods.join("machines/fliers");
+    std::fs::create_dir_all(fliers.join("Veh")).unwrap();
+    std::fs::write(fliers.join("mod.json"), r#"{"kind":"machine","id":"mxvatv_fliers","name":"MX vs. ATV Unleashed biplane and Kiowa","version":"1.0.0","author":"openmx-mods tools/import-atv fliers 0.1"}"#).unwrap();
+    std::fs::write(fliers.join("Veh/kiowa.phy"), b"rotor").unwrap();
+    let odd = mods.join("weather/storms");
+    std::fs::create_dir_all(&odd).unwrap();
+    std::fs::write(odd.join("mod.json"), "{}").unwrap();
+    std::fs::create_dir_all(mods.join("tricks/no_manifest")).unwrap();
+    let mut cache = std::collections::HashMap::new();
+    let packs = lobby::installed_packs(&mods, &mut cache);
+    let keys: Vec<String> = packs.iter().map(|p| p.key()).collect();
+    assert_eq!(keys, vec!["machine/mxvatv_fliers", "weather/storms"], "a folder without a mod.json is no pack; one that says nothing is its folders' kind and id");
+    assert_eq!(packs[0].name, "MX vs. ATV Unleashed biplane and Kiowa 1.0.0");
+    assert_eq!(packs[0].how, "openmx-mods tools/import-atv fliers");
+    assert_eq!((packs[1].name.as_str(), packs[1].how.as_str()), ("storms", ""));
+    let hash = packs[0].hash;
+    assert_eq!(lobby::installed_packs(&mods, &mut cache)[0].hash, hash, "the same files, the same hash");
+    std::fs::write(fliers.join("Veh/kiowa.phy"), b"rotos").unwrap();
+    assert_eq!(lobby::installed_packs(&mods, &mut cache)[0].hash, hash, "kept while the manifest and the file names stay");
+    assert_ne!(lobby::installed_packs(&mods, &mut std::collections::HashMap::new())[0].hash, hash, "read again, other bytes hash otherwise");
+    std::fs::write(fliers.join("Veh/blade.phy"), b"").unwrap();
+    assert_ne!(lobby::installed_packs(&mods, &mut cache)[0].hash, hash, "a new file reads the pack again");
+    let _ = std::fs::remove_dir_all(mods.parent().unwrap());
+}
