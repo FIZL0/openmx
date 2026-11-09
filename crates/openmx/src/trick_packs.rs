@@ -216,6 +216,12 @@ fn file(folder: &Path, name: &str) -> PathBuf {
 }
 
 impl Pack {
+    /// Whether the pack lists any bike files (`phy`) to handle on (P315d): what the Garage's
+    /// Handling row offers it for.
+    pub fn handles(&self) -> bool {
+        !self.phys.is_empty()
+    }
+
     /// The rider's stunts with the pack's extras added (Cross's and Square's).
     pub fn stunts(&self, stunts: Set) -> Set {
         let extras = trick_pack::extras(&self.rows, &stunts);

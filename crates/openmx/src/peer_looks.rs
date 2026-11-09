@@ -36,6 +36,7 @@ pub fn garage_pick(pick: &Pick, own: &roster::Pick) -> roster::Pick {
         preset: String::new(),
         // Online fliers are MX Unleashed's for every seat until the handshake holds packs (P318).
         fliers: Vec::new(),
+        handling: Vec::new(),
     }
 }
 

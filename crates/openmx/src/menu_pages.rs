@@ -17,19 +17,17 @@ const TRICKS_HELP: &str = "Original is MX Unleashed's tricks. Trick Packs adds t
      and with R1 held a sideways flick off a lip \
      for a 360 and a forward one for a front flip. The front flip is the port's own, in neither game, and shows the \
      backflip's pose. Online rides are always Original.";
-/// The Handling row's help (MD40).
-const HANDLING_HELP: &str = "Original is MX Unleashed's bikes. MX vs. ATV rides that game's own bike files from a trick pack in \
-     the mods folder (Handling From names which), and its backflip, which only arms with R1 held as you pull back on the lip. Untamed rides the same files with the steps MX vs. ATV Untamed \
-     reworked, as far as they are ported. A lobby you host rides \
-     yours (Untamed's as MX vs. ATV's), and only players with the same trick pack can join its ride.";
+/// The Garage's Handling row's help (MD40, P315d).
+const HANDLING_HELP: &str = "How this player's bike handles. Original is MX Unleashed's bikes. MX vs. ATV rides that game's own bike files \
+     from a trick pack in the mods folder, and its backflip, which only arms with R1 held as you pull back on the lip. Untamed rides the same \
+     files with the steps MX vs. ATV Untamed reworked, as far as they are ported. A lobby you host rides 1P's \
+     (Untamed's as MX vs. ATV's), and only players with the same trick pack can join its ride.";
 /// The Brake Gyro row's help (P226).
 const BRAKE_GYRO_HELP: &str = "MX vs. ATV's option: a brake held in the air spins the bike nose-up. On is that game's default. \
      Online and in a lobby the bikes keep the default.";
 /// The Gas Gyro row's help (P226).
 const GAS_GYRO_HELP: &str = "MX vs. ATV's option: the throttle held in the air spins the bike nose-down, when Brake Gyro is not \
      already pitching it. Off is that game's default. Online and in a lobby the bikes keep the default.";
-/// The Handling From row's first choice (MD77).
-const FIRST_TRICK_PACK: &str = "First Pack On";
 /// The Air Wrecks row's help (P138).
 const AIR_WRECKS_HELP: &str = "Whether the bike's angle in the air throws the rider off: upside down, nosed over or rolled too far. \
      Off, you ride every jump out, and only the landing is judged. On is the original game.";
@@ -204,10 +202,8 @@ pub enum Key {
     Tricks,
     /// A trick pack's switch by its place in [`Menu::trick_packs`] (MD77).
     TrickPack(usize),
-    /// How the bikes handle (MD40).
+    /// How a seat's bike handles (MD40): the Garage's Bike tab row since P315d.
     Handling,
-    /// The pack MX vs. ATV's handling reads (MD77).
-    HandlingPack,
     /// MX vs. ATV's Brake Gyro and Gas Gyro options (P226).
     BrakeGyro,
     GasGyro,
@@ -314,7 +310,7 @@ impl Row {
     /// Whether the row is a dropdown (P277, opentennis's B498): a choice of [`LIST`] or more. A row
     /// that picks something for a press to do (Load Preset, Save Over) keeps its left and right.
     pub fn many(&self) -> bool {
-        self.kind == Kind::Choice && self.choices.len() >= LIST && !matches!(self.key, Key::LoadPreset | Key::CameraSaveOver | Key::Garage(_) | Key::Flier(_) | Key::Machine(_))
+        self.kind == Kind::Choice && self.choices.len() >= LIST && !matches!(self.key, Key::LoadPreset | Key::CameraSaveOver | Key::Garage(_) | Key::Flier(_) | Key::Machine(_) | Key::Handling)
     }
 
     /// Whether Cross opens the row's dropdown now: a [`Row::many`] row that is not dimmed.
@@ -386,7 +382,6 @@ fn hint(key: Key, choice: &str) -> &'static str {
         (Key::Handling, "Original") => "MX Unleashed's bikes",
         (Key::Handling, "MX vs. ATV") => "a trick pack's bike files",
         (Key::Handling, "Untamed") => "those files, Untamed's steps",
-        (Key::HandlingPack, FIRST_TRICK_PACK) => "the first switched on",
         _ => "",
     }
 }
@@ -626,24 +621,10 @@ impl Menu {
             r.note = if lit { warning.clone() } else { None }.or_else(|| Some(format!("tricks/{} in the mods folder", p.id)));
             rows.push(r.off_if(folder_off.is_some(), folder_off.unwrap_or_default()));
         }
-        use game_sim::handling::Handling;
-        rows.push(
-            Row::choice(Key::Handling, "Handling", &Handling::ALL.map(Handling::label), Handling::ALL.iter().position(|h| *h == s.handling).unwrap_or(0), HANDLING_HELP)
-                .off_if(folder_off.is_some(), folder_off.unwrap_or_default()),
-        );
-        if !packs.is_empty() {
-            let mut choices = vec![FIRST_TRICK_PACK];
-            choices.extend(packs.iter().map(|p| p.name.as_str()));
-            let now = packs.iter().position(|p| p.id == s.handling_pack).map_or(0, |i| i + 1);
-            let mut from = Row::choice(Key::HandlingPack, "Handling From", &choices, now, "The trick pack whose bike files MX vs. ATV's handling rides. First Pack On is the first trick pack switched on, or the first in the folder.");
-            if let (0, Some(id)) = (now, s.handling_pack_on(&ids)) {
-                from.note = packs.iter().find(|p| p.id == id).map(|p| format!("Now {}", p.name));
-            }
-            let why = if folder_off.is_some() { folder_off } else { (s.handling == Handling::Original).then_some("Only with Handling: MX vs. ATV") };
-            rows.push(from.off_if(why.is_some(), why.unwrap_or_default()));
-        }
-        // P226: MX vs. ATV's own two gyro options, which Untamed's steps read as well
-        let why = if folder_off.is_some() { folder_off } else { (s.handling == Handling::Original).then_some("Only with Handling: MX vs. ATV or Untamed") };
+        // P226: MX vs. ATV's own two gyro options, which Untamed's steps read as well; the handling
+        // itself is each player's, on the Garage's Bike tab (P315d)
+        let handled = self.picks.0.iter().any(|p| p.handling_of(roster::BIKE).is_some());
+        let why = if folder_off.is_some() { folder_off } else { (!handled).then_some("Only on MX vs. ATV or Untamed handling: the Garage's Machines tab") };
         for (key, name, on, help) in [(Key::BrakeGyro, "Brake Gyro", s.gyro.brake, BRAKE_GYRO_HELP), (Key::GasGyro, "Gas Gyro", s.gyro.gas, GAS_GYRO_HELP)] {
             rows.push(Row::on_off(key, name, on, help).off_if(why.is_some(), why.unwrap_or_default()));
         }
@@ -1248,6 +1229,7 @@ impl Menu {
             TAB_MACHINES => {
                 rows.extend(self.bike_rows(seat));
                 rows.push(row(G::Tier, "Driving Model", "Race Physics, or Pro Physics: faster bikes."));
+                rows.push(self.handling_row(seat));
                 rows.extend(self.flier_rows(seat));
                 rows.extend(self.other_machine_rows());
             }
@@ -1335,6 +1317,44 @@ impl Menu {
                 r.off_if(true, &why)
             })
             .collect()
+    }
+
+    /// The handling a machine's row offers (P315d): the original's, then each trick pack's in the
+    /// mods folder that lists bike files, as [`roster::handling_choices`] reads their manifests.
+    /// None but the original's with the mods folder off.
+    pub(super) fn handling_choices(&self) -> Vec<roster::HandlingChoice> {
+        let packs: Vec<roster::HandlingPack> = match self.settings.mods {
+            true => self.trick_packs().iter().map(|p| roster::HandlingPack { id: p.id.clone(), name: p.name.clone(), phy: p.phy }).collect(),
+            false => Vec::new(),
+        };
+        roster::handling_choices(&packs, roster::BIKE)
+    }
+
+    /// The pack a pick naming none rides (P315d), as an older Handling From's First Pack On did:
+    /// the first trick pack on.
+    pub(super) fn first_handling_pack(&self) -> Option<String> {
+        self.settings.trick_packs_on(&self.trick_pack_ids()).into_iter().next()
+    }
+
+    /// The Bike tab's Handling row (P315d): the seat's pick of how its bike handles, out of what the
+    /// installed trick packs' manifests offer. With none offering, the original's alone, greyed with
+    /// where the others come from.
+    fn handling_row(&self, seat: usize) -> Row {
+        let choices = self.handling_choices();
+        let pick = self.garages.get(seat).map(|g| g.pick.clone()).unwrap_or_default();
+        let first = self.first_handling_pack();
+        let now = roster::handling_of(&choices, &pick, roster::BIKE, first.as_deref());
+        let mut r = Row::new(Key::Handling, Kind::Choice, "Handling", HANDLING_HELP);
+        r.choices = choices.iter().map(|c| c.label.clone()).collect();
+        r.now = choices.iter().position(|c| c == now);
+        r.value = now.label.clone();
+        r.note = Some(now.about.clone());
+        let why = match (self.settings.mods, choices.len()) {
+            (false, _) => Some("Needs a trick pack in the mods folder"),
+            (true, 1) => Some("MX vs. ATV's and Untamed's come in trick packs in the mods folder's tricks/"),
+            _ => None,
+        };
+        r.off_if(why.is_some(), why.unwrap_or_default())
     }
 
     /// The Garage's Fliers tab (P315): a row per kind of flier on offer, stepping through every
@@ -1832,19 +1852,19 @@ impl Menu {
             Key::BackwardsBail => s.backwards_bail = !s.backwards_bail,
             Key::Bays => s.bays = !s.bays,
             Key::Tricks => s.tricks = Tricks::ALL[next(row)],
-            Key::Handling => s.handling = game_sim::handling::Handling::ALL[next(row)],
+            Key::Handling => {
+                let seat = self.garage_seat();
+                let (choices, first) = (self.handling_choices(), self.first_handling_pack());
+                let Some(g) = self.garages.get_mut(seat) else { return };
+                roster::step_handling(&choices, &mut g.pick, roster::BIKE, by(p), first.as_deref());
+                return;
+            }
             Key::BrakeGyro => s.gyro.brake = !s.gyro.brake,
             Key::GasGyro => s.gyro.gas = !s.gyro.gas,
             Key::TrickPack(i) => {
                 let ids = self.trick_pack_ids();
                 let Some(id) = ids.get(i).cloned() else { return };
                 self.settings.toggle_trick_pack(&id, &ids);
-            }
-            Key::HandlingPack => {
-                self.settings.handling_pack = match next(row) {
-                    0 => String::new(),
-                    k => self.trick_pack_ids().get(k - 1).cloned().unwrap_or_default(),
-                };
             }
             Key::Modifiers if p.ok => {
                 self.open_modifiers();

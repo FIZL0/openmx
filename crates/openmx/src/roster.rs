@@ -28,6 +28,7 @@
 
 use game_render::Disc;
 use game_render::disc::Res;
+use game_sim::handling::Handling;
 use game_sim::track::{self, Engine, Tuning};
 use std::path::Path;
 
@@ -471,6 +472,7 @@ impl Catalogue {
             look: self.wardrobe.fit(&pick.look),
             preset: pick.preset.clone(),
             fliers: pick.fliers.clone(),
+            handling: pick.handling.clone(),
         }
     }
 
@@ -499,13 +501,16 @@ pub struct Pick {
     /// The flier skin it picked of each flier kind (P315), by the kind's word; a kind it has not
     /// picked flies MX Unleashed's first skin.
     pub fliers: Vec<FlierPick>,
+    /// The handling it picked for each machine (P315d), by the machine's word ([`BIKE`]); a machine
+    /// it has not picked one for handles as MX Unleashed's.
+    pub handling: Vec<HandlingPick>,
 }
 
 impl Default for Pick {
     /// The shell as it was before there was a garage: the `125sx`, on the freeride's set, in the stock
     /// gear.
     fn default() -> Pick {
-        Pick { bike: "125sx".into(), set: Set::FREERIDE, rider: "thq1".into(), look: Look::default(), preset: String::new(), fliers: Vec::new() }
+        Pick { bike: "125sx".into(), set: Set::FREERIDE, rider: "thq1".into(), look: Look::default(), preset: String::new(), fliers: Vec::new(), handling: Vec::new() }
     }
 }
 
@@ -526,6 +531,19 @@ impl Pick {
         match self.fliers.iter_mut().find(|f| f.machine == flier.machine) {
             Some(f) => *f = pick,
             None => self.fliers.push(pick),
+        }
+    }
+
+    /// The seat's pick of handling for `machine` (P315d), if it made one other than the original's.
+    pub fn handling_of(&self, machine: &str) -> Option<&HandlingPick> {
+        self.handling.iter().find(|h| h.machine == machine && h.handling != Handling::Original)
+    }
+
+    /// Pick `choice` as `machine`'s handling, in place of the one before; the original's is no line.
+    pub fn set_handling(&mut self, machine: &str, choice: &HandlingChoice) {
+        self.handling.retain(|h| h.machine != machine);
+        if choice.handling != Handling::Original {
+            self.handling.push(HandlingPick { machine: machine.into(), handling: choice.handling, pack: choice.pack.clone() });
         }
     }
 }
@@ -578,6 +596,21 @@ impl Picks {
                     }
                     continue;
                 }
+                // P315d: `seat<n>.handling = <machine> <handling> [<pack>]`, one line a machine; no
+                // pack is the first trick pack on, as an older settings file's Handling From said.
+                "handling" => {
+                    let w: Vec<&str> = v.split_whitespace().collect();
+                    let machine = w.first().and_then(|m| clean(m));
+                    let handling = w.get(1).and_then(|h| Handling::from_word(h.trim()));
+                    let pack = w.get(2).and_then(|p| clean(p));
+                    if let (Some(machine), Some(handling), true) = (machine, handling, w.len() <= 3 && (w.len() < 3 || pack.is_some())) {
+                        pick.handling.retain(|h| h.machine != machine);
+                        if handling != Handling::Original {
+                            pick.handling.push(HandlingPick { machine, handling, pack: pack.unwrap_or_default() });
+                        }
+                    }
+                    continue;
+                }
                 "preset" => {
                     // A key is a name and a number: longer than a name alone.
                     let ok = |c: char| c.is_ascii_alphanumeric() || " -'.&".contains(c);
@@ -613,6 +646,10 @@ impl Picks {
             }
             for f in &p.fliers {
                 out.push_str(&format!("seat{}.flier = {} {} {}\n", i + 1, f.machine, f.pack, f.skin));
+            }
+            for h in p.handling.iter().filter(|h| h.handling != Handling::Original) {
+                let pack = if h.pack.is_empty() { String::new() } else { format!(" {}", h.pack) };
+                out.push_str(&format!("seat{}.handling = {} {}{pack}\n", i + 1, h.machine, h.handling.word()));
             }
         }
         out
@@ -837,6 +874,90 @@ pub fn other_kinds(offer: &[PackMachine], fliers: &[Flier]) -> Vec<String> {
         }
     }
     out
+}
+
+// ---- the handling on offer (P315d) -----------------------------------------------------------------
+
+/// The machine whose handling the Garage picks today (P315d): the bike, read from a trick pack's
+/// `.phy` files. A flier flies on what its skin's pack gives it ([`Flier::game`]), so it has no row.
+pub const BIKE: &str = "bike";
+
+/// A seat's pick of one machine's handling, as `garage.txt` keeps it: the machine, the handling and
+/// the trick pack whose files it reads (empty: the first trick pack on, else the folder's first).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HandlingPick {
+    pub machine: String,
+    pub handling: Handling,
+    pub pack: String,
+}
+
+/// One handling a machine's row offers (P315d): MX Unleashed's own, or MX vs. ATV's or Untamed's
+/// steps on an installed trick pack's bike files, as its `mod.json` lists them (`phy`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HandlingChoice {
+    pub handling: Handling,
+    /// The trick pack's `mod.json` id; empty for the original's.
+    pub pack: String,
+    /// What the row calls it: the handling, and the pack's name where more than one pack offers.
+    pub label: String,
+    /// What it is, under the row.
+    pub about: String,
+}
+
+/// A trick pack as the handling row sees it: its id, its name, and whether its manifest lists any
+/// bike files (`phy`) to ride on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HandlingPack {
+    pub id: String,
+    pub name: String,
+    pub phy: bool,
+}
+
+/// The handling `machine`'s row offers (P315d): the original's first, then each trick pack in
+/// `packs` (the folder's order) whose manifest lists bike files, MX vs. ATV's and Untamed's steps on
+/// them. Only the bike has a choice; every other machine has the original's alone.
+pub fn handling_choices(packs: &[HandlingPack], machine: &str) -> Vec<HandlingChoice> {
+    let mut out = vec![HandlingChoice { handling: Handling::Original, pack: String::new(), label: Handling::Original.label().into(), about: "MX Unleashed's bikes.".into() }];
+    if machine != BIKE {
+        return out;
+    }
+    let riding: Vec<&HandlingPack> = packs.iter().filter(|p| p.phy).collect();
+    for p in &riding {
+        for (handling, about) in [
+            (Handling::MxVsAtv, format!("MX vs. ATV's bike files and steps, from {}.", p.name)),
+            (Handling::Untamed, format!("{}'s bike files on the steps MX vs. ATV Untamed reworked, as far as they are ported.", p.name)),
+        ] {
+            let label = match riding.len() {
+                1 => handling.label().to_string(),
+                _ => format!("{}, {}", handling.label(), p.name),
+            };
+            out.push(HandlingChoice { handling, pack: p.id.clone(), label, about });
+        }
+    }
+    out
+}
+
+/// The choice `machine` handles on for a seat (P315d): its pick where that is on offer; a pick
+/// naming no pack, or one no longer installed, on the pack `first` names (the first trick pack on)
+/// else the first offering, as a ride reads it; with none offering, the original's.
+pub fn handling_of<'a>(choices: &'a [HandlingChoice], pick: &Pick, machine: &str, first: Option<&str>) -> &'a HandlingChoice {
+    let Some(want) = pick.handling_of(machine) else { return &choices[0] };
+    let same = |c: &&HandlingChoice| c.handling == want.handling;
+    choices
+        .iter()
+        .filter(same)
+        .find(|c| c.pack == want.pack)
+        .or_else(|| choices.iter().filter(same).find(|c| Some(c.pack.as_str()) == first))
+        .or_else(|| choices.iter().find(same))
+        .unwrap_or(&choices[0])
+}
+
+/// Left (`-1`) or right (`1`) on a machine's Handling row: its next choice.
+pub fn step_handling(choices: &[HandlingChoice], pick: &mut Pick, machine: &str, by: i32, first: Option<&str>) {
+    let now = handling_of(choices, pick, machine, first);
+    let at = choices.iter().position(|c| c == now).unwrap_or(0);
+    let next = choices[wrap(at, by, choices.len())].clone();
+    pick.set_handling(machine, &next);
 }
 
 // ---- the look (P86) ----------------------------------------------------------------------------------
@@ -1466,9 +1587,10 @@ impl Garage {
             None => 0,
         };
         if let Some(p) = presets.find(keys[next]) {
-            // A saved look is the rider and the bike: the seat's fliers stay its own (P315).
-            let fliers = std::mem::take(&mut self.pick.fliers);
-            self.pick = Pick { fliers, ..c.fit(p) };
+            // A saved look is the rider and the bike: the seat's fliers (P315) and handling (P315d)
+            // stay its own.
+            let (fliers, handling) = (std::mem::take(&mut self.pick.fliers), std::mem::take(&mut self.pick.handling));
+            self.pick = Pick { fliers, handling, ..c.fit(p) };
         }
     }
 
@@ -1476,8 +1598,8 @@ impl Garage {
     pub fn load_preset(&mut self, c: &Catalogue, presets: &Presets, key: &str) -> bool {
         match presets.find(key) {
             Some(p) => {
-                let fliers = std::mem::take(&mut self.pick.fliers);
-                self.pick = Pick { fliers, ..c.fit(p) };
+                let (fliers, handling) = (std::mem::take(&mut self.pick.fliers), std::mem::take(&mut self.pick.handling));
+                self.pick = Pick { fliers, handling, ..c.fit(p) };
                 true
             }
             None => false,
@@ -1589,6 +1711,39 @@ mod tests {
         assert_eq!(back.0[1].fliers, picks.0[1].fliers);
         assert!(back.0[0].fliers.is_empty());
         assert_eq!(back.0[1].flier("kiowa").map(|f| f.skin.as_str()), Some("kiowa2"));
+    }
+
+    #[test]
+    fn a_seats_handling_is_saved_read_back_and_offered_by_the_packs() {
+        // P315d: one line a machine, the original's none, no pack the first trick pack on.
+        let mut picks = Picks::default();
+        let packs = [
+            HandlingPack { id: "a".into(), name: "Pack A".into(), phy: true },
+            HandlingPack { id: "s".into(), name: "Stunts".into(), phy: false },
+            HandlingPack { id: "u".into(), name: "Pack U".into(), phy: true },
+        ];
+        let choices = handling_choices(&packs, BIKE);
+        let labels: Vec<&str> = choices.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(labels, ["Original", "MX vs. ATV, Pack A", "Untamed, Pack A", "MX vs. ATV, Pack U", "Untamed, Pack U"]);
+        assert_eq!(handling_choices(&packs[..2], BIKE).iter().map(|c| c.label.as_str()).collect::<Vec<_>>(), ["Original", "MX vs. ATV", "Untamed"], "one pack: no names");
+        assert_eq!(handling_choices(&packs, "biplane").len(), 1, "a flier has the original's alone");
+        step_handling(&choices, &mut picks.0[1], BIKE, -1, None);
+        assert_eq!(handling_of(&choices, &picks.0[1], BIKE, None).label, "Untamed, Pack U", "left from the original's wraps");
+        let text = picks.text();
+        assert!(text.contains("seat2.handling = bike untamed u\n") && !text.contains("seat1.handling"), "{text}");
+        assert_eq!(Picks::parse(&text), picks);
+        step_handling(&choices, &mut picks.0[1], BIKE, 1, None);
+        assert!(picks.0[1].handling.is_empty(), "back on the original's: no line");
+        // No pack named: the first trick pack on, else the first offering; a gone pack the same.
+        let read = Picks::parse("seat1.handling = bike mxvatv\nseat2.handling = bike untamed gone\nseat3.handling = bike sideways a\nseat4.handling = bike mxvatv a b\n");
+        assert_eq!(read.0[0].handling_of(BIKE).map(|h| h.pack.as_str()), Some(""));
+        assert_eq!(handling_of(&choices, &read.0[0], BIKE, Some("u")).label, "MX vs. ATV, Pack U");
+        assert_eq!(handling_of(&choices, &read.0[0], BIKE, None).label, "MX vs. ATV, Pack A");
+        assert_eq!(handling_of(&choices, &read.0[1], BIKE, None).label, "Untamed, Pack A");
+        assert!(read.0[2].handling.is_empty() && read.0[3].handling.is_empty(), "words it cannot read");
+        // With no pack offering, a pick handles as the original's.
+        let alone = handling_choices(&[], BIKE);
+        assert_eq!(handling_of(&alone, &read.0[0], BIKE, None).handling, Handling::Original);
     }
 
     #[test]
