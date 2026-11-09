@@ -15143,11 +15143,13 @@ const RIDER_WRECK_ENTRY: u32 = 0x004e_d700;
 const RIDER_POSE: u32 = 0x0050_5720;
 const RIDER_SETTLE_VT: u32 = 0x0050_5710;
 const RIDER_BODY_TARGET: u32 = 0x0049_3b00;
-/// The riding reset's (S287): the bodies' vt `+0x18`, `+0x60`, `+0x20`, and the heap's resize.
+/// The riding reset's (S287) and the wreck entry's (S288): the bodies' vt `+0x18`, `+0x60`, `+0x20`,
+/// the heap's resize, the rider's `+0x8f4` object's cue.
 const RIDER_BODY_MASS: u32 = 0x0049_3cc0;
 const RIDER_BODY_INERTIA: u32 = 0x0049_3bf0;
 const RIDER_BODY_AT: u32 = 0x0049_3b20;
 const HEAP_RESIZE: u32 = 0x001b_7470;
+const RIDER_WRECK_CUE: u32 = 0x004f_7ca0;
 
 thread_local! {
     /// What [`rider_leaf`] served in Rust, by name, over a replay.
@@ -15184,9 +15186,9 @@ fn call_from_hook_dt(ee: &mut Ee, f: u32, ints: &[u64], dt: F) -> u64 {
 }
 
 /// The mode machine's outside calls from inside its hook: the riding reset the port's
-/// ([`rider::riding_reset`], S287) and the bodies' virtuals ([`rider::body_target`],
-/// [`rider::body_mass`], [`rider::body_inertia`], [`rider::body_at`]), every other the original's
-/// (S286-S289 port them).
+/// ([`rider::riding_reset`], S287), the wreck entry the port's ([`rider::wreck_entry`], S288), and
+/// the bodies' virtuals ([`rider::body_target`], [`rider::body_mass`], [`rider::body_inertia`],
+/// [`rider::body_at`]), every other the original's (S286-S289 port them).
 struct LeafRider<'a> {
     ee: &'a mut Ee,
 }
@@ -15211,7 +15213,11 @@ impl rider::Rider for LeafRider<'_> {
                 rider::riding_reset(self, RIDER, dt);
                 0
             }
-            C::WreckEntry(kind) => call_from_hook_dt(self.ee, RIDER_WRECK_ENTRY, &[r, u64::from(kind)], dt),
+            C::WreckEntry(kind) => {
+                rider::wreck_entry(self, RIDER, kind, dt);
+                0
+            }
+            C::WreckCue(cue) => call_from_hook_dt(self.ee, RIDER_WRECK_CUE, &[u64::from(cue), 0], dt),
             C::Pose => {
                 assert_eq!(vt(self.ee, RIDER + 4, 0xd0), RIDER_POSE, "the rider's vt +0xd0");
                 call_from_hook_dt(self.ee, RIDER_POSE, &[r, 0], dt)
@@ -15252,7 +15258,8 @@ impl rider::Rider for LeafRider<'_> {
         let name = match c {
             C::Rand => "> rand",
             C::RidingReset => "= riding reset",
-            C::WreckEntry(_) => "> wreck entry",
+            C::WreckEntry(_) => "= wreck entry",
+            C::WreckCue(_) => "> wreck cue",
             C::Pose => "> pose",
             C::Settle => "> settle",
             C::Switch { .. } => "> switch",
@@ -15362,7 +15369,7 @@ fn ride_replays_with_the_rider_leaf_on_the_ports() {
 
 /// **F31b5i — C15's flip with the rider leaf on the ports**: flip-1 bit-exact, wrecked on row 125
 /// and put back on row 193, the rider's writes into the bike's record the port's; the put back's
-/// riding reset the port's too (S287).
+/// riding reset the port's too (S287), and the wreck entry the port's (S288).
 #[test]
 fn flip_replays_with_the_rider_leaf_on_the_ports() {
     let Some((w, off, served, census)) = replay_with_rider_leaf("flip-1") else { return };
@@ -15374,20 +15381,22 @@ fn flip_replays_with_the_rider_leaf_on_the_ports() {
         served.into_iter().collect::<Vec<_>>(),
         [
             ("= body at", 18),
-            ("= body inertia", 18),
-            ("= body mass", 18),
-            ("= body target", 37),
+            ("= body inertia", 36),
+            ("= body mass", 36),
+            ("= body target", 55),
             ("= bone solve", 12303),
             ("= hand-over", 465),
             ("= modes", 465),
             ("= riding reset", 1),
+            ("= wreck entry", 1),
             ("= wreck spots", 465),
             ("> extra step", 465),
             ("> gather", 68),
-            ("> pose", 3),
-            ("> settle", 3),
-            ("> switch", 1482),
-            ("> wreck entry", 1)
+            ("> pose", 4),
+            ("> rand", 5),
+            ("> settle", 4),
+            ("> switch", 1501),
+            ("> wreck cue", 1)
         ],
         "{census:?}"
     );
