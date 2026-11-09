@@ -534,11 +534,10 @@ fn the_settings_file_reads_back_as_it_was_written() {
         hud_scale: 130,
         // MX vs. ATV's tricks (MD16).
         tricks: menu::Tricks::MxVsAtv,
-        // MX vs. ATV's handling (MD40).
-        handling: game_sim::handling::Handling::MxVsAtv,
-        // Two trick packs stacked, and the handling from the second (MD77).
+        // Two trick packs stacked (MD77).
         trick_packs: vec!["mxvatv".into(), "untamed".into()],
-        handling_pack: "untamed".into(),
+        // An older file's Handling rows (MD40) are read but never written: the Garage's since P315d.
+        old_handling: None,
         // MX vs. ATV's gyros both off its default (P226).
         gyro: game_sim::handling::Gyro { brake: false, gas: true },
         // An older file's Fliers row (MD80e) is read but never written (P315).
@@ -2206,6 +2205,105 @@ fn the_fliers_tab_picks_a_renamed_packs_skins_per_seat() {
     assert!(!m.settings.text().contains("flier"));
 }
 
+/// P315d: the Bike tab's Handling row offers the original's and, for each installed trick pack whose
+/// manifest lists bike files, MX vs. ATV's and Untamed's on them; each seat picks its own, kept in
+/// garage.txt when the Garage closes. Settings → Ride has no Handling rows. An older settings file's
+/// Handling and Handling From become 1P's pick once, and are written no more.
+#[test]
+fn the_bike_tab_picks_each_seats_handling() {
+    use game_sim::handling::Handling;
+    use menu::{Key, TrickPack};
+    use roster::{Catalogue, Picks};
+    let mut disc = match game_render::Disc::open_configured() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    let catalogue = Catalogue::read(&mut disc).unwrap();
+    let pack = |id: &str, name: &str, phy: bool| TrickPack { id: id.into(), name: name.into(), extras: Vec::new(), phy };
+    let packs = vec![pack("mxvatv", "Unleashed tricks", true), pack("stunts", "Stunts only", false), pack("untamed", "Untamed tricks", true)];
+    let mut reader = Reader::new();
+    let mut m = Menu::new(Settings::default(), Controls::default()).with_garage(catalogue.clone(), Picks::default());
+    assert!(!m.take_picks_changed(), "no old setting, no picks");
+    m.set_trick_packs(packs.clone());
+    m.step(reader.read(&Report::idle()));
+    let r = &mut reader;
+    main_to(&mut m, r, "Garage");
+    tab_to(&mut m, r, "Bike");
+    let row = |m: &Menu| m.page().iter().find(|row| row.key == Key::Handling).cloned().expect("a Handling row on the Bike tab");
+    assert_eq!(row(&m).choices, ["Original", "MX vs. ATV, Unleashed tricks", "Untamed, Unleashed tricks", "MX vs. ATV, Untamed tricks", "Untamed, Untamed tricks"], "the pack with no bike files offers none");
+    assert_eq!(row(&m).value, "Original");
+    assert_eq!(row(&m).note.as_deref(), Some("MX Unleashed's bikes."));
+    assert!(row(&m).off.is_none());
+    down_to(&mut m, r, Key::Handling);
+    tap(&mut m, r, Control::Right);
+    assert_eq!(row(&m).value, "MX vs. ATV, Unleashed tricks");
+    assert_eq!(row(&m).note.as_deref(), Some("MX vs. ATV's bike files and steps, from Unleashed tricks."));
+    // 2P's own: up to the Player row, over to 2P, back down, and two steps left from the original's.
+    down_to(&mut m, r, Key::Player);
+    tap(&mut m, r, Control::Right);
+    down_to(&mut m, r, Key::Handling);
+    assert_eq!(row(&m).value, "Original", "2P's is its own");
+    tap(&mut m, r, Control::Left);
+    tap(&mut m, r, Control::Left);
+    assert_eq!(row(&m).value, "MX vs. ATV, Untamed tricks");
+    tap(&mut m, r, Control::Circle);
+    assert!(m.take_picks_changed());
+    let bike = |m: &Menu, seat: usize| m.picks.0[seat].handling_of(roster::BIKE).map(|h| (h.handling, h.pack.clone()));
+    assert_eq!(bike(&m, 0), Some((Handling::MxVsAtv, "mxvatv".into())));
+    assert_eq!(bike(&m, 1), Some((Handling::MxVsAtv, "untamed".into())));
+    assert_eq!(bike(&m, 2), None);
+    let text = m.picks.text();
+    assert!(text.contains("seat1.handling = bike mxvatv mxvatv\n") && text.contains("seat2.handling = bike mxvatv untamed\n"), "{text}");
+    assert_eq!(Picks::parse(&text), m.picks, "garage.txt reads back");
+    // Settings → Ride: no Handling rows; the gyros are no longer greyed, as a seat rides MX vs. ATV's.
+    main_to(&mut m, r, "Settings");
+    tab_to(&mut m, r, "Ride");
+    assert!(m.page().iter().all(|row| row.key != Key::Handling && row.label != "Handling From"));
+    assert!(m.page().iter().find(|row| row.key == Key::BrakeGyro).unwrap().off.is_none());
+
+    // With no trick pack that lists bike files, the original's alone, greyed with where the others come from.
+    let mut m = Menu::new(Settings::default(), Controls::default()).with_garage(catalogue.clone(), Picks::default());
+    m.set_trick_packs(vec![pack("stunts", "Stunts only", false)]);
+    let mut reader = Reader::new();
+    m.step(reader.read(&Report::idle()));
+    let r = &mut reader;
+    main_to(&mut m, r, "Garage");
+    tab_to(&mut m, r, "Bike");
+    assert_eq!(row(&m).choices, ["Original"]);
+    assert_eq!(row(&m).off.as_deref(), Some("MX vs. ATV's and Untamed's come in trick packs in the mods folder's tricks/"));
+
+    // An older file's Handling and Handling From: 1P's pick, and the settings written without them.
+    let old = Settings::parse("handling = untamed\nhandling_pack = untamed\nbrake_gyro = off\n");
+    assert_eq!(old.old_handling, Some((Handling::Untamed, "untamed".into())));
+    assert!(!old.text().contains("handling"), "{}", old.text());
+    let mut m = Menu::new(old, Controls::default()).with_garage(catalogue.clone(), Picks::default());
+    assert!(m.take_picks_changed() && m.take_changed());
+    assert_eq!(bike(&m, 0), Some((Handling::Untamed, "untamed".into())));
+    assert_eq!(bike(&m, 1), None);
+    assert_eq!(m.settings.old_handling, None);
+    assert!(!m.settings.gyro.brake, "the gyros stay the settings'");
+    // Handling alone, from before Handling From: no pack named, shown on the first trick pack on.
+    let mut m = Menu::new(Settings::parse("tricks = mxvatv\ntrick_packs = untamed\nhandling = mxvatv\n"), Controls::default()).with_garage(catalogue.clone(), Picks::default());
+    m.set_trick_packs(packs.clone());
+    assert_eq!(bike(&m, 0), Some((Handling::MxVsAtv, String::new())));
+    assert!(m.picks.text().contains("seat1.handling = bike mxvatv\n"), "{}", m.picks.text());
+    let mut reader = Reader::new();
+    m.step(reader.read(&Report::idle()));
+    let r = &mut reader;
+    main_to(&mut m, r, "Garage");
+    tab_to(&mut m, r, "Bike");
+    assert_eq!(row(&m).value, "MX vs. ATV, Untamed tricks", "the first trick pack on");
+    // A seat that already has a pick of its own keeps it.
+    let mut picks = Picks::default();
+    picks.0[0].handling = vec![roster::HandlingPick { machine: "bike".into(), handling: Handling::MxVsAtv, pack: "mxvatv".into() }];
+    let m = Menu::new(Settings::parse("handling = untamed\n"), Controls::default()).with_garage(catalogue, picks);
+    assert_eq!(bike(&m, 0), Some((Handling::MxVsAtv, "mxvatv".into())));
+    assert_eq!(m.settings.old_handling, None);
+}
+
 #[test]
 fn a_picked_bike_and_rider_reach_the_ride_that_starts_per_seat() {
     use game_render::rider::{Rider as Body, Sex};
@@ -2307,6 +2405,8 @@ fn a_picked_bike_and_rider_reach_the_ride_that_starts_per_seat() {
         let start = || {
             let mut reader = Reader::new();
             let mut m = Menu::new(Settings::default(), Controls::default()).with_garage(catalogue.clone(), Picks::default());
+            // A trick pack with bike files, so the Bike tab's Handling row has more than the original's (P315d).
+            m.set_trick_packs(vec![menu::TrickPack { id: "mxvatv".into(), name: "Unleashed tricks".into(), extras: Vec::new(), phy: true }]);
             m.step(reader.read(&Report::idle()));
             main_to(&mut m, &mut reader, "Garage");
             tab_to(&mut m, &mut reader, tab);
@@ -4961,6 +5061,8 @@ fn every_row_of_every_settings_tab_and_page_changes_by_pad() {
         for name in ["Low", "High"] {
             m.settings.camera_sets[0].save_custom(Machine::Bike, "Race Cam 1", name, menu::cameras::Look::ORIGINAL, &[]);
         }
+        // 1P on MX vs. ATV's handling (P315d), which the gyro rows are for.
+        m.picks.0[0].handling = vec![roster::HandlingPick { machine: "bike".into(), handling: game_sim::handling::Handling::MxVsAtv, pack: String::new() }];
         (m, r)
     };
     for tab in menu::SETTINGS_TABS {
@@ -5757,12 +5859,12 @@ fn the_tricks_row_picks_mx_vs_atv_and_is_saved() {
 
 /// MD77: every installed trick pack has an On/Off row by its name; switching packs on stacks them,
 /// saved by id in `trick_packs`, and the Tricks row names what is on. Past the 96 gestures the rows
-/// warn how many stunts go without a button. Handling From names a pack by id, else the first on.
+/// warn how many stunts go without a button.
 #[test]
 fn each_trick_pack_has_a_row_and_they_stack() {
     use menu::{Key, TrickPack, Tricks};
     let (mut m, mut r) = fresh();
-    let pack = |id: &str, name: &str, extras: Vec<String>| TrickPack { id: id.into(), name: name.into(), extras };
+    let pack = |id: &str, name: &str, extras: Vec<String>| TrickPack { id: id.into(), name: name.into(), extras, phy: true };
     let names = |prefix: &str, n: usize| (0..n).map(|i| format!("{prefix}{i}")).collect::<Vec<_>>();
     m.set_trick_packs(vec![pack("mxvatv", "Unleashed tricks", names("a", 46)), pack("untamed", "Untamed tricks", names("a", 30).into_iter().chain(names("b", 20)).collect())]);
     settings_at(&mut m, &mut r, "Ride");
@@ -5794,15 +5896,8 @@ fn each_trick_pack_has_a_row_and_they_stack() {
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.settings.trick_packs_on(&m.trick_pack_ids()), ["untamed"]);
     assert_eq!(row(&m, Key::Tricks).value, "Untamed tricks");
-    // Handling From: the first pack on, until one is named.
-    m.settings.handling = game_sim::handling::Handling::MxVsAtv;
-    assert_eq!(row(&m, Key::HandlingPack).value, "First Pack On");
-    assert_eq!(row(&m, Key::HandlingPack).note.as_deref(), Some("Now Untamed tricks"));
-    down_to(&mut m, &mut r, Key::HandlingPack);
-    tap(&mut m, &mut r, Control::Right);
-    assert_eq!(m.settings.handling_pack, "mxvatv");
-    assert_eq!(m.settings.handling_pack_on(&m.trick_pack_ids()).as_deref(), Some("mxvatv"));
-    assert!(m.settings.text().contains("handling_pack = mxvatv\n"));
+    // P315d: the Handling rows are the Garage's now.
+    assert!(m.page().iter().all(|r| r.key != Key::Handling && r.label != "Handling From"));
     // The last off: the original's tricks, and the list is kept for next time.
     down_to(&mut m, &mut r, Key::TrickPack(1));
     tap(&mut m, &mut r, Control::Cross);
@@ -5820,20 +5915,21 @@ fn each_trick_pack_has_a_row_and_they_stack() {
     assert!(row(&m, Key::TrickPack(0)).off.is_some(), "greyed with the mods folder off");
 }
 
-/// P226: MX vs. ATV's Brake Gyro and Gas Gyro rows sit under Handling, greyed on the original's,
-/// and each is saved only off that game's default (brake on, gas off).
+/// P226: MX vs. ATV's Brake Gyro and Gas Gyro rows, greyed while no player's bike is on MX vs.
+/// ATV's or Untamed's handling (the Garage's since P315d), and each saved only off that game's
+/// default (brake on, gas off).
 #[test]
 fn gyro_rows_set_mx_vs_atv_gyros() {
     use menu::Key;
     let (mut m, mut r) = fresh();
-    m.set_trick_packs(vec![menu::TrickPack { id: "mxvatv".into(), name: "Unleashed tricks".into(), extras: Vec::new() }]);
+    m.set_trick_packs(vec![menu::TrickPack { id: "mxvatv".into(), name: "Unleashed tricks".into(), extras: Vec::new(), phy: true }]);
     settings_at(&mut m, &mut r, "Ride");
     let row = |m: &Menu, key: Key| m.page().into_iter().find(|row| row.key == key).unwrap();
     assert_eq!(row(&m, Key::BrakeGyro).value, "On");
     assert_eq!(row(&m, Key::GasGyro).value, "Off");
     assert!(row(&m, Key::GasGyro).off.is_some(), "greyed on the original's handling");
-    m.settings.handling = game_sim::handling::Handling::MxVsAtv;
-    assert!(row(&m, Key::GasGyro).off.is_none());
+    m.picks.0[1].handling = vec![roster::HandlingPick { machine: "bike".into(), handling: game_sim::handling::Handling::MxVsAtv, pack: String::new() }];
+    assert!(row(&m, Key::GasGyro).off.is_none(), "any player's");
     assert!(!m.settings.text().contains("gyro"), "{}", m.settings.text());
     down_to(&mut m, &mut r, Key::GasGyro);
     tap(&mut m, &mut r, Control::Cross);
@@ -5843,7 +5939,7 @@ fn gyro_rows_set_mx_vs_atv_gyros() {
     tap(&mut m, &mut r, Control::Right);
     assert_eq!(m.settings.gyro, game_sim::handling::Gyro { brake: false, gas: true });
     let text = m.settings.text();
-    assert!(text.contains("handling = mxvatv\nbrake_gyro = off\ngas_gyro = on\n"), "{text}");
+    assert!(text.contains("brake_gyro = off\ngas_gyro = on\n") && !text.contains("handling"), "{text}");
     assert_eq!(Settings::parse(&text).gyro, m.settings.gyro);
     assert_eq!(Settings::parse("brake_gyro = on\ngas_gyro = off\n").gyro, game_sim::handling::Gyro::default());
 }

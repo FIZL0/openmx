@@ -542,12 +542,10 @@ pub struct Settings {
     /// them that are installed, stacked in the folder's order ([`Settings::trick_packs_on`]); empty,
     /// the first installed pack alone, as a file from before MD77 meant.
     pub trick_packs: Vec<String>,
-    /// The pack whose `mx_*.phy` MX vs. ATV's handling reads (MD77), by id; empty for the first trick
-    /// pack on, or the first installed when none is ([`Settings::handling_pack_on`]).
-    pub handling_pack: String,
-    /// How the bikes handle (MD40): MX Unleashed's, or MX vs. ATV's bikes and steps read from the
-    /// trick pack's `mx_*.phy`. The original's unless changed.
-    pub handling: game_sim::handling::Handling,
+    /// An older file's Handling and Handling From rows (MD40, MD77), read and never written again
+    /// (P315d): off the original's, the handling and the pack id (empty: the first trick pack on)
+    /// the first seat's Garage pick of the bike's handling becomes ([`Menu::take_old_handling`]).
+    pub old_handling: Option<(game_sim::handling::Handling, String)>,
     /// MX vs. ATV's Brake Gyro and Gas Gyro options (P226), read on its handling alone: the game's
     /// own default, brake on and gas off, unless changed.
     pub gyro: game_sim::handling::Gyro,
@@ -1399,8 +1397,7 @@ impl Default for Settings {
             favourites: Vec::new(),
             tricks: Tricks::default(),
             trick_packs: Vec::new(),
-            handling_pack: String::new(),
-            handling: game_sim::handling::Handling::default(),
+            old_handling: None,
             gyro: game_sim::handling::Gyro::default(),
             old_fliers: None,
             plants: Lod::default(),
@@ -1556,6 +1553,7 @@ impl Settings {
         let mut s = Settings::default();
         // An old Flier Skin line may come before its Fliers line.
         let mut old_skin = None;
+        let (mut old_handling, mut old_pack) = (game_sim::handling::Handling::Original, String::new());
         // A file from before P56 has no mix, and its two sliders count to 10.
         let tens = !pairs(text).any(|(k, _)| k == "mix");
         let level = |v: &str, was: u8| match v.parse::<u8>() {
@@ -1613,8 +1611,8 @@ impl Settings {
                 "mods" => s.mods = v != "off",
                 "tricks" => s.tricks = Tricks::from_word(v).unwrap_or(s.tricks),
                 "trick_packs" => s.trick_packs = pack_names(v),
-                "handling_pack" => s.handling_pack = pack_names(v).into_iter().next().unwrap_or_default(),
-                "handling" => s.handling = game_sim::handling::Handling::from_word(v).unwrap_or(s.handling),
+                "handling_pack" => old_pack = pack_names(v).into_iter().next().unwrap_or_default(),
+                "handling" => old_handling = game_sim::handling::Handling::from_word(v).unwrap_or(old_handling),
                 "brake_gyro" => s.gyro.brake = v != "off",
                 "gas_gyro" => s.gyro.gas = v == "on",
                 "fliers" => s.old_fliers = (v == "mxvatv").then(|| s.old_fliers.unwrap_or(0)),
@@ -1696,6 +1694,7 @@ impl Settings {
             video::Look::of(&s).renewed().apply(&mut s);
         }
         s.old_fliers = s.old_fliers.map(|k| old_skin.unwrap_or(k));
+        s.old_handling = (old_handling != game_sim::handling::Handling::Original).then_some((old_handling, old_pack));
         s
     }
 
@@ -1912,9 +1911,6 @@ impl Settings {
         if !self.trick_packs.is_empty() {
             out += &format!("trick_packs = {}\n", self.trick_packs.join(", "));
         }
-        if !self.handling_pack.is_empty() {
-            out += &format!("handling_pack = {}\n", self.handling_pack);
-        }
         out
     }
 
@@ -1948,23 +1944,9 @@ impl Settings {
         }
     }
 
-    /// The pack MX vs. ATV's handling reads (MD77), out of `installed`'s ids: [`Settings::handling_pack`]
-    /// when it is installed, else the first trick pack on, else the first installed; `None` on the
-    /// original's handling or with no pack.
-    pub fn handling_pack_on(&self, installed: &[String]) -> Option<String> {
-        if self.handling == game_sim::handling::Handling::Original {
-            return None;
-        }
-        if installed.contains(&self.handling_pack) {
-            return Some(self.handling_pack.clone());
-        }
-        self.trick_packs_on(installed).into_iter().next().or_else(|| installed.first().cloned())
-    }
-
-    /// The handling's line (MD40), only when it is not the original's, as the tricks' is.
+    /// The gyros' lines (P226). The handling they read is each seat's Garage pick since P315d.
     fn handling_text(&self) -> String {
-        use game_sim::handling::Handling;
-        let mut out = if self.handling == Handling::Original { String::new() } else { format!("handling = {}\n", self.handling.word()) };
+        let mut out = String::new();
         // P226: each gyro only off the game's default, kept while the handling is the original's
         let mvatv = game_sim::handling::Gyro::default();
         if self.gyro.brake != mvatv.brake {
@@ -2164,6 +2146,9 @@ pub struct TrickPack {
     pub name: String,
     /// The stunts it adds past the rider's own 24, in the order it gives them gestures.
     pub extras: Vec<String>,
+    /// Whether its manifest lists bike files (`phy`), which the Garage's Handling row offers to
+    /// ride on (P315d).
+    pub phy: bool,
 }
 
 /// Whose tricks a ride has (MD16), as `settings.txt` and `--tricks` spell it.
@@ -3707,7 +3692,21 @@ impl Menu {
     pub fn with_garage(mut self, catalogue: Catalogue, picks: Picks) -> Menu {
         self.catalogue = std::sync::Arc::new(catalogue);
         self.picks = picks;
+        self.take_old_handling();
         self
+    }
+
+    /// An older settings file's Handling and Handling From rows ([`Settings::old_handling`], P315d)
+    /// become the first seat's pick of the bike's handling, where it has none of its own yet; the
+    /// settings are then written without them, and garage.txt with it.
+    pub fn take_old_handling(&mut self) {
+        let Some((handling, pack)) = self.settings.old_handling.take() else { return };
+        let first = &mut self.picks.0[0];
+        if first.handling_of(roster::BIKE).is_none() {
+            first.set_handling(roster::BIKE, &roster::HandlingChoice { handling, pack, label: String::new(), about: String::new() });
+            self.picks_changed = true;
+        }
+        self.changed = true;
     }
 
     /// The saved looks the garage's Preset row loads (P86).

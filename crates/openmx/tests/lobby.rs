@@ -479,18 +479,20 @@ fn a_room_carries_every_trick_pack_on() {
     use openmx_net::handshake::Handshake;
     let hm = trick_mods("md77-host", "[Three Sixty]\n");
     add_untamed(&hm);
-    let mut settings = Settings::parse("tricks = mxvatv\ntrick_packs = untamed, mxvatv\nhandling = mxvatv\n");
-    let host = |s: &Settings| {
+    let mut settings = Settings::parse("tricks = mxvatv\ntrick_packs = untamed, mxvatv\n");
+    // P315d: the host's 1P Garage pick of the bike's handling, no pack named
+    let mut first = roster::Pick { handling: vec![roster::HandlingPick { machine: roster::BIKE.into(), handling: Handling::MxVsAtv, pack: String::new() }], ..roster::Pick::default() };
+    let host = |s: &Settings, first: &roster::Pick| {
         let mut out = vec![Cmd::Host(Room::new("Hosty", "free06", 2))];
         lobby::name_tricks(&mut out, s, Some(&hm));
-        lobby::name_handling(&mut out, s, Some(&hm));
+        lobby::name_handling(&mut out, first, Some(&hm));
         let Cmd::Host(room) = &out[0] else { unreachable!() };
         room.clone()
     };
-    let room = host(&settings);
+    let room = host(&settings, &first);
     assert_eq!((room.tricks.as_str(), room.handling.as_str()), ("mxvatv,untamed", "mxvatv"));
-    settings.handling_pack = "untamed".into();
-    assert_eq!(host(&settings).handling, "untamed", "Handling From names its own");
+    first.handling[0].pack = "untamed".into();
+    assert_eq!(host(&settings, &first).handling, "untamed", "a pick naming its pack");
     let files = |mods: &std::path::Path| {
         let f = lobby::DiscFiles::default();
         f.tricks_from(Some(mods.to_path_buf()));
@@ -508,7 +510,7 @@ fn a_room_carries_every_trick_pack_on() {
     assert_ne!(Handshake::of(&room, &files(&one)).tricks_hash, shake.tricks_hash, "a changed second pack");
     // One pack: its own id and hash, as a room before MD77 had.
     settings.trick_packs = vec!["mxvatv".into()];
-    let single = host(&settings);
+    let single = host(&settings, &first);
     assert_eq!(single.tricks, "mxvatv");
     assert_eq!(Handshake::of(&single, &files(&hm)).tricks_hash, trick_packs::by_id(&hm, "mxvatv").unwrap().hash().ok());
     for m in [hm, one] {
@@ -524,7 +526,7 @@ fn every_seat_of_an_online_ride_has_the_hosts_handling() {
     use game_sim::handling::Handling;
     use openmx_net::handshake::Handshake;
     let hm = trick_mods("n21-host", "[Three Sixty]\n");
-    let on = |handling: Handling| Settings { handling, ..Settings::parse("") };
+    let on = |handling: Handling| roster::Pick { handling: vec![roster::HandlingPick { machine: roster::BIKE.into(), handling, pack: String::new() }], ..roster::Pick::default() };
     let mut out = vec![Cmd::Host(Room::new("Hosty", "free06", 2)), Cmd::Leave];
     lobby::name_handling(&mut out, &on(Handling::Original), Some(&hm));
     let Cmd::Host(room) = &out[0] else { unreachable!() };

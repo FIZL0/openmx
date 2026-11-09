@@ -2539,11 +2539,11 @@ struct Args {
     /// `--tricks ID[,ID…]` (MD77): which trick packs MX vs. ATV's tricks stack, by id; unset or empty,
     /// the front end's rows say, and a ride outside it has the first pack in the folder alone.
     trick_packs: Option<Vec<String>>,
-    /// `--handling-pack ID` (MD77): the pack MX vs. ATV's handling reads; unset or empty, the front
-    /// end's Handling From row says, else the first trick pack on, else the first in the folder.
+    /// `--handling-pack ID` (MD77): the pack MX vs. ATV's handling reads; unset or empty, each seat's
+    /// Garage pick names it (P315d), else the first trick pack on, else the first in the folder.
     handling_pack: Option<String>,
-    /// `--handling original|mxvatv|untamed` (MD40, MD93): how the bikes handle. Unset, the front end's Handling row
-    /// says, and a ride outside it has the original's. `--online` is always the original's; a ride
+    /// `--handling original|mxvatv|untamed` (MD40, MD93): how every seat's bike handles. Unset, each
+    /// seat's Garage pick says ([`Args::handling_picks`], P315d), and a seat with none has the original's. `--online` is always the original's; a ride
     /// from the lobby is its room's ([`Args::room_handling`], N21).
     handling: Option<game_sim::handling::Handling>,
     /// `--brake-gyro on|off` and `--gas-gyro on|off` (P226): MX vs. ATV's two gyro options, read on its
@@ -2561,6 +2561,9 @@ struct Args {
     flier_skin: Option<usize>,
     /// The first player's flier picks (P315), the Garage's Fliers tab: each kind's pack and skin.
     flier_picks: Vec<roster::FlierPick>,
+    /// The first player's handling picks (P315d), the Garage's Bike tab: each machine's handling and
+    /// pack. `--handling` is over every seat's.
+    handling_picks: Vec<roster::HandlingPick>,
     /// The pack whose `mx_*.phy` a lobby's ride rides on MX vs. ATV's handling (N21): this machine's
     /// mods folder and the pack's id, as the room names it and the handshake held every seat to.
     /// `None` outside the lobby and on the original's handling.
@@ -2663,6 +2666,7 @@ fn apply_picks(args: &mut Args, picks: &[roster::Pick]) {
     args.set = Some(first.set.ridden());
     args.look = first.look.clone();
     args.flier_picks = first.fliers.clone();
+    args.handling_picks = first.handling.clone();
     args.others = rest.to_vec();
 }
 
@@ -2676,6 +2680,7 @@ fn own_pick(args: &Args) -> roster::Pick {
         look: args.look.clone(),
         preset: String::new(),
         fliers: args.flier_picks.clone(),
+        handling: args.handling_picks.clone(),
     }
 }
 
@@ -3214,8 +3219,6 @@ async fn front_end(args: Args) -> Result<(), String> {
                 a.hud_scale = Some(args.hud_scale.unwrap_or(shell.front.menu.settings.hud_scale));
                 a.tricks = Some(args.tricks.unwrap_or(shell.front.menu.settings.tricks));
                 a.trick_packs = Some(args.trick_packs.clone().unwrap_or_else(|| shell.front.menu.settings.trick_packs.clone()));
-                a.handling = Some(args.handling.unwrap_or(shell.front.menu.settings.handling));
-                a.handling_pack = Some(args.handling_pack.clone().unwrap_or_else(|| shell.front.menu.settings.handling_pack.clone()));
                 a.brake_gyro = Some(args.brake_gyro.unwrap_or(shell.front.menu.settings.gyro.brake));
                 a.gas_gyro = Some(args.gas_gyro.unwrap_or(shell.front.menu.settings.gyro.gas));
                 a.graphics = Some(args.graphics.unwrap_or(shell.front.menu.settings.graphics));
@@ -4447,11 +4450,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             (bytes, member)
         }
     };
-    // MX vs. ATV's handling (MD40): its own bike file from the trick pack, in place of the disc's.
-    let handling_pack = ride_handling_pack(&args, &trick_packs)?;
+    // MX vs. ATV's handling (MD40): its own bike file from the trick pack, in place of the disc's,
+    // each seat on its own Garage pick (P315d).
+    let handling_pack = ride_handling_pack(&args, &trick_packs, 0)?;
     let mut stock_phy = handling_phy(handling_pack.as_ref(), &phy_member, &tables.ride.curve, "")
         .unwrap_or_else(|| Phy::read_bytes(&phy_bytes, &tables.ride.curve));
-    untamed_handling(&args, &mut stock_phy);
+    untamed_handling(&args, 0, &mut stock_phy, "");
     gyro_options(&args, &mut stock_phy);
     if !trick_packs.is_empty() {
         println!("{}", trick_packs::lay(&trick_packs, &mut stock_phy, &phy_member));
@@ -4466,6 +4470,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let mut stock_phys: Vec<Phy> = vec![stock_phy.clone()];
     // Each player's bike as their saved markers name it (P99): its `.phy`'s name.
     let mut bike_words: Vec<String> = vec![saved_markers::bike_word(&phy_member)];
+    // Each player's handling pack, where its bike reads one (P315d), for the lines after.
+    let mut handling_from: Vec<Option<String>> = vec![handling_pack.as_ref().filter(|_| stock_phy.handling != game_sim::handling::Handling::Original).map(|p| p.id.clone())];
     let mut other_riders: Vec<Option<(String, String)>> = Vec::new();
     // Online every seat of `--seats` is a rider on this track, each machine's in the same places
     // (N5): seat `s` starts where local player `s + 1` would, on the first's bike.
@@ -4482,9 +4488,20 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     println!("player {}: phy: {note}", i + 1);
                 }
                 println!("player {}: {} on {member}, {}", i + 1, pick.bike, pick.rider);
-                let mut phy = handling_phy(handling_pack.as_ref(), &member, &tables.ride.curve, &format!("player {}: ", i + 1))
+                let who = format!("player {}: ", i + 1);
+                // a seat on the first's handling reads the first's pack, and says nothing twice
+                let own_pack;
+                let own = match seat_handling(&args, i) == seat_handling(&args, 0) {
+                    true => handling_pack.as_ref(),
+                    false => {
+                        own_pack = ride_handling_pack(&args, &trick_packs, i)?;
+                        own_pack.as_ref()
+                    }
+                };
+                let mut phy = handling_phy(own, &member, &tables.ride.curve, &who)
                     .unwrap_or_else(|| Phy::read_bytes(&bytes, &tables.ride.curve));
-                untamed_handling(&args, &mut phy);
+                untamed_handling(&args, i, &mut phy, &who);
+                handling_from.push(own.filter(|_| phy.handling != game_sim::handling::Handling::Original).map(|p| p.id.clone()));
                 gyro_options(&args, &mut phy);
                 if !trick_packs.is_empty() {
                     println!("player {}: {}", i + 1, trick_packs::lay(&trick_packs, &mut phy, &member));
@@ -4499,11 +4516,18 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             None => {
                 let mut phy = stock_phy.clone();
                 stock_phys.push(stock_phy.clone());
+                handling_from.push(handling_from[0].clone());
                 bike_words.push(bike_words[0].clone());
                 mods.bike(i, &mut phy);
                 other_phys.push(phy);
                 other_riders.push(None);
             }
+        }
+    }
+    // P315d: the handling each player rides, once any is not the original's.
+    if stock_phys.iter().any(|p| p.handling != game_sim::handling::Handling::Original) {
+        for (i, (p, from)) in stock_phys.iter().zip(&handling_from).enumerate() {
+            println!("handling: P{} on {}", i + 1, handling_words(p.handling, from.as_deref()));
         }
     }
 
@@ -7975,8 +7999,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                         room.tricks = lobby::room_tricks(args.tricks.unwrap_or_default(), &named, mods_dir(&args).as_deref());
                         // and the handling it rides on (N21): the pack its bikes were read from
                         // (`ride_handling_pack`'s pick), if any
-                        let named = args.handling_pack.clone().unwrap_or_default();
-                        room.handling = lobby::room_handling(args.handling.unwrap_or_default(), &named, &room.tricks, mods_dir(&args).as_deref());
+                        let (handling, named) = seat_handling(&args, 0);
+                        room.handling = lobby::room_handling(handling, &named, &room.tricks, mods_dir(&args).as_deref());
                         let mut pick = openmx_net::Pick::new(&front.menu.lobby.pick.rider, &args.set.unwrap_or(roster::Set::FREERIDE).word());
                         // the preset this seat rides on now (N13), which the room tells a joiner's machine
                         pick.preset = net::rides::preset(&world.seats[0].sim).unwrap_or(0) as u8;
@@ -11531,13 +11555,17 @@ fn ride_trick_packs(args: &Args) -> Result<Vec<trick_packs::Pack>, String> {
 /// folder has one; the line says why not. [`Args::handling_pack`] when the folder has it (MD77),
 /// else the first of the ride's trick packs, else the folder's first. A lobby's ride rides its
 /// room's pack (N21) or the original's handling.
-fn ride_handling_pack(args: &Args, tricks: &[trick_packs::Pack]) -> Result<Option<trick_packs::Pack>, String> {
+///
+/// P315d: seat `seat`'s handling is its own Garage pick ([`seat_handling`]), `--handling` over every
+/// seat's.
+fn ride_handling_pack(args: &Args, tricks: &[trick_packs::Pack], seat: usize) -> Result<Option<trick_packs::Pack>, String> {
     if let Some((dir, id)) = &args.room_handling {
         let pack = trick_packs::by_id(dir, id).map_err(|e| format!("the room's handling: {e}"))?;
         println!("handling: MX vs. ATV's, from the room's {}", pack.id);
         return Ok(Some(pack));
     }
-    if !matches!(args.handling, Some(game_sim::handling::Handling::MxVsAtv | game_sim::handling::Handling::Untamed)) {
+    let (handling, named) = seat_handling(args, seat);
+    if handling == game_sim::handling::Handling::Original {
         return Ok(None);
     }
     if args.online.is_some() {
@@ -11548,7 +11576,6 @@ fn ride_handling_pack(args: &Args, tricks: &[trick_packs::Pack]) -> Result<Optio
         println!("handling: the mods folder is off, so the original's");
         return Ok(None);
     };
-    let named = args.handling_pack.clone().unwrap_or_default();
     let found = match (named.is_empty(), tricks.first()) {
         (false, _) => trick_packs::by_id(&dir, &named).or_else(|e| {
             println!("handling: {e}");
@@ -11737,11 +11764,30 @@ fn ride_fliers(args: &Args) -> Vec<vehicle::Fliers> {
 }
 
 /// Untamed's handling (MD93): a bike read for MX vs. ATV's rides Untamed's reworked steps with
-/// `--handling untamed` or the Handling row's Untamed. Online it stays MX vs. ATV's, as a room names
-/// only its pack.
-fn untamed_handling(args: &Args, phy: &mut Phy) {
-    if args.handling == Some(game_sim::handling::Handling::Untamed) && phy.handling == game_sim::handling::Handling::MxVsAtv {
+/// The handling seat `seat` rides (P315d) and the trick pack it names (empty: the first trick pack
+/// on): `--handling` and `--handling-pack` for every seat, else the seat's Garage pick for the bike
+/// (the first player's [`Args::handling_picks`], another's in [`Args::others`]; a seat with no pick
+/// of its own rides the first's, as its bike does), else the original's.
+fn seat_handling(args: &Args, seat: usize) -> (game_sim::handling::Handling, String) {
+    if let Some(h) = args.handling {
+        return (h, args.handling_pack.clone().unwrap_or_default());
+    }
+    let picks = match seat.checked_sub(1).and_then(|i| args.others.get(i)) {
+        Some(p) => &p.handling,
+        None => &args.handling_picks,
+    };
+    match picks.iter().find(|h| h.machine == roster::BIKE) {
+        Some(h) => (h.handling, args.handling_pack.clone().filter(|p| !p.is_empty()).unwrap_or_else(|| h.pack.clone())),
+        None => (game_sim::handling::Handling::Original, String::new()),
+    }
+}
+
+/// `--handling untamed` or the seat's Garage pick of Untamed (P315d), saying so after `who`. Online
+/// it stays MX vs. ATV's, as a room names only its pack.
+fn untamed_handling(args: &Args, seat: usize, phy: &mut Phy, who: &str) {
+    if args.room_handling.is_none() && seat_handling(args, seat).0 == game_sim::handling::Handling::Untamed && phy.handling == game_sim::handling::Handling::MxVsAtv {
         phy.handling = game_sim::handling::Handling::Untamed;
+        println!("{who}handling: on Untamed's steps");
     }
 }
 
@@ -11755,6 +11801,18 @@ fn gyro_options(args: &Args, phy: &mut Phy) {
     phy.gyro = game_sim::handling::Gyro { brake: args.brake_gyro.unwrap_or(d.brake), gas: args.gas_gyro.unwrap_or(d.gas) };
     if phy.gyro != d {
         println!("handling: brake gyro {}, gas gyro {}", on_off_word(phy.gyro.brake), on_off_word(phy.gyro.gas));
+    }
+}
+
+/// A seat's handling as its line says it (P315d): the original's, or MX vs. ATV's or Untamed's from
+/// the trick pack whose bike files it reads.
+fn handling_words(handling: game_sim::handling::Handling, from: Option<&str>) -> String {
+    use game_sim::handling::Handling;
+    let from = from.map_or(String::new(), |id| format!(" from {id}"));
+    match handling {
+        Handling::Original => "the original's".into(),
+        Handling::MxVsAtv => format!("MX vs. ATV's{from}"),
+        Handling::Untamed => format!("Untamed's{from}"),
     }
 }
 
@@ -11838,7 +11896,7 @@ fn trick_pack_rows(args: &Args, dir: &std::path::Path, stunts: &Set) -> Vec<menu
     for line in why {
         println!("tricks: {line}");
     }
-    packs.iter().map(|p| menu::TrickPack { id: p.id.clone(), name: p.name.clone(), extras: p.extra_names(stunts) }).collect()
+    packs.iter().map(|p| menu::TrickPack { id: p.id.clone(), name: p.name.clone(), extras: p.extra_names(stunts), phy: p.handles() }).collect()
 }
 
 /// The first rider's 24 stunts off the disc, as a ride reads them, for the front end's count of
@@ -13065,6 +13123,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         fliers: None,
         flier_skin: None,
         flier_picks: Vec::new(),
+        handling_picks: Vec::new(),
         room_handling: None,
         room_tricks: None,
         trick_packs: None,
