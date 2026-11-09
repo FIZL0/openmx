@@ -3227,7 +3227,10 @@ impl Listeners for TreeInRam<'_> {
             self.ee.set(28, GP);
             let r0 = self.ee.ran;
             let walks = f == MANAGER_STEP;
-            if walks {
+            if dropped_others(true) && e != RIDER {
+                // F31b5m: the first leaf and the manager's own work left out; the manager's walk
+                // still steps the rider, below.
+            } else if walks {
                 // Its own work first, its closing walk stood in for; then that walk, the port's.
                 let walked: Rc<RefCell<Vec<(u32, u32)>>> = Rc::default();
                 let w = walked.clone();
@@ -7801,6 +7804,10 @@ impl Dynamics for PortSteps<'_, '_> {
     }
     fn preforce(&mut self, i: i32, dt: F) {
         if self.post.0.0.0.elt(List::Preforce, i) != BIKE_PREFORCE {
+            if dropped_others(self.pure) {
+                *self.answered.entry("dropped PreProcess".into()).or_default() += 1;
+                return;
+            }
             return self.post.preforce(i, dt);
         }
         let (map, noise) = (self.map, &mut *self.noise);
@@ -8472,18 +8479,26 @@ fn posts_frame(ee: &mut Ee, dt: F, map: &track::Terrain<'_>, noise: &mut Option<
         ee.call(f, ints, &[x.0], BUDGET);
         ee.r(2)
     };
+    // F31b5m: in the pure run the sim lists' accessors are [`tail::list_get`] and
+    // [`tail::list_remove`], and with `"other listeners dropped"` the frame's listeners other than the
+    // bike's and the rider's are not run ([`dropped_others`]).
+    let get = |ee: &mut Ee, list: u32, i: u32| {
+        if pure { tail::list_get(&mut NodeRam(ee), list, i as i32) } else { call(ee, if list == SIM + 0x24 { LIST24_GET } else { LIST3C_GET }, &[u64::from(list), u64::from(i)], F::ZERO) as u32 }
+    };
     assert_eq!(ee.u8_at(ee.u32_at(SKIP_FLAG) + 0x225) & 8, 0, "the frame is not skipped");
     let mine = ee.u32_at(BIKE + seed::RECORD);
     let mut answered = BTreeMap::new();
     for (slot, original) in [(0x7c, RECORD_CLEAR), (0x84, RECORD_PASS)] {
         for i in 0..ee.u32_at(SIM + 0x24) {
-            let e = call(ee, LIST24_GET, &[u64::from(SIM + 0x24), u64::from(i)], F::ZERO) as u32;
+            let e = get(ee, SIM + 0x24, i);
             let f = ee.u32_at(ee.u32_at(e + 4) + slot);
             if e == mine {
                 assert_eq!(f, original, "the bike's record's vt +{slot:#x}");
                 let t = ee.u32_at(e + 0xec);
                 let terrain = (t != 0).then(|| ground::read_terrain(&|a| ee.u32_at(a), t, Some(map)));
                 posts_record(ee, e, slot, dt, terrain.as_ref(), &mut answered);
+            } else if dropped_others(pure) {
+                *answered.entry(format!("dropped record +{slot:#x}")).or_default() += 1;
             } else {
                 call(ee, f, &[u64::from(e)], dt);
             }
@@ -8507,15 +8522,27 @@ fn posts_frame(ee: &mut Ee, dt: F, map: &track::Terrain<'_>, noise: &mut Option<
     interpreted(ee, &mut mark, "the +0x3c list");
     let mut i = 0;
     while i < ee.u32_at(SIM + 0x3c) {
-        let e = call(ee, LIST3C_GET, &[u64::from(SIM + 0x3c), u64::from(i)], F::ZERO) as u32;
+        let e = get(ee, SIM + 0x3c, i);
         if call(ee, ee.u32_at(ee.u32_at(e) + 8), &[u64::from(e)], dt) != 0 {
-            call(ee, LIST3C_REMOVE, &[u64::from(SIM + 0x3c), u64::from(i)], F::ZERO);
+            if pure {
+                tail::list_remove(&mut NodeRam(ee), SIM + 0x3c, i as i32);
+            } else {
+                call(ee, LIST3C_REMOVE, &[u64::from(SIM + 0x3c), u64::from(i)], F::ZERO);
+            }
         } else {
             i += 1;
         }
     }
     interpreted(ee, &mut mark, "");
     (heads, steps, posts, answered)
+}
+
+/// F31b5m: whether [`posts_frame`]'s pure run leaves out the frame's other listeners (F31b5d, F39:
+/// none of their writes reaches the bike): the sim's records but the bike's (their clear and pass),
+/// the world's PreProcesses but the bike's (the other riders'), the tail's first other leaf and the
+/// manager's own work. The manager's closing walk, which steps the rider, still runs.
+fn dropped_others(pure: bool) -> bool {
+    pure && in_rust("other listeners dropped")
 }
 
 thread_local! {
@@ -8831,13 +8858,25 @@ fn replay_pure(name: &str, rust: &[&'static str]) -> Option<(Vec<bool>, BTreeMap
     for (r, row) in rows.iter().enumerate() {
         poke(&mut a, row, &READER);
         poke(&mut b, row, &READER);
+        // F31b5m: with the other listeners dropped, the second run's frame reads no byte where the
+        // two RAMs differ going into it.
+        let watch = rust.contains(&"other listeners dropped");
+        let parted = if watch { differing_bytes(&a, &b) } else { Vec::new() };
         let counted = INTERPRETED.with(|m| std::mem::take(&mut *m.borrow_mut()));
         posts_frame(&mut a, dt, &map, &mut noise_a, false);
         INTERPRETED.with(|m| *m.borrow_mut() = counted);
         IN_RUST.with(|x| *x.borrow_mut() = rust.to_vec());
+        if watch {
+            b.reads.replace(Some(Default::default()));
+        }
         let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| posts_frame(&mut b, dt, &map, &mut noise_b, true)));
         IN_RUST.with(|x| x.borrow_mut().clear());
         let (heads, steps, posts, answered) = ran.unwrap_or_else(|e| std::panic::resume_unwind(e));
+        if watch {
+            let reads = b.reads.replace(None).unwrap_or_default();
+            let bad = read_where_parted(&reads, &parted);
+            assert!(bad.is_empty(), "{name} row {r}: the frame read {} bytes where the RAM parts from the handing run's\n  {}", bad.len(), bad.iter().take(40).map(|a| format!("{a:#x}")).collect::<Vec<_>>().join("\n  "));
+        }
         assert_eq!((heads, steps, posts), (1, 4, 1), "the head once, the Force body every substep, the PostProcess once");
         for (k, n) in answered {
             *all.entry(k).or_default() += n;
@@ -8861,6 +8900,42 @@ fn replay_pure(name: &str, rust: &[&'static str]) -> Option<(Vec<bool>, BTreeMap
     }
     eprintln!("{name}: nothing handed on answered {all:?}");
     Some((out, all, off))
+}
+
+/// Where two interpreters' RAMs (outside the stack and its scratch, as [`bytes_differ`]) and
+/// scratchpads differ, as sorted `start..end` byte ranges at word grain; the scratchpad's at its
+/// `0x7000_0000` addresses.
+fn differing_bytes(a: &Ee, b: &Ee) -> Vec<std::ops::Range<u32>> {
+    let stack = (a.stack.saturating_sub(0x4_0000) as usize)..(a.stack as usize + 0x400);
+    let mut out: Vec<std::ops::Range<u32>> = Vec::new();
+    let mut add = |at: u32| match out.last_mut() {
+        Some(r) if r.end == at => r.end = at + 4,
+        _ => out.push(at..at + 4),
+    };
+    for i in (0..a.ram.len()).step_by(4) {
+        if !stack.contains(&i) && a.ram[i..i + 4] != b.ram[i..i + 4] {
+            add(i as u32);
+        }
+    }
+    for i in (0..a.spr.len()).step_by(4) {
+        if a.spr[i..i + 4] != b.spr[i..i + 4] {
+            add(0x7000_0000 + i as u32);
+        }
+    }
+    out
+}
+
+/// The bytes of `reads` (as the interpreter logs them, any mirror of RAM) inside `parted`
+/// ([`differing_bytes`]).
+fn read_where_parted(reads: &std::collections::BTreeSet<u32>, parted: &[std::ops::Range<u32>]) -> Vec<u32> {
+    reads
+        .iter()
+        .map(|&a| if a >> 28 == 7 { 0x7000_0000 | (a & 0x3fff) } else { a & 0x0fff_ffff })
+        .filter(|a| {
+            let i = parted.partition_point(|r| r.end <= *a);
+            parted.get(i).is_some_and(|r| r.contains(a))
+        })
+        .collect()
 }
 
 /// The steps' calls [`replay_pure`]'s second run answered in Rust (`= `) and handed on (`> `, none
@@ -9012,6 +9087,122 @@ fn flip_needs_the_part_walks_effects() {
     let changes: Vec<usize> = (1..w.len()).filter(|&r| w[r] != w[r - 1]).collect();
     assert_eq!(changes, [125, 193], "wrecked on row 125, put back on row 193");
     assert!(!off.is_empty(), "the models dropped, the RAM parts from the handing run's");
+}
+
+/// **F31b5m — the frame's other listeners left out**: [`replay_whole`]'s ports with
+/// `"other listeners dropped"` ([`dropped_others`]): the sim's records but the bike's, the other
+/// riders' PreProcesses, the tail's first other leaf and the manager's own work are not run, and the
+/// sim lists' accessors are Rust's. Every row is checked against C15 word for word and the bike and
+/// its physics blocks against the handing run's after every frame ([`replay_pure`]), and the frame
+/// reads no byte of RAM or scratchpad where the two runs differ going into it. Answers the wreck
+/// state per row, what was answered and dropped, where the RAM parts and the interpreter's census.
+fn replay_without_others(name: &str) -> Option<(Vec<bool>, BTreeMap<String, u32>, Vec<String>, BTreeMap<String, u64>)> {
+    INTERPRETED.with(|m| m.borrow_mut().clear());
+    let ran = replay_pure(name, &["PartMove", "Gather", "record sweep", "record search", "other listeners dropped"]);
+    let all = INTERPRETED.with(|m| std::mem::take(&mut *m.borrow_mut()));
+    let (w, answered, off) = ran?;
+    eprintln!("{name}: the other listeners dropped, the interpreter ran {all:?}\n  the RAM parts at {} ranges", off.len());
+    Some((w, answered, off, all))
+}
+
+/// What [`replay_without_others`] dropped, and that none of it ran in the interpreter.
+fn others_dropped(name: &str, rows: u32, answered: &BTreeMap<String, u32>, ran: &BTreeMap<String, u64>, off: &[String]) {
+    let dropped: Vec<(&str, u32)> = answered.iter().filter(|(k, _)| k.starts_with("dropped")).map(|(k, &n)| (k.as_str(), n)).collect();
+    // State 4's records list holds only the bike's record (F31b5d), so no record is dropped; the
+    // five other riders' PreProcesses are, once a frame each.
+    assert_eq!(dropped, [("dropped PreProcess", 5 * rows)], "{name}");
+    for part in ["the tail: the first other leaf", "the tail: the manager"] {
+        assert!(!ran.contains_key(part), "{name}: {part} still ran: {ran:?}");
+    }
+    assert!(ran.contains_key("the tail: the rider"), "{name}: the manager's walk no longer steps the rider: {ran:?}");
+    assert!(!off.is_empty(), "{name}: the others dropped, the RAM parts from the handing run's");
+}
+
+/// Ride-2 with the other listeners left out: C15's on all 459 rows, the bike and its blocks the
+/// handing run's, no byte read where the RAMs part.
+#[test]
+fn ride_replays_with_the_other_listeners_dropped() {
+    let Some((w, answered, off, ran)) = replay_without_others("ride-2") else { return };
+    assert_eq!(w.len(), 459);
+    assert!(w.iter().all(|w| !w), "the ride never wrecks");
+    others_dropped("ride-2", 459, &answered, &ran, &off);
+}
+
+/// Flip-1 with the other listeners left out: C15's on all 465 rows, wrecked on row 125 and put back on
+/// row 193, the bike and its blocks the handing run's, no byte read where the RAMs part.
+#[test]
+fn flip_replays_with_the_other_listeners_dropped() {
+    let Some((w, answered, off, ran)) = replay_without_others("flip-1") else { return };
+    assert_eq!(w.len(), 465);
+    let changes: Vec<usize> = (1..w.len()).filter(|&r| w[r] != w[r - 1]).collect();
+    assert_eq!(changes, [125, 193], "wrecked on row 125, put back on row 193");
+    others_dropped("flip-1", 465, &answered, &ran, &off);
+}
+
+/// **F31b5m — the sim lists' accessors are the original's**: 10 000 lists (a count from -3 to 40, an
+/// array or none, sometimes the list's own words inside its array so the move writes the count), each
+/// asked for an element from 4 before the array to 3 past the count. [`tail::list_get`] answers what
+/// both of SLUS-21104's getters (the `+0x24` list's and the `+0x3c` list's) answer, and
+/// [`tail::list_remove`] answers what the `+0x3c` list's remove answers and leaves the same words; the
+/// original writes nothing outside the list and its array.
+#[test]
+fn the_sim_lists_accessors_are_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let base = ee.scratch(0);
+    let size = 0x200;
+    let mut g = Gen(0x0031_b5d0);
+    let (mut removed, mut refused, mut aliased) = (0, 0, 0);
+    for case in 0..10_000 {
+        let array = base + 0x40;
+        for o in (0..size).step_by(4) {
+            ee.set_u32(base + o, g.bits());
+        }
+        let n = (g.bits() % 44) as i32 - 3;
+        let alias = n > 2 && g.one_in(8);
+        let list = if alias {
+            // The list's count and array words are elements of its own array.
+            let j = g.bits() % (n as u32 - 2);
+            ee.set_u32(array + 4 * j + 8, array);
+            array + 4 * j
+        } else {
+            base
+        };
+        ee.set_u32(list, n as u32);
+        if !alias && g.one_in(10) {
+            ee.set_u32(list + 8, 0);
+        } else {
+            ee.set_u32(list + 8, array);
+        }
+        let i = if alias && g.one_in(2) { ((list - array) / 4) as i32 } else { (g.bits() % (n.max(0) as u32 + 7)) as i32 - 4 };
+        aliased += i32::from(alias && list == array.wrapping_add((i as u32).wrapping_mul(4)));
+        let before: Vec<u32> = (0..size).step_by(4).map(|o| ee.u32_at(base + o)).collect();
+        let array_set = ee.u32_at(list + 8) != 0;
+        if array_set {
+            for f in [LIST24_GET, LIST3C_GET] {
+                ee.set(28, GP);
+                ee.call(f, &[u64::from(list), i as i64 as u64], &[], BUDGET);
+                let want = ee.r(2) as u32;
+                assert_eq!(tail::list_get(&mut NodeRam(&mut ee), list, i), want, "case {case}: the getter {f:#x}, n {n}, i {i}");
+            }
+        }
+        ee.written.clear();
+        ee.set(28, GP);
+        ee.call(LIST3C_REMOVE, &[u64::from(list), i as i64 as u64], &[], BUDGET);
+        let want = ee.r(2) as u32;
+        let stack = ee.stack.saturating_sub(0x4_0000)..ee.stack;
+        let outside: Vec<String> = ee.written_ranges().into_iter().filter(|&(s, e)| (s..e).any(|a| !stack.contains(&a) && !(base..base + size).contains(&a))).map(|(s, e)| format!("{s:#x}..{e:#x}")).collect();
+        assert!(outside.is_empty(), "case {case}: the remove wrote outside the list: {outside:?}");
+        let after: Vec<u32> = (0..size).step_by(4).map(|o| ee.u32_at(base + o)).collect();
+        for (k, w) in before.iter().enumerate() {
+            ee.set_u32(base + 4 * k as u32, *w);
+        }
+        let got = tail::list_remove(&mut NodeRam(&mut ee), list, i);
+        assert_eq!(u32::from(got), want, "case {case}: the remove's answer, n {n}, i {i}");
+        let mine: Vec<u32> = (0..size).step_by(4).map(|o| ee.u32_at(base + o)).collect();
+        assert_eq!(mine, after, "case {case}: the remove's words, n {n}, i {i}");
+        if got { removed += 1 } else { refused += 1 }
+    }
+    assert!(removed > 5000 && refused > 2000 && aliased > 50, "removed {removed}, refused {refused}, the count moved {aliased}");
 }
 
 /// The record's resolution (its vt `+0x88`), which the gravity calls with 1.
