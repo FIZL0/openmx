@@ -46,7 +46,7 @@
 use game_sim::chassis::{Chassis, Deriv};
 use game_sim::race::{
     self, CheckPart, Checkpoint, Course, Crossing, Gate, GridStart, LANES, LapCard, LapRecord, LapRules, LineNotice, Link,
-    PathNode, Prop, Race, Refused, Seen, Spot, Supercross, TrackFile, TrackPath, card_flags, flags, race_flags, race_kind,
+    PathNode, Prop, Race, RacePath, Refused, Seen, Spot, Supercross, TrackFile, TrackPath, TrackPaths, card_flags, flags, race_flags, race_kind,
 };
 use game_sim::rng::Rng;
 use ps2_float::{F, Vf, fpu};
@@ -2301,4 +2301,528 @@ fn the_supercross_loader_stands_sx01s_gates_on_its_props() {
     let mut line = t.line.expect("the file's line");
     Supercross::place_finish_line(&finish, ahead, &mut line);
     assert_eq!(gate_words(&line), gate_words(&want_line), "the line: {line:?} against {want_line:?}");
+}
+
+// --- S293: the track's paths, as the race asks them ---------------------------------------------------
+
+/// Free RAM for a track object's paths: the object, its path array, the path records and their link
+/// arrays, the nodes (16 slots a path), the three pools, and the queries' arguments.
+const T_TRACK: u32 = 0x01b0_0000;
+const T_PATHS: u32 = 0x01b0_0100;
+const T_RECS: u32 = 0x01b0_1000;
+const T_LINKS: u32 = 0x01b0_4000;
+const T_NODES: u32 = 0x01b1_0000;
+const T_ROUTES: u32 = 0x01b2_0000;
+const T_PARENTS: u32 = 0x01b3_0000;
+const T_CANDS: u32 = 0x01b4_0000;
+const T_A: u32 = 0x01b5_0000;
+const T_B: u32 = 0x01b5_0010;
+const T_OUT: u32 = 0x01b5_0020;
+const T_D: u32 = 0x01b5_0030;
+const T_ROUTE: u32 = 0x01b5_0040;
+const T_POINT: u32 = 0x01b5_0050;
+const T_VIA: u32 = 0x01b5_0100;
+
+fn t_rec(i: usize) -> u32 {
+    T_RECS + 0x40 * i as u32
+}
+
+fn t_node(i: usize, n: usize) -> u32 {
+    T_NODES + 0x60 * (16 * i + n) as u32
+}
+
+/// A spot of the port's into RAM as the original's three words.
+fn put_t_spot(ee: &mut Ee, at: u32, s: Spot) {
+    let i = s.path.saturating_sub(1) as usize;
+    ee.set_u32(at, if s.path == 0 { 0 } else { t_rec(i) });
+    ee.set_u32(at + 4, if s.piece == 0 { 0 } else { t_node(i, s.piece as usize - 1) });
+    put_f(ee, at + 8, s.along);
+}
+
+/// A spot's three words, its `along` as bits.
+fn t_bits(s: Spot) -> (u32, u32, u32) {
+    (s.path, s.piece, s.along.0.to_bits())
+}
+
+fn t_spot_at(ee: &Ee, at: u32) -> Spot {
+    let (path, node) = (ee.u32_at(at), ee.u32_at(at + 4));
+    let p = if path == 0 { 0 } else { (path - T_RECS) / 0x40 + 1 };
+    let n = if node == 0 { 0 } else { (node - T_NODES) / 0x60 % 16 + 1 };
+    Spot { path: p, piece: n, along: f32_at(ee, at + 8) }
+}
+
+/// A free list of `n` entries of `size` bytes at `at`, linked through `next`; the words the queries
+/// write before reading are stray, and the route entries' direction byte is 0 as the pool's calloc
+/// leaves it.
+fn put_pool(ee: &mut Ee, p: &mut Pick, at: u32, n: usize, size: u32, next: u32) -> u32 {
+    for k in 0..n as u32 {
+        let e = at + size * k;
+        for o in (0..size).step_by(4) {
+            ee.set_u32(e + o, p.next() as u32 & !0xff);
+        }
+        ee.set_u32(e + next, if k + 1 < n as u32 { e + size } else { 0 });
+    }
+    if n == 0 { 0 } else { at }
+}
+
+fn pool_len(ee: &Ee, head: u32, next: u32) -> usize {
+    let (mut n, mut e) = (0, head);
+    while e != 0 && n < 10_000 {
+        n += 1;
+        e = ee.u32_at(e + next);
+    }
+    n
+}
+
+/// The paths into RAM as the track object holds them.
+fn put_paths(ee: &mut Ee, p: &mut Pick, t: &TrackPaths) {
+    ee.set_u32(T_TRACK + 0x34, t.word_34);
+    put_f(ee, T_TRACK + 0x38, t.ahead);
+    put_f(ee, T_TRACK + 0x3c, t.behind);
+    ee.set_u32(T_TRACK + 0x40, t.paths.len() as u32);
+    ee.set_u32(T_TRACK + 0x50, T_PATHS);
+    put_f(ee, T_TRACK + 0x54, t.lap_length);
+    for (i, path) in t.paths.iter().enumerate() {
+        let r = t_rec(i);
+        ee.set_u32(T_PATHS + 4 * i as u32, r);
+        for o in (0..0x30).step_by(4) {
+            ee.set_u32(r + o, p.next() as u32);
+        }
+        ee.set_u32(r, path.flags);
+        put_f(ee, r + 8, path.length);
+        ee.set_u32(r + 0x10, t_node(i, 0));
+        ee.set_u32(r + 0x14, t_node(i, path.nodes.len() - 1));
+        ee.set_u32(r + 0x18, path.links.len() as u32);
+        put_f(ee, r + 0x1c, path.dist);
+        ee.set_u32(r + 0x28, path.best.map_or(0, t_rec));
+        ee.set_u32(r + 0x2c, T_LINKS + 0x40 * i as u32);
+        for (k, &l) in path.links.iter().enumerate() {
+            ee.set_u32(T_LINKS + 0x40 * i as u32 + 4 * k as u32, t_rec(l));
+        }
+        for (n, node) in path.nodes.iter().enumerate() {
+            let a = t_node(i, n);
+            for o in (0..0x60).step_by(4) {
+                ee.set_u32(a + o, p.next() as u32);
+            }
+            for (k, pt) in node.points.iter().enumerate() {
+                put_quad(ee, a + 0x10 + 0x10 * k as u32, *pt);
+            }
+            put_f(ee, a + 0x40, node.span);
+            ee.set_u32(a + 0x50, if n == 0 { 0 } else { t_node(i, n - 1) });
+            ee.set_u32(a + 0x54, if n + 1 == path.nodes.len() { 0 } else { t_node(i, n + 1) });
+        }
+    }
+    ee.set_u32(T_TRACK + 0x94, T_ROUTES);
+    ee.set_u32(T_TRACK + 0x9c, T_PARENTS);
+    ee.set_u32(T_TRACK + 0xa4, T_CANDS);
+    let routes = put_pool(ee, p, T_ROUTES, t.free_routes, 0x10, 0xc);
+    for k in 0..t.free_routes as u32 {
+        ee.set_u32(T_ROUTES + 0x10 * k, 0);
+    }
+    ee.set_u32(T_TRACK + 0x98, routes);
+    let parents = put_pool(ee, p, T_PARENTS, t.free_parents, 0xc, 8);
+    ee.set_u32(T_TRACK + 0xa0, parents);
+    let cands = put_pool(ee, p, T_CANDS, t.free_candidates, 0x10, 0xc);
+    ee.set_u32(T_TRACK + 0xa8, cands);
+    // A route walked off a path with no best link reads on from a null path (see `build_route`).
+    ee.set_u32(0x28, 0);
+}
+
+/// The paths' scratch words and the pools, read back and held against the port's.
+fn check_paths(ee: &Ee, t: &TrackPaths, what: &str) {
+    for (i, path) in t.paths.iter().enumerate() {
+        let r = t_rec(i);
+        assert_eq!(ee.u32_at(r), path.flags, "{what}: path {i}'s flags");
+        assert_eq!(ee.u32_at(r + 0x1c), path.dist.0.to_bits(), "{what}: path {i}'s distance");
+        assert_eq!(ee.u32_at(r + 0x28), path.best.map_or(0, t_rec), "{what}: path {i}'s best link");
+    }
+    assert_eq!(pool_len(ee, ee.u32_at(T_TRACK + 0x98), 0xc), t.free_routes, "{what}: the route pool");
+    assert_eq!(pool_len(ee, ee.u32_at(T_TRACK + 0xa0), 8), t.free_parents, "{what}: the parent pool");
+    assert_eq!(pool_len(ee, ee.u32_at(T_TRACK + 0xa8), 0xc), t.free_candidates, "{what}: the candidate pool");
+}
+
+/// A flat length the way the file's reader takes it.
+fn t_span(a: Vf, b: Vf) -> F {
+    let (dx, dz) = (fpu::sub(b.x(), a.x()), fpu::sub(b.z(), a.z()));
+    F(fpu::sqrt(fpu::madd(fpu::mula(dx, dx), dz, dz)))
+}
+
+/// A generated course: 1–7 paths of 1–10 nodes winding about the origin, each starting where an earlier
+/// one ends or branching off one of its nodes, so that rings overlap; links onward (the last back to
+/// the first) and a few more; stray flags, scratch words and spans now and then, and sometimes a pool
+/// nearly empty.
+fn t_paths(p: &mut Pick) -> TrackPaths {
+    let count = 1 + p.below(7) as usize;
+    let mut paths: Vec<RacePath> = Vec::new();
+    for i in 0..count {
+        let (mut at, mut heading) = if i == 0 || p.below(3) == 0 {
+            ([p.range(-40.0, 40.0), p.range(-40.0, 40.0)], p.range(0.0, 6.3))
+        } else {
+            let from: &RacePath = &paths[p.below(i as u64) as usize];
+            let n = if p.below(2) == 0 { from.nodes.len() - 1 } else { p.below(from.nodes.len() as u64) as usize };
+            let q = from.nodes[n].points[0];
+            ([q.x() + p.range(-3.0, 3.0), q.z() + p.range(-3.0, 3.0)], p.range(0.0, 6.3))
+        };
+        let width = p.range(4.0, 20.0);
+        let n = 1 + p.below(10) as usize;
+        let mut nodes = Vec::new();
+        for k in 0..n {
+            let (s, c) = heading.sin_cos();
+            let y = p.range(-3.0, 3.0);
+            let w = width * p.range(0.6, 1.4);
+            let centre = Vf([at[0], y, at[1], 0.0]);
+            let left = Vf([at[0] + c * w, y, at[1] - s * w, 0.0]);
+            let right = Vf([at[0] - c * w, y, at[1] + s * w, 0.0]);
+            let points = if p.below(10) == 0 { [centre, right, left] } else { [centre, left, right] };
+            let points = if p.below(30) == 0 { [p.quad([at[0], y, at[1]]), points[1], points[2]] } else { points };
+            nodes.push(PathNode { id: k as i32, word_04: 0, points, span: F::ZERO, word_44: 0, word_48: 0, word_4c: 0 });
+            let step = if p.below(20) == 0 { 0.0 } else { p.range(5.0, 30.0) };
+            at = [at[0] + s * step, at[1] + c * step];
+            heading += p.range(-0.6, 0.6);
+        }
+        let mut length = F::ZERO;
+        for k in 0..n - 1 {
+            let span = t_span(nodes[k].points[0], nodes[k + 1].points[0]);
+            nodes[k].span = F(p.stray(span.0));
+            length += nodes[k].span;
+        }
+        // The file's 0xc1, after the load cleared 0x80 from the paths path 0 reaches.
+        let mut flags = 0x41 | (p.next() as u32 & 0x2a);
+        if p.below(6) == 0 {
+            flags |= 0x100;
+        }
+        if p.below(8) == 0 {
+            flags |= 0x80;
+        }
+        if p.below(8) == 0 {
+            flags |= 0x40;
+        }
+        if p.below(12) == 0 {
+            flags |= 0x10;
+        }
+        let dist = if p.below(2) == 0 {
+            F::ZERO
+        } else {
+            let d = p.range(0.0, 500.0);
+            F(p.stray(d))
+        };
+        let best = (p.below(3) == 0).then(|| p.below(count as u64) as usize);
+        paths.push(RacePath { flags, length: F(p.stray(length.0)), nodes, links: Vec::new(), dist, best });
+    }
+    for i in 0..count {
+        let mut links = vec![(i + 1) % count];
+        for _ in 0..p.below(3) {
+            links.push(p.below(count as u64) as usize);
+        }
+        if p.below(4) == 0 {
+            let last = links.len() - 1;
+            links.swap(0, last);
+        }
+        paths[i].links = links;
+    }
+    let pool = |p: &mut Pick| if p.below(8) == 0 { p.below(6) as usize } else { 10 * count };
+    let (ahead, behind) = match p.below(4) {
+        0 => (F(200.0), F(200.0)),
+        1 => (F(125.0), F(75.0)),
+        _ => (F(p.range(0.0, 150.0)), F(p.range(0.0, 150.0))),
+    };
+    TrackPaths {
+        word_34: p.next() as u32 & 0x7,
+        ahead,
+        behind,
+        lap_length: F(p.range(100.0, 900.0)),
+        free_routes: pool(p),
+        free_parents: pool(p),
+        free_candidates: pool(p),
+        paths,
+    }
+}
+
+/// A spot on one of the paths, `along` in 0..1 (now and then exactly 0 or 1, a signed zero or a
+/// denormal: the walks recurse for good on anything outside).
+fn t_spot_on(p: &mut Pick, t: &TrackPaths) -> Spot {
+    let i = p.below(t.paths.len() as u64) as usize;
+    let n = p.below(t.paths[i].nodes.len() as u64) as usize;
+    let along = match p.below(12) {
+        0 => 0.0,
+        1 => 1.0,
+        2 => -0.0,
+        3 => f32::from_bits(p.next() as u32 & 0x007f_ffff),
+        _ => p.unit(),
+    };
+    Spot::on(i, n, F(along))
+}
+
+#[test]
+fn spot_points_and_the_way_ahead_match_the_track_objects() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let [point_fn, ahead_fn] = match addrs(["path_spot_point", "path_ahead"]) {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    let mut p = Pick(0x51c3_77e0_9a2d_4b18);
+    let mut answers = [0usize; 4];
+    for case in 0..20_000 {
+        let t = t_paths(&mut p);
+        put_paths(&mut ee, &mut p, &t);
+        let mut spot = t_spot_on(&mut p, &t);
+        if p.below(3) == 0 {
+            let a = p.range(-1.0, 2.0);
+            spot.along = F(p.stray(a));
+        }
+        if p.below(30) == 0 {
+            spot.piece = 0;
+        }
+        if p.below(30) == 0 {
+            spot = Spot::default();
+        }
+        let what = format!("case {case}: {spot:?}");
+        let fill = Vf([p.unit(), p.unit(), p.unit(), p.unit()]);
+
+        put_t_spot(&mut ee, T_A, spot);
+        put_quad(&mut ee, T_OUT, fill);
+        ee.call(point_fn, &[u64::from(T_TRACK), u64::from(T_A), u64::from(T_OUT)], &[], BUDGET);
+        let (mut s, mut out) = (spot, fill);
+        let got = t.spot_point(&mut s, &mut out);
+        assert_eq!(ee.v0() as u32, u32::from(got), "{what}: the point's answer");
+        assert_eq!(quad(&ee, T_OUT).to_bits(), out.to_bits(), "{what}: the point");
+        assert_eq!(t_bits(t_spot_at(&ee, T_A)), t_bits(s), "{what}: the spot after");
+        answers[usize::from(got)] += 1;
+
+        let node = ee.u32_at(T_A + 4);
+        put_quad(&mut ee, T_OUT, fill);
+        ee.call(ahead_fn, &[u64::from(T_TRACK), u64::from(node), u64::from(T_OUT)], &[], BUDGET);
+        let mut out = fill;
+        let got = t.path_ahead(spot, &mut out);
+        assert_eq!(ee.v0() as u32, u32::from(got), "{what}: the way ahead's answer");
+        assert_eq!(quad(&ee, T_OUT).to_bits(), out.to_bits(), "{what}: the way ahead");
+        answers[2 + usize::from(got)] += 1;
+    }
+    assert!(answers.iter().all(|&k| k > 1000), "{answers:?}");
+}
+
+/// The original's route list from its head word, as path indices.
+fn t_route_at(ee: &Ee, head: u32) -> Vec<usize> {
+    let (mut out, mut e) = (Vec::new(), ee.u32_at(head));
+    while e != 0 && out.len() < 1000 {
+        let path = ee.u32_at(e + 4);
+        out.push(if path == 0 { usize::MAX } else { ((path - T_RECS) / 0x40) as usize });
+        e = ee.u32_at(e + 0xc);
+    }
+    out
+}
+
+#[test]
+fn distances_routes_and_walks_match_the_track_objects() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let [distance_fn, route_fn, walk_fn, free_fn, reaches_fn] =
+        match addrs(["path_distance", "track_start_spots", "path_route_walk", "path_route_free", "path_reaches"]) {
+            Ok(a) => a,
+            Err(why) => return skip(&why),
+        };
+    let mut p = Pick(0x0e6f_2d91_c4a8_3375);
+    let (mut routed, mut failed, mut walked, mut kept_off) = (0, 0, 0, 0);
+    for case in 0..20_000 {
+        let mut t = t_paths(&mut p);
+        put_paths(&mut ee, &mut p, &t);
+        let a = t_spot_on(&mut p, &t);
+        let b = if p.below(4) == 0 { Spot { along: F(p.unit()), ..a } } else { t_spot_on(&mut p, &t) };
+        let keep_off = p.below(2) == 0;
+        let what = format!("case {case}: {a:?} to {b:?}, keep_off {keep_off}");
+        put_t_spot(&mut ee, T_A, a);
+        put_t_spot(&mut ee, T_B, b);
+
+        ee.call(reaches_fn, &[u64::from(T_TRACK), u64::from(T_A), u64::from(T_B)], &[], BUDGET);
+        let reaches = ee.v0() as u32 & 0xff;
+
+        // The distance, then (on the paths as it left them) the route with its list, and a walk along it.
+        ee.call(distance_fn, &[u64::from(T_TRACK), u64::from(T_A), u64::from(T_B), u64::from(keep_off)], &[], BUDGET);
+        let d = t.distance(a, b, keep_off);
+        assert_eq!(ee.f0().to_bits(), d.0.to_bits(), "{what}: the distance ({d:?})");
+        check_paths(&ee, &t, &format!("{what}: after the distance"));
+        kept_off += usize::from(d == F(-1.0));
+
+        put_t_spot(&mut ee, T_A, a);
+        put_t_spot(&mut ee, T_B, b);
+        let fill = F(p.unit());
+        put_f(&mut ee, T_D, fill);
+        ee.set_u32(T_ROUTE, 0);
+        let with_d = p.below(4) != 0;
+        let d_arg = if with_d { T_D } else { 0 };
+        let args = [u64::from(T_TRACK), u64::from(T_A), u64::from(T_B), u64::from(T_ROUTE), u64::from(d_arg), u64::from(keep_off)];
+        ee.call(route_fn, &args, &[], BUDGET);
+        let mut route = Vec::new();
+        let mut d = fill;
+        let got = t.route(a, b, Some(&mut route), if with_d { Some(&mut d) } else { None }, keep_off);
+        assert_eq!(ee.v0() as i32, got, "{what}: the route's answer");
+        assert_eq!(f32_at(&ee, T_D).0.to_bits(), d.0.to_bits(), "{what}: the route's length");
+        if got == 1 {
+            assert_eq!(t_route_at(&ee, T_ROUTE), route, "{what}: the route");
+        } else {
+            assert!(route.is_empty() && ee.u32_at(T_ROUTE) == 0, "{what}: a failed route keeps a list");
+        }
+        check_paths(&ee, &t, &format!("{what}: after the route"));
+        routed += usize::from(got == 1 && !route.is_empty());
+        failed += usize::from(got == 0);
+
+        let dist = match p.below(6) {
+            0 => F(0.0),
+            1 => F(-p.unit()),
+            _ => F(p.range(0.0, 400.0)),
+        };
+        let fill = Spot { path: 0, piece: 0, along: F(p.unit()) };
+        put_t_spot(&mut ee, T_OUT, fill);
+        ee.call(walk_fn, &[u64::from(T_TRACK), u64::from(T_A), u64::from(T_OUT), u64::from(T_ROUTE), 0], &[dist.0], BUDGET);
+        let mut out = fill;
+        let got = t.route_walk(dist, a, &route, &mut out);
+        assert_eq!(ee.v0() as u32, u32::from(got), "{what}: the walk's answer ({dist:?} along {route:?})");
+        assert_eq!(t_bits(t_spot_at(&ee, T_OUT)), t_bits(out), "{what}: the walk ({dist:?} along {route:?})");
+        walked += usize::from(got && dist > F::ZERO);
+
+        ee.call(free_fn, &[u64::from(T_TRACK), u64::from(T_ROUTE), 0], &[], BUDGET);
+        t.free_route(&mut route);
+        check_paths(&ee, &t, &format!("{what}: after the free"));
+
+        // The reach test, on the spots as they were.
+        let want = a.path == b.path && (if a.piece == b.piece { fpu::operand(a.along.0.to_bits()) <= fpu::operand(b.along.0.to_bits()) } else { b.piece > a.piece });
+        assert_eq!(reaches, u32::from(want), "{what}: the reach test");
+    }
+    assert!(routed > 3000 && failed > 300 && walked > 3000 && kept_off > 1000, "{routed} {failed} {walked} {kept_off}");
+}
+
+#[test]
+fn the_ring_test_matches_the_track_objects() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let inside_fn = match addr("path_inside") {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    let mut p = Pick(0x7d40_19bb_e352_a06c);
+    let mut said = [0usize; 2];
+    for case in 0..20_000 {
+        let t = t_paths(&mut p);
+        put_paths(&mut ee, &mut p, &t);
+        let i = p.below(t.paths.len() as u64) as usize;
+        let path = &t.paths[i];
+        if path.nodes.len() < 2 {
+            continue;
+        }
+        let n = p.below(path.nodes.len() as u64 - 1) as usize;
+        let (a, b) = (&path.nodes[n], &path.nodes[n + 1]);
+        let c = a.points[0];
+        let point = match p.below(5) {
+            0 => a.points[p.below(3) as usize],
+            1 => b.points[p.below(3) as usize],
+            _ => Vf([c.x() + p.range(-40.0, 40.0), p.range(-5.0, 5.0), c.z() + p.range(-40.0, 40.0), 1.0]),
+        };
+        let point = Vf([p.stray(point.x()), point.y(), p.stray(point.z()), point.w()]);
+        put_quad(&mut ee, T_POINT, point);
+        ee.call(inside_fn, &[u64::from(T_TRACK), u64::from(T_POINT), u64::from(t_node(i, n)), u64::from(t_node(i, n + 1))], &[], BUDGET);
+        let want = race::ring_holds(point, a, b);
+        assert_eq!(ee.v0() as u32, u32::from(want), "case {case}: {point:?} in {a:?} {b:?}");
+        said[usize::from(want)] += 1;
+    }
+    assert!(said.iter().all(|&k| k > 1500), "{said:?}");
+}
+
+#[test]
+fn the_reach_marks_match_the_track_objects() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let mark_fn = match addr("track_first_path") {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    let mut p = Pick(0x6a1d_93c0_b257_e48f);
+    let (mut done, mut cleared, mut kept) = (0, 0, 0);
+    for case in 0..20_000 {
+        let mut t = t_paths(&mut p);
+        for path in &mut t.paths {
+            if p.below(4) != 0 {
+                path.flags |= 0x80;
+            }
+            if p.below(40) == 0 {
+                path.flags |= 0x04;
+            }
+        }
+        put_paths(&mut ee, &mut p, &t);
+        let from = p.below(t.paths.len() as u64) as usize;
+        let what = format!("case {case}: from {from}, {} paths, {} free", t.paths.len(), t.free_routes);
+        let before: Vec<u32> = t.paths.iter().map(|q| q.flags).collect();
+        ee.call(mark_fn, &[u64::from(T_TRACK), u64::from(t_rec(from))], &[], BUDGET);
+        let got = t.mark_reached(from);
+        assert_eq!(ee.v0() as i32, got, "{what}: the answer");
+        check_paths(&ee, &t, &what);
+        done += usize::from(got == 1);
+        for (b, q) in before.iter().zip(&t.paths) {
+            cleared += usize::from(b & 0x80 != 0 && q.flags & 0x80 == 0);
+            kept += usize::from(b & 0x80 != 0 && q.flags & 0x80 != 0);
+        }
+    }
+    assert!(done > 15_000 && done < 20_000 && cleared > 10_000 && kept > 2000, "{done} {cleared} {kept}");
+}
+
+#[test]
+fn the_spot_search_matches_the_track_objects() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let find_fn = match addr("path_find_spot") {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    let mut p = Pick(0x2b8e_6c05_f1d7_9a43);
+    let mut answers = [0usize; 3];
+    let mut moved = 0;
+    for case in 0..20_000 {
+        let mut t = t_paths(&mut p);
+        put_paths(&mut ee, &mut p, &t);
+        // A point on or beside a stretch of path, or anywhere.
+        let i = p.below(t.paths.len() as u64) as usize;
+        let n = p.below(t.paths[i].nodes.len() as u64) as usize;
+        let q = t.paths[i].nodes[n].points[0];
+        let point = match p.below(6) {
+            0 => Vf([p.range(-150.0, 150.0), p.range(-5.0, 5.0), p.range(-150.0, 150.0), 1.0]),
+            _ => Vf([q.x() + p.range(-25.0, 25.0), p.range(-5.0, 5.0), q.z() + p.range(-25.0, 25.0), 1.0]),
+        };
+        let point = Vf([p.stray(point.x()), point.y(), p.stray(point.z()), point.w()]);
+        let start = t_spot_on(&mut p, &t);
+        let (mut ahead, mut behind) = match p.below(4) {
+            0 => (t.ahead, t.behind),
+            1 => (F(125.0), F(75.0)),
+            _ => (F(p.range(0.0, 120.0)), F(p.range(0.0, 120.0))),
+        };
+        if p.below(15) == 0 {
+            ahead = F(-p.range(0.0, 10.0));
+        }
+        if p.below(15) == 0 {
+            behind = F(-p.range(0.0, 10.0));
+        }
+        let via: Vec<usize> = if p.below(4) == 0 {
+            (0..1 + p.below(3)).map(|_| p.below(t.paths.len() as u64) as usize).collect()
+        } else {
+            Vec::new()
+        };
+        for (k, &lp) in via.iter().enumerate() {
+            let e = T_VIA + 0x10 * k as u32;
+            ee.set_u32(e + 4, t_rec(lp));
+            ee.set_u32(e + 0xc, if k + 1 < via.len() { e + 0x10 } else { 0 });
+        }
+        let what = format!("case {case}: {point:?} from {start:?}, reach {ahead:?} {behind:?}, via {via:?}");
+        put_quad(&mut ee, T_POINT, point);
+        put_t_spot(&mut ee, T_A, start);
+        put_t_spot(&mut ee, T_OUT, Spot { path: 0, piece: 0, along: F(p.unit()) });
+        let fill = F(p.unit());
+        put_f(&mut ee, T_D, fill);
+        let via_arg = if via.is_empty() { 0 } else { T_VIA };
+        let args = [T_TRACK, T_POINT, T_A, via_arg, T_OUT, T_D].map(u64::from);
+        ee.call(find_fn, &args, &[ahead.0, behind.0], BUDGET * 10);
+        let mut out = Spot::default();
+        let mut d = fill;
+        let got = t.find_spot(ahead, behind, point, start, &via, &mut out, Some(&mut d));
+        assert_eq!(ee.v0() as i32, got, "{what}: the answer");
+        assert_eq!(t_bits(t_spot_at(&ee, T_OUT)), t_bits(out), "{what}: the spot");
+        assert_eq!(f32_at(&ee, T_D).0.to_bits(), d.0.to_bits(), "{what}: the distance");
+        check_paths(&ee, &t, &what);
+        answers[got as usize] += 1;
+        moved += usize::from(got != 0 && out != start);
+    }
+    assert!(answers.iter().all(|&k| k > 200) && moved > 3000, "{answers:?} {moved}");
 }

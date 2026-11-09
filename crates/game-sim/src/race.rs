@@ -911,6 +911,619 @@ impl LapRules {
 /// How far past the line's own spot a card set back on the line is put, so that it stands beyond it.
 const LINE_NUDGE: F = F(1e-5);
 
+// --- the track's paths, as the race asks them (S293) ------------------------------------------------
+
+/// The path flag bits the race's path queries read and write (a path's `+0` word).
+pub mod path_flags {
+    /// The track owns the path. Every path the file makes has it; a route search that gives up would
+    /// free a path without it, which the port never does (see [`super::TrackPaths::new`]).
+    pub const OWNED: u32 = 0x01;
+    /// The route search's mark on a path it has opened, cleared from every path when it succeeds and
+    /// left where it was when it gives up.
+    pub const OPENED: u32 = 0x04;
+    /// A checkpoint path; the race handler clears it once a card reaches the path's last stretch.
+    pub const CHECKPOINT: u32 = 0x40;
+    /// A path the queries asked to keep off (the race asks so every time) leave out.
+    pub const KEEP_OFF: u32 = 0x100;
+    /// A path no link reaches from path 0. The file sets it on every path and the load clears it from
+    /// the ones path 0 reaches ([`super::TrackPaths::mark_reached`]).
+    pub const UNREACHED: u32 = 0x80;
+    /// Paths the spot search never looks for a rider on: unreached or kept off.
+    pub const NOT_SEARCHED: u32 = 0x180;
+}
+
+/// How many entries each of the track's three scratch pools holds per path.
+const POOL_PER_PATH: usize = 10;
+
+/// One path of [`TrackPaths`]: a [`TrackPath`] with its links made indices, and the two scratch words
+/// the route search leaves in it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RacePath {
+    /// The flags (`+0`), [`path_flags`].
+    pub flags: u32,
+    /// The length (`+8`).
+    pub length: F,
+    /// Its nodes, at least one.
+    pub nodes: Vec<PathNode>,
+    /// The paths it leads on to, by index.
+    pub links: Vec<usize>,
+    /// The route search's distance from this path to its goal (`+0x1c`), and the link it found shortest
+    /// (`+0x28`). Both stay from one search to the next.
+    pub dist: F,
+    pub best: Option<usize>,
+}
+
+/// The track object as the race's path queries see it: its paths, the reach a rider's spot is looked
+/// for in, the lap length, and the three scratch pools the queries take entries from.
+///
+/// The pools hold `10 ×` the path count each (the original allocates them so when the file is read).
+/// An entry a query takes and does not give back is gone for good: the spot search keeps the
+/// candidates it took when it runs out halfway, as the original does. Only the counts are kept; the
+/// entries carry nothing the queries read before writing.
+///
+/// A [`Spot`]'s words name a path and a node: in these queries they are 1 + the path's index and 1 +
+/// the node's index along it, and 0 is no path (the original's null). [`Spot::on`] makes one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TrackPaths {
+    /// The file's tag `0x29` word (`+0x34`); bit 2 makes the spot search prefer the spot nearest along
+    /// the path over the one nearest on the ground.
+    pub word_34: u32,
+    /// How far ahead and behind a rider's last spot the search takes a new one (`+0x38`, `+0x3c`):
+    /// 200 each when the track is made; a race sets its own.
+    pub ahead: F,
+    pub behind: F,
+    /// The lap's length (`+0x54`). 0 here; the race sets it.
+    pub lap_length: F,
+    pub paths: Vec<RacePath>,
+    /// The entries left in the route pool (`+0x98`), the parent pool (`+0xa0`) and the candidate pool
+    /// (`+0xa8`).
+    pub free_routes: usize,
+    pub free_parents: usize,
+    pub free_candidates: usize,
+}
+
+impl Spot {
+    /// The spot `along` the way from node `node` of path `path` to the next node.
+    pub fn on(path: usize, node: usize, along: F) -> Spot {
+        Spot { path: path as u32 + 1, piece: node as u32 + 1, along }
+    }
+
+    /// The path and node the spot is on, if it names both.
+    pub fn at(self) -> Option<(usize, usize)> {
+        if self.path == 0 || self.piece == 0 {
+            return None;
+        }
+        Some((self.path as usize - 1, self.piece as usize - 1))
+    }
+
+    fn on_path(self) -> usize {
+        self.at().expect("a spot the path queries walk from names a path and a node").0
+    }
+}
+
+/// `x ⋅ x` on the flat plane through the FPU accumulator: `mula` x, `madd` z.
+fn flat_sq(x: F, z: F) -> F {
+    F(fpu::madd(fpu::mula(x.0, x.0), z.0, z.0))
+}
+
+/// Is `point` (x and z) inside the ring the two nodes' side points make? The ring runs from `a`'s
+/// second point to `b`'s second, `b`'s first, `b`'s third, `a`'s third, `a`'s first and back, and a
+/// ray from the point towards −z counts its crossings.
+pub fn ring_holds(point: Vf, a: &PathNode, b: &PathNode) -> bool {
+    let ring = [a.points[1], b.points[1], b.points[0], b.points[2], a.points[2], a.points[0], a.points[1]];
+    let (px, pz) = (F(point.x()), read(F(point.z())));
+    let mut odd = false;
+    for w in ring.windows(2) {
+        let (u, v) = (w[0], w[1]);
+        let e = F(v.x()) - F(u.x());
+        let t = e * (px - F(u.x()));
+        if t < F::ZERO {
+            continue;
+        }
+        let e2 = e * e;
+        if !(t < e2) {
+            continue;
+        }
+        let z = F(u.z()) + (t / e2) * (F(v.z()) - F(u.z()));
+        if z < pz {
+            odd = !odd;
+        }
+    }
+    odd
+}
+
+impl TrackPaths {
+    /// The paths of a read race file, as the track object holds them once it is loaded.
+    ///
+    /// `None` for a file the queries cannot walk without reading memory the original never allocated:
+    /// an empty path slot, a path with no nodes, a link that names no path, or a path without
+    /// [`path_flags::OWNED`] (the file always sets it).
+    pub fn new(file: &TrackFile) -> Option<TrackPaths> {
+        let mut paths = Vec::new();
+        for p in &file.paths {
+            let p = p.as_ref()?;
+            if p.nodes.is_empty() || p.flags & path_flags::OWNED == 0 {
+                return None;
+            }
+            let mut links = Vec::new();
+            for l in p.links.iter().flatten() {
+                match *l {
+                    Link::Path(i) if file.paths.get(i).is_some_and(|q| q.is_some()) => links.push(i),
+                    _ => return None,
+                }
+            }
+            paths.push(RacePath { flags: p.flags, length: p.length, nodes: p.nodes.clone(), links, dist: F::ZERO, best: None });
+        }
+        let pool = POOL_PER_PATH * paths.len();
+        let mut t = TrackPaths {
+            word_34: file.word_34,
+            ahead: F(200.0),
+            behind: F(200.0),
+            lap_length: F::ZERO,
+            paths,
+            free_routes: pool,
+            free_parents: pool,
+            free_candidates: pool,
+        };
+        if !t.paths.is_empty() {
+            t.mark_reached(0);
+        }
+        Some(t)
+    }
+
+    /// What the load does once the links are read: walks out from path `from` along the links and
+    /// clears [`path_flags::UNREACHED`] from every path it reaches. The walk is depth first, its stack
+    /// taken from the route pool; when the pool runs dry the answer is 0 and the walk stops where it
+    /// is, its stack entries lost and its [`path_flags::OPENED`] marks left on. Otherwise the marks
+    /// come off every path and the answer is 1.
+    pub fn mark_reached(&mut self, from: usize) -> i32 {
+        if self.free_routes == 0 {
+            return 0;
+        }
+        self.free_routes -= 1;
+        let mut stack = vec![from];
+        while let Some(&p) = stack.last() {
+            if self.paths[p].flags & path_flags::OPENED != 0 {
+                stack.pop();
+                self.free_routes += 1;
+                continue;
+            }
+            self.paths[p].flags = (self.paths[p].flags | path_flags::OPENED) & !path_flags::UNREACHED;
+            for j in 0..self.paths[p].links.len() {
+                let l = self.paths[p].links[j];
+                if self.paths[l].flags & path_flags::OPENED != 0 {
+                    continue;
+                }
+                if self.free_routes == 0 {
+                    return 0;
+                }
+                self.free_routes -= 1;
+                stack.push(l);
+            }
+        }
+        for path in &mut self.paths {
+            path.flags &= !path_flags::OPENED;
+        }
+        1
+    }
+
+    fn span(&self, p: usize, n: usize) -> F {
+        self.paths[p].nodes[n].span
+    }
+
+    fn keep_off(&self, p: usize) -> bool {
+        self.paths[p].flags & path_flags::KEEP_OFF != 0
+    }
+
+    /// The point a spot stands on: its node's first point, `along` the way to the next node's, with
+    /// the node's `w`. An `along` outside 0..1 is clamped, and written back into the spot. On a path's
+    /// last node there is no next one: the answer is false, and `out` is the node's point only if
+    /// `along` is 0. False, `out` untouched, for a spot that names no node.
+    pub fn spot_point(&self, spot: &mut Spot, out: &mut Vf) -> bool {
+        let Some((p, n)) = spot.at() else { return false };
+        let nodes = &self.paths[p].nodes;
+        let here = nodes[n].points[0];
+        let Some(next) = nodes.get(n + 1) else {
+            if is_zero(spot.along) {
+                *out = here;
+            }
+            return false;
+        };
+        if read(spot.along) < F::ZERO {
+            spot.along = F::ZERO;
+        } else if !(read(spot.along) <= F::ONE) {
+            spot.along = F::ONE;
+        }
+        let step = next.points[0].sub(here).mul(Vf::splat(spot.along.0));
+        *out = here.merge(Dest::XYZ, here.add(step));
+        true
+    }
+
+    /// The way the path runs at a spot: the unit step from its node's first point to the next node's,
+    /// with the next point's `w`. False, `out` untouched, on a path's last node, a node of no length,
+    /// or a spot that names no node.
+    pub fn path_ahead(&self, spot: Spot, out: &mut Vf) -> bool {
+        let Some((p, n)) = spot.at() else { return false };
+        let nodes = &self.paths[p].nodes;
+        let Some(next) = nodes.get(n + 1) else { return false };
+        if !(F::ZERO < read(nodes[n].span)) {
+            return false;
+        }
+        let ahead = next.points[0];
+        *out = unit(ahead.merge(Dest::XYZ, ahead.sub(nodes[n].points[0])));
+        true
+    }
+
+    /// Is `b` at or after `a` along the same path?
+    fn reaches(&self, a: Spot, b: Spot) -> bool {
+        if a.path != b.path {
+            return false;
+        }
+        if a.piece == b.piece {
+            return read(a.along) <= read(b.along);
+        }
+        b.piece > a.piece
+    }
+
+    /// How far along the paths `b` is from `a`. Along one path, the spans between them; when `b` is
+    /// behind `a` or on another path, the route search's shortest way round ([`TrackPaths::route`]),
+    /// 0 if it finds none. With `keep_off`, −1 if either spot is on a [`path_flags::KEEP_OFF`] path.
+    pub fn distance(&mut self, a: Spot, b: Spot, keep_off: bool) -> F {
+        let (pa, na) = a.at().expect("a spot the path queries measure from names a path and a node");
+        let (pb, nb) = b.at().expect("a spot the path queries measure to names a path and a node");
+        if keep_off && (self.keep_off(pa) || self.keep_off(pb)) {
+            return F(-1.0);
+        }
+        let mut d = F::ZERO;
+        if pa != pb {
+            self.route(a, b, None, Some(&mut d), keep_off);
+            return d;
+        }
+        if na == nb {
+            if read(a.along) <= read(b.along) {
+                return self.span(pa, na) * (b.along - a.along);
+            }
+            self.route(a, b, None, Some(&mut d), keep_off);
+            return d;
+        }
+        let mut n = na;
+        loop {
+            d += self.span(pa, n);
+            n += 1;
+            if n == nb {
+                let part = fpu::msub(fpu::mula(b.along.0, self.span(pa, nb).0), a.along.0, self.span(pa, na).0);
+                return d + F(part);
+            }
+            if n == self.paths[pa].nodes.len() {
+                // Off the path's end before reaching `b`: the search's answer, or the spans so far.
+                self.route(a, b, None, Some(&mut d), keep_off);
+                return d;
+            }
+        }
+    }
+
+    /// The route search: the shortest way along the paths from `a` to `b`. Its length goes to `d`; the
+    /// paths to ride, in order, are pushed onto `route` (which must be empty) — the original's way of
+    /// building it leaves out the path just before `b`'s, and starts at `b`'s own when that one is
+    /// the first's best link. 1 when it found a way (or `b` is ahead of `a` on one path), 0 when it
+    /// found none or ran out of pool entries (the entries go back, the opened marks stay), −1 when
+    /// `keep_off` and either spot is on a [`path_flags::KEEP_OFF`] path.
+    ///
+    /// The search is depth first from `a`'s path over the links: each path's distance is its shortest
+    /// link's plus its own length, `b`'s path's is the way from its start to `b`, and the first path's
+    /// adds the way from `a` to its end. A path reached again before its own links are done takes
+    /// whatever distance it held, from this search or an earlier one.
+    pub fn route(&mut self, a: Spot, b: Spot, mut route: Option<&mut Vec<usize>>, d: Option<&mut F>, keep_off: bool) -> i32 {
+        let pa = a.on_path();
+        let pb = b.on_path();
+        if keep_off && (self.keep_off(pa) || self.keep_off(pb)) {
+            return -1;
+        }
+        if pa == pb && self.reaches(a, b) {
+            if let Some(r) = route {
+                if self.free_routes == 0 {
+                    return 0;
+                }
+                self.free_routes -= 1;
+                r.push(pb);
+            }
+            if let Some(d) = d {
+                *d = self.distance(a, b, keep_off);
+            }
+            return 1;
+        }
+        let last = self.paths[pa].nodes.len() - 1;
+        let tail = self.distance(a, Spot::on(pa, last, F::ONE), keep_off);
+        self.paths[pb].dist = self.distance(Spot::on(pb, 0, F::ZERO), b, keep_off);
+        if self.free_routes == 0 {
+            return 0;
+        }
+        self.free_routes -= 1;
+        let mut stack = vec![pa];
+        let mut reached = false;
+        let mut d = d;
+        while let Some(&p) = stack.last() {
+            if self.paths[p].flags & path_flags::OPENED == 0 {
+                self.paths[p].flags |= path_flags::OPENED;
+                for i in 0..self.paths[p].links.len() {
+                    let l = self.paths[p].links[i];
+                    if l == pb {
+                        reached = true;
+                    }
+                    if self.paths[l].flags & path_flags::OPENED == 0 && l != pb && !(keep_off && self.keep_off(l)) {
+                        if self.free_routes == 0 {
+                            self.free_routes += stack.len();
+                            return 0;
+                        }
+                        self.free_routes -= 1;
+                        stack.push(l);
+                    }
+                }
+                continue;
+            }
+            self.paths[p].best = None;
+            for i in 0..self.paths[p].links.len() {
+                let l = self.paths[p].links[i];
+                let shorter = self.paths[p].best.is_none() || read(self.paths[l].dist) < read(self.paths[p].dist);
+                if shorter && !(keep_off && self.keep_off(l)) {
+                    self.paths[p].dist = self.paths[l].dist;
+                    self.paths[p].best = Some(l);
+                }
+            }
+            if stack.len() == 1 {
+                self.paths[p].dist += tail;
+                if let Some(d) = d.as_deref_mut() {
+                    *d = self.paths[p].dist;
+                }
+                if let Some(r) = route.as_deref_mut()
+                    && reached
+                    && !self.build_route(p, pb, r)
+                {
+                    self.free_routes += stack.len() + r.len();
+                    r.clear();
+                    return 0;
+                }
+            } else {
+                let length = self.paths[p].length;
+                self.paths[p].dist += length;
+            }
+            self.free_routes += 1;
+            stack.pop();
+        }
+        for path in self.paths.iter_mut() {
+            path.flags &= !path_flags::OPENED;
+        }
+        1
+    }
+
+    /// The route from `first` to `goal` over the best links, as the original strings it: each path
+    /// whose best link is not `goal`, then `goal`. False when the pool runs out, or the chain meets a
+    /// path with no best link (where the original reads on from a null path; see the journal).
+    fn build_route(&mut self, first: usize, goal: usize, r: &mut Vec<usize>) -> bool {
+        let mut cur = first;
+        loop {
+            let Some(next) = self.paths[cur].best else { return false };
+            if next == goal {
+                break;
+            }
+            if self.free_routes == 0 {
+                return false;
+            }
+            self.free_routes -= 1;
+            r.push(cur);
+            cur = next;
+        }
+        if self.free_routes == 0 {
+            return false;
+        }
+        self.free_routes -= 1;
+        r.push(goal);
+        true
+    }
+
+    /// Give a route's entries back to the pool.
+    pub fn free_route(&mut self, route: &mut Vec<usize>) {
+        self.free_routes += route.len();
+        route.clear();
+    }
+
+    /// The spot `dist` further on from `spot` along `route` (from [`TrackPaths::route`]), into `out`.
+    /// At the route's end it stops at the last path's last node. False, `out` untouched, when the
+    /// route is empty or does not start on `spot`'s path; `spot` itself when `dist` is not above 0.
+    pub fn route_walk(&self, dist: F, spot: Spot, route: &[usize], out: &mut Spot) -> bool {
+        let Some(&first) = route.first() else { return false };
+        if spot.path != first as u32 + 1 {
+            return false;
+        }
+        if !(F::ZERO < dist) {
+            *out = spot;
+            return true;
+        }
+        let (mut p, mut n) = (first, spot.at().map_or(0, |(_, n)| n));
+        let mut entry = 0;
+        let mut along = spot.along;
+        let mut gone = F::ZERO;
+        loop {
+            if read(along) == F::ONE {
+                if n + 1 < self.paths[p].nodes.len() {
+                    n += 1;
+                    gone += self.span(p, n);
+                } else if entry + 1 < route.len() {
+                    entry += 1;
+                    (p, n) = (route[entry], 0);
+                    gone += self.span(p, n);
+                } else {
+                    gone = dist;
+                }
+            } else {
+                gone += self.span(p, n) * (F::ONE - along);
+                along = F::ONE;
+            }
+            if !(gone <= dist) {
+                let span = self.span(p, n);
+                if !is_zero(span) {
+                    along = F::ONE - (gone - dist) / span;
+                }
+            }
+            if !(gone < dist) {
+                break;
+            }
+        }
+        *out = Spot::on(p, n, along);
+        true
+    }
+
+    /// Where along the paths `point` is: the track object's spot search.
+    ///
+    /// Every stretch of every searched path whose ring holds the point (within its span plus `ahead +
+    /// behind`) gives a candidate, the point's place along the stretch clamped to 0..1. Then, newest
+    /// first, a candidate within `ahead` along the paths of `start`, or `behind` before it, is taken —
+    /// the nearest on the ground, or with [`TrackPaths::word_34`] bit 2 the one furthest along within
+    /// reach; with `ahead` or `behind` negative the first candidate is taken outright. Failing that a
+    /// candidate is measured from the start of each `via` path, and failing that from the end of any
+    /// path that leads to both its path and `start`'s, within the track's own reach (answer 2).
+    ///
+    /// `out` is `start` unless a candidate is taken; `dist_out`, when a candidate is, the distance it
+    /// was taken at. 0 when none was (or the candidate pool ran out, keeping the ones taken so far).
+    #[allow(clippy::too_many_arguments)]
+    pub fn find_spot(&mut self, ahead: F, behind: F, point: Vf, start: Spot, via: &[usize], out: &mut Spot, dist_out: Option<&mut F>) -> i32 {
+        *out = start;
+        let mut best_d = F(fpu::neg(behind.0));
+        let mut best_sq = F(1e6);
+        let (px, pz) = (F(point.x()), F(point.z()));
+        let reach = ahead + behind;
+        let mut cands: Vec<Spot> = Vec::new();
+        for i in 0..self.paths.len() {
+            if self.paths[i].flags & path_flags::NOT_SEARCHED != 0 {
+                continue;
+            }
+            for n in 0..self.paths[i].nodes.len() - 1 {
+                let (here, next) = (&self.paths[i].nodes[n], &self.paths[i].nodes[n + 1]);
+                let (hx, hz) = (F(here.points[0].x()), F(here.points[0].z()));
+                let r = here.span + reach;
+                if !(flat_sq(hx - px, hz - pz) < r * r) || !ring_holds(point, here, next) {
+                    continue;
+                }
+                let (dx, dz) = (F(next.points[0].x()) - hx, F(next.points[0].z()) - hz);
+                let mut t = F::ZERO;
+                if !(dx == F::ZERO && dz == F::ZERO) {
+                    let up = fpu::madd(fpu::mula(dx.0, (px - hx).0), dz.0, (pz - hz).0);
+                    t = F(up) / flat_sq(dx, dz);
+                }
+                if !(t <= F::ONE) {
+                    t = F::ONE;
+                } else if t < F::ZERO {
+                    t = F::ZERO;
+                }
+                if self.free_candidates == 0 {
+                    return 0;
+                }
+                self.free_candidates -= 1;
+                cands.push(Spot::on(i, n, t));
+            }
+        }
+        let (ahead_r, behind_r) = (read(ahead), read(behind));
+        let mut found = 0;
+        for c in cands.iter_mut().rev() {
+            if ahead_r < F::ZERO || behind_r < F::ZERO {
+                if found == 0 {
+                    *out = *c;
+                }
+                found = 1;
+            }
+            let d1 = self.distance(start, *c, true);
+            let d2 = self.distance(*c, start, true);
+            if (!(d1 < F::ZERO) && d1 <= ahead_r) || (!(d2 < F::ZERO) && d2 <= behind_r) {
+                found = 1;
+                self.take(c, d1, d2, point, out, &mut best_d, &mut best_sq);
+            }
+            for &lp in via {
+                if found != 0 {
+                    break;
+                }
+                let from = Spot::on(lp, 0, F::ZERO);
+                let da = self.distance(from, *c, true);
+                let db = self.distance(from, start, true);
+                let on_lp = |s: Spot| s.at().is_some_and(|(p, _)| p == lp);
+                if on_lp(*c) && (!on_lp(start) || (!(da < F::ZERO) && !(db < F::ZERO) && da < db)) {
+                    found = 1;
+                    self.take(c, da, db, point, out, &mut best_d, &mut best_sq);
+                }
+                if (!(da < F::ZERO) && da <= ahead_r) || (!(db < F::ZERO) && db <= behind_r) {
+                    found = 1;
+                    self.take(c, da, db, point, out, &mut best_d, &mut best_sq);
+                }
+            }
+        }
+        if found == 0 && !cands.is_empty() {
+            let start_path = start.at().map(|(p, _)| p);
+            let mut parents = Vec::new();
+            for i in 0..self.paths.len() {
+                for j in 0..self.paths[i].links.len() {
+                    let l = self.paths[i].links[j];
+                    if Some(l) != start_path || self.keep_off(l) || self.free_parents == 0 {
+                        continue;
+                    }
+                    self.free_parents -= 1;
+                    parents.push(i);
+                }
+            }
+            let (reach_ahead, reach_behind) = (read(self.ahead), F(fpu::neg(read(self.behind).0)));
+            for c in cands.iter().rev() {
+                if c.path == start.path {
+                    continue;
+                }
+                for &lp in parents.iter().rev() {
+                    if found != 0 {
+                        break;
+                    }
+                    for j in 0..self.paths[lp].links.len() {
+                        let l = self.paths[lp].links[j];
+                        if l as u32 + 1 != c.path || self.keep_off(l) {
+                            continue;
+                        }
+                        let end = Spot::on(lp, self.paths[lp].nodes.len() - 1, F::ZERO);
+                        let f = self.distance(end, *c, true) - self.distance(end, start, true);
+                        if !(f <= reach_ahead) || f < reach_behind {
+                            continue;
+                        }
+                        best_d = f;
+                        found = 2;
+                        *out = *c;
+                    }
+                }
+            }
+            self.free_parents += parents.len();
+        }
+        self.free_candidates += cands.len();
+        if found != 0
+            && let Some(d) = dist_out
+        {
+            *d = best_d;
+        }
+        found
+    }
+
+    /// The spot search taking candidate `c`, found `da` ahead of (and `db` behind) its measure.
+    #[allow(clippy::too_many_arguments)]
+    fn take(&self, c: &mut Spot, da: F, db: F, point: Vf, out: &mut Spot, best_d: &mut F, best_sq: &mut F) {
+        let back = F(fpu::neg(db.0));
+        if self.word_34 & 2 == 0 || (da <= read(*best_d) && back <= read(*best_d)) {
+            let mut at = Vf::ZERO;
+            self.spot_point(c, &mut at);
+            let sq = flat_sq(F(point.x()) - F(at.x()), F(point.z()) - F(at.z()));
+            if sq < *best_sq {
+                *best_sq = sq;
+                *best_d = da;
+                *out = *c;
+            }
+        } else {
+            *out = *c;
+            *best_d = if da <= read(*best_d) { back } else { da };
+        }
+    }
+}
+
 // --- the track's race file (S13e) -------------------------------------------------------------------
 
 /// What a gate is when the original makes one, before anything is read into it: no flags, its three

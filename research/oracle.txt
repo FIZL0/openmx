@@ -936,15 +936,37 @@ activity_race_load          boot 0x002f8610 (activity) the base loader: the trac
 # race::Supercross::place_drop_gate / place_finish_line; up is 0x00426db0 (0,1,0,1); the line's
 # ahead is 0x0026e630 (track, line +0x98, out).
 track_file_fail             boot 0x00269680 (track, handle, paths, count) track_file_load's error exit
-track_first_path            boot 0x0026e9d0 (track, path) after the load, on path 0 (unported)
+track_first_path            boot 0x0026e9d0 (track, path) -> 1/0 after the load, on path 0: DFS over the
+#                                           links (stack from the pool +0x98), each new path gets 0x4
+#                                           and loses 0x80; pool dry -> 0, marks left. Then 0x4 off all.
+#                                           S293: TrackPaths::mark_reached (find_spot skips 0x180).
 track_gate_spot             boot 0x0026e6d0 (track, gate) -> 0 when the gate needs path_spot (unported)
 path_spot                   boot 0x0026b410 (track, point, spot out, 0, 1, 0) the path spot at a point
-track_start_spots           boot 0x0026cbe0 (track, spots, spots, 0, track+0x54, 1) (unported)
+track_start_spots           boot 0x0026cbe0 (track, a, b, route*, dist*, keep_off) -> 1/0/-1: the route
+#                                           search (the load calls it line spot to line spot for the
+#                                           lap length +0x54). DFS over the links with the pool +0x98
+#                                           (16-byte entries, next +0xc), path flag 0x4 = opened,
+#                                           +0x1c dist, +0x28 best link. S293: TrackPaths::route
+path_find_spot              boot 0x0026c010 (ahead f12, behind f13, track, point, start, via, out,
+#                                           dist*) -> 0/1/2: the spot search. Candidates pool +0xa8
+#                                           (leaked when it runs out), parents pool +0xa0. S293:
+#                                           TrackPaths::find_spot
+path_inside                 boot 0x0026bdb0 (track, point, node, next) -> the ring parity test (S293)
+path_reaches                boot 0x0026cb30 (track, a, b) -> b at or after a on one path (S293)
+path_distance               boot 0x0026e0c0 (track, a, b, keep_off) -> f0: TrackPaths::distance (S293)
+path_spot_point             boot 0x0026e4f0 (track, spot, out) -> 1/0: TrackPaths::spot_point (S293)
+path_route_walk             boot 0x0026e230 (dist f12, track, spot, out, route*, dir) -> 1/0: walks a
+#                                           route; entry byte +0 bit 2 xor dir walks backwards (never
+#                                           set: forward only ported). S293: TrackPaths::route_walk
+path_route_free             boot 0x0026c9f0 (track, route*, also_owned) the route's entries back to
+#                                           +0x98, freeing their paths unless owned (+0 bit 1; with
+#                                           the third argument, owned too). The race passes 0 (S293)
 prop_bound                  boot 0x001b44b0 (prop, centre out, half extents out)
 activity_supercross_load    boot 0x002f9f40 (activity) the loader: gates off the props, then the lane table
 prop_find_fallback          boot 0x00212af0 (0x004e18c0's list, name, 1) -> holder; the prop is holder
 #                                           +0xb0 -> +0x30
-path_ahead                  boot 0x0026e630 (track, spot, out) the path's direction at a spot
+path_ahead                  boot 0x0026e630 (track, node, out) the path's direction at a node (the
+#                                           spot's +4 word). S293: TrackPaths::path_ahead
 
 # ---------------------------------------------------------------------------------------------------
 # D7 — which bike a freeride area loads. The vehicle build loader names two physics files from the
