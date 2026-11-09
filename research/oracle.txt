@@ -903,6 +903,48 @@ score_race_tick             boot 0x00262aa0 (dt f12, mgr) the score manager's ra
 #                                           off-track clock +0xc0 against mgr+0xd4, the time limit
 #                                           +0xc4, then the 30 s (mgr+0x9c) finish countdown, ranking,
 #                                           0x00261b80 / 0x002628f0. Only the lap line is ported (S13c).
+# S13e: the track's race file. Not in Tracks\sx01.res: it is tracks\sx01\sx01.tdf inside
+# Tracks\sx01_2.res (with sx01ai.tdf, supercross.aty, sx01.wpt, hit.dat).
+track_ctor                  boot 0x002693c0 (track) the track object (the score manager's +0x68 =
+#                                           activity +0xb8): +0x38/+0x3c = 200, +0x64..+0x74 = 100,
+#                                           0.9, 1.5, 0.5, 4, +0x90 = 1, +0xac = 3, the rest 0 — but
+#                                           not +0x80/+0x88 (the file's offsets). Wrapper 0x00269490
+#                                           opens the file name at +0x30 through track_file_load.
+track_file_load             boot 0x00269750 (track, name) -> 1 read, 0 failed: the tag reader ported as
+#                                           race::TrackFile::parse. Error exit 0x00269680 frees and
+#                                           returns 0. After the records: links resolved, +0x4c =
+#                                           path 0, 0x0026e9d0 (track, path 0), every gate +0x74 =
+#                                           150, 0x0026e6d0 (track, gate) == 0 -> 0x0026b410 (track,
+#                                           centre, gate+0x94, 0, 1, 0), then 0x0026cbe0 (track, spots,
+#                                           .., track+0x54, 1). Gates: operator_new 0xa0, gate_ctor,
+#                                           vt 0x004547f0 at +8, 0x00246a70 (gate, 0x17, 0x10, 0x80,
+#                                           4), node_add_child (track, gate, 0x408).
+gate_ctor                   boot 0x00246530 (gate, 1) the gate base: +0x30 = 0, +0x40/+0x50/+0x60 =
+#                                           vf0, +0x70..+0x78 = 0, +0x7c = -1. race::Gate::new.
+mem_calloc                  boot 0x001e4ff0 (count, size, file, line) -> zeroed memory (heap_alloc,
+#                                           then memset 0x0040e190)
+fs_eof                      boot 0x00124530 (file, handle) -> 0 while the position is short of the size
+activity_race_load          boot 0x002f8610 (activity) the base loader: the track object from
+#                                           act+0x184's file into act+0xb8 (+0x38 = 125, +0x3c = 75
+#                                           after), 0x002f8b40 ground-snaps the path nodes,
+#                                           ground_query on the line and grid gate centres; a second
+#                                           file act+0x288 into act+0xbc.
+# activity_supercross's loader 0x002f9f40, before the lane table: the start gate (+0x3dc, made with
+# operator_new 0x90 + gate_ctor if absent) and the track's grid (+0x58) and line (+0x5c) gates off
+# the scene props "dropgate" (or the scene +0xb4 name lowercased; scene vt +0x120) and "finishgate"
+# (scene, else 0x00212af0 on 0x004e18c0). Bound 0x001b44b0 (prop, &centre, &half). Ported as
+# race::Supercross::place_drop_gate / place_finish_line; up is 0x00426db0 (0,1,0,1); the line's
+# ahead is 0x0026e630 (track, line +0x98, out).
+track_file_fail             boot 0x00269680 (track, handle, paths, count) track_file_load's error exit
+track_first_path            boot 0x0026e9d0 (track, path) after the load, on path 0 (unported)
+track_gate_spot             boot 0x0026e6d0 (track, gate) -> 0 when the gate needs path_spot (unported)
+path_spot                   boot 0x0026b410 (track, point, spot out, 0, 1, 0) the path spot at a point
+track_start_spots           boot 0x0026cbe0 (track, spots, spots, 0, track+0x54, 1) (unported)
+prop_bound                  boot 0x001b44b0 (prop, centre out, half extents out)
+activity_supercross_load    boot 0x002f9f40 (activity) the loader: gates off the props, then the lane table
+prop_find_fallback          boot 0x00212af0 (0x004e18c0's list, name, 1) -> holder; the prop is holder
+#                                           +0xb0 -> +0x30
+path_ahead                  boot 0x0026e630 (track, spot, out) the path's direction at a spot
 
 # ---------------------------------------------------------------------------------------------------
 # D7 — which bike a freeride area loads. The vehicle build loader names two physics files from the

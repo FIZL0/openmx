@@ -31,6 +31,13 @@
 //! the score card's lap line (S13c) — the lap's time, the best lap, the kept lap records, the finish in
 //! a race that ends at the line, and a ghost race's run starting over — with what it tells the
 //! presentation as [`LineNotice`]s.
+//!
+//! Where the gates stand comes off the disc (S13e): every track carries a race file, which
+//! [`TrackFile::parse`] reads as the track object's loader does — its paths of nodes with their spans
+//! and links, the checkpoint records and their parts, the grid gate, the finish line and a third gate.
+//! A supercross race then stands its grid and start gate on the start-drop prop
+//! ([`Supercross::place_drop_gate`]) and its finish line on the finish prop
+//! ([`Supercross::place_finish_line`]), each handed to it as a [`Prop`].
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
 use crate::contact::unit;
@@ -903,3 +910,579 @@ impl LapRules {
 
 /// How far past the line's own spot a card set back on the line is put, so that it stands beyond it.
 const LINE_NUDGE: F = F(1e-5);
+
+// --- the track's race file (S13e) -------------------------------------------------------------------
+
+/// What a gate is when the original makes one, before anything is read into it: no flags, its three
+/// directions zero with `w` 1, no width or height, and a reach of −1 (test at any distance).
+impl Gate {
+    pub fn new() -> Gate {
+        let zero = Vf([0.0, 0.0, 0.0, 1.0]);
+        Gate { flags: 0, centre: zero, normal: zero, across: zero, width: F::ZERO, height: F::ZERO, reach_sq: F(-1.0) }
+    }
+}
+
+impl Default for Gate {
+    fn default() -> Gate {
+        Gate::new()
+    }
+}
+
+/// A track's race file (`tracks\<track>\<track>.tdf`, in the track's second resource,
+/// `Tracks\<track>_2.res`), as the track object reads it: the riders' paths round the course, and the
+/// gates the race activity starts from.
+///
+/// The file is a run of records, each a tag byte and its little-endian words; [`TrackFile::parse`]
+/// takes them in order, as the original does, so a scale or an offset applies to the points after it.
+/// Points are stored `offset + raw × scale` (`y` only scaled); a gate's across direction is
+/// normalised and its width scaled, its normal kept as written.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TrackFile {
+    /// The x and z offsets every point is moved by (`+0x80`, `+0x88`). The original never sets them
+    /// before reading: a file without them gets whatever the object's memory held. The port starts
+    /// them at 0.
+    pub offset_x: F,
+    pub offset_z: F,
+    /// The scale every point and gate width is multiplied by (`+0x90`), 1 until the file sets it.
+    pub scale: F,
+    /// Tag `0x29`'s word (`+0x34`).
+    pub word_34: u32,
+    /// The paths, by index (`+0x50`, count `+0x40`); a slot the file names no path for is `None`.
+    pub paths: Vec<Option<TrackPath>>,
+    /// How many nodes and checkpoints the file made (`+0x44`, `+0x48`): every one, including those a
+    /// path read again left behind. Each node and checkpoint's id is the count before it.
+    pub nodes_made: i32,
+    pub checkpoints_made: i32,
+    /// The gates: the grid's (`+0x58`, tag `0x0f`), the finish line's (`+0x5c`, tag `0x10`) and a third
+    /// (`+0x60`, tag `0x19`). Each is [`flags`] 3 and 150 high once the file is read.
+    pub grid: Option<Gate>,
+    pub line: Option<Gate>,
+    pub third: Option<Gate>,
+    /// Tags `0x13`–`0x16` and `0x28` (`+0x64`..`+0x74`), the object's defaults 100, 0.9, 1.5, 0.5 and
+    /// 4 until the file sets them. What reads them is not ported.
+    pub tunables: [F; 5],
+}
+
+/// One path of a [`TrackFile`]: a record of `0x30` bytes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TrackPath {
+    /// The flags (`+0`): the file's word with `0xc1` set.
+    pub flags: u32,
+    /// The length (`+8`): the sum of its nodes' spans, in the order they were read.
+    pub length: F,
+    /// Tag `0x18`'s word (`+0xc`).
+    pub word_0c: u32,
+    /// Its nodes, in order (the list at `+0x10`, last `+0x14`).
+    pub nodes: Vec<PathNode>,
+    /// The paths it leads on to (`+0x2c`, count `+0x18`), or `None` if the file gave it no links.
+    pub links: Option<Vec<Link>>,
+    /// The checkpoint count the file gives (`+0x20`), and its checkpoints (the list at `+0x24`).
+    pub checkpoint_count: i32,
+    pub checkpoints: Vec<Checkpoint>,
+}
+
+/// One node of a path: a record of `0x60` bytes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PathNode {
+    /// Its id (`+0`).
+    pub id: i32,
+    /// Tag `0x17`'s word (`+4`).
+    pub word_04: u32,
+    /// Its three points (`+0x10`, `+0x20`, `+0x30`; tags 9, `0xa`, `0xb`), `w` 0. The first is the
+    /// path's own line.
+    pub points: [Vf; 3],
+    /// The flat (xz) distance from its first point to the next node's (`+0x40`), 0 on the last.
+    pub span: F,
+    /// Tags `0x12`, `0x1a`, `0x1b` (`+0x44`, `+0x48`, `+0x4c`); the first is −1 until set.
+    pub word_44: u32,
+    pub word_48: u32,
+    pub word_4c: u32,
+}
+
+/// Where a path's link leads once the file is read: a path by its index (whose slot may be empty), or
+/// the number as the file wrote it when that is no index (only the path count itself passes the
+/// reader's check).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Link {
+    Path(usize),
+    Raw(i32),
+}
+
+/// One checkpoint of a path: a record of `0x24` bytes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Checkpoint {
+    /// Its id (`+0`).
+    pub id: i32,
+    /// Tags `0x21`, `0x20`, `0x1e`, `0x1f` (`+4`, `+8`, `+0xc`, `+0x10`).
+    pub word_04: u32,
+    pub word_08: u32,
+    pub word_0c: u32,
+    pub word_10: u32,
+    /// Its parts, in order (the list at `+0x14`, last `+0x18`).
+    pub parts: Vec<CheckPart>,
+}
+
+/// One part of a checkpoint: a record of `0x40` bytes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CheckPart {
+    /// Tag `0x23`'s word (`+4`).
+    pub word_04: u32,
+    /// Its point (`+0x10`, tag `0x24`), `w` 0.
+    pub point: Vf,
+    /// The flat distance from its point to the next part's (`+0x20`), 0 on the last.
+    pub span: F,
+    /// Tags `0x25`, `0x26` (`+0x24`, `+0x28`).
+    pub word_24: u32,
+    pub word_28: u32,
+}
+
+/// Why [`TrackFile::parse`] gave up. The ones the original answers by failing the load say so; the
+/// others are files on which the original reads or writes memory it never allocated, which the port
+/// does not imitate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refused {
+    /// The original fails the load (a count below 1, a path index out of range, a path record with no
+    /// path, a negative count, a link out of range).
+    Fails,
+    /// A record before the one it hangs off: a path record before any path, a checkpoint before any
+    /// path, a part's point in a checkpoint with no parts, no path count at all.
+    Stray,
+    /// A record running past the end of the file.
+    Truncated,
+    /// A link at the index one past the path's links, which the original's check lets through and
+    /// writes past the end of the array.
+    PastLinks,
+}
+
+/// Where the next record of a list is hooked in: the list's head, or the last record's next.
+#[derive(Clone, Copy)]
+enum Hook {
+    None,
+    Head(usize),
+    After(usize),
+}
+
+struct Record {
+    rec: Checkpoint,
+    next: Option<usize>,
+    parts: Option<usize>,
+    last_part: Option<usize>,
+}
+
+struct Part {
+    part: CheckPart,
+    next: Option<usize>,
+    before: Option<usize>,
+}
+
+struct PathRec {
+    path: TrackPath,
+    checkpoints: Option<usize>,
+}
+
+struct Words<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
+
+impl Words<'_> {
+    fn word(&mut self) -> Result<u32, Refused> {
+        let w = self.bytes.get(self.at..self.at + 4).ok_or(Refused::Truncated)?;
+        self.at += 4;
+        Ok(u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+    }
+    fn f(&mut self) -> Result<F, Refused> {
+        Ok(F(f32::from_bits(self.word()?)))
+    }
+}
+
+/// The flat length of `a − b`: a VU subtract, then `mula` x, `madd` z and a square root.
+fn flat_span(a: Vf, b: Vf) -> F {
+    let d = a.sub(b);
+    F(fpu::sqrt(fpu::madd(fpu::mula(d.x(), d.x()), d.z(), d.z())))
+}
+
+impl TrackFile {
+    /// The track object as its constructor leaves it, before a file is read.
+    pub fn new() -> TrackFile {
+        TrackFile {
+            offset_x: F::ZERO,
+            offset_z: F::ZERO,
+            scale: F::ONE,
+            word_34: 0,
+            paths: Vec::new(),
+            nodes_made: 0,
+            checkpoints_made: 0,
+            grid: None,
+            line: None,
+            third: None,
+            tunables: [F(100.0), F(0.9), F(1.5), F(0.5), F(4.0)],
+        }
+    }
+
+    /// A point as the reader stores it: `offset + raw × scale` on x and z, `raw × scale` on y.
+    fn place(&self, x: F, y: F, z: F) -> [F; 3] {
+        let s = self.scale.0;
+        [
+            F(fpu::add(self.offset_x.0, fpu::mul(x.0, s))),
+            F(fpu::mul(y.0, s)),
+            F(fpu::add(self.offset_z.0, fpu::mul(z.0, s))),
+        ]
+    }
+
+    fn point(&self, w: &mut Words) -> Result<Vf, Refused> {
+        let (x, y, z) = (w.f()?, w.f()?, w.f()?);
+        let [x, y, z] = self.place(x, y, z);
+        Ok(Vf([x.0, y.0, z.0, 0.0]))
+    }
+
+    /// A gate record: centre, normal and across, three words each, and the width.
+    fn gate(&self, w: &mut Words) -> Result<Gate, Refused> {
+        let mut v = [F::ZERO; 10];
+        for x in v.iter_mut() {
+            *x = w.f()?;
+        }
+        let mut g = Gate::new();
+        g.normal = Vf([v[3].0, v[4].0, v[5].0, 1.0]);
+        g.across = crate::air::normalize(Vf([v[6].0, v[7].0, v[8].0, 1.0]));
+        g.width = F(fpu::mul(v[9].0, self.scale.0));
+        let [x, y, z] = self.place(v[0], v[1], v[2]);
+        g.centre = Vf([x.0, y.0, z.0, 1.0]);
+        g.flags = 3;
+        Ok(g)
+    }
+
+    /// Read a race file, record by record, as the track object's loader does.
+    ///
+    /// The reader stops when a tag byte is the file's last: a record with no words there is never
+    /// taken. Unknown tags are skipped (their byte only). Reading a path's index again makes a new,
+    /// empty path in its slot; reading the path count again empties every slot. Once the records are
+    /// read, each link that names a path index is turned into that path, and every gate is made 150
+    /// high.
+    pub fn parse(bytes: &[u8]) -> Result<TrackFile, Refused> {
+        let mut t = TrackFile::new();
+        let mut w = Words { bytes, at: 0 };
+        // The path records, the slots naming them, and the current one.
+        let mut paths: Vec<PathRec> = Vec::new();
+        let mut slots: Option<Vec<Option<usize>>> = None;
+        let mut cur: Option<usize> = None;
+        let mut records: Vec<Record> = Vec::new();
+        let mut parts: Vec<Part> = Vec::new();
+        let mut record_hook = Hook::None;
+        let mut part_hook = Hook::None;
+        let mut record: Option<usize> = None;
+        let mut part: Option<usize> = None;
+        let mut link_count = 0i32;
+        loop {
+            let Some(&tag) = bytes.get(w.at) else { break };
+            w.at += 1;
+            if w.at >= bytes.len() {
+                break;
+            }
+            let count = slots.as_ref().map_or(0, |s| s.len() as i32);
+            match tag {
+                0x01 => {
+                    let n = w.word()? as i32;
+                    if n < 1 {
+                        return Err(Refused::Fails);
+                    }
+                    slots = Some(vec![None; n as usize]);
+                }
+                0x02 => t.offset_x = w.f()?,
+                0x03 => t.offset_z = w.f()?,
+                0x04 => t.scale = w.f()?,
+                0x29 => t.word_34 = w.word()?,
+                0x05 => {
+                    let k = w.word()? as i32;
+                    if k < 0 || k >= count {
+                        return Err(Refused::Fails);
+                    }
+                    paths.push(PathRec {
+                        path: TrackPath {
+                            flags: 0,
+                            length: F::ZERO,
+                            word_0c: 0,
+                            nodes: Vec::new(),
+                            links: None,
+                            checkpoint_count: 0,
+                            checkpoints: Vec::new(),
+                        },
+                        checkpoints: None,
+                    });
+                    let p = paths.len() - 1;
+                    slots.as_mut().expect("a count")[k as usize] = Some(p);
+                    cur = Some(p);
+                    record_hook = Hook::Head(p);
+                }
+                0x06 | 0x07 | 0x18 | 0x08 | 0x0d | 0x1c => {
+                    let p = cur.ok_or(Refused::Stray)?;
+                    let path = &mut paths[p].path;
+                    match tag {
+                        0x06 => path.flags = w.word()? | 0xc1,
+                        0x07 => {
+                            w.word()?;
+                        }
+                        0x18 => path.word_0c = w.word()?,
+                        0x08 => {
+                            path.nodes.push(PathNode {
+                                id: t.nodes_made,
+                                word_04: 0,
+                                points: [Vf::ZERO; 3],
+                                span: F::ZERO,
+                                word_44: 0xbf80_0000,
+                                word_48: 0,
+                                word_4c: 0,
+                            });
+                            t.nodes_made = t.nodes_made.wrapping_add(1);
+                        }
+                        0x0d => {
+                            let n = w.word()? as i32;
+                            if n < 0 {
+                                return Err(Refused::Fails);
+                            }
+                            path.links = Some(vec![Link::Raw(0); n as usize]);
+                            link_count = n;
+                        }
+                        _ => {
+                            path.checkpoint_count = w.word()? as i32;
+                            record_hook = Hook::Head(p);
+                            if path.checkpoint_count < 0 {
+                                return Err(Refused::Fails);
+                            }
+                        }
+                    }
+                }
+                0x17 | 0x09 | 0x0a | 0x0b | 0x12 | 0x1a | 0x1b => {
+                    let p = cur.ok_or(Refused::Stray)?;
+                    if paths[p].path.nodes.is_empty() {
+                        return Err(Refused::Fails);
+                    }
+                    let value = match tag {
+                        0x09 | 0x0a | 0x0b => None,
+                        _ => Some(w.word()?),
+                    };
+                    let point = match tag {
+                        0x09 | 0x0a | 0x0b => Some(t.point(&mut w)?),
+                        _ => None,
+                    };
+                    let path = &mut paths[p].path;
+                    let last = path.nodes.len() - 1;
+                    let node = &mut path.nodes[last];
+                    match (tag, value, point) {
+                        (0x17, Some(v), _) => node.word_04 = v,
+                        (0x12, Some(v), _) => node.word_44 = v,
+                        (0x1a, Some(v), _) => node.word_48 = v,
+                        (0x1b, Some(v), _) => node.word_4c = v,
+                        (0x0a, _, Some(at)) => node.points[1] = at,
+                        (0x0b, _, Some(at)) => node.points[2] = at,
+                        (_, _, Some(at)) => {
+                            node.points[0] = at;
+                            if last > 0 {
+                                let span = flat_span(at, path.nodes[last - 1].points[0]);
+                                path.nodes[last - 1].span = span;
+                                path.length = F(fpu::add(path.length.0, span.0));
+                            }
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                0x0c => {
+                    w.word()?;
+                }
+                0x1d => {
+                    records.push(Record {
+                        rec: Checkpoint {
+                            id: t.checkpoints_made,
+                            word_04: 0,
+                            word_08: 0,
+                            word_0c: 0,
+                            word_10: 0,
+                            parts: Vec::new(),
+                        },
+                        next: None,
+                        parts: None,
+                        last_part: None,
+                    });
+                    let r = records.len() - 1;
+                    t.checkpoints_made = t.checkpoints_made.wrapping_add(1);
+                    match record_hook {
+                        Hook::None => return Err(Refused::Stray),
+                        Hook::Head(p) => paths[p].checkpoints = Some(r),
+                        Hook::After(q) => records[q].next = Some(r),
+                    }
+                    record_hook = Hook::After(r);
+                    part_hook = Hook::Head(r);
+                    record = Some(r);
+                }
+                0x21 | 0x1e | 0x1f | 0x20 => {
+                    let r = record.ok_or(Refused::Fails)?;
+                    let v = w.word()?;
+                    let rec = &mut records[r].rec;
+                    match tag {
+                        0x21 => rec.word_04 = v,
+                        0x1e => rec.word_0c = v,
+                        0x1f => rec.word_10 = v,
+                        _ => rec.word_08 = v,
+                    }
+                }
+                0x22 => {
+                    let r = record.ok_or(Refused::Fails)?;
+                    parts.push(Part {
+                        part: CheckPart { word_04: 0, point: Vf::ZERO, span: F::ZERO, word_24: 0, word_28: 0 },
+                        next: None,
+                        before: records[r].last_part,
+                    });
+                    let s = parts.len() - 1;
+                    match part_hook {
+                        Hook::None => return Err(Refused::Stray),
+                        Hook::Head(q) => records[q].parts = Some(s),
+                        Hook::After(q) => parts[q].next = Some(s),
+                    }
+                    part_hook = Hook::After(s);
+                    records[r].last_part = Some(s);
+                    part = Some(s);
+                }
+                0x23 | 0x25 | 0x26 => {
+                    let s = part.ok_or(Refused::Fails)?;
+                    let v = w.word()?;
+                    let it = &mut parts[s].part;
+                    match tag {
+                        0x23 => it.word_04 = v,
+                        0x25 => it.word_24 = v,
+                        _ => it.word_28 = v,
+                    }
+                }
+                0x24 => {
+                    let (Some(s), Some(r)) = (part, record) else { return Err(Refused::Fails) };
+                    parts[s].part.point = t.point(&mut w)?;
+                    let last = records[r].last_part.ok_or(Refused::Stray)?;
+                    if let Some(before) = parts[last].before {
+                        parts[before].part.span = flat_span(parts[last].part.point, parts[before].part.point);
+                    }
+                }
+                0x0e => {
+                    let p = cur.ok_or(Refused::Stray)?;
+                    if paths[p].path.links.is_none() {
+                        return Err(Refused::Fails);
+                    }
+                    let (c, v) = (w.word()? as i32, w.word()? as i32);
+                    if c < 0 || link_count < c || v < 0 || count < v {
+                        return Err(Refused::Fails);
+                    }
+                    let links = paths[p].path.links.as_mut().expect("links");
+                    match links.get_mut(c as usize) {
+                        Some(l) => *l = Link::Raw(v),
+                        None => return Err(Refused::PastLinks),
+                    }
+                }
+                0x0f => t.grid = Some(t.gate(&mut w)?),
+                0x10 => t.line = Some(t.gate(&mut w)?),
+                0x19 => t.third = Some(t.gate(&mut w)?),
+                0x13 => t.tunables[0] = w.f()?,
+                0x14 => t.tunables[1] = w.f()?,
+                0x15 => t.tunables[2] = w.f()?,
+                0x16 => t.tunables[3] = w.f()?,
+                0x28 => t.tunables[4] = w.f()?,
+                _ => {}
+            }
+        }
+        let slots = slots.ok_or(Refused::Stray)?;
+        let count = slots.len() as i32;
+        let mut out: Vec<Option<TrackPath>> = Vec::with_capacity(slots.len());
+        for slot in &slots {
+            out.push(slot.map(|p| {
+                let mut path = paths[p].path.clone();
+                if let Some(links) = path.links.as_mut() {
+                    for l in links.iter_mut() {
+                        if let Link::Raw(v) = *l {
+                            if (0..count).contains(&v) {
+                                *l = Link::Path(v as usize);
+                            }
+                        }
+                    }
+                }
+                let mut r = paths[p].checkpoints;
+                while let Some(k) = r {
+                    let mut rec = records[k].rec.clone();
+                    let mut s = records[k].parts;
+                    while let Some(j) = s {
+                        rec.parts.push(parts[j].part.clone());
+                        s = parts[j].next;
+                    }
+                    path.checkpoints.push(rec);
+                    r = records[k].next;
+                }
+                path
+            }));
+        }
+        t.paths = out;
+        for g in [&mut t.grid, &mut t.line, &mut t.third].into_iter().flatten() {
+            g.height = F(150.0);
+        }
+        Ok(t)
+    }
+}
+
+impl Default for TrackFile {
+    fn default() -> TrackFile {
+        TrackFile::new()
+    }
+}
+
+/// A prop of the track's scene the supercross loader stands a gate on (the drop gate, the finish
+/// gate): its frame's across and look rows and its position (`+0x80`, `+0xa0`, `+0xb0`), and its
+/// model's bound — half its width, and its height.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Prop {
+    pub across: Vf,
+    pub look: Vf,
+    pub at: Vf,
+    pub half_width: F,
+    pub height: F,
+}
+
+/// The world's up, as the grid gate's normal is crossed with it.
+const UP: Vf = Vf([0.0, 1.0, 0.0, 1.0]);
+
+/// `a × b`, keeping `a`'s `w`: the `vopmula`/`vopmsub` pair writes only `xyz` of the register that
+/// held `a`.
+fn cross(a: Vf, b: Vf) -> Vf {
+    a.merge(Dest::XYZ, crate::air::cross(a, b))
+}
+
+impl Supercross {
+    /// The supercross loader's gates off the drop-gate prop: the track's grid gate (when the file had
+    /// one) stood in it, facing `across × up`; and the start gate, flagged `0x02`, 1000 high, facing
+    /// the prop's look and set back 4.5 behind it. Both are the prop's width (twice its half width).
+    pub fn place_drop_gate(drop: &Prop, grid: Option<&mut Gate>, start: &mut Gate) {
+        let width = F(fpu::mul(2.0, drop.half_width.0));
+        if let Some(g) = grid {
+            g.centre = drop.at;
+            g.width = width;
+            g.height = drop.height;
+            g.across = drop.across;
+            g.normal = cross(drop.across, UP);
+        }
+        start.flags |= 0x02;
+        start.centre = start.centre.merge(Dest::XYZ, drop.at);
+        start.width = width;
+        start.height = F(1000.0);
+        start.across = start.across.merge(Dest::XYZ, drop.across);
+        start.normal = start.normal.merge(Dest::XYZ, drop.look);
+        let back = start.normal.mul_q(4.5);
+        start.centre = start.centre.merge(Dest::XYZ, start.centre.sub(back));
+    }
+
+    /// The finish line off the finish-gate prop: stood at the prop, its width and height, across it,
+    /// and facing the way the riders go there — `ahead` (the track's path direction at the line's
+    /// spot, which the caller finds from the line's new centre) made square to the across direction:
+    /// `normalize(across × (ahead × across))`.
+    pub fn place_finish_line(finish: &Prop, ahead: Vf, line: &mut Gate) {
+        line.centre = line.centre.merge(Dest::XYZ, finish.at);
+        line.width = F(fpu::mul(2.0, finish.half_width.0));
+        line.height = finish.height;
+        line.across = line.across.merge(Dest::XYZ, finish.across);
+        let side = cross(ahead, line.across);
+        line.normal = crate::air::normalize(cross(line.across, side));
+    }
+}
