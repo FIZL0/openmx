@@ -7,19 +7,27 @@ import android.content.pm.PackageInstaller;
 import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.CombinedVibration;
 import android.os.ParcelFileDescriptor;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
+import android.os.VibratorManager;
+import android.view.InputDevice;
 import android.view.View;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
+import android.window.OnBackInvokedCallback;
+import android.window.OnBackInvokedDispatcher;
 import java.io.FileInputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /** openMX's NativeActivity (P308, `tools/apk.sh`), opentennis's HstActivity but for its restart (the disc is copied
  *  in and the game goes on in the same window): what the native side can't do on its own, the system's file picker
- *  for the disc image (M99), Wi-Fi's multicast for the LAN's lobbies (B455) and the updater's install (M140). Called
- *  from `crates/openmx-android/src/sys.rs`. */
+ *  for the disc image (M99), Wi-Fi's multicast for the LAN's lobbies (B455), the updater's install (M140), and the
+ *  back button and the vibrators (P311). Called from `crates/openmx-android/src/sys.rs`. */
 public class MxActivity extends NativeActivity {
     private static final int PICK = 1;
     /** The picked document's file descriptor (the native side owns it), -1 when the picker was cancelled, -2 when
@@ -32,6 +40,8 @@ public class MxActivity extends NativeActivity {
     private volatile int installStatus = -99;
     /** M140: the action of the installer's answer, which comes back to this activity (singleTop: `onNewIntent`). */
     private static final String INSTALLED = "io.github.fizl0.openmx.INSTALLED";
+    /** P311: the back presses the native side hasn't taken yet (`backs`). */
+    private final AtomicInteger backs = new AtomicInteger();
 
     /** M106: the window reaches under the camera cutout on every Android, as it must from Android 15 on; the game keeps
      *  its picture inside the safe area itself (`sys.rs` `safe_area`, `android_gpu.rs`). */
@@ -46,6 +56,17 @@ public class MxActivity extends NativeActivity {
         }
         super.onCreate(state);
         immersive();
+        // P311: from Android 13 the system takes the back key for its gesture (the manifest's
+        // enableOnBackInvokedCallback; Android 16 does so for every app targeting it) and sends the window no key event:
+        // the game reads the presses here, as Circle/Back, the pause in a ride. Before 13 the key comes to the window.
+        if (Build.VERSION.SDK_INT >= 33) {
+            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+                new OnBackInvokedCallback() {
+                    public void onBackInvoked() {
+                        backs.incrementAndGet();
+                    }
+                });
+        }
         try {
             WifiManager w = (WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE);
             if (w != null) {
@@ -209,5 +230,45 @@ public class MxActivity extends NativeActivity {
     @SuppressWarnings("deprecation")
     private static Intent intentBefore33(Intent i) {
         return i.getParcelableExtra(Intent.EXTRA_INTENT);
+    }
+
+    /** P311: the back presses since the last call. */
+    public int backs() {
+        return backs.getAndSet(0);
+    }
+
+    /** P311: `device`'s vibrator (an input device's id; -1 the phone's own) at `level` of 255 for `millis` ms, every
+     *  motor of a controller at once; level 0 stops it. A vibrator with no amplitude control runs at its one strength. */
+    public void vibrate(int device, int level, int millis) {
+        try {
+            VibrationEffect effect = level > 0 && millis > 0 ? VibrationEffect.createOneShot(millis, Math.min(level, 255)) : null;
+            if (Build.VERSION.SDK_INT >= 31) {
+                VibratorManager m;
+                if (device < 0) {
+                    m = (VibratorManager) getSystemService(VIBRATOR_MANAGER_SERVICE);
+                } else {
+                    InputDevice d = InputDevice.getDevice(device);
+                    m = d == null ? null : d.getVibratorManager();
+                }
+                if (m == null || m.getVibratorIds().length == 0) return;
+                if (effect == null) m.cancel();
+                else m.vibrate(CombinedVibration.createParallel(effect));
+                return;
+            }
+            Vibrator v = vibratorBefore31(device);
+            if (v == null || !v.hasVibrator()) return;
+            if (effect == null) v.cancel();
+            else v.vibrate(effect);
+        } catch (Exception e) {
+            // a controller unplugged mid-ask, or no VIBRATE permission: nothing shakes
+        }
+    }
+
+    /** `vibrate`'s vibrator before Android 12, whose only ways to ask are the calls 12 deprecated. */
+    @SuppressWarnings("deprecation")
+    private Vibrator vibratorBefore31(int device) {
+        if (device < 0) return (Vibrator) getSystemService(VIBRATOR_SERVICE);
+        InputDevice d = InputDevice.getDevice(device);
+        return d == null ? null : d.getVibrator();
     }
 }

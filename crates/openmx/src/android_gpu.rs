@@ -13,6 +13,11 @@
 //! inside the camera cutout's inset ([`kept_insets`]), the views and the menus' walls running on to
 //! the window's edges ([`phone_frame`]), and the touch pad ([`crate::android::TOUCH`]) over the
 //! whole window.
+//!
+//! The phone's back button is the keyboard's Escape (P311), which the shell reads as Circle/Back in
+//! the menus and the pause in a ride: a tap of [`crate::window::key::ESCAPE`] for the poll that saw
+//! it, from the key event before Android 13 and `MxActivity`'s back callback from 13 on (an Android
+//! 16 sends both for one press).
 
 use crate::android::TOUCH;
 use crate::aspect::{kept_insets, phone_frame, stretched};
@@ -65,6 +70,9 @@ struct State {
     closed: bool,
     /// The menus' clicks, in window pixels.
     clicks: Vec<(i32, i32)>,
+    /// The back key's presses since the last poll (P311): what is read before Android 13, and sent
+    /// besides the back callback by 16.
+    backs: u32,
     started: Instant,
 }
 
@@ -134,6 +142,13 @@ impl ApplicationHandler for State {
                 let now = self.started.elapsed().as_secs_f32();
                 TOUCH.lock().unwrap_or_else(|e| e.into_inner()).touch(touch, now, &mut self.clicks);
             }
+            WindowEvent::KeyboardInput { event, .. }
+                if event.state.is_pressed()
+                    && !event.repeat
+                    && event.logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::BrowserBack) =>
+            {
+                self.backs += 1;
+            }
             _ => {}
         }
     }
@@ -172,6 +187,7 @@ fn host() -> Result<Host, String> {
         resized: false,
         closed: false,
         clicks: Vec::new(),
+        backs: 0,
         started: Instant::now(),
     };
     Ok(Host { events, state })
@@ -203,6 +219,8 @@ pub struct GpuWindow {
     resized: bool,
     closed: bool,
     clicks: Vec<(i32, i32)>,
+    /// The phone's back button was pressed in the last poll (P311): Escape tapped.
+    back: bool,
     /// The touch pad's sprites and their type, made at its first drawing.
     layer: Option<Layer>,
     /// Since when the frame loop has rested with no window, for the log.
@@ -313,6 +331,7 @@ impl GpuWindow {
             resized: false,
             closed: false,
             clicks: Vec::new(),
+            back: false,
             layer: None,
             resting: None,
         };
@@ -350,9 +369,12 @@ impl GpuWindow {
         }
         let (size, resized, closed) = (host.state.size, std::mem::take(&mut host.state.resized), host.state.closed);
         let clicks = std::mem::take(&mut host.state.clicks);
+        let keys = std::mem::take(&mut host.state.backs);
+        let mut called = 0;
         let now = Instant::now();
         if now >= self.next_look && in_front() {
             self.next_look = now + LOOK;
+            called = openmx_android::backs();
             if let Some(insets) = openmx_android::safe_area()
                 && insets != self.insets
             {
@@ -366,6 +388,11 @@ impl GpuWindow {
         self.stretch = stretch;
         self.size = size;
         self.closed = closed;
+        let by_callback = openmx_android::back_by_callback();
+        self.back = if by_callback { called > 0 } else { keys > 0 };
+        if keys + called > 0 {
+            println!("android: back: {keys} key, {called} callback; read from the {}", if by_callback { "callback" } else { "key" });
+        }
         self.safe = kept_insets(self.insets, stretch);
         let [l, t, r, b] = self.safe;
         self.clicks = clicks.into_iter().map(|(x, y)| (x - l as i32, y - t as i32)).collect();
@@ -409,8 +436,9 @@ impl GpuWindow {
         &[]
     }
 
-    pub fn tapped(&self, _code: u8) -> bool {
-        false
+    /// Only Escape, the phone's back button (P311), in the poll that saw it.
+    pub fn tapped(&self, code: u8) -> bool {
+        code == crate::window::key::ESCAPE && self.back
     }
 
     pub fn resized(&mut self) -> bool {

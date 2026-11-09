@@ -3148,6 +3148,16 @@ impl Front {
         }
     }
 
+    /// Write the settings whether or not the menu changed them (P311): the app going away, which a
+    /// phone may end in the background without a word. A change not yet taken stays marked, for the
+    /// frame that applies it.
+    fn save_now(&mut self) {
+        match menu::save(&self.dir, &self.menu.settings, &self.menu.controls) {
+            Ok(()) => println!("settings: saved in {} (away)", self.dir.display()),
+            Err(e) => println!("settings: {e}"),
+        }
+    }
+
     /// Write the settings when the menu changed them, saying so if it could not.
     fn save(&mut self) {
         if self.menu.take_changed() {
@@ -3593,6 +3603,7 @@ async fn front_end(args: Args) -> Result<(), String> {
                 (shown_look, menu_images) = (None, false);
                 garage.uploaded = false;
             }
+            shell.front.save_now();
             away::answered(asked);
             println!("away: on {:?}", shell.front.menu.screen());
         }
@@ -4189,6 +4200,7 @@ async fn loading_frame(
     }
     // P298: away while a ride loads: nothing to pause yet.
     if let Some(asked) = away::away() {
+        front.save_now();
         away::answered(asked);
     }
     window.show_cursor(cursor::shown(cursor::Showing::Front, window.focused()));
@@ -7588,6 +7600,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 if !f.menu.paused(0) {
                     f.menu.pause();
                 }
+                f.save_now();
                 // On its way to being suspended (P298a: a 5.2 GiB ride was jetsam's first pick), the
                 // ride's models and their textures go back before the answer lets iOS suspend it.
                 // The window draws nothing till it is in front again, and that frame, under the
@@ -10415,7 +10428,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             perf.add(Stage::Draw, draw_at.elapsed().saturating_sub(waited));
             perf.add(Stage::Present, waited);
             frame_waited = waited;
-            if let Some(front) = front.as_deref_mut().filter(|f| tuning && f.menu.settings.video_auto) {
+            // P311: an app in the background still draws, slowly: not the device's pace.
+            if away::gone() {
+                tune_at = None;
+            } else if let Some(front) = front.as_deref_mut().filter(|f| tuning && f.menu.settings.video_auto) {
                 let now = Instant::now();
                 let dt = tune_at.map_or(0.0, |t| now.duration_since(t).as_secs_f32());
                 tune_at = Some(now);

@@ -111,8 +111,11 @@ cat >"$out/AndroidManifest.xml" <<'EOF'
   <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
   <!-- opentennis's M140: the in-app update hands the new .apk to the system's installer (MxActivity.install) -->
   <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
+  <!-- P311: a wreck's rumble through the controller's or the phone's vibrator (MxActivity.vibrate) -->
+  <uses-permission android:name="android.permission.VIBRATE"/>
   <application android:label="openMX" android:icon="@mipmap/ic_launcher"
       android:roundIcon="@mipmap/ic_launcher_round" android:networkSecurityConfig="@xml/network_security_config" android:hasCode="true" android:extractNativeLibs="false"
+      android:enableOnBackInvokedCallback="true"
       android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
     <activity android:name="io.github.fizl0.openmx.MxActivity" android:exported="true" android:screenOrientation="sensorLandscape" android:launchMode="singleTop"
         android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|navigation|uiMode"
