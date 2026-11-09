@@ -761,10 +761,49 @@ hit_freeride_attach         boot 0x00330630 the vtable's per-actor attach (vtabl
 # carry addresses; kit.toml's [symbols] is untracked, so this file is the only committed record.
 activity_supercross         boot 0x002f9b70 the "Supercross" / "Nationals" activity class, 0x4e0 bytes
 #                                           (ctor; vtable 0x004585d0 at +0x44, 0x0045861c at +0x58,
-#                                           0x00458690 at +0x17c, 0x00458784 at +0x3a0). Its own
-#                                           slots in the first: 0x002f7f30, 0x002f8070, 0x002f80a0,
-#                                           0x002fb2e0 (1716 bytes; calls the race reset 0x002fd570),
-#                                           0x002fa520 (1256)
+#                                           0x00458690 at +0x17c, 0x00458784 at +0x3a0). S13a: of the
+#                                           first vtable's slots only 2 (dtor 0x002f9d10), 14 (reset)
+#                                           and 16 (grid) are its own; 0x002f7f30, 0x002f8070 and
+#                                           0x002f80a0 are the base class's (base ctor 0x002f7da0,
+#                                           base vtable 0x00458240, base reset 0x002f8110 = thunk of
+#                                           0x00282400). Ctor sets +0x110 = 0.1, +0x128 = 1, +0x4b0..
+#                                           +0x4bc = 0/0.1/4/4.1, +0x4d8 = 1, the rest 0; arrays at
+#                                           +0x3e0 (the lines), +0x3f8, +0x438 (track intros, items
+#                                           +0x440), +0x47c (start calls, items +0x484), +0x494 (their
+#                                           GateDropTime floats, items +0x49c). The loader 0x002f9f40
+#                                           writes the lane table +0x3bc..+0x3d8 = k*0.19 - 0.871
+#                                           (globals 0x00421148, 0x00421150). Per-card lanes +0x418
+#                                           (by card id, card +0); score cards are the list at +0x84
+#                                           (next card +0x1c8, count +0x8c), card +4 the entity, card
+#                                           +0x2c the place. The start timeline (unanalysed code at
+#                                           0x002fb9b0, time in f13): lights in [+0x4b0, +0x4b4), the
+#                                           start call (0x002fd7d0) and +0x110 = -1 in [+0x4b0+1.5,
+#                                           +0x4b4+1.5), warning lights in [+0x4b8, +0x4bc).
+#                                           +0x10c is the base's RaceStartDelay (0x002f8160 reads it).
+#                                           Ported: race::Supercross, tests/race.rs
+activity_supercross_vtable  boot 0x004585d0 the supercross activity's first vtable (at +0x44)
+activity_supercross_reset   boot 0x002fb2e0 (activity) its reset slot (vtable slot 14): base reset,
+#                                           presentation objects +0x3a8/+0x3ac reset, the race reset
+#                                           0x002fd570 (vt+0x7c on every line), +0x110 = 0.1, start
+#                                           gate +0x3dc flag |= 1, start call pick (rand, step past
+#                                           +0x4ac), +0x10c = drop + 1.5, +0x4b0 = 0, +0x4b4 = 0.1,
+#                                           +0x4b8 = drop - 1.5, +0x4bc = 0.1 + that; +0x4c4 == 0 ->
+#                                           0x002fd800 (intro pick over +0x438 stepping past +0x478,
+#                                           all four times and +0x10c + 6, +0x4c8 = 0); +0x4c0 = 0;
+#                                           HUD calls; +0x410/+0x470/+0x474 = 0, +0x4cc = 1, +0x4d0/
+#                                           +0x4d4 = 0. Supercross::reset
+activity_supercross_grid    boot 0x002fa520 (activity) its grid slot (vtable slot 16): +0x418 lanes =
+#                                           identity then, AllAI off, count passes of neighbour swaps
+#                                           on unit < 0.5; vehicles/riders of list +0x14 reset
+#                                           (0x0027d670, 0x00319270 with 0); each card with an entity
+#                                           placed 8 ft behind the grid gate (+0xb8 -> +0x58) on its
+#                                           lane, ground_query, entity vt+0x8c (pos, facing), vt+0x88;
+#                                           then the base grid 0x002f8120, the starting places
+#                                           0x002faa10 (card +0x2c = lane + 1), the overlays.
+#                                           Supercross::shuffle_lanes / grid_spot / starting_place
+activity_grid_base          boot 0x002f8120 the base activity's grid slot (vtable slot 16)
+race_overlays_bind          boot 0x002fb050 the supercross activity's HUD overlay binding, after its grid
+interface_id                boot 0x00281d60 (registry, name, out id) -> looks an interface's id up by name
 race_manager_tick           boot 0x002fcff0 (dt f12, race) the race manager's tick (vtable 0x004587a4):
 #                                           the +0x4c0 countdown, the start gate watch (gate +0x3dc,
 #                                           cards on +0x84 / +0x1c8, entities on card +4 / +0x1c,
