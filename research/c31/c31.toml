@@ -1,0 +1,777 @@
+# c31.toml -- written by research/c31/spec.py; do not edit by hand.
+# C31: an sx01 single race, every score card per tick (research/c31/README.md).
+
+[watch]
+name        = "c31-sx01-laps"
+description = "sx01 single race, 4 AI-ridden riders: the score manager and every card per tick"
+every       = 1
+frames      = 12000
+start       = "in_game == 1"
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "frame_counter"
+addr = "@frame_counter"
+type = "u32"
+
+[[field]]
+name = "dt"
+addr = "@frame_dt"
+type = "f32"
+
+[[field]]
+name = "rng_state"
+addr = "@rand_state"
+type = "u64"
+
+[[field]]
+name = "in_game"
+addr = "0x004e2650"
+type = "u32"
+
+[[field]]
+name = "mgr_flags"
+addr = "@activity_manager -> 0x58 -> 0x0 -> 0xac"
+type = "u32"
+
+[[field]]
+name = "mgr_kind"
+addr = "@activity_manager -> 0x58 -> 0x0 -> 0xb0"
+type = "s32"
+
+[[field]]
+name = "mgr_handler"
+addr = "@activity_manager -> 0x58 -> 0x0 -> 0xb4"
+type = "s32"
+
+[[field]]
+name = "mgr_laps"
+addr = "@activity_manager -> 0x58 -> 0x0 -> 0xe4"
+type = "s32"
+
+[[field]]
+name = "mgr_b8"
+addr = "@activity_manager -> 0x58 -> 0x0 -> 0x108"
+type = "f32"
+
+[[field]]
+name = "mgr_count_len"
+addr = "@activity_manager -> 0x58 -> 0x0 -> 0x10c"
+type = "f32"
+
+[[field]]
+name = "mgr_count_elapsed"
+addr = "@activity_manager -> 0x58 -> 0x0 -> 0x114"
+type = "f32"
+
+[[field]]
+name = "mgr_raw"
+addr = "@activity_manager -> 0x58 -> 0x0 -> 0x50"
+type = "bytes:272"
+
+[[array]]
+name  = "card0_"
+addr  = "@activity_manager -> 0x58 -> 0x0 -> 0x84"
+deref = true
+count = 1
+
+[[array.field]]
+name = "id"
+off  = 0x0
+type = "s32"
+
+[[array.field]]
+name = "flags"
+off  = 0x8
+type = "u64"
+
+[[array.field]]
+name = "to_line_kept"
+off  = 0x10
+type = "f32"
+
+[[array.field]]
+name = "to_line"
+off  = 0x14
+type = "f32"
+
+[[array.field]]
+name = "path_to"
+off  = 0x18
+type = "f32"
+
+[[array.field]]
+name = "progress"
+off  = 0x1c
+type = "f32"
+
+[[array.field]]
+name = "travelled"
+off  = 0x20
+type = "f32"
+
+[[array.field]]
+name = "laps_length"
+off  = 0x24
+type = "f32"
+
+[[array.field]]
+name = "lap_length"
+off  = 0x28
+type = "f32"
+
+[[array.field]]
+name = "place"
+off  = 0x2c
+type = "s32"
+
+[[array.field]]
+name = "laps"
+off  = 0x30
+type = "s32"
+
+[[array.field]]
+name = "runs"
+off  = 0x34
+type = "s32"
+
+[[array.field]]
+name = "on_track"
+off  = 0x40
+type = "s32"
+
+[[array.field]]
+name = "lap_time"
+off  = 0x48
+type = "f32"
+
+[[array.field]]
+name = "lap_start"
+off  = 0x4c
+type = "f32"
+
+[[array.field]]
+name = "best_lap"
+off  = 0x50
+type = "f32"
+
+[[array.field]]
+name = "best_lap_no"
+off  = 0x54
+type = "s32"
+
+[[array.field]]
+name = "now"
+off  = 0x60
+type = "f32x4"
+
+[[array.field]]
+name = "last"
+off  = 0x70
+type = "f32x4"
+
+[[array.field]]
+name = "spot_path"
+off  = 0x88
+type = "u32"
+
+[[array.field]]
+name = "spot_piece"
+off  = 0x8c
+type = "u32"
+
+[[array.field]]
+name = "spot_along"
+off  = 0x90
+type = "f32"
+
+[[array.field]]
+name = "kept_path"
+off  = 0x94
+type = "u32"
+
+[[array.field]]
+name = "kept_piece"
+off  = 0x98
+type = "u32"
+
+[[array.field]]
+name = "kept_along"
+off  = 0x9c
+type = "f32"
+
+[[array.field]]
+name = "race_time"
+off  = 0xb4
+type = "f32"
+
+[[array.field]]
+name = "lap_clock"
+off  = 0xb8
+type = "f32"
+
+[[array.field]]
+name = "behind"
+off  = 0xbc
+type = "f32"
+
+[[array.field]]
+name = "off_clock"
+off  = 0xc0
+type = "f32"
+
+[[array.field]]
+name = "w_c4"
+off  = 0xc4
+type = "f32"
+
+[[array.field]]
+name = "lines"
+off  = 0xe4
+type = "u32"
+
+[[array.field]]
+name = "record_word"
+off  = 0x108
+type = "u32"
+
+[[array.field]]
+name = "records"
+off  = 0x1bc
+type = "u32"
+
+[[array.field]]
+name = "raw"
+off  = 0x0
+type = "bytes:464"
+
+[[array]]
+name  = "card1_"
+addr  = "@activity_manager -> 0x58 -> 0x0 -> 0x84 -> 0x1c8"
+deref = true
+count = 1
+
+[[array.field]]
+name = "id"
+off  = 0x0
+type = "s32"
+
+[[array.field]]
+name = "flags"
+off  = 0x8
+type = "u64"
+
+[[array.field]]
+name = "to_line_kept"
+off  = 0x10
+type = "f32"
+
+[[array.field]]
+name = "to_line"
+off  = 0x14
+type = "f32"
+
+[[array.field]]
+name = "path_to"
+off  = 0x18
+type = "f32"
+
+[[array.field]]
+name = "progress"
+off  = 0x1c
+type = "f32"
+
+[[array.field]]
+name = "travelled"
+off  = 0x20
+type = "f32"
+
+[[array.field]]
+name = "laps_length"
+off  = 0x24
+type = "f32"
+
+[[array.field]]
+name = "lap_length"
+off  = 0x28
+type = "f32"
+
+[[array.field]]
+name = "place"
+off  = 0x2c
+type = "s32"
+
+[[array.field]]
+name = "laps"
+off  = 0x30
+type = "s32"
+
+[[array.field]]
+name = "runs"
+off  = 0x34
+type = "s32"
+
+[[array.field]]
+name = "on_track"
+off  = 0x40
+type = "s32"
+
+[[array.field]]
+name = "lap_time"
+off  = 0x48
+type = "f32"
+
+[[array.field]]
+name = "lap_start"
+off  = 0x4c
+type = "f32"
+
+[[array.field]]
+name = "best_lap"
+off  = 0x50
+type = "f32"
+
+[[array.field]]
+name = "best_lap_no"
+off  = 0x54
+type = "s32"
+
+[[array.field]]
+name = "now"
+off  = 0x60
+type = "f32x4"
+
+[[array.field]]
+name = "last"
+off  = 0x70
+type = "f32x4"
+
+[[array.field]]
+name = "spot_path"
+off  = 0x88
+type = "u32"
+
+[[array.field]]
+name = "spot_piece"
+off  = 0x8c
+type = "u32"
+
+[[array.field]]
+name = "spot_along"
+off  = 0x90
+type = "f32"
+
+[[array.field]]
+name = "kept_path"
+off  = 0x94
+type = "u32"
+
+[[array.field]]
+name = "kept_piece"
+off  = 0x98
+type = "u32"
+
+[[array.field]]
+name = "kept_along"
+off  = 0x9c
+type = "f32"
+
+[[array.field]]
+name = "race_time"
+off  = 0xb4
+type = "f32"
+
+[[array.field]]
+name = "lap_clock"
+off  = 0xb8
+type = "f32"
+
+[[array.field]]
+name = "behind"
+off  = 0xbc
+type = "f32"
+
+[[array.field]]
+name = "off_clock"
+off  = 0xc0
+type = "f32"
+
+[[array.field]]
+name = "w_c4"
+off  = 0xc4
+type = "f32"
+
+[[array.field]]
+name = "lines"
+off  = 0xe4
+type = "u32"
+
+[[array.field]]
+name = "record_word"
+off  = 0x108
+type = "u32"
+
+[[array.field]]
+name = "records"
+off  = 0x1bc
+type = "u32"
+
+[[array.field]]
+name = "raw"
+off  = 0x0
+type = "bytes:464"
+
+[[array]]
+name  = "card2_"
+addr  = "@activity_manager -> 0x58 -> 0x0 -> 0x84 -> 0x1c8 -> 0x1c8"
+deref = true
+count = 1
+
+[[array.field]]
+name = "id"
+off  = 0x0
+type = "s32"
+
+[[array.field]]
+name = "flags"
+off  = 0x8
+type = "u64"
+
+[[array.field]]
+name = "to_line_kept"
+off  = 0x10
+type = "f32"
+
+[[array.field]]
+name = "to_line"
+off  = 0x14
+type = "f32"
+
+[[array.field]]
+name = "path_to"
+off  = 0x18
+type = "f32"
+
+[[array.field]]
+name = "progress"
+off  = 0x1c
+type = "f32"
+
+[[array.field]]
+name = "travelled"
+off  = 0x20
+type = "f32"
+
+[[array.field]]
+name = "laps_length"
+off  = 0x24
+type = "f32"
+
+[[array.field]]
+name = "lap_length"
+off  = 0x28
+type = "f32"
+
+[[array.field]]
+name = "place"
+off  = 0x2c
+type = "s32"
+
+[[array.field]]
+name = "laps"
+off  = 0x30
+type = "s32"
+
+[[array.field]]
+name = "runs"
+off  = 0x34
+type = "s32"
+
+[[array.field]]
+name = "on_track"
+off  = 0x40
+type = "s32"
+
+[[array.field]]
+name = "lap_time"
+off  = 0x48
+type = "f32"
+
+[[array.field]]
+name = "lap_start"
+off  = 0x4c
+type = "f32"
+
+[[array.field]]
+name = "best_lap"
+off  = 0x50
+type = "f32"
+
+[[array.field]]
+name = "best_lap_no"
+off  = 0x54
+type = "s32"
+
+[[array.field]]
+name = "now"
+off  = 0x60
+type = "f32x4"
+
+[[array.field]]
+name = "last"
+off  = 0x70
+type = "f32x4"
+
+[[array.field]]
+name = "spot_path"
+off  = 0x88
+type = "u32"
+
+[[array.field]]
+name = "spot_piece"
+off  = 0x8c
+type = "u32"
+
+[[array.field]]
+name = "spot_along"
+off  = 0x90
+type = "f32"
+
+[[array.field]]
+name = "kept_path"
+off  = 0x94
+type = "u32"
+
+[[array.field]]
+name = "kept_piece"
+off  = 0x98
+type = "u32"
+
+[[array.field]]
+name = "kept_along"
+off  = 0x9c
+type = "f32"
+
+[[array.field]]
+name = "race_time"
+off  = 0xb4
+type = "f32"
+
+[[array.field]]
+name = "lap_clock"
+off  = 0xb8
+type = "f32"
+
+[[array.field]]
+name = "behind"
+off  = 0xbc
+type = "f32"
+
+[[array.field]]
+name = "off_clock"
+off  = 0xc0
+type = "f32"
+
+[[array.field]]
+name = "w_c4"
+off  = 0xc4
+type = "f32"
+
+[[array.field]]
+name = "lines"
+off  = 0xe4
+type = "u32"
+
+[[array.field]]
+name = "record_word"
+off  = 0x108
+type = "u32"
+
+[[array.field]]
+name = "records"
+off  = 0x1bc
+type = "u32"
+
+[[array.field]]
+name = "raw"
+off  = 0x0
+type = "bytes:464"
+
+[[array]]
+name  = "card3_"
+addr  = "@activity_manager -> 0x58 -> 0x0 -> 0x84 -> 0x1c8 -> 0x1c8 -> 0x1c8"
+deref = true
+count = 1
+
+[[array.field]]
+name = "id"
+off  = 0x0
+type = "s32"
+
+[[array.field]]
+name = "flags"
+off  = 0x8
+type = "u64"
+
+[[array.field]]
+name = "to_line_kept"
+off  = 0x10
+type = "f32"
+
+[[array.field]]
+name = "to_line"
+off  = 0x14
+type = "f32"
+
+[[array.field]]
+name = "path_to"
+off  = 0x18
+type = "f32"
+
+[[array.field]]
+name = "progress"
+off  = 0x1c
+type = "f32"
+
+[[array.field]]
+name = "travelled"
+off  = 0x20
+type = "f32"
+
+[[array.field]]
+name = "laps_length"
+off  = 0x24
+type = "f32"
+
+[[array.field]]
+name = "lap_length"
+off  = 0x28
+type = "f32"
+
+[[array.field]]
+name = "place"
+off  = 0x2c
+type = "s32"
+
+[[array.field]]
+name = "laps"
+off  = 0x30
+type = "s32"
+
+[[array.field]]
+name = "runs"
+off  = 0x34
+type = "s32"
+
+[[array.field]]
+name = "on_track"
+off  = 0x40
+type = "s32"
+
+[[array.field]]
+name = "lap_time"
+off  = 0x48
+type = "f32"
+
+[[array.field]]
+name = "lap_start"
+off  = 0x4c
+type = "f32"
+
+[[array.field]]
+name = "best_lap"
+off  = 0x50
+type = "f32"
+
+[[array.field]]
+name = "best_lap_no"
+off  = 0x54
+type = "s32"
+
+[[array.field]]
+name = "now"
+off  = 0x60
+type = "f32x4"
+
+[[array.field]]
+name = "last"
+off  = 0x70
+type = "f32x4"
+
+[[array.field]]
+name = "spot_path"
+off  = 0x88
+type = "u32"
+
+[[array.field]]
+name = "spot_piece"
+off  = 0x8c
+type = "u32"
+
+[[array.field]]
+name = "spot_along"
+off  = 0x90
+type = "f32"
+
+[[array.field]]
+name = "kept_path"
+off  = 0x94
+type = "u32"
+
+[[array.field]]
+name = "kept_piece"
+off  = 0x98
+type = "u32"
+
+[[array.field]]
+name = "kept_along"
+off  = 0x9c
+type = "f32"
+
+[[array.field]]
+name = "race_time"
+off  = 0xb4
+type = "f32"
+
+[[array.field]]
+name = "lap_clock"
+off  = 0xb8
+type = "f32"
+
+[[array.field]]
+name = "behind"
+off  = 0xbc
+type = "f32"
+
+[[array.field]]
+name = "off_clock"
+off  = 0xc0
+type = "f32"
+
+[[array.field]]
+name = "w_c4"
+off  = 0xc4
+type = "f32"
+
+[[array.field]]
+name = "lines"
+off  = 0xe4
+type = "u32"
+
+[[array.field]]
+name = "record_word"
+off  = 0x108
+type = "u32"
+
+[[array.field]]
+name = "records"
+off  = 0x1bc
+type = "u32"
+
+[[array.field]]
+name = "raw"
+off  = 0x0
+type = "bytes:464"
+

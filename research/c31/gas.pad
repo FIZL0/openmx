@@ -1,0 +1,4 @@
+# C31: the player holds the gas from the saved start of the sx01 race (slot 27, before the countdown)
+# to the end: into the closed gate first, then straight off the grid, so its card leaves the track.
+down cross
+sleep 12000t

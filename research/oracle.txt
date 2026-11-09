@@ -903,6 +903,15 @@ score_race_tick             boot 0x00262aa0 (dt f12, mgr) the score manager's ra
 #                                           off-track clock +0xc0 against mgr+0xd4, the time limit
 #                                           +0xc4, then the 30 s (mgr+0x9c) finish countdown, ranking,
 #                                           0x00261b80 / 0x002628f0. Only the lap line is ported (S13c).
+# C31 — two live sx01 races (research/c31, context/capture/c31; journal 2026-11-09-c31-sx01-laps-capture):
+# * mgr+0x60 is NOT the event's activity type. S196's image (event type 1 Practice, 5 laps) has +0x60 = 2;
+#   C31's boot (event type 2 SingleRace, 4 racers, 3 laps) has +0x60 = 1. The handler switch in
+#   score_manager_tick is on +0x64 (2 in both). With +0x60 = 1 the lap line finishes each card at
+#   mgr+0x94 laps (card |= 1, mgr+0x5c |= 0x10), seen live; with 2 (practice) it never does.
+# * Score cards are 0x1e0 apart, contiguous by id (0x8fc760 + id*0x1e0 in C31's session). The list
+#   (mgr+0x34, next +0x1c8) is re-linked in place order every few ticks; card +0x2c is the place.
+# * The AllAI knob (all_ai) poked to 1 before the world loads does not take over the player's bike:
+#   card 0 stayed at the gate; the NumberOfRacers - 1 AI riders rode.
 # S13e: the track's race file. Not in Tracks\sx01.res: it is tracks\sx01\sx01.tdf inside
 # Tracks\sx01_2.res (with sx01ai.tdf, supercross.aty, sx01.wpt, hit.dat).
 track_ctor                  boot 0x002693c0 (track) the track object (the score manager's +0x68 =
