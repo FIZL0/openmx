@@ -42,11 +42,20 @@
 //!     node heights and a flag the walk after the load clears).
 //! 13. **The gates on their props**: the same image's grid gate, start gate and finish line against
 //!     [`Supercross::place_drop_gate`] and [`Supercross::place_finish_line`] on the image's own props.
+//! 14. **The finish** (S294): stretches of the score manager's race handler, called at their first
+//!     instruction with the handler's registers set and their end hooked — the opening over check (10,000
+//!     lists against [`LapRules::check_over`]), a card's clocks (20,000 cards, made-up finishes and
+//!     running clocks, against [`LapRules::clocks`]), its time limit (20,000, against
+//!     [`LapRules::time_limit`]) and the close after the card loop with the ranking and gap functions
+//!     it calls run for real (20,000 lists of 1–6 cards with ties, ghost cards, the generator anywhere,
+//!     against [`LapRules::close`]), compared on every card word, the list's order, every listener call
+//!     in order, the manager's flags, the countdown and the generator.
 
 use game_sim::chassis::{Chassis, Deriv};
 use game_sim::race::{
     self, CheckPart, Checkpoint, Course, Crossing, Gate, GridStart, LANES, LapCard, LapRecord, LapRules, LineNotice, Link,
-    PathNode, Prop, Race, Refused, Seen, Spot, Supercross, TrackFile, TrackPath, card_flags, flags, race_flags, race_kind,
+    PathNode, Prop, Race, RaceNotice, Refused, Seen, Spot, Supercross, TrackFile, TrackPath, card_flags, flags, race_flags,
+    race_kind,
 };
 use game_sim::rng::Rng;
 use ps2_float::{F, Vf, fpu};
@@ -1378,6 +1387,10 @@ fn lap_card(p: &mut Pick, lines: usize) -> LapCard {
         kept_spot: spot(p),
         race_time,
         lap_clock: time_word(p, 90.0),
+        gap: time_word(p, 60.0),
+        off_track: time_word(p, 10.0),
+        time_left: time_word(p, 60.0),
+        attack_clock: time_word(p, 60.0),
         record_word: p.next() as u32,
         lines_passed: (0..lines).map(|_| p.next() as u32 | 1).collect(),
         records: (0..p.below(4)).map(|_| record(p)).collect(),
@@ -1428,6 +1441,10 @@ fn put_lap_card(ee: &mut Ee, at: u32, c: &LapCard, lines: u32, records: u32) {
         (0x50, c.best_lap),
         (0xb4, c.race_time),
         (0xb8, c.lap_clock),
+        (0xbc, c.gap),
+        (0xc0, c.off_track),
+        (0xc4, c.time_left),
+        (0x168, c.attack_clock),
     ] {
         put_f(ee, at + o, x);
     }
@@ -1488,6 +1505,10 @@ fn lap_card_at(ee: &Ee, at: u32, lines: usize) -> LapCard {
         kept_spot: spot_at(ee, at + 0x94),
         race_time: f(0xb4),
         lap_clock: f(0xb8),
+        gap: f(0xbc),
+        off_track: f(0xc0),
+        time_left: f(0xc4),
+        attack_clock: f(0x168),
         record_word: ee.u32_at(at + 0x108),
         lines_passed: if list == 0 { Vec::new() } else { (0..lines as u32).map(|k| ee.u32_at(list + 4 * k)).collect() },
         records,
@@ -1515,6 +1536,10 @@ fn lap_card_words(c: &LapCard) -> Vec<u64> {
         c.best_lap_no as u64,
         f(c.race_time),
         f(c.lap_clock),
+        f(c.gap),
+        f(c.off_track),
+        f(c.time_left),
+        f(c.attack_clock),
         u64::from(c.record_word),
     ];
     v.extend(c.seen.now.to_bits().map(u64::from));
@@ -1579,6 +1604,7 @@ fn the_lap_line_matches_the_score_cards_line_test() {
             ghost_runs: p.below(5) as i32,
             record_limit: p.below(12) as i32,
             free_records: p.below(4) as u32,
+            ..LapRules::default()
         };
         let mut card = lap_card(&mut p, lines);
         // A lap exactly as quick as the best one.
@@ -2301,4 +2327,493 @@ fn the_supercross_loader_stands_sx01s_gates_on_its_props() {
     let mut line = t.line.expect("the file's line");
     Supercross::place_finish_line(&finish, ahead, &mut line);
     assert_eq!(gate_words(&line), gate_words(&want_line), "the line: {line:?} against {want_line:?}");
+}
+
+// --- S294: the race's finish -------------------------------------------------------------------------
+
+/// Free RAM for the finish's manager, its cards (0x200 apart), their owners, chains and ghost cards,
+/// the listener, the vtables and the hooks their slots land on.
+const F_MGR: u32 = 0x01b0_0000;
+const F_TRACK: u32 = 0x01b0_1000;
+const F_LISTENER: u32 = 0x01b0_2000;
+const F_HEAD: u32 = 0x01b0_3000;
+const F_CARDS: u32 = 0x01b1_0000;
+const F_GHOSTS: u32 = 0x01b2_0000;
+const F_OWNERS: u32 = 0x01b3_0000;
+const F_CHAINS: u32 = 0x01b3_1000;
+const F_VT: u32 = 0x01b4_0000;
+const F_HOOKS: u32 = 0x01b4_1000;
+
+/// A call a listener heard: (who, slot, the object, then the card, the other card and the flag as
+/// that slot passes them; 0 where it passes none).
+type Heard = (u32, u32, u32, u32, u32, u32);
+
+/// Every listener slot of owners, chains and the manager's listener lands on a hook that writes down
+/// the call; the end of a stretch lands on one that ends the call.
+fn finish_hooks(ee: &mut Ee, ends: &[u32]) -> Rc<RefCell<Vec<Heard>>> {
+    let heard: Rc<RefCell<Vec<Heard>>> = Rc::default();
+    for who in [OWNER, CHAIN, TO_LISTENER] {
+        for slot in (0..0x80).step_by(4) {
+            let at = F_HOOKS + who * 0x100 + slot;
+            ee.set_u32(F_VT + who * 0x100 + slot, at);
+            let heard = heard.clone();
+            ee.hooks.insert(
+                at,
+                Box::new(move |ee| {
+                    let r = |i: usize| ee.r(i) as u32;
+                    let (o, l) = (who != TO_LISTENER, who == TO_LISTENER);
+                    let args = match slot {
+                        0x34 if o => (r(6), r(7), r(8)),
+                        0x2c if l => (r(6), r(7), r(8)),
+                        0x38 | 0x64 if o => (r(6), 0, 0),
+                        0x30 | 0x74 if l => (r(6), 0, 0),
+                        _ => (0, 0, 0),
+                    };
+                    heard.borrow_mut().push((who, slot, r(4), args.0, args.1, args.2));
+                }),
+            );
+        }
+    }
+    for &end in ends {
+        ee.hooks.insert(end, Box::new(|ee| ee.set(31, u64::from(ps2_oracle::DONE) | 0xffff_ffff_0000_0000)));
+    }
+    heard
+}
+
+/// The calls a race notice makes, given the cards' addresses in list order as it stands when told,
+/// and which cards have an owner and a chain. `Over` leaves out the listener's one call after them.
+fn race_told(n: RaceNotice, at: &[u32], owner: &[bool], chain: &[bool]) -> Vec<Heard> {
+    let other = |k: Option<usize>| k.map_or(0, |k| at[k]);
+    let (card, o_slot, l_slot, args) = match n {
+        RaceNotice::Over { card } => (card, 0x1c, None, (0, 0, 0)),
+        RaceNotice::TimeUp { card } => (card, 0x64, Some(0x74), (at[card], 0, 0)),
+        RaceNotice::PlaceLost { card, ahead } => (card, 0x34, Some(0x2c), (at[card], other(ahead), 1)),
+        RaceNotice::PlaceGained { card, behind } => (card, 0x34, Some(0x2c), (at[card], other(behind), 0)),
+        RaceNotice::Lead { card } => (card, 0x38, Some(0x30), (at[card], 0, 0)),
+    };
+    let id = ((at[card] - F_CARDS) / 0x200) as u32;
+    let mut v = Vec::new();
+    if owner[id as usize] {
+        v.push((OWNER, o_slot, F_OWNERS + 0x100 * id, args.0, args.1, args.2));
+    }
+    if chain[id as usize] {
+        v.push((CHAIN, o_slot, F_CHAINS + 0x100 * id, args.0, args.1, args.2));
+    }
+    if let Some(l) = l_slot {
+        v.push((TO_LISTENER, l, F_LISTENER, args.0, args.1, args.2));
+    }
+    v
+}
+
+/// The flag bits the finish reads, each set or not at its own odds over the card's other bits.
+fn finish_flags(p: &mut Pick, flags: u64) -> u64 {
+    let mut f = flags;
+    for (bit, odds) in [
+        (card_flags::OUT, 4),
+        (card_flags::TAKING_PART, 2),
+        (card_flags::PLAYER, 3),
+        (card_flags::ATTACK_CLOCK, 2),
+        (card_flags::TIMED_OUT, 6),
+        (card_flags::PLAYER_TOO, 5),
+        (card_flags::BEHIND_LINE, 5),
+        (card_flags::CLOCK_HELD, 4),
+        (card_flags::STANDS_ASIDE, 5),
+    ] {
+        if p.below(odds) == 0 {
+            f |= bit;
+        } else {
+            f &= !bit;
+        }
+    }
+    f
+}
+
+/// A card for the finish: no line words or records; `k` its id in the record word.
+fn finish_card(p: &mut Pick, k: u32) -> LapCard {
+    let mut c = lap_card(p, 0);
+    c.records.clear();
+    c.flags = finish_flags(p, c.flags);
+    c.record_word = k;
+    c.place = p.below(8) as i32;
+    if p.below(6) == 0 {
+        c.time_left = F(p.range(0.0, 0.05));
+    }
+    c
+}
+
+/// The manager's words the finish reads.
+fn finish_rules(p: &mut Pick) -> LapRules {
+    let mut flags = p.next() as u32;
+    for (bit, odds) in [
+        (race_flags::OVER, 3),
+        (race_flags::PLAYER_DONE, 2),
+        (race_flags::FINISHED, 4),
+        (race_flags::OVER_TOLD, 3),
+        (race_flags::RANKED, 2),
+    ] {
+        if p.below(odds) == 0 {
+            flags |= bit;
+        } else {
+            flags &= !bit;
+        }
+    }
+    let wait = match p.below(5) {
+        0 => 0.0,
+        1 => -1.0,
+        _ => 30.0,
+    };
+    let kind = p.below(6) as i32;
+    let laps = if p.below(10) == 0 { p.below(3) as i32 } else { 1 + p.below(6) as i32 };
+    let clock = if p.below(3) == 0 { p.range(29.9, 30.1) } else { p.range(0.0, 30.0) };
+    let limit = if p.below(3) == 0 { 0.0 } else { p.range(-1.0, 300.0) };
+    LapRules {
+        flags,
+        kind,
+        laps,
+        finish_wait: F(wait),
+        finish_clock: F(p.stray(clock)),
+        time_limit: F(p.stray(limit)),
+        ..LapRules::default()
+    }
+}
+
+/// The manager, `cards` linked in list order with their owners (and ghost cards on them), chains and
+/// the listener.
+fn put_finish(ee: &mut Ee, rules: &LapRules, cards: &[LapCard], ghosts: &[Option<LapCard>], owner: &[bool], chain: &[bool]) {
+    ee.set_u32(F_MGR + 0x30, F_LISTENER);
+    ee.set_u32(F_MGR + 0x34, if cards.is_empty() { 0 } else { F_CARDS });
+    ee.set_u32(F_MGR + 0x5c, rules.flags);
+    ee.set_u32(F_MGR + 0x60, rules.kind as u32);
+    ee.set_u32(F_MGR + 0x68, F_TRACK);
+    ee.set_u32(F_MGR + 0x94, rules.laps as u32);
+    put_f(ee, F_MGR + 0x98, rules.finish_clock);
+    put_f(ee, F_MGR + 0x9c, rules.finish_wait);
+    put_f(ee, F_MGR + 0xa0, rules.time_limit);
+    ee.set_u32(F_LISTENER + 4, 0);
+    ee.set_u32(F_LISTENER + 0x10, 0);
+    ee.set_u32(F_LISTENER + 0x14, 0);
+    ee.set_u32(F_LISTENER + 0x1c, F_VT + TO_LISTENER * 0x100);
+    for (k, c) in cards.iter().enumerate() {
+        let k = k as u32;
+        let at = F_CARDS + 0x200 * k;
+        put_lap_card(ee, at, c, 0, 0);
+        ee.set_u32(at + 0x1c8, if (k as usize) + 1 < cards.len() { at + 0x200 } else { 0 });
+        let (own, ch) = (F_OWNERS + 0x100 * k, F_CHAINS + 0x100 * k);
+        ee.set_u32(at + 4, if owner[k as usize] { own } else { 0 });
+        ee.set_u32(at + 0x1c4, if chain[k as usize] { ch } else { 0 });
+        let ghost = ghosts.get(k as usize).and_then(|g| g.as_ref());
+        ee.set_u32(own + 8, if ghost.is_some() { F_GHOSTS + 0x200 * k } else { 0 });
+        ee.set_u32(own + 0x1c, 0);
+        ee.set_u32(own + 0x20, F_VT + OWNER * 0x100);
+        ee.set_u32(ch + 0x1c, 0);
+        ee.set_u32(ch + 0x20, F_VT + CHAIN * 0x100);
+        if let Some(g) = ghost {
+            put_lap_card(ee, F_GHOSTS + 0x200 * k, g, 0, 0);
+        }
+    }
+}
+
+#[test]
+fn the_over_check_matches_the_race_handlers_opening() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let [handler, end] = match addrs(["score_race_tick", "score_race_over_end"]) {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    finish_hooks(&mut ee, &[end]);
+    let mut p = Pick(0x51d0_77a3_9e2c_4b18);
+    let mut over = [0usize; 2];
+    for case in 0..10_000 {
+        let mut rules = finish_rules(&mut p);
+        let n = 1 + p.below(6) as usize;
+        let cards: Vec<LapCard> = (0..n as u32).map(|k| finish_card(&mut p, k)).collect();
+        put_finish(&mut ee, &rules, &cards, &[], &vec![false; n], &vec![false; n]);
+        ee.call(handler, &[u64::from(F_MGR)], &[0.033_333_335], BUDGET);
+        rules.check_over(&cards);
+        assert_eq!(ee.u32_at(F_MGR + 0x5c), rules.flags, "case {case}: {rules:?}");
+        over[usize::from(rules.flags & race_flags::OVER != 0)] += 1;
+    }
+    assert!(over.iter().all(|&k| k > 2000), "over / not over: {over:?}");
+}
+
+#[test]
+fn the_clocks_match_the_race_handlers_card_clocks() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let [start, end] = match addrs(["score_race_clocks", "score_race_clocks_end"]) {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    finish_hooks(&mut ee, &[end]);
+    let mut p = Pick(0x0c4e_9b21_d7f3_6a55);
+    let (mut made_up, mut ran) = (0, 0);
+    for case in 0..20_000 {
+        let rules = finish_rules(&mut p);
+        let mut card = finish_card(&mut p, 0);
+        let now = [p.range(-500.0, 500.0), p.range(-50.0, 50.0), p.range(-500.0, 500.0)];
+        card.seen = Seen { now: p.quad(now), last: p.quad([1.0, 2.0, 3.0]) };
+        card.laps = if p.below(8) == 0 { rules.laps } else { p.below(7) as i32 };
+        // A best lap the clamp to the race time cuts down, now and then.
+        if p.below(5) == 0 {
+            card.best_lap = F(p.range(100.0, 900.0));
+        }
+        let head = finish_card(&mut p, 1);
+        let alone = p.below(4) == 0;
+        put_finish(&mut ee, &rules, &[], &[], &[], &[]);
+        put_lap_card(&mut ee, F_CARDS, &card, 0, 0);
+        put_lap_card(&mut ee, F_HEAD, &head, 0, 0);
+        ee.set_u32(F_MGR + 0x34, if alone { F_CARDS } else { F_HEAD });
+        let dt = if p.below(10) == 0 { F(p.stray(0.0)) } else { F(p.range(0.0, 0.05)) };
+        ee.set(16, u64::from(F_CARDS));
+        ee.set(19, u64::from(F_MGR));
+        ee.set_f(24, 0.0);
+        ee.set_f(25, dt.0);
+        ee.call(start, &[], &[], BUDGET);
+
+        let leader = if alone { card.race_time } else { head.race_time };
+        let was = card.flags;
+        rules.clocks(dt, &mut card, leader);
+        if was & card_flags::OUT == 0 {
+            if card.flags & card_flags::OUT != 0 { made_up += 1 } else { ran += 1 }
+        }
+        assert_eq!(lap_card_words(&lap_card_at(&ee, F_CARDS, 0)), lap_card_words(&card), "case {case}: {rules:?}");
+    }
+    assert!(made_up > 2000 && ran > 2000, "made-up finishes {made_up}, clocks run {ran}");
+}
+
+#[test]
+fn the_time_limit_matches_the_race_handlers_card_clock() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let [start, end] = match addrs(["score_race_time_limit", "score_race_card_end"]) {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    let heard = finish_hooks(&mut ee, &[end]);
+    let mut p = Pick(0x7f13_2c86_e0a4_9d3b);
+    let mut ups = 0;
+    for case in 0..20_000 {
+        let rules = finish_rules(&mut p);
+        let mut card = finish_card(&mut p, 0);
+        // Time about to run out, often.
+        if p.below(2) == 0 {
+            card.time_left = F(p.range(0.0, 0.06));
+        }
+        let (owner, chain) = ([p.below(4) != 0], [p.below(3) == 0]);
+        put_finish(&mut ee, &rules, &[card.clone()], &[], &owner, &chain);
+        let dt = F(p.range(0.0, 0.05));
+        ee.set(16, u64::from(F_CARDS));
+        ee.set(19, u64::from(F_MGR));
+        ee.set_f(24, 0.0);
+        ee.set_f(25, dt.0);
+        heard.borrow_mut().clear();
+        ee.call(start, &[], &[], BUDGET);
+
+        let up = rules.time_limit(dt, &mut card);
+        let want: Vec<Heard> =
+            if up { race_told(RaceNotice::TimeUp { card: 0 }, &[F_CARDS], &owner, &chain) } else { vec![] };
+        let what = format!("case {case}: {rules:?}");
+        assert_eq!(*heard.borrow(), want, "{what}: the listeners");
+        assert_eq!(lap_card_words(&lap_card_at(&ee, F_CARDS, 0)), lap_card_words(&card), "{what}: the card");
+        ups += usize::from(up);
+    }
+    assert!(ups > 500, "only {ups} time limits ran out");
+}
+
+#[test]
+fn the_close_matches_the_race_handlers_finish_ranking_and_gaps() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let [start, end, rand_state] = match addrs(["score_race_close", "score_race_exit", "rand_state"]) {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    let heard = finish_hooks(&mut ee, &[end]);
+    let mut p = Pick(0x93b8_45e1_2a6f_d07c);
+    let mut said = [0usize; 5];
+    let (mut draws, mut ran_out) = (0, 0);
+    for case in 0..20_000 {
+        let mut rules = finish_rules(&mut p);
+        let n = 1 + p.below(6) as usize;
+        let mut cards: Vec<LapCard> = (0..n as u32).map(|k| finish_card(&mut p, k)).collect();
+        // Ties: equal progress and equal race times, and places that already stand.
+        for k in 1..n {
+            if p.below(5) == 0 {
+                cards[k].progress = cards[k - 1].progress;
+            }
+            if p.below(4) == 0 {
+                cards[k].race_time = cards[k - 1].race_time;
+            }
+            if p.below(3) == 0 {
+                cards[k].place = k as i32 + 1;
+            }
+        }
+        let owner: Vec<bool> = (0..n).map(|_| p.below(4) != 0).collect();
+        let chain: Vec<bool> = (0..n).map(|_| p.below(3) == 0).collect();
+        let ghosts: Vec<Option<LapCard>> = (0..n)
+            .map(|k| {
+                (owner[k] && p.below(4) != 0).then(|| {
+                    let mut g = finish_card(&mut p, 100);
+                    if p.below(3) == 0 {
+                        g.best_lap = cards[k].lap_clock;
+                    }
+                    g
+                })
+            })
+            .collect();
+        let state = p.next();
+        put_finish(&mut ee, &rules, &cards, &ghosts, &owner, &chain);
+        ee.write(rand_state, 8, u128::from(state));
+        let dt = F(p.range(0.0, 0.05));
+        ee.set(19, u64::from(F_MGR));
+        ee.set_f(24, 0.0);
+        ee.set_f(25, dt.0);
+        heard.borrow_mut().clear();
+        ee.call(start, &[], &[], 1_000_000);
+
+        let before: Vec<u32> = (0..n as u32).map(|k| F_CARDS + 0x200 * k).collect();
+        let was_over = rules.flags & race_flags::OVER != 0;
+        let mut rng = Rng::from_state(state);
+        let ghost_refs: Vec<Option<&LapCard>> = ghosts.iter().map(|g| g.as_ref()).collect();
+        let notices = rules.close(dt, &mut cards, &ghost_refs, &mut rng);
+        let after: Vec<u32> = cards.iter().map(|c| F_CARDS + 0x200 * c.record_word).collect();
+        let mut want: Vec<Heard> = Vec::new();
+        for (k, &m) in notices.iter().enumerate() {
+            let at = if matches!(m, RaceNotice::Over { .. }) { &before } else { &after };
+            want.extend(race_told(m, at, &owner, &chain));
+            if matches!(m, RaceNotice::Over { .. }) && !matches!(notices.get(k + 1), Some(RaceNotice::Over { .. })) {
+                want.push((TO_LISTENER, 0x18, F_LISTENER, 0, 0, 0));
+            }
+            said[match m {
+                RaceNotice::Over { .. } => 0,
+                RaceNotice::TimeUp { .. } => 1,
+                RaceNotice::PlaceLost { .. } => 2,
+                RaceNotice::PlaceGained { .. } => 3,
+                RaceNotice::Lead { .. } => 4,
+            }] += 1;
+        }
+
+        let what = format!("case {case}: {rules:?}");
+        // The list as the original left it, card by card.
+        let mut list = Vec::new();
+        let mut at = ee.u32_at(F_MGR + 0x34);
+        while at != 0 && list.len() < 8 {
+            list.push(at);
+            at = ee.u32_at(at + 0x1c8);
+        }
+        assert_eq!(list, after, "{what}: the list's order");
+        for (c, &a) in cards.iter().zip(&after) {
+            assert_eq!(lap_card_words(&lap_card_at(&ee, a, 0)), lap_card_words(c), "{what}: card {}", c.record_word);
+        }
+        assert_eq!(*heard.borrow(), want, "{what}: the listeners ({notices:?})");
+        assert_eq!(ee.u32_at(F_MGR + 0x5c), rules.flags, "{what}: the manager's flags");
+        assert_eq!(f32_at(&ee, F_MGR + 0x98).0.to_bits(), rules.finish_clock.0.to_bits(), "{what}: the countdown");
+        assert_eq!(ee.read(rand_state, 8) as u64, rng.state(), "{what}: the generator");
+        draws += usize::from(rng.state() != state);
+        ran_out += usize::from(!was_over && rules.flags & race_flags::OVER != 0);
+    }
+    for (k, n) in said.iter().enumerate() {
+        assert!(k == 1 || *n > 500, "notice {k} came up only {n} times: {said:?}");
+    }
+    assert!(draws > 500 && ran_out > 300, "draws {draws}, countdowns run out {ran_out}");
+}
+
+/// C31's live sx01 single race (4 riders, the player at the gate, 3 AI riders round 3 laps), list
+/// order per tick: each tick's ranking is the previous tick's list ranked on this tick's progress, and,
+/// until a card finishes, every gap is measured on the ranked list. Each tick's list rebuilt from the
+/// one before with this tick's card words, through [`LapRules::rank`] and [`race::gaps`], against the
+/// captured order, places and gaps, bit for bit.
+#[test]
+fn the_ranking_and_gaps_match_c31s_live_race() {
+    let Ok(kit) = Kit::load() else { return skip("no kit.toml") };
+    let rel = "capture/c31/sx01-ai4.csv";
+    let local = kit.root.join("context").join(rel);
+    let path = if local.exists() { local } else { kit.ctx(rel) };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return skip(&format!("{} is not there: C31's list-ordered sx01 capture", path.display()));
+    };
+    let mut lines = text.lines();
+    let head: Vec<&str> = lines.next().unwrap_or("").split(',').collect();
+    let col = |name: &str| head.iter().position(|h| *h == name).unwrap_or_else(|| panic!("no column {name}"));
+    let (c_frame, c_flags) = (col("frame"), col("mgr_flags"));
+    let card_cols: Vec<[usize; 6]> = (0..4)
+        .map(|k| ["id", "flags", "progress", "race_time", "behind", "place"].map(|f| col(&format!("card{k}_0.{f}"))))
+        .collect();
+    struct Row {
+        frame: u32,
+        flags: u32,
+        cards: Vec<(u32, LapCard)>,
+    }
+    let rows: Vec<Row> = lines
+        .map(|l| {
+            let v: Vec<&str> = l.split(',').collect();
+            let f = |i: usize| F(v[i].parse::<f32>().expect("a float"));
+            let cards = card_cols
+                .iter()
+                .map(|c| {
+                    let card = LapCard {
+                        flags: v[c[1]].parse().expect("flags"),
+                        progress: f(c[2]),
+                        race_time: f(c[3]),
+                        gap: f(c[4]),
+                        place: v[c[5]].parse().expect("place"),
+                        ..LapCard::default()
+                    };
+                    (v[c[0]].parse().expect("id"), card)
+                })
+                .collect();
+            Row { frame: v[c_frame].parse().expect("frame"), flags: v[c_flags].parse().expect("flags"), cards }
+        })
+        .collect();
+    let words = |cards: &[(u32, LapCard)]| -> Vec<(u32, i32, u32)> {
+        cards.iter().map(|(id, c)| (*id, c.place, c.gap.0.to_bits())).collect()
+    };
+    let (mut ranked, mut gapped, mut moved) = (0, 0, 0);
+    let mut torn = 0;
+    for w in rows.windows(2) {
+        let (was, now) = (&w[0], &w[1]);
+        if now.frame != was.frame + 1 || now.flags & race_flags::RANKED == 0 || now.cards.iter().all(|(_, c)| is_zero_f(c.race_time)) {
+            continue;
+        }
+        // A torn row (the recorder read a card a tick early or late; recorder-misses-rows-under-load):
+        // every card still racing runs the one race clock, so their race times differ only in a tear.
+        let split = |r: &Row| {
+            let mut t = r.cards.iter().filter(|(_, c)| c.flags & card_flags::OUT == 0).map(|(_, c)| c.race_time.0.to_bits());
+            t.next().is_some_and(|first| t.any(|x| x != first))
+        };
+        if split(was) || split(now) {
+            torn += 1;
+            continue;
+        }
+        // The list as it stood, each card with this tick's words but its place and gap from before.
+        let mut ids = Vec::new();
+        let mut cards: Vec<LapCard> = was
+            .cards
+            .iter()
+            .map(|(id, old)| {
+                let (_, c) = now.cards.iter().find(|(i, _)| i == id).expect("the same cards");
+                ids.push(*id);
+                LapCard { place: old.place, gap: old.gap, record_word: *id, ..c.clone() }
+            })
+            .collect();
+        let _ = LapRules::rank(&mut cards);
+        let finished = now.flags & race_flags::FINISHED != 0;
+        if !finished {
+            race::gaps(&mut cards);
+            gapped += 1;
+        }
+        let mut got: Vec<(u32, LapCard)> = cards.into_iter().map(|c| (c.record_word, c)).collect();
+        if finished {
+            // No gaps measured: each keeps the captured one.
+            for (id, c) in got.iter_mut() {
+                c.gap = now.cards.iter().find(|(i, _)| i == id).map(|(_, n)| n.gap).unwrap_or_default();
+            }
+        }
+        moved += usize::from(got.iter().map(|(i, _)| *i).ne(ids.iter().copied()));
+        assert_eq!(words(&got), words(&now.cards), "frame {}: (id, place, gap bits) in list order", now.frame);
+        ranked += 1;
+    }
+    assert!(torn < 100, "{torn} torn rows");
+    assert!(ranked > 5000 && gapped > 2000 && moved > 0, "ranked {ranked}, gapped {gapped}, re-ordered {moved}");
+}
+
+fn is_zero_f(x: F) -> bool {
+    x.0 == 0.0
 }
