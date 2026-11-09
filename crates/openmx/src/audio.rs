@@ -859,6 +859,32 @@ pub fn pack_of_song(id: &str) -> Option<&str> {
     id.strip_prefix(MOD)?.split('/').next()
 }
 
+/// What the music folder's songs are listed as among the games (P317): they are no game's.
+pub const FOLDER_GAME: &str = "Music Folder";
+
+/// **One game the songs come from** (P317), as Settings, Audio's Songs From lists it: the disc, a
+/// music pack, or the music folder, with how many songs it has. Read off the sources, so a new pack
+/// is one more of these on its own.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Game {
+    /// A music pack's id, or for the others their source's name (`disc`, `folder`).
+    pub key: String,
+    /// Whether it is a music pack, which the mods folder's switch and `mods_off` turn off.
+    pub pack: bool,
+    /// As players know it: the pack's `source.game`, the disc's [`DISC_GAME`], or [`FOLDER_GAME`].
+    pub name: String,
+    pub songs: usize,
+}
+
+/// Where a song's game is listed (P317): the disc's first, then the music packs', then the rest.
+fn game_rank(id: &str) -> u8 {
+    match id.split(':').next() {
+        Some("disc") => 0,
+        _ if pack_of_song(id).is_some() => 1,
+        _ => 2,
+    }
+}
+
 /// A whole song in memory, decoded block by block as it plays.
 pub struct Adpcm {
     data: Vec<u8>,
@@ -1143,6 +1169,8 @@ pub struct Music {
     /// The music packs whose songs are left out (MD7): the Mods page's packs switched off, or every
     /// pack with the mods folder off. `None` is every pack. A song of one already playing plays on.
     packs_off: Option<Vec<String>>,
+    /// The other sources whose songs are left out (P317), by name: Songs From's disc or folder off.
+    sources_off: Vec<String>,
     playing: Option<(String, Box<dyn Stream>)>,
     opening: Option<(String, Receiver<Result<Box<dyn Stream>, String>>)>,
     /// Open songs on the mixer's own thread (tests) rather than a helper's.
@@ -1165,6 +1193,7 @@ impl Music {
             going_back: false,
             held: false,
             packs_off: Some(Vec::new()),
+            sources_off: Vec::new(),
             playing: None,
             opening: None,
             wait: false,
@@ -1174,18 +1203,61 @@ impl Music {
         }
     }
 
-    /// Every song every source has, sources in order, but the music packs' switched off (MD7).
+    /// Every song every source has, but the games switched off (MD7, P317): the disc's first, then
+    /// the music packs', then the folder's, each source's in its order.
     pub fn tracks(&self) -> Vec<Track> {
-        self.sources.iter().flat_map(|s| s.tracks()).filter(|t| self.pack_on(&t.id)).collect()
+        self.every_track().into_iter().filter(|t| self.pack_on(&t.id)).collect()
     }
 
-    /// Whether a song's pack plays (MD7): always for a song of no pack.
+    /// Every song every source has, switched off or not, in [`Music::tracks`]' order.
+    fn every_track(&self) -> Vec<Track> {
+        let mut all: Vec<Track> = self.sources.iter().flat_map(|s| s.tracks()).collect();
+        all.sort_by_key(|t| game_rank(&t.id));
+        all
+    }
+
+    /// Whether a song's game plays (MD7, P317): its pack's switch, or its source's.
     fn pack_on(&self, id: &str) -> bool {
         match (pack_of_song(id), &self.packs_off) {
-            (None, _) => true,
+            (None, _) => !self.sources_off.iter().any(|o| id.split(':').next() == Some(o.as_str())),
             (Some(_), None) => false,
             (Some(p), Some(off)) => !off.iter().any(|o| o == p),
         }
+    }
+
+    /// Which of the other sources play (P317): all but `off`'s, by name (`disc`, `folder`). Whether
+    /// that changed the songs listed.
+    pub fn set_sources_off(&mut self, off: &[String]) -> bool {
+        if off == self.sources_off.as_slice() {
+            return false;
+        }
+        let before = self.tracks();
+        self.sources_off = off.to_vec();
+        before != self.tracks()
+    }
+
+    /// Every game the sources have songs from (P317), switched off or not, in [`Music::tracks`]'
+    /// order: each pack by its game's name, the songs of one counted.
+    pub fn games(&self) -> Vec<Game> {
+        let mut out: Vec<Game> = Vec::new();
+        for t in self.every_track() {
+            let (key, pack) = match pack_of_song(&t.id) {
+                Some(p) => (p.to_string(), true),
+                None => (t.id.split(':').next().unwrap_or_default().to_string(), false),
+            };
+            match out.iter_mut().find(|g| g.key == key && g.pack == pack) {
+                Some(g) => g.songs += 1,
+                None => {
+                    let name = match self.game(&t.id) {
+                        Some(name) => name,
+                        None if pack => key.clone(),
+                        None => FOLDER_GAME.to_string(),
+                    };
+                    out.push(Game { key, pack, name, songs: 1 });
+                }
+            }
+        }
+        out
     }
 
     /// Which music packs play (MD7): with `folder` off none, else all but `off`'s (pack ids; other
@@ -1309,7 +1381,8 @@ impl Music {
         }
         match &self.pick {
             Pick::Off => None,
-            Pick::Track(id) => Some(id.clone()),
+            // A song of a game switched off is not repeated (P317).
+            Pick::Track(id) => self.pack_on(id).then(|| id.clone()),
             Pick::Order => {
                 let all = self.tracks();
                 let after = self.last.as_deref().and_then(|l| all.iter().position(|t| t.id == l));
@@ -1344,6 +1417,9 @@ impl Music {
                     // what `tests/web.rs` reads for the page's music.
                     #[cfg(target_arch = "wasm32")]
                     crate::web_host::say(&format!("music: playing {id}"));
+                    // and the desktop's stdout, which games' songs a ride plays (P317)
+                    #[cfg(not(target_arch = "wasm32"))]
+                    println!("music: playing {id}");
                     self.playing = Some((id, stream));
                     self.buf_frames = 0;
                     self.pos = 0.0;
@@ -4653,9 +4729,18 @@ impl Speakers {
         }
     }
 
-    /// Which music packs play (MD7, [`Music::set_packs`]); whether the songs listed changed.
-    pub fn music_packs(&self, folder: bool, off: &[String]) -> bool {
-        self.mixer.lock().is_ok_and(|mut m| m.music.set_packs(folder, off))
+    /// Which music packs play (MD7, [`Music::set_packs`]) and which other sources (P317,
+    /// [`Music::set_sources_off`]); whether the songs listed changed.
+    pub fn music_packs(&self, folder: bool, off: &[String], sources_off: &[String]) -> bool {
+        self.mixer.lock().is_ok_and(|mut m| {
+            let packs = m.music.set_packs(folder, off);
+            m.music.set_sources_off(sources_off) || packs
+        })
+    }
+
+    /// Every game the songs come from (P317, [`Music::games`]).
+    pub fn games(&self) -> Vec<Game> {
+        self.mixer.lock().map(|m| m.music.games()).unwrap_or_default()
     }
 
     /// A music source read again (MD7, [`Music::set_source`]).
