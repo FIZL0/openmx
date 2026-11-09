@@ -49,6 +49,30 @@ pub struct Rides<'a> {
     /// seat: what a seat's switch to a car takes its copy from into its [`Sim::car`], and what that
     /// car is stepped with. A seat with none here stays where it is when it asks for a car.
     pub cars: &'a [Vec<vehicle::CarRide>],
+    /// The flier packs' planes every machine holds (P318, [`Flier`]), as built and never flown: a
+    /// seat whose pad's [`super::FLIER`] byte names one takes a copy of it, not of
+    /// [`Rides::plane`], at its next switch onto the plane. Empty, every seat flies the ride's own.
+    pub fliers: &'a mut [Flier],
+}
+
+/// **A flier pack's plane online** (P318): the skin's plane as the ride built it on its modifiers,
+/// never flown, under the byte a seat's pad picks it by ([`super::FLIER`],
+/// [`Flight::skin`]), and the skin's `.phy` before the modifiers, which a change of them retunes it
+/// and every plane of it in flight from, as [`Modded::stock_plane`] is the ride's own plane's.
+#[derive(Clone)]
+pub struct Flier {
+    pub byte: u8,
+    pub stock: game_sim::phy::Plane,
+    pub flight: Flight,
+}
+
+/// The plane a seat's switch takes (P318): the flier its pad's byte `byte` names among `fliers`,
+/// else (0, or a byte no flier here has) the ride's own `plane`.
+pub fn template_for<'f>(byte: u8, plane: Option<&'f Flight>, fliers: &'f [Flier]) -> Option<&'f Flight> {
+    match fliers.iter().find(|f| byte != 0 && f.byte == byte) {
+        Some(f) => Some(&f.flight),
+        None => plane,
+    }
 }
 
 /// **A flying seat's step, held at its plane's frame** (N22a1): its plane readied
@@ -259,8 +283,10 @@ impl Game for Rides<'_> {
             // plane, no ground) leaves the seat where it is, and is asked again next tick.
             let wanted = Wanted::of(reports[0].0[super::SWITCH]);
             let cars = self.cars.get(seat).map_or(&[][..], |c| &c[..]);
+            // The plane it takes is the flier its pad picked (P318), else the ride's own.
             if let Some(to) = wanted.to {
-                let _ = vehicle::switch_lane_among(to, self.plane.as_deref(), cars, sim, self.world);
+                let template = template_for(reports[0].0[super::FLIER], self.plane.as_deref(), self.fliers);
+                let _ = vehicle::switch_lane_among(to, template, cars, sim, self.world);
             }
             // The shell's hands, the d-pad the markers' and not the ride's (P93) — unless the seat's
             // Markers switch is off (P129, in its byte), and then the d-pad is the original's.
@@ -415,7 +441,9 @@ impl Rides<'_> {
     /// A seat decoded flying (N17) whose plane came without its ray probe, a constant of the disc
     /// the codec leaves out and puts back only onto a seat that was flying here too: the ride's own.
     fn probe(&self, sim: &mut Sim) {
-        if let (Some(f), Some(t)) = (sim.plane.as_mut(), self.plane.as_deref())
+        // The plane its skin was built as (P318): a flier pack's, or the ride's own.
+        let skin = sim.plane.as_ref().map_or(0, |f| f.skin);
+        if let (Some(f), Some(t)) = (sim.plane.as_mut(), template_for(skin, self.plane.as_deref(), self.fliers))
             && f.rays.is_none()
         {
             f.rays = t.rays.clone();
@@ -449,6 +477,16 @@ pub fn plane_on(stock: &game_sim::phy::Plane, mods: &game_sim::modifiers::Mods, 
     f
 }
 
+/// A flier pack's plane for [`Rides::fliers`] (P318), as [`plane_on`] builds the ride's own: its
+/// `stock` file on 1P's modifiers, flown on `like`'s steps (MX vs. ATV's, [`Flight::mxvatv`]), with
+/// `like`'s ray probe, area and skin — `like` carrying the skin's own probe, off its pack. What
+/// else the ride's own plane leaves off online (its hull, the bikes' mesh) this leaves off too.
+pub fn flier_on(stock: &game_sim::phy::Plane, mods: &game_sim::modifiers::Mods, like: &Flight) -> Flight {
+    let mut f = plane_on(stock, mods, like);
+    (f.mxvatv, f.skin) = (like.mxvatv, like.skin);
+    f
+}
+
 /// Every seat's cars for [`Rides::cars`] (P289): `stock`, each seat's copies as the disc builds them
 /// ([`crate::vehicle::Lot::online_cars`]), seat `s`'s on row `s` of the ride's modifiers `mods`
 /// ([`game_sim::modifiers::Mods::car`]), as the shell's `Garage::modify` puts a seat's offline. A
@@ -471,19 +509,41 @@ pub fn cars_on(stock: &[Vec<vehicle::CarRide>], mods: &game_sim::modifiers::Mods
 /// seat a join adds is decoded onto another seat's constants. A table built on none of them —
 /// which no online seat is: each is built by [`from_seat_bytes`] or `Sim::set_presets([p, 0])` —
 /// goes as preset 0.
+///
+/// A seat flying a flier pack's plane (P318, [`Flight::skin`], which the codec leaves out) has the
+/// preset byte's top bit set and its skin's byte after it, so a joiner puts that skin's constants
+/// back ([`Rides::probe`]); every other seat's bytes are as before.
 pub fn seat_bytes(sim: &Sim) -> Vec<u8> {
-    let mut out = vec![preset(sim).unwrap_or(0) as u8];
+    let skin = sim.plane.as_ref().map_or(0, |f| f.skin);
+    let preset = preset(sim).unwrap_or(0) as u8;
+    let mut out = match skin {
+        0 => vec![preset],
+        s => vec![preset | SKINNED, s],
+    };
     out.extend(game_sim::snapshot::encode(sim));
     out
 }
 
+/// [`seat_bytes`]' flag on the preset byte: a flier pack's skin's byte follows (P318).
+const SKINNED: u8 = 0x80;
+
 /// [`seat_bytes`] back onto `sim`: its state, and its binding table built on the preset.
 pub fn from_seat_bytes(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
     let (&p, state) = bytes.split_first().ok_or("no controller preset")?;
+    let (p, skin, state) = match p & SKINNED {
+        0 => (p, 0, state),
+        _ => {
+            let (&s, state) = state.split_first().ok_or("no flier skin")?;
+            (p & !SKINNED, s, state)
+        }
+    };
     if p as usize >= game_sim::bindings::PRESETS {
         return Err(format!("controller preset {p}"));
     }
     game_sim::snapshot::decode(sim, state)?;
+    if let Some(f) = sim.plane.as_mut() {
+        f.skin = skin;
+    }
     sim.set_presets([p as usize, 0]);
     Ok(())
 }
@@ -602,7 +662,7 @@ impl Modded<'_, '_> {
             Some(a) => Some(&mut **a),
             None => None,
         };
-        let mut on = Rides { sims: &mut *r.sims, world: &mut *r.world, after, time_scale: r.time_scale, plane: r.plane.as_deref_mut(), cars: &cars[..] };
+        let mut on = Rides { fliers: &mut *r.fliers, sims: &mut *r.sims, world: &mut *r.world, after, time_scale: r.time_scale, plane: r.plane.as_deref_mut(), cars: &cars[..] };
         f(&mut on)
     }
 }
@@ -653,13 +713,23 @@ impl Game for Modded<'_, '_> {
             // Each seat on its own row (P134); a ride whose rows are all 1P's is as before.
             to.resim(&was, seat, self.stock.get(seat).unwrap_or(first), sim);
             // A plane in flight retuned where it is, as the pause does offline (P98, `replane`).
-            if let (Some(file), Some(f)) = (self.stock_plane, sim.plane.as_mut()) {
+            // A flier pack's plane (P318) on its own skin's file.
+            let skin = sim.plane.as_ref().map_or(0, |f| f.skin);
+            let file = match self.rides.fliers.iter().find(|t| skin != 0 && t.byte == skin) {
+                Some(t) => Some(&t.stock),
+                None => self.stock_plane,
+            };
+            if let (Some(file), Some(f)) = (file, sim.plane.as_mut()) {
                 to.replane(seat, file, f);
             }
         }
         // And the plane a switch takes from here built on the new set.
         if let (Some(file), Some(t)) = (self.stock_plane, self.rides.plane.as_deref_mut()) {
             *t = plane_on(file, &to, t);
+        }
+        // And the flier packs' (P318), each on its own file.
+        for t in self.rides.fliers.iter_mut() {
+            t.flight = flier_on(&t.stock, &to, &t.flight);
         }
         // And every seat's cars on its own row (P289): a car being driven takes them at its next
         // step, which reads its file off them.

@@ -349,6 +349,7 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
                 f.bike = bike.clone();
                 f.hull = hull.clone();
                 f.mxvatv = *mxvatv;
+                f.skin = sim.plane.as_ref().map_or(0, |here| here.skin);
                 f.wreck = sim.plane.as_ref().and_then(|here| here.wreck.clone());
             }
         }
@@ -364,6 +365,7 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         // Which game's steps fly it (MD100) is the machine's, as its probe is: off the wire, so MX
         // Unleashed's bytes are unchanged, and this machine's again.
         p.mxvatv = here.mxvatv;
+        p.skin = here.skin;
     }
     let here = &sim.rider;
     rider.set = here.set.clone();
@@ -914,7 +916,7 @@ wire!(crate::rider_anim::Clocked { played, snapshot });
 /// skin's); [`decode`] puts this machine's back.
 impl Wire for crate::flight::Flight {
     fn put(&self, out: &mut Vec<u8>) {
-        let Self { joystick, autopilot, engine, aero, body, measure, tires, cg_braking, max_g, max_g_roll, pad, surfaces, attitude, air, crash, gravity, gravity_scale, mass, inv_inertia, edge_scale, wrecks, spawn, spawn_up, area, noise, rng, collider, record, rays: _, nearby, bike: _, hull: _, heard: _, wreck: _, mxvatv: _ } = self;
+        let Self { joystick, autopilot, engine, aero, body, measure, tires, cg_braking, max_g, max_g_roll, pad, surfaces, attitude, air, crash, gravity, gravity_scale, mass, inv_inertia, edge_scale, wrecks, spawn, spawn_up, area, noise, rng, collider, record, rays: _, nearby, bike: _, hull: _, heard: _, wreck: _, mxvatv: _, skin: _ } = self;
         joystick.put(out);
         autopilot.put(out);
         engine.put(out);
@@ -982,6 +984,7 @@ impl Wire for crate::flight::Flight {
             heard: Default::default(),
             wreck: None,
             mxvatv: false,
+            skin: 0,
         })
     }
 }

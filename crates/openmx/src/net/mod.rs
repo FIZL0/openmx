@@ -74,15 +74,21 @@ pub const SEATS: usize = openmx_net::SEATS;
 
 /// The pad bytes a seat sends: bytes 0 to 19 of the pad library's report — status, mode, the button
 /// word, the four stick bytes and the twelve pressures, everything the original's poll reads — and
-/// the shell's own byte after them, [`SWITCH`]. The report's last twelve bytes are never read by the
-/// game; the shell sets only the first of them, and only online.
-pub const WIRE: usize = 21;
+/// the shell's own bytes after them, [`SWITCH`] and [`FLIER`]. The report's last twelve bytes are
+/// never read by the game; the shell sets only the first two of them, and only online.
+pub const WIRE: usize = 22;
 
 /// The report byte that carries a seat's machine switch online (N17): the machine its player wants
 /// and their biplane scheme, [`crate::vehicle::Wanted::byte`]. The first byte past what the original's
 /// poll reads, so the switch rides the same rollback input as the pad and lands on every machine
 /// at the same tick; 0, an idle pad's, asks for nothing.
 pub const SWITCH: usize = 20;
+
+/// The report byte that carries the flier a seat's player picked online (P318): which of the ride's
+/// fliers its next switch onto the plane takes, `online_fliers::byte` — 0 the ride's
+/// own biplane, else a flier pack's skin every machine holds. A level, as [`SWITCH`]'s machine is: a
+/// guessed repeat of it is the same pick. 0, an idle pad's, is the ride's own.
+pub const FLIER: usize = 21;
 
 /// A seat's pad on the wire ([`wire`]); an idle pad by default, which is what ggrs assumes for a
 /// seat before its first real one.

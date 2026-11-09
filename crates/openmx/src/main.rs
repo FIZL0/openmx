@@ -217,6 +217,7 @@ mod modstore;
 mod moment;
 mod net;
 mod online;
+mod online_fliers;
 mod peer_looks;
 mod garage_view;
 // The original's own HUD (V26) is drawn by none of the shell since P170, which took it off the
@@ -2588,7 +2589,8 @@ struct Args {
     /// `--online-script F:WORD,...`: online, from the session's tick `F` on (K29: the tick, as
     /// `--frames` counts online, not the shell's frame, which waits on a peer), its first player picks
     /// the machine `WORD` names (bike, biplane, buggy, monster, baja) as the M key or the pause's
-    /// switch would, or holds Cross down (`gas`) or lets it go (`lift`) — a played tape's switch and
+    /// switch would, or a flier pack's plane (`biplane@mxvatv_fliers/biplane3`, P318) where the ride
+    /// offers it, or holds Cross down (`gas`) or lets it go (`lift`) — a played tape's switch and
     /// throttle for a ride that rides no tape (S249's two-shell test).
     online_script: Vec<(u32, String)>,
     /// `--trace-stick-y F:Y,F:Y,...`: under `--trace-feel`, the left stick's y from frame `F` on
@@ -2775,6 +2777,10 @@ struct Args {
     /// mods folder and the pack's id, as the room names it and the handshake held every seat to.
     /// `None` outside the lobby and on the original's handling.
     room_handling: Option<(std::path::PathBuf, String)>,
+    /// The mods folder a lobby's ride reads this machine's flier packs from (P318,
+    /// [`online_local_fliers`]), which the ride's own `mods` is not on a disc track: `None` outside
+    /// the lobby (where [`mods_dir`] says it) and with the folder off.
+    room_machines: Option<std::path::PathBuf>,
     /// The trick pack a lobby's ride rides (MD19): this machine's mods folder and the pack's id, as
     /// the room names it and the handshake held every seat to. `None` outside the lobby.
     room_tricks: Option<(std::path::PathBuf, String)>,
@@ -3568,8 +3574,10 @@ async fn front_end(args: Args) -> Result<(), String> {
                 // machine's mods folder.
                 a.handling = Some(if room.handling.is_empty() { game_sim::handling::Handling::Original } else { game_sim::handling::Handling::MxVsAtv });
                 a.room_handling = (!room.handling.is_empty()).then(|| (shell.front.dir.join(track_mods::MODS_DIR), room.handling.clone()));
-                // MX Unleashed's fliers (MD80e): the room's handshake names no machine pack.
+                // MX Unleashed's fliers at the start (MD80e); a seat's pick mid-ride flies a flier
+                // pack's off this machine's mods folder where every seat holds it (P318).
                 a.fliers = Some(false);
+                a.room_machines = shell.front.menu.settings.mods.then(|| shell.front.dir.join(track_mods::MODS_DIR));
                 let overlay = args.overlay.unwrap_or(shell.front.menu.settings.overlay);
                 a.overlay = Some(overlay);
                 a.speedometer = Some(args.speedometer.unwrap_or(shell.front.menu.settings.speedometer));
@@ -7390,8 +7398,30 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // The ride's biplane, which a seat's switch online takes a copy of (N17), on the ride's
     // modifiers; and the machine this machine's player last picked online, which its pad carries.
     let plane_like = world.seats[0].garage.plane.as_ref().and_then(|p| p.flight.clone());
+    // The flier packs' planes this machine draws online (P318): each skin's pack, skin and place in
+    // `plane_drawn`, past the ride's own liveries (from `online_drawn_from`); their models, which
+    // the GPU is to have.
+    let (mut online_drawn, mut online_drawn_from, mut online_models) = (Vec::<(String, String, usize)>::new(), usize::MAX, Vec::<String>::new());
     if let Some(on) = online.as_mut() {
         on.planes(stock_plane[0], plane_like.as_ref());
+        // And the flier packs' planes this machine holds (P318), which a seat's pick flies where
+        // every seat's machine holds the pack too.
+        let res = member_ending(&disc, MACHINE_ARCHIVE).ok().and_then(|n| disc.res(&n).ok());
+        let (packs, local) = online_local_fliers(&args, res.as_ref(), plane_like.as_ref());
+        // Each drawn in its own model (P318), loaded now beside the ride's liveries, as the pause's
+        // pick offline loads one (`refit_fliers`).
+        online_drawn_from = plane_drawn.len();
+        for (l, f) in &local {
+            let Some(d) = Biplane::load_model(&mut assets, std::slice::from_ref(&f.files), &f.skin) else { continue };
+            let d = match f.phy_bytes().map(|b| biplane::mxvatv_seat(phy::Plane::read_mxvatv_bytes(&b, f.model_one()).plane.pelvis_box.position)) {
+                Some(seat) => d.with_seat(seat),
+                None => d,
+            };
+            online_drawn.push((l.skin.pack.clone(), l.skin.skin.clone(), plane_drawn.len()));
+            online_models.extend([d.model.clone(), biplane::PROP.to_string(), biplane::PROP_BROKEN.to_string()]);
+            plane_drawn.push(d);
+        }
+        on.fliers_here(packs, local.into_iter().map(|(l, _)| l).collect());
         // Each seat that starts in the plane stands in its own bay at tick 0 (N18): the lobby's
         // now, from the picks; `--peer`s' once every peer's card has said its own.
         on.bays_on(online_bays.clone(), online_bodies.clone());
@@ -7401,7 +7431,15 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             on.start_planes(flies)?;
         }
     }
+    if let (true, false, Some(r)) = (gpu_on, online_models.is_empty(), renderer_of(&mut offscreen, window)) {
+        r.upload_models(&assets, &online_models.iter().collect::<Vec<_>>());
+    }
     let mut online_want: Option<Kind> = None;
+    // The flier pack's plane this machine's player last picked online (P318, `online_fliers::byte`),
+    // which its pad carries beside the machine: 0, the ride's own biplane.
+    let mut online_flier = 0u8;
+    // The ride's offer the pause's flier rows were last made of.
+    let mut online_rows_for: Vec<online_fliers::Offered> = Vec::new();
     let mut online_frames = 0u32;
     // How many of `--online-script`'s words have gone (K29).
     let mut online_scripted = 0usize;
@@ -8165,6 +8203,15 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     match (i, Kind::parse(to.word())) {
                         (0, Ok(to)) if (to == Kind::Biplane && world.seats[0].garage.plane.is_some()) || to == Kind::Bike || car(to) => {
                             online_want = Some(to);
+                            // The plane in the skin the pause's picker left on (P318), where the
+                            // ride offers it; the ride's own where it does not any more.
+                            let word = Machine::Biplane.pack_word().unwrap_or_default();
+                            if let (Kind::Biplane, Some(on), Some(pick)) = (to, online.as_ref(), front.menu.picks.0.first().and_then(|p| p.flier(word)).cloned()) {
+                                online_flier = online_fliers::byte_of(on.flier_offer(), &pick.pack, &pick.skin, roster::ORIGINAL_PACK).unwrap_or_else(|| {
+                                    println!("fliers: {}/{} is not offered online: {}", pick.pack, pick.skin, online_flier_why(on.flier_offer(), &pick));
+                                    0
+                                });
+                            }
                             println!("vehicle: {} at the next tick every machine agrees", to.name());
                         }
                         _ => front.menu.note = Some("This ride has no such machine for you.".into()),
@@ -8633,10 +8680,18 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             let due = args.online_script[online_scripted..].iter().take_while(|(f, _)| u64::from(*f) <= on.ticks() + 1).count();
             online_scripted += due;
             for (_, word) in &args.online_script[online_scripted - due..online_scripted] {
-                match (word.as_str(), Kind::parse(word)) {
+                match (word.as_str(), parse_switch_word(word)) {
                     ("gas", _) => online_gas = true,
                     ("lift", _) => online_gas = false,
-                    (_, Ok(to)) => {
+                    // `biplane@pack/skin` (P318): that flier, where the ride offers it
+                    (_, Ok((to, Some(pick)))) if to == Kind::Biplane => match online_fliers::byte_of(on.flier_offer(), &pick.pack, &pick.skin, roster::ORIGINAL_PACK) {
+                        Some(byte) => {
+                            (online_want, online_flier) = (Some(to), byte);
+                            println!("vehicle: {word} at the next tick every machine agrees");
+                        }
+                        None => println!("fliers: {word} is not offered online: {}", online_flier_why(on.flier_offer(), &pick)),
+                    },
+                    (_, Ok((to, _))) => {
                         online_want = Some(to);
                         println!("vehicle: {} at the next tick every machine agrees", to.name());
                     }
@@ -8671,10 +8726,22 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                             paused,
                         }
                         .byte();
+                    // And the flier they picked (P318), which their next switch onto the plane takes.
+                    pad.0[net::FLIER] = if k == 0 { online_flier } else { 0 };
                     pad
                 })
                 .collect();
             let ended = on.frame_seats(&pads, &mut world.place, rigs[0].body.as_ref());
+            // The host tells the lobby the flier packs its seats fly now (P318), which a joiner must hold.
+            on.say_in_use();
+            // And the pause's picker offers the ride's fliers, greyed where some seat's machine lacks one.
+            if let Some(front) = front.as_deref_mut()
+                && online_rows_for.as_slice() != on.flier_offer()
+            {
+                online_rows_for = on.flier_offer().to_vec();
+                let rows = (!online_rows_for.is_empty()).then(|| online_flier_rows(front.menu.fliers(), &online_rows_for));
+                front.menu.set_online_fliers(rows);
+            }
             // The cars left on the ticks settled now, as offline's switch says them (N25).
             for said in on.cars_left(false) {
                 println!("{said}");
@@ -8896,6 +8963,16 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     took(rig, up);
                     if let (0, Some(front)) = (d, front.as_deref_mut()) {
                         front.menu.switched(0, menu::Machine::from_word(up.name()).unwrap_or_default());
+                    }
+                }
+                // Drawn in its flier pack's model where its plane is one (P318), else in its livery.
+                if let Some(plane) = seat.garage.plane.as_mut() {
+                    let skin = seat.sim.plane.as_ref().map_or(0, |f| f.skin);
+                    let offered = on.flier_offer().iter().find(|o| skin != 0 && o.byte == skin);
+                    match offered.and_then(|o| online_drawn.iter().find(|(p, k, _)| *p == o.pack && *k == o.skin)) {
+                        Some(&(_, _, l)) => plane.livery = l,
+                        None if plane.livery >= online_drawn_from => plane.livery = vehicle::livery(d),
+                        None => {}
                     }
                 }
             }
@@ -11130,6 +11207,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         for said in on.cars_left(true) {
             println!("{said}");
         }
+        println!("{}", on.fliers_flown());
         println!("{}", on.summary());
         // What the lobby said while the ride ran (a drop, the lobby as it is now, chat) is the menu's.
         if let Some(front) = front.as_deref_mut() {
@@ -11870,6 +11948,95 @@ fn flier_offers(packs: &[machine_packs::Pack]) -> Vec<roster::Flier> {
     out
 }
 
+/// This machine's packs and the plane skins of its flier packs for an online ride (P318): every
+/// installed pack as the handshake says it ([`lobby::installed_packs`]), and each flyable plane skin
+/// of a machine pack, in [`flier_offers`]' order, read as the offline ride reads a pick's
+/// ([`flier_refit::PlaneFiles`]) off the disc's machines' archive `res` — preloaded, so a switch to
+/// one mid-ride reads nothing. `like` is a plane of this ride's, whose area each takes. Each with
+/// its pack's files, which its model is drawn off. None with the mods folder off.
+fn online_local_fliers(args: &Args, res: Option<&Res>, like: Option<&Flight>) -> (Vec<openmx_net::Pack>, Vec<(online::LocalFlier, vehicle::PackFlier)>) {
+    let (Some(dir), Some(like)) = (args.room_machines.clone().or_else(|| mods_dir(args)), like) else { return (Vec::new(), Vec::new()) };
+    let packs = lobby::installed_packs(&dir, &mut Default::default());
+    let (machine, why) = machine_packs::find(&dir);
+    for w in why {
+        println!("fliers: {w}");
+    }
+    let word = Machine::Biplane.pack_word().unwrap_or_default();
+    let mut local = Vec::new();
+    for o in flier_offers(&machine).iter().filter(|o| o.pack != roster::ORIGINAL_PACK && o.machine == word && o.why.is_none()) {
+        let Some(pack) = machine.iter().find(|p| p.id == o.pack) else { continue };
+        let (Some(skin), Some(flier)) = (pack.skins.iter().find(|k| k.machine == word && k.skin == o.skin), pack.fliers.iter().find(|k| k.machine == word)) else { continue };
+        let Ok(files) = game_render::disc::Res::folder(&pack.folder) else { continue };
+        let pf = vehicle::PackFlier {
+            id: pack.id.clone(),
+            files,
+            phy: flier.phy.clone(),
+            skin: skin.skin.clone(),
+            second: skin.skin.clone(),
+            model_number: skin.model,
+            psg: skin.psg.clone(),
+            hull: skin.hull.clone(),
+            rays: skin.rays.clone(),
+        };
+        let read = flier_refit::PlaneFiles::read(res, Some(&pf));
+        let Some(stock) = read.stock() else { continue };
+        let mut plane = Flight { mxvatv: read.mxvatv.is_some(), ..Flight::new(&stock) };
+        if let Some(rays) = read.rays {
+            plane = plane.with_rays(rays);
+        }
+        plane.area = like.area;
+        let skin = online_fliers::Skin { pack: o.pack.clone(), skin: o.skin.clone(), name: o.name.clone() };
+        local.push((online::LocalFlier { skin, stock, like: plane }, pf));
+    }
+    (packs, local)
+}
+
+/// The pause's flier rows in an online ride (P318): this machine's (`local`, [`flier_offers`]'),
+/// each pack's plane greyed with the ride's why where `offer` greys it or has it not; the
+/// helicopters greyed, since online flies none (P216); and a row for each pack of the ride's that
+/// this machine lacks, greyed with who lacks it. MX Unleashed's stay as they are: the ride's own.
+fn online_flier_rows(local: &[roster::Flier], offer: &[online_fliers::Offered]) -> Vec<roster::Flier> {
+    let word = Machine::Biplane.pack_word().unwrap_or_default();
+    let mut out: Vec<roster::Flier> = local
+        .iter()
+        .map(|f| {
+            let why = match (f.pack == roster::ORIGINAL_PACK, f.machine == word) {
+                (true, true) => f.why.clone(),
+                (_, false) => Some("Online flies no helicopter".to_string()),
+                (false, true) => match offer.iter().find(|o| o.pack == f.pack && o.skin == f.skin) {
+                    Some(o) if o.open() => f.why.clone(),
+                    Some(o) => Some(o.why.clone()),
+                    None => Some("Not every machine in the ride holds this pack".to_string()),
+                },
+            };
+            roster::Flier { why, ..f.clone() }
+        })
+        .collect();
+    for o in offer.iter().filter(|o| o.skin.is_empty()) {
+        out.push(roster::Flier {
+            pack: o.pack.clone(),
+            game: o.name.clone(),
+            machine: word.to_string(),
+            skin: String::new(),
+            name: o.name.clone(),
+            model: 1,
+            about: String::new(),
+            why: Some(o.why.clone()),
+            preview: None,
+        });
+    }
+    out
+}
+
+/// Why the online ride's offer has not `pick` open (P318): who lacks its pack, or that no seat holds it.
+fn online_flier_why(offer: &[online_fliers::Offered], pick: &roster::FlierPick) -> String {
+    match offer.iter().find(|o| o.pack == pick.pack && (o.skin == pick.skin || o.skin.is_empty())) {
+        Some(o) if !o.open() => o.why.clone(),
+        Some(_) => format!("{} has no skin {}", pick.pack, pick.skin),
+        None => format!("{} is not one of the ride's flier packs", pick.pack),
+    }
+}
+
 /// The machines besides the fliers the Garage's machine picker offers (P315c), off the installed
 /// machine packs' manifests as the fliers are: every bike skin, by its `class`, listed beside the
 /// disc's bikes and greyed, since openmx rides only the disc's bikes; and once, by its name, each
@@ -11975,8 +12142,8 @@ fn seat_flier_picks(args: &Args, seat: usize) -> roster::Pick {
 /// The ride's fliers (MD80e, P315, P315b), one a livery ([`vehicle::livery`]): each kind that seat's
 /// garage picked ([`seat_flier_picks`]; `--fliers`/`--flier-skin` over every seat's), off its machine
 /// pack in the mods folder, every file the pack's manifest names; MX Unleashed's where the pick is
-/// theirs or its pack is gone, and always on `--online` (no handshake holds every seat to a pack yet,
-/// P318). Two seats on the same skin are told apart ([`vehicle::tell_apart`]). A ride on MX
+/// theirs or its pack is gone, and always at an online ride's start (a pick mid-ride flies a pack's
+/// plane where every seat's machine holds the pack, P318, `online_fliers`). Two seats on the same skin are told apart ([`vehicle::tell_apart`]). A ride on MX
 /// Unleashed's first skins says nothing.
 fn ride_fliers(args: &Args) -> Vec<vehicle::Fliers> {
     fliers_for(args, true)
@@ -12011,7 +12178,7 @@ fn fliers_for(args: &Args, say: bool) -> Vec<vehicle::Fliers> {
         return out;
     }
     if args.online.is_some() || args.room_handling.is_some() || args.room_tricks.is_some() {
-        say!("fliers: MX Unleashed's online, which has no handshake to hold every seat to a machine pack");
+        say!("fliers: MX Unleashed's at the start online; a pick mid-ride flies a pack's every machine holds (P318)");
         vehicle::tell_apart(&mut out);
         return out;
     }
@@ -13452,6 +13619,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         flier_picks: Vec::new(),
         handling_picks: Vec::new(),
         room_handling: None,
+        room_machines: None,
         room_tricks: None,
         trick_packs: None,
         handling_pack: None,
@@ -13723,11 +13891,11 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--trace-camera" => args.trace_camera = true,
             "--trace-air" => args.trace_air = true,
             "--online-script" => {
-                let bad = || "--online-script: FRAME:WORD,... (a machine, gas or lift)".to_string();
+                let bad = || "--online-script: FRAME:WORD,... (a machine, biplane@pack/skin, gas or lift)".to_string();
                 for pair in next("frame:word pairs")?.split(',') {
                     let (f, word) = pair.split_once(':').ok_or_else(bad)?;
                     let word = word.trim();
-                    if word != "gas" && word != "lift" && Kind::parse(word).is_err() {
+                    if word != "gas" && word != "lift" && parse_switch_word(word).is_err() {
                         return Err(bad());
                     }
                     args.online_script.push((f.trim().parse().map_err(|_| bad())?, word.to_string()));
@@ -14113,7 +14281,8 @@ fn parse_args() -> Result<Option<Args>, String> {
                      --trace-air prints the chassis' attitude and its rates instead;\n\
                      --trace-switch N rides the throttle alone for N frames first;\n\
                      --online-script F:WORD,... online, picks a machine (bike, biplane, buggy,\n\
-                     monster, baja) at session tick F, or holds Cross (gas) or lets it go (lift);\n\
+                     monster, baja, or biplane@pack/skin) at session tick F, or holds Cross\n\
+                     (gas) or lets it go (lift);\n\
                      --trace-stick-y F:Y,... sets the stick's y from frame F on, each until\n\
                      the next, and adds the backflip's columns to --trace-feel's line;\n\
                      --trace-camera prints each view's camera a frame (preset, distance, pitch,\n\

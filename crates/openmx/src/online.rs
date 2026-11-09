@@ -124,6 +124,38 @@ pub struct Online {
     /// N25: each seat's car after each tick run and not yet reported settled ([`CarAfter`]), by
     /// tick; a re-run writes its ticks again. What [`Online::cars_left`] says a car left from.
     car_ticks: std::collections::BTreeMap<usize, Vec<Option<CarAfter>>>,
+    /// The flier packs' planes a seat can pick (P318, [`crate::online_fliers`]).
+    fliers: Fliers,
+}
+
+/// One plane skin of a flier pack this machine holds (P318): the skin, its `biplane.phy`-like file
+/// before the modifiers, and a plane of this ride's built off its pack's files (its rays, its
+/// MX vs. ATV flight, the ride's area), which the ride's templates are built as.
+pub struct LocalFlier {
+    pub skin: crate::online_fliers::Skin,
+    pub stock: game_sim::phy::Plane,
+    pub like: Flight,
+}
+
+/// The flier packs' side of a ride (P318): what this machine holds, what every seat's machine
+/// holds, the offer that makes, and the planes a seat's pick takes a copy of.
+#[derive(Default)]
+struct Fliers {
+    local: Vec<LocalFlier>,
+    packs: Vec<openmx_net::Pack>,
+    /// `--peer`s: this machine's saved markers as the shell wrote them, which go out wrapped with
+    /// its packs ([`crate::online_fliers::wrap`]), and every seat's machine's packs once heard.
+    marks: Vec<u8>,
+    seat_packs: Vec<Option<Vec<openmx_net::Pack>>>,
+    offer: Vec<crate::online_fliers::Offered>,
+    /// The ride's fliers by byte: built once, before the first tick, off the offer then, on every
+    /// machine alike ([`rides::Flier`]).
+    templates: Vec<rides::Flier>,
+    built: bool,
+    /// The room changed since the offer was made: a seat came or went (P318's narrowing).
+    owed: bool,
+    /// The packs the host last said the ride rides ([`openmx_net::Cmd::InUse`]).
+    said: Vec<String>,
 }
 
 /// N25: a seat's car out after a tick (S249): which car, where its lane took it, and the car as it
@@ -205,6 +237,11 @@ struct Marks {
     offered: Option<Instant>,
 }
 
+/// `--peer`s (P318): whether seat `s` is its machine's first, the one its packs are heard for.
+fn lineup_first(lineup: &crate::net::Lineup, s: usize) -> bool {
+    lineup.seats.get(s).cloned().flatten().is_some_and(|p| lineup.mine(&p).first() == Some(&s))
+}
+
 /// How often a `--peer` machine offers its saved markers again until its ride ticks.
 const OFFER_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
 
@@ -264,6 +301,7 @@ impl Online {
             handed: false,
             spare: None,
             car_ticks: Default::default(),
+            fliers: Fliers::default(),
         })
     }
 
@@ -331,6 +369,7 @@ impl Online {
             handed: false,
             spare: None,
             car_ticks: Default::default(),
+            fliers: Fliers::default(),
         })
     }
 
@@ -371,6 +410,7 @@ impl Online {
             handed: false,
             spare: None,
             car_ticks: Default::default(),
+            fliers: Fliers::default(),
         })
     }
 
@@ -411,6 +451,7 @@ impl Online {
             handed: false,
             spare,
             car_ticks: Default::default(),
+            fliers: Fliers::default(),
         })
     }
 
@@ -509,7 +550,8 @@ impl Online {
     /// as every peer's come here. Not called, this machine's first seat brings none.
     pub fn saved_markers(&mut self, mine: &game_sim::markers::Markers, track: &str, bike: &str) {
         if let (Wire::Udp(udp), Some(marks)) = (&mut self.wire, &mut self.marks) {
-            udp.set_markers(crate::saved_markers::to_wire(mine, bike, track));
+            self.fliers.marks = crate::saved_markers::to_wire(mine, bike, track);
+            udp.set_markers(crate::online_fliers::wrap(&self.fliers.marks, &self.fliers.packs));
             (marks.track, marks.bike) = (track.to_string(), bike.to_string());
         }
     }
@@ -528,7 +570,13 @@ impl Online {
             return true;
         }
         let Some(all) = udp.markers(&self.net.lineup, &self.net.me) else { return false };
+        self.fliers.seat_packs = vec![None; all.len()];
         for (s, (sim, bytes)) in self.sims.iter_mut().zip(&all).enumerate() {
+            // and each seat's machine's packs (P318), wrapped with them
+            let (bytes, packs) = crate::online_fliers::unwrap(bytes);
+            if lineup_first(&self.net.lineup, s) {
+                self.fliers.seat_packs[s] = Some(packs);
+            }
             sim.markers = crate::saved_markers::from_wire(bytes, &marks.bike, &marks.track);
             let placed = sim.markers.placed();
             if placed > 0 {
@@ -536,7 +584,101 @@ impl Online {
             }
         }
         marks.owed = false;
+        self.offer_fliers();
         true
+    }
+
+    /// This machine's flier packs and their plane skins (P318), the ride's modifiers known
+    /// ([`Online::modifiers`]): the lobby's ride and a drop-in offer them at once off the room; a
+    /// `--peer` machine sends its packs with its saved markers, and offers them once every peer's
+    /// are in ([`Online::take_markers`]), before the first tick.
+    pub fn fliers_here(&mut self, packs: Vec<openmx_net::Pack>, local: Vec<LocalFlier>) {
+        (self.fliers.packs, self.fliers.local) = (packs, local);
+        if let Wire::Udp(udp) = &mut self.wire {
+            udp.set_markers(crate::online_fliers::wrap(&self.fliers.marks, &self.fliers.packs));
+        }
+        if self.room.is_some() {
+            self.offer_fliers();
+        }
+    }
+
+    /// The ride's offer of fliers again, off the room or every peer's packs as heard, and the
+    /// ride's templates the first time.
+    fn offer_fliers(&mut self) {
+        let (reference, seats): (Vec<openmx_net::Pack>, Vec<(usize, Option<Vec<openmx_net::Pack>>)>) = match &self.room {
+            Some(room) => {
+                let first = room.packs.get(openmx_net::HOST).or_else(|| room.peers().first().and_then(|p| room.packs.get(p)));
+                let seats = room.seats.iter().enumerate().filter_map(|(n, s)| Some((n, room.packs.get(&s.as_ref()?.peer).cloned()))).collect();
+                (first.cloned().unwrap_or_default(), seats)
+            }
+            None if !self.fliers.seat_packs.is_empty() => {
+                let seats: Vec<_> = self.fliers.seat_packs.iter().enumerate().filter(|(n, _)| lineup_first(&self.net.lineup, *n)).map(|(n, p)| (n, p.clone())).collect();
+                (seats.first().and_then(|s| s.1.clone()).unwrap_or_default(), seats)
+            }
+            // a ride opened to online alone: nobody else's machine to hold anything
+            None => return,
+        };
+        let ride = crate::online_fliers::ride_packs(&reference);
+        let seats: Vec<(usize, Option<&[openmx_net::Pack]>)> = seats.iter().map(|(n, p)| (*n, p.as_deref())).collect();
+        let skins: Vec<crate::online_fliers::Skin> = self.fliers.local.iter().map(|l| l.skin.clone()).collect();
+        self.fliers.offer = crate::online_fliers::offer(&ride, &seats, &self.fliers.packs, &skins);
+        if !self.fliers.built {
+            self.fliers.built = true;
+            self.fliers.templates = self
+                .fliers
+                .offer
+                .iter()
+                .filter(|o| o.open())
+                .filter_map(|o| {
+                    let l = self.fliers.local.iter().find(|l| l.skin.pack == o.pack && l.skin.skin == o.skin)?;
+                    let like = Flight { skin: o.byte, ..l.like.clone() };
+                    Some(rides::Flier { byte: o.byte, stock: l.stock.clone(), flight: rides::flier_on(&l.stock, &self.mods, &like) })
+                })
+                .collect();
+            let open = self.fliers.offer.iter().filter(|o| o.open()).count();
+            if !self.fliers.offer.is_empty() {
+                println!("online: flier offer {open} of {} open, {} built", self.fliers.offer.len(), self.fliers.templates.len());
+            }
+        }
+        for o in &self.fliers.offer {
+            let said = if o.open() { "open".to_string() } else { format!("greyed: {}", o.why) };
+            println!("online: flier {}/{} {said}", o.pack, o.skin);
+        }
+    }
+
+    /// What each seat flies as the ride ends (P318), for the shell's last lines: `online: fliers 1P
+    /// bike, 2P mxvatv_fliers/biplane3` — the ride's own biplane `biplane`, a flier pack's by its
+    /// pack and skin. The ride's last ticks run, which may be a guess.
+    pub fn fliers_flown(&self) -> String {
+        let seat = |sim: &Sim| match sim.plane.as_ref().map(|f| f.skin) {
+            None => "bike".to_string(),
+            Some(0) => "biplane".to_string(),
+            Some(b) => self.fliers.offer.iter().find(|o| o.byte == b).map_or(format!("flier {b:#04x}"), |o| format!("{}/{}", o.pack, o.skin)),
+        };
+        let seats: Vec<String> = self.sims.iter().enumerate().map(|(n, sim)| format!("{}P {}", n + 1, seat(sim))).collect();
+        format!("online: fliers {}", seats.join(", "))
+    }
+
+    /// The fliers this ride offers (P318), as this machine lists them, greyed where some seat's
+    /// machine lacks the pack.
+    pub fn flier_offer(&self) -> &[crate::online_fliers::Offered] {
+        &self.fliers.offer
+    }
+
+    /// The host (P318): tell the lobby the packs the ride's seats fly now, when they change, so a
+    /// peer dropping in must hold them ([`openmx_net::Cmd::InUse`]). Off the last tick run, a guess
+    /// among them: one undone is told again when it changes back.
+    pub fn say_in_use(&mut self) {
+        if !self.host() || !matches!(self.wire, Wire::Lobby { .. }) {
+            return;
+        }
+        let mut keys: Vec<String> = self.sims.iter().filter_map(|s| crate::online_fliers::key_of(&self.fliers.offer, s.plane.as_ref()?.skin)).collect();
+        keys.sort();
+        keys.dedup();
+        if keys != self.fliers.said {
+            self.fliers.said = keys.clone();
+            self.command(openmx_net::Cmd::InUse(keys));
+        }
     }
 
     /// The modifiers the ride is on now: the host's last change once every machine took it.
@@ -715,6 +857,7 @@ impl Online {
         let me = self.net.me.clone();
         let session = &mut self.net;
         let (spawn, arrived, room) = (&self.spawn, &mut self.arrived, &mut self.room);
+        let fliers_owed = &mut self.fliers.owed;
         let first = self.sims.first();
         let (template, bays, bodies) = (self.plane.as_ref(), &self.bays, &self.bay_bodies);
         match &mut self.wire {
@@ -812,6 +955,7 @@ impl Online {
                         }
                         Event::Room(ref r) => {
                             *room = Some(r.clone());
+                            *fliers_owed = true;
                             // one that left before it was taken on
                             let seated = r.peers();
                             for p in arrived.extract_if(.., |p| !seated.contains(p)) {
@@ -1005,6 +1149,9 @@ impl Online {
                 return Err(format!("online: {why}"));
             }
         };
+        if std::mem::take(&mut self.fliers.owed) {
+            self.offer_fliers();
+        }
         if !self.take_markers() {
             self.last = Instant::now();
             return Ok(());
@@ -1034,7 +1181,7 @@ impl Online {
                 }
             };
             // The ride steps with the cars Modded holds, which a change of the modifiers builds again.
-            let mut rides = Rides { sims: &mut self.sims, world: place, after: Some(&mut after), time_scale: self.time_scale, plane: self.plane.as_mut(), cars: &[] };
+            let mut rides = Rides { fliers: &mut self.fliers.templates, sims: &mut self.sims, world: place, after: Some(&mut after), time_scale: self.time_scale, plane: self.plane.as_mut(), cars: &[] };
             let cars = Some((&self.stock_cars[..], &mut self.cars));
             let game = Modded { rides: &mut rides, stock: &self.stock, mods: &mut self.mods, stock_plane: self.stock_plane.as_ref(), cars };
             let mut game = Watched { game, sims: |m| &m.rides.sims[..], ticks: &mut self.car_ticks };

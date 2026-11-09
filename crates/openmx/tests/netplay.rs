@@ -92,13 +92,13 @@ impl Machine for Ride {
                 sim.rider.ride.chassis.vel = Vf::new(0.5, 0.0, 0.0, 0.0);
             }
         };
-        let mut game = Rides { sims: &mut self.sims, world: &mut self.world, after: Some(&mut after), time_scale: None, plane: None, cars: &[] };
+        let mut game = Rides { fliers: &mut [], sims: &mut self.sims, world: &mut self.world, after: Some(&mut after), time_scale: None, plane: None, cars: &[] };
         np.frame(&mut game, local, ROUND.as_secs_f32());
     }
     fn hash(&self) -> u64 {
         let mut sims = self.sims.clone();
         let mut world = Flat::default();
-        Rides { sims: &mut sims, world: &mut world, after: None, time_scale: None, plane: None, cars: &[] }.hash()
+        Rides { fliers: &mut [], sims: &mut sims, world: &mut world, after: None, time_scale: None, plane: None, cars: &[] }.hash()
     }
 }
 
@@ -340,9 +340,9 @@ impl<M: Machine> Run<M> {
 fn a_pad_goes_on_the_wire_as_its_own_bytes() {
     for r in [Report::idle(), Report::missing(), mash(3, 77), mash(0, 1234)] {
         let w = wire(&r);
-        // the game's twenty bytes, then the machine the seat wants (N17), which no pad sets
+        // the game's twenty bytes, then the machine the seat wants (N17) and its flier (P318), which no pad sets
         assert_eq!(w.0[..], r.0[..net::WIRE], "the wire is the report's first {} bytes", net::WIRE);
-        assert_eq!((net::WIRE, r.0[net::SWITCH]), (21, 0));
+        assert_eq!((net::WIRE, r.0[net::SWITCH], r.0[net::FLIER]), (22, 0, 0));
         assert_eq!(unwire(w), r, "and comes back as the report");
     }
     assert_eq!(net::Pad::default(), wire(&Report::idle()));
@@ -481,7 +481,7 @@ fn a_desync_on_the_ride_is_caught_saved_and_resynced() {
         if np.me == "host" {
             let mut sims = sims(2);
             let mut world = Flat::default();
-            let mut game = Rides { sims: &mut sims, world: &mut world, after: None, time_scale: None, plane: None, cars: &[] };
+            let mut game = Rides { fliers: &mut [], sims: &mut sims, world: &mut world, after: None, time_scale: None, plane: None, cars: &[] };
             let hashes = report.replay(&mut game);
             // through the tick it was caught at, every pad was in; the newest ticks' may have been
             // guesses the host ran again on the real ones after the report was written
@@ -507,7 +507,7 @@ fn the_ride_says_every_seat_in_bytes() {
     let mut world = Flat::default();
     let mut there = sims(3);
     let pads = |t: usize| (0..3).map(|s| mash(s, t)).collect::<Vec<_>>();
-    let mut game = Rides { sims: &mut there, world: &mut world, after: None, time_scale: None, plane: None, cars: &[] };
+    let mut game = Rides { fliers: &mut [], sims: &mut there, world: &mut world, after: None, time_scale: None, plane: None, cars: &[] };
     for t in 0..200 {
         game.step(t, &pads(t));
     }
@@ -515,7 +515,7 @@ fn the_ride_says_every_seat_in_bytes() {
     let hash = game.hash();
     let mut here = sims(3);
     let mut world2 = Flat::default();
-    let mut mine = Rides { sims: &mut here, world: &mut world2, after: None, time_scale: None, plane: None, cars: &[] };
+    let mut mine = Rides { fliers: &mut [], sims: &mut here, world: &mut world2, after: None, time_scale: None, plane: None, cars: &[] };
     assert_ne!(mine.hash(), hash);
     mine.decode(&bytes).unwrap();
     assert_eq!(mine.hash(), hash);
@@ -529,7 +529,7 @@ fn the_ride_says_every_seat_in_bytes() {
     let before = mine.hash();
     let mut two = sims(2);
     let mut world3 = Flat::default();
-    let mut other = Rides { sims: &mut two, world: &mut world3, after: None, time_scale: None, plane: None, cars: &[] };
+    let mut other = Rides { fliers: &mut [], sims: &mut two, world: &mut world3, after: None, time_scale: None, plane: None, cars: &[] };
     let theirs = other.encode().unwrap();
     assert!(mine.decode(&theirs).unwrap_err().contains("2 seats in the state, 3 here"));
     let cut = mine.encode().unwrap();
@@ -550,14 +550,14 @@ fn every_seat_rides_its_own_preset_and_says_it_in_bytes() {
         sim.set_presets([p, 0]);
     }
     let pads = |t: usize| (0..3).map(|s| mash(s, t)).collect::<Vec<_>>();
-    let mut game = Rides { sims: &mut there, world: &mut world, after: None, time_scale: None, plane: None, cars: &[] };
+    let mut game = Rides { fliers: &mut [], sims: &mut there, world: &mut world, after: None, time_scale: None, plane: None, cars: &[] };
     for t in 0..300 {
         game.step(t, &pads(t));
     }
     let bytes = game.encode().unwrap();
     let mut here = sims(2);
     let mut world2 = Flat::default();
-    let mut mine = Rides { sims: &mut here, world: &mut world2, after: None, time_scale: None, plane: None, cars: &[] };
+    let mut mine = Rides { fliers: &mut [], sims: &mut here, world: &mut world2, after: None, time_scale: None, plane: None, cars: &[] };
     mine.decode(&bytes).unwrap();
     assert_eq!(mine.sims.iter().map(rides::preset).collect::<Vec<_>>(), [Some(1), Some(0), Some(2)], "the third seat grown, too");
     assert_eq!(mine.hash(), game.hash());
@@ -572,7 +572,7 @@ fn every_seat_rides_its_own_preset_and_says_it_in_bytes() {
         sim.set_presets([0, 0]);
     }
     let mut world3 = Flat::default();
-    let mut off = Rides { sims: &mut shipped, world: &mut world3, after: None, time_scale: None, plane: None, cars: &[] };
+    let mut off = Rides { fliers: &mut [], sims: &mut shipped, world: &mut world3, after: None, time_scale: None, plane: None, cars: &[] };
     for t in 300..600 {
         off.step(t, &pads(t));
     }
@@ -624,7 +624,7 @@ fn the_mashed_pads_are_a_ride() {
             s.up += c.dpad[2] as usize;
             s.speed = s.speed.max(sim.rider.ride.chassis.speed.0);
         };
-        let mut game = Rides { sims: &mut sims, world: &mut world, after: Some(&mut after), time_scale: None, plane: None, cars: &[] };
+        let mut game = Rides { fliers: &mut [], sims: &mut sims, world: &mut world, after: Some(&mut after), time_scale: None, plane: None, cars: &[] };
         for t in 0..ticks {
             game.step(t, &(0..3).map(|s| mash(s, t)).collect::<Vec<_>>());
         }
@@ -1404,7 +1404,7 @@ impl Machine for Ghosted {
             }
             seen[t] = Some(sim.rider.ghost);
         };
-        let mut game = Rides { sims: &mut self.ride.sims, world: &mut self.ride.world, after: Some(&mut after), time_scale: None, plane: None, cars: &[] };
+        let mut game = Rides { fliers: &mut [], sims: &mut self.ride.sims, world: &mut self.ride.world, after: Some(&mut after), time_scale: None, plane: None, cars: &[] };
         np.frame(&mut game, &local, ROUND.as_secs_f32());
     }
     fn hash(&self) -> u64 {
@@ -1478,7 +1478,7 @@ fn the_online_hash_and_bytes_carry_the_ghost() {
     let mut there = Ride::new(2);
     for t in 0..100 {
         let pads = [if t == 70 { chord() } else { mash(0, t) }, mash(1, t)];
-        Rides { sims: &mut there.sims, world: &mut there.world, after: None, time_scale: None, plane: None, cars: &[] }.step(t, &pads);
+        Rides { fliers: &mut [], sims: &mut there.sims, world: &mut there.world, after: None, time_scale: None, plane: None, cars: &[] }.step(t, &pads);
     }
     assert!(there.sims[0].rider.ghost.on && !there.sims[1].rider.ghost.on);
     let mut solid = Ride { sims: there.sims.clone(), world: Flat::default(), glitch: false };
@@ -1486,9 +1486,9 @@ fn the_online_hash_and_bytes_carry_the_ghost() {
     assert_eq!(solid.sims[0].hash(), there.sims[0].hash(), "a one-player sim's hash has no ghost in it");
     assert_ne!(solid.hash(), there.hash(), "the online hash has");
 
-    let bytes = Rides { sims: &mut there.sims, world: &mut there.world, after: None, time_scale: None, plane: None, cars: &[] }.encode().unwrap();
+    let bytes = Rides { fliers: &mut [], sims: &mut there.sims, world: &mut there.world, after: None, time_scale: None, plane: None, cars: &[] }.encode().unwrap();
     let mut here = Ride::new(2);
-    Rides { sims: &mut here.sims, world: &mut here.world, after: None, time_scale: None, plane: None, cars: &[] }.decode(&bytes).unwrap();
+    Rides { fliers: &mut [], sims: &mut here.sims, world: &mut here.world, after: None, time_scale: None, plane: None, cars: &[] }.decode(&bytes).unwrap();
     assert_eq!(here.sims[0].rider.ghost, there.sims[0].rider.ghost);
     assert_eq!(here.hash(), there.hash());
 }
@@ -1548,7 +1548,7 @@ fn measured(lineup: &str, link: &Link, rounds: u32) -> Run<Timed<Ride>> {
     }
     let mut sims = r.games[0].m.sims.clone();
     let mut world = Flat::default();
-    let game = Rides { sims: &mut sims, world: &mut world, after: None, time_scale: None, plane: None, cars: &[] };
+    let game = Rides { fliers: &mut [], sims: &mut sims, world: &mut world, after: None, time_scale: None, plane: None, cars: &[] };
     let t0 = std::time::Instant::now();
     let saves = 100;
     for _ in 0..saves {
@@ -1683,7 +1683,7 @@ impl Machine for ModRide {
     type S = rides::State;
     fn frame(&mut self, np: &mut Netplay<rides::State>, local: &[Report]) {
         let time_scale = self.mods.time_scale();
-        let mut rides = Rides { sims: &mut self.ride.sims, world: &mut self.ride.world, after: None, time_scale, plane: None, cars: &[] };
+        let mut rides = Rides { fliers: &mut [], sims: &mut self.ride.sims, world: &mut self.ride.world, after: None, time_scale, plane: None, cars: &[] };
         let mut game = rides::Modded { rides: &mut rides, stock: &self.stock, mods: &mut self.mods, stock_plane: None, cars: None };
         np.frame(&mut game, local, ROUND.as_secs_f32());
     }
@@ -1746,7 +1746,7 @@ fn the_host_changes_gravity_mid_ride_and_both_peers_stay_in_sync() {
                 half.resim(&Mods::original(), 0, &stock[s], sim);
             }
         }
-        let mut game = Rides { sims: &mut sims, world: &mut world, after: None, time_scale: None, plane: None, cars: &[] };
+        let mut game = Rides { fliers: &mut [], sims: &mut sims, world: &mut world, after: None, time_scale: None, plane: None, cars: &[] };
         assert_eq!(game.hash(), h.hashes[tick], "offline, the state before tick {tick} (the change at {t})");
         let pads: Vec<Report> = h.log[tick].iter().map(|&p| unwire(p)).collect();
         game.step(tick, &pads);
@@ -1927,6 +1927,7 @@ impl Machine for Switching {
             pad.0[net::SWITCH] = wanted(s, np.tick()).byte();
         }
         let mut game = Rides {
+            fliers: &mut [],
             sims: &mut self.ride.sims,
             world: &mut self.ride.world,
             after: None,
@@ -1998,7 +1999,7 @@ fn two_peers_take_the_plane_and_the_bike_back_and_stay_in_sync() {
     let mut took = [Vec::new(), Vec::new()];
     for tick in 0..n {
         let before: Vec<Vf> = seats.iter().map(|s| s.rider.ride.position()).collect();
-        let mut game = Rides { sims: &mut seats, world: &mut world, after: None, time_scale: None, plane: Some(&mut plane), cars: &[] };
+        let mut game = Rides { fliers: &mut [], sims: &mut seats, world: &mut world, after: None, time_scale: None, plane: Some(&mut plane), cars: &[] };
         assert_eq!(game.hash(), h.hashes[tick], "offline, the state before tick {tick}");
         if tick % 50 == 0 {
             // a seat's state in bytes and back (the resync's and the join's way) is the same state
@@ -2006,7 +2007,7 @@ fn two_peers_take_the_plane_and_the_bike_back_and_stay_in_sync() {
             let mut copy = sims(2);
             let mut world2 = Flat::default();
             let mut plane2 = template.clone();
-            let mut other = Rides { sims: &mut copy, world: &mut world2, after: None, time_scale: None, plane: Some(&mut plane2), cars: &[] };
+            let mut other = Rides { fliers: &mut [], sims: &mut copy, world: &mut world2, after: None, time_scale: None, plane: Some(&mut plane2), cars: &[] };
             other.decode(&bytes).unwrap();
             assert_eq!(other.hash(), h.hashes[tick], "tick {tick} through the codec");
             coded += game.sims.iter().filter(|s| s.plane.is_some()).count();
@@ -2092,7 +2093,7 @@ impl Machine for Starting {
             let to = (s == 1 && np.tick() >= BACK_ON_THE_BIKE).then_some(vehicle::Kind::Bike);
             pad.0[net::SWITCH] = vehicle::Wanted { to, ..Default::default() }.byte();
         }
-        let mut game = Rides { sims: &mut self.ride.sims, world: &mut self.ride.world, after: None, time_scale: None, plane: Some(&mut self.plane), cars: &[] };
+        let mut game = Rides { fliers: &mut [], sims: &mut self.ride.sims, world: &mut self.ride.world, after: None, time_scale: None, plane: Some(&mut self.plane), cars: &[] };
         np.frame(&mut game, &pads, ROUND.as_secs_f32());
         for (s, sim) in self.ride.sims.iter().enumerate() {
             self.flown[s] += sim.plane.is_some() as usize;
@@ -2142,7 +2143,7 @@ fn a_seat_starts_the_ride_in_the_plane_on_every_machine() {
     let mut flew = 0;
     let mut back = None;
     for tick in 0..n {
-        let mut game = Rides { sims: &mut seats, world: &mut world, after: None, time_scale: None, plane: Some(&mut plane), cars: &[] };
+        let mut game = Rides { fliers: &mut [], sims: &mut seats, world: &mut world, after: None, time_scale: None, plane: Some(&mut plane), cars: &[] };
         assert_eq!(game.hash(), h.hashes[tick], "offline, the state before tick {tick}");
         let pads: Vec<Report> = h.log[tick].iter().map(|&p| unwire(p)).collect();
         game.step(tick, &pads);
@@ -2184,7 +2185,7 @@ fn a_joiner_that_picked_the_plane_is_seated_flying_from_its_bay() {
     let flying = rides::spawn_flying(first, &marked, &template, bay(2, &template)).unwrap();
     let mut seats = sims(1);
     let mut world = Flat::default();
-    let mut game = Rides { sims: &mut seats, world: &mut world, after: None, time_scale: None, plane: Some(&mut template), cars: &[] };
+    let mut game = Rides { fliers: &mut [], sims: &mut seats, world: &mut world, after: None, time_scale: None, plane: Some(&mut template), cars: &[] };
     game.seat(2, &rides::spawn_on(&flying, &[(2, 3)])).unwrap();
     game.seat(1, &rides::spawn_on(&spawn, &[(1, 1)])).unwrap();
     let template = game_sim::flight::Flight::new(&file);
@@ -2224,7 +2225,7 @@ impl Machine for Pausing {
                 pad.0[net::SWITCH] = vehicle::Wanted { paused: true, ..Default::default() }.byte();
             }
         }
-        let mut game = Rides { sims: &mut self.ride.sims, world: &mut self.ride.world, after: None, time_scale: None, plane: None, cars: &[] };
+        let mut game = Rides { fliers: &mut [], sims: &mut self.ride.sims, world: &mut self.ride.world, after: None, time_scale: None, plane: None, cars: &[] };
         np.frame(&mut game, &pads, ROUND.as_secs_f32());
     }
     fn hash(&self) -> u64 {
@@ -2253,11 +2254,11 @@ fn one_seat_pauses_alone_online_and_both_peers_agree() {
     let mut paused = Vec::new();
     let mut moved_after = 0;
     for tick in 0..n {
-        let mut game = Rides { sims: &mut seats, world: &mut world, after: None, time_scale: None, plane: None, cars: &[] };
+        let mut game = Rides { fliers: &mut [], sims: &mut seats, world: &mut world, after: None, time_scale: None, plane: None, cars: &[] };
         assert_eq!(game.hash(), h.hashes[tick], "offline, the state before tick {tick}");
         let pads: Vec<Report> = h.log[tick].iter().map(|&p| unwire(p)).collect();
         let before = [seats[0].hash(), seats[1].hash()];
-        let mut game = Rides { sims: &mut seats, world: &mut world, after: None, time_scale: None, plane: None, cars: &[] };
+        let mut game = Rides { fliers: &mut [], sims: &mut seats, world: &mut world, after: None, time_scale: None, plane: None, cars: &[] };
         game.step(tick, &pads);
         let held = vehicle::Wanted::of(pads[0].0[net::SWITCH]).paused;
         assert!(!vehicle::Wanted::of(pads[1].0[net::SWITCH]).paused, "g never paused, tick {tick}");
@@ -2319,7 +2320,7 @@ fn a_paused_seat_is_passed_through_online() {
         pads[0].0[net::SWITCH] = vehicle::Wanted { paused: pause, ..Default::default() }.byte();
         let held = sims[0].clone();
         for tick in 0..30 {
-            Rides { sims: &mut sims, world: &mut world, after: None, time_scale: None, plane: None, cars: &[] }.step(tick, &pads);
+            Rides { fliers: &mut [], sims: &mut sims, world: &mut world, after: None, time_scale: None, plane: None, cars: &[] }.step(tick, &pads);
             if pause {
                 assert_eq!(sims[0].hash(), held.hash(), "the paused seat was moved, tick {tick}");
             }
@@ -2393,7 +2394,7 @@ impl Machine for Footed {
             let ch = &sim.rider.ride.chassis;
             seen[t] = Some(Foot { feet: sim.rider.feet, speed: ch.local_vel.z(), yaw: ch.ang_vel.y(), mode: sim.rider.body.machine.mode });
         };
-        let mut game = Rides { sims: &mut self.ride.sims, world: &mut self.ride.world, after: Some(&mut after), time_scale: None, plane: None, cars: &[] };
+        let mut game = Rides { fliers: &mut [], sims: &mut self.ride.sims, world: &mut self.ride.world, after: Some(&mut after), time_scale: None, plane: None, cars: &[] };
         np.frame(&mut game, &local, ROUND.as_secs_f32());
     }
     fn hash(&self) -> u64 {
@@ -2484,7 +2485,7 @@ fn an_online_plane_strikes_another_seats_bike() {
         let pads = [Report::idle(), if seat_two { Report::idle() } else { Report::missing() }];
         let mut struck = None;
         for tick in 0..12 {
-            Rides { sims: &mut sims, world: &mut world, after: None, time_scale: None, plane: None, cars: &[] }.step(tick, &pads);
+            Rides { fliers: &mut [], sims: &mut sims, world: &mut world, after: None, time_scale: None, plane: None, cars: &[] }.step(tick, &pads);
             struck = struck.or(sims[0].plane.as_ref().unwrap().record.struck);
         }
         (sims[0].plane.as_ref().unwrap().body.position.z(), struck)
@@ -2531,7 +2532,7 @@ fn two_online_planes_strike_each_other() {
         let pads = [Report::idle(), if seat_two { Report::idle() } else { Report::missing() }];
         let mut struck = [None, None];
         for tick in 0..20 {
-            Rides { sims: &mut sims, world: &mut world, after: None, time_scale: None, plane: None, cars: &[] }.step(tick, &pads);
+            Rides { fliers: &mut [], sims: &mut sims, world: &mut world, after: None, time_scale: None, plane: None, cars: &[] }.step(tick, &pads);
             for (s, sim) in sims.iter().enumerate() {
                 struck[s] = struck[s].or(sim.plane.as_ref().unwrap().record.struck);
             }
@@ -2547,4 +2548,49 @@ fn two_online_planes_strike_each_other() {
     eprintln!("seat 2 away: z {z:?}, struck {struck:?}");
     assert_eq!(struck[0], None, "nothing was struck");
     assert!(z[0] > z[1] + 40.0, "with seat 2 away the planes still met: z {z:?}");
+}
+
+/// P318: a seat's pick of a flier pack's plane (its pad's `net::FLIER` byte beside N17's switch)
+/// takes that flier's template ([`rides::Flier`]), not the ride's own biplane, its byte kept in the
+/// seat's plane ([`game_sim::flight::Flight::skin`]); a byte no template has takes the ride's own; and
+/// a flying seat's skin goes through its seat bytes (a join) and a resync's decode, which take the
+/// skin's rays and steps off its template.
+#[test]
+fn a_flier_pick_takes_its_template_and_its_skin_rides_the_seat_bytes() {
+    let Some(file) = the_discs_plane() else { return };
+    let mut own = game_sim::flight::Flight::new(&file);
+    let flier = game_sim::flight::Flight { mxvatv: true, skin: 0x12, ..game_sim::flight::Flight::new(&file) };
+    let mut fliers = [rides::Flier { byte: 0x12, stock: file, flight: flier }];
+    let mut seats = sims(2);
+    let mut world = Flat::default();
+    let mut game = Rides { fliers: &mut fliers, sims: &mut seats, world: &mut world, after: None, time_scale: None, plane: Some(&mut own), cars: &[] };
+    let pads = |picks: [u8; 2]| -> Vec<Report> {
+        picks
+            .iter()
+            .map(|&b| {
+                let mut pad = Report::idle();
+                pad.0[net::SWITCH] = vehicle::Wanted { to: Some(vehicle::Kind::Biplane), ..Default::default() }.byte();
+                pad.0[net::FLIER] = b;
+                pad
+            })
+            .collect()
+    };
+    // seat 1 picks the pack's plane; seat 2 a byte no template has, which is the ride's own
+    for t in 0..10 {
+        game.step(t, &pads([0x12, 0x35]));
+    }
+    let (a, b) = (game.sims[0].plane.clone().expect("seat 1 flies"), game.sims[1].plane.clone().expect("seat 2 flies"));
+    assert_eq!((a.skin, a.mxvatv), (0x12, true), "seat 1 on the flier's template");
+    assert_eq!((b.skin, b.mxvatv), (0, false), "seat 2 on the ride's own biplane");
+    // a join's seat bytes and a resync keep the skin
+    let bytes = rides::seat_bytes(&game.sims[0]);
+    let mut joined = sims(1).remove(0);
+    rides::from_seat_bytes(&mut joined, &bytes).unwrap();
+    assert_eq!(joined.plane.as_ref().map(|f| f.skin), Some(0x12));
+    let state = game.encode().expect("a ride's state in bytes");
+    let before = game.sims[0].hash();
+    game.sims[0].plane.as_mut().unwrap().skin = 0;
+    game.decode(&state).unwrap();
+    assert_eq!(game.sims[0].plane.as_ref().map(|f| (f.skin, f.mxvatv)), Some((0x12, true)));
+    assert_eq!(game.sims[0].hash(), before);
 }
