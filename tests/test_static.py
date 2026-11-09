@@ -71,6 +71,7 @@ class FakeCfg:
     ghidra_name = 'synth'
     ghidra_timeout = 600
     states: dict = {}
+    others: dict = {}  # no `[other.<name>]` programs
 
     def __init__(self, root: Path, serial: str = 'SLUS-12345', programs=('boot', 'game')):
         self.root = Path(root)

@@ -20,6 +20,8 @@ import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from ps2kit import uvtool  # noqa: E402
+uvtool.add()  # agent-runner from `uv tool install`, as ./kit finds it
 
 from agent_runner import plan as P  # noqa: E402
 from ps2kit import journal as J  # noqa: E402
@@ -265,7 +267,8 @@ def test_oracle_join():
 
 def kit_py(code, toml, **env):
     """Run `code` in a fresh interpreter with KIT_CONFIG at `toml`; its stdout."""
-    r = subprocess.run([sys.executable, '-c', f'import sys; sys.path.insert(0, {str(ROOT)!r}); {code}'],
+    r = subprocess.run([sys.executable, '-c', f'import sys; sys.path.insert(0, {str(ROOT)!r}); '
+                        f'from ps2kit import uvtool; uvtool.add(); {code}'],
                        capture_output=True, text=True, env={**os.environ, 'KIT_CONFIG': str(toml), **env})
     check(r.returncode == 0, f'{code[:40]} runs', r.stderr[-400:])
     return r.stdout
