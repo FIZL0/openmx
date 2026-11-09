@@ -169,7 +169,77 @@ def test_gate() -> None:
         check('to rerun pass' not in log, 'and no test reads as having run')
 
 
+# `[select]`: a uses nothing, b uses a, c stands alone; b's `names` test reads oracle.txt's "alpha".
+PICK = {
+    'Cargo.toml': '[workspace]\nmembers = ["a", "b", "c"]\nresolver = "2"\n',
+    'a/Cargo.toml': '[package]\nname = "a"\nversion = "0.1.0"\nedition = "2021"\n',
+    'a/src/lib.rs': '/// ```\n/// assert_eq!(a::two(), 2);\n/// ```\npub fn two() -> u32 { 2 }\n',
+    'a/tests/one.rs': '#[test]\nfn one() { assert_eq!(a::two(), 2); }\n',
+    'a/tests/other.rs': '#[test]\nfn other() {}\n',
+    'b/Cargo.toml': '[package]\nname = "b"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\na = { path = "../a" }\n',
+    'b/src/lib.rs': 'pub fn four() -> u32 { a::two() * 2 }\n',
+    'b/tests/uses.rs': '#[test]\nfn uses() { assert_eq!(b::four(), 4); }\n',
+    'b/tests/names.rs': '#[test]\nfn names() { let _ = "alpha"; }\n',
+    'c/Cargo.toml': '[package]\nname = "c"\nversion = "0.1.0"\nedition = "2021"\n',
+    'c/src/lib.rs': 'pub fn one() -> u32 { 1 }\n',
+    'c/tests/alone.rs': '#[test]\nfn alone() { assert_eq!(c::one(), 1); }\n',
+    'research/oracle.txt': '# names\nalpha boot 0x00100000 one\nbeta boot 0x00100010 two\n',
+    'research/c9/rows.csv': 'a,b\n',
+    'gate.toml': '[select]\noracle = "research/oracle.txt"\ndata = ["research"]\nignore = ["*.md"]\n',
+}
+
+
+def test_select() -> None:
+    if not shutil.which('cargo'):
+        print('  skip  no cargo on PATH')
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        w = Path(tmp)
+        for rel, text in PICK.items():
+            (w / rel).parent.mkdir(parents=True, exist_ok=True)
+            (w / rel).write_text(text)
+        g('init', '-q', '-b', 'main', cwd=w)
+        (w / '.gitignore').write_text('target/\ntimes.json\nlog\nCargo.lock\n')
+        g('add', '-A', cwd=w)
+        g('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'base', cwd=w)
+        g('checkout', '-qb', 'task/T2', cwd=w)
+        env = {**os.environ, 'CARGO_TARGET_DIR': str(w / 'target'), 'RUST_TEST_THREADS': '4'}
+
+        def ran(edit: dict, all_slow=False) -> set[str]:
+            for rel, text in edit.items():
+                (w / rel).write_text(text)
+            rc, _ = cargo_gate.run('cargo test -q --message-format=short', w, env, 4, w / 'log', 'main',
+                                   all_slow, w / 'times.json')
+            log = (w / 'log').read_text()
+            g('checkout', '-q', '--', '.', cwd=w)
+            for rel in edit:
+                if not g('ls-files', '--error-unmatch', rel, cwd=w).returncode == 0:
+                    (w / rel).unlink()
+            check(rc == 0, f'passes (rc {rc})')
+            got = {l.split('(', 1)[1].split(',')[0] for l in log.splitlines() if l.startswith('     Running ')}
+            return got | ({'doc'} if '   Doc-tests' in log else set())
+
+        got = ran({'c/src/lib.rs': 'pub fn one() -> u32 { 2 - 1 }\n'})
+        check(got == {'-p c --lib', '-p c --test alone', 'doc'}, f'a crate nothing uses: its own binaries ({sorted(got)})')
+        got = ran({'a/tests/one.rs': '#[test]\nfn one() { assert_eq!(a::two(), 1 + 1); }\n'})
+        check(got == {'-p a --test one'}, f'a test file: that binary alone, no doc tests ({sorted(got)})')
+        got = ran({'a/src/lib.rs': PICK['a/src/lib.rs'] + '\npub fn three() -> u32 { 3 }\n'})
+        check({'-p a --test one', '-p a --test other', '-p b --test uses', '-p b --test names', 'doc'} <= got
+              and not any(a.startswith('-p c') for a in got), f'a used crate: it and its users, not c ({sorted(got)})')
+        got = ran({'research/oracle.txt': PICK['research/oracle.txt'].replace('0x00100000', '0x00100004')})
+        check(got == {'-p b --test names'}, f"an oracle line: the binary naming it ({sorted(got)})")
+        got = ran({'research/c9/rows.csv': 'a,b\n1,2\n'})
+        check(got == set(), f'a research file no test names reaches nothing ({sorted(got)})')
+        got = ran({'notes.md': 'hi\n'})
+        check(got == set(), f'an ignored file reaches nothing ({sorted(got)})')
+        got = ran({'Cargo.toml': PICK['Cargo.toml'] + '\n'})
+        check({'-p a --test one', '-p b --test uses', '-p c --test alone'} <= got, f'the workspace manifest: everything ({sorted(got)})')
+        got = ran({'c/src/lib.rs': 'pub fn one() -> u32 { 2 - 1 }\n'}, all_slow=True)
+        check({'-p a --test one', '-p b --test uses', '-p c --test alone'} <= got, f'--all: everything ({sorted(got)})')
+
+
 if __name__ == '__main__':
     test_gate()
+    test_select()
     print(f'\n{ok} passed, {fail} failed')
     sys.exit(1 if fail else 0)

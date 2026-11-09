@@ -89,6 +89,140 @@ def changed(cwd: Path, shared: str) -> list[str] | None:
     return sorted(out)
 
 
+def _workspace(cwd: Path, env: dict) -> list[dict] | None:
+    """`cargo metadata --no-deps`'s packages, or None if cargo can't say."""
+    r = subprocess.run(['cargo', 'metadata', '--no-deps', '--format-version', '1'], cwd=str(cwd), env=env,
+                       capture_output=True, text=True)
+    if r.returncode:
+        return None
+    try:
+        return json.loads(r.stdout)['packages']
+    except (ValueError, KeyError):
+        return None
+
+
+def _rs_files(d: Path) -> list[Path]:
+    return [p for p in d.rglob('*.rs') if 'target' not in p.relative_to(d).parts]
+
+
+class Selection:
+    """What a change can reach: `whole` packages (every binary, doc tests too) and, in the others, `part`
+    test targets by name. Built by `select`."""
+    def __init__(self, everything: list[str]):
+        self.everything = everything
+        self.whole: set[str] = set()
+        self.part: dict[str, set[str]] = {}
+        self.libs: set[str] = set()  # packages with a library: the only ones `cargo test --doc -p` takes
+
+    def all(self) -> bool:
+        return self.whole >= set(self.everything)
+
+    def keeps(self, pkg: str, kind: str, name: str) -> bool:
+        return pkg in self.whole or (kind == 'test' and name in self.part.get(pkg, ()))
+
+
+def select(cwd: Path, shared: str, env: dict, sel: dict) -> Selection | None:
+    """gate.toml `[select]`: the packages and test binaries the work can change, or None for all of them.
+
+    A file in a package's `tests/` that is a test target's root reaches that binary alone; any other file in
+    a package (src, Cargo.toml, a tests/ helper or data) reaches the package and every workspace package that
+    depends on it, dev-dependencies included. `oracle`'s edited lines reach the binaries whose sources name
+    one of their names in quotes (`addr("name")`); a file under one of `data` reaches the binaries whose
+    sources name its path, or its directory below `data`. `ignore` globs reach nothing. Anything else (the
+    workspace's Cargo.toml or lock, the kit, the gate's own config) reaches everything."""
+    touched = changed(cwd, shared)
+    pkgs = _workspace(cwd, env) if touched is not None else None
+    if pkgs is None:
+        return None
+    root = cwd.resolve()
+    names = [p['name'] for p in pkgs]
+    out = Selection(names)
+    out.libs = {p['name'] for p in pkgs if any(k in ('lib', 'rlib') for t in p['targets'] for k in t['kind'])}
+    dirs = {p['name']: Path(p['manifest_path']).parent.resolve() for p in pkgs}
+    users: dict[str, set[str]] = {n: set() for n in names}
+    for p in pkgs:
+        for d in p['dependencies']:
+            if d['name'] in users and d['name'] != p['name']:
+                users[d['name']].add(p['name'])
+    tests = {p['name']: {Path(t['src_path']).resolve(): t['name'] for t in p['targets'] if 'test' in t['kind']}
+             for p in pkgs}
+
+    def dirty(pkg: str) -> None:
+        todo = [pkg]
+        while todo:
+            n = todo.pop()
+            if n not in out.whole:
+                out.whole.add(n)
+                todo += users[n]
+
+    def owner(path: Path) -> str | None:
+        best = None
+        for n, d in dirs.items():
+            if path.is_relative_to(d) and (best is None or len(d.parts) > len(dirs[best].parts)):
+                best = n
+        return best
+
+    sources: list[tuple[str, Path, str]] | None = None
+
+    def naming(words: list[str]) -> None:
+        """Every source that holds one of `words`: its test binary, else its package."""
+        nonlocal sources
+        if sources is None:
+            sources = [(n, f, f.read_text(encoding='utf-8', errors='replace')) for n, d in dirs.items()
+                       for f in _rs_files(d)]
+        for n, f, text in sources:
+            if not any(w in text for w in words):
+                continue
+            if f in tests[n]:
+                out.part.setdefault(n, set()).add(tests[n][f])
+            elif f.is_relative_to(dirs[n] / 'tests'):
+                out.whole.add(n)
+            else:
+                dirty(n)
+
+    oracle, data = sel.get('oracle'), [str(d).rstrip('/') + '/' for d in sel.get('data', [])]
+    for f in touched:
+        if any(fnmatch.fnmatch(f, g) for g in sel.get('ignore', [])):
+            continue
+        path = (root / f).resolve()
+        if f == oracle:
+            words = sorted({l[1:].split()[0] for l in _diff_lines(cwd, shared, f)
+                            if l[1:].strip() and not l[1:].lstrip().startswith('#')})
+            naming([f'"{w}"' for w in words])
+        elif (top := next((d for d in data if f.startswith(d)), None)) is not None:
+            under = f[len(top):].split('/')[0]
+            naming([f, f'{top}{under}', f'"{under}"'])
+        elif (pkg := owner(path)) is not None:
+            if path in tests[pkg]:
+                out.part.setdefault(pkg, set()).add(tests[pkg][path])
+            else:
+                dirty(pkg)
+        else:
+            return None
+    for n in out.whole:
+        out.part.pop(n, None)
+    return out
+
+
+def _pkg_test(args: str) -> tuple[str, str, str]:
+    """`-p game-sim --test replay` -> ('game-sim', 'test', 'replay'); a `--lib` or `--bin` -> its kind."""
+    w = args.split()
+    pkg = w[w.index('-p') + 1] if '-p' in w else ''
+    for flag, kind in (('--test', 'test'), ('--bin', 'bin'), ('--lib', 'lib')):
+        if flag in w:
+            i = w.index(flag)
+            return pkg, kind, w[i + 1] if kind != 'lib' and i + 1 < len(w) else ''
+    return pkg, '', ''
+
+
+def _diff_lines(cwd: Path, shared: str, f: str) -> list[str]:
+    """The added and removed lines of `f` since the shared branch, uncommitted ones too."""
+    g = lambda *a: subprocess.run(['git', *a], cwd=str(cwd), capture_output=True, text=True)
+    base = g('merge-base', 'HEAD', shared).stdout.strip()
+    r = g('diff', '-U0', base, '--', f)
+    return [l for l in r.stdout.splitlines() if l[:1] in '+-' and not l.startswith(('+++', '---'))]
+
+
 class Binary:
     def __init__(self, exe: str, pkg: str, kind: str, name: str, manifest: str):
         self.exe, self.pkg, self.kind, self.name = exe, pkg, kind, name
@@ -139,12 +273,14 @@ def build(cmd: str, cwd: Path, env: dict, log) -> tuple[int, list[Binary]]:
     return p.wait(), bins
 
 
-def variants(cmd: str, cwd: Path, env: dict, log, gc: dict) -> tuple[int, list[Binary]]:
+def variants(cmd: str, cwd: Path, env: dict, log, gc: dict, pick: Selection | None = None) -> tuple[int, list[Binary]]:
     """gate.toml's `[[variant]]`s: each one's binaries built with its features into its target directory,
-    named by the args that rerun them, filter and all."""
+    named by the args that rerun them, filter and all; with a `pick`, only the ones it keeps."""
     out = []
     for v in gc.get('variant') or []:
         tests = [' '.join(str(t).split()) for t in v.get('tests', [])]
+        if pick is not None:
+            tests = [t for t in tests if pick.keeps(*_pkg_test(t))]
         if not tests:
             continue
         flags = (f' --features {v["features"]}' if v.get('features') else '') + \
@@ -199,12 +335,29 @@ def run(cmd: str, cwd: Path, env: dict, jobs: int, log_path: Path, shared: str, 
     notes = []
     with open(log_path, 'w', encoding='utf-8') as log:
         log.write(f'(cwd {cwd}, {jobs} jobs, test binaries side by side)\n\n')
-        rc, bins = build(cmd, cwd, env, log)
+        pick = select(cwd, shared, env, gc['select']) if gc.get('select') and not all_slow else None
+        if pick is not None and pick.all():
+            pick = None
+        if pick is None:
+            rc, bins = build(cmd, cwd, env, log)
+        else:
+            rc, bins = 0, []
+            builds = ([' '.join(f'-p {n}' for n in sorted(pick.whole))] if pick.whole else []) + \
+                [f'-p {n} ' + ' '.join(f'--test {t}' for t in sorted(ts)) for n, ts in sorted(pick.part.items())]
+            for b in builds:
+                rc, got = build(f'{cmd} {b}', cwd, env, log)
+                bins += got
+                if rc:
+                    return rc, notes
         if rc:
             return rc, notes
-        rc, more = variants(cmd, cwd, env, log, gc)
+        rc, more = variants(cmd, cwd, env, log, gc, pick)
         if rc:
             return rc, notes
+        if pick is not None:
+            notes.append(f'ran {len(bins) + len(more)} test binaries, the ones this work can reach'
+                         f'{" (" + ", ".join(sorted(pick.whole)) + " whole)" if pick.whole else ""}'
+                         ' (./kit check --all runs every one)')
 
         skipped = []
         if not all_slow and gc.get('slow'):
@@ -233,8 +386,12 @@ def run(cmd: str, cwd: Path, env: dict, jobs: int, log_path: Path, shared: str, 
         workers = max(1, jobs)
         benv = {**env, 'RUST_TEST_THREADS': env.get('RUST_TEST_THREADS', str(jobs))}
 
+        doc_pkgs = '' if pick is None else ' '.join(f'-p {n}' for n in sorted(pick.whole & pick.libs))
+
         def doc_tests():
-            r = subprocess.run(f'{re.sub(r"--message-format(=|\s+)\S+", "", cmd)} --doc', shell=True,
+            if pick is not None and not doc_pkgs:
+                return 0, ''
+            r = subprocess.run(f'{re.sub(r"--message-format(=|\s+)\S+", "", cmd)} --doc {doc_pkgs}', shell=True,
                                cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                env=benv, errors='replace')
             return r.returncode, r.stdout
