@@ -157,6 +157,9 @@ pub enum Out {
     /// (an answer), the interrupts on again.
     SenderSend { sender: u32, arg: u32, packet: Packet },
     NetQueue { conn: u32, head: [u8; 2], packet: Packet, flags: u32 },
+    /// A full queue out the connection's socket ([`net_queue`]; the socket, [`FLUSH_BUFFER`]'s
+    /// length, reliable on the second pair's): the answer negative when it failed.
+    NetFlush { socket: u32, len: u32, reliable: bool },
     Hash { f: u32, key: u32 },
     SameKey { f: u32, a: u32, b: u32 },
     IrqOff,
@@ -1132,6 +1135,116 @@ pub fn sender_send(m: &mut impl Updates, sender: u32, arg: u32, packet: Packet, 
     let id = m.word(sender) as u8;
     let flags = if a4 == 0 { m.word(sender.wrapping_add(0x10)) } else { a5 };
     m.out(Out::NetQueue { conn: arg, head: [id, packet.len as u8], packet, flags });
+}
+
+/// The connection's five message queues (each four words: the count byte's address, the start,
+/// the end, the room), its socket (`< 0` none) and its connected word.
+pub const CONN_SOCKET: u32 = 0x28;
+pub const CONN_UP: u32 = 0x2c;
+pub const CONN_QUEUES: [u32; 5] = [0xdc, 0xec, 0xfc, 0x10c, 0x11c];
+/// The buffer a full queue is copied to on its way out the socket.
+pub const FLUSH_BUFFER: u32 = 0x0044_5cc0;
+
+/// **The connection's queue** (F31b5k; the end of [`sender_send`]): a message (the two header bytes,
+/// then the packet) into one of the connection's queues by its flags. Bit 1: the second pair
+/// (`+0xfc`, then `+0x10c`); else bit 4: `+0x11c`, only when connected, and always taken; else the
+/// first pair (`+0xdc`, then `+0xec`). When a pair's first queue is full and the connection is up
+/// (its `+0x2c` set, its socket not negative), the queue goes out the socket ([`Out::NetFlush`],
+/// through [`FLUSH_BUFFER`]; bit 1's the reliable send) and is emptied when that does not fail;
+/// either way the message then tries the pair's second queue. 1 when a queue took it.
+pub fn net_queue(m: &mut impl Updates, conn: u32, head: [u8; 2], packet: &Packet, flags: u32) -> u32 {
+    let pair = if flags & 2 != 0 {
+        [0xfc, 0x10c]
+    } else if flags & 0x10 != 0 {
+        if conn_up(m, conn) {
+            queue_push(m, conn.wrapping_add(0x11c), head, packet);
+        }
+        return 1;
+    } else {
+        [0xdc, 0xec]
+    };
+    let q = conn.wrapping_add(pair[0]);
+    if queue_push(m, q, head, packet) {
+        return 1;
+    }
+    if conn_up(m, conn) {
+        let (base, start) = (m.word(q), m.word(q.wrapping_add(4)));
+        let len = m.word(q.wrapping_add(8)).wrapping_sub(start);
+        for k in 0..len {
+            let b = byte(m, start.wrapping_add(k));
+            set_byte(m, FLUSH_BUFFER.wrapping_add(k), b);
+        }
+        let socket = m.word(conn.wrapping_add(CONN_SOCKET));
+        if (m.out(Out::NetFlush { socket, len, reliable: flags & 2 != 0 }) as i32) >= 0 {
+            set_byte(m, base, 0);
+            let start = m.word(q.wrapping_add(4));
+            m.set(q.wrapping_add(8), start.wrapping_add(1));
+        }
+    }
+    u32::from(queue_push(m, conn.wrapping_add(pair[1]), head, packet))
+}
+
+/// The connection up: its `+0x2c` set and its socket not negative.
+fn conn_up(m: &mut impl Updates, conn: u32) -> bool {
+    m.word(conn.wrapping_add(CONN_UP)) != 0 && (m.word(conn.wrapping_add(CONN_SOCKET)) as i32) >= 0
+}
+
+/// **One queue's push**: the count byte at `q+0`, its messages (two header bytes, the second the
+/// data's length, then the data) from `start + 1` to `end`, `room` bytes. A message that does not
+/// fit drops messages from the front: up to and including the first whose own size plus the room
+/// free (that room alone, not what the drops before it freed) covers the new one; if none within the
+/// count does, the queue is left as it is and the push fails (false). Dropping every counted message
+/// empties the queue (the count byte cleared, `end = start + 1`). An empty queue still looks at one
+/// message past its end.
+fn queue_push(m: &mut impl Updates, q: u32, head: [u8; 2], packet: &Packet) -> bool {
+    let need = u32::from(head[1]) + 2;
+    let base = m.word(q);
+    let mut count = byte(m, base);
+    let (start, end, room) = (m.word(q.wrapping_add(4)), m.word(q.wrapping_add(8)), m.word(q.wrapping_add(12)));
+    let used = end.wrapping_sub(start);
+    if room < need.wrapping_add(used) {
+        let free = room.wrapping_sub(used);
+        let first = start.wrapping_add(1);
+        let (mut p, mut n) = (first, 0u32);
+        let mut got;
+        loop {
+            let l = byte(m, p.wrapping_add(1));
+            n += 1;
+            got = l.wrapping_add(2).wrapping_add(free);
+            p = p.wrapping_add(l).wrapping_add(2);
+            if (n as i32) >= count as i32 || got >= need {
+                break;
+            }
+        }
+        if got < need {
+            return false;
+        }
+        if (n as i32) < count as i32 {
+            // A forward copy down, as the original's memcpy does it.
+            let len = end.wrapping_sub(p);
+            for k in 0..len {
+                let b = byte(m, p.wrapping_add(k));
+                set_byte(m, first.wrapping_add(k), b);
+            }
+            m.set(q.wrapping_add(8), first.wrapping_add(len));
+            count = count.wrapping_sub(n) & 0xff;
+        } else {
+            m.set(q.wrapping_add(8), first);
+            count = 0;
+        }
+        set_byte(m, base, count);
+    }
+    let at = m.word(q.wrapping_add(8));
+    set_byte(m, at, u32::from(head[0]));
+    set_byte(m, at.wrapping_add(1), u32::from(head[1]));
+    let at = at.wrapping_add(2);
+    m.set(q.wrapping_add(8), at);
+    for k in 0..u32::from(head[1]) {
+        set_byte(m, at.wrapping_add(k), u32::from(packet.bytes[k as usize]));
+    }
+    m.set(q.wrapping_add(8), at.wrapping_add(u32::from(head[1])));
+    set_byte(m, base, count.wrapping_add(1));
+    true
 }
 
 /// The trick step's slack past a clip's length, a tuning word (F42).
