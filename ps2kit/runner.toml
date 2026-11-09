@@ -10,6 +10,9 @@
 mode = "d"
 command = "./kit"
 test = "./kit check --all"
+# The gate's limit counts the wait for a check slot: at load 90-110 with three slots' `kit done` holding the
+# locks, a clean merge whose tests take 10 min ran past agent-runner's default 3600 s twice (F31b5k, 11-09).
+timeout = 14400
 rules = "AGENT.md"
 untested = ["*.md", ".github/*"]
 # A post-merge failure is rerun alone before it parks the branch: the netplay/lobby/udp kind of test times out
