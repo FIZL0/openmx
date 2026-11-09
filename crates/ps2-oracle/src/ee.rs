@@ -55,6 +55,8 @@ pub struct Ee {
     pub reads: std::cell::RefCell<Option<BTreeSet<u32>>>,
     /// Instructions executed by the last call.
     pub steps: u64,
+    /// Instructions executed by every call since the machine was made (nested calls too, counted once).
+    pub ran: u64,
     /// The stack pointer each call starts with. Defaults to 16 KB below the top of RAM; move it if a RAM
     /// dump you loaded has live data there.
     pub stack: u32,
@@ -96,6 +98,7 @@ impl Ee {
             written: BTreeSet::new(),
             reads: std::cell::RefCell::new(None),
             steps: 0,
+            ran: 0,
             stack,
             hooks: BTreeMap::new(),
         }
@@ -150,6 +153,7 @@ impl Ee {
             }
             self.step();
             self.steps += 1;
+            self.ran += 1;
         }
     }
 
