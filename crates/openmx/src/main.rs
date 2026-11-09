@@ -6011,6 +6011,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         .collect();
     // Where the first seat's path cars stood before the last tick (S81), which the picture blends from.
     let mut cars_before: Vec<game_sim::math::Mat4> = Vec::new();
+    // And where its knockable props' bodies stood (V126), which the picture blends them from.
+    let mut props_before: Vec<game_sim::contact::Node> = Vec::new();
     // The knockable props' bodies (S131), each by its scene model's place in the picture's list (found
     // by its name and place), with where that model stands as loaded and the body's node at rest
     // there: a body off that node is drawn at its node, one put back where the scene stands it.
@@ -8587,6 +8589,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         }
         traffic_before = traffic_time;
         cars_before = world.seats[0].sim.traffic.cars.iter().map(|c| c.pose).collect();
+        props_before = world.seats[0].sim.traffic.props.nodes().map(|(_, n)| *n).collect();
         }
         // Off to the sim thread (N23a): the world and the engine go, and the picture drawn meanwhile
         // is the one the last tick ended on, from a copy of the seats and a place with its ground.
@@ -9774,16 +9777,21 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         if !creature_copies.is_empty() {
             creatures_at = creatures.placed(blend.0);
         }
-        // The knockable props (S131) where the first seat's bodies are, on the last tick: both
-        // pictures draw the scene's list, so a moved prop is moved there.
-        for ((_, node), seen) in world.seats[0].sim.traffic.props.nodes().zip(&prop_looks) {
+        // The knockable props (S131) where the first seat's bodies are, blended between the tick
+        // before the last and the last (V126) as the cars are: both pictures draw the scene's list,
+        // so a moved prop is moved there, and one standing still on both ticks is left as it is.
+        for (i, ((_, node), seen)) in world.seats[0].sim.traffic.props.nodes().zip(&prop_looks).enumerate() {
             let Some((k, made, rest)) = seen else { continue };
-            let shown = match node == rest {
+            let at = |node: &game_sim::contact::Node| match node == rest {
                 true => made.clone(),
                 false => {
                     let xyz = |v: Vf| v3(v.x(), v.y(), v.z());
                     view::Placement { model: made.model.clone(), pos: xyz(node.origin), look: xyz(node.rows[2]), up: xyz(node.rows[1]) }
                 }
+            };
+            let shown = match props_before.get(i).filter(|b| *b != node) {
+                Some(before) => blend.placement(&at(before), &at(node)),
+                None => at(node),
             };
             let drawn = &mut look.models[*k];
             if (drawn.pos, drawn.look, drawn.up) != (shown.pos, shown.look, shown.up) {
