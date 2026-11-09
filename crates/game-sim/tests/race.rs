@@ -19,10 +19,17 @@
 //! 5. **The sx01 image**: S196's RAM image of an sx01 race before its start, read as the port reads
 //!    it — the class, the lane table, the start's timeline as a reset left it, and the one rider's lane,
 //!    place and spot on the grid.
+//! 6. **The lap line** (S13c): the score card's line test on 20,000 generated cards (every race kind,
+//!    ghost cards, lap records, stray words in every float), against [`LapRules::line`], compared on its
+//!    answer, every listener call in order, every word of the card and the ghost's card, the manager's
+//!    flags and its free lap records.
 
-use game_sim::race::{Crossing, Gate, GridStart, LANES, Seen, Supercross, flags};
+use game_sim::race::{
+    Course, Crossing, Gate, GridStart, LANES, LapCard, LapRecord, LapRules, LineNotice, Seen, Spot, Supercross, card_flags, flags,
+    race_flags, race_kind,
+};
 use game_sim::rng::Rng;
-use ps2_float::{F, Vf};
+use ps2_float::{F, Vf, fpu};
 use ps2_oracle::{Ee, addr, game_or_skip, skip};
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -761,4 +768,402 @@ fn the_sx01_image_holds_the_activity_as_ported() {
     let now = quad(&ee, card + 0x60);
     // The rider has sat on its bike for a while since: the ground and the suspension move it a little.
     assert!((spot.x() - now.x()).abs() < 0.05 && (spot.z() - now.z()).abs() < 0.05, "the grid spot {spot:?}, the rider at {now:?}");
+}
+
+// --- the lap line (S13c) ---------------------------------------------------------------------------
+
+const L_MGR: u32 = 0x01a0_0000;
+const L_TRACK: u32 = 0x01a0_1000;
+const L_LINE: u32 = 0x01a0_2000;
+const L_CARD: u32 = 0x01a0_3000;
+const L_GHOST: u32 = 0x01a0_4000;
+const L_OWNER: u32 = 0x01a0_5000;
+const L_CHAIN: u32 = 0x01a0_5100;
+const L_LISTENER: u32 = 0x01a0_5200;
+const L_VT: u32 = 0x01a0_6000;
+const L_LINES: u32 = 0x01a0_7000;
+const L_GHOST_LINES: u32 = 0x01a0_7100;
+const L_POOL: u32 = 0x01a0_8000;
+const L_RECORDS: u32 = 0x01a0_9000;
+const L_HOOKS: u32 = 0x01a0_a000;
+
+/// Who a listener call went to: the card's owner, the card's chain, or the manager's listener.
+const OWNER: u32 = 0;
+const CHAIN: u32 = 1;
+const LISTENER: u32 = 2;
+
+/// The calls one notice makes, as (who, vtable slot), with what is there to hear them.
+fn told(n: LineNotice, owner: bool, chain: bool) -> Vec<(u32, u32)> {
+    let fan = |o: u32, l: u32| {
+        let mut v = Vec::new();
+        if owner {
+            v.push((OWNER, o));
+        }
+        if chain {
+            v.push((CHAIN, o));
+        }
+        v.push((LISTENER, l));
+        v
+    };
+    match n {
+        LineNotice::Beside => fan(0x28, 0x20),
+        LineNotice::Through => fan(0x24, 0x1c),
+        LineNotice::Started => vec![(LISTENER, 0x4c)],
+        // The original tells the owner, then walks a list starting at the owner again (not the
+        // card's chain): the owner hears it twice.
+        LineNotice::BestLap => {
+            let mut v = if owner { vec![(OWNER, 0x10), (OWNER, 0x10)] } else { vec![] };
+            v.push((LISTENER, 0xc));
+            v
+        }
+        LineNotice::Finished => fan(0x18, 0x14),
+        LineNotice::RunOver => vec![(LISTENER, 0x54)],
+        LineNotice::GhostBest => vec![(LISTENER, 0x58)],
+        LineNotice::GhostReady => vec![(LISTENER, 0x50)],
+        LineNotice::Lap => fan(0xc, 8),
+    }
+}
+
+/// A card's time word: mostly an ordinary clock, now and then zero, negative or a stray pattern.
+fn clock(p: &mut Pick, hi: f32) -> F {
+    let x = match p.below(8) {
+        0 => 0.0,
+        1 => -p.range(0.0, 10.0),
+        _ => p.range(0.0, hi),
+    };
+    F(p.stray(x))
+}
+
+fn spot(p: &mut Pick) -> Spot {
+    let along = p.range(0.0, 2000.0);
+    Spot { path: p.next() as u32, piece: p.below(40) as u32, along: F(p.stray(along)) }
+}
+
+fn lap_card(p: &mut Pick, lines: usize) -> LapCard {
+    let mut flags = p.next() & 0xffff_ffff_fe00_feec;
+    for (bit, odds) in [
+        (card_flags::OUT, 4),
+        (card_flags::TAKING_PART, 2),
+        (card_flags::NO_LINE, 10),
+        (card_flags::FAST_LAP, 2),
+        (card_flags::BEHIND_LINE, 5),
+        (card_flags::NO_BEST, 4),
+    ] {
+        if p.below(odds) == 0 {
+            flags |= bit;
+        } else {
+            flags &= !bit;
+        }
+    }
+    let race_time = clock(p, 600.0);
+    LapCard {
+        flags,
+        to_line_kept: clock(p, 900.0),
+        to_line: clock(p, 900.0),
+        progress: clock(p, 5000.0),
+        laps_length: clock(p, 5000.0),
+        lap_length: clock(p, 900.0),
+        place: p.below(9) as i32,
+        laps: p.below(7) as i32 - if p.below(20) == 0 { 3 } else { 0 },
+        runs: p.below(7) as i32,
+        on_track: p.below(3) as i32,
+        lap_time: clock(p, 90.0),
+        lap_start: if p.below(5) == 0 { race_time } else { clock(p, 600.0) },
+        best_lap: if p.below(3) == 0 { F::ZERO } else { clock(p, 120.0) },
+        best_lap_no: p.below(6) as i32,
+        seen: Seen::default(),
+        spot: spot(p),
+        kept_spot: spot(p),
+        race_time,
+        lap_clock: clock(p, 90.0),
+        record_word: p.next() as u32,
+        lines_passed: (0..lines).map(|_| p.next() as u32 | 1).collect(),
+        records: (0..p.below(4)).map(|_| record(p)).collect(),
+    }
+}
+
+fn record(p: &mut Pick) -> LapRecord {
+    LapRecord {
+        time: clock(p, 90.0),
+        start: clock(p, 600.0),
+        word: p.next() as u32,
+        lap: p.below(12) as i32,
+        place: p.below(9) as i32,
+    }
+}
+
+fn put_spot(ee: &mut Ee, at: u32, s: Spot) {
+    ee.set_u32(at, s.path);
+    ee.set_u32(at + 4, s.piece);
+    put_f(ee, at + 8, s.along);
+}
+
+fn spot_at(ee: &Ee, at: u32) -> Spot {
+    Spot { path: ee.u32_at(at), piece: ee.u32_at(at + 4), along: f32_at(ee, at + 8) }
+}
+
+fn put_record(ee: &mut Ee, at: u32, r: &LapRecord, next: u32) {
+    put_f(ee, at, r.time);
+    put_f(ee, at + 4, r.start);
+    ee.set_u32(at + 8, r.word);
+    ee.set_u32(at + 0xc, r.lap as u32);
+    ee.set_u32(at + 0x10, r.place as u32);
+    ee.set_u32(at + 0x14, next);
+}
+
+/// A card into RAM at `at`, its line words at `lines` and its records at `records`.
+fn put_lap_card(ee: &mut Ee, at: u32, c: &LapCard, lines: u32, records: u32) {
+    ee.set_u32(at + 8, c.flags as u32);
+    ee.set_u32(at + 0xc, (c.flags >> 32) as u32);
+    for (o, x) in [
+        (0x10, c.to_line_kept),
+        (0x14, c.to_line),
+        (0x1c, c.progress),
+        (0x24, c.laps_length),
+        (0x28, c.lap_length),
+        (0x48, c.lap_time),
+        (0x4c, c.lap_start),
+        (0x50, c.best_lap),
+        (0xb4, c.race_time),
+        (0xb8, c.lap_clock),
+    ] {
+        put_f(ee, at + o, x);
+    }
+    for (o, x) in [(0x2c, c.place), (0x30, c.laps), (0x34, c.runs), (0x40, c.on_track), (0x54, c.best_lap_no)] {
+        ee.set_u32(at + o, x as u32);
+    }
+    put_quad(ee, at + 0x60, c.seen.now);
+    put_quad(ee, at + 0x70, c.seen.last);
+    put_spot(ee, at + 0x88, c.spot);
+    put_spot(ee, at + 0x94, c.kept_spot);
+    ee.set_u32(at + 0x108, c.record_word);
+    ee.set_u32(at + 0xe4, if c.lines_passed.is_empty() { 0 } else { lines });
+    for (k, w) in c.lines_passed.iter().enumerate() {
+        ee.set_u32(lines + 4 * k as u32, *w);
+    }
+    let n = c.records.len() as u32;
+    for (k, r) in c.records.iter().enumerate() {
+        let k = k as u32;
+        put_record(ee, records + 0x20 * k, r, if k + 1 < n { records + 0x20 * (k + 1) } else { 0 });
+    }
+    ee.set_u32(at + 0x1bc, if n == 0 { 0 } else { records });
+}
+
+/// A card back out of RAM, its line words `lines` long.
+fn lap_card_at(ee: &Ee, at: u32, lines: usize) -> LapCard {
+    let i = |o: u32| ee.u32_at(at + o) as i32;
+    let f = |o: u32| f32_at(ee, at + o);
+    let list = ee.u32_at(at + 0xe4);
+    let mut records = Vec::new();
+    let mut r = ee.u32_at(at + 0x1bc);
+    while r != 0 && records.len() < 64 {
+        records.push(LapRecord {
+            time: f32_at(ee, r),
+            start: f32_at(ee, r + 4),
+            word: ee.u32_at(r + 8),
+            lap: ee.u32_at(r + 0xc) as i32,
+            place: ee.u32_at(r + 0x10) as i32,
+        });
+        r = ee.u32_at(r + 0x14);
+    }
+    LapCard {
+        flags: u64::from(ee.u32_at(at + 8)) | u64::from(ee.u32_at(at + 0xc)) << 32,
+        to_line_kept: f(0x10),
+        to_line: f(0x14),
+        progress: f(0x1c),
+        laps_length: f(0x24),
+        lap_length: f(0x28),
+        place: i(0x2c),
+        laps: i(0x30),
+        runs: i(0x34),
+        on_track: i(0x40),
+        lap_time: f(0x48),
+        lap_start: f(0x4c),
+        best_lap: f(0x50),
+        best_lap_no: i(0x54),
+        seen: Seen { now: quad(ee, at + 0x60), last: quad(ee, at + 0x70) },
+        spot: spot_at(ee, at + 0x88),
+        kept_spot: spot_at(ee, at + 0x94),
+        race_time: f(0xb4),
+        lap_clock: f(0xb8),
+        record_word: ee.u32_at(at + 0x108),
+        lines_passed: if list == 0 { Vec::new() } else { (0..lines as u32).map(|k| ee.u32_at(list + 4 * k)).collect() },
+        records,
+    }
+}
+
+/// Every word of a card, as bits, so that a signed zero or a stray pattern compares as itself.
+fn lap_card_words(c: &LapCard) -> Vec<u64> {
+    let f = |x: F| u64::from(x.0.to_bits());
+    let s = |x: Spot| [u64::from(x.path), u64::from(x.piece), f(x.along)];
+    let mut v = vec![
+        c.flags,
+        f(c.to_line_kept),
+        f(c.to_line),
+        f(c.progress),
+        f(c.laps_length),
+        f(c.lap_length),
+        c.place as u64,
+        c.laps as u64,
+        c.runs as u64,
+        c.on_track as u64,
+        f(c.lap_time),
+        f(c.lap_start),
+        f(c.best_lap),
+        c.best_lap_no as u64,
+        f(c.race_time),
+        f(c.lap_clock),
+        u64::from(c.record_word),
+    ];
+    v.extend(c.seen.now.to_bits().map(u64::from));
+    v.extend(c.seen.last.to_bits().map(u64::from));
+    v.extend(s(c.spot));
+    v.extend(s(c.kept_spot));
+    v.push(c.lines_passed.len() as u64);
+    v.extend(c.lines_passed.iter().map(|&w| u64::from(w)));
+    for r in &c.records {
+        v.extend([f(r.time), f(r.start), u64::from(r.word), r.lap as u64, r.place as u64]);
+    }
+    v
+}
+
+/// A line most steps can be aimed through: live, standing up, a sensible width; now and then any
+/// gate the crossing test's generator makes.
+fn finish_line(p: &mut Pick) -> Gate {
+    let mut g = gate(p);
+    if p.below(4) != 0 {
+        let normal = [[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 0.0, -1.0]][p.below(3) as usize];
+        g.flags = flags::CLOSED | (p.next() as u32 & flags::EITHER_WAY);
+        g.normal = Vf([normal[0], normal[1], normal[2], 0.0]);
+        g.across = Vf([normal[2], 0.0, -normal[0], 0.0]);
+        g.width = F(p.range(10.0, 60.0));
+        g.height = F(p.range(5.0, 20.0));
+        g.reach_sq = F::ZERO;
+    }
+    g
+}
+
+#[test]
+fn the_lap_line_matches_the_score_cards_line_test() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let line_test = match addr("score_lap_line") {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    // Every listener slot of the three that can hear lands on a hook that writes down who and which.
+    let heard: Rc<RefCell<Vec<(u32, u32)>>> = Rc::default();
+    for who in [OWNER, CHAIN, LISTENER] {
+        for slot in (0..0x80).step_by(4) {
+            let at = L_HOOKS + who * 0x100 + slot;
+            ee.set_u32(L_VT + who * 0x100 + slot, at);
+            let heard = heard.clone();
+            ee.hooks.insert(at, Box::new(move |_| heard.borrow_mut().push((who, slot))));
+        }
+    }
+
+    let mut p = Pick(0x3a9c_5e17_0d44_b2f1);
+    let mut said = [0usize; 9];
+    let mut counted = 0;
+    for case in 0..20_000 {
+        let lines = p.below(5) as usize;
+        let g = finish_line(&mut p);
+        let length = p.range(100.0, 2000.0);
+        let course = Course { line: g, line_spot: spot(&mut p), lap_length: F(p.stray(length)) };
+        let mut rules = LapRules {
+            flags: (p.next() as u32 & !0x410) | if p.below(2) == 0 { race_flags::KEEP_LAPS } else { 0 }
+                | if p.below(5) == 0 { race_flags::FINISHED } else { 0 },
+            kind: if p.below(3) == 0 { race_kind::GHOST_RACE } else { p.below(6) as i32 },
+            laps: 1 + p.below(6) as i32,
+            ghost_runs: p.below(5) as i32,
+            record_limit: p.below(12) as i32,
+            free_records: p.below(4) as u32,
+        };
+        let mut card = lap_card(&mut p, lines);
+        // A lap exactly as quick as the best one.
+        if p.below(8) == 0 {
+            card.best_lap = F(fpu::sub(card.race_time.0, card.lap_start.0));
+        }
+        let (from, to) = step(&mut p, &g);
+        card.seen = Seen { now: from, last: to };
+        // Past the pool, the original takes the card's oldest record and writes through a stale
+        // register when it has none (see `LapRules::line`): give such a card one.
+        let lap = if rules.kind == race_kind::GHOST_RACE { card.runs + 1 } else { card.laps + 1 };
+        if lap >= rules.record_limit && card.records.is_empty() {
+            card.records.push(record(&mut p));
+        }
+        let owner = p.below(5) != 0;
+        let chain = p.below(3) == 0;
+        let mut ghost = (owner && p.below(5) != 0).then(|| lap_card(&mut p, lines));
+        // A ghost exactly as quick as the card's best, or as the lap being run.
+        if let Some(gc) = ghost.as_mut() {
+            match p.below(6) {
+                0 => gc.best_lap = card.best_lap,
+                1 => gc.best_lap = F(fpu::sub(card.race_time.0, card.lap_start.0)),
+                _ => {}
+            }
+        }
+
+        // The manager, the track and the line.
+        ee.set_u32(L_MGR + 0x30, L_LISTENER);
+        ee.set_u32(L_MGR + 0x4c, rules.record_limit as u32);
+        ee.set_u32(L_MGR + 0x5c, rules.flags);
+        ee.set_u32(L_MGR + 0x60, rules.kind as u32);
+        ee.set_u32(L_MGR + 0x68, L_TRACK);
+        ee.set_u32(L_MGR + 0x88, lines as u32);
+        ee.set_u32(L_MGR + 0x94, rules.laps as u32);
+        ee.set_u32(L_MGR + 0xf0, rules.ghost_runs as u32);
+        for k in 0..rules.free_records {
+            let next = if k + 1 < rules.free_records { L_POOL + 0x20 * (k + 1) } else { 0 };
+            put_record(&mut ee, L_POOL + 0x20 * k, &record(&mut p), next);
+        }
+        ee.set_u32(L_MGR + 0x58, if rules.free_records == 0 { 0 } else { L_POOL });
+        put_f(&mut ee, L_TRACK + 0x54, course.lap_length);
+        ee.set_u32(L_TRACK + 0x5c, L_LINE);
+        put_gate(&mut ee, L_LINE, &g);
+        put_spot(&mut ee, L_LINE + 0x94, course.line_spot);
+        ee.set_u32(L_LISTENER + 4, 0);
+        ee.set_u32(L_LISTENER + 0x1c, L_VT + LISTENER * 0x100);
+        // The card, its owner (carrying the ghost's card) and its chain.
+        put_lap_card(&mut ee, L_CARD, &card, L_LINES, L_RECORDS);
+        ee.set_u32(L_CARD + 4, if owner { L_OWNER } else { 0 });
+        ee.set_u32(L_CARD + 0x1c4, if chain { L_CHAIN } else { 0 });
+        ee.set_u32(L_OWNER + 8, if ghost.is_some() { L_GHOST } else { 0 });
+        ee.set_u32(L_OWNER + 0x1c, 0);
+        ee.set_u32(L_OWNER + 0x20, L_VT + OWNER * 0x100);
+        ee.set_u32(L_CHAIN + 0x1c, 0);
+        ee.set_u32(L_CHAIN + 0x20, L_VT + CHAIN * 0x100);
+        if let Some(gc) = &ghost {
+            put_lap_card(&mut ee, L_GHOST, gc, L_GHOST_LINES, L_RECORDS + 0x400);
+        }
+        heard.borrow_mut().clear();
+        ee.call(line_test, &[u64::from(L_MGR), u64::from(L_CARD)], &[], BUDGET);
+        let answer = ee.v0() as u32;
+
+        let (got, notices) = rules.line(&mut card, ghost.as_mut(), &course);
+        let what = format!("case {case}: {rules:?} {g:?}");
+        assert_eq!(answer, u32::from(got), "{what}: the answer");
+        let want_heard: Vec<(u32, u32)> = notices.iter().flat_map(|&n| told(n, owner, chain)).collect();
+        assert_eq!(*heard.borrow(), want_heard, "{what}: the listeners ({notices:?})");
+        assert_eq!(lap_card_words(&lap_card_at(&ee, L_CARD, lines)), lap_card_words(&card), "{what}: the card");
+        if let Some(gc) = &ghost {
+            assert_eq!(lap_card_words(&lap_card_at(&ee, L_GHOST, lines)), lap_card_words(gc), "{what}: the ghost's card");
+        }
+        assert_eq!(ee.u32_at(L_MGR + 0x5c), rules.flags, "{what}: the manager's flags");
+        let mut free = 0;
+        let mut r = ee.u32_at(L_MGR + 0x58);
+        while r != 0 && free < 64 {
+            free += 1;
+            r = ee.u32_at(r + 0x14);
+        }
+        assert_eq!(free, rules.free_records, "{what}: the free records");
+        for n in notices {
+            said[n as usize] += 1;
+        }
+        counted += usize::from(got);
+    }
+    // Every notice comes up often enough to mean something.
+    for (n, k) in said.iter().enumerate() {
+        assert!(*k > 100, "notice {n} came up only {k} times in 20,000: {said:?}");
+    }
+    assert!(counted > 2000, "only {counted} lines counted");
 }
