@@ -2,5 +2,4 @@
 
 2026-11-09. Task: `./kit plan S293`.
 
-One paragraph: what this task was, and how it came out. Details in the numbered files; the newest one's
-suffix says whose move it is (FINAL · PART · READY).
+The race handler per card (score manager), with the track path queries it needs, ported and oracled bit-exact (20k cases each). Not wired into the running race yet; see 1-s13-laps-FINAL.md.
