@@ -407,6 +407,7 @@ fn the_seeded_bikes_first_frame_is_ride2_row_0() {
 // --- F31b1: the bike's PreProcess, the port's ----------------------------------------------------------
 
 use game_sim::handling::bike;
+use game_sim::handling::effects::{self, Effects};
 use game_sim::handling::run;
 use game_sim::quad::{self, Call, Moto, Quad};
 use std::cell::RefCell;
@@ -5035,7 +5036,8 @@ const PART_LEAVES: [(u32, bool, &str); 4] =
 
 /// The vehicle update's part walk, the port's [`tail::walk`] on RAM: a group's step (the walk itself)
 /// is the walk one level down, and each leaf ([`PART_LEAVES`]) is the original's, its closing walk
-/// stood in for by the port's. Every leaf step is watched: it may not change a word of the bike or
+/// stood in for by the port's; F31b5n: but the effects' own work is [`effects::step`]'s, only its
+/// items' virtuals the original's. Every leaf step (and effects item call) is watched: it may not change a word of the bike or
 /// its physics blocks; the steps that move `rand`'s state, and any that builds the smooth noise, are
 /// counted. With `"part leaves dropped"` in [`IN_RUST`] the leaves do not step at all; with `"part
 /// leaf dropped: <name>"` that kind's own work is dropped and its walk kept.
@@ -5064,13 +5066,30 @@ impl Listeners for PartWalk<'_> {
             }
             return;
         }
+        if name == "effects" {
+            effects::step(self, e, dt);
+        } else {
+            self.original(f, &[u64::from(e)], &[dt.0], name, if closes { vec![(e, dt.to_bits())] } else { vec![] });
+        }
+        if closes {
+            tail::walk(self, e, dt);
+        }
+    }
+}
+
+impl PartWalk<'_> {
+    /// The original's `f` run on `ints` and `floats`, booked under `name`, its closing walk (`TAIL`)
+    /// hooked and answered as `walks` ((the group, `dt`'s bits) each), and watched: it may not change a
+    /// word of the bike or its blocks; a step that moved `rand`'s state or built the smooth noise is
+    /// counted.
+    fn original(&mut self, f: u32, ints: &[u64], floats: &[f32], name: &str, walks: Vec<(u32, u32)>) {
         let (before, rand, noise_unbuilt) = (bike_and_blocks(self.ee), rand_state(self.ee), self.ee.u32_at(NOISE_UNBUILT) != 0);
         let walked: Rc<RefCell<Vec<(u32, u32)>>> = Rc::default();
         let w = walked.clone();
         let old = self.ee.hooks.insert(TAIL, Box::new(move |ee: &mut Ee| w.borrow_mut().push((ee.r(4) as u32, ee.f(12).to_bits()))));
         self.ee.set(28, GP);
         let r0 = self.ee.ran;
-        self.ee.call(f, &[u64::from(e)], &[dt.0], BUDGET);
+        self.ee.call(f, ints, floats, BUDGET);
         book(format!("the tail: the update's {name}"), self.ee.ran - r0);
         match old {
             Some(h) => self.ee.hooks.insert(TAIL, h),
@@ -5082,13 +5101,34 @@ impl Listeners for PartWalk<'_> {
         if noise_unbuilt && self.ee.u32_at(NOISE_UNBUILT) == 0 {
             book(format!("the tail: the update's {name} steps that built the noise"), 1);
         }
-        assert_eq!(*walked.borrow(), if closes { vec![(e, dt.to_bits())] } else { vec![] }, "part leaf {e:#x}'s closing walk");
+        assert_eq!(*walked.borrow(), walks, "{name} {ints:#x?}'s closing walk");
         let parted: Vec<String> =
             before.iter().zip(&bike_and_blocks(self.ee)).filter(|(b, a)| b != a).map(|((at, b), (_, a))| format!("{at:#x}: {b:#010x} -> {a:#010x}")).collect();
-        assert!(parted.is_empty(), "part leaf {e:#x} (step {f:#x}) wrote the bike's words:\n  {}", parted.join("\n  "));
-        if closes {
-            tail::walk(self, e, dt);
-        }
+        assert!(parted.is_empty(), "{name} {ints:#x?} (fn {f:#x}) wrote the bike's words:\n  {}", parted.join("\n  "));
+    }
+}
+
+/// F31b5n: the effects' own work is the port's ([`effects::step`]); its items' virtuals are the
+/// original's, each booked by kind (`the update's effects item <vt slot> <fn>`) and watched as a
+/// leaf is.
+impl Effects for PartWalk<'_> {
+    fn word(&mut self, at: u32) -> u32 {
+        self.ee.u32_at(at)
+    }
+    fn set_byte(&mut self, at: u32, b: u8) {
+        self.ee.write(at, 1, u128::from(b));
+    }
+    fn out(&mut self, c: effects::Out, dt: F) {
+        use effects::Out;
+        let (item, slot, ints, floats): (u32, u32, Vec<u64>, Vec<f32>) = match c {
+            Out::Key { item, key } => (item, 8, vec![u64::from(item), u64::from(key)], vec![]),
+            Out::On(item) => (item, 0x18, vec![u64::from(item)], vec![]),
+            Out::Off(item) => (item, 0x1c, vec![u64::from(item)], vec![]),
+            Out::Step(item) => (item, 0x14, vec![u64::from(item)], vec![dt.0]),
+        };
+        let f = self.ee.u32_at(self.ee.u32_at(item + 0x10) + slot);
+        self.original(f, &ints, &floats, &format!("effects item +{slot:#x} {f:#x}"), vec![]);
+        book("the tail: the update's effects item calls", 1);
     }
 }
 
@@ -8788,8 +8828,11 @@ fn flip_replays_with_every_port_at_once() {
 fn walk_served(ran: &BTreeMap<String, u64>) {
     assert!(!ran.contains_key("the tail: the update's Walk"), "the part walk handed on: {ran:?}");
     for (_, _, name) in PART_LEAVES {
+        let name = if name == "effects" { "effects item calls" } else { name };
         assert!(ran.contains_key(&format!("the tail: the update's {name}")), "the part walk's {name} never stepped: {ran:?}");
     }
+    // F31b5n: the effects' own work is the port's.
+    assert!(!ran.contains_key("the tail: the update's effects"), "the effects handed on: {ran:?}");
 }
 
 /// **F31b5j — what the part walk's leaves give the bike**: [`replay_whole`]'s ports with the
@@ -8850,6 +8893,171 @@ fn flip_needs_the_part_walks_effects() {
     let changes: Vec<usize> = (1..w.len()).filter(|&r| w[r] != w[r - 1]).collect();
     assert_eq!(changes, [125, 193], "wrecked on row 125, put back on row 193");
     assert!(!off.is_empty(), "the models dropped, the RAM parts from the handing run's");
+}
+
+/// F31b5n's oracle: the item virtuals' stand-ins, at fake addresses (`FX_FAKE + slot`, two vtables
+/// `0x100` apart), and what each does to RAM so the port's re-reads are put to the test: an item
+/// turned on reads 1 (3 with its mask's 0x40); off, 0 (2 with 0x80); a step with 0x100 takes one
+/// off the items' count; a key with 0x200 one off the table's count, and the key is kept at the
+/// item's `+0x1c`.
+const FX_FAKE: u32 = 0x0000_2000;
+
+fn fx_react(ee: &mut Ee, e: u32, slot: u32, item: u32, key: u32) {
+    let mask = ee.u32_at(item + effects::ITEM_MASK);
+    match slot {
+        0x18 => ee.write(item + effects::ITEM_STATE, 1, if mask & 0x40 != 0 { 3 } else { 1 }),
+        0x1c => ee.write(item + effects::ITEM_STATE, 1, if mask & 0x80 != 0 { 2 } else { 0 }),
+        0x14 if mask & 0x100 != 0 => ee.set_u32(e + effects::ITEMS, ee.u32_at(e + effects::ITEMS).wrapping_sub(1)),
+        8 => {
+            ee.set_u32(item + 0x1c, key);
+            if mask & 0x200 != 0 {
+                let t = ee.u32_at(e + effects::TABLE);
+                ee.set_u32(t, ee.u32_at(t).wrapping_sub(1));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The port's side of the oracle: RAM in place, each item call logged as (slot, item, key, `dt`'s
+/// bits) and answered by [`fx_react`].
+struct FxOracle<'a> {
+    ee: &'a mut Ee,
+    e: u32,
+    log: Vec<(u32, u32, u32, u32)>,
+}
+
+impl Effects for FxOracle<'_> {
+    fn word(&mut self, at: u32) -> u32 {
+        self.ee.u32_at(at)
+    }
+    fn set_byte(&mut self, at: u32, b: u8) {
+        self.ee.write(at, 1, u128::from(b));
+    }
+    fn out(&mut self, c: effects::Out, dt: F) {
+        use effects::Out;
+        let (slot, item, key, f) = match c {
+            Out::Key { item, key } => (8, item, u32::from(key), 0),
+            Out::On(item) => (0x18, item, 0, 0),
+            Out::Off(item) => (0x1c, item, 0, 0),
+            Out::Step(item) => (0x14, item, 0, dt.to_bits()),
+        };
+        self.log.push((slot, item, key, f));
+        fx_react(self.ee, self.e, slot, item, key);
+    }
+}
+
+/// **F31b5n — the effects' own work is the original's**: 10 000 effects listeners in scratch RAM,
+/// each with up to six table entries (their tested words zero or not, keys kept or changed, the
+/// table's word zero or not, counts down to −1) and up to eight items (unbound, bound to an entry or
+/// to a stray flags byte; masks over all five flags; state bytes 0 to 3 and junk), run through
+/// SLUS-21104's effects step with the items' virtuals hooked ([`fx_react`]) and through
+/// [`effects::step`]. The items' calls come in the same order with the same arguments, the original
+/// ends with its closing walk (the listener, `dt`), and the scratch RAM comes out the same.
+#[test]
+fn the_effects_step_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let fx = PART_LEAVES.iter().find(|l| l.2 == "effects").unwrap().0;
+    let (e, table, entries, words, items, array, vts) =
+        (ee.scratch(100), ee.scratch(101), ee.scratch(102), ee.scratch(108), ee.scratch(110), ee.scratch(115), ee.scratch(116));
+    let region = (e, ee.scratch(118) - e);
+    let log: Rc<RefCell<Vec<(u32, u32, u32, u32)>>> = Rc::default();
+    for vt in 0..2 {
+        for slot in [8, 0x14, 0x18, 0x1c] {
+            let l = log.clone();
+            ee.hooks.insert(
+                FX_FAKE + 0x100 * vt + slot,
+                Box::new(move |ee: &mut Ee| {
+                    let (item, key) = (ee.r(4) as u32, ee.r(5) as u32);
+                    let f = if slot == 0x14 { ee.f(12).to_bits() } else { 0 };
+                    l.borrow_mut().push((slot, item, if slot == 8 { key } else { 0 }, f));
+                    fx_react(ee, e, slot, item, key);
+                }),
+            );
+        }
+    }
+    let l = log.clone();
+    ee.hooks.insert(TAIL, Box::new(move |ee: &mut Ee| l.borrow_mut().push((0, ee.r(4) as u32, 0, ee.f(12).to_bits()))));
+    let mut g = Gen(0x0031_b5e0);
+    let mut seen = BTreeMap::<&str, u32>::new();
+    for case in 0..10_000 {
+        let mut setup = Vec::<(u32, u32)>::new();
+        for o in (0..region.1).step_by(4) {
+            setup.push((e + o, g.bits()));
+        }
+        for k in 0..16 {
+            setup.push((words + 4 * k, if g.one_in(2) { 0 } else { g.bits() }));
+        }
+        let word_at = |g: &mut Gen| words + 4 * (g.bits() % 16);
+        let n_entries = g.bits() % 8;
+        setup.push((e + effects::TABLE, table));
+        setup.push((table, n_entries.wrapping_sub(1)));
+        setup.push((table + 4, entries));
+        setup.push((table + effects::TABLE, word_at(&mut g)));
+        for k in 0..6 {
+            let at = entries + effects::ENTRY * k;
+            setup.push((at + effects::FIRST, word_at(&mut g)));
+            setup.push((at + effects::SECOND, word_at(&mut g)));
+            setup.push((at + effects::KEY, words + g.bits() % 64));
+        }
+        let n_items = g.bits() % 10;
+        setup.push((e + effects::ITEMS, n_items.wrapping_sub(1)));
+        setup.push((e + effects::ITEM_ARRAY, array));
+        for k in 0..8 {
+            let item = items + 0x20 * k;
+            setup.push((array + 4 * k, item));
+            let link = match g.bits() % 4 {
+                0 => 0,
+                1 => words,
+                _ => entries + effects::ENTRY * (g.bits() % 6),
+            };
+            setup.push((item + effects::ITEM_ENTRY, link));
+            setup.push((item + effects::ITEM_STATE, if g.one_in(4) { g.bits() } else { g.bits() % 4 }));
+            setup.push((item + effects::ITEM_MASK, g.bits() & 0x3df));
+            setup.push((item + 0x10, vts + 0x20 * (g.bits() % 2)));
+        }
+        for vt in 0..2 {
+            for slot in [8, 0x14, 0x18, 0x1c] {
+                setup.push((vts + 0x20 * vt + slot, FX_FAKE + 0x100 * vt + slot));
+            }
+        }
+        // Keys kept as they are, sometimes.
+        let lay = |ee: &mut Ee, setup: &[(u32, u32)]| {
+            for &(at, w) in setup {
+                ee.set_u32(at, w);
+            }
+        };
+        lay(&mut ee, &setup);
+        for k in 0..6 {
+            let at = entries + effects::ENTRY * k;
+            if g.one_in(2) {
+                let key = ee.u8_at(ee.u32_at(at + effects::KEY));
+                setup.push((at + effects::FLAGS, (ee.u32_at(at + effects::FLAGS) & !0xff00) | u32::from(key) << 8));
+            }
+        }
+        let dt = F(g.near(0.0333, -1.0, 1.0));
+        lay(&mut ee, &setup);
+        log.borrow_mut().clear();
+        ee.set(28, GP);
+        ee.call(fx, &[u64::from(e)], &[dt.0], 1_000_000);
+        let mut want = std::mem::take(&mut *log.borrow_mut());
+        assert_eq!(want.pop(), Some((0, e, 0, dt.to_bits())), "case {case}: the original's closing walk");
+        let want_ram = snap_regions(&ee, &[region]);
+        lay(&mut ee, &setup);
+        let mut port = FxOracle { ee: &mut ee, e, log: vec![] };
+        effects::step(&mut port, e, dt);
+        let got = std::mem::take(&mut port.log);
+        assert_eq!(got, want, "case {case}: the items' calls");
+        assert_eq!(snap_regions(&ee, &[region]), want_ram, "case {case}: the scratch RAM");
+        for &(slot, ..) in &want {
+            *seen.entry(match slot { 8 => "key", 0x14 => "step", 0x18 => "on", _ => "off" }).or_default() += 1;
+        }
+        if want.is_empty() {
+            *seen.entry("no call").or_default() += 1;
+        }
+    }
+    eprintln!("effects oracle: {seen:?}");
+    assert_eq!(seen.len(), 5, "every kind of call, and none: {seen:?}");
 }
 
 /// The record's resolution (its vt `+0x88`), which the gravity calls with 1.
