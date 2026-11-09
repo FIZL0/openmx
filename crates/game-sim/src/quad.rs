@@ -680,6 +680,10 @@ pub trait Moto {
     /// runner keeps a copy of (the last position, the enabled flag).
     fn body_in(&mut self, _b: &crate::atv_body::Body) {}
     fn body_out(&mut self, _b: &mut crate::atv_body::Body) {}
+    /// MD105a: the [`update`]'s [`Tail`] before each call it makes, and after, for a runner that keeps
+    /// it where the calls read and write it (the original reads each word where it uses it).
+    fn tail_out(&mut self, _t: &Tail) {}
+    fn tail_in(&mut self, _t: &mut Tail) {}
 }
 
 impl Moto for Vec<Call> {
@@ -1112,7 +1116,7 @@ pub struct Tail {
 #[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
 pub fn update(t: &mut Tail, q: &mut Quad, body: &mut Body, dt: F, m: &mut impl Moto) {
     let Some(mode) = t.vehicle_state else {
-        m.call(Call::BikeVehicleUpdate(dt), q, body);
+        tail_call(t, Call::BikeVehicleUpdate(dt), q, body, m);
         return;
     };
     if t.rider_held {
@@ -1120,14 +1124,14 @@ pub fn update(t: &mut Tail, q: &mut Quad, body: &mut Body, dt: F, m: &mut impl M
     }
     let slow = q.speed() < t.stunt_speed;
     let (node_up, node_forward) = (t.node_up, t.node_forward);
-    m.call(Call::BikeVehicleUpdate(dt), q, body);
+    tail_call(t, Call::BikeVehicleUpdate(dt), q, body, m);
 
     let surface = t.wheel_surface.map(|s| t.surfaces[usize::from(s)]);
     t.on_hazard = surface.iter().any(|s| s.hazard);
     let sunk = t.on_hazard && t.wheel_sunk.iter().any(|&s| s);
     let time = fpu_max(fpu_max(surface[RIGHT_REAR].time, surface[LEFT_REAR].time), surface[RIGHT_FRONT].time);
     let time = fpu_max(surface[LEFT_FRONT].time, time);
-    m.call(Call::HazardSurface { dt, time, sunk }, q, body);
+    tail_call(t, Call::HazardSurface { dt, time, sunk }, q, body, m);
 
     if t.request != 0 && t.request_was != 0 {
         t.request = 0;
@@ -1145,7 +1149,7 @@ pub fn update(t: &mut Tail, q: &mut Quad, body: &mut Body, dt: F, m: &mut impl M
             (false, 0)
         };
         if strength > 0 && t.pad && t.rumble_on {
-            m.call(Call::Rumble { soft: !hard, strength }, q, body);
+            tail_call(t, Call::Rumble { soft: !hard, strength }, q, body, m);
         }
     }
 
@@ -1158,7 +1162,7 @@ pub fn update(t: &mut Tail, q: &mut Quad, body: &mut Body, dt: F, m: &mut impl M
         one_pair(t, q, body, dt, m, false);
     } else if (q.front_down && q.rear_down) || (!q.airborne && slow) || (q.airborne && !(q.hang_time <= F(ONE_PAIR_HANG))) {
         if !(t.wheelie_time <= F::ZERO) || !(t.stoppie_time <= F::ZERO) {
-            m.call(Call::EndStunt, q, body);
+            tail_call(t, Call::EndStunt, q, body, m);
         }
         t.wheelie_clock = F::ZERO;
         t.stoppie_clock = F::ZERO;
@@ -1194,13 +1198,15 @@ pub fn update(t: &mut Tail, q: &mut Quad, body: &mut Body, dt: F, m: &mut impl M
         if let Some(race) = t.race.filter(|r| !(p.countdown <= F::ZERO) && r.clock <= F::ZERO) {
             p.countdown = p.countdown - dt;
             if p.countdown <= F::ZERO {
-                m.call(Call::CountdownOut, q, body);
+                t.player = Some(p);
+                tail_call(t, Call::CountdownOut, q, body, m);
                 for i in 0..p.listeners {
-                    m.call(Call::CountdownListener(i), q, body);
+                    tail_call(t, Call::CountdownListener(i), q, body, m);
                 }
                 for i in 0..race.watchers {
-                    m.call(Call::CountdownWatcher(i), q, body);
+                    tail_call(t, Call::CountdownWatcher(i), q, body, m);
                 }
+                p = t.player.unwrap_or(p);
             }
         }
         t.player = Some(p);
@@ -1214,7 +1220,7 @@ pub fn update(t: &mut Tail, q: &mut Quad, body: &mut Body, dt: F, m: &mut impl M
         }
     }
     t.clock = t.clock + dt;
-    m.call(Call::Post(t.post), q, body);
+    tail_call(t, Call::Post(t.post), q, body, m);
 }
 
 /// `max.s`.
@@ -1233,18 +1239,20 @@ fn rumble_strength(squeeze: F, scale: f32, least: i32) -> i32 {
 #[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
 fn one_pair(t: &mut Tail, q: &mut Quad, body: &mut Body, dt: F, m: &mut impl Moto, wheelie: bool) {
     let step = t.race.and(t.player).map(|p| p.step);
-    let (clock, stunt, time, best_time, dist, best_dist) = if wheelie {
-        (&mut t.wheelie_clock, t.wheelie_stunt, &mut t.wheelie_time, &mut t.best_wheelie_time, &mut t.wheelie_dist, &mut t.best_wheelie_dist)
-    } else {
-        (&mut t.stoppie_clock, t.stoppie_stunt, &mut t.stoppie_time, &mut t.best_stoppie_time, &mut t.stoppie_dist, &mut t.best_stoppie_dist)
-    };
+    let stunt = if wheelie { t.wheelie_stunt } else { t.stoppie_stunt };
+    let clock = if wheelie { &mut t.wheelie_clock } else { &mut t.stoppie_clock };
     *clock = *clock + dt;
     if *clock <= F(ONE_PAIR) {
         return;
     }
-    if *time <= F::ZERO {
-        m.call(Call::StartStunt(stunt), q, body);
+    if (if wheelie { t.wheelie_time } else { t.stoppie_time }) <= F::ZERO {
+        tail_call(t, Call::StartStunt(stunt), q, body, m);
     }
+    let (time, best_time, dist, best_dist) = if wheelie {
+        (&mut t.wheelie_time, &mut t.best_wheelie_time, &mut t.wheelie_dist, &mut t.best_wheelie_dist)
+    } else {
+        (&mut t.stoppie_time, &mut t.best_stoppie_time, &mut t.stoppie_dist, &mut t.best_stoppie_dist)
+    };
     *time = *time + dt;
     if !(*time <= *best_time) {
         *best_time = *time;
@@ -1255,6 +1263,13 @@ fn one_pair(t: &mut Tail, q: &mut Quad, body: &mut Body, dt: F, m: &mut impl Mot
             *best_dist = *dist;
         }
     }
+}
+
+/// One of the [`update`]'s calls, its [`Tail`] handed to the runner before and taken back after.
+fn tail_call(t: &mut Tail, c: Call, q: &mut Quad, body: &mut Body, m: &mut impl Moto) {
+    m.tail_out(t);
+    m.call(c, q, body);
+    m.tail_in(t);
 }
 
 // --- the tire reader (MD64b) ----------------------------------------------------------------------

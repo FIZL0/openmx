@@ -184,7 +184,7 @@ fn hook_animate(ee: &mut Ee, at: &Rc<Cell<At>>) -> Log<String> {
 
 /// What the port is handed, read off the quad at `quad`: the driver's words, the put-back's three, the
 /// stick, the crossup and the world angular velocity, and the net clock.
-fn read_anim(ee: &Ee, quad: u32) -> (quad::Anim, quad::PutBack, Quad, quad::NetClock) {
+pub(super) fn read_anim(ee: &Ee, quad: u32) -> (quad::Anim, quad::PutBack, Quad, quad::NetClock) {
     let f = |o: u32| F(ee.f32_at(quad + o));
     let i = |o: u32| ee.u32_at(quad + o) as i32;
     let a = quad::Anim {
@@ -222,7 +222,7 @@ fn read_anim(ee: &Ee, quad: u32) -> (quad::Anim, quad::PutBack, Quad, quad::NetC
 /// The stunt table's answers, as the original reads them: the rider's set's entry for the stunt
 /// (`+0x14f0`, 12 bytes each past `0x18`) points at a record whose byte `+0x59` says ready; the clip's
 /// length is its handle's info's `+0x44`.
-struct Table<'a>(&'a Ee, u32);
+pub(super) struct Table<'a>(pub(super) &'a Ee, pub(super) u32);
 
 impl quad::StuntClips for Table<'_> {
     fn ready(&mut self, id: i32) -> bool {

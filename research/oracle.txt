@@ -7031,6 +7031,20 @@ atv_body_add_force_at       atv 0x0049c0b0 = rigid body vt +0x84 (a0 body, a1 fo
 # +0x40) vt +8 0x00127a90, which copies the buffer into the service: point +0, normal +0x10, surface word
 # +0x20, weights +0x30. The globals 0x003dce40 and 0x003dce48 hold pointers into a caller's stack frame
 # (first seen frame 81). The ground ring 0x00541550 and terrain 0x0184c7d0 +0x9e0/+0x9e4 are the ring's.
+# MD105a — the frame's tail on the quad in Rust (tests/atv_quad/sim_tail.rs, run by sim_frame.rs's palm with
+# tail = true; journal research/journal/2026-11-09-md105a-atv-sim-tail/). Comment rows only. The tail 0x00128af0
+# walks the sim 0x0065bba0; the quad's listener is quad +0xc, its step (vt +0x40) 0x004bf9a0 = j 0x004ba9f0
+# (the quad's update, quad::update), stepped once a frame on the palm ride. The update's rider hold: name lookup
+# 0x00214b30(0x005423e0, 0x005274f3, 0), the vehicle state's vt +0xac(state, name), 0 or rider = v0 - 0x2ec,
+# held = *(*(rider+0x378)+0x14); the rumble's on 0x0051a250(*(state+0x6ac)). BikeVehicleUpdate 0x004e1b90 is
+# tail::inner on the quad (the bike's vehicle map holds on the quad). Quad vt slots the ports stand for: +0x45c
+# 0x004aad60 (hazard clock, tail::stuck), +0x49c 0x004e24a0 (wreck test), +0x368 0x004e2260 (enter), +0x36c
+# 0x004e2380 (unwreck), +0x398 0x004e1870 (part), +0x48c 0x004e2e10 / +0x490 0x004e2eb0 (the ray swaps,
+# quad::swap_rays), +0x3a8 0x004b8e30 (put-back, quad::put_back over wreck::put_back_base), +0x3e4 0x004be3c0
+# (animate). Inner-update slots run as the original's: +0x3a4 fade, +0x4f8, +0x4e8, +0x4f0 lean, +0x35c ride,
+# +0x378 sync, +0x37c snapshot, +0x4a0 wreck last; network 0x0025e8d0(quad+0x400), parts 0x00494370(quad).
+# Over the 300 frames: 2 entries, 1 unwreck, 3 swaps, 1 put-back (4 wheel resets), rumble 4 frames, every RAM
+# word outside the stack and the ground ring equal to the whole frame's after each frame.
 # MD74 — the two callees ported (atv_wheel::contact_velocity, hinge_force; tests/atv_wheel.rs runs both off the
 # same image, and the tire-forces test now runs them unhooked). Journal: research/journal/2026-11-02-md74-atv-wheel-callees.
 # Contact velocity, wheel-relative: body point velocity = body +0x80 + turn(body +0x1d0) x (+0x140 - body +0x70).
