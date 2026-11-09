@@ -370,8 +370,8 @@ fn the_spawned_quads_ride_is_the_originals_frame_after_frame() {
 /// MD37b — **the same, with gas, steered at the palm ahead of the spawn** ([`at_the_palm`]), every
 /// frame the original's. MD37a's race-wheelie-launch strikes the palm at ~79 ft/s, but the world
 /// step alone does not: on both sides the quad runs through it with no contact in its record and
-/// no wreck. The strike is in the rest of the game's frame (MD104), which then turns these
-/// asserts round.
+/// no wreck. The strike is in the rest of the game's frame: `sim_frame.rs` (MD105) runs the whole
+/// frame over this ride and strikes, wrecks and is put back.
 #[test]
 fn the_spawned_quads_run_into_the_palm_is_the_originals_frame_after_frame() {
     let Some(seen) = chain(at_the_palm, PALM_FRAMES) else { return };
@@ -495,3 +495,7 @@ fn chain(pad: impl Fn(usize, Vf, Vf) -> Pad, frames: usize) -> Option<Seen> {
     eprintln!("MD37b: {frames} frames, {steps} instructions, {} ground queries; {seen:?}", asked.get());
     Some(seen)
 }
+
+/// MD105: the whole sim frame over the palm ride.
+#[path = "sim_frame.rs"]
+mod sim_frame;
