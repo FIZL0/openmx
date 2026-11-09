@@ -919,6 +919,48 @@ score_race_tick             boot 0x00262aa0 (dt f12, mgr) the score manager's ra
 #                                           0x00267d90 (card 0x80000), the line lists, 0x00268350 /
 #                                           0x00268660 (mgr 0x800/0x1000), the computer aim 0x0026d780
 #                                           (card 0x800000), and everything after the card loop.
+# S292: the other handlers' line tests. Mode (+0x64) 1 is the machine race (S92's store scan), 3 the
+#   freeride/stunt mode; 4, 5 and 6 are never stored (S92), so their gate tests (0x00265040 twice,
+#   0x00265c70, 0x00266750) are dead and not ported.
+score_gate_line             boot 0x002611c0 (mgr, card) -> 0 for no card / no gate (+0x80) or a backwards
+#                                           clock, else 1: the gate race's line. start_gate_crossed(
+#                                           +0x80, +0x60, +0x70); 1: owner/chain vt+0x24, listener
+#                                           +0x1c; +0x24 += |next+0x40 - gate+0x40| (vsub.xyz, mula/
+#                                           madda/madd, sqrt.s; next = gate+0x90 or mgr+0x70); +0x80 =
+#                                           next, +0x84++, +0x38++, vt+0x14/+0x10. Next null: +0x80 =
+#                                           mgr+0x70, +0x84 = 0, laps++, +0xb8 = 0, +0x48 = +0xb4 (read
+#                                           first) - +0x4c, < 0 -> 0 and return 0; (lap < best or best
+#                                           <= 0) best, number, owner/chain +0x10 then listener +0xc
+#                                           TWICE (loop from the listener itself); +0x4c; keep_lap;
+#                                           kind 3 + owner+8: card run over (+0x24 = +0x28), ghost
+#                                           listener +0x54/+0x58, ghost +0x24 = card +0x28, ghost |= 2
+#                                           on runs >= mgr+0xf0 with no best test (+0x50); vt+0xc/+8.
+#                                           Not wrapped and kind 4: card &= ~0x100. 2: +0x28/+0x20.
+#                                           Then every call (not on the backwards return): kind not
+#                                           2/3 and mgr+0x94 <= laps -> card |= 1, mgr |= 0x10, +0x18/
+#                                           +0x14. No 0x10/0x10000/0x20000 tests. Also called by
+#                                           0x00393420, 0x003a1d80, 0x003e3150 and code at 0x003560a0.
+#                                           S292: race::LapRules::gate_line, tests/race.rs
+score_machine_race_tick     boot 0x002640c0 (dt f12, mgr) mode 1's handler: needs mgr+0x34 and +0x70;
+#                                           per card (taking part, not 0x4001, kind 4 needs 0x100):
+#                                           odometer +0x20, 0x00267d90 on 0x80000, then only when card
+#                                           +0x70 (last x) >= 0 score_gate_line (0 -> the handler
+#                                           returns 0), mgr |= 4 for a waited-for card out, the zone
+#                                           list; distances to the gate +0x10/+0x14, the aim +0x180
+#                                           (50 ft, 0.02), listener +0x6c, owner +0x5c, progress, last
+#                                           = now (xyz only), clocks... Only the line and the zones
+#                                           are ported (S292); the rest is S292a.
+score_machine_zones         boot 0x00264338 inside score_machine_race_tick: the zone list (mgr flag 0x200,
+#                                           list mgr+0x78, next +0x90, live flag 1), $16 card, $18 mgr;
+#                                           1 -> owner/chain vt+0x2c, listener +0x24; 2 -> +0x30/+0x28.
+#                                           race::zone_crossings
+score_machine_zones_end     boot 0x00264520 the pc after the zone list
+#   score_mode3's own zone list (0x00268fb4) runs after it copies +0x60 into +0x70, so its step never
+#   moves and no zone is ever crossed (tests/race.rs proves it on the whole handler).
+#   The vtable-only caller 0x00285090 (vtables 0x0045542c, 0x0045c53c) is an AI driver's steering
+#   (+0xd4 its card, +0xdc the track): with its +0x30 bit 0x40000000 it tests the card's next gate
+#   (+0x80) and on 2 (beside) sets +0x30 |= 0xffffffff80000000, which sends it back along the path
+#   (0x0026e0c0, 0x0026d780). AI, not lap bookkeeping: not ported (S292b).
 # S13e: the track's race file. Not in Tracks\sx01.res: it is tracks\sx01\sx01.tdf inside
 # Tracks\sx01_2.res (with sx01ai.tdf, supercross.aty, sx01.wpt, hit.dat).
 track_ctor                  boot 0x002693c0 (track) the track object (the score manager's +0x68 =
