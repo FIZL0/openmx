@@ -774,6 +774,59 @@ race_manager_tick           boot 0x002fcff0 (dt f12, race) the race manager's ti
 #                                           +0x20 xyz times -5 - 5*unit, card +0x1c0 = 1 + unit),
 #                                           the +0x410 countdown, then score_manager_tick(dt, +0x50).
 #                                           S13a: race::Gate::watch, tests/race.rs
+#                                           S13b: the clocks. +0x4c0 runs (c -= dt) only while > 0
+#                                           (c.ole), the track's state (vt+0x20 of
+#                                           *(+0x484)[+0x4ac]) != 2 and (*(+0x160)+0x5c & 2) == 0;
+#                                           at <= 0 the music starts (only if app+0x570: 0x00102640,
+#                                           the track's vt+0x98/+0x9c/+0xa0, +0x4d8, +0x4cc) and it
+#                                           reads 0. The watch needs +0x3dc != 0. +0x410 the same,
+#                                           its run-out the "PreloadAndClutchTipPopup" (0x001bc920,
+#                                           0x001c8850, 0x001c8670 250,250 or 750,1333; app+0x3d0
+#                                           +0x114 = 1); else if +0x470 != 0, +0x474 == 0 and
+#                                           stage(*(+0x44c + 4*(+0x470)))+0x24 != 0 (c.eq):
+#                                           +0x474 = 1, +0x410 = max.s(0.001 0x3a83126f, (len - 0.75)
+#                                           - 1.3 0x3fa66666). race::Race::tick
+race_music_count            boot 0x00102640 (list, n) the music start's first call; hooked to 0 in
+#                                           tests/race.rs, which skips the rest of the start
+race_tip_find               boot 0x001bc920 (ui, name, 1) the tip's lookup; v0 indexes ui+0x30 by 12s
+race_tip_show               boot 0x001c8850 (fader manager, race+0x3a0)
+race_tip_place              boot 0x001c8670 (fader manager, w, h, 1)
+ui_manager                  boot 0x004e1e30 the global the tip's lookup reads its table through (+0x30)
+race_drop                   boot 0x002fbdd0 (race) the gate drop: listener vtable 0x00458690 slot 0xe8,
+#                                           and slot 0x78 through the thunk 0x00300470 (this -0x160),
+#                                           which score_manager_tick calls at the countdown's end. The
+#                                           overlays and interface items first (0x002f90f0, 0x002ff4e0
+#                                           if +0x3ac, 0x0037abf0 per player, 0x003b3940 on
+#                                           scene+0x74), then +0x4c0 = 1.0, gate +0x30 &= ~1, and one
+#                                           rand: scene(app+0x3cc)+0xf0 = 8 + 5 * (rand * 2^-31).
+#                                           race::Race::drop
+race_reset                  boot 0x002fb2e0 (race) closes the gate (|= 1), picks +0x4ac by rand out of
+#                                           +0x47c entries, countdown length mgr+0xbc =
+#                                           table[+0x49c][+0x4ac] + 1.5, interval mgr+0xc0 = 0.1,
+#                                           +0x4c0 = +0x410 = +0x470 = +0x474 = 0. Not ported (S13a's)
+race_countdown_listener     boot 0x002fb9b0 slot 0x5c through the thunk 0x00300480: overlays, beeps and
+#                                           the gate bars' physics flags (0x0015c390 / 0x0015c3a0 on
+#                                           the interface items' +0x68). No rand
+score_manager_countdown_end boot 0x0025fef8 inside score_manager_tick: flags &= ~0x80, |= 1,
+#                                           0x00266da0 (cards without +8 bit 0x10 get bit 2), the
+#                                           listener's vt+0x78 (race_drop), each card's first
+#                                           entity's vt+0x68 (bike_race_start), then elapsed += dt
+bike_race_start             boot 0x0027f5e0 (bike) the bike entity's vt+0x68 (thunk 0x00281a20, this
+#                                           -0xf9c): chassis +0x2a0..+0x2a8 = 1 (0x0015c390),
+#                                           +0x2ac..+0x2b4 = 1 (chassis_set_flags), bike+0x610 = 1;
+#                                           with an AI (bike+0x10d0) three or four rands. A human's
+#                                           chassis waits at the gate with +0x2a0 = 0, 1, 0.
+#                                           race::release
+bike_message                boot 0x0027da00 (bike, msg, out) the bike entity's vt+0x94 (thunk 0x002819b0,
+#                                           this -0xf9c): 1 out = chassis(+0x7a4) transform(+0x254)
+#                                           +0x80; 2 chassis vt+0xc4 (chassis_stop) then chassis
+#                                           +0x260 = *out (lq/sq). race::push
+chassis_stop                boot 0x0015c3b0 (chassis) vtable +0xc4: +0x130 +0x140 +0x70 +0x80 +0x260
+#                                           +0x270 +0x290 = (0,0,0,1), +0x34 = 0, tail-calls vt+0xb0.
+#                                           chassis::stop
+chassis_reset_history       boot 0x0015c420 (chassis) vtable +0xb0: memset 12 at +0x2b8, +0x2d0, +0x310
+#                                           and +0x2c4, +0x2dc, +0x31c; +0x2f0 and +0x300 = (0,0,0,1).
+#                                           chassis::reset_history
 
 # ---------------------------------------------------------------------------------------------------
 # D7 — which bike a freeride area loads. The vehicle build loader names two physics files from the

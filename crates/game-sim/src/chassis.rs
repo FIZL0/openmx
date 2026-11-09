@@ -336,6 +336,32 @@ pub fn set_flags(ch: &mut Chassis, x: i32, y: i32, z: i32) {
     ch.ang_free = [x, y, z];
 }
 
+/// **Stop the body dead** (S13b), the chassis' own virtual: the force, the torque, both
+/// accelerations, the velocity in both frames and the angular velocity in the body's frame back to
+/// [`CLEAR`], the speed to zero, and then the integrator's history forgotten ([`reset_history`]).
+/// The push, the correction and the world's angular velocity are left as they were.
+pub fn stop(ch: &mut Chassis) {
+    ch.force = CLEAR;
+    ch.torque = CLEAR;
+    ch.accel = CLEAR;
+    ch.ang_accel = CLEAR;
+    ch.vel = CLEAR;
+    ch.local_vel = CLEAR;
+    ch.ang_vel = CLEAR;
+    ch.speed = F::ZERO;
+    reset_history(ch);
+}
+
+/// The integrator's history forgotten, the virtual [`stop`] ends on: the position's, the velocity's
+/// and the angular velocity's derivatives (both of each pair) to zero, the orientation's to the
+/// identity quaternion.
+pub fn reset_history(ch: &mut Chassis) {
+    ch.pos_hist = Deriv::default();
+    ch.vel_hist = Deriv::default();
+    ch.ang_hist = Deriv::default();
+    ch.quat_hist = Deriv { dx: CLEAR.0.map(F), prev: CLEAR.0.map(F) };
+}
+
 /// Everything [`measure`] and [`integrate`] call and this module does not port, in the order they
 /// are called and with the vector or `dt` handed over. Both return them as a list, which is how the
 /// order gets proved even where the callee does not.
