@@ -2022,7 +2022,7 @@ fn read_png(path: &std::path::Path) -> (usize, usize, Vec<u8>) {
     (w, h, rgb)
 }
 
-/// The Garage's Bike tab shot at 640x360 from a store of its own whose 1P rides `bike`, or none
+/// The Garage's machine picker (`--screen bike`, the tab it took the place of, P315c) shot at 640x360 from a store of its own whose 1P rides `bike`, or none
 /// without a disc.
 fn garage_shot(bike: &str) -> Option<Vec<u8>> {
     let iso = match game_render::disc::Disc::configured_path() {
@@ -2097,7 +2097,7 @@ fn the_garage_rows_carry_the_originals_names() {
     m.step(reader.read(&Report::idle()));
     let r = &mut reader;
     main_to(&mut m, r, "Garage");
-    tab_to(&mut m, r, "Bike");
+    tab_to(&mut m, r, "Machines");
     let row = |m: &Menu, label: &str| {
         m.page().iter().find(|row| row.label == label).map(|row| row.value.clone()).unwrap_or_else(|| {
             panic!("no {label} row in {:?}", m.page().iter().map(|row| &row.label).collect::<Vec<_>>())
@@ -2153,9 +2153,10 @@ fn the_fliers_tab_picks_a_renamed_packs_skins_per_seat() {
     m.step(reader.read(&Report::idle()));
     let r = &mut reader;
     main_to(&mut m, r, "Garage");
-    tab_to(&mut m, r, "Fliers");
+    tab_to(&mut m, r, "Machines");
     let labels: Vec<String> = m.page().iter().map(|row| row.label.clone()).collect();
-    assert_eq!(labels, ["Player", "Plane", "Helicopter", "Hovercraft"]);
+    assert_eq!(labels, ["Player", "Bike Class", "Bike", "Paint", "Driving Model", "Plane", "Helicopter", "Hovercraft"]);
+    assert_eq!(m.garage_flier(), None, "on the Player row the stage shows the bike");
     let row = |m: &Menu, i: usize| m.page().iter().find(|row| row.key == Key::Flier(i)).cloned().unwrap();
     assert_eq!(row(&m, 0).value, "Biplane");
     assert_eq!(row(&m, 0).choices, ["Biplane", "Biplane, Second Livery", "Red Baron", "Broken (cannot fly)"]);
@@ -2206,6 +2207,94 @@ fn the_fliers_tab_picks_a_renamed_packs_skins_per_seat() {
     assert!(!m.settings.text().contains("flier"));
 }
 
+/// P315c: the Garage's machine picker is one tab — the bike's class, model and paint, its driving
+/// model and every flier kind — with an installed pack's bikes listed by class and game beside the
+/// disc's, greyed and stepped over, and a quad pack's row greyed with why. The stage's arrows step
+/// the bike's paint off the flier rows, and what the tab picked goes through garage.txt and back.
+#[test]
+fn the_machine_picker_lists_pack_bikes_and_round_trips_garage_txt() {
+    use menu::Key;
+    use roster::{Catalogue, PackMachine, Picks, Row as G};
+    let mut disc = match game_render::Disc::open_configured() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    let catalogue = Catalogue::read(&mut disc).unwrap();
+    let pack = |machine: &str, class: &str, name: &str, why: &str| PackMachine {
+        pack: "test_bikes".into(),
+        game: "Test Game".into(),
+        machine: machine.into(),
+        class: class.into(),
+        skin: name.to_lowercase().replace(' ', "_"),
+        name: name.into(),
+        why: Some(why.into()),
+    };
+    let ride = "openmx rides only MX Unleashed's own bikes yet";
+    let mut reader = Reader::new();
+    let mut m = Menu::new(Settings::default(), Controls::default()).with_garage(catalogue, Picks::default());
+    m.set_machines(vec![pack("bike", "250", "Test 250", ride), pack("bike", "450", "Test 450", ride), pack("atv", "", "Test quads", "openmx cannot ride a quad yet")]);
+    m.step(reader.read(&Report::idle()));
+    let r = &mut reader;
+    main_to(&mut m, r, "Garage");
+    tab_to(&mut m, r, "Machines");
+    let labels: Vec<String> = m.page().iter().map(|row| row.label.clone()).collect();
+    assert_eq!(labels, ["Player", "Bike Class", "Bike", "Paint", "Driving Model", "Plane", "Helicopter", "Quad"]);
+    let row = |m: &Menu, key: Key| m.page().iter().find(|row| row.key == key).cloned().unwrap();
+    let class = row(&m, Key::Garage(G::Class));
+    assert_eq!(class.value, "125cc");
+    assert_eq!(class.choices.last().map(String::as_str), Some("450cc (cannot ride)"), "{:?}", class.choices);
+    assert_eq!(class.choices[class.now.unwrap()], "125cc");
+    assert_eq!(row(&m, Key::Garage(G::Model)).note.as_deref(), Some("MX Unleashed's own."));
+    let quad = row(&m, Key::Machine(0));
+    assert_eq!((quad.value.as_str(), quad.off.as_deref()), ("Test quads", Some("openmx cannot ride a quad yet")));
+    assert_eq!(quad.note.as_deref(), Some("Test Game"));
+
+    // The stage shows the bike off the flier rows, and its arrows step the paint.
+    down_to(&mut m, r, Key::Garage(G::Livery));
+    assert_eq!(m.garage_flier(), None);
+    let size = (1280, 720);
+    let paint = row(&m, Key::Garage(G::Livery)).value;
+    assert!(m.click(m.flier_arrow_point(1, size).expect("the stage's arrows"), size));
+    assert_ne!(row(&m, Key::Garage(G::Livery)).value, paint, "the right arrow steps the paint");
+    assert_eq!(m.garage(0).unwrap().pick.bike, "125sx_one");
+
+    // 250cc lists the pack's 250 after the disc's, and left and right never land on it.
+    down_to(&mut m, r, Key::Garage(G::Class));
+    tap(&mut m, r, Control::Right);
+    assert_eq!(row(&m, Key::Garage(G::Class)).value, "250cc");
+    let bike = row(&m, Key::Garage(G::Model));
+    assert_eq!(bike.choices.last().map(String::as_str), Some("Test 250 (cannot ride)"));
+    assert!(!bike.choices.iter().any(|c| c.starts_with("Test 450")), "only this class's");
+    assert_eq!(bike.note.as_deref(), Some(format!("MX Unleashed's own. Also Test Game's 250cc: {ride}.").as_str()));
+    down_to(&mut m, r, Key::Garage(G::Model));
+    for _ in 0..bike.choices.len() {
+        tap(&mut m, r, Control::Right);
+        assert!(!row(&m, Key::Garage(G::Model)).value.starts_with("Test"), "a pack's bike is stepped over");
+    }
+    down_to(&mut m, r, Key::Garage(G::Tier));
+    tap(&mut m, r, Control::Right);
+    down_to(&mut m, r, Key::Flier(0));
+    tap(&mut m, r, Control::Right);
+    assert_eq!(m.garage_flier().map(|f| f.skin.as_str()), Some("biplane2"));
+    tap(&mut m, r, Control::Circle);
+    assert!(m.take_picks_changed());
+    let one = m.picks.0[0].clone();
+    assert_eq!((one.set.engine, one.set.pro), (game_sim::track::Engine::Cc250, true));
+    assert_eq!(one.flier("biplane").map(|f| f.skin.as_str()), Some("biplane2"));
+
+    // garage.txt: written and read back as the tab left it.
+    let dir = scratch("p315c-garage");
+    m.picks.save(&dir).unwrap();
+    let text = std::fs::read_to_string(dir.join(roster::GARAGE_FILE)).unwrap();
+    assert!(text.contains(&format!("seat1 = {} {} thq1\n", one.bike, one.set.word())), "{text}");
+    assert!(text.contains("seat1.flier = biplane original biplane2\n"), "{text}");
+    assert_eq!(Picks::load(&dir), m.picks);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn a_picked_bike_and_rider_reach_the_ride_that_starts_per_seat() {
     use game_render::rider::{Rider as Body, Sex};
@@ -2231,7 +2320,7 @@ fn a_picked_bike_and_rider_reach_the_ride_that_starts_per_seat() {
     assert_eq!(m.screen(), Some(Screen::Garage));
     assert_eq!(m.page()[0].value, "1P");
     // 1P: the Bike tab's class right (125 to 250) and Tier to Pro, then the Rider tab's next rider.
-    tab_to(&mut m, r, "Bike");
+    tab_to(&mut m, r, "Machines");
     down_to(&mut m, r, Key::Garage(G::Class));
     tap(&mut m, r, Control::Right);
     down_to(&mut m, r, Key::Garage(G::Tier));
@@ -2241,7 +2330,7 @@ fn a_picked_bike_and_rider_reach_the_ride_that_starts_per_seat() {
     tap(&mut m, r, Control::Right);
     // 2P: class left (125 to 50), and the rider two along in its second colours. There is no Tuning
     // row: a player always rides the P files, the AI riders' A ones never.
-    tab_to(&mut m, r, "Bike");
+    tab_to(&mut m, r, "Machines");
     down_to(&mut m, r, Key::Player);
     tap(&mut m, r, Control::Right);
     assert_eq!(m.page()[0].value, "2P");
@@ -4684,20 +4773,20 @@ fn l1_and_r1_walk_every_tab_round_from_either_end() {
         tap(&mut m, &mut r, Control::L1);
         assert_eq!(here(&m, Screen::Settings), (i, first[i]));
     }
-    // The Garage: Rider, Bike, Gear and Fliers (P315), each with its Player row first.
+    // The Garage: Rider, Machines (the bike and the fliers, P315c) and Gear, each with its Player row first.
     tap(&mut m, &mut r, Control::Circle);
     main_to(&mut m, &mut r, "Garage");
     assert_eq!(m.screen(), Some(Screen::Garage));
     assert_eq!(m.tabs(Screen::Garage), menu::GARAGE_TABS);
-    assert_eq!(menu::GARAGE_TABS, ["Rider", "Bike", "Gear", "Fliers"]);
-    for i in [0, 1, 2, 3, 0] {
+    assert_eq!(menu::GARAGE_TABS, ["Rider", "Machines", "Gear"]);
+    for i in [0, 1, 2, 0] {
         assert_eq!(here(&m, Screen::Garage), (i, Key::Player));
         tap(&mut m, &mut r, Control::R1);
     }
     assert_eq!(m.tab(Screen::Garage), 1);
     tap(&mut m, &mut r, Control::L1);
     tap(&mut m, &mut r, Control::L1);
-    assert_eq!(here(&m, Screen::Garage), (3, Key::Player), "L1 from Rider is Fliers");
+    assert_eq!(here(&m, Screen::Garage), (2, Key::Player), "L1 from Rider is Gear");
 }
 
 /// P128: Settings' Graphics tab, reached by L1 and R1 from either side and by `--screen graphics`,

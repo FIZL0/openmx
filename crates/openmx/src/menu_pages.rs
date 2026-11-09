@@ -43,9 +43,13 @@ pub const TAB_AUDIO: usize = 3;
 pub const TAB_CONTROLS: usize = 4;
 pub const TAB_CAMERA: usize = 5;
 /// The Garage's tabs, each starting with the same Player row.
-pub const GARAGE_TABS: [&str; 4] = ["Rider", "Bike", "Gear", "Fliers"];
-/// The Garage's Fliers tab (P315), whose stage shows a flier rather than the bike (P315a).
-pub const TAB_FLIERS: usize = 3;
+pub const GARAGE_TABS: [&str; 3] = ["Rider", "Machines", "Gear"];
+/// The Garage's machine picker (P315c): the bike's class, model and paint and every flier kind on
+/// one tab, MX Unleashed's beside each installed machine pack's. Its stage shows the bike, or the
+/// flier whose row is under the cursor (P315a).
+pub const TAB_MACHINES: usize = 1;
+/// The tabs the machine picker took the place of (P315c), still words `--screen` takes for it.
+const MACHINES_WAS: [&str; 2] = ["bike", "fliers"];
 
 /// The players a Player row steps through: the concept's 1P to 4P.
 pub const PLAYERS: usize = 4;
@@ -210,6 +214,9 @@ pub enum Key {
     /// A flier kind's row on the Garage's Fliers tab (P315), by its place in
     /// [`roster::flier_kinds`].
     Flier(usize),
+    /// A greyed row on the machine picker for a kind of machine openmx cannot ride (P315c), by its
+    /// place in [`roster::other_kinds`].
+    Machine(usize),
     /// The Original switch (P126), and each departure's under it.
     Original,
     /// The Ride tab's row into the Original Game page (P179).
@@ -307,7 +314,7 @@ impl Row {
     /// Whether the row is a dropdown (P277, opentennis's B498): a choice of [`LIST`] or more. A row
     /// that picks something for a press to do (Load Preset, Save Over) keeps its left and right.
     pub fn many(&self) -> bool {
-        self.kind == Kind::Choice && self.choices.len() >= LIST && !matches!(self.key, Key::LoadPreset | Key::CameraSaveOver | Key::Garage(_) | Key::Flier(_))
+        self.kind == Kind::Choice && self.choices.len() >= LIST && !matches!(self.key, Key::LoadPreset | Key::CameraSaveOver | Key::Garage(_) | Key::Flier(_) | Key::Machine(_))
     }
 
     /// Whether Cross opens the row's dropdown now: a [`Row::many`] row that is not dimmed.
@@ -432,6 +439,7 @@ impl Screen {
         [(Screen::Settings, &SETTINGS_TABS[..]), (Screen::Garage, &GARAGE_TABS[..])]
             .into_iter()
             .find_map(|(s, tabs)| tabs.iter().position(|t| t.to_lowercase() == w).map(|i| (s, i)))
+            .or_else(|| MACHINES_WAS.contains(&w).then_some((Screen::Garage, TAB_MACHINES)))
     }
 }
 
@@ -1126,19 +1134,41 @@ impl Menu {
             .collect()
     }
 
-    /// The flier kind the Garage's stage shows on its Fliers tab (P315a): the row under the cursor,
-    /// else the first kind. None off the tab.
+    /// The flier kind the Garage's stage shows on its machine picker (P315a, P315c): the kind whose
+    /// row is under the cursor. None off a flier row, where the stage shows the bike.
     fn garage_flier_kind(&self) -> Option<String> {
-        if self.screen() != Some(Screen::Garage) || self.tab(Screen::Garage) != TAB_FLIERS {
+        if !self.on_machines() {
             return None;
         }
-        let kinds = roster::flier_kinds(&self.flier_offer);
         let page = self.page_of(Screen::Garage);
-        let at = match page.get(self.cursor(Screen::Garage)).map(|r| r.key) {
-            Some(Key::Flier(i)) => i,
-            _ => 0,
-        };
-        kinds.get(at).cloned()
+        let Some(Key::Flier(at)) = page.get(self.cursor(Screen::Garage)).map(|r| r.key) else { return None };
+        roster::flier_kinds(&self.flier_offer).get(at).cloned()
+    }
+
+    /// Whether the Garage is on its machine picker (P315c).
+    pub(super) fn on_machines(&self) -> bool {
+        self.screen() == Some(Screen::Garage) && self.tab(Screen::Garage) == TAB_MACHINES
+    }
+
+    /// The stage's arrows on the machine picker (P315a, P315c), `-1` left or `1` right: the shown
+    /// flier's next skin, or with the bike shown its next paint, as left and right on those rows
+    /// step them. Whether there was one to step.
+    pub(super) fn step_garage_machine(&mut self, by: i32) -> bool {
+        if self.garage_flier().is_some() {
+            return self.step_garage_flier(by);
+        }
+        let seat = self.garage_seat();
+        let Some(at) = roster::ROWS.iter().position(|r| *r == roster::Row::Livery) else { return false };
+        let Some(g) = self.garages.get_mut(seat) else { return false };
+        let (was, row) = (g.pick.clone(), g.row);
+        g.row = at;
+        g.turn(&self.catalogue, by);
+        g.row = row;
+        let moved = g.pick != was;
+        if moved {
+            self.changed = true;
+        }
+        moved
     }
 
     /// The flier the Garage's stage turns on its Fliers tab (P315a): the seat's pick of the kind
@@ -1215,21 +1245,96 @@ impl Menu {
                 save.note = Some("Left and right load a saved one.".into());
                 rows.push(save);
             }
-            1 => {
-                rows.push(row(G::Class, "Bike Class", "The bike's class."));
-                rows.push(row(G::Model, "Bike", "The bike in this class."));
-                rows.push(row(G::Livery, "Paint", "The bike's livery."));
+            TAB_MACHINES => {
+                rows.extend(self.bike_rows(seat));
                 rows.push(row(G::Tier, "Driving Model", "Race Physics, or Pro Physics: faster bikes."));
+                rows.extend(self.flier_rows(seat));
+                rows.extend(self.other_machine_rows());
             }
-            2 => {
+            _ => {
                 rows.push(row(G::Piece(Piece::Helmet), "Helmet", "The helmet, in the rider's colours."));
                 rows.push(row(G::Piece(Piece::Goggles), "Goggles", "The goggles."));
                 rows.push(row(G::Piece(Piece::Gloves), "Gloves", "The gloves."));
                 rows.push(row(G::Piece(Piece::Boots), "Boots", "The boots."));
             }
-            _ => rows.extend(self.flier_rows(seat)),
         }
         rows
+    }
+
+    /// The machine picker's bike rows (P315c): Bike Class, Bike and Paint, stepping the disc's bikes
+    /// as the Garage always has, with every installed machine pack's bikes listed beside them by
+    /// their class and game, greyed with why while openmx rides only the disc's.
+    fn bike_rows(&self, seat: usize) -> Vec<Row> {
+        use roster::Row as G;
+        let Some(g) = self.garages.get(seat) else { return Vec::new() };
+        let c = &self.catalogue;
+        let offer = &self.machine_offer;
+        let class = roster::cc(g.pick.set.engine).to_string();
+        let bike = c.bike(&g.pick.bike);
+        let ride = |name: String, why: &Option<String>| if why.is_some() { format!("{name} (cannot ride)") } else { name };
+        let mut rows = Vec::new();
+
+        let mut r = Row::new(Key::Garage(G::Class), Kind::Choice, "Bike Class", "The bike's class: MX Unleashed's, and every installed machine pack's.");
+        r.value = g.value(c, G::Class);
+        let classes = roster::class_choices(c, offer);
+        r.now = classes.iter().position(|(k, _)| *k == class);
+        r.choices = classes.iter().map(|(k, ok)| ride(roster::class_label(k), &(!ok).then(String::new))).collect();
+        rows.push(r);
+
+        let mut r = Row::new(Key::Garage(G::Model), Kind::Choice, "Bike", "The bike in this class, MX Unleashed's first and then every installed machine pack's, grouped by game.");
+        r.value = g.value(c, G::Model);
+        let models = bike.map_or_else(Vec::new, |b| c.models(b.engine));
+        r.now = bike.and_then(|b| models.iter().position(|m| *m == b.model));
+        r.choices = models.iter().map(|m| c.model_name(m)).collect();
+        let packs = roster::pack_bikes(offer, &class);
+        r.choices.extend(packs.iter().map(|m| ride(m.name.clone(), &m.why)));
+        r.note = Some(match packs.first() {
+            Some(m) => {
+                let games: Vec<&str> = packs.iter().fold(Vec::new(), |mut v, m| {
+                    if !v.contains(&m.game.as_str()) {
+                        v.push(&m.game);
+                    }
+                    v
+                });
+                let why = m.why.as_deref().map_or(String::new(), |w| format!(": {w}"));
+                format!("MX Unleashed's own. Also {}'s {}{why}.", games.join(", "), roster::class_label(&class))
+            }
+            None => "MX Unleashed's own.".into(),
+        });
+        rows.push(r);
+
+        let mut r = Row::new(Key::Garage(G::Livery), Kind::Choice, "Paint", "The bike's livery. The stage's arrows step it too.");
+        r.value = g.value(c, G::Livery);
+        let paints: Vec<&roster::Bike> = bike.map_or_else(Vec::new, |b| c.liveries(&b.model).into_iter().filter(|x| x.engine == b.engine).collect());
+        r.now = paints.iter().position(|x| x.archive == g.pick.bike);
+        r.choices = paints.iter().map(|x| c.paint_name(&x.archive)).collect();
+        rows.push(r);
+        rows
+    }
+
+    /// The machine picker's rows for the kinds openmx cannot ride (P315c), one a kind, listing the
+    /// packs that bring it, greyed with why: the installed quads until openmx rides one.
+    fn other_machine_rows(&self) -> Vec<Row> {
+        let offer = &self.machine_offer;
+        roster::other_kinds(offer, &self.flier_offer)
+            .iter()
+            .enumerate()
+            .map(|(i, kind)| {
+                let of: Vec<&roster::PackMachine> = offer.iter().filter(|m| m.machine == *kind).collect();
+                let label = roster::machine_label(kind);
+                let mut r = Row::new(Key::Machine(i), Kind::Choice, &label, &format!("The {}s the installed machine packs bring.", label.to_lowercase()));
+                r.choices = of.iter().map(|m| format!("{} (cannot ride)", m.name)).collect();
+                r.value = of.first().map(|m| m.name.clone()).unwrap_or_default();
+                r.note = Some(of.iter().map(|m| m.game.as_str()).fold(Vec::<&str>::new(), |mut v, g| {
+                    if !v.contains(&g) {
+                        v.push(g);
+                    }
+                    v
+                }).join(", "));
+                let why = of.iter().find_map(|m| m.why.clone()).unwrap_or_default();
+                r.off_if(true, &why)
+            })
+            .collect()
     }
 
     /// The Garage's Fliers tab (P315): a row per kind of flier on offer, stepping through every
@@ -1901,6 +2006,7 @@ impl Menu {
                 self.change_garage(g, p);
                 return;
             }
+            Key::Machine(_) => return,
             Key::Flier(i) => {
                 let seat = self.garage_seat();
                 let offer = self.flier_offer.clone();

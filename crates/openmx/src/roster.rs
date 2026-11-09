@@ -761,6 +761,84 @@ pub fn step_flier(offer: &[Flier], pick: &mut Pick, machine: &str, by: i32) {
     pick.set_flier(&next);
 }
 
+// ---- the other machines on offer (P315c) -----------------------------------------------------------
+
+/// The word a pack's `mod.json` gives a bike (`machine`, `skins[].machine`): its skins are listed on
+/// the machine picker's Bike rows, by their class, beside the disc's.
+pub const BIKE_KIND: &str = "bike";
+
+/// A machine an installed machine pack offers that is not a flier (P315c): a bike pack's skin, by
+/// its class, or once by its name a pack of a kind openmx cannot ride (a quad pack). The Garage's
+/// machine picker lists them beside MX Unleashed's bikes, which are the disc's own ([`Catalogue`]),
+/// and greys what openmx cannot ride with why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackMachine {
+    /// The pack's `mod.json` id.
+    pub pack: String,
+    /// The game it comes from, the pack's `source.game`: what the picker groups by.
+    pub game: String,
+    /// Its kind, the pack's word: `bike`, `atv`.
+    pub machine: String,
+    /// A bike's class, its engine size (`250`); empty for any other kind.
+    pub class: String,
+    /// Its model's name, empty for a pack listed by its name.
+    pub skin: String,
+    /// What the picker calls it: the skin's `name`, else its model's; a pack's name for a pack.
+    pub name: String,
+    /// Why openmx cannot ride it, where it cannot.
+    pub why: Option<String>,
+}
+
+/// The picker's name for a kind of machine: a bike, a quad, else [`flier_label`].
+pub fn machine_label(machine: &str) -> String {
+    match machine {
+        BIKE_KIND => "Bike".into(),
+        "atv" => "Quad".into(),
+        _ => flier_label(machine),
+    }
+}
+
+/// A class as the Bike Class row names it: `250cc`, or the pack's own word where it is not a size.
+pub fn class_label(class: &str) -> String {
+    if !class.is_empty() && class.chars().all(|c| c.is_ascii_digit()) { format!("{class}cc") } else { class.to_string() }
+}
+
+/// The Bike Class row's choices (P315c): the disc's classes, then each class only a pack's bikes
+/// are in, with whether a seat can ride it.
+pub fn class_choices(c: &Catalogue, offer: &[PackMachine]) -> Vec<(String, bool)> {
+    let mut out: Vec<(String, bool)> = ENGINES.into_iter().filter(|&e| !c.models(e).is_empty()).map(|e| (cc(e).to_string(), true)).collect();
+    for m in offer.iter().filter(|m| m.machine == BIKE_KIND) {
+        if !out.iter().any(|(k, _)| *k == m.class) {
+            out.push((m.class.clone(), m.why.is_none()));
+        }
+    }
+    out
+}
+
+/// A pack's bikes of class `class` (`250`), grouped by game in the order the games are first listed.
+pub fn pack_bikes<'a>(offer: &'a [PackMachine], class: &str) -> Vec<&'a PackMachine> {
+    let bikes = || offer.iter().filter(move |m| m.machine == BIKE_KIND && m.class == class);
+    let mut games: Vec<&str> = Vec::new();
+    for m in bikes() {
+        if !games.contains(&m.game.as_str()) {
+            games.push(&m.game);
+        }
+    }
+    games.iter().flat_map(|g| bikes().filter(move |m| m.game == *g)).collect()
+}
+
+/// The kinds the picker lists a row of their own for, greyed (P315c): every pack's kind that is
+/// neither a bike nor a flier ([`flier_kinds`] are the Fliers rows'), in the order first listed.
+pub fn other_kinds(offer: &[PackMachine], fliers: &[Flier]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for m in offer.iter().filter(|m| m.machine != BIKE_KIND && !fliers.iter().any(|f| f.machine == m.machine)) {
+        if !out.contains(&m.machine) {
+            out.push(m.machine.clone());
+        }
+    }
+    out
+}
+
 // ---- the look (P86) ----------------------------------------------------------------------------------
 
 /// The file the saved looks live in, beside `settings.txt`.
