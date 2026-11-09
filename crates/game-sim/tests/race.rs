@@ -33,16 +33,28 @@
 //!     ghost cards, lap records, stray words in every float), against [`LapRules::line`], compared on its
 //!     answer, every listener call in order, every word of the card and the ghost's card, the manager's
 //!     flags and its free lap records.
+//! 11. **The race file** (S13e): the track object's own loader, its file reads and allocations
+//!     hooked, on 12,000 generated race files (every record kind, stray words, truncated and refused
+//!     files), against [`TrackFile::parse`], compared on every path, node, link, checkpoint, part and
+//!     gate it builds, or on the refusal.
+//! 12. **sx01 off the disc**: sx01's race file read out of `MX.PSR` against the track object in S196's
+//!     RAM image — the header, both paths, all 96 nodes and the third gate, bit for bit (but the ground's
+//!     node heights and a flag the walk after the load clears).
+//! 13. **The gates on their props**: the same image's grid gate, start gate and finish line against
+//!     [`Supercross::place_drop_gate`] and [`Supercross::place_finish_line`] on the image's own props.
 
 use game_sim::chassis::{Chassis, Deriv};
 use game_sim::race::{
-    self, Course, Crossing, Gate, GridStart, LANES, LapCard, LapRecord, LapRules, LineNotice, Race, Seen, Spot, Supercross,
-    card_flags, flags, race_flags, race_kind,
+    self, CheckPart, Checkpoint, Course, Crossing, Gate, GridStart, LANES, LapCard, LapRecord, LapRules, LineNotice, Link,
+    PathNode, Prop, Race, Refused, Seen, Spot, Supercross, TrackFile, TrackPath, card_flags, flags, race_flags, race_kind,
 };
 use game_sim::rng::Rng;
 use ps2_float::{F, Vf, fpu};
-use ps2_oracle::{Ee, addr, game_or_skip, skip};
+use game_sim::archive::{Psr, Res};
+use ps2_oracle::{Ee, Kit, addr, game_or_skip, skip};
 use std::cell::{Cell, RefCell};
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -1656,4 +1668,637 @@ fn the_lap_line_matches_the_score_cards_line_test() {
         assert!(*k > 100, "notice {n} came up only {k} times in 20,000: {said:?}");
     }
     assert!(counted > 2000, "only {counted} lines counted");
+}
+
+// --- S13e: the track's race file ---------------------------------------------------------------------
+
+/// Free RAM for the race file's track object, the name it is opened by, and the heap the reader's
+/// allocations are handed out of.
+const TRACK_OBJ: u32 = 0x0193_0000;
+const TRACK_NAME: u32 = 0x0193_1000;
+const HEAP: u32 = 0x0194_0000;
+
+/// A race file being written, record by record.
+struct Tdf(Vec<u8>);
+
+impl Tdf {
+    fn tag(&mut self, t: u8) -> &mut Tdf {
+        self.0.push(t);
+        self
+    }
+    fn w(&mut self, v: u32) -> &mut Tdf {
+        self.0.extend_from_slice(&v.to_le_bytes());
+        self
+    }
+    fn i(&mut self, v: i32) -> &mut Tdf {
+        self.w(v as u32)
+    }
+    fn f(&mut self, x: f32) -> &mut Tdf {
+        self.w(x.to_bits())
+    }
+}
+
+/// A float in `lo..hi`, now and then a stray word.
+fn coord(p: &mut Pick, lo: f32, hi: f32) -> f32 {
+    let x = p.range(lo, hi);
+    p.stray(x)
+}
+
+/// A word for a field the reader only copies: small numbers mostly, any bits sometimes.
+fn any_word(p: &mut Pick) -> u32 {
+    if p.below(3) == 0 { p.next() as u32 } else { p.below(8) as u32 }
+}
+
+fn gate_record(t: &mut Tdf, p: &mut Pick) {
+    let a = p.range(0.0, 6.3);
+    t.f(coord(p, -300.0, 300.0)).f(coord(p, -20.0, 60.0)).f(coord(p, -300.0, 300.0));
+    let tilt = if p.below(3) == 0 { p.range(-0.1, 0.1) } else { 0.0 };
+    t.f(p.stray(a.sin())).f(p.stray(tilt)).f(p.stray(a.cos()));
+    // The file's across direction is not a unit vector (sx01's is ~28 long); now and then zero.
+    let l = match p.below(10) {
+        0 => 0.0,
+        1 => 1.0,
+        _ => p.range(0.01, 60.0),
+    };
+    t.f(p.stray(a.cos() * l)).f(p.stray(tilt * l)).f(p.stray(-a.sin() * l));
+    t.f(coord(p, 0.0, 100.0));
+}
+
+/// A generated race file: the path count, paths of nodes, checkpoints with parts and links, gates,
+/// the header and tunables anywhere, unknown tags, and — now and then — a record the reader refuses.
+fn race_file(p: &mut Pick) -> Vec<u8> {
+    let mut t = Tdf(Vec::new());
+    let odd = |p: &mut Pick| p.below(250) == 0;
+    let header = |t: &mut Tdf, p: &mut Pick| match p.below(9) {
+        0 => {
+            t.tag(2).f(coord(p, -300.0, 300.0));
+        }
+        1 => {
+            t.tag(3).f(coord(p, -300.0, 300.0));
+        }
+        2 => {
+            let s = [1.0, 3.0, 0.5, 2.5][p.below(4) as usize];
+            t.tag(4).f(p.stray(s));
+        }
+        3 => {
+            t.tag(0x29).w(any_word(p));
+        }
+        4 => {
+            let tag = [0x13, 0x14, 0x15, 0x16, 0x28][p.below(5) as usize];
+            t.tag(tag).f(coord(p, 0.0, 200.0));
+        }
+        5 => {
+            t.tag([0x0f, 0x10, 0x19][p.below(3) as usize]);
+            gate_record(t, p);
+        }
+        6 => {
+            t.tag(0x0c).w(any_word(p));
+        }
+        7 => {
+            // An unknown tag: its byte alone.
+            t.tag([0x00, 0x11, 0x27, 0x2a, 0x40, 0xff][p.below(6) as usize]);
+        }
+        _ => {}
+    };
+    for _ in 0..p.below(4) {
+        header(&mut t, p);
+    }
+    let count = if p.below(60) == 0 { [0, -1, -7][p.below(3) as usize] } else { 1 + p.below(4) as i32 };
+    t.tag(1).i(count);
+    let mut part_seen = false;
+    for _ in 0..1 + p.below(count.max(1) as u64 + 1) {
+        let k = if odd(p) { [-1, count][p.below(2) as usize] } else { p.below(count.max(1) as u64) as i32 };
+        t.tag(5).i(k);
+        let mut nodes = 0;
+        let mut record = false;
+        let mut parts = 0;
+        let mut links: Option<i32> = None;
+        for _ in 0..p.below(40) {
+            match p.below(16) {
+                0 => {
+                    let tag = [6, 7, 0x18][p.below(3) as usize];
+                    t.tag(tag).w(any_word(p));
+                }
+                1..=3 => {
+                    t.tag(8);
+                    nodes += 1;
+                    for _ in 0..p.below(8) {
+                        match p.below(7) {
+                            0..=2 => {
+                                let tag = [9, 0x0a, 0x0b][p.below(3) as usize];
+                                t.tag(tag).f(coord(p, -300.0, 300.0)).f(coord(p, -20.0, 60.0)).f(coord(p, -300.0, 300.0));
+                            }
+                            _ => {
+                                let tag = [0x17, 0x12, 0x1a, 0x1b][p.below(4) as usize];
+                                t.tag(tag).w(any_word(p));
+                            }
+                        }
+                    }
+                }
+                4 => {
+                    // A point every node has: the path's line.
+                    if nodes > 0 || odd(p) {
+                        t.tag(9).f(coord(p, -300.0, 300.0)).f(coord(p, -20.0, 60.0)).f(coord(p, -300.0, 300.0));
+                    }
+                }
+                5 => {
+                    let n = if odd(p) { -1 } else { p.below(5) as i32 };
+                    t.tag(0x1c).i(n);
+                }
+                6 | 7 => {
+                    t.tag(0x1d);
+                    record = true;
+                    parts = 0;
+                    for _ in 0..p.below(4) {
+                        let tag = [0x21, 0x1e, 0x1f, 0x20][p.below(4) as usize];
+                        t.tag(tag).w(any_word(p));
+                    }
+                }
+                8 | 9 => {
+                    if record || odd(p) {
+                        t.tag(0x22);
+                        parts += 1;
+                        part_seen = true;
+                    }
+                    for _ in 0..p.below(5) {
+                        match p.below(4) {
+                            // A point needs a part in the checkpoint at hand.
+                            0 if parts > 0 => {
+                                t.tag(0x24).f(coord(p, -300.0, 300.0)).f(coord(p, -20.0, 60.0)).f(coord(p, -300.0, 300.0));
+                            }
+                            // The words go to the last part made, whichever checkpoint it is in.
+                            1..=3 if part_seen || odd(p) => {
+                                let tag = [0x23, 0x25, 0x26][p.below(3) as usize];
+                                t.tag(tag).w(any_word(p));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                10 => {
+                    let n = if odd(p) { -1 } else { 1 + p.below(3) as i32 };
+                    t.tag(0x0d).i(n);
+                    links = Some(n);
+                }
+                11 => {
+                    if let Some(n) = links.filter(|&n| n > 0) {
+                        let c = if odd(p) { -1 } else { p.below(n as u64) as i32 };
+                        let v = if odd(p) { [-1, count + 1][p.below(2) as usize] } else { p.below(count.max(0) as u64 + 1) as i32 };
+                        t.tag(0x0e).i(c).i(v);
+                    } else if odd(p) {
+                        t.tag(0x0e).i(0).i(0);
+                    }
+                }
+                12 if p.below(100) == 0 => {
+                    // The count again: every slot emptied, the path at hand kept on.
+                    t.tag(1).i(1 + p.below(4) as i32);
+                }
+                _ => header(&mut t, p),
+            }
+        }
+    }
+    if p.below(8) == 0 {
+        // A record with no words as the file's last byte: never read.
+        t.tag([8, 0x1d, 0x22, 0x05][p.below(4) as usize]);
+    }
+    t.0
+}
+
+/// A race file, read back out of the track object the original's reader filled, as the port holds
+/// it. A link is turned back into a path index when it is a path's address.
+fn track_at(ee: &Ee, at: u32) -> TrackFile {
+    let f = |a: u32| F(f32::from_bits(ee.u32_at(a)));
+    let count = ee.u32_at(at + 0x40) as i32;
+    let slots: Vec<u32> = (0..count.max(0) as u32).map(|k| ee.u32_at(ee.u32_at(at + 0x50) + 4 * k)).collect();
+    let gate = |o: u32| match ee.u32_at(at + o) {
+        0 => None,
+        g => Some(gate_at(ee, g)),
+    };
+    let paths = slots
+        .iter()
+        .map(|&p| {
+            if p == 0 {
+                return None;
+            }
+            let mut nodes = Vec::new();
+            let mut n = ee.u32_at(p + 0x10);
+            while n != 0 {
+                nodes.push(PathNode {
+                    id: ee.u32_at(n) as i32,
+                    word_04: ee.u32_at(n + 4),
+                    points: [quad(ee, n + 0x10), quad(ee, n + 0x20), quad(ee, n + 0x30)],
+                    span: f(n + 0x40),
+                    word_44: ee.u32_at(n + 0x44),
+                    word_48: ee.u32_at(n + 0x48),
+                    word_4c: ee.u32_at(n + 0x4c),
+                });
+                n = ee.u32_at(n + 0x54);
+            }
+            let links = match ee.u32_at(p + 0x2c) {
+                0 => None,
+                l => Some(
+                    (0..ee.u32_at(p + 0x18))
+                        .map(|c| {
+                            let w = ee.u32_at(l + 4 * c);
+                            match slots.iter().position(|&s| s == w && s != 0) {
+                                Some(k) => Link::Path(k),
+                                None => Link::Raw(w as i32),
+                            }
+                        })
+                        .collect(),
+                ),
+            };
+            let mut checkpoints = Vec::new();
+            let mut r = ee.u32_at(p + 0x24);
+            while r != 0 {
+                let mut parts = Vec::new();
+                let mut s = ee.u32_at(r + 0x14);
+                while s != 0 {
+                    parts.push(CheckPart {
+                        word_04: ee.u32_at(s + 4),
+                        point: quad(ee, s + 0x10),
+                        span: f(s + 0x20),
+                        word_24: ee.u32_at(s + 0x24),
+                        word_28: ee.u32_at(s + 0x28),
+                    });
+                    s = ee.u32_at(s + 0x30);
+                }
+                checkpoints.push(Checkpoint {
+                    id: ee.u32_at(r) as i32,
+                    word_04: ee.u32_at(r + 4),
+                    word_08: ee.u32_at(r + 8),
+                    word_0c: ee.u32_at(r + 0xc),
+                    word_10: ee.u32_at(r + 0x10),
+                    parts,
+                });
+                r = ee.u32_at(r + 0x20);
+            }
+            Some(TrackPath {
+                flags: ee.u32_at(p),
+                length: f(p + 8),
+                word_0c: ee.u32_at(p + 0xc),
+                nodes,
+                links,
+                checkpoint_count: ee.u32_at(p + 0x20) as i32,
+                checkpoints,
+            })
+        })
+        .collect();
+    TrackFile {
+        offset_x: f(at + 0x80),
+        offset_z: f(at + 0x88),
+        scale: f(at + 0x90),
+        word_34: ee.u32_at(at + 0x34),
+        paths,
+        nodes_made: ee.u32_at(at + 0x44) as i32,
+        checkpoints_made: ee.u32_at(at + 0x48) as i32,
+        grid: gate(0x58),
+        line: gate(0x5c),
+        third: gate(0x60),
+        tunables: [0x64, 0x68, 0x6c, 0x70, 0x74].map(|o| f(at + o)),
+    }
+}
+
+/// Every word of a race file, in a fixed order, so that two compare bit for bit (NaNs too). A link to
+/// an empty slot is the null address it is in memory.
+fn track_words(t: &TrackFile) -> Vec<u32> {
+    let mut w = vec![t.offset_x.0.to_bits(), t.offset_z.0.to_bits(), t.scale.0.to_bits(), t.word_34];
+    w.extend([t.nodes_made as u32, t.checkpoints_made as u32, t.paths.len() as u32]);
+    w.extend(t.tunables.map(|x| x.0.to_bits()));
+    let q = |w: &mut Vec<u32>, v: Vf| w.extend(v.to_bits());
+    for g in [&t.grid, &t.line, &t.third] {
+        match g {
+            None => w.push(0xdead_0000),
+            Some(g) => {
+                w.extend([g.flags, g.width.0.to_bits(), g.height.0.to_bits(), g.reach_sq.0.to_bits()]);
+                q(&mut w, g.centre);
+                q(&mut w, g.normal);
+                q(&mut w, g.across);
+            }
+        }
+    }
+    for path in &t.paths {
+        let Some(path) = path else {
+            w.push(0xdead_0001);
+            continue;
+        };
+        w.extend([path.flags, path.length.0.to_bits(), path.word_0c, path.checkpoint_count as u32, path.nodes.len() as u32]);
+        for n in &path.nodes {
+            w.extend([n.id as u32, n.word_04, n.span.0.to_bits(), n.word_44, n.word_48, n.word_4c]);
+            n.points.iter().for_each(|&v| q(&mut w, v));
+        }
+        match &path.links {
+            None => w.push(0xdead_0002),
+            Some(links) => {
+                w.push(links.len() as u32);
+                for l in links {
+                    w.push(match *l {
+                        Link::Path(k) if t.paths[k].is_some() => 0x8000_0000 | k as u32,
+                        Link::Path(_) => 0,
+                        Link::Raw(v) => v as u32,
+                    });
+                }
+            }
+        }
+        w.push(path.checkpoints.len() as u32);
+        for c in &path.checkpoints {
+            w.extend([c.id as u32, c.word_04, c.word_08, c.word_0c, c.word_10, c.parts.len() as u32]);
+            for s in &c.parts {
+                w.extend([s.word_04, s.span.0.to_bits(), s.word_24, s.word_28]);
+                q(&mut w, s.point);
+            }
+        }
+    }
+    w
+}
+
+/// The reader's file and heap, behind its hooks.
+struct Disc {
+    file: Vec<u8>,
+    at: usize,
+    heap: u32,
+}
+
+fn take(d: &RefCell<Disc>, size: u32) -> u32 {
+    let mut d = d.borrow_mut();
+    let at = d.heap;
+    d.heap = (d.heap + size.max(1) + 15) & !15;
+    at
+}
+
+#[test]
+fn the_race_file_reader_matches_the_track_objects_loader() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let names = [
+        "track_ctor",
+        "track_file_load",
+        "fs_open",
+        "fs_read",
+        "fs_eof",
+        "fs_close",
+        "mem_calloc",
+        "operator_new",
+        "node_add_child",
+        "track_file_fail",
+        "track_first_path",
+        "track_gate_spot",
+        "path_spot",
+        "track_start_spots",
+    ];
+    let [ctor, load, open, read, eof, close, calloc, new, add_child, fail, first_path, gate_spot, spot, start_spots] =
+        match addrs(names) {
+            Ok(a) => a,
+            Err(why) => return skip(&why),
+        };
+    let disc = Rc::new(RefCell::new(Disc { file: Vec::new(), at: 0, heap: HEAP }));
+    ee.hooks.insert(open, Box::new(|ee| ee.set(2, 1)));
+    let d = disc.clone();
+    ee.hooks.insert(
+        read,
+        Box::new(move |ee| {
+            let (dst, n) = (ee.r(6) as u32, ee.r(7) as usize);
+            assert!(n == 1 || n == 4, "a read of {n} bytes");
+            let mut d = d.borrow_mut();
+            let end = (d.at + n).min(d.file.len());
+            let bytes = d.file[d.at.min(end)..end].to_vec();
+            d.at = end.max(d.at);
+            ee.load(dst, &bytes);
+            ee.set(2, bytes.len() as u64);
+        }),
+    );
+    let d = disc.clone();
+    ee.hooks.insert(
+        eof,
+        Box::new(move |ee| {
+            let d = d.borrow();
+            ee.set(2, if d.at < d.file.len() { 0 } else { u64::MAX });
+        }),
+    );
+    let d = disc.clone();
+    ee.hooks.insert(
+        calloc,
+        Box::new(move |ee| {
+            let size = (ee.r(4) as u32).wrapping_mul(ee.r(5) as u32);
+            assert!(size < 0x1_0000, "an allocation of {size:#x}");
+            let at = take(&d, size);
+            ee.load(at, &vec![0; size as usize]);
+            ee.set(2, u64::from(at));
+        }),
+    );
+    let d = disc.clone();
+    ee.hooks.insert(
+        new,
+        Box::new(move |ee| {
+            let size = ee.r(4) as u32;
+            let at = take(&d, size);
+            // Not cleared: what the constructor does not set shows.
+            ee.load(at, &vec![0xa5; size as usize]);
+            ee.set(2, u64::from(at));
+        }),
+    );
+    for at in [close, add_child, fail, first_path, spot, start_spots] {
+        ee.hooks.insert(at, Box::new(|_| {}));
+    }
+    ee.hooks.insert(gate_spot, Box::new(|ee| ee.set(2, 1)));
+
+    let mut p = Pick(0x7d15_0e13_2c9b_5a41);
+    let (mut read_ok, mut failed, mut gates, mut records, mut parts, mut links) = (0, 0, 0, 0, 0, 0);
+    for case in 0..12_000 {
+        let file = race_file(&mut p);
+        {
+            let mut d = disc.borrow_mut();
+            d.file = file.clone();
+            d.at = 0;
+            d.heap = HEAP;
+        }
+        ee.load(TRACK_OBJ, &[0x5a; 0x100]);
+        ee.call(ctor, &[u64::from(TRACK_OBJ)], &[], BUDGET);
+        // The two words the constructor leaves: the port starts them at 0.
+        ee.set_u32(TRACK_OBJ + 0x80, 0);
+        ee.set_u32(TRACK_OBJ + 0x88, 0);
+        ee.call(load, &[u64::from(TRACK_OBJ), u64::from(TRACK_NAME)], &[], 20_000_000);
+        let want = ee.v0() as u32;
+        match TrackFile::parse(&file) {
+            Ok(t) => {
+                assert_eq!(want, 1, "case {case}: the original failed a file the port read: {file:02x?}");
+                let got = track_at(&ee, TRACK_OBJ);
+                if track_words(&t) != track_words(&got) {
+                    panic!("case {case}: {file:02x?}\nport {t:#?}\noriginal {got:#?}");
+                }
+                read_ok += 1;
+                gates += [&t.grid, &t.line, &t.third].iter().filter(|g| g.is_some()).count();
+                for path in t.paths.iter().flatten() {
+                    records += path.checkpoints.len();
+                    parts += path.checkpoints.iter().map(|c| c.parts.len()).sum::<usize>();
+                    links += path.links.as_ref().map_or(0, |l| l.len());
+                }
+            }
+            Err(Refused::Fails) => {
+                assert_eq!(want, 0, "case {case}: the original read a file the port fails: {file:02x?}");
+                failed += 1;
+            }
+            Err(why) => panic!("case {case}: the generator wrote a file the port refuses ({why:?}): {file:02x?}"),
+        }
+    }
+    assert!(read_ok > 8_000 && failed > 500, "{read_ok} read, {failed} failed");
+    assert!(gates > 10_000 && records > 10_000 && parts > 10_000 && links > 5_000, "{gates} gates, {records} checkpoints, {parts} parts, {links} links");
+}
+
+/// sx01's race file off the disc: `tracks\sx01\sx01.tdf` in `Tracks\sx01_2.res`, inside MX.PSR.
+fn sx01_race_file() -> Option<Vec<u8>> {
+    let kit = match Kit::load() {
+        Ok(k) => k,
+        Err(why) => {
+            skip(&why);
+            return None;
+        }
+    };
+    let at = kit.ctx("iso").join("MX.PSR");
+    let Ok(mut f) = File::open(&at) else {
+        skip(&format!("no {} — `./kit extract MX.PSR` writes it", at.display()));
+        return None;
+    };
+    let mut front = vec![0u8; 64 << 10];
+    f.read_exact(&mut front).expect("read the front of MX.PSR");
+    let psr = Psr::parse(&front).expect("MX.PSR's directory");
+    let e = psr.find("Tracks\\sx01_2.res").expect("sx01's second track archive");
+    f.seek(SeekFrom::Start(e.at)).expect("seek");
+    let mut bytes = vec![0u8; e.size as usize];
+    f.read_exact(&mut bytes).expect("read");
+    let res = Res::parse(&bytes).expect("the archive's layout");
+    let m = res.find("tracks\\sx01\\sx01.tdf").expect("sx01's race file");
+    Some(res.read(&bytes, m).expect("inflate the race file"))
+}
+
+fn gate_words(g: &Gate) -> Vec<u32> {
+    let mut w = vec![g.flags, g.width.0.to_bits(), g.height.0.to_bits(), g.reach_sq.0.to_bits()];
+    for v in [g.centre, g.normal, g.across] {
+        w.extend(v.to_bits());
+    }
+    w
+}
+
+#[test]
+fn sx01s_race_file_off_the_disc_is_the_track_object_in_the_image() {
+    let Some(file) = sx01_race_file() else { return };
+    let Some(ee) = sx01_image() else { return };
+    let manager = match addr("activity_manager") {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    let t = TrackFile::parse(&file).expect("sx01's race file reads");
+    let act = ee.u32_at(ee.u32_at(ee.u32_at(manager) + 0x58));
+    let track = ee.u32_at(act + 0xb8);
+    let ram = track_at(&ee, track);
+
+    // The file's own words, bit for bit.
+    let head = |t: &TrackFile| {
+        let mut w = vec![t.offset_x.0.to_bits(), t.offset_z.0.to_bits(), t.scale.0.to_bits(), t.word_34];
+        w.extend([t.nodes_made as u32, t.checkpoints_made as u32, t.paths.len() as u32]);
+        w.extend(t.tunables.map(|x| x.0.to_bits()));
+        w
+    };
+    assert_eq!(head(&t), head(&ram), "the scale, offsets, counts and tunables");
+    assert_eq!((t.paths.len(), t.nodes_made, t.checkpoints_made), (2, 96, 0), "two paths, 96 nodes, no checkpoints");
+    // The third gate is the file's as read: nothing after the reader touches it.
+    assert_eq!(gate_words(&t.third.expect("a third gate")), gate_words(&ram.third.expect("a third gate")), "the third gate");
+    assert!(t.grid.is_some() && t.line.is_some(), "the file has a grid gate and a line");
+
+    // The paths: every word but the points' heights, which the activity's loader puts on the ground.
+    for (k, (a, b)) in t.paths.iter().zip(&ram.paths).enumerate() {
+        let (a, b) = (a.as_ref().expect("the file's path"), b.as_ref().expect("the image's path"));
+        // The walk from path 0 after the load takes 0x80 off every path it reaches (unported).
+        assert_eq!(
+            (a.flags & !0x80, a.length.0.to_bits(), a.word_0c, a.checkpoint_count, &a.links),
+            (b.flags & !0x80, b.length.0.to_bits(), b.word_0c, b.checkpoint_count, &b.links),
+            "path {k}"
+        );
+        assert_eq!(a.nodes.len(), b.nodes.len(), "path {k}'s nodes");
+        for (n, m) in a.nodes.iter().zip(&b.nodes) {
+            let flat = |p: &[Vf; 3]| p.map(|v| [v.x().to_bits(), v.z().to_bits(), v.w().to_bits()]);
+            assert_eq!(
+                (n.id, n.word_04, n.span.0.to_bits(), n.word_44, n.word_48, n.word_4c, flat(&n.points)),
+                (m.id, m.word_04, m.span.0.to_bits(), m.word_44, m.word_48, m.word_4c, flat(&m.points)),
+                "path {k}, node {}",
+                n.id
+            );
+        }
+    }
+}
+
+/// The prop whose frame matches: its position at `+0xb0` and its across row at `+0x80` (the `xyz`
+/// lanes, or all four).
+fn find_prop(ee: &Ee, at: Vf, across: Vf, lanes: usize) -> Vec<u32> {
+    let (at, across) = (at.to_bits(), across.to_bits());
+    (0x0010_0000u32..0x01ff_ff00)
+        .step_by(16)
+        .filter(|&a| (0..lanes as u32).all(|k| ee.u32_at(a + 0xb0 + 4 * k) == at[k as usize]))
+        .filter(|&a| (0..lanes as u32).all(|k| ee.u32_at(a + 0x80 + 4 * k) == across[k as usize]))
+        // A scene node: its bound is clean, or the slot that cleans it is code. (Copies of the frame
+        // sit in other objects too.)
+        .filter(|&a| {
+            let table = ee.u32_at(a + 0x38);
+            ee.u8_at(a + 0x110) & 0x80 == 0
+                || (0x0010_0000..0x0200_0000).contains(&table) && (0x0010_0000..0x0050_0000).contains(&ee.u32_at(table + 0x88))
+        })
+        .collect()
+}
+
+#[test]
+fn the_supercross_loader_stands_sx01s_gates_on_its_props() {
+    let Some(file) = sx01_race_file() else { return };
+    let Some(mut ee) = sx01_image() else { return };
+    let [manager, bound, ahead_at] = match addrs(["activity_manager", "prop_bound", "path_ahead"]) {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    let t = TrackFile::parse(&file).expect("sx01's race file reads");
+    let act = ee.u32_at(ee.u32_at(ee.u32_at(manager) + 0x58));
+    let track = ee.u32_at(act + 0xb8);
+    let (grid_at, line_at, start_at) = (ee.u32_at(track + 0x58), ee.u32_at(track + 0x5c), ee.u32_at(act + 0x3dc));
+    let (want_grid, want_line, want_start) = (gate_at(&ee, grid_at), gate_at(&ee, line_at), gate_at(&ee, start_at));
+    let (c, h) = (ee.scratch(0), ee.scratch(1));
+    let mut prop = |ee: &mut Ee, a: u32| {
+        ee.call(bound, &[u64::from(a), u64::from(c), u64::from(h)], &[], 1_000_000);
+        Prop {
+            across: quad(ee, a + 0x80),
+            look: quad(ee, a + 0xa0),
+            at: quad(ee, a + 0xb0),
+            half_width: f32_at(ee, h),
+            height: f32_at(ee, h + 4),
+        }
+    };
+
+    // The drop gate: the grid gate stands in it, the start gate 4.5 behind it.
+    let drops = find_prop(&ee, want_grid.centre, want_grid.across, 4);
+    let drop = drops
+        .iter()
+        .map(|&a| prop(&mut ee, a))
+        .find(|p| fpu::mul(2.0, p.half_width.0).to_bits() == want_grid.width.0.to_bits())
+        .unwrap_or_else(|| panic!("no drop-gate prop of the grid's width among {drops:x?}"));
+    let mut grid = t.grid.expect("the file's grid gate");
+    let mut start = Gate::new();
+    Supercross::place_drop_gate(&drop, Some(&mut grid), &mut start);
+    assert_eq!(gate_words(&grid), gate_words(&want_grid), "the grid gate: {grid:?} against {want_grid:?}");
+    // The start gate has been through a reset since, which closes it.
+    start.flags |= flags::CLOSED;
+    assert_eq!(gate_words(&start), gate_words(&want_start), "the start gate: {start:?} against {want_start:?}");
+
+    // The finish gate: the line stands in it, facing along the path at its spot. Its bound has
+    // changed since the load — no prop with its frame holds half extents of the line's width and
+    // height any more — so those two come from the image's line, and what is proved here is the rest:
+    // the centre, the across direction and the normal worked out from the path's direction.
+    let finishes = find_prop(&ee, want_line.centre, want_line.across, 3);
+    let first = *finishes.first().expect("a prop standing where the line is");
+    let finish = Prop {
+        half_width: F(fpu::mul(0.5, want_line.width.0)),
+        height: want_line.height,
+        ..prop(&mut ee, first)
+    };
+    let out = ee.scratch(2);
+    ee.call(ahead_at, &[u64::from(track), u64::from(ee.u32_at(line_at + 0x98)), u64::from(out)], &[], 1_000_000);
+    let ahead = quad(&ee, out);
+    let mut line = t.line.expect("the file's line");
+    Supercross::place_finish_line(&finish, ahead, &mut line);
+    assert_eq!(gate_words(&line), gate_words(&want_line), "the line: {line:?} against {want_line:?}");
 }
