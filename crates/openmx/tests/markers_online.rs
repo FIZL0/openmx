@@ -127,7 +127,7 @@ fn frame(np: &mut Netplay<rides::State>, sims: &mut Vec<Sim>, world: &mut Flat, 
         let on_slot = sim.markers.slots.iter().flatten().any(|slot| game_sim::hash::of(&**slot) == now);
         bikes.insert((seat, sim.ticks), (now, on_slot));
     };
-    let mut game = Rides { sims, world, after: Some(&mut after), time_scale: None, plane: None, cars: &[] };
+    let mut game = Rides { fliers: &mut [], sims, world, after: Some(&mut after), time_scale: None, plane: None, cars: &[] };
     np.frame(&mut game, &local, ROUND.as_secs_f32());
 }
 

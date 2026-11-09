@@ -3309,6 +3309,10 @@ pub struct Menu {
     /// The fliers on offer (P315): MX Unleashed's and every installed machine pack's skins, as the
     /// shell reads them off the manifests ([`Menu::set_fliers`]).
     flier_offer: Vec<roster::Flier>,
+    /// An online ride's fliers (P318, [`Menu::set_online_fliers`]): the ones above, each greyed with
+    /// who lacks its pack where some seat's machine does, which the pause's picker offers in their
+    /// place. `None` off line, where the pause offers no flier online.
+    flier_online: Option<Vec<roster::Flier>>,
     /// The other machines on offer (P315c): every installed machine pack's bikes and other kinds,
     /// beside the disc's bikes ([`Menu::set_machines`]).
     machine_offer: Vec<roster::PackMachine>,
@@ -3576,6 +3580,7 @@ impl Menu {
             music_seen: Vec::new(),
             trick_seen: Vec::new(),
             flier_offer: roster::original_fliers(),
+            flier_online: None,
             machine_offer: Vec::new(),
             modified: false,
             mods_lock: None,
@@ -4365,11 +4370,13 @@ impl Menu {
     }
 
     /// The flier kind (its pack word) the pause's switch row would put its player in, where that
-    /// player picks its skin there (P315g): the plane or the helicopter, on a ride that is not online
-    /// (P318 holds online seats to MX Unleashed's), for a seat that flies its own picks — the first
-    /// two, as a ride builds one flier a livery and a third seat wears the first's.
+    /// player picks its skin there (P315g): the plane or the helicopter, for a seat that flies its own
+    /// picks — the first two, as a ride builds one flier a livery and a third seat wears the first's.
+    /// Online, the first player's plane where the shell said the ride's fliers (P318,
+    /// [`Menu::set_online_fliers`]), every seat's machine running every seat's.
     fn switch_flier(&self) -> Option<String> {
-        if self.session || self.opening == Opening::Open || self.pauser >= OWN_FLIERS {
+        let online = self.session || self.opening == Opening::Open;
+        if (online && (self.flier_online.is_none() || self.pauser > 0)) || self.pauser >= OWN_FLIERS {
             return None;
         }
         let kind = match self.switch_to()? {
@@ -4377,7 +4384,18 @@ impl Menu {
             Machine::Helicopter => "kiowa",
             _ => return None,
         };
-        (!roster::flier_choices(&self.flier_offer, kind).is_empty()).then(|| kind.to_string())
+        (!roster::flier_choices(self.fliers_here(), kind).is_empty()).then(|| kind.to_string())
+    }
+
+    /// The fliers the pause's picker offers: an online ride's ([`Menu::flier_online`]), else every one.
+    fn fliers_here(&self) -> &[roster::Flier] {
+        self.flier_online.as_deref().unwrap_or(&self.flier_offer)
+    }
+
+    /// An online ride's fliers (P318), as the shell makes them of the ride's offer, or `None` once
+    /// off line again.
+    pub fn set_online_fliers(&mut self, rows: Option<Vec<roster::Flier>>) {
+        self.flier_online = rows;
     }
 
     /// The pause's flier picker, if it is up (P315g): the kind's label, the pauser's skin of it (the
@@ -4386,8 +4404,8 @@ impl Menu {
     pub fn flier_picker(&self) -> Option<(String, Option<&roster::Flier>, Vec<&roster::Flier>, usize)> {
         let (kind, row) = self.picking.as_ref().filter(|_| self.screen() == Some(Screen::Pause))?;
         let pick = self.picks.0.get(self.pauser)?;
-        let choices = roster::flier_choices(&self.flier_offer, kind);
-        Some((roster::flier_label(kind), roster::flier_of(&self.flier_offer, pick, kind), choices, *row))
+        let choices = roster::flier_choices(self.fliers_here(), kind);
+        Some((roster::flier_label(kind), roster::flier_of(self.fliers_here(), pick, kind), choices, *row))
     }
 
     /// One press on the pause's flier picker (P315g): up and down move between the skin and Switch,
@@ -4398,7 +4416,7 @@ impl Menu {
         if p.up || p.down {
             self.picking = Some((kind, 1 - row));
         } else if p.left || p.right || p.l1 || p.r1 {
-            let offer = self.flier_offer.clone();
+            let offer = self.fliers_here().to_vec();
             if let Some(pick) = self.picks.0.get_mut(self.pauser) {
                 let was = pick.clone();
                 roster::step_flier(&offer, pick, &kind, if p.left || p.l1 { -1 } else { 1 });

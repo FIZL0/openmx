@@ -700,6 +700,10 @@ mod net;
 #[allow(dead_code)]
 mod online;
 
+#[path = "../src/online_fliers.rs"]
+#[allow(dead_code)]
+mod online_fliers;
+
 #[path = "../src/vehicle.rs"]
 #[allow(dead_code)]
 mod vehicle;

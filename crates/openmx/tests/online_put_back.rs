@@ -143,7 +143,7 @@ fn a_headless_online_put_back_resets_the_lean() {
             let np = &mut nets[i];
             let local: Vec<Report> =
                 np.lineup.mine(&np.me).into_iter().map(|_| if i == 0 { host(np.tick()) } else { swing(np.tick()) }).collect();
-            let mut game = Rides { sims: &mut sims[i], world: &mut worlds[i], after: None, time_scale: None, plane: Some(&mut flights[i]), cars: &[] };
+            let mut game = Rides { fliers: &mut [], sims: &mut sims[i], world: &mut worlds[i], after: None, time_scale: None, plane: Some(&mut flights[i]), cars: &[] };
             np.frame(&mut game, &local, ROUND.as_secs_f32());
             for (to, d) in np.outgoing() {
                 let j = names.iter().position(|n| *n == to).unwrap();

@@ -376,7 +376,7 @@ impl Machine2 {
                 sim.rider.ride.chassis.vel = vel;
             }
         };
-        let mut game = Rides { sims: &mut self.sims, world: &mut self.world, after: Some(&mut after), time_scale: None, plane: None, cars: &self.cars };
+        let mut game = Rides { fliers: &mut [], sims: &mut self.sims, world: &mut self.world, after: Some(&mut after), time_scale: None, plane: None, cars: &self.cars };
         np.frame(&mut game, local, ROUND.as_secs_f32());
     }
 
@@ -743,7 +743,7 @@ fn a_seats_car_online_rides_its_own_car_modifiers() {
         let mut live = modded.clone();
         let mut hashes = Vec::new();
         let plain = if how == 1 { &modded[..] } else { &stock[..] };
-        let mut ride = Rides { sims: &mut sims, world: &mut world, after: None, time_scale: None, plane: None, cars: if how == 0 { &[] } else { plain } };
+        let mut ride = Rides { fliers: &mut [], sims: &mut sims, world: &mut world, after: None, time_scale: None, plane: None, cars: if how == 0 { &[] } else { plain } };
         let mut m = mods;
         let mut game = rides::Modded { rides: &mut ride, stock: &phys, mods: &mut m, stock_plane: None, cars: (how == 0).then_some((&stock[..], &mut live)) };
         for tick in 0..90 {
@@ -763,7 +763,7 @@ fn a_seats_car_online_rides_its_own_car_modifiers() {
     let mut sims = vec![bike.clone(), bike.clone()];
     let mut world = Flat::default();
     let mut live = modded.clone();
-    let mut ride = Rides { sims: &mut sims, world: &mut world, after: None, time_scale: None, plane: None, cars: &[] };
+    let mut ride = Rides { fliers: &mut [], sims: &mut sims, world: &mut world, after: None, time_scale: None, plane: None, cars: &[] };
     let mut m = mods;
     let mut game = rides::Modded { rides: &mut ride, stock: &phys, mods: &mut m, stock_plane: None, cars: Some((&stock[..], &mut live)) };
     game.remodify(&mods.text(), "").unwrap();

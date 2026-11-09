@@ -182,7 +182,7 @@ fn a_headless_online_wreck_plays_its_voice_and_clank() {
             let np = &mut nets[i];
             let local: Vec<Report> =
                 np.lineup.mine(&np.me).into_iter().map(|_| if i == 0 { Report::idle() } else { swing(np.tick()) }).collect();
-            let mut game = Rides { sims: &mut sims[i], world: &mut worlds[i], after: None, time_scale: None, plane: None, cars: &[] };
+            let mut game = Rides { fliers: &mut [], sims: &mut sims[i], world: &mut worlds[i], after: None, time_scale: None, plane: None, cars: &[] };
             np.frame(&mut game, &local, ROUND.as_secs_f32());
             for (to, d) in np.outgoing() {
                 let j = names.iter().position(|n| *n == to).unwrap();

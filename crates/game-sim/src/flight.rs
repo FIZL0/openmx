@@ -195,6 +195,12 @@ pub struct Flight {
     /// the hash walk nor on the netplay wire, so MX Unleashed's hashes and snapshots are unchanged: a
     /// snapshot taken back, and a marker put back, take this machine's (MD100), as the ray probe.
     pub mxvatv: bool,
+    /// Which of an online ride's fliers this plane was built as (P318): 0, the ride's own biplane,
+    /// as every offline plane is; else the flier pack's skin the seat's pad picked
+    /// (`openmx`'s `net::FLIER` byte). Not in the hash walk nor on the snapshot's wire, as
+    /// [`Flight::mxvatv`]: the parameters it was built off are hashed, and the shell's seat bytes
+    /// carry it beside the snapshot for a joiner to put the skin's constants back.
+    pub skin: u8,
 }
 
 /// The plane's collision mesh in the machines' archive (N22a): its collidable's, kind 0, which the
@@ -447,6 +453,7 @@ impl Flight {
         back.rays = self.rays.clone();
         back.bike = self.bike.clone();
         back.mxvatv = self.mxvatv;
+        back.skin = self.skin;
         *self = back;
     }
 
