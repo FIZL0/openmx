@@ -1148,3 +1148,6 @@ away. Nothing is ever edited by hand here either; `./kit plan <ID>` finds a task
 
 ### Next: races, then the new machines, each followed by a release (in this order)
 - [x] **C31** (follow-up, normal) (S13c split, part 5) Capture an sx01 single race over at least two laps (a generated .p2m2 tape from the race start): per tick the rider's score card words the lap line and the race handler read and write (flags, laps, lap time, lap start, best lap, race clock, the now/last points, on-track word, off-track clock, path spot) for holding race::LapRules::line and the race handler against a live lap → context/capture | j: s13-laps
+
+### Next: the race's AI riders, beside the race above (in this order)
+- [x] **S12c** The AI's look-ahead feeler fan and per-rider avoidance scan (gated by flags 0x80/0x40, the type-3 scenery admit at 0xc0), the brake-short-of-a-standing-human and swerve behaviour seen on free09; oracled → crates/game-sim/src/ai.rs | t: crates/game-sim/tests/ai.rs | j: s12-ai-avoidance — The port is done on origin/wip/S12c (331bcd80: avoidance pass oracled over 10,000 passes); on 11-06 its merge hit conflicts in crates/game-sim/src/ai.rs and tests/ai.rs and the fix session timed out. Start from that branch: merge main into it, resolve, re-run the oracle.

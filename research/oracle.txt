@@ -1304,7 +1304,23 @@ ai_update_vehicle           boot 0x002858d0 VehicleAI.cpp's: both build the look
 #                                           is skipped only when BOTH bits are set, so Free10/Free06
 #                                           (0x40 set, hit_freeride_attach above) are the only areas
 #                                           that suppress it. A third test, (flags&0xc0) == 0, admits
-#                                           the type-3 scenery objects
+#                                           the type-3 scenery objects.
+#                                           S12c: in ai_update_mx (taken when ai+0xd0 == 2, ai+0xd4
+#                                           set, own+0x40 non-zero) the fan and the scene sweep are
+#                                           output-dead — the hits land in sp locals never read again.
+#                                           The rider loop (race ai+0xd8, +0x34 list, +0x1c8 next) runs
+#                                           whatever 0x80/0x40 say; it alone bends the steer (t1) and
+#                                           sets the aimed-for speed (t3). Flag 0x100000 skips riders
+#                                           whose +8 has bit 4; 0x20000 runs the path-edge push; 0x100
+#                                           is cleared at the end. Ported as game_sim::ai::avoid
+ai_mx_construct             boot 0x00382c50 MXVehicleAI constructor (calls ai_vehicle_construct): the
+#                                           avoidance tunables' defaults, feeler height +0x2a8 3.0
+ai_vehicle_construct        boot 0x00282ca0 VehicleAI base constructor: +0x2a4 11 feelers, +0x2ac 100
+path_locate                 boot 0x0026b860 (f12 -1.0, net, 0, point, hint, out, 0, 0, 0) -> found;
+#                                           out+4 the located path segment (+0x54 its next)
+path_segment_holds          boot 0x0026bdb0 (net, point, seg, next) -> the point lies on seg..next
+path_node_direction         boot 0x0026e630 (net, node, io) writes the unit node->next direction into
+#                                           io when node+0x40 > 0, else leaves io as it was
 ai_tick_flag                boot 0x00383580 sets and clears the per-tick bit 0x80 of the same flags
 #                                           (S12b: it is also MXVehicleAI's route follower, 5936
 #                                           bytes: path queries 0x0026b410/0x0026e0c0, rand, 0x003832f0)
@@ -1335,7 +1351,8 @@ ai_character_read           boot 0x00384f00 reads AIChrctr.aip section AI_<skill
 #                                           +0x21c, PitchGain +0x2d4, PitchJitterDeadZone +0x2d8,
 #                                           PitchControlDistance +0x2b4, LandingPitchAngle +0x2ec,
 #                                           SpeedMin/MaxTolerance +0x260/+0x264), Min/Max pairs
-#                                           lerped by the event's difficulty
+#                                           lerped by the event's difficulty; S12c: Near/FarCollisionRange are
+#                                           stored square-rooted at +0x280/+0x284
 ai_rsqrt                    boot 0x00284b80 (x) rsqrt.s 1.0 / sqrt(x)
 ai_acos                     boot 0x002849d0 (x) clamp twice, then fine_acos_table: acos(x)
 vehicle_wreck               boot 0x00252ca0 Wreck(reason), vtable slot +0xfc: sets vehicle+0xb7c = 1
