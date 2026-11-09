@@ -1,6 +1,6 @@
 //! **MD7:** music packs. A pack written here — a generated `.vig` and a `mod.json` playlist in
 //! openmx-mods' standard §4 — is read beside the disc's songs, plays, and shows its title with its
-//! game; the Audio page's Music From and each pack's row choose which games' music plays; a pack the
+//! game; the Audio page's Songs From (P317) switches each game's music, the disc's too; a pack the
 //! folder holds badly is one line, not a crash; and with no pack the songs are the disc's alone, their
 //! labels as before. The disc's half skips without a disc.
 
@@ -224,47 +224,110 @@ fn the_settings_choose_which_games_music_plays() {
     assert!(music.set_packs(true, &[]));
     assert_eq!(ids(&music.tracks()), all);
 
-    // The Audio page: Music From, then each pack's switch, which is the Mods page's.
+    // Songs From (P317): one switch per game the sources have, the disc first, then each pack by its
+    // game, then the music folder, each with its songs; all on.
+    let own = mods.join("own");
+    std::fs::create_dir_all(&own).unwrap();
+    std::fs::write(own.join("mine.wav"), wav()).unwrap();
+    music.set_source(Arc::new(audio::FolderMusic::scan(&own)));
+    let games = music.games();
+    let named: Vec<(&str, usize)> = games.iter().map(|g| (g.name.as_str(), g.songs)).collect();
+    assert_eq!(named, [("MX Unleashed", 1), ("MX vs. ATV Unleashed", 1), ("MX vs. ATV Untamed", 1), ("Music Folder", 1)]);
+    assert_eq!(ids(&music.tracks()), ["disc:breakdown", "mod:mxvatv_music/a", "mod:untamed_music/b", "folder:mine.wav"], "the folder's songs after the packs'");
     let mut m = Menu::new(Settings::default(), Controls::default());
-    m.set_music_packs(vec![("mxvatv_music".into(), "MX vs. ATV Unleashed soundtrack".into(), 1), ("untamed_music".into(), "MX vs. ATV Untamed soundtrack".into(), 1)]);
+    m.music_games = games.iter().map(|g| menu::MusicGame { key: g.key.clone(), pack: g.pack, name: g.name.clone(), songs: g.songs }).collect();
+    m.music_choices = music.labels();
     m.open_tab(Screen::Settings, audio_tab());
     let row = |m: &Menu, key: Key| m.page().into_iter().find(|r| r.key == key).unwrap();
-    assert_eq!(row(&m, Key::MusicFrom).value, "All Games");
-    assert_eq!(row(&m, Key::MusicPack(1)).label, "MX vs. ATV Untamed soundtrack");
-    let keys: Vec<Key> = m.page().into_iter().map(|r| r.key).collect();
-    let from = keys.iter().position(|k| *k == Key::MusicFrom).unwrap();
-    assert_eq!(&keys[from..from + 4], [Key::MusicFrom, Key::MusicPack(0), Key::MusicPack(1), Key::MusicPlays]);
+    let page = m.page();
+    let from = page.iter().position(|r| r.label == "Songs From").unwrap();
+    let keys: Vec<Key> = page[from + 1..from + 7].iter().map(|r| r.key).collect();
+    assert_eq!(keys, [Key::MusicGame(0), Key::MusicGame(1), Key::MusicGame(2), Key::MusicGame(3), Key::Heading, Key::MusicPlays]);
+    assert_eq!(row(&m, Key::MusicGame(0)).label, "MX Unleashed \u{b7} 1 song");
+    assert_eq!(row(&m, Key::MusicGame(2)).label, "MX vs. ATV Untamed \u{b7} 1 song");
+    assert!((0..4).all(|i| row(&m, Key::MusicGame(i)).value == "On"));
+    assert!(page.iter().all(|r| r.label != "Music From" && r.value != "A Mix"), "no Music From row any more");
+    // The Song row's list under game headings: each game's name beside its first song.
+    let song = row(&m, Key::Song);
+    assert_eq!(song.tips, ["MX Unleashed", "MX vs. ATV Unleashed", "MX vs. ATV Untamed", "Music Folder"]);
+    assert_eq!(song.choices[0], "Breakdown - Disc Band", "the heading names the game, not the song");
 
-    // MX Unleashed only, by a press on Music From.
-    press(&mut m, Key::MusicFrom);
-    assert_eq!(row(&m, Key::MusicFrom).value, "MX Unleashed Only");
-    assert_eq!(m.settings.mods_off, ["mxvatv_music", "untamed_music"]);
-    assert!(music.set_packs(m.settings.mods, &m.settings.mods_off));
+    // Only MX vs. ATV Unleashed's songs.
+    for i in [0, 2, 3] {
+        press(&mut m, Key::MusicGame(i));
+    }
+    assert_eq!(m.settings.music_off, ["disc", "folder"]);
+    assert_eq!(m.settings.mods_off, ["untamed_music"]);
+    let hear = |music: &mut audio::Music, m: &Menu| {
+        music.set_packs(m.settings.mods, &m.settings.mods_off);
+        music.set_sources_off(&m.settings.music_off);
+    };
+    hear(&mut music, &m);
+    assert_eq!(ids(&music.tracks()), ["mod:mxvatv_music/a"]);
+    music.set_pick(Pick::Shuffle);
+    music.wait = true;
+    for _ in 0..4 {
+        music.tend();
+        assert_eq!(music.now(), Some("mod:mxvatv_music/a"), "a game switched off never plays");
+        music.next();
+    }
+    // Kept in settings.txt: the packs in mods_off as before, the disc's and the folder's beside them.
+    let kept = Settings::parse(&m.settings.text());
+    assert_eq!((kept.mods_off, kept.music_off), (vec!["untamed_music".to_string()], vec!["disc".to_string(), "folder".to_string()]));
+    // An older file has no music_off: the disc's songs play as they did.
+    assert!(Settings::parse("mods_off = untamed_music\n").music_off.is_empty());
+
+    // The last one off is the music off, not a shuffle of nothing.
+    press(&mut m, Key::MusicGame(1));
+    assert!(m.no_music_games());
+    let plays = row(&m, Key::MusicPlays);
+    assert_eq!(plays.value, "Off");
+    assert!(plays.off.as_deref().unwrap().contains("the music is off"));
+    assert_eq!(row(&m, Key::SkipSong).off.as_deref(), Some("The music is off"));
+    hear(&mut music, &m);
+    assert!(music.tracks().is_empty());
+    music.next();
+    music.tend();
+    assert_eq!(music.now(), None);
+
+    // Only the disc's.
+    press(&mut m, Key::MusicGame(0));
+    hear(&mut music, &m);
     assert_eq!(ids(&music.tracks()), ["disc:breakdown"]);
-    // A mix: one pack back on.
-    press(&mut m, Key::MusicPack(1));
-    assert_eq!(row(&m, Key::MusicFrom).value, "A Mix");
-    assert_eq!(row(&m, Key::MusicPack(1)).value, "On");
-    music.set_packs(m.settings.mods, &m.settings.mods_off);
-    assert_eq!(ids(&music.tracks()), ["disc:breakdown", "mod:untamed_music/b"]);
-    // From a mix, Music From is every pack off; once more, every pack on.
-    press(&mut m, Key::MusicFrom);
-    assert_eq!(row(&m, Key::MusicFrom).value, "MX Unleashed Only");
-    press(&mut m, Key::MusicFrom);
-    assert_eq!(row(&m, Key::MusicFrom).value, "All Games");
-    assert!(m.settings.mods_off.is_empty());
-    // Kept in settings.txt as the Mods page keeps them.
-    press(&mut m, Key::MusicPack(0));
-    assert_eq!(Settings::parse(&m.settings.text()).mods_off, ["mxvatv_music"]);
-    // The folder off dims them.
-    m.settings.mods = false;
-    assert_eq!(row(&m, Key::MusicFrom).off.as_deref(), Some("The mods folder is off"));
+    // One Song on a song of a game switched off is not repeated.
+    music.set_pick(Pick::Track("mod:untamed_music/b".into()));
+    music.tend();
+    assert_eq!(music.now(), None);
 
-    // No pack: the page is as it was, no Music From.
+    // The mods folder off dims the packs' rows, and leaves the disc's and the folder's.
+    m.settings.mods = false;
+    assert_eq!(row(&m, Key::MusicGame(1)).off.as_deref(), Some("The mods folder is off"));
+    assert_eq!(row(&m, Key::MusicGame(0)).off, None);
+
+    // No songs listed yet: no Songs From.
     let mut m = Menu::new(Settings::default(), Controls::default());
     m.open_tab(Screen::Settings, audio_tab());
-    assert!(m.page().iter().all(|r| r.key != Key::MusicFrom && !matches!(r.key, Key::MusicPack(_))));
+    assert!(m.page().iter().all(|r| !matches!(r.key, Key::MusicGame(_))));
     std::fs::remove_dir_all(&mods).unwrap();
+}
+
+/// A short 16-bit stereo `.wav`, as the music folder holds.
+fn wav() -> Vec<u8> {
+    let data = vec![0u8; 4 * 100];
+    let mut b = b"RIFF".to_vec();
+    b.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+    b.extend_from_slice(b"WAVEfmt ");
+    b.extend_from_slice(&16u32.to_le_bytes());
+    b.extend_from_slice(&1u16.to_le_bytes());
+    b.extend_from_slice(&2u16.to_le_bytes());
+    b.extend_from_slice(&44100u32.to_le_bytes());
+    b.extend_from_slice(&(44100u32 * 4).to_le_bytes());
+    b.extend_from_slice(&4u16.to_le_bytes());
+    b.extend_from_slice(&16u16.to_le_bytes());
+    b.extend_from_slice(b"data");
+    b.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    b.extend_from_slice(&data);
+    b
 }
 
 /// Walk the open page's cursor to `key` and press Cross on it.
