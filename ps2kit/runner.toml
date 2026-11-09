@@ -3,6 +3,9 @@
 # fix_*), then a kit.toml `[agent-runner]` table on top, and writes the result to <context>/notes/agent-runner.toml.
 
 [plan]
+# `plan add` refuses a task line that names no files (→) and no test (| t:): mode d keeps tasks apart by
+# those files, and a line naming none ran beside anything (agent-runner 0.19.5).
+need_files = true
 
 [run]
 # d: never two running tasks on one file, and a Next (in this order) section one task at a time. agent-runner

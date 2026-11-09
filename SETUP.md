@@ -45,7 +45,7 @@ Reading the disc, the ELFs and the decompilation runs on a stock Python with no 
 (for a newer version, run it again with the new tag and `--force`):
 
 ```sh
-uv tool install git+https://github.com/FIZL0/agent-runner@v0.19.4
+uv tool install git+https://github.com/FIZL0/agent-runner@v0.19.5
 ```
 
 `./kit` stays on the system Python and adds the tool's venv (`$UV_TOOL_DIR` or `~/.local/share/uv/tools`) to
