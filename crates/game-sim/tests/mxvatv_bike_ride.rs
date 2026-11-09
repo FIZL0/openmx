@@ -3109,6 +3109,15 @@ impl Vehicles for TailInRam<'_> {
         self.ee.u32_at(at)
     }
     fn out(&mut self, c: tail::Out, dt: F) {
+        let r0 = self.ee.ran;
+        self.out_(c, dt);
+        let kind = format!("{c:?}");
+        book(format!("the tail: out {}", &kind[..kind.find([' ', '(']).unwrap_or(kind.len())]), self.ee.ran - r0);
+    }
+}
+
+impl TailInRam<'_> {
+    fn out_(&mut self, c: tail::Out, dt: F) {
         use tail::Out;
         label(&format!("tail {c:?}"));
         self.write();
@@ -3180,12 +3189,16 @@ impl Listeners for TreeInRam<'_> {
             assert_eq!(vt(self.ee, 0x45c), STUCK, "the bike's stuck timer");
             let (ram, spr) = (self.ee.ram.clone(), self.ee.spr.clone());
             self.ee.set(28, GP);
+            let r0 = self.ee.ran;
             self.ee.call(VEHICLE_UPDATE, &[u64::from(BIKE)], &[dt.0], BUDGET);
+            book("the tail: the original vehicle update beside the port", self.ee.ran - r0);
+            let r0 = self.ee.ran;
             let (want, want_spr) = (std::mem::replace(&mut self.ee.ram, ram), std::mem::replace(&mut self.ee.spr, spr));
             let mut m = TailInRam { ee: &mut *self.ee, v: tail::Vehicle::default(), last: Vec::new() };
             m.read();
             tail::vehicle_update(&mut m, dt);
             m.write();
+            book("the tail: the ported vehicle update", self.ee.ran - r0);
             let stack = (self.ee.stack as usize).saturating_sub(STACK_USE)..self.ee.ram.len().min(self.ee.stack as usize + 0x4000);
             let d: Vec<String> = (0..want.len())
                 .step_by(4)
@@ -3202,6 +3215,7 @@ impl Listeners for TreeInRam<'_> {
             let before = bike_and_blocks(self.ee);
             self.others.push(e);
             self.ee.set(28, GP);
+            let r0 = self.ee.ran;
             let walks = f == MANAGER_STEP;
             if walks {
                 // Its own work first, its closing walk stood in for; then that walk, the port's.
@@ -3214,6 +3228,7 @@ impl Listeners for TreeInRam<'_> {
             } else {
                 self.ee.call(f, &[u64::from(e)], &[dt.0], BUDGET);
             }
+            book(["the tail: the first other leaf", "the tail: the manager", "the tail: the rider"][OTHER_LEAVES.iter().position(|l| l.0 == e).unwrap()], self.ee.ran - r0);
             let after = bike_and_blocks(self.ee);
             let parted: Vec<String> = before
                 .iter()
@@ -5261,7 +5276,11 @@ impl Updates for UpdateInRam<'_> {
                 unreachable!("served by the port")
             }
         };
-        self.call(f, &ints, &floats)
+        let r0 = self.ee.ran;
+        let w = self.call(f, &ints, &floats);
+        let kind = format!("{c:?}");
+        book(format!("the tail: the update's {}", &kind[..kind.find([' ', '(']).unwrap_or(kind.len())]), self.ee.ran - r0);
+        w
     }
     fn vector(&mut self, c: update::Out) -> update::Quad {
         use update::Out;
@@ -8185,6 +8204,7 @@ impl Dynamics for PortPosts<'_, '_> {
 /// callees [`PostsInRam`]'s. Answers as [`steps_frame`] does, the record's and the PostProcess's
 /// calls counted in with the steps'.
 fn posts_frame(ee: &mut Ee, dt: F, map: &track::Terrain<'_>, noise: &mut Option<SmoothNoise>, pure: bool) -> (u32, u32, u32, BTreeMap<String, u32>) {
+    let mut mark = (ee.ran, "the records' clear and pass");
     let call = |ee: &mut Ee, f: u32, ints: &[u64], x: F| {
         ee.set(28, GP);
         ee.call(f, ints, &[x.0], BUDGET);
@@ -8207,6 +8227,7 @@ fn posts_frame(ee: &mut Ee, dt: F, map: &track::Terrain<'_>, noise: &mut Option<
             }
         }
     }
+    interpreted(ee, &mut mark, "the bike's world step");
     let world = World { iterations: ee.u32_at(WORLD) as i32, rate: F(ee.f32_at(WORLD + 4)) };
     let at = ee.u32_at(BIKE + seed::BODY);
     let body = seed::body(&|a| ee.u32_at(a), at);
@@ -8218,8 +8239,10 @@ fn posts_frame(ee: &mut Ee, dt: F, map: &track::Terrain<'_>, noise: &mut Option<
     for (a, w) in seed::body_words(&body, at) {
         ee.set_u32(a, w);
     }
+    interpreted(ee, &mut mark, "the tail");
     let (bikes, others) = port_tail(ee, dt);
     assert_eq!((bikes, others.len()), (1, 3), "the tail steps the bike once, its two other leaves and the second's rider: {others:#x?}");
+    interpreted(ee, &mut mark, "the +0x3c list");
     let mut i = 0;
     while i < ee.u32_at(SIM + 0x3c) {
         let e = call(ee, LIST3C_GET, &[u64::from(SIM + 0x3c), u64::from(i)], F::ZERO) as u32;
@@ -8229,7 +8252,27 @@ fn posts_frame(ee: &mut Ee, dt: F, map: &track::Terrain<'_>, noise: &mut Option<
             i += 1;
         }
     }
+    interpreted(ee, &mut mark, "");
     (heads, steps, posts, answered)
+}
+
+thread_local! {
+    /// F31b5: the instructions the interpreter ran in each of [`posts_frame`]'s parts, summed until
+    /// taken.
+    static INTERPRETED: RefCell<BTreeMap<String, u64>> = const { RefCell::new(BTreeMap::new()) };
+}
+
+/// Books `n` instructions to `part` (a part nested in one of [`posts_frame`]'s, counted in both).
+fn book(part: impl Into<String>, n: u64) {
+    if n > 0 {
+        INTERPRETED.with(|m| *m.borrow_mut().entry(part.into()).or_default() += n);
+    }
+}
+
+/// Books the instructions run since `mark` to its part, and starts `next`'s.
+fn interpreted(ee: &Ee, mark: &mut (u64, &'static str), next: &'static str) {
+    book(mark.1, ee.ran - mark.0);
+    *mark = (ee.ran, next);
 }
 
 /// Where two RAMs differ outside the interpreter's stack and scratch (the 256 KiB under `stack`
@@ -8509,7 +8552,7 @@ fn flip_replays_bit_exact_with_rust_callees() {
 /// the second word for word against C15, and the bike and its blocks the first's after every frame.
 /// Answers the wreck state per row, what the second run answered, and the RAM ranges where the two
 /// came to differ (the dropped posts' writes, none the bike's).
-fn replay_pure(name: &str) -> Option<(Vec<bool>, BTreeMap<String, u32>, Vec<String>)> {
+fn replay_pure(name: &str, rust: &[&'static str]) -> Option<(Vec<bool>, BTreeMap<String, u32>, Vec<String>)> {
     let words = mass_words(&race250p()?)?;
     let trn = nat05_trn()?;
     let map = track::Terrain::parse(&trn).unwrap();
@@ -8526,8 +8569,13 @@ fn replay_pure(name: &str) -> Option<(Vec<bool>, BTreeMap<String, u32>, Vec<Stri
     for (r, row) in rows.iter().enumerate() {
         poke(&mut a, row, &READER);
         poke(&mut b, row, &READER);
+        let counted = INTERPRETED.with(|m| std::mem::take(&mut *m.borrow_mut()));
         posts_frame(&mut a, dt, &map, &mut noise_a, false);
-        let (heads, steps, posts, answered) = posts_frame(&mut b, dt, &map, &mut noise_b, true);
+        INTERPRETED.with(|m| *m.borrow_mut() = counted);
+        IN_RUST.with(|x| *x.borrow_mut() = rust.to_vec());
+        let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| posts_frame(&mut b, dt, &map, &mut noise_b, true)));
+        IN_RUST.with(|x| x.borrow_mut().clear());
+        let (heads, steps, posts, answered) = ran.unwrap_or_else(|e| std::panic::resume_unwind(e));
         assert_eq!((heads, steps, posts), (1, 4, 1), "the head once, the Force body every substep, the PostProcess once");
         for (k, n) in answered {
             *all.entry(k).or_default() += n;
@@ -8566,7 +8614,7 @@ fn steps_handed(all: &BTreeMap<String, u32>) -> (Vec<(&str, u32)>, Vec<(&str, u3
 /// RAM the handing run's after every frame.
 #[test]
 fn ride_replays_bit_exact_with_nothing_handed_on() {
-    let Some((w, all, off)) = replay_pure("ride-2") else { return };
+    let Some((w, all, off)) = replay_pure("ride-2", &[]) else { return };
     assert_eq!(off, Vec::<String>::new(), "the RAM is the handing run's");
     assert_eq!(w.len(), 459);
     assert!(w.iter().all(|w| !w), "the ride never wrecks");
@@ -8581,13 +8629,53 @@ fn ride_replays_bit_exact_with_nothing_handed_on() {
 /// posts write no other).
 #[test]
 fn flip_replays_bit_exact_with_nothing_handed_on() {
-    let Some((w, all, off)) = replay_pure("flip-1") else { return };
+    let Some((w, all, off)) = replay_pure("flip-1", &[]) else { return };
     assert_eq!(off, ["0x851fec..0x851ff0"], "the RAM differs only at the cue's write");
     assert_eq!(w.len(), 465);
     let changes: Vec<usize> = (1..w.len()).filter(|&r| w[r] != w[r - 1]).collect();
     assert_eq!(changes, [125, 193], "wrecked on row 125, put back on row 193");
     let (rust, handed) = steps_handed(&all);
     assert_eq!((rust, handed), (vec![("PreloadCue", 1), ("StartStunt", 1)], vec![]));
+}
+
+/// **F31b5 — every port at once**: [`replay_pure`] (the steps hand nothing on) with F46's four
+/// names Rust's too ([`IN_RUST`]), the tail on [`port_tail`]'s ports. Answers the wreck state per
+/// row, what was answered and handed on, the RAM ranges where it came to differ from the handing
+/// run, and the instructions the interpreter still ran in each part of the frame (the second run's
+/// alone).
+fn replay_whole(name: &str) -> Option<(Vec<bool>, BTreeMap<String, u32>, Vec<String>, BTreeMap<String, u64>)> {
+    INTERPRETED.with(|m| m.borrow_mut().clear());
+    let ran = replay_pure(name, &["PartMove", "Gather", "record sweep", "record search"]);
+    let all = INTERPRETED.with(|m| std::mem::take(&mut *m.borrow_mut()));
+    let (w, answered, off) = ran?;
+    eprintln!("{name}: every port at once, the interpreter ran {all:?}");
+    Some((w, answered, off, all))
+}
+
+/// **F31b5 — C15's ride, every port at once**: ride-2 bit-exact and the RAM the handing run's.
+#[test]
+fn ride_replays_with_every_port_at_once() {
+    let Some((w, all, off, ran)) = replay_whole("ride-2") else { return };
+    assert_eq!(off, Vec::<String>::new(), "the RAM is the handing run's");
+    assert_eq!(w.len(), 459);
+    assert!(w.iter().all(|w| !w), "the ride never wrecks");
+    let handed: Vec<(&str, u32)> = all.iter().filter(|(k, _)| k.starts_with("> ")).map(|(k, &n)| (&k[2..], n)).collect();
+    // F54's two are the only calls still handed on by name; the rest of what the interpreter runs is
+    // in `ran` (F31b5i..m).
+    assert_eq!(handed, [("record search heard_hit", 282), ("record search part stand", 432)], "{ran:?}");
+}
+
+/// **F31b5 — C15's flip, every port at once**: flip-1 bit-exact, wrecked on row 125 and put back on
+/// row 193, the RAM the handing run's but for the dropped cue's word.
+#[test]
+fn flip_replays_with_every_port_at_once() {
+    let Some((w, all, off, ran)) = replay_whole("flip-1") else { return };
+    assert_eq!(off, ["0x851fec..0x851ff0"], "the RAM differs only at the cue's write");
+    assert_eq!(w.len(), 465);
+    let changes: Vec<usize> = (1..w.len()).filter(|&r| w[r] != w[r - 1]).collect();
+    assert_eq!(changes, [125, 193], "wrecked on row 125, put back on row 193");
+    let handed: Vec<(&str, u32)> = all.iter().filter(|(k, _)| k.starts_with("> ")).map(|(k, &n)| (&k[2..], n)).collect();
+    assert_eq!(handed, [("record search heard_hit", 110), ("record search part stand", 161)], "{ran:?}");
 }
 
 /// The record's resolution (its vt `+0x88`), which the gravity calls with 1.
