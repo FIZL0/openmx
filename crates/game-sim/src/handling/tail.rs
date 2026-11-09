@@ -24,6 +24,7 @@
 //! Everything the update calls outside the bike's own words goes through [`Vehicles`].
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
+use super::node::Ram;
 use super::seed::Words;
 use crate::air::normalize;
 use ps2_float::{F, Vf, fpu};
@@ -70,6 +71,38 @@ pub fn walk(l: &mut impl Listeners, group: u32, dt: F) {
         }
         e = l.word(e + NEXT);
     }
+}
+
+/// The sim's element lists (its records at `+0x24` and its after-tail list at `+0x3c`), each
+/// `{count, _, array}`: the count a signed word, the array a word of addresses.
+pub const LIST_COUNT: u32 = 0;
+pub const LIST_ARRAY: u32 = 8;
+
+/// The `i`th element of the sim list at `list`. Unchecked, as the original's getter: any `i` reads
+/// the array's word at `4 * i`.
+pub fn list_get(m: &mut impl Ram, list: u32, i: i32) -> u32 {
+    let array = m.word(list + LIST_ARRAY);
+    m.word(array.wrapping_add((i as u32).wrapping_mul(4)))
+}
+
+/// Takes the `i`th element out of the sim list at `list`: the last element moves into its place and
+/// the count drops by one. Answers false, changing nothing, for an empty list, one with no array, or
+/// an `i` at or past the count (a negative `i` is not refused: it writes before the array). The count
+/// is read again after the move, which may have written it.
+pub fn list_remove(m: &mut impl Ram, list: u32, i: i32) -> bool {
+    let n = m.word(list + LIST_COUNT) as i32;
+    if n < 1 {
+        return false;
+    }
+    let array = m.word(list + LIST_ARRAY);
+    if array == 0 || i >= n {
+        return false;
+    }
+    let last = m.word((n as u32).wrapping_mul(4).wrapping_add(array).wrapping_sub(4));
+    m.set(array.wrapping_add((i as u32).wrapping_mul(4)), last);
+    let n = m.word(list + LIST_COUNT);
+    m.set(list + LIST_COUNT, n.wrapping_sub(1));
+    true
 }
 
 /// The bike's state word (`+0xbc4`, what the bike rides in) and its kind (the state's `+0x28`): the
