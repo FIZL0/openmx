@@ -1406,7 +1406,24 @@ ai_feed                     boot 0x0027fbd0 MXVehicleAIInterface vt+0x8: bike fr
 #                                           +0x80..+0xbc) into ai +0x90..+0xcc, body velocity/spin
 #                                           into +0x50/+0x60/+0x70, |v| into +0x80, ground normal
 #                                           +0x2c0 and height +0x204, on-ground flag 0x20
-ai_character_read           boot 0x00384f00 reads AIChrctr.aip section AI_<skill>: the controller's
+#                                           S12e: `this` is the rider (brain at +0x10d0, 0 -> return
+#                                           0, no draw). Brain +0x290 = old +0xc0 first; +0x50 body
+#                                           +0x260 velocity, +0x60 body +0x70, +0x70 body +0x290;
+#                                           |v| = mula/madda/madd x,y,z then sqrt.s. Normal query at
+#                                           (pos.x + v.x*rider+0x11d0, pos.y, pos.z + v.z*+0x11d0,
+#                                           stack w); height query at +0xc0. Flag 0x10 = rider
+#                                           +0xa0c (trick running). Second word +0x38 bits 1|2 set
+#                                           when +0x574 && body +0x264 > 5 && body +0x278 > 30 &&
+#                                           100*(2^-31*rand()) <= rider +0x1100, else both cleared
+#                                           (rand only past the three tests). Ported as ai::feed,
+#                                           oracled over 10,000 frames (tests/ai.rs)
+#   the rider assist,         boot 0x0027fb30, rider vtable slot 0x004551bc (beside stunt_ai_choice
+#                                           and ai_ask_for): body +0x284 = mula(brain +0x1f4,
+#                                           w) + madd(+0x284, 1-w), w = rider +0x1138; on the ground
+#                                           also body velocity x/z toward brain +0x1c0/+0x1c8 by
+#                                           rider +0x113c. Returns 1. Not ported (S281 note); the
+#                                           brief's "rider-to-brain copy (0x0027fb30)" was ai_feed
+ai_character_read          boot 0x00384f00 reads AIChrctr.aip section AI_<skill>: the controller's
 #                                           gains (SteeringGain +0x208, OversteerCorrectionGain
 #                                           +0x21c, PitchGain +0x2d4, PitchJitterDeadZone +0x2d8,
 #                                           PitchControlDistance +0x2b4, LandingPitchAngle +0x2ec,

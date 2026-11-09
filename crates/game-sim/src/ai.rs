@@ -35,6 +35,11 @@
 //! it steers or brakes by reads the feelers. They are kept in the port because the original builds
 //! them and the flags gate them; the scene sweep itself (a sweep of the fan against each solid object)
 //! is not ported.
+//!
+//! [`feed`] is the rider-to-brain copy (S12e): once a frame, before the brain thinks, the rider hands
+//! it its bike's frame and motion, the ground under it and the ground's facing a little way ahead, and
+//! the on-the-ground and tricking bits [`controls`] and [`plan_trick`] read; on a bump it may roll a
+//! `rand()`, which puts it in the order of the frame's draws.
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
 use crate::camera::CurveTable;
@@ -257,7 +262,8 @@ pub mod flag {
     /// The rider has been on the ground since its last flight's trick roll, so this flight may roll.
     /// Cleared by a failed roll or an unspent cool-down; a roll that picks a trick leaves it set.
     pub const TRICK_READY: u64 = 0x8;
-    /// Holds tricks off, as [`ON_GROUND`] does. Nothing traced sets it (see the S12d journal).
+    /// Holds tricks off, as [`ON_GROUND`] does. [`feed`] sets it while the rider's own trick is
+    /// running (S12e), so a flight's trick is not rolled for again under it.
     pub const NO_TRICKS: u64 = 0x10;
     /// Estimate the air time from the vertical speed and the height over the ground rather than from
     /// the route's jump. The AI's set-up turns it on.
@@ -897,6 +903,111 @@ fn unit(v: Vf) -> Vf {
     let sq = v.mul(v);
     let len2 = vu::madd(vu::add(sq.x(), sq.y()), 1.0, sq.z());
     v.merge(Dest::XYZ, v.mul_q(vu::rsqrt(1.0, len2)))
+}
+
+// --- the rider-to-brain copy (S12e) ------------------------------------------------------------------
+
+/// The brain's second flag word: the bits [`feed`] writes.
+pub mod bump {
+    /// Set together by [`feed`]'s roll when the bike leaves a bump fast enough and the roll comes in
+    /// under the rider's chance, and cleared together otherwise. The state-3 branch of the AI's update
+    /// reads [`B`] (S12e journal); what either one does to the riding is not traced.
+    pub const A: u64 = 0x1;
+    pub const B: u64 = 0x2;
+}
+
+/// What [`feed`] reads off the AI rider and its bike's body.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rider {
+    /// The bike's frame as four rows — the side axis, up, forward and the position — copied whole.
+    pub frame: [Vf; 4],
+    /// The body's velocity in the world, its acceleration, and its turn rates in its own frame.
+    pub velocity: Vf,
+    pub acceleration: Vf,
+    pub spin: Vf,
+    /// The body's speed along its own forward axis.
+    pub forward_speed: F,
+    /// Some wheel is on the ground.
+    pub on_ground: bool,
+    /// The rider's trick is running.
+    pub tricking: bool,
+    /// How far ahead, in seconds of the velocity across the ground, the ground's facing is looked up.
+    pub look_ahead: F,
+    /// The chance, in percent, that a bump sets the [`bump`] bits.
+    pub bump_chance: F,
+}
+
+/// The brain's copy of its rider, which [`controls`], [`plan_trick`] and [`avoid`] read.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Senses {
+    /// The position from the frame before.
+    pub last_position: Vf,
+    /// [`Rider::frame`], as copied.
+    pub frame: [Vf; 4],
+    pub velocity: Vf,
+    pub acceleration: Vf,
+    pub spin: Vf,
+    /// The length of the velocity.
+    pub speed: F,
+    /// The ground's facing at the look-ahead point.
+    pub ground_normal: Vf,
+    /// The ground's height under the bike.
+    pub ground: F,
+    /// The brain's flag word ([`flag`]); [`feed`] writes [`flag::ON_GROUND`] and [`flag::NO_TRICKS`].
+    pub flags: u64,
+    /// The brain's second flag word ([`bump`]).
+    pub bumps: u64,
+}
+
+/// One frame of the rider-to-brain copy.
+///
+/// The position from the frame before is kept, then the bike's frame, velocity, acceleration and spin
+/// are copied in and the speed is the velocity's length (`x·x + y·y + z·z` on the accumulator). The
+/// ground is asked twice: its facing at the position moved [`Rider::look_ahead`] along the velocity
+/// across the ground (the height is the bike's own), and its height straight under the bike. The on-the-
+/// ground bit follows the rider's, the no-tricks bit its running trick.
+///
+/// On the ground, rising faster than 5 and going forward faster than 30, `100 × unit()` at or under
+/// [`Rider::bump_chance`] sets both [`bump`] bits; any other way clears them. The draw is made only
+/// past the three tests.
+pub fn feed(rider: &Rider, brain: &mut Senses, world: &mut dyn crate::world::World, rng: &mut Rng) {
+    brain.last_position = brain.frame[3];
+    brain.frame = rider.frame;
+    brain.velocity = rider.velocity;
+    brain.acceleration = rider.acceleration;
+    brain.spin = rider.spin;
+    let v = rider.velocity;
+    brain.speed = Acc::mula(v.x(), v.x()).madda(v.y(), v.y()).madd(v.z(), v.z()).sqrt();
+
+    let at = brain.frame[3];
+    let ahead = Vf::new(
+        (F(at.x()) + F(v.x()) * rider.look_ahead).to_f32(),
+        at.y(),
+        (F(at.z()) + F(v.z()) * rider.look_ahead).to_f32(),
+        at.w(),
+    );
+    brain.ground_normal = world.ground(ahead).1;
+    if rider.on_ground {
+        brain.flags |= flag::ON_GROUND;
+    } else {
+        brain.flags &= !flag::ON_GROUND;
+    }
+    brain.ground = F(world.ground(at).0.y());
+    if rider.tricking {
+        brain.flags |= flag::NO_TRICKS;
+    } else {
+        brain.flags &= !flag::NO_TRICKS;
+    }
+
+    let bumped = rider.on_ground
+        && !(F(v.y()) <= F(5.0))
+        && !(rider.forward_speed <= F(30.0))
+        && F(100.0) * rng.unit() <= rider.bump_chance;
+    if bumped {
+        brain.bumps |= bump::B | bump::A;
+    } else {
+        brain.bumps &= !(bump::B | bump::A);
+    }
 }
 
 #[cfg(test)]
