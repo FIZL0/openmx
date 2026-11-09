@@ -78,6 +78,9 @@ pub struct Skin {
     /// manifest does not say, and the picker names it by its kind and place.
     pub name: String,
     pub about: String,
+    /// A bike's class (P315c), `class`: its engine size, `250`, as the machine picker's Bike Class
+    /// row lists it. Empty for a flier.
+    pub class: String,
     /// 1 or 2: which of the `.phy`'s `ModelOne`/`ModelTwo` keys it flies on.
     pub model: u32,
     pub psg: String,
@@ -171,6 +174,10 @@ pub fn read(folder: &Path) -> Result<Option<Pack>, String> {
                 skin: s(k.get("skin")),
                 name: s(k.get("name")),
                 about: s(k.get("about")),
+                class: match k.get("class") {
+                    Some(Json::Num(n)) => n.clone(),
+                    other => s(other),
+                },
                 model,
                 psg: s(k.get("psg")),
                 ui: s(k.get("ui")),

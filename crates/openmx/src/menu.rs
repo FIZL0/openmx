@@ -3283,6 +3283,9 @@ pub struct Menu {
     /// The fliers on offer (P315): MX Unleashed's and every installed machine pack's skins, as the
     /// shell reads them off the manifests ([`Menu::set_fliers`]).
     flier_offer: Vec<roster::Flier>,
+    /// The other machines on offer (P315c): every installed machine pack's bikes and other kinds,
+    /// beside the disc's bikes ([`Menu::set_machines`]).
+    machine_offer: Vec<roster::PackMachine>,
     /// The ride under the menu has a modifier off the original game's, as the shell tells it: the
     /// pause says so.
     pub modified: bool,
@@ -3543,6 +3546,7 @@ impl Menu {
             music_seen: Vec::new(),
             trick_seen: Vec::new(),
             flier_offer: roster::original_fliers(),
+            machine_offer: Vec::new(),
             modified: false,
             mods_lock: None,
             air_lock: None,
@@ -6231,6 +6235,18 @@ impl Menu {
     /// The fliers on offer (P315).
     pub fn fliers(&self) -> &[roster::Flier] {
         &self.flier_offer
+    }
+
+    /// The machines besides the fliers on offer (P315c), as the shell reads them off the installed
+    /// machine packs' manifests: their bikes, listed on the Bike rows beside the disc's, and a row
+    /// for each other kind.
+    pub fn set_machines(&mut self, offer: Vec<roster::PackMachine>) {
+        self.machine_offer = offer;
+    }
+
+    /// The machines besides the fliers on offer (P315c).
+    pub fn machines(&self) -> &[roster::PackMachine] {
+        &self.machine_offer
     }
 
     pub fn trick_packs(&self) -> &[TrickPack] {

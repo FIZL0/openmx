@@ -55,8 +55,9 @@ const BAND: f32 = 4.6;
 /// Where the Garage stands its bike and rider (P213): right of the plate, over the side panel, in
 /// the stage's top right as the original's model stands in its screen's — x, y, width, height.
 const GARAGE_STAGE: [f32; 4] = [59.0, 1.6, 20.6, 23.2];
-/// The Fliers tab's arrows on the stage (P315a), a tap's way to step the shown flier's skin: the
-/// middle of each, left and right, in the stage's bottom corners, and how far a tap on it reaches.
+/// The machine picker's arrows on the stage (P315a, P315c), a tap's way to step the shown flier's
+/// skin or the bike's paint: the middle of each, left and right, in the stage's bottom corners, and
+/// how far a tap on it reaches.
 const FLIER_ARROWS: [[f32; 2]; 2] = [[61.0, 23.2], [77.6, 23.2]];
 const FLIER_ARROW_R: f32 = 1.4;
 /// Where the pause's Tricks page shows its lit trick performed (P259): its glass box right of the
@@ -252,11 +253,12 @@ impl Menu {
         let (em, o) = fit(size);
         let p = [(at[0] - o[0]) / em, (at[1] - o[1]) / em];
         let inside = |b: &Box4| p[0] >= b[0] && p[1] >= b[1] && p[0] < b[0] + b[2] && p[1] < b[1] + b[3];
-        // The Fliers tab's stage arrows (P315a): the shown flier's next skin.
-        if self.listing().is_none() && self.garage_flier().is_some() {
+        // The machine picker's stage arrows (P315a, P315c): the shown flier's next skin, or the bike's
+        // next paint.
+        if self.listing().is_none() && self.on_machines() {
             let hit = FLIER_ARROWS.iter().position(|c| (p[0] - c[0]).hypot(p[1] - c[1]) <= FLIER_ARROW_R);
             if let Some(side) = hit {
-                let stepped = self.step_garage_flier(if side == 0 { -1 } else { 1 });
+                let stepped = self.step_garage_machine(if side == 0 { -1 } else { 1 });
                 self.cues.list.push(if stepped { Cue::Move } else { Cue::Refused });
                 return true;
             }
@@ -306,10 +308,11 @@ impl Menu {
         Some([o[0] + (b[0] + b[2] / 2.0) * em, o[1] + (b[1] + b[3] / 2.0) * em])
     }
 
-    /// The middle of the Fliers tab's stage arrow `side` (0 left, 1 right; P315a) in a `size` view,
-    /// in its pixels: where a tap steps the shown flier. `None` off the tab.
+    /// The middle of the machine picker's stage arrow `side` (0 left, 1 right; P315a, P315c) in a
+    /// `size` view, in its pixels: where a tap steps the shown flier's skin or the bike's paint.
+    /// `None` off the tab.
     pub fn flier_arrow_point(&self, side: usize, size: (usize, usize)) -> Option<[f32; 2]> {
-        self.garage_flier()?;
+        self.on_machines().then_some(())?;
         let c = FLIER_ARROWS.get(side)?;
         let (em, o) = fit(size);
         Some([o[0] + c[0] * em, o[1] + c[1] * em])
@@ -1897,8 +1900,8 @@ impl Pen<'_> {
             self.plate(menu, 45.0, 4.0);
             // under the bike and rider (P213)
             side = 25.2;
-            // the flier's skin, a tap away (P315a)
-            if menu.garage_flier().is_some() {
+            // the flier's skin or the bike's paint, a tap away (P315a, P315c)
+            if menu.on_machines() {
                 for (c, dir) in FLIER_ARROWS.iter().zip([-1.0, 1.0]) {
                     self.disc(c[0], c[1], FLIER_ARROW_R, [0, 0, 0, 120]);
                     self.arrow(c[0] + dir * 0.1, c[1], [dir, 0.0], 1.1, CHALK);

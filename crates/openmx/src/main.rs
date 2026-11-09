@@ -3112,6 +3112,7 @@ async fn front_end(args: Args) -> Result<(), String> {
     front.menu.set_music_packs(music_packs(&args, &front.dir, mods_on));
     front.menu.set_trick_packs(trick_pack_rows(&args, &front.dir, &rider_stunts));
     front.menu.set_fliers(flier_offer_rows(&args, &front.dir));
+    front.menu.set_machines(machine_offer_rows(&args, &front.dir));
     // The mod store (P198): into the mods folder beside the settings, or `--mods DIR`'s; none under
     // `--mods off`.
     let mut store = StoreFront::new(&args, &front.dir);
@@ -3580,6 +3581,7 @@ async fn front_end(args: Args) -> Result<(), String> {
             // and the trick packs (MD77): one the store installed has its row at once
             shell.front.menu.set_trick_packs(trick_pack_rows(&args, &shell.front.dir, &rider_stunts));
             shell.front.menu.set_fliers(flier_offer_rows(&args, &shell.front.dir));
+            shell.front.menu.set_machines(machine_offer_rows(&args, &shell.front.dir));
             // And their songs (MD7): a pack the store installed plays at once.
             if rescan {
                 shell.front.sound.set_source(std::sync::Arc::new(read_music_packs(mods_folder(&args, &shell.front.dir, true).as_deref())));
@@ -11576,7 +11578,8 @@ fn flier_offers(packs: &[machine_packs::Pack]) -> Vec<roster::Flier> {
     let mut out = roster::original_fliers();
     for pack in packs {
         let mut place: Vec<(String, usize)> = Vec::new();
-        for k in &pack.skins {
+        // A bike pack's skins are the Bike rows' (P315c, [`machine_offers`]).
+        for k in pack.skins.iter().filter(|k| k.machine != roster::BIKE_KIND) {
             let n = match place.iter_mut().find(|(m, _)| *m == k.machine) {
                 Some((_, n)) => {
                     *n += 1;
@@ -11609,6 +11612,87 @@ fn flier_offers(packs: &[machine_packs::Pack]) -> Vec<roster::Flier> {
         }
     }
     out
+}
+
+/// The machines besides the fliers the Garage's machine picker offers (P315c), off the installed
+/// machine packs' manifests as the fliers are: every bike skin, by its `class`, listed beside the
+/// disc's bikes and greyed, since openmx rides only the disc's bikes; and once, by its name, each
+/// pack of skin-less builds of a kind openmx cannot ride (the quads), greyed with why.
+fn machine_offers(packs: &[machine_packs::Pack]) -> Vec<roster::PackMachine> {
+    let mut out = Vec::new();
+    for pack in packs {
+        for k in pack.skins.iter().filter(|k| k.machine == roster::BIKE_KIND) {
+            out.push(roster::PackMachine {
+                pack: pack.id.clone(),
+                game: pack.game.clone(),
+                machine: k.machine.clone(),
+                class: k.class.clone(),
+                skin: k.skin.clone(),
+                name: if k.name.is_empty() { k.skin.clone() } else { k.name.clone() },
+                why: Some("openmx rides only MX Unleashed's own bikes yet".into()),
+            });
+        }
+        if pack.skins.is_empty() && pack.machine != "fliers" {
+            out.push(roster::PackMachine {
+                pack: pack.id.clone(),
+                game: pack.game.clone(),
+                machine: pack.machine.clone(),
+                class: String::new(),
+                skin: String::new(),
+                name: pack.name.clone(),
+                why: Some(format!("openmx cannot ride a {} yet", roster::machine_label(&pack.machine).to_lowercase())),
+            });
+        }
+    }
+    out
+}
+
+/// The machines besides the fliers the Garage offers (P315c): [`machine_offers`] off the mods
+/// folder, none with the folder off (the disc's bikes are always there).
+fn machine_offer_rows(args: &Args, dir: &std::path::Path) -> Vec<roster::PackMachine> {
+    let Some(folder) = mods_folder(args, dir, true) else { return Vec::new() };
+    machine_offers(&machine_packs::find(&folder).0)
+}
+
+#[cfg(test)]
+mod machine_offers_test {
+    //! P315c: the machine picker's bikes and other kinds come off the manifests, as the fliers do.
+    use super::{flier_offers, machine_offers, machine_packs, roster};
+
+    #[test]
+    fn a_bike_packs_skins_and_a_quad_pack_are_offered_off_their_manifests() {
+        let mods = std::env::temp_dir().join(format!("openmx-p315c-mods-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&mods);
+        let pack = mods.join(machine_packs::MACHINES_DIR).join("test_bikes");
+        std::fs::create_dir_all(&pack).unwrap();
+        std::fs::write(
+            pack.join("mod.json"),
+            r#"{"kind": "machine", "id": "test_bikes", "name": "Test bikes", "machine": "bike", "source": {"game": "Test Game"},
+                "skins": [{"machine": "bike", "class": 250, "skin": "yz250_test", "name": "Test 250"},
+                          {"machine": "bike", "class": "450", "skin": "crf450_test"}]}"#,
+        )
+        .unwrap();
+        let quads = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../mods/machines/mxvatv_atv");
+        let mut packs = machine_packs::find(&mods).0;
+        packs.extend(machine_packs::read(&quads).ok().flatten());
+        let offer = machine_offers(&packs);
+        let seen: Vec<(&str, &str, &str, &str, bool)> =
+            offer.iter().map(|m| (m.pack.as_str(), m.machine.as_str(), m.class.as_str(), m.name.as_str(), m.why.is_some())).collect();
+        let mut want = vec![("test_bikes", "bike", "250", "Test 250", true), ("test_bikes", "bike", "450", "crf450_test", true)];
+        if packs.len() == 2 {
+            want.push(("mxvatv_atv", "atv", "", "MX vs. ATV Unleashed quads", true));
+        } else {
+            println!("no MX vs. ATV quads pack at {}: the test pack alone", quads.display());
+        }
+        assert_eq!(seen, want);
+        assert_eq!(offer[0].game, "Test Game");
+        if let Some(q) = offer.get(2) {
+            assert_eq!(q.why.as_deref(), Some("openmx cannot ride a quad yet"));
+        }
+        // and a bike pack's skins are not fliers
+        assert!(flier_offers(&packs).iter().all(|f| f.pack == roster::ORIGINAL_PACK));
+        std::fs::remove_dir_all(&mods).ok();
+    }
 }
 
 /// The fliers the Garage offers (P315): [`flier_offers`] off the mods folder, MX Unleashed's alone
