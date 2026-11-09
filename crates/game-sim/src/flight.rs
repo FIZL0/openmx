@@ -1622,7 +1622,13 @@ impl Dynamics for Listeners<'_> {
 /// the plane keeps it in (the two throttle commands, then the elevator, the aileron and the rudder,
 /// in the order the original stores them).
 pub fn pad(pad: &input::Pad) -> Pad {
-    let p = PlaneInput::from_pad(pad);
+    pad_through(pad, &input::AxisRange::PLAYER)
+}
+
+/// [`pad`] with the stick read through `range` (I8): the rider's [`crate::phy::Phy::stick`], the
+/// original's range unless the experimental stick dead zone narrowed it.
+pub fn pad_through(pad: &input::Pad, range: &input::AxisRange) -> Pad {
+    let p = PlaneInput::from_pad_through(pad, range);
     Pad { forward: p.throttle_up, back: p.throttle_down, elevator: p.elevator, aileron: p.aileron, rudder: p.rudder }
 }
 

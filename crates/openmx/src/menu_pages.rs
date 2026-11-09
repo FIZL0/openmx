@@ -164,6 +164,9 @@ pub enum Key {
     PlaneLayout,
     /// A seat's session markers (P129), on or off.
     Markers,
+    /// The Controls tab's experimental stick dead zone (I8): off — the original's — or one of
+    /// [`game_sim::modifiers::DEAD_ZONES`], held as a seat's [`Knob::StickDeadZone`].
+    DeadZone,
     Nintendo,
     Controller,
     Pressure,
@@ -323,6 +326,11 @@ impl Row {
     }
 }
 
+/// The Stick Dead Zone row's choices (I8): off, then [`game_sim::modifiers::DEAD_ZONES`] narrowing.
+fn dead_zone_ring() -> Vec<u16> {
+    std::iter::once(game_sim::modifiers::ORIGINAL).chain(game_sim::modifiers::DEAD_ZONES).collect()
+}
+
 /// P277: rows with this many choices or more open a dropdown list on Cross; an On/Off row and every
 /// other two-way row keeps flipping on it.
 pub const LIST: usize = 3;
@@ -331,6 +339,9 @@ pub const LIST: usize = 3;
 /// own has none.
 fn hint(key: Key, choice: &str) -> &'static str {
     match (key, choice) {
+        (Key::DeadZone, "Off") => "the original's 0.30",
+        (Key::DeadZone, "0.00") => "none: every byte off centre counts",
+        (Key::DeadZone, _) => "experimental: a smaller zone",
         (Key::Updates, "Ask") => "Square updates",
         (Key::Updates, "Always") => "updates by itself",
         (Key::Updates, "Never") => "never asks GitHub",
@@ -1078,7 +1089,41 @@ impl Menu {
                 "Whether a pad rumbles when its rider wrecks, as the original's did. Every player's pad. On is the original game.",
             ),
         ]);
+        rows.push(Row::heading("Experimental"));
+        rows.push(self.dead_zone_row());
         rows
+    }
+
+    /// The seat the Controls tab's dead zone row sets (I8): a guest's own, the Player row's with
+    /// more than one, and with one player every seat's (`None`), as the modifiers page's All Players.
+    fn dead_zone_seat(&self) -> Option<usize> {
+        match self.mods_own() {
+            Some(s) => Some(s),
+            None if self.many_seats() => Some(self.control_seat().min(SEATS_MAX - 1)),
+            None => None,
+        }
+    }
+
+    /// The Controls tab's Stick Dead Zone row (I8): off, the original's ±0.30, or a narrower one.
+    /// It is a modifier ([`Knob::StickDeadZone`]), so a tape, a preset and a lobby carry it as they
+    /// carry the rest, and changed under the pause it takes as the pause closes.
+    fn dead_zone_row(&self) -> Row {
+        let knob = Knob::StickDeadZone;
+        let ring = dead_zone_ring();
+        let names: Vec<String> = ring.iter().map(|&v| knob.shown(v)).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let v = self.settings.modifiers.get(self.dead_zone_seat().unwrap_or(0), knob);
+        let now = ring.iter().position(|&z| z == v).unwrap_or(0);
+        let lock = self.mods_held().map(str::to_string).or(self.knob_held(knob).map(str::to_string));
+        Row::choice(
+            Key::DeadZone,
+            "Stick Dead Zone",
+            &names,
+            now,
+            "Experimental. How far the stick moves before the rider answers. Off is the original game: the first 0.30 of the stick's travel does nothing. \
+             A smaller zone lets small corrections through. It changes the ride, so a tape records it, and online each player's own goes to every machine.",
+        )
+        .off_if(lock.is_some(), lock.as_deref().unwrap_or(""))
     }
 
     fn camera_page(&self) -> Vec<Row> {
@@ -2023,6 +2068,14 @@ impl Menu {
             Key::Markers => {
                 let i = self.control_seat().min(SEATS_MAX - 1);
                 self.settings.markers[i] = next(row) == 0;
+            }
+            Key::DeadZone => {
+                let ring = dead_zone_ring();
+                let to = ring[next(row).min(ring.len() - 1)];
+                match self.dead_zone_seat() {
+                    Some(seat) => self.settings.modifiers.set(seat, Knob::StickDeadZone, to),
+                    None => (0..SEATS_MAX).for_each(|seat| self.settings.modifiers.set(seat, Knob::StickDeadZone, to)),
+                }
             }
             Key::Nintendo => self.controls.nintendo_positions = !self.controls.nintendo_positions,
             Key::Controller => {

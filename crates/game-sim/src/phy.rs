@@ -652,6 +652,11 @@ pub struct Phy {
     /// command's ramp to full lock ([`crate::handling::step::steer_command`]), its option off. MX
     /// Unleashed's files have neither: zero. Read only on [`crate::handling::Handling::MxVsAtv`].
     pub steer_ramp: crate::handling::step::SteerRamp,
+    /// **The port's own (I8):** the range this player's stick consumers read the pad through — on the
+    /// bike ([`crate::Sim`]'s hands) and on the machines the rider takes ([`crate::flight::pad_through`]).
+    /// The reader writes the original's [`AxisRange::PLAYER`](crate::input::AxisRange::PLAYER); the
+    /// experimental stick dead zone ([`crate::modifiers::Knob::StickDeadZone`]) narrows it.
+    pub stick: crate::input::AxisRange,
 }
 
 impl Phy {
@@ -985,6 +990,7 @@ impl Phy {
             gas_gyro_torque,
             gyro: crate::handling::Gyro::default(),
             steer_ramp,
+            stick: crate::input::AxisRange::PLAYER,
         }
     }
 

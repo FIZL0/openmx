@@ -984,6 +984,15 @@ impl AxisRange {
         dead_lo: F(-0.3),
     };
 
+    /// **The port's own (I8):** [`AxisRange::PLAYER`] with a narrower dead zone, `±zone`, each segment
+    /// stretched back out to the full range from its edge the same way. The experimental stick dead
+    /// zone ([`crate::modifiers::Knob::StickDeadZone`]) hands the ride's stick consumers this in
+    /// place of the original's ±0.3, so a small correction reaches the rider; at `zone` 0.3 it is
+    /// [`AxisRange::PLAYER`] field for field.
+    pub fn player_with_dead_zone(zone: F) -> AxisRange {
+        AxisRange { dead_hi: zone, dead_lo: -zone, ..AxisRange::PLAYER }
+    }
+
     /// One axis byte through the dead zone and the two segments, in the original's own arithmetic:
     /// one divide, then the linear map, then whichever segment the result lands in.
     ///
@@ -1293,8 +1302,13 @@ impl PlaneInput {
     /// are further out, its controls where the first's are 0); a player with one pad, which is every
     /// player the port has, is this.
     pub fn from_pad(pad: &Pad) -> PlaneInput {
-        let stick =
-            (pad.axis_through(Axis::LeftX, &AxisRange::PLAYER), pad.axis_through(Axis::LeftY, &AxisRange::PLAYER));
+        PlaneInput::from_pad_through(pad, &AxisRange::PLAYER)
+    }
+
+    /// [`PlaneInput::from_pad`] with the sticks read through `range`: the experimental dead zone's
+    /// (I8, [`AxisRange::player_with_dead_zone`]) where a player set one, else [`AxisRange::PLAYER`].
+    pub fn from_pad_through(pad: &Pad, range: &AxisRange) -> PlaneInput {
+        let stick = (pad.axis_through(Axis::LeftX, range), pad.axis_through(Axis::LeftY, range));
         let table = &crate::bindings::Table::SHIPPED;
         PlaneInput::from_sticks(stick, |c| table.value(pad, crate::bindings::Command(c as u8)))
     }

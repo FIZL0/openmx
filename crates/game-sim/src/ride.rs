@@ -178,8 +178,15 @@ impl Controls {
     /// rather than in the shell so that a replay fixture and the shell derive the rider's hands from
     /// a pad the same way.
     pub fn through(pad: &crate::input::Pad, table: &crate::bindings::Table) -> Controls {
+        Controls::through_stick(pad, table, &crate::input::AxisRange::PLAYER)
+    }
+
+    /// [`Controls::through`] with the stick read through `range` (I8): the bike's
+    /// [`crate::phy::Phy::stick`], which is the original's [`crate::input::AxisRange::PLAYER`] unless
+    /// the player set the experimental stick dead zone.
+    pub fn through_stick(pad: &crate::input::Pad, table: &crate::bindings::Table, range: &crate::input::AxisRange) -> Controls {
         use crate::bindings::Command;
-        use crate::input::{Axis, AxisRange};
+        use crate::input::Axis;
         let held = |c: Command| table.held(pad, c);
         let pressed = |c: Command| table.pressed(pad, c);
         // The eight-way code the trick table reads, from the d-pad's four commands: odd for a
@@ -198,8 +205,9 @@ impl Controls {
             reverse: F::ZERO,
             // Through the player's own range, ±0.3, which is what the ride's stick consumers carry
             // in the original (I7, proved on a playback of the human's recording) — not the main
-            // menu's ±0.2 that [`crate::input::Pad::axis`] hands out.
-            stick: (pad.axis_through(Axis::LeftX, &AxisRange::PLAYER), pad.axis_through(Axis::LeftY, &AxisRange::PLAYER)),
+            // menu's ±0.2 that [`crate::input::Pad::axis`] hands out — unless the experimental dead
+            // zone (I8) handed a narrower one in.
+            stick: (pad.axis_through(Axis::LeftX, range), pad.axis_through(Axis::LeftY, range)),
             dpad_y: held(Command::UP) || held(Command::DOWN),
             dpad_dir: round.iter().position(|c| held(*c)).map_or(0, |i| i as i32 * 2 + 1),
             stunt: held(Command::TRICK_1),

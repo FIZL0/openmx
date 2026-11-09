@@ -291,8 +291,8 @@ impl Sim {
     /// A bike on the original's tricks reads exactly what it always did.
     fn hands(&self, i: usize) -> Controls {
         let pad = self.input.pad(i);
-        let mut c = Controls::through(pad, self.table());
         let phy = if i == 0 { &self.phy } else { &self.others[i - 1].phy };
+        let mut c = Controls::through_stick(pad, self.table(), &phy.stick);
         if phy.tricks.is_some() && self.plane.is_none() {
             c.extra = trick_pack::EXTRA_CONTROLS.map(|k| pad.held(k));
         }
@@ -361,7 +361,7 @@ impl Sim {
             // `Plane::step` ran it, this lane did not, so a replay waited out a wreck the original's
             // L1+R1 had already put back).
             plane.reset_chord(controls.respawn, &self.tables.ride.acos);
-            let pad = flight::pad(self.input.pad(0));
+            let pad = flight::pad_through(self.input.pad(0), &self.phy.stick);
             // A downed rider's wreck bike meets the plane (S276, [`wreck_plane`]): its search with the
             // hull in its world before the plane's frame, its mirrors on the plane's list, and its
             // step, the plane's body on its resolve, after. The downed rider is not stepped otherwise.

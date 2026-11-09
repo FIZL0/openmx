@@ -284,9 +284,10 @@ fn at_one_hundred_percent_the_new_knobs_touch_nothing() {
         }
         assert_eq!(Mods::parse(&mods.text()).unwrap(), mods);
     }
-    // The menu has a row for every knob but the old biplane speed and (P96) the old flip torque.
+    // The menu has a row for every knob but the old biplane speed, (P96) the old flip torque and
+    // (I8) the stick dead zone, whose row is Settings' Controls tab's.
     assert!(!Knob::MENU.contains(&Knob::PlaneSpeed));
-    assert!(Knob::ALL.iter().all(|k| matches!(k, Knob::PlaneSpeed | Knob::SpinRate) || Knob::MENU.contains(k)));
+    assert!(Knob::ALL.iter().all(|k| matches!(k, Knob::PlaneSpeed | Knob::SpinRate | Knob::StickDeadZone) || Knob::MENU.contains(k)));
 }
 
 #[test]
