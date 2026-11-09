@@ -9911,6 +9911,23 @@ atv_heap_free               atv 0x001b76d0 = free
 #   Oracle: the S278b 60 000 frames, ~25 000 in mode 2, nothing in the arm hooked but the gather (and the
 #   switches); the query run on Nat05's map on both sides, its ring 0x00541550 and terrain +0x9e0/+0x9e4
 #   left out of the compare. Every clause, aim way and release taken (fewest: slow set late 886).
+# S286: the rider's vt +0xd0 0x00505720 (pose) and vt +0xcc 0x00505710 (settle), from S278b's respawn and
+# follow, ported as game_sim::handling::rider::{pose, settle}. tests/mxvatv_rider_modes.rs. Journal:
+# research/journal/2026-11-08-s286-rider-pose-settle/. Neither is a Ghidra function: kit dis -p atv.
+#   Pose 0x00505720..0x00505b1c (a0 rider, a1 still, f12 dt) = MX Unleashed's ragdoll pose (ragdoll_pose::pose):
+#   dt <= 0 (c.ole.s) or a1: still; holders i < +0x290 (re-read), *(+0x2a4) + 0xb0 i: +0xa0 node, +0xa4 body,
+#   +0x60 drawn frame. Node position 0x00194c20 (sp+416), axes 0x00194960 (z sp+368, y sp+352); quat
+#   0x00135860 = basis 0x001340b0(ORIGIN, z, y, 0, 1) then 0x00135620; w < 0: 0 - q (vmulax/vmsubw). Moving:
+#   drawn +0x90 xyz (w 1.0), 0x00135620(drawn) flipped the same, relative (vmul/vopmula/vmaddaw/vmsubaw/
+#   vopmsub, w by vaddax/vmadday/vmaddz), unturn, axis-angle 0x00134f50 (acos *0x003ea9c0 scale 0x003ea9d8;
+#   sin *0x003eab20 [cos, sin] by 0x003ea9d0; zero: axis 0x00396ff0 (1,0,0,1)); still: velocity = rates =
+#   0x00396fc0. at += turned(q, body+0x1a0). Body vt (+0x110) +0x10 0x00492b90 (+0x40 = a1), +0x14
+#   0x00492b70 (+0x50), +0x58 0x00492b30 (+0x180..+0x18c words = a1, +0x160 = a2 quad); drawn = basis(at,
+#   z, y, 0, 1).
+#   Settle 0x00505710: a0 = *(rider+0x27c) (delay slot), j 0x00496a70: count +8 > 0, body 0x0049cd30(world+8,
+#   i) = *(*(world+0x10) + 4i), vt +0x3c 0x00493070 (= wreck::body_commit; copies via 0x00493200), count
+#   re-read. State 4: 18 holders, world 0x010cc6f0 with the same 18 bodies, all vtable 0x003cd200.
+#   Oracle: 12 000 cases, both run whole in the interpreter, every written word equal; zero-angle axis 919.
 
 # F31b5d: state 4's sim listeners that are not the bike's, shown inert on C15 ride-2 and flip-1. Journal:
 # research/journal/2026-11-05-f31b5d-other-listeners-inert/.
