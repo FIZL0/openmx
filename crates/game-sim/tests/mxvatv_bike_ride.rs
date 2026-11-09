@@ -3200,13 +3200,23 @@ impl Listeners for TreeInRam<'_> {
             m.write();
             book("the tail: the ported vehicle update", self.ee.ran - r0);
             let stack = (self.ee.stack as usize).saturating_sub(STACK_USE)..self.ee.ram.len().min(self.ee.stack as usize + 0x4000);
+            // F31b5j: with the part walk's leaves (or one kind's own work) dropped, only the bike and
+            // its blocks are the original's.
+            let only_bike = IN_RUST.with(|r| r.borrow().iter().any(|n| n.starts_with("part leaves dropped") || n.starts_with("part leaf dropped")));
+            let bike: Vec<std::ops::Range<usize>> = if only_bike {
+                let mut b = vec![BIKE as usize..BIKE as usize + 0x1800];
+                b.extend(physics(self.ee).into_iter().map(|(_, at, n)| at as usize..(at + n) as usize));
+                b
+            } else {
+                vec![0..want.len()]
+            };
             let d: Vec<String> = (0..want.len())
                 .step_by(4)
-                .filter(|a| !stack.contains(a) && want[*a..*a + 4] != self.ee.ram[*a..*a + 4])
+                .filter(|a| !stack.contains(a) && bike.iter().any(|r| r.contains(a)) && want[*a..*a + 4] != self.ee.ram[*a..*a + 4])
                 .map(|a| format!("{a:#x}: port {:#010x}, original {:#010x}", self.ee.u32_at(a as u32), u32::from_le_bytes(want[a..a + 4].try_into().unwrap())))
                 .collect();
             assert!(d.is_empty(), "the vehicle update: {} words of RAM differ from the original's\n  {}", d.len(), d.iter().take(20).cloned().collect::<Vec<_>>().join("\n  "));
-            assert!(want_spr == self.ee.spr, "the vehicle update: the scratchpad differs from the original's");
+            assert!(only_bike || want_spr == self.ee.spr, "the vehicle update: the scratchpad differs from the original's");
             self.bikes += 1;
         } else {
             let Some(&(_, _, writes)) = OTHER_LEAVES.iter().find(|l| (l.0, l.1) == (e, f)) else {
@@ -5000,6 +5010,86 @@ const UPDATE_OWN: [(u32, u32); 6] = [
 /// The scratch slots the port's calls hand out: the two bone buffers.
 const U_POSES: u32 = 73;
 
+/// The leaves the vehicle update's part walk ([`update::Out::Walk`]: the bike's own listeners, the
+/// collision record's and the second part's) reaches on state 4, by their step, as (step, whether the
+/// step ends with the walk of its own listeners, name): F31b5j. None is the bike's code, and none
+/// writes a word of the bike or its physics blocks ([`PartWalk`]); but the effects and the emitters
+/// draw on `rand`, and through it reach the bike ([`flip_needs_the_part_walks_effects`]). The walks
+/// reach fourteen: one each of the first two, eleven of the third and one of the fourth.
+///
+/// - The models: flips its `+0x58` between 0 and 1 every frame, then for each entry of its list at
+///   `+0x228` (count `+0x234`) that is set and not yet attached, attaches the models it names: a
+///   scene object's frame, no simulation.
+/// - The effects: sets a flags byte on each of its table's entries (`+0x24`, 0x2c bytes each) from
+///   the words they point at, tells its items (`+0x28`) of a changed key, turns each item on or off by
+///   those flags (vt `+0x18`, `+0x1c`) and steps the ones on (vt `+0x14`, `dt`), which draws on
+///   `rand` now and then.
+/// - The emitters, two kinds (a listener at its object's `+0xc`, its step a thunk to the object's):
+///   from the emitter's two spots' distance over `dt` each spawns particles, drawing on the C
+///   library's `rand` (the one the wreck's throw and the rider's reset draw on) for their counts and
+///   spreads.
+const PART_LEAVES: [(u32, bool, &str); 4] =
+    [(0x0014_1d30, true, "models"), (0x004f_a4a0, true, "effects"), (0x0051_1c10, false, "emitter"), (0x004f_fd20, false, "second emitter")];
+
+/// The vehicle update's part walk, the port's [`tail::walk`] on RAM: a group's step (the walk itself)
+/// is the walk one level down, and each leaf ([`PART_LEAVES`]) is the original's, its closing walk
+/// stood in for by the port's. Every leaf step is watched: it may not change a word of the bike or
+/// its physics blocks; the steps that move `rand`'s state, and any that builds the smooth noise, are
+/// counted. With `"part leaves dropped"` in [`IN_RUST`] the leaves do not step at all; with `"part
+/// leaf dropped: <name>"` that kind's own work is dropped and its walk kept.
+struct PartWalk<'a> {
+    ee: &'a mut Ee,
+}
+
+impl Listeners for PartWalk<'_> {
+    fn word(&mut self, at: u32) -> u32 {
+        self.ee.u32_at(at)
+    }
+    fn step(&mut self, e: u32, dt: F) {
+        let f = self.ee.u32_at(self.ee.u32_at(e + 4) + 0x40);
+        if f == TAIL {
+            return tail::walk(self, e, dt);
+        }
+        let Some(&(_, closes, name)) = PART_LEAVES.iter().find(|l| l.0 == f) else {
+            panic!("a part leaf other than the known: {e:#x}, step {f:#x}")
+        };
+        if in_rust("part leaves dropped") {
+            return;
+        }
+        if in_rust(&format!("part leaf dropped: {name}")) {
+            if closes {
+                tail::walk(self, e, dt);
+            }
+            return;
+        }
+        let (before, rand, noise_unbuilt) = (bike_and_blocks(self.ee), rand_state(self.ee), self.ee.u32_at(NOISE_UNBUILT) != 0);
+        let walked: Rc<RefCell<Vec<(u32, u32)>>> = Rc::default();
+        let w = walked.clone();
+        let old = self.ee.hooks.insert(TAIL, Box::new(move |ee: &mut Ee| w.borrow_mut().push((ee.r(4) as u32, ee.f(12).to_bits()))));
+        self.ee.set(28, GP);
+        let r0 = self.ee.ran;
+        self.ee.call(f, &[u64::from(e)], &[dt.0], BUDGET);
+        book(format!("the tail: the update's {name}"), self.ee.ran - r0);
+        match old {
+            Some(h) => self.ee.hooks.insert(TAIL, h),
+            None => self.ee.hooks.remove(&TAIL),
+        };
+        if rand_state(self.ee) != rand {
+            book(format!("the tail: the update's {name} steps that drew rand"), 1);
+        }
+        if noise_unbuilt && self.ee.u32_at(NOISE_UNBUILT) == 0 {
+            book(format!("the tail: the update's {name} steps that built the noise"), 1);
+        }
+        assert_eq!(*walked.borrow(), if closes { vec![(e, dt.to_bits())] } else { vec![] }, "part leaf {e:#x}'s closing walk");
+        let parted: Vec<String> =
+            before.iter().zip(&bike_and_blocks(self.ee)).filter(|(b, a)| b != a).map(|((at, b), (_, a))| format!("{at:#x}: {b:#010x} -> {a:#010x}")).collect();
+        assert!(parted.is_empty(), "part leaf {e:#x} (step {f:#x}) wrote the bike's words:\n  {}", parted.join("\n  "));
+        if closes {
+            tail::walk(self, e, dt);
+        }
+    }
+}
+
 /// The bike in RAM as the update's callees' port sees it: every word read and written in place, each
 /// call out the original's.
 struct UpdateInRam<'a> {
@@ -5040,6 +5130,14 @@ impl Updates for UpdateInRam<'_> {
             }
         }
         let dt = F(self.x);
+        // F31b5j: the part walk, the port's ([`PartWalk`]); with "the walk handed on", the
+        // original's.
+        if let Out::Walk(g) = c
+            && !in_rust("the walk handed on")
+        {
+            tail::walk(&mut PartWalk { ee: &mut *self.ee }, g, dt);
+            return 0;
+        }
         match c {
             Out::Gear => return update::gear(self),
             Out::Trick => return update::trick(self, dt),
@@ -6654,7 +6752,10 @@ fn the_trail_sender_and_part_virtuals_are_the_originals() {
         let want = std::mem::take(&mut *log.borrow_mut());
         let want_words = snap_regions(&ee, &regions);
         restore_regions(&mut ee, &regions, &before);
+        // The walk handed on to the original, which the rig's hook stands in for.
+        IN_RUST.with(|r| *r.borrow_mut() = vec!["the walk handed on"]);
         let v0 = UpdateInRam { ee: &mut ee, x }.out(c);
+        IN_RUST.with(|r| r.borrow_mut().clear());
         let got = std::mem::take(&mut *log.borrow_mut());
         assert_eq!(format!("{got:?}"), format!("{want:?}"), "case {k} ({c:?}): the calls");
         let got_words = snap_regions(&ee, &regions);
@@ -8663,6 +8764,7 @@ fn ride_replays_with_every_port_at_once() {
     // F54's two are the only calls still handed on by name; the rest of what the interpreter runs is
     // in `ran` (F31b5i..m).
     assert_eq!(handed, [("record search heard_hit", 282), ("record search part stand", 432)], "{ran:?}");
+    walk_served(&ran);
 }
 
 /// **F31b5 — C15's flip, every port at once**: flip-1 bit-exact, wrecked on row 125 and put back on
@@ -8676,6 +8778,76 @@ fn flip_replays_with_every_port_at_once() {
     assert_eq!(changes, [125, 193], "wrecked on row 125, put back on row 193");
     let handed: Vec<(&str, u32)> = all.iter().filter(|(k, _)| k.starts_with("> ")).map(|(k, &n)| (&k[2..], n)).collect();
     assert_eq!(handed, [("record search heard_hit", 110), ("record search part stand", 161)], "{ran:?}");
+    walk_served(&ran);
+}
+
+/// F31b5j: the update's part walk is the port's ([`PartWalk`]), never the interpreter's, and it
+/// stepped every kind of [`PART_LEAVES`].
+fn walk_served(ran: &BTreeMap<String, u64>) {
+    assert!(!ran.contains_key("the tail: the update's Walk"), "the part walk handed on: {ran:?}");
+    for (_, _, name) in PART_LEAVES {
+        assert!(ran.contains_key(&format!("the tail: the update's {name}")), "the part walk's {name} never stepped: {ran:?}");
+    }
+}
+
+/// **F31b5j — what the part walk's leaves give the bike**: [`replay_whole`]'s ports with the
+/// update's part leaves ([`PART_LEAVES`]) not stepped at all (`"part leaves dropped"`), or with one
+/// kind's own work dropped (`"part leaf dropped: models"`). Each row is checked against C15 word for
+/// word and the bike and its physics blocks against the handing run's after every frame
+/// ([`replay_pure`]'s checks); the first that fails is answered as the panic's message. On success,
+/// answers the wreck state per row and where the RAM parts from the handing run's.
+fn replay_without_part_leaves(name: &str, mode: &'static str) -> Result<(Vec<bool>, Vec<String>), String> {
+    let ran = std::panic::catch_unwind(|| replay_pure(name, &["PartMove", "Gather", "record sweep", "record search", mode]));
+    match ran {
+        Ok(Some((w, _, off))) => Ok((w, off)),
+        Ok(None) => Err("skipped".into()),
+        Err(e) => Err(e.downcast_ref::<String>().cloned().unwrap_or_default()),
+    }
+}
+
+/// Ride-2 needs nothing of the part leaves: dropped, it is C15's on all 459 rows and the bike the
+/// handing run's.
+#[test]
+fn ride_replays_without_the_part_leaves() {
+    let (w, off) = match replay_without_part_leaves("ride-2", "part leaves dropped") {
+        Err(e) if e == "skipped" => return,
+        r => r.unwrap(),
+    };
+    assert_eq!(w.len(), 459);
+    assert!(w.iter().all(|w| !w), "the ride never wrecks");
+    assert!(!off.is_empty(), "the leaves dropped, the RAM parts from the handing run's");
+}
+
+/// The words flip-1's bike parts at, on row 114, with the part walk's effects or emitters not as
+/// the original's: the trick hold's clip fraction (`+0x14e4`) and its copy (`+0x908`).
+fn parts_at_the_hold(e: &str) {
+    assert!(e.starts_with("flip-1 row 114: the bike and its blocks differ from the handing run's at 2 words"), "{e}");
+    let at = |o: u32| format!("{:#x}: ", BIKE + o);
+    assert!(e.contains(&at(0x908)) && e.contains(&at(0x14e4)), "{e}");
+}
+
+/// Flip-1 needs the part walk's effects and emitters. With every leaf dropped, or the effects' own
+/// work alone (which turns the emitters on and off), the bike parts from the handing run's on row
+/// 114 at the trick hold ([`parts_at_the_hold`]): the hold's shake samples the smooth noise, whose
+/// tables state 4 has not built yet and the hold builds off the C library's `rand`, which the
+/// emitters draw on every frame. The models' own work dropped, flip-1 is C15's on all 465 rows,
+/// wreck and put-back, and the bike the handing run's.
+#[test]
+fn flip_needs_the_part_walks_effects() {
+    match replay_without_part_leaves("flip-1", "part leaves dropped") {
+        Err(e) if e == "skipped" => return,
+        Err(e) => parts_at_the_hold(&e),
+        Ok(_) => panic!("flip-1 rode the same with the part leaves dropped"),
+    }
+    match replay_without_part_leaves("flip-1", "part leaf dropped: effects") {
+        Err(e) => parts_at_the_hold(&e),
+        Ok(_) => panic!("flip-1 rode the same with the effects dropped"),
+    }
+    let (w, off) = replay_without_part_leaves("flip-1", "part leaf dropped: models").unwrap();
+    assert_eq!(w.len(), 465);
+    let changes: Vec<usize> = (1..w.len()).filter(|&r| w[r] != w[r - 1]).collect();
+    assert_eq!(changes, [125, 193], "wrecked on row 125, put back on row 193");
+    assert!(!off.is_empty(), "the models dropped, the RAM parts from the handing run's");
 }
 
 /// The record's resolution (its vt `+0x88`), which the gravity calls with 1.
@@ -9436,8 +9608,8 @@ fn the_flips_tail_callees_leave_the_physics_alone() {
 
 /// The callees ride-2 leaves in the interpreter, by label ([`label`]). F43b: the attachment move is
 /// the port's, the heap it allocates from the original's (`heap Moved`). F45: the trick wanted is
-/// the port's.
-const RIDE_CALLEES: [&str; 10] = [
+/// the port's. F31b5j: the update's walk is the port's, its leaves watched by [`PartWalk`] itself.
+const RIDE_CALLEES: [&str; 9] = [
     "heap Moved",
     "tail Message",
     "tail Paused",
@@ -9446,12 +9618,11 @@ const RIDE_CALLEES: [&str; 10] = [
     "update IrqOff",
     "update IrqOn",
     "update NetQueue",
-    "update Walk",
     "wreck OutOfBounds",
 ];
 /// The callees flip-1 leaves in the interpreter: ride-2's, the trick's, the wreck's and the put-back's.
 /// F45: the stunt mark, trick end and trick wanted are the ports'.
-const FLIP_CALLEES: [&str; 26] = [
+const FLIP_CALLEES: [&str; 25] = [
     "heap Moved",
     "tail Message",
     "tail Paused",
@@ -9462,7 +9633,6 @@ const FLIP_CALLEES: [&str; 26] = [
     "update KindClear",
     "update NetQueue",
     "update Search",
-    "update Walk",
     "wreck Attach",
     "wreck Camera",
     "wreck Kind",
