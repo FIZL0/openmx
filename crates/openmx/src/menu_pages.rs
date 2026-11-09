@@ -82,10 +82,14 @@ const PRESET_CAMERAS: [(&str, &str); 3] = [
 const PLAYS: [&str; 4] = ["Shuffle", "In Order", "One Song", "Off"];
 const PLAYS_ONE: usize = 2;
 
-/// What Music From offers (MD7): every music pack on, or none, the disc's songs alone. A mix of
-/// them shows as [`MUSIC_MIX`], which the packs' own rows below it make.
-const MUSIC_FROM: [&str; 2] = ["All Games", "MX Unleashed Only"];
-const MUSIC_MIX: &str = "A Mix";
+/// The game a song's id is from (P317), as [`super::MusicGame`]'s key and whether it is a pack's:
+/// `mod:<pack>/<file>` a music pack's, any other the source's its prefix names.
+fn song_game(id: &str) -> (&str, bool) {
+    match id.strip_prefix("mod:") {
+        Some(rest) => (rest.split('/').next().unwrap_or_default(), true),
+        None => (id.split(':').next().unwrap_or_default(), false),
+    }
+}
 
 /// What a row is, which is how it changes and how it is drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -146,8 +150,8 @@ pub enum Key {
     /// A slider by its index in [`Mix::levels`].
     Level(usize),
     MusicPlays,
-    /// Which games' music plays (MD7): every music pack's, or the disc's alone.
-    MusicFrom,
+    /// One game the songs come from (P317), by its place in [`Menu::music_games`]: on or off.
+    MusicGame(usize),
     Song,
     SkipSong,
     /// Back to the song before, and the music held or played on (P174): the pause player's two.
@@ -499,6 +503,15 @@ impl Menu {
     pub fn listing(&self) -> Option<(usize, usize)> {
         let (screen, at, j) = self.listing?;
         (self.screen() == Some(screen) && self.cursor(screen) == at).then_some((at, j))
+    }
+
+    /// The cursor onto the open page's first row whose label starts with `label` (`--menu-row`, P317's
+    /// shot of a row further down). Nothing where none does.
+    pub fn point_at_row(&mut self, label: &str) {
+        let Some(screen) = self.screen() else { return };
+        if let Some(at) = self.page_of(screen).iter().position(|r| r.selectable() && r.label.starts_with(label)) {
+            self.cursor[screen.index()] = at;
+        }
     }
 
     /// Open the dropdown of the row the cursor is on, if it is one (P277; `--open-list`'s, for a
@@ -854,25 +867,33 @@ impl Menu {
             }
             rows.push(r);
         }
+        rows.extend(self.songs_from_rows());
+        // Every game off is the music off (P317), not a shuffle of nothing.
+        let none = self.no_music_games();
         rows.push(Row::heading("Soundtrack"));
-        rows.extend(self.music_from_rows());
-        rows.push(Row::choice(Key::MusicPlays, "Music Plays", &PLAYS, self.plays(), "How the next song is picked. One Song repeats the song below."));
+        let mut plays = Row::choice(Key::MusicPlays, "Music Plays", &PLAYS, self.plays(), "How the next song is picked. One Song repeats the song below.");
+        if none {
+            plays.value = "Off".into();
+        }
+        rows.push(plays.off_if(none, "Every game under Songs From is off, so the music is off"));
         let one = self.plays() == PLAYS_ONE;
-        let mut song = Row::new(Key::Song, Kind::Choice, "Song", "The song One Song repeats.");
+        let mut song = Row::new(Key::Song, Kind::Choice, "Song", "The song One Song repeats, of the games under Songs From.");
         song.choices = self.music_choices.iter().map(|(_, l)| l.clone()).collect();
         song.now = if one { self.music_choices.iter().position(|(id, _)| *id == s.music) } else { None };
         song.value = match (one, song.now) {
             (true, Some(i)) => song.choices[i].clone(),
+            (true, None) if s.music.contains(':') => "Its game is off".into(),
             (true, None) => self.song_label(&s.music),
             _ => self.music_now.as_deref().or(self.song_at()).map_or("None".into(), |id| self.song_label(id)),
         };
-        rows.push(song.off_if(!one, "Only with Music Plays: One Song"));
-        let mut skip = Row::action(Key::SkipSong, "Skip Song", "On to the next song.").off_if(s.music == "off", "The music is off");
+        self.song_headings(&mut song);
+        rows.push(song.off_if(!one, "Only with Music Plays: One Song").off_if(none, "The music is off"));
+        let off = s.music == "off" || none;
+        let mut skip = Row::action(Key::SkipSong, "Skip Song", "On to the next song.").off_if(off, "The music is off");
         if let Some(now) = &self.music_now {
             skip.value = self.song_label(now);
         }
         rows.push(skip);
-        let off = s.music == "off";
         rows.push(Row::action(Key::BackSong, "Previous Song", "Back to the song before this one.").off_if(off, "The music is off"));
         rows.push(match self.music_held {
             true => Row::action(Key::HoldMusic, "Play Music", "The music is paused. On from where it stopped."),
@@ -882,34 +903,77 @@ impl Menu {
         rows
     }
 
-    /// Which games' music plays (MD7): Music From, then each music pack's switch, the Mods page's
-    /// own. None without a pack, so the page is the original's then.
-    fn music_from_rows(&self) -> Vec<Row> {
-        let packs = self.music_packs();
-        if packs.is_empty() {
+    /// Whether a game's songs play (P317): a music pack's while the mods folder is read and the pack
+    /// is not in `mods_off`, the disc's and the folder's while `music_off` does not name them.
+    pub fn music_game_on(&self, g: &super::MusicGame) -> bool {
+        match g.pack {
+            true => self.settings.mods && !self.settings.mods_off.contains(&g.key),
+            false => !self.settings.music_off.contains(&g.key),
+        }
+    }
+
+    /// Every game under Songs From is off (P317), which is the music off.
+    pub fn no_music_games(&self) -> bool {
+        !self.music_games.is_empty() && !self.music_games.iter().any(|g| self.music_game_on(g))
+    }
+
+    /// Songs From (P317): one switch per game the songs come from, in [`Menu::music_games`]' order —
+    /// the disc, each music pack, the music folder — named as players know it, with its songs. None
+    /// before the shell lists them.
+    fn songs_from_rows(&self) -> Vec<Row> {
+        if self.music_games.is_empty() {
             return Vec::new();
         }
-        let off = &self.settings.mods_off;
-        let on = packs.iter().filter(|p| !off.contains(&p.0)).count();
-        let folder_off = (!self.settings.mods).then_some("The mods folder is off");
-        let mut from = Row::choice(
-            Key::MusicFrom,
-            "Music From",
-            &MUSIC_FROM,
-            usize::from(on == 0),
-            "MX Unleashed's own songs always play. All Games adds every music pack's; the packs below choose one by one.",
-        );
-        if on > 0 && on < packs.len() {
-            (from.now, from.value) = (None, MUSIC_MIX.into());
-        }
-        let mut rows = vec![from.off_if(folder_off.is_some(), folder_off.unwrap_or_default())];
-        for (i, (id, name, songs)) in packs.iter().enumerate() {
-            let songs = if *songs == 1 { "1 song".to_string() } else { format!("{songs} songs") };
-            let mut r = Row::on_off(Key::MusicPack(i), name, !off.contains(id), &format!("Music pack, {songs}, in the shuffle beside the disc's."));
-            r.note = Some(format!("music/{id} in the mods folder"));
-            rows.push(r.off_if(folder_off.is_some(), folder_off.unwrap_or_default()));
+        let mut rows = vec![Row::heading("Songs From")];
+        for (i, g) in self.music_games.iter().enumerate() {
+            let songs = if g.songs == 1 { "1 song".to_string() } else { format!("{} songs", g.songs) };
+            let label = format!("{} \u{b7} {songs}", g.name);
+            let about = match (g.pack, g.key.as_str()) {
+                (true, _) => format!("{}'s songs in Music Plays and Song, from its music pack. Off, they are left out.", g.name),
+                (false, "folder") => "Your own .wav files in the music folder, for the User Soundtracks slider. Off, they are left out.".to_string(),
+                _ => format!("{}'s own songs. Off, they are left out.", g.name),
+            };
+            let mut r = Row::on_off(Key::MusicGame(i), &label, self.music_game_on(g), &about);
+            if g.pack {
+                r.note = Some(format!("music/{} in the mods folder", g.key));
+                r = r.off_if(!self.settings.mods, "The mods folder is off");
+            }
+            rows.push(r);
         }
         rows
+    }
+
+    /// The Song row's list under game headings (P317): with more than one game's songs, each game's
+    /// name beside its first song, and the songs without their game, which the heading says.
+    fn song_headings(&self, song: &mut Row) {
+        let games: Vec<Option<&super::MusicGame>> = self
+            .music_choices
+            .iter()
+            .map(|(id, _)| {
+                let (key, pack) = song_game(id);
+                self.music_games.iter().find(|g| g.key == key && g.pack == pack)
+            })
+            .collect();
+        let mut named: Vec<&str> = games.iter().flatten().map(|g| g.key.as_str()).collect();
+        named.dedup();
+        if named.len() < 2 {
+            return;
+        }
+        let mut last = None;
+        song.tips = games
+            .iter()
+            .map(|g| {
+                let here = g.map(|g| (g.key.as_str(), g.pack));
+                let first = here != last;
+                last = here;
+                g.filter(|_| first).map_or(String::new(), |g| g.name.clone())
+            })
+            .collect();
+        for (c, g) in song.choices.iter_mut().zip(&games) {
+            if let Some(cut) = g.and_then(|g| c.strip_suffix(&format!(" ({})", g.name))) {
+                *c = cut.to_string();
+            }
+        }
     }
 
     /// Whether more than one seat is set up (P81): the Controls tab has its Player row only then, and
@@ -2106,13 +2170,14 @@ impl Menu {
                 }
                 self.cursor[Screen::Tracks.index()] = self.track_index();
             }
-            Key::MusicFrom => {
-                // From All or a mix, every pack off; from MX Unleashed Only, every pack on.
-                let ids: Vec<String> = self.music_packs().iter().map(|p| p.0.clone()).collect();
-                let all_off = ids.iter().all(|id| self.settings.mods_off.contains(id));
-                self.settings.mods_off.retain(|o| !ids.contains(o));
-                if !all_off {
-                    self.settings.mods_off.extend(ids);
+            Key::MusicGame(i) => {
+                let Some(g) = self.music_games.get(i).cloned() else { return };
+                let off = if g.pack { &mut self.settings.mods_off } else { &mut self.settings.music_off };
+                match off.iter().position(|k| *k == g.key) {
+                    Some(at) => {
+                        off.remove(at);
+                    }
+                    None => off.push(g.key),
                 }
             }
             Key::MusicPack(i) => {

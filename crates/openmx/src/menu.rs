@@ -533,6 +533,10 @@ pub struct Settings {
     /// (`mxvatv` for `mxvatv_nat13`): their tracks are left off the Free Ride list. A music pack
     /// (P122) is by its whole id (`untamed_music`), which has the underscore no prefix has.
     pub mods_off: Vec<String>,
+    /// The music sources switched off on Settings, Audio's Songs From (P317) that are not music
+    /// packs, which `mods_off` keeps: `disc` for MX Unleashed's own songs, `folder` for the music
+    /// folder's. An older file has none, so every game plays as it did.
+    pub music_off: Vec<String>,
     /// The track pick's filter (MD11), the source game whose tracks it lists: a [`Menu::track_groups`]
     /// name, empty for All Games. A game the pick does not list now shows All and is kept.
     pub track_filter: String,
@@ -1400,6 +1404,7 @@ impl Default for Settings {
             camera_sets: Default::default(),
             mods: true,
             mods_off: Vec::new(),
+            music_off: Vec::new(),
             track_filter: String::new(),
             track_category: String::new(),
             favourites: Vec::new(),
@@ -1631,6 +1636,9 @@ impl Settings {
                 }
                 "mods_off" => {
                     s.mods_off = v.split_whitespace().filter(|w| mod_id(w) || mod_id(&format!("{w}_x"))).map(str::to_string).collect();
+                }
+                "music_off" => {
+                    s.music_off = v.split_whitespace().filter(|w| w.chars().all(|c| c.is_ascii_lowercase())).map(str::to_string).collect();
                 }
                 "track_filter" => s.track_filter = clean_filter(v),
                 "track_category" => s.track_category = clean_filter(v),
@@ -1895,6 +1903,10 @@ impl Settings {
         // The packs switched off (P118), only when there are some.
         if !self.mods_off.is_empty() {
             out += &format!("mods_off = {}\n", self.mods_off.join(" "));
+        }
+        // The disc's and the folder's songs switched off (P317), only when they are.
+        if !self.music_off.is_empty() {
+            out += &format!("music_off = {}\n", self.music_off.join(" "));
         }
         // The pick's filter (MD11), only when it is not All Games.
         if !self.track_filter.is_empty() {
@@ -2988,6 +3000,18 @@ enum Leaving {
     Session,
 }
 
+/// One game the songs come from (P317), as the shell's music sources list it: `audio::Game`, which
+/// the test crates that mount this file without the audio have no copy of.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MusicGame {
+    /// A music pack's id, which `mods_off` switches, or a source's name (`disc`, `folder`), which
+    /// [`Settings::music_off`] does.
+    pub key: String,
+    pub pack: bool,
+    pub name: String,
+    pub songs: usize,
+}
+
 /// What the pause's song rows ask of the music (P56), beside the settings it changes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Tune {
@@ -3249,6 +3273,9 @@ pub struct Menu {
     /// The songs the music row steps through after Off and Shuffle, `(id, label)`, as the shell's
     /// music sources list them (P42). Empty until the shell says.
     pub music_choices: Vec<(String, String)>,
+    /// Every game the songs come from (P317), switched off or not, for Songs From's rows: the disc
+    /// first, then each music pack, then the music folder. Empty until the shell says.
+    pub music_games: Vec<MusicGame>,
     /// The preset the modifiers' Load Preset row is on (P55).
     mod_preset: usize,
     /// Each screen's tab, in [`Screen::ALL`]'s order (P118): Settings' and the Garage's.
@@ -3535,6 +3562,7 @@ impl Menu {
             party: None,
             free_riders: 1,
             music_choices: Vec::new(),
+            music_games: Vec::new(),
             mod_preset: 0,
             tab: [0; Screen::ALL.len()],
             player: 0,

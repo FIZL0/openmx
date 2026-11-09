@@ -71,7 +71,10 @@ fn read_pack(folder: &Path, songs: &mut Vec<Song>, log: &mut Vec<String>) -> Res
     if id != folder_name || !valid_id(id) {
         return Err(format!("its id {id:?} is not its folder's name"));
     }
-    let pack_game = json.get("source").and_then(|s| s.get("game")).and_then(Json::str).unwrap_or("").trim().to_string();
+    // The game its songs are from, or the pack's own name where its source does not say (P317: what
+    // Songs From lists it as).
+    let source_game = json.get("source").and_then(|s| s.get("game")).and_then(Json::str).map(str::trim).filter(|g| !g.is_empty());
+    let pack_game = source_game.or_else(|| json.get("name").and_then(Json::str).map(str::trim)).unwrap_or("").to_string();
     let Some(Json::Arr(list)) = json.get("songs") else { return Err("mod.json has no songs".into()) };
     for (n, song) in list.iter().enumerate() {
         let string = |key: &str| song.get(key).and_then(Json::str).map(|s| s.trim().to_string());

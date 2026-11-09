@@ -529,6 +529,8 @@ fn the_settings_file_reads_back_as_it_was_written() {
         mods: false,
         // One pack of it switched off (P118).
         mods_off: vec!["md2".into()],
+        // The disc's songs off under Songs From (P317).
+        music_off: vec!["disc".into()],
         // No radar, and the HUD at 130 % (V52).
         minimap: false,
         hud_scale: 130,

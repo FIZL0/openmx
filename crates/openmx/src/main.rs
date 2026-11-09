@@ -2691,6 +2691,9 @@ struct Args {
     screen_tab: Option<usize>,
     /// `--open-list`: the dropdown of the row `--screen` opens on, open (P277's shot).
     open_list: bool,
+    /// `--menu-row TEXT`: the page `--screen` opens on, its cursor on the first row whose label starts
+    /// so (P317's shot of a row further down).
+    menu_row: Option<String>,
     /// Which wiring flags were given, so the front end's `controls.txt` fills in only the others.
     wiring_flags: (bool, bool),
     /// `--online NAME@HOST:PORT`, `--peer NAME@HOST:PORT` (each other machine) and `--seats
@@ -3120,8 +3123,10 @@ impl Front {
         let s = &self.menu.settings;
         self.sound.apply(&s.music, levels(s));
         // The music packs the Mods page has on (MD7), and the song lists again when that changed them.
-        if self.sound.music_packs(s.mods || self.mods_asked, &s.mods_off) {
+        if self.sound.music_packs(s.mods || self.mods_asked, &s.mods_off, &s.music_off) {
+            say_music_games(&self.sound, s.mods || self.mods_asked, &s.mods_off, &s.music_off);
             self.menu.music_choices = self.sound.choices();
+            self.menu.music_games = music_games(&self.sound);
         }
         for tune in self.menu.take_tunes() {
             match tune {
@@ -3213,8 +3218,33 @@ fn start_sound(args: &Args, disc: &mut Disc, dir: &std::path::Path, settings: &m
         speakers.open_on_front_end();
     }
     speakers.apply(&settings.music, levels(settings));
-    speakers.music_packs(settings.mods || args.mods_asked, &settings.mods_off);
+    speakers.music_packs(settings.mods || args.mods_asked, &settings.mods_off, &settings.music_off);
+    say_music_games(&speakers, settings.mods || args.mods_asked, &settings.mods_off, &settings.music_off);
     speakers
+}
+
+/// Every game the songs come from (P317), for Settings, Audio's Songs From.
+fn music_games(sound: &audio::Speakers) -> Vec<menu::MusicGame> {
+    sound.games().into_iter().map(|g| menu::MusicGame { key: g.key, pack: g.pack, name: g.name, songs: g.songs }).collect()
+}
+
+/// One line for the games whose songs play (P317), as Songs From has them: or that the music is off
+/// for every game being off.
+fn say_music_games(sound: &audio::Speakers, folder: bool, mods_off: &[String], music_off: &[String]) {
+    let games = sound.games();
+    let on: Vec<String> = games
+        .iter()
+        .filter(|g| match g.pack {
+            true => folder && !mods_off.contains(&g.key),
+            false => !music_off.contains(&g.key),
+        })
+        .map(|g| format!("{} ({})", g.name, g.songs))
+        .collect();
+    match (games.is_empty(), on.is_empty()) {
+        (true, _) => {}
+        (false, true) => println!("music: off, every game under Songs From is off"),
+        (false, false) => println!("music: songs from {}", on.join(", ")),
+    }
 }
 
 /// The music packs in `mods` (MD7), saying how many songs and what was left out.
@@ -3307,6 +3337,7 @@ async fn front_end(args: Args) -> Result<(), String> {
         mods_asked: args.mods_asked,
     };
     front.menu.music_choices = front.sound.choices();
+    front.menu.music_games = music_games(&front.sound);
     front.menu.camera_names = camera_names;
     front.menu.heli_camera_names = heli_camera_names;
     front.menu.car_camera_names = car_camera_names;
@@ -3360,6 +3391,9 @@ async fn front_end(args: Args) -> Result<(), String> {
             None => front.menu.open(screen),
         },
         None => front.menu.splash(),
+    }
+    if let Some(label) = &args.menu_row {
+        front.menu.point_at_row(label);
     }
     if args.open_list {
         front.menu.open_list();
@@ -3793,6 +3827,7 @@ async fn front_end(args: Args) -> Result<(), String> {
             if rescan {
                 shell.front.sound.set_source(std::sync::Arc::new(read_music_packs(mods_folder(&args, &shell.front.dir, true).as_deref())));
                 shell.front.menu.music_choices = shell.front.sound.choices();
+                shell.front.menu.music_games = music_games(&shell.front.sound);
             }
             (shown_look, menu_images) = (None, false);
         }
@@ -13374,6 +13409,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         screen: None,
         screen_tab: None,
         open_list: false,
+        menu_row: None,
         wiring_flags: (false, false),
         fps: false,
         renderer: Backend::default(),
@@ -13425,6 +13461,7 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--ride" => {}
             "--menu" => args.menu = true,
             "--open-list" => args.open_list = true,
+            "--menu-row" => args.menu_row = Some(next("a row's label")?),
             "--where" => args.where_only = true,
             // P191: the updater asks nothing this run (a flag the browser's build takes and ignores)
             "--no-update-check" => {
@@ -13927,7 +13964,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                      \x20      remembered in the data folder, else a picker asks; --where says which, and\n\
                      \x20      where settings.txt, controls.txt and mods/ are; --no-update-check: the main\n\
                      \x20      menu doesn't ask GitHub for a newer build this run)\n\
-                     openmx [--menu [--screen main|tracks|settings|controls|keyboard|pause|TAB [--open-list]]]\n\
+                     openmx [--menu [--screen main|tracks|settings|controls|keyboard|pause|TAB [--menu-row TEXT] [--open-list]]]\n\
                             [--ride] [--track free06] [--bike 125sx] [--rider thq1] [--size 640x448]\n\
                             [--scale 1]\n\
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
@@ -14071,7 +14108,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                      Sound plays through pw-cat, pacat or aplay, whichever is found: every\n\
                      rider's engine, wrecks and landings, the track's own sounds, and music —\n\
                      the disc's songs, then any .wav in the music folder beside the settings,\n\
-                     then the music packs in mods/music/<id>/ (Settings, Audio: Music From),\n\
+                     then the music packs in mods/music/<id>/ (Settings, Audio: Songs From),\n\
                      picked in Settings. --no-sound turns it off; a headless ride has none.\n\
                      \n\
                      Track mods: a --track not on the disc is looked for in mods/tracks/<id>/\n\
