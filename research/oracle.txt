@@ -10817,3 +10817,24 @@ atv_heap_free               atv 0x001b76d0 = free
 #   preforce elements but the bike's +0x30 (five riders, thunk 0x004de0c0), the tail's leaf 0x00eb6420
 #   (step 0x001c9540) and the manager 0x01ed82d0's own work (step 0x002cf9f0; its closing walk 0x00128af0,
 #   which steps the rider 0x010af350, kept).
+
+# F31b5n — the vehicle update's part walk's effects leaf (game_sim::handling::effects; tests/mxvatv_bike_ride.rs
+#   PartWalk's Effects, the_effects_step_is_the_originals). Journal: 2026-11-09-f31b5n-effects-leaf.
+#   Effects step 0x004fa4a0 (a0 the listener, f12 dt; ends with the walk 0x00128af0(listener, dt)).
+#   Table *(+0x24): +0 count (signed, re-read per entry, table re-read from +0x24 per entry), +4 entries
+#   (0x2c apart), +0x24 -> word: set -> bit 8, clear -> 0x10 (once at the start for the items' mask, again
+#   per entry for its flags). Entry flags byte +0x28 = bit|2 (*(+8) set)|4 (*(+0xc) set)|1 (both clear);
+#   key lbu *(+0x24) vs lbu +0x29: differ -> sb +0x29, items k < +0x28 (re-read): item = *(+0x30)[k]
+#   (0x004ffbf0); item+4 == entry -> item vt(+0x10) +8 (item, lbu +0x29).
+#   Items k < +0x28 (re-read): off = (link +4 != 0 and +0xc & lbu link+0x28) or +0xc & bit; off and lbu
+#   +8 & 1 -> vt +0x1c (item); !off and !(lbu +8 & 1) -> vt +0x18 (item); then lbu +8 == 1 -> vt +0x14
+#   (item, f12 dt).
+#   Item virtuals reached on C15 flip-1 (every port on): step +0x14 0x004fa980, 0x004faf20, 0x004fb600,
+#   0x004fdba0, 0x004fe010 (18 steps drew rand), 0x004ff170; on +0x18 0x004fa730, 0x004ff200,
+#   0x004ff360, 0x004ff580, 0x004ff6c0, 0x004ff790, 0x004ff8b0; off +0x1c 0x004ff180, 0x004ff250,
+#   0x004ff5d0, 0x004ff710, 0x004ff7e0, 0x004ff900; key +8 0x004fae30, 0x004fb500, 0x004fcfc0,
+#   0x004fe550, 0x004ff880.
+#   Emitters (still the interpreter's): first kind, step thunk 0x00511c10 -> 0x0050ceb0 (3204 bytes;
+#   callees 0x0050a040, 0x0050db60 (other branch, 2872), 0x0050e6a0 (count), 0x0050e7e0, 0x00193b30,
+#   0x001c1e90, 0x0050c5c0, 0x00125be0, 0x0050eab0, 0x0050e980, 0x0050c8b0; rand 0x003561a8 twice per
+#   spawning frame, the spread table 0x00542410); second kind, thunk 0x004ffd20 -> 0x004fbcc0.
