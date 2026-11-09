@@ -533,3 +533,208 @@ fn the_riders_mode_machine_is_the_originals() {
     }
 }
 
+
+/// The rider's bodies' setters the pose calls (vt `+0x10` position, `+0x14` velocity, `+0x58`
+/// orientation and rates) and the commit the settle calls (`+0x3c`): the port writes them as they are.
+const BODY_SLOTS: [(u32, u32); 4] = [(0x10, 0x0049_2b90), (0x14, 0x0049_2b70), (0x58, 0x0049_2b30), (0x3c, 0x0049_3070)];
+
+/// A random rotation's three rows (`x`, `y`, `z` axes), host floats: inputs only.
+#[allow(clippy::float_arithmetic)]
+fn rotation(g: &mut Gen) -> [[f32; 3]; 3] {
+    let mut q = [g.f(-1.0, 1.0), g.f(-1.0, 1.0), g.f(-1.0, 1.0), g.f(-1.0, 1.0)];
+    let n = q.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-3);
+    q.iter_mut().for_each(|x| *x /= n);
+    let [x, y, z, w] = q;
+    [
+        [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y + w * z), 2.0 * (x * z - w * y)],
+        [2.0 * (x * y - w * z), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z + w * x)],
+        [2.0 * (x * z + w * y), 2.0 * (y * z - w * x), 1.0 - 2.0 * (x * x + y * y)],
+    ]
+}
+
+/// **The rider's pose and settle virtuals are the original's** (S286): 12 000 cases of state 4's
+/// rider, each running vt `+0xd0` (0x00505720, `still` and `dt` drawn: the step, 0, −0, negative, a
+/// tiny one) and vt `+0xcc` (0x00505710) whole in the interpreter, against [`rider::pose`] and
+/// [`rider::settle`] from the same words. Drawn per body holder: its node's world frame (current) or
+/// own frame (stale, rebuilt from its parents), with rotations, skewed rows and signed zeros; the
+/// drawn frame random, or exactly the node's axes' basis (no turn); the body's centre-of-gravity
+/// offset; for the settle every body's staged words. The holder and body counts are drawn too (the
+/// real one, 0, −1). Every word either side writes, off the stack, comes out the same.
+#[test]
+#[allow(clippy::float_arithmetic)]
+fn the_riders_pose_and_settle_are_the_originals() {
+    use game_sim::math::{Mat4, basis, mat4_to_quat};
+    let Some(mut ee) = image() else { return };
+    let acos = game_sim::air::AcosTable::build();
+    let curve = game_sim::camera::CurveTable::build();
+    let bodies = ee.u32_at(RIDER + rider::BODIES);
+    let world = ee.u32_at(RIDER + rider::WORLD);
+    let world_n = ee.u32_at(world + rider::W_BODIES_COUNT);
+    let holder_at = |ee: &Ee, i: u32| ee.u32_at(RIDER + rider::MAIN) + 0xb0 * i;
+    let mut all_bodies: BTreeSet<u32> = (0..bodies).map(|i| ee.u32_at(holder_at(&ee, i) + rider::H_BODY)).collect();
+    for i in 0..world_n {
+        all_bodies.insert(ee.u32_at(ee.u32_at(world + rider::W_BODIES) + 4 * i));
+    }
+    for &b in &all_bodies {
+        for (slot, code) in BODY_SLOTS {
+            assert_eq!(ee.u32_at(ee.u32_at(b + 0x110) + slot), code, "body {b:#x}'s vt {slot:#x}");
+        }
+    }
+    eprintln!("{bodies} holders, world {world:#x} with {world_n} bodies, {} bodies in all", all_bodies.len());
+    let snapshot = ee.ram.clone();
+    let mut g = Gen(0x0286_0001);
+    let mut t: BTreeMap<String, u32> = BTreeMap::new();
+    let mut tally = |path: String| *t.entry(path).or_insert(0) += 1;
+    for k in 0..12_000 {
+        let mut given: Vec<(u32, u32)> = Vec::new();
+        let mut put = |ee: &mut Ee, at: u32, v: u32| {
+            ee.set_u32(at, v);
+            given.push((at, v));
+        };
+        let f = |x: f32| x.to_bits();
+        let mut no_turn = Vec::new();
+        let mut touched: BTreeSet<u32> = BTreeSet::new();
+        let mut flipped = 0;
+        let mut prev_flipped = 0;
+        for i in 0..bodies {
+            let h = holder_at(&ee, i);
+            let n = ee.u32_at(h + rider::H_NODE);
+            let b = ee.u32_at(h + rider::H_BODY);
+            let current = !g.one_in(4);
+            let r = rotation(&mut g);
+            let mut rows = [[0f32; 4]; 4];
+            for a in 0..3 {
+                let skew = if g.one_in(8) { g.f(0.5, 2.0) } else { 1.0 };
+                for c in 0..3 {
+                    let x = r[a][c] * skew + if g.one_in(10) { g.f(-0.2, 0.2) } else { 0.0 };
+                    rows[a][c] = if g.one_in(40) { if g.one_in(2) { -0.0 } else { 0.0 } } else { x };
+                }
+                rows[a][3] = g.pick(&[0, 0, 0x3f80_0000]) as f32;
+            }
+            rows[3] = [g.near(0.0, -60.0, 60.0), g.near(0.0, -60.0, 60.0), g.near(0.0, -60.0, 60.0), 1.0];
+            let frame = if current { n + 0x70 } else { n + 0x30 };
+            for (a, row) in rows.iter().enumerate() {
+                for (c, &x) in row.iter().enumerate() {
+                    put(&mut ee, frame + 0x10 * a as u32 + 4 * c as u32, f(x));
+                }
+            }
+            let flags = ee.u32_at(n + 0x100);
+            put(&mut ee, n + 0x100, if current { flags | 1 } else { flags & !1 });
+            // The drawn frame: the node's own axes' basis (no turn, when the world is known here), or
+            // another rotation.
+            let same = current && g.one_in(4);
+            let z = Vf::new(rows[2][0], rows[2][1], rows[2][2], 0.0);
+            let y = Vf::new(rows[1][0], rows[1][1], rows[1][2], 0.0);
+            let drawn = if same {
+                no_turn.push(b);
+                basis(Vf::new(0.0, 0.0, 0.0, 1.0), z, y, false, true)
+            } else {
+                let d = rotation(&mut g);
+                Mat4([0, 1, 2].map(|a| Vf::new(d[a][0], d[a][1], d[a][2], 0.0)).into_iter().chain([Vf::ZERO]).collect::<Vec<_>>().try_into().unwrap())
+            };
+            if !same && mat4_to_quat(&drawn).w() < 0.0 {
+                prev_flipped += 1;
+            }
+            if current && mat4_to_quat(&basis(Vf::new(0.0, 0.0, 0.0, 1.0), z, y, false, true)).w() < 0.0 {
+                flipped += 1;
+            }
+            for a in 0..3 {
+                for c in 0..4 {
+                    put(&mut ee, h + rider::H_DRAWN + 0x10 * a + 4 * c, drawn.0[a as usize].0[c as usize].to_bits());
+                }
+            }
+            for c in 0..4 {
+                let x = if c == 3 { g.pick(&[0x3f80_0000, 0]) } else { f(g.near(0.0, -60.0, 60.0)) };
+                put(&mut ee, h + rider::H_DRAWN + 0x30 + 4 * c, x);
+            }
+            for c in 0..4 {
+                let x = g.near(0.0, -0.5, 0.5);
+                put(&mut ee, b + 0x1a0 + 4 * c, f(x));
+            }
+        }
+        for &b in &all_bodies {
+            for o in [0x40, 0x50, 0x160, 0x180, 0x1a0] {
+                for c in 0..4 {
+                    let x = g.near(0.0, -9.0, 9.0);
+                    put(&mut ee, b + o + 4 * c, f(x));
+                }
+            }
+        }
+        put(&mut ee, RIDER + rider::BODIES, g.pick(&[bodies, bodies, bodies, bodies, bodies, 0, 0xffff_ffff]));
+        put(&mut ee, world + rider::W_BODIES_COUNT, g.pick(&[world_n, world_n, world_n, world_n, world_n, 0, 0xffff_ffff]));
+        let dt = match g.bits() % 8 {
+            0 => 0.0,
+            1 => -0.0,
+            2 => -f32::from_bits(DT),
+            3 => 1e-6,
+            4 => g.f(0.001, 0.1),
+            _ => f32::from_bits(DT),
+        };
+        let still = g.one_in(5);
+
+        for which in ["pose", "settle"] {
+            let call = || match which {
+                "pose" => (POSE, vec![u64::from(RIDER), u64::from(still)]),
+                _ => (SETTLE, vec![u64::from(RIDER)]),
+            };
+            let pre: HashMap<u32, u32> = given.iter().map(|&(a, _)| (a, ee.u32_at(a))).collect();
+            ee.written.clear();
+            let (pc, ints) = call();
+            ee.set(28, GP);
+            ee.call(pc, &ints, &[dt], BUDGET);
+            let w1 = written_words(&ee, 0);
+            let want: HashMap<u32, u32> = w1.iter().map(|&a| (a, ee.u32_at(a))).collect();
+            for &a in &w1 {
+                ee.set_u32(a, pre.get(&a).copied().unwrap_or_else(|| word_of(&snapshot, a)));
+            }
+            ee.written.clear();
+            let mut port = Port { ee: &mut ee, log: Rc::new(RefCell::new(Vec::new())), rands: VecDeque::new() };
+            match which {
+                "pose" => rider::pose(&mut port, RIDER, F(dt), still, &acos, &curve),
+                _ => rider::settle(&mut port, RIDER),
+            }
+            let w2 = written_words(&ee, 0);
+            touched.extend(w1.iter().chain(&w2));
+            for &a in w1.union(&w2) {
+                let w = want.get(&a).copied().unwrap_or_else(|| pre.get(&a).copied().unwrap_or_else(|| word_of(&snapshot, a)));
+                assert_eq!(ee.u32_at(a), w, "case {k}, {which} (dt {dt}, still {still}): the word at {a:#x} ({})", if w2.contains(&a) { "the port wrote it" } else { "only the original wrote it" });
+            }
+            if which == "pose" {
+                tally(format!("pose: {} words", if w1.is_empty() { "no" } else { "some" }));
+                // No turn: the arc cosine's zero, its axis (1, 0, 0) times a rate of 0.
+                let zero = |b: u32| (0..3).all(|c| want.get(&(b + 0x160 + 4 * c)) == Some(&0));
+                if !still && dt > 0.0 && no_turn.iter().any(|&b| zero(b)) {
+                    tally("pose: zero angle".into());
+                }
+            } else {
+                tally(format!("settle: {} words", if w1.is_empty() { "no" } else { "some" }));
+            }
+            // The pose's writes stay for the settle, as the respawn makes them.
+        }
+        let moving = !still && dt > 0.0;
+        let n_now = ee.u32_at(RIDER + rider::BODIES) as i32;
+        if n_now > 0 {
+            tally(if moving { "pose: moving".into() } else if still { "pose: still".into() } else { "pose: dt <= 0".into() });
+            if moving && !no_turn.is_empty() {
+                tally("pose: no turn".into());
+            }
+            if flipped > 0 {
+                tally("pose: q flipped".into());
+            }
+            if moving && prev_flipped > 0 {
+                tally("pose: drawn flipped".into());
+            }
+        }
+        for a in given.iter().map(|(a, _)| *a).chain(touched) {
+            ee.set_u32(a, word_of(&snapshot, a));
+        }
+    }
+    eprintln!("{t:#?}");
+    for path in ["pose: moving", "pose: still", "pose: dt <= 0", "pose: no turn", "pose: zero angle", "pose: q flipped", "pose: drawn flipped",
+        "pose: no words", "settle: some words", "settle: no words"] {
+        assert!(t.contains_key(path), "path {path} never taken");
+    }
+    for (path, n) in &t {
+        assert!(*n >= 20, "path {path} taken only {n} times");
+    }
+}

@@ -30,7 +30,11 @@
 //! nearby gather, [`touching`], the bike's collidable released by the parts once clear of it, the
 //! ground under the rider, and the three pose-target clauses ([`pose_targets`]).
 //!
-//! What is not here: the world step (3); and the calls in [`Call`]. The `touched` words this reads
+//! The respawn's and the follow's two virtuals ([`Call::Pose`], [`Call::Settle`]) are [`pose`] and
+//! [`settle`] (S286): the ragdoll's bodies started where the skeleton's bones are, then made to be
+//! there.
+//!
+//! What is not here: the world step (3); and the rest of the calls in [`Call`]. The `touched` words this reads
 //! come from the original's ragdoll world until that is ported.
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
@@ -213,8 +217,8 @@ pub enum Call {
     RidingReset,
     /// The wreck entry, with the record's wreck kind and `dt`.
     WreckEntry(u32),
-    /// The rider's vt `+0xd0` (`dt`, 0): the ragdoll posed off the scene; vt `+0xcc`: its world's
-    /// bodies settled.
+    /// The rider's vt `+0xd0` (`dt`, 0): the ragdoll posed off the scene ([`pose`]); vt `+0xcc`: its
+    /// world's bodies settled ([`settle`]).
     Pose,
     Settle,
     /// A part's on/off virtual (its vt at `+0x10`, slot `+0x10`): the part, on or off. The wreck
@@ -869,4 +873,117 @@ pub fn modes(m: &mut impl Rider, rider: u32, dt: F, map: Option<&track::Terrain<
     }
     clear_all(m, rider);
     frame_end(m, rider);
+}
+
+// --- S286: the ragdoll posed and settled ------------------------------------------------------------
+
+use super::wreck::{self as bike_wreck, Wrecks};
+use crate::air::AcosTable;
+use crate::camera::CurveTable;
+use crate::math::Mat4;
+use crate::ragdoll_pose::{self, Bone, Start};
+
+/// The rider's ragdoll world (`+0x27c`): its body count (`+8`) and body array (`+0x10`).
+pub const WORLD: u32 = 0x27c;
+pub const W_BODIES_COUNT: u32 = 0x8;
+pub const W_BODIES: u32 = 0x10;
+/// A body holder's (`+0x2a4`, `0xb0` apart) drawn frame (`+0x60`, four rows: last frame's going in),
+/// its scene node (`+0xa0`) and its body (`+0xa4`).
+pub const H_DRAWN: u32 = 0x60;
+pub const H_NODE: u32 = 0xa0;
+pub const H_BODY: u32 = 0xa4;
+/// A ragdoll body's start, as its three setters write it: the position (`+0x40`), the velocity
+/// (`+0x50`), the orientation (`+0x180`, word by word) and its rates (`+0x160`); and its centre of
+/// gravity's offset (`+0x1a0`).
+const B_START_POSITION: u32 = 0x40;
+const B_START_VELOCITY: u32 = 0x50;
+const B_START_QUAT: u32 = 0x180;
+const B_START_RATES: u32 = 0x160;
+const B_COFG: u32 = 0x1a0;
+/// A scene node's world frame (F43).
+const N_WORLD: u32 = 0x70;
+
+/// **The rider's vt `+0xd0`: its ragdoll posed off the scene** ([`Call::Pose`]). For each body holder
+/// (the count, `+0x290`, re-read after each): the holder's node's world position and its `z` and `y`
+/// rows ([`node::position`], [`node::axes`]); from them, the body's start ([`ragdoll_pose::pose`],
+/// MX Unleashed's ragdoll pose: the axes' quaternion on the `w >= 0` side, the position plus the
+/// centre of gravity's offset turned by it, and unless `still` or `dt <= 0` the velocity and rates
+/// from the holder's drawn frame over `1 / dt`) put through the body's three setters, and the drawn
+/// frame rebuilt at that position. The mode machine calls it with `still` 0.
+pub fn pose(m: &mut impl Ram, rider: u32, dt: F, still: bool, acos: &AcosTable, curve: &CurveTable) {
+    // `c.ole.s dt, 0` taken is the still branch, so a frame time that does not compare divides.
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
+    let inv_dt = if dt <= 0.0 || still { None } else { Some(F(fpu::div(1.0, dt.0))) };
+    let mut i = 0u32;
+    while (i as i32) < m.word(rider + BODIES) as i32 {
+        let holder = m.word(rider + MAIN).wrapping_add(i.wrapping_mul(0xb0));
+        let body = m.word(holder + H_BODY);
+        let n = m.word(holder + H_NODE);
+        let at = node_row(m, n, 3, F::ONE);
+        let holder = m.word(rider + MAIN).wrapping_add(i.wrapping_mul(0xb0));
+        let n = m.word(holder + H_NODE);
+        let z = node_row(m, n, 2, F::ZERO);
+        let y = node_row(m, n, 1, F::ZERO);
+        let bone = Bone { at: Vf::from_bits(at), forward: Vf::from_bits(z), up: Vf::from_bits(y) };
+        let holder = m.word(rider + MAIN).wrapping_add(i.wrapping_mul(0xb0));
+        let mut drawn = Mat4([0, 1, 2, 3].map(|r| quad(m, holder + H_DRAWN + 0x10 * r)));
+        let cofg = quad(m, body + B_COFG);
+        let mut start = Start::default();
+        ragdoll_pose::pose(&bone, cofg, &mut drawn, &mut start, inv_dt, acos, curve);
+        put_quad(m, body + B_START_POSITION, start.position);
+        put_quad(m, body + B_START_VELOCITY, start.velocity);
+        for (k, w) in start.quat.to_bits().into_iter().enumerate() {
+            m.set(body + B_START_QUAT + 4 * k as u32, w);
+        }
+        put_quad(m, body + B_START_RATES, start.rates);
+        let holder = m.word(rider + MAIN).wrapping_add(i.wrapping_mul(0xb0));
+        for (r, row) in drawn.0.into_iter().enumerate() {
+            put_quad(m, holder + H_DRAWN + 0x10 * r as u32, row);
+        }
+        i += 1;
+    }
+}
+
+/// A row of the node's world frame (brought up to date first) as [`node::position`] (row 3, `w` 1) and
+/// [`node::axes`] (rows 2 and 1, `w` 0) hand it out: its `xyz` words as they are, and `w`.
+fn node_row(m: &mut impl Ram, n: u32, row: u32, w: F) -> [u32; 4] {
+    node::update(m, n);
+    let at = n + N_WORLD + 0x10 * row;
+    [m.word(at), m.word(at + 4), m.word(at + 8), w.to_bits()]
+}
+
+/// [`bike_wreck::body_commit`] on plain RAM: it reads and writes words and calls nothing.
+struct Bodies<'a, M>(&'a mut M);
+
+impl<M: Ram> Wrecks for Bodies<'_, M> {
+    fn bike(&self) -> u32 {
+        0
+    }
+    fn word(&mut self, at: u32) -> u32 {
+        self.0.word(at)
+    }
+    fn set(&mut self, at: u32, w: u32) {
+        self.0.set(at, w)
+    }
+    fn out(&mut self, c: bike_wreck::Out) -> u32 {
+        unreachable!("a body's commit makes no call ({c:?})")
+    }
+    fn normal(&mut self, _: u32, _: u32) -> Vf {
+        unreachable!("a body's commit asks for no ground")
+    }
+}
+
+/// **The rider's vt `+0xcc`: its ragdoll world's bodies settled at their starts** ([`Call::Settle`],
+/// the world's own settle): for each body of the world's list (the count re-read after each), its
+/// vt `+0x3c`, which on the ragdoll's bodies is [`bike_wreck::body_commit`]: the staged position,
+/// velocity, orientation and rates made the body's own, every accumulator emptied.
+pub fn settle(m: &mut impl Ram, rider: u32) {
+    let world = m.word(rider + WORLD);
+    let mut i = 0u32;
+    while (i as i32) < m.word(world + W_BODIES_COUNT) as i32 {
+        let list = m.word(world + W_BODIES);
+        let body = m.word(list.wrapping_add(4 * i));
+        bike_wreck::body_commit(&mut Bodies(m), body);
+        i += 1;
+    }
 }
