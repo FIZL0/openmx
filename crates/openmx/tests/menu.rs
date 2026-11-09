@@ -1682,8 +1682,11 @@ fn picking_the_biplane_in_the_pause_puts_that_player_in_it() {
     tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Down);
     assert_eq!(m.view(1).cursor(Screen::Pause), 0);
     // Down twice and Cross on 2P's pad: 2P is in the plane, the ride carries on, 1P is on the bike.
+    // That Cross opens the plane's skin picker first (P315g), and Cross on it switches.
     tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Down);
     tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Down);
+    assert!(tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Cross).iter().all(|a| *a == Act::Stay));
+    assert!(m.view(1).flier_picker().is_some());
     let acts = tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Cross);
     assert!(acts.contains(&Act::Switch(1, Machine::Biplane)), "{acts:?}");
     assert!(m.riding());
@@ -1695,6 +1698,7 @@ fn picking_the_biplane_in_the_pause_puts_that_player_in_it() {
     assert!(m.paused(0) && !m.paused(1));
     tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Down);
     tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Down);
+    tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Cross);
     let acts = tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Cross);
     assert!(acts.contains(&Act::Switch(0, Machine::Biplane)), "{acts:?}");
     assert_eq!((garages[0].up, garages[1].up), (Kind::Biplane, Kind::Biplane));
@@ -1713,6 +1717,52 @@ fn picking_the_biplane_in_the_pause_puts_that_player_in_it() {
     assert!(!acts.iter().any(|a| matches!(a, Act::Switch(..))), "{acts:?}");
     assert_eq!(m.view(1).screen(), Some(Screen::Pause));
     assert_eq!(garages[1].up, Kind::Biplane);
+}
+
+/// P315g: the pause's Switch To Machine into the plane opens the Garage's plane picker over the
+/// pause; its arrows step the seat's skin (kept as the Garage keeps it), Circle backs out with the
+/// skin kept and no switch, and Cross switches. Online it switches at once, as before.
+#[test]
+fn the_pause_switch_picks_the_plane_skin() {
+    let (mut m, mut r) = fresh();
+    m.riders = 1;
+    tap(&mut m, &mut r, Control::Cross);
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.riding());
+    let mut garages = vec![garage(0, Kind::Bike)];
+    m.up[0] = Machine::Bike;
+    m.switchable[0] = true;
+    let mut readers = vec![r];
+    ride_frame(&mut m, &mut readers, &[Report::idle()], &mut garages);
+    let skin = |m: &Menu| m.view(0).flier_picker().and_then(|(_, f, _, _)| f.map(|f| f.skin.clone()));
+
+    tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Start);
+    tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Down);
+    tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Down);
+    tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Cross);
+    let view = m.view(0);
+    let (kind, _, choices, row) = view.flier_picker().expect("the plane picker");
+    assert_eq!((kind.as_str(), choices.len(), row), ("Plane", 2, 1), "the disc's two planes, Switch picked");
+    assert_eq!(skin(&m).as_deref(), Some("biplane"));
+    tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Right);
+    assert_eq!(skin(&m).as_deref(), Some("biplane2"));
+    assert_eq!(m.picks.0[0].flier("biplane").map(|f| f.skin.as_str()), Some("biplane2"), "kept in the seat's picks");
+    assert!(m.take_picks_changed());
+    tap_seat(&mut m, &mut readers, &mut garages, 0, Control::R1);
+    assert_eq!(skin(&m).as_deref(), Some("biplane"), "R1 steps it too, round");
+    tap_seat(&mut m, &mut readers, &mut garages, 0, Control::L1);
+    let acts = tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Circle);
+    assert!(!acts.iter().any(|a| matches!(a, Act::Switch(..))), "{acts:?}");
+    assert!(m.view(0).flier_picker().is_none());
+    assert_eq!(m.view(0).screen(), Some(Screen::Pause), "Circle backs out to the pause");
+    assert_eq!(garages[0].up, Kind::Bike);
+
+    tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Cross);
+    assert_eq!(skin(&m).as_deref(), Some("biplane2"), "the picker opens on the kept skin");
+    let acts = tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Cross);
+    assert!(acts.contains(&Act::Switch(0, Machine::Biplane)), "{acts:?}");
+    assert!(m.riding());
+    assert_eq!(garages[0].up, Kind::Biplane);
 }
 
 /// P177: no pick of a start machine is left. The ride setup's Square, L1 and R1 change nothing,

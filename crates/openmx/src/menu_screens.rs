@@ -1666,6 +1666,9 @@ impl Pen<'_> {
         if let Some((ask, rows, row)) = menu.confirming() {
             self.hints(&[(Btn::Circle, "Stay"), (Btn::Cross, "Select")]);
             self.popup(ask, &rows, row);
+        } else if let Some((kind, shown, choices, row)) = menu.flier_picker() {
+            self.hints(&[(Btn::Circle, "Back"), (Btn::L1R1, "Skin"), (Btn::Cross, "Switch")]);
+            self.flier_popup(&kind, shown, &choices, row);
         } else {
             self.hints(&[(Btn::Circle, "Resume"), (Btn::Cross, "Select")]);
         }
@@ -2949,6 +2952,27 @@ impl Pen<'_> {
 
     /// A two-row question over the screen, dimmed under it: the splash's Quit and the pause's
     /// confirm (P110).
+    /// The pause's flier picker (P315g), over the pause as its confirm is: the kind, its skin between
+    /// arrows and Switch, and under them the skin's game and what it is, and the kind's skins
+    /// openmx cannot fly with why — the Garage's Fliers row, for the machine being switched to.
+    fn flier_popup(&mut self, kind: &str, shown: Option<&roster::Flier>, choices: &[&roster::Flier], row: usize) {
+        let name = shown.map_or_else(|| "None".to_string(), |f| f.name.clone());
+        let flyable = choices.iter().filter(|f| f.why.is_none()).count();
+        let skin = if flyable > 1 { format!("< {name} >") } else { name };
+        self.popup(kind, &[skin.as_str(), "Switch"], row);
+        let w = 26.0;
+        if let Some(f) = shown {
+            let about = self.fit(Weight::Bold, &format!("{}. {}", f.game, f.about), 0.9, w);
+            self.text(Weight::Bold, &about, 40.0, 29.4, 0.9, 0.0, BONE, Align::Centre);
+        }
+        let greyed: Vec<String> = choices.iter().filter_map(|f| f.why.as_ref().map(|why| format!("{}: {why}", f.name))).collect();
+        if let Some(first) = greyed.first() {
+            let more = if greyed.len() > 1 { format!(" (and {} more)", greyed.len() - 1) } else { String::new() };
+            let line = self.fit(Weight::Bold, &format!("{first}{more}"), 0.8, w);
+            self.text(Weight::Bold, &line, 40.0, 30.6, 0.8, 0.0, DUST, Align::Centre);
+        }
+    }
+
     fn popup(&mut self, ask: &str, rows: &[&str], row: usize) {
         let whole = self.whole();
         self.fill(whole, [0, 0, 0, 150]);
