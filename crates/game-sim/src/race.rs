@@ -21,6 +21,8 @@
 //! [`Supercross::shuffle_lanes`], [`Supercross::grid_spot`] and [`Supercross::starting_place`] the
 //! slot that lines the riders up behind the gate. The score cards hang off it as a list, one per rider;
 //! a card's index picks its lane, and its place before the first crossing is that lane's number.
+//! While the countdown runs, [`Supercross::start_timeline`] (S13f) walks the start's windows: the
+//! intro's end and the race overlays, the start call, and the warning that lets the held bikes go.
 //!
 //! Then the start itself (S13b), [`Race`]: the race manager's tick ahead of the riders — its music and
 //! tip clocks, the watch over every rider while the gate is closed, and the score manager's countdown,
@@ -269,7 +271,7 @@ pub struct Supercross {
     pub call: i32,
     /// The start's two light windows: the lights from `lights_on` to `lights_off` (`+0x4b0`/`+0x4b4`),
     /// the start call 1.5 s after each edge; the warning lights from `warn_on` to `warn_off`
-    /// (`+0x4b8`/`+0x4bc`).
+    /// (`+0x4b8`/`+0x4bc`). [`Supercross::start_timeline`] reads them.
     pub lights_on: F,
     pub lights_off: F,
     pub warn_on: F,
@@ -278,7 +280,8 @@ pub struct Supercross {
     pub countdown: F,
     /// Set once the track intro has had its turn (`+0x4c4`): a reset then skips it.
     pub intro_seen: u32,
-    /// Asks the start's timeline to finish the intro (`+0x4c8`); the intro's start clears it.
+    /// Set once the start's timeline has ended the track intro (`+0x4c8`): the intro's start clears
+    /// it, and while it is clear the lights window ends the intro ([`Supercross::start_timeline`]).
     pub intro_queued: u32,
     /// Set by every reset, cleared by the race manager's first countdown (`+0x4cc`).
     pub fresh: u32,
@@ -370,7 +373,8 @@ impl Supercross {
 
     /// The grid slot's lanes: card `i` in lane `i`, then — unless every rider is AI (the `AllAI` knob,
     /// off on retail) — `riders` passes of a bubble along the lanes, each neighbouring pair swapped on
-    /// a coin toss (`unit < 0.5`). `riders × (riders − 1)` `rand()`s.
+    /// a coin toss (`unit < 0.5`). `riders × (riders − 1)` `rand()`s. With `AllAI` set there are none:
+    /// the grid shows the race overlays instead, and skips the vehicles' and riders' resets too.
     pub fn shuffle_lanes(&mut self, riders: usize, all_ai: bool, rng: &mut Rng) {
         for (i, lane) in self.lanes.iter_mut().enumerate().take(riders) {
             *lane = i as i32;
@@ -453,6 +457,129 @@ fn beside(at: Vf, facing: Vf, out: F) -> Vf {
     let x = F(at.x()) + F(facing.z()) * out;
     let z = F(at.z()) - F(facing.x()) * out;
     Vf([x.0, at.y(), z.0, at.w()])
+}
+
+// --- the start's timeline (S13f) -------------------------------------------------------------------
+
+/// A rider's race interface (an actor of class `MXSupercrossInterface`) as the start's timeline drives
+/// it: the body it may carry (`+0x68`; on sx01's image, the human rider's bike chassis) and the four
+/// words it points at (`+0x08`, `+0x0c`, `+0x10`, `+0x14`). The drop writes the second and third
+/// again (1, 0); what reads the words was not traced.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct StartItem {
+    /// The body's axis freedoms ([`crate::chassis::Chassis::free`], `ang_free`), when it has a body.
+    pub body: Option<Axes>,
+    pub words: [i32; 4],
+}
+
+/// A body's freedom to move along each world axis and to turn about each of its own (`+0x2a0..`,
+/// `+0x2ac..` of a chassis).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Axes {
+    pub free: [i32; 3],
+    pub ang_free: [i32; 3],
+}
+
+/// What one call of [`Supercross::start_timeline`] did beyond the activity and its items: each a cue
+/// for the presentation, none read again by a tick.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct StartStep {
+    /// The clock read zero: every item with a body was held for the start (the start hold: its bike
+    /// may move only in height).
+    pub armed: bool,
+    /// The track intro was ended: the scene's intro cameras stop and the intro clip, if it still
+    /// plays, fades out over 750 ms. The score manager's countdown has its interval accumulator set
+    /// to 0, and its elapsed time to [`StartStep::elapsed`] when that is set.
+    pub intro_ended: bool,
+    /// Where the intro's end puts the countdown's elapsed time: 6 s when the intro had not been seen
+    /// and the countdown was short of that (the start jumps to the end of the intro), 0 when it had
+    /// been seen (the countdown starts over).
+    pub elapsed: Option<F>,
+    /// The lights window: the race overlays come on (one, or one per half of a split screen).
+    pub overlays: bool,
+    /// The start call window: the picked start call plays.
+    pub call: bool,
+    /// The warning window: every item's body was freed on every axis.
+    pub warning: bool,
+}
+
+impl Supercross {
+    /// **The start's timeline**, the activity's listener on the score manager's countdown: `time` is
+    /// the countdown's elapsed time, and the manager calls this on the countdown's first tick and each
+    /// time its interval accumulator reaches the interval (0.1 s) again. `intro_camera` is whether the
+    /// scene's intro camera is the one showing. The countdown itself is the score manager's
+    /// ([`Countdown`]): what the intro's end does to it comes back in the [`StartStep`].
+    ///
+    /// When the clock reads zero (or minus zero), each item with a body is held for the start: the
+    /// body free to move only in height and to turn only about x and z, its words 0, 0, 1 and
+    /// `intro_camera`. Then the first window the clock is in, of three, each from its start up to (not
+    /// including) its end:
+    ///
+    /// - the lights, `lights_on..lights_off`: the race overlays show, and the intro is ended first if
+    ///   it has not been ([`Supercross::intro_queued`] clear);
+    /// - the start call, the same window 1.5 s later: the call plays and the cue reads −1;
+    /// - the warning, `warn_on..warn_off`: each item with a body is freed on every axis, its first
+    ///   word 0 and its second 1.
+    ///
+    /// No `rand()`.
+    pub fn start_timeline(&mut self, time: F, items: &mut [StartItem], intro_camera: bool) -> StartStep {
+        let mut step = StartStep::default();
+        let t = read(time);
+        if t == F::ZERO {
+            step.armed = true;
+            for item in items.iter_mut() {
+                if let Some(body) = &mut item.body {
+                    body.free = [0, 1, 0];
+                    body.ang_free = [1, 0, 1];
+                    item.words[..3].copy_from_slice(&[0, 0, 1]);
+                    item.words[3] = intro_camera as i32;
+                }
+            }
+        }
+        let on = read(self.lights_on);
+        if !(t < on) && t < read(self.lights_off) {
+            if self.intro_queued == 0 {
+                step.elapsed = self.end_intro(t, items);
+                step.intro_ended = true;
+            }
+            step.overlays = true;
+        } else if !(t < F(fpu::add(CALL_AFTER_LIGHTS.0, on.0)))
+            && t < F(fpu::add(CALL_AFTER_LIGHTS.0, self.lights_off.0))
+        {
+            step.call = true;
+            self.start_cue = -F::ONE;
+        } else if !(t < read(self.warn_on)) && t < read(self.warn_off) {
+            step.warning = true;
+            for item in items.iter_mut() {
+                if let Some(body) = &mut item.body {
+                    body.free = [1; 3];
+                    body.ang_free = [1; 3];
+                    item.words[0] = 0;
+                    item.words[1] = 1;
+                }
+            }
+        }
+        step
+    }
+
+    /// The intro's end, at the countdown's `elapsed`: the countdown's new elapsed time, if it moves
+    /// (6 s when the intro had not been seen and it is short of that, 0 when it had been); the intro
+    /// marked seen and ended; every item's fourth word 0, body or not.
+    fn end_intro(&mut self, elapsed: F, items: &mut [StartItem]) -> Option<F> {
+        let to = if self.intro_seen != 0 {
+            Some(F::ZERO)
+        } else if read(elapsed) < INTRO {
+            Some(INTRO)
+        } else {
+            None
+        };
+        self.intro_seen = 1;
+        self.intro_queued = 1;
+        for item in items.iter_mut() {
+            item.words[3] = 0;
+        }
+        to
+    }
 }
 
 /// The start's countdown as the score manager runs it: how long it lasts (`+0xbc` of the manager)

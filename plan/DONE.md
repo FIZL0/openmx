@@ -1154,3 +1154,6 @@ away. Nothing is ever edited by hand here either; `./kit plan <ID>` finds a task
 
 ### Next: the race's AI riders, beside the race above (in this order)
 - [x] **S12c** The AI's look-ahead feeler fan and per-rider avoidance scan (gated by flags 0x80/0x40, the type-3 scenery admit at 0xc0), the brake-short-of-a-standing-human and swerve behaviour seen on free09; oracled → crates/game-sim/src/ai.rs | t: crates/game-sim/tests/ai.rs | j: s12-ai-avoidance — The port is done on origin/wip/S12c (331bcd80: avoidance pass oracled over 10,000 passes); on 11-06 its merge hit conflicts in crates/game-sim/src/ai.rs and tests/ai.rs and the fix session timed out. Start from that branch: merge main into it, resolve, re-run the oracle.
+
+### Next: race capture and start lights, beside the races above (in this order)
+- [x] **S13f** (follow-up, normal) The supercross activity's own start timeline (S13a follow-up): the per-tick stretch that reads Supercross's lights_on/lights_off, start_cue and warn_on/warn_off windows against the race clock — the lights, the start call played at the cue and the cue going to -1, the warning lights — plus the AllAI grid path (no lane shuffle) that S13a ported from the code only; oracle the stretch over generated clocks and the grid slot with AllAI set → crates/game-sim/src/race.rs | t: crates/game-sim/tests/race.rs | j: s13-start-timeline

@@ -61,11 +61,23 @@
 //!     and the manager's work after its cards held off, against [`RaceRules::look_for_waited_for`] and
 //!     [`RaceRules::card`], compared on every listener call in order, every word of the card and the
 //!     ghost's card, the manager's flags, the free records, and every path's words and the pools.
+//! 18. **The start's timeline** (S13f): the supercross activity's listener on the countdown, 20,000
+//!     generated clocks (zero, minus zero, denormals, each window's edges and a ulp either side, the
+//!     call window's edges 1.5 s on, stray words) over windows as a reset leaves them or anywhere,
+//!     zero to five actors (other classes, items with and without a body), every viewport mode, the
+//!     intro seen or not, ended or not, against [`Supercross::start_timeline`] on the activity, the
+//!     countdown's elapsed and accumulator, every item's body and words, the call played, the intro's
+//!     fade and the overlays shown.
+//! 19. **The grid with AllAI set**: the grid slot on 2,000 starts with the knob at 1, 2, −1 and the
+//!     sign bit, against [`Supercross::shuffle_lanes`] with `all_ai`: no draw, the lanes in order, the
+//!     race overlays' one call, no vehicle or rider reset, the same spots and places.
+//! 20. **The start hold on the sx01 image**: the image's one interface item is the rider's own, its
+//!     body the bike chassis, held and worded as the timeline's zero left it.
 
 use game_sim::chassis::{Chassis, Deriv};
 use game_sim::race::{
     self, CheckPart, Checkpoint, Course, Crossing, Gate, GridStart, LANES, LapCard, LapRecord, LapRules, LineNotice, Link,
-    PathNode, Prop, Race, RaceCard, RaceNotice, RacePath, RaceRules, Refused, Seen, Spot, Supercross, TrackFile, TrackPath, TrackPaths, card_flags,
+    PathNode, Prop, Race, RaceCard, RaceNotice, RacePath, RaceRules, Refused, Seen, Spot, StartItem, StartStep, Axes, Supercross, TrackFile, TrackPath, TrackPaths, card_flags,
     flags, race_card_flags, race_flags, race_kind,
 };
 use game_sim::rng::Rng;
@@ -3179,4 +3191,484 @@ fn the_race_handler_matches_the_score_managers_per_card() {
         said.iter().all(|&k| k > 200) && laps > 300 && progressed > 1000 && timed_off > 300 && ticked_off > 3000,
         "{said:?} laps {laps} progressed {progressed} out {timed_off} off-clock {ticked_off}"
     );
+}
+
+// --- the start's timeline (S13f) -------------------------------------------------------------------
+
+const TL_ACT: u32 = 0x01c0_0000;
+const TL_APP: u32 = 0x01c0_1000;
+const TL_SCENE: u32 = 0x01c0_2000;
+const TL_LIST_A: u32 = 0x01c0_2100;
+const TL_LIST_B: u32 = 0x01c0_2200;
+const TL_CAMERA: u32 = 0x01c0_2300;
+const TL_SETTINGS: u32 = 0x01c0_3000;
+const TL_VIEWPORTS: u32 = 0x01c0_3100;
+const TL_UI: u32 = 0x01c0_4000;
+const TL_TIPS: u32 = 0x01c0_4100;
+const TL_TIP: u32 = 0x01c0_4200;
+const TL_CLIP_VT: u32 = 0x01c0_5000;
+const TL_CALLS: u32 = 0x01c0_5100;
+const TL_INTROS: u32 = 0x01c0_5200;
+const TL_CLIPS: u32 = 0x01c0_6000;
+const TL_ACTOR_VT: u32 = 0x01c0_7000;
+const TL_NODES: u32 = 0x01c0_8000;
+const TL_ACTORS: u32 = 0x01c0_9000;
+const TL_ITEMS: u32 = 0x01c0_a000;
+const TL_BODIES: u32 = 0x01c1_0000;
+const TL_WORDS: u32 = 0x01c2_0000;
+/// Not code: the actor's cast, the clips' play, "is playing" and fade slots, and the nothing slot.
+const TL_HOOK_CAST: u32 = 0x01c0_f000;
+const TL_HOOK_PLAY: u32 = 0x01c0_f100;
+const TL_HOOK_PLAYING: u32 = 0x01c0_f200;
+const TL_HOOK_FADE: u32 = 0x01c0_f300;
+/// The interface class's bit, as the hooked name lookup hands it out.
+const TL_CLASS_BIT: u64 = 0x40;
+
+/// A word for the timeline's clock: zero, minus zero, a denormal, just either side of an edge, an
+/// edge 1.5 s on, or anywhere around the windows.
+fn timeline_clock(p: &mut Pick, edges: &[F]) -> F {
+    let e = edges[p.below(edges.len() as u64) as usize];
+    match p.below(10) {
+        0 => F::ZERO,
+        1 => F(-0.0),
+        2 => F(f32::from_bits(p.next() as u32 & 0x807f_ffff)),
+        3 => e,
+        4 => F(f32::from_bits(e.0.to_bits().wrapping_add(1))),
+        5 => F(f32::from_bits(e.0.to_bits().wrapping_sub(1))),
+        6 => F(fpu::add(1.5, e.0)),
+        7 => F(fpu::add(fpu::add(1.5, e.0), 0.05)),
+        8 => F(p.stray(e.0)),
+        _ => F(p.range(-1.0, 13.0)),
+    }
+}
+
+#[test]
+fn the_start_timeline_matches_the_countdown_listener() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let [listener, app, ui, name_bit, tip_find, show, cut] = match addrs([
+        "race_countdown_listener",
+        "app_pointer",
+        "ui_manager",
+        "name_bit",
+        "race_tip_find",
+        "hud_overlay_show",
+        "scene_camera_cut",
+    ]) {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    let played: Rc<RefCell<Vec<u32>>> = Rc::default();
+    let faded: Rc<RefCell<Vec<(u32, u64)>>> = Rc::default();
+    let shown: Rc<Cell<u32>> = Rc::default();
+    let playing = Rc::new(Cell::new(0u64));
+    let (pl, fa, sh, an) = (played.clone(), faded.clone(), shown.clone(), playing.clone());
+    ee.hooks.insert(name_bit, Box::new(|ee| ee.set(2, TL_CLASS_BIT)));
+    ee.hooks.insert(tip_find, Box::new(|ee| ee.set(2, 0)));
+    ee.hooks.insert(show, Box::new(move |ee| {
+        assert_eq!(ee.r(4) as u32, TL_TIP + 0x40, "the overlay shown");
+        sh.set(sh.get() + 1);
+    }));
+    ee.hooks.insert(cut, Box::new(|_| {}));
+    // The cast answers with the actor's item (its +0x40, 0 for an actor of another class) for the
+    // interface class's bit only.
+    ee.hooks.insert(TL_HOOK_CAST, Box::new(|ee| {
+        let item = if ee.r(5) == TL_CLASS_BIT { u64::from(ee.u32_at(ee.r(4) as u32 + 0x40)) } else { 0 };
+        ee.set(2, item);
+    }));
+    ee.hooks.insert(TL_HOOK_PLAY, Box::new(move |ee| pl.borrow_mut().push(ee.r(4) as u32)));
+    ee.hooks.insert(TL_HOOK_PLAYING, Box::new(move |ee| ee.set(2, an.get())));
+    ee.hooks.insert(TL_HOOK_FADE, Box::new(move |ee| fa.borrow_mut().push((ee.r(4) as u32, ee.r(6)))));
+    ee.set_u32(app, TL_APP);
+    ee.set_u32(ui, TL_UI);
+    ee.set_u32(TL_UI + 0x30, TL_TIPS);
+    ee.set_u32(TL_TIPS + 4, TL_TIPS + 0x80);
+    ee.set_u32(TL_TIPS + 0x80, TL_TIP);
+    ee.set_u32(TL_TIP + 4, TL_TIP + 0x40);
+    ee.set_u32(TL_APP + 0x3cc, TL_SCENE);
+    ee.set_u32(TL_APP + 0x3d4, TL_SETTINGS);
+    ee.set_u32(TL_SETTINGS + 8, TL_VIEWPORTS);
+    ee.set_u32(TL_SCENE + 0x30, TL_LIST_A);
+    ee.set_u32(TL_LIST_A + 0x30, TL_LIST_B);
+    ee.set_u32(TL_SCENE + 0x64, TL_CAMERA);
+    ee.set_u32(TL_SCENE + 0x68, TL_CAMERA);
+    ee.set_u32(TL_ACTOR_VT + 0xa4, TL_HOOK_CAST);
+    ee.set_u32(TL_CLIP_VT + 0x1c, TL_HOOK_PLAY);
+    ee.set_u32(TL_CLIP_VT + 0x20, TL_HOOK_PLAYING);
+    ee.set_u32(TL_CLIP_VT + 0x34, TL_HOOK_FADE);
+    for k in 0..16 {
+        let clip = TL_CLIPS + 0x10 * k;
+        ee.set_u32(clip + 8, TL_CLIP_VT);
+        ee.set_u32(TL_CALLS + 4 * k, clip);
+        ee.set_u32(TL_INTROS + 4 * k, clip + 0x800);
+        ee.set_u32(clip + 0x800 + 8, TL_CLIP_VT);
+    }
+
+    let mut p = Pick(0x57a7_7713_e11e_0f13);
+    let mut seen = StartStep::default();
+    let (mut both, mut lifted, mut restarted) = (0, 0, 0);
+    for case in 0..20_000 {
+        let mut s = Supercross::new();
+        // Windows as a reset leaves them (with the intro or without) or anywhere, now and then stray.
+        let intro = if p.below(2) == 0 { F(6.0) } else { F::ZERO };
+        let drop = F(p.range(0.0, 4.0));
+        let pick = |p: &mut Pick, x: F| {
+            if p.below(5) == 0 {
+                let r = p.range(-2.0, 12.0);
+                F(p.stray(r))
+            } else {
+                x
+            }
+        };
+        s.lights_on = pick(&mut p, intro);
+        s.lights_off = pick(&mut p, F(fpu::add(0.1, s.lights_on.0)));
+        s.warn_on = pick(&mut p, F(fpu::add(fpu::sub(drop.0, 1.5), intro.0)));
+        s.warn_off = pick(&mut p, F(fpu::add(0.1, s.warn_on.0)));
+        s.start_cue = F(p.stray(0.1));
+        s.start_delay = F(p.range(0.0, 12.0));
+        s.intro_seen = if p.below(2) == 0 { 0 } else { 1 + p.below(3) as u32 };
+        s.intro_queued = p.below(2) as u32;
+        s.call = p.below(16) as i32;
+        s.intro = p.below(16) as i32;
+        // The countdown's elapsed time is the clock handed in; its accumulator any word.
+        let edges = [s.lights_on, s.lights_off, s.warn_on, s.warn_off, F(6.0)];
+        let time = timeline_clock(&mut p, &edges);
+        let acc = p.next() as u32;
+        let mode = p.below(5) as u32;
+        playing.set(p.below(2));
+        let cam_view = if p.below(3) == 0 { 0 } else { 0x1234 };
+        let cam_now = if p.below(2) == 0 { cam_view } else { 0x5678 };
+        let intro_camera = cam_view != 0 && cam_now == cam_view;
+        // Up to five actors: some of another class, some interface items without a body.
+        let actors = p.below(6) as u32;
+        let mut items: Vec<Option<StartItem>> = Vec::new();
+        for k in 0..actors {
+            let item = (p.below(5) != 0).then(|| StartItem {
+                body: (p.below(4) != 0).then(|| Axes {
+                    free: core::array::from_fn(|_| p.below(3) as i32),
+                    ang_free: core::array::from_fn(|_| p.below(3) as i32),
+                }),
+                words: core::array::from_fn(|_| p.next() as i32),
+            });
+            let (node, actor, at) = (TL_NODES + 0x10 * k, TL_ACTORS + 0x80 * k, TL_ITEMS + 0x100 * k);
+            ee.set_u32(node, actor);
+            ee.set_u32(node + 8, if k + 1 < actors { node + 0x10 } else { 0 });
+            ee.set_u32(actor + 8, TL_ACTOR_VT);
+            ee.set_u32(actor + 0x40, if item.is_some() { at } else { 0 });
+            if let Some(it) = &item {
+                let body = TL_BODIES + 0x400 * k;
+                ee.set_u32(at + 0x68, if it.body.is_some() { body } else { 0 });
+                if let Some(b) = it.body {
+                    for (j, x) in b.free.iter().chain(&b.ang_free).enumerate() {
+                        ee.set_u32(body + 0x2a0 + 4 * j as u32, *x as u32);
+                    }
+                }
+                for (j, w) in it.words.iter().enumerate() {
+                    let word = TL_WORDS + 0x40 * k + 4 * j as u32;
+                    ee.set_u32(at + 8 + 4 * j as u32, word);
+                    ee.set_u32(word, *w as u32);
+                }
+            }
+            items.push(item);
+        }
+        ee.set_u32(TL_LIST_B + 0x34, if actors > 0 { TL_NODES } else { 0 });
+        ee.set_u32(TL_CAMERA + 0x68, cam_view);
+        ee.set_u32(TL_CAMERA + 0x40, cam_now);
+        ee.set_u32(TL_VIEWPORTS + 4, mode);
+        put_f(&mut ee, TL_ACT + 0x10c, s.start_delay);
+        put_f(&mut ee, TL_ACT + 0x110, s.start_cue);
+        put_f(&mut ee, TL_ACT + 0x50 + 0xc4, time);
+        ee.set_u32(TL_ACT + 0x50 + 0xc8, acc);
+        ee.set_u32(TL_ACT + 0x440, TL_INTROS);
+        ee.set_u32(TL_ACT + 0x478, s.intro as u32);
+        ee.set_u32(TL_ACT + 0x484, TL_CALLS);
+        ee.set_u32(TL_ACT + 0x4ac, s.call as u32);
+        for (o, x) in [(0x4b0, s.lights_on), (0x4b4, s.lights_off), (0x4b8, s.warn_on), (0x4bc, s.warn_off)] {
+            put_f(&mut ee, TL_ACT + o, x);
+        }
+        ee.set_u32(TL_ACT + 0x4c4, s.intro_seen);
+        ee.set_u32(TL_ACT + 0x4c8, s.intro_queued);
+        played.borrow_mut().clear();
+        faded.borrow_mut().clear();
+        shown.set(0);
+        ee.call(listener, &[u64::from(TL_ACT)], &[p.range(0.0, 10.0), time.0, 0.1], BUDGET);
+
+        let mut want: Vec<StartItem> = items.iter().flatten().copied().collect();
+        let step = s.start_timeline(time, &mut want, intro_camera);
+        let what = format!("case {case}: t {:#010x}, {s:?}", time.0.to_bits());
+        assert_eq!(ee.v0(), 1, "{what}: the answer");
+        for (o, x, name) in [
+            (0x10c, s.start_delay, "start delay"),
+            (0x110, s.start_cue, "cue"),
+            (0x4b0, s.lights_on, "lights on"),
+            (0x4b4, s.lights_off, "lights off"),
+            (0x4b8, s.warn_on, "warning on"),
+            (0x4bc, s.warn_off, "warning off"),
+        ] {
+            assert_eq!(ee.u32_at(TL_ACT + o), x.0.to_bits(), "{what}: {name}");
+        }
+        let elapsed = step.elapsed.unwrap_or(time);
+        assert_eq!(ee.u32_at(TL_ACT + 0x50 + 0xc4), elapsed.0.to_bits(), "{what}: the countdown's elapsed");
+        let acc = if step.intro_ended { 0 } else { acc };
+        assert_eq!(ee.u32_at(TL_ACT + 0x50 + 0xc8), acc, "{what}: the countdown's accumulator");
+        assert_eq!(ee.u32_at(TL_ACT + 0x4c4), s.intro_seen, "{what}: intro seen");
+        assert_eq!(ee.u32_at(TL_ACT + 0x4c8), s.intro_queued, "{what}: intro ended");
+        let mut want = want.into_iter();
+        for (k, item) in items.iter().enumerate() {
+            let Some(_) = item else { continue };
+            let w = want.next().unwrap();
+            let k = k as u32;
+            if let Some(b) = w.body {
+                let body = TL_BODIES + 0x400 * k;
+                let got: Vec<i32> = (0..6).map(|j| ee.u32_at(body + 0x2a0 + 4 * j) as i32).collect();
+                let wanted: Vec<i32> = b.free.iter().chain(&b.ang_free).copied().collect();
+                assert_eq!(got, wanted, "{what}: item {k}'s body");
+            }
+            let got: Vec<i32> = (0..4).map(|j| ee.u32_at(TL_WORDS + 0x40 * k + 4 * j) as i32).collect();
+            assert_eq!(got, w.words, "{what}: item {k}'s words");
+        }
+        let calls: Vec<u32> = if step.call { vec![TL_CLIPS + 0x10 * s.call as u32] } else { vec![] };
+        assert_eq!(*played.borrow(), calls, "{what}: the start call played");
+        let fades = if step.intro_ended && playing.get() != 0 {
+            vec![(TL_CLIPS + 0x800 + 0x10 * s.intro as u32, 750)]
+        } else {
+            vec![]
+        };
+        assert_eq!(*faded.borrow(), fades, "{what}: the intro faded");
+        let overlays = if !step.overlays { 0 } else { [1, 2, 2, 0, 0][mode as usize] };
+        assert_eq!(shown.get(), overlays, "{what}: the overlays shown");
+        seen.armed |= step.armed;
+        seen.intro_ended |= step.intro_ended;
+        seen.overlays |= step.overlays;
+        seen.call |= step.call;
+        seen.warning |= step.warning;
+        both += (step.armed && step.intro_ended) as u32;
+        lifted += (step.elapsed == Some(F(6.0))) as u32;
+        restarted += (step.elapsed == Some(F::ZERO)) as u32;
+    }
+    assert_eq!(seen, StartStep { armed: true, intro_ended: true, overlays: true, call: true, warning: true, elapsed: None });
+    assert!(
+        both > 100 && lifted > 300 && restarted > 300,
+        "{both} armed with the intro's end, {lifted} jumped to the intro's end, {restarted} started over"
+    );
+}
+
+#[test]
+fn the_grid_with_all_ai_set_keeps_the_lanes() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let [grid, app, all_ai, rand_state, ground, interface, base, overlays, ui, tip_find, mode, nth] = match addrs([
+        "activity_supercross_grid",
+        "app_pointer",
+        "all_ai",
+        "rand_state",
+        "ground_query",
+        "interface_id",
+        "activity_grid_base",
+        "race_overlays_bind",
+        "ui_manager",
+        "race_tip_find",
+        "hud_overlay_mode",
+        "list_nth",
+    ]) {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    let grounded: Rc<RefCell<Vec<Vf>>> = Rc::default();
+    let placed: Rc<RefCell<Vec<(u32, Vf, Vf)>>> = Rc::default();
+    let modes: Rc<RefCell<Vec<(u32, u64)>>> = Rc::default();
+    let resets: Rc<Cell<u32>> = Rc::default();
+    let (g, pl, md, r1, r2) = (grounded.clone(), placed.clone(), modes.clone(), resets.clone(), resets.clone());
+    ee.hooks.insert(HOOK_NOTHING, Box::new(|_| {}));
+    ee.hooks.insert(ground, Box::new(move |ee| g.borrow_mut().push(quad(ee, ee.r(5) as u32))));
+    ee.hooks.insert(
+        HOOK_PLACE,
+        Box::new(move |ee| pl.borrow_mut().push((ee.r(4) as u32, quad(ee, ee.r(5) as u32), quad(ee, ee.r(6) as u32)))),
+    );
+    // The vehicles' and riders' resets are the shuffled path's: with AllAI neither the list nor the
+    // interface ids are looked at.
+    ee.hooks.insert(interface, Box::new(move |_| r1.set(r1.get() + 1)));
+    ee.hooks.insert(nth, Box::new(move |ee| {
+        r2.set(r2.get() + 1);
+        ee.set(2, 0);
+    }));
+    ee.hooks.insert(base, Box::new(|_| {}));
+    ee.hooks.insert(overlays, Box::new(|_| {}));
+    ee.hooks.insert(tip_find, Box::new(|ee| ee.set(2, 0)));
+    ee.hooks.insert(mode, Box::new(move |ee| md.borrow_mut().push((ee.r(4) as u32, ee.r(5)))));
+    ee.set_u32(app, APP);
+    ee.set_u32(ui, TL_UI);
+    ee.set_u32(TL_UI + 0x30, TL_TIPS);
+    ee.set_u32(TL_TIPS + 4, TL_TIPS + 0x80);
+    ee.set_u32(TL_TIPS + 0x80, TL_TIP);
+    ee.set_u32(TL_TIP + 4, TL_TIP + 0x40);
+    ee.set_u32(APP + 0x3cc, SCENE);
+    ee.set_u32(SCENE + 0x74, 0);
+    ee.set_u32(ENT_VT + 0x8c, HOOK_PLACE);
+    ee.set_u32(ENT_VT + 0x88, HOOK_NOTHING);
+    ee.set_u32(GRID_OBJ + 0x58, GRID_GATE);
+    ee.set_u32(TRACK + 0x348, START);
+    ee.set_u32(TRACK + 0x428, WORLD);
+
+    let table = Supercross::lane_table();
+    let mut p = Pick(0xa11a_1000_6e1d_0013);
+    for case in 0..2_000 {
+        let riders = 1 + p.below(LANES as u64) as usize;
+        let mut ids: Vec<i32> = (0..riders as i32).collect();
+        for k in (1..riders).rev() {
+            ids.swap(k, p.below(k as u64 + 1) as usize);
+        }
+        let cards: Vec<GridCard> = ids.iter().map(|&id| GridCard { id, ridden: p.below(6) != 0 }).collect();
+        let mut s = Supercross::new();
+        s.lane_offsets = table;
+        s.lanes = core::array::from_fn(|_| p.below(8) as i32);
+        let normal = p.unit_vector();
+        let gated = p.below(4) != 0;
+        let start = if gated {
+            let centre = [p.range(-500.0, 500.0), p.range(-50.0, 150.0), p.range(-500.0, 500.0)];
+            GridStart::Gate { centre: p.quad(centre), normal: p.quad(normal), width: F(p.range(1.0, 150.0)) }
+        } else {
+            let at = [p.range(-500.0, 500.0), p.range(-50.0, 150.0), p.range(-500.0, 500.0)];
+            GridStart::Point { at: p.quad(at), facing: p.quad(normal) }
+        };
+        let state = p.next();
+        let knob = [1u32, 2, 0xffff_ffff, 0x8000_0000][p.below(4) as usize];
+
+        match start {
+            GridStart::Gate { centre, normal, width } => {
+                ee.set_u32(ACT + 0xb8, GRID_OBJ);
+                put_quad(&mut ee, GRID_GATE + 0x40, centre);
+                put_quad(&mut ee, GRID_GATE + 0x50, normal);
+                put_f(&mut ee, GRID_GATE + 0x70, width);
+            }
+            GridStart::Point { at, facing } => {
+                ee.set_u32(ACT + 0xb8, 0);
+                put_quad(&mut ee, START, at);
+                put_quad(&mut ee, START + 0x10, facing);
+            }
+        }
+        ee.set_u32(all_ai, knob);
+        ee.set_u32(ACT + 0x14, 1 + p.below(4) as u32);
+        ee.set_u32(ACT + 0x8c, riders as u32);
+        ee.set_u32(ACT + 0x180, TRACK);
+        for k in 0..LANES as u32 {
+            put_f(&mut ee, ACT + 0x3bc + 4 * k, s.lane_offsets[k as usize]);
+            ee.set_u32(ACT + 0x418 + 4 * k, s.lanes[k as usize] as u32);
+        }
+        ee.set_u32(ACT + 0x84, GRID_CARDS);
+        for (k, c) in cards.iter().enumerate() {
+            let at = GRID_CARDS + k as u32 * CARD_SIZE;
+            let ent = GRID_ENTITIES + k as u32 * ENTITY_SIZE;
+            ee.set_u32(at, c.id as u32);
+            ee.set_u32(at + 4, if c.ridden { ent } else { 0 });
+            ee.set_u32(at + 0x2c, 0xdead);
+            ee.set_u32(at + 0x1c8, if k + 1 < cards.len() { at + CARD_SIZE } else { 0 });
+            ee.set_u32(ent + 0x20, ENT_VT);
+        }
+        ee.write(rand_state, 8, u128::from(state));
+        grounded.borrow_mut().clear();
+        placed.borrow_mut().clear();
+        modes.borrow_mut().clear();
+        resets.set(0);
+        ee.call(grid, &[u64::from(ACT)], &[], BUDGET);
+
+        let mut rng = Rng::from_state(state);
+        s.shuffle_lanes(riders, true, &mut rng);
+        let what = format!("case {case}: {riders} riders, AllAI {knob:#x}, {start:?}");
+        for k in 0..riders as u32 {
+            assert_eq!(ee.u32_at(ACT + 0x418 + 4 * k) as i32, k as i32, "{what}: lane {k}");
+            assert_eq!(s.lanes[k as usize], k as i32, "{what}: the port's lane {k}");
+        }
+        let mut want_ground = Vec::new();
+        let mut want_placed = Vec::new();
+        for (k, c) in cards.iter().enumerate() {
+            let at = GRID_CARDS + k as u32 * CARD_SIZE;
+            assert_eq!(ee.u32_at(at + 0x2c) as i32, s.starting_place(c.id), "{what}: card {k}'s place");
+            if c.ridden {
+                let (spot, facing) = s.grid_spot(start, c.id, riders as i32);
+                want_ground.push(spot.to_bits());
+                want_placed.push((GRID_ENTITIES + k as u32 * ENTITY_SIZE, spot.to_bits(), facing.to_bits()));
+            }
+        }
+        let got_ground: Vec<[u32; 4]> = grounded.borrow().iter().map(|v| v.to_bits()).collect();
+        let got_placed: Vec<(u32, [u32; 4], [u32; 4])> =
+            placed.borrow().iter().map(|(e, a, b)| (*e, a.to_bits(), b.to_bits())).collect();
+        assert_eq!(got_ground, want_ground, "{what}: the ground queries");
+        assert_eq!(got_placed, want_placed, "{what}: the placements");
+        assert_eq!(ee.read(rand_state, 8) as u64, state, "{what}: no draw");
+        assert_eq!(rng.state(), state, "{what}: the port drew");
+        assert_eq!(*modes.borrow(), vec![(TL_TIP + 0x40, 6)], "{what}: the race overlays' mode");
+        assert_eq!(resets.get(), 0, "{what}: the vehicles were reset");
+    }
+}
+
+/// S196's sx01 image, 3.6 s into the countdown and short of the lights: the start's items as the port
+/// reads them. The one item is the rider's own interface, its body the rider's bike chassis; the
+/// countdown's first call armed it and nothing in the timeline has run since but its idle calls.
+#[test]
+fn the_sx01_image_holds_the_start_hold_as_armed() {
+    let Some(mut ee) = sx01_image() else { return };
+    let [app_pointer, activities, gp, names, name_bit] =
+        match addrs(["app_pointer", "activity_manager", "boot_gp", "actor_class_names", "name_bit"]) {
+            Ok(a) => a,
+            Err(why) => return skip(&why),
+        };
+    ee.set(28, u64::from(gp));
+    let act = ee.u32_at(ee.u32_at(ee.u32_at(activities) + 0x58));
+    let elapsed = f32_at(&ee, act + 0x50 + 0xc4);
+    let mut s = Supercross::new();
+    for (o, x) in [(0x4b0, &mut s.lights_on), (0x4b4, &mut s.lights_off), (0x4b8, &mut s.warn_on), (0x4bc, &mut s.warn_off)] {
+        *x = f32_at(&ee, act + o);
+    }
+    s.intro_seen = ee.u32_at(act + 0x4c4);
+    s.intro_queued = ee.u32_at(act + 0x4c8);
+    assert!(elapsed > F::ZERO && elapsed < s.lights_on, "the image is {elapsed} s in, lights at {}", s.lights_on);
+    assert_eq!((s.intro_seen, s.intro_queued), (0, 0), "the intro is still on");
+
+    // The interface class's bit, looked up by name as the timeline does (already registered).
+    let name = 0x01f0_0000;
+    for (k, b) in b"MXSupercrossInterface\0".iter().enumerate() {
+        ee.write(name + k as u32, 1, u128::from(*b));
+    }
+    let registered = ee.u32_at(names);
+    ee.call(name_bit, &[u64::from(names), u64::from(name)], &[], BUDGET);
+    let bit = ee.v0();
+    assert_eq!(ee.u32_at(names), registered, "the class was registered before");
+    let scene = ee.u32_at(ee.u32_at(app_pointer) + 0x3cc);
+    let camera = ee.u32_at(scene + 0x64);
+    let intro_camera = ee.u32_at(camera + 0x68) != 0 && ee.u32_at(camera + 0x40) == ee.u32_at(camera + 0x68);
+    let mut node = ee.u32_at(ee.u32_at(ee.u32_at(scene + 0x30) + 0x30) + 0x34);
+    let mut items = Vec::new();
+    while node != 0 {
+        let actor = ee.u32_at(node);
+        ee.call(ee.u32_at(ee.u32_at(actor + 8) + 0xa4), &[u64::from(actor), bit], &[], BUDGET);
+        if ee.v0() != 0 {
+            items.push(ee.v0() as u32);
+        }
+        node = ee.u32_at(node + 8);
+    }
+    assert_eq!(items.len(), 1, "one rider, one interface");
+    let item = items[0];
+    let card = ee.u32_at(act + 0x84);
+    let chassis = ee.u32_at(ee.u32_at(card + 4) - 0xf9c + 0x7a4);
+    assert_eq!(ee.u32_at(item + 0x68), chassis, "the item's body is the rider's bike chassis");
+    let read_item = |ee: &Ee| StartItem {
+        body: Some(Axes {
+            free: core::array::from_fn(|j| ee.u32_at(chassis + 0x2a0 + 4 * j as u32) as i32),
+            ang_free: core::array::from_fn(|j| ee.u32_at(chassis + 0x2ac + 4 * j as u32) as i32),
+        }),
+        words: core::array::from_fn(|j| ee.u32_at(ee.u32_at(item + 8 + 4 * j as u32)) as i32),
+    };
+    let got = read_item(&ee);
+
+    // Armed at the countdown's zero; since then each call (in no window) has left it.
+    let mut want = [StartItem { body: Some(Axes::default()), words: [9; 4] }];
+    let mut zero = s.clone();
+    let armed = zero.start_timeline(F::ZERO, &mut want, intro_camera);
+    assert!(armed.armed && !armed.call && !armed.warning);
+    let idle = s.clone().start_timeline(elapsed, &mut want, intro_camera);
+    assert_eq!(idle, StartStep::default(), "the image's clock is in no window");
+    assert_eq!(got.words, want[0].words, "the item's words");
+    assert_eq!(got.body.unwrap().free, want[0].body.unwrap().free, "the bike held to height only");
+    // The turn freedoms read 1, 1, 0 where the arming wrote 1, 0, 1: something outside the
+    // timeline rewrites them before this point (journal s13-start-timeline).
+    assert_eq!(got.body.unwrap().ang_free, [1, 1, 0], "the bike's turn freedoms");
 }
