@@ -41,6 +41,14 @@ const RING: (u32, u32) = (0x0054_1550, 0x0054_1550 + 0x70 * 32);
 const BODY_TARGET: u32 = 0x0049_3b00;
 /// The fake points the record's pointers aim at (free RAM past F39's fake world).
 const FAKE: u32 = 0x01c0_a000;
+/// The wreck entry's calls beyond the machine's: the heap's reallocate (answered with [`GROWN`]),
+/// the rider's `+0x8f4` object's cue, and the bodies' vt `+0x18` (mass) and `+0x60` (inertia), run
+/// as they are.
+const REALLOC: u32 = 0x001b_7470;
+const GROWN: u32 = FAKE + 0x8000;
+const WRECK_CUE: u32 = 0x004f_7ca0;
+const BODY_MASS: u32 = 0x0049_3cc0;
+const BODY_INERTIA: u32 = 0x0049_3bf0;
 
 fn image() -> Option<Ee> {
     let kit = Kit::load().map_err(|w| skip(&w)).ok()?;
@@ -110,8 +118,9 @@ impl node::Ram for Port<'_> {
 impl rider::Rider for Port<'_> {
     fn call(&mut self, c: Call, dt: F) -> u32 {
         assert_eq!(dt.0.to_bits(), DT, "{c:?}: dt");
-        // The bodies' vt +0x68 runs as it is in the original, unlogged; its writes are compared.
-        if !matches!(c, Call::BodyTarget { .. }) {
+        // The bodies' vt +0x68 (and the wreck entry's +0x18 and +0x60) run as they are in the
+        // original, unlogged; their writes are compared.
+        if !matches!(c, Call::BodyTarget { .. } | Call::BodyMass { .. } | Call::BodyInertia { .. }) {
             self.log.borrow_mut().push(c);
         }
         match c {
@@ -120,6 +129,15 @@ impl rider::Rider for Port<'_> {
                 rider::body_target(self, body, from);
                 0
             }
+            Call::BodyMass { body, mass } => {
+                rider::body_mass(self, body, mass);
+                0
+            }
+            Call::BodyInertia { body, from } => {
+                rider::body_inertia(self, body, from);
+                0
+            }
+            Call::Realloc { .. } => GROWN,
             _ => 0,
         }
     }
@@ -732,6 +750,220 @@ fn the_riders_pose_and_settle_are_the_originals() {
     eprintln!("{t:#?}");
     for path in ["pose: moving", "pose: still", "pose: dt <= 0", "pose: no turn", "pose: zero angle", "pose: q flipped", "pose: drawn flipped",
         "pose: no words", "settle: some words", "settle: no words"] {
+        assert!(t.contains_key(path), "path {path} never taken");
+    }
+    for (path, n) in &t {
+        assert!(*n >= 20, "path {path} taken only {n} times");
+    }
+}
+
+/// **The rider's wreck entry is the original's** (S288): 20 000 cases of state 4's rider, each
+/// running 0x004ed700 whole in the interpreter (its pose, settle, switches, rand, reallocate and cue
+/// hooked as the machine's test hooks them; the bodies' vt `+0x18`, `+0x60` and `+0x68` run as they
+/// are) against [`rider::wreck_entry`] from the same words. Drawn: the kind (every one of 0..=16, and
+/// two past the table), the three counts (the real one, 0, −1), the record's collidable (or none)
+/// and the spheres' ignore lists (it listed, a free slot, full so the list grows), the pose list's
+/// entries and their bodies' `+0x7c` lanes (negatives under the square root among them), the
+/// masses, inertias (≤ 0 and −0 lanes) and targets, the record's velocities, the bodies' positions
+/// and orientations, every kind's block of aim and clock words, and the world's two settings. Every
+/// word either side writes, off the stack, comes out the same, and so do the calls.
+#[test]
+#[allow(clippy::float_arithmetic)]
+fn the_riders_wreck_entry_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let rec = ee.u32_at(RIDER + rider::RECORD);
+    let bodies = ee.u32_at(RIDER + rider::BODIES);
+    let poses = ee.u32_at(RIDER + rider::POSES);
+    let entries = ee.u32_at(RIDER + 0x3ac);
+    let entry_list = ee.u32_at(RIDER + 0x3b0);
+    let parts: Vec<u32> = (0..ee.u32_at(RIDER + rider::PARTS_COUNT))
+        .map(|i| ee.u32_at(ee.u32_at(RIDER + rider::PARTS) + 4 * i))
+        .collect();
+    let named: Vec<u32> = rider::OFF_FIRST.iter().chain(&rider::LET_GO).map(|&o| ee.u32_at(RIDER + o)).collect();
+    let mut switches: BTreeSet<u32> = named.iter().chain(&parts).map(|&p| ee.u32_at(ee.u32_at(p + 0x10) + 0x10)).collect();
+    let force = ee.u32_at(RIDER + rider::AIM_FORCE);
+    switches.insert(ee.u32_at(ee.u32_at(force + 8) + 0x10));
+    let holder_body = |ee: &Ee, i: u32| ee.u32_at(ee.u32_at(RIDER + rider::MAIN) + 0xb0 * i + 0xa4);
+    for i in 0..bodies {
+        let b = holder_body(&ee, i);
+        for (slot, code) in [(0x18, BODY_MASS), (0x60, BODY_INERTIA), (0x68, BODY_TARGET)] {
+            assert_eq!(ee.u32_at(ee.u32_at(b + 0x110) + slot), code, "body {i}'s vt {slot:#x}");
+        }
+    }
+    let entry_bodies: Vec<u32> = (0..entries).map(|i| ee.u32_at(entry_list + 0x50 * i + 8)).collect();
+    let inertia_of: BTreeSet<u32> = entry_bodies.iter().map(|&b| ee.u32_at(b + 0x7c)).collect();
+    eprintln!("{bodies} bodies, {entries} pose-list entries ({} inertia objects), {} parts, switch fns {switches:#x?}", inertia_of.len(), parts.len());
+    let log: Log = Rc::new(RefCell::new(Vec::new()));
+    let answers = Rc::new(RefCell::new(VecDeque::new()));
+    hook_calls(&mut ee, &log, &answers, &switches);
+    // The wreck entry itself runs.
+    ee.hooks.remove(&WRECK_ENTRY);
+    let l = log.clone();
+    ee.hooks.insert(REALLOC, Box::new(move |ee: &mut Ee| {
+        assert_eq!((ee.r(6), ee.r(7)), (0x0039_683e, 0x4cf), "reallocate: its file and line");
+        l.borrow_mut().push(Call::Realloc { block: ee.r(4) as u32, bytes: ee.r(5) as u32 });
+        ee.set(2, u64::from(GROWN));
+    }));
+    let l = log.clone();
+    ee.hooks.insert(WRECK_CUE, Box::new(move |ee: &mut Ee| {
+        assert_eq!(ee.r(5), 0, "cue: a1");
+        l.borrow_mut().push(Call::WreckCue(ee.r(4) as u32));
+    }));
+    let snapshot = ee.ram.clone();
+
+    let mut g = Gen(0x0288_0001);
+    let mut t: BTreeMap<String, u32> = BTreeMap::new();
+    let mut tally = |path: String| *t.entry(path).or_insert(0) += 1;
+    let f = |x: f32| x.to_bits();
+    for k in 0..20_000 {
+        let mut given: Vec<(u32, u32)> = Vec::new();
+        let mut put = |ee: &mut Ee, at: u32, v: u32| {
+            ee.set_u32(at, v);
+            given.push((at, v));
+        };
+        let kind = if g.one_in(20) { g.pick(&[0x40, 0xffff_ffff]) } else { g.bits() % 17 };
+        let count = |g: &mut Gen, real: u32| g.pick(&[real, real, real, real, real, real, 0, 0xffff_ffff]);
+        put(&mut ee, RIDER + rider::PARTS_COUNT, count(&mut g, parts.len() as u32));
+        put(&mut ee, RIDER + 0x3ac, count(&mut g, entries));
+        put(&mut ee, RIDER + rider::BODIES, count(&mut g, bodies));
+        for o in rider::WORLD_SETTINGS {
+            put(&mut ee, RIDER + o, g.bits());
+        }
+        // The collidable and the spheres' ignore lists.
+        let collidable = FAKE + 0x1000;
+        let c = if g.one_in(5) { 0 } else { collidable };
+        put(&mut ee, rec + rider::R_COLLIDABLE, c);
+        for (n, &p) in parts.iter().enumerate() {
+            let sphere = ee.u32_at(p + 0x88);
+            let list = FAKE + 0x2000 + 0x20 * n as u32;
+            put(&mut ee, sphere + 0xe4, list);
+            put(&mut ee, sphere + 0xe8, g.pick(&[0, 1, 2, 3, 4, 4, 0xffff_ffff]));
+            let full = g.one_in(2);
+            for i in 0..4 {
+                let w = if full { g.pick(&[FAKE + 0x1100, FAKE + 0x1200]) } else { g.pick(&[collidable, 0, FAKE + 0x1100, FAKE + 0x1100]) };
+                put(&mut ee, list + 4 * i, w);
+            }
+        }
+        // The pose list's entries and their bodies' lanes.
+        for i in 0..entries {
+            let e = entry_list + 0x50 * i;
+            put(&mut ee, e + 0xc, f(g.near(0.0, 0.0, 4.0)));
+            for o in [0x30, 0x40] {
+                for c in 0..4 {
+                    let x = if o == 0x30 && g.one_in(10) { g.f(-2.0, 0.0) } else { g.near(0.0, 0.0, 9.0) };
+                    put(&mut ee, e + o + 4 * c, f(x));
+                }
+            }
+        }
+        for &o in &inertia_of {
+            for c in 0..3 {
+                let x = if g.one_in(10) { g.f(-2.0, 0.0) } else { g.near(0.0, 0.0, 9.0) };
+                put(&mut ee, o + 0x130 + 4 * c, f(x));
+            }
+        }
+        // The masses, inertias and targets.
+        for i in 0..bodies {
+            let p = poses + 0x60 * i;
+            let mass = match g.bits() % 8 {
+                0 => g.pick(&[0, 0x8000_0000]),
+                1 => f(g.f(-3.0, 0.0)),
+                _ => f(g.f(0.1, 20.0)),
+            };
+            put(&mut ee, p + 4, mass);
+            for c in 0..4 {
+                let x = match g.bits() % 6 {
+                    0 => g.pick(&[0, 0x8000_0000, 1]),
+                    1 => f(g.f(-2.0, 0.0)),
+                    _ => f(g.f(0.01, 5.0)),
+                };
+                put(&mut ee, p + 0x20 + 4 * c, x);
+            }
+            for c in 0..4 {
+                put(&mut ee, p + 0x50 + 4 * c, f(g.near(0.0, -9.0, 9.0)));
+            }
+        }
+        // The record's velocities, the bodies' positions and orientations.
+        for o in [0x180, 0xa0, 0xb0] {
+            for c in 0..4 {
+                put(&mut ee, rec + o + 4 * c, f(g.near(0.0, -30.0, 30.0)));
+            }
+        }
+        for i in 0..bodies {
+            let b = holder_body(&ee, i);
+            for c in 0..4 {
+                put(&mut ee, b + 0x70 + 4 * c, f(g.near(0.0, -60.0, 60.0)));
+                put(&mut ee, b + 0x190 + 4 * c, f(g.near(0.0, -1.0, 1.0)));
+            }
+        }
+        // Every kind's block: base times, aim, spreads.
+        for at in (0x680..0x840).step_by(4) {
+            put(&mut ee, RIDER + at, f(g.near(0.0, -3.0, 3.0)));
+        }
+        let rands: Vec<u32> = (0..8).map(|_| g.bits() >> 1).collect();
+
+        // The original.
+        log.borrow_mut().clear();
+        *answers.borrow_mut() = rands.iter().copied().collect();
+        ee.written.clear();
+        ee.set(28, GP);
+        ee.call(WRECK_ENTRY, &[u64::from(RIDER), u64::from(kind)], &[f32::from_bits(DT)], BUDGET);
+        let w1 = written_words(&ee, 0);
+        let want: HashMap<u32, u32> = w1.iter().map(|&a| (a, ee.u32_at(a))).collect();
+        let calls = log.borrow().clone();
+
+        // Back to the inputs, then the port.
+        for &a in &w1 {
+            ee.set_u32(a, word_of(&snapshot, a));
+        }
+        for &(a, v) in &given {
+            ee.set_u32(a, v);
+        }
+        let pre: HashMap<u32, u32> = w1.iter().map(|&a| (a, ee.u32_at(a))).collect();
+        log.borrow_mut().clear();
+        ee.written.clear();
+        let mut port = Port { ee: &mut ee, log: log.clone(), rands: rands.iter().copied().collect() };
+        rider::wreck_entry(&mut port, RIDER, kind, F(f32::from_bits(DT)));
+        let w2 = written_words(&ee, 0);
+        assert_eq!(*log.borrow(), calls, "case {k} (kind {kind}): the calls");
+        for &a in w1.union(&w2) {
+            let w = want.get(&a).copied().unwrap_or_else(|| pre.get(&a).copied().unwrap_or_else(|| ee.u32_at(a)));
+            assert_eq!(ee.u32_at(a), w, "case {k} (kind {kind}): the word at {a:#x} ({})", if w2.contains(&a) { "the port wrote it" } else { "only the original wrote it" });
+        }
+        for &a in w1.union(&w2).chain(given.iter().map(|(a, _)| a)) {
+            ee.set_u32(a, word_of(&snapshot, a));
+        }
+
+        tally(format!("kind {}", if kind < 17 { kind.to_string() } else { "past".into() }));
+        let gv = |a: u32| given.iter().rev().find(|(at, _)| *at == a).map(|g| g.1);
+        if calls.iter().any(|c| matches!(c, Call::Realloc { .. })) {
+            tally("keep: grown".into());
+        }
+        if (0..parts.len() as u32).any(|n| (0..4).any(|i| want.contains_key(&(FAKE + 0x2000 + 0x20 * n + 4 * i)))) {
+            tally("keep: a free slot".into());
+        }
+        if gv(RIDER + rider::BODIES) == Some(bodies) {
+            let inv0 = (0..bodies).any(|i| (0..3).any(|c| want.get(&(holder_body(&ee, i) + 0x140 + 4 * c)) == Some(&0)));
+            if inv0 {
+                tally("inertia: a lane at 0".into());
+            }
+        }
+        if kind == 5 {
+            let holds: String = calls
+                .iter()
+                .filter_map(|c| match *c {
+                    Call::Switch { part, on } if part == named[7] => Some(format!("l{on}")),
+                    Call::Switch { part, on } if part == named[8] => Some(format!("r{on}")),
+                    _ => None,
+                })
+                .collect();
+            tally(format!("kind 5: {holds}"));
+        }
+    }
+    eprintln!("{t:#?}");
+    for kind in [1, 2, 3, 4, 5, 6, 7, 8, 11, 12, 13, 15, 0, 9, 10, 14, 16] {
+        assert!(t.contains_key(&format!("kind {kind}")), "kind {kind} never drawn");
+    }
+    for path in ["keep: grown", "keep: a free slot", "inertia: a lane at 0", "kind 5: l1r1", "kind 5: l0r0", "kind 5: l1r0", "kind 5: l0r1", "kind past"] {
         assert!(t.contains_key(path), "path {path} never taken");
     }
     for (path, n) in &t {

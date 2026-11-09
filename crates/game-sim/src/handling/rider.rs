@@ -251,6 +251,16 @@ pub enum Call {
     RidingReset,
     /// The wreck entry, with the record's wreck kind and `dt`.
     WreckEntry(u32),
+    /// The wreck entry's ([`wreck_entry`]): a ragdoll body's vt `+0x18`, its mass (the float's bits,
+    /// in `f12`; [`body_mass`]), and its vt `+0x60`, its inertia from `from` ([`body_inertia`]).
+    BodyMass { body: u32, mass: u32 },
+    BodyInertia { body: u32, from: u32 },
+    /// The heap's reallocate (the block, its new size in bytes; the original also hands on its
+    /// source file and line): the new block. Only an ignore list with no free slot grows ([`keep`]).
+    Realloc { block: u32, bytes: u32 },
+    /// The wreck entry's last call: the rider's `+0x8f4` object (`a0`, `a1` 0) told of the wreck,
+    /// which reads the record's wreck kind itself.
+    WreckCue(u32),
     /// The rider's vt `+0xd0` (`dt`, 0): the ragdoll posed off the scene ([`pose`]); vt `+0xcc`: its
     /// world's bodies settled ([`settle`]).
     Pose,
@@ -1020,4 +1030,380 @@ pub fn settle(m: &mut impl Ram, rider: u32) {
         bike_wreck::body_commit(&mut Bodies(m), body);
         i += 1;
     }
+}
+
+// --- S288: the wreck entry -----------------------------------------------------------------------
+
+use ps2_float::vu::Field;
+
+/// The wreck entry's words: the ragdoll world's two settings it puts back (`+0x540`, `+0x548` into
+/// the world's `+0` and `+4`); the seven parts it switches off first; the pose list's entries
+/// (`+0x3b0`, `+0x3ac` of them, `0x50` bytes); the latch `+0x254`; the rider's `+0x8f4` object.
+pub const WORLD_SETTINGS: [u32; 2] = [0x540, 0x548];
+pub const OFF_FIRST: [u32; 7] = [0x558, 0x55c, 0x578, 0x57c, 0x580, 0x584, 0x588];
+pub const CUE: u32 = 0x8f4;
+/// The aim force's body (`+0x24` of the force).
+const F_BODY: u32 = 0x24;
+/// The record's velocities the wreck kinds hand the bodies: `+0x180` (6, 7, 13), `+0xa0` and `+0xb0`
+/// (5, 12).
+const R_VELOCITY: u32 = 0x180;
+const R_KICK: u32 = 0xa0;
+const R_KICK_SPIN: u32 = 0xb0;
+/// A ragdoll body's spin rates (`+0x1d0`, beside [`B_VELOCITY`]).
+const B_RATES: u32 = 0x1d0;
+
+/// `2⁻³¹`, and rand's answer scaled by it into `[0, 1)`.
+const RAND_SCALE: f32 = f32::from_bits(0x3000_0000);
+
+fn unit(m: &mut impl Rider, dt: F) -> f32 {
+    let r = m.call(Call::Rand, dt) as i32;
+    fpu::mul(RAND_SCALE, fpu::from_i32(r))
+}
+
+/// A rand answer into `[-1, 1)`: `2u − 1`.
+fn signed_unit(m: &mut impl Rider, dt: F) -> f32 {
+    let u = unit(m, dt);
+    fpu::sub(fpu::mul(2.0, u), 1.0)
+}
+
+/// A quadword's `xyz` stored from `v`, its `w` the word `w` as it is (a lane the VU kept).
+fn put_xyz(m: &mut impl Ram, at: u32, v: Vf, w: u32) {
+    let [x, y, z, _] = v.to_bits();
+    for (k, b) in [x, y, z, w].into_iter().enumerate() {
+        m.set((at & !0xf) + 4 * k as u32, b);
+    }
+}
+
+/// **A ragdoll body's vt `+0x18`: its mass** ([`Call::BodyMass`]): `+0x18` the mass, `+0x1c` one
+/// over it.
+pub fn body_mass(m: &mut impl Ram, body: u32, mass: u32) {
+    m.set(body + 0x18, mass);
+    let inv = fpu::div(1.0, fw(m, body + 0x18));
+    put_f(m, body + 0x1c, inv);
+}
+
+/// **A ragdoll body's vt `+0x60`: its inertia** ([`Call::BodyInertia`]): the source's `w` set to 1,
+/// the quadword copied into the body's `+0x130`, and each of `x`, `y`, `z` (read from the source)
+/// inverted into `+0x140..` where above 0, else 0 there.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
+pub fn body_inertia(m: &mut impl Ram, body: u32, from: u32) {
+    m.set(from + 0xc, 0x3f80_0000);
+    copy_words(m, body + 0x130, from);
+    for k in 0..3 {
+        let v = op(m, from + 4 * k);
+        let inv = if v <= 0.0 { 0.0 } else { fpu::div(1.0, v) };
+        put_f(m, body + 0x140 + 4 * k, inv);
+    }
+}
+
+/// **A collidable put on a shape's ignore list** (the counterpart of [`release`]): nothing for none,
+/// or one already listed (the count read once); else the first free (0) slot takes it; else the list
+/// grows by one ([`Call::Realloc`]) and the new last slot takes it.
+pub fn keep(m: &mut impl Rider, shape: u32, collidable: u32, dt: F) {
+    if collidable == 0 {
+        return;
+    }
+    let n = m.word(shape + S_IGNORE_COUNT) as i32;
+    let list = m.word(shape + S_IGNORE);
+    for i in 0..n.max(0) as u32 {
+        if m.word(list.wrapping_add(4 * i)) == collidable {
+            return;
+        }
+    }
+    let list = m.word(shape + S_IGNORE);
+    for i in 0..n.max(0) as u32 {
+        if m.word(list.wrapping_add(4 * i)) == 0 {
+            let list = m.word(shape + S_IGNORE);
+            m.set(list.wrapping_add(4 * i), collidable);
+            return;
+        }
+    }
+    let block = m.word(shape + S_IGNORE);
+    let bytes = (n.wrapping_add(1) as u32).wrapping_mul(4);
+    let grown = m.call(Call::Realloc { block, bytes }, dt);
+    m.set(shape + S_IGNORE, grown);
+    let list = m.word(shape + S_IGNORE);
+    let n = m.word(shape + S_IGNORE_COUNT);
+    m.set(list.wrapping_add(n.wrapping_mul(4)), collidable);
+    let n = m.word(shape + S_IGNORE_COUNT);
+    m.set(shape + S_IGNORE_COUNT, n.wrapping_add(1));
+}
+
+/// The body of holder `i`.
+fn holder_body(m: &mut impl Ram, rider: u32, i: u32) -> u32 {
+    let holder = m.word(rider + MAIN);
+    m.word(holder.wrapping_add(0xb0u32.wrapping_mul(i)) + H_BODY)
+}
+
+/// Every holder's body's velocity (`+0x80`) the record's quadword at `from`, the count re-read
+/// after each; with `stop`, its `y` then 0.
+fn bodies_from_record(m: &mut impl Ram, rider: u32, from: u32, stop: bool) {
+    let mut i = 0u32;
+    while (i as i32) < m.word(rider + BODIES) as i32 {
+        let rec = m.word(rider + RECORD);
+        let body = holder_body(m, rider, i);
+        copy_words(m, body + B_VELOCITY, rec + from);
+        if stop {
+            let body = holder_body(m, rider, i);
+            m.set(body + B_VELOCITY + 4, 0);
+        }
+        i += 1;
+    }
+}
+
+/// Kind 5's kick: each holder's body (the count re-read after each) given the record's `+0xa0`
+/// velocity and its `+0xb0` rates.
+fn kick(m: &mut impl Ram, rider: u32) {
+    let mut i = 0u32;
+    while (i as i32) < m.word(rider + BODIES) as i32 {
+        let rec = m.word(rider + RECORD);
+        let body = holder_body(m, rider, i);
+        copy_words(m, body + B_VELOCITY, rec + R_KICK);
+        let rec = m.word(rider + RECORD);
+        let body = holder_body(m, rider, i);
+        copy_words(m, body + B_RATES, rec + R_KICK_SPIN);
+        i += 1;
+    }
+}
+
+/// The aim force pointed at holder `at`'s body (`+0xa4` the main one), and `+0x630` (the aim turned
+/// by that body) set or cleared, `+0x62c` (as is) cleared.
+fn aim_at(m: &mut impl Ram, rider: u32, at: u32, by_body: bool) {
+    let holder = m.word(rider + MAIN);
+    let force = m.word(rider + AIM_FORCE);
+    let body = m.word(holder + at);
+    m.set(force + F_BODY, body);
+    m.set(rider + AIM_BY_BODY, u32::from(by_body));
+    m.set(rider + AIM_AS_IS, 0);
+}
+
+/// **A wreck kind's random aim and clocks**, off its block of the rider's words at `b` (`0x40`
+/// bytes: `+0` the aim's and let-go's base times, `+0x10` the aim, `+0x20` the times' spreads,
+/// `+0x30` the aim's spread): the aim `+0x650` the block's plus its spread by three signed rands
+/// (`w` the block's), its `x` flipped where `flip`; then the aim clock `+0x640` and the let-go clock
+/// `+0x644` each its base plus its spread by a signed rand.
+fn aim_and_clocks(m: &mut impl Rider, rider: u32, b: u32, flip: bool, dt: F) {
+    let mut s = [0f32; 3];
+    for (k, s) in s.iter_mut().enumerate() {
+        let u = signed_unit(m, dt);
+        *s = fpu::mul(fw(m, rider + b + 0x30 + 4 * k as u32), u);
+    }
+    let base = quad(m, rider + b + 0x10);
+    let w = m.word(rider + b + 0x1c);
+    put_xyz(m, rider + AIM_FROM, base.add(Vf::new(s[0], s[1], s[2], 1.0)), w);
+    if flip {
+        let x = fpu::mul(fw(m, rider + AIM_FROM), -1.0);
+        put_f(m, rider + AIM_FROM, x);
+    }
+    for (k, to) in [AIM_TIME, LET_GO_TIME].into_iter().enumerate() {
+        let u = signed_unit(m, dt);
+        let at = rider + b + 4 * k as u32;
+        let acc = fpu::adda(0.0, fw(m, at));
+        let spread = fw(m, at + 0x20);
+        put_f(m, rider + to, fpu::madd(acc, spread, u));
+    }
+}
+
+/// A random hold, on where rand's `[0, 1)` comes under 0.66.
+fn maybe_hold(m: &mut impl Rider, rider: u32, at: u32, dt: F) {
+    let u = unit(m, dt);
+    let on = u32::from(u < f32::from_bits(0x3f28_f5c3));
+    switch_part(m, rider, at, on, dt);
+}
+
+/// Kind 13's tumble: a random spin `s` (each lane 5 × rand's `[0, 1)`), and each holder's body
+/// (the count read before the first, re-read after each) given the record's velocity, its `x` and `z`
+/// × 1.02 and `y` × 1.01, plus `s × d` for its offset `d` from the main body; and the spin `s` turned
+/// by its orientation into its rates (`w` 1).
+fn tumble(m: &mut impl Rider, rider: u32, dt: F) {
+    let mut s = [0f32; 3];
+    for s in &mut s {
+        let u = unit(m, dt);
+        *s = fpu::mul(5.0, u);
+    }
+    let s = Vf::new(s[0], s[1], s[2], 1.0);
+    let rec = m.word(rider + RECORD);
+    let v = quad(m, rec + R_VELOCITY);
+    let v_w = m.word(rec + R_VELOCITY + 0xc);
+    let v = Vf::new(fpu::mul(v.x(), f32::from_bits(0x3f82_8f5c)), fpu::mul(v.y(), f32::from_bits(0x3f81_47ae)), fpu::mul(v.z(), f32::from_bits(0x3f82_8f5c)), 0.0);
+    let mut i = 0u32;
+    while (i as i32) < m.word(rider + BODIES) as i32 {
+        let holder = m.word(rider + MAIN);
+        let first = m.word(holder + H_BODY);
+        let body = m.word(holder.wrapping_add(0xb0u32.wrapping_mul(i)) + H_BODY);
+        let d = quad(m, body + B_POSITION).sub(quad(m, first + B_POSITION));
+        let c = Vf::opmsub(Vf::opmula(s, d), d, s);
+        let body = holder_body(m, rider, i);
+        put_xyz(m, body + B_VELOCITY, v.add(c), v_w);
+        let body = holder_body(m, rider, i);
+        let q = quad(m, body + B_QUAT);
+        let acc = Vf::madd(Vf::opmula(s, q), s, q.bc(Field::W));
+        let t = Vf::opmsub(acc, q, s);
+        let qs = q.mul(s);
+        let acc = Vf::opmula(t, q);
+        let acc = Vf::madd(acc, q, qs.bc(Field::X));
+        let acc = Vf::madd(acc, q, qs.bc(Field::Y));
+        let acc = Vf::madd(acc, q, qs.bc(Field::Z));
+        let acc = Vf::madd(acc, t, q.bc(Field::W));
+        put_xyz(m, body + B_RATES, Vf::opmsub(acc, q, t), 0x3f80_0000);
+        i += 1;
+    }
+}
+
+/// **The wreck entry** ([`Call::WreckEntry`]: the mode machine going into the wreck, or the record's
+/// kind turning 13 while wrecked), `kind` the record's wreck kind:
+///
+/// 1. the ragdoll posed and settled ([`Call::Pose`], [`Call::Settle`]), its world's two settings put
+///    back, the seven parts of [`OFF_FIRST`] off and the aim force on;
+/// 2. every part switched on and its sphere made to ignore the record's collidable ([`keep`]);
+/// 3. each pose-list entry's body woken (`+0x80` 1), its `+0xe0` and `+0xf0` quadwords the entry's
+///    `+0x30` and `+0x40`, its three `+0x100` lanes `2·f × √(m·k)` (`f` of `+0xf0`, `k` of `+0xe0`,
+///    `m` its `+0x7c` object's `+0x130..`), its `+0xd4` the entry's `+0xc`;
+/// 4. each holder's body given the pose list's mass, inertia and target ([`body_mass`],
+///    [`body_inertia`], [`body_target`]);
+/// 5. `+0x38c` 1; the pose targets, latch `+0x254`, the bike released, high, slow and the touching
+///    clock all 0;
+/// 6. by the kind: 1–5, 8, 11 and 12 the holds (5: each at random), the aim force at a body, and a
+///    random aim and clocks ([`aim_and_clocks`]; 5 and 12 first hand the bodies the record's kick);
+///    6 and 7 the record's velocity to every body, holds and force off; 13 holds off and the
+///    tumble ([`tumble`]); 15 holds and force off and every body dropped (velocity `(0, −2, 0)`,
+///    `+0xa0`, `+0xa8` 0); any other nothing;
+/// 7. the rider's `+0x8f4` object told ([`Call::WreckCue`]).
+pub fn wreck_entry(m: &mut impl Rider, rider: u32, kind: u32, dt: F) {
+    m.call(Call::Pose, dt);
+    m.call(Call::Settle, dt);
+    let a = m.word(rider + WORLD_SETTINGS[0]);
+    let world = m.word(rider + WORLD);
+    m.set(world, a);
+    let b = m.word(rider + WORLD_SETTINGS[1]);
+    let world = m.word(rider + WORLD);
+    m.set(world + 4, b);
+    for at in OFF_FIRST {
+        switch_part(m, rider, at, 0, dt);
+    }
+    switch_part(m, rider, AIM_FORCE, 1, dt);
+    let mut i = 0u32;
+    while (i as i32) < m.word(rider + PARTS_COUNT) as i32 {
+        let list = m.word(rider + PARTS);
+        let part = m.word(list.wrapping_add(4 * i));
+        m.call(Call::Switch { part, on: 1 }, dt);
+        let list = m.word(rider + PARTS);
+        let rec = m.word(rider + RECORD);
+        let part = m.word(list.wrapping_add(4 * i));
+        let sphere = m.word(part + SPHERE);
+        let c = m.word(rec + R_COLLIDABLE);
+        keep(m, sphere, c, dt);
+        i += 1;
+    }
+    let mut i = 0u32;
+    while (i as i32) < m.word(rider + 0x3ac) as i32 {
+        let entry = |m: &mut _, i: u32| -> u32 { Ram::word(m, rider + 0x3b0).wrapping_add(i.wrapping_mul(0x50)) };
+        let e = entry(m, i);
+        let body = m.word(e + 8);
+        m.set(body + 0x80, 1);
+        let e = entry(m, i);
+        let body = m.word(e + 8);
+        let d4 = m.word(e + 0xc);
+        copy_words(m, body + 0xe0, e + 0x30);
+        copy_words(m, body + 0xf0, e + 0x40);
+        for k in 0..3 {
+            let o = m.word(body + 0x7c);
+            let f = fw(m, body + 0xf0 + 4 * k);
+            let kk = fw(m, body + 0xe0 + 4 * k);
+            let mm = fw(m, o + 0x130 + 4 * k);
+            let x = fpu::mul(fpu::mul(2.0, f), fpu::sqrt(fpu::mul(mm, kk)));
+            put_f(m, body + 0x100 + 4 * k, x);
+        }
+        m.set(body + 0xd4, d4);
+        i += 1;
+    }
+    let mut i = 0u32;
+    while (i as i32) < m.word(rider + BODIES) as i32 {
+        let at = |m: &mut _| Ram::word(m, rider + POSES).wrapping_add(0x60u32.wrapping_mul(i));
+        let body = holder_body(m, rider, i);
+        let p = at(m);
+        let mass = m.word(p + 4);
+        m.call(Call::BodyMass { body, mass }, dt);
+        let body = holder_body(m, rider, i);
+        let from = at(m) + 0x20;
+        m.call(Call::BodyInertia { body, from }, dt);
+        let body = holder_body(m, rider, i);
+        let from = at(m) + 0x50;
+        m.call(Call::BodyTarget { body, from }, dt);
+        i += 1;
+    }
+    m.set(rider + 0x38c, 1);
+    m.set(rider + TARGETED, 0);
+    m.set(rider + 0x254, 0);
+    m.set(rider + RELEASED, 0);
+    m.set(rider + HIGH, 0);
+    m.set(rider + SLOW, 0);
+    m.set(rider + TOUCHING_TIME, 0);
+    let [l, r] = LET_GO;
+    // Each aimed kind: its two holds, the holder its aim force follows, whether the aim turns with
+    // that body, its block of words, whether the aim's x flips.
+    let aimed = |l_on: u32, r_on: u32, at: u32, by_body: bool, b: u32, flip: bool| (Some((l_on, r_on)), at, by_body, b, flip);
+    let plan = match kind {
+        1 => Some(aimed(1, 1, H_BODY, true, 0x680, false)),
+        2 => Some(aimed(0, 1, H_BODY, false, 0x6c0, false)),
+        3 => Some(aimed(1, 0, H_BODY, false, 0x6c0, true)),
+        4 => Some(aimed(0, 0, 3 * 0xb0 + H_BODY, false, 0x700, true)),
+        5 => {
+            kick(m, rider);
+            Some((None, H_BODY, true, 0x740, false))
+        }
+        8 => Some(aimed(1, 1, H_BODY, false, 0x780, true)),
+        11 => Some(aimed(0, 0, H_BODY, false, 0x7c0, true)),
+        12 => {
+            bodies_from_record(m, rider, R_KICK, true);
+            Some(aimed(0, 0, H_BODY, false, 0x800, true))
+        }
+        6 | 7 => {
+            bodies_from_record(m, rider, R_VELOCITY, false);
+            switch_part(m, rider, l, 0, dt);
+            switch_part(m, rider, r, 0, dt);
+            switch_part(m, rider, AIM_FORCE, 0, dt);
+            aim_at(m, rider, H_BODY, true);
+            None
+        }
+        13 => {
+            switch_part(m, rider, l, 0, dt);
+            switch_part(m, rider, r, 0, dt);
+            tumble(m, rider, dt);
+            None
+        }
+        15 => {
+            switch_part(m, rider, l, 0, dt);
+            switch_part(m, rider, r, 0, dt);
+            switch_part(m, rider, AIM_FORCE, 0, dt);
+            m.set(rider + AIM_BY_BODY, 0);
+            m.set(rider + AIM_AS_IS, 0);
+            let mut i = 0u32;
+            while (i as i32) < m.word(rider + BODIES) as i32 {
+                for (o, w) in [(0x80, 0), (0x88, 0), (0x84, 0xc000_0000), (0xa0, 0), (0xa8, 0)] {
+                    let body = holder_body(m, rider, i);
+                    m.set(body + o, w);
+                }
+                i += 1;
+            }
+            None
+        }
+        _ => None,
+    };
+    if let Some((holds, at, by_body, b, flip)) = plan {
+        match holds {
+            Some((l_on, r_on)) => {
+                switch_part(m, rider, l, l_on, dt);
+                switch_part(m, rider, r, r_on, dt);
+            }
+            None => {
+                maybe_hold(m, rider, l, dt);
+                maybe_hold(m, rider, r, dt);
+            }
+        }
+        aim_at(m, rider, at, by_body);
+        aim_and_clocks(m, rider, b, flip, dt);
+    }
+    let cue = m.word(rider + CUE);
+    m.call(Call::WreckCue(cue), dt);
 }
