@@ -866,6 +866,43 @@ chassis_stop                boot 0x0015c3b0 (chassis) vtable +0xc4: +0x130 +0x14
 chassis_reset_history       boot 0x0015c420 (chassis) vtable +0xb0: memset 12 at +0x2b8, +0x2d0, +0x310
 #                                           and +0x2c4, +0x2dc, +0x31c; +0x2f0 and +0x300 = (0,0,0,1).
 #                                           chassis::reset_history
+score_lap_line              boot 0x00260820 (mgr, card) -> counted: the score card's lap line, called
+#                                           by the race kind 2 handler (score_race_tick) when the card
+#                                           is near the line. card +8 (ld/sd, 64-bit) flag 0x10 -> 1;
+#                                           start_gate_crossed(*(mgr+0x68)+0x5c, card+0x60, card+0x70):
+#                                           2 -> owner vt+0x28 / chain (+0x1c4, next +0x1c) vt+0x28 /
+#                                           mgr+0x30 listener vt+0x20, return 0; not 1 -> 0. Through:
+#                                           flag 0x10000 -> clear, kind (mgr+0x60) 3 -> listener +0x4c,
+#                                           out. Else +0x24/+0x24/+0x1c; +0x30 += 1; +0xb8 = 0; +0x48 =
+#                                           +0xb4 - +0x4c (sub.s), < 0 -> +0x48 = 0, return 0. Flag
+#                                           0x20000 clear and (+0x50 == 0 or +0x48 < +0x50): +0x50,
+#                                           +0x54 = kind 3 ? +0x34 : +0x30 - 1, owner +0x10 TWICE (the
+#                                           loop restarts at the owner, next +0x1c), listener +0xc.
+#                                           +0x4c = +0xb4; mgr flag 0x400 -> score_keep_lap; kind not
+#                                           2/3 and mgr+0x94 <= +0x30: card |= 1, mgr+0x5c |= 0x10,
+#                                           +0x18/+0x18/+0x14. Kind 3 with owner+8 (the ghost's card):
+#                                           run over (+0xb8/+0x4c/+0xb4/+0x1c/+0x24/+0x30 = 0, +0x34++),
+#                                           listener +0x54, ghost best +0x58, the ghost card reset on the
+#                                           line (spot = line +0x94.. with +0x9c + 1e-5 = 0x3727c5ac,
+#                                           +0x28/+0x14 = track +0x54), +0x34 >= mgr+0xf0 -> ghost |= 2,
+#                                           listener +0x50. Kind 4: card &= ~0x100. memset(+0xe4, 0,
+#                                           mgr+0x88 * 4); +0xc/+0xc/+8; clear 0x20000; return 1.
+#                                           S13c: race::LapRules::line, tests/race.rs
+score_keep_lap              boot 0x00260710 (mgr, card) the lap record: lap = kind 3 ? +0x34 + 1 :
+#                                           +0x30; lap < mgr+0x4c -> pop the free list mgr+0x58 (next
+#                                           +0x14), memset 0x18; else detach the card's oldest (+0x1bc
+#                                           list, next +0x14). Record {+0x48, +0x4c, +0x108, lap, +0x2c,
+#                                           next} prepended. Past the pool with an empty list the record
+#                                           pointer is the caller's stale $s1 (the manager): unreached.
+score_race_tick             boot 0x00262aa0 (dt f12, mgr) the score manager's race kind 2 handler
+#                                           (mgr+0x64 == 2 on sx01): per card the path queries
+#                                           0x0026e630 / 0x0026c010 (on-track +0x40), the line lists
+#                                           mgr+0x70 (flag 0x40, checkpoints near by path distance
+#                                           0x0026e0c0 < mgr+0x100) and mgr+0x78 (flag 0x200), the lap
+#                                           line (score_lap_line) when +0x10 is under track +0x38, the
+#                                           off-track clock +0xc0 against mgr+0xd4, the time limit
+#                                           +0xc4, then the 30 s (mgr+0x9c) finish countdown, ranking,
+#                                           0x00261b80 / 0x002628f0. Only the lap line is ported (S13c).
 
 # ---------------------------------------------------------------------------------------------------
 # D7 — which bike a freeride area loads. The vehicle build loader names two physics files from the
