@@ -10479,6 +10479,21 @@ atv_heap_free               atv 0x001b76d0 = free
 #   flags a4 == 0 ? sender+0x10 : a5; -> 0x00282190(conn 0x0084ada0, &header, flags) (queue 0x00282ea0
 #   copies 2 header bytes and len data). ride-2's record pass runs 46 stunt, 15 whole, 138 change ports
 #   (a temporary count).
+# F31b5k — the connection's queue the sender's send ends in (game_sim::handling::update::{net_queue,
+# queue_push}; tests/mxvatv_bike_ride.rs the_connections_queue_is_the_originals). Journal:
+# research/journal/2026-11-09-f31b5k-net-queue/.
+#   0x00282190(conn, hdr, flags): flags&2 -> push +0xfc; else flags&0x10 -> push +0x11c only if +0x2c != 0
+#   && +0x28 >= 0, v0 1 always; else push +0xdc. A failed push, connection up: memcpy 0x00354310(0x00445cc0,
+#   q+4, q+8 - q+4), 0x002845f0(+0x28, -1, 0x00445cc0, len, 1/0, 1000/0) (bit 1 / plain); >= 0 -> memset
+#   0x003544c8(q+0, 0, 1), q+8 = q+4 + 1; then push the pair's second (+0x10c / +0xec), v0 its answer.
+#   Ghidra drops a1 (the header) on the queue calls; it is $5 throughout.
+#   Push 0x00282ea0(q, hdr): q = {count byte address, start, end, room}, messages [id, len, data] from
+#   start+1. need = hdr[1]+2; room < need + (end-start) -> walk from start+1: n++, got = (this one's
+#   len+2) + (room-used) (not cumulative), stop at n >= count (signed) or got >= need; got < need -> 0;
+#   n < count -> memcpy down (forward, lq/sq or bytes: memmove when dst < src) and count -= n, else
+#   end = start+1 and count 0. Then hdr's 2 bytes, len data bytes, count+1; v0 1.
+#   State 4's conn 0x0084ada0 (bike+0x400's +0x34): +0x28 -1, +0x2c 0 (offline: no flush); queues'
+#   buffers 0x0084af20, 0x0084b450, 0x0084b980, 0x0084c3e0, 0x0084c910, room 0x514, +0xdc holding one.
 # F31b5g — the calls quad::Steps hands on, in Rust (game_sim::handling::record::held/held_words,
 # update::stunt_start/trick_end; tests/mxvatv_bike_ride.rs). Journal:
 # research/journal/2026-11-05-f31b5g-nothing-handed-on/.
