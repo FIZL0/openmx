@@ -3866,9 +3866,12 @@ impl Menu {
         self.quit.as_ref().map(|q| q.1)
     }
 
-    /// The last device among `presses` that pressed anything (P281), for the hints.
+    /// The last device among `presses` that pressed anything (P281), for the hints. Not the
+    /// keyboard on Android, where its only press is the phone's back button (P311): the hints keep
+    /// the touch pad's or the controller's buttons rather than turning to Esc and Space.
     fn note_dev(&mut self, presses: &[(Dev, Press)]) {
-        if let Some((d, _)) = presses.iter().rev().find(|(_, p)| *p != Press::default()) {
+        let hinted = |d: &Dev| !(cfg!(target_os = "android") && *d == Dev::Keys);
+        if let Some((d, _)) = presses.iter().rev().find(|(d, p)| *p != Press::default() && hinted(d)) {
             self.last_dev = Some(d.clone());
         }
     }

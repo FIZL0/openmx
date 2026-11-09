@@ -4401,6 +4401,10 @@ impl Output {
             let m = mixer.clone();
             let thread = std::thread::spawn(move || {
                 let fill = Box::new(move |out: &mut [i16]| match m.lock() {
+                    // P311: silent, and the mix not moved on, from the moment the app went away
+                    // till the stream stands still, or if it would not
+                    #[cfg(target_os = "android")]
+                    Ok(_) if openmx_android::away::paused() => out.fill(0),
                     Ok(mut m) => m.render(out),
                     Err(_) => out.fill(0),
                 });
@@ -4410,8 +4414,17 @@ impl Output {
                     Err(why) => return drop(said.send(Some(why))),
                 };
                 let _ = said.send(None);
+                // P311: the Android app away, the stream stands still (the music where it was) rather
+                // than playing on behind the home screen like a music player's.
+                #[cfg(target_os = "android")]
+                let mut still = false;
                 while !quit.load(std::sync::atomic::Ordering::Relaxed) {
                     std::thread::park_timeout(std::time::Duration::from_millis(50));
+                    #[cfg(target_os = "android")]
+                    if openmx_android::away::paused() != still {
+                        still = !still;
+                        _sound.stand_still(still);
+                    }
                 }
             });
             match opened.recv().map_err(|e| e.to_string())? {
@@ -4492,7 +4505,7 @@ impl Output {
 /// the mix is rendered at `rate` stereo and resampled to it. A small fixed buffer keeps the
 /// effects' latency low; a device that won't take it gets its default.
 #[cfg(any(windows, target_os = "linux", target_os = "android"))]
-pub struct DeviceSound(#[allow(dead_code)] cpal::Stream);
+pub struct DeviceSound(#[cfg_attr(not(target_os = "android"), allow(dead_code))] cpal::Stream);
 
 #[cfg(any(windows, target_os = "linux", target_os = "android"))]
 impl DeviceSound {
@@ -4539,6 +4552,18 @@ impl DeviceSound {
             .map_err(|e| e.to_string())?;
         stream.play().map_err(|e| e.to_string())?;
         Ok(DeviceSound(stream))
+    }
+
+    /// Stop pulling the mix (`still`), the device silent and the mix where it was, or start again
+    /// (P311: the Android app away and back).
+    #[cfg(target_os = "android")]
+    pub fn stand_still(&self, still: bool) {
+        use cpal::traits::StreamTrait;
+        let r = if still { self.0.pause().map_err(|e| e.to_string()) } else { self.0.play().map_err(|e| e.to_string()) };
+        match r {
+            Ok(()) => println!("sound: {}", if still { "stands still, the app away" } else { "on again" }),
+            Err(e) => println!("sound: could not {} the stream: {e}", if still { "pause" } else { "restart" }),
+        }
     }
 }
 

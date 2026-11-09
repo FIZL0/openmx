@@ -95,14 +95,21 @@ fn main(app: AndroidApp) {
     std::process::exit(code);
 }
 
-/// The activity's lifecycle (the patched winit's hook, M108). Finished — swiped away in recents,
-/// closed — the process ends rather than idling on with no activity; a destroy to be made again
-/// (a configuration change the manifest does not take on itself) does not.
+/// The activity's lifecycle (the patched winit's hook, M108). Paused or stopped, the app has gone
+/// away (P311, [`openmx_android::away`]): the shell pauses the ride and saves the settings, the
+/// sound stands still till it is resumed. Finished — swiped away in recents, closed — the process
+/// ends rather than idling on with no activity; a destroy to be made again (a configuration change
+/// the manifest does not take on itself) does not.
 fn lifecycle(phase: winit::platform::android::lifecycle::Phase) {
+    use openmx_android::away;
     use winit::platform::android::lifecycle::Phase;
     println!("android: activity {phase:?}");
-    if phase == Phase::Destroy && openmx_android::finishing() {
-        std::process::exit(0);
+    match phase {
+        Phase::Pause => drop(away::pause()),
+        Phase::Stop => drop(away::stop()),
+        Phase::Resume => drop(away::resume()),
+        Phase::Destroy if openmx_android::finishing() => std::process::exit(0),
+        Phase::Start | Phase::Destroy => {}
     }
 }
 
@@ -384,6 +391,19 @@ pub fn pad_name(node: &str) -> String {
     let Some(id) = PLACES.lock().unwrap_or_else(|e| e.into_inner()).id(i as usize) else { return String::new() };
     let c = CONTROLLERS.lock().unwrap_or_else(|e| e.into_inner());
     c.listed.iter().find(|d| d.id as usize == id).map_or_else(|| format!("Controller {id}"), |d| d.name.clone())
+}
+
+/// Rumble the pad at place `node` (P183, P311, `pad::Motor`), as the iPhone's [`crate::ios`] does:
+/// a controller through its own vibrator, the touch pad through the phone's — the touch pad's
+/// player holds the phone. Never waits ([`openmx_android::vibrate`] asks on a thread of its own).
+pub fn rumble(node: u32, r: crate::pad::Rumble) {
+    let to = if node == TOUCH_INDEX {
+        openmx_android::Vibrator::Phone
+    } else {
+        let Some(id) = PLACES.lock().unwrap_or_else(|e| e.into_inner()).id(node as usize) else { return };
+        openmx_android::Vibrator::Controller(id as i32)
+    };
+    openmx_android::vibrate(to, r.level, u32::from(r.millis()));
 }
 
 /// The js numbers of the standard mapping's buttons, as `web_host.rs` has them.

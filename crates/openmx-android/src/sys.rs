@@ -353,3 +353,51 @@ pub fn install_apk(apk: &Path) -> Result<(), String> {
 pub fn install_status() -> Option<i32> {
     call(jni_str!("installed"), jni_sig!("()I")).and_then(|v| v.i().ok()).filter(|&s| s != -99)
 }
+
+// ---- the back button and the vibrators (P311) -------------------------------------------------------
+
+/// The Android version's API level (`Build.VERSION.SDK_INT`), asked once; 0 if it can't be read.
+pub fn sdk() -> i32 {
+    static SDK: OnceLock<i32> = OnceLock::new();
+    *SDK.get_or_init(|| {
+        with_env(|env, _| env.get_static_field(jni_str!("android/os/Build$VERSION"), jni_str!("SDK_INT"), jni_sig!("I"))?.i())
+            .unwrap_or(0)
+    })
+}
+
+/// Whether the phone's back button comes through `MxActivity`'s back callback ([`backs`]): Android 13
+/// on, where the system takes the back key for its gesture. Before 13 it is only the window's key
+/// event (`BrowserBack`), which an Android 16 also sends besides the callback, so it is read from
+/// one or the other, never both.
+pub fn back_by_callback() -> bool {
+    sdk() >= 33
+}
+
+/// The phone's back presses since the last call that came through `MxActivity`'s back callback
+/// ([`back_by_callback`]).
+pub fn backs() -> u32 {
+    call(jni_str!("backs"), jni_sig!("()I")).and_then(|v| v.i().ok()).map_or(0, |n| n.max(0) as u32)
+}
+
+/// What to vibrate: the phone itself, or the controller with Android's input device id.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Vibrator {
+    Phone,
+    Controller(i32),
+}
+
+/// Runs `to`'s vibrator at `level` of 255 for `millis` ms (`MxActivity.vibrate`: every motor of a
+/// controller, the phone's own for [`Vibrator::Phone`]); level 0 stops it. On a thread of its own,
+/// so a slow binder call never holds a frame. A controller with no vibrator shakes nothing.
+pub fn vibrate(to: Vibrator, level: u8, millis: u32) {
+    let device = match to {
+        Vibrator::Phone => -1,
+        Vibrator::Controller(id) => id,
+    };
+    std::thread::spawn(move || {
+        with_env(|env, activity| {
+            let args = [JValue::Int(device), JValue::Int(i32::from(level)), JValue::Int(millis.min(i32::MAX as u32) as i32)];
+            env.call_method(activity, jni_str!("vibrate"), jni_sig!("(III)V"), &args).map(drop)
+        });
+    });
+}

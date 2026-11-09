@@ -993,11 +993,32 @@ impl Motor {
     }
 }
 
-/// No force feedback off Linux and the iPhone: the asks are kept and nothing turns.
-#[cfg(not(any(target_os = "linux", target_os = "ios")))]
+/// The Android phone's pads' motors (P311): a controller's vibrators, or the phone's own for the
+/// touch pad ([`crate::android::rumble`], a one-shot vibration at the ask's level for its
+/// milliseconds). Every pad node gets one; a controller with no vibrator shakes nothing.
+#[cfg(target_os = "android")]
+struct Motor {
+    /// The pad's place, its node's name (`gamepad/<place>`).
+    place: u32,
+}
+
+#[cfg(target_os = "android")]
+impl Motor {
+    fn open(_: &std::path::Path, _: &std::path::Path, node: &str) -> Option<Motor> {
+        Some(Motor { place: node.parse().ok()? })
+    }
+
+    fn play(&mut self, r: Rumble) -> std::io::Result<()> {
+        crate::android::rumble(self.place, r);
+        Ok(())
+    }
+}
+
+/// No force feedback off Linux and the phones: the asks are kept and nothing turns.
+#[cfg(not(any(target_os = "linux", target_os = "ios", target_os = "android")))]
 struct Motor;
 
-#[cfg(not(any(target_os = "linux", target_os = "ios")))]
+#[cfg(not(any(target_os = "linux", target_os = "ios", target_os = "android")))]
 impl Motor {
     fn open(_: &std::path::Path, _: &std::path::Path, _: &str) -> Option<Motor> {
         None
