@@ -56,7 +56,7 @@ fn the_flight(disc: &mut Disc) -> Flight {
 /// Player `player`'s plane taken from its bay in [`MACHINES`] over `world`, after its first step.
 fn taken(flight: Flight, player: usize, world: &mut Flat) -> Flight {
     let mut lot = Lot::new(MACHINES.as_bytes(), 2, &mut |at| world.ground(at).0.y());
-    lot.lift = Some(F(LIFT));
+    lot.lift = [Some(F(LIFT)); vehicle::LIVERIES];
     let mut plane = lot.plane(player, Some(flight)).expect("the bay's plane");
     plane.step(&Sim::new(0), F(1.0 / 30.0), world);
     plane.flight.expect("the plane still has its flight")
@@ -141,7 +141,7 @@ fn an_online_seat_starts_where_the_offline_plane_does() {
     let normal = Vf::new(0.5, 0.8660254, 0.0, 1.0);
     let mut world = Flat { y: F(12.25), normal };
     let mut lot = Lot::new(MACHINES.as_bytes(), 3, &mut |at| world.ground(at).0.y());
-    lot.lift = Some(F(LIFT));
+    lot.lift = [Some(F(LIFT)); vehicle::LIVERIES];
     let template = the_flight(&mut disc);
     let bays: Vec<vehicle::Bay> = lot.of(Machine::Biplane).copied().collect();
     for (player, bay) in bays.iter().enumerate() {

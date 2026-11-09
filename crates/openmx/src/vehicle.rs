@@ -330,7 +330,8 @@ pub struct PackFlier {
     pub files: game_render::disc::Res,
     /// The `.phy` of the kind, as the manifest names it.
     pub phy: String,
-    /// The skin's model name (`biplane3`), and the one a second copy wears ([`PackFlier::model`]).
+    /// The skin's model name (`biplane3`), what the seat's copy is drawn in, and the other skin of
+    /// the same model, which a second seat that picked the same skin wears instead ([`tell_apart`]).
     pub skin: String,
     pub second: String,
     /// 1 or 2: the `.phy`'s `ModelOne` or `ModelTwo` figures.
@@ -352,13 +353,6 @@ impl PackFlier {
         self.model_number == 1
     }
 
-    /// The model it is drawn in, in `livery`: the pick for the first copy; for the second, the other
-    /// skin of the same model (MD80e), so every copy flies the same figures and the second still
-    /// looks different, as MX Unleashed's alternate livery does.
-    pub fn model(&self, livery: usize) -> &str {
-        if livery % 2 == 0 { &self.skin } else { &self.second }
-    }
-
     pub fn hull(&self) -> Option<Vec<u8>> {
         self.read(&self.hull)
     }
@@ -376,25 +370,65 @@ impl PackFlier {
     }
 }
 
-/// The ride's fliers (P315), the first player's picks: each kind off its pack ([`PackFlier`]), or
-/// MX Unleashed's, the disc's, in the livery picked first.
+/// One seat's fliers (P315, P315b), its garage's picks: each kind off its pack ([`PackFlier`]), or
+/// MX Unleashed's, the disc's, in the livery picked. A ride has one a livery ([`livery`]): the first
+/// player's and the second's, each flying and drawn in their own; a seat past those flies the picks
+/// of the seat whose livery it wears.
 #[derive(Default)]
 pub struct Fliers {
     pub plane: Option<PackFlier>,
     pub kiowa: Option<PackFlier>,
-    /// The disc's livery the first copy wears where the kind is MX Unleashed's: 0, or 1 for its
-    /// second livery picked. The second copy wears the other.
+    /// The disc's livery the seat's copy wears where the kind is MX Unleashed's, the plane's then the
+    /// helicopter's: 0, or 1 for its second livery.
     pub original: [usize; 2],
 }
 
 impl Fliers {
-    /// The disc livery copy livery `livery` of `machine` is drawn in, where it is MX Unleashed's.
-    pub fn original_livery(&self, machine: Machine, livery: usize) -> usize {
-        let first = match machine {
+    /// The seat's flier of `machine` off a pack, `None` where it is MX Unleashed's.
+    pub fn pack(&self, machine: Machine) -> Option<&PackFlier> {
+        match machine {
+            Machine::Helicopter => self.kiowa.as_ref(),
+            _ => self.plane.as_ref(),
+        }
+    }
+
+    /// The disc livery the seat's `machine` is drawn in, where it is MX Unleashed's.
+    pub fn original_of(&self, machine: Machine) -> usize {
+        match machine {
             Machine::Helicopter => self.original[1],
             _ => self.original[0],
-        };
-        (livery + first) % LIVERIES
+        }
+    }
+
+    /// The model the seat's `machine` is drawn in: its pack skin's, else the disc's in its livery
+    /// (`models`, [`Machine::models`]' order).
+    pub fn model<'a>(&'a self, machine: Machine, models: &[&'a str]) -> &'a str {
+        match self.pack(machine) {
+            Some(f) => &f.skin,
+            None => models[self.original_of(machine) % models.len()],
+        }
+    }
+}
+
+/// Every seat's fliers told apart (P315b), `seats` in livery order: a seat that picked the very skin
+/// of a kind the first seat did wears the other — a pack's the other skin of the same model
+/// ([`PackFlier::second`], so it flies the same figures), the disc's its other livery — as the
+/// original parks its second player's machine in the alternate livery. A pack with one skin of the
+/// model leaves both alike.
+pub fn tell_apart(seats: &mut [Fliers]) {
+    let Some((first, rest)) = seats.split_first_mut() else { return };
+    for seat in rest {
+        for k in 0..2 {
+            let (mine, theirs) = match k {
+                0 => (seat.plane.as_mut(), first.plane.as_ref()),
+                _ => (seat.kiowa.as_mut(), first.kiowa.as_ref()),
+            };
+            match (mine, theirs) {
+                (Some(m), Some(t)) if m.id == t.id && m.skin == t.skin => std::mem::swap(&mut m.skin, &mut m.second),
+                (None, None) if seat.original[k] == first.original[k] => seat.original[k] = (seat.original[k] + 1) % LIVERIES,
+                _ => {}
+            }
+        }
     }
 }
 
@@ -563,8 +597,9 @@ pub struct Lot {
     pub bays: Vec<Bay>,
     /// How far over the ground the original stands its plane's body when it spawns it on a file
     /// spot ([`flight::spawn_lift`] off the disc's model, S164), which every plane [`Lot::plane`]
-    /// stands in such a bay carries ([`Plane::lift`]); `None` without the model.
-    pub lift: Option<F>,
+    /// stands in such a bay carries ([`Plane::lift`]); `None` without the model. One a livery, as
+    /// each seat's plane is its own skin's model (P315b).
+    pub lift: [Option<F>; LIVERIES],
     /// The file's planes' `SetGroundHeight`s, in copy order ([`ground_heights`]); a copy past them is
     /// put on the ground.
     pub ground_heights: Vec<bool>,
@@ -572,15 +607,16 @@ pub struct Lot {
     /// which each player's garage takes its cars from ([`Lot::cars_for`]). Empty without the files.
     pub cars: Vec<CarRide>,
     /// The helicopter as the disc builds it (P216), off `machine.res`'s `kiowa.phy`, which each
-    /// player's garage takes a copy of ([`Lot::heli_for`]). `None` without the file.
-    pub kiowa: Option<KiowaRide>,
+    /// player's garage takes a copy of ([`Lot::heli_for`]): one a livery, each seat's picked skin's
+    /// (a pack's, P315b), the first's for a seat past them. Empty without the file.
+    pub kiowa: Vec<KiowaRide>,
     /// Every online seat's cars (S249), seat `i`'s [`Lot::cars_for`] of the lot parked for the most
     /// seats a ride has, as the online biplane bays are: the same on every machine off the same disc.
     /// What an online seat's car is taken from and stepped with ([`switch_lane_among`],
     /// [`drive_lane`]). Empty offline and without the files.
     pub online_cars: Vec<Vec<CarRide>>,
-    /// The models the helicopter is drawn in, one a livery: a pack's ([`PackFlier::model`], MD80e)
-    /// or the disc's in the livery order picked (P315).
+    /// The models the helicopter is drawn in, one a livery: each seat's pick, a pack's (MD80e) or
+    /// the disc's in the livery picked (P315, P315b).
     pub mxvatv_kiowa: Vec<String>,
 }
 
@@ -595,7 +631,7 @@ impl Lot {
     /// [`Lot::new`] over spots already found, one list a machine in [`Machine::ALL`]'s order: a
     /// world's ([`world_spots`]).
     pub fn around(file: Vec<Vec<Spawn>>, players: usize, ground: &mut dyn FnMut(Vf) -> f32) -> Lot {
-        let mut lot = Lot { file, bays: Vec::new(), lift: None, ground_heights: Vec::new(), cars: Vec::new(), kiowa: None, online_cars: Vec::new(), mxvatv_kiowa: Vec::new() };
+        let mut lot = Lot { file, bays: Vec::new(), lift: [None; LIVERIES], ground_heights: Vec::new(), cars: Vec::new(), kiowa: Vec::new(), online_cars: Vec::new(), mxvatv_kiowa: Vec::new() };
         lot.resize(players, ground);
         lot
     }
@@ -640,7 +676,7 @@ impl Lot {
     /// normal. `None` for a spot the port found, without the model, or with no ground under it, where
     /// the model's origin stands on the spot.
     pub fn body_spot(&self, bay: &Bay, ground: &mut dyn FnMut(Vf) -> (Vf, Vf)) -> Option<(Vf, Vf)> {
-        let lift = self.lift.filter(|_| bay.original)?;
+        let lift = self.lift[bay.livery % LIVERIES].filter(|_| bay.original)?;
         let at = bay.spawn.at;
         let (on, normal) = ground(Vf::new(at.x(), at.y() + PROBE, at.z(), 1.0));
         let y = if self.ground_heights.get(bay.copy).copied().unwrap_or(true) { on.y() } else { at.y() };
@@ -655,7 +691,7 @@ impl Lot {
             None => Plane::parked(bay.spawn),
         };
         plane.livery = bay.livery;
-        plane.lift = self.lift.filter(|_| bay.original);
+        plane.lift = self.lift[bay.livery % LIVERIES].filter(|_| bay.original);
         plane.ground_height = self.ground_heights.get(bay.copy).copied().unwrap_or(true);
         Some(plane)
     }
@@ -3107,7 +3143,9 @@ impl Garage {
                 mods.car(seat, &mut car.car);
             }
         }
-        if let (Some(heli), Some(stock)) = (self.heli.as_mut(), lot.kiowa.as_ref()) {
+        if let Some(heli) = self.heli.as_mut()
+            && let Some(stock) = lot.kiowa_of(heli.livery)
+        {
             heli.phy = stock.phy.clone();
             mods.kiowa(seat, &mut heli.phy);
             if let Some(flown) = heli.flown.as_mut() {
@@ -3120,9 +3158,14 @@ impl Garage {
 }
 
 impl Lot {
-    /// Player `copy`'s helicopter: the disc's ([`Lot::kiowa`]) in their livery, parked in their bay.
+    /// The helicopter livery `livery`'s seat flies ([`Lot::kiowa`]), the first's past them.
+    pub fn kiowa_of(&self, livery: usize) -> Option<&KiowaRide> {
+        self.kiowa.get(livery).or(self.kiowa.first())
+    }
+
+    /// Player `copy`'s helicopter: their livery's ([`Lot::kiowa_of`]), parked in their bay.
     pub fn heli_for(&self, copy: usize) -> Option<KiowaRide> {
-        let mut heli = self.kiowa.clone()?;
+        let mut heli = self.kiowa_of(livery(copy))?.clone();
         heli.livery = livery(copy);
         heli.bay = self.bay(Machine::Helicopter, copy).map(|b| b.spawn);
         Some(heli)
@@ -3154,11 +3197,13 @@ mod tests {
     }
 
     #[test]
-    fn mx_unleasheds_first_copy_wears_the_livery_picked_and_the_second_the_other() {
-        // P315: the disc's second livery picked swaps the two copies' liveries.
-        let f = Fliers { original: [1, 0], ..Fliers::default() };
-        assert_eq!([f.original_livery(Machine::Biplane, 0), f.original_livery(Machine::Biplane, 1)], [1, 0]);
-        assert_eq!([f.original_livery(Machine::Helicopter, 0), f.original_livery(Machine::Helicopter, 1)], [0, 1]);
+    fn mx_unleasheds_second_seat_on_the_first_seats_livery_wears_the_other() {
+        // P315b: each seat its own livery, and the second on the first's the alternate.
+        let mut seats = [Fliers { original: [1, 0], ..Fliers::default() }, Fliers { original: [1, 1], ..Fliers::default() }];
+        tell_apart(&mut seats);
+        assert_eq!([seats[0].original_of(Machine::Biplane), seats[1].original_of(Machine::Biplane)], [1, 0]);
+        assert_eq!([seats[0].original_of(Machine::Helicopter), seats[1].original_of(Machine::Helicopter)], [0, 1]);
+        assert_eq!(seats[1].model(Machine::Biplane, &Machine::Biplane.models()[..LIVERIES]), "biplane");
         assert_eq!(Machine::Helicopter.pack_word(), Some("kiowa"));
         assert_eq!(Machine::Buggy.pack_word(), None);
     }
