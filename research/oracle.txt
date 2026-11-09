@@ -10100,6 +10100,37 @@ atv_heap_free               atv 0x001b76d0 = free
 #   re-read. State 4: 18 holders, world 0x010cc6f0 with the same 18 bodies, all vtable 0x003cd200.
 #   Oracle: 12 000 cases, both run whole in the interpreter, every written word equal; zero-angle axis 919.
 
+# S288: the rider's wreck entry 0x004ed700 (a0 rider, a1 record +0x138 kind, f12 dt; S278b's
+# rider::Call::WreckEntry), ported as game_sim::handling::rider::wreck_entry (with body_mass, body_inertia,
+# keep). tests/mxvatv_rider_modes.rs (the_riders_wreck_entry_is_the_originals); served in
+# tests/mxvatv_bike_ride.rs's rider leaf (flip-1 bit-exact). Journal: research/journal/2026-11-09-s288-rider-wreck-entry/.
+#   Order: vt +0xd0 pose (a1 0), vt +0xcc settle; world (+0x27c) +0/+4 = rider +0x540/+0x548; parts +0x558,
+#   +0x55c, +0x578..+0x588 off, aim force on (slot +0x10 of the part's vt: 0x0049bd30 parts, 0x0049bd80 the
+#   force); each part on, then its sphere keeps record +0x1dc: 0x00115600 (ignore list +count/+cap/+block;
+#   already there: nothing; full: realloc 0x001b7470(block, (n+1)*4, file 0x0039683e, line 0x4cf));
+#   pose list (+0x3ac/+0x3b0, 0x50 each): body +0x80 = 1, +0xe0/+0xf0 = entry +0x30/+0x40, +0x100+4k =
+#   2*f*sqrt(m*k) (f +0xf0, k +0xe0, m (*(body+0x7c))+0x130), +0xd4 = entry +0xc; holders: body vt (+0x110)
+#   +0x18 0x00493cc0 (mass: +0x18 m, +0x1c 1/m), +0x60 0x00493bf0 (from +0xc = 1.0; +0x130 quad, +0x140.. 1/v
+#   or 0 where v <= 0), +0x68 0x00493b00 (body_target); +0x38c = 1; +0x264, +0x254, +0x634, +0x63c, +0x638,
+#   +0x380 = 0. Jump table 0x0052a930 (kind < 16 unsigned): 1 0x4edb10, 2 0x4edcc4, 3 0x4ede74, 4 0x4ee038,
+#   5 0x4ee1fc, 6/7 0x4ee86c, 8 0x4ee4e4, 11 0x4ee6a8, 12 0x4ee924, 13 0x4eeb54, 15 0x4eda48, else none; tail
+#   0x4eed80: 0x004f7ca0(*(rider+0x8f4), 0) (reads record +0x138 itself; not ported: Call::WreckCue).
+#   Aimed kinds (holds +0x550/+0x554, force at main +0xa4 or (4) +0x2b4, +0x630, block S, x flipped):
+#   1 1/1 +0x630 1 S 0x680; 2 0/1 0x6c0; 3 1/0 0x6c0 flip; 4 0/0 0x700 flip; 5 each rand*2^-31 < 0x3f28f5c3
+#   (0.66) +0x630 1 S 0x740, first record +0xa0 -> body +0x80, +0xb0 -> body +0x1d0; 8 1/1 0x780 flip;
+#   11 0/0 0x7c0 flip; 12 0/0 0x800 flip, first record +0xa0 -> body +0x80 and body +0x84 = 0. Block: S+0
+#   clock bases, S+0x10 aim, S+0x20 clock spreads, S+0x30 aim spread; +0x650 xyz = aim + spread*(2u-1), w the
+#   raw word S+0x1c (Ghidra shows 1.0: wrong); flip = mul(x, -1.0); +0x640/+0x644 = madd(adda(0, base),
+#   spread, 2u-1). Kinds 1, 3, 8: the first switch's a1 is $5 left at 1 (Ghidra shows no argument).
+#   6/7: record +0x180 -> every body +0x80; holds, force off; aim at main +0xa4, +0x630 = 1. 13: holds off;
+#   spin 5u per lane (w 1.0); v = record +0x180 * (1.02 0x3f828f5c, 1.01 0x3f8147ae, 1.02); body +0x80 =
+#   v + spin x d (w raw record +0x18c); body +0x1d0 = the VU turn of spin by the body quat (w 1.0). 15: holds,
+#   force off, +0x630 = +0x62c = 0; every body +0x80 0, +0x84 0xc0000000, +0x88 0, +0xa0 0, +0xa8 0.
+#   Oracle: 20 000 drawn cases of state 4's rider (18 bodies, 17 pose entries, 9 parts), the function run
+#   whole against the port, pose/settle/switch/rand/realloc/cue hooked, every written word and the call log
+#   equal; every kind ~1 100 times, kind 5's four hold pairs (fewest 127), list grown 11 988, a free slot
+#   7 274, an inertia lane at 0 14 931.
+
 # F31b5d: state 4's sim listeners that are not the bike's, shown inert on C15 ride-2 and flip-1. Journal:
 # research/journal/2026-11-05-f31b5d-other-listeners-inert/.
 #   Lists every frame: sim+0x24 = the bike's record alone (getter 0x00208390 answers it once a pass); sim+0x3c
