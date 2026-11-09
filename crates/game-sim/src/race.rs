@@ -1586,7 +1586,7 @@ pub mod race_card_flags {
     pub const WAITED_FOR_TOO: u64 = 0x8000;
     /// A fast-lap attack's own clock runs (the card's `+0x168`).
     pub const FAST_LAP_CLOCK: u64 = 0x200;
-    /// The card's time ran out ([`super::RaceCard::time_left`]); with [`super::card_flags::OUT`] it
+    /// The card's time ran out ([`super::LapCard::time_left`]); with [`super::card_flags::OUT`] it
     /// marks a card the handler no longer races.
     pub const OUT_OF_TIME: u64 = 0x4000;
     /// The card's time is held: it does not count down.
@@ -1610,19 +1610,10 @@ pub struct RaceCard {
     pub odometer: F,
     /// The spot the rider aims at (`+0xa0`): the kept spot, for a player.
     pub aim: Spot,
-    /// A rider still out when the race ends is given a time this far behind the first card's
-    /// (`+0xbc`).
-    pub split: F,
-    /// How long the rider has been off the track (`+0xc0`).
-    pub off_clock: F,
-    /// The card's time left (`+0xc4`), when the race has a limit; 0 for none.
-    pub time_left: F,
     /// The rider's look ahead (`+0x120`), told to the card's listeners with its position.
     pub look: Vf,
     /// The path's way ahead at the rider's spot (`+0x140`).
     pub ahead: Vf,
-    /// A fast-lap attack's clock (`+0x168`).
-    pub fast_lap_clock: F,
     /// Off the track, the unit step from the rider back to the path (`+0x180`).
     pub to_track: Vf,
 }
@@ -1732,15 +1723,15 @@ impl RaceRules {
         if card.lap.on_track == 0 {
             self.back_to_track(card, track, course, &mut said);
         }
-        if read(self.time_limit) > F::ZERO && read(card.time_left) > F::ZERO {
+        if read(self.time_limit) > F::ZERO && read(card.lap.time_left) > F::ZERO {
             let fl = card.lap.flags;
             if fl & card_flags::TAKING_PART != 0 && fl & done == 0 {
                 if fl & rf::CLOCK_HELD == 0 {
-                    card.time_left = card.time_left - dt;
+                    card.lap.time_left = card.lap.time_left - dt;
                 }
-                if read(card.time_left) <= F::ZERO {
+                if read(card.lap.time_left) <= F::ZERO {
                     card.lap.flags |= rf::OUT_OF_TIME;
-                    card.time_left = F::ZERO;
+                    card.lap.time_left = F::ZERO;
                     said.push(RaceNotice::OutOfTime);
                 }
             }
@@ -1785,13 +1776,13 @@ impl RaceRules {
             track.paths[p].flags &= !path_flags::CHECKPOINT;
         }
         if card.lap.on_track == 0 {
-            card.off_clock = card.off_clock + dt;
+            card.lap.off_track = card.lap.off_track + dt;
         } else {
             self.near_line(card, ghost, track, course, said);
             if card.lap.on_track == 0 {
-                card.off_clock = card.off_clock + dt;
+                card.lap.off_track = card.lap.off_track + dt;
             } else {
-                card.off_clock = F::ZERO;
+                card.lap.off_track = F::ZERO;
             }
         }
         let last = card.lap.seen.last;
@@ -1809,9 +1800,9 @@ impl RaceRules {
         } else {
             // Everyone the race waits for is done: the card is timed off the first card's clock.
             let c = &mut card.lap;
-            c.race_time = leader_time + card.split;
+            c.race_time = leader_time + c.gap;
             let left = F(fpu::from_i32(self.lap.laps.wrapping_sub(c.laps)));
-            c.lap_time = (card.split + c.lap_start) / left;
+            c.lap_time = (c.gap + c.lap_start) / left;
             if read(c.lap_time) < read(c.best_lap) || read(c.best_lap) == F::ZERO {
                 c.best_lap = c.lap_time;
             }
@@ -1823,7 +1814,7 @@ impl RaceRules {
             c.flags |= card_flags::OUT;
         }
         if kind == race_kind::FAST_LAP && card.lap.flags & rf::FAST_LAP_CLOCK != 0 {
-            card.fast_lap_clock = card.fast_lap_clock + dt;
+            card.lap.attack_clock = card.lap.attack_clock + dt;
         }
     }
 
@@ -1898,8 +1889,8 @@ impl RaceRules {
         let back = point.merge(Dest::XYZ, point.sub(card.lap.seen.now));
         card.to_track = unit(back);
         said.push(RaceNotice::OffTrack);
-        if card.lap.flags & race_card_flags::OFF_TRACK_LIMIT != 0 && read(self.off_limit) <= read(card.off_clock) {
-            card.off_clock = F::ZERO;
+        if card.lap.flags & race_card_flags::OFF_TRACK_LIMIT != 0 && read(self.off_limit) <= read(card.lap.off_track) {
+            card.lap.off_track = F::ZERO;
             said.push(RaceNotice::OffTooLong);
         }
     }

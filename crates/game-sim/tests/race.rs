@@ -2890,12 +2890,8 @@ fn race_card_at(ee: &Ee, at: u32, lines: usize) -> RaceCard {
         on_path: f32_at(ee, at + 0x18),
         odometer: f32_at(ee, at + 0x20),
         aim: t_spot_at(ee, at + 0xa0),
-        split: f32_at(ee, at + 0xbc),
-        off_clock: f32_at(ee, at + 0xc0),
-        time_left: f32_at(ee, at + 0xc4),
         look: quad(ee, at + 0x120),
         ahead: quad(ee, at + 0x140),
-        fast_lap_clock: f32_at(ee, at + 0x168),
         to_track: quad(ee, at + 0x180),
     }
 }
@@ -2906,7 +2902,7 @@ fn put_race_card(ee: &mut Ee, at: u32, c: &RaceCard, lines: u32, records: u32) {
     put_t_spot(ee, at + 0x88, c.lap.spot);
     put_t_spot(ee, at + 0x94, c.lap.kept_spot);
     put_t_spot(ee, at + 0xa0, c.aim);
-    for (o, x) in [(0x18, c.on_path), (0x20, c.odometer), (0xbc, c.split), (0xc0, c.off_clock), (0xc4, c.time_left), (0x168, c.fast_lap_clock)] {
+    for (o, x) in [(0x18, c.on_path), (0x20, c.odometer)] {
         put_f(ee, at + o, x);
     }
     put_quad(ee, at + 0x120, c.look);
@@ -2918,7 +2914,6 @@ fn race_card_words(c: &RaceCard) -> Vec<u64> {
     let f = |x: F| u64::from(x.0.to_bits());
     let mut v = lap_card_words(&c.lap);
     v.extend([f(c.on_path), f(c.odometer), u64::from(c.aim.path), u64::from(c.aim.piece), f(c.aim.along)]);
-    v.extend([f(c.split), f(c.off_clock), f(c.time_left), f(c.fast_lap_clock)]);
     for q in [c.look, c.ahead, c.to_track] {
         v.extend(q.to_bits().map(u64::from));
     }
@@ -3087,21 +3082,21 @@ fn the_race_handler_matches_the_score_managers_per_card() {
             lap.records.push(record(&mut p));
         }
         let dt = F([1.0 / 30.0, 1.0 / 60.0, 0.0, 0.1][p.below(4) as usize]);
+        lap.gap = time_word(&mut p, 30.0);
+        lap.off_track = if p.below(3) == 0 { F(p.range(4.0, 6.0)) } else { time_word(&mut p, 5.0) };
+        lap.time_left = match p.below(4) {
+            0 => F::ZERO,
+            1 => F(p.range(0.0, 0.05)),
+            _ => time_word(&mut p, 100.0),
+        };
+        lap.attack_clock = time_word(&mut p, 90.0);
         let mut card = RaceCard {
             lap,
             on_path: time_word(&mut p, 150.0),
             odometer: time_word(&mut p, 5000.0),
             aim: t_spot_on(&mut p, &t),
-            split: time_word(&mut p, 30.0),
-            off_clock: if p.below(3) == 0 { F(p.range(4.0, 6.0)) } else { time_word(&mut p, 5.0) },
-            time_left: match p.below(4) {
-                0 => F::ZERO,
-                1 => F(p.range(0.0, 0.05)),
-                _ => time_word(&mut p, 100.0),
-            },
             look: p.quad([0.0, 0.0, 0.0]),
             ahead: p.quad([0.0, 0.0, 0.0]),
-            fast_lap_clock: time_word(&mut p, 90.0),
             to_track: p.quad([0.0, 0.0, 0.0]),
         };
         let owner = p.below(5) != 0;
@@ -3199,7 +3194,7 @@ fn the_race_handler_matches_the_score_managers_per_card() {
         laps += usize::from(notices.contains(&RaceNotice::Line(LineNotice::Lap)));
         progressed += usize::from(card.lap.progress.0.to_bits() != before.lap.progress.0.to_bits());
         timed_off += usize::from(card.lap.flags & card_flags::OUT != 0 && before.lap.flags & card_flags::OUT == 0 && card.lap.laps == rules.lap.laps);
-        ticked_off += usize::from(card.off_clock != before.off_clock);
+        ticked_off += usize::from(card.lap.off_track != before.lap.off_track);
     }
     assert!(
         said.iter().all(|&k| k > 200) && laps > 300 && progressed > 1000 && timed_off > 300 && ticked_off > 3000,
