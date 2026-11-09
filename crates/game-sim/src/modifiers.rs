@@ -43,6 +43,12 @@
 //! [`Knob::CarAccel`], [`Knob::CarGrip`], [`Knob::CarSuspension`]), each skipped at its default as
 //! every other one is. Gravity, air drag and the time scale stay the bike's and the biplane's.
 //!
+//! I8's [`Knob::StickDeadZone`] is experimental, and the other exception to "a percentage": its value
+//! is the dead zone itself in hundredths ([`DEAD_ZONES`]), and its default, [`ORIGINAL`], is off —
+//! the original's ±0.3 ([`crate::input::AxisRange::PLAYER`]). On, [`Mods::bike`] narrows the range
+//! the bike's file hands the ride's stick consumers ([`Phy::stick`]); the steps read the range they
+//! are handed and have no branch for it. Its row is Settings' Controls tab's, not the modifiers page's.
+//!
 //! The text form ([`Mods::text`], [`Mods::parse`]) is what a tape, a preset and the online lobby
 //! carry: `word=percent` for a world modifier, `word.N=percent` for player N's, only the ones off
 //! their default. An empty text is the original game.
@@ -88,10 +94,11 @@ pub enum Knob {
     CarAccel,
     CarGrip,
     CarSuspension,
+    StickDeadZone,
 }
 
 /// How many modifiers there are.
-pub const KNOBS: usize = 27;
+pub const KNOBS: usize = 28;
 
 /// A modifier's default, which leaves its fields untouched: 100%.
 pub const ORIGINAL: u16 = 100;
@@ -102,6 +109,10 @@ pub const MOST: u16 = 500;
 
 /// [`Knob::PlaneCeiling`]'s top step, one past [`MOST`]: no ceiling at all (P136).
 pub const UNCAPPED: u16 = MOST + STEP;
+
+/// [`Knob::StickDeadZone`]'s choices (I8), in hundredths of the stick's travel from centre to full,
+/// narrowest last; its default, [`ORIGINAL`], is off: the original's ±0.30.
+pub const DEAD_ZONES: [u16; 6] = [25, 20, 15, 10, 5, 0];
 
 /// [`Knob::PlaneMaxG`]'s limits, in whole g (P137): its value is the limit itself, and its default,
 /// [`ORIGINAL`], is no limit at all. P148 raised the top from 9 g to 15 g, which still bites on the
@@ -169,12 +180,14 @@ impl Knob {
         Knob::CarAccel,
         Knob::CarGrip,
         Knob::CarSuspension,
+        Knob::StickDeadZone,
     ];
 
     /// The ones the menu has a row for, in its order: all but [`Knob::PlaneSpeed`], which P95 split
     /// into the biplane's acceleration and top speed, and [`Knob::SpinRate`], which P96's
-    /// [`Knob::Rotation`] took over — only an older preset or tape still sets either.
-    pub const MENU: [Knob; KNOBS - 2] = [
+    /// [`Knob::Rotation`] took over — only an older preset or tape still sets either — and
+    /// [`Knob::StickDeadZone`], whose row is Settings' Controls tab's (I8), not this page's.
+    pub const MENU: [Knob; KNOBS - 3] = [
         Knob::BikeSpeed,
         Knob::BikeAccel,
         Knob::BikePower,
@@ -214,7 +227,8 @@ impl Knob {
             | Knob::SpinRate
             | Knob::Rotation
             | Knob::Jump
-            | Knob::CrashTolerance => Category::Bike,
+            | Knob::CrashTolerance
+            | Knob::StickDeadZone => Category::Bike,
             Knob::PlaneSpeed | Knob::PlaneAccel | Knob::PlaneTopSpeed | Knob::PlaneTurn | Knob::PlaneCeiling | Knob::PlaneMaxG => Category::Biplane,
             Knob::KiowaSpeed | Knob::KiowaClimb | Knob::KiowaTurn | Knob::KiowaCeiling => Category::Kiowa,
             Knob::CarSpeed | Knob::CarAccel | Knob::CarGrip | Knob::CarSuspension => Category::Cars,
@@ -256,6 +270,7 @@ impl Knob {
             Knob::CarAccel => "car_accel",
             Knob::CarGrip => "car_grip",
             Knob::CarSuspension => "car_suspension",
+            Knob::StickDeadZone => "stick_dead_zone",
         }
     }
 
@@ -293,6 +308,7 @@ impl Knob {
             Knob::CarAccel => "Car acceleration",
             Knob::CarGrip => "Car tire grip",
             Knob::CarSuspension => "Car suspension",
+            Knob::StickDeadZone => "Stick Dead Zone",
         }
     }
 
@@ -308,6 +324,7 @@ impl Knob {
         match self {
             Knob::Gravity | Knob::AirDrag => 0,
             Knob::PlaneMaxG => MAX_G.0,
+            Knob::StickDeadZone => DEAD_ZONES[DEAD_ZONES.len() - 1],
             _ => STEP,
         }
     }
@@ -319,6 +336,7 @@ impl Knob {
         match self {
             Knob::PlaneCeiling => UNCAPPED,
             Knob::PlaneMaxG => MAX_G.1,
+            Knob::StickDeadZone => DEAD_ZONES[0],
             _ => MOST,
         }
     }
@@ -334,6 +352,13 @@ impl Knob {
             (Knob::PlaneMaxG, false) if v == ORIGINAL => self.most(),
             (Knob::PlaneMaxG, false) if v <= self.least() => ORIGINAL,
             (Knob::PlaneMaxG, false) => v - 1,
+            // Round the choices, off first: up narrows the dead zone, and past the narrowest is off.
+            (Knob::StickDeadZone, _) => {
+                let ring: Vec<u16> = std::iter::once(ORIGINAL).chain(DEAD_ZONES).collect();
+                let at = ring.iter().position(|&z| z == v).unwrap_or(0);
+                let n = ring.len();
+                ring[if up { (at + 1) % n } else { (at + n - 1) % n }]
+            }
             (_, true) => (v + STEP).min(self.most()),
             (_, false) => v.saturating_sub(STEP).max(self.least()),
         }
@@ -344,6 +369,8 @@ impl Knob {
         match self {
             Knob::PlaneMaxG if v == ORIGINAL => "Off".into(),
             Knob::PlaneMaxG => format!("{v} g"),
+            Knob::StickDeadZone if v == ORIGINAL => "Off".into(),
+            Knob::StickDeadZone => format!("{}.{:02}", v / 100, v % 100),
             // The biplane's max height has a step past the percentages: no ceiling (P136).
             _ if v > MOST => "Uncapped".into(),
             _ => format!("{v}%"),
@@ -380,6 +407,7 @@ impl Knob {
             Knob::CarAccel => "how fast the cars get up to speed, not their top",
             Knob::CarGrip => "every car tire's grip on every surface",
             Knob::CarSuspension => "the cars' spring stiffness, damped alike",
+            Knob::StickDeadZone => "experimental: a smaller stick dead zone, so small corrections reach the rider",
         }
     }
 
@@ -417,6 +445,7 @@ impl Knob {
             Knob::CarAccel => "car [Engine] torque curve, PumpTorqueScale, MaxPumpTorque x k; [Aerodynamics] AeroSurfaceArea, every tire surface's WheelFriction x k",
             Knob::CarGrip => "car every tire surface's FrictionPeak x k",
             Knob::CarSuspension => "car every tire's Spring x k; BounceDamping, ReboundDamping x k^(1/2)",
+            Knob::StickDeadZone => "not a key: the ride's stick consumers' dead zone, ±0.30 in the original, set to ±k/100 and each side stretched to the full range from its edge",
         }
     }
 }
@@ -537,8 +566,21 @@ impl Mods {
         }
     }
 
+    /// Player `seat`'s stick dead zone (I8), `±zone` of the travel, or `None` with it off — the
+    /// original's ±0.3, [`AxisRange::PLAYER`](crate::input::AxisRange::PLAYER).
+    pub fn stick_dead_zone(&self, seat: usize) -> Option<F> {
+        match self.get(seat, Knob::StickDeadZone) {
+            ORIGINAL => None,
+            z => Some(F::from(z as i32) / F(100.0)),
+        }
+    }
+
     /// Player `seat`'s bike: their own modifiers and the world's, on the loaded file.
     pub fn bike(&self, seat: usize, phy: &mut Phy) {
+        // The stick's range rides on the bike's file (I8): every machine the rider takes reads it.
+        if let Some(zone) = self.stick_dead_zone(seat) {
+            phy.stick = crate::input::AxisRange::player_with_dead_zone(zone);
+        }
         if let Some(k) = self.factor(seat, Knob::BikePower) {
             // k times the torque, on the file's gearing. The disc's bikes spin the rear tire off the
             // line on the file's own torque (P97: race125p's launch is held by the tire, not the

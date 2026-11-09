@@ -4551,7 +4551,7 @@ fn the_controls_tab_is_one_choice_a_seat_and_a_plane_stick() {
     settings_at(&mut m, &mut r, "Controls");
     let row = |m: &Menu, k: Key| m.page().into_iter().find(|r| r.key == k).unwrap();
     let keys: Vec<Key> = m.page().iter().map(|r| r.key).collect();
-    assert_eq!(keys, [Key::BikeLayout, Key::Keyboard, Key::PlaneLayout, Key::Markers, Key::Nintendo, Key::Controller, Key::Pressure, Key::Vibration], "one seat: no Player row");
+    assert_eq!(keys, [Key::BikeLayout, Key::Keyboard, Key::PlaneLayout, Key::Markers, Key::Nintendo, Key::Controller, Key::Pressure, Key::Vibration, Key::Heading, Key::DeadZone], "one seat: no Player row");
     assert!(!m.page().iter().any(|r| r.label.contains("Throttle")), "no throttle row");
     assert_eq!(row(&m, Key::BikeLayout).value, "New");
     let plane = row(&m, Key::PlaneLayout);
@@ -8228,8 +8228,8 @@ fn the_backwards_bail_row_toggles_and_survives_a_restart() {
     assert!(!m.settings.backwards_bail, "the host's reset left it on");
 }
 
-/// P183: the Controls tab ends on a Vibration row, every player's; on is the default and the
-/// original's. Off, it is written to the file and read back after a restart.
+/// P183: the Controls tab ends on a Vibration row, every player's, before I8's Experimental heading;
+/// on is the default and the original's. Off, it is written to the file and read back after a restart.
 #[test]
 fn the_vibration_row_toggles_and_survives_a_restart() {
     use menu::Key;
@@ -8237,7 +8237,8 @@ fn the_vibration_row_toggles_and_survives_a_restart() {
     assert!(m.settings.vibration, "on is the default, the original's");
     assert!(!m.settings.text().contains("vibration"), "{}", m.settings.text());
     settings_at(&mut m, &mut r, "Controls");
-    assert_eq!(m.page().last().map(|r| r.key), Some(Key::Vibration));
+    let keys: Vec<Key> = m.page().iter().map(|r| r.key).collect();
+    assert_eq!(keys[keys.len() - 3..], [Key::Vibration, Key::Heading, Key::DeadZone]);
     down_to(&mut m, &mut r, Key::Vibration);
     let row = |m: &Menu| m.page().into_iter().find(|r| r.key == Key::Vibration).unwrap();
     assert_eq!(row(&m).value, "On");
@@ -9806,4 +9807,40 @@ fn a_pad_press_after_a_key_press_switches_the_hints_to_the_pads_style_and_back()
     frame(&mut m, &mut readers, down, idle);
     frame(&mut m, &mut readers, idle, idle);
     assert_eq!(m.buttons().style, Style::Xbox, "the keyboard's echo of the pad's push");
+}
+
+/// I8: the Controls tab's Experimental heading holds the Stick Dead Zone row, off by default — the
+/// original's — and a step narrows it on every seat's modifiers, which settings.txt keeps as the
+/// `stick_dead_zone` modifier and reads back after a restart.
+#[test]
+fn the_dead_zone_row_is_off_by_default_and_saved_as_a_modifier() {
+    use game_sim::modifiers::{Knob, ORIGINAL};
+    use menu::Key;
+    let (mut m, mut r) = fresh();
+    assert_eq!(m.settings.modifiers.get(0, Knob::StickDeadZone), ORIGINAL, "off is the default");
+    assert!(!m.settings.text().contains("stick_dead_zone"), "{}", m.settings.text());
+    settings_at(&mut m, &mut r, "Controls");
+    let row = |m: &Menu| m.page().into_iter().find(|r| r.key == Key::DeadZone).unwrap();
+    assert_eq!((row(&m).label.as_str(), row(&m).value.as_str()), ("Stick Dead Zone", "Off"));
+    assert_eq!(row(&m).choices, ["Off", "0.25", "0.20", "0.15", "0.10", "0.05", "0.00"]);
+    down_to(&mut m, &mut r, Key::DeadZone);
+    for _ in 0..5 {
+        tap(&mut m, &mut r, Control::Right);
+    }
+    assert_eq!(row(&m).value, "0.05");
+    assert!((0..menu::SEATS_MAX).all(|s| m.settings.modifiers.get(s, Knob::StickDeadZone) == 5), "one player: every seat's");
+    assert!(m.settings.text().contains("stick_dead_zone=5"), "{}", m.settings.text());
+
+    let dir = scratch("dead_zone");
+    menu::save(&dir, &m.settings, &m.controls).unwrap();
+    let (settings, _) = menu::load(&dir);
+    assert_eq!(settings.modifiers.get(0, Knob::StickDeadZone), 5);
+    std::fs::remove_dir_all(dir).ok();
+
+    // Round past the narrowest back to off.
+    for _ in 0..2 {
+        tap(&mut m, &mut r, Control::Right);
+    }
+    assert_eq!(row(&m).value, "Off");
+    assert!(!m.settings.text().contains("stick_dead_zone"));
 }

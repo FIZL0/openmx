@@ -812,10 +812,16 @@ pub const INVERTED_MARGIN: f32 = 0.2;
 ///
 /// The centre byte reads `-1/255` through the original's arithmetic, which the dead zone hides; the
 /// stretch would not, so an axis one byte either side of the centre is centred.
-pub fn round_stick(input: &game_sim::input::Pad, mut pad: game_sim::biplane::Pad) -> game_sim::biplane::Pad {
+pub fn round_stick(input: &game_sim::input::Pad, pad: game_sim::biplane::Pad) -> game_sim::biplane::Pad {
+    round_stick_through(input, pad, &game_sim::input::AxisRange::PLAYER)
+}
+
+/// [`round_stick`] on a dead zone of the rider's own, `range` (I8's experimental one, or the
+/// original's [`game_sim::input::AxisRange::PLAYER`]): the round zone is `range`'s width.
+pub fn round_stick_through(input: &game_sim::input::Pad, mut pad: game_sim::biplane::Pad, range: &game_sim::input::AxisRange) -> game_sim::biplane::Pad {
     use game_sim::bindings::{Command, Table};
     use game_sim::input::{Axis, AxisRange, PlaneInput};
-    let range = AxisRange::PLAYER;
+    let range = *range;
     let straight = AxisRange { dead_hi: F::ZERO, dead_lo: F::ZERO, ..range };
     let read = |axis: Axis| {
         let v = input.axis_through(axis, &straight);
@@ -1130,9 +1136,9 @@ impl Plane {
         // reads the pad without it, under every scheme, and the left stick alone banks and climbs.
         // With the seat's markers off (P129) it is the original's again.
         let input = if self.dpad { sim.input.pad(0).clone() } else { without_dpad(sim.input.pad(0)) };
-        let mut pad = flight::pad(&input);
+        let mut pad = flight::pad_through(&input, &sim.phy.stick);
         if self.round_stick {
-            pad = round_stick(&input, pad);
+            pad = round_stick_through(&input, pad, &sim.phy.stick);
             let held = ((dead_zone + dead_zone - pad.aileron.abs()) / dead_zone).max(F::ZERO).min(F::ONE);
             f.autopilot.aileron_dead_zone = F(2.0);
             f.autopilot.feed_forward = feed_forward * held;
@@ -2015,7 +2021,7 @@ pub fn drive_lane_met(sim: &mut Sim, cars: &[CarRide], dt: F, world: &mut dyn Wo
     let lane = *lane;
     let mut car = CarRide { driven: Some(lane.machine), struck: lane.struck, ..template.clone() };
     sim.traffic.frame(dt, world);
-    car.step_met(sim.input.pad(0), sim.table(), &sim.tables.ride, dt, world, met);
+    car.step_met(sim.input.pad(0), &sim.phy.stick, sim.table(), &sim.tables.ride, dt, world, met);
     let kind = lane.kind;
     sim.car = car.driven.take().map(|machine| Box::new(game_sim::car::Lane { kind, machine, struck: car.struck.take() }));
     true
@@ -2447,24 +2453,27 @@ impl CarRide {
     /// ([`game_sim::car::Machine::step_struck`]). The engine's sound pitch samples the shared smooth
     /// noise ([`CarRide::noise`]). Nothing for a car not out.
     pub fn step(&mut self, pad: &game_sim::input::Pad, table: &game_sim::bindings::Table, tables: &game_sim::ride::Tables, dt: F, world: &mut dyn World) {
-        self.step_met(pad, table, tables, dt, world, None);
+        self.step_met(pad, &game_sim::input::AxisRange::PLAYER, table, tables, dt, world, None);
     }
 
     /// [`CarRide::step`] among the riders' bikes (F26): the mirrors of their strikes on its hull
     /// filed after its own search, and resolved against their chassis
-    /// ([`game_sim::car::Machine::step_met`]). A car with no collision object meets nothing.
+    /// ([`game_sim::car::Machine::step_met`]). A car with no collision object meets nothing. The
+    /// stick reads through `stick`, the rider's range (I8's experimental dead zone, or the original's).
+    #[allow(clippy::too_many_arguments)]
     pub fn step_met(
         &mut self,
         pad: &game_sim::input::Pad,
+        stick: &game_sim::input::AxisRange,
         table: &game_sim::bindings::Table,
         tables: &game_sim::ride::Tables,
         dt: F,
         world: &mut dyn World,
         met: Option<&mut flight::Met>,
     ) {
-        use game_sim::input::{Axis, AxisRange};
+        use game_sim::input::Axis;
         let Some(m) = self.driven.as_mut() else { return };
-        let stick = (pad.axis_through(Axis::LeftX, &AxisRange::PLAYER), pad.axis_through(Axis::LeftY, &AxisRange::PLAYER));
+        let stick = (pad.axis_through(Axis::LeftX, stick), pad.axis_through(Axis::LeftY, stick));
         m.controls.input(&self.car, stick, F::ZERO, m.ground_speed, m.side_slip, |c| table.value(pad, c));
         let (noise, rng) = (&mut self.noise, &mut self.rng);
         let mut sample = |t: F| noise.get_or_insert_with(|| game_sim::noise::SmoothNoise::build(rng)).at(t);
@@ -2651,10 +2660,10 @@ impl Garage {
         sim.traffic.frame(dt, world);
         let m = self.up.car();
         if let Some(car) = self.cars.iter_mut().find(|c| Some(c.machine) == m) {
-            car.step_met(sim.input.pad(0), sim.table(), &sim.tables.ride, dt, world, met);
+            car.step_met(sim.input.pad(0), &sim.phy.stick, sim.table(), &sim.tables.ride, dt, world, met);
         }
         if let (Kind::Kiowa, Some(heli)) = (self.up, self.heli.as_mut()) {
-            heli.step(sim.input.pad(0), sim.table(), &sim.tables.ride, dt, world);
+            heli.step_through(sim.input.pad(0), &sim.phy.stick, sim.table(), &sim.tables.ride, dt, world);
         }
         rider::Frame::default()
     }
@@ -2991,9 +3000,23 @@ impl KiowaRide {
     /// thrown and steps from the next. While none is out none of it runs: none is in the world's
     /// lists.
     pub fn step(&mut self, pad: &game_sim::input::Pad, table: &game_sim::bindings::Table, tables: &game_sim::ride::Tables, dt: F, world: &mut dyn World) {
-        use game_sim::input::{Axis, AxisRange};
+        self.step_through(pad, &game_sim::input::AxisRange::PLAYER, table, tables, dt, world);
+    }
+
+    /// [`KiowaRide::step`] with the stick read through `stick`, the rider's range (I8's experimental
+    /// dead zone, or the original's).
+    pub fn step_through(
+        &mut self,
+        pad: &game_sim::input::Pad,
+        stick: &game_sim::input::AxisRange,
+        table: &game_sim::bindings::Table,
+        tables: &game_sim::ride::Tables,
+        dt: F,
+        world: &mut dyn World,
+    ) {
+        use game_sim::input::Axis;
         let Some(h) = self.flown.as_mut() else { return };
-        let stick = (pad.axis_through(Axis::LeftX, &AxisRange::PLAYER), pad.axis_through(Axis::LeftY, &AxisRange::PLAYER));
+        let stick = (pad.axis_through(Axis::LeftX, stick), pad.axis_through(Axis::LeftY, stick));
         let input = game_sim::kiowa::Pad::from_sticks(stick, |c| table.value(pad, c));
         // Its rays meet the blades its nearby list holds (C24).
         let (movers, struck) = h.collision.search_knocking(&mut h.ride.body, world, dt, &h.wreckage.blades.gathered());
