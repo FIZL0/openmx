@@ -3,6 +3,8 @@
 //! players with their riders and bikes, who is ready, and the seed once the host starts.
 
 use serde::{Deserialize, Serialize};
+
+use crate::handshake::Pack;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The most players in one ride (N12), every machine's together: the rollback's seats
@@ -57,6 +59,11 @@ pub struct Pick {
     /// the drawing machine's own model, and what an older build sends.
     #[serde(default)]
     pub model: String,
+    /// The packs the player's picks ride (P318): a machine pack's flier, a handling pack, any kind,
+    /// each as [`crate::handshake::pack_key`] names it, joined by commas; empty for the disc's alone,
+    /// and what an older build sends. Every seat must hold them ([`Room::needs`]).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub packs: String,
 }
 
 impl Pick {
@@ -70,6 +77,7 @@ impl Pick {
             machine: String::new(),
             modifiers: String::new(),
             model: String::new(),
+            packs: String::new(),
         }
     }
 }
@@ -146,6 +154,35 @@ pub struct Room {
     /// an older build sends. The handshake holds every machine to the same files under it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub handling: String,
+    /// Every peer's installed packs (P318, [`crate::handshake::Disc::packs`]), from its Hello and
+    /// the host's own: what the room can offer is what every seat holds ([`Room::offer`]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub packs: BTreeMap<String, Vec<Pack>>,
+    /// The packs a seat rides now, as the host's ride last said ([`crate::Cmd::InUse`]): a pick
+    /// made mid-ride is not in the seats' picks, which the room no longer takes once riding.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub in_use: Vec<String>,
+}
+
+/// One pack the room knows of (P318, [`Room::offer`]): the files the host holds under it (else the
+/// first holder's), and the seats whose machine lacks it or holds other files under its name (`2P`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Offered {
+    pub pack: Pack,
+    pub lacking: Vec<String>,
+}
+
+impl Offered {
+    /// Every seat holds it: it can be picked.
+    pub fn open(&self) -> bool {
+        self.lacking.is_empty()
+    }
+
+    /// Why it is greyed, in words (`needs MX vs. ATV Unleashed biplane and Kiowa, missing for 2P`),
+    /// empty when it is not.
+    pub fn why(&self) -> String {
+        if self.open() { String::new() } else { format!("needs {}, missing for {}", self.pack.said(), self.lacking.join(", ")) }
+    }
 }
 
 impl Room {
@@ -218,7 +255,49 @@ impl Room {
         self.tickets.remove(peer);
         self.ping.remove(peer);
         self.ready.remove(peer);
+        self.packs.remove(peer);
         self.changed();
+    }
+
+    /// The packs some seat rides (P318): every seat's picked packs and the ride's [`Room::in_use`],
+    /// each once, in order. The handshake holds every seat to the host's files under each.
+    pub fn needs(&self) -> Vec<String> {
+        let picked = self.seats.iter().flatten().flat_map(|s| s.pick.packs.split(',')).map(str::trim);
+        let mut out: Vec<String> = Vec::new();
+        for key in self.in_use.iter().map(String::as_str).chain(picked) {
+            if !key.is_empty() && !out.iter().any(|k| k == key) {
+                out.push(key.to_string());
+            }
+        }
+        out
+    }
+
+    /// Every pack a seated peer holds (P318), in key order, with the seats whose machine lacks it:
+    /// the files the host holds under a key are the ones compared, else the first holder's. A peer
+    /// that says no packs (an older build) lacks them all.
+    pub fn offer(&self) -> Vec<Offered> {
+        let peers = self.peers();
+        let mut known: BTreeMap<String, Pack> = BTreeMap::new();
+        let order = std::iter::once(HOST).chain(peers.iter().map(String::as_str).filter(|p| *p != HOST));
+        for peer in order {
+            for p in self.packs.get(peer).into_iter().flatten() {
+                known.entry(p.key()).or_insert_with(|| p.clone());
+            }
+        }
+        known
+            .into_values()
+            .map(|pack| {
+                let holds = |peer: &str| self.packs.get(peer).is_some_and(|ps| ps.iter().any(|p| p.key() == pack.key() && p.hash == pack.hash));
+                let lacking = self
+                    .seats
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| s.as_ref().is_some_and(|s| !holds(&s.peer)))
+                    .map(|(n, _)| format!("{}P", n + 1))
+                    .collect();
+                Offered { pack, lacking }
+            })
+            .collect()
     }
 
     /// The seats `peer` holds, in order.
@@ -417,6 +496,43 @@ mod tests {
         assert!(!serde_json::to_string(&Listing { riding: false, ..l }).unwrap().contains("riding"));
         r.private = true;
         assert_eq!(Listing::of("id", &r).open(), 0, "private is private, riding or not");
+    }
+
+    fn pack(id: &str, hash: u64) -> Pack {
+        Pack { kind: "machine".into(), id: id.into(), hash, name: format!("{id} pack"), how: String::new() }
+    }
+
+    /// P318: the offer is every pack a seated machine holds, greyed with the seats that lack it;
+    /// it narrows as a lacking peer joins and opens again when it goes.
+    #[test]
+    fn the_offer_is_what_every_seat_holds() {
+        let mut r = Room::new("h", "free06", 3);
+        r.take(HOST, &[Pick::new("thq1", "race125p")]);
+        r.packs.insert(HOST.into(), vec![pack("fliers", 1), pack("atv", 2)]);
+        assert!(r.offer().iter().all(Offered::open), "the host alone holds what it holds");
+        r.take("g", &[Pick::new("thq1", "race125p")]);
+        r.packs.insert("g".into(), vec![pack("atv", 2), pack("fliers", 9), pack("cars", 4)]);
+        let o = r.offer();
+        let by = |id: &str| o.iter().find(|o| o.pack.id == id).unwrap().clone();
+        assert_eq!(o.len(), 3);
+        assert!(by("atv").open());
+        assert_eq!(by("fliers").why(), "needs fliers pack, missing for 2P", "other files under the host's id are not the host's pack");
+        assert_eq!(by("cars").why(), "needs cars pack, missing for 1P");
+        r.free("g");
+        assert!(r.offer().iter().all(Offered::open), "the lacking peer gone, the offer opens again");
+        r.take("old", &[Pick::new("thq1", "race125p"), Pick::new("thq1", "race125p")]);
+        assert_eq!(r.offer()[0].lacking, vec!["2P".to_string(), "3P".to_string()], "a peer that says no packs lacks them all, at every seat it holds");
+    }
+
+    #[test]
+    fn needs_are_the_picks_and_the_ride() {
+        let mut r = Room::new("h", "free06", 2);
+        let mut p = Pick::new("thq1", "race125p");
+        p.packs = "machine/fliers, tricks/t".into();
+        r.take(HOST, &[p.clone()]);
+        r.take("g", &[p]);
+        r.in_use = vec!["machine/atv".into(), "machine/fliers".into()];
+        assert_eq!(r.needs(), vec!["machine/atv", "machine/fliers", "tricks/t"]);
     }
 }
 

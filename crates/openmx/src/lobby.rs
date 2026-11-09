@@ -40,6 +40,8 @@ pub struct DiscFiles {
     /// The mods folder this machine's trick packs (MD19) and track mods (MD6) are read from, `None`
     /// while the Mods row is off, as the front end last said it.
     mods: Mutex<Option<PathBuf>>,
+    /// Each pack folder's hash as last read (P318), under what its `mod.json` and file names were then.
+    packs: Mutex<HashMap<PathBuf, (u64, openmx_net::Pack)>>,
 }
 
 /// The disc's member ending in `suffix`, the shortest (the shell's own rule: the menus keep deeper
@@ -135,6 +137,94 @@ pub fn mod_track_hash(dir: &Path) -> Result<u64, String> {
     Ok(h)
 }
 
+/// Every pack in the mods folder `mods` (P318), of whatever kind: each folder two down that holds a
+/// `mod.json` (`mods/machines/mxvatv_fliers/`), as its manifest names it — the kind and id it says,
+/// else the folder's names, its name and version, and what makes one (the author less its version).
+/// Nothing here lists the kinds or the packs, so a pack of a kind no code knows yet is compared and
+/// offered like the rest. A pack's hash is every file under its folder ([`pack_hash`]), kept in
+/// `cache` while its `mod.json` and file names stay as they were. In kind and id order; a kind and
+/// id two folders both say is the first folder's.
+pub fn installed_packs(mods: &Path, cache: &mut HashMap<PathBuf, (u64, openmx_net::Pack)>) -> Vec<openmx_net::Pack> {
+    let mut folders: Vec<PathBuf> = crate::files::list(mods)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|e| e.dir)
+        .flat_map(|kind| crate::files::list(&kind.path).unwrap_or_default())
+        .filter(|e| e.dir && crate::files::is_file(e.path.join("mod.json")))
+        .map(|e| e.path)
+        .collect();
+    folders.sort();
+    let mut out: Vec<openmx_net::Pack> = Vec::new();
+    for folder in folders {
+        let Ok(manifest) = crate::files::read(folder.join("mod.json")) else { continue };
+        let Ok(files) = pack_files(&folder) else { continue };
+        let mut look = fnv(&manifest);
+        for (name, _) in &files {
+            look = fnv_on(fnv_on(look, name.as_bytes()), &[0]);
+        }
+        let pack = match cache.get(&folder) {
+            Some((was, pack)) if *was == look => pack.clone(),
+            _ => {
+                let Some(pack) = read_pack(&folder, &manifest, &files) else { continue };
+                cache.insert(folder.clone(), (look, pack.clone()));
+                pack
+            }
+        };
+        if !out.iter().any(|p| p.key() == pack.key()) {
+            out.push(pack);
+        }
+    }
+    out.sort_by_key(|p| p.key());
+    out
+}
+
+/// The pack in `folder`, off its `mod.json` (`manifest`) and its `files` ([`pack_files`]).
+fn read_pack(folder: &Path, manifest: &[u8], files: &[(String, PathBuf)]) -> Option<openmx_net::Pack> {
+    let json = crate::track_mods::Json::parse(std::str::from_utf8(manifest).ok()?).ok()?;
+    let said = |key: &str| json.get(key).and_then(|v| v.str()).map(str::to_string).filter(|v| !v.is_empty());
+    let leaf = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let kind = said("kind").unwrap_or_else(|| leaf(folder.parent().unwrap_or(folder)));
+    let id = said("id").unwrap_or_else(|| leaf(folder));
+    let name = match (said("name"), said("version")) {
+        (Some(n), Some(v)) => format!("{n} {v}"),
+        (n, _) => n.unwrap_or_else(|| id.clone()),
+    };
+    // `openmx-mods tools/import-atv fliers 0.1`: the tool and its words, less the tool's version
+    let how = said("author").map(|a| a.rsplit_once(' ').filter(|(_, v)| v.starts_with(|c: char| c.is_ascii_digit())).map_or(a.clone(), |(t, _)| t.to_string())).unwrap_or_default();
+    Some(openmx_net::Pack { kind, id, hash: pack_hash(files).ok()?, name, how })
+}
+
+/// Every file under a pack's folder by its path from the folder (`/`-separated, lower case), in that
+/// order: what [`pack_hash`] hashes.
+fn pack_files(dir: &Path) -> Result<Vec<(String, PathBuf)>, String> {
+    fn walk(dir: &Path, under: &str, out: &mut Vec<(String, PathBuf)>) -> Result<(), String> {
+        for e in crate::files::list(dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+            let name = e.path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+            let name = if under.is_empty() { name } else { format!("{under}/{name}") };
+            if e.dir {
+                walk(&e.path, &name, out)?;
+            } else {
+                out.push((name, e.path));
+            }
+        }
+        Ok(())
+    }
+    let mut files = Vec::new();
+    walk(dir, "", &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
+/// A pack's files hashed as a track mod's are ([`mod_track_hash`]): each path and a zero, then its bytes.
+fn pack_hash(files: &[(String, PathBuf)]) -> Result<u64, String> {
+    let mut h = fnv(b"");
+    for (name, path) in files {
+        h = fnv_on(fnv_on(h, name.as_bytes()), &[0]);
+        h = fnv_on(h, &crate::files::read(path).map_err(|e| format!("{}: {e}", path.display()))?);
+    }
+    Ok(h)
+}
+
 impl DiscFiles {
     /// The track mod `name` in this machine's mods folder (MD6), as a ride on it finds it: `None`
     /// with the Mods row off, or with no such track mod.
@@ -171,6 +261,12 @@ impl openmx_net::Disc for DiscFiles {
 
     fn bike(&self, set: &str) -> Option<u64> {
         self.phy(set).map(|b| fnv(&b))
+    }
+
+    /// Every pack in this machine's mods folder (P318, [`installed_packs`]), none with the Mods row off.
+    fn packs(&self) -> Vec<openmx_net::Pack> {
+        let Some(mods) = self.mods.lock().unwrap().clone() else { return Vec::new() };
+        installed_packs(&mods, &mut self.packs.lock().unwrap())
     }
 
     fn markers(&self, track: &str, bike: &str) -> String {

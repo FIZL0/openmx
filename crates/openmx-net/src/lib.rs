@@ -12,6 +12,6 @@ pub mod handshake;
 pub mod net;
 pub mod room;
 
-pub use handshake::{Disc, Handshake, Names};
+pub use handshake::{Disc, Handshake, Names, Pack};
 pub use net::{Board, Cmd, Event, Net, Online, Relay};
-pub use room::{HOST, Listing, Pick, Room, SEATS};
+pub use room::{HOST, Listing, Offered, Pick, Room, SEATS};

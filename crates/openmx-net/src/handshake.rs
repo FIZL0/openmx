@@ -36,6 +36,13 @@ pub trait Disc: Send + Sync {
     fn tricks(&self, _id: &str) -> Option<u64> {
         None
     }
+    /// Every pack this machine's mods folder holds, of whatever kind (P318): machines, handling,
+    /// tricks, tracks and any kind a later mod brings, each by its `mod.json` kind and id and a hash
+    /// of its files. Nothing here knows which packs or kinds there are; the room offers what every
+    /// seat holds and a ride holds every seat to the packs its seats ride ([`Handshake::needs`]).
+    fn packs(&self) -> Vec<Pack> {
+        Vec::new()
+    }
     /// This machine's player's saved markers on `track` for the bike set `bike`, as a pick carries
     /// them ([`crate::room::Pick::markers`]), for a ride it drops in on (P105): empty for none, and
     /// where nothing is saved (the terminal lobby).
@@ -58,6 +65,42 @@ pub fn fnv(bytes: &[u8]) -> u64 {
 /// one file at a time (`fnv_on(fnv(a), b) == fnv(a ++ b)`).
 pub fn fnv_on(h: u64, bytes: &[u8]) -> u64 {
     bytes.iter().fold(h, |h, &b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3))
+}
+
+/// One installed pack (P318), as a machine says it holds it: compared by [`Pack::key`] and
+/// [`Pack::hash`], and its name and the way to make one ([`Pack::how`]) for a refusal or a greyed
+/// pick to tell the player. No game files go between players: each installs their own.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pack {
+    /// Its `mod.json` kind (`machine`, `tricks`, `track`, …) and id.
+    pub kind: String,
+    pub id: String,
+    /// The pack's files, hashed ([`fnv`]).
+    pub hash: u64,
+    /// Its `mod.json` name and version, as the player reads them (`MX vs. ATV Unleashed biplane and Kiowa 1.0.0`).
+    #[serde(default)]
+    pub name: String,
+    /// What makes one, off the player's own disc (its `mod.json` author less the version:
+    /// `openmx-mods tools/import-atv fliers`), empty when it does not say.
+    #[serde(default)]
+    pub how: String,
+}
+
+impl Pack {
+    /// The pack as a room names it: `kind/id`.
+    pub fn key(&self) -> String {
+        pack_key(&self.kind, &self.id)
+    }
+
+    /// Its name for the player, the id when it has none.
+    pub fn said(&self) -> &str {
+        if self.name.is_empty() { &self.id } else { &self.name }
+    }
+}
+
+/// A pack's name in a room ([`Pack::key`]): its kind and id.
+pub fn pack_key(kind: &str, id: &str) -> String {
+    format!("{kind}/{id}")
 }
 
 /// What one peer brings to a ride, made from the lobby's line-up as it stands at the host's Start.
@@ -103,6 +146,12 @@ pub struct Handshake {
     pub handling: String,
     #[serde(default)]
     pub handling_hash: Option<u64>,
+    /// Every pack this peer's mods folder holds (P318, [`Disc::packs`]).
+    #[serde(default)]
+    pub packs: Vec<Pack>,
+    /// The packs some seat rides ([`Room::needs`]): every seat must hold each, with the host's files.
+    #[serde(default)]
+    pub needs: Vec<String>,
 }
 
 /// The build: two builds can't be trusted to simulate alike. The crate's version and "dev" unless the shell stamps
@@ -139,6 +188,8 @@ impl Handshake {
             tricks_hash: if room.tricks.is_empty() { None } else { disc.tricks(&room.tricks) },
             handling: room.handling.clone(),
             handling_hash: if room.handling.is_empty() { None } else { disc.tricks(&room.handling) },
+            packs: disc.packs(),
+            needs: room.needs(),
         }
     }
 
@@ -203,6 +254,22 @@ impl Handshake {
             let why = if self.handling_hash.is_none() { "isn't in your mods folder" } else { "isn't the same in your mods folder as in the host's" };
             return Err(format!("Can't ride: the host's handling is MX vs. ATV's, and its pack {} {why}.", host.handling));
         }
+        for key in &host.needs {
+            let Some(theirs) = host.packs.iter().find(|p| p.key() == *key) else {
+                return Err(format!("Can't ride: a rider is on the pack {key}, and the host's mods folder hasn't got it."));
+            };
+            let mine = self.packs.iter().find(|p| p.key() == *key);
+            if mine.is_some_and(|m| m.hash == theirs.hash) {
+                continue;
+            }
+            let how = if theirs.how.is_empty() { String::new() } else { format!(" Make it from your own disc with {}.", theirs.how) };
+            let why = match mine {
+                None => "isn't in your mods folder",
+                Some(m) if m.name != theirs.name => return Err(format!("Can't ride: a rider is on the pack {} ({key}), and your mods folder has {}.{how}", theirs.said(), m.said())),
+                Some(_) => "isn't the same files in your mods folder",
+            };
+            return Err(format!("Can't ride: a rider is on the pack {} ({key}), and it {why}.{how}", theirs.said()));
+        }
         if self.presets != host.presets {
             let n = (0..self.presets.len().max(host.presets.len())).find(|&n| self.presets.get(n) != host.presets.get(n)).unwrap_or(0);
             let said = |p: Option<&u8>| p.map_or("none".to_string(), |p| p.to_string());
@@ -235,6 +302,8 @@ mod tests {
             tricks_hash: None,
             handling: String::new(),
             handling_hash: None,
+            packs: Vec::new(),
+            needs: Vec::new(),
         }
     }
 
@@ -371,5 +440,54 @@ mod tests {
         assert_eq!(fnv(b"a"), 0xaf63_dc4c_8601_ec8c);
         assert_eq!(fnv(b"foobar"), 0x8594_4171_f739_67e8);
         assert_eq!(fnv_on(fnv(b"foo"), b"bar"), fnv(b"foobar"));
+    }
+
+    fn fliers(hash: u64) -> super::Pack {
+        super::Pack { kind: "machine".into(), id: "mxvatv_fliers".into(), hash, name: "MX vs. ATV Unleashed biplane and Kiowa 1.0.0".into(), how: "openmx-mods tools/import-atv fliers".into() }
+    }
+
+    /// P318: a pack some seat rides holds every seat to the host's files under it, whatever its kind
+    /// (no list of kinds or packs here), and the refusal names it and what makes one; a pack nobody
+    /// rides is no reason to refuse.
+    #[test]
+    fn every_seat_holds_the_packs_a_seat_rides() {
+        let mut room = Room::new("h", "free06", 2);
+        room.take(crate::room::HOST, &[Pick::new("thq1", "race125p")]);
+        room.take("g", &[Pick::new("thq1", "race125p")]);
+        struct Holds(Vec<super::Pack>);
+        impl Disc for Holds {
+            fn packs(&self) -> Vec<super::Pack> {
+                self.0.clone()
+            }
+        }
+        let odd = super::Pack { kind: "weather".into(), id: "storms".into(), hash: 3, name: "Storms".into(), how: String::new() };
+        let host = Handshake::of(&room, &Holds(vec![fliers(1), odd.clone()]));
+        assert!(host.needs.is_empty(), "nobody rides a pack");
+        assert_eq!(Handshake::of(&room, &Holds(vec![])).check(&host), Ok(()), "a pack nobody rides is not needed");
+        room.in_use = vec!["machine/mxvatv_fliers".into()];
+        let host = Handshake::of(&room, &Holds(vec![fliers(1), odd.clone()]));
+        assert_eq!(host.needs, vec!["machine/mxvatv_fliers".to_string()]);
+        assert_eq!(Handshake::of(&room, &Holds(vec![fliers(1)])).check(&host), Ok(()));
+        assert_eq!(
+            Handshake::of(&room, &Holds(vec![odd.clone()])).check(&host),
+            Err("Can't ride: a rider is on the pack MX vs. ATV Unleashed biplane and Kiowa 1.0.0 (machine/mxvatv_fliers), and it isn't in your mods folder. Make it from your own disc with openmx-mods tools/import-atv fliers.".into())
+        );
+        assert_eq!(
+            Handshake::of(&room, &Holds(vec![fliers(2)])).check(&host),
+            Err("Can't ride: a rider is on the pack MX vs. ATV Unleashed biplane and Kiowa 1.0.0 (machine/mxvatv_fliers), and it isn't the same files in your mods folder. Make it from your own disc with openmx-mods tools/import-atv fliers.".into())
+        );
+        let older = super::Pack { name: "MX vs. ATV Unleashed biplane and Kiowa 0.9.0".into(), ..fliers(2) };
+        assert!(Handshake::of(&room, &Holds(vec![older])).check(&host).unwrap_err().contains("and your mods folder has MX vs. ATV Unleashed biplane and Kiowa 0.9.0."));
+        // a kind nobody wrote code for is held the same way, from a seat's pick this time
+        room.in_use.clear();
+        room.seats[1].as_mut().unwrap().pick.packs = "weather/storms".into();
+        let host = Handshake::of(&room, &Holds(vec![fliers(1), odd.clone()]));
+        assert_eq!(Handshake::of(&room, &Holds(vec![fliers(1)])).check(&host), Err("Can't ride: a rider is on the pack Storms (weather/storms), and it isn't in your mods folder.".into()));
+        let lacking_host = Handshake::of(&room, &Holds(vec![]));
+        assert!(Handshake::of(&room, &Holds(vec![odd])).check(&lacking_host).unwrap_err().contains("the host's mods folder hasn't got it"));
+        let json = serde_json::to_string(&host).unwrap();
+        let cut = &json[..json.find(r#","packs""#).unwrap()];
+        let old: Handshake = serde_json::from_str(&format!("{cut}}}")).unwrap();
+        assert!(old.packs.is_empty() && old.needs.is_empty(), "a handshake from a build before P318 holds no packs and needs none");
     }
 }
