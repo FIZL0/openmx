@@ -3512,6 +3512,9 @@ pub struct ResultEvent {
     pub laps: u8,
     /// The front end's play mode (its `+4`): a win counts in a rider's record only at 0.
     pub mode: i32,
+    /// The event's `+0x116` byte, which picks the odd outro scenes at the race's end
+    /// ([`Supercross::race_end`]). What it marks was not traced.
+    pub alt_outro: bool,
 }
 
 /// What the race's end knows of the seat a player's card belongs to: the seat's number (the
@@ -3554,7 +3557,7 @@ pub struct FameEntry {
     pub table: u32,
 }
 
-/// What a card's end of race hands on: the fireworks and the race overlays put away (the winner of a
+/// What a card's finish hands on: the fireworks and the race overlays put away (the winner of a
 /// single race), a win counted in the seat's record, and the Hall of Fame entries it earned.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RaceOver {
@@ -3564,7 +3567,9 @@ pub struct RaceOver {
 }
 
 impl Supercross {
-    /// The activity's answer to [`FinishNotice::Over`], once per card in list order. In a single race
+    /// The activity's answer to [`LineNotice::Finished`], told as a card crosses the line on its last
+    /// lap (not to the race's [`FinishNotice::Over`]: a finish made up when the race ends is never
+    /// answered, so a rider still out then gets no podium, win or record). In a single race
     /// the card in first place sets the fireworks off, and a card on the podium (place under 4) sets
     /// the camera flashes going, toward the winner's brightness if it is a player's card that won and
     /// the podium's otherwise. Then, for a player's card only (`seat`, its seat; `track`, the event's
@@ -3621,6 +3626,82 @@ impl Supercross {
         };
         if let Some(k) = length {
             try_table(base + k, card.race_time);
+        }
+        out
+    }
+}
+
+/// A player's card as the race's end reads it (its seat item's `+0x34` is 1): the seat (`+0x6b0`)
+/// and its rider's statistics tracker's preload and clutch words (`+0x38`, `+0x3c`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EndSeat {
+    pub seat: i32,
+    pub preloads: u32,
+    pub clutches: u32,
+}
+
+/// A seat's two words on the preload and clutch menu: set when the rider never used the preload, and
+/// the clutch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EndTip {
+    pub seat: i32,
+    pub no_preload: bool,
+    pub no_clutch: bool,
+}
+
+/// What the race's end hands the front end.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RaceEnd {
+    /// A single race: the race results menu is handed the score manager (its cards, as they stand)
+    /// and the preload and clutch menu is shown.
+    pub results: bool,
+    /// The preload and clutch menu's words, for each player's card not in first, in list order (a
+    /// later card on the same seat writes over an earlier one).
+    pub tips: Vec<EndTip>,
+    /// The outro scene cued (an index into the activity's scene cues), if one is.
+    pub cue: Option<i32>,
+}
+
+/// How long the activity waits on an outro whose cue has nothing to play (`+0x410`), in seconds.
+const OUTRO_WAIT: F = F(7.0);
+
+impl Supercross {
+    /// The activity's answer to [`FinishNotice::Over`], once, when the race ends. In a single race it
+    /// hands the results menu the score manager, walks the cards in list order (`cards`, each card's
+    /// place and its seat if a player's) for the best place a player took (4 if none took a better
+    /// one) and for each player not in first the preload and clutch menu's words, and picks the outro
+    /// scene by that place: 2, 4 and 6 for first, second and third or worse (1, 3 and 5 with the
+    /// event's [`ResultEvent::alt_outro`]), kept in [`Supercross::hud_stage`]. Then, with a scene
+    /// picked and not yet armed, it tells every rider the race is over and cues the scene; a cue
+    /// with nothing to play (`cue_ends`) arms it at once, with [`Supercross::hud_fade`] at 7 s.
+    pub fn race_end(&mut self, cards: &[(i32, Option<EndSeat>)], event: &ResultEvent, cue_ends: bool) -> RaceEnd {
+        let mut out = RaceEnd::default();
+        if event.activity == 2 {
+            out.results = true;
+            let mut best = 4;
+            for (place, seat) in cards {
+                let Some(seat) = seat else { continue };
+                best = best.min(*place);
+                if *place != 1 {
+                    out.tips.push(EndTip { seat: seat.seat, no_preload: seat.preloads == 0, no_clutch: seat.clutches == 0 });
+                }
+            }
+            self.hud_stage = match (best, event.alt_outro) {
+                (1, false) => 2,
+                (2, false) => 4,
+                (_, false) => 6,
+                (1, true) => 1,
+                (2, true) => 3,
+                (_, true) => 5,
+            };
+        }
+        if self.hud_stage == 0 || self.hud_armed != 0 {
+            return out;
+        }
+        out.cue = Some(self.hud_stage);
+        if cue_ends {
+            self.hud_armed = 1;
+            self.hud_fade = OUTRO_WAIT;
         }
         out
     }

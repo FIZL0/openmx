@@ -103,6 +103,18 @@
 //!     one to five cards over chains of one to four gates and zone lists, every listener call, word,
 //!     flag, countdown, free record and the generator against `LapRules::machine_tick`.
 //! 28. **The gate ranking**: its ranking alone on 20,000 lists with ties, against `LapRules::gate_rank`.
+//! 29. **The Hall of Fame test** (S13d): the front end's "does this time earn a place" on 20,000
+//!     tables, tracks, classes and times (whole seconds and a ulp either side, zero, negatives,
+//!     integer entries), against [`race::HallOfFame::beats`].
+//! 30. **A card's finish, answered**: the supercross activity's answer to the lap line's finish on
+//!     20,000 cards, events, seats, tracks and flashes, against [`Supercross::race_over`] on every
+//!     call (the fireworks, the win counted, each Hall of Fame entry) and the podium flashes' words.
+//! 31. **The race's end, answered**: the activity's answer to the race's Over notice on 20,000 races,
+//!     against [`Supercross::race_end`] on every call, the tip popup's words and the outro scene.
+//! 32. **S13d's live sx01 finish**: a one-lap race the human is ended in by a poke; the winner's finish
+//!     at the line through `race_over` (the flashes bit for bit), the over tick through `check_over`,
+//!     `clocks` and `close` (the made-up finish, the tie draw found on the generator, the ranking)
+//!     and `race_end` (the outro scene), against the captured cards, manager and activity.
 
 use game_sim::chassis::{Chassis, Deriv};
 use game_sim::race::{
@@ -5686,6 +5698,7 @@ fn the_race_over_matches_the_supercross_activitys_answer() {
             class: p.below(4) as i32,
             laps: [3, 5, 10, 1, 2, 4, 3, 5, 10][p.below(9) as usize],
             mode: i32::from(p.below(3) == 0),
+            alt_outro: false,
         };
         ee.set_u32(R_FE + 4, event.mode as u32);
         ee.set_u32(R_EVENT, event.league as u32);
@@ -5787,4 +5800,422 @@ fn the_race_over_matches_the_supercross_activitys_answer() {
         flashed += usize::from(flashes.is_some() && event.activity == 2 && card.place < 4);
     }
     assert!(fired > 2000 && wins > 500 && marks > 4000 && flashed > 4000, "fireworks {fired}, wins {wins}, entries {marks}, flashes {flashed}");
+}
+
+// --- S13d: the results held against a live sx01 finish ------------------------------------------------
+
+/// One string or number field of a capture's JSON line (the capture's lines are flat).
+fn s13d_field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let at = line.find(&format!("\"{key}\": "))? + key.len() + 4;
+    let rest = &line[at..];
+    if let Some(s) = rest.strip_prefix('"') {
+        return s.split('"').next();
+    }
+    rest.split([',', '}']).next()
+}
+
+/// A score card's results words off a captured row's raw bytes, its id (`+0`) kept in
+/// `record_word` so it can be followed through the ranking.
+fn s13d_card(raw: &[u8]) -> LapCard {
+    let u = |o: usize| u32::from_le_bytes(raw[o..o + 4].try_into().unwrap());
+    let f = |o: usize| F(f32::from_bits(u(o)));
+    LapCard {
+        flags: u64::from(u(8)) | u64::from(u(12)) << 32,
+        progress: f(0x1c),
+        place: u(0x2c) as i32,
+        laps: u(0x30) as i32,
+        lap_time: f(0x48),
+        lap_start: f(0x4c),
+        best_lap: f(0x50),
+        race_time: f(0xb4),
+        lap_clock: f(0xb8),
+        gap: f(0xbc),
+        record_word: u(0),
+        ..LapCard::default()
+    }
+}
+
+struct S13dRow {
+    frame: u32,
+    dt: F,
+    rand: u64,
+    mgr: Vec<u8>,
+    cards: Vec<Vec<u8>>,
+    flash: Vec<u8>,
+    act: Vec<u8>,
+}
+
+impl S13dRow {
+    /// The card ids in the manager's list order: from its head (`+0x34`) each card's next (`+0x1c8`),
+    /// `cards` the cards' addresses by id.
+    fn order(&self, cards: &[u32]) -> Vec<usize> {
+        let word = |b: &[u8], o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+        let mut list = Vec::new();
+        let mut at = word(&self.mgr, 0x34);
+        while let Some(k) = cards.iter().position(|&a| a == at && list.len() < cards.len()) {
+            list.push(k);
+            at = word(&self.cards[k], 0x1c8);
+        }
+        list
+    }
+
+    fn flash_f(&self, o: usize) -> F {
+        F(f32::from_bits(u32::from_le_bytes(self.flash[o..o + 4].try_into().unwrap())))
+    }
+}
+
+/// S13d's live sx01 single race of one lap (`context/capture/s13d/sx01-finish.jsonl`,
+/// research/s13d/finish.py): four riders, the human idle at the gate and marked done by a poke once an
+/// AI rider has finished, so the race ends the next tick. Held: each AI rider's finish at the line
+/// through [`Supercross::race_over`] (the podium flashes' half and rate, bit for bit, and their length
+/// one tick on); the over tick leaving the flashes alone (a made-up finish is never answered); and the
+/// over tick itself through [`LapRules::check_over`], [`LapRules::clocks`] and [`LapRules::close`] —
+/// the made-up finish of the rider still out, the tie draw pushing the human's time past it, found on
+/// the generator a few draws on from the tick before's, and the ranking — against every card's
+/// results words, the list order and the manager's flags.
+#[test]
+fn the_results_hold_s13ds_live_sx01_finish() {
+    let Ok(kit) = Kit::load() else { return skip("no kit.toml") };
+    let Ok(text) = std::fs::read_to_string(kit.ctx("capture/s13d/sx01-finish.jsonl")) else {
+        return skip("capture/s13d/sx01-finish.jsonl is not there: research/s13d/run.sh records it");
+    };
+    let hex32 = |h: &str| u32::from_le_bytes(hex_bytes(h)[..4].try_into().unwrap());
+    let mut rows = Vec::new();
+    let (mut before, mut world) = (None, None);
+    for line in text.lines() {
+        match s13d_field(line, "tag") {
+            Some("before") => before = Some(line),
+            Some("world") => world = s13d_field(line, "world").map(hex_bytes),
+            Some(_) => {}
+            None if line.contains("\"poke\"") => {}
+            None => rows.push(S13dRow {
+                frame: s13d_field(line, "frame").unwrap().parse().unwrap(),
+                dt: F(f32::from_bits(hex32(s13d_field(line, "dt").unwrap()))),
+                rand: u64::from_le_bytes(hex_bytes(s13d_field(line, "rand").unwrap())[..8].try_into().unwrap()),
+                mgr: hex_bytes(s13d_field(line, "mgr").unwrap()),
+                cards: (0..4).map(|k| hex_bytes(s13d_field(line, &format!("card{k}")).unwrap())).collect(),
+                flash: s13d_field(line, "flash").map(hex_bytes).unwrap_or_default(),
+                act: hex_bytes(s13d_field(line, "act").unwrap()),
+            }),
+        }
+    }
+    let (Some(before), Some(world)) = (before, world) else { return skip("the capture has no before or world line") };
+    let list = before.split("\"cards\": [").nth(1).and_then(|r| r.split(']').next()).expect("the cards' addresses");
+    let addresses: Vec<u32> = list.split(", ").map(|a| a.parse().unwrap()).collect();
+    let event_raw = hex_bytes(s13d_field(before, "event").unwrap());
+    let fe = hex_bytes(s13d_field(before, "fe").unwrap());
+    let w = |b: &[u8], o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+    let event = race::ResultEvent { league: w(&event_raw, 0) as i32, activity: w(&event_raw, 4) as i32, class: w(&event_raw, 0x10c) as i32, laps: event_raw[0x115], mode: w(&fe, 4) as i32, alt_outro: event_raw[0x116] != 0 };
+    let wf = |o: usize| F(f32::from_bits(w(&world, o - 0x530)));
+    let levels = race::FlashLevels { shortest: wf(0x538), player_win: wf(0x53c), podium: wf(0x544) };
+    assert_eq!((event.activity, event.laps), (2, 1), "a single race of one lap: {event:?}");
+    let act = Supercross::new();
+    let out = |c: &LapCard| c.flags & card_flags::OUT != 0;
+
+    // Each finish at the line (a card goes out on a tick the race is not over), the tick before
+    // there to read the flashes as they stood.
+    let (mut line_finishes, mut fireworks, mut over_ticks) = (0, 0, 0);
+    for p in rows.windows(2) {
+        let (was, now) = (&p[0], &p[1]);
+        if now.frame != was.frame + 1 || was.flash.is_empty() || now.flash.is_empty() {
+            continue;
+        }
+        let over_now = w(&now.mgr, 0x5c) & race_flags::OVER != 0;
+        let over_was = w(&was.mgr, 0x5c) & race_flags::OVER != 0;
+        let words = |r: &S13dRow| [0x5c, 0x64, 0x68, 0x6c].map(|o| r.flash_f(o).0.to_bits());
+        if over_now && !over_was {
+            // The race's end: the half and rate stay as they were (the flashes only run on).
+            over_ticks += 1;
+            assert_eq!(words(now)[2..], words(was)[2..], "frame {}: the over tick set the flashes", now.frame);
+            continue;
+        }
+        for k in 0..4 {
+            let (a, b) = (s13d_card(&was.cards[k]), s13d_card(&now.cards[k]));
+            if out(&a) || !out(&b) || over_now {
+                continue;
+            }
+            let mut fl = race::PodiumFlashes { from: was.flash_f(0x5c), length: was.flash_f(0x64), rate: was.flash_f(0x68), half: was.flash_f(0x6c) };
+            let said = act.race_over(&b, None, &event, -1, &race::HallOfFame::new(), Some(&mut fl), &levels);
+            eprintln!("frame {}: card {k} finished at the line in place {}: {said:?}, flashes {fl:?}", now.frame, b.place);
+            assert_eq!(said.fireworks, b.place == 1, "frame {}: card {k}", now.frame);
+            assert!(said.win.is_none() && said.fame.is_empty(), "frame {}: an AI card has no seat", now.frame);
+            fireworks += usize::from(said.fireworks);
+            if b.place < 4 {
+                // The flashes then run one tick: their length counts down.
+                let got = [fl.from.0.to_bits(), fpu::sub(fl.length.0, now.dt.0).to_bits(), fl.rate.0.to_bits(), fl.half.0.to_bits()];
+                assert_eq!(got[1..], words(now)[1..], "frame {}: card {k}'s flashes (from, length, rate, half)", now.frame);
+            }
+            line_finishes += 1;
+        }
+    }
+    eprintln!("{line_finishes} finishes at the line held, {fireworks} with fireworks, {over_ticks} over ticks");
+    assert!(line_finishes >= 1 && fireworks == 1 && over_ticks == 1, "the winner's finish at the line and the race's end");
+
+    // The over tick: the tick before's cards in list order, through the handler's end.
+    let at = rows.iter().position(|r| w(&r.mgr, 0x5c) & race_flags::OVER != 0).expect("the race ends");
+    let (was, now) = (&rows[at - 1], &rows[at]);
+    assert_eq!(now.frame, was.frame + 1, "the tick before the over tick is there");
+    let mut rules = c31_rules(&was.mgr).lap;
+    let mut cards: Vec<LapCard> = was.order(&addresses).into_iter().map(|k| s13d_card(&was.cards[k])).collect();
+    rules.check_over(&cards);
+    assert!(rules.flags & race_flags::OVER != 0, "no player still racing");
+    let leader = cards[0].race_time;
+    for c in cards.iter_mut() {
+        if !out(c) {
+            rules.clocks(now.dt, c, leader);
+        }
+        // The path work before the clocks, unported here, moves the progress the ranking reads.
+        c.progress = s13d_card(&now.cards[c.record_word as usize]).progress;
+    }
+    // The draw is one rand() somewhere in the tick: the riders' and the world's own draws come first.
+    let want: Vec<LapCard> = now.order(&addresses).into_iter().map(|k| s13d_card(&now.cards[k])).collect();
+    let key = |c: &LapCard| (c.record_word, c.flags & card_flags::OUT, c.place, c.laps, c.race_time.0.to_bits(), c.lap_time.0.to_bits(), c.best_lap.0.to_bits());
+    let mut rng = Rng::from_state(was.rand);
+    let mut found = None;
+    for draws in 0..5_000 {
+        let (mut r, mut rl, mut cs) = (rng, rules, cards.clone());
+        rl.close(now.dt, &mut cs, &[], &mut r);
+        if cs.iter().map(key).eq(want.iter().map(key)) {
+            found = Some((draws, rl.flags, r));
+            break;
+        }
+        rng.rand();
+    }
+    let Some((draws, flags, mut r)) = found else {
+        let mut cs = cards.clone();
+        rules.close(now.dt, &mut cs, &[], &mut Rng::from_state(was.rand));
+        panic!("frame {}: no draw gives the captured results:\n got {:?}\nwant {:?}", now.frame, cs.iter().map(key).collect::<Vec<_>>(), want.iter().map(key).collect::<Vec<_>>());
+    };
+    let mask = race_flags::OVER | race_flags::OVER_TOLD;
+    assert_eq!(flags & mask, w(&now.mgr, 0x5c) & mask, "frame {}: the manager's flags", now.frame);
+    // The tick's last state is on from the draw.
+    let after = (0..5_000).find(|_| {
+        let hit = r.state() == now.rand;
+        r.rand();
+        hit
+    });
+    eprintln!("frame {}: the tie draw is {draws} draws on, {after:?} more to the end of the tick; results {:?}", now.frame, want.iter().map(key).collect::<Vec<_>>());
+    assert!(after.is_some(), "frame {}: the tick's generator is not on from the draw", now.frame);
+    let pushed = cards.windows(2).filter(|p| p[0].race_time.0 > p[1].race_time.0).count();
+    assert!(pushed >= 1, "the capture's over tick has a time to push");
+
+    // The activity's answer to the end, the same tick: the outro scene by the human's place. The
+    // player's card is the one flagged so (the seat item's own word is not captured); its statistics
+    // tracker is not captured either, so the tip popup is not compared. The cue had something to
+    // play: the outro is armed by the activity's own tick after (`Race::tick`), not here.
+    let mut sx = Supercross::new();
+    sx.hud_stage = w(&was.act, 0x470) as i32;
+    sx.hud_armed = w(&was.act, 0x474);
+    let ends: Vec<(i32, Option<race::EndSeat>)> = want.iter().map(|c| (c.place, (c.flags & card_flags::PLAYER != 0).then_some(race::EndSeat::default()))).collect();
+    let said = sx.race_end(&ends, &event, false);
+    eprintln!("frame {}: the race's end {said:?}, scene {}", now.frame, sx.hud_stage);
+    assert_eq!((sx.hud_stage as u32, sx.hud_armed), (w(&now.act, 0x470), w(&now.act, 0x474)), "frame {}: the outro scene and armed word", now.frame);
+    assert!(said.results && said.cue == Some(6), "the human last: scene 6");
+}
+
+// --- S13d: the race's end, handed to the front end ----------------------------------------------------
+
+const E_UI: u32 = 0x01a0_0000;
+const E_MENUS: u32 = E_UI + 0x100;
+const E_RESULTS: u32 = E_UI + 0x1000;
+const E_POPUP: u32 = E_UI + 0x2000;
+const E_MGR: u32 = 0x01a1_0000;
+const E_CARDS: u32 = 0x01a2_0000;
+const E_OWNERS: u32 = 0x01a3_0000;
+const E_ITEMS: u32 = 0x01a4_0000;
+const E_SEATS: u32 = 0x01a5_0000;
+const E_STATS: u32 = 0x01a6_0000;
+const E_RIDERS: u32 = 0x01a7_0000;
+const E_TOLD: u32 = 0x01a8_0000;
+const E_CUES: u32 = 0x01a9_0000;
+const E_FADER: u32 = 0x01aa_0000;
+/// Not code: the vtable slots below land on these and are hooked.
+const E_HOOK_STATS: u32 = 0x01ab_0000;
+const E_HOOK_RIDER: u32 = 0x01ab_0100;
+const E_HOOK_TOLD: u32 = 0x01ab_0200;
+const E_HOOK_CUE: u32 = 0x01ab_0300;
+const E_HOOK_FADE: u32 = 0x01ab_0400;
+const E_VT: u32 = 0x01ac_0000;
+
+#[derive(Debug, PartialEq)]
+enum EndCall {
+    Results(u32, u32),
+    Popup(u32, u32),
+    RiderTold(u32),
+    Cue(u32),
+    Fade(u32),
+}
+
+/// The supercross activity's answer to the race's Over notice, the whole function on 20,000 races:
+/// one to six cards in list order at any places (ties, none in first, places 0 and below), players
+/// and computer riders, the two seats, statistics trackers with and without preload and clutch use,
+/// the event a single race or not and its `+0x116` byte, the outro already picked or armed or not,
+/// one to three interface items, a cue that ends at once or not, the music fade on or off — against
+/// [`Supercross::race_end`], compared on every call it makes in order with its arguments, the tip
+/// popup's four words and the activity's scene, armed word and clock.
+#[test]
+fn the_race_end_matches_the_supercross_activitys_answer() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let [end, app, ui, find, id, nth, bit, take, arm] = match addrs([
+        "race_end",
+        "app_pointer",
+        "ui_manager",
+        "race_tip_find",
+        "interface_id",
+        "list_nth",
+        "name_bit",
+        "race_results_take",
+        "tip_popup_arm",
+    ]) {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    let calls: Rc<RefCell<Vec<EndCall>>> = Rc::default();
+    let lookups = Rc::new(Cell::new(0u64));
+    let cue_ends = Rc::new(Cell::new(false));
+    let l = lookups.clone();
+    ee.hooks.insert(find, Box::new(move |ee| {
+        ee.set(2, l.get());
+        l.set(l.get() + 1);
+    }));
+    ee.hooks.insert(id, Box::new(|_| {}));
+    ee.hooks.insert(bit, Box::new(|ee| ee.set(2, 0)));
+    ee.hooks.insert(nth, Box::new(|ee| ee.set(2, u64::from(E_RIDERS + ee.r(5) as u32 * 0x1000))));
+    let c = calls.clone();
+    ee.hooks.insert(take, Box::new(move |ee| c.borrow_mut().push(EndCall::Results(ee.r(4) as u32, ee.r(5) as u32))));
+    let c = calls.clone();
+    ee.hooks.insert(arm, Box::new(move |ee| c.borrow_mut().push(EndCall::Popup(ee.r(4) as u32, ee.r(5) as u32))));
+    ee.hooks.insert(E_HOOK_STATS, Box::new(|ee| {
+        let k = (ee.r(4) as u32 - E_ITEMS) / 0x1000;
+        ee.set(2, u64::from(E_STATS + k * 0x100));
+    }));
+    ee.hooks.insert(E_HOOK_RIDER, Box::new(|ee| {
+        let k = (ee.r(4) as u32 - E_RIDERS) / 0x1000;
+        ee.set(2, u64::from(E_RIDERS + k * 0x1000 + 0x800 + 0x400));
+    }));
+    let c = calls.clone();
+    ee.hooks.insert(E_HOOK_TOLD, Box::new(move |ee| c.borrow_mut().push(EndCall::RiderTold((ee.r(4) as u32 - E_TOLD) / 0x100))));
+    let c = calls.clone();
+    let ends = cue_ends.clone();
+    ee.hooks.insert(E_HOOK_CUE, Box::new(move |ee| {
+        c.borrow_mut().push(EndCall::Cue((ee.r(4) as u32 - E_CUES) / 0x100));
+        ee.set(2, u64::from(!ends.get()));
+    }));
+    let c = calls.clone();
+    ee.hooks.insert(E_HOOK_FADE, Box::new(move |ee| c.borrow_mut().push(EndCall::Fade(ee.f(12).to_bits()))));
+
+    ee.set_u32(app, R_APP);
+    ee.set_u32(R_APP + 0x3d4, R_FE);
+    ee.set_u32(R_FE + 0xc, R_EVENT);
+    ee.set_u32(ui, E_UI);
+    ee.set_u32(E_UI + 0x30, E_MENUS);
+    for (k, menu) in [E_RESULTS, E_POPUP].into_iter().enumerate() {
+        // The lookup's entry k: +4 a pointer to a pointer to the thing whose +4 is the menu.
+        let entry = E_MENUS + 12 * k as u32;
+        ee.set_u32(entry + 4, E_UI + 0x800 + 0x10 * k as u32);
+        ee.set_u32(E_UI + 0x800 + 0x10 * k as u32, E_UI + 0x900 + 0x10 * k as u32);
+        ee.set_u32(E_UI + 0x900 + 0x10 * k as u32 + 4, menu);
+    }
+    ee.set_u32(R_ACT + 0x160, E_MGR);
+    ee.set_u32(R_APP + 0x400, E_FADER - 0x100);
+    ee.set_u32(E_FADER - 0x100 + 0x44, E_FADER);
+    ee.set_u32(E_FADER + 8, E_VT + 0x400);
+    ee.set_u32(E_VT + 0x400 + 0x94, E_HOOK_FADE);
+    ee.set_u32(E_VT + 0x48 + 0x40, E_HOOK_STATS);
+    ee.set_u32(E_VT + 0x100 + 0xa0, E_HOOK_RIDER);
+    ee.set_u32(E_VT + 0x200 + 0x9c, E_HOOK_TOLD);
+    ee.set_u32(E_VT + 0x300 + 0x1c, E_HOOK_CUE);
+
+    let mut p = Pick(0x51c8_e2a7_09d3_6b4f);
+    let (mut picked, mut tipped, mut cued, mut armed) = ([0usize; 7], 0, 0, 0);
+    for case in 0..20_000 {
+        calls.borrow_mut().clear();
+        lookups.set(0);
+        let event = race::ResultEvent { activity: if p.below(5) == 0 { [0, 1, 3][p.below(3) as usize] } else { 2 }, alt_outro: p.below(2) == 0, ..Default::default() };
+        ee.set_u32(R_EVENT + 4, event.activity as u32);
+        ee.write(R_EVENT + 0x116, 1, if event.alt_outro { 1 + p.below(255) as u128 } else { 0 });
+        let fade = p.below(3) == 0;
+        ee.set_u32(R_APP + 0x570, u32::from(fade));
+        cue_ends.set(p.below(2) == 0);
+
+        let mut act = Supercross::new();
+        act.hud_stage = if p.below(3) == 0 { 0 } else { p.below(7) as i32 };
+        act.hud_armed = u32::from(p.below(4) == 0);
+        act.hud_fade = F(p.range(0.0, 10.0));
+        ee.set_u32(R_ACT + 0x470, act.hud_stage as u32);
+        ee.set_u32(R_ACT + 0x474, act.hud_armed);
+        put_f(&mut ee, R_ACT + 0x410, act.hud_fade);
+        for k in 0..7 {
+            ee.set_u32(R_ACT + 0x44c + 4 * k, E_CUES + 0x100 * k);
+            ee.set_u32(E_CUES + 0x100 * k + 8, E_VT + 0x300);
+        }
+        let items = 1 + p.below(3) as u32;
+        ee.set_u32(R_ACT + 0x14, items);
+        for k in 0..items {
+            let item = E_RIDERS + k * 0x1000;
+            ee.set_u32(item + 8, E_VT + 0x100);
+            ee.set_u32(item + 0x800 + 0xa74, E_TOLD + k * 0x100);
+            ee.set_u32(E_TOLD + k * 0x100 + 8, E_VT + 0x200);
+        }
+
+        let n = 1 + p.below(6) as u32;
+        let mut cards = Vec::new();
+        for k in 0..n {
+            let card = E_CARDS + k * 0x200;
+            let place = if p.below(8) == 0 { p.below(3) as i32 - 2 } else { 1 + p.below(6) as i32 };
+            ee.set_u32(card + 0x2c, place as u32);
+            ee.set_u32(card + 0x1c8, if k + 1 < n { card + 0x200 } else { 0 });
+            ee.set_u32(card + 4, E_OWNERS + k * 0x100);
+            ee.set_u32(E_OWNERS + k * 0x100 + 0x24, E_ITEMS + k * 0x1000);
+            ee.set_u32(E_ITEMS + k * 0x1000 + 0x20, E_SEATS + k * 0x1000);
+            ee.set_u32(E_ITEMS + k * 0x1000 + 0x48, E_VT + 0x48);
+            let player = p.below(3) != 0;
+            let seat = p.below(2) as i32;
+            ee.set_u32(E_SEATS + k * 0x1000 + 0x34, if player { 1 } else { [0, 2, 0xffff_ffff][p.below(3) as usize] });
+            ee.set_u32(E_SEATS + k * 0x1000 + 0x6b0, seat as u32);
+            let stats = race::EndSeat { seat, preloads: if p.below(2) == 0 { 0 } else { p.below(40) as u32 }, clutches: if p.below(2) == 0 { 0 } else { p.below(40) as u32 } };
+            ee.set_u32(E_STATS + k * 0x100 + 0x38, stats.preloads);
+            ee.set_u32(E_STATS + k * 0x100 + 0x3c, stats.clutches);
+            cards.push((place, player.then_some(stats)));
+        }
+        ee.set_u32(E_MGR + 0x34, E_CARDS);
+        let mut popup = [0u32; 4];
+        for (k, w) in popup.iter_mut().enumerate() {
+            *w = p.next() as u32;
+            ee.set_u32(E_POPUP + 0xc0 + 4 * k as u32, *w);
+        }
+
+        ee.call(end, &[u64::from(R_ACT)], &[], BUDGET);
+        let got = act.race_end(&cards, &event, cue_ends.get());
+
+        let mut want = Vec::new();
+        if got.results {
+            want.push(EndCall::Results(E_RESULTS, E_MGR));
+            want.push(EndCall::Popup(E_POPUP, 1));
+        }
+        if let Some(scene) = got.cue {
+            want.extend((0..items).map(EndCall::RiderTold));
+            want.push(EndCall::Cue(scene as u32));
+            if fade {
+                want.push(EndCall::Fade(0.75f32.to_bits()));
+            }
+        }
+        assert_eq!(*calls.borrow(), want, "case {case}: {event:?} {cards:?} → {got:?}");
+        for t in &got.tips {
+            popup[t.seat as usize] = u32::from(t.no_preload);
+            popup[2 + t.seat as usize] = u32::from(t.no_clutch);
+        }
+        let words: Vec<u32> = (0..4).map(|k| ee.u32_at(E_POPUP + 0xc0 + 4 * k)).collect();
+        assert_eq!(words, popup, "case {case}: the tip popup's words, {cards:?}");
+        assert_eq!(
+            (ee.u32_at(R_ACT + 0x470), ee.u32_at(R_ACT + 0x474), ee.u32_at(R_ACT + 0x410)),
+            (act.hud_stage as u32, act.hud_armed, act.hud_fade.0.to_bits()),
+            "case {case}: scene, armed, clock"
+        );
+        picked[act.hud_stage as usize] += usize::from(got.results);
+        tipped += got.tips.len();
+        cued += usize::from(got.cue.is_some());
+        armed += usize::from(got.cue.is_some() && cue_ends.get());
+    }
+    assert!(picked[1..].iter().all(|&n| n > 300) && tipped > 5000 && cued > 8000 && armed > 4000, "scenes {picked:?}, tips {tipped}, cues {cued}, armed {armed}");
 }
