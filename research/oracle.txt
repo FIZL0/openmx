@@ -10844,6 +10844,23 @@ atv_heap_free               atv 0x001b76d0 = free
 # ride-2 + flip-1: 924 sweeps, all nearby, 1 segment, list +0x40 grid 0, reach <= 2.75; no kind 2 candidate
 # in reach; kind 3 (plants) in reach 394 times but +0x126 = 0x13 (NO_GROUPS) skips them; never a hit.
 # Global search 0x001148e0 never runs.
+# F51 — the sweep's pair, parts, nodes and global search in Rust (src atv_sweep pair / search_world;
+# tests/mxvatv_bike_ride.rs the_sweeps_pair_is_the_originals, the_sweeps_global_search_is_the_originals,
+# the_nearby_sweep_with_its_pairs_is_the_originals; journal research/journal/2026-11-10-f51-*). Pair vt +0xb4
+# = 0x001b9a60(probe, other): 0x003dc610 = +0x174 first (also on a refusal); null or not-nearby (+0x45 bit 0)
+# -> 0; zeroes hit/owner and the +0xac words for +0x130; sphere (centre +0x50, reach +0x70); nearest 1,
+# fractions -1, hits 0; other +0x78 kind 0 mesh, 1 hierarchy (parts +0x210 count, +0x224 list; a part that takes a
+# segment -> +0x84 = part, owner = 1), 8 finite plane (not ported, asserted absent), else 0. Mesh sweep
+# 0x0010e570 -> 0x0010c080 = collide::sweep bit for bit; it writes part+0x230 to 0x003dce38. Set
+# 0x001b9290 copies nodes (node world matrix at +0x70); clear 0x001b95f0. Global 0x001148e0(probe, lazy) =
+# MX probe_collide_world but: active = +0x126 bit 1 and a space (+0x20); retired items (word 0 == 1) skipped
+# before SEARCHED; groups only with NO_GROUPS clear; group distance 0x001169f0 z first, max(0), reach near +
+# blend*(far-near)/128; pair distance 0x00116a30 = MX's; bounds vt +0xc4 -> +0x50/+0x70; budget +0x74, last
+# +0x60, on a hit last = (0,-10000,0,1). Part stand 0x0046d390 (count) / 0x0046d3c0 (part) kept the
+# original's. The query leaves the tree's list open (+0x9c head, pool 0x6742a0 nodes still taken) after
+# the walk. Plant part listener vt +0xc 0x00495690 runs a database query of its own (stamp 0x003d3b88 +1)
+# inside the walk: not followed (2 of 1500 global, 2 of 600 nearby cases skipped). State 4 probe
+# 0x00ea7310, record 0x00ea74a0, flags 0x13; no kind 1 or kind 8 objects on nat05.
 # F45a — the bike's net interpolate, the unpack's wheels and the net post in Rust (game_sim::quad::
 # net_interpolate_head / net_interpolate_tail, handling::bike::net_post; tests/mxvatv_bike_ride.rs
 # the_bikes_net_interpolate_is_the_originals, the_bikes_net_check_is_the_originals_with_the_interpolate_
