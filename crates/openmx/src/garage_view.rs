@@ -15,6 +15,7 @@
 use game_render::disc::Disc;
 use game_render::gpu::{Actor, Mips, Renderer, Scene3, Target, View};
 use game_render::mat::{M4, V3, v3};
+use game_render::psg::Tri;
 use game_render::raster::Frame;
 use game_render::rider::{Body, Sex, Skeleton, anchors_of};
 use game_render::scene::Vehicle;
@@ -26,8 +27,18 @@ use ps2_float::F;
 use crate::vehicle::Machine;
 use crate::{dress, member_ending, menu::Menu, roster};
 
-/// How fast the stand turns, in radians a second: once round in about sixteen seconds, by eye.
-const TURN: f32 = 0.4;
+/// How fast the stand turns, in radians a second: once round in about sixteen seconds, by eye. The
+/// Tricks page's camera orbits its rider at the same pace (P319).
+pub const TURN: f32 = 0.4;
+/// The stage cameras' field of view, up and down, in radians.
+pub const FOV: f32 = 0.5;
+/// What a stage's picture keeps clear round what it frames, of its half-width and half-height
+/// (P319): the bike and rider fill the rest.
+const MARGIN: f32 = 0.05;
+/// How many of a model's points the fit reads at most (P319): every so many vertices, not all.
+const FIT_POINTS: usize = 3000;
+/// How many steps round a turn the fit looks from.
+const FIT_TURNS: usize = 48;
 /// The body's clip: breathing on the bike at the start gate, and the stopped pose where a rider has
 /// none.
 const CLIPS: [&str; 2] = ["get_ready_breathe", "turn_stop_Mid"];
@@ -41,9 +52,16 @@ struct Dressed {
     /// The body's model, and its pose for the GPU (node matrices); the software path's is skinned
     /// into the model's triangles.
     body: Option<(String, Vec<M4>)>,
-    /// What to aim at, and how far out the camera stands: the bike's middle and its half-size.
+    /// What to aim at — the middle of the bike and rider, on the line it turns about — and their
+    /// half-size.
     centre: V3,
     radius: f32,
+    /// Points of the bike, its parts and the rider (or the flier), from [`Dressed::centre`]: what the
+    /// camera's distance is fitted to (P319).
+    points: Vec<V3>,
+    /// The distance fitted to the last stage's shape (its width over its height), kept while that
+    /// stays.
+    fit: Option<(f32, f32)>,
     /// Each texture's levels as the GPU takes them, by texture and cut-out, made on the dress's
     /// worker: made at the upload, they were most of its frame (P258).
     mips: Vec<(usize, u8, Mips)>,
@@ -328,24 +346,60 @@ fn dress_flier(tools: &mut Tools, flier: &roster::Flier) -> Result<Dressed, Stri
             }
         }
     }
-    let (min, max) = bounds(&assets, FLIER);
-    let centre = min.add(max).scale(0.5);
-    // A flier is flat, wings or rotor across its height: its box's corners are well outside what the
-    // camera sees of it, so it stands nearer than a bike's would (by eye).
-    let radius = max.sub(min).len() / 2.0 * 0.8;
+    let mut points = Vec::new();
+    points_of(&assets.models[FLIER].tris, M4::IDENTITY, FIT_POINTS, &mut points);
+    let (centre, radius, points) = framed(points);
     let mips = mips_of(&assets);
-    Ok(Dressed { assets, bike: FLIER.to_string(), parts: Vec::new(), body: None, centre, radius, mips })
+    Ok(Dressed { assets, bike: FLIER.to_string(), parts: Vec::new(), body: None, centre, radius, points, fit: None, mips })
 }
 
-/// The corners of the box round model `name`'s triangles.
-fn bounds(assets: &Assets, name: &str) -> (V3, V3) {
-    assets.models[name]
-        .tris
-        .iter()
-        .flat_map(|t| t.v.iter())
-        .fold((v3(f32::MAX, f32::MAX, f32::MAX), v3(f32::MIN, f32::MIN, f32::MIN)), |(lo, hi), v| {
-            (v3(lo.x.min(v.pos.x), lo.y.min(v.pos.y), lo.z.min(v.pos.z)), v3(hi.x.max(v.pos.x), hi.y.max(v.pos.y), hi.z.max(v.pos.z)))
-        })
+/// The corners of the box round `points`.
+pub(crate) fn bounds_of(points: &[V3]) -> (V3, V3) {
+    points.iter().fold((v3(f32::MAX, f32::MAX, f32::MAX), v3(f32::MIN, f32::MIN, f32::MIN)), |(lo, hi), p| {
+        (v3(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z)), v3(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z)))
+    })
+}
+
+/// About `most` of `tris`' corners, every so many of them, placed by `at`, onto `out`.
+pub(crate) fn points_of(tris: &[Tri], at: M4, most: usize, out: &mut Vec<V3>) {
+    let step = (tris.len() * 3).div_ceil(most.max(1)).max(1);
+    out.extend(tris.iter().flat_map(|t| t.v.iter()).step_by(step).map(|v| at.point(v.pos)));
+}
+
+/// The middle of `points`' box, its half-size, and the points from that middle: what a stage
+/// aims at and turns about.
+fn framed(points: Vec<V3>) -> (V3, f32, Vec<V3>) {
+    if points.is_empty() {
+        return (v3(0.0, 1.5, 0.0), 3.0, points);
+    }
+    let (min, max) = bounds_of(&points);
+    let centre = min.add(max).scale(0.5);
+    (centre, max.sub(min).len() / 2.0, points.into_iter().map(|p| p.sub(centre)).collect())
+}
+
+/// How far from `aim` a camera of field of view `fov` (up and down) on a stage `aspect` wide for
+/// each unit high stands so that every one of `points` is in the picture, [`MARGIN`] clear of its
+/// edges, looking at `aim` from each of `dirs` (each a unit step from `aim` towards the eye) (P319).
+///
+/// A point `q` from `aim` is `d - q·e` in front of an eye `d` out along `e`, and `q·r` right of
+/// the middle and `q·u` above it: it is in the picture while `|q·r| ≤ tan(fov/2)·aspect·(d - q·e)`,
+/// and the same up and down, so the distance is the least `d` that holds for every point and
+/// every direction.
+pub(crate) fn fit_distance(points: &[V3], aim: V3, dirs: &[V3], fov: f32, aspect: f32) -> f32 {
+    let ty = (fov / 2.0).tan() * (1.0 - MARGIN);
+    let tx = ty * aspect.max(0.01);
+    let mut back = 0.0f32;
+    for &e in dirs {
+        // level right and the up the eye sees by, as `M4::look_at` makes them
+        let r = v3(e.z, 0.0, -e.x).norm();
+        let u = e.cross(r);
+        for p in points {
+            let q = p.sub(aim);
+            let ahead = q.dot(e);
+            back = back.max(q.dot(r).abs() / tx + ahead).max(q.dot(u).abs() / ty + ahead);
+        }
+    }
+    back
 }
 
 /// Each texture's levels as the GPU takes them, by texture and cut-out ([`Dressed::mips`]).
@@ -398,7 +452,6 @@ fn dress_ride(tools: &mut Tools, pick: &roster::Pick) -> Result<Dressed, String>
             parts.push((name, at));
         }
     }
-    let (min, max) = bounds(&assets, &bike);
     // The rider in its gear and the pick's colours, posed on the bike.
     let body = match member_ending(disc, &format!("{}.res", pick.rider)) {
         Ok(rider) => {
@@ -428,15 +481,18 @@ fn dress_ride(tools: &mut Tools, pick: &roster::Pick) -> Result<Dressed, String>
             None
         }
     };
-    let mut centre = min.add(max).scale(0.5);
-    let mut radius = max.sub(min).len() / 2.0;
-    if body.is_some() {
-        // The rider stands above the seat: aim a little higher and stand back for them.
-        centre.y += 0.12 * radius;
-        radius *= 1.1;
+    // What the camera frames: the bike, its parts on it, and the rider as posed (P319).
+    let mut points = Vec::new();
+    points_of(&assets.models[&bike].tris, M4::IDENTITY, FIT_POINTS, &mut points);
+    for (name, at) in &parts {
+        points_of(&assets.models[name].tris, *at, FIT_POINTS / 4, &mut points);
     }
+    if let Some((name, _)) = &body {
+        points_of(&assets.models[name].tris, M4::IDENTITY, FIT_POINTS, &mut points);
+    }
+    let (centre, radius, points) = framed(points);
     let mips = mips_of(&assets);
-    Ok(Dressed { assets, bike, parts, body, centre, radius, mips })
+    Ok(Dressed { assets, bike, parts, body, centre, radius, points, fit: None, mips })
 }
 
 impl Stage {
@@ -456,14 +512,29 @@ impl Stage {
         out
     }
 
-    /// The camera on the stage, `w` by `h` pixels: from the bike's side and a little above and in
-    /// front, as the original's showroom looks at it.
-    fn camera(&self) -> Option<Camera> {
-        let d = self.dressed.as_ref()?;
-        let fov = 0.5f32;
-        let back = d.radius / (fov / 2.0).tan() * 1.05;
-        let eye = v3(1.0, 0.28, 0.35).norm().scale(back);
-        Some(Camera { eye, at: v3(0.0, 0.0, 0.0), fov, near: 0.1, far: back * 4.0 })
+    /// The camera on a stage `w` by `h` pixels: from the bike's side and a little above and in
+    /// front, as the original's showroom looks at it, as near as the bike and rider fit the stage
+    /// all the way round their turn (P319).
+    fn camera(&mut self, w: usize, h: usize) -> Option<Camera> {
+        let d = self.dressed.as_mut()?;
+        let aspect = w.max(1) as f32 / h.max(1) as f32;
+        let eye = v3(1.0, 0.28, 0.35).norm();
+        let back = match d.fit {
+            Some((a, back)) if a == aspect => back,
+            _ => {
+                // The bike turning under a still camera is the camera going round a still bike.
+                let dirs: Vec<V3> = (0..FIT_TURNS)
+                    .map(|k| {
+                        let a = std::f32::consts::TAU * k as f32 / FIT_TURNS as f32;
+                        v3(eye.x * a.cos() + eye.z * a.sin(), eye.y, eye.z * a.cos() - eye.x * a.sin())
+                    })
+                    .collect();
+                let back = fit_distance(&d.points, v3(0.0, 0.0, 0.0), &dirs, FOV, aspect).max(d.radius * 0.5);
+                d.fit = Some((aspect, back));
+                back
+            }
+        };
+        Some(Camera { eye: eye.scale(back), at: v3(0.0, 0.0, 0.0), fov: FOV, near: 0.1, far: back + d.radius * 4.0 })
     }
 
     /// How far round the stand is `tick` menu frames in.
@@ -486,7 +557,8 @@ impl Stage {
 
     /// Draw the stage over the menu the GPU just drew, into `rect` of the frame.
     pub fn draw_gpu(&mut self, r: &mut Renderer, t: &Target, rect: [u32; 4], turn: f32) {
-        let (Some(d), Some(camera)) = (&self.dressed, self.camera()) else { return };
+        let Some(camera) = self.camera(rect[2] as usize, rect[3] as usize) else { return };
+        let Some(d) = &self.dressed else { return };
         if !self.uploaded {
             // The menus' sprites are kept; a ride's models and textures are not this stage's.
             r.forget_assets();
@@ -539,7 +611,7 @@ impl Stage {
                 self.under = Some(([x, y, w, h], pixels));
             }
         }
-        let camera = self.camera().expect("dressed");
+        let camera = self.camera(w, h).expect("dressed");
         let d = self.dressed.as_ref().expect("dressed");
         let mut stage = Frame::new(w, h, [0, 0, 0]);
         let vp = camera.view_projection(w, h);

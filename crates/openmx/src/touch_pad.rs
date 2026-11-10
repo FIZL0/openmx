@@ -133,6 +133,11 @@ pub struct TouchPad {
     seen: [bool; BUTTONS],
     stick: Option<Stick>,
     axes: [f32; 2],
+    /// The finger whose tap the menus took as a click, while it stays down, and its presses and
+    /// moves since the last [`TouchPad::take_drags`]: a drag, which turns the Tricks page's camera
+    /// (P319).
+    dragging: Option<u64>,
+    drags: Vec<crate::window::MouseEvent>,
 }
 
 impl TouchPad {
@@ -182,8 +187,24 @@ impl TouchPad {
     /// One touch, `now` seconds into the run; the menus' clicks it makes go into `clicks`.
     pub fn touch(&mut self, t: Touch, now: f32, clicks: &mut Vec<(i32, i32)>) {
         let click = |clicks: &mut Vec<(i32, i32)>, (x, y): (f32, f32)| clicks.push((x.floor() as i32, y.floor() as i32));
+        let at = (t.at.0.floor() as i32, t.at.1.floor() as i32);
+        if self.dragging == Some(t.id) && t.phase != Phase::Down {
+            use crate::window::Mouse;
+            self.drags.push((if t.phase == Phase::Move { Mouse::Move } else { Mouse::Up }, at.0, at.1));
+            if t.phase != Phase::Move {
+                self.dragging = None;
+            }
+            return;
+        }
+        let drag = |pad: &mut TouchPad| {
+            pad.dragging = Some(t.id);
+            pad.drags.push((crate::window::Mouse::Down, at.0, at.1));
+        };
         match t.phase {
-            Phase::Down if !self.shown => click(clicks, t.at),
+            Phase::Down if !self.shown => {
+                click(clicks, t.at);
+                drag(self);
+            }
             Phase::Down => {
                 if self.fingers.iter().any(|(id, _)| *id == t.id) {
                     return;
@@ -197,6 +218,7 @@ impl TouchPad {
                     self.stick = Some(Stick { id: t.id, at: t.at, when: now, far: 0.0, knob: t.at });
                 } else {
                     click(clicks, t.at);
+                    drag(self);
                 }
             }
             Phase::Move => {
@@ -237,6 +259,11 @@ impl TouchPad {
             self.pressed[b] = false;
             self.seen[b] = false;
         }
+    }
+
+    /// The drag's presses and moves since the last call, in window pixels (P319).
+    pub fn take_drags(&mut self) -> Vec<crate::window::MouseEvent> {
+        std::mem::take(&mut self.drags)
     }
 
     /// Every finger off, everything up: the pad hidden, or the app sent away.

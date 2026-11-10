@@ -34,8 +34,8 @@ use openmx_web::{TRACK, rgba, start_line};
 /// store's downloads into OPFS, its unpacking and a page opened for Report (P198, `src/modstore.rs`); and the
 /// newer build the page saw, the last one started and a reload (P193); and its Hugging Face token kept by
 /// the page and what is pasted into it (P199, `src/modstore_up.rs`); and a folder of its files listed (P217).
-const HOST_CALLS: [&str; 33] = [
-    "disc_size", "disc_read", "present", "log", "view", "keys", "clicks", "gamepads", "gamepad_name", "play", "queued", "file_read", "file_write", "frame", "gpu", "drawn",
+const HOST_CALLS: [&str; 34] = [
+    "disc_size", "disc_read", "present", "log", "view", "keys", "clicks", "mouse", "gamepads", "gamepad_name", "play", "queued", "file_read", "file_write", "frame", "gpu", "drawn",
     "store_fetch", "store_got", "store_read", "store_close", "store_put", "store_drop", "open_url", "latest", "last_build", "reload",
     "token", "token_keep", "pasted",
     // P223: the device as the page sees it, and the display's measured rate.
