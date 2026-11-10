@@ -156,6 +156,40 @@ pub struct Held {
 }
 
 impl Held {
+    /// **The list refilled from the record's pass** (MD98, MD105b): the contacts
+    /// [`crate::handling::record::pass`] filed this frame become the entries, each as the pass leaves it in
+    /// the list (its kind, ray, normal, point and surface word; both arms [`crate::handling::record::BLANK`]).
+    /// An entry's relative velocity is left as the list's slot held it (the resolution writes it before it
+    /// reads it). `false`, and the list left empty, if a contact is with another record or a mover, which
+    /// the held record cannot answer ([`Held::resolve`]).
+    pub fn refill(&mut self, filed: &[crate::handling::record::Contact]) -> bool {
+        let was = std::mem::take(&mut self.entries);
+        if filed.iter().any(|c| c.other != 0 || c.mover != 0) {
+            return false;
+        }
+        let blank = crate::handling::record::BLANK;
+        self.entries = filed
+            .iter()
+            .enumerate()
+            .map(|(i, c)| Entry {
+                contact: Contact {
+                    kind: c.kind,
+                    from: c.from,
+                    on_body: c.to,
+                    normal: c.normal,
+                    point: c.point,
+                    arm: blank,
+                    other_arm: blank,
+                    surface: c.surface as i32,
+                    other: None,
+                    mover: None,
+                },
+                relative: was.get(i).map_or(Vf::ZERO, |e| e.relative),
+            })
+            .collect();
+        true
+    }
+
     /// The record's resolution on the quad's body, handed 1 as the gravity hands it, with `cofg` the
     /// body's centre of mass in its frame. `false`, and nothing done, if a contact is with another
     /// record (none is held) or the whole body is not in.
