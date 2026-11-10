@@ -10904,3 +10904,42 @@ atv_heap_free               atv 0x001b76d0 = free
 #   callees 0x0050a040, 0x0050db60 (other branch, 2872), 0x0050e6a0 (count), 0x0050e7e0, 0x00193b30,
 #   0x001c1e90, 0x0050c5c0, 0x00125be0, 0x0050eab0, 0x0050e980, 0x0050c8b0; rand 0x003561a8 twice per
 #   spawning frame, the spread table 0x00542410); second kind, thunk 0x004ffd20 -> 0x004fbcc0.
+# S13d — the race's results: what the supercross activity does with each card when the race is over
+# (the score manager's listener vt+0x18, the Over notice, through the thunk 0x003004f0 = this - 0x160).
+race_over_card              boot 0x002fc410 (activity, mgr, card): the card's interface item (list
+#                                           +0x14, list_nth, item vt+0xa4(item, id of
+#                                           "RaceStatusVehicleInterface") - 0x24 holds the card; none
+#                                           found -> the last item). Event (app+0x3d4 +0xc) +4 == 2:
+#                                           place (+0x2c) 1 -> race_fireworks; +0x414 (camera flashes,
+#                                           made by the loader on a track name holding "sx") and place
+#                                           < 4 -> +0x64 = max.s(world(+0x180)+0x538, +0x64), +0x6c =
+#                                           0.5 * +0x64, +0x68 = (world +0x53c (player card in 1st) or
+#                                           +0x544 - +0x5c) / +0x6c. Player card (+8 & 4) only: track
+#                                           id = results_track_find(results_track_list(app+0x3d8 +0x10,
+#                                           event+0)+0x14, event+8) +4, or -1; seat = item+0x6b0;
+#                                           app+0x3d4 +4 == 0, event +4 == 2, place 1, app+0x3f4[seat]
+#                                           -> profile_stat_add(f12 1.0, app+0x3e4, 10 wins, profile
+#                                           +0xcc). Event +4 == 2 and activity +0x4d0[seat]: best lap
+#                                           +0x50 on table 0 (league 0) / 4, race time +0xb4 on table
+#                                           +1/+2/+3 for event laps (+0x115) 3/5/10; each that beats
+#                                           -> fame_menu_mark(+0x3b8 = "HOFMenu", seat, track).
+#                                           race::Supercross::race_over
+race_fireworks              boot 0x002fd460 (activity, item): every "FireworksAnimator%02d" (+0x3f8,
+#                                           0x00215910 on its +0xb4) started, every "Fireworks%02d"
+#                                           emitter (+0x3e0; the array oracle.txt's S13a block calls
+#                                           "the lines") vt+0x80(1), then the "RacingOverlays" overlay
+#                                           0x002a83d0(overlay, 1, item). Presentation.
+hall_of_fame_beats          boot 0x00377bb0 (f12 time, a0 table base app+0x3e0, a1 table 0..10, a2
+#                                           track, a3 class) -> 1 if the time beats any of five: tables
+#                                           0..3 at 0 / 0xf00 / 0x780 / 0x1680, 4..7 at 0x1e04 / 0x2bc4 /
+#                                           0x24e4 / 0x32a4 (+ track*0x50 + class*0x14); 0..3 compare
+#                                           cvt.s.w(cvt.w.s(t)) c.olt, 4..7 and 10 (+0x39ec) t c.olt,
+#                                           8 (+0x3988) !(t c.ole), 9 (+0x3a50, ints) slt kept < cvt.w.s
+#                                           (t); 8..10 + track*0x14. race::HallOfFame::beats
+results_track_list          boot 0x003712b0 (lists, league) the league's track list
+results_track_find          boot 0x003712c0 (list, name) -> the track's entry (+4 its id) or 0
+fame_menu_mark              boot 0x002a43f0 (menu, seat, track): seat 0 -> +0xb0 = 1, +0xbc = 0; else
+#                                           +0xb4 = 1 (+0xbc = 1 if set); +0xc4 = track, +0xc0 = 1
+profile_stat_add            boot 0x0037abf0 (f12 amount, stats, stat id, slot): a jump table of 29;
+#                                           10 = wins (u16 +0x174 + 2*slot), then the win percentage
+#                                           +0x30 + 4*slot = 100 * wins / races (u16 +0x168)

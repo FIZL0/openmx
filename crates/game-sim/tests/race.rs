@@ -5529,3 +5529,262 @@ fn the_gate_ranking_matches_the_score_managers() {
     }
     assert!(said.iter().all(|&k| k > 1000), "{said:?}");
 }
+
+// --- the race's results (S13d) ------------------------------------------------------------------------
+
+const FAME: u32 = 0x0190_0000;
+
+/// A kept Hall of Fame word near `time`: a time a little either side, the time itself, a whole second,
+/// a count (for the counts table), or a stray word.
+fn fame_word(p: &mut Pick, time: f32) -> u32 {
+    match p.below(9) {
+        0 => time.to_bits(),
+        1 => time.trunc().to_bits(),
+        2 => (time.trunc() + 1.0).to_bits(),
+        3 => (time as i32).wrapping_add(p.below(3) as i32 - 1) as u32,
+        4 => 0,
+        5 => p.stray(time).to_bits(),
+        _ => p.range(time * 0.8, time * 1.2).to_bits(),
+    }
+}
+
+fn fame_time(p: &mut Pick) -> F {
+    let x = match p.below(10) {
+        0 => 0.0,
+        1 => p.below(400) as f32,
+        2 => -p.range(0.0, 3.0),
+        3 => p.range(0.0, 1.0),
+        _ => p.range(20.0, 600.0),
+    };
+    F(p.stray(x))
+}
+
+#[test]
+fn the_hall_of_fame_test_matches_the_originals() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let [beats] = match addrs(["hall_of_fame_beats"]) {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    let mut fame = race::HallOfFame::new();
+    for (k, w) in fame.words.iter().enumerate() {
+        ee.set_u32(FAME + 4 * k as u32, *w);
+    }
+    let mut p = Pick(0x7a3e_1d55_c0b2_9f41);
+    let mut answers = [[0u32; 2]; 11];
+    let mut cases = 0;
+    while cases < 20_000 {
+        let table = p.below(13) as u32;
+        let track = p.below(30) as i32 - 2;
+        let class = p.below(7) as i32 - 1;
+        let time = fame_time(&mut p);
+        if let Some(at) = race::HallOfFame::offset(table, track, class) {
+            for i in 0..5 {
+                let w = fame_word(&mut p, time.0);
+                fame.words[at / 4 + i] = w;
+                ee.set_u32(FAME + at as u32 + 4 * i as u32, w);
+            }
+        } else if table <= 10 {
+            continue; // the original reads past its tables
+        }
+        ee.call(beats, &[u64::from(FAME), u64::from(table), track as i64 as u64, class as i64 as u64], &[time.0], BUDGET);
+        let want = ee.r(2) as u32;
+        let got = fame.beats(table, track, class, time);
+        assert_eq!(want, u32::from(got), "case {cases}: table {table} track {track} class {class} time {time:?}");
+        if table <= 10 {
+            answers[table as usize][want as usize] += 1;
+        }
+        cases += 1;
+    }
+    assert!(answers.iter().all(|a| a[0] > 150 && a[1] > 150), "per table (no, yes): {answers:?}");
+}
+
+const R_APP: u32 = 0x0191_0000;
+const R_FE: u32 = R_APP + 0x1000;
+const R_EVENT: u32 = R_APP + 0x2000;
+const R_LISTS: u32 = R_APP + 0x3000;
+const R_STATS: u32 = R_APP + 0x4000;
+const R_PROFILES: u32 = R_APP + 0x5000;
+const R_ACT: u32 = 0x0192_0000;
+const R_WORLD: u32 = 0x0193_0000;
+const R_FLASH: u32 = 0x0193_1000;
+const R_MENU: u32 = 0x0193_2000;
+const R_CARD: u32 = 0x0194_0000;
+const R_ITEMS: u32 = 0x0195_0000;
+const R_ITEM_VT: u32 = 0x0196_0000;
+const R_CAST: u32 = 0x0197_0000;
+const R_TRACK: u32 = 0x0198_0000;
+/// Not code: the items' cast slot lands here and is hooked.
+const R_HOOK_CAST: u32 = 0x0196_1000;
+
+#[derive(Debug, PartialEq)]
+enum OverCall {
+    Fireworks(u32, u32),
+    Stat(u32, u32, u32, u32),
+    Fame(u32, u32, u32),
+}
+
+#[test]
+fn the_race_over_matches_the_supercross_activitys_answer() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let [over, app, id, nth, list, find, fireworks, stat, mark] = match addrs([
+        "race_over_card",
+        "app_pointer",
+        "interface_id",
+        "list_nth",
+        "results_track_list",
+        "results_track_find",
+        "race_fireworks",
+        "profile_stat_add",
+        "fame_menu_mark",
+    ]) {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    let calls: Rc<RefCell<Vec<OverCall>>> = Rc::default();
+    let found = Rc::new(Cell::new(0u32));
+    ee.hooks.insert(id, Box::new(|_| {}));
+    ee.hooks.insert(nth, Box::new(|ee| ee.set(2, u64::from(R_ITEMS + ee.r(5) as u32 * 0x1000))));
+    ee.hooks.insert(R_HOOK_CAST, Box::new(|ee| {
+        let k = (ee.r(4) as u32 - R_ITEMS) / 0x1000;
+        ee.set(2, u64::from(R_CAST + k * 0x100 + 0x24));
+    }));
+    ee.hooks.insert(list, Box::new(|ee| ee.set(2, u64::from(R_LISTS + 0x100))));
+    let f = found.clone();
+    ee.hooks.insert(find, Box::new(move |ee| ee.set(2, u64::from(f.get()))));
+    let c = calls.clone();
+    ee.hooks.insert(fireworks, Box::new(move |ee| c.borrow_mut().push(OverCall::Fireworks(ee.r(4) as u32, ee.r(5) as u32))));
+    let c = calls.clone();
+    ee.hooks.insert(stat, Box::new(move |ee| {
+        c.borrow_mut().push(OverCall::Stat(ee.r(4) as u32, ee.r(5) as u32, ee.r(6) as u32, ee.f(12).to_bits()))
+    }));
+    let c = calls.clone();
+    ee.hooks.insert(mark, Box::new(move |ee| c.borrow_mut().push(OverCall::Fame(ee.r(4) as u32, ee.r(5) as u32, ee.r(6) as u32))));
+
+    ee.set_u32(app, R_APP);
+    ee.set_u32(R_APP + 0x3d4, R_FE);
+    ee.set_u32(R_FE + 0xc, R_EVENT);
+    ee.set_u32(R_APP + 0x3d8, R_LISTS);
+    ee.set_u32(R_APP + 0x3e0, FAME);
+    ee.set_u32(R_APP + 0x3e4, R_STATS);
+    ee.set_u32(R_ACT + 0x180, R_WORLD);
+    ee.set_u32(R_ACT + 0x3b8, R_MENU);
+    ee.set_u32(R_ITEM_VT + 0xa4, R_HOOK_CAST);
+    // Below the tables, where a track the list does not hold (-1) reads: words no time beats.
+    for k in 0..0x14 {
+        ee.set_u32(FAME - 0x50 + 4 * k, 0xff7f_ffff);
+    }
+    let mut fame = race::HallOfFame::new();
+    let act = Supercross::new();
+    let mut p = Pick(0x2b94_d1e0_5c37_8a16);
+    let (mut fired, mut wins, mut marks, mut flashed) = (0, 0, 0, 0);
+    for case in 0..20_000 {
+        calls.borrow_mut().clear();
+        let event = race::ResultEvent {
+            league: [0, 0, 1, 2][p.below(4) as usize],
+            activity: if p.below(4) == 0 { [0, 1, 5][p.below(3) as usize] } else { 2 },
+            class: p.below(4) as i32,
+            laps: [3, 5, 10, 1, 2, 4, 3, 5, 10][p.below(9) as usize],
+            mode: i32::from(p.below(3) == 0),
+        };
+        ee.set_u32(R_FE + 4, event.mode as u32);
+        ee.set_u32(R_EVENT, event.league as u32);
+        ee.set_u32(R_EVENT + 4, event.activity as u32);
+        ee.set_u32(R_EVENT + 0x10c, event.class as u32);
+        ee.write(R_EVENT + 0x115, 1, u128::from(event.laps));
+        let track = if p.below(6) == 0 { -1 } else { p.below(26) as i32 };
+        found.set(if track < 0 { 0 } else { R_TRACK });
+        ee.set_u32(R_TRACK + 4, track as u32);
+
+        let mut card = LapCard {
+            flags: p.next() & !0x4 | if p.below(3) != 0 { 0x4 } else { 0 },
+            place: p.below(7) as i32 - 1,
+            best_lap: fame_time(&mut p),
+            race_time: fame_time(&mut p),
+            ..LapCard::default()
+        };
+        if p.below(4) == 0 {
+            card.place = 1;
+        }
+        ee.write(R_CARD + 8, 8, u128::from(card.flags));
+        ee.set_u32(R_CARD + 0x2c, card.place as u32);
+        put_f(&mut ee, R_CARD + 0x50, card.best_lap);
+        put_f(&mut ee, R_CARD + 0xb4, card.race_time);
+
+        // One to three interface items, the card's among them (or not: the last is taken).
+        let items = 1 + p.below(3) as u32;
+        let mine = p.below(u64::from(items) + 1) as u32;
+        ee.set_u32(R_ACT + 0x14, items);
+        let mut seats = Vec::new();
+        for k in 0..items {
+            let item = R_ITEMS + k * 0x1000;
+            ee.set_u32(item + 8, R_ITEM_VT);
+            let seat = p.below(4) as u32;
+            ee.set_u32(item + 0x6b0, seat);
+            ee.set_u32(R_CAST + k * 0x100, if k == mine { R_CARD } else { R_CARD + 0x1e0 });
+            seats.push(seat);
+        }
+        let taken = mine.min(items - 1);
+        let seat_no = seats[taken as usize];
+        let keeps = p.below(3) != 0;
+        let profile = p.below(3) != 0;
+        ee.set_u32(R_ACT + 0x4d0 + 4 * seat_no, u32::from(keeps));
+        ee.set_u32(R_APP + 0x3f4 + 4 * seat_no, if profile { R_PROFILES + seat_no * 0x100 } else { 0 });
+        ee.set_u32(R_PROFILES + seat_no * 0x100 + 0xcc, 7 + seat_no);
+        let seat = race::ResultSeat { seat: seat_no as i32, keeps_records: keeps, profile };
+
+        let levels = race::FlashLevels { shortest: time_word(&mut p, 4.0), player_win: time_word(&mut p, 2.0), podium: time_word(&mut p, 2.0) };
+        put_f(&mut ee, R_WORLD + 0x538, levels.shortest);
+        put_f(&mut ee, R_WORLD + 0x53c, levels.player_win);
+        put_f(&mut ee, R_WORLD + 0x544, levels.podium);
+        let mut flashes = (p.below(3) != 0).then(|| race::PodiumFlashes {
+            from: time_word(&mut p, 1.0),
+            length: time_word(&mut p, 4.0),
+            rate: time_word(&mut p, 4.0),
+            half: time_word(&mut p, 4.0),
+        });
+        ee.set_u32(R_ACT + 0x414, if flashes.is_some() { R_FLASH } else { 0 });
+        if let Some(fl) = &flashes {
+            for (o, x) in [(0x5c, fl.from), (0x64, fl.length), (0x68, fl.rate), (0x6c, fl.half)] {
+                put_f(&mut ee, R_FLASH + o, x);
+            }
+        }
+
+        // The entries the card's two times are tried against, near those times.
+        let base = if event.league != 0 { 4 } else { 0 };
+        for (table, time) in [(base, card.best_lap), (base + 1, card.race_time), (base + 2, card.race_time), (base + 3, card.race_time)] {
+            if let Some(at) = race::HallOfFame::offset(table, track, event.class) {
+                for i in 0..5 {
+                    let w = fame_word(&mut p, time.0);
+                    fame.words[at / 4 + i] = w;
+                    ee.set_u32(FAME + at as u32 + 4 * i as u32, w);
+                }
+            }
+        }
+
+        ee.call(over, &[u64::from(R_ACT), 0, u64::from(R_CARD)], &[], BUDGET);
+        let got = act.race_over(&card, Some(seat), &event, track, &fame, flashes.as_mut(), &levels);
+
+        let mut want = Vec::new();
+        if got.fireworks {
+            want.push(OverCall::Fireworks(R_ACT, R_ITEMS + taken * 0x1000));
+        }
+        if let Some(s) = got.win {
+            want.push(OverCall::Stat(R_STATS, 10, 7 + s as u32, 1.0f32.to_bits()));
+        }
+        for e in &got.fame {
+            want.push(OverCall::Fame(R_MENU, e.seat as u32, e.track as u32));
+        }
+        assert_eq!(*calls.borrow(), want, "case {case}: {event:?} {card:?} seat {seat:?} track {track}");
+        if let Some(fl) = &flashes {
+            let at = |o| ee.u32_at(R_FLASH + o);
+            let port = [fl.from, fl.length, fl.rate, fl.half].map(|x| x.0.to_bits());
+            assert_eq!([at(0x5c), at(0x64), at(0x68), at(0x6c)], port, "case {case}: flashes");
+        }
+        fired += usize::from(got.fireworks);
+        wins += usize::from(got.win.is_some());
+        marks += got.fame.len();
+        flashed += usize::from(flashes.is_some() && event.activity == 2 && card.place < 4);
+    }
+    assert!(fired > 2000 && wins > 500 && marks > 4000 && flashed > 4000, "fireworks {fired}, wins {wins}, entries {marks}, flashes {flashed}");
+}
