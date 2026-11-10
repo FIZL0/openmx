@@ -1068,6 +1068,13 @@ score_machine_zones_end     boot 0x00264520 the pc after the zone list
 #   (0x0026e0c0, 0x0026d780). AI, not lap bookkeeping: not ported (S292b).
 # S13e: the track's race file. Not in Tracks\sx01.res: it is tracks\sx01\sx01.tdf inside
 # Tracks\sx01_2.res (with sx01ai.tdf, supercross.aty, sx01.wpt, hit.dat).
+# S282c: tracks\sx01\sx01ai.tdf is a second race file, read by the same track_file_load into
+# act+0xbc (activity_race_load's act+0x288 name "Tracks\sx01\sx01AI.tdf"; 38 paths, 444 nodes on
+# sx01). It is the AI follower's net: ai+0xdc = act+0xbc in a racing image (s282c-sx01-race). The
+# avoidance's edge asks the race's own file instead (ai+0xd8 = act+0x50, its +0x68 = act+0xb8,
+# sx01.tdf, at card +0x88/+0x8c). A drop-in branch of 0x003a24f0 writes ai+0xdc = act+0xb8.
+# The .wpt files are not the path: 0x0034a660 reads a count and 0x20-byte records off one, and
+# 0x003a2e90 / 0x003a39d0 read a count list off another (unidentified; S282c).
 track_ctor                  boot 0x002693c0 (track) the track object (the score manager's +0x68 =
 #                                           activity +0xb8): +0x38/+0x3c = 200, +0x64..+0x74 = 100,
 #                                           0.9, 1.5, 0.5, 4, +0x90 = 1, +0xac = 3, the rest 0 — but

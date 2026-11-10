@@ -1029,7 +1029,11 @@ pub fn feed(rider: &Rider, brain: &mut Senses, world: &mut dyn crate::world::Wor
 /// Only the ground plane counts: every query reads `x` and `z` and leaves `y` alone.
 ///
 /// [`off_track`] is the avoidance's keep-on-the-track test ([`avoid`]'s `edge`), made of the three.
-/// The path's reading off the disc (S282c) and the follower that rides it (S282b) are not ported.
+///
+/// A track has two nets, both race files read the same way ([`crate::race::TrackFile`]) out of the
+/// track's second resource, and [`Net::from_track`] makes either one: the avoidance's edge asks the
+/// race's own (`<track>.tdf`, a start run and the lap), and the path follower rides the AI's
+/// (`<track>AI.tdf`, a web of branching lines). The follower itself (S282b) is not ported.
 pub mod path {
     use super::{sub, unit};
     use ps2_float::fpu::Acc;
@@ -1048,10 +1052,54 @@ pub mod path {
         pub next: Option<usize>,
     }
 
-    /// The nodes of a track's AI path, linked by [`Node::next`].
+    /// The nodes of a track's AI path, linked by [`Node::next`], and the paths they make up.
     #[derive(Clone, Debug, Default, PartialEq)]
     pub struct Net {
         pub nodes: Vec<Node>,
+        /// The paths, in the file's order; empty for a net made by hand.
+        pub paths: Vec<Path>,
+    }
+
+    /// One path of a [`Net`]: a run of nodes from `first` down [`Node::next`], and the paths it
+    /// branches into at its end.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct Path {
+        /// The path's flags ([`crate::race::path_flags`]), as the load leaves them.
+        pub flags: u32,
+        /// The sum of its nodes' lengths.
+        pub length: F,
+        /// Its first node, in [`Net::nodes`].
+        pub first: usize,
+        /// The paths it leads on to, by index into [`Net::paths`].
+        pub branches: Vec<usize>,
+    }
+
+    impl Net {
+        /// A loaded track's paths as one net: each path's nodes in turn, its centre the node's
+        /// first point, its edges the second and third, its length the node's span on to the next,
+        /// and its next the node after it on the same path (`None` on a path's last node: a path
+        /// goes on only through its branches).
+        ///
+        /// The original snaps every point's height onto the ground once the file is read (a ray
+        /// down from 1000 above it into the track's collision); these are the heights as filed.
+        pub fn from_track(track: &crate::race::TrackPaths) -> Net {
+            let mut net = Net::default();
+            for p in &track.paths {
+                let first = net.nodes.len();
+                let last = first + p.nodes.len() - 1;
+                for (k, n) in p.nodes.iter().enumerate() {
+                    let at = first + k;
+                    net.nodes.push(Node {
+                        centre: n.points[0],
+                        edges: [n.points[1], n.points[2]],
+                        length: n.span,
+                        next: (at < last).then_some(at + 1),
+                    });
+                }
+                net.paths.push(Path { flags: p.flags, length: p.length, first, branches: p.links.clone() });
+            }
+            net
+        }
     }
 
     /// A point on the line: the stretch from `node` to its next, `along` that far through it (0..1).
