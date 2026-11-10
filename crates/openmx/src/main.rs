@@ -3880,6 +3880,11 @@ async fn front_end(args: Args) -> Result<(), String> {
         // (P177), or the plane under `--vehicle biplane`.
         let machine = args.vehicle.name();
         shell.front.menu.lobby.set_machine(machine);
+        // And the flier pack's plane 1P's Garage picked (P318a), which they start in where the
+        // room offers its pack; else the ride's own.
+        let word = Machine::Biplane.pack_word().unwrap_or_default();
+        let flier = shell.front.menu.picks.0[0].flier(word).map(|f| (f.pack.clone(), f.skin.clone()));
+        shell.front.menu.lobby.set_flier(flier.as_ref().map(|(p, s)| (p.as_str(), s.as_str())));
         // 1P's own modifiers into it too, and the host's room every seat's (P134).
         shell.front.menu.lobby_mods();
         // 1P's controller preset into this machine's lobby pick (N13), for every machine's ride.
@@ -7436,8 +7441,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     }
     let mut online_want: Option<Kind> = None;
     // The flier pack's plane this machine's player last picked online (P318, `online_fliers::byte`),
-    // which its pad carries beside the machine: 0, the ride's own biplane.
-    let mut online_flier = 0u8;
+    // which its pad carries beside the machine: 0, the ride's own biplane. A lobby seat that
+    // starts in a pack's plane (P318a) carries its byte from the start, so its next switch onto the
+    // plane takes the same one.
+    let mut online_flier = online.as_ref().and_then(|on| Some(on.start_flier(*on.my_seats().first()?))).unwrap_or(0);
     // The ride's offer the pause's flier rows were last made of.
     let mut online_rows_for: Vec<online_fliers::Offered> = Vec::new();
     let mut online_frames = 0u32;

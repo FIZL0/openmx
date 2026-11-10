@@ -59,17 +59,31 @@ pub struct Rides<'a> {
 /// never flown, under the byte a seat's pad picks it by ([`super::FLIER`],
 /// [`Flight::skin`]), and the skin's `.phy` before the modifiers, which a change of them retunes it
 /// and every plane of it in flight from, as [`Modded::stock_plane`] is the ride's own plane's.
+///
+/// `closed` (P318a): a seat that joined since lacks its pack, so no switch takes it any more —
+/// the ride's own plane in its place — though a seat already up in it flies on in it. Every
+/// machine closes it at one tick: the join's restart, whose state says it ([`Rides::encode`]).
 #[derive(Clone)]
 pub struct Flier {
     pub byte: u8,
     pub stock: game_sim::phy::Plane,
     pub flight: Flight,
+    pub closed: bool,
 }
 
 /// The plane a seat's switch takes (P318): the flier its pad's byte `byte` names among `fliers`,
 /// else (0, or a byte no flier here has) the ride's own `plane`.
 pub fn template_for<'f>(byte: u8, plane: Option<&'f Flight>, fliers: &'f [Flier]) -> Option<&'f Flight> {
     match fliers.iter().find(|f| byte != 0 && f.byte == byte) {
+        Some(f) => Some(&f.flight),
+        None => plane,
+    }
+}
+
+/// [`template_for`] for a switch onto the plane (P318a): a closed flier's byte takes the ride's
+/// own `plane`.
+pub fn template_to<'f>(byte: u8, plane: Option<&'f Flight>, fliers: &'f [Flier]) -> Option<&'f Flight> {
+    match fliers.iter().find(|f| byte != 0 && f.byte == byte && !f.closed) {
         Some(f) => Some(&f.flight),
         None => plane,
     }
@@ -285,7 +299,7 @@ impl Game for Rides<'_> {
             let cars = self.cars.get(seat).map_or(&[][..], |c| &c[..]);
             // The plane it takes is the flier its pad picked (P318), else the ride's own.
             if let Some(to) = wanted.to {
-                let template = template_for(reports[0].0[super::FLIER], self.plane.as_deref(), self.fliers);
+                let template = template_to(reports[0].0[super::FLIER], self.plane.as_deref(), self.fliers);
                 let _ = vehicle::switch_lane_among(to, template, cars, sim, self.world);
             }
             // The shell's hands, the d-pad the markers' and not the ride's (P93) — unless the seat's
@@ -377,6 +391,13 @@ impl Game for Rides<'_> {
             out.extend((bytes.len() as u32).to_le_bytes());
             out.extend(bytes);
         }
+        // The fliers closed by a join (P318a), after the seats where there are any: their count,
+        // then their bytes. A ride with none says its state as before.
+        let closed: Vec<u8> = self.fliers.iter().filter(|f| f.closed).map(|f| f.byte).collect();
+        if !closed.is_empty() {
+            out.push(closed.len() as u8);
+            out.extend(closed);
+        }
         Some(out)
     }
 
@@ -402,11 +423,18 @@ impl Game for Rides<'_> {
             from_seat_bytes(sim, one).map_err(|e| format!("seat {}: {e}", seat + 1))?;
             at += 4 + n;
         }
-        if at != bytes.len() {
-            return Err(format!("{} bytes left over after the seats", bytes.len() - at));
-        }
+        // And the fliers the state says are closed (P318a), every other one open: every machine
+        // decoding it holds the same set.
+        let closed = match bytes.get(at..) {
+            Some([]) | None => &[][..],
+            Some([n, rest @ ..]) if *n > 0 && rest.len() == *n as usize => rest,
+            Some(rest) => return Err(format!("{} bytes left over after the seats", rest.len())),
+        };
         sims.iter_mut().for_each(|sim| self.probe(sim));
         *self.sims = sims;
+        for f in self.fliers.iter_mut() {
+            f.closed = closed.contains(&f.byte);
+        }
         Ok(())
     }
 
@@ -420,7 +448,17 @@ impl Game for Rides<'_> {
         }
         let mut sim = self.sims.first().ok_or("no seat to take the constants from")?.clone();
         let (&n, rest) = spawn.split_first().ok_or("the spawn is empty")?;
-        let (presets, state) = rest.split_at_checked(2 * n as usize).ok_or("the spawn's presets are cut short")?;
+        let (presets, rest) = rest.split_at_checked(2 * (n & !CLOSING) as usize).ok_or("the spawn's presets are cut short")?;
+        // The fliers the joiner's machine lacks the pack of (P318a), closed from this join on.
+        let state = match n & CLOSING {
+            0 => rest,
+            _ => {
+                let (&m, rest) = rest.split_first().ok_or("the spawn's closed fliers are cut short")?;
+                let (closed, state) = rest.split_at_checked(m as usize).ok_or("the spawn's closed fliers are cut short")?;
+                self.fliers.iter_mut().filter(|f| closed.contains(&f.byte)).for_each(|f| f.closed = true);
+                state
+            }
+        };
         from_seat_bytes(&mut sim, state).map_err(|e| format!("the spawn: {e}"))?;
         if let Some(p) = presets.chunks(2).find(|p| p[0] as usize == seat) {
             sim.set_presets([p[1] as usize, 0]);
@@ -552,13 +590,28 @@ pub fn from_seat_bytes(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
 /// behind the controller preset of each of the joiner's seats as (seat, preset) — their count,
 /// then the pairs. A seat not in the list rides the spawn's own preset.
 pub fn spawn_on(spawn: &[u8], presets: &[(usize, u8)]) -> Vec<u8> {
-    let mut out = vec![presets.len() as u8];
+    spawn_closing(spawn, presets, &[])
+}
+
+/// [`spawn_on`] for a joiner whose machine lacks the packs of the fliers `closed` (P318a, their
+/// bytes): the preset count's top bit set, and after the pairs their count and bytes. The seat it
+/// spawns closes them ([`Flier::closed`]), and the state the join sends every machine says so.
+pub fn spawn_closing(spawn: &[u8], presets: &[(usize, u8)], closed: &[u8]) -> Vec<u8> {
+    let flag = if closed.is_empty() { 0 } else { CLOSING };
+    let mut out = vec![presets.len() as u8 | flag];
     for &(seat, preset) in presets {
         out.extend([seat as u8, preset]);
+    }
+    if !closed.is_empty() {
+        out.push(closed.len() as u8);
+        out.extend(closed);
     }
     out.extend(spawn);
     out
 }
+
+/// [`spawn_closing`]'s flag on the preset count: closed fliers follow the pairs (P318a).
+const CLOSING: u8 = 0x80;
 
 /// A joiner's seat (P105): `spawn` ([`seat_bytes`] of where the ride starts) decoded onto `first`'s
 /// constants with `markers` — the joiner's player's saved markers, as its handshake brought them —

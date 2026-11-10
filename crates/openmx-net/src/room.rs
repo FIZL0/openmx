@@ -64,6 +64,12 @@ pub struct Pick {
     /// and what an older build sends. Every seat must hold them ([`Room::needs`]).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub packs: String,
+    /// The flier pack's plane the player starts the ride in where [`Pick::machine`] is the plane
+    /// (P318a), `pack/skin` as the Garage's pick names it (`mxvatv_fliers/biplane3`); empty for the
+    /// ride's own biplane, and what an older build sends. Its pack is in [`Pick::packs`], so every
+    /// seat holds it. Not in the handshake, as the machine is not.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub flier: String,
 }
 
 impl Pick {
@@ -78,6 +84,7 @@ impl Pick {
             modifiers: String::new(),
             model: String::new(),
             packs: String::new(),
+            flier: String::new(),
         }
     }
 }

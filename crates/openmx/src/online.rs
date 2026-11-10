@@ -156,6 +156,9 @@ struct Fliers {
     owed: bool,
     /// The packs the host last said the ride rides ([`openmx_net::Cmd::InUse`]).
     said: Vec<String>,
+    /// How many of the templates were closed when the offer was made (P318a): a join's restart
+    /// that closes more makes it again.
+    closed: usize,
 }
 
 /// N25: a seat's car out after a tick (S249): which car, where its lane took it, and the car as it
@@ -240,6 +243,30 @@ struct Marks {
 /// `--peer`s (P318): whether seat `s` is its machine's first, the one its packs are heard for.
 fn lineup_first(lineup: &crate::net::Lineup, s: usize) -> bool {
     lineup.seats.get(s).cloned().flatten().is_some_and(|p| lineup.mine(&p).first() == Some(&s))
+}
+
+/// A lobby room's flier packs (P318): the reference machine's packs — the host's, else the first
+/// peer's — and each taken seat's machine's, as [`crate::online_fliers::offer`] reads them.
+fn room_packs(room: &openmx_net::Room) -> (Vec<openmx_net::Pack>, Vec<(usize, Option<Vec<openmx_net::Pack>>)>) {
+    let first = room.packs.get(openmx_net::HOST).or_else(|| room.peers().first().and_then(|p| room.packs.get(p)));
+    let seats = room.seats.iter().enumerate().filter_map(|(n, s)| Some((n, room.packs.get(&s.as_ref()?.peer).cloned()))).collect();
+    (first.cloned().unwrap_or_default(), seats)
+}
+
+/// The ride's offer of fliers on `room` as this machine lists it (P318a), its packs `mine` and
+/// plane skins `local`: what the host closes a joiner's lacking fliers by.
+fn offer_on_room(room: &openmx_net::Room, mine: &[openmx_net::Pack], local: &[LocalFlier]) -> Vec<crate::online_fliers::Offered> {
+    let (reference, seats) = room_packs(room);
+    let seats: Vec<(usize, Option<&[openmx_net::Pack]>)> = seats.iter().map(|(n, p)| (*n, p.as_deref())).collect();
+    let skins: Vec<crate::online_fliers::Skin> = local.iter().map(|l| l.skin.clone()).collect();
+    crate::online_fliers::offer(&crate::online_fliers::ride_packs(&reference), &seats, mine, &skins)
+}
+
+/// The pad byte of the flier pack's plane a lobby `pick` starts in (P318a, its `pack/skin`) in
+/// `offer`: 0, the ride's own biplane, for none, or one the offer greys or has not.
+fn flier_byte(offer: &[crate::online_fliers::Offered], pick: &openmx_net::Pick) -> u8 {
+    let Some((pack, skin)) = pick.flier.split_once('/') else { return 0 };
+    crate::online_fliers::byte_of(offer, pack, skin, crate::roster::ORIGINAL_PACK).unwrap_or(0)
 }
 
 /// How often a `--peer` machine offers its saved markers again until its ride ticks.
@@ -521,8 +548,14 @@ impl Online {
         if self.net.tick() > 0 {
             return Err("the ride started before every seat's machine was known".into());
         }
+        let skins: Vec<u8> = (0..self.sims.len()).map(|s| self.start_flier(s)).collect();
         for (s, sim) in self.sims.iter_mut().enumerate().filter(|&(s, _)| flies.get(s) == Some(&true)) {
-            match (&self.plane, self.bays.get(s)) {
+            // In the flier pack's plane its pick names (P318a), where the ride offers it.
+            let template = rides::template_to(skins[s], self.plane.as_ref(), &self.fliers.templates);
+            if skins[s] != 0 {
+                println!("online: seat {} starts in {}", s + 1, self.room.as_ref().and_then(|r| r.seats.get(s)?.as_ref()).map_or("", |seat| seat.pick.flier.as_str()));
+            }
+            match (template, self.bays.get(s)) {
                 (Some(template), Some(&bay)) => vehicle::start_lane_on(template, bay, self.bay_bodies.get(s).copied().flatten(), sim),
                 _ => println!("online: seat {} picked the biplane, but this ride has none for it; the bike", s + 1),
             }
@@ -606,11 +639,7 @@ impl Online {
     /// ride's templates the first time.
     fn offer_fliers(&mut self) {
         let (reference, seats): (Vec<openmx_net::Pack>, Vec<(usize, Option<Vec<openmx_net::Pack>>)>) = match &self.room {
-            Some(room) => {
-                let first = room.packs.get(openmx_net::HOST).or_else(|| room.peers().first().and_then(|p| room.packs.get(p)));
-                let seats = room.seats.iter().enumerate().filter_map(|(n, s)| Some((n, room.packs.get(&s.as_ref()?.peer).cloned()))).collect();
-                (first.cloned().unwrap_or_default(), seats)
-            }
+            Some(room) => room_packs(room),
             None if !self.fliers.seat_packs.is_empty() => {
                 let seats: Vec<_> = self.fliers.seat_packs.iter().enumerate().filter(|(n, _)| lineup_first(&self.net.lineup, *n)).map(|(n, p)| (n, p.clone())).collect();
                 (seats.first().and_then(|s| s.1.clone()).unwrap_or_default(), seats)
@@ -622,6 +651,14 @@ impl Online {
         let seats: Vec<(usize, Option<&[openmx_net::Pack]>)> = seats.iter().map(|(n, p)| (*n, p.as_deref())).collect();
         let skins: Vec<crate::online_fliers::Skin> = self.fliers.local.iter().map(|l| l.skin.clone()).collect();
         self.fliers.offer = crate::online_fliers::offer(&ride, &seats, &self.fliers.packs, &skins);
+        // A row whose template a join closed (P318a) stays greyed, even once the seat that lacked
+        // its pack has gone: every machine's switch takes the ride's own plane on it now.
+        for o in self.fliers.offer.iter_mut().filter(|o| o.open()) {
+            if self.fliers.templates.iter().any(|t| t.byte == o.byte && t.closed) {
+                o.why = "Closed when a machine without its pack joined the ride".to_string();
+            }
+        }
+        self.fliers.closed = self.fliers.templates.iter().filter(|t| t.closed).count();
         if !self.fliers.built {
             self.fliers.built = true;
             self.fliers.templates = self
@@ -632,7 +669,7 @@ impl Online {
                 .filter_map(|o| {
                     let l = self.fliers.local.iter().find(|l| l.skin.pack == o.pack && l.skin.skin == o.skin)?;
                     let like = Flight { skin: o.byte, ..l.like.clone() };
-                    Some(rides::Flier { byte: o.byte, stock: l.stock.clone(), flight: rides::flier_on(&l.stock, &self.mods, &like) })
+                    Some(rides::Flier { byte: o.byte, stock: l.stock.clone(), flight: rides::flier_on(&l.stock, &self.mods, &like), closed: false })
                 })
                 .collect();
             let open = self.fliers.offer.iter().filter(|o| o.open()).count();
@@ -644,6 +681,13 @@ impl Online {
             let said = if o.open() { "open".to_string() } else { format!("greyed: {}", o.why) };
             println!("online: flier {}/{} {said}", o.pack, o.skin);
         }
+    }
+
+    /// The pad byte of the flier pack's plane seat `seat` starts the ride in (P318a): its lobby
+    /// pick's ([`openmx_net::Pick::flier`]) where the ride offers it, else 0, the ride's own.
+    pub fn start_flier(&self, seat: usize) -> u8 {
+        let Some(pick) = self.room.as_ref().and_then(|r| r.seats.get(seat)?.as_ref()).map(|s| &s.pick) else { return 0 };
+        flier_byte(&self.fliers.offer, pick)
     }
 
     /// What each seat flies as the ride ends (P318), for the shell's last lines: `online: fliers 1P
@@ -857,7 +901,7 @@ impl Online {
         let me = self.net.me.clone();
         let session = &mut self.net;
         let (spawn, arrived, room) = (&self.spawn, &mut self.arrived, &mut self.room);
-        let fliers_owed = &mut self.fliers.owed;
+        let fliers = &mut self.fliers;
         let first = self.sims.first();
         let (template, bays, bodies) = (self.plane.as_ref(), &self.bays, &self.bay_bodies);
         match &mut self.wire {
@@ -920,11 +964,20 @@ impl Online {
                                 _ => None,
                             };
                             let spawn = marked.as_deref().unwrap_or(spawn);
+                            // the ride's fliers as the room offers them with the joiner in it
+                            // (P318a): the ones its machine lacks the pack of close at its join,
+                            // on every machine at that tick, as the state it is sent says
+                            let offer = room.as_ref().map(|r| offer_on_room(r, &fliers.packs, &fliers.local)).unwrap_or_default();
+                            let closed: Vec<u8> = fliers.templates.iter().filter(|t| !t.closed && !offer.iter().any(|o| o.byte == t.byte && o.open())).map(|t| t.byte).collect();
+                            if !closed.is_empty() {
+                                println!("online: {peer} lacks {} of the ride's fliers, closed at its join", closed.len());
+                            }
                             // the joiner's setup machine (N19), as its pick says it: a seat that
                             // picked the plane rides in flying from its own bay, in the state
-                            // every machine is sent, as a lobby ride's seat starts in it (N18)
+                            // every machine is sent, as a lobby ride's seat starts in it (N18);
+                            // in its pick's flier pack's plane where the ride offers it (P318a)
                             let flying = match (seats.as_slice(), seats.first().and_then(|&s| pick(s))) {
-                                ([s], Some(seat)) if seat.pick.machine == vehicle::Kind::Biplane.name() => match (first, template, bays.get(*s)) {
+                                ([s], Some(seat)) if seat.pick.machine == vehicle::Kind::Biplane.name() => match (first, rides::template_to(flier_byte(&offer, &seat.pick), template, &fliers.templates), bays.get(*s)) {
                                     (Some(f), Some(t), Some(&bay)) => match rides::spawn_flying_on(f, spawn, t, bay, bodies.get(*s).copied().flatten()) {
                                         Ok(b) => {
                                             println!("online: {peer} rides in on the biplane");
@@ -947,7 +1000,7 @@ impl Online {
                                 _ => None,
                             };
                             let spawn = flying.as_deref().unwrap_or(spawn);
-                            match session.admit(peer, seats, rides::spawn_on(spawn, &presets)) {
+                            match session.admit(peer, seats, rides::spawn_closing(spawn, &presets, &closed)) {
                                 Ok(()) => arrived.push(peer.clone()),
                                 Err(why) => println!("online: {peer} cannot join: {why}"),
                             }
@@ -955,7 +1008,7 @@ impl Online {
                         }
                         Event::Room(ref r) => {
                             *room = Some(r.clone());
-                            *fliers_owed = true;
+                            fliers.owed = true;
                             // one that left before it was taken on
                             let seated = r.peers();
                             for p in arrived.extract_if(.., |p| !seated.contains(p)) {
@@ -1149,7 +1202,8 @@ impl Online {
                 return Err(format!("online: {why}"));
             }
         };
-        if std::mem::take(&mut self.fliers.owed) {
+        let closed = self.fliers.templates.iter().filter(|t| t.closed).count();
+        if std::mem::take(&mut self.fliers.owed) || closed != self.fliers.closed {
             self.offer_fliers();
         }
         if !self.take_markers() {

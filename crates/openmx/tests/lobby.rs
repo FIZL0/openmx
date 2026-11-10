@@ -1494,3 +1494,106 @@ fn every_installed_pack_is_said_by_kind_id_and_hash() {
     assert_ne!(lobby::installed_packs(&mods, &mut cache)[0].hash, hash, "a new file reads the pack again");
     let _ = std::fs::remove_dir_all(mods.parent().unwrap());
 }
+
+/// P318a: in a lobby's room the Garage's Fliers tab greys a flier pack's skins where some seat's
+/// machine lacks the pack, with the room's why ([`openmx_net::Offered::why`]); MX Unleashed's stay
+/// open, and the fliers on offer are untouched. The lobby pick takes a pack's plane to start in only
+/// where the room offers its pack and the player starts on the plane, and then names its pack, which
+/// the handshake holds every seat to.
+#[test]
+fn a_lobby_greys_a_fliers_pack_some_seat_lacks_and_starts_only_in_an_open_one() {
+    let (mut menu, _reader) = fresh("Hosty", "thq1");
+    let skin = roster::Flier {
+        pack: "mxvatv_fliers".into(),
+        game: "MX vs. ATV Unleashed".into(),
+        machine: "biplane".into(),
+        skin: "biplane3".into(),
+        name: "Spitfire".into(),
+        model: 2,
+        about: String::new(),
+        why: None,
+        preview: None,
+    };
+    menu.set_fliers(vec![skin]);
+    let pack = openmx_net::Pack { kind: "machine".into(), id: "mxvatv_fliers".into(), hash: 7, name: "MX vs. ATV fliers 1.0.0".into(), how: String::new() };
+    let room = |guest_holds: bool| {
+        let mut room = guest_room();
+        room.packs.insert(HOST.into(), vec![pack.clone()]);
+        room.packs.insert("guest-id".into(), if guest_holds { vec![pack.clone()] } else { Vec::new() });
+        room
+    };
+    let shown = |menu: &Menu| menu.garage_fliers().iter().find(|f| f.pack == "mxvatv_fliers").and_then(|f| f.why.clone());
+    // off line: every flier as it is
+    assert_eq!(shown(&menu), None);
+    // the guest lacks the pack: greyed with who lacks it, and no start in it
+    menu.heard(Event::Room(room(false)));
+    assert_eq!(shown(&menu).as_deref(), Some("needs MX vs. ATV fliers 1.0.0, missing for 2P"));
+    assert!(menu.garage_fliers().iter().filter(|f| f.pack == roster::ORIGINAL_PACK).all(|f| f.why.is_none()), "MX Unleashed's stay open");
+    assert!(menu.fliers().iter().all(|f| f.why.is_none()), "the fliers on offer are untouched");
+    menu.lobby.set_machine("biplane");
+    menu.lobby.set_flier(Some(("mxvatv_fliers", "biplane3")));
+    assert_eq!((menu.lobby.pick.flier.as_str(), menu.lobby.pick.packs.as_str()), ("", ""));
+    // every seat holds it: open, and the pick starts in it and names its pack
+    menu.heard(Event::Room(room(true)));
+    assert_eq!(shown(&menu), None);
+    menu.lobby.repick = false;
+    menu.lobby.set_flier(Some(("mxvatv_fliers", "biplane3")));
+    assert_eq!((menu.lobby.pick.flier.as_str(), menu.lobby.pick.packs.as_str()), ("mxvatv_fliers/biplane3", "machine/mxvatv_fliers"));
+    assert!(menu.lobby.repick, "the changed pick goes out");
+    let mut with = room(true);
+    with.seats[0].as_mut().unwrap().pick = menu.lobby.pick.clone();
+    assert_eq!(with.needs(), vec!["machine/mxvatv_fliers".to_string()], "the handshake holds every seat to it");
+    // MX Unleashed's own, or the bike, start in nothing of a pack's
+    menu.lobby.set_flier(Some((roster::ORIGINAL_PACK, "biplane2")));
+    assert_eq!(menu.lobby.pick.flier, "");
+    menu.lobby.set_flier(Some(("mxvatv_fliers", "biplane3")));
+    menu.lobby.set_machine("bike");
+    menu.lobby.set_flier(Some(("mxvatv_fliers", "biplane3")));
+    assert_eq!((menu.lobby.pick.flier.as_str(), menu.lobby.pick.packs.as_str()), ("", ""));
+}
+
+/// P318a: a lobby seat that picked the plane and a flier pack's skin of it
+/// ([`openmx_net::Pick::flier`]) starts the ride in that skin's plane where every seat's machine holds
+/// the pack — the template the ride built of it, its skin's byte in the seat's plane and on its pad
+/// from the start — and in the ride's own biplane where some seat's machine lacks it.
+#[test]
+fn a_lobby_seat_that_picked_a_packs_plane_starts_the_ride_in_it() {
+    use game_render::disc::Disc;
+    let mut disc = match Disc::open_configured() {
+        Ok(disc) => disc,
+        Err(e) => return eprintln!("skipped: {e}"),
+    };
+    let name = disc.entries().iter().find(|e| e.name.eq_ignore_ascii_case("machine.res")).expect("machine.res").name.clone();
+    let bytes = disc.res(&name).unwrap().read_suffix(game_sim::phy::BIPLANE_PHY).expect("biplane.phy");
+    let file = game_sim::phy::Plane::read_bytes(&bytes);
+    let pack = openmx_net::Pack { kind: "machine".into(), id: "mxvatv_fliers".into(), hash: 7, name: "MX vs. ATV fliers 1.0.0".into(), how: String::new() };
+    let start = |guest_holds: bool| {
+        let mut room = guest_room();
+        room.seed = 0x51;
+        room.packs.insert(HOST.into(), vec![pack.clone()]);
+        room.packs.insert("guest-id".into(), if guest_holds { vec![pack.clone()] } else { Vec::new() });
+        for (n, seat) in room.seats.iter_mut().flatten().enumerate() {
+            seat.pick.machine = "biplane".into();
+            if n == 1 {
+                (seat.pick.flier, seat.pick.packs) = ("mxvatv_fliers/biplane3".into(), "machine/mxvatv_fliers".into());
+            }
+        }
+        let sims: Vec<game_sim::Sim> = (0..room.seats.len()).map(|_| game_sim::Sim::new(room.seed)).collect();
+        let mut on = online::Online::lobby(Arc::new(lan("Hosty", 1)), &room, HOST, sims).unwrap();
+        let like = game_sim::flight::Flight::new(&file);
+        on.planes(Some(file.clone()), Some(&like));
+        let skin = online_fliers::Skin { pack: "mxvatv_fliers".into(), skin: "biplane3".into(), name: "Spitfire".into() };
+        let local = online::LocalFlier { skin, stock: file.clone(), like: game_sim::flight::Flight { mxvatv: true, ..like.clone() } };
+        on.fliers_here(vec![pack.clone()], vec![local]);
+        let bay = |x: f32| vehicle::Spawn { at: ps2_float::Vf::new(x, 300.0, 0.0, 1.0), facing: ps2_float::Vf::new(0.0, 0.0, 1.0, 0.0) };
+        on.bays_on((0..room.seats.len()).map(|n| bay(n as f32 * 200.0)).collect(), vec![None; room.seats.len()]);
+        on.start_planes(&online::Online::picked_planes(&room)).unwrap();
+        (on.fliers_flown(), on.start_flier(1))
+    };
+    let byte = online_fliers::byte(0, 0).unwrap();
+    let mut seats = vec!["1P biplane".to_string(), "2P mxvatv_fliers/biplane3".to_string()];
+    seats.extend((2..LOBBY_SEATS).map(|n| format!("{}P bike", n + 1)));
+    assert_eq!(start(true), (format!("online: fliers {}", seats.join(", ")), byte), "2P starts in the pack's plane");
+    seats[1] = "2P biplane".into();
+    assert_eq!(start(false), (format!("online: fliers {}", seats.join(", ")), 0), "a pack some seat lacks: the ride's own");
+}
