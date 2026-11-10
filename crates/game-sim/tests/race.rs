@@ -95,6 +95,10 @@
 //!     passed words, reaches and steps at a gate, against [`RaceRules::clear_checkpoint`] and
 //!     [`RaceRules::line_lists`], compared on every listener call in order with the gate and card
 //!     passed, and every path's words and the pools the path distances use.
+//! 26. **C31's live sx01 laps** (S13c): both captured sx01 single races, every rider's card every tick
+//!     seeded from the tick before and stepped through [`RaceRules::card`] on sx01's paths out of C31's
+//!     RAM image, against the captured card: 16 laps, 9 best laps, 6 finishes, the human's 4,192
+//!     off-track ticks and 19 off-track limits, bit for bit.
 
 use game_sim::chassis::{Chassis, Deriv};
 use game_sim::race::{
@@ -3725,6 +3729,327 @@ fn the_ranking_and_gaps_match_c31s_live_race() {
 
 fn is_zero_f(x: F) -> bool {
     x.0 == 0.0
+}
+
+// --- S13c: the race handler held against C31's live sx01 laps ---------------------------------------
+
+/// sx01's track as C31's session holds it: the paths and the line, and the addresses that name each
+/// path and node in a captured spot.
+struct C31Track {
+    paths: TrackPaths,
+    course: Course,
+    path_at: Vec<u32>,
+    node_at: Vec<Vec<u32>>,
+}
+
+impl C31Track {
+    /// The track object in C31's RAM image (the start state, before any card exists).
+    fn load(ee: &Ee, activities: u32) -> C31Track {
+        let act = ee.u32_at(ee.u32_at(ee.u32_at(activities) + 0x58));
+        let track = ee.u32_at(act + 0xb8);
+        let file = track_at(ee, track);
+        let mut paths = TrackPaths::new(&file).expect("sx01's paths walk");
+        paths.ahead = f32_at(ee, track + 0x38);
+        paths.behind = f32_at(ee, track + 0x3c);
+        paths.lap_length = f32_at(ee, track + 0x54);
+        let path_at: Vec<u32> = (0..ee.u32_at(track + 0x40)).map(|k| ee.u32_at(ee.u32_at(track + 0x50) + 4 * k)).collect();
+        let node_at = path_at
+            .iter()
+            .map(|&p| {
+                let mut v = Vec::new();
+                let mut n = ee.u32_at(p + 0x10);
+                while n != 0 {
+                    v.push(n);
+                    n = ee.u32_at(n + 0x54);
+                }
+                v
+            })
+            .collect();
+        let line_at = ee.u32_at(track + 0x5c);
+        let mut t = C31Track { paths, course: Course { line: gate_at(ee, line_at), line_spot: Spot::default(), lap_length: f32_at(ee, track + 0x54) }, path_at, node_at };
+        t.course.line_spot = t.spot(ee.u32_at(line_at + 0x94), ee.u32_at(line_at + 0x98), f32_at(ee, line_at + 0x9c)).expect("the line's spot");
+        t
+    }
+
+    /// A captured spot's words as the port's path and node numbers (0, 0 for none).
+    fn spot(&self, path: u32, piece: u32, along: F) -> Option<Spot> {
+        if path == 0 && piece == 0 {
+            return Some(Spot { path: 0, piece: 0, along });
+        }
+        let p = self.path_at.iter().position(|&a| a == path)?;
+        let n = self.node_at[p].iter().position(|&a| a == piece)?;
+        Some(Spot::on(p, n, along))
+    }
+}
+
+/// A score card off a captured row's raw bytes (its first 0x1d0), as the race handler keeps it. None
+/// when a spot names a node outside the track (a torn row).
+fn c31_card(raw: &[u8], track: &C31Track) -> Option<RaceCard> {
+    let u = |o: usize| u32::from_le_bytes(raw[o..o + 4].try_into().unwrap());
+    let f = |o: usize| F(f32::from_bits(u(o)));
+    let v = |o: usize| Vf::new(f(o).0, f(o + 4).0, f(o + 8).0, f(o + 12).0);
+    let spot = |o: usize| track.spot(u(o), u(o + 4), f(o + 8));
+    let lap = LapCard {
+        flags: u64::from(u(8)) | u64::from(u(12)) << 32,
+        to_line_kept: f(0x10),
+        to_line: f(0x14),
+        progress: f(0x1c),
+        laps_length: f(0x24),
+        lap_length: f(0x28),
+        place: u(0x2c) as i32,
+        laps: u(0x30) as i32,
+        runs: u(0x34) as i32,
+        on_track: u(0x40) as i32,
+        lap_time: f(0x48),
+        lap_start: f(0x4c),
+        best_lap: f(0x50),
+        best_lap_no: u(0x54) as i32,
+        seen: Seen { now: v(0x60), last: v(0x70) },
+        spot: spot(0x88)?,
+        kept_spot: spot(0x94)?,
+        race_time: f(0xb4),
+        lap_clock: f(0xb8),
+        gap: f(0xbc),
+        off_track: f(0xc0),
+        time_left: f(0xc4),
+        attack_clock: f(0x168),
+        record_word: u(0x108),
+        ..LapCard::default()
+    };
+    Some(RaceCard { lap, on_path: f(0x18), odometer: f(0x20), aim: spot(0xa0)?, look: v(0x120), ahead: v(0x140), to_track: v(0x180) })
+}
+
+/// The card flags that change in C31 by work outside the ported handler: the helpers behind card flag
+/// `0x8_0000`, manager flags `0x800` / `0x1000` and the computer aim (S302), and the listeners. No bit
+/// the lap line or the ported handler writes is among them.
+const C31_UNPORTED_FLAGS: u64 = 0x18_3ce0;
+
+/// The handler's words a card is compared on, named, as raw bits.
+fn c31_words(c: &RaceCard) -> Vec<(&'static str, u64)> {
+    let l = &c.lap;
+    let b = |x: F| u64::from(x.0.to_bits());
+    let q = |x: Vf| x.to_bits().iter().take(3).fold(0u64, |h, w| h.rotate_left(21) ^ u64::from(*w));
+    let s = |x: Spot| u64::from(x.path) << 48 | u64::from(x.piece) << 32 | b(x.along);
+    vec![
+        ("flags", l.flags & !C31_UNPORTED_FLAGS),
+        ("to_line_kept", b(l.to_line_kept)),
+        ("to_line", b(l.to_line)),
+        ("on_path", b(c.on_path)),
+        ("progress", b(l.progress)),
+        ("odometer", b(c.odometer)),
+        ("laps_length", b(l.laps_length)),
+        ("lap_length", b(l.lap_length)),
+        ("laps", l.laps as u64),
+        ("on_track", l.on_track as u64),
+        ("lap_time", b(l.lap_time)),
+        ("lap_start", b(l.lap_start)),
+        ("best_lap", b(l.best_lap)),
+        ("best_lap_no", l.best_lap_no as u64),
+        ("last", q(l.seen.last)),
+        ("spot", s(l.spot)),
+        ("kept_spot", s(l.kept_spot)),
+        ("race_time", b(l.race_time)),
+        ("lap_clock", b(l.lap_clock)),
+        ("off_track", b(l.off_track)),
+        ("time_left", b(l.time_left)),
+        ("ahead", q(c.ahead)),
+        ("to_track", q(c.to_track)),
+    ]
+}
+
+/// The score manager's words off a captured row's raw bytes (its first 0x110).
+fn c31_rules(raw: &[u8]) -> RaceRules {
+    let u = |o: usize| u32::from_le_bytes(raw[o..o + 4].try_into().unwrap());
+    let f = |o: usize| F(f32::from_bits(u(o)));
+    RaceRules {
+        lap: LapRules {
+            flags: u(0x5c),
+            kind: u(0x60) as i32,
+            laps: u(0x94) as i32,
+            ghost_runs: u(0xf0) as i32,
+            record_limit: u(0x4c) as i32,
+            // The free list is not captured; a race of 4 riders and 3 laps never empties it.
+            free_records: 64,
+            finish_wait: f(0x9c),
+            finish_clock: f(0x98),
+            time_limit: f(0xa0),
+        },
+        below_limit: f(0xb8),
+        time_limit: f(0xa0),
+        off_limit: f(0xd4),
+        aim_reach: f(0xd8),
+    }
+}
+
+fn hex_bytes(s: &str) -> Vec<u8> {
+    (0..s.len() / 2).map(|k| u8::from_str_radix(&s[2 * k..2 * k + 2], 16).expect("hex")).collect()
+}
+
+/// C31's two live sx01 single races, every rider's score card every tick: each tick's card is the tick
+/// before's, its rider moved to this tick's place, through the whole race handler per card
+/// ([`RaceRules::card`]: the spot search on sx01's paths out of C31's RAM image, the distances to the
+/// line, the lap line ([`LapRules::line`]) and the card set back on it, the progress, the off-track clock
+/// and the way back, the clocks), against the captured card bit for bit. Every lap counted, every best
+/// lap, the finish at the last lap (manager flag [`race_flags::FINISHED`]) and every off-track episode of
+/// the gas-held human go through it.
+#[test]
+fn the_race_handler_holds_c31s_live_sx01_laps() {
+    let Ok(kit) = Kit::load() else { return skip("no kit.toml") };
+    let image = kit.ctx("states").join("c31-sx01-ai4.ee.bin");
+    let ee = match Ee::from_ram(&image) {
+        Ok(ee) => ee,
+        Err(why) => return skip(&format!("{why} — C31's sx01 start image")),
+    };
+    let activities = match addr("activity_manager") {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    let track = C31Track::load(&ee, activities);
+    let mut held = Vec::new();
+    for (rel, prefix) in [("capture/c31/sx01-gas.csv", "card"), ("capture/c31/sx01-ai4-by-rider.csv", "rider")] {
+        let Ok(text) = std::fs::read_to_string(kit.ctx(rel)) else {
+            skip(&format!("{rel} is not there: C31's sx01 capture"));
+            continue;
+        };
+        held.push((rel, c31_hold(&text, prefix, &track, rel)));
+    }
+    if held.is_empty() {
+        return skip("no C31 capture");
+    }
+    eprintln!("{held:#?}");
+    // About one row in five is the tick before's again, and the row after it two ticks on: the step
+    // between is lost. What each capture still puts through the handler (C31's journal lists the laps).
+    for (rel, h) in &held {
+        assert!(h.stepped > 20_000 && h.torn < 3_000, "{rel}: {h:?}");
+        assert!(h.laps >= 7 && h.bests >= 4 && h.finished == 3, "{rel}: the AI riders' laps and finishes, {h:?}");
+        if rel.contains("gas") {
+            assert!(h.off > 4_000 && h.too_long >= 10 && h.back >= 25, "{rel}: the human's off-track episodes, {h:?}");
+        }
+    }
+}
+
+fn c31_hold(text: &str, prefix: &str, track: &C31Track, what: &str) -> C31Held {
+    let mut lines = text.lines();
+    let head: Vec<&str> = lines.next().unwrap_or("").split(',').collect();
+    let col = |name: &str| head.iter().position(|h| *h == name).unwrap_or_else(|| panic!("{what}: no column {name}"));
+    let (c_frame, c_dt, c_mgr) = (col("frame"), col("dt"), col("mgr_raw"));
+    let c_raw: Vec<usize> = (0..4).map(|k| col(&format!("{prefix}{k}_0.raw"))).collect();
+    struct Row {
+        frame: u32,
+        dt: F,
+        mgr: Vec<u8>,
+        cards: Vec<Option<RaceCard>>,
+        /// The rider ids in the manager's list order (its `+0x34`, each card's next at `+0x1c8`).
+        order: Vec<usize>,
+    }
+    // The cards sit side by side in rider id order, so a card's address ranks it.
+    let order = |mgr: &[u8], raws: &[Vec<u8>]| -> Vec<usize> {
+        let word = |b: &[u8], o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+        let mut at: Vec<u32> = std::iter::once(word(mgr, 0x34)).chain(raws.iter().map(|r| word(r, 0x1c8))).filter(|&a| a != 0).collect();
+        let list = at.clone();
+        at.sort_unstable();
+        list.iter().map(|a| at.binary_search(a).unwrap()).collect()
+    };
+    let rows: Vec<Row> = lines
+        .map(|l| {
+            let v: Vec<&str> = l.split(',').collect();
+            let raws: Vec<Vec<u8>> = c_raw.iter().map(|&c| hex_bytes(v[c])).collect();
+            let mgr = hex_bytes(v[c_mgr]);
+            Row {
+                frame: v[c_frame].parse().expect("frame"),
+                dt: F(v[c_dt].parse::<f32>().expect("dt")),
+                order: order(&mgr, &raws),
+                cards: raws.iter().map(|r| c31_card(r, track)).collect(),
+                mgr,
+            }
+        })
+        .collect();
+    let mut paths = track.paths.clone();
+    let (mut stepped, mut laps, mut bests, mut finished, mut off, mut back, mut torn) = (0, 0, 0, 0, 0, 0, 0);
+    let mut xor = 0u64;
+    let (mut long_way, mut too_long) = (0, 0);
+    let mut lap_ticks = Vec::new();
+    let mut bad: std::collections::BTreeMap<&str, (usize, String)> = Default::default();
+    for w in rows.windows(2) {
+        let (was, now) = (&w[0], &w[1]);
+        if now.frame != was.frame + 1 {
+            continue;
+        }
+        // A torn row: every card still racing runs on one clock, so each advances by this tick's dt.
+        let racing = |c: &RaceCard| c.lap.flags & card_flags::TAKING_PART != 0 && c.lap.flags & card_flags::OUT == 0;
+        let clean = was.cards.iter().zip(&now.cards).all(|(a, b)| match (a, b) {
+            (Some(a), Some(b)) => {
+                let settled = |c: &RaceCard| c.lap.seen.now.to_bits()[..3] == c.lap.seen.last.to_bits()[..3];
+                !racing(a) || !racing(b) || b.lap.race_time.0.to_bits() == (a.lap.race_time + now.dt).0.to_bits() && settled(a) && settled(b)
+            }
+            _ => false,
+        });
+        if !clean {
+            torn += 1;
+            continue;
+        }
+        let mut rules = c31_rules(&was.mgr);
+        let flags: Vec<u64> = was.cards.iter().flatten().map(|c| c.lap.flags).collect();
+        rules.look_for_waited_for(flags);
+        for &k in &now.order {
+            let (Some(a), Some(b)) = (&was.cards[k], &now.cards[k]) else { continue };
+            if a.lap.flags & card_flags::TAKING_PART == 0 || a.lap.flags & card_flags::OUT != 0 {
+                continue;
+            }
+            let mut card = a.clone();
+            card.lap.seen.now = b.lap.seen.now;
+            let said = rules.card(now.dt, &mut card, None, &mut paths, &track.course, F::ZERO);
+            stepped += 1;
+            if card.lap.laps != a.lap.laps {
+                laps += 1;
+                lap_ticks.push((now.frame, k, card.lap.laps));
+            }
+            bests += usize::from(card.lap.best_lap != a.lap.best_lap);
+            finished += usize::from(card.lap.flags & card_flags::OUT != 0);
+            off += usize::from(said.contains(&RaceNotice::OffTrack));
+            too_long += usize::from(said.contains(&RaceNotice::OffTooLong));
+            back += usize::from(a.lap.on_track == 0 && b.lap.on_track != 0);
+            xor |= card.lap.flags ^ b.lap.flags;
+            // The rider a little behind its kept spot on the same stretch: the spot search's distance is
+            // the route forward from the kept spot, the long way round the lap, and that route's answer
+            // hangs on the scratch the route searches leave on the paths. The original's drifts tick to
+            // tick for a rider standing still (the other cards' searches and the unported computer aim,
+            // S302, run first). Both are far past the search's reach, so the progress test, the one
+            // reader of the word, reads them alike.
+            let behind_kept = b.lap.spot.path == a.lap.kept_spot.path && b.lap.spot.piece == a.lap.kept_spot.piece && b.lap.spot.along < a.lap.kept_spot.along;
+            let far = |x: F| x.0 > track.paths.ahead.0;
+            for ((name, got), (_, want)) in c31_words(&card).into_iter().zip(c31_words(b)) {
+                if got != want && name == "on_path" && behind_kept && far(card.on_path) && far(b.on_path) {
+                    long_way += 1;
+                    continue;
+                }
+                if got != want {
+                    let e = bad.entry(name).or_insert((0, String::new()));
+                    if e.0 < 4 {
+                        e.1 += &format!(" | frame {} rider {k}: got {got:#x} want {want:#x}", now.frame);
+                    }
+                    e.0 += 1;
+                }
+            }
+        }
+    }
+    eprintln!("{what}: {stepped} steps, {torn} torn, {laps} laps, {bests} bests, {finished} finished, {off} off-track ticks, {too_long} off too long, {back} back on, {long_way} long way round, flags xor {xor:#x}; laps (frame, rider, lap) {lap_ticks:?}");
+    assert!(bad.is_empty(), "{what}: words that differ (count, first four): {bad:#?}");
+    assert!(xor & !C31_UNPORTED_FLAGS == 0, "{what}: flags {xor:#x}");
+    C31Held { stepped, torn, laps, bests, finished, off, too_long, back }
+}
+
+/// What one capture put through the handler.
+#[derive(Debug, Default)]
+struct C31Held {
+    stepped: usize,
+    torn: usize,
+    laps: usize,
+    bests: usize,
+    finished: usize,
+    off: usize,
+    too_long: usize,
+    back: usize,
 }
 
 // --- S292: the gate race's line and the zones --------------------------------------------------------
