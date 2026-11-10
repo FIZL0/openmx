@@ -817,6 +817,24 @@ footer a { color: var(--bone); }
     const k = ratio();
     worker.postMessage({ click: [Math.round((e.clientX - r.left) * k), Math.round((e.clientY - r.top) * k)] });
   });
+  // The pointer's drags (P319, the Tricks page's orbit): 0 down, 1 move, 2 up, in canvas pixels; a
+  // move only while a button or finger is down.
+  const dragging = new Set();
+  const dragOf = kind => e => {
+    if (!started()) return;
+    if (kind === 0) {
+      dragging.add(e.pointerId);
+      try { screen.setPointerCapture(e.pointerId); } catch {}
+    } else if (!dragging.has(e.pointerId)) return;
+    if (kind === 2) dragging.delete(e.pointerId);
+    const r = screen.getBoundingClientRect();
+    const k = ratio();
+    worker.postMessage({ mouse: [kind, Math.round((e.clientX - r.left) * k), Math.round((e.clientY - r.top) * k)] });
+  };
+  screen.addEventListener('pointerdown', dragOf(0));
+  screen.addEventListener('pointermove', dragOf(1));
+  screen.addEventListener('pointerup', dragOf(2));
+  screen.addEventListener('pointercancel', dragOf(2));
   // The canvas's size in device pixels, which the shell draws at: the whole window, no bars.
   const view = () => {
     const k = ratio();

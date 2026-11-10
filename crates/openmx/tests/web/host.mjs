@@ -31,6 +31,7 @@ globalThis.openmx = {
   view: () => Uint32Array.of(Number(width), Number(height)),
   keys: () => new Uint32Array(),
   clicks: () => new Int32Array(),
+  mouse: () => new Int32Array(),
   gamepads: () => new Float32Array(),
   gamepad_name: () => '',
   play: () => {},

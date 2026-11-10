@@ -351,9 +351,9 @@ impl GpuWindow {
         self.input.clicks()
     }
 
-    /// No drag is read here yet (P214): the page and the phone report taps only.
+    /// The pointer's drags since the last poll (P319, the Tricks page's orbit).
     pub fn mouse(&self) -> &[crate::window::MouseEvent] {
-        &[]
+        self.input.mouse()
     }
 
     pub fn show_cursor(&self, _: bool) {}

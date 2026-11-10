@@ -37,6 +37,10 @@ extern "C" {
     /// Where the pointer went down since the last call, in canvas pixels: `x, y, x, y…`.
     #[wasm_bindgen(js_namespace = openmx)]
     fn clicks() -> Vec<i32>;
+    /// The pointer's drags since the last call, in canvas pixels: `kind, x, y…`, kind 0 down,
+    /// 1 move, 2 up (P319).
+    #[wasm_bindgen(js_namespace = openmx)]
+    fn mouse() -> Vec<i32>;
     /// Every gamepad connected, [`PAD_FIELDS`] numbers each ([`Pad`]).
     #[wasm_bindgen(js_namespace = openmx)]
     fn gamepads() -> Vec<f32>;
@@ -234,6 +238,7 @@ pub struct Canvas {
     /// The polls' times, to put a stalled frame's keys back where they were made (P258).
     arrivals: crate::window::Arrivals,
     clicks: Vec<(i32, i32)>,
+    mouse: Vec<crate::window::MouseEvent>,
     resized: bool,
     rgba: Vec<u8>,
     /// The canvas in device pixels, which a press is given in.
@@ -256,6 +261,7 @@ impl Canvas {
             moments: Vec::new(),
             arrivals: Default::default(),
             clicks: Vec::new(),
+            mouse: Vec::new(),
             resized: false,
             rgba: Vec::new(),
             view: (1, 1),
@@ -308,6 +314,18 @@ impl Canvas {
         crate::menu::touch_room::set(touch_pad_shown().then_some((self.width, self.height)));
         let (sx, sy) = (self.width as f64 / self.view.0 as f64, self.height as f64 / self.view.1 as f64);
         self.clicks = clicks().chunks_exact(2).map(|p| ((p[0] as f64 * sx) as i32, (p[1] as f64 * sy) as i32)).collect();
+        use crate::window::Mouse;
+        self.mouse = mouse()
+            .chunks_exact(3)
+            .map(|p| {
+                let what = match p[0] {
+                    0 => Mouse::Down,
+                    1 => Mouse::Move,
+                    _ => Mouse::Up,
+                };
+                (what, (p[1] as f64 * sx) as i32, (p[2] as f64 * sy) as i32)
+            })
+            .collect();
     }
 
     pub fn closed(&self) -> bool {
@@ -332,9 +350,9 @@ impl Canvas {
         &self.clicks
     }
 
-    /// No drag is read from the page yet (P214): it reports taps only.
+    /// The pointer's drags since the last poll (P319, the Tricks page's orbit).
     pub fn mouse(&self) -> &[crate::window::MouseEvent] {
-        &[]
+        &self.mouse
     }
 
     pub fn key_moments(&self) -> &[KeyMoment] {

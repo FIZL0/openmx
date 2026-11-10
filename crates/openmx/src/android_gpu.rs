@@ -219,6 +219,8 @@ pub struct GpuWindow {
     resized: bool,
     closed: bool,
     clicks: Vec<(i32, i32)>,
+    /// A drag's presses and moves since the last poll (P319), in the same pixels as the clicks.
+    mouse: Vec<crate::window::MouseEvent>,
     /// The phone's back button was pressed in the last poll (P311): Escape tapped.
     back: bool,
     /// The touch pad's sprites and their type, made at its first drawing.
@@ -331,6 +333,7 @@ impl GpuWindow {
             resized: false,
             closed: false,
             clicks: Vec::new(),
+            mouse: Vec::new(),
             back: false,
             layer: None,
             resting: None,
@@ -400,6 +403,7 @@ impl GpuWindow {
         self.height = size.1.saturating_sub(t + b).max(1) as usize;
         let mut touch = TOUCH.lock().unwrap_or_else(|e| e.into_inner());
         touch.layout((size.0 as f32, size.1 as f32), self.safe.map(|v| v as f32));
+        self.mouse = touch.take_drags().into_iter().map(|(what, x, y)| (what, x - l as i32, y - t as i32)).collect();
         let shown = touch.shown;
         drop(touch);
         // The ride HUD stands clear of the touch pad (P304), as on the iPhone.
@@ -419,9 +423,9 @@ impl GpuWindow {
         &self.clicks
     }
 
-    /// No drag is read here yet (P214): the phone reports taps only.
+    /// A finger's drag since the last poll (P319): the touch pad's, from a tap the menus took.
     pub fn mouse(&self) -> &[crate::window::MouseEvent] {
-        &[]
+        &self.mouse
     }
 
     /// A phone has no cursor.

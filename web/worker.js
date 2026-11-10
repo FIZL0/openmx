@@ -27,7 +27,7 @@
 // Messages in:  { import: File, canvas?, api?, args?, phone? }   copy the disc into OPFS, then start
 //               { start: { canvas?, file?, api?, args?, phone? } } start on the OPFS copy, or on `file` when given
 //               { online: { name, relay, codes?, join?, host?, bike, ticks? } }
-//               { key: code << 1 | down } | { blur } | { click: [x, y] } | { view: [w, h] } | { pads, names? }
+//               { key: code << 1 | down } | { blur } | { click: [x, y] } | { mouse: [kind, x, y] } | { view: [w, h] } | { pads, names? }
 //               { played: frames }
 //               { device: [css narrow, css wide, dpr, cores, memory MB] } | { hz: number } (P223: the Auto video
 //               preset's pick, and the display's rate as the page's animation frames come)
@@ -77,6 +77,7 @@ let disc = { size: 0, read: () => -1 };
 let keys = [];
 const heldKeys = new Set();
 let clicks = [];
+let mouse = [];
 let view = [640, 448];
 let pads = [];
 let padNames = {};
@@ -141,6 +142,7 @@ globalThis.openmx = {
   view: () => Uint32Array.from(view),
   keys: () => Uint32Array.from(keys.splice(0)),
   clicks: () => Int32Array.from(clicks.splice(0)),
+  mouse: () => Int32Array.from(mouse.splice(0)),
   gamepads: () => Float32Array.from(pads),
   gamepad_name: i => padNames[i] ?? '',
   play: samples => {
@@ -514,6 +516,8 @@ onmessage = async ({ data }) => {
       heldKeys.clear();
     } else if (data.click) {
       clicks.push(...data.click);
+    } else if (data.mouse) {
+      mouse.push(...data.mouse);
     } else if (data.view) {
       view = data.view;
     } else if (data.pads) {

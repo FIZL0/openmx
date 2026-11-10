@@ -6011,6 +6011,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     }
     // And its rider, loaded the first time a view shows the page: `Some(None)` when it could not be.
     let mut trick_stage: Option<Option<trick_view::TrickView>> = None;
+    // Each seat's pad as the pause last read it, whose right stick turns the page's camera (P319).
+    let mut trick_sticks: Vec<Report> = Vec::new();
     // What a picture drawn while a tick runs on the sim thread asks of the place (N23a): the same
     // ground, and none of the props, which the tick has. A tiled world's ticks stay on the loop.
     let mut drawn_land = match (&sim, keep_terrain.get()) {
@@ -8083,6 +8085,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             // Each player's pad as it is, not as the ride's scheme moved it (P53).
             let menu_report = |i: usize| menu_reports.get(i).copied().unwrap_or((world.seats[i].reports[0], 0));
             let menu_moment = |i: usize| menu_moments.get(i).cloned().flatten();
+            trick_sticks = (0..world.seats.len()).map(|i| menu_report(i).0).collect();
             let mut seat0 = vec![(menu_report(0), menu_moment(0))];
             // The keyboard pauses and works 1P's pause whoever has 1P (P46), from no seat of its own:
             // read as one with 1P's pad (P109), so a push both see is one press.
@@ -10214,13 +10217,25 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         if trick_stage.is_none() && !trick_shown.is_empty() {
             let rider = rider_member.as_deref().map(|m| (m, args.rider.as_str()));
             let bike = Some((bike_member.as_str(), vehicle.mcf.as_str()));
-            let bike_model = rigs.first().map_or(CHASSIS, |r| r.bike_model.as_str());
-            trick_stage = Some(trick_view::load(&mut disc, rider, bike, BIKE_PREFIX, &table.stunts, phy.motion(), pack_clips.as_ref(), &stunts, &assets, bike_model));
+            let models = match rigs.first() {
+                Some(r) => trick_view::Models { bike: &r.bike_model, parts: &r.parts, body: r.body_model.as_deref() },
+                None => trick_view::Models { bike: CHASSIS, parts: &[], body: None },
+            };
+            trick_stage = Some(trick_view::load(&mut disc, rider, bike, BIKE_PREFIX, &table.stunts, phy.motion(), pack_clips.as_ref(), &stunts, &assets, &models));
         }
         let trick_posed: Vec<([usize; 4], trick_view::Posed)> = match trick_stage.as_mut().and_then(Option::as_mut) {
             Some(stage) => {
-                let rows: Vec<&menu::trick_list::TrickRow> = trick_shown.iter().map(|(_, row)| row).collect();
-                trick_shown.iter().map(|(rect, _)| *rect).zip(stage.poses(&rows, Instant::now())).collect()
+                // Each view's camera turned by its own pad's right stick, and by a drag across its
+                // stage (P319).
+                for (seat, _, _) in &trick_shown {
+                    stage.stick(*seat, trick_sticks.get(*seat).map_or([0.0; 2], trick_view::lean_of));
+                }
+                if let Some(w) = window.as_ref() {
+                    let events: Vec<(window::Mouse, [f32; 2])> =
+                        w.mouse().iter().map(|&(what, x, y)| (what, cursor::onto_frame((x, y), (w.width, w.height), (frame.width, frame.height), w.scale))).collect();
+                    stage.mouse(&events, &trick_shown);
+                }
+                stage.poses(&trick_shown, Instant::now())
             }
             None => Vec::new(),
         };

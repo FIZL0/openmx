@@ -51,6 +51,8 @@ struct Shared {
     away: u32,
     /// The menus' clicks, in window pixels.
     clicks: Vec<(i32, i32)>,
+    /// The Tricks page's drags (P319), in window pixels.
+    mouse: Vec<crate::window::MouseEvent>,
     /// A finger came down since the last poll (P233's "Tap screen to resume controller").
     touched: bool,
     /// The rate the shell wants the screen at (P248, [`GpuWindow::screen_rate`]); None, its top.
@@ -68,6 +70,7 @@ static SHARED: Mutex<Shared> = Mutex::new(Shared {
     focused: true,
     away: 0,
     clicks: Vec::new(),
+    mouse: Vec::new(),
     touched: false,
     rate: None,
 });
@@ -237,9 +240,15 @@ impl ApplicationHandler for Host {
                 let touch = Touch { id: t.id, phase, at: (t.location.x as f32, t.location.y as f32) };
                 let mut clicks = Vec::new();
                 let now = self.started.elapsed().as_secs_f32();
-                TOUCH.lock().unwrap_or_else(|e| e.into_inner()).touch(touch, now, &mut clicks);
-                if !clicks.is_empty() {
-                    shared().clicks.extend(clicks);
+                let drags = {
+                    let mut pad = TOUCH.lock().unwrap_or_else(|e| e.into_inner());
+                    pad.touch(touch, now, &mut clicks);
+                    pad.take_drags()
+                };
+                if !clicks.is_empty() || !drags.is_empty() {
+                    let mut s = shared();
+                    s.clicks.extend(clicks);
+                    s.mouse.extend(drags);
                 }
             }
             _ => {}
@@ -303,6 +312,7 @@ pub struct GpuWindow {
     closed: bool,
     focused: bool,
     clicks: Vec<(i32, i32)>,
+    mouse: Vec<crate::window::MouseEvent>,
     /// The touch pad's sprites and their type, made at its first drawing.
     layer: Option<Layer>,
     /// "Tap screen to resume controller" is up (P233).
@@ -426,6 +436,7 @@ impl GpuWindow {
             closed: false,
             focused: true,
             clicks: Vec::new(),
+            mouse: Vec::new(),
             layer: None,
             needs_tap: NeedsTap::default(),
             resting: None,
@@ -477,6 +488,7 @@ impl GpuWindow {
         self.focused = s.focused;
         let [l, t, ..] = self.safe;
         self.clicks = s.clicks.drain(..).map(|(x, y)| (x - l as i32, y - t as i32)).collect();
+        self.mouse = s.mouse.drain(..).map(|(what, x, y)| (what, x - l as i32, y - t as i32)).collect();
         let touched = std::mem::take(&mut s.touched);
         drop(s);
         let was = self.needs_tap.up;
@@ -506,9 +518,10 @@ impl GpuWindow {
         &self.clicks
     }
 
-    /// No drag is read here yet (P214): the page and the phone report taps only.
+    /// A finger's drag off the pad's buttons since the last poll (P319, the Tricks page's orbit),
+    /// in pixels of the room inside the kept insets.
     pub fn mouse(&self) -> &[crate::window::MouseEvent] {
-        &[]
+        &self.mouse
     }
 
     /// A phone has no cursor.
