@@ -11085,3 +11085,24 @@ tip_popup_arm               boot 0x0029abc0 (popup, 1). Not read further.
 #   Buggy image: +0xbc4 0x01c15c90 (mode 1), still bit clear, every tire on surface 0, table all zero.
 atv_car_tire_step           atv 0x004b5ca0 = a car tire's substep (a0 tire, f12 h): suspension 0x004b5cf0, then 0x004b62c0, 0x004b6400
 atv_car_wreck_timer         atv 0x004cd0b0 = the car's wreck timer, vt +0x484 (a0 car, f12 dt): SLUS-21104's own, states 0xd/0xe
+# MD106a — MX Unleashed's car pieces in the frame (game_sim::atv_car::Pieces; tests/mxvatv_car_frame.rs
+#   *_is_mx_unleasheds, 3,000 generated frames each off md39a/buggy.ee.bin with the piece's hook removed, all
+#   five together too). Journal: research/journal/2026-11-10-md106a-mxvatv-car-step. SLUS-21104's pieces are
+#   MXU's math with: adda.s 0/madd.s where MXU mul+adds; the inline remap's degenerate range answers out_lo -
+#   in_lo (the sub.s in the branch's delay slot); the body's virtuals do the writes (vt +0x5c set cofg: pos and
+#   last pos += turn(q, new - old); vt +0x7c 0x0049bfa0 add force at local point: moment += cross(p, f) * *a3
+#   (ones 0x00396fd0) via vt +0x78, force += turn(q, f) via vt +0x80 -> +0x48).
+#   Words (car): human = +0xbc4 && *(+0xbc4)+0x28 == 1; lean +0x11cc, stick +0x11c8, pad word +0x1124, clutch
+#   +0x1120; vehicle gas +0x318, vehicle brake +0x310; brake +0x1130, brake force +0x1134, hand brake +0x1138;
+#   gravity *(+0xe8)+0x40; touching *(+0xc8)+0x34; FL tire ground normal tire+0x110. CofG +0x10f0, CofGAI
+#   +0x1100, travel fwd +0x1110 / back +0x1114. Preload: +0xc50 ready, +0xc54 active, +0xc58 armed, +0xc5c time,
+#   +0xc60 timer, +0xc64 min, +0xc68 max, +0xc6c max preload, +0xc70 force quad, +0x700 cued. Launch +0x1168
+#   timer, +0x116c start, +0x1170 time, +0x1174 max scale, +0x1178 its speed; the boost is *(+0x1250)+0x60.
+#   Aero +0x117c area, +0x1180 damping, +0x1184/+0x1188 unroll gain/torque, +0x118c/+0x1190 unyaw gain/torque,
+#   +0x11a0 control moment, +0x11b0 gyro, +0x11b4 wing count, +0x11b8 wings (stride 0x20: lift, aoa, basic,
+#   induced, +0x10 position). Preload consts: rise 5, speed 30, lean 0x3f4ccccd; aero AIR 0x3a9bc5c4, control
+#   speed 10, stick 0x3dcccccd, up.y 0x3eae147b. The preload ends with its cue: !+0x700 && !(timer <= 0) ->
+#   +0x700 = 1, 0x00272300(*0x00442eb0, car+0x674, 8, 14, +0xd20, 0) from ra 0x004cb99c; +0x700 && timer <= 0
+#   -> +0x700 = 0.
+#   Buggy image: preload 0.25/0/60/2500, launch timer 2.255 start 6.6 time 2.25 scale 6.6 speed 50, one wing
+#   at 0x01628f60, boost 1.0, +0x700 0, record +0x34 0.

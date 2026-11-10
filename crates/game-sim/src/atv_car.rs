@@ -133,6 +133,9 @@ pub enum Call {
     VehicleForce,
     AntiSlide(F),
     Preload(F),
+    /// The preload's own call (MD106a, [`Pieces`]): its cue, played once as the push starts winding
+    /// down from a set timer, and not again until the timer has run out.
+    PreloadCue,
     Launch(F),
     Engine(F),
     TireStep(usize, F),
@@ -377,4 +380,338 @@ impl<S: Steps> crate::biplane::Dynamics for Frame<'_, S> {
 /// the class and two more), run after the car's own; they are not part of this.
 pub fn frame(world: &crate::biplane::World, car: &mut Car, body: &mut Body, dt: F, table: &AcosTable, s: &mut impl Steps) {
     world.step(dt, &mut Frame { car, body, table, s });
+}
+
+// --- MX Unleashed's pieces (MD106a) ----------------------------------------------------------------
+
+/// One wing, as the aero reads it (MX Unleashed's [`crate::car::Wing`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Wing {
+    pub lift_slope: F,
+    pub angle_of_attack: F,
+    pub basic_drag: F,
+    pub induced_drag: F,
+    /// Where it pushes, in the car's frame.
+    pub position: Vf,
+}
+
+/// The loader's words the ported pieces read (research/oracle.txt `# MD39b`, `# MD106a`): MX
+/// Unleashed's `[Mass Properties]` `CofG` and the car's `CofGAI` and travel, `[Preload]`, the clutch's
+/// launch keys and `[Aerodynamics]` with its wings.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Keys {
+    pub cofg: Vf,
+    pub cofg_ai: Vf,
+    pub cofg_travel_forward: F,
+    pub cofg_travel_back: F,
+    pub preload_time: F,
+    pub min_preload_time: F,
+    pub max_preload_time: F,
+    pub max_preload: F,
+    pub clutch_torque_scale_time: F,
+    pub max_clutch_torque_scale: F,
+    pub max_clutch_torque_scale_speed: F,
+    pub aero_surface_area: F,
+    pub airborne_damping: F,
+    pub unroll_gain: F,
+    pub unroll_torque: F,
+    pub unyaw_gain: F,
+    pub unyaw_torque: F,
+    pub airborne_control_moment: Vf,
+    pub brake_gyro_torque: F,
+    /// The wings the aero steps: `NumberOfWings` of them (none when the count is not positive).
+    pub wings: Vec<Wing>,
+}
+
+/// The preload's state: it may wind up, it is pushing, it is armed by a forward lean; the wind-up
+/// while armed and the push's time left while active; the push (world, its `y` set as it fires);
+/// and whether the cue has played for this push.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PreloadState {
+    pub ready: bool,
+    pub active: bool,
+    pub armed: bool,
+    pub timer: F,
+    pub force: Vf,
+    pub cued: bool,
+}
+
+/// What the ported pieces read and keep of the car beyond [`Car`]: its pad's words as the controls
+/// left them, the vehicle's, the world's and the pieces' own.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct State {
+    /// A person drives: the vehicle state's mode is 1 (no vehicle state, or any other mode, is the
+    /// AI's `CofGAI`).
+    pub human: bool,
+    /// The stick's lean (back is negative) and steer, the preload's pad word, the clutch.
+    pub lean: F,
+    pub stick: F,
+    pub pad_word: F,
+    pub clutch: F,
+    /// The vehicle's slewed gas and its brake word; the car's brake, brake force and hand brake.
+    pub gas: F,
+    pub vehicle_brake: F,
+    pub brake: F,
+    pub brake_force: F,
+    pub hand_brake: F,
+    /// The body's weight (world), from the vehicle's gravity block.
+    pub gravity: Vf,
+    /// The collision record says the car touches something.
+    pub touching: bool,
+    /// The left front tire's ground normal (world).
+    pub front_normal: Vf,
+    pub preload: PreloadState,
+    /// The launch's timer and the scale it started from, and the engine's torque scale it sets.
+    pub launch_timer: F,
+    pub launch_start: F,
+    pub launch_boost: F,
+}
+
+/// **The car's [`Steps`] with MX Unleashed's pieces ported** (MD106a), as SLUS-21104 builds them: the
+/// centre of mass's travel, the anti-slide, the preload, the launch and the aero, run on
+/// [`Keys`] and [`State`]. Every other call, and the preload's cue, goes to `rest`.
+pub struct Pieces<R> {
+    pub keys: Keys,
+    pub state: State,
+    pub rest: R,
+}
+
+impl<R: Steps> Steps for Pieces<R> {
+    fn call(&mut self, c: Call, car: &mut Car, body: &mut Body) {
+        if !self.answer(c, car, body) {
+            self.rest.call(c, car, body);
+        }
+    }
+}
+
+impl<R: Steps> Pieces<R> {
+    /// Runs `c` when it is one of the ported pieces; `false`, and nothing done, when it is not.
+    pub fn answer(&mut self, c: Call, car: &mut Car, body: &mut Body) -> bool {
+        match c {
+            Call::TravelCofg => travel_cofg(&self.keys, &self.state, car, body),
+            Call::AntiSlide(_) => anti_slide(&self.state, car, body),
+            Call::Preload(h) => {
+                if preload(&self.keys, &mut self.state, car, body, h) {
+                    self.rest.call(Call::PreloadCue, car, body);
+                }
+            }
+            Call::Launch(h) => launch(&self.keys, &mut self.state, car, h),
+            Call::Aero(_) => aero(&self.keys, &self.state, car, body),
+            _ => return false,
+        }
+        true
+    }
+}
+
+/// The ones vector the aero hands the body's add-force-at as its moment scale.
+const ONES: Vf = Vf([1.0, 1.0, 1.0, 1.0]);
+
+/// `a.xyz + b.xyz`, `w` from `a`; and `-`.
+fn plus(a: Vf, b: Vf) -> Vf {
+    a.merge(Dest::XYZ, a.add(b))
+}
+fn minus(a: Vf, b: Vf) -> Vf {
+    a.merge(Dest::XYZ, a.sub(b))
+}
+/// `v.xyz · s` (`vmulx.xyz` by a broadcast single), `w` kept.
+fn scaled(v: Vf, s: F) -> Vf {
+    v.merge(Dest::XYZ, v.mul(Vf::splat(s.0)))
+}
+/// The FPU's dot product, `mula.s`/`madda.s`/`madd.s`, `a`'s lanes first.
+fn dot(a: Vf, b: Vf) -> F {
+    Acc::mula(a.x(), b.x()).madda(a.y(), b.y()).madd(a.z(), b.z())
+}
+
+/// The listeners' inline remap, MX Unleashed's ([`crate::motion`]'s) but for a degenerate input
+/// range: the branch past the lerp carries `sub.s` in its delay slot, so that answers the low end
+/// less the input's low end, not the low end.
+fn remap(x: F, in_lo: F, in_hi: F, out_lo: F, out_hi: F) -> F {
+    if in_lo == in_hi {
+        return out_lo - in_lo;
+    }
+    let t = (x - in_lo) / (in_hi - in_lo);
+    out_lo.lerp(out_hi, t).max(out_lo.min(out_hi)).min(out_lo.max(out_hi))
+}
+
+/// The body's set-centre-of-mass (its vtable's `+0x5c`): the position and the last position move by
+/// the change, turned into the world, so the car stays put; then the centre is `cofg`, whole.
+fn set_cofg(car: &mut Car, body: &mut Body, cofg: Vf) {
+    let moved = crate::chassis::turn(body.quat, cofg.merge(Dest::XYZ, cofg.sub(car.cofg)));
+    body.position = plus(body.position, moved);
+    body.last_position = plus(body.last_position, moved);
+    car.cofg = cofg;
+}
+
+/// **The centre of mass's travel** (vt `+0x470`, MX Unleashed's [`crate::car::travel_cofg`]): the
+/// class's `CofG` (the AI's `CofGAI` unless a person drives) slid back along `z` by the forward travel
+/// times a forward (negative) lean, or the back travel times any other, through `adda.s`/`madd.s`
+/// where MX Unleashed multiplies and adds; the body handed it through its own setter.
+fn travel_cofg(k: &Keys, s: &State, car: &mut Car, body: &mut Body) {
+    let mut cofg = if s.human { k.cofg } else { k.cofg_ai };
+    let travel = if s.lean < 0.0 { k.cofg_travel_forward } else { k.cofg_travel_back };
+    cofg.0[2] = Acc::adda(F::ZERO, cofg.z()).madd(-travel, s.lean).0;
+    set_cofg(car, body, cofg);
+}
+
+/// Under this speed (along the car) the anti-slide holds a car off the gas.
+const ANTI_SLIDE_SPEED: f32 = 10.0;
+
+/// **The anti-slide** (vt `+0x478`, MX Unleashed's): grounded, off the gas and slower than
+/// [`ANTI_SLIDE_SPEED`] along the car, gravity's pull along the left front's ground is pushed back
+/// against (by a remap from 1 to 1, so wholly), and while either brake word is on, the share along the
+/// car's heading on that ground too.
+fn anti_slide(s: &State, car: &Car, body: &mut Body) {
+    let speed = F(car.velocity.z());
+    if !car.grounded || s.gas != 0.0 || !(speed.abs() < ANTI_SLIDE_SPEED) {
+        return;
+    }
+    let (n, g) = (s.front_normal, s.gravity);
+    let along = minus(g, scaled(n, dot(n, g)));
+    let v = car.forward;
+    let mut heading = minus(v, scaled(n, dot(v, n)));
+    let len2 = dot(heading, heading);
+    if len2 == 0.0 {
+        heading = CLEAR;
+    } else {
+        let r = F::ONE.rsqrt(len2);
+        for k in 0..3 {
+            heading.0[k] = (F(heading.0[k]) * r).0;
+        }
+    }
+    let ahead = scaled(heading, dot(heading, along));
+    let rest = minus(along, ahead);
+    let mut force = scaled(rest, -remap(speed, F::ZERO, F(ANTI_SLIDE_SPEED), F::ONE, F::ONE));
+    if s.vehicle_brake != 0.0 || s.hand_brake != 0.0 {
+        force = minus(force, ahead);
+    }
+    body.force = plus(body.force, force);
+}
+
+/// The preload's thresholds: the body rising faster than this, the car faster than this along
+/// itself, a lean past this either way.
+const PRELOAD_RISE: f32 = 5.0;
+const PRELOAD_SPEED: f32 = 30.0;
+const PRELOAD_LEAN: u32 = 0x3f4c_cccd;
+
+/// **The preload** (vt `+0x47c`, MX Unleashed's, with SLUS-21104's cue): nothing in a wrecked state.
+/// Pushing, the timer runs down and the push is added while time is left. Else, grounded, rising,
+/// fast and off the brake, it is ready: a forward lean past 0.8 arms it (the timer cleared), the timer
+/// winds while armed and the lean is within 0.8, and an armed back lean past 0.8 fires it, the push's
+/// `y` the pad word's size remapped from the preload times onto up to `MaxPreload`, for
+/// `PreloadTime`. Then the cue: played (`true`) when the timer is not run out and the cue has not
+/// played; forgotten once the timer has run out.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's `c.ole.s` branched on false
+fn preload(k: &Keys, s: &mut State, car: &Car, body: &mut Body, h: F) -> bool {
+    if car.state != RIDING {
+        return false;
+    }
+    let lean = F(f32::from_bits(PRELOAD_LEAN));
+    let p = &mut s.preload;
+    if p.active {
+        p.timer = p.timer - h;
+        if p.timer <= 0.0 {
+            p.active = false;
+        } else {
+            body.force = plus(body.force, p.force);
+        }
+    } else if !car.grounded
+        || F(body.velocity.y()) <= PRELOAD_RISE
+        || F(car.velocity.z()) <= PRELOAD_SPEED
+        || s.vehicle_brake != 0.0
+    {
+        p.ready = false;
+    } else {
+        p.ready = true;
+        if !(s.lean <= lean) {
+            p.armed = true;
+            p.timer = F::ZERO;
+        } else if !(s.lean < -lean) {
+            if p.armed {
+                p.timer = p.timer + h;
+            }
+        } else if p.armed {
+            p.force.0[1] = remap(s.pad_word.abs(), k.min_preload_time, k.max_preload_time, F::ZERO, k.max_preload).0;
+            p.timer = k.preload_time;
+            p.armed = false;
+            p.active = true;
+        }
+    }
+    if !p.cued {
+        if !(p.timer <= 0.0) {
+            p.cued = true;
+            return true;
+        }
+    } else if p.timer <= 0.0 {
+        p.cued = false;
+    }
+    false
+}
+
+/// **The launch** (vt `+0x480`, MX Unleashed's): the clutch in clears the timer; let out from
+/// standing (the clutch word 0) and within `ClutchTorqueScaleTime`, the scale starts (at the timer's
+/// first step) from `MaxClutchTorqueScale`, less with speed up to `MaxClutchTorqueScaleSpeed`, and
+/// eases back to 1 over the time: the engine's torque scale.
+fn launch(k: &Keys, s: &mut State, car: &Car, h: F) {
+    if s.clutch == 1.0 {
+        s.launch_timer = F::ZERO;
+        return;
+    }
+    if s.clutch != 0.0 || !(s.launch_timer <= k.clutch_torque_scale_time) {
+        return;
+    }
+    if s.launch_timer == 0.0 {
+        let speed = F(car.velocity.z());
+        s.launch_start = remap(speed, F::ZERO, k.max_clutch_torque_scale_speed, k.max_clutch_torque_scale, F::ONE);
+    }
+    s.launch_timer = s.launch_timer + h;
+    s.launch_boost = remap(s.launch_timer, F::ZERO, k.clutch_torque_scale_time, s.launch_start, F::ONE);
+}
+
+/// The air's density over two, times the speed squared, makes the wings' pressure.
+const AIR: u32 = 0x3a9b_c5c4;
+/// The air control needs the car faster than this, its stick within this of centre to unroll, and
+/// its up row's height above this.
+const AIR_CONTROL_SPEED: f32 = 10.0;
+const UNROLL_STICK: u32 = 0x3dcc_cccd;
+const UNROLL_UP: u32 = 0x3eae_147b;
+
+/// **The aero** (vt `+0x474`, MX Unleashed's): nothing wrecked. Moving forward, each wing's lift and
+/// drag (its lift slope times alpha plus its angle; the drag its basic plus the lift coefficient
+/// squared times the induced, through `adda.s`/`madd.s`) pushed at the wing through the body's
+/// add-force-at. Then off the ground, touching nothing and faster than [`AIR_CONTROL_SPEED`], the air
+/// control in the car's frame: the stick's moment (lean on `x`, steer on `y` and `z`) less the rates'
+/// damping; near the stick's centre and not upside down the unroll and unyaw (`adda.s`/`madd.s`);
+/// with either brake word on, the brakes' gyro on `x`.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's `c.ole.s` branched on false
+fn aero(k: &Keys, s: &State, car: &Car, body: &mut Body) {
+    if car.state != RIDING {
+        return;
+    }
+    if !(F(car.velocity.z()) <= 0.0) {
+        let q = F(f32::from_bits(AIR)) * car.speed * car.speed;
+        for w in &k.wings {
+            let cl = w.lift_slope * (car.alpha + w.angle_of_attack);
+            let cd = Acc::adda(F::ZERO, w.basic_drag).madd(cl, cl * w.induced_drag);
+            let force = Vf::new(0.0, (k.aero_surface_area * (q * cl)).0, (k.aero_surface_area * (-q * cd)).0, 1.0);
+            let p = w.position;
+            let m = p.merge(Dest::XYZ, Vf::opmsub(Vf::opmula(p, force), force, p));
+            body.moment = plus(body.moment, m.merge(Dest::XYZ, m.mul(ONES)));
+            body.force = plus(body.force, crate::chassis::turn(body.quat, force));
+        }
+    }
+    if car.grounded || s.touching || car.speed <= AIR_CONTROL_SPEED {
+        return;
+    }
+    let cm = k.airborne_control_moment;
+    let m = Vf::new((F(cm.x()) * s.lean).0, (F(cm.y()) * s.stick).0, (F(cm.z()) * s.stick).0, 1.0);
+    let r = body.rates;
+    let mut m = minus(m, scaled(r, k.airborne_damping));
+    if s.stick.abs() < F(f32::from_bits(UNROLL_STICK)) && !(F(car.up.y()) <= F(f32::from_bits(UNROLL_UP))) {
+        m.0[2] = Acc::adda(F::ZERO, m.z()).madd(k.unroll_torque, k.unroll_gain * F(car.euler.z()) - F(r.z())).0;
+        m.0[1] = Acc::adda(F::ZERO, m.y()).madd(k.unyaw_torque, k.unyaw_gain * car.side_slip - F(r.y())).0;
+    }
+    if s.brake != 0.0 || s.brake_force != 0.0 {
+        m.0[0] = (F(m.x()) + k.brake_gyro_torque).0;
+    }
+    body.moment = plus(body.moment, m);
 }
