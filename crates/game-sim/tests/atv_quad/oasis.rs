@@ -28,7 +28,7 @@ const GP: u64 = 0x003d_baf0;
 /// The image's quad, its nearby list, its gather probe (the active probe, `+0xd8`) and its trigger
 /// probe (`+0x1430`).
 const IMAGE_LIST: u32 = 0x0162_7a40;
-const PROBE_AT: u32 = 0x0159_c500;
+pub(super) const PROBE_AT: u32 = 0x0159_c500;
 const TRIGGER: u32 = 0x0162_cd30;
 /// What the trigger's stand writes: its centre, its reach and its frame.
 const TRIGGER_STOOD: [(u32, u32); 3] = [(0x50, 0x10), (0x70, 4), (0x130, 0x40)];
@@ -126,7 +126,7 @@ pub(super) fn desert_world(ee: &Ee) -> Option<Desert> {
 
 /// The image's collidable at `c` as the port's (`tests/atv_search.rs`'s): its reach, flags and filter.
 /// The collidables its lists name are not in the port's world; each stands for a number past its end.
-fn collidable(ee: &Ee, c: u32) -> Collidable {
+pub(super) fn collidable(ee: &Ee, c: u32) -> Collidable {
     let mut named = BTreeMap::new();
     let mut objects = |off: u32| {
         let (mode, at, n) = (ee.u32_at(c + off), ee.u32_at(c + off + 4), ee.u32_at(c + off + 8));
