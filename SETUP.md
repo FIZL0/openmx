@@ -48,8 +48,6 @@ Reading the disc, the ELFs and the decompilation runs on a stock Python with no 
 uv tool install git+https://github.com/FIZL0/agent-runner
 ```
 
-Not `uv tool install agent-runner`: that name on PyPI is another project.
-
 `./kit` stays on the system Python and adds the tool's venv (`$UV_TOOL_DIR` or `~/.local/share/uv/tools`) to
 its path; the runner's hooks run with the tool's own Python (`ps2kit/uvtool.py`). `pip install --user` for the
 Python that runs `./kit` works too, and wins over the tool when both are there. A running `./kit run` keeps
