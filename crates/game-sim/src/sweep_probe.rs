@@ -240,7 +240,7 @@ pub fn pair(probe: &mut SweepProbe, other: Option<&Target>) -> bool {
 
 /// The segments into the mesh's space, and the sweep. The local form keeps what the original's arrays
 /// keep: the lengths and the radius are the world's own.
-fn sweep_into(probe: &mut SweepProbe, placed: &Placed) {
+pub(crate) fn sweep_into(probe: &mut SweepProbe, placed: &Placed) {
     let inverse = invert(&placed.transform);
     let count = probe.world.count.min(MAX_PROBES);
     probe.local.count = count;
@@ -257,7 +257,7 @@ fn sweep_into(probe: &mut SweepProbe, placed: &Placed) {
 }
 
 /// The answer's nearest normal, point and push-out, out of a mesh's space.
-fn take_out_nearest(rec: &mut Record, m: &Transform) {
+pub(crate) fn take_out_nearest(rec: &mut Record, m: &Transform) {
     rec.nearest_point = to_world(m, rec.nearest_point);
     rec.nearest_normal = turn(m, rec.nearest_normal);
     rec.push = turn(m, rec.push);
@@ -267,14 +267,14 @@ fn take_out_nearest(rec: &mut Record, m: &Transform) {
 
 /// A point through a transform: `vaddax` of the translation and zero into the accumulator, then
 /// `vmaddax`/`vmadday` and `vmaddz.xyz` over the rows. `w` is the point's own.
-fn to_world(m: &Transform, p: Vf) -> Vf {
+pub(crate) fn to_world(m: &Transform, p: Vf) -> Vf {
     let acc = Vf::madd(m[3].add(Vf::ZERO), m[0], Vf([p.x(); 4]));
     let acc = Vf::madd(acc, m[1], Vf([p.y(); 4]));
     xyz(Vf::madd(acc, m[2], Vf([p.z(); 4])), p)
 }
 
 /// A direction through a transform's rows only: `vmulax`, `vmadday`, `vmaddz.xyz`. `w` is its own.
-fn turn(m: &Transform, v: Vf) -> Vf {
+pub(crate) fn turn(m: &Transform, v: Vf) -> Vf {
     let acc = m[0].mul(Vf([v.x(); 4]));
     let acc = Vf::madd(acc, m[1], Vf([v.y(); 4]));
     xyz(Vf::madd(acc, m[2], Vf([v.z(); 4])), v)

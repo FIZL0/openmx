@@ -17,6 +17,10 @@
 //! ([`atv_contact::Held::refill`]), and the record's part search, sweep and node points are answered
 //! by the port's Desert Oasis ([`WorldStep::search`], [`WorldStep::sweep`], [`WorldStep::node_point`]),
 //! each checked word for word against the original's call, which still runs for what it leaves in RAM.
+//!
+//! MD105a's tail ([`sim_tail::port_tail`]) with MD105b's pieces is the task's own chain: the record, its
+//! outside, the world step and the tail all the port's, against the original's whole frame
+//! (`the_quads_frame_is_the_ports_through_the_palm_strike_wreck_and_put_back`).
 
 use super::*;
 use game_sim::contact_search::Ground;
@@ -1080,6 +1084,24 @@ fn a_spoiled_held_contact_turns_the_ports_step_red() {
 #[test]
 fn the_palm_strikes_contacts_push_the_ports_quad() {
     let Some(seen) = palm(PALM_RIDE, Some(Pieces::Port), None, false) else { return };
+    check_palm(&seen);
+    assert_eq!(seen.port_frames as usize, PALM_RIDE, "the port's world step ran every frame");
+    assert!(seen.port_resolved > 0, "the port's step never resolved a contact: {seen:?}");
+    let [searches, hits, sweeps, pairs, points] = seen.port_asked;
+    assert!(hits > 0 && pairs > 0 && points > 0, "the port's outside answered {:?}", seen.port_asked);
+    assert_eq!((searches, sweeps), (PALM_RIDE as u32, PALM_RIDE as u32), "a part search and a sweep a frame");
+}
+
+/// MD105 — **the quad's frame is the port's through the strike, wreck and put-back**: the palm ride
+/// with every piece the task names in Rust at once: the record's clear and pass ([`port_record`]), the
+/// record's outside answered by Desert Oasis and the world step [`quad::frame`] holding the pass's
+/// contacts ([`WorldStep`], MD105b), and the tail's walk, the quad's update, wreck, put-back and
+/// animate ([`sim_tail::port_tail`], MD105a), against the original's whole frame: every RAM word
+/// outside the stack and the ground ring equal after every one of the 300 frames, the port's step
+/// resolving the palm's contacts.
+#[test]
+fn the_quads_frame_is_the_ports_through_the_palm_strike_wreck_and_put_back() {
+    let Some(seen) = palm(PALM_RIDE, Some(Pieces::Port), None, true) else { return };
     check_palm(&seen);
     assert_eq!(seen.port_frames as usize, PALM_RIDE, "the port's world step ran every frame");
     assert!(seen.port_resolved > 0, "the port's step never resolved a contact: {seen:?}");

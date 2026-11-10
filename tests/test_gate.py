@@ -41,7 +41,8 @@ fn stamp(what: &str) {
     let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
     let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../stamps");
     let mut f = std::fs::OpenOptions::new().create(true).append(true).open(p).unwrap();
-    writeln!(f, "{what} {at}").unwrap();
+    // one write per line: writeln! may split it, and two binaries' lines then interleave mid-line
+    f.write_all(format!("{what} {at}\n").as_bytes()).unwrap();
 }
 '''
 

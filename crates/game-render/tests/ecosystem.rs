@@ -1135,3 +1135,80 @@ fn a_bushs_leaves_walked_from_far_to_near_sharpen_without_a_step() {
     assert!(!seen.is_empty(), "a bush has leaves that keep their coverage");
 }
 
+
+
+/// Every disc track's plants as the original's plant reader places them (V125): every plant the file
+/// has, none skipped; those whose species byte asks stood on the ground by the original's point
+/// query, a whole 65536th of the map at most under it; the rest at the file's own height. Those few
+/// stand off the ground in the original too (its reader has no other path to move them): 15 plants
+/// of six maps, 2 to 10 feet, the worst a rescuetreeH of free07 9.9 feet up (19 with the copies on
+/// free07_ss and free10_ss).
+#[test]
+fn every_tracks_plants_stand_where_the_originals_reader_puts_them() {
+    let Some(mut disc) = disc() else { return };
+    let mut names: Vec<String> = disc
+        .entries()
+        .iter()
+        .map(|e| e.name.to_ascii_lowercase())
+        .filter(|n| n.contains("tracks") && n.ends_with(".res") && !n.ends_with("_2.res"))
+        .filter_map(|n| n.rsplit(['\\', '/']).next().map(|s| s.trim_end_matches(".res").to_string()))
+        .collect();
+    names.sort();
+    names.dedup();
+    let (mut tracks, mut plants, mut off) = (0, 0, Vec::new());
+    for name in &names {
+        let archives = archives(&mut disc, name);
+        let Some(bytes) = scn(&archives[0]) else { continue };
+        let look = Scene::parse(&game_render::ini::text(&bytes));
+        let Some(file) = look.ecosystem_file.clone() else { continue };
+        let place = track::Scene::parse(&bytes).expect("the sim's scene");
+        let terrain_file = terrain_bytes(&archives[0], &place.terrain_file);
+        let terrain = track::Terrain::parse(&terrain_file).expect("the terrain");
+        let extent = eco::extent(&place.terrain, &terrain);
+        let raw = archives.iter().find_map(|a| a.read_suffix(&file).ok()).expect("the .esb");
+        let as_read = Ecosystem::parse(&raw, extent).expect("it reads");
+        let mut assets = Assets::default();
+        let g = Grove::load(&archives, &look, &place.terrain, &terrain, &mut assets).expect("it loads").expect("a grove");
+        let e = &g.ecosystem;
+        assert_eq!(e.plants.len(), as_read.plants.len(), "{name}: every plant the file has");
+        for (i, (p, f)) in e.plants.iter().zip(&as_read.plants).enumerate() {
+            assert_eq!((p.species, p.pos.x, p.pos.z, p.height, p.width), (f.species, f.pos.x, f.pos.z, f.height, f.width), "{name} plant {i}");
+            let d = p.pos.y - eco::ground_under(&place.terrain, &terrain, p.pos);
+            if p.snap {
+                assert!(d <= 1e-3 && d > -extent / 65536.0 - 1e-3, "{name} plant {i}: stood {d} feet off the ground");
+            } else {
+                assert_eq!(p.pos.y, f.pos.y, "{name} plant {i}: the file's height");
+                if d.abs() > 2.0 {
+                    off.push(format!("{name} {} {d:.1}", e.species[p.species].model));
+                }
+            }
+        }
+        tracks += 1;
+        plants += e.plants.len();
+    }
+    println!("{tracks} tracks, {plants} plants; at the file's height and over 2 feet off: {off:?}");
+    assert!(tracks >= 27, "the free rides and the nationals: {tracks}");
+    assert_eq!(off.len(), 19, "{off:?}");
+}
+
+/// The original's own plant words in a free10 and a nat11 state (S133's), against the port's, every
+/// plant: free10 keeps the file's heights, nat11 asks for every plant to be stood.
+#[test]
+fn free10s_and_nat11s_plants_are_the_originals() {
+    let Some(mut disc) = disc() else { return };
+    for (name, state) in [("free10", "s133-free10.ee.bin"), ("nat11", "s133-nat11.ee.bin")] {
+        let t = track(&mut disc, name);
+        let e = &t.grove.ecosystem;
+        let Some((ram, eco_at, held)) = held(state) else { return };
+        let terrain = track::Terrain::parse(&t.terrain_file).unwrap();
+        let extent = eco::extent(&t.layout, &terrain);
+        let scale = f32::from_bits(u32::from_le_bytes(ram[eco_at + 0xd4..eco_at + 0xd8].try_into().unwrap()));
+        assert_eq!(scale, extent / 65536.0, "the state is on {name}: its feet per unit");
+        assert_eq!(held.len(), e.plants.len(), "{name}: the original holds every plant the port places");
+        let words = |p: &eco::Plant| [p.pos.x, p.pos.y, p.pos.z].map(|v| (v / scale) as u16);
+        let wrong: Vec<usize> = (0..held.len()).filter(|&i| words(&e.plants[i]) != held[i].pos).collect();
+        assert!(wrong.is_empty(), "{name}: {} of {} plants stand elsewhere, the first {:?} against {:?}", wrong.len(), held.len(),
+            wrong.first().map(|&i| words(&e.plants[i])), wrong.first().map(|&i| held[i].pos));
+        println!("{name}: {} plants, {} stood, every word the original's", e.plants.len(), e.plants.iter().filter(|p| p.snap).count());
+    }
+}
