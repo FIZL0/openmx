@@ -1540,6 +1540,13 @@ ai_update                   boot 0x00383000 MXVehicleAI::Update(dt): stuck timer
 #                                           ai_tick_flag, vt+0x90, the type-1 climb rule (+0x390
 #                                           hold, +0x394 forward.y limit, +0x30c speed, +0x398 timer),
 #                                           interface vt+0xc; other modes 0x00282af0
+#                                           S281: also flag 0x400000 = last tick's 0x20 before ai_feed
+#                                           (with an interface), vt+0x28 under 0x200000 after vt+0x90,
+#                                           own vt+0xa8 under 0x4000, ai_listener_walk last, result
+#                                           ai_tick_flag's v0 & the walk's. Climb: +0x390 > 0 -> -= dt,
+#                                           +0xe0 = 0; else +0xb4 > +0x394 && +0x80 < +0x30c -> +0xf4 1.0,
+#                                           +0x398 += dt, > 5 -> +0x390 = 5; else +0x398 = 0. Ported as
+#                                           ai::update, oracled over 10,000 ticks (tests/ai.rs)
 ai_route_follow             boot 0x00283a10 VehicleAI's own route follower: path position +0x1b0 and
 #                                           direction +0x1d0 (0x0026e4f0 / 0x0026e630), wobble and
 #                                           drift +0x164..+0x198, target speed +0x1e0 off waypoint
@@ -1563,8 +1570,32 @@ ai_feed                     boot 0x0027fbd0 MXVehicleAIInterface vt+0x8: bike fr
 #                                           and ai_ask_for): body +0x284 = mula(brain +0x1f4,
 #                                           w) + madd(+0x284, 1-w), w = rider +0x1138; on the ground
 #                                           also body velocity x/z toward brain +0x1c0/+0x1c8 by
-#                                           rider +0x113c. Returns 1. Not ported (S281 note); the
+#                                           rider +0x113c. Returns 1. (S281: ported, below); the
 #                                           brief's "rider-to-brain copy (0x0027fb30)" was ai_feed
+#                                           S281: the interface is the rider's sub-object at +0x10d0
+#                                           (+0 brain, +4 type, +8 vtable 0x004550e4, thunks this-0x10d0):
+#                                           vt+0x8 ai_feed, +0xc ai_hand_off, +0x18 ai_rider_assist,
+#                                           +0x28 0x00280070 (target-approach set-up), +0x40 0x00281460
+#                                           (stuck rescue), +0x3c 0x002812b0 (hit reaction: sets +0x14c0
+#                                           back-up / +0x14c8 swerve, +0x14c4 = rand() > 0.5 ? 1 : -1).
+#                                           The assist is called once, at ai_tick_flag's tail (0x00384c40):
+#                                           flags 0x800 -> +0x1c0 = +0x1d0 * +0x1e0, +0x1c8 = +0x1d8 *
+#                                           +0x1e0 (mul.s), then vt+0x18. Ported as ai::assist_aim and
+#                                           ai::assist, oracled over 10,000 cases (tests/ai.rs)
+#   ai_rider_assist (comment: plan lines name it) boot 0x0027fb30 (rider) the rider assist above
+#   ai_hand_off (comment: plan lines name it) boot 0x0027fe90 (rider) interface vt+0xc: brain 0, rider +0xf9c 0 or
+#                                           *(+0xfa0)+0x5c bit 0 clear -> +0x628/+0x62c/+0x63c/+0x648 0,
+#                                           +0x640 1.0, return 0. Else +0x628 = +0x14c8 > 0 ? +0x14c4 :
+#                                           brain +0xf0; +0x62c = brain +0xf4; brain flag 0x20: +0x14c0
+#                                           > 0 ? (+0x648 1, +0x63c 0, +0x640 0) : (+0x648 0, +0x63c
+#                                           brain +0xe0, +0x640 brain +0xe4); airborne +0x640 = 0 only.
+#                                           Return 1. +0x14c0/+0x14c8 count down in the bike tick
+#                                           (0x0027d614). Ported as ai::hand_off, oracled (tests/ai.rs)
+ai_listener_walk            boot 0x00133500 (dt, obj) obj +0x24 bit 1: each listener on +0x18 (next
+#                                           +0x14) with +0x29 bit 0 set, bits 2/3 clear and +0x20 bit 1
+#                                           -> its vt+0x38(dt). Returns 1. The end of ai_update (S281)
+ai_update_base              boot 0x00282af0 VehicleAI's update: ai_update's whole tick for any mode
+#                                           but 5 (S281: not ported)
 ai_character_read          boot 0x00384f00 reads AIChrctr.aip section AI_<skill>: the controller's
 #                                           gains (SteeringGain +0x208, OversteerCorrectionGain
 #                                           +0x21c, PitchGain +0x2d4, PitchJitterDeadZone +0x2d8,
