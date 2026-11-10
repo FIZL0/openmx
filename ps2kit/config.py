@@ -263,8 +263,9 @@ class Config:
 
     @property
     def fix_timeout(self) -> int:
-        """Seconds a merge fixer may take before the merge is left for a human instead."""
-        return int(self.raw.get('run', {}).get('fix_timeout', 1200))
+        """Seconds a merge fixer may take before the merge is left for a human instead: 1200 left
+        a two-sided race.rs conflict (S294a, 11-09) for a human."""
+        return int(self.raw.get('run', {}).get('fix_timeout', 2400))
 
     @property
     def fix_model(self) -> str:
