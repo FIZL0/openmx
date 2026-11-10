@@ -243,6 +243,7 @@ mod car_draw;
 mod perf;
 mod portal;
 mod ride_hud;
+mod race_start;
 // N8: the one-seat online ride against the offline one, tick for tick.
 #[cfg(test)]
 mod same_ride;
@@ -593,7 +594,14 @@ impl Seat {
         let Some(controls) = self.pass_front(dt) else { return };
         let mut did = None;
         if self.riding {
+            let closed = |sim: &Sim| sim.race.as_ref().is_some_and(|r| r.gate.flags & game_sim::race::flags::CLOSED != 0);
+            let was_closed = closed(&self.sim);
             (self.said, did) = self.garage.pass_among(&mut self.sim, dt, &controls, me, spots, place, self.markers, among);
+            // P327: the race's start gate dropped on this pass.
+            if was_closed && !closed(&self.sim) {
+                let at = self.sim.rider.ride.transform().0[3];
+                println!("race: gate dropped at tick {}, rider at {:.2},{:.2},{:.2}", self.sim.ticks, at.x(), at.y(), at.z());
+            }
         }
         self.pass_back(dt, me, controls, did);
     }
@@ -1163,6 +1171,8 @@ struct RideHud<'a> {
     join_buttons: &'a menu::pads::Buttons,
     /// Whether the Show FPS line is up (P323).
     fps: bool,
+    /// The race on, its laps and riders (P327).
+    race: Option<&'a menu::RaceSetup>,
 }
 
 impl RideHud<'_> {
@@ -1222,6 +1232,8 @@ impl RideHud<'_> {
             buttons: self.buttons.get(v).cloned().unwrap_or_default(),
             join_buttons: self.join_buttons.clone(),
             fps: self.fps,
+            // Laps and places are the simulation's to count (S13c, S13d): dashes till then.
+            race: self.race.filter(|_| seat.sim.race.is_some()).map(|r| ride_hud::RaceShown { lap: None, laps: r.laps, place: None, riders: r.riders }),
         };
         rig.ride_hud.note_event(now, shown.event.as_ref());
         draw(&shown, &rig.ride_hud, now);
@@ -2685,6 +2697,9 @@ struct Args {
     fps_limit: Option<menu::FrameLimit>,
     /// `--menu`: the front end, whatever else is asked.
     menu: bool,
+    /// P327: the ride is a race — `--race`, `--laps N`, `--racers N`, or the menu's Race. Its track
+    /// is [`Args::track`]'s; the ride starts on the start grid behind the closed gate.
+    race: Option<menu::RaceSetup>,
     /// Whether a flag picked a ride, which skips the front end unless `--menu` says otherwise.
     ride_flag: bool,
     /// `--screen`: the front end's screen to open on.
@@ -3461,6 +3476,8 @@ async fn front_end(args: Args) -> Result<(), String> {
             loop {
                 let mut a = args.clone();
                 a.track = track.clone();
+                // P327: the menu's Race, or none for its Free Ride.
+                a.race = shell.front.menu.racing().cloned();
                 if !args.mods_asked {
                     a.mods_asked = true;
                     a.mods = shell.front.menu.settings.mods.then(|| shell.front.dir.join(track_mods::MODS_DIR));
@@ -3536,12 +3553,17 @@ async fn front_end(args: Args) -> Result<(), String> {
                     Err(e) => {
                         println!("ride: {e}");
                         shell.front.menu.note = Some(format!("Could not ride {track}: {e}"));
+                        shell.front.menu.race_dropped();
                         break;
                     }
                 }
             }
             if !std::mem::take(&mut picked) {
                 shell.front.menu.main();
+                // A race left is its results on the way back (P327).
+                if shell.front.menu.race_left() {
+                    println!("race: results");
+                }
             }
             shell.front.reader.reset();
             shell.front.readers.reset();
@@ -5485,6 +5507,47 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             (Vf::new(x, on.y(), z, 1.0), Vf::new(h.sin(), 0.0, h.cos(), 0.0))
         }
     };
+    // The race's own draws are seeded as the session's are (`Sim::with_rider(0, …)`), apart from them.
+    const RACE_SEED: u32 = 0;
+    // P327: a race starts on its grid, behind the closed start gate off the scene's drop-gate prop,
+    // the reset's countdown to the drop drawn from the race events' start calls.
+    let race_start = args.race.as_ref().and_then(|r| {
+        let drops = second
+            .as_ref()
+            .and_then(|m| disc.res(m).ok())
+            .and_then(|res| res.read("aud\\event.aud").ok())
+            .map(|b| race_start::drop_times(&ini::text(&b), &args.bike))
+            .unwrap_or_default();
+        let prop = race_start::drop_prop(&look.models, |m| assets.models.get(m).and_then(|l| game_render::animated_toy::bound(&l.tris)));
+        let start = prop.and_then(|p| race_start::lay_out(&p, drops.clone(), r.riders as i32, RACE_SEED));
+        if start.is_none() {
+            println!("race: {} has no start gate ({} start calls, drop gate {}) — a ride from the start line", args.track, drops.len(), if prop.is_some() { "found" } else { "not found" });
+        }
+        start
+    });
+    let (at, heading) = match &race_start {
+        None => (at, heading),
+        Some(s) => {
+            let (on, _) = sim_world::World::ground(&mut sim, Vf::new(s.spot.x(), 1.0e4, s.spot.z(), 1.0));
+            let c = s.gate.centre;
+            println!(
+                "race: {} laps, {} riders; gate at {:.2},{:.2},{:.2} width {:.2} closed; lane {} place {}; grid {:.2},{:.2},{:.2}; drop in {:.2}s",
+                args.race.as_ref().map_or(0, |r| r.laps),
+                s.riders,
+                c.x(),
+                c.y(),
+                c.z(),
+                s.gate.width.0,
+                s.lane,
+                s.place,
+                s.spot.x(),
+                on.y(),
+                s.spot.z(),
+                s.delay.0
+            );
+            (Vf::new(s.spot.x(), on.y(), s.spot.z(), 1.0), Vf::new(s.facing.x(), 0.0, s.facing.z(), 0.0))
+        }
+    };
     let node_at = |name: &str| -> Option<Vf> {
         let chassis = assets.models.get(CHASSIS)?;
         let i = chassis.model.nodes.iter().position(|n| n.name == name)?;
@@ -5534,8 +5597,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         // takes the top row at walking pace (V18).
         rider.body_rates = vehicle_params();
         // No start line (V88): `Rider::new` puts the body at a race's gate, and a free ride has none.
-        // Left up, a ride started in the plane hands the bike back playing the get-ready idles.
-        rider.no_start_line();
+        // Left up, a ride started in the plane hands the bike back playing the get-ready idles. A race
+        // (P327) keeps it: its rider waits at the gate.
+        if race_start.is_none() {
+            rider.no_start_line();
+        }
         // The wreck's own parameters, if the disc had them: the part the bike becomes, the rider's
         // throw-and-roll set, and the tumbling body's inertia tensor, which is neither file's — it comes
         // off the wreck model's own box ([`ride::WRECK_INERTIA`]).
@@ -5918,7 +5984,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             })
         }
     };
-    Ok(Ok((mods, disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, kit, table, place, look, ground, sky, assets, vehicle, tables, phy_bytes, phy, other_phys, stock_phys, bike_words, other_riders, riders, body, ragdolled, chassis, layout, cpresets, camera, lot, flight_for, plane_files, online_bays, online_bodies, plane_starts, stock_plane, garage, plane_presets, plane_camera, plane_drawn, plane_fx, fx_sheet, soft_sheet, sim, traffic, animated, cars, traffic_time, traffic_before, traffic_at, rider, others, head, recorder, pre_chunks, at, car_shift, pack_clips, stunts)))
+    Ok(Ok((mods, disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, kit, table, place, look, ground, sky, assets, vehicle, tables, phy_bytes, phy, other_phys, stock_phys, bike_words, other_riders, riders, body, ragdolled, chassis, layout, cpresets, camera, lot, flight_for, plane_files, online_bays, online_bodies, plane_starts, stock_plane, garage, plane_presets, plane_camera, plane_drawn, plane_fx, fx_sheet, soft_sheet, sim, traffic, animated, cars, traffic_time, traffic_before, traffic_at, rider, others, head, recorder, pre_chunks, at, car_shift, pack_clips, stunts, race_start)))
         }
     };
     let mut load_screen = LoadScreen::default();
@@ -5927,7 +5993,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         None if std::env::var_os(loading::THREADED).is_some() => loading::on_worker(progress, build, || Ok(None::<Leave>))?.unwrap_or_else(Err),
         None => build()?,
     };
-    let (mut mods, mut disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, mut kit, table, place, mut look, ground, sky, mut assets, vehicle, tables, phy_bytes, phy, other_phys, mut stock_phys, mut bike_words, other_riders, riders, body, ragdolled, chassis, mut layout, cpresets, camera, mut lot, flight_for, plane_files, online_bays, online_bodies, plane_starts, mut stock_plane, garage, plane_presets, plane_camera, mut plane_drawn, mut plane_fx, mut fx_sheet, soft_sheet, mut sim, traffic, animated, cars, mut traffic_time, mut traffic_before, mut traffic_at, rider, others, mut head, recorder, pre_chunks, at, car_shift, pack_clips, stunts) = match built {
+    let (mut mods, mut disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, mut kit, table, place, mut look, ground, sky, mut assets, vehicle, tables, phy_bytes, phy, other_phys, mut stock_phys, mut bike_words, other_riders, riders, body, ragdolled, chassis, mut layout, cpresets, camera, mut lot, flight_for, plane_files, online_bays, online_bodies, plane_starts, mut stock_plane, garage, plane_presets, plane_camera, mut plane_drawn, mut plane_fx, mut fx_sheet, soft_sheet, mut sim, traffic, animated, cars, mut traffic_time, mut traffic_before, mut traffic_at, rider, others, mut head, recorder, pre_chunks, at, car_shift, pack_clips, stunts, race_start) = match built {
         Ok(built) => built,
         Err(leave) => return Ok(leave),
     };
@@ -7124,6 +7190,14 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         together: false,
         shade: PageShade::default(),
     }];
+    // The race's HUD readouts, while it has its gate (P327).
+    let race_hud = race_start.as_ref().and(args.race.clone());
+    // P327: the race the first seat's session steps, its gate closed over the rider where it stands.
+    if let Some(start) = &race_start {
+        let sim = &mut seats[0].sim;
+        let m = sim.rider.ride.transform();
+        sim.race = Some(Box::new(start.race((m.0[3], m.0[2]))));
+    }
     for (i, (rider, phy)) in others.into_iter().zip(other_phys).enumerate() {
         // Every player has a plane of their own, parked in their bay of the lot (P87) or, on a map
         // that parks none for them, starting beside the start line (P113). A local seat starts on the
@@ -7176,6 +7250,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             Vf::new(h.sin(), 0.0, h.cos(), 0.0)
         }
     };
+    // Or a race's grid facing (P327).
+    let heading = race_start.as_ref().map_or(heading, |s| Vf::new(s.facing.x(), 0.0, s.facing.z(), 0.0));
     // `--overview` (P166): the track pick's still looks over the map from above and behind the spawn.
     if args.overview && args.shot_pose.is_none() {
         let extent = match &sim {
@@ -10168,7 +10244,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     let marker = shown_markers.get(v).and_then(Option::as_ref);
                     let view = [at.x as f32, at.y as f32, at.w as f32, at.h as f32];
                     let join = join_view == Some(v);
-                    let ctx = RideHud { ridden: &ridden, art: &hud_art, span: radar_span, maps: &map_names, wrap: hud_wrap, speedometer, names: &names, table: &table, simulated, join, buttons: &hud_buttons, join_buttons: &join_buttons, fps: show_fps };
+                    let ctx = RideHud { ridden: &ridden, art: &hud_art, span: radar_span, maps: &map_names, wrap: hud_wrap, speedometer, names: &names, table: &table, simulated, join, buttons: &hud_buttons, join_buttons: &join_buttons, fps: show_fps, race: race_hud.as_ref() };
                     ctx.with(seat, rig, v, marker, |shown, tracker, now| {
                         // clear of the page's touch pad while it is up (P208)
                         let pad = menu::touch_room::Room::of((frame.width, frame.height));
@@ -10896,7 +10972,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             if overlay_mode == menu::Overlay::Hud {
                 let marker = shown_markers.get(v).and_then(Option::as_ref);
                 let join = join_view == Some(v);
-                let ctx = RideHud { ridden: &ridden, art: &hud_art, span: radar_span, maps: &map_names, wrap: hud_wrap, speedometer, names: &names, table: &table, simulated, join, buttons: &hud_buttons, join_buttons: &join_buttons, fps: show_fps };
+                let ctx = RideHud { ridden: &ridden, art: &hud_art, span: radar_span, maps: &map_names, wrap: hud_wrap, speedometer, names: &names, table: &table, simulated, join, buttons: &hud_buttons, join_buttons: &join_buttons, fps: show_fps, race: race_hud.as_ref() };
                 ctx.with(seat, rig, v, marker, |shown, tracker, now| {
                     ride_hud::draw(target, shown, tracker, now);
                 });
@@ -13596,6 +13672,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         trace_hash: false,
         display: std::env::var("DISPLAY").unwrap_or_else(|_| ":0".to_string()),
         menu: false,
+        race: None,
         ride_flag: false,
         screen: None,
         screen_tab: None,
@@ -13644,7 +13721,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         if matches!(
             a.as_str(),
             "--track" | "--play" | "--record" | "--moment" | "--vehicle" | "--phy" | "--ride" | "--headless"
-                | "--players" | "--frames" | "--online" | "--set" | "--garage"
+                | "--players" | "--frames" | "--online" | "--set" | "--garage" | "--race" | "--laps" | "--racers"
         ) || a.starts_with("--trace")
         {
             args.ride_flag = true;
@@ -13652,6 +13729,17 @@ fn parse_args() -> Result<Option<Args>, String> {
         match a.as_str() {
             "--ride" => {}
             "--menu" => args.menu = true,
+            // P327: a race on `--track` (its own track is set when the ride starts), laps and riders.
+            "--race" => _ = args.race.get_or_insert_with(menu::RaceSetup::default),
+            "--laps" | "--racers" => {
+                let n: u32 = next("a number")?.parse().map_err(|e| format!("{a}: {e}"))?;
+                let r = args.race.get_or_insert_with(menu::RaceSetup::default);
+                if a == "--laps" {
+                    r.laps = n.clamp(1, menu::race::MOST_LAPS);
+                } else {
+                    r.riders = n.clamp(1, menu::race::MOST_RIDERS);
+                }
+            }
             "--open-list" => args.open_list = true,
             "--menu-row" => args.menu_row = Some(next("a row's label")?),
             "--where" => args.where_only = true,
