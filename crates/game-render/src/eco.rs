@@ -728,6 +728,23 @@ impl Grove {
         Ok(Some(grove))
     }
 
+    /// Keep only the plants `keep` says yes to, each with its own turn and [`jitter`], and say how
+    /// many went. A world keeps a tile's plants on the ground it keeps of the tile (V125): the rest
+    /// would stand over a join's or a neighbour's ground, in the air or under it.
+    pub fn retain(&mut self, mut keep: impl FnMut(&Plant) -> bool) -> usize {
+        let yes: Vec<bool> = self.ecosystem.plants.iter().map(&mut keep).collect();
+        let before = yes.len();
+        let mut flags = yes.iter();
+        self.ecosystem.plants.retain(|_| *flags.next().unwrap());
+        let mut flags = yes.iter();
+        self.jitter.retain(|_| *flags.next().unwrap());
+        if let Ok(turned) = self.turned.get_mut() {
+            let mut flags = yes.iter();
+            turned.retain(|_| *flags.next().unwrap());
+        }
+        before - self.ecosystem.plants.len()
+    }
+
     /// Every model the grove draws, by name: the species' models, then their billboards, then the
     /// matched billboards, then the [`cut_out`] copies of the models and of the matched billboards
     /// ([`Draw::part_index`]).
