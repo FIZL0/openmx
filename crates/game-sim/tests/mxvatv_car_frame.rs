@@ -17,7 +17,7 @@
 
 use game_sim::air::AcosTable;
 use game_sim::atv_body::Body;
-use game_sim::atv_car::{self, Call, Car, Steps, Tire, Update};
+use game_sim::atv_car::{self, Call, Car, Keys, Pieces, PreloadState, State, Steps, Tire, Update, Wing};
 use game_sim::biplane::World;
 use game_sim::handling::seed;
 use ps2_float::{F, Vf};
@@ -518,6 +518,463 @@ fn generate(r: &mut Rng, image_car: &Car, image_body: &Body, p: &Ptrs) -> (Car, 
     (car, body, dt)
 }
 
+/// The MX Unleashed pieces' words (research/oracle.txt `# MD106a`; the keys' are MD39b's): the
+/// car's, but for the vehicle state's mode, the gravity block's, the record's touching word, the left
+/// front tire's ground normal, the engine's torque scale and a wing's (from its first word).
+mod mx {
+    pub const VEHICLE_STATE: u32 = 0xbc4;
+    pub const MODE: u32 = 0x28;
+    pub const LEAN: u32 = 0x11cc;
+    pub const STICK: u32 = 0x11c8;
+    pub const PAD_WORD: u32 = 0x1124;
+    pub const CLUTCH: u32 = 0x1120;
+    pub const GAS: u32 = 0x318;
+    pub const VEHICLE_BRAKE: u32 = 0x310;
+    pub const BRAKE: u32 = 0x1130;
+    pub const BRAKE_FORCE: u32 = 0x1134;
+    pub const HAND_BRAKE: u32 = 0x1138;
+    pub const GRAVITY_BLOCK: u32 = 0xe8;
+    pub const GRAVITY: u32 = 0x40;
+    pub const TOUCHING: u32 = 0x34;
+    pub const FRONT_NORMAL: u32 = 0x110;
+    pub const READY: u32 = 0xc50;
+    pub const ACTIVE: u32 = 0xc54;
+    pub const ARMED: u32 = 0xc58;
+    pub const PRELOAD_TIME: u32 = 0xc5c;
+    pub const TIMER: u32 = 0xc60;
+    pub const MIN_PRELOAD_TIME: u32 = 0xc64;
+    pub const MAX_PRELOAD_TIME: u32 = 0xc68;
+    pub const MAX_PRELOAD: u32 = 0xc6c;
+    pub const FORCE: u32 = 0xc70;
+    pub const CUED: u32 = 0x700;
+    pub const LAUNCH_TIMER: u32 = 0x1168;
+    pub const LAUNCH_START: u32 = 0x116c;
+    pub const CLUTCH_TIME: u32 = 0x1170;
+    pub const MAX_SCALE: u32 = 0x1174;
+    pub const SCALE_SPEED: u32 = 0x1178;
+    pub const BOOST: u32 = 0x60;
+    pub const COFG: u32 = 0x10f0;
+    pub const COFG_AI: u32 = 0x1100;
+    pub const TRAVEL_FORWARD: u32 = 0x1110;
+    pub const TRAVEL_BACK: u32 = 0x1114;
+    pub const AREA: u32 = 0x117c;
+    pub const DAMPING: u32 = 0x1180;
+    pub const UNROLL_GAIN: u32 = 0x1184;
+    pub const UNROLL_TORQUE: u32 = 0x1188;
+    pub const UNYAW_GAIN: u32 = 0x118c;
+    pub const UNYAW_TORQUE: u32 = 0x1190;
+    pub const CONTROL_MOMENT: u32 = 0x11a0;
+    pub const GYRO: u32 = 0x11b0;
+    pub const WINGS: u32 = 0x11b4;
+    pub const WING_PTR: u32 = 0x11b8;
+}
+
+/// The preload's cue (a sound's play), the global it is handed first, and where the preload calls it.
+const CUE: u32 = 0x0027_2300;
+const CUE_GLOBAL: u32 = 0x0044_2eb0;
+const CUE_FROM: u32 = 0x004c_b99c;
+
+/// The pieces' keys and state as the image holds them: [`Keys`] with its wing count as written (the
+/// image's one wing kept in RAM whatever the count), [`State`], and the vehicle state's pointer (the
+/// image's object, or none) and mode.
+#[derive(Clone)]
+struct Mx {
+    keys: Keys,
+    wing: Wing,
+    wing_count: i32,
+    wing_ptr: u32,
+    vstate_object: u32,
+    vstate: bool,
+    mode: u32,
+    state: State,
+}
+
+impl Mx {
+    fn keys(&self) -> Keys {
+        Keys { wings: if self.wing_count > 0 { vec![self.wing; self.wing_count as usize] } else { Vec::new() }, ..self.keys.clone() }
+    }
+}
+
+fn read_mx(ee: &Ee, p: &Ptrs) -> Mx {
+    let c = |o: u32| CAR + o;
+    let f = |o: u32| F(ee.f32_at(c(o)));
+    let v = |o: u32| get_v(ee, c(o));
+    let b = |o: u32| ee.u32_at(c(o)) != 0;
+    let vstate_object = ee.u32_at(c(mx::VEHICLE_STATE));
+    assert_ne!(vstate_object, 0, "the image's vehicle state");
+    let mode = ee.u32_at(vstate_object + mx::MODE);
+    let wing_ptr = ee.u32_at(c(mx::WING_PTR));
+    let wf = |o: u32| F(ee.f32_at(wing_ptr + o));
+    let wing = Wing { lift_slope: wf(0), angle_of_attack: wf(4), basic_drag: wf(8), induced_drag: wf(0xc), position: get_v(ee, wing_ptr + 0x10) };
+    let keys = Keys {
+        cofg: v(mx::COFG),
+        cofg_ai: v(mx::COFG_AI),
+        cofg_travel_forward: f(mx::TRAVEL_FORWARD),
+        cofg_travel_back: f(mx::TRAVEL_BACK),
+        preload_time: f(mx::PRELOAD_TIME),
+        min_preload_time: f(mx::MIN_PRELOAD_TIME),
+        max_preload_time: f(mx::MAX_PRELOAD_TIME),
+        max_preload: f(mx::MAX_PRELOAD),
+        clutch_torque_scale_time: f(mx::CLUTCH_TIME),
+        max_clutch_torque_scale: f(mx::MAX_SCALE),
+        max_clutch_torque_scale_speed: f(mx::SCALE_SPEED),
+        aero_surface_area: f(mx::AREA),
+        airborne_damping: f(mx::DAMPING),
+        unroll_gain: f(mx::UNROLL_GAIN),
+        unroll_torque: f(mx::UNROLL_TORQUE),
+        unyaw_gain: f(mx::UNYAW_GAIN),
+        unyaw_torque: f(mx::UNYAW_TORQUE),
+        airborne_control_moment: v(mx::CONTROL_MOMENT),
+        brake_gyro_torque: f(mx::GYRO),
+        wings: Vec::new(),
+    };
+    let state = State {
+        human: mode == 1,
+        lean: f(mx::LEAN),
+        stick: f(mx::STICK),
+        pad_word: f(mx::PAD_WORD),
+        clutch: f(mx::CLUTCH),
+        gas: f(mx::GAS),
+        vehicle_brake: f(mx::VEHICLE_BRAKE),
+        brake: f(mx::BRAKE),
+        brake_force: f(mx::BRAKE_FORCE),
+        hand_brake: f(mx::HAND_BRAKE),
+        gravity: get_v(ee, ee.u32_at(c(mx::GRAVITY_BLOCK)) + mx::GRAVITY),
+        touching: ee.u32_at(p.record + mx::TOUCHING) != 0,
+        front_normal: get_v(ee, p.tires[0] + mx::FRONT_NORMAL),
+        preload: PreloadState {
+            ready: b(mx::READY),
+            active: b(mx::ACTIVE),
+            armed: b(mx::ARMED),
+            timer: f(mx::TIMER),
+            force: v(mx::FORCE),
+            cued: b(mx::CUED),
+        },
+        launch_timer: f(mx::LAUNCH_TIMER),
+        launch_start: f(mx::LAUNCH_START),
+        launch_boost: F(ee.f32_at(p.engine + mx::BOOST)),
+    };
+    Mx { keys, wing, wing_count: ee.i32_at(c(mx::WINGS)), wing_ptr, vstate_object, vstate: true, mode, state }
+}
+
+/// Every word [`read_mx`] reads but the gravity block's, where it lives.
+fn mx_words(m: &Mx, p: &Ptrs) -> Vec<(u32, u32)> {
+    let mut out = Vec::new();
+    let c = |o: u32| CAR + o;
+    let (k, s) = (&m.keys, &m.state);
+    let mut fs: Vec<(u32, F)> = vec![
+        (c(mx::TRAVEL_FORWARD), k.cofg_travel_forward),
+        (c(mx::TRAVEL_BACK), k.cofg_travel_back),
+        (c(mx::PRELOAD_TIME), k.preload_time),
+        (c(mx::MIN_PRELOAD_TIME), k.min_preload_time),
+        (c(mx::MAX_PRELOAD_TIME), k.max_preload_time),
+        (c(mx::MAX_PRELOAD), k.max_preload),
+        (c(mx::CLUTCH_TIME), k.clutch_torque_scale_time),
+        (c(mx::MAX_SCALE), k.max_clutch_torque_scale),
+        (c(mx::SCALE_SPEED), k.max_clutch_torque_scale_speed),
+        (c(mx::AREA), k.aero_surface_area),
+        (c(mx::DAMPING), k.airborne_damping),
+        (c(mx::UNROLL_GAIN), k.unroll_gain),
+        (c(mx::UNROLL_TORQUE), k.unroll_torque),
+        (c(mx::UNYAW_GAIN), k.unyaw_gain),
+        (c(mx::UNYAW_TORQUE), k.unyaw_torque),
+        (c(mx::GYRO), k.brake_gyro_torque),
+        (m.wing_ptr, m.wing.lift_slope),
+        (m.wing_ptr + 4, m.wing.angle_of_attack),
+        (m.wing_ptr + 8, m.wing.basic_drag),
+        (m.wing_ptr + 0xc, m.wing.induced_drag),
+        (c(mx::LEAN), s.lean),
+        (c(mx::STICK), s.stick),
+        (c(mx::PAD_WORD), s.pad_word),
+        (c(mx::CLUTCH), s.clutch),
+        (c(mx::GAS), s.gas),
+        (c(mx::VEHICLE_BRAKE), s.vehicle_brake),
+        (c(mx::BRAKE), s.brake),
+        (c(mx::BRAKE_FORCE), s.brake_force),
+        (c(mx::HAND_BRAKE), s.hand_brake),
+        (c(mx::TIMER), s.preload.timer),
+        (c(mx::LAUNCH_TIMER), s.launch_timer),
+        (c(mx::LAUNCH_START), s.launch_start),
+        (p.engine + mx::BOOST, s.launch_boost),
+    ];
+    let vs: [(u32, Vf); 6] = [
+        (c(mx::COFG), k.cofg),
+        (c(mx::COFG_AI), k.cofg_ai),
+        (c(mx::CONTROL_MOMENT), k.airborne_control_moment),
+        (m.wing_ptr + 0x10, m.wing.position),
+        (p.tires[0] + mx::FRONT_NORMAL, s.front_normal),
+        (c(mx::FORCE), s.preload.force),
+    ];
+    for (a, v) in vs {
+        for (j, x) in v.0.into_iter().enumerate() {
+            fs.push((a + 4 * j as u32, F(x)));
+        }
+    }
+    out.extend(fs.into_iter().map(|(a, x)| (a, x.to_bits())));
+    let words = [
+        (c(mx::READY), word(s.preload.ready)),
+        (c(mx::ACTIVE), word(s.preload.active)),
+        (c(mx::ARMED), word(s.preload.armed)),
+        (c(mx::CUED), word(s.preload.cued)),
+        (c(mx::WINGS), m.wing_count as u32),
+        (c(mx::VEHICLE_STATE), if m.vstate { m.vstate_object } else { 0 }),
+        (m.vstate_object + mx::MODE, m.mode),
+        (p.record + mx::TOUCHING, word(s.touching)),
+    ];
+    out.extend(words);
+    out
+}
+
+/// A generated set of keys and pad, vehicle and pieces' state about the image's: the leans and
+/// stick about their thresholds (on them now and then), the preload's flags and timer, the remaps'
+/// input ranges degenerate now and then, the wing count none, one or negative; and the car's words
+/// the pieces read from the last frame (its speed, velocity, flow angles, roll and up row) stirred;
+/// a third of them a fast, rising, grounded car off the brake, where the preload may wind up.
+fn generate_mx(r: &mut Rng, image: &Mx, car: &mut Car, body: &mut Body) -> Mx {
+    let w = car.velocity.0[3];
+    car.velocity = r.vec(70.0, w);
+    if r.chance(0.4) {
+        car.velocity.0[2] = r.range(30.0, 70.0);
+    }
+    car.speed = if r.chance(0.2) { F(r.range(0.0, 10.0)) } else { F(r.range(10.0, 90.0)) };
+    car.alpha = F(r.range(-1.5, 1.5));
+    car.side_slip = F(r.range(-1.5, 1.5));
+    car.euler.0[2] = r.range(-3.0, 3.0);
+    car.up.0[1] = r.range(-1.0, 1.0);
+    let mut m = image.clone();
+    let either = |r: &mut Rng, x: f32| if r.chance(0.5) { -x } else { x };
+    let lean_edge = f32::from_bits(0x3f4c_cccd);
+    let k = &mut m.keys;
+    k.cofg = r.vec(1.5, 1.0);
+    k.cofg_ai = r.vec(1.5, 1.0);
+    k.cofg_travel_forward = F(r.range(0.0, 0.6));
+    k.cofg_travel_back = F(r.range(0.0, 0.6));
+    k.preload_time = F(r.range(0.05, 0.5));
+    k.min_preload_time = F(r.range(0.0, 40.0));
+    k.max_preload_time = if r.chance(0.4) { k.min_preload_time } else { F(k.min_preload_time.0 + r.range(1.0, 80.0)) };
+    k.max_preload = F(r.range(0.0, 3000.0));
+    k.clutch_torque_scale_time = F(r.range(0.1, 3.0));
+    k.max_clutch_torque_scale = F(r.range(1.0, 7.0));
+    k.max_clutch_torque_scale_speed = if r.chance(0.15) { F::ZERO } else { F(r.range(5.0, 60.0)) };
+    k.aero_surface_area = F(r.range(0.0, 6.0));
+    k.airborne_damping = F(r.range(0.0, 3.0));
+    k.unroll_gain = F(r.range(-4.0, 4.0));
+    k.unroll_torque = F(r.range(-3000.0, 3000.0));
+    k.unyaw_gain = F(r.range(-4.0, 4.0));
+    k.unyaw_torque = F(r.range(-3000.0, 3000.0));
+    let w = r.range(-2.0, 2.0);
+    k.airborne_control_moment = r.vec(4000.0, w);
+    k.brake_gyro_torque = F(r.range(-2000.0, 2000.0));
+    m.wing = Wing {
+        lift_slope: F(r.range(0.0, 6.0)),
+        angle_of_attack: F(r.range(-0.3, 0.3)),
+        basic_drag: F(r.range(0.0, 0.2)),
+        induced_drag: F(r.range(0.0, 0.3)),
+        position: Vf::ZERO,
+    };
+    let w = r.range(-2.0, 2.0);
+    m.wing.position = r.vec(2.5, w);
+    m.wing_count = [1, 1, 0, -1][(r.next() % 4) as usize];
+    m.vstate = !r.chance(0.2);
+    m.mode = if r.chance(0.7) { 1 } else { [0, 2, 3][(r.next() % 3) as usize] };
+    let s = &mut m.state;
+    s.human = m.vstate && m.mode == 1;
+    s.lean = F(match r.next() % 8 {
+        0 => either(r, lean_edge),
+        1 => 0.0,
+        2 | 3 => {
+            let x = r.range(0.0, lean_edge);
+            either(r, x)
+        }
+        4 | 5 => -r.range(lean_edge, 1.0),
+        _ => r.range(lean_edge, 1.0),
+    });
+    s.stick = F(match r.next() % 5 {
+        0 => either(r, f32::from_bits(0x3dcc_cccd)),
+        1 | 2 => {
+            let x = r.range(0.0, 0.1);
+            either(r, x)
+        }
+        _ => r.range(-1.0, 1.0),
+    });
+    s.pad_word = F(r.range(-100.0, 100.0));
+    s.clutch = F([0.0, 0.0, 1.0, r.range(0.0, 1.0)][(r.next() % 4) as usize]);
+    let off = |r: &mut Rng, p: f32| F(if r.chance(p) { 0.0 } else { r.range(0.0, 1.0) });
+    s.gas = off(r, 0.6);
+    s.vehicle_brake = off(r, 0.7);
+    s.brake = off(r, 0.6);
+    s.brake_force = off(r, 0.6);
+    s.hand_brake = off(r, 0.7);
+    s.touching = r.chance(0.25);
+    s.front_normal = if r.chance(0.3) { Vf::new(0.0, 1.0, 0.0, 0.0) } else { r.vec(1.0, 0.0) };
+    let pr = &mut s.preload;
+    pr.ready = r.chance(0.5);
+    pr.active = r.chance(0.3);
+    pr.armed = r.chance(0.6);
+    pr.timer = F(if r.chance(0.3) { 0.0 } else { r.range(-0.05, 0.4) });
+    pr.force = Vf::new(r.range(-50.0, 50.0), r.range(0.0, 3000.0), r.range(-50.0, 50.0), if r.chance(0.5) { 0.0 } else { 1.0 });
+    pr.cued = r.chance(0.5);
+    if r.chance(0.35) {
+        car.grounded = true;
+        car.velocity.0[2] = r.range(30.0, 70.0);
+        body.velocity.0[1] = r.range(5.0, 30.0);
+        s.vehicle_brake = F::ZERO;
+        pr.active = r.chance(0.1);
+        pr.armed = r.chance(0.5);
+    }
+    s.launch_timer = F(if r.chance(0.35) { 0.0 } else { r.range(0.0, 3.0) });
+    s.launch_start = F(r.range(1.0, 7.0));
+    s.launch_boost = F(r.range(1.0, 7.0));
+    m
+}
+
+/// Hook the preload's cue: log it, from the preload, on its fixed arguments.
+fn hook_cue(ee: &mut Ee, log: Shared<Vec<Call>>) {
+    ee.hooks.insert(CUE, Box::new(move |ee| {
+        assert_eq!(ee.r(31) as u32, CUE_FROM, "a cue from elsewhere");
+        let want = [ee.u32_at(CUE_GLOBAL), CAR + 0x674, 8, 14, ee.u32_at(CAR + 0xd20), 0];
+        let got = [4, 5, 6, 7, 8, 9].map(|k| ee.r(k) as u32);
+        assert_eq!(got, want, "the cue's arguments");
+        log.borrow_mut().push(Call::PreloadCue);
+    }));
+}
+
+/// The port's side with the pieces at `unhooked` answered by MX Unleashed's [`Pieces`] (and not
+/// logged, as the original's own code runs them unhooked), every other call by the [`Port`]; what
+/// each answered call found is seen.
+struct Unhooked<'a> {
+    pieces: Pieces<Port>,
+    unhooked: &'a [u32],
+    seen: Seen,
+}
+
+impl Steps for Unhooked<'_> {
+    fn call(&mut self, c: Call, car: &mut Car, body: &mut Body) {
+        let addr = match c {
+            Call::TravelCofg => TRAVEL_COFG,
+            Call::AntiSlide(_) => ANTI_SLIDE,
+            Call::Preload(_) => PRELOAD,
+            Call::Launch(_) => LAUNCH,
+            Call::Aero(_) => AERO,
+            _ => 0,
+        };
+        if !self.unhooked.contains(&addr) {
+            self.pieces.rest.call(c, car, body);
+            return;
+        }
+        let (k, s0) = (self.pieces.keys.clone(), self.pieces.state);
+        let riding = car.state == atv_car::RIDING;
+        let mut tags: Vec<&'static str> = Vec::new();
+        match c {
+            Call::TravelCofg => {
+                tags.push(if s0.human { "travel: a person's" } else { "travel: the AI's" });
+                tags.push(if s0.lean < 0.0 { "travel: forward" } else { "travel: back" });
+            }
+            Call::Aero(_) => {
+                if riding && car.velocity.z() > 0.0 && !k.wings.is_empty() {
+                    tags.push("aero: wings");
+                }
+                if riding && !car.grounded && !s0.touching && car.speed > 10.0 {
+                    tags.push("aero: air control");
+                    if s0.stick.abs() < f32::from_bits(0x3dcc_cccd) && car.up.y() > f32::from_bits(0x3eae_147b) {
+                        tags.push("aero: unroll");
+                    }
+                    if s0.brake != 0.0 || s0.brake_force != 0.0 {
+                        tags.push("aero: gyro");
+                    }
+                }
+            }
+            _ => {}
+        }
+        let (force, log) = (body.force, self.pieces.rest.log.len());
+        assert!(self.pieces.answer(c, car, body), "{c:?} unanswered");
+        let s = self.pieces.state;
+        let (p0, p) = (s0.preload, s.preload);
+        match c {
+            Call::AntiSlide(_) => tags.push(match (body.force != force, s0.vehicle_brake != 0.0 || s0.hand_brake != 0.0) {
+                (false, _) => "anti-slide: idle",
+                (true, false) => "anti-slide: holds",
+                (true, true) => "anti-slide: brakes",
+            }),
+            Call::Preload(_) if riding => {
+                tags.push(match (p0.active, p.active) {
+                    (true, true) => "preload: pushing",
+                    (true, false) => "preload: ran out",
+                    (false, true) if k.min_preload_time == k.max_preload_time => "preload: fired, degenerate",
+                    (false, true) => "preload: fired",
+                    (false, false) if !p.ready => "preload: not ready",
+                    (false, false) if !p0.armed && p.armed => "preload: armed",
+                    (false, false) if p.armed && p.timer != p0.timer => "preload: wound",
+                    (false, false) => "preload: ready, idle",
+                });
+                if self.pieces.rest.log.len() > log {
+                    tags.push("preload: cue");
+                } else if p0.cued && !p.cued {
+                    tags.push("preload: cue forgotten");
+                }
+            }
+            // Never wrecked: the Force body calls the preload only riding.
+            Call::Preload(_) => tags.push("preload: wrecked"),
+            Call::Launch(_) => tags.push(if s0.clutch == 1.0 {
+                "launch: clutch in"
+            } else if s.launch_timer == s0.launch_timer {
+                "launch: idle"
+            } else if s0.launch_timer == 0.0 && k.max_clutch_torque_scale_speed == 0.0 {
+                "launch: starts, degenerate"
+            } else if s0.launch_timer == 0.0 {
+                "launch: starts"
+            } else {
+                "launch: eases"
+            }),
+            _ => {}
+        }
+        for t in tags {
+            *self.seen.entry(t).or_insert(0) += 1;
+        }
+    }
+}
+
+/// Each piece unhooked alone, and all five, under the frame's oracle: the original's own code for
+/// the piece against [`Pieces`]'s port, every word and call equal; each of the piece's branches seen.
+fn pieces(seed: u64, unhooked: &[u32], prefixes: &[&str], want: usize) {
+    let Some((_, seen)) = run(seed, 3000, unhooked) else { return };
+    let mine: Vec<(&&str, &u32)> = seen.iter().filter(|(w, _)| prefixes.iter().any(|p| w.starts_with(p))).collect();
+    for &(what, &k) in &mine {
+        assert!(k >= 20, "{what} seen only {k} times");
+    }
+    assert_eq!(mine.len(), want, "a branch was never seen: {seen:?}");
+}
+
+#[test]
+fn travel_cofg_is_mx_unleasheds() {
+    pieces(0x0106_a001, &[TRAVEL_COFG], &["travel"], 4);
+}
+
+#[test]
+fn anti_slide_is_mx_unleasheds() {
+    pieces(0x0106_a002, &[ANTI_SLIDE], &["anti-slide"], 3);
+}
+
+#[test]
+fn preload_is_mx_unleasheds() {
+    pieces(0x0106_a003, &[PRELOAD], &["preload"], 10);
+}
+
+#[test]
+fn launch_is_mx_unleasheds() {
+    pieces(0x0106_a004, &[LAUNCH], &["launch"], 5);
+}
+
+#[test]
+fn aero_is_mx_unleasheds() {
+    pieces(0x0106_a005, &[AERO], &["aero"], 4);
+}
+
+#[test]
+fn all_five_pieces_are_mx_unleasheds() {
+    pieces(0x0106_a006, &[TRAVEL_COFG, ANTI_SLIDE, PRELOAD, LAUNCH, AERO], &["travel", "anti-slide", "preload", "launch", "aero"], 26);
+}
+
 /// **The car's frame is the original's**: SLUS-21104's world step over the buggy image's world, with
 /// every call of the car's three listeners hooked, against [`atv_car::frame`] with a [`Steps`] that
 /// plays the same script, over 3,000 generated states: every word of the car, its tires and its body
@@ -526,33 +983,52 @@ fn generate(r: &mut Rng, image_car: &Car, image_body: &Body, p: &Ptrs) -> (Car, 
 /// the comparison go red there.
 #[test]
 fn the_cars_frame_is_the_originals() {
-    let Some(pristine) = image() else { return };
-    let Some(mut ee) = image() else { return };
+    let Some((seen, _)) = run(0x0106_ca7f_0000_0001, 3000, &[]) else { return };
+    for (what, &k) in &seen {
+        assert!(k >= 30, "{what} seen only {k} times");
+    }
+    assert_eq!(seen.len(), 19, "a branch was never seen: {seen:?}");
+}
+
+type Seen = std::collections::BTreeMap<&'static str, u32>;
+
+/// The world step's frame, `cases` generated states from `seed`, with the calls at `unhooked` left to
+/// SLUS-21104's own code and the port's answered by MX Unleashed's [`Pieces`]: the listeners' branches
+/// seen, and the pieces'.
+fn run(seed: u64, cases: usize, unhooked: &[u32]) -> Option<(Seen, Seen)> {
+    let pristine = image()?;
+    let mut ee = image()?;
     let p = ptrs(&ee);
     let image_car = read_car(&ee, &p);
     let image_body = seed::body(&|a| ee.u32_at(a), p.body);
+    let image_mx = read_mx(&ee, &p);
     assert!(image_body.enabled, "the image's body is enabled");
     let log: Shared<Vec<Call>> = Rc::default();
     let script: Shared<Script> = Rc::default();
     hook(&mut ee, p, log.clone(), script.clone());
+    hook_cue(&mut ee, log.clone());
+    for a in unhooked {
+        assert!(ee.hooks.remove(a).is_some(), "{a:#x} was not hooked");
+    }
     let world = World { iterations: 1, rate: F(115.0) };
     let table = AcosTable::build();
-    let mut r = Rng(0x0106_ca7f_0000_0001);
-    let mut seen = std::collections::BTreeMap::<&str, u32>::new();
+    let mut r = Rng(seed);
+    let mut seen = Seen::new();
+    let mut pieces_seen = Seen::new();
     let mut see = |what: &'static str, yes: bool| {
         if yes {
             *seen.entry(what).or_insert(0) += 1;
         }
     };
-    let blocks: Vec<(u32, u32)> = [(CAR, 0x1500), (p.body, 0x230), (p.record + at::TIPPED, 4)]
+    let blocks: Vec<(u32, u32)> = [(CAR, 0x1500), (p.body, 0x230), (p.record + at::TIPPED, 4), (p.engine + mx::BOOST, 4)]
         .into_iter()
         .chain(p.tires.map(|t| (t, 0x200)))
         .collect();
-    const CASES: usize = 3000;
-    for case in 0..CASES {
-        let (car, body, dt) = generate(&mut r, &image_car, &image_body, &p);
+    for case in 0..cases {
+        let (mut car, mut body, dt) = generate(&mut r, &image_car, &image_body, &p);
+        let m = generate_mx(&mut r, &image_mx, &mut car, &mut body);
         let s = Script::new(&mut r);
-        let before = [car_words(&car, &p), seed::body_words(&body, p.body)].concat();
+        let before = [car_words(&car, &p), seed::body_words(&body, p.body), mx_words(&m, &p)].concat();
 
         // The original.
         poke(&mut ee, &before);
@@ -564,9 +1040,15 @@ fn the_cars_frame_is_the_originals() {
 
         // The port.
         let (mut pc, mut pb) = (car, body);
-        let mut port = Port { log: Vec::new(), script: s };
+        let port = Port { log: Vec::new(), script: s };
+        let mut port = Unhooked { pieces: Pieces { keys: m.keys(), state: m.state, rest: port }, unhooked, seen: Seen::new() };
         atv_car::frame(&world, &mut pc, &mut pb, dt, &table, &mut port);
-        let after = [car_words(&pc, &p), seed::body_words(&pb, p.body)].concat();
+        for (what, k) in std::mem::take(&mut port.seen) {
+            *pieces_seen.entry(what).or_insert(0) += k;
+        }
+        let pm = Mx { state: port.pieces.state, ..m };
+        let port = port.pieces.rest;
+        let after = [car_words(&pc, &p), seed::body_words(&pb, p.body), mx_words(&pm, &p)].concat();
 
         let bad: Vec<String> = after
             .iter()
@@ -627,11 +1109,8 @@ fn the_cars_frame_is_the_originals() {
             }
         }
     }
-    eprintln!("MD106: {CASES} frames, seen {seen:?}");
-    for (what, &k) in &seen {
-        assert!(k >= 30, "{what} seen only {k} times");
-    }
-    assert_eq!(seen.len(), 19, "a branch was never seen: {seen:?}");
+    eprintln!("MD106 (unhooked {unhooked:x?}): {cases} frames, seen {seen:?}, pieces {pieces_seen:?}");
+    Some((seen, pieces_seen))
 }
 
 fn s_any(car: &Car, f: impl Fn(&Tire) -> bool) -> bool {
