@@ -351,7 +351,63 @@ fn world_mxu_has_every_freeride_and_national_with_the_freerides_together() {
         assert!(said.contains(&format!("world ground: {name} built")), "{name}'s ground not built");
         assert!(radar.split(", ").any(|n| n == town), "{town} not among the radar's maps: {radar}");
     }
+    no_edge_anywhere(&said, &json, &mods);
     let _ = std::fs::remove_dir_all(&mods);
+}
+
+/// MD114: world_mxu has no edge to be shot off, the spawn map's included (user 2026-11-05: "mx world
+/// has a bugged shootoff when leaving spawn map, it shouldnt have any"). Gas rides traced from 450 ft
+/// inside each of the spawn map's four kept edges, heading out across it into the ground beyond, and
+/// from 150 ft short of each wrap seam over it (where an edged map of the world's size throws at once,
+/// inside the original's 150-ft margin): none is thrown, none starts the shootoff's warning (music
+/// fade, rumble), and each ends past the edge or seam it rode at. A wreck of the ground's own is not
+/// asked here; on these starts there is none (11-10).
+fn no_edge_anywhere(said: &str, json: &str, mods: &Path) {
+    // "world spawn: mxu_free07 at 9556.0,11855.0"
+    let spawn = after(said, "world spawn: ");
+    let (tile, at) = spawn.split_once(" at ").unwrap();
+    let at: Vec<f32> = at.split(',').map(|v| v.parse().unwrap()).collect();
+    // "world wraps: x every 21853 feet and z every 19828 feet, ..."
+    let wraps: Vec<f32> = after(said, "world wraps: x every ").split_whitespace().filter_map(|w| w.parse().ok()).collect();
+    let (width, depth) = (wraps[0], wraps[1]);
+    // The spawn map's kept rectangle in world feet: its `at`, and its `keep` in samples of its spacing.
+    let line = json.lines().find(|l| l.contains(&format!("\"tile\": \"{tile}\""))).unwrap_or_else(|| panic!("{tile} not in:\n{json}"));
+    let list = |key: &str| -> Vec<f32> {
+        let s = line.split(&format!("\"{key}\": [")).nth(1).unwrap().split(']').next().unwrap();
+        s.split(',').map(|v| v.trim().parse().unwrap()).collect()
+    };
+    let (origin, keep) = (list("at"), list("keep"));
+    let spacing: f32 = after(said, &format!("stitch: {tile}: ")).split(" at ").nth(1).unwrap().split(" ft").next().unwrap().parse().unwrap();
+    let [x0, z0, x1, z1] = [origin[0] + keep[0] * spacing, origin[1] + keep[1] * spacing, origin[0] + keep[2] * spacing, origin[1] + keep[3] * spacing];
+    assert!((x0..x1).contains(&at[0]) && (z0..z1).contains(&at[1]), "the spawn {at:?} is off {tile}'s kept [{x0}, {z0}, {x1}, {z1}]");
+    // 450 ft clears the bank 150 ft inside the +z edge, where a bike on the gas stalls.
+    const IN: f32 = 450.0;
+    const SEAM: f32 = 150.0;
+    // Where each ride starts (x, z, heading in degrees: 0 is +z, 90 is +x) and how it must end.
+    type Past = Box<dyn Fn(f32, f32) -> bool>;
+    let rides: [(&str, [f32; 3], Past); 6] = [
+        ("out of the spawn map's +z edge", [at[0], z1 - IN, 0.0], Box::new(move |_, z| z > z1)),
+        ("out of the spawn map's -z edge", [at[0], z0 + IN, 180.0], Box::new(move |_, z| z < z0)),
+        ("out of the spawn map's +x edge", [x1 - IN, at[1], 90.0], Box::new(move |x, _| x > x1)),
+        ("out of the spawn map's -x edge", [x0 + IN, at[1], 270.0], Box::new(move |x, _| x < x0)),
+        // Over a seam the rider comes in at the near side: the ride ends a little past 0.
+        ("over the x seam", [width - SEAM, at[1], 90.0], Box::new(move |x, _| x < width / 2.0)),
+        ("over the z seam", [at[0], depth - SEAM, 0.0], Box::new(move |_, z| z < depth / 2.0)),
+    ];
+    for (what, [x, z, deg], past) in rides {
+        let start = format!("{x},{z},{deg}");
+        let said = shell_with(mods, "world_mxu", &["--trace", "450", "--trace-gas", "--trace-feel", "--trace-at", &start]);
+        let rows: Vec<Vec<&str>> =
+            said.lines().map(|l| l.split_whitespace().collect::<Vec<_>>()).filter(|w| w.len() == 12 && w[0].parse::<usize>().is_ok()).collect();
+        assert!(!rows.is_empty(), "{what}: no trace rows:\n{said}");
+        for l in said.lines().filter(|l| l.starts_with("thrown: ") || l.starts_with("shootoff warning: ")) {
+            panic!("{what} (from {start}): {l}");
+        }
+        let last = rows.last().unwrap();
+        let (ex, ez): (f32, f32) = (last[5].parse().unwrap(), last[7].parse().unwrap());
+        println!("world_mxu {what}: from {start} to {ex:.0},{ez:.0}, {} wreck rows", rows.iter().filter(|w| w[11] == "1").count());
+        assert!(past(ex, ez), "{what}: the ride from {start} ended at {ex},{ez}, short of it");
+    }
 }
 
 /// P253: MX Unleashed: every national is the 22 national tracks, ridden from nat01's archives.
