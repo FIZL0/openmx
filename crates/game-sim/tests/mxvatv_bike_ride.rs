@@ -8407,15 +8407,29 @@ impl Collides for RecordsInRam<'_, '_, '_> {
         self.inner.chassis_velocity()
     }
     fn sweep(&mut self, from: Vf, to: Vf, nearby: bool) -> Option<Swept> {
-        // F46c: the nearby sweep Rust's; the global one (never on C15) still the original's.
-        if !(nearby && in_rust("record sweep")) {
+        // F46c: the nearby sweep Rust's; F51: its pairs and the global one (never on C15) too.
+        if !in_rust("record sweep") {
             *self.answered.entry("> record sweep".into()).or_default() += 1;
             return self.inner.sweep(from, to, nearby);
         }
         *self.answered.entry("record sweep".into()).or_default() += 1;
         let (at, probe, list) = (self.inner.at, self.inner.word(0x204), self.inner.word(0xfc));
-        assert!(!sweep_in_ram(self.inner.ee, at, probe, list, from, to), "the record's sweep hit: its pair test is not Rust's");
-        None
+        let hit = if nearby {
+            sweep_in_ram(self.inner.ee, at, probe, list, from, to, self.answered)
+        } else {
+            sweep_set_in_ram(self.inner.ee, at, probe, from, to);
+            sweep_all_in_ram(self.inner.ee, probe, 0, self.answered).expect("a listener searched the database inside the record's sweep: not followed");
+            self.inner.ee.u8_at(probe + 0x126) & ws::flags::HIT != 0
+        };
+        if !hit {
+            return None;
+        }
+        let ee = &*self.inner.ee;
+        let hits = ee.u32_at(probe + 0x7c);
+        let obj = ee.u32_at(ee.u32_at(hits + 0x9c));
+        let (normal, point) = (vf_at(ee, ee.u32_at(hits + 0x94)), vf_at(ee, ee.u32_at(hits + 0x98)));
+        let struck = if obj == 0 { Struck::default() } else { self.inner.struck(obj) };
+        Some(Swept { normal, point, struck })
     }
     fn place_part(&mut self) {
         *self.answered.entry("> record place_part".into()).or_default() += 1;
@@ -12705,9 +12719,28 @@ impl GatherInRam {
     /// the trees' nodes, the lists' slots, every other collidable field — must not have changed.
     /// Answers how the tree's query went: `fresh`, `restarted`, or `off` the tree.
     fn write(&self, ee: &mut Ee, list: u32, was: (&[ws::Collidable], &bp::Broad), now: (&[ws::Collidable], &bp::Broad, &atv_world::Nearby), begun: &bp::Broad) -> &'static str {
+        let (no, nb, nl) = now;
+        let how = self.write_query(ee, was, (no, nb), begun);
+        let arr = ee.u32_at(list);
+        for (i, c) in nl.found.iter().enumerate() {
+            ee.set_u32(arr + 8 * i as u32, self.items[c.object]);
+            ee.set_u32(arr + 8 * i as u32 + 4, c.distance.0.to_bits());
+        }
+        ee.set_u32(list + 4, nl.found.len() as u32);
+        for (i, w) in nl.centre.iter().enumerate() {
+            ee.set_u32(list + 0x10 + 4 * i as u32, w.0.to_bits());
+        }
+        ee.set_u32(list + 0x20, nl.bound.0.to_bits());
+        ee.set_u32(list + 0x30, u32::from(nl.built));
+        how
+    }
+
+    /// [`GatherInRam::write`] without the nearby list: a query's outcome written back (F51's global
+    /// search runs two queries and fills no list).
+    fn write_query(&self, ee: &mut Ee, was: (&[ws::Collidable], &bp::Broad), now: (&[ws::Collidable], &bp::Broad), begun: &bp::Broad) -> &'static str {
         let mut how = "off";
         let (wo, wb) = was;
-        let (no, nb, nl) = now;
+        let (no, nb) = now;
         assert_eq!((&wb.spaces, &wb.tables, wb.global), (&nb.spaces, &nb.tables, nb.global), "the spaces changed");
         for (k, (a, b)) in wo.iter().zip(no).enumerate() {
             let e = self.items[k];
@@ -12741,6 +12774,7 @@ impl GatherInRam {
                     if was_open && fresh {
                         query_pool::reset(ee, pool);
                     }
+                    let mut taken = vec![];
                     if fresh {
                         let mut prev = 0;
                         for &n in z.list.iter().rev() {
@@ -12748,13 +12782,17 @@ impl GatherInRam {
                             ee.set_u32(at, prev);
                             ee.set_u32(at + 4, self.nodes[s][n]);
                             prev = at;
+                            taken.insert(0, at);
                         }
                     }
-                    if was_open || fresh {
+                    // A list the walk left open (F51's search ends so) keeps the nodes just taken.
+                    let left_open = (fresh || restart || !stamped) && !y.list.is_empty() && y.list == z.list;
+                    if (was_open || fresh) && !left_open {
                         query_pool::reset(ee, pool);
                     }
-                    assert!(y.list.is_empty() || y.list == x.list, "tree {a:#x}'s query left a list open");
-                    let listed = |i: Option<usize>| i.map_or(0, |i| self.listed[s][i]);
+                    assert!(y.list.is_empty() || y.list == x.list || left_open, "tree {a:#x}'s query left a list open");
+                    let open = if left_open && fresh { &taken } else { &self.listed[s] };
+                    let listed = |i: Option<usize>| i.map_or(0, |i| open[i]);
                     ee.set_u32(a + 0xc, y.flags);
                     ee.set_u32(a + 0x890, y.busy);
                     for (i, c) in y.cells.iter().enumerate() {
@@ -12777,17 +12815,6 @@ impl GatherInRam {
                 _ => panic!("structure {a:#x} changed its kind"),
             }
         }
-        let arr = ee.u32_at(list);
-        for (i, c) in nl.found.iter().enumerate() {
-            ee.set_u32(arr + 8 * i as u32, self.items[c.object]);
-            ee.set_u32(arr + 8 * i as u32 + 4, c.distance.0.to_bits());
-        }
-        ee.set_u32(list + 4, nl.found.len() as u32);
-        for (i, w) in nl.centre.iter().enumerate() {
-            ee.set_u32(list + 0x10 + 4 * i as u32, w.0.to_bits());
-        }
-        ee.set_u32(list + 0x20, nl.bound.0.to_bits());
-        ee.set_u32(list + 0x30, u32::from(nl.built));
         how
     }
 }
@@ -12866,6 +12893,12 @@ impl ws::Narrow for Unported {
     }
 }
 
+impl game_sim::atv_sweep::Outside for Unported {
+    fn target(&mut self, other: usize, _: &mut dyn FnMut(Option<&game_sim::sweep_probe::Target>) -> bool) -> bool {
+        panic!("the sweep paired item {other}")
+    }
+}
+
 /// The nearby search's world round `probe` (a collidable): the probe as item 0, the nearby list at
 /// `list`'s candidates, and the collidables their object lists name, with the filter's fields; and
 /// the candidates by item. Answers the entries by item too.
@@ -12898,12 +12931,124 @@ fn sweep_world_in_ram(ee: &Ee, probe: u32, list: u32) -> (Vec<u32>, Vec<ws::Coll
 }
 
 /// **F46c — the record's sweep in Rust**: the segment from `from` to `to` set on the record `rec`'s
-/// sweep probe `probe` ([`atv_sweep::set`]), the probe placed (its box, and its database entry
-/// moved, [`spatial_move_in_ram`]), and searched over the nearby list `list`
-/// ([`atv_search::search`] with [`atv_sweep::Sweep`]'s clear); everything written back. Answers the
-/// hit bit.
-fn sweep_in_ram(ee: &mut Ee, rec: u32, probe: u32, list: u32, from: Vf, to: Vf) -> bool {
+/// sweep probe `probe` ([`sweep_set_in_ram`]) and searched over the nearby list `list`
+/// ([`atv_search::search`] with [`atv_sweep::Sweep`]: since F51 its pairs too, over
+/// [`SweepWorldInRam`]); everything written back. Answers the hit bit.
+fn sweep_in_ram(ee: &mut Ee, rec: u32, probe: u32, list: u32, from: Vf, to: Vf, kinds: &mut BTreeMap<String, u32>) -> bool {
     use game_sim::atv_search;
+    use game_sim::atv_sweep;
+    let segments = sweep_set_in_ram(ee, rec, probe, from, to);
+    // The search.
+    assert_eq!(ee.u32_at(list + 0x40), 0, "the nearby list has a grid: the sweep would prepare it");
+    let (mut items, mut objects, found) = sweep_world_in_ram(ee, probe, list);
+    // The plant groups' parts, as collidables of their own.
+    for k in 0..objects.len() {
+        if objects[k].class != ws::Class::Group {
+            continue;
+        }
+        for p in PartWorldInRam::species_parts(ee, items[k]) {
+            if p != 0 && !items.contains(&(p + 0x18)) {
+                items.push(p + 0x18);
+                objects.push(ws::Collidable { class: ws::Class::from_byte(ee.u8_at(p + 0x18 + 2)), flags: ee.u8_at(p + 0x126), ..Default::default() });
+            }
+        }
+    }
+    let retired: Vec<bool> = items.iter().map(|&e| ee.u32_at(e - 0x18) == 1).collect();
+    let count = segments.len();
+    let r = ee.u32_at(probe + 0x7c);
+    let (answer, more) = sweep_answer_in_ram(ee, r, count, &mut items);
+    let mut port = SweepProbe { segments: segments.clone(), answer, ..SweepProbe::default() };
+    sweep_local_in_ram(ee, probe, count, &mut port);
+    let mut stood = port.clone();
+    sweep_probe_clear(&mut stood);
+    let mut world = PartWorldInRam { ee: &mut *ee, items, mesh: None, kinds: BTreeMap::new(), listeners: vec![], callbacks: vec![] };
+    for (k, o) in objects.iter_mut().enumerate() {
+        if o.class == ws::Class::Object {
+            let e = world.items[k];
+            world.hear(o, e - 0x18);
+        }
+    }
+    let heard: Vec<ws::Collidable> = objects.clone();
+    let mut outside = SweepWorldInRam { world: &mut world, centre: stood.world.centre, radius: stood.world.radius, pairs: 0, descriptor: None };
+    let mut sweep = atv_sweep::Sweep::new(segments, more, &mut outside);
+    sweep.probe = port;
+    let hit = atv_search::search(&mut objects, 0, &found, &|o: usize| retired.get(o).copied().unwrap_or(false), &mut sweep);
+    let (port, more) = (sweep.probe, sweep.more);
+    let (pairs, descriptor) = (outside.pairs, outside.descriptor);
+    for (k, v) in std::mem::take(&mut world.kinds) {
+        *kinds.entry(k).or_default() += v;
+    }
+    let items = world.items;
+    for (k, (a, b)) in heard.iter().zip(&objects).enumerate() {
+        assert_eq!(ws::Collidable { flags: b.flags, radius: b.radius, group: b.group, ..a.clone() }, *b, "item {k} changed beyond its flags and reach");
+        if a.flags != b.flags {
+            assert_eq!(a.class, ws::Class::Object, "item {k}'s flags");
+            set_u8(ee, items[k] - 0x18 + 0x126, b.flags);
+        }
+        if let Some(g) = b.group {
+            ee.set_u32(items[k] - 0x18 + 0x88, items[g]);
+        }
+    }
+    // The clear's world form and the record's reset.
+    let w = &port.world;
+    let [lengths, starts, dirs] = [0x144, 0x148, 0x14c].map(|o| ee.u32_at(probe + o));
+    for (i, p) in w.probes[..w.count].iter().enumerate() {
+        let i = i as u32;
+        ee.set_u32(lengths + 4 * i, p.length.0.to_bits());
+        set_vf(ee, starts + 0x10 * i, p.origin);
+        set_vf(ee, dirs + 0x10 * i, p.dir);
+    }
+    for o in [0x160, 0x50] {
+        set_vf(ee, probe + o, w.centre);
+    }
+    assert_eq!(objects[0].radius, w.radius);
+    for o in [0x170, 0x70] {
+        ee.set_u32(probe + o, w.radius.0.to_bits());
+    }
+    for a in SWEEP_ZEROED {
+        ee.set_u32(a, 0);
+    }
+    ee.set_u32(SWEEP_RECORD_AT, r);
+    sweep_pairs_write(ee, probe, count, &port, pairs, descriptor);
+    write_sweep_answer(ee, r, count, &items, &port.answer, &more);
+    hit
+}
+
+/// The probe's local forms (each segment's origin and direction in the last paired object's
+/// frame, and the centre) into `port`, as RAM has them.
+fn sweep_local_in_ram(ee: &Ee, probe: u32, count: usize, port: &mut SweepProbe) {
+    use f51_probe as pa;
+    assert_eq!(ee.u32_at(probe + pa::SMOOTH), 0, "the probe asks for smoothed normals: not ported");
+    let (locals, ldirs) = (ee.u32_at(probe + pa::LOCAL_ORIGINS), ee.u32_at(probe + pa::LOCAL_DIRS));
+    for i in 0..count {
+        port.local.probes[i].origin = vf_at(ee, locals + 0x10 * i as u32);
+        port.local.probes[i].dir = vf_at(ee, ldirs + 0x10 * i as u32);
+    }
+    port.local.centre = vf_at(ee, probe + pa::LOCAL_CENTRE);
+}
+
+/// What the pairs write beyond the answer, where any ran: the smoothing word noted in its global,
+/// the local forms, and the last swept mesh's descriptor in its global.
+fn sweep_pairs_write(ee: &mut Ee, probe: u32, count: usize, port: &SweepProbe, pairs: u32, descriptor: Option<u32>) {
+    use f51_probe as pa;
+    if pairs > 0 {
+        let (locals, ldirs) = (ee.u32_at(probe + pa::LOCAL_ORIGINS), ee.u32_at(probe + pa::LOCAL_DIRS));
+        ee.set_u32(SWEEP_SMOOTH_AT, ee.u32_at(probe + pa::SMOOTH));
+        for i in 0..count as u32 {
+            set_vf(ee, locals + 0x10 * i, port.local.probes[i as usize].origin);
+            set_vf(ee, ldirs + 0x10 * i, port.local.probes[i as usize].dir);
+        }
+        set_vf(ee, probe + pa::LOCAL_CENTRE, port.local.centre);
+    }
+    if let Some(d) = descriptor {
+        ee.set_u32(SWEEP_DESCRIPTOR_AT, d);
+    }
+}
+
+/// F46c's set and place in Rust: the segment from `from` to `to` (the record `rec`'s own, written at
+/// `+0xc0`) set on its sweep probe `probe` ([`atv_sweep::set`]), and the probe placed (its box, and
+/// its database entry moved, [`spatial_move_in_ram`]). Answers the segments.
+fn sweep_set_in_ram(ee: &mut Ee, rec: u32, probe: u32, from: Vf, to: Vf) -> Vec<game_sim::sweep_probe::Segment> {
     use game_sim::atv_sweep;
     set_vf(ee, rec + 0xc0, from);
     set_vf(ee, rec + 0xd0, to);
@@ -12930,48 +13075,7 @@ fn sweep_in_ram(ee: &mut Ee, rec: u32, probe: u32, list: u32, from: Vf, to: Vf) 
         ee.set_u32(probe + 0x70, b.reach.0.to_bits());
         spatial_move_in_ram(ee, probe + 0x18, b.centre, b.half, b.reach);
     }
-    // The search.
-    assert_eq!(ee.u32_at(list + 0x40), 0, "the nearby list has a grid: the sweep would prepare it");
-    let (items, mut objects, found) = sweep_world_in_ram(ee, probe, list);
-    let was = objects.clone();
-    let retired = |o: usize| ee.u32_at(items[o] - 0x18) == 1;
-    let mut rest = Unported;
-    let mut sweep = atv_sweep::Sweep::new(segments, &mut rest);
-    let hit = atv_search::search(&mut objects, 0, &found, &retired, &mut sweep);
-    for (k, (a, b)) in was.iter().zip(&objects).enumerate() {
-        assert_eq!(ws::Collidable { flags: b.flags, radius: b.radius, ..a.clone() }, *b, "item {k} changed beyond its flags and reach");
-        if a.flags != b.flags {
-            assert_eq!(a.class, ws::Class::Object, "item {k}'s flags");
-            set_u8(ee, items[k] - 0x18 + 0x126, b.flags);
-        }
-    }
-    // The clear's world form and the record's reset.
-    let w = &sweep.probe.world;
-    let [lengths, starts, dirs] = [0x144, 0x148, 0x14c].map(|o| ee.u32_at(probe + o));
-    for (i, p) in w.probes[..w.count].iter().enumerate() {
-        let i = i as u32;
-        ee.set_u32(lengths + 4 * i, p.length.0.to_bits());
-        set_vf(ee, starts + 0x10 * i, p.origin);
-        set_vf(ee, dirs + 0x10 * i, p.dir);
-    }
-    for o in [0x160, 0x50] {
-        set_vf(ee, probe + o, w.centre);
-    }
-    assert_eq!(objects[0].radius, w.radius);
-    for o in [0x170, 0x70] {
-        ee.set_u32(probe + o, w.radius.0.to_bits());
-    }
-    for a in SWEEP_ZEROED {
-        ee.set_u32(a, 0);
-    }
-    let r = ee.u32_at(probe + 0x7c);
-    ee.set_u32(SWEEP_RECORD_AT, r);
-    let answer = &sweep.probe.answer;
-    set_vf(ee, r, answer.head[0]);
-    set_vf(ee, r + 0x10, answer.head[1]);
-    ee.set_u32(r + 0xb4, answer.record.nearest.0.to_bits());
-    ee.set_u32(r + 0x8c, answer.record.hits as u32);
-    hit
+    segments
 }
 
 /// A ray probe's or a mesh's tree as it sits in RAM, 36 bytes a node (the key, the two child words
@@ -15978,4 +16082,1149 @@ fn leaf_off(off: &[String]) -> Vec<String> {
         })
         .cloned()
         .collect()
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// F51: the sweep probe's paths C15 never takes — its pair test (meshes, hierarchies, the kinds it
+// strikes nothing of) with segments on nodes, and the global search — each against the original
+// (research/oracle.txt `# F51`).
+// ---------------------------------------------------------------------------------------------
+
+use game_sim::atv_sweep;
+use game_sim::collide::{MAX_PROBES, MeshRef};
+use game_sim::sweep_probe::{Placed, Shape, SweepProbe, Target, Transform};
+
+/// The sweep probe's set (its points and nodes), clear (vt `+0xb0`) and pair (vt `+0xb4`).
+const SWEEP_SET: u32 = PROBE_SET;
+const SWEEP_CLEAR: u32 = 0x001b_95f0;
+const SWEEP_PAIR: u32 = 0x001b_9a60;
+/// The run of RAM the oracles' arrays, mesh copies and hierarchies go in ([`F47_AREA`]'s run).
+const F51_AREA: u32 = F47_AREA;
+const F51_AREA_LEN: u32 = 0x10000;
+const F51_CASES: usize = 10_000;
+
+/// A collidable's fields as the pair reads them.
+mod f51_at {
+    pub const NEARBY: u32 = 0x45;
+    pub const CENTRE: u32 = 0x50;
+    pub const RADIUS: u32 = 0x70;
+    pub const KIND: u32 = 0x78;
+    pub const FLAGS: u32 = 0x126;
+    pub const TRANSFORM: u32 = 0x130;
+    pub const PARTS: u32 = 0x210;
+    pub const PART_LIST: u32 = 0x224;
+    pub const VERTICES: u32 = 0x230;
+    pub const PACKED: u32 = 0x238;
+    pub const NODES: u32 = 0x244;
+    pub const TRIANGLES: u32 = 0x248;
+    /// How much of a mesh collidable a copy takes.
+    pub const MESH_LEN: u32 = 0x250;
+}
+
+/// The sweep probe's own fields (MX Unleashed's moved `+0x10`).
+mod f51_probe {
+    pub const RECORD: u32 = 0x7c;
+    pub const COUNT: u32 = 0x130;
+    pub const NODES: u32 = 0x134;
+    pub const ENDS: u32 = 0x138;
+    pub const LOCAL_ORIGINS: u32 = 0x13c;
+    pub const LOCAL_DIRS: u32 = 0x140;
+    pub const LENGTHS: u32 = 0x144;
+    pub const ORIGINS: u32 = 0x148;
+    pub const DIRS: u32 = 0x14c;
+    pub const LOCAL_CENTRE: u32 = 0x150;
+    pub const CENTRE: u32 = 0x160;
+    pub const RADIUS: u32 = 0x170;
+    pub const SMOOTH: u32 = 0x174;
+}
+
+/// The record's fields as the sweep probe uses them.
+mod f51_rec {
+    pub const NORMAL: u32 = 0x20;
+    pub const POINT: u32 = 0x30;
+    pub const PUSH: u32 = 0x40;
+    pub const PART: u32 = 0x84;
+    pub const HITS: u32 = 0x8c;
+    pub const NORMALS: u32 = 0x94;
+    pub const POINTS: u32 = 0x98;
+    pub const STRUCK: u32 = 0x9c;
+    pub const OWNERS: u32 = 0xa0;
+    pub const FLAGS: u32 = 0xa4;
+    pub const FRACTIONS: u32 = 0xa8;
+    pub const WORDS: u32 = 0xac;
+    pub const NEAREST: u32 = 0xb4;
+}
+
+/// A mesh collidable's mesh as the sweep reads it: everything reachable from node 0, the triangles'
+/// three vertex shorts, and the vertices wide or packed.
+struct SweptMesh {
+    nodes: Vec<track::Node>,
+    triangles: Vec<track::Triangle>,
+    vertices: track::Points,
+}
+
+impl SweptMesh {
+    fn read(ee: &Ee, c: u32) -> SweptMesh {
+        use f51_at as at;
+        let (nodes_at, tris_at) = (ee.u32_at(c + at::NODES), ee.u32_at(c + at::TRIANGLES));
+        let node = |i: u32| {
+            let a = nodes_at + 0x24 * i;
+            let v3 = |o: u32| [0, 4, 8].map(|k| word_f(ee, a + o + k));
+            track::Node { volume: word_f(ee, a + 4), centre: v3(0xc), half_extent: v3(0x18), children: [ee.u16_at(a + 8), ee.u16_at(a + 0xa)] }
+        };
+        let (mut n_nodes, mut n_tris) = (1u32, 0u32);
+        let mut todo = vec![0u32];
+        let mut seen = std::collections::BTreeSet::new();
+        while let Some(i) = todo.pop() {
+            if !seen.insert(i) {
+                continue;
+            }
+            let n = node(i);
+            for c in 0..2 {
+                match n.child(c) {
+                    track::Child::Node(j) => {
+                        n_nodes = n_nodes.max(u32::from(j) + 1);
+                        todo.push(u32::from(j));
+                    }
+                    track::Child::Leaf(t) => n_tris = n_tris.max(u32::from(t) + 1),
+                }
+            }
+        }
+        let nodes = (0..n_nodes).map(node).collect();
+        let triangles: Vec<track::Triangle> = (0..n_tris)
+            .map(|i| track::Triangle { distance: F::ZERO, normal: [F::ZERO; 3], vertices: [0, 2, 4].map(|k| ee.u16_at(tris_at + 0x14 * i + k)) })
+            .collect();
+        let corners = triangles.iter().flat_map(|t| t.vertices).max().map_or(0, |m| u32::from(m) + 1);
+        let va = ee.u32_at(c + at::VERTICES);
+        let vertices = if ee.u32_at(c + at::PACKED) != 0 {
+            track::Points::Packed((0..corners).map(|i| [0, 2, 4].map(|k| ee.u16_at(va + 6 * i + k) as i16)).collect())
+        } else {
+            track::Points::Wide((0..corners).map(|i| [0, 4, 8].map(|k| word_f(ee, va + 12 * i + k))).collect())
+        };
+        SweptMesh { nodes, triangles, vertices }
+    }
+
+    fn mesh(&self) -> MeshRef<'_> {
+        MeshRef { nodes: &self.nodes, triangles: &self.triangles, vertices: &self.vertices }
+    }
+}
+
+fn f51_transform(ee: &Ee, c: u32) -> Transform {
+    [0, 1, 2, 3].map(|k| vf_at(ee, c + f51_at::TRANSFORM + 0x10 * k))
+}
+
+/// A world point through a transform in host arithmetic: only for aiming segments and placing copies.
+#[allow(clippy::float_arithmetic)]
+fn f51_place(m: &Transform, p: [f32; 3]) -> [f32; 3] {
+    std::array::from_fn(|k| m[3].0[k] + m[0].0[k] * p[0] + m[1].0[k] * p[1] + m[2].0[k] * p[2])
+}
+
+/// The world the pair oracle pairs against, in RAM: every object of the probe's database world
+/// (nat05's 259 meshes, its plants and probes), copies of some meshes turned and moved, and
+/// hierarchies of two or three such copies each (nat05 has none of its own). Each hierarchy's parts
+/// stand just before it in [`SweepScene::objects`].
+struct SweepScene {
+    probe: u32,
+    rec: u32,
+    objects: Vec<u32>,
+    meshes: Vec<Option<SweptMesh>>,
+    /// Per object the meshes it is swept through: a mesh its own, a hierarchy its parts.
+    parts: Vec<Vec<usize>>,
+    /// The objects with triangles to aim at.
+    aims: Vec<usize>,
+    arrays: SweepArrays,
+}
+
+/// Where the probe's and the record's arrays are moved to (the probe's own hold one segment),
+/// sixteen segments each; and the set's two arguments.
+struct SweepArrays {
+    points: u32,
+    set_nodes: u32,
+    node_mats: u32,
+    node_ptrs: u32,
+    ends: u32,
+    local_origins: u32,
+    local_dirs: u32,
+    lengths: u32,
+    origins: u32,
+    dirs: u32,
+    normals: u32,
+    rpoints: u32,
+    struck: u32,
+    owners: u32,
+    flags: u32,
+    fractions: u32,
+    words: u32,
+}
+
+/// A copy of mesh collidable `from` at `c`, sharing its tree, turned by `q` round its own
+/// translation and moved by `by`; its sphere moved with it and grown a little.
+#[allow(clippy::float_arithmetic)]
+fn f51_turned_copy(ee: &mut Ee, from: u32, c: u32, q: Vf, by: [f32; 3], w_junk: [f32; 3]) {
+    use f51_at as at;
+    for o in (0..at::MESH_LEN).step_by(4) {
+        ee.set_u32(c + o, ee.u32_at(from + o));
+    }
+    let old = f51_transform(ee, from);
+    let centre = vf_at(ee, from + at::CENTRE);
+    // The sphere's centre in the mesh's space (the rows are a rotation).
+    let rel: [f32; 3] = std::array::from_fn(|k| centre.0[k] - old[3].0[k]);
+    let local: [f32; 3] = std::array::from_fn(|r| (0..3).map(|k| rel[k] * old[r].0[k]).sum());
+    let [x, y, z, w] = q.0;
+    let rows = [
+        [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y + z * w), 2.0 * (x * z - y * w)],
+        [2.0 * (x * y - z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z + x * w)],
+        [2.0 * (x * z + y * w), 2.0 * (y * z - x * w), 1.0 - 2.0 * (x * x + y * y)],
+    ];
+    let mut m = old;
+    for r in 0..3 {
+        m[r] = Vf::new(rows[r][0], rows[r][1], rows[r][2], w_junk[r]);
+    }
+    m[3] = Vf::new(old[3].0[0] + by[0], old[3].0[1] + by[1], old[3].0[2] + by[2], old[3].0[3]);
+    for r in 0..4 {
+        set_vf(ee, c + at::TRANSFORM + 0x10 * r as u32, m[r]);
+    }
+    let moved = f51_place(&m, local);
+    set_vf(ee, c + at::CENTRE, Vf::new(moved[0], moved[1], moved[2], centre.w()));
+    let r = word_f(ee, from + at::RADIUS).0;
+    ee.set_u32(c + at::RADIUS, (r * 1.01 + 0.05).to_bits());
+}
+
+#[allow(clippy::float_arithmetic)]
+fn sweep_scene(ee: &mut Ee, g: &mut Gen) -> SweepScene {
+    use f51_at as at;
+    for a in (F51_AREA..F51_AREA + F51_AREA_LEN).step_by(4) {
+        assert_eq!(ee.u32_at(a), 0, "{a:#x} of the oracles' run is not free");
+    }
+    let probe = ee.u32_at(ee.u32_at(BIKE + seed::RECORD) + 0x204);
+    assert_eq!(ee.u32_at(probe + at::KIND), 3, "the record's sweep is not a sweep probe");
+    let rec = ee.u32_at(probe + f51_probe::RECORD);
+    let (m, world, _) = GatherInRam::read(ee, probe);
+    let mut objects: Vec<u32> =
+        (1..world.len()).filter(|&k| world[k].class == ws::Class::Object).map(|k| m.items[k] - 0x18).filter(|&c| c != probe).collect();
+    let mut next = F51_AREA;
+    let mut take = |n: u32| {
+        let a = next;
+        next += (n + 0xf) & !0xf;
+        assert!(next <= F51_AREA + F51_AREA_LEN, "the oracles' run is full");
+        a
+    };
+    let p = MAX_PROBES as u32;
+    let arrays = SweepArrays {
+        points: take(0x20 * p),
+        set_nodes: take(8 * p),
+        node_mats: take(0x80 * p),
+        node_ptrs: take(8 * p),
+        ends: take(0x20 * p),
+        local_origins: take(0x10 * p),
+        local_dirs: take(0x10 * p),
+        lengths: take(4 * p),
+        origins: take(0x10 * p),
+        dirs: take(0x10 * p),
+        normals: take(0x10 * p),
+        rpoints: take(0x10 * p),
+        struck: take(4 * p),
+        owners: take(4 * p),
+        flags: take(4 * p),
+        fractions: take(4 * p),
+        words: take(4 * p),
+    };
+    let solid: Vec<u32> = objects.iter().copied().filter(|&c| ee.u32_at(c + at::KIND) == 0 && ee.u32_at(c + at::TRIANGLES) != 0).collect();
+    let mut parts: Vec<Vec<usize>> = Vec::new();
+    for k in 0..objects.len() {
+        parts.push(if ee.u32_at(objects[k] + at::KIND) == 0 { vec![k] } else { vec![] });
+    }
+    let copy = |ee: &mut Ee, g: &mut Gen, take: &mut dyn FnMut(u32) -> u32, from: u32| {
+        let c = take(at::MESH_LEN);
+        let w = [0; 3].map(|_| if g.one_in(4) { g.f(-1.0, 1.0) } else { 0.0 });
+        let by = [0; 3].map(|_| g.f(-3.0, 3.0));
+        f51_turned_copy(ee, from, c, g.unit_quaternion(), by, w);
+        c
+    };
+    // Turned and moved copies on their own.
+    for _ in 0..12 {
+        let from = solid[(g.bits() as usize) % solid.len()];
+        let c = copy(ee, g, &mut take, from);
+        parts.push(vec![objects.len()]);
+        objects.push(c);
+    }
+    // Hierarchies: a mesh and its one or two nearest, each copied (turned and moved a little, or
+    // standing where it stood), the parts listed; the sphere round all of them.
+    for h in 0..10 {
+        let first = solid[(g.bits() as usize) % solid.len()];
+        let c0 = vf_at(ee, first + at::CENTRE);
+        let mut by: Vec<(f32, u32)> = solid
+            .iter()
+            .filter(|&&c| c != first)
+            .map(|&c| {
+                let d = vf_at(ee, c + at::CENTRE);
+                ((0..3).map(|i| (d.0[i] - c0.0[i]).powi(2)).sum::<f32>(), c)
+            })
+            .collect();
+        by.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let n = 2 + (g.bits() % 2) as usize;
+        let froms: Vec<u32> = std::iter::once(first).chain(by.iter().take(n - 1).map(|&(_, c)| c)).collect();
+        let list_at = take(4 * n as u32);
+        let mut mine = Vec::new();
+        let mut reach = 0.0f32;
+        for (j, &from) in froms.iter().enumerate() {
+            let c = if h % 3 == 0 {
+                let c = take(at::MESH_LEN);
+                f51_turned_copy(ee, from, c, Vf::new(0.0, 0.0, 0.0, 1.0), [0.0; 3], [0.0; 3]);
+                for r in 0..3 {
+                    set_vf(ee, c + at::TRANSFORM + 0x10 * r, vf_at(ee, from + at::TRANSFORM + 0x10 * r));
+                }
+                c
+            } else {
+                copy(ee, g, &mut take, from)
+            };
+            ee.set_u32(list_at + 4 * j as u32, c);
+            let d = vf_at(ee, c + at::CENTRE);
+            let far = (0..3).map(|i| (d.0[i] - c0.0[i]).powi(2)).sum::<f32>().sqrt() + word_f(ee, c + at::RADIUS).0;
+            reach = reach.max(far);
+            mine.push(objects.len());
+            parts.push(vec![objects.len()]);
+            objects.push(c);
+        }
+        let hc = take(0x230);
+        set_u8(ee, hc + at::NEARBY, 1);
+        set_vf(ee, hc + at::CENTRE, c0);
+        ee.set_u32(hc + at::RADIUS, (reach * 1.01 + 0.05).to_bits());
+        ee.set_u32(hc + at::KIND, 1);
+        ee.set_u32(hc + at::PARTS, n as u32);
+        ee.set_u32(hc + at::PART_LIST, list_at);
+        parts.push(mine);
+        objects.push(hc);
+    }
+    let meshes: Vec<Option<SweptMesh>> = objects.iter().map(|&c| (ee.u32_at(c + at::KIND) == 0).then(|| SweptMesh::read(ee, c))).collect();
+    for &c in &objects {
+        assert_ne!(ee.u32_at(c + at::KIND), 8, "{c:#x} is a finite plane: its pair is not ported");
+    }
+    let aims = (0..objects.len()).filter(|&k| parts[k].iter().any(|&j| meshes[j].as_ref().is_some_and(|m| !m.triangles.is_empty()))).collect();
+    SweepScene { probe, rec, objects, meshes, parts, aims, arrays }
+}
+
+impl SweepScene {
+    fn index_of(&self, a: u32) -> Option<usize> {
+        (a != 0).then(|| self.objects.iter().position(|&o| o == a).unwrap_or(1_000_000 + a as usize))
+    }
+
+    /// Object `c` as the pair reads it.
+    fn target<'a>(&self, ee: &Ee, placed: &'a [Placed<'a>], c: usize) -> Target<'a> {
+        use f51_at as at;
+        let o = self.objects[c];
+        let shape = match ee.u32_at(o + at::KIND) {
+            0 => Shape::Mesh(placed[c]),
+            1 => {
+                let first = self.parts[c][0];
+                Shape::Hierarchy(&placed[first..first + self.parts[c].len()])
+            }
+            _ => Shape::Other,
+        };
+        Target { nearby: ee.u8_at(o + at::NEARBY) & 1 != 0, centre: vf_at(ee, o + at::CENTRE), radius: word_f(ee, o + at::RADIUS), shape }
+    }
+}
+
+fn f51_unit(g: &mut Gen) -> [f32; 3] {
+    #[allow(clippy::float_arithmetic)]
+    loop {
+        let v = [g.f(-1.0, 1.0), g.f(-1.0, 1.0), g.f(-1.0, 1.0)];
+        let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        if l > 0.1 && l <= 1.0 {
+            return v.map(|x| x / l);
+        }
+    }
+}
+
+fn f51_junk(g: &mut Gen) -> Vf {
+    Vf([0; 4].map(|_| g.f(-50.0, 50.0)))
+}
+
+/// One generated case for the pair oracle: its points and nodes (`None` when the set is given no
+/// node array), and the objects to pair against.
+struct SweepCase {
+    points: Vec<[Vf; 2]>,
+    nodes: Option<Vec<[Option<Transform>; 2]>>,
+    pairs: Vec<usize>,
+}
+
+#[allow(clippy::float_arithmetic)]
+fn sweep_case(ee: &Ee, s: &SweepScene, g: &mut Gen) -> SweepCase {
+    let pick = |g: &mut Gen, n: usize| (g.bits() as usize) % n;
+    // A hierarchy one case in four (there are few of them).
+    let hierarchies: Vec<usize> = s.aims.iter().copied().filter(|&k| s.meshes[k].is_none()).collect();
+    let aim = if g.one_in(4) { hierarchies[pick(g, hierarchies.len())] } else { s.aims[pick(g, s.aims.len())] };
+    let mut pairs = vec![aim];
+    for _ in 0..pick(g, 3) {
+        pairs.push(if g.one_in(2) { s.aims[pick(g, s.aims.len())] } else { pick(g, s.objects.len()) });
+    }
+    let count = match pick(g, 10) {
+        0..=4 => 1,
+        5..=7 => 2 + pick(g, 3),
+        _ => 5 + pick(g, 12),
+    };
+    let away = if g.one_in(10) { [g.f(-200.0, 200.0), g.f(50.0, 200.0), g.f(-200.0, 200.0)] } else { [0.0; 3] };
+    let with_nodes = !g.one_in(8);
+    let (mut points, mut nodes) = (Vec::new(), Vec::new());
+    let mut last = [0.0f32; 3];
+    for i in 0..count {
+        let solid: Vec<usize> = s.parts[aim].iter().copied().filter(|&j| s.meshes[j].as_ref().is_some_and(|m| !m.triangles.is_empty())).collect();
+        let part = solid[pick(g, solid.len())];
+        let mesh = s.meshes[part].as_ref().unwrap();
+        let m = f51_transform(ee, s.objects[part]);
+        let target = if i > 0 && g.one_in(2) {
+            last.map(|x| x + g.f(-0.3, 0.3))
+        } else {
+            let t = &mesh.triangles[pick(g, mesh.triangles.len())];
+            let c = mesh.mesh().corners(t).map(|v| f51_place(&m, [v.0[0], v.0[1], v.0[2]]));
+            let (mut u, mut v) = (g.f(-0.15, 1.0), g.f(-0.15, 1.0));
+            if u + v > 1.1 {
+                (u, v) = (1.0 - u, 1.0 - v);
+            }
+            std::array::from_fn(|k| c[0][k] + (c[1][k] - c[0][k]) * u + (c[2][k] - c[0][k]) * v)
+        };
+        last = target;
+        let dir = f51_unit(g);
+        let length = if g.one_in(30) { 0.0 } else { g.f(0.005, 3.0) };
+        let before = length * g.f(-0.2, 1.2);
+        let a: [f32; 3] = std::array::from_fn(|k| target[k] - dir[k] * before + away[k]);
+        let b: [f32; 3] = std::array::from_fn(|k| a[k] + dir[k] * length);
+        let mut seg = [Vf::ZERO; 2];
+        let mut on = [None; 2];
+        for (k, e) in [a, b].into_iter().enumerate() {
+            let w = if g.one_in(4) { g.f(-2.0, 2.0) } else { 1.0 };
+            if with_nodes && g.one_in(5) {
+                // On a node: nearly the identity, moved.
+                let mut node: Transform = [Vf([1.0, 0.0, 0.0, 0.0]), Vf([0.0, 1.0, 0.0, 0.0]), Vf([0.0, 0.0, 1.0, 0.0]), Vf::ZERO];
+                for row in node.iter_mut().take(3) {
+                    for c in 0..4 {
+                        row.0[c] += g.f(-0.02, 0.02);
+                    }
+                }
+                let t = [g.f(-2.0, 2.0), g.f(-2.0, 2.0), g.f(-2.0, 2.0)];
+                node[3] = Vf([t[0], t[1], t[2], g.f(-1.0, 1.0)]);
+                on[k] = Some(node);
+                seg[k] = Vf([e[0] - t[0], e[1] - t[1], e[2] - t[2], w]);
+            } else {
+                seg[k] = Vf([e[0], e[1], e[2], w]);
+            }
+        }
+        if g.one_in(40) {
+            seg[1] = seg[0];
+            on[1] = on[0];
+        }
+        points.push(seg);
+        nodes.push(on);
+    }
+    SweepCase { points, nodes: with_nodes.then_some(nodes), pairs }
+}
+
+/// The case into RAM: the probe's and the record's arrays moved to the scene's, the points and
+/// nodes where the set takes them, leftovers of an earlier search in the forms and the answer (the
+/// same in `port` and `more`), and each candidate's nearby bit mostly on.
+fn sweep_case_in_ram(ee: &mut Ee, s: &SweepScene, g: &mut Gen, case: &SweepCase, port: &mut SweepProbe, more: &mut atv_sweep::More) {
+    use f51_probe as pa;
+    use f51_rec as ra;
+    let (pr, a) = (s.probe, &s.arrays);
+    ee.set_u32(pr + pa::COUNT, case.points.len() as u32);
+    for (key, at) in [
+        (pa::NODES, a.node_ptrs),
+        (pa::ENDS, a.ends),
+        (pa::LOCAL_ORIGINS, a.local_origins),
+        (pa::LOCAL_DIRS, a.local_dirs),
+        (pa::LENGTHS, a.lengths),
+        (pa::ORIGINS, a.origins),
+        (pa::DIRS, a.dirs),
+    ] {
+        ee.set_u32(pr + key, at);
+    }
+    assert_eq!(ee.u32_at(pr + pa::RECORD), s.rec);
+    assert_eq!(ee.u32_at(pr + pa::SMOOTH), 0, "the probe asks for smoothed normals");
+    for (i, seg) in case.points.iter().enumerate() {
+        let i = i as u32;
+        for k in 0..2u32 {
+            set_vf(ee, a.points + 0x20 * i + 0x10 * k, seg[k as usize]);
+            // What the set overwrites: junk.
+            set_vf(ee, a.ends + 0x20 * i + 0x10 * k, f51_junk(g));
+            ee.set_u32(a.node_ptrs + 8 * i + 4 * k, g.bits());
+            let slot = a.node_mats + 0x80 * i + 0x40 * k;
+            let node = case.nodes.as_ref().and_then(|n| n[i as usize][k as usize]);
+            match node {
+                Some(m) => {
+                    for r in 0..4u32 {
+                        set_vf(ee, slot + 0x10 * r, m[r as usize]);
+                    }
+                    // A node's world transform is its +0x70.
+                    ee.set_u32(a.set_nodes + 8 * i + 4 * k, slot - 0x70);
+                }
+                None => ee.set_u32(a.set_nodes + 8 * i + 4 * k, 0),
+            }
+        }
+    }
+    for i in 0..MAX_PROBES {
+        let (o, d, lo, ld) = (f51_junk(g), f51_junk(g), f51_junk(g), f51_junk(g));
+        let iu = i as u32;
+        set_vf(ee, a.origins + 0x10 * iu, o);
+        set_vf(ee, a.dirs + 0x10 * iu, d);
+        set_vf(ee, a.local_origins + 0x10 * iu, lo);
+        set_vf(ee, a.local_dirs + 0x10 * iu, ld);
+        port.world.probes[i].origin = o;
+        port.world.probes[i].dir = d;
+        port.local.probes[i].origin = lo;
+        port.local.probes[i].dir = ld;
+    }
+    let lc = f51_junk(g);
+    set_vf(ee, pr + pa::LOCAL_CENTRE, lc);
+    port.local.centre = lc;
+
+    let an = s.rec;
+    for (key, at) in [
+        (ra::NORMALS, a.normals),
+        (ra::POINTS, a.rpoints),
+        (ra::STRUCK, a.struck),
+        (ra::OWNERS, a.owners),
+        (ra::FLAGS, a.flags),
+        (ra::FRACTIONS, a.fractions),
+        (ra::WORDS, a.words),
+    ] {
+        ee.set_u32(an + key, at);
+    }
+    let ans = &mut port.answer;
+    ans.head = [f51_junk(g), f51_junk(g)];
+    set_vf(ee, an, ans.head[0]);
+    set_vf(ee, an + 0x10, ans.head[1]);
+    let r = &mut ans.record;
+    r.nearest_normal = f51_junk(g);
+    r.nearest_point = f51_junk(g);
+    r.push = f51_junk(g);
+    r.hits = (g.bits() % 5) as i32;
+    r.nearest = F(g.f(0.0, 1.0));
+    set_vf(ee, an + ra::NORMAL, r.nearest_normal);
+    set_vf(ee, an + ra::POINT, r.nearest_point);
+    set_vf(ee, an + ra::PUSH, r.push);
+    ee.set_u32(an + ra::HITS, r.hits as u32);
+    ee.set_u32(an + ra::NEAREST, r.nearest.0.to_bits());
+    let part = if g.one_in(3) { 0 } else { s.objects[(g.bits() as usize) % s.objects.len()] };
+    ee.set_u32(an + ra::PART, part);
+    more.part = s.index_of(part);
+    for i in 0..MAX_PROBES {
+        let iu = i as u32;
+        r.fraction[i] = F(if g.one_in(2) { -1.0 } else { g.f(0.0, 1.0) });
+        r.point[i] = f51_junk(g);
+        r.normal[i] = f51_junk(g);
+        r.hit[i] = g.one_in(2);
+        r.owner[i] = (g.bits() % 2) as i32;
+        more.words[i] = g.bits();
+        let struck = if g.one_in(3) { 0 } else { s.objects[(g.bits() as usize) % s.objects.len()] };
+        ans.struck[i] = s.index_of(struck);
+        ee.set_u32(a.fractions + 4 * iu, r.fraction[i].0.to_bits());
+        set_vf(ee, a.rpoints + 0x10 * iu, r.point[i]);
+        set_vf(ee, a.normals + 0x10 * iu, r.normal[i]);
+        ee.set_u32(a.flags + 4 * iu, u32::from(r.hit[i]));
+        ee.set_u32(a.owners + 4 * iu, r.owner[i] as u32);
+        ee.set_u32(a.words + 4 * iu, more.words[i]);
+        ee.set_u32(a.struck + 4 * iu, struck);
+    }
+    for &c in &case.pairs {
+        let o = s.objects[c] + f51_at::NEARBY;
+        let byte = ee.u8_at(o);
+        let on = !g.one_in(12);
+        set_u8(ee, o, byte & !1 | u8::from(on));
+    }
+}
+
+#[derive(Default, Debug)]
+struct SweepReached {
+    pairs: usize,
+    struck: usize,
+    refused: usize,
+    hierarchy_struck: usize,
+    parts_kept: usize,
+    others: usize,
+    segments_hit: usize,
+    on_nodes: usize,
+    no_nodes: usize,
+    no_length: usize,
+    sixteen: usize,
+}
+
+/// The pair against the original's (F51): over 10,000 generated probes of 1 to 16 segments (some on
+/// nodes, some of no length, some far from everything), aimed through the triangles of nat05's
+/// meshes, of turned copies of them and of hierarchies made of copies, the original's set, clear and
+/// one to three pairs against [`atv_sweep::set`], [`sweep_probe::clear`] and [`atv_sweep::pair`] on
+/// the same numbers; every return, both forms of the segments, the sphere, and the whole record
+/// compared bit for bit — its part (`+0x84`) and third word array (`+0xac`) too.
+#[test]
+fn the_sweeps_pair_is_the_originals() {
+    use f51_probe as pa;
+    use f51_rec as ra;
+    let Some(mut ee) = image() else { return };
+    ee.set(28, GP);
+    let mut g = Gen(0x0f51_5eed_0000_0001);
+    let s = sweep_scene(&mut ee, &mut g);
+    let empty = track::Points::Wide(Vec::new());
+    let placed: Vec<Placed> = (0..s.objects.len())
+        .map(|i| {
+            let mesh = match &s.meshes[i] {
+                Some(m) => m.mesh(),
+                None => MeshRef { nodes: &[], triangles: &[], vertices: &empty },
+            };
+            Placed { transform: f51_transform(&ee, s.objects[i]), mesh, object: i }
+        })
+        .collect();
+    let (pr, a) = (s.probe, &s.arrays);
+    let mut seen = SweepReached::default();
+    for case in 0..F51_CASES {
+        let c = sweep_case(&ee, &s, &mut g);
+        let mut port = SweepProbe::default();
+        let mut more = atv_sweep::More::default();
+        sweep_case_in_ram(&mut ee, &s, &mut g, &c, &mut port, &mut more);
+        let count = c.points.len();
+        let set_nodes = if c.nodes.is_some() { a.set_nodes } else { 0 };
+        seen.on_nodes += c.nodes.iter().flatten().filter(|n| n.iter().any(Option::is_some)).count();
+        seen.no_nodes += usize::from(c.nodes.is_none());
+        seen.no_length += c.points.iter().filter(|p| p[0] == p[1]).count();
+        seen.sixteen += usize::from(count == MAX_PROBES);
+
+        // The set.
+        ee.call(SWEEP_SET, &[u64::from(pr), u64::from(a.points), u64::from(set_nodes)], &[], BUDGET);
+        let (segments, b) = atv_sweep::set(&c.points, c.nodes.as_deref());
+        let ctx = format!("case {case}: {count} segments");
+        assert_eq!(vf_at(&ee, pr + f51_at::CENTRE).to_bits(), b.centre.to_bits(), "{ctx}: the set's centre");
+        for o in [pa::RADIUS, f51_at::RADIUS] {
+            assert_eq!(ee.u32_at(pr + o), b.reach.0.to_bits(), "{ctx}: the set's reach at {o:#x}");
+        }
+        for (i, seg) in segments.iter().enumerate() {
+            let i = i as u32;
+            for k in 0..2u32 {
+                assert_eq!(vf_at(&ee, a.ends + 0x20 * i + 0x10 * k).to_bits(), seg.ends[k as usize].to_bits(), "{ctx}: segment {i}'s point {k}");
+                let want = if seg.nodes[k as usize].is_some() { a.node_mats + 0x80 * i + 0x40 * k - 0x70 } else { 0 };
+                assert_eq!(ee.u32_at(a.node_ptrs + 8 * i + 4 * k), want, "{ctx}: segment {i}'s node {k}");
+            }
+        }
+        port.segments = segments;
+
+        // The clear.
+        let flags = ee.u8_at(pr + f51_at::FLAGS);
+        ee.call(SWEEP_CLEAR, &[u64::from(pr)], &[], BUDGET);
+        sweep_probe_clear(&mut port);
+        assert_eq!(ee.u8_at(pr + f51_at::FLAGS), flags & !0x20, "{ctx}: the clear's hit bit");
+
+        // The pairs.
+        let mut returns = Vec::new();
+        for &o in &c.pairs {
+            ee.call(SWEEP_PAIR, &[u64::from(pr), u64::from(s.objects[o])], &[], BUDGET);
+            let theirs = ee.v0() != 0;
+            let t = s.target(&ee, &placed, o);
+            let part = more.part;
+            let ours = atv_sweep::pair(&mut port, &mut more, Some(&t));
+            seen.parts_kept += usize::from(more.part != part);
+            returns.push((o, theirs, ours));
+            seen.pairs += 1;
+            seen.struck += usize::from(theirs);
+            seen.refused += usize::from(!t.nearby);
+            seen.others += usize::from(matches!(t.shape, Shape::Other));
+            seen.hierarchy_struck += usize::from(theirs && matches!(t.shape, Shape::Hierarchy(_)));
+        }
+        if case % 97 == 0 {
+            ee.call(SWEEP_PAIR, &[u64::from(pr), 0], &[], BUDGET);
+            assert_eq!(ee.v0(), 0, "{ctx}: a null pair");
+            assert!(!atv_sweep::pair(&mut port, &mut more, None));
+        }
+        let ctx = format!("{ctx}, pairs {returns:?}");
+        for (_, theirs, ours) in &returns {
+            assert_eq!(theirs, ours, "{ctx}: the return");
+        }
+
+        // The probe.
+        assert_eq!(vf_at(&ee, pr + pa::CENTRE).to_bits(), port.world.centre.to_bits(), "{ctx}: the centre");
+        assert_eq!(vf_at(&ee, pr + f51_at::CENTRE).to_bits(), port.world.centre.to_bits(), "{ctx}: the collidable's centre");
+        assert_eq!(ee.u32_at(pr + pa::RADIUS), port.world.radius.0.to_bits(), "{ctx}: the radius");
+        assert_eq!(ee.u32_at(pr + f51_at::RADIUS), port.world.radius.0.to_bits(), "{ctx}: the reach");
+        assert_eq!(vf_at(&ee, pr + pa::LOCAL_CENTRE).to_bits(), port.local.centre.to_bits(), "{ctx}: the local centre");
+        for i in 0..count {
+            let iu = i as u32;
+            let (w, l) = (port.world.probes[i], port.local.probes[i]);
+            assert_eq!(vf_at(&ee, a.origins + 0x10 * iu).to_bits(), w.origin.to_bits(), "{ctx}: segment {i}'s start");
+            assert_eq!(vf_at(&ee, a.dirs + 0x10 * iu).to_bits(), w.dir.to_bits(), "{ctx}: segment {i}'s direction");
+            assert_eq!(ee.u32_at(a.lengths + 4 * iu), w.length.0.to_bits(), "{ctx}: segment {i}'s length");
+            assert_eq!(vf_at(&ee, a.local_origins + 0x10 * iu).to_bits(), l.origin.to_bits(), "{ctx}: segment {i}'s local start");
+            assert_eq!(vf_at(&ee, a.local_dirs + 0x10 * iu).to_bits(), l.dir.to_bits(), "{ctx}: segment {i}'s local direction");
+        }
+
+        // The record.
+        let (an, ans) = (s.rec, &port.answer);
+        let r = &ans.record;
+        assert_eq!(vf_at(&ee, an).to_bits(), ans.head[0].to_bits(), "{ctx}: +0");
+        assert_eq!(vf_at(&ee, an + 0x10).to_bits(), ans.head[1].to_bits(), "{ctx}: +0x10");
+        assert_eq!(vf_at(&ee, an + ra::NORMAL).to_bits(), r.nearest_normal.to_bits(), "{ctx}: the nearest normal");
+        assert_eq!(vf_at(&ee, an + ra::POINT).to_bits(), r.nearest_point.to_bits(), "{ctx}: the nearest point");
+        assert_eq!(vf_at(&ee, an + ra::PUSH).to_bits(), r.push.to_bits(), "{ctx}: the push");
+        assert_eq!(ee.u32_at(an + ra::HITS) as i32, r.hits, "{ctx}: the tally");
+        assert_eq!(ee.u32_at(an + ra::NEAREST), r.nearest.0.to_bits(), "{ctx}: the nearest fraction");
+        assert_eq!(s.index_of(ee.u32_at(an + ra::PART)), more.part, "{ctx}: the part");
+        for i in 0..MAX_PROBES {
+            let iu = i as u32;
+            assert_eq!(ee.u32_at(a.fractions + 4 * iu), r.fraction[i].0.to_bits(), "{ctx}: segment {i}'s fraction");
+            assert_eq!(vf_at(&ee, a.rpoints + 0x10 * iu).to_bits(), r.point[i].to_bits(), "{ctx}: segment {i}'s point");
+            assert_eq!(vf_at(&ee, a.normals + 0x10 * iu).to_bits(), r.normal[i].to_bits(), "{ctx}: segment {i}'s normal");
+            assert_eq!(ee.u32_at(a.flags + 4 * iu), u32::from(r.hit[i]), "{ctx}: segment {i}'s hit word");
+            assert_eq!(ee.u32_at(a.owners + 4 * iu) as i32, r.owner[i], "{ctx}: segment {i}'s owner word");
+            assert_eq!(ee.u32_at(a.words + 4 * iu), more.words[i], "{ctx}: segment {i}'s +0xac word");
+            assert_eq!(s.index_of(ee.u32_at(a.struck + 4 * iu)), ans.struck[i], "{ctx}: segment {i}'s struck");
+            seen.segments_hit += usize::from(i < count && r.hit[i]);
+        }
+    }
+    eprintln!("F51 pair: {seen:?}");
+    assert!(seen.struck > 2000 && seen.hierarchy_struck > 1000 && seen.parts_kept > 1000 && seen.refused > 500 && seen.others > 500, "the cases do not reach enough");
+    assert!(seen.on_nodes > 1000 && seen.no_nodes > 500 && seen.no_length > 100 && seen.sixteen > 100, "the segments do not vary enough");
+}
+
+fn sweep_probe_clear(probe: &mut SweepProbe) {
+    game_sim::sweep_probe::clear(probe);
+}
+
+/// The global search's sweep descriptor global: the last mesh the pair swept (its `+0x230`).
+const SWEEP_DESCRIPTOR_AT: u32 = 0x003d_ce38;
+/// The pair's smooth-normals global (the probe's `+0x174`).
+const SWEEP_SMOOTH_AT: u32 = 0x003d_c610;
+
+/// The sweep's world in RAM: what each item is to the pair, read from RAM at each pair (a mesh, a
+/// hierarchy and its parts, or nothing struck), and everything else as F46d's part search has it
+/// ([`PartWorldInRam`]: a group's parts stood by the original, the listeners and callbacks handed
+/// on). Keeps what the pairs leave in the two globals only the pair writes.
+struct SweepWorldInRam<'w, 'e> {
+    world: &'w mut PartWorldInRam<'e>,
+    /// The probe's sphere as the clear stands it, for telling which pairs sweep.
+    centre: Vf,
+    radius: F,
+    pairs: u32,
+    descriptor: Option<u32>,
+}
+
+impl atv_sweep::Outside for SweepWorldInRam<'_, '_> {
+    fn target(&mut self, other: usize, pair: &mut dyn FnMut(Option<&Target>) -> bool) -> bool {
+        use f51_at as at;
+        let ee = &*self.world.ee;
+        let c = self.world.items[other] - 0x18;
+        let kind = ee.u32_at(c + at::KIND);
+        *self.world.kinds.entry(format!("sweep pair, kind {kind}")).or_default() += 1;
+        self.pairs += 1;
+        let (nearby, centre, radius) = (ee.u8_at(c + at::NEARBY) & 1 != 0, vf_at(ee, c + at::CENTRE), word_f(ee, c + at::RADIUS));
+        let parts: Vec<u32> = match kind {
+            0 => vec![c],
+            1 => (0..ee.u32_at(c + at::PARTS)).map(|j| ee.u32_at(ee.u32_at(c + at::PART_LIST) + 4 * j)).collect(),
+            8 => panic!("the sweep paired a finite plane ({c:#x}): its pair is not ported"),
+            _ => vec![],
+        };
+        let meshes: Vec<SweptMesh> = parts.iter().map(|&p| SweptMesh::read(ee, p)).collect();
+        let ids: Vec<usize> = parts
+            .iter()
+            .map(|&p| match self.world.items.iter().position(|&e| e == p + 0x18) {
+                Some(k) => k,
+                None => {
+                    self.world.items.push(p + 0x18);
+                    self.world.items.len() - 1
+                }
+            })
+            .collect();
+        let ee = &*self.world.ee;
+        let placed: Vec<Placed> = meshes.iter().zip(&parts).zip(&ids).map(|((m, &p), &id)| Placed { transform: f51_transform(ee, p), mesh: m.mesh(), object: id }).collect();
+        let shape = match kind {
+            0 => Shape::Mesh(placed[0]),
+            1 => Shape::Hierarchy(&placed),
+            _ => Shape::Other,
+        };
+        // Whether the pair gets to its sweep: the spheres as the pair tests them.
+        let d = self.centre.sub(centre);
+        let reach = radius + self.radius;
+        if nearby && F(ps2_float::fpu::dot([d.x(), d.y(), d.z()], [d.x(), d.y(), d.z()])) < reach * reach {
+            if let Some(&last) = parts.last() {
+                self.descriptor = Some(last + 0x230);
+            }
+        }
+        pair(Some(&Target { nearby, centre, radius, shape }))
+    }
+}
+
+impl ws::Narrow for SweepWorldInRam<'_, '_> {
+    fn clear(&mut self, _: &mut [ws::Collidable], _: usize) {
+        unreachable!("the sweep's own clear")
+    }
+    fn prepare(&mut self, _: &mut [ws::Collidable], _: usize) {
+        panic!("the sweep prepared a grid")
+    }
+    fn pair(&mut self, _: &mut [ws::Collidable], _: usize, _: usize) -> bool {
+        unreachable!("the sweep's own pair")
+    }
+    fn parts(&mut self, objects: &mut [ws::Collidable], group: usize) -> usize {
+        self.world.parts(objects, group)
+    }
+    fn part(&mut self, objects: &mut [ws::Collidable], group: usize, i: usize) -> Option<usize> {
+        self.world.part(objects, group, i)
+    }
+    fn heard_hit(&mut self, objects: &mut [ws::Collidable], l: usize, probe: usize, other: usize) {
+        self.world.heard_hit(objects, l, probe, other)
+    }
+    fn heard_struck(&mut self, objects: &mut [ws::Collidable], l: usize, struck: usize, probe: usize) {
+        self.world.heard_struck(objects, l, struck, probe)
+    }
+    fn on_hit(&mut self, objects: &mut [ws::Collidable], c: usize, probe: usize, other: usize) {
+        self.world.on_hit(objects, c, probe, other)
+    }
+    fn on_struck(&mut self, objects: &mut [ws::Collidable], c: usize, struck: usize, probe: usize) {
+        self.world.on_struck(objects, c, struck, probe)
+    }
+}
+
+/// The sweep probe's segments in RAM: its count, its two node pointers (a node's world transform at
+/// its `+0x70`) and its two points each.
+fn sweep_segments_in_ram(ee: &Ee, probe: u32) -> Vec<game_sim::sweep_probe::Segment> {
+    use f51_probe as pa;
+    let (nodes, ends) = (ee.u32_at(probe + pa::NODES), ee.u32_at(probe + pa::ENDS));
+    (0..ee.u32_at(probe + pa::COUNT))
+        .map(|i| {
+            let mut s = game_sim::sweep_probe::Segment::default();
+            for k in 0..2 {
+                s.ends[k as usize] = vf_at(ee, ends + 0x20 * i + 0x10 * k);
+                let n = ee.u32_at(nodes + 8 * i + 4 * k);
+                s.nodes[k as usize] = (n != 0).then(|| [0, 1, 2, 3].map(|r| vf_at(ee, n + 0x70 + 0x10 * r)));
+            }
+            s
+        })
+        .collect()
+}
+
+/// The sweep probe's answer in RAM (`+0x7c`), its first `count` segments' entries, and the record's
+/// [`atv_sweep::More`]; collidables by `items` (one not listed is pushed).
+fn sweep_answer_in_ram(ee: &Ee, rec: u32, count: usize, items: &mut Vec<u32>) -> (game_sim::sweep_probe::Answer, atv_sweep::More) {
+    use f51_rec as ra;
+    let mut item = |c: u32| -> Option<usize> {
+        (c != 0).then(|| match items.iter().position(|&e| e == c + 0x18) {
+            Some(k) => k,
+            None => {
+                items.push(c + 0x18);
+                items.len() - 1
+            }
+        })
+    };
+    let mut a = game_sim::sweep_probe::Answer { head: [vf_at(ee, rec), vf_at(ee, rec + 0x10)], ..Default::default() };
+    let mut more = atv_sweep::More { part: item(ee.u32_at(rec + ra::PART)), ..Default::default() };
+    let r = &mut a.record;
+    r.nearest_normal = vf_at(ee, rec + ra::NORMAL);
+    r.nearest_point = vf_at(ee, rec + ra::POINT);
+    r.push = vf_at(ee, rec + ra::PUSH);
+    r.hits = ee.u32_at(rec + ra::HITS) as i32;
+    r.nearest = word_f(ee, rec + ra::NEAREST);
+    let [normals, points, struck, owners, hits, fractions, words] = [ra::NORMALS, ra::POINTS, ra::STRUCK, ra::OWNERS, ra::FLAGS, ra::FRACTIONS, ra::WORDS].map(|o| ee.u32_at(rec + o));
+    for i in 0..count {
+        let iu = i as u32;
+        r.normal[i] = vf_at(ee, normals + 0x10 * iu);
+        r.point[i] = vf_at(ee, points + 0x10 * iu);
+        r.owner[i] = ee.u32_at(owners + 4 * iu) as i32;
+        let h = ee.u32_at(hits + 4 * iu);
+        assert!(h <= 1, "segment {i}'s hit word is {h:#x}");
+        r.hit[i] = h != 0;
+        r.fraction[i] = word_f(ee, fractions + 4 * iu);
+        more.words[i] = ee.u32_at(words + 4 * iu);
+        a.struck[i] = item(ee.u32_at(struck + 4 * iu));
+    }
+    (a, more)
+}
+
+/// [`sweep_answer_in_ram`]'s answer written back.
+fn write_sweep_answer(ee: &mut Ee, rec: u32, count: usize, items: &[u32], a: &game_sim::sweep_probe::Answer, more: &atv_sweep::More) {
+    use f51_rec as ra;
+    let base = |k: Option<usize>| k.map_or(0, |k| items[k] - 0x18);
+    set_vf(ee, rec, a.head[0]);
+    set_vf(ee, rec + 0x10, a.head[1]);
+    let r = &a.record;
+    set_vf(ee, rec + ra::NORMAL, r.nearest_normal);
+    set_vf(ee, rec + ra::POINT, r.nearest_point);
+    set_vf(ee, rec + ra::PUSH, r.push);
+    ee.set_u32(rec + ra::HITS, r.hits as u32);
+    ee.set_u32(rec + ra::NEAREST, r.nearest.0.to_bits());
+    ee.set_u32(rec + ra::PART, base(more.part));
+    let [normals, points, struck, owners, hits, fractions, words] = [ra::NORMALS, ra::POINTS, ra::STRUCK, ra::OWNERS, ra::FLAGS, ra::FRACTIONS, ra::WORDS].map(|o| ee.u32_at(rec + o));
+    for i in 0..count {
+        let iu = i as u32;
+        set_vf(ee, normals + 0x10 * iu, r.normal[i]);
+        set_vf(ee, points + 0x10 * iu, r.point[i]);
+        ee.set_u32(owners + 4 * iu, r.owner[i] as u32);
+        ee.set_u32(hits + 4 * iu, u32::from(r.hit[i]));
+        ee.set_u32(fractions + 4 * iu, r.fraction[i].0.to_bits());
+        ee.set_u32(words + 4 * iu, more.words[i]);
+        ee.set_u32(struck + 4 * iu, base(a.struck[i]));
+    }
+}
+
+/// **F51 — the global search in Rust**: the sweep probe `probe` against the database world
+/// ([`atv_sweep::search_world`], the narrow phase [`atv_sweep::Sweep`] over [`SweepWorldInRam`]),
+/// called `lazy`, and everything written back: the query's walk (F47's [`GatherInRam::write_query`]),
+/// the flags and groups, the budget and last centre, the clear's world form and globals, the pairs'
+/// globals, local forms and answer. Answers the nearest distance; counts the pairs by kind into
+/// `kinds`. `None` (nothing written back) when a listener handed on searched the database itself:
+/// the original's own walk goes on from what that search left, which the port's cannot follow.
+fn sweep_all_in_ram(ee: &mut Ee, probe: u32, lazy: u32, kinds: &mut BTreeMap<String, u32>) -> Option<F> {
+    use f51_probe as pa;
+    let (m, mut objects, mut broad) = GatherInRam::read(ee, probe);
+    broad.places[0].budget = word_f(ee, probe + 0x74);
+    broad.places[0].last = [0, 4, 8, 12].map(|i| word_f(ee, probe + 0x60 + i));
+    let mut items = m.items.clone();
+    // The plant groups' parts, as collidables of their own.
+    for k in 0..objects.len() {
+        if objects[k].class != ws::Class::Group {
+            continue;
+        }
+        for p in PartWorldInRam::species_parts(ee, items[k]) {
+            if p != 0 && !items.contains(&(p + 0x18)) {
+                items.push(p + 0x18);
+                objects.push(ws::Collidable { class: ws::Class::from_byte(ee.u8_at(p + 0x18 + 2)), flags: ee.u8_at(p + 0x126), ..Default::default() });
+                broad.places.push(bp::Placement::default());
+            }
+        }
+    }
+    let segments = sweep_segments_in_ram(ee, probe);
+    let count = segments.len();
+    let rec = ee.u32_at(probe + pa::RECORD);
+    let (answer, more) = sweep_answer_in_ram(ee, rec, count, &mut items);
+    let mut port = SweepProbe { segments: segments.clone(), answer, ..SweepProbe::default() };
+    sweep_local_in_ram(ee, probe, count, &mut port);
+    let mut stood = port.clone();
+    sweep_probe_clear(&mut stood);
+    let retired: Vec<bool> = items.iter().map(|&e| ee.u32_at(e - 0x18) == 1).collect();
+    let b = atv_sweep::bounds(&segments);
+    let mut world = PartWorldInRam { ee: &mut *ee, items, mesh: None, kinds: BTreeMap::new(), listeners: vec![], callbacks: vec![] };
+    for (k, o) in objects.iter_mut().enumerate() {
+        if o.class == ws::Class::Object {
+            let e = world.items[k];
+            world.hear(o, e - 0x18);
+        }
+    }
+    let was_o = objects.clone();
+    let was_b = broad.clone();
+    let stamp = world.ee.u16_at(STAMP_AT);
+    let mut outside = SweepWorldInRam { world: &mut world, centre: stood.world.centre, radius: stood.world.radius, pairs: 0, descriptor: None };
+    let mut sweep = atv_sweep::Sweep::new(segments, more, &mut outside);
+    sweep.probe = port;
+    let nearest = atv_sweep::search_world(&mut objects, &mut broad, 0, lazy, &|o| retired.get(o).copied().unwrap_or(false), &mut sweep);
+    let (port, more) = (sweep.probe, sweep.more);
+    let (pairs, descriptor) = (outside.pairs, outside.descriptor);
+    for (k, v) in std::mem::take(&mut world.kinds) {
+        *kinds.entry(k).or_default() += v;
+    }
+    let items = world.items;
+    if ee.u16_at(STAMP_AT) != stamp {
+        return None;
+    }
+    // The clear ran (the search got past its budget): the world form is the one it stands.
+    let cleared = port.world == stood.world;
+    // What the walk may change beyond flags and stamps: the probe's reach and place, the parts' groups.
+    let mut wo = was_o.clone();
+    let mut wb = was_b.clone();
+    wo[0].radius = objects[0].radius;
+    let p = &broad.places[0];
+    (wb.places[0].centre, wb.places[0].budget, wb.places[0].last) = (p.centre, p.budget, p.last);
+    for (k, o) in objects.iter().enumerate() {
+        wo[k].group = o.group;
+        if let Some(g) = o.group {
+            ee.set_u32(items[k] - 0x18 + 0x88, items[g]);
+        }
+    }
+    // The first query begun as the search begins it, on a copy.
+    let mut begun = was_b.clone();
+    if cleared {
+        let space = begun.places[0].space.expect("a searching probe in a space");
+        let (mut lo, mut hi) = ([F::ZERO; 4], [F::ZERO; 4]);
+        bp::Query::begin(&mut begun, space, 1, b.centre.0.map(F), b.half.0.map(F), Some((&mut lo, &mut hi)), true);
+    }
+    let m = GatherInRam { items: items.clone(), ..m };
+    m.write_query(ee, (&wo, &wb), (&objects, &broad), &begun);
+    ee.set_u32(probe + 0x74, broad.places[0].budget.0.to_bits());
+    for (i, w) in broad.places[0].last.iter().enumerate() {
+        ee.set_u32(probe + 0x60 + 4 * i as u32, w.0.to_bits());
+    }
+    if cleared {
+        // Its world form, sphere and globals, then the box's centre and reach.
+        let w = &port.world;
+        let [lengths, starts, dirs] = [pa::LENGTHS, pa::ORIGINS, pa::DIRS].map(|o| ee.u32_at(probe + o));
+        for (i, s) in w.probes[..w.count].iter().enumerate() {
+            let i = i as u32;
+            ee.set_u32(lengths + 4 * i, s.length.0.to_bits());
+            set_vf(ee, starts + 0x10 * i, s.origin);
+            set_vf(ee, dirs + 0x10 * i, s.dir);
+        }
+        set_vf(ee, probe + pa::CENTRE, w.centre);
+        ee.set_u32(probe + pa::RADIUS, w.radius.0.to_bits());
+        set_vf(ee, probe + f51_at::CENTRE, b.centre);
+        ee.set_u32(probe + f51_at::RADIUS, b.reach.0.to_bits());
+        for a in SWEEP_ZEROED {
+            ee.set_u32(a, 0);
+        }
+        ee.set_u32(SWEEP_RECORD_AT, rec);
+    }
+    sweep_pairs_write(ee, probe, count, &port, pairs, descriptor);
+    write_sweep_answer(ee, rec, count, &items, &port.answer, &more);
+    Some(nearest)
+}
+
+/// A segment for F51's searches: one in three anywhere round `home` (60 or 400 ft out, up to 4 ft
+/// long), else through a triangle of one of `meshes` (starting before it, or past it); one in four
+/// with a stray `w`.
+fn f51_segment(g: &mut Gen, ee: &Ee, meshes: &[u32], home: Vf) -> [Vf; 2] {
+    let (from, to) = if g.one_in(3) {
+        let reach = if g.one_in(2) { 60.0 } else { 400.0 };
+        let p = [g.f(-reach, reach), g.f(-20.0, 20.0), g.f(-reach, reach)];
+        let d = f51_unit(g).map(|x| x * g.f(0.0, 4.0));
+        ([0, 1, 2].map(|i| home.0[i] + p[i]), d)
+    } else {
+        let c = meshes[(g.bits() as usize) % meshes.len()];
+        let mesh = SweptMesh::read(ee, c);
+        let t = &mesh.triangles[(g.bits() as usize) % mesh.triangles.len()];
+        let m = f51_transform(ee, c);
+        let k = mesh.mesh().corners(t).map(|v| f51_place(&m, [v.0[0], v.0[1], v.0[2]]));
+        let (u, v) = (g.f(0.0, 0.5), g.f(0.0, 0.5));
+        let at: [f32; 3] = std::array::from_fn(|i| k[0][i] + (k[1][i] - k[0][i]) * u + (k[2][i] - k[0][i]) * v);
+        let dir = f51_unit(g);
+        let length = g.f(0.01, 4.0);
+        let before = length * g.f(-0.2, 1.2);
+        (std::array::from_fn(|i| at[i] - dir[i] * before), dir.map(|x| x * length))
+    };
+    let w = if g.one_in(4) { g.f(-2.0, 2.0) } else { 1.0 };
+    [Vf::new(from[0], from[1], from[2], w), Vf::new(from[0] + to[0], from[1] + to[1], from[2] + to[2], w)]
+}
+
+/// The global search against the original's (F51): the record's sweep probe set (the original's set
+/// and place) on a segment through a triangle of one of nat05's meshes, or anywhere round the bike out
+/// to 400 ft, and searched, one RAM by the original and one by [`sweep_all_in_ram`]; the answers alike
+/// and the two RAMs alike after every search outside the stack. Now and then the probe is called lazy
+/// (its budget left from the search before), made inactive, or let search the plants (`NO_GROUPS`
+/// down: their parts stood by the original, their spheres paired).
+#[test]
+fn the_sweeps_global_search_is_the_originals() {
+    let Some(ee) = image() else { return };
+    let mut a = hooked(ee);
+    let mut b = hooked(image().unwrap());
+    b.ram.clone_from(&a.ram);
+    let probe = a.u32_at(a.u32_at(BIKE + seed::RECORD) + 0x204);
+    assert_eq!(a.u32_at(probe + f51_probe::COUNT), 1, "the record's sweep has one segment");
+    let (m, world, _) = GatherInRam::read(&a, probe);
+    let meshes: Vec<u32> = (1..world.len())
+        .filter(|&k| world[k].class == ws::Class::Object)
+        .map(|k| m.items[k] - 0x18)
+        .filter(|&c| a.u32_at(c + f51_at::KIND) == 0 && a.u32_at(c + f51_at::TRIANGLES) != 0)
+        .collect();
+    let home = vf_at(&a, probe + f51_at::CENTRE);
+    let flags = a.u8_at(probe + f51_at::FLAGS);
+    let points = F51_AREA;
+    let mut g = Gen(0x0f51_0a11_5eed_0002);
+    let mut kinds = BTreeMap::<String, u32>::new();
+    let mut seen = BTreeMap::<&str, u32>::new();
+    for n in 0..1500 {
+        let ends = f51_segment(&mut g, &a, &meshes, home);
+        let lazy = u32::from(g.one_in(4));
+        let mut byte = flags;
+        if g.one_in(15) {
+            byte &= !bp::more_flags::ACTIVE;
+        }
+        if g.one_in(4) {
+            byte &= !ws::flags::NO_GROUPS;
+        }
+        for ee in [&mut a, &mut b] {
+            set_vf(ee, points, ends[0]);
+            set_vf(ee, points + 0x10, ends[1]);
+            set_u8(ee, probe + f51_at::FLAGS, byte & !ws::flags::HIT | flags & ws::flags::HIT);
+            ee.set(28, GP);
+            ee.call(SWEEP_SET, &[u64::from(probe), u64::from(points), 0], &[], BUDGET);
+            ee.set(28, GP);
+            ee.call(PROBE_PLACE, &[u64::from(probe)], &[], BUDGET);
+        }
+        let off = bytes_differ(&a.ram, &b.ram, a.stack);
+        assert!(off.is_empty(), "search {n}: the set and place left the RAMs apart at {off:?}");
+        a.set(28, GP);
+        a.call(SEARCH_ALL, &[u64::from(probe), u64::from(lazy)], &[], BUDGET);
+        let theirs = a.f0();
+        let ctx = format!("search {n} (lazy {lazy}, flags {byte:#x})");
+        let Some(ours) = sweep_all_in_ram(&mut b, probe, lazy, &mut kinds) else {
+            // A struck plant's listener searched the database mid-walk: not followed (F51's journal).
+            *seen.entry("reentered").or_default() += 1;
+            b.ram.clone_from(&a.ram);
+            continue;
+        };
+        assert_eq!(theirs.to_bits(), ours.0.to_bits(), "{ctx}: the answer ({theirs} theirs, {} ours)", ours.0);
+        let off = bytes_differ(&a.ram, &b.ram, a.stack);
+        assert!(off.is_empty(), "{ctx}: RAM differs at {} ranges\n  {}", off.len(), off.iter().take(40).cloned().collect::<Vec<_>>().join("\n  "));
+        let hit = a.u8_at(probe + f51_at::FLAGS) & ws::flags::HIT != 0;
+        *seen.entry(if byte & bp::more_flags::ACTIVE == 0 { "inactive" } else if theirs == f32::MAX { "max" } else if hit { "hit" } else if lazy != 0 { "lazy" } else { "clear" }).or_default() += 1;
+    }
+    eprintln!("F51 global: {seen:?}, pairs {kinds:?}");
+    assert!(seen.get("hit").copied().unwrap_or(0) >= 300, "the searches hit: {seen:?}");
+    assert!(seen.get("inactive").copied().unwrap_or(0) >= 50, "{seen:?}");
+    assert!(kinds.keys().any(|k| k.contains("part stand")), "no plant was searched: {kinds:?}");
+}
+
+/// The nearby sweep with its pairs against the original's (F51; C15's sweeps pair nothing): the
+/// record's segment set and placed and the record's nearby list gathered round the sweep probe (the
+/// original's, on both RAMs), then searched over the list, one RAM by the original and one by
+/// [`sweep_in_ram`] (its set and place again, then the search); the hit bits alike and the RAMs alike
+/// outside the stack.
+#[test]
+fn the_nearby_sweep_with_its_pairs_is_the_originals() {
+    let Some(ee) = image() else { return };
+    let mut a = hooked(ee);
+    let mut b = hooked(image().unwrap());
+    b.ram.clone_from(&a.ram);
+    let rec = a.u32_at(BIKE + seed::RECORD);
+    let (probe, list) = (a.u32_at(rec + 0x204), a.u32_at(rec + 0xfc));
+    let (m, world, _) = GatherInRam::read(&a, probe);
+    let meshes: Vec<u32> = (1..world.len())
+        .filter(|&k| world[k].class == ws::Class::Object)
+        .map(|k| m.items[k] - 0x18)
+        .filter(|&c| a.u32_at(c + f51_at::KIND) == 0 && a.u32_at(c + f51_at::TRIANGLES) != 0)
+        .collect();
+    let home = vf_at(&a, probe + f51_at::CENTRE);
+    let flags = a.u8_at(probe + f51_at::FLAGS);
+    let mut g = Gen(0x0f51_0a11_5eed_0003);
+    let mut kinds = BTreeMap::<String, u32>::new();
+    let mut seen = BTreeMap::<&str, u32>::new();
+    for n in 0..600 {
+        let ends = f51_segment(&mut g, &a, &meshes, home);
+        let mut byte = flags;
+        if g.one_in(4) {
+            byte &= !ws::flags::NO_GROUPS;
+        }
+        for ee in [&mut a, &mut b] {
+            set_vf(ee, rec + 0xc0, ends[0]);
+            set_vf(ee, rec + 0xd0, ends[1]);
+            set_u8(ee, probe + f51_at::FLAGS, byte);
+            ee.set(28, GP);
+            ee.call(SWEEP_SET, &[u64::from(probe), u64::from(rec + 0xc0), 0], &[], BUDGET);
+            ee.set(28, GP);
+            ee.call(PROBE_PLACE, &[u64::from(probe)], &[], BUDGET);
+            ee.set(28, GP);
+            ee.call(GATHER, &[u64::from(list), u64::from(probe), 3], &[0.0], BUDGET);
+        }
+        let ctx = format!("sweep {n} (flags {byte:#x}, {} nearby)", a.u32_at(list + 4));
+        let off = bytes_differ(&a.ram, &b.ram, a.stack);
+        assert!(off.is_empty(), "{ctx}: the set, place and gather left the RAMs apart at {off:?}");
+        a.set(28, GP);
+        a.call(SEARCH_NEAR, &[u64::from(probe), u64::from(list), 1], &[], BUDGET);
+        let stamp = b.u16_at(STAMP_AT);
+        let ours = sweep_in_ram(&mut b, rec, probe, list, ends[0], ends[1], &mut kinds);
+        let theirs = a.u8_at(probe + f51_at::FLAGS) & ws::flags::HIT != 0;
+        if b.u16_at(STAMP_AT) != stamp {
+            // A struck plant's listener searched the database (as in the global search's test).
+            *seen.entry("reentered").or_default() += 1;
+            b.ram.clone_from(&a.ram);
+            continue;
+        }
+        assert_eq!(theirs, ours, "{ctx}: the hit");
+        let off = bytes_differ(&a.ram, &b.ram, a.stack);
+        assert!(off.is_empty(), "{ctx}: RAM differs at {} ranges\n  {}", off.len(), off.iter().take(40).cloned().collect::<Vec<_>>().join("\n  "));
+        *seen.entry(if theirs { "hit" } else if a.u32_at(list + 4) > 0 { "missed" } else { "empty" }).or_default() += 1;
+    }
+    eprintln!("F51 nearby: {seen:?}, pairs {kinds:?}");
+    assert!(seen.get("hit").copied().unwrap_or(0) >= 150, "the sweeps hit: {seen:?}");
+    assert!(seen.get("missed").copied().unwrap_or(0) >= 100, "{seen:?}");
 }
