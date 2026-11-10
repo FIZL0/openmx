@@ -2497,6 +2497,7 @@ fn put_paths(ee: &mut Ee, p: &mut Pick, t: &TrackPaths) {
         }
         ee.set_u32(r, path.flags);
         put_f(ee, r + 8, path.length);
+        ee.set_u32(r + 0xc, path.word_0c);
         ee.set_u32(r + 0x10, t_node(i, 0));
         ee.set_u32(r + 0x14, t_node(i, path.nodes.len() - 1));
         ee.set_u32(r + 0x18, path.links.len() as u32);
@@ -2519,6 +2520,7 @@ fn put_paths(ee: &mut Ee, p: &mut Pick, t: &TrackPaths) {
             ee.set_u32(a + 0x54, if n + 1 == path.nodes.len() { 0 } else { t_node(i, n + 1) });
         }
     }
+    ee.set_u32(T_TRACK + 0xac, t.pick);
     ee.set_u32(T_TRACK + 0x94, T_ROUTES);
     ee.set_u32(T_TRACK + 0x9c, T_PARENTS);
     ee.set_u32(T_TRACK + 0xa4, T_CANDS);
@@ -2614,7 +2616,7 @@ fn t_paths(p: &mut Pick) -> TrackPaths {
             F(p.stray(d))
         };
         let best = (p.below(3) == 0).then(|| p.below(count as u64) as usize);
-        paths.push(RacePath { flags, length: F(p.stray(length.0)), nodes, links: Vec::new(), dist, best });
+        paths.push(RacePath { flags, length: F(p.stray(length.0)), word_0c: 0, nodes, links: Vec::new(), dist, best });
     }
     for i in 0..count {
         let mut links = vec![(i + 1) % count];
@@ -2638,6 +2640,7 @@ fn t_paths(p: &mut Pick) -> TrackPaths {
         ahead,
         behind,
         lap_length: F(p.range(100.0, 900.0)),
+        pick: 3,
         free_routes: pool(p),
         free_parents: pool(p),
         free_candidates: pool(p),
@@ -6277,4 +6280,348 @@ fn the_race_end_matches_the_supercross_activitys_answer() {
         armed += usize::from(got.cue.is_some() && cue_ends.get());
     }
     assert!(picked[1..].iter().all(|&n| n > 300) && tipped > 5000 && cued > 8000 && armed > 4000, "scenes {picked:?}, tips {tipped}, cues {cued}, armed {armed}");
+}
+
+// --- the AI's path look-ahead (S308) -----------------------------------------------------------------
+
+const T_HINT: u32 = 0x01b5_0060;
+const T_NEAR: u32 = 0x01b5_0070;
+const T_DRAWS: u32 = 0x01b5_0080;
+const T_LIST: u32 = 0x01b5_0200;
+
+/// Fork words for a generated course: each path's `+0xc` speed, now and then a stray word, and the
+/// track's link-pick mode (3 most often, as every loader sets it).
+fn t_forks(p: &mut Pick, t: &mut TrackPaths) {
+    for path in &mut t.paths {
+        let v = p.range(0.0, 150.0);
+        path.word_0c = p.stray(v).to_bits();
+    }
+    t.pick = match p.below(6) {
+        0 => 1,
+        1 => 2,
+        2 => p.next() as u32 & 7,
+        _ => 3,
+    };
+}
+
+/// A limit for the locates: none (−1), 0, a length, or a stray word.
+fn t_limit(p: &mut Pick) -> F {
+    match p.below(6) {
+        0 => F(-1.0),
+        1 => F(0.0),
+        _ => {
+            let x = p.range(-20.0, 300.0);
+            F(p.stray(x))
+        }
+    }
+}
+
+/// A point near some node of the course, or anywhere about it.
+fn t_point(p: &mut Pick, t: &TrackPaths) -> Vf {
+    let i = p.below(t.paths.len() as u64) as usize;
+    let n = p.below(t.paths[i].nodes.len() as u64) as usize;
+    let q = t.paths[i].nodes[n].points[0];
+    let point = match p.below(8) {
+        0 => Vf([p.range(-150.0, 150.0), p.range(-5.0, 5.0), p.range(-150.0, 150.0), 1.0]),
+        1 => q,
+        _ => Vf([q.x() + p.range(-25.0, 25.0), p.range(-5.0, 5.0), q.z() + p.range(-25.0, 25.0), 1.0]),
+    };
+    Vf([p.stray(point.x()), point.y(), p.stray(point.z()), point.w()])
+}
+
+/// The words below the oracle's stack pointer zeroed: the route locate hands back stack words it never
+/// set, and the port starts them at zero (see `route_locate`).
+fn t_clear_stack(ee: &mut Ee) {
+    for k in 0..0x800u32 {
+        ee.set_u32(ee.stack - 4 * (k + 1), 0);
+    }
+}
+
+/// The path locate with a start hint against SLUS-21104's (`path_locate`), over 20,000 generated courses:
+/// no hint, a hint on the path (now and then naming no node), a hint on another path (the walk then
+/// starts at the way along the paths from it, through the route search), limits, refused keep-off paths
+/// and holding-only walks. The answer, the out spot, the distance, and the paths' scratch words and pools.
+#[test]
+fn the_hinted_path_locate_matches_the_track_objects() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let locate = match addr("path_locate") {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    let mut p = Pick(0x5308_10ca_7e0f_beef);
+    let mut seen = [0usize; 8];
+    for case in 0..20_000 {
+        let mut t = t_paths(&mut p);
+        t_forks(&mut p, &mut t);
+        put_paths(&mut ee, &mut p, &t);
+        let path = p.below(t.paths.len() as u64) as usize;
+        let hint = match p.below(4) {
+            0 => None,
+            1 => {
+                let mut h = t_spot_on(&mut p, &t);
+                h.path = path as u32 + 1;
+                h.piece = if p.below(25) == 0 { 0 } else { 1 + p.below(t.paths[path].nodes.len() as u64) as u32 };
+                Some(h)
+            }
+            _ => Some(t_spot_on(&mut p, &t)),
+        };
+        let point = t_point(&mut p, &t);
+        let limit = t_limit(&mut p);
+        let refuse = p.below(3) == 0;
+        let holding = p.below(3) == 0;
+        let with_distance = p.below(4) != 0;
+        let fill = t_spot_on(&mut p, &t);
+        let d_fill = F(p.unit());
+        put_quad(&mut ee, T_POINT, point);
+        put_t_spot(&mut ee, T_OUT, fill);
+        put_f(&mut ee, T_D, d_fill);
+        if let Some(h) = hint {
+            put_t_spot(&mut ee, T_HINT, h);
+        }
+        let what = format!("case {case}: path {path}, hint {hint:?}, {point:?}, limit {limit:?}, refuse {refuse}, holding {holding}");
+        let args = [
+            u64::from(T_TRACK),
+            if hint.is_some() { u64::from(T_HINT) } else { 0 },
+            u64::from(T_POINT),
+            u64::from(t_rec(path)),
+            u64::from(T_OUT),
+            if with_distance { u64::from(T_D) } else { 0 },
+            u64::from(refuse) * (1 + (p.next() & 0xff)),
+            u64::from(holding),
+        ];
+        ee.call(locate, &args, &[limit.0], BUDGET * 10);
+        let mut out = fill;
+        let mut d = d_fill;
+        let got = game_sim::ai::follow::locate_on(&mut t, limit, path, hint, point, refuse, holding, &mut out, with_distance.then_some(&mut d));
+        assert_eq!(ee.v0() as u32, u32::from(got), "{what}: the answer");
+        assert_eq!(t_bits(t_spot_at(&ee, T_OUT)), t_bits(out), "{what}: the spot");
+        assert_eq!(f32_at(&ee, T_D).0.to_bits(), d.0.to_bits(), "{what}: the distance");
+        check_paths(&ee, &t, &what);
+        seen[usize::from(got)] += 1;
+        let on = hint.is_some_and(|h| h.path == path as u32 + 1);
+        seen[2] += usize::from(got && on);
+        seen[3] += usize::from(got && hint.is_some() && !on);
+        seen[4] += usize::from(got && on && t.paths[path].links.contains(&path));
+        seen[5] += usize::from(got && with_distance && d == F(-1.0));
+        seen[6] += usize::from(got && limit >= F(0.0) && out.piece != fill.piece);
+        seen[7] += usize::from(got && holding && (out.piece, out.along) != (fill.piece, fill.along));
+    }
+    eprintln!(
+        "hinted locate: refused {}, found {}, hint on the path {}, on another {}, looping {}, none taken {}, limited {}, holding {}",
+        seen[0], seen[1], seen[2], seen[3], seen[4], seen[5], seen[6], seen[7]
+    );
+    assert!(
+        seen[0] > 800 && seen[2] > 3000 && seen[3] > 6000 && seen[4] > 300 && seen[5] > 300 && seen[6] > 3000 && seen[7] > 1000,
+        "{seen:?}"
+    );
+}
+
+/// The route locate against SLUS-21104's (`path_route_locate`), over 20,000 routes of one to five paths
+/// (repeats allowed, the list now and then closed into a ring): the nearest place on any of them, with a
+/// hint, limit, refusal and holding-only as above. The answer, the out spot, the distance, the scratch
+/// words and pools.
+#[test]
+fn the_route_locate_matches_the_track_objects() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let locate = match addr("path_route_locate") {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    let mut p = Pick(0x5308_7041_e10c_a7e5);
+    let mut seen = [0usize; 6];
+    for case in 0..20_000 {
+        let mut t = t_paths(&mut p);
+        t_forks(&mut p, &mut t);
+        put_paths(&mut ee, &mut p, &t);
+        let len = if p.below(30) == 0 { 0 } else { 1 + p.below(5) as usize };
+        let route: Vec<usize> = (0..len).map(|_| p.below(t.paths.len() as u64) as usize).collect();
+        let ring = p.below(4) == 0;
+        for (k, &r) in route.iter().enumerate() {
+            let e = T_LIST + 0x10 * k as u32;
+            ee.set_u32(e, p.next() as u32 & !0xff);
+            ee.set_u32(e + 4, t_rec(r));
+            ee.set_u32(e + 8, p.next() as u32);
+            let next = if k + 1 < len { e + 0x10 } else if ring { T_LIST } else { 0 };
+            ee.set_u32(e + 0xc, next);
+        }
+        let hint = if p.below(5) == 0 { None } else { Some(t_spot_on(&mut p, &t)) };
+        let point = t_point(&mut p, &t);
+        let limit = t_limit(&mut p);
+        let refuse = p.below(3) == 0;
+        let holding = p.below(4) == 0;
+        let with_out = p.below(8) != 0;
+        let with_distance = p.below(4) != 0;
+        let fill = t_spot_on(&mut p, &t);
+        let d_fill = F(p.unit());
+        put_quad(&mut ee, T_POINT, point);
+        put_t_spot(&mut ee, T_OUT, fill);
+        put_f(&mut ee, T_D, d_fill);
+        if let Some(h) = hint {
+            put_t_spot(&mut ee, T_HINT, h);
+        }
+        t_clear_stack(&mut ee);
+        let what = format!("case {case}: route {route:?}, hint {hint:?}, {point:?}, limit {limit:?}, refuse {refuse}, holding {holding}");
+        let args = [
+            u64::from(T_TRACK),
+            if len == 0 { 0 } else { u64::from(T_LIST) },
+            if hint.is_some() { u64::from(T_HINT) } else { 0 },
+            u64::from(T_POINT),
+            if with_out { u64::from(T_OUT) } else { 0 },
+            if with_distance { u64::from(T_D) } else { 0 },
+            u64::from(refuse) * (1 + (p.next() & 0xff)),
+            u64::from(holding),
+        ];
+        ee.call(locate, &args, &[limit.0], BUDGET * 40);
+        let mut out = fill;
+        let mut d = d_fill;
+        let got = game_sim::ai::follow::route_locate(
+            &mut t, limit, &route, hint, point, refuse, holding, with_out.then_some(&mut out), with_distance.then_some(&mut d),
+        );
+        assert_eq!(ee.v0() as u32, u32::from(got), "{what}: the answer");
+        assert_eq!(t_bits(t_spot_at(&ee, T_OUT)), t_bits(out), "{what}: the spot");
+        assert_eq!(f32_at(&ee, T_D).0.to_bits(), d.0.to_bits(), "{what}: the distance");
+        check_paths(&ee, &t, &what);
+        seen[usize::from(got)] += 1;
+        seen[2] += usize::from(got && len > 1 && with_out && out.path != route[0] as u32 + 1);
+        seen[3] += usize::from(got && with_distance && d == F(-1.0));
+        seen[4] += usize::from(got && ring);
+        seen[5] += usize::from(got && refuse && route.iter().any(|&r| t.paths[r].flags & 0x100 != 0));
+    }
+    eprintln!(
+        "route locate: refused {}, found {}, a later path nearer {}, none placed {}, ring {}, keep-off passed over {}",
+        seen[0], seen[1], seen[2], seen[3], seen[4], seen[5]
+    );
+    assert!(seen[0] > 300 && seen[2] > 3000 && seen[3] > 300 && seen[4] > 3000 && seen[5] > 1000, "{seen:?}");
+}
+
+/// The vehicle brain's path look-ahead against SLUS-21104's, over 30,000 generated courses: half through
+/// the brain's vt+0x88 (`ai_path_look_ahead`, its route word 0 on the stack) and half straight into the
+/// look-ahead (`path_look_ahead`). Reaches that stay on the spot's path, run on over picked forks (speed
+/// words, draws and the four pick modes), run off the paths' end or the pool, with and without the nearest
+/// place on the route. The answer, both out spots, the scratch words and pools.
+///
+/// Left out, because the original never answers: a spot on a one-node path, and a refused drawn link.
+#[test]
+fn the_path_look_ahead_matches_the_track_objects() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let (forward, look) = match (addr("ai_path_look_ahead"), addr("path_look_ahead")) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(why), _) | (_, Err(why)) => return skip(&why),
+    };
+    let mut p = Pick(0x5308_100c_a4ea_d000);
+    let mut seen = [0usize; 10];
+    let mut case = 0;
+    while case < 30_000 {
+        let mut t = t_paths(&mut p);
+        t_forks(&mut p, &mut t);
+        let long: Vec<usize> = (0..t.paths.len()).filter(|&i| t.paths[i].nodes.len() > 1).collect();
+        if long.is_empty() {
+            continue;
+        }
+        let refuse = p.below(3) == 0;
+        if refuse {
+            for i in 0..t.paths.len() {
+                if t.paths[i].links.iter().any(|&l| t.paths[l].flags & 0x100 != 0) {
+                    t.paths[i].flags &= !0x20;
+                }
+            }
+        }
+        put_paths(&mut ee, &mut p, &t);
+        let first = long[p.below(long.len() as u64) as usize];
+        let mut spot = t_spot_on(&mut p, &t);
+        spot.path = first as u32 + 1;
+        spot.piece = 1 + p.below(t.paths[first].nodes.len() as u64) as u32;
+        let reach = match p.below(10) {
+            0 => F(0.0),
+            1 => F(-p.range(0.0, 10.0)),
+            2 => {
+                let x = p.range(0.0, 400.0);
+                F(p.stray(x))
+            }
+            _ => F(p.range(0.0, 400.0)),
+        };
+        let speed = F(p.range(0.0, 150.0));
+        let limit = t_limit(&mut p);
+        let draws: [F; 10] = std::array::from_fn(|_| match p.below(12) {
+            0 => F(0.0),
+            1 => F(f32::from_bits(0x3f7f_ffff)),
+            _ => F(p.unit()),
+        });
+        let point = t_point(&mut p, &t);
+        let holding = p.below(4) == 0;
+        let with_near = p.below(5) != 0;
+        let (fill, near_fill) = (t_spot_on(&mut p, &t), t_spot_on(&mut p, &t));
+        put_t_spot(&mut ee, T_HINT, spot);
+        put_t_spot(&mut ee, T_OUT, fill);
+        put_t_spot(&mut ee, T_NEAR, near_fill);
+        put_quad(&mut ee, T_POINT, point);
+        for (k, d) in draws.iter().enumerate() {
+            put_f(&mut ee, T_DRAWS + 4 * k as u32, *d);
+        }
+        t_clear_stack(&mut ee);
+        let refuse_word = u64::from(refuse) * (1 + (p.next() & 0xff));
+        let near_at = if with_near { u64::from(T_NEAR) } else { 0 };
+        let by_brain = p.below(2) == 0;
+        let what = format!(
+            "case {case}: spot {spot:?}, reach {reach:?}, speed {speed:?}, limit {limit:?}, refuse {refuse}, holding {holding}, near {with_near}, pick {}",
+            t.pick
+        );
+        if by_brain {
+            ee.set_u32(ee.stack, u32::from(holding));
+            ee.set_u32(ee.stack + 4, 0);
+            ee.set_u32(ee.stack + 8, 0);
+            ee.set_u32(ee.stack + 12, 0);
+            let brain = 0x01b6_0000 + 0x10 * p.below(0x100) as u32;
+            let args = [
+                u64::from(brain),
+                u64::from(T_TRACK),
+                u64::from(T_HINT),
+                u64::from(T_OUT),
+                u64::from(T_POINT),
+                near_at,
+                u64::from(T_DRAWS),
+                refuse_word,
+            ];
+            ee.call(forward, &args, &[reach.0, speed.0, limit.0], BUDGET * 60);
+        } else {
+            let args = [
+                u64::from(T_TRACK),
+                u64::from(T_HINT),
+                u64::from(T_OUT),
+                u64::from(T_POINT),
+                near_at,
+                u64::from(T_DRAWS),
+                refuse_word,
+                u64::from(holding),
+            ];
+            ee.call(look, &args, &[reach.0, speed.0, limit.0], BUDGET * 60);
+        }
+        let (mut out, mut near) = (fill, near_fill);
+        let before = t.free_routes;
+        let got = game_sim::ai::follow::look_ahead(
+            &mut t, reach, speed, limit, spot, point, &draws, refuse, holding, &mut out, with_near.then_some(&mut near),
+        );
+        assert_eq!(ee.v0() as u32, u32::from(got), "{what}: the answer");
+        assert_eq!(t_bits(t_spot_at(&ee, T_OUT)), t_bits(out), "{what}: the spot ahead");
+        assert_eq!(t_bits(t_spot_at(&ee, T_NEAR)), t_bits(near), "{what}: the nearest spot");
+        check_paths(&ee, &t, &what);
+        seen[usize::from(got)] += 1;
+        seen[2] += usize::from(got && out.path == spot.path);
+        seen[3] += usize::from(got && out.path != spot.path);
+        seen[4] += usize::from(!got && before > 0 && out == fill && !(refuse && t.paths[first].flags & 0x100 != 0));
+        seen[5] += usize::from(before == 0);
+        seen[6] += usize::from(got && with_near && near != near_fill);
+        seen[7] += usize::from(got && out.path != spot.path && t.paths[first].flags & 0x8 != 0);
+        seen[8] += usize::from(got && out.path != spot.path && t.paths[first].flags & 0x28 == 0x20);
+        seen[9] += usize::from(by_brain && got);
+        case += 1;
+    }
+    eprintln!(
+        "look-ahead: no {}, yes {}, on the spot's path {}, on past it {}, ran out {}, dry pool {}, nearest {}, by speed {}, by draw {}, through vt+0x88 {}",
+        seen[0], seen[1], seen[2], seen[3], seen[4], seen[5], seen[6], seen[7], seen[8], seen[9]
+    );
+    assert!(
+        seen[2] > 3000 && seen[3] > 6000 && seen[4] > 1000 && seen[5] > 100 && seen[6] > 6000 && seen[7] > 500 && seen[8] > 500 && seen[9] > 6000,
+        "{seen:?}"
+    );
 }

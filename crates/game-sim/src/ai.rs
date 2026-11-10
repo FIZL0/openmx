@@ -2191,7 +2191,7 @@ pub mod follow {
     use super::{add, scale, sub, unit};
     use crate::race::{Spot, TrackPaths, path_flags, ring_holds};
     use ps2_float::fpu::Acc;
-    use ps2_float::{F, Vf, vu};
+    use ps2_float::{F, Vf, fpu, vu};
 
     /// The brain's first flag word: run the avoidance on the heading (the 45° cone first).
     pub const AVOIDS: u64 = 0x1;
@@ -2387,6 +2387,297 @@ pub mod follow {
             b.assist_z = F(b.heading.z()) * b.speed;
             assist(b);
         }
+    }
+
+    /// A float word as the FPU's compares read it ([`fpu::operand`]): a denormal is 0, Inf/NaN the
+    /// saturated maximum.
+    fn seen(x: F) -> F {
+        F(fpu::operand(x.0.to_bits()))
+    }
+
+    /// The nearest place to `point` on one path, `path`, across the ground (the original's path locate,
+    /// with a start hint): `out` gets the path, and the stretch and `along` of the nearest stretch's
+    /// clamped first-point line, as in [`spot`]; `distance` the ground distance to it.
+    ///
+    /// Without a `hint` the walk starts at the path's first node. A hint on this path starts it at the
+    /// hint's node, and when the path links to itself the walk goes on from the first node once it
+    /// reaches the last; a hint on another path starts at the first node, the walked length starting
+    /// at the way along the paths from the hint ([`TrackPaths::distance`], which runs the track's
+    /// route search when the hint is not behind on one path). With `limit` not below 0 the walk stops
+    /// once the length walked, counted from the hint, reaches it. With `holding_only` only a stretch
+    /// whose ring holds the point counts ([`ring_holds`]).
+    ///
+    /// A start node with no next one (a lone node, or a hint on the last) is the place itself, `along`
+    /// 0. When no stretch is taken `out` keeps its stretch and `along`, and `distance` gets −1; the
+    /// distance is the squared one when that is not above 0.
+    ///
+    /// `false`, nothing written, when `refuse` and the path is [`path_flags::KEEP_OFF`]. A hint on
+    /// another path has to name a path and a node.
+    #[allow(clippy::too_many_arguments)]
+    pub fn locate_on(
+        t: &mut TrackPaths, limit: F, path: usize, hint: Option<Spot>, point: Vf, refuse: bool, holding_only: bool,
+        out: &mut Spot, distance: Option<&mut F>,
+    ) -> bool {
+        if refuse && t.paths[path].flags & path_flags::KEEP_OFF != 0 {
+            return false;
+        }
+        out.path = path as u32 + 1;
+        let (mut node, mut walked, mut wraps) = (Some(0), F(0.0), false);
+        match hint {
+            Some(h) if h.path == out.path => {
+                node = h.piece.checked_sub(1).map(|n| n as usize);
+                wraps = t.paths[path].links.contains(&path);
+                if let Some(n) = node {
+                    walked = F(fpu::neg(h.along.0)) * t.paths[path].nodes[n].span;
+                }
+            }
+            Some(h) => walked = t.distance(h, Spot::on(path, 0, F(0.0)), refuse),
+            None => {}
+        }
+        let nodes = &t.paths[path].nodes;
+        let next = |n: usize| (n + 1 < nodes.len()).then_some(n + 1);
+        let (px, pz) = (F(point.x()), F(point.z()));
+        if let Some(n) = node
+            && next(n).is_none()
+        {
+            out.piece = n as u32 + 1;
+            out.along = F(0.0);
+            if let Some(d) = distance {
+                let c = nodes[n].points[0];
+                let (dx, dz) = (px - F(c.x()), pz - F(c.z()));
+                *d = Acc::mula(dx, dx).madd(dz, dz).sqrt();
+            }
+            return true;
+        }
+        let mut best = F(-1.0);
+        while let Some(i) = node {
+            let Some(j) = next(i) else { break };
+            if !(seen(limit) < F(0.0) || seen(walked) < seen(limit)) {
+                break;
+            }
+            if !holding_only || ring_holds(point, &nodes[i], &nodes[j]) {
+                let (a, b) = (nodes[i].points[0], nodes[j].points[0]);
+                let (sx, sz) = (F(b.x()) - F(a.x()), F(b.z()) - F(a.z()));
+                let (rx, rz) = (px - F(a.x()), pz - F(a.z()));
+                let len = nodes[i].span;
+                let along = Acc::mula(sx, rx).madd(sz, rz) / (len * len);
+                let along = if !(along <= F(1.0)) {
+                    F(1.0)
+                } else if along < F(0.0) {
+                    F(0.0)
+                } else {
+                    along
+                };
+                let (ox, oz) = (rx - sx * along, rz - sz * along);
+                let d2 = Acc::mula(ox, ox).madd(oz, oz);
+                if d2 < best || best < F(0.0) {
+                    best = d2;
+                    out.piece = i as u32 + 1;
+                    out.along = along;
+                }
+            }
+            walked = walked + nodes[i].span;
+            node = Some(j);
+            if wraps && next(j).is_none() {
+                node = Some(0);
+                wraps = false;
+            }
+        }
+        if let Some(d) = distance {
+            *d = if best <= F(0.0) { best } else { best.sqrt() };
+        }
+        true
+    }
+
+    /// The nearest place to `point` on any path of `route` (the original's route locate): each path in
+    /// turn through [`locate_on`] with the same arguments, a path [`path_flags::KEEP_OFF`] left out when
+    /// `refuse`. The first answer is taken whatever it is, a later one when its distance is not below
+    /// 0 and is below the one taken — or when the one taken is still −1 (nothing placed). `out` gets
+    /// the place, `distance` its distance.
+    ///
+    /// The places come through one scratch spot the paths take turns writing, so a path that places
+    /// nothing hands on its own path with the stretch and `along` the path before it left. The
+    /// original's scratch, and the place it gives when every path is left out, are words on its stack
+    /// it never set: here they start as [`Spot::default`] (see the journal).
+    ///
+    /// `false` on an empty route, or when [`locate_on`] refuses a path (it cannot here).
+    #[allow(clippy::too_many_arguments)]
+    pub fn route_locate(
+        t: &mut TrackPaths, limit: F, route: &[usize], hint: Option<Spot>, point: Vf, refuse: bool, holding_only: bool,
+        out: Option<&mut Spot>, distance: Option<&mut F>,
+    ) -> bool {
+        let unset = (Spot::default(), Spot::default());
+        route_locate_over(t, limit, route, hint, point, refuse, holding_only, out, distance, unset)
+    }
+
+    /// [`route_locate`] with its unset words given: the place it starts with and its scratch spot.
+    #[allow(clippy::too_many_arguments)]
+    fn route_locate_over(
+        t: &mut TrackPaths, limit: F, route: &[usize], hint: Option<Spot>, point: Vf, refuse: bool, holding_only: bool,
+        out: Option<&mut Spot>, distance: Option<&mut F>, (mut took, mut scratch): (Spot, Spot),
+    ) -> bool {
+        if route.is_empty() {
+            return false;
+        }
+        let mut best = F(-1.0);
+        for &p in route {
+            if refuse && t.paths[p].flags & path_flags::KEEP_OFF != 0 {
+                continue;
+            }
+            let mut d = F(0.0);
+            if !locate_on(t, limit, p, hint, point, refuse, holding_only, &mut scratch, Some(&mut d)) {
+                return false;
+            }
+            if seen(best) == F(-1.0) || (!(seen(d) < F(0.0)) && seen(d) < seen(best)) {
+                took = scratch;
+                best = d;
+            }
+        }
+        if let Some(o) = out {
+            *o = took;
+        }
+        if let Some(d) = distance {
+            *d = best;
+        }
+        true
+    }
+
+    /// The path `from` leads on to, as the look-ahead picks it; `None` where the original reads past
+    /// its link list or never returns (see [`look_ahead`]).
+    ///
+    /// With path flag `0x8`, the link whose `+0xc` word, read as a speed, is nearest `speed`. Else
+    /// with flag `0x20`, link `count × draw` (truncated). Else by [`TrackPaths::pick`]: the shortest
+    /// (3), the shortest but a checkpoint path the longest (2), the longest (1), or the longest
+    /// checkpoint path (anything else). With `refuse` a [`path_flags::KEEP_OFF`] link is passed over;
+    /// when every link is, the first is taken. A tie keeps the first found.
+    fn pick_link(t: &TrackPaths, from: usize, speed: F, draw: F, refuse: bool) -> Option<usize> {
+        let path = &t.paths[from];
+        let links = &path.links;
+        let first = *links.first()?;
+        let off = |l: usize| refuse && t.paths[l].flags & path_flags::KEEP_OFF != 0;
+        if path.flags & 0x8 != 0 {
+            let (mut best, mut pick) = (F(-1.0), first);
+            for &l in links.iter().filter(|&&l| !off(l)) {
+                let gap = (F(f32::from_bits(t.paths[l].word_0c)) - speed).abs();
+                if seen(gap) < seen(best) || seen(best) == F(-1.0) {
+                    (best, pick) = (gap, l);
+                }
+            }
+            return Some(pick);
+        }
+        if path.flags & 0x20 != 0 {
+            let k = (F(fpu::from_i32(links.len() as i32)) * draw).to_i32();
+            let l = *links.get(usize::try_from(k).ok()?)?;
+            return (!off(l)).then_some(l);
+        }
+        let (mut best, mut pick) = (F(-1.0), first);
+        for &l in links.iter().filter(|&&l| !off(l)) {
+            let len = seen(t.paths[l].length);
+            let checkpoint = t.paths[l].flags & path_flags::CHECKPOINT != 0;
+            let longest = match t.pick {
+                3 => false,
+                2 => checkpoint,
+                1 => true,
+                _ if checkpoint => true,
+                _ => continue,
+            };
+            let better = if longest { !(len <= seen(best)) } else { len < seen(best) };
+            if better || seen(best) == F(-1.0) {
+                (best, pick) = (len, l);
+            }
+        }
+        Some(pick)
+    }
+
+    /// The place `reach` on along the paths from `spot` (the vehicle brain's path look-ahead, its
+    /// vt+0x88 with no route given), into `out`; and, with `near`, the nearest place to `point` on the
+    /// paths that took ([`route_locate`] with `limit`, hinted at `spot`; its unset spots are the ones
+    /// the measure to the path's end left on the stack, `spot` the scratch and the path's last stretch
+    /// end the place it starts with).
+    ///
+    /// From `spot` to the end of its path is the way along it to its last stretch's end
+    /// ([`TrackPaths::distance`]). While that, and the length of each path picked after it, add up to
+    /// less than `reach`, the way goes on to the path [`pick_link`] picks at the end of the last one
+    /// (`speed`, the first of the brain's ten `draws`, `refuse`). The place is then found on the last
+    /// path, from `spot` or the path's start, stretch by stretch: `along` the part of the stretch the
+    /// rest of `reach` covers, over the stretch's span. Each path the way takes holds a route-pool
+    /// entry, all handed back at the end.
+    ///
+    /// `false`, nothing written and no entry kept, when `refuse` and `spot`'s path is
+    /// [`path_flags::KEEP_OFF`], when the pool runs dry, or when the paths end before `reach` (`out` not
+    /// written then either); and when the route locate fails (`out` written). Also `false` where the
+    /// original does not answer at all: `spot` on a one-node path (its measure to the path's end
+    /// recurses without end), a fork with no links, a flag-`0x20` draw outside the links, or a refused
+    /// drawn link (the original spins for ever).
+    #[allow(clippy::too_many_arguments)]
+    pub fn look_ahead(
+        t: &mut TrackPaths, reach: F, speed: F, limit: F, spot: Spot, point: Vf, draws: &[F; 10], refuse: bool,
+        holding_only: bool, out: &mut Spot, near: Option<&mut Spot>,
+    ) -> bool {
+        let Some((first, from)) = spot.at() else { return false };
+        if refuse && t.paths[first].flags & path_flags::KEEP_OFF != 0 {
+            return false;
+        }
+        let last = t.paths[first].nodes.len() - 1;
+        if last == 0 {
+            return false;
+        }
+        let end = Spot::on(first, last - 1, F(1.0));
+        let to_end = t.distance(spot, end, false);
+        if t.free_routes == 0 {
+            return false;
+        }
+        t.free_routes -= 1;
+        let mut route = vec![first];
+        let (mut path, mut node, mut along) = (first, from, spot.along);
+        let (mut total, mut length) = (to_end, to_end);
+        if seen(total) < seen(reach) {
+            loop {
+                let Some(next) = pick_link(t, path, speed, draws[0], refuse) else {
+                    t.free_route(&mut route);
+                    return false;
+                };
+                (path, node, along, length) = (next, 0, F(0.0), t.paths[next].length);
+                if t.free_routes == 0 {
+                    t.free_route(&mut route);
+                    return false;
+                }
+                t.free_routes -= 1;
+                total = total + length;
+                route.push(next);
+                if !(seen(total) < seen(reach)) {
+                    break;
+                }
+            }
+        }
+        total = total - length;
+        loop {
+            if !(seen(total) < seen(reach)) {
+                break;
+            }
+            total = total + (F(1.0) - along) * t.paths[path].nodes[node].span;
+            if !(seen(total) < seen(reach)) {
+                break;
+            }
+            node += 1;
+            along = F(0.0);
+            if node == t.paths[path].nodes.len() {
+                t.free_route(&mut route);
+                return false;
+            }
+        }
+        let span = t.paths[path].nodes[node].span;
+        *out = Spot::on(path, node, (span + (reach - total)) / span);
+        let found = match near {
+            // The route locate's unset words lie where the measure to the path's end copied its two
+            // spots.
+            Some(near) => {
+                route_locate_over(t, limit, &route, Some(spot), point, refuse, holding_only, Some(near), None, (end, spot))
+            }
+            None => true,
+        };
+        t.free_route(&mut route);
+        found
     }
 }
 

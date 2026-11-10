@@ -1263,6 +1263,9 @@ pub struct RacePath {
     pub flags: u32,
     /// The length (`+8`).
     pub length: F,
+    /// The file's tag `0x18` word (`+0xc`): the AI's look-ahead reads it as a float, the speed to
+    /// pick this path at from a fork whose path has flag `0x8`.
+    pub word_0c: u32,
     /// Its nodes, at least one.
     pub nodes: Vec<PathNode>,
     /// The paths it leads on to, by index.
@@ -1294,6 +1297,10 @@ pub struct TrackPaths {
     pub behind: F,
     /// The lap's length (`+0x54`). 0 here; the race sets it.
     pub lap_length: F,
+    /// How the AI's look-ahead picks the way on at a fork (`+0xac`): 3 the shortest link, 2 the
+    /// shortest but a checkpoint path the longest, 1 the longest, anything else the longest
+    /// checkpoint path. Every loader asks for 3.
+    pub pick: u32,
     pub paths: Vec<RacePath>,
     /// The entries left in the route pool (`+0x98`), the parent pool (`+0xa0`) and the candidate pool
     /// (`+0xa8`).
@@ -1372,7 +1379,7 @@ impl TrackPaths {
                     _ => return None,
                 }
             }
-            paths.push(RacePath { flags: p.flags, length: p.length, nodes: p.nodes.clone(), links, dist: F::ZERO, best: None });
+            paths.push(RacePath { flags: p.flags, length: p.length, word_0c: p.word_0c, nodes: p.nodes.clone(), links, dist: F::ZERO, best: None });
         }
         let pool = POOL_PER_PATH * paths.len();
         let mut t = TrackPaths {
@@ -1380,6 +1387,7 @@ impl TrackPaths {
             ahead: F(200.0),
             behind: F(200.0),
             lap_length: F::ZERO,
+            pick: 3,
             paths,
             free_routes: pool,
             free_parents: pool,
