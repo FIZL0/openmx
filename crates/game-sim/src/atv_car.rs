@@ -20,8 +20,11 @@
 //! order. The car is described by what the listeners read and write ([`Car`], [`Tire`]), not by its
 //! layout; the field map is research/oracle.txt's (`# MD39`, `# MD39b`, `# MD106`).
 //!
-//! Proof: `tests/mxvatv_car_frame.rs`, SLUS-21104's world step off MD39a's buggy image with every
-//! call hooked.
+//! [`update`], the car's once-a-frame update outside the world step (vt `+0x10c`), is the same: its own
+//! code ported, its calls handed out.
+//!
+//! Proof: `tests/mxvatv_car_frame.rs`, SLUS-21104's world step and the car's update off MD39a's buggy
+//! image with every call hooked.
 
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
@@ -144,6 +147,14 @@ pub enum Call {
     Landed(Vf),
     GroundUnder(Vf),
     NodePosition,
+    /// The update's ([`update`]): the vehicle's ghost step (vt `+0x3a4`, as the quad's); the
+    /// vehicle's hazard-surface clock (vt `+0x45c`, the quad's [`crate::quad::Call::HazardSurface`]),
+    /// handed the longest of the four tires' surface times and whether a tire is sunk; the class's own
+    /// per-frame slot (vt `+0x488`); and last, always, the vehicle's base update.
+    Ghost(F),
+    HazardClock { dt: F, time: F, sunk: bool },
+    ClassStep,
+    VehicleUpdate(F),
 }
 
 /// Whoever runs the calls the car's listeners make. A `Vec<Call>` just lists them.
@@ -270,6 +281,56 @@ fn hold_yaw_rate(rates: &mut Vf, limit: F) {
         let sign = if y < 0.0 { -1 } else { 1 };
         rates.0[1] = (limit * F::from(sign)).0;
     }
+}
+
+/// What the car's [`update`] reads and keeps beyond [`Car`] (research/oracle.txt `# MD106d`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Update {
+    /// The game's still-camera switch: set, the update is the vehicle's base update alone.
+    pub still_camera: bool,
+    /// The vehicle state's mode, or none. With none, or in mode 3 or 4, the update counts the latch
+    /// instead of measuring the hazard surfaces.
+    pub vehicle_state: Option<u32>,
+    /// The vehicle's surface hazard table (the quad's), and each tire's surface, an index into it.
+    pub surfaces: [crate::quad::Surface; 16],
+    pub tire_surface: [u8; 4],
+    /// Some tire is on a hazard surface; kept from the last frame it was measured.
+    pub on_hazard: bool,
+}
+
+/// Counted past this many frames, the latch ([`Car::latch`]) is let go.
+const LATCH_FRAMES: i32 = 3;
+
+/// **The car's update**, once a frame outside the world step. Unless the still camera is on (when only
+/// the vehicle's base update runs): the ghost step; then, with no vehicle state or in its mode 3 or 4,
+/// the latch counted (a set latch counts frames up to [`LATCH_FRAMES`], and on the next is let go with
+/// its count cleared); else the hazard surfaces: on one when any tire's surface is a hazard, sunk when
+/// also any tire is solidly down, and the vehicle's hazard clock handed the longest of the four tires'
+/// surface times. Then the class's own step and the vehicle's base update.
+pub fn update(u: &mut Update, car: &mut Car, body: &mut Body, dt: F, s: &mut impl Steps) {
+    if !u.still_camera {
+        s.call(Call::Ghost(dt), car, body);
+        if matches!(u.vehicle_state, None | Some(3 | 4)) {
+            if car.latch {
+                if car.latch_count < LATCH_FRAMES {
+                    car.latch_count += 1;
+                } else {
+                    car.latch = false;
+                    car.latch_count = 0;
+                }
+            }
+        } else {
+            let surface = u.tire_surface.map(|k| u.surfaces[usize::from(k)]);
+            u.on_hazard = surface.iter().any(|s| s.hazard);
+            let sunk = u.on_hazard && car.tires.iter().any(|t| t.solid);
+            let time = surface[REAR_LEFT].time.max(surface[REAR_RIGHT].time);
+            let time = surface[FRONT_RIGHT].time.max(time);
+            let time = surface[FRONT_LEFT].time.max(time);
+            s.call(Call::HazardClock { dt, time, sunk }, car, body);
+        }
+        s.call(Call::ClassStep, car, body);
+    }
+    s.call(Call::VehicleUpdate(dt), car, body);
 }
 
 /// SLUS-21104's physics world as the car's frame sees it: one rigid body, the car's three

@@ -11065,5 +11065,16 @@ tip_popup_arm               boot 0x0029abc0 (popup, 1). Not read further.
 #   from ra 0x004cc428, record +0x24 = dot(up, normal) <= 0x3f34fdf4; latch; 0x00194c20(node, 0, car +0xc40).
 #   The vt +0x10c update 0x004cc4e0 is not part of the world step.
 #   Settled here: atv_car_listener_48 is the PreProcess (preforce list), atv_car_listener_60 the Force body.
+# MD106d — the car's update atv_car_update 0x004cc4e0 (a0 car, f12 dt; game_sim::atv_car::update; tests/
+#   mxvatv_car_frame.rs the_cars_update_is_the_originals, 10,000 generated updates off md39a/buggy.ee.bin,
+#   its four calls hooked). Journal: research/journal/2026-11-10-md106d-mxvatv-car-update.
+#   *(0x003eab60) +0x225 bit 3 (the still camera) set: base update 0x004a79c0(car, dt) alone. Else vt +0x3a4
+#   (buggy: 0x004cd4e0 = j 0x004a74e0, the vehicle's ghost step; f12 dt). Car +0xbc4 (vehicle state) 0, or its
+#   +0x28 3 or 4: latch count (+0x31c set: +0x12c4 < 3 (slti) -> +1, else +0x31c = +0x12c4 = 0). Else +0xc20 =
+#   any tire's hazard word set (car +0xdf4 + 0xc * tire byte +0xf0: +0 word, +4 time; 16 entries, a string
+#   after), sunk = +0xc20 && any tire +0xa4; f13 = max.s(FL, max.s(FR, max.s(RL, RR))) of the times; vt +0x45c
+#   0x004aad60 (hazard clock: a0 car, f12 dt, f13, a1 sunk 0/1). Then vt +0x488 (buggy 0x004c5510, 6096
+#   bytes, a0 car) and the base update. The buggy's vt +0x10c 0x004c6ce0 calls this at its end.
+#   Buggy image: +0xbc4 0x01c15c90 (mode 1), still bit clear, every tire on surface 0, table all zero.
 atv_car_tire_step           atv 0x004b5ca0 = a car tire's substep (a0 tire, f12 h): suspension 0x004b5cf0, then 0x004b62c0, 0x004b6400
 atv_car_wreck_timer         atv 0x004cd0b0 = the car's wreck timer, vt +0x484 (a0 car, f12 dt): SLUS-21104's own, states 0xd/0xe
