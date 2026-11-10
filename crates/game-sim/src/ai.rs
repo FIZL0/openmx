@@ -36,6 +36,10 @@
 //! them and the flags gate them; the scene sweep itself (a sweep of the fan against each solid object)
 //! is not ported.
 //!
+//! [`path`] is the track's AI path as the AI queries it (S282): the nearest stretch of the racing line
+//! to a point, whether a point is on the track between two nodes, and the line's direction at a node;
+//! [`path::off_track`] puts the three together as [`avoid`]'s keep-on-the-track push.
+//!
 //! [`feed`] is the rider-to-brain copy (S12e): once a frame, before the brain thinks, the rider hands
 //! it its bike's frame and motion, the ground under it and the ground's facing a little way ahead, and
 //! the on-the-ground and tricking bits [`controls`] and [`plan_trick`] read; on a bump it may roll a
@@ -1007,6 +1011,178 @@ pub fn feed(rider: &Rider, brain: &mut Senses, world: &mut dyn crate::world::Wor
         brain.bumps |= bump::B | bump::A;
     } else {
         brain.bumps &= !(bump::B | bump::A);
+    }
+}
+
+// --- the track's AI path (S282) ----------------------------------------------------------------------
+
+/// The track's AI path as the AI asks it things (S282): a chain of nodes down the racing line, each a
+/// cross-section of the track — a centre and two edge points across it — with the length on to the
+/// next node. Between a node and the next lies a six-sided patch of track (both cross-sections'
+/// three points); [`segment_holds`] says whether a point is on that patch, [`locate`] finds the
+/// stretch of line nearest a point, and [`node_direction`] is which way the line runs at a node.
+///
+/// Only the ground plane counts: every query reads `x` and `z` and leaves `y` alone.
+///
+/// [`off_track`] is the avoidance's keep-on-the-track test ([`avoid`]'s `edge`), made of the three.
+/// The path's reading off the disc (S282c) and the follower that rides it (S282b) are not ported.
+pub mod path {
+    use super::{sub, unit};
+    use ps2_float::fpu::Acc;
+    use ps2_float::{F, Vf};
+
+    /// One cross-section of the track.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct Node {
+        /// Where the racing line crosses it.
+        pub centre: Vf,
+        /// Its two ends, one either side of the centre (the original's first one, then the second).
+        pub edges: [Vf; 2],
+        /// The length on to [`Node::next`]; a stretch of nothing has 0.
+        pub length: F,
+        /// The node after this one, `None` at the path's end.
+        pub next: Option<usize>,
+    }
+
+    /// The nodes of a track's AI path, linked by [`Node::next`].
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub struct Net {
+        pub nodes: Vec<Node>,
+    }
+
+    /// A point on the line: the stretch from `node` to its next, `along` that far through it (0..1).
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct Place {
+        pub node: usize,
+        pub along: F,
+    }
+
+    /// What [`locate`] finds.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct Located {
+        /// The nearest stretch, `None` when no stretch was taken (every one refused by `holding_only`).
+        pub place: Option<Place>,
+        /// How far the point is from it across the ground; −1 when nothing was taken, and the squared
+        /// distance, not the distance, when that is not above 0 (the original takes the root only of a
+        /// positive square).
+        pub distance: F,
+    }
+
+    /// The nearest stretch of the line to `point`, walking from `first` down the chain. With `limit`
+    /// not below 0 the walk stops once the stretches it has passed add up to `limit`; with
+    /// `holding_only` a stretch counts only when [`segment_holds`] puts the point on it. Nearest is
+    /// across the ground, to the stretch's centre line clamped to its ends; on a tie the earlier
+    /// stretch keeps it. A path of one node places the point on that node, `along` 0.
+    ///
+    /// This is the lookup with no hint (the avoidance's): the original can also start from a place it
+    /// found before, which is not ported (S282b).
+    pub fn locate(net: &Net, first: usize, point: Vf, limit: F, holding_only: bool) -> Located {
+        let n = &net.nodes;
+        let (px, pz) = (F(point.x()), F(point.z()));
+        if n[first].next.is_none() {
+            let c = n[first].centre;
+            let (dx, dz) = (px - F(c.x()), pz - F(c.z()));
+            let distance = Acc::mula(dx, dx).madd(dz, dz).sqrt();
+            return Located { place: Some(Place { node: first, along: F(0.0) }), distance };
+        }
+        let (mut best, mut place, mut walked) = (F(-1.0), None, F(0.0));
+        let mut at = Some(first);
+        while let Some(i) = at {
+            let Some(j) = n[i].next else { break };
+            if !(limit < F(0.0) || walked < limit) {
+                break;
+            }
+            if !holding_only || segment_holds(net, point, i, j) {
+                let (a, b) = (n[i].centre, n[j].centre);
+                let (sx, sz) = (F(b.x()) - F(a.x()), F(b.z()) - F(a.z()));
+                let (rx, rz) = (px - F(a.x()), pz - F(a.z()));
+                let len = n[i].length;
+                let t = Acc::mula(sx, rx).madd(sz, rz) / (len * len);
+                let t = if !(t <= F(1.0)) {
+                    F(1.0)
+                } else if t < F(0.0) {
+                    F(0.0)
+                } else {
+                    t
+                };
+                let (ox, oz) = (rx - sx * t, rz - sz * t);
+                let d2 = Acc::mula(ox, ox).madd(oz, oz);
+                if d2 < best || best < F(0.0) {
+                    best = d2;
+                    place = Some(Place { node: i, along: t });
+                }
+            }
+            walked = walked + n[i].length;
+            at = Some(j);
+        }
+        let distance = if best <= F(0.0) { best } else { best.sqrt() };
+        Located { place, distance }
+    }
+
+    /// Whether `point` lies on the patch of track from node `seg` to node `next`: the six-sided outline
+    /// through `seg`'s first edge, `next`'s first edge, centre and second edge, then `seg`'s second
+    /// edge and centre, by counting the outline's sides it crosses going one way along `z`.
+    pub fn segment_holds(net: &Net, point: Vf, seg: usize, next: usize) -> bool {
+        let (a, b) = (&net.nodes[seg], &net.nodes[next]);
+        let outline = [
+            (a.edges[0], b.edges[0]),
+            (b.edges[0], b.centre),
+            (b.centre, b.edges[1]),
+            (b.edges[1], a.edges[1]),
+            (a.edges[1], a.centre),
+            (a.centre, a.edges[0]),
+        ];
+        let (px, pz) = (F(point.x()), F(point.z()));
+        let mut inside = false;
+        for (from, to) in outline {
+            let (fx, tx) = (F(from.x()), F(to.x()));
+            let run = tx - fx;
+            let s = run * (px - fx);
+            if s < F(0.0) {
+                continue;
+            }
+            let run2 = run * run;
+            if !(s < run2) {
+                continue;
+            }
+            let (fz, tz) = (F(from.z()), F(to.z()));
+            if fz + s / run2 * (tz - fz) < pz {
+                inside = !inside;
+            }
+        }
+        inside
+    }
+
+    /// The unit direction from `node` on to its next node, written into `io`, when `node` has a next
+    /// and a length above 0; otherwise `io` is left as it was and `false` comes back. The direction is
+    /// the VU0's normalise of the difference, and its `w` is the next node's centre's.
+    pub fn node_direction(net: &Net, node: Option<usize>, io: &mut Vf) -> bool {
+        let Some(i) = node else { return false };
+        let Some(j) = net.nodes[i].next else { return false };
+        if net.nodes[i].length <= F(0.0) {
+            return false;
+        }
+        *io = unit(sub(net.nodes[j].centre, net.nodes[i].centre));
+        true
+    }
+
+    /// The avoidance's keep-on-the-track test, [`super::avoid`]'s `edge`: `ahead` placed on the path
+    /// starting at `first`, then `None` when the stretch it is nearest, or the one after, holds it —
+    /// or when the path ends within two nodes of that stretch — else the direction at the rider's own
+    /// `node` ([`node_direction`]), or `ahead` itself when that node gives none.
+    ///
+    /// The original asks only when the race has a path net and the rider both a path and a node it
+    /// is at; without them it does not push at all, so the caller hands [`super::avoid`] no `edge`.
+    pub fn off_track(net: &Net, first: usize, node: usize, ahead: Vf) -> Option<Vf> {
+        let seg = locate(net, first, ahead, F(-1.0), false).place?.node;
+        let next = net.nodes[seg].next?;
+        let after = net.nodes[next].next?;
+        if segment_holds(net, ahead, seg, next) || segment_holds(net, ahead, next, after) {
+            return None;
+        }
+        let mut io = ahead;
+        node_direction(net, Some(node), &mut io);
+        Some(io)
     }
 }
 
