@@ -1572,6 +1572,20 @@ ai_character_read          boot 0x00384f00 reads AIChrctr.aip section AI_<skill>
 #                                           SpeedMin/MaxTolerance +0x260/+0x264), Min/Max pairs
 #                                           lerped by the event's difficulty; S12c: Near/FarCollisionRange are
 #                                           stored square-rooted at +0x280/+0x284
+#                                           S283 (ai::read_character, oracled over 10,000 files in
+#                                           tests/ai.rs): reads DefaultALODSettings, then selects
+#                                           AI_<skill>; a missed select leaves NO section selected, so
+#                                           every later key is missing (no fallback to the ALOD section).
+#                                           Difficulty d = event+0x117 (app_pointer +0x3d4 +0xc); t =
+#                                           (d-70)*0.0333333 when d <= 100, else (d-100)*0.04; Min/Max
+#                                           pairs mula/madd lerp, Min/Max/OverDrive take max..overdrive
+#                                           above 100, ALOD pairs copy max above 100. Post-steps run on a
+#                                           missing key too: ranges sqrt, separation rate *0.1, landing
+#                                           pitch *pi/180, ALODSpeed *1.4666667, preload-per-mph *0.006818.
+#                                           Two rand() after WheelieMax..WithoutClutch: start-gate delay
+#                                           *= unit; wheelie max = 0.5 + (x-0.5)*unit; none when the file
+#                                           is missing. A Min/Max pair before any section faults (section -1).
+#                                           The folder comes from the "Rider\" prefix path_prefix_init fills.
 ai_rsqrt                    boot 0x00284b80 (x) rsqrt.s 1.0 / sqrt(x)
 ai_acos                     boot 0x002849d0 (x) clamp twice, then fine_acos_table: acos(x)
 vehicle_wreck               boot 0x00252ca0 Wreck(reason), vtable slot +0xfc: sets vehicle+0xb7c = 1

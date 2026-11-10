@@ -207,6 +207,12 @@ pub struct Section<'a> {
 }
 
 impl<'a> Section<'a> {
+    /// Whether the file has the section: the original's section select answers this, and a reader
+    /// that goes on after a miss reads nothing (ai::read_character).
+    pub fn found(&self) -> bool {
+        self.which.is_some()
+    }
+
     /// The value of a key as the file writes it, or `None` when the section does not have one. The
     /// first match wins, as it must for a linear scan.
     pub fn text(&self, key: &str) -> Option<&'a str> {
