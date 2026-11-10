@@ -41,11 +41,11 @@ python3 --version          # must be 3.11 or newer
 
 Reading the disc, the ELFs and the decompilation runs on a stock Python with no packages. The task list
 (`./kit plan`, `./kit done`) and the unattended run (`./kit run`) use
-[agent-runner](https://github.com/FIZL0/agent-runner), a stdlib-only package. Install it as a uv tool
-(for a newer version, run it again with the new tag and `--force`):
+[agent-runner](https://github.com/FIZL0/agent-runner), a stdlib-only package. Install it as a uv tool, and
+`uv tool upgrade agent-runner` for the newest:
 
 ```sh
-uv tool install git+https://github.com/FIZL0/agent-runner@v0.19.5
+uv tool install git+https://github.com/FIZL0/agent-runner
 ```
 
 `./kit` stays on the system Python and adds the tool's venv (`$UV_TOOL_DIR` or `~/.local/share/uv/tools`) to
