@@ -264,8 +264,10 @@ class Config:
     @property
     def fix_timeout(self) -> int:
         """Seconds a merge fixer may take before the merge is left for a human instead: 1200 left
-        a two-sided race.rs conflict (S294a, 11-09) for a human."""
-        return int(self.raw.get('run', {}).get('fix_timeout', 2400))
+        a two-sided race.rs conflict (S294a, 11-09) for a human, and 2400 an append-both ai.rs one at
+        load 120 (S281, 11-10), most of it in the build. Fixes run outside the merge lock now, so a long
+        one holds no other merge up."""
+        return int(self.raw.get('run', {}).get('fix_timeout', 5400))
 
     @property
     def fix_model(self) -> str:
