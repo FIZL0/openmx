@@ -17228,3 +17228,606 @@ fn the_nearby_sweep_with_its_pairs_is_the_originals() {
     assert!(seen.get("hit").copied().unwrap_or(0) >= 150, "the sweeps hit: {seen:?}");
     assert!(seen.get("missed").copied().unwrap_or(0) >= 100, "{seen:?}");
 }
+
+// --- S280: the rider ragdoll world's step ---------------------------------------------------------
+
+use game_sim::handling::ragdoll as rag;
+use game_sim::ragdoll::Tables;
+use node::Ram as _;
+
+/// The world step, the rider ragdoll's world and the frame's call that steps it.
+const WORLD_STEP: u32 = 0x0049_6b70;
+const RAG_WORLD: u32 = 0x010c_c6f0;
+/// The world's constraint vtables (the solve at `+0x18`): the pin, the bone collision, the box.
+const PIN_VT: u32 = 0x003c_d0e0;
+const BONE_VT: u32 = 0x003c_d080;
+const BOX_VT: u32 = 0x003c_d0c0;
+/// The world's force vtables (the push at `+0xc`): the listener wrapper, the directed force; and the
+/// rider's listener's (the rider `0x250` before it).
+const WRAPPER_VT: u32 = 0x003c_d150;
+const DIRECTED_VT: u32 = 0x003c_d1b0;
+const RIDER_LISTENER_VT: u32 = 0x003d_1250;
+const RIDER_LISTENER: u32 = 0x250;
+const PIN_SOLVE: u32 = 0x0049_8c10;
+const BOX_SOLVE: u32 = 0x0049_9e20;
+const DIRECTED_PUSH: u32 = 0x0049_6fe0;
+const RIDER_FORCE: u32 = 0x004f_0690;
+
+fn rag_tables() -> &'static Tables {
+    static T: std::sync::OnceLock<Tables> = std::sync::OnceLock::new();
+    T.get_or_init(Tables::build)
+}
+
+/// What the port's rider world ran, kind by kind.
+#[derive(Debug, Default)]
+struct RagRun {
+    steps: usize,
+    pins: usize,
+    boxes: usize,
+    bones: usize,
+    riders: usize,
+    directed: usize,
+}
+
+/// The test's [`rag::Rig`]: the kinds by their vtables, the bone collision [`bone::solve`]'s on the
+/// map with the scene the original's, and nothing else expected.
+struct RamRig<'a> {
+    map: &'a track::Terrain<'a>,
+    curve: &'a CurveTable,
+    run: Rc<RefCell<RagRun>>,
+}
+
+impl<'a, 'b> rag::Rig<RiderRam<'b>> for RamRig<'a> {
+    fn constraint(&mut self, m: &mut RiderRam<'b>, c: u32) -> rag::Constraint {
+        let mut r = self.run.borrow_mut();
+        match m.word(c + 0x10) {
+            PIN_VT => {
+                r.pins += 1;
+                rag::Constraint::Pin
+            }
+            BONE_VT => rag::Constraint::Bone,
+            BOX_VT => {
+                r.boxes += 1;
+                rag::Constraint::Box
+            }
+            _ => rag::Constraint::Other,
+        }
+    }
+    fn force(&mut self, m: &mut RiderRam<'b>, f: u32) -> rag::Force {
+        match m.word(f + 8) {
+            WRAPPER_VT => rag::Force::Wrapper,
+            DIRECTED_VT => {
+                self.run.borrow_mut().directed += 1;
+                rag::Force::Directed
+            }
+            _ => rag::Force::Other,
+        }
+    }
+    fn listener(&mut self, m: &mut RiderRam<'b>, l: u32) -> rag::Listener {
+        if m.word(l) == RIDER_LISTENER_VT {
+            self.run.borrow_mut().riders += 1;
+            rag::Listener::Rider(l - RIDER_LISTENER)
+        } else {
+            rag::Listener::Other
+        }
+    }
+    fn bone(&mut self, m: &mut RiderRam<'b>, part: u32, h: F) {
+        self.run.borrow_mut().bones += 1;
+        bone::solve(m, &mut OriginalScene, part, h, Some(self.map), self.curve);
+    }
+    fn other_constraint(&mut self, m: &mut RiderRam<'b>, c: u32, _: F, _: bool) {
+        panic!("a constraint of vtable {:#x} at {c:#x}", m.word(c + 0x10));
+    }
+    fn other_force(&mut self, m: &mut RiderRam<'b>, f: u32, _: F) {
+        panic!("a force of vtable {:#x} at {f:#x}", m.word(f + 8));
+    }
+    fn other_listener(&mut self, m: &mut RiderRam<'b>, l: u32, _: F) {
+        panic!("a listener of vtable {:#x} at {l:#x}", m.word(l));
+    }
+    fn preforce(&mut self, _: &mut RiderRam<'b>, e: u32, _: F) {
+        panic!("a preforce listener at {e:#x}");
+    }
+    fn post(&mut self, _: &mut RiderRam<'b>, e: u32, _: F) {
+        panic!("a post listener at {e:#x}");
+    }
+}
+
+/// [`replay`] with the rider ragdoll world's every step [`rag::step`]'s: its forces, integrate,
+/// pins, boxes and (on the map, the scene's search the original's) bone collisions the port's. Every
+/// row is checked bit-exact.
+fn rag_replay(name: &str) -> Option<RagRun> {
+    let mut ee = hooked(image()?);
+    let rows = rows(name)?;
+    let trn: &'static [u8] = Box::leak(nat05_trn()?.into_boxed_slice());
+    let map: &'static track::Terrain = Box::leak(Box::new(track::Terrain::parse(trn).unwrap()));
+    let curve: &'static CurveTable = Box::leak(Box::new(CurveTable::build()));
+    let run: Rc<RefCell<RagRun>> = Rc::default();
+    let h = run.clone();
+    ee.hooks.insert(
+        WORLD_STEP,
+        Box::new(move |ee: &mut Ee| {
+            if ee.r(4) as u32 != RAG_WORLD {
+                return run_as_itself(ee, WORLD_STEP);
+            }
+            let dt = F(ee.f(12));
+            h.borrow_mut().steps += 1;
+            let mut rig = RamRig { map, curve, run: h.clone() };
+            rag::step(&mut RiderRam { ee, overlay: None }, RAG_WORLD, dt, rag_tables(), &mut rig);
+            ee.pc = WORLD_STEP;
+        }),
+    );
+    for (r, row) in rows.iter().enumerate() {
+        poke(&mut ee, row, &READER);
+        ee.set(28, GP);
+        ee.call(FRAME, &[u64::from(SIM)], &[f32::from_bits(DT)], 400_000_000);
+        let d = diff(&ee, row);
+        assert!(d.is_empty(), "{name} row {r} (vsync {}, the port's rider world): {} words differ\n  {}", row["vsync"], d.len(), d.iter().take(40).cloned().collect::<Vec<_>>().join("\n  "));
+        poke(&mut ee, row, &SPOT);
+    }
+    ee.hooks.remove(&WORLD_STEP);
+    Some(Rc::try_unwrap(run).ok().unwrap().into_inner())
+}
+
+/// **The rider ragdoll world in the port's hands, both C15 replays bit-exact** (S280): every step of
+/// the rider's ragdoll world is [`rag::step`]'s — the rider's force, the directed force, the 18
+/// bodies' integrate, and three passes a substep of the 21 pins, 5 boxes and 9 bone collisions — and
+/// every row of ride-2 and flip-1 comes out word for word. The ride steps the world every frame, one
+/// substep each (459 steps, 1 377 constraint passes); the flip steps it on 433 of its 465 frames, 501
+/// substeps in all and 1 367 passes (the world's iteration count is re-read every step).
+#[test]
+fn the_rider_world_steps_as_the_originals() {
+    for (name, steps, substeps, passes) in [("ride-2", 459usize, 459usize, 1377usize), ("flip-1", 433, 501, 1367)] {
+        let Some(run) = rag_replay(name) else { return };
+        eprintln!("{name}: {run:?}");
+        assert_eq!((run.steps, run.riders, run.directed), (steps, substeps, substeps), "{name}: the steps, and both forces every substep");
+        assert_eq!((run.pins, run.boxes, run.bones), (21 * passes, 5 * passes, 9 * passes), "{name}: every constraint every pass");
+    }
+}
+
+/// The oracles' scratch: targets a pin follows, a box's frame, centre, half-size and carried
+/// velocity, a directed force's vector.
+const RAG_AREA: u32 = 0x01cb_d000;
+const RAG_END: u32 = RAG_AREA + 0x200;
+
+/// The world's lists' entries: its bodies and constraints.
+fn rag_list(ee: &Ee, list: u32) -> Vec<u32> {
+    let array = ee.u32_at(RAG_WORLD + list + 8);
+    (0..ee.u32_at(RAG_WORLD + list)).map(|i| ee.u32_at(array + 4 * i)).collect()
+}
+
+/// The rider's holders' nodes and every parent above them.
+fn rag_nodes(ee: &Ee) -> Vec<u32> {
+    let at = ee.u32_at(RIDER + rag::R_HOLDER_AT);
+    let mut out = Vec::new();
+    for i in 0..ee.u32_at(RIDER + rag::R_HOLDERS) {
+        let mut n = ee.u32_at(at + i * rag::H_STRIDE + rag::H_NODE);
+        while n != 0 && !out.contains(&n) {
+            out.push(n);
+            n = ee.u32_at(n + 0xf0);
+        }
+    }
+    out
+}
+
+/// What the rider world's oracles may touch: the bodies, the constraints, the rider and its record
+/// and rests, the holders' nodes, the forces and the scratch.
+fn rag_regions(ee: &Ee) -> Vec<(u32, u32)> {
+    let mut out = vec![(RIDER, 0x700), (ee.u32_at(RIDER + rag::R_RECORD), 0x260), (RAG_AREA, RAG_END - RAG_AREA)];
+    out.extend(rag_list(ee, rag::W_ALL).into_iter().map(|b| (b, 0x230)));
+    out.extend(rag_list(ee, rag::W_CONSTRAINTS).into_iter().map(|c| (c & !0xf, 0x120)));
+    out.extend(rag_list(ee, rag::W_FORCES).into_iter().map(|f| (f & !0xf, 0x30)));
+    out.extend(rag_nodes(ee).into_iter().map(|n| (n & !0xf, 0x110)));
+    out.push((ee.u32_at(RIDER + rag::R_RESTS), 0x40 * 0x20));
+    out.sort();
+    out.dedup();
+    // Merged where they overlap, so each word is one address.
+    let mut merged: Vec<(u32, u32)> = Vec::new();
+    for (at, n) in out {
+        match merged.last_mut() {
+            Some((a, m)) if at <= *a + *m => *m = (*m).max(at + n - *a),
+            _ => merged.push((at, n)),
+        }
+    }
+    merged
+}
+
+#[allow(clippy::float_arithmetic)]
+impl Gen {
+    /// A unit quaternion, about.
+    fn unit_quat(&mut self) -> [f32; 4] {
+        let q = [self.f(-1.0, 1.0), self.f(-1.0, 1.0), self.f(-1.0, 1.0), self.f(-1.0, 1.0)];
+        let n = q.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-3);
+        q.map(|x| x / n)
+    }
+    /// Three lanes in `±r` (signed zeros among them), `w` 1 or, one time in four, any.
+    fn lanes(&mut self, r: f32) -> [f32; 4] {
+        let w = if self.one_in(4) { self.near(0.0, -r, r) } else { 1.0 };
+        [self.near(0.0, -r, r), self.near(0.0, -r, r), self.near(0.0, -r, r), w]
+    }
+    /// A sticky or hit lane: −1, ±0 or 1, or any.
+    fn stop(&mut self) -> f32 {
+        [-1.0, 0.0, -0.0, 1.0, self.f(-2.0, 2.0)][(self.bits() % 5) as usize]
+    }
+    /// A substep: the frame's, a third of it, or any up to 0.05.
+    fn substep(&mut self) -> f32 {
+        match self.bits() % 3 {
+            0 => f32::from_bits(DT),
+            1 => f32::from_bits(DT) / 3.0,
+            _ => self.f(0.0, 0.05),
+        }
+    }
+}
+
+fn put4(ee: &mut Ee, at: u32, v: [f32; 4]) {
+    for (i, x) in v.into_iter().enumerate() {
+        ee.set_f32(at + 4 * i as u32, x);
+    }
+}
+
+/// A body drawn about where it is: near its position, any velocity, frame, rates, inverse mass and
+/// inertia, force and moment, enabled nine times in ten.
+fn rag_body(ee: &mut Ee, g: &mut Gen, b: u32, near: [f32; 3]) {
+    #[allow(clippy::float_arithmetic)]
+    let at = [near[0] + g.f(-2.0, 2.0), near[1] + g.f(-2.0, 2.0), near[2] + g.f(-2.0, 2.0), 1.0];
+    put4(ee, b + bone::B_POSITION, at);
+    put4(ee, b + bone::B_VELOCITY, g.lanes(15.0));
+    put4(ee, b + bone::B_QUAT, g.unit_quat());
+    put4(ee, b + rag::B_REFERENCE, g.unit_quat());
+    put4(ee, b + bone::B_RATES, g.lanes(4.0));
+    put4(ee, b + bone::B_INV_INERTIA, [g.f(0.0, 6.0), g.f(0.0, 6.0), g.f(0.0, 6.0), g.near(1.0, -1.0, 1.0)]);
+    put4(ee, b + rag::B_FORCE, g.lanes(40.0));
+    put4(ee, b + rag::B_MOMENT, g.lanes(10.0));
+    put4(ee, b + rag::B_POSE_POINT, g.lanes(0.6));
+    ee.set_f32(b + bone::B_INV_MASS, g.f(0.05, 4.0));
+    ee.set_f32(b + rag::B_MASS, g.f(0.1, 20.0));
+    ee.set_u32(b, u32::from(!g.one_in(10)));
+}
+
+/// Runs `original` then `port` from the same words and wants every word of `regions` the same and
+/// neither writing anywhere else (the original's stack aside).
+fn rag_compare(ee: &mut Ee, regions: &[(u32, u32)], what: &str, original: impl FnOnce(&mut Ee), port: impl FnOnce(&mut Ee)) {
+    let given = snap_regions(ee, regions);
+    ee.set(28, GP);
+    ee.written.clear();
+    original(ee);
+    let stack = ee.stack;
+    let inside = |a: u32| regions.iter().any(|&(at, n)| (at..at + n).contains(&a));
+    let outside: Vec<u32> = ee.written.iter().copied().filter(|&a| !(stack - 0x4_0000..stack + 0x1000).contains(&a) && !inside(a)).collect();
+    assert!(outside.is_empty(), "{what}: the original wrote outside the regions: {:#x?}", &outside[..outside.len().min(8)]);
+    let want = snap_regions(ee, regions);
+    restore_regions(ee, regions, &given);
+    ee.written.clear();
+    port(ee);
+    let outside: Vec<u32> = ee.written.iter().copied().filter(|&a| !inside(a)).collect();
+    assert!(outside.is_empty(), "{what}: the port wrote outside the regions: {:#x?}", &outside[..outside.len().min(8)]);
+    let got = snap_regions(ee, regions);
+    let addrs = regions.iter().flat_map(|&(at, n)| (0..n).step_by(4).map(move |o| at + o));
+    let off: Vec<String> = want.iter().zip(&got).zip(addrs).filter(|((w, g), _)| w != g).map(|((w, g), a)| format!("{a:#x}: want {w:08x} got {g:08x}")).collect();
+    assert!(off.is_empty(), "{what}: {} words differ\n  {}", off.len(), off.iter().take(24).cloned().collect::<Vec<_>>().join("\n  "));
+}
+
+fn rag_setup() -> Option<(Ee, Vec<(u32, u32)>)> {
+    let ee = image().map(hooked)?;
+    for a in (RAG_AREA..RAG_END).step_by(4) {
+        assert_eq!(ee.u32_at(a), 0, "the scratch is free at {a:#x}");
+    }
+    let regions = rag_regions(&ee);
+    Some((ee, regions))
+}
+
+fn rag_report(t: &BTreeMap<&'static str, u32>, floor: u32, paths: usize) {
+    eprintln!("{t:#?}");
+    for (path, n) in t {
+        assert!(*n >= floor, "path {path} taken only {n} times");
+    }
+    assert!(t.len() >= paths, "every path taken: {t:#?}");
+}
+
+/// **The pin's solve is the original's** (S280): 12 000 solves of state 4's 21 pins through
+/// SLUS-21104's and [`rag::pin`], with every word they read drawn: the pin on or not, its second body
+/// there or not, both bodies enabled or not, limited or not, what it follows (nothing, a target, a
+/// target and its velocity), the anchors, limits, sticky lanes (±1, signed zeros), gains and the pin's
+/// own inverse mass and inertia; the bodies near where they are with any velocity, unit frame,
+/// reference, rates and inverse mass and inertia; the substep the frame's, a third of it or any.
+/// Every word of the bodies, the pins and the scratch comes out the same.
+#[test]
+fn the_rider_worlds_pin_is_the_originals() {
+    let Some((mut ee, regions)) = rag_setup() else { return };
+    let tables = rag_tables();
+    let pins: Vec<u32> = rag_list(&ee, rag::W_CONSTRAINTS).into_iter().filter(|&c| ee.u32_at(c + 0x10) == PIN_VT).collect();
+    assert_eq!(pins.len(), 21, "the world's pins");
+    let image_words = snap_regions(&ee, &regions);
+    let mut g = Gen(0x0280_0001);
+    let mut t = BTreeMap::new();
+    for k in 0..12_000 {
+        restore_regions(&mut ee, &regions, &image_words);
+        let p = pins[(g.bits() as usize) % pins.len()];
+        let (b1, b2) = (ee.u32_at(p + rag::FIRST), ee.u32_at(p + rag::SECOND));
+        let near = [0, 4, 8].map(|o| ee.f32_at(b1 + bone::B_POSITION + o));
+        rag_body(&mut ee, &mut g, b1, near);
+        if b2 != 0 {
+            rag_body(&mut ee, &mut g, b2, near);
+            if g.one_in(4) {
+                ee.set_u32(p + rag::SECOND, 0);
+            }
+        }
+        ee.set_u32(p + rag::ON, u32::from(!g.one_in(12)));
+        ee.set_u32(p + rag::LIMITED, u32::from(g.one_in(2)));
+        match g.bits() % 3 {
+            0 => ee.set_u32(p + rag::FOLLOW, 0),
+            _ => {
+                ee.set_u32(p + rag::FOLLOW, RAG_AREA);
+                ee.set_u32(p + rag::FOLLOW_VELOCITY, if g.one_in(2) { 0 } else { RAG_AREA + 0x10 });
+            }
+        }
+        put4(&mut ee, RAG_AREA, [near[0] + g.f(-1.0, 1.0), near[1] + g.f(-1.0, 1.0), near[2] + g.f(-1.0, 1.0), 1.0]);
+        put4(&mut ee, RAG_AREA + 0x10, g.lanes(10.0));
+        for o in [rag::ANCHOR, rag::ANCHOR2, rag::TARGET_VELOCITY] {
+            put4(&mut ee, p + o, g.lanes(1.0));
+        }
+        put4(&mut ee, p + rag::TARGET, [near[0] + g.f(-1.0, 1.0), near[1] + g.f(-1.0, 1.0), near[2] + g.f(-1.0, 1.0), 1.0]);
+        put4(&mut ee, p + rag::LOWER, [-g.f(0.0, 1.5), -g.f(0.0, 1.5), -g.f(0.0, 1.5), g.near(0.0, -1.0, 1.0)]);
+        put4(&mut ee, p + rag::UPPER, [g.f(0.0, 1.5), g.f(0.0, 1.5), g.f(0.0, 1.5), g.near(0.0, -1.0, 1.0)]);
+        put4(&mut ee, p + rag::HIT, [g.stop(), g.stop(), g.stop(), g.stop()]);
+        put4(&mut ee, p + rag::STICKY, [g.stop(), g.stop(), g.stop(), g.stop()]);
+        put4(&mut ee, p + rag::GAINS, g.lanes(2.0));
+        ee.set_f32(p + rag::OWN_INV_MASS, g.f(0.05, 4.0));
+        put4(&mut ee, p + rag::OWN_INV_INERTIA, [g.f(0.0, 6.0), g.f(0.0, 6.0), g.f(0.0, 6.0), g.near(1.0, -1.0, 1.0)]);
+        let h = g.substep();
+        let (on, second, limited) = (ee.u32_at(p + rag::ON) != 0, ee.u32_at(p + rag::SECOND), ee.u32_at(p + rag::LIMITED) != 0);
+        let (e1, e2) = (ee.u32_at(b1) != 0, second != 0 && ee.u32_at(second) != 0);
+        tally(&mut t, match (on, second != 0 && e1 && e2, e1, limited) {
+            (false, ..) => "off",
+            (true, true, _, true) => "two bodies, limited",
+            (true, true, _, false) => "two bodies",
+            (true, false, false, _) => "first body disabled",
+            (true, false, true, true) => "one body, limited",
+            (true, false, true, false) => "one body",
+        });
+        if on && !(second != 0 && e1 && e2) && e1 {
+            tally(&mut t, match (ee.u32_at(p + rag::FOLLOW) != 0, ee.u32_at(p + rag::FOLLOW_VELOCITY) != 0) {
+                (false, _) => "one body: the second anchor",
+                (true, false) => "one body: follows a target",
+                (true, true) => "one body: follows a target and its velocity",
+            });
+        }
+        rag_compare(
+            &mut ee,
+            &regions,
+            &format!("case {k} (pin {p:#x})"),
+            |ee| ee.call(PIN_SOLVE, &[u64::from(p), 1], &[h], BUDGET),
+            |ee| rag::pin(&mut RiderRam { ee, overlay: None }, p, tables),
+        );
+    }
+    rag_report(&t, 100, 9);
+}
+
+/// **The box's solve is the original's** (S280): 12 000 solves of state 4's 5 boxes through
+/// SLUS-21104's and [`rag::frame_box`], each in one of its four ways — in another of the world's
+/// bodies, in one of the rider's nodes, in a frame, centre and half-size it points at (with a carried
+/// velocity or address zero's), or in its own — with every word it reads drawn: on or not, its body
+/// enabled or not, the frames, centres and half-sizes (zero lanes among them), and its body and the
+/// other near the frame with any velocity, unit frame and rates, so lanes are held at either side or
+/// left. Every word of the bodies, the boxes, the nodes and the scratch comes out the same.
+#[test]
+fn the_rider_worlds_box_is_the_originals() {
+    let Some((mut ee, regions)) = rag_setup() else { return };
+    let boxes: Vec<u32> = rag_list(&ee, rag::W_CONSTRAINTS).into_iter().filter(|&c| ee.u32_at(c + 0x10) == BOX_VT).collect();
+    assert_eq!(boxes.len(), 5, "the world's boxes");
+    let bodies = rag_list(&ee, rag::W_ALL);
+    let holders = ee.u32_at(RIDER + rag::R_HOLDER_AT);
+    let nodes: Vec<u32> = (0..ee.u32_at(RIDER + rag::R_HOLDERS)).map(|i| ee.u32_at(holders + i * rag::H_STRIDE + rag::H_NODE)).collect();
+    let mut image_t = BTreeMap::new();
+    for &x in &boxes {
+        let path = match (ee.u32_at(x + rag::X_IN), ee.u32_at(x + rag::X_NODE)) {
+            (0, 0) => "frame",
+            (0, _) => "node",
+            _ => "body",
+        };
+        tally(&mut image_t, path);
+    }
+    eprintln!("state 4's boxes: {image_t:?}");
+    let image_words = snap_regions(&ee, &regions);
+    let mut g = Gen(0x0280_0002);
+    let mut t = BTreeMap::new();
+    for k in 0..12_000 {
+        restore_regions(&mut ee, &regions, &image_words);
+        let x = boxes[(g.bits() as usize) % boxes.len()];
+        let b = ee.u32_at(x + rag::X_BODY);
+        let way = g.bits() % 4;
+        let (other, node) = (bodies[(g.bits() as usize) % bodies.len()], nodes[(g.bits() as usize) % nodes.len()]);
+        let other = if other == b { bodies[0] } else { other };
+        let near = match way {
+            0 => [0, 4, 8].map(|o| ee.f32_at(other + bone::B_POSITION + o)),
+            1 => [0, 4, 8].map(|o| ee.f32_at(node + 0xa0 + o)),
+            _ => [0, 4, 8].map(|o| ee.f32_at(b + bone::B_POSITION + o)),
+        };
+        rag_body(&mut ee, &mut g, b, near);
+        rag_body(&mut ee, &mut g, other, near);
+        ee.set_u32(b, u32::from(!g.one_in(12)));
+        ee.set_u32(x + rag::ON, u32::from(!g.one_in(12)));
+        ee.set_u32(x + rag::X_IN, if way == 0 { other } else { 0 });
+        ee.set_u32(x + rag::X_NODE, if way == 1 { node } else { 0 });
+        let pointed = way == 2;
+        let dropped = g.bits() % 6;
+        ee.set_u32(x + rag::X_FRAME_AT, if pointed && dropped != 0 { RAG_AREA } else { 0 });
+        ee.set_u32(x + rag::X_CENTRE_AT, if pointed && dropped != 1 { RAG_AREA + 0x40 } else { 0 });
+        ee.set_u32(x + rag::X_HALF_AT, if pointed && dropped != 2 { RAG_AREA + 0x50 } else { 0 });
+        ee.set_u32(x + rag::X_CARRIED_AT, if g.one_in(4) { 0 } else { RAG_AREA + 0x60 });
+        let half = |g: &mut Gen| [0, 1, 2, 3].map(|_| if g.one_in(6) { 0.0 } else { g.f(0.0, 1.5) });
+        for frame in [x + rag::X_FRAME, RAG_AREA] {
+            let q = g.unit_quat();
+            for r in 0..3 {
+                let mut row = g.lanes(1.0);
+                if g.one_in(2) {
+                    row = [q[r], q[(r + 1) % 4], q[(r + 2) % 4], 0.0];
+                }
+                put4(&mut ee, frame + 0x10 * r as u32, row);
+            }
+            #[allow(clippy::float_arithmetic)]
+            put4(&mut ee, frame + 0x30, [near[0] + g.f(-1.0, 1.0), near[1] + g.f(-1.0, 1.0), near[2] + g.f(-1.0, 1.0), 1.0]);
+        }
+        put4(&mut ee, x + rag::X_CENTRE, g.lanes(0.5));
+        put4(&mut ee, RAG_AREA + 0x40, g.lanes(0.5));
+        let (h1, h2) = (half(&mut g), half(&mut g));
+        put4(&mut ee, x + rag::X_HALF, h1);
+        put4(&mut ee, RAG_AREA + 0x50, h2);
+        put4(&mut ee, RAG_AREA + 0x60, g.lanes(15.0));
+        let (on, enabled) = (ee.u32_at(x + rag::ON) != 0, ee.u32_at(b) != 0);
+        tally(&mut t, match (on && enabled, way, pointed && dropped > 2) {
+            (false, ..) => "off or disabled",
+            (true, 0, _) => "in a body",
+            (true, 1, _) => "in a node",
+            (true, 2, true) if ee.u32_at(x + rag::X_CARRIED_AT) == 0 => "in a pointed frame, carried at zero",
+            (true, 2, true) => "in a pointed frame",
+            _ => "in its own frame",
+        });
+        rag_compare(
+            &mut ee,
+            &regions,
+            &format!("case {k} (box {x:#x}, way {way})"),
+            |ee| ee.call(BOX_SOLVE, &[u64::from(x), 1], &[f32::from_bits(DT)], BUDGET),
+            |ee| rag::frame_box(&mut RiderRam { ee, overlay: None }, x),
+        );
+    }
+    rag_report(&t, 200, 6);
+}
+
+/// **The directed force is the original's** (S280): 12 000 pushes of state 4's directed force through
+/// SLUS-21104's and [`rag::directed_force`], with every word it reads drawn: on or not, the vector it
+/// points at (none, the rider's, the scratch) and its own, its body (none, any of the world's, enabled
+/// or not) and its world (none or the rider's, its bodies enabled or not), and every body's force.
+/// Every word of the bodies, the forces, the rider and the scratch comes out the same.
+#[test]
+fn the_rider_worlds_directed_force_is_the_originals() {
+    let Some((mut ee, regions)) = rag_setup() else { return };
+    let forces = rag_list(&ee, rag::W_FORCES);
+    let f = *forces.iter().find(|&&f| ee.u32_at(f + 8) == DIRECTED_VT).expect("the directed force");
+    let bodies = rag_list(&ee, rag::W_ALL);
+    let image_vector = ee.u32_at(f + rag::D_VECTOR_AT);
+    let image_words = snap_regions(&ee, &regions);
+    let mut g = Gen(0x0280_0003);
+    let mut t = BTreeMap::new();
+    for k in 0..12_000 {
+        restore_regions(&mut ee, &regions, &image_words);
+        for &b in &bodies {
+            put4(&mut ee, b + rag::B_FORCE, g.lanes(40.0));
+            ee.set_u32(b, u32::from(!g.one_in(5)));
+        }
+        ee.set_u32(f, u32::from(!g.one_in(6)));
+        let vector = match g.bits() % 3 {
+            0 => 0,
+            1 => image_vector,
+            _ => RAG_AREA,
+        };
+        ee.set_u32(f + rag::D_VECTOR_AT, vector);
+        put4(&mut ee, image_vector, g.lanes(40.0));
+        put4(&mut ee, RAG_AREA, g.lanes(40.0));
+        put4(&mut ee, f + rag::D_VECTOR, g.lanes(40.0));
+        let body = if g.one_in(3) { 0 } else { bodies[(g.bits() as usize) % bodies.len()] };
+        ee.set_u32(f + rag::D_BODY, body);
+        ee.set_u32(f + rag::D_WORLD, if g.one_in(4) { 0 } else { RAG_WORLD });
+        let on = ee.u32_at(f) != 0;
+        let to_body = body != 0 && ee.u32_at(body) != 0;
+        let world = ee.u32_at(f + rag::D_WORLD) != 0;
+        tally(&mut t, match (on, to_body, world, vector != 0) {
+            (false, ..) => "off",
+            (true, true, _, true) => "its body, the vector pointed at",
+            (true, true, _, false) => "its body, its own vector",
+            (true, false, false, _) => "no body, no world",
+            (true, false, true, true) => "the world's bodies, the vector pointed at",
+            (true, false, true, false) => "the world's bodies, its own vector",
+        });
+        rag_compare(
+            &mut ee,
+            &regions,
+            &format!("case {k}"),
+            |ee| ee.call(DIRECTED_PUSH, &[u64::from(f)], &[f32::from_bits(DT)], BUDGET),
+            |ee| rag::directed_force(&mut RiderRam { ee, overlay: None }, f),
+        );
+    }
+    rag_report(&t, 300, 6);
+}
+
+/// **The rider's force is the original's** (S280): 12 000 pushes on state 4's rider through
+/// SLUS-21104's and [`rag::rider_force`], with every word it reads drawn: riding or not, both torque
+/// switches, the mode (riding, the wreck's or another), the fade's length (zero among them) and what is
+/// left of it (past either end), the gravity scale, the pose's spring and damping, the bike's record's
+/// rows, velocity, spin and centre; every body near where it is with any velocity, unit frame, rates
+/// (past ±1), force, moment, mass and pose point; every joint's sticky lanes (±1, signed zeros), max
+/// angle, spring and critical damping (17 of the 21 pins are the rider's joints), one in twenty made
+/// not the rider's or not a joint; and the rests' quaternions. Every word of the rider, its record,
+/// the bodies, the joints, the rests and the nodes comes out the same.
+#[test]
+fn the_rider_force_is_the_originals() {
+    let Some((mut ee, regions)) = rag_setup() else { return };
+    let tables = rag_tables();
+    let bodies = rag_list(&ee, rag::W_ALL);
+    let joints: Vec<u32> = rag_list(&ee, rag::W_JOINTS).into_iter().filter(|&j| ee.u32_at(j + rag::TYPE) == rag::JOINT && ee.u32_at(j + rag::OWNER) == RIDER).collect();
+    assert_eq!(joints.len(), 17, "the rider's joints");
+    let record = ee.u32_at(RIDER + rag::R_RECORD);
+    let rests = ee.u32_at(RIDER + rag::R_RESTS);
+    let image_words = snap_regions(&ee, &regions);
+    let mut g = Gen(0x0280_0004);
+    let mut t = BTreeMap::new();
+    for k in 0..12_000 {
+        restore_regions(&mut ee, &regions, &image_words);
+        for &b in &bodies {
+            let near = [0, 4, 8].map(|o| ee.f32_at(b + bone::B_POSITION + o));
+            rag_body(&mut ee, &mut g, b, near);
+        }
+        for &j in &joints {
+            put4(&mut ee, j + rag::STICKY, [g.stop(), g.stop(), g.stop(), g.stop()]);
+            ee.set_f32(j + rag::MAX_ANGLE, g.near(0.0, 0.0, 1.5));
+            put4(&mut ee, j + rag::SPRING, [g.f(0.0, 300.0), g.f(0.0, 300.0), g.f(0.0, 300.0), g.near(0.0, -5.0, 5.0)]);
+            put4(&mut ee, j + rag::CRITICAL, [g.f(0.0, 50.0), g.f(0.0, 50.0), g.f(0.0, 50.0), g.near(0.0, -5.0, 5.0)]);
+            if g.one_in(20) {
+                if g.one_in(2) {
+                    ee.set_u32(j + rag::OWNER, 0);
+                } else {
+                    ee.set_u32(j + rag::TYPE, 8);
+                }
+            }
+        }
+        for i in 0..0x20 {
+            if g.one_in(2) {
+                put4(&mut ee, rests + 0x40 * i + 0x20, g.unit_quat());
+            }
+        }
+        ee.set_u32(RIDER + rag::R_RIDING, u32::from(!g.one_in(4)));
+        ee.set_u32(RIDER + rag::R_TORQUES, u32::from(!g.one_in(5)));
+        ee.set_u32(RIDER + rag::R_STIFF, u32::from(!g.one_in(5)));
+        ee.set_u32(RIDER + rag::R_MODE, [1, 1, 2, 2, 0, 3][(g.bits() % 6) as usize]);
+        let length = if g.one_in(4) { 0.0 } else { g.f(0.1, 2.0) };
+        ee.set_f32(RIDER + rag::R_FADE_LENGTH, length);
+        #[allow(clippy::float_arithmetic)]
+        ee.set_f32(RIDER + rag::R_FADE_LEFT, g.near(0.0, -0.2 * length - 0.1, 1.2 * length + 0.1));
+        ee.set_f32(RIDER + rag::R_GRAVITY, g.near(1.0, 0.0, 2.0));
+        put4(&mut ee, RIDER + rag::R_POSE_SPRING, [g.f(0.0, 500.0), g.f(0.0, 500.0), g.f(0.0, 500.0), g.near(0.0, -5.0, 5.0)]);
+        put4(&mut ee, RIDER + rag::R_POSE_DAMPING, [g.f(0.0, 80.0), g.f(0.0, 80.0), g.f(0.0, 80.0), g.near(0.0, -5.0, 5.0)]);
+        for r in 0..3 {
+            put4(&mut ee, record + rag::C_ROWS + 0x10 * r, g.lanes(1.0));
+        }
+        put4(&mut ee, record + rag::C_VELOCITY, g.lanes(40.0));
+        ee.set_f32(record + rag::C_SPIN, g.near(0.0, -4.0, 4.0));
+        let near = [0, 4, 8].map(|o| ee.f32_at(bodies[0] + bone::B_POSITION + o));
+        #[allow(clippy::float_arithmetic)]
+        put4(&mut ee, record + rag::C_CENTRE, [near[0] + g.f(-2.0, 2.0), near[1] + g.f(-2.0, 2.0), near[2] + g.f(-2.0, 2.0), 1.0]);
+        let word = |o: u32| ee.u32_at(RIDER + o) != 0;
+        tally(&mut t, if word(rag::R_RIDING) { "riding: the pose pulls" } else { "not riding: gravity only" });
+        tally(&mut t, match (word(rag::R_TORQUES) && word(rag::R_STIFF), ee.u32_at(RIDER + rag::R_MODE), length == 0.0) {
+            (false, ..) => "no torques",
+            (true, 2, true) => "torques: the wreck's, no fade",
+            (true, 2, false) => "torques: the wreck's, faded",
+            (true, ..) => "torques: the second body's only",
+        });
+        rag_compare(
+            &mut ee,
+            &regions,
+            &format!("case {k}"),
+            |ee| ee.call(RIDER_FORCE, &[u64::from(RIDER)], &[f32::from_bits(DT)], BUDGET),
+            |ee| rag::rider_force(&mut RiderRam { ee, overlay: None }, RIDER, tables),
+        );
+    }
+    rag_report(&t, 500, 6);
+}

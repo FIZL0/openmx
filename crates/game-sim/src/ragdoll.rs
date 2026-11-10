@@ -875,7 +875,7 @@ impl Pin {
     /// first by the share of its inverse inertia, and takes the relative rate out of the lanes
     /// still moving outward (or of every lane locked between two equal limits).
     #[allow(clippy::neg_cmp_op_on_partial_ord)]
-    fn twist_limit(&mut self, b1: &mut Body, b2: &mut Body, tables: &Tables) {
+    pub fn twist_limit(&mut self, b1: &mut Body, b2: &mut Body, tables: &Tables) {
         let d = rel(b2.quat, b1.quat);
         let mut e = unturn(b1.quat, d);
         if F(e.w()) < F::ZERO {
@@ -928,7 +928,7 @@ impl Pin {
     /// lane past its limit turns the bone back onto it outright and zeroes the rate still moving
     /// outward.
     #[allow(clippy::neg_cmp_op_on_partial_ord)]
-    fn turn_limit(&mut self, bone: &mut Bone) {
+    pub fn turn_limit(&mut self, bone: &mut Bone) {
         let r = bone.reference;
         let b = &mut bone.body;
         let d = rel(b.quat, r);

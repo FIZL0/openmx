@@ -33,6 +33,7 @@ pub mod ground;
 pub mod mass;
 pub mod node;
 pub mod rider;
+pub mod ragdoll;
 pub mod record;
 pub mod reset;
 pub mod seed;
