@@ -1511,6 +1511,23 @@ path_locate                 boot 0x0026b860 (f12 -1.0, net, 0, point, hint, out,
 #                                           another path costs path_distance and its net search track_start_spots
 #                                           (2976 B): not ported. Ported hint-less as
 #                                           ai::path::locate, oracled over 10,000 paths (tests/ai.rs)
+#                                           S308: the hint ported as ai::follow::locate_on (tests/race.rs)
+path_route_locate           boot 0x0026bbe0 (f12 limit, a0 track, a1 route list, a2 hint, a3 point,
+#                                           t0 out, t1 distance out, t2 refuse, t3 holding) -> found:
+#                                           path_locate on each entry's +4 path (+0xc next), keeps the
+#                                           nearest (d >= 0 and below, or best still -1). Its best and
+#                                           scratch spot start as unset stack words. ai::follow::route_locate
+path_look_ahead             boot 0x0026d780 (f12 reach, f13 speed, f14 limit, a0 track, a1 spot, a2 out,
+#                                           a3 point, t0 nearest out, t1 draws, t2 refuse, t3 holding)
+#                                           -> found: builds a route from the spot's path over forks
+#                                           until reach is covered, places out reach on, then
+#                                           path_route_locate for the nearest. Fork pick: path flag 0x8
+#                                           nearest +0xc speed word, 0x20 links[len * draws[0]], else by
+#                                           track +0xac (3 shortest, 2 shortest/checkpoint longest, 1
+#                                           longest, else longest checkpoint). ai::follow::look_ahead
+ai_path_look_ahead          boot 0x002838c0 MXVehicleAI vt+0x88: with route word sp+8 == 0 forwards to
+#                                           path_look_ahead (a1.. -> a0.., t3 -> t2, sp+0 -> t3); the
+#                                           route branch (0x26cbe0 / 0x26e230 / 0x26bbe0) not ported
 path_segment_holds          boot 0x0026bdb0 (net, point, seg, next) -> the point lies on seg..next
 #                                           S282: crossing count over the hexagon seg+0x20, next+0x20,
 #                                           next+0x10, next+0x30, seg+0x30, seg+0x10 (x/z, plain ops).
