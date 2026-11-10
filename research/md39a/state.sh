@@ -17,8 +17,13 @@ touch "$WORK/mark"
 bash "$HERE/step.sh" "$PID" "$WORK/car.pad" "$DIR/options.p2s" "$SLOT"
 saved="$(dirname "$("$ROOT/kit" pcsx2 status | awk '/^config/ {print $2}')/x")/savestates"
 F="$saved/SLUS-21104 (95BB1901).0$SLOT.p2s"
-for _ in $(seq 60); do [ "$F" -nt "$WORK/mark" ] && break; sleep 1; done   # the save is written after `pine save` returns
+# The save is written after `pine save` returns, and (PCSX2 2.9) only once the VM runs again: a paused VM
+# leaves it as a .part. The state is then the frame the VM resumes on, not the movie's end.
+C6=$ROOT/research/journal/2026-10-20-c6-c6-recording2-capture/playback
+python3 -B "$C6/resume_if_paused.py" "$PID" > /dev/null
+for _ in $(seq 60); do [ "$F" -nt "$WORK/mark" ] && break; sleep 1; done
 sleep 3
+python3 -B "$C6/press.py" "$PID" 'System/Pause' > /dev/null
 cp "$F" "$DIR/$NAME.p2s"
 python3 -I "$HERE/ram.py" "$NAME"
 rm -r "$WORK"
