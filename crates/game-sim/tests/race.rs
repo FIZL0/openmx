@@ -69,10 +69,15 @@
 //!     it calls run for real (20,000 lists of 1–6 cards with ties, ghost cards, the generator anywhere,
 //!     against [`LapRules::close`]), compared on every card word, the list's order, every listener call
 //!     in order, the manager's flags, the countdown and the generator.
+//! 19. **The line lists** (S294a): the race handler's stretch from the checkpoint clear through both
+//!     line lists, 20,000 generated tracks, lists of gates (dead ones, gates on and off the paths),
+//!     passed words, reaches and steps at a gate, against [`RaceRules::clear_checkpoint`] and
+//!     [`RaceRules::line_lists`], compared on every listener call in order with the gate and card
+//!     passed, and every path's words and the pools the path distances use.
 
 use game_sim::chassis::{Chassis, Deriv};
 use game_sim::race::{
-    self, CheckPart, Checkpoint, Course, Crossing, Gate, GridStart, LANES, LapCard, LapRecord, LapRules, LineNotice, Link,
+    self, CheckPart, Checkpoint, Course, Crossing, Gate, GridStart, LANES, LapCard, LapRecord, LapRules, LineLists, LineNotice, Link, ListGate,
     PathNode, Prop, Race, RaceCard, FinishNotice, RaceNotice, RacePath, RaceRules, Refused, Seen, Spot, Supercross, TrackFile, TrackPath, TrackPaths, card_flags,
     flags, race_card_flags, race_flags, race_kind,
 };
@@ -2948,6 +2953,7 @@ fn race_told(n: RaceNotice, owner: bool, chain: bool) -> Vec<(u32, u32)> {
         RaceNotice::OffTrack => fan(true, 0x5c, 0x6c),
         RaceNotice::OffTooLong => fan(true, 0x60, 0x70),
         RaceNotice::OutOfTime => fan(false, 0x64, 0x74),
+        RaceNotice::Checkpoint { .. } | RaceNotice::OtherLine { .. } => unreachable!("no line lists here"),
     }
 }
 
@@ -3189,6 +3195,7 @@ fn the_race_handler_matches_the_score_managers_per_card() {
                 RaceNotice::OffTrack => 2,
                 RaceNotice::OffTooLong => 3,
                 RaceNotice::OutOfTime => 4,
+                RaceNotice::Checkpoint { .. } | RaceNotice::OtherLine { .. } => unreachable!("no line lists here"),
             }] += 1;
         }
         laps += usize::from(notices.contains(&RaceNotice::Line(LineNotice::Lap)));
@@ -3689,4 +3696,194 @@ fn the_ranking_and_gaps_match_c31s_live_race() {
 
 fn is_zero_f(x: F) -> bool {
     x.0 == 0.0
+}
+
+// --- S294a: the race handler's line lists ------------------------------------------------------------
+
+/// Free RAM for the line lists' manager, card, owner, chain, listener, gates, vtables and hooks; the
+/// paths go where `put_paths` lays them.
+const LL_MGR: u32 = 0x01c0_0000;
+const LL_CARD: u32 = 0x01c0_1000;
+const LL_OWNER: u32 = 0x01c0_2000;
+const LL_CHAIN: u32 = 0x01c0_2100;
+const LL_LISTENER: u32 = 0x01c0_2200;
+const LL_LINES: u32 = 0x01c0_3000;
+const LL_RECORDS: u32 = 0x01c0_4000;
+const LL_GATES: u32 = 0x01c1_0000;
+const LL_VT: u32 = 0x01c2_0000;
+const LL_HOOKS: u32 = 0x01c2_1000;
+
+/// The calls a line-list crossing makes: (who, slot, the gate, and the card for the listener).
+fn lists_told(n: RaceNotice, gates: &[u32], others: &[u32], owner: bool, chain: bool) -> Vec<(u32, u32, u32, u32)> {
+    let (gate, o, l) = match n {
+        RaceNotice::Checkpoint { line, through } => (gates[line], if through { 0x24 } else { 0x28 }, if through { 0x1c } else { 0x20 }),
+        RaceNotice::OtherLine { line, through } => (others[line], if through { 0x2c } else { 0x30 }, if through { 0x24 } else { 0x28 }),
+        _ => panic!("{n:?} is not a line list's"),
+    };
+    let mut v = Vec::new();
+    if owner {
+        v.push((OWNER, o, gate, 0));
+    }
+    if chain {
+        v.push((CHAIN, o, gate, 0));
+    }
+    v.push((TO_LISTENER, l, gate, LL_CARD));
+    v
+}
+
+#[test]
+fn the_line_lists_match_the_race_handlers_card_stretch() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let [start, end] = match addrs(["score_race_lines", "score_race_lines_end"]) {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    let heard: Rc<RefCell<Vec<(u32, u32, u32, u32)>>> = Rc::default();
+    for who in [OWNER, CHAIN, TO_LISTENER] {
+        for slot in (0..0x80).step_by(4) {
+            let at = LL_HOOKS + who * 0x100 + slot;
+            ee.set_u32(LL_VT + who * 0x100 + slot, at);
+            let heard = heard.clone();
+            ee.hooks.insert(
+                at,
+                Box::new(move |ee| {
+                    let r = |i: usize| ee.r(i) as u32;
+                    let told = if who == TO_LISTENER { (r(7), r(6)) } else { (r(6), 0) };
+                    assert_eq!(r(5), LL_MGR, "the manager is passed along");
+                    heard.borrow_mut().push((who, slot, told.0, told.1));
+                }),
+            );
+        }
+    }
+    ee.hooks.insert(end, Box::new(|ee| ee.set(31, u64::from(ps2_oracle::DONE) | 0xffff_ffff_0000_0000)));
+    let mut p = Pick(0x51d3_08aa_e62c_94f7);
+    let mut said = [0usize; 4];
+    let (mut passed, mut far, mut cleared) = (0, 0, 0);
+    for case in 0..20_000 {
+        let mut t = t_paths(&mut p);
+        let make = |p: &mut Pick, t: &TrackPaths| {
+            let (mut gate, spot) = if p.below(4) == 0 { (gate(p), t_spot_on(p, t)) } else { line_on(p, t) };
+            if p.below(6) == 0 {
+                gate.flags &= !flags::CLOSED;
+            }
+            ListGate { gate, spot }
+        };
+        let lists = LineLists {
+            checkpoints: (0..p.below(5)).map(|_| make(&mut p, &t)).collect(),
+            others: (0..p.below(4)).map(|_| make(&mut p, &t)).collect(),
+            reach: match p.below(5) {
+                0 => F::ZERO,
+                1 => F(-p.range(0.0, 10.0)),
+                2 => F(p.range(0.0, 20.0)),
+                _ => F(p.range(20.0, 400.0)),
+            },
+        };
+        let mut rules = RaceRules::default();
+        rules.lap.flags = p.next() as u32;
+        for bit in [race_flags::CHECKPOINTS, race_flags::OTHER_LINES] {
+            if p.below(5) == 0 { rules.lap.flags &= !bit } else { rules.lap.flags |= bit }
+        }
+        let n = lists.checkpoints.len();
+        let mut lap = lap_card(&mut p, 0);
+        if p.below(2) == 0 {
+            lap.flags |= race_card_flags::WAITED_FOR;
+        }
+        if p.below(4) != 0 {
+            lap.lines_passed = (0..n).map(|_| if p.below(3) == 0 { p.next() as u32 | 1 } else { 0 }).collect();
+        }
+        lap.kept_spot = t_spot_on(&mut p, &t);
+        let all: Vec<ListGate> = lists.checkpoints.iter().chain(&lists.others).copied().collect();
+        lap.spot = match p.below(4) {
+            0 => lap.kept_spot,
+            1 if !all.is_empty() => all[p.below(all.len() as u64) as usize].spot,
+            _ => t_spot_on(&mut p, &t),
+        };
+        let (now, last) = if all.is_empty() || p.below(6) == 0 {
+            let (x, z) = (p.range(-60.0, 60.0), p.range(-60.0, 60.0));
+            (p.quad([x, 0.0, z]), p.quad([0.0, 0.0, 0.0]))
+        } else {
+            let k = p.below(all.len() as u64) as usize;
+            step(&mut p, &all[k].gate)
+        };
+        lap.seen = Seen { now, last };
+        let card = RaceCard {
+            lap,
+            on_path: time_word(&mut p, 150.0),
+            odometer: time_word(&mut p, 5000.0),
+            aim: t_spot_on(&mut p, &t),
+            look: p.quad([0.0, 0.0, 0.0]),
+            ahead: p.quad([0.0, 0.0, 0.0]),
+            to_track: p.quad([0.0, 0.0, 0.0]),
+        };
+        let owner = p.below(5) != 0;
+        let chain = p.below(3) == 0;
+
+        put_paths(&mut ee, &mut p, &t);
+        put_race_card(&mut ee, LL_CARD, &card, LL_LINES, LL_RECORDS);
+        ee.set_u32(LL_CARD + 4, if owner { LL_OWNER } else { 0 });
+        ee.set_u32(LL_CARD + 0x1c4, if chain { LL_CHAIN } else { 0 });
+        ee.set_u32(LL_OWNER + 0x20, LL_VT + OWNER * 0x100);
+        ee.set_u32(LL_CHAIN + 0x1c, 0);
+        ee.set_u32(LL_CHAIN + 0x20, LL_VT + CHAIN * 0x100);
+        ee.set_u32(LL_LISTENER + 4, 0);
+        ee.set_u32(LL_LISTENER + 0x1c, LL_VT + TO_LISTENER * 0x100);
+        let put_list = |ee: &mut Ee, p: &mut Pick, base: u32, list: &[ListGate]| -> Vec<u32> {
+            let at: Vec<u32> = (0..list.len() as u32).map(|k| base + 0x100 * k).collect();
+            for (k, g) in list.iter().enumerate() {
+                for o in (0..0xa0).step_by(4) {
+                    ee.set_u32(at[k] + o, p.next() as u32);
+                }
+                put_gate(ee, at[k], &g.gate);
+                ee.set_u32(at[k] + 0x90, at.get(k + 1).copied().unwrap_or(0));
+                put_t_spot(ee, at[k] + 0x94, g.spot);
+            }
+            at
+        };
+        let gates = put_list(&mut ee, &mut p, LL_GATES, &lists.checkpoints);
+        let others = put_list(&mut ee, &mut p, LL_GATES + 0x8000, &lists.others);
+        ee.set_u32(LL_MGR + 0x30, LL_LISTENER);
+        ee.set_u32(LL_MGR + 0x5c, rules.lap.flags);
+        ee.set_u32(LL_MGR + 0x68, T_TRACK);
+        ee.set_u32(LL_MGR + 0x70, gates.first().copied().unwrap_or(0));
+        ee.set_u32(LL_MGR + 0x78, others.first().copied().unwrap_or(0));
+        put_f(&mut ee, LL_MGR + 0x100, lists.reach);
+        ee.set_u32(0x28, 0);
+        heard.borrow_mut().clear();
+        ee.set(16, u64::from(LL_CARD));
+        ee.set(19, u64::from(LL_MGR));
+        ee.set_f(24, 0.0);
+        ee.call(start, &[], &[], BUDGET * 20);
+
+        let flags_before: Vec<u32> = t.paths.iter().map(|q| q.flags).collect();
+        rules.clear_checkpoint(&card, &mut t);
+        let notices = rules.line_lists(&card, &lists, &mut t);
+        let what = format!("case {case}: flags {:#x}, {} + {} lines -> {notices:?}", rules.lap.flags, n, lists.others.len());
+        let want: Vec<_> = notices.iter().flat_map(|&k| lists_told(k, &gates, &others, owner, chain)).collect();
+        assert_eq!(*heard.borrow(), want, "{what}: the listeners");
+        check_paths(&ee, &t, &what);
+        cleared += usize::from(t.paths.iter().map(|q| q.flags).ne(flags_before));
+        for k in &notices {
+            said[match k {
+                RaceNotice::Checkpoint { through: true, .. } => 0,
+                RaceNotice::Checkpoint { through: false, .. } => 1,
+                RaceNotice::OtherLine { through: true, .. } => 2,
+                _ => 3,
+            }] += 1;
+        }
+        if rules.lap.flags & race_flags::CHECKPOINTS != 0 {
+            for (k, g) in lists.checkpoints.iter().enumerate() {
+                if g.gate.flags & flags::CLOSED == 0 {
+                    continue;
+                }
+                if card.lap.lines_passed.get(k).is_some_and(|&w| w != 0) {
+                    passed += 1;
+                } else if !notices.iter().any(|x| matches!(x, RaceNotice::Checkpoint { line, .. } if *line == k))
+                    && g.gate.crossed(now, last) != Crossing::Not
+                {
+                    far += 1;
+                }
+            }
+        }
+    }
+    assert!(said.iter().all(|&k| k > 300) && passed > 2000 && far > 300 && cleared > 300, "{said:?} passed {passed} far {far} cleared {cleared}");
 }

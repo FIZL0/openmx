@@ -902,13 +902,28 @@ score_race_tick             boot 0x00262aa0 (dt f12, mgr) the score manager's ra
 #                                           line (score_lap_line) when +0x10 is under track +0x38, the
 #                                           off-track clock +0xc0 against mgr+0xd4, the time limit
 #                                           +0xc4, then the 30 s (mgr+0x9c) finish countdown, ranking,
-#                                           0x00261b80 / 0x002628f0. The lap line is ported (S13c), the finish (S294; below).
+#                                           0x00261b80 / 0x002628f0. The lap line is ported (S13c), the finish (S294; below), the
+#                                           line lists (S294a, score_race_lines).
 # S294 — the race handler's finish, oracled as stretches of score_race_tick (each stretch called at its
 # first pc with $16 = card, $19 = mgr, $f25 = dt, $f24 = 0, its end pc hooked with ra = DONE):
 score_race_over_end         boot 0x00262b90 the opening over check's end (call the handler, hook here):
 #                                           kind (+0x60) not 2/3 -> mgr |= 2, cleared by the first card
 #                                           with 2, no 0x4001, 0x8004 and no 0x400000.
 #                                           race::LapRules::check_over
+score_race_lines            boot 0x00262d00 (S294a) a raced card's checkpoint clear and line lists, as a
+#                                           stretch ($16 card, $19 mgr): card +8 & 4 with the kept spot's
+#                                           path flag 0x40 and its node the path's next-to-last (node
+#                                           +0x54 then +0x54 == 0) -> path &= ~0x40. Mgr flag 0x40: per
+#                                           checkpoint (+0x70, next +0x90; index i counts every entry)
+#                                           live (+0x30 & 1), card +0xe4 null or word i clear, path
+#                                           distance spot +0x88 -> gate +0x94 (keep_off 1) < mgr+0x100,
+#                                           else gate -> spot < mgr+0x100: start_gate_crossed(gate,
+#                                           +0x60, +0x70) 1 -> owner/chain vt+0x24 (o, mgr, gate),
+#                                           listener vt+0x1c (l, mgr, card, gate); 2 -> +0x28 / +0x20.
+#                                           Mgr flag 0x200: every live gate of +0x78 (next +0x90), 1 ->
+#                                           +0x2c / +0x24, 2 -> +0x30 / +0x28. The handler never writes
+#                                           +0xe4. race::RaceRules::clear_checkpoint / line_lists
+score_race_lines_end        boot 0x00263198 the line lists' end (the off-track test of +0x40 follows)
 score_race_clocks           boot 0x00263478 a racing card's clocks: +0x70..+0x78 = +0x60..; over (mgr 2,
 #                                           kind not 3) and not done -> +0xb4 = head +0xb4 + +0xbc,
 #                                           +0x48 = (+0xbc + +0x4c) / (float)(mgr+0x94 - +0x30), best
@@ -947,7 +962,7 @@ score_ghost_gaps            boot 0x002629d0 (mgr) a ghost race's gap of each pla
 #                                           the opening flag-2 scan); the finish estimate (mgr flag 2,
 #                                           card not out) times off *(mgr+0x34)+0xb4 + card +0xbc. The
 #                                           route list sp+0x15c is never set (stale stack). Not ported:
-#                                           0x00267d90 (card 0x80000), the line lists, 0x00268350 /
+#                                           0x00267d90 (card 0x80000), 0x00268350 /
 #                                           0x00268660 (mgr 0x800/0x1000), the computer aim 0x0026d780
 #                                           (card 0x800000), and everything after the card loop.
 # S13e: the track's race file. Not in Tracks\sx01.res: it is tracks\sx01\sx01.tdf inside
