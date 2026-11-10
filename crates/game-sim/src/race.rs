@@ -3411,3 +3411,298 @@ impl LapRules {
         said
     }
 }
+
+// --- the race's results (S13d) ------------------------------------------------------------------------
+
+/// The Hall of Fame's tables, as [`HallOfFame::beats`] names them. Each keeps five entries per track:
+/// the race tables (best lap, and the race's time for 3, 5 and 10 laps, one set per league) per
+/// track and bike class; the last three per arena, with no class.
+pub mod fame_table {
+    pub const SX_BEST_LAP: u32 = 0;
+    pub const SX_3_LAPS: u32 = 1;
+    pub const SX_5_LAPS: u32 = 2;
+    pub const SX_10_LAPS: u32 = 3;
+    pub const NATIONALS_BEST_LAP: u32 = 4;
+    pub const NATIONALS_3_LAPS: u32 = 5;
+    pub const NATIONALS_5_LAPS: u32 = 6;
+    pub const NATIONALS_10_LAPS: u32 = 7;
+    /// Scores, where higher is better.
+    pub const SCORE: u32 = 8;
+    /// Whole counts, where higher is better.
+    pub const COUNT: u32 = 9;
+    /// Times, where lower is better.
+    pub const TIME: u32 = 10;
+}
+
+/// The Hall of Fame's kept entries, word for word as the front end keeps them. Kept raw because the
+/// original reads it by byte offset and nothing more: where each table starts, 0x50 bytes a track
+/// and 0x14 a class (five words) in the race tables, 0x14 an arena in the last three.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HallOfFame {
+    pub words: Vec<u32>,
+}
+
+impl HallOfFame {
+    /// The tables' whole length, in bytes.
+    pub const SIZE: usize = 0x3ab4;
+
+    /// An empty Hall of Fame (every word 0).
+    pub fn new() -> HallOfFame {
+        HallOfFame { words: vec![0; Self::SIZE / 4] }
+    }
+
+    /// Where `table`'s five entries for `track` and `class` start, in bytes; `None` for a table past
+    /// the last, or entries that would lie outside the tables.
+    pub fn offset(table: u32, track: i32, class: i32) -> Option<usize> {
+        let (start, per_track, per_class) = match table {
+            fame_table::SX_BEST_LAP => (0x0000, 0x50, 0x14),
+            fame_table::SX_3_LAPS => (0x0f00, 0x50, 0x14),
+            fame_table::SX_5_LAPS => (0x0780, 0x50, 0x14),
+            fame_table::SX_10_LAPS => (0x1680, 0x50, 0x14),
+            fame_table::NATIONALS_BEST_LAP => (0x1e04, 0x50, 0x14),
+            fame_table::NATIONALS_3_LAPS => (0x2bc4, 0x50, 0x14),
+            fame_table::NATIONALS_5_LAPS => (0x24e4, 0x50, 0x14),
+            fame_table::NATIONALS_10_LAPS => (0x32a4, 0x50, 0x14),
+            fame_table::SCORE => (0x3988, 0x14, 0),
+            fame_table::COUNT => (0x3a50, 0x14, 0),
+            fame_table::TIME => (0x39ec, 0x14, 0),
+            _ => return None,
+        };
+        let at = start + i64::from(track) * per_track + i64::from(class) * per_class;
+        (0..=(Self::SIZE as i64 - 0x14)).contains(&at).then_some(at as usize)
+    }
+
+    /// Whether `time` would earn a place in `table`'s five entries for `track` (and `class`, in the
+    /// race tables): it beats any one of them. The supercross tables compare whole seconds (the time
+    /// cut to an integer and back); the nationals' and [`fame_table::TIME`] the time itself; the
+    /// scores want more than the entry, and the counts more than the entry as whole numbers. A table
+    /// past the last, or a track or class that lands outside the tables, earns nothing.
+    pub fn beats(&self, table: u32, track: i32, class: i32, time: F) -> bool {
+        let Some(at) = Self::offset(table, track, class) else { return false };
+        let entries = &self.words[at / 4..at / 4 + 5];
+        let whole = fpu::to_i32(time.0);
+        entries.iter().any(|&w| {
+            let kept = F(f32::from_bits(w));
+            match table {
+                fame_table::SX_BEST_LAP..=fame_table::SX_10_LAPS => lt(F(fpu::from_i32(whole)), kept),
+                fame_table::SCORE => !le(time, kept),
+                fame_table::COUNT => (w as i32) < whole,
+                _ => lt(time, kept),
+            }
+        })
+    }
+}
+
+impl Default for HallOfFame {
+    fn default() -> HallOfFame {
+        HallOfFame::new()
+    }
+}
+
+/// The front end's event, as the race's end reads it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ResultEvent {
+    /// The league (the event's `+0`): 0 supercross, anything else the nationals' tables.
+    pub league: i32,
+    /// The event's activity type (`+4`): only a single race (2) has a podium.
+    pub activity: i32,
+    /// The bike class (`+0x10c`), which picks the race tables' column.
+    pub class: i32,
+    /// The race's laps (`+0x115`): a race of 3, 5 or 10 laps keeps its time.
+    pub laps: u8,
+    /// The front end's play mode (its `+4`): a win counts in a rider's record only at 0.
+    pub mode: i32,
+    /// The event's `+0x116` byte, which picks the odd outro scenes at the race's end
+    /// ([`Supercross::race_end`]). What it marks was not traced.
+    pub alt_outro: bool,
+}
+
+/// What the race's end knows of the seat a player's card belongs to: the seat's number (the
+/// interface item's `+0x6b0`), whether the activity keeps that seat's records (its `+0x4d0` word per
+/// seat), and whether the seat has a rider profile to count a win in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ResultSeat {
+    pub seat: i32,
+    pub keeps_records: bool,
+    pub profile: bool,
+}
+
+/// The podium's camera flashes (the activity's `+0x414`, only on a track whose name holds "sx"): each
+/// podium finisher sets them going again toward a brightness of its own.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PodiumFlashes {
+    /// Where the brightness starts (`+0x5c`).
+    pub from: F,
+    /// How long they run (`+0x64`), at least the track's shortest.
+    pub length: F,
+    /// How fast the brightness climbs (`+0x68`), and half the length (`+0x6c`).
+    pub rate: F,
+    pub half: F,
+}
+
+/// The track's words the flashes read: their shortest run (`+0x538`) and the brightness for a player
+/// who won (`+0x53c`) and for anyone else on the podium (`+0x544`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FlashLevels {
+    pub shortest: F,
+    pub player_win: F,
+    pub podium: F,
+}
+
+/// A new Hall of Fame entry the front end is told of: whose seat, on which track, in which table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FameEntry {
+    pub seat: i32,
+    pub track: i32,
+    pub table: u32,
+}
+
+/// What a card's finish hands on: the fireworks and the race overlays put away (the winner of a
+/// single race), a win counted in the seat's record, and the Hall of Fame entries it earned.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RaceOver {
+    pub fireworks: bool,
+    pub win: Option<i32>,
+    pub fame: Vec<FameEntry>,
+}
+
+impl Supercross {
+    /// The activity's answer to [`LineNotice::Finished`], told as a card crosses the line on its last
+    /// lap (not to the race's [`FinishNotice::Over`]: a finish made up when the race ends is never
+    /// answered, so a rider still out then gets no podium, win or record). In a single race
+    /// the card in first place sets the fireworks off, and a card on the podium (place under 4) sets
+    /// the camera flashes going, toward the winner's brightness if it is a player's card that won and
+    /// the podium's otherwise. Then, for a player's card only (`seat`, its seat; `track`, the event's
+    /// track in its league's list, −1 for none): a single race won in mode 0 counts a win if the
+    /// seat has a profile, and — in a single race, where the activity keeps the seat's records — its
+    /// best lap is tried on the league's best-lap table and, in a race of 3, 5 or 10 laps, its race
+    /// time on that length's table ([`HallOfFame::beats`]); each one it beats is a [`FameEntry`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn race_over(
+        &self,
+        card: &LapCard,
+        seat: Option<ResultSeat>,
+        event: &ResultEvent,
+        track: i32,
+        fame: &HallOfFame,
+        flashes: Option<&mut PodiumFlashes>,
+        levels: &FlashLevels,
+    ) -> RaceOver {
+        let mut out = RaceOver::default();
+        let player = card.flags & card_flags::PLAYER != 0;
+        if event.activity == 2 {
+            if card.place == 1 {
+                out.fireworks = true;
+            }
+            if let Some(f) = flashes {
+                if card.place < 4 {
+                    let to = if player && card.place == 1 { levels.player_win } else { levels.podium };
+                    f.length = F(fpu::max(levels.shortest.0, f.length.0));
+                    f.half = F(fpu::mul(0.5, f.length.0));
+                    f.rate = F(fpu::div(fpu::sub(to.0, f.from.0), f.half.0));
+                }
+            }
+        }
+        let Some(seat) = seat.filter(|_| player) else { return out };
+        if event.mode == 0 && event.activity == 2 && card.place == 1 && seat.profile {
+            out.win = Some(seat.seat);
+        }
+        if event.activity != 2 || !seat.keeps_records {
+            return out;
+        }
+        let nationals = event.league != 0;
+        let mut try_table = |table: u32, time: F| {
+            if fame.beats(table, track, event.class, time) {
+                out.fame.push(FameEntry { seat: seat.seat, track, table });
+            }
+        };
+        let base = if nationals { fame_table::NATIONALS_BEST_LAP } else { fame_table::SX_BEST_LAP };
+        try_table(base, card.best_lap);
+        let length = match event.laps {
+            3 => Some(1),
+            5 => Some(2),
+            10 => Some(3),
+            _ => None,
+        };
+        if let Some(k) = length {
+            try_table(base + k, card.race_time);
+        }
+        out
+    }
+}
+
+/// A player's card as the race's end reads it (its seat item's `+0x34` is 1): the seat (`+0x6b0`)
+/// and its rider's statistics tracker's preload and clutch words (`+0x38`, `+0x3c`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EndSeat {
+    pub seat: i32,
+    pub preloads: u32,
+    pub clutches: u32,
+}
+
+/// A seat's two words on the preload and clutch menu: set when the rider never used the preload, and
+/// the clutch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EndTip {
+    pub seat: i32,
+    pub no_preload: bool,
+    pub no_clutch: bool,
+}
+
+/// What the race's end hands the front end.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RaceEnd {
+    /// A single race: the race results menu is handed the score manager (its cards, as they stand)
+    /// and the preload and clutch menu is shown.
+    pub results: bool,
+    /// The preload and clutch menu's words, for each player's card not in first, in list order (a
+    /// later card on the same seat writes over an earlier one).
+    pub tips: Vec<EndTip>,
+    /// The outro scene cued (an index into the activity's scene cues), if one is.
+    pub cue: Option<i32>,
+}
+
+/// How long the activity waits on an outro whose cue has nothing to play (`+0x410`), in seconds.
+const OUTRO_WAIT: F = F(7.0);
+
+impl Supercross {
+    /// The activity's answer to [`FinishNotice::Over`], once, when the race ends. In a single race it
+    /// hands the results menu the score manager, walks the cards in list order (`cards`, each card's
+    /// place and its seat if a player's) for the best place a player took (4 if none took a better
+    /// one) and for each player not in first the preload and clutch menu's words, and picks the outro
+    /// scene by that place: 2, 4 and 6 for first, second and third or worse (1, 3 and 5 with the
+    /// event's [`ResultEvent::alt_outro`]), kept in [`Supercross::hud_stage`]. Then, with a scene
+    /// picked and not yet armed, it tells every rider the race is over and cues the scene; a cue
+    /// with nothing to play (`cue_ends`) arms it at once, with [`Supercross::hud_fade`] at 7 s.
+    pub fn race_end(&mut self, cards: &[(i32, Option<EndSeat>)], event: &ResultEvent, cue_ends: bool) -> RaceEnd {
+        let mut out = RaceEnd::default();
+        if event.activity == 2 {
+            out.results = true;
+            let mut best = 4;
+            for (place, seat) in cards {
+                let Some(seat) = seat else { continue };
+                best = best.min(*place);
+                if *place != 1 {
+                    out.tips.push(EndTip { seat: seat.seat, no_preload: seat.preloads == 0, no_clutch: seat.clutches == 0 });
+                }
+            }
+            self.hud_stage = match (best, event.alt_outro) {
+                (1, false) => 2,
+                (2, false) => 4,
+                (_, false) => 6,
+                (1, true) => 1,
+                (2, true) => 3,
+                (_, true) => 5,
+            };
+        }
+        if self.hud_stage == 0 || self.hud_armed != 0 {
+            return out;
+        }
+        out.cue = Some(self.hud_stage);
+        if cue_ends {
+            self.hud_armed = 1;
+            self.hud_fade = OUTRO_WAIT;
+        }
+        out
+    }
+}
