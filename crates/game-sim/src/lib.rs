@@ -1031,6 +1031,10 @@ pub mod atv_part;
 /// `+0x88`, the gravity's call), MX Unleashed's [`contact`] resolution on the ATV's record and body.
 pub mod atv_contact;
 
+/// MX vs. ATV's cars' physics frame (MD106): SLUS-21104's world step over MXVehicleCar's three
+/// listeners, MX Unleashed's car pieces handed out as calls.
+pub mod atv_car;
+
 /// The wheel, in the order the ground step drives it: the suspension ray that looks for the ground
 /// under the wheel and picks between its answer and the collision sweep's, the tire forces that come
 /// out of the contact it settled on, and the wheel's own spin and steering. The ten fields the ground

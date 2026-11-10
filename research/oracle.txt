@@ -10918,3 +10918,38 @@ atv_heap_free               atv 0x001b76d0 = free
 #   callees 0x0050a040, 0x0050db60 (other branch, 2872), 0x0050e6a0 (count), 0x0050e7e0, 0x00193b30,
 #   0x001c1e90, 0x0050c5c0, 0x00125be0, 0x0050eab0, 0x0050e980, 0x0050c8b0; rand 0x003561a8 twice per
 #   spawning frame, the spread table 0x00542410); second kind, thunk 0x004ffd20 -> 0x004fbcc0.
+# MD106 — the car's physics frame (game_sim::atv_car frame/pre_process/force/post_process; tests/
+#   mxvatv_car_frame.rs runs atv_world_step off md39a/buggy.ee.bin over 3,000 states, every call of the
+#   car's listeners hooked). Journal: research/journal/2026-11-10-md106-mxvatv-car-step.
+#   Buggy image's world: bodies 1 (the car's body 0x0160cc20); force 1 (wrapper, listener car +0x3c, thunk
+#   0x004c7160); preforce 4 (car +0x30 thunk 0x004c7140, the idle buggy 0x01627310 (same vtable), two
+#   listeners vt 0x003d04dc fn 0x004de0c0); post 1 (car +0x34 thunk 0x004c7150).
+#   Car 0x01598e10 (vtable 0x003cec60): +0xb8 body, +0xc8 collision record (+0x24 tipped), +0xe4 scene node,
+#   +0x31c latch, +0x320 latched, +0x324 grounded, +0x328 one side, +0x32c speed, +0x330 side slip, +0x334
+#   alpha, +0x340 world rates, +0x350 local velocity, +0x360 euler, +0x370 matrix (4 rows), +0x3b4 ground
+#   world, +0xbe0/+0xbf0 forward/up rows (w kept), +0xc30 ground velocity, +0xc40 node position, +0xc80 state
+#   (0 riding), +0x1240 was grounded, +0x124c yaw-rate limit, +0x1250 engine, +0x1254..+0x1260 tires FL FR RL
+#   RR, +0x12b8 landing sound object, +0x12c4 latch counter. Body +0x1a0 cofg (body frame).
+#   Tire: +0xa4 solid, +0xa8 sorted, +0xb0 grounded, +0xb4 lone front, +0xb8 handed, +0xbc handed load,
+#   +0xc0/+0xc4 handed on, +0xd4 load, +0x180 local contact velocity, +0x19c/+0x1a0 stands on.
+#   PreProcess 0x004cb0c0: 0x004a4ee0 -> 0x00494090 (body +0xc0 = rodata 0x00396fc0 (0,0,0,1)); vt +0x34c
+#   0x004ca450 controls (f12 dt); vt +0x470 0x004cb000 travel cofg; 0x004b50d0(tire) x4 (clears +0xa4 +0xa8
+#   +0x19c +0x1a0); 0x004cad90 contact sort; 0x004b51f0(tire, dt) x4 probe; fronts' +0xb4 = front down &&
+#   no rear down (down = +0xa4 || +0xa8).
+#   Force 0x004cbb60: 0x004a4ef0 -> 0x00493f60 vehicle force; vt +0x478 0x004cb500 anti-slide (h); if
+#   +0xc80 == 0: vt +0x47c 0x004cb7f0 preload, vt +0x480 0x004cba30 launch, 0x004b3f30(engine, h); tire step
+#   0x004b5ca0(tire, h) on FL FR; rears' +0xb8 = 1, +0xbc = fr < fl ? fl : fr (+0xd4), +0xc0/+0xc4 = FL's
+#   +0x19c/+0x1a0 if FL +0xb0 else FR's; all zero when neither front +0xb0; tire step RL RR; vt +0x474
+#   0x004cb200 aero.
+#   PostProcess 0x004cbd80: 0x004a4f00 -> 0x004940b0 vehicle post; yaw clamp !(|rates.y| <= +0x124c) ->
+#   limit*sign; 0x004b3c90(engine, dt) shift; vt +0x484 0x004cd0b0 wreck timer (states 0xd, 0xe);
+#   +0x1240 = +0x324, +0x324 = any tire +0xb0; grounded -> +0x328; landing (!was && now && +0x12b8):
+#   0x00195320(out, node, body +0x80 if body +0xc0 == (0,0,0,1) bitwise else body +0xc0), then
+#   0x00500820(+0x12b8, 0, &out); speed = sqrt(mula/madda/madd); +0x350 unturn; +0xc30 = first grounded
+#   tire's +0x180 else +0x350; +0x340 turn(q, rates); alpha/side slip = flow angles; euler 0x001358d0;
+#   matrix 0x00134940(+0x370, q, pos - turn(q, cofg)); ground query 0x004833c0(+0x3b4, &pos, &normal, 0, 0)
+#   from ra 0x004cc428, record +0x24 = dot(up, normal) <= 0x3f34fdf4; latch; 0x00194c20(node, 0, car +0xc40).
+#   The vt +0x10c update 0x004cc4e0 is not part of the world step.
+#   Settled here: atv_car_listener_48 is the PreProcess (preforce list), atv_car_listener_60 the Force body.
+atv_car_tire_step           atv 0x004b5ca0 = a car tire's substep (a0 tire, f12 h): suspension 0x004b5cf0, then 0x004b62c0, 0x004b6400
+atv_car_wreck_timer         atv 0x004cd0b0 = the car's wreck timer, vt +0x484 (a0 car, f12 dt): SLUS-21104's own, states 0xd/0xe
