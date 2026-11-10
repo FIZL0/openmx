@@ -11,6 +11,12 @@
 //! [`palm`] runs two machines side by side: the original's frame whole, and the frame in F31a's
 //! pieces with the quad's record's virtuals the port's ([`record::clear`], [`record::pass`]). Every
 //! word of RAM outside the interpreter's stack is equal after every frame.
+//!
+//! MD105b makes more of the pieces the port's ([`Pieces::Port`]): the world step is [`quad::frame`]
+//! ([`WorldStep`]), its record held with the contacts the port's pass filed that frame
+//! ([`atv_contact::Held::refill`]), and the record's part search, sweep and node points are answered
+//! by the port's Desert Oasis ([`WorldStep::search`], [`WorldStep::sweep`], [`WorldStep::node_point`]),
+//! each checked word for word against the original's call, which still runs for what it leaves in RAM.
 
 use super::*;
 use game_sim::contact_search::Ground;
@@ -18,6 +24,9 @@ use game_sim::handling::ground;
 use game_sim::handling::record::{self, Collides, Hit, Record, Struck, Swept};
 use game_sim::handling::seed;
 use game_sim::track;
+use game_sim::world::Prop;
+use game_sim::world_search::Collidable;
+use game_sim::{atv_moto, atv_part, atv_sweep, atv_world};
 
 /// The image's sim object (vtable `0x003b9320` at `+4`) and its frame (vt `+0x40`). Its world is the
 /// object's `+0x6c` on, the update list at `+0x24`, the timer list at `+0x3c`.
@@ -100,11 +109,24 @@ fn run(ee: &mut Ee, f: u32, ints: &[u64], x: F) -> u32 {
 /// The frame in F31a's pieces: the update list's every vt `+0x7c`, then every vt `+0x84`, the
 /// world step on `+0x6c`, the tail, and the timer list's vt `+8` (an element answering non-zero
 /// taken out). With `port`, the record at `port`'s two virtuals are [`port_record`]'s (with `spoil`,
-/// its first contact's normal one bit off in each lane). Answers the
+/// its first contact's normal one bit off in each lane; with `world` too, only the port's step's held
+/// copy of it). Answers the
 /// update list's elements, and the terrain queries the port's record made.
-fn frame_in_pieces(ee: &mut Ee, dt: F, port: Option<(u32, &track::Terrain<'_>)>, spoil: bool) -> (Vec<u32>, u32) {
+fn frame_in_pieces(
+    ee: &mut Ee,
+    dt: F,
+    port: Option<(u32, &track::Terrain<'_>)>,
+    spoil: bool,
+    mut world: Option<&mut WorldStep<'_>>,
+) -> (Vec<u32>, u32) {
     assert_eq!(ee.u8_at(ee.u32_at(SKIP_FLAG) + 0x225) & 8, 0, "the frame is not skipped");
     let (mut elements, mut queries) = (Vec::new(), 0);
+    let mut held = None;
+    if let (Some(w), Some((mine, _))) = (world.as_deref_mut(), port) {
+        w.list(ee, mine);
+        w.spoil = spoil;
+    }
+    let spoil = spoil && world.is_none();
     for (slot, original) in [(0x7c, RECORD_CLEAR), (0x84, RECORD_PASS)] {
         for i in 0..ee.u32_at(SIM + 0x24) {
             let e = run(ee, LIST24_GET, &[u64::from(SIM + 0x24), u64::from(i)], F::ZERO);
@@ -117,7 +139,9 @@ fn frame_in_pieces(ee: &mut Ee, dt: F, port: Option<(u32, &track::Terrain<'_>)>,
                     assert_eq!(f, original, "the quad's record's vt +{slot:#x}");
                     let t = ee.u32_at(e + 0xec);
                     let terrain = (t != 0).then(|| ground::read_terrain(&|a| ee.u32_at(a), t, Some(map)));
-                    queries += port_record(ee, e, slot, dt, terrain.as_ref(), spoil);
+                    let (q, h) = port_record(ee, e, slot, dt, terrain.as_ref(), spoil, world.as_deref_mut());
+                    queries += q;
+                    held = held.or(h);
                 }
                 _ => {
                     run(ee, f, &[u64::from(e)], dt);
@@ -125,7 +149,12 @@ fn frame_in_pieces(ee: &mut Ee, dt: F, port: Option<(u32, &track::Terrain<'_>)>,
             }
         }
     }
-    run(ee, WORLD_STEP, &[u64::from(SIM + 0x6c)], dt);
+    match world.as_deref_mut() {
+        Some(w) => w.step(ee, dt, held),
+        None => {
+            run(ee, WORLD_STEP, &[u64::from(SIM + 0x6c)], dt);
+        }
+    }
     run(ee, TAIL, &[u64::from(SIM)], dt);
     let mut i = 0;
     while i < ee.u32_at(SIM + 0x3c) {
@@ -137,6 +166,377 @@ fn frame_in_pieces(ee: &mut Ee, dt: F, port: Option<(u32, &track::Terrain<'_>)>,
         }
     }
     (elements, queries)
+}
+
+/// The quad's control-off word.
+const CONTROL_OFF: u32 = 0xc80;
+
+/// MD105b — **the world step the port's**: [`quad::frame`] with [`quad::Steps`] on the ride
+/// [`image::read_ride`] reads off the machine before the step, its record held as the pass left it
+/// ([`atv_contact::Held`]), the ground the port's terrain and the sweeps and gather Desert Oasis's
+/// ([`atv_search::Oasis`], kept from frame to frame as `frame.rs`'s chain keeps it). The original's
+/// step then runs on the machine (the tail after it reads its RAM), and every word
+/// [`image::compare`] reads of the port's ride, every word of the rigid body and every word the
+/// record's resolution writes ([`record::held_words`]) equals what it left.
+struct WorldStep<'a> {
+    oasis: atv_search::Oasis<'a>,
+    terrain: atv_ground::Terrain<'a>,
+    table: AcosTable,
+    fresh: Ee,
+    /// Frames stepped, and frames whose record held contacts that the port's step resolved.
+    frames: u32,
+    resolved: u32,
+    /// The props' triangles and the plants' trunks' (built on first use), for the record's part search.
+    facets: Vec<Vec<game_sim::ray_probe::Facet>>,
+    trunks: Vec<Option<Vec<game_sim::ray_probe::Facet>>>,
+    /// The record's probes the port's world does not build (the wreck part, the sweep), by their
+    /// collidable in RAM: each one's collidable in [`atv_search::Oasis::world`].
+    probes: BTreeMap<u32, usize>,
+    /// Each of the port world's collidables in the list, the image's collidable it is (a mesh) or its
+    /// list entry (a plant group); 0 for the rest.
+    items: Vec<u32>,
+    /// The quad's scene as the pass found it, and its node 0 in RAM.
+    scene: Option<(atv_moto::Scene, u32)>,
+    /// Spoil the next step's held contacts: the first one's normal one bit off in each lane.
+    spoil: bool,
+    /// How often the record's outside asked the port: part searches, the contacts they filed, sweeps,
+    /// the sweeps' pairs, and node points.
+    asked: [u32; 5],
+}
+
+impl WorldStep<'_> {
+    /// The record's nearby list is the quad's, which the port's own step gathers ([`quad::frame`]'s
+    /// collision sync, [`quad::Sweep::gather`]): as the frame starts, the port's list is the image's,
+    /// entry for entry with its distances and its centre, and [`WorldStep::items`] maps its
+    /// collidables to the image's.
+    fn list(&mut self, ee: &Ee, record_at: u32) {
+        let k = self.frames;
+        assert_eq!(ee.u32_at(record_at + 0xfc), IMAGE_LIST, "the record's nearby list");
+        if ee.u32_at(IMAGE_LIST + 4) != 0 {
+            let centre: [u32; 4] = std::array::from_fn(|j| ee.u32_at(IMAGE_LIST + 0x10 + 4 * j as u32));
+            assert_eq!(self.oasis.list.centre.map(|c| c.0.to_bits()), centre, "frame {k}: the list's centre");
+        }
+        let w = &self.oasis.world;
+        self.items = vec![0; w.objects.len()];
+        let (arr, n) = (ee.u32_at(IMAGE_LIST), ee.u32_at(IMAGE_LIST + 4));
+        let found = &self.oasis.list.found;
+        assert_eq!(found.len() as u32, n, "frame {k}: the port's list is {} long, the image's {n}", found.len());
+        for (i, c) in found.iter().enumerate() {
+            let (e, d) = (ee.u32_at(arr + 8 * i as u32), ee.u32_at(arr + 8 * i as u32 + 4));
+            assert_eq!(c.distance.0.to_bits(), d, "frame {k}: entry {i}'s distance");
+            let o = c.object;
+            match (ee.u8_at(e + 2), w.objects[o].class) {
+                (2, game_sim::world_search::Class::Object) if w.meshes.contains(&o) => {
+                    let at = e - 0x18;
+                    let place = w.broad.places[o].centre;
+                    let port = [place[0], place[1], place[2], w.objects[o].radius].map(|f| f.0.to_bits());
+                    let image = [0x50, 0x54, 0x58, 0x70].map(|x| ee.u32_at(at + x));
+                    assert_eq!(port, image, "frame {k}: entry {i}'s mesh");
+                    self.items[o] = at;
+                }
+                (3, game_sim::world_search::Class::Group) => {
+                    let p = &w.broad.places[o];
+                    let image = (ee.u16_at(e + 0xc), ee.u16_at(e + 0x10), ee.u8_at(e + 0x12), ee.u8_at(e + 0x15) as i8);
+                    assert_eq!((p.cell[0], p.cell[1], p.model, p.blend), image, "frame {k}: entry {i}'s plant");
+                    self.items[o] = e;
+                }
+                (kind, class) => panic!("frame {k}: entry {i} is of kind {kind} in the image and {class:?} in the port"),
+            }
+        }
+    }
+
+    /// The record's probe `at` (its collidable in RAM) as one of the port world's collidables: the
+    /// riding part the world's own probe, the others added on first use; its reach, flags and filter
+    /// read off RAM as the part's place left them.
+    fn probe(&mut self, ee: &Ee, at: u32) -> usize {
+        let objects = &mut self.oasis.world.objects;
+        let i = if at == oasis::PROBE_AT {
+            atv_world::PROBE
+        } else {
+            *self.probes.entry(at).or_insert_with(|| {
+                objects.push(game_sim::world_search::Collidable::default());
+                objects.len() - 1
+            })
+        };
+        objects[i] = oasis::collidable(ee, at);
+        i
+    }
+
+    /// The part search over Desert Oasis: the active part (`part`, stood where the place put it) over
+    /// the port's list, its narrow phase [`atv_part::PartRays`] on the props' meshes and the plants'
+    /// parts ([`OasisParts`]); the record's hits with each struck mesh the image's collidable.
+    fn search(&mut self, ee: &Ee, part: u32) -> Vec<Hit> {
+        assert_eq!(ee.u32_at(part + 0x188), 0, "the part has a ray filter");
+        let probe = self.probe(ee, part);
+        let root = ee.u16_at(part + 0x170);
+        let nodes = tree_at(ee, ee.u32_at(part + 0x17c), root);
+        let segs = ee.u32_at(part + 0x180);
+        let segments: Vec<game_sim::ray_probe::Segment> = (0..ee.u32_at(part + 0x178))
+            .map(|i| game_sim::ray_probe::Segment { from: vf_at(ee, segs + 0x20 * i), to: vf_at(ee, segs + 0x20 * i + 0x10) })
+            .collect();
+        let transform = [0, 1, 2, 3].map(|r| vf_at(ee, part + 0x130 + 0x10 * r));
+        let rays = game_sim::ray_probe::RayProbe { transform, root, nodes: &nodes, segments: &segments };
+        let record = part_record(ee, ee.u32_at(part + 0x7c));
+        if self.facets.is_empty() {
+            self.facets = self.oasis.props.iter().map(|p| game_sim::flight_search::facets(&p.mesh)).collect();
+            self.trunks = vec![None; self.oasis.trees.props.props.len()];
+        }
+        let o = &mut self.oasis;
+        let plants = atv_search::Plants::new(o.trees, o.eco, &o.world, o.first_part);
+        let mut parts = OasisParts { props: o.props, first_mesh: o.world.meshes.start, facets: &self.facets, plants, trunks: &mut self.trunks, trunk: None, items: &self.items };
+        let mut n = atv_part::PartRays { probe: rays, record, world: &mut parts, pairs: 0 };
+        atv_search::search(&mut o.world.objects, probe, &o.list.found, &|_| false, &mut n);
+        let objects = &o.world.objects;
+        let by_id: BTreeMap<u32, usize> = self.items.iter().enumerate().filter(|&(_, &a)| a != 0).map(|(i, &a)| (a, i)).collect();
+        let hits: Vec<Hit> = n
+            .record
+            .contacts
+            .iter()
+            .map(|c| {
+                let struck = by_id.get(&c.object).map_or(Struck { object: c.object, ..Struck::default() }, |&i| Struck { object: c.object, category: objects[i].category, ..Struck::default() });
+                Hit { from: c.from, to: c.to, normal: c.normal, point: c.point, struck }
+            })
+            .collect();
+        self.asked[0] += 1;
+        self.asked[1] += hits.len() as u32;
+        hits
+    }
+
+    /// The sweep over Desert Oasis: the segment set on the sweep probe `probe` ([`atv_sweep::set`]), the
+    /// probe searched over the port's list with [`OasisSweep`]. Answers the segment's bounds and the
+    /// hit bit.
+    fn sweep(&mut self, ee: &Ee, probe: u32, from: Vf, to: Vf) -> (atv_sweep::Bounds, bool) {
+        let i = self.probe(ee, probe);
+        let (segments, bounds) = atv_sweep::set(&[[from, to]], None);
+        let o = &mut self.oasis;
+        let probe = game_sim::sweep_probe::SweepProbe { segments, ..Default::default() };
+        let mut n = OasisSweep { probe, props: o.props, first_mesh: o.world.meshes.start, places: &o.world.broad.places, pairs: 0 };
+        let hit = atv_search::search(&mut o.world.objects, i, &o.list.found, &|_| false, &mut n);
+        self.asked[2] += 1;
+        self.asked[3] += n.pairs;
+        (bounds, hit)
+    }
+
+    /// A point carried into the world by the quad's scene node, the port's scene's
+    /// ([`atv_moto::Scene::tip`]).
+    fn node_point(&mut self, node: u32, v: Vf) -> Vf {
+        let (scene, at) = self.scene.as_mut().expect("the pass's scene");
+        assert_eq!(node, *at, "the record's node is the quad's");
+        self.asked[4] += 1;
+        scene.tip(0, v)
+    }
+
+    fn step(&mut self, ee: &mut Ee, dt: F, held: Option<atv_contact::Held>) {
+        let k = self.frames;
+        let (mut r, mut at) = image::read_ride(ee, image::IMAGE_QUAD, dt).unwrap_or_else(|e| panic!("frame {k}: {e}"));
+        // The control-off word is a mode (the wreck writes 8; other readers compare it with 0xd): the
+        // world step tests it for not 0 and never writes it, and the port's quad keeps that.
+        let control = ee.u32_at(image::IMAGE_QUAD + CONTROL_OFF);
+        if control > 1 {
+            at.gaps.push((image::IMAGE_QUAD + CONTROL_OFF, 0, format!("the control-off word holds {control:#x}: the port keeps whether it is set")));
+        }
+        let touching = held.as_ref().is_some_and(|h| !h.entries.is_empty());
+        let mut held = held;
+        if std::mem::take(&mut self.spoil) {
+            let e = held.as_mut().and_then(|h| h.entries.first_mut()).expect("a held contact to spoil");
+            e.contact.normal = Vf::from_bits(e.contact.normal.to_bits().map(|w| w ^ 1));
+        }
+        r.bike.contacts = held;
+        let mut body = seed::body(&|a| ee.u32_at(a), at.body);
+        let terrain = &self.terrain;
+        let ground = |q: Vf, record: &mut u8| terrain.ground(q, Vf::ZERO, record);
+        let mut m = quad::Steps { bike: r.bike.clone(), rest: Vec::<Call>::new(), ground, sweep: &mut self.oasis };
+        quad::frame(&GAME_WORLD, &r.s.p, &mut r.s.q, &mut body, dt, &self.table, &mut m);
+        let named: Vec<String> = m.rest.iter().map(|c| format!("{c:?}").split([' ', '(']).next().unwrap().to_string()).collect();
+        let held = m.bike.contacts.is_some();
+        assert!(named.iter().all(|n| n == "PartMove" || (n == "GravityRecord" && !held)), "frame {k}: handed on {:?}", m.rest);
+        r.bike = m.bike;
+        r.s.body = body.view();
+        run(ee, WORLD_STEP, &[u64::from(SIM + 0x6c)], dt);
+
+        let (bad, n) = image::compare(ee, &mut self.fresh, &r, &at);
+        let show = bad
+            .iter()
+            .take(20)
+            .map(|&(t, ia, p, w)| format!("  test {t:#010x} = image {ia:#010x} (quad +{:#x}): port {p:#010x}, original {w:#010x}", ia.wrapping_sub(image::IMAGE_QUAD)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(bad.is_empty(), "frame {k}: {} of {n} words of the port's step differ from the original's:\n{show}", bad.len());
+        let mut words = seed::body_words(&body, at.body);
+        if let Some(h) = &r.bike.contacts {
+            words.extend(record::held_words(h, at.record, &|a| ee.u32_at(a)));
+        }
+        let wrong: Vec<String> = words
+            .into_iter()
+            .filter(|&(a, v)| ee.u32_at(a) != v)
+            .map(|(a, v)| format!("  {a:#010x} (body +{:#x}, record +{:#x}): port {v:#010x}, original {:#010x}", a.wrapping_sub(at.body), a.wrapping_sub(at.record), ee.u32_at(a)))
+            .collect();
+        assert!(wrong.is_empty(), "frame {k}: the port's step left the body or the record otherwise:\n{}", wrong.join("\n"));
+        assert_eq!(r.s.q.control_off, ee.u32_at(image::IMAGE_QUAD + CONTROL_OFF) != 0, "frame {k}: the control-off word");
+        self.resolved += u32::from(touching);
+        self.frames += 1;
+    }
+}
+
+/// The part search's world on Desert Oasis, as [`atv_search::Wheels`] pairs it: a prop's mesh (its id
+/// the image's collidable, [`WorldStep::items`]) or a plant's part stood at the plant: a trunk's mesh,
+/// or nothing a contact is made of (a sphere's ray test writes none). Nobody listens to the props or
+/// the parts, and none has a callback.
+struct OasisParts<'a> {
+    props: &'a [Prop],
+    first_mesh: usize,
+    facets: &'a [Vec<game_sim::ray_probe::Facet>],
+    plants: atv_search::Plants<'a>,
+    trunks: &'a mut [Option<Vec<game_sim::ray_probe::Facet>>],
+    trunk: Option<usize>,
+    items: &'a [u32],
+}
+
+impl atv_part::Outside for OasisParts<'_> {
+    fn shape(&mut self, other: usize) -> game_sim::ray_probe::Shape<'_> {
+        use game_sim::ray_probe::{Facet, Mesh, Shape};
+        fn mesh<'m>(id: u32, p: &'m Prop, facets: &'m [Facet]) -> Shape<'m> {
+            Shape::Mesh(Mesh { id, transform: p.to_world.0, root: 0, nodes: &p.mesh.nodes, facets, vertices: &p.mesh.vertices })
+        }
+        if other < self.first_mesh + self.props.len() {
+            let i = other - self.first_mesh;
+            return mesh(self.items[other], &self.props[i], &self.facets[i]);
+        }
+        let Some(j) = self.trunk else { return Shape::Never };
+        let p = &self.plants.trees.props.props[j];
+        mesh(u32::MAX, p, self.trunks[j].get_or_insert_with(|| game_sim::flight_search::facets(&p.mesh)))
+    }
+}
+
+impl game_sim::world_search::Narrow for OasisParts<'_> {
+    fn clear(&mut self, _: &mut [Collidable], _: usize) {
+        unreachable!("the part's own clear")
+    }
+    fn prepare(&mut self, _: &mut [Collidable], _: usize) {
+        panic!("the part search prepared a grid")
+    }
+    fn pair(&mut self, _: &mut [Collidable], _: usize, _: usize) -> bool {
+        unreachable!("the part's own pair")
+    }
+    fn parts(&mut self, _: &mut [Collidable], group: usize) -> usize {
+        self.plants.trees.groups()[group - self.plants.first_group].parts.len()
+    }
+    fn part(&mut self, _: &mut [Collidable], group: usize, i: usize) -> Option<usize> {
+        let g = group - self.plants.first_group;
+        self.trunk = self.plants.trees.groups()[g].parts[i];
+        Some(self.plants.slots[usize::from(self.plants.models[g])] + i)
+    }
+    fn heard_hit(&mut self, _: &mut [Collidable], _: usize, _: usize, _: usize) {
+        unreachable!("nobody listens")
+    }
+    fn heard_struck(&mut self, _: &mut [Collidable], _: usize, _: usize, _: usize) {
+        unreachable!("nobody listens")
+    }
+    fn on_hit(&mut self, _: &mut [Collidable], _: usize, _: usize, _: usize) {
+        unreachable!("no callback")
+    }
+    fn on_struck(&mut self, _: &mut [Collidable], _: usize, _: usize, _: usize) {
+        unreachable!("no callback")
+    }
+}
+
+/// The sweep's narrow phase on Desert Oasis: [`atv_sweep::Sweep`]'s clear (the hit bit down, the
+/// segments stood in the world, the reach the bundle's radius), and for the pair, which
+/// [`atv_sweep`] does not port, MX Unleashed's ([`game_sim::sweep_probe::pair`]) on the prop's mesh,
+/// taken as the ATV's: the palm ride checks its hit bit against the original's on every search.
+struct OasisSweep<'a> {
+    probe: game_sim::sweep_probe::SweepProbe,
+    props: &'a [Prop],
+    first_mesh: usize,
+    places: &'a [game_sim::broad_phase::Placement],
+    pairs: u32,
+}
+
+impl game_sim::world_search::Narrow for OasisSweep<'_> {
+    fn clear(&mut self, objects: &mut [Collidable], probe: usize) {
+        objects[probe].flags &= !game_sim::world_search::flags::HIT;
+        game_sim::sweep_probe::clear(&mut self.probe);
+        objects[probe].radius = self.probe.world.radius;
+    }
+    fn prepare(&mut self, _: &mut [Collidable], _: usize) {
+        panic!("the sweep prepared a grid")
+    }
+    fn pair(&mut self, objects: &mut [Collidable], _: usize, other: usize) -> bool {
+        use game_sim::sweep_probe::{Placed, Shape, Target};
+        let i = other.checked_sub(self.first_mesh).filter(|&i| i < self.props.len()).unwrap_or_else(|| panic!("the sweep paired collidable {other}, not a prop"));
+        let p = &self.props[i];
+        let c = self.places[other].centre;
+        let target = Target {
+            nearby: objects[other].nearby,
+            centre: Vf::new(c[0].0, c[1].0, c[2].0, c[3].0),
+            radius: objects[other].radius,
+            shape: Shape::Mesh(Placed { transform: p.to_world.0, mesh: game_sim::collide::MeshRef::of(&p.mesh), object: other }),
+        };
+        self.pairs += 1;
+        game_sim::sweep_probe::pair(&mut self.probe, Some(&target))
+    }
+    fn parts(&mut self, _: &mut [Collidable], group: usize) -> usize {
+        panic!("the sweep searched group {group}")
+    }
+    fn part(&mut self, _: &mut [Collidable], group: usize, _: usize) -> Option<usize> {
+        panic!("the sweep searched group {group}")
+    }
+    fn heard_hit(&mut self, _: &mut [Collidable], _: usize, _: usize, _: usize) {
+        unreachable!("nobody listens")
+    }
+    fn heard_struck(&mut self, _: &mut [Collidable], _: usize, _: usize, _: usize) {
+        unreachable!("nobody listens")
+    }
+    fn on_hit(&mut self, _: &mut [Collidable], _: usize, _: usize, _: usize) {
+        unreachable!("no callback")
+    }
+    fn on_struck(&mut self, _: &mut [Collidable], _: usize, _: usize, _: usize) {
+        unreachable!("no callback")
+    }
+}
+
+/// A ray probe's tree in RAM from `root` (36-byte nodes: the volume, two child words, the centre and
+/// the half extent), as `tests/mxvatv_bike_ride.rs`' `tree_in_ram` reads it.
+fn tree_at(ee: &Ee, nodes: u32, root: u16) -> Vec<track::Node> {
+    let blank = track::Node { volume: F::ZERO, centre: [F::ZERO; 3], half_extent: [F::ZERO; 3], children: [0, 0] };
+    let (mut out, mut todo) = (Vec::new(), vec![root]);
+    while let Some(w) = todo.pop() {
+        if w & 0x8000 != 0 {
+            continue;
+        }
+        let n = nodes + 36 * u32::from(w);
+        if out.len() <= usize::from(w) {
+            out.resize(usize::from(w) + 1, blank);
+        }
+        let three = |a: u32| [0, 4, 8].map(|k| F(ee.f32_at(a + k)));
+        let children = [ee.u16_at(n + 8), ee.u16_at(n + 10)];
+        out[usize::from(w)] = track::Node { volume: F(ee.f32_at(n)), centre: three(n + 12), half_extent: three(n + 24), children };
+        todo.extend(children);
+    }
+    out
+}
+
+/// The part's record (`+0x7c`) in RAM as its clear finds it (`tests/mxvatv_bike_ride.rs`'
+/// `part_record_in_ram`): the nearest normal and point, the pair's first point, the struck part, the
+/// flags, and the list's shape.
+fn part_record(ee: &Ee, r: u32) -> game_sim::ray_probe::Record {
+    game_sim::ray_probe::Record {
+        normal: vf_at(ee, r + 0x20),
+        point: vf_at(ee, r + 0x30),
+        first_point: vf_at(ee, r + 0x70),
+        part: ee.u32_at(r + 0x84),
+        listed: ee.u32_at(r + 0x90) != 0,
+        capacity: ee.u32_at(r + 0x88) as usize,
+        one_per_ray: ee.u8_at(r + 0xbc) != 0,
+        flags: ee.u8_at(r + 0xb8),
+        nearest: F::ONE,
+        ..game_sim::ray_probe::Record::default()
+    }
+}
+
+/// A hit's words, for comparing two bit for bit.
+fn hit_bits(h: &Hit) -> ([[u32; 4]; 4], Struck) {
+    ([h.from, h.to, h.normal, h.point].map(|v| v.to_bits()), h.struck)
 }
 
 fn vf_at(ee: &Ee, a: u32) -> Vf {
@@ -166,16 +566,20 @@ fn quad_body_words(b: &Body, at: u32) -> Vec<(u32, u32)> {
 /// The record at `at` in the interpreter's RAM as [`record`]'s port sees its outside
 /// (`tests/mxvatv_bike_ride.rs`' F31b4 glue): each call is the original's (scratch slots 0..2 hold
 /// the arguments), the other records a world ray hands a contact to are read on first use and held,
-/// and the terrain query is the port's [`ground::under`].
-struct RecordInRam<'a, 't> {
+/// and the terrain query is the port's [`ground::under`]. With `port` (MD105b), the part search, the
+/// sweep and the node's point are answered by the port's Desert Oasis ([`WorldStep::search`],
+/// [`WorldStep::sweep`], [`WorldStep::node_point`]); the original's call still runs after each, for
+/// what it leaves in RAM, and its answer must be the port's word for word.
+struct RecordInRam<'a, 't, 'w> {
     ee: &'a mut Ee,
     at: u32,
     terrain: Option<&'t atv_ground::Terrain<'t>>,
     others: BTreeMap<u32, (Record, Record)>,
     queries: u32,
+    port: Option<&'a mut WorldStep<'w>>,
 }
 
-impl RecordInRam<'_, '_> {
+impl RecordInRam<'_, '_, '_> {
     fn run(&mut self, f: u32, ints: &[u64]) {
         self.ee.set(28, GP);
         self.ee.call(f, ints, &[], BUDGET);
@@ -193,6 +597,22 @@ impl RecordInRam<'_, '_> {
         let m = ee.u32_at(obj + 0x8c);
         let mover = if m != 0 && ee.u32_at(m + 0x1a0) == record::MOVER_KIND { m } else { 0 };
         Struck { object: obj, other: ee.u32_at(obj + 0x90), mover, category: ee.u32_at(obj + 0x94) }
+    }
+    /// The original's part search, its record read back as the pass's hits.
+    fn original_search(&mut self, part: u32, nearby: bool) -> Vec<Hit> {
+        self.search_with(part, nearby);
+        let h = self.ee.u32_at(part + 0x7c);
+        let n = self.ee.u32_at(h + 0x8c) as i32;
+        let [rays, normals, points, objects] = [0x90, 0x94, 0x98, 0x9c].map(|o| self.ee.u32_at(h + o));
+        (0..n.max(0) as u32)
+            .map(|i| Hit {
+                from: vf_at(self.ee, rays + 0x20 * i),
+                to: vf_at(self.ee, rays + 0x20 * i + 0x10),
+                normal: vf_at(self.ee, normals + 0x10 * i),
+                point: vf_at(self.ee, points + 0x10 * i),
+                struck: self.struck(self.ee.u32_at(objects + 4 * i)),
+            })
+            .collect()
     }
     fn search_with(&mut self, probe: u32, nearby: bool) {
         let list = self.word(0xfc);
@@ -222,7 +642,7 @@ impl RecordInRam<'_, '_> {
     }
 }
 
-impl Collides for RecordInRam<'_, '_> {
+impl Collides for RecordInRam<'_, '_, '_> {
     fn damp(&mut self, linear: Vf, angular: Vf) {
         let body = self.word(0xe4);
         for (slot, v) in BODY_DAMP.into_iter().zip([linear, angular]) {
@@ -243,10 +663,16 @@ impl Collides for RecordInRam<'_, '_> {
         vf_at(self.ee, self.at + 0xd0)
     }
     fn node_place(&mut self, v: Vf) -> Vf {
-        let (out, p) = (self.ee.scratch(1), self.put(0, v));
         let node = self.word(0xe8);
+        let port = self.port.as_mut().map(|w| w.node_point(node, v));
+        let (out, p) = (self.ee.scratch(1), self.put(0, v));
         self.run(NODE_TIP, &[u64::from(out), u64::from(node), p]);
-        vf_at(self.ee, out)
+        let original = vf_at(self.ee, out);
+        if let Some(port) = port {
+            assert_eq!(port.to_bits(), original.to_bits(), "the node's point of {v:?}");
+            return port;
+        }
+        original
     }
     fn node_move(&mut self, at: Vf) {
         let p = self.put(0, at);
@@ -264,10 +690,21 @@ impl Collides for RecordInRam<'_, '_> {
         put_v(self.ee, self.at + 0xc0, from);
         put_v(self.ee, self.at + 0xd0, to);
         let probe = self.word(0x204);
+        let port = self.port.as_mut().map(|w| {
+            assert!(nearby, "a sweep over the whole world");
+            w.sweep(self.ee, probe, from, to)
+        });
         self.run(PROBE_SET, &[u64::from(probe), u64::from(self.at + 0xc0), 0]);
         self.run(PROBE_PLACE, &[u64::from(probe)]);
         self.search_with(probe, nearby);
-        if self.ee.u8_at(probe + 0x126) & 0x20 == 0 {
+        let hit = self.ee.u8_at(probe + 0x126) & 0x20 != 0;
+        if let Some((b, port_hit)) = port {
+            let image = [0x50, 0x54, 0x58, 0x70].map(|o| self.ee.u32_at(probe + o));
+            let mine = [b.centre.x(), b.centre.y(), b.centre.z(), b.reach.0].map(f32::to_bits);
+            assert_eq!(mine, image, "the sweep probe's centre and reach");
+            assert_eq!(port_hit, hit, "the sweep's hit bit");
+        }
+        if !hit {
             return None;
         }
         let hits = self.ee.u32_at(probe + 0x7c);
@@ -288,19 +725,15 @@ impl Collides for RecordInRam<'_, '_> {
     }
     fn search(&mut self, nearby: bool) -> Vec<Hit> {
         let part = self.word(0x200);
-        self.search_with(part, nearby);
-        let h = self.ee.u32_at(part + 0x7c);
-        let n = self.ee.u32_at(h + 0x8c) as i32;
-        let [rays, normals, points, objects] = [0x90, 0x94, 0x98, 0x9c].map(|o| self.ee.u32_at(h + o));
-        (0..n.max(0) as u32)
-            .map(|i| Hit {
-                from: vf_at(self.ee, rays + 0x20 * i),
-                to: vf_at(self.ee, rays + 0x20 * i + 0x10),
-                normal: vf_at(self.ee, normals + 0x10 * i),
-                point: vf_at(self.ee, points + 0x10 * i),
-                struck: self.struck(self.ee.u32_at(objects + 4 * i)),
-            })
-            .collect()
+        let port = self.port.as_mut().map(|w| {
+            assert!(nearby, "a part search over the whole world");
+            w.search(self.ee, part)
+        });
+        let original = self.original_search(part, nearby);
+        let Some(port) = port else { return original };
+        let bits = |h: &[Hit]| h.iter().map(hit_bits).collect::<Vec<_>>();
+        assert_eq!(bits(&port), bits(&original), "the part search's hits");
+        port
     }
     fn terrain_box(&self) -> [Vf; 2] {
         let t = self.word(0xec);
@@ -352,13 +785,29 @@ impl Collides for RecordInRam<'_, '_> {
 }
 
 /// The record at `at`'s virtual `slot` (`+0x7c` or `+0x84`) as the port's, on the record in RAM, its
-/// body the quad's off `+0xe4`. Answers how many terrain queries it made.
-fn port_record(ee: &mut Ee, at: u32, slot: u32, dt: F, terrain: Option<&atv_ground::Terrain<'_>>, spoil: bool) -> u32 {
+/// body the quad's off `+0xe4`. Answers how many terrain queries it made, and after the pass the
+/// record as its resolution holds it ([`record::held`], read before the pass with the list empty)
+/// with the pass's contacts in its list ([`atv_contact::Held::refill`]); `None` if one is with another
+/// record or a mover.
+fn port_record(
+    ee: &mut Ee,
+    at: u32,
+    slot: u32,
+    dt: F,
+    terrain: Option<&atv_ground::Terrain<'_>>,
+    spoil: bool,
+    mut port: Option<&mut WorldStep<'_>>,
+) -> (u32, Option<atv_contact::Held>) {
     let mut rec = record::read(&|a| ee.u32_at(a), at);
+    let mut held = (slot == 0x84).then(|| record::held(&|a| ee.u32_at(a), at)).flatten();
     let read = rec.clone();
     let body_at = ee.u32_at(at + 0xe4);
     let mut body = (body_at != 0).then(|| quad_body(ee, body_at));
-    let mut w = RecordInRam { ee, at, terrain, others: BTreeMap::new(), queries: 0 };
+    if let Some(p) = port.as_deref_mut() {
+        let (r, image) = image::read_ride(ee, image::IMAGE_QUAD, dt).unwrap_or_else(|e| panic!("{e}"));
+        p.scene = Some((r.bike.parts.scene, image.nodes[0]));
+    }
+    let mut w = RecordInRam { ee, at, terrain, others: BTreeMap::new(), queries: 0, port };
     if slot == 0x7c {
         record::clear(&mut rec, &mut w);
     } else {
@@ -369,7 +818,12 @@ fn port_record(ee: &mut Ee, at: u32, slot: u32, dt: F, terrain: Option<&atv_grou
     }
     let queries = w.queries;
     w.finish(&read, &rec, body.as_ref().map(|b| (b, body_at)));
-    queries
+    if let Some(h) = held.as_mut()
+        && !h.refill(&rec.contacts)
+    {
+        held = None;
+    }
+    (queries, held)
 }
 
 /// Every RAM word that differs between the two machines, outside the interpreter's stack (frames
@@ -408,6 +862,11 @@ struct Palm {
     at: Vec<Vf>,
     queries: u32,
     port_queries: u32,
+    /// MD105b: frames the port's world step ran, and how many of them resolved contacts.
+    port_frames: u32,
+    port_resolved: u32,
+    /// [`WorldStep::asked`].
+    port_asked: [u32; 5],
     /// The words that differed on the spoiled frame.
     spoiled: Vec<u32>,
 }
@@ -424,7 +883,7 @@ impl Palm {
 /// frame `spoil`, spoiled, and the run stops there with the words that differ), every RAM word outside
 /// the stack equal to the first's after every frame. Both get [`at_the_palm`]'s pad off the first's
 /// body before each frame.
-fn palm(frames: usize, port: Option<bool>, spoil: Option<usize>) -> Option<Palm> {
+fn palm(frames: usize, port: Option<Pieces>, spoil: Option<usize>) -> Option<Palm> {
     let pre = image()?;
     let trn = terrain_file()?;
     let trn: &'static [u8] = Box::leak(trn.into_boxed_slice());
@@ -438,6 +897,31 @@ fn palm(frames: usize, port: Option<bool>, spoil: Option<usize>) -> Option<Palm>
     assert_eq!(pre.u32_at(quad + 0xc8), at.record, "the quad's collision record");
     assert_eq!(pre.u32_at(pre.u32_at(at.record + 4) + 0x7c), RECORD_CLEAR, "the record is F31b4's class");
     let riding_part = pre.u32_at(at.record + 0x200);
+    let desert = if port == Some(Pieces::Port) { Some(oasis::desert_world(&pre)?) } else { None };
+    let (searched, scene) = match desert {
+        Some(oasis::Desert { world, props, eco, trees, rays, search, first_part, .. }) => (Some((world, rays, search, first_part)), Some((props, eco, trees))),
+        None => (None, None),
+    };
+    let mut world = searched.zip(scene.as_ref()).map(|((world, rays, search, first_part), (props, eco, trees))| {
+        let mut oasis = atv_search::Oasis::new(world, props, eco, trees, rays, search, first_part);
+        assert_eq!(pre.u32_at(IMAGE_LIST + 4), 0, "the image's nearby list is empty");
+        oasis.gathered = true;
+        WorldStep {
+            oasis,
+            terrain: terrain.clone(),
+            table: AcosTable::build(),
+            fresh: image().unwrap(),
+            frames: 0,
+            resolved: 0,
+            facets: Vec::new(),
+            trunks: Vec::new(),
+            probes: BTreeMap::new(),
+            items: Vec::new(),
+            scene: None,
+            spoil: false,
+            asked: [0; 5],
+        }
+    });
 
     let mut ee = pre;
     hooked(&mut ee);
@@ -457,7 +941,7 @@ fn palm(frames: usize, port: Option<bool>, spoil: Option<usize>) -> Option<Palm>
         run(&mut ee, SIM_FRAME, &[u64::from(SIM)], dt);
         if let Some(t) = twin.as_mut() {
             lay_pad(t, quad, p);
-            let (elements, q) = frame_in_pieces(t, dt, (port == Some(true)).then_some((at.record, map)), spoil == Some(k));
+            let (elements, q) = frame_in_pieces(t, dt, (port != Some(Pieces::Original)).then_some((at.record, map)), spoil == Some(k), world.as_mut());
             assert!(elements.contains(&at.record), "frame {k}: the quad's record is not on the update list: {elements:#x?}");
             seen.port_queries += q;
             let bad = ram_differs(&ee, t);
@@ -480,6 +964,9 @@ fn palm(frames: usize, port: Option<bool>, spoil: Option<usize>) -> Option<Palm>
         seen.at.push(get_v(&ee, at.body + 0x70));
     }
     seen.queries = asked.get();
+    if let Some(w) = &world {
+        (seen.port_frames, seen.port_resolved, seen.port_asked) = (w.frames, w.resolved, w.asked);
+    }
     eprintln!(
         "MD105: {frames} frames, {} ground queries, {} by the port's record; first contact frame {:?}, part swaps {:?}, wrecks {:?}",
         seen.queries,
@@ -493,6 +980,15 @@ fn palm(frames: usize, port: Option<bool>, spoil: Option<usize>) -> Option<Palm>
 
 const PALM_RIDE: usize = 300;
 
+/// What the twin's frame in pieces runs as the port's: nothing (all the original's), the quad's
+/// record's two virtuals (MD105), or those and the world step (MD105b).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Pieces {
+    Original,
+    Record,
+    Port,
+}
+
 /// **The original's whole sim frame strikes the palm**: [`at_the_palm`]'s ride, frame after frame,
 /// files the palm's contacts from frame 89, wrecks on frame 96 (the record's active part becomes the
 /// wreck's and the quad's wreck count 1), puts the quad back at its spot on frame 164, and wrecks on
@@ -501,7 +997,7 @@ const PALM_RIDE: usize = 300;
 /// every frame.
 #[test]
 fn the_quads_whole_sim_frame_strikes_the_palm_wrecks_and_is_put_back() {
-    let Some(seen) = palm(PALM_RIDE, Some(false), None) else { return };
+    let Some(seen) = palm(PALM_RIDE, Some(Pieces::Original), None) else { return };
     check_palm(&seen);
 }
 
@@ -521,7 +1017,7 @@ fn check_palm(seen: &Palm) {
 /// the palm's contacts filed by the port.
 #[test]
 fn the_quads_record_is_the_ports_through_the_palm_strike_wreck_and_put_back() {
-    let Some(seen) = palm(PALM_RIDE, Some(true), None) else { return };
+    let Some(seen) = palm(PALM_RIDE, Some(Pieces::Record), None) else { return };
     check_palm(&seen);
 }
 
@@ -530,10 +1026,43 @@ fn the_quads_record_is_the_ports_through_the_palm_strike_wreck_and_put_back() {
 /// list, and in the quad the same frame's world step pushes with it.
 #[test]
 fn a_spoiled_contact_on_the_strike_goes_red() {
-    let Some(seen) = palm(90, Some(true), Some(89)) else { return };
+    let Some(seen) = palm(90, Some(Pieces::Record), Some(89)) else { return };
     let pre = image().unwrap();
     let list = pre.u32_at(image::read_ride(&pre, image::IMAGE_QUAD, F::ZERO).unwrap().1.record + 0xf8);
     let normal: Vec<u32> = (0..4).map(|k| list + 0x30 + 4 * k).collect();
     assert!(normal.iter().all(|a| seen.spoiled.contains(a)), "the spoiled normal's words are not red: {:#x?}", seen.spoiled);
     assert!(seen.spoiled.iter().any(|&a| (image::IMAGE_QUAD..image::IMAGE_QUAD + 0x1800).contains(&a)), "the push did not reach the quad");
+}
+
+/// MD105b — the port's step goes red when its held contacts are wrong: the first one's normal one bit
+/// off in each lane on frame 89, in the port's [`atv_contact::Held`] alone (the record in RAM, and so
+/// the original's step, keep the pass's), and the port's step differs from the original's there.
+#[test]
+fn a_spoiled_held_contact_turns_the_ports_step_red() {
+    let ran = std::panic::catch_unwind(|| palm(90, Some(Pieces::Port), Some(89)));
+    match ran {
+        Ok(None) => {}
+        Ok(Some(_)) => panic!("the spoiled held contact went unseen"),
+        Err(e) => {
+            let msg = e.downcast_ref::<String>().cloned().unwrap_or_default();
+            assert!(msg.starts_with("frame 89: ") && msg.contains("of the port's step differ"), "red for another reason: {msg}");
+        }
+    }
+}
+
+/// MD105b — **the palm strike's contacts push the port's quad**: the palm ride with the quad's
+/// record's virtuals and the world step both the port's ([`WorldStep`]): the contacts
+/// [`record::pass`] files each frame are handed to [`quad::Steps`]' [`atv_contact::Held`]
+/// ([`atv_contact::Held::refill`]), and [`quad::frame`] resolves them. Every word the port's step
+/// holds equals the original's step's, and every RAM word outside the stack the original's whole
+/// frame's, every one of the 300 frames through the strike, wreck, put-back and second strike.
+#[test]
+fn the_palm_strikes_contacts_push_the_ports_quad() {
+    let Some(seen) = palm(PALM_RIDE, Some(Pieces::Port), None) else { return };
+    check_palm(&seen);
+    assert_eq!(seen.port_frames as usize, PALM_RIDE, "the port's world step ran every frame");
+    assert!(seen.port_resolved > 0, "the port's step never resolved a contact: {seen:?}");
+    let [searches, hits, sweeps, pairs, points] = seen.port_asked;
+    assert!(hits > 0 && pairs > 0 && points > 0, "the port's outside answered {:?}", seen.port_asked);
+    assert_eq!((searches, sweeps), (PALM_RIDE as u32, PALM_RIDE as u32), "a part search and a sweep a frame");
 }
