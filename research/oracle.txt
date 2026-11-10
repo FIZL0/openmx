@@ -11023,3 +11023,37 @@ race_end                    boot 0x002fc970 (activity) the race's Over notice (l
 race_results_take           boot 0x0029d940 (results menu, score manager) the results menu takes the
 #                                           cards. Not read further.
 tip_popup_arm               boot 0x0029abc0 (popup, 1). Not read further.
+# F31b5l — the tail's frame post, the wreck fade's world search and the kind clear, Rust's on C15
+# (tests/mxvatv_bike_ride.rs frame_post/FramePost, fade_search_in_ram, UpdateInRam's KindClear/Show; src
+# atv_search::collide_world, broad_phase::probe_collide_world_passing, atv_part::bounds, handling::update::
+# kind_clear/show/category/uncategorise; journal research/journal/2026-11-09-f31b5l-*).
+# Frame post: tail::Out::Message(id) is the event post 0x00272300 = reset::post over the queue 0x00442eb0,
+# poster bike +0x674, message [8, 4, 0, id]. State 4's 11 tells a frame: 0x002fbc80 -> 0x002fba00 ->
+# 0x002f7a70 HUD (speed x scale to its gauge vt +0x60 and lamp vt +0x64, ~600 instr); 0x002a2430 ->
+# 0x0029bee0 race progress (0x0029c910 + 0x0029c1e0 with its rider the bike, else 0x0029c170, ~1175 instr);
+# 0x002a2440 -> 0x0029e6d0 speed flag (only with its vt +0x3c set: +0x54 = speed < 29.3332; 22 instr);
+# 0x002aeed0 -> 0x002a57c0 menu list (only with +0x3c -> 0x002a5cf0); 0x002a3420 x5 -> 0x002a2cf0 pickers
+# (nothing for id 4); 0x00491270 -> 0x00490e60 camera controller (ids 0x15/7/6/0xd/0xc/0xb only);
+# 0x0051b2a0 -> 0x0051a240 (returns 1). None writes the bike or its physics blocks on C15.
+# Fade search: update::Out::Search(rec) = 0x001148e0(rec = bike +0xcc, 0). MX's probe_collide_world with
+# rec +0x126 bit 0x02 AND rec +0x20 (space links) != 0 to be active (else hit bit 0x20 cleared, returns
+# FLT_MAX), budget +0x74, last +0x60, centre +0x50; static query 0x0019d2b0(q, +0x20, 1, c, h, lo, hi, 1),
+# next 0x0019d360, never ended (the tree's +0x9c list stays open); in it an entry (kind 2) whose
+# collidable's first word is 1 is passed over before its +0x126 |= 0x10; pair distance 0x00116a30, filter
+# 0x001144f0(.., 1), narrow vt +0xb4, listeners via 0x00117460; groups (kind 3) unless +0x126 & 1: point
+# distance 0x001169f0 with reach = model(0x0052cd88 +0x84)[+0x12] +0x10c..+0x114 by +0x15/128, cell
+# +0xc/+0x10 x (0x0052cd88 +0xc4), parts 0x0046d390/0x0046d3c0 (part +0x88 = group); moving pass if any
+# link's table +0x28 != +0x2c. On hit +0x60 = (0, -10000, 0, 1), budget 0.
+# The part's box vt +0xc4 = 0x001bd1d0: +0x17c nodes != 0 -> node 0 +0xc centre, +0x18 half; else ray 0
+# (+0x180) (from+to)*0.5, (to-from)*0.5; centre = vaddax m3+vf0x, vmaddax m0 cx, vmadday m1 cy, vmaddz m2 cz;
+# half = vabs(m0*hx), vabs(m1*hy), vabs(m2*hz); vadda(r1, r0), vmaddw(r2, vf0w); w 1. flip-1: 91 searches a
+# run, ~30k instr each (2.8M), flags 0x12 -> 0x12 (never a hit).
+# Kind clear: vt +0x39c = 0x004e1910: unless *(bike +0xbc4) +0x28 == 3: hung parts (+0x1470/+0x1474)
+# 0x0018d170(1.0, part) (part +0x17c = 1.0), then 0x004a71c0: the same check; vt +0x398 = 0x004e1870(bike, 1)
+# (with bike +0x44 & 1 and +0xd0 obj: obj vt(+0x28) +0x20 (obj +0x24); obj +0x20 == 0 -> 0x001143e0(obj,
+# bike +0xb4, bike +0xc0, 1)); bike +0xc1c = 1; parts +0xcc and +0xd4: 0x001155f0(part, 1) (+0xe0 = 1),
+# 0x00115980(part, bit) zeroes the first +0xfc entry (count +0x100) equal to bit, for 0x00113d00(*0x0038d400,
+# "DYNAMICOBJECT" 0x0052693e), bike +0x30c, *0x00542388, "PHYSICSBODY" 0x0052694c, "PHYSICSOBJECT"
+# 0x00526958 (0x00113d00: count, then 32-byte names; strcmp 0x00357158, strcpy 0x00357638 when absent;
+# 1 << index); bike +0x9a8 = 1; 0x0018d170(1.0, bike +0xe4). The mirror kind set is vt +0x3a0 = 0x004e19a0
+# (0.5) / 0x004a7350. flip-1: once a run, 6385 instr.
