@@ -1526,6 +1526,32 @@ ai_tick_flag                boot 0x00383580 sets and clears the per-tick bit 0x8
 #                                           riders have no path net (race +0x68 = 0, interface +0x88 = 0)
 #                                           and ride targets: +0x340 set, +0x344 target, +0x354 = 1.
 #                                           Split S282a (targets), S282b (path follow), S282c (path data)
+#                                           S282a: the free-ride target seeker is 0x00383634..0x00384970
+#                                           (the path branch 0x00383a84 is S282b's, the tail 0x00384970
+#                                           on too): retarget, states +0x354 1/2/3, landing learning
+#                                           +0x358..+0x38c, the hand-off through vt+0x80/vt+0x94.
+#                                           Ported as ai::seek::seek, oracled 10,000 ticks (tests/ai.rs)
+ai_seek_reach               boot 0x00283560 VehicleAI vt+0x80 (ai, point, dir) -> f0: +0x210 + off-line
+#                                           distance * +0x218, at most +0x214; +0x210 on a null.
+#                                           Ported as ai::seek::reach
+ai_seek_hand_off            boot 0x00284ba0 VehicleAI vt+0x94 (ai, point, dir, f12 speed, f13 distance,
+#                                           f14 lead, f15 unused, f16 reach) -> 1: flag 0x08000000,
+#                                           aim +0x1b0, heading +0x1d0, speed +0x1e0. Ported as
+#                                           ai::seek::hand_off
+ai_seek_crossed             boot 0x003832f0 (ai, leg) -> the rider crossed leg+0x20 along leg+0x30 this
+#                                           tick within +0x35c (pos +0xc0, last +0x290). Ported as
+#                                           ai::seek::crossed
+ai_seek_sequence_on         boot 0x004e2658 word: non-zero = targets come from a fixed sequence (writer
+#                                           not found in the ELF; 0 in recording2)
+ai_seek_sequence_root       boot 0x004e2778 pointer: +0x44 -> +0x50 -> +0x48 the sequence list (count
+#                                           +0x30, items +0x38) via 0x003aa630; also the list-build arg
+ai_seek_list_build          boot 0x003a9f10 builds a target set's pick list (+0x11c) when it has none:
+#                                           not ported (ai::seek::Set::picks None)
+ai_seek_miss_start          boot 0x00426db0 quad (0, 1, 0, 1): the seeker's fresh +0x370 last miss
+ai_seek_path_branch         boot 0x00383a84 inside ai_tick_flag: the path follower's start (state 0 and
+#                                           +0xdc set), S282b. tests/ai.rs stops the seeker oracle here
+ai_seek_tail                boot 0x00384970 inside ai_tick_flag: the tail after the hand-off (S282b);
+#                                           tests/ai.rs stops the seeker oracle here
 ai_controls                 boot 0x00283ef0 (ai) VehicleAI's ground controller, MXVehicleAI vt+0x90 via
 #                                           ai_controls_dispatch: target direction +0x1d0 against
 #                                           forward +0xb0 / up +0xa0 -> angles +0x1f0/+0x1f4/+0x1f8,
