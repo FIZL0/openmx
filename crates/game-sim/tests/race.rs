@@ -2934,6 +2934,65 @@ fn the_spot_search_matches_the_track_objects() {
     assert!(answers.iter().all(|&k| k > 200) && moved > 3000, "{answers:?} {moved}");
 }
 
+/// S282b: the path spot at a point (`ai::follow::spot`), on the same generated courses: points on,
+/// beside and far off the paths, holding-only or not, with and without a distance out, and pools that
+/// run dry.
+#[test]
+fn the_path_spot_at_a_point_matches_the_track_objects() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let spot_fn = match addr("path_spot") {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    let mut p = Pick(0x5282_b5b0_7a11_d00d);
+    let mut seen = [0usize; 6];
+    for case in 0..20_000 {
+        let mut t = t_paths(&mut p);
+        put_paths(&mut ee, &mut p, &t);
+        ee.set_u32(T_TRACK + 0x4c, t_rec(0));
+        let i = p.below(t.paths.len() as u64) as usize;
+        let n = p.below(t.paths[i].nodes.len() as u64) as usize;
+        let q = t.paths[i].nodes[n].points[0];
+        let point = match p.below(8) {
+            0 => Vf([p.range(-150.0, 150.0), p.range(-5.0, 5.0), p.range(-150.0, 150.0), 1.0]),
+            1 => q,
+            _ => Vf([q.x() + p.range(-25.0, 25.0), p.range(-5.0, 5.0), q.z() + p.range(-25.0, 25.0), 1.0]),
+        };
+        let point = Vf([p.stray(point.x()), point.y(), p.stray(point.z()), point.w()]);
+        let holding = p.below(3) == 0;
+        let with_distance = p.below(2) == 0;
+        let fill = Spot { path: 0, piece: 0, along: F(p.unit()) };
+        let d_fill = F(p.unit());
+        put_quad(&mut ee, T_POINT, point);
+        put_t_spot(&mut ee, T_OUT, fill);
+        put_f(&mut ee, T_D, d_fill);
+        let what = format!("case {case}: {point:?}, holding {holding}, distance {with_distance}");
+        let args = [
+            u64::from(T_TRACK),
+            u64::from(T_POINT),
+            u64::from(T_OUT),
+            if with_distance { u64::from(T_D) } else { 0 },
+            p.next() & 1,
+            u64::from(holding),
+        ];
+        ee.call(spot_fn, &args, &[], BUDGET * 10);
+        let mut out = fill;
+        let mut d = d_fill;
+        let got = game_sim::ai::follow::spot(&mut t, point, holding, &mut out, with_distance.then_some(&mut d));
+        assert_eq!(ee.v0() as u32, u32::from(got), "{what}: the answer");
+        assert_eq!(t_bits(t_spot_at(&ee, T_OUT)), t_bits(out), "{what}: the spot");
+        assert_eq!(f32_at(&ee, T_D).0.to_bits(), d.0.to_bits(), "{what}: the distance");
+        check_paths(&ee, &t, &what);
+        seen[usize::from(got)] += 1;
+        seen[2] += usize::from(got && out == fill);
+        seen[3] += usize::from(got && holding && out != fill);
+        seen[4] += usize::from(got && out.path > 1);
+        seen[5] += usize::from(got && with_distance && d == F(0.0));
+    }
+    eprintln!("path spot: refused {}, found {}, none {}, holding {}, off path 0 {}, on the line {}", seen[0], seen[1], seen[2], seen[3], seen[4], seen[5]);
+    assert!(seen[0] > 300 && seen[1] > 15_000 && seen[2] > 200 && seen[3] > 2000 && seen[4] > 3000 && seen[5] > 50, "{seen:?}");
+}
+
 /// A race card back out of RAM, its spots read back as path and node indices (see `put_t_spot`).
 fn race_card_at(ee: &Ee, at: u32, lines: usize) -> RaceCard {
     let mut lap = lap_card_at(ee, at, lines);
