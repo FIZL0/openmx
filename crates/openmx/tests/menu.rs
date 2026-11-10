@@ -271,9 +271,10 @@ fn every_screen_is_reachable_from_the_main_menu_by_pad_input_alone() {
     menu.join = join::Join::with(&[Some(0), Some(1)], join::ON_SCREEN, join::Opened::Menu);
     assert_eq!(menu.screen(), Some(Screen::Main));
     // Controls, Audio and Camera are Settings' tabs since P118, Graphics since P128, never a screen of
-    // their own on the stack; `l1_and_r1_walk_every_tab_round_from_either_end` walks those.
+    // their own on the stack; `l1_and_r1_walk_every_tab_round_from_either_end` walks those. Results
+    // is the shell's after a race is left (P327), `race_from_the_main_menu_rides_its_setup_and_shows_results`'s.
     let wanted: Vec<Screen> =
-        Screen::ALL.into_iter().filter(|s| !matches!(s, Screen::Controls | Screen::Audio | Screen::Camera | Screen::Graphics)).collect();
+        Screen::ALL.into_iter().filter(|s| !matches!(s, Screen::Controls | Screen::Audio | Screen::Camera | Screen::Graphics | Screen::Results)).collect();
     // Breadth first over single button taps, so each screen is found by its shortest path.
     let mut found: Vec<(Screen, Vec<Control>)> = vec![(Screen::Main, vec![])];
     let mut seen = HashSet::from([key(&menu)]);
@@ -3010,6 +3011,7 @@ fn two_and_four_players_join_pick_a_track_and_ride_that_many_views() {
     let all = [0, 1, 2, 3];
     let (mut m, mut rd) = fresh_with(4);
     tap_device(&mut m, &mut rd, &all, 0, Control::Down);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Down);
     tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Join));
     // The pad that chose Local Game is 1P already; the third joins and moves a seat right.
@@ -3053,6 +3055,7 @@ fn two_and_four_players_join_pick_a_track_and_ride_that_many_views() {
     // Back on the main menu after the ride, a Free Ride is `--players`' again and no local game.
     m.main();
     tap_device(&mut m, &mut rd, &all, 0, Control::Up);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Up);
     tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Tracks));
     assert!(m.party().is_none());
@@ -3061,6 +3064,7 @@ fn two_and_four_players_join_pick_a_track_and_ride_that_many_views() {
     // Four: every pad joins; the last is pulled out before Start, which keeps its seat and its view
     // (the rider waits on the start line for it).
     let (mut m, mut rd) = fresh_with(4);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Down);
     tap_device(&mut m, &mut rd, &all, 0, Control::Down);
     tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
     for d in 1..4 {
@@ -3091,6 +3095,7 @@ fn two_and_four_players_join_pick_a_track_and_ride_that_many_views() {
 fn pads_join_move_and_leave_and_an_unplugged_one_keeps_its_seat() {
     let all = [0, 1, 2, 3];
     let (mut m, mut rd) = fresh_with(4);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Down);
     tap_device(&mut m, &mut rd, &all, 0, Control::Down);
     tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Join));
@@ -3142,6 +3147,7 @@ fn local_game(pads: usize, joiners: &[usize]) -> (Menu, Vec<Act>) {
     let all: Vec<usize> = (0..pads).collect();
     let (mut m, mut rd) = fresh_with(pads);
     tap_device(&mut m, &mut rd, &all, 0, Control::Down);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Down);
     tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Join));
     for &d in joiners {
@@ -3163,6 +3169,7 @@ fn two_or_three_pads_start_a_local_game_with_a_view_each() {
         let (mut m, mut rd) = fresh_with(2);
         m.settings.split = split;
         let all = [0, 1];
+        tap_device(&mut m, &mut rd, &all, 0, Control::Down);
         tap_device(&mut m, &mut rd, &all, 0, Control::Down);
         tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
         tap_device(&mut m, &mut rd, &all, 1, Control::Cross);
@@ -3214,6 +3221,7 @@ fn one_pad_starts_a_local_game_alone_and_can_free_ride() {
         let all: Vec<usize> = (0..pads).collect();
         let (mut m, mut rd) = fresh_with(pads);
         tap_device(&mut m, &mut rd, &all, 0, Control::Down);
+        tap_device(&mut m, &mut rd, &all, 0, Control::Down);
         tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
         assert!(m.join.can_start(), "{pads} pads plugged in, one joined");
         tap_device(&mut m, &mut rd, &all, 0, Control::Start);
@@ -3234,6 +3242,7 @@ fn one_pad_starts_a_local_game_alone_and_can_free_ride() {
     let all = [0, 1];
     let (mut m, mut rd) = fresh_with(2);
     tap_device(&mut m, &mut rd, &all, 0, Control::Down);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Down);
     tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
     tap_device(&mut m, &mut rd, &all, 1, Control::Cross);
     tap_device(&mut m, &mut rd, &all, 1, Control::Circle);
@@ -3249,6 +3258,7 @@ fn one_pad_starts_a_local_game_alone_and_can_free_ride() {
     tap_device(&mut m, &mut rd, &all, 0, Control::Circle);
     assert_eq!(m.screen(), Some(Screen::Main));
     tap_device(&mut m, &mut rd, &all, 0, Control::Up);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Up);
     tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Tracks));
     let acts = tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
@@ -3261,6 +3271,7 @@ fn one_pad_starts_a_local_game_alone_and_can_free_ride() {
 fn backing_out_of_a_local_game_walks_its_screens_back_to_the_main_menu() {
     let all = [0, 1];
     let (mut m, mut rd) = fresh_with(2);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Down);
     tap_device(&mut m, &mut rd, &all, 0, Control::Down);
     tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
     tap_device(&mut m, &mut rd, &all, 1, Control::Cross);
@@ -7594,6 +7605,7 @@ fn a_lone_rider_on_any_pad_seat_is_joined_by_another_and_the_cue_says_how() {
     // the rider's own Cross is their throttle, not a join.
     let (mut m, mut rd) = fresh_with(4);
     tap_device(&mut m, &mut rd, &all, 0, Control::Down);
+    tap_device(&mut m, &mut rd, &all, 0, Control::Down);
     tap_device(&mut m, &mut rd, &all, 0, Control::Cross);
     tap_device(&mut m, &mut rd, &all, 1, Control::Cross);
     tap_device(&mut m, &mut rd, &all, 0, Control::Circle);
@@ -9843,4 +9855,132 @@ fn the_dead_zone_row_is_off_by_default_and_saved_as_a_modifier() {
     }
     assert_eq!(row(&m).value, "Off");
     assert!(!m.settings.text().contains("stick_dead_zone"));
+}
+
+// ---- P327: Race on the main menu ---------------------------------------------------------------------
+
+/// Race from the main menu (P327): the pick lists the Supercross tracks and Right goes to the
+/// nationals; Cross on a track is its setup on Start Race; Left/Right step the laps and riders; Start
+/// Race rides the track with the race under the menu. Leaving it shows the results, and Cross goes
+/// back to the main menu.
+#[test]
+fn race_from_the_main_menu_rides_its_setup_and_shows_results() {
+    let (mut m, mut r) = fresh();
+    main_to(&mut m, &mut r, "Race");
+    assert_eq!(m.screen(), Some(Screen::Race));
+    assert_eq!(m.cursor(Screen::Race), 0);
+    // Right to the nationals and back, then sx01's setup.
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.race.kind, 1);
+    tap(&mut m, &mut r, Control::Left);
+    assert_eq!(m.race.kind, 0);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::RaceSetup));
+    assert_eq!(m.race.setup.track, "sx01");
+    // Up to Laps, one more; Riders, one fewer; down to Start Race.
+    tap(&mut m, &mut r, Control::Up);
+    tap(&mut m, &mut r, Control::Up);
+    tap(&mut m, &mut r, Control::Right);
+    tap(&mut m, &mut r, Control::Down);
+    tap(&mut m, &mut r, Control::Left);
+    tap(&mut m, &mut r, Control::Down);
+    assert_eq!(m.cursor(Screen::RaceSetup), 2);
+    assert_eq!(m.racing(), None);
+    let acts = tap(&mut m, &mut r, Control::Cross);
+    assert!(acts.contains(&Act::Ride("sx01".into())), "{acts:?}");
+    assert!(m.riding());
+    let want = menu::RaceSetup { track: "sx01".into(), laps: 4, riders: 3 };
+    assert_eq!(m.racing(), Some(&want));
+    // Free Ride's NumberOfRacers is untouched: the race does not become the settings' track.
+    assert_ne!(m.settings.track, "sx01");
+
+    // The ride left: the results screen, the stand-in's numbers all dashes.
+    m.main();
+    assert!(m.race_left());
+    assert_eq!(m.racing(), None);
+    assert_eq!(m.screen(), Some(Screen::Results));
+    let results = m.results();
+    assert_eq!((results.track.as_str(), results.laps, results.riders), ("sx01", 4, 3));
+    assert_eq!(results.rows.len(), 1);
+    assert_eq!(results.rows[0].place, None);
+    assert_eq!(menu::race::time_or_dash(results.rows[0].best_lap), "-:--.--");
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Main));
+    // A second leave is no race: no results.
+    assert!(!m.race_left());
+    assert_eq!(m.screen(), Some(Screen::Main));
+}
+
+/// A Free Ride after a race is no race (P327), and a race whose load is cancelled goes back to its
+/// setup with no race under way.
+#[test]
+fn a_free_ride_is_no_race_and_a_cancelled_race_goes_back_to_its_setup() {
+    let (mut m, mut r) = fresh();
+    main_to(&mut m, &mut r, "Race");
+    tap(&mut m, &mut r, Control::Cross);
+    let acts = tap(&mut m, &mut r, Control::Cross);
+    assert!(acts.contains(&Act::Ride("sx01".into())), "{acts:?}");
+    m.back_to_pick();
+    assert_eq!(m.screen(), Some(Screen::RaceSetup));
+    assert_eq!(m.racing(), None);
+    tap(&mut m, &mut r, Control::Circle);
+    tap(&mut m, &mut r, Control::Circle);
+    assert_eq!(m.screen(), Some(Screen::Main));
+    main_to(&mut m, &mut r, "Free Ride");
+    let acts = tap(&mut m, &mut r, Control::Cross);
+    assert!(acts.iter().any(|a| matches!(a, Act::Ride(_))), "{acts:?}");
+    assert_eq!(m.racing(), None);
+    m.main();
+    assert!(!m.race_left());
+}
+
+/// `--screen screen` shot at 640x360 from a scratch store, or none without a disc (P327).
+fn screen_shot(screen: &str) -> Option<Vec<u8>> {
+    let iso = match game_render::disc::Disc::configured_path() {
+        Ok(p) if p.is_file() => p,
+        _ => {
+            eprintln!("skipped: no disc");
+            return None;
+        }
+    };
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("p327-{screen}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("kit.toml"), "[game]\niso = \"disc.iso\"\n").unwrap();
+    std::os::unix::fs::symlink(&iso, dir.join("disc.iso")).unwrap();
+    let shot = dir.join("shot.png");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_openmx"))
+        .current_dir(&dir)
+        .args(["--headless", "--menu", "--screen", screen, "--size", "640x360", "--frames", "3", "--seconds", "120", "--no-sound"])
+        .arg("--shot")
+        .arg(&shot)
+        .output()
+        .expect("the shell runs");
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "the shell failed: {}\n{said}", String::from_utf8_lossy(&out.stderr));
+    let (w, h, rgb) = read_png(&shot);
+    assert_eq!((w, h), (640, 360));
+    std::fs::remove_dir_all(&dir).ok();
+    Some(rgb)
+}
+
+/// P327: the Race pages draw — the track pick, the setup and the results, each a picture of its own
+/// and none the main menu's; the pick and the setup with the cursor's red row in their list.
+#[test]
+fn the_race_pages_are_shot_from_the_menu() {
+    let Some(main) = screen_shot("main") else { return };
+    let shots: Vec<(&str, Vec<u8>)> = ["race", "race-setup", "results"].into_iter().map(|s| (s, screen_shot(s).unwrap())).collect();
+    for (i, (name, rgb)) in shots.iter().enumerate() {
+        assert_ne!(*rgb, main, "{name} is the main menu's picture");
+        for (other, theirs) in &shots[i + 1..] {
+            assert_ne!(rgb, theirs, "{name} and {other} are one picture");
+        }
+    }
+    // The list's column, left of the page: the cursor's row is a deep red pill.
+    let red = |rgb: &[u8]| {
+        (40..200).flat_map(|y| (60..260).map(move |x| 3 * (y * 640 + x))).filter(|&i| rgb[i] > 120 && rgb[i + 1] < 60 && rgb[i + 2] < 70).count()
+    };
+    for (name, rgb) in &shots[..2] {
+        assert!(red(rgb) > 300, "{name}: no cursor row ({} red pixels)", red(rgb));
+    }
 }

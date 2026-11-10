@@ -192,6 +192,26 @@ pub struct Shown<'a> {
     /// Whether the Show FPS line is up over the frame: with the touch pad up the meters stand under
     /// it in the top right, and in its place without it (P323).
     pub fps: bool,
+    /// The race's lap and place while one is on (P327).
+    pub race: Option<RaceShown>,
+}
+
+/// A race's readouts as a view shows them (P327): the lap of the laps and the place of the riders,
+/// `None` where the simulation does not count them yet (S13c, S13d) and drawn as dashes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RaceShown {
+    pub lap: Option<u32>,
+    pub laps: u32,
+    pub place: Option<u32>,
+    pub riders: u32,
+}
+
+impl RaceShown {
+    /// The two readouts' words: `LAP 1/3`, `POS 2/4`, with a dash for a number not counted.
+    pub fn words(&self) -> [String; 2] {
+        let n = |v: Option<u32>| v.map_or_else(|| "-".to_string(), |v| v.to_string());
+        [format!("LAP {}/{}", n(self.lap), self.laps), format!("POS {}/{}", n(self.place), self.riders)]
+    }
 }
 
 /// The freestyle event as a view shows it (P155): [`EventShown::of`] off the ride's event and the
@@ -582,6 +602,8 @@ pub struct Drawn {
     /// The freestyle event's lines (P155): the target, the countdown or the clock, the announcer's
     /// line and the verdict, as drawn.
     pub event: Vec<Line>,
+    /// The race's lap and place (P327), as drawn.
+    pub race: Vec<Line>,
 }
 
 // ---- the pen --------------------------------------------------------------------------------------
@@ -786,6 +808,9 @@ pub fn sprites_clear_of(out: &mut Vec<Sprite>, base: usize, view: [f32; 4], pad:
     if let Some(e) = &shown.event {
         event(&mut pen, e, tracker, now, &mut drawn);
     }
+    if let Some(r) = &shown.race {
+        race(&mut pen, r, &mut drawn);
+    }
     if let Some(p) = tracker.popup(now) {
         let lines = trick(&mut pen, &p);
         drawn.trick = Some((p, lines));
@@ -934,6 +959,26 @@ fn event(pen: &mut Pen, e: &EventShown, tracker: &Tracker, now: Instant, drawn: 
         centred(pen, verdict_text(v), 190.0, 3.0 * EM, ORANGE, drawn);
         centred(pen, &format!("EVENT {}", grouped(points as f32)), 190.0 + 2.2 * EM, 1.1 * EM, CHALK, drawn);
         centred(pen, &format!("FREERIDE TOTAL {}", grouped(total as f32)), 190.0 + 3.7 * EM, 1.1 * EM, CHALK, drawn);
+    }
+}
+
+/// The race's lap and place (P327), top centre where the event's pill stands: the two side by side in
+/// a dark pill.
+fn race(pen: &mut Pen, r: &RaceShown, drawn: &mut Drawn) {
+    pen.corner = Corner::TopLeft;
+    let (cx, top) = EVENT_AT;
+    let size = 1.1 * EM;
+    let gap = 1.6 * EM;
+    let words = r.words();
+    let widths = words.each_ref().map(|w| Pen::measure(Face::Words, Weight::Heavy, w, size));
+    let w = widths[0] + widths[1] + gap + 2.0 * EM;
+    let h = size + 1.2 * EM;
+    pen.round([cx - w / 2.0, top, w, h], 0.8 * EM, shade(128), shade(128));
+    let mut x = cx - w / 2.0 + EM;
+    for (text, width) in words.iter().zip(widths) {
+        let rect = pen.edged(Face::Words, Weight::Heavy, text, (x, top + 0.6 * EM + size), size, ink::SLANT, CHALK, OUTLINE, 0.1 * EM);
+        drawn.race.push(Line { text: text.clone(), rect, colour: CHALK });
+        x += width + gap;
     }
 }
 

@@ -63,6 +63,10 @@ mod screens;
 mod store;
 #[path = "menu_transfers.rs"]
 mod transfers;
+// P327: Race on the main menu — the race-track pick, the setup and the results.
+#[path = "menu_race.rs"]
+pub mod race;
+pub use race::{RaceSetup, Results};
 pub use transfers::{PLAY_ROWS, Transfers};
 // The pause's Tricks page (P259): the ride's tricks, their gestures and points.
 #[path = "menu_tricks.rs"]
@@ -2639,10 +2643,16 @@ pub enum Screen {
     /// The pause's Tricks page (P259): every trick the ride has, how it is done and what it scores,
     /// the lit one performed in a small view.
     Tricks,
+    /// P327's race-track pick: the Supercross tracks or the nationals, Left and Right between them.
+    Race,
+    /// P327's race setup: laps, riders and Start Race.
+    RaceSetup,
+    /// P327's results, after a race's ride.
+    Results,
 }
 
 impl Screen {
-    pub const ALL: [Screen; 22] = [
+    pub const ALL: [Screen; 25] = [
         Screen::Splash,
         Screen::Main,
         Screen::Tracks,
@@ -2665,6 +2675,9 @@ impl Screen {
         Screen::Assign,
         Screen::Store,
         Screen::Tricks,
+        Screen::Race,
+        Screen::RaceSetup,
+        Screen::Results,
     ];
 
     fn index(self) -> usize {
@@ -2696,6 +2709,9 @@ impl Screen {
             Screen::Assign => "controllers",
             Screen::Store => "store",
             Screen::Tricks => "tricks",
+            Screen::Race => "race",
+            Screen::RaceSetup => "race-setup",
+            Screen::Results => "results",
         }
     }
 
@@ -2727,6 +2743,9 @@ impl Screen {
             Screen::Assign => "Controllers",
             Screen::Store => "Mod Store",
             Screen::Tricks => "Tricks",
+            Screen::Race => "Race",
+            Screen::RaceSetup => "Race Setup",
+            Screen::Results => "Results",
         }
     }
 }
@@ -2753,7 +2772,7 @@ pub fn update_card(n: &str) -> (String, Option<String>) {
     (n.to_string(), UPDATER.get().and_then(|u| (u.progress)()))
 }
 
-pub const MAIN: [&str; 8] = ["Free Ride", "Local Game", "Online", "Garage", "Mods", "Settings", "Controllers", QUIT];
+pub const MAIN: [&str; 9] = ["Free Ride", "Race", "Local Game", "Online", "Garage", "Mods", "Settings", "Controllers", QUIT];
 /// The way out, last on the main menu and the pause: the desktop's Quit closes the game; the web's
 /// goes back to the site's launcher page (the page reloads into it on the shell's quit). The iPhone
 /// has none, as an iOS app is closed from the app switcher, so neither list has the row there and
@@ -2767,12 +2786,14 @@ pub fn main_rows() -> &'static [&'static str] {
     if HAS_QUIT { &MAIN } else { &MAIN[..MAIN.len() - 1] }
 }
 const MAIN_FREE: usize = 0;
-const MAIN_LOCAL: usize = 1;
-const MAIN_ONLINE: usize = 2;
-const MAIN_GARAGE: usize = 3;
-const MAIN_MODS: usize = 4;
-const MAIN_SETTINGS: usize = 5;
-const MAIN_CONTROLLERS: usize = 6;
+/// P327's Race, beside Free Ride ([`race`]).
+const MAIN_RACE: usize = 1;
+const MAIN_LOCAL: usize = 2;
+const MAIN_ONLINE: usize = 3;
+const MAIN_GARAGE: usize = 4;
+const MAIN_MODS: usize = 5;
+const MAIN_SETTINGS: usize = 6;
+const MAIN_CONTROLLERS: usize = 7;
 /// The pause's rows. The third is the original pause menu's "Switch To Machine: %s", with the
 /// machine a switch would go to. "Game Modifiers" (P134) is the old front end's way in from the
 /// pause, put back: the host's page of every seat's, or the pausing player's own. "Controllers" is
@@ -3197,6 +3218,8 @@ pub struct Menu {
     pub loading: Option<Loading>,
     /// The screens the pick's ride was started from, which a cancelled load goes back to.
     ride_stack: Vec<Screen>,
+    /// P327's race: the pick's kind, the setup, the race under way and its results.
+    pub race: race::RaceMenu,
     /// The ride under the menu, as the shell tells it (P41): how many players ride, the machine each
     /// one is on now, and which of them have a machine to switch to.
     pub riders: usize,
@@ -3594,6 +3617,7 @@ impl Menu {
             keyboard: Default::default(),
             party: None,
             free_riders: 1,
+            race: race::RaceMenu::default(),
             music_choices: Vec::new(),
             music_games: Vec::new(),
             mod_preset: 0,
@@ -4287,10 +4311,12 @@ impl Menu {
         let name = match disc {
             Some(i) if i >= TRACKS.len() => DISC_WORLDS[i - TRACKS.len()].1.to_string(),
             Some(i) => TRACKS[i].1.to_string(),
+            None if self.race.racing.is_some() && race::race_kind_of(track).is_some() => race::race_track_name(track).unwrap_or_default(),
             None => self.mod_tracks.iter().find(|(id, _)| id == track).map_or_else(|| track.to_string(), |(_, n)| n.clone()),
         };
         let pack = match disc {
             Some(_) => "MX Unleashed".to_string(),
+            None if self.race.racing.is_some() && race::race_kind_of(track).is_some() => "MX Unleashed".to_string(),
             None => self.packs().into_iter().find(|p| p.prefix == pack_of(track)).map_or("Mods".into(), |p| p.name),
         };
         self.loading = Some(Loading { still: disc.unwrap_or(usize::MAX), name, pack, done: 0.0, stage: String::new() });
@@ -4301,6 +4327,12 @@ impl Menu {
         self.loading = None;
         self.stack = match std::mem::take(&mut self.ride_stack) {
             s if s.last() == Some(&Screen::Tracks) => s,
+            // A race's ride that did not start goes back to its setup (P327).
+            s if s.last() == Some(&Screen::RaceSetup) => {
+                self.race.racing = None;
+                self.stack = s;
+                return;
+            }
             _ => vec![Screen::Main, Screen::Tracks],
         };
         self.cursor[Screen::Tracks.index()] = self.track_index();
@@ -4837,6 +4869,7 @@ impl Menu {
             Screen::Store => self.store.shown().len().max(1),
             Screen::Tricks => self.trick_rows.len().max(1),
             Screen::Split => layouts(self.riders).len(),
+            Screen::Race | Screen::RaceSetup | Screen::Results => self.race_rows(screen),
         }
     }
 
@@ -5100,7 +5133,7 @@ impl Menu {
             // desktop's installs it, or opens its release page.
             Screen::Main if p.delete && self.newer.is_some() => self.update_now(),
             // P293: new mods waiting, put off: Free Ride, Local Game and Online ask first.
-            Screen::Main if (p.ok || p.start) && matches!(at, MAIN_FREE | MAIN_LOCAL | MAIN_ONLINE) && self.play_ask(at) => {}
+            Screen::Main if (p.ok || p.start) && matches!(at, MAIN_FREE | MAIN_RACE | MAIN_LOCAL | MAIN_ONLINE) && self.play_ask(at) => {}
             Screen::Main => match (p.ok || p.start, p.back, at) {
                 (true, _, MAIN_FREE) => {
                     if self.party.take().is_some() {
@@ -5109,6 +5142,12 @@ impl Menu {
                     self.cursor[Screen::Tracks.index()] = self.track_index();
                     self.tick = 0;
                     self.push(Screen::Tracks);
+                }
+                (true, _, MAIN_RACE) => {
+                    if self.party.take().is_some() {
+                        self.riders = self.free_riders;
+                    }
+                    self.open_race();
                 }
                 (true, _, MAIN_LOCAL) => self.open_join(),
                 (true, _, MAIN_ONLINE) => self.push(Screen::Online),
@@ -5158,6 +5197,7 @@ impl Menu {
                         self.settings.track = track.clone();
                         self.changed = true;
                     }
+                    self.race.racing = None;
                     self.ride_stack = std::mem::take(&mut self.stack);
                     return Act::Ride(track);
                 }
@@ -5165,6 +5205,7 @@ impl Menu {
                     self.pop();
                 }
             }
+            Screen::Race | Screen::RaceSetup | Screen::Results => return self.race_press(screen, at, p),
             Screen::Pause => {
                 if p.back || p.start {
                     self.stack.clear();

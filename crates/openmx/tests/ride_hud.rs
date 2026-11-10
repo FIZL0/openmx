@@ -85,6 +85,7 @@ fn shown<'a>(g: &'a Gauges, riders: &'a [Dot], blips: &'a [Blip], markers: Optio
         buttons: Default::default(),
         join_buttons: Default::default(),
         fps: false,
+        race: None,
     }
 }
 

@@ -101,9 +101,9 @@ fn type_text(menu: &mut Menu, reader: &mut Reader, text: &str) {
     tap(menu, reader, Control::Start);
 }
 
-/// Main menu → Online, under Free Ride and the garage.
+/// Main menu → Online, under Free Ride, Race (P327) and Local Play.
 fn to_online(menu: &mut Menu, reader: &mut Reader) {
-    taps(menu, reader, &[Control::Down, Control::Down, Control::Cross]);
+    taps(menu, reader, &[Control::Down, Control::Down, Control::Down, Control::Cross]);
     assert_eq!(menu.screen(), Some(Screen::Online));
 }
 

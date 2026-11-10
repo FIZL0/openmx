@@ -1323,6 +1323,11 @@ fn main_panel(menu: &Menu, at: usize) -> (&'static str, String, Vec<String>) {
     let packs = menu.packs();
     match at {
         MAIN_FREE => ("Free Ride", "Pick a track and ride it on your own. Disc tracks first, then everything in the mods folder.".into(), Vec::new()),
+        MAIN_RACE => (
+            "Race",
+            "Line up on a Supercross or National track's start grid behind the gate, set the laps and the riders, and go when it drops.".into(),
+            vec![format!("Last set up: *{}*", race::race_track_name(&menu.race.setup.track).unwrap_or_default())],
+        ),
         MAIN_LOCAL => (
             "Local Game",
             "Up to eight players on one machine. Every pad presses its own way into a seat, then you pick how the screen splits.".into(),
@@ -1510,6 +1515,9 @@ impl Pen<'_> {
             Screen::Assign => self.assign(menu),
             Screen::Store => self.store(menu),
             Screen::Split => self.split(menu),
+            Screen::Race => self.race(menu),
+            Screen::RaceSetup => self.race_setup(menu),
+            Screen::Results => self.results(menu),
             Screen::Keyboard => self.keyboard(menu),
             Screen::Games => self.games(menu),
             Screen::Lobby => self.lobby(menu),
@@ -2695,6 +2703,101 @@ impl Pen<'_> {
         }
         self.title(Screen::Split.title());
         self.hints(&[(Btn::Circle, "Back"), (Btn::Cross, "Select")]);
+    }
+
+    /// P327's race-track pick: the kind's tracks, nine at a time round the cursor, and the kind's
+    /// name over them with Left and Right to the other.
+    fn race(&mut self, menu: &Menu) {
+        self.strip(10.0, 18.0);
+        self.logo(true);
+        let tracks = race::race_tracks(menu.race.kind);
+        let at = menu.cursor(Screen::Race).min(tracks.len().saturating_sub(1));
+        const SHOWN: usize = 9;
+        let first = at.saturating_sub(SHOWN / 2).min(tracks.len().saturating_sub(SHOWN));
+        let rows: Vec<(String, bool)> = tracks.iter().skip(first).take(SHOWN).map(|(_, n)| (n.clone(), false)).collect();
+        self.list(&rows, at - first, 19.0, 10.4, 18.0);
+        if first > 0 {
+            self.arrow(19.0, 9.6, [0.0, -1.0], 0.7, BONE);
+        }
+        if first + SHOWN < tracks.len() {
+            self.arrow(19.0, STAGE.1 - BAND - 3.6, [0.0, 1.0], 0.7, BONE);
+        }
+        let kind = race::RACE_KINDS[menu.race.kind % race::RACE_KINDS.len()];
+        let (x, w) = (34.0, 40.0);
+        let name = tracks.get(at).map_or("", |(_, n)| n.as_str());
+        let about = if menu.race.kind == 0 { "A stadium's track: tight turns, whoops and rhythm sections." } else { "An outdoor national: long, fast and rough." };
+        let y = self.heading(kind, name, about, x, 10.0, w, 2.6);
+        let id = tracks.get(at).map_or(String::new(), |(id, _)| id.clone());
+        self.chips(&[format!("*{}* of {}", at + 1, tracks.len()), id], x, y + 1.0, w);
+        self.title(Screen::Race.title());
+        self.hints(&[(Btn::Circle, "Back"), (Btn::LeftRight, "Supercross / National"), (Btn::Cross, "Select")]);
+    }
+
+    /// P327's race setup: the laps and the riders, each stepped with Left and Right, and Start Race.
+    fn race_setup(&mut self, menu: &Menu) {
+        self.strip(10.0, 18.0);
+        self.logo(true);
+        let s = &menu.race.setup;
+        let at = menu.cursor(Screen::RaceSetup);
+        let rows: Vec<(String, bool)> = race::SETUP_ROWS
+            .iter()
+            .enumerate()
+            .map(|(i, r)| match i {
+                0 => format!("{r}: {}", s.laps),
+                1 => format!("{r}: {}", s.riders),
+                _ => r.to_string(),
+            })
+            .map(|r| (r, false))
+            .collect();
+        self.list(&rows, at, 19.0, 10.4, 18.0);
+        let (x, w) = (34.0, 40.0);
+        let name = race::race_track_name(&s.track).unwrap_or_else(|| s.track.clone());
+        let about = match at {
+            0 => "How many laps the race runs.",
+            1 => "How many riders the start grid is laid out for. The other riders' bikes come with the AI riders; for now you line up alone in your lane.",
+            _ => "Line up on the grid. The gate drops when the countdown runs out.",
+        };
+        let y = self.heading("Race", &name, about, x, 10.0, w, 2.6);
+        self.chips(&[format!("*{}* laps", s.laps), format!("*{}* riders", s.riders)], x, y + 1.0, w);
+        self.title(Screen::RaceSetup.title());
+        self.hints(&[(Btn::Circle, "Back"), (Btn::LeftRight, "Change"), (Btn::Cross, "Select")]);
+    }
+
+    /// P327's results: a glass row a rider in finishing order — place, number, name, laps, best lap
+    /// and time — with what the race does not count yet as dashes.
+    fn results(&mut self, menu: &Menu) {
+        self.logo(true);
+        let r = menu.results();
+        let (x, w) = (12.0, 56.0);
+        let name = race::race_track_name(&r.track).unwrap_or_else(|| r.track.clone());
+        let y = self.heading("Results", &name, &format!("{} laps, {} riders.", r.laps, r.riders), x, 8.0, w, 2.6);
+        let size = 1.15;
+        let h = size * 2.2;
+        let top = y + 1.4;
+        let cols = [(0.0, "POS", Align::Left), (5.0, "NO.", Align::Left), (10.0, "RIDER", Align::Left), (34.0, "LAPS", Align::Right), (45.0, "BEST LAP", Align::Right), (55.0, "TIME", Align::Right)];
+        for (cx, head, align) in cols {
+            self.text(Weight::Bold, head, x + 0.9 + cx, top, 0.9, 0.0, DUST, align);
+        }
+        let mut y = top + 0.8;
+        for row in &r.rows {
+            self.round([x, y, w, h], 0.6 * size, GLASS, GLASS);
+            let mid = Pen::mid(y + h / 2.0, size);
+            let cells = [
+                race::or_dash(row.place),
+                if row.number.is_empty() { "-".to_string() } else { format!("#{}", row.number) },
+                row.name.clone(),
+                format!("{}/{}", race::or_dash(row.laps), r.laps),
+                race::time_or_dash(row.best_lap),
+                race::time_or_dash(row.total),
+            ];
+            for ((cx, _, align), cell) in cols.iter().zip(cells.iter()) {
+                let colour = if *cx == 0.0 { PEACH } else { CHALK };
+                self.text(Weight::Heavy, cell, x + 0.9 + cx, mid, size, 0.0, colour, *align);
+            }
+            y += h + 0.4;
+        }
+        self.title(Screen::Results.title());
+        self.hints(&[(Btn::Cross, "Main Menu")]);
     }
 
     /// The keyboard: what is typed, the keys and the commands, in a box of glass mid-stage.
