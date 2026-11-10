@@ -845,6 +845,6 @@ impl Listeners for Tree<'_> {
 /// other listeners stepped (the original's).
 pub(super) fn port_tail(ee: &mut Ee, quad: u32, dt: F) -> (u32, Vec<u32>) {
     let mut t = Tree { ee, quad, quads: 0, others: Vec::new() };
-    tail::walk(&mut t, SIM, dt);
+    tail::walk(&mut t, image::heap().sim, dt);
     (t.quads, t.others)
 }

@@ -17,6 +17,48 @@ use super::*;
 /// The player's quad in MD37a's atv_ (Race) states (research/oracle.txt # MD37a).
 pub const IMAGE_QUAD: u32 = 0x015e_0690;
 
+/// MD37b: where an image's heap keeps what the sim-frame chain (`sim_frame.rs`) reaches by address:
+/// the sim object, the player's quad, its nearby list (`+0xc4`), its riding probe (`+0xd8`), its
+/// trigger probe (`+0x1430`) and the terrain object its wheels stand on. MD37a's `atv-r-spawn.ee.bin`
+/// by default; C28's re-made states have another heap (`replay.rs` sets theirs for its thread).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Heap {
+    pub file: &'static str,
+    pub sim: u32,
+    pub quad: u32,
+    pub list: u32,
+    pub probe: u32,
+    pub trigger: u32,
+    pub terrain: u32,
+}
+
+pub const MD37A_HEAP: Heap =
+    Heap { file: "atv-r-spawn", sim: 0x0065_bba0, quad: IMAGE_QUAD, list: 0x0162_7a40, probe: 0x0159_c500, trigger: 0x0162_cd30, terrain: 0x0184_c7d0 };
+
+thread_local! {
+    static HEAP: Cell<Heap> = const { Cell::new(MD37A_HEAP) };
+}
+
+/// The heap this thread's chain runs on.
+pub fn heap() -> Heap {
+    HEAP.with(Cell::get)
+}
+
+pub fn set_heap(h: Heap) {
+    HEAP.with(|c| c.set(h));
+}
+
+/// The image [`heap`] is of, out of `context/mxvatv-ps2/md37a`.
+pub fn heap_image() -> Option<Ee> {
+    let kit = Kit::load().map_err(|w| skip(&w)).ok()?;
+    let path = kit.ctx("mxvatv-ps2/md37a").join(format!("{}.ee{}", heap().file, ".bin"));
+    if !path.exists() {
+        skip(&format!("{} is not there (MD37a's or C28's eeMemory.bin; kept-context/md37a)", path.display()));
+        return None;
+    }
+    Some(Ee::from_ram(&path).unwrap())
+}
+
 /// Where the image keeps what [`read_ride`] read.
 #[derive(Clone, Debug, Default)]
 pub struct Image {

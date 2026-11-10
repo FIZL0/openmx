@@ -98,8 +98,8 @@ pub(super) fn desert_world(ee: &Ee) -> Option<Desert> {
             return None;
         }
     }
-    let q = image::IMAGE_QUAD;
-    if ee.u32_at(q + 0xc4) != IMAGE_LIST || ee.u32_at(q + 0xd8) != PROBE_AT || ee.u32_at(q + 0x1430) != TRIGGER {
+    let h = image::heap();
+    if ee.u32_at(h.quad + 0xc4) != h.list || ee.u32_at(h.quad + 0xd8) != h.probe || ee.u32_at(h.quad + 0x1430) != h.trigger {
         panic!("the image's quad does not hold the list and probes these addresses are from");
     }
     let file = std::fs::read(&res).unwrap();
@@ -116,9 +116,9 @@ pub(super) fn desert_world(ee: &Ee) -> Option<Desert> {
     let field = atv_world::terrain_box(&scene.terrain);
     let (trees, missed) = Trees::new(&eco, atv_world::plant_cell(field), &CurveTable::build());
     assert!(missed.is_empty(), "MC02's plant solids not built: {missed:?}");
-    let mut world = atv_world::World::new(collidable(ee, PROBE_AT), &props.props, &groups, models, atv_world::plant_cell(field), field);
+    let mut world = atv_world::World::new(collidable(ee, h.probe), &props.props, &groups, models, atv_world::plant_cell(field), field);
     let search = world.objects.len();
-    world.objects.push(collidable(ee, TRIGGER));
+    world.objects.push(collidable(ee, h.trigger));
     let first_part = world.objects.len();
     world.objects.extend(atv_search::part_collidables(&eco));
     Some(Desert { world, props: props.props, eco, trees, rays: image_rays(ee), search, first_part, rows: Vec::new() })
@@ -163,9 +163,10 @@ fn quad_at(ee: &Ee, a: u32) -> Vf {
 /// The trigger probe's four rays by wheel (`x` below zero the left, `z` above it the front) and the
 /// port's tree of them.
 fn image_rays(ee: &Ee) -> Rays {
-    let n = ee.u32_at(TRIGGER + at::RAYS);
+    let trigger = image::heap().trigger;
+    let n = ee.u32_at(trigger + at::RAYS);
     assert_eq!(n, 4, "the trigger probe has a ray a wheel");
-    let segs = ee.u32_at(TRIGGER + at::SEGMENTS);
+    let segs = ee.u32_at(trigger + at::SEGMENTS);
     let mut by_wheel = [None; 4];
     for k in 0..n {
         let s = ray_probe::Segment { from: quad_at(ee, segs + 0x20 * k), to: quad_at(ee, segs + 0x20 * k + 0x10) };
@@ -315,11 +316,11 @@ fn frames(rows: &[Row]) -> Vec<(String, [f32; 3], [f32; 4], bool)> {
 }
 
 /// What a struck collidable is, on either side: a mesh by its centre's and reach's bits.
-fn image_mesh(ee: &Ee, c: u32) -> [u32; 4] {
+pub(super) fn image_mesh(ee: &Ee, c: u32) -> [u32; 4] {
     [ee.u32_at(c + at::CENTRE), ee.u32_at(c + at::CENTRE + 4), ee.u32_at(c + at::CENTRE + 8), ee.u32_at(c + at::RADIUS)]
 }
 
-fn port_mesh(w: &atv_world::World, o: usize) -> [u32; 4] {
+pub(super) fn port_mesh(w: &atv_world::World, o: usize) -> [u32; 4] {
     assert!(w.meshes.contains(&o), "the port's rear contact {o} is not a mesh");
     let c = w.broad.places[o].centre;
     [c[0].0.to_bits(), c[1].0.to_bits(), c[2].0.to_bits(), w.objects[o].radius.0.to_bits()]
