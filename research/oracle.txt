@@ -10367,6 +10367,52 @@ atv_heap_free               atv 0x001b76d0 = free
 #   world's 0x00496a70); the hold/free parts' vt +0x10 slot +0x10 = 0x0049bd30 on state 4 (a1 on/off).
 #   Oracle: 60 000 drawn frames of state 4's rider, the whole function against the port, every written
 #   word and the call log equal; every switch and holds arm taken (fewest: holds "L0l1R1r0" ~56).
+# S280: the rest of the rider ragdoll world's step (rider +0x27c, world 0x010cc6f0, stepped by 0x00505d50 ->
+# the world step 0x00496b70), ported as game_sim::handling::ragdoll (step over biplane::World with a Rig
+# for the kinds; pin, frame_box, rider_force, directed_force, add_force, add_moment, add_moment_world).
+# tests/mxvatv_bike_ride.rs (S280 section). Journal: research/journal/2026-11-10-s280-rider-world-step/.
+#   World: +0 iterations (3), +4 rate (27.0); lists {count, _, array}: +0x08 every body (18), +0x38 joints
+#   (35 entries: +0 type 2 pin / 8 bone part / 4 box, +0xc owner), +0x50 step bodies, +0x68 forces (2),
+#   +0x80 constraints (35: 21 pins, 5 boxes, 9 bone parts), +0x98 preforce (0), +0xb0 post (0). Getters
+#   0x0049ca70 / 0x0049cd30 = *(*(list+8) + 4i). Constraint vtable at +0x10 (solve slot +0x18: f12 substep,
+#   a1 pass == 0); force vtable at +8 (slot +0xc, f12 substep); body vtable 0x003cd200 at body+0x110
+#   (integrate +0x54, end of substep +0x40) = atv_body.
+#   Body: +0 enabled, +0x14 holder index, +0x18 mass, +0x1c inv mass, +0x70 pos, +0x80 vel, +0xa0 force,
+#   +0xe8 listener list (count 0 on every rider body), +0x140 inv inertia, +0x180 reference quat, +0x190
+#   quat, +0x1a0 pose point (node frame), +0x1b0 moment, +0x1d0 rates. add_force vt+0x48 0x00494000 (+0xa0
+#   .xyz += v, then listeners' vt+8); add_moment vt+0x78 0x00497530 (+0x1b0, listeners' vt+0xc); vt+0x88
+#   0x0049c1a0 = unturn by +0x190, then vt+0x78.
+#   Pin vtable 0x003cd0e0 solve 0x00498c10 (two-body 0x00497f70) = MX Unleashed's Pin (# S90) shifted
+#   +0x10: +4 on, +0x14 own inv mass, +0x20 own inv inertia, +0x30/+0x40 anchors, +0x50 target, +0x60
+#   target velocity, +0x70/+0x74 follow pointers, +0x78/+0x7c bodies, +0x80 limited, +0x90/+0xa0 limits,
+#   +0xb0 hit (= (0,0,0,1) 0x00396fc0 first), +0xc0 sticky, +0xd4 max angle, +0xe0 spring, +0x100 critical,
+#   +0x110 gains. Second body and both enabled: twist limit (b1's real +0x140), then the two-body with the
+#   pin's +0x14/+0x20 for b1. Else b1 enabled: turn limit against b1+0x180; target = *(+0x70) (and
+#   *(+0x74) -> +0x60 when set) or +0x40, raw words; one-body.
+#   Box vtable 0x003cd0c0 solve 0x00499e20: gate +4 and *(+0x9c body). +0xa0 body set: in that body (its
+#   rates x centre +0x70 plus its velocity carried, both unturned into its +0x190, clamp p and v per lane
+#   to +0x80, back out). Else +0x14 node: MX Unleashed's NodeBox (0x001953c0 unplace, the local of the
+#   velocity unused, place, rotate of the held point written as velocity). Else +0x60/+0x90/+0x94 all
+#   set: BikeBox on *(+0x60) rows, *(+0x90) centre, *(+0x94) half, carried *(+0x98) (address 0 when null).
+#   Else BikeBox on its own +0x20..+0x50, +0x70, +0x80, nothing carried. State 4's five: own/pointed frame.
+#   Forces on state 4: [0] 0x01005790 wrapper (vtable 0x003cd150, slot 0x0049bd50: +0xc listener's vt+8
+#   when set; the listener rider+0x250, vtable 0x003d1250, a thunk to 0x004f0690 a0 -= 0x250); [1]
+#   0x010c0840 directed (vtable 0x003cd1b0, slot 0x00496fe0): +0 on; vector *(+0xc), else its own +0x10;
+#   +0x24 body set and enabled: add_force; else +0x20 world: each enabled body of its +0x08 list (count and
+#   vector re-read). On state 4 off, +0xc = rider+0x660, +0x24 0x010e4730.
+#   Rider force 0x004f0690..0x004f0f38 (Ghidra's size is wrong), a0 rider: spin = rows(record +0x20..+0x40)
+#   . (0,0,record+0xb8); per holder (+0x290 count re-read, +0x2a4 array, 0xb0 stride, +0x40 rest index,
+#   +0xa0 node, +0xa4 body): force.y = msub(adda(0, y), 32.2, scale +0x280 * mass); riding (+0x254): the
+#   pose point placed by the node, spring +0x5e0 / damping +0x5f0 in the body's frame against record
+#   +0xa0 + spin x (x - record +0x1b0). Torques (+0x264 and +0x268): world +0x38 entries of type 2 owned by
+#   the rider: MX Unleashed's joint torque (rest = *(+0x1fc) + idx*0x40 + 0x20, axis-angle 0x00134f50,
+#   rates clamped to +-1, sticky lanes let go), t = spring*a - critical*w; mode +0x368 == 2: times 0.5 *
+#   fade (+0x5d4 length, +0x5d8 left), the first body takes -turn(q2, t) through vt+0x88; sticky = origin.
+#   17 of the 21 pins are the rider's type-2 joints.
+#   Oracles: 12,000 drawn cases each of the pin, the box (all four ways), the directed force and the rider
+#   force, every word equal and no writes outside; every path taken. C15: every step of the world the
+#   port's (bone parts by S278a's solve): ride-2 459 steps / 459 substeps / 1,377 constraint passes,
+#   flip-1 433 steps / 501 substeps / 1,367 passes, every row bit-exact.
 # S285: the rider's wreck arm body 0x004efe10..0x004f0274 (in 0x004ef320, mode 2), ported as
 # game_sim::handling::rider::wreck_arm (aim, let_go, release_bike, ground_y, clauses; release, pose_targets,
 # body_target). tests/mxvatv_rider_modes.rs (the S278b oracle, the arm no longer skipped). Journal:
