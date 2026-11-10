@@ -26,6 +26,7 @@
 
 use crate::ray_probe::{self, Matrix, RayProbe, Record, Shape};
 use crate::world_search::{Collidable, Narrow};
+use ps2_float::vu::{Dest, Field};
 use ps2_float::{F, Vf, fpu, vu};
 
 /// The world the part searches: what the probe is paired with, by collidable (a mesh, a hierarchy,
@@ -170,5 +171,38 @@ impl Narrow for PartRays<'_, '_> {
     }
     fn on_struck(&mut self, objects: &mut [Collidable], callback: usize, struck: usize, probe: usize) {
         self.world.on_struck(objects, callback, struck, probe)
+    }
+}
+
+/// The part probe's box (vt `+0xc4`), as the world probe ([`crate::atv_search::collide_world`]) asks
+/// for it: its tree's first node's box, or without a tree its first ray's (the midpoint, and half the
+/// span, each `vadd`/`vsub` then `× 0.5`), stood through the frame. The centre is the translation
+/// then the three rows (`vadda`, `vmadda` x, y, `vmadd` z); the half extents are the three rows each
+/// scaled by its half, made positive, and summed (`vadda` the second and first, `vmadd` the third by
+/// 1). Both `w` 1.
+pub fn bounds(probe: &RayProbe) -> ([F; 4], [F; 4]) {
+    let half = Vf::splat(0.5);
+    let (c, h) = match probe.nodes.first() {
+        Some(n) => (
+            Vf::new(n.centre[0].0, n.centre[1].0, n.centre[2].0, 1.0),
+            Vf::new(n.half_extent[0].0, n.half_extent[1].0, n.half_extent[2].0, 1.0),
+        ),
+        None => {
+            let s = probe.segments[0];
+            (s.to.add(s.from).mul(half).merge(Dest::W, Vf::VF0), s.to.sub(s.from).mul(half).merge(Dest::W, Vf::VF0))
+        }
+    };
+    let t = &probe.transform;
+    let acc = Vf::madd(t[3].add(Vf::ZERO), t[0], c.bc(Field::X));
+    let acc = Vf::madd(acc, t[1], c.bc(Field::Y));
+    let centre = Vf::madd(acc, t[2], c.bc(Field::Z)).merge(Dest::W, Vf::VF0);
+    let [r0, r1, r2] = [0, 1, 2].map(|i| t[i].mul(h.bc([Field::X, Field::Y, Field::Z][i])).abs());
+    let extent = Vf::madd(r1.add(r0), r2, Vf::splat(1.0)).merge(Dest::W, Vf::VF0);
+    (centre.0.map(F), extent.0.map(F))
+}
+
+impl crate::broad_phase::Probe for PartRays<'_, '_> {
+    fn bounds(&mut self, _objects: &mut [Collidable], _probe: usize) -> ([F; 4], [F; 4]) {
+        bounds(&self.probe)
     }
 }

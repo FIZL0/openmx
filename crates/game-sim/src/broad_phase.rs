@@ -699,6 +699,19 @@ pub fn probe_collide_world<N: Probe>(
     lazy: u32,
     narrow: &mut N,
 ) -> F {
+    probe_collide_world_passing(objects, broad, probe, lazy, &|_| false, narrow)
+}
+
+/// [`probe_collide_world`] passing over, in the static structures, the collidables `retired` names
+/// before they are marked searched (SLUS-21104's form: a collidable whose first word is 1).
+pub fn probe_collide_world_passing<N: Probe>(
+    objects: &mut [Collidable],
+    broad: &mut Broad,
+    probe: usize,
+    lazy: u32,
+    retired: &dyn Fn(usize) -> bool,
+    narrow: &mut N,
+) -> F {
     if objects[probe].flags & more_flags::ACTIVE == 0 {
         objects[probe].flags &= !flags::HIT;
         return F::MAX;
@@ -726,6 +739,9 @@ pub fn probe_collide_world<N: Probe>(
     while let Some(o) = q.next(broad, Some((&mut lo, &mut hi))) {
         match objects[o].class {
             Class::Object => {
+                if retired(o) {
+                    continue;
+                }
                 objects[o].flags |= flags::SEARCHED;
                 let d = pair_distance(objects, broad, probe, o);
                 if d == 0.0 {
