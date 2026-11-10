@@ -44,6 +44,10 @@
 //! it its bike's frame and motion, the ground under it and the ground's facing a little way ahead, and
 //! the on-the-ground and tricking bits [`controls`] and [`plan_trick`] read; on a bump it may roll a
 //! `rand()`, which puts it in the order of the frame's draws.
+//!
+//! [`seek`] is how an AI rider with no path gets round a free-ride map (S282a): it picks a jump, rides
+//! to its setup point, lines up, launches, and learns from where it landed how to take the jump next
+//! time; each tick it hands the brain the heading and speed [`controls`] rides by.
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
 use crate::camera::CurveTable;
@@ -1183,6 +1187,639 @@ pub mod path {
         let mut io = ahead;
         node_direction(net, Some(node), &mut io);
         Some(io)
+    }
+}
+
+// --- the free-ride target seeker (S282a) -------------------------------------------------------------
+
+/// How an AI rider with no path to follow gets round a free-ride map (S282a): it picks a jump, rides
+/// to the jump's setup point, lines up with the take-off, launches, lands, and learns from where it
+/// came down how to take the jump next time.
+///
+/// The map's jumps come in sets ([`Set`]); a rider holds one set and one target out of it. A target
+/// is a [`Jump`]: three [`Leg`]s, the setup point the run-in starts from, the take-off lip and the
+/// landing, each with a point, a facing and — on the take-off — the velocity and aim point the rider
+/// has learnt for it. The rider goes through three states: 1 riding to the setup point, 2 on the
+/// run-in to the lip (once it is past the setup point, on the ground and facing the jump), 3 in the
+/// air and landing (within 20 ft of the lip).
+///
+/// On landing it measures the miss from the landing point and nudges the take-off: the launch
+/// direction turns a step towards the side the landing was missed on, the launch speed and the
+/// learnt count go up or down a step with the miss along the jump, and every step halves when the
+/// miss changes side. A learnt count past 100 re-aims the lip at random within 10 ft. Close enough a
+/// landing, too many tries, or a target done drops the target and the next tick picks another.
+///
+/// Every state ends in the same hand-off ([`hand_off`]): a point and a direction on the ground, a
+/// speed, and how far ahead of the point to steer ([`reach`]), which set the brain's aim point,
+/// heading and target speed — what [`super::controls`] steers and throttles by.
+///
+/// The original keeps the targets three ways, and the port has each: a set's own pick list (one drawn
+/// at random, up to 100 tries), a course ([`Course`]: the nearest target not done yet), and a fixed
+/// sequence when the game has one ([`World::sequence`]). What builds a set's pick list when it has
+/// none is not ported: [`Set::picks`] `None` is a set whose list is not built, and picks nothing.
+///
+/// Where the original reads memory it does not own — an empty list's first entry, a course's entry
+/// before the first when nothing is nearest, a rider with no target in a state that needs one — the
+/// port reads "no target", which is what the original reads when that memory is zero.
+pub mod seek {
+    use super::flag::ON_GROUND;
+    use super::{Controls, add, scale, sub, unit};
+    use crate::rng::Rng;
+    use ps2_float::fpu::Acc;
+    use ps2_float::{Dest, F, Vf, vu};
+
+    /// The first flag word's bit for "past the point, closing on it from behind": [`hand_off`] keeps
+    /// it, and the take-off sets it for the flight.
+    pub const CLOSING: u64 = 0x0800_0000;
+    /// The first flag word's bit that keeps a landing from being learnt from (not traced who sets it).
+    pub const NO_LEARN: u64 = 0x40_0000;
+    /// The second flag word's bit for "ride this jump flat out, do not learn": set or cleared by the
+    /// course's chance roll.
+    pub const HEADLONG: u64 = 0x1000;
+    /// The second flag word's bit set when a leg is finished: on the take-off and after a landing.
+    pub const LEG_DONE: u64 = 0x8;
+    /// The miss a fresh target starts with: `y` 1 says "no landing yet", so nothing halves.
+    pub const MISS_START: Vf = Vf::new(0.0, 1.0, 0.0, 1.0);
+
+    /// The fastest the seeker asks for, and the speed a leg with no learnt velocity is ridden at.
+    const FLAT_OUT: f32 = 150.0;
+
+    /// One part of a jump.
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    pub struct Leg {
+        /// The velocity to ride it at (learnt on the take-off; 0 asks for [`FLAT_OUT`] along the jump).
+        pub velocity: Vf,
+        /// Where to aim for on it (the take-off's is learnt and re-aimed).
+        pub aim: Vf,
+        /// Its point.
+        pub point: Vf,
+        /// Which way it faces: the landing is crossed when the rider passes it this way.
+        pub facing: Vf,
+        /// The learnt count, 0..100.
+        pub learnt: F,
+    }
+
+    /// A target's jump: the original's record of three legs, 0x60 bytes apart.
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    pub struct Jump {
+        pub take_off: Leg,
+        pub landing: Leg,
+        pub setup: Leg,
+    }
+
+    /// A target: its jump, and per player whether it is done.
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub struct Target {
+        pub jump: Option<usize>,
+        pub done: Vec<bool>,
+    }
+
+    /// A course's targets, ridden nearest first, and the chance a target is learnt from rather than
+    /// ridden flat out.
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub struct Course {
+        pub targets: Vec<Option<usize>>,
+        pub chance: F,
+    }
+
+    /// A set of targets: its pick list (`None` until built), and its course if it has one.
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub struct Set {
+        pub picks: Option<Vec<Option<usize>>>,
+        pub course: Option<Course>,
+    }
+
+    /// Everything the seeker looks up: the sets, targets and jumps by index, and the game's fixed
+    /// sequence of targets when it has one (which also changes how many tries a jump gets and how big
+    /// its learning steps start).
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub struct World {
+        pub sets: Vec<Set>,
+        pub targets: Vec<Target>,
+        pub jumps: Vec<Jump>,
+        pub sequence: Option<Vec<Option<usize>>>,
+    }
+
+    /// The seeker's part of the brain.
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    pub struct Seeker {
+        /// The brain's two flag words ([`CLOSING`], [`NO_LEARN`], [`ON_GROUND`]; [`HEADLONG`],
+        /// [`LEG_DONE`]).
+        pub flags: u64,
+        pub flags2: u64,
+        /// The set it picks from, the target it rides and the one it rode before, the target's jump.
+        pub set: Option<usize>,
+        pub target: Option<usize>,
+        pub last_target: Option<usize>,
+        pub jump: Option<usize>,
+        /// Where the course scan or the sequence is.
+        pub index: i32,
+        /// 0 none, 1 to the setup point, 2 the run-in, 3 the flight.
+        pub state: i32,
+        /// Landings on this target (counted elsewhere; the seeker reads and zeroes it).
+        pub tries: i32,
+        /// How near the landing point counts as landed, and as crossing it.
+        pub tolerance: F,
+        /// The learnt count it hands on, and its three learning steps: the launch direction's turn,
+        /// the launch speed's and the learnt count's.
+        pub learnt: F,
+        pub aim_step: F,
+        pub speed_step: F,
+        pub learn_step: F,
+        /// The miss before, and this landing's (`y` 0 once landed).
+        pub last_miss: Vf,
+        pub miss: Vf,
+        /// How far ahead of the point the rider steers.
+        pub lead: F,
+        /// How far the rider is from the point it rides to.
+        pub distance: F,
+        /// The path follower's word, zeroed on a new target.
+        pub follow: u32,
+        /// What [`hand_off`] writes: the point steered at, the unit heading to it, the target speed.
+        pub aim: Vf,
+        pub heading: Vf,
+        pub speed: F,
+    }
+
+    /// The steer-ahead [`reach`] works out: `base + gain × off-line distance`, at most `max`.
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    pub struct Reach {
+        pub base: F,
+        pub max: F,
+        pub gain: F,
+    }
+
+    /// The rider's own bike, as the seeker reads it.
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    pub struct Mount {
+        /// Its flag word: without 2 (in a race) or 0x100 (in a race's phase 4) the AI does not ride.
+        pub flags: u64,
+        /// Above 0.5 a landing is learnt from (what the value is is not traced).
+        pub settle: F,
+    }
+
+    /// What the seeker reads off the rider, its interface and the race.
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    pub struct Ride {
+        pub position: Vf,
+        pub last_position: Vf,
+        pub forward: Vf,
+        pub speed: F,
+        /// The slowest target speed [`hand_off`] and the learning hand on.
+        pub min_speed: F,
+        /// The interface's scale on a learnt speed, and the radius of the setup point inside which
+        /// the speed is `slow_speed`.
+        pub speed_scale: F,
+        pub slow_radius: F,
+        pub slow_speed: F,
+        /// The rider's player number, which a target's done flags are kept by.
+        pub player: usize,
+        pub reach: Reach,
+        /// The race's phase when there is a race.
+        pub race_phase: Option<i32>,
+        pub bike: Option<Mount>,
+        /// The race has an AI path net: a rider with no target follows it (S282b).
+        pub path_net: bool,
+    }
+
+    /// How a tick of [`seek`] ended.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Seek {
+        /// The race holds the rider: the four controls are zeroed and nothing else is done.
+        Still,
+        /// No target or no jump: the original returns 0 here.
+        Lost,
+        /// No state, and a path net to follow: the path follower takes over (S282b, not ported).
+        Path,
+        /// The heading and speed are written; the original goes on to its tail (S282b).
+        Steered,
+    }
+
+    #[derive(Clone, Copy)]
+    enum Part {
+        TakeOff,
+        Landing,
+        Setup,
+    }
+
+    fn part(j: &Jump, p: Part) -> &Leg {
+        match p {
+            Part::TakeOff => &j.take_off,
+            Part::Landing => &j.landing,
+            Part::Setup => &j.setup,
+        }
+    }
+
+    /// `y` stored as 0.
+    fn flat(v: Vf) -> Vf {
+        Vf::new(v.x(), 0.0, v.z(), v.w())
+    }
+
+    /// `a.x·b.x + a.y·b.y + a.z·b.z` on the FPU's accumulator.
+    fn dot(a: Vf, b: Vf) -> F {
+        Acc::mula(a.x(), b.x()).madda(a.y(), b.y()).madd(a.z(), b.z())
+    }
+
+    fn length(v: Vf) -> F {
+        dot(v, v).sqrt()
+    }
+
+    /// The steer-ahead for a point and a direction (the original's vt+0x80): the rider's distance off
+    /// the line through `point` along `dir`, times `gain`, on `base`, and at most `max`.
+    pub fn reach(position: Vf, point: Vf, dir: Vf, r: &Reach) -> F {
+        let d = sub(point, position);
+        let off = add(scale(dir, dot(d, dir)), d);
+        let out = r.base + length(off) * r.gain;
+        if out <= r.max { out } else { r.max }
+    }
+
+    /// The hand-off (the original's vt+0x94): `point` and the unit `dir` on the ground, the target
+    /// `speed`, the rider's `distance` from the point, the `lead` and the [`reach`].
+    ///
+    /// Behind the point (along `dir`) clears [`CLOSING`]; at or past `lead` short of it sets it. The aim
+    /// point is `lead` back from the point along `dir`, or with [`CLOSING`] the rider's own distance
+    /// along — at most `lead + reach` — less the reach. The heading is the flat unit way to the aim
+    /// point. Nearer than `lead` the speed comes down towards the slowest as the heading turns off
+    /// the rider's forward.
+    #[allow(clippy::too_many_arguments)]
+    pub fn hand_off(s: &mut Seeker, ride: &Ride, point: Vf, dir: Vf, speed: F, distance: F, lead: F, reach: F) {
+        let along = dot(flat(sub(point, ride.position)), dir);
+        if along < F(0.0) {
+            s.flags &= !CLOSING;
+        } else if !(along < lead) {
+            s.flags |= CLOSING;
+        }
+        let most = lead + reach;
+        let along = if along <= most { along } else { most };
+        let back = if s.flags & CLOSING != 0 { along - reach } else { lead };
+        s.aim = sub(point, scale(dir, back));
+        s.heading = unit(flat(sub(s.aim, ride.position)));
+        s.speed = if distance < lead {
+            ride.min_speed + (speed - ride.min_speed) * dot(s.heading, ride.forward).abs()
+        } else {
+            speed
+        };
+    }
+
+    /// Whether the rider crossed `leg`'s point this tick (the original's crossing test): it
+    /// is past the point along the leg's facing now and was not before, and where its step crossed
+    /// the point's line is within `tolerance` of the point on the ground.
+    pub fn crossed(position: Vf, last_position: Vf, tolerance: F, leg: &Leg) -> bool {
+        let a = sub(leg.point, position);
+        let now = dot(a, leg.facing);
+        let then = dot(sub(leg.point, last_position), leg.facing);
+        if !(now < F(0.0)) || then < F(0.0) {
+            return false;
+        }
+        let step = sub(position, last_position);
+        let moved = dot(step, leg.facing);
+        if moved <= F(0.0) {
+            return false;
+        }
+        length(flat(sub(scale(step, now / moved), a))) <= tolerance
+    }
+
+    /// One draw off a set's pick list: `None`, without a draw, when the list is not built.
+    fn pick(set: &Set, rng: &mut Rng) -> Option<usize> {
+        let list = set.picks.as_ref()?;
+        let i = rng.index(list.len() as i32);
+        usize::try_from(i).ok().and_then(|i| list.get(i).copied().flatten())
+    }
+
+    /// The course's chance roll: at or under the chance learns, over it rides flat out.
+    fn roll(s: &mut Seeker, chance: F, rng: &mut Rng) {
+        if rng.unit() <= chance {
+            s.flags2 &= !HEADLONG;
+        } else {
+            s.flags2 |= HEADLONG;
+        }
+    }
+
+    /// One tick of the seeker (the free-ride part of the original's ai_tick_flag).
+    ///
+    /// A race holding the rider zeroes `out`'s steer, pitch, throttle and brake and stops there.
+    /// Otherwise a rider with no target, or a done one on a course, picks one — from the sequence, the
+    /// course or the set — takes its jump, and starts it over (state 0, a fresh [`MISS_START`]); a
+    /// take-off with no velocity gets [`FLAT_OUT`] along the jump. Then state 0 becomes 1 (unless a
+    /// path net takes the rider: [`Seek::Path`]), the state moves on as the rider gets there, a
+    /// landing is learnt from, and the state's point, direction and speed go through [`reach`] and
+    /// [`hand_off`]. With no state left the heading is the rider's forward and the speed its own.
+    pub fn seek(s: &mut Seeker, ride: &Ride, world: &mut World, rng: &mut Rng, out: &mut Controls) -> Seek {
+        if let Some(phase) = ride.race_phase {
+            let held = phase == 4 && ride.bike.map_or(0, |b| b.flags) & 0x100 == 0
+                || ride.bike.is_some_and(|b| b.flags & 2 == 0);
+            if held {
+                out.steer = F(0.0);
+                out.pitch = F(0.0);
+                out.throttle = F(0.0);
+                out.brake = F(0.0);
+                return Seek::Still;
+            }
+        }
+
+        let sequenced = world.sequence.is_some();
+        let player = ride.player;
+        let done = |w: &World, t: usize| w.targets[t].done.get(player).copied().unwrap_or(false);
+        let on_course = s.set.is_some_and(|i| world.sets[i].course.is_some());
+        let retarget = match s.target {
+            None => true,
+            Some(t) => on_course && done(world, t),
+        };
+        if retarget {
+            if s.target.is_some() {
+                s.last_target = s.target;
+            }
+            if let Some(si) = s.set {
+                if let Some(seq) = &world.sequence {
+                    let mut tries = 0;
+                    while s.target.is_none() && tries < 100 {
+                        s.target = usize::try_from(s.index).ok().and_then(|i| seq.get(i).copied().flatten());
+                        s.index = s.index.wrapping_add(1);
+                        if s.index >= seq.len() as i32 {
+                            s.index = 0;
+                        }
+                        tries += 1;
+                    }
+                    if let Some(j) = s.target.and_then(|t| world.targets[t].jump) {
+                        let jump = &mut world.jumps[j];
+                        jump.take_off.aim = jump.take_off.point;
+                    }
+                } else if let Some(course) = &world.sets[si].course {
+                    s.index = 0;
+                    let (mut best, mut nearest) = (-1, F(0.0));
+                    while s.index < course.targets.len() as i32 {
+                        s.target = course.targets[s.index as usize];
+                        if let Some(t) = s.target.filter(|&t| !done(world, t)) {
+                            if let Some(j) = world.targets[t].jump {
+                                let d = length(flat(sub(world.jumps[j].setup.point, ride.position)));
+                                if best == -1 || d < nearest {
+                                    best = s.index;
+                                    nearest = d;
+                                }
+                            }
+                        }
+                        s.index += 1;
+                    }
+                    s.target = usize::try_from(best).ok().and_then(|b| course.targets[b]);
+                    let chance = course.chance;
+                    roll(s, chance, rng);
+                } else {
+                    let mut tries = 0;
+                    while s.target.is_none() && tries < 100 {
+                        s.target = pick(&world.sets[si], rng);
+                        tries += 1;
+                    }
+                }
+                let Some(t) = s.target else { return Seek::Lost };
+                s.jump = world.targets[t].jump;
+                let Some(j) = s.jump else { return Seek::Lost };
+                let jump = &mut world.jumps[j];
+                if length(jump.take_off.velocity) <= F(0.0) {
+                    let along = unit(flat(sub(jump.landing.point, jump.take_off.point)));
+                    jump.take_off.velocity = scale(along, F(FLAT_OUT));
+                    jump.take_off.aim = jump.take_off.point;
+                }
+                s.tries = 0;
+            }
+            s.follow = 0;
+            if !sequenced {
+                s.state = 0;
+            }
+            s.last_miss = MISS_START;
+        }
+
+        if let Some(j) = s.jump {
+            let lip = &mut world.jumps[j].take_off;
+            if F(lip.aim.x()) == F(0.0) || F(lip.aim.z()) == F(0.0) {
+                lip.aim = lip.point;
+            }
+        }
+        if s.state == 0 && ride.path_net {
+            return Seek::Path;
+        }
+        let Some(j) = s.jump else { return Seek::Lost };
+        if s.state == 0 {
+            s.state = 1;
+            s.flags &= !CLOSING;
+            s.lead = F(20.0);
+        }
+
+        // the leg whose velocity sets the speed: none for a state the original has no leg for
+        let mut leg = None;
+        match s.state {
+            1 => {
+                let jump = &world.jumps[j];
+                leg = Some(Part::Setup);
+                let short = flat(sub(jump.setup.point, ride.position));
+                let line = unit(flat(sub(jump.take_off.point, jump.setup.point)));
+                let along = dot(short, line);
+                if along < F(0.0)
+                    && !(along <= F(-20.0))
+                    && !(dot(ride.forward, line) < F(0.0))
+                    && s.flags & ON_GROUND != 0
+                {
+                    s.state = 2;
+                    s.lead = F(60.0);
+                    leg = Some(Part::TakeOff);
+                    s.flags2 |= LEG_DONE;
+                }
+            }
+            2 => {
+                leg = Some(Part::TakeOff);
+                let to_lip = flat(sub(world.jumps[j].take_off.point, ride.position));
+                if length(to_lip) < F(20.0) {
+                    s.state = 3;
+                    s.lead = F(0.0);
+                    s.flags |= CLOSING;
+                    leg = Some(Part::Landing);
+                }
+            }
+            3 => {
+                s.last_target = s.target;
+                leg = Some(Part::Landing);
+                let learns = s.flags & NO_LEARN == 0
+                    && s.flags & ON_GROUND != 0
+                    && ride.bike.is_some_and(|b| !(b.settle <= F(0.5)));
+                if learns {
+                    leg = land(s, ride, world, j, rng);
+                } else if s.flags & ON_GROUND != 0
+                    && crossed(ride.position, ride.last_position, s.tolerance, &world.jumps[j].landing)
+                {
+                    s.state = 1;
+                    s.flags &= !CLOSING;
+                    s.lead = F(20.0);
+                    leg = Some(Part::Setup);
+                }
+            }
+            _ => {}
+        }
+
+        if s.state == 0 {
+            s.heading = ride.forward;
+            s.speed = ride.speed;
+            return Seek::Steered;
+        }
+        let jump = &world.jumps[j];
+        let velocity = leg.map_or(Vf::new(0.0, 0.0, 0.0, 0.0), |p| part(jump, p).velocity);
+        let mut speed = ride.speed_scale * length(velocity);
+        let (lip, landing, setup) = (&jump.take_off, &jump.landing, &jump.setup);
+        let (point, dir);
+        if speed <= F(0.0) || s.flags2 & HEADLONG != 0 && !sequenced {
+            speed = F(FLAT_OUT);
+            match s.state {
+                2 => {
+                    (point, dir) = (lip.aim, sub(landing.point, lip.point));
+                    s.learnt = F(100.0);
+                }
+                3 => {
+                    let from = if s.flags & ON_GROUND == 0 { ride.position } else { lip.aim };
+                    (point, dir) = (landing.point, sub(landing.point, from));
+                    s.learnt = F(100.0);
+                }
+                _ => {
+                    (point, dir) = (setup.point, sub(lip.point, setup.point));
+                    s.learnt = F(0.0);
+                }
+            }
+        } else {
+            match s.state {
+                2 => {
+                    (point, dir) = (lip.aim, lip.velocity);
+                    s.learnt = lip.learnt;
+                }
+                3 => {
+                    (point, dir) = (landing.point, sub(landing.point, ride.position));
+                    s.learnt = landing.learnt;
+                }
+                _ => {
+                    (point, dir) = (setup.point, sub(lip.aim, setup.point));
+                    s.learnt = F(0.0);
+                }
+            }
+        }
+        let dir = unit(flat(dir));
+        s.distance = length(flat(sub(ride.position, point)));
+        if s.state == 1 && s.distance <= ride.slow_radius {
+            speed = ride.slow_speed;
+        }
+        let r = reach(ride.position, point, dir, &ride.reach);
+        let (distance, lead) = (s.distance, s.lead);
+        hand_off(s, ride, point, dir, speed, distance, lead, r);
+        Seek::Steered
+    }
+
+    /// A landing on the ground with the bike settled: measure the miss, then either drop the target
+    /// (near enough, out of tries, or done) or learn from it and go back to state 1. Gives the leg
+    /// the speed is read off.
+    fn land(s: &mut Seeker, ride: &Ride, world: &mut World, j: usize, rng: &mut Rng) -> Option<Part> {
+        let sequenced = world.sequence.is_some();
+        let course = s.set.and_then(|i| world.sets[i].course.as_ref()).map(|c| c.chance);
+        let m = sub(world.jumps[j].landing.point, ride.position);
+        s.miss = flat(m);
+        let missed_by = length(s.miss);
+        let done = s.target.is_some_and(|t| world.targets[t].done.get(ride.player).copied().unwrap_or(false));
+        let out_of_tries = if sequenced { s.tries >= 10 } else { s.tries >= 3 };
+        if missed_by < s.tolerance || out_of_tries || course.is_some() && done {
+            s.target = None;
+            s.follow = 0;
+            s.state = 0;
+            s.last_miss = MISS_START;
+            if sequenced {
+                s.speed_step = F(40.0);
+                s.learn_step = F(40.0);
+                s.aim_step = F::from_bits(0x3e4c_cccd); // 0.2
+            } else {
+                s.speed_step = F(4.0);
+                s.learn_step = F(4.0);
+                s.aim_step = F::from_bits(0x3ca3_d70a); // 0.02
+            }
+            return Some(Part::Landing);
+        }
+        match course {
+            Some(chance) => roll(s, chance, rng),
+            None => s.flags2 &= !HEADLONG,
+        }
+        if s.flags2 & HEADLONG == 0 || sequenced {
+            learn(s, ride, &mut world.jumps[j], rng);
+        }
+        s.state = 1;
+        s.flags &= !CLOSING;
+        s.lead = F(20.0);
+        s.flags2 |= LEG_DONE;
+        Some(Part::Setup)
+    }
+
+    /// The take-off learnt from this landing's miss.
+    fn learn(s: &mut Seeker, ride: &Ride, jump: &mut Jump, rng: &mut Rng) {
+        let v = jump.take_off.velocity;
+        let h = unit(flat(v));
+        let mut speed = length(v);
+        s.learnt = jump.take_off.learnt;
+        let (mx, mz) = (s.miss.x(), s.miss.z());
+        let (lx, lz) = (s.last_miss.x(), s.last_miss.z());
+        let (hx, hz) = (F(h.x()), F(h.z()));
+        let along = Acc::mula(mx, hx).madd(mz, hz);
+        let across = Acc::mula(mx, hz).msub(mz, hx);
+        let last_along = Acc::mula(lx, hx).madd(lz, hz);
+        let last_across = Acc::mula(lx, hz).msub(lz, hx);
+
+        // the jump's own line, lip aim to landing, on the ground
+        let mut line = flat(sub(jump.landing.point, jump.take_off.aim));
+        let span = length(line);
+        if !(span <= F(0.0)) {
+            line = line.merge(Dest::XYZ, line.mul_q(vu::div(1.0, span.to_f32())));
+        }
+
+        // turn the launch a step towards the side the landing was missed on
+        let step = s.aim_step;
+        let (nx, nz) = if !(across <= F(0.0)) {
+            let nx = hx + step * hz;
+            (nx, hz - step * nx)
+        } else {
+            let nx = hx - step * hz;
+            (nx, hz + step * nx)
+        };
+        let mut h = unit(Vf::new(nx.0, h.y(), nz.0, h.w()));
+        // at most 45° off the jump's line
+        let cos45 = F::from_bits(0x3f35_04f3);
+        let c = Acc::mula(h.x(), line.x()).madd(h.z(), line.z());
+        if c <= cos45 {
+            h = scale(add(unit(sub(h, scale(line, c))), line), cos45);
+        }
+
+        if F(s.last_miss.y()) <= F(0.0) {
+            if last_along * along < F(0.0) {
+                s.speed_step = s.speed_step * F(0.5);
+                s.learn_step = s.learn_step * F(0.5);
+            }
+            if last_across * across < F(0.0) {
+                s.aim_step = s.aim_step * F(0.5);
+            }
+        }
+        let long = !(along <= F(0.0));
+        speed = if long { speed + s.speed_step } else { speed - s.speed_step };
+        if !(speed <= F::from_bits(0x4315_e666)) {
+            // 149.9
+            speed = F(FLAT_OUT);
+        } else if speed < ride.min_speed {
+            speed = ride.min_speed;
+        }
+        s.learnt = if long { s.learnt + s.learn_step } else { s.learnt - s.learn_step };
+        let lip = jump.take_off.point;
+        let aim = &mut jump.take_off.aim;
+        if !(s.learnt <= F(100.0)) {
+            s.learnt = F(100.0);
+            let x = F(lip.x()) + F(20.0) * rng.unit() - F(10.0);
+            *aim = Vf::new(x.0, aim.y(), aim.z(), aim.w());
+            let z = F(lip.z()) + F(20.0) * rng.unit() - F(10.0);
+            *aim = Vf::new(aim.x(), aim.y(), z.0, aim.w());
+        } else if s.learnt < F(0.0) {
+            *aim = Vf::new(lip.x(), aim.y(), lip.z(), aim.w());
+            s.learnt = F(0.0);
+        }
+        s.last_miss = s.miss;
+        jump.take_off.learnt = s.learnt;
+        jump.take_off.velocity = scale(h, speed);
     }
 }
 
