@@ -801,7 +801,10 @@ pub mod race_flags {
     pub const OVER_TOLD: u32 = 0x2000;
     /// The cards are ranked every tick.
     pub const RANKED: u32 = 0x4000;
-    /// The zone list is live: the handlers ask [`super::zone_crossings`] of every rider's step (S292).
+    /// The race handler tests each card against the checkpoint list ([`super::LineLists::checkpoints`]).
+    pub const CHECKPOINTS: u32 = 0x40;
+    /// The zone list is live: the handlers ask [`super::zone_crossings`] of every rider's step (S292),
+    /// and the race handler tests each card against it ([`super::LineLists::others`], S294a).
     pub const ZONES: u32 = 0x200;
 }
 
@@ -1914,6 +1917,32 @@ pub enum RaceNotice {
     OffTooLong,
     /// The card's time ran out.
     OutOfTime,
+    /// The rider crossed checkpoint `line` (its index in [`LineLists::checkpoints`]): through it, or
+    /// beside it.
+    Checkpoint { line: usize, through: bool },
+    /// The rider crossed `line` of [`LineLists::others`]: through it, or beside it.
+    OtherLine { line: usize, through: bool },
+}
+
+/// One gate on one of the score manager's line lists, with the spot on the path where it stands
+/// (`+0x94`). Only a live gate ([`flags::CLOSED`]) is tested.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ListGate {
+    pub gate: Gate,
+    pub spot: Spot,
+}
+
+/// The score manager's two line lists, as the race handler tests each card against them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LineLists {
+    /// The checkpoints (`+0x70`), tested under [`race_flags::CHECKPOINTS`]: a gate the card has passed
+    /// (its word in [`LapCard::lines_passed`], by list position) is skipped, and so is one further
+    /// than [`LineLists::reach`] along the path from the rider's spot both ways.
+    pub checkpoints: Vec<ListGate>,
+    /// The second list (`+0x78`), tested under [`race_flags::ZONES`] wherever the rider is.
+    pub others: Vec<ListGate>,
+    /// How near by path distance a checkpoint has to be to be tested (`+0x100`).
+    pub reach: F,
 }
 
 impl RaceRules {
@@ -1950,9 +1979,10 @@ impl RaceRules {
     /// race clock of the manager's first card, which a card still out when every waited-for rider is
     /// done ([`race_flags::ALL_OUT`]) is timed from.
     ///
-    /// The card's spots and the line's must name nodes. Left out (see the S293 journal): the line
-    /// lists (manager flags `0x40`, `0x200`), the helpers behind manager flags `0x800` / `0x1000` and
-    /// card flag `0x8_0000`, and [`race_card_flags::COMPUTER_AIM`]'s aim.
+    /// The card's spots and the line's must name nodes. Left out (see the S293 journal): the helpers
+    /// behind manager flags `0x800` / `0x1000` and card flag `0x8_0000`, and
+    /// [`race_card_flags::COMPUTER_AIM`]'s aim. A track with no line lists; see
+    /// [`RaceRules::card_on_lines`].
     #[allow(clippy::too_many_arguments)]
     pub fn card(
         &mut self,
@@ -1961,6 +1991,22 @@ impl RaceRules {
         ghost: Option<&mut LapCard>,
         track: &mut TrackPaths,
         course: &Course,
+        leader_time: F,
+    ) -> Vec<RaceNotice> {
+        self.card_on_lines(dt, card, ghost, track, course, &LineLists::default(), leader_time)
+    }
+
+    /// [`RaceRules::card`] on a track with line lists: a raced card on the track is tested against
+    /// them (see [`RaceRules::line_lists`]) once the spot search has placed it, before the lap line.
+    #[allow(clippy::too_many_arguments)]
+    pub fn card_on_lines(
+        &mut self,
+        dt: F,
+        card: &mut RaceCard,
+        ghost: Option<&mut LapCard>,
+        track: &mut TrackPaths,
+        course: &Course,
+        lists: &LineLists,
         leader_time: F,
     ) -> Vec<RaceNotice> {
         use race_card_flags as rf;
@@ -1973,7 +2019,7 @@ impl RaceRules {
                 card.lap.on_track = 1;
             }
         } else {
-            self.race_step(dt, card, ghost, track, course, leader_time, &mut said);
+            self.race_step(dt, card, ghost, track, course, lists, leader_time, &mut said);
         }
         let fl = card.lap.flags;
         if fl & card_flags::TAKING_PART == 0 || fl & done != 0 {
@@ -2014,6 +2060,7 @@ impl RaceRules {
         ghost: Option<&mut LapCard>,
         track: &mut TrackPaths,
         course: &Course,
+        lists: &LineLists,
         leader_time: F,
         said: &mut Vec<RaceNotice>,
     ) {
@@ -2034,13 +2081,8 @@ impl RaceRules {
                 card.lap.on_track = 0;
             }
         }
-        if card.lap.flags & rf::WAITED_FOR != 0
-            && let Some((p, n)) = card.lap.kept_spot.at()
-            && track.paths[p].flags & path_flags::CHECKPOINT != 0
-            && n + 2 == track.paths[p].nodes.len()
-        {
-            track.paths[p].flags &= !path_flags::CHECKPOINT;
-        }
+        self.clear_checkpoint(card, track);
+        said.extend(self.line_lists(card, lists, track));
         if card.lap.on_track == 0 {
             card.lap.off_track = card.lap.off_track + dt;
         } else {
@@ -2132,6 +2174,66 @@ impl RaceRules {
             c.progress = c.laps_length + c.lap_length - c.to_line;
             c.kept_spot = c.spot;
         }
+    }
+
+    /// A rider the race waits for whose kept spot is on a checkpoint path's last stretch takes the
+    /// path's [`path_flags::CHECKPOINT`] off.
+    pub fn clear_checkpoint(&self, card: &RaceCard, track: &mut TrackPaths) {
+        if card.lap.flags & race_card_flags::WAITED_FOR != 0
+            && let Some((p, n)) = card.lap.kept_spot.at()
+            && track.paths[p].flags & path_flags::CHECKPOINT != 0
+            && n + 2 == track.paths[p].nodes.len()
+        {
+            track.paths[p].flags &= !path_flags::CHECKPOINT;
+        }
+    }
+
+    /// The card's step from where it saw the rider last to where it sees it now, tested against the
+    /// manager's line lists, each list in order, each crossing told as it is found. A checkpoint is
+    /// tested only while live, not passed by the card, and within [`LineLists::reach`] of the rider's
+    /// spot by path distance from the spot to it, or else from it to the spot (the second asked only
+    /// when the first is too far). The second list's live gates are all tested.
+    ///
+    /// The handler never marks a checkpoint passed itself; the card's words are left to whoever hears
+    /// the crossing. A list longer than the card's words reads past them in the original; the port
+    /// takes such a word as clear.
+    pub fn line_lists(&self, card: &RaceCard, lists: &LineLists, track: &mut TrackPaths) -> Vec<RaceNotice> {
+        let mut said = Vec::new();
+        let seen = card.lap.seen;
+        let cross = |g: &Gate| match g.crossed(seen.now, seen.last) {
+            Crossing::Through => Some(true),
+            Crossing::Beside => Some(false),
+            _ => None,
+        };
+        if self.lap.flags & race_flags::CHECKPOINTS != 0 {
+            for (line, cp) in lists.checkpoints.iter().enumerate() {
+                if cp.gate.flags & flags::CLOSED == 0 {
+                    continue;
+                }
+                if card.lap.lines_passed.get(line).is_some_and(|&w| w != 0) {
+                    continue;
+                }
+                let near = lt(track.distance(card.lap.spot, cp.spot, true), lists.reach)
+                    || lt(track.distance(cp.spot, card.lap.spot, true), lists.reach);
+                if !near {
+                    continue;
+                }
+                if let Some(through) = cross(&cp.gate) {
+                    said.push(RaceNotice::Checkpoint { line, through });
+                }
+            }
+        }
+        if self.lap.flags & race_flags::ZONES != 0 {
+            for (line, g) in lists.others.iter().enumerate() {
+                if g.gate.flags & flags::CLOSED == 0 {
+                    continue;
+                }
+                if let Some(through) = cross(&g.gate) {
+                    said.push(RaceNotice::OtherLine { line, through });
+                }
+            }
+        }
+        said
     }
 
     /// Off the track: the rider is pointed back at the path — at the kept spot, or, far from the
