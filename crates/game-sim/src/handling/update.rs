@@ -6,7 +6,9 @@
 //! - [`fade`] ([`super::tail::Out::Fade`]): with the fade clock running, the collision record's
 //!   search (its "searching" word off and on around it); the clock down by `dt` unless the record's
 //!   part is held; at its end the bike's kind cleared, else the alpha from the clock's start onto the
-//!   rider's model and each hung part.
+//!   rider's model and each hung part. The kind clear at its end is [`kind_clear`] (F31b5l), with
+//!   the bike's show ([`show`]); the search is SLUS-21104's world probe
+//!   ([`crate::atv_search::collide_world`]).
 //! - [`lean`] ([`super::tail::Out::Lean`]): the stunt's clock ([`stunt_clock`]), then the next stunt:
 //!   none while down, else the trick step's answer, the riding pose on the ground or none; a put-back
 //!   centres the two blends.
@@ -132,6 +134,12 @@ pub enum Out {
     /// The trail's on and off (its vt `+0x18` / `+0x20`, on its vt at `+4`; the scene node's own are
     /// [`trail_on`] and [`trail_off`]), and a node's shown and hidden (vt `+0x28` / `+0x2c`: the scene
     /// node's own are [`shown`] and [`hidden`]).
+    /// The kind clear's: the bike shown (vt `+0x398`, the bike, 1; ported as [`show`]); the bike's
+    /// shown object (`+0xd0`) switched on (its vt at `+0x28`, slot `+0x20`, on its `+0x24`); and that
+    /// object put back in the spatial database (it, the bike's `+0xb4` and `+0xc0`, 1).
+    Show,
+    ObjectOn(u32),
+    Insert { obj: u32, space: u32, at: u32 },
     TrailOn(u32),
     TrailOff(u32),
     Shown(u32),
@@ -326,6 +334,123 @@ pub fn fade(m: &mut impl Updates, dt: F) {
         let hung = w(m, 0x1474);
         let part = m.word(hung.wrapping_add(4 * i));
         m.set(part.wrapping_add(0x17c), alpha.to_bits());
+        i += 1;
+    }
+}
+
+/// The pointer to the collision categories' name table: a count, then the names, 32 bytes each.
+pub const CATEGORY_NAMES: u32 = 0x0038_d400;
+/// A collision category the game set up as it loaded (0 for none), cleared from the parts beside
+/// the named ones.
+pub const LOADED_CATEGORY: u32 = 0x0054_2388;
+/// The three categories by name the kind clear takes off the bike's two parts, in its order around
+/// the bike's own (`+0x30c`) and [`LOADED_CATEGORY`].
+pub const CLEARED_NAMES: [&[u8]; 3] = [b"DYNAMICOBJECT", b"PHYSICSBODY", b"PHYSICSOBJECT"];
+
+/// **The kind clear** (vt `+0x39c`, the fade's end: F31b5l): nothing while the bike's state is of
+/// kind 3. Else each hung part's alpha (`+0x17c`) to 1, then (the state checked again) the bike
+/// shown ([`Out::Show`]), `+0xc1c` set; each of the collision record's part (`+0xcc`) and the
+/// second part (`+0xd4`) set colliding (`+0xe0`) and these categories taken off its list
+/// ([`uncategorise`]): DYNAMICOBJECT, the bike's own, [`LOADED_CATEGORY`]'s, PHYSICSBODY,
+/// PHYSICSOBJECT (the named ones' bits from [`category`]); then `+0x9a8` set and the rider's model's
+/// alpha (`+0xe4`'s `+0x17c`) to 1.
+pub fn kind_clear(m: &mut impl Updates) {
+    if kind_three(m) {
+        return;
+    }
+    let mut i = 0u32;
+    while (i as i32) < w(m, 0x1470) as i32 {
+        let hung = w(m, 0x1474);
+        let part = m.word(hung.wrapping_add(4 * i));
+        m.set(part.wrapping_add(0x17c), F::ONE.to_bits());
+        i += 1;
+    }
+    if kind_three(m) {
+        return;
+    }
+    m.out(Out::Show);
+    put(m, 0xc1c, 1);
+    for at in [RECORD, 0xd4] {
+        let part = w(m, at);
+        if part == 0 {
+            continue;
+        }
+        m.set(part.wrapping_add(0xe0), 1);
+        let bit = category(m, CLEARED_NAMES[0]);
+        let part = w(m, at);
+        uncategorise(m, part, bit);
+        let (part, own) = (w(m, at), w(m, 0x30c));
+        uncategorise(m, part, own);
+        let loaded = m.word(LOADED_CATEGORY);
+        let part = w(m, at);
+        uncategorise(m, part, loaded);
+        for name in &CLEARED_NAMES[1..] {
+            let bit = category(m, name);
+            let part = w(m, at);
+            uncategorise(m, part, bit);
+        }
+    }
+    put(m, 0x9a8, 1);
+    let model = w(m, 0xe4);
+    m.set(model.wrapping_add(0x17c), F::ONE.to_bits());
+}
+
+/// Whether the bike's state (`+0xbc4`, if any) is of kind 3 (`+0x28`).
+fn kind_three(m: &mut impl Updates) -> bool {
+    let state = w(m, STATE);
+    state != 0 && m.word(state.wrapping_add(0x28)) == 3
+}
+
+/// **The bike shown** (vt `+0x398` with 1, [`Out::Show`]): with `+0x44`'s low bit and a shown
+/// object (`+0xd0`), the object switched on, and put back in the spatial database if it is in no
+/// space (its `+0x20`). The object is read again for each step.
+pub fn show(m: &mut impl Updates) {
+    if w(m, 0x44) & 1 == 0 || w(m, 0xd0) == 0 {
+        return;
+    }
+    let obj = w(m, 0xd0);
+    m.out(Out::ObjectOn(obj));
+    let obj = w(m, 0xd0);
+    if m.word(obj.wrapping_add(0x20)) == 0 {
+        let (obj, space, at) = (w(m, 0xd0), w(m, 0xb4), w(m, 0xc0));
+        m.out(Out::Insert { obj, space, at });
+    }
+}
+
+/// A collision category's bit by name: `1 << i` for the name's place `i` in the table
+/// ([`CATEGORY_NAMES`]), the name added at the end (and the count raised) when it is not there.
+pub fn category(m: &mut impl Updates, name: &[u8]) -> u32 {
+    let table = m.word(CATEGORY_NAMES);
+    let mut n = m.word(table);
+    let mut i = 0u32;
+    while (i as i32) < n as i32 {
+        let at = table.wrapping_add(4 + 32 * i);
+        let same = (0..=name.len()).all(|k| byte(m, at.wrapping_add(k as u32)) == u32::from(name.get(k).copied().unwrap_or(0)));
+        if same {
+            return 1 << (i & 31);
+        }
+        n = m.word(table);
+        i += 1;
+    }
+    let at = table.wrapping_add(4 + 32 * n);
+    for k in 0..=name.len() {
+        set_byte(m, at.wrapping_add(k as u32), u32::from(name.get(k).copied().unwrap_or(0)));
+    }
+    let count = m.word(table);
+    m.set(table, count.wrapping_add(1));
+    1 << (n & 31)
+}
+
+/// The first entry of `part`'s category list (`+0xfc`, `+0x100` long) that is `bit`, zeroed.
+pub fn uncategorise(m: &mut impl Updates, part: u32, bit: u32) {
+    let list = m.word(part.wrapping_add(0xfc));
+    let mut i = 0u32;
+    while (i as i32) < m.word(part.wrapping_add(0x100)) as i32 {
+        if m.word(list.wrapping_add(4 * i)) == bit {
+            let list = m.word(part.wrapping_add(0xfc));
+            m.set(list.wrapping_add(4 * i), 0);
+            return;
+        }
         i += 1;
     }
 }

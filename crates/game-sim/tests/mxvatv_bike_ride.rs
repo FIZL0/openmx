@@ -2081,6 +2081,11 @@ const NODE_TIP: u32 = 0x0019_52a0;
 const PROBE_SET: u32 = 0x001b_9290;
 const PROBE_PLACE: u32 = 0x0011_4360;
 const SEARCH_NEAR: u32 = 0x0011_51c0;
+/// F31b5l: the bike's kind clear (vt `+0x39c`) and its show (vt `+0x398`), and the spatial
+/// database's insert the show calls.
+const KIND_CLEAR_FN: u32 = 0x004e_1910;
+const SHOW_FN: u32 = 0x004e_1870;
+const SPACE_INSERT: u32 = 0x0011_43e0;
 const SEARCH_ALL: u32 = 0x0011_48e0;
 const TERRAIN_QUERY: u32 = 0x0048_38f0;
 /// The body's damping setters, its vtable's (`+0x110`) `+0x20` and `+0x68`.
@@ -3112,6 +3117,10 @@ impl Vehicles for TailInRam<'_> {
     fn out(&mut self, c: tail::Out, dt: F) {
         let r0 = self.ee.ran;
         self.out_(c, dt);
+        if matches!(c, tail::Out::Message(_)) && in_rust("frame post") {
+            // Posted in Rust: its tells are booked by listener ([`FramePost`]).
+            return;
+        }
         let kind = format!("{c:?}");
         book(format!("the tail: out {}", &kind[..kind.find([' ', '(']).unwrap_or(kind.len())]), self.ee.ran - r0);
     }
@@ -3157,7 +3166,98 @@ impl TailInRam<'_> {
             }
             c => (vt(ee, slot_of(c).unwrap()), vec![bike], dt.0),
         };
+        if let Out::Message(id) = c
+            && in_rust("frame post")
+        {
+            frame_post(self.ee, id, dt);
+            self.read();
+            return;
+        }
         self.run(f, &ints, x);
+    }
+}
+
+/// **F31b5l — the frame's message posted in Rust**: [`reset::post`] on state 4's queue for the bike's
+/// poster, the message [`tail::FRAME_MESSAGE`] with the bike's id. Each listener the registration
+/// tells is [`FramePost`]'s.
+fn frame_post(ee: &mut Ee, id: u32, dt: F) {
+    let (kind, msg) = tail::FRAME_MESSAGE;
+    let queue = ee.u32_at(POST_QUEUE);
+    reset::post(&mut FramePost { ee, x: dt.0 }, queue, BIKE + 0x674, [kind, msg, 0, id]);
+}
+
+/// The listeners state 4's registration for the bike's poster tells, by their receive (vt `+0xc`,
+/// most a thunk to the object's own), as (receive, name): F31b5l. Eleven: one each but the fourth,
+/// which is five. None is the bike's code. What each does with the frame's message (kind 8, id 4):
+///
+/// - the HUD: hands the bike's event record to its own gauges (the speed's length times a scale to
+///   the speedometer, a flag word to a lamp): presentation, ~600 instructions a frame;
+/// - the race progress: with its rider the bike, walks the bike along its track nodes (its own
+///   `+0xec..+0xf8`, a node's distance), else steps another rider's: ~1,200 instructions a frame;
+/// - the speed flag: only while its own vt `+0x3c` answers set, keeps whether the bike is under
+///   29.3332 at its `+0x54` (inactive on state 4: 22 instructions);
+/// - the menu list: only while its `+0x3c` is set (0 on state 4);
+/// - the pickers (five), the camera's controller (ids 0x15, 7, 6, 0xd, 0xc, 0xb) and an empty
+///   receive: nothing for id 4.
+const FRAME_LISTENERS: [(u32, &str); 7] = [
+    (0x002f_bc80, "hud"),
+    (0x002a_2430, "race progress"),
+    (0x002a_2440, "speed flag"),
+    (0x002a_eed0, "menu list"),
+    (0x002a_3420, "picker"),
+    (0x0049_1270, "camera controller"),
+    (0x0051_b2a0, "empty"),
+];
+
+/// The frame post's outside: the message laid out in scratch as the poster lays it on its stack, and
+/// each listener told the original's ([`FRAME_LISTENERS`]; `$f12` the frame's `dt`, as the original
+/// post leaves it), booked by name. Every tell is watched: it may not change a word of the bike or its
+/// physics blocks; the tells that move `rand`'s state are counted. With `"frame post tells dropped"`
+/// in [`IN_RUST`] no listener is told.
+struct FramePost<'a> {
+    ee: &'a mut Ee,
+    x: f32,
+}
+
+impl Resets for FramePost<'_> {
+    fn word(&mut self, at: u32) -> u32 {
+        self.ee.u32_at(at)
+    }
+    fn set(&mut self, at: u32, w: u32) {
+        self.ee.set_u32(at, w);
+    }
+    fn out(&mut self, c: reset::Out) -> u32 {
+        match c {
+            reset::Out::Message(words) => {
+                let at = self.ee.scratch(MESSAGE_SCRATCH);
+                for (k, w) in words.into_iter().enumerate() {
+                    self.ee.set_u32(at + 4 * k as u32, w);
+                }
+                at
+            }
+            reset::Out::Tell { to, from, message } => {
+                let f = self.ee.u32_at(self.ee.u32_at(to + 8) + 0xc);
+                let Some(&(_, name)) = FRAME_LISTENERS.iter().find(|l| l.0 == f) else {
+                    panic!("a frame post listener other than the known: {to:#x}, receive {f:#x}")
+                };
+                if in_rust("frame post tells dropped") {
+                    return 0;
+                }
+                let (before, rand) = (bike_and_blocks(self.ee), rand_state(self.ee));
+                let r0 = self.ee.ran;
+                self.ee.set(28, GP);
+                census(self.ee, |ee| ee.call(f, &[u64::from(to), u64::from(from), u64::from(message)], &[self.x], BUDGET));
+                book(format!("the tail: the frame post tells the {name}"), self.ee.ran - r0);
+                if rand_state(self.ee) != rand {
+                    book(format!("the tail: the frame post's {name} tells that drew rand"), 1);
+                }
+                let parted: Vec<String> =
+                    before.iter().zip(&bike_and_blocks(self.ee)).filter(|(b, a)| b != a).map(|((at, b), (_, a))| format!("{at:#x}: {b:#010x} -> {a:#010x}")).collect();
+                assert!(parted.is_empty(), "the frame post's {name} ({to:#x}) wrote the bike's words:\n  {}", parted.join("\n  "));
+                self.ee.r(2) as u32
+            }
+            c => unreachable!("the frame post makes no {c:?}"),
+        }
     }
 }
 
@@ -3202,8 +3302,10 @@ impl Listeners for TreeInRam<'_> {
             book("the tail: the ported vehicle update", self.ee.ran - r0);
             let stack = (self.ee.stack as usize).saturating_sub(STACK_USE)..self.ee.ram.len().min(self.ee.stack as usize + 0x4000);
             // F31b5j: with the part walk's leaves (or one kind's own work) dropped, only the bike and
-            // its blocks are the original's.
-            let only_bike = IN_RUST.with(|r| r.borrow().iter().any(|n| n.starts_with("part leaves dropped") || n.starts_with("part leaf dropped")));
+            // its blocks are the original's; F31b5l: so too with the frame post's tells dropped.
+            let only_bike = IN_RUST.with(|r| {
+                r.borrow().iter().any(|n| n.starts_with("part leaves dropped") || n.starts_with("part leaf dropped") || *n == "frame post tells dropped")
+            });
             let bike: Vec<std::ops::Range<usize>> = if only_bike {
                 let mut b = vec![BIKE as usize..BIKE as usize + 0x1800];
                 b.extend(physics(self.ee).into_iter().map(|(_, at, n)| at as usize..(at + n) as usize));
@@ -5185,6 +5287,31 @@ impl Updates for UpdateInRam<'_> {
             tail::walk(&mut PartWalk { ee: &mut *self.ee }, g, dt);
             return 0;
         }
+        // F31b5l: the wreck fade's world search, the port's ([`fade_search_in_ram`]); what it hands
+        // on (a plant part stood, a hearer) booked by kind.
+        if let Out::Search(rec) = c
+            && in_rust("fade search")
+        {
+            let (r0, mut kinds) = (self.ee.ran, BTreeMap::new());
+            fade_search_in_ram(self.ee, rec, &mut kinds);
+            let handed: Vec<&str> = kinds.keys().filter_map(|k| k.strip_prefix("> ")).collect();
+            book(format!("the tail: the fade search hands on {}", handed.join(", ")), self.ee.ran - r0);
+            return 0;
+        }
+        // F31b5l: the kind clear and the bike shown, the port's.
+        match c {
+            Out::KindClear if in_rust("kind clear") => {
+                assert_eq!(vt(self.ee, 0x39c), KIND_CLEAR_FN, "the bike's vt +0x39c");
+                update::kind_clear(self);
+                return 0;
+            }
+            Out::Show => {
+                assert_eq!(vt(self.ee, 0x398), SHOW_FN, "the bike's vt +0x398");
+                update::show(self);
+                return 0;
+            }
+            _ => {}
+        }
         match c {
             Out::Gear => return update::gear(self),
             Out::Trick => return update::trick(self, dt),
@@ -5383,6 +5510,9 @@ impl Updates for UpdateInRam<'_> {
         let (f, ints, floats) = match c {
             Out::Search(r) => (SEARCH_ALL, vec![u(r), 0], vec![x]),
             Out::KindClear => (vt(ee, 0x39c), vec![bike], vec![x]),
+            Out::Show => unreachable!("served by the port"),
+            Out::ObjectOn(o) => (obj_fn(o, 0x28, 0x20), vec![u(o + 0x24)], vec![x]),
+            Out::Insert { obj, space, at } => (SPACE_INSERT, vec![u(obj), u(space), u(at), 1], vec![x]),
             Out::Gear | Out::Trick | Out::NetCheck | Out::NetUnpack | Out::TrickHold(_) => unreachable!("served by the port"),
             Out::TrickEnd(id) => (vt(ee, 0x4ac), vec![bike, id as i32 as i64 as u64], vec![x]),
             Out::TrickRemote => (vt(ee, 0x4e8), vec![bike], vec![x]),
@@ -9036,7 +9166,7 @@ fn flip_replays_bit_exact_with_nothing_handed_on() {
 /// alone).
 fn replay_whole(name: &str) -> Option<(Vec<bool>, BTreeMap<String, u32>, Vec<String>, BTreeMap<String, u64>)> {
     INTERPRETED.with(|m| m.borrow_mut().clear());
-    let ran = replay_pure(name, &["PartMove", "Gather", "record sweep", "record search"]);
+    let ran = replay_pure(name, &["PartMove", "Gather", "record sweep", "record search", "frame post", "fade search", "kind clear"]);
     let all = INTERPRETED.with(|m| std::mem::take(&mut *m.borrow_mut()));
     let (w, answered, off) = ran?;
     eprintln!("{name}: every port at once, the interpreter ran {all:?}");
@@ -9057,6 +9187,7 @@ fn ride_replays_with_every_port_at_once() {
     walk_served(&ran);
     // F31b5k: the connection's queue is the port's; the interpreter runs none of it.
     assert!(!ran.keys().any(|k| k.contains("NetQueue")), "{ran:?}");
+    three_served(&ran);
 }
 
 /// **F31b5 — C15's flip, every port at once**: flip-1 bit-exact, wrecked on row 125 and put back on
@@ -9072,6 +9203,15 @@ fn flip_replays_with_every_port_at_once() {
     assert_eq!(handed, [("record search heard_hit", 110), ("record search part stand", 161)], "{ran:?}");
     walk_served(&ran);
     assert!(!ran.keys().any(|k| k.contains("NetQueue")), "{ran:?}");
+    three_served(&ran);
+}
+
+/// F31b5l: the tail's frame post, the wreck fade's search and the kind clear are the ports', never
+/// the interpreter's.
+fn three_served(ran: &BTreeMap<String, u64>) {
+    for k in ["the tail: out Message", "the tail: the update's Search", "the tail: the update's KindClear"] {
+        assert!(!ran.contains_key(k), "{k} handed on: {ran:?}");
+    }
 }
 
 /// F31b5j: the update's part walk is the port's ([`PartWalk`]), never the interpreter's, and it
@@ -9425,6 +9565,182 @@ fn the_effects_step_is_the_originals() {
     }
     eprintln!("effects oracle: {seen:?}");
     assert_eq!(seen.len(), 5, "every kind of call, and none: {seen:?}");
+}
+
+/// **F31b5l — what the frame post's listeners give the bike**: [`replay_whole`]'s ports with the
+/// tail's frame post telling no listener (`"frame post tells dropped"`): every row checked against
+/// C15 word for word and the bike and its physics blocks against the handing run's after every frame
+/// ([`replay_pure`]'s checks). Answers the wreck state per row and where the RAM parts from the
+/// handing run's (the HUD's and the race progress's own words), or the first failure.
+fn replay_without_frame_tells(name: &str) -> Result<(Vec<bool>, Vec<String>), String> {
+    let names = ["PartMove", "Gather", "record sweep", "record search", "frame post", "fade search", "kind clear", "frame post tells dropped"];
+    match std::panic::catch_unwind(|| replay_pure(name, &names)) {
+        Ok(Some((w, _, off))) => Ok((w, off)),
+        Ok(None) => Err("skipped".into()),
+        Err(e) => Err(e.downcast_ref::<String>().cloned().unwrap_or_default()),
+    }
+}
+
+/// Ride-2 needs nothing of the frame post's listeners: told nothing, it is C15's on all 459 rows
+/// and the bike the handing run's.
+#[test]
+fn ride_replays_without_the_frame_posts_tells() {
+    let (w, off) = match replay_without_frame_tells("ride-2") {
+        Err(e) if e == "skipped" => return,
+        r => r.unwrap(),
+    };
+    assert_eq!(w.len(), 459);
+    assert!(w.iter().all(|w| !w), "the ride never wrecks");
+    assert!(!off.is_empty(), "the tells dropped, the RAM parts from the handing run's");
+}
+
+/// Flip-1 needs nothing of them either: C15's on all 465 rows, wreck and put-back, and the bike the
+/// handing run's.
+#[test]
+fn flip_replays_without_the_frame_posts_tells() {
+    let (w, off) = match replay_without_frame_tells("flip-1") {
+        Err(e) if e == "skipped" => return,
+        r => r.unwrap(),
+    };
+    assert_eq!(w.len(), 465);
+    let changes: Vec<usize> = (1..w.len()).filter(|&r| w[r] != w[r - 1]).collect();
+    assert_eq!(changes, [125, 193], "wrecked on row 125, put back on row 193");
+    assert!(!off.is_empty(), "the tells dropped, the RAM parts from the handing run's");
+}
+
+/// F31b5l: the part probe's box, its vt `+0xc4`.
+const PART_BOUNDS_FN: u32 = 0x001b_d1d0;
+
+/// **F31b5l — the part's box is the original's**: 20 000 part probes in scratch, each with a frame
+/// and either a tree (its first node's box) or none (its first ray), every float drawn at random
+/// (now and then 0, −0, 1, a denormal, the largest or any bits), run through SLUS-21104's vt `+0xc4`
+/// and through [`atv_part::bounds`]: the centre and the half extents come out bit for bit.
+#[test]
+fn the_parts_box_is_the_originals() {
+    let Some(mut ee) = image().map(hooked) else { return };
+    assert_eq!(ee.u32_at(ee.u32_at(ee.u32_at(BIKE + 0xcc) + 0xc) + 0xc4), PART_BOUNDS_FN, "the riding part's vt +0xc4");
+    let (part, node, rays, out) = (WRECK_AREA, WRECK_AREA + 0x400, WRECK_AREA + 0x500, WRECK_AREA + 0x600);
+    let mut g = Gen(0x0031_b5c4);
+    let mut t = BTreeMap::new();
+    let draw = |g: &mut Gen| if g.one_in(6) { reset_float(g) } else { g.f(-400.0, 400.0).to_bits() };
+    for k in 0..20_000 {
+        let tree = g.one_in(2);
+        tally(&mut t, if tree { "a tree" } else { "a ray" });
+        for i in 0..16 {
+            ee.set_u32(part + 0x130 + 4 * i, draw(&mut g));
+        }
+        for i in 0..9 {
+            ee.set_u32(node + 4 * i, draw(&mut g));
+        }
+        for i in 0..8 {
+            ee.set_u32(rays + 4 * i, draw(&mut g));
+        }
+        ee.set_u32(part + 0x17c, if tree { node } else { 0 });
+        ee.set_u32(part + 0x180, rays);
+        ee.set(28, GP);
+        ee.call(PART_BOUNDS_FN, &[u64::from(part), u64::from(out), u64::from(out + 0x10)], &[], BUDGET);
+        let want = [vf_at(&ee, out).to_bits(), vf_at(&ee, out + 0x10).to_bits()];
+        let (nodes, _) = if tree { tree_in_ram(&ee, node, 0) } else { (vec![], 0) };
+        let segments = [ray_probe::Segment { from: vf_at(&ee, rays), to: vf_at(&ee, rays + 0x10) }];
+        let probe = ray_probe::RayProbe { transform: matrix_at(&ee, part + 0x130), root: 0, nodes: &nodes, segments: &segments };
+        let (c, h) = atv_part::bounds(&probe);
+        let got = [c.map(|x| x.0.to_bits()), h.map(|x| x.0.to_bits())];
+        assert_eq!(got, want, "case {k} ({}): centre, half", if tree { "tree" } else { "ray" });
+    }
+    eprintln!("{t:?}");
+}
+
+/// **F31b5l — the kind clear is the original's**: 10 000 cases on state 4's bike, with its state
+/// there or not and of kind 3 or not, 0 to 4 hung parts, the shown object there or not (in a space
+/// or not, the bike's `+0x44` bit up or not), each of the two parts there or not with a category
+/// list 0 to 6 long drawn from the cleared categories' bits, the bike's own, the loaded one's and
+/// others, the bike's own and the loaded category drawn, and now and then a cleared name missing
+/// from the table (so it is added). Run through SLUS-21104's vt `+0x39c` and through
+/// [`update::kind_clear`] (the show [`update::show`]); the object's switch-on and the spatial insert
+/// are logged on both sides, the same calls in the same order, and every word of the bike, the
+/// parts, the table and the loaded category comes out the same.
+#[test]
+fn the_kind_clear_is_the_originals() {
+    let Some(mut ee) = image().map(hooked) else { return };
+    assert_eq!((vt(&ee, 0x39c), vt(&ee, 0x398)), (KIND_CLEAR_FN, SHOW_FN), "the bike's vt +0x39c and +0x398");
+    let area = WRECK_AREA;
+    let (state, hung, obj, obj_vt, on_fn, model) = (area, area + 0x100, area + 0x200, area + 0x300, area + 0x380, area + 0x400);
+    let parts = [area + 0x800, area + 0xc00];
+    let table = ee.u32_at(update::CATEGORY_NAMES);
+    let names = ee.u32_at(table);
+    assert!(names >= 3, "the categories' table holds {names} names");
+    let regions = [(BIKE, 0x1800), (area, 0x1000), (table, 4 + 32 * (names + 4)), (update::LOADED_CATEGORY, 4)];
+    let image_words = snap_regions(&ee, &regions);
+    let log: Rc<RefCell<Vec<String>>> = Rc::default();
+    let l = log.clone();
+    ee.hooks.insert(on_fn, Box::new(move |ee: &mut Ee| l.borrow_mut().push(format!("on {:#x}", ee.r(4)))));
+    let l = log.clone();
+    ee.hooks.insert(SPACE_INSERT, Box::new(move |ee: &mut Ee| l.borrow_mut().push(format!("insert {:#x} {:#x} {:#x} {}", ee.r(4), ee.r(5), ee.r(6), ee.r(7)))));
+    let mut g = Gen(0x0031_b5c1);
+    let mut t = BTreeMap::new();
+    for k in 0..10_000 {
+        restore_regions(&mut ee, &regions, &image_words);
+        let kind = if g.one_in(4) { 3 } else { g.bits() % 5 };
+        ee.set_u32(BIKE + 0xbc4, if g.one_in(5) { 0 } else { state });
+        ee.set_u32(state + 0x28, kind);
+        let n = g.bits() % 5;
+        ee.set_u32(BIKE + 0x1470, n);
+        ee.set_u32(BIKE + 0x1474, hung);
+        for i in 0..n {
+            ee.set_u32(hung + 4 * i, model + 0x10 * (i + 1));
+        }
+        ee.set_u32(BIKE + 0xe4, model);
+        let flags = ee.u32_at(BIKE + 0x44);
+        ee.set_u32(BIKE + 0x44, flags & !1 | u32::from(!g.one_in(4)));
+        ee.set_u32(BIKE + 0xd0, if g.one_in(5) { 0 } else { obj });
+        ee.set_u32(obj + 0x28, obj_vt);
+        ee.set_u32(obj_vt + 0x20, on_fn);
+        ee.set_u32(obj + 0x20, u32::from(g.one_in(2)));
+        if g.one_in(8) {
+            // A cleared name missing: its table entry renamed.
+            let i = g.bits() % names;
+            ee.set_u32(table + 4 + 32 * i, 0x5a5a_5a5a);
+            tally(&mut t, "a name renamed");
+        }
+        let own = 1 << (g.bits() % 32);
+        ee.set_u32(BIKE + 0x30c, own);
+        let loaded = if g.one_in(3) { 0 } else { 1 << (g.bits() % 32) };
+        ee.set_u32(update::LOADED_CATEGORY, loaded);
+        for (j, p) in parts.into_iter().enumerate() {
+            ee.set_u32(BIKE + [0xcc, 0xd4][j], if g.one_in(5) { 0 } else { p });
+            let len = g.bits() % 7;
+            ee.set_u32(p + 0x100, len);
+            ee.set_u32(p + 0xfc, p + 0x200);
+            for i in 0..len {
+                let bit = match g.bits() % 5 {
+                    0 => 1 << (g.bits() % names.min(32)),
+                    1 => own,
+                    2 => loaded,
+                    3 => 0,
+                    _ => 1 << (g.bits() % 32),
+                };
+                ee.set_u32(p + 0x200 + 4 * i, bit);
+            }
+        }
+        let ran = ee.u32_at(BIKE + 0xbc4) != 0 && kind == 3;
+        tally(&mut t, if ran { "kind 3" } else { "cleared" });
+        let before = snap_regions(&ee, &regions);
+        log.borrow_mut().clear();
+        ee.set(28, GP);
+        ee.call(KIND_CLEAR_FN, &[u64::from(BIKE)], &[], BUDGET);
+        let (want, want_log) = (snap_regions(&ee, &regions), std::mem::take(&mut *log.borrow_mut()));
+        restore_regions(&mut ee, &regions, &before);
+        update::kind_clear(&mut UpdateInRam { ee: &mut ee, x: 0.0 });
+        let (got, got_log) = (snap_regions(&ee, &regions), std::mem::take(&mut *log.borrow_mut()));
+        if want_log.iter().any(|c| c.starts_with("insert")) {
+            tally(&mut t, "inserted");
+        }
+        assert_eq!(got_log, want_log, "case {k}: the calls");
+        let off: Vec<String> = (0..want.len()).filter(|&i| want[i] != got[i]).map(|i| format!("word {i}: original {:#010x}, port {:#010x}", want[i], got[i])).collect();
+        assert!(off.is_empty(), "case {k}: {}", off.join("\n  "));
+    }
+    eprintln!("{t:?}");
+    assert!(t.values().all(|&n| n >= 500), "{t:?}");
 }
 
 /// The record's resolution (its vt `+0x88`), which the gravity calls with 1.
@@ -13341,6 +13657,92 @@ fn part_search_in_ram(ee: &mut Ee, part: u32, list: u32, kinds: &mut BTreeMap<St
             set_u8(ee, items[k] - 0x18 + 0x126, b.flags);
         }
     }
+    write_part_record(ee, part, r, &record, pairs);
+    // A sphere struck leaves no contact: the hit bit alone says it.
+    assert!(hit || record.contacts.is_empty(), "contacts without the hit bit");
+    record.contacts
+}
+
+/// **F31b5l — the wreck fade's world search in Rust**: the ray probe `part` (the riding rays, the
+/// collidable the fade names) against the world directly ([`atv_search::collide_world`] with
+/// [`atv_part::PartRays`], not lazy), the world [`GatherInRam::read`]'s with the plant groups' parts
+/// added as collidables of their own, and everything written back: the flags, the stamps and the
+/// structures' walk state ([`GatherInRam::write_query`]), the parts' group, the probe's last centre
+/// and budget, the clear's globals and the record ([`write_part_record`]). Counts the pairs and the
+/// calls handed on (a plant part stood, a hearer) into `kinds`.
+fn fade_search_in_ram(ee: &mut Ee, part: u32, kinds: &mut BTreeMap<String, u32>) {
+    use game_sim::atv_search;
+    assert_eq!(ee.u32_at(part + 0x188), 0, "the part has a ray filter: its reset and test are not Rust's");
+    let (mut m, mut objects, mut broad) = GatherInRam::read(ee, part);
+    for k in 0..objects.len() {
+        if objects[k].class != ws::Class::Group {
+            continue;
+        }
+        for p in PartWorldInRam::species_parts(ee, m.items[k]) {
+            if p != 0 && !m.items.contains(&(p + 0x18)) {
+                m.items.push(p + 0x18);
+                objects.push(ws::Collidable { class: ws::Class::from_byte(ee.u8_at(p + 0x18 + 2)), flags: ee.u8_at(p + 0x126), ..Default::default() });
+                broad.places.push(bp::Placement::default());
+            }
+        }
+    }
+    broad.places[0].last = [0, 4, 8, 12].map(|i| word_f(ee, part + 0x60 + i));
+    broad.places[0].budget = word_f(ee, part + 0x74);
+    let root = ee.u16_at(part + 0x170);
+    let (nodes, _) = tree_in_ram(ee, ee.u32_at(part + 0x17c), root);
+    let segs = ee.u32_at(part + 0x180);
+    let segments: Vec<ray_probe::Segment> =
+        (0..ee.u32_at(part + 0x178)).map(|i| ray_probe::Segment { from: vf_at(ee, segs + 0x20 * i), to: vf_at(ee, segs + 0x20 * i + 0x10) }).collect();
+    let probe = ray_probe::RayProbe { transform: matrix_at(ee, part + 0x130), root, nodes: &nodes, segments: &segments };
+    let r = ee.u32_at(part + 0x7c);
+    let record = part_record_in_ram(ee, r);
+    let retired: Vec<bool> = m.items.iter().map(|&e| ee.u32_at(e - 0x18) == 1).collect();
+    // The static query begun as the search begins it, on a copy: whether the tree's list is fresh.
+    let mut begun = broad.clone();
+    let active = objects[0].flags & bp::more_flags::ACTIVE != 0;
+    if let (true, Some(space)) = (active, begun.places[0].space) {
+        let (c, h) = atv_part::bounds(&probe);
+        let (mut lo, mut hi) = ([F::ZERO; 4], [F::ZERO; 4]);
+        bp::Query::begin(&mut begun, space, 1, c, h, Some((&mut lo, &mut hi)), true);
+    }
+    let mut world = PartWorldInRam { ee: &mut *ee, items: m.items.clone(), mesh: None, kinds: BTreeMap::new(), listeners: vec![], callbacks: vec![] };
+    for (o, &e) in objects.iter_mut().zip(&m.items) {
+        if o.class == ws::Class::Object {
+            world.hear(o, e - 0x18);
+        }
+    }
+    let (was_o, was_b) = (objects.clone(), broad.clone());
+    let mut n = atv_part::PartRays { probe, record, world: &mut world, pairs: 0 };
+    atv_search::collide_world(&mut objects, &mut broad, 0, 0, &|o| retired[o], &mut n);
+    let (record, pairs) = (n.record, n.pairs);
+    for (k, v) in std::mem::take(&mut world.kinds) {
+        *kinds.entry(k.replace("record search", "fade search")).or_default() += v;
+    }
+    for (k, o) in objects.iter_mut().enumerate() {
+        if let Some(g) = o.group.take() {
+            ee.set_u32(m.items[k] - 0x18 + 0x88, m.items[g]);
+        }
+    }
+    let (last, budget) = (broad.places[0].last, broad.places[0].budget);
+    broad.places[0].last = was_b.places[0].last;
+    broad.places[0].budget = was_b.places[0].budget;
+    let mut was_o = was_o;
+    for o in &mut was_o {
+        o.group = None;
+    }
+    m.write_query(ee, (&was_o, &was_b), (&objects, &broad), &begun);
+    for (i, w) in last.iter().enumerate() {
+        ee.set_u32(part + 0x60 + 4 * i as u32, w.0.to_bits());
+    }
+    ee.set_u32(part + 0x74, budget.0.to_bits());
+    if active && broad.places[0].space.is_some() {
+        write_part_record(ee, part, r, &record, pairs);
+    }
+}
+
+/// The part search's outcome past the flags, written back: the clear's globals, the pairs' smooth
+/// flag and per-contact words, and the part's record at `r`.
+fn write_part_record(ee: &mut Ee, part: u32, r: u32, record: &ray_probe::Record, pairs: u32) {
     // The clear's globals, and the pairs' smooth flag and per-contact words.
     for a in SWEEP_ZEROED {
         ee.set_u32(a, 0);
@@ -13378,9 +13780,6 @@ fn part_search_in_ram(ee: &mut Ee, part: u32, list: u32, kinds: &mut BTreeMap<St
         let shift = (w & 2) * 8;
         ee.set_u32(w & !3, word & !(0xffff << shift) | u32::from(c.segment) << shift);
     }
-    // A sphere struck leaves no contact: the hit bit alone says it.
-    assert!(hit || record.contacts.is_empty(), "contacts without the hit bit");
-    record.contacts
 }
 
 /// **F46 — the handed-on calls in Rust, in lockstep with [`posts_frame`]**: C15's `name` replayed

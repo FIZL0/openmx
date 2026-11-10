@@ -288,3 +288,23 @@ impl crate::quad::Sweep for Oasis<'_> {
         true
     }
 }
+
+/// **The world probe** (the wreck fade's search, F31b5l): `objects[probe]` against the world directly,
+/// as [`crate::broad_phase::probe_collide_world`] with SLUS-21104's two differences: the probe must
+/// also be in a space to collide at all (else only its hit bit is lowered), and in the static
+/// structures a collidable `retired` names is passed over before it is marked searched. Returns how
+/// far the probe is from the nearest thing it did not touch, also its new budget.
+pub fn collide_world<N: crate::broad_phase::Probe>(
+    objects: &mut [Collidable],
+    broad: &mut crate::broad_phase::Broad,
+    probe: usize,
+    lazy: u32,
+    retired: &dyn Fn(usize) -> bool,
+    narrow: &mut N,
+) -> F {
+    if broad.places[probe].space.is_none() {
+        objects[probe].flags &= !flags::HIT;
+        return F::MAX;
+    }
+    crate::broad_phase::probe_collide_world_passing(objects, broad, probe, lazy, retired, narrow)
+}
