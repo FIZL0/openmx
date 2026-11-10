@@ -2560,7 +2560,7 @@ fn a_flier_pick_takes_its_template_and_its_skin_rides_the_seat_bytes() {
     let Some(file) = the_discs_plane() else { return };
     let mut own = game_sim::flight::Flight::new(&file);
     let flier = game_sim::flight::Flight { mxvatv: true, skin: 0x12, ..game_sim::flight::Flight::new(&file) };
-    let mut fliers = [rides::Flier { byte: 0x12, stock: file, flight: flier }];
+    let mut fliers = [rides::Flier { byte: 0x12, stock: file, flight: flier, closed: false }];
     let mut seats = sims(2);
     let mut world = Flat::default();
     let mut game = Rides { fliers: &mut fliers, sims: &mut seats, world: &mut world, after: None, time_scale: None, plane: Some(&mut own), cars: &[] };
@@ -2593,4 +2593,58 @@ fn a_flier_pick_takes_its_template_and_its_skin_rides_the_seat_bytes() {
     game.decode(&state).unwrap();
     assert_eq!(game.sims[0].plane.as_ref().map(|f| (f.skin, f.mxvatv)), Some((0x12, true)));
     assert_eq!(game.sims[0].hash(), before);
+}
+
+/// P318a: a joiner whose machine lacks a flier's pack closes it at its join, on every machine at
+/// that tick — the join's spawn says the closed bytes ([`rides::spawn_closing`]), the seat it spawns
+/// closes them, and the state the join sends every machine says them, which another machine's
+/// decode takes. A switch onto the plane on a closed byte takes the ride's own; a seat already up
+/// in the flier flies on in it; a state that says none opens them again.
+#[test]
+fn a_joiner_lacking_a_fliers_pack_closes_it_at_the_join_on_every_machine() {
+    let Some(file) = the_discs_plane() else { return };
+    let flier = game_sim::flight::Flight { mxvatv: true, skin: 0x12, ..game_sim::flight::Flight::new(&file) };
+    let template = rides::Flier { byte: 0x12, stock: file.clone(), flight: flier, closed: false };
+    let (mut own, mut own_there) = (game_sim::flight::Flight::new(&file), game_sim::flight::Flight::new(&file));
+    let (mut fliers, mut fliers_there) = ([template.clone()], [template]);
+    let (mut seats, mut seats_there) = (sims(2), sims(2));
+    let (mut world, mut world_there) = (Flat::default(), Flat::default());
+    let mut game = Rides { fliers: &mut fliers, sims: &mut seats, world: &mut world, after: None, time_scale: None, plane: Some(&mut own), cars: &[] };
+    let pad = |up: bool, byte: u8| {
+        let mut pad = Report::idle();
+        pad.0[net::SWITCH] = vehicle::Wanted { to: up.then_some(vehicle::Kind::Biplane), ..Default::default() }.byte();
+        pad.0[net::FLIER] = byte;
+        pad
+    };
+    // seat 1 goes up in the pack's plane before the join; seat 2 stays on its bike
+    for t in 0..10 {
+        game.step(t, &[pad(true, 0x12), pad(false, 0x12)]);
+    }
+    assert_eq!(game.sims[0].plane.as_ref().map(|f| f.skin), Some(0x12));
+    // the join: seat 3 lacks the pack
+    let spawn = rides::seat_bytes(&sims(1)[0]);
+    game.seat(2, &rides::spawn_closing(&spawn, &[(2, 0)], &[0x12])).unwrap();
+    assert!(game.fliers[0].closed, "the join closed the flier on the host");
+    let state = game.encode().expect("a ride's state in bytes");
+    // another machine takes the restart's state: the flier is closed there too
+    let mut there = Rides { fliers: &mut fliers_there, sims: &mut seats_there, world: &mut world_there, after: None, time_scale: None, plane: Some(&mut own_there), cars: &[] };
+    there.decode(&state).unwrap();
+    assert!(there.fliers[0].closed, "the restart's state closed the flier on every machine");
+    assert_eq!(there.sims.len(), 3);
+    // seat 2's switch on the closed byte takes the ride's own; seat 1 flies on in the flier
+    for t in 10..20 {
+        game.step(t, &[pad(true, 0x12), pad(true, 0x12), Report::missing()]);
+        there.step(t, &[pad(true, 0x12), pad(true, 0x12), Report::missing()]);
+    }
+    for g in [&game, &there] {
+        assert_eq!(g.sims[0].plane.as_ref().map(|f| (f.skin, f.mxvatv)), Some((0x12, true)), "seat 1 flies on in the flier");
+        assert_eq!(g.sims[1].plane.as_ref().map(|f| (f.skin, f.mxvatv)), Some((0, false)), "seat 2 took the ride's own");
+    }
+    assert_eq!(game.hash(), there.hash(), "both machines ride the same after the join");
+    // a spawn that closes nothing is the one before, and a state that says none opens them again
+    assert_eq!(rides::spawn_closing(&spawn, &[(2, 0)], &[]), rides::spawn_on(&spawn, &[(2, 0)]));
+    let mut open_state = game.encode().unwrap();
+    open_state.truncate(open_state.len() - 2);
+    there.decode(&open_state).unwrap();
+    assert!(!there.fliers[0].closed, "a state that says no closed flier opens it");
 }

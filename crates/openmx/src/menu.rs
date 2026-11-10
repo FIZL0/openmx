@@ -1303,6 +1303,32 @@ impl CameraView {
 }
 
 
+/// The `mod.json` kind of the packs a flier comes in (P318a): the machine packs', as
+/// `online_fliers::KIND` says it, which the lobby's room offers by.
+pub const FLIER_PACK_KIND: &str = "machine";
+
+/// The Garage's fliers in a lobby (P318a): `offer`, each pack's skin greyed with the room's why
+/// ([`openmx_net::Offered::why`]) where some seat's machine lacks its pack or holds other files
+/// under it, or with what this machine's room copy has not heard of it. MX Unleashed's, and a skin
+/// greyed already, stay as they are.
+pub fn lobby_fliers(offer: &[roster::Flier], room: &Room) -> Vec<roster::Flier> {
+    let offered = room.offer();
+    offer
+        .iter()
+        .map(|f| {
+            let why = match f.why.is_some() || f.pack == roster::ORIGINAL_PACK {
+                true => f.why.clone(),
+                false => match offered.iter().find(|o| o.pack.kind == FLIER_PACK_KIND && o.pack.id == f.pack) {
+                    Some(o) if o.open() => None,
+                    Some(o) => Some(o.why()),
+                    None => Some("Not every machine in the room holds this pack".to_string()),
+                },
+            };
+            roster::Flier { why, ..f.clone() }
+        })
+        .collect()
+}
+
 /// The most players a ride seats, as P35's seats count them.
 pub const SEATS_MAX: usize = 8;
 
@@ -3313,6 +3339,9 @@ pub struct Menu {
     /// who lacks its pack where some seat's machine does, which the pause's picker offers in their
     /// place. `None` off line, where the pause offers no flier online.
     flier_online: Option<Vec<roster::Flier>>,
+    /// The fliers above as the lobby's room offers them (P318a, [`lobby_fliers`]), made again as
+    /// the room or the fliers change: what the Garage lists while this machine is in a room.
+    flier_lobby: Vec<roster::Flier>,
     /// The other machines on offer (P315c): every installed machine pack's bikes and other kinds,
     /// beside the disc's bikes ([`Menu::set_machines`]).
     machine_offer: Vec<roster::PackMachine>,
@@ -3580,6 +3609,7 @@ impl Menu {
             music_seen: Vec::new(),
             trick_seen: Vec::new(),
             flier_offer: roster::original_fliers(),
+            flier_lobby: Vec::new(),
             flier_online: None,
             machine_offer: Vec::new(),
             modified: false,
@@ -5525,10 +5555,12 @@ impl Menu {
                     l.code = room.short.clone();
                 }
                 l.ready = room.ready.contains(&l.me);
+                self.flier_lobby = lobby_fliers(&self.flier_offer, &room);
                 l.room = Some(room);
             }
             Event::Start(room, me) => {
                 l.me = me.clone();
+                self.flier_lobby = lobby_fliers(&self.flier_offer, &room);
                 l.room = Some(room.clone());
                 l.start = Some((room, me));
                 l.drop_in = false;
@@ -5539,6 +5571,7 @@ impl Menu {
             // into a ride under way (N10): the same ride from the lobby, its state from the host
             Event::DropIn(room, me) => {
                 l.me = me.clone();
+                self.flier_lobby = lobby_fliers(&self.flier_offer, &room);
                 l.room = Some(room.clone());
                 l.start = Some((room, me));
                 l.drop_in = true;
@@ -5849,6 +5882,27 @@ impl Lobby {
         let word = if word == "bike" { "" } else { word };
         if self.pick.machine != word {
             self.pick.machine = word.to_string();
+            self.repick = self.room.is_some();
+        }
+    }
+
+    /// The flier pack's plane this machine's player starts in (P318a), where they start on the
+    /// plane: `flier`, the Garage's pick of the plane kind as (pack, skin), taken where the room
+    /// offers its pack ([`Room::offer`]) and the pick is not MX Unleashed's own; else none, the
+    /// ride's own biplane. Its pack goes in the pick's packs, so the handshake holds every seat to
+    /// it. A change goes out as [`Lobby::set_machine`]'s does.
+    pub fn set_flier(&mut self, flier: Option<(&str, &str)>) {
+        let open = |pack: &str| {
+            self.room.as_ref().is_some_and(|r| r.offer().iter().any(|o| o.pack.kind == FLIER_PACK_KIND && o.pack.id == pack && o.open()))
+        };
+        let (word, packs) = match flier {
+            Some((pack, skin)) if self.pick.machine == Machine::Biplane.word() && pack != roster::ORIGINAL_PACK && open(pack) => {
+                (format!("{pack}/{skin}"), openmx_net::handshake::pack_key(FLIER_PACK_KIND, pack))
+            }
+            _ => (String::new(), String::new()),
+        };
+        if self.pick.flier != word || self.pick.packs != packs {
+            (self.pick.flier, self.pick.packs) = (word, packs);
             self.repick = self.room.is_some();
         }
     }
@@ -6341,6 +6395,9 @@ impl Menu {
             offer.splice(0..0, roster::original_fliers());
         }
         self.flier_offer = offer;
+        if let Some(room) = &self.lobby.room {
+            self.flier_lobby = lobby_fliers(&self.flier_offer, room);
+        }
         let Some(skin) = self.settings.old_fliers else { return };
         let pack = self.flier_offer.iter().find(|f| f.pack != roster::ORIGINAL_PACK && f.why.is_none()).map(|f| f.pack.clone());
         let Some(pack) = pack else { return };
@@ -6360,6 +6417,15 @@ impl Menu {
     /// The fliers on offer (P315).
     pub fn fliers(&self) -> &[roster::Flier] {
         &self.flier_offer
+    }
+
+    /// The fliers the Garage lists (P318a): in a lobby's room, each pack's skin greyed where some
+    /// seat's machine lacks its pack ([`lobby_fliers`]); else every one on offer.
+    pub fn garage_fliers(&self) -> &[roster::Flier] {
+        match self.lobby.room {
+            Some(_) => &self.flier_lobby,
+            None => &self.flier_offer,
+        }
     }
 
     /// The machines besides the fliers on offer (P315c), as the shell reads them off the installed

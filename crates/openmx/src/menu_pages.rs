@@ -1232,7 +1232,7 @@ impl Menu {
         }
         let page = self.page_of(Screen::Garage);
         let Some(Key::Flier(at)) = page.get(self.cursor(Screen::Garage)).map(|r| r.key) else { return None };
-        roster::flier_kinds(&self.flier_offer).get(at).cloned()
+        roster::flier_kinds(self.garage_fliers()).get(at).cloned()
     }
 
     /// Whether the Garage is on its machine picker (P315c).
@@ -1266,7 +1266,7 @@ impl Menu {
     pub fn garage_flier(&self) -> Option<&roster::Flier> {
         let kind = self.garage_flier_kind()?;
         let pick = self.garage_pick()?;
-        roster::flier_of(&self.flier_offer, pick, &kind).or_else(|| roster::flier_choices(&self.flier_offer, &kind).first().copied())
+        roster::flier_of(self.garage_fliers(), pick, &kind).or_else(|| roster::flier_choices(self.garage_fliers(), &kind).first().copied())
     }
 
     /// The fliers one step either side of the shown one (P315a), for the stage to dress ahead.
@@ -1276,8 +1276,8 @@ impl Menu {
             .into_iter()
             .filter_map(|by| {
                 let mut next = pick.clone();
-                roster::step_flier(&self.flier_offer, &mut next, &kind, by);
-                roster::flier_of(&self.flier_offer, &next, &kind).filter(|f| *f != shown).cloned()
+                roster::step_flier(self.garage_fliers(), &mut next, &kind, by);
+                roster::flier_of(self.garage_fliers(), &next, &kind).filter(|f| *f != shown).cloned()
             })
             .collect()
     }
@@ -1287,7 +1287,7 @@ impl Menu {
     pub(super) fn step_garage_flier(&mut self, by: i32) -> bool {
         let Some(kind) = self.garage_flier_kind() else { return false };
         let seat = self.garage_seat();
-        let offer = self.flier_offer.clone();
+        let offer = self.garage_fliers().to_vec();
         let Some(g) = self.garages.get_mut(seat) else { return false };
         let was = g.pick.clone();
         roster::step_flier(&offer, &mut g.pick, &kind, by);
@@ -1407,7 +1407,7 @@ impl Menu {
     /// packs that bring it, greyed with why: the installed quads until openmx rides one.
     fn other_machine_rows(&self) -> Vec<Row> {
         let offer = &self.machine_offer;
-        roster::other_kinds(offer, &self.flier_offer)
+        roster::other_kinds(offer, self.garage_fliers())
             .iter()
             .enumerate()
             .map(|(i, kind)| {
@@ -1470,7 +1470,7 @@ impl Menu {
     /// installed pack's skins of it after MX Unleashed's, grouped by the game they come from. A skin
     /// openmx cannot fly is listed, greyed with why, and stepped over.
     fn flier_rows(&self, seat: usize) -> Vec<Row> {
-        let offer = self.fliers();
+        let offer = self.garage_fliers();
         let pick = self.garages.get(seat).map(|g| g.pick.clone()).unwrap_or_default();
         let mut rows = Vec::new();
         for (i, kind) in roster::flier_kinds(offer).iter().enumerate() {
@@ -1484,6 +1484,12 @@ impl Menu {
                     r.now = choices.iter().position(|c| std::ptr::eq(*c, f));
                     r.value = f.name.clone();
                     r.note = Some(format!("{}. {}", f.game, f.about));
+                    // The seat's own pick greyed here (P318a: a lobby whose room lacks its pack),
+                    // which it rides MX Unleashed's in place of: why.
+                    let want = pick.flier(kind);
+                    if let Some(off) = choices.iter().find(|c| c.why.is_some() && want.is_some_and(|w| w.pack == c.pack && w.skin == c.skin)) {
+                        r.note = Some(format!("{}: {}. {}", off.name, off.why.clone().unwrap_or_default(), r.note.take().unwrap_or_default()));
+                    }
                     rows.push(r);
                 }
                 None => {
@@ -2152,7 +2158,7 @@ impl Menu {
             Key::Machine(_) => return,
             Key::Flier(i) => {
                 let seat = self.garage_seat();
-                let offer = self.flier_offer.clone();
+                let offer = self.garage_fliers().to_vec();
                 let Some(kind) = roster::flier_kinds(&offer).get(i).cloned() else { return };
                 let Some(g) = self.garages.get_mut(seat) else { return };
                 roster::step_flier(&offer, &mut g.pick, &kind, by(p));
