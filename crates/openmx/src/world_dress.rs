@@ -4,7 +4,7 @@
 //! The ground streams the same way ([`crate::worlds::GroundStream`]); this is what stands on it.
 //! A tile within [`Reach::load`] of a rider is built on a thread of its own, nearest first: its
 //! scene's props (the world's `drop`ped sections left out), its ecosystem stood on its own terrain,
-//! and the models of the cars its `.toy` drives, all into an [`Assets`] of its own. The shell takes
+//! both less what stands outside the tile's keep (V125), and the models of the cars its `.toy` drives, all into an [`Assets`] of its own. The shell takes
 //! that in under the tile's name ([`Assets::take_in`]), so two tiles' `Model1` are two models, and
 //! lets it go again ([`Assets::let_go`]) once the tile is past [`Reach::drop`] of every rider.
 //!
@@ -177,6 +177,16 @@ pub fn build(piece: &WorldPiece, index: usize, lod: Lod) -> Result<Built, String
         for car in toy::cars(&ini::text(&toy_text)).iter() {
             cars += assets.load_placed(&archives, car.stem()) as usize;
         }
+    }
+    // What stands outside the tile's keep stands over ground the world gives a join or a neighbour
+    // (MD27): on a national cut to its track, most of its trees, which floated over the join's blend
+    // (V125). The tile's own props and plants are left out there, as its collision shapes are.
+    let cut = worlds::cut_look(&mut look, &piece.tile);
+    let kept = worlds::keep_feet(piece.tile.keep, piece.tile.spacing);
+    let mut grove = grove;
+    let cut_plants = grove.as_mut().map_or(0, |g| g.retain(|p| worlds::inside(kept, p.pos.x, p.pos.z)));
+    if cut + cut_plants > 0 {
+        notes.push(format!("{cut} models and {cut_plants} plants outside its keep left out"));
     }
     let [dx, dz] = piece.tile.at.map(|a| a.0);
     let prefix = prefix(&piece.tile);
@@ -586,6 +596,59 @@ mod tests {
             assert!((got - want).abs() / want < 0.02, "channel {k}: the modulation gives {got}, the light {want}");
             assert_eq!(p[k], want.min(255.0) as u8, "channel {k}: the baked page, clipped");
         }
+    }
+
+    /// **world_mxu's plants stand on its ground** (V125): every tile's trees and bushes and props
+    /// are those of its map inside the tile's keep, and none outside it, where the ground is a
+    /// join's blend or a neighbour's: before, 90 % of a national's plants stood there, most of them
+    /// over 2 feet off the join's ground and many far more. Each plant kept stands as far off the
+    /// world's ground as off its own map's, where the original places it ridden alone
+    /// (`game-render`'s ecosystem tests), so the ground under it is its map's. Needs the disc and
+    /// builds the world's joins (20 s).
+    #[test]
+    fn world_mxu_plants_stand_on_the_ground_their_map_keeps() {
+        let Ok(mut disc) = game_render::disc::Disc::open_configured() else {
+            println!("SKIPPED: no disc");
+            return;
+        };
+        let mods = std::env::temp_dir().join(format!("openmx-v125-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&mods);
+        std::fs::create_dir_all(&mods).unwrap();
+        let w = crate::disc_worlds::world(&mut disc, &mods, "world_mxu", &mut |_| {}).expect("world_mxu builds");
+        let tiled = w.tiled(Reach::DESKTOP).unwrap();
+        let (mut tiles, mut plants, mut left_out, mut off) = (0, 0, 0, 0);
+        for (i, piece) in w.pieces[..w.tile_count].iter().enumerate() {
+            let b = build(piece, i, Lod::Smooth).unwrap();
+            let Some(g) = &b.grove else { continue };
+            let kept = worlds::keep_feet(piece.tile.keep, piece.tile.spacing);
+            let at = piece.tile.at.map(|a| a.0);
+            // The map's own plants and its terrain, as a ride on it alone has them.
+            let archives = piece.archives().unwrap();
+            let scene = piece.scene.as_ref().unwrap();
+            let look = view::Scene::parse(&ini::text(piece.scene_bytes.as_deref().unwrap()));
+            let terrain_file = crate::track_mods::terrain_bytes(&archives[0], &scene.terrain_file).unwrap();
+            let terrain = track::Terrain::parse(&terrain_file).unwrap();
+            let alone = Grove::load(&archives, &look, &scene.terrain, &terrain, &mut Assets::default()).unwrap().unwrap();
+            let inside: Vec<_> = alone.ecosystem.plants.iter().filter(|p| worlds::inside(kept, p.pos.x, p.pos.z)).collect();
+            assert_eq!(g.ecosystem.plants.len(), inside.len(), "{}: its map's plants inside its keep", piece.stem);
+            for (p, own) in g.ecosystem.plants.iter().zip(&inside) {
+                assert_eq!([p.pos.x - at[0], p.pos.y, p.pos.z - at[1]], [own.pos.x, own.pos.y, own.pos.z], "{}", piece.stem);
+                let ground = tiled.at(F(p.pos.x), F(p.pos.z)).unwrap_or_else(|| panic!("{}: no ground under a plant", piece.stem)).y.0;
+                let own_ground = game_sim::world::Ground::new(&terrain, &scene.terrain).at(F(own.pos.x), F(own.pos.z)).unwrap().y.0;
+                let own_off = own.pos.y - own_ground;
+                assert!((p.pos.y - ground - own_off).abs() < 1e-3, "{}: a plant {} ft off the world's ground, {own_off} off its map's", piece.stem, p.pos.y - ground);
+                off += ((p.pos.y - ground).abs() > 2.0) as usize;
+            }
+            for m in &b.props {
+                assert!(worlds::inside(kept, m.pos.x - at[0], m.pos.z - at[1]), "{}: a prop outside its keep", piece.stem);
+            }
+            tiles += 1;
+            plants += inside.len();
+            left_out += alone.ecosystem.plants.len() - inside.len();
+        }
+        let _ = std::fs::remove_dir_all(&mods);
+        println!("world_mxu: {tiles} tiles with plants, {plants} kept, {left_out} outside the keeps left out, {off} kept over 2 ft off");
+        assert!(tiles >= 26 && left_out > 0, "{tiles} tiles, {left_out} left out");
     }
 
     /// A world of three tiles in a row along `x`, 720 feet apart, 64 samples (567 feet) a side,
