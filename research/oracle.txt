@@ -1494,12 +1494,38 @@ ai_mx_construct             boot 0x00382c50 MXVehicleAI constructor (calls ai_ve
 ai_vehicle_construct        boot 0x00282ca0 VehicleAI base constructor: +0x2a4 11 feelers, +0x2ac 100
 path_locate                 boot 0x0026b860 (f12 -1.0, net, 0, point, hint, out, 0, 0, 0) -> found;
 #                                           out+4 the located path segment (+0x54 its next)
+#                                           S282: really (f12 limit, a0 net, a1 hint place, a2 point,
+#                                           a3 path object, t0 out, t1 distance out, t2 refuse 0x100,
+#                                           t3 holding only); the path object's +0x10 is its first node,
+#                                           +0x18/+0x2c its branch count/list (read with a hint only).
+#                                           out = (path, node, along); node/along untouched when nothing
+#                                           is taken. Node: +0x10 centre, +0x20/+0x30 the two edge points,
+#                                           +0x40 length on, +0x54 next. Nearest by mula/madd in x/z to the
+#                                           clamped centre line; walk stops at limit (>= 0). A hint on
+#                                           another path costs path_distance and its net search track_start_spots
+#                                           (2976 B): not ported. Ported hint-less as
+#                                           ai::path::locate, oracled over 10,000 paths (tests/ai.rs)
 path_segment_holds          boot 0x0026bdb0 (net, point, seg, next) -> the point lies on seg..next
+#                                           S282: crossing count over the hexagon seg+0x20, next+0x20,
+#                                           next+0x10, next+0x30, seg+0x30, seg+0x10 (x/z, plain ops).
+#                                           Ported as ai::path::segment_holds
 path_node_direction         boot 0x0026e630 (net, node, io) writes the unit node->next direction into
 #                                           io when node+0x40 > 0, else leaves io as it was
+#                                           S282: also false with no node or no next; vsub.xyz keeps the
+#                                           next centre's w, VU0 normalise. Ported as
+#                                           ai::path::node_direction. ai_update_mx asks the three only with
+#                                           flag 0x20000, race, interface, interface +0x88 path, +0x8c node
+#                                           and race +0x68 net all non-zero (ai::path::off_track)
 ai_tick_flag                boot 0x00383580 sets and clears the per-tick bit 0x80 of the same flags
 #                                           (S12b: it is also MXVehicleAI's route follower, 5936
 #                                           bytes: path queries 0x0026b410/0x0026e0c0, rand, 0x003832f0)
+#                                           S282: vt+0x74 = ai_update_mx (the avoidance, under flag 1),
+#                                           vt+0x78 0x002830f0, vt+0x80 0x00283560, vt+0x84 ai_trick_plan,
+#                                           vt+0x8c ai_route_follow, vt+0x94 0x00284ba0 (MXVehicleAI
+#                                           vtable 0x0045c4a0). In recording2's free09 image the three AI
+#                                           riders have no path net (race +0x68 = 0, interface +0x88 = 0)
+#                                           and ride targets: +0x340 set, +0x344 target, +0x354 = 1.
+#                                           Split S282a (targets), S282b (path follow), S282c (path data)
 ai_controls                 boot 0x00283ef0 (ai) VehicleAI's ground controller, MXVehicleAI vt+0x90 via
 #                                           ai_controls_dispatch: target direction +0x1d0 against
 #                                           forward +0xb0 / up +0xa0 -> angles +0x1f0/+0x1f4/+0x1f8,
