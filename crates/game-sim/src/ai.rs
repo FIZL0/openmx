@@ -2131,6 +2131,217 @@ pub mod seek {
     }
 }
 
+// --- the race path follower's pieces and the tick's tail (S282b) -----------------------------------
+
+/// What the motocross AI's tick does after the seeker or the path follower has set the heading and
+/// target speed, and the track query the race path follower places a rider with.
+///
+/// The race path follower itself (the original's ai_tick_flag with no seeker state and a path net:
+/// the path's look-ahead, the route follower's wobble and drift, the hand-over to the seeker when
+/// the path runs out) is not ported yet; see S282b's journal.
+pub mod follow {
+    use super::{add, scale, sub, unit};
+    use crate::race::{Spot, TrackPaths, path_flags, ring_holds};
+    use ps2_float::fpu::Acc;
+    use ps2_float::{F, Vf, vu};
+
+    /// The brain's first flag word: run the avoidance on the heading (the 45° cone first).
+    pub const AVOIDS: u64 = 0x1;
+    /// The brain's first flag word: [`super::flag::NO_RIDER_SWEEP`] follows the bike's own word
+    /// [`Tail::bike_word`] each tick (up while it is non-zero).
+    pub const SWEEP_BY_BIKE: u64 = 0x1000;
+    /// The brain's first flag word: hand the heading times the speed to the rider assist each tick.
+    pub const ASSIST: u64 = 0x800;
+
+    /// `cos 45°`, the turn the avoidance gets the heading within.
+    const CONE: f32 = 0.70710677;
+
+    /// The nearest place on the track's paths to `point` across the ground (the original's path spot
+    /// at a point).
+    ///
+    /// The paths are walked depth first from path 0 along their links, one route-pool entry per path
+    /// on the walk's stack (a linked path already opened, or kept off, is not stacked; path 0 is,
+    /// whatever its flags). On each path a lone first node counts as a place by itself, `along` 0;
+    /// every stretch counts by the nearest point of its first-point line, clamped to its ends — with
+    /// `holding_only`, only a stretch whose ring holds the point ([`ring_holds`]). The nearer one
+    /// wins, a tie keeps the first found; `out` gets it and stays as it was when there is none.
+    /// `distance` gets the ground distance, 0 when exactly on the line, and stays as it was when
+    /// nothing was found.
+    ///
+    /// `false` with no paths or an empty pool at the start, `out` untouched. When the pool runs dry
+    /// halfway the answer is `false` too, as the original's, and the walk's entries and its
+    /// [`path_flags::OPENED`] marks stay where they are, `out` holding what was found so far.
+    pub fn spot(t: &mut TrackPaths, point: Vf, holding_only: bool, out: &mut Spot, distance: Option<&mut F>) -> bool {
+        if t.paths.is_empty() || t.free_routes == 0 {
+            return false;
+        }
+        let (px, pz) = (F(point.x()), F(point.z()));
+        let mut best = F(-1.0);
+        t.free_routes -= 1;
+        let mut stack = vec![0];
+        while let Some(&p) = stack.last() {
+            if t.paths[p].flags & path_flags::OPENED != 0 {
+                stack.pop();
+                t.free_routes += 1;
+                continue;
+            }
+            t.paths[p].flags |= path_flags::OPENED;
+            let nodes = &t.paths[p].nodes;
+            if nodes.len() == 1 {
+                let c = nodes[0].points[0];
+                let (dx, dz) = (px - F(c.x()), pz - F(c.z()));
+                let d2 = Acc::mula(dx, dx).madd(dz, dz);
+                if d2 < best || best < F(0.0) {
+                    *out = Spot::on(p, 0, F(0.0));
+                    best = d2;
+                }
+            }
+            for i in 0..nodes.len().saturating_sub(1) {
+                let (a, b) = (&nodes[i], &nodes[i + 1]);
+                if holding_only && !ring_holds(point, a, b) {
+                    continue;
+                }
+                let (cx, cz) = (F(a.points[0].x()), F(a.points[0].z()));
+                let (nx, nz) = (F(b.points[0].x()), F(b.points[0].z()));
+                let (dx, dz) = (nx - cx, nz - cz);
+                let mut t_along = F(0.0);
+                if dx != F(0.0) || dz != F(0.0) {
+                    let num = Acc::mula(dx, px - cx).madd(dz, pz - cz);
+                    t_along = num / Acc::mula(dx, dx).madd(dz, dz);
+                }
+                if !(t_along <= F(1.0)) {
+                    t_along = F(1.0);
+                } else if t_along < F(0.0) {
+                    t_along = F(0.0);
+                }
+                let d2 = if t_along == F(1.0) {
+                    let (ox, oz) = (px - nx, pz - nz);
+                    Acc::mula(ox, ox).madd(oz, oz)
+                } else if t_along == F(0.0) {
+                    let (ox, oz) = (px - cx, pz - cz);
+                    Acc::mula(ox, ox).madd(oz, oz)
+                } else {
+                    let oz = Acc::suba(pz, cz).msub(dz, t_along);
+                    let ox = Acc::suba(px, cx).msub(dx, t_along);
+                    Acc::mula(ox, ox).madd(oz, oz)
+                };
+                if d2 < best || best < F(0.0) {
+                    *out = Spot::on(p, i, t_along);
+                    best = d2;
+                }
+            }
+            for k in 0..t.paths[p].links.len() {
+                let l = t.paths[p].links[k];
+                if t.paths[l].flags & (path_flags::OPENED | path_flags::KEEP_OFF) != 0 {
+                    continue;
+                }
+                if t.free_routes == 0 {
+                    return false;
+                }
+                t.free_routes -= 1;
+                stack.push(l);
+            }
+        }
+        for path in &mut t.paths {
+            path.flags &= !path_flags::OPENED;
+        }
+        if let Some(d) = distance {
+            if best > F(0.0) {
+                *d = best.sqrt();
+            } else if best == F(0.0) {
+                *d = F(0.0);
+            }
+        }
+        true
+    }
+
+    /// The brain's fields the tail reads and writes.
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    pub struct Brain {
+        /// The first flag word ([`AVOIDS`], [`SWEEP_BY_BIKE`], [`ASSIST`],
+        /// [`super::flag::NO_RIDER_SWEEP`], [`super::flag::ON_GROUND`]).
+        pub flags: u64,
+        /// The heading and target speed the seeker or the path follower set.
+        pub heading: Vf,
+        pub speed: F,
+        /// What [`ASSIST`] hands the rider assist: the heading's `x` and `z` times the speed.
+        pub assist_x: F,
+        pub assist_z: F,
+    }
+
+    /// What the tail reads off the rider and its interface.
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    pub struct Tail {
+        pub forward: Vf,
+        pub velocity: Vf,
+        /// The rider's own speed (the velocity's length, as the brain's copy has it).
+        pub own_speed: F,
+        /// The interface's cosine of the widest an airborne rider's heading may be off its velocity.
+        pub air_cone: F,
+        /// The bike's word [`SWEEP_BY_BIKE`] reads, `None` with no bike.
+        pub bike_word: Option<u32>,
+    }
+
+    /// The tick's tail (the original's ai_tick_flag from where the seeker's hand-off joins it).
+    ///
+    /// 1. With [`SWEEP_BY_BIKE`] and a bike, [`super::flag::NO_RIDER_SWEEP`] goes up when the bike's
+    ///    word is non-zero and down when it is 0.
+    /// 2. With [`AVOIDS`]: a heading more than 45° off the forward (by `x` and `z` only) is turned to
+    ///    45° off it — the part across the forward made unit (`y` too) and the sum with the forward
+    ///    scaled by `cos 45°` in `x` and `z` — and then `avoid` runs (the original's vt+0x74, the
+    ///    avoidance, which bends the heading and the speed).
+    /// 3. When the rider moves and is not on the ground, a heading more than the interface's cone off
+    ///    the velocity's direction is put on the cone's edge toward it; its `w` becomes the velocity's.
+    /// 4. `plan` runs (vt+0x84, the trick plan).
+    /// 5. With [`ASSIST`]: the heading's `x`/`z` times the speed go to the brain's assist pair and
+    ///    `assist` runs (the interface's vt+0x18, the rider assist).
+    pub fn tail(
+        b: &mut Brain, ride: &Tail, avoid: &mut dyn FnMut(&mut Brain), plan: &mut dyn FnMut(&mut Brain),
+        assist: &mut dyn FnMut(&mut Brain),
+    ) {
+        if b.flags & SWEEP_BY_BIKE != 0 {
+            if let Some(word) = ride.bike_word {
+                if word != 0 {
+                    b.flags |= super::flag::NO_RIDER_SWEEP;
+                } else {
+                    b.flags &= !super::flag::NO_RIDER_SWEEP;
+                }
+            }
+        }
+        if b.flags & AVOIDS != 0 {
+            let (f, h) = (ride.forward, b.heading);
+            let d = Acc::mula(h.z(), f.z()).madd(h.x(), f.x());
+            if d <= F(CONE) {
+                let x = F(h.x()) - F(f.x()) * d;
+                let z = F(h.z()) - F(f.z()) * d;
+                let h = unit(Vf::new(x.0, h.y(), z.0, h.w()));
+                let x = F(CONE) * (F(h.x()) + F(f.x()));
+                let z = F(CONE) * (F(h.z()) + F(f.z()));
+                b.heading = Vf::new(x.0, h.y(), z.0, h.w());
+            }
+            avoid(b);
+        }
+        if F(0.0) < ride.own_speed {
+            let vel = ride.velocity;
+            let v = vel.merge(ps2_float::Dest::XYZ, vel.mul_q(vu::div(1.0, ride.own_speed.0)));
+            let h = b.heading;
+            let d = Acc::mula(v.x(), h.x()).madda(v.y(), h.y()).madd(v.z(), h.z());
+            let cone = ride.air_cone;
+            if b.flags & super::flag::ON_GROUND == 0 && d < cone {
+                let across = unit(sub(h, scale(v, d)));
+                let across = scale(across, (F(1.0) - cone * cone).sqrt());
+                b.heading = add(scale(v, cone), across);
+            }
+        }
+        plan(b);
+        if b.flags & ASSIST != 0 {
+            b.assist_x = F(b.heading.x()) * b.speed;
+            b.assist_z = F(b.heading.z()) * b.speed;
+            assist(b);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
