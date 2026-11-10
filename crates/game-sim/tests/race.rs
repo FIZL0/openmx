@@ -6625,3 +6625,396 @@ fn the_path_look_ahead_matches_the_track_objects() {
         "{seen:?}"
     );
 }
+
+// --- the AI's path follower (S309) -------------------------------------------------------------------
+
+const F_AI: u32 = 0x01b6_0000;
+const F_JUMP: u32 = 0x01b6_1000;
+const F_RACE: u32 = 0x01b6_2000;
+const PF_VT: u32 = 0x01b6_3000;
+/// Not code: the brain's other vtable slots land here and fail the case.
+const PF_HOOKS: u32 = 0x01b6_4000;
+const PF_SHIM: u32 = 0x01b6_5000;
+/// Not code: the brain's vt+0x8c lands here (see the path branch's oracle).
+const PF_FOLLOW: u32 = 0x01b6_6000;
+
+/// The follower's part of the brain into RAM.
+fn put_follower(ee: &mut Ee, f: &game_sim::ai::follow::Follower) {
+    ee.write(F_AI + 0x30, 8, u128::from(f.flags));
+    ee.set_u32(F_AI + 0x354, f.state as u32);
+    put_quad(ee, F_AI + 0xc0, f.position);
+    put_quad(ee, F_AI + 0xb0, f.forward);
+    put_f(ee, F_AI + 0x80, f.own_speed);
+    put_t_spot(ee, F_AI + 0x220, f.spot);
+    for (k, d) in f.draws.iter().enumerate() {
+        put_f(ee, F_AI + 0x22c + 4 * k as u32, *d);
+    }
+    put_quad(ee, F_AI + 0x1b0, f.aim);
+    put_quad(ee, F_AI + 0x1d0, f.heading);
+    put_f(ee, F_AI + 0x1e0, f.speed);
+    put_quad(ee, F_AI + 0x1f0, f.angles);
+    let words = [
+        f.drift, f.kick, f.kick_time, f.kick_decay, f.kick_clock, f.drift_target, f.drift_low, f.drift_high, f.drift_rate, f.drift_max,
+        f.drift_clock, f.period_low, f.period_high, f.period,
+    ];
+    for (k, w) in words.iter().enumerate() {
+        put_f(ee, F_AI + 0x164 + 4 * k as u32, *w);
+    }
+    put_f(ee, F_AI + 0x210, f.reach.base);
+    put_f(ee, F_AI + 0x214, f.reach.max);
+    put_f(ee, F_AI + 0x218, f.reach.gain);
+    put_f(ee, F_AI + 0x2e0, f.cruise);
+    put_f(ee, F_AI + 0x2f0, f.look);
+    put_f(ee, F_AI + 0x2f4, f.look_cone);
+}
+
+/// The follower's part of the brain read back.
+fn follower_at(ee: &Ee) -> game_sim::ai::follow::Follower {
+    let w = |o: u32| f32_at(ee, F_AI + o);
+    game_sim::ai::follow::Follower {
+        flags: ee.read(F_AI + 0x30, 8) as u64,
+        state: ee.u32_at(F_AI + 0x354) as i32,
+        position: quad(ee, F_AI + 0xc0),
+        forward: quad(ee, F_AI + 0xb0),
+        own_speed: w(0x80),
+        spot: t_spot_at(ee, F_AI + 0x220),
+        draws: std::array::from_fn(|k| w(0x22c + 4 * k as u32)),
+        aim: quad(ee, F_AI + 0x1b0),
+        heading: quad(ee, F_AI + 0x1d0),
+        speed: w(0x1e0),
+        angles: quad(ee, F_AI + 0x1f0),
+        drift: w(0x164),
+        kick: w(0x168),
+        kick_time: w(0x16c),
+        kick_decay: w(0x170),
+        kick_clock: w(0x174),
+        drift_target: w(0x178),
+        drift_low: w(0x17c),
+        drift_high: w(0x180),
+        drift_rate: w(0x184),
+        drift_max: w(0x188),
+        drift_clock: w(0x18c),
+        period_low: w(0x190),
+        period_high: w(0x194),
+        period: w(0x198),
+        reach: game_sim::ai::seek::Reach { base: w(0x210), max: w(0x214), gain: w(0x218) },
+        cruise: w(0x2e0),
+        look: w(0x2f0),
+        look_cone: w(0x2f4),
+    }
+}
+
+/// Everything in a follower as bits, for a comparison that tells `-0` from `0`.
+fn follower_bits(f: &game_sim::ai::follow::Follower) -> Vec<u32> {
+    let mut v = vec![f.flags as u32, (f.flags >> 32) as u32, f.state as u32];
+    for q in [f.position, f.forward, f.aim, f.heading, f.angles] {
+        v.extend(q.to_bits());
+    }
+    let (a, b, c) = t_bits(f.spot);
+    v.extend([a, b, c]);
+    v.extend(f.draws.iter().map(|d| d.0.to_bits()));
+    let words = [
+        f.own_speed, f.speed, f.drift, f.kick, f.kick_time, f.kick_decay, f.kick_clock, f.drift_target, f.drift_low, f.drift_high, f.drift_rate,
+        f.drift_max, f.drift_clock, f.period_low, f.period_high, f.period, f.reach.base, f.reach.max, f.reach.gain, f.cruise, f.look, f.look_cone,
+    ];
+    v.extend(words.iter().map(|w| w.0.to_bits()));
+    v
+}
+
+/// A level direction, `y` small, `w` any.
+fn f_dir(p: &mut Pick) -> Vf {
+    let a = p.range(-3.2, 3.2);
+    let (s, c) = a.sin_cos();
+    let y = if p.below(3) == 0 { p.range(-0.2, 0.2) } else { 0.0 };
+    Vf([c, y, s, p.range(-1.0, 1.0)])
+}
+
+/// A spot the follower may hold: on a stretch with `along` in 0..1, or at a path's last node with
+/// `along` 0 (the places the searches hand out).
+fn f_spot(p: &mut Pick, t: &TrackPaths) -> Spot {
+    let i = p.below(t.paths.len() as u64) as usize;
+    let len = t.paths[i].nodes.len();
+    if p.below(10) == 0 {
+        return Spot::on(i, len - 1, F(0.0));
+    }
+    let along = match p.below(10) {
+        0 => 0.0,
+        1 => 1.0,
+        _ => p.unit(),
+    };
+    Spot::on(i, p.below(len as u64 - 1) as usize, F(along))
+}
+
+/// The tick's path branch against SLUS-21104's, over 12,000 generated courses: from
+/// `ai_seek_path_branch` to `ai_seek_path_end` with every callee the original's (the brain's vt+0x78
+/// reach, vt+0x8c route follower and its vt+0x88 look-ahead, the path queries and `rand`). Riders and
+/// goals placed or not yet, the goal's route or the plain look-ahead, the look-ahead cone, drift and its
+/// draws, the side step, the node speed words and their blend, the hand-over to the seeker. The brain's
+/// follower words, the goal's spot, the paths' scratch words and pools, and the generator.
+///
+/// Left out, because the original reads words nobody set: a rider or goal the net search cannot place
+/// (it then reads its null spot, or points it never wrote on its stack), a course with a one-node path
+/// (the measure to its end never returns), a rider spot whose point is not answered, and a look-ahead
+/// at a spot with no way on (the cone's way is then stale stack: the flag is cleared for those).
+#[test]
+fn the_ais_path_branch_matches_the_tick() {
+    use game_sim::ai::follow::{self, Follower, Goal};
+    let Some(mut ee) = game_or_skip() else { return };
+    let [branch, end, reach_fn, look_fn, follow_fn, rand_state] =
+        match addrs(["ai_seek_path_branch", "ai_seek_path_end", "ai_path_reach", "ai_path_look_ahead", "ai_route_follow", "rand_state"]) {
+            Ok(a) => a,
+            Err(why) => return skip(&why),
+        };
+    // vt+0x88 hands the route search the address of a list head on its stack it never set (128 bytes
+    // down, at +124): the shim zeroes it, as the port starts the route empty, then jumps in.
+    ee.set_u32(PF_SHIM, 0xafa0_fffc); // sw $zero, -4($sp)
+    ee.set_u32(PF_SHIM + 4, 0x0800_0000 | (look_fn >> 2) & 0x03ff_ffff); // j look_fn
+    ee.set_u32(PF_SHIM + 8, 0); // nop
+    for slot in (0..0x100u32).step_by(4) {
+        let target = match slot {
+            0x78 => reach_fn,
+            0x88 => PF_SHIM,
+            0x8c => PF_FOLLOW,
+            _ => {
+                let h = PF_HOOKS + slot;
+                ee.hooks.insert(h, Box::new(move |_| panic!("the path branch called the brain's vtable slot {slot:#x}")));
+                h
+            }
+        };
+        ee.set_u32(PF_VT + slot, target);
+    }
+    ee.hooks.insert(end, Box::new(|ee| ee.set(31, ps2_oracle::DONE as i32 as i64 as u64)));
+    // The route follower, run nested (at the stack pointer it would get anyway). A route path that
+    // placed nothing hands on the place before it with its own path, so the spot can name another
+    // path's node, which the port's spot cannot say; the measure after it then recurses for good.
+    // Such a case stops here and is left out.
+    let cross = Rc::new(Cell::new(false));
+    let seen_cross = cross.clone();
+    ee.hooks.insert(PF_FOLLOW, Box::new(move |ee| {
+        let ra = ee.r(31);
+        let ints: Vec<u64> = (4..10).map(|r| ee.r(r)).collect();
+        let floats = [ee.f(12), ee.f(13)];
+        ee.call(follow_fn, &ints, &floats, BUDGET * 300);
+        let node = ee.u32_at(F_AI + 0x224);
+        let other = node != 0 && ee.u32_at(F_AI + 0x220) != t_rec(((node - T_NODES) / 0x60 / 16) as usize);
+        seen_cross.set(other);
+        ee.set(31, if other { ps2_oracle::DONE as i32 as i64 as u64 } else { ra });
+        // The hook goes back under the address it was reached at.
+        ee.pc = PF_FOLLOW;
+    }));
+
+    let mut p = Pick(0x5309_ba7c_f011_0e5a);
+    let mut seen = std::collections::BTreeMap::<&str, u32>::new();
+    let mut case = 0;
+    let mut tries = 0;
+    while case < 12_000 {
+        tries += 1;
+        assert!(tries < 100_000, "too few usable courses: {case}");
+        let mut t = t_paths(&mut p);
+        if t.paths.iter().any(|path| path.nodes.len() < 2) {
+            continue;
+        }
+        t_forks(&mut p, &mut t);
+        for path in &mut t.paths {
+            for node in &mut path.nodes {
+                node.word_04 = p.next() as u32 & !follow::NO_DRIFT | if p.below(4) == 0 { follow::NO_DRIFT } else { 0 };
+                let speed = p.range(20.0, 150.0);
+                node.word_44 = match p.below(3) {
+                    0 => (-1.0f32).to_bits(),
+                    _ => p.stray(speed).to_bits(),
+                };
+            }
+        }
+
+        let mut flags = p.next() & !(follow::LOOKS_AHEAD | follow::DRIFTS | follow::BLENDS_SPEED | game_sim::ai::seek::CLOSING);
+        for (bit, odds) in [(follow::LOOKS_AHEAD, 2), (follow::DRIFTS, 4), (follow::BLENDS_SPEED, 2), (game_sim::ai::seek::CLOSING, 2)] {
+            if p.below(odds) != 0 {
+                flags |= bit;
+            }
+        }
+        let low = p.range(0.0, 3.0);
+        let plo = p.range(0.0, 2.0);
+        let mut f = Follower {
+            flags,
+            state: 0,
+            position: t_point(&mut p, &t),
+            forward: f_dir(&mut p),
+            own_speed: F(p.range(0.0, 150.0)),
+            spot: if p.below(4) == 0 { Spot::default() } else { f_spot(&mut p, &t) },
+            draws: std::array::from_fn(|_| F(p.unit())),
+            aim: Vf([p.range(-100.0, 100.0), p.range(-5.0, 5.0), p.range(-100.0, 100.0), p.range(-1.0, 1.0)]),
+            heading: f_dir(&mut p),
+            speed: F(p.range(0.0, 150.0)),
+            angles: Vf([p.unit(), p.unit(), p.unit(), p.unit()]),
+            drift: F(p.range(-6.0, 6.0)),
+            kick: F(p.range(-3.0, 3.0)),
+            kick_time: F(p.range(0.0, 2.0)),
+            kick_decay: F(p.range(0.0, 5.0)),
+            kick_clock: F(if p.below(3) == 0 { p.range(0.0, 0.5) } else { p.range(0.0, 3.0) }),
+            drift_target: F(p.range(-6.0, 6.0)),
+            drift_low: F(low),
+            drift_high: F(low + p.range(0.0, 4.0)),
+            drift_rate: F(p.range(0.0, 10.0)),
+            drift_max: F(p.range(0.0, 6.0)),
+            drift_clock: F(p.range(0.0, 3.0)),
+            period_low: F(plo),
+            period_high: F(plo + p.range(0.0, 3.0)),
+            period: F(p.range(0.0, 3.0)),
+            reach: game_sim::ai::seek::Reach {
+                base: F(p.range(0.0, 20.0)),
+                max: F(if p.below(10) == 0 { -1.0 } else { p.range(0.0, 80.0) }),
+                gain: F(p.range(0.0, 2.0)),
+            },
+            cruise: F(p.range(0.0, 150.0)),
+            look: F(p.range(0.0, 200.0)),
+            look_cone: F(p.range(-1.0, 1.0)),
+        };
+        let mut goal = (p.below(3) != 0).then(|| Goal {
+            point: t_point(&mut p, &t),
+            spot: if p.below(2) == 0 { Spot::default() } else { f_spot(&mut p, &t) },
+        });
+        let race_word = (p.below(3) != 0).then(|| p.next() as u32);
+        let dt = F(p.range(0.01, 0.05));
+        let state = p.next();
+
+        // The two searches the branch starts with, run on a copy, to leave out the cases the original
+        // reads unset words in.
+        let mut probe = t.clone();
+        if let Some(g) = &mut goal {
+            let mut s = g.spot;
+            if s.path == 0 {
+                follow::spot(&mut probe, g.point, false, &mut s, None);
+            }
+            if s.at().is_none() {
+                continue;
+            }
+        }
+        let mut s = f.spot;
+        if s.path == 0 {
+            follow::spot(&mut probe, f.position, false, &mut s, None);
+        }
+        if s.at().is_none() {
+            continue;
+        }
+        let sentinel = Vf([1234.5, 0.0, 0.0, 0.0]);
+        let (mut q, mut s2) = (sentinel, s);
+        if !probe.spot_point(&mut s2, &mut q) && q == sentinel {
+            continue;
+        }
+        let mut way = sentinel;
+        if f.flags & follow::LOOKS_AHEAD != 0 && (!probe.path_ahead(s, &mut way) || way == sentinel) {
+            f.flags &= !follow::LOOKS_AHEAD;
+            *seen.entry("look-ahead dropped: no way on").or_default() += 1;
+        }
+
+        put_paths(&mut ee, &mut p, &t);
+        ee.set_u32(T_TRACK + 0x4c, t_rec(0));
+        for (i, path) in t.paths.iter().enumerate() {
+            for (n, node) in path.nodes.iter().enumerate() {
+                ee.set_u32(t_node(i, n) + 4, node.word_04);
+                ee.set_u32(t_node(i, n) + 0x44, node.word_44);
+            }
+        }
+        ee.load(F_AI, &[0; 0x400]);
+        ee.load(F_JUMP, &[0; 0x200]);
+        ee.set_u32(F_AI + 8, PF_VT);
+        ee.set_u32(F_AI + 0xdc, T_TRACK);
+        put_follower(&mut ee, &f);
+        if let Some(g) = &goal {
+            ee.set_u32(F_AI + 0x34c, F_JUMP);
+            put_quad(&mut ee, F_JUMP + 0xe0, g.point);
+            put_t_spot(&mut ee, F_JUMP + 0x110, g.spot);
+        }
+        if let Some(w) = race_word {
+            ee.set_u32(F_AI + 0xd8, F_RACE);
+            ee.set_u32(F_RACE + 0x5c, w);
+        }
+        ee.write(rand_state, 8, u128::from(state));
+        ee.set(19, u64::from(F_AI));
+        ee.set_f(22, dt.0);
+        // The seeker leaves the net in a0 for the goal's search.
+        cross.set(false);
+        ee.call(branch, &[u64::from(T_TRACK)], &[], BUDGET * 400);
+        if cross.get() {
+            *seen.entry("left out: another path's node").or_default() += 1;
+            continue;
+        }
+        let before = f;
+        let goal_before = goal;
+        let free_before = t.free_routes;
+        let mut rng = Rng::from_state(state);
+        follow::path(&mut f, &mut t, dt, goal.as_mut(), race_word, &mut rng);
+        let what = format!("case {case}: {before:?} goal {goal_before:?} race {race_word:?} dt {dt:?} pick {}", t.pick);
+        let theirs = follower_at(&ee);
+        assert_eq!(follower_bits(&theirs), follower_bits(&f), "{what}: the brain\n original {theirs:?}\n port     {f:?}");
+        if let Some(g) = &goal {
+            assert_eq!(t_bits(t_spot_at(&ee, F_JUMP + 0x110)), t_bits(g.spot), "{what}: the goal's spot");
+        }
+        check_paths(&ee, &t, &what);
+        assert_eq!(rng.state(), ee.read(rand_state, 8) as u64, "{what}: the generator");
+
+        let mut count = |k: &'static str| *seen.entry(k).or_default() += 1;
+        if before.spot.path == 0 {
+            count("rider placed");
+        }
+        if goal_before.is_some_and(|g| g.spot.path == 0) {
+            count("goal placed");
+        }
+        if goal.is_some() {
+            count("by route");
+        }
+        let held = f.speed == f.own_speed && f.aim == f.position && f.heading == f.forward;
+        if held {
+            count("nothing ahead");
+        } else {
+            count("followed");
+            if f.draws != before.draws {
+                count("drew again");
+            }
+            if f.drift_clock == F(0.0) {
+                count("new drift target");
+            }
+            if f.drift == F(0.0) {
+                count("no drift");
+            } else if f.drift == f.drift_max || f.drift == -f.drift_max {
+                count("drift held at its most");
+            }
+            if f.kick_clock != before.kick_clock {
+                count("side step");
+            }
+            if f.flags & follow::BLENDS_SPEED != 0 && f.speed != before.speed {
+                count("speed by the nodes");
+            }
+            if f.speed == F(150.0) {
+                count("default speed");
+            }
+        }
+        if before.flags & follow::LOOKS_AHEAD != 0 {
+            count("looked ahead");
+        }
+        if f.state == 1 {
+            count("handed over");
+        }
+        if t.free_routes < free_before.min(3) {
+            count("pool low");
+        }
+        case += 1;
+    }
+    eprintln!("path branch over {tries} courses: {seen:?}");
+    let at = |k: &str| seen.get(k).copied().unwrap_or(0);
+    assert!(
+        at("rider placed") > 1500
+            && at("goal placed") > 1500
+            && at("by route") > 5000
+            && at("nothing ahead") > 300
+            && at("followed") > 5000
+            && at("drew again") > 500
+            && at("new drift target") > 1000
+            && at("side step") > 500
+            && at("speed by the nodes") > 500
+            && at("default speed") > 300
+            && at("looked ahead") > 2000
+            && at("handed over") > 500,
+        "{seen:?}"
+    );
+}

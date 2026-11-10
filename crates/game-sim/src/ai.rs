@@ -2679,6 +2679,374 @@ pub mod follow {
         t.free_route(&mut route);
         found
     }
+
+    // --- the path follower (S309) ---------------------------------------------------------------
+
+    /// The brain's first flag word: the path reach looks [`Follower::look`] ahead along the paths and
+    /// drops the drift where the way there turns away from the path.
+    pub const LOOKS_AHEAD: u64 = 0x0100_0000;
+    /// The brain's first flag word: the follower drifts across its path.
+    pub const DRIFTS: u64 = 0x0080_0000;
+    /// The brain's first flag word: the target speed blends towards the next node's along the stretch.
+    pub const BLENDS_SPEED: u64 = 0x8000;
+    /// A path node's `+4` word: no drift on this stretch.
+    pub const NO_DRIFT: u32 = 0x10;
+    /// A node's speed word (`+0x44`) that asks for none of its own: [`DEFAULT_SPEED`] instead.
+    const NO_SPEED: f32 = -1.0;
+    /// The speed a node with no speed of its own is ridden at.
+    pub const DEFAULT_SPEED: f32 = 150.0;
+    /// What the follower leaves in the controller's three angles (the brain's `+0x1f0`).
+    pub const ANGLES_REST: Vf = Vf::new(0.0, 0.0, 0.0, 1.0);
+
+    /// The path follower's part of the brain: what the path branch, its reach and its route follower
+    /// read and write.
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    pub struct Follower {
+        /// The first flag word ([`LOOKS_AHEAD`], [`DRIFTS`], [`BLENDS_SPEED`],
+        /// [`super::seek::CLOSING`]).
+        pub flags: u64,
+        /// The seeker's state: 0 while the path takes the rider, 1 once it hands over.
+        pub state: i32,
+        /// The rider's position and forward, and its own speed (the brain's copies).
+        pub position: Vf,
+        pub forward: Vf,
+        pub own_speed: F,
+        /// Where on the net the rider is (path 0 until the net search places it).
+        pub spot: Spot,
+        /// Ten draws in 0..1, drawn again each time the rider changes path; the look-ahead reads
+        /// the first at a drawn fork.
+        pub draws: [F; 10],
+        /// The point aimed for, the heading and the target speed the controller rides to.
+        pub aim: Vf,
+        pub heading: Vf,
+        pub speed: F,
+        /// The controller's three angles, set to [`ANGLES_REST`].
+        pub angles: Vf,
+        /// How far across the path the aim sits (`+` to the right of the heading), and the side
+        /// step that holds it for a while: the step, how long it lasts, how fast it dies away and
+        /// its clock.
+        pub drift: F,
+        pub kick: F,
+        pub kick_time: F,
+        pub kick_decay: F,
+        pub kick_clock: F,
+        /// The drift it moves to, the range that is drawn from, how fast it moves and the most
+        /// it may be.
+        pub drift_target: F,
+        pub drift_low: F,
+        pub drift_high: F,
+        pub drift_rate: F,
+        pub drift_max: F,
+        /// The clock to the next draw, the range its period is drawn from, and the period.
+        pub drift_clock: F,
+        pub period_low: F,
+        pub period_high: F,
+        pub period: F,
+        /// The steering reach: `base + gain ·` the flat distance to the spot, at most `max`.
+        pub reach: super::seek::Reach,
+        /// The target speed when the route follower is told not to follow the nodes' speeds.
+        pub cruise: F,
+        /// How far ahead [`LOOKS_AHEAD`] looks, and the cosine the way there may be off the path.
+        pub look: F,
+        pub look_cone: F,
+    }
+
+    /// The point the seeker heads for once the path hands it over (the target jump's setup leg),
+    /// and its own place on the net, found once.
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    pub struct Goal {
+        pub point: Vf,
+        pub spot: Spot,
+    }
+
+    /// A compare as the FPU's `c.olt.s` makes it.
+    fn lt(a: F, b: F) -> bool {
+        seen(a) < seen(b)
+    }
+
+    /// `c.ole.s`.
+    fn le(a: F, b: F) -> bool {
+        seen(a) <= seen(b)
+    }
+
+    /// `v` with its `y` 0.
+    fn level(v: Vf) -> Vf {
+        Vf([v.x(), 0.0, v.z(), v.w()])
+    }
+
+    /// The flat distance from `p` to `q`, by `mula`/`madd` and `sqrt.s`.
+    fn flat_distance(p: Vf, q: Vf) -> F {
+        let (dx, dz) = (F(p.x()) - F(q.x()), F(p.z()) - F(q.z()));
+        Acc::mula(dx, dx).madd(dz, dz).sqrt()
+    }
+
+    /// `p` moved `drift` across the way `heading` points: `x + drift·heading.z`, `z − drift·heading.x`.
+    fn across(p: Vf, drift: F, heading: Vf) -> Vf {
+        let x = F(p.x()) + drift * F(heading.z());
+        let z = F(p.z()) - drift * F(heading.x());
+        Vf([x.0, p.y(), z.0, p.w()])
+    }
+
+    /// The path and node a spot names, where its path has that node. The route locate can hand back a
+    /// spot on one path with another path's node (see [`route_locate`]); the port's spot cannot say
+    /// which, and reads it as naming nothing.
+    fn node_of(t: &TrackPaths, spot: Spot) -> Option<(usize, usize)> {
+        spot.at().filter(|&(p, n)| p < t.paths.len() && n < t.paths[p].nodes.len())
+    }
+
+    /// The `+4` word of the node a spot is on (0 for a spot on no node: the original reads its null).
+    fn node_word(t: &TrackPaths, spot: Spot) -> u32 {
+        node_of(t, spot).map_or(0, |(p, n)| t.paths[p].nodes[n].word_04)
+    }
+
+    /// A node's speed word as the follower takes it: [`DEFAULT_SPEED`] for −1.
+    fn node_speed(word: u32) -> F {
+        let w = F(f32::from_bits(word));
+        if seen(w) == F(NO_SPEED) { F(DEFAULT_SPEED) } else { w }
+    }
+
+    /// How far ahead the rider steers along its path (the vehicle brain's vt+0x78, the path reach),
+    /// `a` and `b` its two floats (the path branch passes 0 and 0), `follow` its flag word (1 from
+    /// the path branch).
+    ///
+    /// With a spot and `follow`: under [`LOOKS_AHEAD`], the place [`Follower::look`] on along the
+    /// paths ([`look_ahead`], no nearest place) becomes the aim, made the level unit way there from
+    /// the spot's point; when that is more than [`Follower::look_cone`] off the level unit way the
+    /// path runs at the spot, the drift is dropped. Then the reach is `base + gain ·` the flat
+    /// distance from the rider to the spot's point moved [`Follower::drift`] across the heading, at
+    /// most `max`.
+    ///
+    /// Otherwise the spot is looked for afresh ([`spot`]): at the rider when it has none, else at
+    /// `start`'s point 20 back along its direction when `a < b` and there is one (the race file's
+    /// `+0x5c` object, its `+0x40` and `+0x50`: what it is was not traced), else at `point`. The
+    /// reach is `base + gain ·` the flat distance to the spot's point, at most 0 when `a < b` and
+    /// `b − base` when not.
+    ///
+    /// Points the original takes off its stack where a query does not answer are 0 here (see the
+    /// journal); the queries always answer on a placed spot of a net as loaded.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reach(f: &mut Follower, t: &mut TrackPaths, a: F, b: F, follow: bool, point: Vf, start: Option<(Vf, Vf)>) -> F {
+        if f.spot.path != 0 && follow {
+            if f.flags & LOOKS_AHEAD != 0 {
+                let mut ahead = Spot::default();
+                let draws = f.draws;
+                if look_ahead(t, f.look, f.own_speed, f.look, f.spot, f.position, &draws, false, false, &mut ahead, None) {
+                    t.spot_point(&mut ahead, &mut f.aim);
+                    let mut way = Vf::default();
+                    t.path_ahead(f.spot, &mut way);
+                    let mut here = Vf::default();
+                    t.spot_point(&mut f.spot, &mut here);
+                    f.aim = unit(level(sub(f.aim, here)));
+                    let way = unit(level(way));
+                    if lt(Acc::mula(f.aim.x(), way.x()).madd(f.aim.z(), way.z()), f.look_cone) {
+                        f.drift = F(0.0);
+                    }
+                }
+            }
+            let mut here = Vf::default();
+            t.spot_point(&mut f.spot, &mut here);
+            let r = f.reach.base + f.reach.gain * flat_distance(across(here, f.drift, f.heading), f.position);
+            return if le(r, f.reach.max) { r } else { f.reach.max };
+        }
+        if f.spot.path == 0 {
+            spot(t, f.position, false, &mut f.spot, None);
+        } else {
+            let at = match start {
+                Some((at, dir)) if lt(a, b) => sub(at, scale(dir, F(20.0))),
+                _ => point,
+            };
+            spot(t, at, false, &mut f.spot, None);
+        }
+        let mut here = Vf::default();
+        t.spot_point(&mut f.spot, &mut here);
+        let r = f.reach.base + f.reach.gain * flat_distance(here, f.position);
+        let most = if lt(a, b) { F(0.0) } else { b - f.reach.base };
+        if le(r, most) { r } else { most }
+    }
+
+    /// The vehicle brain's path look-ahead with its route word (vt+0x88): without a `goal`, the
+    /// [`look_ahead`]; with one, the place `reach` on from `spot` along the route search's way to the
+    /// goal ([`TrackPaths::route`] keeping off [`path_flags::KEEP_OFF`] paths when `refuse`, then
+    /// [`TrackPaths::route_walk`]), and the nearest place to `point` on that route
+    /// ([`route_locate`] with `limit`, hinted at `spot`). The route's entries go back to the pool.
+    /// `speed` and `draws` are not read on the route.
+    ///
+    /// On the route all three run whatever the others answer, and the answer is the bitwise and of
+    /// theirs (the route search's −1 counts as found). The route locate's unset words are the goal
+    /// (the place it starts with: the route search's copy of it) and `spot` (its scratch: the walk's
+    /// copy), left where its frame lies.
+    ///
+    /// `false`, nothing run, for a spot or goal that names no node (the original reads its null).
+    #[allow(clippy::too_many_arguments)]
+    pub fn route_look_ahead(
+        t: &mut TrackPaths, reach: F, speed: F, limit: F, spot: Spot, point: Vf, draws: &[F; 10], refuse: bool,
+        holding_only: bool, goal: Option<Spot>, out: &mut Spot, near: Option<&mut Spot>,
+    ) -> bool {
+        let Some(goal) = goal else {
+            return look_ahead(t, reach, speed, limit, spot, point, draws, refuse, holding_only, out, near);
+        };
+        if node_of(t, spot).is_none() || node_of(t, goal).is_none() {
+            return false;
+        }
+        let mut route = Vec::new();
+        let found = t.route(spot, goal, Some(&mut route), None, refuse);
+        let walked = t.route_walk(reach, spot, &route, out);
+        let near_found = route_locate_over(t, limit, &route, Some(spot), point, refuse, holding_only, near, None, (goal, spot));
+        t.free_route(&mut route);
+        found & i32::from(walked) & i32::from(near_found) != 0
+    }
+
+    /// The vehicle brain's route follower (vt+0x8c): `reach` on along the paths ([`route_look_ahead`]
+    /// from the rider's spot with the brain's speed and `max` reach as its limit, the goal's spot as
+    /// its route) gives the aim, the heading, the spot and the target speed. `follow` is its flag word
+    /// (1 from the path branch). Each `rand()` is one [`Rng::unit`](crate::rng::Rng::unit).
+    ///
+    /// When the look-ahead finds nothing the rider holds its own: speed its own, aim its position,
+    /// heading its forward. Otherwise:
+    /// - a nearest place on another path than the spot's draws the ten [`Follower::draws`] afresh;
+    /// - the drift clock runs; at its period a new drift target is drawn between `drift_low` and
+    ///   `drift_high` (one more draw below ½ flips its sign) and a new period between `period_low`
+    ///   and `period_high`;
+    /// - the nearest place becomes the spot, the place ahead the aim (left as it was where the place
+    ///   names the last node with `along` off 0) and the way the path runs there the heading (left
+    ///   where it runs nowhere);
+    /// - on a [`NO_DRIFT`] node, or without [`DRIFTS`], the drift is 0; else it moves towards its
+    ///   target by at most `drift_rate · dt` and is held within `drift_max`;
+    /// - with no race, or a race word with bit 0, the side step takes over while its clock is within
+    ///   its time (the drift is the step, which dies away by `kick_decay · dt`), and is 0 after;
+    /// - the aim moves the drift across the heading, the heading turns a twentieth of the way to the
+    ///   aim, level and unit;
+    /// - the speed is the node's ([`DEFAULT_SPEED`] for −1; [`Follower::cruise`] without `follow`),
+    ///   blended along the stretch to the next node's under [`BLENDS_SPEED`].
+    ///
+    /// The angles are [`ANGLES_REST`] either way.
+    #[allow(clippy::too_many_arguments)]
+    pub fn route_follow(
+        f: &mut Follower, t: &mut TrackPaths, dt: F, reach: F, follow: bool, goal: Option<Spot>, race_word: Option<u32>,
+        rng: &mut crate::rng::Rng,
+    ) {
+        let (mut ahead, mut near) = (Spot::default(), Spot::default());
+        let draws = f.draws;
+        let found =
+            route_look_ahead(t, reach, f.own_speed, f.reach.max, f.spot, f.position, &draws, false, false, goal, &mut ahead, Some(&mut near));
+        if !found {
+            f.speed = f.own_speed;
+            f.aim = f.position;
+            f.heading = f.forward;
+            f.angles = ANGLES_REST;
+            return;
+        }
+        if near.path != f.spot.path {
+            for d in &mut f.draws {
+                *d = rng.unit();
+            }
+        }
+        f.drift_clock = f.drift_clock + dt;
+        if !lt(f.drift_clock, f.period) {
+            let r = rng.unit();
+            f.drift_target = f.drift_low + (f.drift_high - f.drift_low) * r;
+            if lt(rng.unit(), F(0.5)) {
+                f.drift_target = -f.drift_target;
+            }
+            let r = rng.unit();
+            f.period = f.period_low + (f.period_high - f.period_low) * r;
+            f.drift_clock = F(0.0);
+        }
+        f.spot = near;
+        t.spot_point(&mut ahead, &mut f.aim);
+        t.path_ahead(ahead, &mut f.heading);
+        // The original also takes the way the path runs at the new spot, into a word it never reads.
+        if node_word(t, f.spot) & NO_DRIFT != 0 || f.flags & DRIFTS == 0 {
+            f.drift = F(0.0);
+        } else {
+            let step = f.drift_rate * dt;
+            let mut by = f.drift_target - f.drift;
+            if le(by, step) {
+                if lt(by, -step) {
+                    by = -step;
+                }
+            } else {
+                by = step;
+            }
+            f.drift = f.drift + by;
+            if le(f.drift, f.drift_max) {
+                if lt(f.drift, -f.drift_max) {
+                    f.drift = -f.drift_max;
+                }
+            } else {
+                f.drift = f.drift_max;
+            }
+        }
+        if race_word.is_none_or(|w| w & 1 != 0) {
+            if le(f.kick_clock, f.kick_time) {
+                f.kick_clock = f.kick_clock + dt;
+                f.drift = f.kick;
+                f.kick = f.kick - f.kick_decay * dt;
+            } else {
+                f.kick = F(0.0);
+            }
+        }
+        f.aim = across(f.aim, f.drift, f.heading);
+        let turn = scale(sub(f.aim, f.position), F(0.05));
+        f.heading = unit(level(add(f.heading, turn)));
+        if !follow {
+            f.speed = f.cruise;
+        } else if let Some((p, n)) = node_of(t, f.spot) {
+            let nodes = &t.paths[p].nodes;
+            f.speed = node_speed(nodes[n].word_44);
+            if f.flags & BLENDS_SPEED != 0
+                && let Some(next) = nodes.get(n + 1)
+            {
+                let along = f.spot.along;
+                let next_speed = F(f32::from_bits(next.word_44));
+                f.speed = if seen(next_speed) == F(NO_SPEED) {
+                    Acc::mula(f.speed, F(1.0) - along).madd(F(DEFAULT_SPEED), along)
+                } else {
+                    Acc::mula(f.speed, F(1.0) - along).madd(along, next_speed)
+                };
+            }
+        }
+        f.angles = ANGLES_REST;
+    }
+
+    /// The tick's path branch (the original's ai_tick_flag when the seeker has no state and the brain
+    /// a net, [`super::seek::Seek::Path`]); the caller goes on to [`tail`].
+    ///
+    /// The goal's spot is looked for once ([`spot`] at its point, while it has none), then the rider's
+    /// the same way. The [`reach`] (0, 0, following, at the rider) goes to the [`route_follow`]
+    /// (`dt`, following, the goal's spot as its route). With a goal, once the way along the paths
+    /// from the rider's spot to the goal's ([`TrackPaths::distance`], keeping off) is no longer than
+    /// the straight one from the rider to the goal's point, the seeker takes over: state 1 and
+    /// [`super::seek::CLOSING`] cleared.
+    ///
+    /// The goal's spot has to name a node by the measure; the port leaves the hand-over out where it
+    /// does not (the original reads its null).
+    pub fn path(
+        f: &mut Follower, t: &mut TrackPaths, dt: F, mut goal: Option<&mut Goal>, race_word: Option<u32>,
+        rng: &mut crate::rng::Rng,
+    ) {
+        if let Some(g) = goal.as_deref_mut()
+            && g.spot.path == 0
+        {
+            spot(t, g.point, false, &mut g.spot, None);
+        }
+        if f.spot.path == 0 {
+            spot(t, f.position, false, &mut f.spot, None);
+        }
+        let position = f.position;
+        let r = reach(f, t, F(0.0), F(0.0), true, position, None);
+        route_follow(f, t, dt, r, true, goal.as_ref().map(|g| g.spot), race_word, rng);
+        let Some(g) = goal else { return };
+        let d = sub(f.position, g.point);
+        let straight = Acc::mula(d.x(), d.x()).madda(d.y(), d.y()).madd(d.z(), d.z()).sqrt();
+        if node_of(t, f.spot).is_none() || node_of(t, g.spot).is_none() {
+            return;
+        }
+        if le(t.distance(f.spot, g.spot, true), straight) {
+            f.state = 1;
+            f.flags &= !super::seek::CLOSING;
+        }
+    }
 }
 
 #[cfg(test)]

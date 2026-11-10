@@ -1535,6 +1535,18 @@ path_look_ahead             boot 0x0026d780 (f12 reach, f13 speed, f14 limit, a0
 ai_path_look_ahead          boot 0x002838c0 MXVehicleAI vt+0x88: with route word sp+8 == 0 forwards to
 #                                           path_look_ahead (a1.. -> a0.., t3 -> t2, sp+0 -> t3); the
 #                                           route branch (0x26cbe0 / 0x26e230 / 0x26bbe0) not ported
+#                                           S309: route branch ported: path_route (a1, sp+8, list), the
+#                                           walk reach on, path_route_locate (limit f14, hint a2, near
+#                                           t0), free; v0 = the three answers and-ed, all three run.
+#                                           ai::follow::route_look_ahead
+ai_path_reach               boot 0x002830f0 VehicleAI vt+0x78 (ai, net, follow, point, f12 a, f13 b) -> f0
+#                                           S309: with +0x220 placed and follow: flag 0x01000000 looks
+#                                           +0x2f0 ahead (path_look_ahead into the aim +0x1b0, cone
+#                                           +0x2f4 drops +0x164), then +0x210 + +0x218 * the flat
+#                                           distance to the spot moved +0x164 across +0x1d0, at most
+#                                           +0x214. Else re-spots (+0xc0 / race +0xd8->+0x68->+0x5c's
+#                                           +0x40 - 20*+0x50 when a < b / point), at most 0 or b - base.
+#                                           ai::follow::reach
 path_segment_holds          boot 0x0026bdb0 (net, point, seg, next) -> the point lies on seg..next
 #                                           S282: crossing count over the hexagon seg+0x20, next+0x20,
 #                                           next+0x10, next+0x30, seg+0x30, seg+0x10 (x/z, plain ops).
@@ -1603,6 +1615,15 @@ ai_route_follow             boot 0x00283a10 VehicleAI's own route follower: path
 #                                           direction +0x1d0 (0x0026e4f0 / 0x0026e630), wobble and
 #                                           drift +0x164..+0x198, target speed +0x1e0 off waypoint
 #                                           +0x44 (-1 -> 150)
+#                                           S309: vt+0x88 (reach f13, own speed, limit +0x214, goal t1),
+#                                           10 draws +0x22c on a path change, drift clock +0x18c, kick
+#                                           +0x168..+0x174 under race +0xd8 -> +0x5c bit 0 (or none),
+#                                           flag 0x00800000 drifts, node +4 bit 0x10 stops it, flag 0x8000
+#                                           blends speed to the next node's; angles +0x1f0 = quad
+#                                           0x00426d70 (0,0,0,1). ai::follow::route_follow
+ai_seek_path_end            boot 0x0038496c inside ai_tick_flag: where the path branch (and the seeker)
+#                                           joins the tail; S309's path-branch oracles stop here
+#                                           (the goal's spot search takes a0 = net from the seeker)
 ai_feed                     boot 0x0027fbd0 MXVehicleAIInterface vt+0x8: bike frame (+0x18's
 #                                           +0x80..+0xbc) into ai +0x90..+0xcc, body velocity/spin
 #                                           into +0x50/+0x60/+0x70, |v| into +0x80, ground normal
