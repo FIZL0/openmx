@@ -1010,6 +1010,314 @@ pub fn feed(rider: &Rider, brain: &mut Senses, world: &mut dyn crate::world::Wor
     }
 }
 
+// --- the character file (S283) ------------------------------------------------------------------------
+
+/// A Min/Max pair out of the character file, as the rider keeps it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Pair {
+    pub min: F,
+    pub max: F,
+}
+
+/// A Min/Max/OverDrive triple out of the character file.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Triple {
+    pub min: F,
+    pub max: F,
+    pub overdrive: F,
+}
+
+/// A Min/Max/OverDrive triple out of the character file, and the value the event's difficulty puts
+/// between them.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Spread {
+    pub min: F,
+    pub max: F,
+    pub overdrive: F,
+    pub value: F,
+}
+
+/// The adaptive level of difficulty (`DefaultALODSettings`): how the brain eases off or pushes on by
+/// how far it is from the player. Each one is its [`Pair`] put between by the difficulty.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Alod {
+    /// `ALODWindow`: the lead within which the speed is adjusted at all.
+    pub window: F,
+    /// `ALODLowerLimit` and `ALODUpperLimit`: the least and most the target speed is scaled by.
+    pub lower_limit: F,
+    pub upper_limit: F,
+    /// `ALODSpeed`, read in miles an hour and kept in feet a second.
+    pub speed: F,
+    /// `ALODLeadWindow`.
+    pub lead_window: F,
+}
+
+/// What the character file sets on the rider's side of the AI (the brain's owner), as opposed to the
+/// brain's own [`Character`] fields. The raw Min/Max/OverDrive numbers are kept as well as the value
+/// put between them, because the reader keeps them and a key the file lacks leaves the old one.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Profile {
+    /// The `DefaultALODSettings` pairs, which [`Alod`] is put between.
+    pub alod_window: Pair,
+    pub alod_lower_limit: Pair,
+    pub alod_upper_limit: Pair,
+    pub alod_speed: Pair,
+    pub alod_lead_window: Pair,
+    /// `LookAheadGain`.
+    pub look_ahead_gain: F,
+    /// `…NearCollisionAvoidanceResponseScale`. The value put between them is
+    /// [`AvoidTuning::near_response`].
+    pub near_response: Triple,
+    /// `…PreloadSuccessProbability`.
+    pub preload_success: Spread,
+    /// `PullBackSpeed`, `PullBackAmount`.
+    pub pull_back_speed: F,
+    pub pull_back_amount: F,
+    /// `MinHangTimeForLandingLag`, `…LandingLagProbability`, `MaxLandingLagTime`.
+    pub landing_lag_hang_time: F,
+    pub landing_lag: Spread,
+    pub landing_lag_time: F,
+    /// `…HorsePowerScale`.
+    pub horse_power: Spread,
+    /// `OverPowerPhysicsTurnRateTweak`, `OverPowerPhysicsVelocityTweak`.
+    pub turn_rate_tweak: F,
+    pub velocity_tweak: F,
+    /// `…BrilliantMomentPercent`, `BrilliantMomentMinDuration`, `BrilliantMomentRandomDuration`.
+    pub brilliant_moment: Spread,
+    pub brilliant_min_duration: F,
+    pub brilliant_random_duration: F,
+    /// `PreloadPercentagePerMPHDifference`, kept per foot a second.
+    pub preload_per_speed: F,
+    /// `…GLoadWreckScale`.
+    pub g_load_wreck: Spread,
+    /// `RandomStartGateDelay`, already scaled by the reader's draw.
+    pub start_gate_delay: F,
+    /// `ClutchStartProbability`, `WheelieStartProbability`.
+    pub clutch_start_probability: F,
+    pub wheelie_start_probability: F,
+    /// `WheelieStartMinDuration`; `WheelieStartMaxDuration`, already moved toward a half by the
+    /// reader's second draw.
+    pub wheelie_start_min: F,
+    pub wheelie_start_max: F,
+    /// `WheelieMin/MaxPullBackWithClutch`, `WheelieMin/MaxPullBackWithoutClutch`.
+    pub wheelie_pull_back_clutch: Pair,
+    pub wheelie_pull_back: Pair,
+    /// `CrossUpProbability`, `CrossUpMinDuration`, `CrossUpMaxDuration`, `CrossUpMinHeight`.
+    pub crossup_probability: F,
+    pub crossup_min_duration: F,
+    pub crossup_max_duration: F,
+    pub crossup_min_height: F,
+}
+
+/// Everything an AI rider's character file sets: the controller's and the avoidance's tuning, the rest
+/// of the brain's, and the rider's [`Profile`]. The reader updates one of these in place, so it starts
+/// as the AI's constructors left it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Character {
+    pub tuning: Tuning,
+    pub avoid: AvoidTuning,
+    pub alod: Alod,
+    /// `SteeringJitterFilter`, `SteeringRateFilter`: four lanes each.
+    pub steering_jitter_filter: Vf,
+    pub steering_rate_filter: Vf,
+    /// `MinRandomOffset`, `MaxRandomOffset`, `MaxDriftSize`, `MaxDesiredOffsetDriftRate`: the route
+    /// follower's line across the track.
+    pub min_random_offset: F,
+    pub max_random_offset: F,
+    pub max_drift_size: F,
+    pub max_drift_rate: F,
+    /// `NoTrackOffsetLookAhead`, `NoTrackOffsetMinTurnDP`.
+    pub no_track_look_ahead: F,
+    pub no_track_min_turn: F,
+    /// `MinLookAheadDistance`, `MaxLookAheadDistance`.
+    pub min_look_ahead: F,
+    pub max_look_ahead: F,
+    /// `RollGain`, `RollControlDistance`.
+    pub roll_gain: F,
+    pub roll_distance: F,
+    /// `MinimumStuntInterval`, `StuntProbability`.
+    pub min_stunt_interval: F,
+    pub stunt_probability: F,
+    pub profile: Profile,
+}
+
+/// Where the event's difficulty byte puts a Min/Max/OverDrive spread: `(byte − 70)·0.0333333` up to
+/// 100 (Min to Max), `(byte − 100)·0.04` past it (Max to OverDrive). Returns the fraction and whether
+/// the byte is in the lower half.
+pub fn difficulty_fraction(difficulty: u8) -> (F, bool) {
+    let d = F::from(i32::from(difficulty));
+    let lower = d <= F(100.0);
+    let t = if lower { F(0.0333333) * (d - F(70.0)) } else { F(0.04) * (d - F(100.0)) };
+    (t, lower)
+}
+
+/// Reads an AI rider's character file (`Rider\AIChrctr.aip`) into `c`.
+///
+/// `file` is the parsed file, or `None` when it is not there, in which case nothing changes and no
+/// draw is made. The `DefaultALODSettings` section, when the file has it, gives the five [`Alod`]
+/// pairs. Then the section `AI_<skill>` is selected and everything else is read from it; in a file that
+/// lacks it every key reads as missing (the defaults, the post-read steps and the two draws still run).
+///
+/// A key the file does not have leaves the old value, except the ones the original reads with a
+/// default (the `FarCollision…` ones, `NearCollisionMinBrakingSpeed`, the horse power, overpower,
+/// brilliant moment, preload and g-load keys), and the post-read steps run on whatever is there:
+/// `Near/FarCollisionRange` are square-rooted, `NearCollisionSeperationRate` is taken a tenth of,
+/// `LandingPitchAngle` turned to radians, `ALODSpeed` and `PreloadPercentagePerMPHDifference` from
+/// miles an hour to feet a second.
+///
+/// Every value with a Min and Max (and OverDrive) is put between them as `mula(lo, 1−t) + madd(hi, t)`
+/// with `t` from [`difficulty_fraction`]: Min to Max up to 100, Max to OverDrive past it. The ALOD
+/// pairs have no OverDrive and take Max past 100.
+///
+/// Two `rand()` draws end it: `RandomStartGateDelay` is scaled by one [`Rng::unit`], and
+/// `WheelieStartMaxDuration` becomes `0.5 + (max − 0.5)·unit`.
+pub fn read_character(file: Option<&crate::phy::Ini>, skill: i32, difficulty: u8, rng: &mut Rng, c: &mut Character) {
+    let Some(ini) = file else { return };
+    let (t, lower) = difficulty_fraction(difficulty);
+    let u = F(1.0) - t;
+    let lerp = |lo: F, hi: F| Acc::mula(lo, u).madd(hi, t);
+    let between = |min: F, max: F, overdrive: F| if lower { lerp(min, max) } else { lerp(max, overdrive) };
+    let spread = |s: &mut Spread| s.value = between(s.min, s.max, s.overdrive);
+
+    let defaults = ini.section("DefaultALODSettings");
+    let p = &mut c.profile;
+    if defaults.found() {
+        let pair = |s: &crate::phy::Section, p: &mut Pair, min: &str, max: &str| -> F {
+            p.min = s.float(min).unwrap_or(p.min);
+            p.max = s.float(max).unwrap_or(p.max);
+            if lower { lerp(p.min, p.max) } else { p.max }
+        };
+        c.alod.window = pair(&defaults, &mut p.alod_window, "MinALODWindow", "MaxALODWindow");
+        c.alod.lower_limit = pair(&defaults, &mut p.alod_lower_limit, "MinALODLowerLimit", "MaxALODLowerLimit");
+        c.alod.upper_limit = pair(&defaults, &mut p.alod_upper_limit, "MinALODUpperLimit", "MaxALODUpperLimit");
+        c.alod.speed = pair(&defaults, &mut p.alod_speed, "MinALODSpeed", "MaxALODSpeed") * F(1.4666667);
+        c.alod.lead_window = pair(&defaults, &mut p.alod_lead_window, "MinALODLeadWindow", "MaxALODLeadWindow");
+    }
+    // A file without the rider's own section reads nothing more: the select that misses leaves no
+    // section selected rather than the ALOD one.
+    let s = ini.section(&format!("AI_{skill}"));
+    let get = |v: &mut F, key: &str| *v = s.float(key).unwrap_or(*v);
+    let or = |key: &str, default: f32| s.float_or(key, F(default));
+    let get3 = |v: &mut Spread, min: &str, max: &str, overdrive: &str| {
+        get(&mut v.min, min);
+        get(&mut v.max, max);
+        get(&mut v.overdrive, overdrive);
+    };
+    let or3 = |v: &mut Spread, keys: [(&str, f32); 3]| {
+        v.min = or(keys[0].0, keys[0].1);
+        v.max = or(keys[1].0, keys[1].1);
+        v.overdrive = or(keys[2].0, keys[2].1);
+    };
+
+    c.steering_jitter_filter = s.vector("SteeringJitterFilter", c.steering_jitter_filter);
+    c.steering_rate_filter = s.vector("SteeringRateFilter", c.steering_rate_filter);
+    let tu = &mut c.tuning;
+    get(&mut tu.steering_gain, "SteeringGain");
+    get(&mut c.min_random_offset, "MinRandomOffset");
+    get(&mut c.max_random_offset, "MaxRandomOffset");
+    get(&mut c.max_drift_size, "MaxDriftSize");
+    get(&mut c.max_drift_rate, "MaxDesiredOffsetDriftRate");
+    get(&mut c.no_track_look_ahead, "NoTrackOffsetLookAhead");
+    get(&mut c.no_track_min_turn, "NoTrackOffsetMinTurnDP");
+    get(&mut c.max_look_ahead, "MaxLookAheadDistance");
+    get(&mut c.min_look_ahead, "MinLookAheadDistance");
+    get(&mut p.look_ahead_gain, "LookAheadGain");
+    get(&mut tu.oversteer_gain, "OversteerCorrectionGain");
+    get(&mut tu.slow_tolerance, "SpeedMinTolerance");
+    get(&mut tu.fast_tolerance, "SpeedMaxTolerance");
+
+    let av = &mut c.avoid;
+    let near = &mut p.near_response;
+    get(&mut near.min, "MinNearCollisionAvoidanceResponseScale");
+    get(&mut near.max, "MaxNearCollisionAvoidanceResponseScale");
+    get(&mut near.overdrive, "OverDriveNearCollisionAvoidanceResponseScale");
+    av.near_response = between(near.min, near.max, near.overdrive);
+    get(&mut av.near_range, "NearCollisionRange");
+    av.near_range = av.near_range.sqrt();
+    get(&mut av.far_range, "FarCollisionRange");
+    av.far_range = av.far_range.sqrt();
+    av.far_radius = or("FarCollisionAvoidanceRadius", 7.0);
+    av.far_response = or("FarCollisionAvoidanceResponseScale", 0.125);
+    av.far_approach_limit = or("FarCollisionBrakingApproachRateLimit", 2.0);
+    av.far_min_braking_speed = or("FarCollisionMinBrakingSpeed", 20.0);
+    av.far_braking_response = or("FarCollisionBrakingResponseScale", 1.0);
+    get(&mut av.near_separation, "NearCollisionSeperationRate");
+    av.near_separation = av.near_separation * F(0.1);
+    get(&mut av.near_braking_response, "NearCollisionBrakingResponse");
+    get(&mut av.passing_speed, "PassingSpeed");
+    av.near_min_braking_speed = or("NearCollisionMinBrakingSpeed", 20.0);
+    get(&mut av.front_window, "FrontLateralAvoidanceWindow");
+    get(&mut av.rear_window, "RearLateralAvoidanceWindow");
+
+    get(&mut c.roll_gain, "RollGain");
+    get(&mut c.roll_distance, "RollControlDistance");
+    get(&mut tu.pitch_distance, "PitchControlDistance");
+    get(&mut tu.pitch_gain, "PitchGain");
+    get(&mut tu.pitch_filter, "PitchJitterDeadZone");
+    get(&mut c.min_stunt_interval, "MinimumStuntInterval");
+    get(&mut c.stunt_probability, "StuntProbability");
+    get3(
+        &mut p.preload_success,
+        "MinPreloadSuccessProbability",
+        "MaxPreloadSuccessProbability",
+        "OverDrivePreloadSuccessProbability",
+    );
+    spread(&mut p.preload_success);
+    get(&mut p.pull_back_speed, "PullBackSpeed");
+    get(&mut p.pull_back_amount, "PullBackAmount");
+    get(&mut tu.landing_pitch, "LandingPitchAngle");
+    tu.landing_pitch = tu.landing_pitch * F(0.017453292);
+    get(&mut p.landing_lag_hang_time, "MinHangTimeForLandingLag");
+    get3(
+        &mut p.landing_lag,
+        "MinLandingLagProbability",
+        "MaxLandingLagProbability",
+        "OverDriveLandingLagProbability",
+    );
+    spread(&mut p.landing_lag);
+    get(&mut p.landing_lag_time, "MaxLandingLagTime");
+    or3(
+        &mut p.horse_power,
+        [("MinHorsePowerScale", 80.0), ("MaxHorsePowerScale", 98.0), ("OverDriveHorsePowerScale", 115.0)],
+    );
+    spread(&mut p.horse_power);
+    p.turn_rate_tweak = or("OverPowerPhysicsTurnRateTweak", 0.5);
+    p.velocity_tweak = or("OverPowerPhysicsVelocityTweak", 0.0001);
+    or3(
+        &mut p.brilliant_moment,
+        [
+            ("MinBrilliantMomentPercent", 25.0),
+            ("MaxBrilliantMomentPercent", 50.0),
+            ("OverDriveBrilliantMomentPercent", 100.0),
+        ],
+    );
+    spread(&mut p.brilliant_moment);
+    p.brilliant_min_duration = or("BrilliantMomentMinDuration", 2.5);
+    p.brilliant_random_duration = or("BrilliantMomentRandomDuration", 4.0);
+    p.preload_per_speed = or("PreloadPercentagePerMPHDifference", 10.0) * F(0.006818182);
+    or3(
+        &mut p.g_load_wreck,
+        [("MinGLoadWreckScale", 80.0), ("MaxGLoadWreckScale", 100.0), ("OverDriveGLoadWreckScale", 102.0)],
+    );
+    spread(&mut p.g_load_wreck);
+    get(&mut p.start_gate_delay, "RandomStartGateDelay");
+    get(&mut p.clutch_start_probability, "ClutchStartProbability");
+    get(&mut p.wheelie_start_probability, "WheelieStartProbability");
+    get(&mut p.wheelie_start_min, "WheelieStartMinDuration");
+    get(&mut p.wheelie_start_max, "WheelieStartMaxDuration");
+    get(&mut p.wheelie_pull_back_clutch.min, "WheelieMinPullBackWithClutch");
+    get(&mut p.wheelie_pull_back_clutch.max, "WheelieMaxPullBackWithClutch");
+    get(&mut p.wheelie_pull_back.min, "WheelieMinPullBackWithoutClutch");
+    get(&mut p.wheelie_pull_back.max, "WheelieMaxPullBackWithoutClutch");
+    p.start_gate_delay = p.start_gate_delay * rng.unit();
+    let r = rng.unit();
+    p.wheelie_start_max = F(0.5) + (p.wheelie_start_max - F(0.5)) * r;
+    get(&mut p.crossup_probability, "CrossUpProbability");
+    get(&mut p.crossup_min_duration, "CrossUpMinDuration");
+    get(&mut p.crossup_max_duration, "CrossUpMaxDuration");
+    get(&mut p.crossup_min_height, "CrossUpMinHeight");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
