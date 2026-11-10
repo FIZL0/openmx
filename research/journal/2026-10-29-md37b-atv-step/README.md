@@ -9,4 +9,8 @@ MD75 (the physics frame) and MD76 (Desert Oasis's ground). The captured-ride rep
 Part 3, after those landed, chained MD75e's whole frame over two 240/300-frame rides bit-exact against
 the original's world step in the interpreter; MD37a's csvs are lost (C28), and the strike and wreck are
 outside the world step (MD104).
+Part 4, after C28 and MD105 landed, replays all 15 of C28's captured rides bit-exact: the original's
+whole sim frame and the port's beside it, with the body, engine and wheels equal to every row. Three
+rides stop at a strike where the rows tear (C32), and the quad's other words are listed, not asserted
+(MD120).
 Details in the numbered files; the newest one's suffix says whose move it is (FINAL · PART · READY).
