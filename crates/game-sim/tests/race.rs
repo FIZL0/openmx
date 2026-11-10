@@ -99,11 +99,15 @@
 //!     seeded from the tick before and stepped through [`RaceRules::card`] on sx01's paths out of C31's
 //!     RAM image, against the captured card: 16 laps, 9 best laps, 6 finishes, the human's 4,192
 //!     off-track ticks and 19 off-track limits, bit for bit.
+//! 27. **The machine race's handler** (S292a): the score manager's mode-1 handler on 20,000 lists of
+//!     one to five cards over chains of one to four gates and zone lists, every listener call, word,
+//!     flag, countdown, free record and the generator against `LapRules::machine_tick`.
+//! 28. **The gate ranking**: its ranking alone on 20,000 lists with ties, against `LapRules::gate_rank`.
 
 use game_sim::chassis::{Chassis, Deriv};
 use game_sim::race::{
     self, CheckPart, Checkpoint, Course, Crossing, Gate, GridStart, LANES, LapCard, LapRecord, LapRules, LineLists, LineNotice, Link, ListGate,
-    PathNode, Prop, Race, RaceCard, FinishNotice, RaceNotice, RacePath, RaceRules, Refused, Seen, Spot, StartItem, StartStep, Axes, Supercross, TrackFile, TrackPath, TrackPaths, card_flags,
+    MachineNotice, PathNode, Prop, Race, RaceCard, FinishNotice, RaceNotice, RacePath, RaceRules, Refused, Seen, Spot, StartItem, StartStep, Axes, Supercross, TrackFile, TrackPath, TrackPaths, card_flags,
     flags, race_card_flags, race_flags, race_kind,
 };
 use game_sim::rng::Rng;
@@ -4852,6 +4856,7 @@ fn the_sx01_image_holds_the_start_hold_as_armed() {
     assert_eq!(got.body.unwrap().ang_free, [1, 1, 0], "the bike's turn freedoms");
 }
 
+
 // --- S294a: the race handler's line lists ------------------------------------------------------------
 
 /// Free RAM for the line lists' manager, card, owner, chain, listener, gates, vtables and hooks; the
@@ -5040,4 +5045,487 @@ fn the_line_lists_match_the_race_handlers_card_stretch() {
         }
     }
     assert!(said.iter().all(|&k| k > 300) && passed > 2000 && far > 300 && cleared > 300, "{said:?} passed {passed} far {far} cleared {cleared}");
+}
+
+
+// --- S292a: the machine race's handler ---------------------------------------------------------------
+
+/// Free RAM for the machine race: its manager, listener, cards (0x200 apart), their owners, chains,
+/// ghost cards and records, the free records, the chains of gates and zones, the vtables and hooks.
+const M_MGR: u32 = 0x01d0_0000;
+const M_LISTENER: u32 = 0x01d0_1000;
+const M_CARDS: u32 = 0x01d1_0000;
+const M_GHOSTS: u32 = 0x01d2_0000;
+const M_OWNERS: u32 = 0x01d3_0000;
+const M_CHAINS: u32 = 0x01d3_1000;
+const M_RECORDS: u32 = 0x01d4_0000;
+const M_POOL: u32 = 0x01d5_0000;
+const M_GATES: u32 = 0x01d6_0000;
+const M_ZONES: u32 = 0x01d7_0000;
+const M_VT: u32 = 0x01d8_0000;
+const M_HOOKS: u32 = 0x01d8_1000;
+
+/// A call a machine-race listener heard: who, its slot, the object, up to three word arguments as the
+/// slot passes them (0 where it passes none), and the two vectors a `+0x20` call points at.
+type MHeard = (u32, u32, u32, [u32; 3], [u32; 8]);
+
+fn m_card(k: usize) -> u32 {
+    M_CARDS + 0x200 * k as u32
+}
+
+/// Every listener slot lands on a hook that writes the call down; `ends` end the call.
+fn machine_hooks(ee: &mut Ee, ends: &[u32]) -> Rc<RefCell<Vec<MHeard>>> {
+    let heard: Rc<RefCell<Vec<MHeard>>> = Rc::default();
+    for who in [OWNER, CHAIN, TO_LISTENER] {
+        for slot in (0..0x80).step_by(4) {
+            let at = M_HOOKS + who * 0x100 + slot;
+            ee.set_u32(M_VT + who * 0x100 + slot, at);
+            let heard = heard.clone();
+            ee.hooks.insert(
+                at,
+                Box::new(move |ee| {
+                    let r = |i: usize| ee.r(i) as u32;
+                    let l = who == TO_LISTENER;
+                    let mut v = [0u32; 8];
+                    let args = match slot {
+                        0x08 if !l => [r(5), 0, 0],
+                        0x20 if !l => {
+                            for i in 0..4u32 {
+                                v[i as usize] = ee.u32_at(r(5) + 4 * i);
+                                v[4 + i as usize] = ee.u32_at(r(6) + 4 * i);
+                            }
+                            [0, 0, 0]
+                        }
+                        0x2c | 0x30 if !l => [r(6), 0, 0],
+                        0x24 | 0x28 if l => [r(6), r(7), 0],
+                        0x5c | 0x64 | 0x38 if !l => [r(6), 0, 0],
+                        0x6c | 0x74 | 0x30 if l => [r(6), 0, 0],
+                        0x34 if !l => [r(6), r(7), r(8)],
+                        0x2c if l => [r(6), r(7), r(8)],
+                        _ => [0, 0, 0],
+                    };
+                    heard.borrow_mut().push((who, slot, r(4), args, v));
+                }),
+            );
+        }
+    }
+    for &end in ends {
+        ee.hooks.insert(end, Box::new(|ee| ee.set(31, u64::from(ps2_oracle::DONE) | 0xffff_ffff_0000_0000)));
+    }
+    heard
+}
+
+/// The card's own words the machine race reads and writes (no spots, no line words).
+fn put_machine_card(ee: &mut Ee, k: usize, c: &RaceCard, n: usize, owner: bool, chain: bool, ghost: Option<&LapCard>) {
+    let at = m_card(k);
+    put_lap_card(ee, at, &c.lap, 0, M_RECORDS + 0x400 * k as u32);
+    ee.set_u32(at + 0x80, c.lap.gate.map_or(0, |g| M_GATES + 0x100 * g as u32));
+    ee.set_u32(at + 0x84, c.lap.gates_this_lap as u32);
+    ee.set_u32(at + 0x38, c.lap.gates_passed as u32);
+    put_f(ee, at + 0x20, c.odometer);
+    put_quad(ee, at + 0x120, c.look);
+    put_quad(ee, at + 0x180, c.to_track);
+    ee.set_u32(at + 0x1c8, if k + 1 < n { m_card(k + 1) } else { 0 });
+    let k = k as u32;
+    let (own, ch) = (M_OWNERS + 0x100 * k, M_CHAINS + 0x100 * k);
+    ee.set_u32(at + 4, if owner { own } else { 0 });
+    ee.set_u32(at + 0x1c4, if chain { ch } else { 0 });
+    ee.set_u32(own + 8, if ghost.is_some() { M_GHOSTS + 0x200 * k } else { 0 });
+    ee.set_u32(own + 0x1c, 0);
+    ee.set_u32(own + 0x20, M_VT + OWNER * 0x100);
+    ee.set_u32(ch + 0x1c, 0);
+    ee.set_u32(ch + 0x20, M_VT + CHAIN * 0x100);
+    if let Some(g) = ghost {
+        let ga = M_GHOSTS + 0x200 * k;
+        put_lap_card(ee, ga, g, 0, M_RECORDS + 0x400 * k + 0x200);
+        ee.set_u32(ga + 0x80, g.gate.map_or(0, |x| M_GATES + 0x100 * x as u32));
+        ee.set_u32(ga + 0x84, g.gates_this_lap as u32);
+        ee.set_u32(ga + 0x38, g.gates_passed as u32);
+    }
+}
+
+fn machine_lap_at(ee: &Ee, at: u32) -> LapCard {
+    let mut c = lap_card_at(ee, at, 0);
+    let g = ee.u32_at(at + 0x80);
+    c.gate = (g != 0).then(|| ((g - M_GATES) / 0x100) as usize);
+    c.gates_this_lap = ee.u32_at(at + 0x84) as i32;
+    c.gates_passed = ee.u32_at(at + 0x38) as i32;
+    c
+}
+
+fn machine_card_at(ee: &Ee, at: u32) -> RaceCard {
+    RaceCard {
+        lap: machine_lap_at(ee, at),
+        odometer: f32_at(ee, at + 0x20),
+        look: quad(ee, at + 0x120),
+        to_track: quad(ee, at + 0x180),
+        ..RaceCard::default()
+    }
+}
+
+/// The calls a machine notice makes for card `k` (at `at`), with what is there to hear it.
+fn machine_told(n: MachineNotice, at: u32, k: u32, owner: bool, chain: bool) -> Vec<MHeard> {
+    let (own, ch) = (M_OWNERS + 0x100 * k, M_CHAINS + 0x100 * k);
+    let obj = |who: u32| match who {
+        OWNER => own,
+        CHAIN => ch,
+        _ => M_LISTENER,
+    };
+    let fan = |o: u32, oa: [u32; 3], l: Option<(u32, [u32; 3])>, listener_first: bool| {
+        let mut v = Vec::new();
+        let l = l.map(|(s, a)| (TO_LISTENER, s, M_LISTENER, a, [0; 8]));
+        if listener_first {
+            v.extend(l);
+        }
+        if owner {
+            v.push((OWNER, o, own, oa, [0; 8]));
+        }
+        if chain {
+            v.push((CHAIN, o, ch, oa, [0; 8]));
+        }
+        if !listener_first {
+            v.extend(l);
+        }
+        v
+    };
+    match n {
+        MachineNotice::Look => fan(8, [at, 0, 0], None, false),
+        MachineNotice::Line(n) => told_gate(n, owner, chain).into_iter().map(|(w, s)| (w, s, obj(w), [0; 3], [0; 8])).collect(),
+        MachineNotice::Zone { zone, crossing } => {
+            let z = M_ZONES + 0x100 * zone as u32;
+            let (o, l) = if crossing == Crossing::Through { (0x2c, 0x24) } else { (0x30, 0x28) };
+            fan(o, [z, 0, 0], Some((l, [at, z, 0])), false)
+        }
+        MachineNotice::Aimed => fan(0x5c, [at, 0, 0], Some((0x6c, [at, 0, 0])), true),
+        MachineNotice::Aim { point, ahead } => {
+            let mut v = [0u32; 8];
+            v[..4].copy_from_slice(&point.to_bits());
+            v[4..].copy_from_slice(&ahead.to_bits());
+            let mut out = Vec::new();
+            if owner {
+                out.push((OWNER, 0x20, own, [0; 3], v));
+            }
+            if chain {
+                out.push((CHAIN, 0x20, ch, [0; 3], v));
+            }
+            out
+        }
+        MachineNotice::TimeUp => fan(0x64, [at, 0, 0], Some((0x74, [at, 0, 0])), false),
+    }
+}
+
+/// The calls a finish notice makes, as `finish_told` gives them for the race handler.
+fn machine_finish_told(n: FinishNotice, at: &[u32], owner: &[bool], chain: &[bool]) -> Vec<MHeard> {
+    let other = |k: Option<usize>| k.map_or(0, |k| at[k]);
+    let (card, o_slot, l_slot, args) = match n {
+        FinishNotice::Over { card } => (card, 0x1c, None, [0, 0, 0]),
+        FinishNotice::TimeUp { card } => (card, 0x64, Some(0x74), [at[card], 0, 0]),
+        FinishNotice::PlaceLost { card, ahead } => (card, 0x34, Some(0x2c), [at[card], other(ahead), 1]),
+        FinishNotice::PlaceGained { card, behind } => (card, 0x34, Some(0x2c), [at[card], other(behind), 0]),
+        FinishNotice::Lead { card } => (card, 0x38, Some(0x30), [at[card], 0, 0]),
+    };
+    let id = (at[card] - M_CARDS) / 0x200;
+    let mut v = Vec::new();
+    if owner[id as usize] {
+        v.push((OWNER, o_slot, M_OWNERS + 0x100 * id, args, [0; 8]));
+    }
+    if chain[id as usize] {
+        v.push((CHAIN, o_slot, M_CHAINS + 0x100 * id, args, [0; 8]));
+    }
+    if let Some(l) = l_slot {
+        v.push((TO_LISTENER, l, M_LISTENER, args, [0; 8]));
+    }
+    v
+}
+
+/// A machine-race card: a lap card with every flag the handler reads at its own odds (never the
+/// unported helper's `0x8_0000`), a gate to wait at, a step about it, and the handler's own words.
+fn machine_card(p: &mut Pick, k: usize, gates: &[Gate], rules: &LapRules) -> RaceCard {
+    let mut lap = lap_card(p, 0);
+    lap.flags = finish_flags(p, lap.flags) & !0x8_0000;
+    if p.below(3) == 0 {
+        lap.flags |= card_flags::TAKING_PART;
+        lap.flags &= !(card_flags::OUT | card_flags::TIMED_OUT);
+    }
+    lap.record_word = k as u32;
+    let n = gates.len();
+    let at = if p.below(2) == 0 { n - 1 } else { p.below(n as u64) as usize };
+    lap.gate = (p.below(15) != 0).then_some(at);
+    lap.gates_this_lap = p.below(5) as i32;
+    lap.gates_passed = p.below(4) as i32;
+    let (from, to) = step(p, &gates[at]);
+    lap.seen = Seen { now: from, last: to };
+    // Riders far from their gate too, past the 50 ft the aim leads by.
+    if p.below(4) == 0 {
+        let (x, y, z) = (p.range(-200.0, 200.0), p.range(-20.0, 20.0), p.range(-200.0, 200.0));
+        lap.seen.now = p.quad([x, y, z]);
+        let (dx, dz) = (p.range(-5.0, 5.0), p.range(-5.0, 5.0));
+        lap.seen.last = p.quad([x + dx, y, z + dz]);
+    }
+    // A card waiting at no gate whose gate line is skipped reads low memory in the original.
+    if lap.gate.is_none() && !(lap.seen.last.x() >= 0.0) {
+        lap.seen.last.0[0] = p.range(0.0, 50.0);
+    }
+    if p.below(8) == 0 {
+        lap.best_lap = F(fpu::sub(lap.race_time.0, lap.lap_start.0));
+    }
+    if p.below(6) == 0 {
+        lap.laps = rules.laps - 1;
+    }
+    if p.below(4) == 0 {
+        lap.time_left = F(p.range(0.0, 0.06));
+    }
+    let lap_no = if rules.kind == race_kind::GHOST_RACE { lap.runs + 1 } else { lap.laps + 1 };
+    if lap_no >= rules.record_limit && lap.records.is_empty() {
+        lap.records.push(record(p));
+    }
+    let odometer = time_word(p, 9000.0);
+    let (lx, lz, tx, tz) = (p.range(-1.0, 1.0), p.range(-1.0, 1.0), p.range(-1.0, 1.0), p.range(-1.0, 1.0));
+    RaceCard {
+        lap,
+        odometer,
+        look: p.quad([lx, 0.0, lz]),
+        to_track: p.quad([tx, 0.0, tz]),
+        ..RaceCard::default()
+    }
+}
+
+fn machine_rules(p: &mut Pick) -> LapRules {
+    let mut rules = finish_rules(p);
+    for (bit, odds) in [(race_flags::ZONES, 2), (race_flags::KEEP_LAPS, 2)] {
+        if p.below(odds) == 0 {
+            rules.flags |= bit;
+        } else {
+            rules.flags &= !bit;
+        }
+    }
+    if p.below(3) == 0 {
+        rules.kind = race_kind::GHOST_RACE;
+    }
+    rules.laps = 1 + p.below(5) as i32;
+    rules.ghost_runs = p.below(5) as i32;
+    rules.record_limit = p.below(12) as i32;
+    rules.free_records = p.below(6) as u32;
+    rules
+}
+
+/// The machine race's whole handler on 20,000 generated lists of one to five cards, chains of one to
+/// four gates and zone lists, against [`LapRules::machine_tick`]: every listener call in order with its
+/// card, zone, other card and the two vectors it is pointed at, the handler's answer, the list's order,
+/// every word of every card and ghost card, the manager's flags, the countdown, the free records and
+/// the generator. The manager holds no track, so the path steering (unported) is never taken.
+#[test]
+fn the_machine_race_matches_the_score_managers_mode_1_handler() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let [handler, rand_state] = match addrs(["score_machine_race_tick", "rand_state"]) {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    let heard = machine_hooks(&mut ee, &[]);
+    let mut p = Pick(0x3a7c_15e2_90bd_4f61);
+    let mut said = std::collections::BTreeMap::<String, usize>::new();
+    let (mut stopped, mut near, mut far, mut made_up) = (0, 0, 0, 0);
+    for case in 0..20_000 {
+        let mut rules = machine_rules(&mut p);
+        let n = 1 + p.below(5) as usize;
+        let gates: Vec<Gate> = (0..1 + p.below(4) as usize).map(|_| finish_line(&mut p)).collect();
+        let (mut zones, _) = zones_about(&mut p);
+        if p.below(8) == 0 {
+            zones.clear();
+        }
+        let mut cards: Vec<RaceCard> = (0..n).map(|k| machine_card(&mut p, k, &gates, &rules)).collect();
+        // Zones the riders' steps cross, now and then.
+        if !zones.is_empty() && p.below(2) == 0 {
+            let k = p.below(n as u64) as usize;
+            let z = p.below(zones.len() as u64) as usize;
+            let (from, to) = step(&mut p, &zones[z]);
+            cards[k].lap.seen = Seen { now: from, last: to };
+            if cards[k].lap.gate.is_none() && !(to.x() >= 0.0) {
+                cards[k].lap.gate = Some(0);
+            }
+        }
+        let owner: Vec<bool> = (0..n).map(|_| p.below(4) != 0).collect();
+        let chain: Vec<bool> = (0..n).map(|_| p.below(3) == 0).collect();
+        let mut ghosts: Vec<Option<LapCard>> = (0..n)
+            .map(|k| {
+                (owner[k] && p.below(4) == 0).then(|| {
+                    let mut g = lap_card(&mut p, 0);
+                    g.gate = (p.below(3) != 0).then(|| p.below(gates.len() as u64) as usize);
+                    g.gates_this_lap = p.below(5) as i32;
+                    g.gates_passed = p.below(20) as i32;
+                    if p.below(3) == 0 {
+                        g.best_lap = cards[k].lap.best_lap;
+                    }
+                    g
+                })
+            })
+            .collect();
+
+        put_chain(&mut ee, M_GATES, &gates);
+        put_chain(&mut ee, M_ZONES, &zones);
+        ee.set_u32(M_MGR + 0x30, M_LISTENER);
+        ee.set_u32(M_MGR + 0x34, M_CARDS);
+        ee.set_u32(M_MGR + 0x4c, rules.record_limit as u32);
+        ee.set_u32(M_MGR + 0x5c, rules.flags);
+        ee.set_u32(M_MGR + 0x60, rules.kind as u32);
+        ee.set_u32(M_MGR + 0x68, 0);
+        ee.set_u32(M_MGR + 0x70, M_GATES);
+        ee.set_u32(M_MGR + 0x78, if zones.is_empty() { 0 } else { M_ZONES });
+        ee.set_u32(M_MGR + 0x94, rules.laps as u32);
+        put_f(&mut ee, M_MGR + 0x98, rules.finish_clock);
+        put_f(&mut ee, M_MGR + 0x9c, rules.finish_wait);
+        put_f(&mut ee, M_MGR + 0xa0, rules.time_limit);
+        ee.set_u32(M_MGR + 0xf0, rules.ghost_runs as u32);
+        for k in 0..rules.free_records {
+            let next = if k + 1 < rules.free_records { M_POOL + 0x20 * (k + 1) } else { 0 };
+            put_record(&mut ee, M_POOL + 0x20 * k, &record(&mut p), next);
+        }
+        ee.set_u32(M_MGR + 0x58, if rules.free_records == 0 { 0 } else { M_POOL });
+        for (o, w) in [(4, 0), (0x10, 0), (0x14, 0), (0x18, 0), (0x1c, M_VT + TO_LISTENER * 0x100)] {
+            ee.set_u32(M_LISTENER + o, w);
+        }
+        for k in 0..n {
+            put_machine_card(&mut ee, k, &cards[k], n, owner[k], chain[k], ghosts[k].as_ref());
+        }
+        let state = p.next();
+        ee.write(rand_state, 8, u128::from(state));
+        let dt = if p.below(10) == 0 { F(p.stray(0.0)) } else { F(p.range(0.0, 0.05)) };
+        heard.borrow_mut().clear();
+        ee.call(handler, &[u64::from(M_MGR)], &[dt.0], 2_000_000);
+        let answer = ee.v0() as u32;
+
+        let was = rules;
+        let mut rng = Rng::from_state(state);
+        let tick = rules.machine_tick(dt, &mut cards, &mut ghosts, &gates, &zones, &mut rng);
+        let what = format!("case {case}: {was:?}, {n} cards, {} gates", gates.len());
+
+        let mut want: Vec<MHeard> = Vec::new();
+        for &(k, m) in &tick.said {
+            want.extend(machine_told(m, m_card(k), k as u32, owner[k], chain[k]));
+            let name = format!("{m:?}");
+            *said.entry(name.split([' ', '(', '{']).next().unwrap().to_string()).or_default() += 1;
+            if let MachineNotice::Line(l) = m {
+                *said.entry(format!("{l:?}")).or_default() += 1;
+            }
+        }
+        let before: Vec<u32> = (0..n).map(m_card).collect();
+        let after: Vec<u32> = cards.iter().map(|c| m_card(c.lap.record_word as usize)).collect();
+        for (k, &m) in tick.finish.iter().enumerate() {
+            let at = if matches!(m, FinishNotice::Over { .. }) { &before } else { &after };
+            want.extend(machine_finish_told(m, at, &owner, &chain));
+            if matches!(m, FinishNotice::Over { .. }) && !matches!(tick.finish.get(k + 1), Some(FinishNotice::Over { .. })) {
+                want.push((TO_LISTENER, 0x18, M_LISTENER, [0; 3], [0; 8]));
+            }
+            let name = format!("{m:?}");
+            *said.entry(name.split([' ', '{']).next().unwrap().to_string()).or_default() += 1;
+        }
+        assert_eq!(*heard.borrow(), want, "{what}: the listeners ({tick:?})");
+        assert_eq!(answer, u32::from(tick.went_on), "{what}: the answer");
+        let mut list = Vec::new();
+        let mut at = ee.u32_at(M_MGR + 0x34);
+        while at != 0 && list.len() < 8 {
+            list.push(at);
+            at = ee.u32_at(at + 0x1c8);
+        }
+        assert_eq!(list, after, "{what}: the list's order");
+        for (c, &a) in cards.iter().zip(&after) {
+            assert_eq!(race_card_words(&machine_card_at(&ee, a)), race_card_words(c), "{what}: card {}", c.lap.record_word);
+        }
+        for (k, g) in ghosts.iter().enumerate() {
+            if let Some(g) = g {
+                let ga = M_GHOSTS + 0x200 * k as u32;
+                assert_eq!(lap_card_words(&machine_lap_at(&ee, ga)), lap_card_words(g), "{what}: ghost {k}");
+            }
+        }
+        assert_eq!(ee.u32_at(M_MGR + 0x5c), rules.flags, "{what}: the manager's flags");
+        assert_eq!(f32_at(&ee, M_MGR + 0x98).0.to_bits(), rules.finish_clock.0.to_bits(), "{what}: the countdown");
+        assert_eq!(pool_len(&ee, ee.u32_at(M_MGR + 0x58), 0x14), rules.free_records as usize, "{what}: the free records");
+        assert_eq!(ee.read(rand_state, 8) as u64, rng.state(), "{what}: the generator");
+
+        stopped += usize::from(!tick.went_on);
+        for (k, c) in cards.iter().enumerate() {
+            let _ = k;
+            if c.lap.gate.is_some() {
+                if c.lap.to_line_kept.0 <= 50.0 { near += 1 } else { far += 1 }
+            }
+        }
+        made_up += usize::from(was.flags & race_flags::OVER != 0 && tick.went_on);
+    }
+    for key in ["Look", "Line", "Zone", "Aimed", "Aim", "TimeUp", "Over", "PlaceLost", "PlaceGained", "Lead", "Gate", "Lap", "BestLap", "Finished", "RunOver", "GhostReady"] {
+        let c = said.get(key).copied().unwrap_or(0);
+        // A ghost run's end needs a ghost race on its last lap with a lap closed: rarer.
+        let floor = if matches!(key, "RunOver" | "GhostReady") { 40 } else { 100 };
+        assert!(c > floor, "{key} came up only {c} times: {said:?}");
+    }
+    assert!(stopped > 200 && near > 2000 && far > 2000 && made_up > 1000, "stopped {stopped} near {near} far {far} made up {made_up}: {said:?}");
+}
+
+/// The gate race's ranking on its own, 20,000 lists of one to six cards with ties in gates passed and
+/// in distance to the next gate, against [`LapRules::gate_rank`] on the list's order, the places and
+/// every listener call.
+#[test]
+fn the_gate_ranking_matches_the_score_managers() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let rank = match addr("score_gate_rank") {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    let heard = machine_hooks(&mut ee, &[]);
+    let mut p = Pick(0x6d02_b8e7_1c49_a355);
+    let mut said = [0usize; 3];
+    for case in 0..20_000 {
+        let n = 1 + p.below(6) as usize;
+        let mut cards: Vec<LapCard> = (0..n)
+            .map(|k| {
+                let mut c = finish_card(&mut p, k as u32);
+                c.gates_passed = p.below(4) as i32 - i32::from(p.below(20) == 0);
+                c
+            })
+            .collect();
+        for k in 1..n {
+            if p.below(4) == 0 {
+                cards[k].to_line = cards[k - 1].to_line;
+            }
+            if p.below(3) == 0 {
+                cards[k].place = k as i32 + 1;
+            }
+        }
+        let owner: Vec<bool> = (0..n).map(|_| p.below(4) != 0).collect();
+        let chain: Vec<bool> = (0..n).map(|_| p.below(3) == 0).collect();
+        ee.set_u32(M_MGR + 0x30, M_LISTENER);
+        ee.set_u32(M_MGR + 0x34, M_CARDS);
+        for (o, w) in [(4, 0), (0x10, 0), (0x14, 0), (0x18, 0), (0x1c, M_VT + TO_LISTENER * 0x100)] {
+            ee.set_u32(M_LISTENER + o, w);
+        }
+        for (k, c) in cards.iter().enumerate() {
+            let rc = RaceCard { lap: c.clone(), ..RaceCard::default() };
+            put_machine_card(&mut ee, k, &rc, n, owner[k], chain[k], None);
+        }
+        heard.borrow_mut().clear();
+        ee.call(rank, &[u64::from(M_MGR)], &[], 1_000_000);
+        assert_eq!(ee.v0(), 1, "case {case}: the answer");
+
+        let notices = LapRules::gate_rank(&mut cards);
+        let after: Vec<u32> = cards.iter().map(|c| m_card(c.record_word as usize)).collect();
+        let want: Vec<MHeard> = notices.iter().flat_map(|&m| machine_finish_told(m, &after, &owner, &chain)).collect();
+        for m in &notices {
+            said[match m {
+                FinishNotice::PlaceLost { .. } => 0,
+                FinishNotice::PlaceGained { .. } => 1,
+                _ => 2,
+            }] += 1;
+        }
+        let mut list = Vec::new();
+        let mut at = ee.u32_at(M_MGR + 0x34);
+        while at != 0 && list.len() < 8 {
+            list.push(at);
+            at = ee.u32_at(at + 0x1c8);
+        }
+        assert_eq!(list, after, "case {case}: the list's order");
+        for (c, &a) in cards.iter().zip(&after) {
+            assert_eq!(lap_card_words(&machine_lap_at(&ee, a)), lap_card_words(c), "case {case}: card {}", c.record_word);
+        }
+        assert_eq!(*heard.borrow(), want, "case {case}: the listeners");
+    }
+    assert!(said.iter().all(|&k| k > 1000), "{said:?}");
 }

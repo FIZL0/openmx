@@ -2443,39 +2443,8 @@ impl LapRules {
     /// card further back than before hears [`FinishNotice::PlaceLost`] (the card ahead of it), one
     /// further on [`FinishNotice::PlaceGained`] (the card behind it), and a new leader
     /// [`FinishNotice::Lead`]. A card with no place yet (0) is told nothing but the lead.
-    pub fn rank(cards: &mut Vec<LapCard>) -> Vec<FinishNotice> {
-        let n = cards.len();
-        let mut p = 0;
-        while p + 1 < n {
-            if cards[p].flags & card_flags::OUT == 0 {
-                let mut q = p + 1;
-                while q < n {
-                    if lt(cards[p].progress, cards[q].progress) {
-                        let c = cards.remove(q);
-                        cards.insert(p, c);
-                        q += 2;
-                    } else {
-                        q += 1;
-                    }
-                }
-            }
-            p += 1;
-        }
-        let mut said = Vec::new();
-        for k in 0..n {
-            let place = k as i32 + 1;
-            let was = cards[k].place;
-            cards[k].place = place;
-            if was != 0 && place > was {
-                said.push(FinishNotice::PlaceLost { card: k, ahead: k.checked_sub(1) });
-            } else if place < was {
-                said.push(FinishNotice::PlaceGained { card: k, behind: (k + 1 < n).then_some(k + 1) });
-            }
-            if place == 1 && was != 1 {
-                said.push(FinishNotice::Lead { card: k });
-            }
-        }
-        said
+    pub fn rank<T: AsRef<LapCard> + AsMut<LapCard>>(cards: &mut Vec<T>) -> Vec<FinishNotice> {
+        rank_by(cards, |p, q| lt(p.progress, q.progress))
     }
 
     /// A ghost race's gap: a player's card, while its lap is no slower than its ghost's best and the
@@ -2506,10 +2475,12 @@ fn behind(card: &LapCard, pace_time: F, per_foot: f32) -> F {
 /// far behind as its race time less the leader's time to its progress at the leader's pace (none
 /// below 0; with the leader nowhere yet, its race time); the leader's own gap is the second card's,
 /// negated (0 alone). `cards` in list order, not empty.
-pub fn gaps(cards: &mut [LapCard]) {
+pub fn gaps<T: AsRef<LapCard> + AsMut<LapCard>>(cards: &mut [T]) {
     let Some((lead, rest)) = cards.split_first_mut() else { return };
+    let lead = lead.as_mut();
     let per_foot = if lt(F::ZERO, lead.progress) { fpu::div(1.0, lead.progress.0) } else { 0.0 };
     for c in rest.iter_mut() {
+        let c = c.as_mut();
         if c.flags & card_flags::OUT == 0 {
             c.gap = behind(c, lead.race_time, per_foot);
             if lt(c.gap, F::ZERO) {
@@ -2518,7 +2489,7 @@ pub fn gaps(cards: &mut [LapCard]) {
         }
     }
     lead.gap = match rest.first() {
-        Some(second) => F(fpu::neg(second.gap.0)),
+        Some(second) => F(fpu::neg(second.as_ref().gap.0)),
         None => F::ZERO,
     };
 }
@@ -3096,5 +3067,347 @@ impl Supercross {
         line.across = line.across.merge(Dest::XYZ, finish.across);
         let side = cross(ahead, line.across);
         line.normal = crate::air::normalize(cross(line.across, side));
+    }
+}
+
+// --- the machine race's handler (S292a) -------------------------------------------------------------
+
+/// The ranking's own sort, given which of two cards is further on (`ahead(p, q)`: `q` is ahead of `p`),
+/// then the places and their notices: see [`LapRules::rank`].
+fn rank_by<T: AsRef<LapCard> + AsMut<LapCard>>(cards: &mut Vec<T>, ahead: impl Fn(&LapCard, &LapCard) -> bool) -> Vec<FinishNotice> {
+    let n = cards.len();
+    let mut p = 0;
+    while p + 1 < n {
+        if cards[p].as_ref().flags & card_flags::OUT == 0 {
+            let mut q = p + 1;
+            while q < n {
+                if ahead(cards[p].as_ref(), cards[q].as_ref()) {
+                    let c = cards.remove(q);
+                    cards.insert(p, c);
+                    q += 2;
+                } else {
+                    q += 1;
+                }
+            }
+        }
+        p += 1;
+    }
+    let mut said = Vec::new();
+    for k in 0..n {
+        let card = cards[k].as_mut();
+        let place = k as i32 + 1;
+        let was = card.place;
+        card.place = place;
+        if was != 0 && place > was {
+            said.push(FinishNotice::PlaceLost { card: k, ahead: k.checked_sub(1) });
+        } else if place < was {
+            said.push(FinishNotice::PlaceGained { card: k, behind: (k + 1 < n).then_some(k + 1) });
+        }
+        if place == 1 && was != 1 {
+            said.push(FinishNotice::Lead { card: k });
+        }
+    }
+    said
+}
+
+impl AsRef<LapCard> for LapCard {
+    fn as_ref(&self) -> &LapCard {
+        self
+    }
+}
+
+impl AsMut<LapCard> for LapCard {
+    fn as_mut(&mut self) -> &mut LapCard {
+        self
+    }
+}
+
+impl AsRef<LapCard> for RaceCard {
+    fn as_ref(&self) -> &LapCard {
+        &self.lap
+    }
+}
+
+impl AsMut<LapCard> for RaceCard {
+    fn as_mut(&mut self) -> &mut LapCard {
+        &mut self.lap
+    }
+}
+
+/// The score manager's flag bit that sends the machine race's riders along the track's path rather
+/// than straight at their next gate (`0x80_0000`; the port leaves that way out).
+pub const PATH_STEER: u32 = 0x80_0000;
+
+/// Within this many feet of its next gate a rider aims past it, toward the gate after (the
+/// machine race's 50 ft), by [`AIM_LEAD`] of the gate-to-gate step per foot closer.
+const AIM_NEAR: F = F(50.0);
+const AIM_LEAD: F = F(0.02);
+
+/// What the machine race's handler tells one card's listeners, in the order it tells them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MachineNotice {
+    /// Every card, first thing each tick: the card's owner and its chain look at it (their slot
+    /// `+8`, handed the card).
+    Look,
+    /// The gate line's ([`LapRules::gate_line`]).
+    Line(LineNotice),
+    /// The rider's step went through or past a live zone ([`zone_crossings`]).
+    Zone { zone: usize, crossing: Crossing },
+    /// The card's aim at its gate is new ([`RaceCard::to_track`]): the manager's listener hears it
+    /// first, then the card's owner and its chain.
+    Aimed,
+    /// Where the rider is and the way it is to go (the card's owner and its chain): its aim for a
+    /// racing card, its look ahead ([`RaceCard::look`]) once more for a done one.
+    Aim { point: Vf, ahead: Vf },
+    /// The card's time limit ran out ([`LapRules::time_limit`]; told as [`FinishNotice::TimeUp`]).
+    TimeUp,
+}
+
+/// One tick of the machine race's handler, as [`LapRules::machine_tick`] hands it back.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MachineTick {
+    /// The handler's answer: false when it stopped early (no cards, no gates, or a card's gate line
+    /// said no; nothing after that card was done) — otherwise true.
+    pub went_on: bool,
+    /// What each card was told, by its place in the list as the tick began.
+    pub said: Vec<(usize, MachineNotice)>,
+    /// What the close after the cards told (the finish, the ranking), the cards by their place after
+    /// it.
+    pub finish: Vec<FinishNotice>,
+}
+
+impl LapRules {
+    /// The gate race's ranking: as [`LapRules::rank`], but a card is further on for more gates passed
+    /// in the whole run ([`LapCard::gates_passed`]), and on as many for being nearer its next gate
+    /// ([`LapCard::to_line`], the machine race's distance from the rider to it).
+    pub fn gate_rank<T: AsRef<LapCard> + AsMut<LapCard>>(cards: &mut Vec<T>) -> Vec<FinishNotice> {
+        rank_by(cards, |p, q| p.gates_passed < q.gates_passed || (q.gates_passed == p.gates_passed && lt(q.to_line, p.to_line)))
+    }
+
+    /// The machine race's handler (the score manager's mode 1), once a tick: the over check
+    /// ([`LapRules::check_over`]), each card in list order ([`LapRules::machine_card`]; the list's
+    /// head's race clock times the made-up finishes), and the close ([`LapRules::machine_close`]).
+    /// `ghosts` are the cards' owners' ghost cards, by place in the list; `gates` the race's chain of
+    /// gates, `zones` the manager's zone list.
+    ///
+    /// With no cards or no gates the handler does nothing at all; a card whose gate line says no stops
+    /// it there (see [`MachineTick::went_on`]).
+    pub fn machine_tick(
+        &mut self,
+        dt: F,
+        cards: &mut Vec<RaceCard>,
+        ghosts: &mut [Option<LapCard>],
+        gates: &[Gate],
+        zones: &[Gate],
+        rng: &mut Rng,
+    ) -> MachineTick {
+        let mut tick = MachineTick::default();
+        if cards.is_empty() || gates.is_empty() {
+            return tick;
+        }
+        let flags: Vec<LapCard> = cards.iter().map(|c| LapCard { flags: c.lap.flags, ..LapCard::default() }).collect();
+        self.check_over(&flags);
+        for k in 0..cards.len() {
+            let leader = (k > 0).then(|| cards[0].lap.race_time);
+            let ghost = ghosts.get_mut(k).and_then(|g| g.as_mut());
+            let (go_on, said) = self.machine_card(dt, &mut cards[k], ghost, gates, zones, leader);
+            tick.said.extend(said.into_iter().map(|n| (k, n)));
+            if !go_on {
+                return tick;
+            }
+        }
+        let refs: Vec<Option<&LapCard>> = ghosts.iter().map(|g| g.as_ref()).collect();
+        tick.finish = self.machine_close(dt, cards, &refs, rng);
+        tick.went_on = true;
+        tick
+    }
+
+    /// The machine race's handler on one card, `dt` long, its rider already moved to
+    /// `card.lap.seen.now`. False: the card's gate line said no, and the handler stops.
+    ///
+    /// Every card is looked at ([`MachineNotice::Look`]). A done card ([`card_flags::OUT`] or
+    /// [`card_flags::TIMED_OUT`]) tells where its rider is and its look ahead; a card not taking part,
+    /// or in a fast-lap attack without [`card_flags::FAST_LAP`], does nothing more there. A racing card:
+    ///
+    /// * its odometer runs by the step's length;
+    /// * unless where it was seen the tick before is at a negative `x` (not yet seen), its gate line
+    ///   ([`LapRules::gate_line`]); then a done card the race waits for ([`card_flags::PLAYER`] or
+    ///   [`card_flags::PLAYER_TOO`]) starts the finish countdown ([`race_flags::PLAYER_DONE`]), and with
+    ///   the zone list live ([`race_flags::ZONES`]) each zone the step crossed is told;
+    /// * its distances to its gate from the tick before's place ([`LapCard::to_line_kept`]) and from
+    ///   now ([`LapCard::to_line`]);
+    /// * its aim ([`RaceCard::to_track`]), the unit step from the rider to its gate — or, within 50 ft
+    ///   of it, to a point past the gate toward the next one (the first after the last), 0.02 of the
+    ///   gate-to-gate step for each foot closer; told [`MachineNotice::Aimed`];
+    /// * its progress, the length of the laps behind it less its distance to its gate, and the tick
+    ///   before's place moved to now;
+    /// * its clocks, or once the race is [`race_flags::OVER`] and the card not done, its finish made up
+    ///   from its gap as [`LapRules::clocks`] does (but a card on its laps already takes its race time
+    ///   less its lap's start as the lap, and no kind of race is spared); the fast-lap attack clock.
+    ///
+    /// Then any card's time limit ([`LapRules::time_limit`]) and, for every card, where its rider is
+    /// and its aim ([`MachineNotice::Aim`]). `leader_time` is the list head's race clock (`None`: this
+    /// card is the head, and its own is read when needed).
+    ///
+    /// Left out: the helper behind card flag `0x8_0000`, and the path steering of [`PATH_STEER`] (the
+    /// port always aims straight). The original reads low memory for a card waiting at no gate whose
+    /// gate line it skips; the port stops the handler there.
+    pub fn machine_card(
+        &mut self,
+        dt: F,
+        card: &mut RaceCard,
+        ghost: Option<&mut LapCard>,
+        gates: &[Gate],
+        zones: &[Gate],
+        leader_time: Option<F>,
+    ) -> (bool, Vec<MachineNotice>) {
+        let mut said = vec![MachineNotice::Look];
+        let fl = card.lap.flags;
+        let done = card_flags::OUT | card_flags::TIMED_OUT;
+        if fl & card_flags::TAKING_PART == 0 || (self.kind == race_kind::FAST_LAP && fl & card_flags::FAST_LAP == 0) || fl & done != 0 {
+            if fl & done != 0 {
+                said.push(MachineNotice::Aim { point: card.lap.seen.now, ahead: card.look });
+            }
+        } else if !self.machine_step(dt, card, ghost, gates, zones, leader_time, &mut said) {
+            return (false, said);
+        }
+        if self.time_limit(dt, &mut card.lap) {
+            said.push(MachineNotice::TimeUp);
+        }
+        said.push(MachineNotice::Aim { point: card.lap.seen.now, ahead: card.to_track });
+        (true, said)
+    }
+
+    /// A racing card's work in the machine race, up to its clocks.
+    #[allow(clippy::too_many_arguments)]
+    fn machine_step(
+        &mut self,
+        dt: F,
+        card: &mut RaceCard,
+        ghost: Option<&mut LapCard>,
+        gates: &[Gate],
+        zones: &[Gate],
+        leader_time: Option<F>,
+        said: &mut Vec<MachineNotice>,
+    ) -> bool {
+        let step = card.lap.seen.now.sub(card.lap.seen.last);
+        card.odometer = F(fpu::add(card.odometer.0, fpu::sqrt(dot3(step, step).0)));
+        if !lt(F(card.lap.seen.last.x()), F::ZERO) {
+            let (go_on, heard) = self.gate_line(&mut card.lap, ghost, gates);
+            said.extend(heard.into_iter().map(MachineNotice::Line));
+            if !go_on {
+                return false;
+            }
+            let fl = card.lap.flags;
+            if fl & card_flags::OUT != 0 && fl & (card_flags::PLAYER | card_flags::PLAYER_TOO) != 0 {
+                self.flags |= race_flags::PLAYER_DONE;
+            }
+            if self.flags & race_flags::ZONES != 0 {
+                said.extend(
+                    zone_crossings(card.lap.seen, zones).into_iter().map(|(zone, crossing)| MachineNotice::Zone { zone, crossing }),
+                );
+            }
+        }
+        let Some(at) = card.lap.gate else { return false };
+        let gate = gates[at].centre;
+        let c = &mut card.lap;
+        let from_last = gate.sub(c.seen.last);
+        c.to_line_kept = F(fpu::sqrt(dot3(from_last, from_last).0));
+        let from_now = gate.sub(c.seen.now);
+        c.to_line = F(fpu::sqrt(dot3(from_now, from_now).0));
+        let target = if le(c.to_line_kept, AIM_NEAR) {
+            let next = gates[if at + 1 < gates.len() { at + 1 } else { 0 }].centre;
+            let on = next.merge(Dest::XYZ, next.sub(gate));
+            let lead = F(fpu::mul(AIM_LEAD.0, fpu::sub(AIM_NEAR.0, c.to_line_kept.0)));
+            let on = on.merge(Dest::XYZ, on.mul(Vf::splat(lead.0)));
+            gate.merge(Dest::XYZ, gate.add(on))
+        } else {
+            gate
+        };
+        card.to_track = unit(target.merge(Dest::XYZ, target.sub(c.seen.now)));
+        said.push(MachineNotice::Aimed);
+        c.progress = F(fpu::sub(c.laps_length.0, c.to_line.0));
+        c.seen.last = c.seen.last.merge(Dest::XYZ, c.seen.now);
+        let out = c.flags & card_flags::OUT != 0;
+        if self.flags & race_flags::OVER != 0 && !out {
+            let leader = leader_time.unwrap_or(c.race_time);
+            c.race_time = F(fpu::add(leader.0, c.gap.0));
+            let lap = fpu::sub(c.race_time.0, c.lap_start.0);
+            c.lap_time = if c.laps < self.laps {
+                F(fpu::div(lap, fpu::from_i32(self.laps.wrapping_sub(c.laps))))
+            } else {
+                F(lap)
+            };
+            if lt(c.lap_time, c.best_lap) || is_zero(c.best_lap) {
+                c.best_lap = c.lap_time;
+            }
+            let laps = F(fpu::from_i32(self.laps));
+            if lt(c.race_time, F(fpu::mul(laps.0, c.best_lap.0))) {
+                c.best_lap = F(fpu::div(c.race_time.0, laps.0));
+            }
+            c.laps = self.laps;
+            c.flags |= card_flags::OUT;
+        } else if !out {
+            let behind = c.flags & card_flags::BEHIND_LINE != 0;
+            if self.kind != race_kind::GHOST_RACE || !behind {
+                c.race_time = F(fpu::add(c.race_time.0, dt.0));
+            }
+            if !behind {
+                c.lap_clock = F(fpu::add(c.lap_clock.0, dt.0));
+            }
+        }
+        if self.kind == race_kind::FAST_LAP && c.flags & card_flags::ATTACK_CLOCK != 0 {
+            c.attack_clock = F(fpu::add(c.attack_clock.0, dt.0));
+        }
+        true
+    }
+
+    /// The machine race's close each tick, after its cards: as [`LapRules::close`], but the finish
+    /// countdown runs in a ghost race too, and the ranking is [`LapRules::gate_rank`]'s.
+    pub fn machine_close(
+        &mut self,
+        dt: F,
+        cards: &mut Vec<RaceCard>,
+        ghosts: &[Option<&LapCard>],
+        rng: &mut Rng,
+    ) -> Vec<FinishNotice> {
+        let mut said = Vec::new();
+        if self.flags & race_flags::PLAYER_DONE != 0 && self.flags & race_flags::OVER == 0 && !le(self.finish_wait, F::ZERO) {
+            if lt(self.finish_clock, self.finish_wait) {
+                self.finish_clock = F(fpu::add(self.finish_clock.0, dt.0));
+            } else {
+                self.flags |= race_flags::OVER;
+                for c in cards.iter_mut() {
+                    c.lap.flags |= card_flags::OUT;
+                }
+            }
+        }
+        if self.flags & race_flags::OVER != 0 && self.flags & race_flags::OVER_TOLD == 0 {
+            self.flags |= race_flags::OVER_TOLD;
+            for k in 0..cards.len() {
+                if k + 1 < cards.len() && !le(cards[k].lap.race_time, cards[k + 1].lap.race_time) {
+                    let draw = rng.unit();
+                    cards[k + 1].lap.race_time = F(fpu::add(cards[k].lap.race_time.0, draw.0));
+                }
+                said.push(FinishNotice::Over { card: k });
+            }
+        }
+        if self.kind == race_kind::GHOST_RACE {
+            if self.flags & race_flags::FINISHED == 0 {
+                for (c, g) in cards.iter_mut().zip(ghosts) {
+                    if let Some(g) = g {
+                        Self::ghost_gap(&mut c.lap, g);
+                    }
+                }
+            }
+        } else {
+            if self.flags & race_flags::RANKED != 0 {
+                said.extend(Self::gate_rank(cards));
+            }
+            if self.flags & race_flags::FINISHED == 0 {
+                gaps(cards);
+            }
+        }
+        said
     }
 }

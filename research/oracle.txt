@@ -1030,6 +1030,31 @@ score_machine_race_tick     boot 0x002640c0 (dt f12, mgr) mode 1's handler: need
 #                                           (50 ft, 0.02), listener +0x6c, owner +0x5c, progress, last
 #                                           = now (xyz only), clocks... Only the line and the zones
 #                                           are ported (S292); the rest is S292a.
+#                                           S292a: LapRules::machine_tick / machine_card / machine_close.
+#                                           Every card first: owner/chain vt+8 (card). Not racing: 0x4001
+#                                           -> owner/chain vt+0x20 (card+0x60, card+0x120). Racing: the
+#                                           odometer (vsub.xyz, mula/madda/madd, sqrt.s, add.s); 0x80000
+#                                           -> 0x00267d90 (unported); c.olt.s last.x < 0 skips the gate
+#                                           line (NaN/-0 run it); gate line 0 -> return 0 at once (no
+#                                           close); OUT with 4|0x8000 -> mgr |= 4; zones. +0x10 = |gate -
+#                                           last|, +0x14 = |gate - now|; +0x10 <= 50 (c.ole.s): aim = gate
+#                                           + (next - gate) * (0.02 * (50 - +0x10)) - now, next = gate
+#                                           +0x90 or mgr+0x70 (VU vsub/vmulx/vadd .xyz, w the gate's);
+#                                           else gate - now; then unit (vrsqrt); listener vt+0x6c (its
+#                                           +4 chain walked without a null test on +0x30), owner/chain
+#                                           vt+0x5c. +0x1c = +0x24 - +0x14; last = now. Over (mgr 2) and
+#                                           not out, no kind test: +0xb4 = head +0xb4 + +0xbc; +0x48 =
+#                                           (+0xb4 - +0x4c) / (laps - +0x30) when +0x30 < laps, else bare;
+#                                           best/clamp/laps/|= 1 as score_race_clocks. Else the clocks.
+#                                           Kind 4 + 0x200: +0x168. Every card: the time limit (as
+#                                           score_race_time_limit), then mgr+0x68 null or no mgr 0x800000:
+#                                           owner/chain vt+0x20 (card+0x60, card+0x180); else the path
+#                                           steering (path_spot 0x0026b410, unported). After the loop:
+#                                           score_race_close's but the countdown has no kind test and the
+#                                           ranking is score_gate_rank.
+score_gate_rank             boot 0x00262470 (mgr) -> 0 with no cards (no track test): score_rank's sort and
+#                                           notices, but q ahead of p on gates (+0x38) more, or equal and
+#                                           +0x14 c.olt.s less. LapRules::gate_rank
 score_machine_zones         boot 0x00264338 inside score_machine_race_tick: the zone list (mgr flag 0x200,
 #                                           list mgr+0x78, next +0x90, live flag 1), $16 card, $18 mgr;
 #                                           1 -> owner/chain vt+0x2c, listener +0x24; 2 -> +0x30/+0x28.
