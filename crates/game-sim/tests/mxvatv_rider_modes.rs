@@ -1344,3 +1344,280 @@ fn the_riders_wreck_entry_is_the_originals() {
         assert!(*n >= 20, "path {path} taken only {n} times");
     }
 }
+
+// F55: the rider's listener step's own code — the frame around the mode machine, the copy after it
+// and the extra step — each against the original.
+
+const FRAME: u32 = 0x004f_1790;
+const COPY_AFTER: u32 = 0x004f_2970;
+const EXTRA_STEP: u32 = 0x004f_2d50;
+const WORLD_STEP: u32 = 0x0050_5d50;
+const NODE_POSITION: u32 = 0x0019_4c20;
+
+/// What both sides' node position writes: a quadword that names the call.
+fn position_marker(node: u32, out: u32) -> [u32; 4] {
+    [node, out, 0x3f80_0000, node ^ out]
+}
+
+/// The port's side of the listener step's calls: logged, the world step answering `answer`, the
+/// node position writing [`position_marker`].
+struct StepPort<'a> {
+    ee: &'a mut Ee,
+    log: Log,
+    answer: u32,
+}
+
+impl node::Ram for StepPort<'_> {
+    fn word(&mut self, at: u32) -> u32 {
+        self.ee.u32_at(at)
+    }
+    fn set(&mut self, at: u32, w: u32) {
+        self.ee.set_u32(at, w)
+    }
+}
+
+impl rider::Rider for StepPort<'_> {
+    fn call(&mut self, c: Call, _dt: F) -> u32 {
+        self.log.borrow_mut().push(c);
+        match c {
+            Call::WorldStep => self.answer,
+            Call::AfterStep => 0,
+            Call::NodePosition { node, out } => {
+                for (k, w) in position_marker(node, out).into_iter().enumerate() {
+                    self.ee.set_u32(out + 4 * k as u32, w);
+                }
+                0
+            }
+            _ => panic!("{c:?}: not a call of the listener step's own code"),
+        }
+    }
+}
+
+/// **The rider's listener step's own code is the original's** (F55), on state 4's rider, 20 000
+/// cases each of: the rider's frame with its record not ridden (the node's alpha off the rider's
+/// kind 0..4 and −1, the kind-3 switch, the record's ask 0..3 and its fade and start — above, at and
+/// below 0, signed zeros, denormals, saturated words; the two clocks, their targets, flags and rates
+/// on both sides; no node, no record; the world step's answer drawn); the copy after it (record or
+/// none, its wreck kind, the mask against each copy's bits, `+0xa70` 0..2); and the extra step (its
+/// switch, the table index 0..3, each entry's time, step and down word, the record's speed about 5
+/// and 10, the value, clock and ceiling, `dt` 0 among them). The world step and the rider's vt
+/// `+0x148` are hooked and logged, the node position writes a marker. Every word either side writes,
+/// off the stack, comes out the same, the same calls are made in the same order, and the answers
+/// agree. The frame's ridden arm (the mode machine, proven by S278b's oracle) is proven by C15's
+/// replays (`tests/mxvatv_bike_ride.rs`, `*_with_the_rider_leaf_on_the_ports`).
+#[test]
+#[allow(clippy::float_arithmetic)]
+fn the_riders_listener_step_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let rec = ee.u32_at(RIDER + rider::RECORD);
+    let node = ee.u32_at(RIDER + rider::NODE);
+    assert!(rec != 0 && node != 0, "state 4's rider has a record and a node");
+    let after_vt = ee.u32_at(ee.u32_at(RIDER + 4) + 0x148);
+    eprintln!("record {rec:#x}, node {node:#x}, vt +0x148 {after_vt:#x}");
+    let log: Log = Rc::new(RefCell::new(Vec::new()));
+    let answer = Rc::new(RefCell::new(0u32));
+    {
+        let (l, a) = (log.clone(), answer.clone());
+        ee.hooks.insert(WORLD_STEP, Box::new(move |ee: &mut Ee| {
+            assert_eq!(ee.r(4) as u32, RIDER, "the world step's rider");
+            l.borrow_mut().push(Call::WorldStep);
+            ee.set(2, u64::from(*a.borrow()));
+        }));
+        let l = log.clone();
+        ee.hooks.insert(after_vt, Box::new(move |ee: &mut Ee| {
+            assert_eq!(ee.r(4) as u32, RIDER, "vt +0x148's rider");
+            l.borrow_mut().push(Call::AfterStep);
+        }));
+        let l = log.clone();
+        ee.hooks.insert(NODE_POSITION, Box::new(move |ee: &mut Ee| {
+            assert_eq!(ee.r(5), 0, "the node position's a1");
+            let (node, out) = (ee.r(4) as u32, ee.r(6) as u32);
+            l.borrow_mut().push(Call::NodePosition { node, out });
+            for (k, w) in position_marker(node, out).into_iter().enumerate() {
+                ee.set_u32(out + 4 * k as u32, w);
+            }
+        }));
+    }
+    let snapshot = ee.ram.clone();
+    let mut t: BTreeMap<String, u32> = BTreeMap::new();
+    let mut g = Gen(0x0f55_0001);
+    let f = |x: f32| x.to_bits();
+    // A float word: mostly near `at` in `lo..hi`, sometimes a signed zero, a denormal or saturated.
+    let word = |g: &mut Gen, at: f32, lo: f32, hi: f32| match g.bits() % 12 {
+        0 => g.pick(&[0, 0x8000_0000]),
+        1 => g.pick(&[0x0000_0001, 0x8040_0000, 0x7f80_0000, 0xff80_0001]),
+        _ => g.near(at, lo, hi).to_bits(),
+    };
+    for (what, fun) in [("frame", FRAME), ("copy", COPY_AFTER), ("extra", EXTRA_STEP)] {
+        for k in 0..20_000 {
+            let mut given: Vec<(u32, u32)> = Vec::new();
+            let mut put = |ee: &mut Ee, at: u32, v: u32| {
+                ee.set_u32(at, v);
+                given.push((at, v));
+            };
+            let some = f(g.f(0.0, 0.1));
+            let dt = g.pick(&[DT, DT, DT, 0, some]);
+            let mut path = Vec::new();
+            match what {
+                "frame" => {
+                    put(&mut ee, rec + rider::R_RIDDEN, 0);
+                    let kind = g.pick(&[0, 1, 2, 3, 3, 4, 0xffff_ffff]);
+                    put(&mut ee, RIDER + rider::KIND, kind);
+                    let switch = g.pick(&[0, 1]);
+                    put(&mut ee, RIDER + rider::KIND3_FADE, switch);
+                    let ask = g.pick(&[0, 1, 2, 3]);
+                    put(&mut ee, rec + rider::R_ALPHA, ask);
+                    let fade = word(&mut g, 0.0, -0.5, 2.0);
+                    put(&mut ee, rec + rider::R_FADE, fade);
+                    let from = if g.one_in(4) { g.pick(&[0, 0x8000_0000, 0x0000_0001]) } else { word(&mut g, 1.0, -1.0, 3.0) };
+                    put(&mut ee, rec + rider::R_FADE_FROM, from);
+                    for (clock, target, flag, set, clear) in rider::CLOCKS {
+                        put(&mut ee, RIDER + flag, g.pick(&[0, 1]));
+                        for o in [set, clear] {
+                            let r = word(&mut g, 1.0, -0.5, 5.0);
+                            put(&mut ee, RIDER + o, r);
+                        }
+                        let c = word(&mut g, 0.0, -1.0, 1.0);
+                        put(&mut ee, RIDER + clock, c);
+                        let at = if g.one_in(6) { c } else { word(&mut g, 0.0, -1.0, 1.0) };
+                        put(&mut ee, RIDER + target, at);
+                    }
+                    put(&mut ee, RIDER + rider::UNRIDDEN_CLEAR, g.bits());
+                    let (no_node, no_rec) = (g.one_in(20), g.one_in(20));
+                    if no_node {
+                        put(&mut ee, RIDER + rider::NODE, 0);
+                    }
+                    if no_rec {
+                        put(&mut ee, RIDER + rider::RECORD, 0);
+                    }
+                    *answer.borrow_mut() = g.bits();
+                    path.push(match () {
+                        _ if no_node || no_rec => "none".to_string(),
+                        _ if kind == 2 => "kind 2".into(),
+                        _ if kind == 3 => format!("kind 3, switch {switch}"),
+                        _ => {
+                            let fo = fpu_operand(fade);
+                            let tail = if fo <= 0.0 { "no fade" } else if fpu_operand(from) == 0.0 { "fade from 0" } else { "fade" };
+                            format!("ask {}, {tail}", ask.min(3))
+                        }
+                    });
+                }
+                "copy" => {
+                    let has_rec = !g.one_in(4);
+                    if !has_rec {
+                        put(&mut ee, RIDER + rider::RECORD, 0);
+                    }
+                    let kind = g.pick(&[0, 0, 1, 13]);
+                    put(&mut ee, rec + rider::R_KIND, kind);
+                    let mask = g.pick(&[0, 1, 2, 3, 0xffff_ffff]);
+                    put(&mut ee, RIDER + rider::COPY_MASK, mask);
+                    for o in [0x9d4, 0x904, 0xa94] {
+                        let b = g.pick(&[0, 1, 2, 3]);
+                        put(&mut ee, RIDER + o, b);
+                    }
+                    let a70 = g.pick(&[0, 1, 1, 2]);
+                    put(&mut ee, RIDER + 0xa70, a70);
+                    for o in [0x214, 0xa0, 0xa4, 0xa8, 0xac] {
+                        put(&mut ee, rec + o, g.bits());
+                    }
+                    for i in 0..12 {
+                        put(&mut ee, rec + 0x220 + 4 * i, g.bits());
+                    }
+                    put(&mut ee, RIDER + 0xa74, g.bits());
+                    put(&mut ee, RIDER + rider::SPOT_NODE, g.bits() & !3);
+                    let on = |o: u32| mask & given.iter().rev().find(|(a, _)| *a == RIDER + o).unwrap().1 != 0;
+                    let lit = |b: bool| if b { "on" } else { "off" };
+                    path.push(if has_rec { "record".to_string() } else { format!("no record, {} a70 {a70}", lit(on(0x9d4))) });
+                    for o in [0x904, 0xa94] {
+                        path.push(format!("{o:#x} {}{}", lit(on(o)), if on(o) { if has_rec && kind != 0 { " wrecked" } else { " node" } } else { "" }));
+                    }
+                }
+                _ => {
+                    let on = g.pick(&[0, 1, 1, 1, 0x100]);
+                    put(&mut ee, RIDER + rider::EXTRA_ON, on);
+                    let i = g.pick(&[0, 1, 2, 3]);
+                    put(&mut ee, rec + 0x1e8, i);
+                    for e in 0..4 {
+                        let at = RIDER + rider::EXTRA_TABLE + 32 * e;
+                        let time = word(&mut g, 0.0, -0.1, 0.2);
+                        put(&mut ee, at, time);
+                        let step = word(&mut g, 0.5, -2.0, 2.0);
+                        put(&mut ee, at + 4, step);
+                        let down = g.pick(&[0, 1]);
+                        put(&mut ee, at + 8, down);
+                    }
+                    let edge = g.pick(&[5.0f32.to_bits(), 10.0f32.to_bits()]);
+                    let speed = if g.one_in(5) { edge } else { word(&mut g, 7.5, 0.0, 15.0) };
+                    put(&mut ee, rec + 0x1a8, speed);
+                    for (o, at, lo, hi) in [(rider::EXTRA_VALUE, 0.5, -1.0, 3.0), (rider::EXTRA_CLOCK, 0.0, -0.1, 0.3), (rider::EXTRA_MAX, 1.0, -1.0, 3.0)] {
+                        let v = word(&mut g, at, lo, hi);
+                        put(&mut ee, RIDER + o, v);
+                    }
+                    let gv = |a: u32| given.iter().rev().find(|(x, _)| *x == a).unwrap().1;
+                    let e = RIDER + rider::EXTRA_TABLE + 32 * i;
+                    let down = gv(e + 8) != 0;
+                    let fast = fpu_operand(speed) > if down { 5.0 } else { 10.0 };
+                    path.push(match () {
+                        _ if on == 0 => "off".to_string(),
+                        _ if down && fpu_operand(gv(e)) <= 0.0 => "down, no time".into(),
+                        _ if !fast => format!("{}, slow", if down { "down" } else { "up" }),
+                        _ => format!("{}, fast", if down { "down" } else { "up" }),
+                    });
+                }
+            }
+
+            // The original.
+            log.borrow_mut().clear();
+            ee.set(28, GP);
+            ee.call(fun, &[u64::from(RIDER)], &[f32::from_bits(dt)], BUDGET);
+            let v1 = ee.r(2) as u32;
+            let w1 = written_words(&ee, 0);
+            let want: HashMap<u32, u32> = w1.iter().map(|&a| (a, ee.u32_at(a))).collect();
+            let calls = log.borrow().clone();
+
+            // Back to the inputs, then the port.
+            for &a in &w1 {
+                ee.set_u32(a, word_of(&snapshot, a));
+            }
+            for &(a, v) in &given {
+                ee.set_u32(a, v);
+            }
+            let pre: HashMap<u32, u32> = w1.iter().map(|&a| (a, ee.u32_at(a))).collect();
+            log.borrow_mut().clear();
+            ee.written.clear();
+            let dt = F(f32::from_bits(dt));
+            let v2 = {
+                let mut port = StepPort { ee: &mut ee, log: log.clone(), answer: *answer.borrow() };
+                match what {
+                    "frame" => rider::frame(&mut port, RIDER, dt, None),
+                    "copy" => {
+                        rider::copy_after(&mut port, RIDER);
+                        v1
+                    }
+                    _ => rider::extra_step(&mut port, RIDER, dt),
+                }
+            };
+            let w2 = written_words(&ee, 0);
+            assert_eq!(*log.borrow(), calls, "{what} case {k} ({path:?}): the calls");
+            assert_eq!(v2, v1, "{what} case {k} ({path:?}): the answer");
+            for &a in w1.union(&w2) {
+                let w = want.get(&a).copied().unwrap_or_else(|| pre.get(&a).copied().unwrap_or_else(|| ee.u32_at(a)));
+                let got = ee.u32_at(a);
+                assert_eq!(got, w, "{what} case {k} ({path:?}): the word at {a:#x} ({})", if w2.contains(&a) { "the port wrote it" } else { "only the original wrote it" });
+            }
+            for &a in w1.union(&w2).chain(given.iter().map(|(a, _)| a)) {
+                ee.set_u32(a, word_of(&snapshot, a));
+            }
+            for p in path {
+                *t.entry(format!("{what}: {p}")).or_insert(0) += 1;
+            }
+        }
+    }
+    eprintln!("{t:#?}");
+    for (path, n) in &t {
+        assert!(*n >= 20, "path {path} taken only {n} times");
+    }
+    for path in ["frame: kind 2", "frame: kind 3, switch 0", "frame: kind 3, switch 1", "frame: ask 1, fade", "frame: ask 2, fade from 0", "frame: ask 0, no fade", "frame: none", "extra: down, no time", "extra: down, fast", "extra: up, fast", "extra: up, slow", "copy: no record, on a70 1", "copy: 0xa94 on wrecked", "copy: 0x904 on node"] {
+        assert!(t.contains_key(path), "path {path} never taken");
+    }
+}
