@@ -45,6 +45,13 @@
 //! the on-the-ground and tricking bits [`controls`] and [`plan_trick`] read; on a bump it may roll a
 //! `rand()`, which puts it in the order of the frame's draws.
 //!
+//! [`update`] is the AI tick itself (S281). It runs the stuck clock; then, while the rider is riding,
+//! it runs the copy, the route follower, [`controls`], the steep-climb rule and [`hand_off`] in that
+//! order (the steps it calls go through [`Steps`]). [`hand_off`] gives the bar, lean, gas and brake to
+//! the bike, with the back-up and swerve recovery taking over the levers when they are active.
+//! [`assist`] is the route follower's last step: by the rider's two weights it pulls the body's yaw
+//! rate toward the brain's heading and, on the ground, the body's velocity toward the aim.
+//!
 //! [`seek`] is how an AI rider with no path gets round a free-ride map (S282a): it picks a jump, rides
 //! to its setup point, lines up, launches, and learns from where it landed how to take the jump next
 //! time; each tick it hands the brain the heading and speed [`controls`] rides by.
@@ -1544,6 +1551,254 @@ pub fn read_character(file: Option<&crate::phy::Ini>, skill: i32, difficulty: u8
     get(&mut p.crossup_min_duration, "CrossUpMinDuration");
     get(&mut p.crossup_max_duration, "CrossUpMaxDuration");
     get(&mut p.crossup_min_height, "CrossUpMinHeight");
+}
+
+// --- the AI tick (S281) -------------------------------------------------------------------------------
+
+/// The brain flag bits the tick itself reads or writes (beside [`flag`]'s).
+pub mod tick_flag {
+    /// Last tick's [`super::flag::ON_GROUND`]: the tick copies it here before the rider-to-brain copy
+    /// brings the new one in.
+    pub const WAS_ON_GROUND: u64 = 0x40_0000;
+    /// Ask the bike to run its target-approach set-up (the interface's slot under this bit) after the
+    /// controller. What sets it was not traced; recording2's free09 riders never have it.
+    pub const APPROACH: u64 = 0x20_0000;
+    /// Run the brain's own extra step after the controller. Not traced; free09's riders never have it.
+    pub const EXTRA: u64 = 0x4000;
+    /// At the end of the route follower, aim the bike's ground velocity along the route and hand it to
+    /// the rider assist ([`assist`]). On for all of free09's riders.
+    pub const ASSIST: u64 = 0x800;
+}
+
+/// The mode the brain is in. Only [`RIDE`] runs [`update`]'s riding order; every other mode goes to the
+/// base AI's update instead.
+pub const RIDE: i32 = 5;
+
+/// The interface type that runs [`Climb`]: the motocross bike.
+pub const MOTOCROSS: i32 = 1;
+
+/// The stuck rescue: when a ground-going rider (interface types 1, 2, 3 and 6) holds the throttle open
+/// below [`STUCK_SPEED`] for [`STUCK_TIME`] seconds, the bike is asked to rescue itself.
+pub const STUCK_SPEED: f32 = 10.0;
+pub const STUCK_TIME: f32 = 5.0;
+
+/// The climb rule's clock: [`Climb::timer`] seconds nose-up and slow before the throttle is cut, and the
+/// [`Climb::hold`] it is cut for.
+pub const CLIMB_TIME: f32 = 5.0;
+
+/// The motocross rider's give-up on a climb it cannot make: pointing up steeper than [`Climb::steep`]
+/// and slower than [`Climb::speed`], it leans full forward, and after [`CLIMB_TIME`] of that it cuts the
+/// throttle for as long again.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Climb {
+    /// Seconds left of the cut throttle; 0 or under when it is not cut.
+    pub hold: F,
+    /// The forward axis's height above which the bike counts as climbing.
+    pub steep: F,
+    /// How long it has been climbing slowly.
+    pub timer: F,
+    /// Under this speed a climb counts as slow.
+    pub speed: F,
+}
+
+/// The brain as [`update`] reads and writes it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Brain {
+    /// The interface's type (1 the motocross bike), or `None` with no interface attached.
+    pub kind: Option<i32>,
+    /// The brain's mode; [`RIDE`] for a riding AI.
+    pub mode: i32,
+    /// The flag word ([`flag`], [`tick_flag`]).
+    pub flags: u64,
+    /// The bike's speed and its forward axis's height, as the rider-to-brain copy left them.
+    pub speed: F,
+    pub forward_y: F,
+    /// The stuck clock.
+    pub stuck: F,
+    pub climb: Climb,
+    /// What the controller hands the bike: the bar, the lean, the throttle and the brake.
+    pub steer: F,
+    pub pitch: F,
+    pub throttle: F,
+    pub brake: F,
+}
+
+/// What [`update`] calls out to, in its order. Each one is a piece of the AI ported on its own (or a part
+/// of the bike's that is not yet); the tick decides only when each runs.
+pub trait Steps {
+    /// The bike's stuck rescue.
+    fn rescue(&mut self, brain: &mut Brain);
+    /// The rider-to-brain copy ([`feed`]): the speed, the frame and [`flag::ON_GROUND`] come in here.
+    fn feed(&mut self, brain: &mut Brain);
+    /// The route follower, which also plans tricks and, under [`tick_flag::ASSIST`], ends in
+    /// [`assist_aim`] and [`assist`]. Its answer is ANDed into the tick's.
+    fn route(&mut self, brain: &mut Brain, dt: F) -> bool;
+    /// The controller: [`controls`] on the ground (the flying types have their own).
+    fn controls(&mut self, brain: &mut Brain);
+    /// The bike's target-approach set-up, under [`tick_flag::APPROACH`].
+    fn approach(&mut self, brain: &mut Brain, dt: F);
+    /// The brain's extra step, under [`tick_flag::EXTRA`].
+    fn extra(&mut self, brain: &mut Brain, dt: F);
+    /// The controls into the bike's levers ([`hand_off`]).
+    fn hand_off(&mut self, brain: &mut Brain, dt: F);
+    /// The brain's attached listeners. Its answer is ANDed into the tick's.
+    fn listeners(&mut self, brain: &mut Brain, dt: F) -> bool;
+    /// Any mode but [`RIDE`]: the base AI's update, which is the whole tick then.
+    fn other_mode(&mut self, brain: &mut Brain, dt: F) -> bool;
+}
+
+/// One AI tick of a motocross brain.
+///
+/// First the stuck clock, on last tick's throttle and speed: a ground-going interface (types 1, 2, 3
+/// and 6), the throttle open and the speed under [`STUCK_SPEED`] add `dt`; at [`STUCK_TIME`] the bike is
+/// rescued and the clock starts again; anything else zeroes it.
+///
+/// Then, riding: last tick's ground bit is kept in [`tick_flag::WAS_ON_GROUND`], the rider-to-brain copy,
+/// the route follower, the controller, the two flagged steps, and for the motocross bike the [`Climb`]
+/// rule on what the controller asked for; last, the hand-off to the bike's levers and the listeners.
+/// The bit copy and the copy itself are skipped with no interface; the hand-off is not (the original
+/// would call through a null interface there: a riding brain always has one).
+pub fn update(brain: &mut Brain, steps: &mut dyn Steps, dt: F) -> bool {
+    let ground_going = matches!(brain.kind, Some(1 | 2 | 3 | 6));
+    if !ground_going || op(brain.throttle) <= F(0.0) || !(op(brain.speed) < F(STUCK_SPEED)) {
+        brain.stuck = F(0.0);
+    } else {
+        brain.stuck = brain.stuck + dt;
+        if !(op(brain.stuck) < F(STUCK_TIME)) {
+            steps.rescue(brain);
+            brain.stuck = F(0.0);
+        }
+    }
+    if brain.mode != RIDE {
+        return steps.other_mode(brain, dt);
+    }
+
+    if brain.kind.is_some() {
+        if brain.flags & flag::ON_GROUND != 0 {
+            brain.flags |= tick_flag::WAS_ON_GROUND;
+        } else {
+            brain.flags &= !tick_flag::WAS_ON_GROUND;
+        }
+        steps.feed(brain);
+    }
+    let routed = steps.route(brain, dt);
+    steps.controls(brain);
+    if brain.kind.is_some() && brain.flags & tick_flag::APPROACH != 0 {
+        steps.approach(brain, dt);
+    }
+    if brain.flags & tick_flag::EXTRA != 0 {
+        steps.extra(brain, dt);
+    }
+    if brain.kind == Some(MOTOCROSS) {
+        climb(brain, dt);
+    }
+    steps.hand_off(brain, dt);
+    let heard = steps.listeners(brain, dt);
+    routed & heard
+}
+
+/// A value as a compare reads it: a denormal is 0. The tick's values are copied raw, so they are kept
+/// as they came and only their compares go through this.
+fn op(x: F) -> F {
+    F::from_bits(x.to_bits())
+}
+
+/// The [`Climb`] rule, after the controller: while the cut lasts it counts down and the throttle is
+/// closed; otherwise a slow climb leans the rider full forward and runs the clock, which past
+/// [`CLIMB_TIME`] starts a cut of as long; anything else zeroes the clock.
+fn climb(brain: &mut Brain, dt: F) {
+    let c = &mut brain.climb;
+    if !(op(c.hold) <= F(0.0)) {
+        c.hold = c.hold - dt;
+        brain.throttle = F(0.0);
+    } else if op(brain.forward_y) <= op(c.steep) || !(op(brain.speed) < op(c.speed)) {
+        c.timer = F(0.0);
+    } else {
+        brain.pitch = F(1.0);
+        c.timer = c.timer + dt;
+        if !(op(c.timer) <= F(CLIMB_TIME)) {
+            c.hold = F(CLIMB_TIME);
+        }
+    }
+}
+
+/// The bike's levers the hand-off writes, as the pad read writes them for a human: the stick across and
+/// along (the bar and the lean), the gas, the brake and the reverse.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Levers {
+    pub steer: F,
+    pub lean: F,
+    pub gas: F,
+    pub brake: F,
+    pub reverse: F,
+}
+
+/// The bike's own overrides of the AI's controls, which its hit reactions set and its tick counts down:
+/// backing up, and swerving one way.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Recovery {
+    /// Seconds left backing up.
+    pub back_up: F,
+    /// Seconds left swerving, and the bar it swerves on (±1).
+    pub swerve: F,
+    pub swerve_bar: F,
+}
+
+/// The AI's controls into its bike's levers, once a tick.
+///
+/// With no brain, or not `live` (the rider has no race card, or the score keeper's running bit is
+/// down), the levers are let go — no bar, lean, gas or reverse, the brake full on — and the answer is
+/// false. Otherwise the bar is the brain's (or the swerve's while it lasts) and the lean the brain's;
+/// on the ground the gas and the brake are the brain's, or while backing up the reverse alone; in the
+/// air the brake is let off and the gas and the reverse stay as they were.
+pub fn hand_off(brain: Option<&Brain>, live: bool, recovery: &Recovery, levers: &mut Levers) -> bool {
+    let Some(brain) = brain.filter(|_| live) else {
+        *levers = Levers { brake: F(1.0), ..Levers::default() };
+        return false;
+    };
+    levers.steer = if op(recovery.swerve) <= F(0.0) { brain.steer } else { recovery.swerve_bar };
+    levers.lean = brain.pitch;
+    if brain.flags & flag::ON_GROUND == 0 {
+        levers.brake = F(0.0);
+    } else if op(recovery.back_up) <= F(0.0) {
+        levers.reverse = F(0.0);
+        levers.gas = brain.throttle;
+        levers.brake = brain.brake;
+    } else {
+        levers.reverse = F(1.0);
+        levers.gas = F(0.0);
+        levers.brake = F(0.0);
+    }
+    true
+}
+
+/// The route follower's last step: under [`tick_flag::ASSIST`], the ground velocity the bike is aimed
+/// at, `x` and `z` — the route's direction times its target speed — which [`assist`] then pulls toward.
+pub fn assist_aim(flags: u64, direction: Vf, target_speed: F) -> Option<(F, F)> {
+    (flags & tick_flag::ASSIST != 0).then(|| (F(direction.x()) * target_speed, F(direction.z()) * target_speed))
+}
+
+/// The rider's two assist weights (the character's), each a blend toward the brain's wish per tick.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Weights {
+    /// How much of the brain's heading angle the body's yaw rate takes.
+    pub heading: F,
+    /// How much of the brain's aim the body's ground velocity takes.
+    pub aim: F,
+}
+
+/// The rider assist, the route follower's last call under [`tick_flag::ASSIST`]: the body's yaw rate is
+/// pulled toward the brain's heading angle (the controller's from the tick before), and on the ground the
+/// body's velocity `x` and `z` toward the [`assist_aim`] — `wish·w + own·(1 − w)` on the accumulator.
+/// With both weights 0, as on free09, it changes nothing (bar a −0 yaw rate, which comes out +0).
+pub fn assist(w: &Weights, heading: F, aim: (F, F), on_ground: bool, yaw_rate: &mut F, velocity: &mut Vf) {
+    let keep_aim = F(1.0) - w.aim;
+    *yaw_rate = Acc::mula(heading, w.heading).madd(*yaw_rate, F(1.0) - w.heading);
+    if on_ground {
+        let x = Acc::mula(aim.0, w.aim).madd(velocity.x(), keep_aim);
+        let z = Acc::mula(aim.1, w.aim).madd(velocity.z(), keep_aim);
+        *velocity = Vf::new(x.to_f32(), velocity.y(), z.to_f32(), velocity.w());
+    }
 }
 
 // --- the free-ride target seeker (S282a) -------------------------------------------------------------
