@@ -1587,8 +1587,19 @@ ai_seek_sequence_on         boot 0x004e2658 word: non-zero = targets come from a
 #                                           not found in the ELF; 0 in recording2)
 ai_seek_sequence_root       boot 0x004e2778 pointer: +0x44 -> +0x50 -> +0x48 the sequence list (count
 #                                           +0x30, items +0x38) via 0x003aa630; also the list-build arg
-ai_seek_list_build          boot 0x003a9f10 builds a target set's pick list (+0x11c) when it has none:
-#                                           not ported (ai::seek::Set::picks None)
+ai_seek_list_build          boot 0x003a9f10 (root = ai_seek_sequence_root's word) builds every set's pick
+#                                           list (+0x11c) at once: the first non-null set in root+0x30/+0x38
+#                                           whose +0x54 owner has +0x34 == 1; its position node
+#                                           (+0x3c -> [0] -> +0x18) +0x70; owner vt+0xac(owner,
+#                                           name_bit("HitFreeride"), 0) != 0 -> only groups whose
+#                                           +0x44 byte[owner +0x30] has bit 0. Groups root+0x44 ->
+#                                           +0x30/+0x38, in play at +0x78 == 1, point +0x50; nearest by
+#                                           vsub.xyz + mula/madda/madd, c.olt against 0x7f7fffff (first
+#                                           of equals). Writes it (or 0) to every non-null set. Called
+#                                           from ai_seek_pick 0x003a6ca0 when +0x11c is 0; the pick
+#                                           draws off group+0x48 (count +4, items +0xc) via 0x003aaab0.
+#                                           S306: ported as ai::seek::build, oracled 10,000 worlds and
+#                                           inside the seeker oracle (tests/ai.rs)
 ai_seek_miss_start          boot 0x00426db0 quad (0, 1, 0, 1): the seeker's fresh +0x370 last miss
 ai_seek_path_branch         boot 0x00383a84 inside ai_tick_flag: the path follower's start (state 0 and
 #                                           +0xdc set), S282b. tests/ai.rs stops the seeker oracle here
