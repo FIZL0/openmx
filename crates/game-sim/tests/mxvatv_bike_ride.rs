@@ -9629,8 +9629,10 @@ fn the_parts_box_is_the_originals() {
         for i in 0..16 {
             ee.set_u32(part + 0x130 + 4 * i, draw(&mut g));
         }
+        // The node's two child shorts (+8, +10) are leaves: a random inner child is an index into RAM
+        // past this one node, and one pointing back made a loop tree_in_ram walked until memory ran out.
         for i in 0..9 {
-            ee.set_u32(node + 4 * i, draw(&mut g));
+            ee.set_u32(node + 4 * i, if i == 2 { 0x8000_8000 | g.bits() & 0x7fff_7fff } else { draw(&mut g) });
         }
         for i in 0..8 {
             ee.set_u32(rays + 4 * i, draw(&mut g));
@@ -13410,7 +13412,7 @@ fn sweep_set_points_in_ram(ee: &mut Ee, probe: u32, points: &[[Vf; 2]]) -> Vec<g
 /// its highest leaf.
 fn tree_in_ram(ee: &Ee, nodes: u32, root: u16) -> (Vec<track::Node>, usize) {
     let blank = track::Node { volume: F::ZERO, centre: [F::ZERO; 3], half_extent: [F::ZERO; 3], children: [0, 0] };
-    let (mut out, mut leaves, mut todo) = (Vec::new(), 0, vec![root]);
+    let (mut out, mut seen, mut leaves, mut todo) = (Vec::new(), Vec::new(), 0, vec![root]);
     while let Some(w) = todo.pop() {
         if w & 0x8000 != 0 {
             leaves = leaves.max(usize::from(w & 0x7fff) + 1);
@@ -13419,7 +13421,10 @@ fn tree_in_ram(ee: &Ee, nodes: u32, root: u16) -> (Vec<track::Node>, usize) {
         let n = nodes + 36 * u32::from(w);
         if out.len() <= usize::from(w) {
             out.resize(usize::from(w) + 1, blank);
+            seen.resize(usize::from(w) + 1, false);
         }
+        // A tree reaches each node once; a second visit is a loop, which would grow `todo` forever.
+        assert!(!std::mem::replace(&mut seen[usize::from(w)], true), "node {w} at {nodes:#x} reached twice: not a tree");
         let three = |a: u32| [0, 4, 8].map(|k| word_f(ee, a + k));
         let children = [ee.u16_at(n + 8), ee.u16_at(n + 10)];
         out[usize::from(w)] = track::Node { volume: word_f(ee, n), centre: three(n + 12), half_extent: three(n + 24), children };
