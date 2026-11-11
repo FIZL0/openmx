@@ -11310,6 +11310,32 @@ atv_car_wreck_timer         atv 0x004cd0b0 = the car's wreck timer, vt +0x484 (a
 #   -> +0x700 = 0.
 #   Buggy image: preload 0.25/0/60/2500, launch timer 2.255 start 6.6 time 2.25 scale 6.6 speed 50, one wing
 #   at 0x01628f60, boost 1.0, +0x700 0, record +0x34 0.
+# MD124 — MX Unleashed's tire step in the car's frame (game_sim::atv_car::{tire_step, TireKeys, TireState},
+#   answered by Pieces as Call::TireStep; tests/mxvatv_car_frame.rs tire_step_is_mx_unleasheds and
+#   all_six_pieces_with_the_tire_step_are_mx_unleasheds, 3,000 frames each off md39a/buggy.ee.bin with the
+#   step's hook removed). Journal: research/journal/2026-11-11-md124-mxvatv-car-step.
+atv_tire_step               atv 0x004b5ca0 = a0 tire, f12 h: suspension 0x004b5cf0(tire, h), roll 0x004b62c0 (brake *+0x24), forces 0x004b6400(h)
+atv_tire_contact_velocity   atv 0x004b5740 = point velocity +0x160 (body vel + turn(q, rates x unturn(q, contact - pos)), minus (0,0,0,1)), body velocity +0x170, local +0x180; the stands-on (+0x19c/+0x1a0) mover branches are not ported (Pieces hands such a step to rest)
+atv_tire_frame              atv 0x004b6680 = steer +0x250 != 0: (sin, 0, cos, stack w) of the table's coarse lookup (plain wraps), turned by q; else turn(q, (0,0,1,1) 0x00397010); basis 0x001340b0(+0x260, (0,0,0,1), fwd, normal +0x110, 1, 0); velocity +0x210 = rows . point velocity (transpose + vmulax)
+atv_tire_slip               atv 0x004b6a00 = lock (brake > 0 && ratio > 0x3f733333), spin, fast (> 20) / slow model, camber +0x9ac = -(+0x9b0) * acos lean of car normal +0x120/+0x124, clamps
+atv_tire_surface_force      atv 0x004b70b0 = MXU's combined-slip tire model on surface byte +0xf0's tables, fused (adda 0 / madd) where MXU mul+adds
+#   Body virtuals the step calls: vt +0x84 0x0049c0b0 add force at world point (moment += unturn(q, (p - pos)
+#   x f) * a3, force += f), vt +0x4c 0x0049c540 add velocity (velocity +0x80 and correction +0xd0 both), vt +0x78
+#   0x00497530 add moment, vt +0x80 0x00493ff0 -> 0x00494000 add force.
+#   Tire words (fields as MD39b's keys): +0x24 brake ptr (fronts car+0x1130, rears +0x1134), +0x28 steer ptr
+#   (fronts car+0x113c, rears +0x1140), +0x30 max compression, +0x34/+0x38 max (de)compression rate, +0x3c
+#   spring, +0x40 bounce (v > 0) / +0x44 rebound damping, +0x48 1/inertia, +0x50 max steer, +0x60 drop, +0x70
+#   mount, +0x90 top wheel speed, +0x94 max angle rate, +0x98 ABS, +0x9c/+0xa0 braking slips; +0xcc
+#   compression, +0xd0 last, +0xe0 lever, +0xf0 surface byte, +0x100 ground point, +0x110 normal, +0x130
+#   contact, +0x140 upper, +0x150 lower, +0x190 angle, +0x194 spin, +0x1ac body, +0x1d0 low-speed grip,
+#   +0x1d4 slipping, +0x1d8 sliding, +0x1dc locked, +0x1e0/+0x1e4 torque/last, +0x1e8 radius, +0x1fc slip
+#   ratio, +0x200 slip angle, +0x204 slip tan, +0x220 last velocity, +0x230/+0x240 force/last, +0x2a0 side
+#   ratio; surfaces from +0x5a4 (16 tables of 16: braking torque, wheel friction, c1..c4, a0, a1, a3, 1/a2,
+#   1/a4, moment scale, cornering stiffness, max load, peak, end point), +0x9a4 friction scale.
+#   Consts: bottom ratio 2, lock 0x3f733333, slip/slide 0x3e4ccccd, speeds 20/5, grip 0x3fb33333 * sqrt(100
+#   load), creep 5, atan fit 0x3e8f5c29, clamps half pi / 0x3f7ae148 / camber 0x3db851ec, 4/pi 0x3fa2f983.
+#   Buggy image: fronts max comp 1.6, spring 1000, steer 0.610865, top 293.332, radius 1.1, roll ratio 0.63;
+#   rears 2, 800, 0, 27.15, 1.3, 0.67; ABS 0, slips 0.2/0.3; surface 0 braking torque 1400, peak 3.25/3.7.
 # MD122 — the quad's loader: every word SLUS-21104's loaders leave in the player's quad, its body, record,
 # world, engine and wheels, from its atv_*.phy alone (game_sim::quad::Load::{read, words, params, tune,
 # tune_quad, tune_body}; tests/atv_quad/load.rs the_c28_quads_words_are_their_phy_files: 1994 words an image,
