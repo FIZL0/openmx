@@ -1,4 +1,4 @@
-# 1 — s12 ai path follow branch (PART)
+# 1 — s12 ai path follow branch (FINAL)
 
 Task S309. 2026-11-10.
 
