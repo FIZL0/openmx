@@ -3679,6 +3679,12 @@ pub struct Ride<R = Vec<Call>> {
     pub bike: Bike,
     pub rest: R,
     pub table: crate::air::AcosTable,
+    /// MD123a's: the collision record run before each step ([`Ride::record_on`]); `None`, none runs.
+    pub recorded: Option<Recorded>,
+    /// MD123a's: the frame's tail run after each step ([`Ride::tail_on`]); `None`, none runs.
+    pub tailed: Option<Tailed>,
+    /// MD123a's: the wreck, its clock and the put-back ([`Ride::wreck_on`]); `None`, none runs.
+    pub wrecked: Option<Wrecked>,
 }
 
 /// The quad's physics world: one iteration a substep, at least 115 substeps a second.
@@ -3686,7 +3692,7 @@ pub const WORLD: crate::biplane::World = crate::biplane::World { iterations: 1, 
 
 impl<R: Moto + Default> Ride<R> {
     pub fn new(p: Params, q: Quad, body: crate::atv_body::Body, bike: Bike, rest: R) -> Ride<R> {
-        Ride { p, q, body, bike, rest, table: crate::air::AcosTable::build() }
+        Ride { p, q, body, bike, rest, table: crate::air::AcosTable::build(), recorded: None, tailed: None, wrecked: None }
     }
 
     /// The pad's levers and stick where the pad reader stores them: the gas and brake into the quad,
@@ -3711,14 +3717,27 @@ impl<R: Moto + Default> Ride<R> {
     pub fn frame_on(&mut self, dt: F, world: &mut dyn crate::world::World, segments: [[Vf; 2]; 4]) {
         let b = &mut self.bike.parts.bounds;
         *b = world_bounds(world, b.floor);
-        let cell = std::cell::RefCell::new(world);
-        let ground = |at: Vf, record: &mut u8| world_ground(&mut **cell.borrow_mut(), at, record);
-        self.frame(dt, ground, OnWorld { world: &cell, segments });
+        self.record_on(dt, world);
+        {
+            let cell = std::cell::RefCell::new(&mut *world);
+            let ground = |at: Vf, record: &mut u8| world_ground(&mut **cell.borrow_mut(), at, record);
+            self.frame(dt, ground, OnWorld { world: &cell, segments });
+        }
+        if let Some(r) = &mut self.recorded {
+            // The held list comes back from the steps' bike for the next frame's refill.
+            if let Some(h) = self.bike.contacts.take() {
+                r.held = h;
+            }
+        }
+        self.tail_on(dt);
+        self.wreck_on(dt);
     }
 
     /// One tick as the shell steps it: the controls laid ([`Ride::controls`]), then [`Ride::frame_on`].
+    /// A quad that is down ([`Ride::down`]) has no rider on it: its controls are let go.
     pub fn step(&mut self, c: &crate::ride::Controls, dt: F, world: &mut dyn crate::world::World, segments: [[Vf; 2]; 4]) {
-        self.controls(c);
+        let none = crate::ride::Controls::default();
+        self.controls(if self.down() { &none } else { c });
         self.frame_on(dt, world, segments);
     }
 }
@@ -3727,5 +3746,420 @@ impl Ride<Vec<Call>> {
     /// The first wreck the steps entered since `rest` was last cleared ([`Call::Wreck`], its reason).
     pub fn wreck(&self) -> Option<u8> {
         self.rest.iter().find_map(|c| if let Call::Wreck(r) = c { Some(*r) } else { None })
+    }
+}
+
+// --- MD123a: the collision record and the tail on MX Unleashed's worlds ------------------------------
+
+/// **The collision record's outside on an MX Unleashed world** (MD123a), what
+/// [`crate::handling::record::clear`] and [`crate::handling::record::pass`] ask of a quad on a track
+/// the shell rides, in place of SLUS-21104's part search, sweep and terrain service (MD105's on Desert
+/// Oasis):
+///
+/// - the world rays ([`Collides::search`]): the active part's rays (`rays`, in the scene node's frame)
+///   stood at the node's world frame ([`crate::atv_moto::Scene::tip`]) and swept, sixteen to a bundle,
+///   against everything solid and the placed groups ([`crate::world::World::solid`],
+///   [`crate::world::World::groups`]). A ray that hit is one hit: its segment as the part keeps it,
+///   the world's normal and point, and as what was struck the prop's owner number plus one (0 stays
+///   "nothing") in category 0, with no record and no mover (nothing on an MX Unleashed world has
+///   either);
+/// - the sweep back ([`Collides::sweep`]): the segment swept as one ray against the same, its hit
+///   the nearest;
+/// - the heightfield rays' terrain ([`Collides::under`]): [`crate::world::World::ground`] at the
+///   ray's tip, the surface under it ([`crate::world::World::wheel_surface`], else
+///   [`crate::world::World::surface`]) in all four corners; the terrain's box the world's map edge
+///   ([`world_bounds`]), or everything for a world with none;
+/// - the node's moves ([`Collides::node_place`], [`Collides::node_move`]) the quad's scene's.
+///
+/// The body's damping the clear gives back is kept in `damped` for the caller, who holds the body.
+pub struct RecordOn<'a> {
+    pub world: &'a mut dyn crate::world::World,
+    pub scene: &'a mut crate::atv_moto::Scene,
+    pub rays: &'a [[Vf; 2]],
+    pub damped: Option<(Vf, Vf)>,
+    /// The category every struck prop is given (MX Unleashed's props have none of their own).
+    pub category: u32,
+    /// Another record a hit names: none ever is on an MX Unleashed world, so this is never reached.
+    pub nobody: crate::handling::record::Record,
+}
+
+/// How far the terrain's box reaches on a world with no map edge.
+const NO_EDGE: f32 = 1.0e30;
+
+impl RecordOn<'_> {
+    /// `segments` (world points) swept as ray bundles against the world: per segment, the hit's
+    /// normal, point and owner number, or none.
+    fn sweep_segments(&mut self, segments: &[[Vf; 2]]) -> Vec<Option<(Vf, Vf, i32)>> {
+        use crate::collide::{Bundle, MAX_PROBES, Probe, Record};
+        let mut out = Vec::with_capacity(segments.len());
+        for chunk in segments.chunks(MAX_PROBES) {
+            let centre = chunk[0][0].merge(Dest::W, Vf::VF0);
+            let mut bundle = Bundle { count: chunk.len(), centre, ..Bundle::default() };
+            let mut radius = F::ZERO;
+            for (k, [a, b]) in chunk.iter().enumerate() {
+                bundle.probes[k] = Probe::between(*a, *b);
+                for p in [a, b] {
+                    let d = p.sub(centre);
+                    let r = F(fpu::sqrt(fpu::madd(fpu::madda(fpu::mula(d.x(), d.x()), d.y(), d.y()), d.z(), d.z())));
+                    if r > radius {
+                        radius = r;
+                    }
+                }
+            }
+            bundle.radius = radius;
+            let mut record = Record::new();
+            self.world.solid(&bundle, &mut record);
+            self.world.groups(&bundle, &mut record);
+            out.extend((0..chunk.len()).map(|k| record.hit[k].then(|| (record.normal[k], record.point[k], record.owner[k]))));
+        }
+        out
+    }
+}
+
+impl crate::handling::record::Collides for RecordOn<'_> {
+    fn damp(&mut self, linear: Vf, angular: Vf) {
+        self.damped = Some((linear, angular));
+    }
+    fn node_rotate(&mut self, v: Vf) -> Vf {
+        self.scene.turn(0, v)
+    }
+    fn node_position(&mut self) -> Vf {
+        self.scene.tip(0, Vf::new(0.0, 0.0, 0.0, 1.0))
+    }
+    fn node_place(&mut self, v: Vf) -> Vf {
+        self.scene.tip(0, v)
+    }
+    fn node_move(&mut self, at: Vf) {
+        // The quad's node has no parent: the move is always made.
+        let _ = self.scene.set_position(0, at);
+    }
+    fn node_up(&self) -> [F; 3] {
+        let w = &self.scene.nodes[0].world;
+        [F(w[0].y()), F(w[1].y()), F(w[2].y())]
+    }
+    fn chassis_velocity(&self) -> Vf {
+        Vf::ZERO
+    }
+    fn sweep(&mut self, from: Vf, to: Vf, _nearby: bool) -> Option<crate::handling::record::Swept> {
+        let (normal, point, owner) = self.sweep_segments(&[[from, to]])[0]?;
+        let struck = crate::handling::record::Struck { object: (owner as u32).wrapping_add(1), category: self.category, ..Default::default() };
+        Some(crate::handling::record::Swept { normal, point, struck })
+    }
+    fn place_part(&mut self) {
+        // The rays are stood at the node's frame when they are searched.
+    }
+    fn part_rays(&self) -> Vec<[Vf; 2]> {
+        self.rays.to_vec()
+    }
+    fn search(&mut self, _nearby: bool) -> Vec<crate::handling::record::Hit> {
+        let rays = self.rays;
+        let stood: Vec<[Vf; 2]> = rays.iter().map(|[a, b]| [self.scene.tip(0, *a), self.scene.tip(0, *b)]).collect();
+        let hits = self.sweep_segments(&stood);
+        rays.iter()
+            .zip(hits)
+            .filter_map(|(&[from, to], h)| {
+                let (normal, point, owner) = h?;
+                let struck = crate::handling::record::Struck { object: (owner as u32).wrapping_add(1), category: self.category, ..Default::default() };
+                Some(crate::handling::record::Hit { from, to, normal, point, struck })
+            })
+            .collect()
+    }
+    fn terrain_box(&self) -> [Vf; 2] {
+        match world_bounds(&*self.world, F::ZERO).area {
+            Some((lo, hi)) => [lo, hi],
+            None => [Vf::splat(fpu::neg(NO_EDGE)), Vf::splat(NO_EDGE)],
+        }
+    }
+    fn under(&mut self, g: &mut crate::contact_search::Ground) {
+        let at = g.point;
+        let (point, normal) = self.world.ground(at);
+        let s = match self.world.wheel_surface(at) {
+            Some(s) => s,
+            None => self.world.surface(at),
+        };
+        (g.point, g.normal, g.surfaces) = (point, normal, [s; 4]);
+    }
+    fn velocity(&mut self, _s: &crate::handling::record::Struck) -> Vf {
+        Vf::ZERO
+    }
+    fn other(&mut self, _id: u32) -> &mut crate::handling::record::Record {
+        &mut self.nobody
+    }
+}
+
+/// **The quad's collision record on an MX Unleashed world** (MD123a), as [`Ride`] keeps it: the
+/// record ([`crate::handling::record::Record`]), its resolution's fields and list
+/// ([`crate::atv_contact::Held`], refilled from each pass), the riding rays and the wreck rays (each
+/// in the scene node's frame) and which of the two the record runs on ([`Rays`], [`swap_rays`]).
+#[derive(Clone, Debug)]
+pub struct Recorded {
+    pub record: crate::handling::record::Record,
+    pub held: crate::atv_contact::Held,
+    pub riding: Vec<[Vf; 2]>,
+    pub wreck: Vec<[Vf; 2]>,
+    pub rays: Rays,
+}
+
+impl Recorded {
+    /// The rays the record runs on: the wreck rays once [`swap_rays`] put them in, else the riding.
+    pub fn active(&self) -> &[[Vf; 2]] {
+        if self.rays.active == self.rays.wreck && self.rays.wreck != self.rays.riding { &self.wreck } else { &self.riding }
+    }
+}
+
+/// **The quad's frame tail on an MX Unleashed world** (MD123a), as [`Ride`] keeps it: the update's
+/// words ([`Tail`]), the vehicle's words its hazard clock keeps ([`crate::handling::tail::Vehicle`]:
+/// free, stuck, the stuck clock, the run's flags) and the put-back's ([`PutBack`]).
+#[derive(Clone, Debug, Default)]
+pub struct Tailed {
+    pub tail: Tail,
+    pub vehicle: crate::handling::tail::Vehicle,
+    pub put_back: PutBack,
+}
+
+/// The hazard clock's outside ([`crate::handling::tail::stuck`]): the vehicle's words, and the
+/// put-backs it asks for, counted.
+struct Clock<'a> {
+    v: &'a mut crate::handling::tail::Vehicle,
+    put_backs: u32,
+}
+
+impl crate::handling::tail::Vehicles for Clock<'_> {
+    fn vehicle(&mut self) -> &mut crate::handling::tail::Vehicle {
+        self.v
+    }
+    fn skipped(&mut self) -> bool {
+        false
+    }
+    fn paused(&mut self) -> bool {
+        false
+    }
+    fn rumble_ready(&mut self) -> bool {
+        false
+    }
+    fn word(&mut self, _at: u32) -> u32 {
+        0
+    }
+    fn out(&mut self, c: crate::handling::tail::Out, _dt: F) {
+        // The hazard clock asks only for the put-back.
+        if c == crate::handling::tail::Out::PutBack {
+            self.put_backs += 1;
+        }
+    }
+}
+
+/// The tail's calls on an MX Unleashed world: the hazard surface answered by the vehicle's hazard
+/// clock ([`crate::handling::tail::stuck`]), its put-back by [`put_back`] (place and keep set, as the
+/// clock asks it); every other call handed to `rest`.
+struct TailOn<'a, R> {
+    vehicle: &'a mut crate::handling::tail::Vehicle,
+    put_back: &'a mut PutBack,
+    on: PutOn<'a, R>,
+}
+
+impl<R: Moto> Moto for TailOn<'_, R> {
+    fn call(&mut self, c: Call, q: &mut Quad, body: &mut Body) {
+        match c {
+            Call::HazardSurface { dt, time, sunk } => {
+                let mut clock = Clock { v: self.vehicle, put_backs: 0 };
+                crate::handling::tail::stuck(&mut clock, sunk, dt, time);
+                for _ in 0..clock.put_backs {
+                    put_back(self.put_back, q, body, true, true, &mut self.on);
+                }
+            }
+            c => self.on.rest.call(c, q, body),
+        }
+    }
+}
+
+/// The put-back's calls on an MX Unleashed world: the vehicle's put-back
+/// ([`Call::VehiclePutBack`]) answered by standing the body still at the spot kept (where it, its
+/// orientation; [`Wrecked::spot`]), or where it is for none; every other call handed to `rest`.
+struct PutOn<'a, R> {
+    spot: Option<(Vf, Vf)>,
+    rest: &'a mut R,
+}
+
+impl<R: Moto> Moto for PutOn<'_, R> {
+    fn call(&mut self, c: Call, q: &mut Quad, body: &mut Body) {
+        match c {
+            Call::VehiclePutBack { .. } => {
+                if let Some((at, turn)) = self.spot {
+                    (body.position, body.orientation) = (at, turn);
+                }
+                (body.velocity, body.ang_vel, body.force, body.moment) = (Vf::ZERO, Vf::ZERO, Vf::ZERO, Vf::ZERO);
+                self.rest.call(c, q, body);
+            }
+            c => self.rest.call(c, q, body),
+        }
+    }
+}
+
+/// **The quad's wreck on an MX Unleashed world** (MD123a), as [`Ride`] keeps it: the reason it is
+/// down for (`0` riding), the clock it is down for, `MaxWreckTime`, the struck class the reason-15
+/// test masks a struck object's category with and the category an MX Unleashed prop is given, and the
+/// spot it is put back to (the last place it stood on all four wheels, and its orientation there)
+/// with where its scene node was then.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Wrecked {
+    pub reason: u8,
+    pub clock: F,
+    pub max_time: F,
+    pub class: u32,
+    pub category: u32,
+    pub spot: Option<(Vf, Vf)>,
+    pub node: Vf,
+}
+
+impl<R: Moto + Default> Ride<R> {
+    /// **The collision record's clear and pass** (MD123a, [`crate::handling::record::clear`] and
+    /// [`crate::handling::record::pass`] on [`RecordOn`]), before the steps: the pass's contacts into
+    /// the held list ([`crate::atv_contact::Held::refill`]) the gravity's call resolves
+    /// ([`Bike::contacts`]), the record's touch and its struck object's class into [`Bike::touching`]
+    /// and [`Bike::struck_class`], and the damping the clear gives the body.
+    pub fn record_on(&mut self, dt: F, world: &mut dyn crate::world::World) {
+        let Some(r) = self.recorded.as_mut() else { return };
+        let (class, category) = self.wrecked.as_ref().map_or((0, 0), |w| (w.class, w.category));
+        let rays = r.active().to_vec();
+        let mut on = RecordOn { world, scene: &mut self.bike.parts.scene, rays: &rays, damped: None, category, nobody: Default::default() };
+        crate::handling::record::clear(&mut r.record, &mut on);
+        let mut view = self.body.view();
+        let body = if r.record.body { Some(&mut view) } else { None };
+        // `me` names the record to another one's contact: there is no other on an MX Unleashed world.
+        crate::handling::record::pass(&mut r.record, 1, body, dt, &mut on);
+        if let Some((linear, angular)) = on.damped {
+            (self.body.damping, self.body.ang_damping) = (linear, angular);
+        }
+        self.body.set_view(&view);
+        // A contact is never with another record or a mover here, so the refill always holds.
+        r.held.refill(&r.record.contacts);
+        self.bike.contacts = Some(r.held.clone());
+        self.bike.touching = r.record.touching;
+        self.bike.struck_class = r.record.touching && r.record.struck != 0 && category & class != 0;
+    }
+
+    /// **The frame's tail** (MD123a, [`update`] on [`Tailed`]), after the steps: the wheels' surfaces,
+    /// sunk flags and squeezes and the node's up and forward rows laid from the bike, then the update
+    /// with its hazard surface answered by the vehicle's hazard clock and the clock's put-back by
+    /// [`put_back`] ([`TailOn`]). Its other calls go to `rest`: the vehicle update
+    /// ([`Call::BikeVehicleUpdate`], which the steps ran already), the rumble, the stunts' start and
+    /// end, the countdown's three and the post.
+    pub fn tail_on(&mut self, dt: F) {
+        let Some(t) = self.tailed.as_mut() else { return };
+        let b = &self.bike;
+        t.tail.wheel_surface = b.more.map(|m| m.record);
+        t.tail.wheel_sunk = b.wheels.map(|w| w.ray_hit != 0);
+        t.tail.wheel_squeeze = b.wheels.map(|w| w.compression);
+        let node = &b.parts.scene.nodes[0].world;
+        (t.tail.node_up, t.tail.node_forward) = (node[1], node[2]);
+        let spot = self.wrecked.as_ref().and_then(|w| w.spot);
+        let mut view = self.body.view();
+        let mut m = TailOn { vehicle: &mut t.vehicle, put_back: &mut t.put_back, on: PutOn { spot, rest: &mut self.rest } };
+        update(&mut t.tail, &mut self.q, &mut view, dt, &mut m);
+        self.body.set_view(&view);
+    }
+
+    /// **The swap between the riding and the wreck rays** ([`swap_rays`]) on the record's rays, the
+    /// one swapped to in the world already.
+    pub fn swap(&mut self, wrecked: bool) {
+        let Some(r) = self.recorded.as_mut() else { return };
+        let mut view = self.body.view();
+        swap_rays(&mut r.rays, wrecked, true, &mut self.q, &mut view, &mut self.rest);
+        self.body.set_view(&view);
+    }
+
+    /// **The wreck, its clock and the put-back** (MD123a), after the tail: riding, reason 15 asked
+    /// as the backflip asks it ([`crate::handling::step::flip_wreck_steep`]: the record touching a
+    /// struck-class object, and airborne or the loads past their limits); a wreck is told to `rest`
+    /// ([`Call::Wreck`]), swaps the wreck rays in and starts the clock at `MaxWreckTime`. Down, the
+    /// clock counts and, run out, swaps the riding rays back and puts the quad back ([`put_back`],
+    /// place and keep set) at the spot kept. Riding on all four wheels keeps the spot.
+    pub fn wreck_on(&mut self, dt: F) {
+        let Some(w) = self.wrecked.as_mut() else { return };
+        let mut view = self.body.view();
+        if w.reason == 0 {
+            let loads = crate::air::Loads { side: F(self.q.attitude.x()), fore_aft: F(self.q.attitude.z()), ..Default::default() };
+            if crate::handling::step::flip_wreck_steep(&self.bike.air_keys, self.bike.struck_class, self.q.airborne, &loads) {
+                const STRUCK: u8 = crate::air::Wreck::Struck as u8;
+                (w.reason, w.clock) = (STRUCK, w.max_time);
+                self.rest.call(Call::Wreck(STRUCK), &mut self.q, &mut view);
+                self.body.set_view(&view);
+                self.swap(true);
+            } else if self.q.all_down {
+                (w.spot, w.node) = (Some((view.position, view.orientation)), self.bike.parts.scene.nodes[0].world[3]);
+            }
+            return;
+        }
+        w.clock = F(fpu::sub(w.clock.0, dt.0));
+        if w.clock > F::ZERO {
+            return;
+        }
+        (w.reason, w.clock) = (0, F::ZERO);
+        let (spot, node) = (w.spot, w.node);
+        self.swap(false);
+        let mut view = self.body.view();
+        let mut own = PutBack::default();
+        let pb = match self.tailed.as_mut() {
+            Some(t) => &mut t.put_back,
+            None => &mut own,
+        };
+        put_back(pb, &mut self.q, &mut view, true, true, &mut PutOn { spot, rest: &mut self.rest });
+        self.body.set_view(&view);
+        (self.body.last_position, self.body.last_quat) = (self.body.position, self.body.quat);
+        self.bike.parts.last_position = self.body.position;
+        if let Some((_, turn)) = spot {
+            self.bike.parts.scene.place(0, turn, node);
+        }
+    }
+
+    /// Whether the quad is down ([`Wrecked::reason`]).
+    pub fn down(&self) -> bool {
+        self.wrecked.as_ref().is_some_and(|w| w.reason != 0)
+    }
+}
+
+/// The wreck body's calls on an MX Unleashed world: the wreck rays' load ([`Call::PartLoad`] of
+/// [`Part::Wreck`]) answered with `file`'s segments, every other call handed to `rest`.
+struct WreckLoad<'a, R> {
+    file: &'a crate::track::Rays,
+    loaded: Option<Vec<[Vf; 2]>>,
+    rest: &'a mut R,
+}
+
+impl<R: Moto> Moto for WreckLoad<'_, R> {
+    fn call(&mut self, c: Call, q: &mut Quad, body: &mut Body) {
+        match c {
+            Call::PartLoad(Part::Wreck) => self.loaded = Some(crate::flight_search::Rays::of(self.file).pairs()),
+            c => self.rest.call(c, q, body),
+        }
+    }
+}
+
+impl<R: Moto + Default> Ride<R> {
+    /// **The wreck body built** (MD123a, [`build_wreck_body`]) for the collision record: the wreck
+    /// rays loaded from `file` (the quad's [`WRECK_FILE`], parsed with
+    /// [`crate::track::Rays::parse`]) into [`Recorded::wreck`], and the record's rays left on the
+    /// riding ones with the wreck rays' handle (`wreck`) to swap to ([`Ride::swap`]). The other calls
+    /// (the two parts made, flagged, readied and hung) go to `rest`. Nothing is done without a record.
+    #[allow(clippy::too_many_arguments)] // build_wreck_body's inputs and the file
+    pub fn build_wreck(
+        &mut self,
+        w: &mut WreckBody,
+        file: &crate::track::Rays,
+        trigger: u32,
+        wreck: u32,
+        actor: u32,
+        category: impl FnMut(&str) -> u32,
+    ) {
+        let Some(r) = self.recorded.as_mut() else { return };
+        let mut view = self.body.view();
+        let mut m = WreckLoad { file, loaded: None, rest: &mut self.rest };
+        build_wreck_body(w, trigger, wreck, actor, category, &mut self.q, &mut view, &mut m);
+        if let Some(rays) = m.loaded {
+            r.wreck = rays;
+        }
+        let riding = w.riding_kept;
+        r.rays = Rays { active: riding, active_too: riding, record: riding, wreck: w.wreck.handle, riding };
+        self.body.set_view(&view);
     }
 }
