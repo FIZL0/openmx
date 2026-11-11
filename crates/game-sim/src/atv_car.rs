@@ -446,6 +446,8 @@ pub struct Keys {
     pub brake_gyro_torque: F,
     /// The wings the aero steps: `NumberOfWings` of them (none when the count is not positive).
     pub wings: Vec<Wing>,
+    /// Each tire's keys (MD124).
+    pub tires: [TireKeys; 4],
 }
 
 /// The preload's state: it may wind up, it is pushing, it is armed by a forward lean; the wind-up
@@ -490,11 +492,17 @@ pub struct State {
     pub launch_timer: F,
     pub launch_start: F,
     pub launch_boost: F,
+    /// The steer words the tires' steer pointers read, the fronts' and the rears' (MD124), and each
+    /// tire's own state.
+    pub steer: F,
+    pub rear_steer: F,
+    pub tires: [TireState; 4],
 }
 
 /// **The car's [`Steps`] with MX Unleashed's pieces ported** (MD106a), as SLUS-21104 builds them: the
-/// centre of mass's travel, the anti-slide, the preload, the launch and the aero, run on
-/// [`Keys`] and [`State`]. Every other call, and the preload's cue, goes to `rest`.
+/// centre of mass's travel, the anti-slide, the preload, the launch and the aero, and (MD124) each
+/// tire's step ([`tire_step`]), run on [`Keys`] and [`State`]. Every other call, the preload's cue,
+/// and a tire step on or handed a mover's contact, goes to `rest`.
 pub struct Pieces<R> {
     pub keys: Keys,
     pub state: State,
@@ -522,6 +530,16 @@ impl<R: Steps> Pieces<R> {
             }
             Call::Launch(h) => launch(&self.keys, &mut self.state, car, h),
             Call::Aero(_) => aero(&self.keys, &self.state, car, body),
+            Call::TireStep(i, h) => {
+                // What stands on a mover (its velocity and its contact list) is the rest's.
+                let t = car.tires[i];
+                if t.stands_on != [0, 0] || (t.handed && t.handed_on != [0, 0]) {
+                    return false;
+                }
+                let mut s = self.state.tires[i];
+                tire_step(&self.keys.tires[i], &mut car.tires[i], &mut s, &self.state, car.cofg, body, h);
+                self.state.tires[i] = s;
+            }
             _ => return false,
         }
         true
@@ -1017,4 +1035,451 @@ pub fn unwreck(v: &mut Vehicle, car: &mut Car, body: &mut Body, s: &mut impl Ste
         v.inertia = set_inertia(v, body, own);
     }
     s.call(Call::Cue(13), car, body);
+}
+
+// --- MX Unleashed's tire step (MD124) ----------------------------------------------------------------
+
+/// Which of the car's lever words a tire's brake or steer pointer reads ([`State`]'s `brake`,
+/// `brake_force`, `steer` and `rear_steer`): the fronts' brake reads the brake and their steer the
+/// steer, the rears' the brake force and the rear steer. `None` is a null pointer, which skips the
+/// read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lever {
+    Brake,
+    BrakeForce,
+    Steer,
+    RearSteer,
+}
+
+/// One tire's keys, as MD39b maps them: its suspension, wheel and tire model, with its sixteen
+/// surfaces.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TireKeys {
+    pub brake: Option<Lever>,
+    pub steer: Option<Lever>,
+    pub max_compression: F,
+    pub max_compression_rate: F,
+    pub max_decompression_rate: F,
+    pub spring: F,
+    /// The damping while the contact moves away from the ground (`v > 0`), and towards it.
+    pub bounce_damping: F,
+    pub rebound_damping: F,
+    pub inv_inertia: F,
+    pub max_steer_angle: F,
+    /// The wheel's travel from its mount, and the mount, in the car's frame.
+    pub drop: Vf,
+    pub mount: Vf,
+    pub top_wheel_speed: F,
+    pub max_tire_angle_rate: F,
+    /// The ABS word, non-zero.
+    pub abs: bool,
+    pub min_braking_slip: F,
+    pub max_braking_slip: F,
+    pub radius: F,
+    pub friction_scale: F,
+    pub camber_roll_ratio: F,
+    pub surfaces: [crate::car::Surface; 16],
+}
+
+/// What one tire's step reads and writes besides [`Tire`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TireState {
+    /// The surface index (a byte) and the probe's ground point and normal under the tire.
+    pub surface: u8,
+    pub ground_point: Vf,
+    pub ground_normal: Vf,
+    /// The car's normal's `x` and `y` in the tire's frame, the camber's lean.
+    pub car_normal: [F; 2],
+    pub compression: F,
+    pub last_compression: F,
+    pub lever: Vf,
+    pub contact: Vf,
+    pub upper: Vf,
+    pub lower: Vf,
+    pub point_velocity: Vf,
+    pub body_velocity: Vf,
+    pub angle: F,
+    pub spin: F,
+    pub low_speed_grip: bool,
+    pub slipping: bool,
+    pub sliding: bool,
+    pub locked: bool,
+    pub torque: F,
+    pub last_torque: F,
+    pub slip_ratio: F,
+    pub slip_angle: F,
+    pub slip_tan: F,
+    /// The contact's velocity in the tire's frame, and the last one the low-speed grip compared.
+    pub velocity: Vf,
+    pub last_velocity: Vf,
+    /// The tire's force in its own frame, and the last.
+    pub force: Vf,
+    pub last_force: Vf,
+    pub steer: F,
+    pub frame: [Vf; 4],
+    pub side_ratio: F,
+    pub camber: F,
+}
+
+/// The engine's sine and arc cosine tables, built once as the startup code builds them.
+fn tables() -> &'static (crate::camera::CurveTable, AcosTable) {
+    static TABLES: std::sync::OnceLock<(crate::camera::CurveTable, AcosTable)> = std::sync::OnceLock::new();
+    TABLES.get_or_init(|| (crate::camera::CurveTable::build(), AcosTable::build()))
+}
+
+const INV_TWO_PI: u32 = 0x3e22_f983;
+const TWO_PI: u32 = 0x40c9_0fdb;
+const PI: u32 = 0x4049_0fdb;
+const HALF_PI: u32 = 0x3fc9_0fdb;
+/// The straight wheel's heading, `(0, 0, 1, 1)`.
+const AHEAD: Vf = Vf([0.0, 0.0, 1.0, 1.0]);
+/// A tire bottomed out past its travel only pushes the body back up when it stands on something
+/// solid or its contact is within this many travels.
+const BOTTOM_RATIO: f32 = 2.0;
+/// Braking past this slip locks the wheel.
+const LOCK_SLIP: u32 = 0x3f73_3333; // 0.95
+/// Past this slip ratio the wheel is slipping, and past this slip angle sliding.
+const SLIP: u32 = 0x3e4c_cccd; // 0.2
+/// The slip's own model below this speed along the tire; the low-speed grip below the second.
+const FAST_SLIP_SPEED: f32 = 20.0;
+const GRIP_SPEED: f32 = 5.0;
+const GRIP_SCALE: u32 = 0x3fb3_3333; // 1.4
+const GRIP_LOAD: f32 = 100.0;
+/// The slip ratio's relaxation rate, and the arc tangent's fit.
+const CREEP_RATE: f32 = 5.0;
+const ATAN_FIT: u32 = 0x3e8f_5c29; // 0.28
+const MAX_SLIP_RATIO: u32 = 0x3f7a_e148; // 0.98
+const MAX_CAMBER: u32 = 0x3db8_51ec; // 0.09
+/// `4 / pi`, the friction curve's linear term.
+const FOUR_OVER_PI: u32 = 0x3fa2_f983;
+
+fn bits(b: u32) -> F {
+    F(f32::from_bits(b))
+}
+
+/// `x` held inside −1..1 by the original's pair of selects, the high test first.
+fn clamp_unit(x: F) -> F {
+    if x <= 1.0 {
+        if x >= -1.0 { x } else { F(-1.0) }
+    } else {
+        F::ONE
+    }
+}
+
+/// An angle wrapped once into `-pi..pi` as the inlined wraps do it: the whole turns off through
+/// `adda.s`/`msub.s`, then one subtraction or addition.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's `c.ole.s` branched on false
+fn wrap(a: F) -> F {
+    let turns = F::from((bits(INV_TWO_PI) * a).to_i32());
+    let a = Acc::adda(F::ZERO, a).msub(bits(TWO_PI), turns);
+    if !(a <= bits(PI)) {
+        a - bits(TWO_PI)
+    } else if a < -bits(PI) {
+        bits(TWO_PI) + a
+    } else {
+        a
+    }
+}
+
+/// The body's add-force-at (its vt `+0x84`): the force, and its moment about the centre of mass
+/// turned into the body's frame and scaled lane by lane.
+fn add_force_at(body: &mut Body, f: Vf, p: Vf, scale: Vf) {
+    let r = minus(p, body.position);
+    let c = r.merge(Dest::XYZ, Vf::opmsub(Vf::opmula(r, f), f, r));
+    let m = crate::biplane::unturn(body.quat, c);
+    body.moment = plus(body.moment, m.merge(Dest::XYZ, m.mul(scale)));
+    body.force = plus(body.force, f);
+}
+
+/// The body's add-velocity (its vt `+0x4c`): into the velocity and the correction both.
+fn add_velocity(body: &mut Body, v: Vf) {
+    body.velocity = plus(body.velocity, v);
+    body.correction = plus(body.correction, v);
+}
+
+/// The contact's velocity: the body's, with its rates' spin about the centre of mass at the contact;
+/// and the body's alone, in the world and in the body's frame.
+fn contact_velocity(t: &mut Tire, s: &mut TireState, body: &Body) {
+    let q = body.quat;
+    let local = crate::biplane::unturn(q, minus(s.contact, body.position));
+    let r = body.rates;
+    let spin = r.merge(Dest::XYZ, Vf::opmsub(Vf::opmula(r, local), local, r));
+    s.point_velocity = minus(plus(body.velocity, crate::chassis::turn(q, spin)), CLEAR);
+    s.body_velocity = minus(body.velocity, CLEAR);
+    t.local_velocity = crate::biplane::unturn(q, s.body_velocity);
+}
+
+/// **The suspension**: the wheel's travel from its mount down to its drop, in the world; where the
+/// ground's plane cuts it, the contact and the compression. Compressed, the tire is down: bottomed
+/// past its travel, the body is pushed out along the normal and its velocity into the ground taken
+/// off (on something solid, or near), and the compression held at the travel; then the spring less
+/// the damper (clamped rate) is the load, pushed at the contact. Not down, the rears take what the
+/// fronts handed them. Last, the compression eases back no faster than the decompression rate.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's `c.ole.s` branched on false
+fn suspension(k: &TireKeys, t: &mut Tire, s: &mut TireState, cofg: Vf, body: &mut Body, h: F) {
+    s.compression = F::ZERO;
+    t.grounded = false;
+    let mut ratio = F::ZERO;
+    let q = body.quat;
+    let n = s.ground_normal;
+    if t.solid || t.sorted {
+        s.upper = plus(crate::chassis::turn(q, minus(k.mount, cofg)), body.position);
+        s.lever = minus(plus(k.mount, k.drop), cofg);
+        s.lower = plus(crate::chassis::turn(q, s.lever), body.position);
+        let travel = minus(s.upper, s.lower);
+        let along = dot(travel, n);
+        if !(along <= 0.0) {
+            ratio = dot(minus(s.ground_point, s.lower), n) / along;
+            if !(ratio <= 0.0) {
+                s.contact = plus(scaled(travel, ratio), s.lower);
+                let d = minus(s.contact, s.lower);
+                s.compression = dot(d, d).sqrt();
+            }
+        }
+        if !(s.compression <= 0.0) {
+            t.grounded = true;
+            contact_velocity(t, s, body);
+            let max = k.max_compression;
+            if !(s.compression <= max) {
+                if t.solid || ratio < BOTTOM_RATIO {
+                    let push = (s.compression - max).max(F::ZERO).min(max);
+                    body.position = plus(body.position, scaled(n, push));
+                    let into = dot(s.body_velocity, n).min(F::ZERO);
+                    add_velocity(body, scaled(n, -into));
+                }
+                s.compression = max;
+                contact_velocity(t, s, body);
+            }
+            let rate = k.max_compression_rate;
+            let v = dot(s.point_velocity, n).max(-rate).min(rate);
+            let damper = if v <= 0.0 { k.rebound_damping } else { k.bounce_damping };
+            t.load = F::ZERO.max(Acc::mula(k.spring, s.compression).msub(damper, v));
+            add_force_at(body, scaled(n, t.load), s.contact, ONES);
+        }
+    }
+    if !t.grounded {
+        if t.handed {
+            t.load = t.handed_load;
+            t.stands_on = t.handed_on;
+            s.lever = plus(k.mount, k.drop);
+            s.lower = crate::chassis::turn(q, s.lever);
+            contact_velocity(t, s, body);
+        } else {
+            t.load = F::ZERO;
+            s.point_velocity = CLEAR;
+        }
+    }
+    let last = s.last_compression;
+    if s.compression < last {
+        s.compression = last - (last - s.compression).min(k.max_decompression_rate * h);
+    }
+    s.last_compression = s.compression.min(k.max_compression);
+}
+
+/// **The roll**: the surface's wheel friction against half the spin (clamped to ±1), and braked, the
+/// surface's braking torque against it too, eased off by the ABS between the braking slips.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's `c.ole.s` branched on false
+fn roll(k: &TireKeys, t: &Tire, s: &mut TireState, brake: Option<F>) {
+    let sf = &k.surfaces[usize::from(s.surface) & 15];
+    let half = (F(0.5) * s.spin).max(F(-1.0)).min(F::ONE);
+    s.torque = Acc::adda(F::ZERO, s.torque).madd(-half, sf.wheel_friction);
+    if let Some(b) = brake
+        && !(b <= 0.0)
+    {
+        let mut scale = F::ONE;
+        let (lo, hi) = (k.min_braking_slip, k.max_braking_slip);
+        if k.abs && t.grounded && lo != hi {
+            let along = (s.slip_ratio.abs() - lo) / (hi - lo);
+            scale = Acc::adda(F::ZERO, F::ONE).madd(along, F(-1.0)).max(F::ZERO).min(F::ONE);
+        }
+        s.torque = Acc::adda(F::ZERO, s.torque).madd(sf.max_braking_torque, half * (scale * -b.max(F::ZERO)));
+    }
+}
+
+/// **The slip**: braked hard past [`LOCK_SLIP`] the wheel locks, else it spins up by the torque less
+/// the ground's pull (capped at its top speed). Fast along the tire, the slip angle and ratio come
+/// straight from the velocity; slow, the low-speed grip holds a crawling tire still, and both relax
+/// towards the velocity's instead. Then the camber off the car's lean, and the clamps.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's `c.ole.s` branched on false
+fn slip(k: &TireKeys, t: &Tire, s: &mut TireState, brake: Option<F>, h: F) {
+    let (curve, acos) = tables();
+    let (lat, fwd) = (F(s.velocity.x()), F(s.velocity.z()));
+    let speed = fwd.abs();
+    if brake.is_some_and(|b| !(b <= 0.0)) && !(s.slip_ratio <= bits(LOCK_SLIP)) {
+        s.slipping = false;
+        s.locked = true;
+        s.spin = F::ZERO;
+    } else {
+        s.slipping = !(s.slip_ratio.abs() <= bits(SLIP));
+        s.locked = false;
+        let top = k.top_wheel_speed;
+        let pull = k.inv_inertia * (s.torque - F(s.last_force.z()) * k.radius);
+        s.spin = Acc::adda(F::ZERO, s.spin).madd(pull, h).max(-top).min(top);
+    }
+    if !(speed <= FAST_SLIP_SPEED) {
+        let cos = speed * F::ONE.rsqrt(Acc::mula(speed, speed).madd(lat, lat));
+        let angle = acos.at(clamp_unit(clamp_unit(cos)));
+        s.slip_angle = if lat < 0.0 { -angle } else { angle };
+        s.slip_ratio = Acc::adda(F::ZERO, fwd).msub(s.spin, k.radius) / speed;
+        let (c, sn) = curve.coarse(wrap(wrap(s.slip_angle)));
+        s.slip_tan = sn / c;
+    } else {
+        if speed < GRIP_SPEED && F(s.last_velocity.x()) * lat < 0.0 {
+            s.low_speed_grip = true;
+        } else if !(speed <= GRIP_SPEED) {
+            s.low_speed_grip = false;
+        }
+        s.last_velocity = s.velocity;
+        if s.low_speed_grip {
+            let grip = (F(GRIP_LOAD) * t.load).sqrt();
+            s.force.0[0] = Acc::adda(F::ZERO, s.force.x()).msub(bits(GRIP_SCALE) * lat, grip).0;
+        }
+        s.slip_tan = Acc::adda(F::ZERO, s.slip_tan).madd(h, Acc::adda(F::ZERO, lat).msub(speed, s.slip_tan));
+        let x = s.slip_tan.abs();
+        let atan = if x <= 1.0 {
+            x / Acc::adda(F::ZERO, F::ONE).madd(bits(ATAN_FIT) * x, x)
+        } else {
+            bits(HALF_PI) - x / Acc::adda(F::ZERO, bits(ATAN_FIT)).madd(x, x)
+        };
+        s.slip_angle = if s.slip_tan < 0.0 { -atan } else { atan };
+        let creep = Acc::adda(F::ZERO, fwd).msuba(speed, s.slip_ratio).msub(k.radius, s.spin);
+        s.slip_ratio = Acc::adda(F::ZERO, s.slip_ratio).madd(h, F(CREEP_RATE) * creep);
+    }
+    s.sliding = !(s.slip_angle.abs() <= bits(SLIP));
+    let [x, y] = s.car_normal;
+    let c = y * F::ONE.rsqrt(Acc::mula(y, y).madd(x, x));
+    let lean = acos.at(clamp_unit(clamp_unit(c)));
+    let lean = if x < 0.0 { -lean } else { lean };
+    s.camber = -k.camber_roll_ratio * lean;
+    s.slip_angle = s.slip_angle.max(-bits(HALF_PI)).min(bits(HALF_PI));
+    s.slip_ratio = s.slip_ratio.max(-bits(MAX_SLIP_RATIO)).min(bits(MAX_SLIP_RATIO));
+    s.camber = s.camber.max(-bits(MAX_CAMBER)).min(bits(MAX_CAMBER));
+}
+
+/// **The surface's force**: the tire model's combined slip on the surface the tire stands on, its
+/// load capped — the friction curve's shape off the slips, scaled by the load and the peak friction
+/// (falling off toward the end point), sideways less the camber's thrust — added into the force.
+fn surface_force(k: &TireKeys, t: &Tire, s: &mut TireState) {
+    let (curve, _) = tables();
+    let sf = &k.surfaces[usize::from(s.surface) & 15];
+    let mu = k.friction_scale * sf.friction_peak;
+    let (cos, sin) = curve.coarse(wrap(wrap(s.slip_angle)));
+    let sr = s.slip_ratio;
+    let sr2 = sr * sr;
+    let sin2 = sin * sin;
+    let tan = sin / cos;
+    let cos2 = cos * cos;
+    let tan2 = tan * tan;
+    let load = t.load.min(sf.max_normal_load);
+    let (lat, fwd) = if load == 0.0 {
+        (F::ZERO, F::ZERO)
+    } else {
+        let load2 = load * load;
+        let a1a2 = sf.a1 * sf.inv_a2;
+        let d = F(2.0) * Acc::adda(F::ZERO, Acc::adda(F::ZERO, sf.a0).madd(sf.a1, load)).msub(load2, a1a2);
+        let comb = Acc::adda(F::ZERO, sin2).madd(sr2, cos2).sqrt();
+        let cs = (F(2.0) * load) * sf.cornering_stiffness;
+        let e8 = (F(8.0) * mu) * load;
+        let a3a4 = sf.a3 * sf.inv_a4;
+        let a3l = sf.a3 * load;
+        let cx = Acc::adda(F::ZERO, cs).madd(comb, d - cs);
+        let mue = mu * Acc::adda(F::ZERO, F::ONE).msub(sf.friction_end_point, comb);
+        let q = (cs * sr) / (F::ONE - sr);
+        let d2t2 = (d * d) * tan2;
+        let sigma = (bits(PI) * Acc::adda(F::ZERO, d2t2).madd(q, q).sqrt()) / e8;
+        let s2 = sigma * sigma;
+        let s3 = s2 * sigma;
+        let c1s = sf.c1 * s3;
+        let num = Acc::adda(F::ZERO, Acc::adda(F::ZERO, c1s).madd(sf.c2, s2)).madd(bits(FOUR_OVER_PI), sigma);
+        let tt = Acc::adda(F::ZERO, Acc::adda(F::ZERO, c1s).madd(sf.c3, s2)).madd(sf.c4, sigma);
+        let ck = Acc::adda(F::ZERO, a3l).msub(load2, a3a4);
+        let shape = num / (F::ONE + tt);
+        let norm = Acc::adda(F::ZERO, d2t2).madd(cx * cx, sr2).sqrt();
+        let (x, y) = if norm.abs() <= 0.0 {
+            (F::ZERO, F::ZERO)
+        } else {
+            let inv = F::ONE / norm;
+            (inv * (sr * (shape * cx)), inv * (tan * (-shape * d)))
+        };
+        (Acc::mula(load, y * mue).msub(ck, s.camber), load * (-x * mue))
+    };
+    s.force.0[0] = (F(s.force.x()) + lat).0;
+    s.force.0[2] = (F(s.force.z()) + fwd).0;
+}
+
+/// `v` taken into the tire's frame: each row dotted with it, by the transposed rows' VU0
+/// multiply-adds; `w` is `v`'s.
+fn into_frame(m: &[Vf; 4], v: Vf) -> Vf {
+    let col = |i: usize| Vf::new(m[0].0[i], m[1].0[i], m[2].0[i], 0.0);
+    let acc = col(0).mul(v.bc(ps2_float::Field::X));
+    let acc = Vf::madd(acc, col(1), v.bc(ps2_float::Field::Y));
+    v.merge(Dest::XYZ, Vf::madd(acc, col(2), v.bc(ps2_float::Field::Z)))
+}
+
+/// `v` out of the tire's frame into the world: the rows by its lanes; `w` is `v`'s.
+fn out_of_frame(m: &[Vf; 4], v: Vf) -> Vf {
+    let acc = m[0].mul(v.bc(ps2_float::Field::X));
+    let acc = Vf::madd(acc, m[1], v.bc(ps2_float::Field::Y));
+    v.merge(Dest::XYZ, Vf::madd(acc, m[2], v.bc(ps2_float::Field::Z)))
+}
+
+/// **The forces**: the steer word to the steer angle; in the air only the slip. Down, the tire's frame
+/// off its steered heading and the ground's normal, the contact's velocity into it, the slip and the
+/// surface's force, and that force turned out into the world on the body (with its moment, unless only
+/// the fronts are down). Then the wheel turns by its spin (clamped by the angle rate) and wraps, the
+/// torque is spent, and the side ratio is the sideways force on the load.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's `c.ole.s` branched on false
+fn forces(k: &TireKeys, t: &Tire, s: &mut TireState, body: &mut Body, steer: Option<F>, brake: Option<F>, h: F) {
+    if let Some(w) = steer {
+        s.steer = w * k.max_steer_angle;
+    }
+    s.force = CLEAR;
+    if !t.grounded {
+        s.velocity = CLEAR;
+        slip(k, t, s, brake, h);
+    } else {
+        let q = body.quat;
+        let forward = if !(s.steer.abs() <= 0.0) {
+            // The frame's lookups wrap with plain `mul.s`/`sub.s`, as the table's own lookup does.
+            let (cos, sin) = tables().0.coarse(s.steer);
+            crate::chassis::turn(q, Vf::new(sin.0, 0.0, cos.0, 0.0))
+        } else {
+            crate::chassis::turn(q, AHEAD)
+        };
+        s.frame = crate::math::basis(CLEAR, forward, s.ground_normal, true, false).0;
+        s.velocity = into_frame(&s.frame, s.point_velocity);
+        slip(k, t, s, brake, h);
+        surface_force(k, t, s);
+        let world = out_of_frame(&s.frame, s.force);
+        body.force = plus(body.force, world);
+        if !t.lone_front {
+            let r = minus(s.contact, body.position);
+            let arm = r.merge(Dest::XYZ, Vf::opmsub(Vf::opmula(r, world), world, r));
+            body.moment = plus(body.moment, crate::biplane::unturn(q, arm));
+        }
+    }
+    s.last_force = s.force;
+    let rate = k.max_tire_angle_rate;
+    let a = Acc::adda(F::ZERO, s.angle).madd(h, s.spin.max(-rate).min(rate));
+    s.angle = wrap(a);
+    s.last_torque = s.torque;
+    s.torque = F::ZERO;
+    s.side_ratio = if t.load <= 0.0 { F::ZERO } else { F(s.force.x()) / t.load };
+}
+
+/// **One tire's step** (MX Unleashed's): its suspension, roll and forces, reading the brake and steer
+/// words its pointers name, with `cofg` the body's centre of mass ([`Car::cofg`]).
+pub fn tire_step(k: &TireKeys, t: &mut Tire, s: &mut TireState, levers: &State, cofg: Vf, body: &mut Body, h: F) {
+    let read = |l: Option<Lever>| {
+        l.map(|l| match l {
+            Lever::Brake => levers.brake,
+            Lever::BrakeForce => levers.brake_force,
+            Lever::Steer => levers.steer,
+            Lever::RearSteer => levers.rear_steer,
+        })
+    };
+    let (brake, steer) = (read(k.brake), read(k.steer));
+    suspension(k, t, s, cofg, body, h);
+    roll(k, t, s, brake);
+    forces(k, t, s, body, steer, brake, h);
 }

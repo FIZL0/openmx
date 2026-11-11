@@ -17,7 +17,8 @@
 
 use game_sim::air::AcosTable;
 use game_sim::atv_body::Body;
-use game_sim::atv_car::{self, Call, Car, Keys, Pieces, PreloadState, State, Steps, Tire, Update, Wing};
+use game_sim::atv_car::{self, Call, Car, Keys, Lever, Pieces, PreloadState, State, Steps, Tire, TireKeys, TireState, Update, Wing};
+use game_sim::car::Surface;
 use game_sim::biplane::World;
 use game_sim::handling::seed;
 use ps2_float::{F, Vf};
@@ -627,6 +628,7 @@ fn read_mx(ee: &Ee, p: &Ptrs) -> Mx {
         airborne_control_moment: v(mx::CONTROL_MOMENT),
         brake_gyro_torque: f(mx::GYRO),
         wings: Vec::new(),
+        tires: core::array::from_fn(|k| read_tire_keys(ee, p.tires[k])),
     };
     let state = State {
         human: mode == 1,
@@ -653,6 +655,9 @@ fn read_mx(ee: &Ee, p: &Ptrs) -> Mx {
         launch_timer: f(mx::LAUNCH_TIMER),
         launch_start: f(mx::LAUNCH_START),
         launch_boost: F(ee.f32_at(p.engine + mx::BOOST)),
+        steer: f(tire::STEER_WORD),
+        rear_steer: f(tire::REAR_STEER_WORD),
+        tires: core::array::from_fn(|k| read_tire_state(ee, p.tires[k])),
     };
     Mx { keys, wing, wing_count: ee.i32_at(c(mx::WINGS)), wing_ptr, vstate_object, vstate: true, mode, state }
 }
@@ -696,6 +701,8 @@ fn mx_words(m: &Mx, p: &Ptrs) -> Vec<(u32, u32)> {
         (c(mx::LAUNCH_TIMER), s.launch_timer),
         (c(mx::LAUNCH_START), s.launch_start),
         (p.engine + mx::BOOST, s.launch_boost),
+        (c(tire::STEER_WORD), s.steer),
+        (c(tire::REAR_STEER_WORD), s.rear_steer),
     ];
     let vs: [(u32, Vf); 6] = [
         (c(mx::COFG), k.cofg),
@@ -722,7 +729,400 @@ fn mx_words(m: &Mx, p: &Ptrs) -> Vec<(u32, u32)> {
         (p.record + mx::TOUCHING, word(s.touching)),
     ];
     out.extend(words);
+    for (i, &t) in p.tires.iter().enumerate() {
+        out.extend(tire_words(&k.tires[i], &s.tires[i], t));
+    }
     out
+}
+
+/// The tire step's words (research/oracle.txt `# MD124`; the keys' are MD39b's): a tire's, and the
+/// car's two steer words its steer pointers name.
+mod tire {
+    pub const STEER_WORD: u32 = 0x113c;
+    pub const REAR_STEER_WORD: u32 = 0x1140;
+    pub const BRAKE_PTR: u32 = 0x24;
+    pub const STEER_PTR: u32 = 0x28;
+    pub const MAX_COMPRESSION: u32 = 0x30;
+    pub const MAX_COMPRESSION_RATE: u32 = 0x34;
+    pub const MAX_DECOMPRESSION_RATE: u32 = 0x38;
+    pub const SPRING: u32 = 0x3c;
+    pub const BOUNCE: u32 = 0x40;
+    pub const REBOUND: u32 = 0x44;
+    pub const INV_INERTIA: u32 = 0x48;
+    pub const MAX_STEER: u32 = 0x50;
+    pub const DROP: u32 = 0x60;
+    pub const MOUNT: u32 = 0x70;
+    pub const TOP_SPEED: u32 = 0x90;
+    pub const ANGLE_RATE: u32 = 0x94;
+    pub const ABS: u32 = 0x98;
+    pub const MIN_SLIP: u32 = 0x9c;
+    pub const MAX_SLIP: u32 = 0xa0;
+    pub const COMPRESSION: u32 = 0xcc;
+    pub const LAST_COMPRESSION: u32 = 0xd0;
+    pub const LEVER: u32 = 0xe0;
+    pub const SURFACE: u32 = 0xf0;
+    pub const GROUND_POINT: u32 = 0x100;
+    pub const GROUND_NORMAL: u32 = 0x110;
+    pub const CAR_NORMAL: u32 = 0x120;
+    pub const CONTACT: u32 = 0x130;
+    pub const UPPER: u32 = 0x140;
+    pub const LOWER: u32 = 0x150;
+    pub const POINT_VELOCITY: u32 = 0x160;
+    pub const BODY_VELOCITY: u32 = 0x170;
+    pub const ANGLE: u32 = 0x190;
+    pub const SPIN: u32 = 0x194;
+    pub const GRIP: u32 = 0x1d0;
+    pub const SLIPPING: u32 = 0x1d4;
+    pub const SLIDING: u32 = 0x1d8;
+    pub const LOCKED: u32 = 0x1dc;
+    pub const TORQUE: u32 = 0x1e0;
+    pub const LAST_TORQUE: u32 = 0x1e4;
+    pub const RADIUS: u32 = 0x1e8;
+    pub const SLIP_RATIO: u32 = 0x1fc;
+    pub const SLIP_ANGLE: u32 = 0x200;
+    pub const SLIP_TAN: u32 = 0x204;
+    pub const VELOCITY: u32 = 0x210;
+    pub const LAST_VELOCITY: u32 = 0x220;
+    pub const FORCE: u32 = 0x230;
+    pub const LAST_FORCE: u32 = 0x240;
+    pub const STEER: u32 = 0x250;
+    pub const FRAME: u32 = 0x260;
+    pub const SIDE_RATIO: u32 = 0x2a0;
+    /// Sixteen surfaces' tables, one after another, each of sixteen words (one per surface).
+    pub const SURFACES: u32 = 0x5a4;
+    pub const FRICTION_SCALE: u32 = 0x9a4;
+    pub const CAMBER: u32 = 0x9ac;
+    pub const ROLL_RATIO: u32 = 0x9b0;
+    /// How much of a tire the step may write.
+    pub const SIZE: u32 = 0x9b4;
+}
+
+/// Where a lever's word lives.
+fn lever_at(l: Option<Lever>) -> u32 {
+    match l {
+        None => 0,
+        Some(Lever::Brake) => CAR + mx::BRAKE,
+        Some(Lever::BrakeForce) => CAR + mx::BRAKE_FORCE,
+        Some(Lever::Steer) => CAR + tire::STEER_WORD,
+        Some(Lever::RearSteer) => CAR + tire::REAR_STEER_WORD,
+    }
+}
+
+fn lever(a: u32) -> Option<Lever> {
+    [Lever::Brake, Lever::BrakeForce, Lever::Steer, Lever::RearSteer]
+        .into_iter()
+        .find(|&l| lever_at(Some(l)) == a)
+        .or_else(|| {
+            assert_eq!(a, 0, "a tire's lever pointer");
+            None
+        })
+}
+
+/// A surface's sixteen words, in their tables' order.
+fn surface_fields(s: &mut Surface) -> [&mut F; 16] {
+    [
+        &mut s.max_braking_torque,
+        &mut s.wheel_friction,
+        &mut s.c1,
+        &mut s.c2,
+        &mut s.c3,
+        &mut s.c4,
+        &mut s.a0,
+        &mut s.a1,
+        &mut s.a3,
+        &mut s.inv_a2,
+        &mut s.inv_a4,
+        &mut s.moment_scale,
+        &mut s.cornering_stiffness,
+        &mut s.max_normal_load,
+        &mut s.friction_peak,
+        &mut s.friction_end_point,
+    ]
+}
+
+fn read_tire_keys(ee: &Ee, t: u32) -> TireKeys {
+    let f = |o: u32| F(ee.f32_at(t + o));
+    let mut k = TireKeys {
+        brake: lever(ee.u32_at(t + tire::BRAKE_PTR)),
+        steer: lever(ee.u32_at(t + tire::STEER_PTR)),
+        max_compression: f(tire::MAX_COMPRESSION),
+        max_compression_rate: f(tire::MAX_COMPRESSION_RATE),
+        max_decompression_rate: f(tire::MAX_DECOMPRESSION_RATE),
+        spring: f(tire::SPRING),
+        bounce_damping: f(tire::BOUNCE),
+        rebound_damping: f(tire::REBOUND),
+        inv_inertia: f(tire::INV_INERTIA),
+        max_steer_angle: f(tire::MAX_STEER),
+        drop: get_v(ee, t + tire::DROP),
+        mount: get_v(ee, t + tire::MOUNT),
+        top_wheel_speed: f(tire::TOP_SPEED),
+        max_tire_angle_rate: f(tire::ANGLE_RATE),
+        abs: ee.u32_at(t + tire::ABS) != 0,
+        min_braking_slip: f(tire::MIN_SLIP),
+        max_braking_slip: f(tire::MAX_SLIP),
+        radius: f(tire::RADIUS),
+        friction_scale: f(tire::FRICTION_SCALE),
+        camber_roll_ratio: f(tire::ROLL_RATIO),
+        surfaces: [Surface::default(); 16],
+    };
+    for (i, s) in k.surfaces.iter_mut().enumerate() {
+        for (j, x) in surface_fields(s).into_iter().enumerate() {
+            *x = f(tire::SURFACES + 0x40 * j as u32 + 4 * i as u32);
+        }
+    }
+    k
+}
+
+fn read_tire_state(ee: &Ee, t: u32) -> TireState {
+    let f = |o: u32| F(ee.f32_at(t + o));
+    let b = |o: u32| ee.u32_at(t + o) != 0;
+    let v = |o: u32| get_v(ee, t + o);
+    let surface = ee.u32_at(t + tire::SURFACE);
+    assert!(surface < 16, "a tire's surface word {surface:#x}");
+    TireState {
+        surface: surface as u8,
+        ground_point: v(tire::GROUND_POINT),
+        ground_normal: v(tire::GROUND_NORMAL),
+        car_normal: [f(tire::CAR_NORMAL), f(tire::CAR_NORMAL + 4)],
+        compression: f(tire::COMPRESSION),
+        last_compression: f(tire::LAST_COMPRESSION),
+        lever: v(tire::LEVER),
+        contact: v(tire::CONTACT),
+        upper: v(tire::UPPER),
+        lower: v(tire::LOWER),
+        point_velocity: v(tire::POINT_VELOCITY),
+        body_velocity: v(tire::BODY_VELOCITY),
+        angle: f(tire::ANGLE),
+        spin: f(tire::SPIN),
+        low_speed_grip: b(tire::GRIP),
+        slipping: b(tire::SLIPPING),
+        sliding: b(tire::SLIDING),
+        locked: b(tire::LOCKED),
+        torque: f(tire::TORQUE),
+        last_torque: f(tire::LAST_TORQUE),
+        slip_ratio: f(tire::SLIP_RATIO),
+        slip_angle: f(tire::SLIP_ANGLE),
+        slip_tan: f(tire::SLIP_TAN),
+        velocity: v(tire::VELOCITY),
+        last_velocity: v(tire::LAST_VELOCITY),
+        force: v(tire::FORCE),
+        last_force: v(tire::LAST_FORCE),
+        steer: f(tire::STEER),
+        frame: core::array::from_fn(|k| v(tire::FRAME + 0x10 * k as u32)),
+        side_ratio: f(tire::SIDE_RATIO),
+        camber: f(tire::CAMBER),
+    }
+}
+
+/// Every word [`read_tire_keys`] and [`read_tire_state`] read, where it lives.
+fn tire_words(k: &TireKeys, s: &TireState, t: u32) -> Vec<(u32, u32)> {
+    let mut fs: Vec<(u32, F)> = vec![
+        (tire::MAX_COMPRESSION, k.max_compression),
+        (tire::MAX_COMPRESSION_RATE, k.max_compression_rate),
+        (tire::MAX_DECOMPRESSION_RATE, k.max_decompression_rate),
+        (tire::SPRING, k.spring),
+        (tire::BOUNCE, k.bounce_damping),
+        (tire::REBOUND, k.rebound_damping),
+        (tire::INV_INERTIA, k.inv_inertia),
+        (tire::MAX_STEER, k.max_steer_angle),
+        (tire::TOP_SPEED, k.top_wheel_speed),
+        (tire::ANGLE_RATE, k.max_tire_angle_rate),
+        (tire::MIN_SLIP, k.min_braking_slip),
+        (tire::MAX_SLIP, k.max_braking_slip),
+        (tire::RADIUS, k.radius),
+        (tire::FRICTION_SCALE, k.friction_scale),
+        (tire::ROLL_RATIO, k.camber_roll_ratio),
+        (tire::CAR_NORMAL, s.car_normal[0]),
+        (tire::CAR_NORMAL + 4, s.car_normal[1]),
+        (tire::COMPRESSION, s.compression),
+        (tire::LAST_COMPRESSION, s.last_compression),
+        (tire::ANGLE, s.angle),
+        (tire::SPIN, s.spin),
+        (tire::TORQUE, s.torque),
+        (tire::LAST_TORQUE, s.last_torque),
+        (tire::SLIP_RATIO, s.slip_ratio),
+        (tire::SLIP_ANGLE, s.slip_angle),
+        (tire::SLIP_TAN, s.slip_tan),
+        (tire::STEER, s.steer),
+        (tire::SIDE_RATIO, s.side_ratio),
+        (tire::CAMBER, s.camber),
+    ];
+    let mut surfaces = k.surfaces;
+    for (i, sf) in surfaces.iter_mut().enumerate() {
+        for (j, x) in surface_fields(sf).into_iter().enumerate() {
+            fs.push((tire::SURFACES + 0x40 * j as u32 + 4 * i as u32, *x));
+        }
+    }
+    let mut vs: Vec<(u32, Vf)> = vec![
+        (tire::DROP, k.drop),
+        (tire::MOUNT, k.mount),
+        (tire::LEVER, s.lever),
+        (tire::GROUND_POINT, s.ground_point),
+        (tire::GROUND_NORMAL, s.ground_normal),
+        (tire::CONTACT, s.contact),
+        (tire::UPPER, s.upper),
+        (tire::LOWER, s.lower),
+        (tire::POINT_VELOCITY, s.point_velocity),
+        (tire::BODY_VELOCITY, s.body_velocity),
+        (tire::VELOCITY, s.velocity),
+        (tire::LAST_VELOCITY, s.last_velocity),
+        (tire::FORCE, s.force),
+        (tire::LAST_FORCE, s.last_force),
+    ];
+    for (j, r) in s.frame.iter().enumerate() {
+        vs.push((tire::FRAME + 0x10 * j as u32, *r));
+    }
+    for (a, v) in vs {
+        for (j, x) in v.0.into_iter().enumerate() {
+            fs.push((a + 4 * j as u32, F(x)));
+        }
+    }
+    let mut out: Vec<(u32, u32)> = fs.into_iter().map(|(o, x)| (t + o, x.to_bits())).collect();
+    out.extend([
+        (t + tire::BRAKE_PTR, lever_at(k.brake)),
+        (t + tire::STEER_PTR, lever_at(k.steer)),
+        (t + tire::ABS, word(k.abs)),
+        (t + tire::SURFACE, u32::from(s.surface)),
+        (t + tire::GRIP, word(s.low_speed_grip)),
+        (t + tire::SLIPPING, word(s.slipping)),
+        (t + tire::SLIDING, word(s.sliding)),
+        (t + tire::LOCKED, word(s.locked)),
+    ]);
+    out
+}
+
+/// `v` turned by the unit quaternion `q` (`x, y, z` the axis part), natively: only to aim generated
+/// grounds at the wheels.
+fn rotate(q: Vf, v: [f32; 3]) -> [f32; 3] {
+    let u = [q.x(), q.y(), q.z()];
+    let w = q.w();
+    let cross = |a: [f32; 3], b: [f32; 3]| [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    let t = cross(u, v).map(|x| 2.0 * x);
+    let tt = cross(u, t);
+    core::array::from_fn(|k| v[k] + w * t[k] + tt[k])
+}
+
+/// The tires' keys and state stirred about the image's, after [`generate_mx`]: each tire's ground
+/// aimed along its travel (short of it, within it, bottomed past it, past twice it), its normal
+/// near the car's up, slip ratios near locking, the ABS on with its slips degenerate now and then,
+/// steer and brake pointers null now and then, every surface's model stirred; a third of the bodies
+/// slowed into the slip's slow model. The fronts are handed no mover (the rears' come from them).
+fn generate_tires(r: &mut Rng, m: &mut Mx, car: &mut Car, body: &mut Body) {
+    if r.chance(0.35) {
+        let v = body.velocity;
+        let n = (v.x() * v.x() + v.y() * v.y() + v.z() * v.z()).sqrt().max(1e-3);
+        let to = if r.chance(0.5) { r.range(0.0, 6.0) } else { r.range(0.0, 25.0) };
+        body.velocity = Vf::new(v.x() * to / n, v.y() * to / n, v.z() * to / n, v.w());
+        if r.chance(0.3) {
+            body.rates = Vf::new(body.rates.x() * 0.05, body.rates.y() * 0.05, body.rates.z() * 0.05, body.rates.w());
+        }
+    }
+    for t in &mut car.tires[..atv_car::REAR_LEFT] {
+        t.handed_on = [0, 0];
+    }
+    let up = rotate(body.quat, [0.0, 1.0, 0.0]);
+    let s = &mut m.state;
+    s.steer = F(if r.chance(0.3) { 0.0 } else { r.range(-1.0, 1.0) });
+    s.rear_steer = F(if r.chance(0.5) { 0.0 } else { r.range(-1.0, 1.0) });
+    for i in 0..4 {
+        let (k, st) = (&mut m.keys.tires[i], &mut s.tires[i]);
+        let stir = |r: &mut Rng, x: F| F(x.0 * r.range(0.6, 1.4));
+        if r.chance(0.1) {
+            k.brake = None;
+        }
+        if r.chance(0.1) {
+            k.steer = None;
+        }
+        k.max_compression = stir(r, k.max_compression);
+        k.max_compression_rate = F(r.range(2.0, 20.0));
+        k.max_decompression_rate = F(r.range(2.0, 20.0));
+        k.spring = F(r.range(300.0, 1500.0));
+        k.bounce_damping = F(r.range(20.0, 200.0));
+        k.rebound_damping = F(r.range(20.0, 200.0));
+        k.inv_inertia = F(r.range(0.02, 0.5));
+        k.max_steer_angle = F(r.range(0.0, 0.8));
+        k.top_wheel_speed = F(r.range(20.0, 300.0));
+        k.max_tire_angle_rate = if r.chance(0.5) { F(f32::MAX) } else { F(r.range(5.0, 100.0)) };
+        k.abs = r.chance(0.5);
+        k.min_braking_slip = F(r.range(0.0, 0.3));
+        k.max_braking_slip = if r.chance(0.2) { k.min_braking_slip } else { F(k.min_braking_slip.0 + r.range(0.05, 0.4)) };
+        k.radius = stir(r, k.radius);
+        k.friction_scale = F(r.range(0.5, 1.5));
+        k.camber_roll_ratio = F(r.range(0.0, 1.0));
+        let base = k.surfaces[0];
+        for sf in &mut k.surfaces {
+            *sf = base;
+            for x in surface_fields(sf) {
+                *x = F(x.0 * r.range(0.5, 1.5));
+            }
+            sf.wheel_friction = F(r.range(0.0, 200.0));
+            sf.max_braking_torque = F(r.range(0.0, 3000.0));
+            sf.max_normal_load = if r.chance(0.1) { F::ZERO } else { F(r.range(100.0, 2500.0)) };
+        }
+        st.surface = (r.next() % 16) as u8;
+        // The normal near the car's up (or anywhere), and the ground point at a chosen share of the
+        // wheel's travel from its lower end.
+        let n = if r.chance(0.15) {
+            let v = r.vec(1.0, 0.0);
+            [v.x(), v.y(), v.z()]
+        } else {
+            let a = up.map(|x| x + r.range(-0.2, 0.2));
+            let l = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt().max(1e-3);
+            a.map(|x| x / l)
+        };
+        st.ground_normal = Vf::new(n[0], n[1], n[2], 0.0);
+        let rel = |v: Vf| [v.x() - car.cofg.x(), v.y() - car.cofg.y(), v.z() - car.cofg.z()];
+        let lower_local = rel(Vf::new(k.mount.x() + k.drop.x(), k.mount.y() + k.drop.y(), k.mount.z() + k.drop.z(), 0.0));
+        let upper_local = rel(k.mount);
+        let (lo, hi) = (rotate(body.quat, lower_local), rotate(body.quat, upper_local));
+        let pos = [body.position.x(), body.position.y(), body.position.z()];
+        let ratio = match r.next() % 6 {
+            0 => r.range(-0.5, 0.0),
+            1 | 2 => r.range(0.0, 1.0),
+            3 | 4 => r.range(1.0, 2.0),
+            _ => r.range(2.0, 3.0),
+        };
+        let side = r.vec(3.0, 0.0);
+        let point: [f32; 3] = core::array::from_fn(|j| pos[j] + lo[j] + (hi[j] - lo[j]) * ratio + side.0[j]);
+        st.ground_point = Vf::new(point[0], point[1], point[2], r.range(-2.0, 2.0));
+        st.car_normal = [F(r.range(-0.6, 0.6)), F(r.range(0.3, 1.0))];
+        st.compression = F(r.range(0.0, 2.0));
+        st.last_compression = F(r.range(0.0, 2.5));
+        for v in [&mut st.lever, &mut st.contact, &mut st.upper, &mut st.lower, &mut st.point_velocity, &mut st.body_velocity] {
+            let w = r.range(-2.0, 2.0);
+            *v = r.vec(50.0, w);
+        }
+        st.angle = F(r.range(-3.1, 3.1));
+        st.spin = F(r.range(-300.0, 300.0));
+        st.low_speed_grip = r.chance(0.5);
+        st.slipping = r.chance(0.5);
+        st.sliding = r.chance(0.5);
+        st.locked = r.chance(0.5);
+        st.torque = F(r.range(-3000.0, 3000.0));
+        st.last_torque = F(r.range(-3000.0, 3000.0));
+        st.slip_ratio = F(if r.chance(0.3) {
+            let x = r.range(0.9, 1.0);
+            if r.chance(0.8) { x } else { -x }
+        } else {
+            r.range(-1.0, 1.0)
+        });
+        st.slip_angle = F(r.range(-1.6, 1.6));
+        st.slip_tan = F(r.range(-3.0, 3.0));
+        for v in [&mut st.velocity, &mut st.last_velocity, &mut st.force, &mut st.last_force] {
+            let w = r.range(-2.0, 2.0);
+            *v = r.vec(40.0, w);
+        }
+        st.last_force.0[2] = r.range(-1500.0, 1500.0);
+        st.steer = F(if r.chance(0.3) { 0.0 } else { r.range(-0.6, 0.6) });
+        for v in &mut st.frame {
+            let w = r.range(-2.0, 2.0);
+            *v = r.vec(1.0, w);
+        }
+        st.side_ratio = F(r.range(-2.0, 2.0));
+        st.camber = F(r.range(-0.1, 0.1));
+    }
+    // The left front's ground normal is the anti-slide's front normal: one word.
+    s.front_normal = s.tires[0].ground_normal;
 }
 
 /// A generated set of keys and pad, vehicle and pieces' state about the image's: the leans and
@@ -856,6 +1256,7 @@ impl Steps for Unhooked<'_> {
             Call::Preload(_) => PRELOAD,
             Call::Launch(_) => LAUNCH,
             Call::Aero(_) => AERO,
+            Call::TireStep(..) => TIRE_STEP,
             _ => 0,
         };
         if !self.unhooked.contains(&addr) {
@@ -886,8 +1287,12 @@ impl Steps for Unhooked<'_> {
             }
             _ => {}
         }
-        let (force, log) = (body.force, self.pieces.rest.log.len());
+        let (force, log, position) = (body.force, self.pieces.rest.log.len(), body.position);
+        let tire0 = if let Call::TireStep(i, _) = c { Some(car.tires[i]) } else { None };
         assert!(self.pieces.answer(c, car, body), "{c:?} unanswered");
+        if let (Call::TireStep(i, _), Some(t0)) = (c, tire0) {
+            tire_tags(&k.tires[i], &s0, &self.pieces.state, i, &t0, &car.tires[i], body.position != position, &mut tags);
+        }
         let s = self.pieces.state;
         let (p0, p) = (s0.preload, s.preload);
         match c {
@@ -934,6 +1339,48 @@ impl Steps for Unhooked<'_> {
     }
 }
 
+/// What one tire step found: its suspension's, roll's and slip's branches.
+#[allow(clippy::too_many_arguments)]
+fn tire_tags(k: &TireKeys, s0: &State, s1: &State, i: usize, t0: &Tire, t: &Tire, pushed: bool, tags: &mut Vec<&'static str>) {
+    let (st0, st) = (&s0.tires[i], &s1.tires[i]);
+    let read = |l: Option<Lever>| {
+        l.map(|l| match l {
+            Lever::Brake => s0.brake,
+            Lever::BrakeForce => s0.brake_force,
+            Lever::Steer => s0.steer,
+            Lever::RearSteer => s0.rear_steer,
+        })
+    };
+    let brake = read(k.brake);
+    let mut tag = |what: &'static str, yes: bool| {
+        if yes {
+            tags.push(what);
+        }
+    };
+    tag("tire: down", t.grounded);
+    tag("tire: bottomed, pushed", pushed);
+    tag("tire: bottomed, held", t.grounded && !pushed && st.compression == k.max_compression && !t.solid);
+    tag("tire: handed", !t.grounded && t0.handed);
+    tag("tire: in the air", !t.grounded && !t0.handed);
+    tag("tire: unloaded", t.grounded && t.load == 0.0);
+    tag("tire: lone front", t.grounded && t.lone_front);
+    tag("tire: no pointer", k.brake.is_none() || k.steer.is_none());
+    let braked = brake.is_some_and(|b| b > 0.0);
+    tag("tire: braked", braked);
+    tag("tire: abs", braked && k.abs && t.grounded && k.min_braking_slip != k.max_braking_slip);
+    tag("tire: abs, degenerate", braked && k.abs && t.grounded && k.min_braking_slip == k.max_braking_slip);
+    tag("tire: steered", t.grounded && st.steer != 0.0);
+    tag("tire: straight", t.grounded && st.steer == 0.0);
+    tag("tire: locked", st.locked);
+    let speed = st.velocity.z().abs();
+    tag("tire: fast", speed > 20.0);
+    tag("tire: slow", speed <= 20.0 && !(speed < 5.0));
+    tag("tire: crawling", speed < 5.0);
+    tag("tire: low-speed grip", speed <= 20.0 && st.low_speed_grip);
+    tag("tire: grip let go", st0.low_speed_grip && !st.low_speed_grip);
+    tag("tire: wheel wraps", (st.angle.0 - st0.angle.0).abs() > 3.0);
+}
+
 /// Each piece unhooked alone, and all five, under the frame's oracle: the original's own code for
 /// the piece against [`Pieces`]'s port, every word and call equal; each of the piece's branches seen.
 fn pieces(seed: u64, unhooked: &[u32], prefixes: &[&str], want: usize) {
@@ -971,8 +1418,19 @@ fn aero_is_mx_unleasheds() {
 }
 
 #[test]
+fn tire_step_is_mx_unleasheds() {
+    pieces(0x0124_a001, &[TIRE_STEP], &["tire"], 20);
+}
+
+#[test]
 fn all_five_pieces_are_mx_unleasheds() {
     pieces(0x0106_a006, &[TRAVEL_COFG, ANTI_SLIDE, PRELOAD, LAUNCH, AERO], &["travel", "anti-slide", "preload", "launch", "aero"], 26);
+}
+
+#[test]
+fn all_six_pieces_with_the_tire_step_are_mx_unleasheds() {
+    let all = [TRAVEL_COFG, ANTI_SLIDE, PRELOAD, LAUNCH, AERO, TIRE_STEP];
+    pieces(0x0124_a002, &all, &["travel", "anti-slide", "preload", "launch", "aero", "tire"], 46);
 }
 
 /// **The car's frame is the original's**: SLUS-21104's world step over the buggy image's world, with
@@ -1022,11 +1480,12 @@ fn run(seed: u64, cases: usize, unhooked: &[u32]) -> Option<(Seen, Seen)> {
     };
     let blocks: Vec<(u32, u32)> = [(CAR, 0x1500), (p.body, 0x230), (p.record + at::TIPPED, 4), (p.engine + mx::BOOST, 4)]
         .into_iter()
-        .chain(p.tires.map(|t| (t, 0x200)))
+        .chain(p.tires.map(|t| (t, tire::SIZE)))
         .collect();
     for case in 0..cases {
         let (mut car, mut body, dt) = generate(&mut r, &image_car, &image_body, &p);
-        let m = generate_mx(&mut r, &image_mx, &mut car, &mut body);
+        let mut m = generate_mx(&mut r, &image_mx, &mut car, &mut body);
+        generate_tires(&mut r, &mut m, &mut car, &mut body);
         let s = Script::new(&mut r);
         let before = [car_words(&car, &p), seed::body_words(&body, p.body), mx_words(&m, &p)].concat();
 
