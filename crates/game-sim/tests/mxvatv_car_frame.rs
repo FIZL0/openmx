@@ -2005,7 +2005,7 @@ fn pieces(seed: u64, unhooked: &[u32], prefixes: &[&str], want: usize) {
     pieces_over(3000, seed, unhooked, prefixes, want);
 }
 
-/// [`pieces`] over `cases` frames. The six-piece runs need 6,000: "preload: fired, degenerate" is
+/// [`pieces`] over `cases` frames. The six- and eight-piece runs need 6,000: "preload: fired, degenerate" is
 /// rare (it averaged about 17 per 3,000 frames once MD126's controls joined the stream), too close
 /// to the floor of 20 for any seed to stay above it (B36).
 fn pieces_over(cases: usize, seed: u64, unhooked: &[u32], prefixes: &[&str], want: usize) {
@@ -2070,7 +2070,9 @@ fn all_six_pieces_with_the_tire_step_are_mx_unleasheds() {
 
 #[test]
 fn all_eight_pieces_are_mx_unleasheds() {
-    pieces(
+    // 6,000 frames, as the six-piece run: the degenerate preload fell to 19 in 3,000 (F31b5l).
+    pieces_over(
+        6000,
         0x0127_0003,
         &[TRAVEL_COFG, SORT_CONTACTS, PROBE, ANTI_SLIDE, PRELOAD, LAUNCH, AERO, TIRE_STEP],
         &["travel", "sort", "probe", "anti-slide", "preload", "launch", "aero", "tire"],
