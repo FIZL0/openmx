@@ -71,6 +71,62 @@ pub struct Tire {
     pub load: F,
     /// The contact's velocity in the car's frame, the post's ground velocity while the tire is down.
     pub local_velocity: Vf,
+    /// The probe's and the contact sort's (MD127, [`Pieces`]), which the tire step reads too. Where the axle's top hangs (the car's
+    /// frame) and the tire's radius; whether the tire has a ground to ask (without, the probe finds
+    /// nothing).
+    pub mount: Vf,
+    pub radius: F,
+    pub on_ground: bool,
+    /// The last ground normal the probe found (world), and it in the car's frame; the axle's drop
+    /// from the mount to the bottom of the tire along it (the car's frame), the bottom against the
+    /// centre of mass, and the axle's top and bottom in the world.
+    pub probe_normal: Vf,
+    pub car_normal: Vf,
+    pub drop: Vf,
+    pub lever: Vf,
+    pub upper: Vf,
+    pub lower: Vf,
+    /// How many times this frame's probe asked the ground.
+    pub probes: i32,
+    /// The contact: the ground's point and normal the probe found, or the sorted hit's.
+    pub ground_point: Vf,
+    pub ground_normal: Vf,
+    /// The terrain holds the tire over its sorted contact (kept from frame to frame).
+    pub held: bool,
+    /// The surface byte the ground query leaves (the probe clears it under a sorted tire that the
+    /// ground is below).
+    pub surface: u8,
+    /// The sorted hit's own record, as the sort handed it over.
+    pub hit: u32,
+    /// The ground query's answer to [`Call::TireGround`]: the point moved onto the ground, and the
+    /// ground's normal.
+    pub query: (Vf, Vf),
+}
+
+/// One of the contact sort's ray hits (MD127), as [`Call::SortSearch`] answers it: where the ray hangs
+/// (the car's frame), the point and normal struck, the struck object (zero for none), the mover
+/// under it with its kind word (kept only when that is 2), and the hit's own record.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SortHit {
+    pub from: Vf,
+    pub point: Vf,
+    pub normal: Vf,
+    pub object: u32,
+    pub mover: u32,
+    pub mover_kind: u32,
+    pub record: u32,
+}
+
+/// The most hits the sort's search answers: one a ray, four rays.
+pub const SORT_HITS: usize = 4;
+
+/// The contact sort's search, as [`Call::SortSearch`] answers it: whether it struck anything, and the
+/// hits.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SortAnswer {
+    pub found: bool,
+    pub count: usize,
+    pub hits: [SortHit; SORT_HITS],
 }
 
 /// What the car's listeners read and write of the car, beside its body and [`Tire`]s.
@@ -113,6 +169,10 @@ pub struct Car {
     /// The scene node's position, as [`Call::NodePosition`] answers it.
     pub node_pos: Vf,
     pub tires: [Tire; 4],
+    /// The car has its sort rays (without, the contact sort does nothing); and the search's answer
+    /// (MD127).
+    pub sort_rays: bool,
+    pub sort: SortAnswer,
 }
 
 /// What the car's three listeners call, and this module does not port, in the order the original
@@ -180,6 +240,15 @@ pub enum Call {
     WreckLook(bool),
     /// The landing's sound played with the shock (or velocity) in the node's frame.
     LandingSound(Vf),
+    /// What the contact sort and the probe hand out (MD127, [`Pieces`]): the sort's ray probe placed
+    /// at the car's frame ([`Car::matrix`], its vt `+0xcc`) and searched (into [`Car::sort`]); a
+    /// struck object's listeners told of the hit (each of them, vt `+0xc` with 0, 0), by the hit's
+    /// index; the ground query under a tire's axle bottom (the point asked; into [`Tire::query`] and
+    /// [`Tire::surface`]).
+    SortPlace,
+    SortSearch,
+    Struck(usize),
+    TireGround(usize, Vf),
     /// The car's node placed while current, with a subtree under it (its model's parts, past what
     /// [`Vehicle::scene`] holds): every current node of the subtree marked out of date.
     SubtreeOutOfDate,
@@ -485,8 +554,6 @@ pub struct State {
     pub gravity: Vf,
     /// The collision record says the car touches something.
     pub touching: bool,
-    /// The left front tire's ground normal (world).
-    pub front_normal: Vf,
     pub preload: PreloadState,
     /// The launch's timer and the scale it started from, and the engine's torque scale it sets.
     pub launch_timer: F,
@@ -501,8 +568,9 @@ pub struct State {
 
 /// **The car's [`Steps`] with MX Unleashed's pieces ported** (MD106a), as SLUS-21104 builds them: the
 /// centre of mass's travel, the anti-slide, the preload, the launch and the aero, and (MD124) each
-/// tire's step ([`tire_step`]), run on [`Keys`] and [`State`]. Every other call, the preload's cue,
-/// and a tire step on or handed a mover's contact, goes to `rest`.
+/// tire's step ([`tire_step`]), run on [`Keys`] and [`State`]; and (MD127) the contact sort and each
+/// tire's probe, on the [`Car`]'s and [`Tire`]s' words. Every other call, the preload's cue, a tire
+/// step on or handed a mover's contact, and what the sort and the probe hand out go to `rest`.
 pub struct Pieces<R> {
     pub keys: Keys,
     pub state: State,
@@ -540,6 +608,8 @@ impl<R: Steps> Pieces<R> {
                 tire_step(&self.keys.tires[i], &mut car.tires[i], &mut s, &self.state, car.cofg, body, h);
                 self.state.tires[i] = s;
             }
+            Call::SortContacts => sort_contacts(car, body, &mut self.rest),
+            Call::Probe(k, _) => probe(k, car, body, &mut self.rest),
             _ => return false,
         }
         true
@@ -608,7 +678,7 @@ fn anti_slide(s: &State, car: &Car, body: &mut Body) {
     if !car.grounded || s.gas != 0.0 || !(speed.abs() < ANTI_SLIDE_SPEED) {
         return;
     }
-    let (n, g) = (s.front_normal, s.gravity);
+    let (n, g) = (car.tires[FRONT_LEFT].ground_normal, s.gravity);
     let along = minus(g, scaled(n, dot(n, g)));
     let v = car.forward;
     let mut heading = minus(v, scaled(n, dot(v, n)));
@@ -757,6 +827,136 @@ fn aero(k: &Keys, s: &State, car: &Car, body: &mut Body) {
         m.0[0] = (F(m.x()) + k.brake_gyro_torque).0;
     }
     body.moment = plus(body.moment, m);
+}
+
+// --- the contact sort and the tire probe (MD127) ---------------------------------------------------
+
+/// The cosine (5°) two of the probe's normals must agree past before it stops asking the ground: a
+/// literal here, where MX Unleashed's probe ([`crate::car::Wheel::probe`]) takes it off its curve table.
+const PROBE_AGREE: u32 = 0x3f7f_069e;
+/// The most times the probe asks.
+const PROBE_TRIES: i32 = 5;
+/// How far (ft) the terrain must rise past a sorted contact to hold the tire, and fall below it to
+/// let go.
+const TERRAIN_HOLD: u32 = 0x3dcc_cccd;
+
+/// **The contact sort** (MX Unleashed's [`crate::car::Machine::sort_contacts`]), once a frame between
+/// the tires' clear and their probes: with its rays, the sort's ray probe placed at the car's frame
+/// and searched ([`Call::SortPlace`], [`Call::SortSearch`]); when it struck anything, each hit in
+/// turn its object's listeners told ([`Call::Struck`], when it struck an object) and handed to its
+/// tire by where its ray hangs: forward unless `z <= 0`, right unless `x <= 0` (the same as MX
+/// Unleashed's `> 0`, with no NaN on the PS2). A hit's mover is kept only when its kind word is 2.
+fn sort_contacts(car: &mut Car, body: &mut Body, s: &mut impl Steps) {
+    if !car.sort_rays {
+        return;
+    }
+    s.call(Call::SortPlace, car, body);
+    s.call(Call::SortSearch, car, body);
+    let a = car.sort;
+    if !a.found {
+        return;
+    }
+    for (i, h) in a.hits[..a.count.min(SORT_HITS)].iter().enumerate() {
+        if h.object != 0 {
+            s.call(Call::Struck(i), car, body);
+        }
+        let mover = if h.mover != 0 && h.mover_kind == 2 { h.mover } else { 0 };
+        let k = match (F(h.from.z()) <= F::ZERO, F(h.from.x()) <= F::ZERO) {
+            (false, false) => FRONT_RIGHT,
+            (false, true) => FRONT_LEFT,
+            (true, false) => REAR_RIGHT,
+            (true, true) => REAR_LEFT,
+        };
+        set_contact(&mut car.tires[k], body, h, mover);
+    }
+}
+
+/// The axle's drop along a normal in the car's frame: the radius down its `yz`, unit-scaled.
+fn drop_along(car_normal: Vf, radius: F) -> Vf {
+    let dir = crate::contact::unit(Vf::new(0.0, car_normal.y(), car_normal.z(), 1.0));
+    scaled(dir, -radius)
+}
+
+/// The sort's hand-off (MX Unleashed's [`crate::car::Wheel::set_contact`]): the hit's point and normal
+/// as the tire's contact, what it is on (the object and the kept mover), the hit's record, and the
+/// normal in the car's frame with the drop along it, which MX Unleashed leaves to the probe.
+fn set_contact(t: &mut Tire, body: &Body, h: &SortHit, mover: u32) {
+    t.ground_point = h.point;
+    t.ground_normal = h.normal;
+    t.stands_on = [h.object, mover];
+    t.hit = h.record;
+    t.car_normal = crate::biplane::unturn(body.quat, h.normal);
+    t.drop = drop_along(t.car_normal, t.radius);
+    t.sorted = true;
+}
+
+/// **A tire's probe** (MX Unleashed's [`crate::car::Wheel::probe`]), once a frame: with a ground to
+/// ask, the axle's top placed; then the axle's bottom along last frame's normal and the ground under
+/// it ([`Call::TireGround`]), asked again from the new normal until two agree within 5° or it has
+/// asked five times. A sorted tire keeps its contact unless its normal is 45° or more off the car's
+/// up; with the ground below the axle's bottom the tire is not solid (and a sorted one's surface byte
+/// is cleared); else a sorted tire takes the terrain only while the terrain holds it, and any other
+/// is solid on it.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
+fn probe(k: usize, car: &mut Car, body: &mut Body, s: &mut impl Steps) {
+    car.tires[k].solid = false;
+    if !car.tires[k].on_ground {
+        return;
+    }
+    let q = body.quat;
+    let mut t = car.tires[k];
+    t.upper = plus(crate::chassis::turn(q, minus(t.mount, car.cofg)), body.position);
+    t.probes = 0;
+    let mut d = F::ZERO;
+    let (mut point, mut normal) = (Vf::ZERO, Vf::ZERO);
+    while d < F::from_bits(PROBE_AGREE) && t.probes < PROBE_TRIES {
+        t.car_normal = crate::biplane::unturn(q, t.probe_normal);
+        t.drop = drop_along(t.car_normal, t.radius);
+        t.lever = minus(plus(t.mount, t.drop), car.cofg);
+        t.lower = plus(crate::chassis::turn(q, t.lever), body.position);
+        car.tires[k] = t;
+        s.call(Call::TireGround(k, t.lower), car, body);
+        t = car.tires[k];
+        (point, normal) = t.query;
+        normal = crate::contact::unit(normal);
+        d = dot(normal, t.probe_normal);
+        t.probe_normal = normal;
+        t.probes += 1;
+    }
+    let facing = F::from_bits(UPRIGHT);
+    if t.sorted && dot(car.up, t.ground_normal) < facing {
+        t.sorted = false;
+    }
+    if F(point.y()) < F(t.lower.y()) {
+        if t.sorted {
+            t.surface = 0;
+        }
+        car.tires[k] = t;
+        return;
+    }
+    if t.sorted {
+        let (ground, sorted) = (F(point.y()), F(t.ground_point.y()));
+        let hold = F::from_bits(TERRAIN_HOLD);
+        let axle = crate::contact::unit(minus(t.upper, t.lower));
+        if dot(axle, t.ground_normal) < facing {
+            t.held = true;
+        } else if !t.held {
+            if !(ground <= hold + sorted) {
+                t.held = true;
+            }
+        } else if !(sorted <= hold + ground) {
+            t.held = false;
+        }
+        if !t.held {
+            car.tires[k] = t;
+            return;
+        }
+        t.sorted = false;
+    }
+    t.solid = true;
+    t.ground_point = point;
+    t.ground_normal = normal;
+    car.tires[k] = t;
 }
 
 /// The car's state word in the two wrecks its own wreck timer starts: thrown back off the map's edge,
@@ -1066,36 +1266,25 @@ pub struct TireKeys {
     pub rebound_damping: F,
     pub inv_inertia: F,
     pub max_steer_angle: F,
-    /// The wheel's travel from its mount, and the mount, in the car's frame.
-    pub drop: Vf,
-    pub mount: Vf,
     pub top_wheel_speed: F,
     pub max_tire_angle_rate: F,
     /// The ABS word, non-zero.
     pub abs: bool,
     pub min_braking_slip: F,
     pub max_braking_slip: F,
-    pub radius: F,
     pub friction_scale: F,
     pub camber_roll_ratio: F,
     pub surfaces: [crate::car::Surface; 16],
 }
 
-/// What one tire's step reads and writes besides [`Tire`].
+/// What one tire's step reads and writes besides [`Tire`]. The words the probe and the step share
+/// (the mount, drop and radius, the surface byte, the ground point and normal, the car normal, whose
+/// `x` and `y` are the camber's lean, the lever and the axle's top and bottom) are the [`Tire`]'s.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct TireState {
-    /// The surface index (a byte) and the probe's ground point and normal under the tire.
-    pub surface: u8,
-    pub ground_point: Vf,
-    pub ground_normal: Vf,
-    /// The car's normal's `x` and `y` in the tire's frame, the camber's lean.
-    pub car_normal: [F; 2],
     pub compression: F,
     pub last_compression: F,
-    pub lever: Vf,
     pub contact: Vf,
-    pub upper: Vf,
-    pub lower: Vf,
     pub point_velocity: Vf,
     pub body_velocity: Vf,
     pub angle: F,
@@ -1221,18 +1410,18 @@ fn suspension(k: &TireKeys, t: &mut Tire, s: &mut TireState, cofg: Vf, body: &mu
     t.grounded = false;
     let mut ratio = F::ZERO;
     let q = body.quat;
-    let n = s.ground_normal;
+    let n = t.ground_normal;
     if t.solid || t.sorted {
-        s.upper = plus(crate::chassis::turn(q, minus(k.mount, cofg)), body.position);
-        s.lever = minus(plus(k.mount, k.drop), cofg);
-        s.lower = plus(crate::chassis::turn(q, s.lever), body.position);
-        let travel = minus(s.upper, s.lower);
+        t.upper = plus(crate::chassis::turn(q, minus(t.mount, cofg)), body.position);
+        t.lever = minus(plus(t.mount, t.drop), cofg);
+        t.lower = plus(crate::chassis::turn(q, t.lever), body.position);
+        let travel = minus(t.upper, t.lower);
         let along = dot(travel, n);
         if !(along <= 0.0) {
-            ratio = dot(minus(s.ground_point, s.lower), n) / along;
+            ratio = dot(minus(t.ground_point, t.lower), n) / along;
             if !(ratio <= 0.0) {
-                s.contact = plus(scaled(travel, ratio), s.lower);
-                let d = minus(s.contact, s.lower);
+                s.contact = plus(scaled(travel, ratio), t.lower);
+                let d = minus(s.contact, t.lower);
                 s.compression = dot(d, d).sqrt();
             }
         }
@@ -1261,8 +1450,8 @@ fn suspension(k: &TireKeys, t: &mut Tire, s: &mut TireState, cofg: Vf, body: &mu
         if t.handed {
             t.load = t.handed_load;
             t.stands_on = t.handed_on;
-            s.lever = plus(k.mount, k.drop);
-            s.lower = crate::chassis::turn(q, s.lever);
+            t.lever = plus(t.mount, t.drop);
+            t.lower = crate::chassis::turn(q, t.lever);
             contact_velocity(t, s, body);
         } else {
             t.load = F::ZERO;
@@ -1280,7 +1469,7 @@ fn suspension(k: &TireKeys, t: &mut Tire, s: &mut TireState, cofg: Vf, body: &mu
 /// surface's braking torque against it too, eased off by the ABS between the braking slips.
 #[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's `c.ole.s` branched on false
 fn roll(k: &TireKeys, t: &Tire, s: &mut TireState, brake: Option<F>) {
-    let sf = &k.surfaces[usize::from(s.surface) & 15];
+    let sf = &k.surfaces[usize::from(t.surface) & 15];
     let half = (F(0.5) * s.spin).max(F(-1.0)).min(F::ONE);
     s.torque = Acc::adda(F::ZERO, s.torque).madd(-half, sf.wheel_friction);
     if let Some(b) = brake
@@ -1313,14 +1502,14 @@ fn slip(k: &TireKeys, t: &Tire, s: &mut TireState, brake: Option<F>, h: F) {
         s.slipping = !(s.slip_ratio.abs() <= bits(SLIP));
         s.locked = false;
         let top = k.top_wheel_speed;
-        let pull = k.inv_inertia * (s.torque - F(s.last_force.z()) * k.radius);
+        let pull = k.inv_inertia * (s.torque - F(s.last_force.z()) * t.radius);
         s.spin = Acc::adda(F::ZERO, s.spin).madd(pull, h).max(-top).min(top);
     }
     if !(speed <= FAST_SLIP_SPEED) {
         let cos = speed * F::ONE.rsqrt(Acc::mula(speed, speed).madd(lat, lat));
         let angle = acos.at(clamp_unit(clamp_unit(cos)));
         s.slip_angle = if lat < 0.0 { -angle } else { angle };
-        s.slip_ratio = Acc::adda(F::ZERO, fwd).msub(s.spin, k.radius) / speed;
+        s.slip_ratio = Acc::adda(F::ZERO, fwd).msub(s.spin, t.radius) / speed;
         let (c, sn) = curve.coarse(wrap(wrap(s.slip_angle)));
         s.slip_tan = sn / c;
     } else {
@@ -1342,11 +1531,11 @@ fn slip(k: &TireKeys, t: &Tire, s: &mut TireState, brake: Option<F>, h: F) {
             bits(HALF_PI) - x / Acc::adda(F::ZERO, bits(ATAN_FIT)).madd(x, x)
         };
         s.slip_angle = if s.slip_tan < 0.0 { -atan } else { atan };
-        let creep = Acc::adda(F::ZERO, fwd).msuba(speed, s.slip_ratio).msub(k.radius, s.spin);
+        let creep = Acc::adda(F::ZERO, fwd).msuba(speed, s.slip_ratio).msub(t.radius, s.spin);
         s.slip_ratio = Acc::adda(F::ZERO, s.slip_ratio).madd(h, F(CREEP_RATE) * creep);
     }
     s.sliding = !(s.slip_angle.abs() <= bits(SLIP));
-    let [x, y] = s.car_normal;
+    let (x, y) = (F(t.car_normal.x()), F(t.car_normal.y()));
     let c = y * F::ONE.rsqrt(Acc::mula(y, y).madd(x, x));
     let lean = acos.at(clamp_unit(clamp_unit(c)));
     let lean = if x < 0.0 { -lean } else { lean };
@@ -1361,7 +1550,7 @@ fn slip(k: &TireKeys, t: &Tire, s: &mut TireState, brake: Option<F>, h: F) {
 /// (falling off toward the end point), sideways less the camber's thrust — added into the force.
 fn surface_force(k: &TireKeys, t: &Tire, s: &mut TireState) {
     let (curve, _) = tables();
-    let sf = &k.surfaces[usize::from(s.surface) & 15];
+    let sf = &k.surfaces[usize::from(t.surface) & 15];
     let mu = k.friction_scale * sf.friction_peak;
     let (cos, sin) = curve.coarse(wrap(wrap(s.slip_angle)));
     let sr = s.slip_ratio;
@@ -1446,7 +1635,7 @@ fn forces(k: &TireKeys, t: &Tire, s: &mut TireState, body: &mut Body, steer: Opt
         } else {
             crate::chassis::turn(q, AHEAD)
         };
-        s.frame = crate::math::basis(CLEAR, forward, s.ground_normal, true, false).0;
+        s.frame = crate::math::basis(CLEAR, forward, t.ground_normal, true, false).0;
         s.velocity = into_frame(&s.frame, s.point_velocity);
         slip(k, t, s, brake, h);
         surface_force(k, t, s);
