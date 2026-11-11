@@ -17,7 +17,7 @@
 
 use game_sim::air::AcosTable;
 use game_sim::atv_body::Body;
-use game_sim::atv_car::{self, Call, Car, Keys, Lever, Pieces, PreloadState, State, Steps, Tire, TireKeys, TireState, Update, Wing};
+use game_sim::atv_car::{self, Call, Car, Keys, Lever, Pieces, PreloadState, SORT_HITS, SortAnswer, State, Steps, Tire, TireKeys, TireState, Update, Wing};
 use game_sim::car::Surface;
 use game_sim::biplane::World;
 use game_sim::car::Reverse;
@@ -60,6 +60,60 @@ const REVERSE: u32 = 0x004b_3c20;
 /// Where the car's PostProcess makes its last three calls from (their return addresses).
 const POST_LANDED: [u32; 2] = [0x004c_bf60, 0x004c_bf88];
 const POST_GROUND: u32 = 0x004c_c428;
+/// Where the probe asks the ground (MD127).
+const PROBE_GROUND: u32 = 0x004b_5464;
+/// The sort's ray probe's place (its vt `+0xcc`) and search, and where the sort calls them (MD127).
+const SORT_PLACE: u32 = 0x001b_cfe0;
+const SORT_SEARCH: u32 = 0x0011_51c0;
+const POST_PLACE: u32 = 0x004c_addc;
+const POST_SEARCH: u32 = 0x004c_adec;
+/// Free RAM (zero in the image) for the sort's hits, records, objects with their one listener, and
+/// movers; the listener's vt `+0xc` is a hook at [`sort::STUB`].
+mod sort {
+    pub const SCRATCH: u32 = 0x01fe_0000;
+    pub const FROMS: u32 = SCRATCH;
+    pub const NORMALS: u32 = SCRATCH + 0x100;
+    pub const POINTS: u32 = SCRATCH + 0x200;
+    pub const RECORDS: u32 = SCRATCH + 0x300;
+    pub fn record(i: usize) -> u32 {
+        SCRATCH + 0x400 + 0x200 * i as u32
+    }
+    pub fn object(i: usize) -> u32 {
+        SCRATCH + 0x1400 + 0x300 * i as u32
+    }
+    pub fn listeners(i: usize) -> u32 {
+        SCRATCH + 0x2400 + 0x200 * i as u32
+    }
+    pub fn items(i: usize) -> u32 {
+        SCRATCH + 0x3400 + 0x10 * i as u32
+    }
+    pub fn item(i: usize) -> u32 {
+        SCRATCH + 0x3800 + 0x10 * i as u32
+    }
+    pub const VTABLE: u32 = SCRATCH + 0x3c00;
+    pub fn mover(i: usize) -> u32 {
+        SCRATCH + 0x4000 + 0x200 * i as u32
+    }
+    pub const STUB: u32 = SCRATCH + 0x5000;
+    pub const END: u32 = SCRATCH + 0x5100;
+    /// The probe's flags byte (bit `0x20`: it struck something) and its hit list; the list's count
+    /// and arrays.
+    pub const FLAGS: u32 = 0x126;
+    pub const LIST: u32 = 0x7c;
+    pub const COUNT: u32 = 0x8c;
+    pub const LIST_FROMS: u32 = 0x90;
+    pub const LIST_NORMALS: u32 = 0x94;
+    pub const LIST_POINTS: u32 = 0x98;
+    pub const LIST_RECORDS: u32 = 0x9c;
+    /// A record's object and mover; an object's listener list, its count and items; a mover's
+    /// kind.
+    pub const RECORD_OBJECT: u32 = 0x90;
+    pub const RECORD_MOVER: u32 = 0x8c;
+    pub const OBJECT_LISTENERS: u32 = 0x208;
+    pub const LISTENER_COUNT: u32 = 0x104;
+    pub const LISTENER_ITEMS: u32 = 0x10c;
+    pub const MOVER_KIND: u32 = 0x1a0;
+}
 const POST_NODE: u32 = 0x004c_c4c0;
 
 /// The car's words (research/oracle.txt `# MD106`).
@@ -105,6 +159,25 @@ mod at {
     pub const LOAD: u32 = 0xd4;
     pub const LOCAL_VELOCITY: u32 = 0x180;
     pub const STANDS_ON: u32 = 0x19c;
+    /// The car's sort rays and the sort's ray probe (MD127).
+    pub const SORT_RAYS: u32 = 0xc4;
+    pub const SORT_PROBE: u32 = 0x1264;
+    /// A tire's probe words (MD127).
+    pub const DROP: u32 = 0x60;
+    pub const MOUNT: u32 = 0x70;
+    pub const HELD: u32 = 0xac;
+    pub const PROBES: u32 = 0xc8;
+    pub const LEVER: u32 = 0xe0;
+    pub const SURFACE: u32 = 0xf0;
+    pub const GROUND_POINT: u32 = 0x100;
+    pub const GROUND_NORMAL: u32 = 0x110;
+    pub const CAR_NORMAL: u32 = 0x120;
+    pub const UPPER: u32 = 0x140;
+    pub const LOWER: u32 = 0x150;
+    pub const TIRE_WORLD: u32 = 0x1a4;
+    pub const HIT: u32 = 0x1b8;
+    pub const PROBE_NORMAL: u32 = 0x1c0;
+    pub const RADIUS: u32 = 0x1e8;
 }
 
 fn image() -> Option<Ee> {
@@ -146,6 +219,9 @@ struct Ptrs {
     tires: [u32; 4],
     ground_world: u32,
     landing_sound: u32,
+    sort_rays: u32,
+    sort_probe: u32,
+    tire_worlds: [u32; 4],
 }
 
 fn ptrs(ee: &Ee) -> Ptrs {
@@ -157,6 +233,9 @@ fn ptrs(ee: &Ee) -> Ptrs {
         tires: at::TIRES.map(|o| ee.u32_at(CAR + o)),
         ground_world: ee.u32_at(CAR + at::GROUND_WORLD),
         landing_sound: ee.u32_at(CAR + at::LANDING_SOUND),
+        sort_rays: ee.u32_at(CAR + at::SORT_RAYS),
+        sort_probe: ee.u32_at(CAR + at::SORT_PROBE),
+        tire_worlds: at::TIRES.map(|o| ee.u32_at(ee.u32_at(CAR + o) + at::TIRE_WORLD)),
     }
 }
 
@@ -192,6 +271,8 @@ fn read_car(ee: &Ee, p: &Ptrs) -> Car {
         latch_count: ee.i32_at(c(at::LATCH_COUNT)),
         node_pos: v(at::NODE_POS),
         tires: p.tires.map(|t| read_tire(ee, t)),
+        sort_rays: b(at::SORT_RAYS),
+        sort: SortAnswer::default(),
     }
 }
 
@@ -208,6 +289,22 @@ fn read_tire(ee: &Ee, t: u32) -> Tire {
         handed_on: [ee.u32_at(t + at::HANDED_ON), ee.u32_at(t + at::HANDED_ON + 4)],
         load: F(ee.f32_at(t + at::LOAD)),
         local_velocity: get_v(ee, t + at::LOCAL_VELOCITY),
+        mount: get_v(ee, t + at::MOUNT),
+        radius: F(ee.f32_at(t + at::RADIUS)),
+        on_ground: b(at::TIRE_WORLD),
+        probe_normal: get_v(ee, t + at::PROBE_NORMAL),
+        car_normal: get_v(ee, t + at::CAR_NORMAL),
+        drop: get_v(ee, t + at::DROP),
+        lever: get_v(ee, t + at::LEVER),
+        upper: get_v(ee, t + at::UPPER),
+        lower: get_v(ee, t + at::LOWER),
+        probes: ee.i32_at(t + at::PROBES),
+        ground_point: get_v(ee, t + at::GROUND_POINT),
+        ground_normal: get_v(ee, t + at::GROUND_NORMAL),
+        held: b(at::HELD),
+        surface: ee.u8_at(t + at::SURFACE),
+        hit: ee.u32_at(t + at::HIT),
+        query: (Vf::ZERO, Vf::ZERO),
     }
 }
 
@@ -230,6 +327,7 @@ fn car_words(car: &Car, p: &Ptrs) -> Vec<(u32, u32)> {
     w(c(at::LATCH), word(car.latch));
     w(c(at::LATCHED), word(car.latched));
     w(c(at::LATCH_COUNT), car.latch_count as u32);
+    w(c(at::SORT_RAYS), if car.sort_rays { p.sort_rays } else { 0 });
     let mut vs: Vec<(u32, Vf)> = vec![
         (c(at::VELOCITY), car.velocity),
         (c(at::WORLD_RATES), car.world_rates),
@@ -256,6 +354,29 @@ fn car_words(car: &Car, p: &Ptrs) -> Vec<(u32, u32)> {
         w(t + at::HANDED_ON + 4, tire.handed_on[1]);
         w(t + at::LOAD, tire.load.to_bits());
         vs.push((t + at::LOCAL_VELOCITY, tire.local_velocity));
+        w(t + at::RADIUS, tire.radius.to_bits());
+        w(t + at::HELD, word(tire.held));
+        w(t + at::PROBES, tire.probes as u32);
+        // The surface is the record's first byte; the other three the original never writes (zero
+        // in the image).
+        w(t + at::SURFACE, u32::from(tire.surface));
+        w(t + at::HIT, tire.hit);
+        for (o, v) in [
+            (at::MOUNT, tire.mount),
+            (at::PROBE_NORMAL, tire.probe_normal),
+            (at::CAR_NORMAL, tire.car_normal),
+            (at::DROP, tire.drop),
+            (at::LEVER, tire.lever),
+            (at::UPPER, tire.upper),
+            (at::LOWER, tire.lower),
+            (at::GROUND_POINT, tire.ground_point),
+            (at::GROUND_NORMAL, tire.ground_normal),
+        ] {
+            vs.push((t + o, v));
+        }
+    }
+    for (t, (tire, &world)) in p.tires.iter().zip(car.tires.iter().zip(&p.tire_worlds)) {
+        w(t + at::TIRE_WORLD, if tire.on_ground { world } else { 0 });
     }
     for (a, v) in vs {
         for (k, x) in v.to_bits().into_iter().enumerate() {
@@ -316,6 +437,21 @@ struct Script {
     stepped: [usize; 4],
     normal: Vf,
     node_pos: Vf,
+    /// The probes' ground queries (MD127), by tire and query; how many each tire has asked; and the
+    /// contact sort's search.
+    ground: [[Ground; 5]; 4],
+    asked: [usize; 4],
+    sort: SortAnswer,
+}
+
+/// One answer of a probe's ground query: the height a step from the point asked, or from the tire's
+/// contact; the normal, or the tire's last probe normal again (so two agree); the surface byte.
+#[derive(Clone, Copy, Default)]
+struct Ground {
+    from_contact: bool,
+    dy: f32,
+    normal: Option<Vf>,
+    surface: u8,
 }
 
 impl Script {
@@ -357,6 +493,17 @@ impl Script {
         (t.solid, t.sorted) = self.probe[k];
     }
 
+    /// The next ground query's answer for tire `k`, asked at `at`: the point moved onto the ground,
+    /// the normal and the surface byte.
+    fn ground(&mut self, k: usize, at: Vf, t: &Tire) -> (Vf, Vf, u8) {
+        let g = self.ground[k][self.asked[k]];
+        self.asked[k] += 1;
+        let base = if g.from_contact { t.ground_point.y() } else { at.y() };
+        let mut point = at;
+        point.0[1] = base + g.dy;
+        (point, g.normal.unwrap_or(t.probe_normal), g.surface)
+    }
+
     fn step(&mut self, k: usize, t: &mut Tire) {
         let (g, load, on, v) = self.steps[k][self.stepped[k]];
         self.stepped[k] += 1;
@@ -377,6 +524,12 @@ impl Steps for Port {
             Call::TireStep(k, _) => self.script.step(k, &mut car.tires[k]),
             Call::GroundUnder(_) => car.ground_normal = self.script.normal,
             Call::NodePosition => car.node_pos = self.script.node_pos,
+            Call::TireGround(k, at) => {
+                let (point, normal, surface) = self.script.ground(k, at, &car.tires[k]);
+                car.tires[k].query = (point, normal);
+                car.tires[k].surface = surface;
+            }
+            Call::SortSearch => car.sort = self.script.sort,
             _ => {}
         }
         self.log.push(c);
@@ -460,11 +613,27 @@ fn hook(ee: &mut Ee, p: Ptrs, log: Shared<Vec<Call>>, script: Shared<Script>) {
     }));
     let (l, s) = (log.clone(), script.clone());
     ee.hooks.insert(GROUND_QUERY, Box::new(move |ee| {
+        if ee.r(31) as u32 == PROBE_GROUND {
+            // A probe's (MD127), its record the tire's surface byte; the idle buggy's are left.
+            let record = ee.r(8) as u32;
+            let Some(k) = p.tires.iter().position(|&t| t + at::SURFACE == record) else { return };
+            assert_eq!((ee.r(4) as u32, ee.r(7)), (p.tire_worlds[k], 0), "the probe's ground query's world and fourth");
+            let (a1, a2) = (ee.r(5) as u32, ee.r(6) as u32);
+            let asked = get_v(ee, a1);
+            let t = read_tire(ee, p.tires[k]);
+            let (point, normal, surface) = s.borrow_mut().ground(k, asked, &t);
+            put_v(ee, a1, point);
+            put_v(ee, a2, normal);
+            ee.write(record, 1, u128::from(surface));
+            l.borrow_mut().push(Call::TireGround(k, asked));
+            return;
+        }
         assert_eq!(ee.r(31) as u32, POST_GROUND, "a ground query from elsewhere");
         assert_eq!((ee.r(4) as u32, ee.r(7), ee.r(8)), (p.ground_world, 0, 0), "the ground query's world, fourth and record");
         l.borrow_mut().push(Call::GroundUnder(get_v(ee, ee.r(5) as u32)));
         put_v(ee, ee.r(6) as u32, s.borrow().normal);
     }));
+    hook_sort(ee, p, log.clone(), script.clone());
     let (l, s) = (log, script);
     ee.hooks.insert(NODE_POSITION, Box::new(move |ee| {
         assert_eq!(ee.r(31) as u32, POST_NODE, "a node position from elsewhere");
@@ -472,6 +641,162 @@ fn hook(ee: &mut Ee, p: Ptrs, log: Shared<Vec<Call>>, script: Shared<Script>) {
         put_v(ee, CAR + at::NODE_POS, s.borrow().node_pos);
         l.borrow_mut().push(Call::NodePosition);
     }));
+}
+
+/// Hook what the contact sort calls (MD127), for when it runs unhooked: the ray probe's place and
+/// search, on the car's probe, log and the search lays the script's hits out in [`sort::SCRATCH`]; the
+/// idle buggy's are skipped (its probe's flags byte says it struck nothing). Each struck object's one
+/// listener logs the hit.
+fn hook_sort(ee: &mut Ee, p: Ptrs, log: Shared<Vec<Call>>, script: Shared<Script>) {
+    let l = log.clone();
+    ee.hooks.insert(SORT_PLACE, Box::new(move |ee| {
+        if ee.r(4) as u32 != p.sort_probe {
+            return;
+        }
+        assert_eq!((ee.r(31) as u32, ee.r(5) as u32), (POST_PLACE, CAR + 0x370), "the sort probe's place");
+        l.borrow_mut().push(Call::SortPlace);
+    }));
+    let l = log.clone();
+    ee.hooks.insert(SORT_SEARCH, Box::new(move |ee| {
+        if ee.r(4) as u32 != p.sort_probe {
+            return;
+        }
+        assert_eq!((ee.r(31) as u32, ee.r(5) as u32, ee.r(6)), (POST_SEARCH, p.sort_rays, 1), "the sort probe's search");
+        let a = script.borrow().sort;
+        let list = ee.u32_at(p.sort_probe + sort::LIST);
+        for (o, to) in [
+            (sort::LIST_FROMS, sort::FROMS),
+            (sort::LIST_NORMALS, sort::NORMALS),
+            (sort::LIST_POINTS, sort::POINTS),
+            (sort::LIST_RECORDS, sort::RECORDS),
+        ] {
+            ee.set_u32(list + o, to);
+        }
+        ee.set_u32(list + sort::COUNT, a.count as u32);
+        for (i, h) in a.hits.iter().enumerate() {
+            let record = sort::record(i);
+            put_v(ee, sort::FROMS + 0x20 * i as u32, h.from);
+            put_v(ee, sort::NORMALS + 0x10 * i as u32, h.normal);
+            put_v(ee, sort::POINTS + 0x10 * i as u32, h.point);
+            ee.set_u32(sort::RECORDS + 4 * i as u32, record);
+            ee.set_u32(record + sort::RECORD_OBJECT, h.object);
+            ee.set_u32(record + sort::RECORD_MOVER, h.mover);
+            if h.mover != 0 {
+                ee.set_u32(h.mover + sort::MOVER_KIND, h.mover_kind);
+            }
+            if h.object != 0 {
+                let x = sort::listeners(i);
+                ee.set_u32(h.object + sort::OBJECT_LISTENERS, x);
+                ee.set_u32(x + sort::LISTENER_COUNT, 1);
+                ee.set_u32(x + sort::LISTENER_ITEMS, sort::items(i));
+                ee.set_u32(sort::items(i), sort::item(i));
+                ee.set_u32(sort::item(i), sort::VTABLE);
+            }
+        }
+        ee.set_u32(sort::VTABLE + 0xc, sort::STUB);
+        let flags = ee.u8_at(p.sort_probe + sort::FLAGS) & !0x20 | if a.found { 0x20 } else { 0 };
+        ee.write(p.sort_probe + sort::FLAGS, 1, u128::from(flags));
+        l.borrow_mut().push(Call::SortSearch);
+    }));
+    ee.hooks.insert(sort::STUB, Box::new(move |ee| {
+        assert_eq!((ee.r(5), ee.r(6)), (0, 0), "a struck listener's arguments");
+        let item = ee.r(4) as u32;
+        let i = (0..SORT_HITS).position(|i| sort::item(i) == item).expect("a struck listener of ours");
+        log.borrow_mut().push(Call::Struck(i));
+    }));
+}
+
+/// The sort's hits and the probes' ground answers (MD127), off their own stream so the other words'
+/// draws stay as they were: hits struck from rays hanging either side of `±0` round the body, now and
+/// then on an object (with its listener) or a mover of either kind; heights a step from the point
+/// asked or the contact, at or off the normal the probe has.
+fn generate_sort(r: &mut Rng, s: &mut Script, body: &Body) {
+    let side = |r: &mut Rng| match r.next() % 6 {
+        0 => 0.0,
+        1 => -0.0,
+        2 => r.range(0.0, 5.0),
+        3 => -r.range(0.0, 5.0),
+        _ => r.range(-5.0, 5.0),
+    };
+    let upish = |r: &mut Rng| {
+        if r.chance(0.6) {
+            let mut n = r.vec(0.4, 0.0);
+            n.0[1] = r.range(0.6, 1.2);
+            n
+        } else {
+            r.vec(1.0, 0.0)
+        }
+    };
+    s.sort.found = r.chance(0.6);
+    s.sort.count = (r.next() % (SORT_HITS as u64 + 1)) as usize;
+    for (i, h) in s.sort.hits.iter_mut().enumerate() {
+        h.from = Vf::new(side(r), r.range(-2.0, 2.0), side(r), r.range(-1.0, 1.0));
+        h.point = plus_v(body.position, r.vec(6.0, 1.0));
+        h.normal = upish(r);
+        h.object = if r.chance(0.4) { sort::object(i) } else { 0 };
+        h.mover = if r.chance(0.5) { sort::mover(i) } else { 0 };
+        h.mover_kind = if r.chance(0.6) { 2 } else { r.word() % 5 };
+        h.record = sort::record(i);
+    }
+    for k in 0..4 {
+        for g in &mut s.ground[k] {
+            g.from_contact = r.chance(0.4);
+            g.dy = match r.next() % 9 {
+                0 => 0.0,
+                1 => 0.1,
+                2 => -0.1,
+                3 => 0.05,
+                4 => -0.05,
+                5 => 0.2,
+                6 => -0.2,
+                _ => r.range(-3.0, 3.0),
+            };
+            g.normal = if r.chance(0.35) { None } else { Some(upish(r)) };
+            g.surface = r.word() as u8;
+        }
+    }
+}
+
+fn plus_v(a: Vf, b: Vf) -> Vf {
+    Vf::new(a.x() + b.x(), a.y() + b.y(), a.z() + b.z(), a.w())
+}
+
+/// The tires' probe words (MD127): now and then no ground to ask or no sort rays, last frame's normal
+/// up-ish (or anything), the terrain's hold, last frame's contact round the body.
+fn generate_probe(r: &mut Rng, car: &mut Car, body: &Body) {
+    car.sort_rays = !r.chance(0.1);
+    if r.chance(0.5) {
+        car.up = Vf::new(0.0, 1.0, 0.0, car.up.w());
+    }
+    for t in &mut car.tires {
+        t.on_ground = !r.chance(0.08);
+        t.probe_normal = if r.chance(0.6) {
+            let mut n = r.vec(0.3, 0.0);
+            n.0[1] = 1.0;
+            crate_unit(n)
+        } else {
+            let w = r.range(-1.0, 1.0);
+            r.vec(1.0, w)
+        };
+        t.held = r.chance(0.5);
+        t.ground_point = plus_v(body.position, r.vec(4.0, 1.0));
+        if r.chance(0.5) {
+            t.ground_normal = r.vec(1.0, 0.0);
+        }
+        t.probes = (r.next() % 7) as i32;
+        t.surface = r.word() as u8;
+        t.hit = if r.chance(0.5) { 0 } else { r.word() };
+        t.car_normal = r.vec(1.0, 0.0);
+        t.drop = r.vec(1.5, 0.0);
+        t.lever = r.vec(5.0, 1.0);
+        t.upper = r.vec(2000.0, 1.0);
+        t.lower = r.vec(2000.0, 1.0);
+    }
+}
+
+fn crate_unit(v: Vf) -> Vf {
+    let n = (v.x() * v.x() + v.y() * v.y() + v.z() * v.z()).sqrt();
+    Vf::new(v.x() / n, v.y() / n, v.z() / n, v.w())
 }
 
 /// A generated state: the image's car with its flags, speeds and frame stirred, and its body moving.
@@ -529,8 +854,9 @@ fn generate(r: &mut Rng, image_car: &Car, image_body: &Body, p: &Ptrs) -> (Car, 
 }
 
 /// The MX Unleashed pieces' words (research/oracle.txt `# MD106a`; the keys' are MD39b's): the
-/// car's, but for the vehicle state's mode, the gravity block's, the record's touching word, the left
-/// front tire's ground normal, the engine's torque scale and a wing's (from its first word).
+/// car's, but for the vehicle state's mode, the gravity block's, the record's touching word, the
+/// engine's torque scale and a wing's (from its first word). The left front tire's ground normal is
+/// the tire's ([`at::GROUND_NORMAL`]).
 mod mx {
     pub const VEHICLE_STATE: u32 = 0xbc4;
     pub const MODE: u32 = 0x28;
@@ -546,7 +872,6 @@ mod mx {
     pub const GRAVITY_BLOCK: u32 = 0xe8;
     pub const GRAVITY: u32 = 0x40;
     pub const TOUCHING: u32 = 0x34;
-    pub const FRONT_NORMAL: u32 = 0x110;
     pub const READY: u32 = 0xc50;
     pub const ACTIVE: u32 = 0xc54;
     pub const ARMED: u32 = 0xc58;
@@ -723,7 +1048,6 @@ fn read_mx(ee: &Ee, p: &Ptrs) -> Mx {
         hand_brake: f(mx::HAND_BRAKE),
         gravity: get_v(ee, ee.u32_at(c(mx::GRAVITY_BLOCK)) + mx::GRAVITY),
         touching: ee.u32_at(p.record + mx::TOUCHING) != 0,
-        front_normal: get_v(ee, p.tires[0] + mx::FRONT_NORMAL),
         preload: PreloadState {
             ready: b(mx::READY),
             active: b(mx::ACTIVE),
@@ -820,12 +1144,11 @@ fn mx_words(m: &Mx, p: &Ptrs) -> Vec<(u32, u32)> {
         let a = c(mx::REAR_TABLE + 8 * i as u32);
         fs.extend([(a, *speed), (a + 4, *scale)]);
     }
-    let vs: [(u32, Vf); 6] = [
+    let vs: [(u32, Vf); 5] = [
         (c(mx::COFG), k.cofg),
         (c(mx::COFG_AI), k.cofg_ai),
         (c(mx::CONTROL_MOMENT), k.airborne_control_moment),
         (m.wing_ptr + 0x10, m.wing.position),
-        (p.tires[0] + mx::FRONT_NORMAL, s.front_normal),
         (c(mx::FORCE), s.preload.force),
     ];
     for (a, v) in vs {
@@ -978,14 +1301,11 @@ fn read_tire_keys(ee: &Ee, t: u32) -> TireKeys {
         rebound_damping: f(tire::REBOUND),
         inv_inertia: f(tire::INV_INERTIA),
         max_steer_angle: f(tire::MAX_STEER),
-        drop: get_v(ee, t + tire::DROP),
-        mount: get_v(ee, t + tire::MOUNT),
         top_wheel_speed: f(tire::TOP_SPEED),
         max_tire_angle_rate: f(tire::ANGLE_RATE),
         abs: ee.u32_at(t + tire::ABS) != 0,
         min_braking_slip: f(tire::MIN_SLIP),
         max_braking_slip: f(tire::MAX_SLIP),
-        radius: f(tire::RADIUS),
         friction_scale: f(tire::FRICTION_SCALE),
         camber_roll_ratio: f(tire::ROLL_RATIO),
         surfaces: [Surface::default(); 16],
@@ -1005,16 +1325,9 @@ fn read_tire_state(ee: &Ee, t: u32) -> TireState {
     let surface = ee.u32_at(t + tire::SURFACE);
     assert!(surface < 16, "a tire's surface word {surface:#x}");
     TireState {
-        surface: surface as u8,
-        ground_point: v(tire::GROUND_POINT),
-        ground_normal: v(tire::GROUND_NORMAL),
-        car_normal: [f(tire::CAR_NORMAL), f(tire::CAR_NORMAL + 4)],
         compression: f(tire::COMPRESSION),
         last_compression: f(tire::LAST_COMPRESSION),
-        lever: v(tire::LEVER),
         contact: v(tire::CONTACT),
-        upper: v(tire::UPPER),
-        lower: v(tire::LOWER),
         point_velocity: v(tire::POINT_VELOCITY),
         body_velocity: v(tire::BODY_VELOCITY),
         angle: f(tire::ANGLE),
@@ -1054,11 +1367,8 @@ fn tire_words(k: &TireKeys, s: &TireState, t: u32) -> Vec<(u32, u32)> {
         (tire::ANGLE_RATE, k.max_tire_angle_rate),
         (tire::MIN_SLIP, k.min_braking_slip),
         (tire::MAX_SLIP, k.max_braking_slip),
-        (tire::RADIUS, k.radius),
         (tire::FRICTION_SCALE, k.friction_scale),
         (tire::ROLL_RATIO, k.camber_roll_ratio),
-        (tire::CAR_NORMAL, s.car_normal[0]),
-        (tire::CAR_NORMAL + 4, s.car_normal[1]),
         (tire::COMPRESSION, s.compression),
         (tire::LAST_COMPRESSION, s.last_compression),
         (tire::ANGLE, s.angle),
@@ -1079,14 +1389,7 @@ fn tire_words(k: &TireKeys, s: &TireState, t: u32) -> Vec<(u32, u32)> {
         }
     }
     let mut vs: Vec<(u32, Vf)> = vec![
-        (tire::DROP, k.drop),
-        (tire::MOUNT, k.mount),
-        (tire::LEVER, s.lever),
-        (tire::GROUND_POINT, s.ground_point),
-        (tire::GROUND_NORMAL, s.ground_normal),
         (tire::CONTACT, s.contact),
-        (tire::UPPER, s.upper),
-        (tire::LOWER, s.lower),
         (tire::POINT_VELOCITY, s.point_velocity),
         (tire::BODY_VELOCITY, s.body_velocity),
         (tire::VELOCITY, s.velocity),
@@ -1107,7 +1410,6 @@ fn tire_words(k: &TireKeys, s: &TireState, t: u32) -> Vec<(u32, u32)> {
         (t + tire::BRAKE_PTR, lever_at(k.brake)),
         (t + tire::STEER_PTR, lever_at(k.steer)),
         (t + tire::ABS, word(k.abs)),
-        (t + tire::SURFACE, u32::from(s.surface)),
         (t + tire::GRIP, word(s.low_speed_grip)),
         (t + tire::SLIPPING, word(s.slipping)),
         (t + tire::SLIDING, word(s.sliding)),
@@ -1146,11 +1448,12 @@ fn generate_tires(r: &mut Rng, m: &mut Mx, car: &mut Car, body: &mut Body) {
         t.handed_on = [0, 0];
     }
     let up = rotate(body.quat, [0.0, 1.0, 0.0]);
+    let cofg = car.cofg;
     let s = &mut m.state;
     s.steer = F(if r.chance(0.3) { 0.0 } else { r.range(-1.0, 1.0) });
     s.rear_steer = F(if r.chance(0.5) { 0.0 } else { r.range(-1.0, 1.0) });
     for i in 0..4 {
-        let (k, st) = (&mut m.keys.tires[i], &mut s.tires[i]);
+        let (k, st, ct) = (&mut m.keys.tires[i], &mut s.tires[i], &mut car.tires[i]);
         let stir = |r: &mut Rng, x: F| F(x.0 * r.range(0.6, 1.4));
         if r.chance(0.1) {
             k.brake = None;
@@ -1171,7 +1474,7 @@ fn generate_tires(r: &mut Rng, m: &mut Mx, car: &mut Car, body: &mut Body) {
         k.abs = r.chance(0.5);
         k.min_braking_slip = F(r.range(0.0, 0.3));
         k.max_braking_slip = if r.chance(0.2) { k.min_braking_slip } else { F(k.min_braking_slip.0 + r.range(0.05, 0.4)) };
-        k.radius = stir(r, k.radius);
+        ct.radius = stir(r, ct.radius);
         k.friction_scale = F(r.range(0.5, 1.5));
         k.camber_roll_ratio = F(r.range(0.0, 1.0));
         let base = k.surfaces[0];
@@ -1184,7 +1487,7 @@ fn generate_tires(r: &mut Rng, m: &mut Mx, car: &mut Car, body: &mut Body) {
             sf.max_braking_torque = F(r.range(0.0, 3000.0));
             sf.max_normal_load = if r.chance(0.1) { F::ZERO } else { F(r.range(100.0, 2500.0)) };
         }
-        st.surface = (r.next() % 16) as u8;
+        ct.surface = (r.next() % 16) as u8;
         // The normal near the car's up (or anywhere), and the ground point at a chosen share of the
         // wheel's travel from its lower end.
         let n = if r.chance(0.15) {
@@ -1195,10 +1498,10 @@ fn generate_tires(r: &mut Rng, m: &mut Mx, car: &mut Car, body: &mut Body) {
             let l = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt().max(1e-3);
             a.map(|x| x / l)
         };
-        st.ground_normal = Vf::new(n[0], n[1], n[2], 0.0);
-        let rel = |v: Vf| [v.x() - car.cofg.x(), v.y() - car.cofg.y(), v.z() - car.cofg.z()];
-        let lower_local = rel(Vf::new(k.mount.x() + k.drop.x(), k.mount.y() + k.drop.y(), k.mount.z() + k.drop.z(), 0.0));
-        let upper_local = rel(k.mount);
+        ct.ground_normal = Vf::new(n[0], n[1], n[2], 0.0);
+        let rel = |v: Vf| [v.x() - cofg.x(), v.y() - cofg.y(), v.z() - cofg.z()];
+        let lower_local = rel(Vf::new(ct.mount.x() + ct.drop.x(), ct.mount.y() + ct.drop.y(), ct.mount.z() + ct.drop.z(), 0.0));
+        let upper_local = rel(ct.mount);
         let (lo, hi) = (rotate(body.quat, lower_local), rotate(body.quat, upper_local));
         let pos = [body.position.x(), body.position.y(), body.position.z()];
         let ratio = match r.next() % 6 {
@@ -1209,11 +1512,12 @@ fn generate_tires(r: &mut Rng, m: &mut Mx, car: &mut Car, body: &mut Body) {
         };
         let side = r.vec(3.0, 0.0);
         let point: [f32; 3] = core::array::from_fn(|j| pos[j] + lo[j] + (hi[j] - lo[j]) * ratio + side.0[j]);
-        st.ground_point = Vf::new(point[0], point[1], point[2], r.range(-2.0, 2.0));
-        st.car_normal = [F(r.range(-0.6, 0.6)), F(r.range(0.3, 1.0))];
+        ct.ground_point = Vf::new(point[0], point[1], point[2], r.range(-2.0, 2.0));
+        let (nx, ny) = (r.range(-0.6, 0.6), r.range(0.3, 1.0));
+        ct.car_normal = Vf::new(nx, ny, ct.car_normal.z(), ct.car_normal.w());
         st.compression = F(r.range(0.0, 2.0));
         st.last_compression = F(r.range(0.0, 2.5));
-        for v in [&mut st.lever, &mut st.contact, &mut st.upper, &mut st.lower, &mut st.point_velocity, &mut st.body_velocity] {
+        for v in [&mut ct.lever, &mut st.contact, &mut ct.upper, &mut ct.lower, &mut st.point_velocity, &mut st.body_velocity] {
             let w = r.range(-2.0, 2.0);
             *v = r.vec(50.0, w);
         }
@@ -1246,8 +1550,6 @@ fn generate_tires(r: &mut Rng, m: &mut Mx, car: &mut Car, body: &mut Body) {
         st.side_ratio = F(r.range(-2.0, 2.0));
         st.camber = F(r.range(-0.1, 0.1));
     }
-    // The left front's ground normal is the anti-slide's front normal: one word.
-    s.front_normal = s.tires[0].ground_normal;
 }
 
 /// A generated set of keys and pad, vehicle and pieces' state about the image's: the leans and
@@ -1331,7 +1633,8 @@ fn generate_mx(r: &mut Rng, image: &Mx, car: &mut Car, body: &mut Body) -> Mx {
     s.brake_force = off(r, 0.6);
     s.hand_brake = off(r, 0.7);
     s.touching = r.chance(0.25);
-    s.front_normal = if r.chance(0.3) { Vf::new(0.0, 1.0, 0.0, 0.0) } else { r.vec(1.0, 0.0) };
+    // The left front tire's ground normal (the car's, MD127).
+    car.tires[0].ground_normal = if r.chance(0.3) { Vf::new(0.0, 1.0, 0.0, 0.0) } else { r.vec(1.0, 0.0) };
     let pr = &mut s.preload;
     pr.ready = r.chance(0.5);
     pr.active = r.chance(0.3);
@@ -1436,6 +1739,8 @@ impl Steps for Unhooked<'_> {
             Call::Launch(_) => LAUNCH,
             Call::Aero(_) => AERO,
             Call::TireStep(..) => TIRE_STEP,
+            Call::SortContacts => SORT_CONTACTS,
+            Call::Probe(..) => PROBE,
             _ => 0,
         };
         if !self.unhooked.contains(&addr) {
@@ -1468,10 +1773,73 @@ impl Steps for Unhooked<'_> {
             _ => {}
         }
         let (force, log, position) = (body.force, self.pieces.rest.log.len(), body.position);
-        let tire0 = if let Call::TireStep(i, _) = c { Some(car.tires[i]) } else { None };
+        let car0 = *car;
         assert!(self.pieces.answer(c, car, body), "{c:?} unanswered");
-        if let (Call::TireStep(i, _), Some(t0)) = (c, tire0) {
-            tire_tags(&k.tires[i], &s0, &self.pieces.state, i, &t0, &car.tires[i], body.position != position, &mut tags);
+        let calls = &self.pieces.rest.log[log..];
+        match c {
+            Call::TireStep(i, _) => {
+                tire_tags(&k.tires[i], &s0, &self.pieces.state, i, &car0.tires[i], &car.tires[i], body.position != position, &mut tags);
+            }
+            Call::SortContacts if !car0.sort_rays => tags.push("sort: no rays"),
+            Call::SortContacts if !car.sort.found => tags.push("sort: nothing found"),
+            Call::SortContacts => {
+                let a = car.sort;
+                for h in &a.hits[..a.count] {
+                    tags.push(match (h.from.z() <= 0.0, h.from.x() <= 0.0) {
+                        (false, false) => "sort: front right",
+                        (false, true) => "sort: front left",
+                        (true, false) => "sort: rear right",
+                        (true, true) => "sort: rear left",
+                    });
+                    if h.from.z() == 0.0 || h.from.x() == 0.0 {
+                        tags.push("sort: on a zero");
+                    }
+                    if h.object != 0 {
+                        tags.push("sort: struck");
+                    }
+                    if h.mover != 0 {
+                        tags.push(if h.mover_kind == 2 { "sort: mover kept" } else { "sort: mover dropped" });
+                    }
+                }
+            }
+            Call::Probe(k, _) => {
+                let (t0, t) = (car0.tires[k], car.tires[k]);
+                let asked = calls.iter().filter(|c| matches!(c, Call::TireGround(..))).count();
+                if !t0.on_ground {
+                    tags.push("probe: no ground");
+                } else {
+                    tags.push(match asked {
+                        1 => "probe: asked once",
+                        5 => "probe: asked five times",
+                        _ => "probe: asked again",
+                    });
+                    let dropped = t0.sorted && car0.up.x() * t0.ground_normal.x() + car0.up.y() * t0.ground_normal.y() + car0.up.z() * t0.ground_normal.z() < f32::from_bits(0x3f34_fdf4);
+                    if dropped {
+                        tags.push("probe: sorted dropped by up");
+                    }
+                    let below = t.query.0.y() < t.lower.y();
+                    if below {
+                        tags.push(if t0.sorted && !dropped { "probe: below, surface cleared" } else { "probe: below" });
+                    } else if t0.sorted && !dropped {
+                        let a = [t.upper.x() - t.lower.x(), t.upper.y() - t.lower.y(), t.upper.z() - t.lower.z()];
+                        let n = t0.ground_normal;
+                        let facing = (a[0] * n.x() + a[1] * n.y() + a[2] * n.z()) / (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt();
+                        if facing < 0.7 {
+                            tags.push("probe: held by the axle");
+                        }
+                        tags.push(match (t0.held, t.held, t.solid) {
+                            (_, true, true) if t0.held => "probe: held kept",
+                            (_, true, true) => "probe: held taken",
+                            (true, false, false) => "probe: let go",
+                            (_, _, false) => "probe: sorted kept",
+                            _ => "probe: held",
+                        });
+                    } else {
+                        tags.push("probe: solid on terrain");
+                    }
+                }
+            }
+            _ => {}
         }
         let s = self.pieces.state;
         let (p0, p) = (s0.preload, s.preload);
@@ -1672,6 +2040,16 @@ fn tire_step_is_mx_unleasheds() {
 }
 
 #[test]
+fn contact_sort_is_mx_unleasheds() {
+    pieces(0x0127_0001, &[SORT_CONTACTS], &["sort"], 10);
+}
+
+#[test]
+fn sort_and_probes_are_mx_unleasheds() {
+    pieces(0x0127_0002, &[SORT_CONTACTS, PROBE], &["sort", "probe"], 10 + 13);
+}
+
+#[test]
 fn all_five_pieces_are_mx_unleasheds() {
     pieces(0x0106_a006, &[TRAVEL_COFG, ANTI_SLIDE, PRELOAD, LAUNCH, AERO], &["travel", "anti-slide", "preload", "launch", "aero"], 26);
 }
@@ -1680,6 +2058,17 @@ fn all_five_pieces_are_mx_unleasheds() {
 fn all_six_pieces_with_the_tire_step_are_mx_unleasheds() {
     let all = [TRAVEL_COFG, ANTI_SLIDE, PRELOAD, LAUNCH, AERO, TIRE_STEP];
     pieces(0x0124_a002, &all, &["travel", "anti-slide", "preload", "launch", "aero", "tire"], 46);
+}
+
+#[test]
+fn all_eight_pieces_are_mx_unleasheds() {
+    pieces(
+        0x0127_0003,
+        &[TRAVEL_COFG, SORT_CONTACTS, PROBE, ANTI_SLIDE, PRELOAD, LAUNCH, AERO, TIRE_STEP],
+        &["travel", "sort", "probe", "anti-slide", "preload", "launch", "aero", "tire"],
+        // Every tag but the sort's struck object and kept mover.
+        46 + 10 + 13 - 2,
+    );
 }
 
 /// **The car's frame is the original's**: SLUS-21104's world step over the buggy image's world, with
@@ -1720,6 +2109,7 @@ fn run(seed: u64, cases: usize, unhooked: &[u32]) -> Option<(Seen, Seen)> {
     let world = World { iterations: 1, rate: F(115.0) };
     let table = AcosTable::build();
     let mut r = Rng(seed);
+    let mut r2 = Rng(seed ^ 0x0127_5eed_0127_5eed);
     let mut seen = Seen::new();
     let mut pieces_seen = Seen::new();
     let mut see = |what: &'static str, yes: bool| {
@@ -1737,7 +2127,28 @@ fn run(seed: u64, cases: usize, unhooked: &[u32]) -> Option<(Seen, Seen)> {
         generate_tires(&mut r, &mut m, &mut car, &mut body);
         // The rears' friction scales (MD126) are their tires' (MD124): one word each.
         m.state.rear_friction = [2, 3].map(|t| m.keys.tires[t].friction_scale);
-        let s = Script::new(&mut r);
+        let mut s = Script::new(&mut r);
+        if unhooked.contains(&SORT_CONTACTS) || unhooked.contains(&PROBE) {
+            generate_probe(&mut r2, &mut car, &body);
+            generate_sort(&mut r2, &mut s, &body);
+            // With the tire step unhooked too, what the port's step leaves to the rest or does
+            // not prove (MD124) stays out: a tire standing on a struck object or a kept mover, and
+            // a surface byte past the sixteen tables.
+            if unhooked.contains(&TIRE_STEP) {
+                for h in &mut s.sort.hits {
+                    h.object = 0;
+                    if h.mover_kind == 2 {
+                        h.mover_kind = 3;
+                    }
+                }
+                for g in s.ground.iter_mut().flatten() {
+                    g.surface &= 15;
+                }
+                for t in &mut car.tires {
+                    t.surface &= 15;
+                }
+            }
+        }
         let before = [car_words(&car, &p), seed::body_words(&body, p.body), mx_words(&m, &p)].concat();
 
         // The original.
@@ -1940,7 +2351,11 @@ fn the_cars_update_is_the_originals() {
     let blocks: Vec<(u32, u32)> = std::iter::once((CAR, 0x1500)).chain(p.tires.map(|t| (t, 0x200))).collect();
     const CASES: usize = 10_000;
     for case in 0..CASES {
-        let (u, hazard_words, car, dt) = generate_update(&mut r, &image_car);
+        let (u, hazard_words, mut car, dt) = generate_update(&mut r, &image_car);
+        // The update's surface index is the tire's surface byte (MD127's [`Tire::surface`]).
+        for (t, &k) in car.tires.iter_mut().zip(&u.tire_surface) {
+            t.surface = k;
+        }
 
         // The original.
         poke(&mut ee, &car_words(&car, &p));
