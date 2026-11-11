@@ -20,6 +20,10 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::rc::Rc;
 
+#[path = "mxvatv_bike_ride/gather_in_ram.rs"]
+mod gather_in_ram;
+use gather_in_ram::gather_in_ram;
+
 const DT: u32 = 0x3d08_850a;
 const GP: u64 = 0x003d_baf0;
 const BUDGET: u64 = 50_000_000;
@@ -36,6 +40,9 @@ const SETTLE: u32 = 0x0050_5710;
 /// The wreck arm's nearby gather; the ground query's ring of read cells (0x70 bytes, 32 keys) and the
 /// terrain's two words that keep it.
 const GATHER: u32 = 0x001d_6a60;
+/// S289: the on/off virtuals every part's vtable (`+0x10`) and the aim force's (`+8`) hold at `+0x10`.
+const PART_SWITCH: u32 = 0x0049_bd30;
+const FORCE_SWITCH: u32 = 0x0049_bd80;
 const RING: (u32, u32) = (0x0054_1550, 0x0054_1550 + 0x70 * 32);
 /// The rider's bodies' vt `+0x68` (vtable `0x003cd200`), run as it is.
 const BODY_TARGET: u32 = 0x0049_3b00;
@@ -138,6 +145,14 @@ impl rider::Rider for Port<'_> {
                 0
             }
             Call::Grow { .. } => WRECK_GROWN,
+            Call::Switch { part, on } => {
+                rider::switch_on(self, RIDER, part, on);
+                0
+            }
+            Call::Gather { list, probe, kind } if GATHERS.get() => {
+                gather_in_ram(self.ee, list, probe, kind);
+                0
+            }
             _ => 0,
         }
     }
@@ -179,16 +194,45 @@ fn hook_calls(ee: &mut Ee, log: &Log, answers: &Rc<RefCell<VecDeque<u32>>>, swit
         rider_in(ee, "settle");
         l.borrow_mut().push(Call::Settle);
     }));
+    // S289: the switches and the gather logged, then run as they are.
     for &at in switches {
+        assert!([PART_SWITCH, FORCE_SWITCH].contains(&at), "an on/off virtual at {at:#x}: not the parts' or the force's");
         let l = log.clone();
         ee.hooks.insert(at, Box::new(move |ee: &mut Ee| {
             l.borrow_mut().push(Call::Switch { part: ee.r(4) as u32, on: ee.r(5) as u32 });
+            run_as_is(ee, at);
         }));
     }
     let l = log.clone();
     ee.hooks.insert(GATHER, Box::new(move |ee: &mut Ee| {
         l.borrow_mut().push(Call::Gather { list: ee.r(4) as u32, probe: ee.r(5) as u32, kind: ee.r(6) as u32 });
+        if GATHERS.get() {
+            run_as_is(ee, GATHER);
+        }
     }));
+}
+
+thread_local! {
+    /// S289: whether the gather runs, on both sides (as it is in the original, [`gather_in_ram`] in
+    /// the port's), or on neither: a gather reads state 4's whole broad phase out of RAM in the
+    /// port's, ~9 ms, so the mode machine's test runs it in one case in eight.
+    static GATHERS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// S289: inside its own hook, the hooked function run in the interpreter after all (a nested call
+/// with the hook out of the way, on the stack below the caller's): its arguments as they are, the
+/// caller's `sp`/`ra`, the written set and the hooked `pc` put back so the hook fires again.
+fn run_as_is(ee: &mut Ee, at: u32) {
+    let (sp, ra, stack) = (ee.r(29), ee.r(31), ee.stack);
+    let args: Vec<u64> = (4..8).map(|i| ee.r(i)).collect();
+    let floats: Vec<f32> = (12..14).map(|i| ee.f(i)).collect();
+    let written = std::mem::take(&mut ee.written);
+    ee.stack = (sp as u32 - 0x400) & !0xf;
+    ee.call(at, &args, &floats, BUDGET);
+    ee.written.extend(written);
+    ee.set(29, sp);
+    ee.set(31, ra);
+    (ee.stack, ee.pc) = (stack, at);
 }
 
 /// Nat05's terrain map off its `.res` (state 4 rides Nat05), for the port's ground query.
@@ -225,7 +269,9 @@ fn written_words(ee: &Ee, terrain: u32) -> BTreeSet<u32> {
 /// `+0x86e` bytes, holds' fades, the follow's words; the record's orientation, points and pairs (none,
 /// one or both pointers), its air and level words and the lean inputs on both sides of each limit,
 /// signed zeros among them. Every word written comes out the same on both sides, and the same calls
-/// are made in the same order.
+/// are made in the same order. S289: the parts' and the aim force's on/off virtuals run on both sides
+/// (as they are, and [`rider::switch_on`]), and so does the wreck arm's nearby gather in one case in
+/// eight (as it is, and [`gather_in_ram`]), the probe's ignore list sometimes naming one it finds.
 #[test]
 #[allow(clippy::float_arithmetic)]
 fn the_riders_mode_machine_is_the_originals() {
@@ -272,6 +318,20 @@ fn the_riders_mode_machine_is_the_originals() {
     eprintln!("terrain {terrain:#x}, main body {body:#x}, {bodies} bodies, pose list {poses:#x}, {} parts", parts.len());
     let real_parts = ee.u32_at(RIDER + 0x3ac);
     eprintln!("record {rec:#x}, holder {holder:#x}, switch fns {switches:#x?}, pose list {real_parts}");
+    // The gather's list and probe: the first part's sphere.
+    let nearby = ee.u32_at(RIDER + rider::NEARBY);
+    let probe_sphere = ee.u32_at(parts[0] + 0x88);
+    // What it finds on the image, run once as it is: the collidables (entry - 0x18) the probe's
+    // ignore list is sometimes given, so the pair filter leaves one out.
+    let found: Vec<u32> = {
+        let mut e = image().unwrap();
+        e.set(28, GP);
+        e.call(GATHER, &[u64::from(nearby), u64::from(probe_sphere), 3], &[], BUDGET);
+        let (arr, n) = (e.u32_at(nearby), e.u32_at(nearby + 4));
+        (0..n).map(|i| e.u32_at(arr + 8 * i) - 0x18).collect()
+    };
+    assert!(!found.is_empty(), "the gather finds nothing round the rider on the image");
+    eprintln!("gather list {nearby:#x}, probe {probe_sphere:#x}: {} found", found.len());
     let log: Log = Rc::new(RefCell::new(Vec::new()));
     let answers = Rc::new(RefCell::new(VecDeque::new()));
     hook_calls(&mut ee, &log, &answers, &switches);
@@ -384,7 +444,7 @@ fn the_riders_mode_machine_is_the_originals() {
             put(&mut ee, sphere + 0xe4, list);
             put(&mut ee, sphere + 0xe8, g.pick(&[0, 1, 2, 3, 4, 0xffff_ffff]));
             for i in 0..4 {
-                let w = g.pick(&[collidable, collidable, 0, FAKE + 0x1100]);
+                let w = if k == 0 && g.one_in(3) { found[g.bits() as usize % found.len()] } else { g.pick(&[collidable, collidable, 0, FAKE + 0x1100]) };
                 put(&mut ee, list + 4 * i, w);
             }
         }
@@ -438,6 +498,8 @@ fn the_riders_mode_machine_is_the_originals() {
         put(&mut ee, rec + 0x12c, if g.one_in(2) { 1 } else { 0 });
         put(&mut ee, RIDER + 0x3ac, g.pick(&[real_parts, real_parts, real_parts, 0, 0xffff_ffff]));
         let rands: Vec<u32> = (0..4).map(|_| g.bits()).collect();
+        let gathers = g.one_in(8);
+        GATHERS.set(gathers);
 
         // The original.
         log.borrow_mut().clear();
@@ -507,6 +569,16 @@ fn the_riders_mode_machine_is_the_originals() {
             tally(format!("arm: switched {arm}"));
             let gv = |a: u32| given.iter().rev().find(|(at, _)| *at == a).unwrap().1;
             let now = |a: u32| want.get(&a).copied().unwrap_or_else(|| gv(a));
+            if gathers {
+                // S289: the gather run on both sides, what it found, and whether the probe's own
+                // ignore list (drawn for the release) was in play.
+                let n = want.get(&(nearby + 4)).copied().unwrap_or_else(|| ee.u32_at(nearby + 4));
+                tally(format!("arm: gathered {}", if n == 0 { "nothing" } else { "some" }));
+                let ignores = gv(probe_sphere + 0xe8) as i32;
+                let list = gv(probe_sphere + 0xe4);
+                let left_out = (0..ignores.max(0) as u32).any(|i| found.contains(&gv(list + 4 * i)));
+                tally(format!("arm: gathered, the probe ignoring {}", if left_out { "one it finds" } else if ignores > 0 { "others" } else { "none" }));
+            }
             if f32::from_bits(gv(RIDER + rider::AIM_TIME)) > 0.0 {
                 let how = if gv(RIDER + rider::AIM_AS_IS) != 0 { "as is" } else if gv(RIDER + rider::AIM_BY_BODY) != 0 { "by body" } else { "by record" };
                 tally(format!("arm: aim {how}"));
@@ -546,6 +618,9 @@ fn the_riders_mode_machine_is_the_originals() {
         }
     }
     eprintln!("{t:#?}");
+    for path in ["arm: gathered, the probe ignoring one it finds", "arm: gathered, the probe ignoring others", "arm: gathered, the probe ignoring none"] {
+        assert!(t.contains_key(path), "path {path} never taken");
+    }
     for (path, n) in &t {
         assert!(*n >= 20, "path {path} taken only {n} times");
     }
@@ -800,6 +875,10 @@ impl rider::Rider for ResetPort<'_> {
             Call::BodyInertia { body, from } => rider::body_inertia(self, body, from),
             Call::BodyTarget { body, from } => rider::body_target(self, body, from),
             Call::BodyAt { body, from } => rider::body_at(self, body, from),
+            Call::Switch { part, on } => {
+                self.log.borrow_mut().push(c);
+                rider::switch_on(self, RIDER, part, on);
+            }
             Call::Grow { list, bytes } => {
                 self.log.borrow_mut().push(c);
                 let n = self.grown;

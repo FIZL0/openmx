@@ -263,7 +263,7 @@ pub enum Call {
     Pose,
     Settle,
     /// A part's on/off virtual (its vt at `+0x10`, slot `+0x10`): the part, on or off. The wreck
-    /// arm's aim force (`+0x5bc`) is switched off by the same call, its vt at `+8`.
+    /// arm's aim force (`+0x5bc`) is switched off by the same call, its vt at `+8` ([`switch_on`]).
     Switch { part: u32, on: u32 },
     /// The wreck arm's nearby gather: the rider's list (`+0x5b8`) refilled from the broad phase
     /// around the first part's sphere, kind 3 (the quad's [`crate::atv_world`] gather on RAM).
@@ -724,6 +724,26 @@ pub fn release(m: &mut impl Ram, shape: u32, collidable: u32) {
 /// at `from`.
 pub fn body_target(m: &mut impl Ram, body: u32, from: u32) {
     copy_quad(m, body + 0x150, from);
+}
+
+/// **A part's on/off virtual** (every hold's and named part's on state 4): its `+4` word is `on`.
+pub fn part_switch(m: &mut impl Ram, part: u32, on: u32) {
+    m.set(part + 4, on);
+}
+
+/// **The aim force's on/off virtual**: its `+0` word is `on`.
+pub fn force_switch(m: &mut impl Ram, force: u32, on: u32) {
+    m.set(force, on);
+}
+
+/// [`Call::Switch`] answered: the rider's aim force (`+0x5bc`) by [`force_switch`], any other part
+/// by [`part_switch`].
+pub fn switch_on(m: &mut impl Ram, rider: u32, part: u32, on: u32) {
+    if part == m.word(rider + AIM_FORCE) {
+        force_switch(m, part, on);
+    } else {
+        part_switch(m, part, on);
+    }
 }
 
 /// **The pose targets** set (`on`) or cleared: on, the latch set, the fade started (`+0x5d8` the

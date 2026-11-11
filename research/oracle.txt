@@ -10543,6 +10543,21 @@ atv_heap_free               atv 0x001b76d0 = free
 #   whole against the port, pose/settle/switch/rand/realloc/cue hooked, every written word and the call log
 #   equal; every kind ~1 100 times, kind 5's four hold pairs (fewest 127), list grown 11 988, a free slot
 #   7 274, an inertia lane at 0 14 931.
+# S289: the calls S285's wreck arm and S287/S288 left to the interpreter, ported/served. Journal:
+# research/journal/2026-11-10-s289-rider-switches-and-gather/.
+#   On/off virtuals (every one of state 4's parts' vtables at part +0x10, slot +0x10; the aim force's at
+#   +8, slot +0x10): 0x0049bd30 = sw a1, 4(a0); 0x0049bd80 = sw a1, 0(a0) (both a jr ra with the store in
+#   its delay slot; kit dis -p atv). game_sim::handling::rider::{part_switch, force_switch, switch_on}
+#   (switch_on picks the force by rider +0x5bc).
+#   Gather 0x001d6a60(*(rider+0x5b8) 0x0110c5d0, first part's sphere 0x01106c90, 3): served by F46b's
+#   gather_in_ram (moved to tests/mxvatv_bike_ride/gather_in_ram.rs, shared). The rider's list: filter 1,
+#   flat 0, empty in the image (a gather on it finds some); every part's sphere has +0xe0 mode 1 (exclude), +0xe4/+0xe8 none. The
+#   pair filter 0x001144f0 reads +0xe8 signed (0 < n): the shared reader now drops counts <= 0.
+#   Oracle: tests/mxvatv_rider_modes.rs, the switches logged then run as they are (nested call) against
+#   rider::switch_on in all three tests (60 000 / 20 000 / 20 000 cases); the gather in 1 case in 8 of the
+#   mode machine's (~3 200 gathers in mode 2), the probe's ignore list naming a collidable it finds 1 287
+#   times. Replays: tests/mxvatv_bike_ride.rs's rider leaf serves both in Rust; ride-2 (1 836 switches)
+#   and flip-1 (1 501 switches, 68 gathers) stay bit-exact.
 
 # F31b5d: state 4's sim listeners that are not the bike's, shown inert on C15 ride-2 and flip-1. Journal:
 # research/journal/2026-11-05-f31b5d-other-listeners-inert/.
