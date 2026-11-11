@@ -11312,3 +11312,29 @@ atv_wheel_ctor              atv 0x004a0030 = the wheel constructor: lock +0x70 0
 #   Box 0x001961f0 walks the node's children's world rows (node +0x70) through 0x00196550: on the spawned
 #   quad it is not the load's, root reset to identity or not. Load half box on all four images, worked back
 #   from rec+0x60: (2.1281617, 1.9494964, 3.016569).
+# MD127 — the car's contact sort 0x004cad90 (a0 car) and tire probe 0x004b51f0 (a0 tire, f12 dt), MXU's
+#   pieces as SLUS-21104 builds them (game_sim::atv_car::Pieces sort_contacts/probe; tests/mxvatv_car_frame.rs
+#   contact_sort_is_mx_unleasheds, sort_and_probes_are_mx_unleasheds, all_seven_pieces_are_mx_unleasheds,
+#   3,000 frames each off md39a/buggy.ee.bin). Journal: research/journal/2026-11-11-md127-mxvatv-car-step.
+#   Sort: car +0xc4 rays (0 -> return); probe P = car +0x1264; P's vt +0xcc (0x001bcfe0, a1 car+0x370, ra
+#   0x004caddc) places it, 0x001151c0(P, rays, 1) (ra 0x004cadec) searches; P+0x126 bit 0x20 = struck. List
+#   L = *(P+0x7c): +0x8c count (re-read each hit), +0x90 froms (stride 0x20, x +0, z +8), +0x94 normals, +0x98
+#   points (stride 0x10), +0x9c record pointers. Record +0x90 object, +0x8c mover (kept iff mover+0x1a0 == 2).
+#   Object: X = obj+0x208, count X+0x104, item i = 0x004bf960(X+0x104, i) = (*(X+0x10c))[i]; each item's vt
+#   +0xc(item, 0, 0), before the hand-off. Tire by c.ole.s against 0: z <= 0 rear, x <= 0 left; car +0x1254 FL,
+#   +0x1258 FR, +0x125c RL, +0x1260 RR. Hand-off 0x004b50f0(tire, point, normal, object, mover, record):
+#   +0x100 point, +0x110 normal, +0x19c object, +0x1a0 mover, +0x1b8 record, +0x120 car normal = unturn(body
+#   +0x190 quat, normal), +0x60 drop = unit((0, cn.y, cn.z, 1)) * -radius (+0x1e8; vmulx.xyz, w 1), +0xa8 = 1.
+#   Probe tire words: +0xa4 solid (cleared first), +0x1a4 ground world (0 -> return), +0x70 mount, +0x1c0
+#   probe normal, +0x140 upper = turn(q, mount - cofg) + pos, +0xc8 probes (reset to 0), +0xe0 lever = mount +
+#   drop - cofg, +0x150 lower = turn(q, lever) + pos, +0xac terrain held, +0xf0 surface byte. Loop while d <
+#   0x3f7f069e (cos 5°, a literal; MXU reads its curve table) && probes < 5: car normal, drop, lever, lower;
+#   0x004833c0(world, &point (lower in, ground out), &normal, 0, tire+0xf0) from ra 0x004b5464; normal =
+#   unit(normal); d = dot(normal, probe normal); probe normal = normal; probes++. Then: sorted && dot(car up,
+#   +0x110) < 0x3f34fdf4 -> sorted = 0. point.y < lower.y -> (sorted -> +0xf0 byte = 0) return. Sorted: axle =
+#   unit(upper - lower); dot(axle, +0x110) < 0x3f34fdf4 -> held = 1; else !held -> !(ground <=
+#   0x3dcccccd + sorted.y) sets it; else !(sorted.y <= 0x3dcccccd + ground) clears it; !held -> return;
+#   held -> sorted = 0. Solid = 1, +0x100 = point, +0x110 = normal.
+#   Buggy image: tires 0x01612f80/0x01613950/0x01614320/0x01614cf0, radius 1.1 front / 1.3 rear, all four
+#   on world 0x0184c7d0; P 0x016156c0 (flags 0x12, nothing struck), rays 0x0160ede0, L 0x01628f90.
+#   0x01fe0000..0x01feb000 is zero in the image (the test's scratch for hits, records, objects, movers).
