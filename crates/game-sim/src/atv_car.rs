@@ -155,6 +155,31 @@ pub enum Call {
     HazardClock { dt: F, time: F, sunk: bool },
     ClassStep,
     VehicleUpdate(F),
+    /// What SLUS-21104's own calls hand out in turn, when [`Own`] answers them (MD106b). The vehicle
+    /// force's: the collision record told of the gravity (its vt `+0x88`, with 1). The vehicle post's:
+    /// outside the world, the body's reset (vt `+0x13c`) and the car's respawn (vt `+0xe8`, which the
+    /// unwreck makes too); the spatial update (vt `+0xe4`), the node's bounds (with bit 1 of the flag
+    /// byte) and the collision sync (vt `+0x124`).
+    GravityRecord,
+    BodyReset,
+    Respawn,
+    SpatialUpdate,
+    NodeBounds,
+    CollisionSync,
+    /// The wreck timer's: the map-edge test and throw (vt `+0x16c`, answered into
+    /// [`Vehicle::out_of_bounds`]); the wreck's pad rumble, when the vehicle state is the player's and
+    /// has a pad (the rumble's own switch is the call's to test); a sound cue posted with its kind (11
+    /// the wreck, 12 the map-edge wreck's clock started, 13 the unwreck); the car's wrecked look put on
+    /// (`true`, its vt `+0x94`) or taken off (its vt `+0x90`).
+    OutOfBounds,
+    Rumble,
+    Cue(u32),
+    WreckLook(bool),
+    /// The landing's sound played with the shock (or velocity) in the node's frame.
+    LandingSound(Vf),
+    /// The car's node placed while current, with a subtree under it (its model's parts, past what
+    /// [`Vehicle::scene`] holds): every current node of the subtree marked out of date.
+    SubtreeOutOfDate,
 }
 
 /// Whoever runs the calls the car's listeners make. A `Vec<Call>` just lists them.
@@ -377,4 +402,282 @@ impl<S: Steps> crate::biplane::Dynamics for Frame<'_, S> {
 /// the class and two more), run after the car's own; they are not part of this.
 pub fn frame(world: &crate::biplane::World, car: &mut Car, body: &mut Body, dt: F, table: &AcosTable, s: &mut impl Steps) {
     world.step(dt, &mut Frame { car, body, table, s });
+}
+
+/// The car's state word in the two wrecks its own wreck timer starts: thrown back off the map's edge,
+/// and tipped over and still.
+pub const WRECK_EDGE: u32 = 13;
+pub const WRECK_TIPPED: u32 = 14;
+
+/// Under this ground speed the car counts as still, for the tipped wreck and both unwrecks.
+const STILL_SPEED: f32 = 10.0;
+/// Below this (the node's up row on the world's up) the car is tipped over enough to wreck.
+const TIPPED_UP: u32 = 0x3f4c_cccd; // 0.8
+/// A tipped wreck's clock starts this far short of `MaxWreckTime`.
+const TIPPED_HEAD_START: f32 = 2.0;
+/// What a map-edge wreck keeps of the body's velocity as it unwrecks.
+const EDGE_KEEP: u32 = 0x3d75_c28f; // 0.06
+/// The wreck spins the body's rates up by this.
+const WRECK_SPIN: u32 = 0x401a_e148; // 2.42
+/// What the unwreck keeps of the body's velocity.
+const UNWRECK_KEEP: u32 = 0x3df5_c28f; // 0.12
+/// The map-edge throw halves the world's drag word; the unwreck from it divides it back by this.
+const EDGE_DRAG: f32 = 0.5;
+/// The rodata `(1, 1, 1, 1)` the unwreck puts both dampings back to.
+const UNDAMPED: Vf = Vf([1.0, 1.0, 1.0, 1.0]);
+
+/// What SLUS-21104's own calls in the car's frame read and write beyond [`Car`] and the body
+/// (research/oracle.txt `# MD106b`): MXVehicle's wreck words, the world's two words the wreck and the
+/// force touch, the flag byte, the scene node and the world's bounds.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Vehicle {
+    /// Wrecks are on for this car; without, the wreck timer does nothing.
+    pub wrecks_on: bool,
+    /// The car is held to the map: the wreck timer asks [`Call::OutOfBounds`].
+    pub bounded: bool,
+    /// The wreck clock, `MaxWreckTime`, and whether the clock is counting to the unwreck.
+    pub clock: F,
+    pub max_wreck_time: F,
+    pub counting: bool,
+    /// Set by the tipped wreck, cleared by the unwreck.
+    pub tipped_wreck: bool,
+    /// The vehicle's kind: 0 and 1 keep their body's damping and inertia through a wreck.
+    pub kind: u32,
+    /// `WreckDamping`, `WreckInertia`, and the body's own inertia, the wreck's is a multiple of.
+    pub wreck_damping: Vf,
+    pub wreck_inertia: Vf,
+    pub inertia: Vf,
+    /// The inertia the body holds now (its inverse is the body's [`Body::inv_inertia`]).
+    pub body_inertia: Vf,
+    /// The vehicle state is the player's with a pad: the wreck asks for [`Call::Rumble`].
+    pub rumble: bool,
+    /// The car has a wrecked look ([`Call::WreckLook`]). The wreck uses it without asking.
+    pub look: bool,
+    /// The collision record is touching something; and there is a record.
+    pub touching: bool,
+    pub record: bool,
+    /// The world's gravity force, added each substep, and its drag word.
+    pub gravity: Vf,
+    pub drag: F,
+    /// The vehicle's flag byte: bit 0 holds it in the world's box, bit 6 over its floor; bit 1 asks
+    /// the post for the node's bounds; the force clears bit 5, the post bit 2.
+    pub flags: u8,
+    /// The car's node (node 0) and its parents, and the world's bounds. Node 0's subtree is not held:
+    /// `subtree` says it has one, which placing the node hands out ([`Call::SubtreeOutOfDate`]).
+    pub scene: crate::atv_moto::Scene,
+    pub subtree: bool,
+    pub bounds: crate::atv_moto::Bounds,
+    /// [`Call::OutOfBounds`]'s answer.
+    pub out_of_bounds: bool,
+}
+
+/// **SLUS-21104's own calls answered** (MD106b): the vehicle force and post, the wreck timer, the
+/// landing's node-local turn and the node's position, each ported; every other call, and what these
+/// hand out, goes on to `rest`.
+pub struct Own<'a, S> {
+    pub v: &'a mut Vehicle,
+    pub rest: &'a mut S,
+}
+
+impl<S: Steps> Steps for Own<'_, S> {
+    fn call(&mut self, c: Call, car: &mut Car, body: &mut Body) {
+        let v = &mut *self.v;
+        let s = &mut *self.rest;
+        match c {
+            Call::VehicleForce => vehicle_force(v, body, car, s),
+            Call::VehiclePost(_) => vehicle_post(v, car, body, s),
+            Call::WreckTimer(dt) => wreck_timer(v, car, body, dt, s),
+            Call::Landed(shock) => {
+                let out = node_local(&mut v.scene, 0, shock);
+                s.call(Call::LandingSound(out), car, body);
+            }
+            Call::NodePosition => car.node_pos = v.scene.position(0),
+            c => s.call(c, car, body),
+        }
+    }
+}
+
+/// **The vehicle's force**, the Force body's first call: with the body enabled, the world's gravity
+/// into its force (`xyz`), the collision record told ([`Call::GravityRecord`]) if there is one, and
+/// bit 5 of the flag byte cleared. With the body off, nothing.
+pub fn vehicle_force(v: &mut Vehicle, body: &mut Body, car: &mut Car, s: &mut impl Steps) {
+    if !body.enabled {
+        return;
+    }
+    body.force = body.force.merge(Dest::XYZ, body.force.add(v.gravity));
+    if v.record {
+        s.call(Call::GravityRecord, car, body);
+    }
+    v.flags &= !0x20;
+}
+
+/// **The vehicle's post step**, the PostProcess's first call: with the body enabled, the car's
+/// origin (the body's position less its centre of mass turned into the world,
+/// [`crate::atv_moto::origin`]) tested against the world ([`crate::atv_moto::in_world`]); inside, the
+/// node placed there with the body's orientation (its subtree marked out of date by
+/// [`Call::SubtreeOutOfDate`]); outside, [`Call::BodyReset`] and [`Call::Respawn`].
+/// Then [`Call::SpatialUpdate`], [`Call::NodeBounds`] with bit 1 of the flag byte, and
+/// [`Call::CollisionSync`]; bit 2 cleared. The quad's is the same code ([`crate::atv_moto::vehicle_post`]).
+pub fn vehicle_post(v: &mut Vehicle, car: &mut Car, body: &mut Body, s: &mut impl Steps) {
+    if !body.enabled {
+        return;
+    }
+    let at = crate::atv_moto::origin(&body.view(), car.cofg);
+    if crate::atv_moto::in_world(v.flags, &v.bounds, at) {
+        let current = v.scene.nodes[0].flags & 1 != 0;
+        v.scene.place(0, body.quat, at);
+        if current && v.subtree {
+            s.call(Call::SubtreeOutOfDate, car, body);
+        }
+    } else {
+        s.call(Call::BodyReset, car, body);
+        s.call(Call::Respawn, car, body);
+    }
+    s.call(Call::SpatialUpdate, car, body);
+    if v.flags & 0x02 != 0 {
+        s.call(Call::NodeBounds, car, body);
+    }
+    s.call(Call::CollisionSync, car, body);
+    v.flags &= !0x04;
+}
+
+/// A world direction into node `n`'s frame (the landing's call): its world frame brought up to date,
+/// then the transposed rows times the direction ([`crate::chassis::unrotate`]'s packing), `w` kept.
+pub fn node_local(scene: &mut crate::atv_moto::Scene, n: usize, d: Vf) -> Vf {
+    scene.update(n);
+    let w = &scene.nodes[n].world;
+    crate::chassis::unrotate(&crate::chassis::Mat3 { rows: [w[0], w[1], w[2]] }, d)
+}
+
+/// The ground velocity's length, as the wreck timer measures it (`mula`, `madda`, `madd`, `sqrt`).
+fn ground_speed(car: &Car) -> F {
+    let g = car.ground_velocity;
+    Acc::mula(g.x(), g.x()).madda(g.y(), g.y()).madd(g.z(), g.z()).sqrt()
+}
+
+/// `v.xyz * k`, `w` kept (a `vmulx.xyz` of a scalar moved in).
+fn scale_xyz(v: Vf, k: u32) -> Vf {
+    v.merge(Dest::XYZ, v.mul(Vf::splat(f32::from_bits(k))))
+}
+
+/// The body's inertia set (its vt `+0x60`): `w` 1 (in the caller's copy too), kept, and each lane's
+/// reciprocal into the inverse, or 0 for a lane not above 0; the inverse's `w` stays.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's `c.ole.s` branched on true
+fn set_inertia(v: &mut Vehicle, body: &mut Body, mut i: Vf) -> Vf {
+    i.0[3] = 1.0;
+    v.body_inertia = i;
+    for k in 0..3 {
+        body.inv_inertia.0[k] = if F(i.0[k]) <= F::ZERO { 0.0 } else { (F::ONE / F(i.0[k])).0 };
+    }
+    i
+}
+
+/// **The car's wreck timer** (vt `+0x484`, SLUS-21104's own; MX Unleashed's car has none), once a
+/// PostProcess, with wrecks on:
+///
+/// - held to the map and not already thrown off its edge: off it ([`Call::OutOfBounds`]), the
+///   [`WRECK_EDGE`] wreck;
+/// - riding: tipped over and still — under [`STILL_SPEED`] on the ground velocity, the record touching,
+///   on one side or in the air, and the node's up row under [`TIPPED_UP`] on the world's up — the
+///   [`WRECK_TIPPED`] wreck, its clock started [`TIPPED_HEAD_START`] short of `MaxWreckTime`;
+/// - wrecked (the state read again, so a fresh map-edge wreck counts this frame): the clock runs. Off
+///   the edge, past `MaxWreckTime` the clock starts again counting (cue 12); counting, past it again
+///   or still, the body keeps [`EDGE_KEEP`] of its velocity and the car unwrecks. Tipped, not yet
+///   counting, past it and still: the unwreck, and the clock starts again counting.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's `c.ole.s` / `c.olt.s` branched on false
+pub fn wreck_timer(v: &mut Vehicle, car: &mut Car, body: &mut Body, dt: F, s: &mut impl Steps) {
+    if !v.wrecks_on {
+        return;
+    }
+    if v.bounded && car.state != WRECK_EDGE {
+        s.call(Call::OutOfBounds, car, body);
+        if v.out_of_bounds {
+            wreck(v, car, body, WRECK_EDGE, s);
+        }
+    }
+    if car.state == RIDING {
+        // The node's own frame's up row, dotted with the rodata's (0, 1, 0).
+        let up = v.scene.nodes[0].local[1];
+        let level = Acc::mula(up.x(), F::ZERO).madda(up.y(), F::ONE).madd(up.z(), F::ZERO);
+        if ground_speed(car) < F(STILL_SPEED)
+            && v.touching
+            && (car.one_side || !car.grounded)
+            && level < F(f32::from_bits(TIPPED_UP))
+        {
+            wreck(v, car, body, WRECK_TIPPED, s);
+            v.clock = v.max_wreck_time - F(TIPPED_HEAD_START);
+            v.tipped_wreck = true;
+        }
+        return;
+    }
+    v.clock = v.clock + dt;
+    if car.state == WRECK_EDGE {
+        if !v.counting && !(v.clock <= v.max_wreck_time) {
+            v.counting = true;
+            v.clock = F::ZERO;
+            s.call(Call::Cue(12), car, body);
+        }
+        if v.counting && (!(v.clock <= v.max_wreck_time) || ground_speed(car) < F(STILL_SPEED)) {
+            body.velocity = scale_xyz(body.velocity, EDGE_KEEP);
+            unwreck(v, car, body, s);
+        }
+    } else if car.state == WRECK_TIPPED
+        && !v.counting
+        && !(v.clock <= v.max_wreck_time)
+        && ground_speed(car) < F(STILL_SPEED)
+    {
+        unwreck(v, car, body, s);
+        v.counting = true;
+        v.clock = F::ZERO;
+    }
+}
+
+/// **The car's wreck** (vt `+0x368`): MXVehicle's — the state set, the clock stopped at 0, the
+/// rumble ([`Call::Rumble`]) if it is the player's; unless the vehicle is of kind 0 or 1, both the
+/// body's dampings `WreckDamping` and its inertia `WreckInertia` times its own (`xyz`); cue 11 — then
+/// the car's: the body's rates spun up by [`WRECK_SPIN`], and the wrecked look on.
+pub fn wreck(v: &mut Vehicle, car: &mut Car, body: &mut Body, state: u32, s: &mut impl Steps) {
+    car.state = state;
+    v.clock = F::ZERO;
+    v.counting = false;
+    if v.rumble {
+        s.call(Call::Rumble, car, body);
+    }
+    if v.kind != 1 && v.kind != 0 {
+        let i = v.wreck_inertia.merge(Dest::XYZ, v.wreck_inertia.mul(v.inertia));
+        body.damping = v.wreck_damping;
+        body.ang_damping = v.wreck_damping;
+        set_inertia(v, body, i);
+    }
+    s.call(Call::Cue(11), car, body);
+    body.rates = scale_xyz(body.rates, WRECK_SPIN);
+    s.call(Call::WreckLook(true), car, body);
+}
+
+/// **The car's unwreck** (vt `+0x36c`, with 1): the car's — the latch set, the tipped wreck's flag
+/// cleared, the body keeping [`UNWRECK_KEEP`] of its velocity, the wrecked look off if there is one,
+/// the respawn ([`Call::Respawn`]) — then MXVehicle's: out of a map-edge wreck the world's drag
+/// divided back by [`EDGE_DRAG`]; riding, the clock at 0 (counting is left as it is); unless the
+/// vehicle is of kind 0 or 1, both dampings back to [`UNDAMPED`] and the body's own inertia back
+/// (its `w` set to 1 where it is kept); cue 13.
+pub fn unwreck(v: &mut Vehicle, car: &mut Car, body: &mut Body, s: &mut impl Steps) {
+    car.latch = true;
+    v.tipped_wreck = false;
+    body.velocity = scale_xyz(body.velocity, UNWRECK_KEEP);
+    if v.look {
+        s.call(Call::WreckLook(false), car, body);
+    }
+    s.call(Call::Respawn, car, body);
+    if car.state == WRECK_EDGE {
+        v.drag = v.drag / F(EDGE_DRAG);
+    }
+    car.state = RIDING;
+    v.clock = F::ZERO;
+    if v.kind != 1 && v.kind != 0 {
+        body.damping = UNDAMPED;
+        body.ang_damping = UNDAMPED;
+        let own = v.inertia;
+        v.inertia = set_inertia(v, body, own);
+    }
+    s.call(Call::Cue(13), car, body);
 }
