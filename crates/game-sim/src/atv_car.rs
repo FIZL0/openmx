@@ -124,6 +124,9 @@ pub enum Call {
     /// friction), the centre of mass's travel (vt `+0x470`; [`crate::car::travel_cofg`]), the contact
     /// sort, and each tire's probe.
     Controls(F),
+    /// The controls' own call (MD126, [`Pieces`]): the engine's reverse switch, into reverse with both
+    /// pedals down, out of it otherwise (and always without a driver).
+    Reverse(crate::car::Reverse),
     TravelCofg,
     SortContacts,
     Probe(usize, F),
@@ -395,11 +398,29 @@ pub struct Wing {
     pub position: Vf,
 }
 
-/// The loader's words the ported pieces read (research/oracle.txt `# MD39b`, `# MD106a`): MX
-/// Unleashed's `[Mass Properties]` `CofG` and the car's `CofGAI` and travel, `[Preload]`, the clutch's
-/// launch keys and `[Aerodynamics]` with its wings.
+/// The loader's words the ported pieces read (research/oracle.txt `# MD39b`, `# MD106a`, `# MD126`): MX
+/// Unleashed's `[Joystick]` (its rate limits, steer tables and squared steering), `[Steering]`'s yaw
+/// rate limits and the hand brake's keys, `[Mass Properties]` `CofG` and the car's `CofGAI` and
+/// travel, `[Preload]`, the clutch's launch keys and `[Aerodynamics]` with its wings.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Keys {
+    pub square_steering: bool,
+    pub brake_rate_limit: F,
+    pub gas_rate_limit: F,
+    pub x_dpad_rate_limit_on: F,
+    pub x_dpad_rate_limit_off: F,
+    pub x_axis_rate_limit: F,
+    /// Three `(speed, scale)` points each: the stick's, a wheel's and the d-pad's steer tables.
+    pub steer: [[F; 2]; 3],
+    pub wheel_steer: [[F; 2]; 3],
+    pub dpad_steer: [[F; 2]; 3],
+    /// Two `(speed, scale)` points: the rear tires' share of the steer.
+    pub rear_steer: [[F; 2]; 2],
+    pub yaw_rate_limit: F,
+    pub hand_brake_yaw_rate_limit: F,
+    pub hand_brake_friction_scale: F,
+    pub hand_brake_brake_scale: F,
+    pub hand_brake_fade_time: F,
     pub cofg: Vf,
     pub cofg_ai: Vf,
     pub cofg_travel_forward: F,
@@ -443,17 +464,40 @@ pub struct State {
     /// A person drives: the vehicle state's mode is 1 (no vehicle state, or any other mode, is the
     /// AI's `CofGAI`).
     pub human: bool,
-    /// The stick's lean (back is negative) and steer, the preload's pad word, the clutch.
+    /// Someone drives at all (without, the controls clear every pedal); the vehicle state says the
+    /// driver's controller is a wheel; the d-pad steered last.
+    pub driven: bool,
+    pub wheel: bool,
+    pub dpad: bool,
+    /// The race's start holds the gas off (the vehicle's start-penalty clock is running).
+    pub start_penalty: bool,
+    /// The stick's lean (back is negative) and steer, the preload's pad word, the clutch pedal.
     pub lean: F,
     pub stick: F,
     pub pad_word: F,
     pub clutch: F,
-    /// The vehicle's slewed gas and its brake word; the car's brake, brake force and hand brake.
+    /// The vehicle's gas and brake pedals as pressed, and its gas after the rate limit; the car's
+    /// brake and brake force (the front and the rear tires' brakes) and hand brake.
+    pub gas_pedal: F,
     pub gas: F,
     pub vehicle_brake: F,
     pub brake: F,
     pub brake_force: F,
     pub hand_brake: F,
+    /// The steer after its rate limit; the front and rear steer angles; the clutch the engine reads;
+    /// what is left of the hand brake's fade; the two rear tires' friction scales (left, right).
+    pub steer_input: F,
+    pub steer: F,
+    pub rear_steer: F,
+    pub engaged_clutch: F,
+    pub hand_brake_fade: F,
+    pub rear_friction: [F; 2],
+    /// The car is held braked, off the gas, until the gas pedal first comes on; the vehicle lets both
+    /// pedals reverse it, and lets the gas through at all; the engine is in reverse.
+    pub held: bool,
+    pub reverse_enabled: bool,
+    pub throttle_enabled: bool,
+    pub reversing: bool,
     /// The body's weight (world), from the vehicle's gravity block.
     pub gravity: Vf,
     /// The collision record says the car touches something.
@@ -467,9 +511,10 @@ pub struct State {
     pub launch_boost: F,
 }
 
-/// **The car's [`Steps`] with MX Unleashed's pieces ported** (MD106a), as SLUS-21104 builds them: the
-/// centre of mass's travel, the anti-slide, the preload, the launch and the aero, run on
-/// [`Keys`] and [`State`]. Every other call, and the preload's cue, goes to `rest`.
+/// **The car's [`Steps`] with MX Unleashed's pieces ported** (MD106a, MD126), as SLUS-21104 builds
+/// them: the controls, the centre of mass's travel, the anti-slide, the preload, the launch and the
+/// aero, run on [`Keys`] and [`State`]. Every other call, the controls' reverse switch and the
+/// preload's cue go to `rest`.
 pub struct Pieces<R> {
     pub keys: Keys,
     pub state: State,
@@ -488,6 +533,11 @@ impl<R: Steps> Pieces<R> {
     /// Runs `c` when it is one of the ported pieces; `false`, and nothing done, when it is not.
     pub fn answer(&mut self, c: Call, car: &mut Car, body: &mut Body) -> bool {
         match c {
+            Call::Controls(dt) => {
+                if let Some(r) = controls(&self.keys, &mut self.state, car, dt) {
+                    self.rest.call(Call::Reverse(r), car, body);
+                }
+            }
             Call::TravelCofg => travel_cofg(&self.keys, &self.state, car, body),
             Call::AntiSlide(_) => anti_slide(&self.state, car, body),
             Call::Preload(h) => {
@@ -531,6 +581,136 @@ fn remap(x: F, in_lo: F, in_hi: F, out_lo: F, out_hi: F) -> F {
     }
     let t = (x - in_lo) / (in_hi - in_lo);
     out_lo.lerp(out_hi, t).max(out_lo.min(out_hi)).min(out_lo.max(out_hi))
+}
+
+/// The controls' inline remap for the steer tables: as [`remap`], but a degenerate input range is
+/// the low end itself (the `sub.s` in that branch's delay slot writes a register it drops).
+fn table_remap(x: F, in_lo: F, in_hi: F, out_lo: F, out_hi: F) -> F {
+    if in_lo == in_hi { out_lo } else { remap(x, in_lo, in_hi, out_lo, out_hi) }
+}
+
+/// A three-point steer table at `speed`: the first segment below the middle point's speed, the
+/// second at or above it.
+fn steer_scale(t: &[[F; 2]; 3], speed: F) -> F {
+    let [a, b, c] = *t;
+    if speed < b[0] { table_remap(speed, a[0], b[0], a[1], b[1]) } else { table_remap(speed, b[0], c[0], b[1], c[1]) }
+}
+
+/// `now` moved toward `want` by at most `rate`: `max.s`/`min.s`, then the add.
+fn slew(now: F, want: F, rate: F) -> F {
+    now + (want - now).max(-rate).min(rate)
+}
+
+/// A pedal through its rate limit: it rises no faster than `rate`, and drops at once.
+fn pedal(now: F, want: F, rate: F) -> F {
+    if want <= now { want } else { slew(now, want, rate) }
+}
+
+/// The throttle both pedals together hold the car to while it reverses.
+const REVERSE_THROTTLE: u32 = 0x3ecc_cccd;
+/// The speed over which the hand brake's brake scale comes in.
+const HAND_BRAKE_SPEED: f32 = 10.0;
+
+/// **The controls** (vt `+0x34c`, MX Unleashed's [`crate::car::Controls::step`] on SLUS-21104's
+/// vehicle): first a running start penalty takes the gas pedal off. Without a driver every pedal and
+/// the stick are cleared, the brakes are full and the yaw limit is the key's, and the engine is put
+/// out of reverse. Else the steer: the d-pad's through its on or off rate (off with the stick
+/// centred), a wheel's as it is, or the stick's (squared, keeping its sign, with `SquareSteeringInput`)
+/// through its rate, each times its table at the car's forward speed; the rear's share by its two
+/// points. Then the pedals, unless the car is held (the gas pedal lets it go): both pedals down (when
+/// the vehicle allows it) is reverse, the brakes off and the gas pedal pressed to 0.4; otherwise out
+/// of reverse (when in it) and the brake through its rate, the rears' the same; the gas through its
+/// rate (none while the vehicle holds the throttle off). The clutch passes through. Last the hand
+/// brake: held, the rears' friction and the yaw limit are its, the rears' brake its scale with speed
+/// up to 10, and the fade is wound; let go, the friction comes back over the fade, and with the fade
+/// run out the yaw limit is the key's. Returns the engine's reverse switch, where it calls it.
+///
+/// SLUS-21104 adds to MX Unleashed's the start penalty, the hold and the vehicle's reverse and
+/// throttle switches; the remaps are inline (`adda.s`/`madd.s`), the steer tables' answering a flat
+/// range with its low end, the fade's with the low end less the input's (both 1 for its range).
+fn controls(k: &Keys, s: &mut State, car: &mut Car, dt: F) -> Option<crate::car::Reverse> {
+    use crate::car::Reverse;
+    if s.start_penalty {
+        s.gas_pedal = F::ZERO;
+    }
+    if !s.driven {
+        s.stick = F::ZERO;
+        s.lean = F::ZERO;
+        s.pad_word = F::ZERO;
+        s.gas_pedal = F::ZERO;
+        s.vehicle_brake = F::ZERO;
+        s.clutch = F::ZERO;
+        s.steer_input = F::ZERO;
+        s.gas = F::ZERO;
+        s.steer = F::ZERO;
+        s.hand_brake = F::ZERO;
+        s.brake = F::ONE;
+        s.brake_force = F::ONE;
+        car.yaw_rate_limit = k.yaw_rate_limit;
+        return Some(Reverse::Out);
+    }
+
+    let speed = F(car.velocity.z());
+    let scale = if s.dpad {
+        let rate = if s.stick.abs() == 0.0 { k.x_dpad_rate_limit_off } else { k.x_dpad_rate_limit_on };
+        s.steer_input = slew(s.steer_input, s.stick, rate * dt);
+        steer_scale(&k.dpad_steer, speed)
+    } else if s.wheel {
+        s.steer_input = s.stick;
+        steer_scale(&k.wheel_steer, speed)
+    } else {
+        if k.square_steering {
+            let sign = if s.stick < 0.0 { -1 } else { 1 };
+            s.stick = s.stick * (s.stick * F::from(sign));
+        }
+        s.steer_input = slew(s.steer_input, s.stick, k.x_axis_rate_limit * dt);
+        steer_scale(&k.steer, speed)
+    };
+    s.steer = scale * s.steer_input;
+    let [r1, r2] = k.rear_steer;
+    s.rear_steer = table_remap(speed, r1[0], r2[0], r1[1], r2[1]) * s.steer;
+
+    let mut reverse = None;
+    if s.gas_pedal > 0.0 {
+        s.held = false;
+    }
+    if s.held {
+        s.brake = F::ONE;
+        s.brake_force = F::ONE;
+        s.gas = F::ZERO;
+    } else {
+        if s.gas_pedal == 0.0 || s.vehicle_brake == 0.0 || !s.reverse_enabled {
+            if s.reversing {
+                reverse = Some(Reverse::Out);
+            }
+            s.brake = pedal(s.brake, s.vehicle_brake, k.brake_rate_limit * dt);
+            s.brake_force = s.brake;
+        } else {
+            reverse = Some(Reverse::In);
+            s.brake = F::ZERO;
+            s.brake_force = F::ZERO;
+            s.gas_pedal = F(f32::from_bits(REVERSE_THROTTLE));
+        }
+        s.gas = if s.throttle_enabled { pedal(s.gas, s.gas_pedal, k.gas_rate_limit * dt) } else { F::ZERO };
+    }
+    s.engaged_clutch = s.clutch;
+
+    if s.hand_brake == 0.0 {
+        if s.hand_brake_fade > 0.0 {
+            let f = remap(s.hand_brake_fade, F::ZERO, k.hand_brake_fade_time, F::ONE, k.hand_brake_friction_scale);
+            s.rear_friction = [f; 2];
+            s.hand_brake_fade = s.hand_brake_fade - dt;
+        } else {
+            s.rear_friction = [F::ONE; 2];
+            car.yaw_rate_limit = k.yaw_rate_limit;
+        }
+    } else {
+        s.rear_friction = [k.hand_brake_friction_scale; 2];
+        car.yaw_rate_limit = k.hand_brake_yaw_rate_limit;
+        s.brake_force = remap(car.speed, F::ZERO, F(HAND_BRAKE_SPEED), F::ONE, k.hand_brake_brake_scale);
+        s.hand_brake_fade = k.hand_brake_fade_time;
+    }
+    reverse
 }
 
 /// The body's set-centre-of-mass (its vtable's `+0x5c`): the position and the last position move by
