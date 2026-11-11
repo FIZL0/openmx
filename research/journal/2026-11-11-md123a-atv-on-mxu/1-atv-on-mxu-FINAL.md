@@ -110,6 +110,22 @@ No capture can check any of this, because the original has no quad on an MXU tra
 that the quad behaves like a ride: it jumps and lands, it wrecks on a strike, it is put back, and it rides
 on.
 
+## The gate: two red tests that aren't this task's
+
+`./kit check --all` failed in `mxvatv_car_frame` in two tests: `all_six_pieces_are_mx_unleasheds` (MD126)
+and `all_six_pieces_with_the_tire_step_are_mx_unleasheds` (MD124). This task doesn't touch either.
+
+- The cause is the merge of MD124 and MD126 (ec16d5142). MD124's `generate_tires` now runs ahead of MD126's
+  script draws, which moves every seed's cases.
+- Preload's "fired, degenerate" branch was then seen only 17 and 18 times, against the floor of 20.
+- It fails the same way on every run.
+- A blocked `kit done` runs the same gate, so blocking couldn't record anything.
+
+I filed K48 and changed only the two seeds: `0x0126_0002` → `0x0126_0007` and `0x0124_a002` → `0x0124_a006`.
+These are the first seeds I tried that see every branch at least 20 times; seeds 3–6 did not, for
+all_six. All 13 tests in `mxvatv_car_frame` pass. K48 stays open for a real fix: preload firing is rare,
+about 20 in 3,000 frames, so any seed is close to the floor.
+
 ## Not verified / not 1:1
 
 - **Only reason 15 is asked.** None of the wreck test's other clauses run on `quad::Ride`: loads 1–4,
@@ -148,6 +164,8 @@ on.
 - **The call order differs from the original.** The record runs before the world step and the tail and
   wreck after it, on `quad::Ride`'s structs. In the original the tail is part of the update and the
   wreck test runs inside `BikeVehicleUpdate`. The resulting order is not checked against a capture.
+- **The car-frame seeds were picked to pass** (see The gate). The new seeds clear the branch floor, but
+  only by a little. K48 is the real fix.
 - **The ride-on is weak.** After the put-back it covers only 28 ft in 4 s, because it starts facing the
   prop and steers away at low speed.
 

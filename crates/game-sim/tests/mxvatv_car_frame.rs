@@ -1623,7 +1623,7 @@ fn controls_are_mx_unleasheds() {
 #[test]
 fn all_six_pieces_are_mx_unleasheds() {
     pieces(
-        0x0126_0002,
+        0x0126_0007,
         &[CONTROLS, TRAVEL_COFG, ANTI_SLIDE, PRELOAD, LAUNCH, AERO],
         &["controls", "travel", "anti-slide", "preload", "launch", "aero"],
         48,
@@ -1679,7 +1679,7 @@ fn all_five_pieces_are_mx_unleasheds() {
 #[test]
 fn all_six_pieces_with_the_tire_step_are_mx_unleasheds() {
     let all = [TRAVEL_COFG, ANTI_SLIDE, PRELOAD, LAUNCH, AERO, TIRE_STEP];
-    pieces(0x0124_a002, &all, &["travel", "anti-slide", "preload", "launch", "aero", "tire"], 46);
+    pieces(0x0124_a006, &all, &["travel", "anti-slide", "preload", "launch", "aero", "tire"], 46);
 }
 
 /// **The car's frame is the original's**: SLUS-21104's world step over the buggy image's world, with
