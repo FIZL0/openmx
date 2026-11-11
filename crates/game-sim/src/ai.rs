@@ -2335,6 +2335,7 @@ pub fn habits(h: &mut Habits, spot_point: Option<&mut dyn FnMut(&mut Vf)>, rng: 
 pub mod seek {
     use super::flag::ON_GROUND;
     use super::{Controls, add, scale, sub, unit};
+    use crate::phy::{Ini, Section};
     use crate::rng::Rng;
     use ps2_float::fpu::Acc;
     use ps2_float::{Dest, F, Vf, vu};
@@ -2420,6 +2421,10 @@ pub mod seek {
     /// One of the map's jump groups: the targets a set holding it draws from (`None`: the group has
     /// no list, and a draw finds nothing), where it is, whether it is in play, and per player whether
     /// it is open.
+    ///
+    /// On a map ([`load`]) a group is one of `hit.dat`'s activity start zones: in play is a hit
+    /// zone's (the type word the build tests for 1), its list is the hit set its `HitSetID` names, and
+    /// open is the player's progress having unlocked it.
     #[derive(Clone, Debug, Default, PartialEq)]
     pub struct Group {
         pub targets: Option<Vec<Option<usize>>>,
@@ -2643,6 +2648,175 @@ pub mod seek {
         for set in &mut world.sets {
             set.picks = found;
         }
+    }
+
+    /// What a start zone's `Type` names: the four free-ride activities.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Activity {
+        Hit,
+        Run,
+        Race,
+        Stunt,
+    }
+
+    impl Activity {
+        /// The `Type` word, matched without regard to case; any other word is no activity.
+        pub fn of(word: &str) -> Option<Activity> {
+            [("Hit", Activity::Hit), ("Run", Activity::Run), ("Race", Activity::Race), ("Stunt", Activity::Stunt)]
+                .into_iter()
+                .find(|(w, _)| w.eq_ignore_ascii_case(word))
+                .map(|(_, a)| a)
+        }
+    }
+
+    /// A start zone as the progression reads it when it opens zones to a player: its activity, its
+    /// number in `hit.dat` (`[ASZ n]`), and its place in its progression — where its `HitSetID` last
+    /// appears in `[Progression HitSets]` (a hit zone) or `[Run HitSets]` (a run zone), from 0; a race
+    /// or stunt zone is place 0, and a hit or run zone its list does not name has none.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Zone {
+        pub activity: Option<Activity>,
+        pub number: i32,
+        pub place: Option<usize>,
+    }
+
+    /// How many players a zone keeps an open flag for.
+    pub const OPEN_PLAYERS: usize = 2;
+
+    /// The two database files a map's `hit.dat` names under `[HitData]` (`HitDBFilename`,
+    /// `HitSetDBFilename`), as written: the game puts its track folder in front of each.
+    pub fn databases(hit_dat: &Ini) -> (Option<&str>, Option<&str>) {
+        let s = hit_dat.section("HitData");
+        (s.text("HitDBFilename"), s.text("HitSetDBFilename"))
+    }
+
+    /// A map's seeker world, as the game builds it at load: the jumps of the hit database, one
+    /// target per jump with a done flag per slot, the hit sets its set database lists, and a group per
+    /// start zone of `hit.dat`, with a set per rider.
+    ///
+    /// - Each jump's three points, and each zone's, are moved onto the ground (only the height; a
+    ///   point over no ground is left).
+    /// - A hit or set whose id is missing or 0 takes the database's next id (`NextHitID`,
+    ///   `NextHitSetID`, from 1), which then counts on.
+    /// - A set's hit ids name the first target whose hit has that id, or nothing.
+    /// - A zone's list is the first hit set whose id its `HitSetID` is (a missing one, -1, is none);
+    ///   it is in play when it is a hit zone, and `open(player, zone)` is whether the player's
+    ///   progress has opened it, for [`OPEN_PLAYERS`] players.
+    /// - The sets' pick lists are left for [`build`]; no set has a course and there is no sequence.
+    pub fn load(
+        hit_dat: &Ini,
+        hits: &Ini,
+        hit_sets: &Ini,
+        owners: &[Owner],
+        slots: usize,
+        open: &dyn Fn(usize, Zone) -> bool,
+        ground: &mut dyn crate::world::World,
+    ) -> World {
+        let mut snap = |p: Vf| -> Vf {
+            if ground.keeps(p) { p.merge(Dest::Y, Vf::splat(ground.ground(p).0.y())) } else { p }
+        };
+
+        let general = hits.section("General");
+        let total = general.int("TotalHits").unwrap_or(0);
+        let mut next = general.text("NextHitID").map_or(1, id);
+        let mut ids = Vec::new();
+        let mut jumps = Vec::new();
+        for n in 1..=total.max(0) {
+            let mut hit_id = hits.section(&format!("Hit {n}")).text("HitID").map_or(0, id);
+            if hit_id == 0 {
+                hit_id = next;
+                next = next.wrapping_add(1);
+            }
+            ids.push(hit_id);
+            let leg = |part: &str| leg(hits.section(&format!("HitZone {part} {n}")));
+            let mut jump = Jump { take_off: leg("TakeOff"), landing: leg("Landing"), setup: leg("Start") };
+            jump.setup.point = snap(jump.setup.point);
+            jump.take_off.point = snap(jump.take_off.point);
+            jump.landing.point = snap(jump.landing.point);
+            jumps.push(jump);
+        }
+        let targets = (0..jumps.len()).map(|j| Target { jump: Some(j), done: vec![false; slots] }).collect();
+
+        let general = hit_sets.section("General");
+        let total = general.int("TotalHitSets").unwrap_or(0);
+        let mut next = general.text("NextHitSetID").map_or(1, id);
+        let mut lists: Vec<(u16, Vec<Option<usize>>)> = Vec::new();
+        for n in 1..=total.max(0) {
+            let s = hit_sets.section(&format!("HitSet {n}"));
+            let mut set_id = s.text("HitSetID").map_or(0, id);
+            if set_id == 0 {
+                set_id = next;
+                next = next.wrapping_add(1);
+            }
+            let list = s.texts("HitID").map(|v| ids.iter().position(|&h| h == id(v))).collect();
+            lists.push((set_id, list));
+        }
+
+        let order = |name: &str| -> Vec<i32> { hit_dat.section(name).texts("HitSetID").map(|v| int(v)).collect() };
+        let (progression, run) = (order("Progression HitSets"), order("Run HitSets"));
+        let count = hit_dat.section("Activity Start Zones").int("ASZCount").unwrap_or(0);
+        let mut groups = Vec::new();
+        for number in 1..=count.max(0) {
+            let s = hit_dat.section(&format!("ASZ {number}"));
+            let point = snap(s.vector("Position", Vf::new(0.0, 0.0, 0.0, 1.0)));
+            let activity = s.text("Type").and_then(Activity::of);
+            let hit_set = s.int("HitSetID").unwrap_or(-1);
+            let last = |list: &[i32]| list.iter().rposition(|&h| h == hit_set);
+            let place = match activity {
+                Some(Activity::Hit) => last(&progression),
+                Some(Activity::Run) => last(&run),
+                Some(Activity::Race | Activity::Stunt) => Some(0),
+                None => None,
+            };
+            let zone = Zone { activity, number, place };
+            groups.push(Group {
+                targets: lists.iter().find(|(i, _)| *i as u32 == hit_set as u32).map(|(_, l)| l.clone()),
+                point,
+                active: activity == Some(Activity::Hit),
+                open: (0..OPEN_PLAYERS).map(|p| open(p, zone)).collect(),
+            });
+        }
+
+        World {
+            sets: owners.iter().map(|&owner| Set { picks: None, course: None, owner }).collect(),
+            targets,
+            jumps,
+            sequence: None,
+            groups,
+        }
+    }
+
+    /// One `[HitZone ...]` section: a leg's point, facing, velocity, aim and learnt count (its
+    /// `Scale` sizes the zone, which the seeker does not read).
+    fn leg(s: Section<'_>) -> Leg {
+        let zero = Vf::new(0.0, 0.0, 0.0, 1.0);
+        Leg {
+            point: s.vector("Position", zero),
+            facing: s.vector("LookVector", Vf::new(1.0, 0.0, 0.0, 1.0)),
+            velocity: s.vector("TargetVelocity", zero),
+            learnt: s.float_or("TargetPreload", F::ZERO),
+            aim: s.vector("TargetPosition", zero),
+        }
+    }
+
+    /// An id as the databases read one: decimal, kept to sixteen bits.
+    fn id(text: &str) -> u16 {
+        let t = text.trim_start_matches([' ', '\t']);
+        let (negative, t) = match t.as_bytes().first() {
+            Some(b'-') => (true, &t[1..]),
+            Some(b'+') => (false, &t[1..]),
+            _ => (false, t),
+        };
+        let mut v: i64 = 0;
+        for d in t.bytes().take_while(u8::is_ascii_digit) {
+            v = v.saturating_mul(10).saturating_add((d - b'0') as i64);
+        }
+        (if negative { v.wrapping_neg() } else { v }) as u16
+    }
+
+    /// A progression list's entry: [`Section::int`]'s reading of one value.
+    fn int(text: &str) -> i32 {
+        Ini::parse(&format!("[a]\nb={text}\n")).section("a").int("b").unwrap_or(0)
     }
 
     /// One draw off a set's pick list, [`build`]ing the lists first when the set has none: `None`,

@@ -224,6 +224,16 @@ impl<'a> Section<'a> {
             .map(|(_, _, v)| v.as_str())
     }
 
+    /// Every value of a key, in file order: what the original's reader hands a caller that reads one
+    /// key over and over, its cursor going on past the last match each time (a hit set's `HitID`s).
+    pub fn texts(&self, key: &'a str) -> impl Iterator<Item = &'a str> + 'a {
+        let (ini, which) = (self.ini, self.which);
+        ini.pairs
+            .iter()
+            .filter(move |(s, k, _)| Some(*s) == which && eq_ignore_case(k, key))
+            .map(|(_, _, v)| v.as_str())
+    }
+
     /// A float, or `None` when the key is missing — which the original signals by leaving the
     /// destination alone, so every caller here keeps what it had.
     pub fn float(&self, key: &str) -> Option<F> {
