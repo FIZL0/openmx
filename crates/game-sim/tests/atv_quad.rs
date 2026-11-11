@@ -38,6 +38,10 @@ mod animate;
 #[path = "atv_quad/interpolate.rs"]
 mod interpolate;
 
+/// MD122: the quad's loader against C28's images.
+#[path = "atv_quad/load.rs"]
+mod load;
+
 const OBJ: u32 = 0x01c0_0000;
 const BODY: u32 = 0x01c0_2000;
 const WORLD: u32 = 0x01c0_2400;
