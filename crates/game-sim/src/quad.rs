@@ -3574,3 +3574,158 @@ impl Load {
 
 /// The body's largest roll and pitch rates, either side of `YawRateLimit`.
 const QUAD_MAX_RATE: f32 = 20.0;
+
+// --- MD123: the quad on MX Unleashed's worlds ------------------------------------------------------
+
+/// **The quad's ground query on an MX Unleashed world** (MD123): what [`Steps`]' `ground` answers on a
+/// track the shell rides, in place of Desert Oasis's [`crate::atv_ground::Terrain::ground`]. The
+/// probe's end `at` is moved onto the world's ground ([`crate::world::World::ground`], the query
+/// [`crate::ride::Ride`]'s wheels ask), and the surface under it written into the wheel's record where
+/// the world's own query writes one ([`crate::world::World::wheel_surface`]), else left as it was.
+pub fn world_ground(world: &mut dyn crate::world::World, at: Vf, record: &mut u8) -> (Vf, Vf) {
+    let (point, normal) = world.ground(at);
+    if let Some(s) = world.wheel_surface(at) {
+        *record = s;
+    }
+    (point, normal)
+}
+
+/// The world box the vehicle's in-world test reads ([`crate::atv_moto::in_world`]) for an MX Unleashed
+/// world: its map edge ([`crate::world::World::area`]) from the origin, or none (every spot inside)
+/// for a world with no edge. The floor is kept.
+pub fn world_bounds(world: &dyn crate::world::World, floor: F) -> crate::atv_moto::Bounds {
+    let area = world.area().map(|a| (Vf::new(0.0, 0.0, 0.0, 1.0), Vf::new(a.width.0, 0.0, a.depth.0, 1.0)));
+    crate::atv_moto::Bounds { floor, area }
+}
+
+/// **The quad's wheel rays swept over an MX Unleashed world** (MD123), the [`Sweep`] for
+/// [`Call::Contacts`] on a track: the trigger probe's four segments (one a wheel, in
+/// [`LEFT_FRONT`]..[`RIGHT_REAR`] order, in the quad's frame; [`trigger_segments`]) stood at the scene
+/// node's frame and swept as one bundle against everything solid ([`crate::world::World::solid`],
+/// what [`crate::ride::Ride`]'s probes are swept against) and then the placed groups
+/// ([`crate::world::World::groups`]) into the same record. Each segment that hit is a contact at its
+/// own start (so [`wheel_contacts`] gives it to its wheel), the hit's normal and point, the thing hit's
+/// owner number as its node, and no owner or vehicle (nothing on an MX Unleashed world listens).
+///
+/// The gather ([`Sweep::gather`]) is answered and does nothing: the world's sweep looks at all it has,
+/// with no nearby list to fill. The world is shared with the ground query ([`Ride::frame_on`]).
+pub struct OnWorld<'a, 'w> {
+    pub world: &'a std::cell::RefCell<&'w mut dyn crate::world::World>,
+    pub segments: [[Vf; 2]; 4],
+}
+
+impl Sweep for OnWorld<'_, '_> {
+    fn sweep(&mut self, frame: &crate::ray_probe::Matrix) -> Option<(bool, Vec<Contact>)> {
+        use crate::collide::{Bundle, Probe, Record};
+        let m = crate::math::Mat4(*frame);
+        let ends = self.segments.map(|[a, b]| [crate::math::transform_point(&m, a), crate::math::transform_point(&m, b)]);
+        let centre = frame[3].merge(Dest::W, Vf::VF0);
+        let mut radius = F::ZERO;
+        let mut bundle = Bundle { count: 4, centre, ..Bundle::default() };
+        for (k, [a, b]) in ends.iter().enumerate() {
+            bundle.probes[k] = Probe::between(*a, *b);
+            for p in [a, b] {
+                let d = p.sub(centre);
+                let r = F(fpu::sqrt(fpu::madd(fpu::madda(fpu::mula(d.x(), d.x()), d.y(), d.y()), d.z(), d.z())));
+                if r > radius {
+                    radius = r;
+                }
+            }
+        }
+        bundle.radius = radius;
+        let mut record = Record::new();
+        let mut world = self.world.borrow_mut();
+        let solid = world.solid(&bundle, &mut record);
+        let groups = world.groups(&bundle, &mut record);
+        let contacts = (0..4)
+            .filter(|&k| record.hit[k])
+            .map(|k| Contact {
+                at: self.segments[k][0],
+                normal: record.normal[k],
+                point: record.point[k],
+                node: record.owner[k] as u32,
+                ..Contact::default()
+            })
+            .collect();
+        Some((solid || groups, contacts))
+    }
+
+    fn gather(&mut self, _centre: Vf, _reach: F) -> bool {
+        true
+    }
+}
+
+/// **The quad as a shell steps it** (MD123): its keys ([`Params`]), its words ([`Quad`]), its rigid
+/// body, the bike steps' own words ([`Bike`]) and whoever answers the calls those leave (`rest`), one
+/// [`frame`] a tick. The same type rides Desert Oasis in the tests ([`Ride::frame`] handed
+/// [`crate::atv_ground::Terrain`]'s query and [`crate::atv_search::Oasis`]) and an MX Unleashed world in
+/// the shell ([`Ride::frame_on`]).
+///
+/// What the world step hands `rest` (a `Vec<Call>` lists them, until its owner clears it) and nobody
+/// here answers:
+///
+/// - [`Call::GravityRecord`] with no record held ([`Bike::contacts`] `None`): the collision record's
+///   virtual, whose contacts an MX Unleashed world never files.
+/// - [`Call::SpatialMove`] and [`Call::PartMove`]: SLUS-21104's spatial database, which an MX Unleashed
+///   world does not have; its sweep reads the world directly ([`OnWorld`]).
+/// - [`Call::BodyReset`] and [`Call::Respawn`], the quad's origin off the world's box
+///   ([`world_bounds`]).
+/// - [`Call::PreloadCue`] (a sound cue), [`Call::StartStunt`]/[`Call::EndStunt`] (the rider's
+///   animation) and [`Call::Wreck`] (the reason; [`Ride::wreck`] reads it).
+pub struct Ride<R = Vec<Call>> {
+    pub p: Params,
+    pub q: Quad,
+    pub body: crate::atv_body::Body,
+    pub bike: Bike,
+    pub rest: R,
+    pub table: crate::air::AcosTable,
+}
+
+/// The quad's physics world: one iteration a substep, at least 115 substeps a second.
+pub const WORLD: crate::biplane::World = crate::biplane::World { iterations: 1, rate: F(115.0) };
+
+impl<R: Moto + Default> Ride<R> {
+    pub fn new(p: Params, q: Quad, body: crate::atv_body::Body, bike: Bike, rest: R) -> Ride<R> {
+        Ride { p, q, body, bike, rest, table: crate::air::AcosTable::build() }
+    }
+
+    /// The pad's levers and stick where the pad reader stores them: the gas and brake into the quad,
+    /// the stick into the input limiter's.
+    pub fn controls(&mut self, c: &crate::ride::Controls) {
+        (self.q.gas, self.q.brake) = (c.gas, c.brake);
+        (self.bike.stick.x, self.bike.stick.y) = c.stick;
+    }
+
+    /// One tick of [`frame`], with `ground` and `sweep` answering [`Steps`]' ground query and sweep.
+    pub fn frame<G: FnMut(Vf, &mut u8) -> (Vf, Vf), S: Sweep>(&mut self, dt: F, ground: G, sweep: S) {
+        // The steps own a copy of the bike and the rest for the frame; both come back after.
+        let (bike, rest) = (self.bike.clone(), std::mem::take(&mut self.rest));
+        let mut m = Steps { bike, rest, ground, sweep };
+        frame(&WORLD, &self.p, &mut self.q, &mut self.body, dt, &self.table, &mut m);
+        (self.bike, self.rest) = (m.bike, m.rest);
+    }
+
+    /// One tick on an MX Unleashed world: [`Ride::frame`] with the ground query [`world_ground`] and
+    /// the sweep [`OnWorld`] (`segments` the trigger probe's, [`trigger_segments`]), and the in-world
+    /// test's box the world's ([`world_bounds`]).
+    pub fn frame_on(&mut self, dt: F, world: &mut dyn crate::world::World, segments: [[Vf; 2]; 4]) {
+        let b = &mut self.bike.parts.bounds;
+        *b = world_bounds(world, b.floor);
+        let cell = std::cell::RefCell::new(world);
+        let ground = |at: Vf, record: &mut u8| world_ground(&mut **cell.borrow_mut(), at, record);
+        self.frame(dt, ground, OnWorld { world: &cell, segments });
+    }
+
+    /// One tick as the shell steps it: the controls laid ([`Ride::controls`]), then [`Ride::frame_on`].
+    pub fn step(&mut self, c: &crate::ride::Controls, dt: F, world: &mut dyn crate::world::World, segments: [[Vf; 2]; 4]) {
+        self.controls(c);
+        self.frame_on(dt, world, segments);
+    }
+}
+
+impl Ride<Vec<Call>> {
+    /// The first wreck the steps entered since `rest` was last cleared ([`Call::Wreck`], its reason).
+    pub fn wreck(&self) -> Option<u8> {
+        self.rest.iter().find_map(|c| if let Call::Wreck(r) = c { Some(*r) } else { None })
+    }
+}
