@@ -17,10 +17,10 @@
 
 use game_sim::air::AcosTable;
 use game_sim::atv_body::Body;
-use game_sim::atv_car::{self, Call, Car, Keys, Lever, Pieces, PreloadState, SORT_HITS, SortAnswer, State, Steps, Tire, TireKeys, TireState, Update, Wing};
+use game_sim::atv_car::{self, Call, Car, EngineKeys, EngineState, Keys, Lever, Pieces, PreloadState, SORT_HITS, SortAnswer, State, Steps, Tire, TireKeys, TireState, Update, Wing};
 use game_sim::car::Surface;
 use game_sim::biplane::World;
-use game_sim::car::Reverse;
+use game_sim::car::{Reverse, Shift};
 use game_sim::handling::seed;
 use ps2_float::{F, Vf};
 use ps2_oracle::{Ee, Kit, skip};
@@ -56,6 +56,10 @@ const GROUND_QUERY: u32 = 0x0048_33c0;
 const NODE_POSITION: u32 = 0x0019_4c20;
 /// The engine's reverse switch (a0 engine, a1 into reverse), which the controls call.
 const REVERSE: u32 = 0x004b_3c20;
+/// The shared smooth noise, where the engine's step asks it (MD125), and the shift's sound.
+const SMOOTH_NOISE: u32 = 0x0013_4580;
+const NOISE_FROM: u32 = 0x004b_45fc;
+const SHIFT_SOUND: u32 = 0x004b_83e0;
 
 /// Where the car's PostProcess makes its last three calls from (their return addresses).
 const POST_LANDED: [u32; 2] = [0x004c_bf60, 0x004c_bf88];
@@ -216,6 +220,8 @@ struct Ptrs {
     record: u32,
     node: u32,
     engine: u32,
+    /// The engine's sound object (MD125).
+    engine_sound: u32,
     tires: [u32; 4],
     ground_world: u32,
     landing_sound: u32,
@@ -230,6 +236,7 @@ fn ptrs(ee: &Ee) -> Ptrs {
         record: ee.u32_at(CAR + at::RECORD),
         node: ee.u32_at(CAR + at::NODE),
         engine: ee.u32_at(CAR + at::ENGINE),
+        engine_sound: ee.u32_at(ee.u32_at(CAR + at::ENGINE) + engine::SOUND),
         tires: at::TIRES.map(|o| ee.u32_at(CAR + o)),
         ground_world: ee.u32_at(CAR + at::GROUND_WORLD),
         landing_sound: ee.u32_at(CAR + at::LANDING_SOUND),
@@ -273,6 +280,7 @@ fn read_car(ee: &Ee, p: &Ptrs) -> Car {
         tires: p.tires.map(|t| read_tire(ee, t)),
         sort_rays: b(at::SORT_RAYS),
         sort: SortAnswer::default(),
+        noise: F::ZERO,
     }
 }
 
@@ -530,6 +538,7 @@ impl Steps for Port {
                 car.tires[k].surface = surface;
             }
             Call::SortSearch => car.sort = self.script.sort,
+            Call::Noise(at) => car.noise = F(fake_noise(at.0)),
             _ => {}
         }
         self.log.push(c);
@@ -602,6 +611,23 @@ fn hook(ee: &mut Ee, p: Ptrs, log: Shared<Vec<Call>>, script: Shared<Script>) {
             l.borrow_mut().push(Call::Reverse(if ee.r(5) != 0 { Reverse::In } else { Reverse::Out }));
         }
     }));
+    // The smooth noise, faked for every caller (MD125); logged where the player's engine asks it.
+    let l = log.clone();
+    ee.hooks.insert(SMOOTH_NOISE, Box::new(move |ee| {
+        let x = ee.f(12);
+        if ee.r(31) as u32 == NOISE_FROM && ee.r(16) as u32 == p.engine {
+            l.borrow_mut().push(Call::Noise(F(x)));
+        }
+        ee.set_f(0, fake_noise(x));
+    }));
+    // The shift's sound, on the player's engine's sound object; the idle buggy's are skipped.
+    let l = log.clone();
+    ee.hooks.insert(SHIFT_SOUND, Box::new(move |ee| {
+        if ee.r(4) as u32 == p.engine_sound {
+            assert_eq!(ee.r(5), 0, "the shift sound's second");
+            l.borrow_mut().push(Call::ShiftSound);
+        }
+    }));
     let l = log.clone();
     ee.hooks.insert(NODE_LOCAL, Box::new(move |ee| {
         assert!(POST_LANDED.contains(&(ee.r(31) as u32)), "node local from {:#x}", ee.r(31));
@@ -641,6 +667,12 @@ fn hook(ee: &mut Ee, p: Ptrs, log: Shared<Vec<Call>>, script: Shared<Script>) {
         put_v(ee, CAR + at::NODE_POS, s.borrow().node_pos);
         l.borrow_mut().push(Call::NodePosition);
     }));
+}
+
+/// A stand-in for the shared smooth noise, as `mxvatv_step`'s: one of eight values by the time's bits.
+fn fake_noise(x: f32) -> f32 {
+    const WAVE: [f32; 8] = [0.0, 1.0, -1.0, 0.5, -0.25, 0.937_5, -0.812_5, 0.125];
+    WAVE[(x.to_bits() >> 3) as usize & 7]
 }
 
 /// Hook what the contact sort calls (MD127), for when it runs unhooked: the ray probe's place and
@@ -952,6 +984,8 @@ struct Mx {
     penalty_object: u32,
     penalty: bool,
     penalty_clock: F,
+    /// The engine's torque table's RPMs and torques, and its gear ratios: where they live (MD125).
+    engine_tables: [u32; 3],
     state: State,
 }
 
@@ -1015,6 +1049,7 @@ fn read_mx(ee: &Ee, p: &Ptrs) -> Mx {
         brake_gyro_torque: f(mx::GYRO),
         wings: Vec::new(),
         tires: core::array::from_fn(|k| read_tire_keys(ee, p.tires[k])),
+        engine: Some(read_engine_keys(ee, p)),
     };
     let wheel_word = ee.u32_at(vstate_object + mx::WHEEL);
     let penalty_object = ee.u32_at(c(mx::PENALTY_OBJECT));
@@ -1060,6 +1095,7 @@ fn read_mx(ee: &Ee, p: &Ptrs) -> Mx {
         launch_start: f(mx::LAUNCH_START),
         launch_boost: F(ee.f32_at(p.engine + mx::BOOST)),
         tires: core::array::from_fn(|k| read_tire_state(ee, p.tires[k])),
+        engine: read_engine_state(ee, p),
     };
     Mx {
         keys,
@@ -1073,6 +1109,7 @@ fn read_mx(ee: &Ee, p: &Ptrs) -> Mx {
         penalty_object,
         penalty: true,
         penalty_clock,
+        engine_tables: [engine::RPMS, engine::TORQUES, engine::RATIOS].map(|o| ee.u32_at(p.engine + o)),
         state,
     }
 }
@@ -1180,6 +1217,7 @@ fn mx_words(m: &Mx, p: &Ptrs) -> Vec<(u32, u32)> {
     for (i, &t) in p.tires.iter().enumerate() {
         out.extend(tire_words(&k.tires[i], &s.tires[i], t));
     }
+    out.extend(engine_words(m.engine_tables, k.engine.as_ref().expect("the engine's keys"), &s.engine, p));
     out
 }
 
@@ -1243,6 +1281,308 @@ mod tire {
     pub const ROLL_RATIO: u32 = 0x9b0;
     /// How much of a tire the step may write.
     pub const SIZE: u32 = 0x9b4;
+}
+
+/// The engine's words (research/oracle.txt `# MD125`; the keys' are MD39b's).
+mod engine {
+    pub const SLOTS: u32 = 0x24;
+    pub const IDLE: u32 = 0x40;
+    pub const BRAKING: u32 = 0x44;
+    pub const FINAL: u32 = 0x48;
+    pub const LOSS: u32 = 0x4c;
+    pub const INV_INERTIA: u32 = 0x54;
+    pub const PUMP_SCALE: u32 = 0x58;
+    pub const MAX_K: u32 = 0x5c;
+    pub const MIN_RPM: u32 = 0x64;
+    pub const TCS: u32 = 0x68;
+    pub const MIN_SLIP: u32 = 0x6c;
+    pub const MAX_SLIP: u32 = 0x70;
+    pub const NOX_ON: u32 = 0x74;
+    pub const NOX_LEFT: u32 = 0x78;
+    pub const BURN: u32 = 0x7c;
+    pub const HP: u32 = 0x80;
+    /// The shift points: low and high load, low and high up-shift, low and high down-shift.
+    pub const POINTS: u32 = 0x84;
+    pub const SHIFT_TIME: u32 = 0x9c;
+    pub const SHIFT_TIMER: u32 = 0xa0;
+    pub const SHIFTING_UP: u32 = 0xa4;
+    pub const UP_DURATION: u32 = 0xa8;
+    pub const UP_THROTTLE: u32 = 0xac;
+    pub const DOWN_DURATION: u32 = 0xb0;
+    pub const DOWN_THROTTLE: u32 = 0xb4;
+    pub const THROTTLE_TIMER: u32 = 0xb8;
+    pub const GEAR: u32 = 0xc0;
+    pub const RPM_COUNT: u32 = 0xc4;
+    pub const RPMS: u32 = 0xc8;
+    pub const TORQUES: u32 = 0xcc;
+    pub const GEAR_COUNT: u32 = 0xd0;
+    pub const RATIOS: u32 = 0xd4;
+    pub const RATIO: u32 = 0xd8;
+    pub const INV_RATIO: u32 = 0xdc;
+    pub const WHEEL_RPM: u32 = 0xe0;
+    pub const MAX_PUMP: u32 = 0xe4;
+    pub const CONVERTER: u32 = 0xe8;
+    pub const MULTIPLICATION: u32 = 0xec;
+    pub const OUTPUT: u32 = 0xf0;
+    pub const CURSOR_INDEX: u32 = 0xf8;
+    pub const CURSOR_FRAC: u32 = 0xfc;
+    pub const TORQUE: u32 = 0x104;
+    pub const BRAKING_TORQUE: u32 = 0x108;
+    pub const DRIVE: u32 = 0x10c;
+    pub const RPM: u32 = 0x11c;
+    pub const SLIP_RPM: u32 = 0x120;
+    pub const REDLINE: u32 = 0x124;
+    pub const CLOCK: u32 = 0x128;
+    pub const PITCH: u32 = 0x12c;
+    pub const SOUND: u32 = 0x130;
+    /// How much of the engine its step and shift may write.
+    pub const SIZE: u32 = 0x134;
+}
+
+fn read_engine_keys(ee: &Ee, p: &Ptrs) -> EngineKeys {
+    let e = p.engine;
+    let f = |o: u32| F(ee.f32_at(e + o));
+    let slot = |i: u32| {
+        let t = ee.u32_at(e + engine::SLOTS + 4 * i);
+        p.tires.iter().position(|&x| x == t)
+    };
+    let table = |at: u32, n: u32| -> Vec<F> { (0..n).map(|i| F(ee.f32_at(ee.u32_at(e + at) + 4 * i))).collect() };
+    let point = |i: u32| f(engine::POINTS + 4 * i);
+    EngineKeys {
+        drive: [slot(0).expect("the engine's first slot"), slot(1).expect("the engine's second slot")],
+        drive_more: slot(2).zip(slot(3)).map(|(a, b)| [a, b]),
+        rpm: table(engine::RPMS, ee.u32_at(e + engine::RPM_COUNT)),
+        torque: table(engine::TORQUES, ee.u32_at(e + engine::RPM_COUNT)),
+        redline: f(engine::REDLINE),
+        gear_ratios: table(engine::RATIOS, ee.u32_at(e + engine::GEAR_COUNT)),
+        final_gear_ratio: f(engine::FINAL),
+        idle_throttle: f(engine::IDLE),
+        engine_braking: f(engine::BRAKING),
+        transmission_loss: f(engine::LOSS),
+        inv_inertia: f(engine::INV_INERTIA),
+        min_rpm: f(engine::MIN_RPM),
+        pump_torque_scale: f(engine::PUMP_SCALE),
+        max_pump_torque: f(engine::MAX_PUMP),
+        max_k: f(engine::MAX_K),
+        tcs: ee.u32_at(e + engine::TCS) != 0,
+        min_traction_slip: f(engine::MIN_SLIP),
+        max_traction_slip: f(engine::MAX_SLIP),
+        nox_burn_rate: f(engine::BURN),
+        nox_hp_boost: f(engine::HP),
+        shift: Shift {
+            low_load_rpm: point(0),
+            high_load_rpm: Some(point(1)),
+            low_load_up_shift_rpm: point(2),
+            high_load_up_shift_rpm: point(3),
+            low_load_down_shift_rpm: point(4),
+            high_load_down_shift_rpm: point(5),
+            shift_time: f(engine::SHIFT_TIME),
+            shift_up_duration: f(engine::UP_DURATION),
+            shift_up_throttle: f(engine::UP_THROTTLE),
+            shift_down_duration: f(engine::DOWN_DURATION),
+            shift_down_throttle: f(engine::DOWN_THROTTLE),
+        },
+        sound: ee.u32_at(e + engine::SOUND) != 0,
+    }
+}
+
+fn read_engine_state(ee: &Ee, p: &Ptrs) -> EngineState {
+    let e = p.engine;
+    let f = |o: u32| F(ee.f32_at(e + o));
+    EngineState {
+        nox_on: ee.u32_at(e + engine::NOX_ON) != 0,
+        nox_left: f(engine::NOX_LEFT),
+        shift_timer: f(engine::SHIFT_TIMER),
+        shifting_up: ee.u32_at(e + engine::SHIFTING_UP) != 0,
+        shift_throttle_timer: f(engine::THROTTLE_TIMER),
+        gear: ee.i32_at(e + engine::GEAR),
+        ratio: f(engine::RATIO),
+        inv_ratio: f(engine::INV_RATIO),
+        wheel_rpm: f(engine::WHEEL_RPM),
+        converter_torque: f(engine::CONVERTER),
+        multiplication: f(engine::MULTIPLICATION),
+        output_torque: f(engine::OUTPUT),
+        cursor_index: ee.u32_at(e + engine::CURSOR_INDEX),
+        cursor_frac: f(engine::CURSOR_FRAC),
+        engine_torque: f(engine::TORQUE),
+        braking_torque: f(engine::BRAKING_TORQUE),
+        drive_torque: core::array::from_fn(|i| f(engine::DRIVE + 4 * i as u32)),
+        rpm: f(engine::RPM),
+        slip_rpm: f(engine::SLIP_RPM),
+        sound_clock: f(engine::CLOCK),
+        pitch: f(engine::PITCH),
+    }
+}
+
+/// Every word [`read_engine_keys`] and [`read_engine_state`] read, where it lives (the tables at
+/// `tables`, the image's), but the reverse word and the launch's scale, which are [`mx_words`]'s.
+fn engine_words(tables: [u32; 3], k: &EngineKeys, s: &EngineState, p: &Ptrs) -> Vec<(u32, u32)> {
+    let e = p.engine;
+    let sh = k.shift;
+    let mut fs: Vec<(u32, F)> = vec![
+        (engine::IDLE, k.idle_throttle),
+        (engine::BRAKING, k.engine_braking),
+        (engine::FINAL, k.final_gear_ratio),
+        (engine::LOSS, k.transmission_loss),
+        (engine::INV_INERTIA, k.inv_inertia),
+        (engine::PUMP_SCALE, k.pump_torque_scale),
+        (engine::MAX_K, k.max_k),
+        (engine::MIN_RPM, k.min_rpm),
+        (engine::MIN_SLIP, k.min_traction_slip),
+        (engine::MAX_SLIP, k.max_traction_slip),
+        (engine::NOX_LEFT, s.nox_left),
+        (engine::BURN, k.nox_burn_rate),
+        (engine::HP, k.nox_hp_boost),
+        (engine::POINTS, sh.low_load_rpm),
+        (engine::POINTS + 4, sh.high_load_rpm.unwrap_or(F::ZERO)),
+        (engine::POINTS + 8, sh.low_load_up_shift_rpm),
+        (engine::POINTS + 0xc, sh.high_load_up_shift_rpm),
+        (engine::POINTS + 0x10, sh.low_load_down_shift_rpm),
+        (engine::POINTS + 0x14, sh.high_load_down_shift_rpm),
+        (engine::SHIFT_TIME, sh.shift_time),
+        (engine::SHIFT_TIMER, s.shift_timer),
+        (engine::UP_DURATION, sh.shift_up_duration),
+        (engine::UP_THROTTLE, sh.shift_up_throttle),
+        (engine::DOWN_DURATION, sh.shift_down_duration),
+        (engine::DOWN_THROTTLE, sh.shift_down_throttle),
+        (engine::THROTTLE_TIMER, s.shift_throttle_timer),
+        (engine::RATIO, s.ratio),
+        (engine::INV_RATIO, s.inv_ratio),
+        (engine::WHEEL_RPM, s.wheel_rpm),
+        (engine::MAX_PUMP, k.max_pump_torque),
+        (engine::CONVERTER, s.converter_torque),
+        (engine::MULTIPLICATION, s.multiplication),
+        (engine::OUTPUT, s.output_torque),
+        (engine::CURSOR_FRAC, s.cursor_frac),
+        (engine::TORQUE, s.engine_torque),
+        (engine::BRAKING_TORQUE, s.braking_torque),
+        (engine::RPM, s.rpm),
+        (engine::SLIP_RPM, s.slip_rpm),
+        (engine::REDLINE, k.redline),
+        (engine::CLOCK, s.sound_clock),
+        (engine::PITCH, s.pitch),
+    ];
+    for (i, &x) in s.drive_torque.iter().enumerate() {
+        fs.push((engine::DRIVE + 4 * i as u32, x));
+    }
+    let mut out: Vec<(u32, u32)> = fs.into_iter().map(|(o, x)| (e + o, x.to_bits())).collect();
+    let slots = [Some(k.drive[0]), Some(k.drive[1]), k.drive_more.map(|d| d[0]), k.drive_more.map(|d| d[1])];
+    for (i, t) in slots.into_iter().enumerate() {
+        out.push((e + engine::SLOTS + 4 * i as u32, t.map_or(0, |t| p.tires[t])));
+    }
+    out.extend([
+        (e + engine::TCS, word(k.tcs)),
+        (e + engine::NOX_ON, word(s.nox_on)),
+        (e + engine::SHIFTING_UP, word(s.shifting_up)),
+        (e + engine::GEAR, s.gear as u32),
+        (e + engine::CURSOR_INDEX, s.cursor_index),
+        (e + engine::SOUND, if k.sound { p.engine_sound } else { 0 }),
+    ]);
+    for (at, xs) in tables.into_iter().zip([&k.rpm, &k.torque, &k.gear_ratios]) {
+        out.extend(xs.iter().enumerate().map(|(i, x)| (at + 4 * i as u32, x.to_bits())));
+    }
+    out
+}
+
+/// A generated engine about the image's (MD125): the torque table, the ratios, the converter and the
+/// revs about the redline, the floor and the bottom of the pitch; the gear and its ratio (in
+/// reverse, turned round); nitrous on, empty or burning; traction control on and off, its slip
+/// range flat now and then; the shift points with a flat load range now and then, its timers
+/// running or done; a four-wheel drive now and then; and the pedals, the clutch down half the time,
+/// the drive tires' spins and their compressions about the squat's floor.
+fn generate_engine(r: &mut Rng, m: &mut Mx, car: &mut Car) {
+    let either = |r: &mut Rng, x: f32| if r.chance(0.5) { -x } else { x };
+    let k = m.keys.engine.as_mut().expect("the engine's keys");
+    let n = k.rpm.len();
+    let mut x = r.range(0.0, 900.0);
+    for i in 0..n {
+        k.rpm[i] = F(x);
+        x += r.range(300.0, 1200.0);
+        k.torque[i] = F(r.range(20.0, 400.0));
+    }
+    k.redline = if r.chance(0.04) { F(r.range(100.0, 1500.0)) } else { F(r.range(5000.0, 9000.0)) };
+    k.min_rpm = if k.redline.0 < 2000.0 { k.redline } else { F(r.range(0.0, 1500.0)) };
+    k.final_gear_ratio = F(r.range(2.0, 6.0));
+    let mut g = r.range(2.5, 4.0);
+    for x in &mut k.gear_ratios {
+        *x = F(g);
+        g *= r.range(0.5, 0.9);
+    }
+    k.idle_throttle = F(r.range(0.0, 0.2));
+    k.engine_braking = F(r.range(0.0, 6e-6));
+    k.transmission_loss = F(r.range(0.0, 0.4));
+    k.inv_inertia = F(r.range(0.5, 20.0));
+    k.pump_torque_scale = F(r.range(0.0, 2e-4));
+    k.max_pump_torque = F(r.range(50.0, 800.0));
+    k.max_k = F(r.range(1.0, 3.5));
+    k.tcs = r.chance(0.5);
+    k.min_traction_slip = F(r.range(0.0, 0.4));
+    k.max_traction_slip = if r.chance(0.3) { k.min_traction_slip } else { F(k.min_traction_slip.0 + r.range(0.05, 0.6)) };
+    k.nox_burn_rate = F(r.range(0.0, 3.0));
+    k.nox_hp_boost = F(r.range(0.0, 150.0));
+    let lo = r.range(0.0, 2000.0);
+    k.shift = Shift {
+        low_load_rpm: F(lo),
+        high_load_rpm: Some(F(if r.chance(0.3) { lo } else { lo + r.range(100.0, 3000.0) })),
+        low_load_up_shift_rpm: F(r.range(2000.0, 7000.0)),
+        high_load_up_shift_rpm: F(r.range(2000.0, 8000.0)),
+        low_load_down_shift_rpm: F(r.range(500.0, 4000.0)),
+        high_load_down_shift_rpm: F(r.range(500.0, 5000.0)),
+        shift_time: F(r.range(0.0, 1.0)),
+        shift_up_duration: F(r.range(0.0, 0.5)),
+        shift_up_throttle: F(r.range(0.0, 1.0)),
+        shift_down_duration: F(r.range(0.0, 0.5)),
+        shift_down_throttle: F(r.range(0.0, 1.0)),
+    };
+    k.sound = r.chance(0.8);
+    if r.chance(0.25) {
+        k.drive_more = Some([0, 1]);
+    } else {
+        k.drive_more = None;
+    }
+    let k = k.clone();
+    let s = &mut m.state;
+    s.reversing = r.chance(0.2);
+    let e = &mut s.engine;
+    e.nox_on = r.chance(0.4);
+    e.nox_left = F(if r.chance(0.3) { 0.0 } else { r.range(0.0, 5.0) });
+    e.shift_timer = F(if r.chance(0.5) { 0.0 } else { r.range(-0.1, 0.5) });
+    e.shifting_up = r.chance(0.5);
+    e.shift_throttle_timer = F(if r.chance(0.6) { 0.0 } else { r.range(-0.05, 0.5) });
+    let gears = k.gear_ratios.len();
+    e.gear = if r.chance(0.3) { gears as i32 } else { 1 + (r.next() % gears as u64) as i32 };
+    e.ratio = k.final_gear_ratio * k.gear_ratios[e.gear as usize - 1];
+    if s.reversing {
+        e.ratio = -e.ratio;
+    }
+    e.inv_ratio = F::ONE / e.ratio;
+    for x in [&mut e.wheel_rpm, &mut e.converter_torque, &mut e.multiplication, &mut e.output_torque, &mut e.engine_torque, &mut e.braking_torque, &mut e.pitch] {
+        *x = F(r.range(-100.0, 100.0));
+    }
+    e.drive_torque = core::array::from_fn(|_| F(r.range(-100.0, 100.0)));
+    e.slip_rpm = F(r.range(-1000.0, 5000.0));
+    e.cursor_index = (r.next() % n as u64) as u32;
+    e.cursor_frac = F(r.unit());
+    let (lo, hi) = (k.min_rpm.0, k.redline.0);
+    e.rpm = F(match r.next() % 5 {
+        0 => r.range(lo, lo + 0.1 * (hi - lo)),
+        1 => r.range(hi - 0.05 * (hi - lo), hi + 500.0),
+        2 => r.range(-100.0, lo),
+        _ => r.range(lo, hi),
+    });
+    e.sound_clock = F(r.range(0.0, 200.0));
+    s.engaged_clutch = F(if r.chance(0.5) { 0.0 } else { r.range(0.0, 1.0) });
+    s.gas = F(if r.chance(0.3) { 0.0 } else { r.range(0.0, 1.0) });
+    s.brake_force = F(if r.chance(0.6) { 0.0 } else { r.range(0.0, 1.0) });
+    let tires = [Some(k.drive), k.drive_more].into_iter().flatten().flatten();
+    for t in tires {
+        let st = &mut s.tires[t];
+        st.spin = F(if r.chance(0.2) { either(r, 0.0) } else { r.range(-20.0, 80.0) });
+        st.slip_ratio = F(r.range(-1.0, 1.0));
+        let max = m.keys.tires[k.drive[0]].max_compression.0;
+        st.compression = F(r.range(0.0, 0.3) * max);
+        car.tires[t].grounded = !r.chance(0.2);
+    }
 }
 
 /// Where a lever's word lives.
@@ -1741,6 +2081,8 @@ impl Steps for Unhooked<'_> {
             Call::TireStep(..) => TIRE_STEP,
             Call::SortContacts => SORT_CONTACTS,
             Call::Probe(..) => PROBE,
+            Call::Engine(_) => ENGINE_STEP,
+            Call::Shift(_) => SHIFT,
             _ => 0,
         };
         if !self.unhooked.contains(&addr) {
@@ -1777,6 +2119,8 @@ impl Steps for Unhooked<'_> {
         assert!(self.pieces.answer(c, car, body), "{c:?} unanswered");
         let calls = &self.pieces.rest.log[log..];
         match c {
+            Call::Engine(_) => engine_tags(&k, &s0, &self.pieces.state, &car0, calls, &mut tags),
+            Call::Shift(_) => shift_tags(&k, &s0, &self.pieces.state, &car0, calls, &mut tags),
             Call::TireStep(i, _) => {
                 tire_tags(&k.tires[i], &s0, &self.pieces.state, i, &car0.tires[i], &car.tires[i], body.position != position, &mut tags);
             }
@@ -1929,6 +2273,83 @@ fn tire_tags(k: &TireKeys, s0: &State, s1: &State, i: usize, t0: &Tire, t: &Tire
     tag("tire: wheel wraps", (st.angle.0 - st0.angle.0).abs() > 3.0);
 }
 
+/// What one engine step found (MD125): the shift's throttle or the pedals, the clutch, nitrous, the
+/// drive's tires and traction control, the brake, the launch's scale, and the pitch's branches (the
+/// top wobble's by the revs `s1` ends on).
+fn engine_tags(k: &Keys, s: &State, s1: &State, car: &Car, calls: &[Call], tags: &mut Vec<&'static str>) {
+    let e = k.engine.as_ref().unwrap();
+    let g = &s.engine;
+    let shifting = g.shift_throttle_timer > 0.0;
+    tags.push(if shifting { "engine: shift's throttle" } else { "engine: pedals" });
+    let clutch = if shifting { 1.0 } else { s.engaged_clutch.0 };
+    let tires: Vec<usize> = [Some(e.drive), e.drive_more].into_iter().flatten().flatten().collect();
+    if clutch <= 0.0 {
+        tags.push("engine: clutch up");
+        let spin: f32 = tires.iter().map(|&t| s.tires[t].spin.0).sum();
+        if g.ratio > 0.0 && spin > 0.0 {
+            tags.push("engine: launch's scale");
+        }
+    } else {
+        tags.push("engine: clutch in");
+    }
+    if g.nox_on && g.rpm > 0.0 && g.nox_left > 0.0 {
+        tags.push("engine: nitrous");
+    }
+    if e.drive_more.is_some() {
+        tags.push("engine: four-wheel drive");
+    }
+    let pair = |[a, b]: [usize; 2]| e.tcs && car.tires[a].grounded && car.tires[b].grounded;
+    if [Some(e.drive), e.drive_more].into_iter().flatten().any(pair) {
+        tags.push(if e.min_traction_slip == e.max_traction_slip { "engine: traction control, flat" } else { "engine: traction control" });
+    }
+    if s.brake_force > 0.0 {
+        tags.push("engine: braked");
+    }
+    if e.min_rpm == e.redline {
+        tags.push("engine: pitch flat");
+    }
+    if calls.iter().any(|c| matches!(c, Call::Noise(_))) {
+        tags.push("engine: pitch's noise");
+    }
+    if e.min_rpm != e.redline && (s1.engine.rpm.0 - e.min_rpm.0) / (e.redline.0 - e.min_rpm.0) > 0.95 {
+        tags.push("engine: pitch's top wobble");
+    }
+    let [a, b] = e.drive;
+    if 0.5 * (s.tires[a].compression.0 + s.tires[b].compression.0) / k.tires[a].max_compression.0 >= 0.1 {
+        tags.push("engine: squat");
+    }
+}
+
+/// What one shift found (MD125), from `s0` before and `s` after.
+fn shift_tags(k: &Keys, s0: &State, s: &State, car: &Car, calls: &[Call], tags: &mut Vec<&'static str>) {
+    let e = k.engine.as_ref().unwrap();
+    let (g0, g) = (&s0.engine, &s.engine);
+    let [a, b] = e.drive;
+    tags.push(if !car.tires[a].grounded && !car.tires[b].grounded {
+        "shift: off the ground"
+    } else if s0.reversing {
+        "shift: reversing"
+    } else if g0.shift_timer > 0.0 {
+        "shift: timer runs"
+    } else if s0.engaged_clutch > 0.0 {
+        "shift: clutch in"
+    } else if g.gear > g0.gear {
+        "shift: up"
+    } else if g.gear < g0.gear {
+        "shift: down"
+    } else if g.shift_timer != g0.shift_timer {
+        "shift: top gear"
+    } else {
+        "shift: held"
+    });
+    if (g.gear != g0.gear) && e.shift.high_load_rpm == Some(e.shift.low_load_rpm) {
+        tags.push("shift: flat load");
+    }
+    if calls.iter().any(|c| matches!(c, Call::ShiftSound)) {
+        tags.push("shift: sound");
+    }
+}
+
 /// The branches the controls take from `s` (the state they are handed) and `car`.
 fn controls_tags(k: &Keys, s: &State, car: &Car, tags: &mut Vec<&'static str>) {
     if s.start_penalty {
@@ -2018,6 +2439,16 @@ fn pieces_over(cases: usize, seed: u64, unhooked: &[u32], prefixes: &[&str], wan
 }
 
 #[test]
+fn engine_is_mx_unleasheds() {
+    pieces(0x0125_0001, &[ENGINE_STEP, SHIFT], &["engine", "shift"], 24);
+}
+
+#[test]
+fn engine_with_the_controls_is_mx_unleasheds() {
+    pieces(0x0125_0002, &[CONTROLS, ENGINE_STEP, SHIFT], &["controls", "engine", "shift"], 22 + 24);
+}
+
+#[test]
 fn travel_cofg_is_mx_unleasheds() {
     pieces(0x0106_a001, &[TRAVEL_COFG], &["travel"], 4);
 }
@@ -2071,7 +2502,7 @@ fn all_six_pieces_with_the_tire_step_are_mx_unleasheds() {
 #[test]
 fn all_eight_pieces_are_mx_unleasheds() {
     pieces(
-        0x0127_0003,
+        0x0127_0013,
         &[TRAVEL_COFG, SORT_CONTACTS, PROBE, ANTI_SLIDE, PRELOAD, LAUNCH, AERO, TIRE_STEP],
         &["travel", "sort", "probe", "anti-slide", "preload", "launch", "aero", "tire"],
         // Every tag but the sort's struck object and kept mover.
@@ -2114,10 +2545,17 @@ fn run(seed: u64, cases: usize, unhooked: &[u32]) -> Option<(Seen, Seen)> {
     for a in unhooked {
         assert!(ee.hooks.remove(a).is_some(), "{a:#x} was not hooked");
     }
+    // The engine's shift and reverse switch go with its step (MD125).
+    assert_eq!(unhooked.contains(&ENGINE_STEP), unhooked.contains(&SHIFT), "the engine's step and shift unhooked together");
+    if unhooked.contains(&ENGINE_STEP) {
+        assert!(ee.hooks.remove(&REVERSE).is_some(), "the reverse switch was not hooked");
+    }
     let world = World { iterations: 1, rate: F(115.0) };
     let table = AcosTable::build();
     let mut r = Rng(seed);
     let mut r2 = Rng(seed ^ 0x0127_5eed_0127_5eed);
+    let mut r3 = Rng(seed ^ 0x0125_e061_0125_e061);
+    let engine = unhooked.contains(&ENGINE_STEP);
     let mut seen = Seen::new();
     let mut pieces_seen = Seen::new();
     let mut see = |what: &'static str, yes: bool| {
@@ -2125,7 +2563,7 @@ fn run(seed: u64, cases: usize, unhooked: &[u32]) -> Option<(Seen, Seen)> {
             *seen.entry(what).or_insert(0) += 1;
         }
     };
-    let blocks: Vec<(u32, u32)> = [(CAR, 0x1500), (p.body, 0x230), (p.record + at::TIPPED, 4), (p.engine + mx::BOOST, 4)]
+    let blocks: Vec<(u32, u32)> = [(CAR, 0x1500), (p.body, 0x230), (p.record + at::TIPPED, 4), (p.engine, engine::SIZE)]
         .into_iter()
         .chain(p.tires.map(|t| (t, tire::SIZE)))
         .collect();
@@ -2157,6 +2595,9 @@ fn run(seed: u64, cases: usize, unhooked: &[u32]) -> Option<(Seen, Seen)> {
                 }
             }
         }
+        if engine {
+            generate_engine(&mut r3, &mut m, &mut car);
+        }
         let before = [car_words(&car, &p), seed::body_words(&body, p.body), mx_words(&m, &p)].concat();
 
         // The original.
@@ -2170,7 +2611,8 @@ fn run(seed: u64, cases: usize, unhooked: &[u32]) -> Option<(Seen, Seen)> {
         // The port.
         let (mut pc, mut pb) = (car, body);
         let port = Port { log: Vec::new(), script: s };
-        let mut port = Unhooked { pieces: Pieces { keys: m.keys(), state: m.state, rest: port }, unhooked, seen: Seen::new() };
+        let keys = Keys { engine: if engine { m.keys.engine.clone() } else { None }, ..m.keys() };
+        let mut port = Unhooked { pieces: Pieces { keys, state: m.state, rest: port }, unhooked, seen: Seen::new() };
         atv_car::frame(&world, &mut pc, &mut pb, dt, &table, &mut port);
         for (what, k) in std::mem::take(&mut port.seen) {
             *pieces_seen.entry(what).or_insert(0) += k;
