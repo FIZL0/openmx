@@ -673,7 +673,8 @@ mod tests {
     }
 
     /// P315a: a flier dresses for the stage, MX Unleashed's off the disc and a pack's off its own
-    /// folder in its `_ui` garage model, each with triangles, textures and a size to stand back for.
+    /// folder in its `_ui` garage model (every MX vs. ATV skin of both kinds, MD109), each with
+    /// triangles, textures and a size to stand back for.
     #[test]
     fn fliers_dress_off_the_disc_and_a_packs_garage_model() {
         if let Err(e) = Disc::open_configured() {
@@ -683,9 +684,15 @@ mod tests {
         let mut offer = roster::original_fliers();
         let pack = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../mods/machines/mxvatv_fliers");
         if pack.join("Veh/Anim/biplane3_ui.psg").is_file() {
-            let mut f = offer[0].clone();
-            (f.pack, f.skin, f.preview) = ("mxvatv_fliers".into(), "biplane3".into(), Some((pack.clone(), "Veh/Anim/biplane3_ui.psg".into())));
-            offer.push(f);
+            // Every skin of both kinds (MD109): the Kiowa's four as well as the plane's.
+            for (kind, at) in [("biplane", 0), ("kiowa", 2)] {
+                for n in ["", "2", "3", "4"] {
+                    let mut f = offer[at].clone();
+                    let ui = format!("Veh/Anim/{kind}{n}_ui.psg");
+                    (f.pack, f.skin, f.preview) = ("mxvatv_fliers".into(), format!("{kind}{n}"), Some((pack.clone(), ui)));
+                    offer.push(f);
+                }
+            }
         } else {
             println!("no MX vs. ATV fliers pack at {}: the disc's alone", pack.display());
         }
