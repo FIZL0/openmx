@@ -9181,9 +9181,9 @@ fn ride_replays_with_every_port_at_once() {
     assert_eq!(w.len(), 459);
     assert!(w.iter().all(|w| !w), "the ride never wrecks");
     let handed: Vec<(&str, u32)> = all.iter().filter(|(k, _)| k.starts_with("> ")).map(|(k, &n)| (&k[2..], n)).collect();
-    // F54's two are the only calls still handed on by name; the rest of what the interpreter runs is
-    // in `ran` (F31b5i..m).
-    assert_eq!(handed, [("record search heard_hit", 282), ("record search part stand", 432)], "{ran:?}");
+    // F54: nothing is handed on by name (the pair log's grows are the heap's, unnamed); what the
+    // interpreter still runs is in `ran` (F31b5i..m).
+    assert_eq!(handed, [], "{ran:?}");
     walk_served(&ran);
     // F31b5k: the connection's queue is the port's; the interpreter runs none of it.
     assert!(!ran.keys().any(|k| k.contains("NetQueue")), "{ran:?}");
@@ -9200,7 +9200,7 @@ fn flip_replays_with_every_port_at_once() {
     let changes: Vec<usize> = (1..w.len()).filter(|&r| w[r] != w[r - 1]).collect();
     assert_eq!(changes, [125, 193], "wrecked on row 125, put back on row 193");
     let handed: Vec<(&str, u32)> = all.iter().filter(|(k, _)| k.starts_with("> ")).map(|(k, &n)| (&k[2..], n)).collect();
-    assert_eq!(handed, [("record search heard_hit", 110), ("record search part stand", 161)], "{ran:?}");
+    assert_eq!(handed, [], "{ran:?}");
     walk_served(&ran);
     assert!(!ran.keys().any(|k| k.contains("NetQueue")), "{ran:?}");
     three_served(&ran);
@@ -13029,11 +13029,122 @@ impl MeshInRam {
 
 /// A plant group's part `i` stood at the plant (`(group entry, i)`, answers the part or 0).
 const ECO_PART: u32 = 0x0046_d3c0;
+/// F54: the riding part's two listeners, by their vt `+8` (thunks to the bike, `this - 0x38`, and to
+/// the pair log's owner, `this - 0x28`); the bike's hit slot (vt `+0x138`); the file and line the pair
+/// log's push passes the heap's resize.
+const BIKE_HEARD: u32 = 0x0049_56a0;
+const PAIR_LOG_HEARD: u32 = 0x0025_b950;
+const BIKE_HIT_SLOT: u32 = 0x138;
+const PAIR_LOG_FILE: u32 = 0x003a_1c30;
+const PAIR_LOG_LINE: u32 = 0xd1;
+const HEAP_RESIZE_F54: u32 = 0x001b_7470;
+
+use game_sim::{atv_hear, atv_plant};
+
+/// The tables a turned plant mesh reads, built once.
+fn plant_tables() -> atv_plant::Tables<'static> {
+    static T: std::sync::OnceLock<(AcosTable, CurveTable)> = std::sync::OnceLock::new();
+    let (acos, curve) = T.get_or_init(|| (AcosTable::build(), CurveTable::build()));
+    atv_plant::Tables { acos, curve }
+}
+
+/// The plant (group entry `g`) and its species' scale words as RAM has them, the eco's unit, and its
+/// part `i` (0 for none).
+fn plant_in_ram(ee: &Ee, g: u32, i: usize) -> (atv_plant::Plant, atv_plant::Species, F, u32) {
+    let eco = ee.u32_at(ECO_AT);
+    let sp = ee.u32_at(ee.u32_at(eco + 0x84) + 4 * u32::from(ee.u8_at(g + 0x12)));
+    let flags = ee.u8_at(g + 0x16);
+    let turn = if flags & atv_plant::flags::TURNED != 0 { raw_quad(ee, ee.u32_at(eco + 0x70) + 0x50 * u32::from(ee.u8_at(g + 0x17)) + 0x10) } else { Vf::ZERO };
+    let plant = atv_plant::Plant { position: [0xc, 0xe, 0x10].map(|o| ee.u16_at(g + o)), lean: ee.u8_at(g + 0x14) as i8, size: ee.u8_at(g + 0x15) as i8, flags, turn };
+    let species = atv_plant::Species { lean: [word_f(ee, sp + 0x100), word_f(ee, sp + 0x104)], size: [word_f(ee, sp + 0x10c), word_f(ee, sp + 0x114)] };
+    let part = if flags & atv_plant::flags::HIDDEN != 0 { 0 } else { ee.u32_at(ee.u32_at(sp + 0x19c) + 4 * i as u32) };
+    (plant, species, word_f(ee, eco + 0xc4), part)
+}
+
+/// **F54 — a plant group's part stood at its plant in Rust** ([`atv_plant::stand`]): the plant at
+/// `g`, its part `i`; a sphere's scales, frame and refresh written back (its stand slot asserted to
+/// be the sphere's frame), a mesh's stood frame's position written and its stand slot called at the
+/// port's frame (`frame_at`, 16 words of scratch; the slot is the part's own code). Answers the part
+/// or 0, as the original does.
+fn plant_stand_with(ee: &mut Ee, g: u32, i: usize, frame_at: Option<u32>) -> u32 {
+    let (plant, species, unit, p) = plant_in_ram(ee, g, i);
+    let tables = plant_tables();
+    if p == 0 {
+        assert_eq!(atv_plant::stand(&plant, &species, unit, None, Some(&tables)), atv_plant::Stood::Nothing);
+        return 0;
+    }
+    let vt = ee.u32_at(p + 0xc);
+    match ee.u32_at(p + 0x78) {
+        5 => {
+            assert_eq!(ee.u32_at(vt + 0xcc), SPHERE_FRAME, "a plant sphere's stand slot ({p:#x})");
+            let mut s = sphere_in_ram(ee, p);
+            let mut scales = [word_f(ee, p + 0x188), word_f(ee, p + 0x18c)];
+            let r = atv_plant::stand(&plant, &species, unit, Some(atv_plant::Part::Sphere { sphere: &mut s, scales: &mut scales }), Some(&tables));
+            assert_eq!(r, atv_plant::Stood::Done);
+            write_sphere(ee, p, &s);
+            ee.set_u32(p + 0x188, scales[0].0.to_bits());
+            ee.set_u32(p + 0x18c, scales[1].0.to_bits());
+        }
+        0 => {
+            let mut stood = [0, 1, 2, 3].map(|k| raw_quad(ee, p + 0x1b0 + 0x10 * k));
+            let r = atv_plant::stand(&plant, &species, unit, Some(atv_plant::Part::Mesh { stood: &mut stood }), Some(&tables));
+            let atv_plant::Stood::Mesh(frame) = r else { panic!("a mesh stood as {r:?}") };
+            for k in 0..3 {
+                ee.set_u32(p + 0x1e0 + 4 * k, stood[3].0[k as usize].to_bits());
+            }
+            let at = frame_at.expect("a plant mesh's stand slot: the frame goes in scratch");
+            for (k, row) in frame.iter().enumerate() {
+                set_vf(ee, at + 0x10 * k as u32, *row);
+            }
+            let f = ee.u32_at(vt + 0xcc);
+            ee.set(28, GP);
+            ee.call(f, &[u64::from(p), u64::from(at)], &[], BUDGET);
+        }
+        _ => assert_eq!(atv_plant::stand(&plant, &species, unit, Some(atv_plant::Part::Other), Some(&tables)), atv_plant::Stood::Done),
+    }
+    p
+}
+
+/// [`plant_stand_with`] in a search: no plant mesh is stood on C15 (its stand slot is not Rust's).
+fn plant_stand_in_ram(ee: &mut Ee, g: u32, i: usize) -> u32 {
+    plant_stand_with(ee, g, i, None)
+}
+
+/// **F54 — the bike's own listener in Rust** ([`atv_hear::bike_hears`]): the bike at `bike`, the struck
+/// collidable at `struck`.
+fn bike_heard_in_ram(ee: &Ee, bike: u32, struck: u32) -> atv_hear::Heard {
+    let (flags, mask) = (ee.u8_at(bike + 0x44), ee.u32_at(ee.u32_at(bike + 0xe8) + 0xa4));
+    if atv_hear::bike_hears(flags, mask, ee.u32_at(struck + 0x94)) { atv_hear::Heard::Bike } else { atv_hear::Heard::Nothing }
+}
+
+/// **F54 — the pair log's listener in Rust** ([`atv_hear::push`]): the owner at `o` logs `{probe,
+/// struck, 0, kind}` on its log (`+0x3c8`), the log's words written back; a grow is the heap's resize
+/// (the original's, `grown` told the bytes).
+fn pair_log_heard_in_ram(ee: &mut Ee, o: u32, probe: u32, struck: u32, grown: &mut dyn FnMut(u32)) {
+    let l = o + 0x3c8;
+    let kind = atv_hear::kind(ee.u32_at(struck + 0x94), [ee.u32_at(o + 0x2c), ee.u32_at(o + 0x30)]);
+    let i = |ee: &Ee, k: u32| ee.u32_at(l + k) as i32;
+    let mut log = atv_hear::Log { count: i(ee, 0), entries: ee.u32_at(l + 8), step: i(ee, 0xc), capacity: i(ee, 0x10), most: i(ee, 0x14) };
+    let slot = atv_hear::push(&mut log, &mut |at, bytes| {
+        grown(bytes);
+        ee.set(28, GP);
+        ee.call(HEAP_RESIZE_F54, &[u64::from(at), u64::from(bytes), u64::from(PAIR_LOG_FILE), u64::from(PAIR_LOG_LINE)], &[], BUDGET);
+        ee.v0() as u32
+    });
+    ee.set_u32(l + 8, log.entries);
+    ee.set_u32(l + 0x10, log.capacity as u32);
+    if let Some(slot) = slot {
+        for (k, w) in atv_hear::entry(probe, struck, kind).into_iter().enumerate() {
+            ee.set_u32(log.entries.wrapping_add(slot << 4) + 4 * k as u32, w);
+        }
+        ee.set_u32(l, log.count as u32);
+    }
+}
 
 /// The world of a part search in RAM: what each item is to the pair, read from RAM at each pair (a
 /// mesh, kind 0; a hierarchy, kind 1, not read: C15 never pairs one; anything else nothing struck),
-/// and a plant group's parts, each stood at the plant by the original ([`ECO_PART`], handed on).
-/// Counts the pairs by kind, and the stands.
+/// and a plant group's parts, each stood at the plant by the port ([`plant_stand_in_ram`], F54).
+/// Counts the pairs by kind, the stands and the listeners heard.
 struct PartWorldInRam<'e> {
     ee: &'e mut Ee,
     items: Vec<u32>,
@@ -13122,16 +13233,38 @@ impl ws::Narrow for PartWorldInRam<'_> {
         Self::species_parts(self.ee, self.items[group]).len()
     }
     fn part(&mut self, _: &mut [ws::Collidable], group: usize, i: usize) -> Option<usize> {
-        *self.kinds.entry("> record search part stand".into()).or_default() += 1;
-        self.ee.set(28, GP);
-        self.ee.call(ECO_PART, &[u64::from(self.items[group]), i as u64], &[], BUDGET);
-        let p = self.ee.v0() as u32;
+        *self.kinds.entry("record search part stand".into()).or_default() += 1;
+        let p = plant_stand_in_ram(self.ee, self.items[group], i);
         (p != 0).then(|| self.items.iter().position(|&e| e == p + 0x18).expect("a stood part the search did not list"))
     }
+    /// F54: the riding part's two listeners Rust's ([`atv_hear`]); any other handed on.
     fn heard_hit(&mut self, objects: &mut [ws::Collidable], l: usize, probe: usize, other: usize) {
         let l = self.listeners[l];
         let f = self.ee.u32_at(self.ee.u32_at(l) + 8);
-        self.hand_on(objects, "heard_hit", f, l, probe, other);
+        let [ca, cb] = [probe, other].map(|k| self.items[k] - 0x18);
+        match f {
+            BIKE_HEARD => {
+                *self.kinds.entry("record search heard_hit, the bike's".into()).or_default() += 1;
+                let bike = l - 0x38;
+                if bike_heard_in_ram(self.ee, bike, cb) == atv_hear::Heard::Bike {
+                    // Never on C15; handed on as the original calls it, the category in `a1`.
+                    *self.kinds.entry("> record search the bike's hit slot".into()).or_default() += 1;
+                    for (k, c) in [(probe, ca), (other, cb)] {
+                        set_u8(self.ee, c + 0x126, objects[k].flags);
+                    }
+                    let f = self.ee.u32_at(self.ee.u32_at(bike + 4) + BIKE_HIT_SLOT);
+                    let category = self.ee.u32_at(cb + 0x94);
+                    self.ee.set(28, GP);
+                    self.ee.call(f, &[u64::from(bike), u64::from(category), u64::from(cb)], &[], BUDGET);
+                }
+            }
+            PAIR_LOG_HEARD => {
+                *self.kinds.entry("record search heard_hit, the pair log".into()).or_default() += 1;
+                let kinds = &mut self.kinds;
+                pair_log_heard_in_ram(self.ee, l - 0x28, ca, cb, &mut |_| *kinds.entry("heap: the pair log grown".into()).or_default() += 1);
+            }
+            _ => self.hand_on(objects, "heard_hit", f, l, probe, other),
+        }
     }
     fn heard_struck(&mut self, objects: &mut [ws::Collidable], l: usize, struck: usize, probe: usize) {
         let l = self.listeners[l];
@@ -13547,8 +13680,9 @@ fn ride_replays_with_the_part_search_in_rust() {
     assert!(handed.iter().all(|(k, _)| k != "record search"), "{handed:?}");
     let pairs: Vec<(&String, &u32)> = all.iter().filter(|(k, _)| k.starts_with("record search pair")).collect();
     assert_eq!(pairs, [(&"record search pair, kind 5".to_string(), &432)], "ride-2's pairs: plant spheres alone");
-    // Two listeners hear each of the 141 spheres struck (heard by RAM alike: a miss logs nothing).
-    assert_eq!(all.get("> record search heard_hit"), Some(&282));
+    // Two listeners hear each of the 141 spheres struck (heard by RAM alike: a miss logs nothing),
+    // both Rust's (F54), as is every stand.
+    heard_in_rust(&all, 141, 432);
 }
 
 /// **F46 — C15's ride, all four of F46 Rust's**: ride-2 in lockstep with [`posts_frame`]'s handing
@@ -13565,7 +13699,7 @@ fn ride_replays_with_the_searches_and_the_database_in_rust() {
     assert!(handed.iter().all(|(k, _)| !names.contains(&k.as_str())), "{handed:?}");
     let pairs: Vec<(&String, &u32)> = all.iter().filter(|(k, _)| k.starts_with("record search pair")).collect();
     assert_eq!(pairs, [(&"record search pair, kind 5".to_string(), &432)], "ride-2's pairs: plant spheres alone");
-    assert_eq!(all.get("> record search heard_hit"), Some(&282));
+    heard_in_rust(&all, 141, 432);
 }
 
 /// **F46d — C15's flip, all four of F46 Rust's**: flip-1 in lockstep, the riding part searched
@@ -13581,7 +13715,360 @@ fn flip_replays_with_the_part_search_in_rust() {
     assert!(handed.iter().all(|(k, _)| !names.contains(&k.as_str())), "{handed:?}");
     let pairs: Vec<(&String, &u32)> = all.iter().filter(|(k, _)| k.starts_with("record search pair")).collect();
     assert_eq!(pairs, [(&"record search pair, kind 5".to_string(), &161)], "flip-1's pairs: plant spheres alone");
-    assert_eq!(all.get("> record search heard_hit"), Some(&110));
+    heard_in_rust(&all, 55, 161);
+}
+
+/// F54: each listener heard `hits` times and the plants stood `stands` times, all in Rust: no
+/// listener, stand or bike hit slot handed on.
+fn heard_in_rust(all: &BTreeMap<String, u32>, hits: u32, stands: u32) {
+    assert_eq!(all.get("record search heard_hit, the bike's"), Some(&hits), "{all:?}");
+    assert_eq!(all.get("record search heard_hit, the pair log"), Some(&hits), "{all:?}");
+    assert_eq!(all.get("record search part stand"), Some(&stands), "{all:?}");
+    assert!(!all.keys().any(|k| k.starts_with("> record search")), "{all:?}");
+}
+
+/// F54's oracles' RAM (state 4 leaves it zero): the plant, a fake species' parts, a mesh part and its
+/// vtable, the turns, the struck, the pair log's owner and entries, the heap's answer; the address
+/// the fake mesh's stand slot is hooked at.
+const F54_AREA: u32 = 0x000a_0000;
+const F54_MESH_SLOT: u32 = F54_AREA + 0xf000;
+
+/// A word for a species' scale: about 1 mostly, now and then 0, -0, a tiny or a huge one.
+fn f54_scale(g: &mut Gen) -> f32 {
+    match g.bits() % 16 {
+        0 => 0.0,
+        1 => -0.0,
+        2 => f32::MIN_POSITIVE,
+        3 => 3.0e38,
+        4 => f32::from_bits(g.bits()),
+        _ => g.near(1.0, 0.1, 4.0),
+    }
+}
+
+/// A random plant at `g`: its position, species (of `species`), lean, size, flags and turn.
+fn f54_plant(ee: &mut Ee, g: &mut Gen, at: u32, species: u32, turns: u32) {
+    for o in [0xc, 0xe, 0x10] {
+        let h = if g.one_in(8) { [0, 0xffff, 0x8000][(g.bits() % 3) as usize] } else { g.bits() & 0xffff };
+        ee.set_u32(at + o & !3, ee.u32_at(at + o & !3) & !(0xffff << (8 * (o & 3))) | h << (8 * (o & 3)));
+    }
+    set_u8(ee, at + 0x12, (g.bits() % species) as u8);
+    for o in [0x14, 0x15] {
+        set_u8(ee, at + o, if g.one_in(6) { [0x80, 0x7f, 0][(g.bits() % 3) as usize] } else { g.bits() as u8 });
+    }
+    let mut flags = g.bits() as u8 & !atv_plant::flags::HIDDEN;
+    if g.one_in(8) {
+        flags |= atv_plant::flags::HIDDEN;
+    }
+    set_u8(ee, at + 0x16, flags);
+    set_u8(ee, at + 0x17, (g.bits() % turns.max(1)) as u8);
+}
+
+/// **F54 — the plant stand on a sphere is the original's**: 10,000 times on state 4's species (each a
+/// sphere's), a random plant (position, species, lean, size, flags: hidden one time in eight), a
+/// random part slot (emptied one time in ten), the species' four scale words, the eco's unit and the
+/// sphere's point, frame and radius drawn — SLUS-21104's stand ([`ECO_PART`]) in the interpreter and
+/// [`plant_stand_with`] ([`atv_plant::stand`]); every word of RAM and the answer the same.
+#[test]
+fn the_plant_stand_on_a_sphere_is_the_originals() {
+    let Some(mut ee) = image().map(hooked) else { return };
+    let eco = ee.u32_at(ECO_AT);
+    let list = ee.u32_at(eco + 0x84);
+    let n = (0..64).take_while(|&k| ee.u32_at(list + 4 * k) != 0).count() as u32;
+    assert_eq!(n, 10, "state 4's species");
+    assert!(ee.ram[F54_AREA as usize..F54_AREA as usize + 0x10000].iter().all(|&b| b == 0));
+    let log: Calls = Rc::default();
+    let base = ee.ram.clone();
+    let mut g = Gen(0x0f54_0001);
+    let (mut t, mut off) = (BTreeMap::new(), Vec::new());
+    for k in 0..10_000 {
+        ee.ram.clone_from(&base);
+        let plant = F54_AREA;
+        f54_plant(&mut ee, &mut g, plant, n, 1);
+        let sp = ee.u32_at(list + 4 * u32::from(ee.u8_at(plant + 0x12)));
+        let count = ee.u32_at(sp + 0x194);
+        assert!(count > 0);
+        let i = (g.bits() % count) as usize;
+        let slot = ee.u32_at(sp + 0x19c) + 4 * i as u32;
+        if g.one_in(10) {
+            ee.set_u32(slot, 0);
+        }
+        for o in [0x100, 0x104, 0x10c, 0x114] {
+            if !g.one_in(3) {
+                ee.set_u32(sp + o, f54_scale(&mut g).to_bits());
+            }
+        }
+        if g.one_in(2) {
+            ee.set_u32(eco + 0xc4, g.near(0.087890625, 0.0, 1.0).to_bits());
+        }
+        let part = ee.u32_at(slot);
+        if part != 0 {
+            assert_eq!(ee.u32_at(part + 0x78), 5, "state 4's parts are spheres");
+            for r in 0..3 {
+                set_vf(&mut ee, part + s279_at::FRAME + 0x10 * r, Vf(g.lanes(2.0)));
+            }
+            set_vf(&mut ee, part + s279_at::LOCAL, Vf(g.lanes(3.0)));
+            if g.one_in(2) {
+                ee.set_u32(part + s279_at::RADIUS, g.near(0.0, 0.0, 6.0).to_bits());
+            }
+        }
+        let flags = ee.u8_at(plant + 0x16);
+        tally(&mut t, if flags & atv_plant::flags::HIDDEN != 0 { "hidden" } else if part == 0 { "empty slot" } else { "sphere stood" });
+        let (want, got) = (std::cell::Cell::new(0), std::cell::Cell::new(0));
+        let d = f47_compare(
+            &mut ee,
+            &log,
+            |ee| {
+                ee.set(28, GP);
+                ee.call(ECO_PART, &[u64::from(plant), i as u64], &[], BUDGET);
+                want.set(ee.v0() as u32);
+            },
+            |ee| got.set(plant_stand_with(ee, plant, i, None)),
+        );
+        if !d.is_empty() || want != got {
+            off.push(format!("{k}: answers {:#x} {:#x}, {d:?}", want.get(), got.get()));
+        }
+    }
+    f47_report(&t, &off, 800);
+}
+
+/// **F54 — the plant stand on a mesh is the original's**: 10,000 times a fake mesh part (kind 0, one
+/// time in eight another kind) in a fake species' slot, its last frame (`+0x1b0`) drawn, the plant
+/// turned (flag `0x04`) half the time by a quaternion of the eco's turns (a unit one mostly; `w` 1,
+/// -1, past 1 or ±0 now and then); SLUS-21104's stand and [`plant_stand_with`], the part's stand
+/// slot hooked (it logs the part and the 16 words of the frame it is handed). Every word of RAM, the
+/// slot's calls and the answer the same.
+#[test]
+fn the_plant_stand_on_a_mesh_is_the_originals() {
+    let Some(mut ee) = image().map(hooked) else { return };
+    let eco = ee.u32_at(ECO_AT);
+    let log: Calls = Rc::default();
+    {
+        let log = log.clone();
+        ee.hooks.insert(F54_MESH_SLOT, Box::new(move |ee: &mut Ee| {
+            let (p, at) = (ee.r(4) as u32, ee.r(5) as u32);
+            let mut w = vec![p];
+            w.extend((0..16).map(|k| ee.u32_at(at + 4 * k)));
+            log.borrow_mut().push((F54_MESH_SLOT, w));
+        }));
+    }
+    let (species, parts, part, vtable, turns) = (F54_AREA + 0x100, F54_AREA + 0x400, F54_AREA + 0x1000, F54_AREA + 0x2000, F54_AREA + 0x3000);
+    ee.set_u32(ee.u32_at(eco + 0x84), species);
+    ee.set_u32(species + 0x194, 4);
+    ee.set_u32(species + 0x19c, parts);
+    ee.set_u32(eco + 0x70, turns);
+    ee.set_u32(part + 0xc, vtable);
+    ee.set_u32(vtable + 0xcc, F54_MESH_SLOT);
+    let base = ee.ram.clone();
+    let mut g = Gen(0x0f54_0002);
+    let (mut t, mut off) = (BTreeMap::new(), Vec::new());
+    for k in 0..10_000 {
+        ee.ram.clone_from(&base);
+        let plant = F54_AREA;
+        f54_plant(&mut ee, &mut g, plant, 1, 16);
+        let i = g.bits() % 4;
+        ee.set_u32(parts + 4 * i, part);
+        let kind = if g.one_in(8) { [1, 2, 3, 6][(g.bits() % 4) as usize] } else { 0 };
+        ee.set_u32(part + 0x78, kind);
+        for r in 0..4 {
+            set_vf(&mut ee, part + 0x1b0 + 0x10 * r, Vf(g.lanes(2.0)));
+        }
+        let turned = g.one_in(2);
+        let flags = ee.u8_at(plant + 0x16) & !atv_plant::flags::TURNED | if turned { atv_plant::flags::TURNED } else { 0 };
+        set_u8(&mut ee, plant + 0x16, flags);
+        let mut q = g.unit_quat();
+        match g.bits() % 12 {
+            0 => q = [0.0, 0.0, 0.0, 1.0],
+            1 => q[3] = 1.0,
+            2 => q[3] = -1.0,
+            3 => q[3] = 1.0 + g.f(0.0, 0.5),
+            4 => q[3] = if g.one_in(2) { 0.0 } else { -0.0 },
+            _ => {}
+        }
+        let turn = turns + 0x50 * u32::from(ee.u8_at(plant + 0x17)) + 0x10;
+        set_vf(&mut ee, turn, Vf(q));
+        if g.one_in(2) {
+            ee.set_u32(eco + 0xc4, g.near(0.087890625, 0.0, 1.0).to_bits());
+        }
+        tally(
+            &mut t,
+            if flags & atv_plant::flags::HIDDEN != 0 {
+                "hidden"
+            } else if kind != 0 {
+                "another kind"
+            } else if turned {
+                "mesh turned"
+            } else {
+                "mesh"
+            },
+        );
+        let (want, got) = (std::cell::Cell::new(0), std::cell::Cell::new(0));
+        let d = f47_compare(
+            &mut ee,
+            &log,
+            |ee| {
+                ee.set(28, GP);
+                ee.call(ECO_PART, &[u64::from(plant), u64::from(i)], &[], BUDGET);
+                want.set(ee.v0() as u32);
+            },
+            |ee| {
+                let at = ee.scratch(60);
+                got.set(plant_stand_with(ee, plant, i as usize, Some(at)));
+            },
+        );
+        if !d.is_empty() || want != got {
+            off.push(format!("{k}: answers {:#x} {:#x}, {d:?}", want.get(), got.get()));
+        }
+    }
+    f47_report(&t, &off, 500);
+}
+
+/// **F54 — the turn's angle and axis, and the coarse cosine and sine, are the original's**: 20,000
+/// quaternions (unit mostly; `w` at and past ±1, ±0, the largest either way now and then) through
+/// [`atv_plant::axis_angle`] and the original's (research/oracle.txt `# F54`), and 20,000
+/// angles (to ±40, the wraps' edges, the table's) through [`atv_plant::coarse`] and the original's two.
+#[test]
+fn the_plant_turns_reads_are_the_originals() {
+    let Some(mut ee) = image().map(hooked) else { return };
+    let tables = plant_tables();
+    let mut g = Gen(0x0f54_0003);
+    let mut off = Vec::new();
+    for k in 0..20_000 {
+        let mut q = g.unit_quat();
+        match g.bits() % 10 {
+            0 => q[3] = 1.0,
+            1 => q[3] = -1.0,
+            2 => q[3] = g.f(1.0, 3.0) * if g.one_in(2) { 1.0 } else { -1.0 },
+            3 => q[3] = if g.one_in(2) { 0.0 } else { -0.0 },
+            4 => q[3] = f32::MAX * if g.one_in(2) { 1.0 } else { -1.0 },
+            _ => {}
+        }
+        let [a, c, b] = [0, 1, 2].map(|s| ee.scratch(s));
+        set_vf(&mut ee, a, Vf(q));
+        for o in [0, 4, 8, 12] {
+            ee.set_u32(b + o, 0x7fc0_dead);
+        }
+        ee.set(28, GP);
+        ee.call(F54_AXIS_ANGLE, &[u64::from(a), u64::from(c), u64::from(b)], &[], BUDGET);
+        let want = (ee.u32_at(c), [0, 4, 8, 12].map(|o| ee.u32_at(b + o)));
+        let (angle, axis) = atv_plant::axis_angle(Vf(q), &tables);
+        let got = (angle.0.to_bits(), axis.0.map(f32::to_bits));
+        if want != got {
+            off.push(format!("axis {k}: {q:?}: original {want:x?}, port {got:x?}"));
+        }
+    }
+    for k in 0..20_000 {
+        let x = match g.bits() % 8 {
+            0 => [core::f32::consts::PI, -core::f32::consts::PI, core::f32::consts::TAU, 0.0, -0.0][(g.bits() % 5) as usize],
+            1 => f32::from_bits((g.f(-7.0, 7.0)).to_bits() ^ (g.bits() & 3)),
+            _ => g.f(-40.0, 40.0),
+        };
+        ee.set(28, GP);
+        ee.call(F54_COS, &[], &[x], BUDGET);
+        let cos = ee.f(0).to_bits();
+        ee.set(28, GP);
+        ee.call(F54_SIN, &[], &[x], BUDGET);
+        let sin = ee.f(0).to_bits();
+        let (c, s) = atv_plant::coarse(F(x), tables.curve);
+        if (cos, sin) != (c.0.to_bits(), s.0.to_bits()) {
+            off.push(format!("coarse {k}: {x:?}: original {cos:#x} {sin:#x}, port {:#x} {:#x}", c.0.to_bits(), s.0.to_bits()));
+        }
+    }
+    assert!(off.is_empty(), "{} differ:\n  {}", off.len(), off.iter().take(30).cloned().collect::<Vec<_>>().join("\n  "));
+}
+
+/// The turn's quaternion as an angle and an axis (`(q, angle out, axis out)`), and the coarse
+/// cosine and sine (`$f12`).
+const F54_AXIS_ANGLE: u32 = 0x0013_4f50;
+const F54_COS: u32 = 0x0046_d8f0;
+const F54_SIN: u32 = 0x0046_d7c0;
+/// The bike's own listener and the pair log's, past their thunks (`(owner, probe, struck)`).
+const F54_BIKE_HEARS: u32 = 0x0049_3cf0;
+const F54_PAIR_LOG_HEARS: u32 = 0x0025_a350;
+
+/// **F54 — the riding part's two listeners are the original's**: 10,000 hits on each. The bike's: its
+/// flag byte (`+0x44`), its `+0xe8` object's mask and the struck's category drawn, SLUS-21104's
+/// listener and [`bike_heard_in_ram`] with the bike's hit slot (hooked, it logs) called as the
+/// original calls it (the struck's category in `a1`). The pair log's: a fake owner's two masks, its log's count, step, capacity and
+/// most (full one time in three, so it grows or cannot) and the struck's category drawn, the heap's
+/// resize hooked (it logs and answers a fixed block); SLUS-21104's and [`pair_log_heard_in_ram`].
+/// Every word of RAM and the calls the same.
+#[test]
+fn the_riding_parts_listeners_are_the_originals() {
+    let Some(mut ee) = image().map(hooked) else { return };
+    let log: Calls = Rc::default();
+    let hit_slot = vt(&ee, BIKE_HIT_SLOT);
+    log_hook(&mut ee, hit_slot, 3, &[], false, 0, &log);
+    log_hook(&mut ee, HEAP_RESIZE_F54, 4, &[], false, F54_AREA + 0x8000, &log);
+    let (probe, struck, owner, entries) = (F54_AREA, F54_AREA + 0x200, F54_AREA + 0x1000, F54_AREA + 0x2000);
+    let mask_at = ee.u32_at(BIKE + 0xe8) + 0xa4;
+    let base = ee.ram.clone();
+    let mut g = Gen(0x0f54_0004);
+    let (mut t, mut off) = (BTreeMap::new(), Vec::new());
+    let category = |g: &mut Gen| if g.one_in(4) { 1 << (g.bits() % 32) } else if g.one_in(5) { 0 } else { g.bits() };
+    for k in 0..10_000 {
+        ee.ram.clone_from(&base);
+        set_u8(&mut ee, BIKE + 0x44, g.bits() as u8);
+        ee.set_u32(mask_at, category(&mut g));
+        ee.set_u32(struck + 0x94, category(&mut g));
+        let heard = bike_heard_in_ram(&ee, BIKE, struck);
+        tally(&mut t, if heard == atv_hear::Heard::Bike { "the bike hears" } else { "the bike does not" });
+        let d = f47_compare(
+            &mut ee,
+            &log,
+            |ee| {
+                ee.set(28, GP);
+                ee.call(F54_BIKE_HEARS, &[u64::from(BIKE), u64::from(probe), u64::from(struck)], &[], BUDGET);
+            },
+            |ee| {
+                if bike_heard_in_ram(ee, BIKE, struck) == atv_hear::Heard::Bike {
+                    let category = ee.u32_at(struck + 0x94);
+                    ee.set(28, GP);
+                    ee.call(hit_slot, &[u64::from(BIKE), u64::from(category), u64::from(struck)], &[], BUDGET);
+                }
+            },
+        );
+        if !d.is_empty() {
+            off.push(format!("bike {k}: {d:?}"));
+        }
+    }
+    for k in 0..10_000 {
+        ee.ram.clone_from(&base);
+        ee.set_u32(owner + 0x2c, category(&mut g));
+        ee.set_u32(owner + 0x30, category(&mut g));
+        ee.set_u32(struck + 0x94, category(&mut g));
+        let l = owner + 0x3c8;
+        let capacity = (g.bits() % 12) as i32 - 1;
+        let count = if g.one_in(3) { capacity + (g.bits() % 3) as i32 } else { (g.bits() % 12) as i32 - 1 };
+        let step = [16, 1, 0, -1, (g.bits() % 40) as i32][(g.bits() % 5) as usize];
+        let most = [i32::MAX, capacity, count + step, count + step - 1, (g.bits() % 40) as i32 - 2][(g.bits() % 5) as usize];
+        let (count, capacity, step, most) = if g.one_in(40) { (i32::MAX, i32::MAX, 16, i32::MAX) } else { (count, capacity, step, most) };
+        for (o, w) in [(0, count as u32), (4, g.bits()), (8, entries), (0xc, step as u32), (0x10, capacity as u32), (0x14, most as u32)] {
+            ee.set_u32(l + o, w);
+        }
+        tally(
+            &mut t,
+            if count < capacity {
+                "logged"
+            } else if capacity < count.wrapping_add(step) && count.wrapping_add(step) <= most {
+                "grown and logged"
+            } else {
+                "full"
+            },
+        );
+        let d = f47_compare(
+            &mut ee,
+            &log,
+            |ee| {
+                ee.set(28, GP);
+                ee.call(F54_PAIR_LOG_HEARS, &[u64::from(owner), u64::from(probe), u64::from(struck)], &[], BUDGET);
+            },
+            |ee| pair_log_heard_in_ram(ee, owner, probe, struck, &mut |_| {}),
+        );
+        if !d.is_empty() {
+            off.push(format!("pair log {k}: count {count} capacity {capacity} step {step} most {most}: {d:?}"));
+        }
+    }
+    f47_report(&t, &off, 300);
 }
 
 /// SLUS-21104's ray probe against a sphere, its two tests (research/oracle.txt `# F46d`): a world

@@ -305,7 +305,7 @@ pub fn spin(m: &mut impl Ram, n: u32, axis: u32, angle: F, curve: &CurveTable) {
 /// `w` the sign word a `mfc1` leaves of `z`, all ones for a `z` with its sign set, else 0),
 /// `t = a - a·cos` and `s = a·sin`, the rows `t·a.x`, `t·a.y`, `t·a.z` with `cos` on the diagonal and
 /// `±s` off it; the position row `(0, 0, 0, 1)`.
-fn turn([x, y, z]: [F; 3], sin: F, cos: F) -> [Vf; 4] {
+pub(crate) fn turn([x, y, z]: [F; 3], sin: F, cos: F) -> [Vf; 4] {
     let sign = if z.to_bits() & 0x8000_0000 != 0 { u32::MAX } else { 0 };
     let a = Vf::from_bits([x.to_bits(), y.to_bits(), z.to_bits(), sign]);
     let t = Vf::msub(a.add(Vf::ZERO), a, Vf::splat(cos.0));
