@@ -11441,3 +11441,35 @@ atv_wheel_ctor              atv 0x004a0030 = the wheel constructor: lock +0x70 0
 #   Buggy image: tires 0x01612f80/0x01613950/0x01614320/0x01614cf0, radius 1.1 front / 1.3 rear, all four
 #   on world 0x0184c7d0; P 0x016156c0 (flags 0x12, nothing struck), rays 0x0160ede0, L 0x01628f90.
 #   0x01fe0000..0x01feb000 is zero in the image (the test's scratch for hits, records, objects, movers).
+# F54 — the part search's handed-on calls in Rust: the plant stand (src atv_plant) and the riding part's
+#   two listeners (src atv_hear); tests/mxvatv_bike_ride.rs plant_stand_with / bike_heard_in_ram /
+#   pair_log_heard_in_ram, the_plant_stand_on_a_sphere_is_the_originals, ..._on_a_mesh_..., the_plant_turns_
+#   reads_are_the_originals, the_riding_parts_listeners_are_the_originals. Journal research/journal/
+#   2026-11-10-f54-plant-stand-and-listeners.
+#   Stand 0x0046d3c0 (a0 group entry, a1 i): g +0x16 & 0x08 -> 0; eco = *0x0052cd88; species = *(*(eco+0x84)
+#   + 4*byte g+0x12); part = *(*(sp+0x19c) + 4i), 0 -> 0. Position = cvt.s.w(u16 g+0xc/+0xe/+0x10) * eco
+#   +0xc4 (state 4 0.087890625). Part +0x78: 5 sphere: +0x188 = (s0 + i8(g+0x15)*(s1-s0)/128)/s0 (s0 sp+0x10c,
+#   s1 sp+0x114), +0x18c = (l0 + i8(g+0x14)*(l0-l1)/128)/l0 (l0 sp+0x100, l1 sp+0x104); +0x170..+0x178 =
+#   position; vt +0xcc(part, part+0x140) (sphere 0x001c3340 = atv_sphere::refresh at its frame). 0 mesh: mat
+#   = 4 quads of +0x1b0, row 3 xyz and +0x1e0..+0x1e8 = position; g+0x16 & 0x04: 0x00134f50(*(eco+0x70) +
+#   byte g+0x17 * 0x50 + 0x10, &angle, &axis) (acos *0x003ea9c0 scale 0x003ea9d8; half 0 -> axis
+#   0x00396ff0 (1,0,0,1); else axis = q.xyz / sin(half) via *0x003eab20 entry +4, 1/step 0x003ea9d0; angle =
+#   half*2), cos 0x0046d8f0 / sin 0x0046d7c0 (entry [0] / [1] below, no interpolation; each wraps twice by
+#   adda 0 / msub 2pi*turns), 0x0046d680(a0 &mat, a1 0, f12..f14 axis xyz, f15 cos, f16 sin): rows 0..2 =
+#   node::turn x rows (row 3 kept); vt +0xcc(part, &mat). Else nothing more. State 4: 10 species, all sphere parts, eco +0x70 = 0.
+#   Listeners: the bike's 0x004956a0 -> 0x00493cf0 (bike = this-0x38): byte +0x44 & 0x02 and struck +0x94 &
+#   *(+0xe8)+0xa4 -> bike vt +0x138 (0x00494940) with a1 = the category (lw $5 overwrites the probe), a2
+#   struck. C15: +0x44 = 0x67, mask 0x800, category 0x80: never. The pair log's 0x0025b950 -> 0x0025a350
+#   (owner = this-0x28): kind 1 if cat & +0x2c (0x40), 2 if & +0x30 (0x80), else 0; 0x0025b620(log
+#   +0x3c8, &{probe, struck, 0, kind}, 0x003a1c30, 0xd1): log {count +0, entries +8, step +0xc, cap +0x10,
+#   most +0x14}, count < cap push; else 0x0025b840(log, count+step): cap < want <= most (signed) ->
+#   0x001b7470(entries, want<<4, 0x003a1c30, 0xd1), +8/+0x10 set, push; else nothing. C15 grows it (10 ->
+#   154, step 16). ride-2 432 stands / 141 hits per listener, flip-1 161 / 55.
+atv_plant_turn_axis_angle   atv 0x00134f50 = a quaternion as an angle and an axis (a0 q, a1 angle out, a2 axis out)
+atv_plant_turn_cos          atv 0x0046d8f0 = the curve table's cosine below f12, no interpolation
+atv_plant_turn_sin          atv 0x0046d7c0 = the curve table's sine below f12, no interpolation
+atv_plant_turn_rows         atv 0x0046d680 = rows turned about an axis (a0 frame, a1 0, f12..f14 axis, f15 cos, f16 sin)
+atv_bike_heard_hit          atv 0x00493cf0 = the bike's riding part listener (a0 bike, a1 probe, a2 struck)
+atv_pair_log_heard_hit      atv 0x0025a350 = the pair log's riding part listener (a0 owner, a1 probe, a2 struck)
+atv_pair_log_push           atv 0x0025b620 = a 16-byte entry pushed on a growable log (a0 log, a1 entry, a2 file, a3 line)
+atv_pair_log_grow           atv 0x0025b840 = a growable log's resize to a1 entries
