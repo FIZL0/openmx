@@ -12935,9 +12935,15 @@ fn sweep_world_in_ram(ee: &Ee, probe: u32, list: u32) -> (Vec<u32>, Vec<ws::Coll
 /// ([`atv_search::search`] with [`atv_sweep::Sweep`]: since F51 its pairs too, over
 /// [`SweepWorldInRam`]); everything written back. Answers the hit bit.
 fn sweep_in_ram(ee: &mut Ee, rec: u32, probe: u32, list: u32, from: Vf, to: Vf, kinds: &mut BTreeMap<String, u32>) -> bool {
+    let segments = sweep_set_in_ram(ee, rec, probe, from, to);
+    sweep_search_in_ram(ee, probe, list, segments, kinds)
+}
+
+/// F46c's search in Rust: the sweep probe `probe` on `segments` (just set) searched over the nearby
+/// list `list`, as [`sweep_in_ram`] has it. Answers the hit bit.
+fn sweep_search_in_ram(ee: &mut Ee, probe: u32, list: u32, segments: Vec<game_sim::sweep_probe::Segment>, kinds: &mut BTreeMap<String, u32>) -> bool {
     use game_sim::atv_search;
     use game_sim::atv_sweep;
-    let segments = sweep_set_in_ram(ee, rec, probe, from, to);
     // The search.
     assert_eq!(ee.u32_at(list + 0x40), 0, "the nearby list has a grid: the sweep would prepare it");
     let (mut items, mut objects, found) = sweep_world_in_ram(ee, probe, list);
@@ -13049,13 +13055,18 @@ fn sweep_pairs_write(ee: &mut Ee, probe: u32, count: usize, port: &SweepProbe, p
 /// `+0xc0`) set on its sweep probe `probe` ([`atv_sweep::set`]), and the probe placed (its box, and
 /// its database entry moved, [`spatial_move_in_ram`]). Answers the segments.
 fn sweep_set_in_ram(ee: &mut Ee, rec: u32, probe: u32, from: Vf, to: Vf) -> Vec<game_sim::sweep_probe::Segment> {
-    use game_sim::atv_sweep;
     set_vf(ee, rec + 0xc0, from);
     set_vf(ee, rec + 0xd0, to);
     // The set: the record's segment the probe's, no nodes.
     let n = ee.u32_at(probe + 0x130);
     let points: Vec<[Vf; 2]> = (0..n).map(|i| [vf_at(ee, rec + 0xc0 + 0x20 * i), vf_at(ee, rec + 0xd0 + 0x20 * i)]).collect();
-    let (segments, b) = atv_sweep::set(&points, None);
+    sweep_set_points_in_ram(ee, probe, &points)
+}
+
+/// F46c's set and place on the sweep probe `probe`, from its segments' `points` with no nodes.
+fn sweep_set_points_in_ram(ee: &mut Ee, probe: u32, points: &[[Vf; 2]]) -> Vec<game_sim::sweep_probe::Segment> {
+    use game_sim::atv_sweep;
+    let (segments, b) = atv_sweep::set(points, None);
     let (nodes, quads) = (ee.u32_at(probe + 0x134), ee.u32_at(probe + 0x138));
     for (i, s) in segments.iter().enumerate() {
         let i = i as u32;
@@ -17227,4 +17238,368 @@ fn the_nearby_sweep_with_its_pairs_is_the_originals() {
     eprintln!("F51 nearby: {seen:?}, pairs {kinds:?}");
     assert!(seen.get("hit").copied().unwrap_or(0) >= 150, "the sweeps hit: {seen:?}");
     assert!(seen.get("missed").copied().unwrap_or(0) >= 100, "{seen:?}");
+}
+
+
+use game_sim::atv_sphere;
+
+/// S279: a rider part's sphere (vtable), its refresh (vt `200`) and the frame it ends in (vt `+0xcc`),
+/// its clear (vt `+0xb0`) and pair (vt `+0xb4`); the rider part's probe is the bike record's sweep
+/// probe (F46c's vtable).
+const SPHERE_VT: u32 = 0x003b_6ec0;
+const SPHERE_REFRESH: u32 = 0x001c_33f0;
+const SPHERE_FRAME: u32 = 0x001c_3340;
+const SPHERE_CLEAR: u32 = 0x001c_1ed0;
+/// (`0x001c_2230`: a jump to the pair proper at `0x001c_2ec0`.)
+const SPHERE_PAIR: u32 = 0x001c_2230;
+const SWEEP_VT: u32 = 0x003b_6b40;
+/// The sphere's words: its point, frame, radius and square, node, record; as a collidable, its
+/// centre and reach.
+mod s279_at {
+    pub const LOCAL: u32 = 0x130;
+    pub const FRAME: u32 = 0x140;
+    pub const RADIUS: u32 = 0x180;
+    pub const RADIUS2: u32 = 0x184;
+    pub const NODE: u32 = 0x190;
+    pub const RECORD: u32 = 0x7c;
+    pub const CENTRE: u32 = 0x50;
+    pub const REACH: u32 = 0x70;
+}
+
+/// A quadword's four words as they are (no normalising).
+fn raw_quad(ee: &Ee, a: u32) -> Vf {
+    Vf([0, 4, 8, 12].map(|k| f32::from_bits(ee.u32_at(a + k))))
+}
+
+fn sphere_in_ram(ee: &Ee, s: u32) -> atv_sphere::Sphere {
+    use s279_at as at;
+    atv_sphere::Sphere {
+        local: raw_quad(ee, s + at::LOCAL),
+        frame: [0, 1, 2, 3].map(|k| raw_quad(ee, s + at::FRAME + 0x10 * k)),
+        radius: word_f(ee, s + at::RADIUS),
+        radius2: word_f(ee, s + at::RADIUS2),
+        centre: raw_quad(ee, s + at::CENTRE),
+        reach: word_f(ee, s + at::REACH),
+    }
+}
+
+fn write_sphere(ee: &mut Ee, s: u32, p: &atv_sphere::Sphere) {
+    use s279_at as at;
+    set_vf(ee, s + at::LOCAL, p.local);
+    for (k, r) in p.frame.iter().enumerate() {
+        set_vf(ee, s + at::FRAME + 0x10 * k as u32, *r);
+    }
+    ee.set_u32(s + at::RADIUS, p.radius.0.to_bits());
+    ee.set_u32(s + at::RADIUS2, p.radius2.0.to_bits());
+    set_vf(ee, s + at::CENTRE, p.centre);
+    ee.set_u32(s + at::REACH, p.reach.0.to_bits());
+}
+
+/// The sphere's pair, still the original's (S279a): each pair handed on, counted by the other's kind.
+struct SpherePairInRam<'w, 'e> {
+    world: &'w mut PartWorldInRam<'e>,
+}
+
+impl ws::Narrow for SpherePairInRam<'_, '_> {
+    fn clear(&mut self, _: &mut [ws::Collidable], _: usize) {
+        unreachable!("the sphere's own clear")
+    }
+    fn prepare(&mut self, _: &mut [ws::Collidable], _: usize) {
+        panic!("the sphere search prepared a grid")
+    }
+    fn pair(&mut self, _: &mut [ws::Collidable], probe: usize, other: usize) -> bool {
+        let [s, c] = [probe, other].map(|k| self.world.items[k] - 0x18);
+        let kind = self.world.ee.u32_at(c + 0x78);
+        *self.world.kinds.entry(format!("> sphere pair, kind {kind}")).or_default() += 1;
+        self.world.ee.set(28, GP);
+        self.world.ee.call(SPHERE_PAIR, &[u64::from(s), u64::from(c)], &[], BUDGET);
+        self.world.ee.v0() != 0
+    }
+    fn parts(&mut self, objects: &mut [ws::Collidable], group: usize) -> usize {
+        self.world.parts(objects, group)
+    }
+    fn part(&mut self, objects: &mut [ws::Collidable], group: usize, i: usize) -> Option<usize> {
+        self.world.part(objects, group, i)
+    }
+    fn heard_hit(&mut self, objects: &mut [ws::Collidable], l: usize, probe: usize, other: usize) {
+        self.world.heard_hit(objects, l, probe, other)
+    }
+    fn heard_struck(&mut self, objects: &mut [ws::Collidable], l: usize, struck: usize, probe: usize) {
+        self.world.heard_struck(objects, l, struck, probe)
+    }
+    fn on_hit(&mut self, objects: &mut [ws::Collidable], c: usize, probe: usize, other: usize) {
+        self.world.on_hit(objects, c, probe, other)
+    }
+    fn on_struck(&mut self, objects: &mut [ws::Collidable], c: usize, struck: usize, probe: usize) {
+        self.world.on_struck(objects, c, struck, probe)
+    }
+}
+
+/// **S279 — a rider part's sphere searched over its pool in Rust**: [`atv_search::search`] with
+/// [`atv_sphere::Search`] (the clear the port's: the hit bit, the record emptied and made the
+/// current one), a plant group's parts stood by the original and the pairs handed on
+/// ([`SpherePairInRam`]); the flags and groups written back. Answers the hit bit.
+fn sphere_search_in_ram(ee: &mut Ee, sphere: u32, pool: u32, kinds: &mut BTreeMap<String, u32>) -> bool {
+    use game_sim::atv_search;
+    assert_eq!(ee.u32_at(pool + 0x40), 0, "the pool has a grid: the search would prepare it");
+    let (mut items, mut objects, found) = sweep_world_in_ram(ee, sphere, pool);
+    for k in 0..objects.len() {
+        if objects[k].class != ws::Class::Group {
+            continue;
+        }
+        for p in PartWorldInRam::species_parts(ee, items[k]) {
+            if p != 0 && !items.contains(&(p + 0x18)) {
+                items.push(p + 0x18);
+                objects.push(ws::Collidable { class: ws::Class::from_byte(ee.u8_at(p + 0x18 + 2)), flags: ee.u8_at(p + 0x126), ..Default::default() });
+            }
+        }
+    }
+    let retired: Vec<bool> = items.iter().map(|&e| ee.u32_at(e - 0x18) == 1).collect();
+    // The clear's record, before any pair reads or fills it: the current record, emptied.
+    let r = ee.u32_at(sphere + s279_at::RECORD);
+    ee.set_u32(SWEEP_RECORD_AT, r);
+    ee.set_u32(r + 4, 0);
+    let mut world = PartWorldInRam { ee: &mut *ee, items, mesh: None, kinds: BTreeMap::new(), listeners: vec![], callbacks: vec![] };
+    for (k, o) in objects.iter_mut().enumerate() {
+        if o.class == ws::Class::Object {
+            let e = world.items[k];
+            world.hear(o, e - 0x18);
+        }
+    }
+    let heard = objects.clone();
+    let mut rest = SpherePairInRam { world: &mut world };
+    let mut narrow = atv_sphere::Search::new(&mut rest);
+    let hit = atv_search::search(&mut objects, 0, &found, &|o: usize| retired.get(o).copied().unwrap_or(false), &mut narrow);
+    assert!(narrow.cleared, "the search cleared the sphere");
+    for (k, v) in std::mem::take(&mut world.kinds) {
+        *kinds.entry(k).or_default() += v;
+    }
+    let items = world.items;
+    for (k, (a, b)) in heard.iter().zip(&objects).enumerate() {
+        assert_eq!(ws::Collidable { flags: b.flags, group: b.group, ..a.clone() }, *b, "item {k} changed beyond its flags");
+        if a.flags != b.flags {
+            set_u8(ee, items[k] - 0x18 + 0x126, b.flags);
+        }
+        if let Some(g) = b.group {
+            ee.set_u32(items[k] - 0x18 + 0x88, items[g]);
+        }
+    }
+    hit
+}
+
+/// **S279 — the bone collision's scene in the port's hands**: the sphere's place and refresh
+/// ([`atv_sphere::place`], [`atv_sphere::refresh`]), the probe's segment (F46c's set and place,
+/// [`sweep_set_points_in_ram`]), the sphere's pool search ([`sphere_search_in_ram`]) and the probe's
+/// (F46c/F51's, [`sweep_search_in_ram`]), and the probe's whole-scene search (F51's,
+/// [`sweep_all_in_ram`]). Still the original's: the sphere's pair (S279a), a sphere's whole-scene
+/// search, and a mover's two virtuals (the other side's own code). Counts every call by what it was.
+#[derive(Default)]
+struct PortScene {
+    /// The probe's segments, from its segment to its search.
+    segments: Option<(u32, Vec<game_sim::sweep_probe::Segment>)>,
+    kinds: BTreeMap<String, u32>,
+}
+
+/// Runs `f` inside a hook on the stack below the hooked call's (as [`call_from_hook`] does), the
+/// hook's `ra`, `sp` and `pc` put back after.
+fn in_hook<T>(ee: &mut Ee, f: impl FnOnce(&mut Ee) -> T) -> T {
+    let (pc, ra, sp, gp, stack) = (ee.pc, ee.r(31), ee.r(29), ee.r(28), ee.stack);
+    ee.stack = (sp as u32 - 0x80) & !0xf;
+    let out = f(ee);
+    (ee.stack, ee.pc) = (stack, pc);
+    ee.set(29, sp);
+    ee.set(31, ra);
+    ee.set(28, gp);
+    out
+}
+
+impl<'a> bone::Scene<RiderRam<'a>> for PortScene {
+    fn place(&mut self, m: &mut RiderRam<'a>, sphere: u32, at: u32) {
+        let ee = &mut *m.ee;
+        let vt = ee.u32_at(sphere + 0xc);
+        assert_eq!(vt, SPHERE_VT, "a rider part's sphere");
+        assert_eq!([ee.u32_at(vt + SHAPE_VT_REFRESH), ee.u32_at(vt + 0xcc), ee.u32_at(vt + 0xb0), ee.u32_at(vt + 0xb4)], [SPHERE_REFRESH, SPHERE_FRAME, SPHERE_CLEAR, SPHERE_PAIR]);
+        assert_eq!(ee.u32_at(sphere + s279_at::NODE), 0, "the sphere has a node: its world frame is not read");
+        let mut s = sphere_in_ram(ee, sphere);
+        atv_sphere::place(&mut s, (at != 0).then(|| Vf([0, 4, 8, 12].map(|k| f32::from_bits(ee.u32_at(at + k))))), None);
+        atv_sphere::refresh(&mut s, None);
+        write_sphere(ee, sphere, &s);
+        *self.kinds.entry("place".into()).or_default() += 1;
+    }
+    fn segment(&mut self, m: &mut RiderRam<'a>, probe: u32, from: Vf, to: Vf) {
+        let ee = &mut *m.ee;
+        assert_eq!(ee.u32_at(probe + 0xc), SWEEP_VT, "a rider part's probe");
+        assert_eq!(ee.u32_at(probe + 0x130), 1, "the probe's one segment");
+        let segments = in_hook(ee, |ee| sweep_set_points_in_ram(ee, probe, &[[from, to]]));
+        self.segments = Some((probe, segments));
+        *self.kinds.entry("segment".into()).or_default() += 1;
+    }
+    fn search(&mut self, m: &mut RiderRam<'a>, shape: u32, pool: u32) {
+        let ee = &mut *m.ee;
+        let kinds = &mut self.kinds;
+        let hit = match ee.u32_at(shape + 0xc) {
+            SPHERE_VT => in_hook(ee, |ee| sphere_search_in_ram(ee, shape, pool, kinds)),
+            SWEEP_VT => {
+                let (probe, segments) = self.segments.take().expect("the probe's segment before its search");
+                assert_eq!(probe, shape);
+                in_hook(ee, |ee| sweep_search_in_ram(ee, probe, pool, segments, kinds))
+            }
+            vt => panic!("a search by {shape:#x} (vtable {vt:#x})"),
+        };
+        *self.kinds.entry(format!("search hit {}", u8::from(hit))).or_default() += 1;
+    }
+    fn search_all(&mut self, m: &mut RiderRam<'a>, shape: u32) {
+        let ee = &mut *m.ee;
+        let kinds = &mut self.kinds;
+        match ee.u32_at(shape + 0xc) {
+            SWEEP_VT => {
+                self.segments = None;
+                in_hook(ee, |ee| sweep_all_in_ram(ee, shape, 0, kinds)).expect("a listener searched the database inside the probe's search");
+            }
+            _ => {
+                *kinds.entry("> sphere whole-scene search".into()).or_default() += 1;
+                call_from_hook(ee, SHAPE_SEARCH_ALL, &[u64::from(shape), 0]);
+            }
+        }
+        *self.kinds.entry("search_all".into()).or_default() += 1;
+    }
+    fn spin(&mut self, m: &mut RiderRam<'a>, mover: u32) -> Vf {
+        *self.kinds.entry("> spin".into()).or_default() += 1;
+        OriginalScene.spin(m, mover)
+    }
+    fn velocity(&mut self, m: &mut RiderRam<'a>, mover: u32) -> Vf {
+        *self.kinds.entry("> velocity".into()).or_default() += 1;
+        OriginalScene.velocity(m, mover)
+    }
+}
+
+/// **The rider's bone collisions with the port's scene, both C15 replays bit-exact** (S279): every
+/// bone solve [`bone::solve`]'s, on one interpreter with the original's scene ([`OriginalScene`]) and
+/// on another with the port's ([`PortScene`]: the sphere's place, refresh, clear and pool search,
+/// the probe's segment, place and searches), run side by side. Every row of ride-2 and flip-1 is the
+/// capture's on both, and after every frame the two RAMs (outside the stack) and scratchpads are the
+/// same, word for word. On C15 the rider's pool (its nearby list) holds 0 to 19 candidates, none of
+/// them within a part's reach: no pair runs, nothing is hit (S279a, S279b).
+#[test]
+fn the_bone_collisions_scene_is_the_ports() {
+    for (name, n) in [("ride-2", 459usize), ("flip-1", 465)] {
+        let (Some(ia), Some(ib)) = (image(), image()) else { return };
+        let (mut a, mut b) = (hooked(ia), hooked(ib));
+        let Some(rows) = rows(name) else { return };
+        assert_eq!(rows.len(), n);
+        let trn: &'static [u8] = Box::leak(nat05_trn().unwrap().into_boxed_slice());
+        let map: &'static track::Terrain = Box::leak(Box::new(track::Terrain::parse(trn).unwrap()));
+        let curve: &'static CurveTable = Box::leak(Box::new(CurveTable::build()));
+        let scene: Rc<RefCell<PortScene>> = Rc::default();
+        a.hooks.insert(
+            BONE_SOLVE,
+            Box::new(move |ee: &mut Ee| {
+                let (part, dt) = (ee.r(4) as u32, F(ee.f(12)));
+                bone::solve(&mut RiderRam { ee, overlay: None }, &mut OriginalScene, part, dt, Some(map), curve);
+                ee.pc = BONE_SOLVE;
+            }),
+        );
+        let s = scene.clone();
+        b.hooks.insert(
+            BONE_SOLVE,
+            Box::new(move |ee: &mut Ee| {
+                let (part, dt) = (ee.r(4) as u32, F(ee.f(12)));
+                bone::solve(&mut RiderRam { ee, overlay: None }, &mut *s.borrow_mut(), part, dt, Some(map), curve);
+                ee.pc = BONE_SOLVE;
+            }),
+        );
+        for (r, row) in rows.iter().enumerate() {
+            for (side, ee) in [("original's scene", &mut a), ("port's scene", &mut b)] {
+                poke(ee, row, &READER);
+                ee.set(28, GP);
+                ee.call(FRAME, &[u64::from(SIM)], &[f32::from_bits(DT)], 400_000_000);
+                let d = diff(ee, row);
+                assert!(d.is_empty(), "{name} row {r} ({side}): {} words differ\n  {}", d.len(), d.iter().take(20).cloned().collect::<Vec<_>>().join("\n  "));
+                poke(ee, row, &SPOT);
+            }
+            let parted = differing_bytes(&a, &b);
+            assert!(parted.is_empty(), "{name} row {r}: the scenes part at {:x?}", &parted[..parted.len().min(20)]);
+        }
+        let k = &scene.borrow().kinds;
+        eprintln!("{name}: {k:?}");
+        let get = |s: &str| k.get(s).copied().unwrap_or(0);
+        assert!(get("place") > 0 && get("segment") > 0, "{name}: the scene was asked");
+        assert_eq!(get("search hit 0"), 2 * get("place"), "{name}: a sphere and a probe search for every place, none hit");
+        assert!(k.keys().all(|s| !s.starts_with('>')), "{name}: something was handed to the original: {k:?}");
+    }
+}
+
+/// A float word for the sphere oracle: ±0, a denormal, ±∞, a NaN, the largest, any bits, or a
+/// plain value within `span` (most of the time).
+#[allow(clippy::float_arithmetic)]
+fn s279_word(g: &mut Gen, span: f32) -> u32 {
+    match g.bits() % 16 {
+        0 => 0,
+        1 => 0x8000_0000,
+        2 => g.bits() & 0x807f_ffff,
+        3 => 0x7f80_0000 | (g.bits() & 0x8000_0000),
+        4 => 0x7fc0_0000 | (g.bits() & 0x803f_ffff),
+        5 => 0x7f7f_ffff | (g.bits() & 0x8000_0000),
+        6 => g.bits(),
+        _ => g.f(-span, span).to_bits(),
+    }
+}
+
+/// **A rider part's sphere is placed and refreshed as the original does it** (S279): 12 000 calls
+/// of SLUS-21104's place (`a1` a point or none, `a2` a radius or none) then refresh (vt `200`), on
+/// state 4's nine rider spheres with no node, and of [`atv_sphere::place`] then
+/// [`atv_sphere::refresh`] from the same words: every word of the sphere it reads drawn (the
+/// point, the frame it replaces, the radius and its square, the centre and reach), ±0, denormals,
+/// ±∞, NaNs and any bits among them. Every byte of the sphere comes out the same, and the original
+/// writes nowhere else (but its stack).
+#[test]
+fn the_rider_spheres_place_is_the_originals() {
+    use s279_at as at;
+    let Some(mut ee) = image().map(hooked) else { return };
+    let spheres: Vec<u32> = rider_parts(&ee).into_iter().map(|p| ee.u32_at(p + bone::SPHERE)).collect();
+    assert_eq!(spheres.len(), 9);
+    let (point, radius) = (B_AREA, B_AREA + 0x10);
+    let mut g = Gen(0x5279);
+    let mut paths = BTreeMap::new();
+    for case in 0..12_000 {
+        let s = spheres[case % 9];
+        assert_eq!(ee.u32_at(s + 0xc), SPHERE_VT);
+        assert_eq!(ee.u32_at(s + at::NODE), 0);
+        for o in (at::LOCAL..at::RADIUS2 + 4).step_by(4).chain([at::CENTRE, at::CENTRE + 4, at::CENTRE + 8, at::CENTRE + 12, at::REACH]) {
+            ee.set_u32(s + o, s279_word(&mut g, 3000.0));
+        }
+        for k in 0..5 {
+            ee.set_u32(point + 4 * k, s279_word(&mut g, 3000.0));
+        }
+        let (a1, a2) = (if g.one_in(4) { 0 } else { point }, if g.one_in(2) { 0 } else { radius });
+        *paths.entry((a1 != 0, a2 != 0)).or_insert(0u32) += 1;
+        let before: Vec<u32> = (0..0x1a0).step_by(4).map(|o| ee.u32_at(s + o)).collect();
+        let mut port = sphere_in_ram(&ee, s);
+        let p = (a1 != 0).then(|| raw_quad(&ee, point));
+        let r = (a2 != 0).then(|| word_f(&ee, radius));
+        // The original's.
+        ee.written.clear();
+        ee.set(28, GP);
+        ee.call(SHAPE_PLACE, &[u64::from(s), u64::from(a1), u64::from(a2)], &[], BUDGET);
+        ee.set(28, GP);
+        ee.call(SPHERE_REFRESH, &[u64::from(s)], &[], BUDGET);
+        let stack = ee.stack.saturating_sub(0x1000)..ee.stack + 0x400;
+        let stray: Vec<u32> = ee.written.iter().copied().filter(|&w| !(s..s + 0x1a0).contains(&(w & 0x0fff_ffff)) && !stack.contains(&(w & 0x0fff_ffff))).collect();
+        assert!(stray.is_empty(), "case {case}: the original wrote {stray:x?}");
+        let want: Vec<u32> = (0..0x1a0).step_by(4).map(|o| ee.u32_at(s + o)).collect();
+        // The port's, from the same words.
+        for (k, w) in before.iter().enumerate() {
+            ee.set_u32(s + 4 * k as u32, *w);
+        }
+        atv_sphere::place(&mut port, p, r);
+        atv_sphere::refresh(&mut port, None);
+        write_sphere(&mut ee, s, &port);
+        let got: Vec<u32> = (0..0x1a0).step_by(4).map(|o| ee.u32_at(s + o)).collect();
+        let d: Vec<String> = (0..want.len()).filter(|&k| want[k] != got[k]).map(|k| format!("+{:#x}: {:#010x} want {:#010x}", 4 * k, got[k], want[k])).collect();
+        assert!(d.is_empty(), "case {case} (sphere {s:#x}, point {}, radius {}): {}", a1 != 0, a2 != 0, d.join(", "));
+        for (k, w) in before.iter().enumerate() {
+            ee.set_u32(s + 4 * k as u32, *w);
+        }
+    }
+    assert!(paths.values().all(|&n| n >= 1000) && paths.len() == 4, "{paths:?}");
 }

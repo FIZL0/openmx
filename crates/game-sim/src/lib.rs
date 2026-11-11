@@ -1027,6 +1027,10 @@ pub mod atv_sweep;
 /// collision record's nearby list — MX Unleashed's [`ray_probe`] clear and pair on its moved fields.
 pub mod atv_part;
 
+/// A rider part's sphere (S279): SLUS-21104's sphere collidable placed, refreshed, cleared and
+/// searched as the rider ragdoll world's bone collisions ask.
+pub mod atv_sphere;
+
 /// The quad's collision record's contacts (MD75e1): SLUS-21104's resolution of them (the record's vt
 /// `+0x88`, the gravity's call), MX Unleashed's [`contact`] resolution on the ATV's record and body.
 pub mod atv_contact;

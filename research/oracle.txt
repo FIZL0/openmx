@@ -10383,6 +10383,29 @@ atv_heap_free               atv 0x001b76d0 = free
 #   world's 0x00496a70); the hold/free parts' vt +0x10 slot +0x10 = 0x0049bd30 on state 4 (a1 on/off).
 #   Oracle: 60 000 drawn frames of state 4's rider, the whole function against the port, every written
 #   word and the call log equal; every switch and holds arm taken (fewest: holds "L0l1R1r0" ~56).
+# S279: the bone collision's scene on a rider part's sphere and probe, ported as game_sim::atv_sphere (place,
+# refresh, Search's clear) with atv_search::search for the pool searches and F51's sweep for the probe's
+# segment and whole-scene search; tests/mxvatv_bike_ride.rs (PortScene, the_bone_collisions_scene_is_the_ports,
+# the_rider_spheres_place_is_the_originals). Journal: research/journal/2026-11-10-s279-rider-sphere-scene/.
+#   State 4's nine rider parts: sweep on, sweep back 2.0, pool +0x84 = 0x0110c5d0. Part +0x88 sphere,
+#   vtable 0x003b6ec0, flags 0x12 or 0x52, node +0x190 0; part +0x8c probe, vtable 0x003b6b40 (the bike
+#   record's sweep probe class), flags 0x13.
+#   Sphere: +0x130 point, +0x140 frame (4 rows), +0x180 radius, +0x184 radius², +0x50 centre, +0x70 reach,
+#   +0x7c record. Place 0x001c1e90(s, p, r): p given -> +0x130 = p's four words; r given -> +0x180 = r,
+#   +0x184 = r·r (the bone collision hands r = 0, none).
+#   vt +200 0x001c33f0 refresh: +0x190 set -> its world frame (0x00194e00, not read: no rider sphere has a
+#   node, asserted), else the identity (pcpyld/pextlw of 1.0, last row vf0); then vt +0xcc 0x001c3340:
+#   +0x140 = frame; +0x50 = m3 + 0, madd m0·x, m1·y, m2·z (xyz), w the point's; +0x70 = +0x180.
+#   vt +0xb0 0x001c1ed0 clear: +0x126 &= ~0x20, *0x003dc618 = +0x7c record, record +4 = 0.
+#   vt +0xb4 0x001c2230 = j 0x001c2ec0 pair: other +0x45 bit 0 gate, then by kind: 6 box, 5 sphere/sphere
+#   0x00106f70, 1 a hierarchy's parts, 0 mesh 0x001095c0 -> 0x00108ba0; writes the record's contacts. Not
+#   ported (S279a).
+#   C15, both replays served by the port side by side with the original scene (rows bit-exact, RAM equal
+#   outside the stack after every frame): ride-2 147 places and segments, 294 searches over pools of 0;
+#   flip-1 2,574 places and segments, 5,148 searches over pools of 13 or 19. No pair (nothing within
+#   reach), no hit, never the whole-scene search 0x001148e0. A capture with a scene hit: S279b.
+#   Oracle: 12,000 places and refreshes on the nine spheres (special floats, all four place arms >= 1,000),
+#   all 0x1a0 bytes equal and nothing written outside the sphere.
 # S285: the rider's wreck arm body 0x004efe10..0x004f0274 (in 0x004ef320, mode 2), ported as
 # game_sim::handling::rider::wreck_arm (aim, let_go, release_bike, ground_y, clauses; release, pose_targets,
 # body_target). tests/mxvatv_rider_modes.rs (the S278b oracle, the arm no longer skipped). Journal:
