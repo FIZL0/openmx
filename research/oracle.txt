@@ -11343,3 +11343,23 @@ atv_wheel_ctor              atv 0x004a0030 = the wheel constructor: lock +0x70 0
 #   Box 0x001961f0 walks the node's children's world rows (node +0x70) through 0x00196550: on the spawned
 #   quad it is not the load's, root reset to identity or not. Load half box on all four images, worked back
 #   from rec+0x60: (2.1281617, 1.9494964, 3.016569).
+# MD126 — the car's controls in atv_car::Pieces (vt +0x34c 0x004ca450, a0 car, f12 dt; tests/mxvatv_car_frame.rs
+#   controls_are_mx_unleasheds and all_six_pieces_are_mx_unleasheds, 3,000 frames each off md39a/buggy.ee.bin).
+#   Journal: research/journal/2026-11-10-md126-mxvatv-car-step. MXU's car_controls (0x00396870) on SLUS-21104's
+#   vehicle words. First 0x004a7990: *(car+0x680) && *(..)+0x1d0 > 0 -> gas pedal +0x314 = 0 (start penalty).
+#   +0x11bc 0 (no driver): +0x11c8 +0x11cc +0x1124 +0x314 +0x310 +0x1120 +0x11d0 +0x318 +0x113c +0x1138 = 0,
+#   +0x1130 = +0x1134 = 1, +0x124c = +0x1244, 0x004b3c20(engine, 0); return. Wheel = +0xbc4 && *(+0xbc4)+0x54.
+#   Steer: +0x11c4 d-pad (rate +0x11dc, +0x11e0 when |stick| == 0; table +0x1218), else wheel (+0x11d0 =
+#   stick; table +0x1200), else stick (+0x11c0 squares it: stick * (stick * sign), sign cvt.s.w; rate +0x11e4;
+#   table +0x11e8). Tables (speed, scale) x3 by +0x358 (local velocity z): < middle speed -> first segment. Each
+#   inline remap is adda.s 0/madd.s; a flat steer or rear-steer range answers out_lo (the delay-slot sub.s writes
+#   a dropped register). +0x113c = scale * +0x11d0; +0x1140 = remap(+0x358, +0x1230, +0x1238, +0x1234, +0x123c)
+#   * +0x113c. Gas pedal > 0 clears +0xd7c (held); held: +0x1130 = +0x1134 = 1, +0x318 = 0. Else gas pedal
+#   && +0x310 && +0xdd8 -> 0x004b3c20(engine, 1), +0x1130 = +0x1134 = 0, +0x314 = 0x3ecccccd; otherwise engine
+#   +0xbc (reversing) -> 0x004b3c20(engine, 0), +0x1130 pedal-slewed to +0x310 by +0x11d4*dt (drops at once),
+#   +0x1134 = +0x1130. +0x318 = +0xdd4 ? pedal-slew to +0x314 by +0x11d8*dt : 0. +0x112c = +0x1120. Hand brake
+#   +0x1138 != 0: RL/RR +0x9a4 = +0x1158, +0x124c = +0x1248, +0x1134 = remap(+0x32c, 0, 10, 1, +0x115c), +0x1164
+#   = +0x1160. Off, +0x1164 > 0: +0x9a4 = remap(+0x1164, 0, +0x1160, 1, +0x1158) (flat: 1 - 0), +0x1164 -= dt;
+#   else +0x9a4 = 1, +0x124c = +0x1244. 0x004b3c20 (engine reverse switch) is handed out as Call::Reverse.
+#   Buggy image: driven, square steering, d-pad 0, wheel word 0, +0xd7c 0, +0xdd4/+0xdd8 1, penalty object
+#   0x00bcb550 (clock 0), engine not reversing; rates 10/3/3/2/15.5; hand brake 0.9/5/0.15.
