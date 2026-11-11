@@ -1031,6 +1031,14 @@ pub mod atv_part;
 /// searched as the rider ragdoll world's bone collisions ask.
 pub mod atv_sphere;
 
+/// A plant group's part stood at its plant (F54): SLUS-21104's eco part stand, a sphere's scales and
+/// position or a mesh's frame and turn, then the part's stand slot.
+pub mod atv_plant;
+
+/// What hears the bike's riding part hit (F54): SLUS-21104's two listeners on it, the bike's own and
+/// the log of the pairs with their category kind.
+pub mod atv_hear;
+
 /// The quad's collision record's contacts (MD75e1): SLUS-21104's resolution of them (the record's vt
 /// `+0x88`, the gravity's call), MX Unleashed's [`contact`] resolution on the ATV's record and body.
 pub mod atv_contact;
