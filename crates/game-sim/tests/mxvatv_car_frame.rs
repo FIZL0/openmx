@@ -20,6 +20,7 @@ use game_sim::atv_body::Body;
 use game_sim::atv_car::{self, Call, Car, Keys, Lever, Pieces, PreloadState, State, Steps, Tire, TireKeys, TireState, Update, Wing};
 use game_sim::car::Surface;
 use game_sim::biplane::World;
+use game_sim::car::Reverse;
 use game_sim::handling::seed;
 use ps2_float::{F, Vf};
 use ps2_oracle::{Ee, Kit, skip};
@@ -53,6 +54,8 @@ const NODE_LOCAL: u32 = 0x0019_5320;
 const LANDING_SOUND: u32 = 0x0050_0820;
 const GROUND_QUERY: u32 = 0x0048_33c0;
 const NODE_POSITION: u32 = 0x0019_4c20;
+/// The engine's reverse switch (a0 engine, a1 into reverse), which the controls call.
+const REVERSE: u32 = 0x004b_3c20;
 
 /// Where the car's PostProcess makes its last three calls from (their return addresses).
 const POST_LANDED: [u32; 2] = [0x004c_bf60, 0x004c_bf88];
@@ -441,6 +444,12 @@ fn hook(ee: &mut Ee, p: Ptrs, log: Shared<Vec<Call>>, script: Shared<Script>) {
         }));
     }
     let l = log.clone();
+    ee.hooks.insert(REVERSE, Box::new(move |ee| {
+        if ee.r(4) as u32 == p.engine {
+            l.borrow_mut().push(Call::Reverse(if ee.r(5) != 0 { Reverse::In } else { Reverse::Out }));
+        }
+    }));
+    let l = log.clone();
     ee.hooks.insert(NODE_LOCAL, Box::new(move |ee| {
         assert!(POST_LANDED.contains(&(ee.r(31) as u32)), "node local from {:#x}", ee.r(31));
         assert_eq!(ee.r(5) as u32, p.node, "the landing's node");
@@ -568,6 +577,32 @@ mod mx {
     pub const GYRO: u32 = 0x11b0;
     pub const WINGS: u32 = 0x11b4;
     pub const WING_PTR: u32 = 0x11b8;
+    // The controls' (research/oracle.txt `# MD126`).
+    pub const WHEEL: u32 = 0x54;
+    pub const PENALTY_OBJECT: u32 = 0x680;
+    pub const PENALTY: u32 = 0x1d0;
+    pub const DRIVEN: u32 = 0x11bc;
+    pub const SQUARE: u32 = 0x11c0;
+    pub const DPAD: u32 = 0x11c4;
+    pub const GAS_PEDAL: u32 = 0x314;
+    pub const STEER_INPUT: u32 = 0x11d0;
+    pub const STEER: u32 = 0x113c;
+    pub const REAR_STEER: u32 = 0x1140;
+    pub const ENGAGED_CLUTCH: u32 = 0x112c;
+    pub const FADE: u32 = 0x1164;
+    pub const REAR_FRICTION: u32 = 0x9a4;
+    pub const HELD: u32 = 0xd7c;
+    pub const THROTTLE_ENABLED: u32 = 0xdd4;
+    pub const REVERSE_ENABLED: u32 = 0xdd8;
+    pub const REVERSING: u32 = 0xbc;
+    pub const RATES: u32 = 0x11d4;
+    pub const TABLES: u32 = 0x11e8;
+    pub const REAR_TABLE: u32 = 0x1230;
+    pub const YAW_LIMIT: u32 = 0x1244;
+    pub const HAND_BRAKE_YAW_LIMIT: u32 = 0x1248;
+    pub const FRICTION_SCALE: u32 = 0x1158;
+    pub const BRAKE_SCALE: u32 = 0x115c;
+    pub const FADE_TIME: u32 = 0x1160;
 }
 
 /// The preload's cue (a sound's play), the global it is handed first, and where the preload calls it.
@@ -587,6 +622,11 @@ struct Mx {
     vstate_object: u32,
     vstate: bool,
     mode: u32,
+    /// The vehicle state's wheel word, the start penalty's object (the image's, or none) and its clock.
+    wheel_word: u32,
+    penalty_object: u32,
+    penalty: bool,
+    penalty_clock: F,
     state: State,
 }
 
@@ -607,7 +647,28 @@ fn read_mx(ee: &Ee, p: &Ptrs) -> Mx {
     let wing_ptr = ee.u32_at(c(mx::WING_PTR));
     let wf = |o: u32| F(ee.f32_at(wing_ptr + o));
     let wing = Wing { lift_slope: wf(0), angle_of_attack: wf(4), basic_drag: wf(8), induced_drag: wf(0xc), position: get_v(ee, wing_ptr + 0x10) };
+    let ff = |a: u32| F(ee.f32_at(a));
+    let table = |a: u32| -> [[F; 2]; 3] { core::array::from_fn(|i| [ff(a + 8 * i as u32), ff(a + 8 * i as u32 + 4)]) };
+    let rate = |i: u32| f(mx::RATES + 4 * i);
     let keys = Keys {
+        square_steering: b(mx::SQUARE),
+        brake_rate_limit: rate(0),
+        gas_rate_limit: rate(1),
+        x_dpad_rate_limit_on: rate(2),
+        x_dpad_rate_limit_off: rate(3),
+        x_axis_rate_limit: rate(4),
+        steer: table(c(mx::TABLES)),
+        wheel_steer: table(c(mx::TABLES + 0x18)),
+        dpad_steer: table(c(mx::TABLES + 0x30)),
+        rear_steer: {
+            let [a, b, _] = table(c(mx::REAR_TABLE));
+            [a, b]
+        },
+        yaw_rate_limit: f(mx::YAW_LIMIT),
+        hand_brake_yaw_rate_limit: f(mx::HAND_BRAKE_YAW_LIMIT),
+        hand_brake_friction_scale: f(mx::FRICTION_SCALE),
+        hand_brake_brake_scale: f(mx::BRAKE_SCALE),
+        hand_brake_fade_time: f(mx::FADE_TIME),
         cofg: v(mx::COFG),
         cofg_ai: v(mx::COFG_AI),
         cofg_travel_forward: f(mx::TRAVEL_FORWARD),
@@ -630,8 +691,27 @@ fn read_mx(ee: &Ee, p: &Ptrs) -> Mx {
         wings: Vec::new(),
         tires: core::array::from_fn(|k| read_tire_keys(ee, p.tires[k])),
     };
+    let wheel_word = ee.u32_at(vstate_object + mx::WHEEL);
+    let penalty_object = ee.u32_at(c(mx::PENALTY_OBJECT));
+    assert_ne!(penalty_object, 0, "the image's start penalty");
+    let penalty_clock = F(ee.f32_at(penalty_object + mx::PENALTY));
     let state = State {
         human: mode == 1,
+        driven: b(mx::DRIVEN),
+        wheel: wheel_word != 0,
+        dpad: b(mx::DPAD),
+        start_penalty: penalty_clock > 0.0,
+        gas_pedal: f(mx::GAS_PEDAL),
+        steer_input: f(mx::STEER_INPUT),
+        steer: f(mx::STEER),
+        rear_steer: f(mx::REAR_STEER),
+        engaged_clutch: f(mx::ENGAGED_CLUTCH),
+        hand_brake_fade: f(mx::FADE),
+        rear_friction: [2, 3].map(|t| F(ee.f32_at(p.tires[t] + mx::REAR_FRICTION))),
+        held: b(mx::HELD),
+        reverse_enabled: b(mx::REVERSE_ENABLED),
+        throttle_enabled: b(mx::THROTTLE_ENABLED),
+        reversing: ee.u32_at(p.engine + mx::REVERSING) != 0,
         lean: f(mx::LEAN),
         stick: f(mx::STICK),
         pad_word: f(mx::PAD_WORD),
@@ -655,11 +735,22 @@ fn read_mx(ee: &Ee, p: &Ptrs) -> Mx {
         launch_timer: f(mx::LAUNCH_TIMER),
         launch_start: f(mx::LAUNCH_START),
         launch_boost: F(ee.f32_at(p.engine + mx::BOOST)),
-        steer: f(tire::STEER_WORD),
-        rear_steer: f(tire::REAR_STEER_WORD),
         tires: core::array::from_fn(|k| read_tire_state(ee, p.tires[k])),
     };
-    Mx { keys, wing, wing_count: ee.i32_at(c(mx::WINGS)), wing_ptr, vstate_object, vstate: true, mode, state }
+    Mx {
+        keys,
+        wing,
+        wing_count: ee.i32_at(c(mx::WINGS)),
+        wing_ptr,
+        vstate_object,
+        vstate: true,
+        mode,
+        wheel_word,
+        penalty_object,
+        penalty: true,
+        penalty_clock,
+        state,
+    }
 }
 
 /// Every word [`read_mx`] reads but the gravity block's, where it lives.
@@ -701,9 +792,34 @@ fn mx_words(m: &Mx, p: &Ptrs) -> Vec<(u32, u32)> {
         (c(mx::LAUNCH_TIMER), s.launch_timer),
         (c(mx::LAUNCH_START), s.launch_start),
         (p.engine + mx::BOOST, s.launch_boost),
-        (c(tire::STEER_WORD), s.steer),
-        (c(tire::REAR_STEER_WORD), s.rear_steer),
+        (c(mx::RATES), k.brake_rate_limit),
+        (c(mx::RATES + 4), k.gas_rate_limit),
+        (c(mx::RATES + 8), k.x_dpad_rate_limit_on),
+        (c(mx::RATES + 0xc), k.x_dpad_rate_limit_off),
+        (c(mx::RATES + 0x10), k.x_axis_rate_limit),
+        (c(mx::YAW_LIMIT), k.yaw_rate_limit),
+        (c(mx::HAND_BRAKE_YAW_LIMIT), k.hand_brake_yaw_rate_limit),
+        (c(mx::FRICTION_SCALE), k.hand_brake_friction_scale),
+        (c(mx::BRAKE_SCALE), k.hand_brake_brake_scale),
+        (c(mx::FADE_TIME), k.hand_brake_fade_time),
+        (m.penalty_object + mx::PENALTY, m.penalty_clock),
+        (c(mx::GAS_PEDAL), s.gas_pedal),
+        (c(mx::STEER_INPUT), s.steer_input),
+        (c(mx::STEER), s.steer),
+        (c(mx::REAR_STEER), s.rear_steer),
+        (c(mx::ENGAGED_CLUTCH), s.engaged_clutch),
+        (c(mx::FADE), s.hand_brake_fade),
     ];
+    for (t, table) in [k.steer, k.wheel_steer, k.dpad_steer].iter().enumerate() {
+        for (i, [speed, scale]) in table.iter().enumerate() {
+            let a = c(mx::TABLES + 0x18 * t as u32 + 8 * i as u32);
+            fs.extend([(a, *speed), (a + 4, *scale)]);
+        }
+    }
+    for (i, [speed, scale]) in k.rear_steer.iter().enumerate() {
+        let a = c(mx::REAR_TABLE + 8 * i as u32);
+        fs.extend([(a, *speed), (a + 4, *scale)]);
+    }
     let vs: [(u32, Vf); 6] = [
         (c(mx::COFG), k.cofg),
         (c(mx::COFG_AI), k.cofg_ai),
@@ -727,6 +843,15 @@ fn mx_words(m: &Mx, p: &Ptrs) -> Vec<(u32, u32)> {
         (c(mx::VEHICLE_STATE), if m.vstate { m.vstate_object } else { 0 }),
         (m.vstate_object + mx::MODE, m.mode),
         (p.record + mx::TOUCHING, word(s.touching)),
+        (m.vstate_object + mx::WHEEL, m.wheel_word),
+        (c(mx::PENALTY_OBJECT), if m.penalty { m.penalty_object } else { 0 }),
+        (c(mx::SQUARE), word(k.square_steering)),
+        (c(mx::DRIVEN), word(s.driven)),
+        (c(mx::DPAD), word(s.dpad)),
+        (c(mx::HELD), word(s.held)),
+        (c(mx::REVERSE_ENABLED), word(s.reverse_enabled)),
+        (c(mx::THROTTLE_ENABLED), word(s.throttle_enabled)),
+        (p.engine + mx::REVERSING, word(s.reversing)),
     ];
     out.extend(words);
     for (i, &t) in p.tires.iter().enumerate() {
@@ -1225,7 +1350,60 @@ fn generate_mx(r: &mut Rng, image: &Mx, car: &mut Car, body: &mut Body) -> Mx {
     s.launch_timer = F(if r.chance(0.35) { 0.0 } else { r.range(0.0, 3.0) });
     s.launch_start = F(r.range(1.0, 7.0));
     s.launch_boost = F(r.range(1.0, 7.0));
+    generate_controls(r, &mut m);
     m
+}
+
+/// The controls' share of [`generate_mx`]: who drives and how (no driver, the d-pad, a wheel, the
+/// stick squared or not), the steer tables with their segments flat now and then, the gas pedal
+/// (down with the brake, for reverse, now and then), the hold, the vehicle's switches, the start penalty (its object
+/// gone now and then) and the hand brake's fade about its ends.
+fn generate_controls(r: &mut Rng, m: &mut Mx) {
+    let either = |r: &mut Rng, x: f32| if r.chance(0.5) { -x } else { x };
+    let k = &mut m.keys;
+    k.square_steering = r.chance(0.5);
+    for rate in [&mut k.brake_rate_limit, &mut k.gas_rate_limit, &mut k.x_dpad_rate_limit_on, &mut k.x_dpad_rate_limit_off, &mut k.x_axis_rate_limit] {
+        *rate = F(r.range(0.0, 20.0));
+    }
+    let mut table = |r: &mut Rng| -> [[F; 2]; 3] {
+        let a = r.range(0.0, 20.0);
+        let b = if r.chance(0.2) { a } else { a + r.range(1.0, 40.0) };
+        let c = if r.chance(0.2) { b } else { b + r.range(1.0, 40.0) };
+        [a, b, c].map(|x| [F(x), F(r.range(0.0, 1.5))])
+    };
+    (k.steer, k.wheel_steer, k.dpad_steer) = (table(r), table(r), table(r));
+    let [a, b, _] = table(r);
+    k.rear_steer = [a, [b[0], F(r.range(-1.0, 1.0))]];
+    k.yaw_rate_limit = F(r.range(0.5, 5.0));
+    k.hand_brake_yaw_rate_limit = F(r.range(0.5, 5.0));
+    k.hand_brake_friction_scale = F(r.range(0.0, 1.5));
+    k.hand_brake_brake_scale = F(r.range(0.0, 1.5));
+    k.hand_brake_fade_time = F(if r.chance(0.15) { 0.0 } else { r.range(0.1, 1.0) });
+    m.wheel_word = if r.chance(0.3) { 1 } else { 0 };
+    m.penalty = !r.chance(0.1);
+    m.penalty_clock = F(if r.chance(0.8) { either(r, 0.0) } else { r.range(-1.0, 3.0) });
+    let s = &mut m.state;
+    s.driven = !r.chance(0.12);
+    s.wheel = m.vstate && m.wheel_word != 0;
+    s.dpad = r.chance(0.35);
+    s.start_penalty = m.penalty && m.penalty_clock > 0.0;
+    if s.dpad && r.chance(0.3) {
+        s.stick = F(either(r, 0.0));
+    }
+    s.gas_pedal = F(if r.chance(0.4) { 0.0 } else { r.range(0.0, 1.0) });
+    if s.vehicle_brake != 0.0 && r.chance(0.6) {
+        s.gas_pedal = F(r.range(0.05, 1.0));
+    }
+    s.steer_input = F(r.range(-1.0, 1.0));
+    s.steer = F(r.range(-1.0, 1.0));
+    s.rear_steer = F(r.range(-1.0, 1.0));
+    s.engaged_clutch = F(r.range(0.0, 1.0));
+    s.hand_brake_fade = F(if r.chance(0.3) { 0.0 } else { r.range(-0.05, 1.0) });
+    s.rear_friction = [F(r.range(0.0, 1.5)), F(r.range(0.0, 1.5))];
+    s.held = r.chance(0.25);
+    s.reverse_enabled = !r.chance(0.2);
+    s.throttle_enabled = !r.chance(0.2);
+    s.reversing = r.chance(0.3);
 }
 
 /// Hook the preload's cue: log it, from the preload, on its fixed arguments.
@@ -1251,6 +1429,7 @@ struct Unhooked<'a> {
 impl Steps for Unhooked<'_> {
     fn call(&mut self, c: Call, car: &mut Car, body: &mut Body) {
         let addr = match c {
+            Call::Controls(_) => CONTROLS,
             Call::TravelCofg => TRAVEL_COFG,
             Call::AntiSlide(_) => ANTI_SLIDE,
             Call::Preload(_) => PRELOAD,
@@ -1267,6 +1446,7 @@ impl Steps for Unhooked<'_> {
         let riding = car.state == atv_car::RIDING;
         let mut tags: Vec<&'static str> = Vec::new();
         match c {
+            Call::Controls(_) => controls_tags(&k, &s0, car, &mut tags),
             Call::TravelCofg => {
                 tags.push(if s0.human { "travel: a person's" } else { "travel: the AI's" });
                 tags.push(if s0.lean < 0.0 { "travel: forward" } else { "travel: back" });
@@ -1381,6 +1561,75 @@ fn tire_tags(k: &TireKeys, s0: &State, s1: &State, i: usize, t0: &Tire, t: &Tire
     tag("tire: wheel wraps", (st.angle.0 - st0.angle.0).abs() > 3.0);
 }
 
+/// The branches the controls take from `s` (the state they are handed) and `car`.
+fn controls_tags(k: &Keys, s: &State, car: &Car, tags: &mut Vec<&'static str>) {
+    if s.start_penalty {
+        tags.push("controls: start penalty");
+    }
+    if !s.driven {
+        tags.push("controls: no driver");
+        return;
+    }
+    let speed = car.velocity.z();
+    let table = if s.dpad {
+        tags.push(if s.stick.abs() == 0.0 { "controls: d-pad, centred" } else { "controls: d-pad" });
+        &k.dpad_steer
+    } else if s.wheel {
+        tags.push("controls: wheel");
+        &k.wheel_steer
+    } else {
+        tags.push(if k.square_steering { "controls: stick, squared" } else { "controls: stick" });
+        &k.steer
+    };
+    let [a, b, c] = *table;
+    tags.push(match speed < b[0].0 {
+        true if a[0] == b[0] => "controls: low segment, flat",
+        true => "controls: low segment",
+        false if b[0] == c[0] => "controls: high segment, flat",
+        false => "controls: high segment",
+    });
+    if k.rear_steer[0][0] == k.rear_steer[1][0] {
+        tags.push("controls: rear steer flat");
+    }
+    let gas = if s.start_penalty { 0.0 } else { s.gas_pedal.0 };
+    if s.held && !(gas > 0.0) {
+        tags.push("controls: held");
+    } else {
+        if gas != 0.0 && s.vehicle_brake != 0.0 && s.reverse_enabled {
+            tags.push("controls: into reverse");
+        } else {
+            if s.reversing {
+                tags.push("controls: out of reverse");
+            }
+            tags.push(if s.vehicle_brake <= s.brake { "controls: brake let off" } else { "controls: brake eases on" });
+        }
+        if !s.throttle_enabled {
+            tags.push("controls: no throttle");
+        }
+    }
+    tags.push(match (s.hand_brake != 0.0, s.hand_brake_fade > 0.0) {
+        (true, _) => "controls: hand brake",
+        (false, true) if k.hand_brake_fade_time == 0.0 => "controls: fading, flat",
+        (false, true) => "controls: fading",
+        (false, false) => "controls: faded",
+    });
+}
+
+#[test]
+fn controls_are_mx_unleasheds() {
+    pieces(0x0126_0001, &[CONTROLS], &["controls"], 22);
+}
+
+#[test]
+fn all_six_pieces_are_mx_unleasheds() {
+    pieces(
+        0x0126_0002,
+        &[CONTROLS, TRAVEL_COFG, ANTI_SLIDE, PRELOAD, LAUNCH, AERO],
+        &["controls", "travel", "anti-slide", "preload", "launch", "aero"],
+        48,
+    );
+}
+
 /// Each piece unhooked alone, and all five, under the frame's oracle: the original's own code for
 /// the piece against [`Pieces`]'s port, every word and call equal; each of the piece's branches seen.
 fn pieces(seed: u64, unhooked: &[u32], prefixes: &[&str], want: usize) {
@@ -1486,6 +1735,8 @@ fn run(seed: u64, cases: usize, unhooked: &[u32]) -> Option<(Seen, Seen)> {
         let (mut car, mut body, dt) = generate(&mut r, &image_car, &image_body, &p);
         let mut m = generate_mx(&mut r, &image_mx, &mut car, &mut body);
         generate_tires(&mut r, &mut m, &mut car, &mut body);
+        // The rears' friction scales (MD126) are their tires' (MD124): one word each.
+        m.state.rear_friction = [2, 3].map(|t| m.keys.tires[t].friction_scale);
         let s = Script::new(&mut r);
         let before = [car_words(&car, &p), seed::body_words(&body, p.body), mx_words(&m, &p)].concat();
 
@@ -1505,7 +1756,7 @@ fn run(seed: u64, cases: usize, unhooked: &[u32]) -> Option<(Seen, Seen)> {
         for (what, k) in std::mem::take(&mut port.seen) {
             *pieces_seen.entry(what).or_insert(0) += k;
         }
-        let pm = Mx { state: port.pieces.state, ..m };
+        let pm = Mx { keys: Keys { tires: port.pieces.keys.tires, ..m.keys.clone() }, state: port.pieces.state, ..m };
         let port = port.pieces.rest;
         let after = [car_words(&pc, &p), seed::body_words(&pb, p.body), mx_words(&pm, &p)].concat();
 
