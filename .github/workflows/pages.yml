@@ -78,7 +78,7 @@ jobs:
       - run: rustup update --no-self-update stable && rustup default stable && rustup target add x86_64-pc-windows-gnu
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
       - run: |
-          sudo apt-get update -q && sudo apt-get install -yq --no-install-recommends gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64
+          tools/ci-apt.sh gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64
           export OPENMX_COMMIT=${GITHUB_SHA::7}
           tools/build.sh windows
           (cd dist/windows && zip -q ../../openmx-windows-x86_64.zip openmx.exe)
