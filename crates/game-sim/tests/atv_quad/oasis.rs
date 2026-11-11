@@ -162,7 +162,7 @@ fn quad_at(ee: &Ee, a: u32) -> Vf {
 
 /// The trigger probe's four rays by wheel (`x` below zero the left, `z` above it the front) and the
 /// port's tree of them.
-fn image_rays(ee: &Ee) -> Rays {
+pub(super) fn image_rays(ee: &Ee) -> Rays {
     let trigger = image::heap().trigger;
     let n = ee.u32_at(trigger + at::RAYS);
     assert_eq!(n, 4, "the trigger probe has a ray a wheel");
@@ -215,7 +215,7 @@ fn race_rows(dir: &Path) -> Option<Vec<Row>> {
 
 /// The body at `pos` turned by `quat` (normalised), and the quad's node placed where the body is:
 /// the body's frame less its centre of gravity (`(0, 1, 0)`) along its up row.
-fn place(r: &mut Ride, pos: [f32; 3], quat: [f32; 4]) {
+pub(super) fn place(r: &mut Ride, pos: [f32; 3], quat: [f32; 4]) {
     let n = quat.iter().map(|v| v * v).sum::<f32>().sqrt();
     let q = Vf::new(quat[0] / n, quat[1] / n, quat[2] / n, quat[3] / n);
     let p = Vf::new(pos[0], pos[1], pos[2], 1.0);

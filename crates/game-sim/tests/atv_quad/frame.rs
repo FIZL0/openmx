@@ -445,26 +445,28 @@ fn chain(pad: impl Fn(usize, Vf, Vf) -> Pad, frames: usize) -> Option<Seen> {
         port_asked.set(port_asked.get() + 1);
         terrain.ground(q, Vf::ZERO, record)
     };
-    let table = AcosTable::build();
-    let mut m = quad::Steps { bike: r.bike.clone(), rest: Vec::<Call>::new(), ground, sweep: &mut oasis };
+    let mut ground = ground;
+    // MD123: the port's side is the type a shell steps.
+    let mut ride = quad::Ride::new(r.s.p.clone(), r.s.q.clone(), body, r.bike.clone(), Vec::<Call>::new());
     let mut fresh = image().unwrap();
     let (mut seen, mut steps) = (Seen { nearest: f32::MAX, ..Seen::default() }, 0u64);
     for k in 0..frames {
         let p = pad(k, get_v(&ee, at.body + 0x70), get_v(&ee, at.body + 0x80));
         lay_pad(&mut ee, quad, p);
-        (r.s.q.gas, r.s.q.brake) = (F(p.gas), F(p.brake));
-        (m.bike.stick.x, m.bike.stick.y) = (F(p.x), F(p.y));
+        ride.controls(&game_sim::ride::Controls { gas: F(p.gas), brake: F(p.brake), stick: (F(p.x), F(p.y)), ..Default::default() });
         ee.set(28, GP);
         ee.call(WORLD_STEP, &[u64::from(IMAGE_WORLD)], &[dt.0], 50_000_000);
         assert!(ee.steps > 10_000, "frame {k}: the world step ran only {} instructions", ee.steps);
         steps += ee.steps;
-        m.rest.clear();
-        quad::frame(&GAME_WORLD, &r.s.p, &mut r.s.q, &mut body, dt, &table, &mut m);
-        let named: Vec<String> = m.rest.iter().map(|c| format!("{c:?}").split([' ', '(']).next().unwrap().to_string()).collect();
-        assert!(named.iter().all(|n| n == "GravityRecord" || n == "PartMove"), "frame {k}: handed on {:?}", m.rest);
+        ride.rest.clear();
+        ride.frame(dt, &mut ground, &mut oasis);
+        let named: Vec<String> = ride.rest.iter().map(|c| format!("{c:?}").split([' ', '(']).next().unwrap().to_string()).collect();
+        assert!(named.iter().all(|n| n == "GravityRecord" || n == "PartMove"), "frame {k}: handed on {:?}", ride.rest);
         assert_eq!(port_asked.get(), asked.get(), "frame {k}: the ground queries");
-        r.bike = m.bike.clone();
-        r.s.body = body.view();
+        r.bike = ride.bike.clone();
+        r.s.q = ride.q.clone();
+        r.s.body = ride.body.view();
+        let body = &ride.body;
         let (bad, n) = image::compare(&ee, &mut fresh, &r, &at);
         let show = bad
             .iter()
@@ -473,7 +475,7 @@ fn chain(pad: impl Fn(usize, Vf, Vf) -> Pad, frames: usize) -> Option<Seen> {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(bad.is_empty(), "frame {k} ({p:?}): {} of {n} words differ from the original's:\n{show}", bad.len());
-        let body_bad: Vec<String> = seed::body_words(&body, at.body)
+        let body_bad: Vec<String> = seed::body_words(body, at.body)
             .into_iter()
             .filter(|&(a, v)| ee.u32_at(a) != v)
             .map(|(a, v)| format!("  body +{:#x}: port {v:#010x}, original {:#010x}", a - at.body, ee.u32_at(a)))

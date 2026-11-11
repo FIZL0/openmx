@@ -42,6 +42,10 @@ mod interpolate;
 #[path = "atv_quad/load.rs"]
 mod load;
 
+/// MD123: the quad stepped on free09.
+#[path = "atv_quad/mxu.rs"]
+mod mxu;
+
 const OBJ: u32 = 0x01c0_0000;
 const BODY: u32 = 0x01c0_2000;
 const WORLD: u32 = 0x01c0_2400;
