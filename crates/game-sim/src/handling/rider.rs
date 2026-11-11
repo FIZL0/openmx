@@ -41,6 +41,10 @@
 //! After the frame, the rider's listener step copies the wreck's two spots into the record
 //! ([`wreck_spots`], F31b5i): with [`hand_over`], every word the rider writes into the bike's record.
 //!
+//! The listener step's own code is here too (F55): the rider's frame around the mode machine
+//! ([`frame`]: the node's [`alpha`], two rate-limited clocks), the copy after it ([`copy_after`]) and
+//! the extra step ([`extra_step`]), put together as [`listener_step`].
+//!
 //! What is not here: the world step (3); and the rest of the calls in [`Call`]. The `touched` words this reads
 //! come from the original's ragdoll world until that is ported.
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
@@ -280,6 +284,12 @@ pub enum Call {
     /// The heap's resize of a shape's ignore list (`list` to `bytes`, [`ignore`]): its answer the
     /// list's new address, the old entries in it.
     Grow { list: u32, bytes: u32 },
+    /// The rider's frame's (F55): the rider's ragdoll world's step, with `dt` (its answer the frame's),
+    /// and the rider's vt `+0x148` after it.
+    WorldStep,
+    AfterStep,
+    /// The copy after the frame's (F55): the scene node's position (`a1` 0) into the quadword at `out`.
+    NodePosition { node: u32, out: u32 },
 }
 
 /// The mode machine's RAM and calls; [`Rider::call`]'s answer is `v0` (only [`Call::Rand`]'s is read).
@@ -1527,4 +1537,211 @@ pub fn wreck_entry(m: &mut impl Rider, rider: u32, kind: u32, dt: F) {
     }
     let cue = m.word(rider + CUE);
     m.call(Call::WreckCue(cue), dt);
+}
+
+// --- F55: the rider's listener step -----------------------------------------------------------------
+
+/// The rider's frame's words: its kind (`+0x3a4`; 2 and 3 fade the node) and the kind-3 fade's
+/// switch (`+0x8fc`); the two clocks (`+0x360`, `+0x364`), each run toward its target (`+0x340`,
+/// `+0x344`) by at most its rate times `dt`, the rate chosen by a flag (`+0x338`/`+0x33c`: set
+/// `+0x350`/`+0x354`, clear `+0x358`/`+0x35c`); the word cleared when the record is not ridden
+/// (`+0x25c`).
+pub const KIND: u32 = 0x3a4;
+pub const KIND3_FADE: u32 = 0x8fc;
+pub const CLOCKS: [(u32, u32, u32, u32, u32); 2] = [(0x360, 0x340, 0x338, 0x350, 0x358), (0x364, 0x344, 0x33c, 0x354, 0x35c)];
+pub const UNRIDDEN_CLEAR: u32 = 0x25c;
+/// A scene node's alpha (`+0x17c`; the setter answers the old one, which the frame drops).
+pub const ALPHA: u32 = 0x17c;
+/// The record's fade words: how the record asks for the alpha (`+0x278`: 1 whole, 2 half), and the
+/// fade's time and its start (`+0x27c`, `+0x280`).
+pub const R_ALPHA: u32 = 0x278;
+pub const R_FADE: u32 = 0x27c;
+pub const R_FADE_FROM: u32 = 0x280;
+
+fn put_alpha(m: &mut impl Ram, rider: u32, a: f32) {
+    let node = m.word(rider + NODE);
+    put_f(m, node + ALPHA, a);
+}
+
+/// **The rider's node's alpha** (the frame's first call). Kind 2: a half. Kind 3: whole with the
+/// kind-3 switch (`+0x8fc`) clear, a half with it set (the switch read twice, the second time by the
+/// shared kind-3 test). Any other kind: the record's ask (`+0x278`: 1 whole, 2 a half, others
+/// nothing); then, while the record's fade (`+0x27c`) is above 0, `0.1 + (fade − from) / (0 − from)
+/// · 0.9` clamped to 0.1..1 (on the accumulator), or just 0.1 with `from` (`+0x280`) 0.
+pub fn alpha(m: &mut impl Ram, rider: u32) {
+    let kind = m.word(rider + KIND);
+    if kind == 2 {
+        put_alpha(m, rider, 0.5);
+        return;
+    }
+    if kind == 3 && m.word(rider + KIND3_FADE) == 0 {
+        put_alpha(m, rider, 1.0);
+        return;
+    }
+    if kind == 3 && m.word(rider + KIND3_FADE) != 0 {
+        put_alpha(m, rider, 0.5);
+        return;
+    }
+    let rec = m.word(rider + RECORD);
+    match m.word(rec + R_ALPHA) {
+        2 => put_alpha(m, rider, 0.5),
+        1 => put_alpha(m, rider, 1.0),
+        _ => {}
+    }
+    let rec = m.word(rider + RECORD);
+    if op(m, rec + R_FADE) <= 0.0 {
+        return;
+    }
+    let (fade, from) = (fw(m, rec + R_FADE), fw(m, rec + R_FADE_FROM));
+    let low = f32::from_bits(0x3dcc_cccd);
+    let a = if op(m, rec + R_FADE_FROM) == 0.0 {
+        low
+    } else {
+        let t = fpu::div(fpu::sub(fade, from), fpu::sub(0.0, from));
+        let v = fpu::madd(fpu::adda(0.0, low), t, fpu::sub(1.0, low));
+        fpu::min(fpu::max(v, fpu::min(low, 1.0)), fpu::max(low, 1.0))
+    };
+    put_alpha(m, rider, a);
+}
+
+/// **The rider's frame** (the listener step's first call; its answer is the step's): 1 at once
+/// with no scene node or no record. Else [`alpha`]; the two clocks each moved toward their targets
+/// by at most `rate · dt` (`+0x360` toward `+0x340`, `+0x364` toward `+0x344`, the rates read before
+/// either moves); the mode machine ([`modes`]) with the record ridden, else `+0x25c` cleared; then
+/// the ragdoll world's step ([`Call::WorldStep`], whose answer is the frame's) and the rider's vt
+/// `+0x148` ([`Call::AfterStep`]).
+pub fn frame(m: &mut impl Rider, rider: u32, dt: F, map: Option<&track::Terrain<'_>>) -> u32 {
+    if m.word(rider + NODE) == 0 || m.word(rider + RECORD) == 0 {
+        return 1;
+    }
+    alpha(m, rider);
+    let rates = CLOCKS.map(|(_, _, flag, set, clear)| {
+        let r = if m.word(rider + flag) != 0 { set } else { clear };
+        fpu::mul(fw(m, rider + r), dt.0)
+    });
+    for ((clock, target, ..), step) in CLOCKS.into_iter().zip(rates) {
+        let c = fw(m, rider + clock);
+        let d = fpu::sub(fw(m, rider + target), c);
+        let d = fpu::min(fpu::max(d, fpu::neg(step)), step);
+        put_f(m, rider + clock, fpu::add(c, d));
+    }
+    let rec = m.word(rider + RECORD);
+    if m.word(rec + R_RIDDEN) != 0 {
+        modes(m, rider, dt, map);
+    } else {
+        m.set(rider + UNRIDDEN_CLEAR, 0);
+    }
+    let v = m.call(Call::WorldStep, dt);
+    m.call(Call::AfterStep, dt);
+    v
+}
+
+/// The copy's words: the rider's own record word (`+0xb0c`), taken from the record's `+0x214`, or
+/// with no record from `+0xa74`; three quadwords from the record's `+0x220` (`+0x9e0..+0xa10`) when
+/// `+0xa70` is 1; the scene node the positions come from without a wrecked record (`+0xb14`); the
+/// mask (`+0x2f4`) each of the three copies tests against its own (`+0x9d4`, `+0x904`, `+0xa94`).
+pub const OWN_WORD: u32 = 0xb0c;
+pub const SPOT_NODE: u32 = 0xb14;
+pub const COPY_MASK: u32 = 0x2f4;
+
+/// **The copy after the frame** (the listener step's second call). With a record its `+0x214` to
+/// the rider's `+0xb0c`; without, and with the mask's `+0x9d4` bits, `+0xa74` to `+0xb0c`, and with
+/// `+0xa70` 1 the three quadwords at the record's `+0x220` to `+0x9e0` (the record pointer read
+/// each time; it is null on this arm, so they come from low memory, as in the original). Then
+/// twice, with the mask's `+0x904` and its `+0xa94` bits: the record's `+0x220` (with a record
+/// whose wreck kind is set) or the spot node's position ([`Call::NodePosition`]) to `+0x910` and to
+/// `+0xaa0`; after the second, the record's `+0xa0` to `+0xab0`. Quadwords move as `lq`/`sq`.
+pub fn copy_after(m: &mut impl Rider, rider: u32) {
+    let rec = m.word(rider + RECORD);
+    if rec != 0 {
+        let w = m.word(rec + 0x214);
+        m.set(rider + OWN_WORD, w);
+    } else if m.word(rider + COPY_MASK) & m.word(rider + 0x9d4) != 0 {
+        let w = m.word(rider + 0xa74);
+        m.set(rider + OWN_WORD, w);
+        if m.word(rider + 0xa70) == 1 {
+            for k in [0, 0x10, 0x20] {
+                let rec = m.word(rider + RECORD);
+                copy_words(m, rider + 0x9e0 + k, rec.wrapping_add(0x220 + k));
+            }
+        }
+    }
+    for (bits, to) in [(0x904, 0x910), (0xa94, 0xaa0)] {
+        if m.word(rider + COPY_MASK) & m.word(rider + bits) == 0 {
+            continue;
+        }
+        let rec = m.word(rider + RECORD);
+        if rec != 0 && m.word(rec + R_KIND) != 0 {
+            copy_words(m, rider + to, rec + 0x220);
+        } else {
+            let node = m.word(rider + SPOT_NODE);
+            m.call(Call::NodePosition { node, out: rider + to }, F::ZERO);
+        }
+        if to == 0xaa0 {
+            let rec = m.word(rider + RECORD);
+            copy_words(m, rider + 0xab0, rec.wrapping_add(0xa0));
+        }
+    }
+}
+
+/// The extra step's words: its switch (`+0xd34`), its value and clock (`+0xd2c`, `+0xd30`) and the
+/// value's ceiling (`+0xd38`); the table it reads, 32 bytes an entry at `+0xb20` indexed by the
+/// record's `+0x1e8` (the time `+0`, the step `+4`, down or up `+8`); the record's speed (`+0x1a8`).
+pub const EXTRA_ON: u32 = 0xd34;
+pub const EXTRA_VALUE: u32 = 0xd2c;
+pub const EXTRA_CLOCK: u32 = 0xd30;
+pub const EXTRA_MAX: u32 = 0xd38;
+pub const EXTRA_TABLE: u32 = 0xb20;
+
+/// The extra step's table entry for the record's `+0x1e8`.
+fn extra_entry(m: &mut impl Ram, rider: u32) -> u32 {
+    let rec = m.word(rider + RECORD);
+    rider.wrapping_add(m.word(rec + 0x1e8) << 5) + EXTRA_TABLE
+}
+
+/// **The extra step** (the listener step's last call, while `+0xd34` is set; its answer, whether
+/// the value moved, is dropped). With the entry's down word set: a time of 0 or less zeroes the
+/// value and the clock; else above 5 speed the clock runs on by `dt` and, once past the entry's
+/// time, the value goes down by the step (clamped to 0..`+0xd38`) and the clock to 0. With it clear:
+/// the same above 10 speed, the value going up, and no zero-time arm.
+pub fn extra_step(m: &mut impl Ram, rider: u32, dt: F) -> u32 {
+    if m.word(rider + EXTRA_ON) == 0 {
+        return 0;
+    }
+    let e = extra_entry(m, rider);
+    let rec = m.word(rider + RECORD);
+    let down = m.word(e + 8) != 0;
+    if down && op(m, e) <= 0.0 {
+        m.set(rider + EXTRA_CLOCK, 0);
+        m.set(rider + EXTRA_VALUE, 0);
+        return 1;
+    }
+    let over = if down { 5.0 } else { 10.0 };
+    if op(m, rec + 0x1a8) <= over {
+        return 0;
+    }
+    let c = fpu::add(fw(m, rider + EXTRA_CLOCK), dt.0);
+    put_f(m, rider + EXTRA_CLOCK, c);
+    let e = extra_entry(m, rider);
+    if op(m, rider + EXTRA_CLOCK) <= op(m, e) {
+        return 0;
+    }
+    let (step, v) = (fw(m, e + 4), fw(m, rider + EXTRA_VALUE));
+    let v = if down { fpu::sub(v, step) } else { fpu::add(v, step) };
+    let v = fpu::min(fpu::max(v, 0.0), fw(m, rider + EXTRA_MAX));
+    put_f(m, rider + EXTRA_VALUE, v);
+    m.set(rider + EXTRA_CLOCK, 0);
+    1
+}
+
+/// **The rider's listener step**: [`frame`], [`wreck_spots`], [`copy_after`], and with `+0xd34`
+/// set [`extra_step`]; its answer is the frame's.
+pub fn listener_step(m: &mut impl Rider, rider: u32, dt: F, map: Option<&track::Terrain<'_>>) -> u32 {
+    let v = frame(m, rider, dt, map);
+    wreck_spots(m, rider);
+    copy_after(m, rider);
+    if m.word(rider + EXTRA_ON) != 0 {
+        extra_step(m, rider, dt);
+    }
+    v
 }
