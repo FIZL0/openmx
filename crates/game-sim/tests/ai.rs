@@ -3030,6 +3030,18 @@ const SK_PATH: u64 = 0x9a7;
 const SK_JUMP_COUNT: usize = 6;
 const SK_TARGET_COUNT: usize = 8;
 const SK_SET_COUNT: usize = 3;
+const SK_GROUPS: u32 = 0x0185_0000;
+const SK_GROUP_SIZE: u32 = 0x100;
+const SK_GROUP_COUNT: usize = 6;
+const SK_OWNERS: u32 = 0x0185_1000;
+const SK_OWNER_SIZE: u32 = 0x200;
+const SK_OWNER_VT: u32 = 0x0185_2000;
+/// Not code: the owner's vtable slots land here, and all but the flag question panic.
+const SK_OWNER_HOOKS: u32 = 0x0185_3000;
+/// The bit the name registry hands out for "HitFreeride" (any one bit does).
+const SK_FLAG_BIT: u64 = 0x40;
+/// Where an owner keeps its answer to the flag question, for the hook to give back.
+const SK_OWNER_ANSWER: u32 = 0xf0;
 const SK_ZERO: [u8; 0x4000] = [0; 0x4000];
 
 fn sk_ptr(base: u32, size: u32, i: Option<usize>) -> u32 {
@@ -3180,10 +3192,37 @@ fn sk_read_seeker(ee: &ps2_oracle::Ee) -> sk::Seeker {
     }
 }
 
-/// Lays the world out the original's way: the targets with their done flags, the jumps, the sets with
-/// their pick lists and courses, the sequence behind its root pointer.
-fn sk_write_world(ee: &mut ps2_oracle::Ee, w: &sk::World, unbuilt_holder: &[bool], seq_on: u32, seq_root: u32) {
+/// Lays the world out the original's way: the targets with their done flags, the jumps, the groups,
+/// the sets with their pick lists, courses and owners, and behind the root pointer the set list
+/// (`gaps` null entries before each set, and `gaps[sets]` after), the group list and the sequence.
+fn sk_write_world(ee: &mut ps2_oracle::Ee, w: &sk::World, gaps: &[u32], seq_on: u32, seq_root: u32) {
+    for i in 0..SK_GROUP_COUNT as u32 {
+        ee.load(SK_GROUPS + SK_GROUP_SIZE * i, &SK_ZERO[..SK_GROUP_SIZE as usize]);
+    }
+    for i in 0..SK_SET_COUNT as u32 {
+        ee.load(SK_OWNERS + SK_OWNER_SIZE * i, &SK_ZERO[..SK_OWNER_SIZE as usize]);
+    }
     let mut bump = SK_LISTS;
+    for (i, g) in w.groups.iter().enumerate() {
+        let at = SK_GROUPS + SK_GROUP_SIZE * i as u32;
+        if let Some(list) = &g.targets {
+            let l = sk_alloc(&mut bump, 0x10);
+            let items = sk_list(ee, &mut bump, list);
+            ee.set_u32(l + 4, list.len() as u32);
+            ee.set_u32(l + 0xc, items);
+            ee.set_u32(at + 0x48, l);
+        }
+        // the open bit is bit 0 of a byte per player; the other bits must not count
+        let open = sk_alloc(&mut bump, 0x10);
+        for (p, o) in g.open.iter().enumerate() {
+            ee.write(open + p as u32, 1, if *o { 0xa5 } else { 0x5a });
+        }
+        ee.set_u32(at + 0x44, open);
+        put(ee, at + 0x50, g.point);
+        // in play is the word 1 exactly
+        let word = if g.active { 1 } else { [0, 2, 0xffff_ffff, 0x101][i % 4] };
+        ee.set_u32(at + 0x78, word);
+    }
     for (i, t) in w.targets.iter().enumerate() {
         let at = SK_TARGETS + SK_TARGET_SIZE * i as u32;
         ee.set_u32(at + 0x3c, sk_ptr(SK_JUMPS, SK_JUMP_SIZE, t.jump));
@@ -3202,23 +3241,20 @@ fn sk_write_world(ee: &mut ps2_oracle::Ee, w: &sk::World, unbuilt_holder: &[bool
     }
     for (i, s) in w.sets.iter().enumerate() {
         let at = SK_SETS + SK_SET_SIZE * i as u32;
-        match &s.picks {
-            Some(list) => {
-                let holder = sk_alloc(&mut bump, 0x50);
-                let l = sk_alloc(&mut bump, 0x10);
-                let items = sk_list(ee, &mut bump, list);
-                ee.set_u32(holder + 0x48, l);
-                ee.set_u32(l + 4, list.len() as u32);
-                ee.set_u32(l + 0xc, items);
-                ee.set_u32(at + 0x11c, holder);
-            }
-            // a holder with no list, or no holder (the build is hooked to leave it so)
-            None if unbuilt_holder[i] => {
-                let holder = sk_alloc(&mut bump, 0x50);
-                ee.set_u32(at + 0x11c, holder);
-            }
-            None => ee.set_u32(at + 0x11c, 0),
-        }
+        ee.set_u32(at + 0x11c, sk_ptr(SK_GROUPS, SK_GROUP_SIZE, s.picks));
+        // the owner, its model's root node two pointers down, and its answer to the flag question
+        let o = SK_OWNERS + SK_OWNER_SIZE * i as u32;
+        ee.set_u32(o + 8, SK_OWNER_VT);
+        ee.set_u32(o + 0x30, s.owner.player as u32);
+        ee.set_u32(o + 0x34, s.owner.kind as u32);
+        ee.set_u32(o + 0x3c, o + 0x100);
+        ee.set_u32(o + 0x100, o + 0x120);
+        ee.set_u32(o + 0x120 + 0x18, o + 0x140);
+        put(ee, o + 0x140 + 0x70, s.owner.position);
+        // a yes with only high bits set still counts: the original tests all 64
+        let yes = if i == 1 { 1u128 << 40 } else { 1 };
+        ee.write(o + SK_OWNER_ANSWER, 8, if s.owner.hit_freeride { yes } else { 0 });
+        ee.set_u32(at + 0x54, o);
         match &s.course {
             Some(c) => {
                 let holder = sk_alloc(&mut bump, 0xa0);
@@ -3233,26 +3269,84 @@ fn sk_write_world(ee: &mut ps2_oracle::Ee, w: &sk::World, unbuilt_holder: &[bool
             None => ee.set_u32(at + 0x114, 0),
         }
     }
+    let x = sk_alloc(&mut bump, 0x50);
+    let y = sk_alloc(&mut bump, 0x60);
+    let mut entries = Vec::new();
+    for i in 0..=w.sets.len() {
+        entries.extend((0..gaps[i]).map(|_| 0));
+        if i < w.sets.len() {
+            entries.push(SK_SETS + SK_SET_SIZE * i as u32);
+        }
+    }
+    let list = sk_alloc(&mut bump, 4 * entries.len() as u32);
+    for (k, e) in entries.iter().enumerate() {
+        ee.set_u32(list + 4 * k as u32, *e);
+    }
+    ee.set_u32(x + 0x30, entries.len() as u32);
+    ee.set_u32(x + 0x38, list);
+    let groups = sk_alloc(&mut bump, 4 * w.groups.len() as u32);
+    for i in 0..w.groups.len() {
+        ee.set_u32(groups + 4 * i as u32, SK_GROUPS + SK_GROUP_SIZE * i as u32);
+    }
+    ee.set_u32(x + 0x44, y);
+    ee.set_u32(y + 0x30, w.groups.len() as u32);
+    ee.set_u32(y + 0x38, groups);
+    ee.set_u32(seq_root, x);
     match &w.sequence {
         Some(seq) => {
-            let x = sk_alloc(&mut bump, 0x50);
-            let y = sk_alloc(&mut bump, 0x60);
             let z = sk_alloc(&mut bump, 0x50);
             let g = sk_alloc(&mut bump, 0x40);
             let items = sk_list(ee, &mut bump, seq);
-            ee.set_u32(x + 0x44, y);
             ee.set_u32(y + 0x50, z);
             ee.set_u32(z + 0x48, g);
             ee.set_u32(g + 0x30, seq.len() as u32);
             ee.set_u32(g + 0x38, items);
             ee.set_u32(seq_on, 1);
-            ee.set_u32(seq_root, x);
         }
-        None => {
-            ee.set_u32(seq_on, 0);
-            ee.set_u32(seq_root, 0);
-        }
+        None => ee.set_u32(seq_on, 0),
     }
+}
+
+/// Every set's pick list as the original left it.
+fn sk_read_picks(ee: &ps2_oracle::Ee, n: usize) -> Vec<Option<usize>> {
+    (0..n as u32).map(|i| sk_index(SK_GROUPS, SK_GROUP_SIZE, ee.u32_at(SK_SETS + SK_SET_SIZE * i + 0x11c))).collect()
+}
+
+/// The map's groups and every set's owner, around `near`: the owners and the groups' points close
+/// enough together that the nearest is often a near thing, and now and then two points the same.
+fn sk_gen_groups(p: &mut Pick, targets: &[sk::Target], near: Vf) -> Vec<sk::Group> {
+    let n = p.below(SK_GROUP_COUNT as u32 + 1) as usize;
+    let mut groups: Vec<sk::Group> = (0..n)
+        .map(|_| sk::Group {
+            targets: (!p.chance(6)).then(|| sk_gen_list(p, targets, 6, false, 4)),
+            point: {
+                let r = if p.chance(2) { 40.0 } else { 300.0 };
+                sk_offset(near, p.vec_w(r))
+            },
+            active: p.below(10) < 7,
+            open: (0..p.below(5)).map(|_| p.chance(2)).collect(),
+        })
+        .collect();
+    if n >= 2 && p.chance(6) {
+        groups[n - 1].point = groups[0].point;
+    }
+    groups
+}
+
+fn sk_gen_owner(p: &mut Pick, near: Vf) -> sk::Owner {
+    sk::Owner {
+        kind: [0, 1, 1, 1, 2, -1][p.below(6) as usize],
+        player: p.below(5) as usize,
+        position: {
+            let r = if p.chance(2) { 40.0 } else { 300.0 };
+            sk_offset(near, p.vec_w(r))
+        },
+        hit_freeride: p.chance(2),
+    }
+}
+
+fn sk_gen_gaps(p: &mut Pick) -> Vec<u32> {
+    (0..=SK_SET_COUNT).map(|_| if p.chance(5) { 1 + p.below(2) as u32 } else { 0 }).collect()
 }
 
 fn sk_write_ride(ee: &mut ps2_oracle::Ee, r: &sk::Ride) {
@@ -3353,7 +3447,7 @@ fn sk_gen_list(p: &mut Pick, targets: &[sk::Target], max: u32, with_jump: bool, 
         .collect()
 }
 
-fn sk_gen(p: &mut Pick) -> (sk::Seeker, sk::Ride, sk::World, Vec<bool>) {
+fn sk_gen(p: &mut Pick) -> (sk::Seeker, sk::Ride, sk::World, Vec<u32>) {
     let jumps: Vec<sk::Jump> = (0..SK_JUMP_COUNT).map(|_| sk_gen_jump(p)).collect();
     let mut targets: Vec<sk::Target> = (0..SK_TARGET_COUNT)
         .map(|_| sk::Target {
@@ -3364,9 +3458,12 @@ fn sk_gen(p: &mut Pick) -> (sk::Seeker, sk::Ride, sk::World, Vec<bool>) {
     if targets.iter().all(|t| t.jump.is_none()) {
         targets[0].jump = Some(0);
     }
+    let near = p.vec_w(300.0);
+    let groups = sk_gen_groups(p, &targets, near);
     let sets: Vec<sk::Set> = (0..SK_SET_COUNT)
         .map(|_| sk::Set {
-            picks: if p.chance(4) { None } else { Some(sk_gen_list(p, &targets, 6, false, 4)) },
+            picks: if groups.is_empty() || p.chance(3) { None } else { Some(p.below(groups.len() as u32) as usize) },
+            owner: sk_gen_owner(p, near),
             course: (p.below(10) < 3).then(|| sk::Course {
                 targets: sk_gen_list(p, &targets, 6, true, 7),
                 chance: F(match p.below(4) {
@@ -3377,7 +3474,7 @@ fn sk_gen(p: &mut Pick) -> (sk::Seeker, sk::Ride, sk::World, Vec<bool>) {
             }),
         })
         .collect();
-    let unbuilt: Vec<bool> = (0..SK_SET_COUNT).map(|_| p.chance(2)).collect();
+    let gaps = sk_gen_gaps(p);
     let sequence = p.chance(4).then(|| {
         let mut seq = sk_gen_list(p, &targets, 6, true, 3);
         if seq.iter().all(|t| t.is_none()) {
@@ -3386,7 +3483,7 @@ fn sk_gen(p: &mut Pick) -> (sk::Seeker, sk::Ride, sk::World, Vec<bool>) {
         }
         seq
     });
-    let world = sk::World { sets, targets, jumps, sequence };
+    let world = sk::World { sets, targets, jumps, sequence, groups };
 
     let sequenced = world.sequence.is_some();
     let set = if sequenced || !p.chance(10) { Some(p.below(SK_SET_COUNT as u32) as usize) } else { None };
@@ -3506,7 +3603,7 @@ fn sk_gen(p: &mut Pick) -> (sk::Seeker, sk::Ride, sk::World, Vec<bool>) {
         bike,
         path_net: p.chance(7),
     };
-    (seeker, ride, world, unbuilt)
+    (seeker, ride, world, gaps)
 }
 
 fn sk_controls() -> ai::Controls {
@@ -3524,6 +3621,25 @@ fn sk_controls() -> ai::Controls {
     }
 }
 
+/// The name registry (it allocates for a name it has not seen) hands out [`SK_FLAG_BIT`], and the
+/// owners' vtable answers the flag question from [`SK_OWNER_ANSWER`]; every other owner slot panics.
+fn sk_owner_hooks(ee: &mut ps2_oracle::Ee, name_bit: u32) {
+    ee.hooks.insert(name_bit, Box::new(|ee| ee.set(2, SK_FLAG_BIT)));
+    for slot in (0..0x100).step_by(4) {
+        let h = SK_OWNER_HOOKS + slot;
+        if slot == 0xac {
+            ee.hooks.insert(h, Box::new(|ee| {
+                assert_eq!((ee.r(5), ee.r(6)), (SK_FLAG_BIT, 0), "the flag question's arguments");
+                let answer = ee.read(ee.r(4) as u32 + SK_OWNER_ANSWER, 8) as u64;
+                ee.set(2, answer);
+            }));
+        } else {
+            ee.hooks.insert(h, Box::new(move |_| panic!("the build called the owner's vtable slot {slot:#x}")));
+        }
+        ee.set_u32(SK_OWNER_VT + slot, h);
+    }
+}
+
 /// Sets up the hooks and the vtable for the seeker; gives (ai_tick_flag, rand_state, sequence word,
 /// sequence root).
 fn sk_setup(ee: &mut ps2_oracle::Ee) -> Option<[u32; 4]> {
@@ -3532,13 +3648,13 @@ fn sk_setup(ee: &mut ps2_oracle::Ee) -> Option<[u32; 4]> {
         "rand_state",
         "ai_seek_reach",
         "ai_seek_hand_off",
-        "ai_seek_list_build",
+        "name_bit",
         "ai_seek_path_branch",
         "ai_seek_tail",
         "ai_seek_sequence_on",
         "ai_seek_sequence_root",
     ])?;
-    let [tick, rand_state, reach, hand_off, build, path, tail, seq_on, seq_root] = at[..] else { unreachable!() };
+    let [tick, rand_state, reach, hand_off, name_bit, path, tail, seq_on, seq_root] = at[..] else { unreachable!() };
     for slot in (0..0x100).step_by(4) {
         let target = match slot {
             0x80 => reach,
@@ -3551,7 +3667,7 @@ fn sk_setup(ee: &mut ps2_oracle::Ee) -> Option<[u32; 4]> {
         };
         ee.set_u32(SK_VT + slot, target);
     }
-    ee.hooks.insert(build, Box::new(|ee| ee.set(2, 0)));
+    sk_owner_hooks(ee, name_bit);
     ee.hooks.insert(path, Box::new(|ee| {
         ee.set(2, SK_PATH);
         ee.set(31, ps2_oracle::DONE as i32 as i64 as u64);
@@ -3571,7 +3687,7 @@ fn the_target_seeker_matches_over_ten_thousand_ticks() {
     let mut p = Pick(0x5282_a7a2_93e7_5eed);
     let mut seen = std::collections::BTreeMap::<&str, u32>::new();
     for case in 0..10_000 {
-        let (mut seeker, ride, mut world, unbuilt) = sk_gen(&mut p);
+        let (mut seeker, ride, mut world, gaps) = sk_gen(&mut p);
         let state = p.next();
         let before = (seeker, world.clone());
 
@@ -3582,7 +3698,7 @@ fn the_target_seeker_matches_over_ten_thousand_ticks() {
             ee.load(SK_TARGETS + SK_TARGET_SIZE * i, &SK_ZERO[..SK_TARGET_SIZE as usize]);
         }
         ee.set_u32(SK_AI + 8, SK_VT);
-        sk_write_world(&mut ee, &world, &unbuilt, seq_on, seq_root);
+        sk_write_world(&mut ee, &world, &gaps, seq_on, seq_root);
         sk_write_ride(&mut ee, &ride);
         sk_write_seeker(&mut ee, &seeker);
         let mut out = sk_controls();
@@ -3617,6 +3733,8 @@ fn the_target_seeker_matches_over_ten_thousand_ticks() {
             }
         }
         assert_eq!(ee.read(rand_state, 8) as u64, rng.state(), "{what}: the generator");
+        let picks: Vec<_> = world.sets.iter().map(|s| s.picks).collect();
+        assert_eq!(sk_read_picks(&ee, world.sets.len()), picks, "{what}: the pick lists");
 
         // what the tick went through
         let (b, bw) = &before;
@@ -3666,6 +3784,9 @@ fn the_target_seeker_matches_over_ten_thousand_ticks() {
         if b.state == 3 && world.jumps.iter().zip(&bw.jumps).any(|(a, c)| moved(a, c)) {
             count("lip re-aimed");
         }
+        if world.sets.iter().zip(&bw.sets).any(|(a, c)| a.picks != c.picks) {
+            count(if world.sets[0].picks.is_some() { "built" } else { "built none" });
+        }
     }
     eprintln!("target seeker: {seen:?}");
     for (k, n) in [
@@ -3685,8 +3806,80 @@ fn the_target_seeker_matches_over_ten_thousand_ticks() {
         ("closing flipped", 500),
         ("steps halved", 30),
         ("lip re-aimed", 100),
+        ("built", 100),
+        ("built none", 20),
     ] {
         assert!(seen.get(k).copied().unwrap_or(0) >= n, "only {:?} ticks went through {k}", seen.get(k));
+    }
+}
+
+// The pick-list build (S306) on its own: the sets' owners and the map's groups generated around one
+// spot, so the nearest group is often a near thing, with null entries in the set list, groups out of
+// play or closed to the player, an owner that asks for open groups and one that does not, no owner of
+// kind 1, no groups, and two groups at the same point. The original's build is called on the root;
+// every set's pick list is compared.
+#[test]
+fn the_pick_list_build_matches_over_ten_thousand_worlds() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let Some(at) = named(&["ai_seek_list_build", "name_bit", "ai_seek_sequence_on", "ai_seek_sequence_root"]) else { return };
+    let [build, name_bit, seq_on, seq_root] = at[..] else { unreachable!() };
+    sk_owner_hooks(&mut ee, name_bit);
+
+    let mut p = Pick(0x5306_b1d1_57a7_e5ed);
+    let mut seen = std::collections::BTreeMap::<&str, u32>::new();
+    for case in 0..10_000 {
+        let targets: Vec<sk::Target> = (0..SK_TARGET_COUNT)
+            .map(|t| sk::Target { jump: Some(t % SK_JUMP_COUNT), done: Vec::new() })
+            .collect();
+        let near = p.vec_w(300.0);
+        let groups = sk_gen_groups(&mut p, &targets, near);
+        let sets: Vec<sk::Set> = (0..SK_SET_COUNT)
+            .map(|_| sk::Set {
+                picks: if groups.is_empty() || p.chance(2) { None } else { Some(p.below(groups.len() as u32) as usize) },
+                course: None,
+                owner: sk_gen_owner(&mut p, near),
+            })
+            .collect();
+        let gaps = sk_gen_gaps(&mut p);
+        let mut world = sk::World { sets, targets, jumps: Vec::new(), sequence: None, groups };
+
+        ee.load(SK_LISTS, &SK_ZERO);
+        sk_write_world(&mut ee, &world, &gaps, seq_on, seq_root);
+        ee.call(build, &[u64::from(ee.u32_at(seq_root))], &[], BUDGET);
+
+        let human = world.sets.iter().find(|s| s.owner.kind == 1).map(|s| s.owner);
+        sk::build(&mut world);
+        let picks: Vec<_> = world.sets.iter().map(|s| s.picks).collect();
+        assert_eq!(sk_read_picks(&ee, world.sets.len()), picks, "case {case}: the pick lists");
+
+        let mut count = |k: &'static str| *seen.entry(k).or_default() += 1;
+        count(match (human, picks[0]) {
+            (None, _) => "no owner of kind 1",
+            (Some(_), None) => "no group",
+            (Some(o), Some(_)) if o.hit_freeride => "an open group",
+            (Some(_), Some(_)) => "any group in play",
+        });
+        if let (Some(o), Some(g)) = (human, picks[0]) {
+            let skipped_nearer = world.groups.iter().enumerate().any(|(i, x)| {
+                i != g && {
+                    let d = |v: Vf| (v.x() - o.position.x()).powi(2) + (v.y() - o.position.y()).powi(2) + (v.z() - o.position.z()).powi(2);
+                    d(x.point) < d(world.groups[g].point)
+                }
+            });
+            if skipped_nearer {
+                count("a nearer group passed over");
+            }
+        }
+    }
+    eprintln!("pick-list build: {seen:?}");
+    for (k, n) in [
+        ("no owner of kind 1", 300),
+        ("no group", 300),
+        ("an open group", 1000),
+        ("any group in play", 1000),
+        ("a nearer group passed over", 500),
+    ] {
+        assert!(seen.get(k).copied().unwrap_or(0) >= n, "only {:?} worlds went through {k}", seen.get(k));
     }
 }
 

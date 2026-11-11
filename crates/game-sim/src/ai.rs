@@ -1824,10 +1824,11 @@ pub fn assist(w: &Weights, heading: F, aim: (F, F), on_ground: bool, yaw_rate: &
 /// speed, and how far ahead of the point to steer ([`reach`]), which set the brain's aim point,
 /// heading and target speed — what [`super::controls`] steers and throttles by.
 ///
-/// The original keeps the targets three ways, and the port has each: a set's own pick list (one drawn
+/// The original keeps the targets three ways, and the port has each: a set's pick list (one drawn
 /// at random, up to 100 tries), a course ([`Course`]: the nearest target not done yet), and a fixed
-/// sequence when the game has one ([`World::sequence`]). What builds a set's pick list when it has
-/// none is not ported: [`Set::picks`] `None` is a set whose list is not built, and picks nothing.
+/// sequence when the game has one ([`World::sequence`]). A pick list is one of the map's jump groups
+/// ([`Group`]); a set with none yet has one chosen for every set at once by [`build`] (S306): the
+/// open group nearest the human rider.
 ///
 /// Where the original reads memory it does not own — an empty list's first entry, a course's entry
 /// before the first when nothing is nearest, a rider with no target in a state that needs one — the
@@ -1893,11 +1894,39 @@ pub mod seek {
         pub chance: F,
     }
 
-    /// A set of targets: its pick list (`None` until built), and its course if it has one.
+    /// A set of targets: its pick list (the [`Group`] by index, `None` until [`build`] finds one), its
+    /// course if it has one, and the rider it belongs to.
     #[derive(Clone, Debug, Default, PartialEq)]
     pub struct Set {
-        pub picks: Option<Vec<Option<usize>>>,
+        pub picks: Option<usize>,
         pub course: Option<Course>,
+        pub owner: Owner,
+    }
+
+    /// The rider a [`Set`] belongs to, as [`build`] reads it.
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    pub struct Owner {
+        /// The build centres on the first set whose owner's kind is 1 (the human rider's in a free
+        /// ride, by where the game tests it; what the other values are is not traced).
+        pub kind: i32,
+        /// Its player number, which a group's open flags are kept by.
+        pub player: usize,
+        /// Where its model's root is.
+        pub position: Vf,
+        /// The owner answers yes to the game's "HitFreeride" flag: then only groups open to its player
+        /// are chosen from.
+        pub hit_freeride: bool,
+    }
+
+    /// One of the map's jump groups: the targets a set holding it draws from (`None`: the group has
+    /// no list, and a draw finds nothing), where it is, whether it is in play, and per player whether
+    /// it is open.
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub struct Group {
+        pub targets: Option<Vec<Option<usize>>>,
+        pub point: Vf,
+        pub active: bool,
+        pub open: Vec<bool>,
     }
 
     /// Everything the seeker looks up: the sets, targets and jumps by index, and the game's fixed
@@ -1909,6 +1938,7 @@ pub mod seek {
         pub targets: Vec<Target>,
         pub jumps: Vec<Jump>,
         pub sequence: Option<Vec<Option<usize>>>,
+        pub groups: Vec<Group>,
     }
 
     /// The seeker's part of the brain.
@@ -2090,9 +2120,39 @@ pub mod seek {
         length(flat(sub(scale(step, now / moved), a))) <= tolerance
     }
 
-    /// One draw off a set's pick list: `None`, without a draw, when the list is not built.
-    fn pick(set: &Set, rng: &mut Rng) -> Option<usize> {
-        let list = set.picks.as_ref()?;
+    /// Chooses every set's pick list (the original's ai_seek_list_build): the first set whose owner's
+    /// kind is 1 is the one the choice centres on, and of the groups in play — and, when that owner
+    /// answers to "HitFreeride", open to its player — the one whose point is nearest its position
+    /// (squared distance in all three axes, the first of equals) goes to every set. With no such
+    /// owner, or no such group, every set's list is cleared.
+    pub fn build(world: &mut World) {
+        let mut found = None;
+        if let Some(owner) = world.sets.iter().map(|s| s.owner).find(|o| o.kind == 1) {
+            let mut nearest = F(f32::MAX);
+            for (g, group) in world.groups.iter().enumerate() {
+                let open = !owner.hit_freeride || group.open.get(owner.player).copied().unwrap_or(false);
+                if open && group.active {
+                    let d = sub(group.point, owner.position);
+                    let d = dot(d, d);
+                    if d < nearest {
+                        nearest = d;
+                        found = Some(g);
+                    }
+                }
+            }
+        }
+        for set in &mut world.sets {
+            set.picks = found;
+        }
+    }
+
+    /// One draw off a set's pick list, [`build`]ing the lists first when the set has none: `None`,
+    /// without a draw, when there is still none or its group has no list.
+    fn pick(world: &mut World, si: usize, rng: &mut Rng) -> Option<usize> {
+        if world.sets[si].picks.is_none() {
+            build(world);
+        }
+        let list = world.groups[world.sets[si].picks?].targets.as_ref()?;
         let i = rng.index(list.len() as i32);
         usize::try_from(i).ok().and_then(|i| list.get(i).copied().flatten())
     }
@@ -2177,7 +2237,7 @@ pub mod seek {
                 } else {
                     let mut tries = 0;
                     while s.target.is_none() && tries < 100 {
-                        s.target = pick(&world.sets[si], rng);
+                        s.target = pick(world, si, rng);
                         tries += 1;
                     }
                 }
