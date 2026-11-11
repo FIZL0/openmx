@@ -1676,6 +1676,47 @@ ai_listener_walk            boot 0x00133500 (dt, obj) obj +0x24 bit 1: each list
 #                                           -> its vt+0x38(dt). Returns 1. The end of ai_update (S281)
 ai_update_base              boot 0x00282af0 VehicleAI's update: ai_update's whole tick for any mode
 #                                           but 5 (S281: not ported)
+#                                           S312: interface -> 0x400000 = 0x20, vt+0x8; mode 4 -> own
+#                                           vt+0x9c (0x00285090), 2 -> vt+0x98 (0x00284de0), else answer 0;
+#                                           vt+0x90; vt+0x28 under iface && 0x200000; vt+0xa8 under 0x4000;
+#                                           interface vt+0xc (no null test); answer & ai_listener_walk.
+#                                           Ported as ai::update_base, oracled (tests/ai.rs)
+ai_stuck_rescue             boot 0x00281460 (rider) interface vt+0x40 (thunk 0x00281c00): app +0x3cc ->
+#                                           +0x74 race object; none or its +0x34 == 3 -> rider's vtable at
+#                                           +0x48, slot +0x138 (rider, 1, 1); else ride_reset_request
+#                                           (rider, 1, 0). S312: ai::rescue
+ai_hit_reaction             boot 0x002812b0 (rider, kind a1, -, out a3, dir t0) interface vt+0x3c: dir
+#                                           normalised into a dead local; kind & 6 -> brain flag 0x100,
+#                                           +0x14c0 = +0x14c8 = 1.0; else kind & 0x10 -> *out = 150.0,
+#                                           +0x14c8 = 1.0; either draws +0x14c4 = 2^-31 rand() <= 0.5 ? -1
+#                                           : 1. Returns 1. S312: ai::hit_reaction
+ai_recovery_countdown       boot 0x0027d5fc inside the player update 0x0027c890 (s2 rider, f20 dt):
+#                                           +0x14c0 > 0 -> -= dt; +0x14c8 the same. S312: ai::Recovery::
+#                                           count_down, oracled as a stretch to the next pc below
+ai_recovery_countdown_end   boot 0x0027d634 the pc after the countdown
+ai_steer_filter             boot 0x00286b90 (brain, f12 dt) MXVehicleAI vt+0xa8 (slot 0x0045c548, not a
+#                                           Ghidra function): rate = +0x110 (SteeringRateFilter) * dt
+#                                           (vmulx.xyz), d = +0xf0 - +0x130 (vsub.xyz); per lane d >= 0:
+#                                           d < +0x120 (SteeringJitterFilter) -> d * +0x140, d > rate ->
+#                                           rate; d < 0: d > -jitter -> d * +0x140, d < -rate -> -rate;
+#                                           +0x130 += d (vadd.xyz), +0xf0 = +0x130 whole. Returns 1.
+#                                           S312: ai::filter_steering
+ai_habits                   boot 0x00280070 (rider, f12 dt) interface vt+0x28 (thunk), "target-approach
+#                                           set-up" in S281: brain +0x38 bits (1 pop, 2 preload, 4 set, 8
+#                                           clutch, 0x10 clutched, 0x20 gate clutch, 0x40 lag due, 0x80
+#                                           brilliant, 0x100 gate wheelie, 0x200 cross-up, 0x400 due);
+#                                           rider +0x10d0-relative Profile: +0x10e4 preload base, +0x10ec
+#                                           preload, +0x10f0 per speed, +0x1108 pull-back, +0x110c..
+#                                           +0x1124 landing lag (+0x1124 rolled, -1), +0x1134 horse power,
+#                                           +0x114c..+0x115c brilliant moment, +0x1170 gate delay, +0x1174
+#                                           clock, +0x11ec wait, +0x1184/+0x1198/+0x11a8 gate wheelie,
+#                                           +0x11ac..+0x11cc cross-up; bike +0x494/+0x4a4/+0x4ac/+0x4b0/
+#                                           +0x4c4 preload, +0x644 clutch, engine +0x7b8 -> +0xbc power,
+#                                           body +0x7a4 -> +0x264; card +0xfc air time, +0x8 bit 0x80000,
+#                                           +0x1b0, +0x88 spot (path_spot_point on keeper +0xfa0 -> +0x68),
+#                                           keeper +0x64 == 3 no cross-up; brain +0x2b0 low air, +0x354
+#                                           start state, +0x360 start preload. Five rand() draws at most.
+#                                           S312: ai::habits, oracled over 10,000 ticks
 ai_character_read          boot 0x00384f00 reads AIChrctr.aip section AI_<skill>: the controller's
 #                                           gains (SteeringGain +0x208, OversteerCorrectionGain
 #                                           +0x21c, PitchGain +0x2d4, PitchJitterDeadZone +0x2d8,
