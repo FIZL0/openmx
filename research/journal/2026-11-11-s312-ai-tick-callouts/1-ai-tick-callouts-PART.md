@@ -1,4 +1,4 @@
-# 1 — ai tick callouts (FINAL)
+# 1 — ai tick callouts (PART)
 
 Task S312. 2026-11-11.
 
@@ -107,8 +107,10 @@ context/notes/check.log, so they ran and did not skip.
   resolved the conflicts to main's own atv_car.rs and test file, byte for byte. It was still red:
   17, 18, and 19 for main's new `all_eight_pieces_are_mx_unleasheds`. So I took it back out
   (`git reset --keep`); this branch carries none of it.
-- Filed as MD132. `kit done` refuses on this red, so S312 lands `--blocked --after MD132` with its
-  work committed.
+- I proved it on the bare base in a scratch worktree (4002e6a70, its own target dir): the same 17
+  and 18.
+- Filed as MD132. `kit done` refuses on this red, even with `--blocked`, which runs the gate too. So
+  S312 is committed and pushed by hand, unticked.
 
 ## Not verified / not 1:1
 
@@ -137,5 +139,8 @@ context/notes/check.log, so they ran and did not skip.
 
 ## Next
 
+- **S312's work is complete; only the tick is waiting.** Once MD132 has made `mxvatv_car_frame`'s
+  pieces tests green on main, run `./kit done S312 "<msg>"` on this branch (or on main after the
+  merge). Then the task ticks; rename this file -FINAL.
 - S12e can now give `ai::update`'s `Steps` real bodies from these callouts.
 - Filed as S314: mode 2 and mode 4's drivers, and which listeners an AI brain carries.
