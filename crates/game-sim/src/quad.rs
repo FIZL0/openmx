@@ -2983,3 +2983,594 @@ pub fn animate(
     }
     m.call(Call::AttachmentMoved, q, body);
 }
+
+/// The constructor's steering lock, either way: a quarter turn's half (`0x3f490fd9`), which the reader
+/// replaces on the fronts only.
+const CONSTRUCTED_LOCK: f32 = 0.78539807;
+
+impl WheelTire {
+    /// What the wheel's constructor leaves in the words [`tire_phy`] writes or keeps: all zero but the
+    /// three spin inertias (1), the steering lock (`±`[`CONSTRUCTED_LOCK`]) and
+    /// `OtherTireNormalLoadScale` (1). `mount` and `sweep` are the wheel setup's, off the model: the
+    /// reader reads them and is handed them here.
+    pub fn constructed(mount: Vf, sweep: bool) -> WheelTire {
+        WheelTire {
+            spin_inertia: F::ONE,
+            inv_spin_inertia: F::ONE,
+            tire_inertia: F::ONE,
+            max_steer_angle: F(CONSTRUCTED_LOCK),
+            min_steer_angle: -F(CONSTRUCTED_LOCK),
+            other_load_scale: F::ONE,
+            mount,
+            sweep,
+            ..WheelTire::default()
+        }
+    }
+}
+
+/// `(0, 4.1, -0.6, 1)`: the quad's `FPCameraOffset` before `[Camera]` is read (the cars' is 5.1 up).
+const QUAD_FP_CAMERA_OFFSET: Vf = Vf::new(0.0, 4.1, -0.6, 1.0);
+/// The quad's follow camera's presets file before `[Camera]` is read.
+pub const QUAD_CAMERA_FILE: &str = "FC_ATVDefault.pb";
+/// `(1, 1, 1, 1)`: `WreckDamping`'s default.
+const ONES: Vf = Vf::new(1.0, 1.0, 1.0, 1.0);
+/// The string getter's buffer for `FCamFileName`, terminator included.
+const CAMERA_FILE_LEN: usize = 0x20;
+
+/// **The quad's loader** (MD122): an `atv_*.phy` as SLUS-21104 loads it into a quad, in its order and
+/// with its defaults, with no RAM image.
+///
+/// - MXVehicle's base loader: `[Mass Properties]` through the rigid-body part reader
+///   ([`crate::handling::mass::Part`]), then `[Wrecks]`' `MaxWreckTime` (default 5), `WreckGravity`
+///   (3), `WreckDamping` (ones) and `WreckInertia` (`(0, 0, 0, 1)`).
+/// - The bike's shared loader: `[Mass Properties]` again ([`crate::handling::mass::Bike`]), the tire
+///   reader ([`tire_phy`], against the part's mass) and the bike's keys — `[Engine]`, `[Roll Control]`,
+///   `[Pitch Control]`, `[Aerodynamics]`, `[Airborne Control]`, `[Joystick]`, `[Preload]`, `[Backflip]`,
+///   `[Three Sixty]`, `[Donuts]`, `[No Hander Lander]`, `[Wrecks]` — which are MX Unleashed's keys with
+///   MX Unleashed's defaults and units, so [`crate::phy::Phy::read`] reads them; then the machine's
+///   `[Camera]` and the bike's `[Animation]` boxes.
+///
+/// What the loader takes from the model rather than the file is handed in: the model's half box (the
+/// part reader's inertia) and each wheel's mount and sweep shape (the wheel setup's).
+#[derive(Clone, Debug)]
+pub struct Load {
+    pub part: crate::handling::mass::Part,
+    pub max_wreck_time: F,
+    pub wrecks: crate::car::MxvatvWrecks,
+    pub bike: crate::handling::mass::Bike,
+    /// The four wheels from their constructed state, and the segment each sweep shape was rebuilt to.
+    pub tires: TireSetup,
+    pub sweeps: [Option<[Vf; 2]>; 4],
+    /// The engine as its three setters leave it (in first), its `EngineInertia` (kept beside the
+    /// inverse) and its peak torque and the revs of it.
+    pub engine: crate::r#move::Engine,
+    pub engine_inertia: F,
+    pub peak: crate::phy::Peak,
+    /// The ground step's keys: the clutch, shift points, reverse push, steering fade, donut and drag,
+    /// with the centres of gravity and travels the bike's `[Mass Properties]` read and the springs the
+    /// tire reader set.
+    pub mv: crate::r#move::Params,
+    pub roll: crate::phy::Roll,
+    pub pitch: crate::phy::Pitch,
+    pub joystick: crate::phy::Joystick,
+    pub steer_ramp: crate::handling::step::SteerRamp,
+    pub donuts: crate::phy::Donuts,
+    pub balance: crate::phy::Balance,
+    pub air: crate::air::Params,
+    pub gas_gyro_torque: F,
+    pub max_crossup: F,
+    pub three_sixty: crate::air::SpinTuning,
+    pub camera: crate::car::MxvatvCamera,
+    pub pelvis_box_position: Vf,
+    pub pelvis_box_size: Vf,
+}
+
+/// Where [`Load::words`] puts what it loaded: the quad and what it points at — its rigid body,
+/// collision record, physics world, engine and four wheels — and the three tables the engine's setters
+/// keep behind pointers (the RPM points, the torques, the gear ratios).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LoadAt {
+    pub quad: u32,
+    pub body: u32,
+    pub record: u32,
+    pub world: u32,
+    pub engine: u32,
+    pub wheels: [u32; 4],
+    pub curve_rpm: u32,
+    pub curve_torque: u32,
+    pub ratios: u32,
+}
+
+impl Load {
+    /// Read the file's bytes.
+    pub fn read_bytes(bytes: &[u8], half_box: Vf, mounts: [(Vf, bool); 4], curve: &crate::camera::CurveTable) -> Load {
+        Load::read(&crate::phy::Ini::parse_bytes(bytes), half_box, mounts, curve)
+    }
+
+    /// Load a parsed file. `mounts` is each wheel's mount and whether it has a sweep shape, in
+    /// [`LEFT_FRONT`]..[`RIGHT_REAR`] order.
+    pub fn read(ini: &crate::phy::Ini, half_box: Vf, mounts: [(Vf, bool); 4], curve: &crate::camera::CurveTable) -> Load {
+        use crate::handling::mass;
+        let part = mass::Part::read(&ini.section("Mass Properties"), half_box, curve);
+        let s = ini.section("Wrecks");
+        let max_wreck_time = s.float_or("MaxWreckTime", F(5.0));
+        let wrecks = crate::car::MxvatvWrecks {
+            wreck_gravity: s.float_or("WreckGravity", F(3.0)),
+            wreck_damping: s.vector("WreckDamping", ONES),
+            wreck_inertia: s.vector("WreckInertia", NOTHING),
+        };
+        let bike = mass::Bike::read(&ini.section("Mass Properties"));
+        let mut tires = TireSetup { wheels: mounts.map(|(m, s)| WheelTire::constructed(m, s)), ..TireSetup::default() };
+        let sweeps = tire_phy(&mut tires, ini, part.body.mass);
+
+        let phy = crate::phy::Phy::read(ini, curve);
+        let mut mv = phy.mv;
+        (mv.cofg, mv.balance_cofg) = (bike.cofgs[0], bike.cofgs[2]);
+        (mv.cofg_travel_forward, mv.cofg_travel_back, mv.brake_cofg_travel_forward) =
+            (bike.travel_forward, bike.travel_back, bike.brake_travel_forward);
+        (mv.front_spring_when_stopped, mv.front_spring) = tires.front_spring;
+        (mv.rear_spring_when_stopped, mv.rear_spring) = tires.rear_spring;
+        let engine_inertia = ini.section("Engine").float("EngineInertia").unwrap_or(F::ZERO);
+
+        let s = ini.section("Three Sixty");
+        let key = |k: &str| s.float(k).unwrap_or(F::ZERO);
+        let three_sixty = crate::air::SpinTuning {
+            min_time: key("MinThreeSixtyTime"),
+            max_time: key("MaxThreeSixtyTime"),
+            min_torque_x: key("MinThreeSixtyTorqueX"),
+            max_torque_x: key("MaxThreeSixtyTorqueX"),
+            min_torque_y: key("MinThreeSixtyTorqueY"),
+            max_torque_y: key("MaxThreeSixtyTorqueY"),
+            rate_increase: key("ThreeSixtyTorqueRateIncrease"),
+            rate_decrease: key("ThreeSixtyTorqueRateDecrease"),
+        };
+
+        let s = ini.section("Camera");
+        let camera_file = match s.text("FCamFileName") {
+            Some(name) => {
+                let mut end = name.len().min(CAMERA_FILE_LEN - 1);
+                while !name.is_char_boundary(end) {
+                    end -= 1;
+                }
+                name[..end].to_string()
+            }
+            None => QUAD_CAMERA_FILE.to_string(),
+        };
+        let camera = crate::car::MxvatvCamera {
+            left_shoulder_offset: s.vector("Left1stPerShoulderOffset", NOTHING),
+            right_shoulder_offset: s.vector("Right1stPerShoulderOffset", NOTHING),
+            fp_camera_offset: s.vector("FPCameraOffset", QUAD_FP_CAMERA_OFFSET),
+            camera_file,
+        };
+
+        Load {
+            part,
+            max_wreck_time,
+            wrecks,
+            bike,
+            tires,
+            sweeps,
+            engine: phy.engine,
+            engine_inertia,
+            peak: phy.peak,
+            mv,
+            roll: phy.roll,
+            pitch: phy.pitch,
+            joystick: phy.joystick,
+            steer_ramp: phy.steer_ramp,
+            donuts: phy.donuts,
+            balance: phy.balance,
+            air: phy.air,
+            gas_gyro_torque: phy.gas_gyro_torque,
+            max_crossup: phy.max_crossup,
+            three_sixty,
+            camera,
+            pelvis_box_position: phy.animation.pelvis_box_position,
+            pelvis_box_size: phy.animation.pelvis_box_size,
+        }
+    }
+
+    /// The quad's wheelie, stoppie, steering, full-lock, donut and spring keys. The full-lock option is
+    /// off, as the quad is made.
+    pub fn params(&self) -> Params {
+        let (p, m) = (&self.pitch, &self.mv);
+        Params {
+            max_pitch_command: p.max_pitch_command,
+            pitch_gain: p.pitch_gain,
+            pitch_rate_gain: p.pitch_rate_gain,
+            inv_wheelie_top_speed: p.inv_wheelie_top_speed,
+            max_stoppie_pitch_command: p.max_stoppie_pitch_command,
+            stoppie_pitch_gain: p.stoppie_pitch_gain,
+            stoppie_yaw_rate_scale: p.stoppie_yaw_rate_scale,
+            stoppie_top_speed: p.stoppie_top_speed,
+            steer_speed_1: m.steer_speed_1,
+            steer_scale_1: m.steer_scale_1,
+            steer_speed_2: m.steer_speed_2,
+            steer_scale_2: m.steer_scale_2,
+            full_lock: false,
+            full_lock_angle: self.steer_ramp.amount,
+            full_lock_time: self.steer_ramp.time,
+            max_donut_speed: m.max_donut_speed,
+            donut_angle: m.donut_angle,
+            donut_angle_back: m.donut_angle_back,
+            front_spring: self.tires.front_spring,
+            rear_spring: self.tires.rear_spring,
+        }
+    }
+
+    /// [`Bike::clutch_keys`]: the ground step's keys the quad's bike steps read.
+    pub fn clutch_keys(&self) -> crate::r#move::Params {
+        let m = &self.mv;
+        crate::r#move::Params {
+            clutch_torque_scale_time: m.clutch_torque_scale_time,
+            max_clutch_torque_scale_speed: m.max_clutch_torque_scale_speed,
+            max_clutch_torque_scale: m.max_clutch_torque_scale,
+            up_shift_rpm: m.up_shift_rpm,
+            down_shift_rpm: m.down_shift_rpm,
+            cofg: m.cofg,
+            balance_cofg: m.balance_cofg,
+            cofg_travel_forward: m.cofg_travel_forward,
+            cofg_travel_back: m.cofg_travel_back,
+            clutch_cofg_travel_back: m.clutch_cofg_travel_back,
+            brake_cofg_travel_forward: m.brake_cofg_travel_forward,
+            drag: m.drag,
+            ..crate::r#move::Params::default()
+        }
+    }
+
+    /// [`Bike::air_keys`]: the keys the quad's air steps read — the air control, gyro and unroll, the
+    /// preload and backflip, and the speed and airborne-pitch wreck limits; the rest are left at 0.
+    /// The control authority time is among them: the quad holds its own ([`Quad::authority_time`]),
+    /// which the air steps put over it.
+    pub fn air_keys(&self) -> crate::air::Params {
+        let a = &self.air;
+        crate::air::Params {
+            airborne_control_moment: a.airborne_control_moment,
+            airborne_damping: a.airborne_damping,
+            airborne_control_force: a.airborne_control_force,
+            brake_gyro_torque: a.brake_gyro_torque,
+            unroll_gain: a.unroll_gain,
+            unroll_torque: a.unroll_torque,
+            unyaw_gain: a.unyaw_gain,
+            unyaw_torque: a.unyaw_torque,
+            preload_time: a.preload_time,
+            max_preload: a.max_preload,
+            min_preload_time: a.min_preload_time,
+            max_preload_time: a.max_preload_time,
+            min_dpad_preload_time: a.min_dpad_preload_time,
+            max_dpad_preload_time: a.max_dpad_preload_time,
+            min_backflip_time: a.min_backflip_time,
+            max_backflip_time: a.max_backflip_time,
+            min_backflip_torque: a.min_backflip_torque,
+            max_backflip_torque: a.max_backflip_torque,
+            backflip_torque_rate_increase: a.backflip_torque_rate_increase,
+            backflip_torque_rate_decrease: a.backflip_torque_rate_decrease,
+            front_wreck_speed_limit: a.front_wreck_speed_limit,
+            back_wreck_speed_limit: a.back_wreck_speed_limit,
+            side_wreck_speed_limit: a.side_wreck_speed_limit,
+            airborne_pitch_down_wreck_angle: a.airborne_pitch_down_wreck_angle,
+            airborne_pitch_up_wreck_angle: a.airborne_pitch_up_wreck_angle,
+            control_authority_time: F::ZERO,
+            racing_down_wreck_speed_limit: F::ZERO,
+            freestyle_down_wreck_speed_limit: F::ZERO,
+            ground_pitch_down_wreck_angle: F::ZERO,
+            ground_pitch_up_wreck_angle: F::ZERO,
+            airborne_roll_wreck_angle: F::ZERO,
+            no_hander_wreck_speed_limit: F::ZERO,
+            no_hander_max_roll_angle: F::ZERO,
+            joust_wreck_height: F::ZERO,
+            crossup_wreck: F::ZERO,
+            crossup_wreck_time: F::ZERO,
+            rotation_speed: None,
+        }
+    }
+
+    /// The loaded tuning over a bike: the input limiter, the clutch keys, the engine (in first, the
+    /// curve's cursor at its foot), the air keys, the gas gyro, and the four wheels' tire words (their
+    /// suspension, steering and spin keys, and each tire's surfaces). Its state is left as it was.
+    pub fn tune(&self, b: &mut Bike) {
+        b.joystick = self.joystick;
+        b.clutch_keys = self.clutch_keys();
+        let e = &self.engine;
+        let be = &mut b.engine;
+        (be.gear, be.gears, be.final_drive, be.gear_ratios, be.ratio, be.inv_ratio) =
+            (e.gear, e.gears, e.final_drive, e.gear_ratios, e.ratio, e.inv_ratio);
+        (be.rev_limit, be.idle_throttle, be.engine_braking, be.inv_inertia) = (e.rev_limit, e.idle_throttle, e.engine_braking, e.inv_inertia);
+        (be.clutch_static, be.clutch_kinetic, be.min_rpm) = (e.clutch_static, e.clutch_kinetic, e.min_rpm);
+        (be.curve_rpm, be.curve_torque, be.curve) = (e.curve_rpm, e.curve_torque, e.curve);
+        b.air_keys = self.air_keys();
+        b.gas_gyro_torque = self.gas_gyro_torque;
+        for k in 0..4 {
+            let t = &self.tires.wheels[k];
+            let w = &mut b.wheels[k];
+            (w.max_compression, w.max_damper_speed, w.extension_rate) = (t.strut_compression, t.max_compression_rate, t.max_decompression_rate);
+            (w.damping_out, w.damping_in) = (t.damping_in, t.damping_out);
+            (w.max_steer_angle, w.min_steer_angle) = (t.max_steer_angle, t.min_steer_angle);
+            // The steering torque the setter leaves is the step's input, cleared every tick: not tuning.
+            (w.steer_damping, w.steer_inv_inertia) = (t.steer_damping, t.inv_steer_inertia);
+            (w.mount, w.probe_length) = (t.mount, t.radius);
+            let s = &mut b.spins[k];
+            (s.parametric, s.inv_inertia, s.tire_inertia) = (t.parametric, t.inv_spin_inertia, t.tire_inertia);
+            (s.arm, s.other_load_scale, s.inv_radius) = (t.force_position, t.other_load_scale, t.inv_radius);
+            s.surfaces = t.surfaces;
+        }
+    }
+
+    /// The loaded words over the quad's own state: the reverse push's speed and gain, the gravity force
+    /// the part reader put in the world, and each wheel's lock, `1/r` and whether the init made it a
+    /// steered one (the fronts) — with the balancing flag the init clears on all four.
+    pub fn tune_quad(&self, q: &mut Quad) {
+        (q.push_target, q.push_gain) = (self.mv.reverse_speed, self.mv.reverse_gain);
+        q.gravity = self.part.gravity.force;
+        for (k, w) in q.wheels.iter_mut().enumerate() {
+            let t = &self.tires.wheels[k];
+            (w.max_steer_angle, w.inv_radius) = (t.max_steer_angle, t.inv_radius);
+            (w.steered, w.balancing) = (k < LEFT_REAR, false);
+        }
+    }
+
+    /// The loaded mass, damping, inertia and rate limits over the quad's rigid body.
+    pub fn tune_body(&self, b: &mut crate::atv_body::Body) {
+        let (pb, bk) = (&self.part.body, &self.bike);
+        (b.inv_mass, b.damping, b.ang_damping) = (pb.inv_mass, pb.damping, pb.angular_damping);
+        b.inv_inertia = Vf::new(bk.inv_inertia[0].0, bk.inv_inertia[1].0, bk.inv_inertia[2].0, b.inv_inertia.w());
+        if let Some(y) = bk.yaw_rate_limit {
+            b.max_rates = [F(QUAD_MAX_RATE), y, F(QUAD_MAX_RATE)];
+        }
+    }
+
+    /// Every word the loaders write, as [`crate::handling::mass::Part::words`] gives them: `(address,
+    /// mask, bits)`, in the order they are written (a later word over an earlier one wins). A byte of
+    /// the camera's file name is the low byte of its word's mask.
+    pub fn words(&self, at: &LoadAt) -> Vec<(u32, u32, u32)> {
+        use crate::handling::mass::Layout;
+        let mut w = self.part.words(Layout { object: at.quad, body: at.body, record: at.record, gravity: at.world });
+        let o = at.quad;
+        let f = |w: &mut Vec<(u32, u32, u32)>, a: u32, v: F| w.push((a, !0, v.to_bits()));
+        let i = |w: &mut Vec<(u32, u32, u32)>, a: u32, v: u32| w.push((a, !0, v));
+        let v = |w: &mut Vec<(u32, u32, u32)>, a: u32, q: Vf| {
+            for (k, b) in q.to_bits().into_iter().enumerate() {
+                w.push((a + 4 * k as u32, !0, b));
+            }
+        };
+        f(&mut w, o + 0xc88, self.max_wreck_time);
+        f(&mut w, o + 0xc90, self.wrecks.wreck_gravity);
+        v(&mut w, o + 0xca0, self.wrecks.wreck_damping);
+        v(&mut w, o + 0xcb0, self.wrecks.wreck_inertia);
+        w.extend(self.bike.words(o, at.body));
+
+        // The tire reader.
+        for (k, t) in self.tires.wheels.iter().enumerate() {
+            let a = at.wheels[k];
+            i(&mut w, a + 0x34, t.parametric as u32);
+            for (off, x) in [
+                (0x3c, t.strut_compression),
+                (0x40, t.max_compression_rate),
+                (0x44, t.max_decompression_rate),
+                (0x48, t.spring),
+                (0x4c, t.damping_in),
+                (0x50, t.damping_out),
+                (0x54, t.spin_inertia),
+                (0x58, t.inv_spin_inertia),
+                (0x5c, t.tire_inertia),
+                (0x60, t.steer_torque),
+                (0x64, t.steer_damping),
+                (0x68, t.steer_inertia),
+                (0x6c, t.inv_steer_inertia),
+                (0x70, t.max_steer_angle),
+                (0x74, t.min_steer_angle),
+                (0xb8, t.other_load_scale),
+                (0x214, t.radius),
+                (0x218, t.ply),
+                (0x21c, t.width),
+                (0x220, t.tire_mass),
+                (0x838, t.inv_radius),
+                (0x8a8, t.ply_scale),
+                (0x8b4, t.steer_torque),
+            ] {
+                f(&mut w, a + off, x);
+            }
+            // The init's: the fronts steer; no wheel is balancing.
+            i(&mut w, a + 0x2c, u32::from(k < LEFT_REAR));
+            i(&mut w, a + 0x30, 0);
+            v(&mut w, a + 0xa0, t.force_position);
+            v(&mut w, a + 0x100, t.rest);
+            for (j, s) in t.surfaces.iter().enumerate() {
+                for (n, x) in s.drive.iter().chain(&s.side).chain(&s.drag).enumerate() {
+                    f(&mut w, a + 0x238 + 0x40 * n as u32 + 4 * j as u32, *x);
+                }
+            }
+        }
+        for (off, x) in [
+            (0x137c, self.tires.front_spring.0),
+            (0x1380, self.tires.front_spring.1),
+            (0x1384, self.tires.rear_spring.0),
+            (0x1388, self.tires.rear_spring.1),
+        ] {
+            f(&mut w, o + off, x);
+        }
+        for j in 0..crate::phy::MAX_SURFACES {
+            f(&mut w, o + 0x1654 + 4 * j as u32, self.tires.mud_time[j]);
+            f(&mut w, o + 0x1694 + 4 * j as u32, self.tires.mud_amount[j]);
+        }
+
+        // [Engine]: the engine's words, its tables, and the quad's.
+        let (e, en) = (&self.engine, at.engine);
+        for (off, x) in [
+            (0x2c, e.idle_throttle),
+            (0x30, e.engine_braking),
+            (0x34, e.final_drive),
+            (0x38, self.engine_inertia),
+            (0x44, e.clutch_static),
+            (0x48, e.clutch_kinetic),
+            (0x54, e.min_rpm),
+            (0x74, e.ratio),
+            (0x78, e.inv_ratio),
+            (0xa8, self.peak.rpm),
+            (0xac, e.rev_limit),
+            (0xb0, self.peak.torque),
+        ] {
+            f(&mut w, en + off, x);
+        }
+        if F::ZERO < self.engine_inertia {
+            f(&mut w, en + 0x3c, e.inv_inertia);
+        }
+        i(&mut w, en + 0x5c, e.gear as u32);
+        i(&mut w, en + 0x60, e.curve.points);
+        i(&mut w, en + 0x6c, e.gears as u32);
+        i(&mut w, en + 0x80, e.curve.points);
+        i(&mut w, en + 0x84, e.curve.index);
+        f(&mut w, en + 0x88, e.curve.frac());
+        for k in 0..e.curve.points {
+            f(&mut w, at.curve_rpm + 4 * k, e.curve_rpm[k as usize]);
+            f(&mut w, at.curve_torque + 4 * k, e.curve_torque[k as usize]);
+        }
+        for k in 0..e.gears as u32 {
+            f(&mut w, at.ratios + 4 * k, e.gear_ratios[k as usize]);
+        }
+        let m = &self.mv;
+        for (off, x) in [
+            (0x1350, m.clutch_torque_scale_time),
+            (0x1358, m.max_clutch_torque_scale_speed),
+            (0x135c, m.max_clutch_torque_scale),
+            (0x1328, m.clutch_cofg_travel_back),
+            (0x13dc, m.up_shift_rpm),
+            (0x13e0, m.down_shift_rpm),
+            (0x123c, m.reverse_speed),
+            (0x1240, m.reverse_gain),
+        ] {
+            f(&mut w, o + off, x);
+        }
+
+        // [Roll Control], [Pitch Control], [Aerodynamics].
+        let (r, p) = (&self.roll, &self.pitch);
+        for (off, x) in [
+            (0x1360, r.max_roll_command),
+            (0x1364, r.max_roll_rate_command),
+            (0x1368, r.max_roll_speed),
+            (0x136c, r.max_roll_yaw_rate),
+            (0x1370, r.roll_gain),
+            (0x1374, r.min_stand_upright_speed),
+            (0x1378, r.max_stand_upright_speed),
+            (0x138c, r.roll_control_gain),
+            (0x1390, r.roll_control_rate_gain),
+            (0x1394, r.roll_control_max_cg),
+            (0x1398, r.max_roll_rate_disturbance),
+            (0x139c, p.max_pitch_command),
+            (0x13a0, p.pitch_gain),
+            (0x13a4, p.pitch_rate_gain),
+            (0x13a8, p.inv_wheelie_top_speed),
+            (0x13cc, p.max_stoppie_pitch_command),
+            (0x13d0, p.stoppie_pitch_gain),
+            (0x13d4, p.stoppie_yaw_rate_scale),
+            (0x13d8, p.stoppie_top_speed),
+            (0x13b4, p.stoppie_brake),
+        ] {
+            f(&mut w, o + off, x);
+        }
+        f(&mut w, at.world + 4, m.drag);
+
+        // [Airborne Control], [Joystick], [Preload], [Backflip], [Three Sixty], [Donuts].
+        let (a, j, t, d) = (&self.air, &self.joystick, &self.three_sixty, &self.donuts);
+        f(&mut w, o + 0x1180, a.airborne_damping);
+        f(&mut w, o + 0x1184, a.airborne_control_force);
+        v(&mut w, o + 0x1170, a.airborne_control_moment);
+        for (off, x) in [
+            (0x1330, a.brake_gyro_torque),
+            (0x1334, self.gas_gyro_torque),
+            (0x1338, a.unroll_gain),
+            (0x133c, a.unroll_torque),
+            (0x1340, a.unyaw_gain),
+            (0x1344, a.unyaw_torque),
+            (0x14b0, self.max_crossup),
+            (0x12d8, j.x_axis_rate_limit),
+            (0x12dc, j.y_axis_rate_limit),
+            (0x12e0, j.x_dpad_rate_limit),
+            (0x12e4, j.y_dpad_rate_limit),
+            (0x12f4, self.steer_ramp.amount),
+            (0x12f8, self.steer_ramp.time),
+            (0x1300, m.steer_speed_1),
+            (0x1304, m.steer_scale_1),
+            (0x1308, m.steer_speed_2),
+            (0x130c, m.steer_scale_2),
+            (0x1310, j.gas_rate_limit),
+            (0x1314, j.brake_rate_limit),
+            (0x1318, j.clutch_in_rate_limit),
+            (0x131c, j.clutch_out_rate_limit),
+            (0xc5c, a.preload_time),
+            (0xc6c, a.max_preload),
+            (0xc64, a.min_preload_time),
+            (0xc68, a.max_preload_time),
+            (0x1160, a.min_dpad_preload_time),
+            (0x1164, a.max_dpad_preload_time),
+            (0x11b4, a.max_backflip_torque),
+            (0x11b0, a.min_backflip_torque),
+            (0x11b8, a.backflip_torque_rate_increase),
+            (0x11bc, a.backflip_torque_rate_decrease),
+            (0x11a4, a.min_backflip_time),
+            (0x11a8, a.max_backflip_time),
+            (0x11f0, t.max_torque_x),
+            (0x11ec, t.min_torque_x),
+            (0x11f8, t.max_torque_y),
+            (0x11f4, t.min_torque_y),
+            (0x11fc, t.rate_increase),
+            (0x1200, t.rate_decrease),
+            (0x11e0, t.min_time),
+            (0x11e4, t.max_time),
+            (0x1228, d.min_donut_speed),
+            (0x122c, m.max_donut_speed),
+            (0x1230, m.donut_angle),
+            (0x1234, m.donut_angle_back),
+            (0x1238, d.roll_angle_scale),
+        ] {
+            f(&mut w, o + off, x);
+        }
+
+        // [No Hander Lander], [Wrecks].
+        let b = &self.balance;
+        for (off, x) in [
+            (0x1500, b.min_balance_inertia),
+            (0x1504, b.max_balance_inertia),
+            (0x14fc, b.balance_inertia_rate),
+            (0x1508, b.input_inertia),
+            (0x1520, b.max_balance_point),
+            (0x1514, b.balance_noise_amplitude),
+            (0x151c, b.balance_noise_time_scale),
+            (0x13e8, a.front_wreck_speed_limit),
+            (0x13ec, a.back_wreck_speed_limit),
+            (0x13f0, a.side_wreck_speed_limit),
+            (0x13f4, a.racing_down_wreck_speed_limit),
+            (0x13f8, a.freestyle_down_wreck_speed_limit),
+            (0x13fc, a.ground_pitch_down_wreck_angle),
+            (0x1400, a.ground_pitch_up_wreck_angle),
+            (0x1404, a.airborne_pitch_down_wreck_angle),
+            (0x1408, a.airborne_pitch_up_wreck_angle),
+            (0x140c, a.airborne_roll_wreck_angle),
+            (0x1420, a.crossup_wreck),
+            (0x1424, a.crossup_wreck_time),
+            (0x1414, a.no_hander_max_roll_angle),
+            (0x1410, a.no_hander_wreck_speed_limit),
+            (0x1418, a.joust_wreck_height),
+        ] {
+            f(&mut w, o + off, x);
+        }
+
+        // [Camera], [Animation].
+        let c = &self.camera;
+        v(&mut w, o + 0x980, c.left_shoulder_offset);
+        v(&mut w, o + 0x990, c.right_shoulder_offset);
+        v(&mut w, o + 0xda0, c.fp_camera_offset);
+        let name = c.camera_file.as_bytes();
+        for k in 0..=name.len() {
+            let a = o + 0xdb0 + k as u32;
+            let shift = 8 * (a & 3);
+            w.push((a & !3, 0xff << shift, u32::from(name.get(k).copied().unwrap_or(0)) << shift));
+        }
+        v(&mut w, o + 0x1490, self.pelvis_box_position);
+        v(&mut w, o + 0x14a0, self.pelvis_box_size);
+        w
+    }
+}
+
+/// The body's largest roll and pitch rates, either side of `YawRateLimit`.
+const QUAD_MAX_RATE: f32 = 20.0;
