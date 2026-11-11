@@ -134,7 +134,8 @@ impl Kiowa {
     }
 
     /// [`Kiowa::load`] of the helicopter's model `model` by name (`kiowa3`, MX vs. ATV's second
-    /// model, MD80e), with the same rotor parts.
+    /// model, MD80e), with the same rotor parts. SLUS-21104's helicopter loads the parts by these
+    /// same four names for both its models, so a pack's `bladeblur2`-style files go unread (MD109).
     pub fn load_model(assets: &mut Assets, archives: &[Res], model: &str) -> Option<Kiowa> {
         if !assets.load(archives, model) {
             return None;

@@ -5398,7 +5398,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         for l in (0..liveries).filter(|_| picked) {
             let seat = if liveries > 1 { format!("P{} ", l + 1) } else { String::new() };
             match kiowa_pack[l] {
-                Some(f) => println!("kiowa: {seat}{}'s, on its steps, drawn in {}", f.id, lot.mxvatv_kiowa[l]),
+                Some(f) => {
+                    println!("kiowa: {seat}{}'s, on its steps, drawn in {}", f.id, lot.mxvatv_kiowa[l]);
+                    // Its thrown blades' files, the pack's where it has them (MD109).
+                    let blades = flier_refit::blade_files(res, Some(f)).from_pack;
+                    println!("kiowa: {seat}thrown blades: {blades} of 4 files off {}, the rest the disc's", f.id);
+                }
                 None => println!("kiowa: {seat}MX Unleashed's, drawn in {}", lot.mxvatv_kiowa[l]),
             }
         }

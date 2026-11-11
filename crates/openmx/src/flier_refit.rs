@@ -99,9 +99,9 @@ pub fn kiowa_ride(res: &Res, pack: Option<&PackFlier>) -> Option<vehicle::KiowaR
         Some(psg) => heli.with_model(&psg),
         None => heli,
     };
-    // And the blades it throws (P265), bodies of their own.
-    let heli = match (read(game_sim::kiowa::WRECK_BLADE_PHY), read(game_sim::kiowa::BLADE_MODEL)) {
-        (Some(phy), Some(psg)) => heli.with_blades(&phy, &psg, read(game_sim::kiowa::BLADE_RAYS).as_deref(), read(game_sim::kiowa::BLADE_SHAPE).as_deref()),
+    // And the blades it throws (P265), bodies of their own: the pack's files where it has them (MD109).
+    let heli = match blade_files(res, pack) {
+        BladeFiles { phy: Some(phy), psg: Some(psg), rays, shape, .. } => heli.with_blades(&phy, &psg, rays.as_deref(), shape.as_deref()),
         _ => heli,
     };
     // And the hull those blades meet (C21).
@@ -113,6 +113,40 @@ pub fn kiowa_ride(res: &Res, pack: Option<&PackFlier>) -> Option<vehicle::KiowaR
         Some(col) => heli.with_hull(&col),
         None => heli,
     })
+}
+
+/// The files a helicopter's thrown blades are built off (P265): `wreckblade.phy`, `bladebent.psg`
+/// and its two collision files, the ray probe (`bladebentm.col`) and the mesh (`bladebentf.col`).
+#[derive(Default)]
+pub struct BladeFiles {
+    pub phy: Option<Vec<u8>>,
+    pub psg: Option<Vec<u8>>,
+    pub rays: Option<Vec<u8>>,
+    pub shape: Option<Vec<u8>>,
+    /// How many of the four came off the pack.
+    pub from_pack: usize,
+}
+
+/// The thrown blades' files (MD109): each the pack's where the seat flies one and the pack has the
+/// file, by its name in any folder (MX vs. ATV keeps them as `Veh\WreckBlade.phy`,
+/// `Veh\Anim\bladebent.psg`, `Veh\Col\BladeBent{M,F}.col`), else the disc's out of the machines'
+/// archive `res`. SLUS-21104's helicopter init loads `bladebent` by that one name for both models:
+/// the pack's `bladebent2.psg` goes unread here as it does there.
+pub fn blade_files(res: &Res, pack: Option<&PackFlier>) -> BladeFiles {
+    let mut files = BladeFiles::default();
+    let mut read = |path: &str| {
+        let name = path.rsplit('\\').next().unwrap_or(path);
+        if let Some(b) = pack.and_then(|f| f.files.read_whole(name).ok()) {
+            files.from_pack += 1;
+            return Some(b);
+        }
+        res.find_suffix(path).and_then(|e| res.read(&e.name).ok())
+    };
+    let phy = read(game_sim::kiowa::WRECK_BLADE_PHY);
+    let psg = read(game_sim::kiowa::BLADE_MODEL);
+    let rays = read(game_sim::kiowa::BLADE_RAYS);
+    let shape = read(game_sim::kiowa::BLADE_SHAPE);
+    BladeFiles { phy, psg, rays, shape, ..files }
 }
 
 /// What a livery's flier of one kind is, to tell whether a new pick changes it: the pack and skin

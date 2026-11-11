@@ -313,3 +313,44 @@ fn the_fliers_read_the_packs_cameras_and_particles() {
         "\n{said}"
     );
 }
+
+/// kiowa_switch.rs's fast landing (P265): into the helicopter at 30, up on Cross, nose down on the
+/// stick, then down on Square with the stick still forward, into the ground going fast: on
+/// SLUS-21104's steps by about tick 380, and put back on its skids some 150 ticks after.
+fn fast_landing(name: &str) -> PathBuf {
+    // (ticks, second buttons byte (active low), Cross's pressure, Square's, the left stick's y)
+    let phases = [(30, 0xff, 0, 0, 0x7f), (60, 0xbf, 0xff, 0, 0x7f), (200, 0xff, 0, 0, 0x00), (300, 0x7f, 0, 0xff, 0x00)];
+    let frames: usize = phases.iter().map(|p| p.0).sum();
+    let mut text = format!("# game-sim pad tape: {frames} frames\nformat 1\ntape the helicopter\n");
+    for (ticks, buttons, cross, square, stick_y) in phases {
+        let report = format!("0079ff{buttons:02x}7f7f7f{stick_y:02x}{}{cross:02x}{square:02x}{}", "00".repeat(6), "00".repeat(16));
+        for _ in 0..ticks {
+            text += &format!("frame 0x3d08850a 0x{report} -\n");
+        }
+    }
+    text += "switch 30 helicopter\n";
+    let path = scratch(name);
+    std::fs::write(&path, text).expect("the tape is written");
+    path
+}
+
+#[test]
+fn the_packs_kiowa_throws_the_packs_blades() {
+    // MD109: a pack's helicopter builds the blades its wreck throws off the pack's wreckblade.phy and
+    // bladebent.psg (the bytes MX Unleashed's disc has too); the pack has no blade collision, so
+    // those two are the disc's. On the fast landing it wrecks and throws all four, which are still out
+    // at tick 440.
+    if !pack() {
+        return;
+    }
+    let tape = fast_landing("md109-thrown-blades.tape");
+    for skin in ["1", "3"] {
+        let Some(said) = ride(440, &tape, &["--fliers", "mxvatv", "--flier-skin", skin]) else { return };
+        let line = said.lines().find(|l| l.starts_with("kiowa: thrown blades: ")).unwrap_or_else(|| panic!("no thrown-blades line:\n{said}"));
+        let from: usize = line.split_whitespace().nth(3).and_then(|n| n.parse().ok()).unwrap_or_else(|| panic!("no count in `{line}`"));
+        assert!(from >= 2, "skin {skin}: wreckblade.phy and bladebent.psg are the pack's: {line}");
+        let blades = said.lines().find(|l| l.starts_with("kiowa: blades: ")).unwrap_or_else(|| panic!("skin {skin} threw no blades:\n{said}"));
+        assert_eq!(blades.split_whitespace().nth(2), Some("4"), "skin {skin}: {blades}");
+        println!("skin {skin}: {line}; {blades}");
+    }
+}
