@@ -290,7 +290,7 @@ pub mod flag {
     /// Set on Free06 and Free10 only, when a freeride attaches its AI. With [`NO_RIDER_SWEEP`] also up,
     /// no feeler fan is built at all.
     pub const QUIET_AREA: u64 = 0x40;
-    /// Cleared by every avoidance pass. What sets it was not traced.
+    /// Cleared by every avoidance pass. A hit that sets the bike backing up sets it ([`hit_reaction`]).
     pub const AVOID_DUE: u64 = 0x100;
     /// Push back toward the track's path when the point ahead is off it.
     pub const KEEP_ON_TRACK: u64 = 0x20000;
@@ -1643,8 +1643,12 @@ pub trait Steps {
     fn hand_off(&mut self, brain: &mut Brain, dt: F);
     /// The brain's attached listeners. Its answer is ANDed into the tick's.
     fn listeners(&mut self, brain: &mut Brain, dt: F) -> bool;
-    /// Any mode but [`RIDE`]: the base AI's update, which is the whole tick then.
+    /// Any mode but [`RIDE`]: the base AI's update, which is the whole tick then ([`update_base`]).
     fn other_mode(&mut self, brain: &mut Brain, dt: F) -> bool;
+    /// [`update_base`]'s mode-2 and mode-4 drivers (the base AI's own, not ported). Their answers are
+    /// ANDed into the base update's.
+    fn mode_two(&mut self, brain: &mut Brain, dt: F) -> bool;
+    fn mode_four(&mut self, brain: &mut Brain, dt: F) -> bool;
 }
 
 /// One AI tick of a motocross brain.
@@ -1798,6 +1802,501 @@ pub fn assist(w: &Weights, heading: F, aim: (F, F), on_ground: bool, yaw_rate: &
         let x = Acc::mula(aim.0, w.aim).madd(velocity.x(), keep_aim);
         let z = Acc::mula(aim.1, w.aim).madd(velocity.z(), keep_aim);
         *velocity = Vf::new(x.to_f32(), velocity.y(), z.to_f32(), velocity.w());
+    }
+}
+
+// --- the AI tick's callouts (S312) -------------------------------------------------------------------
+
+/// The base AI's update: the whole tick of a brain that is not [`RIDE`]ing, which [`update`] hands over
+/// to through [`Steps::other_mode`].
+///
+/// With an interface, last tick's ground bit goes into [`tick_flag::WAS_ON_GROUND`] and the rider-to-
+/// brain copy runs. Mode 2 and mode 4 then run their own driver, whose answer the update keeps (any
+/// other mode answers false and runs none). Then, as in [`update`], the controller, the two flagged
+/// steps, the hand-off and the listeners, whose answer is ANDed in. There is no climb rule here. The
+/// hand-off runs with no interface too (the original calls through a null one).
+pub fn update_base(brain: &mut Brain, steps: &mut dyn Steps, dt: F) -> bool {
+    if brain.kind.is_some() {
+        if brain.flags & flag::ON_GROUND != 0 {
+            brain.flags |= tick_flag::WAS_ON_GROUND;
+        } else {
+            brain.flags &= !tick_flag::WAS_ON_GROUND;
+        }
+        steps.feed(brain);
+    }
+    let answer = match brain.mode {
+        2 => steps.mode_two(brain, dt),
+        4 => steps.mode_four(brain, dt),
+        _ => false,
+    };
+    steps.controls(brain);
+    if brain.kind.is_some() && brain.flags & tick_flag::APPROACH != 0 {
+        steps.approach(brain, dt);
+    }
+    if brain.flags & tick_flag::EXTRA != 0 {
+        steps.extra(brain, dt);
+    }
+    steps.hand_off(brain, dt);
+    let heard = steps.listeners(brain, dt);
+    answer & heard
+}
+
+/// What the bike does when [`update`]'s stuck clock runs out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rescue {
+    /// The bike's own put-back, asked with both of its arguments 1.
+    PutBack,
+    /// A reset request of the after-a-wreck kind (1), on the spot (no page): the one a wreck makes.
+    Reset,
+}
+
+/// The stuck rescue (the interface's rescue slot), by the state of the game's current race object:
+/// with none, or in state 3, the bike puts itself back; in any other state it asks for a reset.
+pub fn rescue(race_state: Option<i32>) -> Rescue {
+    match race_state {
+        None | Some(3) => Rescue::PutBack,
+        Some(_) => Rescue::Reset,
+    }
+}
+
+/// The kind bits of a hit that [`hit_reaction`] reacts to.
+pub mod hit {
+    /// Either bit: back up and swerve.
+    pub const BACK_UP: u64 = 0x6;
+    /// Swerve only (when neither [`BACK_UP`] bit is up).
+    pub const SWERVE: u64 = 0x10;
+}
+
+/// The seconds a hit reaction backs up and swerves for.
+pub const RECOVERY_TIME: f32 = 1.0;
+
+/// The value a swerve-only hit hands back to its caller.
+pub const SWERVE_REPLY: f32 = 150.0;
+
+/// The bike's hit reaction (the interface's hit slot), which sets its [`Recovery`].
+///
+/// A [`hit::BACK_UP`] hit raises the brain's [`flag::AVOID_DUE`] and backs up and swerves for
+/// [`RECOVERY_TIME`]; a [`hit::SWERVE`] hit swerves only, and writes [`SWERVE_REPLY`] into the caller's
+/// `reply`. Either way the swerve's bar is drawn: right (1) when `unit()` comes over 0.5, else left (−1).
+/// Any other hit does nothing and draws nothing. The original also normalises the hit's direction into
+/// a local it never reads; the port leaves that out.
+pub fn hit_reaction(kind: u64, brain_flags: &mut u64, recovery: &mut Recovery, reply: &mut F, rng: &mut Rng) {
+    if kind & hit::BACK_UP != 0 {
+        *brain_flags |= flag::AVOID_DUE;
+        recovery.back_up = F(RECOVERY_TIME);
+    } else if kind & hit::SWERVE != 0 {
+        *reply = F(SWERVE_REPLY);
+    } else {
+        return;
+    }
+    recovery.swerve = F(RECOVERY_TIME);
+    recovery.swerve_bar = if rng.unit() <= F(0.5) { F(-1.0) } else { F(1.0) };
+}
+
+impl Recovery {
+    /// The bike tick's countdown, after the hand-off: each timer still above 0 loses `dt` (and may go
+    /// under 0); one at or under 0 is left alone.
+    pub fn count_down(&mut self, dt: F) {
+        if !(op(self.back_up) <= F(0.0)) {
+            self.back_up = self.back_up - dt;
+        }
+        if !(op(self.swerve) <= F(0.0)) {
+            self.swerve = self.swerve - dt;
+        }
+    }
+}
+
+/// One of the brain's attached listeners, as the listener walk reads it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Listener {
+    /// Its state byte: told only with bit 0 up and bits 2 and 3 down.
+    pub state: u8,
+    /// Its wants word: told only with bit 1 up.
+    pub wants: u32,
+}
+
+/// The listener walk that ends the tick: with the brain's listening bit up (`listening`), every
+/// listener on its list, in order, whose [`Listener`] bits say so is told the tick (`tell` gets its
+/// index; the original calls the listener's own tick with `dt`). The answer is always true.
+pub fn listener_walk(listening: bool, listeners: &[Listener], mut tell: impl FnMut(usize)) -> bool {
+    if listening {
+        for (i, l) in listeners.iter().enumerate() {
+            if l.state & 0b1101 == 0b0001 && l.wants & 2 != 0 {
+                tell(i);
+            }
+        }
+    }
+    true
+}
+
+/// The brain's steering filter (its extra step, under [`tick_flag::EXTRA`]), lane by lane on the
+/// controls' first three lanes (the bar, the lean and the third).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SteerFilter {
+    /// `SteeringRateFilter`: the most a lane may move in a second.
+    pub rate: Vf,
+    /// `SteeringJitterFilter`: a move smaller than this is jitter, and is scaled by [`Self::gain`].
+    pub jitter: Vf,
+    pub gain: Vf,
+    /// The filtered controls, from the tick before.
+    pub out: Vf,
+}
+
+/// The steering filter: each lane's move from [`SteerFilter::out`] to the controller's `wish` is scaled
+/// by the gain while it is under the jitter either way, left as it is up to `rate·dt`, and clamped to
+/// that past it. The filtered value is kept and becomes the controls, whole quadword (its `w` too).
+pub fn filter_steering(f: &mut SteerFilter, wish: &mut Vf, dt: F) {
+    let rate = f.rate.merge(Dest::XYZ, f.rate.mul(Vf::splat(dt.to_f32())));
+    let delta = wish.merge(Dest::XYZ, wish.sub(f.out));
+    let lane = |d: f32, jitter: f32, gain: f32, rate: f32| {
+        let (d, jitter, rate) = (F(d), F(jitter), F(rate));
+        if !(op(d) < F(0.0)) {
+            if op(d) < op(jitter) {
+                d * F(gain)
+            } else if op(d) <= op(rate) {
+                d
+            } else {
+                rate
+            }
+        } else if !(op(d) <= op(-jitter)) {
+            d * F(gain)
+        } else if op(d) < op(-rate) {
+            -rate
+        } else {
+            d
+        }
+    };
+    let step = Vf::new(
+        lane(delta.x(), f.jitter.x(), f.gain.x(), rate.x()).to_f32(),
+        lane(delta.y(), f.jitter.y(), f.gain.y(), rate.y()).to_f32(),
+        lane(delta.z(), f.jitter.z(), f.gain.z(), rate.z()).to_f32(),
+        delta.w(),
+    );
+    f.out = f.out.merge(Dest::XYZ, f.out.add(step));
+    *wish = f.out;
+}
+
+/// The bits of the brain's second flag word ([`bump`]'s) that [`habits`] keeps.
+pub mod habit {
+    /// [`super::bump::A`]: let the preload go (lean back, and fire the bike's preload).
+    pub const POP: u64 = 0x1;
+    /// [`super::bump::B`]: wind up a preload.
+    pub const PRELOAD: u64 = 0x2;
+    /// The preload's amount is worked out for this one.
+    pub const PRELOAD_SET: u64 = 0x4;
+    /// Pull the clutch this tick.
+    pub const CLUTCH: u64 = 0x8;
+    /// The clutch was pulled for the node it is on.
+    pub const CLUTCHED: u64 = 0x10;
+    /// Pull the clutch when the start gate's delay is over.
+    pub const GATE_CLUTCH: u64 = 0x20;
+    /// This flight's landing lag is still to be rolled.
+    pub const LAG_DUE: u64 = 0x40;
+    /// A brilliant moment is running.
+    pub const BRILLIANT: u64 = 0x80;
+    /// Wheelie off the start once the gate's delay is over.
+    pub const GATE_WHEELIE: u64 = 0x100;
+    /// Crossing up.
+    pub const CROSS_UP: u64 = 0x200;
+    /// Cross up in the next flight.
+    pub const CROSS_UP_DUE: u64 = 0x400;
+}
+
+/// The route node bits [`habits`] reads.
+pub mod node_flag {
+    /// Lean by the rider's pull-back amount on the ground here.
+    pub const PULL_BACK: u32 = 0x8;
+    /// A take-off: wind up and fire the preload here.
+    pub const TAKE_OFF: u32 = 0x40;
+    /// Pull the clutch here (once).
+    pub const CLUTCH: u32 = 0x100;
+}
+
+/// The route node the brain is on, as [`habits`] reads it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct HabitNode {
+    pub flags: u32,
+    /// The node's speed (under 0: none, read as 150) and the gain the preload is worked out by.
+    pub speed: F,
+    pub gain: F,
+}
+
+/// What [`habits`] reads and writes: the brain's, the rider's (its [`Profile`] and clocks), its bike's
+/// and its race card's.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Habits {
+    // The brain's.
+    pub mode: i32,
+    pub node: Option<HabitNode>,
+    /// The brain's start state (3 at the start) and the preload, in percent, it starts with.
+    pub start_state: i32,
+    pub start_preload: F,
+    /// The flag word ([`flag`], [`tick_flag`]; read only) and the second one ([`habit`]).
+    pub flags: u64,
+    pub moves: u64,
+    pub speed: F,
+    pub steer: F,
+    pub pitch: F,
+    pub throttle: F,
+    pub brake: F,
+    /// The bike's position and forward axis, as the copy left them, and the ground's height under it.
+    pub position: Vf,
+    pub forward: Vf,
+    pub ground: F,
+    /// Under this height over the ground (or [`Self::cross_up_height`]) the bike is low in the air.
+    pub low_air: F,
+    /// The route's direction.
+    pub direction: Vf,
+    // The rider's.
+    /// The preload: the base, the share per foot a second under the node's speed, and the amount.
+    pub preload_base: F,
+    pub preload_per_speed: F,
+    pub preload: F,
+    pub pull_back_amount: F,
+    /// The landing lag: the least air time it is rolled for, the chance in percent, the longest, and the
+    /// one rolled (−1 for none).
+    pub lag_hang_time: F,
+    pub lag_chance: F,
+    pub lag_time: F,
+    pub lag: F,
+    /// The horse power scale in percent, and the brilliant moment: its chance in percent, the shortest,
+    /// the random part, its clock and the second-long clock between rolls.
+    pub horse_power: F,
+    pub brilliant_chance: F,
+    pub brilliant_min: F,
+    pub brilliant_random: F,
+    pub brilliant: F,
+    pub brilliant_roll: F,
+    /// The start: the gate's delay, the clock since the start, how long the rider sits still at it.
+    pub gate_delay: F,
+    pub gate_clock: F,
+    pub gate_wait: F,
+    /// The wheelie off the start: the longest, its clock and the lean it holds.
+    pub wheelie_max: F,
+    pub wheelie: F,
+    pub wheelie_lean: F,
+    /// The cross-up: its side (±1), length, clock, chance in percent, shortest and longest, the height
+    /// under which the bike is low, and the least bar it holds low in the air.
+    pub cross_up_side: F,
+    pub cross_up_time: F,
+    pub cross_up: F,
+    pub cross_up_chance: F,
+    pub cross_up_min: F,
+    pub cross_up_max: F,
+    pub cross_up_height: F,
+    pub low_air_bar: F,
+    // The bike's.
+    /// The engine's power scale (1 in a brilliant moment, else the horse power over 100).
+    pub power_scale: F,
+    /// The preload: its force, its firing word, its clock and what that restarts from, and its most.
+    pub preload_force: F,
+    pub preload_firing: i32,
+    pub preload_clock: F,
+    pub preload_clock_start: F,
+    pub max_preload: F,
+    pub clutch: F,
+    /// The body's speed along its forward axis.
+    pub forward_speed: F,
+    // The race card's and the score keeper's.
+    pub air_time: F,
+    /// The card's racing bit (it comes back on at a respawn) and the clock the landing lag runs against.
+    pub racing: bool,
+    pub lag_clock: F,
+    pub keeper_state: i32,
+}
+
+/// The rider's habits (the interface's target-approach slot, under [`tick_flag::APPROACH`]): the human
+/// touches on top of the controller — the preload into a take-off, the brilliant moment, the landing
+/// lag, the start gate, the clutch, the wheelie off the start and the cross-up.
+///
+/// In order:
+/// - **Preload.** Riding, or on no node: at the start (state 3) a wanted preload not yet set is set to
+///   the start's percent and popped at once; off the start it is let go. On a take-off node with a
+///   preload wanted: once, `base + per_speed·(gain·(speed − own speed))` clamped to 0..1; the lean is
+///   −1 to pop it, else pushed to 1 if under 0.9. Anywhere else the preload is not set.
+/// - **Brilliant moment.** Once a second (horse power under 100, none running) `100·unit()` at or under
+///   its chance starts one of `min + random·unit()` seconds at full power; when it runs out the power
+///   goes back to the horse power.
+/// - **Landing lag.** On the ground the lean takes the pull-back on a pull-back node and the lag is
+///   due; leaving the ground makes it due; once the flight's air time reaches the hang time,
+///   `100·unit()` under the chance rolls a lag of `time·unit()`.
+/// - **Start and lag.** Racing and inside the lag: no throttle on the ground. Otherwise, before the
+///   start's wait is over the rider sits still (no throttle, bar or lean) and the clock runs; after it,
+///   the lag is −1. In the air there is no brake.
+/// - **Fire.** Popping on a take-off node (or riding): the bike's preload fires at its most times the
+///   amount, the lean is −0.3, and `100·unit()` under the chance makes the next flight cross up.
+/// - **Clutch.** A clutch node pulls it once; the gate's delay over pulls it once; a pull is one tick.
+///   The gate's delay over also holds the wheelie's lean for up to its longest.
+/// - **Cross-up.** In the air with one due (the keeper not in state 3), the side is the sign of the
+///   route's way ahead on the bike's forward axis — the way from the bike to the card's spot on the
+///   track, or with no track the route's direction — the length is drawn and it starts. Low in the air
+///   it holds at least the bar's least; high, it steers to its side until its time is up. On the ground
+///   it stops. Just off the ground, with none due, the side is set to −1 (the original crosses a zero
+///   vector there).
+///
+/// `spot_point` writes the card's spot on the track (`race::TrackPaths::spot_point`, which may also
+/// clamp the spot) into the vector it is handed; `None` when the keeper has no track.
+pub fn habits(h: &mut Habits, spot_point: Option<&mut dyn FnMut(&mut Vf)>, rng: &mut Rng, dt: F) {
+    use habit::*;
+    let take_off = h.node.is_some_and(|n| n.flags & node_flag::TAKE_OFF != 0);
+    match h.node {
+        Some(n) if h.mode != RIDE => {
+            if h.moves & PRELOAD == 0 || n.flags & node_flag::TAKE_OFF == 0 {
+                h.moves &= !PRELOAD_SET;
+            } else {
+                if h.moves & PRELOAD_SET == 0 {
+                    let goal = if op(n.speed) < F(0.0) { F(150.0) } else { n.speed };
+                    let p = h.preload_base + h.preload_per_speed * (n.gain * (goal - h.speed));
+                    h.preload = p;
+                    if !(op(p) <= F(1.0)) {
+                        h.preload = F(1.0);
+                    } else if op(p) < F(0.0) {
+                        h.preload = F(0.0);
+                    }
+                    h.moves |= PRELOAD_SET;
+                }
+                if h.moves & POP != 0 {
+                    h.pitch = F(-1.0);
+                } else if op(h.pitch) < F(0.9) {
+                    h.pitch = F(1.0);
+                }
+            }
+        }
+        _ => {
+            if h.start_state == 3 {
+                if h.moves & PRELOAD != 0 && h.moves & PRELOAD_SET == 0 {
+                    h.preload = F(0.01) * h.start_preload;
+                    h.moves |= POP | PRELOAD_SET;
+                }
+            } else {
+                h.preload = F(0.0);
+                h.moves &= !(POP | PRELOAD_SET);
+            }
+        }
+    }
+
+    if !(op(h.brilliant_roll) < F(1.0)) && h.moves & BRILLIANT == 0 && op(h.horse_power) < F(100.0) {
+        if F(100.0) * rng.unit() <= op(h.brilliant_chance) {
+            h.moves |= BRILLIANT;
+            h.brilliant = h.brilliant_min + h.brilliant_random * rng.unit();
+            h.power_scale = F(1.0);
+        }
+        h.brilliant_roll = F(0.0);
+    }
+    if h.moves & BRILLIANT != 0 {
+        h.brilliant = h.brilliant - dt;
+        if op(h.brilliant) <= F(0.0) {
+            h.moves &= !BRILLIANT;
+            h.power_scale = F(0.01) * h.horse_power;
+        }
+    }
+    h.brilliant_roll = h.brilliant_roll + dt;
+
+    let on_ground = h.flags & flag::ON_GROUND != 0;
+    if on_ground {
+        if h.node.is_some_and(|n| n.flags & node_flag::PULL_BACK != 0) {
+            h.pitch = h.pull_back_amount;
+        }
+        h.moves &= !LAG_DUE;
+    } else if h.flags & tick_flag::WAS_ON_GROUND != 0 {
+        h.moves |= LAG_DUE;
+    }
+    if h.moves & LAG_DUE != 0 && !(op(h.air_time) < op(h.lag_hang_time)) {
+        if F(100.0) * rng.unit() < op(h.lag_chance) {
+            h.lag = h.lag_time * rng.unit();
+        }
+        h.moves &= !LAG_DUE;
+    }
+
+    if h.racing && op(h.lag_clock) <= op(h.lag) {
+        if on_ground {
+            h.throttle = F(0.0);
+        }
+    } else if op(h.gate_clock) < op(h.gate_wait) {
+        h.gate_clock = h.gate_clock + dt;
+        h.throttle = F(0.0);
+        h.steer = F(0.0);
+        h.pitch = F(0.0);
+    } else {
+        h.lag = F(-1.0);
+    }
+    if !on_ground {
+        h.brake = F(0.0);
+    }
+
+    if h.moves & POP != 0 && (take_off || h.mode == RIDE) {
+        h.preload_force = h.max_preload * h.preload;
+        h.preload_firing = 1;
+        h.preload_clock = h.preload_clock_start;
+        h.pitch = F(-0.3);
+        if F(100.0) * rng.unit() < op(h.cross_up_chance) {
+            h.moves |= CROSS_UP_DUE;
+        }
+    }
+
+    if let Some(n) = h.node {
+        if n.flags & node_flag::CLUTCH == 0 {
+            h.moves &= !CLUTCHED;
+        } else if h.moves & CLUTCHED == 0 {
+            h.moves |= CLUTCH;
+        }
+    }
+    let gate_over = |h: &Habits| !(op(h.gate_clock) < op(h.gate_delay));
+    if h.moves & GATE_CLUTCH != 0 && gate_over(h) {
+        h.moves = (h.moves & !GATE_CLUTCH) | CLUTCH;
+    }
+    if h.moves & CLUTCH != 0 {
+        h.clutch = F(1.0);
+        h.moves = (h.moves & !CLUTCH) | CLUTCHED;
+    } else {
+        h.clutch = F(0.0);
+    }
+    if h.moves & GATE_WHEELIE != 0 && gate_over(h) {
+        h.pitch = h.wheelie_lean;
+        h.wheelie = h.wheelie + dt;
+        if !(op(h.wheelie) <= op(h.wheelie_max)) {
+            h.moves &= !GATE_WHEELIE;
+        }
+    }
+
+    let height = F(h.position.y()) - h.ground;
+    // The way ahead the cross-up's side is read off: still the zero quadword unless a cross-up starts.
+    let mut way = Vf::new(0.0, 0.0, 0.0, 1.0);
+    if !on_ground && h.moves & CROSS_UP_DUE != 0 && h.keeper_state != 3 {
+        match spot_point {
+            Some(spot_point) => {
+                spot_point(&mut way);
+                way = way.merge(Dest::XYZ, way.sub(h.position));
+            }
+            None => way = h.direction,
+        }
+        let ahead = Acc::mula(way.x(), h.forward.x()).madd(way.z(), h.forward.z());
+        h.cross_up_side = if op(ahead) <= F(0.0) { F(-1.0) } else { F(1.0) };
+        h.cross_up_time = h.cross_up_min + (h.cross_up_max - h.cross_up_min) * rng.unit();
+        h.cross_up = F(0.0);
+        h.moves = (h.moves | CROSS_UP) & !CROSS_UP_DUE;
+    } else if on_ground {
+        h.moves &= !CROSS_UP;
+    } else if h.flags & tick_flag::WAS_ON_GROUND != 0 {
+        let across = Acc::mula(way.x(), h.forward.z()).msub(way.z(), h.forward.x());
+        h.cross_up_side = if op(across) <= F(0.0) { F(-1.0) } else { F(1.0) };
+    }
+
+    if !on_ground {
+        if op(height) <= op(h.low_air) || op(height) < op(h.cross_up_height) {
+            if h.moves & CROSS_UP == 0 && !(op(h.forward_speed) <= F(0.0)) {
+                let bar = h.cross_up_side * h.low_air_bar;
+                if op(h.steer.abs()) < op(bar) {
+                    h.steer = bar;
+                }
+            }
+        } else if h.moves & CROSS_UP != 0 {
+            h.steer = h.cross_up_side;
+            h.cross_up = h.cross_up + dt;
+            if !(op(h.cross_up) <= op(h.cross_up_time)) {
+                h.moves &= !CROSS_UP;
+            }
+        }
     }
 }
 
