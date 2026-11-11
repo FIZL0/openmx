@@ -70,3 +70,11 @@ Task S289. 2026-11-10.
 ## Next
 
 None: S289 is done.
+
+## Gate: mxvatv_bike_ride SIGKILLed (not S289's)
+
+The gate's mxvatv_bike_ride died by signal 9 near test 117/118, with no panic, twice. Split by name,
+it was the_parts_box_is_the_originals: its random tree node made tree_in_ram loop until memory ran out.
+Main fixed this at 3bbecc9b3 after this branch forked. I cherry-picked it unchanged; it isn't
+S289's change. The other test in that letter group, the_other_riders_pre_process_leave_the_bike_alone,
+ran past a 3000 s limit when run alone under load. It passed in the full gate run.
