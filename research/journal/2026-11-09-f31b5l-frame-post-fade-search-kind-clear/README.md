@@ -14,3 +14,10 @@ clear have function oracles. The post's eleven listeners (the HUD, race progress
 the original's code. They are shown not to touch the bike on C15, but they are not ported. The show's
 switch-on and spatial insert are also still handed on. Both are filed as follow-ups. Details in
 `1-frame-post-fade-search-kind-clear-*.md`.
+
+## 2026-11-11 — the tick
+The work above merged on 11-10 as a pre-gate commit (66c902b70) without the task's tick. This
+session re-ran the gate: it was red on main on `mxvatv_car_frame::all_eight_pieces_are_mx_unleasheds`
+(deterministic: "preload: fired, degenerate seen only 19 times" against the floor of 20), the same
+rare-branch floor B36 fixed for the six-piece runs. The eight-piece run now goes 6,000 frames too.
+No change to the F31b5l port itself; its Not verified list stands as written in the FINAL entry.
