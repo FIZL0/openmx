@@ -11521,3 +11521,20 @@ atv_wheel_ctor              atv 0x004a0030 = the wheel constructor: lock +0x70 0
 #   present -> top = (0x3dd67756 * redline) * inv into both (+0x90), and slots 2 and 3 when both present.
 #   Reverse: on -> reversing 1, gear 1, ratio = final * -ratios[0], inv = 1/ratio (top speeds left);
 #   off -> reversing 0, set-gear(1).
+# F55: the rider's listener step's own code (0x004f2ad0, a0 rider, f12 dt; answer the frame's), ported as
+# game_sim::handling::rider::{listener_step, frame, alpha, copy_after, extra_step}. Proof:
+# tests/mxvatv_rider_modes.rs (the_riders_listener_step_is_the_originals, 3 x 20,000 cases, frame unridden)
+# and tests/mxvatv_bike_ride.rs's rider leaf (ride-2, flip-1 bit-exact, RAM alike). Journal:
+# research/journal/2026-11-11-f55-rider-leaf-own-code/.
+#   Frame 0x004f1790: node +0x24 or record +0x378 null -> 1. 0x004f1610 (node alpha, setter 0x0018d170 =
+#   node +0x17c, old answered): +0x3a4 2 -> 0.5; 3 -> +0x8fc ? 0.5 : 1.0 (the switch read twice); else record
+#   +0x278 1 -> 1.0, 2 -> 0.5; then record +0x27c > 0: +0x280 == 0 ? 0.1 : clamp(0.1 + (fade-from)/(0-from)*0.9)
+#   (adda/madd). Clocks +0x360/+0x364 toward +0x340/+0x344 by +-rate*dt (rate +0x350/+0x354 with +0x338/+0x33c
+#   set, else +0x358/+0x35c). Record +8 ? mode machine 0x004ef320 : +0x25c = 0. World step 0x00505d50 (v0 the
+#   frame's), then vt +0x148.
+#   Copy 0x004f2970: record ? +0xb0c = rec +0x214 : (+0x2f4 & +0x9d4) ? +0xb0c = +0xa74, +0xa70 == 1 ? lq
+#   rec(null)+0x220.. -> +0x9e0..+0xa00. (+0x2f4 & +0x904): rec && rec +0x138 ? rec +0x220 -> +0x910 :
+#   0x00194c20(+0xb14, 0, +0x910). (+0x2f4 & +0xa94): same into +0xaa0, then rec +0xa0 -> +0xab0.
+#   Extra 0x004f2d50 (+0xd34): entry rider +0xb20 + 32*rec +0x1e8 (time +0, step +4, down +8). Down: time <= 0
+#   -> +0xd30 = +0xd2c = 0, 1; rec +0x1a8 > 5: +0xd30 += dt, past time -> +0xd2c = clamp(+0xd2c - step, 0,
+#   +0xd38), +0xd30 = 0, 1. Up: rec +0x1a8 > 10, the same with + step.

@@ -15759,13 +15759,10 @@ fn net_post_in_ram(ee: &mut Ee, dt: F) {
 // S285), its bone collision solves (bone::solve, S278a), its part clear and hand-over (S278), and the
 // leaf's own wreck spots into the bike's record (rider::wreck_spots).
 
-/// The rider's listener step's three calls: the rider's frame (the mode machine, then the rider's
-/// world step and its vt `+0x148`), the copy after it, and the step run while the rider's `+0xd34` is
-/// set. The frame's mode machine; the machine's outside calls (S278b's oracle's addresses).
-const RIDER_FRAME: u32 = 0x004f_1790;
-const RIDER_AFTER: u32 = 0x004f_2970;
-const RIDER_EXTRA: u32 = 0x004f_2d50;
-const RIDER_MODES: u32 = 0x004e_f320;
+/// The rider's ragdoll world's step, the frame's call after the mode machine (S280 ports it); the
+/// machine's outside calls (S278b's oracle's addresses). The listener step's own code is Rust's
+/// (F55: `rider::listener_step`).
+const RIDER_WORLD_STEP: u32 = 0x0050_5d50;
 const RIDER_RESET: u32 = 0x004e_ef40;
 const RIDER_WRECK_ENTRY: u32 = 0x004e_d700;
 const RIDER_POSE: u32 = 0x0050_5720;
@@ -15891,6 +15888,12 @@ impl rider::Rider for LeafRider<'_> {
                 0
             }
             C::Grow { list, bytes } => call_from_hook_dt(self.ee, HEAP_RESIZE, &[u64::from(list), u64::from(bytes), 0x0039_683e, 0x4cf], dt),
+            C::WorldStep => call_from_hook_dt(self.ee, RIDER_WORLD_STEP, &[r], dt),
+            C::AfterStep => {
+                let f = vt(self.ee, RIDER + 4, 0x148);
+                call_from_hook_dt(self.ee, f, &[r], dt)
+            }
+            C::NodePosition { node, out } => call_from_hook_dt(self.ee, NODE_POSITION, &[u64::from(node), 0, u64::from(out)], dt),
         };
         let name = match c {
             C::Rand => "> rand",
@@ -15906,6 +15909,9 @@ impl rider::Rider for LeafRider<'_> {
             C::BodyInertia { .. } => "= body inertia",
             C::BodyAt { .. } => "= body at",
             C::Grow { .. } => "> heap resize",
+            C::WorldStep => "> world step",
+            C::AfterStep => "> after step",
+            C::NodePosition { .. } => "> node position",
         };
         leaf_served(name);
         v as u32
@@ -15913,27 +15919,14 @@ impl rider::Rider for LeafRider<'_> {
 }
 
 /// **The rider's listener step** on the ports ([`TreeInRam`] when [`in_rust`] names `rider leaf`):
-/// the rider's frame runs in the interpreter with its mode machine [`rider::modes`]'s, its bone
-/// collision solves [`bone::solve`]'s (the scene's calls the original's), its part clears and
-/// hand-over [`rider::clear`]'s and [`rider::hand_over`]'s; then the wreck spots
-/// ([`rider::wreck_spots`]); then the copy after and, with `+0xd34` set, the extra step, both the
-/// original's. The bike's record gets every word the rider writes into it from the port.
+/// [`rider::listener_step`] (F55: the frame's body, the copy after and the extra step Rust's), its
+/// mode machine [`rider::modes`]; the rider's world step and its vt `+0x148` run in the interpreter
+/// with its bone collision solves [`bone::solve`]'s (the scene's calls the original's), its part
+/// clears and hand-over [`rider::clear`]'s and [`rider::hand_over`]'s. The bike's record gets every
+/// word the rider writes into it from the port.
 fn rider_leaf(ee: &mut Ee, dt: F) {
     let map = nat05_map();
     let curve = curve();
-    ee.hooks.insert(
-        RIDER_MODES,
-        Box::new(move |ee: &mut Ee| {
-            assert_eq!(ee.r(4) as u32, RIDER, "the mode machine's rider");
-            let dt = F(ee.f(12));
-            let (pc, ra, sp) = (ee.pc, ee.r(31), ee.r(29));
-            rider::modes(&mut LeafRider { ee }, RIDER, dt, Some(map));
-            ee.pc = pc;
-            ee.set(29, sp);
-            ee.set(31, ra);
-            leaf_served("= modes");
-        }),
-    );
     ee.hooks.insert(
         BONE_SOLVE,
         Box::new(move |ee: &mut Ee| {
@@ -15959,19 +15952,17 @@ fn rider_leaf(ee: &mut Ee, dt: F) {
             leaf_served("= hand-over");
         }),
     );
-    ee.set(28, GP);
-    ee.call(RIDER_FRAME, &[u64::from(RIDER)], &[dt.0], BUDGET);
-    for a in [RIDER_MODES, BONE_SOLVE, PART_CLEAR, HAND_OVER] {
+    let ridden = ee.u32_at(ee.u32_at(RIDER + rider::RECORD) + rider::R_RIDDEN) != 0;
+    rider::listener_step(&mut LeafRider { ee }, RIDER, dt, Some(map));
+    for a in [BONE_SOLVE, PART_CLEAR, HAND_OVER] {
         ee.hooks.remove(&a);
     }
-    rider::wreck_spots(&mut RiderRam { ee, overlay: None }, RIDER);
-    leaf_served("= wreck spots");
-    ee.set(28, GP);
-    ee.call(RIDER_AFTER, &[u64::from(RIDER)], &[], BUDGET);
-    if ee.u32_at(RIDER + 0xd34) != 0 {
-        ee.set(28, GP);
-        ee.call(RIDER_EXTRA, &[u64::from(RIDER)], &[dt.0], BUDGET);
-        leaf_served("> extra step");
+    leaf_served("= listener step");
+    if ridden {
+        leaf_served("= modes");
+    }
+    if ee.u32_at(RIDER + rider::EXTRA_ON) != 0 {
+        leaf_served("= extra step");
     }
 }
 
@@ -15999,7 +15990,17 @@ fn ride_replays_with_the_rider_leaf_on_the_ports() {
     assert_eq!(leaf_off(&off), Vec::<String>::new(), "the RAM is the handing run's but the ground query's ring");
     assert_eq!(
         served.into_iter().collect::<Vec<_>>(),
-        [("= bone solve", 12393), ("= hand-over", 459), ("= modes", 459), ("= switch", 1836), ("= wreck spots", 459), ("> extra step", 459)],
+        [
+            ("= bone solve", 12393),
+            ("= extra step", 459),
+            ("= hand-over", 459),
+            ("= listener step", 459),
+            ("= modes", 459),
+            ("= switch", 1836),
+            ("> after step", 459),
+            ("> node position", 459),
+            ("> world step", 459)
+        ],
         "{census:?}"
     );
 }
@@ -16022,17 +16023,20 @@ fn flip_replays_with_the_rider_leaf_on_the_ports() {
             ("= body mass", 36),
             ("= body target", 55),
             ("= bone solve", 12303),
+            ("= extra step", 465),
             ("= gather", 68),
             ("= hand-over", 465),
+            ("= listener step", 465),
             ("= modes", 465),
             ("= riding reset", 1),
             ("= switch", 1501),
             ("= wreck entry", 1),
-            ("= wreck spots", 465),
-            ("> extra step", 465),
+            ("> after step", 465),
+            ("> node position", 397),
             ("> pose", 4),
             ("> rand", 5),
             ("> settle", 4),
+            ("> world step", 465),
             ("> wreck cue", 1)
         ],
         "{census:?}"
