@@ -1642,6 +1642,39 @@ ai_route_follow             boot 0x00283a10 VehicleAI's own route follower: path
 ai_seek_path_end            boot 0x0038496c inside ai_tick_flag: where the path branch (and the seeker)
 #                                           joins the tail; S309's path-branch oracles stop here
 #                                           (the goal's spot search takes a0 = net from the seeker)
+ai_seek_root_ctor           boot 0x003a9520 MXFreestyleData ctor: the seeker root (ai_seek_sequence_root's
+#                                           word). S313 (ai::seek::load), proved on recording2's free09
+ai_seek_load                boot 0x003a9680 (root, hit.dat ini, slots): param_3 sets of 0x740 into
+#                                           root+0x38 (+0x34 allocated, +0x30 used, bumped by 0x003a9d60
+#                                           as riders join; 0x003a6600 sets set+0x54 = owner). [HitData]
+#                                           EnableAllHits -> root+0x58; HitDBFilename/HitSetDBFilename get
+#                                           the track folder in front. [Progression HitSets]/[Run HitSets]
+#                                           HitSetID lists read with a running cursor
+ai_seek_hit_db              boot 0x00323b00 hit DB: [General] TotalHits, NextHitID (u16 base 10,
+#                                           default 1); per n [Hit n] HitID (0 -> the counter, which
+#                                           counts on, 0x00323c90). Record 0x130, u16 id +0x120
+ai_seek_hit_read            boot 0x00322800 [HitZone Start n] -> +0xc0, TakeOff -> +0, Landing -> +0x60;
+#                                           each Position +0x20, LookVector +0x30, Scale +0x40 xyz,
+#                                           TargetVelocity +0, TargetPreload +0x4c, TargetPosition +0x10
+ai_seek_hit_set_db          boot 0x00323d30 [General] TotalHitSets, NextHitSetID; [HitSet n] HitSetID
+#                                           (0 -> counter from 1, 0x00323fd0), repeated HitID keys
+ai_seek_targets             boot 0x00324610 one 0x48 target per hit: +0x3c hit, +0x40 mgr+0x48 records
+#                                           of 0x30 (done u16 +0x20 bit 2, ctor 0x00322b90); points
+#                                           setup +0xe0 / take-off +0x20 / landing +0x80 put on the
+#                                           ground first by 0x001dc960 (y only)
+ai_seek_hit_set_lists       boot 0x00324b90 one holder per set (+0 entry, u16 id at entry+8; +4 count;
+#                                           +0xc items): a HitID -> the first target whose hit id matches
+ai_seek_zones               boot 0x00326330 [Activity Start Zones] ASZCount; [ASZ n] 0xa0 groups,
+#                                           n at +0x74; read by 0x003259b0: Position +0x50 (then put on
+#                                           the ground), LookVector +0x60, Scale, Type via 0x00410c50
+#                                           (Hit 1 / Run 2 / Race 3 / Stunt 4 at +0x78), HitSetID
+#                                           (default -1; +0x48 = the first list of that id, u32 compare),
+#                                           AIDifficulty +0x94; +0x70 the last place in its progression
+#                                           list (-1 none, Race/Stunt 0)
+ai_seek_zone_open           boot 0x003256f0 +0x44: two open bytes (players 0, 1), zeroed by 0x003259a0;
+#                                           0x00330f10..0x00331030 sets bit 0 (+bit 4) from the save
+#                                           profile (Hit: byte place+0x20 bit 0; Run: place+0x25;
+#                                           Race: a setting; Stunt: +0x18); bit 2 = shown
 ai_feed                     boot 0x0027fbd0 MXVehicleAIInterface vt+0x8: bike frame (+0x18's
 #                                           +0x80..+0xbc) into ai +0x90..+0xcc, body velocity/spin
 #                                           into +0x50/+0x60/+0x70, |v| into +0x80, ground normal
