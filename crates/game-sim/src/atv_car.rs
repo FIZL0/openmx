@@ -173,6 +173,8 @@ pub struct Car {
     /// (MD127).
     pub sort_rays: bool,
     pub sort: SortAnswer,
+    /// The shared smooth noise's answer to [`Call::Noise`] (MD125).
+    pub noise: F,
 }
 
 /// What the car's three listeners call, and this module does not port, in the order the original
@@ -243,6 +245,11 @@ pub enum Call {
     WreckLook(bool),
     /// The landing's sound played with the shock (or velocity) in the node's frame.
     LandingSound(Vf),
+    /// What the engine hands out (MD125, [`Pieces`]): its sound's wobble at the bottom of the revs
+    /// asks the shared smooth noise at a time (into [`Car::noise`]); a shift, with the engine's sound,
+    /// plays the shift on it.
+    Noise(F),
+    ShiftSound,
     /// What the contact sort and the probe hand out (MD127, [`Pieces`]): the sort's ray probe placed
     /// at the car's frame ([`Car::matrix`], its vt `+0xcc`) and searched (into [`Car::sort`]); a
     /// struck object's listeners told of the hit (each of them, vt `+0xc` with 0, 0), by the hit's
@@ -538,6 +545,9 @@ pub struct Keys {
     pub wings: Vec<Wing>,
     /// Each tire's keys (MD124).
     pub tires: [TireKeys; 4],
+    /// The engine's (MD125): with them [`Pieces`] runs the engine's step, its shift and its reverse
+    /// switch; without, those go to the rest.
+    pub engine: Option<EngineKeys>,
 }
 
 /// The preload's state: it may wind up, it is pushing, it is armed by a forward lean; the wind-up
@@ -606,14 +616,18 @@ pub struct State {
     pub launch_boost: F,
     /// Each tire's own state (MD124).
     pub tires: [TireState; 4],
+    /// The engine's running words (MD125); its reverse word is [`State::reversing`], and the launch's
+    /// torque scale [`State::launch_boost`].
+    pub engine: EngineState,
 }
 
 /// **The car's [`Steps`] with MX Unleashed's pieces ported** (MD106a, MD126), as SLUS-21104 builds
 /// them: the controls, the centre of mass's travel, the anti-slide, the preload, the launch and the
 /// aero, and (MD124) each tire's step ([`tire_step`]), run on [`Keys`] and [`State`]; and (MD127) the
-/// contact sort and each tire's probe, on the [`Car`]'s and [`Tire`]s' words. Every other call, the
-/// controls' reverse switch, the preload's cue, a tire step on or handed a mover's contact, and what
-/// the sort and the probe hand out go to `rest`.
+/// contact sort and each tire's probe, on the [`Car`]'s and [`Tire`]s' words; and (MD125), given the
+/// engine's keys, the engine's step, its shift and its reverse switch. Every other call, the
+/// controls' reverse switch without the engine's keys, the preload's cue, a tire step on or handed a
+/// mover's contact, and what the sort, the probe and the engine hand out go to `rest`.
 pub struct Pieces<R> {
     pub keys: Keys,
     pub state: State,
@@ -634,7 +648,10 @@ impl<R: Steps> Pieces<R> {
         match c {
             Call::Controls(dt) => {
                 if let Some(r) = controls(&self.keys, &mut self.state, car, dt) {
-                    self.rest.call(Call::Reverse(r), car, body);
+                    // The engine's reverse switch, the engine's piece's when it has one.
+                    if !self.answer(Call::Reverse(r), car, body) {
+                        self.rest.call(Call::Reverse(r), car, body);
+                    }
                 }
                 // The rears' friction scales are the words their tire steps read (MD124's keys).
                 self.keys.tires[2].friction_scale = self.state.rear_friction[0];
@@ -661,6 +678,20 @@ impl<R: Steps> Pieces<R> {
             }
             Call::SortContacts => sort_contacts(car, body, &mut self.rest),
             Call::Probe(k, _) => probe(k, car, body, &mut self.rest),
+            Call::Engine(h) => {
+                let Keys { engine: Some(e), tires, .. } = &mut self.keys else { return false };
+                engine_step(e, tires, &mut self.state, car, body, h, &mut self.rest);
+            }
+            Call::Shift(dt) => {
+                let Keys { engine: Some(e), tires, .. } = &mut self.keys else { return false };
+                if shift(e, tires, &mut self.state, car, dt) && e.sound {
+                    self.rest.call(Call::ShiftSound, car, body);
+                }
+            }
+            Call::Reverse(r) => {
+                let Keys { engine: Some(e), tires, .. } = &mut self.keys else { return false };
+                reverse(e, tires, &mut self.state, r);
+            }
             _ => return false,
         }
         true
@@ -1852,4 +1883,343 @@ pub fn tire_step(k: &TireKeys, t: &mut Tire, s: &mut TireState, levers: &State, 
     suspension(k, t, s, cofg, body, h);
     roll(k, t, s, brake);
     forces(k, t, s, body, steer, brake, h);
+}
+
+// --- the engine and its gearbox (MD125) ---------------------------------------------------------------
+
+/// The engine's loader words (research/oracle.txt `# MD125`; MD39b's `[Engine]`), as SLUS-21104's
+/// engine keeps them: MX Unleashed's [`crate::car::Engine`] on the car's tires.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EngineKeys {
+    /// The tires the engine drives (its first two slots), and on a four-wheel drive the other two.
+    pub drive: [usize; 2],
+    pub drive_more: Option<[usize; 2]>,
+    /// The torque table: its RPM axis and the torque at each point; its last RPM, the redline.
+    pub rpm: Vec<F>,
+    pub torque: Vec<F>,
+    pub redline: F,
+    /// `GearRatio1..` and `FinalGearRatio`.
+    pub gear_ratios: Vec<F>,
+    pub final_gear_ratio: F,
+    pub idle_throttle: F,
+    /// `EngineBraking * 1e-6`.
+    pub engine_braking: F,
+    /// The fraction of the drive the box loses.
+    pub transmission_loss: F,
+    pub inv_inertia: F,
+    pub min_rpm: F,
+    /// The torque converter: `PumpTorqueScale * 0.001`, `MaxPumpTorque`, `maxK`.
+    pub pump_torque_scale: F,
+    pub max_pump_torque: F,
+    pub max_k: F,
+    /// Traction control.
+    pub tcs: bool,
+    pub min_traction_slip: F,
+    pub max_traction_slip: F,
+    /// Nitrous: how fast it burns and the horsepower it adds.
+    pub nox_burn_rate: F,
+    pub nox_hp_boost: F,
+    /// The shift points and the shift's throttle (`high_load_rpm` read as zero when `None`).
+    pub shift: crate::car::Shift,
+    /// The engine has its sound, which a shift plays.
+    pub sound: bool,
+}
+
+/// The engine's running words: MX Unleashed's [`crate::car::Drivetrain`]'s, but its reverse word
+/// ([`State::reversing`]) and the launch's torque scale ([`State::launch_boost`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct EngineState {
+    /// Nitrous on (the car's word), and what is left in the bottle.
+    pub nox_on: bool,
+    pub nox_left: F,
+    /// Time until the box may shift again; the last shift went up; the shift's own throttle's time.
+    pub shift_timer: F,
+    pub shifting_up: bool,
+    pub shift_throttle_timer: F,
+    /// The gear, from 1, and the overall ratio and its reciprocal.
+    pub gear: i32,
+    pub ratio: F,
+    pub inv_ratio: F,
+    /// The driven wheels' speed in engine revs; the converter's pump torque, multiplication and
+    /// output.
+    pub wheel_rpm: F,
+    pub converter_torque: F,
+    pub multiplication: F,
+    pub output_torque: F,
+    /// The torque curve's cursor: its point and the weight back to the one below.
+    pub cursor_index: u32,
+    pub cursor_frac: F,
+    /// The net torque and the engine braking taken off it; each drive slot's torque.
+    pub engine_torque: F,
+    pub braking_torque: F,
+    pub drive_torque: [F; 4],
+    /// The revs, the revs the converter slips by, and the sound's clock and pitch.
+    pub rpm: F,
+    pub slip_rpm: F,
+    pub sound_clock: F,
+    pub pitch: F,
+}
+
+/// Engine revs to radians a second, and back; horsepower over revs to torque.
+const RPM_TO_RAD: u32 = 0x3dd6_7756; // 0.10471976
+const RAD_TO_RPM: u32 = 0x4118_c9eb; // 9.549296
+const HP_TORQUE: f32 = 5252.0;
+/// The sound's pitch: its floor (also the squat's), the top past which it wobbles on the curve
+/// table's sine, the bottom under which on the smooth noise.
+const PITCH_FLOOR: u32 = 0x3dcc_cccd; // 0.1
+const PITCH_HIGH: u32 = 0x3f73_3333; // 0.95
+const PITCH_LOW: u32 = 0x3e4c_cccd; // 0.2
+const PITCH_NOISE: u32 = 0x3de1_47ae; // 0.11
+/// The curve table's index scale (camera's), for the sound's top wobble's bare lookup.
+const CURVE_INV_STEP: f32 = 954.77045;
+
+/// The inline remap's clamped lerp, `adda.s 0`/`madd.s`, for a range known not to be flat.
+fn lerp_held(t: F, lo: F, hi: F) -> F {
+    Acc::adda(F::ZERO, lo).madd(t, hi - lo).max(lo.min(hi)).min(lo.max(hi))
+}
+
+/// **Put the box in `gear`** (from 1; SLUS-21104's set-gear, MX Unleashed's
+/// [`crate::car::Drivetrain::set_gear`]): nothing in reverse or off the ends. The ratio sets the
+/// driven tires' top wheel speed, the redline's (the second pair's only on a four-wheel drive).
+fn set_gear(e: &EngineKeys, tires: &mut [TireKeys; 4], s: &mut State, gear: i32) {
+    if gear <= 0 || e.gear_ratios.len() < gear as usize || s.reversing {
+        return;
+    }
+    let g = &mut s.engine;
+    g.gear = gear;
+    g.ratio = e.final_gear_ratio * e.gear_ratios[gear as usize - 1];
+    g.inv_ratio = F::ONE / g.ratio;
+    let top = e.redline * bits(RPM_TO_RAD) * g.inv_ratio;
+    for k in e.drive.into_iter().chain(e.drive_more.into_iter().flatten()) {
+        tires[k].top_wheel_speed = top;
+    }
+}
+
+/// **The engine's reverse switch** (MX Unleashed's [`crate::car::Drivetrain::set_reverse`]): into
+/// reverse, first's ratio turned round with the tires' top speeds left alone; out of it, into first.
+fn reverse(e: &EngineKeys, tires: &mut [TireKeys; 4], s: &mut State, r: crate::car::Reverse) {
+    if r == crate::car::Reverse::In {
+        s.reversing = true;
+        let g = &mut s.engine;
+        g.gear = 1;
+        g.ratio = e.final_gear_ratio * -e.gear_ratios[0];
+        g.inv_ratio = F::ONE / g.ratio;
+    } else {
+        s.reversing = false;
+        set_gear(e, tires, s, 1);
+    }
+}
+
+/// A shift point between its low-load and high-load RPMs by where the converter's slip sits between
+/// the two loads; a flat load range is the low-load point.
+fn shift_point(e: &EngineKeys, s: &EngineState, low: F, high: F) -> F {
+    let (lo, hi) = (e.shift.low_load_rpm, e.shift.high_load_rpm.unwrap_or(F::ZERO));
+    if lo == hi {
+        return low;
+    }
+    lerp_held((s.slip_rpm - lo) / (hi - lo), low, high)
+}
+
+/// **The automatic box** (SLUS-21104's, once a frame from the PostProcess; MX Unleashed's
+/// [`crate::car::Drivetrain::shift`]): nothing while neither of the first two drive slots' tires is
+/// on the ground, or in reverse. A running timer counts down and that is all; else, with the clutch
+/// up, revs over the up-shift point go up a gear (none past the top, the timer restarted all the
+/// same) and revs under the down-shift point down one (none from first), each starting the shift's
+/// throttle and the timer. `true` on a shift, where the original plays the shift sound (before the
+/// gear changes). The box's own way out of reverse on an up-shift, and into it on a shift down from
+/// first, are never reached: in reverse it returns first, and it never shifts down from first.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's `c.ole.s` branched on false
+fn shift(e: &EngineKeys, tires: &mut [TireKeys; 4], s: &mut State, car: &Car, dt: F) -> bool {
+    let [a, b] = e.drive;
+    if (!car.tires[a].grounded && !car.tires[b].grounded) || s.reversing {
+        return false;
+    }
+    let g = &mut s.engine;
+    if !(g.shift_timer <= 0.0) {
+        g.shift_timer = g.shift_timer - dt;
+        return false;
+    }
+    if !(s.engaged_clutch <= 0.0) {
+        return false;
+    }
+    let p = e.shift;
+    let up = shift_point(e, g, p.low_load_up_shift_rpm, p.high_load_up_shift_rpm);
+    let down = shift_point(e, g, p.low_load_down_shift_rpm, p.high_load_down_shift_rpm);
+    let mut shifted = false;
+    if !(g.rpm <= up) {
+        let next = g.gear + 1;
+        if next as usize <= e.gear_ratios.len() {
+            g.shifting_up = true;
+            g.shift_throttle_timer = p.shift_up_duration;
+            shifted = true;
+            set_gear(e, tires, s, next);
+        }
+    } else if g.rpm < down {
+        if g.gear < 2 {
+            return false;
+        }
+        g.shifting_up = false;
+        g.shift_throttle_timer = p.shift_down_duration;
+        shifted = true;
+        let next = g.gear - 1;
+        set_gear(e, tires, s, next);
+    } else {
+        return false;
+    }
+    s.engine.shift_timer = p.shift_time;
+    shifted
+}
+
+/// The torque curve's cursor walked to `x` (the shared curve seek): up past every point at or under
+/// it, back below every point over it; the weight back to the point below, or zero at either end.
+fn seek(xs: &[F], g: &mut EngineState, x: F) {
+    let n = xs.len() as u32;
+    let mut i = g.cursor_index;
+    while i < n && xs[i as usize] <= x {
+        i += 1;
+    }
+    while i != 0 && x < xs[i as usize - 1] {
+        i -= 1;
+    }
+    if i < n {
+        g.cursor_frac = if i == 0 {
+            F::ZERO
+        } else {
+            let hi = xs[i as usize];
+            (hi - x) / (hi - xs[i as usize - 1])
+        };
+    } else {
+        g.cursor_frac = F::ZERO;
+        i = n.wrapping_sub(1);
+    }
+    g.cursor_index = i;
+}
+
+/// Traction control's cut for a tire's slip ratio: 1 under the minimum slip falling to 0 at the
+/// maximum. A flat slip range is `flat`: the inline remap's own branch answers 1 for the first tire
+/// of a pair, and for the second the `sub.s` its delay slot carries, `1 - min`.
+fn traction(e: &EngineKeys, slip_ratio: F, flat: F) -> F {
+    let (lo, hi) = (e.min_traction_slip, e.max_traction_slip);
+    if lo == hi {
+        return flat;
+    }
+    let t = (slip_ratio.abs() - lo) / (hi - lo);
+    Acc::adda(F::ZERO, F::ONE).madd(t, F::ZERO - F::ONE).max(F::ONE.min(F::ZERO)).min(F::ONE.max(F::ZERO))
+}
+
+/// **The engine, once a substep** (SLUS-21104's, from the Force body while riding; MX Unleashed's
+/// [`crate::car::Drivetrain::step`], whose doc walks it), on the car's throttle ([`State::gas`]),
+/// clutch ([`State::engaged_clutch`]) and brake ([`State::brake_force`]): the drive torque added to
+/// the driven tires' ([`TireState::torque`]). SLUS-21104 fuses (`adda.s 0`/`madd.s`, `msub.s`) what
+/// MX Unleashed multiplies and adds: the torque curve's value, the nitrous left, the converter's
+/// multiplication, the revs' damping and step, and the sound's wobbles and squat; and its traction
+/// control on a flat slip range cuts the second tire of a pair to `1 - min` ([`traction`]). The
+/// smooth noise the sound's bottom wobble asks is handed out ([`Call::Noise`]).
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's `c.ole.s` branched on false
+fn engine_step(e: &EngineKeys, tires: &[TireKeys; 4], s: &mut State, car: &mut Car, body: &mut Body, h: F, rest: &mut impl Steps) {
+    let (gas, engaged_clutch, brake_force) = (s.gas, s.engaged_clutch, s.brake_force);
+    let g = &mut s.engine;
+    let (clutch, throttle) = if !(g.shift_throttle_timer <= 0.0) {
+        let p = e.shift;
+        let throttle = if g.shifting_up { p.shift_up_throttle } else { p.shift_down_throttle };
+        g.shift_throttle_timer = g.shift_throttle_timer - h;
+        (F::ONE, throttle)
+    } else {
+        (engaged_clutch, gas)
+    };
+
+    seek(&e.rpm, g, g.rpm);
+    let i = g.cursor_index as usize;
+    let mut torque = if i == 0 {
+        e.torque[0]
+    } else {
+        let hi = e.torque[i];
+        Acc::adda(F::ZERO, hi).msub(g.cursor_frac, hi - e.torque[i - 1])
+    };
+    if g.nox_on && !(g.rpm <= 0.0) && !(g.nox_left <= 0.0) {
+        let boost = F(HP_TORQUE) * e.nox_hp_boost / g.rpm;
+        torque = torque + boost;
+        g.nox_left = Acc::adda(F::ZERO, g.nox_left).msub(e.nox_burn_rate, h).max(F::ZERO);
+    }
+    g.engine_torque = torque * (throttle + e.idle_throttle).min(F::ONE);
+    g.braking_torque = g.rpm * (e.engine_braking * g.rpm);
+    g.engine_torque = g.engine_torque - g.braking_torque;
+
+    let ts = &s.tires;
+    let [a, b] = e.drive;
+    let (share, spin) = if clutch <= 0.0 {
+        let mut spin = ts[a].spin + ts[b].spin;
+        let share = if let Some([c, d]) = e.drive_more {
+            spin = spin + (ts[c].spin + ts[d].spin);
+            F(0.25)
+        } else {
+            F(0.5)
+        };
+        g.wheel_rpm = bits(RAD_TO_RPM) * (g.ratio * (share * spin));
+        g.slip_rpm = if g.wheel_rpm < 0.0 { g.rpm } else { g.rpm - g.wheel_rpm };
+        (share, spin)
+    } else {
+        g.wheel_rpm = g.rpm;
+        g.slip_rpm = F::ZERO;
+        (F::ZERO, F::ZERO)
+    };
+
+    let slip = g.slip_rpm;
+    let sign = F::from(if slip < 0.0 { -1 } else { 1 });
+    g.converter_torque = slip * (slip * (e.pump_torque_scale * sign));
+    g.converter_torque = g.converter_torque.max(-e.max_pump_torque).min(e.max_pump_torque);
+    let (wheel_rpm, rpm) = (g.wheel_rpm, g.rpm);
+    g.multiplication = if rpm <= wheel_rpm || rpm <= 0.0 || wheel_rpm <= 0.0 {
+        e.max_k
+    } else {
+        Acc::adda(F::ZERO, e.max_k).madd(F::ONE - e.max_k, wheel_rpm / rpm)
+    };
+    let boost = if g.ratio <= 0.0 || spin <= 0.0 { F::ONE } else { s.launch_boost };
+    g.output_torque = g.converter_torque * (boost * g.multiplication);
+
+    // The pump torque's slope in the revs, for the implicit step.
+    let slope = F(0.5) * (slip * (e.pump_torque_scale * (F(2.0) * sign)));
+    let net = e.inv_inertia * (g.engine_torque - g.converter_torque);
+    let damp = Acc::adda(F::ZERO, F::ONE).madd(h, slope * e.inv_inertia);
+    let accel = if damp <= 0.0 { F::ONE * net } else { (F::ONE / damp) * net };
+    g.rpm = Acc::adda(F::ZERO, g.rpm).madd(bits(RAD_TO_RPM), h * accel);
+    g.rpm = g.rpm.max(e.min_rpm).min(e.redline);
+
+    let drive = if brake_force <= 0.0 { g.ratio * (share * (F::ONE - e.transmission_loss)) } else { F::ZERO };
+    for (n, [a, b]) in [Some(e.drive), e.drive_more].into_iter().flatten().enumerate() {
+        let (cut_a, cut_b) = if e.tcs && car.tires[a].grounded && car.tires[b].grounded {
+            (traction(e, s.tires[a].slip_ratio, F::ONE), traction(e, s.tires[b].slip_ratio, F::ONE - e.min_traction_slip))
+        } else {
+            (F::ONE, F::ONE)
+        };
+        let g = &mut s.engine;
+        g.drive_torque[2 * n] = g.output_torque * (cut_a * drive);
+        g.drive_torque[2 * n + 1] = g.output_torque * (cut_b * drive);
+        s.tires[a].torque = s.tires[a].torque + g.drive_torque[2 * n];
+        s.tires[b].torque = s.tires[b].torque + g.drive_torque[2 * n + 1];
+    }
+
+    // The sound's pitch.
+    let g = &mut s.engine;
+    let (lo, hi) = (e.min_rpm, e.redline);
+    let floor = bits(PITCH_FLOOR);
+    g.pitch = if lo == hi { floor } else { lerp_held((g.rpm - lo) / (hi - lo), floor, F::ONE) };
+    if !(g.pitch <= bits(PITCH_HIGH)) {
+        let a = wrap(wrap(F(35.0) * g.sound_clock));
+        let k = ((bits(PI) + a) * CURVE_INV_STEP).to_i32();
+        let sin = F(tables().0.entries()[k as usize][1]);
+        g.pitch = Acc::adda(F::ZERO, g.pitch).madd(F(0.0125), sin);
+    } else if g.pitch < bits(PITCH_LOW) {
+        let at = F(0.25) * g.sound_clock;
+        rest.call(Call::Noise(at), car, body);
+        let g = &mut s.engine;
+        g.pitch = Acc::adda(F::ZERO, g.pitch).madd(bits(PITCH_NOISE), car.noise);
+    }
+    let g = &mut s.engine;
+    let squat = F(0.5) * (s.tires[a].compression + s.tires[b].compression) / tires[a].max_compression;
+    if !(squat < floor) {
+        g.pitch = Acc::adda(F::ZERO, g.pitch).msub(floor, squat - floor);
+    }
+    g.sound_clock = g.sound_clock + h;
+    g.pitch = lerp_held((g.pitch - F::ZERO) / (F::ONE - F::ZERO), lo, hi);
 }
