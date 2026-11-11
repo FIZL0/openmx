@@ -3766,6 +3766,32 @@ pub struct SeatSound {
     held: bool,
     /// The sim's wreck emitters at the last frame (P202), which this one's picks are read against.
     emitters: Option<WreckEmitters>,
+    /// This rider's fliers' own sounds where they fly off a pack that has them (MD108), else the
+    /// disc's ([`Sound::plane`], [`Sound::heli`] and theirs).
+    own: OwnFliers,
+}
+
+/// A plane's sounds off a flier pack (MD108): its keyed loops (`carengine.aud`'s `[biplane]`), its
+/// wreck clank and its wheels (`machine.aud`'s `[biplaneWreck]`, `[biplaneTireTouchdown]`), each
+/// read by the reader the disc's are.
+pub struct PlaneVoices {
+    pub engine: LoopEngine,
+    pub wreck: MachineWreck,
+    pub touchdown: MachineTouchdown,
+}
+
+/// A helicopter's sounds off a flier pack (MD108): its one loop (`otherengine.aud`'s `[Helicopter]`)
+/// and its wreck clank (`machine.aud`'s `[helicopterWreck]`).
+pub struct HeliVoices {
+    pub engine: HeliEngine,
+    pub wreck: MachineWreck,
+}
+
+/// One rider's fliers' own sounds (MD108): `None` for a kind that sounds as the disc's.
+#[derive(Clone, Default)]
+pub struct OwnFliers {
+    pub plane: Option<Arc<PlaneVoices>>,
+    pub heli: Option<Arc<HeliVoices>>,
 }
 
 impl SeatSound {
@@ -3788,6 +3814,7 @@ impl SeatSound {
             shots: Vec::new(),
             held: false,
             emitters: None,
+            own: OwnFliers::default(),
         }
     }
 
@@ -3875,6 +3902,17 @@ impl Sound {
         }
     }
 
+    /// Rider `seat`'s fliers' own sounds (MD108), from here on: its plane's and helicopter's loops are
+    /// stopped, so the next tick up starts them off the new lists.
+    pub fn set_own_fliers(&mut self, seat: usize, own: OwnFliers) {
+        let Some(s) = self.seats.get_mut(seat) else { return };
+        if let Ok(mut m) = self.mixer.lock() {
+            s.plane.silence(&mut m);
+            s.heli.silence(&mut m);
+        }
+        s.own = own;
+    }
+
     /// **A tick's collision sounds** (F27a): the material table's update over the frame's queue
     /// ([`game_sim::material_hit::play`], which empties it), each sound played over the last.
     pub fn hits(&mut self, queue: &mut Vec<game_sim::material_hit::Hit>) {
@@ -3952,12 +3990,14 @@ impl Sound {
                 s.edge.stop_rumble(m);
                 s.drive_on.stop(m);
                 s.plane.silence(m);
+                let own = s.own.heli.clone();
+                let (engine, wreck) = own.as_deref().map_or((&self.heli, &self.heli_wreck), |o| (&o.engine, &o.wreck));
                 if heli.crash.wrecked {
                     s.heli.silence(m);
                 } else {
-                    s.heli.update(m, &self.heli, heli.collective, heli.at, heli.vel, dt);
+                    s.heli.update(m, engine, heli.collective, heli.at, heli.vel, dt);
                 }
-                s.clank.tick(m, &self.heli_wreck, &heli.crash, heli.at, dt, &mut s.dice);
+                s.clank.tick(m, wreck, &heli.crash, heli.at, dt, &mut s.dice);
                 continue;
             }
             s.heli.silence(m);
@@ -3968,13 +4008,15 @@ impl Sound {
                 // The wreck stops the engine sound and the unwreck (the respawn, or the L1+R1 reset)
                 // starts it again (P187): silent from the wreck tick, back at the note the flight
                 // gives it — idle, on the reset's closed throttle — on the first tick after.
+                let own = s.own.plane.clone();
+                let (engine, wreck, touchdown) = own.as_deref().map_or((&self.plane, &self.plane_wreck, &self.plane_touchdown), |o| (&o.engine, &o.wreck, &o.touchdown));
                 if f.crash.wrecked {
                     s.plane.silence(m);
                 } else {
-                    s.plane.update(m, &self.plane, note, at);
+                    s.plane.update(m, engine, note, at);
                 }
-                s.clank.tick(m, &self.plane_wreck, &f.crash, at, dt, &mut s.dice);
-                s.tires.tick(m, &self.plane_touchdown, f.touchdown, at, &mut s.dice);
+                s.clank.tick(m, wreck, &f.crash, at, dt, &mut s.dice);
+                s.tires.tick(m, touchdown, f.touchdown, at, &mut s.dice);
                 continue;
             }
             s.edge.tick(m, &self.shootoff, &f.edge);

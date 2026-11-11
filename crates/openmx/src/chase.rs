@@ -147,6 +147,21 @@ pub fn mod_race_presets(m: ModMachine) -> String {
     mod_presets(m).replacen("FC_", "RC_", 1)
 }
 
+/// A flier pack's own follow-camera file (MD108, `Cam\FC_BiplaneDefault.pb`, `Cam\FC_HeliDefault.pb`)
+/// for one screen: its `[<aspect>/<viewport>/<n>]` presets as SLUS-21104's loader reads them
+/// ([`game_sim::camera::Preset::read_layout`]), which falls back from 16:9 to 4:3. A viewport the file
+/// has none of (`4p`: no file on that disc has it, and the loader's load fails there) rides the full
+/// screen's, as a track's `cpresets.ini` without its split copies does.
+pub fn flier_presets(bytes: &[u8], aspect: game_sim::camera::Aspect, viewport: game_sim::camera::Viewport) -> Vec<game_sim::camera::Preset> {
+    use game_sim::camera::{Preset, Viewport};
+    let ini = game_sim::phy::Ini::parse_bytes(bytes);
+    let own = Preset::read_layout(&ini, aspect, viewport);
+    match own.is_empty() && viewport != Viewport::Full {
+        true => Preset::read_layout(&ini, aspect, Viewport::Full),
+        false => own,
+    }
+}
+
 /// A car's target block (S149e, S246), as the original's car fills it once a frame in its post
 /// listener after the measure (`research/oracle.txt`, S246): the rows are the measure's, the velocity
 /// the body's, the lean word the measure's world rates (the camera reads the yaw), the flag "no tire

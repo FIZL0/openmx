@@ -278,3 +278,38 @@ fn the_switch_flies_the_skin_picked_mid_ride() {
     let words: Vec<&str> = text.lines().filter(|l| l.starts_with("switch ")).map(|l| l.split_whitespace().nth(2).unwrap_or("")).collect();
     assert_eq!(words, ["biplane@mxvatv_fliers/biplane3", "bike", "biplane@mxvatv_fliers/biplane", "bike", "biplane@original/biplane2", "bike", "helicopter@mxvatv_fliers/kiowa4", "bike"], "\n{text}");
 }
+
+#[test]
+fn the_fliers_read_the_packs_cameras_and_particles() {
+    // MD108: a pack flier follows on the pack's own FC_ presets and throws its own particle lists,
+    // loaded on the switch or switched into mid-ride; switched back to the disc's flier, the camera
+    // is MX Unleashed's again. The sounds (its engine loops, wrecks and touchdown) need a sound
+    // device and are not heard headless.
+    if !pack() {
+        return;
+    }
+    let both = switching_tape("md108-both.tape", 240, &[(20, "biplane"), (90, "bike"), (110, "helicopter"), (180, "bike")]);
+    let Some(said) = ride(220, &both, &["--fliers", "mxvatv", "--flier-skin", "3"]) else { return };
+    for line in [
+        "biplane: particles: mxvatv_fliers's own Part/biplaneparticles.dat",
+        "kiowa: particles: mxvatv_fliers's own Part/helicopterparticles.dat",
+        "biplane: mxvatv_fliers's camera, 8 presets in Cam/FC_BiplaneDefault.pb",
+        "kiowa: mxvatv_fliers's camera, 8 presets in Cam/FC_HeliDefault.pb",
+    ] {
+        assert!(said.lines().any(|l| l == line), "no `{line}`:\n{said}");
+    }
+
+    let steps = switching_tape("md108-steps.tape", 240, &[(20, "biplane@mxvatv_fliers/biplane3"), (90, "bike"), (110, "biplane@original/biplane2"), (180, "bike")]);
+    let Some(said) = ride(220, &steps, &[]) else { return };
+    let cameras: Vec<&str> = said.lines().filter(|l| l.starts_with("biplane: ") && (l.ends_with(" camera") || l.contains(" camera,") || l.contains("camera starts"))).collect();
+    assert_eq!(
+        cameras,
+        [
+            "biplane: mxvatv_fliers's camera, 8 presets in Cam/FC_BiplaneDefault.pb",
+            "biplane: its camera starts on Race Camera 1",
+            "biplane: MX Unleashed's camera",
+            "biplane: its camera starts on Flight Cam 1",
+        ],
+        "\n{said}"
+    );
+}

@@ -820,6 +820,69 @@ fn refit_fliers(
     (changed, models)
 }
 
+/// Each livery's fliers' own sounds (MD108), handed to every seat of it, for the liveries in
+/// `liveries` (all of them at the load, the ones a pick rebuilt mid-ride): each kind flown off a pack
+/// whose sounds read sounds as the pack's ([`own_flier_sounds`]), the rest as the disc's.
+fn set_own_flier_sounds(sound: &mut audio::Sound, fliers: &[vehicle::Fliers], liveries: &[usize]) {
+    let seats = sound.seats.len();
+    for &l in liveries {
+        let Some(fl) = fliers.get(l) else { continue };
+        if (0..seats).all(|i| vehicle::livery(i) != l) {
+            continue;
+        }
+        let who = if seats > 1 { format!("P{} ", l + 1) } else { String::new() };
+        let own = own_flier_sounds(fl, &who);
+        for seat in (0..seats).filter(|&i| vehicle::livery(i) == l) {
+            sound.set_own_fliers(seat, own.clone());
+        }
+    }
+}
+
+/// A seat's fliers' own sounds (MD108): each kind flown off a flier pack, its pack's `mod.json` read
+/// again out of its folder and its sounds through the readers the disc's go through
+/// ([`machine_packs::Pack::flier_sounds`]: the plane's keyed loops, wreck clank and wheels, the
+/// helicopter's loop and wreck clank). A pack that reads no engine for the kind leaves it the disc's.
+/// Says what each read, after `who`.
+fn own_flier_sounds(fliers: &vehicle::Fliers, who: &str) -> audio::OwnFliers {
+    let mut own = audio::OwnFliers::default();
+    for m in [Machine::Biplane, Machine::Helicopter] {
+        let Some(f) = fliers.pack(m).filter(|f| f.phy_bytes().is_some()) else { continue };
+        let word = m.pack_word().unwrap_or_default();
+        let pack = match machine_packs::read(&f.folder) {
+            Ok(Some(p)) => p,
+            Ok(None) => continue,
+            Err(e) => {
+                println!("{word}: {who}{}'s sounds: {e}; MX Unleashed's", f.id);
+                continue;
+            }
+        };
+        let Some(flier) = pack.fliers.iter().find(|k| k.machine == word) else { continue };
+        let (sounds, why) = match pack.flier_sounds(flier) {
+            Ok(read) => read,
+            Err(e) => {
+                println!("{word}: {who}{}'s sounds: {e}; MX Unleashed's", f.id);
+                continue;
+            }
+        };
+        for w in &why {
+            println!("{word}: {who}{}'s sounds: {w} not read", f.id);
+        }
+        let (wreck, touchdown) = (sounds.wreck.list.sounds.len(), sounds.touchdown.list.sounds.len());
+        match m {
+            Machine::Helicopter if sounds.rotor.clip.is_some() => {
+                println!("{word}: {who}{}'s sounds, its rotor loop and {wreck} wreck", f.id);
+                own.heli = Some(std::sync::Arc::new(audio::HeliVoices { engine: sounds.rotor, wreck: sounds.wreck }));
+            }
+            Machine::Biplane if !sounds.loops.loops.is_empty() => {
+                println!("{word}: {who}{}'s sounds, {} engine loops, {wreck} wreck, {touchdown} touchdown", f.id, sounds.loops.loops.len());
+                own.plane = Some(std::sync::Arc::new(audio::PlaneVoices { engine: sounds.loops, wreck: sounds.wreck, touchdown: sounds.touchdown }));
+            }
+            _ => println!("{word}: {who}{} reads no engine sounds of its own; MX Unleashed's", f.id),
+        }
+    }
+    own
+}
+
 /// Seat `seat`'s flier picks set to `fliers` (P315g), from the pause's flier picker or a tape: the
 /// ride's fliers before and after ([`fliers_for`]), or `None` where nothing changes. A `--fliers`
 /// over every seat's picks is let go of, each livery's picks pinned to what it flew under it first.
@@ -1108,6 +1171,7 @@ fn dress_peer(p: &mut PeerDress, n: usize, pick: &roster::Pick) -> Result<(Rig, 
         plane_camera: p.cameras.1.as_ref().map(|c| Race { cam: c.clone() }),
         // Online rides no helicopter (P216); its cars have their own cameras (S268).
         heli_camera: None,
+        flier_cameras: Default::default(),
         car_cameras: p.car_cameras.iter().map(|(k, c)| (*k, Race { cam: c.cam.clone() })).collect(),
         wreck_camera: chase::WreckCamera::new(false),
         framing: (chase::Framing::ORIGINAL, chase::Framing::ORIGINAL),
@@ -1361,6 +1425,10 @@ struct Rig {
     /// The helicopter's own camera (P216), on `HeloCPresets.ini`, while this player has one. It
     /// shares the plane's framing, field-of-view ease and look-back slots.
     heli_camera: Option<Race>,
+    /// The seat's plane's and helicopter's own follow-camera files where each flies off a flier pack
+    /// that has one (MD108, `Cam\FC_BiplaneDefault.pb`): what their cameras' presets are read from in
+    /// place of the disc's ([`own_flier_cameras`]).
+    flier_cameras: [Option<Vec<u8>>; 2],
     /// The cars' own cameras (S246), one a car kind this player can drive, each on its kind's presets
     /// file ([`chase::car_presets`]). They share the bike's framing, field-of-view ease and look-back
     /// slots; a car without one is followed by the bike's.
@@ -5388,7 +5456,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     };
     // Its particles (P58): the emitter list and its `.emt`s, and the track's particle sheet.
     let (mut plane_fx, mut fx_sheet) = match plane_drawn.first() {
-        Some(drawn) => match load_plane_fx(&archives, plane_kit.as_ref(), &stem, drawn, &assets) {
+        Some(drawn) => match load_plane_fx(&archives, plane_kit.as_ref(), &stem, drawn, &assets, plane_pack[0]) {
             Ok((fx, binds, sheet)) => (Some((fx, binds)), Some(sheet)),
             Err(why) => {
                 println!("biplane: no particles: {why}");
@@ -6166,8 +6234,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // The Kiowa's (V114): the track's `helicopterparticles.dat`, the wash under its rotor and its
     // wreck's dust, one manager a seat stepped off it as the bikes' are, and the track's sheet where
     // nothing above loaded it. Only where the disc has a Kiowa to fly.
+    // A seat's off a flier pack with a list of its own throws the pack's (MD108): the first livery's
+    // here, and each other livery's of its own below where any flies off a pack.
+    let flown_fliers = fliers_for(&args, false);
+    let kiowa_own = |l: usize| flown_fliers.get(l).and_then(|f| f.kiowa.as_ref()).filter(|_| lot.kiowa_of(l).is_some_and(|k| k.mxvatv.is_some()));
     let (heli_fx_list, soft_sheet) = match (garage.heli.is_some(), kiowa_drawn.first()) {
-        (true, Some(drawn)) => match load_heli_fx(&archives, &stem, drawn, &assets) {
+        (true, Some(drawn)) => match load_heli_fx(&archives, &stem, drawn, &assets, kiowa_own(0)) {
             Ok((fx, binds, sheet)) => {
                 if fx_sheet.is_none() {
                     fx_sheet = Some(sheet.clone());
@@ -6180,6 +6252,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             }
         },
         _ => (None, soft_sheet),
+    };
+    let heli_fx_own: Vec<Option<(particles::PlaneFx, Vec<(String, M4)>)>> = match (heli_fx_list.is_some(), (0..vehicle::LIVERIES).any(|l| kiowa_own(l).is_some())) {
+        (true, true) => (1..kiowa_drawn.len())
+            .map(|l| load_heli_fx(&archives, &stem, &kiowa_drawn[l], &assets, kiowa_own(l)).map_err(|why| println!("kiowa: P{} no particles of its own: {why}", l + 1)).ok().map(|(fx, binds, _)| (fx, binds)))
+            .collect(),
+        _ => Vec::new(),
     };
     let mut heli_fx: Vec<particles::PlaneFx> = Vec::new();
     // The cars' (S248): each car the garage can switch to, its list out of the track's archives
@@ -6288,6 +6366,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     s.set_toys(Disc::open_configured()?, &track_res, &stem, &names)?;
                 }
                 Ok(s)
+            });
+            // Each seat's fliers off a pack sound as the pack's (MD108).
+            let read = read.map(|mut s| {
+                set_own_flier_sounds(&mut s, &flown_fliers, &(0..vehicle::LIVERIES).collect::<Vec<_>>());
+                s
             });
             match read {
                 Ok(s) => Some(s),
@@ -6537,6 +6620,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 cam
             }),
             // And their own cars' (S246).
+            flier_cameras: Default::default(),
             car_cameras: car_cameras.iter().map(|(k, c)| (*k, Race { cam: c.cam.clone() })).collect(),
             wreck_camera: chase::WreckCamera::new(false),
             framing: (chase::Framing::ORIGINAL, chase::Framing::ORIGINAL),
@@ -6572,6 +6656,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             camera,
             plane_camera,
             heli_camera: heli_camera.as_ref().map(|c| Race { cam: c.cam.clone() }),
+            flier_cameras: Default::default(),
             car_cameras: car_cameras.iter().map(|(k, c)| (*k, Race { cam: c.cam.clone() })).collect(),
             wreck_camera: chase::WreckCamera::new(false),
             framing: (chase::Framing::ORIGINAL, chase::Framing::ORIGINAL),
@@ -7023,6 +7108,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         set_heli_display(&mut rigs, layout, display, heli_presets.as_deref());
         set_car_display(&mut rigs, layout, display, &car_presets);
     }
+    // Each seat's fliers off a pack follow on the pack's own camera files (MD108).
+    own_flier_cameras(&mut rigs, &flown_fliers, layout, display, cpresets.as_deref(), plane_presets.as_deref(), heli_presets.as_deref());
     // The original's HUD (V26): its art off the disc, the world its radar covers, and which overlay is
     // up. Art that does not load stops the ride with the reason (V28) — it used to say so on stderr
     // and ride on with no HUD, which is how a HUD went missing with nobody told why.
@@ -7833,7 +7920,14 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     let was = pick.and_then(|p| repick_fliers(&mut args, 0, std::slice::from_ref(&p)));
                     if let Some((was, now)) = was {
                         let res = member_ending(&disc, MACHINE_ARCHIVE).ok().and_then(|n| disc.res(&n).ok());
-                        let (_, models) = refit_fliers(&mut world.seats, &was, &now, res.as_ref(), &mut lot, &mods, &plane_files, &flight_for, &mut stock_plane, &mut plane_drawn, &mut kiowa_drawn, &mut assets);
+                        let (changed, models) = refit_fliers(&mut world.seats, &was, &now, res.as_ref(), &mut lot, &mods, &plane_files, &flight_for, &mut stock_plane, &mut plane_drawn, &mut kiowa_drawn, &mut assets);
+                        // And its own camera and sounds where the new pick's pack has them (MD108).
+                        own_flier_cameras(&mut rigs, &now, layout, display, cpresets.as_deref(), plane_presets.as_deref(), heli_presets.as_deref());
+                        if let Some(s) = &mut sound {
+                            let mut liveries: Vec<usize> = changed.iter().map(|(l, _)| *l).collect();
+                            liveries.dedup();
+                            set_own_flier_sounds(s, &now, &liveries);
+                        }
                         plane_copies.clear();
                         if let (true, false, Some(r)) = (gpu_on, models.is_empty(), renderer_of(&mut offscreen, window)) {
                             r.upload_models(&assets, &models.iter().collect::<Vec<_>>());
@@ -8313,7 +8407,14 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                         && let Some((was, now)) = repick_fliers(&mut args, i, &picked)
                     {
                         let res = member_ending(&disc, MACHINE_ARCHIVE).ok().and_then(|n| disc.res(&n).ok());
-                        let (_, models) = refit_fliers(&mut world.seats, &was, &now, res.as_ref(), &mut lot, &mods, &plane_files, &flight_for, &mut stock_plane, &mut plane_drawn, &mut kiowa_drawn, &mut assets);
+                        let (changed, models) = refit_fliers(&mut world.seats, &was, &now, res.as_ref(), &mut lot, &mods, &plane_files, &flight_for, &mut stock_plane, &mut plane_drawn, &mut kiowa_drawn, &mut assets);
+                        // And its own camera and sounds where the new pick's pack has them (MD108).
+                        own_flier_cameras(&mut rigs, &now, layout, display, cpresets.as_deref(), plane_presets.as_deref(), heli_presets.as_deref());
+                        if let Some(s) = &mut sound {
+                            let mut liveries: Vec<usize> = changed.iter().map(|(l, _)| *l).collect();
+                            liveries.dedup();
+                            set_own_flier_sounds(s, &now, &liveries);
+                        }
                         plane_copies.clear();
                         if let (true, false, Some(r)) = (gpu_on, models.is_empty(), renderer_of(&mut offscreen, window)) {
                             r.upload_models(&assets, &models.iter().collect::<Vec<_>>());
@@ -8491,6 +8592,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                             camera: Race { cam: join_cameras.0.clone() },
                             plane_camera: join_cameras.1.as_ref().map(|c| Race { cam: c.clone() }),
                             heli_camera: heli_camera.as_ref().map(|c| Race { cam: c.cam.clone() }),
+                            flier_cameras: Default::default(),
                             car_cameras: car_cameras.iter().map(|(k, c)| (*k, Race { cam: c.cam.clone() })).collect(),
                             wreck_camera: chase::WreckCamera::new(false),
                             framing: (chase::Framing::ORIGINAL, chase::Framing::ORIGINAL),
@@ -9510,9 +9612,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     println!("{who}camera presets: {} of the seat's own, the button on {}", laid.0.len(), laid.1.label());
                 }
                 rig.camera_presets = laid;
-                frame_rig(rig, &bike, &plane, framings(view));
+                let own = rig_flier_presets(rig, 0, layout, display);
+                frame_rig(rig, &bike, own.as_deref().unwrap_or(&plane), framings(view));
                 let heli = heli_presets.as_deref().map(|b| layout_presets(b, layout, display, game_render::kiowa::PRESETS)).unwrap_or_default();
-                frame_heli(rig, &heli);
+                let own = rig_flier_presets(rig, 1, layout, display);
+                frame_heli(rig, own.as_deref().unwrap_or(&heli));
                 frame_cars(rig, &cars_for_display(layout, display, &car_presets));
             }
             // The seat's first frame (P163): each camera on the preset the seat's camera button last
@@ -9830,10 +9934,16 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         }
         // The Kiowas' (V114): a frame for each seat flying one, off its flight after the tick. A seat
         // not in one has its emitters off, and what is in the air runs out.
-        if simulated && !args.overview && let Some((list, binds)) = &heli_fx_list {
-            heli_fx.resize_with(world.seats.len(), || list.clone());
+        if simulated && !args.overview && let Some(first) = &heli_fx_list {
+            // Each seat's livery's list (MD108), the first's where it has none of its own.
+            let of = |i: usize| vehicle::livery(i).checked_sub(1).and_then(|l| heli_fx_own.get(l)).and_then(Option::as_ref).unwrap_or(first);
+            heli_fx.truncate(world.seats.len());
+            while heli_fx.len() < world.seats.len() {
+                heli_fx.push(of(heli_fx.len()).0.clone());
+            }
             let place = &mut world.place;
-            for (seat, fx) in world.seats.iter().zip(&mut heli_fx) {
+            for (i, (seat, fx)) in world.seats.iter().zip(&mut heli_fx).enumerate() {
+                let binds = &of(i).1;
                 let frame = seat.garage.heli_up().map_or_else(particles::PlaneFrame::default, |h| heli_fx_frame(h, binds));
                 fx.step_over(&frame, dt.0, &mut |at| plane_fx_ground(place, at));
             }
@@ -11624,6 +11734,87 @@ fn layout_presets(bytes: &[u8], layout: Layout, display: Display, file: &str) ->
     own
 }
 
+/// A flier pack's own camera file's presets for `layout` on `display` (MD108): [`chase::flier_presets`]
+/// at the display's shape, 16:9 for a wide one and 4:3 for the television, and the layout's viewport.
+fn flier_layout_presets(bytes: &[u8], layout: Layout, display: Display) -> Vec<Preset> {
+    use game_sim::camera::{Aspect as Shape, Viewport};
+    let shape = match display {
+        Display::Wide => Shape::Wide,
+        Display::Television => Shape::Standard,
+    };
+    let viewport = match layout {
+        Layout::Full => Viewport::Full,
+        Layout::Stacked => Viewport::SplitH,
+        Layout::SideBySide => Viewport::SplitV,
+        Layout::Quarters | Layout::Eighths => Viewport::Quad,
+    };
+    chase::flier_presets(bytes, shape, viewport)
+}
+
+/// The seat's own presets for its plane (`kind` 0) or helicopter (1) where it flies off a flier pack
+/// with a camera file of its own (MD108, [`Rig::flier_cameras`]); `None` for the disc's.
+fn rig_flier_presets(rig: &Rig, kind: usize, layout: Layout, display: Display) -> Option<Vec<Preset>> {
+    rig.flier_cameras[kind].as_deref().map(|b| flier_layout_presets(b, layout, display)).filter(|p| !p.is_empty())
+}
+
+/// Each seat's fliers' own follow cameras (MD108): a seat whose plane or helicopter flies off a pack
+/// whose manifest names a camera file of its own (`fliers.<kind>.cameras`) follows it on that file's
+/// presets ([`flier_layout_presets`]), starting on its first, as SLUS-21104's camera starts; a kind
+/// that goes back to the disc's goes back onto `plane`'s or `heli`'s, on [`PLANE_CAMERA`] or
+/// [`HELI_CAMERA`]. Only the seats whose file changed are reframed, each with its own laid over the
+/// presets as [`frame_rig`] lays them. Says which.
+#[allow(clippy::too_many_arguments)]
+fn own_flier_cameras(rigs: &mut [Rig], fliers: &[vehicle::Fliers], layout: Layout, display: Display, bike: Option<&[u8]>, plane: Option<&[u8]>, heli: Option<&[u8]>) {
+    let many = rigs.len() > 1;
+    for (i, rig) in rigs.iter_mut().enumerate() {
+        let Some(fl) = fliers.get(vehicle::livery(i)).or(fliers.first()) else { continue };
+        let who = if many { format!("P{} ", i + 1) } else { String::new() };
+        for (k, m) in [Machine::Biplane, Machine::Helicopter].into_iter().enumerate() {
+            let own = fl.pack(m).filter(|f| f.phy_bytes().is_some()).and_then(|f| f.camera_bytes().map(|b| (f, b)));
+            let bytes = own.as_ref().map(|(_, b)| b.clone());
+            if bytes == rig.flier_cameras[k] {
+                continue;
+            }
+            let word = m.pack_word().unwrap_or_default();
+            let presets = match &own {
+                Some((f, b)) => {
+                    let p = flier_layout_presets(b, layout, display);
+                    println!("{word}: {who}{}'s camera, {} presets in {}", f.id, p.len(), f.cameras);
+                    p
+                }
+                None => {
+                    println!("{word}: {who}MX Unleashed's camera");
+                    let (bytes, file) = if k == 0 { (plane, PLANE_PRESETS) } else { (heli, game_render::kiowa::PRESETS) };
+                    bytes.map(|b| layout_presets(b, layout, display, file)).unwrap_or_default()
+                }
+            };
+            rig.flier_cameras[k] = bytes;
+            if presets.is_empty() {
+                continue;
+            }
+            if k == 0 {
+                let bike = bike.map(|b| layout_presets(b, layout, display, "cpresets.ini")).unwrap_or_default();
+                let framing = rig.framing;
+                frame_rig(rig, &bike, &presets, framing);
+            } else {
+                frame_heli(rig, &presets);
+            }
+            let cam = if k == 0 { rig.plane_camera.as_mut() } else { rig.heli_camera.as_mut() };
+            if let Some(cam) = cam {
+                let start = match &own {
+                    Some(_) => Some(0),
+                    None => Preset::find(&cam.cam.presets, if k == 0 { PLANE_CAMERA } else { HELI_CAMERA }),
+                };
+                if let Some(at) = start {
+                    (cam.cam.preset, cam.cam.previous) = (at, at);
+                    cam.cam.set_preset(at);
+                }
+                println!("{word}: {who}its camera starts on {}", cam.cam.preset().name);
+            }
+        }
+    }
+}
+
 /// The disc's camera presets the camera button cycles through (P163), the bike's and the plane's, by
 /// name, for the Camera page's Preset row: free06's files, whose names every track's shares (the
 /// freerides' and the races' read alike). Empty where they cannot be read.
@@ -11678,7 +11869,8 @@ fn set_display(rigs: &mut [Rig], layout: Layout, display: Display, bike: Option<
     let plane = plane.map(|b| layout_presets(b, layout, display, PLANE_PRESETS)).unwrap_or_default();
     for rig in rigs {
         let framing = rig.framing;
-        frame_rig(rig, &bike, &plane, framing);
+        let own = rig_flier_presets(rig, 0, layout, display);
+        frame_rig(rig, &bike, own.as_deref().unwrap_or(&plane), framing);
     }
 }
 
@@ -11766,7 +11958,8 @@ fn set_car_display(rigs: &mut [Rig], layout: Layout, display: Display, cars: &[(
 fn set_heli_display(rigs: &mut [Rig], layout: Layout, display: Display, heli: Option<&[u8]>) {
     let heli = heli.map(|b| layout_presets(b, layout, display, game_render::kiowa::PRESETS)).unwrap_or_default();
     for rig in rigs {
-        frame_heli(rig, &heli);
+        let own = rig_flier_presets(rig, 1, layout, display);
+        frame_heli(rig, own.as_deref().unwrap_or(&heli));
     }
 }
 
@@ -12075,6 +12268,9 @@ fn online_local_fliers(args: &Args, res: Option<&Res>, like: Option<&Flight>) ->
             psg: skin.psg.clone(),
             hull: skin.hull.clone(),
             rays: skin.rays.clone(),
+            cameras: flier.cameras.clone(),
+            particles: flier.particles.clone(),
+            folder: pack.folder.clone(),
         };
         let read = flier_refit::PlaneFiles::read(res, Some(&pf));
         let Some(stock) = read.stock() else { continue };
@@ -12343,6 +12539,9 @@ fn fliers_for(args: &Args, say: bool) -> Vec<vehicle::Fliers> {
                 psg: skin.psg.clone(),
                 hull: skin.hull.clone(),
                 rays: skin.rays.clone(),
+                cameras: flier.cameras.clone(),
+                particles: flier.particles.clone(),
+                folder: pack.folder.clone(),
             };
             match m {
                 Machine::Biplane => seat.plane = Some(flier),
@@ -13053,17 +13252,20 @@ fn load_biplane(
 
 /// The plane's particles (P58): the emitter list out of the track's archives and each `.emt` it names
 /// beside it, the track's particle sheet (`particle\<track>particles.prt` and its texture), and where
-/// each entry's node is on the plane. Says what it found, and what it skips.
+/// each entry's node is on the plane. Says what it found, and what it skips. A plane off a flier pack
+/// with a list of its own (MD108, `pack`) throws the pack's ([`pack_fx_read`]).
 fn load_plane_fx(
     archives: &[Res],
     kit: Option<&Res>,
     track: &str,
     drawn: &Biplane,
     assets: &Assets,
+    pack: Option<&vehicle::PackFlier>,
 ) -> Result<(particles::PlaneFx, Vec<(String, M4)>, game_render::pst::Texture), String> {
     // The track's own archives first, then the plane's kit's where the track has none of its files (P113).
-    let read = |name: &str| archives.iter().chain(kit).find_map(|a| a.read_suffix(&format!("\\{name}")).ok());
-    let list = read(biplane::PARTICLES).ok_or(format!("no {}", biplane::PARTICLES))?;
+    let track_read = |name: &str| archives.iter().chain(kit).find_map(|a| a.read_suffix(&format!("\\{name}")).ok());
+    let (read, list) = pack_fx_read(pack, track_read, biplane::PARTICLES, "biplane");
+    let list = list.ok_or(format!("no {}", biplane::PARTICLES))?;
     let sheet = read(&particles::sheet(track)).ok_or(format!("no {}", particles::sheet(track)))?;
     let texture = read(&particles::sheet_texture(track)).ok_or(format!("no {}", particles::sheet_texture(track)))?;
     let texture = game_render::pst::Texture::parse(&texture)?;
@@ -13085,6 +13287,37 @@ fn load_plane_fx(
         println!("biplane: particles: {name} ({why}) not ported");
     }
     Ok((fx, binds, texture))
+}
+
+/// A flier's particle files (MD108): where it flies off a pack whose manifest names a list of its own
+/// (`fliers.<kind>.particles`), that list and each `.emt` it names out of the pack, else out of
+/// `track` (`track` reads `\<name>` off the track's archives). The zone table and the particle sheet
+/// stay the track's: the zones are the surfaces of the world ridden, MX Unleashed's, and the sheet is
+/// the track's own. `stock` is the disc's list's name, `word` the kind for the line it says. The
+/// reader, and the list's bytes.
+fn pack_fx_read<'a>(
+    pack: Option<&'a vehicle::PackFlier>,
+    track: impl Fn(&str) -> Option<Vec<u8>> + 'a,
+    stock: &str,
+    word: &str,
+) -> (impl Fn(&str) -> Option<Vec<u8>> + 'a, Option<Vec<u8>>) {
+    let pack = pack.filter(|f| !f.particles.is_empty());
+    let own_list = pack.and_then(|f| f.read(&f.particles).map(|b| (f, b)));
+    match (&own_list, pack) {
+        (Some((f, _)), _) => println!("{word}: particles: {}'s own {}", f.id, f.particles),
+        (None, Some(f)) => println!("{word}: particles: {} lacks its {}; the track's {stock}", f.id, f.particles),
+        (None, None) => {}
+    }
+    let own = own_list.as_ref().map(|(f, _)| *f);
+    let list = match own_list {
+        Some((_, b)) => Some(b),
+        None => track(stock),
+    };
+    let read = move |name: &str| {
+        let from_pack = own.filter(|_| !name.eq_ignore_ascii_case(particles::ZONES)).and_then(|f| f.files.read_suffix(&format!("\\{name}")).ok());
+        from_pack.or_else(|| track(name))
+    };
+    (read, list)
 }
 
 /// What the plane's particles read off it this frame (P58): its emitters' nodes where the plane is,
@@ -13125,9 +13358,11 @@ fn load_heli_fx(
     track: &str,
     drawn: &Kiowa,
     assets: &Assets,
+    pack: Option<&vehicle::PackFlier>,
 ) -> Result<(particles::PlaneFx, Vec<(String, M4)>, game_render::pst::Texture), String> {
-    let read = |name: &str| archives.iter().find_map(|a| a.read_suffix(&format!("\\{name}")).ok());
-    let list = read(particles::KIOWA_PARTICLES).ok_or(format!("no {}", particles::KIOWA_PARTICLES))?;
+    let track_read = |name: &str| archives.iter().find_map(|a| a.read_suffix(&format!("\\{name}")).ok());
+    let (read, list) = pack_fx_read(pack, track_read, particles::KIOWA_PARTICLES, "kiowa");
+    let list = list.ok_or(format!("no {}", particles::KIOWA_PARTICLES))?;
     let sheet = read(&particles::sheet(track)).ok_or(format!("no {}", particles::sheet(track)))?;
     let texture = read(&particles::sheet_texture(track)).ok_or(format!("no {}", particles::sheet_texture(track)))?;
     let texture = game_render::pst::Texture::parse(&texture)?;

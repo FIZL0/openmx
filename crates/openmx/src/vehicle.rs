@@ -340,6 +340,12 @@ pub struct PackFlier {
     pub psg: String,
     pub hull: String,
     pub rays: String,
+    /// The kind's own follow-camera file (`Cam/FC_BiplaneDefault.pb`) and particle list
+    /// (`Part/biplaneparticles.dat`), as the manifest names them (MD108): empty where it names none.
+    pub cameras: String,
+    pub particles: String,
+    /// The pack's folder, which its sounds are read out of with its `mod.json` (MD108).
+    pub folder: std::path::PathBuf,
 }
 
 impl PackFlier {
@@ -367,6 +373,11 @@ impl PackFlier {
 
     pub fn phy_bytes(&self) -> Option<Vec<u8>> {
         self.read(&self.phy)
+    }
+
+    /// The kind's own follow-camera file's bytes (MD108), `None` where the pack has none.
+    pub fn camera_bytes(&self) -> Option<Vec<u8>> {
+        Some(&self.cameras).filter(|c| !c.is_empty()).and_then(|c| self.read(c))
     }
 }
 
