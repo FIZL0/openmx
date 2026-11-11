@@ -1,0 +1,489 @@
+# s281-ai-tick.toml — the three free09 AI riders' tick (S281): each brain's flags, speed, forward
+# height, controls, climb and stuck clocks, aim and heading, and its bike's levers and overrides, from
+# slot 44 of copy 1 (recording2's session a few hundred feet on: same heap, so fixed addresses). No pad.
+#
+#   ./kit pcsx2 with -- ./kit record watch/s281-ai-tick.toml -o context/capture/s281/ai-tick.csv
+#
+# The brains are the MXVehicleAI objects (vtable at +8) whose mode +0xd0 is 5; the riders are each
+# brain's interface (+0x40) less 0x10d0.
+
+[watch]
+name        = "s281-ai-tick"
+description = "free09's three AI riders: brain tick fields and the bike levers they hand off to"
+every       = 1
+frames      = 900
+
+[setup]
+state     = 44
+warmup    = 0
+settle_ms = 240
+
+[[field]]
+name = "clock"
+addr = "0xd5090c"
+type = "f32"
+
+[[field]]
+name = "b0_flags_lo"
+addr = "0x1483ee0"
+type = "u32"
+
+[[field]]
+name = "b0_flags_hi"
+addr = "0x1483ee4"
+type = "u32"
+
+[[field]]
+name = "b0_speed"
+addr = "0x1483f30"
+type = "f32"
+
+[[field]]
+name = "b0_fwd_y"
+addr = "0x1483f64"
+type = "f32"
+
+[[field]]
+name = "b0_throttle"
+addr = "0x1483f90"
+type = "f32"
+
+[[field]]
+name = "b0_brake"
+addr = "0x1483f94"
+type = "f32"
+
+[[field]]
+name = "b0_steer"
+addr = "0x1483fa0"
+type = "f32"
+
+[[field]]
+name = "b0_pitch"
+addr = "0x1483fa4"
+type = "f32"
+
+[[field]]
+name = "b0_climb_hold"
+addr = "0x1484240"
+type = "f32"
+
+[[field]]
+name = "b0_climb_steep"
+addr = "0x1484244"
+type = "f32"
+
+[[field]]
+name = "b0_climb_timer"
+addr = "0x1484248"
+type = "f32"
+
+[[field]]
+name = "b0_climb_speed"
+addr = "0x14841bc"
+type = "f32"
+
+[[field]]
+name = "b0_stuck"
+addr = "0x14842a0"
+type = "f32"
+
+[[field]]
+name = "b0_aim_x"
+addr = "0x1484070"
+type = "f32"
+
+[[field]]
+name = "b0_aim_z"
+addr = "0x1484078"
+type = "f32"
+
+[[field]]
+name = "b0_dir_x"
+addr = "0x1484080"
+type = "f32"
+
+[[field]]
+name = "b0_dir_z"
+addr = "0x1484088"
+type = "f32"
+
+[[field]]
+name = "b0_target_speed"
+addr = "0x1484090"
+type = "f32"
+
+[[field]]
+name = "b0_heading"
+addr = "0x14840a4"
+type = "f32"
+
+[[field]]
+name = "r0_lever_steer"
+addr = "0xd4fb38"
+type = "f32"
+
+[[field]]
+name = "r0_lever_lean"
+addr = "0xd4fb3c"
+type = "f32"
+
+[[field]]
+name = "r0_lever_gas"
+addr = "0xd4fb4c"
+type = "f32"
+
+[[field]]
+name = "r0_lever_brake"
+addr = "0xd4fb50"
+type = "f32"
+
+[[field]]
+name = "r0_lever_reverse"
+addr = "0xd4fb58"
+type = "f32"
+
+[[field]]
+name = "r0_back_up"
+addr = "0xd509d0"
+type = "f32"
+
+[[field]]
+name = "r0_swerve_bar"
+addr = "0xd509d4"
+type = "f32"
+
+[[field]]
+name = "r0_swerve"
+addr = "0xd509d8"
+type = "f32"
+
+[[field]]
+name = "r0_ground"
+addr = "0xd4fa84"
+type = "u32"
+
+[[field]]
+name = "r0_card"
+addr = "0xd504ac"
+type = "u32"
+
+[[field]]
+name = "r0_w_heading"
+addr = "0xd50648"
+type = "f32"
+
+[[field]]
+name = "r0_w_aim"
+addr = "0xd5064c"
+type = "f32"
+
+[[field]]
+name = "b1_flags_lo"
+addr = "0xc64030"
+type = "u32"
+
+[[field]]
+name = "b1_flags_hi"
+addr = "0xc64034"
+type = "u32"
+
+[[field]]
+name = "b1_speed"
+addr = "0xc64080"
+type = "f32"
+
+[[field]]
+name = "b1_fwd_y"
+addr = "0xc640b4"
+type = "f32"
+
+[[field]]
+name = "b1_throttle"
+addr = "0xc640e0"
+type = "f32"
+
+[[field]]
+name = "b1_brake"
+addr = "0xc640e4"
+type = "f32"
+
+[[field]]
+name = "b1_steer"
+addr = "0xc640f0"
+type = "f32"
+
+[[field]]
+name = "b1_pitch"
+addr = "0xc640f4"
+type = "f32"
+
+[[field]]
+name = "b1_climb_hold"
+addr = "0xc64390"
+type = "f32"
+
+[[field]]
+name = "b1_climb_steep"
+addr = "0xc64394"
+type = "f32"
+
+[[field]]
+name = "b1_climb_timer"
+addr = "0xc64398"
+type = "f32"
+
+[[field]]
+name = "b1_climb_speed"
+addr = "0xc6430c"
+type = "f32"
+
+[[field]]
+name = "b1_stuck"
+addr = "0xc643f0"
+type = "f32"
+
+[[field]]
+name = "b1_aim_x"
+addr = "0xc641c0"
+type = "f32"
+
+[[field]]
+name = "b1_aim_z"
+addr = "0xc641c8"
+type = "f32"
+
+[[field]]
+name = "b1_dir_x"
+addr = "0xc641d0"
+type = "f32"
+
+[[field]]
+name = "b1_dir_z"
+addr = "0xc641d8"
+type = "f32"
+
+[[field]]
+name = "b1_target_speed"
+addr = "0xc641e0"
+type = "f32"
+
+[[field]]
+name = "b1_heading"
+addr = "0xc641f4"
+type = "f32"
+
+[[field]]
+name = "r1_lever_steer"
+addr = "0xc4f668"
+type = "f32"
+
+[[field]]
+name = "r1_lever_lean"
+addr = "0xc4f66c"
+type = "f32"
+
+[[field]]
+name = "r1_lever_gas"
+addr = "0xc4f67c"
+type = "f32"
+
+[[field]]
+name = "r1_lever_brake"
+addr = "0xc4f680"
+type = "f32"
+
+[[field]]
+name = "r1_lever_reverse"
+addr = "0xc4f688"
+type = "f32"
+
+[[field]]
+name = "r1_back_up"
+addr = "0xc50500"
+type = "f32"
+
+[[field]]
+name = "r1_swerve_bar"
+addr = "0xc50504"
+type = "f32"
+
+[[field]]
+name = "r1_swerve"
+addr = "0xc50508"
+type = "f32"
+
+[[field]]
+name = "r1_ground"
+addr = "0xc4f5b4"
+type = "u32"
+
+[[field]]
+name = "r1_card"
+addr = "0xc4ffdc"
+type = "u32"
+
+[[field]]
+name = "r1_w_heading"
+addr = "0xc50178"
+type = "f32"
+
+[[field]]
+name = "r1_w_aim"
+addr = "0xc5017c"
+type = "f32"
+
+[[field]]
+name = "b2_flags_lo"
+addr = "0x1048030"
+type = "u32"
+
+[[field]]
+name = "b2_flags_hi"
+addr = "0x1048034"
+type = "u32"
+
+[[field]]
+name = "b2_speed"
+addr = "0x1048080"
+type = "f32"
+
+[[field]]
+name = "b2_fwd_y"
+addr = "0x10480b4"
+type = "f32"
+
+[[field]]
+name = "b2_throttle"
+addr = "0x10480e0"
+type = "f32"
+
+[[field]]
+name = "b2_brake"
+addr = "0x10480e4"
+type = "f32"
+
+[[field]]
+name = "b2_steer"
+addr = "0x10480f0"
+type = "f32"
+
+[[field]]
+name = "b2_pitch"
+addr = "0x10480f4"
+type = "f32"
+
+[[field]]
+name = "b2_climb_hold"
+addr = "0x1048390"
+type = "f32"
+
+[[field]]
+name = "b2_climb_steep"
+addr = "0x1048394"
+type = "f32"
+
+[[field]]
+name = "b2_climb_timer"
+addr = "0x1048398"
+type = "f32"
+
+[[field]]
+name = "b2_climb_speed"
+addr = "0x104830c"
+type = "f32"
+
+[[field]]
+name = "b2_stuck"
+addr = "0x10483f0"
+type = "f32"
+
+[[field]]
+name = "b2_aim_x"
+addr = "0x10481c0"
+type = "f32"
+
+[[field]]
+name = "b2_aim_z"
+addr = "0x10481c8"
+type = "f32"
+
+[[field]]
+name = "b2_dir_x"
+addr = "0x10481d0"
+type = "f32"
+
+[[field]]
+name = "b2_dir_z"
+addr = "0x10481d8"
+type = "f32"
+
+[[field]]
+name = "b2_target_speed"
+addr = "0x10481e0"
+type = "f32"
+
+[[field]]
+name = "b2_heading"
+addr = "0x10481f4"
+type = "f32"
+
+[[field]]
+name = "r2_lever_steer"
+addr = "0x1509078"
+type = "f32"
+
+[[field]]
+name = "r2_lever_lean"
+addr = "0x150907c"
+type = "f32"
+
+[[field]]
+name = "r2_lever_gas"
+addr = "0x150908c"
+type = "f32"
+
+[[field]]
+name = "r2_lever_brake"
+addr = "0x1509090"
+type = "f32"
+
+[[field]]
+name = "r2_lever_reverse"
+addr = "0x1509098"
+type = "f32"
+
+[[field]]
+name = "r2_back_up"
+addr = "0x1509f10"
+type = "f32"
+
+[[field]]
+name = "r2_swerve_bar"
+addr = "0x1509f14"
+type = "f32"
+
+[[field]]
+name = "r2_swerve"
+addr = "0x1509f18"
+type = "f32"
+
+[[field]]
+name = "r2_ground"
+addr = "0x1508fc4"
+type = "u32"
+
+[[field]]
+name = "r2_card"
+addr = "0x15099ec"
+type = "u32"
+
+[[field]]
+name = "r2_w_heading"
+addr = "0x1509b88"
+type = "f32"
+
+[[field]]
+name = "r2_w_aim"
+addr = "0x1509b8c"
+type = "f32"
