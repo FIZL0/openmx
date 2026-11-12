@@ -3570,6 +3570,148 @@ impl Load {
         v(&mut w, o + 0x14a0, self.pelvis_box_size);
         w
     }
+
+    /// Load a parsed file with the model's inputs read off the model at the quad's spawn point `at`
+    /// and `heading`: the part reader's box in the heading's own frame ([`heading_frame`]), the
+    /// mounts in the unit one ([`spawn_frame`]).
+    pub fn read_model(ini: &crate::phy::Ini, model: &Model, at: Vf, heading: Vf, curve: &crate::camera::CurveTable) -> Result<Load, String> {
+        Ok(Load::read(ini, model.half_box(&heading_frame(at, heading)), model.mounts(&spawn_frame(at, heading))?, curve))
+    }
+}
+
+// --- MD129: the loader's model inputs ----------------------------------------------------------------
+
+/// The wheel nodes the wheel setup looks up by name, in [`LEFT_FRONT`]..[`RIGHT_REAR`] order.
+pub const WHEEL_NODES: [&str; 4] = ["WheelLeftFront", "WheelRightFront", "WheelLeftRear", "WheelRightRear"];
+
+/// One node of the quad's chassis model (`.psg`) as it loads: its name, its local rows (the bind pose,
+/// which the animation controller saves untouched at load), its own box, and its parent.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelNode {
+    pub name: String,
+    pub local: crate::math::Mat4,
+    pub own: crate::props::NodeBox,
+    pub parent: Option<usize>,
+}
+
+/// **The quad's chassis model** (MD129), the `.psg` the machine's `.mcf` names (`SLTFile=`): its nodes
+/// in the file's order, each after its parent. The model hangs under the quad's scene node, a node with
+/// no box of its own whose world rows are the quad's placement, so what the loader reads off it — the
+/// part reader's box and the wheel setup's mounts — is worked in that placement's frame and carries its
+/// rounding: at a spawn some 3,000 ft out the bind pose's box and mounts move by up to a few 1e-4.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Model {
+    pub nodes: Vec<ModelNode>,
+}
+
+impl Model {
+    /// Read the `.psg`: `psg\0`, a version and the node count, then 224-byte records — the name
+    /// (128 bytes), the local rows (16 floats, the translation last), the box's centre and half
+    /// extent (three floats each, `w` 1 as the scene node keeps them), a radius and the parent (`-1`
+    /// for the root).
+    pub fn parse(psg: &[u8]) -> Result<Model, String> {
+        const NODES: usize = 12;
+        const RECORD: usize = 224;
+        const NAME: usize = 128;
+        const CENTRE: usize = 192;
+        const HALF: usize = 204;
+        const PARENT: usize = 220;
+        let word = |at: usize| -> Result<u32, String> {
+            psg.get(at..at + 4)
+                .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .ok_or_else(|| format!(".psg ends at {} before byte {at}", psg.len()))
+        };
+        if psg.get(..4) != Some(b"psg\0".as_slice()) {
+            return Err("not a .psg: no psg\\0 at the front".into());
+        }
+        let count = word(8)? as usize;
+        let mut nodes = Vec::with_capacity(count.min(4096));
+        for i in 0..count {
+            let at = NODES + i * RECORD;
+            let name = psg.get(at..at + NAME).ok_or_else(|| format!(".psg ends before node {i}"))?;
+            let name = String::from_utf8_lossy(name.split(|&b| b == 0).next().unwrap_or_default()).into_owned();
+            let row = |r: usize| -> Result<Vf, String> {
+                let b = at + NAME + r * 16;
+                Ok(Vf::from_bits([word(b)?, word(b + 4)?, word(b + 8)?, word(b + 12)?]))
+            };
+            let local = crate::math::Mat4([row(0)?, row(1)?, row(2)?, row(3)?]);
+            let three = |b: usize| -> Result<Vf, String> { Ok(Vf::from_bits([word(b)?, word(b + 4)?, word(b + 8)?, 1f32.to_bits()])) };
+            let own = crate::props::NodeBox { centre: three(at + CENTRE)?, half_extent: three(at + HALF)? };
+            let parent = match usize::try_from(word(at + PARENT)? as i32) {
+                Ok(p) if p < i => Some(p),
+                Ok(p) => return Err(format!("node {i}'s parent {p} comes after it")),
+                Err(_) => None,
+            };
+            nodes.push(ModelNode { name, local, own, parent });
+        }
+        Ok(Model { nodes })
+    }
+
+    /// Each node's world rows with the model's roots under `frame`, as the scene's world update
+    /// composes them ([`crate::toys::compose`]).
+    pub fn worlds(&self, frame: &crate::math::Mat4) -> Vec<crate::math::Mat4> {
+        let mut worlds: Vec<crate::math::Mat4> = Vec::with_capacity(self.nodes.len());
+        for n in &self.nodes {
+            let parent = n.parent.map_or(*frame, |p| worlds[p]);
+            worlds.push(crate::toys::compose(&n.local, &parent));
+        }
+        worlds
+    }
+
+    /// **The part reader's box**: the half extent of the quad's scene node's bounds
+    /// ([`crate::prop_world::node_bounds`]) — the node has no box, its world rows are `frame`, and
+    /// under it hangs the model, every node with its own box.
+    pub fn half_box(&self, frame: &crate::math::Mat4) -> Vf {
+        use crate::prop_world::BoundsNode;
+        let worlds = self.worlds(frame);
+        fn tree(m: &Model, worlds: &[crate::math::Mat4], i: usize) -> BoundsNode {
+            let children = (0..m.nodes.len()).filter(|&k| m.nodes[k].parent == Some(i)).map(|k| tree(m, worlds, k)).collect();
+            BoundsNode { own: Some(m.nodes[i].own), world: worlds[i], children }
+        }
+        let roots = (0..self.nodes.len()).filter(|&k| self.nodes[k].parent.is_none()).map(|k| tree(self, &worlds, k)).collect();
+        crate::prop_world::node_bounds(&BoundsNode { own: None, world: *frame, children: roots }).half_extent
+    }
+
+    /// **The wheel setup's mounts**: each [`WHEEL_NODES`] node's world origin carried back into
+    /// `frame` (less `frame`'s origin, then the rows' dots: `vmulax`, `vmadday`, `vmaddz` on the
+    /// transposed rows), `w` 1; no wheel has a sweep shape, as the quad's init asks for none.
+    pub fn mounts(&self, frame: &crate::math::Mat4) -> Result<[(Vf, bool); 4], String> {
+        let worlds = self.worlds(frame);
+        let [r0, r1, r2, r3] = frame.0;
+        let column = |k: usize| Vf::new(r0[k], r1[k], r2[k], 0.0);
+        let mut out = [(Vf::ZERO, false); 4];
+        for (slot, name) in out.iter_mut().zip(WHEEL_NODES) {
+            let i = self.nodes.iter().position(|n| n.name == name).ok_or_else(|| format!("the model has no {name}"))?;
+            let d = worlds[i].0[3].sub(r3);
+            let acc = column(0).mul(d.bc(Field::X));
+            let acc = Vf::madd(acc, column(1), d.bc(Field::Y));
+            let p = Vf::madd(acc, column(2), d.bc(Field::Z));
+            *slot = (Vf::new(p.x(), p.y(), p.z(), 1.0), false);
+        }
+        Ok(out)
+    }
+}
+
+/// **The quad's placement as the wheel setup reads the model in it**: at `at`, facing `heading` made
+/// unit length ([`crate::contact::unit`]) as the third row, upright (`(0, 1, 0)`) and the first row
+/// their cross, `(z.z, 0, -z.x)`. The quad keeps both as its spawn point and heading.
+pub fn spawn_frame(at: Vf, heading: Vf) -> crate::math::Mat4 {
+    rows_facing(at, crate::contact::unit(heading))
+}
+
+/// **The quad's placement as the part reader reads the model in it**: [`spawn_frame`] with the
+/// heading as kept, not made unit length.
+pub fn heading_frame(at: Vf, heading: Vf) -> crate::math::Mat4 {
+    rows_facing(at, heading)
+}
+
+fn rows_facing(at: Vf, z: Vf) -> crate::math::Mat4 {
+    crate::math::Mat4([
+        Vf::new(z.z(), 0.0, (-F(z.x())).0, 0.0),
+        Vf::new(0.0, 1.0, 0.0, 0.0),
+        Vf::new(z.x(), z.y(), z.z(), 0.0),
+        Vf::new(at.x(), at.y(), at.z(), 1.0),
+    ])
 }
 
 /// The body's largest roll and pitch rates, either side of `YawRateLimit`.
