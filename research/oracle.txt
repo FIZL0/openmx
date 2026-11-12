@@ -1102,6 +1102,27 @@ activity_race_load          boot 0x002f8610 (activity) the base loader: the trac
 #                                           after), 0x002f8b40 ground-snaps the path nodes,
 #                                           ground_query on the line and grid gate centres; a second
 #                                           file act+0x288 into act+0xbc.
+# S296: the load's ground snap. ported as race::TrackFile::snap_to_ground (the terrain half).
+#   the ground snap 0x002f8b40 (activity, track): every path slot's nodes (+0x10, next
+#                                           +0x54): points +0x14/+0x24/+0x34 = 0, then with a terrain
+#                                           (world act+0x180 +0x428) ground_query each and floor at 0.
+#                                           A node with +4 & 0x80: per point, a sweep probe 1000 long
+#                                           down from y+900 (probe +0x138/+0x150, put_back_refile
+#                                           radius 10, filter 0x00421130), then race_prop_raise with
+#                                           t2 = node+0x14 all three times (the first point's y).
+#                                           Its probe/search come from operator_new (0x170, 0x40).
+race_prop_raise             boot 0x002f8820 (act, world, filter, probe+4, search, probe, &y) the props
+#                                           the search grid finds near the probe: type 2 (a mesh, not
+#                                           masked by two named classes) swept, *y = max(*y, hit +4);
+#                                           type 3 only answers 1 within 20 (unused). Not ported.
+res_find                    boot 0x00125bc0 (store, name) -> nonzero when the named file is there
+track_load                  boot 0x00269490 (track, name, 3) -> the track, read by track_file_load, or 0
+sweep_probe_ctor            boot 0x001e80f0 (probe, 1) -> probe
+sweep_probe_setup           boot 0x001e8460 (probe, 1, 0, 0)
+world_layer                 boot 0x001a6e10 (world, k) -> world +0x4f8's entry k (entry 0 out of range)
+world_add_probe             boot 0x00119c60 (probe, layer, 1, 1) into the broad phase
+search_setup                boot 0x00218980 (search, 128; cell 10.0, reach 30.0 in f12/f13)
+search_free                 boot 0x00218910 (search, 1) frees the grid, then the search
 # activity_supercross's loader 0x002f9f40, before the lane table: the start gate (+0x3dc, made with
 # operator_new 0x90 + gate_ctor if absent) and the track's grid (+0x58) and line (+0x5c) gates off
 # the scene props "dropgate" (or the scene +0xb4 name lowercased; scene vt +0x120) and "finishgate"
