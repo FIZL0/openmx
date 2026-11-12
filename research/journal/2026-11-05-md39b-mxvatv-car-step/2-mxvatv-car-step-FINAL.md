@@ -14,8 +14,10 @@ Task MD39b. 2026-11-12.
   - **MD107**: `tests/mxvatv_car_replay.rs` replays each of the five drives through SLUS-21104's frame
     driver in the interpreter, seeded from the drive's RAM image and fed only the tape's inputs through
     the port's `atv_car::input`. Every row's car, body, engine and tire words are compared bit for bit.
-- Left the proof of the five drives and the 5-of-5 field map to the gate (`mxvatv_car_fields`, `mxvatv_car_captures`,
-  `mxvatv_car_replay`): my own targeted check of the three waited 50 minutes for a check slot under load and was cut off.
+- Did not rerun `mxvatv_car_fields`, `mxvatv_car_captures` or `mxvatv_car_replay` myself. My targeted check
+  waited 50 minutes for a check slot under load and was cut off. `./kit done` ran 0 test binaries, because
+  this part changes only the journal. The passes I rely on are the ones MD107's and C29's gates ran when
+  they landed.
 - No code changed in this part.
 
 ## What the original does
@@ -32,6 +34,8 @@ frame and the input step. All addresses are in `research/oracle.txt` `# MD39b`, 
 
 ## Not verified / not 1:1
 
+- **No test was rerun on this branch for this part**: see What I did. The proofs are the ones MD107's and
+  C29's merges ran.
 - **The drives are replayed by the original's frame, not the port's whole frame.**
   - What the replay proves: the captures, the seeding, the tape lag and the port's input step.
   - What it does not prove: that `atv_car`'s whole frame, run by itself, gives the same rows. That needs
