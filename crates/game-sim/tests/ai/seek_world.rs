@@ -3,7 +3,7 @@
 use super::*;
 
 /// A member of the disc's container.
-fn s313_member(f: &mut std::fs::File, psr: &game_sim::archive::Psr, name: &str) -> Vec<u8> {
+pub(crate) fn s313_member(f: &mut std::fs::File, psr: &game_sim::archive::Psr, name: &str) -> Vec<u8> {
     use std::io::{Read, Seek, SeekFrom};
     let e = psr.find(name).unwrap_or_else(|| panic!("no {name}"));
     f.seek(SeekFrom::Start(e.at)).unwrap();
@@ -13,7 +13,7 @@ fn s313_member(f: &mut std::fs::File, psr: &game_sim::archive::Psr, name: &str) 
 }
 
 /// A file of one of the container's archives, by its full name.
-fn s313_file(file: &[u8], name: &str) -> Vec<u8> {
+pub(crate) fn s313_file(file: &[u8], name: &str) -> Vec<u8> {
     let res = game_sim::archive::Res::parse(file).unwrap();
     let want = name.to_ascii_lowercase();
     let e = res.entries.iter().find(|e| e.name.to_ascii_lowercase() == want).unwrap_or_else(|| panic!("no {name}"));

@@ -29,7 +29,7 @@ fn state() -> Option<Ee> {
 
 /// The game's curve table out of the image, and the port's fine arc cosine (proved the game's in
 /// `tests/ragdoll.rs`); and the step beside the table is the port's.
-fn tables(ee: &Ee) -> Tables {
+pub(crate) fn tables(ee: &Ee) -> Tables {
     assert_eq!(ee.f32_at(addr("curve_table_step").unwrap()).to_bits(), CURVE_STEP.to_bits());
     assert_eq!(ee.f32_at(addr("curve_table_invstep").unwrap()).to_bits(), CURVE_INV_STEP.to_bits());
     let base = ee.u32_at(addr("curve_table_ptr").unwrap());
@@ -53,7 +53,7 @@ fn f(ee: &Ee, a: u32) -> F {
 }
 
 /// What the controller reads, off a rider in RAM.
-fn read(ee: &Ee, ai: u32) -> (Situation, Tuning) {
+pub(crate) fn read(ee: &Ee, ai: u32) -> (Situation, Tuning) {
     let at = Situation {
         up: quad(ee, ai + 0xa0),
         forward: quad(ee, ai + 0xb0),

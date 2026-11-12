@@ -1502,6 +1502,13 @@ ai_update_vehicle           boot 0x002858d0 VehicleAI.cpp's: both build the look
 #                                           sets the aimed-for speed (t3). Flag 0x100000 skips riders
 #                                           whose +8 has bit 4; 0x20000 runs the path-edge push; 0x100
 #                                           is cleared at the end. Ported as game_sim::ai::avoid
+#                                           S12e: the MX path needs ai+0xd0 == 2 && card && card+0x40;
+#                                           else 0x00386ddc jal ai_update_vehicle with the same args. A
+#                                           riding brain is mode 5, so every free09 AI rider runs
+#                                           ai_update_vehicle (not ported; writes +0x1d0 whole with w 1,
+#                                           e.g. pc 0x00286794). Call site in ai_tick_flag 0x00384a60:
+#                                           a1/a2 = ai+0x150/+0x154, a3 = +0xc0, t0 = t1 = +0x1d0
+#                                           (heading and steer alias), t2 = t3 = +0x1e0
 ai_mx_construct             boot 0x00382c50 MXVehicleAI constructor (calls ai_vehicle_construct): the
 #                                           avoidance tunables' defaults, feeler height +0x2a8 3.0
 ai_vehicle_construct        boot 0x00282ca0 VehicleAI base constructor: +0x2a4 11 feelers, +0x2ac 100
