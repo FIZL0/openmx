@@ -475,6 +475,8 @@ fn the_settings_file_reads_back_as_it_was_written() {
         air_wrecks: false,
         // Backwards Landings Bail on (S161).
         backwards_bail: true,
+        // A quad picked (MD37d).
+        atv: "atv_Race250P".into(),
         // Vibration off (P183).
         vibration: false,
         // Button Icons Xbox (P281).
@@ -2400,6 +2402,69 @@ fn the_machine_picker_lists_pack_bikes_and_round_trips_garage_txt() {
     assert!(text.contains("seat1.flier = biplane original biplane2\n"), "{text}");
     assert_eq!(Picks::load(&dir), m.picks);
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// MD37d: with a quad pack whose handling files openmx rides, the Garage's Quad row is a pick: Off,
+/// the default and the original's, or one of the files. A pick is written to the settings file and
+/// read back, and the pause's switch row offers the quad, last, to a player the shell says has one.
+#[test]
+fn the_quad_row_picks_a_handling_file_and_the_pause_offers_it() {
+    use menu::{Key, Machine};
+    use roster::{Catalogue, PackMachine, Picks};
+    let mut disc = match game_render::Disc::open_configured() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    let catalogue = Catalogue::read(&mut disc).unwrap();
+    let quad = |skin: &str, name: &str| PackMachine {
+        pack: "mxvatv_atv".into(),
+        game: "MX vs. ATV Unleashed".into(),
+        machine: "atv".into(),
+        class: String::new(),
+        skin: skin.into(),
+        name: name.into(),
+        why: None,
+    };
+    let mut reader = Reader::new();
+    let mut m = Menu::new(Settings::default(), Controls::default()).with_garage(catalogue, Picks::default());
+    assert!(m.settings.atv.is_empty(), "off is the default");
+    assert!(!m.settings.text().contains("atv"), "{}", m.settings.text());
+    m.set_machines(vec![quad("atv_Race250P", "Race 250 P"), quad("atv_s_Pro250A", "Pro 250 A Sport")]);
+    m.step(reader.read(&Report::idle()));
+    let r = &mut reader;
+    main_to(&mut m, r, "Garage");
+    tab_to(&mut m, r, "Machines");
+    let row = |m: &Menu| m.page().iter().find(|row| row.key == Key::Machine(0)).cloned().unwrap();
+    let q = row(&m);
+    assert_eq!(q.label, "Quad");
+    assert_eq!(q.choices, ["Off", "Race 250 P", "Pro 250 A Sport"]);
+    assert_eq!((q.value.as_str(), q.off.as_deref()), ("Off", None));
+    down_to(&mut m, r, Key::Machine(0));
+    tap(&mut m, r, Control::Right);
+    assert_eq!(m.settings.atv, "atv_Race250P");
+    assert_eq!(row(&m).value, "Race 250 P");
+    tap(&mut m, r, Control::Right);
+    assert_eq!((m.settings.atv.as_str(), row(&m).value.as_str()), ("atv_s_Pro250A", "Pro 250 A Sport"));
+    assert!(m.settings.text().contains("atv = atv_s_Pro250A\n"), "{}", m.settings.text());
+    let dir = scratch("md37d-quad");
+    menu::save(&dir, &m.settings, &m.controls).unwrap();
+    assert_eq!(menu::load(&dir).0.atv, "atv_s_Pro250A");
+    std::fs::remove_dir_all(dir).ok();
+    tap(&mut m, r, Control::Right);
+    assert!(m.settings.atv.is_empty(), "round to Off");
+    assert!(Settings::parse("atv = off\n").atv.is_empty());
+
+    // The pause's switch row: the quad last, for a player who has one, and not to the one on it.
+    assert!(!m.choices(0).contains(&Machine::Atv));
+    m.atv[0] = true;
+    assert_eq!(m.choices(0).last(), Some(&Machine::Atv));
+    assert_eq!((Machine::Atv.word(), Machine::Atv.label()), ("atv", "Quad"));
+    m.switched(0, Machine::Atv);
+    assert!(!m.choices(0).contains(&Machine::Atv));
+    assert_eq!(m.choices(0).first(), Some(&Machine::Bike));
 }
 
 /// P315d: the Bike tab's Handling row offers the original's and, for each installed trick pack whose

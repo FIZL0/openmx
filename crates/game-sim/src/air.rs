@@ -348,6 +348,7 @@ const ACOS_SCALE: f32 = 14999.5;
 ///
 /// It is built by the game's *double-precision* `acos` and then rounded to `f32`, which is why
 /// [`acos`] below is `f64`: a `f32` arc cosine gives different last bits and so a different table.
+#[derive(Clone)]
 pub struct AcosTable(Box<[f32]>);
 
 impl AcosTable {

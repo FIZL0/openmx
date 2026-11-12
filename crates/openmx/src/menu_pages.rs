@@ -1403,8 +1403,18 @@ impl Menu {
         rows
     }
 
+    /// The Quad row's picks past Off (MD37d), if row `i` of [`Menu::other_machine_rows`] is the
+    /// quads' and openmx can ride them: each handling file the installed quad pack lists.
+    fn atv_picks(&self, i: usize) -> Option<Vec<String>> {
+        let kinds = roster::other_kinds(&self.machine_offer, self.garage_fliers());
+        (kinds.get(i).map(String::as_str) == Some(roster::ATV_KIND)).then_some(())?;
+        let picks: Vec<String> = self.machine_offer.iter().filter(|m| m.machine == roster::ATV_KIND && m.why.is_none()).map(|m| m.skin.clone()).collect();
+        (!picks.is_empty()).then_some(picks)
+    }
+
     /// The machine picker's rows for the kinds openmx cannot ride (P315c), one a kind, listing the
-    /// packs that bring it, greyed with why: the installed quads until openmx rides one.
+    /// packs that bring it, greyed with why; and the quads' (MD37d), which picks one to switch to
+    /// from the pause, or none.
     fn other_machine_rows(&self) -> Vec<Row> {
         let offer = &self.machine_offer;
         roster::other_kinds(offer, self.garage_fliers())
@@ -1413,6 +1423,19 @@ impl Menu {
             .map(|(i, kind)| {
                 let of: Vec<&roster::PackMachine> = offer.iter().filter(|m| m.machine == *kind).collect();
                 let label = roster::machine_label(kind);
+                if let Some(picks) = self.atv_picks(i) {
+                    let mut r = Row::new(
+                        Key::Machine(i),
+                        Kind::Choice,
+                        &label,
+                        "MX vs. ATV's quad, an addition: the handling it rides, which the pause's Switch To Machine then offers. Off, the original's, offers none.",
+                    );
+                    r.choices = std::iter::once("Off".to_string()).chain(of.iter().filter(|m| m.why.is_none()).map(|m| m.name.clone())).collect();
+                    r.now = Some(picks.iter().position(|p| *p == self.settings.atv).map_or(0, |k| k + 1));
+                    r.value = r.choices[r.now.unwrap_or(0)].clone();
+                    r.note = of.first().map(|m| m.game.clone());
+                    return r;
+                }
                 let mut r = Row::new(Key::Machine(i), Kind::Choice, &label, &format!("The {}s the installed machine packs bring.", label.to_lowercase()));
                 r.choices = of.iter().map(|m| format!("{} (cannot ride)", m.name)).collect();
                 r.value = of.first().map(|m| m.name.clone()).unwrap_or_default();
@@ -1708,7 +1731,7 @@ impl Menu {
     fn mods_category_for_pause(&self) -> Option<Category> {
         use super::Machine as M;
         (self.stack.first() == Some(&Screen::Pause)).then(|| match self.up[self.pauser.min(SEATS_MAX - 1)] {
-            M::Bike => Category::Bike,
+            M::Bike | M::Atv => Category::Bike,
             M::Biplane => Category::Biplane,
             M::Buggy | M::Monster | M::Baja => Category::Cars,
             M::Helicopter => Category::Kiowa,
@@ -1947,6 +1970,10 @@ impl Menu {
         let mods_players = (self.screen() == Some(Screen::Modifiers)).then(|| self.mods_own().is_none());
         // P223: a row the presets set, changed by hand (here or by the Original switch), ends Auto.
         let look = super::video::Look::of(&self.settings);
+        let atv_picks = match row.key {
+            Key::Machine(i) => self.atv_picks(i),
+            _ => None,
+        };
         let s = &mut self.settings;
         match row.key {
             Key::Heading => return,
@@ -2155,7 +2182,14 @@ impl Menu {
                 self.change_garage(g, p);
                 return;
             }
-            Key::Machine(_) => return,
+            // The Quad row (MD37d): off, or the handling file it rides.
+            Key::Machine(_) => {
+                let Some(picks) = atv_picks else { return };
+                s.atv = match next(row) {
+                    0 => String::new(),
+                    k => picks.get(k - 1).cloned().unwrap_or_default(),
+                };
+            }
             Key::Flier(i) => {
                 let seat = self.garage_seat();
                 let offer = self.garage_fliers().to_vec();

@@ -48,6 +48,9 @@ pub struct Pack {
     pub files: Res,
     /// `builds`: each `.sub` with its motion set and the chassis model that set names.
     pub builds: Vec<Build>,
+    /// `phy` (MD37d): a quad pack's handling files (`Veh/atv_Race250P.phy`), the Garage's Quad
+    /// row's picks.
+    pub phy: Vec<String>,
     /// `rider`: the rider's clip prefix (`ATV`), its riding and stunt motion sets and stunt table.
     pub rider: String,
     rider_motions: String,
@@ -216,6 +219,10 @@ pub fn read(folder: &Path) -> Result<Option<Pack>, String> {
         files: Res::folder(folder)?,
         folder: folder.to_owned(),
         builds,
+        phy: match json.get("phy") {
+            Some(Json::Arr(list)) => list.iter().filter_map(Json::str).map(str::to_owned).collect(),
+            _ => Vec::new(),
+        },
         rider: rider.and_then(|r| r.get("rider")).and_then(Json::str).unwrap_or("ATV").to_owned(),
         rider_motions: s(rider.and_then(|r| r.get("motions"))),
         rider_stunts: s(rider.and_then(|r| r.get("stunts"))),

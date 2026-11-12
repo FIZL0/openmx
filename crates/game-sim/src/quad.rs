@@ -3853,6 +3853,7 @@ impl Sweep for OnWorld<'_, '_> {
 ///   ([`world_bounds`]).
 /// - [`Call::PreloadCue`] (a sound cue), [`Call::StartStunt`]/[`Call::EndStunt`] (the rider's
 ///   animation) and [`Call::Wreck`] (the reason; [`Ride::wreck`] reads it).
+#[derive(Clone)]
 pub struct Ride<R = Vec<Call>> {
     pub p: Params,
     pub q: Quad,
