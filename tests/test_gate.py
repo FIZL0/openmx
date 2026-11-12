@@ -206,11 +206,11 @@ def test_select() -> None:
         g('checkout', '-qb', 'task/T2', cwd=w)
         env = {**os.environ, 'CARGO_TARGET_DIR': str(w / 'target'), 'RUST_TEST_THREADS': '4'}
 
-        def ran(edit: dict, all_slow=False, since='main', notes=None) -> set[str]:
+        def ran(edit: dict, all_slow=False, since='main', notes=None, keep_slow=False) -> set[str]:
             for rel, text in edit.items():
                 (w / rel).write_text(text)
             rc, got_notes = cargo_gate.run('cargo test -q --message-format=short', w, env, 4, w / 'log', since,
-                                           all_slow, w / 'times.json')
+                                           all_slow, w / 'times.json', keep_slow=keep_slow)
             if notes is not None:
                 notes[:] = got_notes
             log = (w / 'log').read_text()
@@ -256,6 +256,17 @@ def test_select() -> None:
         got = ran({})
         check({'-p a --test one', '-p b --test uses', '-p c --test alone'} <= got,
               f'against the shared branch: the library change too ({sorted(got)})')
+        # A [[slow]] binary whose paths the change misses: `done` leaves it out, a merge's --since runs it.
+        slow = PICK['gate.toml'] + '\n[[slow]]\ntest = "-p b --test uses"\npaths = ["b/tests/uses.rs"]\n'
+        (w / 'gate.toml').write_text(slow)
+        commit('b/tests/uses is slow')
+        gated = g('rev-parse', 'HEAD', cwd=w).stdout.strip()
+        (w / 'a/src/lib.rs').write_text(PICK['a/src/lib.rs'] + '\npub fn three() -> u32 { 2 + 1 }\n')
+        commit('a library change b uses')
+        got = ran({}, since=gated)
+        check('-p a --test one' in got and '-p b --test uses' not in got, f'done: the slow binary left out ({sorted(got)})')
+        got = ran({}, since=gated, keep_slow=True)
+        check({'-p a --test one', '-p b --test uses'} <= got, f'a merge\'s --since: the slow binary runs ({sorted(got)})')
         notes = []
         got = ran({}, since='0' * 40, notes=notes)
         check({'-p a --test one', '-p b --test uses', '-p c --test alone'} <= got, f'--since nothing known: everything ({sorted(got)})')

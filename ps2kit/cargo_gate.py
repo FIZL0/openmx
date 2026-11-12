@@ -32,7 +32,8 @@ tracked rather than in `kit.toml` because every worktree has to agree on it, and
 
 A slow binary runs anyway under `./kit check --all`, which a run's merge check uses once a day, and a filtered
 check names it directly. Between those, a merge's check is `./kit check --since <base>`: the same picking, from
-the commit the merge is on rather than from the shared branch. `paths` are fnmatch globs (`*` crosses `/`) against what this branch changed since
+the commit the merge is on rather than from the shared branch, and a slow binary runs whenever that picking
+reaches it (its `paths` only spare a slot's `done`). `paths` are fnmatch globs (`*` crosses `/`) against what this branch changed since
 it left the shared branch, plus what is uncommitted. A flaky entry is a regex against `<rerun args>::<test>`.
 A test only gets its lone rerun when every failure in that binary matches an entry, so a binary that also
 failed for real is left failed. A variant binary's rerun line carries its features, target directory and
@@ -384,13 +385,18 @@ def alone_tests(cwd: Path) -> list[str]:
 
 
 def run(cmd: str, cwd: Path, env: dict, jobs: int, log_path: Path, shared: str, all_slow: bool,
-        times_path: Path, alone=nullcontext) -> tuple[int, list[str]]:
+        times_path: Path, alone=nullcontext, keep_slow: bool = False) -> tuple[int, list[str]]:
     """The whole gate. Returns cargo's exit code shape (0 passed, 101 a test failed, else the build's) and
     the notes `./kit check` adds to its one line: slow binaries left out, flakes that passed alone.
 
     `alone` is a context manager a failed `[alone]` binary's rerun, and a `[flaky]` one's, runs inside: `./kit check` passes one
     that holds every check slot on the machine (checks.alone). Only a failure takes the machine — a budget
-    test that passes beside the other worktrees' gates has no reason to stop them."""
+    test that passes beside the other worktrees' gates has no reason to stop them.
+
+    `keep_slow`: a merge's gate (`./kit check --since`) runs a `[[slow]]` binary whenever the selection
+    reaches it. Its `paths` are a guess at what it proves, good enough to spare a slot's `done`, but camera and
+    tick link nearly all of game-sim, so a merge that skipped them on that guess would leave a break for
+    the daily --all to find a day of merges later."""
     gc = gate_config(cwd)
     notes = []
     with open(log_path, 'w', encoding='utf-8') as log:
@@ -423,7 +429,7 @@ def run(cmd: str, cwd: Path, env: dict, jobs: int, log_path: Path, shared: str, 
                          ' (./kit check --all runs every one)')
 
         skipped = []
-        if not all_slow and gc.get('slow'):
+        if not all_slow and not keep_slow and gc.get('slow'):
             touched = changed(cwd, shared)
             for s in gc['slow']:
                 want = ' '.join(str(s.get('test', '')).split())

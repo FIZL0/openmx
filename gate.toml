@@ -1,8 +1,10 @@
 # What `./kit check` and `./kit done` do differently on a whole run (see ps2kit/cargo_gate.py). Tracked, so
 # every worktree's gate agrees; kit.toml stays per machine.
 
-# Binaries the gate runs only when the work touches what they prove. `./kit check --all` (the run's merge
-# check) always runs them, and `./kit check -- -p game-sim --test camera` runs one by name.
+# Binaries a slot's `done` runs only when the work touches what they prove. A merge's gate (`./kit check
+# --since`) runs them whenever its selection reaches their crate, `./kit check --all` always, and
+# `./kit check -- -p game-sim --test camera` runs one by name. The paths are a guess (both binaries link
+# nearly all of game-sim), so only `done` goes by them.
 [[slow]]
 # 22 oracle proofs of the camera, each over a minute: 268 s, the gate's longest binary (2026-10-23).
 test = "-p game-sim --test camera"

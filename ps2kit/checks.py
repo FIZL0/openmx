@@ -290,7 +290,7 @@ def _run_shown(cmd: str, extra: list[str], cwd: Path, log: Path, env=None, all_s
             ref = f'{remote}/{shared}' if not _git(cwd)('rev-parse', '-q', '--verify', f'{remote}/{shared}').returncode \
                 else shared
         rc, notes = cargo_gate.run(cmd, cwd, e, jobs, log, ref, all_slow or os.environ.get('KIT_CHECK_ALL') == '1',
-                                   cfg(False).ctx('notes/check-times.json'), alone=alone)
+                                   cfg(False).ctx('notes/check-times.json'), alone=alone, keep_slow=bool(since))
         NOTES.extend(notes)
         return rc
     with open(log, 'w', encoding='utf-8') as f:
