@@ -171,6 +171,26 @@ def alone():
         _take_slot()
 
 
+def _alone_wanted() -> bool:
+    """Another process's gate waits in `alone` for every check slot (cargo_gate.GiveWay)."""
+    return bool(_HOLD) and _check_lock('check-alone').held_by_other()
+
+
+def _give_way() -> None:
+    """Give this process's check slot to the gate waiting in `alone`, until its lone rerun ends: queue on
+    `check-alone` behind it, holding no slot (so never a lock while waiting on another), then take one again."""
+    t = time.monotonic()
+    print("waiting: another gate's lone rerun has the machine; this one goes on after it", file=sys.stderr, flush=True)
+    _release_slot()
+    turn = _check_lock('check-alone', "another gate's time-budget tests")
+    try:
+        turn.take()
+    finally:
+        turn.release()
+        _take_slot()
+    NOTES.append(f"paused {time.monotonic() - t:.0f}s for another gate's lone rerun")
+
+
 def _jobs() -> int:
     cores = os.cpu_count() or 2
     share = max(1, cores // _slots())
@@ -290,7 +310,8 @@ def _run_shown(cmd: str, extra: list[str], cwd: Path, log: Path, env=None, all_s
             ref = f'{remote}/{shared}' if not _git(cwd)('rev-parse', '-q', '--verify', f'{remote}/{shared}').returncode \
                 else shared
         rc, notes = cargo_gate.run(cmd, cwd, e, jobs, log, ref, all_slow or os.environ.get('KIT_CHECK_ALL') == '1',
-                                   cfg(False).ctx('notes/check-times.json'), alone=alone, keep_slow=bool(since))
+                                   cfg(False).ctx('notes/check-times.json'), alone=alone, keep_slow=bool(since),
+                                   way=cargo_gate.GiveWay(_alone_wanted, _give_way))
         NOTES.extend(notes)
         return rc
     with open(log, 'w', encoding='utf-8') as f:

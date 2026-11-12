@@ -299,9 +299,59 @@ def test_threads() -> None:
     check([x for x, _ in got] == list('abcde'), f'in the order they came ({[x for x, _ in got]})')
 
 
+def test_give_way() -> None:
+    import threading, time
+    want, events, lock = threading.Event(), [], threading.Lock()
+    running = [0]
+
+    def give_way():
+        with lock:
+            events.append(('gave way', running[0]))
+        time.sleep(0.1)
+        want.clear()
+
+    way = cargo_gate.GiveWay(want.is_set, give_way)
+
+    def binary(tag, secs):
+        with way.turn():
+            with lock:
+                running[0] += 1
+                events.append((tag, running[0]))
+            time.sleep(secs)
+            with lock:
+                running[0] -= 1
+
+    first = [threading.Thread(target=binary, args=(t, 0.2)) for t in 'ab']
+    for t in first:
+        t.start()
+    time.sleep(0.05)
+    want.set()  # another gate's lone rerun now waits for this one's slot
+    later = [threading.Thread(target=binary, args=(t, 0.01)) for t in 'cd']
+    for t in later:
+        t.start()
+    for t in first + later:
+        t.join()
+    tags = [e[0] for e in events]
+    check(tags[:2] == ['a', 'b'] and tags[2] == 'gave way', f'the binaries running finish first ({events})')
+    check(events[2] == ('gave way', 0), f'and the slot goes with nothing of this gate running ({events})')
+    check(sorted(tags[3:]) == ['c', 'd'], f'then the waiting binaries start ({events})')
+    events.clear()
+    binary('e', 0)
+    check(events == [('e', 1)], f'no rerun waiting: no pause ({events})')
+
+    fails = cargo_gate.GiveWay(lambda: True, lambda: (_ for _ in ()).throw(KeyboardInterrupt))
+    try:
+        with fails.turn():
+            pass
+    except KeyboardInterrupt:
+        pass
+    check(not fails.paused, 'a give_way that raises leaves the gate unpaused')
+
+
 if __name__ == '__main__':
     test_gate()
     test_select()
     test_threads()
+    test_give_way()
     print(f'\n{ok} passed, {fail} failed')
     sys.exit(1 if fail else 0)

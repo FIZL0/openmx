@@ -343,6 +343,41 @@ class Threads:
                 self.cv.notify_all()
 
 
+class GiveWay:
+    """Lets another gate's lone rerun (checks.alone) have this gate's check slot between binaries: a binary
+    about to start, when `wanted()` says one waits, waits instead until this gate's running binaries end,
+    then `give_way()` gives up the slot until that rerun is over and takes one again. Without it the rerun
+    waited for this whole gate: on 11-12 a batch's lone rerun waited 45 min on the gate built ahead on top
+    of it, whose result only counted once the batch passed. The rerun takes minutes and this gate loses no
+    work, only the time it pauses."""
+
+    def __init__(self, wanted, give_way):
+        self.wanted, self.give_way = wanted, give_way
+        self.cv, self.running, self.paused = threading.Condition(), 0, False
+
+    @contextmanager
+    def turn(self):
+        with self.cv:
+            while True:
+                self.cv.wait_for(lambda: not self.paused)
+                if not self.wanted():
+                    break
+                self.paused = True
+                self.cv.wait_for(lambda: self.running == 0)
+                try:
+                    self.give_way()
+                finally:
+                    self.paused = False
+                    self.cv.notify_all()
+            self.running += 1
+        try:
+            yield
+        finally:
+            with self.cv:
+                self.running -= 1
+                self.cv.notify_all()
+
+
 def count_tests(b: Binary, env: dict) -> int:
     """How many tests `b` runs (its filter applied): `--list`, which starts no test. 1 when it cannot say."""
     try:
@@ -354,10 +389,14 @@ def count_tests(b: Binary, env: dict) -> int:
     return max(1, sum(l.endswith(': test') for l in r.stdout.splitlines()))
 
 
-def _run_one(b: Binary, env: dict, filters: list[str] | None = None, threads: Threads | None = None) -> None:
+def _run_one(b: Binary, env: dict, filters: list[str] | None = None, threads: Threads | None = None,
+             way: GiveWay | None = None) -> None:
     if threads is not None:
         with threads.take(count_tests(b, env)) as k:
-            return _run_one(b, {**env, 'RUST_TEST_THREADS': str(k)}, filters)
+            return _run_one(b, {**env, 'RUST_TEST_THREADS': str(k)}, filters, way=way)
+    if way is not None:
+        with way.turn():
+            return _run_one(b, env, filters)
     e = {**env, 'CARGO_MANIFEST_DIR': b.dir, 'CARGO_PKG_NAME': b.pkg, 'CARGO_CRATE_NAME': b.name.replace('-', '_')}
     args = [b.exe, '-q'] + (['--exact', *filters] if filters else [b.filter] if b.filter else [])
     t = time.monotonic()
@@ -385,7 +424,7 @@ def alone_tests(cwd: Path) -> list[str]:
 
 
 def run(cmd: str, cwd: Path, env: dict, jobs: int, log_path: Path, shared: str, all_slow: bool,
-        times_path: Path, alone=nullcontext, keep_slow: bool = False) -> tuple[int, list[str]]:
+        times_path: Path, alone=nullcontext, keep_slow: bool = False, way: GiveWay | None = None) -> tuple[int, list[str]]:
     """The whole gate. Returns cargo's exit code shape (0 passed, 101 a test failed, else the build's) and
     the notes `./kit check` adds to its one line: slow binaries left out, flakes that passed alone.
 
@@ -396,7 +435,9 @@ def run(cmd: str, cwd: Path, env: dict, jobs: int, log_path: Path, shared: str, 
     `keep_slow`: a merge's gate (`./kit check --since`) runs a `[[slow]]` binary whenever the selection
     reaches it. Its `paths` are a guess at what it proves, good enough to spare a slot's `done`, but camera and
     tick link nearly all of game-sim, so a merge that skipped them on that guess would leave a break for
-    the daily --all to find a day of merges later."""
+    the daily --all to find a day of merges later.
+
+    `way`: each test binary waits its turn there, so another gate's lone rerun gets this one's slot (GiveWay)."""
     gc = gate_config(cwd)
     notes = []
     with open(log_path, 'w', encoding='utf-8') as log:
@@ -469,10 +510,10 @@ def run(cmd: str, cwd: Path, env: dict, jobs: int, log_path: Path, shared: str, 
 
         with ThreadPoolExecutor(max_workers=workers) as pool:
             dfut = pool.submit(doc_tests)
-            list(pool.map(lambda b: _run_one(b, benv, threads=threads), pooled))
+            list(pool.map(lambda b: _run_one(b, benv, threads=threads, way=way), pooled))
             drc, dout = dfut.result()
         for b in later:
-            _run_one(b, benv)
+            _run_one(b, benv, way=way)
         # Over budget may be the other worktrees' gates, not the change: one more go with the machine to
         # itself, and only that one counts.
         for b in later:
