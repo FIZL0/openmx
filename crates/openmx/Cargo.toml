@@ -141,9 +141,9 @@ pollster = "1"
 native-sim = ["ps2-float/native"]
 # The Android .so (`tools/apk.sh`, the `openmx` example).
 android = []
-# opentennis's B492: a build players get. On Android (`tools/apk.sh`) the developers' OPENMX_*
-# variables are dropped before anything reads them (`android.rs`); the desktop's player builds do
-# not take it yet.
+# opentennis's B492: a build players get, every one (tools/build.sh, tools/ios-ipa.sh, tools/apk.sh,
+# tools/web.sh; tools/release.sh refuses one that does not). The developers' OPENMX_* variables are
+# dropped before anything reads them (`main.rs`'s `dev_env`, `android.rs` on Android); the page has none.
 ship = []
 
 [dev-dependencies]

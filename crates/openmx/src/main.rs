@@ -167,9 +167,9 @@
 
 // The Android app's one exception (P308): `android.rs`'s `android_main`, the symbol the
 // NativeActivity looks up by name, which `#[unsafe(no_mangle)]` makes. Every JNI call is in
-// `openmx-android`.
-#![cfg_attr(not(target_os = "android"), forbid(unsafe_code))]
-#![cfg_attr(target_os = "android", deny(unsafe_code))]
+// `openmx-android`. And everywhere else (P312) `dev_env`'s removing of the developers' variables,
+// which edition 2024 marks unsafe.
+#![deny(unsafe_code)]
 
 // The shell's modules, crate-visible: the browser's build (P196, `web.rs`) mounts this file as a module of
 // its own and takes them up to its root, where their `crate::` paths look for them.
@@ -419,6 +419,7 @@ const STUNT_TABLE: &str = "stunts.ini";
 // On Android the shell is a library the activity loads, and `android_main` its entry.
 #[cfg_attr(target_os = "android", allow(dead_code))]
 fn main() {
+    dev_env();
     launched();
     // The iPhone runs UIKit on this thread and the shell on another (P200).
     #[cfg(target_os = "ios")]
@@ -1776,6 +1777,36 @@ fn seam_carry(by: [f32; 3], flying: bool, before: Option<&mut Shown>, plane: Opt
 fn drawn_wrap(t: &game_sim::tiles::Tiled) -> Option<game_render::wrap::Wrap> {
     game_render::wrap::Wrap::of(t.wraps(), t.extent().map(|v| v.0))
 }
+
+/// P312 (opentennis's B492): a player's build (`ship`: tools/build.sh, tools/ios-ipa.sh) ignores the
+/// developers' `OPENMX_*` variables (fixtures, pad roots, update servers, faked updates, button
+/// styles…): dropped before anything reads them, so a stray one on a player's machine changes nothing.
+/// Kept: `docs/`'s texture reload, as the Android app keeps it (`android.rs`, P308). The page has no
+/// environment, and the Android app drops its own in `android_main`.
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+fn dev_env() {
+    const KEEP: [&str; 1] = ["OPENMX_TEXTURE_RELOAD"];
+    if !cfg!(feature = "ship") {
+        return;
+    }
+    let names: Vec<String> = std::env::vars_os()
+        .filter_map(|(k, _)| k.into_string().ok())
+        .filter(|k| k.starts_with("OPENMX_") && !KEEP.contains(&k.as_str()))
+        .collect();
+    for k in &names {
+        // SAFETY: the first thing `main` does, before the shell starts a thread.
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::remove_var(k)
+        };
+    }
+    if !names.is_empty() {
+        eprintln!("openmx: a player's build, ignoring {}", names.join(" "));
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", target_os = "android"))]
+fn dev_env() {}
 
 /// When the shell started (P283): the first call's moment, which `main` makes.
 fn launched() -> Instant {

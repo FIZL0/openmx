@@ -28,12 +28,12 @@ fn build_features(flag: Option<&str>) -> String {
 }
 
 /// tools/build.sh's default build (linux, windows, all: the release's and the Deck's) is native-sim, and
-/// --exact-sim builds without it.
+/// --exact-sim builds without it; both are `ship` (P312: no dev variables in a player's build).
 #[test]
 fn the_default_player_build_is_native_and_exact_sim_is_not() {
-    assert_eq!(build_features(None), "--features native-sim");
-    assert_eq!(build_features(Some("--native-sim")), "--features native-sim", "F15's flag still means native");
-    assert_eq!(build_features(Some("--exact-sim")), "");
+    assert_eq!(build_features(None), "--features ship,native-sim");
+    assert_eq!(build_features(Some("--native-sim")), "--features ship,native-sim", "F15's flag still means native");
+    assert_eq!(build_features(Some("--exact-sim")), "--features ship");
     // and the builds use what it says
     let build = read("tools/build.sh");
     assert!(build.contains("-e FEATURES=\"$features\"") && build.contains("--bin openmx $FEATURES'"), "the linux build drops the features");
@@ -45,12 +45,13 @@ fn the_default_player_build_is_native_and_exact_sim_is_not() {
 #[test]
 fn the_page_the_app_and_the_beta_are_native() {
     let web = read("tools/web.sh");
-    assert!(web.contains("features=\"--features native-sim\""), "tools/web.sh's release page is not native");
+    assert!(web.contains("features=\"--features ship,native-sim\""), "tools/web.sh's release page is not native, or not ship");
     assert!(web.contains("--check) check=1 features= ;;"), "tools/web.sh --check (the tests' page) must stay exact");
     assert!(web.contains("--target \"$target\" $features"), "tools/web.sh drops the features");
 
     let ipa = read("tools/ios-ipa.sh");
-    assert!(ipa.contains("features=\"--features native-sim\""), "the iPhone app is not native");
+    assert!(ipa.contains("features=\"--features ship,native-sim\""), "the iPhone app is not native, or not ship");
+    assert!(ipa.contains("--exact-sim) features=\"--features ship\" ;;"), "the iPhone app's exact build is not ship");
     assert!(ipa.contains("--bin openmx $features"), "tools/ios-ipa.sh drops the features");
 
     // P308: the Android app, native and with `ship` (B492: no dev variables on a phone); build.sh android passes
@@ -58,7 +59,7 @@ fn the_page_the_app_and_the_beta_are_native() {
     let apk = read("tools/apk.sh");
     assert!(apk.contains("features=\"--features android,ship,native-sim\""), "the Android app is not native, or not ship");
     assert!(apk.contains("--example openmx $features"), "tools/apk.sh drops the features");
-    assert!(read("tools/build.sh").contains("android) tools/apk.sh $([ -n \"$features\" ] || echo --exact-sim) ;;"), "build.sh android drops --exact-sim");
+    assert!(read("tools/build.sh").contains("android) tools/apk.sh ${exact:+--exact-sim} ;;"), "build.sh android drops --exact-sim");
 
     let pages = read(".github/workflows/pages.yml");
     assert!(pages.contains("cargo build --locked --release -p openmx --bin openmx $(bash tools/build.sh features)"), "the beta's Linux build is not build.sh's");
@@ -71,6 +72,8 @@ fn the_page_the_app_and_the_beta_are_native() {
     assert!(release.contains("native sim"), "the release notes do not say which sim");
     assert!(release.contains("tools/build.sh android\n") && release.contains("openmx-android.apk"), "the release has no Android app");
     assert!(!release.contains("--exact-sim\n") && !release.contains("ios-ipa.sh \"$out/openmx-ios.ipa\" --exact-sim"));
+    // P312: and refuses a player build script that drops `ship` (opentennis's release.sh grep)
+    assert!(release.contains("for f in tools/build.sh tools/apk.sh tools/ios-ipa.sh tools/web.sh; do"), "the release does not check the builds are ship");
 }
 
 /// The gate's builds are exact: native-sim is no default feature of openmx (nor ps2-float's native of

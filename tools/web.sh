@@ -36,11 +36,12 @@ scratch=${OPENMX_CROSS_DIR:-${TMPDIR:-/tmp}/openmx-cross}
 offline=${OPENMX_CROSS_OFFLINE:-0}
 target=wasm32-unknown-unknown
 check=0
-# P262: the page players load runs openmx's `native-sim` (tools/build.sh's player builds do); the tests' does not
-features="--features native-sim"
+# P262: the page players load runs openmx's `native-sim` (tools/build.sh's player builds do); the tests' does not.
+# P312: and `ship`, as every player build (tools/release.sh checks); the tests' page stays the dev build.
+features="--features ship,native-sim"
 case ${1:-} in
     --check) check=1 features= ;;
-    --exact-sim) features= ;;
+    --exact-sim) features="--features ship" ;;
     "") ;;
     *) echo "usage: tools/web.sh [--check | --exact-sim]" >&2; exit 2 ;;
 esac
@@ -97,7 +98,7 @@ fi
 # directory would rebuild both every time.
 out=${CARGO_TARGET_DIR:-$repo/target}/web
 # and the native build's its own again (P262), so it never swaps the pkg/ a test is serving for a native one
-[ -z "$features" ] || out=$out-native
+[[ $features != *native-sim* ]] || out=$out-native
 # --check's module is the tests' (a release build only for speed): stamped "dev" as their own desktop builds are
 # (crates/openmx/build.rs, P189), so the two meet online and a commit does not rebuild it.
 [ "$check" = 0 ] || export OPENMX_COMMIT=${OPENMX_COMMIT:-dev}
