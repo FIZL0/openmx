@@ -3,13 +3,14 @@
 # (tools/ios-build.sh), stripped, in a Payload/openMX.app with Info.plist + the icon (P225, tools/icons.sh), zipped.
 # Usage: tools/ios-ipa.sh [OUT.ipa] [--exact-sim]  (default target/openmx-ios.ipa)
 # The app is a player build, so on the native sim (P262, as tools/build.sh's); --exact-sim builds the PS2-arithmetic one.
+# Both take `ship` (P312, opentennis's B492): the developers' OPENMX_* variables are dropped as it starts.
 # On the phone: the app's folder in the Files app ("On My iPhone → openMX") takes the ISO, settings.txt and mods/.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-features="--features native-sim" out=target/openmx-ios.ipa
+features="--features ship,native-sim" out=target/openmx-ios.ipa
 for a; do
     case $a in
-        --exact-sim) features= ;;
+        --exact-sim) features="--features ship" ;;
         *) out=$a ;;
     esac
 done

@@ -54,6 +54,10 @@ command -v jq >/dev/null || { echo "jq missing: sudo pacman -S jq" >&2; exit 1; 
 sdk=${OPENMX_IOS_SDK:-$HOME/.local/share/hst-ios/iPhoneOS.sdk}
 [ -d "$sdk" ] || { echo "no iOS SDK at $sdk (the release carries openmx-ios.ipa): run tools/ios-sdk.py Xcode.xip" >&2; exit 1; }
 [ -d "${ANDROID_HOME:-$HOME/Android/Sdk}" ] || { echo "no Android SDK (the release carries openmx-android.apk): see tools/apk.sh" >&2; exit 1; }
+# P312 (opentennis's B492): every player build drops the developers' OPENMX_* variables (openmx's `ship` feature)
+for f in tools/build.sh tools/apk.sh tools/ios-ipa.sh tools/web.sh; do
+    grep -q 'features="--features [a-z,-]*ship' "$f" || { echo "$f doesn't build with --features ship (B492)" >&2; exit 1; }
+done
 # what the release uploads, in dist/release
 assets=(openmx-linux-x86_64.tar.gz openmx-windows-x86_64.zip openmx-ios.ipa openmx-android.apk openmx-linux-x86_64
     openmx-windows-x86_64.exe web.tar.gz SHA256SUMS SHA256SUMS.sig altstore-source.json)

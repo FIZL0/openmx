@@ -14,6 +14,8 @@
 # with other native builds (its online build id ends ", native sim"; the corner and --version do not say, P267),
 # and its tapes say `sim native`. --exact-sim (after the target) builds the PS2-arithmetic reference instead, the sim
 # plain `cargo run -p openmx` and the ./kit check gate run (native-sim is not a default feature, and must not be).
+# Every player build takes openmx's `ship` too (P312, opentennis's B492): the developers' OPENMX_* variables are
+# dropped as it starts (main.rs's dev_env), --exact-sim's as well, and tools/release.sh refuses a script without it.
 # `tools/build.sh features [--exact-sim]` prints the cargo arguments that choice makes, for the Actions jobs and
 # crates/openmx/tests/player_build.rs. (--native-sim, F15's flag, is still taken: it is the default now.)
 # No game data goes into dist/. OPENMX_COMMIT / OPENMX_VERSION in the environment are passed into the build
@@ -26,9 +28,9 @@
 set -e
 cd "$(dirname "$0")/.."
 what=${1:-linux}
-features="--features native-sim"
+features="--features ship,native-sim" exact=
 case $2 in
-    --exact-sim) features= ;;
+    --exact-sim) features="--features ship" exact=1 ;;
     --native-sim|"") ;;
     *) echo "usage: tools/build.sh [linux|windows|android|all|features] [--exact-sim]" >&2; exit 2 ;;
 esac
@@ -108,7 +110,7 @@ windows() {
 case $what in
     linux) linux ;;
     windows) windows ;;
-    android) tools/apk.sh $([ -n "$features" ] || echo --exact-sim) ;;  # apk.sh builds native unless told --exact-sim
+    android) tools/apk.sh ${exact:+--exact-sim} ;;  # apk.sh builds native and ship unless told --exact-sim
     all) linux; windows ;;
     *) echo "usage: tools/build.sh [linux|windows|android|all|features] [--exact-sim]" >&2; exit 2 ;;
 esac
