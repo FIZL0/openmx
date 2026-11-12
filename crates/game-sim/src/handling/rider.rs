@@ -294,6 +294,16 @@ pub enum Call {
     /// The wreck entry's last call: the rider's `+0x8f4` object (`a0`, `a1` 0) told of the wreck,
     /// which reads the record's wreck kind itself.
     WreckCue(u32),
+    /// The wreck cue's ([`wreck_cue`], S300) calls on its sound emitter and sounds, all of them audio:
+    /// the emitter's vt `+0x98` (its answer non-zero while it still plays: no cue), its vt `+0x20`
+    /// (woken, when its `+0x21` bit 0 is clear), the playing sound's vt `+0x20` (its answer non-zero
+    /// while that sound still plays: no cue), the picked sound's vt `+0x1c` (played, `how` 4) and the
+    /// emitter's vt `+0x84` (the sound made its playing one, `a2` 0).
+    CueBusy { cue: u32 },
+    CueWake { cue: u32 },
+    SoundBusy { sound: u32 },
+    SoundPlay { sound: u32, how: u32 },
+    CuePlaying { cue: u32, sound: u32 },
     /// The rider's vt `+0xd0` (`dt`, 0): the ragdoll posed off the scene ([`pose`]); vt `+0xcc`: its
     /// world's bodies settled ([`settle`]).
     Pose,
@@ -1589,6 +1599,91 @@ pub fn wreck_entry(m: &mut impl Rider, rider: u32, kind: u32, dt: F) {
     }
     let cue = m.word(rider + CUE);
     m.call(Call::WreckCue(cue), dt);
+}
+
+// --- S300: the wreck cue ------------------------------------------------------------------------
+
+/// The wreck cue's emitter words: the record it reads the wreck kind from (`+0x240`); its two lists
+/// of sounds, each `[count, sounds, last pick]` (`+0x21c`, `+0x224`, `+0x234` the crash list;
+/// `+0x200`, `+0x208`, `+0x218` the fall list); its playing sounds (`+0x38` count, `+0x40` the
+/// array); the flag words at `+0x20` (byte `+0x21` bit 0: awake), `+0x1f0` (bit 1: may cue, bit 0
+/// set by a cue) and `+0xe4` (bit 0 set by a cue).
+pub const CUE_RECORD: u32 = 0x240;
+pub const CUE_CRASH: [u32; 3] = [0x21c, 0x224, 0x234];
+pub const CUE_FALL: [u32; 3] = [0x200, 0x208, 0x218];
+pub const CUE_PLAYING: [u32; 2] = [0x38, 0x40];
+
+/// **The wreck entry's cue** (S300): the rider's sound emitter (`+0x8f4`, `cue`) asked for a wreck
+/// sound, as the wreck entry asks it (`a1` 0; the emitter's other arm, `a1` set, does nothing).
+/// Playing is audio; what is simulation is the pick's draw from rand, which moves every draw after it
+/// (MX Unleashed's [`crate::wreck_sound`] is the same emitter).
+///
+/// Nothing while the emitter still plays ([`Call::CueBusy`]). By the record's wreck kind: 1–7 and 12
+/// the crash list, 8–11 and 14 the fall list, any other nothing. The emitter woken
+/// ([`Call::CueWake`]) when its `+0x21` bit 0 is clear; a sound of the list picked
+/// ([`list_pick`], a draw when it has two or more); then nothing more unless `+0x1f0` bit 1 is set
+/// and no sound still plays (the last of the playing ones, [`Call::SoundBusy`]); else the pick played
+/// ([`Call::SoundPlay`], 4), `+0x1f0` bit 0 and `+0xe4` bit 0 set, and the pick made the playing
+/// one ([`Call::CuePlaying`]).
+pub fn wreck_cue(m: &mut impl Rider, cue: u32, dt: F) {
+    if m.call(Call::CueBusy { cue }, dt) != 0 {
+        return;
+    }
+    let rec = m.word(cue + CUE_RECORD);
+    let [count, sounds, last] = match m.word(rec + R_KIND) {
+        1..=7 | 12 => CUE_CRASH,
+        8..=11 | 14 => CUE_FALL,
+        _ => return,
+    };
+    if m.word(cue + 0x20) & 0x100 == 0 {
+        m.call(Call::CueWake { cue }, dt);
+    }
+    let n = m.word(cue + count) as i32;
+    let i = list_pick(m, n, cue + last, dt);
+    let list = m.word(cue + sounds);
+    let sound = m.word(list.wrapping_add((i as u32).wrapping_mul(4)));
+    let playing = last_playing(m, cue);
+    if m.word(cue + 0x1f0) & 2 == 0 {
+        return;
+    }
+    if playing != 0 && m.call(Call::SoundBusy { sound: playing }, dt) != 0 {
+        return;
+    }
+    m.call(Call::SoundPlay { sound, how: 4 }, dt);
+    let f = m.word(cue + 0x1f0);
+    m.set(cue + 0x1f0, f | 1);
+    let e = m.word(cue + 0xe4);
+    m.set(cue + 0xe4, e | 1);
+    m.call(Call::CuePlaying { cue, sound }, dt);
+}
+
+/// **The sound engine's no-repeat pick** over a list of `n`, its last pick at `last`: under two, 0
+/// and no draw; else `n × (rand × 2⁻³¹)` truncated, moved on by one (mod `n`) when it is the last
+/// pick. The pick is kept at `last` either way.
+pub fn list_pick(m: &mut impl Rider, n: i32, last: u32, dt: F) -> i32 {
+    if n < 2 {
+        m.set(last, 0);
+        return 0;
+    }
+    let u = unit(m, dt);
+    let before = m.word(last) as i32;
+    let mut i = fpu::to_i32(fpu::mul(fpu::from_i32(n), u));
+    if i == before {
+        i = i.wrapping_add(1).wrapping_rem(n);
+    }
+    m.set(last, i as u32);
+    i
+}
+
+/// The emitter's last playing sound, or 0 when none plays.
+fn last_playing(m: &mut impl Ram, cue: u32) -> u32 {
+    let [count, array] = CUE_PLAYING;
+    let n = m.word(cue + count);
+    if n == 0 {
+        return 0;
+    }
+    let a = m.word(cue + array);
+    m.word(a.wrapping_add(n.wrapping_sub(1).wrapping_mul(4)))
 }
 
 // --- F55: the rider's listener step -----------------------------------------------------------------
