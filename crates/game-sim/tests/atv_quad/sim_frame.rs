@@ -18,6 +18,10 @@
 //! by the port's Desert Oasis ([`WorldStep::search`], [`WorldStep::sweep`], [`WorldStep::node_point`]),
 //! each checked word for word against the original's call, which still runs for what it leaves in RAM.
 //!
+//! MD118 stops those calls: what the part search, the sweep's set, place and search, and the node's
+//! frame update leave in RAM is written by the ports ([`record_outside`], the bike's F46/F51/F54
+//! glue; the node's words off the port's scene), and the RAM comparison proves every word of it.
+//!
 //! MD105a's tail ([`sim_tail::port_tail`]) with MD105b's pieces is the task's own chain: the record, its
 //! outside, the world step and the tail all the port's, against the original's whole frame
 //! (`the_quads_frame_is_the_ports_through_the_palm_strike_wreck_and_put_back`).
@@ -34,6 +38,9 @@ use game_sim::{atv_moto, atv_part, atv_sweep, atv_world};
 
 #[path = "sim_tail.rs"]
 mod sim_tail;
+
+#[path = "record_outside.rs"]
+mod record_outside;
 
 /// The image's sim object ([`image::Heap::sim`], vtable `0x003b9320` at `+4`) and its frame (vt `+0x40`). Its world is the
 /// object's `+0x6c` on, the update list at `+0x24`, the timer list at `+0x3c`.
@@ -207,13 +214,16 @@ struct WorldStep<'a> {
     /// Each of the port world's collidables in the list, the image's collidable it is (a mesh) or its
     /// list entry (a plant group); 0 for the rest.
     items: Vec<u32>,
-    /// The quad's scene as the pass found it, and its node 0 in RAM.
-    scene: Option<(atv_moto::Scene, u32)>,
+    /// The quad's scene as the pass found it, and its nodes in RAM (node 0 the quad's).
+    scene: Option<(atv_moto::Scene, Vec<u32>)>,
     /// Spoil the next step's held contacts: the first one's normal one bit off in each lane.
     spoil: bool,
     /// How often the record's outside asked the port: part searches, the contacts they filed, sweeps,
     /// the sweeps' pairs, and node points.
     asked: [u32; 5],
+    /// MD118: what the record's outside in RAM ([`record_outside`]) did, by kind: the pairs, the
+    /// plant parts stood, the listeners heard, and any call handed on to the original (`> `).
+    outside: BTreeMap<String, u32>,
 }
 
 impl WorldStep<'_> {
@@ -331,12 +341,27 @@ impl WorldStep<'_> {
     }
 
     /// A point carried into the world by the quad's scene node, the port's scene's
-    /// ([`atv_moto::Scene::tip`]).
-    fn node_point(&mut self, node: u32, v: Vf) -> Vf {
+    /// ([`atv_moto::Scene::tip`]). MD118: the frame update it makes (each node's world rows at
+    /// `+0x70` and its flags at `+0x100`) written to the nodes in RAM where they changed.
+    fn node_point(&mut self, ee: &mut Ee, node: u32, v: Vf) -> Vf {
         let (scene, at) = self.scene.as_mut().expect("the pass's scene");
-        assert_eq!(node, *at, "the record's node is the quad's");
+        assert_eq!(node, at[0], "the record's node is the quad's");
         self.asked[4] += 1;
-        scene.tip(0, v)
+        let was = scene.nodes;
+        let p = scene.tip(0, v);
+        for (k, (a, b)) in was.iter().zip(&scene.nodes).enumerate().take(at.len()) {
+            let n = at[k];
+            for r in 0..4 {
+                if a.world[r].to_bits() != b.world[r].to_bits() {
+                    put_v(ee, n + 0x70 + 0x10 * r as u32, b.world[r]);
+                }
+            }
+            if a.flags != b.flags {
+                let w = ee.u32_at(n + 0x100);
+                ee.set_u32(n + 0x100, w & !0xff | u32::from(b.flags));
+            }
+        }
+        p
     }
 
     fn step(&mut self, ee: &mut Ee, dt: F, held: Option<atv_contact::Held>) {
@@ -593,8 +618,10 @@ fn quad_body_words(b: &Body, at: u32) -> Vec<(u32, u32)> {
 /// the arguments), the other records a world ray hands a contact to are read on first use and held,
 /// and the terrain query is the port's [`ground::under`]. With `port` (MD105b), the part search, the
 /// sweep and the node's point are answered by the port's Desert Oasis ([`WorldStep::search`],
-/// [`WorldStep::sweep`], [`WorldStep::node_point`]); the original's call still runs after each, for
-/// what it leaves in RAM, and its answer must be the port's word for word.
+/// [`WorldStep::sweep`], [`WorldStep::node_point`]). MD118: what each leaves in RAM is the ports' too
+/// ([`record_outside::sweep_in_ram`], [`record_outside::part_search_in_ram`], the scene's node words),
+/// with no original call; its answer (the RAM sweep's and search's) must be Desert Oasis's word for
+/// word. The part's place (only after a sweep hit) is still the original's.
 struct RecordInRam<'a, 't, 'w> {
     ee: &'a mut Ee,
     at: u32,
@@ -689,15 +716,12 @@ impl Collides for RecordInRam<'_, '_, '_> {
     }
     fn node_place(&mut self, v: Vf) -> Vf {
         let node = self.word(0xe8);
-        let port = self.port.as_mut().map(|w| w.node_point(node, v));
+        if let Some(w) = self.port.as_mut() {
+            return w.node_point(self.ee, node, v);
+        }
         let (out, p) = (self.ee.scratch(1), self.put(0, v));
         self.run(NODE_TIP, &[u64::from(out), u64::from(node), p]);
-        let original = vf_at(self.ee, out);
-        if let Some(port) = port {
-            assert_eq!(port.to_bits(), original.to_bits(), "the node's point of {v:?}");
-            return port;
-        }
-        original
+        vf_at(self.ee, out)
     }
     fn node_move(&mut self, at: Vf) {
         let p = self.put(0, at);
@@ -712,17 +736,23 @@ impl Collides for RecordInRam<'_, '_, '_> {
         vf_at(self.ee, self.word(0xe0) + 0x250)
     }
     fn sweep(&mut self, from: Vf, to: Vf, nearby: bool) -> Option<Swept> {
-        put_v(self.ee, self.at + 0xc0, from);
-        put_v(self.ee, self.at + 0xd0, to);
         let probe = self.word(0x204);
         let port = self.port.as_mut().map(|w| {
             assert!(nearby, "a sweep over the whole world");
             w.sweep(self.ee, probe, from, to)
         });
-        self.run(PROBE_SET, &[u64::from(probe), u64::from(self.at + 0xc0), 0]);
-        self.run(PROBE_PLACE, &[u64::from(probe)]);
-        self.search_with(probe, nearby);
-        let hit = self.ee.u8_at(probe + 0x126) & 0x20 != 0;
+        let hit = if let Some(w) = self.port.as_mut() {
+            let list = self.ee.u32_at(self.at + 0xfc);
+            record_outside::sweep_in_ram(self.ee, self.at, probe, list, from, to, &mut w.outside)
+        } else {
+            put_v(self.ee, self.at + 0xc0, from);
+            put_v(self.ee, self.at + 0xd0, to);
+            self.run(PROBE_SET, &[u64::from(probe), u64::from(self.at + 0xc0), 0]);
+            self.run(PROBE_PLACE, &[u64::from(probe)]);
+            self.search_with(probe, nearby);
+            self.ee.u8_at(probe + 0x126) & 0x20 != 0
+        };
+        assert_eq!(hit, self.ee.u8_at(probe + 0x126) & 0x20 != 0, "the sweep's answer and its probe's hit bit");
         if let Some((b, port_hit)) = port {
             let image = [0x50, 0x54, 0x58, 0x70].map(|o| self.ee.u32_at(probe + o));
             let mine = [b.centre.x(), b.centre.y(), b.centre.z(), b.reach.0].map(f32::to_bits);
@@ -754,10 +784,14 @@ impl Collides for RecordInRam<'_, '_, '_> {
             assert!(nearby, "a part search over the whole world");
             w.search(self.ee, part)
         });
-        let original = self.original_search(part, nearby);
-        let Some(port) = port else { return original };
+        let Some(port) = port else { return self.original_search(part, nearby) };
+        let list = self.word(0xfc);
+        let w = self.port.as_mut().expect("the port");
+        let contacts = record_outside::part_search_in_ram(self.ee, part, list, &mut w.outside);
+        let in_ram: Vec<Hit> =
+            contacts.iter().map(|c| Hit { from: c.from, to: c.to, normal: c.normal, point: c.point, struck: self.struck(c.object) }).collect();
         let bits = |h: &[Hit]| h.iter().map(hit_bits).collect::<Vec<_>>();
-        assert_eq!(bits(&port), bits(&original), "the part search's hits");
+        assert_eq!(bits(&port), bits(&in_ram), "the part search's hits");
         port
     }
     fn terrain_box(&self) -> [Vf; 2] {
@@ -830,7 +864,7 @@ fn port_record(
     let mut body = (body_at != 0).then(|| quad_body(ee, body_at));
     if let Some(p) = port.as_deref_mut() {
         let (r, image) = image::read_ride(ee, image::heap().quad, dt).unwrap_or_else(|e| panic!("{e}"));
-        p.scene = Some((r.bike.parts.scene, image.nodes[0]));
+        p.scene = Some((r.bike.parts.scene, image.nodes));
     }
     let mut w = RecordInRam { ee, at, terrain, others: BTreeMap::new(), queries: 0, port };
     if slot == 0x7c {
@@ -893,6 +927,8 @@ struct Palm {
     port_resolved: u32,
     /// [`WorldStep::asked`].
     port_asked: [u32; 5],
+    /// [`WorldStep::outside`].
+    port_outside: BTreeMap<String, u32>,
     /// The words that differed on the spoiled frame.
     spoiled: Vec<u32>,
 }
@@ -973,6 +1009,7 @@ fn sim_chain(
             scene: None,
             spoil: false,
             asked: [0; 5],
+            outside: BTreeMap::new(),
         }
     });
 
@@ -1031,6 +1068,7 @@ fn sim_chain(
     seen.queries = asked.get();
     if let Some(w) = &world {
         (seen.port_frames, seen.port_resolved, seen.port_asked) = (w.frames, w.resolved, w.asked);
+        seen.port_outside = w.outside.clone();
     }
     eprintln!(
         "MD105: {frames} frames, {} ground queries, {} by the port's record; first contact frame {:?}, part swaps {:?}, wrecks {:?}",
@@ -1136,6 +1174,12 @@ fn a_spoiled_held_contact_turns_the_ports_step_red() {
 #[test]
 fn the_palm_strikes_contacts_push_the_ports_quad() {
     let Some(seen) = palm(PALM_RIDE, Some(Pieces::Port), None, false) else { return };
+    // MD118: the record's outside is Rust's; only the pair log's heap resize goes to the original
+    let o = &seen.port_outside;
+    assert!(o.keys().all(|k| !k.starts_with("> ")), "an outside call was handed on: {o:?}");
+    for k in ["record search part stand", "record search pair, kind 0", "sweep pair, kind 0"] {
+        assert!(o.get(k).is_some_and(|&n| n > 0), "the ride never reached {k}: {o:?}");
+    }
     check_palm(&seen);
     assert_eq!(seen.port_frames as usize, PALM_RIDE, "the port's world step ran every frame");
     assert!(seen.port_resolved > 0, "the port's step never resolved a contact: {seen:?}");
