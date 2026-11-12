@@ -85,7 +85,9 @@ halfwords times the eco's unit.
 
 ## Next
 
-**F54's work is complete; only the tick is waiting.** `./kit done` (2026-11-11) ran the gate and it was red
+2026-11-11 (third session): the code was already on main (merged with task/F54); this session only renamed the entry FINAL and ran `./kit done` to tick it, as B36 and F31b5l gave the pieces runs more frames and the gate passed at d014e2a05.
+
+Earlier: **F54's work is complete; only the tick is waiting.** `./kit done` (2026-11-11) ran the gate and it was red
 in a file F54 does not touch: `mxvatv_car_frame`'s `all_eight_pieces_are_mx_unleasheds` ("preload: fired,
 degenerate seen only 19 times", want 20). That is MD132, red on base and deterministic (S312 hit it too).
 `kit done` refuses on it, so the work is committed by hand on task/F54 and the task is left open with a plan
