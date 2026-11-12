@@ -8,7 +8,9 @@
 //! are, whose lap and place fields are `None` — shown as dashes — until the simulation has them
 //! (P313 wires them in).
 
+use super::results::{Board, FameMarks, HandOver, Records, Tip, tips_of};
 use super::{Act, Menu, Press, Screen};
+use ps2_float::F;
 
 /// The two kinds of race track the pick steps between, as the original's front end names them.
 pub const RACE_KINDS: [&str; 2] = ["Supercross", "National"];
@@ -118,6 +120,24 @@ pub struct Results {
     pub laps: u32,
     pub riders: u32,
     pub rows: Vec<ResultRow>,
+    /// P330: the results menu's pages, when the race handed its cards over; the page shown; what
+    /// the screen is showing of the race's end; the tip popup's lines; the Hall of Fame's marks.
+    pub board: Option<Board>,
+    pub page: usize,
+    pub stage: Stage,
+    pub tips: Vec<Tip>,
+    pub fame: FameMarks,
+}
+
+/// What the results screen shows of the race's end, in turn: the preload and clutch tip popup
+/// (armed at the race's end, so first), the results menu's pages, and the Hall of Fame's call for
+/// a new entry.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Stage {
+    Tips,
+    #[default]
+    Board,
+    Fame,
 }
 
 impl Results {
@@ -129,7 +149,38 @@ impl Results {
             laps: setup.laps,
             riders: setup.riders,
             rows: vec![ResultRow { name: name.to_string(), number: number.to_string(), place: None, laps: None, best_lap: None, total: None }],
+            board: None,
+            page: 0,
+            stage: Stage::Board,
+            tips: Vec::new(),
+            fame: FameMarks::default(),
         }
+    }
+
+    /// The results of a race that handed its end over (P330): the results menu's pages from the
+    /// cards when `race_end` handed them on (a single race), the tip popup's lines, and the Hall
+    /// of Fame marks each player's finish earned.
+    pub fn handed(setup: &RaceSetup, name: &str, number: &str, hand: &HandOver) -> Results {
+        let mut r = Results::stand_in(setup, name, number);
+        if hand.end.results {
+            r.board = Some(Board::take(&hand.cards, false));
+            r.tips = tips_of(&hand.end.tips);
+        }
+        for e in hand.overs.iter().flat_map(|o| &o.fame) {
+            r.fame.mark(e.seat, e.track);
+        }
+        r.stage = if r.tips.is_empty() { Stage::Board } else { Stage::Tips };
+        r
+    }
+
+    /// Cross on the results screen: on to the next of its stages, `false` when it was the last.
+    pub fn next_stage(&mut self) -> bool {
+        let next = match self.stage {
+            Stage::Tips => Some(Stage::Board),
+            Stage::Board if self.fame.waiting => Some(Stage::Fame),
+            _ => None,
+        };
+        next.map(|n| self.stage = n).is_some()
     }
 }
 
@@ -185,6 +236,12 @@ pub struct RaceMenu {
     pub racing: Option<RaceSetup>,
     /// The results screen's, once a race has been left.
     pub results: Option<Results>,
+    /// P330: what the race under way handed over at its end, for the results.
+    pub hand: Option<HandOver>,
+    /// The riders' records (`records.txt`), and whether a race's win changed them since the shell
+    /// last saved them.
+    pub records: Records,
+    pub records_changed: bool,
 }
 
 impl Menu {
@@ -236,9 +293,16 @@ impl Menu {
                 }
             }
             Screen::Results => {
-                if p.ok || p.back || p.start {
-                    self.race.results = None;
-                    self.stack = vec![Screen::Main];
+                let pages = super::results::PAGES.len();
+                if let Some(r) = self.race.results.as_mut().filter(|r| r.board.is_some() && r.stage == Stage::Board)
+                    && (p.left || p.right || p.l1 || p.r1)
+                {
+                    r.page = if p.left || p.l1 { (r.page + pages - 1) % pages } else { (r.page + 1) % pages };
+                } else if p.ok || p.back || p.start {
+                    if !self.race.results.as_mut().is_some_and(Results::next_stage) {
+                        self.race.results = None;
+                        self.stack = vec![Screen::Main];
+                    }
                 }
             }
             _ => {}
@@ -253,6 +317,7 @@ impl Menu {
             self.riders = self.free_riders;
         }
         self.race.racing = Some(setup.clone());
+        self.race.hand = None;
         self.ride_stack = std::mem::take(&mut self.stack);
         Act::Ride(setup.track)
     }
@@ -274,7 +339,10 @@ impl Menu {
         let Some(setup) = self.race.racing.take() else { return false };
         let name = self.rider_name(0);
         let number = self.garages.first().map(|g| g.pick.look.number.clone()).unwrap_or_default();
-        self.race.results = Some(Results::stand_in(&setup, &name, &number));
+        self.race.results = Some(match self.race.hand.take() {
+            Some(hand) => Results::handed(&setup, &name, &number, &hand),
+            None => Results::stand_in(&setup, &name, &number),
+        });
         self.stack = vec![Screen::Main, Screen::Results];
         true
     }
@@ -282,6 +350,29 @@ impl Menu {
     /// A race's ride that did not start (its load failed or was cancelled): no results.
     pub fn race_dropped(&mut self) {
         self.race.racing = None;
+        self.race.hand = None;
+    }
+
+    /// The race under way has ended (P330): what its two answers handed over, kept for the results
+    /// the ride's leave shows. A player's win counts in their seat's record now, as the original's
+    /// profile counts it at the finish (`race_over`'s [`game_sim::race::RaceOver::win`]).
+    #[allow(dead_code)] // the shell's once the Sim runs the race's two answers (S301)
+    pub fn race_ended(&mut self, hand: HandOver) {
+        if self.race.racing.is_none() {
+            return;
+        }
+        for seat in hand.overs.iter().filter_map(|o| o.win) {
+            if let Ok(seat) = usize::try_from(seat) {
+                self.race.records.seat(seat).add_wins(F(1.0));
+                self.race.records_changed = true;
+            }
+        }
+        self.race.hand = Some(hand);
+    }
+
+    /// Whether the riders' records changed since the last call, for the shell to save them.
+    pub fn take_records_changed(&mut self) -> bool {
+        std::mem::take(&mut self.race.records_changed)
     }
 
     /// The results the results screen shows: the last race's, or for `--screen results` a stand-in
