@@ -115,6 +115,14 @@
 //!     at the line through `race_over` (the flashes bit for bit), the over tick through `check_over`,
 //!     `clocks` and `close` (the made-up finish, the tie draw found on the generator, the ranking)
 //!     and `race_end` (the outro scene), against the captured cards, manager and activity.
+//! 33. **The gate's spot** (S295): the track object's gate spot on 20,000 generated courses and gates
+//!     (across a stretch, short of it, far off, no width, stray words, pools run dry), against
+//!     [`TrackPaths::gate_spot`], on its answer, the spot, every path's flags and the route pool.
+//! 34. **The load's end**: the track object's loader, nothing after the reader hooked, on 10,000
+//!     generated loadable race files, against [`TrackPaths::load`] — every path's flags and scratch
+//!     words, the three pools, the three gates' spots and the lap length.
+//! 35. **sx01 loaded**: sx01's race file through [`TrackPaths::load`] against S196's image: the lap
+//!     length and the third gate's spot, bit for bit.
 
 use game_sim::chassis::{Chassis, Deriv};
 use game_sim::race::{
@@ -2333,6 +2341,28 @@ fn sx01s_race_file_off_the_disc_is_the_track_object_in_the_image() {
     }
 }
 
+/// S295: sx01's race file, loaded by [`TrackPaths::load`], against S196's track object: the lap length
+/// and the third gate's spot (the supercross loader moves the grid gate and the line and spots them
+/// again, so theirs are not the load's).
+#[test]
+fn sx01s_loaded_track_has_the_images_lap_length_and_third_gate_spot() {
+    let Some(file) = sx01_race_file() else { return };
+    let Some(ee) = sx01_image() else { return };
+    let manager = match addr("activity_manager") {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    let act = ee.u32_at(ee.u32_at(ee.u32_at(manager) + 0x58));
+    let track = ee.u32_at(act + 0xb8);
+    let t = TrackFile::parse(&file).expect("sx01's race file reads");
+    let (paths, spots) = TrackPaths::load(&t).expect("sx01's track loads");
+    let slots: Vec<u32> = (0..ee.u32_at(track + 0x40)).map(|k| ee.u32_at(ee.u32_at(track + 0x50) + 4 * k)).collect();
+    assert_eq!(f32_at(&ee, track + 0x54).0.to_bits(), paths.lap_length.0.to_bits(), "the lap length ({:?})", paths.lap_length);
+    let third = spots[2].expect("a third gate");
+    assert_eq!(t_bits(loaded_spot_at(&ee, &slots, ee.u32_at(track + 0x60) + 0x94)), t_bits(third), "the third gate's spot");
+    eprintln!("sx01: lap {:?}, spots {spots:?}", paths.lap_length);
+}
+
 /// The prop whose frame matches: its position at `+0xb0` and its across row at `+0x80` (the `xyz`
 /// lanes, or all four).
 fn find_prop(ee: &Ee, at: Vf, across: Vf, lanes: usize) -> Vec<u32> {
@@ -2994,6 +3024,299 @@ fn the_path_spot_at_a_point_matches_the_track_objects() {
     }
     eprintln!("path spot: refused {}, found {}, none {}, holding {}, off path 0 {}, on the line {}", seen[0], seen[1], seen[2], seen[3], seen[4], seen[5]);
     assert!(seen[0] > 300 && seen[1] > 15_000 && seen[2] > 200 && seen[3] > 2000 && seen[4] > 3000 && seen[5] > 50, "{seen:?}");
+}
+
+const T_GATE: u32 = 0x01b6_0000;
+
+/// A gate standing on a generated course: mostly across one of its stretches (its width spanning the
+/// stretch, or falling short of it), now and then far off any path, with no width, or along the stretch
+/// rather than across it; stray words now and then.
+fn gate_on(p: &mut Pick, t: &TrackPaths) -> (Vf, Vf, F) {
+    let i = p.below(t.paths.len() as u64) as usize;
+    let nodes = &t.paths[i].nodes;
+    let k = p.below(nodes.len() as u64) as usize;
+    let a = nodes[k].points[0];
+    let b = nodes.get(k + 1).map_or(a, |n| n.points[0]);
+    let f = p.unit();
+    let mut centre = [a.x() + (b.x() - a.x()) * f, p.range(-3.0, 3.0), a.z() + (b.z() - a.z()) * f];
+    let (dx, dz) = (b.x() - a.x(), b.z() - a.z());
+    let heading = if dx == 0.0 && dz == 0.0 { p.range(0.0, 6.3) } else { dz.atan2(dx) };
+    let turn = match p.below(6) {
+        0 => 0.0,
+        1 => p.range(-1.5, 1.5),
+        _ => std::f32::consts::FRAC_PI_2 + p.range(-0.5, 0.5),
+    };
+    let (s, c) = (heading + turn).sin_cos();
+    let mut width = match p.below(8) {
+        0 => 0.0,
+        1 => p.range(0.0, 2.0),
+        _ => p.range(5.0, 60.0),
+    };
+    if p.below(8) == 0 {
+        centre[0] += p.range(-200.0, 200.0);
+        centre[2] += p.range(-200.0, 200.0);
+    }
+    if p.below(20) == 0 {
+        width = -width;
+    }
+    let centre = Vf([p.stray(centre[0]), centre[1], p.stray(centre[2]), 1.0]);
+    let across = Vf([p.stray(c), p.range(-0.1, 0.1), p.stray(s), 1.0]);
+    (centre, across, F(p.stray(width)))
+}
+
+/// S295: the gate's spot (`TrackPaths::gate_spot`) against the track object's, on the generated
+/// courses: gates across stretches, short of them, far off, with no width; pools that run dry.
+#[test]
+fn the_gate_spot_matches_the_track_objects() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let gate_fn = match addr("track_gate_spot") {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    let mut p = Pick(0x5295_6a7e_0dd5_1c3b);
+    let (mut crossed, mut nearest, mut refused, mut later_path) = (0, 0, 0, 0);
+    for case in 0..20_000 {
+        let mut t = t_paths(&mut p);
+        put_paths(&mut ee, &mut p, &t);
+        ee.set_u32(T_TRACK + 0x4c, t_rec(0));
+        let (centre, across, width) = gate_on(&mut p, &t);
+        for o in (0..0xa0).step_by(4) {
+            ee.set_u32(T_GATE + o, p.next() as u32);
+        }
+        put_quad(&mut ee, T_GATE + 0x40, centre);
+        put_quad(&mut ee, T_GATE + 0x60, across);
+        put_f(&mut ee, T_GATE + 0x70, width);
+        let fill = Spot { path: 0, piece: 0, along: F(p.unit()) };
+        put_t_spot(&mut ee, T_GATE + 0x94, fill);
+        let gate = Gate { centre, across, width, ..Gate::new() };
+        let what = format!("case {case}: {gate:?}");
+
+        ee.call(gate_fn, &[u64::from(T_TRACK), u64::from(T_GATE)], &[], BUDGET * 10);
+        let mut out = fill;
+        let mut probe = t.clone();
+        let got = t.gate_spot(&gate, &mut out);
+        assert_eq!(ee.v0() as u32, u32::from(got), "{what}: the answer");
+        assert_eq!(t_bits(t_spot_at(&ee, T_GATE + 0x94)), t_bits(out), "{what}: the spot");
+        check_paths(&ee, &t, &what);
+        // Which way it answered: the path spot at the centre gives the same spot only by chance.
+        let mut s = fill;
+        let near = game_sim::ai::follow::spot(&mut probe, centre, false, &mut s, None);
+        if !got {
+            refused += 1;
+        } else if near && s == out {
+            nearest += 1;
+        } else {
+            crossed += 1;
+            later_path += usize::from(out.path > 1);
+        }
+    }
+    eprintln!("gate spot: crossed {crossed} (off path 0 {later_path}), nearest {nearest}, refused {refused}");
+    assert!(crossed > 6000 && nearest > 2000 && refused > 300 && later_path > 2000, "{crossed} {nearest} {refused} {later_path}");
+}
+
+/// A race file the load's walks can run on: [`t_paths`]' course written out record by record (each
+/// path's flags, nodes and links in range), now and then a scale and offsets first, and the three gates
+/// each stood on the course as [`gate_on`] stands one, or left out. Now and then a path has so many
+/// links that the route pool runs dry on the walks.
+fn loadable_file(p: &mut Pick) -> Vec<u8> {
+    let course = t_paths(p);
+    let count = course.paths.len();
+    let mut t = Tdf(Vec::new());
+    if p.below(4) == 0 {
+        t.tag(4).f([0.5, 2.5, 3.0][p.below(3) as usize]);
+    }
+    if p.below(4) == 0 {
+        t.tag(2).f(p.range(-50.0, 50.0)).tag(3).f(p.range(-50.0, 50.0));
+    }
+    t.tag(1).i(count as i32);
+    let dense = count > 1 && p.below(10) == 0;
+    for (i, path) in course.paths.iter().enumerate() {
+        t.tag(5).i(i as i32);
+        let mut flags = p.next() as u32 & 0x2a & !0x04;
+        if p.below(6) == 0 {
+            flags |= 0x100;
+        }
+        if p.below(40) == 0 {
+            flags |= 0x04;
+        }
+        t.tag(6).w(flags);
+        for n in &path.nodes {
+            t.tag(8);
+            for (tag, pt) in [9u8, 0x0a, 0x0b].into_iter().zip(n.points) {
+                t.tag(tag).f(pt.x()).f(pt.y()).f(pt.z());
+            }
+        }
+        let mut links = path.links.clone();
+        if dense {
+            for _ in 0..p.below(12 * count as u64) {
+                links.push(p.below(count as u64) as usize);
+            }
+        }
+        t.tag(0x0d).i(links.len() as i32);
+        for (c, &l) in links.iter().enumerate() {
+            t.tag(0x0e).i(c as i32).i(l as i32);
+        }
+    }
+    for tag in [0x0f, 0x10, 0x19] {
+        if p.below(5) == 0 {
+            continue;
+        }
+        let (centre, across, width) = gate_on(p, &course);
+        let normal = p.unit_vector();
+        t.tag(tag).f(centre.x()).f(centre.y()).f(centre.z()).f(normal[0]).f(normal[1]).f(normal[2]);
+        t.f(across.x()).f(across.y()).f(across.z()).f(width.0);
+    }
+    // A last byte the reader never takes.
+    t.tag(0);
+    t.0
+}
+
+/// A spot in the loaded track object (path and node addresses) as path and node indices, by the
+/// path slots at `slots` and each path's node list.
+fn loaded_spot_at(ee: &Ee, slots: &[u32], at: u32) -> Spot {
+    let (path, node) = (ee.u32_at(at), ee.u32_at(at + 4));
+    let along = f32_at(ee, at + 8);
+    if path == 0 {
+        return Spot { path: 0, piece: node, along };
+    }
+    let Some(i) = slots.iter().position(|&s| s == path && s != 0) else {
+        return Spot { path: path | 0x8000_0000, piece: node, along };
+    };
+    let (mut n, mut k) = (ee.u32_at(path + 0x10), 0u32);
+    while n != 0 && n != node && k < 10_000 {
+        n = ee.u32_at(n + 0x54);
+        k += 1;
+    }
+    let piece = if node == 0 { 0 } else if n == node { k + 1 } else { node | 0x8000_0000 };
+    Spot { path: i as u32 + 1, piece, along }
+}
+
+/// S295: the end of the race file's load — the walk from path 0, each gate's spot and the lap's length
+/// — on 10,000 generated loadable files, the track object's own loader with nothing after the reader
+/// hooked, against [`TrackPaths::load`]: every path's flags and scratch words, the three pools, the
+/// gates' spots and the lap length.
+#[test]
+fn the_loaded_track_object_matches_trackpaths_load() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let names = ["track_ctor", "track_file_load", "fs_open", "fs_read", "fs_eof", "fs_close", "mem_calloc", "operator_new", "node_add_child", "free"];
+    let [ctor, load, open, read, eof, close, calloc, new, add_child, free] = match addrs(names) {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    let disc = Rc::new(RefCell::new(Disc { file: Vec::new(), at: 0, heap: HEAP }));
+    ee.hooks.insert(open, Box::new(|ee| ee.set(2, 1)));
+    let d = disc.clone();
+    ee.hooks.insert(
+        read,
+        Box::new(move |ee| {
+            let (dst, n) = (ee.r(6) as u32, ee.r(7) as usize);
+            let mut d = d.borrow_mut();
+            let end = (d.at + n).min(d.file.len());
+            let bytes = d.file[d.at.min(end)..end].to_vec();
+            d.at = end.max(d.at);
+            ee.load(dst, &bytes);
+            ee.set(2, bytes.len() as u64);
+        }),
+    );
+    let d = disc.clone();
+    ee.hooks.insert(
+        eof,
+        Box::new(move |ee| {
+            let d = d.borrow();
+            ee.set(2, if d.at < d.file.len() { 0 } else { u64::MAX });
+        }),
+    );
+    let d = disc.clone();
+    ee.hooks.insert(
+        calloc,
+        Box::new(move |ee| {
+            let size = (ee.r(4) as u32).wrapping_mul(ee.r(5) as u32);
+            assert!(size < 0x1_0000, "an allocation of {size:#x}");
+            let at = take(&d, size);
+            ee.load(at, &vec![0; size as usize]);
+            ee.set(2, u64::from(at));
+        }),
+    );
+    let d = disc.clone();
+    ee.hooks.insert(
+        new,
+        Box::new(move |ee| {
+            let size = ee.r(4) as u32;
+            let at = take(&d, size);
+            ee.load(at, &vec![0xa5; size as usize]);
+            ee.set(2, u64::from(at));
+        }),
+    );
+    let freed = Rc::new(Cell::new(0));
+    let f = freed.clone();
+    ee.hooks.insert(free, Box::new(move |_| f.set(f.get() + 1)));
+    for at in [close, add_child] {
+        ee.hooks.insert(at, Box::new(|_| {}));
+    }
+
+    let mut p = Pick(0x5295_10ad_7e3c_9b21);
+    let (mut loaded, mut refused, mut crossed_gates, mut laps, mut no_way, mut dry) = (0, 0, 0, 0, 0, 0);
+    for case in 0.. {
+        if loaded == 10_000 {
+            break;
+        }
+        let file = loadable_file(&mut p);
+        let tf = TrackFile::parse(&file).unwrap_or_else(|why| panic!("case {case}: a loadable file refused ({why:?}): {file:02x?}"));
+        let Some((t, spots)) = TrackPaths::load(&tf) else {
+            // The original measures the lap from a null path: not run.
+            refused += 1;
+            continue;
+        };
+        {
+            let mut d = disc.borrow_mut();
+            d.file = file.clone();
+            d.at = 0;
+            d.heap = HEAP;
+        }
+        ee.load(TRACK_OBJ, &[0x5a; 0x100]);
+        ee.call(ctor, &[u64::from(TRACK_OBJ)], &[], BUDGET);
+        ee.set_u32(TRACK_OBJ + 0x80, 0);
+        ee.set_u32(TRACK_OBJ + 0x88, 0);
+        ee.call(load, &[u64::from(TRACK_OBJ), u64::from(TRACK_NAME)], &[], 50_000_000);
+        let what = format!("case {case}: {file:02x?}");
+        assert_eq!(ee.v0() as u32, 1, "{what}: the load");
+        assert_eq!(freed.get(), 0, "{what}: the load freed memory");
+
+        let slots: Vec<u32> = (0..t.paths.len() as u32).map(|k| ee.u32_at(ee.u32_at(TRACK_OBJ + 0x50) + 4 * k)).collect();
+        for (i, path) in t.paths.iter().enumerate() {
+            let r = slots[i];
+            assert_eq!(ee.u32_at(r), path.flags, "{what}: path {i}'s flags");
+            assert_eq!(ee.u32_at(r + 0x1c), path.dist.0.to_bits(), "{what}: path {i}'s distance");
+            let best = ee.u32_at(r + 0x28);
+            assert_eq!(slots.iter().position(|&s| s == best && best != 0), path.best, "{what}: path {i}'s best link ({best:#x})");
+        }
+        assert_eq!(pool_len(&ee, ee.u32_at(TRACK_OBJ + 0x98), 0xc), t.free_routes, "{what}: the route pool");
+        assert_eq!(pool_len(&ee, ee.u32_at(TRACK_OBJ + 0xa0), 8), t.free_parents, "{what}: the parent pool");
+        assert_eq!(pool_len(&ee, ee.u32_at(TRACK_OBJ + 0xa8), 0xc), t.free_candidates, "{what}: the candidate pool");
+        assert_eq!(ee.u32_at(TRACK_OBJ + 0x54), t.lap_length.0.to_bits(), "{what}: the lap length");
+        for (k, (o, s)) in [0x58, 0x5c, 0x60].into_iter().zip(spots).enumerate() {
+            let g = ee.u32_at(TRACK_OBJ + o);
+            match s {
+                None => assert_eq!(g, 0, "{what}: gate {k}"),
+                Some(s) => {
+                    // A spot never written is the reader's zeros, as the port's default.
+                    assert_eq!(t_bits(loaded_spot_at(&ee, &slots, g + 0x94)), t_bits(s), "{what}: gate {k}'s spot");
+                    crossed_gates += usize::from(s.along != F::ZERO && s.along != F(1.0));
+                }
+            }
+        }
+        if t.free_routes < 10 * t.paths.len() {
+            dry += 1;
+        }
+        if t.lap_length == F::ZERO {
+            no_way += 1;
+        } else {
+            laps += 1;
+        }
+        loaded += 1;
+    }
+    eprintln!("load: {loaded} loaded ({laps} laps, {no_way} without), {refused} refused, {crossed_gates} gate spots inside a stretch, {dry} dry");
+    assert!(refused < 1000 && laps > 5000 && no_way > 300 && crossed_gates > 8000 && dry > 50, "{loaded} {laps} {no_way} {crossed_gates} {dry} {refused}");
 }
 
 /// A race card back out of RAM, its spots read back as path and node indices (see `put_t_spot`).

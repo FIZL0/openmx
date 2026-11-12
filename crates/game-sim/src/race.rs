@@ -1295,7 +1295,7 @@ pub struct TrackPaths {
     /// 200 each when the track is made; a race sets its own.
     pub ahead: F,
     pub behind: F,
-    /// The lap's length (`+0x54`). 0 here; the race sets it.
+    /// The lap's length (`+0x54`). 0 from [`TrackPaths::new`]; [`TrackPaths::load`] measures it.
     pub lap_length: F,
     /// How the AI's look-ahead picks the way on at a fork (`+0xac`): 3 the shortest link, 2 the
     /// shortest but a checkpoint path the longest, 1 the longest, anything else the longest
@@ -3017,6 +3017,119 @@ impl TrackFile {
 impl Default for TrackFile {
     fn default() -> TrackFile {
         TrackFile::new()
+    }
+}
+
+/// Where two flat lines cross: the line from `a` along `d` and the line from `b` along `e` (x and z).
+/// The fractions along each, `(t, s)`, or `None` when they run parallel. The determinant goes through
+/// the FPU accumulator (`mula`, `msub`), as does `t`'s numerator; `s` is measured on whichever of
+/// `e`'s lanes is not zero, x first.
+fn flat_crossing(a: (F, F), d: (F, F), b: (F, F), e: (F, F)) -> Option<(F, F)> {
+    use ps2_float::fpu::Acc;
+    let det = Acc::mula(d.1, e.0).msub(e.1, d.0);
+    if det == F::ZERO {
+        return None;
+    }
+    let t = Acc::mula(e.0, b.1 - a.1).madd(e.1, a.0 - b.0) / det;
+    let s = if e.0 == F::ZERO { (a.1 + d.1 * t - b.1) / e.1 } else { (a.0 + d.0 * t - b.0) / e.0 };
+    Some((t, s))
+}
+
+impl TrackPaths {
+    /// The spot a gate stands on: where the gate's bottom edge, from one end of its width to the other
+    /// on the flat, crosses a stretch of path (the first points of two nodes in a row).
+    ///
+    /// The paths are walked depth first from path 0 along their links, one route-pool entry per path on
+    /// the walk's stack, as [`TrackPaths::mark_reached`] walks them (no path is left out for its flags).
+    /// On each path the first stretch the edge crosses, both fractions in 0..1, gives the spot, `along`
+    /// the stretch's fraction; a later path's crossing replaces an earlier one's. The walk's
+    /// [`path_flags::OPENED`] marks come off every path when it ends.
+    ///
+    /// With no crossing the answer is the path spot nearest the gate's centre
+    /// ([`crate::ai::follow::spot`], every stretch), and `out` is what that leaves. False, `out`
+    /// untouched, with no paths or an empty pool at the start; false too, `out` untouched and the
+    /// walk's entries and marks left where they are, when the pool runs dry halfway.
+    pub fn gate_spot(&mut self, gate: &Gate, out: &mut Spot) -> bool {
+        if self.paths.is_empty() || self.free_routes == 0 {
+            return false;
+        }
+        self.free_routes -= 1;
+        let (dx, dz) = (F(gate.across.x()) * gate.width, F(gate.across.z()) * gate.width);
+        let a = (F(gate.centre.x()) - F(0.5) * dx, F(gate.centre.z()) - F(0.5) * dz);
+        let mut found = None;
+        let mut stack = vec![0];
+        while let Some(&p) = stack.last() {
+            if self.paths[p].flags & path_flags::OPENED != 0 {
+                stack.pop();
+                self.free_routes += 1;
+                continue;
+            }
+            self.paths[p].flags |= path_flags::OPENED;
+            let nodes = &self.paths[p].nodes;
+            for i in 0..nodes.len().saturating_sub(1) {
+                let (b, n) = (nodes[i].points[0], nodes[i + 1].points[0]);
+                let e = (F(n.x()) - F(b.x()), F(n.z()) - F(b.z()));
+                let Some((t, s)) = flat_crossing(a, (dx, dz), (F(b.x()), F(b.z())), e) else { continue };
+                if t < F::ZERO || !(t <= F(1.0)) || s < F::ZERO || !(s <= F(1.0)) {
+                    continue;
+                }
+                found = Some(Spot::on(p, i, s));
+                break;
+            }
+            for k in 0..self.paths[p].links.len() {
+                let l = self.paths[p].links[k];
+                if self.paths[l].flags & path_flags::OPENED != 0 {
+                    continue;
+                }
+                if self.free_routes == 0 {
+                    return false;
+                }
+                self.free_routes -= 1;
+                stack.push(l);
+            }
+        }
+        for path in &mut self.paths {
+            path.flags &= !path_flags::OPENED;
+        }
+        match found {
+            Some(s) => {
+                *out = s;
+                true
+            }
+            None => crate::ai::follow::spot(self, gate.centre, false, out, None),
+        }
+    }
+
+    /// The track object once its race file is loaded: the file's paths walked from path 0
+    /// ([`TrackPaths::new`]), then each gate the file has — the grid's, the line's, the third, in that
+    /// order — given its spot ([`TrackPaths::gate_spot`], and the path spot at its centre asked a second
+    /// time when that fails), then the lap's length: the route search from the line's spot, a hair
+    /// (`0.0001`) along, round to the same spot, kept-off paths left out. With no line the lap runs
+    /// from path 0's first node. A route that finds no way leaves the length 0.
+    ///
+    /// The spots come back as `[grid, line, third]`, `None` for a gate the file does not have. A gate
+    /// whose spot both searches refused (the route pool run dry) keeps the zeros the reader gave it,
+    /// [`Spot::default`].
+    ///
+    /// `None` where [`TrackPaths::new`] refuses, and where the line's spot is still those zeros: the
+    /// original measures the lap from a null path there.
+    pub fn load(file: &TrackFile) -> Option<(TrackPaths, [Option<Spot>; 3])> {
+        let mut t = TrackPaths::new(file)?;
+        let mut spots = [None; 3];
+        for (k, gate) in [&file.grid, &file.line, &file.third].into_iter().enumerate() {
+            let Some(gate) = gate else { continue };
+            let mut s = Spot::default();
+            if !t.gate_spot(gate, &mut s) {
+                crate::ai::follow::spot(&mut t, gate.centre, false, &mut s, None);
+            }
+            spots[k] = Some(s);
+        }
+        let from = spots[1].unwrap_or(Spot::on(0, 0, F::ZERO));
+        from.at()?;
+        let mut length = t.lap_length;
+        t.route(Spot { along: F(f32::from_bits(0x38d1_b717)), ..from }, Spot { along: F::ZERO, ..from }, None, Some(&mut length), true);
+        t.lap_length = length;
+        Some((t, spots))
     }
 }
 

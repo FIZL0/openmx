@@ -1110,7 +1110,16 @@ track_first_path            boot 0x0026e9d0 (track, path) -> 1/0 after the load,
 #                                           links (stack from the pool +0x98), each new path gets 0x4
 #                                           and loses 0x80; pool dry -> 0, marks left. Then 0x4 off all.
 #                                           S293: TrackPaths::mark_reached (find_spot skips 0x180).
-track_gate_spot             boot 0x0026e6d0 (track, gate) -> 0 when the gate needs path_spot (unported)
+track_gate_spot             boot 0x0026e6d0 (track, gate) -> 1/0: the gate's spot into gate +0x94
+#                                           S295: DFS from +0x4c like track_first_path (pool +0x98,
+#                                           flag 0x4 only); per path the first stretch whose node+0x10
+#                                           x/z line crosses the gate's bottom edge (centre - 0.5 *
+#                                           across * width, along across * width; 0x001346f0, both
+#                                           fractions in 0..1) wins, a later path replaces it; none ->
+#                                           path_spot (centre, holding 0). Pool dry -> 0, marks left.
+#                                           TrackPaths::gate_spot. The load's tail (gate +0x94..+0x9c
+#                                           zeroed by the reader; lap +0x54 = route line spot along
+#                                           0x38d1b717 to along 0, keep off) is TrackPaths::load
 path_spot                   boot 0x0026b410 (track, point, spot out, 0, 1, 0) the path spot at a point
 #                                           S282b: really (track, point, out, dist*, unused, holding
 #                                           only): DFS from track +0x4c over the links (route pool
