@@ -28,6 +28,10 @@
 //! On C15's rides the pair never runs: nothing of nat05's world but its plants comes within the
 //! probe's reach, and the probe never searches placed groups (`+0x126` bit 0), so no search hits. It
 //! is proved against the original's own pair over generated probes and nat05's meshes instead.
+//!
+//! On Desert Oasis (MD119) the quad's record sweeps with it through [`Sweep`]: the palm ride's sweeps
+//! all miss, and the same ride with the quad sped up into the palm's trunk hits it, the probe and its
+//! record equal to the original's search's word for word on each hit.
 
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
