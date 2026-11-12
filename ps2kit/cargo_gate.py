@@ -30,8 +30,9 @@ tracked rather than in `kit.toml` because every worktree has to agree on it, and
     filter = "native_tolerance"
     tests = ["-p game-sim --test replay"]
 
-A slow binary runs anyway under `./kit check --all`, which is what a run's merge check uses, and a filtered
-check names it directly. `paths` are fnmatch globs (`*` crosses `/`) against what this branch changed since
+A slow binary runs anyway under `./kit check --all`, which a run's merge check uses once a day, and a filtered
+check names it directly. Between those, a merge's check is `./kit check --since <base>`: the same picking, from
+the commit the merge is on rather than from the shared branch. `paths` are fnmatch globs (`*` crosses `/`) against what this branch changed since
 it left the shared branch, plus what is uncommitted. A flaky entry is a regex against `<rerun args>::<test>`.
 A test only gets its lone rerun when every failure in that binary matches an entry, so a binary that also
 failed for real is left failed. A variant binary's rerun line carries its features, target directory and
@@ -122,7 +123,7 @@ class Selection:
         return pkg in self.whole or (kind == 'test' and name in self.part.get(pkg, ()))
 
 
-def select(cwd: Path, shared: str, env: dict, sel: dict) -> Selection | None:
+def select(cwd: Path, shared: str, env: dict, sel: dict, why: list[str] | None = None) -> Selection | None:
     """gate.toml `[select]`: the packages and test binaries the work can change, or None for all of them.
 
     A file in a package's `tests/` that is a test target's root, or a module in that root's own folder
@@ -131,10 +132,14 @@ def select(cwd: Path, shared: str, env: dict, sel: dict) -> Selection | None:
     it, dev-dependencies included. `oracle`'s edited lines reach the binaries whose sources name
     one of their names in quotes (`addr("name")`); a file under one of `data` reaches the binaries whose
     sources name its path, or its directory below `data`. `ignore` globs reach nothing. Anything else (the
-    workspace's Cargo.toml or lock, the kit, the gate's own config) reaches everything."""
+    workspace's Cargo.toml or lock, the kit, the gate's own config) reaches everything. `shared` is the
+    shared branch, or the commit a merge's gate starts from (`./kit check --since`); `why` gets the reason
+    a None is everything."""
+    why = [] if why is None else why
     touched = changed(cwd, shared)
     pkgs = _workspace(cwd, env) if touched is not None else None
     if pkgs is None:
+        why.append(f'git cannot say what changed since {shared}' if touched is None else 'cargo metadata failed')
         return None
     root = cwd.resolve()
     names = [p['name'] for p in pkgs]
@@ -211,6 +216,7 @@ def select(cwd: Path, shared: str, env: dict, sel: dict) -> Selection | None:
             else:
                 dirty(pkg)
         else:
+            why.append(f'{f} is outside every package')
             return None
     for n in out.whole:
         out.part.pop(n, None)
@@ -389,9 +395,12 @@ def run(cmd: str, cwd: Path, env: dict, jobs: int, log_path: Path, shared: str, 
     notes = []
     with open(log_path, 'w', encoding='utf-8') as log:
         log.write(f'(cwd {cwd}, {jobs} jobs, test binaries side by side)\n\n')
-        pick = select(cwd, shared, env, gc['select']) if gc.get('select') and not all_slow else None
+        why: list[str] = []
+        pick = select(cwd, shared, env, gc['select'], why) if gc.get('select') and not all_slow else None
         if pick is not None and pick.all():
-            pick = None
+            pick, why = None, ['the change reaches every package']
+        if why:
+            notes.append(f'ran every test binary: {why[0]}')
         if pick is None:
             rc, bins = build(cmd, cwd, env, log)
         else:

@@ -206,11 +206,13 @@ def test_select() -> None:
         g('checkout', '-qb', 'task/T2', cwd=w)
         env = {**os.environ, 'CARGO_TARGET_DIR': str(w / 'target'), 'RUST_TEST_THREADS': '4'}
 
-        def ran(edit: dict, all_slow=False) -> set[str]:
+        def ran(edit: dict, all_slow=False, since='main', notes=None) -> set[str]:
             for rel, text in edit.items():
                 (w / rel).write_text(text)
-            rc, _ = cargo_gate.run('cargo test -q --message-format=short', w, env, 4, w / 'log', 'main',
-                                   all_slow, w / 'times.json')
+            rc, got_notes = cargo_gate.run('cargo test -q --message-format=short', w, env, 4, w / 'log', since,
+                                           all_slow, w / 'times.json')
+            if notes is not None:
+                notes[:] = got_notes
             log = (w / 'log').read_text()
             g('checkout', '-q', '--', '.', cwd=w)
             for rel in edit:
@@ -237,6 +239,27 @@ def test_select() -> None:
         check({'-p a --test one', '-p b --test uses', '-p c --test alone'} <= got, f'the workspace manifest: everything ({sorted(got)})')
         got = ran({'c/src/lib.rs': 'pub fn one() -> u32 { 2 - 1 }\n'}, all_slow=True)
         check({'-p a --test one', '-p b --test uses', '-p c --test alone'} <= got, f'--all: everything ({sorted(got)})')
+        notes = []
+        got = ran({'gate.toml': PICK['gate.toml'] + '\n'}, notes=notes)
+        check({'-p a --test one', '-p b --test uses', '-p c --test alone'} <= got, f'gate.toml: everything ({sorted(got)})')
+        check(any('gate.toml is outside every package' in n for n in notes), f'and says why ({notes})')
+
+        # `./kit check --since <rev>`, a merge's gate: only what changed after rev, not since the shared branch.
+        commit = lambda m: g('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qam', m, cwd=w)
+        (w / 'a/src/lib.rs').write_text(PICK['a/src/lib.rs'] + '\npub fn three() -> u32 { 3 }\n')
+        commit('a library change, already gated')
+        passed = g('rev-parse', 'HEAD', cwd=w).stdout.strip()
+        (w / 'c/tests/alone.rs').write_text('#[test]\nfn alone() { assert_eq!(c::one(), 1 + 0); }\n')
+        commit('a test-only change on top')
+        got = ran({}, since=passed)
+        check(got == {'-p c --test alone'}, f'--since: what changed after it alone ({sorted(got)})')
+        got = ran({})
+        check({'-p a --test one', '-p b --test uses', '-p c --test alone'} <= got,
+              f'against the shared branch: the library change too ({sorted(got)})')
+        notes = []
+        got = ran({}, since='0' * 40, notes=notes)
+        check({'-p a --test one', '-p b --test uses', '-p c --test alone'} <= got, f'--since nothing known: everything ({sorted(got)})')
+        check(any('cannot say' in n for n in notes), f'and says why ({notes})')
 
 
 def test_threads() -> None:

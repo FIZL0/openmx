@@ -13,6 +13,11 @@ need_files = true
 mode = "d"
 command = "./kit"
 test = "./kit check --all"
+# A merge tests only what changed since {base}, a commit that already passed a gate (the shared branch moves on
+# nothing else), by gate.toml [select]; the whole `test` above runs again once a day passes without one (K50,
+# agent-runner 0.24.0): a test-only merge takes minutes, not the hour --all does beside three slots.
+test_since = "./kit check --since {base}"
+full_every_hours = 24
 # The gate's limit counts the wait for a check slot: at load 90-110 with three slots' `kit done` holding the
 # locks, a clean merge whose tests take 10 min ran past agent-runner's default 3600 s twice (F31b5k, 11-09).
 timeout = 14400

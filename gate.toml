@@ -83,8 +83,8 @@ tests = ["-p openmx --test one_fps", "-p game-render --test ecosystem"]
 [select]
 # `./kit done` and a bare `./kit check` build and run only the test binaries the work can reach (ps2kit/cargo_gate.py
 # select): a crate's src reaches that crate and every crate that uses it, a test file only its own binary,
-# research/oracle.txt's edited lines the tests that name them. `./kit check --all`, the run's merge gate, still
-# runs everything. Four full suites at once (three slots' `done` and the merge) held the machine at load ~100 and
+# research/oracle.txt's edited lines the tests that name them. A run's merge gate picks the same way from the commit
+# it merges onto (`./kit check --since {base}`, K50), and `./kit check --all` runs everything once a day. Four full suites at once (three slots' `done` and the merge) held the machine at load ~100 and
 # made each one take an hour (user 2026-11-09: 'i dont want tests to take so long for quicker progress').
 oracle = "research/oracle.txt"
 data = ["research"]  # a file here reaches the tests that name its path or its directory
