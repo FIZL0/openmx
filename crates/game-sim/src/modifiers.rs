@@ -43,6 +43,10 @@
 //! [`Knob::CarAccel`], [`Knob::CarGrip`], [`Knob::CarSuspension`]), each skipped at its default as
 //! every other one is. Gravity, air drag and the time scale stay the bike's and the biplane's.
 //!
+//! P287 gave MX vs. ATV's quad, an addition, its own [`Category::Atv`] on its loaded `.phy`
+//! ([`Mods::atv`]: [`Knob::AtvSpeed`], [`Knob::AtvAccel`], [`Knob::AtvGrip`], [`Knob::AtvSuspension`]),
+//! the bike's four reasoned the same way on the quad's fields, each skipped at its default.
+//!
 //! I8's [`Knob::StickDeadZone`] is experimental, and the other exception to "a percentage": its value
 //! is the dead zone itself in hundredths ([`DEAD_ZONES`]), and its default, [`ORIGINAL`], is off —
 //! the original's ±0.3 ([`crate::input::AxisRange::PLAYER`]). On, [`Mods::bike`] narrows the range
@@ -95,10 +99,14 @@ pub enum Knob {
     CarGrip,
     CarSuspension,
     StickDeadZone,
+    AtvSpeed,
+    AtvAccel,
+    AtvGrip,
+    AtvSuspension,
 }
 
 /// How many modifiers there are.
-pub const KNOBS: usize = 28;
+pub const KNOBS: usize = 32;
 
 /// A modifier's default, which leaves its fields untouched: 100%.
 pub const ORIGINAL: u16 = 100;
@@ -127,6 +135,8 @@ pub enum Category {
     Biplane,
     Kiowa,
     Cars,
+    /// MX vs. ATV's quad (P287), an addition: offered only while it is on, so not in [`Category::ALL`].
+    Atv,
     World,
 }
 
@@ -141,6 +151,7 @@ impl Category {
             Category::Biplane => "Biplane",
             Category::Kiowa => "Kiowa",
             Category::Cars => "Cars",
+            Category::Atv => "ATV",
             Category::World => "World",
         }
     }
@@ -181,6 +192,10 @@ impl Knob {
         Knob::CarGrip,
         Knob::CarSuspension,
         Knob::StickDeadZone,
+        Knob::AtvSpeed,
+        Knob::AtvAccel,
+        Knob::AtvGrip,
+        Knob::AtvSuspension,
     ];
 
     /// The ones the menu has a row for, in its order: all but [`Knob::PlaneSpeed`], which P95 split
@@ -213,6 +228,10 @@ impl Knob {
         Knob::CarAccel,
         Knob::CarGrip,
         Knob::CarSuspension,
+        Knob::AtvSpeed,
+        Knob::AtvAccel,
+        Knob::AtvGrip,
+        Knob::AtvSuspension,
     ];
 
     /// The machine it is for, or the world (P272): the menu's category it shows under.
@@ -232,6 +251,7 @@ impl Knob {
             Knob::PlaneSpeed | Knob::PlaneAccel | Knob::PlaneTopSpeed | Knob::PlaneTurn | Knob::PlaneCeiling | Knob::PlaneMaxG => Category::Biplane,
             Knob::KiowaSpeed | Knob::KiowaClimb | Knob::KiowaTurn | Knob::KiowaCeiling => Category::Kiowa,
             Knob::CarSpeed | Knob::CarAccel | Knob::CarGrip | Knob::CarSuspension => Category::Cars,
+            Knob::AtvSpeed | Knob::AtvAccel | Knob::AtvGrip | Knob::AtvSuspension => Category::Atv,
             Knob::Gravity | Knob::AirDrag | Knob::TimeScale => Category::World,
         }
     }
@@ -271,6 +291,10 @@ impl Knob {
             Knob::CarGrip => "car_grip",
             Knob::CarSuspension => "car_suspension",
             Knob::StickDeadZone => "stick_dead_zone",
+            Knob::AtvSpeed => "atv_speed",
+            Knob::AtvAccel => "atv_accel",
+            Knob::AtvGrip => "atv_grip",
+            Knob::AtvSuspension => "atv_suspension",
         }
     }
 
@@ -309,6 +333,10 @@ impl Knob {
             Knob::CarGrip => "Car tire grip",
             Knob::CarSuspension => "Car suspension",
             Knob::StickDeadZone => "Stick Dead Zone",
+            Knob::AtvSpeed => "ATV top speed",
+            Knob::AtvAccel => "ATV acceleration",
+            Knob::AtvGrip => "ATV tire grip",
+            Knob::AtvSuspension => "ATV suspension",
         }
     }
 
@@ -408,6 +436,10 @@ impl Knob {
             Knob::CarGrip => "every car tire's grip on every surface",
             Knob::CarSuspension => "the cars' spring stiffness, damped alike",
             Knob::StickDeadZone => "experimental: a smaller stick dead zone, so small corrections reach the rider",
+            Knob::AtvSpeed => "the quad's top speed, not the pull off the line",
+            Knob::AtvAccel => "how fast the quad gets up to speed, not its top",
+            Knob::AtvGrip => "every quad tire's grip on every surface",
+            Knob::AtvSuspension => "the quad's spring stiffness, damped alike",
         }
     }
 
@@ -445,6 +477,14 @@ impl Knob {
             Knob::CarAccel => "car [Engine] torque curve, PumpTorqueScale, MaxPumpTorque x k; [Aerodynamics] AeroSurfaceArea, every tire surface's WheelFriction x k",
             Knob::CarGrip => "car every tire surface's FrictionPeak x k",
             Knob::CarSuspension => "car every tire's Spring x k; BounceDamping, ReboundDamping x k^(1/2)",
+            Knob::AtvSpeed => {
+                "quad [Engine] torque curve, ClutchStatic/KineticFriction, EngineBraking x k; FinalGearRatio / k; [Aerodynamics] Drag, every tire surface's WheelDrag / k^2; ReverseSpeed, MaxClutchTorqueScaleSpeed x k; above 100%, the body's speed limit x k"
+            }
+            Knob::AtvAccel => {
+                "quad [Engine] torque curve, ClutchStatic/KineticFriction x k; [Aerodynamics] Drag, every tire surface's WheelDrag, WheelFriction x k; above 100%, the rear tires' MaxDriveForce, SkidDriveForce x k"
+            }
+            Knob::AtvGrip => "quad every tire surface's SideForce, SlippingSideForce, MaxDriveForce, MaxSideForce, MaxSlippingSideForce, Skid*Force x k",
+            Knob::AtvSuspension => "quad [Front/Rear Tire] Spring, SpringWhenStopped x k; the dampers' rates x k^(1/2)",
             Knob::StickDeadZone => "not a key: the ride's stick consumers' dead zone, ±0.30 in the original, set to ±k/100 and each side stretched to the full range from its edge",
         }
     }
@@ -981,6 +1021,99 @@ impl Mods {
                 t.bounce_damping = t.bounce_damping * d;
                 t.rebound_damping = t.rebound_damping * d;
             }
+        }
+    }
+
+    /// Player `seat`'s quad (P287), on what its `.phy` loaded before the ride is spawned from it: the
+    /// bike's top speed, acceleration, grip and suspension, reasoned the same way on the same keys.
+    pub fn atv(&self, seat: usize, load: &mut crate::quad::Load) {
+        use crate::quad::{LEFT_REAR, RIGHT_REAR};
+        let power = |load: &mut crate::quad::Load, k: F| {
+            for t in &mut load.engine.curve_torque {
+                *t = *t * k;
+            }
+            load.peak.torque = load.peak.torque * k;
+            load.engine.clutch_static = load.engine.clutch_static * k;
+            load.engine.clutch_kinetic = load.engine.clutch_kinetic * k;
+        };
+        if let Some(k) = self.factor(seat, Knob::AtvAccel) {
+            // As the bike's: k times the torque and k times what holds the quad back on the flat, so
+            // the force left to speed it up is k times the file's below the top, and the top stays.
+            // Above 100% the driven pair's grip along itself goes up with the torque.
+            power(load, k);
+            if k > F::ONE {
+                for w in [LEFT_REAR, RIGHT_REAR] {
+                    for s in &mut load.tires.wheels[w].surfaces {
+                        s.drive[2] = s.drive[2] * k;
+                        s.drive[5] = s.drive[5] * k;
+                    }
+                }
+            }
+            load.mv.drag = load.mv.drag * k;
+            for w in &mut load.tires.wheels {
+                for s in &mut w.surfaces {
+                    s.drag[1] = s.drag[1] * k;
+                    s.drag[2] = s.drag[2] * k;
+                }
+            }
+        }
+        if let Some(k) = self.factor(seat, Knob::AtvSpeed) {
+            // As the bike's: the torque and the gearing together, the force at the wheel the file's
+            // at any revs and the wheel k times as fast for them; the drags down so k times the speed
+            // meets the file's at the file's speed. The pull off the line is the file's.
+            power(load, k);
+            let e = &mut load.engine;
+            e.engine_braking = e.engine_braking * k;
+            e.final_drive = e.final_drive / k;
+            let gear = e.gear.max(1);
+            mv::set_gear(e, gear);
+            load.mv.drag = load.mv.drag / (k * k);
+            for w in &mut load.tires.wheels {
+                for s in &mut w.surfaces {
+                    s.drag[2] = s.drag[2] / (k * k);
+                }
+            }
+            load.mv.reverse_speed = load.mv.reverse_speed * k;
+            load.mv.max_clutch_torque_scale_speed = load.mv.max_clutch_torque_scale_speed * k;
+        }
+        if let Some(k) = self.factor(seat, Knob::AtvGrip) {
+            // The bike's eight grip keys, which the quad's wheels keep as each surface's drive row.
+            for w in &mut load.tires.wheels {
+                for s in &mut w.surfaces {
+                    for f in &mut s.drive {
+                        *f = *f * k;
+                    }
+                }
+            }
+        }
+        if let Some(k) = self.factor(seat, Knob::AtvSuspension) {
+            // The loader turns the file's spring into a rate against the quad's weight, and its dampers'
+            // ratios into rates against that (`phy::damping`, which goes with its square root): stiffer,
+            // damped as much, as the cars'.
+            let d = k.sqrt();
+            for w in &mut load.tires.wheels {
+                w.spring = w.spring * k;
+                w.damping_in = w.damping_in * d;
+                w.damping_out = w.damping_out * d;
+            }
+            let t = &mut load.tires;
+            for f in [&mut t.front_spring.0, &mut t.front_spring.1, &mut t.rear_spring.0, &mut t.rear_spring.1] {
+                *f = *f * k;
+            }
+            let m = &mut load.mv;
+            for f in [&mut m.front_spring, &mut m.front_spring_when_stopped, &mut m.rear_spring, &mut m.rear_spring_when_stopped] {
+                *f = *f * k;
+            }
+        }
+    }
+
+    /// Player `seat`'s quad once it is spawned (P287): its body's speed limit, k times with
+    /// [`Knob::AtvSpeed`] above 100%, so the limit is not what stops a faster quad.
+    pub fn atv_body(&self, seat: usize, body: &mut crate::atv_body::Body) {
+        if let Some(k) = self.factor(seat, Knob::AtvSpeed)
+            && k > F::ONE
+        {
+            body.max_speed = body.max_speed * k;
         }
     }
 
