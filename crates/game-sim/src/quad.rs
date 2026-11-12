@@ -4305,3 +4305,312 @@ impl<R: Moto + Default> Ride<R> {
         self.body.set_view(&view);
     }
 }
+
+// --- MD123: the quad made from its files -----------------------------------------------------------
+
+/// The body's top speed and the constructor's other words the loaders leave alone, as the spawned
+/// quad holds them (C28's spawn image): the rider's stunt with none playing, the backflip's stunt id
+/// ([`crate::handling::FIRST_FLIP_STUNT`]) and the 360's two (right, left), its direction, and the
+/// quad's flag byte.
+const SPAWN_MAX_SPEED: f32 = 300.0;
+const NO_STUNT: i32 = 0xff;
+const SPIN_STUNTS: (u32, u32) = (44, 45);
+const SPAWN_SPIN_DIR: i32 = 1;
+const SPAWN_FLAGS: u8 = 5;
+/// The steering hinge's axis each wheel starts with, the frame's up.
+const UP: Vf = Vf::new(0.0, 1.0, 0.0, 1.0);
+/// The quad's control authority's ramp time as spawned.
+const SPAWN_AUTHORITY_TIME: f32 = 1.0;
+
+impl Model {
+    /// [`Model::half_box`]'s whole box, its centre (in `frame`) with the half extent: the quad's scene
+    /// node's bounds.
+    pub fn bounds(&self, frame: &crate::math::Mat4) -> crate::props::NodeBox {
+        use crate::prop_world::BoundsNode;
+        let worlds = self.worlds(frame);
+        fn tree(m: &Model, worlds: &[crate::math::Mat4], i: usize) -> BoundsNode {
+            let children = (0..m.nodes.len()).filter(|&k| m.nodes[k].parent == Some(i)).map(|k| tree(m, worlds, k)).collect();
+            BoundsNode { own: Some(m.nodes[i].own), world: worlds[i], children }
+        }
+        let roots = (0..self.nodes.len()).filter(|&k| self.nodes[k].parent.is_none()).map(|k| tree(self, &worlds, k)).collect();
+        crate::prop_world::node_bounds(&BoundsNode { own: None, world: *frame, children: roots })
+    }
+
+    /// The model's first root and, below it, each node's first child (in the file's order), as far as
+    /// `n` nodes: the chain [`crate::atv_moto::Scene`] holds under the quad's node.
+    pub fn first_chain(&self, n: usize) -> Vec<usize> {
+        let mut chain = Vec::new();
+        let mut at = self.nodes.iter().position(|m| m.parent.is_none());
+        while let Some(i) = at.filter(|_| chain.len() < n) {
+            chain.push(i);
+            at = (0..self.nodes.len()).find(|&k| self.nodes[k].parent == Some(i));
+        }
+        chain
+    }
+}
+
+impl<R: Moto + Default> Ride<R> {
+    /// **The quad made from its files** (MD123), with no RAM image: `load` (its `.phy`, read with the
+    /// model's box and mounts, [`Load::read_model`]) over a quad standing still at `at` facing
+    /// `heading` ([`spawn_frame`]), its chassis `model` hung under its scene node.
+    ///
+    /// - The scene node (the scene's node 0) is the spawn frame with no parent, its box the model's
+    ///   ([`Model::bounds`]); under it the model's first chain ([`Model::first_chain`]) with their
+    ///   bind locals, up to [`crate::atv_moto::NODES`].
+    /// - The body is one foot up the frame from the node (the node is the body less its up row, as
+    ///   the steps keep it), turned to the frame ([`crate::math::mat4_to_quat`]), still, enabled on
+    ///   every axis, with the loaded mass, damping, inertia and rates ([`Load::tune_body`]), the top
+    ///   speed [`SPAWN_MAX_SPEED`] and no acceleration limits.
+    /// - The quad, its keys and the bike steps' words are the loaded ones ([`Load::params`],
+    ///   [`Load::tune_quad`], [`Load::tune`]) over a quad at rest: in first, engine at its idle state,
+    ///   every wheel on its ground query ([`crate::atv_wheel::Ground::Still`]) at its spring when
+    ///   stopped, the engine on the rear pair, the gyros [`crate::handling::Gyro::default`], the
+    ///   360's keys `[Three Sixty]`'s, and the world's box `bounds` with the part reader's reset
+    ///   height as its floor.
+    /// - The collision sync is off and the quad has no spatial entry: every call either makes is a
+    ///   move in SLUS-21104's spatial database, which an MX Unleashed world does not have.
+    ///
+    /// No collision record, tail or wreck is laid ([`Ride::recorded`], [`Ride::tailed`],
+    /// [`Ride::wrecked`] `None`); [`Ride::rig`] lays them.
+    pub fn spawn(load: &Load, model: &Model, at: Vf, heading: Vf, bounds: Option<(Vf, Vf)>, rest: R) -> Ride<R> {
+        use crate::atv_moto;
+        let frame = spawn_frame(at, heading);
+        let rows = frame.0;
+        let w1 = |v: Vf| v.merge(Dest::W, Vf::new(0.0, 0.0, 0.0, 1.0));
+        let zero = Vf::new(0.0, 0.0, 0.0, 1.0);
+
+        // The scene: the quad's node, then the model's chain under it.
+        let mut scene = atv_moto::Scene::default();
+        let b = model.bounds(&frame);
+        scene.nodes[0] = atv_moto::Node { local: rows, world: rows, centre: b.centre, half: b.half_extent, ..atv_moto::Node::default() };
+        let chain = model.first_chain(atv_moto::NODES - 1);
+        for (k, &i) in chain.iter().enumerate() {
+            let n = k + 1;
+            scene.nodes[n] = atv_moto::Node { local: model.nodes[i].local.0, parent: Some(n - 1), ..atv_moto::Node::default() };
+            scene.nodes[n - 1].child = Some(n);
+        }
+        scene.update(chain.len());
+
+        // The body: a foot up the frame's up row from the node.
+        let position = Vf::new(at.x(), at.y(), at.z(), 1.0).merge(Dest::XYZ, at.add(rows[1]));
+        let quat = crate::math::mat4_to_quat(&frame);
+        let mut body = crate::atv_body::Body {
+            enabled: true,
+            linear_axes: [true; 3],
+            angular_axes: [true; 3],
+            last_position: position,
+            position,
+            last_quat: quat,
+            quat,
+            velocity: zero,
+            last_force: zero,
+            force: zero,
+            accel: zero,
+            correction_peak: zero,
+            correction: zero,
+            moment: zero,
+            last_moment: zero,
+            rates: zero,
+            ang_accel: zero,
+            twist_peak: zero,
+            twist: zero,
+            inv_inertia: zero,
+            max_speed: F(SPAWN_MAX_SPEED),
+            max_accel: F(f32::MAX),
+            max_ang_accel: F(f32::MAX),
+            ..crate::atv_body::Body::default()
+        };
+        load.tune_body(&mut body);
+
+        // The quad's own words.
+        let mut q = Quad {
+            active: true,
+            push: true,
+            authority_time: F(SPAWN_AUTHORITY_TIME),
+            heading: w1(rows[2]),
+            up: w1(rows[1]),
+            node_pos: w1(rows[3]),
+            node_pos_kept: w1(rows[3]),
+            node_local: zero,
+            ..Quad::default()
+        };
+        load.tune_quad(&mut q);
+        let springs = [load.tires.front_spring.0, load.tires.front_spring.0, load.tires.rear_spring.0, load.tires.rear_spring.0];
+        for (w, s) in q.wheels.iter_mut().zip(springs) {
+            w.spring = s;
+        }
+
+        // The bike steps' words.
+        let t = &load.three_sixty;
+        let spin = atv_moto::Spin {
+            min_time: t.min_time,
+            max_time: t.max_time,
+            min_pitch: t.min_torque_x,
+            max_pitch: t.max_torque_x,
+            min_yaw: t.min_torque_y,
+            max_yaw: t.max_torque_y,
+            rate: t.rate_decrease,
+            moment: zero,
+            dir: SPAWN_SPIN_DIR,
+            stunt_right: SPIN_STUNTS.0,
+            stunt_left: SPIN_STUNTS.1,
+            ..atv_moto::Spin::default()
+        };
+        let parts = atv_moto::Parts {
+            cofg_off: load.bike.cofgs[1],
+            last_position: position,
+            body_on: true,
+            flags: SPAWN_FLAGS,
+            record: true,
+            spin,
+            scene,
+            bounds: atv_moto::Bounds { floor: load.part.gravity.minimum_reset_height, area: bounds },
+            ..atv_moto::Parts::default()
+        };
+        let wheels = std::array::from_fn(|k| crate::wheel::Wheel {
+            has_ground: true,
+            steered: k < LEFT_REAR,
+            spring_rate: springs[k],
+            ..crate::wheel::Wheel::default()
+        });
+        let more = [crate::atv_wheel::More { steer_axis: UP, ..crate::atv_wheel::More::default() }; 4];
+        let spins = std::array::from_fn(|_| crate::atv_wheel::Spin { brake: Some(F::ZERO), ..crate::atv_wheel::Spin::default() });
+        let mut bike = Bike {
+            held: crate::ride::Held::default(),
+            gas_cut: crate::handling::step::GasCut::default(),
+            cut_time: F::ZERO,
+            joystick: load.joystick,
+            stick: crate::trick::Stick::default(),
+            clutch: F::ZERO,
+            gate_cut: false,
+            clutch_keys: crate::r#move::Params::default(),
+            ride: crate::r#move::Ride::default(),
+            // The constructor's two torque scales, both one (the bike's, [`crate::ride`]'s, and C28's
+            // spawned quad's): no `.phy` key writes them, and a zeroed engine makes no torque.
+            engine: crate::r#move::Engine { clutch_torque_scale: F::ONE, torque_scale: F::ONE, ..load.engine },
+            air_keys: load.air_keys(),
+            air: crate::air::Air::default(),
+            stick_hold: F::ZERO,
+            preload_cue: false,
+            spin_applied: false,
+            spin_active: false,
+            touching: false,
+            struck_class: false,
+            buttons: 0,
+            right_y: F(rows[1].y()),
+            up_y: F(rows[2].y()),
+            stunt_id: NO_STUNT,
+            rider_stunt: NO_STUNT,
+            flip_clip: crate::handling::FlipClip::default(),
+            flip_stunt: crate::handling::FIRST_FLIP_STUNT as u32,
+            gas_gyro_torque: load.gas_gyro_torque,
+            gyro: crate::handling::Gyro::default(),
+            wheels,
+            more,
+            ground: [crate::atv_wheel::Ground::Still; 4],
+            cofg: load.part.body.cofg,
+            spins,
+            parts,
+            contacts: None,
+        };
+        load.tune(&mut bike);
+        Ride::new(load.params(), q, body, bike, rest)
+    }
+}
+
+/// Where [`Ride::rig`] lays the part reader's words to read the collision record back
+/// ([`crate::handling::record::read`], [`crate::handling::record::held`]): scratch places, nobody's
+/// RAM.
+const RIG_AT: crate::handling::mass::Layout = crate::handling::mass::Layout { object: 0x1000, body: 0x2000, record: 0x3000, gravity: 0x4000 };
+const RIG_CLASS_AT: u32 = 0x5000;
+/// The record's constructor words no `.phy` key writes, as the spawned quad holds them (the Oasis
+/// spawn image's record): the actor bit it is, what it collides with (everything), and its class
+/// word (the record's `+0x208` object's `+0x94`).
+const RECORD_ACTORS: u32 = 0x1000;
+const RECORD_COLLIDES: u32 = !0;
+const RECORD_CLASS: u32 = 0x3012;
+/// The handles the quad's ray parts and the quad itself go by ([`build_wreck_body`]'s lists, the
+/// swap): any distinct words other than 0, since an MX Unleashed world never names them.
+const RIDING_RAYS: u32 = 1;
+const WRECK_RAYS: u32 = 2;
+const TRIGGER_PROBE: u32 = 3;
+const QUAD_ACTOR: u32 = 4;
+/// The tail's words the spawned quad holds that no file writes: the vehicle state's mode (1, its
+/// rumble and second countdown run) and the speed below which no wheelie or stoppie runs.
+const SPAWN_VEHICLE_MODE: u32 = 1;
+const SPAWN_STUNT_SPEED: f32 = 5.0;
+/// The class a struck object counts for the backflip's wreck (the image's struck-class word).
+const SPAWN_STRUCK_CLASS: u32 = 0x20;
+
+impl<R: Moto + Default> Ride<R> {
+    /// **MD123a's record, tail and wreck from the files** (MD123), for a quad [`Ride::spawn`] made:
+    ///
+    /// - The collision record is what the part reader writes ([`crate::handling::mass::Part::words`],
+    ///   laid at scratch places and read back as the record and its resolution's fields) over the
+    ///   record's constructor: the world rays, the rays and the sweep on as `CheckForCollisions` and
+    ///   `CheckForHighSpeedCollisions` say, rests and damping of one, a body, the terrain, the
+    ///   near-field list, one contact a riding ray, and the two probes; the held list's body is the
+    ///   ride's.
+    /// - The riding rays are `riding`'s (the bike's `m.col`, a ray probe), the wreck body is built on
+    ///   `wreck` ([`WRECK_FILE`], [`Ride::build_wreck`]).
+    /// - The tail has the vehicle state's mode [`SPAWN_VEHICLE_MODE`] and the stunt speed
+    ///   [`SPAWN_STUNT_SPEED`], every surface no hazard; the wreck the `.phy`'s `MaxWreckTime` and the
+    ///   struck class [`SPAWN_STRUCK_CLASS`].
+    pub fn rig(&mut self, load: &Load, riding: &crate::track::Rays, wreck: &crate::track::Rays) {
+        use crate::handling::record;
+        let riding = crate::flight_search::Rays::of(riding).pairs();
+        let r = &load.part.record;
+        let mut words = std::collections::BTreeMap::new();
+        for (a, mask, v) in load.part.words(RIG_AT) {
+            let w = words.entry(a).or_insert(0u32);
+            *w = (*w & !mask) | (v & mask);
+        }
+        let at = RIG_AT.record;
+        let one = F::ONE.to_bits();
+        for (o, v) in [
+            (0x28, 1),
+            (0x2c, u32::from(r.check_for_collisions != 0)),
+            (0x30, u32::from(r.check_high_speed != 0)),
+            (0x48, one),
+            (0x4c, one),
+            (0x50, one),
+            (0x54, one),
+            (0xe4, RIG_AT.body),
+            (0xec, 1),
+            (0xf4, riding.len() as u32),
+            (0xfc, 1),
+            (0x100, RECORD_ACTORS),
+            (0x104, RECORD_COLLIDES),
+            (0x200, 1),
+            (0x204, 1),
+            (0x208, RIG_CLASS_AT),
+        ] {
+            words.insert(at + o, v);
+        }
+        // The `w` lanes of the centre of mass in the world and the relative velocity.
+        for o in [0x9c, 0x1fc] {
+            words.insert(at + o, one);
+        }
+        words.insert(RIG_CLASS_AT + 0x94, RECORD_CLASS);
+        let w = |a: u32| words.get(&a).copied().unwrap_or(0);
+        let mut held = record::held(&w, at).expect("a record with no contacts is held");
+        held.body = Some(self.body);
+        self.recorded = Some(Recorded {
+            record: record::read(&w, at),
+            held,
+            riding,
+            wreck: Vec::new(),
+            rays: Rays { active: RIDING_RAYS, active_too: RIDING_RAYS, record: RIDING_RAYS, wreck: RIDING_RAYS, riding: RIDING_RAYS },
+        });
+        let mut body = WreckBody { riding: Col::made(RIDING_RAYS), ..WreckBody::default() };
+        self.build_wreck(&mut body, wreck, TRIGGER_PROBE, WRECK_RAYS, QUAD_ACTOR, |_| 0);
+        let tail = Tail { vehicle_state: Some(SPAWN_VEHICLE_MODE), stunt_speed: F(SPAWN_STUNT_SPEED), ..Tail::default() };
+        self.tailed = Some(Tailed { tail, ..Tailed::default() });
+        self.wrecked = Some(Wrecked {
+            max_time: load.max_wreck_time,
+            class: SPAWN_STRUCK_CLASS,
+            category: SPAWN_STRUCK_CLASS,
+            ..Wrecked::default()
+        });
+    }
+}
