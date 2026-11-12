@@ -18,3 +18,7 @@ kit    text eol=lf
 *.png  binary
 *.bin  binary
 *.elf  binary
+
+# Append-only: two tasks each adding names keep both lines instead of stopping the merge for a fix session
+# (3 of the 13 fix sessions on 11-10/11 were here).
+research/oracle.txt merge=union

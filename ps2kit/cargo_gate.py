@@ -49,10 +49,11 @@ import os
 import re
 import shlex
 import subprocess
+import threading
 import time
 import tomllib
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 WHOLE = re.compile(r'^\s*cargo\s+test(\s|$)')
@@ -308,7 +309,48 @@ def variants(cmd: str, cwd: Path, env: dict, log, gc: dict, pick: Selection | No
     return 0, out
 
 
-def _run_one(b: Binary, env: dict, filters: list[str] | None = None) -> None:
+class Threads:
+    """A gate's test threads, `jobs` of them: a binary takes one per test it holds, up to all of them, waiting
+    its turn (first come, first served) until that many are free. Each binary used to run with all `jobs`
+    threads beside `jobs` others, up to jobs² threads a gate: at three gates at once the machine ran 2.5
+    threads a core and `tick` took 1105 s against 148 s with the machine to itself (11-11)."""
+
+    def __init__(self, n: int):
+        self.n, self.free, self.cv, self.queue = n, n, threading.Condition(), []
+
+    @contextmanager
+    def take(self, want: int):
+        k = max(1, min(want, self.n))
+        me = object()
+        with self.cv:
+            self.queue.append(me)
+            self.cv.wait_for(lambda: self.queue[0] is me and self.free >= k)
+            self.queue.pop(0)
+            self.free -= k
+            self.cv.notify_all()
+        try:
+            yield k
+        finally:
+            with self.cv:
+                self.free += k
+                self.cv.notify_all()
+
+
+def count_tests(b: Binary, env: dict) -> int:
+    """How many tests `b` runs (its filter applied): `--list`, which starts no test. 1 when it cannot say."""
+    try:
+        r = subprocess.run([b.exe, '--list', '--format', 'terse'] + ([b.filter] if b.filter else []), cwd=b.dir,
+                           env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, errors='replace',
+                           timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return 1
+    return max(1, sum(l.endswith(': test') for l in r.stdout.splitlines()))
+
+
+def _run_one(b: Binary, env: dict, filters: list[str] | None = None, threads: Threads | None = None) -> None:
+    if threads is not None:
+        with threads.take(count_tests(b, env)) as k:
+            return _run_one(b, {**env, 'RUST_TEST_THREADS': str(k)}, filters)
     e = {**env, 'CARGO_MANIFEST_DIR': b.dir, 'CARGO_PKG_NAME': b.pkg, 'CARGO_CRATE_NAME': b.name.replace('-', '_')}
     args = [b.exe, '-q'] + (['--exact', *filters] if filters else [b.filter] if b.filter else [])
     t = time.monotonic()
@@ -397,6 +439,8 @@ def run(cmd: str, cwd: Path, env: dict, jobs: int, log_path: Path, shared: str, 
         pooled = [b for b in bins if b.args not in solo]
         workers = max(1, jobs)
         benv = {**env, 'RUST_TEST_THREADS': env.get('RUST_TEST_THREADS', str(jobs))}
+        # A RUST_TEST_THREADS other than the jobs is someone's own choice, and every binary gets it as before.
+        threads = Threads(jobs) if benv['RUST_TEST_THREADS'] == str(jobs) else None
 
         doc_pkgs = '' if pick is None else ' '.join(f'-p {n}' for n in sorted(pick.whole & pick.libs))
 
@@ -410,7 +454,7 @@ def run(cmd: str, cwd: Path, env: dict, jobs: int, log_path: Path, shared: str, 
 
         with ThreadPoolExecutor(max_workers=workers) as pool:
             dfut = pool.submit(doc_tests)
-            list(pool.map(lambda b: _run_one(b, benv), pooled))
+            list(pool.map(lambda b: _run_one(b, benv, threads=threads), pooled))
             drc, dout = dfut.result()
         for b in later:
             _run_one(b, benv)

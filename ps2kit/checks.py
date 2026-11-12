@@ -112,11 +112,17 @@ def _check_lock(name: str, note: str = '') -> plat.Lock:
 # The check slot this process holds, if it took one: `alone` gives it up and takes another after.
 _HOLD: list[plat.Lock] = []
 _FIRST = [False]  # this process is the merge gate: `_slot(first=True)`, and twice the jobs
+_NICED: list[bool] = []
 
 
 def _take_slot(first: bool | None = None) -> None:
     if first is not None:
         _FIRST[0] = first
+    # Every finished task waits on the merge gate; a slot's own check gives it the cores first (nice 10,
+    # once: it adds up, and the builds and tests it starts inherit it).
+    if not _FIRST[0] and not _NICED and hasattr(os, 'nice'):
+        os.nice(10)
+        _NICED.append(True)
     _HOLD[:] = [_slot(first=_FIRST[0])]
 
 

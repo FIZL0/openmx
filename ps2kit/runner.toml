@@ -32,7 +32,8 @@ flaky_kind = "K"
 ci_watch = ["pages.yml"]
 # What a fix or repair session builds before it commits a merge: every test target, so a clash git merged
 # without a conflict (two sides adding one name) shows here and not in the gate after it. The gate reuses it.
-build = "cargo test -q --no-run --message-format=short"
+# It runs outside the check slots, so it takes one slot's share of the cores, not all of them.
+build = "cargo test -q --no-run --message-format=short -j $(( $(nproc) / 3 ))"
 slot_env = ["KIT_PCSX2={n}", "KIT_RUN=1"]
 pass_env = ["KIT_CONFIG", "KIT_CHECK_SLOTS", "AGENT_RUNNER_IDLE_BG"]
 on_exit = "./kit pcsx2 stop"

@@ -239,8 +239,35 @@ def test_select() -> None:
         check({'-p a --test one', '-p b --test uses', '-p c --test alone'} <= got, f'--all: everything ({sorted(got)})')
 
 
+def test_threads() -> None:
+    import threading, time
+    t = cargo_gate.Threads(4)
+    busy, peak, got, lock = [0], [0], [], threading.Lock()
+
+    def one(want, tag):
+        with t.take(want) as k:
+            with lock:
+                busy[0] += k
+                peak[0] = max(peak[0], busy[0])
+                got.append((tag, k))
+            time.sleep(0.05)
+            with lock:
+                busy[0] -= k
+
+    runs = [threading.Thread(target=one, args=a) for a in [(3, 'a'), (9, 'b'), (1, 'c'), (0, 'd'), (2, 'e')]]
+    for r in runs:
+        r.start()
+        time.sleep(0.005)
+    for r in runs:
+        r.join()
+    check(peak[0] <= 4, f'never more threads than the budget (peak {peak[0]})')
+    check(dict(got) == {'a': 3, 'b': 4, 'c': 1, 'd': 1, 'e': 2}, f'each takes its tests, 1 to all ({dict(got)})')
+    check([x for x, _ in got] == list('abcde'), f'in the order they came ({[x for x, _ in got]})')
+
+
 if __name__ == '__main__':
     test_gate()
     test_select()
+    test_threads()
     print(f'\n{ok} passed, {fail} failed')
     sys.exit(1 if fail else 0)

@@ -21,6 +21,12 @@ publish = false
 # minutes in a debug build and seconds here.
 [profile.test]
 opt-level = 2
+# Line tables keep a panic's file:line; full debug info made 100-800 MB test binaries, 364 of them, and
+# every worktree's target hit the 80 GB cap and was cleaned and rebuilt whole (11-11).
+debug = "line-tables-only"
+
+[profile.test.package."*"]
+debug = false
 
 [profile.dev]
 opt-level = 1
