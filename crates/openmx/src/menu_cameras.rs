@@ -29,7 +29,7 @@ impl Look {
     pub fn of(view: &CameraView, machine: Machine) -> Look {
         match machine {
             // A car's camera takes the bike's one set, as the helicopter's does (S149e, P264).
-            Machine::Bike | Machine::Buggy | Machine::Monster | Machine::Baja | Machine::Helicopter => Look { fov: view.fov, distance: view.distance, height: view.height },
+            Machine::Bike | Machine::Buggy | Machine::Monster | Machine::Baja | Machine::Helicopter | Machine::Atv => Look { fov: view.fov, distance: view.distance, height: view.height },
             Machine::Biplane => Look { fov: view.fov, distance: view.plane_distance, height: view.plane_height },
         }
     }
@@ -345,6 +345,7 @@ impl Pick {
             Machine::Buggy => "Buggy: ",
             Machine::Monster => "Monster Truck: ",
             Machine::Baja => "Baja: ",
+            Machine::Atv => "Quad: ",
             Machine::Bike => "",
         };
         let mine = if self.custom { " (Mine)" } else { "" };

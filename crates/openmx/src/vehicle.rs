@@ -77,6 +77,9 @@ pub enum Kind {
     Baja,
     /// The Kiowa helicopter (P216), the original's machine kind 2 ([`KiowaRide`]).
     Kiowa,
+    /// MX vs. ATV's quad off a machine pack (MD37d, [`AtvRide`]): an addition, there only when the
+    /// Garage's Quad row picks one.
+    Atv,
 }
 
 impl Kind {
@@ -89,7 +92,8 @@ impl Kind {
             "monster" | "truck" | "monstertruck" => Ok(Kind::Monster),
             "baja" => Ok(Kind::Baja),
             "helicopter" | "kiowa" | "heli" => Ok(Kind::Kiowa),
-            _ => Err(format!("--vehicle: {word:?} is not a vehicle; it is bike, biplane, helicopter, buggy, monster or baja")),
+            "atv" | "quad" => Ok(Kind::Atv),
+            _ => Err(format!("--vehicle: {word:?} is not a vehicle; it is bike, biplane, helicopter, buggy, monster, baja or atv")),
         }
     }
 
@@ -102,6 +106,7 @@ impl Kind {
             Kind::Monster => "monster",
             Kind::Baja => "baja",
             Kind::Kiowa => "helicopter",
+            Kind::Atv => "atv",
         }
     }
 
@@ -110,7 +115,7 @@ impl Kind {
     pub fn other(self) -> Kind {
         match self {
             Kind::Bike => Kind::Biplane,
-            Kind::Biplane | Kind::Buggy | Kind::Monster | Kind::Baja | Kind::Kiowa => Kind::Bike,
+            Kind::Biplane | Kind::Buggy | Kind::Monster | Kind::Baja | Kind::Kiowa | Kind::Atv => Kind::Bike,
         }
     }
 
@@ -120,7 +125,7 @@ impl Kind {
             Kind::Buggy => Some(Machine::Buggy),
             Kind::Monster => Some(Machine::Monster),
             Kind::Baja => Some(Machine::Baja),
-            Kind::Bike | Kind::Biplane | Kind::Kiowa => None,
+            Kind::Bike | Kind::Biplane | Kind::Kiowa | Kind::Atv => None,
         }
     }
 }
@@ -1333,6 +1338,8 @@ pub struct Garage {
     pub cars: Vec<CarRide>,
     /// This player's helicopter (P216), where the disc has its `kiowa.phy` ([`KiowaRide`]).
     pub heli: Option<KiowaRide>,
+    /// This player's quad (MD37d), where the Garage picks one off a quad pack ([`AtvRide`]).
+    pub atv: Option<AtvRide>,
 }
 
 /// How far above a machine's origin the ground under it is looked for when the other is spawned
@@ -1442,6 +1449,8 @@ pub fn markers_of(kind: Kind) -> markers::Vehicle {
         Kind::Buggy | Kind::Monster | Kind::Baja => markers::Vehicle::Bike,
         // So does the helicopter (P216).
         Kind::Kiowa => markers::Vehicle::Bike,
+        // And the quad (MD37d).
+        Kind::Atv => markers::Vehicle::Bike,
     }
 }
 
@@ -1470,10 +1479,10 @@ impl Garage {
         if up == Kind::Biplane && plane.is_none() {
             return Err("--vehicle biplane: this ride has no biplane (the disc's machine.res has no biplane.phy)".into());
         }
-        if up.car().is_some() || up == Kind::Kiowa {
+        if up.car().is_some() || up == Kind::Kiowa || up == Kind::Atv {
             return Err(format!("--vehicle {}: a ride starts on the bike or the plane; switch to it from the pause", up.name()));
         }
-        Ok(Garage { up, plane, taken: up == Kind::Biplane, cars: Vec::new(), heli: None })
+        Ok(Garage { up, plane, taken: up == Kind::Biplane, cars: Vec::new(), heli: None, atv: None })
     }
 
     /// **The plane put in the air** (V96's `--fly-at`, a measurement start): stood at `at` along
@@ -1496,6 +1505,9 @@ impl Garage {
         }
         if self.heli.is_some() {
             out.push(Kind::Kiowa);
+        }
+        if self.atv.is_some() {
+            out.push(Kind::Atv);
         }
         out.extend(self.cars.iter().filter_map(|c| c.machine.car_kind()));
         out
@@ -1533,7 +1545,7 @@ impl Garage {
                 let spot = under(plane, sim, world).ok_or("there is no ground under the plane to stand the bike on")?;
                 sim.rider.teleport_to(spot);
             }
-            Kind::Buggy | Kind::Monster | Kind::Baja | Kind::Kiowa => return self.switch_car(to, sim, world),
+            Kind::Buggy | Kind::Monster | Kind::Baja | Kind::Kiowa | Kind::Atv => return self.switch_car(to, sim, world),
         }
         // A trick or combo in progress fails as a bail fails it (P161): the trick stopped, the
         // chain's points lost and not banked, so the HUD plays the pop-up out as a bail's and the
@@ -1622,6 +1634,8 @@ impl Garage {
             // A car has no markers yet (S149e): the d-pad steers it. Nor the helicopter (P216),
             // whose d-pad is its stick's.
             Kind::Buggy | Kind::Monster | Kind::Baja | Kind::Kiowa => None,
+            // Nor the quad (MD37d).
+            Kind::Atv => None,
         };
         (said, did)
     }
@@ -1640,6 +1654,9 @@ impl Garage {
         }
         if let (Kind::Kiowa, Some(heli)) = (self.up, &self.heli) {
             return heli.spot(world);
+        }
+        if let Some(atv) = self.atv_up() {
+            return atv.spot(world);
         }
         match (self.up, &self.plane) {
             (Kind::Biplane, Some(plane)) => {
@@ -1750,6 +1767,13 @@ impl Garage {
     /// ([`Sim::step_among`]), the plane with their bikes ([`Plane::step_among`]). Alone, it is
     /// [`Garage::step`] exactly.
     pub fn step_among(&mut self, sim: &mut Sim, dt: F, controls: &Controls, world: &mut dyn World, among: Among<'_>) -> rider::Frame {
+        // The quad (MD37d) on the seat's controls as the bike's pad maps them; the track's path cars
+        // run as they do under a car.
+        if let (Kind::Atv, Some(atv)) = (self.up, self.atv.as_mut()) {
+            sim.traffic.frame(dt, world);
+            atv.step(controls, dt, world);
+            return rider::Frame::default();
+        }
         if detour(self.up) {
             return self.drive_met(sim, dt, world, among.met);
         }
@@ -1921,6 +1945,8 @@ impl Wanted {
             Some(Kind::Baja) => 5,
             // Online flies no helicopter (P216): its pick is no pick.
             Some(Kind::Kiowa) => 0,
+            // Nor any quad (MD37d): an offline addition.
+            Some(Kind::Atv) => 0,
         };
         (to & 3) | (to >> 2) << 7 | (self.every_bank as u8) << 2 | (self.round_stick as u8) << 3 | (self.dpad_rides as u8) << 4 | (self.together as u8) << 5 | (self.paused as u8) << 6
     }
@@ -1990,7 +2016,7 @@ pub fn switch_lane_among(to: Kind, template: Option<&Flight>, cars: &[CarRide], 
             c.struck = lane.struck;
         }
     }
-    let mut garage = Garage { up, plane, taken: true, cars, heli: None };
+    let mut garage = Garage { up, plane, taken: true, cars, heli: None, atv: None };
     let result = garage.switch(to, sim, world);
     // Refused, the seat stays on what it was on, the lane as it was.
     let now = garage.up;
@@ -2174,7 +2200,7 @@ pub fn settle_lane(sim: &mut Sim, mut plane: Plane, ready: Readied) -> bool {
 /// it while it is on or near the ground, the bike's spot on the bike.
 pub fn lane_spot(sim: &Sim, world: &mut dyn World) -> Spot {
     match &sim.plane {
-        Some(f) => Garage { up: Kind::Biplane, plane: Some(Plane::around(f.clone())), taken: true, cars: Vec::new(), heli: None }.spot(sim, world),
+        Some(f) => Garage { up: Kind::Biplane, plane: Some(Plane::around(f.clone())), taken: true, cars: Vec::new(), heli: None, atv: None }.spot(sim, world),
         None => match &sim.car {
             // In a car (S249), [`CarRide::spot`]'s: on the ground under it, upright, stopped.
             Some(car) => car_spot(&car.machine, world),
@@ -2647,6 +2673,10 @@ impl Garage {
                 let heli = self.heli.as_mut().ok_or("this ride has no helicopter")?;
                 heli.take(&from, world).ok_or("there is no ground here to stand the helicopter on")?;
             }
+            None if to == Kind::Atv => {
+                let atv = self.atv.as_mut().ok_or("this ride has no quad")?;
+                atv.take(&from, world).ok_or("there is no ground here to stand the quad on")?;
+            }
             None => sim.rider.teleport_to(from),
         }
         let left = self.up.car();
@@ -2656,6 +2686,9 @@ impl Garage {
         }
         if let (Kind::Kiowa, Some(heli)) = (self.up, self.heli.as_mut()) {
             heli.flown = None;
+        }
+        if let (Kind::Atv, Some(atv)) = (self.up, self.atv.as_mut()) {
+            atv.ridden = None;
         }
         sim.rider.trick_lost();
         self.up = to;
@@ -3159,7 +3192,7 @@ fn blade_tables() -> &'static game_sim::ragdoll::Tables {
 
 /// A machine the switch spawns on the player and takes away again: a car or the helicopter.
 fn detour(kind: Kind) -> bool {
-    kind.car().is_some() || kind == Kind::Kiowa
+    kind.car().is_some() || kind == Kind::Kiowa || kind == Kind::Atv
 }
 
 impl Garage {
@@ -3210,6 +3243,210 @@ impl Garage {
     /// The helicopter up, if it is.
     pub fn heli_up(&self) -> Option<&KiowaRide> {
         self.heli.as_ref().filter(|_| self.up == Kind::Kiowa)
+    }
+}
+
+// ---- MX vs. ATV's quad (MD37d) -------------------------------------------------------------------
+
+/// The word a quad pack's `mod.json` gives its kind, `machine: "atv"`.
+pub const ATV_PACK_WORD: &str = "atv";
+
+/// What the Garage's Quad row and the shell call a quad pick: its `.phy`'s stem with the `atv_`
+/// taken off, the driving model and the class spaced out, and the sport twin (`atv_s_`) said:
+/// `atv_Race250P` is "Race 250 P", `atv_s_Pro250A` "Pro 250 A Sport".
+pub fn atv_label(phy: &str) -> String {
+    let stem = phy.rsplit(['/', '\\']).next().unwrap_or(phy);
+    let stem = stem.strip_suffix(".phy").unwrap_or(stem);
+    let lower = stem.to_ascii_lowercase();
+    let (sport, rest) = match lower.strip_prefix("atv_s_") {
+        Some(_) => (true, &stem[6..]),
+        None => (false, stem.get(4..).filter(|_| lower.starts_with("atv_")).unwrap_or(stem)),
+    };
+    let mut out = String::new();
+    let mut last: Option<char> = None;
+    for c in rest.chars() {
+        if let Some(l) = last
+            && (l.is_ascii_digit() != c.is_ascii_digit() || (c.is_ascii_uppercase() && l.is_ascii_lowercase()))
+        {
+            out.push(' ');
+        }
+        out.push(c);
+        last = Some(c);
+    }
+    if sport {
+        out.push_str(" Sport");
+    }
+    out
+}
+
+/// The stem a pick is kept by (`atv_Race250P`), off a `.phy`'s path in the pack.
+pub fn atv_stem(phy: &str) -> &str {
+    let stem = phy.rsplit(['/', '\\']).next().unwrap_or(phy);
+    stem.strip_suffix(".phy").unwrap_or(stem)
+}
+
+/// The chassis model and its collision object's ray probe a quad's `.phy` rides with, by the build
+/// its name says: `atv_s_*` the sport chassis (`ATV_S.mcf`'s `atv_s_chasis`), the rest the race
+/// chassis (`ATV_R.mcf`'s `250R_atv_chasis`); each `Veh\Col\ATV_<R|S>_ChasisM.col`, its `m.col`.
+pub fn atv_chassis(phy: &str) -> (&'static str, &'static str) {
+    match atv_stem(phy).to_ascii_lowercase().starts_with("atv_s_") {
+        true => ("atv_s_chasis.psg", "ATV_S_ChasisM.col"),
+        false => ("250r_atv_chasis.psg", "ATV_R_ChasisM.col"),
+    }
+}
+
+/// **MX vs. ATV's quad in the ride** (MD37d): one `.phy` of a quad pack (openmx-mods'
+/// `mxvatv_atv`), its chassis model and its two collision objects, made into a quad each time it is
+/// taken ([`game_sim::quad::Ride::spawn`] and [`game_sim::quad::Ride::rig`], MD123's, from the
+/// files alone) and stepped on the world the bike rides ([`game_sim::quad::Ride::step`]). Like a car,
+/// the switch spawns it on the player and takes it away again; nothing parks one, as no MX
+/// Unleashed track has an ATV bay.
+#[derive(Clone)]
+pub struct AtvRide {
+    /// The pack's `mod.json` id.
+    pub pack: String,
+    /// The `.phy`'s stem (`atv_Race250P`).
+    pub phy: String,
+    pub ini: Ini,
+    pub model: std::sync::Arc<game_sim::quad::Model>,
+    /// The chassis' `m.col` and `WreckATVm.col`, parsed.
+    pub riding: game_sim::track::Rays,
+    pub wreck: game_sim::track::Rays,
+    /// The quad while the player is on it.
+    pub ridden: Option<Box<Quad>>,
+    /// Where it was last taken.
+    pub taken_at: Vf,
+    /// How many times it has wrecked since it was last taken.
+    pub wrecks: u32,
+}
+
+impl std::fmt::Debug for AtvRide {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AtvRide").field("pack", &self.pack).field("phy", &self.phy).field("ridden", &self.ridden.is_some()).field("wrecks", &self.wrecks).finish()
+    }
+}
+
+/// A quad out: the ride and its trigger probe's segments, which every step sweeps.
+#[derive(Clone)]
+pub struct Quad {
+    pub ride: game_sim::quad::Ride,
+    pub segments: [[Vf; 2]; 4],
+    /// Whether it was down (wrecked) last tick, for counting wrecks.
+    pub was_down: bool,
+}
+
+impl AtvRide {
+    /// The quad off a pack's files (`read` by their paths in the pack), its `.phy` `phy`: the
+    /// `.phy`, the chassis and both collision objects ([`atv_chassis`], [`game_sim::quad::WRECK_FILE`]),
+    /// each checked by building a quad at the origin. `Err` with what is missing or does not read.
+    pub fn read(pack: &str, phy: &str, read: &mut dyn FnMut(&str) -> Option<Vec<u8>>) -> Result<AtvRide, String> {
+        let (psg, col) = atv_chassis(phy);
+        let mut file = |name: &str| read(name).ok_or_else(|| format!("{pack} has no {name}"));
+        let ini = Ini::parse_bytes(&file(phy)?);
+        let model = game_sim::quad::Model::parse(&file(&format!("Veh/Anim/{psg}"))?).map_err(|e| format!("{psg}: {e}"))?;
+        let rays = |b: Vec<u8>, what: &str| game_sim::track::Rays::parse(&b).map_err(|e| format!("{what}: {e}"));
+        let riding = rays(file(&format!("Veh/Col/{col}"))?, col)?;
+        let wreck = rays(file(&format!("Veh/Col/{}", game_sim::quad::WRECK_FILE))?, game_sim::quad::WRECK_FILE)?;
+        let atv = AtvRide { pack: pack.to_string(), phy: atv_stem(phy).to_string(), ini, model: std::sync::Arc::new(model), riding, wreck, ridden: None, taken_at: Vf::default(), wrecks: 0 };
+        atv.made(Vf::new(0.0, 0.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 1.0), None)?;
+        Ok(atv)
+    }
+
+    /// The quad made standing at `at` facing `heading`, the world's box `bounds`, with its record,
+    /// tail and wreck.
+    fn made(&self, at: Vf, heading: Vf, bounds: Option<(Vf, Vf)>) -> Result<Quad, String> {
+        let curve = game_sim::camera::CurveTable::build();
+        let load = game_sim::quad::Load::read_model(&self.ini, &self.model, at, heading, &curve).map_err(|e| format!("{}: {e}", self.phy))?;
+        let segments = game_sim::quad::trigger_segments(&load.tires, true).ok_or_else(|| format!("{}: no trigger probe", self.phy))?;
+        let mut ride = game_sim::quad::Ride::spawn(&load, &self.model, at, heading, bounds, Vec::new());
+        ride.rig(&load, &self.riding, &self.wreck);
+        Ok(Quad { ride, segments, was_down: false })
+    }
+
+    /// The quad taken at `from`: made standing on the ground under the spot, facing along it, at
+    /// rest. `None`, and nothing taken, with no ground there.
+    pub fn take(&mut self, from: &Spot, world: &mut dyn World) -> Option<()> {
+        let g = ground_under(world, from.at)?;
+        let at = Vf::new(from.at.x(), g, from.at.z(), 1.0);
+        let f = level(from.forward).unwrap_or(Vf::new(0.0, 0.0, 1.0, 0.0));
+        let bounds = world.area().map(|a| (Vf::new(0.0, 0.0, 0.0, 1.0), Vf::new(a.width.0, 0.0, a.depth.0, 1.0)));
+        let quad = self.made(at, Vf::new(f.x(), 0.0, f.z(), 1.0), bounds).ok()?;
+        self.ridden = Some(Box::new(quad));
+        self.taken_at = at;
+        self.wrecks = 0;
+        Some(())
+    }
+
+    /// One tick of it on the seat's `controls` (the bike's, as its pad maps them), over `world`.
+    pub fn step(&mut self, controls: &Controls, dt: F, world: &mut dyn World) {
+        let Some(q) = self.ridden.as_deref_mut() else { return };
+        q.ride.rest.clear();
+        q.ride.step(controls, dt, world, q.segments);
+        let down = q.ride.down();
+        if down && !q.was_down {
+            self.wrecks += 1;
+        }
+        q.was_down = down;
+    }
+
+    /// Its ride, while it is out.
+    pub fn quad(&self) -> Option<&game_sim::quad::Ride> {
+        Some(&self.ridden.as_ref()?.ride)
+    }
+
+    /// The matrix it is drawn by: its scene node's world rows and origin, while it is out.
+    pub fn matrix(&self) -> Option<game_sim::math::Mat4> {
+        Some(game_sim::math::Mat4(self.ridden.as_ref()?.ride.bike.parts.scene.nodes[0].world))
+    }
+
+    /// Its scene node's origin and forward row, while it is out.
+    fn place(&self) -> Option<(Vf, Vf)> {
+        let m = self.matrix()?.0;
+        Some((Vf::new(m[3].x(), m[3].y(), m[3].z(), 1.0), Vf::new(m[2].x(), m[2].y(), m[2].z(), 0.0)))
+    }
+
+    /// What the shell says of it while it is out: how far it went from where it was taken, how
+    /// fast, whether all four are down, in the air or wrecked, and how many times it wrecked.
+    pub fn report(&self) -> Option<String> {
+        let q = self.ridden.as_ref()?;
+        let (at, _) = self.place()?;
+        let gone = (at.x() - self.taken_at.x()).hypot(at.z() - self.taken_at.z());
+        let state = match (q.ride.down(), q.ride.q.airborne, q.ride.q.all_down) {
+            (true, _, _) => "wrecked",
+            (false, true, _) => "in the air",
+            (false, false, true) => "on all four",
+            (false, false, false) => "on some wheels",
+        };
+        Some(format!(
+            "atv: {} {gone:.1} ft from where it was taken, at {:.1}, {:.1}, {:.1}, {:.1} ft/s, {state}, wrecked {} times",
+            self.phy,
+            at.x(),
+            at.y(),
+            at.z(),
+            q.ride.q.speed_len.0,
+            self.wrecks,
+        ))
+    }
+
+    /// The player on it, for whatever is put where they are: on the ground under the quad,
+    /// upright, along its heading flattened, stopped; its own place with no ground under it.
+    pub fn spot(&self, world: &mut dyn World) -> Spot {
+        let up = Vf::new(0.0, 1.0, 0.0, 0.0);
+        let Some((at, forward)) = self.place() else {
+            return Spot::still(self.taken_at, Vf::new(0.0, 0.0, 1.0, 0.0), up);
+        };
+        let forward = level(forward).unwrap_or(Vf::new(0.0, 0.0, 1.0, 0.0));
+        match ground_under(world, at) {
+            Some(g) => Spot::still(Vf::new(at.x(), g, at.z(), 1.0), forward, up),
+            None => Spot::still(at, forward, up),
+        }
+    }
+}
+
+impl Garage {
+    /// The quad, while it is up.
+    pub fn atv_up(&self) -> Option<&AtvRide> {
+        self.atv.as_ref().filter(|_| self.up == Kind::Atv)
     }
 }
 

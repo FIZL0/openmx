@@ -699,6 +699,10 @@ fn switch_machine(seat: &mut Seat, rig: &mut Rig, to: Kind, place: &mut dyn sim_
     if let Some(said) = seat.garage.heli_up().and_then(vehicle::KiowaRide::report) {
         println!("{said}");
     }
+    // And the quad (MD37d).
+    if let Some(said) = seat.garage.atv_up().and_then(vehicle::AtvRide::report) {
+        println!("{said}");
+    }
     match seat.garage.switch(to, &mut seat.sim, place) {
         Ok(up) => {
             took(rig, up);
@@ -2625,6 +2629,10 @@ struct Args {
     /// ([`game_sim::state::Sense::backwards_bail`], S161): the Settings screen's Backwards Landings
     /// Bail row, which `--backwards-bail` turns on. Off by default, the original's.
     backwards_bail: bool,
+    /// MX vs. ATV's quad (MD37d), an addition: `--atv NAME`, the handling file (`atv_Race250P`) the
+    /// installed quad pack rides it on, which the pause's switch row then offers; under the front
+    /// end the Garage's Quad row. Empty, the default, for none: the ride is the original's.
+    atv: String,
     /// Whether a wreck rumbles the rider's pad (P183, [`pad::WreckRumble`]): `--no-vibration` turns
     /// it off, and under the front end the Controls tab's Vibration row does, live.
     vibration: bool,
@@ -3610,6 +3618,9 @@ async fn front_end(args: Args) -> Result<(), String> {
                 a.wrecks = args.wrecks && shell.front.menu.settings.wrecks;
                 a.air_wrecks = args.air_wrecks && shell.front.menu.settings.air_wrecks;
                 a.backwards_bail = args.backwards_bail || shell.front.menu.settings.backwards_bail;
+                if args.atv.is_empty() {
+                    a.atv = shell.front.menu.settings.atv.clone();
+                }
                 if args.modifiers.is_original() {
                     a.modifiers = shell.front.menu.settings.modifiers;
                 }
@@ -3724,6 +3735,8 @@ async fn front_end(args: Args) -> Result<(), String> {
                 a.wrecks = room.wrecks;
                 a.air_wrecks = room.air_wrecks;
                 a.backwards_bail = room.backwards_bail;
+                // The quad is offline only (MD37d).
+                a.atv = String::new();
                 // This machine's rider in the first seat's look (P86), as the room was told.
                 a.look = shell.front.menu.picks.0[0].look.clone();
                 a.wiring = shell.front.wiring();
@@ -5358,6 +5371,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let mut garage = Garage::new(args.vehicle, plane)?;
     garage.cars = lot.cars_for(0);
     garage.heli = lot.heli_for(0);
+    garage.atv = ride_atv(&args);
     garage.modify(&lot, &mods, 0);
     if !garage.cars.is_empty() {
         let names: Vec<&str> = garage.cars.iter().map(|c| c.machine.section()).collect();
@@ -7349,6 +7363,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 let mut garage = Garage::new(up, plane)?;
                 garage.cars = lot.cars_for(i + 1);
                 garage.heli = lot.heli_for(i + 1);
+                garage.atv = seats[0].garage.atv.clone();
                 garage.modify(&lot, &mods, i + 1);
                 garage
             },
@@ -7459,6 +7474,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 front.menu.cars[i][k] = seat.garage.machines().contains(&kind);
             }
             front.menu.heli[i] = seat.garage.heli.is_some();
+            front.menu.atv[i] = seat.garage.atv.is_some();
         }
     }
     let mut start_readers: Vec<Reader> = (1..world.seats.len()).map(|_| Reader::at(RIDE_HZ)).collect();
@@ -8586,6 +8602,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                         let mut garage = Garage::new(Kind::Bike, lot.plane(i, flight_for(i)))?;
                         garage.cars = lot.cars_for(i);
                         garage.heli = lot.heli_for(i);
+                        garage.atv = world.seats[0].garage.atv.clone();
                         garage.modify(&lot, &mods, i);
                         let body = match &rider_member {
                             Some(member) => Body::load(vec![disc.res(member)?], &args.rider, Sex::Male, "", &table.stunts, phy.motion()).ok(),
@@ -11440,6 +11457,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 println!("{said}");
             }
         }
+        // Or the quad (MD37d).
+        if let Some(said) = world.seats[0].garage.atv_up().and_then(vehicle::AtvRide::report) {
+            println!("{said}");
+        }
     }
 
     let opened = front.as_deref().is_some_and(|f| f.menu.opening == menu::Opening::Open);
@@ -12369,8 +12390,9 @@ fn online_flier_why(offer: &[online_fliers::Offered], pick: &roster::FlierPick) 
 
 /// The machines besides the fliers the Garage's machine picker offers (P315c), off the installed
 /// machine packs' manifests as the fliers are: every bike skin, by its `class`, listed beside the
-/// disc's bikes and greyed, since openmx rides only the disc's bikes; and once, by its name, each
-/// pack of skin-less builds of a kind openmx cannot ride (the quads), greyed with why.
+/// disc's bikes and greyed, since openmx rides only the disc's bikes; each handling file a quad pack
+/// lists (MD37d), ridden; and once, by its name, each other pack of skin-less builds of a kind
+/// openmx cannot ride, greyed with why.
 fn machine_offers(packs: &[machine_packs::Pack]) -> Vec<roster::PackMachine> {
     let mut out = Vec::new();
     for pack in packs {
@@ -12385,6 +12407,21 @@ fn machine_offers(packs: &[machine_packs::Pack]) -> Vec<roster::PackMachine> {
                 why: Some("openmx rides only MX Unleashed's own bikes yet".into()),
             });
         }
+        // The quads (MD37d): one a handling file, ridden.
+        if pack.machine == roster::ATV_KIND && !pack.phy.is_empty() {
+            for phy in &pack.phy {
+                out.push(roster::PackMachine {
+                    pack: pack.id.clone(),
+                    game: pack.game.clone(),
+                    machine: pack.machine.clone(),
+                    class: String::new(),
+                    skin: vehicle::atv_stem(phy).to_string(),
+                    name: vehicle::atv_label(phy),
+                    why: None,
+                });
+            }
+            continue;
+        }
         if pack.skins.is_empty() && pack.machine != "fliers" {
             out.push(roster::PackMachine {
                 pack: pack.id.clone(),
@@ -12398,6 +12435,42 @@ fn machine_offers(packs: &[machine_packs::Pack]) -> Vec<roster::PackMachine> {
         }
     }
     out
+}
+
+/// The quad the ride offers (MD37d): `--atv`'s handling file (the Garage's Quad row's under the front
+/// end) off the installed quad pack. None with none picked, online, or with no pack or file to read,
+/// a line saying why.
+fn ride_atv(args: &Args) -> Option<vehicle::AtvRide> {
+    if args.atv.is_empty() {
+        return None;
+    }
+    if args.online.is_some() {
+        println!("atv: {} picked, but the quad is offline only", args.atv);
+        return None;
+    }
+    let Some(dir) = mods_dir(args) else {
+        println!("atv: {} picked, but the mods folder is off", args.atv);
+        return None;
+    };
+    let packs = machine_packs::find(&dir).0;
+    let Some(pack) = packs.iter().find(|p| p.machine == roster::ATV_KIND && !p.phy.is_empty()) else {
+        println!("atv: {} picked, but {} has no quad pack", args.atv, dir.join(machine_packs::MACHINES_DIR).display());
+        return None;
+    };
+    let Some(phy) = pack.phy.iter().find(|p| vehicle::atv_stem(p).eq_ignore_ascii_case(&args.atv)) else {
+        println!("atv: {} lists no {}.phy", pack.id, args.atv);
+        return None;
+    };
+    match vehicle::AtvRide::read(&pack.id, phy, &mut |n| pack.files.read(&n.replace('/', "\\")).ok()) {
+        Ok(atv) => {
+            println!("atv: {} ({}) off {} (switch from the pause)", vehicle::atv_label(phy), vehicle::atv_stem(phy), pack.id);
+            Some(atv)
+        }
+        Err(e) => {
+            println!("atv: {e}");
+            None
+        }
+    }
 }
 
 /// The machines besides the fliers the Garage offers (P315c): [`machine_offers`] off the mods
@@ -12432,15 +12505,18 @@ mod machine_offers_test {
         let seen: Vec<(&str, &str, &str, &str, bool)> =
             offer.iter().map(|m| (m.pack.as_str(), m.machine.as_str(), m.class.as_str(), m.name.as_str(), m.why.is_some())).collect();
         let mut want = vec![("test_bikes", "bike", "250", "Test 250", true), ("test_bikes", "bike", "450", "crf450_test", true)];
+        let labels: Vec<String> = packs.get(1).map_or_else(Vec::new, |q| q.phy.iter().map(|p| super::vehicle::atv_label(p)).collect());
         if packs.len() == 2 {
-            want.push(("mxvatv_atv", "atv", "", "MX vs. ATV Unleashed quads", true));
+            // MD37d: the quads by their handling files, ridden
+            assert_eq!(labels.len(), 8);
+            want.extend(labels.iter().map(|l| ("mxvatv_atv", "atv", "", l.as_str(), false)));
         } else {
             println!("no MX vs. ATV quads pack at {}: the test pack alone", quads.display());
         }
         assert_eq!(seen, want);
         assert_eq!(offer[0].game, "Test Game");
         if let Some(q) = offer.get(2) {
-            assert_eq!(q.why.as_deref(), Some("openmx cannot ride a quad yet"));
+            assert_eq!((q.skin.as_str(), q.name.as_str()), ("atv_Pro250A", "Pro 250 A"));
         }
         // and a bike pack's skins are not fliers
         assert!(flier_offers(&packs).iter().all(|f| f.pack == roster::ORIGINAL_PACK));
@@ -13900,6 +13976,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         wrecks: true,
         air_wrecks: true,
         backwards_bail: false,
+        atv: String::new(),
         vibration: true,
         modifiers: game_sim::modifiers::Mods::original(),
         trace: None,
@@ -14236,6 +14313,7 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--no-wrecks" => args.wrecks = false,
             "--no-air-wrecks" => args.air_wrecks = false,
             "--backwards-bail" => args.backwards_bail = true,
+            "--atv" => args.atv = next("a quad's handling file, like atv_Race250P")?,
             "--no-vibration" => args.vibration = false,
             "--modifiers" => {
                 args.modifiers =
@@ -14541,7 +14619,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--ride] [--track free06] [--bike 125sx] [--rider thq1] [--size 640x448]\n\
                             [--scale 1]\n\
                             [--pad /dev/input/js0] [--display :0] [--seconds N] [--shot PATH]\n\
-                            [--moment FILE OUT.png] [--no-wrecks] [--no-air-wrecks] [--backwards-bail] [--no-vibration] [--overlay hud|none] [--speedometer digital|analog] [--tricks original|mxvatv|ID,ID…] [--handling original|mxvatv|untamed] [--handling-pack ID] [--fliers original|mxvatv] [--flier-skin N] [--brake-gyro on|off] [--gas-gyro on|off] [--markers on|off] [--camera NAME]\n\
+                            [--moment FILE OUT.png] [--no-wrecks] [--no-air-wrecks] [--backwards-bail] [--atv NAME] [--no-vibration] [--overlay hud|none] [--speedometer digital|analog] [--tricks original|mxvatv|ID,ID…] [--handling original|mxvatv|untamed] [--handling-pack ID] [--fliers original|mxvatv] [--flier-skin N] [--brake-gyro on|off] [--gas-gyro on|off] [--markers on|off] [--camera NAME]\n\
                             [--minimap on|off] [--show-fps on|off] [--hud-scale 50..150] [--world-sky global|per-map]\n\
                             [--camera-view original|default|FOV,DIST,HEIGHT,PDIST,PHEIGHT]\n\
                             [--modifiers 'gravity=50 bike_speed.2=200']\n\
@@ -14651,7 +14729,10 @@ fn parse_args() -> Result<Option<Args>, String> {
                      the rider on whatever the bike's attitude in the air (a landing is still\n\
                      judged); --backwards-bail throws the rider off a landing\n\
                      with the bike facing back against its way, which the original rides\n\
-                     out (off by default); --no-vibration keeps the pad still\n\
+                     out (off by default); --atv atv_Race250P offers MX vs. ATV's\n\
+                     quad on that handling file in the pause's switch row, off its\n\
+                     installed machine pack (offline only; none by default);\n\
+                     --no-vibration keeps the pad still\n\
                      when its rider wrecks; --modifiers sets the\n\
                      game modifiers, percentages of what the ride loads (a tape keeps its own);\n\
                      --moment draws one frame posed\n\

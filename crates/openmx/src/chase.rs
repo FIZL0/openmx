@@ -30,6 +30,9 @@ pub fn ridden(garage: &Garage, ride: &Ride) -> Ridden {
     if let Some(h) = garage.heli_up().and_then(|k| k.flown.as_ref()) {
         return heli(h);
     }
+    if let Some(r) = garage.atv_up().and_then(|a| a.quad()) {
+        return quad(r);
+    }
     match (garage.up, &garage.plane) {
         // The plane: its flight's block (V29), or a parked plane's origin when there is no flight.
         (Kind::Biplane, Some(plane)) => match &plane.flight {
@@ -89,6 +92,19 @@ pub fn heli(h: &crate::vehicle::Heli) -> Ridden {
         },
         airborne: !h.touching(),
         speed: m.speed,
+    }
+}
+
+/// The quad's target block (MD37d), filled the way the helicopter's is: the body's centre of mass
+/// where the frame's last substep began, its drawn node's rows, the body's velocity, no lean, the
+/// quad's own airborne flag and speed. Which words MX vs. ATV's quad writes there was not read.
+pub fn quad(r: &game_sim::quad::Ride) -> Ridden {
+    let one = |v: Vf| Vf::new(v.x(), v.y(), v.z(), 1.0);
+    let m = r.bike.parts.scene.nodes[0].world;
+    Ridden {
+        target: Target { body_point: one(r.body.last_position), forward: one(m[2]), up: one(m[1]), vel: one(r.body.velocity), lean: F::ZERO },
+        airborne: r.q.airborne,
+        speed: r.q.speed_len,
     }
 }
 

@@ -826,6 +826,9 @@ pub struct PackMachine {
     pub why: Option<String>,
 }
 
+/// The quads' kind word (MD37d), a quad pack's `machine`.
+pub const ATV_KIND: &str = "atv";
+
 /// The picker's name for a kind of machine: a bike, a quad, else [`flier_label`].
 pub fn machine_label(machine: &str) -> String {
     match machine {
