@@ -3728,7 +3728,7 @@ fn the_modifiers_page_shows_one_machines_knobs_at_a_time() {
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Modifiers));
     assert_eq!((m.page()[0].key, m.page()[1].key), (Key::Player, Key::ModsMachine));
-    // No mod machine is rideable yet (the ATV, MX vs. ATV's cars): the original's four and the world.
+    // With no mod machine's addition on (P287's ATV): the original's four and the world.
     assert_eq!(m.page()[1].choices, Category::ALL.map(|c| c.label().to_string()).to_vec());
     assert_eq!(m.page()[1].value, "Bike");
     let mut seen = Vec::new();
@@ -3742,7 +3742,8 @@ fn the_modifiers_page_shows_one_machines_knobs_at_a_time() {
         seen.extend(knobs);
     }
     seen.sort_by_key(|k| Knob::MENU.iter().position(|m| m == k));
-    assert_eq!(seen, Knob::MENU.to_vec(), "every knob is under one machine");
+    let disc: Vec<Knob> = Knob::MENU.into_iter().filter(|k| k.category() != Category::Atv).collect();
+    assert_eq!(seen, disc, "every knob is under one machine");
     for k in [Knob::KiowaSpeed, Knob::KiowaClimb, Knob::KiowaTurn, Knob::KiowaCeiling, Knob::CarSpeed, Knob::CarAccel, Knob::CarGrip, Knob::CarSuspension] {
         assert_eq!(Knob::from_word(k.word()), Some(k));
     }
@@ -3776,6 +3777,47 @@ fn the_modifiers_page_shows_one_machines_knobs_at_a_time() {
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.page()[1].value, "Kiowa");
     assert!(m.page().iter().any(|row| row.key == Key::Knob(Knob::KiowaCeiling)));
+}
+
+/// P287: the Machine row offers the ATV, before the world's, only while the quad addition is on — a
+/// handling file on the Garage's Quad row, or a ride under the pause that has one; its page is the
+/// quad's four knobs, and under the pause on the quad it opens there. Online they are the host's
+/// to leave alone: the quad is offline only.
+#[test]
+fn the_atv_category_shows_while_the_quad_addition_is_on() {
+    use game_sim::modifiers::Category;
+    use menu::Key;
+    let (mut m, mut r) = fresh();
+    settings_at(&mut m, &mut r, "Ride");
+    down_to(&mut m, &mut r, Key::Modifiers);
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(!m.page()[1].choices.iter().any(|c| c == "ATV"), "off by default");
+    m.settings.atv = "atv_Race250P".into();
+    let mut want: Vec<String> = Category::ALL.map(|c| c.label().to_string()).to_vec();
+    want.insert(4, "ATV".into());
+    assert_eq!(m.page()[1].choices, want);
+    pick_category(&mut m, &mut r, Category::Atv);
+    let knobs: Vec<Knob> = m.page().iter().filter_map(|row| match row.key { Key::Knob(k) => Some(k), _ => None }).collect();
+    assert_eq!(knobs, [Knob::AtvSpeed, Knob::AtvAccel, Knob::AtvGrip, Knob::AtvSuspension]);
+    assert!(!m.page().iter().any(|row| row.label == "Wrecks"));
+    down_to(&mut m, &mut r, Key::Knob(Knob::AtvGrip));
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.settings.modifiers.get(0, Knob::AtvGrip), 110);
+    assert!(m.page()[1].tips.iter().any(|t| t == "1 changed"), "{:?}", m.page()[1].tips);
+    // Off again, the row goes and the page falls back to the first machine's; the value is kept.
+    m.settings.atv.clear();
+    assert_eq!(m.page()[1].value, "Bike");
+    assert_eq!(m.settings.modifiers.get(0, Knob::AtvGrip), 110);
+
+    // Under the pause, a ride with a quad (`--atv`) offers it, and on the quad the page opens there.
+    let (mut m, mut r) = fresh();
+    m.atv[0] = true;
+    m.up[0] = Machine::Atv;
+    m.pause();
+    tap_until(&mut m, &mut r, Control::Down, |m| m.pause_rows()[m.cursor(Screen::Pause)] == "Game Modifiers");
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.page()[1].value, "ATV");
+    assert!(m.page().iter().any(|row| row.key == Key::Knob(Knob::AtvSuspension)));
 }
 
 /// P55: the Ride tab's Game Modifiers row opens the modifiers; the arrows step a modifier by ten
@@ -9974,6 +10016,67 @@ fn race_from_the_main_menu_rides_its_setup_and_shows_results() {
     // A second leave is no race: no results.
     assert!(!m.race_left());
     assert_eq!(m.screen(), Some(Screen::Main));
+}
+
+/// The race's end on screen (P330): what the race hands over at its end becomes the results menu's
+/// board — the tips first for a seat that skipped the preload, then the pages Left and Right step
+/// round, then the Hall of Fame for a new entry — and the winner's win is counted in its record.
+#[test]
+fn a_race_end_shows_its_tips_board_and_hall_of_fame_and_counts_the_win() {
+    use game_sim::race::{EndTip, FameEntry, LapCard, RaceEnd, RaceOver};
+    use menu::results::{CardStats, HandOver, ResultCard, Who};
+    use ps2_float::F;
+    let (mut m, mut r) = fresh();
+    main_to(&mut m, &mut r, "Race");
+    tap(&mut m, &mut r, Control::Cross);
+    let acts = tap(&mut m, &mut r, Control::Cross);
+    assert!(acts.contains(&Act::Ride("sx01".into())), "{acts:?}");
+    let card = |place, time: f32, gap: f32| LapCard { place, race_time: F(time), gap: F(gap), best_lap: F(time / 3.0), ..LapCard::default() };
+    let hand = HandOver {
+        cards: vec![
+            ResultCard::take(&card(2, 190.5, 4.25), Who::Ai("Rival".into()), &CardStats::default()),
+            ResultCard::take(&card(1, 186.25, 0.0), Who::Player("Me".into()), &CardStats { preloads: 0, clutches: 3, ..CardStats::default() }),
+        ],
+        end: RaceEnd { results: true, tips: vec![EndTip { seat: 0, no_preload: true, no_clutch: false }], ..RaceEnd::default() },
+        overs: vec![RaceOver { fireworks: true, win: Some(0), fame: vec![FameEntry { seat: 0, track: 0, table: 0 }] }],
+    };
+    m.race_ended(hand);
+    assert!(m.take_records_changed());
+    assert!(!m.take_records_changed());
+    // No race is counted yet (P332): a win over no races is the FPU's 100 / 0, its largest float.
+    assert_eq!((m.race.records.seats[0].wins, m.race.records.seats[0].win_rate), (1, F(f32::MAX)));
+    m.main();
+    assert!(m.race_left());
+    assert_eq!(m.screen(), Some(Screen::Results));
+    let results = m.results();
+    assert_eq!(results.stage, menu::race::Stage::Tips);
+    assert_eq!(results.tips, vec![menu::results::Tip { seat: 0, preload: true, clutch: false }]);
+    assert!(results.fame.seat0 && results.fame.waiting);
+    let board = results.board.as_ref().unwrap();
+    // The race's own page keeps the manager's list order (its sort starts on that key and skips);
+    // the fastest lap page sorts.
+    assert_eq!(board.pages[0][0], ["1", "Rival", "03:10.50", "00:04.25"]);
+    assert_eq!(board.pages[0][1], ["2", "Me", "03:06.25", "--:--.--"]);
+    assert_eq!(board.pages[1][0][1], "Me");
+    // Left and Right do nothing on the tips; Cross is the board.
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.results().page, 0);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.results().stage, menu::race::Stage::Board);
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.results().page, 1);
+    tap(&mut m, &mut r, Control::Left);
+    tap(&mut m, &mut r, Control::Left);
+    assert_eq!(m.results().page, 10);
+    tap(&mut m, &mut r, Control::R1);
+    assert_eq!(m.results().page, 0);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.results().stage, menu::race::Stage::Fame);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Main));
+    // A race end with no race under way is dropped.
+    m.race_ended(HandOver { overs: vec![RaceOver { win: Some(0), ..RaceOver::default() }], ..HandOver::default() });
+    assert!(!m.take_records_changed());
 }
 
 /// A Free Ride after a race is no race (P327), and a race whose load is cancelled goes back to its

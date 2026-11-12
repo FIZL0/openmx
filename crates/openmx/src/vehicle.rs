@@ -3221,6 +3221,11 @@ impl Garage {
                 flown.kiowa.aero = heli.phy.aero;
             }
         }
+        // The quad's (P287) are read as it is made: a quad already out keeps its numbers until the
+        // next take, as a car out does.
+        if let Some(atv) = self.atv.as_mut() {
+            (atv.mods, atv.seat) = (*mods, seat);
+        }
     }
 }
 
@@ -3318,6 +3323,10 @@ pub struct AtvRide {
     pub taken_at: Vf,
     /// How many times it has wrecked since it was last taken.
     pub wrecks: u32,
+    /// The game modifiers it is made on (P287) and whose: [`Garage::modify`] sets them, and the next
+    /// take reads them ([`game_sim::modifiers::Mods::atv`]); the original's until then.
+    pub mods: game_sim::modifiers::Mods,
+    pub seat: usize,
 }
 
 impl std::fmt::Debug for AtvRide {
@@ -3347,7 +3356,7 @@ impl AtvRide {
         let rays = |b: Vec<u8>, what: &str| game_sim::track::Rays::parse(&b).map_err(|e| format!("{what}: {e}"));
         let riding = rays(file(&format!("Veh/Col/{col}"))?, col)?;
         let wreck = rays(file(&format!("Veh/Col/{}", game_sim::quad::WRECK_FILE))?, game_sim::quad::WRECK_FILE)?;
-        let atv = AtvRide { pack: pack.to_string(), phy: atv_stem(phy).to_string(), ini, model: std::sync::Arc::new(model), riding, wreck, ridden: None, taken_at: Vf::default(), wrecks: 0 };
+        let atv = AtvRide { pack: pack.to_string(), phy: atv_stem(phy).to_string(), ini, model: std::sync::Arc::new(model), riding, wreck, ridden: None, taken_at: Vf::default(), wrecks: 0, mods: game_sim::modifiers::Mods::original(), seat: 0 };
         atv.made(Vf::new(0.0, 0.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 1.0), None)?;
         Ok(atv)
     }
@@ -3356,10 +3365,12 @@ impl AtvRide {
     /// tail and wreck.
     fn made(&self, at: Vf, heading: Vf, bounds: Option<(Vf, Vf)>) -> Result<Quad, String> {
         let curve = game_sim::camera::CurveTable::build();
-        let load = game_sim::quad::Load::read_model(&self.ini, &self.model, at, heading, &curve).map_err(|e| format!("{}: {e}", self.phy))?;
+        let mut load = game_sim::quad::Load::read_model(&self.ini, &self.model, at, heading, &curve).map_err(|e| format!("{}: {e}", self.phy))?;
+        self.mods.atv(self.seat, &mut load);
         let segments = game_sim::quad::trigger_segments(&load.tires, true).ok_or_else(|| format!("{}: no trigger probe", self.phy))?;
         let mut ride = game_sim::quad::Ride::spawn(&load, &self.model, at, heading, bounds, Vec::new());
         ride.rig(&load, &self.riding, &self.wreck);
+        self.mods.atv_body(self.seat, &mut ride.body);
         Ok(Quad { ride, segments, was_down: false })
     }
 

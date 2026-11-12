@@ -3293,6 +3293,12 @@ impl Front {
 
     /// Write the settings when the menu changed them, saying so if it could not.
     fn save(&mut self) {
+        // And the riders' race records (P330), when a race's win counted in them.
+        if self.menu.take_records_changed()
+            && let Err(e) = self.menu.race.records.save(&self.dir)
+        {
+            println!("records: {e}");
+        }
         if self.menu.take_changed() {
             match menu::save(&self.dir, &self.menu.settings, &self.menu.controls) {
                 Ok(()) => println!("settings: saved in {}", self.dir.display()),
@@ -3479,6 +3485,8 @@ async fn front_end(args: Args) -> Result<(), String> {
     front.menu.camera_names = camera_names;
     front.menu.heli_camera_names = heli_camera_names;
     front.menu.car_camera_names = car_camera_names;
+    // The riders' race records (P330), which a race's win counts in.
+    front.menu.race.records = menu::results::Records::load(&front.dir);
     // The track mods (MD2), after the disc's tracks in the pick; read again when the Mods row turns.
     let mut mods_on = front.menu.settings.mods;
     let listed = mod_tracks(&args, &front.dir, mods_on);

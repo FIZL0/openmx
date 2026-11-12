@@ -1577,6 +1577,10 @@ impl Menu {
         if knob.category() == Category::Kiowa && (self.guest || self.lobby.room.is_some()) {
             return Some("Online rides have no Kiowa yet.");
         }
+        // MD37d: the quad is offline only.
+        if knob.category() == Category::Atv && (self.guest || self.lobby.room.is_some()) {
+            return Some("Online rides have no quad yet.");
+        }
         match self.mods_own() {
             None => None,
             Some(_) if !knob.per_seat() => Some("The world's: only the host sets it."),
@@ -1689,9 +1693,21 @@ impl Menu {
     }
 
     /// The categories the modifiers page's Machine row offers (P272): each machine the game has, then
-    /// the world's. A mod machine's goes in here, while its addition is on, once it has knobs.
+    /// the world's. A mod machine's goes in here, while its addition is on, once it has knobs: MX vs.
+    /// ATV's quad (P287) before the world's, while the Garage's Quad row picks one or the ride under
+    /// the pause has one.
     pub fn mods_categories(&self) -> Vec<Category> {
-        Category::ALL.to_vec()
+        let mut all = Category::ALL.to_vec();
+        if self.atv_on() {
+            all.insert(all.len() - 1, Category::Atv);
+        }
+        all
+    }
+
+    /// The quad addition is on (MD37d): a handling file picked on the Garage's Quad row, or under the
+    /// pause a ride that offers one (`--atv`).
+    fn atv_on(&self) -> bool {
+        !self.settings.atv.is_empty() || (self.stack.first() == Some(&Screen::Pause) && self.atv.iter().any(|&a| a))
     }
 
     /// The category the modifiers page shows: the one picked, or the first if that one is gone.
@@ -1731,7 +1747,9 @@ impl Menu {
     fn mods_category_for_pause(&self) -> Option<Category> {
         use super::Machine as M;
         (self.stack.first() == Some(&Screen::Pause)).then(|| match self.up[self.pauser.min(SEATS_MAX - 1)] {
-            M::Bike | M::Atv => Category::Bike,
+            M::Bike => Category::Bike,
+            M::Atv if self.atv_on() => Category::Atv,
+            M::Atv => Category::Bike,
             M::Biplane => Category::Biplane,
             M::Buggy | M::Monster | M::Baja => Category::Cars,
             M::Helicopter => Category::Kiowa,
