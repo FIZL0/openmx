@@ -116,7 +116,10 @@ rest of the session. `docs/CONTEXT.md` explains each measure; the short version:
 
 "Continue" means: `./kit plan next`, read `./kit plan brief <ID>`, do that task completely, write the
 journal entry, then `./kit done <ID> "<message>"` — which runs the tests, ticks the task, commits and
-pushes the branch you are on, in one call. Then stop and report. Don't merge tasks, don't skip ahead. If a
+pushes the branch you are on, in one call. Run it, and any `./kit check --all`, as a background command
+and wait for it to finish: under the other slots' load the gate can run past an hour, past your shell's own
+time limit, and a gate cut off there commits nothing. Never start a second one while the first still runs.
+Then stop and report. Don't merge tasks, don't skip ahead. If a
 task turns out to be too big, split it into sub-tasks first (`./kit plan add`), then do the first one.
 
 **Never merge, rebase, push the shared branch or resolve a conflict by hand.** `./kit done` pushes the
