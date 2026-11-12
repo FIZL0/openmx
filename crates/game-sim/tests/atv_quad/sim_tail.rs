@@ -184,6 +184,7 @@ fn read_tail(ee: &Ee, q: u32) -> Tail {
         second_countdown: f(0x1760),
         clock: f(0x1750),
         post: w(0xd20),
+        untamed: false,
     }
 }
 
