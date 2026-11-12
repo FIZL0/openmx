@@ -3728,7 +3728,7 @@ fn the_modifiers_page_shows_one_machines_knobs_at_a_time() {
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Modifiers));
     assert_eq!((m.page()[0].key, m.page()[1].key), (Key::Player, Key::ModsMachine));
-    // No mod machine is rideable yet (the ATV, MX vs. ATV's cars): the original's four and the world.
+    // With no mod machine's addition on (P287's ATV): the original's four and the world.
     assert_eq!(m.page()[1].choices, Category::ALL.map(|c| c.label().to_string()).to_vec());
     assert_eq!(m.page()[1].value, "Bike");
     let mut seen = Vec::new();
@@ -3742,7 +3742,8 @@ fn the_modifiers_page_shows_one_machines_knobs_at_a_time() {
         seen.extend(knobs);
     }
     seen.sort_by_key(|k| Knob::MENU.iter().position(|m| m == k));
-    assert_eq!(seen, Knob::MENU.to_vec(), "every knob is under one machine");
+    let disc: Vec<Knob> = Knob::MENU.into_iter().filter(|k| k.category() != Category::Atv).collect();
+    assert_eq!(seen, disc, "every knob is under one machine");
     for k in [Knob::KiowaSpeed, Knob::KiowaClimb, Knob::KiowaTurn, Knob::KiowaCeiling, Knob::CarSpeed, Knob::CarAccel, Knob::CarGrip, Knob::CarSuspension] {
         assert_eq!(Knob::from_word(k.word()), Some(k));
     }
@@ -3776,6 +3777,47 @@ fn the_modifiers_page_shows_one_machines_knobs_at_a_time() {
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.page()[1].value, "Kiowa");
     assert!(m.page().iter().any(|row| row.key == Key::Knob(Knob::KiowaCeiling)));
+}
+
+/// P287: the Machine row offers the ATV, before the world's, only while the quad addition is on — a
+/// handling file on the Garage's Quad row, or a ride under the pause that has one; its page is the
+/// quad's four knobs, and under the pause on the quad it opens there. Online they are the host's
+/// to leave alone: the quad is offline only.
+#[test]
+fn the_atv_category_shows_while_the_quad_addition_is_on() {
+    use game_sim::modifiers::Category;
+    use menu::Key;
+    let (mut m, mut r) = fresh();
+    settings_at(&mut m, &mut r, "Ride");
+    down_to(&mut m, &mut r, Key::Modifiers);
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(!m.page()[1].choices.iter().any(|c| c == "ATV"), "off by default");
+    m.settings.atv = "atv_Race250P".into();
+    let mut want: Vec<String> = Category::ALL.map(|c| c.label().to_string()).to_vec();
+    want.insert(4, "ATV".into());
+    assert_eq!(m.page()[1].choices, want);
+    pick_category(&mut m, &mut r, Category::Atv);
+    let knobs: Vec<Knob> = m.page().iter().filter_map(|row| match row.key { Key::Knob(k) => Some(k), _ => None }).collect();
+    assert_eq!(knobs, [Knob::AtvSpeed, Knob::AtvAccel, Knob::AtvGrip, Knob::AtvSuspension]);
+    assert!(!m.page().iter().any(|row| row.label == "Wrecks"));
+    down_to(&mut m, &mut r, Key::Knob(Knob::AtvGrip));
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.settings.modifiers.get(0, Knob::AtvGrip), 110);
+    assert!(m.page()[1].tips.iter().any(|t| t == "1 changed"), "{:?}", m.page()[1].tips);
+    // Off again, the row goes and the page falls back to the first machine's; the value is kept.
+    m.settings.atv.clear();
+    assert_eq!(m.page()[1].value, "Bike");
+    assert_eq!(m.settings.modifiers.get(0, Knob::AtvGrip), 110);
+
+    // Under the pause, a ride with a quad (`--atv`) offers it, and on the quad the page opens there.
+    let (mut m, mut r) = fresh();
+    m.atv[0] = true;
+    m.up[0] = Machine::Atv;
+    m.pause();
+    tap_until(&mut m, &mut r, Control::Down, |m| m.pause_rows()[m.cursor(Screen::Pause)] == "Game Modifiers");
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.page()[1].value, "ATV");
+    assert!(m.page().iter().any(|row| row.key == Key::Knob(Knob::AtvSuspension)));
 }
 
 /// P55: the Ride tab's Game Modifiers row opens the modifiers; the arrows step a modifier by ten
