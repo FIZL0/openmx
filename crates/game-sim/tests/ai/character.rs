@@ -53,7 +53,7 @@ const CH_KEYS: [&str; 87] = [
 
 /// Every field the reader writes, with where the original keeps it: the brain (`true`) or the rider,
 /// and the offset. The quadwords come as four lanes.
-fn ch_slots(c: &mut Character) -> Vec<(bool, u32, &mut f32)> {
+pub(crate) fn ch_slots(c: &mut Character) -> Vec<(bool, u32, &mut f32)> {
     let Character { tuning: t, avoid: a, alod, profile: p, .. } = c;
     let mut out: Vec<(bool, u32, &mut f32)> = vec![
         (true, 0x44, &mut alod.window.0),
@@ -220,7 +220,7 @@ fn ch_file(p: &mut Pick, skill: i32) -> String {
 }
 
 /// The retail character file, out of the bike archive that carries it.
-fn ch_retail() -> Option<Vec<u8>> {
+pub(crate) fn ch_retail() -> Option<Vec<u8>> {
     let kit = ps2_oracle::Kit::load().ok()?;
     let mut f = std::fs::File::open(kit.ctx("iso").join("MX.PSR")).ok()?;
     use std::io::{Read, Seek, SeekFrom};

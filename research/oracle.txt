@@ -1559,6 +1559,14 @@ ai_update_vehicle           boot 0x002858d0 VehicleAI.cpp's: both build the look
 ai_mx_construct             boot 0x00382c50 MXVehicleAI constructor (calls ai_vehicle_construct): the
 #                                           avoidance tunables' defaults, feeler height +0x2a8 3.0
 ai_vehicle_construct        boot 0x00282ca0 VehicleAI base constructor: +0x2a4 11 feelers, +0x2ac 100
+ai_mx_spawn                 boot 0x00384cc0 (iface, mode) the MX brain's spawn: operator_new 0x400,
+#                                           ai_mx_construct, ai_attach (iface, 0), mode (-1: event kind
+#                                           **(app+0x3d4)+0xc 2 -> 5, 0/1 -> 2, else left 0), +0x25c 60,
+#                                           flags |= 0x3a0b803, then the set-up numbers. Callers: the
+#                                           AI rider spawn 0x0020e3f0 (rider+0x10d0, -1, then
+#                                           ai_character_read). S12e: ported as game_sim::ai::spawn
+#                                           (tests/ai/spawn.rs)
+ai_attach                   boot 0x00283000 (brain, iface, flags): +0x40 iface, +0x30 the flags sign-extended
 path_locate                 boot 0x0026b860 (f12 -1.0, net, 0, point, hint, out, 0, 0, 0) -> found;
 #                                           out+4 the located path segment (+0x54 its next)
 #                                           S282: really (f12 limit, a0 net, a1 hint place, a2 point,
