@@ -7018,3 +7018,395 @@ fn the_ais_path_branch_matches_the_tick() {
         "{seen:?}"
     );
 }
+
+
+// --- S296: the race file stood on the ground ----------------------------------------------------------
+
+/// A member of MX.PSR, whole.
+fn psr_member(name: &str) -> Option<Vec<u8>> {
+    let kit = match Kit::load() {
+        Ok(k) => k,
+        Err(why) => {
+            skip(&why);
+            return None;
+        }
+    };
+    let at = kit.ctx("iso").join("MX.PSR");
+    let Ok(mut f) = File::open(&at) else {
+        skip(&format!("no {} — `./kit extract MX.PSR` writes it", at.display()));
+        return None;
+    };
+    let mut front = vec![0u8; 64 << 10];
+    f.read_exact(&mut front).expect("read the front of MX.PSR");
+    let psr = Psr::parse(&front).expect("MX.PSR's directory");
+    let e = psr.find(name)?;
+    f.seek(SeekFrom::Start(e.at)).expect("seek");
+    let mut bytes = vec![0u8; e.size as usize];
+    f.read_exact(&mut bytes).expect("read");
+    Some(bytes)
+}
+
+#[test]
+fn sx01s_race_file_stood_on_its_terrain_is_the_track_object_in_the_image() {
+    let Some(file) = sx01_race_file() else { return };
+    let Some(ee) = sx01_image() else { return };
+    let Some(res_bytes) = psr_member("Tracks\\sx01.res") else { return };
+    let manager = match addr("activity_manager") {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    let res = Res::parse(&res_bytes).expect("sx01's track archive");
+    let read = |suffix: &str| {
+        let e = res
+            .entries
+            .iter()
+            .find(|e| e.name.to_ascii_lowercase().ends_with(suffix))
+            .unwrap_or_else(|| panic!("sx01 has no {suffix}"));
+        res.read(&res_bytes, e).expect("a sx01 member")
+    };
+    let scene = game_sim::track::Scene::parse(&read(".scn")).expect("sx01's scene");
+    let terrain_bytes = read(&scene.terrain_file.to_ascii_lowercase());
+    let terrain = game_sim::track::Terrain::parse(&terrain_bytes).expect("sx01's terrain");
+    let mut ground = game_sim::world::Ground::new(&terrain, &scene.terrain);
+
+    let act = ee.u32_at(ee.u32_at(ee.u32_at(manager) + 0x58));
+    let ram = track_at(&ee, ee.u32_at(act + 0xb8));
+    let mut t = TrackFile::parse(&file).expect("sx01's race file reads");
+    let read_line = t.line.clone().expect("a line");
+    let raise = t.snap_to_ground(Some(&mut ground));
+    assert!(raise.is_empty(), "sx01 has no node for the props to raise: {raise:?}");
+
+    // Every point of every node, all four lanes, heights now included.
+    let mut nodes = 0;
+    let mut lifted = 0;
+    for (k, (a, b)) in t.paths.iter().zip(&ram.paths).enumerate() {
+        let (a, b) = (a.as_ref().expect("the file's path"), b.as_ref().expect("the image's path"));
+        assert_eq!(a.nodes.len(), b.nodes.len(), "path {k}'s nodes");
+        for (n, m) in a.nodes.iter().zip(&b.nodes) {
+            assert_eq!(n.points.map(|p| p.to_bits()), m.points.map(|p| p.to_bits()), "path {k}, node {}: {:?} against {:?}", n.id, n.points, m.points);
+            nodes += 1;
+            lifted += n.points.iter().filter(|p| p.y() > 0.0).count();
+        }
+    }
+    assert_eq!((nodes, lifted), (96, 288), "every point of the 96 nodes stands on the ground");
+
+    // The gates: the third stays as read; the line and the grid gate are stood on the terrain (the
+    // supercross loader moves both onto their props afterwards, so the image cannot show those).
+    assert_eq!(gate_words(t.third.as_ref().unwrap()), gate_words(ram.third.as_ref().unwrap()), "the third gate");
+    let line = t.line.expect("a line");
+    let (want, _) = game_sim::world::World::ground(&mut ground, read_line.centre);
+    assert_eq!(line.centre.to_bits(), [read_line.centre.x().to_bits(), want.y().to_bits(), read_line.centre.z().to_bits(), 1.0f32.to_bits()], "the line's centre");
+    assert!(line.centre.y() > 0.0, "the line stands on the ground");
+
+    // With no terrain every node is put at height 0 and the gates stay as read.
+    let mut flat = TrackFile::parse(&file).unwrap();
+    let grid = flat.grid.clone();
+    flat.snap_to_ground(None);
+    assert!(flat.paths.iter().flatten().flat_map(|p| &p.nodes).all(|n| n.points.iter().all(|p| p.y().to_bits() == 0)));
+    assert_eq!(flat.grid, grid);
+}
+
+/// Which tracks' race files hold a node the original raises onto the props (`word_04 & 0x80`), the
+/// part of the snap [`TrackFile::snap_to_ground`] hands back rather than carries: five tracks' files,
+/// sx01's not among them.
+#[test]
+fn the_race_files_that_ask_for_the_prop_raise() {
+    let Some(front) = psr_member_front() else { return };
+    let psr = Psr::parse(&front).expect("MX.PSR's directory");
+    let names: Vec<String> = psr.entries.iter().map(|e| e.name.clone()).filter(|n| n.to_ascii_lowercase().ends_with("_2.res")).collect();
+    let mut files = 0;
+    let mut flagged = std::collections::BTreeSet::new();
+    for name in &names {
+        let bytes = psr_member(name).expect("a listed member");
+        let Ok(res) = Res::parse(&bytes) else { continue };
+        for e in res.entries.iter().filter(|e| e.name.to_ascii_lowercase().ends_with(".tdf")) {
+            let Ok(file) = res.read(&bytes, e) else { continue };
+            let Ok(t) = TrackFile::parse(&file) else { continue };
+            files += 1;
+            if t.paths.iter().flatten().flat_map(|p| &p.nodes).any(|n| n.word_04 & 0x80 != 0) {
+                flagged.insert(e.name.clone());
+            }
+        }
+    }
+    assert!(files > 0, "no race file read among {names:?}");
+    assert!(files > 100, "{files} race files");
+    let want = ["nat03\\nat03.tdf", "nat03\\nat03ai.tdf", "sx06\\sx06.tdf", "sx08\\sx08.tdf", "sx11\\sx11.tdf", "sx20\\sx20.tdf"];
+    assert_eq!(flagged.into_iter().collect::<Vec<_>>(), want.map(|n| format!("tracks\\{n}")), "the files with nodes the props raise");
+}
+
+/// The front of MX.PSR, where its directory is.
+fn psr_member_front() -> Option<Vec<u8>> {
+    let kit = match Kit::load() {
+        Ok(k) => k,
+        Err(why) => {
+            skip(&why);
+            return None;
+        }
+    };
+    let at = kit.ctx("iso").join("MX.PSR");
+    let Ok(mut f) = File::open(&at) else {
+        skip(&format!("no {} — `./kit extract MX.PSR` writes it", at.display()));
+        return None;
+    };
+    let mut front = vec![0u8; 64 << 10];
+    f.read_exact(&mut front).expect("read the front of MX.PSR");
+    Some(front)
+}
+
+/// Free RAM for the load oracle: the activity, its world and terrain, the track object, its path
+/// array, path records, nodes (16 a path), two gates, the probe and its three buffers, the search.
+const G_ACT: u32 = 0x01c0_0000;
+const G_WORLD: u32 = 0x01c0_1000;
+const G_TERRAIN: u32 = 0x01c0_2000;
+const G_TRACK: u32 = 0x01c0_3000;
+const G_PATHS: u32 = 0x01c0_3100;
+const G_RECS: u32 = 0x01c0_3200;
+const G_NODES: u32 = 0x01c1_0000;
+const G_GRID: u32 = 0x01c2_0000;
+const G_LINE: u32 = 0x01c2_0100;
+const G_PROBE: u32 = 0x01c2_1000;
+const G_SEARCH: u32 = 0x01c2_2000;
+const G_PROBE_BUFS: u32 = 0x01c2_3000;
+const G_VTABLE: u32 = 0x01c2_4000;
+const HOOK_PROBE_FREE: u32 = 0x01c2_5000;
+
+fn g_node(i: usize, n: usize) -> u32 {
+    G_NODES + 0x60 * (16 * i + n) as u32
+}
+
+/// The terrain the port asks: each query takes the next answer off a list the original's hooked
+/// query is given too — a height, or no ground (the point left as it was).
+struct Answers {
+    left: std::collections::VecDeque<Option<f32>>,
+    asked: Vec<[u32; 2]>,
+    below: usize,
+}
+
+impl game_sim::world::World for Answers {
+    fn ground(&mut self, at: Vf) -> (Vf, Vf) {
+        let y = self.left.pop_front().expect("an answer").expect("asked only where it keeps");
+        self.below += usize::from(F(y) < F::ZERO);
+        (Vf([at.x(), y, at.z(), at.w()]), Vf([0.0, 1.0, 0.0, 0.0]))
+    }
+    fn keeps(&mut self, at: Vf) -> bool {
+        self.asked.push([at.x().to_bits(), at.z().to_bits()]);
+        if self.left.front().copied().flatten().is_none() {
+            self.left.pop_front().expect("an answer");
+            return false;
+        }
+        true
+    }
+    fn solid(&mut self, _: &game_sim::collide::Bundle, _: &mut game_sim::collide::Record) -> bool {
+        false
+    }
+}
+
+#[test]
+fn the_race_file_stands_on_the_ground_as_the_race_activitys_load_puts_it() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let names = [
+        "activity_race_load", "res_find", "operator_new", "track_ctor", "track_load", "node_add_child", "ground_query",
+        "sweep_probe_ctor", "sweep_probe_setup", "world_layer", "world_add_probe", "search_setup", "search_free",
+        "put_back_refile", "race_prop_raise",
+    ];
+    let [load, res_find, new, ctor, track_load, add_child, ground, probe_ctor, probe_setup, layer, add_probe, setup, free, refile, raise_at] =
+        match addrs(names) {
+            Ok(a) => a,
+            Err(why) => return skip(&why),
+        };
+    // Only the first file is there; the track object is the one put in RAM below.
+    ee.hooks.insert(res_find, Box::new(|ee| ee.set(2, u64::from(ee.r(5) as u32 == G_ACT + 0x184))));
+    let news = Rc::new(Cell::new(0u32));
+    let n2 = news.clone();
+    ee.hooks.insert(
+        new,
+        Box::new(move |ee| {
+            let size = ee.r(4) as u32;
+            n2.set(n2.get() + 1);
+            ee.set(2, u64::from(match size {
+                0xc0 => G_TRACK,
+                0x170 => G_PROBE,
+                0x40 => G_SEARCH,
+                s => panic!("operator_new {s:#x}"),
+            }));
+        }),
+    );
+    ee.hooks.insert(ctor, Box::new(|ee| ee.set(2, ee.r(4))));
+    ee.hooks.insert(track_load, Box::new(|ee| ee.set(2, u64::from(G_TRACK))));
+    ee.hooks.insert(probe_ctor, Box::new(|ee| ee.set(2, ee.r(4))));
+    ee.hooks.insert(layer, Box::new(|ee| ee.set(2, 0)));
+    for a in [add_child, probe_setup, add_probe, setup, free, HOOK_PROBE_FREE] {
+        ee.hooks.insert(a, Box::new(|_| {}));
+    }
+    // The terrain: the next answer off the list, every point it was asked about recorded.
+    let answers: Rc<RefCell<std::collections::VecDeque<Option<f32>>>> = Rc::default();
+    let asked: Rc<RefCell<Vec<(u32, [u32; 2])>>> = Rc::default();
+    let (a2, k2) = (answers.clone(), asked.clone());
+    ee.hooks.insert(
+        ground,
+        Box::new(move |ee| {
+            let (world, at) = (ee.r(4) as u32, ee.r(5) as u32);
+            k2.borrow_mut().push((world, [ee.u32_at(at), ee.u32_at(at + 8)]));
+            if world == 0 {
+                return;
+            }
+            if let Some(y) = a2.borrow_mut().pop_front().expect("an answer") {
+                ee.set_u32(at + 4, y.to_bits());
+            }
+        }),
+    );
+    // The prop raise: where its sweep starts, and which height it is handed.
+    let raises: Rc<RefCell<Vec<(Vf, u32)>>> = Rc::default();
+    let starts: Rc<RefCell<Vec<Vf>>> = Rc::default();
+    let (r2, s2) = (raises.clone(), starts.clone());
+    ee.hooks.insert(refile, Box::new(move |ee| s2.borrow_mut().push(quad(ee, ee.u32_at(G_PROBE + 0x138)))));
+    ee.hooks.insert(raise_at, Box::new(move |ee| r2.borrow_mut().push((quad(ee, G_PROBE + 0x150), ee.r(10) as u32))));
+
+    let mut p = Pick(0x5296_0bd1_7e4a_c3f5);
+    let mut height = |p: &mut Pick| -> f32 {
+        match p.next() % 10 {
+            0 => -0.0,
+            1 => 0.0,
+            2 => -1.0e-40,
+            3 => f32::from_bits(0x8000_0001 + (p.next() as u32 & 0xff)),
+            4 => -((p.next() % 5000) as f32) / 7.0,
+            _ => ((p.next() % 30000) as f32) / 7.0 - 100.0,
+        }
+    };
+    let (mut points, mut floored, mut raised, mut no_terrain) = (0, 0, 0, 0);
+    for case in 0..10_000 {
+        // A track: paths of nodes, the three points of each anywhere, any height.
+        let mut t = TrackFile::new();
+        for i in 0..1 + p.next() as usize % 4 {
+            let nodes = (0..1 + p.next() as usize % 6)
+                .map(|n| PathNode {
+                    id: n as i32,
+                    word_04: (p.next() as u32 & 0xff7f) | if p.next() % 6 == 0 { 0x80 } else { 0 },
+                    points: std::array::from_fn(|_| Vf([(p.next() % 4000) as f32 - 500.0, height(&mut p), (p.next() % 4000) as f32 - 500.0, 0.0])),
+                    span: F(i as f32),
+                    word_44: 0,
+                    word_48: 0,
+                    word_4c: 0,
+                })
+                .collect();
+            t.paths.push(Some(TrackPath { flags: 0xc1, length: F::ZERO, word_0c: 0, nodes, links: None, checkpoint_count: 0, checkpoints: Vec::new() }));
+        }
+        let mut gate = |p: &mut Pick| {
+            (p.next() % 5 != 0).then(|| {
+                let mut g = Gate::new();
+                g.centre = Vf([(p.next() % 4000) as f32 - 500.0, height(p), (p.next() % 4000) as f32, 1.0]);
+                g
+            })
+        };
+        t.grid = gate(&mut p);
+        t.line = gate(&mut p);
+        let terrain = p.next() % 8 != 0;
+        let list: std::collections::VecDeque<Option<f32>> =
+            (0..100).map(|_| (p.next() % 7 != 0).then(|| height(&mut p))).collect();
+
+        // Into RAM.
+        ee.set_u32(G_ACT + 0x180, G_WORLD);
+        ee.set_u32(G_WORLD + 0x428, if terrain { G_TERRAIN } else { 0 });
+        ee.set_u32(G_ACT + 0x184, 0x0078_7473);
+        ee.set_u32(G_ACT + 0x288, 0);
+        ee.set_u32(G_TRACK + 0x40, t.paths.len() as u32);
+        ee.set_u32(G_TRACK + 0x50, G_PATHS);
+        ee.set_u32(G_TRACK + 0x58, if t.grid.is_some() { G_GRID } else { 0 });
+        ee.set_u32(G_TRACK + 0x5c, if t.line.is_some() { G_LINE } else { 0 });
+        for (i, path) in t.paths.iter().enumerate() {
+            let path = path.as_ref().unwrap();
+            let r = G_RECS + 0x30 * i as u32;
+            ee.set_u32(G_PATHS + 4 * i as u32, r);
+            ee.set_u32(r + 0x10, g_node(i, 0));
+            for (n, node) in path.nodes.iter().enumerate() {
+                let a = g_node(i, n);
+                ee.set_u32(a + 4, node.word_04);
+                for (k, pt) in node.points.iter().enumerate() {
+                    put_quad(&mut ee, a + 0x10 + 0x10 * k as u32, *pt);
+                }
+                ee.set_u32(a + 0x54, if n + 1 == path.nodes.len() { 0 } else { g_node(i, n + 1) });
+            }
+        }
+        for (g, at) in [(&t.grid, G_GRID), (&t.line, G_LINE)] {
+            if let Some(g) = g {
+                put_quad(&mut ee, at + 0x40, g.centre);
+            }
+        }
+        for o in [0x134, 0x138, 0x13c] {
+            ee.set_u32(G_PROBE + o, G_PROBE_BUFS + 4 * o);
+        }
+        ee.set_u32(G_PROBE + 0x10, G_VTABLE);
+        ee.set_u32(G_VTABLE + 0x10, HOOK_PROBE_FREE);
+        *answers.borrow_mut() = list.clone();
+        asked.borrow_mut().clear();
+        raises.borrow_mut().clear();
+        starts.borrow_mut().clear();
+        ee.call(load, &[u64::from(G_ACT)], &[], 10_000_000);
+        assert_eq!(ee.v0(), 0, "case {case}: the second file is not there");
+
+        // The port, on the same answers.
+        let mut world = Answers { left: list, asked: Vec::new(), below: 0 };
+        let want = t.clone();
+        let raise = t.snap_to_ground(if terrain { Some(&mut world) } else { None });
+        let mut want_raise = Vec::new();
+        for (i, path) in t.paths.iter().enumerate() {
+            for (n, node) in path.as_ref().unwrap().nodes.iter().enumerate() {
+                let a = g_node(i, n);
+                for (k, pt) in node.points.iter().enumerate() {
+                    let got = quad(&ee, a + 0x10 + 0x10 * k as u32);
+                    assert_eq!(pt.to_bits(), got.to_bits(), "case {case}: path {i} node {n} point {k}: port {pt:?}, original {got:?}");
+                    points += 1;
+                }
+                if node.word_04 & 0x80 != 0 {
+                    want_raise.push((i, n));
+                }
+            }
+        }
+        assert_eq!(raise, want_raise, "case {case}: the nodes the props raise");
+        // Every raise sweeps from 900 above each point, as snapped, and is handed the first point's
+        // height three times over.
+        let (starts, raises) = (starts.borrow(), raises.borrow());
+        assert_eq!(raises.len(), 3 * raise.len(), "case {case}: three sweeps a raised node");
+        for (j, &(i, n)) in raise.iter().enumerate() {
+            let node = &t.paths[i].as_ref().unwrap().nodes[n];
+            for k in 0..3 {
+                let pt = node.points[k];
+                let lift = [pt.x().to_bits(), fpu::add(pt.y(), 900.0).to_bits(), pt.z().to_bits()];
+                let s = starts[3 * j + k].to_bits();
+                assert_eq!([s[0], s[1], s[2]], lift, "case {case}: node ({i}, {n}) sweep {k}'s start");
+                assert_eq!(raises[3 * j + k].0.to_bits(), pt.to_bits(), "case {case}: node ({i}, {n}) sweep {k}'s point");
+                assert_eq!(raises[3 * j + k].1, g_node(i, n) + 0x14, "case {case}: node ({i}, {n}) sweep {k}'s height");
+            }
+            raised += 1;
+        }
+        // The gates: the line's centre, then the grid gate's, on the terrain.
+        for (port, at, name) in [(&t.line, G_LINE, "line"), (&t.grid, G_GRID, "grid")] {
+            if let Some(g) = port {
+                let got = quad(&ee, at + 0x40);
+                if terrain {
+                    assert_eq!(g.centre.to_bits(), got.to_bits(), "case {case}: the {name}'s centre");
+                } else {
+                    // The original queries a missing terrain anyway (through address 0); the port
+                    // leaves the gate as read.
+                    assert_eq!(g.centre.to_bits(), want_gate(&want, name).centre.to_bits());
+                }
+            }
+        }
+        // The same questions in the same order, so the answers met the same points.
+        let asked = asked.borrow();
+        let on_terrain: Vec<[u32; 2]> = asked.iter().filter(|a| a.0 != 0).map(|a| a.1).collect();
+        if terrain {
+            assert_eq!(world.asked, on_terrain, "case {case}: the points asked, in order");
+            floored += world.below;
+        } else {
+            assert!(on_terrain.is_empty());
+            assert_eq!(asked.len(), usize::from(t.grid.is_some()) + usize::from(t.line.is_some()));
+            no_terrain += 1;
+        }
+    }
+    assert!(points > 60_000 && floored > 3_000 && raised > 1_000 && no_terrain > 1_000, "{points} points, {floored} floored, {raised} raised, {no_terrain} with no terrain");
+}
+
+fn want_gate<'a>(t: &'a TrackFile, name: &str) -> &'a Gate {
+    if name == "line" { t.line.as_ref().unwrap() } else { t.grid.as_ref().unwrap() }
+}

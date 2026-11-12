@@ -3012,6 +3012,59 @@ impl TrackFile {
         }
         Ok(t)
     }
+
+    /// Stand the file's paths and gates on the ground, as the race activity's load does once the file
+    /// is read (S296). `terrain` is the world's terrain, which only the terrain answers (the props are
+    /// not asked); `None` is a world with no terrain, which leaves every node at height 0.
+    ///
+    /// Every node's three points are dropped to height 0 and then taken to the terrain under them, and
+    /// a point the terrain answers below 0 is put back at 0. A point the terrain does not reach (off
+    /// its field) stays at 0, as the original's query leaves it where it was. Then the finish line's
+    /// centre and the grid gate's are taken to the terrain, as they are, with no floor; the third gate
+    /// stays as read.
+    ///
+    /// A node whose `word_04` carries `0x80` is one the original goes on to raise onto the scene's
+    /// props: a downward sweep from 900 above each of its points, which lifts the node's *first*
+    /// point to the highest prop it meets — all three sweeps write the first point's height (the
+    /// original passes the same address each time). That raise is not ported: those nodes are
+    /// returned, as (path index, node index) pairs, after their terrain snap. sx01's file has none.
+    pub fn snap_to_ground(&mut self, mut terrain: Option<&mut dyn crate::world::World>) -> Vec<(usize, usize)> {
+        let mut raise = Vec::new();
+        for (k, path) in self.paths.iter_mut().enumerate() {
+            let Some(path) = path else { continue };
+            for (n, node) in path.nodes.iter_mut().enumerate() {
+                for p in node.points.iter_mut() {
+                    p.0[1] = 0.0;
+                }
+                if let Some(t) = terrain.as_deref_mut() {
+                    for p in node.points.iter_mut() {
+                        ground_y(t, p);
+                        // `c.lt.s` reads a denormal as zero: a tiny negative height stays as it is.
+                        if F::from_bits(p.y().to_bits()) < F::ZERO {
+                            p.0[1] = 0.0;
+                        }
+                    }
+                }
+                if node.word_04 & 0x80 != 0 {
+                    raise.push((k, n));
+                }
+            }
+        }
+        if let Some(t) = terrain {
+            for g in [&mut self.line, &mut self.grid].into_iter().flatten() {
+                ground_y(t, &mut g.centre);
+            }
+        }
+        raise
+    }
+}
+
+/// The world's ground query on a point in place: it takes the surface's height where the terrain
+/// reaches, and is left as it was where it does not.
+fn ground_y(terrain: &mut dyn crate::world::World, p: &mut Vf) {
+    if terrain.keeps(*p) {
+        p.0[1] = terrain.ground(*p).0.y();
+    }
 }
 
 impl Default for TrackFile {
