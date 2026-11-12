@@ -11695,3 +11695,26 @@ atv_pair_log_grow           atv 0x0025b840 = a growable log's resize to a1 entri
 # files three heightfield contacts (rays 3, 6, 16: the wingtips' ends; surface 0); the body's force listener
 # resolves them (vt+0x88, 1) after gravity, every substep: atv_contact::resolve, word for word. The sweep never
 # hits and the world rays file nothing along either flight.
+# MD107 — MD39a's five car drives replayed bit-exact (tests/mxvatv_car_replay.rs; the car's input step
+#   ported as game_sim::atv_car::input, proved by the_car_input_step_is_the_ports, 10,000 cases on
+#   md39a/buggy.ee.bin). Journal: research/journal/2026-11-09-md107-mxvatv-car-step.
+#   Input step 0x004ca010 (a0 car, a1 record [player, controls+0x18, stick x, stick y]): car +0xbc4 == 0
+#   or 0x00249330(+0xbc4) != 1 -> nothing. +0x11c8 = x, +0x11cc = y, +0x1124 = *(rec[1]+0x31c). Strength
+#   s(c) = *(rec[1] + 0x18*0x00118e10(*(*0x003eab60), c, 2, 10, player) + 4). Gas +0x314: speed +0x32c <=
+#   +0x1148 (DigitalThrottleSpeed) or !(|+0x330| < +0x114c (DigitalSideSlipAngle)) -> analog: +0x1144
+#   (MaxAnalogThrottle) == 0 -> 0-0, else t = (s(0xe)-0)/(r-0), adda 0,0 / madd t,(1-0), max min(0,1),
+#   min max(0,1); else s(0xe) <= 0 ? 0 : 1. Gas > 0 -> +0x1128 = 1. Brake +0x310 = !(s(0xf) <= 0) ||
+#   +0x1128 == 0 ? 1 : 0. Hand brake +0x1138 = s(0x18) <= 0 ? 0 : 1. Clutch +0x1120 = s(0x10) == 0 ? 0 : 1.
+#   s(0) != 0 -> +0x11c8 = -1, +0x11c4 = 1; else s(1) != 0 -> 1, +0x11c4 = 1; else !(+0x11c8 <= 0) ->
+#   +0x11c4 = 0. s(2) != 0 -> +0x11cc = -1; else s(3) != 0 -> 1.
+#   Keys as the images hold them: +0x1144 0x3dcccccc (buggy), 0x3f4ccccc (golf); +0x1148 0x4212aa7f,
+#   +0x114c 0x3e56774e.
+#   Outside the sim frame (never written by 0x00204040): car +0xd38..+0xd70 (put-back spot), +0xd90..+0xd9c
+#   (a position breadcrumb, dropped every so far driven), bit 0x400 of +0x44.
+#   Images vs rows: buggy and baja images are row 0; sandrail, golf, truck images are the frame before row
+#   0. Every row 0's vsync is the image's + 2. Frame j (from the image) reads tape tick j - 2 on all five.
+#   Golf's car +0x930..+0x938 (a position copy) is read one frame late on most rows.
+#   The tire step (0x004b5ca0) is three parts, 0x004b5cf0, 0x004b62c0, 0x004b6400 (each a0 tire, f12 dt).
+#   It clears words before writing them: tire +0xb0 cleared at 0x004b5d10 and set at 0x004b5740 (from
+#   0x004b5fd8); tire +0x230..+0x23c cleared by one sq at 0x004b6444, then x at 0x004b73c8 and z at
+#   0x004b73e0 (from 0x004b648c), or x alone at 0x004b6e10. Recorder rows read in between hold the 0.
