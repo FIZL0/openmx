@@ -11831,3 +11831,24 @@ atv_pair_log_grow           atv 0x0025b840 = a growable log's resize to a1 entri
 atv_spatial_insert          atv 0x0018d590 = a collidable's entry put in a world (a0 entry, a1 cell, a2 kind, a3 centre, t0 half, t1 1, t2 own record, t3 0; f12 reach)
 atv_record_new              atv 0x0018fd90 = a record taken up (the link pool made if none, counted)
 atv_record_drop             atv 0x0018fe20 = a record let go of (a1 -1; the pool deleted with the last)
+# MD81b — MX vs. ATV Untamed's (SLUS-21701) ATV step against SLUS-21104's. Static, as MD81a; research/untamed-machines.md
+# has the verdicts, tests/untamed_atv.rs proves the two changes off the Untamed Free Ride image. Journal:
+# research/journal/2026-11-12-md81b-untamed-atv. Comment rows only. Twins, SLUS-21104 -> SLUS-21701:
+#   quad ground step 0x004b9580 -> 0x004dbbb0 (the same code); ground head 0x004b9020 -> 0x004db650; air state
+#   0x004b97a0 -> 0x004dbdd0; stand upright 0x004bcee0 -> 0x004df4a0; roll/pitch 0x004bc9e0 -> 0x004defa0; wheel
+#   contacts 0x004bd2d0 -> 0x004df890; pitch torque 0x004bd290 -> 0x004df850; wheel suspension 0x004a0cb0 ->
+#   0x004c4980; tire forces 0x004a16f0 -> 0x004c53b0: moved fields and scheduling.
+#   quad update 0x004ba9f0 -> 0x004dd000: hazard clock call at 0x004dd254 (a1 hazard && grounded, a2 grounded,
+#   f12 dt, f13 the four surface times' max); bike vehicle update 0x004e1b90 -> 0x004f9bd0.
+#   hazard clock (vt +0x45c) 0x004aad60 -> 0x004ce3a0 (also called from 0x004ea0a8 and 0x004f2344): a2 == 0
+#   skips the free reset. Fields: stuck +0xc10 -> +0xc00, free +0xc14 -> +0xc04, time +0xdf0 -> +0xde0, run
+#   +0x680 -> +0x6a4 (its +8 bit 0x400000), put back vt +0x3a8 (a1 1, a2 1).
+#   node world update 0x00193b30 -> 0x0018f720: after the topmost node's frame x parent, 0x00131aa0(a0 world,
+#   a1 +0xd0, a2 +0xc0, a3 +0xb0, t0 1, t1 1) makes it orthonormal. Node fields +0x30 local -> +0x60, +0x70
+#   world -> +0xa0, +0xf0 parent -> +0x120, +0x100 flags -> +0x130.
+#   Not classified: plant axis-angle 0x00134f50 -> 0x00132e00, quat to euler 0x001358d0 -> 0x00133280, collide
+#   against search 0x001151c0 -> 0x00114680, pair accepts 0x001144f0 -> 0x001139e0, eco part 0x0046d3c0 ->
+#   0x0049f3d0, 0x00272d40 -> 0x0025f820, 0x004a25b0 -> 0x004c6260, 0x004a2440 -> 0x004c60f0, post event
+#   0x00272300 -> 0x0025e740, name bit 0x00214b30 -> 0x002166b0; tire phy 0x004bb880 -> 0x004dde40, put back
+#   0x004b8e30 -> 0x004db460, animate 0x004be3c0 -> 0x004e0980, pose nodes 0x004be8d0 -> 0x004e0e20, net
+#   unpack 0x004bdd20 -> 0x004e02f0.

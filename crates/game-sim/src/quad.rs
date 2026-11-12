@@ -575,6 +575,9 @@ pub enum Call {
     /// last (its id).
     BikeVehicleUpdate(F),
     HazardSurface { dt: F, time: F, sunk: bool },
+    /// Untamed's hazard clock (MD81b; [`Tail::untamed`]): [`Call::HazardSurface`]'s with whether any
+    /// wheel is sunk at all (`grounded`), which Untamed hands the clock as a word of its own.
+    UntamedHazardSurface { dt: F, time: F, sunk: bool, grounded: bool },
     Rumble { soft: bool, strength: i32 },
     StartStunt(u32),
     EndStunt,
@@ -1092,6 +1095,9 @@ pub struct Tail {
     pub clock: F,
     /// The message the update posts last.
     pub post: u32,
+    /// Untamed's update (MD81b): the hazard clock is [`Call::UntamedHazardSurface`], told whether a
+    /// wheel is sunk at all. Off, it is SLUS-21104's.
+    pub untamed: bool,
 }
 
 /// **The quad's update**, once a frame: the bike's vehicle update, then the quad's own tail.
@@ -1131,7 +1137,12 @@ pub fn update(t: &mut Tail, q: &mut Quad, body: &mut Body, dt: F, m: &mut impl M
     let sunk = t.on_hazard && t.wheel_sunk.iter().any(|&s| s);
     let time = fpu_max(fpu_max(surface[RIGHT_REAR].time, surface[LEFT_REAR].time), surface[RIGHT_FRONT].time);
     let time = fpu_max(surface[LEFT_FRONT].time, time);
-    tail_call(t, Call::HazardSurface { dt, time, sunk }, q, body, m);
+    if t.untamed {
+        let grounded = t.wheel_sunk.iter().any(|&s| s);
+        tail_call(t, Call::UntamedHazardSurface { dt, time, sunk, grounded }, q, body, m);
+    } else {
+        tail_call(t, Call::HazardSurface { dt, time, sunk }, q, body, m);
+    }
 
     if t.request != 0 && t.request_was != 0 {
         t.request = 0;
@@ -4145,6 +4156,13 @@ impl<R: Moto> Moto for TailOn<'_, R> {
             Call::HazardSurface { dt, time, sunk } => {
                 let mut clock = Clock { v: self.vehicle, put_backs: 0 };
                 crate::handling::tail::stuck(&mut clock, sunk, dt, time);
+                for _ in 0..clock.put_backs {
+                    put_back(self.put_back, q, body, true, true, &mut self.on);
+                }
+            }
+            Call::UntamedHazardSurface { dt, time, sunk, grounded } => {
+                let mut clock = Clock { v: self.vehicle, put_backs: 0 };
+                crate::handling::untamed::stuck(&mut clock, sunk, grounded, dt, time);
                 for _ in 0..clock.put_backs {
                     put_back(self.put_back, q, body, true, true, &mut self.on);
                 }

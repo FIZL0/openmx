@@ -1453,6 +1453,7 @@ impl Gen {
             second_countdown: if self.one_in(5) { F::ZERO } else { self.f(-0.1, 0.5) },
             clock: self.f(0.0, 100.0),
             post: self.bits(),
+            untamed: false,
         }
     }
 }

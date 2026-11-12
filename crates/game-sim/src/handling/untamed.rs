@@ -1064,3 +1064,35 @@ fn origin(body: &crate::quad::Body, cofg: Vf) -> Vf {
     let turned = body.to_world(cofg);
     body.position.merge(Dest::XYZ, body.position.sub(turned))
 }
+
+/// **Untamed's hazard clock** (MD81b): [`super::tail::stuck`] with a third argument, `grounded` (some
+/// wheel's ray down; the quad's update hands it as its own word, beside `on`, which is it and the
+/// hazard surface together). With it clear, the free reset is passed over: the vehicle is not free,
+/// stuck unless its run says not, and the clock goes on by `limit` as with `on` (−1 puts it back at
+/// once, 0 or under zeroes the time, over 0 counts up and puts it back past it). With it set, it is
+/// SLUS-21104's clock.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
+pub fn stuck(m: &mut impl super::tail::Vehicles, on: bool, grounded: bool, dt: F, limit: F) {
+    use super::tail::{NO_STUCK, Out};
+    let v = m.vehicle();
+    if grounded && (!on || (limit <= F::ZERO && limit != F(-1.0))) {
+        (v.free, v.stuck, v.stuck_time) = (1, 0, F::ZERO);
+        return;
+    }
+    v.free = 0;
+    if v.run_flags & NO_STUCK == 0 {
+        v.stuck = 1;
+    }
+    if limit == F(-1.0) {
+        m.out(Out::PutBack, dt);
+        m.vehicle().stuck_time = F::ZERO;
+    } else if limit <= F::ZERO {
+        v.stuck_time = F::ZERO;
+    } else {
+        v.stuck_time = v.stuck_time + dt;
+        if !(v.stuck_time <= limit) {
+            m.out(Out::PutBack, dt);
+            m.vehicle().stuck_time = F::ZERO;
+        }
+    }
+}

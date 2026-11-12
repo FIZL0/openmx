@@ -457,6 +457,24 @@ pub(crate) fn frame_mul(a: &[Vf; 4], b: &[Vf; 4]) -> [Vf; 4] {
     [first(a[0]), first(a[1]), first(a[2]), row(a[3], b[3].add(Vf::ZERO))]
 }
 
+/// A frame made orthonormal as Untamed's node update does it (MD81b): the first row thrown away and
+/// made again as the second row × the third (a `vopmula`/`vopmsub` pair), the second made again as the
+/// third × that, the second and third each scaled by `1/sqrt` of its length squared (`(x² + y²) + z²`),
+/// the first made a third time as the two scaled rows' cross; the rows' `w` 0, the position's 1.
+pub fn untamed_orthonormal(m: &[Vf; 4]) -> [Vf; 4] {
+    let (y, z) = (m[1], m[2]);
+    let x = Vf::opmsub(Vf::opmula(y, z), z, y);
+    let y = Vf::opmsub(Vf::opmula(z, x), x, z);
+    let len2 = |v: Vf| {
+        let s = v.mul(v);
+        vu::add(vu::add(s.x(), s.y()), s.z())
+    };
+    let unit = |v: Vf| Vf::ZERO.merge(Dest::XYZ, v.mul_q(vu::rsqrt(1.0, len2(v))));
+    let (y, z) = (unit(y), unit(z));
+    let x = Vf::ZERO.merge(Dest::XYZ, Vf::opmsub(Vf::opmula(y, z), z, y));
+    [x, y, z, m[3].merge(Dest::W, Vf::new(0.0, 0.0, 0.0, 1.0))]
+}
+
 /// A rigid frame's inverse, as the frame set takes it of the parent's: the 3×3 transposed (each
 /// moved lane `0 + x`, the `w`s left), the position `0 - x·rx - y·ry - z·rz` over the transposed rows.
 pub(crate) fn frame_inverse(m: &[Vf; 4]) -> [Vf; 4] {
@@ -511,6 +529,33 @@ impl Scene {
         for &i in chain.iter().rev() {
             let node = self.nodes[i];
             self.nodes[i].world = match node.parent {
+                Some(p) => frame_mul(&node.local, &self.nodes[p].world),
+                None => node.local,
+            };
+            self.nodes[i].flags |= CLEAN;
+        }
+    }
+
+    /// **Untamed's node world update** (MD81b): [`Scene::update`], but the topmost node brought up to
+    /// date, when it has a parent, has its frame times its parent's made orthonormal again
+    /// ([`untamed_orthonormal`]). The nodes under it are multiplied as on SLUS-21104.
+    pub fn update_untamed(&mut self, n: usize) {
+        if self.nodes[n].flags & CLEAN != 0 {
+            return;
+        }
+        let mut chain = vec![n];
+        let mut up = self.nodes[n].parent;
+        while let Some(p) = up {
+            if self.nodes[p].flags & CLEAN != 0 {
+                break;
+            }
+            chain.push(p);
+            up = self.nodes[p].parent;
+        }
+        for (k, &i) in chain.iter().rev().enumerate() {
+            let node = self.nodes[i];
+            self.nodes[i].world = match node.parent {
+                Some(p) if k == 0 => untamed_orthonormal(&frame_mul(&node.local, &self.nodes[p].world)),
                 Some(p) => frame_mul(&node.local, &self.nodes[p].world),
                 None => node.local,
             };

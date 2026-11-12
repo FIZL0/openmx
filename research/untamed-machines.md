@@ -235,6 +235,51 @@ The brief's "every stunt-id bound +8" has nothing to do in these three: none of 
 The bounds are in the wreck test (proved by MD81a), start stunt and airborne control (the port reads no id
 there), and the backflip (MD93a).
 
+## SLUS-21701's ATV step against SLUS-21104's (MD81b)
+
+Static, as MD81a's: twins paired by layout order over the folded ELF (GAME_REL.BIN at 0x48ea80), each pair
+disassembled at the larger of the two Ghidra sizes with `./kit dis --limit 100000` (MD81a's own diffs ran
+under the 400-line default and may have been cut short on long functions), compared by `sdiff.py`, then the
+`jal` callees paired in order and walked three deep from the quad's ground step, ground head, air state,
+update and wheel contacts. Addresses are in `research/oracle.txt # MD81b`.
+
+The quad's fields moved: −0x10 through the `+0xb..+0xd` block (vehicle state `+0xbc4` → `+0xbb4`, wreck
+words `+0xc80` → `+0xc70`, hazard words `+0xc10`/`+0xc14` → `+0xc00`/`+0xc04`, the clock `+0xdf0` →
+`+0xde0`), +0x10 for the engine (`+0x142c` → `+0x143c`), +0x40 for the wheels (`+0x17b0..bc` →
+`+0x17f0..fc`), +0x30 for the chassis angles and the body (`+0xb8` → `+0xe8`), `+0x704..710` → `+0x728..734`,
+`+0x1744/48` → `+0x1784/88`, the run `+0x680` → `+0x6a4`. The bike-class slots the quad calls are 8 lower
+(`+0x4b8` → `+0x4b0`, `+0x4ac` → `+0x4a4`, `+0x4d0` → `+0x4c8`, `+0x53c` → `+0x530`).
+
+| function | SLUS-21701 against SLUS-21104 | port |
+|---|---|---|
+| ground step | the same code | — |
+| ground head, stand upright, roll/pitch, pitch torque, wheel contacts | moved fields, a moved slot, scheduling; the contact counts read `lhu` (as the bike's) | — |
+| air state (the quad's) | `$s0` → `$s1`, a 16 B larger frame; the same signature and float ops; no vtable call, so none of the bike's out-of-world rework | — |
+| wheel suspension, tire forces, wheel integrate, rev limit, wheel clear, peak rates, clutch, auto shift, air drag, contact velocity, hinge force, steer and spin integrate, quaternion axes, ground query, terrain cell, node rotate/unplace, curve value | the same code (branch-likely and scheduling only) | — |
+| airborne control | `slti 41` → `49`, `46` → `54`: the trick bounds, which the port does not read | — |
+| preload, backflip, spin in the air (the bike's, called by the quad's ground step) | reworked, as on the bike | MD93, MD93a, MD93b: `handling::untamed::{preload, ride_backflip, ride_spin}` |
+| update | the bike's vehicle update is Untamed's (MD93c); the hazard clock is called straight, not through vt `+0x45c`, with a **third word**; the rumble pad's slots moved (`+0x1c`/`+0x4c` → `+8`/`+0x40`); the distance's `if d < 0 { d = 0 } dist += d·dt` became `if !(d <= 0) { dist += d·dt }` (the same sum but on a `-0` distance; below) | `quad::Tail::untamed` |
+| **hazard clock** | handed `grounded` (any wheel's `+0xd0`, the port's `wheel_sunk`) beside `on`. With it clear, the free reset is passed over: the vehicle is not free, stuck unless the run's flag says not, and the clock runs by the surface time (−1 put back at once, ≤ 0 time zeroed, > 0 counted and put back past it). With it set, SLUS-21104's | `handling::untamed::stuck`, proved by `untamed_hazard_clock_is_the_originals` (4000 states) |
+| **node world update** (the scene graph's, every machine's) | the topmost node brought up to date, when it has a parent, has its new world frame made orthonormal again (a new call: the first row the second × the third, the second the third × that, both normalised by `rsqrt`, the first their cross). The node's words moved +0x30 | `atv_moto::Scene::update_untamed`, `atv_moto::untamed_orthonormal`, proved by `untamed_node_world_update_is_the_originals` (2000 three-node chains) and `untamed_orthonormaliser_is_the_originals` |
+
+The distance clause: SLUS-21104 raises a `d` under 0 to 0 (`c.lt.s`; a NaN or `-0` is kept and added),
+Untamed adds only when `!(d <= 0)` (a NaN is added too, a `-0` not, and `dist + -0·dt` is `dist`). They part
+only on a negative `d` with the distance `-0`: SLUS-21104's `-0 + +0` is `+0`, Untamed's stays `-0`. The stat
+starts at `+0` and only adds, so it is never `-0`. Not ported.
+
+**Neither change is on any ride yet.** `Tail::untamed` is false by default and `update_untamed` is called by
+nothing, so every replay and hash is SLUS-21104's. No Untamed ATV ride was captured: no Untamed ATV save
+state exists (copy 9's are a Free Ride bike), and the pack, the Untamed routing of the quad's steps and the
+capture are follow-ups.
+
+Not classified (they differ, but are world, collision or presentation code the quad shares with every
+machine, or were not reached): the plant's axis-angle turn (628 → 312 B: likely a Ghidra size split), the
+quaternion-to-euler (MD93d found the same clamps; a new `jal` past its end at the larger size), the collide
+against search (slots `+0x11c`/`+0x120` → `+0x13c`/`+0x140`, counts `lhu`), the pair accept (`lhu`), the eco
+part (a `beq`/`bne` swap), the event post (`lhu`), two unnamed callees of the update, the name bit (its callees
+did not pair), and the quad's `.phy` tire reader, put-back, animate, node pose, net unpack and wreck path,
+which the walk did not reach.
+
 ## Not checked
 
 - **Code** (MD81a compared the bike step, above; the other machines' steps are still unchecked). No function of SLUS-21701 was compared with SLUS-21104's. "Same classes" means the same
