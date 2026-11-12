@@ -55,6 +55,13 @@ const REALLOC: u32 = 0x001b_7470;
 const WRECK_GROWN: u32 = FAKE + 0x8000;
 const WRECK_CUE: u32 = 0x004f_7ca0;
 const BODY_MASS: u32 = 0x0049_3cc0;
+/// S300: the cue's calls on state 4's emitter (vtable `0x003d14f0`: `+0x98`, `+0x20`, `+0x84`) and its
+/// sounds (vtable `0x003b42c0`: `+0x20`, `+0x1c`), all audio, logged and not run.
+const CUE_BUSY: u32 = 0x0019_7ef0;
+const CUE_WAKE: u32 = 0x0012_8080;
+const CUE_PLAYING: u32 = 0x0019_85d0;
+const SOUND_BUSY: u32 = 0x0014_ede0;
+const SOUND_PLAY: u32 = 0x0014_ea30;
 const BODY_INERTIA: u32 = 0x0049_3bf0;
 
 fn image() -> Option<Ee> {
@@ -145,6 +152,12 @@ impl rider::Rider for Port<'_> {
                 0
             }
             Call::Grow { .. } => WRECK_GROWN,
+            Call::WreckCue(cue) => {
+                rider::wreck_cue(self, cue, dt);
+                0
+            }
+            Call::CueBusy { .. } => CUE_ANSWERS.get().0,
+            Call::SoundBusy { .. } => CUE_ANSWERS.get().1,
             Call::Switch { part, on } => {
                 rider::switch_on(self, RIDER, part, on);
                 0
@@ -203,6 +216,26 @@ fn hook_calls(ee: &mut Ee, log: &Log, answers: &Rc<RefCell<VecDeque<u32>>>, swit
             run_as_is(ee, at);
         }));
     }
+    // S300: the cue's audio calls, logged; the two "still playing" ones answer CUE_ANSWERS.
+    let l = log.clone();
+    ee.hooks.insert(CUE_BUSY, Box::new(move |ee: &mut Ee| {
+        l.borrow_mut().push(Call::CueBusy { cue: ee.r(4) as u32 });
+        ee.set(2, u64::from(CUE_ANSWERS.get().0));
+    }));
+    let l = log.clone();
+    ee.hooks.insert(CUE_WAKE, Box::new(move |ee: &mut Ee| l.borrow_mut().push(Call::CueWake { cue: ee.r(4) as u32 })));
+    let l = log.clone();
+    ee.hooks.insert(SOUND_BUSY, Box::new(move |ee: &mut Ee| {
+        l.borrow_mut().push(Call::SoundBusy { sound: ee.r(4) as u32 });
+        ee.set(2, u64::from(CUE_ANSWERS.get().1));
+    }));
+    let l = log.clone();
+    ee.hooks.insert(SOUND_PLAY, Box::new(move |ee: &mut Ee| l.borrow_mut().push(Call::SoundPlay { sound: ee.r(4) as u32, how: ee.r(5) as u32 })));
+    let l = log.clone();
+    ee.hooks.insert(CUE_PLAYING, Box::new(move |ee: &mut Ee| {
+        assert_eq!(ee.r(6), 0, "the emitter's vt +0x84: a2");
+        l.borrow_mut().push(Call::CuePlaying { cue: ee.r(4) as u32, sound: ee.r(5) as u32 });
+    }));
     let l = log.clone();
     ee.hooks.insert(GATHER, Box::new(move |ee: &mut Ee| {
         l.borrow_mut().push(Call::Gather { list: ee.r(4) as u32, probe: ee.r(5) as u32, kind: ee.r(6) as u32 });
@@ -217,6 +250,9 @@ thread_local! {
     /// the port's), or on neither: a gather reads state 4's whole broad phase out of RAM in the
     /// port's, ~9 ms, so the mode machine's test runs it in one case in eight.
     static GATHERS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    /// S300: the answers of the cue's emitter vt `+0x98` and the playing sound's vt `+0x20` (both
+    /// "still playing"), on both sides.
+    static CUE_ANSWERS: std::cell::Cell<(u32, u32)> = const { std::cell::Cell::new((0, 0)) };
 }
 
 /// S289: inside its own hook, the hooked function run in the interpreter after all (a nested call
@@ -1132,8 +1168,9 @@ fn fpu_operand(w: u32) -> f32 {
 }
 
 /// **The rider's wreck entry is the original's** (S288): 20 000 cases of state 4's rider, each
-/// running 0x004ed700 whole in the interpreter (its pose, settle, switches, rand, reallocate and cue
-/// hooked as the machine's test hooks them; the bodies' vt `+0x18`, `+0x60` and `+0x68` run as they
+/// running 0x004ed700 whole in the interpreter (its pose, settle, switches, rand and reallocate
+/// hooked as the machine's test hooks them, its cue run as it is against [`rider::wreck_cue`] (S300)
+/// with the cue's audio calls hooked; the bodies' vt `+0x18`, `+0x60` and `+0x68` run as they
 /// are) against [`rider::wreck_entry`] from the same words. Drawn: the kind (every one of 0..=16, and
 /// two past the table), the three counts (the real one, 0, −1), the record's collidable (or none)
 /// and the spheres' ignore lists (it listed, a free slot, full so the list grows), the pose list's
@@ -1182,6 +1219,8 @@ fn the_riders_wreck_entry_is_the_originals() {
     ee.hooks.insert(WRECK_CUE, Box::new(move |ee: &mut Ee| {
         assert_eq!(ee.r(5), 0, "cue: a1");
         l.borrow_mut().push(Call::WreckCue(ee.r(4) as u32));
+        // S300: run as it is, against rider::wreck_cue on the port's side.
+        run_as_is(ee, WRECK_CUE);
     }));
     let snapshot = ee.ram.clone();
 
@@ -1273,7 +1312,10 @@ fn the_riders_wreck_entry_is_the_originals() {
         for at in (0x680..0x840).step_by(4) {
             put(&mut ee, RIDER + at, f(g.near(0.0, -3.0, 3.0)));
         }
-        let rands: Vec<u32> = (0..8).map(|_| g.bits() >> 1).collect();
+        // S300: the record's kind, as the machine hands it on (the cue reads it); eight rands for the
+        // entry, one for the cue's pick.
+        put(&mut ee, rec + rider::R_KIND, kind);
+        let rands: Vec<u32> = (0..9).map(|_| g.bits() >> 1).collect();
 
         // The original.
         log.borrow_mut().clear();
@@ -1338,6 +1380,155 @@ fn the_riders_wreck_entry_is_the_originals() {
         assert!(t.contains_key(&format!("kind {kind}")), "kind {kind} never drawn");
     }
     for path in ["keep: grown", "keep: a free slot", "inertia: a lane at 0", "kind 5: l1r1", "kind 5: l0r0", "kind 5: l1r0", "kind 5: l0r1", "kind past"] {
+        assert!(t.contains_key(path), "path {path} never taken");
+    }
+    for (path, n) in &t {
+        assert!(*n >= 20, "path {path} taken only {n} times");
+    }
+}
+
+/// **The wreck cue is the original's** (S300): 12 000 cases of state 4's rider's sound emitter, each
+/// running 0x004f7ca0 whole in the interpreter (`a1` 0, as the wreck entry calls it; its audio calls
+/// hooked to log, the two "still playing" ones answering drawn words, rand a drawn word) against
+/// [`rider::wreck_cue`] from the same words. Drawn: the record's kind (every one of 0..=16, and two
+/// past the table), both answers, the flag words (`+0x20`, `+0x1f0`, `+0xe4`), both lists' counts
+/// (under two, negative, up to ten) and last picks (−1, in and past the list), the playing sounds
+/// (none, some, a null last), and rand's answer (negatives and the ends among them). Every word either
+/// side writes, off the stack, comes out the same, and so do the calls.
+#[test]
+fn the_wreck_cue_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let cue = ee.u32_at(RIDER + rider::CUE);
+    let rec = ee.u32_at(cue + rider::CUE_RECORD);
+    let emitter_vt = ee.u32_at(cue + 4);
+    for (slot, code) in [(0x98, CUE_BUSY), (0x20, CUE_WAKE), (0x84, CUE_PLAYING)] {
+        assert_eq!(ee.u32_at(emitter_vt + slot), code, "the emitter's vt {slot:#x}");
+    }
+    let sound_vt = ee.u32_at(ee.u32_at(ee.u32_at(cue + rider::CUE_CRASH[1])) + 4);
+    for (slot, code) in [(0x20, SOUND_BUSY), (0x1c, SOUND_PLAY)] {
+        assert_eq!(ee.u32_at(sound_vt + slot), code, "the sounds' vt {slot:#x}");
+    }
+    let log: Log = Rc::new(RefCell::new(Vec::new()));
+    let answers = Rc::new(RefCell::new(VecDeque::new()));
+    hook_calls(&mut ee, &log, &answers, &BTreeSet::new());
+    // Fake sounds (each only its vtable) and the arrays: both lists 16 entries either side of where
+    // they point, the playing ones from the start.
+    let sound = |j: u32| FAKE + 0x4000 + 0x10 * j;
+    for j in 0..96 {
+        ee.set_u32(sound(j) + 4, sound_vt);
+    }
+    let arrays = [FAKE + 0x3000, FAKE + 0x3100, FAKE + 0x3200];
+    for (n, &a) in arrays.iter().enumerate() {
+        for j in 0..32 {
+            ee.set_u32(a + 4 * j, sound(32 * n as u32 + j));
+        }
+    }
+    let snapshot = ee.ram.clone();
+
+    let mut g = Gen(0x0300_0001);
+    let mut t: BTreeMap<String, u32> = BTreeMap::new();
+    let mut tally = |path: &str| *t.entry(path.to_string()).or_insert(0) += 1;
+    for k in 0..12_000 {
+        let mut given: Vec<(u32, u32)> = Vec::new();
+        let mut put = |ee: &mut Ee, at: u32, v: u32| {
+            ee.set_u32(at, v);
+            given.push((at, v));
+        };
+        let kind = if g.one_in(20) { g.pick(&[0x40, 0xffff_ffff]) } else { g.bits() % 17 };
+        put(&mut ee, rec + rider::R_KIND, kind);
+        for o in [0x20, 0x1f0, 0xe4] {
+            put(&mut ee, cue + o, g.bits());
+        }
+        let mut lists = [(0u32, 0u32); 2];
+        for (j, (list, array)) in [(rider::CUE_CRASH, arrays[0]), (rider::CUE_FALL, arrays[1])].into_iter().enumerate() {
+            let [count, sounds, last] = list;
+            let n = g.pick(&[0, 1, 2, 2, 3, 4, 5, 5, 10, 0xffff_ffff, 0x8000_0000]);
+            put(&mut ee, cue + count, n);
+            put(&mut ee, cue + sounds, array + 0x40);
+            let l = match g.bits() % 4 {
+                0 => g.pick(&[0xffff_ffff, 0x7fff_ffff, 0]),
+                _ => g.bits() % 11,
+            };
+            put(&mut ee, cue + last, l);
+            lists[j] = (n, l);
+        }
+        let [count, array] = rider::CUE_PLAYING;
+        let playing = g.pick(&[0, 1, 1, 2, 3]);
+        put(&mut ee, cue + count, playing);
+        put(&mut ee, cue + array, arrays[2]);
+        if playing > 0 && g.one_in(8) {
+            put(&mut ee, arrays[2] + 4 * (playing - 1), 0);
+        }
+        let answer = |g: &mut Gen| if g.one_in(4) { g.pick(&[1, 2, 3, 0x8000_0000]) } else { 0 };
+        let a = (answer(&mut g), answer(&mut g));
+        CUE_ANSWERS.set(a);
+        let r = match g.bits() % 8 {
+            0 => g.pick(&[0, 0x7fff_ffff, 0x8000_0000, 0xffff_ffff]),
+            1 => g.bits(),
+            _ => g.bits() >> 1,
+        };
+
+        // The original.
+        log.borrow_mut().clear();
+        *answers.borrow_mut() = VecDeque::from([r]);
+        ee.written.clear();
+        ee.set(28, GP);
+        ee.call(WRECK_CUE, &[u64::from(cue), 0], &[f32::from_bits(DT)], BUDGET);
+        let w1 = written_words(&ee, 0);
+        let want: HashMap<u32, u32> = w1.iter().map(|&a| (a, ee.u32_at(a))).collect();
+        let calls = log.borrow().clone();
+
+        // Back to the inputs, then the port.
+        for &a in &w1 {
+            ee.set_u32(a, word_of(&snapshot, a));
+        }
+        for &(a, v) in &given {
+            ee.set_u32(a, v);
+        }
+        let pre: HashMap<u32, u32> = w1.iter().map(|&a| (a, ee.u32_at(a))).collect();
+        log.borrow_mut().clear();
+        ee.written.clear();
+        let mut port = Port { ee: &mut ee, log: log.clone(), rands: VecDeque::from([r]) };
+        rider::wreck_cue(&mut port, cue, F(f32::from_bits(DT)));
+        let w2 = written_words(&ee, 0);
+        assert_eq!(*log.borrow(), calls, "case {k} (kind {kind}): the calls");
+        for &a in w1.union(&w2) {
+            let w = want.get(&a).copied().unwrap_or_else(|| pre.get(&a).copied().unwrap_or_else(|| ee.u32_at(a)));
+            assert_eq!(ee.u32_at(a), w, "case {k} (kind {kind}): the word at {a:#x} ({})", if w2.contains(&a) { "the port wrote it" } else { "only the original wrote it" });
+        }
+        for &a in w1.union(&w2).chain(given.iter().map(|(a, _)| a)) {
+            ee.set_u32(a, word_of(&snapshot, a));
+        }
+
+        tally(&format!("kind {}", if kind < 17 { kind.to_string() } else { "past".into() }));
+        let has = |f: fn(&Call) -> bool| calls.iter().any(f);
+        let listed = matches!(kind, 1..=12 | 14);
+        if a.0 != 0 {
+            tally("emitter busy");
+        } else if listed {
+            tally(if has(|c| matches!(c, Call::CueWake { .. })) { "woken" } else { "awake" });
+            tally(if has(|c| matches!(c, Call::Rand)) { "drew" } else { "no draw" });
+            let (n, l) = lists[if (1..=7).contains(&kind) || kind == 12 { 0 } else { 1 }];
+            if has(|c| matches!(c, Call::Rand)) {
+                let u = ps2_float::fpu::mul(f32::from_bits(0x3000_0000), ps2_float::fpu::from_i32(r as i32));
+                let i = ps2_float::fpu::to_i32(ps2_float::fpu::mul(ps2_float::fpu::from_i32(n as i32), u));
+                tally(if i == l as i32 { "a repeat moved on" } else { "a fresh pick" });
+                tally(if i < 0 { "a pick below the list" } else { "a pick in the list" });
+            }
+            if has(|c| matches!(c, Call::SoundPlay { .. })) {
+                tally("played");
+            } else if has(|c| matches!(c, Call::SoundBusy { .. })) {
+                tally("a sound still plays");
+            } else {
+                tally("may not cue");
+            }
+        }
+    }
+    eprintln!("{t:#?}");
+    for kind in 0..17 {
+        assert!(t.contains_key(&format!("kind {kind}")), "kind {kind} never drawn");
+    }
+    for path in ["emitter busy", "woken", "awake", "drew", "no draw", "a repeat moved on", "a fresh pick", "a pick below the list", "played", "a sound still plays", "may not cue", "kind past"] {
         assert!(t.contains_key(path), "path {path} never taken");
     }
     for (path, n) in &t {

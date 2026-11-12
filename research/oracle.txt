@@ -10685,7 +10685,7 @@ atv_heap_free               atv 0x001b76d0 = free
 #   or 0 where v <= 0), +0x68 0x00493b00 (body_target); +0x38c = 1; +0x264, +0x254, +0x634, +0x63c, +0x638,
 #   +0x380 = 0. Jump table 0x0052a930 (kind < 16 unsigned): 1 0x4edb10, 2 0x4edcc4, 3 0x4ede74, 4 0x4ee038,
 #   5 0x4ee1fc, 6/7 0x4ee86c, 8 0x4ee4e4, 11 0x4ee6a8, 12 0x4ee924, 13 0x4eeb54, 15 0x4eda48, else none; tail
-#   0x4eed80: 0x004f7ca0(*(rider+0x8f4), 0) (reads record +0x138 itself; not ported: Call::WreckCue).
+#   0x4eed80: 0x004f7ca0(*(rider+0x8f4), 0) (reads record +0x138 itself; ported by S300: rider::wreck_cue).
 #   Aimed kinds (holds +0x550/+0x554, force at main +0xa4 or (4) +0x2b4, +0x630, block S, x flipped):
 #   1 1/1 +0x630 1 S 0x680; 2 0/1 0x6c0; 3 1/0 0x6c0 flip; 4 0/0 0x700 flip; 5 each rand*2^-31 < 0x3f28f5c3
 #   (0.66) +0x630 1 S 0x740, first record +0xa0 -> body +0x80, +0xb0 -> body +0x1d0; 8 1/1 0x780 flip;
@@ -10716,6 +10716,30 @@ atv_heap_free               atv 0x001b76d0 = free
 #   mode machine's (~3 200 gathers in mode 2), the probe's ignore list naming a collidable it finds 1 287
 #   times. Replays: tests/mxvatv_bike_ride.rs's rider leaf serves both in Rust; ride-2 (1 836 switches)
 #   and flip-1 (1 501 switches, 68 gathers) stay bit-exact.
+
+# S300: the wreck entry's cue 0x004f7ca0 (a0 the rider's +0x8f4 emitter 0x0103df30, a1 0; S288's
+# rider::Call::WreckCue), ported as game_sim::handling::rider::{wreck_cue, list_pick}.
+# tests/mxvatv_rider_modes.rs (the_wreck_cue_is_the_originals; run as it is inside S288's test against the
+# port); served in tests/mxvatv_bike_ride.rs's rider leaf (flip-1 bit-exact: one cue, one draw, played).
+# Journal: research/journal/2026-11-12-s300-rider-wreck-cue/.
+#   a1 != 0: nothing (only caller passes 0; not ported). Emitter vtable 0x003d14f0: vt +0x98 0x00197ef0
+#   (busy: +0x30 set -> 2, else the max of the +0x38 sounds' vt +0x20, stopping at 2) != 0: nothing.
+#   Kind *(+0x240 = rider's record)+0x138, sltiu 15, table 0x0052afe0: 1-7, 12 the crash list
+#   (+0x21c count, +0x224 array, +0x234 last); 8-11, 14 the fall list (+0x200, +0x208, +0x218); 0, 13 and
+#   >= 15 nothing. Byte +0x21 bit 0 clear: vt +0x20 0x00128080 (sets +0x21 bits 0, 1; tail vt +0x2c
+#   0x00127fd0, the children walk). Pick 0x001972a0(count, &last): count < 2 (slti) -> last = 0, 0;
+#   else i = cvt.w.s(cvt(count) * (2^-31 * cvt(rand 0x003561a8))), i == last -> (i+1) rem count (div/mfhi);
+#   last = i. sound = array[i]. Playing 0x00198590: +0x38 count ? *(+0x40)[count-1] : 0 (0x00102f80
+#   is array get). +0x1f0 bit 1 clear (dsll32 30 / dsrl32 31): nothing. Playing != 0 and its vt +0x20
+#   (sounds' vtable 0x003b42c0: 0x0014ede0, the voice's state off the engine 0x00188550) != 0: nothing.
+#   Else sound vt +0x1c 0x0014ea30(sound, 4) (play), +0x1f0 bit 0 set (sb), +0xe4 |= 1, emitter vt +0x84
+#   0x001985d0(emitter, sound, 0) (the playing list cleared and the sound pushed). State 4: crash 10
+#   sounds, fall 4, +0x1f0 7, +0x21 0x83, one playing (its voice -1: idle). MX Unleashed's same emitter:
+#   game_sim::wreck_sound (the audio calls are left as rider::Call::{CueBusy, CueWake, SoundBusy,
+#   SoundPlay, CuePlaying}).
+#   Oracle: 12 000 drawn cases (every kind ~650; busy 2 963; woken 3 215; drew 4 136, a repeat moved on
+#   360, a pick below the list 312; a sound still plays 615; played 2 633), every written word and the
+#   call log equal. S288's 20 000 cases now run the cue as it is (record +0x138 = the kind) against it.
 
 # F31b5d: state 4's sim listeners that are not the bike's, shown inert on C15 ride-2 and flip-1. Journal:
 # research/journal/2026-11-05-f31b5d-other-listeners-inert/.

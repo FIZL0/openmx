@@ -16889,7 +16889,6 @@ const RIDER_BODY_MASS: u32 = 0x0049_3cc0;
 const RIDER_BODY_INERTIA: u32 = 0x0049_3bf0;
 const RIDER_BODY_AT: u32 = 0x0049_3b20;
 const HEAP_RESIZE: u32 = 0x001b_7470;
-const RIDER_WRECK_CUE: u32 = 0x004f_7ca0;
 /// S289: the parts' and the aim force's on/off virtuals.
 const RIDER_PART_SWITCH: u32 = 0x0049_bd30;
 const RIDER_FORCE_SWITCH: u32 = 0x0049_bd80;
@@ -16929,8 +16928,8 @@ fn call_from_hook_dt(ee: &mut Ee, f: u32, ints: &[u64], dt: F) -> u64 {
 }
 
 /// The mode machine's outside calls from inside its hook: the riding reset the port's
-/// ([`rider::riding_reset`], S287), the wreck entry the port's ([`rider::wreck_entry`], S288), and
-/// the bodies' virtuals ([`rider::body_target`], [`rider::body_mass`], [`rider::body_inertia`],
+/// ([`rider::riding_reset`], S287), the wreck entry the port's ([`rider::wreck_entry`], S288) and its
+/// cue ([`rider::wreck_cue`], S300; its audio calls the original's), and the bodies' virtuals ([`rider::body_target`], [`rider::body_mass`], [`rider::body_inertia`],
 /// [`rider::body_at`]), the parts' and the aim force's on/off virtuals ([`rider::switch_on`]) and the
 /// wreck arm's nearby gather ([`gather_in_ram`], S289), every other the original's.
 struct LeafRider<'a> {
@@ -16963,7 +16962,16 @@ impl rider::Rider for LeafRider<'_> {
                 rider::wreck_entry(self, RIDER, kind, dt);
                 0
             }
-            C::WreckCue(cue) => call_from_hook_dt(self.ee, RIDER_WRECK_CUE, &[u64::from(cue), 0], dt),
+            C::WreckCue(cue) => {
+                rider::wreck_cue(self, cue, dt);
+                0
+            }
+            // S300: the cue's audio calls, the original's (the emitter's vtable at +4, the sounds' too).
+            C::CueBusy { cue } => call_from_hook_dt(self.ee, vt(self.ee, cue + 4, 0x98), &[u64::from(cue)], dt),
+            C::CueWake { cue } => call_from_hook_dt(self.ee, vt(self.ee, cue + 4, 0x20), &[u64::from(cue)], dt),
+            C::SoundBusy { sound } => call_from_hook_dt(self.ee, vt(self.ee, sound + 4, 0x20), &[u64::from(sound)], dt),
+            C::SoundPlay { sound, how } => call_from_hook_dt(self.ee, vt(self.ee, sound + 4, 0x1c), &[u64::from(sound), u64::from(how)], dt),
+            C::CuePlaying { cue, sound } => call_from_hook_dt(self.ee, vt(self.ee, cue + 4, 0x84), &[u64::from(cue), u64::from(sound), 0], dt),
             C::Pose => {
                 assert_eq!(vt(self.ee, RIDER + 4, 0xd0), RIDER_POSE, "the rider's vt +0xd0");
                 rider::pose(self, RIDER, dt, false, acos(), curve());
@@ -17057,7 +17065,12 @@ impl rider::Rider for LeafRider<'_> {
             C::Rand => "> rand",
             C::RidingReset => "= riding reset",
             C::WreckEntry(_) => "= wreck entry",
-            C::WreckCue(_) => "> wreck cue",
+            C::WreckCue(_) => "= wreck cue",
+            C::CueBusy { .. } => "> cue busy",
+            C::CueWake { .. } => "> cue wake",
+            C::SoundBusy { .. } => "> sound busy",
+            C::SoundPlay { .. } => "> sound play",
+            C::CuePlaying { .. } => "> cue playing",
             C::Pose => "= pose",
             C::Settle => "= settle",
             C::Switch { .. } => "= switch",
@@ -17223,8 +17236,9 @@ fn ride_replays_with_the_rider_leaf_on_the_ports() {
 
 /// **F31b5i — C15's flip with the rider leaf on the ports**: flip-1 bit-exact, wrecked on row 125
 /// and put back on row 193, the rider's writes into the bike's record the port's; the put back's
-/// riding reset the port's too (S287), the wreck entry the port's (S288), the ragdoll world the
-/// port's on its 433 steps (S280), and every pose and settle the port's (S286).
+/// riding reset the port's too (S287), the wreck entry the port's (S288) and its cue (S300: one draw,
+/// a sound played; the audio calls the original's), the ragdoll world the port's on its 433 steps
+/// (S280), and every pose and settle the port's (S286).
 #[test]
 fn flip_replays_with_the_rider_leaf_on_the_ports() {
     let Some((w, off, served, census)) = replay_with_rider_leaf("flip-1") else { return };
@@ -17255,10 +17269,14 @@ fn flip_replays_with_the_rider_leaf_on_the_ports() {
             ("= settle", 6),
             ("= switch", 1501),
             ("= world step", 465),
+            ("= wreck cue", 1),
             ("= wreck entry", 1),
+            ("> cue busy", 1),
+            ("> cue playing", 1),
             ("> idle layer", 465),
-            ("> rand", 5),
-            ("> wreck cue", 1)
+            ("> rand", 6),
+            ("> sound busy", 1),
+            ("> sound play", 1)
         ],
         "{census:?}"
     );
