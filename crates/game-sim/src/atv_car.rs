@@ -757,6 +757,83 @@ const REVERSE_THROTTLE: u32 = 0x3ecc_cccd;
 /// The speed over which the hand brake's brake scale comes in.
 const HAND_BRAKE_SPEED: f32 = 10.0;
 
+/// The `[Joystick]` keys the car's input step reads: the gas button's full pressure, and the speed
+/// and sideways angle past which (fast and not sliding) any press is the whole pedal (MD107).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct InputKeys {
+    pub max_analog_throttle: F,
+    pub digital_throttle_speed: F,
+    pub digital_side_slip_angle: F,
+}
+
+/// The car's pad words as its input step leaves them for the controls ([`State`]'s of the same
+/// names), and whether the gas pedal has come on yet: until it does the brake is held on.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Input {
+    pub stick: F,
+    pub lean: F,
+    pub pad_word: F,
+    pub gas_pedal: F,
+    pub vehicle_brake: F,
+    pub hand_brake: F,
+    pub clutch: F,
+    pub dpad: bool,
+    pub gassed: bool,
+}
+
+/// The hand brake's command on SLUS-21104's car (MX Unleashed's is [`crate::car`]'s `0x16`).
+const HAND_BRAKE: crate::bindings::Command = crate::bindings::Command(0x18);
+
+/// **The car's input step** (MD107; MX Unleashed's [`crate::car::Controls::input`]), once a frame
+/// for a car a person drives, before the sim frame: the stick `(steer, lean)` and the pad word as
+/// they come, then each pedal from its command's strength (`value`). `speed` is the car's +0x32c and
+/// `side_slip` its +0x330: slow, or sliding past the angle, the gas is the button's pressure over
+/// `MaxAnalogThrottle` (none when that is 0), else any press is the whole pedal. The first gas holds
+/// the brake no longer. The d-pad's left or right is the whole stick; with neither, a stick to the
+/// right says the d-pad no longer steers. Up or down is the whole lean.
+///
+/// SLUS-21104 adds to MX Unleashed's the held brake; the remap is inline (`adda.s`/`madd.s`).
+pub fn input(k: &InputKeys, p: &mut Input, speed: F, side_slip: F, stick: (F, F), pad_word: F, value: impl Fn(crate::bindings::Command) -> F) {
+    use crate::bindings::Command;
+    (p.stick, p.lean) = stick;
+    p.pad_word = pad_word;
+    p.gas_pedal = if speed <= k.digital_throttle_speed || !(side_slip.abs() < k.digital_side_slip_angle) {
+        let (s, r) = (value(Command::GAS), k.max_analog_throttle);
+        if F::ZERO == r {
+            F::ZERO - F::ZERO
+        } else {
+            let t = (s - F::ZERO) / (r - F::ZERO);
+            let lo = F::ZERO.min(F::ONE);
+            let hi = F::ZERO.max(F::ONE);
+            Acc::adda(F::ZERO, F::ZERO).madd(t, F::ONE - F::ZERO).max(lo).min(hi)
+        }
+    } else if value(Command::GAS) <= 0.0 {
+        F::ZERO
+    } else {
+        F::ONE
+    };
+    if !(p.gas_pedal <= 0.0) {
+        p.gassed = true;
+    }
+    p.vehicle_brake = if !(value(Command::BRAKE) <= 0.0) || !p.gassed { F::ONE } else { F::ZERO };
+    p.hand_brake = if value(HAND_BRAKE) <= 0.0 { F::ZERO } else { F::ONE };
+    p.clutch = if value(Command::CLUTCH) == 0.0 { F::ZERO } else { F::ONE };
+    if value(Command::LEFT) != 0.0 {
+        p.stick = F(-1.0);
+        p.dpad = true;
+    } else if value(Command::RIGHT) != 0.0 {
+        p.stick = F::ONE;
+        p.dpad = true;
+    } else if !(p.stick <= 0.0) {
+        p.dpad = false;
+    }
+    if value(Command::UP) != 0.0 {
+        p.lean = F(-1.0);
+    } else if value(Command::DOWN) != 0.0 {
+        p.lean = F::ONE;
+    }
+}
+
 /// **The controls** (vt `+0x34c`, MX Unleashed's [`crate::car::Controls::step`] on SLUS-21104's
 /// vehicle): first a running start penalty takes the gas pedal off. Without a driver every pedal and
 /// the stick are cleared, the brakes are full and the yaw limit is the key's, and the engine is put
