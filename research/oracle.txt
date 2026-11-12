@@ -11215,6 +11215,27 @@ atv_heap_free               atv 0x001b76d0 = free
 #   callees 0x0050a040, 0x0050db60 (other branch, 2872), 0x0050e6a0 (count), 0x0050e7e0, 0x00193b30,
 #   0x001c1e90, 0x0050c5c0, 0x00125be0, 0x0050eab0, 0x0050e980, 0x0050c8b0; rand 0x003561a8 twice per
 #   spawning frame, the spread table 0x00542410); second kind, thunk 0x004ffd20 -> 0x004fbcc0.
+# F56 — the effects items' turning virtuals in Rust (game_sim::handling::effects::{on, off, key, pause, unpause},
+#   Class, Call; tests/mxvatv_bike_ride.rs the_effects_items_turning_is_the_originals (20,000 cases) and PartWalk's
+#   effects::Items). Journal research/journal/2026-11-11-f56-effects-items-turning. Item: vt at +0x10 (+8 key,
+#   +0x14 step, +0x18 on, +0x1c off, +0x20 pause, +0x24 unpause), state byte +8 (1 on, 2 paused), object +0x14 (vt
+#   at object +4: +0x84 halt, +0xa4 light, +0xa8 douse), picks bytes +0x18 + key (0xff none).
+#   Clocked, vt 0x003d1650: on 0x004fa730 (|= 1); off 0x004ff180 (&= ~1, then halt 0x004fe890 = object vt +0x84,
+#   +0x44 = 0, +0x4c = +0x48); key 0x004fe550 (pick != 0xff -> vt +0x24 0x004fe5c0 (&= ~2) else vt +0x20
+#   0x004fe5b0 (|= 2, j 0x004fe890)).
+#   Lit, vt 0x003d1680 / 0x003d16b0 / 0x003d18a0: on 0x004ff200 / 0x004ff360 / 0x004ff8b0 (|= 1, re-read, !(& 2)
+#   -> light); off 0x004ff250 / 0x004ff3b0 / 0x004ff900 (&= ~1, douse); key 0x004ff1d0 / 0x004ff330 / 0x004ff880
+#   (jr ra); pause 0x004ff280 / 0x004ff3e0 / 0x004ff930 (|= 2, douse); unpause 0x004ff2a0 / 0x004ff400 /
+#   0x004ff950 (&= ~2, re-read, & 1 -> light).
+#   Picked, vt 0x003d1740 / 0x003d1840: on 0x004ff580 / 0x004ff6c0 (as Lit); off 0x004ff5d0 / 0x004ff710 (&= ~1,
+#   +0x28 = 0, douse); key 0x004fcfc0 / 0x004fb500 (pick != 0xff -> 0x0050a920(object, pick) (the emitter's
+#   own: writes object +0xd8's +0x38..+0x48, +0xa4), then vt +0x24 (a1 whatever 0x0050a920 left), else vt +0x20);
+#   pause 0x004fd030 / 0x004fb570 (|= 2, +0x28 = 0, douse); unpause 0x004fd060 / 0x004fb5a0 (as Lit).
+#   Latched, vt 0x003d1870: on 0x004ff790; off 0x004ff7e0 (&= ~1, douse, then +0x90 = 0); key 0x004fae30 (as
+#   Picked); pause 0x004faea0 (|= 2, douse); unpause 0x004faec0.
+#   Flip-1 (every port): 4463 item calls, the object calls 35 halt (0x004e9f00), 594 light (0x0050aaa0), 779
+#   douse (0x0050ab00), 360 picks; all still the interpreter's (the emitters', F57/F59). Vtable 0x003d18d0 (on
+#   0x004fa730 at +0x18) is in RAM but no item flip-1 or ride-2 turns has it; not classed (fx_class panics).
 # S13d — the race's results: what the supercross activity does with each card that finishes at the line
 # (the score manager's listener, the activity +0x160 with its vtable at +0x1c = 0x00458690: vt+0x14,
 # the lap line's Finished notice, through the thunk 0x003004f0 = this - 0x160. The race's Over notice

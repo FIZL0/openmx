@@ -16,6 +16,10 @@
 //!
 //! It ends with the walk of its own listeners, which its caller makes. The items' own work (the
 //! particle emitters they turn on and off among it) is theirs, handed out.
+//!
+//! F56: the items' turning virtuals ([`on`], [`off`], [`key`], and the [`pause`] and [`unpause`] a
+//! key reaches) are ported too, by the item's [`Class`]; what they hand their objects ([`Call`]) is
+//! the objects' own. Their steps (`+0x14`) are not ported yet.
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
 use ps2_float::F;
@@ -140,4 +144,169 @@ pub fn step(m: &mut impl Effects, e: u32, dt: F) {
         }
         k += 1;
     }
+}
+
+// --- F56: the items' turning virtuals ------------------------------------------------------------
+
+/// An item's own words beyond the effects' ([`ITEM_ENTRY`], [`ITEM_STATE`], [`ITEM_MASK`]): its
+/// object (`+0x14`, the thing it lights and douses, its vtable at the object's `+4`), and its
+/// table of picks (a byte per key from `+0x18`, [`UNPICKED`] for a key that pauses it).
+pub const ITEM_OBJECT: u32 = 0x14;
+pub const ITEM_PICKS: u32 = 0x18;
+pub const UNPICKED: u8 = 0xff;
+/// The state byte's bits: on ([`Out::On`]) and paused (a key with no pick).
+pub const ON: u8 = 1;
+pub const PAUSED: u8 = 2;
+/// A [`Class::Clocked`] item's clock (`+0x44`, cleared) and its count (`+0x4c`, set back to the
+/// start at `+0x48`) when its object halts.
+pub const CLOCK: u32 = 0x44;
+pub const COUNT_START: u32 = 0x48;
+pub const COUNT: u32 = 0x4c;
+/// The word a [`Class::Picked`] item clears when it douses (`+0x28`), and the one a
+/// [`Class::Latched`] item clears after it douses on turning off (`+0x90`).
+pub const PICKED_WORD: u32 = 0x28;
+pub const LATCH: u32 = 0x90;
+
+/// An effects item's class, as its vtable (`+0x10`) says: what its turning virtuals (on `+0x18`,
+/// off `+0x1c`, key `+8`, and pause `+0x20` and unpause `+0x24`, which only a key reaches) do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Class {
+    /// Turning on only sets [`ON`]; turning off and pausing halt its object and reset its clocks
+    /// ([`CLOCK`], [`COUNT`]); unpausing only clears [`PAUSED`]; a key pauses or unpauses it by its
+    /// pick, and hands the pick on to nobody.
+    Clocked,
+    /// Turning on lights its object unless paused, turning off and pausing douse it, unpausing
+    /// lights it again if on; a key does nothing.
+    Lit,
+    /// As [`Class::Lit`], but a key with a pick hands it to the object ([`Call::Pick`]) and
+    /// unpauses, one without pauses; and turning off and pausing clear [`PICKED_WORD`] before the
+    /// douse.
+    Picked,
+    /// As [`Class::Picked`], but pausing clears nothing and turning off clears [`LATCH`] after the
+    /// douse.
+    Latched,
+}
+
+/// What an item hands its object (`+0x14`), each the object's virtual or its own function.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Call {
+    /// Lit (vt `+0xa4`) and doused (vt `+0xa8`).
+    Light(u32),
+    Douse(u32),
+    /// Halted (vt `+0x84`).
+    Halt(u32),
+    /// Given a pick (the object's own, not a virtual): the byte the key picked.
+    Pick { object: u32, pick: u8 },
+}
+
+/// The items' world: RAM, each item's class, and the calls they hand their objects.
+pub trait Items {
+    fn word(&mut self, at: u32) -> u32;
+    fn set(&mut self, at: u32, w: u32);
+    fn set_byte(&mut self, at: u32, b: u8);
+    fn class(&mut self, item: u32) -> Class;
+    fn call(&mut self, c: Call);
+}
+
+fn item_byte(m: &mut impl Items, at: u32) -> u8 {
+    (m.word(at & !3) >> (8 * (at & 3))) as u8
+}
+
+/// The item's state byte with `set` set and `clear` cleared, stored and read back.
+fn restate(m: &mut impl Items, item: u32, set: u8, clear: u8) -> u8 {
+    let s = (item_byte(m, item + ITEM_STATE) | set) & !clear;
+    m.set_byte(item + ITEM_STATE, s);
+    item_byte(m, item + ITEM_STATE)
+}
+
+fn object(m: &mut impl Items, item: u32) -> u32 {
+    m.word(item + ITEM_OBJECT)
+}
+
+/// A clocked item's object halted, its clock cleared and its count set back to the start.
+fn halt(m: &mut impl Items, item: u32) {
+    let o = object(m, item);
+    m.call(Call::Halt(o));
+    m.set(item + CLOCK, 0);
+    let start = m.word(item + COUNT_START);
+    m.set(item + COUNT, start);
+}
+
+/// The item turned on (its vt `+0x18`).
+pub fn on(m: &mut impl Items, item: u32) {
+    let class = m.class(item);
+    let s = restate(m, item, ON, 0);
+    if class != Class::Clocked && s & PAUSED == 0 {
+        let o = object(m, item);
+        m.call(Call::Light(o));
+    }
+}
+
+/// The item turned off (its vt `+0x1c`).
+pub fn off(m: &mut impl Items, item: u32) {
+    let class = m.class(item);
+    restate(m, item, 0, ON);
+    match class {
+        Class::Clocked => halt(m, item),
+        Class::Lit => {
+            let o = object(m, item);
+            m.call(Call::Douse(o));
+        }
+        Class::Picked => {
+            m.set(item + PICKED_WORD, 0);
+            let o = object(m, item);
+            m.call(Call::Douse(o));
+        }
+        Class::Latched => {
+            let o = object(m, item);
+            m.call(Call::Douse(o));
+            m.set(item + LATCH, 0);
+        }
+    }
+}
+
+/// The item paused (its vt `+0x20`).
+pub fn pause(m: &mut impl Items, item: u32) {
+    let class = m.class(item);
+    restate(m, item, PAUSED, 0);
+    match class {
+        Class::Clocked => halt(m, item),
+        Class::Picked => {
+            m.set(item + PICKED_WORD, 0);
+            let o = object(m, item);
+            m.call(Call::Douse(o));
+        }
+        Class::Lit | Class::Latched => {
+            let o = object(m, item);
+            m.call(Call::Douse(o));
+        }
+    }
+}
+
+/// The item unpaused (its vt `+0x24`).
+pub fn unpause(m: &mut impl Items, item: u32) {
+    let class = m.class(item);
+    let s = restate(m, item, 0, PAUSED);
+    if class != Class::Clocked && s & ON != 0 {
+        let o = object(m, item);
+        m.call(Call::Light(o));
+    }
+}
+
+/// The item told its entry's new key (its vt `+8`): its pick for the key ([`ITEM_PICKS`]) unpauses
+/// it, [`UNPICKED`] pauses it. A picked or latched item hands the pick to its object first.
+pub fn key(m: &mut impl Items, item: u32, key: u8) {
+    let class = m.class(item);
+    if class == Class::Lit {
+        return;
+    }
+    let pick = item_byte(m, item + ITEM_PICKS + u32::from(key));
+    if pick == UNPICKED {
+        return pause(m, item);
+    }
+    if class != Class::Clocked {
+        let object = object(m, item);
+        m.call(Call::Pick { object, pick });
+    }
+    unpause(m, item);
 }
