@@ -4925,9 +4925,82 @@ fn the_sx01_image_holds_the_start_hold_as_armed() {
     assert_eq!(idle, StartStep::default(), "the image's clock is in no window");
     assert_eq!(got.words, want[0].words, "the item's words");
     assert_eq!(got.body.unwrap().free, want[0].body.unwrap().free, "the bike held to height only");
-    // The turn freedoms read 1, 1, 0 where the arming wrote 1, 0, 1: something outside the
-    // timeline rewrites them before this point (journal s13-start-timeline).
+    // The turn freedoms read 1, 1, 0 where the arming wrote 1, 0, 1: the bike's ground step rewrites
+    // them every tick (S290, the_sx01_image_s_held_bike_turns_as_its_ground_step_sets).
     assert_eq!(got.body.unwrap().ang_free, [1, 1, 0], "the bike's turn freedoms");
+}
+
+/// S290: the start hold on a rider's chassis ([`race::hold`], [`StartStep::apply`]) is what the
+/// timeline writes on an item's body (the timeline is the oracled one, proof 18): over 20,000 calls
+/// at clocks on and around every window edge and zero, with any freedoms to start from, the chassis
+/// the step is applied to holds the item's six freedoms afterwards.
+#[test]
+fn the_start_hold_on_a_chassis_is_the_timelines_on_its_body() {
+    let mut x = 0x9e37_79b9_u32;
+    let mut next = move || {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        x
+    };
+    let (mut armed, mut warned, mut idle) = (0, 0, 0);
+    for case in 0..20_000 {
+        let mut s = Supercross::new();
+        s.lights_on = F((next() % 80) as f32 * 0.1);
+        s.lights_off = F(fpu::add(0.1, s.lights_on.0));
+        s.warn_on = F((next() % 130) as f32 * 0.1);
+        s.warn_off = F(fpu::add(0.1, s.warn_on.0));
+        s.intro_seen = next() % 2;
+        s.intro_queued = next() % 2;
+        let edges = [F::ZERO, -F::ZERO, s.lights_on, s.lights_off, s.warn_on, s.warn_off, F(f32::from_bits(1))];
+        let base = edges[next() as usize % edges.len()];
+        let t = match next() % 4 {
+            0 => base,
+            1 => F(f32::from_bits(base.0.to_bits().wrapping_add(1))),
+            2 => F(f32::from_bits(base.0.to_bits().wrapping_sub(1))),
+            _ => F((next() % 140) as f32 * 0.1),
+        };
+        let free: [i32; 3] = core::array::from_fn(|_| (next() % 3) as i32);
+        let ang_free: [i32; 3] = core::array::from_fn(|_| (next() % 3) as i32);
+        let mut ch = Chassis { free, ang_free, ..Chassis::default() };
+        let mut items = [StartItem { body: Some(Axes { free, ang_free }), words: [0; 4] }];
+        let step = s.start_timeline(t, &mut items, false);
+        step.apply(&mut ch);
+        let want = items[0].body.unwrap();
+        assert_eq!((ch.free, ch.ang_free), (want.free, want.ang_free), "case {case}: t {t:?}, step {step:?}");
+        armed += usize::from(step.armed);
+        warned += usize::from(step.warning);
+        idle += usize::from(!step.armed && !step.warning);
+    }
+    assert!(armed > 1000 && warned > 1000 && idle > 1000, "armed {armed}, warned {warned}, idle {idle}");
+    let mut ch = Chassis::default();
+    race::hold(&mut ch);
+    assert_eq!((ch.free, ch.ang_free), ([0, 1, 0], [1, 0, 1]), "the hold");
+}
+
+/// S290: the turn freedoms on S196's sx01 image (1, 1, 0 where the arming wrote 1, 0, 1) are the
+/// bike's ground step's: the bike is on its ground step (its air-state word `+0x748` clear) with a
+/// wheel down (`+0x574`), and that step sets them to 1, 1, 0 every tick a wheel is down
+/// (`chassis::set_flags` from `move::pose`). Its linear freedoms are the hold's alone: nothing else
+/// writes them between the countdown's zero and the warning.
+#[test]
+fn the_sx01_image_s_held_bike_turns_as_its_ground_step_sets() {
+    let Some(ee) = sx01_image() else { return };
+    let [activities] = match addrs(["activity_manager"]) {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    let act = ee.u32_at(ee.u32_at(ee.u32_at(activities) + 0x58));
+    let bike = ee.u32_at(ee.u32_at(act + 0x84) + 4) - 0xf9c;
+    let chassis = ee.u32_at(bike + 0x7a4);
+    assert_eq!(ee.u32_at(bike + 0x748), 0, "the bike runs its ground step");
+    assert_ne!(ee.u32_at(bike + 0x574), 0, "a wheel is down");
+    let mut held = Chassis::default();
+    race::hold(&mut held);
+    game_sim::chassis::set_flags(&mut held, 1, 1, i32::from(ee.u32_at(bike + 0x574) == 0));
+    let read = |o: u32| -> [i32; 3] { core::array::from_fn(|j| ee.u32_at(chassis + o + 4 * j as u32) as i32) };
+    assert_eq!(read(0x2a0), held.free, "held to height only");
+    assert_eq!(read(0x2ac), held.ang_free, "the ground step's turn freedoms over the hold's");
 }
 
 

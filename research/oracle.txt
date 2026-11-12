@@ -867,7 +867,10 @@ race_countdown_listener     boot 0x002fb9b0 slot 0x5c through the thunk 0x003004
 #                                           accumulator. S196 sx01 image: one item, its +0x68 the human
 #                                           rider's bike chassis (free 0,1,0 = the start hold S290
 #                                           looks for), but its ang_free reads 1,1,0, not the 1,0,1
-#                                           this writes: another writer, not found.
+#                                           this writes: S290, bike_ground_step's
+#                                           chassis_set_flags(1, 1, !bike+0x574) every tick (on the
+#                                           image bike+0x748 = 0, +0x574 set). race::hold and
+#                                           race::StartStep::apply put it on a Chassis.
 #                                           race::Supercross::start_timeline
 race_intro_end              boot 0x002fd630 (activity, fade) cameras stopped by viewport mode
 #                                           (scene_camera_cut on scene +0x68 / +0x64), then +0x4c4 == 0:
