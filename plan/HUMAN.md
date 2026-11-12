@@ -502,3 +502,29 @@ P324 in it:
 
 The lines that matter are the `ms a frame:` lines under the 40 fps pause seconds and under the riding seconds
 that read 57–59 fps.
+
+## openMX on a real Android phone (P310)
+
+P308 built the Android app but only ran it on the x86_64 emulator (software Vulkan, 0.7 fps); no phone has
+been on this machine since (`adb devices` lists none). About 20 minutes, with an arm64 phone (Android 8+), a
+controller, and a second openMX on the same Wi-Fi (the desktop is fine):
+
+1. On the phone, download **v0.11.0**'s `openmx-android.apk` from the GitHub releases page (the older one, so
+   step 6 has an update to fetch) and install it (allow "install unknown apps" for the browser). Or over USB:
+   `adb install openmx-android.apk`, after which the agents can read logcat too.
+2. Launch it, pick the disc image when it asks (Downloads or an SD card), and wait for the copy-in and the menu.
+3. **GPU, speed and look:** ride Dallas (or any track) for two minutes, by touch first, then
+   **controller:** pair a Bluetooth pad (or plug a USB one), check it shows under Controllers and rides.
+   Note whether the picture looks like the desktop's and whether the **sound** (engine, music) plays.
+4. **LAN lobby:** host a LAN lobby on the desktop's openMX; on the phone, Online → LAN should list it. Join and
+   ride a few seconds together.
+5. **Store HTTPS:** open the mods store screen and check its list loads (a TLS/certificate error there is B418).
+6. **Update:** back on the main menu, Update (0.12.0 or newer is out) should show under the corner; press it,
+   let it download, accept the system installer, and check the corner then says the new version.
+7. Copy `Android/data/io.github.fizl0.openmx/files/openmx-log.txt` and `openmx-log-previous.txt` (the
+   launch before the update) off the phone (USB or LocalSend) into the repo's `context/p310/`, and write in
+   P310 one line per step: worked / what went wrong, and the phone's model. The log lines that matter: the
+   `gpu`/adapter line and the fps lines a second, `update check:`, and any `net:` or TLS errors.
+
+If the installer refuses the update ("package conflicts"), the two apks were signed by different keys: say so
+in P310 — every release must be signed with `~/.android/debug.keystore` (never delete it).
