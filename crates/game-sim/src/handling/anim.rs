@@ -47,11 +47,14 @@ pub enum Saved {
     Positions,
 }
 
-/// The two startup tables the keys are read through.
+/// The two startup tables the keys are read through, and the word that tells a rotation channel of
+/// the narrow kind (F62a): its sampler, the channel's vtable (`+0x10`) at `+0x10`. Every other
+/// rotation channel is of the wide kind.
 #[derive(Clone, Copy)]
 pub struct Tables<'a> {
     pub turns: &'a Turns,
     pub acos: &'a AcosTable,
+    pub narrow: u32,
 }
 
 const FADE_LIST_ON: u32 = 0x10;
@@ -152,8 +155,16 @@ fn key(m: &mut impl Ram, t: &Tables, at: u32) -> Vf {
     toys::decode(t.turns.wide_at(lo as u16), axis)
 }
 
-/// **A rotation channel at `time`** (keys of 12 bytes: the time, then the key), or nothing for an
-/// off or empty channel. Fewer than three keys: the first two slerped (two keys: by the time from the
+/// One narrow rotation key (4 bytes at `at`: the narrow turn table's index, the axis's three signed
+/// bytes) as a quaternion, the same way (F62a).
+fn narrow_key(m: &mut impl Ram, t: &Tables, at: u32) -> Vf {
+    let w = m.word(at);
+    let axis = [(w >> 8) as i8, (w >> 16) as i8, (w >> 24) as i8].map(i32::from);
+    toys::decode(t.turns.narrow[(w & 0xff) as usize], axis)
+}
+
+/// **A rotation channel at `time`** (keys of 12 bytes: the time, then the key; of 8 for the narrow
+/// kind, [`Tables::narrow`]), or nothing for an off or empty channel. Fewer than three keys: the first two slerped (two keys: by the time from the
 /// word *before* the keys, the original's, over their span; one: the key with itself). Three or
 /// more: from the key it stopped at last (put back to 1 when that is past three quarters and the
 /// time before the first quarter, to the last when it is before the first quarter and the time past
@@ -169,7 +180,11 @@ pub fn rotation(m: &mut impl Ram, t: &Tables, ch: u32, time: F) -> Option<Quad> 
         return None;
     }
     let keys = m.word(ch + 0x14);
-    let at = |i: i32| keys.wrapping_add(i.wrapping_mul(12) as u32);
+    // The narrow kind's keys are 8 bytes (F62a), the same walk over them.
+    let vt = m.word(ch + 0x10);
+    let narrow = m.word(vt.wrapping_add(0x10)) == t.narrow;
+    let size = if narrow { 8 } else { 12 };
+    let at = |i: i32| keys.wrapping_add(i.wrapping_mul(size) as u32);
     let (a, b, u, slerp) = if n < 3 {
         if n == 2 {
             let u = (time - f(m, at(-1))) / (f(m, at(1)) - f(m, at(0)));
@@ -219,11 +234,12 @@ pub fn rotation(m: &mut impl Ram, t: &Tables, ch: u32, time: F) -> Option<Quad> 
         let u = (time - lo) / (f(m, at(i)) - lo);
         (at(i - 1), at(i), u, slerp)
     };
-    let qb = key(m, t, b.wrapping_add(4));
+    let mut key = |m: &mut _, at: u32| if narrow { narrow_key(m, t, at) } else { key(m, t, at) };
+    let qb = key(m, b.wrapping_add(4));
     if !slerp {
         return Some(qb.to_bits());
     }
-    let qa = key(m, t, a.wrapping_add(4));
+    let qa = key(m, a.wrapping_add(4));
     Some(math::slerp(qa, qb, u, true, t.acos).to_bits())
 }
 
@@ -436,6 +452,82 @@ pub fn blend(m: &mut impl Ram, t: &Tables, ctrl: u32, clips: [u32; 2], weight: F
             && let Some(saved) = fade_position(m, ctrl, bone, bone, fade)
         {
             pb = saved;
+        }
+        k += 1;
+    }
+    finish(m, ctrl, a, time);
+}
+
+/// `b − (b − a)·mix` on VU0 (`xyz`), `w` the word `b` holds: the two-way mix [`blend4`] makes of
+/// each pair.
+fn mix_positions(a: Quad, b: Quad, mix: F) -> Quad {
+    let (va, vb) = (Vf::from_bits(a), Vf::from_bits(b));
+    let s = Vf::from_bits([mix.to_bits(); 4]);
+    let r = vb.sub(vb.sub(va).mul(s)).to_bits();
+    [r[0], r[1], r[2], b[3]]
+}
+
+/// **Four clips blended** (F62a: the rider's idle layer's) at `weight` of the first's length: channel
+/// `k` of each sampled, the first two slerped the short way by `mix` (from the second to the first,
+/// as [`blend`] does), the last two the same, then those two results by `mix2` (from the second pair's
+/// to the first's); into the bone the first clip's channel maps to, faded and stored as [`play`] does.
+/// The positions likewise, each mix `b − (b − a)·s` with the `w` of `b`; the result stored whole into
+/// the bone before the bone is checked, then faded. The first and third clips share one sample buffer,
+/// the second and fourth another (so an off channel keeps the other clip's quaternion, a held position
+/// the other's `z`), and a fade leaves the saved rotation in the first buffer and the saved position
+/// in the second. Channels are paired by their place in the lists and counted by the first clip's.
+pub fn blend4(m: &mut impl Ram, t: &Tables, ctrl: u32, clips: [u32; 4], weight: F, mix: F, mix2: F, fade: F) {
+    let [a, b, c, d] = clips;
+    m.set(ctrl + 0x3c, 0);
+    let data = m.word(a + 4);
+    let time = f(m, data + 0x44) * weight;
+    let slerp = |from: Quad, to: Quad, u: F| math::slerp(Vf::from_bits(from), Vf::from_bits(to), u, true, t.acos).to_bits();
+    let (mut first, mut second): (Quad, Quad) = ([0; 4], [0; 4]);
+    let mut k = 0;
+    while (k as i32) < deref(m, a + 4, 0x28) as i32 {
+        let pair = |m: &mut _, x: u32, y: u32, first: &mut Quad, second: &mut Quad| {
+            let (ch, _) = channel(m, x, 0x1c, k);
+            if let Some(r) = rotation(m, t, ch, time) {
+                *first = r;
+            }
+            let (ch, _) = channel(m, y, 0x1c, k);
+            if let Some(r) = rotation(m, t, ch, time) {
+                *second = r;
+            }
+            slerp(*second, *first, mix)
+        };
+        let ab = pair(m, a, b, &mut first, &mut second);
+        let cd = pair(m, c, d, &mut first, &mut second);
+        let q = slerp(cd, ab, mix2);
+        let (_, bone) = channel(m, a, 0x1c, k);
+        if bone != NONE {
+            if fades(m, ctrl, bone, fade, 0x208) {
+                first = saved(m, ctrl, 0x208, bone);
+            }
+            put_rotation(m, t, ctrl, bone, bone, q, fade);
+        }
+        k += 1;
+    }
+    let (mut first, mut second): (Quad, Quad) = ([0; 4], [0; 4]);
+    let mut k = 0;
+    while (k as i32) < deref(m, a + 4, 0x24) as i32 {
+        let pair = |m: &mut _, x: u32, y: u32, first: &mut Quad, second: &mut Quad| {
+            let (ch, _) = channel(m, x, 0x18, k);
+            position(m, ch, time, first);
+            let (ch, _) = channel(m, y, 0x18, k);
+            position(m, ch, time, second);
+            mix_positions(*first, *second, mix)
+        };
+        let ab = pair(m, a, b, &mut first, &mut second);
+        let cd = pair(m, c, d, &mut first, &mut second);
+        let p = mix_positions(ab, cd, mix2);
+        let (_, bone) = channel(m, a, 0x18, k);
+        let at = m.word(ctrl + 0x1fc).wrapping_add(BONE * bone) + 0x10;
+        put_quad(m, at, p);
+        if bone != NONE
+            && let Some(saved) = fade_position(m, ctrl, bone, bone, fade)
+        {
+            second = saved;
         }
         k += 1;
     }

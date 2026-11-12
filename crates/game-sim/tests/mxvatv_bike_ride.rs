@@ -5032,6 +5032,8 @@ const ANIM_BLEND4: u32 = 0x0014_0720;
 /// and the two lines it passes).
 const ANIM_TURNS: u32 = 0x0012_c550;
 const ANIM_MOVES: u32 = 0x0012_db50;
+/// F62a: the narrow rotation channels' sampler (their vtable's `+0x10`; the rider's idle clips).
+const ANIM_TURNS_NARROW: u32 = 0x0012_cac0;
 const HEAP_ALLOC: u32 = 0x001b_7340;
 const HEAP_FILE: u32 = 0x0039_7180;
 const NODE_SPIN: u32 = 0x0019_5210;
@@ -5388,7 +5390,7 @@ impl Updates for UpdateInRam<'_> {
             Out::AnimBlend { clips, .. } => kinds(self.ee, &clips),
             _ => {}
         }
-        let t = anim::Tables { turns: Turns::get(), acos: acos() };
+        let t = anim::Tables { turns: Turns::get(), acos: acos(), narrow: ANIM_TURNS_NARROW };
         match c {
             Out::AnimPlay { ctrl, clip, weight, fade } => {
                 anim::play(&mut NodeRam(self.ee), &t, ctrl, clip, F::from_bits(weight), F::from_bits(fade));
@@ -11968,6 +11970,8 @@ const A_BONES: u32 = ANIM + 0x300;
 const A_SAVED: [u32; 2] = [ANIM + 0x500, ANIM + 0x580];
 const A_MASK: u32 = ANIM + 0x600;
 const A_VT: u32 = ANIM + 0x620;
+/// F62a: the narrow rotation channels' vtable.
+const A_VT_NARROW: u32 = ANIM + 0x640;
 const A_OUT: u32 = ANIM + 0x680;
 const A_CLIPS: [u32; 2] = [ANIM + 0x700, ANIM + 0x708];
 const A_CHANNELS: u32 = ANIM + 0x1000;
@@ -11982,6 +11986,7 @@ enum AnimCall {
     Stop,
     Play,
     Blend,
+    Blend4,
     Rotation,
     Position,
 }
@@ -12061,6 +12066,8 @@ fn lay_controller(ee: &mut Ee, seed: u64) -> (u32, u32) {
     }
     ee.set_u32(A_VT + 0x10, ANIM_TURNS);
     ee.set_u32(A_VT + 0x14, ANIM_MOVES);
+    ee.set_u32(A_VT_NARROW + 0x10, ANIM_TURNS_NARROW);
+    ee.set_u32(A_VT_NARROW + 0x14, ANIM_MOVES);
     let length = match r() % 6 {
         0 => 1.0,
         1 => 0.0,
@@ -12101,15 +12108,21 @@ fn lay_controller(ee: &mut Ee, seed: u64) -> (u32, u32) {
                 ee.set_u32(ch, (r() % 0x10) as u32);
                 ee.set_u32(ch + 4, if r() % 6 == 0 { 0 } else { r() as u32 | 1 });
                 ee.set_u32(ch + 8, n as u32);
-                ee.set_u32(ch + 0x10, A_VT);
+                let narrow = kind == 0 && r() % 2 == 0;
+                ee.set_u32(ch + 0x10, if narrow { A_VT_NARROW } else { A_VT });
                 ee.set_u32(ch + 0x14, keys + 0x10);
                 ee.set_u32(ch + 0x18, ((r() % (n.max(0) as u64 + 1)) as u32).wrapping_sub(1));
-                let size = if kind == 0 { 12 } else { 16 };
+                let size = if narrow { 8 } else if kind == 0 { 12 } else { 16 };
                 let mut t = length * ((r() >> 40) as f32 / (1u64 << 24) as f32 * 0.6 - 0.3);
                 for i in 0..n.max(0) as u32 {
                     let at = keys + 0x10 + size * i;
                     ee.set_f32(at, t);
-                    if kind == 0 {
+                    if narrow {
+                        // The narrow key: a turn of the 256 and an axis of signed bytes.
+                        let q = rotation_key(&mut r);
+                        let axis = [q[0] >> 16, q[1], q[1] >> 16].map(|h| (h as i16 >> 8) as u8 as u32);
+                        ee.set_u32(at + 4, (r() % 256) as u32 | axis[0] << 8 | axis[1] << 16 | axis[2] << 24);
+                    } else if kind == 0 {
                         let q = rotation_key(&mut r);
                         ee.set_u32(at + 4, q[0]);
                         ee.set_u32(at + 8, q[1]);
@@ -12142,7 +12155,7 @@ fn anim_float(x: u64) -> f32 {
 
 /// **F43a — the anim controller's calls are the original's**: 10 000 random controllers
 /// ([`lay_controller`]: bones on a random node forest, two clips, their channels and keys), each with
-/// a stop, a play, a blend or one channel sampled — the original in the interpreter (its stack zeroed
+/// a stop, a play, a blend (of two clips, or F62a's of four) or one channel sampled — the original in the interpreter (its stack zeroed
 /// first), then the port on the same RAM; every word of the controller, its clips and the forest the
 /// same, the saved buffers the original made as well (from a heap that hands out two fixed ones), and
 /// the original writes nothing else outside its stack.
@@ -12153,7 +12166,7 @@ fn the_anim_controller_calls_are_the_originals() {
     let mut t = |s: String| *tally.entry(s).or_default() += 1;
     let snap = |ee: &Ee| -> Vec<u32> { (FOREST..FOREST_END).chain(ANIM..ANIM_END).step_by(4).map(|o| ee.u32_at(o)).collect() };
     let stack = ee.stack;
-    let tables = anim::Tables { turns: Turns::get(), acos: acos() };
+    let tables = anim::Tables { turns: Turns::get(), acos: acos(), narrow: ANIM_TURNS_NARROW };
     ee.hooks.insert(
         HEAP_ALLOC,
         Box::new(|ee: &mut Ee| {
@@ -12164,12 +12177,16 @@ fn the_anim_controller_calls_are_the_originals() {
             ee.set(2, u64::from(A_HEAP[(line == 0x52d) as usize]));
         }),
     );
-    let calls = [AnimCall::Stop, AnimCall::Play, AnimCall::Play, AnimCall::Blend, AnimCall::Blend, AnimCall::Rotation, AnimCall::Position];
+    let calls = [AnimCall::Stop, AnimCall::Play, AnimCall::Play, AnimCall::Blend, AnimCall::Blend, AnimCall::Blend4, AnimCall::Rotation, AnimCall::Position];
     for k in 0..10_000u64 {
         lay_forest(&mut ee, k ^ 0xa43);
         let (ctrl, pick) = lay_controller(&mut ee, k);
         let x = mix(k ^ 0x00f4_3a00);
-        let c = calls[(x % 7) as usize];
+        let c = calls[(x % 8) as usize];
+        // The four clips of a four-clip blend: the two clips in one of four orders.
+        let [a, b] = A_CLIPS;
+        let four = [[a, b, b, a], [a, a, b, b], [b, a, a, b], [a, b, a, b]][(mix(x ^ 6) % 4) as usize];
+        let mix2 = anim_float(mix(x ^ 7));
         let (weight, mix_, fade) = (anim_float(mix(x ^ 1)), anim_float(mix(x ^ 2)), if mix(x ^ 3) % 4 == 0 { 0.0 } else { anim_float(mix(x ^ 4)) });
         let ch = A_CHANNELS + 0x20 * (if c == AnimCall::Position { 4 + pick % 3 } else { pick % 4 } + 7 * (pick & 1));
         let time = {
@@ -12185,7 +12202,7 @@ fn the_anim_controller_calls_are_the_originals() {
                     path += " made buffers";
                 }
             }
-            AnimCall::Play | AnimCall::Blend => {
+            AnimCall::Play | AnimCall::Blend | AnimCall::Blend4 => {
                 path += if fade > 0.0 { " faded" } else { " not faded" };
                 t(format!("{c:?}{}", if flags & 0x10 != 0 && ee.u32_at(ctrl + 0x210) != 0 { " a fade list" } else { " no fade list" }));
                 t(format!("{c:?} nodes {}", (flags >> 12) & 3));
@@ -12193,7 +12210,7 @@ fn the_anim_controller_calls_are_the_originals() {
             AnimCall::Rotation | AnimCall::Position => {
                 let n = ee.u32_at(ch + 8) as i32;
                 let keys = ee.u32_at(ch + 0x14);
-                let size = if c == AnimCall::Rotation { 12 } else { 16 };
+                let size = if c != AnimCall::Rotation { 16 } else if ee.u32_at(ch + 0x10) == A_VT_NARROW { 8 } else { 12 };
                 path += if ee.u32_at(ch + 4) == 0 { " off" } else { " on" };
                 path += &match n {
                     ..=0 => " no keys".to_string(),
@@ -12205,7 +12222,11 @@ fn the_anim_controller_calls_are_the_originals() {
             }
         }
         t(path.clone());
-        for o in (stack - 0x2000..stack).step_by(4) {
+        if c == AnimCall::Rotation && ee.u32_at(ch + 0x10) == A_VT_NARROW {
+            t(format!("{path} narrow"));
+        }
+        // (The four-clip blend's stack arguments, zero in the idle layer's calls, above it.)
+        for o in (stack - 0x2000..stack + 0x40).step_by(4) {
             ee.set_u32(o, 0);
         }
         let before = snap(&ee);
@@ -12214,7 +12235,8 @@ fn the_anim_controller_calls_are_the_originals() {
             AnimCall::Stop => (ANIM_STOP, vec![u(ctrl), 0, 0, 0, 0], vec![]),
             AnimCall::Play => (ANIM_PLAY, vec![u(ctrl), u(A_CLIPS[0]), 0, 0, 0, 0, 0, 0], vec![weight, fade, 0.0]),
             AnimCall::Blend => (ANIM_BLEND, vec![u(ctrl), u(A_CLIPS[0]), u(A_CLIPS[1]), 0, 0, 0, 0, 0], vec![weight, mix_, fade]),
-            AnimCall::Rotation => (ANIM_TURNS, vec![u(ch), u(A_OUT)], vec![time]),
+            AnimCall::Blend4 => (ANIM_BLEND4, vec![u(ctrl), u(four[0]), u(four[1]), u(four[2]), u(four[3]), 0, 0, 0], vec![weight, mix_, mix2, fade]),
+            AnimCall::Rotation => (ee.u32_at(ee.u32_at(ch + 0x10) + 0x10), vec![u(ch), u(A_OUT)], vec![time]),
             AnimCall::Position => (ANIM_MOVES, vec![u(ch), u(A_OUT)], vec![time]),
         };
         ee.set(28, GP);
@@ -12236,6 +12258,7 @@ fn the_anim_controller_calls_are_the_originals() {
             AnimCall::Stop => anim::stop(m, ctrl),
             AnimCall::Play => anim::play(m, &tables, ctrl, A_CLIPS[0], F(weight), F(fade)),
             AnimCall::Blend => anim::blend(m, &tables, ctrl, A_CLIPS, F(weight), F(mix_), F(fade)),
+            AnimCall::Blend4 => anim::blend4(m, &tables, ctrl, four, F(weight), F(mix_), F(mix2), F(fade)),
             AnimCall::Rotation => {
                 if let Some(q) = anim::rotation(m, &tables, ch, F(time)) {
                     for (j, w) in q.into_iter().enumerate() {
@@ -12254,13 +12277,15 @@ fn the_anim_controller_calls_are_the_originals() {
         let (got, got_buf) = (snap(&ee), buffers(&ee));
         let names = |j: usize| if j < ((FOREST_END - FOREST) / 4) as usize { format!("forest +{:#x}", 4 * j) } else { format!("controller +{:#x}", 4 * j - (FOREST_END - FOREST) as usize) };
         let diff: Vec<String> = (0..want.len()).filter(|&j| want[j] != got[j]).map(|j| format!("{}: original {:#010x}, port {:#010x}", names(j), want[j], got[j])).take(12).collect();
-        assert!(diff.is_empty(), "case {k} ({path}, weight {weight}, mix {mix_}, fade {fade}, time {time}): {}", diff.join("\n  "));
+        assert!(diff.is_empty(), "case {k} ({path}, weight {weight}, mix {mix_}, mix2 {mix2}, fade {fade}, time {time}): {}", diff.join("\n  "));
         assert_eq!(want_buf, got_buf, "case {k} ({path}): the saved buffers");
     }
     eprintln!("{tally:#?}");
     let want = [
         "Stop", "Stop made buffers", "Play faded", "Play not faded", "Play a fade list", "Play no fade list", "Play nodes 0", "Play nodes 1", "Play nodes 2", "Play nodes 3",
         "Blend faded", "Blend not faded", "Blend a fade list", "Blend no fade list", "Blend nodes 0", "Blend nodes 3",
+        "Blend4 faded", "Blend4 not faded", "Blend4 a fade list", "Blend4 no fade list", "Blend4 nodes 0", "Blend4 nodes 3",
+        "Rotation on 1 keys narrow", "Rotation on 2 keys narrow", "Rotation on before the first narrow", "Rotation on past the last narrow", "Rotation on inside narrow",
         "Rotation off no keys", "Rotation on no keys", "Rotation on 1 keys", "Rotation on 2 keys", "Rotation on before the first", "Rotation on past the last", "Rotation on inside",
         "Position off inside", "Position on no keys", "Position on 1 keys", "Position on 2 keys", "Position on before the first", "Position on past the last", "Position on inside",
     ];
@@ -16747,10 +16772,17 @@ fn net_post_in_ram(ee: &mut Ee, dt: F) {
 /// The machine's outside calls (S278b's oracle's addresses). The listener step's own code is Rust's
 /// (F55: `rider::listener_step`), its world step too (F62: `rider::world_step`): the rider's vt
 /// `+0xdc` (the drawn frames kept) and `+0xd8` (the nodes on the ragdoll) Rust's, its `+0xd4` (the
-/// idle layer) the original's.
+/// idle layer) Rust's too since F62a (`rider::idle`).
 const RIDER_KEEP_DRAWN: u32 = 0x0050_5c50;
 const RIDER_AIM_NODES: u32 = 0x004f_0f40;
 const RIDER_IDLE: u32 = 0x004e_b380;
+/// F62a: the idle layer's own outside calls — the rider's vt `+0x174` (a clip by id, its words read
+/// by the port), the wreck poses' clip start, the controller's clip advance (vt `+0x88`), and the
+/// flag that says `rand` has its clock seed.
+const RIDER_CLIP_BY_ID: u32 = 0x004f_2d30;
+const RIDER_CLIP_START: u32 = 0x0013_ea90;
+const RIDER_CLIP_ADVANCE: u32 = 0x0013_c7b0;
+const RAND_SEEDED: u32 = 0x0052_cd80;
 const RIDER_RESET: u32 = 0x004e_ef40;
 const RIDER_WRECK_ENTRY: u32 = 0x004e_d700;
 const RIDER_POSE: u32 = 0x0050_5720;
@@ -16891,7 +16923,28 @@ impl rider::Rider for LeafRider<'_> {
             }
             C::Idle => {
                 assert_eq!(vt(self.ee, RIDER + 4, 0xd4), RIDER_IDLE, "the rider's vt +0xd4");
-                call_from_hook_dt(self.ee, RIDER_IDLE, &[r], dt)
+                assert_eq!(vt(self.ee, RIDER + 4, 0x174), RIDER_CLIP_BY_ID, "the rider's vt +0x174");
+                rider::idle(self, RIDER, dt, &anim::Tables { turns: Turns::get(), acos: acos(), narrow: ANIM_TURNS_NARROW });
+                0
+            }
+            C::Seed => {
+                assert_ne!(self.ee.u32_at(RAND_SEEDED), 0, "the idle layer seeds rand from the clock (unported)");
+                0
+            }
+            C::ClipStart { clip } => {
+                let rate = F::from_bits(self.ee.u32_at(RIDER + rider::IDLE_RATE));
+                call_from_hook_dt(self.ee, RIDER_CLIP_START, &[r, u64::from(clip), 0], rate)
+            }
+            C::ClipAdvance => {
+                assert_eq!(vt(self.ee, RIDER + 4, 0x88), RIDER_CLIP_ADVANCE, "the rider's vt +0x88");
+                call_from_hook_dt(self.ee, RIDER_CLIP_ADVANCE, &[r, 0, 0, 0, 0], dt)
+            }
+            C::SavedPose { bytes, buffer } => {
+                let line = match buffer {
+                    anim::Saved::Rotations => 0x52a,
+                    anim::Saved::Positions => 0x52d,
+                };
+                call_from_hook_dt(self.ee, HEAP_ALLOC, &[u64::from(bytes), u64::from(HEAP_FILE), line], dt)
             }
             C::RagWorld => {
                 let world = self.ee.u32_at(RIDER + rider::WORLD);
@@ -16945,7 +16998,11 @@ impl rider::Rider for LeafRider<'_> {
             C::WorldStep => "= world step",
             C::AfterStep => "= after step",
             C::NodePosition { .. } => "= node position",
-            C::Idle => "> idle layer",
+            C::Idle => "= idle layer",
+            C::Seed => "= rand seed",
+            C::ClipStart { .. } => "> clip start",
+            C::ClipAdvance => "> clip advance",
+            C::SavedPose { .. } => "> heap (saved pose)",
             C::RagWorld => "= ragdoll world",
             C::PoseStill => "= pose still",
             C::Bounds { .. } => "= node bounds",
@@ -17000,7 +17057,8 @@ impl<'a, 'b> rag::Rig<RiderRam<'b>> for LeafRig<'a> {
 /// mode machine [`rider::modes`] with its pose and settle [`rider::pose`]'s and [`rider::settle`]'s
 /// (S286). The world step is [`rider::world_step`]'s (F62: its drawn frames, node bits, node aims
 /// and base step; the node's bounds [`node::bounds`]' into the database by [`attach::spatial_move`]),
-/// all but its idle layer (vt `+0xd4`, the original's); the ragdoll world it steps is
+/// its idle layer too ([`rider::idle`], F62a: the clips by [`anim`]'s stop, play, blend and four-clip
+/// blend, but the controller's clip advance and the wreck poses' clip start the original's); the ragdoll world it steps is
 /// [`rag::step`]'s (S280), its bone collisions [`bone::solve`]'s on the port's scene ([`PortScene`],
 /// S279), and its respawn's pose and settle the port's; the vt `+0x148` after it [`rider::after_step`]'s (the
 /// hand-over [`rider::hand_over`]'s, and the wreck's spot node into the record), the copy's node position [`node::position`]'s, the part clears
@@ -17058,9 +17116,9 @@ fn replay_with_rider_leaf(name: &str) -> Option<(Vec<bool>, Vec<String>, BTreeMa
     Some((w, off, served, census))
 }
 
-/// What the leaf left to the interpreter is only its outside calls' (each booked by name): the
-/// world step's idle layer (F62), rand, the cue, the wreck entry's heap resize and any heap call of
-/// the node's spatial move.
+/// What the leaf left to the interpreter is only its outside calls' (each booked by name): the idle
+/// layer's clip advance and clip start and its saved-pose heap (F62a), rand, the cue, the wreck
+/// entry's heap resize and any heap call of the node's spatial move.
 fn leaf_census(census: &BTreeMap<String, u64>) {
     let get = |k: &str| census.get(k).copied().unwrap_or(0);
     let calls: u64 = census.iter().filter(|(k, _)| k.starts_with("the rider leaf >")).map(|(_, n)| n).sum();
@@ -17083,14 +17141,14 @@ fn ride_replays_with_the_rider_leaf_on_the_ports() {
             ("= after step", 459),
             ("= bone solve", 12393),
             ("= extra step", 459),
+            ("= idle layer", 459),
             ("= listener step", 459),
             ("= modes", 459),
             ("= node bounds", 459),
             ("= node position", 459),
             ("= ragdoll world", 459),
             ("= switch", 1836),
-            ("= world step", 459),
-            ("> idle layer", 459)
+            ("= world step", 459)
         ],
         "{census:?}"
     );
@@ -17119,6 +17177,7 @@ fn flip_replays_with_the_rider_leaf_on_the_ports() {
             ("= bone solve", 12303),
             ("= extra step", 465),
             ("= gather", 68),
+            ("= idle layer", 465),
             ("= listener step", 465),
             ("= modes", 465),
             ("= node bounds", 465),
@@ -17126,13 +17185,15 @@ fn flip_replays_with_the_rider_leaf_on_the_ports() {
             ("= pose", 4),
             ("= pose still", 2),
             ("= ragdoll world", 433),
+            ("= rand seed", 1),
             ("= riding reset", 1),
             ("= settle", 6),
             ("= switch", 1501),
             ("= world step", 465),
             ("= wreck entry", 1),
-            ("> idle layer", 465),
-            ("> rand", 5),
+            ("> clip advance", 68),
+            ("> clip start", 2),
+            ("> rand", 7),
             ("> wreck cue", 1)
         ],
         "{census:?}"
