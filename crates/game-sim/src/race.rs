@@ -593,14 +593,52 @@ impl Supercross {
 /// The start's countdown as the score manager runs it: how long it lasts (`+0xbc` of the manager)
 /// and how long it has run (`+0xc4`). While it runs, the manager adds the tick's `dt` to `elapsed`
 /// each tick until `elapsed` is no longer under `length`; that tick ends it and drops the gate
-/// ([`Race::tick`]). The beeps and the light it shows on the way (every `+0xc0` seconds) are the
-/// front end's and change nothing a tick reads.
+/// ([`Race::tick`]). On the way it calls its listener, the race's activity
+/// ([`Supercross::start_timeline`]), every `interval` seconds (S304).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Countdown {
     pub length: F,
     pub elapsed: F,
     /// Still counting (the manager's `0x80` flag); cleared by the tick that drops the gate.
     pub running: bool,
+    /// How often the listener is called (`+0xc0`): 0.1 s from the race's reset. At zero or below it
+    /// is never called.
+    pub interval: F,
+    /// The listener's accumulator (`+0xc8`): zero from the countdown's start, so the first tick calls
+    /// it; a call when it has reached `interval` takes `interval` off it, and every tick with a
+    /// listener adds `dt`. The intro's end zeroes it.
+    pub acc: F,
+}
+
+impl Countdown {
+    /// The listener's turn this tick (with an interval above zero), ahead of the countdown's own end
+    /// test: whether it is called —
+    /// on the first tick (the accumulator reads zero) or once the accumulator has reached the
+    /// interval, which is then taken off it. The caller makes the call, then [`Countdown::heard`].
+    fn listen(&mut self) -> bool {
+        let (interval, acc) = (read(self.interval), read(self.acc));
+        if !(interval <= acc || acc == F::ZERO) {
+            return false;
+        }
+        if interval <= acc {
+            self.acc = F(fpu::sub(self.acc.0, self.interval.0));
+        }
+        true
+    }
+
+    /// After the listener's call (`step`, when it was called): the intro's end moves the elapsed time
+    /// and zeroes the accumulator; then the tick's `dt` goes on the accumulator.
+    fn heard(&mut self, step: Option<&StartStep>, dt: F) {
+        if let Some(step) = step
+            && step.intro_ended
+        {
+            if let Some(e) = step.elapsed {
+                self.elapsed = e;
+            }
+            self.acc = F::ZERO;
+        }
+        self.acc = F(fpu::add(self.acc.0, dt.0));
+    }
 }
 
 /// A race's start (S13b): the race manager's tick as far as a tick reads it — its two clocks, the
@@ -627,6 +665,10 @@ pub struct Race {
     /// The tip clock has been armed from the stage (`+0x474`); it is armed once.
     pub tip_armed: bool,
     pub countdown: Countdown,
+    /// The race's activity, the countdown's listener (S304): while the countdown runs, its start
+    /// timeline is called at the countdown's cadence ([`Countdown::interval`]). `None` — no listener —
+    /// and the countdown only counts.
+    pub activity: Option<Supercross>,
     /// The word the drop draws for the scene (its `+0xf0`), eight to thirteen seconds.
     pub scene_clock: F,
     /// The race's draws: the watch's two per rider caught and the drop's one.
@@ -645,6 +687,10 @@ pub struct Frame {
     pub caught: Vec<(usize, Caught)>,
     /// The countdown ended and the gate dropped: every rider is to be [`release`]d.
     pub dropped: bool,
+    /// The start's timeline was called this tick, and what it did ([`Supercross::start_timeline`]):
+    /// every rider's chassis is to take its [`StartStep::apply`], after the caught riders' pushes and
+    /// before the drop's release.
+    pub start: Option<StartStep>,
 }
 
 impl Race {
@@ -660,7 +706,8 @@ impl Race {
             tip_in: F::ZERO,
             stage: None,
             tip_armed: false,
-            countdown: Countdown { length, elapsed: F::ZERO, running: true },
+            countdown: Countdown { length, elapsed: F::ZERO, running: true, interval: WINDOW, acc: F::ZERO },
+            activity: None,
             scene_clock: F::ZERO,
             rng,
         }
@@ -711,6 +758,16 @@ impl Race {
         }
         let c = &mut self.countdown;
         if c.running {
+            if let Some(activity) = &mut self.activity {
+                if F::ZERO < read(c.interval) {
+                    if c.listen() {
+                        // The items' bodies are the riders' chassis, which the caller holds: the
+                        // step says what was done to them. No intro camera in the port.
+                        frame.start = Some(activity.start_timeline(c.elapsed, &mut [], false));
+                    }
+                    c.heard(frame.start.as_ref(), dt);
+                }
+            }
             if !(read(c.elapsed) < read(c.length)) {
                 c.running = false;
                 self.drop();

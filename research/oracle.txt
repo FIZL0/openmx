@@ -5751,6 +5751,10 @@ rider_score_trick_abort     boot 0x00280d70 (rider) rider vt+0x114: the trick an
 #   accumulator. The modes written to +0x64 are 1, 2 and 3 only (no store of 4, 5 or 6 anywhere).
 score_manager_tick          boot 0x0025fcd0 (dt f12, mgr) countdown while not running (flag 0x80), or
 #                                           the mode's handler, the leading card, score_grow, the clock
+#                                           S304: the countdown's listener cadence (interval > 0 and a
+#                                           listener: acc >= interval -> acc -= interval, or acc == 0:
+#                                           call vt+0x5c(length, elapsed, interval); acc += dt only
+#                                           with a listener). race::Countdown, Race::activity
 score_countdown_start       boot 0x002603d0 (mgr) length > 0: flag 0x80, elapsed and accumulator 0;
 #                                           else running at once, every card takes part
 score_mode3                 boot 0x00268d00 (dt f12, mgr) all done judged first; each card taking part

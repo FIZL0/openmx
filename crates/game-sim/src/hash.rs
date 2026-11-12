@@ -555,8 +555,8 @@ impl State for Sim {
 }
 
 impl State for crate::race::Race {
-    /// The gate as it stands, the cards' memory of the riders, the clocks, the countdown and the
-    /// race's generator.
+    /// The gate as it stands, the cards' memory of the riders, the clocks, the countdown and its
+    /// listener's timeline, and the race's generator.
     fn walk(&self, w: &mut Walk<'_>) {
         let g = &self.gate;
         w.group("gate", |w| {
@@ -584,6 +584,22 @@ impl State for crate::race::Race {
         w.f("countdown.length", self.countdown.length);
         w.f("countdown.elapsed", self.countdown.elapsed);
         w.bool("countdown.running", self.countdown.running);
+        w.f("countdown.interval", self.countdown.interval);
+        w.f("countdown.acc", self.countdown.acc);
+        // The countdown's listener (S304), on a race that has one: what its start timeline reads and
+        // writes.
+        w.bool("activity", self.activity.is_some());
+        if let Some(a) = &self.activity {
+            w.group("activity", |w| {
+                w.f("start_cue", a.start_cue);
+                w.f("lights_on", a.lights_on);
+                w.f("lights_off", a.lights_off);
+                w.f("warn_on", a.warn_on);
+                w.f("warn_off", a.warn_off);
+                w.u32("intro_seen", a.intro_seen);
+                w.u32("intro_queued", a.intro_queued);
+            });
+        }
         w.f("scene_clock", self.scene_clock);
         w.field("rng", &self.rng);
     }
