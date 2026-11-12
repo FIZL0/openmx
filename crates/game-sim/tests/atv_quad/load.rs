@@ -275,3 +275,92 @@ fn the_wheels_the_reader_leaves_are_the_constructors() {
         }
     }
 }
+
+/// The quad's spawn point and heading, the placement the load reads the model in (MD129).
+fn spawn(ee: &Ee) -> (Vf, Vf) {
+    (get_v(ee, QUAD + 0x50), get_v(ee, QUAD + 0x60))
+}
+
+/// The R quad's chassis model, or why it is not there.
+fn chassis(kit: &Kit) -> Option<quad::Model> {
+    let path = kit.ctx("mxvatv-ps2/md37a").join("250r_atv_chasis.psg");
+    let Ok(bytes) = std::fs::read(&path) else {
+        skip(&format!(
+            "{} is not there: it is Veh\\Anim's 250r_atv_chasis.psg out of MXVSATV.PSR's vehicletype_1.res \
+             (research/journal/2026-11-11-md129-atv-model-load)",
+            path.display()
+        ));
+        return None;
+    };
+    Some(quad::Model::parse(&bytes).unwrap_or_else(|e| panic!("250r_atv_chasis.psg: {e}")))
+}
+
+/// The wheel setup's mounts off the chassis model at the quad's spawn are each C28 wheel's, bit for
+/// bit, and none has a sweep shape.
+#[test]
+fn the_models_mounts_are_the_c28_wheels() {
+    let Ok(kit) = Kit::load().map_err(|w| skip(&w)) else { return };
+    let Some(model) = chassis(&kit) else { return };
+    let dir = kit.ctx("mxvatv-ps2/md37a");
+    let mut seen = 0;
+    for (name, _) in IMAGES {
+        let path = dir.join(format!("{name}.ee{}", ".bin"));
+        if !path.exists() {
+            skip(&format!("{} is not there (C28's; memory: md37a ATV states live in s2)", path.display()));
+            continue;
+        }
+        let ee = Ee::from_ram(&path).unwrap_or_else(|e| panic!("{e}"));
+        let want = mounts(&ee, &layout(&ee));
+        let (at, heading) = spawn(&ee);
+        let got = model.mounts(&quad::spawn_frame(at, heading)).unwrap_or_else(|e| panic!("{e}"));
+        for k in 0..4 {
+            assert_eq!(got[k].0.0.map(f32::to_bits), want[k].0.0.map(f32::to_bits), "{name}: wheel {k}'s mount {:?} {:?}", got[k].0, want[k].0);
+            assert_eq!(got[k].1, want[k].1, "{name}: wheel {k}'s sweep shape");
+        }
+        seen += 1;
+    }
+    assert!(seen > 0 || IMAGES.is_empty());
+}
+
+/// The part reader's box off the chassis model at the quad's spawn, against the record's inertia:
+/// its `x` and `y` are the only box's near that gives the record, its `z` one float under it (not
+/// 1:1: the frame the loader saw is not pinned down, research/journal/2026-11-11-md129-atv-model-load).
+/// So [`Load::read_model`]'s words are the image's but for the four record words that `z` feeds.
+#[test]
+fn the_models_box_is_the_c28_records_but_one_float() {
+    let Ok(kit) = Kit::load().map_err(|w| skip(&w)) else { return };
+    let Some(model) = chassis(&kit) else { return };
+    let dir = kit.ctx("mxvatv-ps2/md37a");
+    let phy = dir.join("phy");
+    if !phy.exists() {
+        skip(&format!("{} is not there (research/journal/2026-11-02-md64b-atv-tire-phy)", phy.display()));
+        return;
+    }
+    let mut seen = 0;
+    for (name, file) in IMAGES {
+        let path = dir.join(format!("{name}.ee{}", ".bin"));
+        if !path.exists() {
+            skip(&format!("{} is not there (C28's; memory: md37a ATV states live in s2)", path.display()));
+            continue;
+        }
+        let ee = Ee::from_ram(&path).unwrap_or_else(|e| panic!("{e}"));
+        let at = layout(&ee);
+        let (spot, heading) = spawn(&ee);
+        let half = model.half_box(&quad::heading_frame(spot, heading));
+        let bytes = std::fs::read(phy.join(format!("{file}.phy"))).unwrap_or_else(|e| panic!("{file}: {e}"));
+        let load = Load::read_model(&Ini::parse_bytes(&bytes), &model, spot, heading, &curve(&ee)).unwrap_or_else(|e| panic!("{e}"));
+        let want: [u32; 3] = std::array::from_fn(|k| ee.u32_at(at.record + 0x60 + 4 * k as u32));
+        let solved = load_box(&load.part, want).expect("a box that gives the record");
+        let up = Vf::new(half.x(), half.y(), f32::from_bits(half.z().to_bits() + 1), 1.0);
+        assert_eq!(up.0[..3].iter().map(|v| v.to_bits()).collect::<Vec<_>>(), solved.0[..3].iter().map(|v| v.to_bits()).collect::<Vec<_>>(), "{name}: the model's box {half:?}, the record's {solved:?}");
+        let (bad, n) = misses(&ee, &at, &load.words(&at));
+        for (a, theirs, port) in &bad {
+            println!("{name}: {a:#010x} ({}): the original's {theirs:#010x} ours {port:#010x}", place(&at, *a));
+        }
+        // The record's inertia `x`, `y` (each over the box's `z`) and their inverses.
+        let off: Vec<u32> = bad.iter().map(|&(a, _, _)| a - at.record).collect();
+        assert_eq!(off, [0x60, 0x64, 0x70, 0x74], "{name}: of {n} words, the ones that differ from {file}'s");
+        seen += 1;
+    }
+    assert!(seen > 0 || IMAGES.is_empty());
+}
