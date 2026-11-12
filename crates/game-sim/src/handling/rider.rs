@@ -47,8 +47,13 @@
 //! ([`frame`]: the node's [`alpha`], two rate-limited clocks), the copy after it ([`copy_after`]) and
 //! the extra step ([`extra_step`]), put together as [`listener_step`].
 //!
-//! What is not here: the world step (3); and the rest of the calls in [`Call`]. The `touched` words this reads
-//! come from the original's ragdoll world until that is ported.
+//! The frame's world step ([`Call::WorldStep`]) is [`world_step`] (F62): the holders' drawn frames
+//! kept ([`keep_drawn`]), the animation's node bits, the idle layer, the ragdoll world and the nodes
+//! put where it is ([`aim_nodes`]), the respawn's still pose, the node's bounds and the controller's
+//! base step ([`base_step`]).
+//!
+//! What is not here: the idle layer ([`Call::Idle`], the rider's animation picked and blended), the
+//! ragdoll world itself, and the rest of the calls in [`Call`].
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
 use super::ground;
@@ -322,6 +327,19 @@ pub enum Call {
     AfterStep,
     /// The copy after the frame's (F55): the scene node's position (`a1` 0) into the quadword at `out`.
     NodePosition { node: u32, out: u32 },
+    /// The world step's ([`world_step`], F62): the rider's vt `+0xd4`, its idle layer (with `dt`);
+    /// the ragdoll world (`+0x27c`) stepped by `dt`; the respawn's vt `+0xd0` with `a1` 1, the
+    /// ragdoll posed still ([`pose`]); the scene node's bounds into the spatial database.
+    Idle,
+    RagWorld,
+    PoseStill,
+    Bounds { node: u32 },
+    /// The base step's ([`base_step`]): the controller's entry `index` bound (the entry's words
+    /// unset); the entry list at `list` grown to `count`; a listener of the rider's own group stepped
+    /// by `dt`.
+    EntryBind { index: u32 },
+    EntriesGrow { list: u32, count: u32 },
+    Listener { listener: u32 },
 }
 
 /// The mode machine's RAM and calls; [`Rider::call`]'s answer is `v0` (only [`Call::Rand`]'s is read).
@@ -1796,4 +1814,230 @@ pub fn listener_step(m: &mut impl Rider, rider: u32, dt: F, map: Option<&track::
         extra_step(m, rider, dt);
     }
     v
+}
+
+// --- F62: the ragdoll world's step, with its own steps around it ------------------------------------
+
+use super::anim;
+use super::tail::{self, Listeners};
+use ps2_float::vu;
+
+/// The world step's words: the latch (`+0x254`, set by the riding reset), the respawn ask
+/// (`+0x258`), the ragdoll's switch (`+0x260`; with [`LEFT_AS_IS`] set and neither of the other two,
+/// the ragdoll world steps and the nodes follow it); the parts' placing ask (`+0x390`, set while
+/// the nodes follow the record).
+pub const LATCH: u32 = 0x254;
+pub const RESPAWN_ASK: u32 = 0x258;
+pub const RAG_ON: u32 = 0x260;
+pub const PLACE_PARTS: u32 = 0x390;
+/// The rider is an animation controller: its second flag byte (`+0x2d`), [`NODES_PLACED`] and
+/// [`NODES_TURNED`] set while the animation moves the nodes; the toggle (`+0x58`); its entry list
+/// (`+0x228`: the array, the room `+4`, the count `+0xc`, 16 bytes an entry).
+pub const CTRL_FLAGS: u32 = 0x2d;
+pub const NODES_PLACED: u32 = 0x10;
+pub const NODES_TURNED: u32 = 0x20;
+pub const TOGGLE: u32 = 0x58;
+pub const ENTRIES: u32 = 0x228;
+/// A quadword's four words as they are.
+fn words(m: &mut impl Ram, at: u32) -> [u32; 4] {
+    [0, 4, 8, 12].map(|k| m.word((at & !0xf) + k))
+}
+
+/// A byte stored as `sb` stores it.
+fn put_byte(m: &mut impl Ram, at: u32, b: u32) {
+    let (w, s) = (at & !3, 8 * (at & 3));
+    let old = m.word(w);
+    m.set(w, (old & !(0xff << s)) | ((b & 0xff) << s));
+}
+
+/// The holder `i` (`0xb0` bytes each from [`MAIN`]).
+fn holder(m: &mut impl Ram, rider: u32, i: u32) -> u32 {
+    m.word(rider + MAIN).wrapping_add(0xb0u32.wrapping_mul(i))
+}
+
+/// **The rider's world step** ([`Call::WorldStep`], F62). With the game paused (the outside world's
+/// answer, `paused`) only the base step ([`base_step`]). Else, in order:
+///
+/// 1. the drawn frames kept ([`keep_drawn`], the rider's vt `+0xdc`);
+/// 2. the animation's node bits ([`NODES_PLACED`], [`NODES_TURNED`]) cleared while the ragdoll has
+///    the nodes ([`LEFT_AS_IS`] and [`RAG_ON`] set, [`LATCH`] and [`RESPAWN_ASK`] clear), else set,
+///    each bit its own store;
+/// 3. with the latch, every holder's node but the first put at its holder's `+0x50`
+///    ([`node::set_position`], the count re-read after each);
+/// 4. the idle layer ([`Call::Idle`], vt `+0xd4`);
+/// 5. while the ragdoll has the nodes but for the latch: the ragdoll world ([`Call::RagWorld`]),
+///    then the nodes put on it ([`aim_nodes`], vt `+0xd8`);
+/// 6. with the respawn ask: the ragdoll posed still and settled ([`Call::PoseStill`],
+///    [`Call::Settle`], vt `+0xd0` and `+0xcc`), and the ask cleared;
+/// 7. the scene node's bounds ([`Call::Bounds`]) and the base step.
+pub fn world_step(m: &mut impl Rider, rider: u32, dt: F, paused: bool) {
+    if paused {
+        base_step(m, rider, dt);
+        return;
+    }
+    keep_drawn(m, rider);
+    let off = m.word(rider + LEFT_AS_IS) != 0 && m.word(rider + RAG_ON) != 0 && m.word(rider + LATCH) == 0 && m.word(rider + RESPAWN_ASK) == 0;
+    let set = if off { 0 } else { 0xff };
+    for bit in [NODES_PLACED, NODES_TURNED] {
+        let b = byte(m, rider + CTRL_FLAGS);
+        put_byte(m, rider + CTRL_FLAGS, b & !bit | bit & set);
+    }
+    if m.word(rider + LATCH) != 0 {
+        let mut i = 1u32;
+        while (i as i32) < m.word(rider + BODIES) as i32 {
+            let h = holder(m, rider, i);
+            let (n, p) = (m.word(h + H_NODE), words(m, h + 0x50));
+            node::set_position(m, n, p);
+            i += 1;
+        }
+    }
+    m.call(Call::Idle, dt);
+    if m.word(rider + LEFT_AS_IS) != 0 && m.word(rider + RAG_ON) != 0 && m.word(rider + RESPAWN_ASK) == 0 {
+        m.call(Call::RagWorld, dt);
+        aim_nodes(m, rider);
+    }
+    if m.word(rider + RESPAWN_ASK) != 0 {
+        m.call(Call::PoseStill, dt);
+        m.call(Call::Settle, dt);
+        m.set(rider + RESPAWN_ASK, 0);
+    }
+    let node = m.word(rider + NODE);
+    m.call(Call::Bounds { node }, dt);
+    base_step(m, rider, dt);
+}
+
+/// **The drawn frames kept** (the rider's vt `+0xdc`): each holder's node's world frame (its four
+/// rows, `+0x70`) to the holder's drawn frame ([`H_DRAWN`]) as `lq`/`sq` move them, the count re-read
+/// after each.
+pub fn keep_drawn(m: &mut impl Ram, rider: u32) {
+    let mut i = 0u32;
+    while (i as i32) < m.word(rider + BODIES) as i32 {
+        let h = holder(m, rider, i);
+        let from = m.word(h + H_NODE) + 0x70;
+        for r in [0, 0x10, 0x20, 0x30] {
+            copy_words(m, h + H_DRAWN + r, from + r);
+        }
+        i += 1;
+    }
+}
+
+/// A quaternion made unit as the node aims make it: `s = q·q` over the four lanes, its sum
+/// `((w + x) + y) + z` through the accumulator, then `q · (1 / √sum)` (`vrsqrt`).
+fn unit_quat(q: Vf) -> Vf {
+    let s = q.mul(q);
+    let sum = vu::madd(vu::madd(vu::add(s.w(), s.x()), 1.0, s.y()), 1.0, s.z());
+    q.mul_q(vu::rsqrt(1.0, sum))
+}
+
+/// Holder `i`'s body's orientation made unit ([`unit_quat`]) and stored back; its words.
+fn body_quat(m: &mut impl Ram, rider: u32, i: u32) -> (u32, [u32; 4]) {
+    let b = holder_body(m, rider, i);
+    let q = unit_quat(quad(m, b + B_QUAT));
+    put_quad(m, b + B_QUAT, q);
+    (b, words(m, b + B_QUAT))
+}
+
+/// Holder `i`'s node put on its body ([`node::orient`]): turned to the body's orientation (made unit
+/// first, [`body_quat`]) at the body's position less its centre of gravity's offset turned by it
+/// ([`turned`], `xyz`; the `w` the position's word).
+fn node_on_body(m: &mut impl Ram, rider: u32, i: u32) {
+    let (b, q) = body_quat(m, rider, i);
+    let t = turned(quad(m, b + B_QUAT), quad(m, b + B_COFG));
+    let at = quad(m, b + B_POSITION);
+    let [x, y, z, _] = at.sub(t).to_bits();
+    let pos = [x, y, z, m.word(b + B_POSITION + 12)];
+    let h = holder(m, rider, i);
+    let n = m.word(h + H_NODE);
+    node::orient(m, n, q, pos);
+}
+
+/// **The nodes put where the ragdoll is** (the rider's vt `+0xd8`). The scene node: wrecked (mode
+/// 2) with no respawn ask, turned to the first body's orientation at its position
+/// ([`node::orient`], the words as they are); else at the record's `+0x1b0` ([`node::set`]) and
+/// turned to its `+0x1c0` (`anim::turn_node`). Then, not wrecked: every holder's node on its body
+/// ([`node_on_body`], the count re-read after each) and [`PLACE_PARTS`] 1. Wrecked: with
+/// [`PLACE_PARTS`], the parts placed ([`place_parts`]) and it cleared; the first holder's node on its
+/// body; every other's turned to its body's orientation (made unit) where it is
+/// ([`node::orient_here`]).
+pub fn aim_nodes(m: &mut impl Ram, rider: u32) {
+    let rec = m.word(rider + RECORD);
+    let node = m.word(rider + NODE);
+    if m.word(rider + MODE) == 2 && m.word(rec + R_RESPAWN) == 0 {
+        let b = holder_body(m, rider, 0);
+        let (q, at) = (words(m, b + B_QUAT), words(m, b + B_POSITION));
+        node::orient(m, node, q, at);
+    } else {
+        let at = words(m, rec + 0x1b0);
+        node::set(m, node, at);
+        let q = words(m, rec + 0x1c0);
+        anim::turn_node(m, node, q);
+    }
+    if m.word(rider + MODE) != 2 {
+        let mut i = 0u32;
+        while (i as i32) < m.word(rider + BODIES) as i32 {
+            node_on_body(m, rider, i);
+            i += 1;
+        }
+        m.set(rider + PLACE_PARTS, 1);
+        return;
+    }
+    if m.word(rider + PLACE_PARTS) != 0 {
+        place_parts(m, rider);
+        m.set(rider + PLACE_PARTS, 0);
+    }
+    node_on_body(m, rider, 0);
+    let mut i = 1u32;
+    while (i as i32) < m.word(rider + BODIES) as i32 {
+        let (_, q) = body_quat(m, rider, i);
+        let h = holder(m, rider, i);
+        let n = m.word(h + H_NODE);
+        node::orient_here(m, n, q);
+        i += 1;
+    }
+}
+
+/// The controller's entry `i` (16 bytes each from the list's array): the list grown to `2(i + 1)`
+/// first when `i` is past its room ([`Call::EntriesGrow`]), and its count raised to `i + 1`.
+fn entry(m: &mut impl Rider, rider: u32, i: u32, dt: F) -> u32 {
+    let list = rider + ENTRIES;
+    if (i as i32) >= m.word(list + 4) as i32 {
+        m.call(Call::EntriesGrow { list, count: (i + 1) << 1 }, dt);
+    }
+    if (m.word(list + 0xc) as i32) < (i + 1) as i32 {
+        m.set(list + 0xc, i + 1);
+    }
+    m.word(list).wrapping_add(i << 4)
+}
+
+/// The rider's own listener group as [`tail::walk`] reads it: each listener's step is the outside
+/// world's ([`Call::Listener`]).
+struct Group<'a, M>(&'a mut M);
+
+impl<M: Rider> Listeners for Group<'_, M> {
+    fn word(&mut self, at: u32) -> u32 {
+        self.0.word(at)
+    }
+    fn step(&mut self, listener: u32, dt: F) {
+        self.0.call(Call::Listener { listener }, dt);
+    }
+}
+
+/// **The controller's base step**: the toggle ([`TOGGLE`]) flipped to whether it was 0; each entry
+/// (the count re-read after each) whose first word is set and whose `+8` is not bound
+/// ([`Call::EntryBind`]); then the walk of the rider's own listeners ([`tail::walk`]).
+pub fn base_step(m: &mut impl Rider, rider: u32, dt: F) {
+    let t = m.word(rider + TOGGLE);
+    m.set(rider + TOGGLE, u32::from(t == 0));
+    let mut i = 0u32;
+    while (i as i32) < m.word(rider + ENTRIES + 0xc) as i32 {
+        let e = entry(m, rider, i, dt);
+        if m.word(e) != 0 {
+            let e = entry(m, rider, i, dt);
+            if m.word(e + 8) == 0 {
+                m.call(Call::EntryBind { index: i }, dt);
+            }
+        }
+        i += 1;
+    }
+    tail::walk(&mut Group(m), rider, dt);
 }

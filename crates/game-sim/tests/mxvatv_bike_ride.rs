@@ -16744,10 +16744,13 @@ fn net_post_in_ram(ee: &mut Ee, dt: F) {
 // hand-over (rider::after_step, S278), and the leaf's own wreck spots into the bike's record
 // (rider::wreck_spots).
 
-/// The rider's world step's wrapper, the frame's call after the mode machine (F62; the ragdoll world
-/// inside it is S280's); the machine's outside calls (S278b's oracle's addresses). The listener step's own code is Rust's
-/// (F55: `rider::listener_step`).
-const RIDER_WORLD_STEP: u32 = 0x0050_5d50;
+/// The machine's outside calls (S278b's oracle's addresses). The listener step's own code is Rust's
+/// (F55: `rider::listener_step`), its world step too (F62: `rider::world_step`): the rider's vt
+/// `+0xdc` (the drawn frames kept) and `+0xd8` (the nodes on the ragdoll) Rust's, its `+0xd4` (the
+/// idle layer) the original's.
+const RIDER_KEEP_DRAWN: u32 = 0x0050_5c50;
+const RIDER_AIM_NODES: u32 = 0x004f_0f40;
+const RIDER_IDLE: u32 = 0x004e_b380;
 const RIDER_RESET: u32 = 0x004e_ef40;
 const RIDER_WRECK_ENTRY: u32 = 0x004e_d700;
 const RIDER_POSE: u32 = 0x0050_5720;
@@ -16807,6 +16810,7 @@ fn call_from_hook_dt(ee: &mut Ee, f: u32, ints: &[u64], dt: F) -> u64 {
 /// wreck arm's nearby gather ([`gather_in_ram`], S289), every other the original's.
 struct LeafRider<'a> {
     ee: &'a mut Ee,
+    scene: Rc<RefCell<PortScene>>,
 }
 
 impl node::Ram for LeafRider<'_> {
@@ -16878,7 +16882,42 @@ impl rider::Rider for LeafRider<'_> {
                 0
             }
             C::Grow { list, bytes } => call_from_hook_dt(self.ee, HEAP_RESIZE, &[u64::from(list), u64::from(bytes), 0x0039_683e, 0x4cf], dt),
-            C::WorldStep => call_from_hook_dt(self.ee, RIDER_WORLD_STEP, &[r], dt),
+            C::WorldStep => {
+                assert_eq!(vt(self.ee, RIDER + 4, 0xdc), RIDER_KEEP_DRAWN, "the rider's vt +0xdc");
+                assert_eq!(vt(self.ee, RIDER + 4, 0xd8), RIDER_AIM_NODES, "the rider's vt +0xd8");
+                let paused = self.ee.u8_at(self.ee.u32_at(SKIP_FLAG) + 0x225) & 8 != 0;
+                rider::world_step(self, RIDER, dt, paused);
+                0
+            }
+            C::Idle => {
+                assert_eq!(vt(self.ee, RIDER + 4, 0xd4), RIDER_IDLE, "the rider's vt +0xd4");
+                call_from_hook_dt(self.ee, RIDER_IDLE, &[r], dt)
+            }
+            C::RagWorld => {
+                let world = self.ee.u32_at(RIDER + rider::WORLD);
+                assert_eq!(world, RAG_WORLD, "the rider's ragdoll world");
+                let (map, curve) = (nat05_map(), curve());
+                let mut rig = LeafRig { rig: RamRig { map, curve, run: Rc::default() }, scene: self.scene.clone() };
+                rag::step(&mut RiderRam { ee: self.ee, overlay: None }, world, dt, rag_tables(), &mut rig);
+                0
+            }
+            C::PoseStill => {
+                assert_eq!(vt(self.ee, RIDER + 4, 0xd0), RIDER_POSE, "the rider's vt +0xd0");
+                rider::pose(self, RIDER, dt, true, acos(), curve());
+                0
+            }
+            C::Bounds { node } => {
+                // The node's bounds (its vt +0x94 the gather) into the database by the spatial move,
+                // both the ports'; only a heap call the move makes runs in the interpreter.
+                assert_eq!(vt(self.ee, node + 4, 0x94), NODE_REBOUND, "the rider node's vt +0x94");
+                let m = &mut NodeRam(self.ee);
+                if let Some((centre, half, reach)) = node::bounds(m, node) {
+                    attach::spatial_move(m, &ATTACH_GLOBALS, node, centre, half, reach);
+                }
+                book("the rider leaf > heap (spatial move)", self.ee.ran - r0);
+                0
+            }
+            C::EntryBind { .. } | C::EntriesGrow { .. } | C::Listener { .. } => panic!("C15's rider reaches no {c:?}"),
             C::AfterStep => {
                 assert_eq!(vt(self.ee, RIDER + 4, 0x148), RIDER_AFTER_STEP, "the rider's vt +0x148");
                 rider::after_step(self, RIDER);
@@ -16903,9 +16942,14 @@ impl rider::Rider for LeafRider<'_> {
             C::BodyInertia { .. } => "= body inertia",
             C::BodyAt { .. } => "= body at",
             C::Grow { .. } => "> heap resize",
-            C::WorldStep => "> world step",
+            C::WorldStep => "= world step",
             C::AfterStep => "= after step",
             C::NodePosition { .. } => "= node position",
+            C::Idle => "> idle layer",
+            C::RagWorld => "= ragdoll world",
+            C::PoseStill => "= pose still",
+            C::Bounds { .. } => "= node bounds",
+            C::EntryBind { .. } | C::EntriesGrow { .. } | C::Listener { .. } => unreachable!(),
         };
         book(format!("the rider leaf {name}"), self.ee.ran - r0);
         leaf_served(name);
@@ -16954,10 +16998,11 @@ impl<'a, 'b> rag::Rig<RiderRam<'b>> for LeafRig<'a> {
 /// **The rider's listener step** on the ports ([`TreeInRam`] when [`in_rust`] names `rider leaf`):
 /// [`rider::listener_step`] (F55: the frame's body, the copy after and the extra step Rust's), its
 /// mode machine [`rider::modes`] with its pose and settle [`rider::pose`]'s and [`rider::settle`]'s
-/// (S286). The world step's wrapper runs in the interpreter (its vt `+0xdc`, `+0xd4`, `+0xd8`, the
-/// node's bounds and the base step, F62), but the ragdoll world it steps is [`rag::step`]'s
-/// (S280), its bone collisions [`bone::solve`]'s on the port's scene ([`PortScene`], S279), and its
-/// respawn's pose and settle the port's; the vt `+0x148` after it [`rider::after_step`]'s (the
+/// (S286). The world step is [`rider::world_step`]'s (F62: its drawn frames, node bits, node aims
+/// and base step; the node's bounds [`node::bounds`]' into the database by [`attach::spatial_move`]),
+/// all but its idle layer (vt `+0xd4`, the original's); the ragdoll world it steps is
+/// [`rag::step`]'s (S280), its bone collisions [`bone::solve`]'s on the port's scene ([`PortScene`],
+/// S279), and its respawn's pose and settle the port's; the vt `+0x148` after it [`rider::after_step`]'s (the
 /// hand-over [`rider::hand_over`]'s, and the wreck's spot node into the record), the copy's node position [`node::position`]'s, the part clears
 /// [`rider::clear`]'s. The bike's record gets every word the
 /// rider writes into it from the port.
@@ -16975,37 +17020,6 @@ fn rider_leaf(ee: &mut Ee, dt: F) {
             leaf_served("= bone solve");
         }),
     );
-    let s = scene.clone();
-    ee.hooks.insert(
-        WORLD_STEP,
-        Box::new(move |ee: &mut Ee| {
-            if ee.r(4) as u32 != RAG_WORLD {
-                return run_as_itself(ee, WORLD_STEP);
-            }
-            let dt = F(ee.f(12));
-            let mut rig = LeafRig { rig: RamRig { map, curve, run: Rc::default() }, scene: s.clone() };
-            rag::step(&mut RiderRam { ee, overlay: None }, RAG_WORLD, dt, rag_tables(), &mut rig);
-            ee.pc = WORLD_STEP;
-            leaf_served("= ragdoll world");
-        }),
-    );
-    // The world step's own pose (still) and settle, after a respawn: the port's (S286).
-    ee.hooks.insert(
-        RIDER_POSE,
-        Box::new(move |ee: &mut Ee| {
-            let (rider, still, dt) = (ee.r(4) as u32, ee.r(5) != 0, F(ee.f(12)));
-            rider::pose(&mut RiderRam { ee, overlay: None }, rider, dt, still, acos(), curve);
-            leaf_served("= pose (world step)");
-        }),
-    );
-    ee.hooks.insert(
-        RIDER_SETTLE_VT,
-        Box::new(|ee: &mut Ee| {
-            let rider = ee.r(4) as u32;
-            rider::settle(&mut RiderRam { ee, overlay: None }, rider);
-            leaf_served("= settle (world step)");
-        }),
-    );
     ee.hooks.insert(
         PART_CLEAR,
         Box::new(|ee: &mut Ee| {
@@ -17015,8 +17029,8 @@ fn rider_leaf(ee: &mut Ee, dt: F) {
         }),
     );
     let ridden = ee.u32_at(ee.u32_at(RIDER + rider::RECORD) + rider::R_RIDDEN) != 0;
-    rider::listener_step(&mut LeafRider { ee }, RIDER, dt, Some(map));
-    for a in [BONE_SOLVE, PART_CLEAR, WORLD_STEP, RIDER_POSE, RIDER_SETTLE_VT] {
+    rider::listener_step(&mut LeafRider { ee, scene: scene.clone() }, RIDER, dt, Some(map));
+    for a in [BONE_SOLVE, PART_CLEAR] {
         ee.hooks.remove(&a);
     }
     let kinds = std::mem::take(&mut scene.borrow_mut().kinds);
@@ -17045,8 +17059,8 @@ fn replay_with_rider_leaf(name: &str) -> Option<(Vec<bool>, Vec<String>, BTreeMa
 }
 
 /// What the leaf left to the interpreter is only its outside calls' (each booked by name): the
-/// world step's wrapper with its callees but the ragdoll world (F62), rand, the cue and the
-/// wreck entry's heap resize.
+/// world step's idle layer (F62), rand, the cue, the wreck entry's heap resize and any heap call of
+/// the node's spatial move.
 fn leaf_census(census: &BTreeMap<String, u64>) {
     let get = |k: &str| census.get(k).copied().unwrap_or(0);
     let calls: u64 = census.iter().filter(|(k, _)| k.starts_with("the rider leaf >")).map(|(_, n)| n).sum();
@@ -17071,10 +17085,12 @@ fn ride_replays_with_the_rider_leaf_on_the_ports() {
             ("= extra step", 459),
             ("= listener step", 459),
             ("= modes", 459),
+            ("= node bounds", 459),
             ("= node position", 459),
             ("= ragdoll world", 459),
             ("= switch", 1836),
-            ("> world step", 459)
+            ("= world step", 459),
+            ("> idle layer", 459)
         ],
         "{census:?}"
     );
@@ -17105,17 +17121,18 @@ fn flip_replays_with_the_rider_leaf_on_the_ports() {
             ("= gather", 68),
             ("= listener step", 465),
             ("= modes", 465),
+            ("= node bounds", 465),
             ("= node position", 397),
             ("= pose", 4),
-            ("= pose (world step)", 2),
+            ("= pose still", 2),
             ("= ragdoll world", 433),
             ("= riding reset", 1),
-            ("= settle", 4),
-            ("= settle (world step)", 2),
+            ("= settle", 6),
             ("= switch", 1501),
+            ("= world step", 465),
             ("= wreck entry", 1),
+            ("> idle layer", 465),
             ("> rand", 5),
-            ("> world step", 465),
             ("> wreck cue", 1)
         ],
         "{census:?}"
