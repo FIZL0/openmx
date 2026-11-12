@@ -1393,6 +1393,13 @@ const NODE_BASE: u32 = 0x003b_52b0;
 /// The attachment's box and the attachment move (the bike's update's call).
 const BOX: u32 = 0x0026_7120;
 const ATTACH: u32 = 0x0026_6d30;
+/// F31b5o's: the insert (`atv_spatial_insert`), the record's and the link pool's files at their
+/// `new`, the pool's class, and its deleting destructor (the class's `+0x10`).
+const INSERT: u32 = 0x0018_d590;
+const RECORD_FILE: u32 = 0x0039_99e0;
+const LINK_POOL_FILE: u32 = 0x0039_9a60;
+const POOL_CLASS: u32 = 0x003b_32a0;
+const POOL_DELETE: u32 = 0x0010_5020;
 
 const GLOBALS: attach::Globals = attach::Globals { links: POOL_AT, current: CURRENT, node_class: NODE_VT, node_base: NODE_BASE };
 
@@ -1446,6 +1453,8 @@ fn site_call(site: attach::Site, at: u32, bytes: u32) -> (u32, Vec<u32>) {
         attach::Site::ChunkIn(h) => (ALLOC_IN, vec![h, bytes, POOL_FILE, 0xaa]),
         attach::Site::Grow => (REALLOC, vec![at, bytes, TREE_FILE, 0x6d8]),
         attach::Site::Node => (NEW, vec![bytes, NODE_FILE, 0x5b]),
+        attach::Site::Record => (NEW, vec![bytes, RECORD_FILE, 0x42]),
+        attach::Site::Pool => (NEW, vec![bytes, LINK_POOL_FILE, 0x13]),
     }
 }
 
@@ -1495,6 +1504,9 @@ impl attach::Space for OnRam<'_> {
     fn construct(&mut self, ctor: u32, link: u32) {
         panic!("pool constructor {ctor:#x} on {link:#x}: no laid pool has one");
     }
+    fn delete_pool(&mut self, pool: u32) {
+        self.calls.borrow_mut().push((POOL_DELETE, vec![pool]));
+    }
 }
 
 /// The original (`original`) and the port (`port`) run from the same RAM and heap: every byte either
@@ -1535,7 +1547,8 @@ fn twin(
     ee.written.clear();
     port(&mut OnRam { ee, heap: heap.clone(), calls: calls.clone() });
     let got_calls = calls.take();
-    let got: Vec<u32> = ee.written.iter().map(|&a| mask(a)).collect();
+    // The stack aside here too: the insert's own record is on the original's ([`attach::insert`]).
+    let got: Vec<u32> = ee.written.iter().map(|&a| mask(a)).filter(|&a| a < low).collect();
     let mut wrong = vec![];
     for a in want.keys().copied().chain(got.iter().copied()).collect::<std::collections::BTreeSet<u32>>() {
         let Some(before) = was(a) else { return Err(format!("the port wrote {a:#x}, outside what is put back")) };
@@ -1775,4 +1788,81 @@ fn the_attachment_box_is_the_originals() {
         }
     }
     assert!(with_parent >= 100 && dirty >= 100 && no_record >= 100, "{with_parent} {dirty} {no_record}");
+}
+
+/// F31b5o: the insert ([`attach::insert`]) against the original's on MD75c1's generated databases:
+/// a random entry put in a random cell under a kind the cell has a list or tree for, filed with a
+/// record off the heap or with the call's own, now and then with no link pool (the pool made, and
+/// with the call's own record and no other the pool deleted again). Every byte written outside the
+/// stack the same, and the heap calls and the pool's delete.
+#[test]
+fn the_spatial_insert_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let heap: Shared = Rc::default();
+    let calls: Calls = Rc::default();
+    hook_logged_heap(&mut ee, &heap, &calls);
+    let c = calls.clone();
+    ee.hooks.insert(POOL_DELETE, Box::new(move |ee| c.borrow_mut().push((POOL_DELETE, vec![ee.r(4) as u32]))));
+    assert_eq!(ee.u32_at(POOL_CLASS + 0x10), POOL_DELETE, "the pool's class is not the image's");
+    let mut g = Gen(0xf31b_5001);
+    let mut tally: BTreeMap<String, u32> = BTreeMap::new();
+    let keep = [(AREA, AREA_END), (CURRENT, CURRENT + 4), (POOL_AT, POOL_AT + 12)];
+    // The original's own record: its frame is 192 bytes, the record at 160.
+    let temp = ee.stack - 32;
+    const N: usize = 6000;
+    for k in 0..N {
+        let c = case(&mut g);
+        let map = lay(&mut ee, &heap, &c.db, &c.rec, c.mover);
+        let cell = map.cells[g.below(map.cells.len())];
+        let has = |ee: &Ee, o: u32| matches!(ee.u32_at(ee.u32_at(cell + o) + 4), LIST_VT | TREE_VT);
+        let kind = match (has(&ee, 0x28), g.below(3)) {
+            (true, 0) => 1,
+            (true, 1) => 3,
+            _ => 2,
+        };
+        let entry = item_addr(g.below(ENTRIES as usize));
+        let keep_temp = g.chance(0.5);
+        let no_pool = g.chance(0.2);
+        if no_pool {
+            ee.set_u32(POOL_AT, 0);
+            ee.set_u32(POOL_AT + 8, g.below(2) as u32);
+        } else {
+            ee.set_u32(POOL_AT + 8, 1 + g.below(4) as u32);
+        }
+        ee.set_u32(CURRENT, 0);
+        set_vf(&mut ee, CENTRE, c.centre);
+        set_vf(&mut ee, HALF, c.half);
+        let (centre, half, reach) = (c.centre, c.half, c.reach);
+        let r = twin(
+            &mut ee,
+            &heap,
+            &calls,
+            &keep,
+            |ee| ee.call(INSERT, &[entry, cell, kind, CENTRE, HALF, 1, keep_temp as u32, 0].map(u64::from), &[reach.0], BUDGET),
+            |m| attach::insert(m, &GLOBALS, attach::PoolClass(POOL_CLASS), entry, cell, kind, centre, half, reach, temp, keep_temp),
+        );
+        match r {
+            Ok((_, made)) => {
+                let tree = matches!(ee.u32_at(ee.u32_at(cell + if kind & 1 != 0 { 0x28 } else { 0x2c }) + 4), TREE_VT);
+                *tally.entry(format!("{} kind {kind}", if tree { "tree" } else { "list" })).or_default() += 1;
+                *tally.entry(format!("own record {keep_temp}")).or_default() += 1;
+                for (f, a) in made {
+                    let line = match f {
+                        POOL_DELETE => "pool deleted".to_string(),
+                        FREE => "free".to_string(),
+                        _ => format!("{f:#x} line {}", a[a.len() - 1]),
+                    };
+                    *tally.entry(line).or_default() += 1;
+                }
+            }
+            Err(e) => panic!("case {k} (kind {kind}, own record {keep_temp}, no pool {no_pool}): the port's insert is not the original's: {e}"),
+        }
+    }
+    for want in ["list kind 1", "list kind 2", "list kind 3", "tree kind 1", "tree kind 3", "own record true", "own record false", "pool deleted"] {
+        assert!(tally.get(want).copied().unwrap_or(0) >= 10, "only {:?} of {want:?}: {tally:?}", tally.get(want));
+    }
+    for line in [0x42, 0x13] {
+        assert!(tally.iter().any(|(k, &n)| k.ends_with(&format!(" line {line}")) && n >= 10), "too few of line {line:#x}: {tally:?}");
+    }
+    println!("{N} generated inserts, the original's and the port's the same: {tally:?}");
 }
