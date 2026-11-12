@@ -443,7 +443,9 @@ impl Sim {
 
     /// The race manager's tick (S13b, [`race::Race::tick`]): every rider where the last tick left
     /// them, in player order; a rider the closed gate caught is thrown back ([`race::push`]) and gets
-    /// its penalty on its card, and on the drop every rider is let go ([`race::release`]).
+    /// its penalty on its card; when the countdown called the start's timeline (S304), every rider's
+    /// chassis takes what it did ([`race::StartStep::apply`]: held at the countdown's zero, freed in
+    /// the warning window); and on the drop every rider is let go ([`race::release`]).
     fn race_frame(&mut self, dt: F) {
         if self.race.is_none() {
             return;
@@ -459,6 +461,9 @@ impl Sim {
         for (i, hit) in frame.caught {
             race::push(&mut all[i].ride.chassis, hit.push);
             all[i].score.gate_penalty = hit.penalty;
+        }
+        if let Some(step) = frame.start {
+            all.iter_mut().for_each(|r| step.apply(&mut r.ride.chassis));
         }
         if frame.dropped {
             all.iter_mut().for_each(|r| race::release(&mut r.ride.chassis));

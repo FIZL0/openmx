@@ -123,6 +123,13 @@
 //!     words, the three pools, the three gates' spots and the lap length.
 //! 35. **sx01 loaded**: sx01's race file through [`TrackPaths::load`] against S196's image: the lap
 //!     length and the third gate's spot, bit for bit.
+//! 36. **The listener's cadence** (S304): the score manager's tick counting down, 1,500 runs from the
+//!     countdown's start to its drop (about 270,000 ticks; the activity's timeline as the listener or
+//!     none, intervals 0.1, a tick, zero, signed zero, negative, denormal or anything, dts at 30 Hz,
+//!     60 Hz or at random, stray start words), against [`Race::tick`] with [`Race::activity`]: every
+//!     call's arguments and step, the elapsed time, the accumulator and the drop, bit for bit.
+//! 37. **The hold on a Sim's race**: the rider held from the countdown's first tick, freed in the
+//!     warning window before the drop; the timeline in the snapshot and the hash.
 
 use game_sim::chassis::{Chassis, Deriv};
 use game_sim::race::{
@@ -7805,4 +7812,237 @@ fn the_race_file_stands_on_the_ground_as_the_race_activitys_load_puts_it() {
 
 fn want_gate<'a>(t: &'a TrackFile, name: &str) -> &'a Gate {
     if name == "line" { t.line.as_ref().unwrap() } else { t.grid.as_ref().unwrap() }
+}
+
+// --- the countdown's listener cadence (S304) -------------------------------------------------------
+
+const CD_MGR: u32 = 0x01d0_0000;
+const CD_LISTENER: u32 = 0x01d0_1000;
+const CD_VT: u32 = 0x01d0_2000;
+/// Not code: the listener's countdown slot and its drop slot.
+const CD_HOOK_LISTEN: u32 = 0x01d0_f000;
+const CD_HOOK_DROP: u32 = 0x01d0_f100;
+
+/// An activity as a reset leaves it (a start call of 0..4 s, the intro seen or not), now and then
+/// with stray windows.
+fn cadence_activity(p: &mut Pick) -> Supercross {
+    let mut s = Supercross::new();
+    s.drop_times = (0..1 + p.below(3)).map(|_| F(p.range(0.0, 4.0))).collect();
+    s.intro_clips = 1 + p.below(4) as i32;
+    s.intro_seen = p.below(2) as u32;
+    let mut rng = Rng::from_state(p.next());
+    s.reset(&mut Gate::new(), &mut rng);
+    if p.below(6) == 0 {
+        s.lights_on = F(p.range(-0.5, 3.0));
+        s.lights_off = F(fpu::add(0.1, s.lights_on.0));
+        s.warn_on = F(p.range(-0.5, 8.0));
+        s.warn_off = F(p.stray(fpu::add(0.1, s.warn_on.0)));
+    }
+    s
+}
+
+/// **The listener's cadence**: the score manager's tick, counting down, over 1,500 runs from the
+/// countdown's start to its drop — the activity's timeline as the listener (its intro's end moving
+/// the elapsed time and zeroing the accumulator) or no listener, intervals of 0.1 s, a tick, a
+/// hundredth, zero, minus zero, negative, denormal or anything, dts at 30 Hz, 60 Hz or at random,
+/// lengths from the reset or at random, a start with stray elapsed or accumulator words now and then
+/// — against [`Race::tick`] with [`Race::activity`]: every call's length, time and interval, what the
+/// timeline did, the elapsed time, the accumulator and the drop after every tick, bit for bit.
+#[test]
+fn the_countdowns_listener_cadence_matches_the_score_managers_tick() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let [score_tick] = match addrs(["score_manager_tick"]) {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    // The game's listener runs the port's timeline on the clock it is handed and writes back what the
+    // intro's end writes (S13f proved that against the listener itself); its calls are kept.
+    let heard: Rc<RefCell<Vec<(u32, u32, u32, StartStep)>>> = Rc::default();
+    let game_act: Rc<RefCell<Supercross>> = Rc::new(RefCell::new(Supercross::new()));
+    let dropped = Rc::new(Cell::new(0u32));
+    let (h, a, d) = (heard.clone(), game_act.clone(), dropped.clone());
+    ee.hooks.insert(CD_HOOK_LISTEN, Box::new(move |ee| {
+        let (length, time, interval) = (ee.f(12), ee.f(13), ee.f(14));
+        let step = a.borrow_mut().start_timeline(F(time), &mut [], false);
+        if step.intro_ended {
+            if let Some(e) = step.elapsed {
+                ee.set_f32(CD_MGR + 0xc4, e.0);
+            }
+            ee.set_u32(CD_MGR + 0xc8, 0);
+        }
+        h.borrow_mut().push((length.to_bits(), time.to_bits(), interval.to_bits(), step));
+        ee.set(2, 1);
+    }));
+    ee.hooks.insert(CD_HOOK_DROP, Box::new(move |_| d.set(d.get() + 1)));
+    ee.set_u32(CD_LISTENER + 0x1c, CD_VT);
+    ee.set_u32(CD_LISTENER + 4, 0);
+    ee.set_u32(CD_VT + 0x5c, CD_HOOK_LISTEN);
+    ee.set_u32(CD_VT + 0x78, CD_HOOK_DROP);
+    // No cards (+0x34), nothing on the node walk (+0x24).
+    ee.set_u32(CD_MGR + 0x34, 0);
+    ee.set_u32(CD_MGR + 0x24, 0);
+
+    let mut p = Pick(0x5304_cade_0c0d_7713);
+    let (mut ticks, mut calls, mut by_zero, mut by_interval) = (0usize, 0usize, 0usize, 0usize);
+    let (mut moved, mut warned, mut deaf) = (0usize, 0usize, 0usize);
+    for run in 0..1500 {
+        let act = cadence_activity(&mut p);
+        let listening = p.below(8) != 0;
+        let interval = match p.below(12) {
+            0 => 0.0,
+            1 => -0.0,
+            2 => -p.range(0.0, 1.0),
+            3 => f32::from_bits(p.next() as u32 & 0x007f_ffff),
+            4 => 0.033_333_335,
+            5 => 0.01,
+            6 => p.range(0.0, 1.0),
+            _ => 0.1,
+        };
+        let length = if p.below(4) == 0 { p.range(-0.5, 10.0) } else { act.start_delay.0 };
+        let elapsed = if p.below(10) == 0 {
+            let x = p.range(-0.5, 2.0);
+            p.stray(x)
+        } else {
+            0.0
+        };
+        let acc = if p.below(10) == 0 {
+            let x = p.range(-0.2, 0.3);
+            p.stray(x)
+        } else {
+            0.0
+        };
+        let rate = p.below(4);
+
+        *game_act.borrow_mut() = act.clone();
+        ee.set_u32(CD_MGR + 0x5c, 0x80);
+        ee.set_u32(CD_MGR + 0x30, if listening { CD_LISTENER } else { 0 });
+        ee.set_f32(CD_MGR + 0xbc, length);
+        ee.set_f32(CD_MGR + 0xc0, interval);
+        ee.set_f32(CD_MGR + 0xc4, elapsed);
+        ee.set_f32(CD_MGR + 0xc8, acc);
+        dropped.set(0);
+        let mut race = Race::new(Gate::new(), &[], F(length), Rng::from_state(1));
+        race.gate.flags = 0;
+        race.countdown.interval = F(interval);
+        race.countdown.elapsed = F(elapsed);
+        race.countdown.acc = F(acc);
+        race.activity = listening.then_some(act);
+        deaf += usize::from(!listening);
+
+        for t in 0.. {
+            let dt = match rate {
+                0 => 0.033_333_335,
+                1 => 1.0 / 60.0,
+                2 => p.range(0.0, 0.2),
+                _ => {
+                    if p.below(4) == 0 {
+                        p.range(0.0, 0.2)
+                    } else {
+                        0.033_333_335
+                    }
+                }
+            };
+            let before = race.countdown;
+            heard.borrow_mut().clear();
+            ee.call(score_tick, &[u64::from(CD_MGR)], &[dt], BUDGET);
+            let frame = race.tick(F(dt), &[]);
+            let what = format!("run {run} tick {t}: dt {dt} interval {interval:?} length {length:?} before {before:?}");
+            let want: Vec<(u32, u32, u32, StartStep)> = frame
+                .start
+                .iter()
+                .map(|s| (before.length.0.to_bits(), before.elapsed.0.to_bits(), before.interval.0.to_bits(), *s))
+                .collect();
+            assert_eq!(*heard.borrow(), want, "{what}: the listener's calls");
+            assert_eq!(ee.u32_at(CD_MGR + 0xc4), race.countdown.elapsed.0.to_bits(), "{what}: elapsed");
+            assert_eq!(ee.u32_at(CD_MGR + 0xc8), race.countdown.acc.0.to_bits(), "{what}: the accumulator");
+            assert_eq!(ee.u32_at(CD_MGR + 0x5c) & 0x80 != 0, race.countdown.running, "{what}: counting");
+            assert_eq!(dropped.get() != 0, frame.dropped && listening, "{what}: the drop");
+            // By its words: a stray window can be a NaN, which no `==` matches.
+            if let Some(act) = &race.activity {
+                assert_eq!(format!("{:?}", *game_act.borrow()), format!("{act:?}"), "{what}: the activity");
+            }
+            ticks += 1;
+            if let Some(s) = frame.start {
+                calls += 1;
+                if before.acc.0.to_bits() & 0x7f80_0000 == 0 {
+                    by_zero += 1;
+                } else {
+                    by_interval += 1;
+                }
+                moved += usize::from(s.elapsed.is_some());
+                warned += usize::from(s.warning);
+            }
+            // A stray start word can leave the countdown far from its end: 800 ticks of it is enough.
+            if frame.dropped || t == 800 {
+                break;
+            }
+        }
+    }
+    println!(
+        "listener cadence: {ticks} ticks bit-exact, {calls} calls ({by_zero} on a zero accumulator, \
+         {by_interval} on the interval), {moved} intro ends moving the clock, {warned} warnings, {deaf} runs with no listener"
+    );
+    assert!(by_zero > 500 && by_interval > 10_000 && moved > 100 && warned > 100 && deaf > 100, "a case never ran");
+}
+
+/// A race on the stand-in bike with sx01's 1.54 s start call, the intro seen, and the activity as
+/// the countdown's listener.
+fn timeline_ride() -> (game_sim::Sim, Supercross) {
+    let mut sim = race_ride(500.0, 0.0);
+    let mut act = Supercross::new();
+    act.drop_times = vec![F(1.54)];
+    act.intro_seen = 1;
+    act.reset(&mut Gate::new(), &mut Rng::from_state(5));
+    let race = sim.race.as_mut().unwrap();
+    race.countdown.length = act.start_delay;
+    race.activity = Some(act.clone());
+    (sim, act)
+}
+
+/// **The hold on a Sim's race**: on the countdown's first tick the timeline holds the rider (free to
+/// move only in height) and ends the intro, starting the clock over; at 30 Hz its calls land every
+/// third tick, so one lands in the warning window, which lets the rider go before the drop; the
+/// timeline's fields ride the snapshot and the hash.
+#[test]
+fn the_start_timeline_holds_the_rider_until_the_warning() {
+    let (mut sim, act) = timeline_ride();
+    sim.tick(game_sim::Input::default());
+    let race = sim.race.as_ref().unwrap();
+    assert_eq!(sim.rider.ride.chassis.free, [0, 1, 0], "held at the countdown's zero");
+    assert_eq!(race.activity.as_ref().unwrap().intro_queued, 1, "the intro ended");
+    let dt = race.countdown.elapsed;
+    assert!(F::ZERO < dt && dt < F(0.04), "the clock started over: {dt:?}");
+    assert_eq!(race.countdown.acc, dt, "the accumulator started over with it");
+
+    let bytes = game_sim::snapshot::encode(&sim);
+    let (mut other, _) = timeline_ride();
+    game_sim::snapshot::decode(&mut other, &bytes).expect("the state decodes");
+    assert_eq!(other.race, sim.race, "the snapshot carries the timeline");
+    assert_eq!(other.hash(), sim.hash());
+    let mut acc_off = sim.clone();
+    acc_off.race.as_mut().unwrap().countdown.acc = F::ZERO;
+    assert_ne!(acc_off.hash(), sim.hash(), "the accumulator is in the hash");
+    let mut queued = sim.clone();
+    queued.race.as_mut().unwrap().activity.as_mut().unwrap().intro_queued = 0;
+    assert_ne!(queued.hash(), sim.hash(), "the timeline is in the hash");
+
+    let mut freed_at = None;
+    let mut n = 1;
+    while sim.race.as_ref().unwrap().countdown.running {
+        let at = sim.race.as_ref().unwrap().countdown.elapsed;
+        sim.tick(game_sim::Input::default());
+        n += 1;
+        assert!(n < 200, "the countdown never ended");
+        let running = sim.race.as_ref().unwrap().countdown.running;
+        if freed_at.is_none() && sim.rider.ride.chassis.free == [1, 1, 1] && running {
+            freed_at = Some(at);
+        }
+        if freed_at.is_none() && running {
+            assert_eq!(sim.rider.ride.chassis.free, [0, 1, 0], "tick {n}: still held at {at:?}");
+        }
+    }
+    let at = freed_at.expect("the warning let the rider go before the drop");
+    assert!(!(at < act.warn_on) && at < act.warn_off, "freed at {at:?}, the warning {:?}..{:?}", act.warn_on, act.warn_off);
+    assert_eq!(sim.rider.ride.chassis.free, [1, 1, 1]);
+    println!("held from tick 1, freed at {at:?} (warning {:?}), dropped after {n} ticks", act.warn_on);
 }
