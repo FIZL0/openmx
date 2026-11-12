@@ -108,6 +108,7 @@ mod path_branch; // S309: the tick's path branch on sx01's net
 mod callouts; // S312: the AI tick's callouts
 mod seek_world; // S313: a map's seeker world off the disc
 mod sim; // S12e: the AI riders in the sim
+mod seek_real; // S305: the target seeker on free09's real world
 
 use avoidance::*;
 use path_nets::*;
