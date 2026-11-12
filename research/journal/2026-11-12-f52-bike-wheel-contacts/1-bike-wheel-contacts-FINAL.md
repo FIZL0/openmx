@@ -1,4 +1,4 @@
-# 1 — bike wheel contacts (PART)
+# 1 — bike wheel contacts (FINAL)
 
 Task F52. 2026-11-12.
 
