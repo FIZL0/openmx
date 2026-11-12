@@ -20,7 +20,7 @@ use std::cell::Cell;
 
 const S12E_STATE: &str = "recording2.p2m2_SaveState.eeMemory.bin";
 /// The image's three brains and their riders, in the order the scene runs them.
-const S12E_RIDERS: [(u32, u32); 3] = [(0x0148_3eb0, 0x00d4_f510), (0x00c6_4000, 0x00c4_f040), (0x0104_8000, 0x0150_8a50)];
+pub(crate) const S12E_RIDERS: [(u32, u32); 3] = [(0x0148_3eb0, 0x00d4_f510), (0x00c6_4000, 0x00c4_f040), (0x0104_8000, 0x0150_8a50)];
 /// The step the image's scene root hands its children (its dt word).
 const S12E_DT: u32 = 0x3d08_850a;
 const S12E_TICKS: usize = 60;
@@ -86,9 +86,9 @@ fn s12e_habit_words(b: u32, r: u32, engine: u32, body: u32, card: u32) -> Vec<Ha
 
 /// The free09 seeker world's lists in the image: the sets (in the set root's order) and the targets
 /// (in the hit database's), which the seeker's pointers index.
-struct S12eLists {
-    sets: Vec<u32>,
-    targets: Vec<u32>,
+pub(crate) struct S12eLists {
+    pub(crate) sets: Vec<u32>,
+    pub(crate) targets: Vec<u32>,
 }
 
 impl S12eLists {
@@ -101,7 +101,7 @@ impl S12eLists {
             self.targets.iter().position(|&t| ee.u32_at(t + 0x3c) == at).unwrap_or_else(|| panic!("jump {at:#x} is no target's"))
         })
     }
-    fn seeker(&self, ee: &Ee, b: u32) -> sk::Seeker {
+    pub(crate) fn seeker(&self, ee: &Ee, b: u32) -> sk::Seeker {
         sk::Seeker {
             flags: s12e_u64(ee, b + 0x30),
             flags2: s12e_u64(ee, b + 0x38),
@@ -130,7 +130,7 @@ impl S12eLists {
 }
 
 /// free09's seeker world off the disc, as `seek_world.rs` loads it, and the image's lists.
-fn s12e_seek_world(kit: &Kit, ee: &Ee) -> Option<(sk::World, S12eLists)> {
+pub(crate) fn s12e_seek_world(kit: &Kit, ee: &Ee) -> Option<(sk::World, S12eLists)> {
     use game_sim::track::{Scene, Terrain};
     use game_sim::world::{Ground, Place, Props};
     use std::io::Read;

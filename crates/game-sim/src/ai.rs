@@ -2343,7 +2343,8 @@ pub mod seek {
     /// The first flag word's bit for "past the point, closing on it from behind": [`hand_off`] keeps
     /// it, and the take-off sets it for the flight.
     pub const CLOSING: u64 = 0x0800_0000;
-    /// The first flag word's bit that keeps a landing from being learnt from (not traced who sets it).
+    /// The first flag word's bit that keeps a landing from being learnt from (not traced who sets it;
+    /// free09's AI riders all carry it, so as they ride they never learn).
     pub const NO_LEARN: u64 = 0x40_0000;
     /// The second flag word's bit for "ride this jump flat out, do not learn": set or cleared by the
     /// course's chance roll.
