@@ -11643,3 +11643,19 @@ atv_pair_log_grow           atv 0x0025b840 = a growable log's resize to a1 entri
 #   400833cd 3ff98919 40410f76; the only box near that gives rec+0x60 is 400833cd 3ff98919 40410f77, so z is
 #   one float under: rec +0x60/+0x64/+0x70/+0x74 differ by 1-2 floats. Identity, rotation-only, origin-only,
 #   mixed raw/unit rows and y = z x x frames all miss. The frame the loader saw is not found.
+
+# F31b5i: the rider leaf on the ports (tests/mxvatv_bike_ride.rs rider_leaf). Journal:
+# research/journal/2026-11-08-f31b5i-rider-leaf-on-the-ports/.
+#   The rider's vtable (rider+4) is 0x003d11b0 (+0xcc 0x00505710 settle, +0xd0 0x00505720 pose, +0xd4
+#   0x004eb380, +0xd8 0x004f0f40, +0xdc 0x00505c50, +0x148 0x004f28f0); the look-alike at 0x003d1030 has
+#   +0x148 = 0x004f1210 (the hand-over) itself.
+#   0x004f28f0 = 0x004f1210(rider); record = +0x378, none -> return; kind (+0x138) set ->
+#   0x00194c20(*(rider+0xb14), 0, record+0x220), 0x00194960(*(rider+0xb14), 0, record+0x230, record+0x240)
+#   (record re-read); rider+0x4f0 = record+0x128 (re-read). Ported as handling::rider::after_step.
+#   World step wrapper 0x00505d50 (a0 rider, f12 dt): byte 0x003eab60+0x225 bit 3 -> only 0x00141d30; else
+#   vt +0xdc; +0x2d bits 4,5 set unless +0x25c, +0x260 set and +0x254, +0x258 clear (then cleared); with
+#   +0x254, holders 1..+0x290 (0xb0 apart at +0x2a4) 0x00194af0(holder+0xa0's node, holder+0x50); vt +0xd4;
+#   +0x25c, +0x260 set, +0x258 clear -> 0x00496b70(+0x27c) then vt +0xd8; +0x258 set -> vt +0xd0(still 1),
+#   vt +0xcc, +0x258 = 0; 0x00196e80(+0x24); 0x00141d30. Interpreted on C15 ride-2 (459 frames): vt +0xd4
+#   5.36M (calls 0x004eb6f0, 3132 bytes, and rand), vt +0xd8 2.11M, 0x00196e80 1.78M, 0x00194af0 0.57M, vt
+#   +0xdc 0.19M, 0x00141d30 0.02M. Follow-up F62.

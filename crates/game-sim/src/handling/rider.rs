@@ -39,7 +39,9 @@
 //! again ([`ignore`]), the joints' springs and the bodies' masses, inertias and targets put back.
 //!
 //! After the frame, the rider's listener step copies the wreck's two spots into the record
-//! ([`wreck_spots`], F31b5i): with [`hand_over`], every word the rider writes into the bike's record.
+//! ([`wreck_spots`], F31b5i). The frame's last call, the rider's vt `+0x148` ([`after_step`]), runs
+//! [`hand_over`] and puts the wreck's spot node into the record. Between them, every word the rider
+//! writes into the bike's record.
 //!
 //! The listener step's own code is here too (F55): the rider's frame around the mode machine
 //! ([`frame`]: the node's [`alpha`], two rate-limited clocks), the copy after it ([`copy_after`]) and
@@ -209,6 +211,36 @@ pub fn wreck_spots(m: &mut impl Ram, rider: u32) {
     let record = m.word(rider + RECORD);
     let main = m.word(holder + 0xa4);
     copy_words(m, record + R_SPOT_MAIN, main + 0x80);
+}
+
+/// The record's words the rider's vt `+0x148` writes: the spot node's position and its `z` and `y`
+/// rows while wrecked (the bike's `+0x870..+0x8a0`), and the word it copies to the rider's `+0x4f0`.
+pub const R_SPOT_AT: u32 = 0x220;
+pub const R_SPOT_Z: u32 = 0x230;
+pub const R_SPOT_Y: u32 = 0x240;
+pub const R_KEPT: u32 = 0x128;
+pub const KEPT: u32 = 0x4f0;
+
+/// **The rider's vt `+0x148`** (its frame's last call, after the ragdoll world's step):
+/// [`hand_over`]; then with a record, while its wreck kind is set the spot node's (`+0xb14`) world
+/// position to the record's `+0x220` and its `z` and `y` rows to `+0x230` and `+0x240`
+/// ([`node::position`], [`node::axes`]), and either way the record's `+0x128` to the rider's
+/// `+0x4f0` (the record pointer read again for each).
+pub fn after_step(m: &mut impl Ram, rider: u32) {
+    hand_over(m, rider);
+    let record = m.word(rider + RECORD);
+    if record == 0 {
+        return;
+    }
+    if m.word(record + R_KIND) != 0 {
+        let node = m.word(rider + SPOT_NODE);
+        node::position(m, node, record + R_SPOT_AT);
+        let (node, record) = (m.word(rider + SPOT_NODE), m.word(rider + RECORD));
+        node::axes(m, node, record + R_SPOT_Z, record + R_SPOT_Y);
+    }
+    let record = m.word(rider + RECORD);
+    let w = m.word(record + R_KEPT);
+    m.set(rider + KEPT, w);
 }
 
 /// A quadword moved as `lq`/`sq` move it: four words as they are, the addresses' low four bits
