@@ -5,14 +5,15 @@
 // recording2's free09 image holds three AI riders mid-ride. Each one's brain, interface, card and bike
 // are read out of RAM into a `Racer` and its `Around`; then, rider by rider in the image's actor order
 // and tick after tick, the original's `ai_update` runs in the interpreter and the port's tick runs on
-// what it read. Nothing of the original is hooked but the ground query, which runs as it is and is
-// recorded: the two the rider-to-brain copy asks are played back to the port (and the points it asks
-// at compared), and the eleven the avoidance's feeler sweep asks are only counted (the sweep's hits are
-// thrown away). The bike is frozen between ticks — its physics is not run — so the brain sees the same
-// bike every tick and only its own state moves on.
+// what it read. Nothing of the original is hooked but what is recorded as it runs: the ground query
+// (the two the rider-to-brain copy asks and the eleven the generic avoidance's probes ask are played
+// back to the port in turn, and the points asked compared), the avoidance's scene walk (the objects it
+// hands out become the port's `Thing`s) and its sweep of each solid object (the answer and per-feeler
+// hits are handed to the port's `Scene::sweep`). The bike is frozen between ticks — its physics is not
+// run — so the brain sees the same bike every tick and only its own state moves on.
 
 use super::*;
-use game_sim::ai::{Around, Card, Habits, Racer, Senses, Told};
+use game_sim::ai::{Around, Card, Habits, Racer, Senses, Thing, Told, VehicleScene, VehicleTuning};
 use game_sim::ragdoll::Tables;
 use super::seek_world::{s313_file, s313_member};
 use ps2_oracle::{Ee, Kit};
@@ -285,6 +286,14 @@ fn s12e_racer(ee: &Ee, lists: &S12eLists, b: u32, r: u32) -> Racer {
         bar_rest: [s12e_f(ee, b + 0xf8), s12e_f(ee, b + 0xfc)],
         tuning,
         avoid,
+        vehicle: VehicleTuning {
+            probe_ahead: s12e_f(ee, b + 0x300),
+            drop_run: s12e_f(ee, b + 0x304),
+            climb_limit: s12e_f(ee, b + 0x308),
+            climb_speed: s12e_f(ee, b + 0x30c),
+            drop_limit: s12e_f(ee, b + 0x310),
+            turn_limit: s12e_f(ee, b + 0x328),
+        },
         plan,
         habits,
         filter: ai::SteerFilter {
@@ -398,7 +407,7 @@ struct S12eQuery {
     in_avoid: bool,
 }
 
-/// The port's ground: the original's answers to the rider-to-brain copy, in turn.
+/// The port's ground: the original's answers, in turn.
 struct S12eReplay {
     answers: Vec<S12eQuery>,
     asked: Vec<[u32; 4]>,
@@ -414,6 +423,38 @@ impl World for S12eReplay {
     fn solid(&mut self, _bundle: &Bundle, _record: &mut Record) -> bool {
         false
     }
+}
+
+/// The port's scene: what the original's walk handed out and what its sweeps answered, in turn.
+struct S12eScene {
+    things: Option<Vec<Thing>>,
+    sweeps: Vec<(u32, bool, Vec<bool>)>,
+    swept: Vec<u32>,
+}
+
+impl ai::Scene for S12eScene {
+    fn walk(&mut self) -> Option<Vec<Thing>> {
+        self.things.clone()
+    }
+    fn sweep(&mut self, id: u32, fan: &[ai::Feeler]) -> Option<Vec<bool>> {
+        let (theirs, met, hits) = self.sweeps.get(self.swept.len()).cloned().expect("the port swept more objects");
+        assert_eq!(theirs, id, "sweep {}: the object", self.swept.len());
+        assert_eq!(hits.len(), fan.len());
+        self.swept.push(id);
+        met.then_some(hits)
+    }
+}
+
+/// What the original's avoidance walked and swept in one tick.
+#[derive(Default)]
+struct S12eWalk {
+    opened: Option<bool>,
+    things: Vec<Thing>,
+    /// The AI_IGNORE bit the pass asked for.
+    ignore_bit: u32,
+    /// The brain's feeler count (+0x2a4), set before the tick.
+    feelers: u32,
+    sweeps: Vec<(u32, bool, Vec<bool>)>,
 }
 
 /// A hook that runs the hooked function as it is, on its own stack below the caller's, with `before`
@@ -446,9 +487,9 @@ fn s12e_pass_through(ee: &mut Ee, at: u32, mut before: impl FnMut(&Ee) + 'static
 /// plan; every habit word and the preload's firing word; the levers; the body's yaw rate and velocity;
 /// every jump's legs; and the generator's state, which both sides carry from rider to rider.
 ///
-/// A riding brain avoids with the generic vehicle avoidance, which is not ported: the heading, speed
-/// and flags it left in the original stand in for it (`Around::vehicle_avoid`), and its ground probes
-/// are kept out of the replayed ground.
+/// A riding brain avoids with the generic vehicle avoidance (S317, `ai::avoid_vehicle`): its ground
+/// probes, scene walk and sweeps are the original's, replayed; its fan, the objects swept and the hit
+/// reaction's recovery words are compared too.
 #[test]
 fn s12e_the_joined_tick_is_the_originals_on_free09() {
     let kit = match Kit::load() {
@@ -461,14 +502,28 @@ fn s12e_the_joined_tick_is_the_originals_on_free09() {
     }
     let mut ee = Ee::from_ram(&path).unwrap_or_else(|e| panic!("{e}"));
     ee.set(28, u64::from(addr("boot_gp").unwrap()));
-    let Some(at) = named(&["ai_update", "ground_query", "ai_update_mx", "ai_update_vehicle", "rand_state"]) else { return };
-    let [update, query, update_mx, update_vehicle, rand_state] = at[..] else { unreachable!() };
+    let Some(at) = named(&[
+        "ai_update",
+        "ground_query",
+        "ai_update_mx",
+        "rand_state",
+        "ai_iface_walk_begin",
+        "ai_iface_walk_next",
+        "bundle_sweep_object",
+        "class_bit",
+        "world_manager",
+    ]) else {
+        return;
+    };
+    let [update, query, update_mx, rand_state, walk_begin, walk_next, sweep, class_bit, world_manager] = at[..] else {
+        unreachable!()
+    };
     let Some((mut seek_world, lists)) = s12e_seek_world(&kit, &ee) else { return };
     let tables: Tables = controls::tables(&ee);
 
     let queries: Rc<RefCell<Vec<S12eQuery>>> = Rc::default();
     let in_avoid: Rc<Cell<bool>> = Rc::default();
-    let vehicle: Rc<Cell<Option<(Vf, F, u64)>>> = Rc::default();
+    let walk: Rc<RefCell<S12eWalk>> = Rc::default();
     let asking: Rc<Cell<(u32, u32, [u32; 4])>> = Rc::default();
     {
         let (a, a2) = (asking.clone(), asking.clone());
@@ -490,12 +545,37 @@ fn s12e_the_joined_tick_is_the_originals_on_free09() {
         );
         let (i1, i2) = (in_avoid.clone(), in_avoid.clone());
         s12e_pass_through(&mut ee, update_mx, move |_| i1.set(true), move |_| i2.set(false));
-        // The generic avoidance is not ported: what it left stands in for it.
-        let (v, brain) = (vehicle.clone(), Rc::new(Cell::new(0u32)));
-        let at = brain.clone();
-        s12e_pass_through(&mut ee, update_vehicle, move |e| at.set(e.r(4) as u32), move |e| {
-            let b = brain.get();
-            assert!(v.replace(Some((s12e_vf(e, b + 0x1d0), F(e.f32_at(b + 0x1e0)), s12e_u64(e, b + 0x30)))).is_none());
+        // The generic avoidance's scene: the walk's objects as it handed them out, and each sweep.
+        let w = walk.clone();
+        s12e_pass_through(&mut ee, walk_begin, |_| {}, move |e| w.borrow_mut().opened = Some(e.v0() != 0));
+        let w = walk.clone();
+        s12e_pass_through(&mut ee, walk_next, |_| {}, move |e| {
+            let o = e.v0() as u32;
+            if o == 0 {
+                return;
+            }
+            let mut w = w.borrow_mut();
+            let thing = match e.read(o + 2, 1) {
+                2 => Thing::Solid {
+                    id: o,
+                    collidable: e.read(o + 0x31, 1) & 1 != 0,
+                    ai_ignore: e.u32_at(o + 0x84) & w.ignore_bit != 0,
+                },
+                3 => Thing::Group { x: e.read(o + 8, 2) as u16, z: e.read(o + 0xc, 2) as u16 },
+                _ => Thing::Other,
+            };
+            w.things.push(thing);
+        });
+        let w = walk.clone();
+        s12e_pass_through(&mut ee, class_bit, |_| {}, move |e| w.borrow_mut().ignore_bit = e.v0() as u32);
+        let (w, swept) = (walk.clone(), Rc::new(Cell::new((0u32, 0u32))));
+        let s2 = swept.clone();
+        s12e_pass_through(&mut ee, sweep, move |e| s2.set((e.r(4) as u32, e.r(5) as u32)), move |e| {
+            let (bundle, o) = swept.get();
+            let mut w = w.borrow_mut();
+            let hits = e.u32_at(e.u32_at(bundle + 0x6c) + 0xa4);
+            let hits = (0..w.feelers).map(|k| e.u32_at(hits + 4 * k) != 0).collect();
+            w.sweeps.push((o, e.v0() != 0, hits));
         });
     }
 
@@ -507,11 +587,14 @@ fn s12e_the_joined_tick_is_the_originals_on_free09() {
 
     let mut draws = 0;
     let mut seen = std::collections::BTreeSet::new();
+    let mut reasons = std::collections::BTreeMap::<String, usize>::new();
+    let (mut things, mut sweeps) = (0, 0);
     for tick in 0..S12E_TICKS {
         for (k, &(b, r)) in S12E_RIDERS.iter().enumerate() {
             let what = format!("tick {tick} rider {k} (brain {b:#x})");
             let before = rng.state();
             queries.borrow_mut().clear();
+            *walk.borrow_mut() = S12eWalk { feelers: ee.u32_at(b + 0x2a4), ..S12eWalk::default() };
             ee.call(update, &[u64::from(b)], &[dt], S12E_BUDGET);
             let answer = ee.v0() as u32;
 
@@ -519,17 +602,21 @@ fn s12e_the_joined_tick_is_the_originals_on_free09() {
             let bike = &mut bikes[k];
             assert_eq!(racer.brain.flags & flag::KEEP_ON_TRACK, 0, "{what}: the keep-on-track push needs the track's path");
             let theirs = queries.borrow().clone();
-            let mut world = S12eReplay { answers: theirs.iter().filter(|q| !q.in_avoid).copied().collect(), asked: Vec::new() };
+            let mut world = S12eReplay { answers: theirs.clone(), asked: Vec::new() };
             // The card's settle word is the habits' air time; its racing bit the habits'.
             let card = bike.card.map(|c| Card {
                 settle: racer.habits.air_time,
                 flags: c.flags & !0x8_0000 | if racer.habits.racing { 0x8_0000 } else { 0 },
                 ..c
             });
-            let theirs_vehicle = vehicle.take().expect("a riding brain runs the generic avoidance");
-            let mut stand_in = |fb: &mut game_sim::ai::follow::Brain| {
-                (fb.heading, fb.speed, fb.flags) = theirs_vehicle;
+            let theirs_walk = std::mem::take(&mut *walk.borrow_mut());
+            let opened = theirs_walk.opened.expect("a riding brain walks the scene");
+            let mut scene = S12eScene {
+                things: opened.then(|| theirs_walk.things.clone()),
+                sweeps: theirs_walk.sweeps.clone(),
+                swept: Vec::new(),
             };
+            let ignore: Vec<u32> = (0..ee.u32_at(b + 0x150)).map(|k| ee.u32_at(ee.u32_at(b + 0x154) + 4 * k)).collect();
             let mut rider = bike.rider;
             rider.velocity = bike.velocity;
             let mut around = Around {
@@ -547,7 +634,12 @@ fn s12e_the_joined_tick_is_the_originals_on_free09() {
                 path_net: bike.path_net,
                 others: &bike.others,
                 edge: None,
-                vehicle_avoid: Some(&mut stand_in),
+                vehicle: Some(VehicleScene {
+                    scene: &mut scene,
+                    cell: s12e_f(&ee, ee.u32_at(world_manager) + 0xd4),
+                    ignore: &ignore,
+                    off_path: None,
+                }),
                 jump: None,
                 node: None,
                 spot: None,
@@ -560,16 +652,39 @@ fn s12e_the_joined_tick_is_the_originals_on_free09() {
                 velocity: &mut bike.velocity,
             };
             let told: Told = racer.tick(&mut around, &mut rng, F(dt));
+            bike.recovery = around.recovery;
+            drop(around);
             assert_eq!(ee.u32_at(b + 0x224), 0, "{what}: a route node: the trick plan and the habits would read it");
             assert_eq!(ee.u32_at(ee.u32_at(r + 0xfa0) + 0x68), 0, "{what}: a track: the cross-up would read its spot");
 
-            // What was asked of the ground.
-            let feed_asked: Vec<_> = theirs.iter().filter(|q| !q.in_avoid).map(|q| q.asked).collect();
-            assert_eq!(feed_asked.len(), world.asked.len(), "{what}: the copy's ground queries");
-            assert_eq!(feed_asked[0][..3], world.asked[0][..3], "{what}: the look-ahead point");
-            assert_eq!(feed_asked[1], world.asked[1], "{what}: the point under the bike");
-            // The motocross fan is not built: the generic avoidance's own probes are in what it left.
+            // What was asked of the ground: the copy's two, then the avoidance's probes.
+            let asked: Vec<_> = theirs.iter().map(|q| q.asked).collect();
+            assert_eq!(asked.len(), world.asked.len(), "{what}: the ground queries");
+            assert_eq!(asked[0][..3], world.asked[0][..3], "{what}: the look-ahead point");
+            assert_eq!(asked[1..], world.asked[1..], "{what}: the ground points");
+            assert!(theirs[..2].iter().all(|q| !q.in_avoid) && theirs[2..].iter().all(|q| q.in_avoid), "{what}: the order");
+            // The motocross fan is not built; the generic one is, into the brain's bundle.
             assert!(told.feelers.is_none(), "{what}: the motocross avoidance ran");
+            let pass = told.vehicle.as_ref().unwrap_or_else(|| panic!("{what}: the generic avoidance did not run"));
+            let bundle = ee.u32_at(b + 0x2a0);
+            for (i, f) in pass.fan.iter().enumerate() {
+                let i = i as u32;
+                assert_eq!(got(&ee, ee.u32_at(bundle + 0x13c) + 16 * i), f.direction.to_bits(), "{what}: feeler {i}'s direction");
+                assert_eq!(got(&ee, ee.u32_at(bundle + 0x138) + 16 * i), f.origin.to_bits(), "{what}: feeler {i}'s origin");
+                assert_eq!(ee.u32_at(ee.u32_at(bundle + 0x134) + 4 * i), f.length.to_bits(), "{what}: feeler {i}'s length");
+            }
+            let theirs_swept: Vec<u32> = theirs_walk.sweeps.iter().map(|s| s.0).collect();
+            assert_eq!(scene.swept, theirs_swept, "{what}: the objects swept");
+            for (name, at, ours) in [
+                ("back-up", r + 0x14c0, bike.recovery.back_up),
+                ("swerve bar", r + 0x14c4, bike.recovery.swerve_bar),
+                ("swerve", r + 0x14c8, bike.recovery.swerve),
+            ] {
+                assert_eq!(ee.u32_at(at), ours.to_bits(), "{what}: the {name}");
+            }
+            *reasons.entry(format!("{:#x}{}", pass.reasons, if pass.took.is_some() { "" } else { " blocked" })).or_insert(0) += 1;
+            things += theirs_walk.things.len();
+            sweeps += theirs_walk.sweeps.len();
 
             assert_eq!(answer, u32::from(told.answer), "{what}: the answer");
             assert!(told.missing.is_empty() && told.rescue.is_none() && told.listeners.is_empty(), "{what}: {told:?}");
@@ -660,4 +775,5 @@ fn s12e_the_joined_tick_is_the_originals_on_free09() {
         }
     }
     println!("{} rider ticks, {draws} drawing; seeker states and ground: {seen:?}", S12E_TICKS * 3);
+    println!("avoidance: {things} objects walked, {sweeps} swept; reasons: {reasons:?}");
 }

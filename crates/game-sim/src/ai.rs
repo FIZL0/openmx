@@ -296,6 +296,10 @@ pub mod flag {
     pub const KEEP_ON_TRACK: u64 = 0x20000;
     /// Leave out the riders whose own flag word has bit 4 set.
     pub const SKIP_MARKED: u64 = 0x100000;
+    /// The generic avoidance blocks a feeler whose ground ahead climbs too steeply for the speed.
+    pub const CLIMB_CHECK: u64 = 0x200_0000;
+    /// The generic avoidance blocks a feeler whose ground ahead falls away.
+    pub const DROP_CHECK: u64 = 0x400_0000;
 }
 
 const PI: f32 = 3.1415927;
@@ -615,7 +619,7 @@ pub fn plan_trick(
 // --- avoidance (S12c) -------------------------------------------------------------------------------
 
 /// How wide the motocross fan is, edge to edge: a quarter turn's half, as the original's literal.
-/// (The generic vehicle AI fans twice as wide; that path is not ported.)
+/// (The generic vehicle AI fans twice as wide: [`VEHICLE_FAN_SPREAD`].)
 pub const MX_FAN_SPREAD: f32 = 0.7853982;
 
 /// The avoidance's numbers. Each one is a key of the rider's AI character file where it has one, read
@@ -918,6 +922,256 @@ fn unit(v: Vf) -> Vf {
     let sq = v.mul(v);
     let len2 = vu::madd(vu::add(sq.x(), sq.y()), 1.0, sq.z());
     v.merge(Dest::XYZ, v.mul_q(vu::rsqrt(1.0, len2)))
+}
+
+// --- the generic vehicle avoidance (S317) ------------------------------------------------------------
+
+/// How wide the generic vehicle AI's fan is, edge to edge: a quarter turn, twice the motocross fan.
+pub const VEHICLE_FAN_SPREAD: f32 = HALF_PI;
+
+/// The `w` of every feeler direction the generic avoidance hands out: the fan writes only `x`, `y`
+/// and `z`, and the bundle's builder left 1 there.
+pub const BUNDLE_W: f32 = 1.0;
+
+/// The generic avoidance's own numbers, beside the [`AvoidTuning`] it shares with the motocross pass
+/// (the feelers, `near_range` as the clearance a rider or a placed group must keep from a feeler,
+/// `far_range` as how far along a feeler a rider counts, `edge_look_ahead`). [`Default`] is the vehicle
+/// AI constructor's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VehicleTuning {
+    /// How far ahead along each feeler the ground is asked about.
+    pub probe_ahead: F,
+    /// What the drop under a feeler is divided by before [`VehicleTuning::drop_limit`] judges it.
+    pub drop_run: F,
+    /// A rise over [`VehicleTuning::probe_ahead`] at least this steep blocks a feeler, under
+    /// [`flag::CLIMB_CHECK`], unless the rider is going at least [`VehicleTuning::climb_speed`].
+    pub climb_limit: F,
+    pub climb_speed: F,
+    /// A fall at or under this blocks a feeler, under [`flag::DROP_CHECK`].
+    pub drop_limit: F,
+    /// A feeler is not taken when the rider's speed times the sine of its turn off the steer is this or
+    /// more.
+    pub turn_limit: F,
+}
+
+impl Default for VehicleTuning {
+    fn default() -> Self {
+        VehicleTuning {
+            probe_ahead: F(20.0),
+            drop_run: F(20.0),
+            climb_limit: F(0.5),
+            climb_speed: F(40.0),
+            drop_limit: F(-0.5),
+            turn_limit: F(150.0),
+        }
+    }
+}
+
+/// One thing the scene walk around the rider hands the generic avoidance, in the walk's order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Thing {
+    /// A solid object: the fan is swept at it unless it is not collidable, is in the ignore list, or is
+    /// of the `AI_IGNORE` class. `id` is the caller's, handed back to [`Scene::sweep`].
+    Solid { id: u32, collidable: bool, ai_ignore: bool },
+    /// A placed group (a tree, a post) by its cell on the world's grid.
+    Group { x: u16, z: u16 },
+    /// Anything else, which the pass passes over.
+    Other,
+}
+
+/// What the generic avoidance asks of the scene it rides in.
+pub trait Scene {
+    /// The things around the rider, in the walk's order; `None` when the walk does not open.
+    fn walk(&mut self) -> Option<Vec<Thing>>;
+    /// Sweep the fan at solid thing `id`: `None` when the sweep says it did not meet it, else per
+    /// feeler whether that feeler hit.
+    fn sweep(&mut self, id: u32, fan: &[Feeler]) -> Option<Vec<bool>>;
+}
+
+/// The rider's surroundings for one generic avoidance pass.
+pub struct VehicleScene<'a> {
+    pub scene: &'a mut dyn Scene,
+    /// The world's placed-group cell size: a group's cell times this is its spot.
+    pub cell: F,
+    /// The things the caller asks to be left out (the route's ignore list).
+    pub ignore: &'a [u32],
+    /// The off-the-path test, asked only under [`flag::KEEP_ON_TRACK`]: `None` without a track, a
+    /// race, or the bike's path pieces. Given a point it says whether that point lies off both the
+    /// route segment the rider is on and the one after (and false when either segment is missing).
+    pub off_path: Option<&'a mut dyn FnMut(Vf) -> bool>,
+}
+
+/// Why feelers were blocked: the bits of [`VehiclePass::reasons`], which the hit reaction is handed.
+pub mod blocked {
+    /// A rider ahead along the feeler is coming back toward the rider (or standing).
+    pub const RIDER: u32 = 0x1;
+    /// The sweep hit something solid on the feeler or one beside it.
+    pub const SOLID: u32 = 0x2;
+    /// A placed group stands within the clearance of the feeler.
+    pub const GROUP: u32 = 0x4;
+    /// The point ahead on the feeler is off the route's path.
+    pub const OFF_PATH: u32 = 0x8;
+    /// The ground ahead rises too steeply for the speed.
+    pub const CLIMB: u32 = 0x10;
+    /// The ground ahead falls away.
+    pub const DROP: u32 = 0x20;
+}
+
+/// What one generic avoidance pass did, beside the steer, the flags and the recovery it writes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VehiclePass {
+    /// The fan as the bundle holds it after the pass (its centre is the rider's position).
+    pub fan: Vec<Feeler>,
+    /// Each feeler's speed: the speed handed in, lowered to a rider's closing speed along it, or 0
+    /// where something blocks it.
+    pub speeds: Vec<F>,
+    /// The [`blocked`] bits.
+    pub reasons: u32,
+    /// The feeler taken, or `None` when none was worth riding and the hit reaction ran.
+    pub took: Option<usize>,
+}
+
+/// One pass of the generic vehicle avoidance, which every riding brain runs where the motocross one
+/// ([`avoid`]) is not taken.
+///
+/// Nothing runs and `None` comes back when `me.speed` is not above 0. Otherwise a fan of
+/// `tuning.feelers` rays (at least one) is built [`VEHICLE_FAN_SPREAD`] wide about `me.heading`, each
+/// starting at `me.speed`. When [`look`] allows, the scene walk's solid things are swept at
+/// ([`Thing::Solid`]; not with [`flag::NO_RIDER_SWEEP`]) and its placed groups looked at
+/// ([`Thing::Group`]). Then the riders in `others` (the race's list without this rider's own) lower
+/// the feelers they stand on, the off-the-path test ([`flag::KEEP_ON_TRACK`]) and the ground ahead
+/// ([`flag::CLIMB_CHECK`], [`flag::DROP_CHECK`], asked of `world`) block feelers, and the feeler
+/// with the best speed toward the heading is taken — the middle one unless another beats it within
+/// [`VehicleTuning::turn_limit`] of the steer handed in. Taken, the steer becomes that feeler (its `w`
+/// [`BUNDLE_W`]), the speed its speed, and [`flag::AVOID_DUE`] is cleared. With none worth taking,
+/// the bike's [`hit_reaction`] gets the [`blocked`] bits and may write the speed.
+pub fn avoid_vehicle(
+    tuning: &AvoidTuning, vehicle: &VehicleTuning, me: &Me, flags: &mut u64, others: &[Other],
+    around: &mut VehicleScene<'_>, world: &mut dyn crate::world::World, steer: &mut Steer,
+    recovery: &mut Recovery, rng: &mut Rng, curve: &CurveTable,
+) -> Option<VehiclePass> {
+    if me.speed <= F(0.0) {
+        return None;
+    }
+    let pos = me.position;
+    let mut fan = feeler_fan(tuning, F(VEHICLE_FAN_SPREAD), pos, me.heading, curve);
+    for f in &mut fan {
+        f.direction.0[3] = BUNDLE_W;
+    }
+    let n = fan.len();
+    let mut speeds = vec![me.speed; n];
+    let mut reasons = 0u32;
+    let block = |speeds: &mut [F], reasons: &mut u32, i: usize, why: u32| {
+        *reasons |= why;
+        speeds[i] = F(0.0);
+    };
+
+    let look = look(*flags);
+    if look.fan {
+        if let Some(things) = around.scene.walk() {
+            for thing in things {
+                match thing {
+                    Thing::Solid { id, collidable, ai_ignore } => {
+                        if !collidable || around.ignore.contains(&id) || ai_ignore || !look.riders {
+                            continue;
+                        }
+                        let Some(hits) = around.scene.sweep(id, &fan) else { continue };
+                        for i in 0..n {
+                            if hits[i] || (i > 0 && hits[i - 1]) || (i + 1 < n && hits[i + 1]) {
+                                block(&mut speeds, &mut reasons, i, blocked::SOLID);
+                            }
+                        }
+                    }
+                    Thing::Group { x, z } if look.scenery => {
+                        let gx = F(fpu::from_i32(i32::from(x))) * around.cell;
+                        let gz = F(fpu::from_i32(i32::from(z))) * around.cell;
+                        let off = Vf::new((gx - F(pos.x())).0, 0.0, (gz - F(pos.z())).0, 0.0);
+                        for (i, f) in fan.iter().enumerate() {
+                            let along = dot(f.direction, off);
+                            if along <= F(0.0) || !(along <= tuning.feeler_length) {
+                                continue;
+                            }
+                            let p = add(scale(f.direction, along), pos);
+                            let gx = F(fpu::from_i32(i32::from(x))) * around.cell;
+                            let gz = F(fpu::from_i32(i32::from(z))) * around.cell;
+                            let d = Vf::new((F(p.x()) - gx).0, 0.0, (F(p.z()) - gz).0, 0.0);
+                            if dot(d, d).sqrt() < tuning.near_range {
+                                block(&mut speeds, &mut reasons, i, blocked::GROUP);
+                            }
+                        }
+                    }
+                    Thing::Group { .. } | Thing::Other => {}
+                }
+            }
+        }
+    }
+
+    for r in others.iter().filter(|r| r.active) {
+        let off = sub(r.position, pos);
+        for (i, f) in fan.iter().enumerate() {
+            let along = dot(f.direction, off);
+            if along <= F(0.0) || !(along < tuning.far_range) {
+                continue;
+            }
+            let d = sub(add(scale(f.direction, along), pos), r.position);
+            if dot(d, d).sqrt() < tuning.near_range {
+                let closing = dot(f.direction, r.velocity);
+                if closing < speeds[i] {
+                    speeds[i] = closing;
+                    if closing <= F(0.0) {
+                        reasons |= blocked::RIDER;
+                    }
+                }
+            }
+        }
+    }
+
+    if *flags & flag::KEEP_ON_TRACK != 0 {
+        if let Some(off_path) = around.off_path.as_mut() {
+            for (i, f) in fan.iter().enumerate() {
+                if off_path(add(pos, scale(f.direction, tuning.edge_look_ahead))) {
+                    block(&mut speeds, &mut reasons, i, blocked::OFF_PATH);
+                }
+            }
+        }
+    }
+
+    if *flags & (flag::CLIMB_CHECK | flag::DROP_CHECK) != 0 {
+        for (i, f) in fan.iter().enumerate() {
+            let ahead = add(scale(f.direction, vehicle.probe_ahead), pos);
+            let rise = F(world.ground(ahead).0.y()) - F(pos.y());
+            if *flags & flag::CLIMB_CHECK != 0
+                && !(rise / vehicle.probe_ahead < vehicle.climb_limit)
+                && me.held_speed < vehicle.climb_speed
+            {
+                block(&mut speeds, &mut reasons, i, blocked::CLIMB);
+            } else if *flags & flag::DROP_CHECK != 0 && rise / vehicle.drop_run <= vehicle.drop_limit {
+                block(&mut speeds, &mut reasons, i, blocked::DROP);
+            }
+        }
+    }
+
+    let mid = n / 2;
+    let mut best = speeds[mid] * dot(fan[mid].direction, me.heading);
+    let mut took = mid;
+    for (i, f) in fan.iter().enumerate() {
+        let worth = speeds[i] * dot(f.direction, me.heading);
+        let c = dot(f.direction, steer.direction);
+        if !(worth <= best) && me.held_speed * (F(1.0) - c * c).sqrt() < vehicle.turn_limit {
+            best = worth;
+            took = i;
+        }
+    }
+    let took = if !(best <= F(0.0)) {
+        steer.direction = fan[took].direction;
+        steer.speed = speeds[took];
+        *flags &= !flag::AVOID_DUE;
+        Some(took)
+    } else {
+        hit_reaction(u64::from(reasons), flags, recovery, &mut steer.speed, rng);
+        None
+    };
+    Some(VehiclePass { fan, speeds, reasons, took })
 }
 
 // --- the rider-to-brain copy (S12e) ------------------------------------------------------------------
@@ -4078,6 +4332,7 @@ pub struct Racer {
     pub bar_rest: [F; 2],
     pub tuning: Tuning,
     pub avoid: AvoidTuning,
+    pub vehicle: VehicleTuning,
     pub plan: TrickPlan,
     pub habits: Habits,
     pub filter: SteerFilter,
@@ -4123,11 +4378,12 @@ pub struct Around<'a> {
     pub others: &'a [Other],
     /// The off-the-track answer [`avoid`] asks under [`flag::KEEP_ON_TRACK`]; `None` with no track.
     pub edge: Option<&'a mut dyn FnMut(Vf) -> Option<Vf>>,
-    /// The generic vehicle avoidance, which the original runs in place of [`avoid`] unless the brain's
-    /// mode is 2 and its card's bike word is set — so for every riding brain ([`RIDE`]). It is not
-    /// ported: this stands in for it (bending the heading and speed, and the flags), and with `None`
-    /// the tick leaves them as the route made them and tells [`Told::missing`] `"vehicle avoid"`.
-    pub vehicle_avoid: Option<&'a mut dyn FnMut(&mut follow::Brain)>,
+    /// The scene the generic vehicle avoidance ([`avoid_vehicle`]) rides in. The original runs that
+    /// pass in place of [`avoid`] unless the brain's mode is 2 and its card's bike word is set — so for
+    /// every riding brain ([`RIDE`]). Its ground probes ask [`Around::world`], and its hit reaction
+    /// writes [`Around::recovery`]. With `None` the tick leaves the heading and speed as the route made
+    /// them and tells [`Told::missing`] `"vehicle avoid"`.
+    pub vehicle: Option<VehicleScene<'a>>,
     /// The route node the rider is on, as the trick plan and the habits read it.
     pub jump: Option<Jump>,
     pub node: Option<HabitNode>,
@@ -4156,10 +4412,12 @@ pub struct Told {
     pub rescue: Option<Rescue>,
     /// The listeners told, by index.
     pub listeners: Vec<usize>,
-    /// The feeler fan the avoidance built (the original sweeps it and throws the hits away).
+    /// The feeler fan the motocross avoidance built (the original sweeps it and throws the hits away).
     pub feelers: Option<Vec<Feeler>>,
+    /// What the generic avoidance did, when it ran.
+    pub vehicle: Option<VehiclePass>,
     /// Steps the tick reached that the port has not got, in order: `"path"` (the path follower after
-    /// the seeker), `"vehicle avoid"` (the generic avoidance, [`Around::vehicle_avoid`]), `"fly"` (the
+    /// the seeker), `"vehicle avoid"` (the generic avoidance with no [`Around::vehicle`]), `"fly"` (the
     /// flying interfaces' controller), `"mode two"` and `"mode four"`.
     pub missing: Vec<&'static str>,
 }
@@ -4235,13 +4493,18 @@ impl Steps for Join<'_, '_> {
             air_cone: a.air_cone,
             bike_word: a.card.map(|c| c.bike_word),
         };
-        let rng = &mut *self.rng;
+        // The generic avoidance's hit reaction and the trick plan both draw.
+        let rng = core::cell::RefCell::new(&mut *self.rng);
         let feelers = &mut self.told.feelers;
+        let vehicle_pass = &mut self.told.vehicle;
         let senses = &r.senses;
-        let (avoid_tuning, plan, weights, heading_angle) = (&r.avoid, &mut r.plan, &r.weights, r.controls.heading);
+        let (avoid_tuning, vehicle_tuning) = (&r.avoid, &r.vehicle);
+        let (plan, weights, heading_angle) = (&mut r.plan, &r.weights, r.controls.heading);
         let progress = a.card.map_or(F(0.0), |c| c.progress);
         let mx = b.mode == 2 && a.card.is_some_and(|c| c.bike_word != 0);
-        let vehicle = &mut a.vehicle_avoid;
+        let vehicle = &mut a.vehicle;
+        let world = &mut *a.world;
+        let recovery = &mut a.recovery;
         let mut unported = false;
         let others = a.others;
         let curve = &a.tables.curve;
@@ -4253,13 +4516,6 @@ impl Steps for Join<'_, '_> {
             &mut fb,
             &tail,
             &mut |fb| {
-                if !mx {
-                    match vehicle {
-                        Some(v) => v(fb),
-                        None => unported = true,
-                    }
-                    return;
-                }
                 let me = Me {
                     position: senses.frame[3],
                     heading: fb.heading,
@@ -4268,9 +4524,21 @@ impl Steps for Join<'_, '_> {
                     held_speed: senses.speed,
                     progress,
                 };
+                // The heading and the steer are one quad in the brain, and so are the two speeds.
                 let mut steer = Steer { direction: fb.heading, speed: fb.speed };
-                let edge = edge.as_mut().map(|e| &mut **e as &mut dyn FnMut(Vf) -> Option<Vf>);
-                *feelers = avoid(avoid_tuning, &me, &mut fb.flags, others, edge, &mut steer, curve);
+                if mx {
+                    let edge = edge.as_mut().map(|e| &mut **e as &mut dyn FnMut(Vf) -> Option<Vf>);
+                    *feelers = avoid(avoid_tuning, &me, &mut fb.flags, others, edge, &mut steer, curve);
+                } else if let Some(v) = vehicle.as_mut() {
+                    let rng = &mut **rng.borrow_mut();
+                    *vehicle_pass = avoid_vehicle(
+                        avoid_tuning, vehicle_tuning, &me, &mut fb.flags, others, v, world, &mut steer, recovery, rng,
+                        curve,
+                    );
+                } else {
+                    unported = true;
+                    return;
+                }
                 (fb.heading, fb.speed) = (steer.direction, steer.speed);
             },
             &mut |fb| {
@@ -4281,7 +4549,7 @@ impl Steps for Join<'_, '_> {
                     jump,
                 };
                 let rider = tricks.as_mut().map(|(set, t)| (*set, &mut **t));
-                plan_trick(dt, &mut fb.flags, plan, at, rider, rng);
+                plan_trick(dt, &mut fb.flags, plan, at, rider, &mut **rng.borrow_mut());
             },
             &mut |fb| {
                 let on_ground = fb.flags & flag::ON_GROUND != 0;

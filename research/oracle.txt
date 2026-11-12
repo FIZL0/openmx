@@ -1488,6 +1488,14 @@ name_bit                    boot 0x00281cb0 (registry, name) -> bit: walk the re
 #                                           allocated, strncpy'd and appended, and the shifted value is
 #                                           returned. So slot 31 gets 0x80000000 and every slot from 32
 #                                           on gets 0
+class_bit                   boot 0x00119520 (registry, name) -> 1 << index: a counted registry of
+#                                           0x20-byte names (count at +0, names from +4); a miss
+#                                           appends the name. ai_update_vehicle asks it for
+#                                           "AI_IGNORE" (0x00433df0) in registry 0x0041db50 and skips
+#                                           type-2 objects whose +0x84 has that bit (S317)
+ai_iface_walk_begin         boot 0x00281b90 the AI interface's vt+0x2c thunk (this - 0x10d0, j 0x00280aa0):
+#                                           opens the scene walk around the rider; v0 non-zero if open
+ai_iface_walk_next          boot 0x00281b80 vt+0x30 thunk (j 0x00280b00): the walk's next object, or 0
 name_registry_clear         boot 0x00281df0 operator delete[] each name in index order, then free the
 #                                           nodes
 actor_kind_names            boot 0x004e1e88 the type-name registry: {count, head, tail}. An actor's
@@ -1542,6 +1550,12 @@ ai_update_vehicle           boot 0x002858d0 VehicleAI.cpp's: both build the look
 #                                           e.g. pc 0x00286794). Call site in ai_tick_flag 0x00384a60:
 #                                           a1/a2 = ai+0x150/+0x154, a3 = +0xc0, t0 = t1 = +0x1d0
 #                                           (heading and steer alias), t2 = t3 = +0x1e0
+#                                           S317: ported as game_sim::ai::avoid_vehicle — fan
+#                                           spread pi/2, ground probes via vt+0x38 (ground_query on
+#                                           rider+0x7ac), blocked -> vt+0x3c ai_hit_reaction. The
+#                                           interface is rider+0x10d0, vtable 0x004550e4, thunks
+#                                           this-0x10d0: 0x00281b90 walk begin, 0x00281b80 next,
+#                                           0x00281b70 end, 0x00281b60 ground, 0x00281b50 hit
 ai_mx_construct             boot 0x00382c50 MXVehicleAI constructor (calls ai_vehicle_construct): the
 #                                           avoidance tunables' defaults, feeler height +0x2a8 3.0
 ai_vehicle_construct        boot 0x00282ca0 VehicleAI base constructor: +0x2a4 11 feelers, +0x2ac 100
