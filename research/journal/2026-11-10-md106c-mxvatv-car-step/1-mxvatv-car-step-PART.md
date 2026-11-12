@@ -33,3 +33,5 @@ Once MD106a and MD106b have merged: read MD39a's buggy image whole into Car/body
 tests/mxvatv_car_frame.rs with a case that unhooks every call except the ground query, answers that through
 atv_ground on MC02, and compares every word. Account for the idle second buggy's writes and the other two
 preforce listeners'.
+
+(Continued and finished in `2026-11-11-md106c-whole-frame/`.)
