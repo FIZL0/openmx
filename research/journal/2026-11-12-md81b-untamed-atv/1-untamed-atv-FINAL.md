@@ -88,7 +88,7 @@ The rest of the comparison is a static diff, not a run.
   way on the task base without my change, and with main's MD119 sweep fix cherry-picked on top, so I dropped
   the cherry-pick. The 13 other port replays and all the originals'-frame twins passed with my change in
   place. That is the evidence that the hashes and replays are unchanged with `Tail::untamed` off. I filed
-  MD146 and moved capture/md37a back out of the slot, so the final gate skipped the C28 replays as every slot
+  MD146 (dropped later: P287 had filed it as its MD143, and K51 fixes it) and moved capture/md37a back out of the slot, so the final gate skipped the C28 replays as every slot
   without them does.
 
 ## Next
