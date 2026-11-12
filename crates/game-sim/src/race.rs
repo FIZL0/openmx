@@ -740,6 +740,32 @@ pub fn push(ch: &mut crate::chassis::Chassis, push: Vf) {
     ch.vel = push;
 }
 
+/// **The start hold** (S290): a rider's bike as the start's timeline arms it when the countdown reads
+/// zero ([`Supercross::start_timeline`], [`StartStep::armed`]) — free to move only in height and to
+/// turn only about its own x and z, the writes the timeline makes on each item's body. On sx01 that
+/// body is the human's bike chassis. The turn freedoms do not last: the bike's ground step sets them
+/// again every frame ([`crate::chassis::set_flags`], 1, 1 and "no wheel down"), so a held bike
+/// standing on the ground reads 1, 1, 0. The warning window, or failing that the drop, lets it go
+/// ([`release`]).
+pub fn hold(ch: &mut crate::chassis::Chassis) {
+    ch.free = [0, 1, 0];
+    ch.ang_free = [1, 0, 1];
+}
+
+impl StartStep {
+    /// What this call of the timeline did to every item's body, done to a rider's chassis: held
+    /// ([`hold`]) when the clock read zero, then freed on every axis ([`release`]) in the warning
+    /// window. A step with neither leaves the chassis alone.
+    pub fn apply(&self, ch: &mut crate::chassis::Chassis) {
+        if self.armed {
+            hold(ch);
+        }
+        if self.warning {
+            release(ch);
+        }
+    }
+}
+
 /// A rider's bike let go at the drop, the message every card's bike gets after the gate opens: the
 /// chassis may move along and turn about every axis again. (A computer rider's also redraws its
 /// start; the port's riders are all players.)
