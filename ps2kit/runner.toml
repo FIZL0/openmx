@@ -15,7 +15,9 @@ command = "./kit"
 test = "./kit check --all"
 # A merge tests only what changed since {base}, a commit that already passed a gate (the shared branch moves on
 # nothing else), by gate.toml [select]; the whole `test` above runs again once a day passes without one (K50,
-# agent-runner 0.24.0): a test-only merge takes minutes, not the hour --all does beside three slots.
+# agent-runner 0.24.0): a test-only merge takes minutes, not the hour --all does beside three slots. What the
+# daily run finds already fails on main, so the merge it ran on lands and agent-runner 0.25.0 files a critical
+# K task to fix the test (and widen gate.toml [select]); that run counts as the day's, so later merges stay selective.
 test_since = "./kit check --since {base}"
 full_every_hours = 24
 # The gate's limit counts the wait for a check slot: at load 90-110 with three slots' `kit done` holding the
@@ -30,7 +32,7 @@ retest = "./kit check --rerun {names}"
 # A load flake the gate's own [flaky] rerun let through (checks.py prints it under the PASSED line) is still a
 # test to fix: agent-runner files a critical K task to make it robust, unless an open task names it.
 flaky = '^\s*\(passed on a lone rerun \(load flakes, gate\.toml\): (.+)\)$'
-flaky_kind = "K"
+flaky_kind = "K"  # and the failing tests main already has (agent-runner 0.25.0)
 # main's GitHub Actions: every push there runs pages.yml (ci.yml inside it), and a red run sent an email and
 # nothing else (ci.yml was red on every push for two days to 11-02). agent-runner 0.7.3+ reads the newest
 # finished run while a run is up and files one critical B task for a red one, none again while it is open (K22).
