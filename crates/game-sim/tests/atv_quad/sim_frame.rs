@@ -17,6 +17,8 @@
 //! ([`atv_contact::Held::refill`]), and the record's part search, sweep and node points are answered
 //! by the port's Desert Oasis ([`WorldStep::search`], [`WorldStep::sweep`], [`WorldStep::node_point`]),
 //! each checked word for word against the original's call, which still runs for what it leaves in RAM.
+//! MD119 puts the sweep's own pair in ([`atv_sweep::pair`] through [`atv_sweep::Sweep`]) and runs a
+//! ride where it hits (`the_sweep_that_hits_the_palm_is_the_ports`).
 //!
 //! MD105a's tail ([`sim_tail::port_tail`]) with MD105b's pieces is the task's own chain: the record, its
 //! outside, the world step and the tail all the port's, against the original's whole frame
@@ -212,8 +214,8 @@ struct WorldStep<'a> {
     /// Spoil the next step's held contacts: the first one's normal one bit off in each lane.
     spoil: bool,
     /// How often the record's outside asked the port: part searches, the contacts they filed, sweeps,
-    /// the sweeps' pairs, and node points.
-    asked: [u32; 5],
+    /// the sweeps' pairs, node points, and the sweeps that hit.
+    asked: [u32; 6],
 }
 
 impl WorldStep<'_> {
@@ -316,18 +318,24 @@ impl WorldStep<'_> {
     }
 
     /// The sweep over Desert Oasis: the segment set on the sweep probe `probe` ([`atv_sweep::set`]), the
-    /// probe searched over the port's list with [`OasisSweep`]. Answers the segment's bounds and the
-    /// hit bit.
-    fn sweep(&mut self, ee: &Ee, probe: u32, from: Vf, to: Vf) -> (atv_sweep::Bounds, bool) {
+    /// probe searched over the port's list with [`atv_sweep::Sweep`] (the ATV's own clear and pair,
+    /// MD119) on [`OasisSweep`]'s props. Answers the segment's bounds, the hit bit, and the probe and
+    /// its record as the search left them, each struck collidable the image's.
+    fn sweep(&mut self, ee: &Ee, probe: u32, from: Vf, to: Vf) -> PortSweep {
         let i = self.probe(ee, probe);
         let (segments, bounds) = atv_sweep::set(&[[from, to]], None);
         let o = &mut self.oasis;
-        let probe = game_sim::sweep_probe::SweepProbe { segments, ..Default::default() };
-        let mut n = OasisSweep { probe, props: o.props, first_mesh: o.world.meshes.start, places: &o.world.broad.places, pairs: 0 };
+        let mut outside = OasisSweep { props: o.props, first_mesh: o.world.meshes.start, places: &o.world.broad.places, nearby: Vec::new(), pairs: 0 };
+        outside.nearby = o.world.objects.iter().map(|c| (c.nearby, c.radius)).collect();
+        let mut n = atv_sweep::Sweep::new(segments, atv_sweep::More::default(), &mut outside);
         let hit = atv_search::search(&mut o.world.objects, i, &o.list.found, &|_| false, &mut n);
+        let (probe, more) = (n.probe, n.more);
+        let items = &self.items;
+        let struck = probe.answer.struck.map(|s| s.map(|o| items[o]));
         self.asked[2] += 1;
-        self.asked[3] += n.pairs;
-        (bounds, hit)
+        self.asked[3] += outside.pairs;
+        self.asked[5] += u32::from(hit);
+        PortSweep { bounds, hit, probe, more, struck }
     }
 
     /// A point carried into the world by the quad's scene node, the port's scene's
@@ -465,40 +473,46 @@ impl game_sim::world_search::Narrow for OasisParts<'_> {
     }
 }
 
-/// The sweep's narrow phase on Desert Oasis: [`atv_sweep::Sweep`]'s clear (the hit bit down, the
-/// segments stood in the world, the reach the bundle's radius), and for the pair, which
-/// [`atv_sweep`] does not port, MX Unleashed's ([`game_sim::sweep_probe::pair`]) on the prop's mesh,
-/// taken as the ATV's: the palm ride checks its hit bit against the original's on every search.
+/// The sweep's world on Desert Oasis for [`atv_sweep::Sweep`] (MD119): each collidable the sweep pairs
+/// is a prop's mesh as a [`Target`](game_sim::sweep_probe::Target), its centre its place's and its
+/// reach and nearby flag as the search found them (`nearby`, read off the world's collidables before
+/// the search, which the sweep does not change for props). Plants are never paired (the probe skips
+/// placed groups), nobody listens, and none has a callback.
 struct OasisSweep<'a> {
-    probe: game_sim::sweep_probe::SweepProbe,
     props: &'a [Prop],
     first_mesh: usize,
     places: &'a [game_sim::broad_phase::Placement],
+    nearby: Vec<(bool, F)>,
     pairs: u32,
 }
 
-impl game_sim::world_search::Narrow for OasisSweep<'_> {
-    fn clear(&mut self, objects: &mut [Collidable], probe: usize) {
-        objects[probe].flags &= !game_sim::world_search::flags::HIT;
-        game_sim::sweep_probe::clear(&mut self.probe);
-        objects[probe].radius = self.probe.world.radius;
-    }
-    fn prepare(&mut self, _: &mut [Collidable], _: usize) {
-        panic!("the sweep prepared a grid")
-    }
-    fn pair(&mut self, objects: &mut [Collidable], _: usize, other: usize) -> bool {
+impl atv_sweep::Outside for OasisSweep<'_> {
+    fn target(&mut self, other: usize, pair: &mut dyn FnMut(Option<&game_sim::sweep_probe::Target>) -> bool) -> bool {
         use game_sim::sweep_probe::{Placed, Shape, Target};
         let i = other.checked_sub(self.first_mesh).filter(|&i| i < self.props.len()).unwrap_or_else(|| panic!("the sweep paired collidable {other}, not a prop"));
         let p = &self.props[i];
         let c = self.places[other].centre;
+        let (nearby, radius) = self.nearby[other];
         let target = Target {
-            nearby: objects[other].nearby,
+            nearby,
             centre: Vf::new(c[0].0, c[1].0, c[2].0, c[3].0),
-            radius: objects[other].radius,
+            radius,
             shape: Shape::Mesh(Placed { transform: p.to_world.0, mesh: game_sim::collide::MeshRef::of(&p.mesh), object: other }),
         };
         self.pairs += 1;
-        game_sim::sweep_probe::pair(&mut self.probe, Some(&target))
+        pair(Some(&target))
+    }
+}
+
+impl game_sim::world_search::Narrow for OasisSweep<'_> {
+    fn clear(&mut self, _: &mut [Collidable], _: usize) {
+        unreachable!("the sweep's own clear")
+    }
+    fn prepare(&mut self, _: &mut [Collidable], _: usize) {
+        panic!("the sweep prepared a grid")
+    }
+    fn pair(&mut self, _: &mut [Collidable], _: usize, _: usize) -> bool {
+        unreachable!("the sweep's own pair")
     }
     fn parts(&mut self, _: &mut [Collidable], group: usize) -> usize {
         panic!("the sweep searched group {group}")
@@ -518,6 +532,16 @@ impl game_sim::world_search::Narrow for OasisSweep<'_> {
     fn on_struck(&mut self, _: &mut [Collidable], _: usize, _: usize, _: usize) {
         unreachable!("no callback")
     }
+}
+
+/// What [`WorldStep::sweep`] answers: the set's bounds, the hit bit, the probe and the ATV record's
+/// more as the search left them, and each segment's struck collidable as the image's address.
+struct PortSweep {
+    bounds: atv_sweep::Bounds,
+    hit: bool,
+    probe: game_sim::sweep_probe::SweepProbe,
+    more: atv_sweep::More,
+    struck: [Option<u32>; game_sim::collide::MAX_PROBES],
 }
 
 /// A ray probe's tree in RAM from `root` (36-byte nodes: the volume, two child words, the centre and
@@ -723,21 +747,30 @@ impl Collides for RecordInRam<'_, '_, '_> {
         self.run(PROBE_PLACE, &[u64::from(probe)]);
         self.search_with(probe, nearby);
         let hit = self.ee.u8_at(probe + 0x126) & 0x20 != 0;
-        if let Some((b, port_hit)) = port {
-            let image = [0x50, 0x54, 0x58, 0x70].map(|o| self.ee.u32_at(probe + o));
-            let mine = [b.centre.x(), b.centre.y(), b.centre.z(), b.reach.0].map(f32::to_bits);
-            assert_eq!(mine, image, "the sweep probe's centre and reach");
-            assert_eq!(port_hit, hit, "the sweep's hit bit");
-        }
+        let Some(port) = port else {
+            if !hit {
+                return None;
+            }
+            let hits = self.ee.u32_at(probe + 0x7c);
+            let obj = self.ee.u32_at(self.ee.u32_at(hits + 0x9c));
+            let struck = if obj == 0 { Struck::default() } else { self.struck(obj) };
+            let normal = vf_at(self.ee, self.ee.u32_at(hits + 0x94));
+            let point = vf_at(self.ee, self.ee.u32_at(hits + 0x98));
+            return Some(Swept { normal, point, struck });
+        };
+        let b = port.bounds;
+        let image = [0x50, 0x54, 0x58, 0x70].map(|o| self.ee.u32_at(probe + o));
+        let mine = [b.centre.x(), b.centre.y(), b.centre.z(), b.reach.0].map(f32::to_bits);
+        assert_eq!(mine, image, "the sweep probe's centre and reach");
+        assert_eq!(port.hit, hit, "the sweep's hit bit");
         if !hit {
             return None;
         }
-        let hits = self.ee.u32_at(probe + 0x7c);
-        let obj = self.ee.u32_at(self.ee.u32_at(hits + 0x9c));
-        let struck = if obj == 0 { Struck::default() } else { self.struck(obj) };
-        let normal = vf_at(self.ee, self.ee.u32_at(hits + 0x94));
-        let point = vf_at(self.ee, self.ee.u32_at(hits + 0x98));
-        Some(Swept { normal, point, struck })
+        // MD119: a sweep that hits, the ATV's pair's record against the original's word for word.
+        sweep_record_is_the_originals(self.ee, probe, &port);
+        let r = &port.probe.answer.record;
+        let obj = port.struck[0].expect("the hit segment's struck collidable");
+        Some(Swept { normal: r.normal[0], point: r.point[0], struck: self.struck(obj) })
     }
     fn place_part(&mut self) {
         let part = self.word(0x200);
@@ -807,6 +840,38 @@ impl Collides for RecordInRam<'_, '_, '_> {
         });
         &mut o.1
     }
+}
+
+/// MD119 — the sweep probe at `probe` in RAM after the original's search that hit, against the
+/// port's ([`WorldStep::sweep`]): the world form of its segment, its sphere, and its record (`+0x7c`):
+/// the two head quads, the nearest normal, point and push, the tally and nearest fraction, and the
+/// hit segment's fraction, point, normal, hit word, owner word, third word (`+0xac`) and struck
+/// collidable, bit for bit. A mesh leaves the record's part (`+0x84`) alone, and the port keeps none.
+fn sweep_record_is_the_originals(ee: &Ee, probe: u32, port: &PortSweep) {
+    let p = &port.probe;
+    let w = p.world.probes[0];
+    let bits = |a: u32| vf_at(ee, a).to_bits();
+    assert_eq!(bits(ee.u32_at(probe + 0x148)), w.origin.to_bits(), "the sweep's world start");
+    assert_eq!(bits(ee.u32_at(probe + 0x14c)), w.dir.to_bits(), "the sweep's world direction");
+    assert_eq!(ee.u32_at(ee.u32_at(probe + 0x144)), w.length.0.to_bits(), "the sweep's length");
+    assert_eq!(bits(probe + 0x160), p.world.centre.to_bits(), "the sweep's centre");
+    assert_eq!(ee.u32_at(probe + 0x170), p.world.radius.0.to_bits(), "the sweep's radius");
+    let (rec, a, r) = (ee.u32_at(probe + 0x7c), &p.answer, &p.answer.record);
+    let arr = |o: u32| ee.u32_at(rec + o);
+    let got = (
+        [bits(rec), bits(rec + 0x10), bits(rec + 0x20), bits(rec + 0x30), bits(rec + 0x40)],
+        [arr(0x8c), arr(0xb4), ee.u32_at(arr(0xa8)), ee.u32_at(arr(0xa4)), ee.u32_at(arr(0xa0)), ee.u32_at(arr(0xac))],
+        [bits(arr(0x98)), bits(arr(0x94))],
+        ee.u32_at(arr(0x9c)),
+    );
+    let want = (
+        [a.head[0], a.head[1], r.nearest_normal, r.nearest_point, r.push].map(|v| v.to_bits()),
+        [r.hits as u32, r.nearest.0.to_bits(), r.fraction[0].0.to_bits(), u32::from(r.hit[0]), r.owner[0] as u32, port.more.words[0]],
+        [r.point[0].to_bits(), r.normal[0].to_bits()],
+        port.struck[0].unwrap_or(0),
+    );
+    assert_eq!(got, want, "the sweep's record (heads, nearest normal, point, push; tally, nearest, fraction, hit, owner, +0xac word; point, normal; struck)");
+    assert_eq!(port.more.part, None, "a mesh keeps no part");
 }
 
 /// The record at `at`'s virtual `slot` (`+0x7c` or `+0x84`) as the port's, on the record in RAM, its
@@ -892,7 +957,7 @@ struct Palm {
     port_frames: u32,
     port_resolved: u32,
     /// [`WorldStep::asked`].
-    port_asked: [u32; 5],
+    port_asked: [u32; 6],
     /// The words that differed on the spoiled frame.
     spoiled: Vec<u32>,
 }
@@ -910,13 +975,24 @@ impl Palm {
 /// the stack equal to the first's after every frame. Both get [`at_the_palm`]'s pad off the first's
 /// body before each frame.
 fn palm(frames: usize, port: Option<Pieces>, spoil: Option<usize>, tail: bool) -> Option<Palm> {
+    palm_kicked(frames, port, spoil, tail, None)
+}
+
+/// [`palm`] with, on `kick`'s frame, the body's velocity (`+0x80`, `xyz`) scaled by its factor before
+/// the frame, on both machines.
+fn palm_kicked(frames: usize, port: Option<Pieces>, spoil: Option<usize>, tail: bool, kick: Option<(usize, f32)>) -> Option<Palm> {
     let quad = image::heap().quad;
     let body = |ee: &Ee| image::read_ride(ee, quad, F::ZERO).unwrap_or_else(|e| panic!("{e}")).1.body;
     let mut at = None;
-    let pad = |_: usize, ee: &Ee| {
+    let pad = |k: usize, ee: &Ee| {
         let b = *at.get_or_insert_with(|| body(ee));
         let p = at_the_palm(0, get_v(ee, b + 0x70), get_v(ee, b + 0x80));
-        pad_words(quad, &p)
+        let mut words = pad_words(quad, &p);
+        if let Some((_, by)) = kick.filter(|&(f, _)| f == k) {
+            let v = get_v(ee, b + 0x80);
+            words.extend((0..3).map(|i| (b + 0x80 + 4 * i as u32, (v.0[i] * by).to_bits())));
+        }
+        words
     };
     sim_chain(frames, port, spoil, tail, pad, |_, _| Vec::new())
 }
@@ -972,7 +1048,7 @@ fn sim_chain(
             items: Vec::new(),
             scene: None,
             spoil: false,
-            asked: [0; 5],
+            asked: [0; 6],
         }
     });
 
@@ -1033,12 +1109,13 @@ fn sim_chain(
         (seen.port_frames, seen.port_resolved, seen.port_asked) = (w.frames, w.resolved, w.asked);
     }
     eprintln!(
-        "MD105: {frames} frames, {} ground queries, {} by the port's record; first contact frame {:?}, part swaps {:?}, wrecks {:?}",
+        "MD105: {frames} frames, {} ground queries, {} by the port's record; first contact frame {:?}, part swaps {:?}, wrecks {:?}; the port's outside asked {:?}",
         seen.queries,
         seen.port_queries,
         seen.contacts.iter().position(|&c| c != 0),
         seen.swaps(),
-        seen.wrecks.last()
+        seen.wrecks.last(),
+        seen.port_asked
     );
     Some(seen)
 }
@@ -1139,10 +1216,32 @@ fn the_palm_strikes_contacts_push_the_ports_quad() {
     check_palm(&seen);
     assert_eq!(seen.port_frames as usize, PALM_RIDE, "the port's world step ran every frame");
     assert!(seen.port_resolved > 0, "the port's step never resolved a contact: {seen:?}");
-    let [searches, hits, sweeps, pairs, points] = seen.port_asked;
+    let [searches, hits, sweeps, pairs, points, swept] = seen.port_asked;
     assert!(hits > 0 && pairs > 0 && points > 0, "the port's outside answered {:?}", seen.port_asked);
     assert_eq!((searches, sweeps), (PALM_RIDE as u32, PALM_RIDE as u32), "a part search and a sweep a frame");
+    assert_eq!(swept, 0, "a sweep on the palm ride hit: its misses are this ride's, the hits the fast ride's");
 }
+
+/// MD119 — **the sweep that hits is the port's**: the palm ride with the body's velocity doubled
+/// before frame 87 ([`FAST_PALM`]), so that the record's sweep back (its point 3 ft over the body,
+/// two frames of velocity long) crosses the palm's trunk before the part's rays push the quad off
+/// it: the original's sweep hits on frame 90. The record, its outside and the world step are the
+/// port's as in the palm ride above, the sweep's pair [`atv_sweep::pair`] (through
+/// [`atv_sweep::Sweep`]); on each hit the probe and its record equal the original's word for word
+/// ([`sweep_record_is_the_originals`]), the record's put-out runs on the port's hit, and every RAM
+/// word outside the stack equals the original's whole frame's after every frame.
+#[test]
+fn the_sweep_that_hits_the_palm_is_the_ports() {
+    let Some(seen) = palm_kicked(FAST_PALM_RIDE, Some(Pieces::Port), None, false, Some(FAST_PALM)) else { return };
+    assert_eq!(seen.port_frames as usize, FAST_PALM_RIDE, "the port's world step ran every frame");
+    let [searches, _, sweeps, pairs, _, swept] = seen.port_asked;
+    assert_eq!((searches, sweeps), (FAST_PALM_RIDE as u32, FAST_PALM_RIDE as u32), "a part search and a sweep a frame");
+    assert!(pairs > 0 && swept > 0, "the fast ride's sweep never hit: {:?}", seen.port_asked);
+}
+
+/// The fast palm ride: the frame whose velocity is scaled and by how much, and how long it runs.
+const FAST_PALM: (usize, f32) = (87, 2.0);
+const FAST_PALM_RIDE: usize = 130;
 
 /// MD105 — **the quad's frame is the port's through the strike, wreck and put-back**: the palm ride
 /// with every piece the task names in Rust at once: the record's clear and pass ([`port_record`]), the
@@ -1157,7 +1256,7 @@ fn the_quads_frame_is_the_ports_through_the_palm_strike_wreck_and_put_back() {
     check_palm(&seen);
     assert_eq!(seen.port_frames as usize, PALM_RIDE, "the port's world step ran every frame");
     assert!(seen.port_resolved > 0, "the port's step never resolved a contact: {seen:?}");
-    let [searches, hits, sweeps, pairs, points] = seen.port_asked;
+    let [searches, hits, sweeps, pairs, points, _] = seen.port_asked;
     assert!(hits > 0 && pairs > 0 && points > 0, "the port's outside answered {:?}", seen.port_asked);
     assert_eq!((searches, sweeps), (PALM_RIDE as u32, PALM_RIDE as u32), "a part search and a sweep a frame");
 }
@@ -1165,3 +1264,4 @@ fn the_quads_frame_is_the_ports_through_the_palm_strike_wreck_and_put_back() {
 /// MD37b: C28's captured rides replayed through the whole sim frame.
 #[path = "replay.rs"]
 mod replay;
+
