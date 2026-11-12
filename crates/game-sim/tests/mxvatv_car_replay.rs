@@ -458,9 +458,9 @@ const ADD_MOMENT: u32 = 0x0049_7530;
 /// The tire step's three parts (its contact, its forces, their hand-out).
 const TIRE_PARTS: [u32; 3] = [0x004b_5cf0, 0x004b_62c0, 0x004b_6400];
 /// The tire words its step clears before it writes them, two stores apart or more (the contact flag,
-/// cleared by the first part at 0x004b5d10 and set at 0x004b5740; the quad at +0x230, cleared whole by
-/// the third at 0x004b6444, then x at 0x004b73c8 and z at 0x004b73e0 or x alone at 0x004b6e10): a row
-/// the recorder read in between holds a 0 no kept moment does.
+/// cleared and set again by the first part; the quad at +0x230, cleared whole by the third, then x and
+/// z apart; research/oracle.txt `# MD107`): a row the recorder read in between holds a 0 no kept
+/// moment does.
 const CLEARED: [&str; 5] = [".raw+0xb0", ".raw+0x230", ".raw+0x234", ".raw+0x238", ".raw+0x23c"];
 
 type Seen = std::rc::Rc<std::cell::RefCell<Vec<Vec<u32>>>>;
