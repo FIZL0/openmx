@@ -11339,8 +11339,36 @@ race_end                    boot 0x002fc970 (activity) the race's Over notice (l
 #                                           vt+0x94(f12 0.75, obj, 0, 0). Returns 0.
 #                                           race::Supercross::race_end
 race_results_take           boot 0x0029d940 (results menu, score manager) the results menu takes the
-#                                           cards. Not read further.
+#                                           cards. Read in P330, below. menu::results::Board::take
 tip_popup_arm               boot 0x0029abc0 (popup, 1). Not read further.
+# P330 — the results menu's own code, read (crates/openmx/src/menu_results.rs; tests/race_results.rs).
+race_results_sort           boot 0x0029b720 (record list, key) the insertion sort of the list (count +0,
+#                                           records +4.., key +0x2c) on record word key+1: skipped if
+#                                           key == +0x2c; keys 0..3 up (3: a 0 word is 18000.0 while it
+#                                           moves, from the second record on, and 18000.0 back to 0),
+#                                           the rest down; c.olt, so ties keep their order.
+#                                           menu::results::sort
+race_results_card           boot 0x0029b560 (record, card) a card's record (0x38): +0 the seat item
+#                                           (owner +4 +0x24 +0x20), then floats place (cvt), race time
+#                                           +0xb4, max.s(0, gap +0xbc), best lap +0x50, tracker +0x24
+#                                           +0x28 (cvt), card +0xf0, +0x100, tracker +0x2c..+0x3c (cvt).
+#                                           The tracker is the item's vt(+0x48)+0x40(item, the
+#                                           "StatisticsTracker" id). menu::results::ResultCard::take
+ai_rider_name               boot 0x00373340 (AI entry, buf, size) an AI rider's name into buf
+#   race_results_take (above): record list +0xa8 (count, ten records), eleven pages +0xac..+0xd4 (page
+#   +4 key 0,3..12, +0xc columns, +0x20 rows = cards + 3, text 0x19 a cell at +0x24 row number,
+#   +0x1b4 name (seat item +0x34 == 1: profile +0x6b4 +0x38; 2: ai_rider_name(+0x6b8); else the row
+#   number left in the buffer), +0x344 / +0x4d4 values). Page 0: race time, gap; keys 3, 7 as times
+#   ("--:--.--" for == 0, "99:99.99" / "-99:99.99" past +-5999.99, else cvt.w.s(100t + 0.5) as
+#   mm:ss.cc); 6 distance ("%d" of cvt.w.s(t), or of 0.3048 t when app+0x3d4 +8 +0x18); the rest
+#   "%d" of cvt.w.s. Built per page after that page's sort, then the list is sorted on page 0's key
+#   again, +0x130 = 0, +0x134 = page 0's +0xc. Page titles: the STR_STAT_TITLE_* strings, built by
+#   0x0029b970. Paging 0x0029d680 (+-1 mod 11, re-sorts, does not rewrite the text); input 0x0029cde0
+#   (0x3e/0x3f page, 0x36 Restart -> the HOFMenu first when its +0xc0 is set (0x002a0b90), 0x38 Quit).
+#   Hall of Fame defaults: 0x00375890 (from 0x003755b0) fills every table from per-track base times
+#   (0x00421540.. four tables of 24) stepped by 0x00375810 with names by 0x00375680. Not ported.
+#   profile_stat_add stat 9 (0x0037ad50) counts races (+0x168), stat 10 wins (+0x174); both rewrite
+#   the win percentage +0x30 (100.0 when equal, else 100 * wins / races).
 # MD106 — the car's physics frame (game_sim::atv_car frame/pre_process/force/post_process; tests/
 #   mxvatv_car_frame.rs runs atv_world_step off md39a/buggy.ee.bin over 3,000 states, every call of the
 #   car's listeners hooked). Journal: research/journal/2026-11-10-md106-mxvatv-car-step.

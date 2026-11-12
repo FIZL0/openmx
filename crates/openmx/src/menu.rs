@@ -67,6 +67,9 @@ mod transfers;
 #[path = "menu_race.rs"]
 pub mod race;
 pub use race::{RaceSetup, Results};
+// P330: the race's end — the results menu's pages, the tip popup, the Hall of Fame marks, the wins.
+#[path = "menu_results.rs"]
+pub mod results;
 pub use transfers::{PLAY_ROWS, Transfers};
 // The pause's Tricks page (P259): the ride's tricks, their gestures and points.
 #[path = "menu_tricks.rs"]

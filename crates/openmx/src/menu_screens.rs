@@ -2764,10 +2764,15 @@ impl Pen<'_> {
     }
 
     /// P327's results: a glass row a rider in finishing order — place, number, name, laps, best lap
-    /// and time — with what the race does not count yet as dashes.
+    /// and time — with what the race does not count yet as dashes. P330: a race that handed its
+    /// end over shows the results menu's pages instead, after the tip popup and before the Hall of
+    /// Fame's call.
     fn results(&mut self, menu: &Menu) {
         self.logo(true);
         let r = menu.results();
+        if r.board.is_some() {
+            return self.race_end(&r);
+        }
         let (x, w) = (12.0, 56.0);
         let name = race::race_track_name(&r.track).unwrap_or_else(|| r.track.clone());
         let y = self.heading("Results", &name, &format!("{} laps, {} riders.", r.laps, r.riders), x, 8.0, w, 2.6);
@@ -2798,6 +2803,74 @@ impl Pen<'_> {
         }
         self.title(Screen::Results.title());
         self.hints(&[(Btn::Cross, "Main Menu")]);
+    }
+
+    /// P330's race end: the tip popup, one of the results menu's pages as it wrote them, or the
+    /// Hall of Fame's call, by [`race::Stage`].
+    fn race_end(&mut self, r: &Results) {
+        let (x, w) = (12.0, 56.0);
+        let name = race::race_track_name(&r.track).unwrap_or_else(|| r.track.clone());
+        let about = format!("{} laps, {} riders.", r.laps, r.riders);
+        match r.stage {
+            race::Stage::Tips => {
+                let y = self.heading("Race Over", &name, &about, x, 8.0, w, 2.6);
+                let mut y = y + 1.4;
+                for t in &r.tips {
+                    let mut said = Vec::new();
+                    if t.preload {
+                        said.push("No preload in that race: hold it before a jump's lip and let go on the lip to go higher.");
+                    }
+                    if t.clutch {
+                        said.push("No clutch in that race: feather it out of the turns and off the start to pull away harder.");
+                    }
+                    self.text(Weight::Heavy, &format!("Player {}", t.seat + 1), x, y + CAP * 1.2, 1.2, 0.0, PEACH, Align::Left);
+                    y += 2.0;
+                    for line in said {
+                        y = self.para(line, x, y, w, 1.0, 1.5, CHALK) + 0.6;
+                    }
+                    y += 1.0;
+                }
+                self.title(Screen::Results.title());
+                self.hints(&[(Btn::Cross, "OK")]);
+            }
+            race::Stage::Fame => {
+                let y = self.heading("Hall of Fame", &name, "A new record!", x, 8.0, w, 2.6);
+                let seats: Vec<String> = [(r.fame.seat0, 1), (r.fame.seat1, 2)].iter().filter(|(m, _)| *m).map(|(_, n)| format!("Player {n}")).collect();
+                let said = format!("{} set a time that earns a place in the Hall of Fame.", seats.join(" and "));
+                self.para(&said, x, y + 1.4, w, 1.1, 1.5, CHALK);
+                self.title(Screen::Results.title());
+                self.hints(&[(Btn::Cross, "Main Menu")]);
+            }
+            race::Stage::Board => {
+                let Some(board) = &r.board else { return };
+                let page = &super::results::PAGES[r.page % super::results::PAGES.len()];
+                let y = self.heading(page.title, &name, &about, x, 8.0, w, 2.6);
+                let size = 1.15;
+                let h = size * 2.2;
+                let top = y + 1.4;
+                let at: &[(f32, Align)] = if page.heads.len() == 4 {
+                    &[(0.0, Align::Left), (5.0, Align::Left), (42.0, Align::Right), (55.0, Align::Right)]
+                } else {
+                    &[(0.0, Align::Left), (5.0, Align::Left), (55.0, Align::Right)]
+                };
+                for ((cx, align), head) in at.iter().zip(page.heads) {
+                    self.text(Weight::Bold, &head.to_uppercase(), x + 0.9 + cx, top, 0.9, 0.0, DUST, *align);
+                }
+                let mut y = top + 0.8;
+                for row in &board.pages[r.page % board.pages.len()] {
+                    self.round([x, y, w, h], 0.6 * size, GLASS, GLASS);
+                    let mid = Pen::mid(y + h / 2.0, size);
+                    for (k, ((cx, align), cell)) in at.iter().zip(row).enumerate() {
+                        let colour = if k == 0 { PEACH } else { CHALK };
+                        self.text(Weight::Heavy, cell, x + 0.9 + cx, mid, size, 0.0, colour, *align);
+                    }
+                    y += h + 0.4;
+                }
+                self.title(Screen::Results.title());
+                let next = if r.fame.waiting { "Hall of Fame" } else { "Main Menu" };
+                self.hints(&[(Btn::LeftRight, "Page"), (Btn::Cross, next)]);
+            }
+        }
     }
 
     /// The keyboard: what is typed, the keys and the commands, in a box of glass mid-stage.
