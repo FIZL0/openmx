@@ -16,6 +16,35 @@ pub const RACE_KINDS: [&str; 2] = ["Supercross", "National"];
 /// How many Supercross tracks the disc has: `Tracks\sx01.res` to `sx24.res`.
 pub const SUPERCROSS: usize = 24;
 
+/// The Supercross tracks by the disc's names, their stadiums' cities: the STR_SX01..STR_SX24
+/// strings of appstart/loc's l_ui_eng.bin, which tracks.dat's `[SXnn] TextID` points at.
+pub const RACE_SUPERCROSS: [(&str, &str); SUPERCROSS] = [
+    ("sx01", "Los Angeles"),
+    ("sx02", "Jackson"),
+    ("sx03", "San Diego"),
+    ("sx04", "Phoenix"),
+    ("sx05", "Memphis"),
+    ("sx06", "San Antonio"),
+    ("sx07", "Lincoln"),
+    ("sx08", "Denver"),
+    ("sx09", "Provo"),
+    ("sx10", "Las Vegas"),
+    ("sx11", "Detroit"),
+    ("sx12", "Pittsburgh"),
+    ("sx13", "Lynchburg"),
+    ("sx14", "Charlotte"),
+    ("sx15", "Chicago"),
+    ("sx16", "Springfield"),
+    ("sx17", "Dallas"),
+    ("sx18", "Norfolk"),
+    ("sx19", "Bridgeport"),
+    ("sx20", "Rochester"),
+    ("sx21", "Cleveland"),
+    ("sx22", "Cincinnati"),
+    ("sx23", "Houston"),
+    ("sx24", "Atlanta"),
+];
+
 /// The National tracks by the disc's names: [`crate::worlds::NATIONALS`]'s, copied here as the
 /// test crates mount the menu without the worlds.
 pub const RACE_NATIONALS: [(&str, &str); 22] = [
@@ -125,14 +154,14 @@ pub fn supercross_id(k: usize) -> String {
     format!("sx{:02}", k + 1)
 }
 
-/// The race tracks of kind `kind` ([`RACE_KINDS`]), `(id, name)`. The nationals by the disc's names
-/// ([`RACE_NATIONALS`]); the Supercross tracks by number, as the stadiums' names the disc
-/// has are not mapped to the tracks yet.
+/// The race tracks of kind `kind` ([`RACE_KINDS`]), `(id, name)`, by the disc's names
+/// ([`RACE_SUPERCROSS`], [`RACE_NATIONALS`]).
 pub fn race_tracks(kind: usize) -> Vec<(String, String)> {
-    match kind {
-        0 => (0..SUPERCROSS).map(|k| (supercross_id(k), format!("Supercross {:02}", k + 1))).collect(),
-        _ => RACE_NATIONALS.iter().map(|(id, name)| (id.to_string(), name.to_string())).collect(),
-    }
+    let tracks: &[(&str, &str)] = match kind {
+        0 => &RACE_SUPERCROSS,
+        _ => &RACE_NATIONALS,
+    };
+    tracks.iter().map(|(id, name)| (id.to_string(), name.to_string())).collect()
 }
 
 /// A race track's name, or `None` for a track that is not one.
@@ -272,6 +301,10 @@ mod tests {
         assert_eq!(sx.len(), 24);
         assert_eq!(sx[0].0, "sx01");
         assert_eq!(sx[23].0, "sx24");
+        assert!(sx.iter().enumerate().all(|(k, (id, _))| *id == supercross_id(k)));
+        assert_eq!(sx[0].1, "Los Angeles");
+        assert_eq!(sx[23].1, "Atlanta");
+        assert_eq!(race_track_name("sx16"), Some("Springfield".to_string()));
         let nat = race_tracks(1);
         assert_eq!(nat.len(), 22);
         assert_eq!(nat[0], ("nat01".to_string(), "Seneca Butte".to_string()));
