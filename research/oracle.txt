@@ -11898,3 +11898,23 @@ atv_pair_log_grow           atv 0x0025b840 = a growable log's resize to a1 entri
 atv_spatial_insert          atv 0x0018d590 = a collidable's entry put in a world (a0 entry, a1 cell, a2 kind, a3 centre, t0 half, t1 1, t2 own record, t3 0; f12 reach)
 atv_record_new              atv 0x0018fd90 = a record taken up (the link pool made if none, counted)
 atv_record_drop             atv 0x0018fe20 = a record let go of (a1 -1; the pool deleted with the last)
+
+# F62a: the rider's idle layer vt +0xd4 0x004eb380 in Rust (handling::rider::idle, idle_state, idle_clips;
+# anim::blend4; tests/mxvatv_bike_ride.rs rider_leaf serves Call::Idle). Journal: research/journal/*-f62a-*/.
+#   0x004eb380 = rider::idle_state then rider::idle_clips. Seeded-clock check 0x0052cd80 (word != 0 on C15;
+#   asserted, not ported). State byte +0x86e from the record / +0x638 (SLOW) / rand 0x003561a8; +0x86d the
+#   last, +0x870 kept; pause clock +0x8ac/+0x8b0, range +0x8b4/+0x8b8, lap +0x8bc (rate 0x3cf5c28f).
+#   0x004eb6f0 (3132 bytes) = rider::idle_clips: rate +0x614 from +0x618..+0x628, stop 0x0013e650 and +0x610 = 1
+#   on a change; slots *(+0x5c0), *(+0x5c4); clip by id vt +0x174 0x004f2d30 (table +0xb18), named set
+#   0x004f2030 = *(*(holder+8) + 4i) (sets +0x878, +0x874 the chosen, -1 on C15); fmodf 0x0034ff10; then
+#   blend4 / blend 0x0013f5e0 / play 0x0013eec0; clip advance vt +0x88 0x0013c7b0 (F62b) and wreck states'
+#   clip start 0x0013ea90 (a1 clip, a2 0, f12 = +0x614) stay the original's. Saved pose buffer: heap lines
+#   0x52a / 0x52d (never reached on C15).
+#   0x00140720 = anim::blend4: a0 r, a1..a3,t0 the four clips, t1 0, t2 0, t3 0, stack sd 0 at sp+0/8/16
+#   (callee reads caller sp+8 the start key, sp+16 events: an oracle must zero above sp).
+#   Rotation channels have two samplers, chosen by *(*(ch+0x10)+0x10): wide 0x0012c550 (12-byte keys: time,
+#   u16 turn, 3 i16 axis; decode 0x00134d80 / 0x001004c0, table 0x003d3de0) and narrow 0x0012cac0 (8-byte
+#   keys: time, u8 turn, 3 i8 axis; decode 0x00134ca0 / 0x00100350, table 0x003dbde0); same walk. The rider's
+#   idle clips are narrow.
+#   C15 counts left outside after the port: ride-2 (459) none; flip-1 (465) vt +0x88 68, 0x0013ea90 2, rand 7,
+#   seed check 1.

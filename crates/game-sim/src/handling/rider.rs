@@ -52,8 +52,12 @@
 //! put where it is ([`aim_nodes`]), the respawn's still pose, the node's bounds and the controller's
 //! base step ([`base_step`]).
 //!
-//! What is not here: the idle layer ([`Call::Idle`], the rider's animation picked and blended), the
-//! ragdoll world itself, and the rest of the calls in [`Call`].
+//! The idle layer ([`Call::Idle`]) is [`idle`] (F62a): the state picked ([`idle_state`]) and its clips
+//! chosen and blended ([`idle_clips`], through [`anim`]).
+//!
+//! What is not here: the controller's own clip advance and the wreck poses' clip start (the idle
+//! layer's [`Call::ClipAdvance`], [`Call::ClipStart`]), the ragdoll world itself, and the rest of the
+//! calls in [`Call`].
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
 use super::ground;
@@ -350,6 +354,14 @@ pub enum Call {
     EntryBind { index: u32 },
     EntriesGrow { list: u32, count: u32 },
     Listener { listener: u32 },
+    /// The idle layer's ([`idle`], F62a): `rand` seeded from the clock once (before a wreck pose is
+    /// drawn by lot); the wreck pose's clip started at the rate the layer holds in `f12`; the
+    /// controller's own clip advance (its vt `+0x88`, `f12` `dt`); a saved-pose buffer of `bytes` made
+    /// for [`anim::stop`] (its address the answer).
+    Seed,
+    ClipStart { clip: u32 },
+    ClipAdvance,
+    SavedPose { bytes: u32, buffer: anim::Saved },
 }
 
 /// The mode machine's RAM and calls; [`Rider::call`]'s answer is `v0` (only [`Call::Rand`]'s is read).
@@ -2135,4 +2147,399 @@ pub fn base_step(m: &mut impl Rider, rider: u32, dt: F) {
         i += 1;
     }
     tail::walk(&mut Group(m), rider, dt);
+}
+
+// --- F62a: the idle layer ---------------------------------------------------------------------------
+
+/// The idle layer's words. The state asked for and the one acted on (`+0x86e`, `+0x86d`, a byte
+/// each; the states [`STILL`] .. [`PAUSE`] and none, 255); the record's `+0x1d8` kept after
+/// (`+0x870`); the named clip set picked (`+0x874`, negative for none) and the sets' holder
+/// (`+0x878`, its list at `+8`); the clips by id (`+0xb18`, a word an id).
+pub const IDLE_WANT: u32 = 0x86e;
+pub const IDLE_STATE: u32 = 0x86d;
+pub const IDLE_KEPT: u32 = 0x870;
+pub const CLIP_SET: u32 = 0x874;
+pub const CLIP_SETS: u32 = 0x878;
+pub const CLIPS_BY_ID: u32 = 0xb18;
+/// The speeds the states read: under `+0x890` the rider may pause, and the three bands (`+0x894`,
+/// `+0x898`, `+0x89c`) the still state's clips are picked by. The pause: asked (`+0x8ac`, which
+/// [`choose`] reads too), its clock (`+0x8b0`) drawn between `+0x8b4` and `+0x8b8`, and its end
+/// (`+0x24c`). The lap of the slow states' clip pair (`+0x8bc`).
+pub const PAUSE_SPEED: u32 = 0x890;
+pub const BANDS: [u32; 3] = [0x894, 0x898, 0x89c];
+pub const PAUSE_ASK: u32 = 0x8ac;
+pub const PAUSE_CLOCK: u32 = 0x8b0;
+pub const PAUSE_RANGE: [u32; 2] = [0x8b4, 0x8b8];
+pub const PAUSE_END: u32 = 0x24c;
+pub const LAP: u32 = 0x8bc;
+/// The two blend slots (`+0x5c0`, `+0x5c4`: each points at its value, its time constant and its last
+/// rate); the fade out of the stopped pose (`+0x610`) and the rate it falls at (`+0x614`), taken from
+/// one of five (`+0x618` the pause's, `+0x61c` the wreck poses', `+0x620` the riding states', `+0x624`
+/// the turn's, `+0x628` the record's own).
+pub const SLOTS: [u32; 2] = [0x5c0, 0x5c4];
+pub const IDLE_FADE: u32 = 0x610;
+pub const IDLE_RATE: u32 = 0x614;
+pub const RATES: [u32; 5] = [0x618, 0x61c, 0x620, 0x624, 0x628];
+/// The states: still (or none), the two slow ones, the turn, the wreck poses (`@` then `A` .. `E`,
+/// drawn by lot) and the pause. State bytes under [`OFF_STATES`] name a clip by id of their own.
+pub const STILL: u32 = 0x38;
+pub const SLOW_STATES: [u32; 2] = [0x3b, 0x3c];
+pub const TURN: u32 = 0x3d;
+pub const WRECK_POSE: u32 = 0x40;
+pub const PAUSE: u32 = 0x46;
+pub const OFF_STATES: u32 = 46;
+/// The record's words the layer reads besides the choice's: the state held (`+0x10`, the state then
+/// its `+0x210`, which the layer writes back), the layer left alone (`+0x14`), the offset the node is
+/// put at (`+0x100`, a pointer), the turn asked (`+0x130`), the slots' targets (`+0x1a4`, `+0x1a0`;
+/// the float maximum keeps the slot), the stick held (`+0x19c`), `+0x190`, the speed (`+0x1a8`), the
+/// node's place and turn (`+0x1b0`, `+0x1c0`), a rate ask (`+0x1d0`), a state asked (`+0x1d4`, a byte,
+/// 255 none) and the own clip's weight (`+0x1d8`).
+const R_HELD: u32 = 0x10;
+const R_LEFT: u32 = 0x14;
+const R_STATE: u32 = 0x210;
+
+fn fl(m: &mut impl Ram, at: u32) -> F {
+    F::from_bits(m.word(at))
+}
+
+/// The `0.03` the slow states' lap runs at, a unit of speed a second.
+const LAP_RATE: u32 = 0x3cf5_c28f;
+
+/// The anim controller's saved buffers made through [`Call::SavedPose`].
+struct Saving<'a, M> {
+    m: &'a mut M,
+    dt: F,
+}
+
+impl<M: Rider> Ram for Saving<'_, M> {
+    fn word(&mut self, at: u32) -> u32 {
+        self.m.word(at)
+    }
+    fn set(&mut self, at: u32, w: u32) {
+        self.m.set(at, w)
+    }
+}
+
+impl<M: Rider> anim::Anim for Saving<'_, M> {
+    fn alloc(&mut self, bytes: u32, buffer: anim::Saved) -> u32 {
+        self.m.call(Call::SavedPose { bytes, buffer }, self.dt)
+    }
+}
+
+/// **The rider's idle layer** ([`Call::Idle`], its vt `+0xd4`, F62a): the state picked
+/// ([`idle_state`], or with the record's [`R_HELD`] the record's [`R_STATE`]); the clips chosen
+/// and played ([`idle_clips`]); the record's `+0x1d8` kept ([`IDLE_KEPT`]).
+pub fn idle(m: &mut impl Rider, rider: u32, dt: F, t: &anim::Tables) {
+    let rec = m.word(rider + RECORD);
+    if m.word(rec + R_HELD) != 0 {
+        let s = m.word(rec + R_STATE);
+        put_byte(m, rider + IDLE_WANT, s);
+    } else {
+        idle_state(m, rider, dt);
+        let rec = m.word(rider + RECORD);
+        if !(fl(m, rec + 0x1a8) <= fl(m, rider + BANDS[0])) {
+            m.set(rider + PAUSE_CLOCK, 0);
+            m.set(rider + PAUSE_ASK, 0);
+        }
+    }
+    idle_clips(m, rider, dt, t);
+    let rec = m.word(rider + RECORD);
+    let w = m.word(rec + 0x1d8);
+    m.set(rider + IDLE_KEPT, w);
+}
+
+/// **The state picked** into [`IDLE_WANT`]: wrecked, [`WRECK_POSE`] until the wreck is [`SLOW`],
+/// then once a pose by lot (`A` plus `5u`, [`Call::Seed`] first); else the record's state asked; the
+/// turn asked, [`TURN`]; the stick held, a slow state by `+0x1a0` under a half; else, with the speed
+/// under [`PAUSE_SPEED`], both slot targets a half and `+0x190` zero, the pause's clock — drawn by lot
+/// between its range when run out or with the record's hold, else run down by `dt`, its end starting
+/// the pause ([`PAUSE`]) — and then [`STILL`] unless a pause is asked (which [`PAUSE_END`] ends).
+pub fn idle_state(m: &mut impl Rider, rider: u32, dt: F) {
+    let rec = m.word(rider + RECORD);
+    let want = rider + IDLE_WANT;
+    if m.word(rec + R_KIND) != 0 {
+        if m.word(rider + SLOW) == 0 {
+            put_byte(m, want, WRECK_POSE);
+        } else if byte(m, want) < WRECK_POSE + 1 {
+            m.call(Call::Seed, dt);
+            let u = unit(m, dt);
+            let k = fpu::to_i32(fpu::mul(5.0, u));
+            put_byte(m, want, (k + 65) as u32);
+        }
+        return;
+    }
+    let asked = byte(m, rec + 0x1d4);
+    if asked != 0xff {
+        put_byte(m, want, asked);
+        return;
+    }
+    if m.word(rec + 0x130) != 0 {
+        put_byte(m, want, TURN);
+        return;
+    }
+    if fl(m, rec + 0x19c) != F::ZERO {
+        let s = if fl(m, rec + 0x1a0) < F(0.5) { SLOW_STATES[0] } else { SLOW_STATES[1] };
+        put_byte(m, want, s);
+        return;
+    }
+    let half = F(0.5);
+    if fl(m, rec + 0x1a8).abs() < fl(m, rider + PAUSE_SPEED) && fl(m, rec + 0x1a0) == half && fl(m, rec + 0x1a4) == half && fl(m, rec + 0x190) == F::ZERO {
+        let clock = fl(m, rider + PAUSE_CLOCK);
+        if clock <= F::ZERO || m.word(rec + R_HOLD) != 0 {
+            let u = F(unit(m, dt));
+            let (lo, hi) = (fl(m, rider + PAUSE_RANGE[0]), fl(m, rider + PAUSE_RANGE[1]));
+            let x = (u - F::ZERO) / (F::ONE - F::ZERO);
+            let c = Acc::adda(F::ZERO, lo).madd(x, hi - lo).max(lo.min(hi)).min(lo.max(hi));
+            m.set(rider + PAUSE_CLOCK, c.to_bits());
+        } else {
+            let c = clock - dt;
+            m.set(rider + PAUSE_CLOCK, c.to_bits());
+            if c < F::ZERO {
+                put_byte(m, want, PAUSE);
+                m.set(rider + PAUSE_ASK, 1);
+                m.set(rider + PAUSE_END, 0);
+            }
+        }
+    }
+    if m.word(rider + PAUSE_ASK) == 0 {
+        put_byte(m, want, STILL);
+    } else if m.word(rider + PAUSE_END) != 0 {
+        m.set(rider + PAUSE_ASK, 0);
+    }
+}
+
+/// The clip of id `id` (the rider's vt `+0x174`): the word `id` of [`CLIPS_BY_ID`]'s list.
+pub fn clip_by_id(m: &mut impl Ram, rider: u32, id: u32) -> u32 {
+    let list = m.word(rider + CLIPS_BY_ID);
+    m.word(list.wrapping_add(id << 2))
+}
+
+/// The named clip set `i`: the word `i` of the list at the sets' holder's `+8`.
+pub fn clip_set(m: &mut impl Ram, holder: u32, i: u32) -> u32 {
+    let list = m.word(holder + 8);
+    m.word(list.wrapping_add(i << 2))
+}
+
+/// A slot run towards `target`: its rate `min(dt, τ)/τ` kept, its value `v + rate·(target − v)`
+/// through the accumulator.
+fn run_slot(m: &mut impl Ram, rider: u32, slot: u32, target: u32, dt: F) -> F {
+    let s = m.word(rider + slot);
+    let tau = fl(m, s + 4);
+    let rec = m.word(rider + RECORD);
+    let to = fl(m, rec + target);
+    let r = dt.min(tau) / tau;
+    m.set(s + 8, r.to_bits());
+    let v = fl(m, s);
+    let v = Acc::adda(F::ZERO, v).madd(r, to - v);
+    m.set(s, v.to_bits());
+    v
+}
+
+/// Where `x` falls between `lo` and `hi`, from 1 down to 0 (1 when they are the same).
+fn band(x: F, lo: F, hi: F) -> F {
+    if lo == hi {
+        return F::ONE;
+    }
+    let u = (x - lo) / (hi - lo);
+    Acc::adda(F::ZERO, F::ONE).madd(u, F::ZERO - F::ONE).max(F::ONE.min(F::ZERO)).min(F::ONE.max(F::ZERO))
+}
+
+/// The two ids of a pair by the slot: the pair from `id` down under a half, from `id + 1` down at or
+/// past it (and the slot's half then taken off); the mix twice the slot.
+fn by_half(m: &mut impl Ram, rider: u32, ids: &[u32], s: F) -> ([u32; 4], F) {
+    let up = !(s < F(0.5));
+    let mut clips = [0; 4];
+    for (k, &id) in ids.iter().enumerate() {
+        clips[k] = clip_by_id(m, rider, if up { id + 1 } else { id });
+    }
+    let mix = if up { F(2.0) * (s - F(0.5)) } else { F(2.0) * s };
+    (clips, mix)
+}
+
+/// **The clips chosen and played** (the idle layer's 3 KB callee). Nothing with the record's
+/// [`R_LEFT`]. Else:
+///
+/// 1. unless the ragdoll has the nodes, the scene node put at the record's `+0x1b0` (plus its
+///    `+0x100` offset turned by its `+0x1c0`, [`turned`], when not ridden) and turned to `+0x1c0`;
+/// 2. a new state (or the record's `+0x1d0`): the rate picked from [`RATES`] (the lap restarted for a
+///    slow state), the controller stopped ([`anim::stop`]) and the fade put at 1;
+/// 3. the state acted on, and into the record's [`R_STATE`]; the fade run down by the rate; the
+///    record's respawn ask zeroes both and puts the slots at their targets; the two slots run
+///    ([`run_slot`]);
+/// 4. the clips: a named set ([`CLIP_SET`]) by its words; else a state of its own clip by id, at the
+///    record's `+0x1d8`; the slow states' pair at the lap (run on by `0.03·speed·dt`, wrapped by
+///    `fmodf`); the turn's pair; the still state's by speed band (a pair, or two pairs mixed by
+///    [`band`]); a wreck pose's clip started on its change ([`Call::ClipStart`]);
+/// 5. the weights clamped to `0..1` (the fade stored so), then four clips [`anim::blend4`], two
+///    [`anim::blend`], one [`anim::play`], none the controller's own advance ([`Call::ClipAdvance`]).
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
+pub fn idle_clips(m: &mut impl Rider, rider: u32, dt: F, t: &anim::Tables) {
+    let rec = m.word(rider + RECORD);
+    if m.word(rec + R_LEFT) != 0 {
+        return;
+    }
+    if m.word(rider + LEFT_AS_IS) == 0 || m.word(rider + RAG_ON) == 0 {
+        let at = if m.word(rec + R_RIDDEN) == 0 {
+            let q = words(m, rec + 0x1c0);
+            let off_at = m.word(rec + 0x100);
+            let off = words(m, off_at);
+            let v = turned(Vf::from_bits(q), Vf::from_bits(off));
+            let rec = m.word(rider + RECORD);
+            let s = v.add(Vf::from_bits(words(m, rec + 0x1b0))).to_bits();
+            [s[0], s[1], s[2], off[3]]
+        } else {
+            let rec = m.word(rider + RECORD);
+            words(m, rec + 0x1b0)
+        };
+        let node = m.word(rider + NODE);
+        node::set(m, node, at);
+        let (node, rec) = (m.word(rider + NODE), m.word(rider + RECORD));
+        let q = words(m, rec + 0x1c0);
+        anim::turn_node(m, node, q);
+    }
+    let want = byte(m, rider + IDLE_WANT);
+    let rec = m.word(rider + RECORD);
+    let mut changed = false;
+    if want != byte(m, rider + IDLE_STATE) || m.word(rec + 0x1d0) != 0 {
+        changed = true;
+        let rec = m.word(rider + RECORD);
+        let rate = if byte(m, rec + 0x1d4) == 0xff && m.word(rec + 0x1d0) == 0 {
+            match want {
+                0x3b | 0x3c => {
+                    let r = m.word(rider + RATES[2]);
+                    m.set(rider + IDLE_RATE, r);
+                    m.set(rider + LAP, 0);
+                    None
+                }
+                TURN => Some(RATES[3]),
+                0x40..=0x45 => Some(RATES[1]),
+                PAUSE => Some(RATES[0]),
+                _ => Some(RATES[2]),
+            }
+        } else {
+            Some(RATES[4])
+        };
+        if let Some(at) = rate {
+            let r = m.word(rider + at);
+            m.set(rider + IDLE_RATE, r);
+        }
+    }
+    if changed {
+        anim::stop(&mut Saving { m: &mut *m, dt }, rider);
+        m.set(rider + IDLE_FADE, F::ONE.to_bits());
+    }
+    let s = byte(m, rider + IDLE_WANT);
+    put_byte(m, rider + IDLE_STATE, s);
+    let s = byte(m, rider + IDLE_WANT);
+    let rec = m.word(rider + RECORD);
+    m.set(rec + R_STATE, s);
+    let fade = Acc::adda(F::ZERO, fl(m, rider + IDLE_FADE)).msub(fl(m, rider + IDLE_RATE), dt);
+    m.set(rider + IDLE_FADE, fade.to_bits());
+    let rec = m.word(rider + RECORD);
+    if m.word(rec + R_RESPAWN) != 0 {
+        m.set(rider + IDLE_RATE, 0);
+        m.set(rider + IDLE_FADE, 0);
+        for (slot, target) in [(SLOTS[0], 0x1a4), (SLOTS[1], 0x1a0)] {
+            let rec = m.word(rider + RECORD);
+            let v = fl(m, rec + target);
+            if v != F::MAX {
+                let s = m.word(rider + slot);
+                m.set(s, v.to_bits());
+            }
+        }
+    }
+    let s0 = run_slot(m, rider, SLOTS[0], 0x1a4, dt);
+    let s1 = run_slot(m, rider, SLOTS[1], 0x1a0, dt);
+    let (mut weight, mut mix, mut mix2) = (F::ZERO, F::ZERO, F::ZERO);
+    let (mut n, mut clips) = (0, [0u32; 4]);
+    let set = m.word(rider + CLIP_SET);
+    if (set as i32) >= 0 {
+        let rec = m.word(rider + RECORD);
+        let held = fpu::to_i32(fl(m, rec + 0x19c).0);
+        let e = clip_set(m, rider + CLIP_SETS, set);
+        let (own, a, b) = (m.word(e + 0xc), m.word(e + 4), m.word(e + 8));
+        (n, clips, weight, mix) = if own != 0 && held != 0 {
+            (1, [own, 0, 0, 0], F::ONE, mix)
+        } else if a != 0 && b != 0 {
+            (2, [a, b, 0, 0], s1, s0)
+        } else if a != 0 {
+            (1, [a, 0, 0, 0], s1, mix)
+        } else if b != 0 {
+            (1, [b, 0, 0, 0], s0, mix)
+        } else {
+            (0, clips, weight, mix)
+        };
+    } else {
+        let state = byte(m, rider + IDLE_STATE);
+        let own = if state < OFF_STATES { clip_by_id(m, rider, state) } else { 0 };
+        if own != 0 {
+            let rec = m.word(rider + RECORD);
+            (n, clips[0], weight) = (1, own, fl(m, rec + 0x1d8));
+        } else {
+            match state {
+                0x3b | 0x3c => {
+                    let rec = m.word(rider + RECORD);
+                    let speed = fl(m, rec + 0x1a8);
+                    if !(speed <= F::ZERO) {
+                        let step = F::from_bits(LAP_RATE) * speed;
+                        let lap = Acc::adda(F::ZERO, fl(m, rider + LAP)).madd(dt, step);
+                        m.set(rider + LAP, lap.to_bits());
+                        let w = ps2_float::libm::fmodf(lap.0, 1.0);
+                        m.set(rider + LAP, w.to_bits());
+                    }
+                    weight = fl(m, rider + LAP);
+                    clips[0] = clip_by_id(m, rider, 0x3c);
+                    clips[1] = clip_by_id(m, rider, 0x3b);
+                    (mix, n) = (s1, 2);
+                }
+                TURN => {
+                    weight = s1;
+                    (clips, mix) = by_half(m, rider, &[0x3e, 0x3d], s0);
+                    n = 2;
+                }
+                0xff | STILL => {
+                    let rec = m.word(rider + RECORD);
+                    let speed = fl(m, rec + 0x1a8);
+                    let [b0, b1, b2] = BANDS.map(|at| F::from_bits(m.word(rider + at)));
+                    weight = s1;
+                    if speed < b0 {
+                        (clips, mix) = by_half(m, rider, &[0x33, 0x32, 0x36, 0x35], s0);
+                        let (rec, hi) = (m.word(rider + RECORD), fl(m, rider + BANDS[0]));
+                        mix2 = band(fl(m, rec + 0x1a8), F::ZERO, hi);
+                        n = 4;
+                    } else if speed <= b1 {
+                        (clips, mix) = by_half(m, rider, &[0x36, 0x35], s0);
+                        n = 2;
+                    } else if speed <= b2 {
+                        (clips, mix) = by_half(m, rider, &[0x36, 0x35, 0x39, 0x38], s0);
+                        let (rec, lo, hi) = (m.word(rider + RECORD), fl(m, rider + BANDS[1]), fl(m, rider + BANDS[2]));
+                        mix2 = band(fl(m, rec + 0x1a8), lo, hi);
+                        n = 4;
+                    } else {
+                        (clips, mix) = by_half(m, rider, &[0x39, 0x38], s0);
+                        n = 2;
+                    }
+                }
+                0x40..=0x46 => {
+                    if changed {
+                        let clip = clip_by_id(m, rider, state);
+                        m.call(Call::ClipStart { clip }, dt);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let unit = |x: F| x.max(F::ZERO).min(F::ONE);
+    let (weight, mix, mix2) = (unit(weight), unit(mix), unit(mix2));
+    let fade = unit(fl(m, rider + IDLE_FADE));
+    m.set(rider + IDLE_FADE, fade.to_bits());
+    match n {
+        4 => anim::blend4(m, t, rider, clips, weight, mix, mix2, fade),
+        2 => anim::blend(m, t, rider, [clips[0], clips[1]], weight, mix, fade),
+        1 => anim::play(m, t, rider, clips[0], weight, fade),
+        _ => {
+            m.call(Call::ClipAdvance, dt);
+        }
+    }
 }
