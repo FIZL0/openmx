@@ -86,6 +86,13 @@ pub trait World {
         Some(self.surface(at))
     }
 
+    /// SLUS-21104's terrain object, for a world that is MX vs. ATV's ground
+    /// ([`crate::handling::ground::Under`], MD110): what a SLUS-21104 collision record's heightfield
+    /// rays ask ([`crate::handling::ground::under`]). None for every other world.
+    fn mxvatv_terrain(&self) -> Option<crate::atv_ground::Terrain<'_>> {
+        None
+    }
+
     /// Sweep a bundle of probes against everything solid, in world space. `true` when anything was
     /// looked at — the record says what was hit.
     fn solid(&mut self, bundle: &Bundle, record: &mut Record) -> bool;

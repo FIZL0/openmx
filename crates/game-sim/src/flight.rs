@@ -201,6 +201,88 @@ pub struct Flight {
     /// [`Flight::mxvatv`]: the parameters it was built off are hashed, and the shell's seat bytes
     /// carry it beside the snapshot for a joiner to put the skin's constants back.
     pub skin: u8,
+    /// SLUS-21104's collision record on the plane (MD110, [`MxvatvRecord`]): with one, the frame's
+    /// search is the record's pass over the world's SLUS-21104 terrain ([`world::World::mxvatv_terrain`])
+    /// and the force listener resolves its contacts as SLUS-21104's record does, in place of MX
+    /// Unleashed's search and resolution. None as every plane is built; boxed, so a plane without one
+    /// is a word bigger; not in the hash walk.
+    pub record_mxvatv: Option<Box<MxvatvRecord>>,
+}
+
+/// **SLUS-21104's collision record on its plane** (MD110): the record its pass fills
+/// ([`crate::handling::record::pass`]), what its resolution keeps ([`crate::atv_contact::Held`]: the
+/// tuning, the impulse mask and the list, refilled from each pass; no body, the flight's is resolved),
+/// and the active part's rays, in the scene node's frame.
+///
+/// The plane's scene node is the plane matrix the tires read ([`Measure::matrix`],
+/// [`biplane::Measure::flight_mxvatv`]): the record places the rays' ends with it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MxvatvRecord {
+    pub record: crate::handling::record::Record,
+    pub held: crate::atv_contact::Held,
+    pub rays: Vec<[Vf; 2]>,
+}
+
+/// The record's outside on the plane ([`crate::handling::record::Collides`]): the node is the plane
+/// matrix, the heightfield rays ask the world's SLUS-21104 terrain ([`crate::handling::ground::under`]
+/// within its box). SLUS-21104's props are not in the port's worlds, so the part's search and the
+/// sweep strike nothing, and no other record is ever named.
+struct RecordOnPlane<'a> {
+    matrix: &'a mut [Vf; 4],
+    terrain: Option<crate::atv_ground::Terrain<'a>>,
+    rays: &'a [[Vf; 2]],
+    damped: Option<(Vf, Vf)>,
+    nobody: crate::handling::record::Record,
+}
+
+impl crate::handling::record::Collides for RecordOnPlane<'_> {
+    fn damp(&mut self, linear: Vf, angular: Vf) {
+        self.damped = Some((linear, angular));
+    }
+    fn node_rotate(&mut self, v: Vf) -> Vf {
+        let m = &self.matrix;
+        v.merge(Dest::XYZ, Vf::madd(Vf::madd(m[0].mul(v.bc(ps2_float::Field::X)), m[1], v.bc(ps2_float::Field::Y)), m[2], v.bc(ps2_float::Field::Z)))
+    }
+    fn node_position(&mut self) -> Vf {
+        crate::atv_moto::frame_point(self.matrix, Vf::new(0.0, 0.0, 0.0, 1.0))
+    }
+    fn node_place(&mut self, v: Vf) -> Vf {
+        crate::atv_moto::frame_point(self.matrix, v)
+    }
+    fn node_move(&mut self, at: Vf) {
+        self.matrix[3] = self.matrix[3].merge(Dest::XYZ, at);
+    }
+    fn node_up(&self) -> [F; 3] {
+        let m = &self.matrix;
+        [F(m[0].y()), F(m[1].y()), F(m[2].y())]
+    }
+    fn chassis_velocity(&self) -> Vf {
+        Vf::ZERO
+    }
+    fn sweep(&mut self, _from: Vf, _to: Vf, _nearby: bool) -> Option<crate::handling::record::Swept> {
+        None
+    }
+    fn place_part(&mut self) {}
+    fn part_rays(&self) -> Vec<[Vf; 2]> {
+        self.rays.to_vec()
+    }
+    fn search(&mut self, _nearby: bool) -> Vec<crate::handling::record::Hit> {
+        Vec::new()
+    }
+    fn terrain_box(&self) -> [Vf; 2] {
+        self.terrain.map_or([Vf::ZERO, Vf::ZERO], |t| [t.min, t.max])
+    }
+    fn under(&mut self, g: &mut contact_search::Ground) {
+        if let Some(t) = &self.terrain {
+            crate::handling::ground::under(t, g);
+        }
+    }
+    fn velocity(&mut self, _s: &crate::handling::record::Struck) -> Vf {
+        Vf::ZERO
+    }
+    fn other(&mut self, _id: u32) -> &mut crate::handling::record::Record {
+        &mut self.nobody
+    }
 }
 
 /// The plane's collision mesh in the machines' archive (N22a): its collidable's, kind 0, which the
@@ -797,6 +879,7 @@ impl Flight {
         let wrecked: Vec<usize> = hulls.iter().map(|&(j, _)| j).collect();
         let (struck, movers, knocked, hit) =
             self.search_wrecked(dt, ground, mesh.as_deref().map(|mesh| Bikes { mesh, bikes }), met.as_deref_mut(), &knocks, &wrecks, &wrecked);
+        self.pass_mxvatv(dt, ground);
         let bikes = mesh.as_deref().map(|mesh| Bikes { mesh, bikes });
         if let Some(m) = met.as_deref().filter(|m| !m.mirrors.is_empty() && self.rays.is_some()) {
             let r = &mut self.record;
@@ -1108,6 +1191,32 @@ impl Flight {
         flight_search::refresh_flown(props, trees, bikes.as_ref(), bounds, rays, &node, &mut self.nearby);
     }
 
+    /// **SLUS-21104's record's clear and pass** (MD110), before the world steps, for a plane with
+    /// [`Flight::record_mxvatv`]: [`crate::handling::record::clear`] and
+    /// [`crate::handling::record::pass`] on the plane's body and node ([`RecordOnPlane`]), the record's
+    /// terrain the world's ([`world::World::mxvatv_terrain`]; none, no heightfield rays), and the
+    /// contacts filed into the list the force listener resolves ([`crate::atv_contact::Held::refill`]).
+    fn pass_mxvatv(&mut self, dt: F, world: &mut dyn world::World) {
+        let Some(r) = self.record_mxvatv.as_mut() else { return };
+        let terrain = world.mxvatv_terrain();
+        r.record.terrain = terrain.is_some();
+        let mut matrix = self.measure.matrix.0;
+        let mut on = RecordOnPlane { matrix: &mut matrix, terrain, rays: &r.rays, damped: None, nobody: Default::default() };
+        crate::handling::record::clear(&mut r.record, &mut on);
+        let b = &mut self.body;
+        let mut view = crate::quad::Body { orientation: b.quat, position: b.position, velocity: b.velocity, ..Default::default() };
+        let body = if r.record.body { Some(&mut view) } else { None };
+        // `me` names the record to another one's contact: no other record is in the port's worlds.
+        crate::handling::record::pass(&mut r.record, 1, body, dt, &mut on);
+        if let Some((linear, angular)) = on.damped {
+            (b.damping, b.ang_damping) = (linear, angular);
+        }
+        b.position = view.position;
+        self.measure.matrix.0 = matrix;
+        // A contact is never with another record or a mover here, so the refill always holds.
+        r.held.refill(&r.record.contacts);
+    }
+
     /// The preforce listener.
     fn preforce(&mut self, dt: F) {
         self.body.clear_shock_peak();
@@ -1132,8 +1241,14 @@ impl Flight {
         others: &mut [contact::Other<'_>],
     ) {
         let (collider, contacts, mass) = (&mut self.collider, &mut self.record.contacts, self.mass);
-        collision_force(&mut self.body, self.gravity, |body| {
-            contact::resolve(collider, &mut Weighed { body, mass }, contacts, others, movers, true);
+        let held = self.record_mxvatv.as_mut().map(|r| &mut r.held);
+        collision_force(&mut self.body, self.gravity, |body| match held {
+            // SLUS-21104's record (MD110): its resolution, handed 1 as the body's force listener hands it.
+            Some(h) => {
+                let mut me = Weighed { body, mass };
+                crate::atv_contact::resolve(&mut h.record, &mut contact::Own::Body(&mut me), &mut h.entries, &mut [], &h.movers, true);
+            }
+            None => contact::resolve(collider, &mut Weighed { body, mass }, contacts, others, movers, true),
         });
         if self.crash.reason == 0 {
             self.attitude = self.measure.attitude(self.attitude.flown, &self.body);
@@ -1238,7 +1353,9 @@ impl Flight {
         // The aero model's true speed is on while a wheel is down or the collision record touched
         // anything (S193: a wreck tumbling on its body rays has it on, which the chord's first frame
         // back flies on).
-        let (touchdown, true_speed) = self.measure.contacts(wheels, self.record.touching);
+        // SLUS-21104's record's touch, for a plane with one (MD110).
+        let touching = self.record_mxvatv.as_ref().map_or(self.record.touching, |r| r.record.touching);
+        let (touchdown, true_speed) = self.measure.contacts(wheels, touching);
         // The touchdown sound's pick (P146) draws one `rand()` even from its list of one, before the
         // crash test's: the plane's draws include it.
         if touchdown {
@@ -1247,8 +1364,9 @@ impl Flight {
         self.aero.true_speed = true_speed;
         let m = &self.measure;
         // What the world rays last struck, in the plane's mask of categories the speed rule spares.
-        let ignored = self.record.struck.is_some_and(|o| flight_search::category(o) & VEHICLE != 0);
-        let c = CrashContact { touching: self.record.touching, ignored, grounded: m.grounded, speed: m.airspeed, up_y: F(m.up.y()), holed, bare };
+        // SLUS-21104's record strikes no object in the port's worlds (no props: [`RecordOnPlane`]).
+        let ignored = self.record_mxvatv.is_none() && self.record.struck.is_some_and(|o| flight_search::category(o) & VEHICLE != 0);
+        let c = CrashContact { touching, ignored, grounded: m.grounded, speed: m.airspeed, up_y: F(m.up.y()), holed, bare };
         let b = &mut self.body;
         let edge = self.area.filter(|a| wrap == [false, false] || holed || crate::off_map::outside_axes(a, wrap, b.position, F(crate::biplane::EDGE)));
         let out = if self.mxvatv {

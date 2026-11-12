@@ -11643,3 +11643,16 @@ atv_pair_log_grow           atv 0x0025b840 = a growable log's resize to a1 entri
 #   400833cd 3ff98919 40410f76; the only box near that gives rec+0x60 is 400833cd 3ff98919 40410f77, so z is
 #   one float under: rec +0x60/+0x64/+0x70/+0x74 differ by 1-2 floats. Identity, rotation-only, origin-only,
 #   mixed raw/unit rows and y = z x x frames all miss. The frame the loader saw is not found.
+
+# MD110 — the biplane's hull on MC02's terrain (flight::MxvatvRecord, Flight::pass_mxvatv; tests/
+# mxvatv_biplane_replay.rs, journal research/journal/2026-11-11-md110-mxvatv-biplane-hull). The plane's
+# collision record is *(plane+0xc8) (biplane3 0x01b33e40), F31b4's class (vt 0x003b9290): +0x24 heightfield
+# rays 1 (always, unlike the bike's tip-over word), +0x28/+0x2c/+0x30 1, +0x44 damp 0, capacity 36, list at
+# +0xf8 = rec+0x220, body +0xe4 = plane+0xb8, node +0xe8 whose world frame +0x70..+0xa0 equals the plane matrix
+# plane+0x370..+0x3a0 (atv_quat_frame's), terrain +0xec the tires' +0x134 object, part +0x200 with 36 rays
+# (+0x178 count, +0x180, 0x20 each; all start at (-0.000103, 5.98, -0.99)). Resolution words: +0x58 mass
+# 310.559, +0x80 cofg (0,0,0,1), +0x10c max depth 0.5, scenery 4500/641/0 angular 1, actor 15000/1170/0,
+# surfaces +0x1a8 0.5 then 1s, impulse mask +0x150 all 1. biplane3 frame 2060 (the stretch from 2000's 60th)
+# files three heightfield contacts (rays 3, 6, 16: the wingtips' ends; surface 0); the body's force listener
+# resolves them (vt+0x88, 1) after gravity, every substep: atv_contact::resolve, word for word. The sweep never
+# hits and the world rays file nothing along either flight.
