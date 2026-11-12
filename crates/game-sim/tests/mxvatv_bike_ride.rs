@@ -5477,6 +5477,12 @@ impl Updates for UpdateInRam<'_> {
                 unpack_wheel_in_ram(self.ee, c, dt, unpack_map().unwrap());
                 return 0;
             }
+            // F52's: the contacts, quad::Steps' with the trigger probe's search [`TriggerInRam`]'s.
+            Out::Contacts if unpack_map().is_some() && ported(CONTACTS) => {
+                served("Contacts");
+                unpack_wheel_in_ram(self.ee, c, dt, unpack_map().unwrap());
+                return 0;
+            }
             // F45a's: the net post, [`bike::net_post`] with its calls [`PostsInRam`]'s.
             Out::NetPost if [NET_POST, NODE_BOUNDS, vt(ee, 0xe4), vt(ee, 0x124)].iter().all(|&f| ported(f)) => {
                 served("NetPost");
@@ -7617,6 +7623,88 @@ struct StepsInRam<'a, 'm> {
     noise: &'m mut Option<SmoothNoise>,
     answered: &'m mut BTreeMap<String, u32>,
     pure: bool,
+    /// F52: the contacts [`quad::Steps`]' with the sweep [`TriggerInRam`]; else the original's.
+    wheel_contacts: bool,
+}
+
+/// The bike's trigger probe (`+0x1430`: the wheels' two rays) and its nearby list (`+0xc4`).
+const TRIGGER: u32 = 0x1430;
+const NEARBY: u32 = 0xc4;
+
+/// **F52 — the bike's trigger probe in RAM as [`quad::Steps`]' sweep** for [`Call::Contacts`]: the
+/// probe (a ray probe, [`KINDS`]) stood at the frame the steps hand ([`game_sim::atv_sync::stand`],
+/// its centre, reach and frame written back), then searched over the bike's nearby list
+/// ([`part_search_in_ram`], its pairs counted into `answered` as `wheel contacts …`), its hit bit and
+/// contacts read back as the walk reads them ([`trigger_contacts`]). A contact with an owner or a
+/// vehicle of kind 2 is refused (the steps' bike keeps no wheel owner or vehicle, [`steps::read`]).
+struct TriggerInRam<'e, 'm> {
+    ee: &'e mut Ee,
+    answered: &'m mut BTreeMap<String, u32>,
+}
+
+/// The trigger probe at `probe` after its search, as the bike's walk reads it: its hit bit, and each
+/// contact of its record (`+0x7c`; count `+0x8c` signed, rays `+0x90` 0x20 apart, normals `+0x94`,
+/// points `+0x98`, objects `+0x9c`) with the ray's start, the object's owner (`+0x90`) and that
+/// owner's listener count (`*(owner+0x208)+0x104`), its vehicle (`+0x8c`) and the vehicle's kind
+/// (`+0x1a0`).
+fn trigger_contacts(ee: &Ee, probe: u32) -> (bool, Vec<quad::Contact>) {
+    let look = ee.u8_at(probe + 0x126) & ws::flags::HIT != 0;
+    let r = ee.u32_at(probe + 0x7c);
+    let n = ee.u32_at(r + 0x8c) as i32;
+    let [rays, normals, points, objects] = [0x90, 0x94, 0x98, 0x9c].map(|o| ee.u32_at(r + o));
+    let cs = (0..n.max(0) as u32)
+        .map(|i| {
+            let object = ee.u32_at(objects + 4 * i);
+            let (owner, vehicle) = (ee.u32_at(object + 0x90), ee.u32_at(object + 0x8c));
+            quad::Contact {
+                at: vf_at(ee, rays + 0x20 * i),
+                normal: vf_at(ee, normals + 0x10 * i),
+                point: vf_at(ee, points + 0x10 * i),
+                node: object,
+                owner,
+                listeners: if owner == 0 { 0 } else { ee.u32_at(ee.u32_at(owner + 0x208) + 0x104) as i32 },
+                vehicle,
+                vehicle_kind: if vehicle == 0 { 0 } else { ee.u32_at(vehicle + 0x1a0) as i32 },
+            }
+        })
+        .collect();
+    (look, cs)
+}
+
+impl quad::Sweep for TriggerInRam<'_, '_> {
+    fn sweep(&mut self, frame: &ray_probe::Matrix) -> Option<(bool, Vec<quad::Contact>)> {
+        use game_sim::atv_sync::{Collidable, Kind, stand};
+        let ee = &mut *self.ee;
+        let probe = ee.u32_at(BIKE + TRIGGER);
+        assert_eq!(ee.u32_at(probe + 0xc), KINDS.rays, "the trigger probe is a ray probe");
+        let xyz = |ee: &Ee, p: u32| Vf::new(ee.f32_at(p + 0xc), ee.f32_at(p + 0x10), ee.f32_at(p + 0x14), 0.0);
+        let half = |ee: &Ee, p: u32| Vf::new(ee.f32_at(p + 0x18), ee.f32_at(p + 0x1c), ee.f32_at(p + 0x20), 0.0);
+        let (tree, bound) = (ee.u32_at(probe + 0x17c), ee.u32_at(probe + 0x180));
+        let kind = Kind::Rays { tree: (tree != 0).then(|| (xyz(ee, tree), half(ee, tree))), bound: (vf_at(ee, bound), vf_at(ee, bound + 0x10)) };
+        let mut c = Collidable { kind, frame: matrix_at(ee, probe + 0x130), centre: vf_at(ee, probe + 0x50), reach: word_f(ee, probe + 0x70), spatial: false };
+        stand(&mut c, frame);
+        set_vf(ee, probe + 0x50, c.centre);
+        ee.set_u32(probe + 0x70, c.reach.0.to_bits());
+        for (r, v) in c.frame.into_iter().enumerate() {
+            set_vf(ee, probe + 0x130 + 0x10 * r as u32, v);
+        }
+        let list = ee.u32_at(BIKE + NEARBY);
+        let mut kinds = BTreeMap::new();
+        let found = part_search_in_ram(ee, probe, list, &mut kinds);
+        for (k, n) in kinds {
+            *self.answered.entry(k.replace("record search", "wheel contacts")).or_default() += n;
+        }
+        let (look, cs) = trigger_contacts(ee, probe);
+        assert_eq!(cs.len(), found.len(), "the record the search filed");
+        for c in &cs {
+            assert!(c.owner == 0 && !(c.vehicle != 0 && c.vehicle_kind == 2), "the trigger struck {:#x}, owned by {:#x} (vehicle {:#x}): not followed", c.node, c.owner, c.vehicle);
+        }
+        Some((look, cs))
+    }
+
+    fn two_wheels(&self) -> bool {
+        true
+    }
 }
 
 impl StepsInRam<'_, '_> {
@@ -7853,7 +7941,7 @@ impl run::Runs for RunInRam<'_> {
 
 impl Moto for StepsInRam<'_, '_> {
     fn call(&mut self, c: Call, q: &mut Quad, body: &mut quad::Body) {
-        if matches!(c, Call::Contacts) {
+        if matches!(c, Call::Contacts) && !self.wheel_contacts {
             return self.inner.call(c, q, body);
         }
         *self.answered.entry(call_name(&c)).or_default() += 1;
@@ -7878,7 +7966,7 @@ impl Moto for StepsInRam<'_, '_> {
             bike: k,
             rest: Vec::<Call>::new(),
             ground: |p: Vf, rec: &mut u8| terrain.as_ref().expect("a wheel with ground has a terrain").ground(p, Vf::ZERO, rec),
-            sweep: (),
+            sweep: TriggerInRam { ee: &mut *self.inner.ram.ee, answered: &mut *self.answered },
         };
         s.call(c, q, body);
         let quad::Steps { bike: k, rest, .. } = s;
@@ -7931,7 +8019,7 @@ fn steps_head(ee: &mut Ee, dt: F, map: &track::Terrain<'_>, noise: &mut Option<S
     let was = axes;
     let ram = InRam { ee, wheels, record, body, last: Vec::new() };
     let inner = StepInRam { ram, rider: bike::Rider::default(), rider_last: Vec::new(), dt };
-    let mut m = StepsInRam { inner, map, noise, answered, pure };
+    let mut m = StepsInRam { inner, map, noise, answered, pure, wheel_contacts: in_rust("wheel contacts") };
     let (mut q, mut b) = m.inner.read();
     bike::ground_head(&p, &mut q, &mut b, held, &mut axes, dt, &mut m);
     m.inner.write(&q, &b);
@@ -7949,7 +8037,7 @@ fn steps_step(ee: &mut Ee, dt: F, map: &track::Terrain<'_>, noise: &mut Option<S
     let p = bike::read_params(&|a| ee.u32_at(a), BIKE);
     let ram = InRam { ee, wheels, record, body, last: Vec::new() };
     let inner = StepInRam { ram, rider: bike::Rider::default(), rider_last: Vec::new(), dt };
-    let mut m = StepsInRam { inner, map, noise, answered, pure };
+    let mut m = StepsInRam { inner, map, noise, answered, pure, wheel_contacts: in_rust("wheel contacts") };
     let (mut q, mut b) = m.inner.read();
     bike::ground_step(&p, &mut q, &mut b, dt, &mut m);
     m.inner.write(&q, &b);
@@ -13718,6 +13806,208 @@ fn flip_replays_with_the_part_search_in_rust() {
     heard_in_rust(&all, 55, 161);
 }
 
+/// **F52 — C15's rides, the bike's wheel contacts Rust's**: ride-2 and flip-1 in lockstep with
+/// [`posts_frame`]'s handing run, every substep's contacts [`quad::Steps`]' with the trigger probe
+/// stood and searched by [`TriggerInRam`], none handed on, RAM alike.
+#[test]
+fn rides_replay_with_the_wheel_contacts_in_rust() {
+    // The trigger's two rays pass through plant spheres (kind 5) and nothing else; a sphere files no
+    // contact, so the walk never sets a wheel along either ride.
+    for (name, rows, pairs) in [("ride-2", 459, 1380), ("flip-1", 465, 484)] {
+        let Some((w, all)) = replay_in_rust(name, &["wheel contacts"]) else { return };
+        assert_eq!(w.len(), rows);
+        assert_eq!(all.get("Contacts"), Some(&(4 * rows as u32)), "{name}: {all:?}");
+        let kinds: Vec<(&String, &u32)> = all.iter().filter(|(k, _)| k.starts_with("wheel contacts pair")).collect();
+        assert_eq!(kinds, [(&"wheel contacts pair, kind 5".to_string(), &pairs)], "{name}: {all:?}");
+        assert!(!all.keys().any(|k| k.starts_with("> wheel contacts")), "{name}: {all:?}");
+    }
+}
+
+/// F52's walk oracle's RAM (state 4 leaves it zero, as [`F54_AREA`]): the record and its arrays, the
+/// objects struck, their owners, the owners' listener holders and listeners, the vehicles, the
+/// listeners' vtable; and the address their vt `+0xc` is hooked at.
+const F52_AREA: u32 = F54_AREA;
+const F52_TELL: u32 = F52_AREA + 0x7ff0;
+/// The trigger probe's vt `+0xc8` (its node's frame, then its own stand).
+const TRIGGER_STAND_FN: u32 = 0x001b_d180;
+
+/// A word for a contact ray's `z`: either side of the bike, now and then exactly 0, -0, the
+/// smallest either way, a denormal, an Inf or NaN pattern, or any bits at all.
+fn f52_z(g: &mut Gen) -> f32 {
+    match g.bits() % 14 {
+        0 => 0.0,
+        1 => -0.0,
+        2 => f32::MIN_POSITIVE,
+        3 => -f32::MIN_POSITIVE,
+        4 => f32::from_bits(g.bits()),
+        5 => f32::from_bits(g.bits() & 0x807f_ffff),
+        6 => f32::from_bits(g.bits() | 0x7f80_0000),
+        _ => g.f(-4.0, 4.0),
+    }
+}
+
+/// **F52 — the bike's walk of its trigger's record is the original's**: 10 000 records laid by hand
+/// (0 to 6 contacts, now and then a negative count or no hit bit; each struck object owned or not,
+/// its owner with 0 to 3 listeners, its vehicle of kind 2 or another or none; each ray's `z` either
+/// side of the bike, zeros of both signs among them) under SLUS-21104's `bike_wheel_contacts` with
+/// the trigger's stand and search hooked to log, and under the port: the stand and search logged as
+/// the original makes them, then [`trigger_contacts`] and [`bike::wheel_contacts`] on the wheels in
+/// RAM, each listener told through its own vtable (the list's getter read in place). The calls, in
+/// order, and every byte outside the stack come out the same.
+#[test]
+fn the_bikes_wheel_contacts_walk_is_the_originals() {
+    use game_sim::chassis::WheelContact;
+    let Some(mut ee) = image().map(hooked) else { return };
+    assert!((F52_AREA..F52_AREA + 0x8000).step_by(4).all(|a| ee.u32_at(a) == 0), "the area is not free");
+    let probe = ee.u32_at(BIKE + TRIGGER);
+    assert_eq!(ee.u32_at(ee.u32_at(probe + 0xc) + 0xc8), TRIGGER_STAND_FN, "the trigger's vt +0xc8");
+    let log: Rc<RefCell<Vec<String>>> = Rc::default();
+    for (at, what) in [(TRIGGER_STAND_FN, "stand"), (SEARCH_NEAR, "search"), (F52_TELL, "tell")] {
+        let l = log.clone();
+        ee.hooks.insert(at, Box::new(move |ee: &mut Ee| {
+            let line = match what {
+                "stand" => format!("stand {:#x}", ee.r(4)),
+                _ => format!("{what} {:#x} {:#x} {:#x}", ee.r(4), ee.r(5), ee.r(6)),
+            };
+            l.borrow_mut().push(line);
+        }));
+    }
+    let wheels = the_wheels(&ee);
+    let base = ee.ram.clone();
+    let mut dirty = std::collections::BTreeSet::new();
+    let mut g = Gen(0x0000_f52a);
+    let mut t = BTreeMap::new();
+    let (rec, rays, normals, points, objects) = (F52_AREA, F52_AREA + 0x100, F52_AREA + 0x200, F52_AREA + 0x280, F52_AREA + 0x300);
+    let object = |j: u32| F52_AREA + 0x400 + 0x100 * j;
+    let owner = |j: u32| F52_AREA + 0x1000 + 0x300 * j;
+    let holder = |j: u32| F52_AREA + 0x2000 + 0x200 * j;
+    let vehicle = |j: u32| F52_AREA + 0x3000 + 0x200 * j;
+    let vtable = F52_AREA + 0x7f00;
+    let rand_vf = |g: &mut Gen| Vf::new(g.f(-50.0, 50.0), g.f(-50.0, 50.0), g.f(-50.0, 50.0), g.f(-1.0, 1.0));
+    for k in 0..10_000 {
+        reset_bytes(&mut ee, &base, std::mem::take(&mut dirty));
+        ee.written.clear();
+        // The three objects a contact may strike, their owners, listeners and vehicles.
+        ee.set_u32(vtable + 0xc, F52_TELL);
+        for j in 0..3 {
+            let o = object(j);
+            ee.set_u32(o + 0x90, if g.one_in(2) { 0 } else { owner(j) });
+            ee.set_u32(owner(j) + 0x208, holder(j));
+            let n = g.bits() % 4;
+            ee.set_u32(holder(j) + 0x104, n);
+            ee.set_u32(holder(j) + 0x10c, holder(j) + 0x120);
+            for i in 0..n {
+                let el = holder(j) + 0x140 + 0x10 * i;
+                ee.set_u32(holder(j) + 0x120 + 4 * i, el);
+                ee.set_u32(el, vtable);
+            }
+            ee.set_u32(o + 0x8c, if g.one_in(3) { 0 } else { vehicle(j) });
+            ee.set_u32(vehicle(j) + 0x1a0, [2, 2, 1, 0, 3, 0xffff_fffe][(g.bits() % 6) as usize]);
+        }
+        let n = if g.one_in(30) { -1 } else { (g.bits() % 7) as i32 };
+        ee.set_u32(probe + 0x7c, rec);
+        ee.set_u32(rec + 0x8c, n as u32);
+        for (o, a) in [(0x90, rays), (0x94, normals), (0x98, points), (0x9c, objects)] {
+            ee.set_u32(rec + o, a);
+        }
+        for i in 0..n.max(0) as u32 {
+            let from = rand_vf(&mut g);
+            set_vf(&mut ee, rays + 0x20 * i, Vf::new(from.x(), from.y(), f52_z(&mut g), from.w()));
+            set_vf(&mut ee, rays + 0x20 * i + 0x10, rand_vf(&mut g));
+            set_vf(&mut ee, normals + 0x10 * i, rand_vf(&mut g));
+            set_vf(&mut ee, points + 0x10 * i, rand_vf(&mut g));
+            ee.set_u32(objects + 4 * i, object(g.bits() % 3));
+        }
+        let flags = ee.u8_at(probe + 0x126);
+        let hit = !g.one_in(6);
+        ee.write(probe + 0x126, 1, u128::from(if hit { flags | 0x20 } else { flags & !0x20 }));
+        // What the wheels held before, and the rear's node.
+        for &w in &wheels {
+            set_vf(&mut ee, w + 0x120, rand_vf(&mut g));
+            set_vf(&mut ee, w + 0x130, rand_vf(&mut g));
+            ee.set_u32(w + 0x1f0, g.bits());
+            ee.set_u32(w + 0x1f4, g.bits());
+            ee.set_u32(w + 0xd4, g.bits() % 2);
+        }
+        ee.set_u32(BIKE + 0x143c, g.bits());
+        let dt = g.f(0.001, 0.05);
+        let (want, got) = (RefCell::new(Vec::new()), RefCell::new(Vec::new()));
+        let off = both_ways(
+            &mut ee,
+            &base,
+            &mut dirty,
+            |_| false,
+            |ee| {
+                ee.call(CONTACTS, &[u64::from(BIKE)], &[dt], BUDGET);
+                *want.borrow_mut() = std::mem::take(&mut *log.borrow_mut());
+            },
+            |ee| {
+                {
+                    let mut l = log.borrow_mut();
+                    l.push(format!("stand {probe:#x}"));
+                    l.push(format!("search {probe:#x} {:#x} 0x1", ee.u32_at(BIKE + NEARBY)));
+                }
+                let (look, cs) = trigger_contacts(ee, probe);
+                let wheel = |ee: &Ee, w: u32| WheelContact {
+                    point: vf_at(ee, w + 0x120),
+                    normal: vf_at(ee, w + 0x130),
+                    owner: ee.u32_at(w + 0x1f0),
+                    vehicle: ee.u32_at(w + 0x1f4),
+                    touching: ee.u32_at(w + 0xd4) as i32,
+                };
+                let (mut front, mut rear) = (wheel(ee, wheels[0]), wheel(ee, wheels[1]));
+                let mut rear_node = ee.u32_at(BIKE + 0x143c);
+                bike::wheel_contacts(&mut front, &mut rear, &mut rear_node, look, &cs, &mut |owner, i| {
+                    // The owner's listener list's getter: the array at the list's `+8`, entry `i`.
+                    let list = ee.u32_at(owner + 0x208) + 0x104;
+                    let el = ee.u32_at(ee.u32_at(list + 8) + 4 * i as u32);
+                    let f = ee.u32_at(ee.u32_at(el) + 0xc);
+                    ee.set(28, GP);
+                    ee.call(f, &[u64::from(el), 0, 0], &[dt], BUDGET);
+                });
+                ee.set_u32(BIKE + 0x143c, rear_node);
+                for (w, c) in wheels.into_iter().zip([front, rear]) {
+                    set_vf(ee, w + 0x120, c.point);
+                    set_vf(ee, w + 0x130, c.normal);
+                    ee.set_u32(w + 0x1f0, c.owner);
+                    ee.set_u32(w + 0x1f4, c.vehicle);
+                    ee.set_u32(w + 0xd4, c.touching as u32);
+                }
+                *got.borrow_mut() = std::mem::take(&mut *log.borrow_mut());
+            },
+        );
+        assert!(off.is_empty(), "case {k}: {} bytes differ\n  {}", off.len(), off.iter().take(24).cloned().collect::<Vec<_>>().join("\n  "));
+        let (want, got) = (want.into_inner(), got.into_inner());
+        assert_eq!(got, want, "case {k}: the calls");
+        let (_, cs) = trigger_contacts(&ee, probe);
+        if !hit {
+            tally(&mut t, "no hit");
+        } else if n < 0 {
+            tally(&mut t, "negative count");
+        }
+        if hit {
+            for c in &cs {
+                tally(&mut t, if !(c.at.z() <= 0.0) { "front" } else { "rear" });
+                if c.at.z() == 0.0 {
+                    tally(&mut t, "z zero");
+                }
+                if c.at.z().to_bits() & 0x7f80_0000 == 0x7f80_0000 || (c.at.z() != 0.0 && c.at.z().abs() < f32::MIN_POSITIVE) {
+                    tally(&mut t, "z NaN or denormal");
+                }
+                if c.owner != 0 && c.listeners > 0 {
+                    tally(&mut t, "told");
+                }
+                if c.vehicle != 0 {
+                    tally(&mut t, if c.vehicle_kind == 2 { "vehicle kept" } else { "vehicle dropped" });
+                }
+            }
+        }
+    }
+    reset_bytes(&mut ee, &base, dirty);
+    eprintln!("{t:?}");
+    assert!(t.values().all(|&n| n >= 100) && t.len() == 9, "{t:?}");
+}
+
 /// F54: each listener heard `hits` times and the plants stood `stands` times, all in Rust: no
 /// listener, stand or bike hit slot handed on.
 fn heard_in_rust(all: &BTreeMap<String, u32>, hits: u32, stands: u32) {
@@ -16115,7 +16405,7 @@ fn unpack_map() -> Option<&'static track::Terrain<'static>> {
 }
 
 /// **F45a — one of the net unpack's wheel calls** (a wheel's clear, suspension or tire forces: `c`
-/// on the wheel at `wheel`) on the bike in RAM, through [`quad::Steps`] on the ground of `map` as
+/// on the wheel at `wheel`; F52: or the contacts, on the bike) on the bike in RAM, through [`quad::Steps`] on the ground of `map` as
 /// [`StepsInRam`] serves the Force body's.
 fn unpack_wheel_in_ram(ee: &mut Ee, c: update::Out, dt: F, map: &track::Terrain<'_>) {
     use update::Out;
@@ -16130,12 +16420,13 @@ fn unpack_wheel_in_ram(ee: &mut Ee, c: update::Out, dt: F, map: &track::Terrain<
         Out::WheelClear(w) => Call::WheelClear(i(w)),
         Out::Suspension(w) => Call::Suspension(i(w), dt),
         Out::TireForces(w) => Call::TireForces(i(w), dt),
+        Out::Contacts => Call::Contacts,
         c => panic!("the unpack's wheel calls are no {c:?}"),
     };
     let ram = InRam { ee, wheels, record, body, last: Vec::new() };
     let inner = StepInRam { ram, rider: bike::Rider::default(), rider_last: Vec::new(), dt };
     let (mut noise, mut answered) = (None, BTreeMap::new());
-    let mut m = StepsInRam { inner, map, noise: &mut noise, answered: &mut answered, pure: true };
+    let mut m = StepsInRam { inner, map, noise: &mut noise, answered: &mut answered, pure: true, wheel_contacts: true };
     let (mut q, mut b) = m.inner.read();
     m.call(c, &mut q, &mut b);
     m.inner.write(&q, &b);
@@ -16147,8 +16438,8 @@ fn unpack_wheel_in_ram(ee: &mut Ee, c: update::Out, dt: F, map: &track::Terrain<
 /// the wheels are down, half down or up), quaternion (the image's or tipped) and velocity drawn, the
 /// steer filter's time and `dt` too, run through SLUS-21104's vt `+0x3f0` and through
 /// [`update::net_unpack`] on [`UpdateInRam`]: the node turn [`node::orient`]'s, the wheel clears,
-/// suspensions and tire forces [`unpack_wheel_in_ram`]'s (F45a); the contacts and the net post
-/// still the original's. Every byte outside the stack comes out the same.
+/// suspensions and tire forces [`unpack_wheel_in_ram`]'s (F45a), the net post [`net_post_in_ram`]'s,
+/// the contacts (F52) [`unpack_wheel_in_ram`]'s too. Every byte outside the stack comes out the same.
 #[test]
 #[allow(clippy::float_arithmetic)]
 fn the_bikes_net_unpack_is_the_originals_with_the_wheels_in_rust() {
@@ -16200,6 +16491,7 @@ fn the_bikes_net_unpack_is_the_originals_with_the_wheels_in_rust() {
             assert_eq!(served.get(c), Some(&2), "case {k}: {c} served twice ({served:?})");
         }
         assert_eq!(served.get("NetPost"), Some(&1), "case {k}: the net post served ({served:?})");
+        assert_eq!(served.get("Contacts"), Some(&1), "case {k}: the contacts served ({served:?})");
         if k == 0 {
             eprintln!("served: {served:?}");
         }

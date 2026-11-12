@@ -332,6 +332,44 @@ pub fn ground_step(p: &Params, q: &mut Quad, body: &mut Body, dt: F, m: &mut imp
     m.call(Call::PeakRates, q, body);
 }
 
+/// **The bike's wheel contacts** (F52), the walk of its Force body's [`Call::Contacts`] after the
+/// trigger probe was stood at the bike's node and searched over the bike's nearby list: with the
+/// probe's hit bit (`look`) each contact of its record in turn — its owner's listeners told it was
+/// touched first (`tell(owner, i)`, `i` up from 0 while under the owner's count), then the contact
+/// set on the front wheel when its ray's start lies ahead of the bike (`z` not at or below zero) and
+/// on the rear otherwise, its vehicle passed on only when that vehicle's kind is 2. The rear's last
+/// contact's node is kept (`rear_node`, zeroed first). `z` is read as the FPU reads it (a denormal
+/// is zero, a NaN pattern its signed maximum), so every pattern goes the original's way. MX
+/// Unleashed's distributor ([`crate::chassis::wheel_contacts`]) is the same walk.
+pub fn wheel_contacts(
+    front: &mut crate::chassis::WheelContact,
+    rear: &mut crate::chassis::WheelContact,
+    rear_node: &mut u32,
+    look: bool,
+    cs: &[crate::quad::Contact],
+    tell: &mut impl FnMut(u32, i32),
+) {
+    *rear_node = 0;
+    if !look {
+        return;
+    }
+    for c in cs {
+        if c.owner != 0 {
+            for i in 0..c.listeners {
+                tell(c.owner, i);
+            }
+        }
+        let vehicle = if c.vehicle != 0 && c.vehicle_kind == 2 { c.vehicle } else { 0 };
+        let at = crate::chassis::Contact { normal: c.normal, point: c.point, owner: c.owner, ..Default::default() };
+        if F::from_bits(c.at.z().to_bits()) > F::ZERO {
+            crate::chassis::set_contact(front, &at, vehicle);
+        } else {
+            crate::chassis::set_contact(rear, &at, vehicle);
+            *rear_node = c.node;
+        }
+    }
+}
+
 /// The [`Rider`] words, bike-relative (the balance's keys and accumulators, the raw stick `x`), and
 /// the centre of gravity, body-relative.
 const RIDER_KEYS: [u32; 11] = [0x14fc, 0x1500, 0x1504, 0x1508, 0x1514, 0x151c, 0x1520, 0x1398, 0x138c, 0x1390, 0x1394];

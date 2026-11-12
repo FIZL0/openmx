@@ -1909,6 +1909,13 @@ pub trait Sweep {
     fn gather(&mut self, _centre: Vf, _reach: F) -> bool {
         false
     }
+
+    /// F52: whether the contacts go onto a bike's two wheels ([`crate::handling::bike::wheel_contacts`]:
+    /// front or rear by `z` alone, at [`crate::handling::bike::FRONT`] and `REAR`) rather than the
+    /// quad's four ([`wheel_contacts`]).
+    fn two_wheels(&self) -> bool {
+        false
+    }
 }
 
 impl Sweep for () {
@@ -1924,6 +1931,10 @@ impl<S: Sweep + ?Sized> Sweep for &mut S {
 
     fn gather(&mut self, centre: Vf, reach: F) -> bool {
         (**self).gather(centre, reach)
+    }
+
+    fn two_wheels(&self) -> bool {
+        (**self).two_wheels()
     }
 }
 
@@ -2080,7 +2091,11 @@ impl<R: Moto, G: FnMut(Vf, &mut u8) -> (Vf, Vf), S: Sweep> Steps<R, G, S> {
                 // MD75e: the probe is the quad's trigger, stood at the frame it was swept from.
                 let trigger = &mut self.bike.parts.collidables.states[crate::atv_sync::slot(Part::Trigger)];
                 crate::atv_sync::stand(trigger, &scene.nodes[0].world);
-                self.contacts(q, look, &cs);
+                if self.sweep.two_wheels() {
+                    self.bike_contacts(q, look, &cs);
+                } else {
+                    self.contacts(q, look, &cs);
+                }
             }
             Call::RevLimit => crate::atv_moto::rev_limit(&self.bike.engine, &mut self.bike.parts.drive, self.bike.parts.driven),
             Call::PeakRates => crate::atv_moto::peak_rates(q, body),
@@ -2165,6 +2180,30 @@ impl<R: Moto, G, S> Steps<R, G, S> {
         let calls = wheel_contacts(&mut wc, &mut b.parts.rear_node, look, cs);
         debug_assert!(!calls.iter().any(|c| matches!(c, crate::chassis::ContactCall::Notify(..))), "a swept contact with an owner");
         for (i, c) in wc.iter().enumerate() {
+            debug_assert_eq!((c.owner, c.vehicle), (0, 0), "a swept contact with an owner or a vehicle");
+            let w = &mut b.wheels[i];
+            (w.contact_point, w.contact_normal, w.swept_contact) = (c.point, c.normal, c.touching);
+            q.wheels[i].normal = c.normal;
+        }
+    }
+
+    /// **The contacts spread onto the bike's two wheels** (F52, [`crate::handling::bike::wheel_contacts`]
+    /// after the sweep): as [`Steps::contacts`], on the front and rear alone. The bike's wheels keep
+    /// no owner or vehicle here (as on the quad), nor anyone to tell.
+    fn bike_contacts(&mut self, q: &mut Quad, look: bool, cs: &[Contact]) {
+        use crate::handling::bike::{FRONT, REAR};
+        let b = &mut self.bike;
+        let mut wc = [FRONT, REAR].map(|i| crate::chassis::WheelContact {
+            point: b.wheels[i].contact_point,
+            normal: q.wheels[i].normal,
+            touching: b.wheels[i].swept_contact,
+            ..Default::default()
+        });
+        let [front, rear] = &mut wc;
+        crate::handling::bike::wheel_contacts(front, rear, &mut b.parts.rear_node, look, cs, &mut |owner, i| {
+            debug_assert!(false, "a swept contact with an owner {owner:#x} telling its listener {i}");
+        });
+        for (i, c) in [FRONT, REAR].into_iter().zip(&wc) {
             debug_assert_eq!((c.owner, c.vehicle), (0, 0), "a swept contact with an owner or a vehicle");
             let w = &mut b.wheels[i];
             (w.contact_point, w.contact_normal, w.swept_contact) = (c.point, c.normal, c.touching);
