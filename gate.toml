@@ -15,6 +15,40 @@ test = "-p game-sim --test tick"
 paths = ["crates/game-sim/src/tick.rs", "crates/game-sim/src/rng.rs", "crates/game-sim/src/input.rs",
          "crates/game-sim/tests/tick.rs", "crates/ps2-float/*", "crates/ps2-oracle/*", "research/oracle.txt"]
 
+# The three longest binaries after those (11-12 merge gate: 615 s, 481 s, 263 s) ran in nearly every slot's
+# `done`, since any game-sim or openmx src change reaches its whole package. `paths` are what each one
+# proves: the modules its tests name (and, for menu, the ones it mounts). The merge gate still runs them, so a
+# reach these miss shows there.
+[[slow]]
+test = "-p game-sim --test mxvatv_bike_ride"
+paths = ["crates/game-sim/tests/mxvatv_bike_ride*", "crates/game-sim/src/atv_*", "crates/game-sim/src/sweep_probe.rs",
+         "crates/game-sim/src/world_search.rs", "crates/game-sim/src/broad_*", "crates/game-sim/src/quad.rs",
+         "crates/game-sim/src/phy.rs", "crates/game-sim/src/track.rs", "crates/game-sim/src/toys.rs",
+         "crates/game-sim/src/ragdoll*", "crates/game-sim/src/handling*", "crates/game-sim/src/camera.rs",
+         "crates/game-sim/src/rng.rs", "crates/game-sim/src/noise.rs",
+         "crates/ps2-float/*", "crates/ps2-oracle/*", "research/oracle.txt"]
+
+[[slow]]
+test = "-p game-sim --test atv_quad"
+paths = ["crates/game-sim/tests/atv_quad*", "crates/game-sim/src/atv_*", "crates/game-sim/src/ray_probe.rs",
+         "crates/game-sim/src/sweep_probe.rs", "crates/game-sim/src/world_search.rs", "crates/game-sim/src/world.rs",
+         "crates/game-sim/src/track.rs", "crates/game-sim/src/wheel.rs", "crates/game-sim/src/air.rs",
+         "crates/game-sim/src/ride.rs", "crates/game-sim/src/quad.rs", "crates/game-sim/src/collide.rs",
+         "crates/game-sim/src/phy.rs", "crates/game-sim/src/camera.rs", "crates/game-sim/src/handling*",
+         "crates/ps2-float/*", "crates/ps2-oracle/*", "research/oracle.txt"]
+
+[[slow]]
+test = "-p openmx --test menu"
+paths = ["crates/openmx/tests/menu.rs", "crates/openmx/src/menu*", "crates/openmx/src/clock.rs",
+         "crates/openmx/src/thread.rs", "crates/openmx/src/files.rs", "crates/openmx/src/vehicle.rs",
+         "crates/openmx/src/roster.rs", "crates/openmx/src/dress.rs", "crates/openmx/src/join.rs",
+         "crates/openmx/src/split.rs", "crates/openmx/src/chase.rs", "crates/openmx/src/window.rs",
+         "crates/openmx/src/pad.rs", "crates/openmx/src/pads.rs", "crates/openmx/src/audio.rs",
+         "crates/openmx/src/track_mods.rs", "crates/openmx/src/video.rs", "crates/openmx/src/touch_room.rs",
+         "crates/game-sim/src/input.rs", "crates/game-sim/src/modifiers.rs", "crates/game-sim/src/trick*",
+         "crates/game-sim/src/handling*", "crates/game-sim/src/camera.rs", "crates/game-sim/src/archive.rs",
+         "crates/game-render/src/world*"]
+
 [flaky]
 # Wall-clock and loopback-port tests that red under the other slots' load and pass alone (memory of 10-21
 # to 10-23: lobby's mDNS seating, udp's dropped-and-rebound ports, pace's frame timing). Each is a regex on
