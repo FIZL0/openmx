@@ -247,7 +247,8 @@ def _log_path() -> Path:
 NOTES: list[str] = []
 
 
-def _run(cmd: str, extra: list[str], cwd: Path, log: Path, env=None, all_slow: bool = False) -> int:
+def _run(cmd: str, extra: list[str], cwd: Path, log: Path, env=None, all_slow: bool = False,
+         since: str | None = None) -> int:
     """`_run_shown`, with every window the tests open on a private headless display (gate.toml `[display]`)
     instead of the desktop's compositor, and a note when that compositor's GPU memory grew over the run.
 
@@ -258,7 +259,7 @@ def _run(cmd: str, extra: list[str], cwd: Path, log: Path, env=None, all_slow: b
     before = plat.compositor_gtt_mib()
     shown = plat.PrivateDisplay(str(d.get('size', '1920x1080'))) if d.get('private') else None
     with shown or nullcontext({}) as denv:
-        rc = _run_shown(cmd, extra, cwd, log, {**(env or {}), **denv}, all_slow)
+        rc = _run_shown(cmd, extra, cwd, log, {**(env or {}), **denv}, all_slow, since)
     if shown and not denv:
         NOTES.append(f'test windows went to the desktop\'s display: no private one ({shown.why})')
     grew = {k: v - before.get(k, 0.0) for k, v in plat.compositor_gtt_mib().items()}
@@ -268,8 +269,10 @@ def _run(cmd: str, extra: list[str], cwd: Path, log: Path, env=None, all_slow: b
     return rc
 
 
-def _run_shown(cmd: str, extra: list[str], cwd: Path, log: Path, env=None, all_slow: bool = False) -> int:
-    """Run a configured command with the extra args appended, everything into `log`."""
+def _run_shown(cmd: str, extra: list[str], cwd: Path, log: Path, env=None, all_slow: bool = False,
+               since: str | None = None) -> int:
+    """Run a configured command with the extra args appended, everything into `log`. A whole run picks the
+    tests the work can reach since it left the shared branch, or since `since` (a commit) when given."""
     jobs = _jobs()
     if '{jobs}' in cmd:
         cmd = cmd.replace('{jobs}', str(jobs))
@@ -279,12 +282,15 @@ def _run_shown(cmd: str, extra: list[str], cwd: Path, log: Path, env=None, all_s
     from ps2kit import cargo_gate
     NOTES.clear()
     if cargo_gate.applies(cmd, extra):
-        remote = cfg(False).push_remote or 'origin'
-        shared = shared_name(cwd, remote)
-        ref = f'{remote}/{shared}' if not _git(cwd)('rev-parse', '-q', '--verify', f'{remote}/{shared}').returncode \
-            else shared
+        if since:
+            ref = since
+        else:
+            remote = cfg(False).push_remote or 'origin'
+            shared = shared_name(cwd, remote)
+            ref = f'{remote}/{shared}' if not _git(cwd)('rev-parse', '-q', '--verify', f'{remote}/{shared}').returncode \
+                else shared
         rc, notes = cargo_gate.run(cmd, cwd, e, jobs, log, ref, all_slow or os.environ.get('KIT_CHECK_ALL') == '1',
-                                   cfg(False).ctx('notes/check-times.json'), alone=alone)
+                                   cfg(False).ctx('notes/check-times.json'), alone=alone, keep_slow=bool(since))
         NOTES.extend(notes)
         return rc
     with open(log, 'w', encoding='utf-8') as f:
@@ -369,7 +375,21 @@ def cmd_check(argv: list[str]) -> int:
     ap.add_argument('--rerun', action='extend', nargs='+', default=[], metavar='ARGS',
                     help="failed test binaries as the summary's \"to rerun pass\" lines give them, each one quoted "
                          "string (the run's retest of a load flake)")
+    # agent-runner 0.24.0's [run] test_since: a merge's gate tests what changed since {base}, a commit that
+    # passed a gate already (the shared branch only moves on one), and its full `test` (--all) runs daily (K50).
+    ap.add_argument('--since', metavar='REV',
+                    help="only the tests what changed since REV can reach (gate.toml [select]), as `done` does "
+                         "against its base; a run's merge gate between its daily --all")
     a, unknown = ap.parse_known_args(argv)
+    if a.since and a.all:
+        a.since = None  # --all is the whole of it anyway
+    if a.since:
+        r = _git(Path.cwd())('rev-parse', '-q', '--verify', f'{a.since}^{{commit}}')
+        if r.returncode:
+            print(f'check --since: {a.since} is no commit here; testing everything', file=sys.stderr)
+            a.all, a.since = True, None
+        else:
+            a.since = r.stdout.strip()
     extra = a.extra + unknown + [w for r in a.rerun for w in shlex.split(r)]
 
     c = cfg(False)
@@ -381,7 +401,7 @@ def cmd_check(argv: list[str]) -> int:
     cwd = Path.cwd() if (Path.cwd() / '.git').exists() else ROOT
     log = _log_path()
     if not a.no_gate:
-        _take_slot(first=a.all)  # --all is the run's merge gate, which every finished task waits on
+        _take_slot(first=a.all or bool(a.since))  # the run's merge gate, which every finished task waits on
     try:
         _cap_build_dirs(cwd)
         if len(a.rerun) > 1:
@@ -396,7 +416,7 @@ def cmd_check(argv: list[str]) -> int:
             log.write_text(text, encoding='utf-8')
             NOTES[:] = notes
         else:
-            rc = _run(c.test_cmd, extra, cwd, log, all_slow=a.all)
+            rc = _run(c.test_cmd, extra, cwd, log, all_slow=a.all, since=a.since)
     finally:
         _release_slot()
     for l in summarise(rc, log):

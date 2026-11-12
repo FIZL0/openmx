@@ -1,8 +1,10 @@
 # What `./kit check` and `./kit done` do differently on a whole run (see ps2kit/cargo_gate.py). Tracked, so
 # every worktree's gate agrees; kit.toml stays per machine.
 
-# Binaries the gate runs only when the work touches what they prove. `./kit check --all` (the run's merge
-# check) always runs them, and `./kit check -- -p game-sim --test camera` runs one by name.
+# Binaries a slot's `done` runs only when the work touches what they prove. A merge's gate (`./kit check
+# --since`) runs them whenever its selection reaches their crate, `./kit check --all` always, and
+# `./kit check -- -p game-sim --test camera` runs one by name. The paths are a guess (both binaries link
+# nearly all of game-sim), so only `done` goes by them.
 [[slow]]
 # 22 oracle proofs of the camera, each over a minute: 268 s, the gate's longest binary (2026-10-23).
 test = "-p game-sim --test camera"
@@ -49,8 +51,8 @@ tests = ["-p openmx --test one_fps", "-p game-render --test ecosystem"]
 [select]
 # `./kit done` and a bare `./kit check` build and run only the test binaries the work can reach (ps2kit/cargo_gate.py
 # select): a crate's src reaches that crate and every crate that uses it, a test file only its own binary,
-# research/oracle.txt's edited lines the tests that name them. `./kit check --all`, the run's merge gate, still
-# runs everything. Four full suites at once (three slots' `done` and the merge) held the machine at load ~100 and
+# research/oracle.txt's edited lines the tests that name them. A run's merge gate picks the same way from the commit
+# it merges onto (`./kit check --since {base}`, K50), and `./kit check --all` runs everything once a day. Four full suites at once (three slots' `done` and the merge) held the machine at load ~100 and
 # made each one take an hour (user 2026-11-09: 'i dont want tests to take so long for quicker progress').
 oracle = "research/oracle.txt"
 data = ["research"]  # a file here reaches the tests that name its path or its directory
