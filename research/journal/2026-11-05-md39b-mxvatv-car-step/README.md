@@ -8,5 +8,5 @@ Unleashed's car loader wrapped in MXVehicle's `[Wrecks]` and `[Camera]` loaders,
 baja and truck RAM images: 1,271 to 1,283 loader words per car, bit for bit (tests/mxvatv_car_fields.rs).
 MD39a's captures had gone from this slot. I recovered three of the five states from my emulator copy's save
 slots; the golf cart and sand rail states, the tape and every csv are lost. So the step and the replay are
-not done. They are filed as C29 (remake the captures), MD106 (the car's whole frame) and MD107 (the five
-drives replayed), and MD39b is blocked on them. Details in `1-mxvatv-car-step-PART.md`.
+not done in part 1. They were filed as C29 (remake the captures), MD106 (the car's whole frame) and MD107 (the five
+drives replayed). All three have landed, and part 2 (`2-mxvatv-car-step-FINAL.md`) closes MD39b on them. The port-side replay is MD135.
