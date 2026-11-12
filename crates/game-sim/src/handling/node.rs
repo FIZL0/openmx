@@ -286,6 +286,35 @@ pub fn orient(m: &mut impl Ram, n: u32, q: Quad, pos: Quad) {
     moved(m, n);
 }
 
+/// **The node turned to a quaternion where it is** (F62; the original's call with no frame of
+/// reference and no position): the quaternion's three rotation rows ([`crate::math::quat_to_mat4`],
+/// `w` 0), taken into the parent's frame (its world frame brought up to date first, then inverted)
+/// if there is one, as the node's own frame; the position row's `xyz` words put back as they were;
+/// then [`moved`]. The original's fourth row is stack it never set: under a parent only the
+/// position row's `w` reads it, times the inverse's rotation rows' `w` (0 on a rigid frame), so it
+/// is taken as 0 here; a root's own frame gets its rotation rows only (the original's position row
+/// `w` is that stack word, not ported).
+pub fn orient_here(m: &mut impl Ram, n: u32, q: Quad) {
+    let keep = [0, 4, 8].map(|k| m.word(n + POSITION + k));
+    let [r0, r1, r2, _] = crate::math::quat_to_mat4(Vf::from_bits(q), Vf::ZERO).0;
+    match m.word(n + PARENT) {
+        0 => {
+            for (r, row) in [r0, r1, r2].iter().enumerate() {
+                put_v(m, n + LOCAL + 0x10 * r as u32, *row);
+            }
+        }
+        parent => {
+            update(m, parent);
+            let f = frame_mul(&[r0, r1, r2, Vf::ZERO], &frame_inverse(&rows(m, parent + WORLD)));
+            put_rows(m, n + LOCAL, &f);
+        }
+    }
+    for (k, x) in keep.into_iter().enumerate() {
+        m.set(n + POSITION + 4 * k as u32, x);
+    }
+    moved(m, n);
+}
+
 /// **The node spun about an axis** by `angle` (radians): the axis (its three words in RAM)
 /// normalized (`mula`/`madda`/`madd` of `y`, `x`, `z`, then `rsqrt`), the angle's sine and cosine off
 /// the curve table ([`sin_cos`]), and the own frame's three rows the rotation about the axis by it
