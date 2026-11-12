@@ -2945,6 +2945,12 @@ impl Seats {
     fn poll(&mut self) {
         for j in &mut self.joined {
             j.pads.drain();
+            // Its node gone from the directory is the pad gone too (K47): udev takes `jsN` away as
+            // the pad goes, and an open file can still read "nothing waiting" for a moment after.
+            #[cfg(not(any(target_arch = "wasm32", target_os = "ios", target_os = "android", windows)))]
+            if std::fs::symlink_metadata(&j.path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
+                j.pads.gone = true;
+            }
         }
         self.joined.retain(|j| !j.pads.gone);
         if self.since_scan.is_none_or(|t| t.elapsed().as_secs_f32() >= RESCAN_SECONDS) {
@@ -4944,6 +4950,12 @@ pub(crate) mod tests {
         pub(crate) fn unplug(self) {
             std::fs::remove_file(&self.path).unwrap();
         }
+
+        /// A second copy of the writer, as a child forked mid-test holds until its exec (K47): the
+        /// fifo reads no end-of-file while it is open.
+        pub(crate) fn writer_copy(&self) -> std::fs::File {
+            self.writer.try_clone().unwrap()
+        }
     }
 
     /// A sysfs entry for a node, as the kernel would write one for a USB pad.
@@ -5043,13 +5055,16 @@ pub(crate) mod tests {
         let now = frame(&mut seats, &nothing);
         assert!(down(playing(now[0]), Control::Circle));
 
-        // A pulled out: 1P waits, paused, and 2P rides on.
+        // A pulled out: 1P waits, paused, and 2P rides on — even while another process still holds
+        // its writer (K47: a shell another test spawns holds one between its fork and its exec).
+        let forked = a.writer_copy();
         a.unplug();
         let now = frame(&mut seats, &nothing);
         assert_eq!(now[0], SeatInput::Waiting);
         assert_eq!(now[0].report(), Report::missing());
         assert!(down(playing(now[1]), Control::Cross));
         assert!(seats.said()[0].starts_with("1P: the pad is out"));
+        drop(forked);
 
         // A third pad joins 3P, not the seat 1P is waiting in.
         sys_entry(&sys, "js2", "Pad C", "usb-3/input0");
