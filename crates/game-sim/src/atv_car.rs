@@ -24,7 +24,8 @@
 //! code ported, its calls handed out.
 //!
 //! Proof: `tests/mxvatv_car_frame.rs`, SLUS-21104's world step and the car's update off MD39a's buggy
-//! image with every call hooked.
+//! image with every call hooked; and (MD106c) the image's frame whole, with [`Pieces`] and [`Own`]
+//! answering the calls and only the ground query left to the test.
 
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 

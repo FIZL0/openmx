@@ -11310,6 +11310,17 @@ tip_popup_arm               boot 0x0029abc0 (popup, 1). Not read further.
 #   from ra 0x004cc428, record +0x24 = dot(up, normal) <= 0x3f34fdf4; latch; 0x00194c20(node, 0, car +0xc40).
 #   The vt +0x10c update 0x004cc4e0 is not part of the world step.
 #   Settled here: atv_car_listener_48 is the PreProcess (preforce list), atv_car_listener_60 the Force body.
+# MD106c — the buggy image's world step whole (tests/mxvatv_car_frame.rs whole::the_buggys_whole_frame_is_
+#   the_originals; only atv_ground_query 0x004833c0 hooked, answered by atv_ground on MC02; terrain object
+#   0x0184c7d0 is every tire's +0x1a4 and car +0x3b4). Preforce list world +0x98 count 4, +0xa0 array:
+#   car +0x30, idle buggy 0x01627310 (object 0x016272e0, vstate mode 2), and two vehicles of class vt
+#   0x003d0450 (objects 0x0197f990, 0x019f68d0, vstate mode 2; listener vt 0x003d04dc slot +8 0x004de0c0
+#   -> 0x004d8b20 on object = elt - 0x30, returns at once with no vstate or mode 3/4). Their writes
+#   (1125 bytes) touch nothing of the car's; they share 36 bytes with the car's hand-outs (0x003dc618,
+#   0x003dce20, 0x003dce28 among them). The frame's hand-outs: sort place/search (struck nothing at
+#   spawn), the record's vt +0x88 x4 (0x00205730), subtree out of date, spatial update, node bounds,
+#   collision sync (0x004942c0, writes the car node's +0 halfword, a stamp), map-edge test (inside).
+#   The noise's knot 0x003f6d88 is the car's engine's (tables 0x003f3540 perm, 0x003f6580 g1, built).
 # MD106d — the car's update atv_car_update 0x004cc4e0 (a0 car, f12 dt; game_sim::atv_car::update; tests/
 #   mxvatv_car_frame.rs the_cars_update_is_the_originals, 10,000 generated updates off md39a/buggy.ee.bin,
 #   its four calls hooked). Journal: research/journal/2026-11-10-md106d-mxvatv-car-update.
