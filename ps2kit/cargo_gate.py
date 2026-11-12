@@ -124,9 +124,10 @@ class Selection:
 def select(cwd: Path, shared: str, env: dict, sel: dict) -> Selection | None:
     """gate.toml `[select]`: the packages and test binaries the work can change, or None for all of them.
 
-    A file in a package's `tests/` that is a test target's root reaches that binary alone; any other file in
-    a package (src, Cargo.toml, a tests/ helper or data) reaches the package and every workspace package that
-    depends on it, dev-dependencies included. `oracle`'s edited lines reach the binaries whose sources name
+    A file in a package's `tests/` that is a test target's root, or a module in that root's own folder
+    (`tests/ai/` of `tests/ai/main.rs`), reaches that binary alone; any other file in a package (src,
+    Cargo.toml, a tests/ helper or data) reaches the package and every workspace package that depends on
+    it, dev-dependencies included. `oracle`'s edited lines reach the binaries whose sources name
     one of their names in quotes (`addr("name")`); a file under one of `data` reaches the binaries whose
     sources name its path, or its directory below `data`. `ignore` globs reach nothing. Anything else (the
     workspace's Cargo.toml or lock, the kit, the gate's own config) reaches everything."""
@@ -146,6 +147,17 @@ def select(cwd: Path, shared: str, env: dict, sel: dict) -> Selection | None:
                 users[d['name']].add(p['name'])
     tests = {p['name']: {Path(t['src_path']).resolve(): t['name'] for t in p['targets'] if 'test' in t['kind']}
              for p in pkgs}
+
+    def binary(pkg: str, path: Path) -> str | None:
+        """The test binary `path` belongs to alone: its root, or a module in the root's own folder
+        (`tests/ai/main.rs`'s `tests/ai/`, or `tests/atv_quad.rs`'s `tests/atv_quad/`)."""
+        if path in tests[pkg]:
+            return tests[pkg][path]
+        for root, name in tests[pkg].items():
+            own = root.parent if root.name == 'main.rs' else root.with_suffix('')
+            if own != dirs[pkg] / 'tests' and path.is_relative_to(own):
+                return name
+        return None
 
     def dirty(pkg: str) -> None:
         todo = [pkg]
@@ -173,8 +185,8 @@ def select(cwd: Path, shared: str, env: dict, sel: dict) -> Selection | None:
         for n, f, text in sources:
             if not any(w in text for w in words):
                 continue
-            if f in tests[n]:
-                out.part.setdefault(n, set()).add(tests[n][f])
+            if (b := binary(n, f)) is not None:
+                out.part.setdefault(n, set()).add(b)
             elif f.is_relative_to(dirs[n] / 'tests'):
                 out.whole.add(n)
             else:
@@ -193,8 +205,8 @@ def select(cwd: Path, shared: str, env: dict, sel: dict) -> Selection | None:
             under = f[len(top):].split('/')[0]
             naming([f, f'{top}{under}', f'"{under}"'])
         elif (pkg := owner(path)) is not None:
-            if path in tests[pkg]:
-                out.part.setdefault(pkg, set()).add(tests[pkg][path])
+            if (b := binary(pkg, path)) is not None:
+                out.part.setdefault(pkg, set()).add(b)
             else:
                 dirty(pkg)
         else:
