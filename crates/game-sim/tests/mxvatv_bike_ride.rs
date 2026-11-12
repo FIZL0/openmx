@@ -5227,15 +5227,65 @@ impl Effects for PartWalk<'_> {
     }
     fn out(&mut self, c: effects::Out, dt: F) {
         use effects::Out;
-        let (item, slot, ints, floats): (u32, u32, Vec<u64>, Vec<f32>) = match c {
-            Out::Key { item, key } => (item, 8, vec![u64::from(item), u64::from(key)], vec![]),
-            Out::On(item) => (item, 0x18, vec![u64::from(item)], vec![]),
-            Out::Off(item) => (item, 0x1c, vec![u64::from(item)], vec![]),
-            Out::Step(item) => (item, 0x14, vec![u64::from(item)], vec![dt.0]),
-        };
-        let f = self.ee.u32_at(self.ee.u32_at(item + 0x10) + slot);
-        self.original(f, &ints, &floats, &format!("effects item +{slot:#x} {f:#x}"), vec![]);
         book("the tail: the update's effects item calls", 1);
+        // F56: the turning virtuals are the port's.
+        match c {
+            Out::Key { item, key } => return effects::key(self, item, key),
+            Out::On(item) => return effects::on(self, item),
+            Out::Off(item) => return effects::off(self, item),
+            Out::Step(item) => {
+                let f = self.ee.u32_at(self.ee.u32_at(item + 0x10) + 0x14);
+                self.original(f, &[u64::from(item)], &[dt.0], &format!("effects item +0x14 {f:#x}"), vec![]);
+            }
+        }
+    }
+}
+
+/// F56: the effects items' classes by their vtables (research/oracle.txt `# F56`); the seven C15's
+/// state 4 holds.
+const FX_CLASSES: [(u32, effects::Class); 7] = {
+    use effects::Class::*;
+    [(0x003d_1650, Clocked), (0x003d_1680, Lit), (0x003d_16b0, Lit), (0x003d_1740, Picked), (0x003d_1840, Picked), (0x003d_1870, Latched), (0x003d_18a0, Lit)]
+};
+/// The object's own function a key's pick is handed to.
+const FX_PICK: u32 = 0x0050_a920;
+
+fn fx_class(ee: &Ee, item: u32) -> effects::Class {
+    let vt = ee.u32_at(item + 0x10);
+    FX_CLASSES.iter().find(|c| c.0 == vt).unwrap_or_else(|| panic!("an effects item of a class not ported: {item:#x}, vtable {vt:#x}")).1
+}
+
+/// The object's virtual slot (or [`FX_PICK`]) a call is, its object and its arguments.
+fn fx_object_call(ee: &Ee, c: effects::Call) -> (u32, Vec<u64>, String) {
+    use effects::Call;
+    let (o, slot, ints) = match c {
+        Call::Light(o) => (o, 0xa4, vec![u64::from(o)]),
+        Call::Douse(o) => (o, 0xa8, vec![u64::from(o)]),
+        Call::Halt(o) => (o, 0x84, vec![u64::from(o)]),
+        Call::Pick { object, pick } => return (FX_PICK, vec![u64::from(object), u64::from(pick)], format!("effects item object pick {FX_PICK:#x}")),
+    };
+    let f = ee.u32_at(ee.u32_at(o + 4) + slot);
+    (f, ints, format!("effects item object +{slot:#x} {f:#x}"))
+}
+
+/// F56: the items' turning virtuals are the port's; what they hand their objects is the original's,
+/// booked by slot and watched as a leaf is.
+impl effects::Items for PartWalk<'_> {
+    fn word(&mut self, at: u32) -> u32 {
+        self.ee.u32_at(at)
+    }
+    fn set(&mut self, at: u32, w: u32) {
+        self.ee.set_u32(at, w);
+    }
+    fn set_byte(&mut self, at: u32, b: u8) {
+        self.ee.write(at, 1, u128::from(b));
+    }
+    fn class(&mut self, item: u32) -> effects::Class {
+        fx_class(self.ee, item)
+    }
+    fn call(&mut self, c: effects::Call) {
+        let (f, ints, name) = fx_object_call(self.ee, c);
+        self.original(f, &ints, &[], &name, vec![]);
     }
 }
 
@@ -9204,6 +9254,9 @@ fn flip_replays_with_every_port_at_once() {
     walk_served(&ran);
     assert!(!ran.keys().any(|k| k.contains("NetQueue")), "{ran:?}");
     three_served(&ran);
+    // F56: the port's turning reached the items' objects.
+    let objects: Vec<&String> = ran.keys().filter(|k| k.contains("effects item object")).collect();
+    assert!(!objects.is_empty(), "no effects item turned: {ran:?}");
 }
 
 /// F31b5l: the tail's frame post, the wreck fade's search and the kind clear are the ports', never
@@ -9224,6 +9277,10 @@ fn walk_served(ran: &BTreeMap<String, u64>) {
     }
     // F31b5n: the effects' own work is the port's.
     assert!(!ran.contains_key("the tail: the update's effects"), "the effects handed on: {ran:?}");
+    // F56: and its items' turning virtuals.
+    for slot in ["+0x8 ", "+0x18 ", "+0x1c "] {
+        assert!(!ran.keys().any(|k| k.contains(&format!("effects item {slot}"))), "an effects item's {slot}handed on: {ran:?}");
+    }
 }
 
 /// **F31b5j — what the part walk's leaves give the bike**: [`replay_whole`]'s ports with the
@@ -9565,6 +9622,153 @@ fn the_effects_step_is_the_originals() {
     }
     eprintln!("effects oracle: {seen:?}");
     assert_eq!(seen.len(), 5, "every kind of call, and none: {seen:?}");
+}
+
+/// F56's oracle: the objects' virtuals at fake addresses (`FX_OBJ_FAKE + slot`), and [`FX_PICK`]
+/// hooked. Each changes the item so the port's order and re-reads are put to the test: a halt
+/// changes the count's start (`+0x48`), a douse sets both words a douse's neighbours clear (`+0x28`,
+/// `+0x90`), a pick moves the item to its second object.
+const FX_OBJ_FAKE: u32 = 0x0000_2400;
+
+/// A call an item hands its object, as (slot, or 1 for the pick; the object; the pick).
+type FxObjCall = (u32, u32, u32);
+
+fn fx_object_react(ee: &mut Ee, item: u32, second: u32, (slot, ..): FxObjCall) {
+    match slot {
+        0x84 => ee.set_u32(item + effects::COUNT_START, ee.u32_at(item + effects::COUNT_START) ^ 0x5555),
+        0xa8 => {
+            ee.set_u32(item + effects::PICKED_WORD, 0xdead);
+            ee.set_u32(item + effects::LATCH, 0xbeef);
+        }
+        1 => ee.set_u32(item + effects::ITEM_OBJECT, second),
+        _ => {}
+    }
+}
+
+/// The port's side of F56's oracle: RAM in place, each object call logged and answered by
+/// [`fx_object_react`].
+struct FxItems<'a> {
+    ee: &'a mut Ee,
+    item: u32,
+    second: u32,
+    log: Vec<FxObjCall>,
+}
+
+impl effects::Items for FxItems<'_> {
+    fn word(&mut self, at: u32) -> u32 {
+        self.ee.u32_at(at)
+    }
+    fn set(&mut self, at: u32, w: u32) {
+        self.ee.set_u32(at, w);
+    }
+    fn set_byte(&mut self, at: u32, b: u8) {
+        self.ee.write(at, 1, u128::from(b));
+    }
+    fn class(&mut self, item: u32) -> effects::Class {
+        fx_class(self.ee, item)
+    }
+    fn call(&mut self, c: effects::Call) {
+        use effects::Call;
+        let c = match c {
+            Call::Light(o) => (0xa4, o, 0),
+            Call::Douse(o) => (0xa8, o, 0),
+            Call::Halt(o) => (0x84, o, 0),
+            Call::Pick { object, pick } => (1, object, u32::from(pick)),
+        };
+        self.log.push(c);
+        fx_object_react(self.ee, self.item, self.second, c);
+    }
+}
+
+/// **F56 — the effects items' turning virtuals are the original's**: 20 000 items in scratch RAM,
+/// each of one of the seven classes state 4 holds ([`FX_CLASSES`], by its real vtable), its words
+/// junk, its state byte 0 to 3 or junk, its picks a mix of [`effects::UNPICKED`] and junk, run
+/// through SLUS-21104's virtual (key `+8`, on `+0x18`, off `+0x1c`, pause `+0x20`, unpause `+0x24`)
+/// with its objects' calls hooked, and through the port's. The objects' calls come in the same order
+/// with the same arguments, and the item and its objects come out the same.
+#[test]
+fn the_effects_items_turning_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let (item, first, second, vt) = (ee.scratch(120), ee.scratch(126), ee.scratch(127), ee.scratch(128));
+    let region = (item, ee.scratch(132) - item);
+    let log: Rc<RefCell<Vec<FxObjCall>>> = Rc::default();
+    for slot in [0x84, 0xa4, 0xa8] {
+        let l = log.clone();
+        ee.hooks.insert(
+            FX_OBJ_FAKE + slot,
+            Box::new(move |ee: &mut Ee| {
+                let c = (slot, ee.r(4) as u32, 0);
+                l.borrow_mut().push(c);
+                fx_object_react(ee, item, second, c);
+            }),
+        );
+    }
+    let l = log.clone();
+    ee.hooks.insert(
+        FX_PICK,
+        Box::new(move |ee: &mut Ee| {
+            let c = (1, ee.r(4) as u32, ee.r(5) as u32);
+            l.borrow_mut().push(c);
+            fx_object_react(ee, item, second, c);
+        }),
+    );
+    let mut g = Gen(0x0000_f560);
+    let mut seen = BTreeMap::<String, u32>::new();
+    for case in 0..20_000 {
+        let (vtable, class) = FX_CLASSES[(g.bits() % 7) as usize];
+        let mut setup = Vec::<(u32, u32)>::new();
+        for o in (0..region.1).step_by(4) {
+            setup.push((item + o, g.bits()));
+        }
+        setup.push((item + 0x10, vtable));
+        setup.push((item + effects::ITEM_OBJECT, first));
+        let state = if g.one_in(4) { g.bits() } else { g.bits() % 4 };
+        setup.push((item + effects::ITEM_STATE, state));
+        let mut picks = [0u32; 0x40];
+        for p in &mut picks {
+            *p = (0..4).map(|k| if g.one_in(3) { 0xffu32 << (8 * k) } else { (g.bits() & 0xff) << (8 * k) }).fold(0, |a, b| a | b);
+        }
+        for (k, &p) in picks.iter().enumerate() {
+            setup.push((item + effects::ITEM_PICKS + 4 * k as u32, p));
+        }
+        setup.push((first + 4, vt));
+        setup.push((second + 4, vt));
+        for slot in [0x84, 0xa4, 0xa8] {
+            setup.push((vt + slot, FX_OBJ_FAKE + slot));
+        }
+        let slot = [8, 0x18, 0x1c, 0x20, 0x24][(g.bits() % 5) as usize];
+        let key = g.bits() as u8;
+        let lay = |ee: &mut Ee| {
+            for &(at, w) in &setup {
+                ee.set_u32(at, w);
+            }
+        };
+        lay(&mut ee);
+        log.borrow_mut().clear();
+        let f = ee.u32_at(vtable + slot);
+        ee.set(28, GP);
+        ee.call(f, &[u64::from(item), u64::from(key)], &[], 100_000);
+        let want = std::mem::take(&mut *log.borrow_mut());
+        let want_ram = snap_regions(&ee, &[region]);
+        lay(&mut ee);
+        let mut port = FxItems { ee: &mut ee, item, second, log: vec![] };
+        match slot {
+            8 => effects::key(&mut port, item, key),
+            0x18 => effects::on(&mut port, item),
+            0x1c => effects::off(&mut port, item),
+            0x20 => effects::pause(&mut port, item),
+            _ => effects::unpause(&mut port, item),
+        }
+        let got = std::mem::take(&mut port.log);
+        assert_eq!(got, want, "case {case}: {class:?} +{slot:#x} (state {state:#x}, key {key})'s object calls");
+        assert_eq!(snap_regions(&ee, &[region]), want_ram, "case {case}: {class:?} +{slot:#x} (state {state:#x}, key {key})'s RAM");
+        let calls: Vec<&str> = want.iter().map(|c| match c.0 { 0x84 => "halt", 0xa4 => "light", 0xa8 => "douse", _ => "pick" }).collect();
+        *seen.entry(format!("{class:?} +{slot:#x} {calls:?}")).or_default() += 1;
+    }
+    eprintln!("effects items oracle: {seen:#?}");
+    for want in ["halt", "light", "douse", "pick", "[]"] {
+        assert!(seen.keys().any(|k| k.contains(want)), "no case made {want}: {seen:?}");
+    }
 }
 
 /// **F31b5l — what the frame post's listeners give the bike**: [`replay_whole`]'s ports with the
