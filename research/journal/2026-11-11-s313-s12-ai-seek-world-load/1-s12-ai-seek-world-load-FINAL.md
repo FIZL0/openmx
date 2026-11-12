@@ -96,3 +96,8 @@ degenerate seen only 19 times"). That is MD132's red, which this task does not t
 078736f3d (F31b5l: the eight-piece run goes 6,000 frames). Once that is merged into the branch, run
 `./kit done S313 "S313: ..."`; it should go green and tick. Follow-ups: S314 (wire the load in), S315
 (open flags from the profile).
+
+## Closed 2026-11-11
+
+The MD132 base fix (F31b5l, 078736f3d) is on this branch now. `./kit done` ran the gate green and ticked
+S313. No code changed in this session.
