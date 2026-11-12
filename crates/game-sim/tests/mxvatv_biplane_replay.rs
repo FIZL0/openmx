@@ -19,14 +19,16 @@
 //!   and flown beside it on the same input words, its body word for word against the game's after
 //!   each frame, as far as [`BIPLANE_AGREES_THROUGH`] and [`BIPLANE3_AGREES_THROUGH`] pin. Since
 //!   MD101b it stands on Desert Oasis's ground ([`ground::Under`] over MC02's terrain, the object the
-//!   tires' `+0x134` points at), and its tires are compared too, word for word.
+//!   tires' `+0x134` points at), and its tires are compared too, word for word; since MD110 its
+//!   collision record ([`flight::MxvatvRecord`], seeded off `*(plane + 0xc8)`) runs its pass on that
+//!   terrain and resolves its contacts, and the record's words are compared too.
 //!
 //! Skips without the images or the captures.
 
 use game_sim::biplane::{self, Body};
 use game_sim::flight;
 use game_sim::ride;
-use game_sim::handling::ground;
+use game_sim::handling::{ground, record};
 use game_sim::track;
 use game_sim::input::{PlaneCommand, PlaneInput};
 use ps2_float::{F, Vf};
@@ -548,13 +550,13 @@ const STRETCH: usize = 100;
 /// **How far the port flies each stretch** with every body and tire word equal to the game's, frame by
 /// frame (a ratchet: raise it as the port gains the original's ground collision and wreck machine;
 /// MD101c). One entry per stretch, `STRETCH` the most; the last stretch of each flight ends with its
-/// capture (biplane's 30 frames, biplane3's 39). Since MD101b the tires stand on MC02's ground and
-/// every stretch agrees to its end but two of biplane3's: at frame 2059 the game's body takes a push
-/// and a shock no tire gives (its tires agree on that frame), the hull meeting the terrain, and the
-/// stretch from 2100 is seeded in that contact.
+/// capture (biplane's 30 frames, biplane3's 39). Since MD101b the tires stand on MC02's ground; since
+/// MD110 the plane's collision record runs too (its heightfield rays on the terrain, its contacts
+/// resolved every substep: biplane3's hull strikes the ground from frame 2059), and every stretch of
+/// both agrees to its end, the record's words with the body's and the tires'.
 const BIPLANE_AGREES_THROUGH: &[usize] = &[100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 30];
 const BIPLANE3_AGREES_THROUGH: &[usize] =
-    &[100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 59, 0, 100, 39];
+    &[100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 39];
 
 /// The tire's terrain object (`+0x134`), the one its probe hands the ground query.
 const TIRE_TERRAIN: u32 = 0x134;
@@ -596,6 +598,7 @@ mod at {
     pub const AERO: u32 = 0x1168;
     pub const MODEL: u32 = 0x1320;
     pub const TIRES: u32 = 0x116c;
+    pub const RECORD: u32 = 0xc8;
 }
 
 /// The input step's five words as the plane's frame reads them.
@@ -642,8 +645,40 @@ fn seeded(ee: &Ee, plane: u32, phy: &[u8], tables: &ride::Tables) -> flight::Fli
     for (k, t) in f.tires.iter_mut().enumerate() {
         read_tire(ee, ee.u32_at(plane + at::TIRES + 4 * k as u32), t);
     }
+    f.record_mxvatv = Some(Box::new(read_record(ee, plane)));
     f.remeasure(&tables.acos);
     f
+}
+
+/// The plane's collision record (`*(plane + 0xc8)`, the bike's record class: research/oracle.txt
+/// `# F31b4`) as [`flight::MxvatvRecord`] holds it (MD110): its flags, tuning and list
+/// ([`record::read`]), its resolution's fields ([`record::held`], the body left to the flight) and
+/// the active part's rays (`+0x200`'s `+0x178` of them at `+0x180`, start and end).
+fn read_record(ee: &Ee, plane: u32) -> flight::MxvatvRecord {
+    let at = ee.u32_at(plane + at::RECORD);
+    let w = |a: u32| ee.u32_at(a);
+    let mut held = record::held(&w, at).expect("the plane's record names no other record or mover");
+    held.body = None;
+    let part = ee.u32_at(at + 0x200);
+    let rays = ee.u32_at(part + 0x180);
+    let rays = (0..ee.u32_at(part + 0x178)).map(|i| [quad(ee, rays + 0x20 * i), quad(ee, rays + 0x20 * i + 0x10)]).collect();
+    flight::MxvatvRecord { record: record::read(&w, at), held, rays }
+}
+
+/// The words where the port's record and the game's differ: what the pass writes ([`record::words`])
+/// and what the resolution writes ([`record::held_words`]).
+fn record_diff(p: &flight::Flight, ee: &Ee, plane: u32) -> Vec<String> {
+    let Some(r) = &p.record_mxvatv else { return Vec::new() };
+    let at = ee.u32_at(plane + at::RECORD);
+    let w = |a: u32| ee.u32_at(a);
+    // The resolution writes the arms over the pass's blanks: its word stands.
+    let mut words: std::collections::BTreeMap<u32, u32> = record::words(&r.record, at, ee.u32_at(at + 0xf8)).into_iter().collect();
+    words.extend(record::held_words(&r.held, at, &w));
+    words
+        .into_iter()
+        .filter(|&(a, v)| ee.u32_at(a) != v)
+        .map(|(a, v)| format!("record+{:#x}: {v:#010x} ({}) want {:#010x} ({})", a - at, f32::from_bits(v), ee.u32_at(a), ee.f32_at(a)))
+        .collect()
 }
 
 /// The body's words where the port's and the game's differ, by offset.
@@ -847,6 +882,7 @@ fn port_flies(f: &Flight) -> Option<Vec<Stretch>> {
             p.frame(dt, pad, &mut ground, &tables);
             let mut d = body_diff(&p.body, &read_body(&ee, body_at));
             d.extend(tires_diff(p, &ee, f.plane));
+            d.extend(record_diff(p, &ee, f.plane));
             let last = out.last_mut().unwrap();
             if d.is_empty() {
                 last.agreed += 1;
@@ -903,3 +939,4 @@ fn the_port_flies_biplane() {
 fn the_port_flies_biplane3() {
     port_flown(&BIPLANE3, BIPLANE3_AGREES_THROUGH);
 }
+
