@@ -61,6 +61,10 @@ pub enum Site {
     Grow,
     /// A new tree node.
     Node,
+    /// A collidable's new record, as it is put in a world ([`insert`]).
+    Record,
+    /// The link pool, made by the first record when there is none.
+    Pool,
 }
 
 /// What the database's memory needs beyond words.
@@ -75,6 +79,9 @@ pub trait Space: Ram {
     fn free(&mut self, at: u32);
     /// A pool's constructor `ctor` run on a new chunk's link at `link`.
     fn construct(&mut self, ctor: u32, link: u32);
+    /// The link pool at `pool` deleted (its class's deleting destructor, its vtable's `+0x10`), when
+    /// the last record lets go of it.
+    fn delete_pool(&mut self, pool: u32);
 }
 
 /// The original's globals and classes the database's calls read and write.
@@ -812,4 +819,103 @@ pub fn spatial_move(m: &mut impl Space, g: &Globals, entry: u32, centre: Vf, hal
     }
     overlaps(m, g, rec, entry, centre, half, reach);
     set_v(m, rec + 0x10, centre);
+}
+
+// --- a collidable put in a world (F31b5o) --------------------------------------------------------------
+
+/// The link pool's class, which [`insert`] gives a pool it has to make (the vtable at its `+4`).
+#[derive(Clone, Copy, Debug)]
+pub struct PoolClass(pub u32);
+
+/// A record taken up (`atv_record_new`): the link pool made first if there is none (a pool of
+/// 16-byte links, 4096 bytes a chunk), the record's four words cleared, and the records counted
+/// (the count kept two words after the pool's pointer).
+fn record_new(m: &mut impl Space, g: &Globals, class: PoolClass, rec: u32) {
+    if m.word(g.links) == 0 {
+        let p = m.alloc(0x3c, Site::Pool);
+        if p != 0 {
+            let (stride, bytes) = (0x10u32, 0x1000u32);
+            m.set(p, 1);
+            m.set(p + 4, class.0);
+            m.set(p + 0x30, 0);
+            m.set(p + 0x34, 0);
+            m.set(p + 8, ((bytes - stride) as i32 / stride as i32) as u32);
+            m.set(p + 0xc, 0);
+            m.set(p + 0x10, 0);
+            let n = m.word(p + 8);
+            m.set(p + 0x18, n);
+            m.set(p + 0x1c, stride);
+            m.set(p + 0x20, bytes);
+            m.set(p + 0x24, 0);
+            m.set(p + 0x14, 0);
+            m.set(p + 0x2c, 0);
+            m.set(p + 0x38, 4);
+        }
+        m.set(g.links, p);
+    }
+    for k in 0..4 {
+        m.set(rec + 4 * k, 0);
+    }
+    add(m, g.links + 8, 1);
+}
+
+/// A record let go of (`atv_record_drop`, never freeing the record itself): the count down, and the
+/// link pool deleted with the last.
+fn record_drop(m: &mut impl Space, g: &Globals, rec: u32) {
+    if rec == 0 {
+        return;
+    }
+    add(m, g.links + 8, u32::MAX);
+    if m.word(g.links + 8) == 0 {
+        let p = m.word(g.links);
+        if p != 0 {
+            m.delete_pool(p);
+            m.set(g.links, 0);
+        }
+    }
+}
+
+/// **A collidable's entry put in a world** (`atv_spatial_insert`): `entry` (a collidable's `+0x18`)
+/// filed in cell `cell` under `kind` with its box at `centre`, `half` either way, and its sphere
+/// reaching `reach` for the overlaps. The call takes up a record of its own at `temp` (the
+/// original's is on its stack) and lets it go at the end; unless `keep_temp`, the entry gets a new
+/// record off the heap (its `+8`) and is filed with that, else it is filed with the call's own.
+/// The filing: the cell's sub-database for the kind, its place for the box ([`pick`], none held)
+/// and the entry put there ([`put`]); the record's cell, sub-database and place, no extras, the
+/// centre (all four lanes); then the overlaps ([`overlaps`]).
+#[allow(clippy::too_many_arguments)]
+pub fn insert(m: &mut impl Space, g: &Globals, class: PoolClass, entry: u32, cell: u32, kind: u32, centre: Vf, half: Vf, reach: F, temp: u32, keep_temp: bool) {
+    record_new(m, g, class, temp);
+    let rec = if keep_temp {
+        temp
+    } else {
+        let r = m.alloc(0x20, Site::Record);
+        if r != 0 {
+            record_new(m, g, class, r);
+        }
+        m.set(entry + 8, r);
+        r
+    };
+    let s = sub_of(m, cell, kind);
+    let at = pick(m, s, centre, half, 0);
+    put(m, g, s, entry, at, centre, half);
+    m.set(rec + 4, cell);
+    m.set(rec + 8, s);
+    m.set(rec + 0xc, at);
+    m.set(rec, 0);
+    set_v(m, rec + 0x10, centre);
+    overlaps(m, g, rec, entry, centre, half, reach);
+    record_drop(m, g, temp);
+}
+
+/// **A collidable put in a world** (`atv_part_in_world`, with its last argument 1): its box in the
+/// world (its class's vt `+0xc4`, handed in as `centre` and `half`), the reach the half's length
+/// (`mula`, `madda`, `madd`, `sqrt.s`), and its entry (`+0x18`) [`insert`]ed in `cell` under
+/// `kind`, filed with the call's own record when its flag byte (`+0x126`) has bit 3.
+#[allow(clippy::too_many_arguments)]
+pub fn part_in_world(m: &mut impl Space, g: &Globals, class: PoolClass, part: u32, cell: u32, kind: u32, centre: Vf, half: Vf, temp: u32) {
+    let [x, y, z] = [half.x(), half.y(), half.z()];
+    let reach = F(ps2_float::fpu::sqrt(ps2_float::fpu::madd(ps2_float::fpu::madda(ps2_float::fpu::mula(x, x), y, y), z, z)));
+    let flags = m.word(part + 0x124) >> 16 & 0xff;
+    insert(m, g, class, part + 0x18, cell, kind, centre, half, reach, temp, flags & 8 != 0);
 }

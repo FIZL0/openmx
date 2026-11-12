@@ -3243,6 +3243,11 @@ impl Resets for FramePost<'_> {
                 if in_rust("frame post tells dropped") {
                     return 0;
                 }
+                // F31b5o: the pure frame's, every listener but the HUD left out (the HUD allocates
+                // and frees on the heap the frame's own calls allocate from: research/oracle.txt).
+                if in_rust("frame post tells but the hud's dropped") && name != "hud" {
+                    return 0;
+                }
                 let (before, rand) = (bike_and_blocks(self.ee), rand_state(self.ee));
                 let r0 = self.ee.ran;
                 self.ee.set(28, GP);
@@ -3291,7 +3296,11 @@ impl Listeners for TreeInRam<'_> {
             let (ram, spr) = (self.ee.ram.clone(), self.ee.spr.clone());
             self.ee.set(28, GP);
             let r0 = self.ee.ran;
+            // F31b5o: the original beside the port is the check's, not the frame's: what it reads (its
+            // frame post's listeners among it) is not watched ([`replay_pure`]).
+            let watched = self.ee.reads.replace(None);
             self.ee.call(VEHICLE_UPDATE, &[u64::from(BIKE)], &[dt.0], BUDGET);
+            self.ee.reads.replace(watched);
             book("the tail: the original vehicle update beside the port", self.ee.ran - r0);
             let r0 = self.ee.ran;
             let (want, want_spr) = (std::mem::replace(&mut self.ee.ram, ram), std::mem::replace(&mut self.ee.spr, spr));
@@ -3304,7 +3313,7 @@ impl Listeners for TreeInRam<'_> {
             // F31b5j: with the part walk's leaves (or one kind's own work) dropped, only the bike and
             // its blocks are the original's; F31b5l: so too with the frame post's tells dropped.
             let only_bike = IN_RUST.with(|r| {
-                r.borrow().iter().any(|n| n.starts_with("part leaves dropped") || n.starts_with("part leaf dropped") || *n == "frame post tells dropped")
+                r.borrow().iter().any(|n| n.starts_with("part leaves dropped") || n.starts_with("part leaf dropped") || *n == "frame post tells dropped" || *n == "frame post tells but the hud's dropped")
             });
             let bike: Vec<std::ops::Range<usize>> = if only_bike {
                 let mut b = vec![BIKE as usize..BIKE as usize + 0x1800];
@@ -5082,6 +5091,29 @@ const NODE_ON: u32 = 0x0012_8040;
 const NODE_OFF: u32 = 0x0012_8080;
 const NODE_SHOWN: u32 = 0x0012_7f60;
 const NODE_HIDDEN: u32 = 0x0012_7fd0;
+/// F31b5o's: the record's and the link pool's files at their `new`, the pool's class, and the
+/// scratch the insert's own record is kept in, as the original's is on its stack: under the top
+/// `0x400` the RAM comparisons leave out with the stack ([`bytes_differ`]) (research/oracle.txt
+/// `# F31b5o`).
+const RECORD_FILE: u32 = 0x0039_99e0;
+const LINK_POOL_FILE: u32 = 0x0039_9a60;
+const POOL_CLASS: u32 = 0x003b_32a0;
+const INSERT_SCRATCH: u32 = 14;
+
+/// A ray probe's or a mesh's box in the world (vt `+0xc4`), read from RAM as the sync reads it.
+fn part_box_in_ram(ee: &Ee, a: u32) -> (Vf, Vf) {
+    let xyz = |p: u32| Vf::new(f32::from_bits(ee.u32_at(p + 0xc)), f32::from_bits(ee.u32_at(p + 0x10)), f32::from_bits(ee.u32_at(p + 0x14)), 0.0);
+    let half = |p: u32| Vf::new(f32::from_bits(ee.u32_at(p + 0x18)), f32::from_bits(ee.u32_at(p + 0x1c)), f32::from_bits(ee.u32_at(p + 0x20)), 0.0);
+    let rows = |p: u32| std::array::from_fn(|r| vf_at(ee, p + 0x10 * r as u32));
+    let kind = if ee.u32_at(a + 0xc) == RAYS_VTABLE {
+        let (tree, bound) = (ee.u32_at(a + 0x17c), ee.u32_at(a + 0x180));
+        game_sim::atv_sync::Kind::Rays { tree: (tree != 0).then(|| (xyz(tree), half(tree))), bound: (vf_at(ee, bound), vf_at(ee, bound + 0x10)) }
+    } else {
+        let mesh = ee.u32_at(a + 0x244);
+        game_sim::atv_sync::Kind::Mesh { local: rows(a + 0x170), centre: xyz(mesh), half: half(mesh), stood: [Vf::ZERO; 4], before: [Vf::ZERO; 4] }
+    };
+    game_sim::atv_sync::part_box(&game_sim::atv_sync::Collidable { kind, frame: rows(a + 0x130), ..Default::default() })
+}
 const SEND_THUNK: u32 = 0x004b_fa30;
 const PART_STEPS: [u32; 2] = [0x001b_cfa0, 0x001b_acd0];
 /// F44a's: the bike's three packets (vt `+0x544`, `+0x400`, `+0x404`), the sender's own send (its vt
@@ -5457,6 +5489,19 @@ impl Updates for UpdateInRam<'_> {
             Out::Hidden(n) if slot(n, 4, 0x2c) == NODE_HIDDEN => return void(update::hidden(self, n)),
             Out::Send { net, arg } if net == BIKE + update::NET && slot(net, 0x38, 0x20) == SEND_THUNK => return update::send(self, arg),
             Out::Part(p) if PART_STEPS.contains(&slot(p, 0xc, 0xbc)) => return void(update::part_step(self, p)),
+            // F31b5o's: the shown object's switch-on, the scene node's off on its child; and the
+            // spatial insert, the part's box put in the world.
+            Out::ObjectOn(o) if slot(o + 0x24, 4, 0x20) == NODE_OFF => {
+                F45_SERVED.with(|s| *s.borrow_mut().entry("ObjectOn").or_default() += 1);
+                return void(update::trail_off(self, o + 0x24));
+            }
+            Out::Insert { obj, space, at } if [RAYS_VTABLE, MESH_VTABLE].contains(&ee.u32_at(obj + 0xc)) => {
+                F45_SERVED.with(|s| *s.borrow_mut().entry("Insert").or_default() += 1);
+                let (centre, half) = part_box_in_ram(ee, obj);
+                let temp = ee.scratch(INSERT_SCRATCH);
+                attach::part_in_world(&mut NodeRam(self.ee), &ATTACH_GLOBALS, attach::PoolClass(POOL_CLASS), obj, space, at, centre, half, temp);
+                return 0;
+            }
             _ => {}
         }
         // F44a's: the same, where no oracle hooks the original.
@@ -5684,6 +5729,8 @@ impl attach::Space for NodeRam<'_> {
             attach::Site::Chunk => self.heap(HEAP_ALLOC, &[bytes, POOL_FILE, 0xad]),
             attach::Site::ChunkIn(h) => self.heap(HEAP_ALLOC_IN, &[h, bytes, POOL_FILE, 0xaa]),
             attach::Site::Node => self.heap(HEAP_NEW, &[bytes, NODE_FILE, 0x5b]),
+            attach::Site::Record => self.heap(HEAP_NEW, &[bytes, RECORD_FILE, 0x42]),
+            attach::Site::Pool => self.heap(HEAP_NEW, &[bytes, LINK_POOL_FILE, 0x13]),
             s => unreachable!("{s:?} reallocates"),
         }
     }
@@ -5699,6 +5746,10 @@ impl attach::Space for NodeRam<'_> {
     }
     fn construct(&mut self, ctor: u32, link: u32) {
         self.heap(ctor, &[link]);
+    }
+    fn delete_pool(&mut self, pool: u32) {
+        let f = self.0.u32_at(self.0.u32_at(pool + 4) + 0x10);
+        self.heap(f, &[pool]);
     }
 }
 
@@ -9094,7 +9145,8 @@ fn replay_pure(name: &str, rust: &[&'static str]) -> Option<(Vec<bool>, BTreeMap
         poke(&mut b, row, &READER);
         // F31b5m: with the other listeners dropped, the second run's frame reads no byte where the
         // two RAMs differ going into it.
-        let watch = rust.contains(&"other listeners dropped");
+        // F31b5o: so too with the frame post's tells dropped.
+        let watch = ["other listeners dropped", "frame post tells but the hud's dropped"].iter().any(|n| rust.contains(n));
         let parted = if watch { differing_bytes(&a, &b) } else { Vec::new() };
         let counted = INTERPRETED.with(|m| std::mem::take(&mut *m.borrow_mut()));
         posts_frame(&mut a, dt, &map, &mut noise_a, false);
@@ -9213,21 +9265,28 @@ fn flip_replays_bit_exact_with_nothing_handed_on() {
 /// names Rust's too ([`IN_RUST`]), the tail on [`port_tail`]'s ports. Answers the wreck state per
 /// row, what was answered and handed on, the RAM ranges where it came to differ from the handing
 /// run, and the instructions the interpreter still ran in each part of the frame (the second run's
-/// alone).
+/// alone). F31b5o: the frame post tells no listener but the HUD (`"frame post tells but the hud's
+/// dropped"`: the race progress is presentation, the rest change nothing the frame reads; the HUD,
+/// presentation too, allocates and frees on the heap the frame allocates from, and a wreck's ini read
+/// copies a reused block's stale bytes), so the frame is watched to read no byte where the RAM parts
+/// from the handing run's ([`replay_pure`]).
 fn replay_whole(name: &str) -> Option<(Vec<bool>, BTreeMap<String, u32>, Vec<String>, BTreeMap<String, u64>)> {
     INTERPRETED.with(|m| m.borrow_mut().clear());
-    let ran = replay_pure(name, &["PartMove", "Gather", "record sweep", "record search", "frame post", "fade search", "kind clear"]);
+    let ran = replay_pure(name, &["PartMove", "Gather", "record sweep", "record search", "frame post", "fade search", "kind clear", "frame post tells but the hud's dropped"]);
     let all = INTERPRETED.with(|m| std::mem::take(&mut *m.borrow_mut()));
     let (w, answered, off) = ran?;
     eprintln!("{name}: every port at once, the interpreter ran {all:?}");
     Some((w, answered, off, all))
 }
 
-/// **F31b5 — C15's ride, every port at once**: ride-2 bit-exact and the RAM the handing run's.
+/// **F31b5 — C15's ride, every port at once**: ride-2 bit-exact and the RAM the handing run's
+/// (F31b5o: but for the race progress's words, its tell left out).
 #[test]
 fn ride_replays_with_every_port_at_once() {
     let Some((w, all, off, ran)) = replay_whole("ride-2") else { return };
-    assert_eq!(off, Vec::<String>::new(), "the RAM is the handing run's");
+    let mut want = RACE_PROGRESS_WORDS.to_vec();
+    want.push("0x16d1b54..0x16d1b58");
+    assert_eq!(off, want, "the RAM parts only at the race progress's words");
     assert_eq!(w.len(), 459);
     assert!(w.iter().all(|w| !w), "the ride never wrecks");
     let handed: Vec<(&str, u32)> = all.iter().filter(|(k, _)| k.starts_with("> ")).map(|(k, &n)| (&k[2..], n)).collect();
@@ -9241,11 +9300,14 @@ fn ride_replays_with_every_port_at_once() {
 }
 
 /// **F31b5 — C15's flip, every port at once**: flip-1 bit-exact, wrecked on row 125 and put back on
-/// row 193, the RAM the handing run's but for the dropped cue's word.
+/// row 193, the RAM the handing run's but for the dropped cue's word (F31b5o: and the race
+/// progress's words).
 #[test]
 fn flip_replays_with_every_port_at_once() {
     let Some((w, all, off, ran)) = replay_whole("flip-1") else { return };
-    assert_eq!(off, ["0x851fec..0x851ff0"], "the RAM differs only at the cue's write");
+    let mut want = RACE_PROGRESS_WORDS.to_vec();
+    want.push("0x851fec..0x851ff0");
+    assert_eq!(off, want, "the RAM parts only at the race progress's words and the cue's write");
     assert_eq!(w.len(), 465);
     let changes: Vec<usize> = (1..w.len()).filter(|&r| w[r] != w[r - 1]).collect();
     assert_eq!(changes, [125, 193], "wrecked on row 125, put back on row 193");
@@ -9259,10 +9321,34 @@ fn flip_replays_with_every_port_at_once() {
     assert!(!objects.is_empty(), "no effects item turned: {ran:?}");
 }
 
+/// F31b5o: where the RAM parts from the handing run's with the frame post's tells but the HUD's left
+/// out, in the order first seen: the race progress's own words (state 4's, which only its tell reads).
+const RACE_PROGRESS_WORDS: [&str; 12] = [
+    "0x16cdf70..0x16cdf7c",
+    "0x16cdf80..0x16cdf8c",
+    "0x16cdf90..0x16cdf94",
+    "0x16ce5fc..0x16ce600",
+    "0x16ce654..0x16ce658",
+    "0x16cebfc..0x16cec00",
+    "0x16cfa20..0x16cfa28",
+    "0x16d1210..0x16d1218",
+    "0x16d14ec..0x16d14f0",
+    "0x16d188c..0x16d1890",
+    "0x16d1b50..0x16d1b58",
+    "0x16d1c2c..0x16d1c30",
+];
+
 /// F31b5l: the tail's frame post, the wreck fade's search and the kind clear are the ports', never
 /// the interpreter's.
 fn three_served(ran: &BTreeMap<String, u64>) {
     for k in ["the tail: out Message", "the tail: the update's Search", "the tail: the update's KindClear"] {
+        assert!(!ran.contains_key(k), "{k} handed on: {ran:?}");
+    }
+    // F31b5o: and the frame post tells no listener, and the kind clear's show hands on neither the
+    // object's switch-on nor the spatial insert.
+    let told: Vec<&String> = ran.keys().filter(|k| k.starts_with("the tail: the frame post tells")).collect();
+    assert_eq!(told, ["the tail: the frame post tells the hud"], "the frame post told: {ran:?}");
+    for k in ["the tail: the update's ObjectOn", "the tail: the update's Insert"] {
         assert!(!ran.contains_key(k), "{k} handed on: {ran:?}");
     }
 }
@@ -9810,6 +9896,45 @@ fn flip_replays_without_the_frame_posts_tells() {
     let changes: Vec<usize> = (1..w.len()).filter(|&r| w[r] != w[r - 1]).collect();
     assert_eq!(changes, [125, 193], "wrecked on row 125, put back on row 193");
     assert!(!off.is_empty(), "the tells dropped, the RAM parts from the handing run's");
+}
+
+/// **F31b5o — every port with the frame post's tells told**: [`replay_whole`]'s ports with every
+/// listener told the original's, so each bike step is checked against the original's on all of RAM
+/// ([`TreeInRam`]): the kind clear's object on and spatial insert, Rust's ([`attach::part_in_world`]),
+/// leave RAM as the original's do. Answers the wreck state per row, where the RAM parts from the
+/// handing run's, and the census.
+fn replay_told(name: &str) -> Option<(Vec<bool>, Vec<String>, BTreeMap<&'static str, u32>)> {
+    INTERPRETED.with(|m| m.borrow_mut().clear());
+    F45_SERVED.with(|s| s.borrow_mut().clear());
+    let ran = replay_pure(name, &["PartMove", "Gather", "record sweep", "record search", "frame post", "fade search", "kind clear"]);
+    let all = INTERPRETED.with(|m| std::mem::take(&mut *m.borrow_mut()));
+    let served = F45_SERVED.with(|s| std::mem::take(&mut *s.borrow_mut()));
+    let (w, _, off) = ran?;
+    for k in ["the tail: the update's ObjectOn", "the tail: the update's Insert"] {
+        assert!(!all.contains_key(k), "{name}: {k} handed on: {all:?}");
+    }
+    eprintln!("{name}: the tells told, served {served:?}");
+    Some((w, off, served))
+}
+
+/// Ride-2 with the tells told: C15's on all 459 rows and all of RAM the handing run's.
+#[test]
+fn ride_replays_with_the_frame_posts_tells_told() {
+    let Some((w, off, _)) = replay_told("ride-2") else { return };
+    assert_eq!(w.len(), 459);
+    assert_eq!(off, Vec::<String>::new(), "the RAM is the handing run's");
+}
+
+/// Flip-1 with the tells told: C15's on all 465 rows, the kind clear's insert at the put-back Rust's,
+/// and all of RAM the handing run's but for the dropped cue's word.
+#[test]
+fn flip_replays_with_the_frame_posts_tells_told() {
+    let Some((w, off, served)) = replay_told("flip-1") else { return };
+    assert_eq!((served.get("ObjectOn"), served.get("Insert")), (Some(&1), Some(&1)), "{served:?}");
+    assert_eq!(w.len(), 465);
+    let changes: Vec<usize> = (1..w.len()).filter(|&r| w[r] != w[r - 1]).collect();
+    assert_eq!(changes, [125, 193], "wrecked on row 125, put back on row 193");
+    assert_eq!(off, ["0x851fec..0x851ff0"], "the RAM differs only at the cue's write");
 }
 
 /// F31b5l: the part probe's box, its vt `+0xc4`.

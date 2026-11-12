@@ -11692,3 +11692,28 @@ atv_pair_log_grow           atv 0x0025b840 = a growable log's resize to a1 entri
 # files three heightfield contacts (rays 3, 6, 16: the wingtips' ends; surface 0); the body's force listener
 # resolves them (vt+0x88, 1) after gravity, every substep: atv_contact::resolve, word for word. The sweep never
 # hits and the world rays file nothing along either flight.
+# F31b5o — the frame post's listeners left out of the pure frame, and the kind clear's show's object on and
+# spatial insert Rust's (src handling::attach::insert/part_in_world, record_new/record_drop; tests
+# mxvatv_bike_ride.rs UpdateInRam ObjectOn/Insert, replay_whole "frame post tells dropped" + read watch;
+# atv_spatial.rs the_spatial_insert_is_the_originals; journal research/journal/2026-11-12-f31b5o-*).
+# ObjectOn(obj): obj vt(+0x28) +0x20 with a0 = obj +0x24; the frame mesh's child vt 0x003b6d1c +0x20 is
+# 0x00128080, F44's scene node off = update::trail_off(obj +0x24).
+# Insert 0x001143e0(part, cell = bike +0xb4, kind = bike +0xc0, 1): box = part vt +0xc4 (mesh 0x001be7b0,
+# probe 0x001bd1d0 = atv_sync::part_box); reach = sqrt.s(madd z.z (madda y.y (mula x.x))) of the half;
+# 0x0018d590(entry = part +0x18, cell, kind, &centre, &half, 1, +0x126 & 8, 0; f12 reach) = atv_spatial_insert:
+# frame 192 bytes, own record at sp+160. 0x0018fd90 (atv_record_new): pool global 0x0040c460 == 0 ->
+# 0x001b7620(0x3c, 0x00399a60, 0x13) then 0x00105c90(p, 0x10, 0x1000) (+0 1, +4 class 0x003b32a0, +8 =
+# +0x18 = (0x1000-0x10)/0x10, +0x1c 0x10, +0x20 0x1000, +0x38 4, rest 0); the record's 4 words 0; count
+# 0x0040c468 += 1. Bit 3 clear: rec = 0x001b7620(0x20, 0x003999e0, 0x42), record_new'd if nonzero, entry +8 =
+# rec; set: the own record. 0x0018feb0(rec, entry, cell, kind, c, h, 1, 0; reach): sub = 0x0018ed50(cell,
+# kind) (bit 0 -> cell +0x28, bit 1 -> +0x2c), slot = sub vt +0x20(sub, c, h, 0), sub vt +0x24(sub, entry,
+# slot, c, h); rec +4 cell, +8 sub, +0xc slot, +0 0, +0x10 c (quad); flag -> 0x00190350 overlaps. Then
+# 0x0018fe20(own, -1) (atv_record_drop): count -= 1; 0 with a pool -> pool vt +0x10 (0x00105020), global 0.
+# State 4: frame mesh 0x00ea63a0 +0x126 = 0x94 (heap record), probe 0x2, sweep 0x3; flip-1 inserts once (707
+# instr), ObjectOn 28 instr.
+# Frame post listeners: with the tells dropped the RAM parts at the HUD's (0x016b1f3c.., 0x340 apart, read by
+# 0x00297208 from 0x002f7b58) and the race progress's (0x016cdf70.., read by 0x0029cc18 / 0x0029c94c) words;
+# no frame code but the listeners themselves reads them (TreeInRam's original-beside run is not watched).
+atv_spatial_insert          atv 0x0018d590 = a collidable's entry put in a world (a0 entry, a1 cell, a2 kind, a3 centre, t0 half, t1 1, t2 own record, t3 0; f12 reach)
+atv_record_new              atv 0x0018fd90 = a record taken up (the link pool made if none, counted)
+atv_record_drop             atv 0x0018fe20 = a record let go of (a1 -1; the pool deleted with the last)
