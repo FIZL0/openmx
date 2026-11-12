@@ -164,10 +164,13 @@ pub fn surface(g: &Ground) -> u8 {
 /// query, its normal buffer starting straight up; [`World::surface`] asks it again at the ground
 /// point and answers the record (none where the query writes none: 0).
 ///
-/// Nothing solid: the plane's collision record and the props are not SLUS-21104's yet.
+/// Its terrain is the one a SLUS-21104 collision record's heightfield rays ask
+/// ([`World::mxvatv_terrain`], MD110: the plane's hull on the ground). Nothing solid: SLUS-21104's
+/// props (the record's world rays and sweep) are not in the port.
 ///
 /// [`World::ground`]: crate::world::World::ground
 /// [`World::surface`]: crate::world::World::surface
+/// [`World::mxvatv_terrain`]: crate::world::World::mxvatv_terrain
 #[derive(Clone, Copy, Debug)]
 pub struct Under<'a>(pub Terrain<'a>);
 
@@ -181,6 +184,10 @@ impl crate::world::World for Under<'_> {
         let mut record = 0;
         self.0.ground(at, UP, &mut record);
         record
+    }
+
+    fn mxvatv_terrain(&self) -> Option<Terrain<'_>> {
+        Some(self.0)
     }
 
     fn solid(&mut self, _bundle: &crate::collide::Bundle, _record: &mut crate::collide::Record) -> bool {
