@@ -1,4 +1,4 @@
-# 1 — ai tick callouts (PART)
+# 1 — ai tick callouts (FINAL)
 
 Task S312. 2026-11-11.
 
@@ -110,7 +110,11 @@ context/notes/check.log, so they ran and did not skip.
 - I proved it on the bare base in a scratch worktree (4002e6a70, its own target dir): the same 17
   and 18.
 - Filed as MD132. `kit done` refuses on this red, even with `--blocked`, which runs the gate too. So
-  S312 is committed and pushed by hand, unticked.
+  S312 was first committed and pushed by hand, unticked.
+- Later the same day, main fixed it from the other side: B36 (344ca6cd9) and F31b5l (078736f3d)
+  give the six-piece and eight-piece runs 6,000 more frames, which gets them past the
+  degenerate-preload floor. With main merged in (d014e2a05), `./kit check --all` passed:
+  5397 tests. S312 is ticked on that run.
 
 ## Not verified / not 1:1
 
@@ -135,12 +139,8 @@ context/notes/check.log, so they ran and did not skip.
   proved by function oracles only.
 - **The PC exe was not read.**
 - **Nothing is wired into the Sim.** That is S12e.
-- **The gate is red on base**, in `mxvatv_car_frame` (see above; MD132). It is not S312's.
 
 ## Next
 
-- **S312's work is complete; only the tick is waiting.** Once MD132 has made `mxvatv_car_frame`'s
-  pieces tests green on main, run `./kit done S312 "<msg>"` on this branch (or on main after the
-  merge). Then the task ticks; rename this file -FINAL.
 - S12e can now give `ai::update`'s `Steps` real bodies from these callouts.
 - Filed as S314: mode 2 and mode 4's drivers, and which listeners an AI brain carries.
