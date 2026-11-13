@@ -7848,8 +7848,9 @@ const NEARBY: u32 = 0xc4;
 /// probe (a ray probe, [`KINDS`]) stood at the frame the steps hand ([`game_sim::atv_sync::stand`],
 /// its centre, reach and frame written back), then searched over the bike's nearby list
 /// ([`part_search_in_ram`], its pairs counted into `answered` as `wheel contacts …`), its hit bit and
-/// contacts read back as the walk reads them ([`trigger_contacts`]). A contact with an owner or a
-/// vehicle of kind 2 is refused (the steps' bike keeps no wheel owner or vehicle, [`steps::read`]).
+/// contacts read back as the walk reads them ([`trigger_contacts`]). F63: an owner's listeners are
+/// told in RAM ([`tell_in_ram`]), a wheel's ground read there ([`ground_in_ram`]), and an object's
+/// centre of mass the contact velocity turns written back.
 struct TriggerInRam<'e, 'm> {
     ee: &'e mut Ee,
     answered: &'m mut BTreeMap<String, u32>,
@@ -7910,7 +7911,9 @@ impl quad::Sweep for TriggerInRam<'_, '_> {
         let (look, cs) = trigger_contacts(ee, probe);
         assert_eq!(cs.len(), found.len(), "the record the search filed");
         for c in &cs {
-            assert!(c.owner == 0 && !(c.vehicle != 0 && c.vehicle_kind == 2), "the trigger struck {:#x}, owned by {:#x} (vehicle {:#x}): not followed", c.node, c.owner, c.vehicle);
+            if c.owner != 0 || c.vehicle != 0 && c.vehicle_kind == 2 {
+                *self.answered.entry("wheel contacts owned or on a vehicle".into()).or_default() += 1;
+            }
         }
         Some((look, cs))
     }
@@ -7918,6 +7921,70 @@ impl quad::Sweep for TriggerInRam<'_, '_> {
     fn two_wheels(&self) -> bool {
         true
     }
+
+    fn tell(&mut self, owner: u32, i: i32) {
+        tell_in_ram(self.ee, owner, i);
+    }
+
+    fn ground(&mut self, owner: u32, vehicle: u32) -> game_sim::atv_wheel::Ground {
+        ground_in_ram(self.ee, owner, vehicle)
+    }
+
+    fn object_cofg(&mut self, owner: u32, cofg_world: Vf) {
+        set_vf(self.ee, owner + 0x90, cofg_world);
+    }
+}
+
+/// F63: the `i`th of `owner`'s touch listeners told, as the bike's walk tells it: the owner's
+/// listener list (`*(owner+0x208)+0x104`), its getter read in place (the array at the list's `+8`,
+/// entry `i`), the entry's vt `+0xc` handed it, 0 and 0.
+fn tell_in_ram(ee: &mut Ee, owner: u32, i: i32) {
+    let list = ee.u32_at(owner + 0x208) + 0x104;
+    let el = ee.u32_at(ee.u32_at(list + 8) + 4 * i as u32);
+    let f = ee.u32_at(ee.u32_at(el) + 0xc);
+    call_kept(ee, f, &[u64::from(el), 0, 0], &[]);
+}
+
+/// F63: `f` called with `GP` set, the writes before it kept alongside its own (the interpreter's
+/// call starts its written set afresh).
+fn call_kept(ee: &mut Ee, f: u32, ints: &[u64], floats: &[f32]) {
+    let before = std::mem::take(&mut ee.written);
+    ee.set(28, GP);
+    ee.call(f, ints, floats, BUDGET);
+    ee.written.extend(before);
+}
+
+/// F63: what a vehicle's two virtuals answer, as the contact velocity asks them (its vtable at
+/// `+4`; `+0xc4` the spin, then `+0xc0` the velocity, each handed a quadword on the stack to fill
+/// and the vehicle): (velocity, spin).
+fn mover_in_ram(ee: &mut Ee, vehicle: u32) -> (Vf, Vf) {
+    let out = ee.stack - 0x8000;
+    let mut ask = |ee: &mut Ee, slot: u32| {
+        let f = ee.u32_at(ee.u32_at(vehicle + 4) + slot);
+        call_kept(ee, f, &[u64::from(out), u64::from(vehicle)], &[]);
+        vf_at(ee, ee.r(2) as u32)
+    };
+    let spin = ask(ee, 0xc4);
+    (ask(ee, 0xc0), spin)
+}
+
+/// F63: [`steps::ground`] in RAM, a vehicle's virtuals asked there ([`mover_in_ram`]).
+fn ground_in_ram(ee: &mut Ee, owner: u32, vehicle: u32) -> game_sim::atv_wheel::Ground {
+    let answers = (owner == 0 && vehicle != 0).then(|| mover_in_ram(ee, vehicle));
+    steps::ground(&|a| ee.u32_at(a), owner, vehicle, &mut |_| answers)
+        .unwrap_or_else(|e| panic!("a wheel on {owner:#x} / {vehicle:#x}: {e}"))
+}
+
+/// F63: [`steps::read_with`] in RAM, each wheel's vehicle's virtuals asked first.
+fn read_in_ram(ee: &mut Ee) -> Result<(quad::Bike, steps::At), String> {
+    let mut answers = BTreeMap::new();
+    for w in the_wheels(ee) {
+        let (owner, vehicle) = (ee.u32_at(w + steps::OWNER), ee.u32_at(w + steps::VEHICLE));
+        if owner == 0 && vehicle != 0 {
+            answers.insert(vehicle, mover_in_ram(ee, vehicle));
+        }
+    }
+    steps::read_with(&|a| ee.u32_at(a), BIKE, &mut |v| answers.get(&v).copied())
 }
 
 impl StepsInRam<'_, '_> {
@@ -8159,9 +8226,9 @@ impl Moto for StepsInRam<'_, '_> {
         }
         *self.answered.entry(call_name(&c)).or_default() += 1;
         self.inner.write(q, body);
+        let (mut k, at) = read_in_ram(&mut *self.inner.ram.ee).unwrap_or_else(|e| panic!("{c:?}: the bike's words: {e}"));
         let ee = &*self.inner.ram.ee;
         let m = |a| ee.u32_at(a);
-        let (mut k, at) = steps::read(&m, BIKE).unwrap_or_else(|e| panic!("{c:?}: the bike's words: {e}"));
         k.struck_class = struck_class(ee);
         let last = steps::words(&k, &at, &m);
         let terrain = {
@@ -15176,6 +15243,280 @@ fn the_bikes_wheel_contacts_walk_is_the_originals() {
                 if c.vehicle != 0 {
                     tally(&mut t, if c.vehicle_kind == 2 { "vehicle kept" } else { "vehicle dropped" });
                 }
+            }
+        }
+    }
+    reset_bytes(&mut ee, &base, dirty);
+    eprintln!("{t:?}");
+    assert!(t.values().all(|&n| n >= 100) && t.len() == 9, "{t:?}");
+}
+
+/// SLUS-21104's wheel contact velocity (a0 the wheel).
+const CONTACT_VELOCITY: u32 = 0x004a_1150;
+/// F63's laid vehicles' two virtuals, hooked: the velocity at the vehicle's `+0x300`, the spin at
+/// its `+0x310`, into the quadword handed.
+const F63_VELOCITY: u32 = F52_AREA + 0xd000;
+const F63_SPIN: u32 = F52_AREA + 0xd010;
+
+/// F63: the trigger's search as F52's walk oracle logs it (the stand and search are hooked in the
+/// original), its record read back, and the rest of [`TriggerInRam`]'s answers: listeners told,
+/// grounds read and the objects' centres of mass written, all in RAM.
+struct OwnedInRam<'e> {
+    ee: &'e mut Ee,
+    log: Rc<RefCell<Vec<String>>>,
+}
+
+impl quad::Sweep for OwnedInRam<'_> {
+    fn sweep(&mut self, _frame: &ray_probe::Matrix) -> Option<(bool, Vec<quad::Contact>)> {
+        let probe = self.ee.u32_at(BIKE + TRIGGER);
+        {
+            let mut l = self.log.borrow_mut();
+            l.push(format!("stand {probe:#x}"));
+            l.push(format!("search {probe:#x} {:#x} 0x1", self.ee.u32_at(BIKE + NEARBY)));
+        }
+        Some(trigger_contacts(self.ee, probe))
+    }
+
+    fn two_wheels(&self) -> bool {
+        true
+    }
+
+    fn tell(&mut self, owner: u32, i: i32) {
+        tell_in_ram(self.ee, owner, i);
+    }
+
+    fn ground(&mut self, owner: u32, vehicle: u32) -> game_sim::atv_wheel::Ground {
+        ground_in_ram(self.ee, owner, vehicle)
+    }
+
+    fn object_cofg(&mut self, owner: u32, cofg_world: Vf) {
+        set_vf(self.ee, owner + 0x90, cofg_world);
+    }
+}
+
+/// A scene node at `at`, current and with no parent, its rows and origin drawn.
+fn f63_node(ee: &mut Ee, g: &mut Gen, at: u32) {
+    for r in 0..4 {
+        set_vf(ee, at + 0x70 + 0x10 * r, Vf::new(g.f(-2.0, 2.0), g.f(-2.0, 2.0), g.f(-2.0, 2.0), if r == 3 { 1.0 } else { 0.0 }));
+    }
+    ee.set_u32(at + 0xf0, 0);
+    ee.set_u32(at + 0x100, 1);
+}
+
+/// **F63 — the Steps route takes owned and vehicle wheel contacts as the original does**: 10 000
+/// times F52's laid records (each struck object owned or not, its owner with 0 to 3 listeners and
+/// on a rigid body or a vehicle's chassis, its vehicle of kind 2 mostly, a mover with two hooked
+/// virtuals), the wheels' owner and vehicle beforehand drawn the same way (still, an owner, an owner
+/// and a vehicle, a vehicle alone) and their ground known or not. SLUS-21104's `bike_wheel_contacts`
+/// (stand and search hooked to log) and then its contact velocity on the front and rear wheel; and
+/// the port: [`steps::read_with`], [`quad::Steps`]' [`Call::Contacts`] on [`OwnedInRam`] (listeners
+/// told through their own vtables, each wheel's ground [`steps::ground`]'s), [`steps::words`], then
+/// [`steps::read_with`] again and [`game_sim::atv_wheel::contact_velocity`] on each wheel's ground,
+/// the object's centre of mass written as [`quad::Sweep::object_cofg`] is told it. The calls, in
+/// order, and every byte outside the stack come out the same.
+#[test]
+fn the_steps_routes_owned_wheel_contacts_are_the_originals() {
+    use game_sim::atv_wheel::Ground;
+    let Some(mut ee) = image().map(hooked) else { return };
+    assert!((F52_AREA..F52_AREA + 0xe000).step_by(4).all(|a| ee.u32_at(a) == 0), "the area is not free");
+    let probe = ee.u32_at(BIKE + TRIGGER);
+    let log: Rc<RefCell<Vec<String>>> = Rc::default();
+    for (at, what) in [(TRIGGER_STAND_FN, "stand"), (SEARCH_NEAR, "search"), (F52_TELL, "tell")] {
+        let l = log.clone();
+        ee.hooks.insert(at, Box::new(move |ee: &mut Ee| {
+            let line = match what {
+                "stand" => format!("stand {:#x}", ee.r(4)),
+                _ => format!("{what} {:#x} {:#x} {:#x}", ee.r(4), ee.r(5), ee.r(6)),
+            };
+            l.borrow_mut().push(line);
+        }));
+    }
+    for (at, o) in [(F63_VELOCITY, 0x300), (F63_SPIN, 0x310)] {
+        ee.hooks.insert(at, Box::new(move |ee: &mut Ee| {
+            let (out, v) = (ee.r(4) as u32, ee.r(5) as u32);
+            let x = vf_at(ee, v + o);
+            set_vf(ee, out, x);
+            ee.set(2, u64::from(out));
+        }));
+    }
+    let wheels = the_wheels(&ee);
+    let slots = [bike::FRONT, bike::REAR];
+    let base = ee.ram.clone();
+    let mut dirty = std::collections::BTreeSet::new();
+    let mut g = Gen(0x0000_f63a);
+    let mut t = BTreeMap::new();
+    let (rec, rays, normals, points, objects) = (F52_AREA, F52_AREA + 0x100, F52_AREA + 0x200, F52_AREA + 0x280, F52_AREA + 0x300);
+    let object = |j: u32| F52_AREA + 0x400 + 0x100 * j;
+    let owner = |j: u32| F52_AREA + 0x1000 + 0x300 * j;
+    let holder = |j: u32| F52_AREA + 0x2000 + 0x200 * j;
+    let rigid = |j: u32| F52_AREA + 0x8000 + 0x200 * j;
+    let chassis = |j: u32| F52_AREA + 0x9000 + 0x300 * j;
+    let node = |j: u32| F52_AREA + 0xa000 + 0x100 * j;
+    let vehicle = |j: u32| F52_AREA + 0xb000 + 0x400 * j;
+    let (vtable, vehicle_vtable) = (F52_AREA + 0x7f00, F52_AREA + 0xc000);
+    let rand_vf = |g: &mut Gen| Vf::new(g.f(-50.0, 50.0), g.f(-50.0, 50.0), g.f(-50.0, 50.0), g.f(-1.0, 1.0));
+    for case in 0..10_000 {
+        reset_bytes(&mut ee, &base, std::mem::take(&mut dirty));
+        ee.written.clear();
+        ee.set_u32(vtable + 0xc, F52_TELL);
+        ee.set_u32(vehicle_vtable + 0xc0, F63_VELOCITY);
+        ee.set_u32(vehicle_vtable + 0xc4, F63_SPIN);
+        for j in 0..3 {
+            // The owner: listeners, its centre of mass, and a rigid body or a chassis under it.
+            let ow = owner(j);
+            ee.set_u32(ow + 0x208, holder(j));
+            let n = g.bits() % 4;
+            ee.set_u32(holder(j) + 0x104, n);
+            ee.set_u32(holder(j) + 0x10c, holder(j) + 0x120);
+            for i in 0..n {
+                let el = holder(j) + 0x140 + 0x10 * i;
+                ee.set_u32(holder(j) + 0x120 + 4 * i, el);
+                ee.set_u32(el, vtable);
+            }
+            set_vf(&mut ee, ow + 0x80, rand_vf(&mut g));
+            set_vf(&mut ee, ow + 0x90, rand_vf(&mut g));
+            if g.one_in(2) {
+                let b = rigid(j);
+                ee.set_u32(ow + 0xe4, b);
+                set_vf(&mut ee, b + 0x70, rand_vf(&mut g));
+                set_vf(&mut ee, b + 0x80, rand_vf(&mut g));
+                set_vf(&mut ee, b + 0x190, g.unit_quaternion());
+                set_vf(&mut ee, b + 0x1d0, rand_vf(&mut g));
+            } else {
+                ee.set_u32(ow + 0xe0, chassis(j));
+                ee.set_u32(ow + 0xe8, node(j));
+                for o in [0x180, 0x250, 0x280] {
+                    set_vf(&mut ee, chassis(j) + o, rand_vf(&mut g));
+                }
+                f63_node(&mut ee, &mut g, node(j));
+            }
+            // The vehicle: a mover, its virtuals' answers laid where the hooks read them.
+            let v = vehicle(j);
+            ee.set_u32(v + 4, vehicle_vtable);
+            ee.set_u32(v + 0x1a0, [2, 2, 2, 1, 0][(g.bits() % 5) as usize]);
+            ee.set_u32(v + 0x244, node(3 + j));
+            f63_node(&mut ee, &mut g, node(3 + j));
+            for o in [0x180, 0x300, 0x310] {
+                set_vf(&mut ee, v + o, rand_vf(&mut g));
+            }
+            // The struck object.
+            let o = object(j);
+            ee.set_u32(o + 0x90, if g.one_in(3) { 0 } else { ow });
+            ee.set_u32(o + 0x8c, if g.one_in(3) { 0 } else { v });
+        }
+        let n = if g.one_in(30) { -1 } else { (g.bits() % 4) as i32 };
+        ee.set_u32(probe + 0x7c, rec);
+        ee.set_u32(rec + 0x8c, n as u32);
+        for (o, a) in [(0x90, rays), (0x94, normals), (0x98, points), (0x9c, objects)] {
+            ee.set_u32(rec + o, a);
+        }
+        for i in 0..n.max(0) as u32 {
+            let from = rand_vf(&mut g);
+            set_vf(&mut ee, rays + 0x20 * i, Vf::new(from.x(), from.y(), f52_z(&mut g), from.w()));
+            set_vf(&mut ee, rays + 0x20 * i + 0x10, rand_vf(&mut g));
+            set_vf(&mut ee, normals + 0x10 * i, rand_vf(&mut g));
+            set_vf(&mut ee, points + 0x10 * i, rand_vf(&mut g));
+            ee.set_u32(objects + 4 * i, object(g.bits() % 3));
+        }
+        let flags = ee.u8_at(probe + 0x126);
+        let hit = !g.one_in(6);
+        ee.write(probe + 0x126, 1, u128::from(if hit { flags | 0x20 } else { flags & !0x20 }));
+        // What the wheels stood on before, whether its velocity is known, and the rear's node.
+        for &w in &wheels {
+            set_vf(&mut ee, w + 0x120, rand_vf(&mut g));
+            set_vf(&mut ee, w + 0x130, rand_vf(&mut g));
+            let (j, i) = (g.bits() % 3, g.bits() % 3);
+            let (ow, v) = [(0, 0), (owner(j), 0), (owner(j), vehicle(i)), (0, vehicle(i))][(g.bits() % 4) as usize];
+            ee.set_u32(w + steps::OWNER, ow);
+            ee.set_u32(w + steps::VEHICLE, v);
+            ee.set_u32(w + 0xd4, g.bits() % 2);
+            ee.set_u32(w + 0x1a0, u32::from(g.one_in(4)));
+            set_vf(&mut ee, w + 0x1b0, rand_vf(&mut g));
+            set_vf(&mut ee, w + 0x1c0, rand_vf(&mut g));
+        }
+        ee.set_u32(BIKE + 0x143c, g.bits());
+        let dt = g.f(0.001, 0.05);
+        let (want, got) = (RefCell::new(Vec::new()), RefCell::new(Vec::new()));
+        let grounds = RefCell::new(Vec::new());
+        let off = both_ways(
+            &mut ee,
+            &base,
+            &mut dirty,
+            |_| false,
+            |ee| {
+                call_kept(ee, CONTACTS, &[u64::from(BIKE)], &[dt]);
+                for w in wheels {
+                    call_kept(ee, CONTACT_VELOCITY, &[u64::from(w)], &[]);
+                }
+                *want.borrow_mut() = std::mem::take(&mut *log.borrow_mut());
+            },
+            |ee| {
+                let (k, at) = read_in_ram(ee).unwrap_or_else(|e| panic!("case {case}: {e}"));
+                let mut q = Quad::default();
+                for (&slot, &w) in slots.iter().zip(&wheels) {
+                    q.wheels[slot].normal = vf_at(ee, w + 0x130);
+                }
+                let mut body = quad::Body::default();
+                let mut s = quad::Steps {
+                    bike: k,
+                    rest: Vec::<Call>::new(),
+                    ground: |_: Vf, _: &mut u8| -> (Vf, Vf) { unreachable!("the contacts ask no ground") },
+                    sweep: OwnedInRam { ee: &mut *ee, log: log.clone() },
+                };
+                s.call(Call::Contacts, &mut q, &mut body);
+                assert!(s.rest.is_empty(), "case {case}: handed on {:?}", s.rest);
+                let k = s.bike;
+                for (a, x) in steps::words(&k, &at, &|a| ee.u32_at(a)) {
+                    ee.set_u32(a, x);
+                }
+                for (&slot, &w) in slots.iter().zip(&wheels) {
+                    set_vf(ee, w + 0x130, q.wheels[slot].normal);
+                }
+                // The contact velocity on each wheel's ground, as the tire forces run it.
+                let (mut k, at) = read_in_ram(ee).unwrap_or_else(|e| panic!("case {case}: {e}"));
+                for (&slot, &w) in slots.iter().zip(&wheels) {
+                    let b = ee.u32_at(w + 0x1e4);
+                    let wb = game_sim::atv_wheel::Body {
+                        position: vf_at(ee, b + 0x70),
+                        velocity: vf_at(ee, b + 0x80),
+                        orientation: vf_at(ee, b + 0x190),
+                        spin: vf_at(ee, b + 0x1d0),
+                        ..Default::default()
+                    };
+                    let known = k.more[slot].ground_known;
+                    grounds.borrow_mut().push((k.ground[slot], known));
+                    game_sim::atv_wheel::contact_velocity(&mut k.wheels[slot], &mut k.more[slot], &wb, &mut k.ground[slot]);
+                    if let (0, Ground::Object { cofg_world, .. }) = (known, k.ground[slot]) {
+                        set_vf(ee, k.ground_of[slot].0 + 0x90, cofg_world);
+                    }
+                }
+                for (a, x) in steps::words(&k, &at, &|a| ee.u32_at(a)) {
+                    ee.set_u32(a, x);
+                }
+                *got.borrow_mut() = std::mem::take(&mut *log.borrow_mut());
+            },
+        );
+        assert!(off.is_empty(), "case {case}: {} bytes differ (grounds {:?})\n  {}", off.len(), grounds.borrow(), off.iter().take(24).cloned().collect::<Vec<_>>().join("\n  "));
+        let (want, got) = (want.into_inner(), got.into_inner());
+        assert_eq!(got, want, "case {case}: the calls");
+        if want.iter().any(|l| l.starts_with("tell")) {
+            tally(&mut t, "told");
+        }
+        for (gr, known) in grounds.into_inner() {
+            tally(&mut t, match gr {
+                Ground::Still => "on still ground",
+                Ground::Object { on: game_sim::atv_wheel::Holder::Body(_), .. } => "on a body",
+                Ground::Object { .. } => "on a chassis",
+                Ground::Mover(_) => "on a mover",
+            });
+            if known != 0 {
+                tally(&mut t, "ground known");
+            }
+        }
+        let (_, cs) = trigger_contacts(&ee, probe);
+        if hit && n > 0 {
+            for c in &cs {
+                tally(&mut t, if c.owner != 0 { "struck owned" } else if c.vehicle != 0 && c.vehicle_kind == 2 { "struck a vehicle alone" } else { "struck the world" });
             }
         }
     }
