@@ -311,6 +311,46 @@ fn the_settings_choose_which_games_music_plays() {
     std::fs::remove_dir_all(&mods).unwrap();
 }
 
+/// P339 — the music plays off the settings a player has: none yet (a fresh install), and the file
+/// v0.12.0 wrote, before Songs From (P317), with Music From on All Games or on MX Unleashed Only (every
+/// pack in `mods_off`). The settings go to the speakers as the shell's start does.
+#[test]
+fn the_music_plays_with_fresh_and_v0_12_settings() {
+    let mods = scratch("p339");
+    write_pack(&mods, "mxvatv_music", "MX vs. ATV Unleashed", &[("A", "A", "")]);
+    write_pack(&mods, "untamed_music", "MX vs. ATV Untamed", &[("B", "B", "")]);
+    // v0.12.0's Settings::text() for its defaults, as it wrote them
+    let v012 = "# openmx's front end (P36)\nname = Rider\noverlay = speedometer\nspeedometer = mph\nwrecks = on\n\
+                track = world_mxu_free\nsplit_screen = h\nmusic = shuffle\nmusic_volume = 70\neffects_volume = 80\n\
+                folder_volume = 70\ncrowd_volume = 45\nengine_volume = 60\nmenu_volume = 100\nmix = game\n\
+                custom = 70 70 80 45 60 100\ngraphics = high\nrender_scale = 1\n";
+    let disc_only = format!("{v012}mods_off = mxvatv_music untamed_music\n");
+    let cases = [("fresh", Settings::default(), 3), ("v0.12.0", Settings::parse(v012), 3), ("v0.12.0, MX Unleashed Only", Settings::parse(&disc_only), 1)];
+    for (name, settings, songs) in cases {
+        let (packs, _) = PackMusic::read(Some(&mods));
+        let mut music = audio::Music::new(vec![Arc::new(Disc), Arc::new(packs)], 5);
+        music.wait = true;
+        let speakers = audio::Speakers::start(music, false);
+        let s = &settings;
+        speakers.apply(&s.music, audio::Levels { music: s.music_volume, folder: s.folder_volume, effects: s.effects_volume, crowd: s.crowd_volume, engine: s.engine_volume, menu: s.menu_volume });
+        speakers.music_packs(s.mods, &s.mods_off, &s.music_off);
+        assert_eq!(speakers.mixer().lock().unwrap().music.tracks().len(), songs, "{name}: the songs listed");
+        assert!(s.music_off.is_empty(), "{name}: the disc's songs are on");
+        assert_eq!(s.music, "shuffle", "{name}");
+        let mut heard = 0;
+        for _ in 0..4 {
+            let mut out = vec![0i16; audio::RATE as usize / 10 * 2];
+            speakers.mixer().lock().unwrap().render(&mut out);
+            heard = heard.max(out.iter().map(|s| (*s as i32).abs()).max().unwrap());
+        }
+        assert!(speakers.now().is_some(), "{name}: a song plays");
+        assert!(!speakers.held(), "{name}: not paused");
+        assert!(speakers.mixer().lock().unwrap().music_gain() > 0.5, "{name}: at its slider");
+        assert!(heard > 0, "{name}: the song is heard");
+    }
+    std::fs::remove_dir_all(&mods).unwrap();
+}
+
 /// A short 16-bit stereo `.wav`, as the music folder holds.
 fn wav() -> Vec<u8> {
     let data = vec![0u8; 4 * 100];

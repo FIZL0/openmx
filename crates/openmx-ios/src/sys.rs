@@ -1210,19 +1210,24 @@ fn other_audio_hint() -> bool {
 /// Playback, mixing with others ([`crate::session`]), and the category and options read back, for
 /// the log: what the session holds now.
 fn set_category() -> String {
+    set_category_with(crate::session::OPTIONS)
+}
+
+/// Playback with `options`, and the category and options read back, for the log.
+fn set_category_with(options: usize) -> String {
     pool(|| {
         let s = audio_session();
         // SAFETY: objc_msgSend cast to `BOOL (id, SEL, NSString *, NSUInteger, NSError **)`, as
         // AVAudioSession declares `setCategory:withOptions:error:`; the category is AVFAudio's constant
         let ok = unsafe {
             let set: extern "C" fn(Id, Id, Id, usize, *mut Id) -> bool = std::mem::transmute(objc_msgSend as *const ());
-            set(s, sel(c"setCategory:withOptions:error:"), AVAudioSessionCategoryPlayback, crate::session::OPTIONS, std::ptr::null_mut())
+            set(s, sel(c"setCategory:withOptions:error:"), AVAudioSessionCategoryPlayback, options, std::ptr::null_mut())
         };
         let category = text(get(s, c"category"));
-        let options = int(s, c"categoryOptions") as usize;
-        let held = category == crate::session::CATEGORY && options == crate::session::OPTIONS;
+        let got = int(s, c"categoryOptions") as usize;
+        let held = category == crate::session::CATEGORY && got == options;
         format!(
-            "{}{category} with options {options:#x}{}",
+            "{}{category} with options {got:#x}{}",
             if ok { "" } else { "setting the category failed; " },
             if held { "" } else { " (not the Playback, MixWithOthers asked for)" }
         )
@@ -1239,8 +1244,19 @@ pub fn activate_audio() -> bool {
             set(audio_session(), sel(c"setActive:error:"), true, std::ptr::null_mut())
         }
     });
-    hear(crate::session::Event::OtherAudio(pool(other_audio_hint)));
+    hear(crate::session::Event::HintRead(pool(other_audio_hint)));
     ok
+}
+
+/// The player took the music back from another app (P339): the session made active without mixing,
+/// which interrupts the other app and so stops its music, then mixing again, so apps that start
+/// sound later play beside ours. Its line for the log. Not on the audio render thread.
+pub fn take_over_audio() -> String {
+    let alone = set_category_with(crate::session::TAKE_OVER_OPTIONS);
+    let active = activate_audio();
+    let back = set_category();
+    hear(crate::session::Event::TookOver);
+    format!("took the music back: {alone}, {}; then {back}", if active { "active" } else { "not made active" })
 }
 
 /// Another app's music is playing: the game's music is to be silent, the rest of its sound not. Any thread.
@@ -1299,7 +1315,7 @@ extern "C" fn on_audio(_: *const Block, note: Id) {
         } else if name == "UIApplicationDidEnterBackgroundNotification" {
             Event::Background
         } else {
-            hear(Event::OtherAudio(other_audio_hint()));
+            hear(Event::HintRead(other_audio_hint()));
             Event::Active
         };
         hear(event);

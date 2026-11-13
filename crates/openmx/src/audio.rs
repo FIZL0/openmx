@@ -470,6 +470,14 @@ pub struct Mixer {
     /// Another app's music is playing (P296, iOS's secondary-audio hint): the songs and the menu's
     /// loop are silent, and the engine, effects, crowd and menu clicks are not.
     pub other_audio: bool,
+    /// The player took the music back from the other app (P339): its music plays under the hint
+    /// until the hint ends, and [`Mixer::take_over_asked`] has the session stop the other app's.
+    took_over: bool,
+    /// [`Mixer::hear_other_audio`] held the music for the hint (P339), not the player: it lets it go
+    /// when the hint ends.
+    held_for_other: bool,
+    /// A take-over the platform has not acted on yet.
+    take_over: bool,
     /// The front end is up: the menu's loop plays and the songs hold where they are, silent even
     /// before the loop has loaded. Off, the ride's songs play. A change fades over [`MENU_FADE`].
     pub front_end: bool,
@@ -504,6 +512,9 @@ impl Mixer {
             rendered: 0,
             menu_music: None,
             other_audio: false,
+            took_over: false,
+            held_for_other: false,
+            take_over: false,
             front_end: false,
             menu_fade: 0.0,
             menu_pos: 0.0,
@@ -660,7 +671,7 @@ impl Mixer {
     /// music's for the rest — the original's split, where the songs past the disc's thirteen take the
     /// ripped music's volume and the rest the music's.
     pub fn music_gain(&self) -> f32 {
-        if self.other_audio {
+        if self.music_silenced() {
             return 0.0;
         }
         let base = match self.music.now() {
@@ -672,6 +683,42 @@ impl Mixer {
             Some(f) => ((((base * 100.0).round() as i32) as f32 * f) as i32).max(0) as f32 / 100.0,
             None => base,
         }
+    }
+
+    /// Whether the songs and the menu's loop are silent for another app's music (P296): under the
+    /// hint, until the player takes the music back (P339).
+    pub fn music_silenced(&self) -> bool {
+        self.other_audio && !self.took_over
+    }
+
+    /// The platform's secondary-audio hint, heard each buffer (P339). Another app's music starting
+    /// holds ours, so the player and Settings show it paused rather than playing in silence; the
+    /// player letting it go on under the hint takes the music back ([`Mixer::take_over_asked`]); the
+    /// hint ending lets go a hold it made, and the next hint holds it again.
+    pub fn hear_other_audio(&mut self, on: bool) {
+        if on && !self.other_audio && !self.took_over && !self.music.held() {
+            self.music.hold(true);
+            self.held_for_other = true;
+        }
+        if on && self.other_audio && !self.took_over && !self.music.held() {
+            self.took_over = true;
+            self.take_over = true;
+            self.held_for_other = false;
+        }
+        if !on {
+            if self.held_for_other && self.music.held() {
+                self.music.hold(false);
+            }
+            self.held_for_other = false;
+            self.took_over = false;
+        }
+        self.other_audio = on;
+    }
+
+    /// Whether the player took the music back since this was last asked (P339): the platform then
+    /// has its session stop the other app's music.
+    pub fn take_over_asked(&mut self) -> bool {
+        std::mem::take(&mut self.take_over)
     }
 
     /// The fade between the songs and the menu's loop (P65): 0 the songs alone, 1 the loop alone.
@@ -715,7 +762,7 @@ impl Mixer {
         let step = clip.rate as f64 / RATE as f64;
         let back = if (MENU_LOOP_FROM as usize) < n - 1 { MENU_LOOP_FROM } else { 0.0 };
         for f in 0..frames {
-            let g = if self.other_audio { 0.0 } else { self.music_volume } * at(f);
+            let g = if self.music_silenced() { 0.0 } else { self.music_volume } * at(f);
             let i = self.menu_pos as usize;
             let t = (self.menu_pos - i as f64) as f32;
             let j = if i + 1 < n { i + 1 } else { back as usize };
@@ -4392,7 +4439,7 @@ impl Output {
             let fill = |mixer: Arc<Mutex<Mixer>>| -> Box<dyn FnMut(&mut [i16]) + Send> {
                 Box::new(move |out: &mut [i16]| match mixer.lock() {
                     Ok(mut m) => {
-                        m.other_audio = openmx_ios::other_audio();
+                        m.hear_other_audio(openmx_ios::other_audio());
                         m.render(out)
                     }
                     Err(_) => out.fill(0),
@@ -4408,6 +4455,11 @@ impl Output {
                 while !quit.load(std::sync::atomic::Ordering::Relaxed) {
                     std::thread::park_timeout(std::time::Duration::from_millis(50));
                     wait = wait.saturating_sub(1);
+                    // P339: the player let the music go on under another app's: the session stops
+                    // that app's, and the output starts again after it
+                    if mixer.lock().is_ok_and(|mut m| m.take_over_asked()) {
+                        println!("audio: {}", openmx_ios::take_over_audio());
+                    }
                     let want = openmx_ios::audio_restarts();
                     if (want == done && sound.is_some()) || wait > 0 {
                         continue;

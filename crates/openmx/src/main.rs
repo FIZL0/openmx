@@ -3931,6 +3931,8 @@ async fn front_end(args: Args) -> Result<(), String> {
         }
         let before = shell.front.menu.p1().cloned();
         shell.front.menu.music_now = shell.front.sound.now();
+        // P339: held by the sound too (another app's music on the iPhone), so Settings says so
+        shell.front.menu.music_held = shell.front.sound.held();
         act = shell.front.menu.step_devices(&presses);
         shell.front.cue(true);
         // Every press the frame held, a step each (P165): a slow frame's second tap, or the repeats
