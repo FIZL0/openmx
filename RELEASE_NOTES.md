@@ -1,1 +1,12 @@
 <!-- What's new since the last release, for players, in plain English: one "- " line per change. tools/release.sh puts this in the release and empties it. -->
+- Race is on the main menu: pick a Supercross track (named by city, Los Angeles to Atlanta), set up the race and line up behind the gate. The countdown holds every rider until the drop, the HUD shows your lap and place, and the race ends on the results board with tips, Hall of Fame marks and win records.
+- Supercross races no longer throw you off the map at the start. Only the nationals and freestyle maps keep the out-of-bounds edge.
+- The Garage's Bike and Fliers tabs are now one Machines tab, with bike class, bike, paint, driving model and every flier kind. Each player flies their own plane and helicopter picks, and the fliers show on the Garage stage.
+- The Bike tab has a Handling row: ride with the original's handling, or with a trick pack's MX vs. ATV or Untamed handling.
+- Fliers pack skins have names. Switch To Machine on the pause menu can change your flier's skin mid-ride.
+- Fliers work online. A pack's plane can be picked whenever every player in the room has that pack; skins a room doesn't offer are greyed out, with the reason.
+- MX vs. ATV's quad comes as an addition that is off by default. Pick it from the Garage's Quad row, then take it with Switch To Machine on the pause menu. While it's on, Game Modifiers has an ATV category for its top speed, acceleration, grip and suspension. Online, every player's quad has to match the host's pack.
+- Settings → Audio → Songs From turns each game's music on or off.
+- Cars and the Kiowa now wrap round at the edges of a wrapped world instead of being thrown.
+- Android: the ride pauses when the app goes to the background, settings are saved, and the back button works as Escape.
+- Browser on phones (iPhone Safari): fixed "gpu: encoder state is invalid" when a ride starts. If WebGPU fails during a ride, the page restarts on WebGL.
