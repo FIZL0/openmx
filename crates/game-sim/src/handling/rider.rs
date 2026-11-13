@@ -55,9 +55,10 @@
 //! The idle layer ([`Call::Idle`]) is [`idle`] (F62a): the state picked ([`idle_state`]) and its clips
 //! chosen and blended ([`idle_clips`], through [`anim`]).
 //!
-//! What is not here: the controller's own clip advance and the wreck poses' clip start (the idle
-//! layer's [`Call::ClipAdvance`], [`Call::ClipStart`]), the ragdoll world itself, and the rest of the
-//! calls in [`Call`].
+//! The idle layer's [`Call::ClipAdvance`] and [`Call::ClipStart`] stay calls (the controller's vt);
+//! their ports are [`anim::advance`] and [`anim::start`] (F62b).
+//!
+//! What is not here: the ragdoll world itself and the rest of the calls in [`Call`].
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
 use super::ground;
@@ -357,7 +358,8 @@ pub enum Call {
     /// The idle layer's ([`idle`], F62a): `rand` seeded from the clock once (before a wreck pose is
     /// drawn by lot); the wreck pose's clip started at the rate the layer holds in `f12`; the
     /// controller's own clip advance (its vt `+0x88`, `f12` `dt`); a saved-pose buffer of `bytes` made
-    /// for [`anim::stop`] (its address the answer).
+    /// for [`anim::stop`] (its address the answer). The start and advance are [`anim::start`] and
+    /// [`anim::advance`] (F62b).
     Seed,
     ClipStart { clip: u32 },
     ClipAdvance,
