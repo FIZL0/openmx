@@ -509,6 +509,79 @@ fn a_webgpu_error_on_the_menu_starts_again_on_webgl2() {
     assert!(kept[again.unwrap_or(0)..].contains("&webgl2"), "the log has no page on webgl2 after the restart:\n{kept}");
 }
 
+/// A phone's race on sx01 on WebGPU (P336, `tests/web/gpu.mjs`): the user's iPhone's Safari ended every ride's first
+/// frame with 'gpu: encoder state is invalid', WebKit's words for an encoder some command in it broke, whatever it
+/// was. The page opened as a phone's (844×390 at 3 to one, touch) with every WebGPU limit no more than that iPhone's,
+/// straight into an eight-rider race on sx01: it must show 1400 pictures and more on WebGPU, past the start, with no
+/// validation error in the worker's console. Then the same race with the encoder of the frame's ground meshes stage
+/// broken after 120 frames, as WebKit finds one: the error must name that stage and its frame (each stage of a frame
+/// is an encoder and an error scope of its own on WebGPU), the shell leave the ride with it, and the page start again
+/// on WebGL2 and draw the race there, lit. The module is `tools/web.sh --check`'s. Skips without the disc, node or
+/// chromium.
+#[test]
+fn a_phone_race_on_sx01_rides_on_webgpu_and_a_broken_stage_is_named() {
+    let iso = match Disc::open_configured() {
+        Ok(_) => configured_image().expect("the disc opened, so its path resolves"),
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    for tool in ["node", "chromium"] {
+        if Command::new(tool).arg("--version").output().is_err() {
+            eprintln!("skipped: no {tool}");
+            return;
+        }
+    }
+    const FLAGS: [&str; 4] = ["--enable-unsafe-webgpu", "--enable-features=Vulkan", "--use-angle=vulkan", "--ignore-gpu-blocklist"];
+    let field = |text: &str, key: &str| -> String {
+        text.split(&format!("\"{key}\":")).nth(1).unwrap_or("").split([',', '}']).next().unwrap_or("").trim_matches('"').to_string()
+    };
+    let run = |name: &str, envs: &[(&str, &str)]| -> (String, String) {
+        let scratch = std::env::temp_dir().join(format!("openmx-web-sx01-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+        let run = Command::new("node")
+            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/web/gpu.mjs"))
+            .arg(repo().join("web"))
+            .arg(&iso)
+            .arg(scratch.join("profile"))
+            .arg(scratch.join("race.png"))
+            .arg("")
+            .args(FLAGS)
+            .env("OPENMX_GPU_PKG", built())
+            .env("OPENMX_GPU_PHONE", "844,390,3")
+            .env("OPENMX_GPU_LIMITS", "iphone")
+            .env("OPENMX_GPU_ARGS", "--ride --track sx01 --race --racers 8")
+            .envs(envs.iter().copied())
+            .output()
+            .expect("run node");
+        let _ = std::fs::remove_dir_all(&scratch);
+        let (text, log) = (String::from_utf8_lossy(&run.stdout).into_owned(), String::from_utf8_lossy(&run.stderr).into_owned());
+        assert!(run.status.success(), "gpu.mjs ({name}) failed:\n{log}{text}");
+        (text, log)
+    };
+    let (text, log) = run("ride", &[("OPENMX_GPU_FRAMES", "1500")]);
+    assert!(log.contains("limits: an iPhone's"), "the iPhone's limits were not set:\n{log}");
+    assert!(!log.contains("validation error"), "a WebGPU validation error in the race:\n{log}");
+    assert_eq!(field(&text, "gpu"), "webgpu", "the race is not on WebGPU:\n{text}");
+    assert_eq!(field(&text, "drawn"), "webgpu 1688 780", "no first WebGPU frame at the phone's size:\n{text}");
+    let list = text.split("\"fps\":[").nth(1).and_then(|s| s.split(']').next()).unwrap_or("");
+    let shown: f64 = list.split(',').filter_map(|f| f.parse::<f64>().ok()).sum();
+    assert!(shown >= 1400.0, "only {shown} pictures shown:\n{text}");
+    println!("sx01's race on a phone's WebGPU: {shown:.0} pictures, no validation error");
+
+    let (text, log) = run("broken", &[("OPENMX_GPU_SECONDS", "3"), ("OPENMX_GPU_BREAK", "the ground meshes,120"), ("OPENMX_GPU_WANT", "webgl2")]);
+    assert!(log.contains("break: the encoder of the ground meshes"), "no encoder was broken:\n{log}");
+    assert!(log.contains("gpu: validation error in the ground meshes, frame "), "the broken stage is not named:\n{log}");
+    assert!(log.contains("webgpu failed in a ride: gpu: "), "the shell did not leave the ride on the error:\n{log}");
+    assert_eq!(field(&text, "gpu"), "webgl2", "the page did not start again on WebGL2:\n{text}");
+    assert!(field(&text, "drawn").starts_with("webgl2"), "no WebGL2 frame after the restart:\n{text}");
+    let lit: f64 = field(&text, "lit").parse().expect("lit");
+    let pixels: f64 = field(&text, "pixels").parse().expect("pixels");
+    assert!(lit > pixels / 2.0, "only {lit} of {pixels} pixels of the race on WebGL2 are lit:\n{text}");
+    println!("a broken ground meshes encoder: named, and the race started again on {}", field(&text, "drawn"));
+}
+
 /// The page log for bug reports (P257b, `tests/web/log.mjs`): a phone has no Web Inspector, so with
 /// `?fps` (or the Settings switch) the page keeps every console line, the worker's too, and a Save
 /// log button downloads them. Headless chromium picks a file that is no disc: the shell ends on it

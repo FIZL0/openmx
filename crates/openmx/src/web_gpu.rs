@@ -14,7 +14,7 @@
 //! animation frame, the display's own rate.
 
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -63,20 +63,46 @@ fn error() -> Option<String> {
 /// Every validation error to the page's console with what made it, and the first kept for the
 /// next frame (P257): the browser's own words name the call that failed only with its source.
 fn report(source: &str, e: &wgpu::Error) {
+    let e = said(e);
     crate::web_host::say(&format!("gpu: validation error in {source}: {e}"));
     if let Ok(mut slot) = ERROR.lock() {
         slot.get_or_insert(format!("gpu: {e} (in {source})"));
     }
 }
 
+/// An error's words with each cause under it that they do not already hold (P336): wgpu's own
+/// validation keeps the failing call's error as the source of the one it reports. A browser's
+/// cause is only a placeholder (`<WebGPU Error>`), left out.
+fn said(e: &wgpu::Error) -> String {
+    let mut text = e.to_string().trim().to_string();
+    let mut cause = std::error::Error::source(e);
+    while let Some(c) = cause {
+        let more = c.to_string().trim().to_string();
+        let placeholder = more.starts_with('<') && more.ends_with('>');
+        if !more.is_empty() && !placeholder && !text.contains(&more) {
+            text = format!("{text}: {more}");
+        }
+        cause = c.source();
+    }
+    text
+}
+
+/// The frame being drawn, or 0 outside one: what names a stage's scope with its frame (P336).
+static FRAME: AtomicU64 = AtomicU64::new(0);
+
 /// The [`game_render::gpu::Watcher`] the renderer hands its error scopes: each popped, and what it
-/// caught reported.
+/// caught reported, with the frame it was made in. A frame's stages each have one
+/// (`Renderer::stage`, P336), so an encoder WebKit calls only "invalid" is named by what it held.
 fn watcher() -> game_render::gpu::Watcher {
     Arc::new(|what: &'static str, scope: wgpu::ErrorScopeGuard| {
         let popped = scope.pop();
+        let source = match FRAME.load(Ordering::Relaxed) {
+            0 => what.to_string(),
+            f => format!("{what}, frame {f}"),
+        };
         wasm_bindgen_futures::spawn_local(async move {
             if let Some(e) = popped.await {
-                report(what, &e);
+                report(&source, &e);
             }
         });
     })
@@ -89,8 +115,13 @@ static RODE: AtomicBool = AtomicBool::new(false);
 /// What starts a WebGPU validation error the front end ends on: web/index.html's `fallBack` reads it.
 pub const FRONT: &str = "webgpu failed in the front end: ";
 
-/// A ride starts: a WebGPU validation error from now on ends the ride, and the page does not start
-/// again.
+/// What starts a WebGPU validation error a ride ends on (P336): the shell leaves with it rather than
+/// going back to its menu, and web/index.html's `fallBack` starts the page again on WebGL2. A phone's
+/// Safari broke every ride's first frame, its menus drawing well, so going back to the menu on WebGPU
+/// only failed the next ride the same way.
+pub const RIDE: &str = "webgpu failed in a ride: ";
+
+/// A ride starts: a WebGPU validation error from now on ends the ride, starting with [`RIDE`].
 pub fn riding() {
     RODE.store(true, Ordering::Relaxed);
 }
@@ -385,7 +416,9 @@ impl GpuWindow {
     ) -> Result<Option<T>, String> {
         let r = self.draw_frame(width, height, draw);
         match r {
-            Err(e) if self.api == Api::WebGpu && !RODE.load(Ordering::Relaxed) && e.starts_with("gpu: ") => Err(format!("{FRONT}{e}")),
+            Err(e) if self.api == Api::WebGpu && e.starts_with("gpu: ") => {
+                Err(format!("{}{e}", if RODE.load(Ordering::Relaxed) { RIDE } else { FRONT }))
+            }
             r => r,
         }
     }
@@ -429,7 +462,9 @@ impl GpuWindow {
         // the renderer watches is named by its own scope inside this one.
         self.frames += 1;
         let scope = self.renderer.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        FRAME.store(self.frames, Ordering::Relaxed);
         let out = draw(&mut self.renderer, &target);
+        FRAME.store(0, Ordering::Relaxed);
         self.renderer.queue.present(texture);
         let (frame, popped) = (self.frames, scope.pop());
         wasm_bindgen_futures::spawn_local(async move {

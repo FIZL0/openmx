@@ -1131,6 +1131,9 @@ pub struct Renderer {
     pub lod_bias: f32,
     /// What hears the device's validation errors by what made them (P257), or nothing.
     watch: Option<Watcher>,
+    /// Each stage of a frame in an encoder and a watched scope of its own ([`Renderer::stage`],
+    /// P336): on a browser's WebGPU with a [`Watcher`].
+    staged: bool,
 }
 
 /// What a [`Renderer`] hands each validation error scope it pushed around a create, with what the
@@ -2641,6 +2644,7 @@ impl Renderer {
             sun,
             over: false,
             lod_bias: 1.0,
+            staged: watcher.is_some() && info.backend == wgpu::Backend::BrowserWebGpu,
             watch: { drop(made); watcher },
         })
     }
@@ -2649,6 +2653,20 @@ impl Renderer {
     /// [`Watcher`] then with `what` (P257); nothing without one.
     fn watched(&self, what: &'static str) -> Watch {
         watch(&self.device, self.watch.as_ref(), what)
+    }
+
+    /// The frame's next stage, `what` (P336): where [`Renderer::staged`], what `encoder` holds so far
+    /// is submitted inside `scope`, and `encoder` and `scope` begin again, the scope named `what`.
+    /// WebKit says only "encoder state is invalid" of an encoder any command in it broke, whatever
+    /// that was, so this way the stage that broke it is named. Elsewhere one encoder holds the frame.
+    fn stage(&self, encoder: &mut wgpu::CommandEncoder, scope: &mut Option<Watch>, what: &'static str) {
+        if !self.staged {
+            return;
+        }
+        let done = std::mem::replace(encoder, self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(what) }));
+        self.queue.submit([done.finish()]);
+        drop(scope.take());
+        *scope = Some(self.watched(what));
     }
 
     /// The scene's props, drawn in every frame from now on.
@@ -3034,6 +3052,8 @@ impl Renderer {
             self.samplers.entry(CLAMPED).or_insert_with(|| texture_sampler(&self.device, CLAMPED, anisotropy));
         }
         let meshes = meshes.map(|m| {
+            // Its far target is drawn in an encoder of its own as it is made (P336).
+            let _watch = self.watched("the ground meshes' far target");
             let read = (&self.samplers[&CLAMPED], self.anisotropy);
             ground_mesh::GpuMeshes::new(&self.device, &self.queue, &self.sampler, read, m)
         });
@@ -3251,6 +3271,7 @@ impl Renderer {
                 let size = (last * 2).max(last + need).min(g.per_page);
                 let bigger = ground_vertex_buffer(&self.device, cells, size);
                 let old = g.pages.pop().expect("a page");
+                let _watch = watch(&self.device, self.watch.as_ref(), "the ground's growing vertex page");
                 let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("ground grows") });
                 encoder.copy_buffer_to_buffer(&old, 0, &bigger, 0, old.size());
                 self.queue.submit([encoder.finish()]);
@@ -4340,9 +4361,11 @@ impl Renderer {
         };
         let bled = self.bled_sprites(target, frame.sprites);
         let sprites = self.sprites.prepare(&self.device, &self.queue, place, target.size, bled.as_deref().unwrap_or(frame.sprites));
+        let mut scope = self.staged.then(|| self.watched("the sun maps"));
         let mut encoder = self.device.create_command_encoder(&Default::default());
         drawn.draws += self.draw_sun_maps(&mut encoder, passes.len());
         // The roads and ruts under each view, drawn sharp again round any that has moved (V67, V89).
+        self.stage(&mut encoder, &mut scope, "the ground meshes");
         if let Some(m) = self.ground.as_mut().and_then(|g| g.meshes.as_mut()) {
             let eyes: Vec<V3> = views.iter().map(|v| v.camera.eye).collect();
             m.follow(&self.device, &self.queue, &mut encoder, &eyes);
@@ -4352,12 +4375,16 @@ impl Renderer {
         let picture = picture_rect(target, bleed);
         let [px, py, pw, ph] = picture;
         let drawn_at = if pw > 0 && ph > 0 && !over { scale } else { 1.0 };
+        if self.timer.is_some() {
+            self.stage(&mut encoder, &mut scope, "the frame's first timestamp");
+        }
         let timed = self.timer.as_mut().and_then(|t| t.begin(&mut encoder, drawn_at));
         if scale < 1.0 && pw > 0 && ph > 0 && !over {
             // The views into the low texture, each view's edges scaled and rounded so they still meet;
             // then the low texture stretched over the picture (the frame and its bleed), and the
             // overlay over that at full size.
             let size = scale::scaled((pw, ph), scale);
+            self.stage(&mut encoder, &mut scope, "the views");
             let (low, low_depth) = self.upscale.low(&self.device, self.format, &self.clamp_sampler, size);
             {
                 let mut pass = begin_pass(&mut encoder, &low, &low_depth, "views");
@@ -4371,6 +4398,7 @@ impl Renderer {
                 };
                 self.draw_views(&mut pass, views, &passes, &ground_counts, rect, size, &mut drawn);
             }
+            self.stage(&mut encoder, &mut scope, "the picture and overlay");
             let depth = self.depth_for(target.size);
             let mut pass = begin_pass(&mut encoder, target.view, &depth, "frame");
             pass.set_scissor_rect(px, py, pw, ph);
@@ -4378,6 +4406,7 @@ impl Renderer {
             drawn.draws += 1;
             self.draw_overlay(&mut pass, target, frame, sprites, &mut drawn);
         } else {
+            self.stage(&mut encoder, &mut scope, "the views and overlay");
             let depth = self.depth_for(target.size);
             let mut pass = match over {
                 true => begin_pass_over(&mut encoder, target.view, &depth),
@@ -4387,10 +4416,14 @@ impl Renderer {
             self.draw_views(&mut pass, views, &passes, &ground_counts, rect, target.size, &mut drawn);
             self.draw_overlay(&mut pass, target, frame, sprites, &mut drawn);
         }
+        if timed.is_some() {
+            self.stage(&mut encoder, &mut scope, "the frame's last timestamp");
+        }
         if let (Some(t), Some(k)) = (self.timer.as_mut(), timed) {
             t.end(&mut encoder, k);
         }
         self.queue.submit([encoder.finish()]);
+        drop(scope);
         if let (Some(t), Some(k)) = (self.timer.as_mut(), timed) {
             t.submitted(k);
         }

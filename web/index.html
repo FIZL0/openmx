@@ -762,15 +762,18 @@ footer a { color: var(--bone); }
   // context it was first given, so the next try needs a fresh page. A WebGPU validation error after the first frame but
   // before the first ride (P257: a phone's Safari on the menu, its sound playing over a dead canvas) does too: the
   // browser reports one later than the call that made it, and the worker's error then starts with web_gpu.rs's FRONT.
+  // So does one in a ride, which web_gpu.rs's RIDE starts (P336: a phone's Safari broke every ride's first frame, and
+  // its menus, still on WebGPU, only led to the next ride breaking the same way).
   let drawing = '';
   let drawn = false;
   const fallBack = why => {
+    const rode = drawing === 'webgpu' && String(why).includes('webgpu failed in a ride: ');
     const front = drawing === 'webgpu' && String(why).startsWith('webgpu failed in the front end: ');
-    if ((drawn && !front) || !drawing || drawing === 'software') return false;
+    if ((drawn && !front && !rode) || !drawing || drawing === 'software') return false;
     const next = new URLSearchParams(location.search);
     next.delete('webgl2');
     next.set(drawing === 'webgpu' ? 'webgl2' : 'software', '');
-    console.log(`openmx: ${drawing} failed ${front ? 'in the front end' : 'before its first frame'} (${why}); starting again on ${drawing === 'webgpu' ? 'webgl2' : 'software'}`);
+    console.log(`openmx: ${drawing} failed ${rode ? 'in a ride' : front ? 'in the front end' : 'before its first frame'} (${why}); starting again on ${drawing === 'webgpu' ? 'webgl2' : 'software'}`);
     location.replace(`${location.pathname}?${next.toString().replace(/=(&|$)/g, '$1')}`);
     return true;
   };

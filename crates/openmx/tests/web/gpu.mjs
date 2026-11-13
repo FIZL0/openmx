@@ -11,7 +11,13 @@
 // With OPENMX_GPU_FAULT set to a count (P257), worker.js is served with a fault ahead of it: after that many WebGPU
 // frames the device is asked for a texture past any limit, a real WebGPU validation error, once; OPENMX_GPU_WANT then
 // names the API the run waits to see drawn (the page's fallback's). With OPENMX_GPU_LOG set (P257b) the page keeps its
-// log (`?fps`), and the JSON's last field, `log`, is what its Save log would download. Prints one JSON line:
+// log (`?fps`), and the JSON's last field, `log`, is what its Save log would download. With OPENMX_GPU_LIMITS=iphone
+// (P336) every WebGPU limit the worker reads is no more than the user's iPhone's (Safari, iOS 18.7). With
+// OPENMX_GPU_BREAK set to `label,frames` (P336), the first WebGPU command encoder labelled `label` made after that many
+// frames is broken (a debug group popped that was never pushed), as WebKit finds an encoder broken by a command in it:
+// the run then waits for the page's fallback as with a fault. With OPENMX_GPU_FRAMES set, the page is watched until it
+// has shown that many pictures (the worker's counts a second, summed; at most two minutes) rather than for SECONDS.
+// Prints one JSON line:
 // { state, gpu, drawn, fps: [per second...], lit, pixels, png, log? } — `gpu` what the page says draws (worker.js's `gpu`),
 // `drawn` its first GPU frame, `fps` the page's pictures a second as worker.js counts them, and `lit` how many of the
 // last screenshot's `pixels` are not black. The screenshot is written to <out.png>.
@@ -28,6 +34,42 @@ const ARGS = process.env.OPENMX_GPU_ARGS ?? '--ride';
 const FAULT = process.env.OPENMX_GPU_FAULT;
 const WANT = process.env.OPENMX_GPU_WANT ?? '';
 const LOG = !!process.env.OPENMX_GPU_LOG;
+const LIMITS = process.env.OPENMX_GPU_LIMITS;
+const BREAK = process.env.OPENMX_GPU_BREAK;
+const FRAMES = Number(process.env.OPENMX_GPU_FRAMES ?? 0);
+// The user's iPhone's limits (context/p336's log, the adapter's): each limit read is the lesser of the browser's own
+// and these.
+const iphone = `(() => {
+  if (typeof GPUSupportedLimits === 'undefined') return;
+  const caps = { maxTextureDimension2D: 16384, maxTextureArrayLayers: 2048, maxBufferSize: 1073741824,
+    maxSampledTexturesPerShaderStage: 44, maxSamplersPerShaderStage: 22, maxBindGroups: 11,
+    maxInterStageShaderVariables: 31 };
+  for (const [k, cap] of Object.entries(caps)) {
+    const d = Object.getOwnPropertyDescriptor(GPUSupportedLimits.prototype, k);
+    if (!d?.get) continue;
+    Object.defineProperty(GPUSupportedLimits.prototype, k, { ...d, get() { return Math.min(d.get.call(this), cap); } });
+  }
+  console.log("limits: an iPhone's");
+})();
+`;
+// The break: frames counted as the fault counts them, and the encoder labelled so broken once.
+const broken = (label, frames) => `(() => {
+  if (typeof GPUDevice === 'undefined') return;
+  let shown = 0, done = false;
+  const get = GPUCanvasContext.prototype.getCurrentTexture;
+  GPUCanvasContext.prototype.getCurrentTexture = function () { shown++; return get.call(this); };
+  const make = GPUDevice.prototype.createCommandEncoder;
+  GPUDevice.prototype.createCommandEncoder = function (d) {
+    const e = make.call(this, d);
+    if (!done && shown >= ${Number(frames)} && d?.label === ${JSON.stringify(label)}) {
+      done = true;
+      console.log('break: the encoder of ' + d.label + ' at WebGPU frame ' + shown);
+      e.popDebugGroup();
+    }
+    return e;
+  };
+})();
+`;
 // The fault: the device the canvas is configured with, and the frames it gives, counted.
 const fault = frames => `(() => {
   if (typeof GPUCanvasContext === 'undefined') return;
@@ -60,6 +102,8 @@ const server = http.createServer((req, res) => {
     // OPFS refused, as chromium.mjs's --no-opfs: the picked file is read where it is, and nothing is copied
     if (p === '/index.html') b = Buffer.from(String(b).replace('opfs = true;', 'opfs = false;'));
     if (p === '/worker.js' && FAULT) b = Buffer.concat([Buffer.from(fault(FAULT)), b]);
+    if (p === '/worker.js' && BREAK) b = Buffer.concat([Buffer.from(broken(...BREAK.split(','))), b]);
+    if (p === '/worker.js' && LIMITS === 'iphone') b = Buffer.concat([Buffer.from(iphone), b]);
     res.writeHead(200, { 'content-type': types[path.extname(f)] ?? 'application/octet-stream' });
     res.end(b);
   });
@@ -152,7 +196,8 @@ if (d.state === 'failed' || !(d.drawn?.startsWith(WANT) || d.gpu === 'software')
 
 // the ride: its pictures a second, as the worker counts them, each second for SECONDS
 const fps = [];
-for (let s = 0; s < SECONDS; s++) {
+const shown = () => fps.reduce((a, b) => a + b, 0);
+for (let s = 0; FRAMES ? shown() < FRAMES && s < 120 : s < SECONDS; s++) {
   await new Promise(r => setTimeout(r, 1000));
   d = await data();
   fps.push(Number(d.fps ?? 0));
