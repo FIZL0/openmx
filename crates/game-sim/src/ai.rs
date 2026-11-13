@@ -2554,6 +2554,377 @@ pub fn habits(h: &mut Habits, spot_point: Option<&mut dyn FnMut(&mut Vf)>, rng: 
     }
 }
 
+// --- the base AI's mode drivers (S314) -----------------------------------------------------------------
+
+/// The two drivers [`update_base`] runs through [`Steps::mode_two`] and [`Steps::mode_four`]: the race
+/// driver (mode 2, what a race's AI riders run: kinds 0 and 1 of [`spawn_mode`]) and the gate driver
+/// (mode 4). Each sets the brain's heading and target speed and ends in its own tail; the queries and
+/// the brain's own slots they call are [`Calls`], each a piece ported (or not) on its own.
+///
+/// An AI brain carries no listeners for [`listener_walk`] to tell: in sx01's race image and in free09's
+/// free ride every AI brain's list is empty and its listening bit down.
+pub mod drive {
+    use super::flag::{NO_RIDER_SWEEP, QUIET_AREA};
+    use super::follow::{ASSIST, AVOIDS, SWEEP_BY_BIKE};
+    use super::{add, op, scale, sub, unit};
+    use crate::race::{Crossing, Seen, Spot};
+    use ps2_float::fpu::Acc;
+    use ps2_float::{F, Vf, fpu};
+
+    /// The brain's flag word: run the brain's speed step ([`Calls::slow`]) on the target speed.
+    pub const SLOWS: u64 = 0x400;
+    /// The brain's flag word: the gate driver watches the card's next gate for a pass beside it.
+    pub const WATCH_GATE: u64 = 0x4000_0000;
+    /// The brain's flag word: the gate driver is riding back along the path to the gate it missed.
+    /// The original sets it as a sign-extended word, so every bit from 31 up goes up and down together.
+    pub const TURNING_BACK: u64 = 0xffff_ffff_8000_0000;
+
+    /// A race card's flag word ([`crate::race::card_flags`]): the card takes part.
+    pub const CARD_TAKING_PART: u64 = 0x2;
+    /// A race card's flag word: in a fast-lap attack, the card is on its run.
+    pub const CARD_ON_RUN: u64 = 0x100;
+    /// The race kind ([`crate::race::race_kind`]) the race driver holds a card off its run in.
+    pub const FAST_LAP: i32 = 4;
+
+    /// The gate flag ([`crate::race::flags`]) that makes a gate a side gate: its facing is `side` and
+    /// its target speed its own.
+    pub const SIDE_GATE: u32 = 0x20;
+
+    /// What the race driver aims at with no spot kept on its card: the rider's own position, and this
+    /// as the goal's speed.
+    pub const NO_GOAL_SPEED: f32 = 1000.0;
+    /// The fifth number the gate driver hands its seek hand-off (which does not read it).
+    pub const GATE_CONE: u32 = 0x3f34_fdf4;
+
+    /// The brain's fields the drivers read and write.
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    pub struct Brain {
+        /// The flag word.
+        pub flags: u64,
+        /// The rider's speed, forward axis and position, as the rider-to-brain copy left them.
+        pub speed: F,
+        pub forward: Vf,
+        pub position: Vf,
+        /// The controller's outputs, which a card out of the race zeroes: the throttle, the brake, the
+        /// bar and the lean.
+        pub throttle: F,
+        pub brake: F,
+        pub steer: F,
+        pub pitch: F,
+        /// The aim point, the heading and the target speed.
+        pub aim: Vf,
+        pub heading: Vf,
+        pub target_speed: F,
+        /// What [`ASSIST`] hands the rider assist: the heading's `x` and `z` times the target speed.
+        pub assist_x: F,
+        pub assist_z: F,
+        /// Where on the AI's path net the rider is (its path word 0: not placed yet).
+        pub spot: Spot,
+        /// The seek's longest reach.
+        pub reach_max: F,
+        /// The gate driver's target speed at a gate square on, what it gains as the heading turns off
+        /// the forward, and how far short of the gate it aims.
+        pub gate_speed: F,
+        pub gate_gain: F,
+        pub gate_lead: F,
+        /// The race driver's goal: the word its reach and route follower are told, and its speed.
+        pub goal_word: u32,
+        pub goal_speed: F,
+        /// The target speed as the race driver left it before its speed step.
+        pub last_speed: F,
+    }
+
+    /// One gate as the gate driver reads it.
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    pub struct Gate {
+        /// The gate's flags ([`SIDE_GATE`], and the crossing test's).
+        pub flags: u32,
+        /// The middle of its bottom edge, and the way a rider passes it.
+        pub centre: Vf,
+        pub normal: Vf,
+        /// A side gate's facing, used instead of `normal`, and its own target speed.
+        pub side: Vf,
+        pub speed: F,
+        /// Where the gate stands on the AI's path net.
+        pub spot: Spot,
+    }
+
+    /// The rider's race card, as the drivers read it.
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    pub struct Card {
+        pub flags: u64,
+        /// The path distance to the line from the kept spot, and from the rider's own.
+        pub to_line_kept: F,
+        pub to_line: F,
+        /// The card's on-the-track word.
+        pub on_track: u32,
+        /// Where the card saw its rider, now and the tick before.
+        pub seen: Seen,
+        /// The spot the path tests keep (its path word 0: none).
+        pub kept_spot: Spot,
+        /// The card's next gate.
+        pub gate: Option<Gate>,
+    }
+
+    /// The race object, as the drivers read it.
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    pub struct Race {
+        /// [`crate::race::race_kind`].
+        pub kind: i32,
+        /// The race track's number the race driver's reach is told (the track's `+0x38`, 200 as the
+        /// track is built).
+        pub track_reach: F,
+        /// The spot the track's line stands at: the race driver goes only once both its words are set.
+        pub line_spot: Spot,
+    }
+
+    /// What the drivers call out to, each as the original calls it.
+    pub trait Calls {
+        /// The race track's point for a spot (the path spot point on the race's own track).
+        fn spot_point(&mut self, spot: Spot) -> Vf;
+        /// Place the rider on the AI's path net: the path spot at its position, into [`Brain::spot`].
+        fn place(&mut self, b: &mut Brain);
+        /// The brain's path reach (its vt+0x78) for a point, with `a` and `b`.
+        fn reach(&mut self, b: &mut Brain, point: Vf, a: F, bb: F) -> F;
+        /// The brain's reach along its own spot (its vt+0x7c, [`path_reach`]) with `a`.
+        fn path_reach(&mut self, b: &mut Brain, a: F) -> F;
+        /// The brain's route follower (its vt+0x8c), told `follow`, `dt` and the reach: sets the aim,
+        /// the heading and the target speed.
+        fn route_follow(&mut self, b: &mut Brain, follow: u32, dt: F, reach: F);
+        /// The start gate's crossing test of the card's step.
+        fn crossed(&mut self, gate: &Gate, seen: Seen) -> Crossing;
+        /// The way along the AI's path net from one spot to another (paths kept off refused).
+        fn distance(&mut self, from: Spot, to: Spot) -> F;
+        /// The path look-ahead from `from`, into [`Brain::spot`], with the brain's draws.
+        fn look_ahead(&mut self, b: &mut Brain, from: Spot, reach: F, speed: F, limit: F);
+        /// The brain's seek reach (vt+0x80) and hand-off (vt+0x94).
+        fn seek_reach(&mut self, b: &mut Brain, point: Vf, dir: Vf) -> F;
+        #[allow(clippy::too_many_arguments)]
+        fn seek_hand_off(&mut self, b: &mut Brain, point: Vf, dir: Vf, speed: F, distance: F, lead: F, cone: F, reach: F);
+        /// The avoidance (vt+0x74) on the heading and the target speed, under [`AVOIDS`].
+        fn avoid(&mut self, b: &mut Brain);
+        /// The trick plan (vt+0x84).
+        fn plan(&mut self, b: &mut Brain, dt: F);
+        /// The brain's speed step on the target speed (vt+0xa0), under [`SLOWS`].
+        fn slow(&mut self, b: &mut Brain);
+        /// The interface's rider assist, under [`ASSIST`].
+        fn assist(&mut self, b: &mut Brain, dt: F);
+    }
+
+    /// The controls a card out of the race leaves the bike: nothing.
+    fn let_go(b: &mut Brain) {
+        (b.steer, b.pitch, b.throttle, b.brake) = (F(0.0), F(0.0), F(0.0), F(0.0));
+    }
+
+    /// The race driver (the brain's vt+0x98).
+    ///
+    /// In a fast-lap attack ([`FAST_LAP`]) a card off its run lets go of the controls and answers
+    /// true. With no race, no card or no path net it answers false; a card not taking part lets go and
+    /// answers true; a track whose line has no spot yet answers false.
+    ///
+    /// Then the goal: with a spot kept on the card it is the race track's point there, the card's
+    /// distance to the line from it the goal's speed and the card's on-the-track word the goal's word;
+    /// without, the rider's own position, [`NO_GOAL_SPEED`] and 1. The reach for it (`a` the card's
+    /// distance from its kept spot, `b` the track's number) goes to the route follower with the goal's
+    /// word.
+    ///
+    /// The tail: under [`SWEEP_BY_BIKE`], [`NO_RIDER_SWEEP`] and [`QUIET_AREA`] go up with the card on
+    /// the track and down off it; the avoidance under [`AVOIDS`]; the trick plan; the target speed is
+    /// kept as [`Brain::last_speed`]; the speed step under [`SLOWS`]; under [`ASSIST`] the heading's `x`
+    /// and `z` times the target speed and the rider assist. True.
+    ///
+    /// The original does not test the card in the fast-lap check, nor the race's track: a `None` card
+    /// there passes the check by.
+    pub fn mode_two(b: &mut Brain, race: Option<&Race>, card: Option<&Card>, net: bool, c: &mut dyn Calls, dt: F) -> bool {
+        if let (Some(r), Some(k)) = (race, card) {
+            if r.kind == FAST_LAP && k.flags & CARD_ON_RUN == 0 {
+                let_go(b);
+                return true;
+            }
+        }
+        let (Some(race), Some(card)) = (race, card) else { return false };
+        if !net {
+            return false;
+        }
+        if card.flags & CARD_TAKING_PART == 0 {
+            let_go(b);
+            return true;
+        }
+        if race.line_spot.path == 0 || race.line_spot.piece == 0 {
+            return false;
+        }
+        let point = if card.kept_spot.path != 0 {
+            let p = c.spot_point(card.kept_spot);
+            b.goal_speed = card.to_line_kept;
+            b.goal_word = card.on_track;
+            p
+        } else {
+            b.goal_speed = F(NO_GOAL_SPEED);
+            b.goal_word = 1;
+            b.position
+        };
+        let reach = c.reach(b, point, card.to_line_kept, race.track_reach);
+        let follow = b.goal_word;
+        c.route_follow(b, follow, dt, reach);
+
+        if b.flags & SWEEP_BY_BIKE != 0 {
+            if card.on_track != 0 {
+                b.flags |= NO_RIDER_SWEEP | QUIET_AREA;
+            } else {
+                b.flags &= !(NO_RIDER_SWEEP | QUIET_AREA);
+            }
+        }
+        if b.flags & AVOIDS != 0 {
+            c.avoid(b);
+        }
+        c.plan(b, dt);
+        b.last_speed = b.target_speed;
+        tail(b, c, dt);
+        true
+    }
+
+    /// Both drivers' last two steps: the speed step and the assist.
+    fn tail(b: &mut Brain, c: &mut dyn Calls, dt: F) {
+        if b.flags & SLOWS != 0 {
+            c.slow(b);
+        }
+        if b.flags & ASSIST != 0 {
+            b.assist_x = F(b.heading.x()) * b.target_speed;
+            b.assist_z = F(b.heading.z()) * b.target_speed;
+            c.assist(b, dt);
+        }
+    }
+
+    /// `a.x·b.x + a.y·b.y + a.z·b.z` on the FPU's accumulator.
+    fn dot(a: Vf, b: Vf) -> F {
+        Acc::mula(a.x(), b.x()).madda(a.y(), b.y()).madd(a.z(), b.z())
+    }
+
+    /// The gate's facing toward the rider: its `side` on a [`SIDE_GATE`], else its `normal`, turned
+    /// round (`x`, `y`, `z` negated, `w` kept) when it points the way the rider faces.
+    fn facing(gate: &Gate, forward: Vf) -> Vf {
+        let n = if gate.flags & SIDE_GATE != 0 { gate.side } else { gate.normal };
+        if dot(forward, n) <= F(0.0) {
+            n
+        } else {
+            Vf::new(fpu::neg(n.x()), fpu::neg(n.y()), fpu::neg(n.z()), n.w())
+        }
+    }
+
+    /// The gate's facing the other way round from [`facing`]: turned to run along `forward`, for the
+    /// seek and the side gate's hand-off.
+    fn along(gate: &Gate, forward: Vf) -> Vf {
+        let n = if gate.flags & SIDE_GATE != 0 { gate.side } else { gate.normal };
+        if dot(forward, n) <= F(0.0) {
+            Vf::new(fpu::neg(n.x()), fpu::neg(n.y()), fpu::neg(n.z()), n.w())
+        } else {
+            n
+        }
+    }
+
+    /// The gate driver (the brain's vt+0x9c).
+    ///
+    /// With no race or no card it answers false; a card not taking part lets go of the controls and
+    /// answers true; with neither a path net nor a next gate it answers false.
+    ///
+    /// On a path net: an unplaced rider is placed; the path reach (`a` the card's distance from its
+    /// kept spot) goes to the route follower with the word 1. Under [`WATCH_GATE`], with a next gate,
+    /// a step that passes it beside ([`Crossing::Beside`]) sets [`TURNING_BACK`]; while that is up the
+    /// way to the gate is measured both ways along the net: under the gate's lead, or further there
+    /// than back, the rider looks ahead from the net's first path along the way it has come (the
+    /// look-ahead's reach that way less the path reach, its limit that way); otherwise
+    /// [`TURNING_BACK`] goes down.
+    ///
+    /// With no net it aims at the next gate: [`Brain::gate_lead`] short of the gate along its facing
+    /// toward the rider (the card's distance to the line when nearer), less the seek's longest reach.
+    /// The heading is the flat unit way there; the target speed [`Brain::gate_speed`] plus, as the
+    /// heading turns off the forward, the [`Brain::gate_gain`] (on a side gate: on toward the gate's
+    /// own speed). The seek reach and hand-off take the gate's centre and its facing turned the other
+    /// way ([`along`]); a plain gate's hand-off takes its normal as it is, and the gate speed plus the
+    /// gain as the speed.
+    ///
+    /// The tail: the avoidance under [`AVOIDS`], the trick plan, the speed step under [`SLOWS`], and
+    /// the assist under [`ASSIST`]. True.
+    pub fn mode_four(b: &mut Brain, race: bool, card: Option<&Card>, net: bool, c: &mut dyn Calls, dt: F) -> bool {
+        let Some(card) = card.filter(|_| race) else { return false };
+        if card.flags & CARD_TAKING_PART == 0 {
+            let_go(b);
+            return true;
+        }
+        if !net && card.gate.is_none() {
+            return false;
+        }
+        if net {
+            if b.spot.path == 0 {
+                c.place(b);
+            }
+            let reach = c.path_reach(b, card.to_line_kept);
+            c.route_follow(b, 1, dt, reach);
+            if b.flags & WATCH_GATE != 0 {
+                if let Some(gate) = &card.gate {
+                    if c.crossed(gate, card.seen) == Crossing::Beside {
+                        b.flags |= TURNING_BACK;
+                    }
+                    if b.flags & TURNING_BACK != 0 {
+                        let there = c.distance(b.spot, gate.spot);
+                        let back = c.distance(gate.spot, b.spot);
+                        if op(there) < op(b.gate_lead) || !(op(there) <= op(back)) {
+                            let start = Spot::on(0, 0, F(0.0));
+                            let way = c.distance(start, b.spot);
+                            c.look_ahead(b, start, way - reach, b.speed, way);
+                        } else {
+                            b.flags &= !TURNING_BACK;
+                        }
+                    }
+                }
+            }
+        } else if let Some(gate) = &card.gate {
+            let toward = facing(gate, b.forward);
+            let short = if op(card.to_line) <= op(b.gate_lead) { card.to_line } else { b.gate_lead };
+            b.aim = add(gate.centre, scale(toward, short - b.reach_max));
+            let way = sub(b.aim, b.position);
+            b.heading = unit(Vf::new(way.x(), 0.0, way.z(), way.w()));
+            let turn = dot(b.heading, b.forward).abs();
+            b.target_speed = if gate.flags & SIDE_GATE != 0 {
+                b.gate_speed + (gate.speed - b.gate_speed) * turn
+            } else {
+                b.gate_speed + b.gate_gain * turn
+            };
+            let toward = along(gate, b.forward);
+            let reach = c.seek_reach(b, gate.centre, toward);
+            let cone = F(f32::from_bits(GATE_CONE));
+            if gate.flags & SIDE_GATE != 0 {
+                c.seek_hand_off(b, gate.centre, toward, gate.speed, card.to_line, b.gate_lead, cone, reach);
+            } else {
+                let speed = b.gate_gain + b.gate_speed;
+                c.seek_hand_off(b, gate.centre, gate.normal, speed, card.to_line, b.gate_lead, cone, reach);
+            }
+        }
+
+        if b.flags & AVOIDS != 0 {
+            c.avoid(b);
+        }
+        c.plan(b, dt);
+        tail(b, c, dt);
+        true
+    }
+
+    /// The brain's reach along its own spot (its vt+0x7c): `base` plus `gain` times the flat distance
+    /// from the rider to the net's `point` at [`Brain::spot`], at most `max`. With `keep_last` (the
+    /// card's [`crate::race::card_flags::OUT`]) the rider's position is first kept in `last`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn path_reach(position: Vf, point: Vf, base: F, gain: F, max: F, keep_last: bool, last: &mut Vf) -> F {
+        if keep_last {
+            *last = position;
+        }
+        let dx = F(point.x()) - F(position.x());
+        let dz = F(point.z()) - F(position.z());
+        let d = Acc::mula(dx, dx).madd(dz, dz).sqrt();
+        let out = base + gain * d;
+        if out <= op(max) { out } else { max }
+    }
+}
+
 // --- the free-ride target seeker (S282a) -------------------------------------------------------------
 
 /// How an AI rider with no path to follow gets round a free-ride map (S282a): it picks a jump, rides

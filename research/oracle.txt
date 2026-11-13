@@ -1848,6 +1848,39 @@ ai_update_base              boot 0x00282af0 VehicleAI's update: ai_update's whol
 #                                           vt+0x90; vt+0x28 under iface && 0x200000; vt+0xa8 under 0x4000;
 #                                           interface vt+0xc (no null test); answer & ai_listener_walk.
 #                                           Ported as ai::update_base, oracled (tests/ai.rs)
+ai_race_drive               boot 0x00284de0 VehicleAI vt+0x98, ai_update_base's mode 2 (a race's AI riders:
+#                                           mode 2 on all three of s282c-sx01-race's brains): race +0x60
+#                                           == 4 && !(card+8 & 0x100) -> zero +0xe0/+0xe4/+0xf0/+0xf4, 1;
+#                                           no race/card/net(+0xdc) 0; !(card+8 & 2) zero, 1; race+0x68
+#                                           ->+0x5c (the line gate) +0x94/+0x98 both set or 0. card +0x94
+#                                           set: path_spot_point(race+0x68, card+0x94, sp+0x30) (answer not
+#                                           read), +0x320 = card+0x10, +0x31c = card+0x40; else sp+0x30 =
+#                                           +0xc0, +0x320 = 1000, +0x31c = 1. vt+0x78 (ai, net, +0x31c,
+#                                           sp+0x30, f12 card+0x10, f13 track+0x38), vt+0x8c (ai, net,
+#                                           +0x31c, +0x1e0, +0x1d0, 0, dt, reach). Tail: 0x1000 -> 0xc0 by
+#                                           card+0x40; 1 -> vt+0x74; vt+0x84; +0x324 = +0x1e0; 0x400 ->
+#                                           vt+0xa0(+0x1e0); 0x800 -> +0x1c0/+0x1c8, interface vt+0x18
+#                                           (no null test). 1. S314: ai::drive::mode_two, oracled
+ai_gate_drive               boot 0x00285090 VehicleAI vt+0x9c, ai_update_base's mode 4 (not seen in an image):
+#                                           no race/card 0; !(card+8 & 2) zero, 1; no net and no card+0x80
+#                                           gate 0. Net: +0x220 == 0 -> path_spot(net, +0xc0, +0x220, 0,1,0);
+#                                           vt+0x7c (ai, net, +0xc0, f12 card+0x10); vt+0x8c (.., 1, ..);
+#                                           0x40000000 && gate: start_gate_crossed(gate, card+0x60, +0x70)
+#                                           == 2 -> flags |= 0xffffffff80000000; while set path_distance
+#                                           both ways +0x220 <-> gate+0x94; there < +0x25c or there > back:
+#                                           path_look_ahead from (net+0x4c, its +0x10, 0); else clear bits
+#                                           31..63. No net: aim +0x1b0 = gate+0x40 + facing * (min(card
+#                                           +0x14, +0x25c) - +0x214), facing gate+0x50 (+0xb0 on flag 0x20)
+#                                           against +0xb0; heading flat unit; +0x1e0 by +0x254/+0x258 or
+#                                           gate+0xa4; vt+0x80, vt+0x94 (f15 0x3f34fdf4). Tail as
+#                                           ai_race_drive without 0x1000 and +0x324. ai::drive::mode_four
+ai_own_path_reach           boot 0x00283460 VehicleAI vt+0x7c (ai, net, -, f12 unused): card+8 & 1 -> +0x290 =
+#                                           +0xc0; path_spot_point(net, +0x220, sp); +0x210 + +0x218 * flat
+#                                           distance, at most +0x214. S314: ai::drive::path_reach
+ai_speed_step               boot 0x00388120 MXVehicleAI vt+0xa0 (ai, speed*): +0x224 path set and its +4 bit 4
+#                                           clear -> 0x00286960 (the speed cap off the race leader's
+#                                           progress, race +0xa4), else 0. Not ported (S314 calls it)
+mx_vehicle_ai_vtable        boot 0x0045c4a0 MXVehicleAI's vtable (VehicleAI's is 0x00455390)
 ai_stuck_rescue             boot 0x00281460 (rider) interface vt+0x40 (thunk 0x00281c00): app +0x3cc ->
 #                                           +0x74 race object; none or its +0x34 == 3 -> rider's vtable at
 #                                           +0x48, slot +0x138 (rider, 1, 1); else ride_reset_request
