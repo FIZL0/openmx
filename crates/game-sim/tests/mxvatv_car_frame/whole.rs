@@ -6,7 +6,7 @@ use game_sim::noise::SmoothNoise;
 use std::collections::BTreeSet;
 
 /// Desert Oasis's terrain file, out of `mc02.res` (MD37a's copy; MD39a's buggy spawns there).
-fn terrain_file() -> Option<Vec<u8>> {
+pub(crate) fn terrain_file() -> Option<Vec<u8>> {
     let kit = Kit::load().map_err(|w| skip(&w)).ok()?;
     let res = kit.ctx("mxvatv-ps2/md37a").join("mc02.res");
     if !res.exists() {
@@ -21,23 +21,23 @@ fn terrain_file() -> Option<Vec<u8>> {
 /// The shared smooth noise's tables, the word that says they are not built yet, and the knot
 /// each sample leaves (MD125 faked the noise; here it is [`SmoothNoise::at_accumulated`] on the
 /// image's tables, as `mxvatv_bike_ride`'s).
-const NOISE_PERM: u32 = 0x003f_3540;
-const NOISE_G1: u32 = 0x003f_6580;
-const NOISE_UNBUILT: u32 = 0x0038_f708;
-const NOISE_KNOT: u32 = 0x003f_6d88;
+pub(crate) const NOISE_PERM: u32 = 0x003f_3540;
+pub(crate) const NOISE_G1: u32 = 0x003f_6580;
+pub(crate) const NOISE_UNBUILT: u32 = 0x0038_f708;
+pub(crate) const NOISE_KNOT: u32 = 0x003f_6d88;
 /// The sort's ray probe's flags byte and its struck bit (MD127's [`sort::FLAGS`]).
 const STRUCK: u8 = 0x20;
 
 /// The port's world round the car: both ground queries answered by [`atv_ground::query`] on
 /// Desert Oasis, the noise by [`SmoothNoise::at_accumulated`] (keeping the knot the original
 /// leaves), and every other call it is handed listed.
-struct Oasis<'t> {
-    terrain: &'t atv_ground::Terrain<'t>,
-    noise: SmoothNoise,
-    knot: Option<u32>,
+pub(crate) struct Oasis<'t> {
+    pub(crate) terrain: &'t atv_ground::Terrain<'t>,
+    pub(crate) noise: SmoothNoise,
+    pub(crate) knot: Option<u32>,
     /// Each query, by tire (none for the one under the body), and the point asked.
-    asked: Vec<(Option<usize>, [u32; 4])>,
-    rest: Vec<Call>,
+    pub(crate) asked: Vec<(Option<usize>, [u32; 4])>,
+    pub(crate) rest: Vec<Call>,
 }
 
 impl Steps for Oasis<'_> {

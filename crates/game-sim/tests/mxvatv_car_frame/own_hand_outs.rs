@@ -73,8 +73,8 @@ pub(crate) struct HandPtrs {
 }
 
 pub(crate) fn hand_ptrs(ee: &Ee, p: &Ptrs) -> HandPtrs {
-    let terrain = ee.u32_at(CAR + hand::TERRAIN);
-    let parts = [(Part::Riding, ee.u32_at(CAR + hand::RIDING)), (Part::Frame, ee.u32_at(CAR + hand::FRAME))];
+    let terrain = ee.u32_at(car_at() + hand::TERRAIN);
+    let parts = [(Part::Riding, ee.u32_at(car_at() + hand::RIDING)), (Part::Frame, ee.u32_at(car_at() + hand::FRAME))];
     let mut below = Vec::new();
     let mut todo = vec![ee.u32_at(p.node + 0xf4)];
     while let Some(n) = todo.pop() {
@@ -91,7 +91,7 @@ pub(crate) fn hand_ptrs(ee: &Ee, p: &Ptrs) -> HandPtrs {
         parts,
         node_entry: ee.u32_at(p.node + hand::NODE_ENTRY),
         part_entries: parts.map(|(_, a)| ee.u32_at(a + hand::PART_ENTRY)),
-        owner: ee.u32_at(CAR + hand::OWNER),
+        owner: ee.u32_at(car_at() + hand::OWNER),
         below,
     }
 }
@@ -123,19 +123,19 @@ fn collidable(ee: &Ee, a: u32) -> Collidable {
 /// MD128's words of the vehicle read out of RAM, into a [`read_vehicle`]'s.
 pub(crate) fn read_hand_outs(ee: &Ee, p: &Ptrs, o: &OwnPtrs, v: &mut atv_car::Vehicle) {
     let h = hand_ptrs(ee, p);
-    let reset = ee.u8_at(CAR + hand::RESET_BYTE);
+    let reset = ee.u8_at(car_at() + hand::RESET_BYTE);
     assert_eq!(h.extent, o.area, "the world's box is not the terrain's extent ([`generate_hand_outs`] draws one for both)");
     v.area = (h.extent != 0).then(|| game_sim::biplane::Area {
         width: F(ee.f32_at(h.extent + hand::WIDTH)),
         depth: F(ee.f32_at(h.extent + hand::DEPTH)),
     });
-    v.spatial = ee.u32_at(CAR + hand::ENTRY) != 0;
+    v.spatial = ee.u32_at(car_at() + hand::ENTRY) != 0;
     let part = |a: u32| h.parts.iter().find(|&&(_, x)| a != 0 && x == a).map(|&(q, _)| q);
     let mut c = Collidables {
         sync: reset & 1 != 0,
-        riding: part(ee.u32_at(CAR + hand::RIDING)),
-        frame: part(ee.u32_at(CAR + hand::FRAME)),
-        active: part(ee.u32_at(CAR + hand::ACTIVE)),
+        riding: part(ee.u32_at(car_at() + hand::RIDING)),
+        frame: part(ee.u32_at(car_at() + hand::FRAME)),
+        active: part(ee.u32_at(car_at() + hand::ACTIVE)),
         ..Default::default()
     };
     for &(q, a) in &h.parts {
@@ -143,7 +143,7 @@ pub(crate) fn read_hand_outs(ee: &Ee, p: &Ptrs, o: &OwnPtrs, v: &mut atv_car::Ve
     }
     v.collidables = c;
     v.reset_flags = reset & !1;
-    v.flag_word = ee.u32_at(CAR + hand::FLAG_WORD);
+    v.flag_word = ee.u32_at(car_at() + hand::FLAG_WORD);
     v.owned = h.owner != 0;
     // Only an empty list is read: the resolution's contacts are not this test's (MD75e1's).
     v.held = (ee.u32_at(p.record + hand::COUNT) == 0).then(game_sim::atv_contact::Held::default);
@@ -175,18 +175,18 @@ pub(crate) fn hand_words(ee: &Ee, v: &atv_car::Vehicle, p: &Ptrs, o: &OwnPtrs) -
     }
     // The car's own entry: the image has none, so a generated one is the node's (the hooked move
     // is all that reads it).
-    let entry = match ee.u32_at(CAR + hand::ENTRY) {
+    let entry = match ee.u32_at(car_at() + hand::ENTRY) {
         0 => h.node_entry,
         e => e,
     };
-    out.push((CAR + hand::ENTRY, if v.spatial { entry } else { 0 }));
-    out.push((CAR + hand::FLAG_WORD, v.flag_word));
-    out.push((CAR + hand::OWNER, if v.owned { h.owner } else { 0 }));
+    out.push((car_at() + hand::ENTRY, if v.spatial { entry } else { 0 }));
+    out.push((car_at() + hand::FLAG_WORD, v.flag_word));
+    out.push((car_at() + hand::OWNER, if v.owned { h.owner } else { 0 }));
     let at = |q: Option<Part>| q.map_or(0, |q| h.parts.iter().find(|&&(x, _)| x == q).expect("a held part").1);
     let c = &v.collidables;
-    out.push((CAR + hand::RIDING, at(c.riding)));
-    out.push((CAR + hand::FRAME, at(c.frame)));
-    out.push((CAR + hand::ACTIVE, at(c.active)));
+    out.push((car_at() + hand::RIDING, at(c.riding)));
+    out.push((car_at() + hand::FRAME, at(c.frame)));
+    out.push((car_at() + hand::ACTIVE, at(c.active)));
     for (k, &(q, a)) in h.parts.iter().enumerate() {
         let s = &c.states[slot(q)];
         out.push((a + hand::PART_ENTRY, if s.spatial { h.part_entries[k] } else { 0 }));
@@ -227,7 +227,7 @@ pub(crate) fn hand_words(ee: &Ee, v: &atv_car::Vehicle, p: &Ptrs, o: &OwnPtrs) -
 /// word's other halves the image's.
 pub(crate) fn flag_bytes_word(ee: &Ee, v: &atv_car::Vehicle) -> u32 {
     let reset = v.reset_flags | u8::from(v.collidables.sync);
-    (ee.u32_at(CAR + hand::RESET_BYTE) & 0xffff_0000) | u32::from(v.flags) << 8 | u32::from(reset)
+    (ee.u32_at(car_at() + hand::RESET_BYTE) & 0xffff_0000) | u32::from(v.flags) << 8 | u32::from(reset)
 }
 
 /// The blocks MD128's calls write in, beyond MD106b's: the two collidables and each subtree node's

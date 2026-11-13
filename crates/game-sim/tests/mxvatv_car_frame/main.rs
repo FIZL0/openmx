@@ -41,6 +41,15 @@ use std::rc::Rc;
 /// SLUS-21104's `$gp`.
 const CAR: u32 = 0x0159_8e10;
 const BUGGY_VTABLE: u32 = 0x003c_ec60;
+
+thread_local! {
+    /// The car the readers read and write: the buggy image's, or a drive's own (MD135).
+    static THE_CAR: std::cell::Cell<u32> = const { std::cell::Cell::new(CAR) };
+}
+
+fn car_at() -> u32 {
+    THE_CAR.with(std::cell::Cell::get)
+}
 const WORLD: u32 = 0x0065_bc0c;
 const GP: u64 = 0x003d_baf0;
 const WORLD_STEP: u32 = 0x0049_6b70;
@@ -242,24 +251,24 @@ struct Ptrs {
 
 fn ptrs(ee: &Ee) -> Ptrs {
     Ptrs {
-        body: ee.u32_at(CAR + at::BODY),
-        record: ee.u32_at(CAR + at::RECORD),
-        node: ee.u32_at(CAR + at::NODE),
-        engine: ee.u32_at(CAR + at::ENGINE),
-        engine_sound: ee.u32_at(ee.u32_at(CAR + at::ENGINE) + engine::SOUND),
-        tires: at::TIRES.map(|o| ee.u32_at(CAR + o)),
-        ground_world: ee.u32_at(CAR + at::GROUND_WORLD),
-        landing_sound: ee.u32_at(CAR + at::LANDING_SOUND),
-        sort_rays: ee.u32_at(CAR + at::SORT_RAYS),
-        sort_probe: ee.u32_at(CAR + at::SORT_PROBE),
-        tire_worlds: at::TIRES.map(|o| ee.u32_at(ee.u32_at(CAR + o) + at::TIRE_WORLD)),
+        body: ee.u32_at(car_at() + at::BODY),
+        record: ee.u32_at(car_at() + at::RECORD),
+        node: ee.u32_at(car_at() + at::NODE),
+        engine: ee.u32_at(car_at() + at::ENGINE),
+        engine_sound: ee.u32_at(ee.u32_at(car_at() + at::ENGINE) + engine::SOUND),
+        tires: at::TIRES.map(|o| ee.u32_at(car_at() + o)),
+        ground_world: ee.u32_at(car_at() + at::GROUND_WORLD),
+        landing_sound: ee.u32_at(car_at() + at::LANDING_SOUND),
+        sort_rays: ee.u32_at(car_at() + at::SORT_RAYS),
+        sort_probe: ee.u32_at(car_at() + at::SORT_PROBE),
+        tire_worlds: at::TIRES.map(|o| ee.u32_at(ee.u32_at(car_at() + o) + at::TIRE_WORLD)),
     }
 }
 
 /// The car as [`atv_car`] holds it, read out of RAM. The ground's normal is the query's answer and
 /// lives on the stack: it reads as zero.
 fn read_car(ee: &Ee, p: &Ptrs) -> Car {
-    let c = |o: u32| CAR + o;
+    let c = |o: u32| car_at() + o;
     let b = |o: u32| ee.u32_at(c(o)) != 0;
     let f = |o: u32| F(ee.f32_at(c(o)));
     let v = |o: u32| get_v(ee, c(o));
@@ -331,7 +340,7 @@ fn read_tire(ee: &Ee, t: u32) -> Tire {
 fn car_words(car: &Car, p: &Ptrs) -> Vec<(u32, u32)> {
     let mut out = Vec::new();
     let mut w = |a: u32, x: u32| out.push((a, x));
-    let c = |o: u32| CAR + o;
+    let c = |o: u32| car_at() + o;
     w(c(at::STATE), car.state);
     w(c(at::YAW_RATE_LIMIT), car.yaw_rate_limit.to_bits());
     w(c(at::WAS_GROUNDED), word(car.was_grounded));
@@ -1022,7 +1031,7 @@ impl Mx {
 }
 
 fn read_mx(ee: &Ee, p: &Ptrs) -> Mx {
-    let c = |o: u32| CAR + o;
+    let c = |o: u32| car_at() + o;
     let f = |o: u32| F(ee.f32_at(c(o)));
     let v = |o: u32| get_v(ee, c(o));
     let b = |o: u32| ee.u32_at(c(o)) != 0;
@@ -1143,7 +1152,7 @@ fn read_mx(ee: &Ee, p: &Ptrs) -> Mx {
 /// Every word [`read_mx`] reads but the gravity block's, where it lives.
 fn mx_words(m: &Mx, p: &Ptrs) -> Vec<(u32, u32)> {
     let mut out = Vec::new();
-    let c = |o: u32| CAR + o;
+    let c = |o: u32| car_at() + o;
     let (k, s) = (&m.keys, &m.state);
     let mut fs: Vec<(u32, F)> = vec![
         (c(mx::TRAVEL_FORWARD), k.cofg_travel_forward),
@@ -1615,10 +1624,10 @@ fn generate_engine(r: &mut Rng, m: &mut Mx, car: &mut Car) {
 fn lever_at(l: Option<Lever>) -> u32 {
     match l {
         None => 0,
-        Some(Lever::Brake) => CAR + mx::BRAKE,
-        Some(Lever::BrakeForce) => CAR + mx::BRAKE_FORCE,
-        Some(Lever::Steer) => CAR + tire::STEER_WORD,
-        Some(Lever::RearSteer) => CAR + tire::REAR_STEER_WORD,
+        Some(Lever::Brake) => car_at() + mx::BRAKE,
+        Some(Lever::BrakeForce) => car_at() + mx::BRAKE_FORCE,
+        Some(Lever::Steer) => car_at() + tire::STEER_WORD,
+        Some(Lever::RearSteer) => car_at() + tire::REAR_STEER_WORD,
     }
 }
 
@@ -2436,6 +2445,7 @@ mod own_calls; // MD106b: SLUS-21104's own calls in the frame, unhooked
 mod whole; // MD106c: the whole frame off the image
 mod class_update; // MD106e: the car classes' update slots, the update's calls unhooked
 mod own_hand_outs; // MD128: what the own calls hand out in turn, unhooked
+mod drives; // MD135: MD107's five drives, the port's frame beside the interpreter's
 
 use own_calls::*;
 use own_hand_outs::*;

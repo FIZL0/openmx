@@ -61,13 +61,13 @@ pub(crate) struct OwnPtrs {
 }
 
 pub(crate) fn own_ptrs(ee: &Ee, p: &Ptrs) -> OwnPtrs {
-    let world = ee.u32_at(CAR + own::WORLD);
+    let world = ee.u32_at(car_at() + own::WORLD);
     let nodes = car_scene_nodes(ee, p.node);
     assert!(nodes.len() <= 4, "the car's node has {} parents, past the 3 a Scene holds", nodes.len() - 1);
     OwnPtrs {
         world,
-        state: ee.u32_at(CAR + own::VEHICLE_STATE),
-        look: ee.u32_at(CAR + own::LOOK),
+        state: ee.u32_at(car_at() + own::VEHICLE_STATE),
+        look: ee.u32_at(car_at() + own::LOOK),
         area: ee.u32_at(world + own::AREA),
         nodes,
     }
@@ -90,24 +90,24 @@ pub(crate) fn read_vehicle(ee: &Ee, p: &Ptrs, o: &OwnPtrs) -> atv_car::Vehicle {
     }
     let mode = ee.u32_at(o.state + own::MODE);
     let mut v = atv_car::Vehicle {
-        wrecks_on: b(CAR + own::WRECKS_ON),
-        bounded: b(CAR + own::BOUNDED),
-        clock: F(ee.f32_at(CAR + own::CLOCK)),
-        max_wreck_time: F(ee.f32_at(CAR + own::MAX_WRECK_TIME)),
-        counting: b(CAR + own::COUNTING),
-        tipped_wreck: b(CAR + own::TIPPED_WRECK),
-        kind: ee.u32_at(CAR + own::KIND),
-        wreck_damping: get_v(ee, CAR + own::WRECK_DAMPING),
-        wreck_inertia: get_v(ee, CAR + own::WRECK_INERTIA),
-        inertia: get_v(ee, CAR + own::INERTIA),
+        wrecks_on: b(car_at() + own::WRECKS_ON),
+        bounded: b(car_at() + own::BOUNDED),
+        clock: F(ee.f32_at(car_at() + own::CLOCK)),
+        max_wreck_time: F(ee.f32_at(car_at() + own::MAX_WRECK_TIME)),
+        counting: b(car_at() + own::COUNTING),
+        tipped_wreck: b(car_at() + own::TIPPED_WRECK),
+        kind: ee.u32_at(car_at() + own::KIND),
+        wreck_damping: get_v(ee, car_at() + own::WRECK_DAMPING),
+        wreck_inertia: get_v(ee, car_at() + own::WRECK_INERTIA),
+        inertia: get_v(ee, car_at() + own::INERTIA),
         body_inertia: get_v(ee, p.body + own::BODY_INERTIA),
         rumble: o.state != 0 && mode == 1 && b(o.state + own::PAD),
-        look: b(CAR + own::LOOK),
+        look: b(car_at() + own::LOOK),
         touching: b(p.record + own::TOUCHING),
         record: p.record != 0,
         gravity: get_v(ee, o.world + own::GRAVITY),
         drag: F(ee.f32_at(o.world + own::DRAG)),
-        flags: ee.u8_at(CAR + own::FLAGS_WORD + 1),
+        flags: ee.u8_at(car_at() + own::FLAGS_WORD + 1),
         scene: game_sim::atv_moto::Scene { nodes },
         subtree: ee.u32_at(p.node + 0xf4) != 0,
         bounds: game_sim::atv_moto::Bounds {
@@ -126,23 +126,23 @@ pub(crate) fn read_vehicle(ee: &Ee, p: &Ptrs, o: &OwnPtrs) -> atv_car::Vehicle {
 pub(crate) fn vehicle_words(ee: &Ee, v: &atv_car::Vehicle, p: &Ptrs, o: &OwnPtrs) -> Vec<(u32, u32)> {
     let mut out = Vec::new();
     let mut w = |a: u32, x: u32| out.push((a, x));
-    w(CAR + own::WRECKS_ON, word(v.wrecks_on));
-    w(CAR + own::BOUNDED, word(v.bounded));
-    w(CAR + own::CLOCK, v.clock.to_bits());
-    w(CAR + own::MAX_WRECK_TIME, v.max_wreck_time.to_bits());
-    w(CAR + own::COUNTING, word(v.counting));
-    w(CAR + own::TIPPED_WRECK, word(v.tipped_wreck));
-    w(CAR + own::KIND, v.kind);
-    w(CAR + own::LOOK, if v.look { o.look } else { 0 });
+    w(car_at() + own::WRECKS_ON, word(v.wrecks_on));
+    w(car_at() + own::BOUNDED, word(v.bounded));
+    w(car_at() + own::CLOCK, v.clock.to_bits());
+    w(car_at() + own::MAX_WRECK_TIME, v.max_wreck_time.to_bits());
+    w(car_at() + own::COUNTING, word(v.counting));
+    w(car_at() + own::TIPPED_WRECK, word(v.tipped_wreck));
+    w(car_at() + own::KIND, v.kind);
+    w(car_at() + own::LOOK, if v.look { o.look } else { 0 });
     w(o.state + own::MODE, if v.rumble { 1 } else { 0 });
     w(p.record + own::TOUCHING, word(v.touching));
     w(o.world + own::DRAG, v.drag.to_bits());
     w(o.world + own::FLOOR, v.bounds.floor.to_bits());
-    w(CAR + own::FLAGS_WORD, flag_bytes_word(ee, v));
+    w(car_at() + own::FLAGS_WORD, flag_bytes_word(ee, v));
     let mut vs = vec![
-        (CAR + own::WRECK_DAMPING, v.wreck_damping),
-        (CAR + own::WRECK_INERTIA, v.wreck_inertia),
-        (CAR + own::INERTIA, v.inertia),
+        (car_at() + own::WRECK_DAMPING, v.wreck_damping),
+        (car_at() + own::WRECK_INERTIA, v.wreck_inertia),
+        (car_at() + own::INERTIA, v.inertia),
         (p.body + own::BODY_INERTIA, v.body_inertia),
         (o.world + own::GRAVITY, v.gravity),
     ];
