@@ -5705,9 +5705,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     if stadium {
         println!("stadium: {} has no map edge", args.track);
     }
+    let league = menu::race::league_of(&args.track);
     let new_rider = |phy: &Phy, at: Vf, heading: Vf| -> Rider {
         let mut rider = Rider::new(phy, mounts, at, heading, stunts.clone());
-        rider.edge_armed &= !stadium;
+        // P332: and the bike builder arms it only at an outdoor event, so a Supercross track's
+        // stadium throws no one either; its grid stands inside the edge's margin.
+        rider.edge_armed &= !stadium && game_sim::off_map::armed(game_sim::off_map::Built::Player, league);
         // A put-back draws the rider at once on the riding pose (P270, the user's ask), not sprung
         // over from the trick or the wreck.
         rider.cut_put_back = true;

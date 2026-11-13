@@ -225,6 +225,23 @@ pub fn race_kind_of(track: &str) -> Option<usize> {
     (0..RACE_KINDS.len()).find(|&k| race_tracks(k).iter().any(|(id, _)| id == track))
 }
 
+/// The league a disc track is ridden in, as the original's bike builder reads it off the event
+/// (P332): a Supercross track (`sxNN`, [`RACE_SUPERCROSS`]) is a stadium, a National
+/// ([`RACE_NATIONALS`]) is outdoors, and everything else — the free-ride towns, the disc worlds —
+/// is a free ride. The builder arms the map edge only outdoors ([`game_sim::off_map::armed`]), so a
+/// Supercross rider is never shot off, however near the stadium's edge the grid stands.
+pub fn league_of(track: &str) -> game_sim::off_map::League {
+    use game_sim::off_map::League;
+    let is = |list: &[(&str, &str)]| list.iter().any(|(id, _)| id.eq_ignore_ascii_case(track));
+    if is(&RACE_SUPERCROSS) {
+        League::Supercross
+    } else if is(&RACE_NATIONALS) {
+        League::Nationals
+    } else {
+        League::FreeRide
+    }
+}
+
 /// The front end's race state: the pick's kind, the setup being made, the race under way and the
 /// last race's results.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -401,6 +418,26 @@ mod tests {
         assert_eq!(nat[0], ("nat01".to_string(), "Seneca Butte".to_string()));
         assert_eq!(race_kind_of("nat05"), Some(1));
         assert_eq!(race_kind_of("free06"), None);
+    }
+
+    /// P332: a Supercross race's bike has no map edge, a National's and a free ride's do — the
+    /// stadium's grid stands inside the 150 ft margin, and an armed edge threw the rider at spawn.
+    #[test]
+    fn only_the_supercross_tracks_disarm_the_edge() {
+        use game_sim::off_map::{Built, League, armed};
+        for (id, _) in race_tracks(0) {
+            assert_eq!(league_of(&id), League::Supercross, "{id}");
+            assert!(!armed(Built::Player, league_of(&id)), "{id}");
+        }
+        assert_eq!(league_of("SX07"), League::Supercross);
+        for (id, _) in race_tracks(1) {
+            assert_eq!(league_of(&id), League::Nationals, "{id}");
+            assert!(armed(Built::Player, league_of(&id)), "{id}");
+        }
+        for id in ["free06", "free09", "world_mxu", "some_mod"] {
+            assert_eq!(league_of(id), League::FreeRide, "{id}");
+            assert!(armed(Built::Player, league_of(id)), "{id}");
+        }
     }
 
     #[test]
