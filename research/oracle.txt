@@ -12192,3 +12192,10 @@ atv_out_of_bounds           atv 0x004a4f20 (vt +0x16c, the bike in a0): body pos
 #                                           xyz = dir * speed, y += 240/root + 0x4180cccd * root (adda/
 #                                           madd); body drag *= 0.5 (0x00526598); rates = (0.5, 0x3ecccccd,
 #                                           0x3f333333) * three rand units, w 1. Returns 1 thrown.
+# F63 — the bike's wheel owner and vehicle through the Steps route (src steps::ground / read_with, quad::Bike
+#   ground_of, quad::Sweep tell / ground / object_cofg; tests/mxvatv_bike_ride.rs
+#   the_steps_routes_owned_wheel_contacts_are_the_originals). Comment rows only. Journal
+#   research/journal/2026-11-13-f63-steps-wheel-owners.
+#   Wheel +0x1f0 owner, +0x1f4 vehicle: set by 0x004a0c80 (F52), zeroed by the wheel clear 0x004a0c30, read by
+#   the contact velocity 0x004a1150 while +0x1a0 is clear (MD74's offsets). Vehicle alone: vtable at
+#   vehicle +4, jalr vt +0xc4 (spin) then vt +0xc0 (velocity), a0 = a stack quadword, a1 = vehicle, v0 = a0.

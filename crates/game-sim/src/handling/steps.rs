@@ -210,6 +210,7 @@ fn blank() -> Bike {
         wheels: Default::default(),
         more: Default::default(),
         ground: Default::default(),
+        ground_of: [(0, 0); 4],
         cofg: Vf::ZERO,
         spins: Default::default(),
         parts: Default::default(),
@@ -473,6 +474,12 @@ fn wheel(k: &mut Bike, i: usize, a: u32, v: &mut impl Visit) {
     v.v(a + 0x1c0, &mut m.ground_point_velocity);
     v.v(a + 0x8c0, &mut m.steer_axis);
 
+    // F63: what the wheel stands on, as the contacts set it: its collision object's owner and its
+    // vehicle (the ground they stand it on is [`ground`]'s, read in [`read`]).
+    let (owner, vehicle) = &mut k.ground_of[i];
+    v.word(a + OWNER, owner);
+    v.word(a + VEHICLE, vehicle);
+
     let d = &mut k.parts.drive[i];
     v.f(a + 0x1d4, &mut d.spin);
     v.f(a + 0x210, &mut d.torque);
@@ -506,26 +513,32 @@ fn wheel(k: &mut Bike, i: usize, a: u32, v: &mut impl Visit) {
     }
 }
 
-/// **The bike at `bike` as a [`Bike`]**, and where its parts are.
+/// **The bike at `bike` as a [`Bike`]**, and where its parts are: [`read_with`], a wheel on a
+/// vehicle alone refused (what it moves at is the vehicle's virtuals').
+pub fn read(m: &impl Words, bike: u32) -> Result<(Bike, At), String> {
+    read_with(m, bike, &mut |_| None)
+}
+
+/// **The bike at `bike` as a [`Bike`]**, and where its parts are, `mover` what a vehicle's two
+/// virtuals answer ([`ground`]).
 ///
 /// Besides [`fields`]' words, what the steps read and do not keep: the start gate's penalty (its
-/// `+0x1d0` above 0), each wheel's ground (on still ground only: a wheel's collision object
-/// `+0x1f0` or mover `+0x1f4` is an error), its brake (the steps take the lever off the quad),
+/// `+0x1d0` above 0), each wheel's ground (F63: [`ground`] off its owner and vehicle, which
+/// [`fields`] keeps), its brake (the steps take the lever off the quad),
 /// [`crate::wheel::Wheel::has_ground`] (`+0x1e0` set), the engine's driven wheels (`+0x90`, `+0x94`)
 /// and the spin's stunt copies the steps take off the drive and the quad wheel. The scene is the
 /// bike's node alone, which is to have no parent (its world frame is its own).
-pub fn read(m: &impl Words, bike: u32) -> Result<(Bike, At), String> {
+pub fn read_with(m: &impl Words, bike: u32, mover: &mut dyn FnMut(u32) -> Option<(Vf, Vf)>) -> Result<(Bike, At), String> {
     let at = at(m, bike)?;
     let mut k = blank();
     fields(&mut k, &at, &mut Read(m));
     let gate = m.word(bike + GATE);
     k.gate_cut = gate != 0 && F::ZERO < m.f(gate + 0x1d0);
     for (&slot, &w) in SLOTS.iter().zip(&at.wheels) {
-        if m.word(w + 0x1f0) != 0 || m.word(w + 0x1f4) != 0 {
-            return Err(format!("the bike's wheel {w:#010x} stands on a collision object or a mover"));
-        }
         k.wheels[slot].has_ground = m.word(w + super::ground::WHEEL_TERRAIN) != 0;
-        k.ground[slot] = crate::atv_wheel::Ground::Still;
+        let (owner, vehicle) = k.ground_of[slot];
+        k.ground[slot] = ground(m, owner, vehicle, &mut *mover)
+            .map_err(|e| format!("the bike's wheel {w:#010x}: {e}"))?;
         let s = &mut k.spins[slot];
         s.brake = match m.word(w + 0x24) {
             0 => None,
@@ -544,6 +557,66 @@ pub fn read(m: &impl Words, bike: u32) -> Result<(Bike, At), String> {
         return Err(format!("the bike's node {:#010x} has a parent, which the scene does not hold", at.node));
     }
     Ok((k, at))
+}
+
+/// A wheel's collision object's owner and its vehicle (the contacts' set-contact writes both).
+pub const OWNER: u32 = 0x1f0;
+pub const VEHICLE: u32 = 0x1f4;
+
+/// **What a wheel with `owner` and `vehicle` stands on** (F63), as its contact velocity reads them:
+/// with an owner, a collision object on a rigid body (the owner's `+0xe4`: its position `+0x70`,
+/// velocity `+0x80`, orientation `+0x190` and spin `+0x1d0`, all the velocity reads) or, with no
+/// body, on a vehicle's chassis (`+0xe0`: its centre of mass `+0x180`, velocity `+0x250` and spin
+/// `+0x280`) placed by the owner's transform (`+0xe8`), the owner's centre of mass `+0x80` and its
+/// world turn `+0x90` besides; with only a vehicle, a mover (its transform `+0x244`, the point it
+/// turns about `+0x180`, and its velocity and spin as `mover` answers its two virtuals, spin asked
+/// first); with neither, still ground. The vehicle beside an owner is not read.
+///
+/// Refused: a transform with a parent or out of date (the velocity would bring it up to date, a
+/// scene update the steps do not hold), a chassis that is not there, and a mover `mover` does not
+/// answer.
+pub fn ground(
+    m: &impl Words,
+    owner: u32,
+    vehicle: u32,
+    mover: &mut dyn FnMut(u32) -> Option<(Vf, Vf)>,
+) -> Result<crate::atv_wheel::Ground, String> {
+    use crate::atv_wheel::{Body, Chassis, Ground, Holder, Mover};
+    let node = |at: u32| -> Result<crate::contact::Node, String> {
+        if m.word(at + 0xf0) != 0 || m.word(at + FLAGS) & CLEAN == 0 {
+            return Err(format!("the transform {at:#010x} has a parent or is out of date"));
+        }
+        Ok(crate::contact::Node { rows: [m.v(at + 0x70), m.v(at + 0x80), m.v(at + 0x90)], origin: m.v(at + 0xa0) })
+    };
+    if owner != 0 {
+        let body = m.word(owner + 0xe4);
+        let on = if body != 0 {
+            Holder::Body(Body {
+                position: m.v(body + 0x70),
+                velocity: m.v(body + 0x80),
+                orientation: m.v(body + 0x190),
+                spin: m.v(body + 0x1d0),
+                ..Default::default()
+            })
+        } else {
+            let chassis = m.word(owner + 0xe0);
+            if chassis == 0 {
+                return Err(format!("the owner {owner:#010x} is on neither a body nor a chassis"));
+            }
+            Holder::Chassis(Chassis {
+                cofg: m.v(chassis + 0x180),
+                velocity: m.v(chassis + 0x250),
+                spin: m.v(chassis + 0x280),
+                node: node(m.word(owner + 0xe8))?,
+            })
+        };
+        return Ok(Ground::Object { cofg: m.v(owner + 0x80), cofg_world: m.v(owner + 0x90), on });
+    }
+    if vehicle != 0 {
+        let (velocity, spin) = mover(vehicle).ok_or_else(|| format!("the vehicle {vehicle:#010x}: its virtuals are not answered"))?;
+        return Ok(Ground::Mover(Mover { node: node(m.word(vehicle + 0x244))?, origin: m.v(vehicle + 0x180), velocity, spin }));
+    }
+    Ok(Ground::Still)
 }
 
 /// [`read`]'s inverse: every word [`fields`] read, as `k` has it, `m` the memory the masked words'

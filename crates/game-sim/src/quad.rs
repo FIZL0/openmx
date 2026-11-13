@@ -1856,6 +1856,10 @@ pub struct Bike {
     pub wheels: [crate::wheel::Wheel; 4],
     pub more: [crate::atv_wheel::More; 4],
     pub ground: [crate::atv_wheel::Ground; 4],
+    /// F63: each wheel's collision object's owner and its vehicle (`+0x1f0`, `+0x1f4`), what
+    /// [`Bike::ground`] was read off: cleared with the wheel, set by the contacts, copied by a wheel
+    /// borrowing its partner's load.
+    pub ground_of: [(u32, u32); 4],
     pub cofg: Vf,
     /// MD75's: the words of each wheel the wheel integrate's surface drag and spin read and keep
     /// ([`crate::atv_wheel::Spin`]). Its spin, torque, spinning flag and forward force are
@@ -1927,6 +1931,24 @@ pub trait Sweep {
     fn two_wheels(&self) -> bool {
         false
     }
+
+    /// F63: the `i`th of `owner`'s touch listeners told one of its objects was struck (the
+    /// listener's `+0xc` virtual, handed 0 and 0), as the contacts walk them. A world whose contacts
+    /// have no owner is never asked.
+    fn tell(&mut self, owner: u32, i: i32) {
+        debug_assert!(false, "a swept contact with an owner {owner:#x} telling its listener {i}: the sweep does not tell");
+    }
+
+    /// F63: what a wheel set on a contact with `owner` and `vehicle` stands on
+    /// ([`crate::handling::steps::ground`]); asked only when either is there.
+    fn ground(&mut self, owner: u32, vehicle: u32) -> crate::atv_wheel::Ground {
+        debug_assert!(false, "a swept contact with an owner {owner:#x} or a vehicle {vehicle:#x}: the sweep has no ground for it");
+        crate::atv_wheel::Ground::Still
+    }
+
+    /// F63: a wheel's contact velocity turned the centre of mass of the collision object `owner` into
+    /// the world (`cofg_world`, the object's `+0x90`), the one word of the world the bike's steps write.
+    fn object_cofg(&mut self, _owner: u32, _cofg_world: Vf) {}
 }
 
 impl Sweep for () {
@@ -1946,6 +1968,18 @@ impl<S: Sweep + ?Sized> Sweep for &mut S {
 
     fn two_wheels(&self) -> bool {
         (**self).two_wheels()
+    }
+
+    fn tell(&mut self, owner: u32, i: i32) {
+        (**self).tell(owner, i)
+    }
+
+    fn ground(&mut self, owner: u32, vehicle: u32) -> crate::atv_wheel::Ground {
+        (**self).ground(owner, vehicle)
+    }
+
+    fn object_cofg(&mut self, owner: u32, cofg_world: Vf) {
+        (**self).object_cofg(owner, cofg_world)
     }
 }
 
@@ -2017,8 +2051,16 @@ impl<R: Moto, G: FnMut(Vf, &mut u8) -> (Vf, Vf), S: Sweep> Steps<R, G, S> {
                 let mut wb = self.wheel_body(body);
                 let Bike { wheels, more, ground, .. } = &mut self.bike;
                 let under = &mut ground[i];
+                let known = more[i].ground_known;
+                let mut asked = false;
                 crate::atv_wheel::tire_forces(&mut wheels[i], &mut wb, dt,
-                    &mut |c, w, b, x| crate::atv_wheel::run(c, w, b, x, under), &mut more[i]);
+                    &mut |c, w, b, x| {
+                        asked |= c == crate::wheel::Call::ContactVelocity;
+                        crate::atv_wheel::run(c, w, b, x, under)
+                    }, &mut more[i]);
+                if asked && known == 0 {
+                    self.told_cofg(i);
+                }
                 self.wheel_out(q, body, &mut wb, i);
             }
             Call::WheelIntegrate(i, dt) => {
@@ -2050,9 +2092,17 @@ impl<R: Moto, G: FnMut(Vf, &mut u8) -> (Vf, Vf), S: Sweep> Steps<R, G, S> {
                     spring_force: b.wheels[j].spring_force,
                     ground: b.ground[j],
                 };
-                let Bike { wheels, more, spins, ground, .. } = b;
-                crate::atv_wheel::spin_integrate(&mut wheels[i], &mut more[i], &mut spins[i], &mut wb, dt, &other,
+                let Bike { wheels, more, spins, ground, ground_of, .. } = b;
+                let known = more[i].ground_known;
+                let calls = crate::atv_wheel::spin_integrate(&mut wheels[i], &mut more[i], &mut spins[i], &mut wb, dt, &other,
                     &mut ground[i], curve());
+                // F63: a wheel borrowing its partner's load took its ground, and ran the contact velocity on it.
+                if calls.contains(&crate::wheel::Call::ContactVelocity) {
+                    ground_of[i] = ground_of[j];
+                    if known == 0 {
+                        self.told_cofg(i);
+                    }
+                }
                 self.spin_out(q, i);
                 self.wheel_out(q, body, &mut wb, i);
             }
@@ -2087,8 +2137,9 @@ impl<R: Moto, G: FnMut(Vf, &mut u8) -> (Vf, Vf), S: Sweep> Steps<R, G, S> {
             Call::AirDrag(_) => crate::atv_moto::air_drag(self.bike.clutch_keys.drag, q, body),
             Call::WheelClear(i) => {
                 q.wheels[i].touching = false;
-                let Bike { wheels, more, ground, .. } = &mut self.bike;
+                let Bike { wheels, more, ground, ground_of, .. } = &mut self.bike;
                 crate::atv_moto::wheel_clear(&mut wheels[i], &mut more[i], &mut ground[i]);
+                ground_of[i] = (0, 0);
             }
             Call::Contacts => {
                 // The search's vt +0xc8: the probe's node's world frame
@@ -2176,7 +2227,7 @@ impl<R: Moto, G: FnMut(Vf, &mut u8) -> (Vf, Vf), S: Sweep> Steps<R, G, S> {
     }
 }
 
-impl<R: Moto, G, S> Steps<R, G, S> {
+impl<R: Moto, G, S: Sweep> Steps<R, G, S> {
     /// **The contacts spread onto the wheels** (MD86, [`wheel_contacts`] after the sweep): each
     /// wheel's swept contact (`+0xd4`), point and normal in, and out again with the last rear
     /// contact's collidable ([`crate::atv_moto::Parts::rear_node`]).
@@ -2186,39 +2237,66 @@ impl<R: Moto, G, S> Steps<R, G, S> {
             point: b.wheels[i].contact_point,
             normal: q.wheels[i].normal,
             touching: b.wheels[i].swept_contact,
-            ..Default::default()
+            owner: b.ground_of[i].0,
+            vehicle: b.ground_of[i].1,
         });
         let calls = wheel_contacts(&mut wc, &mut b.parts.rear_node, look, cs);
-        debug_assert!(!calls.iter().any(|c| matches!(c, crate::chassis::ContactCall::Notify(..))), "a swept contact with an owner");
+        for c in calls {
+            if let crate::chassis::ContactCall::Notify(owner, i) = c {
+                self.sweep.tell(owner, i);
+            }
+        }
         for (i, c) in wc.iter().enumerate() {
-            debug_assert_eq!((c.owner, c.vehicle), (0, 0), "a swept contact with an owner or a vehicle");
-            let w = &mut b.wheels[i];
+            let w = &mut self.bike.wheels[i];
             (w.contact_point, w.contact_normal, w.swept_contact) = (c.point, c.normal, c.touching);
             q.wheels[i].normal = c.normal;
+            self.stand_on(i, c.owner, c.vehicle);
+        }
+    }
+
+    /// F63: wheel `i` set on a contact with `owner` and `vehicle` (both zero for the world): what it
+    /// stands on, the sweep's when either is there. A wheel the walk left alone keeps its ground.
+    fn stand_on(&mut self, i: usize, owner: u32, vehicle: u32) {
+        let b = &mut self.bike;
+        if b.ground_of[i] == (owner, vehicle) {
+            return;
+        }
+        b.ground_of[i] = (owner, vehicle);
+        b.ground[i] = match (owner, vehicle) {
+            (0, 0) => crate::atv_wheel::Ground::Still,
+            _ => self.sweep.ground(owner, vehicle),
+        };
+    }
+
+    /// F63: wheel `i`'s contact velocity worked its ground out; on a collision object it turned the
+    /// object's centre of mass into the world, which the sweep is told.
+    fn told_cofg(&mut self, i: usize) {
+        if let crate::atv_wheel::Ground::Object { cofg_world, .. } = self.bike.ground[i] {
+            self.sweep.object_cofg(self.bike.ground_of[i].0, cofg_world);
         }
     }
 
     /// **The contacts spread onto the bike's two wheels** (F52, [`crate::handling::bike::wheel_contacts`]
-    /// after the sweep): as [`Steps::contacts`], on the front and rear alone. The bike's wheels keep
-    /// no owner or vehicle here (as on the quad), nor anyone to tell.
+    /// after the sweep): as [`Steps::contacts`], on the front and rear alone. F63: the owners'
+    /// listeners told through the sweep, each wheel's owner and vehicle kept and what they stand it on
+    /// the sweep's ([`Steps::stand_on`]).
     fn bike_contacts(&mut self, q: &mut Quad, look: bool, cs: &[Contact]) {
         use crate::handling::bike::{FRONT, REAR};
-        let b = &mut self.bike;
+        let Steps { bike: b, sweep, .. } = self;
         let mut wc = [FRONT, REAR].map(|i| crate::chassis::WheelContact {
             point: b.wheels[i].contact_point,
             normal: q.wheels[i].normal,
             touching: b.wheels[i].swept_contact,
-            ..Default::default()
+            owner: b.ground_of[i].0,
+            vehicle: b.ground_of[i].1,
         });
         let [front, rear] = &mut wc;
-        crate::handling::bike::wheel_contacts(front, rear, &mut b.parts.rear_node, look, cs, &mut |owner, i| {
-            debug_assert!(false, "a swept contact with an owner {owner:#x} telling its listener {i}");
-        });
+        crate::handling::bike::wheel_contacts(front, rear, &mut b.parts.rear_node, look, cs, &mut |owner, i| sweep.tell(owner, i));
         for (i, c) in [FRONT, REAR].into_iter().zip(&wc) {
-            debug_assert_eq!((c.owner, c.vehicle), (0, 0), "a swept contact with an owner or a vehicle");
-            let w = &mut b.wheels[i];
+            let w = &mut self.bike.wheels[i];
             (w.contact_point, w.contact_normal, w.swept_contact) = (c.point, c.normal, c.touching);
             q.wheels[i].normal = c.normal;
+            self.stand_on(i, c.owner, c.vehicle);
         }
     }
 
@@ -4917,6 +4995,7 @@ impl<R: Moto + Default> Ride<R> {
             wheels,
             more,
             ground: [crate::atv_wheel::Ground::Still; 4],
+            ground_of: [(0, 0); 4],
             cofg: load.part.body.cofg,
             spins,
             parts,
