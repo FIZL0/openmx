@@ -365,6 +365,91 @@ fn another_apps_music_silences_only_ours() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// P339 — the hint heard as the iPhone's output hears it: another app's music holds ours, so the
+/// player shows it paused rather than playing in silence; letting it go on takes the music back
+/// (asked of the session once) and it plays under the hint; the hint's end lets go a hold it made.
+#[test]
+fn another_apps_music_pauses_ours_and_playing_takes_it_back() {
+    let dir = std::env::temp_dir().join(format!("openmx-p339-music-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("song.wav"), tone_wav(220.0, 0.5, 44100)).unwrap();
+    let mut music = Music::new(vec![Arc::new(audio::FolderMusic::scan(&dir))], 7);
+    music.wait = true;
+    let mut mixer = Mixer::new(music);
+    mixer.folder_volume = 1.0;
+    mixer.music.set_pick(Pick::Track("folder:song.wav".into()));
+    let hear = |m: &mut Mixer, on: bool| {
+        m.hear_other_audio(on);
+        listen(m)
+    };
+    assert!(rms(&hear(&mut mixer, false)) > 3000.0, "the song plays");
+    assert!(!mixer.take_over_asked());
+
+    // Another app's music from launch on (the 2026-11-13 iPhone log's "other audio true"): paused.
+    assert_eq!(rms(&hear(&mut mixer, true)), 0.0);
+    assert!(mixer.music.held(), "shown paused, not playing in silence");
+    assert!(mixer.music_silenced());
+    assert!(!mixer.take_over_asked(), "holding asks nothing of the session");
+    for _ in 0..3 {
+        assert_eq!(rms(&hear(&mut mixer, true)), 0.0);
+    }
+    assert!(mixer.music.held(), "it stays paused while the other app plays");
+
+    // Play Music (the player's hold disc, Settings' row): it takes over and is heard at once.
+    mixer.music.hold(false);
+    mixer.hear_other_audio(true);
+    assert!(mixer.take_over_asked(), "the session is asked to stop the other app's music");
+    assert!(!mixer.take_over_asked(), "once");
+    assert!(!mixer.music_silenced());
+    assert_eq!(mixer.music_gain(), 1.0);
+    let mut back = Vec::new();
+    for _ in 0..3 {
+        back = hear(&mut mixer, true);
+    }
+    assert!(rms(&back) > 3000.0, "the song plays under the hint: rms {}", rms(&back));
+    assert!(!mixer.music.held());
+
+    // The hint ends and comes again (the other app started later): paused once more.
+    hear(&mut mixer, false);
+    assert!(!mixer.music_silenced());
+    hear(&mut mixer, true);
+    assert!(mixer.music.held() && mixer.music_silenced());
+    // ... and with the hint gone the hold it made goes too: the song is back on its own.
+    let mut after = Vec::new();
+    for _ in 0..3 {
+        after = hear(&mut mixer, false);
+    }
+    assert!(!mixer.music.held());
+    assert!(rms(&after) > 3000.0, "the song is heard again: rms {}", rms(&after));
+
+    // A hold the player made is theirs: the hint's end does not let it go, and playing under the
+    // hint takes over as well.
+    mixer.music.hold(true);
+    hear(&mut mixer, true);
+    hear(&mut mixer, false);
+    assert!(mixer.music.held(), "the player's own pause stays");
+    hear(&mut mixer, true);
+    mixer.music.hold(false);
+    hear(&mut mixer, true);
+    assert!(mixer.take_over_asked());
+
+    // The menu's loop is music too: silent while paused for the hint, heard after taking over.
+    let mut menu = Mixer::new(Music::new(Vec::new(), 7));
+    menu.music_volume = 1.0;
+    menu.menu_music = Some(tone(9000.0, 1.0));
+    menu.front_end = true;
+    for _ in 0..12 {
+        hear(&mut menu, true);
+    }
+    assert!(menu.music.held());
+    assert_eq!(rms(&hear(&mut menu, true)), 0.0, "the menu's loop is silent under the hint");
+    menu.music.hold(false);
+    hear(&mut menu, true);
+    assert!(menu.take_over_asked());
+    assert!(rms(&hear(&mut menu, true)) > 3000.0, "the menu's loop plays after taking over");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn the_music_goes_back_a_song_and_holds_where_it_is() {
     // A folder of its own: the other music test empties its folder when it starts and ends.
