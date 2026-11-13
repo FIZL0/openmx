@@ -5274,6 +5274,11 @@ impl Effects for PartWalk<'_> {
             Out::On(item) => return effects::on(self, item),
             Out::Off(item) => return effects::off(self, item),
             Out::Step(item) => {
+                // F58: and the steps of the kinds ported ([`FX_KINDS`]).
+                if fx_kind(self.ee, item).is_some() {
+                    book("the tail: the update's effects item steps", 1);
+                    return effects::item_step(self, item, dt);
+                }
                 let f = self.ee.u32_at(self.ee.u32_at(item + 0x10) + 0x14);
                 self.original(f, &[u64::from(item)], &[dt.0], &format!("effects item +0x14 {f:#x}"), vec![]);
             }
@@ -5355,22 +5360,37 @@ const FX_CLASSES: [(u32, effects::Class); 7] = {
 /// The object's own function a key's pick is handed to.
 const FX_PICK: u32 = 0x0050_a920;
 
+/// F58: the effects items' step kinds by their vtables (research/oracle.txt `# F58`): the six C15's
+/// flip-1 steps. `0x003d1740`'s step is not ported (no C15 item steps with it): handed on.
+const FX_KINDS: [(u32, effects::Kind); 6] = {
+    use effects::Kind::*;
+    [(0x003d_1650, Still), (0x003d_1680, Linked), (0x003d_16b0, Spots), (0x003d_1840, Swing), (0x003d_1870, Ramp), (0x003d_18a0, Gauge)]
+};
+
+fn fx_kind(ee: &Ee, item: u32) -> Option<effects::Kind> {
+    let vt = ee.u32_at(item + 0x10);
+    FX_KINDS.iter().find(|c| c.0 == vt).map(|c| c.1)
+}
+
 fn fx_class(ee: &Ee, item: u32) -> effects::Class {
     let vt = ee.u32_at(item + 0x10);
     FX_CLASSES.iter().find(|c| c.0 == vt).unwrap_or_else(|| panic!("an effects item of a class not ported: {item:#x}, vtable {vt:#x}")).1
 }
 
 /// The object's virtual slot (or [`FX_PICK`]) a call is, its object and its arguments.
-fn fx_object_call(ee: &Ee, c: effects::Call) -> (u32, Vec<u64>, String) {
+fn fx_object_call(ee: &Ee, c: effects::Call) -> (u32, Vec<u64>, Vec<f32>, String) {
     use effects::Call;
-    let (o, slot, ints) = match c {
-        Call::Light(o) => (o, 0xa4, vec![u64::from(o)]),
-        Call::Douse(o) => (o, 0xa8, vec![u64::from(o)]),
-        Call::Halt(o) => (o, 0x84, vec![u64::from(o)]),
-        Call::Pick { object, pick } => return (FX_PICK, vec![u64::from(object), u64::from(pick)], format!("effects item object pick {FX_PICK:#x}")),
+    let (o, slot, ints, floats) = match c {
+        Call::Light(o) => (o, 0xa4, vec![u64::from(o)], vec![]),
+        Call::Douse(o) => (o, 0xa8, vec![u64::from(o)], vec![]),
+        Call::Halt(o) => (o, 0x84, vec![u64::from(o)], vec![]),
+        Call::Move { object, dt } => (object, 0x98, vec![u64::from(object)], vec![dt.0]),
+        Call::Pick { object, pick } => {
+            return (FX_PICK, vec![u64::from(object), u64::from(pick)], vec![], format!("effects item object pick {FX_PICK:#x}"));
+        }
     };
     let f = ee.u32_at(ee.u32_at(o + 4) + slot);
-    (f, ints, format!("effects item object +{slot:#x} {f:#x}"))
+    (f, ints, floats, format!("effects item object +{slot:#x} {f:#x}"))
 }
 
 /// F56: the items' turning virtuals are the port's; what they hand their objects is the original's,
@@ -5389,8 +5409,27 @@ impl effects::Items for PartWalk<'_> {
         fx_class(self.ee, item)
     }
     fn call(&mut self, c: effects::Call) {
-        let (f, ints, name) = fx_object_call(self.ee, c);
-        self.original(f, &ints, &[], &name, vec![]);
+        let (f, ints, floats, name) = fx_object_call(self.ee, c);
+        // F58: an item's move steps its emitter there, the first emitter kind's step: F57's port
+        // (whose own hand-outs, `rand` among them, stay the original's).
+        if let effects::Call::Move { object, dt } = c
+            && f == EMIT_STEP
+        {
+            book("the tail: the update's effects item emitter steps", 1);
+            emitter::step(self, object, dt);
+            return;
+        }
+        self.original(f, &ints, &floats, &name, vec![]);
+    }
+}
+
+/// The first emitter kind's step, the one an effects item's move (its object's vt `+0x98`) reaches.
+const EMIT_STEP: u32 = 0x0050_ceb0;
+
+/// F58: the items' steps are the port's, by [`FX_KINDS`].
+impl effects::Steps for PartWalk<'_> {
+    fn kind(&mut self, item: u32) -> effects::Kind {
+        fx_kind(self.ee, item).expect("a step kind ported")
     }
 }
 
@@ -9480,6 +9519,10 @@ fn flip_replays_with_every_port_at_once() {
     // F56: the port's turning reached the items' objects.
     let objects: Vec<&String> = ran.keys().filter(|k| k.contains("effects item object")).collect();
     assert!(!objects.is_empty(), "no effects item turned: {ran:?}");
+    // F58: and the port's steps moved some.
+    assert!(ran.contains_key("the tail: the update's effects item steps"), "no effects item stepped: {ran:?}");
+    assert!(ran.contains_key("the tail: the update's effects item emitter steps"), "no effects item moved its emitter: {ran:?}");
+    assert!(!objects.iter().any(|k| k.contains("+0x98 ")), "an effects item's move handed on: {ran:?}");
 }
 
 /// F31b5o: where the RAM parts from the handing run's with the frame post's tells but the HUD's left
@@ -9531,7 +9574,8 @@ fn walk_served(ran: &BTreeMap<String, u64>) {
     // F57: and the first emitter kind's, but for what it hands out.
     assert!(!ran.contains_key("the tail: the update's emitter"), "the emitter handed on: {ran:?}");
     // F56: and its items' turning virtuals.
-    for slot in ["+0x8 ", "+0x18 ", "+0x1c "] {
+    // F58: and their steps.
+    for slot in ["+0x8 ", "+0x14 ", "+0x18 ", "+0x1c "] {
         assert!(!ran.keys().any(|k| k.contains(&format!("effects item {slot}"))), "an effects item's {slot}handed on: {ran:?}");
     }
 }
@@ -9927,6 +9971,7 @@ impl effects::Items for FxItems<'_> {
             Call::Douse(o) => (0xa8, o, 0),
             Call::Halt(o) => (0x84, o, 0),
             Call::Pick { object, pick } => (1, object, u32::from(pick)),
+            Call::Move { object, dt } => (0x98, object, dt.to_bits()),
         };
         self.log.push(c);
         fx_object_react(self.ee, self.item, self.second, c);
@@ -10022,6 +10067,279 @@ fn the_effects_items_turning_is_the_originals() {
     for want in ["halt", "light", "douse", "pick", "[]"] {
         assert!(seen.keys().any(|k| k.contains(want)), "no case made {want}: {seen:?}");
     }
+}
+
+/// F58's oracle: what each object call does, on both sides, so the port's order and re-reads are put
+/// to the test: a pick moves the item to its second object and changes a linked part's motion, a
+/// light changes the spots' part's motion, a move drops the spots' count and changes the links.
+fn fx_step_react(ee: &mut Ee, l: &FxStepLayout, (slot, ..): FxObjCall) {
+    match slot {
+        1 => {
+            ee.set_u32(l.item + effects::ITEM_OBJECT, l.second);
+            ee.set_u32(l.motion + 0x84, ee.u32_at(l.motion + 0x84) ^ 0x0040_0000);
+        }
+        0xa4 => ee.set_u32(l.part + 0x1f4, ee.u32_at(l.part + 0x1f4) ^ 0x0040_0000),
+        0x98 => {
+            ee.set_u32(l.part + 0xf0, ee.u32_at(l.part + 0xf0).wrapping_sub(1));
+            ee.set_u32(l.item + 0x18, ee.u32_at(l.item + 0x18) ^ 0x24);
+        }
+        _ => {}
+    }
+}
+
+/// Where F58's oracle lays its case out in scratch RAM.
+#[derive(Clone, Copy)]
+struct FxStepLayout {
+    item: u32,
+    effects: u32,
+    table: u32,
+    words: u32,
+    entry: u32,
+    first: u32,
+    second: u32,
+    vt: u32,
+    defs: [u32; 2],
+    part: u32,
+    spots: u32,
+    parts: u32,
+    linked: u32,
+    motion: u32,
+    end: u32,
+}
+
+/// The port's side of F58's oracle.
+struct FxSteps<'a> {
+    ee: &'a mut Ee,
+    l: FxStepLayout,
+    kind: effects::Kind,
+    log: Vec<FxObjCall>,
+}
+
+impl effects::Items for FxSteps<'_> {
+    fn word(&mut self, at: u32) -> u32 {
+        self.ee.u32_at(at)
+    }
+    fn set(&mut self, at: u32, w: u32) {
+        self.ee.set_u32(at, w);
+    }
+    fn set_byte(&mut self, at: u32, b: u8) {
+        self.ee.write(at, 1, u128::from(b));
+    }
+    fn class(&mut self, item: u32) -> effects::Class {
+        fx_class(self.ee, item)
+    }
+    fn call(&mut self, c: effects::Call) {
+        use effects::Call;
+        let c = match c {
+            Call::Light(o) => (0xa4, o, 0),
+            Call::Douse(o) => (0xa8, o, 0),
+            Call::Halt(o) => (0x84, o, 0),
+            Call::Pick { object, pick } => (1, object, u32::from(pick)),
+            Call::Move { object, dt } => (0x98, object, dt.to_bits()),
+        };
+        self.log.push(c);
+        fx_step_react(self.ee, &self.l, c);
+    }
+}
+
+impl effects::Steps for FxSteps<'_> {
+    fn kind(&mut self, _: u32) -> effects::Kind {
+        self.kind
+    }
+}
+
+/// A float word of F58's oracle: zeros of both signs, a half, ones of both signs, junk bits now and
+/// then (an operand's Inf, NaN and denormals among them), else anything in `±3`.
+fn fx_float(g: &mut Gen) -> u32 {
+    match g.bits() % 16 {
+        0 => 0,
+        1 => 0x8000_0000,
+        2 => 0x3f00_0000,
+        3 => 0x3f80_0000,
+        4 => 0xbf80_0000,
+        5 => g.bits(),
+        _ => g.near(0.0, -3.0, 3.0).to_bits(),
+    }
+}
+
+/// A word that is zero half the time, else a float.
+fn fx_maybe(g: &mut Gen) -> u32 {
+    if g.one_in(2) { 0 } else { fx_float(g) }
+}
+
+/// **F58 — the effects items' steps are the original's**: 20 000 items in scratch RAM, each of one of
+/// the six step kinds C15's flip-1 steps ([`FX_KINDS`], by its real vtable), their words, the table's
+/// and entry's (each pointing into a pool of floats and zeros), the objects', the definitions', the
+/// spots' part and its spots and the linked parts junk floats and zeros, the picks a mix of
+/// [`effects::UNPICKED`] and small picks against the definitions' small picks; run through
+/// SLUS-21104's step (vt `+0x14`, `dt` the frame's, zero, or anything in -0.05..0.5) with the objects' calls
+/// hooked ([`fx_step_react`]), and through the port's. The calls come in the same order with the
+/// same arguments, and the whole layout comes out the same.
+#[test]
+fn the_effects_items_steps_are_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let s = |k: u32| ee.scratch(k);
+    let l = FxStepLayout {
+        item: s(140),
+        effects: s(144),
+        table: s(145),
+        words: s(146),
+        entry: s(148),
+        first: s(149),
+        second: s(153),
+        vt: s(157),
+        defs: [s(160), s(166)],
+        part: s(172),
+        spots: s(180),
+        parts: s(189),
+        linked: s(190),
+        motion: s(208),
+        end: s(211),
+    };
+    let region = (l.item, l.end - l.item);
+    let log: Rc<RefCell<Vec<FxObjCall>>> = Rc::default();
+    for slot in [0x84, 0x98, 0xa4, 0xa8] {
+        let lg = log.clone();
+        ee.hooks.insert(
+            FX_OBJ_FAKE + slot,
+            Box::new(move |ee: &mut Ee| {
+                let c = (slot, ee.r(4) as u32, if slot == 0x98 { ee.f(12).to_bits() } else { 0 });
+                lg.borrow_mut().push(c);
+                fx_step_react(ee, &l, c);
+            }),
+        );
+    }
+    let lg = log.clone();
+    ee.hooks.insert(
+        FX_PICK,
+        Box::new(move |ee: &mut Ee| {
+            let c = (1, ee.r(4) as u32, ee.r(5) as u32);
+            lg.borrow_mut().push(c);
+            fx_step_react(ee, &l, c);
+        }),
+    );
+    let mut g = Gen(0x0000_f580);
+    let mut seen = BTreeMap::<String, u32>::new();
+    for case in 0..20_000 {
+        let (vtable, kind) = FX_KINDS[(g.bits() % 6) as usize];
+        let mut setup = Vec::<(u32, u32)>::new();
+        for o in (0..region.1).step_by(4) {
+            setup.push((l.item + o, fx_float(&mut g)));
+        }
+        let word = |g: &mut Gen| l.words + 4 * (g.bits() % 31);
+        // the item: its effects, entry, vtable, object, mask, switches and picks
+        setup.push((l.item, l.effects));
+        setup.push((l.item + effects::ITEM_ENTRY, l.entry));
+        setup.push((l.item + 0x10, vtable));
+        setup.push((l.item + effects::ITEM_OBJECT, l.first));
+        setup.push((l.item + effects::ITEM_MASK, if g.one_in(3) { 0 } else { g.bits() & 0x1f }));
+        for at in [0x30, 0x70, 0x90] {
+            setup.push((l.item + at, fx_maybe(&mut g)));
+        }
+        if g.one_in(2) {
+            // picks (and the links mask at +0x18)
+            for o in (0x18..0x68).step_by(4) {
+                let b = (0..4).map(|k| (if g.one_in(3) { 0xff } else { g.bits() % 4 }) << (8 * k)).fold(0, |a, b| a | b);
+                setup.push((l.item + o, b));
+            }
+        }
+        setup.push((l.item + 0x28, l.words + 4 * 31));
+        setup.push((l.effects + effects::TABLE, l.table));
+        // the table and the entry, pointing into the pool
+        setup.push((l.table + effects::TABLE_PARTS, if g.one_in(8) { g.bits() | 0x8000_0000 } else { g.bits() % 9 }));
+        setup.push((l.table + effects::TABLE_PART_ARRAY, l.parts));
+        for at in [effects::TABLE_LEVEL, effects::TABLE_GATE, effects::TABLE_SWING, effects::TABLE] {
+            setup.push((l.table + at, word(&mut g)));
+        }
+        for at in [effects::FIRST, effects::SECOND, effects::ENTRY_RAMP, effects::ENTRY_ON, effects::ENTRY_SWING] {
+            setup.push((l.entry + at, word(&mut g)));
+        }
+        for k in 0..31 {
+            setup.push((l.words + 4 * k, fx_maybe(&mut g)));
+        }
+        setup.push((l.words + 4 * 31, if g.one_in(8) { 0 } else { l.part }));
+        // the objects and their definitions
+        for (o, d) in [(l.first, l.defs[0]), (l.second, l.defs[1])] {
+            setup.push((o + 4, l.vt));
+            setup.push((o + effects::OBJECT_DEF, d));
+            setup.push((o + 0xb0, g.bits()));
+            setup.push((d + effects::DEF_PICK, g.bits() % 4));
+            setup.push((d + effects::DEF_FLAGS, g.bits()));
+        }
+        for slot in [0x84, 0x98, 0xa4, 0xa8] {
+            setup.push((l.vt + slot, FX_OBJ_FAKE + slot));
+        }
+        // the spots' part and its spots
+        setup.push((l.part + 0x3c, fx_maybe(&mut g)));
+        setup.push((l.part + 0x40, fx_maybe(&mut g)));
+        setup.push((l.part + 0xf0, if g.one_in(8) { g.bits() | 0x8000_0000 } else { g.bits() % 5 }));
+        setup.push((l.part + 0xf8, l.spots));
+        for k in 0..4 {
+            setup.push((l.spots + 0x90 * k + 0x80, g.bits() % 0x48));
+        }
+        // the linked parts, some missing
+        for k in 0..8 {
+            let part = l.linked + 0x90 * (k % 6);
+            // (a count of 8 reads the array's 8 words; the parts' links mask spans them)
+            setup.push((l.parts + 4 * k, if g.one_in(5) { 0 } else { part }));
+        }
+        for k in 0..6 {
+            let part = l.linked + 0x90 * k;
+            setup.push((part + 0x18, fx_maybe(&mut g)));
+            setup.push((part + 0x1c, fx_maybe(&mut g)));
+            setup.push((part + 0x3c, g.bits() % 0x48));
+            setup.push((part + 0x80, l.motion));
+        }
+        let dt = match g.bits() % 4 {
+            0 => 1.0 / 30.0,
+            1 => 0.0,
+            2 => g.f(-0.05, 0.5),
+            _ => g.f(0.0, 0.1),
+        };
+        let lay = |ee: &mut Ee| {
+            for &(at, w) in &setup {
+                ee.set_u32(at, w);
+            }
+        };
+        lay(&mut ee);
+        log.borrow_mut().clear();
+        let f = ee.u32_at(vtable + 0x14);
+        ee.set(28, GP);
+        ee.call(f, &[u64::from(l.item)], &[dt], 100_000);
+        let want = std::mem::take(&mut *log.borrow_mut());
+        let want_ram = snap_regions(&ee, &[region]);
+        lay(&mut ee);
+        let mut port = FxSteps { ee: &mut ee, l, kind, log: vec![] };
+        effects::item_step(&mut port, l.item, F::from_bits(dt.to_bits()));
+        let got = std::mem::take(&mut port.log);
+        assert_eq!(got, want, "case {case}: {kind:?} (dt {:#x})'s object calls", dt.to_bits());
+        let got_ram = snap_regions(&ee, &[region]);
+        if got_ram != want_ram {
+            let parted: Vec<String> = (0..region.1)
+                .step_by(4)
+                .zip(got_ram.iter().zip(&want_ram))
+                .filter(|(_, (a, b))| a != b)
+                .map(|(o, (a, b))| format!("{:#x}: got {a:#010x} want {b:#010x}", l.item + o))
+                .collect();
+            panic!("case {case}: {kind:?} (dt {:#x})'s RAM:\n  {}", dt.to_bits(), parted.join("\n  "));
+        }
+        let calls: Vec<&str> = want.iter().map(|c| match c.0 { 0x84 => "halt", 0x98 => "move", 0xa4 => "light", 0xa8 => "douse", _ => "pick" }).collect();
+        let mut calls = calls;
+        calls.dedup();
+        *seen.entry(format!("{kind:?} {calls:?}")).or_default() += 1;
+    }
+    eprintln!("effects items steps oracle: {seen:#?}");
+    for kind in ["Gauge", "Ramp", "Swing", "Spots", "Linked"] {
+        for call in ["light", "douse"] {
+            assert!(seen.keys().any(|k| k.starts_with(kind) && k.contains(call)), "no {kind} case made {call}: {seen:?}");
+        }
+    }
+    for kind in ["Spots", "Linked"] {
+        for call in ["move", "pick"] {
+            assert!(seen.keys().any(|k| k.starts_with(kind) && k.contains(call)), "no {kind} case made {call}: {seen:?}");
+        }
+    }
+    assert!(seen.keys().any(|k| k.starts_with("Still []")), "no Still case: {seen:?}");
 }
 
 /// F57's oracle: the emitter's objects' lighting virtuals and its owner's at fake addresses
