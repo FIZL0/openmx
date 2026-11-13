@@ -133,6 +133,16 @@
 //! 38. **The prop raise** (S296a): the race files of sx06, sx08, sx11, sx20 and nat03, stood on their
 //!     terrain and raised onto their scene and knockable meshes ([`TrackFile::raise_on_props`]),
 //!     against images of a race on each: every point of every node, bit for bit.
+//! 39. **The gates' prop lookups** (S297): the scene's prop lookup and the toy list's on 10,000
+//!     generated name lists each (bytes past 0x7f too), against [`race::find_prop`] and
+//!     [`race::find_toy`]: the answer and the needle the toy lookup leaves lowercased.
+//! 40. **The prop bound query**: 10,000 generated node trees (own boxes or none, children with
+//!     children, stale or kept, sized or not, spheres), against [`race::PropBound::query`].
+//! 41. **The gates' props on the race images**: the drop and finish props [`Supercross::gate_props`]
+//!     finds on eight race images against the original's lookups, and every scene prop's bound,
+//!     marked stale, against its query.
+//! 42. **sx01's finish line, width and height**: the finish toy's model off the disc at its rest pose,
+//!     its bound and the line stood in it, against S196's image to the bit.
 
 use game_sim::chassis::{Chassis, Deriv};
 use game_sim::race::{
@@ -140,6 +150,9 @@ use game_sim::race::{
     MachineNotice, PathNode, Prop, Race, RaceCard, FinishNotice, RaceNotice, RacePath, RaceRules, Refused, Seen, Spot, StartItem, StartStep, Axes, Supercross, TrackFile, TrackPath, TrackPaths, card_flags,
     flags, race_card_flags, race_flags, race_kind,
 };
+use game_sim::math::Mat4;
+use game_sim::prop_world::BoundsNode;
+use game_sim::props::NodeBox;
 use game_sim::rng::Rng;
 use ps2_float::{F, Vf, fpu};
 use game_sim::archive::{Psr, Res};
@@ -2434,7 +2447,9 @@ fn the_supercross_loader_stands_sx01s_gates_on_its_props() {
     // The finish gate: the line stands in it, facing along the path at its spot. Its bound has
     // changed since the load — no prop with its frame holds half extents of the line's width and
     // height any more — so those two come from the image's line, and what is proved here is the rest:
-    // the centre, the across direction and the normal worked out from the path's direction.
+    // the centre, the across direction and the normal worked out from the path's direction. (The width
+    // and height are proved off the prop's rest bound in
+    // `sx01s_finish_line_is_as_wide_and_high_as_the_finish_props_rest_bound`.)
     let finishes = find_prop(&ee, want_line.centre, want_line.across, 3);
     let first = *finishes.first().expect("a prop standing where the line is");
     let finish = Prop {
@@ -8264,4 +8279,443 @@ fn a_held_rider_cannot_creep_until_the_warning_and_is_caught_in_it() {
     assert!(p > F(0.9) && p <= F(2.0), "the penalty {p:?}");
     assert_eq!(sim.race.as_ref().unwrap().gate.flags & flags::CLOSED, flags::CLOSED, "caught behind the closed gate");
     println!("held from tick 1 to tick {freed_n} (clock {at:?}), caught on tick {n}, {:?} before the drop", F(act.start_delay.0 - sim.race.as_ref().unwrap().countdown.elapsed.0));
+}
+
+// --- S297: the gates' props, found and bounded ---------------------------------------------------------
+
+/// Free RAM for the lookups: a scene and its prop holders, the props (only their name word is read),
+/// the names, the needle, and the toy list with its entries.
+const P_SCENE: u32 = 0x0190_0000;
+const P_HOLDERS: u32 = 0x0190_0100;
+const P_HOLDER: u32 = 0x0190_1000;
+const P_PROPS: u32 = 0x0190_2000;
+const P_PROP_SIZE: u32 = 0x140;
+const P_NAMES: u32 = 0x0192_0000;
+const P_NEEDLE: u32 = 0x0193_0000;
+const P_TOYS: u32 = 0x0193_1000;
+const P_TOY_ARRAY: u32 = 0x0193_1100;
+const P_TOY: u32 = 0x0193_2000;
+
+fn put_name(ee: &mut Ee, at: u32, name: &[u8]) {
+    ee.load(at, &[name, &[0]].concat());
+}
+
+/// A name a track's prop might have: pieces of the gates' names in either case, path pieces, the
+/// characters either side of the capitals, and now and then any byte at all (past 0x7f too).
+fn prop_name(p: &mut Pick) -> Vec<u8> {
+    const PIECES: [&[u8]; 16] = [
+        b"drop", b"gate", b"finish", b"Gate", b"DROP", b"THQsx", b"FinishGate", b"dropgat", b"finishgate", b"dropgate",
+        b"tracks\\sx01\\anim\\", b".psg", b"x", b"[@`{", b"Z", b"a",
+    ];
+    let mut v = Vec::new();
+    for _ in 0..p.below(6) {
+        match p.below(8) {
+            0 => v.push(0x80 + p.below(0x80) as u8),
+            1 => v.push(1 + p.below(0x7f) as u8),
+            _ => v.extend_from_slice(PIECES[p.below(16) as usize]),
+        }
+    }
+    v
+}
+
+fn needle(p: &mut Pick) -> Vec<u8> {
+    match p.below(6) {
+        0 => race::DROP_GATE.to_vec(),
+        1 => race::FINISH_GATE.to_vec(),
+        2 => prop_name(p).to_ascii_lowercase(),
+        _ => prop_name(p),
+    }
+}
+
+/// The scene's prop lookup and the toy list's, on 10,000 generated lists each: the holders' props'
+/// names (holders with no prop among them) and the toys' names, bytes past 0x7f included, against
+/// [`race::find_prop`] and [`race::find_toy`] — the answer, and the needle the toy lookup leaves.
+#[test]
+fn the_scene_and_toy_lookups_are_find_prop() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let [scene_find, toy_find] = match addrs(["scene_prop_find", "prop_find_fallback"]) {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    let mut p = Pick(0x5297_0001);
+    let (mut found, mut toys_found, mut empty, mut wrapped) = (0, 0, 0, 0);
+    for case in 0..10_000 {
+        let want = needle(&mut p);
+        empty += usize::from(want.is_empty());
+        // The scene: holders, some with no prop.
+        let n = p.below(9) as u32;
+        let mut names: Vec<Option<Vec<u8>>> = Vec::new();
+        ee.set_u32(P_SCENE + 0x3d0, n);
+        ee.set_u32(P_SCENE + 0x3d4, P_HOLDERS);
+        for k in 0..n {
+            let holder = P_HOLDER + 0x40 * k;
+            let prop = P_PROPS + P_PROP_SIZE * k;
+            ee.set_u32(P_HOLDERS + 4 * k, holder);
+            if p.below(6) == 0 {
+                ee.set_u32(holder + 0x34, 0);
+                names.push(None);
+            } else {
+                let name = prop_name(&mut p);
+                ee.set_u32(holder + 0x34, prop);
+                ee.set_u32(prop + 0x120, P_NAMES + 0x100 * k);
+                put_name(&mut ee, P_NAMES + 0x100 * k, &name);
+                names.push(Some(name));
+            }
+        }
+        put_name(&mut ee, P_NEEDLE, &want);
+        ee.call(scene_find, &[u64::from(P_SCENE), u64::from(P_NEEDLE), 1], &[], BUDGET);
+        let got = ee.v0() as u32;
+        let game = (got != 0).then(|| ((got - P_PROPS) / P_PROP_SIZE) as usize);
+        let port = race::find_prop(names.iter().map(|n| n.as_deref()), &want);
+        assert_eq!(port, game, "case {case}: the scene's lookup of {want:?} over {names:?}");
+        found += usize::from(game.is_some());
+
+        // The toy list: every entry has a name, and the needle is lowercased where it lies.
+        let n = p.below(9) as u32;
+        let mut toys: Vec<Vec<u8>> = Vec::new();
+        ee.set_u32(P_TOYS + 0x30, n);
+        ee.set_u32(P_TOYS + 0x38, P_TOY_ARRAY);
+        for k in 0..n {
+            let toy = P_TOY + 0x40 * k;
+            let name = prop_name(&mut p);
+            ee.set_u32(P_TOY_ARRAY + 4 * k, toy);
+            ee.set_u32(toy + 0x30, P_NAMES + 0x100 * k);
+            put_name(&mut ee, P_NAMES + 0x100 * k, &name);
+            toys.push(name);
+        }
+        let want = needle(&mut p);
+        put_name(&mut ee, P_NEEDLE, &want);
+        ee.call(toy_find, &[u64::from(P_TOYS), u64::from(P_NEEDLE), 1], &[], BUDGET);
+        let got = ee.v0() as u32;
+        let game = (got != 0).then(|| ((got - P_TOY) / 0x40) as usize);
+        let mut left = want.clone();
+        let port = race::find_toy(toys.iter().map(|t| t.as_slice()), &mut left);
+        assert_eq!(port, game, "case {case}: the toy list's lookup of {want:?} over {toys:?}");
+        let game_left: Vec<u8> = (0..want.len() as u32).map(|k| ee.u8_at(P_NEEDLE + k)).collect();
+        assert_eq!(left, game_left, "case {case}: the needle, lowercased where it lies");
+        toys_found += usize::from(game.is_some());
+        wrapped += usize::from(left.contains(&0));
+    }
+    assert!(found > 1_000 && toys_found > 1_000 && empty > 100 && wrapped > 10, "{found} scene finds, {toys_found} toy finds, {empty} empty needles, {wrapped} cut short");
+    eprintln!("prop lookups: {found} scene finds, {toys_found} toy finds of 10,000, {empty} empty needles, {wrapped} needles cut short by their lowercasing");
+}
+
+/// Free RAM for the bound query: the nodes, their class's table, the root's child array, the answers.
+const B_NODES: u32 = 0x0194_0000;
+const B_NODE_SIZE: u32 = 0x200;
+const B_TABLE: u32 = 0x0196_0000;
+const B_KIDS: u32 = 0x0196_1000;
+const B_OUT: u32 = 0x0196_2000;
+
+/// A node's world rows: turned about some axis (or not), somewhere on a track, now and then a stray
+/// word.
+fn rows(p: &mut Pick) -> Mat4 {
+    let [x, y, z] = p.unit_vector();
+    let a = if p.below(4) == 0 { 0.0 } else { p.range(-3.2, 3.2) };
+    let (s, c) = a.sin_cos();
+    let t = 1.0 - c;
+    let r = [
+        [t * x * x + c, t * x * y + s * z, t * x * z - s * y],
+        [t * x * y - s * z, t * y * y + c, t * y * z + s * x],
+        [t * x * z + s * y, t * y * z - s * x, t * z * z + c],
+    ];
+    let mut m = Mat4([Vf::ZERO; 4]);
+    for k in 0..3 {
+        m.0[k] = Vf([p.stray(r[k][0]), p.stray(r[k][1]), p.stray(r[k][2]), if p.below(8) == 0 { p.range(-1.0, 1.0) } else { 0.0 }]);
+    }
+    m.0[3] = Vf([p.range(-400.0, 400.0), p.range(-20.0, 120.0), p.range(-400.0, 400.0), 1.0]);
+    m
+}
+
+fn node_box(p: &mut Pick) -> NodeBox {
+    let c = [p.range(-20.0, 20.0), p.range(-5.0, 40.0), p.range(-20.0, 20.0)];
+    let h = [p.range(-1.0, 60.0), p.range(0.0, 50.0), p.range(0.0, 10.0)];
+    NodeBox { centre: p.quad(c), half_extent: p.quad(h) }
+}
+
+fn put_mat(ee: &mut Ee, at: u32, m: &Mat4) {
+    for (k, r) in m.0.iter().enumerate() {
+        put_quad(ee, at + 16 * k as u32, *r);
+    }
+}
+
+/// One node into RAM (its world rows fresh, its box), and its linked children after it; returns it
+/// as the bound walks it.
+fn put_bound_node(ee: &mut Ee, p: &mut Pick, next: &mut u32, depth: u32) -> (u32, BoundsNode) {
+    let at = B_NODES + B_NODE_SIZE * *next;
+    *next += 1;
+    for o in (0..B_NODE_SIZE).step_by(4) {
+        ee.set_u32(at + o, 0);
+    }
+    let flags = (p.next() as u8 & !race::bound_flags::STALE) | 1;
+    let world = rows(p);
+    let b = node_box(p);
+    put_mat(ee, at + 0x80, &world);
+    put_quad(ee, at + 0xc0, b.centre);
+    put_quad(ee, at + 0xd0, b.half_extent);
+    ee.write(at + 0x110, 1, u128::from(flags));
+    let mut children = Vec::new();
+    let mut link = at + 0x104;
+    for _ in 0..if depth < 2 { p.below(3) } else { 0 } {
+        let (k, n) = put_bound_node(ee, p, next, depth + 1);
+        ee.set_u32(link, k);
+        link = k + 0x108;
+        children.push(n);
+    }
+    let own = (flags & race::bound_flags::BOXED != 0).then_some(b);
+    (at, BoundsNode { own, world, children })
+}
+
+/// The prop's bound query, on 10,000 generated props — stale or not, sized or not, the rebuild bit,
+/// boxed or not, up to three children in the prop's own array and two levels of linked children under
+/// each, stray words in every row and box — against [`race::PropBound::query`]: both answers and
+/// every word of the bound the node keeps, its radius and its flags. A stale sphere-bounded prop is
+/// the port's refusal, and not run.
+#[test]
+fn the_prop_bound_query_is_prop_bound() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let [query, rebuild] = match addrs(["prop_bound", "prop_bound_rebuild"]) {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    ee.set_u32(B_TABLE + 0x88, rebuild);
+    let mut p = Pick(0x5297_0002);
+    let (mut rebuilt, mut kept, mut spheres, mut sized) = (0, 0, 0, 0);
+    for case in 0..10_000 {
+        let mut next = 0;
+        let (root, mut tree) = put_bound_node(&mut ee, &mut p, &mut next, 2);
+        let mut flags = (p.next() as u8) | 1;
+        if p.below(3) == 0 {
+            flags |= race::bound_flags::STALE;
+        }
+        if p.below(3) == 0 {
+            flags &= !race::bound_flags::SPHERE;
+        }
+        ee.write(root + 0x110, 1, u128::from(flags));
+        ee.set_u32(root + 0x38, B_TABLE);
+        let own = node_box(&mut p);
+        put_quad(&mut ee, root + 0xc0, own.centre);
+        put_quad(&mut ee, root + 0xd0, own.half_extent);
+        tree.own = (flags & race::bound_flags::BOXED != 0).then_some(own);
+        let kids = p.below(4) as u32;
+        ee.set_u32(root + 0x11c, kids);
+        ee.set_u32(root + 0x13c, B_KIDS);
+        for k in 0..kids {
+            let (at, n) = put_bound_node(&mut ee, &mut p, &mut next, 1);
+            ee.set_u32(B_KIDS + 4 * k, at);
+            tree.children.push(n);
+        }
+        let (c, h, r) = (p.range(-9.0, 9.0), p.range(0.0, 9.0), p.range(0.0, 9.0));
+        let mut port = race::PropBound { centre: p.quad([c; 3]), half: p.quad([h; 3]), radius: F(p.stray(r)), flags };
+        put_quad(&mut ee, root + 0xe0, port.centre);
+        put_quad(&mut ee, root + 0xf0, port.half);
+        put_f(&mut ee, root + 0x118, port.radius);
+        let Some((c, h)) = port.query(&tree) else {
+            assert!(flags & race::bound_flags::SPHERE != 0, "case {case}: refused a box node ({flags:#x})");
+            spheres += 1;
+            continue;
+        };
+        ee.call(query, &[u64::from(root), u64::from(B_OUT), u64::from(B_OUT + 16)], &[], BUDGET);
+        let game = (quad(&ee, B_OUT), quad(&ee, B_OUT + 16));
+        assert_eq!((c.to_bits(), h.to_bits()), (game.0.to_bits(), game.1.to_bits()), "case {case}: the answers ({flags:#x})");
+        let kept_words = (quad(&ee, root + 0xe0).to_bits(), quad(&ee, root + 0xf0).to_bits(), ee.u32_at(root + 0x118), ee.u8_at(root + 0x110));
+        assert_eq!(
+            kept_words,
+            (port.centre.to_bits(), port.half.to_bits(), port.radius.0.to_bits(), port.flags),
+            "case {case}: the kept bound ({flags:#x})"
+        );
+        if port.flags != flags {
+            rebuilt += 1;
+            sized += usize::from(port.flags & race::bound_flags::SIZED != 0 && flags & race::bound_flags::SIZED == 0);
+        } else {
+            kept += 1;
+        }
+    }
+    assert!(rebuilt > 1_000 && kept > 1_000 && spheres > 100 && sized > 100, "{rebuilt} rebuilt, {kept} kept, {spheres} spheres, {sized} newly sized");
+    eprintln!("prop bound: {rebuilt} rebuilt ({sized} newly sized), {kept} kept, {spheres} stale spheres refused");
+}
+
+/// A C string in an image (at most 256 bytes).
+fn ram_c_str(ee: &Ee, at: u32) -> Vec<u8> {
+    (at..at + 256).map(|a| ee.u8_at(a)).take_while(|&b| b != 0).collect()
+}
+
+/// A scene node's bound tree as its rebuild reads it out of an image: its own box when its flags say
+/// it has one, its world rows, and its child array's nodes the same way, without theirs.
+fn ram_bound_node(ee: &Ee, n: u32, top: bool) -> BoundsNode {
+    let own = (ee.u8_at(n + 0x110) & race::bound_flags::BOXED != 0).then(|| NodeBox { centre: quad(ee, n + 0xc0), half_extent: quad(ee, n + 0xd0) });
+    let world = Mat4([0x80, 0x90, 0xa0, 0xb0].map(|o| quad(ee, n + o)));
+    let (count, array) = (ee.u32_at(n + 0x11c), ee.u32_at(n + 0x13c));
+    assert!(count < 4096, "node {n:x} with {count} children");
+    let children = if top { (0..count).map(|k| ram_bound_node(ee, ee.u32_at(array + 4 * k), false)).collect() } else { Vec::new() };
+    BoundsNode { own, world, children }
+}
+
+/// The race images the gate props are looked for in: S196's sx01 start, S296a's five race starts,
+/// S282c's sx01 race and C31's four-rider sx01.
+fn gate_prop_images() -> Vec<(String, Ee)> {
+    let mut out = Vec::new();
+    for name in ["s196-sx01", "s296a-sx06", "s296a-sx08", "s296a-sx11", "s296a-sx20", "s296a-nat03", "s282c-sx01-race", "c31-sx01-ai4"] {
+        let here = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../context/states").join(format!("{name}.ee.bin"));
+        match Ee::from_ram(&here) {
+            Ok(ee) => out.push((name.to_string(), ee)),
+            Err(why) => skip(&format!("{why} — {name}'s RAM image")),
+        }
+    }
+    out
+}
+
+/// **The gates' props on the race images**: on each image whose activity has a scene, the drop gate's
+/// and the finish gate's props [`Supercross::gate_props`] finds among the scene's holders and the
+/// track's toys (by the name the loaded world gives the drop gate) against the original's scene lookup
+/// and toy-list lookup, called on the same names; and every scene prop's bound, marked stale, against
+/// the original's bound query ([`race::PropBound::query`]): the answer and the centre, half extent,
+/// radius and flags it keeps. The rows are read after the original's query, which rebuilds a moved
+/// node's transform first (not ported); stale sphere-bounded props are counted and passed over.
+#[test]
+fn the_race_images_gate_props_and_their_bounds_are_the_loaders() {
+    let [find_at, toy_find_at, toys_at, app_at, manager, bound_at, gp] =
+        match addrs(["scene_prop_find", "prop_find_fallback", "toy_list", "app_pointer", "activity_manager", "prop_bound", "boot_gp"]) {
+            Ok(a) => a,
+            Err(why) => return skip(&why),
+        };
+    let images = gate_prop_images();
+    let (mut tracks, mut bounds, mut spheres, mut toy_finishes) = (0, 0, 0, 0);
+    for (name, mut ee) in images {
+        ee.set(28, u64::from(gp));
+        let act = ee.u32_at(ee.u32_at(ee.u32_at(manager) + 0x58));
+        let scene = ee.u32_at(act + 0x180);
+        if scene == 0 || ee.u32_at(ee.u32_at(scene + 8) + 0x120) != find_at {
+            eprintln!("{name}: no scene on the activity");
+            continue;
+        }
+        tracks += 1;
+        let (n, array) = (ee.u32_at(scene + 0x3d0), ee.u32_at(scene + 0x3d4));
+        let props: Vec<u32> = (0..n).map(|k| ee.u32_at(ee.u32_at(array + 4 * k) + 0x34)).collect();
+        let names: Vec<Option<Vec<u8>>> = props.iter().map(|&p| (p != 0).then(|| ram_c_str(&ee, ee.u32_at(p + 0x120)))).collect();
+        let list = ee.u32_at(toys_at);
+        let toys: Vec<u32> = if list == 0 { Vec::new() } else { (0..ee.u32_at(list + 0x30)).map(|k| ee.u32_at(ee.u32_at(list + 0x38) + 4 * k)).collect() };
+        let toy_names: Vec<Vec<u8>> = toys.iter().map(|&t| ram_c_str(&ee, ee.u32_at(t + 0x30))).collect();
+        let world = ee.u32_at(ee.u32_at(app_at) + 0x3cc);
+        let own_at = if world == 0 { 0 } else { ee.u32_at(world + 0xb4) };
+        let own = (own_at != 0).then(|| ram_c_str(&ee, own_at));
+
+        let scene_names: Vec<Option<&[u8]>> = names.iter().map(|n| n.as_deref()).collect();
+        let toy_refs: Vec<&[u8]> = toy_names.iter().map(|t| t.as_slice()).collect();
+        let (drop, finish) = Supercross::gate_props(&scene_names, &toy_refs, own.as_deref());
+
+        let needle = ee.scratch(4);
+        let ask = |ee: &mut Ee, f: u32, on: u32, what: &[u8]| {
+            put_name(ee, needle, what);
+            ee.call(f, &[u64::from(on), u64::from(needle), 1], &[], 10_000_000);
+            ee.v0() as u32
+        };
+        let drop_name = own.as_ref().map_or(b"dropgate".to_vec(), |o| o.to_ascii_lowercase());
+        let game_drop = ask(&mut ee, find_at, scene, &drop_name);
+        assert_eq!(drop.map_or(0, |k| props[k]), game_drop, "{name}: the drop gate's prop (by {:?})", String::from_utf8_lossy(&drop_name));
+        let game_finish = match ask(&mut ee, find_at, scene, b"finishgate") {
+            0 if list != 0 => {
+                let t = ask(&mut ee, toy_find_at, list, b"finishgate");
+                toys.iter().position(|&q| q == t && t != 0).map(race::PropAt::Toy)
+            }
+            0 => None,
+            p => props.iter().position(|&q| q == p).map(race::PropAt::Scene),
+        };
+        assert_eq!(finish, game_finish, "{name}: the finish gate's prop");
+        toy_finishes += usize::from(matches!(finish, Some(race::PropAt::Toy(_))));
+        eprintln!("{name}: drop {:?} by {:?}, finish {finish:?}", drop.map(|k| String::from_utf8_lossy(names[k].as_deref().unwrap()).into_owned()), String::from_utf8_lossy(&drop_name));
+
+        let (c, h) = (ee.scratch(0), ee.scratch(1));
+        for &p in props.iter().filter(|&&p| p != 0) {
+            let flags = ee.u8_at(p + 0x110) | race::bound_flags::STALE | race::bound_flags::REBUILD;
+            let mut port = race::PropBound { centre: Vf::VF0, half: Vf::VF0, radius: F(0.0), flags };
+            if flags & race::bound_flags::SPHERE != 0 {
+                assert_eq!(port.query(&ram_bound_node(&ee, p, true)), None, "{name}: prop {p:x}, sphere-bounded");
+                spheres += 1;
+                continue;
+            }
+            ee.write(p + 0x110, 1, u128::from(flags));
+            ee.call(bound_at, &[u64::from(p), u64::from(c), u64::from(h)], &[], 10_000_000);
+            let got = port.query(&ram_bound_node(&ee, p, true)).expect("a box bound");
+            let what = format!("{name}: prop {p:x} {:?}", String::from_utf8_lossy(&ram_c_str(&ee, ee.u32_at(p + 0x120))));
+            assert_eq!((got.0.to_bits(), got.1.to_bits()), (quad(&ee, c).to_bits(), quad(&ee, h).to_bits()), "{what}: the answer");
+            assert_eq!(port.centre.to_bits(), quad(&ee, p + 0xe0).to_bits(), "{what}: the centre kept");
+            assert_eq!(port.half.to_bits(), quad(&ee, p + 0xf0).to_bits(), "{what}: the half extent kept");
+            assert_eq!(port.radius.0.to_bits(), ee.u32_at(p + 0x118), "{what}: the radius");
+            assert_eq!(port.flags, ee.u8_at(p + 0x110), "{what}: the flags");
+            bounds += 1;
+        }
+    }
+    if tracks == 0 {
+        return skip("no race image with a scene");
+    }
+    assert!(bounds > 1_000 && toy_finishes > 0, "{tracks} tracks, {bounds} bounds, {toy_finishes} finish gates among the toys");
+    eprintln!("gate props on {tracks} race images: {bounds} prop bounds rebuilt, {spheres} sphere-bounded passed over, {toy_finishes} finish gates among the toys");
+}
+
+/// **The finish line's width and height off the finish prop's load-time bound** (sx01): the loader
+/// finds the finish gate among the toys ([`Supercross::gate_props`] on the image's names), and the
+/// prop is the toy's model, `thq_finishgatenarrow.psg` off the disc stood at the prop's frame: a node
+/// with no box of its own whose children are the model's seven nodes, the gate's box and six fireworks
+/// dummies. At rest every dummy is inside the gate's box, so the stale bound
+/// ([`race::PropBound::query`]) is the gate's box, and the line [`Supercross::place_finish_line`]
+/// stands in it is the image's to the bit, width and height included. (The bound the prop keeps in
+/// the image has been widened since by the dummies' animation — they hang 200 ft up by then.)
+#[test]
+fn sx01s_finish_line_is_as_wide_and_high_as_the_finish_props_rest_bound() {
+    let Some(file) = sx01_race_file() else { return };
+    let Some(mut ee) = sx01_image() else { return };
+    let [manager, toys_at, ahead_at, gp] = match addrs(["activity_manager", "toy_list", "path_ahead", "boot_gp"]) {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    let Some(archive) = psr_member("Tracks\\sx01.res") else { return };
+    ee.set(28, u64::from(gp));
+    let act = ee.u32_at(ee.u32_at(ee.u32_at(manager) + 0x58));
+    let scene = ee.u32_at(act + 0x180);
+    let props: Vec<u32> = (0..ee.u32_at(scene + 0x3d0)).map(|k| ee.u32_at(ee.u32_at(ee.u32_at(scene + 0x3d4) + 4 * k) + 0x34)).collect();
+    let names: Vec<Option<Vec<u8>>> = props.iter().map(|&p| (p != 0).then(|| ram_c_str(&ee, ee.u32_at(p + 0x120)))).collect();
+    let list = ee.u32_at(toys_at);
+    let toys: Vec<u32> = (0..ee.u32_at(list + 0x30)).map(|k| ee.u32_at(ee.u32_at(list + 0x38) + 4 * k)).collect();
+    let toy_names: Vec<Vec<u8>> = toys.iter().map(|&t| ram_c_str(&ee, ee.u32_at(t + 0x30))).collect();
+    let scene_names: Vec<Option<&[u8]>> = names.iter().map(|n| n.as_deref()).collect();
+    let toy_refs: Vec<&[u8]> = toy_names.iter().map(|t| t.as_slice()).collect();
+    let (_, finish) = Supercross::gate_props(&scene_names, &toy_refs, None);
+    let Some(race::PropAt::Toy(k)) = finish else { panic!("sx01's finish gate is not a toy: {finish:?}") };
+    let prop = ee.u32_at(ee.u32_at(toys[k] + 0xb0) + 0x30);
+    let model = String::from_utf8(ram_c_str(&ee, ee.u32_at(prop + 0x120))).expect("a model name");
+    assert_eq!(model.to_ascii_lowercase(), "tracks\\sx01\\anim\\thq_finishgatenarrow.psg");
+    let flags = ee.u8_at(prop + 0x110);
+    assert_eq!(flags & (race::bound_flags::BOXED | race::bound_flags::SPHERE), 0, "the finish prop has no box or sphere of its own");
+
+    let res = Res::parse(&archive).expect("sx01's archive");
+    let e = res.entries.iter().find(|e| e.name.eq_ignore_ascii_case(&model)).expect("the finish model in sx01's archive");
+    let psg = res.read(&archive, e).expect("inflate the model");
+    let frame = Mat4([0x80, 0x90, 0xa0, 0xb0].map(|o| quad(&ee, prop + o)));
+    let tree = game_sim::physics_car::model_tree(&psg, Some(&frame)).expect("the model's nodes");
+    fn every(n: &BoundsNode, out: &mut Vec<BoundsNode>) {
+        out.push(BoundsNode { own: n.own, world: n.world, children: Vec::new() });
+        n.children.iter().for_each(|c| every(c, out));
+    }
+    let mut children = Vec::new();
+    every(&tree, &mut children);
+    assert_eq!(children.len(), ee.u32_at(prop + 0x11c) as usize, "the prop's children are the model's nodes");
+    let mut bound = race::PropBound { centre: Vf::VF0, half: Vf::VF0, radius: F(0.0), flags: flags | race::bound_flags::STALE };
+    let (_, half) = bound.query(&BoundsNode { own: None, world: frame, children }).expect("a box bound");
+    let gate_box = tree.own.expect("the gate's box").half_extent;
+    // The width and height are the gate box's own; its depth comes back through the prop's turned
+    // frame an ulp short (1.7741324, as the image's kept bound has it too).
+    assert_eq!(half.to_bits()[..2], gate_box.to_bits()[..2], "the rest bound is the gate's box: {half:?} against {gate_box:?}");
+
+    let track = ee.u32_at(act + 0xb8);
+    let line_at = ee.u32_at(track + 0x5c);
+    let want = gate_at(&ee, line_at);
+    let out = ee.scratch(2);
+    ee.call(ahead_at, &[u64::from(track), u64::from(ee.u32_at(line_at + 0x98)), u64::from(out)], &[], 1_000_000);
+    let ahead = quad(&ee, out);
+    let t = TrackFile::parse(&file).expect("sx01's race file reads");
+    let mut line = t.line.expect("the file's line");
+    Supercross::place_finish_line(&Prop::new(frame.0[0], frame.0[2], frame.0[3], half), ahead, &mut line);
+    assert_eq!(gate_words(&line), gate_words(&want), "the line: {line:?} against {want:?}");
+    eprintln!("sx01's finish line: {} wide, {} high, off the finish prop's rest bound {half:?}", line.width.0, line.height.0);
 }
