@@ -1532,8 +1532,18 @@ class_bit                   boot 0x00119520 (registry, name) -> 1 << index: a co
 #                                           "AI_IGNORE" (0x00433df0) in registry 0x0041db50 and skips
 #                                           type-2 objects whose +0x84 has that bit (S317)
 ai_iface_walk_begin         boot 0x00281b90 the AI interface's vt+0x2c thunk (this - 0x10d0, j 0x00280aa0):
-#                                           opens the scene walk around the rider; v0 non-zero if open
+#                                           opens the scene walk around the rider; v0 non-zero if open.
+#                                           S323: 0x00280aa0 is world_tree_query_begin(rider+0x13b0,
+#                                           (rider+0x7c4)+4, kind 3, centre = body(+0x7a4)+0x60 (the
+#                                           cofg), half = quad 0x00420dc0 = (50,50,50,1), 0, 0, 1);
+#                                           next is 0x001bb490(query,0,0), end 0x001bb890. Ported as
+#                                           ai::WorldScene::walk (Query::begin kind 3, WALK_HALF). The
+#                                           brain's bundle (+0x2a0, made on first use) has radius
+#                                           +0x160 = the feeler length (+0x2ac) and centre +0x150 =
+#                                           the position; per-feeler hits at (bundle+0x6c)+0xa4
 ai_iface_walk_next          boot 0x00281b80 vt+0x30 thunk (j 0x00280b00): the walk's next object, or 0
+ai_iface_walk_end           boot 0x00281b70 vt+0x34 thunk (j 0x00280b10): closes the walk's query
+#                                           (0x001bb890 on rider+0x13b0); v0 = 1 (S323)
 name_registry_clear         boot 0x00281df0 operator delete[] each name in index order, then free the
 #                                           nodes
 actor_kind_names            boot 0x004e1e88 the type-name registry: {count, head, tail}. An actor's
