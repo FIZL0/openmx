@@ -12,6 +12,11 @@
 //! A track mod (MD6) is a track by its id, hashed over its folder's files ([`Disc::track`]), and the host
 //! says its name and version too ([`Disc::track_mod`]), so a peer that lacks it, or holds another
 //! version, is told which mod it needs: nothing is sent, each player installs their own.
+//!
+//! Each seat's machine is in it too (MD37e, [`Handshake::machines`]): the one it starts on and the
+//! quad its ride offers, a pack's (`mxvatv_atv/atv_Race250P`). The quad's pack is one of the packs a
+//! seat rides ([`Room::needs`]), so a peer without it, or with other files under it, is refused with
+//! the pack's name and what makes one, as any pack a seat rides is (P318).
 
 use serde::{Deserialize, Serialize};
 
@@ -152,6 +157,18 @@ pub struct Handshake {
     /// The packs some seat rides ([`Room::needs`]): every seat must hold each, with the host's files.
     #[serde(default)]
     pub needs: Vec<String>,
+    /// Every seated player's machine in seat order (MD37e, [`machine`]): what they start on and the
+    /// quad their ride offers. Every machine runs every seat's physics on it.
+    #[serde(default)]
+    pub machines: Vec<String>,
+}
+
+/// A seat's machine as the handshake says it (MD37e): the machine it starts on (`bike` for the
+/// pick's empty word) and, where its ride offers one, `+ quad ` and the quad (`bike + quad
+/// mxvatv_atv/atv_Race250P`).
+pub fn machine(pick: &crate::room::Pick) -> String {
+    let start = if pick.machine.is_empty() { "bike" } else { pick.machine.as_str() };
+    if pick.quad.is_empty() { start.to_string() } else { format!("{start} + quad {}", pick.quad) }
 }
 
 /// The build: two builds can't be trusted to simulate alike. The crate's version and "dev" unless the shell stamps
@@ -190,6 +207,7 @@ impl Handshake {
             handling_hash: if room.handling.is_empty() { None } else { disc.tricks(&room.handling) },
             packs: disc.packs(),
             needs: room.needs(),
+            machines: room.seats.iter().flatten().map(|s| machine(&s.pick)).collect(),
         }
     }
 
@@ -270,6 +288,11 @@ impl Handshake {
             };
             return Err(format!("Can't ride: a rider is on the pack {} ({key}), and it {why}.{how}", theirs.said()));
         }
+        if self.machines != host.machines {
+            let n = (0..self.machines.len().max(host.machines.len())).find(|&n| self.machines.get(n) != host.machines.get(n)).unwrap_or(0);
+            let said = |m: Option<&String>| m.cloned().unwrap_or_else(|| "none".to_string());
+            return differ(&format!("rider {}'s machine", n + 1), said(self.machines.get(n)), said(host.machines.get(n)));
+        }
         if self.presets != host.presets {
             let n = (0..self.presets.len().max(host.presets.len())).find(|&n| self.presets.get(n) != host.presets.get(n)).unwrap_or(0);
             let said = |p: Option<&u8>| p.map_or("none".to_string(), |p| p.to_string());
@@ -304,6 +327,7 @@ mod tests {
             handling_hash: None,
             packs: Vec::new(),
             needs: Vec::new(),
+            machines: vec!["bike".into(), "bike".into()],
         }
     }
 
@@ -330,6 +354,8 @@ mod tests {
         refused(Handshake { presets: vec![0], ..h.clone() }, "rider 2's controller preset differs (host: 2, you: none)");
         refused(Handshake { tricks: "mxvatv".into(), tricks_hash: Some(5), ..h.clone() }, "the trick pack differs (host: none, the original's tricks, you: mxvatv)");
         refused(Handshake { handling: "mxvatv".into(), handling_hash: Some(5), ..h.clone() }, "the handling differs (host: the original's, you: MX vs. ATV's, from mxvatv)");
+        refused(Handshake { machines: vec!["bike".into(), "bike + quad mxvatv_atv/atv_Race250P".into()], ..h.clone() }, "rider 2's machine differs (host: bike, you: bike + quad mxvatv_atv/atv_Race250P)");
+        refused(Handshake { machines: vec!["bike".into()], ..h.clone() }, "rider 2's machine differs (host: bike, you: none)");
     }
 
     /// A disc whose mods folder holds one trick pack.
@@ -489,5 +515,48 @@ mod tests {
         let cut = &json[..json.find(r#","packs""#).unwrap()];
         let old: Handshake = serde_json::from_str(&format!("{cut}}}")).unwrap();
         assert!(old.packs.is_empty() && old.needs.is_empty(), "a handshake from a build before P318 holds no packs and needs none");
+    }
+
+    /// MD37e: a seat on a quad says it among the seats' machines, and its pack is one every seat
+    /// must hold; a peer without the pack, or with another version of it, is refused with it named.
+    #[test]
+    fn every_seat_holds_the_quad_a_seat_rides() {
+        let atv = |hash: u64, version: &str| super::Pack {
+            kind: "machine".into(),
+            id: "mxvatv_atv".into(),
+            hash,
+            name: format!("MX vs. ATV Unleashed quads {version}"),
+            how: "openmx-mods tools/import-atv atv".into(),
+        };
+        struct Holds(Vec<super::Pack>);
+        impl Disc for Holds {
+            fn packs(&self) -> Vec<super::Pack> {
+                self.0.clone()
+            }
+        }
+        let quad = Pick { quad: "mxvatv_atv/atv_Race250P".into(), packs: "machine/mxvatv_atv".into(), ..Pick::new("thq1", "race125p") };
+        let mut room = Room::new("h", "free06", 2);
+        room.take(crate::room::HOST, &[quad.clone()]);
+        room.take("g", &[Pick { quad: "mxvatv_atv/atv_s_Pro250A".into(), ..quad.clone() }]);
+        let host = Handshake::of(&room, &Holds(vec![atv(1, "1.0.0")]));
+        assert_eq!(host.machines, ["bike + quad mxvatv_atv/atv_Race250P", "bike + quad mxvatv_atv/atv_s_Pro250A"]);
+        assert_eq!(host.needs, ["machine/mxvatv_atv"]);
+        assert_eq!(Handshake::of(&room, &Holds(vec![atv(1, "1.0.0")])).check(&host), Ok(()), "both on quads, the same pack");
+        assert_eq!(
+            Handshake::of(&room, &Holds(vec![])).check(&host),
+            Err("Can't ride: a rider is on the pack MX vs. ATV Unleashed quads 1.0.0 (machine/mxvatv_atv), and it isn't in your mods folder. Make it from your own disc with openmx-mods tools/import-atv atv.".into())
+        );
+        assert!(Handshake::of(&room, &Holds(vec![atv(2, "1.1.0")])).check(&host).unwrap_err().contains("and your mods folder has MX vs. ATV Unleashed quads 1.1.0."));
+        assert!(Handshake::of(&room, &Holds(vec![atv(2, "1.0.0")])).check(&host).unwrap_err().contains("isn't the same files in your mods folder"));
+        // a seat on the plane says so, and one on nothing of a pack's needs none
+        let mut plain = Room::new("h", "free06", 2);
+        plain.take(crate::room::HOST, &[Pick { machine: "biplane".into(), ..Pick::new("thq1", "race125p") }]);
+        let host = Handshake::of(&plain, &Holds(vec![atv(1, "1.0.0")]));
+        assert_eq!((host.machines.as_slice(), host.needs.len()), (&["biplane".to_string()][..], 0));
+        assert_eq!(Handshake::of(&plain, &Holds(vec![])).check(&host), Ok(()));
+        let json = serde_json::to_string(&quad).unwrap();
+        let old: Pick = serde_json::from_str(&json.replace(r#","quad":"mxvatv_atv/atv_Race250P""#, "")).unwrap();
+        assert_eq!(old.quad, "", "a pick from a build before MD37e offers no quad");
+        assert!(!serde_json::to_string(&Pick::new("thq1", "race125p")).unwrap().contains("quad"), "no quad, no word of it");
     }
 }
