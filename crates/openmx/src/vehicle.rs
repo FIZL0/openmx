@@ -2786,6 +2786,12 @@ impl game_sim::kiowa::Surroundings for KiowaAround<'_> {
         self.ground.post(body);
         self.wreckage.blades.gather_round(self.ground.collision, body);
     }
+    fn wrap_round(&mut self, body: &mut game_sim::biplane::Body) -> [i8; 2] {
+        self.ground.wrap_round(body)
+    }
+    fn wrap(&self) -> [bool; 2] {
+        self.ground.wrap()
+    }
     fn resolve(&mut self, body: &mut game_sim::biplane::Body) {
         let ground = &mut self.ground;
         self.wreckage.blades.with_others(|others| ground.resolve_among(body, others));

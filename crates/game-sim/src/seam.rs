@@ -128,3 +128,34 @@ pub fn by(lap: i8, side: F) -> F {
         _ => F::ZERO,
     }
 }
+
+/// The laps a point is past a world's seams, `[x, z]` ([`lap`]), and what they move it by: `None`
+/// on a world that does not wrap, or with the point inside.
+pub fn past(world: &dyn crate::world::World, at: Vf) -> Option<([i8; 2], [F; 2])> {
+    let wrap = world.wrap();
+    let area = world.area().filter(|_| wrap != [false, false])?;
+    let laps = [lap(wrap[0], at.x(), area.width), lap(wrap[1], at.z(), area.depth)];
+    (laps != [0, 0]).then(|| (laps, [by(laps[0], area.width), by(laps[1], area.depth)]))
+}
+
+/// A rigid-body part's collision object (MD120: a car's, the helicopter's): its record. Its
+/// collider's `cofg_world` is the centre of mass turned into the world, an offset from the body's
+/// position that every contact works out again before it reads it, so it is not a place; the
+/// nearby list is gathered again where the body now is.
+pub fn collision(c: &mut crate::kiowa::Collision, by: [F; 2]) {
+    record(&mut c.record, by);
+}
+
+/// **A car** (MD120, [`crate::car::Machine::wrap_round`]): its body, its matrix's origin and each
+/// corner's places — the axle's top and bottom, the ground the probe found and the tire's contact.
+/// Its centre of mass's travel and everything in its own frame are not places.
+pub fn car(m: &mut crate::car::Machine, by: [F; 2]) {
+    body(&mut m.body, by);
+    matrix(&mut m.matrix, by);
+    for w in &mut m.wheels {
+        w.upper = moved(w.upper, by);
+        w.lower = moved(w.lower, by);
+        w.ground_point = moved(w.ground_point, by);
+        w.s.contact = moved(w.s.contact, by);
+    }
+}

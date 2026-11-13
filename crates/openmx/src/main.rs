@@ -1742,12 +1742,15 @@ fn seam_moved((wrap, side): ([bool; 2], [f32; 2]), was: Option<M4>, now: Vf) -> 
 
 /// The whole widths a seat's machine moved over a seam this tick (MD29, MD44): the plane's while it
 /// is flown, from its spot `plane` before the tick, else the bike's from `bike` ([`seam_moved`]). The
-/// helicopter's, flown, is the plane's: `plane` is then its spot before the tick (P216b).
-fn seat_seam(seams: ([bool; 2], [f32; 2]), seat: &Seat, bike: Option<M4>, plane: Option<M4>) -> Option<[f32; 3]> {
-    match (seat.garage.plane_flown(), seat.garage.heli_up().and_then(|h| h.matrix())) {
-        (Some(p), _) => seam_moved(seams, plane, p.at),
-        (None, Some(m)) => seam_moved(seams, plane, m.0[3]),
-        (None, None) => seam_moved(seams, bike, seat.sim.bike_pos()),
+/// helicopter's, flown, is the plane's: `plane` is then its spot before the tick (P216b). A driven
+/// car's is its own, from its spot `car` before the tick (MD120).
+fn seat_seam(seams: ([bool; 2], [f32; 2]), seat: &Seat, bike: Option<M4>, plane: Option<M4>, car: Option<M4>) -> Option<[f32; 3]> {
+    let driven = seat.garage.car_up().and_then(|c| c.driven.as_ref());
+    match (seat.garage.plane_flown(), seat.garage.heli_up().and_then(|h| h.matrix()), driven) {
+        (Some(p), _, _) => seam_moved(seams, plane, p.at),
+        (None, Some(m), _) => seam_moved(seams, plane, m.0[3]),
+        (None, None, Some(m)) => seam_moved(seams, car, m.matrix.0[3]),
+        (None, None, None) => seam_moved(seams, bike, seat.sim.bike_pos()),
     }
 }
 
@@ -9526,13 +9529,22 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     true => before_helis.get(i).copied().flatten().map(|(m, _)| m),
                     false => before_planes.get(i).copied().flatten(),
                 };
-                let by = seams.and_then(|s| seat_seam(s, seat, before.get(i).map(|b| b.bike), flown_before))?;
+                let car_before = before_cars.get(i).copied().flatten();
+                let by = seams.and_then(|s| seat_seam(s, seat, before.get(i).map(|b| b.bike), flown_before, car_before))?;
+                // A driven car's spot before the tick slides over with it (MD120), as the plane's does.
+                if let Some(Some(m)) = before_cars.get_mut(i) {
+                    m.0[3][0] += by[0];
+                    m.0[3][2] += by[2];
+                }
                 let mut heli_slot = flown_before.filter(|_| heli);
-                let slot = match heli {
-                    true => Some(&mut heli_slot),
-                    false => before_planes.get_mut(i),
+                // A driven car's crossing leaves the parked bike and plane where they stand.
+                let driving = car_before.is_some();
+                let slot = match (heli, driving) {
+                    (true, _) => Some(&mut heli_slot),
+                    (false, true) => None,
+                    (false, false) => before_planes.get_mut(i),
                 };
-                seam_carry(by, seat.garage.plane_flown().is_some() || heli, before.get_mut(i), slot, before_cameras.get_mut(i), cuts.get_mut(i));
+                seam_carry(by, seat.garage.plane_flown().is_some() || heli || driving, before.get_mut(i), slot, before_cameras.get_mut(i), cuts.get_mut(i));
                 if let (Some(Some((m, _))), Some(carried)) = (before_helis.get_mut(i), heli_slot) {
                     *m = carried;
                 }
