@@ -1108,6 +1108,18 @@ activity_race_load          boot 0x002f8610 (activity) the base loader: the trac
 #                                           after), 0x002f8b40 ground-snaps the path nodes,
 #                                           ground_query on the line and grid gate centres; a second
 #                                           file act+0x288 into act+0xbc.
+# S299: the second load is the first one again on act+0x288 / act+0xbc: track_ctor, track_file_load,
+#   the ground snap with a1 = act+0xbc (0x002f876c), node_add_child (act+0x50, track, -1 rather than
+#   0x408), +0x38/+0x3c = 125/75, ground_query on its line and grid gate. It runs only when the first
+#   loaded; a missing or unreadable second file returns 0.
+activity_race_setup         boot 0x002f8160 (activity, settings) the base activity's setup: with
+#                                           settings, Position/Radius (+0x30, +0x40), "TDF" and
+#                                           "AITDF" into two buffers (empty -> "%s%s" of world+0x140
+#                                           and ".tdf" / "AI.tdf"), UseTriggers.. flags, RaceStartDelay
+#                                           (+ a random half), WrongWayIndicatorDelay, MinTimeOnGround,
+#                                           RaceTimeOutValue, MaxLapRecords; without, the defaults. Then
+#                                           act+0x184 / act+0x288 = "%s%s\%s" of "Tracks\", world+0x140
+#                                           and each buffer, and vt+0x30. race::race_file_names.
 # S296: the load's ground snap. ported as race::TrackFile::snap_to_ground (the terrain half).
 #   the ground snap 0x002f8b40 (activity, track): every path slot's nodes (+0x10, next
 #                                           +0x54): points +0x14/+0x24/+0x34 = 0, then with a terrain
