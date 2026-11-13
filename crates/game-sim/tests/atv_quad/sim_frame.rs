@@ -76,6 +76,12 @@ const SERVICE: u32 = 0x003e_ab60;
 /// are left out of the compare, as S278b does.
 const RING: (u32, u32) = (0x0054_1550, 10 * 0x70);
 const TERRAIN_RING: [u32; 2] = [0x9e0, 0x9e4];
+/// K51: the mesh tree walk's box-against-triangle test's scratch (the triangle's three corners as the
+/// mesh keeps them, the same in the box's frame and their centre, two edges and a third axis): both of
+/// the original's tests write each word in the call before reading it and nothing else touches them, so
+/// they carry nothing from one call to the next. The port's pair (`atv_sweep`, the part's mesh pair)
+/// keeps its triangle in its own frame and never writes them, so they are left out of the compare.
+const TRIANGLE_SCRATCH: (u32, u32) = (0x003d_ce50, 0xa0);
 const BODY_DAMP: [u32; 2] = [0x20, 0x68];
 const BUDGET: u64 = 400_000_000;
 const DT: u32 = 0x3d08_850a;
@@ -952,7 +958,7 @@ fn port_record(
 
 /// Every RAM word that differs between the two machines, outside the interpreter's stack (frames
 /// and scratch slots, which the pieces' separate calls lay differently) and the ground query's ring
-/// ([`RING`], [`TERRAIN_RING`]). A word that holds an address
+/// ([`RING`], [`TERRAIN_RING`]), and the triangle test's scratch ([`TRIANGLE_SCRATCH`]). A word that holds an address
 /// in the stack on both is equal too: two globals (`0x003dce40`, `0x003dce48`) keep a pointer into a
 /// caller's frame, which sits deeper or shallower as the calls nest.
 fn ram_differs(a: &Ee, b: &Ee) -> Vec<(u32, u32, u32)> {
@@ -967,7 +973,9 @@ fn ram_differs(a: &Ee, b: &Ee) -> Vec<(u32, u32, u32)> {
         for i in (0..x.len()).step_by(4) {
             let (p, q) = (u32::from_le_bytes(x[i..i + 4].try_into().unwrap()), u32::from_le_bytes(y[i..i + 4].try_into().unwrap()));
             let a = (k * 0x1000 + i) as u32;
-            let ring = (RING.0..RING.0 + RING.1).contains(&a) || TERRAIN_RING.map(|o| terrain + o).contains(&a);
+            let ring = (RING.0..RING.0 + RING.1).contains(&a)
+                || TERRAIN_RING.map(|o| terrain + o).contains(&a)
+                || (TRIANGLE_SCRATCH.0..TRIANGLE_SCRATCH.0 + TRIANGLE_SCRATCH.1).contains(&a);
             if p != q && !(in_stack(p) && in_stack(q)) && !ring {
                 out.push((a, p, q));
             }

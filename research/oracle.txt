@@ -1114,7 +1114,13 @@ activity_race_load          boot 0x002f8610 (activity) the base loader: the trac
 race_prop_raise             boot 0x002f8820 (act, world, filter, probe+4, search, probe, &y) the props
 #                                           the search grid finds near the probe: type 2 (a mesh, not
 #                                           masked by two named classes) swept, *y = max(*y, hit +4);
-#                                           type 3 only answers 1 within 20 (unused). Not ported.
+#                                           type 3 only answers 1 within 20 (unused). S296a: ported as
+#                                           race::TrackFile::raise_on_props over back_search::query_each
+#                                           (the masks are VEHICLE|RIDER category bits, strings 0x0043c108
+#                                           and 0x0043c110); its props are the scene's .col meshes and the
+#                                           knockable props' f.col (race::knockable_meshes). Proved on
+#                                           s296a-{sx06,sx08,sx11,sx20,nat03} images, sx20's lift by a hay
+#                                           bale beside the node's third point.
 res_find                    boot 0x00125bc0 (store, name) -> nonzero when the named file is there
 track_load                  boot 0x00269490 (track, name, 3) -> the track, read by track_file_load, or 0
 sweep_probe_ctor            boot 0x001e80f0 (probe, 1) -> probe

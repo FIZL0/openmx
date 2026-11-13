@@ -3052,8 +3052,9 @@ impl TrackFile {
     /// A node whose `word_04` carries `0x80` is one the original goes on to raise onto the scene's
     /// props: a downward sweep from 900 above each of its points, which lifts the node's *first*
     /// point to the highest prop it meets — all three sweeps write the first point's height (the
-    /// original passes the same address each time). That raise is not ported: those nodes are
-    /// returned, as (path index, node index) pairs, after their terrain snap. sx01's file has none.
+    /// original passes the same address each time). Those nodes are returned, as (path index, node
+    /// index) pairs, after their terrain snap, for [`TrackFile::raise_on_props`] (S296a), which the
+    /// original runs on each one as the walk reaches it; sx01's file has none.
     pub fn snap_to_ground(&mut self, mut terrain: Option<&mut dyn crate::world::World>) -> Vec<(usize, usize)> {
         let mut raise = Vec::new();
         for (k, path) in self.paths.iter_mut().enumerate() {
@@ -3083,6 +3084,65 @@ impl TrackFile {
         }
         raise
     }
+
+    /// Raise the nodes [`TrackFile::snap_to_ground`] handed back onto the scene's props, as the race
+    /// activity's load does once a flagged node is on the terrain (S296a).
+    ///
+    /// For each of the node's three points in turn, a probe 1000 long points straight down from 900
+    /// above the point, in a bundle whose sphere is centred on the point with radius 1000. The search
+    /// grid gathers what is near it (the put-back's own gather and per-object sweep,
+    /// [`back_search::query_each`]: a fresh search each time, since the probe's reach is past its
+    /// bound), and every mesh prop the probe meets lifts the height to its hit point's when that is
+    /// higher. The height is the node's *first* point's on all three sweeps, so the second and third
+    /// points never move off the terrain, while their own sweeps can still lift the first. A placed
+    /// group the search gathers changes nothing.
+    ///
+    /// The props are the world's as they stand at the race's load: the scene's collision meshes and the
+    /// knockable props' ([`knockable_meshes`]), where their models stand.
+    ///
+    /// [`back_search::query_each`]: crate::back_search::query_each
+    pub fn raise_on_props(&mut self, nodes: &[(usize, usize)], scene: crate::back_search::Scene<'_>) {
+        for &(k, n) in nodes {
+            let Some(node) = self.paths.get_mut(k).and_then(|p| p.as_mut()).and_then(|p| p.nodes.get_mut(n)) else { continue };
+            for i in 0..3 {
+                let at = node.points[i];
+                let mut bundle = crate::collide::Bundle { count: 1, centre: at, radius: F(1000.0), ..Default::default() };
+                bundle.probes[0] = crate::collide::Probe {
+                    origin: Vf::new(at.x(), (F(at.y()) + F(900.0)).0, at.z(), 0.0),
+                    dir: Vf::new(0.0, -1.0, 0.0, 0.0),
+                    length: F(1000.0),
+                };
+                let mut cache = crate::back_search::Cache::default();
+                let mut found = crate::collide::Record::new();
+                let y = &mut node.points[0].0[1];
+                crate::back_search::query_each(scene, &bundle, &mut cache, crate::back_search::Race::default(), &mut found, |(_, record)| {
+                    let hit = record.point[0].y();
+                    // `c.lt.s`: both heights read as FPU operands, a denormal as zero.
+                    if F::from_bits(y.to_bits()) < F::from_bits(hit.to_bits()) {
+                        *y = hit;
+                    }
+                });
+            }
+        }
+    }
+}
+
+/// The knockable props' collidable meshes as the race activity's load finds them (S296a): each body
+/// with a collision object and an `f.col`, stood where its node stands it ([`PropSet::matrix`]) —
+/// at the load, where the scene put its model. The prop raise ([`TrackFile::raise_on_props`]) searches
+/// them with the scene's collision meshes: on sx20 a hay bale lifts a node.
+///
+/// [`PropSet::matrix`]: crate::prop_set::PropSet::matrix
+pub fn knockable_meshes(set: &crate::prop_set::PropSet) -> Vec<crate::world::Prop> {
+    let mut out = Vec::new();
+    for (coll, shapes) in set.collections.iter().zip(set.shapes.iter()) {
+        for (object, mesh) in coll.objects.iter().zip(shapes) {
+            if let Some(mesh) = mesh.as_ref().filter(|_| object.collision.is_some()) {
+                out.push(crate::world::Prop::on(mesh.clone(), &crate::prop_set::PropSet::matrix(&object.node)));
+            }
+        }
+    }
+    out
 }
 
 /// The world's ground query on a point in place: it takes the surface's height where the terrain

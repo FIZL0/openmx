@@ -123,6 +123,9 @@
 //!     words, the three pools, the three gates' spots and the lap length.
 //! 35. **sx01 loaded**: sx01's race file through [`TrackPaths::load`] against S196's image: the lap
 //!     length and the third gate's spot, bit for bit.
+//! 36. **The prop raise** (S296a): the race files of sx06, sx08, sx11, sx20 and nat03, stood on their
+//!     terrain and raised onto their scene and knockable meshes ([`TrackFile::raise_on_props`]),
+//!     against images of a race on each: every point of every node, bit for bit.
 
 use game_sim::chassis::{Chassis, Deriv};
 use game_sim::race::{
@@ -7805,4 +7808,184 @@ fn the_race_file_stands_on_the_ground_as_the_race_activitys_load_puts_it() {
 
 fn want_gate<'a>(t: &'a TrackFile, name: &str) -> &'a Gate {
     if name == "line" { t.line.as_ref().unwrap() } else { t.grid.as_ref().unwrap() }
+}
+
+/// S296a's RAM images of a race at its start on a track whose race file asks for the prop raise:
+/// `context/states/s296a-<track>.ee.bin`, made by S133's boot script (`boot.py <track> 0 2 <slot>`)
+/// and `./kit state ram`.
+fn raise_image(track: &str) -> Option<Ee> {
+    let name = format!("s296a-{track}.ee.bin");
+    let here = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../context/states").join(&name);
+    match Ee::from_ram(&here) {
+        Ok(ee) => Some(ee),
+        Err(why) => {
+            skip(&format!("{why} — S296a's {track} RAM image (S133's boot.py {track} 0 2 <slot>, then `./kit state ram`)"));
+            None
+        }
+    }
+}
+
+/// A track's race file (`tracks\<t>\<t>.tdf` in `Tracks\<t>_2.res`), its terrain and its collision
+/// meshes and its ecosystem, when it has one, off the disc.
+fn track_world(track: &str) -> Option<(Vec<u8>, Vec<u8>, game_sim::track::Scene, game_sim::world::Props, Option<Vec<u8>>)> {
+    let second = psr_member(&format!("Tracks\\{track}_2.res"))?;
+    let first = psr_member(&format!("Tracks\\{track}.res"))?;
+    let parts = [(Res::parse(&first).expect("the track's archive"), &first), (Res::parse(&second).expect("its second archive"), &second)];
+    let find = |want: &str| {
+        let want = want.to_ascii_lowercase();
+        parts.iter().find_map(|(res, bytes)| {
+            let e = res.entries.iter().find(|e| {
+                let n = e.name.to_ascii_lowercase();
+                n == want || n.ends_with(&format!("\\{want}"))
+            })?;
+            res.read(bytes, e).ok()
+        })
+    };
+    let file = find(&format!("{track}.tdf")).expect("the race file");
+    let suffix = |s: &str| {
+        parts.iter().find_map(|(res, bytes)| res.entries.iter().find(|e| e.name.to_ascii_lowercase().ends_with(s)).and_then(|e| res.read(bytes, e).ok()))
+    };
+    let scene = game_sim::track::Scene::parse(&suffix(".scn").expect("a scene")).expect("the scene");
+    let name = scene.terrain_file.to_ascii_lowercase();
+    let terrain = suffix(&name).or_else(|| suffix(&name.replace(".trn", ".ps2.trn"))).unwrap_or_else(|| panic!("no terrain {name}"));
+    let (props, missed) = game_sim::world::Props::load(&scene, |want| find(want).ok_or_else(|| "no archive of this track has it".to_string()));
+    // nat03's scene names eleven fence and silo meshes neither of its archives has.
+    assert!(missed.is_empty() || track == "nat03", "{track}'s collision meshes the archives lack: {missed:?}");
+    Some((file, terrain, scene, props, suffix(".esb")))
+}
+
+/// **The prop raise on the images** (S296a): each race file that asks for the raise, stood on its
+/// track's terrain and raised onto the track's collision meshes (with its ecosystem's placed groups in
+/// the search, where it has one), is bit for bit every point of every node of the track object in the
+/// image of a race on that track: the raised nodes' first points on the props, their other two left on
+/// the terrain.
+#[test]
+fn the_race_files_raised_onto_their_props_are_the_track_objects_in_the_images() {
+    let manager = match addr("activity_manager") {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    let (mut tracks, mut flagged, mut lifted, mut edge) = (0, 0, 0, 0);
+    for track in ["sx06", "sx08", "sx11", "sx20", "nat03"] {
+        let Some((file, terrain, scene, mut props, esb)) = track_world(track) else { return };
+        let Some(ee) = raise_image(track) else { continue };
+        let terrain = game_sim::track::Terrain::parse(&terrain).expect("the terrain");
+        let ground = game_sim::world::Ground::new(&terrain, &scene.terrain);
+        let field = ground.field();
+        let trees = esb.map(|esb| {
+            let mut eco = game_sim::eco::Ecosystem::parse(&esb).expect("the ecosystem");
+            let layout = &scene.terrain;
+            let extent = F::from(layout.width.max(layout.breadth) as i32 * game_sim::world::SAMPLES_PER_WIDTH as i32) * terrain.scale;
+            eco.stand(extent, |p| F(game_sim::contact_search::ground(&field, p).point.y()));
+            let table = ee.u32_at(addr("curve_table_ptr").unwrap());
+            let entries: Vec<[f32; 2]> = (0..game_sim::camera::CURVE_ENTRIES as u32)
+                .map(|i| [f32::from_bits(ee.u32_at(table + 8 * i)), f32::from_bits(ee.u32_at(table + 8 * i + 4))])
+                .collect();
+            let curve = game_sim::camera::CurveTable::from_entries(&entries);
+            game_sim::eco::Trees::new(&eco, game_sim::eco::cell_size(extent), &curve).0
+        });
+        let bounds = ([F(field.min.x()), F(field.min.z())], [F(field.max.x()), F(field.max.z())]);
+        let Some((set, said)) = knockables(track, &scene, ground.area) else { return skip(&format!("{track} has no .toy")) };
+        assert!(said.is_empty(), "{track}'s props load whole: {said:?}");
+        let knocked = game_sim::race::knockable_meshes(&set);
+        let scene_props = props.props.len();
+        props.props.extend(knocked);
+        let act = ee.u32_at(ee.u32_at(ee.u32_at(manager) + 0x58));
+        let ram = track_at(&ee, ee.u32_at(act + 0xb8));
+
+        // Stood on the terrain by the terrain object's own query; `Ground` refuses the field's last
+        // sample row and column, which that query answers (sx11 has a point there).
+        let mut t = TrackFile::parse(&file).expect("the race file reads");
+        let raise = t.snap_to_ground(Some(&mut TerrainQuery(ground.field())));
+        let on_terrain = t.clone();
+        let mut by_ground = TrackFile::parse(&file).unwrap();
+        let mut own = game_sim::world::Ground::new(&terrain, &scene.terrain);
+        assert_eq!(by_ground.snap_to_ground(Some(&mut own)), raise);
+        for (a, b) in on_terrain.paths.iter().flatten().flat_map(|p| &p.nodes).zip(by_ground.paths.iter().flatten().flat_map(|p| &p.nodes)) {
+            for (p, q) in a.points.iter().zip(&b.points) {
+                if p.to_bits() != q.to_bits() {
+                    let last = |v: f32, max: f32| !(F(v) < F(max) - ground.spacing);
+                    assert!((last(p.x(), field.max.x()) || last(p.z(), field.max.z())) && q.y() == 0.0, "{track}: Ground's snap differs off the last row: {p:?} against {q:?}");
+                    edge += 1;
+                }
+            }
+        }
+        t.raise_on_props(&raise, game_sim::back_search::Scene { props: &props.props, trees: trees.as_ref(), field: Some(bounds) });
+
+        let (mut nodes, mut apart) = (0, Vec::new());
+        for (k, (a, b)) in t.paths.iter().zip(&ram.paths).enumerate() {
+            let (a, b) = (a.as_ref().expect("the file's path"), b.as_ref().expect("the image's path"));
+            assert_eq!(a.nodes.len(), b.nodes.len(), "{track}: path {k}'s nodes");
+            for (n, m) in a.nodes.iter().zip(&b.nodes) {
+                nodes += 1;
+                if n.points.map(|p| p.to_bits()) != m.points.map(|p| p.to_bits()) {
+                    apart.push((k, n.id, n.word_04 & 0x80 != 0, n.points, m.points));
+                }
+            }
+        }
+        // What the raise moved: only ever a flagged node's first point.
+        let mut up = 0;
+        for (k, (a, b)) in t.paths.iter().zip(&on_terrain.paths).enumerate() {
+            for (n, (x, y)) in a.as_ref().unwrap().nodes.iter().zip(&b.as_ref().unwrap().nodes).enumerate() {
+                let moved: Vec<bool> = (0..3).map(|i| x.points[i].to_bits() != y.points[i].to_bits()).collect();
+                assert!(!moved[1] && !moved[2], "{track}: path {k} node {n}'s second or third point moved");
+                if moved[0] {
+                    assert!(raise.contains(&(k, n)), "{track}: path {k} node {n} moved unflagged");
+                    assert!(x.points[0].y() > y.points[0].y(), "{track}: the raise only lifts");
+                    up += 1;
+                }
+            }
+        }
+        eprintln!("{track}: {nodes} nodes, {} for the props, {up} lifted, {scene_props} scene meshes and {} knockable, groups {}", raise.len(), props.props.len() - scene_props, trees.is_some());
+        assert!(apart.is_empty(), "{track}: {} of {nodes} nodes apart (path, id, flagged, port, image): {:#?}", apart.len(), &apart[..apart.len().min(4)]);
+        tracks += 1;
+        flagged += raise.len();
+        lifted += up;
+    }
+    if tracks > 0 {
+        assert!(flagged > 0 && lifted > 0, "{tracks} tracks raised nothing: {flagged} flagged, {lifted} lifted");
+    }
+    eprintln!("{edge} points Ground leaves at 0 in the field's last sample row or column");
+}
+
+/// A track's knockable props, loaded as the shell loads them (both of its archives asked).
+fn knockables(track: &str, scene: &game_sim::track::Scene, area: game_sim::biplane::Area) -> Option<(game_sim::prop_set::PropSet, Vec<String>)> {
+    let parts: Vec<(Res, Vec<u8>)> = [format!("Tracks\\{track}.res"), format!("Tracks\\{track}_2.res")]
+        .iter()
+        .filter_map(|n| psr_member(n))
+        .map(|b| (Res::parse(&b).expect("a track archive"), b))
+        .collect();
+    let find = |want: &str, suffix: bool| {
+        let want = want.to_ascii_lowercase();
+        parts.iter().find_map(|(res, bytes)| {
+            let e = res.entries.iter().find(|e| {
+                let n = e.name.to_ascii_lowercase();
+                if suffix { n.ends_with(&want) } else { n == want }
+            })?;
+            res.read(bytes, e).ok()
+        })
+    };
+    let toy = game_sim::phy::Ini::parse_bytes(&find(&format!("{track}.toy"), true)?);
+    Some(game_sim::prop_set::PropSet::load(
+        &toy,
+        &format!("Tracks\\{track}\\"),
+        &scene.models,
+        &mut |p| find(p, false),
+        &mut |p| find(p, true),
+        Some(area),
+    ))
+}
+
+/// The terrain object's own ground query ([`game_sim::contact_search::ground`]), the original's
+/// `ground_query`: it answers out to the field's box, and leaves a point it has no cell for as it was.
+struct TerrainQuery<'a>(game_sim::contact_search::TerrainField<'a>);
+
+impl game_sim::world::World for TerrainQuery<'_> {
+    fn ground(&mut self, at: Vf) -> (Vf, Vf) {
+        let g = game_sim::contact_search::ground(&self.0, at);
+        (g.point, g.normal)
+    }
+    fn solid(&mut self, _: &game_sim::collide::Bundle, _: &mut game_sim::collide::Record) -> bool {
+        false
+    }
 }
