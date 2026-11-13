@@ -5,8 +5,10 @@
 //!
 //! The port's own where the original's code was not ported (S297's prop lookup and bound): the prop is
 //! the first scene model whose name has `dropgate` in it, as the original looks its props up by that
-//! name, and its bound is the box round the model's finest triangles. The start hold (S290, S304) and
-//! the intro are not run: the gate's watch is what keeps a rider behind it until the drop.
+//! name, and its bound is the box round the model's finest triangles. The activity is the
+//! countdown's listener, so its start timeline holds the rider from the countdown's zero to the
+//! warning window (S290, S304), and the gate's watch catches a rider who rolls through after that;
+//! the intro is counted as seen and not shown.
 
 use game_render::scene::Placement;
 use game_render::V3;
@@ -33,13 +35,17 @@ pub struct Start {
     pub delay: F,
     /// The race's own draws, after the reset's and the lanes'.
     pub rng: Rng,
+    /// The race's activity after its reset and the lanes: the countdown's listener.
+    pub activity: Supercross,
 }
 
 impl Start {
     /// The race `Sim::race` steps, with the rider standing at `rider` (its bike's translation and
     /// forward row).
     pub fn race(&self, rider: (Vf, Vf)) -> Race {
-        Race::new(self.gate, &[rider], self.delay, self.rng.clone())
+        let mut race = Race::new(self.gate, &[rider], self.delay, self.rng.clone());
+        race.activity = Some(self.activity.clone());
+        race
     }
 }
 
@@ -104,7 +110,8 @@ pub fn lay_out(prop: &Prop, drops: Vec<F>, riders: i32, seed: u32) -> Option<Sta
     s.reset(&mut start, &mut rng);
     s.shuffle_lanes(riders as usize, false, &mut rng);
     let (spot, facing) = s.grid_spot(GridStart::Gate { centre: start.centre, normal: start.normal, width: start.width }, 0, riders);
-    Some(Start { spot, facing, lane: s.lanes[0], place: s.starting_place(0), riders, gate: start, delay: s.start_delay, rng })
+    let (lane, place, delay) = (s.lanes[0], s.starting_place(0), s.start_delay);
+    Some(Start { spot, facing, lane, place, riders, gate: start, delay, rng, activity: s })
 }
 
 #[cfg(test)]
@@ -141,5 +148,9 @@ mod tests {
         assert_eq!((s.lane, s.place), (0, 1));
         // Behind the gate, facing through it.
         assert!(s.spot.z() < s.gate.centre.z() && s.facing.z() > 0.9);
+        // The race listens to the start's timeline, which holds the rider from the countdown's zero.
+        let race = s.race((s.spot, s.facing));
+        assert_eq!(race.activity.as_ref().map(|a| a.start_delay), Some(s.delay));
+        assert_eq!(race.countdown.length, s.delay);
     }
 }

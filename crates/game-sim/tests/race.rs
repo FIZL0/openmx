@@ -8046,3 +8046,39 @@ fn the_start_timeline_holds_the_rider_until_the_warning() {
     assert_eq!(sim.rider.ride.chassis.free, [1, 1, 1]);
     println!("held from tick 1, freed at {at:?} (warning {:?}), dropped after {n} ticks", act.warn_on);
 }
+
+/// **A held rider cannot creep** (S290): on sx01's start, with the gate three feet ahead and the gas
+/// held from the first tick, the timeline's hold keeps the bike where it stands, in all but height,
+/// until the warning lets it go; then it rolls into the closed gate and the watch catches it before
+/// the drop — the watch is the backstop for the warning window, as in the original, not the only
+/// thing holding the rider.
+#[test]
+fn a_held_rider_cannot_creep_until_the_warning_and_is_caught_in_it() {
+    let (mut sim, act) = timeline_ride();
+    let race = sim.race.as_mut().unwrap();
+    let ahead = race_ride(3.0, 0.0).race.unwrap().gate;
+    race.gate = ahead;
+    let start = sim.bike_pos();
+    let (mut n, mut freed) = (0, None);
+    while sim.rider.score.gate_penalty <= F::ZERO {
+        let at = sim.race.as_ref().unwrap().countdown.elapsed;
+        sim.tick(gas());
+        n += 1;
+        let race = sim.race.as_ref().unwrap();
+        assert!(race.countdown.running, "tick {n}: the drop came first; the rider at {:?} from {start:?}", sim.bike_pos());
+        if freed.is_none() && sim.rider.ride.chassis.free == [1, 1, 1] {
+            freed = Some((n, at));
+        }
+        if freed.is_none() {
+            assert_eq!(sim.rider.ride.chassis.free, [0, 1, 0], "tick {n}: held");
+            let p = sim.bike_pos();
+            assert_eq!((p.x(), p.z()), (start.x(), start.z()), "tick {n}: a held bike crept");
+        }
+    }
+    let (freed_n, at) = freed.expect("let go before it was caught");
+    assert!(!(at < act.warn_on) && at < act.warn_off, "freed at {at:?}, the warning {:?}..{:?}", act.warn_on, act.warn_off);
+    let p = sim.rider.score.gate_penalty;
+    assert!(p > F(0.9) && p <= F(2.0), "the penalty {p:?}");
+    assert_eq!(sim.race.as_ref().unwrap().gate.flags & flags::CLOSED, flags::CLOSED, "caught behind the closed gate");
+    println!("held from tick 1 to tick {freed_n} (clock {at:?}), caught on tick {n}, {:?} before the drop", F(act.start_delay.0 - sim.race.as_ref().unwrap().countdown.elapsed.0));
+}
