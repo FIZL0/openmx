@@ -11980,6 +11980,30 @@ atv_pair_log_grow           atv 0x0025b840 = a growable log's resize to a1 entri
 #   one float under: rec +0x60/+0x64/+0x70/+0x74 differ by 1-2 floats. Identity, rotation-only, origin-only,
 #   mixed raw/unit rows and y = z x x frames all miss. The frame the loader saw is not found.
 
+# MD150 — MX vs. ATV's car built from its files (atv_car::Load, tire_points; tests/mxvatv_car_load.rs), against
+#   MD39a's five spawn images (car at 0x01598e10 buggy/baja/truck, 0x01b158a0 sandrail, 0x01b0dac0 golf).
+#   Setup FUN_004c76f0, the first call of each class's node finder (buggy 0x004c4b00 vt +0x340, golf 0x004ceda0,
+#   truck 0x004d64d0): per tire node = 0x00195a90(car+0xe4, name) for "FrontLeftTire"/"FrontRightTire"/
+#   "RearLeft_Tire"/"RearRight_Tire" (0x528529/0x528537/0x528546/0x528554), 0x00194c20(node, car+0xe4, sp point);
+#   tire = 0x9c0 bytes from 0x004b48b0, set by 0x004b4d30(tire, model, car, point, brake, steer, 0): +0x1a4 model,
+#   +0x1a8 car, +0x1ac body, +0x24 brake / +0x28 steer (fronts car+0x1130/+0x113c, rears +0x1134/+0x1140), +0x70
+#   point w 1 (+ TireWidth in x by the tire reader: baja +-0.4, truck +-0.8, others 0); param 7 0: no sweep.
+#   Engine car+0x1250 = 0x004b3620 (0x134 bytes), then vt +0x7c(engine, car+0x318, car+0x112c, car+0x1134); sort
+#   probe car+0x1264 (400 bytes); flags bits at car+0x44 cleared here.
+#   Base loader 0x004a7e70: [Mass Properties] by 0x00493210, [Wrecks] (+0xc88 MaxWreckTime, +0xc90 WreckGravity,
+#   +0xca0 WreckDamping, +0xcb0 WreckInertia), then body+0x130..+0x13c copied to car+0xcc0.
+#   Spawn words no key gives (all five): body max speed 300, max accel / ang accel f32::MAX, max rates 12 12 12,
+#   inv inertia w 1, ang damping as read; tire +0x9a4 friction scale 1; undriven tires' +0x90 = 0x4392aa7f; flag
+#   byte car+0x45 = 0x06 | part bits (bit0 reset off edge, bit6 below minimum); state 0; +0x124c = YawRateLimit.
+#   Frame: the images' cars have settled (matrix origin ~(2817.29, 121.25, 3302.09) vs spawn +0x50 (2817.85,
+#   122.11, 3303.50)). Tire points from the psg: spawn/heading frames ~0.2 ft off; origin identity within ~2e-3
+#   (x ~+0.0015 throughout); the image's car matrix car+0x370..+0x3a0 within ~1e-4..6e-4. None bit-exact.
+#   Box: the record inertia rec+0x60's half box is near the model's bounds at the origin (buggy 3.5371513
+#   3.2025664 6.533138, baja 4.135842 4.326822 9.479412, sandrail 4.5983067 3.7880838 7.350102, golf 2.4306574
+#   3.60802 4.308774, truck 7.247992 6.3525705 9.490924); identity at spawn, at the matrix origin, at zero, and the
+#   heading frame all miss bit-exact (heading frame ~5% inertia). The test solves the box from rec+0x60 and
+#   body+0x130 together (the record alone is not unique on the buggy).
+
 # F31b5i: the rider leaf on the ports (tests/mxvatv_bike_ride.rs rider_leaf). Journal:
 # research/journal/2026-11-08-f31b5i-rider-leaf-on-the-ports/.
 #   The rider's vtable (rider+4) is 0x003d11b0 (+0xcc 0x00505710 settle, +0xd0 0x00505720 pose, +0xd4

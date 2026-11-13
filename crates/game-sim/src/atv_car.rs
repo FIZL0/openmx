@@ -2704,3 +2704,275 @@ fn engine_step(e: &EngineKeys, tires: &[TireKeys; 4], s: &mut State, car: &mut C
     g.sound_clock = g.sound_clock + h;
     g.pitch = lerp_held((g.pitch - F::ZERO) / (F::ONE - F::ZERO), lo, hi);
 }
+
+// --- MD150: the car made from its files ----------------------------------------------------------
+
+/// The spawned car's words no file key gives, as the constructor and the loaders leave them on all
+/// five of MD39a's spawn images: the body's top speed and rate limits, the tires' friction scale, and
+/// the flag bits the part reader does not write.
+const SPAWN_MAX_SPEED: f32 = 300.0;
+const SPAWN_MAX_RATE: f32 = 12.0;
+const SPAWN_FRICTION_SCALE: F = F::ONE;
+/// The inverse inertia's `w`, which the part reader leaves alone.
+const SPAWN_INV_INERTIA_W: f32 = 1.0;
+/// The flag byte's bits 1 and 2 (the post asks for the node's bounds; the post's own bit), set on the
+/// spawned car; bits 0 and 6 are the part reader's.
+const SPAWN_FLAGS: u8 = 0x06;
+
+/// Each tire's brake and steer levers, as the car's tire setup hands them out: the fronts the brake
+/// and the steer, the rears the brake force and the rear steer.
+pub const TIRE_LEVERS: [(Lever, Lever); 4] = [
+    (Lever::Brake, Lever::Steer),
+    (Lever::Brake, Lever::Steer),
+    (Lever::BrakeForce, Lever::RearSteer),
+    (Lever::BrakeForce, Lever::RearSteer),
+];
+
+/// **MX vs. ATV's car made from its files** (MD150), with no RAM image: a `Veh\<car>.phy` as
+/// SLUS-21104 loads it ([`crate::car::Car::read_mxvatv`], MD39b), its `[Mass Properties]` again
+/// through the rigid-body part reader ([`crate::handling::mass::Part`], MXVehicle's base loader), and
+/// what the car's setup takes from the chassis model: the part reader's half box and the four tire
+/// nodes' points ([`tire_points`]), handed in as for the quad ([`crate::quad::Load::read`]).
+///
+/// It builds what the ported frame reads ([`Keys`], [`InputKeys`], [`Car`], [`Body`], [`Vehicle`]) as
+/// the car stands after its load: riding, still, no wreck clock, with no pose. Where the car stands,
+/// its scene node and the world's bounds are the ride's to set.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Load {
+    pub file: crate::car::MxvatvCar,
+    pub part: crate::handling::mass::Part,
+    /// The tire nodes' points in the car's frame (before `TireWidth`), in [`FRONT_LEFT`]..[`REAR_RIGHT`]
+    /// order.
+    pub points: [Vf; 4],
+}
+
+impl Load {
+    /// Read a parsed file for one of the five cars.
+    pub fn read(ini: &crate::phy::Ini, machine: crate::car::MxvatvMachine, half_box: Vf, points: [Vf; 4], curve: &crate::camera::CurveTable) -> Load {
+        let part = crate::handling::mass::Part::read(&ini.section("Mass Properties"), half_box, curve);
+        Load { file: crate::car::Car::read_mxvatv(ini, machine), part, points }
+    }
+
+    /// Read the file's bytes.
+    pub fn read_bytes(bytes: &[u8], machine: crate::car::MxvatvMachine, half_box: Vf, points: [Vf; 4], curve: &crate::camera::CurveTable) -> Load {
+        Load::read(&crate::phy::Ini::parse_bytes(bytes), machine, half_box, points, curve)
+    }
+
+    /// Each tire's mount: its node's point slid out along `x` by `TireWidth`, `w` 1.
+    pub fn mounts(&self) -> [Vf; 4] {
+        core::array::from_fn(|k| {
+            let p = self.points[k];
+            Vf::new((F(p.x()) + self.file.car.tires[k].width).0, p.y(), p.z(), 1.0)
+        })
+    }
+
+    /// The pieces' keys: `[Joystick]`, `[Steering]`, the centres of mass and travel, `[Preload]`, the
+    /// clutch's launch, `[Aerodynamics]` and its wings, each tire's and the engine's.
+    ///
+    /// The keys read with the leave-alone getter (`[Preload]`, the clutch's) fall back to zero, which
+    /// no retail file needs. An undriven tire's top speed is MX Unleashed's constant
+    /// ([`crate::car::UNDRIVEN_TOP_WHEEL_SPEED`]); each tire has sixteen surfaces, the ones past the
+    /// file's zero.
+    pub fn keys(&self) -> Keys {
+        let c = &self.file.car;
+        let (j, a, p) = (&c.joystick, &c.aero, &c.preload);
+        let or0 = |v: Option<F>| v.unwrap_or(F::ZERO);
+        Keys {
+            square_steering: j.square_steering_input != 0,
+            brake_rate_limit: j.brake_rate_limit,
+            gas_rate_limit: j.gas_rate_limit,
+            x_dpad_rate_limit_on: j.x_dpad_rate_limit_on,
+            x_dpad_rate_limit_off: j.x_dpad_rate_limit_off,
+            x_axis_rate_limit: j.x_axis_rate_limit,
+            steer: j.steer,
+            wheel_steer: j.wheel_steer,
+            dpad_steer: j.dpad_steer,
+            rear_steer: j.rear_steer,
+            yaw_rate_limit: c.yaw_rate_limit,
+            hand_brake_yaw_rate_limit: c.hand_brake_yaw_rate_limit,
+            hand_brake_friction_scale: c.hand_brake_friction_scale,
+            hand_brake_brake_scale: c.hand_brake_brake_scale,
+            hand_brake_fade_time: c.hand_brake_fade_time,
+            cofg: c.mass_properties.cofg,
+            cofg_ai: c.cofg_ai,
+            cofg_travel_forward: c.cofg_travel_forward,
+            cofg_travel_back: c.cofg_travel_back,
+            preload_time: or0(p.preload_time),
+            min_preload_time: or0(p.min_preload_time),
+            max_preload_time: or0(p.max_preload_time),
+            max_preload: or0(p.max_preload),
+            clutch_torque_scale_time: or0(c.clutch_torque_scale_time),
+            max_clutch_torque_scale: or0(c.max_clutch_torque_scale),
+            max_clutch_torque_scale_speed: or0(c.max_clutch_torque_scale_speed),
+            aero_surface_area: a.aero_surface_area,
+            airborne_damping: a.airborne_damping,
+            unroll_gain: a.unroll_gain,
+            unroll_torque: a.unroll_torque,
+            unyaw_gain: a.unyaw_gain,
+            unyaw_torque: a.unyaw_torque,
+            airborne_control_moment: a.airborne_control_moment,
+            brake_gyro_torque: a.brake_gyro_torque,
+            wings: if a.number_of_wings > 0 {
+                a.wings
+                    .iter()
+                    .map(|w| Wing { lift_slope: w.lift_slope, angle_of_attack: w.angle_of_attack, basic_drag: w.basic_drag, induced_drag: w.induced_drag, position: w.position })
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            tires: core::array::from_fn(|k| self.tire_keys(k)),
+            engine: self.engine_keys(),
+        }
+    }
+
+    /// One tire's keys, with its levers ([`TIRE_LEVERS`]).
+    pub fn tire_keys(&self, k: usize) -> TireKeys {
+        let c = &self.file.car;
+        let t = &c.tires[k];
+        let mut surfaces = [crate::car::Surface::default(); 16];
+        for (s, f) in surfaces.iter_mut().zip(&t.surfaces) {
+            *s = *f;
+        }
+        TireKeys {
+            brake: Some(TIRE_LEVERS[k].0),
+            steer: Some(TIRE_LEVERS[k].1),
+            max_compression: t.max_compression,
+            max_compression_rate: t.max_compression_rate,
+            max_decompression_rate: t.max_decompression_rate,
+            spring: t.spring,
+            bounce_damping: t.bounce_damping,
+            rebound_damping: t.rebound_damping,
+            inv_inertia: t.inv_inertia,
+            max_steer_angle: t.max_steer_angle,
+            top_wheel_speed: c.top_wheel_speed(k).unwrap_or(crate::car::UNDRIVEN_TOP_WHEEL_SPEED),
+            max_tire_angle_rate: t.max_tire_angle_rate,
+            abs: t.abs_enabled != 0,
+            min_braking_slip: t.min_braking_slip,
+            max_braking_slip: t.max_braking_slip,
+            friction_scale: SPAWN_FRICTION_SCALE,
+            camber_roll_ratio: t.camber_roll_ratio,
+            surfaces,
+        }
+    }
+
+    /// The engine's keys, with its sound. `None` when the file drives no tire, which no retail file
+    /// does. A missing inverse inertia or RPM table reads as zero.
+    pub fn engine_keys(&self) -> Option<EngineKeys> {
+        let e = &self.file.car.engine;
+        let [Some(a), Some(b), c, d] = e.driven else { return None };
+        Some(EngineKeys {
+            drive: [a, b],
+            drive_more: c.zip(d).map(|(c, d)| [c, d]),
+            rpm: e.rpm.clone(),
+            torque: e.torque.clone(),
+            redline: e.max_rpm.unwrap_or(F::ZERO),
+            gear_ratios: e.gear_ratios.clone(),
+            final_gear_ratio: e.final_gear_ratio,
+            idle_throttle: e.idle_throttle,
+            engine_braking: e.engine_braking,
+            transmission_loss: e.transmission_loss,
+            inv_inertia: e.inv_inertia.unwrap_or(F::ZERO),
+            min_rpm: e.min_rpm,
+            pump_torque_scale: e.pump_torque_scale,
+            max_pump_torque: e.max_pump_torque,
+            max_k: e.max_k,
+            tcs: e.tcs_enabled != 0,
+            min_traction_slip: e.min_traction_slip,
+            max_traction_slip: e.max_traction_slip,
+            nox_burn_rate: e.nox_burn_rate,
+            nox_hp_boost: e.nox_hp_boost,
+            shift: e.shift,
+            sound: true,
+        })
+    }
+
+    /// The input step's `[Joystick]` keys.
+    pub fn input_keys(&self) -> InputKeys {
+        let j = &self.file.car.joystick;
+        InputKeys { max_analog_throttle: j.max_analog_throttle, digital_throttle_speed: j.digital_throttle_speed, digital_side_slip_angle: j.digital_side_slip_angle }
+    }
+
+    /// The car as loaded: riding, its yaw limit `YawRateLimit`, a landing sound and sort rays, the
+    /// body's centre of mass, each tire's mount ([`Load::mounts`]) and radius; nothing measured yet.
+    pub fn car(&self) -> Car {
+        let mounts = self.mounts();
+        let mut car = Car {
+            state: RIDING,
+            yaw_rate_limit: self.file.car.yaw_rate_limit,
+            landing_sound: true,
+            cofg: self.part.body.cofg,
+            sort_rays: true,
+            ..Car::default()
+        };
+        for (k, t) in car.tires.iter_mut().enumerate() {
+            (t.mount, t.radius) = (mounts[k], self.file.car.tires[k].radius);
+        }
+        car
+    }
+
+    /// The rigid body as loaded: enabled on every axis, the part's mass, damping and inertia, the top
+    /// speed and rates the constructor gives, no acceleration limits, and no pose (all zero).
+    pub fn body(&self) -> Body {
+        let b = &self.part.body;
+        let [ix, iy, iz] = b.inv_inertia;
+        Body {
+            enabled: true,
+            linear_axes: [true; 3],
+            inv_mass: b.inv_mass,
+            damping: b.damping,
+            max_speed: F(SPAWN_MAX_SPEED),
+            max_accel: F(f32::MAX),
+            angular_axes: [true; 3],
+            inv_inertia: Vf::new(ix.0, iy.0, iz.0, SPAWN_INV_INERTIA_W),
+            ang_damping: b.angular_damping,
+            max_rates: [F(SPAWN_MAX_RATE); 3],
+            max_ang_accel: F(f32::MAX),
+            ..Body::default()
+        }
+    }
+
+    /// MXVehicle's words as loaded: wrecks on, held to the map, no wreck clock, the car's kind word,
+    /// `[Wrecks]`, the part's inertia (the body's and the one the wreck scales), a wrecked look and a
+    /// collision record, the world's gravity force, and the flag byte. `drag` is the world's own
+    /// word. The scene and the bounds are the ride's.
+    pub fn vehicle(&self, drag: F) -> Vehicle {
+        let (w, f) = (&self.file.wrecks, self.part.flags);
+        Vehicle {
+            wrecks_on: true,
+            bounded: true,
+            max_wreck_time: self.file.car.max_wreck_time,
+            kind: self.file.machine.kind_word(),
+            wreck_damping: w.wreck_damping,
+            wreck_inertia: w.wreck_inertia,
+            inertia: self.part.body.inertia,
+            body_inertia: self.part.body.inertia,
+            look: true,
+            record: true,
+            gravity: self.part.gravity.force,
+            drag,
+            flags: SPAWN_FLAGS | u8::from(f.reset_off_edge) | (u8::from(f.reset_below_minimum) << 6),
+            ..Vehicle::default()
+        }
+    }
+}
+
+/// **The car's tire nodes' points** off its chassis model (`<car>.psg`) placed at `frame`: each
+/// [`crate::car::TIRE_NODES`] node's world origin carried back into `frame`, as the quad's wheel
+/// setup does it ([`crate::quad::Model::mounts`]), `w` 1. The frame the car's setup sees is its
+/// placement at that time, which a spawn image does not keep (research/journal MD150).
+pub fn tire_points(model: &crate::quad::Model, frame: &crate::math::Mat4) -> Result<[Vf; 4], String> {
+    use ps2_float::Field;
+    let worlds = model.worlds(frame);
+    let [r0, r1, r2, r3] = frame.0;
+    let column = |k: usize| Vf::new(r0[k], r1[k], r2[k], 0.0);
+    let mut out = [Vf::ZERO; 4];
+    for (slot, name) in out.iter_mut().zip(crate::car::TIRE_NODES) {
+        let i = model.nodes.iter().position(|n| n.name == name).ok_or_else(|| format!("the model has no {name}"))?;
+        let d = worlds[i].0[3].sub(r3);
+        let acc = column(0).mul(d.bc(Field::X));
+        let acc = Vf::madd(acc, column(1), d.bc(Field::Y));
+        let p = Vf::madd(acc, column(2), d.bc(Field::Z));
+        *slot = Vf::new(p.x(), p.y(), p.z(), 1.0);
+    }
+    Ok(out)
+}
