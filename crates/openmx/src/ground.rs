@@ -97,9 +97,13 @@ impl<'a> Ground<'a> {
         }
     }
 
-    /// Paint the ground with the track's own layers instead of one dirt colour.
-    pub fn painted(mut self, paint: Option<Splat>) -> Ground<'a> {
-        self.paint = paint;
+    /// Paint the ground with the track's own layers or pages instead of one dirt colour
+    /// ([`game_render::gpu::track_paint`]): `track` is the archives' stem and `scn` the scene's text.
+    pub fn dressed(mut self, archives: &[game_render::disc::Res], track: &str, scn: &str) -> Ground<'a> {
+        let leaves = (self.samples_x / LEAF_SAMPLES, self.samples_z / LEAF_SAMPLES);
+        let paint = game_render::gpu::track_paint(archives, track, scn, &self.terrain, self.spacing, leaves, self.extent());
+        self.paint = paint.splat;
+        self.pages = paint.pages;
         self
     }
 
@@ -111,14 +115,6 @@ impl<'a> Ground<'a> {
     /// [`CHUNK_FEET`] in this ground's cells, a power of two as [`Ground::chunks`] makes them.
     pub fn chunk_cells(&self) -> u32 {
         ((CHUNK_FEET / self.spacing.max(1.0e-3)).round() as u32).max(1).next_power_of_two()
-    }
-
-    /// Paint a mod track's ground from its terrain's own pages, with `detail` over them repeating
-    /// every `multiplier` samples (MD4). A terrain without pages stays as it was.
-    pub fn paged(mut self, detail: Option<game_render::pst::Texture>, multiplier: f32) -> Ground<'a> {
-        let leaves = (self.samples_x / LEAF_SAMPLES, self.samples_z / LEAF_SAMPLES);
-        self.pages = Pages::of(&self.terrain, self.spacing, leaves).map(|p| p.with_detail(detail, multiplier));
-        self
     }
 
     /// How big the field is in world units.

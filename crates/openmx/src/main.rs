@@ -4691,25 +4691,14 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // The same file parsed twice, because the two sides of it are owned by different crates: the
     // shell's `Ground` draws it in host floats, the port's answers the ride's ray in the game's.
     let ground = Ground::new(track::Terrain::parse(&terrain_bytes).map_err(|e| format!("{}: {e}", place.terrain_file))?, &place.terrain);
-    let ground = {
-        let extent = ground.extent();
-        ground.painted(game_render::splat::Splat::load(&archives, &stem, extent))
-    };
-    // A mod track with no splat is painted from its terrain's own pages, as MX vs. ATV draws its maps
-    // (MD4). The disc's tracks keep their own ground.
-    let ground = match &modded {
-        Some(_) if ground.paint.is_none() => {
-            let detail = game_render::terrain::Pages::load_detail(&archives[..1], &stem);
-            let ground = ground.paged(detail, game_render::terrain::detail_multiplier(&ini::text(&scn_bytes)));
-            if let Some(p) = &ground.pages {
-                let paged = p.page_of.iter().filter(|p| p.is_some()).count();
-                let detail = if p.detail.is_some() { "with" } else { "without" };
-                println!("ground: {} terrain pages on {paged} of {} leaves, {detail} a detail map", p.pages.len(), p.page_of.len());
-            }
-            ground
-        }
-        _ => ground,
-    };
+    // Its splat, or with none its terrain's own pages, as MX vs. ATV draws its maps (MD4): a mod
+    // track's, and the disc's supercross stadiums' and nationals' (P337).
+    let ground = ground.dressed(&archives, &stem, &ini::text(&scn_bytes));
+    if let Some(p) = &ground.pages {
+        let paged = p.page_of.iter().filter(|p| p.is_some()).count();
+        let detail = if p.detail.is_some() { "with" } else { "without" };
+        println!("ground: {} terrain pages on {paged} of {} leaves, {detail} a detail map", p.pages.len(), p.page_of.len());
+    }
     let sim_terrain = track::Terrain::parse(terrain_bytes)?;
     let sim_terrain: &track::Terrain = keep_terrain.get_or_init(|| sim_terrain);
     // A world's ground (MD8): every tile and join, each asked in its own coordinates.

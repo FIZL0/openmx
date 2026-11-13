@@ -415,6 +415,52 @@ pub enum GroundPaint<'a> {
     World(&'a WorldPaint),
 }
 
+/// A lone track's own ground paint, read from its archives ([`track_paint`]).
+#[derive(Default)]
+pub struct TrackPaint {
+    /// Its splat and baked light (V25): the disc's freeride tracks.
+    pub splat: Option<Splat>,
+    /// Its terrain's own pages under its detail map (MD4), on a track with no splat: a mod track's,
+    /// and the disc's supercross stadiums' and nationals', their `.trn`'s pages and `<track>_d.pst`.
+    pub pages: Option<Pages>,
+}
+
+impl TrackPaint {
+    /// The paint to hand [`Renderer::set_ground_painted`].
+    pub fn paint(&self) -> GroundPaint<'_> {
+        match (&self.splat, &self.pages) {
+            (Some(s), _) => GroundPaint::Splat(s),
+            (None, Some(p)) => GroundPaint::Pages(p),
+            (None, None) => GroundPaint::Bare,
+        }
+    }
+}
+
+/// What a lone track's ground is painted with: its splat where it has one, else its terrain's pages
+/// and detail map, else nothing (the one dirt colour). `track` is the archives' stem (`sx01`), `scn`
+/// the scene's text, and the terrain is `leaves` across and along, `spacing` feet a sample and
+/// `extent` feet in all.
+///
+/// P337: the pages were a mod track's only, so a supercross Race on the disc's own stadium, and a
+/// national ridden alone, drew one flat colour where the original has its ground (the world's tiles
+/// already paged them, MD9).
+pub fn track_paint(
+    archives: &[crate::disc::Res],
+    track: &str,
+    scn: &str,
+    terrain: &game_sim::track::Terrain,
+    spacing: f32,
+    leaves: (u32, u32),
+    extent: (f32, f32),
+) -> TrackPaint {
+    if let Some(splat) = Splat::load(archives, track, extent) {
+        return TrackPaint { splat: Some(splat), pages: None };
+    }
+    let detail = Pages::load_detail(&archives[..archives.len().min(1)], track);
+    let pages = Pages::of(terrain, spacing, leaves).map(|p| p.with_detail(detail, crate::terrain::detail_multiplier(scn)));
+    TrackPaint { splat: None, pages }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct GroundChunk {
     pub vertices: Vec<GroundVertex>,
