@@ -1140,7 +1140,8 @@ search_free                 boot 0x00218910 (search, 1) frees the grid, then the
 # the scene props "dropgate" (or the scene +0xb4 name lowercased; scene vt +0x120) and "finishgate"
 # (scene, else 0x00212af0 on 0x004e18c0). Bound 0x001b44b0 (prop, &centre, &half). Ported as
 # race::Supercross::place_drop_gate / place_finish_line; up is 0x00426db0 (0,1,0,1); the line's
-# ahead is 0x0026e630 (track, line +0x98, out).
+# ahead is 0x0026e630 (track, line +0x98, out). S298: the whole loader run with the scene vt +0x120,
+# 0x00212af0, the bound, path_spot and path_ahead hooked, 10,000 generated scenes, every gate word.
 track_file_fail             boot 0x00269680 (track, handle, paths, count) track_file_load's error exit
 track_first_path            boot 0x0026e9d0 (track, path) -> 1/0 after the load, on path 0: DFS over the
 #                                           links (stack from the pool +0x98), each new path gets 0x4

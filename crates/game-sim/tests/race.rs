@@ -41,7 +41,11 @@
 //!     RAM image — the header, both paths, all 96 nodes and the third gate, bit for bit (but the ground's
 //!     node heights and a flag the walk after the load clears).
 //! 13. **The gates on their props**: the same image's grid gate, start gate and finish line against
-//!     [`Supercross::place_drop_gate`] and [`Supercross::place_finish_line`] on the image's own props.
+//!     [`Supercross::place_drop_gate`] and [`Supercross::place_finish_line`] on the image's own props;
+//!     and (S298) the supercross loader itself run over 10,000 generated scenes — props found or not
+//!     (the finish by the fallback list too), track gates there or not, stray frames and bounds, any
+//!     `w` — with the prop lookups, the bound, the path spot and the path direction hooked, compared on
+//!     every gate word and on what the loader asked each hook.
 //! 14. **The track's paths** (S293), each on 20,000 generated courses of one to seven linked paths
 //!     (stray words, kept-off and unreached paths, short pools, signed-zero and denormal spots) laid
 //!     out as the track object holds them: the spot's point and the way ahead
@@ -2448,6 +2452,260 @@ fn the_supercross_loader_stands_sx01s_gates_on_its_props() {
     let mut line = t.line.expect("the file's line");
     Supercross::place_finish_line(&finish, ahead, &mut line);
     assert_eq!(gate_words(&line), gate_words(&want_line), "the line: {line:?} against {want_line:?}");
+}
+
+// --- S298: the supercross loader's gate override, generated --------------------------------------------
+
+/// Free RAM for the loader's run: the activity, its scene and the scene's vtable, the track object, the
+/// app, the three gates, the two props, the fallback's holder, and the hooks' landing slots (not code).
+const GO_ACT: u32 = 0x01e0_0000;
+const GO_SCENE: u32 = 0x01e0_1000;
+const GO_SCENE_VT: u32 = 0x01e0_1100;
+const GO_TRACK: u32 = 0x01e0_2000;
+const GO_APP: u32 = 0x01e0_3000;
+const GO_GRID: u32 = 0x01e0_4000;
+const GO_LINE: u32 = 0x01e0_4100;
+const GO_START: u32 = 0x01e0_4200;
+const GO_DROP: u32 = 0x01e0_5000;
+const GO_FINISH: u32 = 0x01e0_5200;
+const GO_HOLDER: u32 = 0x01e0_5400;
+const GO_HOLDER_B: u32 = 0x01e0_5500;
+const GO_FIND: u32 = 0x01e0_f000;
+
+/// A gate full of any words: whatever the loader leaves alone has to come through as it was.
+fn any_gate(p: &mut Pick) -> Gate {
+    let q = |p: &mut Pick| Vf([0; 4].map(|_| f32::from_bits(p.next() as u32)));
+    Gate {
+        flags: p.next() as u32,
+        centre: q(p),
+        normal: q(p),
+        across: q(p),
+        width: F(f32::from_bits(p.next() as u32)),
+        height: F(f32::from_bits(p.next() as u32)),
+        reach_sq: F(f32::from_bits(p.next() as u32)),
+    }
+}
+
+/// A prop's frame row: mostly a unit direction or a spot on a track, now and then stray words, and any
+/// `w`.
+fn prop_row(p: &mut Pick, scale: f32) -> Vf {
+    let v = if scale == 0.0 { p.unit_vector() } else { [0; 3].map(|_| p.range(-scale, scale)) };
+    let w = match p.below(3) {
+        0 => 0.0,
+        1 => 1.0,
+        _ => f32::from_bits(p.next() as u32),
+    };
+    let v = v.map(|c| p.stray(c));
+    Vf([v[0], v[1], v[2], w])
+}
+
+#[test]
+fn the_supercross_loaders_gate_override_matches_over_ten_thousand_scenes() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let [load, bound, ahead_at, spot_at, fallback, app, gp] = match addrs([
+        "activity_supercross_load",
+        "prop_bound",
+        "path_ahead",
+        "path_spot",
+        "prop_find_fallback",
+        "app_pointer",
+        "boot_gp",
+    ]) {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    ee.set(28, u64::from(gp));
+
+    // What the scene's lookup, the fallback, the bound and the path direction answer this case, and
+    // what the loader asked them.
+    #[derive(Default)]
+    struct Answers {
+        drop: u32,
+        finish: u32,
+        holder: u32,
+        bounds: Vec<(u32, [u32; 2])>,
+        ahead: [u32; 4],
+        asked: Vec<String>,
+        fell_back: u32,
+        spots: Vec<[u64; 6]>,
+        aheads: Vec<[u64; 2]>,
+        bounded: Vec<u32>,
+    }
+    let state = Rc::new(RefCell::new(Answers::default()));
+    let name = |ee: &Ee, at: u32| {
+        let mut s = String::new();
+        let mut a = at;
+        while ee.u8_at(a) != 0 && s.len() < 64 {
+            s.push(ee.u8_at(a) as char);
+            a += 1;
+        }
+        s
+    };
+    let st = state.clone();
+    ee.hooks.insert(GO_FIND, Box::new(move |ee| {
+        let mut st = st.borrow_mut();
+        assert_eq!(ee.r(4) as u32, GO_SCENE, "the scene's lookup on its own scene");
+        assert_eq!(ee.r(6) as u32, 1, "the scene's lookup's third argument");
+        let n = name(ee, ee.r(5) as u32);
+        let found = match n.as_str() {
+            "dropgate" => st.drop,
+            "finishgate" => st.finish,
+            _ => 0,
+        };
+        st.asked.push(n);
+        ee.set(2, u64::from(found));
+    }));
+    let st = state.clone();
+    ee.hooks.insert(fallback, Box::new(move |ee| {
+        let mut st = st.borrow_mut();
+        assert_eq!(name(ee, ee.r(5) as u32), "finishgate", "the fallback's name");
+        assert_eq!(ee.r(6) as u32, 1, "the fallback's third argument");
+        st.fell_back += 1;
+        ee.set(2, u64::from(st.holder));
+    }));
+    let st = state.clone();
+    ee.hooks.insert(bound, Box::new(move |ee| {
+        let mut st = st.borrow_mut();
+        let prop = ee.r(4) as u32;
+        let half = ee.r(6) as u32;
+        let words = st.bounds.iter().find(|b| b.0 == prop).map(|b| b.1).expect("a bound for a known prop");
+        // The centre out is garbage the loader never reads.
+        for k in 0..4 {
+            ee.set_u32(ee.r(5) as u32 + 4 * k, 0x7fc0_dead);
+        }
+        ee.set_u32(half, words[0]);
+        ee.set_u32(half + 4, words[1]);
+        ee.set_u32(half + 8, 0x7fc0_beef);
+        st.bounded.push(prop);
+    }));
+    let st = state.clone();
+    ee.hooks.insert(spot_at, Box::new(move |ee| {
+        st.borrow_mut().spots.push([4, 5, 6, 7, 8, 9].map(|r| ee.r(r) & 0xffff_ffff));
+    }));
+    let st = state.clone();
+    ee.hooks.insert(ahead_at, Box::new(move |ee| {
+        let mut st = st.borrow_mut();
+        st.aheads.push([ee.r(4) & 0xffff_ffff, ee.r(5) & 0xffff_ffff]);
+        let out = ee.r(6) as u32;
+        for k in 0..4 {
+            ee.set_u32(out + 4 * k as u32, st.ahead[k]);
+        }
+    }));
+
+    ee.set_u32(app, GO_APP);
+    ee.set_u32(GO_APP + 0x3cc, 0); // no scene name: the drop gate's prop is "dropgate"
+    ee.set_u32(GO_ACT + 0x180, GO_SCENE);
+    ee.set_u32(GO_SCENE + 8, GO_SCENE_VT);
+    ee.set_u32(GO_SCENE_VT + 0x120, GO_FIND);
+    ee.set_u32(GO_ACT + 0xb8, GO_TRACK);
+    ee.set_u32(GO_ACT + 0x3dc, GO_START);
+    // A lane object already made: the loader does not build one.
+    ee.set_u32(GO_ACT + 0x3ac, GO_HOLDER_B);
+
+    let mut p = Pick(0x5298_0dd5_9a7e_0001);
+    let mut seen = [0usize; 6]; // drop, grid, line in the scene, line by the fallback, no finish, line kept
+    for case in 0..10_000 {
+        let has_drop = p.below(8) != 0;
+        let has_grid = p.below(6) != 0;
+        let has_line = p.below(6) != 0;
+        let finish_from = p.below(8); // 0: none, 1: the fallback's holder, else the scene's
+        let mk_prop = |p: &mut Pick| Prop {
+            across: prop_row(p, 0.0),
+            look: prop_row(p, 0.0),
+            at: prop_row(p, 2000.0),
+            half_width: { let x = p.range(0.0, 40.0); F(p.stray(x)) },
+            height: { let x = p.range(0.0, 30.0); F(p.stray(x)) },
+        };
+        let (drop, finish) = (mk_prop(&mut p), mk_prop(&mut p));
+        let ahead = prop_row(&mut p, 0.0);
+        let (mut grid, mut line, mut start) = (any_gate(&mut p), any_gate(&mut p), any_gate(&mut p));
+        let node = p.next() as u32;
+        // The line's +0x94 spot: its node word (+0x98) is what the path direction is asked at.
+        let spot_words = [p.next() as u32, node, p.next() as u32];
+
+        for (at, prop) in [(GO_DROP, &drop), (GO_FINISH, &finish)] {
+            for k in 0..0x100 {
+                ee.set_u32(at + 4 * k, 0xa5a5_0000 | k);
+            }
+            put_quad(&mut ee, at + 0x80, prop.across);
+            put_quad(&mut ee, at + 0xa0, prop.look);
+            put_quad(&mut ee, at + 0xb0, prop.at);
+        }
+        for (at, g) in [(GO_GRID, &grid), (GO_LINE, &line), (GO_START, &start)] {
+            for k in 0..0x28 {
+                ee.set_u32(at + 4 * k, 0x5a5a_0000 | k);
+            }
+            put_gate(&mut ee, at, g);
+            for (k, w) in spot_words.iter().enumerate() {
+                ee.set_u32(at + 0x94 + 4 * k as u32, *w);
+            }
+        }
+        ee.set_u32(GO_TRACK + 0x58, if has_grid { GO_GRID } else { 0 });
+        ee.set_u32(GO_TRACK + 0x5c, if has_line { GO_LINE } else { 0 });
+        let finish_prop = if finish_from == 0 { 0 } else { GO_FINISH };
+        ee.set_u32(GO_HOLDER + 0xb0, GO_HOLDER_B);
+        ee.set_u32(GO_HOLDER_B + 0x30, finish_prop);
+        {
+            let mut st = state.borrow_mut();
+            *st = Answers {
+                drop: if has_drop { GO_DROP } else { 0 },
+                finish: if finish_from >= 2 { GO_FINISH } else { 0 },
+                holder: if finish_from == 1 { GO_HOLDER } else { 0 },
+                bounds: vec![
+                    (GO_DROP, [drop.half_width.0.to_bits(), drop.height.0.to_bits()]),
+                    (GO_FINISH, [finish.half_width.0.to_bits(), finish.height.0.to_bits()]),
+                ],
+                ahead: ahead.to_bits(),
+                ..Answers::default()
+            };
+        }
+        ee.call(load, &[u64::from(GO_ACT)], &[], 1_000_000);
+
+        // The port, on the same props.
+        if has_drop {
+            Supercross::place_drop_gate(&drop, has_grid.then_some(&mut grid), &mut start);
+            seen[0] += 1;
+            seen[1] += has_grid as usize;
+        }
+        let finds = finish_from != 0 && has_line;
+        if finds {
+            Supercross::place_finish_line(&finish, ahead, &mut line);
+            seen[if finish_from == 1 { 3 } else { 2 }] += 1;
+        } else if finish_from == 0 {
+            seen[4] += 1;
+        } else {
+            seen[5] += 1;
+        }
+        let ctx = || format!("case {case}: drop {drop:?} finish {finish:?} ahead {ahead:?}, grid {has_grid} line {has_line} finish from {finish_from}");
+        assert_eq!(gate_words(&gate_at(&ee, GO_GRID)), gate_words(&grid), "{}: the grid gate", ctx());
+        assert_eq!(gate_words(&gate_at(&ee, GO_LINE)), gate_words(&line), "{}: the line", ctx());
+        assert_eq!(gate_words(&gate_at(&ee, GO_START)), gate_words(&start), "{}: the start gate", ctx());
+
+        // What the loader asked: both names off the scene, the fallback only for a finish the scene
+        // lacks, a bound per prop placed, and the path spot (and, for the line, its direction) after
+        // each track gate is moved.
+        let st = state.borrow();
+        assert_eq!(st.asked, ["dropgate", "finishgate"], "{}", ctx());
+        assert_eq!(st.fell_back, u32::from(finish_from < 2), "{}: the fallback", ctx());
+        let mut bounded = Vec::new();
+        let mut spots = Vec::new();
+        if has_drop {
+            bounded.push(GO_DROP);
+            if has_grid {
+                spots.push([GO_TRACK, GO_GRID + 0x40, GO_GRID + 0x94, 0, 1, 0].map(u64::from));
+            }
+        }
+        if finds {
+            bounded.push(GO_FINISH);
+            spots.push([GO_TRACK, GO_LINE + 0x40, GO_LINE + 0x94, 0, 1, 0].map(u64::from));
+        }
+        assert_eq!(st.bounded, bounded, "{}: the bounds", ctx());
+        assert_eq!(st.spots, spots, "{}: the path spots", ctx());
+        let aheads: Vec<[u64; 2]> = if finds { vec![[u64::from(GO_TRACK), u64::from(node)]] } else { vec![] };
+        assert_eq!(st.aheads, aheads, "{}: the path direction", ctx());
+    }
+    eprintln!("gate override: drop {} grid {} line {} (fallback {}) no finish {} no line {}", seen[0], seen[1], seen[2] + seen[3], seen[3], seen[4], seen[5]);
+    assert!(seen.iter().all(|&n| n > 500), "a branch went short: {seen:?}");
 }
 
 // --- S293: the track's paths, as the race asks them ---------------------------------------------------
