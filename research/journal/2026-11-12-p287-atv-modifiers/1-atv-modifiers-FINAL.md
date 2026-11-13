@@ -1,4 +1,4 @@
-# 1 — atv modifiers (PART)
+# 1 — atv modifiers
 
 Task P287. 2026-11-12.
 
@@ -71,9 +71,9 @@ Nothing. These knobs are an addition on an addition (MX vs. ATV's quad in MX Unl
 
 ## Next
 
-The work is done and committed. P287 is not ticked, because the gate cannot go green: main is red in
-`game-sim --test atv_quad` (filed as **MD143**, critical). Once MD143 lands, rerun
-`./kit done P287 "<msg>"` on this branch. Nothing in P287 needs changing.
+None. The work merged to main unticked (MD143 had the gate red). MD143 is now closed (K51 took the
+triangle-test scratch out of atv_quad's compare). The reopened run changed no code and only ran the gate
+and ticked P287.
 
 ## Gate note
 
