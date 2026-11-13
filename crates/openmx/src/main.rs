@@ -4031,6 +4031,9 @@ async fn front_end(args: Args) -> Result<(), String> {
         let word = Machine::Biplane.pack_word().unwrap_or_default();
         let flier = shell.front.menu.picks.0[0].flier(word).map(|f| (f.pack.clone(), f.skin.clone()));
         shell.front.menu.lobby.set_flier(flier.as_ref().map(|(p, s)| (p.as_str(), s.as_str())));
+        // And the quad 1P's Garage picked (MD37e), which the handshake holds every seat to.
+        let quad = shell.front.menu.quad_pick();
+        shell.front.menu.lobby.set_quad(quad.as_ref().map(|(p, s)| (p.as_str(), s.as_str())));
         // 1P's own modifiers into it too, and the host's room every seat's (P134).
         shell.front.menu.lobby_mods();
         // 1P's controller preset into this machine's lobby pick (N13), for every machine's ride.

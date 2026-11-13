@@ -4,7 +4,7 @@
 //! server — nothing leaves the machine), where a host's menu opens a lobby, a guest's menu types the
 //! room code on the on-screen keyboard and joins, says ready, and the host's Start gives both menus the
 //! same ride and seed; a guest leaving mid-ride puts the host back in its lobby; a guest whose disc
-//! holds another race125p is refused and told why, as is one without the host's track mod (MD6). Last, what the shell hashes for the handshake,
+//! holds another race125p is refused and told why, as is one without the host's track mod (MD6) or a quad pack a seat rides (MD37e). Last, what the shell hashes for the handshake,
 //! against the disc when there is one.
 
 // the browser's own clock, threads and files, which are std's here (P196)
@@ -615,6 +615,124 @@ fn a_room_on_a_track_mod_seats_only_peers_with_the_same_mod() {
             }
             Some(says) => {
                 until((&mut h, &hn), (&mut g, &gn), "the refusal", |h, g, ha, ga| {
+                    assert!(!ha.contains(&Act::Online) && !ga.contains(&Act::Online), "nobody rides");
+                    g.screen() == Some(Screen::Online) && h.lobby.room.as_ref().is_some_and(|r| r.taken() == 1)
+                });
+                let why = g.note.clone().unwrap_or_default();
+                assert!(why.contains(says), "{name}: {why}");
+                assert!(g.lobby.room.is_none(), "not seated");
+                println!("guest told: {why}");
+            }
+        }
+        for m in [hm, gm] {
+            let _ = std::fs::remove_dir_all(m.parent().unwrap());
+        }
+    }
+}
+
+/// A `mods/` folder in the temp dir holding a quad pack, `mxvatv_atv` ("MX vs. ATV Unleashed
+/// quads", `version`), whose race quad's handling file says `phy`; `None` for a folder without it.
+fn quad_mods_folder(name: &str, held: Option<(&str, &str)>) -> std::path::PathBuf {
+    let mods = std::env::temp_dir().join(format!("openmx-md37e-{}-{name}", std::process::id())).join("mods");
+    let _ = std::fs::remove_dir_all(&mods);
+    std::fs::create_dir_all(&mods).unwrap();
+    let Some((version, phy)) = held else { return mods };
+    let dir = mods.join("machines").join("mxvatv_atv");
+    std::fs::create_dir_all(dir.join("Veh")).unwrap();
+    let json = format!(
+        r#"{{"kind": "machine", "id": "mxvatv_atv", "machine": "atv", "name": "MX vs. ATV Unleashed quads", "version": "{version}", "author": "openmx-mods tools/import-atv atv 0.1", "phy": ["Veh/atv_Race250P.phy", "Veh/atv_s_Pro250A.phy"]}}"#
+    );
+    std::fs::write(dir.join("mod.json"), json).unwrap();
+    std::fs::write(dir.join("Veh/atv_Race250P.phy"), phy).unwrap();
+    std::fs::write(dir.join("Veh/atv_s_Pro250A.phy"), "[Engine]\n").unwrap();
+    mods
+}
+
+/// The Garage's offer of the quad pack's two handling files, as the shell lists them off the pack
+/// (`machine_offers`), and the Quad row on `pick` (empty: Off).
+fn offer_quads(m: &mut Menu, pick: &str) {
+    let quad = |skin: &str, name: &str| roster::PackMachine {
+        pack: "mxvatv_atv".into(),
+        game: "MX vs. ATV Unleashed".into(),
+        machine: roster::ATV_KIND.into(),
+        class: String::new(),
+        skin: skin.into(),
+        name: name.into(),
+        why: None,
+    };
+    m.set_machines(vec![quad("atv_Race250P", "Race 250 P"), quad("atv_s_Pro250A", "Pro 250 A Sport")]);
+    m.settings.atv = pick.into();
+}
+
+/// [`pump`], with 1P's Garage quad put in the lobby pick first as the shell's frame does (MD37e),
+/// and a changed pick sent.
+fn pump_quads(m: &mut Menu, net: &Net) -> Vec<Act> {
+    let quad = m.quad_pick();
+    m.lobby.set_quad(quad.as_ref().map(|(p, s)| (p.as_str(), s.as_str())));
+    let preset = m.lobby.pick.preset as usize;
+    m.lobby.preset(preset);
+    pump(m, net)
+}
+
+/// MD37e: two peers whose mods folders hold the same quad pack are seated each on their own quad,
+/// which the room and the handshake carry seat by seat with the pack, and ride; a guest without the
+/// pack, or with another version of it or other files, is refused with the pack named, and not seated.
+#[test]
+fn two_peers_on_quads_ride_online_and_one_without_the_pack_is_refused_with_it_named() {
+    let host_files = Some(("1.0.0", "[Engine]\nTorque=1\n"));
+    let cases: [(&str, Option<(&str, &str)>, Option<&str>); 4] = [
+        ("same", host_files, None),
+        ("changed", Some(("1.0.0", "[Engine]\nTorque=2\n")), Some("the pack MX vs. ATV Unleashed quads 1.0.0 (machine/mxvatv_atv), and it isn't the same files in your mods folder")),
+        ("version", Some(("1.1.0", "[Engine]\nTorque=1\n")), Some("the pack MX vs. ATV Unleashed quads 1.0.0 (machine/mxvatv_atv), and your mods folder has MX vs. ATV Unleashed quads 1.1.0")),
+        ("none", None, Some("the pack MX vs. ATV Unleashed quads 1.0.0 (machine/mxvatv_atv), and it isn't in your mods folder. Make it from your own disc with openmx-mods tools/import-atv atv.")),
+    ];
+    for (name, guest_files, refused) in cases {
+        let (hm, gm) = (quad_mods_folder(&format!("host-{name}"), host_files), quad_mods_folder(&format!("guest-{name}"), guest_files));
+        let (hn, gn) = (lan_with_tricks("Hosty", &hm), lan_with_tricks("Guesty", &gm));
+        let (mut h, mut hr) = fresh("Hosty", "thq1");
+        let (mut g, mut gr) = fresh("Guesty", "thq2");
+        offer_quads(&mut h, "atv_Race250P");
+        // a guest without the pack has no quad to offer; one with it rides the sport quad
+        if guest_files.is_some() {
+            offer_quads(&mut g, "atv_s_Pro250A");
+        }
+        host_and_join(&mut h, &mut hr, &hn, &mut g, &mut gr, &gn);
+        let both = |h: &mut Menu, g: &mut Menu, what: &str, done: &mut dyn FnMut(&Menu, &Menu, &[Act], &[Act]) -> bool| {
+            let end = Instant::now() + Duration::from_secs(30);
+            let (mut ha, mut ga) = (Vec::new(), Vec::new());
+            while Instant::now() < end {
+                ha.extend(pump_quads(h, &hn));
+                ga.extend(pump_quads(g, &gn));
+                if done(h, g, &ha, &ga) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            panic!("{what}: not in 30 s; host {:?} / guest {:?}", h.lobby, g.lobby);
+        };
+        // the host's seat is on its quad, and a guest holding the same pack's files on its own
+        let quads = |m: &Menu| m.lobby.room.as_ref().map(|r| r.seats.iter().flatten().map(|s| s.pick.quad.clone()).collect::<Vec<_>>()).unwrap_or_default();
+        let want: Vec<String> = match refused {
+            None => vec!["mxvatv_atv/atv_Race250P".into(), "mxvatv_atv/atv_s_Pro250A".into()],
+            // the room does not offer the pack where the guest lacks it, so it picks none
+            Some(_) => vec!["mxvatv_atv/atv_Race250P".into(), String::new()],
+        };
+        both(&mut h, &mut g, "the quads in the room", &mut |h, g, _, _| quads(h) == want && quads(g) == want);
+        assert_eq!(h.lobby.room.as_ref().unwrap().needs(), vec!["machine/mxvatv_atv".to_string()], "the handshake holds every seat to the quad pack");
+        taps(&mut g, &mut gr, &[Control::Down, Control::Down, Control::Cross]);
+        both(&mut h, &mut g, "ready", &mut |h, _, _, _| h.lobby.room.as_ref().is_some_and(|r| r.all_ready()));
+        h.lobby.out.push(Cmd::Start);
+        match refused {
+            None => {
+                both(&mut h, &mut g, "the ride", &mut |_, _, ha, ga| ha.contains(&Act::Online) && ga.contains(&Act::Online));
+                for m in [&h, &g] {
+                    let (room, _) = m.lobby.start.as_ref().unwrap();
+                    let machines: Vec<String> = room.seats.iter().flatten().map(|s| openmx_net::handshake::machine(&s.pick)).collect();
+                    assert_eq!(machines, ["bike + quad mxvatv_atv/atv_Race250P", "bike + quad mxvatv_atv/atv_s_Pro250A"], "every machine starts the ride with each seat's quad");
+                }
+            }
+            Some(says) => {
+                both(&mut h, &mut g, "the refusal", &mut |h, g, ha, ga| {
                     assert!(!ha.contains(&Act::Online) && !ga.contains(&Act::Online), "nobody rides");
                     g.screen() == Some(Screen::Online) && h.lobby.room.as_ref().is_some_and(|r| r.taken() == 1)
                 });

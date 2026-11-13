@@ -1317,6 +1317,18 @@ impl CameraView {
 /// `online_fliers::KIND` says it, which the lobby's room offers by.
 pub const FLIER_PACK_KIND: &str = "machine";
 
+/// The machine pack a pick's `pack/skin` word (a flier's or a quad's) rides, as a room names it
+/// (`machine/mxvatv_atv`): empty for none.
+fn machine_pack(word: &str) -> String {
+    word.split_once('/').map(|(pack, _)| openmx_net::handshake::pack_key(FLIER_PACK_KIND, pack)).unwrap_or_default()
+}
+
+/// Two picks' packs as one pick's list ([`openmx_net::Pick::packs`]): each that is not empty,
+/// joined by a comma.
+fn joined_packs(a: &str, b: &str) -> String {
+    [a, b].into_iter().filter(|p| !p.is_empty()).collect::<Vec<_>>().join(",")
+}
+
 /// The Garage's fliers in a lobby (P318a): `offer`, each pack's skin greyed with the room's why
 /// ([`openmx_net::Offered::why`]) where some seat's machine lacks its pack or holds other files
 /// under it, or with what this machine's room copy has not heard of it. MX Unleashed's, and a skin
@@ -5969,8 +5981,34 @@ impl Lobby {
             }
             _ => (String::new(), String::new()),
         };
+        let packs = joined_packs(&packs, &machine_pack(&self.pick.quad));
         if self.pick.flier != word || self.pick.packs != packs {
             (self.pick.flier, self.pick.packs) = (word, packs);
+            self.repick = self.room.is_some();
+        }
+    }
+
+    /// The quad this machine's player's ride offers (MD37e), the Garage's Quad row's pick as
+    /// (pack, stem): taken where the room's host holds the same files under its pack as this
+    /// machine, else none, and the ride offers no quad. Unlike a flier, a seat that lacks it does
+    /// not take the pick away: its pack goes in the pick's packs beside a flier's, so the handshake
+    /// holds every seat to the host's files and refuses one without them, naming the pack; and the
+    /// seat's machine names the quad ([`openmx_net::handshake::machine`]). A change goes out as
+    /// [`Lobby::set_machine`]'s does.
+    pub fn set_quad(&mut self, quad: Option<(&str, &str)>) {
+        let open = |pack: &str| {
+            let Some(r) = self.room.as_ref() else { return false };
+            let key = openmx_net::handshake::pack_key(FLIER_PACK_KIND, pack);
+            let held = |peer: &str| r.packs.get(peer).and_then(|ps| ps.iter().find(|p| p.key() == key)).map(|p| p.hash);
+            held(HOST).is_some_and(|h| held(&self.me) == Some(h))
+        };
+        let word = match quad {
+            Some((pack, stem)) if !stem.is_empty() && open(pack) => format!("{pack}/{stem}"),
+            _ => String::new(),
+        };
+        let packs = joined_packs(&machine_pack(&self.pick.flier), &machine_pack(&word));
+        if self.pick.quad != word || self.pick.packs != packs {
+            (self.pick.quad, self.pick.packs) = (word, packs);
             self.repick = self.room.is_some();
         }
     }
@@ -6506,6 +6544,15 @@ impl Menu {
     /// The machines besides the fliers on offer (P315c).
     pub fn machines(&self) -> &[roster::PackMachine] {
         &self.machine_offer
+    }
+
+    /// The quad the Garage's Quad row picked (MD37e, [`Settings::atv`]) as the offer has it, (pack,
+    /// stem): the first quad pack's handling file of that name, as the ride reads it; `None` with
+    /// the row off or no pack offering it.
+    pub fn quad_pick(&self) -> Option<(String, String)> {
+        let want = &self.settings.atv;
+        let m = self.machine_offer.iter().find(|m| m.machine == roster::ATV_KIND && m.why.is_none() && !want.is_empty() && m.skin.eq_ignore_ascii_case(want))?;
+        Some((m.pack.clone(), m.skin.clone()))
     }
 
     pub fn trick_packs(&self) -> &[TrickPack] {

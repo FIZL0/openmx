@@ -70,6 +70,12 @@ pub struct Pick {
     /// seat holds it. Not in the handshake, as the machine is not.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub flier: String,
+    /// The quad the player's ride offers them (MD37e), `pack/stem` as the Garage's Quad row and the
+    /// pack name it (`mxvatv_atv/atv_Race250P`); empty for none, and what an older build sends. Its
+    /// pack is in [`Pick::packs`], so every seat holds the same files, and the handshake compares it
+    /// seat by seat ([`crate::handshake::Handshake::machines`]).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub quad: String,
 }
 
 impl Pick {
@@ -85,6 +91,7 @@ impl Pick {
             model: String::new(),
             packs: String::new(),
             flier: String::new(),
+            quad: String::new(),
         }
     }
 }
