@@ -78,3 +78,9 @@ Task F57. 2026-11-12.
 ## Next
 
 F57a ports the other kind's step.
+
+## Gate note
+
+The first `kit done` gate was red in atv_quad's sim_frame (race_stoppie_short f109, race_wheelie_launch f88,
+the palm sweep). That is the known MD143 failure, which K51 fixed on main (42d6c765e). I took K51's
+sim_frame.rs unchanged (its parent copy is the same as this branch's) and reran the gate.
