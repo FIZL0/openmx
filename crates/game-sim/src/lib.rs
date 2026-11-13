@@ -147,6 +147,10 @@ pub struct Sim {
     /// countdown that drops it, stepped at the top of every tick before the riders, after the event.
     /// `None` — every ride but a race — steps, walks and encodes as before ([`race::Race`]).
     pub race: Option<Box<race::Race>>,
+    /// The AI riders (S323, [`ai::Lane`]): each one's brain thinks before its bike's frame and
+    /// hands it the controls ([`Sim::step_all`]). `None` — every ride with no AI rider — steps and
+    /// hashes as before. Not on the wire yet: a resync keeps this machine's lane.
+    pub ai: Option<Box<ai::Lane>>,
 }
 
 /// On a world that wraps (MD29), the copy of the point `at` nearest `from`, one width over on each
@@ -255,6 +259,7 @@ impl Sim {
             traffic: traffic::Traffic::default(),
             event: event::Event::default(),
             race: None,
+            ai: None,
         }
     }
 
@@ -569,6 +574,9 @@ impl Sim {
                 .collect();
             // The wheels stand on the props for the frame (S210, [`prop_wheel`]).
             self.lend_props(i);
+            // An AI rider's brain thinks first, and its levers are the bike's controls (S323).
+            let thought = self.think(i, dt, world);
+            let c = thought.as_ref().unwrap_or(c);
             let tables = &self.tables;
             let frame = if i == 0 {
                 self.rider.frame_bumped(&self.phy, tables, c, dt, world, &rivals, bump.as_mut())
@@ -689,6 +697,7 @@ impl Clone for Sim {
             traffic: self.traffic.clone(),
             event: self.event.clone(),
             race: self.race.clone(),
+            ai: self.ai.clone(),
         }
     }
 }

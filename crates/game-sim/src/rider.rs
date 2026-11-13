@@ -936,7 +936,9 @@ impl Rider {
             no_hander_speed: p.air.no_hander_wreck_speed_limit,
         };
         let before = tricks.in_progress;
-        if bike.wrecked || !tricks.request(set, bike, params) {
+        // An AI-driven rider's request goes through the gate, which holds a trick its brain asked
+        // for (S323); a human's is the plain request.
+        if bike.wrecked || !crate::ai::gesture_gate(sense.ai_route, tricks, set, bike, params) {
             tricks.idle(&mut bike);
         }
         // The idle's own tail, whatever was asked for: a held rider shows the pose straight on
