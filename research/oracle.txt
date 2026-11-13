@@ -12017,3 +12017,13 @@ camera_flash_tick           boot 0x002f95c0 (object, f12 dt): ring +0x48 (times,
 #                                           ticked once the race's outro runs (S13d: frame ~2775).
 #   World +0x538.. from the .toy's first [CameraFlash] (sx01: 2.0, 0x3e999999, 0x3ecccccc, 0x3e999999,
 #   0x3e99999a, 0x3c23d70a; the second section, floor 0.025, unread). camera_flashes.rs levels().
+# C33 — a live free09 4-racer ride, the riders' bodies per tick (research/c33, context/capture/c33;
+#   journal 2026-11-13-c33-free09-ai4-capture):
+# * A scripted Freestyle boot (event league 2, kind 5, free09) with all_ai 0 never leaves the loading
+#   screen (frame_counter 0/1, the bar half full); with all_ai 1 it loads, and the human's rider still
+#   has no brain. Bike class (event +0x10c) 1 stalled the load early twice; 2 loads.
+# * frame_counter sits at 0 and then 1 while the world loads after in_game turns 1; a state saved at 1
+#   never runs on once loaded. The riders, bodies and brains already exist at frame 0.
+# * The actor list (game_manager +0x34 -> +0x34) nodes' actors' first word is no type: riders read 2 on
+#   recording2 and 1 on C33's boot. Every rider has an interface (vtable 0x004550e4 at +8, the rider at
+#   +0xc, the brain or 0 at +0); research/c33/riders.py finds the riders that way.
