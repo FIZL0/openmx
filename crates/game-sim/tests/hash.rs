@@ -592,7 +592,10 @@ fn the_size_of_the_state_type_is_pinned() {
     // None as every plane is built, so not walked and not on the wire.
     // 12264 since S323: the AI riders' lane (`Sim::ai`), boxed, None unless a ride builds one, not
     // walked and not on the wire yet (S325).
+    // 12272 since S316: a free ride's seeker world (`Sim::seek`), boxed, built at the map's load and
+    // stepped by nothing yet (S323 walks and sends it once the AI riders seek), so not walked and not
+    // on the wire.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 12264, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 12272, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }

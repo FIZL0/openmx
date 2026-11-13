@@ -151,6 +151,11 @@ pub struct Sim {
     /// hands it the controls ([`Sim::step_all`]). `None` — every ride with no AI rider — steps and
     /// hashes as before. Not on the wire yet: a resync keeps this machine's lane.
     pub ai: Option<Box<ai::Lane>>,
+    /// A free ride's seeker world (S316): the map's jumps, targets and start zones the AI riders
+    /// seek from, with a set per rider, built once at the map's load ([`Sim::load_seek`]). `None` —
+    /// a map with no hit data, or a session that never loaded it — is what every state was before.
+    /// Nothing steps it yet (the AI lane, S323), so it is not walked or sent.
+    pub seek: Option<Box<ai::seek::World>>,
 }
 
 /// On a world that wraps (MD29), the copy of the point `at` nearest `from`, one width over on each
@@ -260,6 +265,7 @@ impl Sim {
             event: event::Event::default(),
             race: None,
             ai: None,
+            seek: None,
         }
     }
 
@@ -492,6 +498,42 @@ impl Sim {
         self.others.len()
     }
 
+    /// **A free-ride map's seeker world, at the map's load** (S316): [`ai::seek::load`] over the
+    /// map's `hit.dat`, the hit and hit-set databases it names (`read` answers a file of the track's
+    /// folder by the name `hit.dat` gives), the session's riders as the sets' owners and `slots`
+    /// done flags per target — the original's load takes the activity's player count, which on
+    /// recording2's free09 is its four riders and one more player. Player 1 owns the first set as
+    /// kind 1, the human the pick lists centre on, and every other player kind 2, as the original's
+    /// AI riders are; each owner is where its bike is now, and none answers "HitFreeride". `open`
+    /// is a zone's open flag per player ([`ai::seek::Zone`]). A `hit.dat` that names no databases,
+    /// or a database `read` does not find, loads nothing and answers false.
+    pub fn load_seek(
+        &mut self,
+        hit_dat: &phy::Ini,
+        read: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
+        slots: usize,
+        open: &dyn Fn(usize, ai::seek::Zone) -> bool,
+        ground: &mut dyn World,
+    ) -> bool {
+        let (Some(hits), Some(hit_sets)) = ai::seek::databases(hit_dat) else {
+            return false;
+        };
+        let (Some(hits), Some(hit_sets)) = (read(hits), read(hit_sets)) else {
+            return false;
+        };
+        let owners: Vec<ai::seek::Owner> = (0..self.players())
+            .map(|player| ai::seek::Owner {
+                kind: if player == 0 { 1 } else { 2 },
+                player,
+                position: self.rider_of(player).ride.position(),
+                hit_freeride: false,
+            })
+            .collect();
+        let (hits, hit_sets) = (phy::Ini::parse_bytes(&hits), phy::Ini::parse_bytes(&hit_sets));
+        self.seek = Some(Box::new(ai::seek::load(hit_dat, &hits, &hit_sets, &owners, slots, open, ground)));
+        true
+    }
+
     /// Player `i`'s rider: 0 is [`Sim::rider`].
     pub fn rider_of(&self, i: usize) -> &Rider {
         if i == 0 { &self.rider } else { &self.others[i - 1].rider }
@@ -698,6 +740,7 @@ impl Clone for Sim {
             event: self.event.clone(),
             race: self.race.clone(),
             ai: self.ai.clone(),
+            seek: self.seek.clone(),
         }
     }
 }
