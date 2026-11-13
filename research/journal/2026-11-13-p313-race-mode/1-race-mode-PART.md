@@ -72,7 +72,11 @@ Task P313. 2026-11-13.
 
 - `game-sim/tests/race.rs` `riders_walked_round_sx01_run_their_laps_to_the_over` walks two riders
   round sx01's paths from the grid gate's path (the human at 4 ft a tick, the computer's at 3). It
-  checks the laps (3 each), the finish order (human first), the places (1, 2) and the Over. A Sim
+  checks the human's three laps and finish, and the places (1, 2). The Over comes on the tick after
+  the human's finish, with the computer's card a lap short at the line (the Over's draws then write
+  its laps out to three). That is the ported close's answer under the
+  supercross rules: the player's finish ends the race, and the over-told draws stand in for the
+  laps not ridden. This walk did not compare it against a live race. A Sim
   racing with laps round-trips the snapshot with the same hash.
 - `openmx` `race_start::tests::the_watch_tells_laps_places_the_finish_and_the_over` checks the
   watch's lines, the outro's wait and the hand-over.

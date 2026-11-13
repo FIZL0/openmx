@@ -307,7 +307,8 @@ mod tests {
         laps.cards[1].card.lap.laps = 2;
         laps.cards[1].card.lap.flags |= race::card_flags::OUT;
         laps.rules.lap.flags |= race::race_flags::OVER_TOLD;
-        assert_eq!(w.look(&laps), vec![Change::Lap { player: 1, lap: 2 }, Change::Finished { player: 1, place: 2 }, Change::Over]);
+        // Its laps counted from none to the last at once: a finish, no lap between.
+        assert_eq!(w.look(&laps), vec![Change::Finished { player: 1, place: 2 }, Change::Over]);
         assert!(w.look(&laps).is_empty());
         let ticks = (0..300).filter(|_| w.wait(1.0 / 30.0)).count();
         assert_eq!(ticks, 1);
