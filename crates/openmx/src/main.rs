@@ -244,6 +244,7 @@ mod perf;
 mod portal;
 mod ride_hud;
 mod race_start;
+mod camera_flashes;
 // N8: the one-seat online ride against the offline one, tick for tick.
 #[cfg(test)]
 mod same_ride;
@@ -2807,6 +2808,9 @@ struct Args {
     /// P327: the ride is a race — `--race`, `--laps N`, `--racers N`, or the menu's Race. Its track
     /// is [`Args::track`]'s; the ride starts on the start grid behind the closed gate.
     race: Option<menu::RaceSetup>,
+    /// `--race-win SECS` (V127): the player wins the race that many seconds in, as the lap line will
+    /// say once the shell counts laps — the finish's fireworks and camera flashes, for a look.
+    race_win: Option<f32>,
     /// Whether a flag picked a ride, which skips the front end unless `--menu` says otherwise.
     ride_flag: bool,
     /// `--screen`: the front end's screen to open on.
@@ -5671,6 +5675,18 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             (Vf::new(s.spot.x(), on.y(), s.spot.z(), 1.0), Vf::new(s.facing.x(), 0.0, s.facing.z(), 0.0))
         }
     };
+    // V127: a race on a disc's supercross track has its crowd's camera flashes, the scene's
+    // `cameraflash` props taken out of what it draws (before anything holds an index into it).
+    let stadium_flashes = match (&race_start, &modded, &world_mod) {
+        (Some(_), None, None) => {
+            let toy = archives.iter().find_map(|a| a.read_suffix(&format!("\\{stem}.toy")).ok()).map(|b| ini::text(&b)).unwrap_or_default();
+            camera_flashes::Stadium::take(&mut look, &stem.to_ascii_lowercase(), &toy)
+        }
+        _ => None,
+    };
+    if let Some(s) = &stadium_flashes {
+        println!("race: {} camera flashes, floor {}", s.len(), s.flashes.floor.0);
+    }
     let node_at = |name: &str| -> Option<Vf> {
         let chassis = assets.models.get(CHASSIS)?;
         let i = chassis.model.nodes.iter().position(|n| n.name == name)?;
@@ -6107,7 +6123,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             })
         }
     };
-    Ok(Ok((mods, disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, kit, table, place, look, ground, sky, assets, vehicle, tables, phy_bytes, phy, other_phys, stock_phys, bike_words, other_riders, riders, body, ragdolled, chassis, layout, cpresets, camera, lot, flight_for, plane_files, online_bays, online_bodies, plane_starts, stock_plane, garage, plane_presets, plane_camera, plane_drawn, plane_fx, fx_sheet, soft_sheet, sim, traffic, animated, cars, traffic_time, traffic_before, traffic_at, rider, others, head, recorder, pre_chunks, at, car_shift, pack_clips, stunts, race_start)))
+    Ok(Ok((mods, disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, kit, table, place, look, ground, sky, assets, vehicle, tables, phy_bytes, phy, other_phys, stock_phys, bike_words, other_riders, riders, body, ragdolled, chassis, layout, cpresets, camera, lot, flight_for, plane_files, online_bays, online_bodies, plane_starts, stock_plane, garage, plane_presets, plane_camera, plane_drawn, plane_fx, fx_sheet, soft_sheet, sim, traffic, animated, cars, traffic_time, traffic_before, traffic_at, rider, others, head, recorder, pre_chunks, at, car_shift, pack_clips, stunts, race_start, stadium_flashes)))
         }
     };
     let mut load_screen = LoadScreen::default();
@@ -6116,7 +6132,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         None if std::env::var_os(loading::THREADED).is_some() => loading::on_worker(progress, build, || Ok(None::<Leave>))?.unwrap_or_else(Err),
         None => build()?,
     };
-    let (mut mods, mut disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, mut kit, table, place, mut look, ground, sky, mut assets, vehicle, tables, phy_bytes, phy, other_phys, mut stock_phys, mut bike_words, other_riders, riders, body, ragdolled, chassis, mut layout, cpresets, camera, mut lot, flight_for, plane_files, online_bays, online_bodies, plane_starts, mut stock_plane, garage, plane_presets, plane_camera, mut plane_drawn, mut plane_fx, mut fx_sheet, soft_sheet, mut sim, traffic, animated, cars, mut traffic_time, mut traffic_before, mut traffic_at, rider, others, mut head, recorder, pre_chunks, at, car_shift, pack_clips, stunts, race_start) = match built {
+    let (mut mods, mut disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, mut kit, table, place, mut look, ground, sky, mut assets, vehicle, tables, phy_bytes, phy, other_phys, mut stock_phys, mut bike_words, other_riders, riders, body, ragdolled, chassis, mut layout, cpresets, camera, mut lot, flight_for, plane_files, online_bays, online_bodies, plane_starts, mut stock_plane, garage, plane_presets, plane_camera, mut plane_drawn, mut plane_fx, mut fx_sheet, soft_sheet, mut sim, traffic, animated, cars, mut traffic_time, mut traffic_before, mut traffic_at, rider, others, mut head, recorder, pre_chunks, at, car_shift, pack_clips, stunts, race_start, mut stadium_flashes) = match built {
         Ok(built) => built,
         Err(leave) => return Ok(leave),
     };
@@ -9329,6 +9345,22 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             let place = &mut world.place;
             fx.step_over(dt.0, &mut |at| plane_fx_ground(place, at));
         }
+        // The stadium's camera flashes (V127), a tick for each simulated, and `--race-win`'s finish
+        // when its time comes: the flashes' burst and, the winner's, the track's fireworks.
+        if simulated && let Some(s) = &mut stadium_flashes {
+            let was = s.clock;
+            s.tick(dt);
+            if let Some(at) = args.race_win
+                && was < at
+                && s.clock >= at
+            {
+                let over = s.player_wins();
+                println!("race: won at {:.2}s — fireworks {}, flashes toward {}", s.clock, over.fireworks, s.levels.player_win.0);
+                if over.fireworks && let Some(fx) = &mut track_fx {
+                    fx.finish();
+                }
+            }
+        }
         // The track's rain (V73): who rode into its triggers, then a frame of its box where the
         // camera it follows is.
         if simulated && let Some(rain) = &mut rain {
@@ -10636,6 +10668,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 gpu_poses.push(pose.clone());
                 actors.push(Actor { model, at: *at, pose: Some(gpu_poses.len() - 1), lod_from: None, alpha: 1.0, casts: false });
             }
+            // The stadium's lit camera flashes (V127), each at its fade.
+            actors.extend(stadium_flashes.iter().flat_map(|s| s.actors()));
             // A view's own player's markers (P88), faint bikes where each was put down: in that
             // player's view and nobody else's, so a view with any has the shared list and them.
             let marked: Vec<Vec<Actor>> = world
@@ -11088,6 +11122,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     actor.push((copy.as_str(), *at));
                 }
             }
+            // The stadium's lit camera flashes (V127): the software path draws them solid.
+            actor.extend(stadium_flashes.iter().flat_map(|s| s.shown()).map(|(model, at, _)| (model, at)));
             // On a wrapped world (MD43) every rider, plane and car at its copy nearest the camera.
             if soft_wrap.is_some() {
                 for a in &mut actor {
@@ -14043,6 +14079,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         display: std::env::var("DISPLAY").unwrap_or_else(|_| ":0".to_string()),
         menu: false,
         race: None,
+        race_win: None,
         ride_flag: false,
         screen: None,
         screen_tab: None,
@@ -14091,7 +14128,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         if matches!(
             a.as_str(),
             "--track" | "--play" | "--record" | "--moment" | "--vehicle" | "--phy" | "--ride" | "--headless"
-                | "--players" | "--frames" | "--online" | "--set" | "--garage" | "--race" | "--laps" | "--racers"
+                | "--players" | "--frames" | "--online" | "--set" | "--garage" | "--race" | "--laps" | "--racers" | "--race-win"
         ) || a.starts_with("--trace")
         {
             args.ride_flag = true;
@@ -14109,6 +14146,10 @@ fn parse_args() -> Result<Option<Args>, String> {
                 } else {
                     r.riders = n.clamp(1, menu::race::MOST_RIDERS);
                 }
+            }
+            "--race-win" => {
+                args.race_win = Some(next("seconds")?.parse().map_err(|e| format!("{a}: {e}"))?);
+                _ = args.race.get_or_insert_with(menu::RaceSetup::default);
             }
             "--open-list" => args.open_list = true,
             "--menu-row" => args.menu_row = Some(next("a row's label")?),

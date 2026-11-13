@@ -1280,6 +1280,10 @@ pub mod event;
 /// The race activities (S13): the gates a race is counted through — the start gate and its penalty.
 pub mod race;
 
+/// A supercross stadium's camera flashes (V127): the crowd's flashes the race activity shows all race
+/// long and bursts at each podium finish, a batch at a time off the track's `cameraflash` props.
+pub mod camera_flash;
+
 /// The four-wheeled machines (S149): the monster truck's, the buggy's and the baja's shared `.phy`
 /// loader — part, tires and their surfaces, engine and gearbox, airborne controls, steer tables.
 pub mod car;
