@@ -893,6 +893,12 @@ bike_race_start             boot 0x0027f5e0 (bike) the bike entity's vt+0x68 (th
 #                                           with an AI (bike+0x10d0) three or four rands. A human's
 #                                           chassis waits at the gate with +0x2a0 = 0, 1, 0.
 #                                           race::release
+#                                           AI branch (iface = bike+0x10d0): +0xa4 = 0; keeper
+#                                           (bike+0xfa0) +0x64 == 3: +0x11c = 0.75 unit, brain+0x218 =
+#                                           +0x14c; else +0x11c = +0xa0, brain+0x218 = +0x148; 100 unit <
+#                                           +0xa8 sets brain+0x38 0x20, +0xd8 = lerp(+0xb8,+0xbc) else
+#                                           lerp(+0xc0,+0xc4); 100 unit < +0xac sets 0x100, +0xc8 = 0.
+#                                           S322: Racer::race_start, oracled over 10,000
 bike_message                boot 0x0027da00 (bike, msg, out) the bike entity's vt+0x94 (thunk 0x002819b0,
 #                                           this -0xf9c): 1 out = chassis(+0x7a4) transform(+0x254)
 #                                           +0x80; 2 chassis vt+0xc4 (chassis_stop) then chassis
@@ -1573,6 +1579,19 @@ ai_mx_spawn                 boot 0x00384cc0 (iface, mode) the MX brain's spawn: 
 #                                           ai_character_read). S12e: ported as game_sim::ai::spawn
 #                                           (tests/ai/spawn.rs)
 ai_attach                   boot 0x00283000 (brain, iface, flags): +0x40 iface, +0x30 the flags sign-extended
+bike_construct              boot 0x00279ed0 (bike) the bike entity's constructor (operator_new 0x14e0 in the
+#                                           AI rider spawn 0x0020e0b0); f20 = 1.0 from 0x0027a0e0 on
+bike_construct_interface    boot 0x0027a478 inside bike_construct: s0 = bike; ai_interface_construct
+#                                           (bike+0x10d0) then the rider's habit numbers on the interface
+#                                           (bike+0x10e4..+0x11d0). Nothing before it writes past +0x10c8.
+#                                           S322: oracled as a stretch to the epilogue
+bike_construct_epilogue     boot 0x0027a7b0 inside bike_construct: the ld ra after the last store
+ai_interface_construct      boot 0x00382d90 (iface, owner+4, owner) the rider's AI interface: +0 brain 0,
+#                                           zeroes +0x14..+0x108, +0x10c 1 1 100 20, +0x14c 0.2 (the
+#                                           state-3 race start's reach gain; the reader writes +0x148 only,
+#                                           no rider-relative store to +0x121c), ..+0x1e0 1. Leaves
+#                                           +0x120..+0x148 (ALOD pairs, LookAheadGain) unwritten.
+#                                           S322: game_sim::ai::interface_profile / interface_habits
 path_locate                 boot 0x0026b860 (f12 -1.0, net, 0, point, hint, out, 0, 0, 0) -> found;
 #                                           out+4 the located path segment (+0x54 its next)
 #                                           S282: really (f12 limit, a0 net, a1 hint place, a2 point,

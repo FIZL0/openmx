@@ -319,8 +319,9 @@ fn the_brain_spawn_matches_the_originals() {
 
 /// free09's three AI riders as the spawn and the character file make them, against recording2's image:
 /// each rider's skill (interface +0x104) and the event's difficulty byte are read off the image, the
-/// brain is spawned and the retail `AIChrctr.aip` read into it, and every tuning word the tick never
-/// writes is compared with the image's brain and interface.
+/// brain is spawned on the port's interface defaults, the retail `AIChrctr.aip` read into it and the
+/// race start run, and every tuning word the tick never writes is compared with the image's brain and
+/// interface.
 #[test]
 fn free09s_ai_riders_spawn_as_the_image_holds_them() {
     let kit = match Kit::load() {
@@ -348,24 +349,23 @@ fn free09s_ai_riders_spawn_as_the_image_holds_them() {
         let skill = f(iface + 0x104) as i32;
         let mut rng = Rng::from_state(1);
         let mut s = spawn(&mut rng, f(iface + 4) as i32, None, event_kind);
+        // The interface's own words the reader keeps where the file has no key are the port's
+        // constructor defaults (S322's `interface_profile`), as the spawn left them.
         let mut c = s.character;
-        // The interface's own words the reader keeps where the file has no key: its constructor's,
-        // which the port does not build, so they are taken from the image.
-        for (in_brain, off, v) in super::character::ch_slots(&mut c) {
-            if !in_brain {
-                *v = f32::from_bits(f(iface + off));
-            }
-        }
         read_character(Some(&ini), skill, difficulty, &mut rng, &mut c);
         s.character = c;
         s.racer.take(&s.character);
+        // The race start (S322): the reach's gain from the rider's start words. Its draws are not
+        // compared (the generator's state at the start is not in the image).
+        let keeper = f(r + 0xfa0);
+        let keeper_state = (keeper != 0).then(|| f(keeper + 0x64) as i32);
+        s.racer.race_start(&s.character.profile, keeper_state, &mut rng);
         let what = format!("brain {b:#x} (skill {skill}, difficulty {difficulty}, event kind {event_kind})");
         assert_eq!(s.racer.brain.mode, f(b + 0xd0) as i32, "{what}: mode");
         let flags = f(b + 0x30) as u64 | (f(b + 0x34) as u64) << 32;
         assert_eq!(flags & game_sim::ai::SPAWN_FLAGS, game_sim::ai::SPAWN_FLAGS, "{what}: the spawn's flags are on");
         // the tunings: everything the spawn and the reader write that the tick reads and never writes
-        // (not the reach's gain, which the bike's race start sets from the rider's +0x148 or +0x14c,
-        // nor the seeker's lead, which its own states set)
+        // and the reach's gain the race start set (not the seeker's lead, which its own states set)
         let tunings = [
             "steering gain", "oversteer gain", "aim gain", "pitch distance", "pitch gain", "pitch filter", "landing pitch",
             "slow tolerance", "fast tolerance", "cruise base", "cruise gain", "brake gain", "steer scale", "pitch scale",
@@ -373,7 +373,7 @@ fn free09s_ai_riders_spawn_as_the_image_holds_them() {
             "far braking response", "near separation", "near response", "near braking response", "passing speed",
             "near min braking speed", "front window", "rear window", "drift match", "far heading cos", "edge look ahead",
             "edge push", "feeler height", "feeler length", "probe ahead", "drop run", "climb limit", "drop limit",
-            "turn limit", "climb speed", "climb steep", "reach base", "reach max", "min speed",
+            "turn limit", "climb speed", "climb steep", "reach base", "reach max", "reach gain", "min speed",
             "trick cooldown", "trick chance", "low air", "tolerance", "aim step", "speed step", "learn step",
             "alod window", "alod lower limit", "alod upper limit", "alod speed", "alod lead window", "min random offset",
             "max random offset", "max drift size", "max drift rate", "no-track look ahead", "no-track min turn",
@@ -391,7 +391,7 @@ fn free09s_ai_riders_spawn_as_the_image_holds_them() {
                 }
             }
         }
-        assert!(seen >= 75, "{what}: only {seen} tuning words compared");
+        assert!(seen >= 76, "{what}: only {seen} tuning words compared");
         // and the rider's side: the habits' and the assist's numbers off the interface (not the gate
         // delay or the wheelie's start, which the reader draws: the generator's state at the spawn is
         // not in the image)
@@ -416,6 +416,9 @@ fn free09s_ai_riders_spawn_as_the_image_holds_them() {
             if f(iface + off) != v.0.to_bits() {
                 wrong.push(format!("interface +{off:#x} ({name}) is {}, the port has {}", f32::from_bits(f(iface + off)), v.0));
             }
+        }
+        if f(iface + 0x14c) != game_sim::ai::KEEPER_THREE_REACH_GAIN.to_bits() {
+            wrong.push(format!("interface +0x14c is {}, the port's state-3 reach gain is 0.2", f32::from_bits(f(iface + 0x14c))));
         }
         assert!(wrong.is_empty(), "{what}:\n{}", wrong.join("\n"));
         let _: &Racer = &s.racer;

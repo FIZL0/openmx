@@ -111,6 +111,7 @@ mod sim; // S12e: the AI riders in the sim
 mod seek_real; // S305: the target seeker on free09's real world
 mod avoid_vehicle; // S317: the generic vehicle avoidance
 mod spawn; // S12e: the brain spawn
+mod interface; // S322: the rider's interface defaults and the race start
 
 use avoidance::*;
 use path_nets::*;

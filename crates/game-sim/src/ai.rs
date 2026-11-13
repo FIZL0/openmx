@@ -4699,8 +4699,9 @@ pub struct Wander {
 }
 
 /// A motocross brain as its spawn leaves it, before the character file is read: the [`Racer`], the
-/// brain's side of its [`Character`] (the profile is the rider's, and left at its default), and the
-/// follower's [`Wander`].
+/// brain's side of its [`Character`] (its profile as the rider's constructors leave it,
+/// [`interface_profile`]), and the follower's [`Wander`]. The racer's habits start from
+/// [`interface_habits`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct Spawned {
     pub racer: Racer,
@@ -4830,7 +4831,7 @@ pub fn spawn(rng: &mut Rng, kind: i32, mode: Option<i32>, event_kind: i32) -> Sp
         roll_distance: one,
         min_stunt_interval: F(10.0),
         stunt_probability: F(10.0),
-        profile: Profile::default(),
+        profile: interface_profile(),
     };
     let mut racer = Racer {
         brain,
@@ -4857,7 +4858,7 @@ pub fn spawn(rng: &mut Rng, kind: i32, mode: Option<i32>, event_kind: i32) -> Sp
         avoid,
         vehicle: VehicleTuning::default(),
         plan: TrickPlan { cooldown: F(10.0), since: zero, chance: F(10.0), estimate: zero, slot: 0, air: zero },
-        habits: Habits::default(),
+        habits: interface_habits(),
         filter,
         weights: Weights::default(),
         listening: false,
@@ -4912,6 +4913,108 @@ impl Racer {
         h.cross_up_max = p.crossup_max_duration;
         h.cross_up_height = p.crossup_min_height;
         self.weights = Weights { heading: p.turn_rate_tweak, aim: p.velocity_tweak };
+    }
+}
+
+// --- the rider's interface and the race start (S322) ---------------------------------------------------
+
+/// The rider's side of the AI as the rider's constructors leave it, before the character file is read:
+/// the profile words [`read_character`] keeps where the file has no key. The interface's own
+/// constructor zeroes most of it, and the bike's constructor then gives the habits their numbers: the
+/// preload's 0.1 a foot a second and 100 % success, a 0.6 pull-back at 50, the horse power 1, a
+/// brilliant moment of 2.5 + 4 random seconds, a start wheelie of 0.5 to 1.5 seconds pulled back
+/// 0.65–0.75 with the clutch and 0.9 without, and a cross-up of 0.5 to 1 second above 10 feet. Every
+/// chance (preload aside) is 0.
+///
+/// Nothing writes the ALOD pairs or `LookAheadGain`: the original leaves whatever the allocation held,
+/// and they are 0 here.
+pub fn interface_profile() -> Profile {
+    let zero = F(0.0);
+    let spread = |x: f32| Spread { min: F(x), max: F(x), overdrive: F(x), value: F(x) };
+    Profile {
+        alod_window: Pair::default(),
+        alod_lower_limit: Pair::default(),
+        alod_upper_limit: Pair::default(),
+        alod_speed: Pair::default(),
+        alod_lead_window: Pair::default(),
+        look_ahead_gain: zero,
+        near_response: Triple::default(),
+        preload_success: spread(100.0),
+        pull_back_speed: F(50.0),
+        pull_back_amount: F(0.6),
+        landing_lag_hang_time: zero,
+        landing_lag: spread(0.0),
+        landing_lag_time: zero,
+        horse_power: spread(1.0),
+        turn_rate_tweak: zero,
+        velocity_tweak: zero,
+        brilliant_moment: spread(0.0),
+        brilliant_min_duration: F(2.5),
+        brilliant_random_duration: F(4.0),
+        preload_per_speed: F(0.1),
+        g_load_wreck: spread(0.0),
+        start_gate_delay: zero,
+        clutch_start_probability: zero,
+        wheelie_start_probability: zero,
+        wheelie_start_min: F(0.5),
+        wheelie_start_max: F(1.5),
+        wheelie_pull_back_clutch: Pair { min: F(0.65), max: F(0.75) },
+        wheelie_pull_back: Pair { min: F(0.9), max: F(0.9) },
+        crossup_probability: zero,
+        crossup_min_duration: F(0.5),
+        crossup_max_duration: F(1.0),
+        crossup_min_height: F(10.0),
+    }
+}
+
+/// The rider's own [`Habits`] words as its constructors leave them: the preload's amount 1, no landing
+/// lag rolled (−1), the brilliant moment's roll clock 1, the least bar low in the air 0.15, and every
+/// clock 0. The words the profile also holds come from it, through [`Racer::take`]; the brain's, the
+/// bike's and the card's are left at their defaults.
+pub fn interface_habits() -> Habits {
+    Habits { preload: F(1.0), lag: F(-1.0), brilliant_roll: F(1.0), low_air_bar: F(0.15), ..Habits::default() }
+}
+
+/// The reach gain the race start gives when the score keeper is in state 3, in place of the
+/// character's `LookAheadGain`: an interface word the constructor sets and nothing else writes.
+pub const KEEPER_THREE_REACH_GAIN: f32 = 0.2;
+
+impl Racer {
+    /// The bike's race start, its AI side: what the gate's drop does to an AI rider. The gate clock
+    /// goes back to 0; the wait at the gate is the character's delay ([`Habits::gate_delay`]) and the
+    /// reach's gain its `LookAheadGain` — or, with the score keeper in state 3, a wait of
+    /// `0.75·unit()` and a gain of [`KEEPER_THREE_REACH_GAIN`]. Then `100·unit()` under the clutch
+    /// start's chance makes the rider dump the clutch off the gate ([`habit::GATE_CLUTCH`]) and holds a
+    /// wheelie lean drawn between the with-clutch pull-backs, else the without-clutch ones; and
+    /// `100·unit()` under the wheelie start's chance makes it wheelie off the gate
+    /// ([`habit::GATE_WHEELIE`]) with the wheelie's clock at 0. Three draws, or four in state 3.
+    ///
+    /// `keeper_state` is the rider's score keeper's state, `None` with no keeper. The human side (the
+    /// chassis's release and the bike's started word) is `race::release`'s.
+    pub fn race_start(&mut self, p: &Profile, keeper_state: Option<i32>, rng: &mut Rng) {
+        let h = &mut self.habits;
+        h.gate_clock = F(0.0);
+        if keeper_state == Some(3) {
+            h.gate_wait = F(0.75) * rng.unit();
+            self.reach.gain = F(KEEPER_THREE_REACH_GAIN);
+        } else {
+            h.gate_wait = h.gate_delay;
+            self.reach.gain = p.look_ahead_gain;
+        }
+        let lean = if F(100.0) * rng.unit() < p.clutch_start_probability {
+            self.moves |= habit::GATE_CLUTCH;
+            p.wheelie_pull_back_clutch
+        } else {
+            self.moves &= !habit::GATE_CLUTCH;
+            p.wheelie_pull_back
+        };
+        h.wheelie_lean = lean.min + (lean.max - lean.min) * rng.unit();
+        if F(100.0) * rng.unit() < p.wheelie_start_probability {
+            self.moves |= habit::GATE_WHEELIE;
+            h.wheelie = F(0.0);
+        } else {
+            self.moves &= !habit::GATE_WHEELIE;
+        }
     }
 }
 
