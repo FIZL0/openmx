@@ -590,7 +590,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // snapshot section only when a race runs, so the leaves do not move.
     // 12256 since MD110: the plane's SLUS-21104 collision record (`Flight::record_mxvatv`), boxed,
     // None as every plane is built, so not walked and not on the wire.
+    // 12264 since S323: the AI riders' lane (`Sim::ai`), boxed, None unless a ride builds one, not
+    // walked and not on the wire yet (S325).
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 12256, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 12264, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }

@@ -5018,6 +5018,295 @@ impl Racer {
     }
 }
 
+// --- the Sim's AI lane (S323) ------------------------------------------------------------------------
+
+/// The half sides of the box the generic avoidance's scene walk gathers round the bike's centre of
+/// gravity (the walk's own quadword, `w` 1).
+pub const WALK_HALF: f32 = 50.0;
+
+/// The Sim's world lent to one AI tick twice over: as the [`Around::world`] its ground probes ask, and
+/// as the scene its generic avoidance walks and sweeps ([`WorldScene`]). Each question borrows the
+/// world for its own length, and none asks another inside it.
+pub struct Lent<'w>(core::cell::RefCell<&'w mut dyn crate::world::World>);
+
+impl<'w> Lent<'w> {
+    pub fn new(world: &'w mut dyn crate::world::World) -> Lent<'w> {
+        Lent(core::cell::RefCell::new(world))
+    }
+}
+
+impl crate::world::World for &Lent<'_> {
+    fn ground(&mut self, at: Vf) -> (Vf, Vf) {
+        self.0.borrow_mut().ground(at)
+    }
+    fn surface(&mut self, at: Vf) -> u8 {
+        self.0.borrow_mut().surface(at)
+    }
+    fn solid(&mut self, bundle: &crate::collide::Bundle, record: &mut crate::collide::Record) -> bool {
+        self.0.borrow_mut().solid(bundle, record)
+    }
+}
+
+/// The scene a Sim rider's generic avoidance rides in, out of the Sim's own world.
+///
+/// The walk is the broad phase's query of both structures (kind 3) with a box of half side
+/// [`WALK_HALF`] round `cofg`, over the world's props and plants as the plane's world holds them
+/// ([`crate::flight_search::world_flown`]): a prop is a [`Thing::Solid`] by its collidable's index (it
+/// is collidable, and none is of the `AI_IGNORE` class), a plant a [`Thing::Group`] by its cell, and
+/// the port's own two probes are left out. The sweep is the bundle against the one prop
+/// ([`crate::back_search::sweep_object`]): the feelers as its probes, its sphere at `centre` with
+/// `radius`.
+pub struct WorldScene<'s, 'w> {
+    pub world: &'s Lent<'w>,
+    /// The bike's centre of gravity.
+    pub cofg: Vf,
+    /// The feeler bundle's sphere: the rider's position and the feelers' length.
+    pub centre: Vf,
+    pub radius: F,
+    /// What the tick's walk handed out, and each solid swept with the feelers it hit if it met it.
+    pub walked: Vec<Thing>,
+    pub swept: Vec<(u32, Option<Vec<bool>>)>,
+}
+
+impl Scene for WorldScene<'_, '_> {
+    fn walk(&mut self) -> Option<Vec<Thing>> {
+        use crate::flight_search::FIRST;
+        let mut world = self.world.0.borrow_mut();
+        let (field, props, trees) = world.wooded();
+        let field = field.as_deref().map(|f| {
+            let (lo, hi) = (f.min(), f.max());
+            ([F(lo.x()), F(lo.z())], [F(hi.x()), F(hi.z())])
+        });
+        let props = props.map_or(&[][..], |p| &p.props[..]);
+        let (mut broad, _) = crate::flight_search::world_flown(props, trees, None, field, self.cofg, F(0.0));
+        let c = self.cofg;
+        let centre = [F(c.x()), F(c.y()), F(c.z()), F(c.w())];
+        let half = [F(WALK_HALF), F(WALK_HALF), F(WALK_HALF), F(1.0)];
+        let groups = FIRST + props.len();
+        let mut things = Vec::new();
+        let mut q = crate::broad_phase::Query::begin(&mut broad, 0, 3, centre, half, None, true);
+        while let Some(o) = q.next(&mut broad, None) {
+            if (FIRST..groups).contains(&o) {
+                things.push(Thing::Solid { id: o as u32, collidable: true, ai_ignore: false });
+            } else if let Some(g) = trees.and_then(|t| t.groups().get(o.checked_sub(groups)?)) {
+                things.push(Thing::Group { x: g.cell[0], z: g.cell[2] });
+            }
+        }
+        q.end(&mut broad);
+        self.walked.clone_from(&things);
+        Some(things)
+    }
+
+    fn sweep(&mut self, id: u32, fan: &[Feeler]) -> Option<Vec<bool>> {
+        use crate::collide::{Bundle, MAX_PROBES, Probe, Record};
+        let mut world = self.world.0.borrow_mut();
+        let (_, props, _) = world.wooded();
+        let prop = props?.props.get((id as usize).checked_sub(crate::flight_search::FIRST)?)?;
+        let n = fan.len().min(MAX_PROBES);
+        let mut bundle = Bundle { count: n, centre: self.centre, radius: self.radius, ..Bundle::default() };
+        for (p, f) in bundle.probes.iter_mut().zip(fan) {
+            *p = Probe { origin: f.origin, dir: f.direction, length: f.length };
+        }
+        let mut record = Record::new();
+        let met = crate::back_search::sweep_object(&bundle, prop, &mut record);
+        let hits = met.then(|| (0..fan.len()).map(|i| i < n && record.hit[i]).collect::<Vec<bool>>());
+        self.swept.push((id, hits.clone()));
+        hits
+    }
+}
+
+/// One AI rider of the Sim's lane: its brain, and the words of its interface and race card the tick
+/// reads and writes beside the bike's own.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pilot {
+    pub racer: Racer,
+    /// The brain's side of its character file, and the follower's dice, as the spawn left them.
+    pub character: Character,
+    pub wander: Wander,
+    /// The levers the hand-off writes and [`ride_controls`] turns into the bike's controls.
+    pub levers: Levers,
+    pub recovery: Recovery,
+    pub card: Option<Card>,
+    pub seat: Seat,
+    /// The things the avoidance leaves out, by their [`WorldScene`] ids.
+    pub ignore: Vec<u32>,
+}
+
+/// The words of an AI rider's interface, rider and race the tick reads and nothing in it writes.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Seat {
+    /// The interface's: the speed scale and slow radius and speed the seeker reads, the player number
+    /// and the air cone the tail reads.
+    pub speed_scale: F,
+    pub slow_radius: F,
+    pub slow_speed: F,
+    pub player: usize,
+    pub air_cone: F,
+    /// The rider's look-ahead time and bump chance, which the copy reads.
+    pub look_ahead: F,
+    pub bump_chance: F,
+    /// The race's phase, and whether it has an AI path net.
+    pub race_phase: Option<i32>,
+    pub path_net: bool,
+    /// Whether the rider is live (a card, and its keeper running): the hand-off writes no lever else.
+    pub live: bool,
+}
+
+/// What a Sim rider's body shows its brain, and the two words of it the assist pulls.
+pub struct Mount<'a> {
+    /// The bike as the copy reads it ([`Rider::look_ahead`] and [`Rider::bump_chance`] are the
+    /// pilot's, and put in by [`Pilot::think`]).
+    pub rider: Rider,
+    /// The body's centre of gravity, which the scene walk gathers round.
+    pub cofg: Vf,
+    pub yaw_rate: &'a mut F,
+    pub velocity: &'a mut Vf,
+}
+
+/// One [`Pilot::think`]: what the tick told, the controls for the bike, and what its scene walked and
+/// swept.
+#[derive(Clone, Debug)]
+pub struct Thought {
+    pub told: Told,
+    pub controls: crate::ride::Controls,
+    pub walked: Vec<Thing>,
+    pub swept: Vec<(u32, Option<Vec<bool>>)>,
+}
+
+impl Pilot {
+    /// A roster rider's pilot: the brain [`spawn`]ed on an interface of type `kind`, its character
+    /// file read over the spawn's ([`read_character`], at `skill` and the event's `difficulty`) and
+    /// [`Racer::take`]n, sitting in `seat`: no card, still levers, no recovery and nothing ignored.
+    #[allow(clippy::too_many_arguments)] // the spawn's, the reader's and the seat
+    pub fn spawn(
+        rng: &mut Rng, kind: i32, mode: Option<i32>, event_kind: i32, file: Option<&crate::phy::Ini>, skill: i32,
+        difficulty: u8, seat: Seat,
+    ) -> Pilot {
+        let Spawned { mut racer, mut character, wander } = spawn(rng, kind, mode, event_kind);
+        read_character(file, skill, difficulty, rng, &mut character);
+        racer.take(&character);
+        Pilot {
+            racer,
+            character,
+            wander,
+            levers: Levers::default(),
+            recovery: Recovery::default(),
+            card: None,
+            seat,
+            ignore: Vec::new(),
+        }
+    }
+
+    /// One AI tick of the rider against the Sim's world ([`Racer::tick`]): its ground probes ask
+    /// `world`, its generic avoidance walks and sweeps a [`WorldScene`] of it, the trick plan asks the
+    /// rider's `tricks`, and the levers it hands off come back as the bike's controls
+    /// ([`ride_controls`], the clutch the habits pull). The card's settle word and racing bit are the
+    /// habits' air time and racing bit, which the original keeps in the card.
+    #[allow(clippy::too_many_arguments)] // the tick's world, as Around has it
+    pub fn think(
+        &mut self, mount: Mount<'_>, world: &mut dyn crate::world::World, seek_world: &mut seek::World,
+        tables: &Tables, others: &[Other], tricks: Option<(&Set, &mut Tricks)>, rng: &mut Rng, dt: F,
+    ) -> Thought {
+        let cell = world.wooded().2.map_or(F(0.0), |t| t.cell());
+        let lent = Lent::new(world);
+        let mut ground = &lent;
+        let seat = self.seat;
+        let rider = Rider { look_ahead: seat.look_ahead, bump_chance: seat.bump_chance, ..mount.rider };
+        let mut scene = WorldScene {
+            world: &lent,
+            cofg: mount.cofg,
+            centre: rider.frame[3],
+            radius: self.racer.avoid.feeler_length,
+            walked: Vec::new(),
+            swept: Vec::new(),
+        };
+        let habits = &self.racer.habits;
+        let card = self.card.map(|c| Card {
+            settle: habits.air_time,
+            flags: c.flags & !0x8_0000 | if habits.racing { 0x8_0000 } else { 0 },
+            ..c
+        });
+        let mut around = Around {
+            rider,
+            world: &mut ground,
+            seek_world,
+            tables,
+            speed_scale: seat.speed_scale,
+            slow_radius: seat.slow_radius,
+            slow_speed: seat.slow_speed,
+            player: seat.player,
+            air_cone: seat.air_cone,
+            card,
+            race_phase: seat.race_phase,
+            path_net: seat.path_net,
+            others,
+            edge: None,
+            vehicle: Some(VehicleScene { scene: &mut scene, cell, ignore: &self.ignore, off_path: None }),
+            jump: None,
+            node: None,
+            spot: None,
+            tricks,
+            race_state: None,
+            live: seat.live,
+            recovery: self.recovery,
+            levers: &mut self.levers,
+            yaw_rate: mount.yaw_rate,
+            velocity: mount.velocity,
+        };
+        let told = self.racer.tick(&mut around, rng, dt);
+        self.recovery = around.recovery;
+        drop(around);
+        let controls = ride_controls(&self.levers, self.racer.habits.clutch);
+        Thought { told, controls, walked: scene.walked, swept: scene.swept }
+    }
+}
+
+/// The Sim's AI riders ([`crate::Sim::ai`]): the free-ride map's seeker world they all learn into, the
+/// tables their controllers read, the generator they draw from (the original's `rand()`), and each
+/// AI player's [`Pilot`] by its player index, in the order the scene runs their brains.
+#[derive(Clone)]
+pub struct Lane {
+    pub seek: seek::World,
+    pub tables: std::sync::Arc<Tables>,
+    pub rng: Rng,
+    pub pilots: Vec<(usize, Pilot)>,
+}
+
+/// What a Sim rider shows its brain ([`Pilot::think`]'s [`Mount`], without the assist's two words):
+/// the bike's drawn frame (its rows the side, up, forward and position), the body's velocity,
+/// acceleration and turn rates in its own frame, its speed along its own forward axis, whether a wheel
+/// is on the ground, whether a trick is running, and the body's centre of gravity.
+pub fn mount_of(rider: &crate::rider::Rider) -> (Rider, Vf) {
+    let ch = &rider.ride.chassis;
+    let seen = Rider {
+        frame: rider.ride.transform().0,
+        velocity: ch.vel,
+        acceleration: ch.accel,
+        spin: ch.ang_vel,
+        forward_speed: F(ch.local_vel.z()),
+        on_ground: rider.ride.air.on_ground,
+        tricking: rider.tricks.in_progress,
+        look_ahead: F(0.0),
+        bump_chance: F(0.0),
+    };
+    (seen, ch.cofg_world)
+}
+
+/// Another Sim rider as an AI rider's race list holds it: active unless wrecked, where its body is,
+/// how fast and which way it goes.
+pub fn other_of(rider: &crate::rider::Rider) -> Other {
+    let ch = &rider.ride.chassis;
+    Other {
+        active: rider.state.wreck.is_none(),
+        marked: false,
+        position: ch.cofg_world,
+        velocity: ch.vel,
+        heading: rider.ride.transform().0[2],
+        speed: ch.speed,
+        progress: F(0.0),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

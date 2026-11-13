@@ -19,30 +19,30 @@ use super::seek_world::{s313_file, s313_member};
 use ps2_oracle::{Ee, Kit};
 use std::cell::Cell;
 
-const S12E_STATE: &str = "recording2.p2m2_SaveState.eeMemory.bin";
+pub(crate) const S12E_STATE: &str = "recording2.p2m2_SaveState.eeMemory.bin";
 /// The image's three brains and their riders, in the order the scene runs them.
 pub(crate) const S12E_RIDERS: [(u32, u32); 3] = [(0x0148_3eb0, 0x00d4_f510), (0x00c6_4000, 0x00c4_f040), (0x0104_8000, 0x0150_8a50)];
 /// The step the image's scene root hands its children (its dt word).
-const S12E_DT: u32 = 0x3d08_850a;
+pub(crate) const S12E_DT: u32 = 0x3d08_850a;
 const S12E_TICKS: usize = 60;
-const S12E_BUDGET: u64 = 50_000_000;
+pub(crate) const S12E_BUDGET: u64 = 50_000_000;
 
-fn s12e_f(ee: &Ee, at: u32) -> F {
+pub(crate) fn s12e_f(ee: &Ee, at: u32) -> F {
     F(f32::from_bits(ee.u32_at(at)))
 }
 
-fn s12e_vf(ee: &Ee, at: u32) -> Vf {
+pub(crate) fn s12e_vf(ee: &Ee, at: u32) -> Vf {
     Vf::from_bits(got(ee, at))
 }
 
-fn s12e_u64(ee: &Ee, at: u32) -> u64 {
+pub(crate) fn s12e_u64(ee: &Ee, at: u32) -> u64 {
     ee.read(at, 8) as u64
 }
 
 /// The habits' own words (the ones not shared with the brain's other pieces), by where the image keeps
 /// them: the brain's, the rider's, its engine's (rider +0x7b8), its body's (+0x7a4) and its card's.
-type HabitWord = (u32, &'static str, fn(&mut Habits) -> &mut F);
-fn s12e_habit_words(b: u32, r: u32, engine: u32, body: u32, card: u32) -> Vec<HabitWord> {
+pub(crate) type HabitWord = (u32, &'static str, fn(&mut Habits) -> &mut F);
+pub(crate) fn s12e_habit_words(b: u32, r: u32, engine: u32, body: u32, card: u32) -> Vec<HabitWord> {
     vec![
         (b + 0x2b0, "low air", |h| &mut h.low_air),
         (r + 0x10e4, "preload base", |h| &mut h.preload_base),
@@ -184,7 +184,7 @@ pub(crate) fn s12e_seek_world(kit: &Kit, ee: &Ee) -> Option<(sk::World, S12eList
 }
 
 /// One brain read out of RAM.
-fn s12e_racer(ee: &Ee, lists: &S12eLists, b: u32, r: u32) -> Racer {
+pub(crate) fn s12e_racer(ee: &Ee, lists: &S12eLists, b: u32, r: u32) -> Racer {
     let iface = ee.u32_at(b + 0x40);
     let card = ee.u32_at(b + 0xd4);
     let flags = s12e_u64(ee, b + 0x30);
@@ -310,25 +310,25 @@ fn s12e_racer(ee: &Ee, lists: &S12eLists, b: u32, r: u32) -> Racer {
 
 /// What a rider's `Around` is made of that the tick does not change: its bike as the copy reads it,
 /// its interface, its card and the race's other riders.
-struct S12eBike {
-    rider: ai::Rider,
-    speed_scale: F,
-    slow_radius: F,
-    slow_speed: F,
-    player: usize,
-    air_cone: F,
-    card: Option<Card>,
-    race_phase: Option<i32>,
-    path_net: bool,
-    others: Vec<Other>,
-    live: bool,
-    recovery: Recovery,
-    levers: Levers,
-    yaw_rate: F,
-    velocity: Vf,
+pub(crate) struct S12eBike {
+    pub(crate) rider: ai::Rider,
+    pub(crate) speed_scale: F,
+    pub(crate) slow_radius: F,
+    pub(crate) slow_speed: F,
+    pub(crate) player: usize,
+    pub(crate) air_cone: F,
+    pub(crate) card: Option<Card>,
+    pub(crate) race_phase: Option<i32>,
+    pub(crate) path_net: bool,
+    pub(crate) others: Vec<Other>,
+    pub(crate) live: bool,
+    pub(crate) recovery: Recovery,
+    pub(crate) levers: Levers,
+    pub(crate) yaw_rate: F,
+    pub(crate) velocity: Vf,
 }
 
-fn s12e_bike(ee: &Ee, b: u32, r: u32) -> S12eBike {
+pub(crate) fn s12e_bike(ee: &Ee, b: u32, r: u32) -> S12eBike {
     let iface = ee.u32_at(b + 0x40);
     let frame = ee.u32_at(r + 0x18);
     let body = ee.u32_at(r + 0x7a4);
@@ -459,7 +459,7 @@ struct S12eWalk {
 
 /// A hook that runs the hooked function as it is, on its own stack below the caller's, with `before`
 /// and `after` around it.
-fn s12e_pass_through(ee: &mut Ee, at: u32, mut before: impl FnMut(&Ee) + 'static, mut after: impl FnMut(&Ee) + 'static) {
+pub(crate) fn s12e_pass_through(ee: &mut Ee, at: u32, mut before: impl FnMut(&Ee) + 'static, mut after: impl FnMut(&Ee) + 'static) {
     ee.hooks.insert(
         at,
         Box::new(move |e: &mut Ee| {
