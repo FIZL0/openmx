@@ -2602,9 +2602,32 @@ impl Default for Gate {
     }
 }
 
+/// The two race files a race activity loads, as its setup names them: `Tracks\<track>\<file>`, where
+/// the file is the activity settings' `TDF` (the race's own) or `AITDF` (the AI's), and when the
+/// setting is missing or empty, `<track>.tdf` or `<track>AI.tdf`. `track` is the world's track name as
+/// the game holds it (`sx01`). No activity file on the disc sets either key, so every race track
+/// loads `<track>.tdf` and `<track>AI.tdf` from its second resource (`Tracks\<track>_2.res`, whose
+/// members are lower case: the lookup ignores case).
+///
+/// Both are [`TrackFile`]s, read by the same reader into two track objects, and both are stood on the
+/// ground the same way ([`TrackFile::snap_to_ground`], then the line's and the grid gate's centres).
+/// The first is the race's: a start run and the lap, which the cards, gates and the avoidance's edge
+/// use. The second is the AI riders' web of branching lines (`crate::ai::path`): many more paths, each
+/// linking on to one or more others, with no checkpoints. It carries a grid gate and a finish line of
+/// its own too (only nat01's has a third gate). The second is loaded only when the first was; a
+/// missing second file leaves the activity without one, and the load reports failure.
+pub fn race_file_names(track: &str, tdf: Option<&str>, ai_tdf: Option<&str>) -> [String; 2] {
+    let pick = |set: Option<&str>, tail: &str| match set {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => format!("{track}{tail}"),
+    };
+    [format!("Tracks\\{track}\\{}", pick(tdf, ".tdf")), format!("Tracks\\{track}\\{}", pick(ai_tdf, "AI.tdf"))]
+}
+
 /// A track's race file (`tracks\<track>\<track>.tdf`, in the track's second resource,
 /// `Tracks\<track>_2.res`), as the track object reads it: the riders' paths round the course, and the
-/// gates the race activity starts from.
+/// gates the race activity starts from. The AI's file (`<track>AI.tdf`) is read the same way; see
+/// [`race_file_names`] for what each holds.
 ///
 /// The file is a run of records, each a tag byte and its little-endian words; [`TrackFile::parse`]
 /// takes them in order, as the original does, so a scale or an offset applies to the points after it.

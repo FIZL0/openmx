@@ -133,6 +133,11 @@
 //! 38. **The prop raise** (S296a): the race files of sx06, sx08, sx11, sx20 and nat03, stood on their
 //!     terrain and raised onto their scene and knockable meshes ([`TrackFile::raise_on_props`]),
 //!     against images of a race on each: every point of every node, bit for bit.
+//! 39. **The second race file** (S299): S196's two file names are [`race::race_file_names`]'; sx01AI.tdf
+//!     read, walked and stood on sx01's terrain is the activity's second track object, word for word,
+//!     heights and both gates included.
+//! 40. **Every track's second file**: a scan of the disc's 56 second archives: the 46 race tracks'
+//!     AI files, what they hold, and that no activity file renames them.
 
 use game_sim::chassis::{Chassis, Deriv};
 use game_sim::race::{
@@ -8264,4 +8269,161 @@ fn a_held_rider_cannot_creep_until_the_warning_and_is_caught_in_it() {
     assert!(p > F(0.9) && p <= F(2.0), "the penalty {p:?}");
     assert_eq!(sim.race.as_ref().unwrap().gate.flags & flags::CLOSED, flags::CLOSED, "caught behind the closed gate");
     println!("held from tick 1 to tick {freed_n} (clock {at:?}), caught on tick {n}, {:?} before the drop", F(act.start_delay.0 - sim.race.as_ref().unwrap().countdown.elapsed.0));
+}
+
+
+/// A NUL-ended string in RAM.
+fn c_string(ee: &Ee, at: u32) -> String {
+    (0..0x104u32).map(|k| ee.u8_at(at + k)).take_while(|&b| b != 0).map(char::from).collect()
+}
+
+/// S299: the race activity's second race file. Its names in the image are [`race::race_file_names`]'
+/// for the world's track name, and sx01AI.tdf read off the disc and stood on sx01's terrain is the
+/// second track object (activity `+0xbc`) in S196's image, word for word: the header, every path's
+/// words, flags after the walk and links, every node's words and all four lanes of its points, and
+/// both of its gates.
+#[test]
+fn sx01s_ai_race_file_is_the_activitys_second_track_object_in_the_image() {
+    let Some(ee) = sx01_image() else { return };
+    let Some(res_bytes) = psr_member("Tracks\\sx01.res") else { return };
+    let Some(second) = psr_member("Tracks\\sx01_2.res") else { return };
+    let manager = match addr("activity_manager") {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    let act = ee.u32_at(ee.u32_at(ee.u32_at(manager) + 0x58));
+
+    // The names: Tracks\<track>\<track>.tdf and Tracks\<track>\<track>AI.tdf, sx01's settings setting
+    // neither key.
+    let track_name = c_string(&ee, ee.u32_at(act + 0x180) + 0x140);
+    assert_eq!(track_name, "sx01", "the world's track name");
+    let names = race::race_file_names(&track_name, None, None);
+    assert_eq!([c_string(&ee, act + 0x184), c_string(&ee, act + 0x288)], names, "the two names the setup wrote");
+    assert_eq!(names[1], "Tracks\\sx01\\sx01AI.tdf");
+    assert_eq!(race::race_file_names("sx01", Some(""), Some("other.tdf")), ["Tracks\\sx01\\sx01.tdf".to_string(), "Tracks\\sx01\\other.tdf".to_string()]);
+
+    let res = Res::parse(&res_bytes).expect("sx01's track archive");
+    let read = |suffix: &str| {
+        let e = res.entries.iter().find(|e| e.name.to_ascii_lowercase().ends_with(suffix)).unwrap_or_else(|| panic!("sx01 has no {suffix}"));
+        res.read(&res_bytes, e).expect("a sx01 member")
+    };
+    let scene = game_sim::track::Scene::parse(&read(".scn")).expect("sx01's scene");
+    let terrain_bytes = read(&scene.terrain_file.to_ascii_lowercase());
+    let terrain = game_sim::track::Terrain::parse(&terrain_bytes).expect("sx01's terrain");
+    let mut ground = game_sim::world::Ground::new(&terrain, &scene.terrain);
+
+    // The member by the name the activity asks for, ignoring case as the archive's lookup does.
+    let res2 = Res::parse(&second).expect("sx01's second archive");
+    let want_member = names[1].to_ascii_lowercase();
+    let e = res2.entries.iter().find(|e| want_member == e.name.to_ascii_lowercase()).expect("sx01AI.tdf by its asked name");
+    let file = res2.read(&second, e).expect("inflate sx01AI.tdf");
+    let mut t = TrackFile::parse(&file).expect("sx01AI.tdf reads");
+    let walked = TrackPaths::new(&t).expect("sx01AI.tdf's paths walk");
+    let raise = t.snap_to_ground(Some(&mut ground));
+    assert!(raise.is_empty(), "sx01AI.tdf has no node for the props to raise");
+
+    let ram = track_at(&ee, ee.u32_at(act + 0xbc));
+    assert_ne!(ee.u32_at(act + 0xbc), ee.u32_at(act + 0xb8), "two track objects");
+    let head = |t: &TrackFile| {
+        let mut w = vec![t.offset_x.0.to_bits(), t.offset_z.0.to_bits(), t.scale.0.to_bits(), t.word_34];
+        w.extend([t.nodes_made as u32, t.checkpoints_made as u32, t.paths.len() as u32]);
+        w.extend(t.tunables.map(|x| x.0.to_bits()));
+        w
+    };
+    assert_eq!(head(&t), head(&ram), "the scale, offsets, counts and tunables");
+    assert_eq!((t.paths.len(), t.nodes_made, t.checkpoints_made), (38, 444, 0), "38 paths, 444 nodes, no checkpoints");
+
+    assert_eq!(
+        walked.paths.iter().map(|p| p.flags).collect::<Vec<_>>(),
+        ram.paths.iter().map(|p| p.as_ref().expect("the image's path").flags).collect::<Vec<_>>(),
+        "the paths' flags after the walk"
+    );
+    let (mut nodes, mut on_ground) = (0, 0);
+    for (k, (a, b)) in t.paths.iter().zip(&ram.paths).enumerate() {
+        let (a, b) = (a.as_ref().expect("the file's path"), b.as_ref().expect("the image's path"));
+        assert_eq!(
+            (a.flags & !0x80, a.length.0.to_bits(), a.word_0c, a.checkpoint_count, &a.links, a.checkpoints.len()),
+            (b.flags & !0x80, b.length.0.to_bits(), b.word_0c, b.checkpoint_count, &b.links, b.checkpoints.len()),
+            "path {k}"
+        );
+        assert_eq!(a.nodes.len(), b.nodes.len(), "path {k}'s nodes");
+        for (n, m) in a.nodes.iter().zip(&b.nodes) {
+            assert_eq!(
+                (n.id, n.word_04, n.span.0.to_bits(), n.word_44, n.word_48, n.word_4c, n.points.map(|p| p.to_bits())),
+                (m.id, m.word_04, m.span.0.to_bits(), m.word_44, m.word_48, m.word_4c, m.points.map(|p| p.to_bits())),
+                "path {k}, node {}",
+                n.id
+            );
+            nodes += 1;
+            on_ground += n.points.iter().filter(|p| p.y() > 0.0).count();
+        }
+    }
+    assert_eq!(nodes, 444);
+    assert!(on_ground > 1_000, "only {on_ground} points stand above 0");
+
+    // Its gates: a grid gate and a line, their centres on the terrain, no third.
+    assert!(t.third.is_none() && ram.third.is_none(), "no third gate");
+    for (what, a, b) in [("grid", &t.grid, &ram.grid), ("line", &t.line, &ram.line)] {
+        let (a, b) = (a.as_ref().unwrap_or_else(|| panic!("the file's {what}")), b.as_ref().unwrap_or_else(|| panic!("the image's {what}")));
+        assert_eq!(gate_words(a), gate_words(b), "the AI file's {what} gate: {a:?} against {b:?}");
+    }
+}
+
+/// S299: what the race activity's second file holds on every track of the disc. Each of the 46 race
+/// tracks (22 nationals, 24 supercross) has `<track>ai.tdf` beside `<track>.tdf` in its second
+/// archive, and the freestyle tracks have neither (their one race file is `<track>mr1.tdf`). No
+/// activity file sets the `TDF` or `AITDF` key, so the names are always the defaults. Every AI file
+/// reads; it holds more paths than the race's, linked into a branching web (more links than paths),
+/// no checkpoints, a grid gate and a line (a third gate only on nat01's), the same scale and offsets
+/// as the race's own file, and path flags beyond the reader's `0xc1` only from `0x08` and `0x20`.
+#[test]
+fn the_race_activitys_second_file_on_every_track() {
+    let Some(front) = psr_member_front() else { return };
+    let psr = Psr::parse(&front).expect("MX.PSR's directory");
+    let archives: Vec<String> = psr.entries.iter().map(|e| e.name.clone()).filter(|n| n.to_ascii_lowercase().ends_with("_2.res")).collect();
+    let (mut race_tracks, mut freestyle) = (Vec::new(), 0);
+    let mut thirds = Vec::new();
+    let mut flag_bits = 0u32;
+    for name in &archives {
+        let track = name.trim_start_matches("Tracks\\").trim_end_matches("_2.res").to_string();
+        let bytes = psr_member(name).expect("a listed member");
+        let res = Res::parse(&bytes).expect("a track's second archive");
+        let member = |file: &str| {
+            let want = file.to_ascii_lowercase();
+            res.entries.iter().find(|e| e.name.to_ascii_lowercase() == want).map(|e| res.read(&bytes, e).expect("inflate"))
+        };
+        for e in res.entries.iter().filter(|e| e.name.to_ascii_lowercase().ends_with(".aty")) {
+            let text = String::from_utf8_lossy(&res.read(&bytes, e).expect("inflate")).to_ascii_lowercase();
+            assert!(!text.contains("tdf"), "{} names a race file", e.name);
+        }
+        let [race_name, ai_name] = race::race_file_names(&track, None, None);
+        let (Some(race_file), Some(ai_file)) = (member(&race_name), member(&ai_name)) else {
+            assert!(track.starts_with("free"), "{track} lacks a race file");
+            assert!(member(&format!("Tracks\\{track}\\{track}mr1.tdf")).is_some(), "{track}'s freestyle file");
+            freestyle += 1;
+            continue;
+        };
+        let race_t = TrackFile::parse(&race_file).unwrap_or_else(|w| panic!("{race_name}: {w:?}"));
+        let ai = TrackFile::parse(&ai_file).unwrap_or_else(|w| panic!("{ai_name}: {w:?}"));
+        TrackPaths::new(&ai).unwrap_or_else(|| panic!("{ai_name}'s paths walk"));
+        let paths: Vec<&TrackPath> = ai.paths.iter().flatten().collect();
+        let links: usize = paths.iter().map(|p| p.links.as_ref().map_or(0, Vec::len)).sum();
+        assert_eq!(paths.len(), ai.paths.len(), "{ai_name}: no empty slot");
+        assert!(paths.len() > race_t.paths.len() && links > paths.len(), "{ai_name}: {} paths, {links} links", paths.len());
+        assert!(paths.iter().all(|p| p.links.as_ref().is_some_and(|l| !l.is_empty())), "{ai_name}: every path leads on");
+        assert_eq!((ai.checkpoints_made, paths.iter().map(|p| p.checkpoints.len()).sum::<usize>()), (0, 0), "{ai_name}: no checkpoints");
+        assert!(ai.grid.is_some() && ai.line.is_some(), "{ai_name}: a grid gate and a line");
+        assert_eq!((ai.scale, ai.offset_x, ai.offset_z), (race_t.scale, race_t.offset_x, race_t.offset_z), "{ai_name}: the race file's scale and offsets");
+        if ai.third.is_some() {
+            thirds.push(track.clone());
+        }
+        flag_bits |= paths.iter().fold(0, |b, p| b | p.flags);
+        race_tracks.push(track);
+    }
+    assert_eq!(freestyle, 10, "the freestyle tracks");
+    assert_eq!(race_tracks.len(), 46, "the race tracks: {race_tracks:?}");
+    assert_eq!(race_tracks.iter().filter(|t| t.starts_with("nat")).count(), 22);
+    assert_eq!(race_tracks.iter().filter(|t| t.starts_with("sx")).count(), 24);
+    assert_eq!(thirds, ["nat01"], "the AI files with a third gate");
+    assert_eq!(flag_bits & !0xc1, 0x28, "the path flags beyond the reader's");
 }
