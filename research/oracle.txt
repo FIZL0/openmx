@@ -11351,6 +11351,19 @@ atv_heap_free               atv 0x001b76d0 = free
 #   plus +0x50 (turned by node 0x00195230 with flags 0x10); +8 != 0 -> notice 0x0018d690(obj, spot, 0x0052b9e0, f12
 #   2.0); skip bit 1; hold +0xb8; +0xb1 bit 0 with *0x005253c8; modes 1/2/3 on def +0x58 with the clock +0xbc,
 #   spans def +0x60/+0x68 (rand) and +0x64/+0x6c (fixed), light/douse at object vt (+4) +0xa4/+0xa8.
+# F58 — the effects items' steps in Rust (game_sim::handling::effects::{item_step, Kind, Steps}, Call::Move;
+#   tests/mxvatv_bike_ride.rs the_effects_items_steps_are_the_originals (20,000 cases), PartWalk's FX_KINDS).
+#   Journal research/journal/2026-11-13-f58-effects-items-steps. Vt +0x14 by vtable: 0x003d1650 0x004ff170 (jr ra,
+#   Still); 0x003d18a0 0x004fa980 (Gauge: table +0x18/+0x20, item +0x18/+0x1c, object +0x68); 0x003d1870
+#   0x004faf20 (Ramp: entry +8/+0xc latch item +0x90, entry +0x10 vs item +0x28/+0x2c, def +0x110..+0x15c);
+#   0x003d1840 0x004fb600 (Swing: table +0x18/+0x1c/+0x20, entry +0x14/+0x20, item +0x28 fade 0.25, object
+#   +0x60/+0xb1, def +0x28 bit 0x200, +0x110..+0x154); 0x003d16b0 0x004fdba0 (Spots: *(item +0x28) part,
+#   +0x3c/+0x40 flags, +0x1f0 motion, spots +0xf8 0x90 apart, count +0xf0 re-read, picks item +0x18 + spot +0x80);
+#   0x003d1680 0x004fe010 (Linked: table +0x10 count read once, +0x14 array, links item +0x18 bits, picks item
+#   +0x1c + part byte +0x3c, motion *(part +0x80) +0x80). Spots and Linked: pick != def (+0xd8) +0x40 ->
+#   0x0050a920(object, pick); object +0x40 = spot - motion*dt (.xyz, w the spot's), +0x30 = spot; object vt +0x98
+#   (object, f12 dt) = 0x0050ceb0, the first emitter kind's step (F57's port answers it in PartWalk). The steps call
+#   no rand themselves: flip-1's rand draws in 0x004fe010's steps are that emitter step's. 0x003d1740's step 0x004fd0c0 (700 bytes) no C15 item steps; not ported (handed on).
 # S13d — the race's results: what the supercross activity does with each card that finishes at the line
 # (the score manager's listener, the activity +0x160 with its vtable at +0x1c = 0x00458690: vt+0x14,
 # the lap line's Finished notice, through the thunk 0x003004f0 = this - 0x160. The race's Over notice
