@@ -3439,6 +3439,7 @@ impl Gen {
             wheels: bike_wheels,
             more,
             ground: [game_sim::atv_wheel::Ground::Still; 4],
+            ground_of: [(0, 0); 4],
             cofg: self.vec(-0.5, 0.5),
             parts: game_sim::atv_moto::Parts::default(),
             contacts: None,

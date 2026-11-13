@@ -12102,3 +12102,10 @@ camera_flash_tick           boot 0x002f95c0 (object, f12 dt): ring +0x48 (times,
 #   now, +0x6c = now + span, +0x74 span, +0x40 = old clip, old 0 or fading -> +0x40 0 and stop 0x0013e650;
 #   then vt +0x90 0x0013e960 (set clip: +0x24c 0, +0x3c clip, +0x2d bit1 clear, +0x64 0) and fading set.
 #   C15 flip-1 (465): 2 starts; 68 advances = 8 via 0x0013db90, 8 via 0x0013d350, 52 plain.
+# F63 — the bike's wheel owner and vehicle through the Steps route (src steps::ground / read_with, quad::Bike
+#   ground_of, quad::Sweep tell / ground / object_cofg; tests/mxvatv_bike_ride.rs
+#   the_steps_routes_owned_wheel_contacts_are_the_originals). Comment rows only. Journal
+#   research/journal/2026-11-13-f63-steps-wheel-owners.
+#   Wheel +0x1f0 owner, +0x1f4 vehicle: set by 0x004a0c80 (F52), zeroed by the wheel clear 0x004a0c30, read by
+#   the contact velocity 0x004a1150 while +0x1a0 is clear (MD74's offsets). Vehicle alone: vtable at
+#   vehicle +4, jalr vt +0xc4 (spin) then vt +0xc0 (velocity), a0 = a stack quadword, a1 = vehicle, v0 = a0.

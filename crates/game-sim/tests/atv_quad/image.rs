@@ -664,6 +664,7 @@ pub fn read_ride(ee: &Ee, quad: u32, dt: F) -> Result<(Ride, Image), String> {
         wheels: bike_wheels,
         more,
         ground: [atv_wheel::Ground::Still; 4],
+        ground_of: [(0, 0); 4],
         cofg: v(ee, bo + 0x1a0),
         spins,
         parts,
