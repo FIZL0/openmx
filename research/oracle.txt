@@ -11332,6 +11332,25 @@ atv_heap_free               atv 0x001b76d0 = free
 #   Flip-1 (every port): 4463 item calls, the object calls 35 halt (0x004e9f00), 594 light (0x0050aaa0), 779
 #   douse (0x0050ab00), 360 picks; all still the interpreter's (the emitters', F57/F59). Vtable 0x003d18d0 (on
 #   0x004fa730 at +0x18) is in RAM but no item flip-1 or ride-2 turns has it; not classed (fx_class panics).
+# F57 — the part walk's first emitter kind in Rust (game_sim::handling::emitter::{step, gate, count, base, look,
+#   size}, Call, Emitters; tests/mxvatv_bike_ride.rs the_emitter_step_is_the_originals and PartWalk's "emitter"
+#   name). The listener's thunk 0x00511c10 (a0 - 12, j 0x0050ceb0(obj, f12 dt)). Step 0x0050ceb0: gate 0x0050a040
+#   (!= 0 -> answer 1); def (+0xd8) +0x4c bit 0x40 -> the other kind 0x0050db60(obj, f12 dt), its answer (handed
+#   out, F57a); node +0x80's owner (+8) +4 +0xa4 half vs the frame id half at gp-0x7f60 (0x003d3b90); moved = spot
+#   (+0x30) - last (+0x40), dist sqrt(madd), speed dist/dt; velocity bit 8 -> moved * (1/dt) else 0x00396fc0's quad;
+#   fast = speed > +0xf8; speed < +0xf4 -> 1; rand (0x003561a8) * 2^-31 twice: the count 0x0050e6a0 and the walk
+#   (table of five thresholds/dir/stride, else -3/3); count <= 0 -> 1; def +0x58 == 1 -> flags |= 0x80; base
+#   0x0050e7e0; push bit 0x10 adds pool +0x140; def +0x168 > 0 -> owner place 0x001c1e90(+0xd0, spot, +0xcc+0x20),
+#   owner vt (+0xc) +0xc8, follow 0x0050c5c0(obj), with +0x160 != 0 the probe 0x00125be0(*0x003eab60, spot, &slot
+#   seeded 0x800000) sets +0xc8; the loop: pool (def +0) count +0x108 < room +0x110, particle = (+0x118)[count];
+#   spread table 0x00542410 (600 floats), centre quad 0x00525450; look 0x0050eab0 (def +0x28 bit 0x400 stepped:
+#   +0x38 + n*(+0x44) by +0xb8 spans); life/size 0x0050e980 (+0xe4 / +0xe8 by speed, def +0xbc/+0x100 ranges,
+#   0x40 bit scales by pool +0x174 +0x84); settle bit 0x20 -> 0x004833c0(*0x00541528, p, 0, 0, 0); spins bit
+#   0x200000 (def +0xa0, +0xa4 deg); +0xc8 == 1 -> bind 0x0050c8b0(obj, p); fades 0x4000/0x8000 by def bits 2/4.
+#   Gate 0x0050a040: paused byte (*0x003eab60)+0x225 bit 3 -> 1; node -> last = spot, node position (0x00194c20)
+#   plus +0x50 (turned by node 0x00195230 with flags 0x10); +8 != 0 -> notice 0x0018d690(obj, spot, 0x0052b9e0, f12
+#   2.0); skip bit 1; hold +0xb8; +0xb1 bit 0 with *0x005253c8; modes 1/2/3 on def +0x58 with the clock +0xbc,
+#   spans def +0x60/+0x68 (rand) and +0x64/+0x6c (fixed), light/douse at object vt (+4) +0xa4/+0xa8.
 # S13d — the race's results: what the supercross activity does with each card that finishes at the line
 # (the score manager's listener, the activity +0x160 with its vtable at +0x1c = 0x00458690: vt+0x14,
 # the lap line's Finished notice, through the thunk 0x003004f0 = this - 0x160. The race's Over notice

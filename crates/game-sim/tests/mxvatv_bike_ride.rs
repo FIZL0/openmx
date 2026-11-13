@@ -408,6 +408,7 @@ fn the_seeded_bikes_first_frame_is_ride2_row_0() {
 
 use game_sim::handling::bike;
 use game_sim::handling::effects::{self, Effects};
+use game_sim::handling::emitter;
 use game_sim::handling::run;
 use game_sim::quad::{self, Call, Moto, Quad};
 use std::cell::RefCell;
@@ -5209,6 +5210,11 @@ impl Listeners for PartWalk<'_> {
         }
         if name == "effects" {
             effects::step(self, e, dt);
+        } else if name == "emitter" {
+            // F57: the emitter's own work is the port's ([`emitter::step`], the thunk's object
+            // twelve bytes before its listener); what it hands out is the original's.
+            book("the tail: the update's emitter steps", 1);
+            emitter::step(self, e - 0xc, dt);
         } else {
             self.original(f, &[u64::from(e)], &[dt.0], name, if closes { vec![(e, dt.to_bits())] } else { vec![] });
         }
@@ -5274,6 +5280,71 @@ impl Effects for PartWalk<'_> {
         }
     }
 }
+
+/// F57: the emitter's words, the interpreter's.
+impl node::Ram for PartWalk<'_> {
+    fn word(&mut self, at: u32) -> u32 {
+        self.ee.u32_at(at)
+    }
+    fn set(&mut self, at: u32, w: u32) {
+        self.ee.set_u32(at, w);
+    }
+}
+
+/// F57: what the emitter port hands out (research/oracle.txt `# F57`), each the original's, booked
+/// by kind (`the update's emitter <kind>`) and watched as a leaf is.
+impl emitter::Emitters for PartWalk<'_> {
+    fn set_byte(&mut self, at: u32, b: u8) {
+        self.ee.write(at, 1, u128::from(b));
+    }
+    fn set_half(&mut self, at: u32, h: u16) {
+        self.ee.write(at, 2, u128::from(h));
+    }
+    fn out(&mut self, c: emitter::Call) -> u32 {
+        use emitter::Call;
+        let a = |x: u32| u64::from(x);
+        let (f, ints, floats, kind) = match c {
+            Call::Rand => (RAND, vec![], vec![], "rand".to_string()),
+            Call::Notice(o) => (EMIT_NOTICE, vec![a(o), a(o + emitter::SPOT), a(emitter::NOTICE_KIND)], vec![2.0], "notice".into()),
+            Call::Light(o) | Call::Douse(o) => {
+                let slot = if matches!(c, Call::Light(_)) { 0xa4 } else { 0xa8 };
+                let f = self.ee.u32_at(self.ee.u32_at(o + 4) + slot);
+                (f, vec![a(o)], vec![], format!("object +{slot:#x} {f:#x}"))
+            }
+            Call::Other { emitter, dt } => (EMIT_OTHER, vec![a(emitter)], vec![dt.0], "other kind".into()),
+            Call::Place { owner, at, with } => (EMIT_PLACE, vec![a(owner), a(at), a(with)], vec![], "place".into()),
+            Call::Owner(x) => {
+                let f = self.ee.u32_at(self.ee.u32_at(x + 0xc) + 0xc8);
+                (f, vec![a(x)], vec![], format!("owner +0xc8 {f:#x}"))
+            }
+            Call::Follow(o) => (EMIT_FOLLOW, vec![a(o)], vec![], "follow".into()),
+            Call::Probe(at) => {
+                // the original's own stack slot, seeded as it seeds it
+                let slot = (self.ee.r(29) as u32).wrapping_sub(0x1000) & !0xf;
+                self.ee.set_u32(slot, 0x0080_0000);
+                let game = self.ee.u32_at(emitter::GAME);
+                self.original(EMIT_PROBE, &[a(game), a(at), a(slot)], &[], "emitter probe", vec![]);
+                return self.ee.u32_at(slot);
+            }
+            Call::Settle(p) => (EMIT_SETTLE, vec![a(self.ee.u32_at(EMIT_SETTLE_WORLD)), a(p), 0, 0, 0], vec![], "settle".into()),
+            Call::Bind { emitter, particle } => (EMIT_BIND, vec![a(emitter), a(particle)], vec![], "bind".into()),
+        };
+        self.original(f, &ints, &floats, &format!("emitter {kind}"), vec![]);
+        self.ee.r(2) as u32
+    }
+}
+
+/// F57: the functions the emitter port hands out (research/oracle.txt `# F57`): the listener's
+/// notice, the other kind's step, the owner's place, the emitter's follow-up, the world probe, the
+/// particle's settle (on the world the word holds) and bind.
+const EMIT_NOTICE: u32 = 0x0018_d690;
+const EMIT_OTHER: u32 = 0x0050_db60;
+const EMIT_PLACE: u32 = 0x001c_1e90;
+const EMIT_FOLLOW: u32 = 0x0050_c5c0;
+const EMIT_PROBE: u32 = 0x0012_5be0;
+const EMIT_SETTLE: u32 = 0x0048_33c0;
+const EMIT_SETTLE_WORLD: u32 = 0x0054_1528;
+const EMIT_BIND: u32 = 0x0050_c8b0;
 
 /// F56: the effects items' classes by their vtables (research/oracle.txt `# F56`); the seven C15's
 /// state 4 holds.
@@ -9448,11 +9519,17 @@ fn three_served(ran: &BTreeMap<String, u64>) {
 fn walk_served(ran: &BTreeMap<String, u64>) {
     assert!(!ran.contains_key("the tail: the update's Walk"), "the part walk handed on: {ran:?}");
     for (_, _, name) in PART_LEAVES {
-        let name = if name == "effects" { "effects item calls" } else { name };
+        let name = match name {
+            "effects" => "effects item calls",
+            "emitter" => "emitter steps",
+            _ => name,
+        };
         assert!(ran.contains_key(&format!("the tail: the update's {name}")), "the part walk's {name} never stepped: {ran:?}");
     }
     // F31b5n: the effects' own work is the port's.
     assert!(!ran.contains_key("the tail: the update's effects"), "the effects handed on: {ran:?}");
+    // F57: and the first emitter kind's, but for what it hands out.
+    assert!(!ran.contains_key("the tail: the update's emitter"), "the emitter handed on: {ran:?}");
     // F56: and its items' turning virtuals.
     for slot in ["+0x8 ", "+0x18 ", "+0x1c "] {
         assert!(!ran.keys().any(|k| k.contains(&format!("effects item {slot}"))), "an effects item's {slot}handed on: {ran:?}");
@@ -9943,6 +10020,295 @@ fn the_effects_items_turning_is_the_originals() {
     }
     eprintln!("effects items oracle: {seen:#?}");
     for want in ["halt", "light", "douse", "pick", "[]"] {
+        assert!(seen.keys().any(|k| k.contains(want)), "no case made {want}: {seen:?}");
+    }
+}
+
+/// F57's oracle: the emitter's objects' lighting virtuals and its owner's at fake addresses
+/// (`EMIT_FAKE + slot`).
+const EMIT_FAKE: u32 = 0x0000_2800;
+
+/// A call the emitter makes, as (kind, its integer arguments and `$f12`'s bits).
+type EmitCall = (&'static str, Vec<u32>);
+
+/// What each call of F57's oracle does, on the interpreter's side and the port's: `rand` steps an
+/// LCG kept at `seed`; the rest change a word the step reads after them (the particle's height and
+/// flags, the emitter's bind) or answer something (the other kind 0x77, the probe the spot's `x`).
+fn emit_react(ee: &mut Ee, seed: u32, (kind, args): &EmitCall) -> u32 {
+    match *kind {
+        "rand" => {
+            let s = ee.u32_at(seed).wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            ee.set_u32(seed, s);
+            (s >> 1) & 0x7fff_ffff
+        }
+        "other" => 0x77,
+        "probe" => {
+            let x = ee.u32_at(args[1]);
+            ee.set_u32(args[2], x);
+            0
+        }
+        "settle" => {
+            ee.set_u32(args[1] + 4, 2.0f32.to_bits());
+            0
+        }
+        "bind" => {
+            ee.set_u32(args[1] + 0x48, ee.u32_at(args[1] + 0x48) ^ 0x4000);
+            0
+        }
+        "follow" => {
+            ee.set_u32(args[0] + emitter::BIND, ee.u32_at(args[0] + emitter::BIND) ^ 1);
+            0
+        }
+        "light" | "douse" => {
+            ee.set_u32(args[0] + emitter::AGE, 0x3f80_0000);
+            0
+        }
+        _ => 0,
+    }
+}
+
+/// The port's side of F57's oracle: RAM in place, each call logged and answered by [`emit_react`].
+struct EmitOracle<'a> {
+    ee: &'a mut Ee,
+    seed: u32,
+    log: Vec<EmitCall>,
+}
+
+impl node::Ram for EmitOracle<'_> {
+    fn word(&mut self, at: u32) -> u32 {
+        self.ee.u32_at(at)
+    }
+    fn set(&mut self, at: u32, w: u32) {
+        self.ee.set_u32(at, w);
+    }
+}
+
+impl emitter::Emitters for EmitOracle<'_> {
+    fn set_byte(&mut self, at: u32, b: u8) {
+        self.ee.write(at, 1, u128::from(b));
+    }
+    fn set_half(&mut self, at: u32, h: u16) {
+        self.ee.write(at, 2, u128::from(h));
+    }
+    fn out(&mut self, c: emitter::Call) -> u32 {
+        use emitter::Call;
+        let call: EmitCall = match c {
+            Call::Rand => ("rand", vec![]),
+            Call::Notice(o) => ("notice", vec![o, o + emitter::SPOT, emitter::NOTICE_KIND, 2.0f32.to_bits()]),
+            Call::Light(o) => ("light", vec![o]),
+            Call::Douse(o) => ("douse", vec![o]),
+            Call::Other { emitter, dt } => ("other", vec![emitter, dt.to_bits()]),
+            Call::Place { owner, at, with } => ("place", vec![owner, at, with]),
+            Call::Owner(x) => ("owner", vec![x]),
+            Call::Follow(o) => ("follow", vec![o]),
+            Call::Probe(at) => {
+                // the original's stack slot is its own; the oracle's is a scratch word
+                let slot = self.ee.scratch(241);
+                self.ee.set_u32(slot, 0x0080_0000);
+                let game = self.ee.u32_at(emitter::GAME);
+                let call = ("probe", vec![game, at, slot, 0x0080_0000]);
+                emit_react(self.ee, self.seed, &call);
+                self.log.push(call);
+                return self.ee.u32_at(slot);
+            }
+            Call::Settle(p) => ("settle", vec![self.ee.u32_at(EMIT_SETTLE_WORLD), p, 0, 0, 0]),
+            Call::Bind { emitter, particle } => ("bind", vec![emitter, particle]),
+        };
+        let r = emit_react(self.ee, self.seed, &call);
+        self.log.push(call);
+        r
+    }
+}
+
+/// **F57 — the emitter's step is the original's**: 20 000 emitters in scratch RAM (flags, clocks,
+/// modes, a node or none, a frame, a turn, speeds, a definition with every option, a pool part
+/// full), run through SLUS-21104's step (the thunk's target) with what it hands out hooked
+/// ([`emit_react`]) and through [`emitter::step`]: the calls come in the same order with the same
+/// arguments, the step answers the same and the scratch RAM comes out the same. The spread table and
+/// its centre are the image's.
+#[test]
+fn the_emitter_step_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let slots = |ee: &Ee, k: u32, n: u32| (ee.scratch(k), n * 0x40);
+    let (o, def, pool, array, parts, node, parent, owner, rows, game, vt, misc) = (
+        slots(&ee, 180, 5),
+        slots(&ee, 185, 6),
+        slots(&ee, 191, 6),
+        slots(&ee, 197, 1),
+        slots(&ee, 198, 12),
+        slots(&ee, 210, 5),
+        slots(&ee, 215, 5),
+        slots(&ee, 220, 1),
+        slots(&ee, 221, 1),
+        slots(&ee, 222, 10),
+        slots(&ee, 232, 4),
+        slots(&ee, 236, 4),
+    );
+    let seed = ee.scratch(240);
+    // the port's probe slot (241) is not the original's: left out
+    let region = (o.0, ee.scratch(241) - o.0);
+    let globals = [(emitter::GAME, 4), (emitter::HELD, 4), (emitter::FRAME_ID & !3, 4)];
+    let log: Rc<RefCell<Vec<EmitCall>>> = Rc::default();
+    let hooked: [(u32, &'static str, usize, bool); 10] = [
+        (RAND, "rand", 0, false),
+        (EMIT_NOTICE, "notice", 3, true),
+        (EMIT_FAKE + 0xa4, "light", 1, false),
+        (EMIT_FAKE + 0xa8, "douse", 1, false),
+        (EMIT_OTHER, "other", 1, true),
+        (EMIT_PLACE, "place", 3, false),
+        (EMIT_FAKE + 0xc8, "owner", 1, false),
+        (EMIT_FOLLOW, "follow", 1, false),
+        (EMIT_SETTLE, "settle", 5, false),
+        (EMIT_BIND, "bind", 2, false),
+    ];
+    for (at, kind, n, f12) in hooked {
+        let l = log.clone();
+        ee.hooks.insert(
+            at,
+            Box::new(move |ee: &mut Ee| {
+                let mut args: Vec<u32> = (0..n).map(|k| ee.r(4 + k) as u32).collect();
+                if f12 {
+                    args.push(ee.f(12).to_bits());
+                }
+                let call = (kind, args);
+                let r = emit_react(ee, seed, &call);
+                l.borrow_mut().push(call);
+                ee.set(2, u64::from(r));
+            }),
+        );
+    }
+    let l = log.clone();
+    ee.hooks.insert(
+        EMIT_PROBE,
+        Box::new(move |ee: &mut Ee| {
+            let (a0, a1, a2) = (ee.r(4) as u32, ee.r(5) as u32, ee.r(6) as u32);
+            let call = ("probe", vec![a0, a1, ee.scratch(241), ee.u32_at(a2)]);
+            let r = emit_react(ee, seed, &("probe", vec![a0, a1, a2]));
+            l.borrow_mut().push(call);
+            ee.set(2, u64::from(r));
+        }),
+    );
+    let mut g = Gen(0x00f5_7e11);
+    let mut seen = BTreeMap::<String, u32>::new();
+    for case in 0..20_000 {
+        let mut setup = Vec::<(u32, u32)>::new();
+        let fl = |g: &mut Gen, at: f32, lo: f32, hi: f32| g.near(at, lo, hi).to_bits();
+        for k in (0..region.1).step_by(4) {
+            setup.push((region.0 + k, fl(&mut g, 0.0, -2.0, 2.0)));
+        }
+        let (ob, d, p) = (o.0, def.0, pool.0);
+        // the emitter
+        let spot = [g.f(-50.0, 50.0), g.f(-5.0, 5.0), g.f(-50.0, 50.0)];
+        for k in 0..3 {
+            setup.push((ob + emitter::SPOT + 4 * k, spot[k as usize].to_bits()));
+            let moved = if g.one_in(6) { 0.0 } else { g.f(-1.0, 1.0) };
+            setup.push((ob + emitter::LAST + 4 * k, (spot[k as usize] - moved).to_bits()));
+        }
+        setup.push((ob + 4, vt.0));
+        setup.push((ob + 8, if g.one_in(8) { misc.0 } else { 0 }));
+        let n = if g.one_in(3) { node.0 } else { 0 };
+        setup.push((ob + emitter::NODE, n));
+        setup.push((ob + emitter::FRAME, rows.0));
+        setup.push((ob + emitter::LOOK, g.bits()));
+        setup.push((ob + emitter::FLAGS, g.bits() & !if g.one_in(2) { 1 } else { 0 }));
+        setup.push((ob + emitter::HOLD, fl(&mut g, 0.0, -0.5, 0.5)));
+        setup.push((ob + emitter::WAIT, fl(&mut g, 0.0, -0.1, 0.1)));
+        setup.push((ob + emitter::RATE, fl(&mut g, 1.0, 0.0, 2.0)));
+        setup.push((ob + emitter::BIND, g.bits() % 3));
+        setup.push((ob + 0xcc, misc.0));
+        setup.push((ob + 0xd0, owner.0));
+        setup.push((ob + emitter::DEF, d));
+        setup.push((ob + emitter::CARRY, g.f(0.0, 1.0).to_bits()));
+        for at in [emitter::LIFE_BY_SPEED, emitter::SIZE_BY_SPEED, emitter::COUNT_BY_DISTANCE, emitter::COUNT_BY_SPEED] {
+            setup.push((ob + at, fl(&mut g, 0.0, -1.0, 3.0)));
+        }
+        setup.push((ob + emitter::SLOWEST, fl(&mut g, 0.0, 0.0, 10.0)));
+        setup.push((ob + emitter::FAST_ABOVE, fl(&mut g, 0.0, 0.0, 30.0)));
+        // its owner's virtual, the objects' vtable
+        setup.push((owner.0 + 0xc, vt.0));
+        for slot in [0xa4, 0xa8, 0xc8] {
+            setup.push((vt.0 + slot, EMIT_FAKE + slot));
+        }
+        // the node: its owner's frame id matching or not, current or under a parent
+        setup.push((node.0 + 8, if g.one_in(2) { 0 } else { misc.0 + 0x10 }));
+        setup.push((node.0 + 0x104, 0));
+        setup.push((misc.0 + 0x14, misc.0 + 0x20));
+        let id = g.bits() & 0xffff;
+        setup.push((misc.0 + 0x20 + 0xa4, if g.one_in(4) { id ^ 1 } else { id }));
+        setup.push((node.0 + 0xf0, if g.one_in(2) { parent.0 } else { 0 }));
+        setup.push((node.0 + 0x100, g.bits() & 0x81));
+        setup.push((parent.0 + 0xf0, 0));
+        setup.push((parent.0 + 0x100, g.bits() & 0x81));
+        // the globals
+        setup.push((emitter::GAME, game.0));
+        setup.push((game.0 + 0x224, if g.one_in(10) { 0x0800 } else { 0 }));
+        setup.push((emitter::HELD, u32::from(g.one_in(3))));
+        setup.push((emitter::FRAME_ID & !3, id << (8 * (emitter::FRAME_ID & 2))));
+        // the definition
+        setup.push((d + emitter::POOL, p));
+        setup.push((d + 0x24, fl(&mut g, 0.0, -1.0, 3.0)));
+        setup.push((d + emitter::DEF_FLAGS, g.bits() & 0x0020_040f));
+        setup.push((d + 0x38, g.bits() % 64));
+        setup.push((d + 0x3c, g.bits() % 64));
+        setup.push((d + 0x44, g.bits() % 8));
+        setup.push((d + emitter::DEF_OPTIONS, g.bits() & if g.one_in(8) { 0xff } else { 0xbf }));
+        setup.push((d + emitter::DEF_MODE, g.bits() % 5));
+        for at in [0x60, 0x64, 0x68, 0x6c] {
+            setup.push((d + at, g.f(0.0, 0.2).to_bits()));
+        }
+        setup.push((d + 0xb8, g.f(0.05, 1.0).to_bits()));
+        for at in [0x110, 0x114] {
+            setup.push((d + at, fl(&mut g, 0.0, 0.0, 150.0)));
+        }
+        setup.push((d + 0x160, fl(&mut g, 0.0, -50.0, 50.0)));
+        setup.push((d + 0x168, [0, 0, 1, 2, 3][g.bits() as usize % 5]));
+        // the pool: room for up to eight, some taken
+        let room = g.bits() % 9;
+        setup.push((p + emitter::POOL_COUNT, g.bits() % (room + 1)));
+        setup.push((p + emitter::POOL_ROOM, room));
+        setup.push((p + emitter::POOL_ARRAY, array.0));
+        setup.push((p + 0x174, if g.one_in(2) { 0 } else { misc.0 + 0x30 }));
+        for k in 0..8 {
+            setup.push((array.0 + 4 * k, parts.0 + 0x60 * k)); // quad-aligned, as `sq` needs
+        }
+        let dt = F(g.near(0.0333, 0.0, 0.1));
+        setup.push((seed, g.bits()));
+        let lay = |ee: &mut Ee| {
+            for &(at, w) in &setup {
+                ee.set_u32(at, w);
+            }
+        };
+        lay(&mut ee);
+        log.borrow_mut().clear();
+        ee.set(28, GP);
+        ee.call(0x0050_ceb0, &[u64::from(ob)], &[dt.0], 5_000_000);
+        let want_r = ee.r(2) as u32;
+        let want = std::mem::take(&mut *log.borrow_mut());
+        let want_ram = snap_regions(&ee, &[region]);
+        let want_globals = snap_regions(&ee, &globals);
+        lay(&mut ee);
+        let mut port = EmitOracle { ee: &mut ee, seed, log: vec![] };
+        let got_r = emitter::step(&mut port, ob, dt);
+        let got = std::mem::take(&mut port.log);
+        assert_eq!(got, want, "case {case}: the calls");
+        assert_eq!(got_r, want_r, "case {case}: the answer");
+        let got_ram = snap_regions(&ee, &[region]);
+        let parted: Vec<String> = got_ram
+            .iter()
+            .zip(&want_ram)
+            .enumerate()
+            .filter(|(_, (a, b))| a != b)
+            .map(|(k, (a, b))| format!("{:#x}: {b:#010x} want, {a:#010x} got", region.0 + 4 * k as u32))
+            .collect();
+        assert!(parted.is_empty(), "case {case}: the scratch RAM parts:\n  {}", parted.join("\n  "));
+        assert_eq!(snap_regions(&ee, &globals), want_globals, "case {case}: the globals");
+        let spawned = ee.u32_at(p + emitter::POOL_COUNT) != setup.iter().rfind(|s| s.0 == p + emitter::POOL_COUNT).unwrap().1;
+        let mut kinds: Vec<&str> = want.iter().map(|c| c.0).filter(|&k| k != "rand").collect();
+        kinds.dedup();
+        *seen.entry(format!("{}{kinds:?}", if spawned { "spawned " } else { "" })).or_default() += 1;
+    }
+    eprintln!("emitter oracle: {seen:#?}");
+    for want in ["spawned", "notice", "light", "douse", "other", "place", "owner", "follow", "probe", "settle", "bind"] {
         assert!(seen.keys().any(|k| k.contains(want)), "no case made {want}: {seen:?}");
     }
 }
