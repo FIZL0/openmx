@@ -18047,7 +18047,7 @@ impl<'a, 'b> rag::Rig<RiderRam<'b>> for LeafRig<'a> {
 /// (S286). The world step is [`rider::world_step`]'s (F62: its drawn frames, node bits, node aims
 /// and base step; the node's bounds [`node::bounds`]' into the database by [`attach::spatial_move`]),
 /// its idle layer too ([`rider::idle`], F62a: the clips by [`anim`]'s stop, play, blend and four-clip
-/// blend, but the controller's clip advance and the wreck poses' clip start the original's); the ragdoll world it steps is
+/// blend, and F62b's clip advance and the wreck poses' clip start [`anim::advance`]'s and [`anim::start`]'s); the ragdoll world it steps is
 /// [`rag::step`]'s (S280), its bone collisions [`bone::solve`]'s on the port's scene ([`PortScene`],
 /// S279), and its respawn's pose and settle the port's; the vt `+0x148` after it [`rider::after_step`]'s (the
 /// hand-over [`rider::hand_over`]'s, and the wreck's spot node into the record), the copy's node position [`node::position`]'s, the part clears
@@ -18105,13 +18105,19 @@ fn replay_with_rider_leaf(name: &str) -> Option<(Vec<bool>, Vec<String>, BTreeMa
     Some((w, off, served, census))
 }
 
-/// What the leaf left to the interpreter is only its outside calls' (each booked by name): the idle
-/// layer's clip advance and clip start and its saved-pose heap (F62a), rand, the cue, the wreck
-/// entry's heap resize and any heap call of the node's spatial move.
+/// What the leaf left to the interpreter is only its outside calls' (each booked by name), and those
+/// are only rand, the cue and its sound, and the heap: the clip start's saved pose, the wreck entry's
+/// resize and any heap call of the node's spatial move (F31b5i's "census 0 but rand/heap/cue").
 fn leaf_census(census: &BTreeMap<String, u64>) {
     let get = |k: &str| census.get(k).copied().unwrap_or(0);
     let calls: u64 = census.iter().filter(|(k, _)| k.starts_with("the rider leaf >")).map(|(_, n)| n).sum();
     assert_eq!(get("the tail: the rider"), calls, "the tail's rider ran only the leaf's outside calls in the interpreter: {census:?}");
+    let other: Vec<&String> = census
+        .keys()
+        .filter_map(|k| k.strip_prefix("the rider leaf > ").map(|_| k))
+        .filter(|k| !["rand", "cue ", "sound ", "heap"].iter().any(|p| k["the rider leaf > ".len()..].starts_with(p)))
+        .collect();
+    assert!(other.is_empty(), "the leaf's outside calls are only rand, the cue's and the heap's: {other:?}");
 }
 
 /// **F31b5i — C15's ride with the rider leaf on the ports**: ride-2 bit-exact, every port at once
