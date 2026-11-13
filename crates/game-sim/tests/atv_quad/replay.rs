@@ -146,8 +146,10 @@ fn replay(name: &str, state: &str, upto: usize, port: Option<Pieces>, tail: bool
 
 /// Each ride twice: by the original's frame alone, and by the port's pieces and tail beside it (every
 /// RAM word of the twin equal to the original's after each frame, and both equal to the capture). A ride
-/// whose rows the recorder read mid-frame from some row on, never at a frame's end again, is replayed up
-/// to the row before (race-jump-side 257, s-stoppie-short 120, s-wheelie-launch 81; see the journal).
+/// is replayed up to the row before its rows stop equalling the capture (race-jump-side 257, s-stoppie-short
+/// 120, s-wheelie-launch 81). The two s- rides' rows from there on are read mid-frame, at the same point
+/// in emulated time whatever the emulator's speed, so a slower re-record does not move them; race-jump-side
+/// is not a read: the frame puts the quad back a frame before the original does (C32's journal).
 macro_rules! rides {
     ($($orig:ident, $port:ident: $name:literal off $state:literal upto $upto:literal;)*) => {$(
         #[test]
