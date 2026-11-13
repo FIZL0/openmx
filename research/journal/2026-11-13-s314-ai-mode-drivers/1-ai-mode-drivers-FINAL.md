@@ -1,4 +1,4 @@
-# 1 — ai mode drivers (PART)
+# 1 — ai mode drivers (FINAL)
 
 Task S314. 2026-11-13.
 
