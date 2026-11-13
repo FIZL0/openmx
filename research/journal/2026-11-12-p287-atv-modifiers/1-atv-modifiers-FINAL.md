@@ -1,4 +1,4 @@
-# 1 — atv modifiers (PART)
+# 1 — atv modifiers
 
 Task P287. 2026-11-12.
 
