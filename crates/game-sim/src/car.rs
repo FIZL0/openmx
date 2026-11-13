@@ -2593,6 +2593,21 @@ impl Machine {
         self.latched = self.latch;
     }
 
+    /// **Over a seam** (MD120, the port's own; [`crate::flight::Flight::wrap_round`]'s for a car): on
+    /// a world that wraps, a car whose body has crossed a seam is moved back one width on that axis —
+    /// its body, its corners' places ([`crate::seam::car`]) and its collision object's record,
+    /// if it has one — and the answer is the widths it was past, `[x, z]`. Its speeds,
+    /// spins and attitude are not places, so it drives on as it was driving. `[0, 0]` on every world
+    /// that does not wrap, which it leaves alone.
+    pub fn wrap_round(&mut self, world: &dyn crate::world::World, collision: Option<&mut Collision>) -> [i8; 2] {
+        let Some((laps, by)) = crate::seam::past(world, self.body.position) else { return [0, 0] };
+        crate::seam::car(self, by);
+        if let Some(c) = collision {
+            crate::seam::collision(c, by);
+        }
+        laps
+    }
+
     /// A wrecked car waits to leave the ground and come back; a whole one near the map's edge is
     /// thrown, and one stuck on the gas against something for `MaxWreckTime` is reset.
     fn wreck_timer(&mut self, car: &Car, world: &impl crate::world::World, dt: F) -> Option<CarEvent> {
@@ -2603,7 +2618,14 @@ impl Machine {
             }
             return (self.wreck_lifted && (self.grounded || self.touching)).then_some(CarEvent::Unwreck);
         }
-        if world.area().is_some_and(|a| a.outside(self.body.position, F(EDGE_MARGIN))) {
+        // On a world that wraps (MD120), only an axis that does not wrap has an edge, as the plane's
+        // ([`crate::off_map::outside_axes`]); elsewhere the original's test.
+        let (wrap, at) = (world.wrap(), self.body.position);
+        let edge = |a: &crate::biplane::Area| match wrap {
+            [false, false] => a.outside(at, F(EDGE_MARGIN)),
+            _ => crate::off_map::outside_axes(a, wrap, at, F(EDGE_MARGIN)),
+        };
+        if world.area().is_some_and(|a| edge(&a)) {
             return Some(CarEvent::Thrown);
         }
         let v = self.ground_velocity;
@@ -2676,6 +2698,8 @@ impl<W: crate::world::World, N: FnMut(F) -> F> crate::biplane::Dynamics for Step
     }
     fn constrain(&mut self, _: i32, _: bool) {}
     fn post(&mut self, _: i32, dt: F) {
+        // Over a seam (MD120), first: the refill gathers where the car now is.
+        self.m.wrap_round(&*self.world, self.struck.as_mut().map(|(c, _)| &mut **c));
         if let Some((c, _)) = &mut self.struck {
             c.refresh(&self.m.body, &mut *self.world);
         }

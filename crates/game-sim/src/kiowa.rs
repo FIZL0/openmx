@@ -1044,6 +1044,22 @@ pub trait Surroundings {
     fn post(&mut self, body: &Body) {
         let _ = body;
     }
+    /// **Over a seam** (MD120, the port's own; [`crate::flight::Flight::wrap_round`]'s for the
+    /// helicopter), first in the post listener: on a world that wraps, a helicopter whose body has
+    /// crossed a seam is moved back one width on that axis, its body and its collision object
+    /// ([`crate::seam`]), and the answer is the widths it was past, `[x, z]`. Its speeds, spins and
+    /// attitude are not places; the measure that follows takes its matrix where it now is. The
+    /// spawn its put-back goes to is a place in the world already. Nothing (`[0, 0]`) for
+    /// surroundings with no world that wraps.
+    fn wrap_round(&mut self, body: &mut Body) -> [i8; 2] {
+        let _ = body;
+        [0, 0]
+    }
+    /// Which of the world's axes wrap, `[x, z]`: only an axis that does not has an edge for the
+    /// crash test's throw ([`crate::off_map::outside_axes`]). Neither by default.
+    fn wrap(&self) -> [bool; 2] {
+        [false, false]
+    }
     /// The body wrapper's collision response, every substep after gravity.
     fn resolve(&mut self, body: &mut Body);
     /// The collision record's touching flag.
@@ -1197,6 +1213,7 @@ impl<S: Surroundings> crate::biplane::Dynamics for Lists<'_, S> {
     fn constrain(&mut self, _: i32, _: bool) {}
     fn post(&mut self, _: i32, dt: F) {
         let ride = &mut *self.ride;
+        self.around.wrap_round(&mut ride.body);
         self.around.post(&ride.body);
         if self.mxvatv.is_some() {
             ride.measure.flight_mxvatv(&ride.body, self.acos);
@@ -1207,11 +1224,14 @@ impl<S: Surroundings> crate::biplane::Dynamics for Lists<'_, S> {
         let c = CrashContact { touching, ignored: self.around.ignored(), speed: ride.measure.speed };
         let (around, matrix) = (&mut *self.around, ride.measure.matrix);
         let b = &mut ride.body;
+        // On a world that wraps (MD120), the edge is only an axis that does not, as the plane's.
+        let wrap = around.wrap();
+        let area = ride.area.filter(|a| wrap == [false, false] || crate::off_map::outside_axes(a, wrap, b.position, F(EDGE)));
         let strike = || around.strike(&matrix);
         self.asked = if self.mxvatv.is_some() {
-            ride.crash.step_mxvatv(&c, ride.area.as_ref(), b.position, &mut b.velocity, &mut b.rates, &mut ride.throw_scale, self.rng, dt, strike)
+            ride.crash.step_mxvatv(&c, area.as_ref(), b.position, &mut b.velocity, &mut b.rates, &mut ride.throw_scale, self.rng, dt, strike)
         } else {
-            ride.crash.step(&c, ride.area.as_ref(), b.position, &mut b.velocity, &mut b.rates, &mut ride.throw_scale, self.rng, dt, strike)
+            ride.crash.step(&c, area.as_ref(), b.position, &mut b.velocity, &mut b.rates, &mut ride.throw_scale, self.rng, dt, strike)
         };
         self.around.crashed(&self.asked, ride, self.rng);
         let entries = self.around.entries();
@@ -2023,6 +2043,15 @@ impl Grounded<'_> {
 impl Surroundings for Grounded<'_> {
     fn post(&mut self, body: &Body) {
         self.collision.refresh(body, self.world);
+    }
+    fn wrap_round(&mut self, body: &mut Body) -> [i8; 2] {
+        let Some((laps, by)) = crate::seam::past(&*self.world, body.position) else { return [0, 0] };
+        crate::seam::body(body, by);
+        crate::seam::collision(self.collision, by);
+        laps
+    }
+    fn wrap(&self) -> [bool; 2] {
+        self.world.wrap()
     }
     fn resolve(&mut self, body: &mut Body) {
         let c = &mut *self.collision;
