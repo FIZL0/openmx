@@ -679,6 +679,20 @@ fn hook(ee: &mut Ee, p: Ptrs, log: Shared<Vec<Call>>, script: Shared<Script>) {
     }));
 }
 
+/// Run the original's own `addr` from inside its hook on the two arguments it was handed, and leave
+/// the machine as a return from it would (as `tests/atv_wheel.rs`'s): the interpreter files the hook
+/// back under `pc`, and the outer call keeps what it wrote and its instruction count.
+fn run_inside(ee: &mut Ee, addr: u32) {
+    let args = [ee.r(4), ee.r(5)];
+    let (ra, sp, stack, steps, written) = (ee.r(31), ee.r(29), ee.stack, ee.steps, ee.written.clone());
+    ee.stack = (sp as u32 - 0x40) & !0xf;
+    ee.call(addr, &args, &[], 100_000);
+    ee.written.extend(written);
+    (ee.stack, ee.pc, ee.steps) = (stack, addr, steps + ee.steps);
+    ee.set(29, sp);
+    ee.set(31, ra);
+}
+
 /// A stand-in for the shared smooth noise, as `mxvatv_step`'s: one of eight values by the time's bits.
 fn fake_noise(x: f32) -> f32 {
     const WAVE: [f32; 8] = [0.0, 1.0, -1.0, 0.5, -0.25, 0.937_5, -0.812_5, 0.125];
@@ -688,11 +702,13 @@ fn fake_noise(x: f32) -> f32 {
 /// Hook what the contact sort calls (MD127), for when it runs unhooked: the ray probe's place and
 /// search, on the car's probe, log and the search lays the script's hits out in [`sort::SCRATCH`]; the
 /// idle buggy's are skipped (its probe's flags byte says it struck nothing). Each struck object's one
-/// listener logs the hit.
+/// listener logs the hit. Any other probe's place (the collision sync stands the riding probe, MD128)
+/// runs the original's own ([`run_inside`]).
 fn hook_sort(ee: &mut Ee, p: Ptrs, log: Shared<Vec<Call>>, script: Shared<Script>) {
     let l = log.clone();
     ee.hooks.insert(SORT_PLACE, Box::new(move |ee| {
         if ee.r(4) as u32 != p.sort_probe {
+            run_inside(ee, SORT_PLACE);
             return;
         }
         assert_eq!((ee.r(31) as u32, ee.r(5) as u32), (POST_PLACE, CAR + 0x370), "the sort probe's place");
@@ -2419,6 +2435,8 @@ mod update; // MD106d: the car's update
 mod own_calls; // MD106b: SLUS-21104's own calls in the frame, unhooked
 mod whole; // MD106c: the whole frame off the image
 mod class_update; // MD106e: the car classes' update slots, the update's calls unhooked
+mod own_hand_outs; // MD128: what the own calls hand out in turn, unhooked
 
 use own_calls::*;
+use own_hand_outs::*;
 use pieces::*;

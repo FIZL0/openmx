@@ -148,8 +148,7 @@ fn the_buggys_whole_frame_is_the_originals() {
     assert_eq!(listeners.len(), 4, "the preforce list's length");
     assert_eq!(listeners[0], CAR + 0x30, "the car's PreProcess leads the list");
     let dt = F(1.0 / 30.0);
-    let record_tell = pre.u32_at(pre.u32_at(p.record + 4) + 0x88);
-    let handed_out = [SORT_PLACE, SORT_SEARCH, record_tell, SUBTREE_OUT_OF_DATE, SPATIAL_UPDATE, NODE_BOUNDS, COLLISION_SYNC, EDGE_TEST];
+    let handed_out = [SORT_PLACE, SORT_SEARCH, SPATIAL_MOVE, GATHER];
     let step = |car_alone: bool, nothing_handed: bool| {
         let mut ee = image().unwrap();
         let asked: Shared<Vec<Asked>> = Rc::default();
@@ -161,6 +160,16 @@ fn the_buggys_whole_frame_is_the_originals() {
             for f in handed_out {
                 ee.hooks.insert(f, Box::new(|ee| ee.set(2, 0)));
             }
+            // The place is every ray probe's stand: only the sort probe's is handed out (MD128: the
+            // collision sync stands the riding probe).
+            let sort_probe = ee.u32_at(CAR + at::SORT_PROBE);
+            ee.hooks.insert(SORT_PLACE, Box::new(move |ee| {
+                if ee.r(4) as u32 == sort_probe {
+                    ee.set(2, 0);
+                } else {
+                    run_inside(ee, SORT_PLACE);
+                }
+            }));
         }
         ee.set(28, GP);
         ee.call(WORLD_STEP, &[u64::from(WORLD)], &[dt.0], 50_000_000);
@@ -228,14 +237,20 @@ fn the_buggys_whole_frame_is_the_originals() {
     assert_eq!(asked.len() - theirs.len(), asked_others.borrow().len(), "the other listeners' queries");
 
     // What the port handed out, and what the original's own code answered: the sort's search
-    // struck nothing (the port's `SortSearch` leaves [`Car::sort`] empty); the map-edge test
-    // said inside (the port's [`atv_car::Vehicle::out_of_bounds`] stays false), so the car rides.
-    let named: Vec<String> = oasis.rest.iter().map(|c| format!("{c:?}")).collect();
-    assert_eq!(
-        named,
-        ["SortPlace", "SortSearch", "GravityRecord", "GravityRecord", "GravityRecord", "GravityRecord", "SubtreeOutOfDate", "SpatialUpdate", "NodeBounds", "CollisionSync", "OutOfBounds"],
-        "handed out"
-    );
+    // struck nothing (the port's `SortSearch` leaves [`Car::sort`] empty); the node's entry moved
+    // (the car has none of its own), the frame mesh's and the riding probe's, and the nearby list
+    // gathered (MD128); the map-edge test said inside, so the car rides.
+    let named: Vec<String> = oasis
+        .rest
+        .iter()
+        .map(|c| match c {
+            Call::SpatialMove { node, .. } => format!("SpatialMove(node {node})"),
+            Call::PartMove { part, .. } => format!("PartMove({part:?})"),
+            c => format!("{c:?}"),
+        })
+        .collect();
+    assert_eq!(named, ["SortPlace", "SortSearch", "SpatialMove(node true)", "PartMove(Frame)", "PartMove(Riding)", "Gather(Riding)"], "handed out");
+    assert!(!v.out_of_bounds, "the map-edge test");
     assert_eq!(ee.u8_at(p.sort_probe + sort::FLAGS) & STRUCK, 0, "the sort's search struck something");
     assert_eq!(ee.u32_at(CAR + at::STATE), atv_car::RIDING, "the car wrecked");
 
