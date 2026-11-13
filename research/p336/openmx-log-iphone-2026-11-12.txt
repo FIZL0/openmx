@@ -1,0 +1,10 @@
+openmx-log 2026-11-13T03:23:02.430Z Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0.1 Mobile/15E148 Safari/604.1 
+1156ms worker log: gpu: adapter limits: 2D 16384, layers 2048, buffer 1073741824, sampled textures a stage 44, samplers a stage 22, bind groups 11, inter-stage variables 31
+1162ms worker log: gpu: apple (BrowserWebGpu) into a Bgra8Unorm canvas (webgpu)
+1162ms worker log: renderer: gpu, webgpu
+1262ms worker log: music: playing disc:lonelyday
+4389ms worker log: pads: 1P: Touch controls (gamepad/16) — the menus and the first seat are its
+8545ms worker log: pads: 1P: Touch controls (gamepad/16)
+8568ms worker log: music: playing disc:getupagain
+8572ms worker log: gpu: validation error in frame 414: encoder state is invalid
+8572ms worker log: gpu: validation error in an unwatched call: encoder state is invalid
