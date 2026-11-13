@@ -1,4 +1,4 @@
-# 1 — paint update median (PART)
+# 1 — paint update median (FINAL)
 
 Task K53. 2026-11-13.
 
