@@ -528,3 +528,15 @@ controller, and a second openMX on the same Wi-Fi (the desktop is fine):
 
 If the installer refuses the update ("package conflicts"), the two apks were signed by different keys: say so
 in P310 — every release must be signed with `~/.android/debug.keystore` (never delete it).
+
+## Which stage of a ride's frame the iPhone's Safari breaks (P336a)
+
+P336 could not find the call: Chrome takes every one the ride makes, and WebKit's WebGPU runs only on Apple
+hardware. A build with P336 names the stage of the frame that broke, and then rides on WebGL2 instead of failing
+(five minutes):
+
+1. Once P336 is on beta.openmx.dev, turn the log on as in *The iPhone's WebGPU log* above (Settings & files → Log
+   for bug reports, or `?fps`), open the page **without** `?webgl2`, and start a ride (sx01 broke before).
+2. The ride should fail once and the page restart itself onto `?webgl2`. Pick the ride again there; it should ride.
+3. Save log, and put `openmx-log.txt` in the repo's `context/p336a/`. The line that matters is
+   `worker log: gpu: validation error in <stage>, frame N: …`. Say in P336a whether the WebGL2 ride worked.

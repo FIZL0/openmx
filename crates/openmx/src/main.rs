@@ -3670,6 +3670,12 @@ async fn front_end(args: Args) -> Result<(), String> {
                     Ok(Leave::Quit) => return Ok(()),
                     Err(e) => {
                         println!("ride: {e}");
+                        // A WebGPU validation error leaves the shell, and the page starts again on
+                        // WebGL2 (P336): the next ride on WebGPU would only break the same way.
+                        #[cfg(target_arch = "wasm32")]
+                        if let Some(at) = e.find(gpuwin::RIDE) {
+                            return Err(e[at..].to_string());
+                        }
                         shell.front.menu.note = Some(format!("Could not ride {track}: {e}"));
                         shell.front.menu.race_dropped();
                         break;
@@ -3764,6 +3770,11 @@ async fn front_end(args: Args) -> Result<(), String> {
                     Err(e) => {
                         println!("ride: {e}");
                         shell.front.network.abandon(&mut shell.front.menu);
+                        // As a ride from the menu (P336): the page starts again on WebGL2.
+                        #[cfg(target_arch = "wasm32")]
+                        if let Some(at) = e.find(gpuwin::RIDE) {
+                            return Err(e[at..].to_string());
+                        }
                         shell.front.menu.note = Some(format!("Could not ride {}: {e}", room.track));
                     }
                 }
