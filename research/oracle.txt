@@ -11485,6 +11485,29 @@ ai_rider_name               boot 0x00373340 (AI entry, buf, size) an AI rider's 
 #   spawn), the record's vt +0x88 x4 (0x00205730), subtree out of date, spatial update, node bounds,
 #   collision sync (0x004942c0, writes the car node's +0 halfword, a stamp), map-edge test (inside).
 #   The noise's knot 0x003f6d88 is the car's engine's (tables 0x003f3540 perm, 0x003f6580 g1, built).
+# MD106e — the car classes' update slots (vt +0x10c): buggy 0x004c6ce0, golf cart 0x004d0250, truck 0x004d7f40,
+#   one code (instruction diff equal; rodata 0x005252b8/c0/c8, 0x005252f8/0x00525300/08, 0x00525338/40/48 =
+#   0.3, 5.0, 55.0 each) (a0 car, f12 dt; game_sim::atv_car::class_update with OwnUpdate; tests/
+#   mxvatv_car_frame.rs the_car_classes_update_slots_are_the_originals, 10,000 cases off md39a/buggy.ee.bin,
+#   ghost step 0x004a74e0, hazard clock 0x004aad60 and base update 0x004a79c0 unhooked; class step 0x004c5510
+#   hooked, split off). Journal: research/journal/2026-11-12-md106e-mxvatv-car-step.
+#   +0xbc4 0: 0x004cc4e0 alone. Else odometer: +0x324 -> speed = +0xc38; else n = node +0x90 if -1 < its y < 1,
+#   else node +0x80; y = 0, VU-normalised (rsqrt); speed = adda(0, vel.z*n.z).madd(vel.x, n.x) (body +0x80);
+#   speed < 0 -> 0; +0x724 = adda(0, +0x724).madd(speed, dt). Collision: (+0x48c && its +0xe4 && (that +8 &
+#   2)) || (state && state +0x28 == 1): vt +0x138 (0x004cd740: +0x11bc = 1, j 0x00494940), byte +0x44 &= ~8;
+#   else body +0 word -> +0x11bc = 0, +0xdc -> 0x00203ff0(*(+0xdc), car +0x40); vt +0x124 (0x004942c0), +0x44
+#   |= 8. +0x684 0 -> vt +0x3ac (0x004aa460: car, node +0xa0, node +0x90, 0, 1). state && mode 1 && +0xc80 0:
+#   len = sqrt(mula/madda/madd of body +0xc0); len <= 5 -> 0, else cvt.w(255 * (len / 55)), < 126 -> 125; > 0
+#   && state +0x5c && 0x0051a250(*(state +0x6ac)) (level in s1) -> rumbler vt(+0x1c) +0x4c(f12 0.3, a1 0, a2
+#   level). Then 0x004cc4e0(car, dt), then 0x00272300(*0x00442eb0, car +0x674, 8, 4, +0xd20, 0).
+#   Ghost step 0x004a74e0 (a0 car, f12 dt): !(+0xde8 <= 0): probe +0xcc -> 0x00115890(probe, 0),
+#   0x001148e0(probe, 0), 0x00115890(probe, 1); probe byte +0x126 bit 0x20 clear -> +0xde8 -= dt. Then +0xde8 <=
+#   0 -> vt +0x39c (0x004cd4c0 = j 0x004a71c0, ghost over). Else len = +0xdec; 0 -> alpha 0.1, else alpha =
+#   adda(0, 0.1).madd((t - len) / (0 - len), 1 - 0.1), max.s min(0.1, 1), min.s max(0.1, 1);
+#   0x0018d170(f12 alpha, a0 node +0xe4).
+#   Hazard clock 0x004aad60 = game_sim::handling::tail::stuck (the bike's); base update 0x004a79c0 =
+#   tail::base (vt +0x3e4 0x004c7050, +0x35c 0x004a7b70, +0x378 0x004cd4f0, +0x37c 0x004c5370, 0x0025e8d0(car
+#   +0x400, dt), 0x00494370(car, dt)); put-back vt +0x3a8 0x004a6f70 (a1 1, a2 1).
 # MD106d — the car's update atv_car_update 0x004cc4e0 (a0 car, f12 dt; game_sim::atv_car::update; tests/
 #   mxvatv_car_frame.rs the_cars_update_is_the_originals, 10,000 generated updates off md39a/buggy.ee.bin,
 #   its four calls hooked). Journal: research/journal/2026-11-10-md106d-mxvatv-car-update.

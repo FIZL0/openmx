@@ -2418,6 +2418,7 @@ mod pieces; // MD106: the frame's pieces, and the whole frame with its calls hoo
 mod update; // MD106d: the car's update
 mod own_calls; // MD106b: SLUS-21104's own calls in the frame, unhooked
 mod whole; // MD106c: the whole frame off the image
+mod class_update; // MD106e: the car classes' update slots, the update's calls unhooked
 
 use own_calls::*;
 use pieces::*;

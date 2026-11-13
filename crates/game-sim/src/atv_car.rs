@@ -21,7 +21,10 @@
 //! layout; the field map is research/oracle.txt's (`# MD39`, `# MD39b`, `# MD106`).
 //!
 //! [`update`], the car's once-a-frame update outside the world step (vt `+0x10c`), is the same: its own
-//! code ported, its calls handed out.
+//! code ported, its calls handed out. [`class_update`] is the buggy's, golf cart's and truck's slot
+//! around it (MD106e), and [`OwnUpdate`] answers the update's own calls: the ghost step, the hazard
+//! clock and the base update (the bike's [`crate::handling::tail`]); the class's per-frame step stays
+//! a call.
 //!
 //! Proof: `tests/mxvatv_car_frame/`, SLUS-21104's world step and the car's update off MD39a's buggy
 //! image with every call hooked; and (MD106c) the image's frame whole, with [`Pieces`] and [`Own`]
@@ -263,6 +266,32 @@ pub enum Call {
     /// The car's node placed while current, with a subtree under it (its model's parts, past what
     /// [`Vehicle::scene`] holds): every current node of the subtree marked out of date.
     SubtreeOutOfDate,
+    /// What the update's own calls hand out in turn, when [`OwnUpdate`] answers them (MD106e). The
+    /// ghost step's: the collision probe's overlap search (answered into [`Updated::inside`]), the
+    /// node's alpha, and the ghost over (vt `+0x39c`). The base update's ([`crate::handling::tail::base`]):
+    /// its prepare (vt `+0x3e4`), the ride (vt `+0x35c`), the sync and snapshot (vt `+0x378`,
+    /// `+0x37c`), the network's step and the vehicle's parts and listeners. The hazard clock's: the
+    /// put-back (vt `+0x3a8` with 1, 1).
+    GhostSearch,
+    GhostAlpha(F),
+    GhostOver,
+    Prepare,
+    Ride(F),
+    Sync,
+    Snapshot,
+    Network(F),
+    Parts(F),
+    PutBack,
+    /// What the car classes' own update slot ([`class_update`]) calls around [`update`]: the
+    /// collision put on (vt `+0x138`), or taken off: the car taken off its list (with the list there)
+    /// before [`Call::CollisionSync`]; without a player, the vehicle placed at its node's position
+    /// and heading (vt `+0x3ac`, with 0 and 1); the pad's rumble at a level, when the vehicle state's
+    /// rumble is on (the call's to ask), for [`RIDE_RUMBLE_TIME`] and not the soft one; and last
+    /// [`Call::Cue`] 4, the frame's message.
+    CollisionOn,
+    Unlist,
+    Place,
+    RideRumble(i32),
 }
 
 /// Whoever runs the calls the car's listeners make. A `Vec<Call>` just lists them.
@@ -439,6 +468,217 @@ pub fn update(u: &mut Update, car: &mut Car, body: &mut Body, dt: F, s: &mut imp
         s.call(Call::ClassStep, car, body);
     }
     s.call(Call::VehicleUpdate(dt), car, body);
+}
+
+/// What the car's update's own calls and its class's update slot read and write beyond [`Car`],
+/// [`Update`] and the body (research/oracle.txt `# MD106e`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Updated {
+    /// The ghost's clock (counting down while it is on) and its length; whether the car has a
+    /// collision probe, and the probe's answer to [`Call::GhostSearch`]: inside something.
+    pub ghost: F,
+    pub ghost_length: F,
+    pub probe: bool,
+    pub inside: bool,
+    /// The vehicle base's words the base update and the hazard clock keep, as the bike's
+    /// ([`crate::handling::tail`]; the vehicle base is the same class): the state (a pointer, which
+    /// must be 0 exactly when [`Update::vehicle_state`] is none), the clocks, free and stuck, the
+    /// body's position, the run's flags. The slot reads the node's two axes (`side` and `ahead`), the
+    /// distance, the player and the rumbler there (on the ground, the speed and the wreck reason are
+    /// [`Car::grounded`], [`Car::ground_velocity`]'s `z` and [`Car::state`]); `speed` is unused.
+    pub vehicle: crate::handling::tail::Vehicle,
+    /// The car is linked to an object whose node's flag word has bit 1: its collision stays on.
+    pub carried: bool,
+    /// The car's word the slot clears when it takes the collision off with the body in the world
+    /// (the collision's put-on, [`Call::CollisionOn`], sets it); the car is on a list then (it is
+    /// taken off it, [`Call::Unlist`]); and the byte whose bit 3 says the collision is off.
+    pub collision_word: u32,
+    pub listed: bool,
+    pub collision_flags: u8,
+}
+
+/// The ghost's alpha floor, and its top.
+const GHOST_FLOOR: f32 = 0.1;
+/// The class slot's rumble: from this shock on, at 255 × shock over [`RIDE_RUMBLE_FULL`] and at least
+/// [`RIDE_RUMBLE_LEAST`], for this long. The buggy's, the golf cart's and the truck's are the same.
+const RIDE_RUMBLE_FROM: f32 = 5.0;
+const RIDE_RUMBLE_FULL: f32 = 55.0;
+pub const RIDE_RUMBLE_TIME: f32 = 0.3;
+const RIDE_RUMBLE_LEAST: i32 = 125;
+/// The vehicle state's mode the slot rides in: the collision on, the odometer's rumble measured.
+const MODE_RIDING: u32 = 1;
+/// The collision flags' bit: the collision off.
+const COLLISION_OFF: u8 = 0x08;
+
+/// **The update's own calls answered** (MD106e): the ghost step ([`ghost_step`]), the hazard clock
+/// ([`crate::handling::tail::stuck`], the quad's and the bike's) and the base update
+/// ([`crate::handling::tail::base`]); every other call, and what these hand out, goes on to `rest`.
+pub struct OwnUpdate<'a, S> {
+    pub w: &'a mut Updated,
+    pub rest: &'a mut S,
+}
+
+impl<S: Steps> Steps for OwnUpdate<'_, S> {
+    fn call(&mut self, c: Call, car: &mut Car, body: &mut Body) {
+        // The vehicle base reads the body's position as its own (where it was last free).
+        self.w.vehicle.body_position = body.position;
+        match c {
+            Call::Ghost(dt) => ghost_step(self.w, car, body, dt, self.rest),
+            Call::HazardClock { dt, time, sunk } => {
+                crate::handling::tail::stuck(&mut Base { w: &mut *self.w, rest: &mut *self.rest, car, body }, sunk, dt, time)
+            }
+            Call::VehicleUpdate(dt) => crate::handling::tail::base(&mut Base { w: &mut *self.w, rest: &mut *self.rest, car, body }, dt),
+            c => self.rest.call(c, car, body),
+        }
+    }
+}
+
+/// The vehicle base's outside world for the base update and the hazard clock: what they hand out
+/// goes on as [`Call`]s.
+struct Base<'a, S> {
+    w: &'a mut Updated,
+    rest: &'a mut S,
+    car: &'a mut Car,
+    body: &'a mut Body,
+}
+
+impl<S: Steps> crate::handling::tail::Vehicles for Base<'_, S> {
+    fn vehicle(&mut self) -> &mut crate::handling::tail::Vehicle {
+        &mut self.w.vehicle
+    }
+    fn skipped(&mut self) -> bool {
+        unreachable!("the base update and the hazard clock do not ask for the skip")
+    }
+    fn paused(&mut self) -> bool {
+        unreachable!("the base update and the hazard clock do not ask for the pause")
+    }
+    fn rumble_ready(&mut self) -> bool {
+        unreachable!("the base update and the hazard clock do not rumble")
+    }
+    fn word(&mut self, _at: u32) -> u32 {
+        unreachable!("the base update and the hazard clock read no word outside the vehicle")
+    }
+    fn out(&mut self, c: crate::handling::tail::Out, dt: F) {
+        use crate::handling::tail::Out;
+        let c = match c {
+            Out::Prepare => Call::Prepare,
+            Out::Ride => Call::Ride(dt),
+            Out::Sync => Call::Sync,
+            Out::Snapshot => Call::Snapshot,
+            Out::Network => Call::Network(dt),
+            Out::Parts => Call::Parts(dt),
+            Out::PutBack => Call::PutBack,
+            c => unreachable!("the base update and the hazard clock hand out no {c:?}"),
+        };
+        self.rest.call(c, self.car, self.body);
+    }
+}
+
+/// **The vehicle's ghost step** (the car's vt `+0x3a4`): while the ghost's clock runs, the car's
+/// collision probe searched for an overlap ([`Call::GhostSearch`]), and the clock counted down by
+/// `dt` unless it is inside something (with no probe, no search and no count). Still running, the
+/// node drawn at an alpha that rises from [`GHOST_FLOOR`] to 1 as the clock runs out (the floor with
+/// a zero length); run out, the ghost is over ([`Call::GhostOver`]). The clock is not put back to
+/// zero here. MX Unleashed's is [`crate::ghost::Ghost::step`], with a fixed length.
+pub fn ghost_step(w: &mut Updated, car: &mut Car, body: &mut Body, dt: F, s: &mut impl Steps) {
+    if w.ghost <= F::ZERO {
+        return;
+    }
+    if w.probe {
+        s.call(Call::GhostSearch, car, body);
+        if !w.inside {
+            w.ghost = w.ghost - dt;
+        }
+    }
+    if w.ghost <= F::ZERO {
+        s.call(Call::GhostOver, car, body);
+        return;
+    }
+    let len = w.ghost_length;
+    let alpha = if len == F::ZERO {
+        F(GHOST_FLOOR)
+    } else {
+        let t = (w.ghost - len) / (F::ZERO - len);
+        let (lo, hi) = (F(GHOST_FLOOR), F::ONE);
+        Acc::adda(F::ZERO, lo).madd(t, hi - lo).max(lo.min(hi)).min(lo.max(hi))
+    };
+    s.call(Call::GhostAlpha(alpha), car, body);
+}
+
+/// `xyz` normalised with VU0's `vrsqrt`; `w` kept.
+fn normalize(v: Vf) -> Vf {
+    let sq = v.mul(v);
+    let len2 = ps2_float::vu::madd(ps2_float::vu::add(sq.x(), sq.y()), 1.0, sq.z());
+    v.merge(Dest::XYZ, v.mul_q(ps2_float::vu::rsqrt(1.0, len2)))
+}
+
+/// **The car classes' own update slot** (the buggy's, golf cart's and truck's vt `+0x10c`, one code
+/// with the same constants), around the class's [`update`]. With no vehicle state, the update alone.
+/// Otherwise:
+///
+/// 1. the odometer: the distance grows by `dt` times the speed, never below 0: on the ground the
+///    ground velocity's `z` (the vehicle base's signed speed word), off it the body's velocity along
+///    the node's heading flattened (its ahead axis, or its side axis when the ahead axis points
+///    straight up or down, `y` dropped, normalised);
+/// 2. the collision: on ([`Call::CollisionOn`], the off bit cleared) while carried or riding (the
+///    vehicle state's mode 1); else off: with the body in the world its word cleared and, on a list,
+///    [`Call::Unlist`]; then [`Call::CollisionSync`] and the off bit set;
+/// 3. with no player, [`Call::Place`];
+/// 4. riding and not wrecked ([`RIDING`]), the pad's rumble off the body's shock peak past [`RIDE_RUMBLE_FROM`]
+///    ([`Call::RideRumble`], with a rumbler);
+/// 5. the [`update`], its own calls answered by [`OwnUpdate`]; and [`Call::Cue`] 4.
+pub fn class_update(u: &mut Update, w: &mut Updated, car: &mut Car, body: &mut Body, dt: F, s: &mut impl Steps) {
+    if u.vehicle_state.is_none() {
+        update(u, car, body, dt, &mut OwnUpdate { w, rest: s });
+        return;
+    }
+    let v = &mut w.vehicle;
+    let mut speed = if car.grounded {
+        F(car.ground_velocity.z())
+    } else {
+        let y = F(v.ahead.y());
+        let mut d = if y <= F(-1.0) || !(y < F::ONE) { v.side } else { v.ahead };
+        d.0[1] = 0.0;
+        let d = normalize(d);
+        Acc::adda(F::ZERO, F(body.velocity.z()) * F(d.z())).madd(body.velocity.x(), d.x())
+    };
+    if speed < F::ZERO {
+        speed = F::ZERO;
+    }
+    v.distance = Acc::adda(F::ZERO, v.distance).madd(speed, dt);
+
+    let riding = u.vehicle_state == Some(MODE_RIDING);
+    if w.carried || riding {
+        s.call(Call::CollisionOn, car, body);
+        w.collision_flags &= !COLLISION_OFF;
+    } else {
+        if body.enabled {
+            w.collision_word = 0;
+            if w.listed {
+                s.call(Call::Unlist, car, body);
+            }
+        }
+        s.call(Call::CollisionSync, car, body);
+        w.collision_flags |= COLLISION_OFF;
+    }
+    if w.vehicle.player == 0 {
+        s.call(Call::Place, car, body);
+    }
+    if riding && car.state == RIDING {
+        let p = body.correction_peak;
+        let shock = Acc::mula(p.x(), p.x()).madda(p.y(), p.y()).madd(p.z(), p.z()).sqrt();
+        let level = if shock <= F(RIDE_RUMBLE_FROM) {
+            0
+        } else {
+            let l = (F(255.0) * (shock / F(RIDE_RUMBLE_FULL))).to_i32();
+            l.max(RIDE_RUMBLE_LEAST)
+        };
+        if level > 0 && w.vehicle.rumbler {
+            s.call(Call::RideRumble(level), car, body);
+        }
+    }
+    update(u, car, body, dt, &mut OwnUpdate { w, rest: s });
+    s.call(Call::Cue(4), car, body);
 }
 
 /// SLUS-21104's physics world as the car's frame sees it: one rigid body, the car's three

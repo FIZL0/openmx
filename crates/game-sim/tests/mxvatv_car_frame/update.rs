@@ -14,7 +14,7 @@ const STILL_BYTE: u32 = 0x225;
 const STILL_BIT: u8 = 0x08;
 
 /// The update's words (research/oracle.txt `# MD106d`).
-mod up {
+pub(crate) mod up {
     pub const VEHICLE_STATE: u32 = 0xbc4;
     pub const MODE: u32 = 0x28;
     pub const ON_HAZARD: u32 = 0xc20;
@@ -47,7 +47,7 @@ fn hook_update(ee: &mut Ee, log: Shared<Vec<Call>>) {
 /// A generated update: the image's car with its latch, tires' contact flags and surfaces stirred,
 /// the still camera and the vehicle state's mode chosen, and a surface table (with the hazard words
 /// as written: any set word is a hazard).
-fn generate_update(r: &mut Rng, image_car: &Car) -> (Update, [u32; 16], Car, F) {
+pub(crate) fn generate_update(r: &mut Rng, image_car: &Car) -> (Update, [u32; 16], Car, F) {
     let mut car = *image_car;
     car.latch = r.chance(0.6);
     car.latched = r.chance(0.5);
