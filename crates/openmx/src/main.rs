@@ -11467,6 +11467,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 paint.slowest * 1000.0,
                 paint.slowest_cpu * 1000.0
             );
+            let (median, p90, writes) = paint.writing_cpu_spread();
+            println!(
+                "world paint: {writes} updates wrote pages, their cpu {:.2} ms at the median and {:.2} ms at the 90th percentile",
+                median * 1000.0,
+                p90 * 1000.0
+            );
             if let Some((used, shown)) = renderer_of(&mut offscreen, window).and_then(|r| r.world_paint_pool()) {
                 let used: Vec<String> = used.iter().map(|(u, c)| format!("{u} of {c}")).collect();
                 println!("world paint: {shown} maps on their own pages at the end, layers held {}", used.join(", "));

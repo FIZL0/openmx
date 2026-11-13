@@ -51,6 +51,10 @@ pub struct PaintStream {
     /// gate's budget reads, the wall clock above taking in the other processes' load. The wall
     /// clock's where the thread's is not known.
     pub slowest_cpu: f32,
+    /// The CPU time of each update that wrote pages, in seconds (K53): the gate judges their median,
+    /// which a contended machine's odd slow update (a page fault, a cache another process emptied)
+    /// does not move the way it moves the slowest.
+    pub writing_cpu: Vec<f32>,
 }
 
 impl PaintStream {
@@ -96,6 +100,7 @@ impl PaintStream {
             let_go: 0,
             slowest: 0.0,
             slowest_cpu: 0.0,
+            writing_cpu: Vec::new(),
         }
     }
 
@@ -171,6 +176,20 @@ impl PaintStream {
         self.slowest = self.slowest.max(took.as_secs_f32());
         let cpu = cpu_at.zip(cpu_time(true)).map_or(took, |(a, b)| b.saturating_sub(a));
         self.slowest_cpu = self.slowest_cpu.max(cpu.as_secs_f32());
+        if wrote > 0 {
+            self.writing_cpu.push(cpu.as_secs_f32());
+        }
+    }
+
+    /// The median and the 90th percentile of the writing updates' CPU time, in seconds, and how many
+    /// there were (K53).
+    pub fn writing_cpu_spread(&self) -> (f32, f32, usize) {
+        let mut cpu = self.writing_cpu.clone();
+        if cpu.is_empty() {
+            return (0.0, 0.0, 0);
+        }
+        cpu.sort_by(f32::total_cmp);
+        (cpu[cpu.len() / 2], cpu[cpu.len() * 9 / 10], cpu.len())
     }
 
     /// What the stream did since the shell last took the lines.
