@@ -30,6 +30,7 @@ pub mod bone;
 pub mod bike;
 pub mod effects;
 pub mod emitter;
+pub mod ring;
 pub mod ground;
 pub mod mass;
 pub mod node;

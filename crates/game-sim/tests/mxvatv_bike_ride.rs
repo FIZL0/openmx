@@ -409,6 +409,7 @@ fn the_seeded_bikes_first_frame_is_ride2_row_0() {
 use game_sim::handling::bike;
 use game_sim::handling::effects::{self, Effects};
 use game_sim::handling::emitter;
+use game_sim::handling::ring;
 use game_sim::handling::run;
 use game_sim::quad::{self, Call, Moto, Quad};
 use std::cell::RefCell;
@@ -5215,6 +5216,14 @@ impl Listeners for PartWalk<'_> {
             // twelve bytes before its listener); what it hands out is the original's.
             book("the tail: the update's emitter steps", 1);
             emitter::step(self, e - 0xc, dt);
+        } else if name == "second emitter" {
+            // F59: and the second kind's ([`ring::step`]), its hand-outs the original's too.
+            book("the tail: the update's second emitter steps", 1);
+            let rand = rand_state(self.ee);
+            ring::step(self, e - 0xc, dt);
+            if rand_state(self.ee) != rand {
+                book("the tail: the update's second emitter steps that drew rand", 1);
+            }
         } else {
             self.original(f, &[u64::from(e)], &[dt.0], name, if closes { vec![(e, dt.to_bits())] } else { vec![] });
         }
@@ -5339,6 +5348,23 @@ impl emitter::Emitters for PartWalk<'_> {
     }
 }
 
+/// F59: the second emitter kind's own hand-outs: `srand` is the original's; no C15 frame reads the
+/// clock (the seed is set long before state 4), and the original's read is a SIF call the
+/// interpreter cannot make, so it stops the replay.
+impl ring::Rings for PartWalk<'_> {
+    fn clock(&mut self) -> u32 {
+        panic!("the second emitter kind read the clock: no C15 frame was expected to seed rand")
+    }
+    fn seed(&mut self, seed: u32) {
+        self.original(RING_SRAND, &[u64::from(seed)], &[], "second emitter srand", vec![]);
+    }
+}
+
+/// `srand`, the second emitter kind's seeding.
+const RING_SRAND: u32 = 0x0035_6190;
+/// The second emitter kind's step, the thunk's target.
+const RING_STEP: u32 = 0x004f_bcc0;
+
 /// F57: the functions the emitter port hands out (research/oracle.txt `# F57`): the listener's
 /// notice, the other kind's step, the owner's place, the emitter's follow-up, the world probe, the
 /// particle's settle (on the world the word holds) and bind.
@@ -5417,6 +5443,14 @@ impl effects::Items for PartWalk<'_> {
         {
             book("the tail: the update's effects item emitter steps", 1);
             emitter::step(self, object, dt);
+            return;
+        }
+        // F59: or the second kind's, if a move reaches it
+        if let effects::Call::Move { object, dt } = c
+            && f == RING_STEP
+        {
+            book("the tail: the update's effects item second emitter steps", 1);
+            ring::step(self, object, dt);
             return;
         }
         self.original(f, &ints, &floats, &name, vec![]);
@@ -9632,6 +9666,7 @@ fn walk_served(ran: &BTreeMap<String, u64>) {
         let name = match name {
             "effects" => "effects item calls",
             "emitter" => "emitter steps",
+            "second emitter" => "second emitter steps",
             _ => name,
         };
         assert!(ran.contains_key(&format!("the tail: the update's {name}")), "the part walk's {name} never stepped: {ran:?}");
@@ -9640,6 +9675,10 @@ fn walk_served(ran: &BTreeMap<String, u64>) {
     assert!(!ran.contains_key("the tail: the update's effects"), "the effects handed on: {ran:?}");
     // F57: and the first emitter kind's, but for what it hands out.
     assert!(!ran.contains_key("the tail: the update's emitter"), "the emitter handed on: {ran:?}");
+    // F59: and the second kind's.
+    assert!(!ran.contains_key("the tail: the update's second emitter"), "the second emitter handed on: {ran:?}");
+    // (no C15 frame of it spawns: none draws rand, so its spawning loop is the oracle's alone)
+    assert!(!ran.contains_key("the tail: the update's second emitter steps that drew rand"), "the second emitter drew rand: {ran:?}");
     // F56: and its items' turning virtuals.
     // F58: and their steps.
     for slot in ["+0x8 ", "+0x14 ", "+0x18 ", "+0x1c "] {
@@ -10694,6 +10733,233 @@ fn the_emitter_step_is_the_originals() {
     }
     eprintln!("emitter oracle: {seen:#?}");
     for want in ["spawned", "notice", "light", "douse", "other", "place", "owner", "follow", "probe", "settle", "bind"] {
+        assert!(seen.keys().any(|k| k.contains(want)), "no case made {want}: {seen:?}");
+    }
+}
+
+/// F59's oracle: the clock read (its eight bytes into the buffer handed it) and `srand`.
+const RING_CLOCK: u32 = 0x0036_1798;
+
+/// The port's side of F59's oracle: F57's ([`EmitOracle`]), with the clock answered from the word
+/// at `clock` and `srand` setting the oracle's `rand` state ([`emit_react`]'s LCG).
+impl ring::Rings for EmitOracle<'_> {
+    fn clock(&mut self) -> u32 {
+        self.log.push(("clock", vec![]));
+        self.ee.u32_at(self.seed + 4)
+    }
+    fn seed(&mut self, s: u32) {
+        self.log.push(("srand", vec![s]));
+        self.ee.set_u32(self.seed, s);
+    }
+}
+
+/// **F59 — the second emitter kind's step is the original's**: 20 000 emitters of the second kind in
+/// scratch RAM (F57's emitter words and definition, plus the ring: 120 directions, its index, stride
+/// and scale; `rand` seeded or not), run through SLUS-21104's step (the thunk's target) with what it
+/// hands out hooked ([`emit_react`]; the clock answering the case's bytes, `srand` setting the
+/// oracle's `rand`) and through [`ring::step`]: the calls come in the same order with the same
+/// arguments, the step answers the same, and the scratch RAM and the globals (the seed among them)
+/// come out the same. The spread table, its centre, the aim's direction and the arc cosine's table
+/// are the image's.
+#[test]
+fn the_second_emitter_step_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let slots = |ee: &Ee, k: u32, n: u32| (ee.scratch(k), n * 0x40);
+    let (o, def, pool, array, parts, node, parent, rows, game, vt, misc) = (
+        slots(&ee, 100, 36),
+        slots(&ee, 136, 6),
+        slots(&ee, 142, 6),
+        slots(&ee, 148, 1),
+        slots(&ee, 149, 12),
+        slots(&ee, 161, 5),
+        slots(&ee, 166, 5),
+        slots(&ee, 171, 1),
+        slots(&ee, 172, 10),
+        slots(&ee, 182, 4),
+        slots(&ee, 186, 4),
+    );
+    // the oracle's rand state, and the clock's bytes after it
+    let seed = ee.scratch(190);
+    let region = (o.0, ee.scratch(191) - o.0);
+    let globals = [(emitter::GAME, 4), (emitter::HELD, 4), (emitter::FRAME_ID & !3, 4), (ring::SEEDED, 4)];
+    assert_ne!(ee.u32_at(ring::ACOS_TABLE), 0, "the image's arc cosine table");
+    let log: Rc<RefCell<Vec<EmitCall>>> = Rc::default();
+    let hooked: [(u32, &'static str, usize, bool); 6] = [
+        (RAND, "rand", 0, false),
+        (EMIT_NOTICE, "notice", 3, true),
+        (EMIT_FAKE + 0xa4, "light", 1, false),
+        (EMIT_FAKE + 0xa8, "douse", 1, false),
+        (EMIT_SETTLE, "settle", 5, false),
+        (EMIT_BIND, "bind", 2, false),
+    ];
+    for (at, kind, n, f12) in hooked {
+        let l = log.clone();
+        ee.hooks.insert(
+            at,
+            Box::new(move |ee: &mut Ee| {
+                let mut args: Vec<u32> = (0..n).map(|k| ee.r(4 + k) as u32).collect();
+                if f12 {
+                    args.push(ee.f(12).to_bits());
+                }
+                let call = (kind, args);
+                let r = emit_react(ee, seed, &call);
+                l.borrow_mut().push(call);
+                ee.set(2, u64::from(r));
+            }),
+        );
+    }
+    let l = log.clone();
+    ee.hooks.insert(
+        RING_CLOCK,
+        Box::new(move |ee: &mut Ee| {
+            let [s, mi, h, day] = ee.u32_at(seed + 4).to_le_bytes();
+            let buf = ee.r(4) as u32;
+            for (k, b) in [0x5a, s, mi, h, 0xa5, day, 0x11, 0x22].into_iter().enumerate() {
+                ee.write(buf + k as u32, 1, u128::from(b));
+            }
+            l.borrow_mut().push(("clock", vec![]));
+            ee.set(2, 0);
+        }),
+    );
+    let l = log.clone();
+    ee.hooks.insert(
+        RING_SRAND,
+        Box::new(move |ee: &mut Ee| {
+            let s = ee.r(4) as u32;
+            ee.set_u32(seed, s);
+            l.borrow_mut().push(("srand", vec![s]));
+        }),
+    );
+    let mut g = Gen(0x00f5_9e22);
+    let mut seen = BTreeMap::<String, u32>::new();
+    for case in 0..20_000 {
+        let mut setup = Vec::<(u32, u32)>::new();
+        let fl = |g: &mut Gen, at: f32, lo: f32, hi: f32| g.near(at, lo, hi).to_bits();
+        for k in (0..region.1).step_by(4) {
+            setup.push((region.0 + k, fl(&mut g, 0.0, -2.0, 2.0)));
+        }
+        let (ob, d, p) = (o.0, def.0, pool.0);
+        // the emitter
+        let spot = [g.f(-50.0, 50.0), g.f(-5.0, 5.0), g.f(-50.0, 50.0)];
+        for k in 0..3 {
+            setup.push((ob + emitter::SPOT + 4 * k, spot[k as usize].to_bits()));
+            let moved = if g.one_in(6) { 0.0 } else { g.f(-1.0, 1.0) };
+            setup.push((ob + emitter::LAST + 4 * k, (spot[k as usize] - moved).to_bits()));
+        }
+        setup.push((ob + 4, vt.0));
+        setup.push((ob + 8, if g.one_in(8) { misc.0 } else { 0 }));
+        // with no node, the step reads the words at 0x60 (the image's)
+        let n = if g.one_in(3) { 0 } else { node.0 };
+        setup.push((ob + emitter::NODE, n));
+        setup.push((ob + emitter::FRAME, rows.0));
+        setup.push((ob + emitter::LOOK, g.bits()));
+        setup.push((ob + emitter::FLAGS, g.bits() & !if g.one_in(2) { 1 } else { 0 }));
+        setup.push((ob + emitter::HOLD, fl(&mut g, 0.0, -0.5, 0.5)));
+        setup.push((ob + emitter::WAIT, fl(&mut g, 0.0, -0.1, 0.1)));
+        setup.push((ob + emitter::RATE, fl(&mut g, 1.0, 0.0, 2.0)));
+        setup.push((ob + emitter::BIND, g.bits() % 3));
+        setup.push((ob + emitter::DEF, d));
+        setup.push((ob + emitter::CARRY, g.f(0.0, 1.0).to_bits()));
+        for at in [emitter::LIFE_BY_SPEED, emitter::SIZE_BY_SPEED, emitter::COUNT_BY_DISTANCE, emitter::COUNT_BY_SPEED] {
+            setup.push((ob + at, fl(&mut g, 0.0, -1.0, 3.0)));
+        }
+        setup.push((ob + emitter::SLOWEST, fl(&mut g, 0.0, 0.0, 10.0)));
+        setup.push((ob + emitter::FAST_ABOVE, fl(&mut g, 0.0, 0.0, 30.0)));
+        // the ring: an index anywhere on it, a stride of 0 to 9, a scale, its directions round `y`
+        setup.push((ob + ring::RING_AT, g.bits() % 120));
+        setup.push((ob + ring::RING_STRIDE, g.bits() % 10));
+        setup.push((ob + ring::RING_SCALE, fl(&mut g, 0.0, -2.0, 4.0)));
+        for k in 0..120u32 {
+            let a = g.f(0.0, 6.3);
+            for (lane, x) in [a.cos(), g.f(-0.2, 0.2), a.sin(), 0.0].into_iter().enumerate() {
+                setup.push((ob + ring::RING + 16 * k + 4 * lane as u32, x.to_bits()));
+            }
+        }
+        // the objects' vtable
+        for slot in [0xa4, 0xa8] {
+            setup.push((vt.0 + slot, EMIT_FAKE + slot));
+        }
+        // the node: its owner's frame id matching or not, current or under a parent
+        setup.push((node.0 + 8, if g.one_in(2) { 0 } else { misc.0 + 0x10 }));
+        setup.push((node.0 + 0x104, 0));
+        setup.push((misc.0 + 0x14, misc.0 + 0x20));
+        let id = g.bits() & 0xffff;
+        setup.push((misc.0 + 0x20 + 0xa4, if g.one_in(4) { id ^ 1 } else { id }));
+        setup.push((node.0 + 0xf0, if g.one_in(2) { parent.0 } else { 0 }));
+        setup.push((node.0 + 0x100, g.bits() & 0x81));
+        setup.push((parent.0 + 0xf0, 0));
+        setup.push((parent.0 + 0x100, g.bits() & 0x81));
+        // the globals: rand seeded already, or not (then from the clock's bytes)
+        setup.push((emitter::GAME, game.0));
+        setup.push((game.0 + 0x224, if g.one_in(10) { 0x0800 } else { 0 }));
+        setup.push((emitter::HELD, u32::from(g.one_in(3))));
+        setup.push((emitter::FRAME_ID & !3, id << (8 * (emitter::FRAME_ID & 2))));
+        setup.push((ring::SEEDED, if g.one_in(4) { 0 } else { g.bits() | 1 }));
+        // the definition
+        setup.push((d + emitter::POOL, p));
+        setup.push((d + 0x24, fl(&mut g, 0.0, -1.0, 3.0)));
+        setup.push((d + emitter::DEF_FLAGS, g.bits() & 0x0020_040f));
+        setup.push((d + 0x38, g.bits() % 64));
+        setup.push((d + 0x3c, g.bits() % 64));
+        setup.push((d + 0x44, g.bits() % 8));
+        setup.push((d + emitter::DEF_OPTIONS, g.bits() & 0xbf));
+        setup.push((d + emitter::DEF_MODE, g.bits() % 5));
+        for at in [0x60, 0x64, 0x68, 0x6c] {
+            setup.push((d + at, g.f(0.0, 0.2).to_bits()));
+        }
+        setup.push((d + 0xb8, g.f(0.05, 1.0).to_bits()));
+        for at in [0x110, 0x114] {
+            setup.push((d + at, fl(&mut g, 0.0, 0.0, 150.0)));
+        }
+        // the pool: room for up to eight, some taken
+        let room = g.bits() % 9;
+        setup.push((p + emitter::POOL_COUNT, g.bits() % (room + 1)));
+        setup.push((p + emitter::POOL_ROOM, room));
+        setup.push((p + emitter::POOL_ARRAY, array.0));
+        setup.push((p + 0x174, if g.one_in(2) { 0 } else { misc.0 + 0x30 }));
+        for k in 0..8 {
+            setup.push((array.0 + 4 * k, parts.0 + 0x60 * k)); // quad-aligned, as `sq` needs
+        }
+        let dt = F(g.near(0.0333, 0.0, 0.1));
+        setup.push((seed, g.bits()));
+        setup.push((seed + 4, g.bits()));
+        let lay = |ee: &mut Ee| {
+            for &(at, w) in &setup {
+                ee.set_u32(at, w);
+            }
+        };
+        lay(&mut ee);
+        log.borrow_mut().clear();
+        ee.set(28, GP);
+        ee.call(RING_STEP, &[u64::from(ob)], &[dt.0], 5_000_000);
+        let want_r = ee.r(2) as u32;
+        let want = std::mem::take(&mut *log.borrow_mut());
+        let want_ram = snap_regions(&ee, &[region]);
+        let want_globals = snap_regions(&ee, &globals);
+        lay(&mut ee);
+        let mut port = EmitOracle { ee: &mut ee, seed, log: vec![] };
+        let got_r = ring::step(&mut port, ob, dt);
+        let got = std::mem::take(&mut port.log);
+        assert_eq!(got, want, "case {case}: the calls");
+        assert_eq!(got_r, want_r, "case {case}: the answer");
+        let got_ram = snap_regions(&ee, &[region]);
+        let parted: Vec<String> = got_ram
+            .iter()
+            .zip(&want_ram)
+            .enumerate()
+            .filter(|(_, (a, b))| a != b)
+            .map(|(k, (a, b))| format!("{:#x}: {b:#010x} want, {a:#010x} got", region.0 + 4 * k as u32))
+            .collect();
+        assert!(parted.is_empty(), "case {case}: the scratch RAM parts:\n  {}", parted.join("\n  "));
+        assert_eq!(snap_regions(&ee, &globals), want_globals, "case {case}: the globals");
+        let spawned = ee.u32_at(p + emitter::POOL_COUNT) != setup.iter().rfind(|s| s.0 == p + emitter::POOL_COUNT).unwrap().1;
+        let mut kinds: Vec<&str> = want.iter().map(|c| c.0).filter(|&k| k != "rand").collect();
+        kinds.dedup();
+        let draws = want.iter().filter(|c| c.0 == "rand").count();
+        *seen.entry(format!("{}{draws} draws {kinds:?}", if spawned { "spawned " } else { "" })).or_default() += 1;
+    }
+    eprintln!("second emitter oracle: {seen:#?}");
+    for want in ["spawned", "notice", "light", "douse", "settle", "bind", "clock", "srand", "3 draws"] {
         assert!(seen.keys().any(|k| k.contains(want)), "no case made {want}: {seen:?}");
     }
 }

@@ -204,7 +204,7 @@ fn draw(m: &mut impl Emitters) -> F {
 }
 
 /// `v`'s `xyz` through the three rows at `rows` (`vmulax`, `vmadday`, `vmaddz`), `w` its own.
-fn in_frame(m: &mut impl Emitters, rows: u32, q: Quad) -> Quad {
+pub(super) fn in_frame(m: &mut impl Emitters, rows: u32, q: Quad) -> Quad {
     let r = [0, 0x10, 0x20].map(|k| v(quad(m, rows + k)));
     let x = v(q);
     xyz(Vf::madd(Vf::madd(r[0].mul(x.bc(Field::X)), r[1], x.bc(Field::Y)), r[2], x.bc(Field::Z)), q)
@@ -212,7 +212,7 @@ fn in_frame(m: &mut impl Emitters, rows: u32, q: Quad) -> Quad {
 
 /// `v` turned by the quaternion at `at` (`q v q*`, two `vopmula`/`vmadd*`/`vopmsub` rounds), `w`
 /// its own.
-fn turned(m: &mut impl Emitters, at: u32, x: Quad) -> Quad {
+pub(super) fn turned(m: &mut impl Emitters, at: u32, x: Quad) -> Quad {
     let q = v(quad(m, at));
     let c = v(x);
     let acc = Vf::madd(Vf::opmula(q, c), c, q.bc(Field::W));
