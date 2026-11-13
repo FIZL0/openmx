@@ -91,11 +91,12 @@ fn a_picked_quad_rides_and_leaves_the_bike_ride_alone() {
     let Some(said) = ride(320, &switched, &["--atv", "atv_Race250P"]) else { return };
     assert!(said.contains("atv: Race 250 P (atv_Race250P) off mxvatv_atv (switch from the pause)\n"), "\n{said}");
     assert_eq!(vehicles(&said), ["bike", "atv", "bike"], "\n{said}");
-    // The gas held over 250 ticks rides it well away, upright: the line said as it is left.
+    // The gas held over 250 ticks rides it well away: the line said as it is left. Since MD133's wreck
+    // test a hard landing on the way may wreck it (a front load past the `.phy`'s limit), so the
+    // wrecks are not asserted.
     let line = said.lines().find(|l| l.starts_with("atv: atv_Race250P ")).unwrap_or_else(|| panic!("no quad line:\n{said}"));
     let gone: f32 = line.split_whitespace().nth(2).and_then(|w| w.parse().ok()).unwrap_or_else(|| panic!("no distance in `{line}`"));
     assert!(gone > 100.0, "the quad went only {gone} ft on the gas: {line}");
-    assert!(!line.contains(", wrecked,") && line.ends_with("wrecked 0 times"), "{line}");
 
     // The sport chassis' twin builds and rides too.
     let Some(sport) = ride(320, &switched, &["--atv", "atv_s_Pro250A"]) else { return };

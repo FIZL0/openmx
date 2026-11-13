@@ -165,7 +165,40 @@ fn md123a_rigs(pre: &Ee, at: &image::Image, ride: &mut quad::Ride) {
     ride.tailed = Some(quad::Tailed { tail, ..quad::Tailed::default() });
     let class = pre.u32_at(game_sim::handling::wreck::STRUCK_CLASS);
     let max_time = f(game_sim::handling::wreck::MAX_WRECK_TIME);
-    ride.wrecked = Some(quad::Wrecked { max_time, class, category: class, ..quad::Wrecked::default() });
+    let limits = quad::Limits {
+        front: f(0x13e8),
+        back: f(0x13ec),
+        side: f(0x13f0),
+        racing_down: f(0x13f4),
+        freestyle_down: f(0x13f8),
+        ground_pitch_down: f(0x13fc),
+        ground_pitch_up: f(0x1400),
+        airborne_pitch_down: f(0x1404),
+        airborne_pitch_up: f(0x1408),
+        airborne_roll: f(0x140c),
+        no_hander: f(0x1410),
+        no_hander_max_roll: f(0x1414),
+        joust_height: f(0x1418),
+        crossup: f(0x1420),
+        crossup_time: f(0x1424),
+    };
+    let word = |o: u32| pre.u32_at(q + o);
+    ride.wrecked = Some(quad::Wrecked {
+        max_time,
+        class,
+        category: class,
+        limits,
+        edge: word(0x308) != 0,
+        wrecks: pre.u32_at(game_sim::handling::wreck::WRECKS_ON) != 0 && word(0xc1c) != 0,
+        small: word(0xbc0) == 0,
+        balance: word(0x152c) as i32,
+        wanted: word(0x1530) as i32,
+        blend: f(0x14e4),
+        trick_wrecked: word(0x14cc) != 0,
+        racing: word(0x146c) != 0,
+        crossup: f(0x141c),
+        ..quad::Wrecked::default()
+    });
 }
 
 /// The image-seeded quad put down at `start` (two feet over the ground) facing `yaw` (radians from
@@ -693,7 +726,7 @@ fn the_quad_from_its_files_wrecks_on_a_free09_prop_and_is_put_back() {
         eprintln!("MD123 files prop {prop} {centre:?} from {start:?} yaw {yaw}");
         let (mut wrecked_at, mut put_at, mut touched) = (None, None, 0usize);
         let mut handed = std::collections::BTreeSet::new();
-        let mut back_at = Vf::ZERO;
+        let (mut back_at, mut far) = (Vf::ZERO, 0.0f32);
         for k in 0..FRAMES {
             ride.rest.clear();
             let stick = if put_at.is_some() { (F::ONE, F::ZERO) } else { (F::ZERO, F::ZERO) };
@@ -713,12 +746,16 @@ fn the_quad_from_its_files_wrecks_on_a_free09_prop_and_is_put_back() {
                 put_at = Some(k);
                 back_at = p;
             }
+            if put_at.is_some() {
+                // The farthest it gets: on the full stick it rides a circle back toward the spot.
+                let d = p.sub(back_at);
+                far = far.max((d.x() * d.x() + d.z() * d.z()).sqrt());
+            }
             if put_at.is_some_and(|f| k > f + RIDE_ON) {
                 break;
             }
         }
-        let gone = ride.body.position.sub(back_at);
-        let gone = (gone.x() * gone.x() + gone.z() * gone.z()).sqrt();
+        let gone = far;
         eprintln!(
             "MD123 files free09: wreck {wrecked_at:?}, put back {put_at:?}, then {gone} ft on; the record on a prop {touched}; handed on {handed:?}"
         );
@@ -728,5 +765,131 @@ fn the_quad_from_its_files_wrecks_on_a_free09_prop_and_is_put_back() {
         let put = put_at.expect("the wrecked quad was never put back");
         assert!(put > k, "put back before the wreck");
         assert!(gone > 10.0, "the quad did not ride on after the put-back: {gone} ft");
+    });
+}
+
+/// MD133's drops: how high over free09's ground at [`SPOT`] the quad made from its files is let go,
+/// and how many frames it gets to wreck in.
+const DROP: f32 = 300.0;
+const DROP_FRAMES: usize = 300;
+
+/// The quad made from its files and rigged from them, [`DROP`] over free09's ground at [`SPOT`] facing
+/// `+z`, turned `pitch` degrees about its own side axis (positive: the nose down), let go with the
+/// controls off: the first wreck it is entered for, the frame, and the ride.
+fn dropped(world: &mut Place<'_>, files: &(Ini, quad::Model), cols: &(game_sim::track::Rays, game_sim::track::Rays), pitch: f32) -> Option<(usize, u8, quad::Ride)> {
+    let (floor, _) = world.ground(Vf::new(SPOT.0, 1.0e4, SPOT.1, 1.0));
+    let at = Vf::new(SPOT.0, floor.y() + DROP, SPOT.1, 1.0);
+    let area = world.area().map(|a| (Vf::new(0.0, 0.0, 0.0, 1.0), Vf::new(a.width.0, 0.0, a.depth.0, 1.0)));
+    let (mut ride, load) = from_files(files, at, Vf::new(0.0, 0.0, 1.0, 1.0), area);
+    ride.rig(&load, &cols.0, &cols.1);
+    let (s, c) = (pitch.to_radians() / 2.0).sin_cos();
+    let q = ride.body.quat;
+    // q · (the turn about x), Hamilton's product.
+    let turned = Vf::new(q.w() * s + q.x() * c, q.y() * c + q.z() * s, q.z() * c - q.y() * s, q.w() * c - q.x() * s);
+    (ride.body.quat, ride.body.last_quat) = (turned, turned);
+    let segments = quad::trigger_segments(&load.tires, true).expect("the trigger probe's segments");
+    let dt = F::from_bits(0x3d08_850a);
+    for k in 0..DROP_FRAMES {
+        ride.rest.clear();
+        ride.step(&Controls::default(), dt, world, segments);
+        assert!(ride.body.position.0.iter().all(|v| v.is_finite()), "frame {k}: the body is at {:?}", ride.body.position);
+        if let Some(why) = ride.wreck() {
+            eprintln!("MD133 drop pitch {pitch}: frame {k} wreck {why} at {:?}, velocity {:?}", ride.body.position, ride.body.velocity);
+            return Some((k, why, ride));
+        }
+    }
+    None
+}
+
+/// MD133: dropped level from [`DROP`] ft onto free09, the quad made from its files lands too hard —
+/// the vertical load past `RacingDownWreckSpeedLimit` — and wrecks flat (5) on the frame it lands.
+#[test]
+fn the_quad_dropped_level_onto_free09_wrecks_flat() {
+    let (Some(files), Some(cols)) = (quad_files(), quad_cols()) else { return };
+    let mut disc = match Disc::open_configured() {
+        Ok(d) => d,
+        Err(why) => {
+            skip(&why);
+            return;
+        }
+    };
+    in_free09(&mut disc, |world| {
+        let (k, why, ride) = dropped(world, &files, &cols, 0.0).expect("the dropped quad did not wreck");
+        assert_eq!(why, 5, "the hard landing's wreck is flat (5), frame {k}");
+        assert!(ride.q.on_ground, "the flat wreck came before the landing, frame {k}");
+        assert_eq!(ride.wrecked.as_ref().unwrap().reason, 5);
+    });
+}
+
+/// MD133: dropped nose down (88°, past `AirbornePitchDownWreckAngle`), the quad made from its files
+/// nose-dives (8) in the air, before it lands.
+#[test]
+fn the_quad_dropped_nose_down_over_free09_nose_dives() {
+    let (Some(files), Some(cols)) = (quad_files(), quad_cols()) else { return };
+    let mut disc = match Disc::open_configured() {
+        Ok(d) => d,
+        Err(why) => {
+            skip(&why);
+            return;
+        }
+    };
+    in_free09(&mut disc, |world| {
+        let (k, why, ride) = dropped(world, &files, &cols, 88.0).expect("the dropped quad did not wreck");
+        assert_eq!(why, 8, "the nose-down drop's wreck is the nose-dive (8), frame {k}");
+        assert!(!ride.q.on_ground, "the nose-dive came after the landing, frame {k}");
+    });
+}
+
+/// How far in from free09's west edge the edge run starts, and its frames.
+const EDGE_RUN: f32 = 200.0;
+const EDGE_FRAMES: usize = 600;
+
+/// MD133: ridden on the gas west at free09's edge, the quad made from its files is out of bounds (13)
+/// once within 150 ft of it, thrown back toward the map's middle (its velocity turned east and up),
+/// and stays down for the cannonball's window and `MaxWreckTime` before it is put back on the map.
+#[test]
+fn the_quad_ridden_off_free09s_edge_is_out_of_bounds() {
+    let (Some(files), Some(cols)) = (quad_files(), quad_cols()) else { return };
+    let mut disc = match Disc::open_configured() {
+        Ok(d) => d,
+        Err(why) => {
+            skip(&why);
+            return;
+        }
+    };
+    let dt = F::from_bits(0x3d08_850a);
+    in_free09(&mut disc, |world| {
+        let start = (EDGE_RUN, SPOT.1);
+        let (mut ride, load) = files_on(&files, world, start, -std::f32::consts::FRAC_PI_2);
+        ride.rig(&load, &cols.0, &cols.1);
+        let segments = quad::trigger_segments(&load.tires, true).expect("the trigger probe's segments");
+        let (mut wrecked_at, mut put_at) = (None, None);
+        for k in 0..EDGE_FRAMES {
+            ride.rest.clear();
+            let x0 = ride.body.position.x();
+            ride.step(&Controls { gas: F::ONE, ..Controls::default() }, dt, world, segments);
+            let (p, v) = (ride.body.position, ride.body.velocity);
+            assert!(p.0.iter().all(|f| f.is_finite()), "frame {k}: the body is at {p:?}");
+            if let Some(why) = ride.wreck() {
+                if wrecked_at.is_none() {
+                    eprintln!("MD133 edge frame {k}: wreck {why} at {p:?} (from x {x0}), thrown at {v:?}");
+                    assert_eq!(why, 13, "the edge's wreck is out of bounds (13)");
+                    assert!(p.x() < 150.0 && 150.0 <= x0, "out of bounds at x {}, not the frame it crossed the edge's 150 ft (from {x0})", p.x());
+                    assert!(v.x() > 0.0 && v.y() > 0.0, "the throw is not back in and up: {v:?}");
+                    wrecked_at = Some(k);
+                }
+            }
+            if ride.rest.iter().any(|c| matches!(c, Call::VehiclePutBack { .. })) {
+                eprintln!("MD133 edge frame {k}: put back to {p:?}");
+                put_at = Some(k);
+                assert!(p.x() > 150.0, "put back out of bounds at {p:?}");
+                break;
+            }
+        }
+        let k = wrecked_at.expect("the run off the edge did not wreck the quad");
+        let put = put_at.expect("the thrown quad was never put back");
+        let (window, max) = (2.5 / dt.0, load.max_wreck_time.0 / dt.0);
+        assert!((put - k) as f32 > window + max, "put back {} frames after the throw, inside the window and MaxWreckTime", put - k);
+        assert!(!ride.down(), "put back but still down");
     });
 }

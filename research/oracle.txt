@@ -11994,3 +11994,14 @@ camera_flash_tick           boot 0x002f95c0 (object, f12 dt): ring +0x48 (times,
 #                                           ticked once the race's outro runs (S13d: frame ~2775).
 #   World +0x538.. from the .toy's first [CameraFlash] (sx01: 2.0, 0x3e999999, 0x3ecccccc, 0x3e999999,
 #   0x3e99999a, 0x3c23d70a; the second section, floor 0.025, unread). camera_flashes.rs levels().
+# MD133 — the quad's whole wreck test on MX Unleashed's worlds (quad::Ride::wreck_on: throw, enter, clock,
+# unwreck, keep_back). Journal: research/journal/2026-11-13-md133-atv-on-mxu/.
+atv_out_of_bounds           atv 0x004a4f20 (vt +0x16c, the bike in a0): body position against the world's box
+#                                           with margin 150 (x < 150 || w-150 < x || z < 150 || d-150 < z;
+#                                           the terrain test 0x0031d410 too). Out: target (0.5 w, pos.y,
+#                                           0.5 d, 1) - pos, unit by mula/madda/madd + rsqrt (len2 == 0:
+#                                           the rodata quad 0x00525240 = (0,0,0,1)); root = 2 * sqrt(g
+#                                           0x416e8262); speed = min(0x45019999, 0.5 w) / root; velocity
+#                                           xyz = dir * speed, y += 240/root + 0x4180cccd * root (adda/
+#                                           madd); body drag *= 0.5 (0x00526598); rates = (0.5, 0x3ecccccd,
+#                                           0x3f333333) * three rand units, w 1. Returns 1 thrown.

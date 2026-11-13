@@ -773,6 +773,50 @@ const BACK_OVER: f32 = 10.0;
 const BACK_OVER_REACH: f32 = 1000.0;
 const DOWN: Vf = Vf::new(0.0, -1.0, 0.0, 1.0);
 
+/// **The put-back record's update on a record of the caller's own** (MD133): [`Ride::keep_back`],
+/// step for step, on `back` and the query state `cache` (what [`Ride::back`] and
+/// [`Ride::back_search`] are to the bike), for another machine on an MX Unleashed world — the quad
+/// ([`crate::quad::Ride`]). `true` when it moved.
+pub fn keep_back_on(back: &mut Back, cache: &mut Option<Box<crate::back_search::Cache>>, at: Vf, heading: Vf, world: &mut dyn World,
+                    curve: &CurveTable) -> bool {
+    let Some(ground) = open_sky(at, world, cache) else {
+        return false;
+    };
+    let spot = Vf::new(at.x(), ground.0, at.z(), at.w());
+    if !world.keeps(spot) {
+        return false;
+    }
+    let Some((spot, normal)) = clear(spot, heading, world, curve, cache) else {
+        return false;
+    };
+    if !(F(normal.y()) > F(BACK_LEVEL)) {
+        return false;
+    }
+    *back = Back { at: add_xyz(spot, scale(back.up, F(BACK_RAISE))), facing: flat_unit(heading), up: normal };
+    true
+}
+
+/// **The put-back record's update in a cannonball, on a record of the caller's own** (MD133):
+/// [`Ride::keep_back_thrown`], step for step, on `back` and `cache` ([`keep_back_on`]'s).
+pub fn keep_back_thrown_on(back: &mut Back, cache: &mut Option<Box<crate::back_search::Cache>>, over: Vf, at: Vf, forward: Vf,
+                           world: &mut dyn World, curve: &CurveTable) -> bool {
+    if open_sky(over, world, cache).is_none() {
+        return false;
+    }
+    if !world.keeps(at) {
+        return false;
+    }
+    let facing = flat_unit(forward);
+    let spot = Vf::new(at.x(), at.y(), at.z(), 0.0);
+    let (spot, normal, clear) = clearance(spot, facing, world, curve, cache);
+    back.up = normal;
+    if clear {
+        back.at = spot;
+        back.facing = facing;
+    }
+    clear
+}
+
 // --- the bike ---------------------------------------------------------------------------------------
 
 /// The whole bike: every word of state one ride carries.

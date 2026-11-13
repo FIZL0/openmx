@@ -3912,7 +3912,7 @@ impl<R: Moto + Default> Ride<R> {
         *b = world_bounds(world, b.floor);
         self.record_on(dt, world);
         {
-            let cell = std::cell::RefCell::new(&mut *world);
+            let cell: std::cell::RefCell<&mut dyn crate::world::World> = std::cell::RefCell::new(&mut *world);
             let ground = |at: Vf, record: &mut u8| world_ground(&mut **cell.borrow_mut(), at, record);
             self.frame(dt, ground, OnWorld { world: &cell, segments });
         }
@@ -3923,7 +3923,7 @@ impl<R: Moto + Default> Ride<R> {
             }
         }
         self.tail_on(dt);
-        self.wreck_on(dt);
+        self.wreck_on(dt, world);
     }
 
     /// One tick as the shell steps it: the controls laid ([`Ride::controls`]), then [`Ride::frame_on`].
@@ -4198,9 +4198,17 @@ impl<R: Moto> Moto for PutOn<'_, R> {
 /// **The quad's wreck on an MX Unleashed world** (MD123a), as [`Ride`] keeps it: the reason it is
 /// down for (`0` riding), the clock it is down for, `MaxWreckTime`, the struck class the reason-15
 /// test masks a struck object's category with and the category an MX Unleashed prop is given, and the
-/// spot it is put back to (the last place it stood on all four wheels, and its orientation there)
-/// with where its scene node was then.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+/// spot it is put back to (the body there, and its orientation) with where its scene node is there.
+///
+/// MD133's: whether the clock counts (`+0xc8c`, armed once the quad settles past the window), the
+/// map edge armed (`+0x308`) and wrecks on (the game's switch and `+0xc1c` both), the size word
+/// being 0 (`small`, `+0xbc0`), the clauses' limits ([`Limits`]), the rider's words the clauses read
+/// that the headless quad has no rider to write (the balance stunt `+0x152c`, the pose wanted
+/// `+0x1530`, its blend `+0x14e4`, the trick wrecked `+0x14cc`, racing `+0x146c`, the landing's
+/// crossup `+0x141c`), the generator the throw and the entry draw from, and the put-back record
+/// ([`crate::ride::Back`], kept as MX Unleashed keeps it; `None` until it first is) with its query's
+/// state. [`Wrecked::spot`] and [`Wrecked::node`] are the record's spot.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Wrecked {
     pub reason: u8,
     pub clock: F,
@@ -4209,6 +4217,104 @@ pub struct Wrecked {
     pub category: u32,
     pub spot: Option<(Vf, Vf)>,
     pub node: Vf,
+    pub counting: bool,
+    pub edge: bool,
+    pub wrecks: bool,
+    pub small: bool,
+    pub limits: Limits,
+    pub balance: i32,
+    pub wanted: i32,
+    pub blend: F,
+    pub trick_wrecked: bool,
+    pub racing: bool,
+    pub crossup: F,
+    pub rng: crate::rng::Rng,
+    pub back: Option<crate::ride::Back>,
+    pub search: BackSearch,
+}
+
+/// **The wreck clauses' limits** (MD133, the quad's `+0x13e8..+0x1424` but `+0x141c`): the `.phy`'s
+/// wreck keys as [`crate::air::Params`] names them. [`Bike::air_keys`] holds only the four the air
+/// steps read (front, back, side, the airborne pitch both ways).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Limits {
+    pub front: F,
+    pub back: F,
+    pub side: F,
+    pub racing_down: F,
+    pub freestyle_down: F,
+    pub ground_pitch_down: F,
+    pub ground_pitch_up: F,
+    pub airborne_pitch_down: F,
+    pub airborne_pitch_up: F,
+    pub airborne_roll: F,
+    pub no_hander: F,
+    pub no_hander_max_roll: F,
+    pub joust_height: F,
+    pub crossup: F,
+    pub crossup_time: F,
+}
+
+impl Limits {
+    /// The limits out of a whole set of keys (the `.phy`'s, [`Load::air`]).
+    pub fn of(p: &crate::air::Params) -> Limits {
+        Limits {
+            front: p.front_wreck_speed_limit,
+            back: p.back_wreck_speed_limit,
+            side: p.side_wreck_speed_limit,
+            racing_down: p.racing_down_wreck_speed_limit,
+            freestyle_down: p.freestyle_down_wreck_speed_limit,
+            ground_pitch_down: p.ground_pitch_down_wreck_angle,
+            ground_pitch_up: p.ground_pitch_up_wreck_angle,
+            airborne_pitch_down: p.airborne_pitch_down_wreck_angle,
+            airborne_pitch_up: p.airborne_pitch_up_wreck_angle,
+            airborne_roll: p.airborne_roll_wreck_angle,
+            no_hander: p.no_hander_wreck_speed_limit,
+            no_hander_max_roll: p.no_hander_max_roll_angle,
+            joust_height: p.joust_wreck_height,
+            crossup: p.crossup_wreck,
+            crossup_time: p.crossup_wreck_time,
+        }
+    }
+
+    /// `base` with its wreck keys these.
+    pub fn keys(&self, base: &crate::air::Params) -> crate::air::Params {
+        crate::air::Params {
+            front_wreck_speed_limit: self.front,
+            back_wreck_speed_limit: self.back,
+            side_wreck_speed_limit: self.side,
+            racing_down_wreck_speed_limit: self.racing_down,
+            freestyle_down_wreck_speed_limit: self.freestyle_down,
+            ground_pitch_down_wreck_angle: self.ground_pitch_down,
+            ground_pitch_up_wreck_angle: self.ground_pitch_up,
+            airborne_pitch_down_wreck_angle: self.airborne_pitch_down,
+            airborne_pitch_up_wreck_angle: self.airborne_pitch_up,
+            airborne_roll_wreck_angle: self.airborne_roll,
+            no_hander_wreck_speed_limit: self.no_hander,
+            no_hander_max_roll_angle: self.no_hander_max_roll,
+            joust_wreck_height: self.joust_height,
+            crossup_wreck: self.crossup,
+            crossup_wreck_time: self.crossup_time,
+            ..*base
+        }
+    }
+}
+
+/// The put-back query's state ([`crate::back_search::Cache`]): a cache, not the ride's state, so any
+/// two are equal and it prints as its name.
+#[derive(Clone, Default)]
+pub struct BackSearch(pub Option<Box<crate::back_search::Cache>>);
+
+impl PartialEq for BackSearch {
+    fn eq(&self, _: &BackSearch) -> bool {
+        true
+    }
+}
+
+impl std::fmt::Debug for BackSearch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BackSearch")
+    }
 }
 
 impl<R: Moto + Default> Ride<R> {
@@ -4268,34 +4374,200 @@ impl<R: Moto + Default> Ride<R> {
         self.body.set_view(&view);
     }
 
-    /// **The wreck, its clock and the put-back** (MD123a), after the tail: riding, reason 15 asked
-    /// as the backflip asks it ([`crate::handling::step::flip_wreck_steep`]: the record touching a
-    /// struck-class object, and airborne or the loads past their limits); a wreck is told to `rest`
-    /// ([`Call::Wreck`]), swaps the wreck rays in and starts the clock at `MaxWreckTime`. Down, the
-    /// clock counts and, run out, swaps the riding rays back and puts the quad back ([`put_back`],
-    /// place and keep set) at the spot kept. Riding on all four wheels keeps the spot.
-    pub fn wreck_on(&mut self, dt: F) {
-        let Some(w) = self.wrecked.as_mut() else { return };
-        let mut view = self.body.view();
-        if w.reason == 0 {
-            let loads = crate::air::Loads { side: F(self.q.attitude.x()), fore_aft: F(self.q.attitude.z()), ..Default::default() };
-            if crate::handling::step::flip_wreck_steep(&self.bike.air_keys, self.bike.struck_class, self.q.airborne, &loads) {
-                const STRUCK: u8 = crate::air::Wreck::Struck as u8;
-                (w.reason, w.clock) = (STRUCK, w.max_time);
-                self.rest.call(Call::Wreck(STRUCK), &mut self.q, &mut view);
-                self.body.set_view(&view);
-                self.swap(true);
-            } else if self.q.all_down {
-                (w.spot, w.node) = (Some((view.position, view.orientation)), self.bike.parts.scene.nodes[0].world[3]);
+    /// **The wreck test, its clock and the put-back** (MD133: [`crate::handling::wreck::wreck_test`]
+    /// as the quad runs it, on [`Wrecked`]), after the tail. A quad not driven (its vehicle state's
+    /// mode not [`DRIVEN`]) and riding is down for no control (14) with the clock counting from
+    /// `MaxWreckTime`. A driven one, with wrecks on: the map edge armed and not already thrown, off
+    /// the world's edge ([`Ride::throw`]) is out of bounds (13); otherwise, riding, the clauses and the
+    /// hits off the record's contacts ([`Ride::wreck_entries`]), each entered in turn
+    /// ([`Ride::enter`]). Then the clock ([`Ride::clock`]), whose run out is the unwreck
+    /// ([`Ride::unwreck`]); last, the put-back record kept ([`Ride::keep_back`]).
+    pub fn wreck_on(&mut self, dt: F, world: &mut dyn crate::world::World) {
+        let Some(w) = self.wrecked.as_ref() else { return };
+        let prev = w.reason;
+        let driven = self.tailed.as_ref().map_or(true, |t| t.tail.vehicle_state == Some(DRIVEN));
+        if !driven {
+            if prev == 0 {
+                self.enter(NO_CONTROL);
+                let w = self.wrecked.as_mut().expect("the wreck");
+                (w.clock, w.counting) = (w.max_time, true);
             }
+        } else {
+            if w.wrecks {
+                let mut free = true;
+                if w.edge && prev != OUT_OF_BOUNDS && self.throw(&*world) {
+                    self.enter(OUT_OF_BOUNDS);
+                    free = false;
+                }
+                if free && !self.down() {
+                    let (landed, hit) = self.wreck_entries();
+                    for r in [landed, hit].into_iter().flatten() {
+                        self.enter(r as u8);
+                    }
+                }
+            }
+            self.clock(dt);
+        }
+        self.keep_back(world);
+    }
+
+    /// **The clauses and the hits** ([`crate::handling::step::wreck_entries`], the original's
+    /// switch on) on the quad's fields: the keys [`Bike::air_keys`] with the wreck limits
+    /// [`Wrecked::limits`]; the air state's ground, airborne and hang words the quad's, the backflip's
+    /// torque the bike's; the pitch and roll the quad's angles, the velocity the body's; the up the
+    /// quad's, touching the record's, in a trick the rider's stunt id at most 40; the loads the
+    /// quad's (`+0x1250` side, `+0x1254` vertical, `+0x1258` fore and aft) with the rider's words
+    /// [`Wrecked`] holds; the size word's reach, the body's height, and each of the record's contacts
+    /// (mirrored when its kind is not 0, its reach the ray's end's height) scenery: nothing on an MX
+    /// Unleashed world is another actor. A joust's throw goes to the bike's air state.
+    pub fn wreck_entries(&mut self) -> (Option<crate::air::Wreck>, Option<crate::air::Wreck>) {
+        let Some(w) = self.wrecked.as_ref() else { return (None, None) };
+        let (q, b) = (&self.q, &self.bike);
+        let keys = w.limits.keys(&b.air_keys);
+        let mut air = crate::air::Air {
+            on_ground: q.on_ground,
+            airborne: q.airborne,
+            was_airborne: q.was_airborne,
+            hang_time: q.hang_time,
+            ..b.air
+        };
+        let chassis = crate::air::Chassis {
+            speed: q.speed_len,
+            pitch: F(q.euler.x()),
+            roll: F(q.euler.z()),
+            vel: self.body.velocity,
+            ..Default::default()
+        };
+        let step = crate::air::Step { up: q.up, touching: b.touching, stunt: b.rider_stunt < TRICKS, ..Default::default() };
+        let loads = crate::air::Loads {
+            side: F(q.attitude.x()),
+            vertical: F(q.attitude.y()),
+            fore_aft: F(q.attitude.z()),
+            landing_crossup: w.crossup,
+            no_hander: b.rider_stunt == w.balance,
+            racing: w.racing,
+            pose: b.rider_stunt,
+            pose_wanted: w.wanted,
+            pose_blend: w.blend,
+            trick_wrecked: w.trick_wrecked,
+        };
+        let inp = crate::handling::step::WreckIn { spin_applied: b.spin_applied, struck_class: b.struck_class };
+        let contacts: Vec<crate::air::Contact> = self.recorded.as_ref().map_or_else(Vec::new, |r| {
+            r.record
+                .contacts
+                .iter()
+                .map(|c| crate::air::Contact { mirrored: c.kind != 0, reach: F(c.to.y()), other: crate::air::Other::Scenery })
+                .collect()
+        });
+        let height = F(self.body.position.y());
+        let out = crate::handling::step::wreck_entries(&keys, &mut air, &chassis, &step, &loads, &inp, true, w.small, height, &contacts);
+        self.bike.air.wreck_impact = air.wreck_impact;
+        out
+    }
+
+    /// **Off the world's edge, and the throw** (the quad's out-of-bounds test): the body within
+    /// [`EDGE_MARGIN`] of the world's box on an axis that does not wrap, or past it (a `NaN` is
+    /// inside), or off one of its terrains ([`crate::world::World::off_world`], MD8). Off, the quad
+    /// is thrown back in: toward the box's middle at the body's height, unit length (none for no
+    /// distance), at [`THROW_REACH`] or half the width, the less, over `2·√g` ([`THROW_G`]), lifted
+    /// by [`THROW_OVER`] over it plus [`THROW_LIFT`] times it; the air drag halved
+    /// ([`THROW_SCALE`]); spun by three draws ([`THROW_SPIN`], `w` 1). `true` when thrown.
+    pub fn throw(&mut self, world: &dyn crate::world::World) -> bool {
+        let Some(area) = world.area() else { return false };
+        let Some(w) = self.wrecked.as_mut() else { return false };
+        let at = self.body.position;
+        let wrap = world.wrap();
+        let (x, z) = (F(at.x()), F(at.z()));
+        let off_x = !wrap[0] && (x < EDGE_MARGIN || area.width - EDGE_MARGIN < x);
+        let off_z = !wrap[1] && (z < EDGE_MARGIN || area.depth - EDGE_MARGIN < z);
+        if !(off_x || off_z || world.off_world(at, EDGE_MARGIN)) {
+            return false;
+        }
+        let half = F(0.5);
+        let (mid_x, mid_z) = (half * area.width, half * area.depth);
+        let target = Vf::new(mid_x.0, at.y(), mid_z.0, 1.0);
+        let d = target.merge(Dest::XYZ, target.sub(at));
+        let (dx, dy, dz) = (F(d.x()), F(d.y()), F(d.z()));
+        let len2 = Acc::mula(dx, dx).madda(dy, dy).madd(dz, dz);
+        let dir = if F::ZERO == len2 {
+            ORIGIN
+        } else {
+            let k = F::ONE.rsqrt(len2);
+            Vf::new((dx * k).0, (dy * k).0, (dz * k).0, d.w())
+        };
+        let root = F(2.0) * THROW_G.sqrt();
+        let speed = THROW_REACH.min(mid_x) / root;
+        let over = THROW_OVER / root;
+        let lift = Acc::adda(F::ZERO, over).madd(THROW_LIFT, root);
+        let v = dir.merge(Dest::XYZ, dir.mul(Vf::splat(speed.0)));
+        self.body.velocity = Vf::new(v.x(), (F(v.y()) + lift).0, v.z(), v.w());
+        let drag = &mut self.bike.clutch_keys.drag;
+        *drag = *drag * THROW_SCALE;
+        let s = THROW_SPIN;
+        let sx = s[0] * w.rng.unit();
+        let sy = s[1] * w.rng.unit();
+        let sz = s[2] * w.rng.unit();
+        self.body.rates = Vf::new(sx.0, sy.0, sz.0, 1.0);
+        true
+    }
+
+    /// **The wreck's entry**, reason `r`: for out of bounds the body spun by three more draws (`w`
+    /// kept); the reason told to `rest` ([`Call::Wreck`]); the wreck rays swapped in
+    /// ([`Ride::swap`]); the reason set, the clock at 0 and not counting. The rider's settle and
+    /// stance, the riding part's off, the rumble, the body's damping (the quad's size word hands none)
+    /// and the event are not the headless quad's.
+    pub fn enter(&mut self, r: u8) {
+        let Some(w) = self.wrecked.as_mut() else { return };
+        if r == OUT_OF_BOUNDS {
+            let x = w.rng.unit();
+            let y = w.rng.unit();
+            let z = w.rng.unit();
+            self.body.rates = Vf::new(x.0, y.0, z.0, self.body.rates.w());
+        }
+        let mut view = self.body.view();
+        self.rest.call(Call::Wreck(r), &mut self.q, &mut view);
+        self.body.set_view(&view);
+        self.swap(true);
+        let w = self.wrecked.as_mut().expect("the wreck");
+        (w.reason, w.clock, w.counting) = (r, F::ZERO, false);
+    }
+
+    /// **The wreck clock**, with a reason set: `dt` on; not yet counting and settled (the quad on the
+    /// ground or its record touching, for the rider's "a ragdoll part touches" flag the original
+    /// reads: the headless quad has no rider), past the window
+    /// ([`crate::state::SETTLE_CANNONBALL`] for out of bounds, else [`crate::state::SETTLE`]) the
+    /// count arms and the clock goes to 0; counting and past `MaxWreckTime`, the unwreck.
+    pub fn clock(&mut self, dt: F) {
+        let settles = self.q.on_ground || self.recorded.as_ref().is_some_and(|r| r.record.touching);
+        let Some(w) = self.wrecked.as_mut() else { return };
+        if w.reason == 0 {
             return;
         }
-        w.clock = F(fpu::sub(w.clock.0, dt.0));
-        if w.clock > F::ZERO {
-            return;
+        w.clock = F(fpu::add(w.clock.0, dt.0));
+        if !w.counting && settles {
+            let window = if w.reason == OUT_OF_BOUNDS { crate::state::SETTLE_CANNONBALL } else { crate::state::SETTLE };
+            if !(w.clock <= window) {
+                (w.counting, w.clock) = (true, F::ZERO);
+            }
         }
-        (w.reason, w.clock) = (0, F::ZERO);
-        let (spot, node) = (w.spot, w.node);
+        if w.counting && !(w.clock <= w.max_time) {
+            self.unwreck();
+        }
+    }
+
+    /// **The unwreck**: the loads and the body's correction peak back to the origin, the rider's
+    /// stunt and the stunt id none, the backflip's torque out; the riding rays swapped back, the quad
+    /// put back ([`put_back`], place and keep set) at the record's spot ([`Wrecked::spot`]), the
+    /// engine reset (the revs to idle, the road's to 0, in first); out of bounds, the air drag the
+    /// throw halved divided back; the reason and the clock 0, the landing's crossup the put-back's
+    /// half. The body's last pose and the parts' and scene node's follow the put-back.
+    pub fn unwreck(&mut self) {
+        let Some(w) = self.wrecked.as_mut() else { return };
+        let (reason, spot, node) = (w.reason, w.spot, w.node);
+        self.q.attitude = ORIGIN;
+        self.body.correction_peak = ORIGIN;
+        (self.bike.rider_stunt, self.bike.stunt_id) = (NO_STUNT, NO_STUNT);
+        self.bike.air.flip_torque_applied = false;
         self.swap(false);
         let mut view = self.body.view();
         let mut own = PutBack::default();
@@ -4304,11 +4576,57 @@ impl<R: Moto + Default> Ride<R> {
             None => &mut own,
         };
         put_back(pb, &mut self.q, &mut view, true, true, &mut PutOn { spot, rest: &mut self.rest });
+        let crossup = pb.settle;
         self.body.set_view(&view);
+        let e = &mut self.bike.engine;
+        (e.rpm, e.road_rpm) = (e.min_rpm, F::ZERO);
+        crate::r#move::set_gear(e, 1);
+        if reason == OUT_OF_BOUNDS {
+            let drag = &mut self.bike.clutch_keys.drag;
+            *drag = *drag / THROW_SCALE;
+        }
+        let w = self.wrecked.as_mut().expect("the wreck");
+        (w.reason, w.clock, w.crossup) = (0, F::ZERO, crossup);
         (self.body.last_position, self.body.last_quat) = (self.body.position, self.body.quat);
         self.bike.parts.last_position = self.body.position;
         if let Some((_, turn)) = spot {
             self.bike.parts.scene.place(0, turn, node);
+        }
+    }
+
+    /// **The put-back record kept** (S66's, [`crate::ride::keep_back_on`] on [`Wrecked::back`]),
+    /// once a frame after the wreck: riding, under the probe [`BACK_PROBE`] up the scene node's frame
+    /// at the body's height; down, under the body; thrown, only while the record touches, on the
+    /// node ([`crate::ride::keep_back_thrown_on`]); the heading the node's forward row each time.
+    /// The spot ([`Wrecked::spot`], [`Wrecked::node`]) is the record's: the node at its point, turned
+    /// to its facing and up ([`crate::math::basis`]), the body a foot up the up row as the spawn
+    /// stands it.
+    pub fn keep_back(&mut self, world: &mut dyn crate::world::World) {
+        let touching = self.recorded.as_ref().is_some_and(|r| r.record.touching);
+        let Some(w) = self.wrecked.as_mut() else { return };
+        let scene = &self.bike.parts.scene;
+        let frame = scene.nodes[0].world;
+        let probe = crate::math::transform_point(&crate::math::Mat4(frame), BACK_PROBE);
+        let mut back = w.back.unwrap_or_default();
+        let curve = back_curve();
+        let at = self.body.position;
+        let kept = match w.reason {
+            0 => {
+                let probe = Vf::new(probe.x(), at.y(), probe.z(), probe.w());
+                crate::ride::keep_back_on(&mut back, &mut w.search.0, probe, frame[2], world, curve)
+            }
+            OUT_OF_BOUNDS => touching && crate::ride::keep_back_thrown_on(&mut back, &mut w.search.0, at, frame[3], frame[2], world, curve),
+            _ => crate::ride::keep_back_on(&mut back, &mut w.search.0, at, frame[2], world, curve),
+        };
+        // The thrown branch writes the up whether or not the spot moved.
+        if kept || (w.back.is_some() && w.reason == OUT_OF_BOUNDS && touching) {
+            w.back = Some(back);
+        }
+        if let Some(b) = w.back {
+            let m = crate::math::basis(b.at, b.facing, b.up, true, false);
+            let node = Vf::new(b.at.x(), b.at.y(), b.at.z(), 1.0);
+            let body = node.merge(Dest::XYZ, node.add(m.0[1]));
+            (w.spot, w.node) = (Some((body, crate::math::mat4_to_quat(&m))), node);
         }
     }
 
@@ -4373,6 +4691,39 @@ impl<R: Moto + Default> Ride<R> {
 const SPAWN_MAX_SPEED: f32 = 300.0;
 const NO_STUNT: i32 = 0xff;
 const SPIN_STUNTS: (u32, u32) = (44, 45);
+
+/// The wreck test's words (MD133): the vehicle state's mode a driven quad has (the spawn's
+/// [`SPAWN_VEHICLE_MODE`]); no control (14) and out of bounds (13); a rider's stunt id under
+/// [`TRICKS`] is a trick in play.
+const DRIVEN: u32 = SPAWN_VEHICLE_MODE;
+/// The wreck test's rider words as the spawned quad holds them (C28's spawn image, MD133): the
+/// no-hander's balance pose, the pose wanted, and the landing's crossup.
+const SPAWN_BALANCE: i32 = 4;
+const SPAWN_WANTED: i32 = 254;
+const SPAWN_CROSSUP: f32 = 0.5;
+const NO_CONTROL: u8 = 14;
+const OUT_OF_BOUNDS: u8 = 13;
+const TRICKS: i32 = 41;
+/// The quad's out-of-bounds test (MD133, disassembled): the band inside the world's box that is
+/// already out, and the throw back in: the gravity its `2·√g` reads, the reach it caps the
+/// horizontal speed at, the lift's two terms, the drag's scale, and the spin's three scales.
+const EDGE_MARGIN: F = F(150.0);
+const THROW_G: F = F(f32::from_bits(0x416e_8262));
+const THROW_REACH: F = F(f32::from_bits(0x4501_9999));
+const THROW_OVER: F = F(240.0);
+const THROW_LIFT: F = F(f32::from_bits(0x4180_cccd));
+const THROW_SCALE: F = F(0.5);
+const THROW_SPIN: [F; 3] = [F(0.5), F(f32::from_bits(0x3ecc_cccd)), F(f32::from_bits(0x3f33_3333))];
+/// The origin quaternion and point (`w` 1).
+const ORIGIN: Vf = Vf::new(0.0, 0.0, 0.0, 1.0);
+/// The put-back record's probe while riding: three feet up the scene node's frame (S66's).
+const BACK_PROBE: Vf = Vf::new(0.0, 3.0, 0.0, 1.0);
+
+/// The curve table the put-back record's search reads ([`crate::camera::CurveTable::build`]), built once.
+fn back_curve() -> &'static crate::camera::CurveTable {
+    static CURVE: std::sync::OnceLock<crate::camera::CurveTable> = std::sync::OnceLock::new();
+    CURVE.get_or_init(crate::camera::CurveTable::build)
+}
 const SPAWN_SPIN_DIR: i32 = 1;
 const SPAWN_FLAGS: u8 = 5;
 /// The steering hinge's axis each wheel starts with, the frame's up.
@@ -4668,6 +5019,15 @@ impl<R: Moto + Default> Ride<R> {
             max_time: load.max_wreck_time,
             class: SPAWN_STRUCK_CLASS,
             category: SPAWN_STRUCK_CLASS,
+            limits: Limits::of(&load.air),
+            edge: true,
+            wrecks: true,
+            small: false,
+            balance: SPAWN_BALANCE,
+            wanted: SPAWN_WANTED,
+            blend: F::ZERO,
+            racing: true,
+            crossup: F(SPAWN_CROSSUP),
             ..Wrecked::default()
         });
     }
