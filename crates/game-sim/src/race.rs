@@ -673,6 +673,9 @@ pub struct Race {
     pub scene_clock: F,
     /// The race's draws: the watch's two per rider caught and the drop's one.
     pub rng: Rng,
+    /// The race's laps (P313), on a race read off its track's file: `None` — a start alone, as S13b
+    /// ported it — and the tick does nothing after the drop.
+    pub laps: Option<Box<Laps>>,
 }
 
 /// What one [`Race::tick`] did that is not in the race itself.
@@ -691,6 +694,8 @@ pub struct Frame {
     /// every rider's chassis is to take its [`StartStep::apply`], after the caught riders' pushes and
     /// before the drop's release.
     pub start: Option<StartStep>,
+    /// What the race's laps told, on a tick after the drop.
+    pub laps: LapsFrame,
 }
 
 impl Race {
@@ -710,6 +715,7 @@ impl Race {
             activity: None,
             scene_clock: F::ZERO,
             rng,
+            laps: None,
         }
     }
 
@@ -721,9 +727,11 @@ impl Race {
     /// every card while the gate is closed ([`Gate::watch`]); the tip clock, which runs the same way
     /// — or, at zero, is armed once from the lesson stage; and then the score manager's countdown,
     /// whose last tick drops the gate ([`Race::drop`]). The watch runs before the drop, so a rider
-    /// through the gate on the drop's own tick is still caught.
+    /// through the gate on the drop's own tick is still caught. Then, on a race with laps, the drop
+    /// starts them and every later tick runs them ([`Laps`]).
     pub fn tick(&mut self, dt: F, riders: &[(Vf, Vf)]) -> Frame {
         let mut frame = Frame::default();
+        let started = !self.countdown.running;
         if !(read(self.music_in) <= F::ZERO) && !self.music_held {
             self.music_in = F(fpu::sub(self.music_in.0, dt.0));
             if self.music_in <= F::ZERO {
@@ -775,6 +783,13 @@ impl Race {
             }
             let c = &mut self.countdown;
             c.elapsed = F(fpu::add(c.elapsed.0, dt.0));
+        }
+        if let Some(laps) = &mut self.laps {
+            if started {
+                frame.laps = laps.tick(dt, riders, &mut self.rng);
+            } else if frame.dropped {
+                laps.start();
+            }
         }
         frame
     }
@@ -2476,10 +2491,10 @@ impl LapRules {
     /// where it has one; [`LapRules::ghost_gap`]); any other race ranks the cards if it ranks them
     /// ([`race_flags::RANKED`]; [`LapRules::rank`]) and, unless a card has finished, measures the gaps
     /// ([`gaps`]). `cards` in list order, and not empty (with none the handler does nothing at all).
-    pub fn close(
+    pub fn close<T: AsRef<LapCard> + AsMut<LapCard>>(
         &mut self,
         dt: F,
-        cards: &mut Vec<LapCard>,
+        cards: &mut Vec<T>,
         ghosts: &[Option<&LapCard>],
         rng: &mut Rng,
     ) -> Vec<FinishNotice> {
@@ -2494,16 +2509,16 @@ impl LapRules {
             } else {
                 self.flags |= race_flags::OVER;
                 for c in cards.iter_mut() {
-                    c.flags |= card_flags::OUT;
+                    c.as_mut().flags |= card_flags::OUT;
                 }
             }
         }
         if self.flags & race_flags::OVER != 0 && self.flags & race_flags::OVER_TOLD == 0 {
             self.flags |= race_flags::OVER_TOLD;
             for k in 0..cards.len() {
-                if k + 1 < cards.len() && !le(cards[k].race_time, cards[k + 1].race_time) {
+                if k + 1 < cards.len() && !le(cards[k].as_ref().race_time, cards[k + 1].as_ref().race_time) {
                     let draw = rng.unit();
-                    cards[k + 1].race_time = F(fpu::add(cards[k].race_time.0, draw.0));
+                    cards[k + 1].as_mut().race_time = F(fpu::add(cards[k].as_ref().race_time.0, draw.0));
                 }
                 said.push(FinishNotice::Over { card: k });
             }
@@ -2512,7 +2527,7 @@ impl LapRules {
             if self.flags & race_flags::FINISHED == 0 {
                 for (c, g) in cards.iter_mut().zip(ghosts) {
                     if let Some(g) = g {
-                        Self::ghost_gap(c, g);
+                        Self::ghost_gap(c.as_mut(), g);
                     }
                 }
             }
@@ -4181,5 +4196,188 @@ impl Supercross {
             self.hud_fade = OUTRO_WAIT;
         }
         out
+    }
+}
+
+// --- a race's laps in a ride (P313) -----------------------------------------------------------------
+
+/// A score card as the ride keeps it: the race handler's card and the player it scores. The list is
+/// kept in the original's order, which the ranking re-sorts into places.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Entry {
+    pub player: usize,
+    pub card: RaceCard,
+}
+
+impl AsRef<LapCard> for Entry {
+    fn as_ref(&self) -> &LapCard {
+        &self.card.lap
+    }
+}
+
+impl AsMut<LapCard> for Entry {
+    fn as_mut(&mut self) -> &mut LapCard {
+        &mut self.card.lap
+    }
+}
+
+/// The track a race's laps are counted on before it is read: no paths. Nothing walks it; it stands
+/// in for the track a snapshot leaves off the wire until the decoder puts this machine's back.
+impl Default for TrackPaths {
+    fn default() -> TrackPaths {
+        TrackPaths {
+            word_34: 0,
+            ahead: F(200.0),
+            behind: F(200.0),
+            lap_length: F::ZERO,
+            pick: 3,
+            paths: Vec::new(),
+            free_routes: 0,
+            free_parents: 0,
+            free_candidates: 0,
+        }
+    }
+}
+
+/// The score manager's words on a supercross race, as sx01's live race holds them (S282c's image,
+/// C31's boot): a ranked race (`0x5e00`; the drop sets bit 1) of `laps` laps keeping ten lap records,
+/// a 30-second finish wait, no time limit, no below-the-path limit, five seconds off the track, an aim
+/// one reach ahead.
+pub fn supercross_rules(laps: i32) -> RaceRules {
+    RaceRules {
+        lap: LapRules {
+            flags: 0x5e00,
+            kind: race_kind::RACE,
+            laps,
+            ghost_runs: 1,
+            record_limit: 10,
+            free_records: 10,
+            finish_wait: F(30.0),
+            finish_clock: F::ZERO,
+            time_limit: F::ZERO,
+        },
+        below_limit: F(-1.0),
+        time_limit: F::ZERO,
+        off_limit: F(5.0),
+        aim_reach: F(1.0),
+    }
+}
+
+/// A human's score card flags before the drop, as sx01's live race holds them: a player the race
+/// waits for, with the off-track limit and the bits whose helpers are not ported (`0x400`, `0x800`,
+/// `0x8_0000`, `0x80_0000`).
+pub const HUMAN_CARD: u64 = 0x0188_0c04;
+/// A computer rider's: no player bit, `0x08` and `0x10_0000` beside the rest.
+pub const COMPUTER_CARD: u64 = 0x0198_0c08;
+
+/// How far ahead and behind its last spot a race card's spot search looks: sx01's track object in a
+/// live race (its `+0x38`, `+0x3c`), where the track is made with 200 each.
+pub const RACE_REACH: (F, F) = (F(125.0), F(75.0));
+
+/// **A race's laps** (P313): the score manager's race handler over the ride's riders — every card's
+/// spot on the track's paths, its lap line, checkpoints, clocks and progress, then the finish wait,
+/// the places and the gaps ([`RaceRules::card_on_lines`], [`LapRules::close`]). It runs from the
+/// tick after the drop, as the original's handler does once the countdown has set the manager's
+/// started bit.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Laps {
+    pub rules: RaceRules,
+    pub course: Course,
+    pub lists: LineLists,
+    /// In list order: places, once ranked.
+    pub cards: Vec<Entry>,
+    /// The track's paths. Shared with every copy of the ride until one walks them.
+    pub track: std::sync::Arc<TrackPaths>,
+}
+
+/// What one tick of a race's laps told, by player.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LapsFrame {
+    pub cards: Vec<(usize, RaceNotice)>,
+    /// The finish notices, their cards turned into players.
+    pub finish: Vec<FinishNotice>,
+}
+
+impl Laps {
+    /// The laps of a race on `track`, its line `course`, one card per rider in `riders` (where each
+    /// stands and its card flags, in player order) with its spot found where it stands, its distance to
+    /// the line its lap's length, and no progress yet.
+    pub fn new(rules: RaceRules, course: Course, mut track: TrackPaths, riders: &[(Vf, u64)]) -> Laps {
+        (track.ahead, track.behind) = RACE_REACH;
+        let mut cards = Vec::with_capacity(riders.len());
+        for (player, &(at, flags)) in riders.iter().enumerate() {
+            let mut spot = course.line_spot;
+            crate::ai::follow::spot(&mut track, at, false, &mut spot, None);
+            let to_line = track.distance(spot, course.line_spot, true);
+            let lap = LapCard {
+                flags,
+                to_line_kept: to_line,
+                to_line,
+                lap_length: to_line,
+                on_track: 1,
+                seen: Seen { now: at, last: at },
+                spot,
+                kept_spot: spot,
+                ..LapCard::default()
+            };
+            cards.push(Entry { player, card: RaceCard { lap, aim: spot, ..RaceCard::default() } });
+        }
+        Laps { rules, course, lists: LineLists { reach: F(20.0), ..LineLists::default() }, cards, track: std::sync::Arc::new(track) }
+    }
+
+    /// The drop: the manager started, and every card that takes a line test taking part.
+    pub fn start(&mut self) {
+        self.rules.lap.flags |= 1;
+        for e in &mut self.cards {
+            if e.card.lap.flags & card_flags::NO_LINE == 0 {
+                e.card.lap.flags |= card_flags::TAKING_PART;
+            }
+        }
+    }
+
+    /// One tick of the race handler, `dt` long, every rider at `riders` (in player order): the opening
+    /// look for a rider still raced, each card in list order — its owner telling it where its rider is,
+    /// then the card's step timed off the list head's clock — and the close.
+    pub fn tick(&mut self, dt: F, riders: &[(Vf, Vf)], rng: &mut Rng) -> LapsFrame {
+        let mut frame = LapsFrame::default();
+        if self.cards.is_empty() {
+            return frame;
+        }
+        let track = std::sync::Arc::make_mut(&mut self.track);
+        self.rules.look_for_waited_for(self.cards.iter().map(|e| e.card.lap.flags));
+        for k in 0..self.cards.len() {
+            let leader_time = self.cards[0].card.lap.race_time;
+            let e = &mut self.cards[k];
+            if let Some(&(at, _)) = riders.get(e.player) {
+                e.card.lap.seen.now = e.card.lap.seen.now.merge(Dest::XYZ, at);
+            }
+            let said = self.rules.card_on_lines(dt, &mut e.card, None, track, &self.course, &self.lists, leader_time);
+            frame.cards.extend(said.into_iter().map(|n| (e.player, n)));
+        }
+        let before: Vec<usize> = self.cards.iter().map(|e| e.player).collect();
+        let said = self.rules.lap.close(dt, &mut self.cards, &[], rng);
+        let after = |k: usize| self.cards[k].player;
+        frame.finish = said
+            .into_iter()
+            .map(|n| match n {
+                FinishNotice::Over { card } => FinishNotice::Over { card: before[card] },
+                FinishNotice::TimeUp { card } => FinishNotice::TimeUp { card: before[card] },
+                FinishNotice::PlaceLost { card, ahead } => FinishNotice::PlaceLost { card: after(card), ahead: ahead.map(after) },
+                FinishNotice::PlaceGained { card, behind } => FinishNotice::PlaceGained { card: after(card), behind: behind.map(after) },
+                FinishNotice::Lead { card } => FinishNotice::Lead { card: after(card) },
+            })
+            .collect();
+        frame
+    }
+
+    /// Player `player`'s card.
+    pub fn card(&self, player: usize) -> Option<&LapCard> {
+        self.cards.iter().find(|e| e.player == player).map(|e| &e.card.lap)
+    }
+
+    /// The race's end has been told: every rider it waits for is done (or the finish wait ran out),
+    /// and the others' times are made up from their gaps.
+    pub fn over(&self) -> bool {
+        self.rules.lap.flags & race_flags::OVER_TOLD != 0
     }
 }

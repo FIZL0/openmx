@@ -1302,8 +1302,12 @@ impl RideHud<'_> {
             buttons: self.buttons.get(v).cloned().unwrap_or_default(),
             join_buttons: self.join_buttons.clone(),
             fps: self.fps,
-            // Laps and places are the simulation's to count (S13c, S13d): dashes till then.
-            race: self.race.filter(|_| seat.sim.race.is_some()).map(|r| ride_hud::RaceShown { lap: None, laps: r.laps, place: None, riders: r.riders }),
+            // Laps and places are the race's lap line's (P313): dashes till it counts them.
+            race: self.race.filter(|_| seat.sim.race.is_some()).map(|r| {
+                let card = seat.sim.race.as_ref().and_then(|race| race.laps.as_ref()).and_then(|l| l.card(0));
+                let (lap, place) = card.map_or((None, None), |c| race_start::shown(c, r.laps));
+                ride_hud::RaceShown { lap, laps: r.laps, place, riders: r.riders }
+            }),
         };
         rig.ride_hud.note_event(now, shown.event.as_ref());
         draw(&shown, &rig.ride_hud, now);
@@ -5700,6 +5704,33 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             (Vf::new(s.spot.x(), on.y(), s.spot.z(), 1.0), Vf::new(s.facing.x(), 0.0, s.facing.z(), 0.0))
         }
     };
+    // P313: the race's laps, off the track's race file in its second archive, the human's card where
+    // the grid puts them.
+    let race_start = race_start.map(|mut s| {
+        let file = second.as_ref().and_then(|m| disc.res(m).ok()).and_then(|res| res.read(&race_start::race_file_name(&stem)).ok());
+        let bound = |m: &str| assets.models.get(m).and_then(|l| game_render::animated_toy::bound(&l.tris));
+        // In the scene, or else in the toys, as the supercross loader looks (sx01's is a toy).
+        let finish = race_start::finish_prop(&look.models, bound).or_else(|| {
+            let k = game_sim::race::find_toy(animated.names.iter().map(|n| n.as_bytes()), &mut game_sim::race::FINISH_GATE.to_vec())?;
+            let p = race_start::toy_placement(animated.models.get(k)?, &animated.sim.specs.get(k)?.place);
+            race_start::finish_prop(&[p], bound)
+        });
+        let laps = args.race.as_ref().map_or(0, |r| r.laps as i32);
+        s.laps = file.as_deref().and_then(|f| race_start::laps(f, &mut sim, finish.as_ref(), laps, &[(at, game_sim::race::HUMAN_CARD)]));
+        match &s.laps {
+            Some(l) => println!(
+                "race: laps on {} — lap {:.2}, line at {:.2},{:.2},{:.2}{}",
+                race_start::race_file_name(&stem),
+                l.course.lap_length.0,
+                l.course.line.centre.x(),
+                l.course.line.centre.y(),
+                l.course.line.centre.z(),
+                if finish.is_some() { " on the finish gate" } else { "" }
+            ),
+            None => println!("race: no laps — {} {}", race_start::race_file_name(&stem), if file.is_some() { "does not load" } else { "not found" }),
+        }
+        s
+    });
     // V127: a race on a disc's supercross track has its crowd's camera flashes, the scene's
     // `cameraflash` props taken out of what it draws (before anything holds an index into it).
     let stadium_flashes = match (&race_start, &modded, &world_mod) {
@@ -7836,6 +7867,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let mut cameras: Vec<Camera> = Vec::with_capacity(args.players);
     // How the ride ended, for the front end: anything but the pause's own two is a quit.
     let mut leave = Leave::Quit;
+    // What the shell has seen of the race's lap line (P313), to say its laps, places and end.
+    let mut race_watch = race_start::Watch::default();
     let mut escape = held(window, key::ESCAPE);
     let mut perf = perf::Perf::new(args.fps);
     let mut hushed = false;
@@ -9400,6 +9433,50 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 println!("race: won at {:.2}s — fireworks {}, flashes toward {}", s.clock, over.fireworks, s.levels.player_win.0);
                 if over.fireworks && let Some(fx) = &mut track_fx {
                     fx.finish();
+                }
+            }
+        }
+        // The race's lap line (P313), which the first seat's Sim counts: its laps and places said, a
+        // finish at the line heard as the original's `race_over` (the flashes' burst, the winner's
+        // fireworks: S192), and at the Over the cards handed to the results, which the ride's leave
+        // shows once the outro's wait has run.
+        if simulated && let Some(laps) = world.seats[0].sim.race.as_ref().and_then(|r| r.laps.as_deref()) {
+            let laps_run = laps.rules.lap.laps.clamp(0, 255) as u8;
+            for change in race_watch.look(laps) {
+                match change {
+                    race_start::Change::Lap { player, lap } => println!("race: player {} on lap {lap}", player + 1),
+                    race_start::Change::Place { player, place } => println!("race: player {} in place {place}", player + 1),
+                    race_start::Change::Finished { player, place } => {
+                        let Some(card) = laps.card(player) else { continue };
+                        let over = match &mut stadium_flashes {
+                            Some(s) => s.card_finishes(card, laps_run),
+                            None => {
+                                let event = game_sim::race::ResultEvent { activity: 2, laps: laps_run, ..Default::default() };
+                                let flash = game_sim::race::FlashLevels::default();
+                                game_sim::race::Supercross::new().race_over(card, None, &event, -1, &game_sim::race::HallOfFame::default(), None, &flash)
+                            }
+                        };
+                        println!("race: player {} finished in place {place} at {:.2}s — fireworks {}", player + 1, card.race_time.0, over.fireworks);
+                        if over.fireworks && let Some(fx) = &mut track_fx {
+                            fx.finish();
+                        }
+                        race_watch.overs.push(over);
+                    }
+                    race_start::Change::Over => {
+                        let places: Vec<String> = laps.cards.iter().map(|e| format!("{}:{}", e.player + 1, e.card.lap.place)).collect();
+                        println!("race: over — places {}", places.join(" "));
+                        if let Some(front) = front.as_deref_mut() {
+                            let name = front.menu.racer_name(0);
+                            front.menu.race_ended(race_start::hand_over(laps, laps_run, &name, &race_watch.overs));
+                        }
+                    }
+                }
+            }
+            if race_watch.wait(dt.0) {
+                println!("race: outro over");
+                if front.is_some() {
+                    leave = Leave::Menu;
+                    break;
                 }
             }
         }

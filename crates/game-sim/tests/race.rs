@@ -8977,3 +8977,94 @@ fn sx01s_finish_line_is_as_wide_and_high_as_the_finish_props_rest_bound() {
     assert_eq!(gate_words(&line), gate_words(&want), "the line: {line:?} against {want:?}");
     eprintln!("sx01's finish line: {} wide, {} high, off the finish prop's rest bound {half:?}", line.width.0, line.height.0);
 }
+
+/// Points `step` feet apart along sx01's paths from `from`'s first node, each path left by its first
+/// link: the way round the track a test rider is walked.
+fn track_walk(paths: &TrackPaths, from: usize, step: f32, count: usize) -> Vec<Vf> {
+    let mut points = Vec::new();
+    let mut path = from;
+    while points.len() < 400_000 {
+        let Some(p) = paths.paths.get(path) else { break };
+        points.extend(p.nodes.iter().map(|n| n.points[0]));
+        let Some(&next) = p.links.first() else { break };
+        path = next;
+        if points.len() > count * 64 {
+            break;
+        }
+    }
+    let mut out = vec![points[0]];
+    let mut left = step;
+    for w in points.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let d = ((b.x() - a.x()).powi(2) + (b.z() - a.z()).powi(2)).sqrt();
+        let mut at = 0.0;
+        while d > 0.0 && at + left <= d {
+            at += left;
+            left = step;
+            let t = at / d;
+            out.push(Vf([a.x() + (b.x() - a.x()) * t, a.y() + (b.y() - a.y()) * t, a.z() + (b.z() - a.z()) * t, 1.0]));
+            if out.len() >= count {
+                return out;
+            }
+        }
+        left -= d - at;
+    }
+    out
+}
+
+/// P313: two riders walked round sx01's paths from the grid gate's path, the human faster than the
+/// computer's, through a race of three laps on the supercross rules: the lap line counts the human's
+/// laps one by one, finishes them first and the computer's second, and tells the Over once both are in.
+/// A snapshot of a Sim racing with the lap line decodes to the same hash.
+#[test]
+fn riders_walked_round_sx01_run_their_laps_to_the_over() {
+    let Some(file) = sx01_race_file() else { return };
+    let mut t = TrackFile::parse(&file).expect("sx01's race file reads");
+    t.snap_to_ground(None);
+    let (paths, spots) = TrackPaths::load(&t).expect("sx01's track loads");
+    let course = Course { line: t.line.clone().expect("a line"), line_spot: spots[1].expect("a line spot"), lap_length: paths.lap_length };
+    let grid = spots[0].expect("a grid spot").path as usize;
+    let dt = F(1.0 / 30.0);
+    let walks = [track_walk(&paths, grid, 4.0, 6000), track_walk(&paths, grid, 3.0, 6000)];
+    let mut laps = race::Laps::new(race::supercross_rules(3), course, paths, &[(walks[0][0], race::HUMAN_CARD), (walks[1][0], race::COMPUTER_CARD)]);
+    let snapshot_laps = laps.clone();
+    laps.start();
+    let mut rng = Rng::from_state(0x1234_5678);
+    let (mut counted, mut finished, mut over_at) = ([0; 2], Vec::new(), None);
+    for tick in 1..6000 {
+        let riders: Vec<(Vf, Vf)> = walks.iter().map(|w| (w[tick.min(w.len() - 1)], Vf::new(0.0, 0.0, 1.0, 0.0))).collect();
+        let frame = laps.tick(dt, &riders, &mut rng);
+        for (player, n) in &frame.cards {
+            match n {
+                RaceNotice::Line(LineNotice::Lap) => counted[*player] += 1,
+                RaceNotice::Line(LineNotice::Finished) => finished.push(*player),
+                _ => {}
+            }
+        }
+        if laps.over() {
+            over_at = Some(tick);
+            break;
+        }
+    }
+    let human = laps.card(0).expect("the human's card");
+    let ai = laps.card(1).expect("the computer's card");
+    eprintln!("laps {counted:?}, finished {finished:?}, over at {over_at:?}, human {:?}s place {}, ai place {}", human.race_time, human.place, ai.place);
+    assert_eq!(finished, vec![0, 1], "the human finishes first");
+    assert_eq!((human.laps, ai.laps), (3, 3));
+    assert_eq!((human.place, ai.place), (1, 2));
+    assert!(over_at.is_some(), "the race is over once both are in");
+
+    let mut sim = game_sim::Sim::new(7);
+    let m = sim.rider.ride.transform();
+    let mut r = Race::new(closed_gate(), &[(m.0[3], m.0[2])], F(3.0), Rng::from_state(1));
+    r.laps = Some(Box::new(snapshot_laps));
+    sim.race = Some(Box::new(r));
+    for _ in 0..120 {
+        sim.tick(game_sim::Input::default());
+    }
+    let bytes = game_sim::snapshot::encode(&sim);
+    let mut back = game_sim::Sim::new(7);
+    game_sim::snapshot::decode(&mut back, &bytes).expect("the state decodes");
+    assert_eq!(game_sim::hash::of(&back), game_sim::hash::of(&sim));
+    assert!(back.race.as_ref().and_then(|r| r.laps.as_ref()).is_some_and(|l| l.rules.lap.flags & 1 != 0), "the drop came through");
+}
