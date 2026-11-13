@@ -1,0 +1,1309 @@
+openmx 0.13.0 (e983cfc build 4179, native sim) on iOS, memory 3 MB, 6652 MB left before iOS closes the app
+ios: the screen up to 120 fps, low power mode off, thermal state nominal
+ios: audio session AVAudioSessionCategoryPlayback with options 0x1, active, other audio true
+iOS UIApplicationWillEnterForegroundNotification, memory 6 MB, 6649 MB left before iOS closes the app
+iOS GCControllerDidConnectNotification (1 controllers)
+iOS UIApplicationDidBecomeActiveNotification (1 controllers)
+audio: UIApplicationDidBecomeActiveNotification (Active): other audio true, restart 0
+ios: system gestures deferred on bottom, top, left, right, home indicator shown
+ios: holding Locked
+textures: 512 px at most (a phone's)
+front end: settings in /private/var/mobile/Containers/Data/Application/C1D67FFA-5FB6-4934-834D-2371F2B8FCBD/Documents
+music: 22 songs from music packs
+music: 35 songs from disc and folder and mod; your own .wav files go in /private/var/mobile/Containers/Data/Application/C1D67FFA-5FB6-4934-834D-2371F2B8FCBD/Documents/music
+sound: through an AudioQueue
+music: songs from MX Unleashed (13), MX vs. ATV Untamed (22)
+camera: the Camera page lists ["Race Cam 1", "Race Cam 2", "Freestyle Cam", "Slot Cam"] and ["Flight Cam 1", "Flight Cam 2", "Slot Cam"]
+camera: the Camera page lists the helicopter's ["Aero Cam 1", "Aero Cam 2", "Slot Cam"]
+camera: the Camera page lists the cars' [(Buggy, ["Race Cam 1", "Race Cam 2", "Freestyle Cam", "Slot Cam"]), (Monster, ["Race Cam 1", "Race Cam 2", "Freestyle Cam", "Slot Cam"]), (Baja, ["Race Cam 1", "Race Cam 2", "Freestyle", "Slot Cam"])]
+garage: 54 bikes, 80 riders; seat 1 rides crf450_factoryconnection on pro250p as azonic2
+music: playing disc:downfall
+mods: 99 tracks, 3 worlds
+mods: tracks/world_mxu_free has no picture, and a world is not shot here
+mods: tracks/world_mxvatv has no picture, and a world is not shot here
+mods: tracks/world_untamed has no picture, and a world is not shot here
+mods: pictures of elev_glamis, elev_hatfield, elev_littlesahara, elev_ocotillo, mxvatv_fs01, mxvatv_fs02, mxvatv_fs03, mxvatv_fs05, mxvatv_fs06, mxvatv_mc01, mxvatv_mc02, mxvatv_mc04, mxvatv_mc06, mxvatv_mc08, mxvatv_mc10, mxvatv_nat01, mxvatv_nat03, mxvatv_nat04, mxvatv_nat05, mxvatv_nat06, mxvatv_nat09, mxvatv_nat10, mxvatv_nat16, mxvatv_nat17, mxvatv_sm01, mxvatv_sm02, mxvatv_sx01, mxvatv_sx02, mxvatv_sx05, mxvatv_sx06, mxvatv_sx08, mxvatv_sx09, mxvatv_sx11, mxvatv_sx13, mxvatv_sx14, mxvatv_sx17, mxvatv_sx18, untamed_am_cs, untamed_am_gfuc, untamed_bt_a, untamed_bt_b, untamed_fs_a, untamed_nat_dvca, untamed_nat_in, untamed_nat_md, untamed_nat_nc, untamed_nat_ny, untamed_nat_ut, untamed_sm_as, untamed_sm_cf, untamed_sm_hs, untamed_sm_mb, untamed_sm_of, untamed_sm_s1, untamed_sx_c, untamed_sx_d, untamed_sx_f, untamed_sx_h, untamed_sx_j, untamed_sx_k, untamed_sx_l
+mods: taking a still of mxvatv_fs04, mxvatv_fs07, mxvatv_fs08, mxvatv_mc03, mxvatv_mc05, mxvatv_mc07, mxvatv_mc09, mxvatv_nat02, mxvatv_nat07, mxvatv_nat08, mxvatv_nat11, mxvatv_nat12, mxvatv_nat13, mxvatv_nat15, mxvatv_sm03, mxvatv_sx03, mxvatv_sx04, mxvatv_sx07, mxvatv_sx10, mxvatv_sx12, mxvatv_sx15, mxvatv_sx16, untamed_am_jy, untamed_fs_b, untamed_fs_c, untamed_fs_d, untamed_mt_a, untamed_nat_az, untamed_nat_co, untamed_nat_ma, untamed_nat_or, untamed_nat_pa, untamed_nat_sdca, untamed_sx_a, untamed_sx_b, untamed_sx_e, untamed_sx_g, untamed_sx_i from the spawn
+mods: 1 music packs
+gpu: Apple A17 Pro GPU (Metal) into a Bgra8Unorm surface, Fifo
+pad: none found — the menus are on the keyboard (arrows, Space, Return, Escape)
+mods: no still of mxvatv_fs04: the shell: Operation not permitted (os error 1)
+mods: no still of mxvatv_fs07: the shell: Operation not permitted (os error 1)
+mods: no still of mxvatv_fs08: the shell: Operation not permitted (os error 1)
+mods: no still of mxvatv_mc03: the shell: Operation not permitted (os error 1)
+mods: no still of mxvatv_mc05: the shell: Operation not permitted (os error 1)
+mods: no still of mxvatv_mc07: the shell: Operation not permitted (os error 1)
+mods: no still of mxvatv_mc09: the shell: Operation not permitted (os error 1)
+mods: no still of mxvatv_nat02: the shell: Operation not permitted (os error 1)
+mods: no still of mxvatv_nat07: the shell: Operation not permitted (os error 1)
+mods: no still of mxvatv_nat08: the shell: Operation not permitted (os error 1)
+mods: no still of mxvatv_nat11: the shell: Operation not permitted (os error 1)
+mods: no still of mxvatv_nat12: the shell: Operation not permitted (os error 1)
+mods: no still of mxvatv_nat13: the shell: Operation not permitted (os error 1)
+mods: no still of mxvatv_nat15: the shell: Operation not permitted (os error 1)
+mods: no still of mxvatv_sm03: the shell: Operation not permitted (os error 1)
+mods: no still of mxvatv_sx03: the shell: Operation not permitted (os error 1)
+mods: no still of mxvatv_sx04: the shell: Operation not permitted (os error 1)
+mods: no still of mxvatv_sx07: the shell: Operation not permitted (os error 1)
+mods: no still of mxvatv_sx10: the shell: Operation not permitted (os error 1)
+mods: no still of mxvatv_sx12: the shell: Operation not permitted (os error 1)
+mods: no still of mxvatv_sx15: the shell: Operation not permitted (os error 1)
+mods: no still of mxvatv_sx16: the shell: Operation not permitted (os error 1)
+mods: no still of untamed_am_jy: the shell: Operation not permitted (os error 1)
+mods: no still of untamed_fs_b: the shell: Operation not permitted (os error 1)
+mods: no still of untamed_fs_c: the shell: Operation not permitted (os error 1)
+mods: no still of untamed_fs_d: the shell: Operation not permitted (os error 1)
+mods: no still of untamed_mt_a: the shell: Operation not permitted (os error 1)
+mods: no still of untamed_nat_az: the shell: Operation not permitted (os error 1)
+mods: no still of untamed_nat_co: the shell: Operation not permitted (os error 1)
+mods: no still of untamed_nat_ma: the shell: Operation not permitted (os error 1)
+mods: no still of untamed_nat_or: the shell: Operation not permitted (os error 1)
+mods: no still of untamed_nat_pa: the shell: Operation not permitted (os error 1)
+mods: no still of untamed_nat_sdca: the shell: Operation not permitted (os error 1)
+mods: no still of untamed_sx_a: the shell: Operation not permitted (os error 1)
+mods: no still of untamed_sx_b: the shell: Operation not permitted (os error 1)
+mods: no still of untamed_sx_e: the shell: Operation not permitted (os error 1)
+mods: no still of untamed_sx_g: the shell: Operation not permitted (os error 1)
+mods: no still of untamed_sx_i: the shell: Operation not permitted (os error 1)
+ios: the screen at 60 fps
+update check: v0.13.0 is the latest
+1P: OhSnap MCON I (gamepad/0) — the menus and the first seat are its
+iOS UIApplicationWillResignActiveNotification (1 controllers)
+settings: saved in /private/var/mobile/Containers/Data/Application/C1D67FFA-5FB6-4934-834D-2371F2B8FCBD/Documents (away)
+away: on Some(Settings)
+ios: away, the frame loop rests
+iOS UIApplicationDidBecomeActiveNotification (1 controllers)
+audio: UIApplicationDidBecomeActiveNotification (Active): other audio true, restart ios: back, the frame loop rested 4.3 s
+0
+settings: saved in /private/var/mobile/Containers/Data/Application/C1D67FFA-5FB6-4934-834D-2371F2B8FCBD/Documents
+settings: saved in /private/var/mobile/Containers/Data/Application/C1D67FFA-5FB6-4934-834D-2371F2B8FCBD/Documents
+iOS UIApplicationWillResignActiveNotification (1 controllers)
+settings: saved in /private/var/mobile/Containers/Data/Application/C1D67FFA-5FB6-4934-834D-2371F2B8FCBD/Documents (away)
+away: on Some(Main)
+ios: away, the frame loop rests
+iOS UIApplicationDidBecomeActiveNotification (1 controllers)
+audio: UIApplicationDidBecomeActiveNotification (Active): other audio true, restart 0
+ios: back, the frame loop rested 1.4 s
+textures: 0 from 0 texture packs, 0 key-named in mods/texture-replacements, 0 PCSX2-named, 0 mods' own upscales
+modifiers: bike_speed=120 plane_accel=110 plane_top_speed=120 plane_ceiling=510
+stunts: 57 on the disc, 24 this rider can do
+tricks: MX vs. ATV's, from mxvatv_tricks then untamed_tricks
+tricks: 19 extra stunts, each on a gesture
+Supercross01: 1506 props, 768 collision shapes, ground 765 x 765 feet in 256 x 256 samples
+solid: 768 of 768 collision meshes
+loaded: 91 of 83 models, 40 textures, bike
+tricks: mxvatv_tricks's 360, front flip and whip from mx_pro250p.phy
+wrecks: 1043 bytes of wreck bike, 16916 bytes of rider wreck set
+rider: azonic2 wearing mrider.mcf -> rider.mcf -> mrider.psg, 84 clips bound, 24 of 24 gesture slots, 3 airborne
+rider: 24 of 24 gesture slots and 36 of 36 pose clips for its own machine
+ragdoll: 18 parts off the riding pose
+rider contact: the bikes push each other apart
+tricks: clips from /private/var/mobile/Containers/Data/Application/C1D67FFA-5FB6-4934-834D-2371F2B8FCBD/Documents/mods/tricks/mxvatv_tricks and /private/var/mobile/Containers/Data/Application/C1D67FFA-5FB6-4934-834D-2371F2B8FCBD/Documents/mods/tricks/untamed_tricks for 19 extras and the two 360s: the rider has all 21 of them; the bike has 7 of 21, none for cliffhanger, rocksolid, stalefish, mcmetz, switchblade, nofooter, heelclicker, discocan, nohandeddiscocan, supermanseatgrab, suicidedoublecan, ninjanac, rodeo, doublegrab; the front flip has none in either game: the rider leans forward and the bike stays on its airborne row
+chassis: bike.mcf -> bike.psg, 20 clips bound, 7 of 24 gesture slots, 4 of 36              pose clips, nodes Nodes { root: Some(0), bars: Some(3), shocks: Some(9), front: Some(14), swingarm: Some(5), rear: Some(20) }
+chassis: no bike clip on the disc or in the pack for lazyboy, cancan, nohandedlander, pendulum, hartattack, indianair, barhop, supercan, superman, saranwrap, stalelin, onehandindianair, shoalin, cordova, deadbody, rigamortis, stripper; the rider's hands hold the bars through them
+fliers: P1 biplane Plane 3 (biplane3), from mxvatv_fliers, model 2
+fliers: P2 biplane Plane 3 (biplane3), from mxvatv_fliers, model 2
+biplane: the track has no machine.txt
+biplane: no parked copy here; it spawns on the player, and starts on the start line
+cars: buggy, monster, baja (switch from the pause); none parked here
+biplane: 5 camera presets in biplanecpresets.ini
+kiowa: 1 of 1 skins loaded, flown from the pause or its bay; 0 camera presets in helocpresets.ini
+cars: 3 of 3 models loaded
+biplane: 1 of 1 liveries loaded
+biplane: mxvatv_fliers's, drawn in biplane3
+biplane: particles: mxvatv_fliers's own Part/biplaneparticles.dat
+biplane: particles: Vehicle Dust (CollisionModel) from "Dust 1"
+biplane: particles: Vehicle Chunks (CollisionModel) from "Chunks 1"
+biplane: particles: Smoke (Generic) from "Smoke 2"
+biplane: particles: Left Exhaust (Exhaust { max_speed: 35.0 }) from "Smoke 1"
+biplane: particles: Right Exhaust (Exhaust { max_speed: 35.0 }) from "Smoke 1"
+biplane: particles: Front Left Tire Dust (Dust(DustKeys { min_compression: 0.0, burst_compression: 0.85, burst: true, growth: 2.0, velocity: 5.0, base: 0.5, scale: 5.0, burst_scale: 5.0, offset: V3 { x: 0.0, y: 0.0, z: 0.0 } })) from "Dust 1"
+biplane: particles: Front Right Tire Dust (Dust(DustKeys { min_compression: 0.0, burst_compression: 0.85, burst: true, growth: 2.0, velocity: 5.0, base: 0.5, scale: 5.0, burst_scale: 5.0, offset: V3 { x: 0.0, y: 0.0, z: 0.0 } })) from "Dust 1"
+biplane: particles: Rear Tire Dust (Dust(DustKeys { min_compression: 0.0, burst_compression: 0.85, burst: true, growth: 2.0, velocity: 5.0, base: 0.5, scale: 5.0, burst_scale: 5.0, offset: V3 { x: 0.0, y: 0.0, z: 0.0 } })) from "Dust 1"
+biplane: particles: Dust (HelicopterDust { begin: 20.0, end: 25.0 }) from "Dust 1"
+animated toys: 2 on clips, 0 left out
+props: 27 collections, 222 bodies
+race: 3 laps, 4 riders; gate at 101.49,87.87,454.58 width 118.55 closed; lane 2 place 3; grid 94.91,90.00,446.58; drop in 3.60s
+race: 1200 camera flashes, floor 0.01
+start: 101, 90, 458 facing 0 degrees, 11 camera presets
+the dirt under the start line is at 90.0 feet
+the dirt under the biplane is at 90.0 feet
+tricks page: 50 tricks
+kiowa: its camera starts on Aero Cam 1
+buggy: its camera starts on Race Cam 1, 6 presets in buggycpresets.ini
+monster: its camera starts on Race Cam 1, 6 presets in monstertruckcpresets.ini
+baja: its camera starts on Race Cam 1, 6 presets in fourwheelcpresets.ini
+loading: built, 22 frames drawn over 0.39 s
+bike: particles: Vehicle Dust (CollisionModel) from "Dust 1"
+bike: particles: Vehicle Chunks (CollisionModel) from "Chunks 1"
+bike: particles: Rider Dust (Constraint { mask: 508 }) from "Dust 1"
+bike: particles: Rider Chunks (Constraint { mask: 508 }) from "Chunks 1"
+bike: particles: Foot Spray (Constraint { mask: 3 }) from "Dust 1"
+bike: particles: Exhuast (Exhaust { max_speed: 15.0 }) from "Smoke 1"
+bike: particles: Front Tire Dust (Dust(DustKeys { min_compression: 0.8, burst_compression: 0.85, burst: true, growth: 2.0, velocity: 5.0, base: 0.5, scale: 5.0, burst_scale: 5.0, offset: V3 { x: 0.0, y: 0.0, z: 0.0 } })) from "Dust 1"
+bike: particles: Rear Tire Dust (Dust(DustKeys { min_compression: 0.01, burst_compression: 0.85, burst: true, growth: 2.0, velocity: 5.0, base: 0.5, scale: 5.0, burst_scale: 5.0, offset: V3 { x: 0.0, y: 0.0, z: 0.0 } })) from "Dust 1"
+bike: particles: Front Tire Dirt (Generic) from "Dirt 1"
+bike: particles: Rear Tire Dirt (Generic) from "Dirt 1"
+bike: particles: Front Tire Dirt Spray (Spray(SprayKeys { side_scale: 1.5, side_threshold: 4.0, min_y: 0.0, max_y: 3.0, ramp: 0.0 })) from "Dirt 1"
+bike: particles: Rear Tire Dirt Spray (Spray(SprayKeys { side_scale: 3.0, side_threshold: 3.0, min_y: 0.0, max_y: 10.0, ramp: 0.0 })) from "Dirt 1"
+bike: particles: Front Tire Chunks (Spray(SprayKeys { side_scale: 1.75, side_threshold: 4.0, min_y: 0.0, max_y: 3.0, ramp: 0.0 })) from "Chunks 1"
+bike: particles: Rear Tire Chunks (Spray(SprayKeys { side_scale: 4.0, side_threshold: 3.0, min_y: 0.0, max_y: 17.0, ramp: 0.0 })) from "Chunks 1"
+bike: particles: Rear Tire Collision Chunks (Spray(SprayKeys { side_scale: 4.0, side_threshold: 3.0, min_y: 0.0, max_y: 6.0, ramp: 0.0 })) from "Chunks 1"
+bike: particles: Front Tire Track (TireTrack) laid by the tire tracks
+bike: particles: Rear Tire Track (TireTrack) laid by the tire tracks
+track: particles: Fireworks01 (ParticleEmitter1) from "Fireworks 1"
+track: particles: Fireworks02 (ParticleEmitter2) from "Fireworks 1"
+track: particles: Fireworks03 (ParticleEmitter3) from "Fireworks 2"
+track: particles: Fireworks04 (ParticleEmitter4) from "Fireworks 2"
+track: particles: Fireworks05 (ParticleEmitter5) from "Fireworks 3"
+track: particles: Fireworks06 (ParticleEmitter6) from "Fireworks 3"
+track: particles: Fireworks07 (ParticleEmitter7) from "Smoke 2"
+track: particles: Fireworks08 (ParticleEmitter8) from "Smoke 2"
+track: particles: Fireworks09 (ParticleEmitter9) from "Smoke 2"
+track: particles: Fireworks10 (ParticleEmitter10) from "Smoke 2"
+track: particles: Fireworks11 (ParticleEmitter11) from "Smoke 2"
+track: particles: Fireworks12 (ParticleEmitter12) from "Smoke 2"
+track: particles: Fireworks13 (ParticleEmitter13) from "Smoke 2"
+track: particles: Fireworks14 (ParticleEmitter14) from "Smoke 2"
+track: particles: Fireworks15 (ParticleEmitter15) from "Smoke 2"
+track: particles: Fireworks16 (ParticleEmitter16) from "Smoke 2"
+track: particles: Fireworks17 (ParticleEmitter17) from "Smoke 2"
+track: particles: Fireworks18 (ParticleEmitter18) from "Smoke 2"
+track: particles: Fireworks19 (ParticleEmitter19) from "Flash"
+track: particles: Fireworks20 (ParticleEmitter20) from "Flash"
+track: particles: Fireworks21 (ParticleEmitter21) from "Flash"
+track: particles: Fireworks22 (ParticleEmitter22) from "Flash"
+track: particles: Fireworks23 (ParticleEmitter23) from "Flash"
+track: particles: Fireworks24 (ParticleEmitter24) from "Flash"
+track: particles: Fireworks25 (ParticleEmitter25) from "Fireworks 2"
+track: particles: Fireworks26 (ParticleEmitter26) from "Fireworks 2"
+track: particles: Fireworks27 (ParticleEmitter27) from "Fireworks 2"
+track: particles: Fireworks28 (ParticleEmitter28) from "Fireworks 2"
+track: particles: Fireworks29 (ParticleEmitter29) from "Fireworks 2"
+track: particles: Fireworks30 (ParticleEmitter30) from "Fireworks 2"
+kiowa: no particles: no helicopterparticles.dat
+car: buggy: no particles: no buggyparticles.dat
+car: monstertruck: no particles: no monsterparticles.dat
+car: baja: no particles: no bajaparticles.dat
+sound: 99 clips decoded, 5.8 MB
+biplane: mxvatv_fliers's sounds, 7 engine loops, 5 wreck, 1 touchdown
+controls: new
+biplane controls: new
+renderer: gpu
+chassis: the fork is drawn to a compression of 0.965
+gpu: 105 models, 81 materials, 75 textures and 4 ground chunks uploaded in 1.12 s
+texture filtering: 16x (anisotropy 16, this device 16 at most)
+shadows: on, quality high (the original's in 25,25,25 at 0.750)
+model detail: reduced
+graphics: farther (fog 3098..16000 up to 100%, far clip 16000; the disc's fog 387..2000 in [114, 117, 123])
+loading: done, 31 frames drawn over 1.59 s
+render scale: 0.75
+window 2202x1179 (screen 1179x2556), drawing 2202x1179 at scale 1, --aspect fill, a 16:9 display
+picture shape: fill
+camera: cpresets.ini's Preset{n}w copies, 11 of 11, for full screen on a 16:9 display
+camera: biplanecpresets.ini's Preset{n}w copies, 5 of 5, for full screen on a 16:9 display
+camera: helocpresets.ini's Preset{n}w copies, 4 of 4, for full screen on a 16:9 display
+camera: buggycpresets.ini's Preset{n}w copies, 6 of 6, for full screen on a 16:9 display
+camera: monstertruckcpresets.ini's Preset{n}w copies, 6 of 6, for full screen on a 16:9 display
+camera: fourwheelcpresets.ini's Preset{n}w copies, 6 of 6, for full screen on a 16:9 display
+biplane: mxvatv_fliers's camera, 7 presets in Cam/FC_BiplaneDefault.pb
+camera: cpresets.ini's Preset{n}w copies, 11 of 11, for full screen on a 16:9 display
+biplane: its camera starts on Race Camera 1
+map: 768 x 768 feet to its edge, shot back from 150 feet short of it; radar 576 feet across
+tire tracks: Front Tire Track on tire 0, 32 strips, ttrack
+tire tracks: Rear Tire Track on tire 1, 32 strips, ttrack
+track: sun flare: SunFlare20 (200 px at 50)
+vehicle: bike
+1P: OhSnap MCON I (gamepad/0)
+camera: cpresets.ini's Preset{n}w copies, 11 of 11, for full screen on a 16:9 display
+camera: biplanecpresets.ini's Preset{n}w copies, 5 of 5, for full screen on a 16:9 display
+camera view: 4 115 110 120 115
+camera: helocpresets.ini's Preset{n}w copies, 4 of 4, for full screen on a 16:9 display
+camera: buggycpresets.ini's Preset{n}w copies, 6 of 6, for full screen on a 16:9 display
+camera: monstertruckcpresets.ini's Preset{n}w copies, 6 of 6, for full screen on a 16:9 display
+camera: fourwheelcpresets.ini's Preset{n}w copies, 6 of 6, for full screen on a 16:9 display
+camera: starts on Freestyle Cam, where it was left
+music: playing mod:untamed_music/facedown_red_jumpsuit_apparatus
+warm frame: 31.41 ms behind the loading screen
+load: the ride's first frame 35.68 s after launch, memory peak 598 MB, now 589 MB (233 MB of it the GPU's), 6066 MB left before iOS closes the app, cpu not known here
+  1s 59.1 fps, 107522 triangles a frame,   0.1 mph, memory 524 MB (6131 MB left, GPU 236 MB)
+     bike particles: none
+     ms a frame: input 0.18 sim 0.53 scene 0.06 hud 0.26 present 15.26, all 16.41; worst 27.02 ms (present 25.37, scene 1.22), 33 over 16.7; widest gap 27.0 ms, waited 11.64 ms a frame, 223 sprites, gpu no frame timed
+  2s 60.0 fps, 107605 triangles a frame,   0.1 mph, memory 508 MB (6147 MB left, GPU 236 MB)
+     bike particles: none
+     ms a frame: input 0.21 sim 0.64 stream 0.06 hud 0.31 present 15.33, all 16.68; worst 23.09 ms (present 22.82, hud 0.22), 29 over 16.7; widest gap 23.1 ms, waited 11.03 ms a frame, 223 sprites, gpu no frame timed
+  3s 59.9 fps, 107596 triangles a frame,   0.2 mph, memory 493 MB (6162 MB left, GPU 236 MB)
+     bike particles: none
+     ms a frame: input 0.21 sim 0.70 stream 0.06 hud 0.33 present 15.26, all 16.69; worst 21.38 ms (present 21.03, hud 0.30), 28 over 16.7; widest gap 21.4 ms, waited 10.91 ms a frame, 223 sprites, gpu no frame timed
+race: gate dropped at tick 110, rider at 94.91,89.54,447.09
+  4s 59.9 fps, 107591 triangles a frame,   0.2 mph, memory 493 MB (6162 MB left, GPU 236 MB)
+     bike particles: none
+     ms a frame: input 0.21 sim 0.80 stream 0.07 scene 0.05 hud 0.37 present 15.09, all 16.70; worst 20.46 ms (present 20.04, hud 0.38), 28 over 16.7; widest gap 20.5 ms, waited 10.29 ms a frame, 223 sprites, gpu no frame timed
+  5s 60.2 fps, 107593 triangles a frame,   0.2 mph, memory 493 MB (6162 MB left, GPU 236 MB)
+     bike particles: Exhuast 11
+     ms a frame: input 0.20 sim 0.85 stream 0.08 anim 0.05 scene 0.06 hud 0.37 present 14.97, all 16.63; worst 20.04 ms (present 19.61, hud 0.37), 29 over 16.7; widest gap 20.1 ms, waited 10.10 ms a frame, 223 sprites, gpu no frame timed
+  6s 59.0 fps, 107591 triangles a frame,   0.2 mph, memory 501 MB (6154 MB left, GPU 236 MB)
+     bike particles: Exhuast 15
+     ms a frame: input 0.20 sim 0.83 stream 0.08 anim 0.05 camera 0.13 scene 0.05 hud 0.32 present 15.24, all 16.94; worst 35.71 ms (present 35.62, hud 0.08), 28 over 16.7; widest gap 35.8 ms, waited 10.61 ms a frame, 223 sprites, gpu no frame timed
+  7s 60.0 fps, 113886 triangles a frame,  11.0 mph, memory 505 MB (6150 MB left, GPU 236 MB)
+     bike particles: Exhuast 10, Rear Tire Dirt 9, Rear Tire Dirt Spray 67, Rear Tire Chunks 48, Rear Tire Collision Chunks 17
+     ms a frame: input 0.23 sim 1.03 stream 0.07 scene 0.05 hud 0.30 present 14.88, all 16.67; worst 21.59 ms (sim 18.35, present 1.46), 33 over 16.7; widest gap 21.6 ms, waited 10.37 ms a frame, 225 sprites, gpu no frame timed
+  8s 59.8 fps, 139545 triangles a frame,  46.8 mph, memory 503 MB (6152 MB left, GPU 236 MB)
+     bike particles: Rear Tire Dirt 15, Rear Tire Dirt Spray 116, Rear Tire Chunks 110, Rear Tire Collision Chunks 95
+     ms a frame: input 0.23 sim 0.80 stream 0.06 scene 0.07 hud 0.38 present 15.07, all 16.72; worst 28.36 ms (present 28.08, hud 0.21), 32 over 16.7; widest gap 28.4 ms, waited 10.02 ms a frame, 325 sprites, gpu no frame timed
+  9s 60.2 fps, 109884 triangles a frame,  61.9 mph, memory 498 MB (6157 MB left, GPU 236 MB)
+     bike particles: Front Tire Dirt 14, Rear Tire Dirt 12, Rear Tire Collision Chunks 75
+     ms a frame: input 0.27 sim 0.84 stream 0.08 scene 0.09 hud 0.47 present 14.72, all 16.61; worst 19.12 ms (present 14.45, ground 2.34), 29 over 16.7; widest gap 19.1 ms, waited 9.47 ms a frame, 325 sprites, gpu no frame timed
+ 10s 58.0 fps, 105747 triangles a frame,  63.0 mph, memory 503 MB (6152 MB left, GPU 236 MB)
+     bike particles: Front Tire Dirt 15, Rear Tire Dirt 17, Rear Tire Dirt Spray 79, Rear Tire Chunks 59, Rear Tire Collision Chunks 21
+     ms a frame: input 0.22 sim 0.68 stream 0.06 scene 0.08 hud 0.31 present 15.81, all 17.25; worst 55.49 ms (present 54.99, hud 0.43), 31 over 16.7; widest gap 55.5 ms, waited 10.95 ms a frame, 328 sprites, gpu no frame timed
+ 11s 60.0 fps, 133846 triangles a frame,  57.5 mph, memory 505 MB (6150 MB left, GPU 236 MB)
+     bike particles: Rear Tire Dirt Spray 18, Rear Tire Chunks 17, Rear Tire Collision Chunks 44
+     ms a frame: input 0.25 sim 0.76 stream 0.06 scene 0.07 hud 0.38 present 15.05, all 16.68; worst 23.75 ms (present 21.33, sim 1.48), 30 over 16.7; widest gap 23.8 ms, waited 10.08 ms a frame, 228 sprites, gpu no frame timed
+ 12s 59.9 fps, 140360 triangles a frame,  53.9 mph, memory 500 MB (6155 MB left, GPU 236 MB)
+     bike particles: Rear Tire Dirt 3, Rear Tire Collision Chunks 6
+     ms a frame: input 0.31 sim 1.02 stream 0.07 scene 0.09 hud 0.42 present 14.67, all 16.70; worst 19.01 ms (present 16.29, sim 1.62), 30 over 16.7; widest gap 19.1 ms, waited 9.14 ms a frame, 228 sprites, gpu no frame timed
+ 13s 59.9 fps, 139563 triangles a frame,  54.6 mph, memory 500 MB (6155 MB left, GPU 236 MB)
+     bike particles: Rear Tire Dirt 4, Rear Tire Dirt Spray 20, Rear Tire Chunks 16, Rear Tire Collision Chunks 7
+     ms a frame: input 0.25 sim 0.82 stream 0.07 scene 0.08 hud 0.47 present 14.90, all 16.70; worst 19.56 ms (present 17.87, log 1.04), 27 over 16.7; widest gap 19.6 ms, waited 9.55 ms a frame, 228 sprites, gpu no frame timed
+ 14s 60.2 fps, 139067 triangles a frame,  52.8 mph, memory 503 MB (6152 MB left, GPU 236 MB)
+     bike particles: Rear Tire Dirt 7, Rear Tire Dirt Spray 11, Rear Tire Chunks 19, Rear Tire Collision Chunks 11
+     ms a frame: input 0.29 sim 0.84 stream 0.07 scene 0.07 hud 0.43 present 14.79, all 16.61; worst 26.23 ms (present 23.72, sim 1.54), 29 over 16.7; widest gap 26.3 ms, waited 9.35 ms a frame, 229 sprites, gpu no frame timed
+ 15s 60.0 fps, 107526 triangles a frame,  47.7 mph, memory 502 MB (6153 MB left, GPU 236 MB)
+     bike particles: Rear Tire Dirt Spray 15, Rear Tire Chunks 8, Rear Tire Collision Chunks 13
+     ms a frame: input 0.23 sim 0.80 stream 0.07 scene 0.07 hud 0.40 present 14.98, all 16.68; worst 21.06 ms (present 20.55, hud 0.44), 32 over 16.7; widest gap 21.1 ms, waited 9.73 ms a frame, 229 sprites, gpu no frame timed
+ 16s 60.0 fps,  72869 triangles a frame,  42.5 mph, memory 500 MB (6155 MB left, GPU 236 MB)
+     bike particles: Rear Tire Dirt Spray 36, Rear Tire Chunks 22, Rear Tire Collision Chunks 11
+     ms a frame: input 0.27 sim 0.79 stream 0.07 scene 0.08 hud 0.39 present 14.95, all 16.67; worst 19.68 ms (present 19.21, hud 0.39), 30 over 16.7; widest gap 19.7 ms, waited 9.60 ms a frame, 229 sprites, gpu no frame timed
+ 17s 60.0 fps,  75971 triangles a frame,  35.7 mph, memory 502 MB (6153 MB left, GPU 236 MB)
+     bike particles: Foot Spray 7, Front Tire Dirt 5, Rear Tire Dirt 7, Rear Tire Collision Chunks 8
+     ms a frame: input 0.22 sim 0.80 stream 0.08 scene 0.08 hud 0.39 present 14.99, all 16.67; worst 20.61 ms (present 18.90, hud 1.63), 28 over 16.7; widest gap 20.7 ms, waited 9.77 ms a frame, 229 sprites, gpu no frame timed
+ 18s 60.0 fps, 144786 triangles a frame,  40.9 mph, memory 505 MB (6150 MB left, GPU 236 MB)
+     bike particles: Rear Tire Dirt 3, Rear Tire Dirt Spray 35, Rear Tire Chunks 23, Rear Tire Collision Chunks 14
+     ms a frame: input 0.24 sim 0.86 stream 0.07 ground 0.06 scene 0.08 hud 0.39 present 14.89, all 16.67; worst 19.69 ms (present 19.24, hud 0.38), 29 over 16.7; widest gap 19.7 ms, waited 9.65 ms a frame, 229 sprites, gpu no frame timed
+ 19s 60.0 fps, 174157 triangles a frame,  39.5 mph, memory 506 MB (6149 MB left, GPU 236 MB)
+     bike particles: Front Tire Dirt 13, Rear Tire Dirt 4, Rear Tire Dirt Spray 20, Rear Tire Chunks 9, Rear Tire Collision Chunks 12
+     ms a frame: input 0.25 sim 0.92 stream 0.07 scene 0.08 hud 0.42 present 14.81, all 16.68; worst 19.52 ms (present 18.95, hud 0.50), 32 over 16.7; widest gap 19.5 ms, waited 9.20 ms a frame, 228 sprites, gpu no frame timed
+ 20s 60.0 fps, 140115 triangles a frame,  39.7 mph, memory 505 MB (6150 MB left, GPU 236 MB)
+     bike particles: Rear Tire Dirt Spray 25, Rear Tire Chunks 25, Rear Tire Collision Chunks 21
+     ms a frame: input 0.30 sim 1.02 stream 0.07 scene 0.09 hud 0.43 present 14.66, all 16.69; worst 19.44 ms (present 18.11, log 0.75), 28 over 16.7; widest gap 19.5 ms, waited 8.89 ms a frame, 229 sprites, gpu no frame timed
+ 21s 60.1 fps, 123740 triangles a frame,  35.0 mph, memory 508 MB (6147 MB left, GPU 236 MB)
+     bike particles: Front Tire Dirt 11, Rear Tire Dirt 10, Rear Tire Dirt Spray 11, Rear Tire Chunks 16, Rear Tire Collision Chunks 15
+     ms a frame: input 0.29 sim 1.15 stream 0.08 anim 0.05 ground 0.09 scene 0.09 hud 0.52 present 14.31, all 16.65; worst 21.27 ms (present 19.21, ground 1.57), 32 over 16.7; widest gap 21.3 ms, waited 8.51 ms a frame, 228 sprites, gpu no frame timed
+ 22s 60.1 fps, 139712 triangles a frame,  36.5 mph, memory 508 MB (6147 MB left, GPU 236 MB)
+     bike particles: Rear Tire Dirt Spray 47, Rear Tire Chunks 38, Rear Tire Collision Chunks 16
+     ms a frame: input 0.26 sim 1.01 stream 0.07 anim 0.07 scene 0.09 hud 0.47 present 14.60, all 16.65; worst 18.56 ms (present 15.00, sim 1.67), 29 over 16.7; widest gap 18.6 ms, waited 9.06 ms a frame, 229 sprites, gpu no frame timed
+ 23s 59.9 fps, 141059 triangles a frame,  27.4 mph, memory 509 MB (6146 MB left, GPU 236 MB)
+     bike particles: Front Tire Dirt 11, Rear Tire Dirt Spray 62, Rear Tire Chunks 67, Rear Tire Collision Chunks 27
+     ms a frame: input 0.25 sim 1.02 stream 0.07 scene 0.10 hud 0.47 present 14.66, all 16.70; worst 21.79 ms (present 18.64, sim 1.85), 30 over 16.7; widest gap 21.8 ms, waited 9.01 ms a frame, 227 sprites, gpu no frame timed
+ 24s 60.1 fps, 141979 triangles a frame,  40.3 mph, memory 508 MB (6147 MB left, GPU 236 MB)
+     bike particles: Front Tire Dirt 15, Rear Tire Dirt 13, Rear Tire Collision Chunks 13
+     ms a frame: input 0.26 sim 0.89 stream 0.07 scene 0.09 hud 0.50 present 14.72, all 16.65; worst 21.67 ms (present 19.98, hud 1.61), 29 over 16.7; widest gap 21.7 ms, waited 9.25 ms a frame, 228 sprites, gpu no frame timed
+     ms a frame: input 0.25 sim 1.10 stream 0.07 scene 0.11 hud 0.47 present 14.55, all 16.68; worst 21.20 ms (present 20.51, hud 0.58), 30 over 16.7; widest gap 21.4 ms, waited 9.15 ms a frame, 228 sprites, gpu no frame timed
+ 25s 59.9 fps, 139661 triangles a frame,  33.4 mph, memory 508 MB (6147 MB left, GPU 236 MB)
+     bike particles: Rear Tire Collision Chunks 9
+     ms a frame: input 0.24 sim 1.19 stream 0.08 scene 0.09 hud 0.47 present 14.51, all 16.71; worst 20.05 ms (present 18.81, hud 0.97), 29 over 16.7; widest gap 20.1 ms, waited 9.11 ms a frame, 227 sprites, gpu no frame timed
+ 26s 60.0 fps, 123645 triangles a frame,  38.8 mph, memory 505 MB (6150 MB left, GPU 236 MB)
+     bike particles: Rear Tire Collision Chunks 2
+     ms a frame: input 0.37 sim 0.89 stream 0.08 anim 0.06 scene 0.08 hud 0.46 present 14.59, all 16.62; worst 20.86 ms (present 20.12, hud 0.63), 31 over 16.7; widest gap 20.9 ms, waited 9.30 ms a frame, 228 sprites, gpu no frame timed
+ 27s 60.1 fps, 105531 triangles a frame,  25.3 mph, memory 505 MB (6150 MB left, GPU 236 MB)
+     bike particles: Rear Tire Collision Chunks 5
+     ms a frame: input 0.27 sim 0.89 stream 0.07 scene 0.11 hud 0.45 present 14.78, all 16.69; worst 18.86 ms (present 18.30, hud 0.47), 30 over 16.7; widest gap 19.1 ms, waited 9.71 ms a frame, 228 sprites, gpu no frame timed
+ 28s 59.9 fps, 105400 triangles a frame,  27.3 mph, memory 503 MB (6152 MB left, GPU 236 MB)
+     bike particles: Rear Tire Dirt 8, Rear Tire Dirt Spray 78, Rear Tire Chunks 65, Rear Tire Collision Chunks 26
+     ms a frame: input 0.30 sim 0.81 stream 0.07 scene 0.13 hud 0.50 present 14.73, all 16.66; worst 19.84 ms (present 19.34, hud 0.40), 33 over 16.7; widest gap 19.8 ms, waited 9.34 ms a frame, 228 sprites, gpu no frame timed
+ 29s 60.1 fps, 105319 triangles a frame,  28.3 mph, memory 503 MB (6152 MB left, GPU 236 MB)
+     bike particles: Rear Tire Collision Chunks 15
+     ms a frame: input 0.24 sim 0.85 stream 0.08 scene 0.10 hud 0.49 present 14.79, all 16.65; worst 22.38 ms (present 19.75, sim 1.53), 30 over 16.7; widest gap 22.4 ms, waited 9.55 ms a frame, 228 sprites, gpu no frame timed
+ 30s 59.9 fps, 106143 triangles a frame,  44.4 mph, memory 503 MB (6152 MB left, GPU 236 MB)
+     bike particles: Front Tire Dirt 8, Rear Tire Dirt 9, Rear Tire Dirt Spray 36, Rear Tire Chunks 21, Rear Tire Collision Chunks 8
+     ms a frame: input 0.25 sim 0.86 stream 0.07 scene 0.07 hud 0.58 present 14.73, all 16.68; worst 22.65 ms (present 19.28, sim 1.80), 33 over 16.7; widest gap 22.7 ms, waited 9.27 ms a frame, 228 sprites, gpu no frame timed
+ 31s 60.1 fps, 114021 triangles a frame,  32.6 mph, memory 503 MB (6152 MB left, GPU 236 MB)
+     bike particles: Front Tire Dirt 12, Rear Tire Dirt 16, Rear Tire Collision Chunks 8
+     ms a frame: input 0.23 sim 0.82 stream 0.08 ground 0.08 scene 0.07 hud 0.45 present 14.89, all 16.70; worst 23.33 ms (present 21.68, hud 1.58), 29 over 16.7; widest gap 23.4 ms, waited 9.20 ms a frame, 228 sprites, gpu no frame timed
+ 32s 60.0 fps, 168557 triangles a frame,  34.9 mph, memory 508 MB (6147 MB left, GPU 236 MB)
+     bike particles: Rear Tire Collision Chunks 33
+     ms a frame: input 0.28 sim 0.86 stream 0.07 scene 0.08 hud 0.46 present 14.78, all 16.64; worst 19.52 ms (present 16.40, sim 2.08), 26 over 16.7; widest gap 19.5 ms, waited 9.24 ms a frame, 228 sprites, gpu no frame timed
+ 33s 60.0 fps, 141079 triangles a frame,  38.1 mph, memory 503 MB (6152 MB left, GPU 236 MB)
+     bike particles: Rear Tire Dirt Spray 67, Rear Tire Chunks 66, Rear Tire Collision Chunks 39
+     ms a frame: input 0.23 sim 0.86 stream 0.08 scene 0.09 hud 0.43 present 14.85, all 16.67; worst 19.82 ms (present 19.25, hud 0.49), 28 over 16.7; widest gap 19.9 ms, waited 9.48 ms a frame, 227 sprites, gpu no frame timed
+ 34s 60.0 fps, 150078 triangles a frame,  28.0 mph, memory 503 MB (6152 MB left, GPU 236 MB)
+     bike particles: Foot Spray 9, Front Tire Dirt 12, Rear Tire Dirt 13, Rear Tire Collision Chunks 23
+     ms a frame: input 0.25 sim 0.90 stream 0.07 scene 0.09 hud 0.43 present 14.82, all 16.68; worst 18.80 ms (present 18.18, hud 0.53), 30 over 16.7; widest gap 18.8 ms, waited 9.36 ms a frame, 227 sprites, gpu no frame timed
+ 35s 60.1 fps, 171359 triangles a frame,  40.0 mph, memory 503 MB (6152 MB left, GPU 236 MB)
+     bike particles: Foot Spray 17, Front Tire Dirt 15, Rear Tire Dirt 13, Rear Tire Dirt Spray 156, Rear Tire Chunks 141, Rear Tire Collision Chunks 41
+     ms a frame: input 0.25 sim 0.88 stream 0.07 scene 0.08 hud 0.47 present 14.75, all 16.65; worst 20.27 ms (present 19.20, hud 0.98), 29 over 16.7; widest gap 20.3 ms, waited 9.42 ms a frame, 228 sprites, gpu no frame timed
+ 36s 60.1 fps, 127081 triangles a frame,  36.9 mph, memory 503 MB (6152 MB left, GPU 236 MB)
+     bike particles: Rear Tire Collision Chunks 56
+     ms a frame: input 0.26 sim 0.89 stream 0.08 scene 0.08 hud 0.43 present 14.83, all 16.68; worst 18.77 ms (present 18.16, hud 0.53), 32 over 16.7; widest gap 18.8 ms, waited 9.88 ms a frame, 228 sprites, gpu no frame timed
+ 37s 60.0 fps, 111555 triangles a frame,  35.7 mph, memory 503 MB (6152 MB left, GPU 236 MB)
+     bike particles: Rear Tire Collision Chunks 13
+     ms a frame: input 0.24 sim 0.90 stream 0.07 scene 0.07 hud 0.45 present 14.84, all 16.71; worst 18.09 ms (present 15.28, sim 1.73), 30 over 16.7; widest gap 18.1 ms, waited 9.77 ms a frame, 227 sprites, gpu no frame timed
+ 38s 59.7 fps, 118320 triangles a frame,  42.6 mph, memory 503 MB (6152 MB left, GPU 236 MB)
+     bike particles: Front Tire Dirt 15, Rear Tire Dirt 15, Rear Tire Dirt Spray 189, Rear Tire Chunks 168, Rear Tire Collision Chunks 65
+     ms a frame: input 0.28 sim 0.92 stream 0.07 scene 0.08 hud 0.53 present 14.62, all 16.66; worst 22.41 ms (present 19.31, sim 1.60), 32 over 16.7; widest gap 22.4 ms, waited 9.11 ms a frame, 229 sprites, gpu no frame timed
+ 39s 60.3 fps, 169436 triangles a frame,  48.2 mph, memory 503 MB (6152 MB left, GPU 236 MB)
+     bike particles: Rear Tire Dirt Spray 10, Rear Tire Chunks 9, Rear Tire Collision Chunks 62
+     ms a frame: input 0.33 sim 0.93 stream 0.07 anim 0.06 scene 0.08 hud 0.47 present 14.68, all 16.70; worst 19.21 ms (present 18.59, hud 0.51), 28 over 16.7; widest gap 19.3 ms, waited 9.34 ms a frame, 228 sprites, gpu no frame timed
+ 40s 60.1 fps, 151165 triangles a frame,  39.9 mph, memory 503 MB (6152 MB left, GPU 236 MB)
+     bike particles: Rear Tire Collision Chunks 8
+     ms a frame: input 0.25 sim 0.97 stream 0.07 scene 0.08 hud 0.45 present 14.67, all 16.61; worst 18.14 ms (present 14.17, sim 2.65), 29 over 16.7; widest gap 18.2 ms, waited 9.52 ms a frame, 227 sprites, gpu no frame timed
+ 41s 59.9 fps, 139988 triangles a frame,  43.8 mph, memory 503 MB (6152 MB left, GPU 236 MB)
+     bike particles: Front Tire Dirt 4, Rear Tire Dirt 14, Rear Tire Collision Chunks 1
+     ms a frame: input 0.27 sim 1.00 stream 0.07 scene 0.07 hud 0.51 present 14.63, all 16.66; worst 20.46 ms (present 17.08, sim 2.33), 31 over 16.7; widest gap 20.5 ms, waited 9.37 ms a frame, 229 sprites, gpu no frame timed
+ 42s 60.1 fps, 139252 triangles a frame,  45.0 mph, memory 504 MB (6151 MB left, GPU 236 MB)
+     bike particles: Rear Tire Chunks 12, Rear Tire Collision Chunks 5
+     ms a frame: input 0.26 sim 1.31 stream 0.07 scene 0.09 hud 0.50 present 14.33, all 16.68; worst 19.70 ms (present 18.83, hud 0.79), 31 over 16.7; widest gap 19.7 ms, waited 9.08 ms a frame, 230 sprites, gpu no frame timed
+ 43s 60.1 fps, 138879 triangles a frame,  39.1 mph, memory 503 MB (6152 MB left, GPU 236 MB)
+     bike particles: Rear Tire Collision Chunks 3
+     ms a frame: input 0.29 sim 1.19 stream 0.08 scene 0.08 hud 0.51 present 14.40, all 16.69; worst 21.38 ms (present 17.97, sim 2.40), 26 over 16.7; widest gap 21.4 ms, waited 9.08 ms a frame, 228 sprites, gpu no frame timed
+ 44s 60.0 fps, 125955 triangles a frame,  44.7 mph, memory 506 MB (6149 MB left, GPU 236 MB)
+     bike particles: none
+     ms a frame: input 0.26 sim 0.86 stream 0.07 scene 0.09 hud 0.56 present 14.69, all 16.65; worst 21.94 ms (present 18.80, sim 1.54), 33 over 16.7; widest gap 22.1 ms, waited 9.50 ms a frame, 228 sprites, gpu no frame timed
+ 45s 60.0 fps, 105685 triangles a frame,  32.1 mph, memory 506 MB (6149 MB left, GPU 236 MB)
+     bike particles: Foot Spray 9, Front Tire Dirt 14, Rear Tire Dirt 14, Rear Tire Collision Chunks 9
+     ms a frame: input 0.25 sim 0.83 stream 0.07 ground 0.06 scene 0.07 hud 0.50 present 14.81, all 16.68; worst 24.10 ms (present 23.70, hud 0.31), 33 over 16.7; widest gap 24.1 ms, waited 9.33 ms a frame, 228 sprites, gpu no frame timed
+ 46s 60.0 fps, 157357 triangles a frame,  40.9 mph, memory 509 MB (6146 MB left, GPU 236 MB)
+     bike particles: Foot Spray 9, Front Tire Dirt 17, Rear Tire Dirt 15, Rear Tire Dirt Spray 123, Rear Tire Chunks 115, Rear Tire Collision Chunks 88
+     ms a frame: input 0.25 sim 0.86 stream 0.07 scene 0.07 hud 0.47 present 14.86, all 16.68; worst 21.10 ms (present 18.15, sim 1.73), 37 over 16.7; widest gap 21.1 ms, waited 9.16 ms a frame, 229 sprites, gpu no frame timed
+ 47s 60.0 fps, 175130 triangles a frame,  46.1 mph, memory 509 MB (6146 MB left, GPU 236 MB)
+     bike particles: Front Tire Dirt 14, Rear Tire Dirt 13, Rear Tire Collision Chunks 59
+     ms a frame: input 0.25 sim 1.01 stream 0.08 scene 0.08 hud 0.47 present 14.66, all 16.66; worst 21.80 ms (present 21.13, hud 0.54), 26 over 16.7; widest gap 21.8 ms, waited 8.83 ms a frame, 230 sprites, gpu no frame timed
+ 48s 60.0 fps, 174600 triangles a frame,  43.2 mph, memory 506 MB (6149 MB left, GPU 236 MB)
+     bike particles: Rear Tire Collision Chunks 31
+     ms a frame: input 0.24 sim 0.89 stream 0.07 scene 0.07 hud 0.45 present 14.80, all 16.62; worst 21.75 ms (present 18.01, sim 2.57), 25 over 16.7; widest gap 22.8 ms, waited 9.34 ms a frame, 228 sprites, gpu no frame timed
+ 50s 60.1 fps, 154989 triangles a frame,  44.5 mph, memory 506 MB (6149 MB left, GPU 236 MB)
+     bike particles: Rear Tire Collision Chunks 5
+     ms a frame: input 0.26 sim 0.91 stream 0.07 scene 0.08 hud 0.44 present 14.82, all 16.71; worst 21.44 ms (present 19.63, sim 1.07), 29 over 16.7; widest gap 21.5 ms, waited 9.51 ms a frame, 229 sprites, gpu no frame timed
+ 51s 59.9 fps, 140106 triangles a frame,  34.5 mph, memory 504 MB (6151 MB left, GPU 236 MB)
+     bike particles: Rear Tire Collision Chunks 27
+     ms a frame: input 0.30 sim 1.04 stream 0.07 anim 0.05 scene 0.08 hud 0.46 present 14.61, all 16.68; worst 20.06 ms (present 19.37, hud 0.60), 28 over 16.7; widest gap 20.1 ms, waited 9.33 ms a frame, 229 sprites, gpu no frame timed
+ 52s 59.8 fps, 139917 triangles a frame,  35.7 mph, memory 504 MB (6151 MB left, GPU 236 MB)
+     bike particles: Rear Tire Collision Chunks 7
+iOS UIApplicationWillResignActiveNotification (1 controllers)
+settings: saved in /private/var/mobile/Containers/Data/Application/C1D67FFA-5FB6-4934-834D-2371F2B8FCBD/Documents (away)
+ios: away, the frame loop rests
+ 53s 38.4 fps, 125316 triangles a frame,  32.0 mph (frozen), memory 504 MB (6151 MB left, GPU 237 MB)
+     bike particles: none
+     ms a frame: input 0.30 sim 0.73 stream 0.12 scene 0.07 hud 0.42 present 23.91, all 25.66; worst 107.40 ms (present 105.32, stream 0.71), 21 over 16.7; widest gap 107.4 ms, waited 11.19 ms a frame, 602 sprites, gpu no frame timed
+settings: saved in /private/var/mobile/Containers/Data/Application/C1D67FFA-5FB6-4934-834D-2371F2B8FCBD/Documents (away)
+away: gave back 105 models, 81 materials and 75 textures in the background
+iOS UIApplicationDidEnterBackgroundNotification: answered after 108 ms, memory 392 MB, 6263 MB left before iOS closes the app
+audio: UIApplicationDidEnterBackgroundNotification (Background): other audio true, restart 0
+ 54s  9.5 fps,      0 triangles a frame,  32.0 mph (frozen), memory 392 MB (6263 MB left, GPU 206 MB)
+     bike particles: none
+     ms a frame: input 0.93 sim 0.15 stream 0.22 hud 0.36 present 104.03, all 105.77; worst 113.39 ms (present 111.81, input 0.93), 10 over 16.7; widest gap 113.4 ms, waited 22.62 ms a frame, 602 sprites, gpu no frame timed
+iOS UIApplicationWillEnterForegroundNotification, memory 382 MB, 6273 MB left before iOS closes the app
+iOS GCControllerDidDisconnectNotification (0 controllers)
+iOS GCControllerDidConnectNotification (1 controllers)
+123s  0.1 fps,      0 triangles a frame,  32.0 mph (frozen), memory 382 MB (6273 MB left, GPU 207 MB)
+     bike particles: none
+     ms a frame: input 0.50 sim 0.20 stream 0.27 hud 0.40 present 11636.66, all 11638.14; worst 69303.02 ms (present 69301.77, input 0.40), 6 over 16.7; widest gap 69303.2 ms, waited 22.62 ms a frame, 602 sprites, gpu no frame timed
+iOS UIApplicationDidBecomeActiveNotification (1 controllers)
+audio: UIApplicationDidBecomeActiveNotification (Active): other audio true, restart 1
+ios: back, the frame loop rested 71.4 s
+sound: the AudioQueue started again (1, session active)
+settings: saved in /private/var/mobile/Containers/Data/Application/C1D67FFA-5FB6-4934-834D-2371F2B8FCBD/Documents
+music: playing mod:untamed_music/soul_crusher_operator
+124s 55.3 fps, 103616 triangles a frame,  32.0 mph (frozen), memory 523 MB (6132 MB left, GPU 226 MB)
+     bike particles: none
+     ms a frame: input 0.22 menu 0.05 stream 0.08 scene 0.06 hud 0.43 present 17.18, all 18.10; worst 105.34 ms (present 103.07, hud 0.80), 23 over 16.7; widest gap 105.2 ms, waited 11.26 ms a frame, 604 sprites, gpu no frame timed
+125s 60.0 fps, 107451 triangles a frame,  32.0 mph (frozen), memory 515 MB (6140 MB left, GPU 226 MB)
+     bike particles: none
+     ms a frame: input 0.22 sim 0.07 stream 0.07 hud 0.44 present 15.76, all 16.67; worst 21.25 ms (present 19.91, input 0.69), 29 over 16.7; widest gap 21.3 ms, waited 12.02 ms a frame, 604 sprites, gpu no frame timed
+126s 59.9 fps, 107453 triangles a frame,  32.0 mph (frozen), memory 515 MB (6140 MB left, GPU 226 MB)
+     bike particles: none
+     ms a frame: input 0.24 sim 0.07 stream 0.09 hud 0.71 present 15.46, all 16.69; worst 25.46 ms (present 23.59, hud 1.10), 32 over 16.7; widest gap 25.5 ms, waited 10.86 ms a frame, 641 sprites, gpu no frame timed
+127s 59.0 fps, 107452 triangles a frame,  32.0 mph (frozen), memory 509 MB (6146 MB left, GPU 226 MB)
+     bike particles: none
+     ms a frame: input 0.24 sim 0.06 stream 0.09 hud 0.76 present 15.67, all 16.94; worst 32.43 ms (present 30.60, input 0.72), 33 over 16.7; widest gap 32.4 ms, waited 10.88 ms a frame, 732 sprites, gpu no frame timed
+128s 59.9 fps, 107453 triangles a frame,  32.0 mph (frozen), memory 490 MB (6165 MB left, GPU 226 MB)
+     bike particles: none
+     ms a frame: input 0.21 sim 0.06 stream 0.10 hud 0.78 present 15.45, all 16.70; worst 19.17 ms (present 17.89, hud 0.67), 30 over 16.7; widest gap 19.2 ms, waited 10.59 ms a frame, 732 sprites, gpu no frame timed
+129s 60.1 fps, 107452 triangles a frame,  32.0 mph (frozen), memory 490 MB (6165 MB left, GPU 226 MB)
+     bike particles: none
+     ms a frame: input 0.21 stream 0.08 hud 0.75 present 15.43, all 16.64; worst 24.63 ms (present 23.39, hud 1.18), 33 over 16.7; widest gap 24.7 ms, waited 10.58 ms a frame, 732 sprites, gpu no frame timed
+biplane: mxvatv_fliers's sounds, 7 engine loops, 5 wreck, 1 touchdown
+garage: saved in /private/var/mobile/Containers/Data/Application/C1D67FFA-5FB6-4934-834D-2371F2B8FCBD/Documents
+vehicle: biplane
+skin: P1 biplane Plane 4 (biplane4) from mxvatv_fliers
+markers: kept in /private/var/mobile/Containers/Data/Application/C1D67FFA-5FB6-4934-834D-2371F2B8FCBD/Documents/markers/sx01/Fizlo.markers
+markers: kept in /private/var/mobile/Containers/Data/Application/C1D67FFA-5FB6-4934-834D-2371F2B8FCBD/Documents/markers/sx01/Fizlo.biplane.markers
+131s 55.1 fps, 108750 triangles a frame,   2.1 mph (biplane), memory 510 MB (6145 MB left, GPU 229 MB)
+     plane at 498, 89, 277: throttle 13%, airspeed 2.1 mph, on the ground
+     particles: Vehicle Dust 0, Vehicle Chunks 0, Smoke 1, Left Exhaust 12, Right Exhaust 11, Front Left Tire Dust 0, Front Right Tire Dust 0, Rear Tire Dust 0, Dust 59
+     ms a frame: input 0.17 menu 1.87 sim 0.30 stream 0.07 hud 0.50 present 15.18, all 18.16; worst 106.41 ms (menu 104.52, sim 0.57), 30 over 16.7; widest gap 106.4 ms, waited 11.50 ms a frame, 732 sprites, gpu no frame timed
+132s 60.0 fps, 108632 triangles a frame,  10.8 mph (biplane), memory 511 MB (6144 MB left, GPU 230 MB)
+     plane at 495, 89, 268: throttle 50%, airspeed 10.8 mph, on the ground
+     particles: Vehicle Dust 0, Vehicle Chunks 0, Smoke 0, Left Exhaust 18, Right Exhaust 18, Front Left Tire Dust 5, Front Right Tire Dust 4, Rear Tire Dust 3, Dust 60
+     ms a frame: input 0.24 sim 0.44 stream 0.07 hud 0.52 present 15.29, all 16.68; worst 22.28 ms (present 20.34, sim 0.90), 31 over 16.7; widest gap 22.3 ms, waited 10.65 ms a frame, 238 sprites, gpu no frame timed
+133s 60.1 fps,  76265 triangles a frame,  28.0 mph (biplane), memory 500 MB (6155 MB left, GPU 229 MB)
+     plane at 488, 92, 240: throttle 90%, airspeed 28.0 mph, on the ground
+     particles: Vehicle Dust 0, Vehicle Chunks 0, Smoke 11, Left Exhaust 11, Right Exhaust 6, Front Left Tire Dust 185, Front Right Tire Dust 69, Rear Tire Dust 37, Dust 62
+     ms a frame: input 0.21 sim 0.48 stream 0.08 hud 0.48 present 15.29, all 16.65; worst 20.17 ms (present 19.48, hud 0.65), 34 over 16.7; widest gap 21.0 ms, waited 10.63 ms a frame, 238 sprites, gpu no frame timed
+134s 60.0 fps,  76791 triangles a frame,  40.7 mph (biplane), memory 501 MB (6154 MB left, GPU 230 MB)
+     plane at 466, 130, 211: throttle 100%, airspeed 40.7 mph, in the air
+     particles: Vehicle Dust 1, Vehicle Chunks 4, Smoke 67, Left Exhaust 0, Right Exhaust 0, Front Left Tire Dust 0, Front Right Tire Dust 28, Rear Tire Dust 0, Dust 50
+     ms a frame: input 0.25 sim 0.47 stream 0.08 hud 0.69 present 15.08, all 16.68; worst 19.28 ms (present 18.67, hud 0.57), 33 over 16.7; widest gap 19.3 ms, waited 10.37 ms a frame, 238 sprites, gpu no frame timed
+135s 60.1 fps, 109717 triangles a frame,  53.8 mph (biplane), memory 503 MB (6152 MB left, GPU 229 MB)
+     plane at 422, 183, 194: throttle 100%, airspeed 53.8 mph, in the air
+     particles: Vehicle Dust 1, Vehicle Chunks 1, Smoke 96, Left Exhaust 0, Right Exhaust 0, Front Left Tire Dust 0, Front Right Tire Dust 0, Rear Tire Dust 0, Dust 8
+     ms a frame: input 0.20 sim 0.41 stream 0.06 hud 0.58 present 15.30, all 16.65; worst 24.51 ms (present 21.65, sim 1.49), 32 over 16.7; widest gap 25.0 ms, waited 11.10 ms a frame, 226 sprites, gpu no frame timed
+136s 59.9 fps, 109451 triangles a frame,  57.3 mph (biplane), memory 503 MB (6152 MB left, GPU 229 MB)
+     plane at 372, 247, 178: throttle 100%, airspeed 57.3 mph, in the air
+     particles: Vehicle Dust 0, Vehicle Chunks 0, Smoke 101, Left Exhaust 0, Right Exhaust 0, Front Left Tire Dust 0, Front Right Tire Dust 0, Rear Tire Dust 0, Dust 0
+     ms a frame: input 0.28 sim 0.45 stream 0.07 hud 0.80 present 15.00, all 16.70; worst 21.84 ms (present 21.22, hud 0.57), 31 over 16.7; widest gap 21.9 ms, waited 10.01 ms a frame, 226 sprites, gpu no frame timed
+137s 60.1 fps,  99422 triangles a frame,  58.9 mph (biplane), memory 498 MB (6157 MB left, GPU 229 MB)
+     plane at 341, 326, 184: throttle 100%, airspeed 58.9 mph, in the air
+     particles: Vehicle Dust 0, Vehicle Chunks 0, Smoke 98, Left Exhaust 0, Right Exhaust 0, Front Left Tire Dust 0, Front Right Tire Dust 0, Rear Tire Dust 0, Dust 0
+     ms a frame: input 0.28 sim 0.47 stream 0.07 hud 0.74 present 14.98, all 16.65; worst 18.92 ms (present 18.38, hud 0.50), 31 over 16.7; widest gap 19.0 ms, waited 10.25 ms a frame, 226 sprites, gpu no frame timed
+138s 59.9 fps,  76339 triangles a frame,  62.3 mph (biplane), memory 498 MB (6157 MB left, GPU 229 MB)
+     plane at 287, 392, 195: throttle 100%, airspeed 62.3 mph, in the air
+     particles: Vehicle Dust 0, Vehicle Chunks 0, Smoke 94, Left Exhaust 0, Right Exhaust 0, Front Left Tire Dust 0, Front Right Tire Dust 0, Rear Tire Dust 0, Dust 0
+     ms a frame: input 0.25 sim 0.48 stream 0.07 hud 0.63 present 15.16, all 16.70; worst 18.92 ms (present 16.47, sim 0.95), 25 over 16.7; widest gap 19.0 ms, waited 10.31 ms a frame, 226 sprites, gpu no frame timed
+139s 60.1 fps,  75609 triangles a frame,  73.6 mph (biplane), memory 498 MB (6157 MB left, GPU 229 MB)
+     plane at 190, 401, 194: throttle 100%, airspeed 73.6 mph, in the air
+     particles: Vehicle Dust 0, Vehicle Chunks 0, Smoke 103, Left Exhaust 0, Right Exhaust 0, Front Left Tire Dust 0, Front Right Tire Dust 0, Rear Tire Dust 0, Dust 0
+     ms a frame: input 0.22 sim 0.50 stream 0.07 hud 0.67 present 15.08, all 16.63; worst 22.28 ms (present 20.87, hud 1.36), 31 over 16.7; widest gap 22.3 ms, waited 10.70 ms a frame, 226 sprites, gpu no frame timed
+140s 60.1 fps, 103516 triangles a frame,  88.3 mph (biplane), memory 498 MB (6157 MB left, GPU 229 MB)
+     plane at 165, 472, 233: throttle 21%, airspeed 88.3 mph, in the air
+     particles: Vehicle Dust 0, Vehicle Chunks 0, Smoke 66, Left Exhaust 0, Right Exhaust 0, Front Left Tire Dust 0, Front Right Tire Dust 0, Rear Tire Dust 0, Dust 0
+     ms a frame: input 0.17 sim 0.41 hud 0.39 present 15.52, all 16.65; worst 18.67 ms (present 17.51, sim 0.58), 31 over 16.7; widest gap 18.7 ms, waited 11.87 ms a frame, 228 sprites, gpu no frame timed
+141s 59.9 fps, 109473 triangles a frame,  50.6 mph (biplane), memory 498 MB (6157 MB left, GPU 229 MB)
+     plane at 204, 562, 255: throttle 59%, airspeed 50.6 mph, in the air
+     particles: Vehicle Dust 0, Vehicle Chunks 0, Smoke 11, Left Exhaust 0, Right Exhaust 0, Front Left Tire Dust 0, Front Right Tire Dust 0, Rear Tire Dust 0, Dust 0
+     ms a frame: input 0.15 sim 0.34 hud 0.33 present 15.75, all 16.70; worst 21.83 ms (present 19.99, sim 0.85), 29 over 16.7; widest gap 21.8 ms, waited 12.50 ms a frame, 226 sprites, gpu no frame timed
+142s 60.0 fps, 109134 triangles a frame,  31.5 mph (frozen), memory 499 MB (6156 MB left, GPU 229 MB)
+     plane at 227, 592, 270: throttle 64%, airspeed 31.5 mph, in the air
+     particles: Vehicle Dust 0, Vehicle Chunks 0, Smoke 0, Left Exhaust 0, Right Exhaust 0, Front Left Tire Dust 0, Front Right Tire Dust 0, Rear Tire Dust 0, Dust 0
+     ms a frame: input 0.20 sim 0.36 stream 0.08 hud 0.59 present 15.34, all 16.66; worst 20.39 ms (present 19.07, hud 0.68), 34 over 16.7; widest gap 20.4 ms, waited 10.87 ms a frame, 634 sprites, gpu no frame timed
+vehicle: bike
+markers: kept in /private/var/mobile/Containers/Data/Application/C1D67FFA-5FB6-4934-834D-2371F2B8FCBD/Documents/markers/sx01/Fizlo.markers
+markers: kept in /private/var/mobile/Containers/Data/Application/C1D67FFA-5FB6-4934-834D-2371F2B8FCBD/Documents/markers/sx01/Fizlo.biplane.markers
+143s 59.9 fps,  78315 triangles a frame,   1.7 mph, memory 498 MB (6157 MB left, GPU 229 MB)
+     bike particles: Exhuast 7, Rear Tire Dirt Spray 16, Rear Tire Chunks 15, Rear Tire Collision Chunks 10
+     ms a frame: input 0.20 sim 0.53 stream 0.08 hud 0.66 present 15.04, all 16.71; worst 19.10 ms (present 18.60, hud 0.45), 30 over 16.7; widest gap 19.1 ms, waited 10.42 ms a frame, 647 sprites, gpu no frame timed
+144s 60.2 fps,  77547 triangles a frame,  17.0 mph, memory 503 MB (6152 MB left, GPU 229 MB)
+     bike particles: Exhuast 1, Rear Tire Dirt 15, Rear Tire Dirt Spray 148, Rear Tire Chunks 125, Rear Tire Collision Chunks 112
+     ms a frame: input 0.25 sim 0.77 stream 0.06 scene 0.05 hud 0.57 present 14.78, all 16.63; worst 23.76 ms (present 21.05, sim 1.60), 29 over 16.7; widest gap 23.9 ms, waited 9.99 ms a frame, 240 sprites, gpu no frame timed
+145s 60.0 fps,  74258 triangles a frame,  46.3 mph, memory 503 MB (6152 MB left, GPU 229 MB)
+     bike particles: Front Tire Dirt 15, Rear Tire Dirt 15, Rear Tire Collision Chunks 53
+     ms a frame: input 0.23 sim 0.87 stream 0.06 scene 0.06 hud 0.53 present 14.82, all 16.67; worst 21.60 ms (present 20.88, hud 0.63), 29 over 16.7; widest gap 21.6 ms, waited 9.94 ms a frame, 241 sprites, gpu no frame timed
+146s 60.0 fps,  94674 triangles a frame,  46.7 mph, memory 498 MB (6157 MB left, GPU 229 MB)
+     bike particles: Rear Tire Dirt Spray 19, Rear Tire Chunks 9, Rear Tire Collision Chunks 12
+     ms a frame: input 0.20 sim 0.84 stream 0.07 scene 0.07 hud 0.56 present 14.85, all 16.68; worst 18.97 ms (present 18.48, hud 0.42), 33 over 16.7; widest gap 19.0 ms, waited 9.89 ms a frame, 241 sprites, gpu no frame timed
+147s 60.0 fps, 105390 triangles a frame,  49.7 mph, memory 498 MB (6157 MB left, GPU 229 MB)
+     bike particles: Rear Tire Dirt Spray 13, Rear Tire Chunks 16, Rear Tire Collision Chunks 12
+     ms a frame: input 0.26 sim 0.86 stream 0.07 scene 0.07 hud 0.48 present 14.82, all 16.67; worst 18.38 ms (present 15.74, sim 1.36), 28 over 16.7; widest gap 18.4 ms, waited 9.91 ms a frame, 229 sprites, gpu no frame timed
+148s 60.0 fps,  99153 triangles a frame,  42.2 mph, memory 498 MB (6157 MB left, GPU 229 MB)
+     bike particles: Rear Tire Collision Chunks 32
+     ms a frame: input 0.24 sim 1.02 stream 0.07 scene 0.07 hud 0.51 present 14.67, all 16.69; worst 19.37 ms (present 16.66, sim 1.68), 32 over 16.7; widest gap 19.5 ms, waited 9.67 ms a frame, 228 sprites, gpu no frame timed
+wreck: reason 1 — L1 and R1 together to get back on
+149s 60.2 fps,  92973 triangles a frame,  18.6 mph (down), memory 498 MB (6157 MB left, GPU 229 MB)
+     bike particles: Rear Tire Collision Chunks 6
+     ms a frame: input 0.15 sim 0.68 ground 0.07 scene 0.06 hud 0.31 present 15.24, all 16.60; worst 19.41 ms (present 19.12, hud 0.24), 30 over 16.7; widest gap 19.5 ms, waited 12.03 ms a frame, 227 sprites, gpu no frame timed
+150s 56.9 fps,  89575 triangles a frame,  27.2 mph (frozen), memory 503 MB (6152 MB left, GPU 229 MB)
+     bike particles: none
+     ms a frame: input 0.18 sim 0.34 stream 0.06 hud 0.39 present 16.51, all 17.59; worst 63.88 ms (present 62.60, input 0.46), 32 over 16.7; widest gap 63.9 ms, waited 12.40 ms a frame, 664 sprites, gpu no frame timed
+ridden for 150.1s over 2419 frames, ending at 261.75, 121.09, 1.64
+race: results
+settings: saved in /private/var/mobile/Containers/Data/Application/C1D67FFA-5FB6-4934-834D-2371F2B8FCBD/Documents
+settings: saved in /private/var/mobile/Containers/Data/Application/C1D67FFA-5FB6-4934-834D-2371F2B8FCBD/Documents
+settings: saved in /private/var/mobile/Containers/Data/Application/C1D67FFA-5FB6-4934-834D-2371F2B8FCBD/Documents
+textures: 0 from 0 texture packs, 0 key-named in mods/texture-replacements, 0 PCSX2-named, 0 mods' own upscales
+modifiers: bike_speed=120 plane_accel=110 plane_top_speed=120 plane_ceiling=510
+stunts: 57 on the disc, 24 this rider can do
+tricks: MX vs. ATV's, from mxvatv_tricks then untamed_tricks
+tricks: 19 extra stunts, each on a gesture
+world spawn: mxu_free07 at 9556.0,11855.0
+world: world_mxu (MX Unleashed: WORLD), 27 tiles and 480 joins, 21853 x 19828 feet, lit by mxu_free06
+world wraps: x every 21853 feet and z every 19828 feet, closed by 164 seam joins
+world holes: none, so only the outer edge throws
+Supercross01[Quadzilla]: 577 props, 353 collision shapes, ground 6903 x 6903 feet in 768 x 768 samples
+solid: 353 of 353 collision meshes
+loaded: 33 of 0 models, 10 textures, bike
+tricks: mxvatv_tricks's 360, front flip and whip from mx_pro250p.phy
+wrecks: 1043 bytes of wreck bike, 16916 bytes of rider wreck set
+rider: azonic2 wearing mrider.mcf -> rider.mcf -> mrider.psg, 84 clips bound, 24 of 24 gesture slots, 3 airborne
+rider: 24 of 24 gesture slots and 36 of 36 pose clips for its own machine
+ragdoll: 18 parts off the riding pose
+rider contact: the bikes push each other apart
+tricks: clips from /private/var/mobile/Containers/Data/Application/C1D67FFA-5FB6-4934-834D-2371F2B8FCBD/Documents/mods/tricks/mxvatv_tricks and /private/var/mobile/Containers/Data/Application/C1D67FFA-5FB6-4934-834D-2371F2B8FCBD/Documents/mods/tricks/untamed_tricks for 19 extras and the two 360s: the rider has all 21 of them; the bike has 7 of 21, none for cliffhanger, rocksolid, stalefish, mcmetz, switchblade, nofooter, heelclicker, discocan, nohandeddiscocan, supermanseatgrab, suicidedoublecan, ninjanac, rodeo, doublegrab; the front flip has none in either game: the rider leans forward and the bike stays on its airborne row
+chassis: bike.mcf -> bike.psg, 20 clips bound, 7 of 24 gesture slots, 4 of 36              pose clips, nodes Nodes { root: Some(0), bars: Some(3), shocks: Some(9), front: Some(14), swingarm: Some(5), rear: Some(20) }
+chassis: no bike clip on the disc or in the pack for lazyboy, cancan, nohandedlander, pendulum, hartattack, indianair, barhop, supercan, superman, saranwrap, stalelin, onehandindianair, shoalin, cordova, deadbody, rigamortis, stripper; the rider's hands hold the bars through them
+fliers: P1 biplane Plane 4 (biplane4), from mxvatv_fliers, model 2
+fliers: P2 biplane Plane 4 (biplane4), from mxvatv_fliers, model 2
+machines: 1 biplane, 1 helicopter, 0 buggy, 0 monster, 0 baja for 1 players
+biplane: flies on MX vs. ATV's biplane.phy, on its steps
+biplane: parked by tracks\free06\machine.txt at 9516, 199, 11855 facing 180 degrees
+cars: buggy, monster, baja (switch from the pause); none parked here
+biplane: 5 camera presets in biplanecpresets.ini
+kiowa: 1 of 1 skins loaded, flown from the pause or its bay; 4 camera presets in helocpresets.ini
+cars: 3 of 3 models loaded
+biplane: 1 of 1 liveries loaded
+biplane: mxvatv_fliers's, drawn in biplane4
+biplane: particles: mxvatv_fliers's own Part/biplaneparticles.dat
+biplane: particles: Vehicle Dust (CollisionModel) from "Dust 1"
+biplane: particles: Vehicle Chunks (CollisionModel) from "Chunks 1"
+biplane: particles: Smoke (Generic) from "Smoke 2"
+biplane: particles: Left Exhaust (Exhaust { max_speed: 35.0 }) from "Smoke 1"
+biplane: particles: Right Exhaust (Exhaust { max_speed: 35.0 }) from "Smoke 1"
+biplane: particles: Front Left Tire Dust (Dust(DustKeys { min_compression: 0.0, burst_compression: 0.85, burst: true, growth: 2.0, velocity: 5.0, base: 0.5, scale: 5.0, burst_scale: 5.0, offset: V3 { x: 0.0, y: 0.0, z: 0.0 } })) from "Dust 1"
+biplane: particles: Front Right Tire Dust (Dust(DustKeys { min_compression: 0.0, burst_compression: 0.85, burst: true, growth: 2.0, velocity: 5.0, base: 0.5, scale: 5.0, burst_scale: 5.0, offset: V3 { x: 0.0, y: 0.0, z: 0.0 } })) from "Dust 1"
+biplane: particles: Rear Tire Dust (Dust(DustKeys { min_compression: 0.0, burst_compression: 0.85, burst: true, growth: 2.0, velocity: 5.0, base: 0.5, scale: 5.0, burst_scale: 5.0, offset: V3 { x: 0.0, y: 0.0, z: 0.0 } })) from "Dust 1"
+biplane: particles: Dust (HelicopterDust { begin: 20.0, end: 25.0 }) from "Dust 1"
+start: 9556, 208, 11855 facing 0 degrees, 11 camera presets
+the dirt under the start line is at 208.5 feet
+the dirt under the biplane is at 198.7 feet
+tricks page: 50 tricks
+kiowa: its camera starts on Aero Cam 1
+buggy: its camera starts on Race Cam 1, 6 presets in buggycpresets.ini
+monster: its camera starts on Race Cam 1, 6 presets in monstertruckcpresets.ini
+baja: its camera starts on Race Cam 1, 6 presets in fourwheelcpresets.ini
+loading: built, 173 frames drawn over 2.91 s
+bike: particles: Vehicle Dust (CollisionModel) from "Dust 1"
+bike: particles: Vehicle Chunks (CollisionModel) from "Chunks 1"
+bike: particles: Rider Dust (Constraint { mask: 508 }) from "Dust 1"
+bike: particles: Rider Chunks (Constraint { mask: 508 }) from "Chunks 1"
+bike: particles: Foot Dust (Constraint { mask: 3 }) from "Dust 1"
+bike: particles: Right Exhuast (Exhaust { max_speed: 15.0 }) from "Smoke 1"
+bike: particles: Left Exhuast (Exhaust { max_speed: 15.0 }) from "Smoke 1"
+bike: particles: Rear Tire Dust Spray (Generic) from "Dust 1"
+bike: particles: Front Tire Dirt Spray (Spray(SprayKeys { side_scale: 1.5, side_threshold: 8.0, min_y: 0.0, max_y: 2.0, ramp: 0.0 })) from "Dirt 1"
+bike: particles: Rear Tire Dirt Spray (Spray(SprayKeys { side_scale: 1.0, side_threshold: 5.0, min_y: 0.0, max_y: 5.0, ramp: 0.0 })) from "Dirt 1"
+bike: particles: Front Tire Chunks (Spray(SprayKeys { side_scale: 1.75, side_threshold: 4.0, min_y: 0.0, max_y: 10.0, ramp: 0.0 })) from "Chunks 1"
+bike: particles: Rear Tire Chunks (Spray(SprayKeys { side_scale: 4.0, side_threshold: 5.0, min_y: 0.0, max_y: 20.0, ramp: 0.0 })) from "Chunks 1"
+bike: particles: Rear Tire Collision Chunks (Spray(SprayKeys { side_scale: 4.0, side_threshold: 3.0, min_y: 0.0, max_y: 10.0, ramp: 0.0 })) from "Chunks 1"
+bike: particles: Front Tire Track (TireTrack) laid by the tire tracks
+bike: particles: Rear Tire Track (TireTrack) laid by the tire tracks
+kiowa: particles: MainBody Dust (CollisionModel) from "Dust 1"
+kiowa: particles: MainBody Dirt (CollisionModel) from "Dirt 1"
+kiowa: particles: MainBody Chunks (CollisionModel) from "Chunks 1"
+kiowa: particles: Blade 1 Dust (CollisionModel) from "Dust 1"
+kiowa: particles: Blade 1 Chunks (CollisionModel) from "Chunks 1"
+kiowa: particles: Blade 2 Dust (CollisionModel) from "Dust 1"
+kiowa: particles: Blade 2 Chunks (CollisionModel) from "Chunks 1"
+kiowa: particles: Blade 3 Dust (CollisionModel) from "Dust 1"
+kiowa: particles: Blade 3 Chunks (CollisionModel) from "Chunks 1"
+kiowa: particles: Blade 4 Dust (CollisionModel) from "Dust 1"
+kiowa: particles: Blade 4 Chunks (CollisionModel) from "Chunks 1"
+kiowa: particles: Dust (HelicopterDust { begin: 15.0, end: 40.0 }) from "Dust 1"
+car: buggy: particles: 18 entries off buggyparticles.dat; 4 laid by the tire tracks (Front Left Tire Track, Front Right Tire Track, Rear Left Tire Track, Rear Right Tire Track); 0 not run ()
+car: monstertruck: particles: 18 entries off monsterparticles.dat; 4 laid by the tire tracks (Front Left Tire Track, Front Right Tire Track, Rear Left Tire Track, Rear Right Tire Track); 0 not run ()
+car: baja: particles: 17 entries off bajaparticles.dat; 4 laid by the tire tracks (Front Left Tire Track, Front Right Tire Track, Rear Left Tire Track, Rear Right Tire Track); 0 not run ()
+sound: 99 clips decoded, 5.8 MB
+sound: 63 fixed emitters on 27 maps (free06 0, free07 0, free09 0, free10 1, free11 0, nat01 0, nat02 0, nat03 0, nat04 0, nat05 0, nat06 50, nat07 0, nat08 8, nat09 0, nat10 0, nat11 3, nat12 0, nat13 0, nat14 0, nat15 0, nat16 0, nat17 1, nat18 0, nat19 0, nat20 0, nat21 0, nat22 0)
+biplane: mxvatv_fliers's sounds, 7 engine loops, 5 wreck, 1 touchdown
+controls: new
+biplane controls: new
+renderer: gpu
+chassis: the fork is drawn to a compression of 0.965
+world props: mxu_free07 built, 235 props, 1212 plants, 4 car models
+world props: mxu_free09 built, 318 props, 726 plants, 6 car models
+world props: mxu_free10 built, 336 props, 6160 plants, 4 car models
+world props: mxu_free11 built, 151 props, 0 plants, 12 car models
+world props: mxu_nat04 built, 537 props, 2530 plants, 0 car models (0 models and 10190 plants outside its keep left out)
+world props: mxu_nat06 built, 298 props, 2193 plants, 0 car models (0 models and 7947 plants outside its keep left out)
+world props: mxu_nat16 built, 339 props, 425 plants, 0 car models (0 models and 1902 plants outside its keep left out)
+world props: mxu_nat21 built, 96 props, 378 plants, 0 car models (0 models and 1175 plants outside its keep left out)
+world props: mxu_nat22 built, 193 props, 1907 plants, 0 car models (2 of 34 models missing; 0 models and 7310 plants outside its keep left out)
+world props: 9 of 27 tiles dressed before the ride in 0.38 s, 26 cars on clips
+world look: 27 of 27 tiles painted from their pages, 27 with a sky of their own
+world: mxu_free06 loaded, 353 shapes
+world: mxu_free07 loaded, 209 shapes
+world: mxu_free09 loaded, 275 shapes
+world: mxu_free10 loaded, 282 shapes
+world: mxu_free11 loaded, 86 shapes
+world: mxu_nat04 loaded, 780 shapes
+world: mxu_nat06 loaded, 727 shapes
+world: mxu_nat16 loaded, 316 shapes
+world: mxu_nat21 loaded, 95 shapes
+world: mxu_nat22 loaded, 424 shapes
+world: j006_008 loaded, 0 shapes
+world: j006_009 loaded, 0 shapes
+world: j006_010 loaded, 0 shapes
+world: j006_011 loaded, 0 shapes
+world: j006_012 loaded, 0 shapes
+world: j006_013 loaded, 0 shapes
+world: j007_012 loaded, 0 shapes
+world: j007_013 loaded, 0 shapes
+world: j008_012 loaded, 0 shapes
+world: j008_013 loaded, 0 shapes
+world: j009_012 loaded, 0 shapes
+world: j009_013 loaded, 0 shapes
+world: j010_012 loaded, 0 shapes
+world: j010_013 loaded, 0 shapes
+world: j011_008 loaded, 0 shapes
+world: j011_009 loaded, 0 shapes
+world: j011_010 loaded, 0 shapes
+world: j011_011 loaded, 0 shapes
+world: j011_012 loaded, 0 shapes
+world: j011_013 loaded, 0 shapes
+world paint: 27 of 27 paged maps on the GPU, pages 128x128 x 1441, 128x128 x 736, detail 256x256 x 22, 5 sharp splats, layers 256x256 x 37
+world paint: roads and ruts of mxu_free06, mxu_free07, mxu_free09, mxu_free10, mxu_free11 (103802 triangles, 11 textures)
+world stand-in: 536 x 491 cells of 43 ft, 272 chunks in 0.42 s
+world ground: mxu_free07 built, 400 chunks
+world ground: mxu_free09 built coarse, 36 chunks
+world ground: mxu_free10 built coarse, 36 chunks
+world ground: mxu_free11 built coarse, 36 chunks
+world ground: mxu_nat04 built coarse, 36 chunks
+world ground: mxu_nat06 built coarse, 30 chunks
+world ground: mxu_nat16 built coarse, 16 chunks
+world ground: mxu_nat21 built coarse, 16 chunks
+world ground: mxu_nat22 built coarse, 25 chunks
+world ground: j006_008 built coarse, 2 chunks
+world ground: j006_009 built coarse, 2 chunks
+world ground: j006_010 built coarse, 2 chunks
+world ground: j006_011 built coarse, 2 chunks
+world ground: j006_012 built coarse, 3 chunks
+world ground: j006_013 built coarse, 3 chunks
+world ground: j007_012 built, 24 chunks
+world ground: j007_013 built coarse, 2 chunks
+world ground: j008_012 built, 24 chunks
+world ground: j008_013 built coarse, 2 chunks
+world ground: j009_012 built, 24 chunks
+world ground: j009_013 built coarse, 2 chunks
+world ground: j010_012 built, 24 chunks
+world ground: j010_013 built coarse, 2 chunks
+world ground: j011_008 built coarse, 4 chunks
+world ground: j011_009 built coarse, 4 chunks
+world ground: j011_010 built coarse, 4 chunks
+world ground: j011_011 built coarse, 4 chunks
+world ground: j011_012 built coarse, 4 chunks
+world ground: j011_013 built coarse, 4 chunks
+world ground: 29 of 507 pieces built before the ride in 1.85 s (near the start; load 3000 ft, drop 4500 ft; 24 coarse past 1500 ft)
+world paint: 2 maps on their own pages at the start, the rest on far pages; layers held 576 of 1440, 0 of 592 (load 3000 ft, drop 4500 ft)
+gpu: 820 models, 502 materials, 502 textures and 1045 ground chunks uploaded in 2.74 s
+texture filtering: 16x (anisotropy 16, this device 16 at most)
+shadows: on, quality high (the original's in 25,25,25 at 0.700)
+model detail: reduced
+graphics: farther (fog 2816..6144 up to 100%, far clip 6144; the disc's fog 352..768 in [97, 93, 92])
+loading: done, 227 frames drawn over 9.60 s
+render scale: 0.75
+world sky: per-map (the whole world's from mxu_free06)
+window 2202x1179 (screen 1179x2556), drawing 2202x1179 at scale 1, --aspect fill, a 16:9 display
+picture shape: fill
+camera: cpresets.ini's Preset{n}w copies, 11 of 11, for full screen on a 16:9 display
+camera: biplanecpresets.ini's Preset{n}w copies, 5 of 5, for full screen on a 16:9 display
+camera: helocpresets.ini's Preset{n}w copies, 4 of 4, for full screen on a 16:9 display
+camera: buggycpresets.ini's Preset{n}w copies, 6 of 6, for full screen on a 16:9 display
+camera: monstertruckcpresets.ini's Preset{n}w copies, 6 of 6, for full screen on a 16:9 display
+camera: fourwheelcpresets.ini's Preset{n}w copies, 6 of 6, for full screen on a 16:9 display
+biplane: mxvatv_fliers's camera, 7 presets in Cam/FC_BiplaneDefault.pb
+camera: cpresets.ini's Preset{n}w copies, 11 of 11, for full screen on a 16:9 display
+biplane: its camera starts on Race Camera 1
+radar maps: 27: Dallas, Norfolk, Bridgeport, Rochester, Cleveland, Seneca Butte, Bodie, Racine: Long, Doha, Blueridge, Summerhaven, Pine Bluff, Slack Jaw, Goblin Valley, Foxpark, Hillsboro, Black Hills, Rattlesnake Pass, Grandview, Cedar Mills, Casa De Cobre, Waimea, Manassas Park, Ensenada, Sliderock, Signal Butte, Racine: Short
+map: 21853 x 19828 feet to its edge, shot back from 150 feet short of it; radar 1728 feet across
+tire tracks: Front Tire Track on tire 0, 32 strips, ttrack
+tire tracks: Rear Tire Track on tire 1, 32 strips, ttrack
+car: buggy: tire tracks: 4 on tires 0, 1, 2, 3
+car: monstertruck: tire tracks: 4 on tires 0, 1, 2, 3
+car: baja: tire tracks: 4 on tires 0, 1, 2, 3
+freestyle event: 1 stunt zones, target 400000
+vehicle: bike
+markers: Fizlo on world_mxu: 2 kept
+world shapes: near sets cut in 0.83 ms
+world: mxu_nat02 loaded, 820 shapes
+world: j004_002 loaded, 0 shapes
+camera: cpresets.ini's Preset{n}w copies, 11 of 11, for full screen on a 16:9 display
+camera: biplanecpresets.ini's Preset{n}w copies, 5 of 5, for full screen on a 16:9 display
+camera view: 4 115 110 120 115
+camera: helocpresets.ini's Preset{n}w copies, 4 of 4, for full screen on a 16:9 display
+camera: buggycpresets.ini's Preset{n}w copies, 6 of 6, for full screen on a 16:9 display
+camera: monstertruckcpresets.ini's Preset{n}w copies, 6 of 6, for full screen on a 16:9 display
+camera: fourwheelcpresets.ini's Preset{n}w copies, 6 of 6, for full screen on a 16:9 display
+camera: starts on Freestyle Cam, where it was left
+world sky: over mxu_free07 at 9556,11834 in view 1: sun of mxu_free07 0.551,-0.506,0.664 ambient 0.463,0.451,0.502 fog 61,68,76 281..1000
+music: playing mod:untamed_music/lobotomy_for_dummies_zebrahead
+warm frame: 68.20 ms behind the loading screen
+load: the ride's first frame 202.14 s after launch, memory peak 1647 MB, now 1633 MB (650 MB of it the GPU's), 5023 MB left before iOS closes the app, cpu not known here
+world: mxu_free06 dropped
+world: mxu_nat02 dropped
+world: j004_002 dropped
+  1s 56.9 fps, 370614 triangles a frame,   0.0 mph, memory 1582 MB (5073 MB left, GPU 654 MB)
+     bike particles: none
+     ms a frame: input 0.09 sim 0.12 stream 0.12 ground 0.22 hud 0.56 present 15.17, all 16.37; worst 22.13 ms (present 21.79, hud 0.26), 28 over 16.7; widest gap 22.1 ms, waited 12.83 ms a frame, 558 sprites, gpu no frame timed
+  2s 59.8 fps, 370972 triangles a frame,   0.1 mph, memory 1448 MB (5207 MB left, GPU 654 MB)
+     bike particles: none
+     ms a frame: input 0.12 sim 0.17 stream 0.16 ground 0.28 hud 0.70 present 15.16, all 16.73; worst 20.66 ms (present 19.60, hud 0.40), 33 over 16.7; widest gap 20.7 ms, waited 11.80 ms a frame, 558 sprites, gpu no frame timed
+  3s 59.9 fps, 371974 triangles a frame,   3.4 mph, memory 1341 MB (5314 MB left, GPU 654 MB)
+     bike particles: Right Exhuast 4
+     ms a frame: input 0.14 sim 0.21 stream 0.20 ground 0.35 scene 0.06 hud 0.87 present 14.77, all 16.69; worst 24.92 ms (present 23.78, hud 0.75), 32 over 16.7; widest gap 24.9 ms, waited 9.84 ms a frame, 558 sprites, gpu no frame timed
+  4s 60.0 fps, 392633 triangles a frame,  12.9 mph, memory 1268 MB (5387 MB left, GPU 654 MB)
+     bike particles: Right Exhuast 5, Rear Tire Dust Spray 78, Rear Tire Dirt Spray 59, Rear Tire Chunks 7, Rear Tire Collision Chunks 16
+     ms a frame: input 0.15 sim 0.21 stream 0.21 ground 0.42 scene 0.06 hud 0.90 present 14.66, all 16.67; worst 24.30 ms (present 22.87, hud 1.02), 26 over 16.7; widest gap 24.3 ms, waited 9.39 ms a frame, 638 sprites, gpu no frame timed
+marker: slot 2
+marker: placed in slot 2
+markers: kept in /private/var/mobile/Containers/Data/Application/C1D67FFA-5FB6-4934-834D-2371F2B8FCBD/Documents/markers/world_mxu/Fizlo.markers
+  5s 60.1 fps, 394256 triangles a frame,  21.3 mph, memory 1270 MB (5385 MB left, GPU 655 MB)
+     bike particles: Rear Tire Dust Spray 109, Rear Tire Collision Chunks 9
+     ms a frame: input 0.15 sim 0.21 stream 0.36 ground 0.41 scene 0.06 hud 0.95 present 14.44, all 16.66; worst 18.78 ms (present 15.94, hud 0.81), 28 over 16.7; widest gap 18.8 ms, waited 9.27 ms a frame, 642 sprites, gpu no frame timed
+world ground: mxu_free09 built, 400 chunks at tick 157
+  6s 60.0 fps, 515236 triangles a frame,  23.3 mph, memory 1276 MB (5378 MB left, GPU 666 MB)
+     bike particles: Rear Tire Dust Spray 108, Rear Tire Dirt Spray 55, Rear Tire Collision Chunks 8
+     ms a frame: input 0.08 sim 0.11 stream 0.18 ground 0.95 hud 0.49 present 14.80, all 16.68; worst 18.67 ms (present 16.45, ground 1.58), 27 over 16.7; widest gap 18.7 ms, waited 11.93 ms a frame, 642 sprites, gpu no frame timed
+  7s 60.0 fps, 507720 triangles a frame,  44.1 mph, memory 1297 MB (5358 MB left, GPU 664 MB)
+     bike particles: Rear Tire Dust Spray 113, Rear Tire Dirt Spray 418, Rear Tire Chunks 51, Rear Tire Collision Chunks 62
+     ms a frame: input 0.11 sim 0.16 stream 0.19 ground 1.14 hud 0.75 present 14.21, all 16.66; worst 19.06 ms (present 17.11, ground 0.85), 33 over 16.7; widest gap 19.1 ms, waited 10.13 ms a frame, 642 sprites, gpu no frame timed
+  8s 60.3 fps, 482019 triangles a frame,  55.1 mph, memory 1299 MB (5356 MB left, GPU 663 MB)
+     bike particles: Rear Tire Dust Spray 87, Rear Tire Dirt Spray 128, Rear Tire Chunks 8, Rear Tire Collision Chunks 82
+     ms a frame: input 0.12 sim 0.15 stream 0.16 ground 0.53 hud 0.78 present 14.75, all 16.60; worst 22.66 ms (present 20.65, hud 1.05), 32 over 16.7; widest gap 22.7 ms, waited 10.63 ms a frame, 643 sprites, gpu no frame timed
+world ground: mxu_nat16 built, 256 chunks at tick 247
+  9s 59.9 fps, 462990 triangles a frame,  58.1 mph, memory 1332 MB (5323 MB left, GPU 669 MB)
+     bike particles: Rear Tire Dust Spray 28, Rear Tire Collision Chunks 11
+     ms a frame: input 0.05 sim 0.07 stream 0.11 ground 0.32 hud 0.27 present 15.83, all 16.69; worst 18.80 ms (present 17.07, ground 0.58), 31 over 16.7; widest gap 18.8 ms, waited 14.30 ms a frame, 642 sprites, gpu no frame timed
+world ground: mxu_nat04 built, 324 chunks at tick 274
+ 10s 60.0 fps, 440888 triangles a frame,  60.2 mph (frozen), memory 1341 MB (5314 MB left, GPU 678 MB)
+     bike particles: Rear Tire Dust Spray 47, Rear Tire Dirt Spray 37, Rear Tire Collision Chunks 8
+     ms a frame: stream 0.14 ground 0.23 hud 0.29 present 15.90, all 16.67; worst 17.25 ms (present 16.31, ground 0.46), 39 over 16.7; widest gap 17.3 ms, waited 14.76 ms a frame, 1076 sprites, gpu no frame timed
+ 11s 59.8 fps, 421255 triangles a frame,  60.2 mph (frozen), memory 1284 MB (5371 MB left, GPU 678 MB)
+     bike particles: Rear Tire Dust Spray 13, Rear Tire Collision Chunks 3
+     ms a frame: input 0.14 stream 0.24 ground 0.78 hud 0.95 present 14.48, all 16.73; worst 20.63 ms (present 18.53, hud 0.67), 30 over 16.7; widest gap 20.7 ms, waited 10.16 ms a frame, 1278 sprites, gpu no frame timed
+ 12s 60.0 fps, 421255 triangles a frame,  60.2 mph (frozen), memory 1280 MB (5375 MB left, GPU 679 MB)
+     bike particles: none
+     ms a frame: input 0.14 menu 0.07 stream 0.30 ground 0.93 hud 1.12 present 14.00, all 16.67; worst 19.59 ms (present 15.98, ground 1.27), 34 over 16.7; widest gap 19.6 ms, waited 8.91 ms a frame, 1407 sprites, gpu no frame timed
+ 13s 60.0 fps, 421255 triangles a frame,  60.2 mph (frozen), memory 1279 MB (5376 MB left, GPU 679 MB)
+     bike particles: none
+     ms a frame: input 0.18 menu 0.07 stream 0.27 ground 0.99 hud 1.08 present 14.00, all 16.68; worst 18.39 ms (present 14.41, ground 1.78), 34 over 16.7; widest gap 18.4 ms, waited 9.08 ms a frame, 1035 sprites, gpu no frame timed
+settings: saved in /private/var/mobile/Containers/Data/Application/C1D67FFA-5FB6-4934-834D-2371F2B8FCBD/Documents
+ 14s 60.0 fps, 421255 triangles a frame,  60.2 mph (frozen), memory 1279 MB (5376 MB left, GPU 678 MB)
+     bike particles: none
+     ms a frame: input 0.16 stream 0.26 ground 1.02 hud 1.05 present 14.03, all 16.67; worst 22.10 ms (present 14.96, ground 4.70), 29 over 16.7; widest gap 22.1 ms, waited 9.11 ms a frame, 1035 sprites, gpu no frame timed
+settings: saved in /private/var/mobile/Containers/Data/Application/C1D67FFA-5FB6-4934-834D-2371F2B8FCBD/Documents
+ 15s 60.0 fps, 421255 triangles a frame,  60.2 mph (frozen), memory 1283 MB (5372 MB left, GPU 678 MB)
+     bike particles: none
+     ms a frame: input 0.15 stream 0.28 ground 0.96 hud 1.03 present 14.11, all 16.67; worst 23.65 ms (present 20.86, ground 0.89), 33 over 16.7; widest gap 23.7 ms, waited 9.18 ms a frame, 974 sprites, gpu no frame timed
+ 16s 60.0 fps, 421255 triangles a frame,  60.2 mph (frozen), memory 1284 MB (5371 MB left, GPU 678 MB)
+     bike particles: none
+     ms a frame: input 0.13 stream 0.26 ground 0.94 hud 1.02 present 14.20, all 16.66; worst 20.26 ms (present 18.21, hud 1.11), 30 over 16.7; widest gap 20.4 ms, waited 9.27 ms a frame, 974 sprites, gpu no frame timed
+ 17s 60.0 fps, 421255 triangles a frame,  60.2 mph (frozen), memory 1279 MB (5377 MB left, GPU 678 MB)
+     bike particles: none
+     ms a frame: input 0.14 stream 0.28 ground 0.92 hud 1.02 present 14.19, all 16.68; worst 19.18 ms (present 16.98, hud 1.19), 28 over 16.7; widest gap 19.2 ms, waited 9.07 ms a frame, 1007 sprites, gpu no frame timed
+ 18s 60.0 fps, 421255 triangles a frame,  60.2 mph (frozen), memory 1278 MB (5377 MB left, GPU 678 MB)
+     bike particles: none
+     ms a frame: input 0.14 stream 0.26 ground 0.89 hud 1.02 present 14.24, all 16.67; worst 21.91 ms (present 19.25, ground 0.99), 25 over 16.7; widest gap 21.9 ms, waited 9.09 ms a frame, 999 sprites, gpu no frame timed
+ 19s 59.9 fps, 432431 triangles a frame,  57.9 mph, memory 1305 MB (5350 MB left, GPU 679 MB)
+     bike particles: Rear Tire Dust Spray 24
+     ms a frame: input 0.13 sim 0.11 stream 0.26 ground 1.08 scene 0.05 hud 0.96 present 14.05, all 16.69; worst 20.85 ms (present 16.39, ground 3.35), 26 over 16.7; widest gap 20.9 ms, waited 9.04 ms a frame, 946 sprites, gpu no frame timed
+ 20s 60.1 fps, 434439 triangles a frame,  53.6 mph (frozen), memory 1305 MB (5350 MB left, GPU 678 MB)
+     bike particles: Rear Tire Dust Spray 49
+     ms a frame: input 0.16 sim 0.13 stream 0.25 ground 1.31 scene 0.05 hud 1.08 present 13.59, all 16.66; worst 21.67 ms (present 14.53, ground 5.07), 30 over 16.7; widest gap 21.7 ms, waited 8.06 ms a frame, 938 sprites, gpu no frame timed
+ 21s 60.0 fps, 419293 triangles a frame,  53.6 mph (frozen), memory 1281 MB (5374 MB left, GPU 678 MB)
+     bike particles: Rear Tire Dust Spray 8
+     ms a frame: input 0.12 stream 0.33 ground 0.82 scene 0.06 hud 1.25 present 14.03, all 16.68; worst 20.51 ms (present 18.37, hud 1.30), 24 over 16.7; widest gap 20.5 ms, waited 8.69 ms a frame, 938 sprites, gpu no frame timed
+iOS UIApplicationWillResignActiveNotification (1 controllers)
+ios: away, the frame loop rests
+ 22s 54.7 fps, 411669 triangles a frame,  53.6 mph (frozen), memory 1281 MB (5374 MB left, GPU 677 MB)
+     bike particles: none
+     ms a frame: input 0.15 stream 0.30 ground 0.82 scene 0.06 hud 1.18 present 15.70, all 18.28; worst 107.10 ms (present 105.24, hud 1.71), 28 over 16.7; widest gap 107.1 ms, waited 8.80 ms a frame, 938 sprites, gpu no frame timed
+settings: saved in /private/var/mobile/Containers/Data/Application/C1D67FFA-5FB6-4934-834D-2371F2B8FCBD/Documents (away)
+ 23s  9.4 fps,      0 triangles a frame,  53.6 mph (frozen), memory 1169 MB (5486 MB left, GPU 682 MB)
+     bike particles: none
+     ms a frame: input 0.64 sim 0.12 stream 0.56 scene 0.06 hud 1.48 present 103.54, all 106.52; worst 110.91 ms (present 105.83, hud 1.99), 10 over 16.7; widest gap 110.9 ms, waited 8.79 ms a frame, 938 sprites, gpu no frame timed
+settings: saved in /private/var/mobile/Containers/Data/Application/C1D67FFA-5FB6-4934-834D-2371F2B8FCBD/Documents (away)
+away: gave back 820 models, 502 materials and 502 textures in the background
+iOS UIApplicationDidEnterBackgroundNotification: answered after 109 ms, memory 1059 MB, 5596 MB left before iOS closes the app
+audio: UIApplicationDidEnterBackgroundNotification (Background): other audio true, restart 1
+ 24s  9.4 fps,      0 triangles a frame,  53.6 mph (frozen), memory 1060 MB (5595 MB left, GPU 565 MB)
+     bike particles: none
+     ms a frame: input 2.46 sim 0.08 stream 0.39 scene 0.06 hud 1.02 present 102.79 pace 0.05, all 106.89; worst 124.30 ms (present 101.96, input 21.00), 10 over 16.7; widest gap 124.7 ms, waited 8.79 ms a frame, 929 sprites, gpu no frame timed
+iOS UIApplicationWillEnterForegroundNotification, memory 1057 MB, 5598 MB left before iOS closes the app
+ 71s  0.0 fps,      0 triangles a frame,  53.6 mph (frozen), memory 1057 MB (5598 MB left, GPU 566 MB)
+     bike particles: none
+     ms a frame: input 0.61 sim 0.09 stream 0.43 scene 0.05 hud 1.11 present 23451.15 log 9.04, all 23462.55; worst 46821.85 ms (present 46801.22, log 18.08), 2 over 16.7; widest gap 46821.6 ms, waited 8.79 ms a frame, 929 sprites, gpu no frame timed
+iOS UIApplicationDidBecomeActiveNotification (1 controllers)
+audio: UIApplicationDidBecomeActiveNotification (Active): other audio true, restart 2
+ios: back, the frame loop rested 49.4 s
+world ground: back in front at tick 739, 29 pieces built again
+sound: the AudioQueue started again (2, session active)
+world ground: mxu_free07 built, 400 chunks at tick 740
+world ground: j010_012 built, 24 chunks at tick 740
+ 72s 19.8 fps, 335434 triangles a frame,  53.6 mph (frozen), memory 1361 MB (5294 MB left, GPU 667 MB)
+     bike particles: none
+     ms a frame: input 0.38 stream 3.25 ground 0.28 hud 0.62 present 45.93, all 50.55; worst 371.90 ms (present 367.28, hud 2.34), 15 over 16.7; widest gap 371.2 ms, waited 10.90 ms a frame, 929 sprites, gpu no frame timed
+world ground: mxu_nat16 built, 256 chunks at tick 767
+world ground: mxu_nat04 built, 324 chunks at tick 781
+world ground: j009_012 built, 24 chunks at tick 781
+world ground: j011_011 built coarse, 4 chunks at tick 782
+world ground: j011_010 built coarse, 4 chunks at tick 782
+world ground: j011_012 built coarse, 4 chunks at tick 782
+world ground: j008_012 built, 24 chunks at tick 783
+world ground: j011_009 built coarse, 4 chunks at tick 783
+iOS UIApplicationWillResignActiveNotification (1 controllers)
+ios: away, the frame loop rests
+settings: saved in /private/var/mobile/Containers/Data/Application/C1D67FFA-5FB6-4934-834D-2371F2B8FCBD/Documents (away)
+ 73s 52.2 fps, 403593 triangles a frame,  53.6 mph (frozen), memory 1355 MB (5300 MB left, GPU 667 MB)
+     bike particles: none
+     ms a frame: input 0.05 stream 0.19 ground 0.19 hud 0.24 present 18.46, all 19.17; worst 106.75 ms (present 105.19, input 0.96), 28 over 16.7; widest gap 106.8 ms, waited 14.33 ms a frame, 938 sprites, gpu no frame timed
+ 74s  9.4 fps,      0 triangles a frame,  53.6 mph (frozen), memory 1265 MB (5390 MB left, GPU 672 MB)
+     bike particles: none
+     ms a frame: input 0.58 stream 0.76 scene 0.42 hud 0.65 present 103.61, all 106.10; worst 119.08 ms (present 103.92, stream 5.80), 10 over 16.7; widest gap 119.1 ms, waited 14.96 ms a frame, 938 sprites, gpu no frame timed
+settings: saved in /private/var/mobile/Containers/Data/Application/C1D67FFA-5FB6-4934-834D-2371F2B8FCBD/Documents (away)
+away: gave back 789 models, 483 materials and 483 textures in the background
+iOS UIApplicationDidEnterBackgroundNotification: answered after 49 ms, memory 1155 MB, 5500 MB left before iOS closes the app
+audio: UIApplicationDidEnterBackgroundNotification (Background): other audio true, restart 2
+iOS UIApplicationWillEnterForegroundNotification, memory 1079 MB, 5576 MB left before iOS closes the app
+ 90s  0.6 fps,      0 triangles a frame,  53.6 mph (frozen), memory 1079 MB (5576 MB left, GPU 564 MB)
+     bike particles: none
+     ms a frame: input 0.69 stream 0.18 hud 0.39 present 1579.63, all 1581.00; worst 14859.82 ms (present 14858.82, log 0.43), 10 over 16.7; widest gap 14866.2 ms, waited 14.96 ms a frame, 938 sprites, gpu no frame timed
+iOS UIApplicationDidBecomeActiveNotification (1 controllers)
+ios: back, the frame loop rested 17.4 s
+audio: UIApplicationDidBecomeActiveNotification (Active): other audio true, restart 3
+world ground: back in front at tick 864, 29 pieces built again
+world ground: mxu_nat06 built coarse, 30 chunks at tick 864
+world ground: j011_013 built coarse, 4 chunks at tick 864
+world ground: mxu_free09 built, 400 chunks at tick 864
+world ground: j011_008 built coarse, 4 chunks at tick 864
+world ground: j010_013 built coarse, 2 chunks at tick 864
+world ground: j007_012 built, 24 chunks at tick 864
+world ground: mxu_nat21 built coarse, 16 chunks at tick 864
+world ground: j009_013 built coarse, 2 chunks at tick 864
+world ground: j008_013 built coarse, 2 chunks at tick 864
+world ground: mxu_nat22 built coarse, 25 chunks at tick 864
+world ground: j007_013 built coarse, 2 chunks at tick 864
+world ground: j006_013 built coarse, 3 chunks at tick 864
+world ground: j006_008 built coarse, 2 chunks at tick 864
+world ground: j006_012 built coarse, 3 chunks at tick 864
+world ground: j006_009 built coarse, 2 chunks at tick 864
+world ground: j006_011 built coarse, 2 chunks at tick 864
+world ground: j006_010 built coarse, 2 chunks at tick 864
+world ground: mxu_free11 built coarse, 36 chunks at tick 864
+world ground: mxu_free10 built coarse, 36 chunks at tick 864
+sound: the AudioQueue started again (3, session active)
+world ground: mxu_free07 built, 400 chunks at tick 866
+world ground: j010_012 built, 24 chunks at tick 866
+ 91s 104.9 fps,  63289 triangles a frame,  53.6 mph (frozen), memory 1336 MB (5319 MB left, GPU 682 MB)
+     bike particles: none
+     ms a frame: input 0.08 stream 0.34 ground 0.06 hud 0.39 present 8.64, all 9.54; worst 333.48 ms (present 330.00, stream 2.47), 12 over 16.7; widest gap 333.5 ms, waited 14.56 ms a frame, 947 sprites, gpu no frame timed
+world ground: mxu_nat16 built, 256 chunks at tick 890
+world ground: mxu_nat04 built, 324 chunks at tick 905
+world ground: j009_012 built, 24 chunks at tick 905
+world ground: j011_011 built coarse, 4 chunks at tick 905
+world ground: j011_010 built coarse, 4 chunks at tick 906
+world ground: j011_012 built coarse, 4 chunks at tick 906
+world ground: j008_012 built, 24 chunks at tick 906
+world ground: j011_009 built coarse, 4 chunks at tick 907
+ 92s 60.8 fps, 418370 triangles a frame,  53.6 mph (frozen), memory 1335 MB (5320 MB left, GPU 681 MB)
+     bike particles: none
+     ms a frame: stream 0.18 ground 0.20 hud 0.25 present 15.76, all 16.46; worst 21.08 ms (present 20.70, hud 0.20), 37 over 16.7; widest gap 21.1 ms, waited 14.67 ms a frame, 947 sprites, gpu no frame timed
+iOS UIApplicationWillResignActiveNotification (1 controllers)
+ios: away, the frame loop rests
+ 93s 54.7 fps, 411805 triangles a frame,  53.6 mph (frozen), memory 1316 MB (5339 MB left, GPU 680 MB)
+     bike particles: none
+     ms a frame: input 0.09 stream 0.16 ground 0.74 hud 0.66 present 16.55, all 18.27; worst 102.71 ms (present 101.69, hud 0.91), 30 over 16.7; widest gap 102.7 ms, waited 11.23 ms a frame, 938 sprites, gpu no frame timed
+settings: saved in /private/var/mobile/Containers/Data/Application/C1D67FFA-5FB6-4934-834D-2371F2B8FCBD/Documents (away)
+settings: saved in /private/var/mobile/Containers/Data/Application/C1D67FFA-5FB6-4934-834D-2371F2B8FCBD/Documents (away)
+away: gave back 789 models, 483 materials and 483 textures in the background
+iOS UIApplicationDidEnterBackgroundNotification: answered after 61 ms, memory 1210 MB, 5445 MB left before iOS closes the app
+audio: UIApplicationDidEnterBackgroundNotification (Background): other audio true, restart 3
+ 94s  9.0 fps,      0 triangles a frame,  53.6 mph (frozen), memory 1101 MB (5554 MB left, GPU 573 MB)
+     bike particles: none
+     ms a frame: input 3.91 menu 0.07 sim 0.13 stream 0.84 anim 0.07 scene 0.06 hud 1.58 present 103.93 pace 0.18, all 110.78; worst 137.71 ms (present 105.71, input 26.71), 10 over 16.7; widest gap 137.8 ms, waited 14.99 ms a frame, 938 sprites, gpu no frame timed
+101s  0.6 fps,      0 triangles a frame,  53.6 mph (frozen), memory 1065 MB (5590 MB left, GPU 575 MB)
+     bike particles: none
+     ms a frame: input 0.46 sim 0.09 stream 0.36 hud 1.26 present 1630.38, all 1632.71; worst 6209.94 ms (present 6208.46, hud 0.65), 4 over 16.7; widest gap 6210.0 ms, waited 14.99 ms a frame, 929 sprites, gpu no frame timed
+iOS UIApplicationWillEnterForegroundNotification, memory 1065 MB, 5590 MB left before iOS closes the app
+iOS UIApplicationDidBecomeActiveNotification (1 controllers)
+audio: UIApplicationDidBecomeActiveNotification (Active): other audio true, restart 4
+ios: back, the frame loop rested 8.0 s
+world ground: back in front at tick 997, 29 pieces built again
+sound: the AudioQueue started again (4, session active)
+world ground: mxu_free07 built, 400 chunks at tick 998
+world ground: j010_012 built, 24 chunks at tick 998
+102s 11.0 fps, 286187 triangles a frame,  50.6 mph, memory 1415 MB (5240 MB left, GPU 682 MB)
+     bike particles: Rear Tire Dust Spray 14
+     ms a frame: input 0.46 menu 0.06 sim 0.40 stream 3.39 anim 0.21 camera 0.08 ground 1.81 hud 1.26 present 83.56, all 91.30; worst 461.88 ms (present 457.82, hud 2.43), 10 over 16.7; widest gap 461.9 ms, waited 12.45 ms a frame, 929 sprites, gpu no frame timed
+world paint: mxu_nat16 shown at tick 1017
+world ground: mxu_nat16 built, 256 chunks at tick 1032
+world ground: j009_012 built, 24 chunks at tick 1032
+world: j012_009 loaded, 0 shapes
+world: j012_010 loaded, 0 shapes
+world: j012_012 loaded, 0 shapes
+world: j012_013 loaded, 0 shapes
+103s 61.6 fps, 443820 triangles a frame,  50.5 mph, memory 1426 MB (5229 MB left, GPU 681 MB)
+     bike particles: Rear Tire Dust Spray 42, Rear Tire Dirt Spray 84, Rear Tire Chunks 13, Rear Tire Collision Chunks 10
+     ms a frame: sim 0.06 stream 0.19 ground 0.37 hud 0.30 present 15.23, all 16.24; worst 24.25 ms (present 23.83, hud 0.22), 28 over 16.7; widest gap 24.3 ms, waited 13.80 ms a frame, 556 sprites, gpu no frame timed
+world ground: mxu_nat04 built, 324 chunks at tick 1049
+world ground: j011_011 built coarse, 4 chunks at tick 1050
+world ground: j011_012 built coarse, 4 chunks at tick 1050
+world ground: j008_012 built, 24 chunks at tick 1051
+world ground: j011_010 built coarse, 4 chunks at tick 1051
+world ground: mxu_nat06 built coarse, 30 chunks at tick 1065
+world ground: j011_013 built coarse, 4 chunks at tick 1065
+world ground: j011_009 built coarse, 4 chunks at tick 1065
+world ground: mxu_free09 built, 400 chunks at tick 1070
+world ground: j010_013 built coarse, 2 chunks at tick 1070
+world ground: j012_012 built coarse, 4 chunks at tick 1071
+world ground: j012_013 built coarse, 3 chunks at tick 1071
+world ground: j012_010 built coarse, 2 chunks at tick 1072
+world ground: j009_013 built coarse, 2 chunks at tick 1072
+world ground: j011_008 built coarse, 4 chunks at tick 1073
+world ground: j012_009 built coarse, 2 chunks at tick 1073
+world ground: j007_012 built, 24 chunks at tick 1073
+104s 60.0 fps, 428896 triangles a frame,  47.2 mph, memory 1445 MB (5210 MB left, GPU 680 MB)
+     bike particles: Rear Tire Dust Spray 25, Rear Tire Collision Chunks 10
+     ms a frame: sim 0.06 stream 0.26 ground 0.27 hud 0.27 present 15.71, all 16.67; worst 18.37 ms (present 17.55, ground 0.59), 29 over 16.7; widest gap 18.4 ms, waited 14.48 ms a frame, 555 sprites, gpu no frame timed
+world ground: mxu_nat21 built coarse, 16 chunks at tick 1096
+world ground: j008_013 built coarse, 2 chunks at tick 1097
+world ground: j007_013 built coarse, 2 chunks at tick 1097
+iOS UIApplicationWillResignActiveNotification (1 controllers)
+settings: saved in /private/var/mobile/Containers/Data/Application/C1D67FFA-5FB6-4934-834D-2371F2B8FCBD/Documents (away)
+ios: away, the frame loop rests
+105s 51.9 fps, 410157 triangles a frame,  22.3 mph (frozen), memory 1418 MB (5237 MB left, GPU 681 MB)
+     bike particles: Rear Tire Dust Spray 46
+     ms a frame: input 0.23 sim 0.08 stream 0.11 ground 0.30 hud 0.35 present 18.13, all 19.26; worst 114.43 ms (present 105.71, input 7.50), 22 over 16.7; widest gap 114.4 ms, waited 12.64 ms a frame, 938 sprites, gpu no frame timed
+106s  9.5 fps,      0 triangles a frame,  22.3 mph (frozen), memory 1257 MB (5398 MB left, GPU 685 MB)
+     bike particles: Rear Tire Dust Spray 21
+     ms a frame: input 0.36 sim 0.07 stream 0.30 hud 0.96 present 103.99, all 105.76; worst 110.78 ms (present 105.33, hud 3.92), 10 over 16.7; widest gap 110.8 ms, waited 20.28 ms a frame, 938 sprites, gpu no frame timed
+iOS UIApplicationDidBecomeActiveNotification (1 controllers)
+audio: UIApplicationDidBecomeActiveNotification (Active): other audio true, restart 4
+ios: back, the frame loop rested 2.2 s
+107s  9.5 fps,      0 triangles a frame,  22.3 mph (frozen), memory 1247 MB (5408 MB left, GPU 690 MB)
+     bike particles: none
+     ms a frame: input 0.47 sim 0.10 stream 0.46 scene 0.06 hud 1.16 present 102.41 pace 0.17, all 104.89; worst 109.42 ms (present 105.58, hud 1.77), 10 over 16.7; widest gap 109.4 ms, waited 20.28 ms a frame, 938 sprites, gpu no frame timed
+world ground: back in front at tick 1169, 33 pieces built again
+world ground: mxu_nat22 built coarse, 25 chunks at tick 1169
+world ground: j006_013 built coarse, 3 chunks at tick 1169
+world ground: j006_012 built coarse, 3 chunks at tick 1169
+world ground: j006_008 built coarse, 2 chunks at tick 1169
+world ground: j006_009 built coarse, 2 chunks at tick 1169
+world ground: j006_011 built coarse, 2 chunks at tick 1169
+world ground: j006_010 built coarse, 2 chunks at tick 1169
+world ground: mxu_free11 built coarse, 36 chunks at tick 1169
+world ground: mxu_free10 built coarse, 36 chunks at tick 1169
+world ground: mxu_free07 built, 400 chunks at tick 1176
+world ground: mxu_nat16 built, 256 chunks at tick 1198
+world ground: j010_012 built, 24 chunks at tick 1198
+108s 59.6 fps, 392308 triangles a frame,  22.3 mph (frozen), memory 1331 MB (5324 MB left, GPU 680 MB)
+     bike particles: none
+     ms a frame: input 0.06 stream 0.38 ground 0.33 hud 0.38 present 15.58, all 16.78; worst 31.36 ms (present 30.38, hud 0.62), 31 over 16.7; widest gap 31.4 ms, waited 14.00 ms a frame, 938 sprites, gpu no frame timed
+world ground: mxu_nat04 built, 324 chunks at tick 1216
+world ground: j009_012 built, 24 chunks at tick 1216
+world ground: j011_011 built coarse, 4 chunks at tick 1216
+world ground: j011_012 built coarse, 4 chunks at tick 1217
+world ground: j011_010 built coarse, 4 chunks at tick 1217
+109s 60.0 fps, 418197 triangles a frame,  15.9 mph, memory 1330 MB (5325 MB left, GPU 681 MB)
+     bike particles: Rear Tire Dust Spray 68, Rear Tire Dirt Spray 104, Rear Tire Chunks 17, Rear Tire Collision Chunks 16
+     ms a frame: stream 0.13 ground 0.21 hud 0.22 present 16.00, all 16.67; worst 17.19 ms (present 16.68, hud 0.38), 30 over 16.7; widest gap 17.2 ms, waited 14.94 ms a frame, 938 sprites, gpu no frame timed
+world ground: mxu_nat06 built coarse, 30 chunks at tick 1231
+world ground: j008_012 built, 24 chunks at tick 1232
+world ground: j011_009 built coarse, 4 chunks at tick 1232
+world ground: j011_013 built coarse, 4 chunks at tick 1233
+world ground: mxu_free09 built, 400 chunks at tick 1237
+world ground: j010_013 built coarse, 2 chunks at tick 1237
+world ground: j012_012 built coarse, 4 chunks at tick 1238
+world ground: j012_010 built coarse, 2 chunks at tick 1238
+world ground: j012_013 built coarse, 3 chunks at tick 1239
+world ground: j011_008 built coarse, 4 chunks at tick 1239
+world ground: j012_009 built coarse, 2 chunks at tick 1240
+world ground: j009_013 built coarse, 2 chunks at tick 1241
+world ground: j007_012 built, 24 chunks at tick 1241
+110s 60.0 fps, 422403 triangles a frame,  28.5 mph, memory 1358 MB (5297 MB left, GPU 681 MB)
+     bike particles: Rear Tire Dust Spray 78, Rear Tire Dirt Spray 95, Rear Tire Chunks 14, Rear Tire Collision Chunks 45
+     ms a frame: stream 0.17 ground 0.29 hud 0.25 present 15.84, all 16.67; worst 17.72 ms (present 16.97, ground 0.29), 29 over 16.7; widest gap 17.7 ms, waited 14.67 ms a frame, 555 sprites, gpu no frame timed
+world ground: mxu_nat21 built coarse, 16 chunks at tick 1262
+world ground: j008_013 built coarse, 2 chunks at tick 1263
+world ground: j007_013 built coarse, 2 chunks at tick 1264
+world paint: mxu_nat04 shown at tick 1278
+111s 60.0 fps, 422429 triangles a frame,  49.3 mph, memory 1350 MB (5305 MB left, GPU 681 MB)
+     bike particles: Rear Tire Dust Spray 106, Rear Tire Dirt Spray 257, Rear Tire Chunks 3, Rear Tire Collision Chunks 67
+     ms a frame: input 0.06 sim 0.08 stream 0.11 ground 0.37 hud 0.39 present 15.62, all 16.68; worst 18.40 ms (present 16.43, ground 1.37), 31 over 16.7; widest gap 18.4 ms, waited 13.87 ms a frame, 555 sprites, gpu no frame timed
+world: c10_000_000 loaded, 0 shapes
+world ground: c10_000_000 built coarse, 3 chunks at tick 1319
+112s 60.0 fps, 444123 triangles a frame,  49.1 mph, memory 1343 MB (5312 MB left, GPU 683 MB)
+     bike particles: Rear Tire Dust Spray 108, Rear Tire Dirt Spray 202, Rear Tire Chunks 31, Rear Tire Collision Chunks 47
+     ms a frame: input 0.11 sim 0.18 stream 0.13 ground 1.25 hud 0.68 present 14.22, all 16.67; worst 23.23 ms (present 18.18, ground 2.82), 31 over 16.7; widest gap 23.3 ms, waited 10.63 ms a frame, 556 sprites, gpu no frame timed
+113s 59.8 fps, 448657 triangles a frame,  43.8 mph, memory 1354 MB (5301 MB left, GPU 682 MB)
+     bike particles: Rear Tire Dust Spray 35, Rear Tire Collision Chunks 26
+     ms a frame: input 0.12 sim 0.16 stream 0.17 ground 1.05 hud 0.76 present 14.36, all 16.74; worst 20.98 ms (present 18.75, ground 0.89), 29 over 16.7; widest gap 21.0 ms, waited 10.40 ms a frame, 556 sprites, gpu no frame timed
+wreck: reason 2 — L1 and R1 together to get back on
+114s 60.1 fps, 345196 triangles a frame,  15.1 mph (getting up), memory 1364 MB (5291 MB left, GPU 686 MB)
+     bike particles: Vehicle Dust 22, Vehicle Chunks 145, Rider Dust 21, Rider Chunks 9
+     ms a frame: input 0.14 sim 0.22 stream 0.18 ground 1.26 scene 0.05 hud 0.89 present 13.85, all 16.66; worst 20.36 ms (present 14.75, ground 4.19), 28 over 16.7; widest gap 20.4 ms, waited 9.81 ms a frame, 686 sprites, gpu no frame timed
+115s 59.9 fps, 601338 triangles a frame,   5.1 mph (getting up), memory 1338 MB (5317 MB left, GPU 686 MB)
+     bike particles: Vehicle Dust 28, Vehicle Chunks 114, Rider Dust 41, Rider Chunks 6
+     ms a frame: input 0.11 sim 0.31 stream 0.18 ground 1.16 scene 0.05 hud 0.95 present 13.86, all 16.70; worst 18.64 ms (present 15.62, ground 2.15), 29 over 16.7; widest gap 18.7 ms, waited 9.59 ms a frame, 544 sprites, gpu no frame timed
+page: seat 0 alpha 87
+page: seat 0 alpha 171
+page: seat 0 alpha 255
+put back
+page: seat 0 alpha 168
+page: seat 0 alpha 84
+116s 59.2 fps, 557763 triangles a frame,   1.6 mph, memory 1339 MB (5316 MB left, GPU 686 MB)
+     bike particles: Vehicle Dust 37, Vehicle Chunks 6, Rider Dust 26, Right Exhuast 2
+     ms a frame: input 0.21 sim 0.35 stream 0.23 ground 1.64 scene 0.06 hud 1.13 present 13.17, all 16.89; worst 34.11 ms (present 30.05, ground 1.95), 28 over 16.7; widest gap 34.2 ms, waited 8.06 ms a frame, 545 sprites, gpu no frame timed
+page: seat 0 alpha 0
+117s 59.8 fps, 537834 triangles a frame,   8.3 mph, memory 1338 MB (5317 MB left, GPU 685 MB)
+     bike particles: Vehicle Dust 5, Rear Tire Dust Spray 46
+     ms a frame: input 0.15 sim 0.24 stream 0.20 ground 1.92 hud 0.93 present 13.14, all 16.73; worst 21.93 ms (present 17.33, ground 2.85), 31 over 16.7; widest gap 22.0 ms, waited 8.55 ms a frame, 545 sprites, gpu no frame timed
+world ground: j011_009 built, 49 chunks at tick 1500
+world ground: j011_010 built, 56 chunks at tick 1501
+world ground: j011_011 built, 56 chunks at tick 1501
+world ground: j011_012 built, 59 chunks at tick 1502
+118s 60.3 fps, 502573 triangles a frame,   8.9 mph, memory 1341 MB (5314 MB left, GPU 684 MB)
+     bike particles: Right Exhuast 8, Rear Tire Dust Spray 101, Rear Tire Dirt Spray 289, Rear Tire Chunks 12, Rear Tire Collision Chunks 43
+     ms a frame: input 0.14 sim 0.24 stream 0.27 ground 1.20 scene 0.05 hud 1.02 present 13.59, all 16.57; worst 18.60 ms (present 14.40, ground 1.99), 28 over 16.7; widest gap 18.6 ms, waited 8.62 ms a frame, 546 sprites, gpu no frame timed
+119s 59.7 fps, 514334 triangles a frame,  10.0 mph, memory 1312 MB (5343 MB left, GPU 683 MB)
+     bike particles: Right Exhuast 6, Rear Tire Dust Spray 115, Rear Tire Dirt Spray 291, Rear Tire Chunks 32, Rear Tire Collision Chunks 63
+     ms a frame: input 0.08 sim 0.14 stream 0.12 ground 1.10 hud 0.59 present 14.66, all 16.76; worst 19.32 ms (present 17.10, ground 1.60), 34 over 16.7; widest gap 19.3 ms, waited 11.54 ms a frame, 546 sprites, gpu no frame timed
+120s 60.0 fps, 578909 triangles a frame,  10.7 mph, memory 1311 MB (5344 MB left, GPU 685 MB)
+     bike particles: Rear Tire Dust Spray 114, Rear Tire Collision Chunks 34
+     ms a frame: input 0.16 sim 0.20 stream 0.21 ground 1.78 scene 0.06 hud 0.99 present 13.18, all 16.68; worst 22.18 ms (present 16.72, ground 2.31), 31 over 16.7; widest gap 22.2 ms, waited 8.19 ms a frame, 546 sprites, gpu no frame timed
+121s 60.0 fps, 586658 triangles a frame,   2.0 mph, memory 1337 MB (5318 MB left, GPU 687 MB)
+     bike particles: Right Exhuast 6, Rear Tire Dust Spray 109, Rear Tire Dirt Spray 23, Rear Tire Chunks 2, Rear Tire Collision Chunks 6
+     ms a frame: input 0.18 sim 0.23 stream 0.22 ground 1.97 scene 0.06 hud 1.05 present 12.85, all 16.67; worst 20.47 ms (present 16.60, ground 1.55), 31 over 16.7; widest gap 20.5 ms, waited 7.83 ms a frame, 571 sprites, gpu no frame timed
+122s 60.0 fps, 480142 triangles a frame,  28.1 mph, memory 1335 MB (5320 MB left, GPU 685 MB)
+     bike particles: Rear Tire Dust Spray 103, Rear Tire Dirt Spray 52, Rear Tire Chunks 9, Rear Tire Collision Chunks 20
+     ms a frame: input 0.21 sim 0.20 stream 0.22 ground 1.74 scene 0.06 hud 1.04 present 13.10 log 0.08, all 16.73; worst 21.79 ms (present 13.25, log 4.67), 29 over 16.7; widest gap 21.8 ms, waited 8.12 ms a frame, 573 sprites, gpu no frame timed
+123s 60.3 fps, 396453 triangles a frame,  47.1 mph, memory 1334 MB (5321 MB left, GPU 684 MB)
+     bike particles: Rear Tire Dust Spray 89, Rear Tire Dirt Spray 225, Rear Tire Collision Chunks 58
+     ms a frame: input 0.19 sim 0.24 stream 0.22 ground 1.47 scene 0.06 hud 1.16 present 13.18, all 16.60; worst 18.93 ms (present 15.57, ground 2.23), 31 over 16.7; widest gap 18.9 ms, waited 8.27 ms a frame, 571 sprites, gpu no frame timed
+124s 60.2 fps, 421572 triangles a frame,  54.6 mph, memory 1368 MB (5287 MB left, GPU 684 MB)
+     bike particles: Rear Tire Dust Spray 96, Rear Tire Dirt Spray 56, Rear Tire Chunks 1, Rear Tire Collision Chunks 22
+     ms a frame: input 0.20 sim 0.21 stream 0.22 ground 1.54 scene 0.06 hud 1.05 present 13.23, all 16.61; worst 21.37 ms (present 17.27, ground 1.71), 28 over 16.7; widest gap 21.4 ms, waited 8.21 ms a frame, 571 sprites, gpu no frame timed
+world ground: mxu_nat06 built, 342 chunks at tick 1698
+125s 60.1 fps, 530528 triangles a frame,  64.1 mph, memory 1375 MB (5280 MB left, GPU 687 MB)
+     bike particles: Rear Tire Dust Spray 114, Rear Tire Dirt Spray 123, Rear Tire Chunks 1, Rear Tire Collision Chunks 24
+     ms a frame: sim 0.06 stream 0.13 ground 0.53 hud 0.30 present 15.56, all 16.65; worst 18.64 ms (present 17.03, ground 1.19), 26 over 16.7; widest gap 18.7 ms, waited 14.39 ms a frame, 571 sprites, gpu no frame timed
+world: j006_014 loaded, 0 shapes
+world: j011_014 loaded, 0 shapes
+world: j012_014 loaded, 0 shapes
+world ground: j011_014 built coarse, 4 chunks at tick 1728
+world ground: j012_014 built coarse, 2 chunks at tick 1729
+world ground: j006_014 built coarse, 2 chunks at tick 1729
+world: c10_000_001 loaded, 0 shapes
+world ground: c10_000_001 built coarse, 2 chunks at tick 1745
+126s 60.0 fps, 564413 triangles a frame,  75.2 mph, memory 1364 MB (5291 MB left, GPU 686 MB)
+     bike particles: Rear Tire Dust Spray 108, Rear Tire Collision Chunks 4
+     ms a frame: input 0.08 sim 0.10 stream 0.11 ground 0.67 hud 0.52 present 15.15, all 16.68; worst 19.56 ms (present 17.08, ground 1.61), 31 over 16.7; widest gap 19.6 ms, waited 12.99 ms a frame, 571 sprites, gpu no frame timed
+127s 59.8 fps, 561063 triangles a frame,  82.7 mph, memory 1341 MB (5314 MB left, GPU 684 MB)
+     bike particles: Rear Tire Dust Spray 113
+     ms a frame: input 0.11 sim 0.16 stream 0.19 ground 1.06 scene 0.05 hud 0.83 present 14.25, all 16.73; worst 18.87 ms (present 15.02, ground 2.91), 28 over 16.7; widest gap 18.9 ms, waited 10.63 ms a frame, 571 sprites, gpu no frame timed
+128s 59.1 fps, 563861 triangles a frame,  88.2 mph, memory 1363 MB (5292 MB left, GPU 684 MB)
+     bike particles: Rear Tire Dust Spray 113
+     ms a frame: input 0.15 sim 0.19 stream 0.20 ground 0.87 scene 0.06 hud 0.88 present 14.49, all 16.92; worst 27.64 ms (present 25.35, hud 0.94), 29 over 16.7; widest gap 27.7 ms, waited 10.39 ms a frame, 571 sprites, gpu no frame timed
+world ground: j009_013 built, 8 chunks at tick 1832
+world ground: j010_013 built, 8 chunks at tick 1833
+world ground: j008_013 built, 8 chunks at tick 1833
+world ground: j011_013 built, 50 chunks at tick 1834
+129s 60.2 fps, 560130 triangles a frame,  92.1 mph, memory 1336 MB (5319 MB left, GPU 684 MB)
+     bike particles: Rear Tire Dust Spray 111
+     ms a frame: input 0.15 sim 0.16 stream 0.23 ground 0.94 scene 0.06 hud 0.88 present 14.11, all 16.61; worst 18.69 ms (present 14.76, ground 2.01), 30 over 16.7; widest gap 18.7 ms, waited 10.11 ms a frame, 571 sprites, gpu no frame timed
+world: mxu_nat15 loaded, 491 shapes
+world props: mxu_nat15 built, 339 props, 4105 plants, 0 car models (0 models and 16455 plants outside its keep left out) at tick 1852
+130s 59.0 fps, 557676 triangles a frame,  95.1 mph, memory 1407 MB (5248 MB left, GPU 695 MB)
+     bike particles: Rear Tire Dust Spray 117
+     ms a frame: input 0.07 sim 0.10 stream 0.34 ground 0.47 hud 0.40 present 15.50, all 16.94; worst 31.62 ms (present 29.68, ground 0.66), 32 over 16.7; widest gap 31.7 ms, waited 13.52 ms a frame, 571 sprites, gpu no frame timed
+world ground: mxu_nat15 built coarse, 36 chunks at tick 1869
+131s 59.9 fps, 591626 triangles a frame,  97.3 mph, memory 1408 MB (5247 MB left, GPU 697 MB)
+     bike particles: Rear Tire Dust Spray 120
+     ms a frame: input 0.09 sim 0.11 stream 0.13 ground 0.76 hud 0.52 present 15.01, all 16.71; worst 18.23 ms (present 16.95, ground 0.67), 33 over 16.7; widest gap 18.3 ms, waited 11.74 ms a frame, 571 sprites, gpu no frame timed
+132s 59.9 fps, 595340 triangles a frame,  98.6 mph, memory 1388 MB (5267 MB left, GPU 696 MB)
+     bike particles: Rear Tire Dust Spray 110
+     ms a frame: input 0.11 sim 0.14 stream 0.18 ground 0.84 scene 0.06 hud 0.76 present 14.53, all 16.70; worst 22.34 ms (present 20.54, ground 0.64), 33 over 16.7; widest gap 22.4 ms, waited 10.31 ms a frame, 571 sprites, gpu no frame timed
+world ground: j011_009 built coarse, 4 chunks at tick 1945
+world: c10_000_002 loaded, 0 shapes
+world ground: c10_000_002 built coarse, 2 chunks at tick 1952
+133s 60.2 fps, 597731 triangles a frame,  99.3 mph, memory 1387 MB (5268 MB left, GPU 696 MB)
+     bike particles: Rear Tire Dust Spray 110
+     ms a frame: input 0.10 sim 0.14 stream 0.17 ground 0.76 hud 0.71 present 14.64, all 16.63; worst 21.87 ms (present 20.50, ground 0.73), 33 over 16.7; widest gap 21.9 ms, waited 10.69 ms a frame, 571 sprites, gpu no frame timed
+world: j006_015 loaded, 0 shapes
+world: j011_015 loaded, 0 shapes
+world: j012_015 loaded, 0 shapes
+world ground: j011_015 built coarse, 4 chunks at tick 1972
+world ground: j012_015 built coarse, 4 chunks at tick 1973
+world ground: j006_015 built coarse, 2 chunks at tick 1973
+world paint: mxu_nat06 shown at tick 1974
+134s 56.7 fps, 597764 triangles a frame,  99.4 mph, memory 1372 MB (5283 MB left, GPU 696 MB)
+     bike particles: Rear Tire Dust Spray 116
+     ms a frame: input 0.09 sim 0.11 stream 0.19 ground 0.71 hud 0.60 present 15.84, all 17.63; worst 71.88 ms (present 70.67, hud 0.65), 32 over 16.7; widest gap 71.9 ms, waited 11.56 ms a frame, 544 sprites, gpu no frame timed
+135s 59.2 fps, 605925 triangles a frame,  98.9 mph, memory 1399 MB (5256 MB left, GPU 696 MB)
+     bike particles: Rear Tire Dust Spray 113, Rear Tire Dirt Spray 46, Rear Tire Chunks 7, Rear Tire Collision Chunks 8
+     ms a frame: input 0.12 sim 0.15 stream 0.17 ground 0.72 hud 0.66 present 14.96, all 16.88; worst 25.34 ms (present 23.91, ground 0.61), 34 over 16.7; widest gap 25.4 ms, waited 10.88 ms a frame, 546 sprites, gpu no frame timed
+136s 59.9 fps, 604632 triangles a frame,  86.0 mph, memory 1367 MB (5288 MB left, GPU 698 MB)
+     bike particles: Rear Tire Dust Spray 48, Rear Tire Collision Chunks 12
+     ms a frame: input 0.14 sim 0.17 stream 0.26 ground 0.80 scene 0.07 hud 0.91 present 14.28, all 16.70; worst 19.07 ms (present 17.02, hud 1.18), 33 over 16.7; widest gap 19.1 ms, waited 9.47 ms a frame, 500 sprites, gpu no frame timed
+world ground: j011_014 built, 48 chunks at tick 2062
+137s 59.2 fps, 604340 triangles a frame,  72.4 mph, memory 1391 MB (5264 MB left, GPU 697 MB)
+     bike particles: Rear Tire Dust Spray 60, Rear Tire Dirt Spray 76, Rear Tire Chunks 11, Rear Tire Collision Chunks 9
+     ms a frame: input 0.11 sim 0.16 stream 0.22 ground 0.65 scene 0.05 hud 0.77 present 14.88, all 16.91; worst 34.09 ms (present 31.44, hud 0.96), 33 over 16.7; widest gap 34.1 ms, waited 10.75 ms a frame, 500 sprites, gpu no frame timed
+138s 59.8 fps, 594065 triangles a frame,  56.7 mph, memory 1365 MB (5290 MB left, GPU 696 MB)
+     bike particles: Rear Tire Dust Spray 9, Rear Tire Collision Chunks 6
+     ms a frame: input 0.13 sim 0.17 stream 0.27 ground 0.74 scene 0.07 hud 1.01 present 14.24, all 16.72; worst 18.30 ms (present 16.55, ground 0.85), 30 over 16.7; widest gap 18.4 ms, waited 9.10 ms a frame, 500 sprites, gpu no frame timed
+world: mxu_nat22 dropped
+world ground: mxu_nat22 dropped at tick 2124
+world props: mxu_nat22 dropped at tick 2124
+marker: placed in slot 2
+markers: kept in /private/var/mobile/Containers/Data/Application/C1D67FFA-5FB6-4934-834D-2371F2B8FCBD/Documents/markers/world_mxu/Fizlo.markers
+139s 58.2 fps, 579755 triangles a frame,  49.5 mph, memory 1364 MB (5291 MB left, GPU 692 MB)
+     bike particles: none
+     ms a frame: input 0.14 sim 0.17 stream 0.47 ground 0.71 scene 0.06 hud 1.29 present 14.27, all 17.20; worst 29.67 ms (present 27.28, hud 0.83), 30 over 16.7; widest gap 29.7 ms, waited 9.78 ms a frame, 579 sprites, gpu no frame timed
+140s 59.8 fps, 566780 triangles a frame,  48.0 mph, memory 1386 MB (5269 MB left, GPU 692 MB)
+     bike particles: Rear Tire Dust Spray 16, Rear Tire Dirt Spray 55, Rear Tire Chunks 8, Rear Tire Collision Chunks 9
+     ms a frame: input 0.13 sim 0.16 stream 0.22 ground 0.66 scene 0.06 hud 0.88 present 14.58, all 16.74; worst 21.15 ms (present 20.02, hud 0.67), 33 over 16.7; widest gap 21.2 ms, waited 10.27 ms a frame, 633 sprites, gpu no frame timed
+world: mxu_nat21 dropped
+world ground: mxu_nat21 dropped at tick 2184
+world props: mxu_nat21 dropped at tick 2184
+141s 60.2 fps, 561334 triangles a frame,  55.8 mph, memory 1351 MB (5304 MB left, GPU 687 MB)
+     bike particles: Rear Tire Dust Spray 89, Rear Tire Dirt Spray 311, Rear Tire Chunks 25, Rear Tire Collision Chunks 73
+     ms a frame: input 0.14 sim 0.17 stream 0.29 ground 0.85 scene 0.06 hud 1.06 present 13.92, all 16.61; worst 19.94 ms (present 14.54, ground 2.07), 33 over 16.7; widest gap 20.0 ms, waited 9.19 ms a frame, 633 sprites, gpu no frame timed
+world: c19_000_000 loaded, 0 shapes
+world ground: c19_000_000 built coarse, 3 chunks at tick 2208
+world sky: over mxu_free09 at 10515,13965 in view 1: sun of mxu_free09 -0.022,-0.698,0.716 ambient 0.499,0.491,0.526 fog 106,110,108 328..1000
+142s 60.0 fps, 554676 triangles a frame,  60.7 mph, memory 1346 MB (5309 MB left, GPU 685 MB)
+     bike particles: Rear Tire Dust Spray 61, Rear Tire Dirt Spray 43, Rear Tire Chunks 9, Rear Tire Collision Chunks 33
+     ms a frame: input 0.11 sim 0.15 stream 0.20 ground 0.60 hud 0.78 present 14.72, all 16.66; worst 19.07 ms (present 17.58, ground 0.81), 35 over 16.7; widest gap 19.1 ms, waited 10.99 ms a frame, 605 sprites, gpu no frame timed
+143s 60.2 fps, 544287 triangles a frame,  52.8 mph, memory 1379 MB (5276 MB left, GPU 685 MB)
+     bike particles: Rear Tire Dust Spray 94, Rear Tire Dirt Spray 39, Rear Tire Collision Chunks 31
+     ms a frame: input 0.10 sim 0.15 stream 0.18 ground 0.75 hud 0.80 present 14.52, all 16.61; worst 19.03 ms (present 16.02, ground 1.65), 27 over 16.7; widest gap 19.1 ms, waited 10.98 ms a frame, 528 sprites, gpu no frame timed
+world ground: mxu_nat15 built, 324 chunks at tick 2272
+world ground: j011_010 built coarse, 4 chunks at tick 2272
+144s 59.8 fps, 476822 triangles a frame,  33.4 mph, memory 1348 MB (5307 MB left, GPU 694 MB)
+     bike particles: Rear Tire Dust Spray 62
+     ms a frame: input 0.05 sim 0.07 stream 0.15 ground 0.90 hud 0.37 present 15.13, all 16.74; worst 18.77 ms (present 16.38, ground 1.18), 28 over 16.7; widest gap 19.0 ms, waited 13.05 ms a frame, 528 sprites, gpu no frame timed
+145s 59.9 fps, 448019 triangles a frame,  42.1 mph, memory 1341 MB (5314 MB left, GPU 695 MB)
+     bike particles: Rear Tire Dust Spray 2
+     ms a frame: input 0.13 sim 0.14 stream 0.17 ground 1.30 hud 0.69 present 14.16, all 16.70; worst 21.22 ms (present 17.96, ground 1.57), 30 over 16.7; widest gap 21.3 ms, waited 10.06 ms a frame, 528 sprites, gpu no frame timed
+146s 60.0 fps, 317277 triangles a frame,  61.6 mph, memory 1340 MB (5315 MB left, GPU 693 MB)
+     bike particles: Rear Tire Dust Spray 44
+     ms a frame: input 0.18 sim 0.19 stream 0.22 ground 1.29 scene 0.06 hud 0.90 present 13.76, all 16.68; worst 19.50 ms (present 16.10, ground 0.99), 29 over 16.7; widest gap 19.6 ms, waited 9.09 ms a frame, 528 sprites, gpu no frame timed
+world: j006_016 loaded, 0 shapes
+world: j011_016 loaded, 0 shapes
+world: j012_016 loaded, 0 shapes
+world ground: j011_016 built coarse, 4 chunks at tick 2353
+world ground: j012_016 built coarse, 2 chunks at tick 2353
+world ground: j006_016 built coarse, 2 chunks at tick 2354
+world: j006_008 dropped
+world: j011_008 dropped
+world ground: j006_008 dropped at tick 2355
+world ground: j011_008 dropped at tick 2355
+147s 60.1 fps, 500222 triangles a frame,  67.2 mph, memory 1337 MB (5318 MB left, GPU 693 MB)
+     bike particles: Rear Tire Dust Spray 46, Rear Tire Collision Chunks 7
+     ms a frame: input 0.08 sim 0.13 stream 0.15 ground 0.76 hud 0.54 present 14.91, all 16.63; worst 23.38 ms (present 21.41, ground 1.02), 27 over 16.7; widest gap 23.4 ms, waited 11.90 ms a frame, 546 sprites, gpu no frame timed
+148s 59.9 fps, 507859 triangles a frame,  67.1 mph, memory 1363 MB (5292 MB left, GPU 693 MB)
+     bike particles: Rear Tire Dust Spray 56, Rear Tire Dirt Spray 73, Rear Tire Chunks 10, Rear Tire Collision Chunks 10
+     ms a frame: input 0.12 sim 0.18 stream 0.22 ground 1.10 scene 0.05 hud 0.89 present 14.07, all 16.69; worst 20.74 ms (present 18.41, ground 1.44), 34 over 16.7; widest gap 20.7 ms, waited 9.29 ms a frame, 548 sprites, gpu no frame timed
+149s 59.0 fps, 521372 triangles a frame,  60.9 mph, memory 1336 MB (5319 MB left, GPU 693 MB)
+     bike particles: Rear Tire Dust Spray 65, Rear Tire Dirt Spray 51, Rear Tire Collision Chunks 15
+     ms a frame: input 0.14 sim 0.15 stream 0.23 ground 0.94 scene 0.06 hud 0.92 present 14.42, all 16.95; worst 29.75 ms (present 29.12, hud 0.33), 34 over 16.7; widest gap 29.8 ms, waited 8.61 ms a frame, 548 sprites, gpu no frame timed
+world ground: mxu_nat04 built coarse, 36 chunks at tick 2472
+150s 60.3 fps, 510632 triangles a frame,  57.4 mph, memory 1373 MB (5282 MB left, GPU 694 MB)
+     bike particles: Rear Tire Dust Spray 6, Rear Tire Collision Chunks 1
+     ms a frame: input 0.08 sim 0.08 stream 0.16 ground 0.52 hud 0.56 present 15.10, all 16.57; worst 20.36 ms (present 16.56, ground 1.50), 26 over 16.7; widest gap 20.4 ms, waited 12.14 ms a frame, 546 sprites, gpu no frame timed
+world paint: mxu_nat04 let go at tick 2480
+world ground: j011_015 built, 48 chunks at tick 2498
+151s 59.9 fps, 501333 triangles a frame,  62.6 mph, memory 1368 MB (5287 MB left, GPU 693 MB)
+     bike particles: Rear Tire Dust Spray 39
+     ms a frame: input 0.07 sim 0.08 stream 0.15 ground 0.70 hud 0.52 present 15.11, all 16.69; worst 18.05 ms (present 16.65, ground 0.85), 35 over 16.7; widest gap 18.1 ms, waited 11.95 ms a frame, 686 sprites, gpu no frame timed
+152s 59.8 fps, 497112 triangles a frame,  73.9 mph, memory 1342 MB (5313 MB left, GPU 694 MB)
+     bike particles: Rear Tire Dust Spray 109, Rear Tire Dirt Spray 24, Rear Tire Chunks 4, Rear Tire Collision Chunks 3
+     ms a frame: input 0.11 sim 0.18 stream 0.20 ground 0.77 scene 0.05 hud 0.80 present 14.58, all 16.74; worst 19.26 ms (present 17.12, hud 1.19), 34 over 16.7; widest gap 19.3 ms, waited 10.36 ms a frame, 690 sprites, gpu no frame timed
+153s 60.0 fps, 471617 triangles a frame,  80.9 mph, memory 1368 MB (5287 MB left, GPU 695 MB)
+     bike particles: Rear Tire Dust Spray 112, Rear Tire Dirt Spray 5, Rear Tire Collision Chunks 11
+     ms a frame: input 0.13 sim 0.20 stream 0.24 ground 1.45 scene 0.06 hud 1.02 present 13.52, all 16.68; worst 20.90 ms (present 16.85, ground 1.79), 32 over 16.7; widest gap 20.9 ms, waited 8.53 ms a frame, 550 sprites, gpu no frame timed
+world: c19_000_001 loaded, 0 shapes
+world ground: c19_000_001 built coarse, 2 chunks at tick 2573
+154s 60.1 fps, 444211 triangles a frame,  63.7 mph, memory 1365 MB (5290 MB left, GPU 691 MB)
+     bike particles: Rear Tire Dust Spray 79, Rear Tire Dirt Spray 108, Rear Tire Chunks 13, Rear Tire Collision Chunks 17
+     ms a frame: input 0.13 sim 0.13 stream 0.16 ground 1.15 hud 0.70 present 14.27, all 16.63; worst 20.33 ms (present 16.79, ground 2.04), 33 over 16.7; widest gap 20.3 ms, waited 10.88 ms a frame, 550 sprites, gpu no frame timed
+155s 59.9 fps, 419556 triangles a frame,  50.2 mph, memory 1361 MB (5294 MB left, GPU 691 MB)
+     bike particles: Rear Tire Dust Spray 19, Rear Tire Collision Chunks 13
+     ms a frame: input 0.14 sim 0.20 stream 0.22 ground 1.41 scene 0.06 hud 0.99 present 13.60, all 16.70; worst 19.36 ms (present 15.30, ground 1.69), 29 over 16.7; widest gap 19.4 ms, waited 8.93 ms a frame, 549 sprites, gpu no frame timed
+world paint: mxu_nat15 shown at tick 2641
+156s 60.1 fps, 429051 triangles a frame,  46.2 mph, memory 1344 MB (5311 MB left, GPU 691 MB)
+     bike particles: none
+     ms a frame: input 0.11 sim 0.17 stream 0.19 ground 1.13 hud 0.70 present 14.26, all 16.64; worst 19.23 ms (present 16.73, ground 1.86), 32 over 16.7; widest gap 19.2 ms, waited 10.64 ms a frame, 549 sprites, gpu no frame timed
+world ground: j007_012 built coarse, 2 chunks at tick 2672
+157s 59.9 fps, 409307 triangles a frame,  51.8 mph, memory 1364 MB (5291 MB left, GPU 690 MB)
+     bike particles: none
+     ms a frame: input 0.10 sim 0.12 stream 0.16 ground 0.83 hud 0.64 present 14.76, all 16.69; worst 21.26 ms (present 18.25, ground 1.16), 27 over 16.7; widest gap 21.3 ms, waited 11.73 ms a frame, 549 sprites, gpu no frame timed
+158s 59.9 fps, 381986 triangles a frame,  46.8 mph, memory 1339 MB (5316 MB left, GPU 691 MB)
+     bike particles: Rear Tire Dust Spray 4, Rear Tire Dirt Spray 28, Rear Tire Chunks 4, Rear Tire Collision Chunks 3
+     ms a frame: input 0.15 sim 0.18 stream 0.22 ground 1.62 scene 0.06 hud 0.95 present 13.43, all 16.69; worst 21.96 ms (present 18.34, ground 1.85), 33 over 16.7; widest gap 22.0 ms, waited 8.63 ms a frame, 549 sprites, gpu no frame timed
+world: c19_001_000 loaded, 0 shapes
+world ground: c19_001_000 built coarse, 2 chunks at tick 2720
+world: j013_011 loaded, 0 shapes
+world: j013_012 loaded, 0 shapes
+world: j013_013 loaded, 0 shapes
+world: j013_015 loaded, 0 shapes
+world ground: j013_015 built coarse, 4 chunks at tick 2739
+world ground: j013_013 built coarse, 2 chunks at tick 2740
+world ground: j013_012 built coarse, 4 chunks at tick 2741
+world ground: j013_011 built coarse, 2 chunks at tick 2741
+160s 60.3 fps, 348284 triangles a frame,  51.2 mph, memory 1371 MB (5284 MB left, GPU 693 MB)
+     bike particles: Rear Tire Dust Spray 77, Rear Tire Dirt Spray 122, Rear Tire Collision Chunks 41
+     ms a frame: input 0.10 sim 0.12 stream 0.15 ground 1.30 hud 0.63 present 14.20, all 16.58; worst 20.83 ms (present 17.94, ground 1.97), 30 over 16.7; widest gap 20.9 ms, waited 11.31 ms a frame, 550 sprites, gpu no frame timed
+world ground: j011_011 built coarse, 4 chunks at tick 2765
+iOS NSProcessInfoThermalStateDidChangeNotification (1 controllers)
+iOS low power mode off, thermal state fair
+161s 60.1 fps, 465042 triangles a frame,  36.1 mph, memory 1370 MB (5285 MB left, GPU 694 MB)
+     bike particles: Rear Tire Dust Spray 85, Rear Tire Dirt Spray 145, Rear Tire Chunks 13, Rear Tire Collision Chunks 29
+     ms a frame: input 0.07 sim 0.11 stream 0.12 ground 1.26 hud 0.48 present 14.56, all 16.66; worst 20.47 ms (present 14.72, ground 4.30), 29 over 16.7; widest gap 20.5 ms, waited 12.30 ms a frame, 550 sprites, gpu no frame timed
+162s 59.6 fps, 489893 triangles a frame,  31.4 mph, memory 1344 MB (5311 MB left, GPU 694 MB)
+     bike particles: Rear Tire Dust Spray 17, Rear Tire Collision Chunks 15
+     ms a frame: input 0.14 sim 0.16 stream 0.20 ground 0.94 scene 0.06 hud 0.91 present 14.30, all 16.78; worst 19.69 ms (present 15.24, ground 2.06), 36 over 16.7; widest gap 19.7 ms, waited 10.15 ms a frame, 549 sprites, gpu no frame timed
+163s 60.1 fps, 475977 triangles a frame,  42.9 mph, memory 1342 MB (5313 MB left, GPU 693 MB)
+     bike particles: Rear Tire Dust Spray 39
+     ms a frame: input 0.19 sim 0.20 stream 0.24 ground 1.60 scene 0.06 hud 1.10 present 13.17, all 16.64; worst 22.80 ms (present 16.76, ground 4.96), 27 over 16.7; widest gap 22.9 ms, waited 7.77 ms a frame, 549 sprites, gpu no frame timed
+world: j011_017 loaded, 0 shapes
+world: j012_017 loaded, 0 shapes
+world ground: j011_017 built coarse, 4 chunks at tick 2847
+world ground: j012_017 built coarse, 3 chunks at tick 2848
+world: j006_009 dropped
+world: j011_009 dropped
+world: j012_009 dropped
+world ground: j006_009 dropped at tick 2852
+world ground: j011_009 dropped at tick 2852
+world ground: j012_009 dropped at tick 2852
+164s 60.1 fps, 509847 triangles a frame,  50.3 mph, memory 1369 MB (5286 MB left, GPU 693 MB)
+     bike particles: Rear Tire Dust Spray 59, Rear Tire Dirt Spray 75, Rear Tire Collision Chunks 10
+     ms a frame: input 0.13 sim 0.18 stream 0.20 ground 0.65 hud 0.73 present 14.64, all 16.65; worst 21.96 ms (present 20.13, hud 0.56), 29 over 16.7; widest gap 22.0 ms, waited 10.76 ms a frame, 549 sprites, gpu no frame timed
+165s 60.0 fps, 494145 triangles a frame,  46.6 mph, memory 1370 MB (5285 MB left, GPU 693 MB)
+     bike particles: Rear Tire Dust Spray 15, Rear Tire Collision Chunks 1
+     ms a frame: input 0.14 sim 0.21 stream 0.26 ground 0.76 scene 0.07 hud 1.01 present 14.15, all 16.68; worst 19.56 ms (present 18.01, hud 1.02), 32 over 16.7; widest gap 19.6 ms, waited 8.79 ms a frame, 550 sprites, gpu no frame timed
+166s 60.0 fps, 492263 triangles a frame,  48.3 mph, memory 1342 MB (5313 MB left, GPU 693 MB)
+     bike particles: Rear Tire Dust Spray 37, Rear Tire Dirt Spray 116, Rear Tire Collision Chunks 23
+     ms a frame: input 0.16 sim 0.22 stream 0.25 ground 0.74 scene 0.06 hud 1.04 present 14.11, all 16.67; worst 19.40 ms (present 16.27, hud 1.00), 28 over 16.7; widest gap 19.8 ms, waited 9.01 ms a frame, 551 sprites, gpu no frame timed
+marker: slot 3
+167s 60.1 fps, 489617 triangles a frame,  56.6 mph, memory 1344 MB (5311 MB left, GPU 694 MB)
+     bike particles: Rear Tire Dust Spray 68, Rear Tire Dirt Spray 90, Rear Tire Chunks 5, Rear Tire Collision Chunks 21
+     ms a frame: input 0.23 sim 0.25 stream 0.28 ground 0.67 scene 0.07 hud 1.22 present 13.84, all 16.65; worst 20.08 ms (present 17.74, hud 1.21), 28 over 16.7; widest gap 20.1 ms, waited 8.07 ms a frame, 630 sprites, gpu no frame timed
+marker: placed in slot 3
+markers: kept in /private/var/mobile/Containers/Data/Application/C1D67FFA-5FB6-4934-834D-2371F2B8FCBD/Documents/markers/world_mxu/Fizlo.markers
+168s 50.3 fps, 491340 triangles a frame,  45.0 mph, memory 1343 MB (5312 MB left, GPU 694 MB)
+     bike particles: Rear Tire Dust Spray 51, Rear Tire Collision Chunks 24
+     ms a frame: input 0.17 sim 0.22 stream 0.45 ground 0.46 scene 0.07 hud 1.03 present 17.40, all 19.88; worst 33.58 ms (present 30.68, hud 1.22), 37 over 16.7; widest gap 33.6 ms, waited 12.72 ms a frame, 631 sprites, gpu no frame timed
+169s 47.9 fps, 489240 triangles a frame,  42.1 mph, memory 1378 MB (5277 MB left, GPU 695 MB)
+     bike particles: Rear Tire Dust Spray 1, Rear Tire Collision Chunks 1
+     ms a frame: input 0.17 sim 0.20 stream 0.35 ground 0.78 scene 0.06 hud 0.96 present 18.30, all 20.90; worst 41.88 ms (present 35.41, stream 3.00), 38 over 16.7; widest gap 41.9 ms, waited 12.84 ms a frame, 629 sprites, gpu no frame timed
+170s 59.0 fps, 476127 triangles a frame,  46.9 mph, memory 1347 MB (5308 MB left, GPU 695 MB)
+     bike particles: none
+     ms a frame: input 0.14 sim 0.20 stream 0.29 anim 0.05 ground 0.75 scene 0.09 hud 1.18 present 14.21, all 16.96; worst 22.88 ms (present 20.87, hud 1.07), 33 over 16.7; widest gap 23.1 ms, waited 9.32 ms a frame, 629 sprites, gpu no frame timed
+wreck: reason 8 — L1 and R1 together to get back on
+171s 60.0 fps, 354095 triangles a frame,  29.2 mph (getting up), memory 1349 MB (5306 MB left, GPU 696 MB)
+     bike particles: Vehicle Dust 7, Vehicle Chunks 48, Rider Dust 43, Rider Chunks 18
+     ms a frame: input 0.14 sim 0.27 stream 0.21 ground 1.14 scene 0.07 hud 0.91 present 13.86, all 16.68; worst 21.69 ms (present 18.23, hud 1.35), 31 over 16.7; widest gap 21.7 ms, waited 9.53 ms a frame, 553 sprites, gpu no frame timed
+world ground: j011_016 built, 48 chunks at tick 3097
+172s 59.2 fps, 551827 triangles a frame,  26.6 mph (getting up), memory 1376 MB (5279 MB left, GPU 699 MB)
+     bike particles: Vehicle Dust 9, Vehicle Chunks 85, Rider Dust 41, Rider Chunks 9
+     ms a frame: input 0.15 sim 0.29 stream 0.19 ground 1.00 scene 0.05 hud 0.85 present 14.29, all 16.90; worst 32.15 ms (present 28.40, ground 2.76), 26 over 16.7; widest gap 32.3 ms, waited 10.80 ms a frame, 551 sprites, gpu no frame timed
+page: seat 0 alpha 84
+page: seat 0 alpha 171
+page: seat 0 alpha 255
+put back
+page: seat 0 alpha 171
+page: seat 0 alpha 84
+page: seat 0 alpha 0
+173s 59.0 fps, 527174 triangles a frame,   1.2 mph, memory 1375 MB (5280 MB left, GPU 694 MB)
+     bike particles: Vehicle Dust 18, Vehicle Chunks 122, Rider Dust 1
+     ms a frame: input 0.11 sim 0.29 stream 0.20 ground 2.26 hud 0.95 present 13.04, all 16.97; worst 27.83 ms (present 26.76, hud 0.81), 30 over 16.7; widest gap 27.9 ms, waited 9.19 ms a frame, 552 sprites, gpu no frame timed
+iOS UIApplicationWillResignActiveNotification (1 controllers)
+ios: away, the frame loop rests
+settings: saved in /private/var/mobile/Containers/Data/Application/C1D67FFA-5FB6-4934-834D-2371F2B8FCBD/Documents (away)
+settings: saved in /private/var/mobile/Containers/Data/Application/C1D67FFA-5FB6-4934-834D-2371F2B8FCBD/Documents (away)
+away: gave back 875 models, 556 materials and 498 textures in the background
+iOS UIApplicationDidEnterBackgroundNotification: answered after 116 ms, memory 1252 MB, 5403 MB left before iOS closes the app
+audio: UIApplicationDidEnterBackgroundNotification (Background): other audio true, restart 4
+174s 14.9 fps, 203778 triangles a frame,   1.9 mph (frozen), memory 1237 MB (5418 MB left, GPU 586 MB)
+     bike particles: Vehicle Dust 1, Vehicle Chunks 54
+     ms a frame: input 2.92 menu 0.06 sim 0.13 stream 0.45 ground 0.71 scene 0.11 hud 1.16 present 61.60, all 67.19; worst 143.17 ms (present 103.21, input 37.80), 12 over 16.7; widest gap 143.1 ms, waited 11.15 ms a frame, 933 sprites, gpu no frame timed
