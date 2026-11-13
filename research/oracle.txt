@@ -11409,6 +11409,28 @@ atv_heap_free               atv 0x001b76d0 = free
 #   0x0050a920(object, pick); object +0x40 = spot - motion*dt (.xyz, w the spot's), +0x30 = spot; object vt +0x98
 #   (object, f12 dt) = 0x0050ceb0, the first emitter kind's step (F57's port answers it in PartWalk). The steps call
 #   no rand themselves: flip-1's rand draws in 0x004fe010's steps are that emitter step's. 0x003d1740's step 0x004fd0c0 (700 bytes) no C15 item steps; not ported (handed on).
+# F59 — the part walk's second emitter kind in Rust (game_sim::handling::ring::{step, aim}, Rings; tests/
+#   mxvatv_bike_ride.rs the_second_emitter_step_is_the_originals (20,000 cases) and PartWalk's "second emitter").
+#   Journal research/journal/2026-11-13-f59-second-emitter-kind. Thunk 0x004ffd20 (a0 - 12, j 0x004fbcc0(obj, f12
+#   dt)). Step 0x004fbcc0 (3884 bytes): gate 0x0050a040 (F57's), node owner frame id as F57; moved/dist/speed and
+#   the velocity (def +0x4c bit 8) as F57; fast/slowest; rand twice: count 0x0050e6a0 (F57's) and the walk (same
+#   five thresholds); flags bit 8 with a node -> node update 0x00193b30; then always 0x00194c20(node, 0, spot)
+#   (node 0: the words at 0x60..0x68 and w 1); count <= 0 -> 1; def +0x58 == 1 -> flags |= 0x80; base: velocity
+#   bit -> 0x0050e7e0 (F57's base), else the zero quad 0x00396fc0 with only x += (+0x60 through the rows at +0xa0).x;
+#   push bit 0x10 adds pool +0x140; idx = u*(599-13 stride); +0x110 = +0x60 + +0x70; aim: unit(+0x110) against
+#   0x00397010 (0,0,1): dot clamped twice, acos lerped off the table *0x003ea9c0 by (1+c)*(*0x003ea9d8) (30000
+#   entries, 14999.5 in the image), cross y < 0 -> 2pi - a; a = 2.3561945 + (2pi - a), > 2pi -> - 2pi; at =
+#   cvt.w.s(120 * a/2pi); *0x0052cd80 == 0 -> clock 0x00361798(buf) (SIF RPC), seed = b1 + 60 b2 + 360 b3 + 86400
+#   b5 stored there, srand 0x00356190(seed); rand -> +0x100 = (at + cvt.w.s(+0x108 * u)) % 120 (a dead (x+90) %
+#   120 after). Centre 0x005253a0 (not F57's 0x00525450). Loop: pool full -> 1; walk bounce as F57; xyz off
+#   idx+1..3, offset/push as F57 (in frame / turned); heading = ring(+0x140 + 16 +0x100) + base; +0x100 = (+0x100
+#   + +0x108) % 120; p+0 = spot + ring(new)*+0x134 + offset; p+0x30 = p+0x34 (the old) * def+0x10c; p+0x34 by
+#   idx+4 (def +0x100/+0x108); p+0x3c by idx+5 (+0xbc/+0xc4); p+0x38 = 1/p+0x34; p+0x10 = heading + push; p+0x44
+#   by idx+6 (+0x118/+0x120); p+0x54 = obj, p+0x48 = def+0x28; look 0x0050eab0 by idx+7 -> p+0x26; p+0x44 == 0
+#   -> &= ~8; settle 0x004833c0 (bit 0x20, then p+4 += offset y); spins: p+0x4c = def+0xa0 (no +0x50) else both
+#   0; +0xc8 == 1 -> bind 0x0050c8b0; fades by idx+8, +9; pool count++; !stepped -> look byte by idx+10. No
+#   p+0x40, the spawn point does not walk back along the move (F57's does). Answers 1.
+#   C15: one listener on state 4 (flip-1 and ride-2); no frame draws rand (all stop at the gate or slowest).
 # S13d — the race's results: what the supercross activity does with each card that finishes at the line
 # (the score manager's listener, the activity +0x160 with its vtable at +0x1c = 0x00458690: vt+0x14,
 # the lap line's Finished notice, through the thunk 0x003004f0 = this - 0x160. The race's Over notice
