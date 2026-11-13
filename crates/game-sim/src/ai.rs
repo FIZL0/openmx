@@ -4679,6 +4679,242 @@ pub fn ride_controls(levers: &Levers, clutch: F) -> crate::ride::Controls {
     }
 }
 
+/// The route follower's drift, kick and period words, and its ten dice, as a fresh brain has them:
+/// what a path follower built for this rider starts from (the names are [`follow::Follower`]'s).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Wander {
+    /// Ten `unit()` draws, made in order when the brain is built.
+    pub draws: [F; 10],
+    pub drift: F,
+    pub kick: F,
+    pub kick_time: F,
+    pub kick_decay: F,
+    pub kick_clock: F,
+    pub drift_target: F,
+    pub drift_clock: F,
+    pub period_low: F,
+    pub period_high: F,
+    pub period: F,
+    pub cruise: F,
+}
+
+/// A motocross brain as its spawn leaves it, before the character file is read: the [`Racer`], the
+/// brain's side of its [`Character`] (the profile is the rider's, and left at its default), and the
+/// follower's [`Wander`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct Spawned {
+    pub racer: Racer,
+    pub character: Character,
+    pub wander: Wander,
+}
+
+/// The brain's mode when the spawn is told to pick it: [`RIDE`] for event kind 2 (the free ride), 2 for
+/// kinds 0 and 1, and the constructor's 0 for any other.
+pub fn spawn_mode(event_kind: i32) -> i32 {
+    match event_kind {
+        2 => RIDE,
+        0 | 1 => 2,
+        _ => 0,
+    }
+}
+
+/// An AI rider's brain spawned on its interface: the vehicle AI's constructor, the motocross AI's on
+/// top of it, the attach to the interface (type `kind`), the mode (`mode`, or [`spawn_mode`] of the
+/// event's kind when `None`), the flag word, and the motocross set-up's own numbers.
+///
+/// The vehicle AI's constructor makes ten `unit()` draws for the follower's dice, in order, and nothing
+/// else draws. The set-up then overrides some of the constructors' values: the lead 60 (from 160), the
+/// trick cooldown and chance 10 (from 10 and 0), the steering gain 5.1 (from 2.5), both speed
+/// tolerances 1 (from 10), the reach 25 + 4 × off-line, at most 80.1 (from 20 + 3 ×, at most 100), the
+/// landing pitch distance 10 (from 20), the drift size 3 (from 5), the ALOD window 175 and upper limit
+/// 0.9 (from 50 and 0.5), and the feeler height 3 (from 1). The attach zeroes the flag word, and the
+/// set-up turns on [`SPAWN_FLAGS`].
+///
+/// A word neither constructor writes (the spin, the ground's height, the flight's air time, the aim,
+/// the controller's angles and flat forward) is 0 here: the original leaves whatever the allocation
+/// held.
+pub fn spawn(rng: &mut Rng, kind: i32, mode: Option<i32>, event_kind: i32) -> Spawned {
+    let draws: [F; 10] = core::array::from_fn(|_| rng.unit());
+    let zero = F(0.0);
+    let one = F(1.0);
+    let vf0 = Vf::new(0.0, 0.0, 0.0, 1.0);
+    let flags = SPAWN_FLAGS;
+    let brain = Brain {
+        kind: Some(kind),
+        mode: mode.unwrap_or_else(|| spawn_mode(event_kind)),
+        flags,
+        speed: zero,
+        forward_y: zero,
+        stuck: zero,
+        climb: Climb { hold: zero, steep: F(0.7), timer: zero, speed: F(40.0) },
+        steer: zero,
+        pitch: zero,
+        throttle: zero,
+        brake: zero,
+    };
+    let senses = Senses {
+        last_position: vf0,
+        frame: [Vf::new(1.0, 0.0, 0.0, 0.0), Vf::new(0.0, 1.0, 0.0, 0.0), Vf::new(0.0, 0.0, 1.0, 0.0), vf0],
+        velocity: vf0,
+        acceleration: vf0,
+        spin: Vf::new(0.0, 0.0, 0.0, 0.0),
+        speed: zero,
+        ground_normal: Vf::new(0.0, 1.0, 0.0, 1.0),
+        ground: zero,
+        flags,
+        bumps: 0,
+    };
+    let tuning = Tuning {
+        steering_gain: F(5.1),
+        oversteer_gain: F(1.5),
+        aim_gain: F(0.2),
+        pitch_distance: F(10.0),
+        pitch_gain: F(10.0),
+        pitch_filter: F(0.1),
+        landing_pitch: zero,
+        slow_tolerance: one,
+        fast_tolerance: one,
+        cruise_base: F(0.0125),
+        cruise_gain: one,
+        brake_gain: F(0.006_666_7),
+        steer_scale: one,
+        pitch_scale: one,
+    };
+    let filter = SteerFilter {
+        rate: Vf::new(2.0, 2.0, 2.0, 1.0),
+        jitter: Vf::new(0.2, 0.2, 0.2, 1.0),
+        gain: Vf::new(0.1, 0.1, 0.1, 1.0),
+        out: vf0,
+    };
+    let reach = seek::Reach { base: F(25.0), max: F(80.1), gain: F(4.0) };
+    let seeker = seek::Seeker {
+        flags,
+        flags2: 0,
+        set: None,
+        target: None,
+        last_target: None,
+        jump: None,
+        index: 0,
+        state: 0,
+        tries: 0,
+        tolerance: F(20.0),
+        learnt: zero,
+        aim_step: F(0.05),
+        speed_step: F(10.0),
+        learn_step: F(10.0),
+        last_miss: vf0,
+        miss: vf0,
+        lead: F(60.0),
+        distance: zero,
+        follow: 0,
+        aim: Vf::new(0.0, 0.0, 0.0, 0.0),
+        heading: vf0,
+        speed: zero,
+    };
+    let avoid = AvoidTuning::default();
+    let character = Character {
+        tuning,
+        avoid,
+        alod: Alod { window: F(175.0), lower_limit: F(0.5), upper_limit: F(0.9), speed: F(70.0), lead_window: F(75.0) },
+        steering_jitter_filter: filter.jitter,
+        steering_rate_filter: filter.rate,
+        min_random_offset: zero,
+        max_random_offset: F(5.0),
+        max_drift_size: F(3.0),
+        max_drift_rate: F(10.0),
+        no_track_look_ahead: F(100.0),
+        no_track_min_turn: F(0.707),
+        min_look_ahead: reach.base,
+        max_look_ahead: reach.max,
+        roll_gain: F(10.0),
+        roll_distance: one,
+        min_stunt_interval: F(10.0),
+        stunt_probability: F(10.0),
+        profile: Profile::default(),
+    };
+    let mut racer = Racer {
+        brain,
+        senses,
+        moves: 0,
+        seeker,
+        reach,
+        min_speed: F(40.0),
+        assist_x: zero,
+        assist_z: zero,
+        controls: Controls {
+            steer: zero,
+            pitch: zero,
+            throttle: zero,
+            brake: zero,
+            heading: zero,
+            aim: zero,
+            roll: zero,
+            flat_forward: Vf::new(0.0, 0.0, 0.0, 0.0),
+            target_speed: zero,
+        },
+        bar_rest: [zero, one],
+        tuning,
+        avoid,
+        vehicle: VehicleTuning::default(),
+        plan: TrickPlan { cooldown: F(10.0), since: zero, chance: F(10.0), estimate: zero, slot: 0, air: zero },
+        habits: Habits::default(),
+        filter,
+        weights: Weights::default(),
+        listening: false,
+        listeners: Vec::new(),
+    };
+    racer.take(&character);
+    let wander = Wander {
+        draws,
+        kick_time: F(3.0),
+        period_low: F(2.0),
+        period_high: F(20.0),
+        cruise: F(50.0),
+        ..Wander::default()
+    };
+    Spawned { racer, character, wander }
+}
+
+/// The flag word the motocross set-up leaves: [`flag`] bits 0x1, 0x2, 0x800 ([`tick_flag::ASSIST`]),
+/// 0x1000, 0x2000, 0x8000, 0x20_0000 ([`tick_flag::APPROACH`]), 0x80_0000, 0x100_0000 and
+/// 0x200_0000.
+pub const SPAWN_FLAGS: u64 = 0x1 | 0x2 | 0x800 | 0x1000 | 0x2000 | 0x8000 | 0x20_0000 | 0x80_0000 | 0x100_0000 | 0x200_0000;
+
+impl Racer {
+    /// Bring in what the character file set ([`read_character`]): the controller's and the avoidance's
+    /// tuning, the steering filter's rate and jitter, the reach's least and most, the trick plan's
+    /// interval and chance, and from the rider's [`Profile`] the habits' numbers and the assist's
+    /// weights. Each is the same word in the original, which the reader writes and the tick reads.
+    pub fn take(&mut self, c: &Character) {
+        self.tuning = c.tuning;
+        self.avoid = c.avoid;
+        self.filter.rate = c.steering_rate_filter;
+        self.filter.jitter = c.steering_jitter_filter;
+        self.reach.base = c.min_look_ahead;
+        self.reach.max = c.max_look_ahead;
+        self.plan.cooldown = c.min_stunt_interval;
+        self.plan.chance = c.stunt_probability;
+        let (h, p) = (&mut self.habits, &c.profile);
+        h.low_air = c.roll_distance;
+        h.preload_per_speed = p.preload_per_speed;
+        h.pull_back_amount = p.pull_back_amount;
+        h.lag_hang_time = p.landing_lag_hang_time;
+        h.lag_chance = p.landing_lag.value;
+        h.lag_time = p.landing_lag_time;
+        h.horse_power = p.horse_power.value;
+        h.brilliant_chance = p.brilliant_moment.value;
+        h.brilliant_min = p.brilliant_min_duration;
+        h.brilliant_random = p.brilliant_random_duration;
+        h.gate_delay = p.start_gate_delay;
+        h.wheelie_max = p.wheelie_start_max;
+        h.cross_up_chance = p.crossup_probability;
+        h.cross_up_min = p.crossup_min_duration;
+        h.cross_up_max = p.crossup_max_duration;
+        h.cross_up_height = p.crossup_min_height;
+        self.weights = Weights { heading: p.turn_rate_tweak, aim: p.velocity_tweak };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
