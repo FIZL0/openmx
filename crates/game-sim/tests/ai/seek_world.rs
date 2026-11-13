@@ -154,3 +154,98 @@ fn s313_free09_world_loads_as_the_image_holds_it() {
     assert_eq!(world.groups[8].targets.as_ref().map(Vec::len), Some(4));
     assert_eq!((&world.groups[10].targets, &world.groups[11].targets), (&None, &None));
 }
+
+// --- S316: the Sim loads it at the map's load ------------------------------------------------------------
+
+/// **A free ride's Sim loads free09's seeker world with its riders as the owners, as the original's
+/// load leaves it.** Four riders, each where recording2's image has its model root; the Sim's
+/// load reads free09's `hit.dat` and the two databases it names through the track folder. Against
+/// the image: one set per rider, each owner's kind (player 1's 1, the AI riders' 2) and player number,
+/// and the slot count, the activity's players, the riders and one more. The rest of the world is
+/// [`game_sim::ai::seek::load`]'s, which S313's test proves field for field, so it is compared
+/// against a direct call with the image's owners. And a `hit.dat` that names no databases (an MX
+/// track's) loads nothing.
+#[test]
+fn s316_a_free_ride_sim_loads_its_seeker_world() {
+    use game_sim::phy::Ini;
+    use game_sim::track::{Scene, Terrain};
+    use game_sim::world::{Ground, Place, Props};
+    use game_sim::{Sim, rider::Rider, stock};
+    use std::io::Read;
+
+    let kit = match ps2_oracle::Kit::load() {
+        Ok(k) => k,
+        Err(w) => return skip(&w),
+    };
+    let image = kit.ctx("states").join("recording2.p2m2_SaveState.eeMemory.bin");
+    if !image.exists() {
+        return skip(&format!("{} is not there: `./kit state ram` of recording2.p2m2_SaveState.p2s", image.display()));
+    }
+    let mut f = match std::fs::File::open(kit.ctx("iso").join("MX.PSR")) {
+        Ok(f) => f,
+        Err(e) => return skip(&format!("no disc container: {e}")),
+    };
+    let mut front = vec![0u8; 64 << 10];
+    f.read_exact(&mut front).unwrap();
+    let psr = game_sim::archive::Psr::parse(&front).unwrap();
+    let track = s313_member(&mut f, &psr, "Tracks\\free09.res");
+    let scene = Scene::parse(&s313_file(&track, "tracks\\free09\\free09.scn")).unwrap();
+    let trn = s313_file(&track, "tracks\\free09\\free09.ps2.trn");
+    let terrain = Terrain::parse(&trn).unwrap();
+    let mut place = Place { ground: Ground::new(&terrain, &scene.terrain), props: Props::default() };
+    let data = s313_member(&mut f, &psr, "Tracks\\free09_2.res");
+    let hit_dat = Ini::parse_bytes(&s313_file(&data, "tracks\\free09\\hit.dat"));
+
+    let ee = ps2_oracle::Ee::from_ram(&image).unwrap_or_else(|e| panic!("{e}"));
+    let root = ee.u32_at(addr("ai_seek_sequence_root").unwrap());
+    let set_items = ee.u32_at(root + 0x38);
+    let owners: Vec<sk::Owner> = (0..ee.u32_at(root + 0x30))
+        .map(|i| {
+            let o = ee.u32_at(ee.u32_at(set_items + 4 * i) + 0x54);
+            let node = ee.u32_at(ee.u32_at(ee.u32_at(o + 0x3c)) + 0x18);
+            sk::Owner {
+                kind: ee.u32_at(o + 0x34) as i32,
+                player: ee.u32_at(o + 0x30) as usize,
+                position: Vf::from_bits(s313_bits(&ee, node + 0x70)),
+                hit_freeride: false,
+            }
+        })
+        .collect();
+    let zones = ee.u32_at(root + 0x44);
+    let slots = ee.u32_at(ee.u32_at(ee.u32_at(zones + 0x50) + 0x48) + 0x48) as usize;
+    assert_eq!(owners.len(), 4);
+
+    let tables = std::sync::Arc::new(game_sim::rider::Tables::build());
+    let phy = stock::phy(&tables.ride.curve);
+    let rider = |at: Vf| Rider::new(&phy, stock::mounts(&phy), at, stock::FACING, Set::default());
+    let mut sim = Sim::with_rider(1, std::sync::Arc::clone(&tables), phy.clone(), rider(owners[0].position));
+    for o in &owners[1..] {
+        sim.add_player(phy.clone(), rider(o.position));
+    }
+    assert_eq!(sim.players() + 1, slots, "the image's slot count is its riders and one more");
+    let open = |player: usize, zone: sk::Zone| player == 0 && zone.place == Some(0);
+    let mut read = |name: &str| Some(s313_file(&data, &format!("tracks\\free09\\{name}")));
+    assert!(sim.load_seek(&hit_dat, &mut read, sim.players() + 1, &open, &mut place));
+    let world = sim.seek.as_deref().expect("a seeker world");
+
+    for (set, want) in world.sets.iter().zip(&owners) {
+        assert_eq!((set.owner.kind, set.owner.player), (want.kind, want.player), "the owners");
+        assert_eq!(set.owner.position.to_bits(), sim.rider_of(set.owner.player).ride.position().to_bits());
+        assert!(!set.owner.hit_freeride);
+    }
+    let (hits, sets) = sk::databases(&hit_dat);
+    let hits = Ini::parse_bytes(&s313_file(&data, &format!("tracks\\free09\\{}", hits.unwrap())));
+    let sets = Ini::parse_bytes(&s313_file(&data, &format!("tracks\\free09\\{}", sets.unwrap())));
+    let owners: Vec<sk::Owner> = world.sets.iter().map(|s| s.owner).collect();
+    let direct = sk::load(&hit_dat, &hits, &sets, &owners, slots, &open, &mut place);
+    assert_eq!(world, &direct);
+    assert_eq!((world.sets.len(), world.targets.len(), world.groups.len()), (4, 106, 12));
+    assert!(world.targets.iter().all(|t| t.done.len() == slots));
+    // Its clone carries it, and a state that never loaded one has none.
+    assert_eq!(sim.clone().seek.as_deref(), Some(world));
+
+    let mut bare = Sim::new(1);
+    let mut none = |_: &str| -> Option<Vec<u8>> { panic!("nothing to read") };
+    assert!(!bare.load_seek(&Ini::parse("[HitData]\n"), &mut none, 2, &open, &mut place));
+    assert_eq!(bare.seek, None);
+}

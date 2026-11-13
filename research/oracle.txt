@@ -1736,7 +1736,13 @@ ai_seek_load                boot 0x003a9680 (root, hit.dat ini, slots): param_3 
 #                                           as riders join; 0x003a6600 sets set+0x54 = owner). [HitData]
 #                                           EnableAllHits -> root+0x58; HitDBFilename/HitSetDBFilename get
 #                                           the track folder in front. [Progression HitSets]/[Run HitSets]
-#                                           HitSetID lists read with a running cursor
+#                                           HitSetID lists read with a running cursor.
+#                                           Called by the activity manager's map load (0x0021b620,
+#                                           s3 = activity_manager) with slots = its +0x5c list's
+#                                           count: the activity's players (owner objects, +0x30
+#                                           player, +0x34 kind). recording2: 5 = the 4 riders (kind
+#                                           1, 2, 2, 2) and a static player at 0x004ec290 (player 4,
+#                                           kind 2, no set; what it is not traced). S316
 ai_seek_hit_db              boot 0x00323b00 hit DB: [General] TotalHits, NextHitID (u16 base 10,
 #                                           default 1); per n [Hit n] HitID (0 -> the counter, which
 #                                           counts on, 0x00323c90). Record 0x130, u16 id +0x120

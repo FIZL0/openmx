@@ -7467,6 +7467,20 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         println!("freestyle event: {} stunt zones, target {}", stunt.zones.len(), stunt.target);
     }
     seats.iter_mut().for_each(|s| s.sim.event = stunt.clone());
+    // The free-ride AI riders' seeker world (S316) on every seat's state: the same `hit.dat`'s
+    // databases out of the track's folder, its riders the owners, a done flag per rider and one
+    // more (the original's player count on free09). Zones open as a fresh profile's are taken to
+    // be — the first of each progression (S315 reads them off the save).
+    let seek_dat = game_sim::phy::Ini::parse(&hit_dat);
+    for (i, s) in seats.iter_mut().enumerate() {
+        let slots = s.sim.players() + 1;
+        let mut read = |name: &str| archives.iter().find_map(|a| a.read_suffix(&format!("{stem}\\{name}")).ok());
+        let open = |_: usize, zone: game_sim::ai::seek::Zone| zone.place == Some(0);
+        if s.sim.load_seek(&seek_dat, &mut read, slots, &open, &mut sim) && i == 0 {
+            let w = s.sim.seek.as_deref().expect("loaded");
+            println!("ai seek: {} targets, {} zones, {} riders, {slots} slots", w.targets.len(), w.groups.len(), w.sets.len());
+        }
+    }
     let mut world = World { place: sim, seats, tape: recorder, played_dt: None };
     // `--fly-at` (V96): the first seat's plane flying high over the world from the first tick, at
     // the biplane's cruise.
