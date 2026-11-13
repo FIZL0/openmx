@@ -230,6 +230,9 @@ struct ViewUniform {
     sun_world_m: [[f32; 4]; 4],
 }
 
+/// [`MaterialUniform::coverage`]'s bit for an additive material.
+const ADDITIVE: u32 = 2;
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct MaterialUniform {
@@ -237,7 +240,9 @@ struct MaterialUniform {
     cutoff: f32,
     shading: u32,
     /// 1 for [`Surface::keep_coverage`]: the texture's levels keep the coverage (V58), and the
-    /// shader reads two of them dithered (V85).
+    /// shader reads two of them dithered (V85). Bit 2 for an additive material: the shader weighs
+    /// its colour by the texel's alpha itself (V127), so that a see-through copy's blend constant
+    /// weighs that again rather than in its place.
     coverage: u32,
     /// Texels at or over this alpha are not drawn: the half of a material whose failing texels are
     /// drawn apart from its passing ones ([`GpuMaterial::rest`]).
@@ -3718,7 +3723,7 @@ impl Renderer {
             constant,
             cutoff: if keep > 0 { KEEP_EDGE as f32 } else { cutoff as f32 },
             shading: key.shading.0 as u32,
-            coverage: key.keep_coverage as u32,
+            coverage: key.keep_coverage as u32 | if key.pipeline.blend == Blend::Add { ADDITIVE } else { 0 },
             below,
         };
         let buffer = |uniform: MaterialUniform| {
@@ -3802,9 +3807,10 @@ impl Renderer {
             _ if key.ghost => Some(constant(wgpu::BlendFactor::OneMinusConstant)),
             Blend::Opaque => None,
             Blend::Alpha => Some(wgpu::BlendState::ALPHA_BLENDING),
+            // The shader has weighed the colour by its alpha already ([`ADDITIVE`]).
             Blend::Add => Some(wgpu::BlendState {
                 color: wgpu::BlendComponent {
-                    src_factor: wgpu::BlendFactor::SrcAlpha,
+                    src_factor: wgpu::BlendFactor::One,
                     dst_factor: wgpu::BlendFactor::One,
                     operation: wgpu::BlendOperation::Add,
                 },
@@ -5762,7 +5768,7 @@ fn node_matrix(i: u32) -> mat4x4f {
 
 @fragment fn fs(i: Out) -> @location(0) vec4f {
   var t: vec4f;
-  if (material.coverage == 1u) {
+  if ((material.coverage & 1u) == 1u) {
     // A cut-out that keeps its coverage (leaves) has it kept by its texture's mips (V58), and reads
     // one level a pixel, not a mix of two, which would fall under the cutoff between them. Which
     // of the two levels about the pixel's own it reads is dithered by how far it is between them
@@ -5801,6 +5807,10 @@ fn node_matrix(i: u32) -> mat4x4f {
     }
   }
   let out = clamp(t.rgb * lit * (1.0 - i.fog) + view.fog_color.rgb * i.fog, vec3f(0.0), vec3f(255.0));
+  // An additive material's colour, `Cs * As`, added over what is drawn by its blend (V127).
+  if ((material.coverage & 2u) != 0u) {
+    return vec4f(out / 255.0 * (t.a / 255.0), t.a / 255.0);
+  }
   return vec4f(out / 255.0, t.a / 255.0);
 }
 
