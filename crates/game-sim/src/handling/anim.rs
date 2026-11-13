@@ -9,6 +9,10 @@
 //! - [`blend`]: two clips at the same fraction, mixed bone by bone, then the same fade.
 //! - [`rotation`] and [`position`]: one channel sampled at a time, the two channel kinds the
 //!   rider's clips are made of.
+//! - [`advance`] and [`start`] (F62b): the controller's own clip advance (its vt `+0x88`: the clip
+//!   run on by `dt`, sampled, and crossfaded from the saved pose or the clip before it while `+0x2d`
+//!   bit 1 holds) and a clip started with a crossfade of a span (`+0x68` clock, `+0x6c` end, `+0x70`
+//!   start, `+0x74` span, `+0x40` the old clip); research/oracle.txt `# F62b`.
 //!
 //! The controller's words: its flag bytes (`+0x2c`: bit 4 a per-bone fade list in use; `+0x2d`: bit 5
 //! the bones' nodes turned, bit 4 placed), `+0x3c` (cleared by a play or blend), the last clip and
@@ -532,4 +536,275 @@ pub fn blend4(m: &mut impl Ram, t: &Tables, ctrl: u32, clips: [u32; 4], weight: 
         k += 1;
     }
     finish(m, ctrl, a, time);
+}
+
+// F62b: the controller's own clip (`+0x3c`), its time (`+0x64`) and its crossfade: the clock
+// (`+0x68`), its end (`+0x6c`), its start (`+0x70`), its span (`+0x74`), the clip faded out of
+// (`+0x40`, none for the saved pose), the fading bit (`+0x2d` bit 1) and the ended word (`+0x24c`).
+
+const FADING: u32 = 0x02;
+/// `+0x2c` bit 7: a list of per-bone words (`+0x214` long) the crossfades fill; not ported.
+const BONE_LIST_ON: u32 = 0x80;
+
+/// **The controller's clip set** (its vt `+0x90`): not ended, the clip its own, not fading, at
+/// time 0.
+pub fn set_clip(m: &mut impl Ram, ctrl: u32, clip: u32) {
+    m.set(ctrl + 0x24c, 0);
+    m.set(ctrl + 0x3c, clip);
+    let b = byte(m, ctrl + 0x2d);
+    put_byte(m, ctrl + 0x2d, b & !FADING);
+    m.set(ctrl + 0x64, 0);
+}
+
+/// **A clip started with a crossfade of `span`** (the rider's wreck poses' shape: the new clip
+/// from its start). A span of 0 only sets the clip ([`set_clip`]). Otherwise the crossfade's clock
+/// and start are put at the old clip's time and its end `span` past it, the old clip kept to fade
+/// out of; with no old clip, or a crossfade already running, the controller is stopped
+/// ([`stop`]) and the fade is out of the saved pose instead. Then the clip set, and fading.
+pub fn start(m: &mut impl Anim, ctrl: u32, clip: u32, span: F) {
+    if span == F::ZERO {
+        set_clip(m, ctrl, clip);
+        return;
+    }
+    let now = m.word(ctrl + 0x64);
+    m.set(ctrl + 0x70, now);
+    m.set(ctrl + 0x68, now);
+    m.set(ctrl + 0x6c, (F::from_bits(now) + span).to_bits());
+    m.set(ctrl + 0x74, span.to_bits());
+    let old = m.word(ctrl + 0x3c);
+    m.set(ctrl + 0x40, old);
+    if old == 0 || byte(m, ctrl + 0x2d) & FADING != 0 {
+        m.set(ctrl + 0x40, 0);
+        stop(m, ctrl);
+    }
+    set_clip(m, ctrl, clip);
+    let b = byte(m, ctrl + 0x2d);
+    put_byte(m, ctrl + 0x2d, (b & !FADING) | FADING);
+}
+
+/// A quadword as VU0 holds it: the words as they are (a slerp that cannot turn stores its first
+/// quaternion back word for word, a denormal lane too).
+fn raw(q: Quad) -> Vf {
+    Vf(q.map(f32::from_bits))
+}
+
+/// A bone's rotation stored as the advance and its crossfades store it: the node turned if the
+/// controller turns them, else into the bone (never both, unlike [`put_rotation`]).
+fn store_rotation(m: &mut impl Ram, ctrl: u32, bone: u32, q: Quad) {
+    let at = m.word(ctrl + 0x1fc).wrapping_add(BONE * bone);
+    if byte(m, ctrl + 0x2d) & TURN_NODES != 0 {
+        let n = m.word(at);
+        turn_node(m, n, q);
+    } else {
+        put_quad(m, at + 0x20, q);
+    }
+}
+
+/// A bone's position (`at`, already sampled) moved `1 − w` of the way to `from` (`xyz` on VU0,
+/// `w` kept), and its node placed if the controller places them.
+fn cross_position(m: &mut impl Ram, ctrl: u32, at: u32, from: Quad, w: F) {
+    let p = quad(m, at);
+    let pv = raw(p);
+    let s = raw([(F::ONE - w).to_bits(); 4]);
+    let r = pv.add(raw(from).sub(pv).mul(s)).to_bits();
+    put_quad(m, at, [r[0], r[1], r[2], p[3]]);
+    if byte(m, ctrl + 0x2d) & PLACE_NODES != 0 {
+        let n = m.word(at - 0x10);
+        node::set_position(m, n, [r[0], r[1], r[2], p[3]]);
+    }
+}
+
+/// The clip's rotation and position counts.
+fn counts(m: &mut impl Ram, clip: u32) -> (i32, i32) {
+    let data = m.word(clip + 4);
+    (m.word(data + 0x28) as i32, m.word(data + 0x24) as i32)
+}
+
+/// The controller's own clip's counts.
+fn own(m: &mut impl Ram, ctrl: u32) -> (i32, i32) {
+    let clip = m.word(ctrl + 0x3c);
+    counts(m, clip)
+}
+
+/// **The clip played at its time**: every rotation channel with a bone sampled ([`rotation`]; an
+/// off one keeps the last quaternion) and stored ([`store_rotation`]), every position channel with
+/// a bone sampled into the bone ([`position`]) and its node placed if the controller places them.
+fn sample(m: &mut impl Ram, t: &Tables, ctrl: u32) {
+    let clip = m.word(ctrl + 0x3c);
+    let time = f(m, ctrl + 0x64);
+    let (rotations, positions) = counts(m, clip);
+    let mut q: Quad = [0; 4];
+    for k in 0..rotations.max(0) as u32 {
+        let (ch, bone) = channel(m, clip, 0x1c, k);
+        if bone != NONE {
+            if let Some(r) = rotation(m, t, ch, time) {
+                q = r;
+            }
+            store_rotation(m, ctrl, bone, q);
+        }
+    }
+    for k in 0..positions.max(0) as u32 {
+        let (ch, bone) = channel(m, clip, 0x18, k);
+        if bone != NONE {
+            let at = m.word(ctrl + 0x1fc).wrapping_add(BONE * bone) + 0x10;
+            let mut p = quad(m, at);
+            position(m, ch, time, &mut p);
+            put_quad(m, at, p);
+            if byte(m, ctrl + 0x2d) & PLACE_NODES != 0 {
+                let n = m.word(at - 0x10);
+                node::set_position(m, n, p);
+            }
+        }
+    }
+}
+
+/// **The crossfade out of the saved pose** at `w` (0 the saved pose, 1 the clip): each rotation
+/// slerped the short way from the saved one to the clip's, each position [`cross_position`]ed from
+/// the saved one. The quaternion buffer keeps the last slerp for an off channel.
+fn fade_from_saved(m: &mut impl Ram, t: &Tables, ctrl: u32, w: F) {
+    let time = f(m, ctrl + 0x64);
+    let mut q: Quad = [0; 4];
+    let mut k = 0;
+    while (k as i32) < own(m, ctrl).0 {
+        let clip = m.word(ctrl + 0x3c);
+        let (ch, bone) = channel(m, clip, 0x1c, k);
+        if bone != NONE {
+            if let Some(r) = rotation(m, t, ch, time) {
+                q = r;
+            }
+            let s = saved(m, ctrl, 0x208, bone);
+            q = math::slerp(raw(s), raw(q), w, true, t.acos).to_bits();
+            store_rotation(m, ctrl, bone, q);
+        }
+        k += 1;
+    }
+    let mut k = 0;
+    while (k as i32) < own(m, ctrl).1 {
+        let clip = m.word(ctrl + 0x3c);
+        let (ch, bone) = channel(m, clip, 0x18, k);
+        if bone != NONE {
+            let from = saved(m, ctrl, 0x20c, bone);
+            let at = m.word(ctrl + 0x1fc).wrapping_add(BONE * bone) + 0x10;
+            let mut p = quad(m, at);
+            position(m, ch, time, &mut p);
+            put_quad(m, at, p);
+            cross_position(m, ctrl, at, from, w);
+        }
+        k += 1;
+    }
+}
+
+/// **The crossfade out of the old clip** (`+0x40`) at `w`: channel `k` of the new clip at its time
+/// and of the old at the crossfade's clock (the new clip's own channel `k` where the old has fewer),
+/// the rotations slerped the short way from the old to the new, the positions [`cross_position`]ed
+/// from the old. Each clip keeps its own sample buffer, so an off channel holds what the last one
+/// left (the new clip's the last slerp).
+fn fade_from_clip(m: &mut impl Ram, t: &Tables, ctrl: u32, w: F) {
+    let time = f(m, ctrl + 0x64);
+    let (mut new, mut old): (Quad, Quad) = ([0; 4], [0; 4]);
+    let mut k = 0;
+    while (k as i32) < own(m, ctrl).0 {
+        let clip = m.word(ctrl + 0x3c);
+        let (ch, bone) = channel(m, clip, 0x1c, k);
+        if bone != NONE {
+            if let Some(r) = rotation(m, t, ch, time) {
+                new = r;
+            }
+            let was = m.word(ctrl + 0x40);
+            let och = if (k as i32) < counts(m, was).0 { channel(m, was, 0x1c, k).0 } else { channel(m, clip, 0x1c, k).0 };
+            let clock = f(m, ctrl + 0x68);
+            if let Some(r) = rotation(m, t, och, clock) {
+                old = r;
+            }
+            new = math::slerp(raw(old), raw(new), w, true, t.acos).to_bits();
+            store_rotation(m, ctrl, bone, new);
+        }
+        k += 1;
+    }
+    let mut from: Quad = [0; 4];
+    let mut k = 0;
+    while (k as i32) < own(m, ctrl).1 {
+        let clip = m.word(ctrl + 0x3c);
+        let (ch, bone) = channel(m, clip, 0x18, k);
+        if bone != NONE {
+            let was = m.word(ctrl + 0x40);
+            let och = if (k as i32) < counts(m, was).1 { channel(m, was, 0x18, k).0 } else { ch };
+            let clock = f(m, ctrl + 0x68);
+            position(m, och, clock, &mut from);
+            let at = m.word(ctrl + 0x1fc).wrapping_add(BONE * bone) + 0x10;
+            let mut p = quad(m, at);
+            position(m, ch, time, &mut p);
+            put_quad(m, at, p);
+            cross_position(m, ctrl, at, from, w);
+        }
+        k += 1;
+    }
+}
+
+/// **The controller's clip advanced by `dt`** (its vt `+0x88`, in the rider's idle layer's shape:
+/// no mirror, no channel mask, every channel, no clip events). Nothing when ended or with no clip.
+/// The last clip and time kept (`+0x44`, `+0x48`), the time moved on; past the clip's length a
+/// looping clip (its data's `+0x30` bit 0) goes round by the length, any other ends (after this
+/// call: ended, time and clock 0). Fading, the clock moves on too and the crossfade's weight is
+/// `(clock − start − dt) / span`, 0 below 0, 1 from 1, `(3 − 2u)·u²` between, through the
+/// accumulator; the fade is out of the old clip ([`fade_from_clip`]) or out of the saved pose
+/// ([`fade_from_saved`]). Not fading, the clip is sampled ([`sample`]). Once the clock reaches the
+/// crossfade's end, fading stops and the clock is 0.
+///
+/// The crossfades' per-bone list (`+0x2c` bit 7, the rider's controller never has it) is not
+/// ported.
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
+pub fn advance(m: &mut impl Ram, t: &Tables, ctrl: u32, dt: F) {
+    if m.word(ctrl + 0x24c) != 0 {
+        return;
+    }
+    let clip = m.word(ctrl + 0x3c);
+    if clip == 0 {
+        return;
+    }
+    m.set(ctrl + 0x44, clip);
+    let was = m.word(ctrl + 0x64);
+    m.set(ctrl + 0x48, was);
+    m.set(ctrl + 0x64, (F::from_bits(was) + dt).to_bits());
+    let data = m.word(clip + 4);
+    let mut ended = false;
+    if f(m, data + 0x44) < f(m, ctrl + 0x64) {
+        if byte(m, data + 0x30) & 1 == 0 {
+            ended = true;
+        } else {
+            let time = f(m, ctrl + 0x64) - f(m, data + 0x44);
+            m.set(ctrl + 0x64, time.to_bits());
+        }
+    }
+    if byte(m, ctrl + 0x2d) & FADING != 0 {
+        let clock = f(m, ctrl + 0x68) + dt;
+        m.set(ctrl + 0x68, clock.to_bits());
+        let u = ((clock - f(m, ctrl + 0x70)) - dt) / f(m, ctrl + 0x74);
+        let w = if u < F::ZERO {
+            F::ZERO
+        } else if !(u < F::ONE) {
+            F::ONE
+        } else {
+            let v = (u - F::ZERO) / F::ONE;
+            Acc::adda(F::ZERO, F(3.0)).msub(F(2.0), v) * (v * v)
+        };
+        if m.word(ctrl + 0x40) == 0 {
+            fade_from_saved(m, t, ctrl, w);
+        } else {
+            fade_from_clip(m, t, ctrl, w);
+        }
+        debug_assert!(byte(m, ctrl + 0x2c) & BONE_LIST_ON == 0, "the crossfades' per-bone list is not ported");
+    } else {
+        sample(m, t, ctrl);
+    }
+    if !(f(m, ctrl + 0x68) < f(m, ctrl + 0x6c)) {
+        let b = byte(m, ctrl + 0x2d);
+        put_byte(m, ctrl + 0x2d, b & !FADING);
+        m.set(ctrl + 0x68, 0);
+    }
+    if ended {
+        m.set(ctrl + 0x24c, 1);
+        m.set(ctrl + 0x64, 0);
+        m.set(ctrl + 0x68, 0);
+    }
 }

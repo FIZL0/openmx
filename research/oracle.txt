@@ -12046,3 +12046,20 @@ camera_flash_tick           boot 0x002f95c0 (object, f12 dt): ring +0x48 (times,
 # * The actor list (game_manager +0x34 -> +0x34) nodes' actors' first word is no type: riders read 2 on
 #   recording2 and 1 on C33's boot. Every rider has an interface (vtable 0x004550e4 at +8, the rider at
 #   +0xc, the brain or 0 at +0); research/c33/riders.py finds the riders that way.
+# F62b: the rider controller's clip advance vt +0x88 0x0013c7b0 and clip start 0x0013ea90 in Rust (anim::advance,
+# anim::start, anim::set_clip; tests/mxvatv_bike_ride.rs rider_leaf serves Call::ClipAdvance / Call::ClipStart).
+# Journal: research/journal/2026-11-13-f62b-clip-advance-and-crossfade.
+#   0x0013c7b0 (a0 ctrl, a1 mirror, a2 mask, a3 alternate, t0 events, f12 dt; C15 passes 0s) = anim::advance.
+#   End test 0x00136d80 is len (clip +0x44) < t; clip +0x30 bit0 loops. Ctrl +0x2c bit4 fade list, bit7 the
+#   per-bone list (+0x214/+0x218/+0x21c; not ported, the rider's +0x2c is 0x60); +0x2d bit1 fading, bit4 place
+#   nodes, bit5 turn nodes (C15: 0xd/0xf). +0x3c clip, +0x40 old clip, +0x44/+0x48 last clip/time, +0x64 time,
+#   +0x68 clock, +0x6c end, +0x70 start, +0x74 span, +0x24c ended; +0x1f8 bones, +0x1fc 0x40-byte bones (node,
+#   +0x10 position, +0x20 quat); +0x208/+0x20c saved rotations/positions. Fade weight u = ((clock - start) -
+#   dt) / span, w = (3 - 2u) u^2 (adda/msub order). +0x40 == 0 -> 0x0013db90 (fade from the saved pose:
+#   slerp 0x00134b90(out, saved, q, w)); else 0x0013d350 (fade from the old clip sampled at +0x68, slerp(old,
+#   new, w); the new clip's channel k where the old one has fewer). Positions p + (from - p)(1 - w) xyz, p's w.
+#   Slerp stores a raw when |cos| >= 1 (denormal words kept). Rotations go to the node (bit5) or bone +0x20.
+#   0x0013ea90 (a0 ctrl, a1 clip, a2 keep-time 0 on C15, f12 span): span 0 -> vt +0x90 only; else +0x70/+0x68 =
+#   now, +0x6c = now + span, +0x74 span, +0x40 = old clip, old 0 or fading -> +0x40 0 and stop 0x0013e650;
+#   then vt +0x90 0x0013e960 (set clip: +0x24c 0, +0x3c clip, +0x2d bit1 clear, +0x64 0) and fading set.
+#   C15 flip-1 (465): 2 starts; 68 advances = 8 via 0x0013db90, 8 via 0x0013d350, 52 plain.

@@ -1,4 +1,4 @@
-# 1 — waits on f62a (PART)
+# 1 — waits on f62a (FINAL)
 
 Task F62b. 2026-11-12.
 
@@ -32,7 +32,10 @@ Not proved: nothing was ported.
 
 ## Next
 
-Once F62a is on main: read F62a's journal (research/journal/2026-11-12-f62a-rider-idle-layer) and
+Superseded 2026-11-13: F62a landed and F62b was done in research/journal/2026-11-13-f62b-clip-advance-and-crossfade
+(its -FINAL file has the port, the proof and the Not verified list). Nothing is waiting on this entry.
+
+Originally: once F62a is on main: read F62a's journal (research/journal/2026-11-12-f62a-rider-idle-layer) and
 research/oracle.txt `# F62`/`# F62a`. Then `./kit fn -p atv` on the rider controller's vt +0x88 and its
 callees, port them into handling/anim.rs, and serve the outside clip-advance call in `rider_leaf`'s idle
 arm. Prove it with `flip_replays_with_the_rider_leaf_on_the_ports`, with the tail's rider census left at

@@ -12480,7 +12480,13 @@ enum AnimCall {
     Blend4,
     Rotation,
     Position,
+    /// F62b: the clip advance (vt `+0x88`) and the clip start, in the rider's idle layer's shapes.
+    Advance,
+    Start,
 }
+
+/// F62b: the controller's own vtable (only its `+0x90`, the clip set, is read).
+const A_VT_CTRL: u32 = ANIM + 0x690;
 
 /// The oracle's controller RAM: the interpreter's, with the saved buffers the original made handed
 /// back to the port.
@@ -12633,6 +12639,93 @@ fn lay_controller(ee: &mut Ee, seed: u64) -> (u32, u32) {
     (ctrl, (r() % 7) as u32)
 }
 
+/// F62b: a clip advance's or start's words: the controller's vtable, its clip (mostly the first,
+/// sometimes none), the clip faded out of (the second, or none), ended now and then, a time from
+/// before the clip to past its end, the crossfade's clock, end, start and span around it, the
+/// clips' loop bits at random; never the crossfades' per-bone list (`+0x2c` bit 7, unported).
+fn lay_crossfade(ee: &mut Ee, ctrl: u32, seed: u64) {
+    let mut k = 0u64;
+    let mut r = || {
+        k += 1;
+        mix(seed ^ k.wrapping_mul(0x51_7cc1_b727))
+    };
+    ee.set_u32(ctrl + 4, A_VT_CTRL);
+    ee.set_u32(A_VT_CTRL + 0x90, ANIM_SET_CLIP);
+    ee.set_u32(ctrl + 0x3c, if r() % 8 == 0 { 0 } else { A_CLIPS[0] });
+    ee.set_u32(ctrl + 0x40, if r() % 2 == 0 { 0 } else { A_CLIPS[1] });
+    ee.set_u32(ctrl + 0x24c, if r() % 10 == 0 { 1 } else { 0 });
+    let flags = ee.u32_at(ctrl + 0x2c) & !0x80;
+    let fading = if r() % 3 == 0 { 0 } else { 0x200 };
+    ee.set_u32(ctrl + 0x2c, flags & !0x200 | fading);
+    let length = ee.f32_at(ee.u32_at(A_CLIPS[0] + 4) + 0x44);
+    let unit = |x: u64| (x >> 40) as f32 / (1u64 << 24) as f32;
+    ee.set_f32(ctrl + 0x64, length * (unit(r()) * 1.4 - 0.2));
+    let span = match r() % 8 {
+        0 => 0.0,
+        _ => 0.05 + unit(r()) * 0.5,
+    };
+    let start = unit(r()) * length;
+    let clock = start + span * (unit(r()) * 1.4 - 0.2);
+    ee.set_f32(ctrl + 0x68, clock);
+    ee.set_f32(ctrl + 0x6c, start + span);
+    ee.set_f32(ctrl + 0x70, start);
+    ee.set_f32(ctrl + 0x74, span);
+    for c in A_CLIPS {
+        let data = ee.u32_at(c + 4);
+        let w = ee.u32_at(data + 0x30);
+        ee.set_u32(data + 0x30, w & !1 | (r() & 1) as u32);
+    }
+}
+
+/// The path a clip advance takes with these words and `dt`, then the ways it varies.
+fn advance_path(ee: &Ee, ctrl: u32, dt: f32) -> Vec<String> {
+    let clip = ee.u32_at(ctrl + 0x3c);
+    if ee.u32_at(ctrl + 0x24c) != 0 {
+        return vec![" ended".into()];
+    }
+    if clip == 0 {
+        return vec![" no clip".into()];
+    }
+    let data = ee.u32_at(clip + 4);
+    let time = ee.f32_at(ctrl + 0x64) + dt;
+    let over = time > ee.f32_at(data + 0x44);
+    let looped = over && ee.u32_at(data + 0x30) & 1 != 0;
+    let nodes = (ee.u32_at(ctrl + 0x2c) >> 12) & 3;
+    let mut p = String::new();
+    if ee.u32_at(ctrl + 0x2c) & 0x200 == 0 {
+        p += " sampled";
+    } else {
+        p += if ee.u32_at(ctrl + 0x40) == 0 { " from the pose" } else { " from the clip" };
+        let clock = ee.f32_at(ctrl + 0x68) + dt;
+        let u = (clock - ee.f32_at(ctrl + 0x70) - dt) / ee.f32_at(ctrl + 0x74);
+        let more = if u < 0.0 {
+            " before"
+        } else if u < 1.0 {
+            " eased"
+        } else {
+            ""
+        };
+        let done = if clock >= ee.f32_at(ctrl + 0x6c) { " done" } else { "" };
+        let fewer = {
+            let old = ee.u32_at(ctrl + 0x40);
+            old != 0 && (ee.u32_at(ee.u32_at(old + 4) + 0x28) < ee.u32_at(data + 0x28) || ee.u32_at(ee.u32_at(old + 4) + 0x24) < ee.u32_at(data + 0x24))
+        };
+        let mut v = vec![p.clone(), format!("{p}{more}"), format!("{p}{done}"), format!("{p} nodes {nodes}")];
+        if fewer {
+            v.push(" from the clip fewer channels".into());
+        }
+        if over {
+            v.push(format!("{p}{}", if looped { " looped" } else { " over" }));
+        }
+        return v;
+    }
+    let mut v = vec![p.clone(), format!("{p} nodes {nodes}")];
+    if over {
+        v.push(format!("{p}{}", if looped { " looped" } else { " over" }));
+    }
+    v
+}
+
 /// A weight, mix or fade: mostly in 0..1, sometimes past either end, sometimes exactly 0 or 1.
 fn anim_float(x: u64) -> f32 {
     match x % 10 {
@@ -12668,12 +12761,29 @@ fn the_anim_controller_calls_are_the_originals() {
             ee.set(2, u64::from(A_HEAP[(line == 0x52d) as usize]));
         }),
     );
-    let calls = [AnimCall::Stop, AnimCall::Play, AnimCall::Play, AnimCall::Blend, AnimCall::Blend, AnimCall::Blend4, AnimCall::Rotation, AnimCall::Position];
-    for k in 0..10_000u64 {
+    let calls = [
+        AnimCall::Stop,
+        AnimCall::Play,
+        AnimCall::Play,
+        AnimCall::Blend,
+        AnimCall::Blend,
+        AnimCall::Blend4,
+        AnimCall::Rotation,
+        AnimCall::Position,
+        AnimCall::Advance,
+        AnimCall::Advance,
+        AnimCall::Advance,
+        AnimCall::Start,
+    ];
+    for k in 0..14_000u64 {
         lay_forest(&mut ee, k ^ 0xa43);
         let (ctrl, pick) = lay_controller(&mut ee, k);
         let x = mix(k ^ 0x00f4_3a00);
-        let c = calls[(x % 8) as usize];
+        let c = calls[(x % calls.len() as u64) as usize];
+        let dt = if mix(x ^ 8) % 3 == 0 { anim_float(mix(x ^ 9)) * 0.5 } else { 1.0 / 30.0 };
+        if matches!(c, AnimCall::Advance | AnimCall::Start) {
+            lay_crossfade(&mut ee, ctrl, mix(x ^ 10));
+        }
         // The four clips of a four-clip blend: the two clips in one of four orders.
         let [a, b] = A_CLIPS;
         let four = [[a, b, b, a], [a, a, b, b], [b, a, a, b], [a, b, a, b]][(mix(x ^ 6) % 4) as usize];
@@ -12698,6 +12808,24 @@ fn the_anim_controller_calls_are_the_originals() {
                 t(format!("{c:?}{}", if flags & 0x10 != 0 && ee.u32_at(ctrl + 0x210) != 0 { " a fade list" } else { " no fade list" }));
                 t(format!("{c:?} nodes {}", (flags >> 12) & 3));
             }
+            AnimCall::Advance => {
+                let tags = advance_path(&ee, ctrl, dt);
+                for tag in &tags[1..] {
+                    t(format!("Advance{tag}"));
+                }
+                path += &tags[0];
+            }
+            AnimCall::Start => {
+                path += if fade == 0.0 {
+                    " no span"
+                } else if ee.u32_at(ctrl + 0x3c) == 0 {
+                    " stopped, no clip"
+                } else if flags & 0x200 != 0 {
+                    " stopped, fading"
+                } else {
+                    " from the clip"
+                };
+            }
             AnimCall::Rotation | AnimCall::Position => {
                 let n = ee.u32_at(ch + 8) as i32;
                 let keys = ee.u32_at(ch + 0x14);
@@ -12721,6 +12849,7 @@ fn the_anim_controller_calls_are_the_originals() {
             ee.set_u32(o, 0);
         }
         let before = snap(&ee);
+        let before_given = [ee.u32_at(ctrl + 0x208), ee.u32_at(ctrl + 0x20c)];
         let u = u64::from;
         let (f, ints, floats): (u32, Vec<u64>, Vec<f32>) = match c {
             AnimCall::Stop => (ANIM_STOP, vec![u(ctrl), 0, 0, 0, 0], vec![]),
@@ -12729,11 +12858,13 @@ fn the_anim_controller_calls_are_the_originals() {
             AnimCall::Blend4 => (ANIM_BLEND4, vec![u(ctrl), u(four[0]), u(four[1]), u(four[2]), u(four[3]), 0, 0, 0], vec![weight, mix_, mix2, fade]),
             AnimCall::Rotation => (ee.u32_at(ee.u32_at(ch + 0x10) + 0x10), vec![u(ch), u(A_OUT)], vec![time]),
             AnimCall::Position => (ANIM_MOVES, vec![u(ch), u(A_OUT)], vec![time]),
+            AnimCall::Advance => (RIDER_CLIP_ADVANCE, vec![u(ctrl), 0, 0, 0, 0], vec![dt]),
+            AnimCall::Start => (RIDER_CLIP_START, vec![u(ctrl), u(A_CLIPS[1]), 0], vec![fade]),
         };
         ee.set(28, GP);
         ee.call(f, &ints, &floats, BUDGET);
         let given = [ee.u32_at(ctrl + 0x208), ee.u32_at(ctrl + 0x20c)];
-        let made = path.ends_with("made buffers");
+        let made = path.ends_with("made buffers") || path.starts_with("Start stopped") && given != before_given;
         let off: Vec<u32> = ee.written.iter().copied().filter(|&w| !(FOREST..FOREST_END).contains(&w) && !(ANIM..A_HEAP[1] + 0x100).contains(&w) && !(stack - 0x1_0000..stack + 0x4000).contains(&w)).collect();
         assert!(off.is_empty(), "case {k} ({path}): the original wrote outside the controller: {:#x?}", &off[..off.len().min(8)]);
         let buffers = |ee: &Ee| -> Vec<u32> {
@@ -12757,6 +12888,8 @@ fn the_anim_controller_calls_are_the_originals() {
                     }
                 }
             }
+            AnimCall::Advance => anim::advance(m, &tables, ctrl, F(dt)),
+            AnimCall::Start => anim::start(m, ctrl, A_CLIPS[1], F(fade)),
             AnimCall::Position => {
                 let mut q = [0, 4, 8, 12].map(|j| m.0.u32_at(A_OUT + j));
                 anim::position(m, ch, F(time), &mut q);
@@ -12779,6 +12912,11 @@ fn the_anim_controller_calls_are_the_originals() {
         "Rotation on 1 keys narrow", "Rotation on 2 keys narrow", "Rotation on before the first narrow", "Rotation on past the last narrow", "Rotation on inside narrow",
         "Rotation off no keys", "Rotation on no keys", "Rotation on 1 keys", "Rotation on 2 keys", "Rotation on before the first", "Rotation on past the last", "Rotation on inside",
         "Position off inside", "Position on no keys", "Position on 1 keys", "Position on 2 keys", "Position on before the first", "Position on past the last", "Position on inside",
+        "Advance ended", "Advance no clip", "Advance sampled", "Advance sampled looped", "Advance sampled over", "Advance sampled nodes 3",
+        "Advance from the pose", "Advance from the pose nodes 3", "Advance from the pose before", "Advance from the pose eased", "Advance from the pose done", "Advance from the pose over",
+        "Advance from the clip", "Advance from the clip nodes 3", "Advance from the clip before", "Advance from the clip eased", "Advance from the clip done", "Advance from the clip looped",
+        "Advance from the clip fewer channels",
+        "Start no span", "Start stopped, no clip", "Start stopped, fading", "Start from the clip",
     ];
     for p in want {
         assert!(tally.get(p).is_some_and(|&n| n >= 20), "{p}: {tally:#?}");
@@ -17272,6 +17410,8 @@ const RIDER_IDLE: u32 = 0x004e_b380;
 /// flag that says `rand` has its clock seed.
 const RIDER_CLIP_BY_ID: u32 = 0x004f_2d30;
 const RIDER_CLIP_START: u32 = 0x0013_ea90;
+/// F62b: the anim controller's clip set, its vt `+0x90`.
+const ANIM_SET_CLIP: u32 = 0x0013_e960;
 const RIDER_CLIP_ADVANCE: u32 = 0x0013_c7b0;
 const RAND_SEEDED: u32 = 0x0052_cd80;
 const RIDER_RESET: u32 = 0x004e_ef40;
@@ -17431,12 +17571,16 @@ impl rider::Rider for LeafRider<'_> {
                 0
             }
             C::ClipStart { clip } => {
-                let rate = F::from_bits(self.ee.u32_at(RIDER + rider::IDLE_RATE));
-                call_from_hook_dt(self.ee, RIDER_CLIP_START, &[r, u64::from(clip), 0], rate)
+                // F62b: the clip start's port, its stop's saved buffers through `SavedPose`.
+                assert_eq!(vt(self.ee, RIDER + 4, 0x90), ANIM_SET_CLIP, "the rider's vt +0x90");
+                let span = F::from_bits(self.ee.u32_at(RIDER + rider::IDLE_RATE));
+                anim::start(&mut LeafAnim { m: self, dt }, RIDER, clip, span);
+                0
             }
             C::ClipAdvance => {
                 assert_eq!(vt(self.ee, RIDER + 4, 0x88), RIDER_CLIP_ADVANCE, "the rider's vt +0x88");
-                call_from_hook_dt(self.ee, RIDER_CLIP_ADVANCE, &[r, 0, 0, 0, 0], dt)
+                anim::advance(self, &anim::Tables { turns: Turns::get(), acos: acos(), narrow: ANIM_TURNS_NARROW }, RIDER, dt);
+                0
             }
             C::SavedPose { bytes, buffer } => {
                 let line = match buffer {
@@ -17504,8 +17648,8 @@ impl rider::Rider for LeafRider<'_> {
             C::NodePosition { .. } => "= node position",
             C::Idle => "= idle layer",
             C::Seed => "= rand seed",
-            C::ClipStart { .. } => "> clip start",
-            C::ClipAdvance => "> clip advance",
+            C::ClipStart { .. } => "= clip start",
+            C::ClipAdvance => "= clip advance",
             C::SavedPose { .. } => "> heap (saved pose)",
             C::RagWorld => "= ragdoll world",
             C::PoseStill => "= pose still",
@@ -17515,6 +17659,29 @@ impl rider::Rider for LeafRider<'_> {
         book(format!("the rider leaf {name}"), self.ee.ran - r0);
         leaf_served(name);
         v as u32
+    }
+}
+
+/// The clip start's controller (F62b): the leaf's RAM, a stop's saved buffers made through
+/// [`rider::Call::SavedPose`] (the original's heap).
+struct LeafAnim<'a, 'b> {
+    m: &'a mut LeafRider<'b>,
+    dt: F,
+}
+
+impl node::Ram for LeafAnim<'_, '_> {
+    fn word(&mut self, at: u32) -> u32 {
+        self.m.ee.u32_at(at)
+    }
+    fn set(&mut self, at: u32, w: u32) {
+        self.m.ee.set_u32(at, w)
+    }
+}
+
+impl anim::Anim for LeafAnim<'_, '_> {
+    fn alloc(&mut self, bytes: u32, buffer: anim::Saved) -> u32 {
+        use rider::Rider;
+        self.m.call(rider::Call::SavedPose { bytes, buffer }, self.dt)
     }
 }
 
@@ -17680,6 +17847,8 @@ fn flip_replays_with_the_rider_leaf_on_the_ports() {
             ("= body mass", 36),
             ("= body target", 55),
             ("= bone solve", 12303),
+            ("= clip advance", 68),
+            ("= clip start", 2),
             ("= extra step", 465),
             ("= gather", 68),
             ("= idle layer", 465),
@@ -17697,8 +17866,6 @@ fn flip_replays_with_the_rider_leaf_on_the_ports() {
             ("= world step", 465),
             ("= wreck cue", 1),
             ("= wreck entry", 1),
-            ("> clip advance", 68),
-            ("> clip start", 2),
             ("> cue busy", 1),
             ("> cue playing", 1),
             ("> rand", 8),
