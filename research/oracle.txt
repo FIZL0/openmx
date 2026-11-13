@@ -1180,6 +1180,31 @@ prop_bound                  boot 0x001b44b0 (prop, centre out, half extents out)
 activity_supercross_load    boot 0x002f9f40 (activity) the loader: gates off the props, then the lane table
 prop_find_fallback          boot 0x00212af0 (0x004e18c0's list, name, 1) -> holder; the prop is holder
 #                                           +0xb0 -> +0x30
+scene_prop_find             boot 0x001a6040 scene vt +0x120 (scene, name, 1) -> the first holder's prop
+#                                           (holders: count +0x3d0, array +0x3d4; prop = holder +0x34,
+#                                           0 skipped) whose node name (+0x120 -> string, via
+#                                           0x001b4fa0) strcpy'd and lowercased (0x00413118, ctype
+#                                           0x0044aaa9 bit 0: A-Z and some bytes past 0x7f, +0x20
+#                                           as a byte) holds the name (strstr
+#                                           0x00411b28); the name itself is not lowercased. 0x00212af0
+#                                           does the same over toy +0x30 names and lowercases the name
+#                                           in place, once per toy looked at. S297: race::find_prop,
+#                                           race::find_toy, Supercross::gate_props
+prop_bound_rebuild          boot 0x001a17e0 the prop node class's (vt 0x0044f870) vt +0x88: bound
+#                                           rebuild. 0x001b44b0 calls it when +0x110 bit 7 (stale) and
+#                                           (bit 3 or not bit 6), then clears bit 7. Box branch (bit 4
+#                                           clear): node_bounds over the own box (bit 2) and the
+#                                           children in the array +0x11c count / +0x13c, each through
+#                                           node_bounds_merge 0x001b42a0 with its last argument 0 (the
+#                                           children's own children are not walked), centre +0xe0,
+#                                           half +0xf0, radius +0x118 = sqrt(mula/madda/madd of half
+#                                           xyz), bit 6 set when > 0. Sphere branch (bit 4): unported.
+#                                           S297: race::PropBound::query
+toy_list                    boot 0x004e18c0 -> the track's toy list (count +0x30, array +0x38; toy +0x30
+#                                           its name, +0xb0 -> +0x30 its model node). sx01's FinishGate
+#                                           is a toy (tracks\sx01\anim\thq_finishgatenarrow.psg)
+# The drop gate's name: app_pointer -> +0x3cc the loaded world -> +0xb4 its drop-gate prop name
+# (sx01: "THQsxdropgate"); no world or no name -> "dropgate". S297.
 path_ahead                  boot 0x0026e630 (track, node, out) the path's direction at a node (the
 #                                           spot's +4 word). S293: TrackPaths::path_ahead
 

@@ -3387,6 +3387,166 @@ impl Supercross {
     }
 }
 
+// --- the gates' props: the scene's lookup and the prop's bound (S297) --------------------------------
+
+/// The name the supercross loader asks for the finish-gate prop by.
+pub const FINISH_GATE: &[u8] = b"finishgate";
+/// The drop gate's name when the track's world names none of its own.
+pub const DROP_GATE: &[u8] = b"dropgate";
+
+/// Which bytes past `0x7f` the game's `tolower` takes for capitals, bit `b - 0x80` for byte `b`: it reads
+/// them as negative characters, so its character table is indexed below its start, where the bytes
+/// are the program's other constants and bit 0 of each says "capital".
+const HIGH_CAPITALS: u128 = 0x06c3_eed5_7c61_00d5_5df6_f321_e969_2180;
+
+/// The game's `tolower` on one byte: `A`–`Z` and the bytes [`HIGH_CAPITALS`] marks have `0x20` added,
+/// stored back as a byte (so `0xe0` and up wrap round, `0xe0` to the terminator).
+fn tolower(c: u8) -> u8 {
+    let capital = c.is_ascii_uppercase() || (c >= 0x80 && HIGH_CAPITALS >> (c - 0x80) & 1 != 0);
+    if capital { c.wrapping_add(0x20) } else { c }
+}
+
+/// A C string: the bytes up to the first terminator.
+fn c_str(s: &[u8]) -> &[u8] {
+    &s[..s.iter().position(|&b| b == 0).unwrap_or(s.len())]
+}
+
+/// One of the game's lowercasing loops over a string where it lies: every byte up to the terminator
+/// the string had when the loop began, a byte it turns into a terminator (and the bytes after it)
+/// included — the string that is left ends at the first one.
+fn lower_pass(s: &mut [u8]) {
+    let n = c_str(s).len();
+    for b in &mut s[..n] {
+        *b = tolower(*b);
+    }
+}
+
+/// The game's `strstr`, as a yes or no: does `hay` hold `needle` (both C strings)? An empty needle is
+/// held by anything, an empty hay holds only that.
+fn holds(hay: &[u8], needle: &[u8]) -> bool {
+    let (hay, needle) = (c_str(hay), c_str(needle));
+    needle.is_empty() || hay.windows(needle.len()).any(|w| w == needle)
+}
+
+/// A name copied out and lowercased, as both lookups compare it.
+fn lowered(name: &[u8]) -> Vec<u8> {
+    let mut v = c_str(name).to_vec();
+    lower_pass(&mut v);
+    v
+}
+
+/// **The scene's prop lookup**: the first of `names` (each holder's prop's node name) that holds
+/// `needle` once lowercased; the needle itself is taken as it stands. A `None` is a holder with no
+/// prop, passed over.
+pub fn find_prop<'a>(names: impl IntoIterator<Item = Option<&'a [u8]>>, needle: &[u8]) -> Option<usize> {
+    names.into_iter().position(|n| n.is_some_and(|n| holds(&lowered(n), needle)))
+}
+
+/// **The toy list's lookup**, the loader's second try for the finish gate: the first of `names` (each
+/// toy's own name) that holds the needle once both are lowercased. The needle is lowercased where it
+/// lies, once for every toy looked at, which only a byte past `0x7f` notices: `needle` is left as the
+/// lookup leaves it.
+pub fn find_toy<'a>(names: impl IntoIterator<Item = &'a [u8]>, needle: &mut [u8]) -> Option<usize> {
+    names.into_iter().position(|n| {
+        let hay = lowered(n);
+        lower_pass(needle);
+        holds(&hay, needle)
+    })
+}
+
+/// Where the loader found a gate's prop: the scene holder's, or a toy's (the prop is the toy's model
+/// node).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PropAt {
+    Scene(usize),
+    Toy(usize),
+}
+
+impl Supercross {
+    /// **The props the supercross loader stands the gates on**, as indices into the scene's prop
+    /// holders (`scene`, by their props' names) and the track's toys (`toys`, by name): the drop gate,
+    /// in the scene alone ([`find_prop`]), by the name the world gives it (`own_drop`, lowercased; an
+    /// empty name finds the first holder with a prop) or else [`DROP_GATE`]; and the finish gate by
+    /// [`FINISH_GATE`], in the scene, and in the toys ([`find_toy`]) when the scene has none.
+    pub fn gate_props(scene: &[Option<&[u8]>], toys: &[&[u8]], own_drop: Option<&[u8]>) -> (Option<usize>, Option<PropAt>) {
+        let drop_name = own_drop.map_or(DROP_GATE.to_vec(), lowered);
+        let drop = find_prop(scene.iter().copied(), &drop_name);
+        let finish = find_prop(scene.iter().copied(), FINISH_GATE)
+            .map(PropAt::Scene)
+            .or_else(|| find_toy(toys.iter().copied(), &mut FINISH_GATE.to_vec()).map(PropAt::Toy));
+        (drop, finish)
+    }
+}
+
+/// The bound bits of a scene node's flag byte (`+0x110`).
+pub mod bound_flags {
+    /// The node has a box of its own (centre `+0xc0`, half extent `+0xd0`).
+    pub const BOXED: u8 = 0x04;
+    /// Rebuild a stale bound even when it is sized.
+    pub const REBUILD: u8 = 0x08;
+    /// The node is bounded by a sphere, not a box.
+    pub const SPHERE: u8 = 0x10;
+    /// The last rebuild found a radius above zero.
+    pub const SIZED: u8 = 0x40;
+    /// The bound is stale: the node or one under it has moved since.
+    pub const STALE: u8 = 0x80;
+}
+
+/// A prop's bound as its node keeps it: the centre and half extent (`+0xe0`, `+0xf0`), the radius
+/// (`+0x118`) and the flag byte ([`bound_flags`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PropBound {
+    pub centre: Vf,
+    pub half: Vf,
+    pub radius: F,
+    pub flags: u8,
+}
+
+impl PropBound {
+    /// **The prop's bound query**: the centre and half extent, rebuilt first from the node's tree when
+    /// they are stale and either [`bound_flags::REBUILD`] is set or the bound is not yet sized. The box
+    /// rebuild is [`crate::prop_world::node_bounds`] over `node` (whose `own` box is there exactly
+    /// when [`bound_flags::BOXED`] is set) and its own children (the node's child array) alone: the
+    /// rebuild does not carry the merge below them, so their children are not looked at. Its radius is
+    /// `sqrt(hx² + hy² + hz²)` by the FPU's accumulator, and [`bound_flags::SIZED`] is set when that is
+    /// above zero (never cleared).
+    ///
+    /// `None` for a stale sphere-bounded node ([`bound_flags::SPHERE`]): that rebuild (each child's
+    /// sphere carried into the node) is not ported, and no gate prop seen has one.
+    pub fn query(&mut self, node: &crate::prop_world::BoundsNode) -> Option<(Vf, Vf)> {
+        use bound_flags::*;
+        let f = self.flags;
+        if f & STALE != 0 && (f & REBUILD != 0 || f & SIZED == 0) {
+            if f & SPHERE != 0 {
+                return None;
+            }
+            use crate::prop_world::BoundsNode;
+            let alone = |c: &BoundsNode| BoundsNode { own: c.own, world: c.world, children: Vec::new() };
+            let b = crate::prop_world::node_bounds(&BoundsNode { children: node.children.iter().map(alone).collect(), ..alone(node) });
+            let (x, y, z) = (b.half_extent.x(), b.half_extent.y(), b.half_extent.z());
+            let r = fpu::sqrt(fpu::madd(fpu::madda(fpu::mula(x, x), y, y), z, z));
+            self.centre = b.centre;
+            self.half = b.half_extent;
+            self.radius = F(r);
+            // `c.ole.s r, 0` and the branch over the set (the FPU has no NaN to tell `>` apart).
+            if r > 0.0 {
+                self.flags |= SIZED;
+            }
+            self.flags &= !STALE;
+        }
+        Some((self.centre, self.half))
+    }
+}
+
+impl Prop {
+    /// A gate prop off its node's frame rows (across, look, position: `+0x80`, `+0xa0`, `+0xb0`) and
+    /// the half extent its bound query answered: half its width is the half extent's `x`, its height
+    /// the half extent's `y` (the loader takes the half, not the whole).
+    pub fn new(across: Vf, look: Vf, at: Vf, half: Vf) -> Prop {
+        Prop { across, look, at, half_width: F(half.x()), height: F(half.y()) }
+    }
+}
+
 // --- the machine race's handler (S292a) -------------------------------------------------------------
 
 /// The ranking's own sort, given which of two cards is further on (`ahead(p, q)`: `q` is ahead of `p`),
