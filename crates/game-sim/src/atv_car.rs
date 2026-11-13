@@ -261,8 +261,25 @@ pub enum Call {
     Struck(usize),
     TireGround(usize, Vf),
     /// The car's node placed while current, with a subtree under it (its model's parts, past what
-    /// [`Vehicle::scene`] holds): every current node of the subtree marked out of date.
+    /// [`Vehicle::scene`] holds): every current node of the subtree marked out of date. [`Own`]
+    /// answers it when [`Vehicle::below`] holds the subtree (MD128).
     SubtreeOutOfDate,
+    /// What [`Own`]'s answers to those hand out in turn (MD128), as the quad's
+    /// ([`crate::quad::Call`]): the spatial database's move of the car's entry (`node` false; its
+    /// node's box, reach 0) or the node's (its bounds' box and reach); the node's bounds gathered again
+    /// (its vt `+0x94`, which takes in nodes past what [`Vehicle::scene`] holds); a collidable's box
+    /// moved in the database, after its sync; the nearby list gathered round the active probe. The
+    /// body's reset's: the body taken off the physics world's three lists (the bodies, the vehicle
+    /// state's, the post elements), by index; with bit 7 of [`Vehicle::reset_flags`], the riding
+    /// probe's owner cleared and the world's category word added to its list; else the record handed
+    /// back to its owner.
+    SpatialMove { node: bool, centre: Vf, half: Vf, reach: F },
+    NodeRebound,
+    PartMove { part: crate::quad::Part, centre: Vf, half: Vf, reach: F },
+    Gather(crate::quad::Part),
+    LeaveWorld(usize),
+    RidingLetGo,
+    ReleaseRecord,
 }
 
 /// Whoever runs the calls the car's listeners make. A `Vec<Call>` just lists them.
@@ -1271,10 +1288,14 @@ const EDGE_DRAG: f32 = 0.5;
 /// The rodata `(1, 1, 1, 1)` the unwreck puts both dampings back to.
 const UNDAMPED: Vf = Vf([1.0, 1.0, 1.0, 1.0]);
 
+/// The map-edge test's margin: a point this near an edge of the map's area is off it.
+const EDGE_MARGIN: f32 = 150.0;
+
 /// What SLUS-21104's own calls in the car's frame read and write beyond [`Car`] and the body
-/// (research/oracle.txt `# MD106b`): MXVehicle's wreck words, the world's two words the wreck and the
-/// force touch, the flag byte, the scene node and the world's bounds.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+/// (research/oracle.txt `# MD106b`, `# MD128`): MXVehicle's wreck words, the world's two words the
+/// wreck and the force touch, the flag bytes, the scene node and its subtree, the world's bounds, the
+/// map's area, the collidables and the collision record.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Vehicle {
     /// Wrecks are on for this car; without, the wreck timer does nothing.
     pub wrecks_on: bool,
@@ -1307,18 +1328,49 @@ pub struct Vehicle {
     /// The vehicle's flag byte: bit 0 holds it in the world's box, bit 6 over its floor; bit 1 asks
     /// the post for the node's bounds; the force clears bit 5, the post bit 2.
     pub flags: u8,
-    /// The car's node (node 0) and its parents, and the world's bounds. Node 0's subtree is not held:
-    /// `subtree` says it has one, which placing the node hands out ([`Call::SubtreeOutOfDate`]).
+    /// The car's node (node 0) and its parents, and the world's bounds. Node 0's subtree is
+    /// [`Vehicle::below`]; `subtree` says it has one.
     pub scene: crate::atv_moto::Scene,
     pub subtree: bool,
     pub bounds: crate::atv_moto::Bounds,
     /// [`Call::OutOfBounds`]'s answer.
     pub out_of_bounds: bool,
+    /// MD128's. The map's area the edge test reads (the terrain's extent; `None`, never off it), and
+    /// the random numbers its throw draws.
+    pub area: Option<crate::biplane::Area>,
+    pub rng: crate::rng::Rng,
+    /// The car has an entry in the world's spatial database (`+8`): the spatial update moves it.
+    pub spatial: bool,
+    /// The car's collidables as the collision sync sees them (the sync's switch is bit 0 of the byte
+    /// before the flag byte).
+    pub collidables: crate::atv_moto::Collidables,
+    /// The rest of that byte (`+0x44`), which the body's reset reads: bit 7 lets the riding probe go
+    /// rather than hand the record back, bit 6 clears bit 1 of `flag_word` (`+0x24`).
+    pub reset_flags: u8,
+    pub flag_word: u32,
+    /// The record has an owner (`+0xdc`) to be handed back to.
+    pub owned: bool,
+    /// The record's contacts, which the gravity's call resolves ([`crate::atv_contact::resolve`] on
+    /// the car's body; the held body is not read). `None`, and [`Call::GravityRecord`] goes on.
+    pub held: Option<crate::atv_contact::Held>,
+    /// Node 0's subtree, its first child first; empty, and [`Call::SubtreeOutOfDate`] goes on.
+    pub below: Vec<Below>,
+}
+
+/// A node of the car node's subtree as marking it out of date sees it: its first child and next
+/// sibling (places in [`Vehicle::below`]) and its flag byte (bit 0 current).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Below {
+    pub child: Option<usize>,
+    pub sibling: Option<usize>,
+    pub flags: u8,
 }
 
 /// **SLUS-21104's own calls answered** (MD106b): the vehicle force and post, the wreck timer, the
-/// landing's node-local turn and the node's position, each ported; every other call, and what these
-/// hand out, goes on to `rest`.
+/// landing's node-local turn and the node's position, each ported; and (MD128) what those hand out:
+/// the map-edge test and throw, the body's reset, the spatial update, the node's bounds, the collision
+/// sync and each collidable's, the record's gravity call and the subtree's marking. Every other call,
+/// and what these hand out in turn, goes on to `rest`.
 pub struct Own<'a, S> {
     pub v: &'a mut Vehicle,
     pub rest: &'a mut S,
@@ -1326,18 +1378,47 @@ pub struct Own<'a, S> {
 
 impl<S: Steps> Steps for Own<'_, S> {
     fn call(&mut self, c: Call, car: &mut Car, body: &mut Body) {
-        let v = &mut *self.v;
-        let s = &mut *self.rest;
         match c {
-            Call::VehicleForce => vehicle_force(v, body, car, s),
-            Call::VehiclePost(_) => vehicle_post(v, car, body, s),
-            Call::WreckTimer(dt) => wreck_timer(v, car, body, dt, s),
+            Call::VehicleForce => vehicle_force(self, body, car),
+            Call::VehiclePost(_) => vehicle_post(self, car, body),
+            Call::WreckTimer(dt) => wreck_timer(self, car, body, dt),
             Call::Landed(shock) => {
-                let out = node_local(&mut v.scene, 0, shock);
-                s.call(Call::LandingSound(out), car, body);
+                let out = node_local(&mut self.v.scene, 0, shock);
+                self.rest.call(Call::LandingSound(out), car, body);
             }
-            Call::NodePosition => car.node_pos = v.scene.position(0),
-            c => s.call(c, car, body),
+            Call::NodePosition => car.node_pos = self.v.scene.position(0),
+            Call::OutOfBounds => out_of_bounds(self.v, body),
+            Call::BodyReset => body_reset(self, car, body),
+            Call::GravityRecord if self.v.held.as_ref().is_some_and(|h| h.entries.iter().all(|e| e.contact.other.is_none())) => {
+                let h = self.v.held.as_mut().expect("tested");
+                let mut me = crate::atv_contact::Weighed { body, mass: h.mass, cofg: car.cofg };
+                let side = &mut crate::contact::Own::Body(&mut me);
+                crate::atv_contact::resolve(&mut h.record, side, &mut h.entries, &mut [], &h.movers, true);
+            }
+            Call::SubtreeOutOfDate if !self.v.below.is_empty() => out_of_date(&mut self.v.below, 0),
+            Call::SpatialUpdate => {
+                if self.v.spatial {
+                    let (centre, half) = node_box(self, car, body);
+                    self.rest.call(Call::SpatialMove { node: false, centre, half, reach: F::ZERO }, car, body);
+                }
+            }
+            Call::NodeBounds => {
+                if self.v.scene.nodes[0].spatial {
+                    let (centre, half) = node_box(self, car, body);
+                    let (centre, half, reach) = self.v.scene.database_box(0, centre, half);
+                    self.rest.call(Call::SpatialMove { node: true, centre, half, reach }, car, body);
+                }
+            }
+            Call::CollisionSync => {
+                for c in crate::atv_moto::collision_sync(&self.v.collidables) {
+                    match c {
+                        crate::quad::Call::PartSync(p) => part_sync(self, p, car, body),
+                        crate::quad::Call::Gather(p) => self.rest.call(Call::Gather(p), car, body),
+                        c => unreachable!("the collision sync's {c:?}"),
+                    }
+                }
+            }
+            c => self.rest.call(c, car, body),
         }
     }
 }
@@ -1345,15 +1426,15 @@ impl<S: Steps> Steps for Own<'_, S> {
 /// **The vehicle's force**, the Force body's first call: with the body enabled, the world's gravity
 /// into its force (`xyz`), the collision record told ([`Call::GravityRecord`]) if there is one, and
 /// bit 5 of the flag byte cleared. With the body off, nothing.
-pub fn vehicle_force(v: &mut Vehicle, body: &mut Body, car: &mut Car, s: &mut impl Steps) {
+pub fn vehicle_force<S: Steps>(o: &mut Own<'_, S>, body: &mut Body, car: &mut Car) {
     if !body.enabled {
         return;
     }
-    body.force = body.force.merge(Dest::XYZ, body.force.add(v.gravity));
-    if v.record {
-        s.call(Call::GravityRecord, car, body);
+    body.force = body.force.merge(Dest::XYZ, body.force.add(o.v.gravity));
+    if o.v.record {
+        o.call(Call::GravityRecord, car, body);
     }
-    v.flags &= !0x20;
+    o.v.flags &= !0x20;
 }
 
 /// **The vehicle's post step**, the PostProcess's first call: with the body enabled, the car's
@@ -1363,27 +1444,106 @@ pub fn vehicle_force(v: &mut Vehicle, body: &mut Body, car: &mut Car, s: &mut im
 /// [`Call::SubtreeOutOfDate`]); outside, [`Call::BodyReset`] and [`Call::Respawn`].
 /// Then [`Call::SpatialUpdate`], [`Call::NodeBounds`] with bit 1 of the flag byte, and
 /// [`Call::CollisionSync`]; bit 2 cleared. The quad's is the same code ([`crate::atv_moto::vehicle_post`]).
-pub fn vehicle_post(v: &mut Vehicle, car: &mut Car, body: &mut Body, s: &mut impl Steps) {
+pub fn vehicle_post<S: Steps>(o: &mut Own<'_, S>, car: &mut Car, body: &mut Body) {
     if !body.enabled {
         return;
     }
     let at = crate::atv_moto::origin(&body.view(), car.cofg);
-    if crate::atv_moto::in_world(v.flags, &v.bounds, at) {
-        let current = v.scene.nodes[0].flags & 1 != 0;
-        v.scene.place(0, body.quat, at);
-        if current && v.subtree {
-            s.call(Call::SubtreeOutOfDate, car, body);
+    if crate::atv_moto::in_world(o.v.flags, &o.v.bounds, at) {
+        let current = o.v.scene.nodes[0].flags & 1 != 0;
+        o.v.scene.place(0, body.quat, at);
+        if current && o.v.subtree {
+            o.call(Call::SubtreeOutOfDate, car, body);
         }
     } else {
-        s.call(Call::BodyReset, car, body);
-        s.call(Call::Respawn, car, body);
+        o.call(Call::BodyReset, car, body);
+        o.call(Call::Respawn, car, body);
     }
-    s.call(Call::SpatialUpdate, car, body);
-    if v.flags & 0x02 != 0 {
-        s.call(Call::NodeBounds, car, body);
+    o.call(Call::SpatialUpdate, car, body);
+    if o.v.flags & 0x02 != 0 {
+        o.call(Call::NodeBounds, car, body);
     }
-    s.call(Call::CollisionSync, car, body);
-    v.flags &= !0x04;
+    o.call(Call::CollisionSync, car, body);
+    o.v.flags &= !0x04;
+}
+
+/// **The map-edge test and throw** (MXVehicle's out-of-bounds slot, vt `+0x16c`; MD128): held to the
+/// map, the body's position within [`EDGE_MARGIN`] of the area's edge or past it
+/// ([`crate::biplane::Area::outside_mxvatv`]) throws the body back towards the middle
+/// ([`crate::biplane::throw_mxvatv`]: its velocity and rates, the world's drag word halved) and
+/// answers yes, into [`Vehicle::out_of_bounds`]. The biplane's slot is the same function.
+fn out_of_bounds(v: &mut Vehicle, body: &mut Body) {
+    v.out_of_bounds = false;
+    let Some(area) = v.area.filter(|_| v.bounded) else { return };
+    if area.outside_mxvatv(body.position, F(EDGE_MARGIN)) {
+        crate::biplane::throw_mxvatv(&area, body.position, &mut body.velocity, &mut body.rates, &mut v.drag, &mut v.rng);
+        v.out_of_bounds = true;
+    }
+}
+
+/// **The body's reset** (MXVehicle's vt `+0x13c`, out of the world; MD128), as the bike's
+/// ([`crate::handling::reset::body_reset`]) on the car's words: with the body enabled, the body taken
+/// off the world's three lists ([`Call::LeaveWorld`]) and turned off; with a record and its owner,
+/// the riding probe let go ([`Call::RidingLetGo`], with bit 7 of [`Vehicle::reset_flags`] and a riding
+/// probe) or the record handed back ([`Call::ReleaseRecord`]); with bit 6, bit 1 of the flag word
+/// cleared.
+fn body_reset<S: Steps>(o: &mut Own<'_, S>, car: &mut Car, body: &mut Body) {
+    if !body.enabled {
+        return;
+    }
+    for k in 0..3 {
+        o.rest.call(Call::LeaveWorld(k), car, body);
+    }
+    body.enabled = false;
+    if o.v.owned && o.v.record {
+        if o.v.reset_flags & 0x80 != 0 {
+            if o.v.collidables.riding.is_some() {
+                o.rest.call(Call::RidingLetGo, car, body);
+            }
+        } else {
+            o.rest.call(Call::ReleaseRecord, car, body);
+        }
+    }
+    if o.v.reset_flags & 0x40 != 0 {
+        o.v.flag_word &= !2;
+    }
+}
+
+/// The car's node's box in the world (as the quad's): its frame brought up to date, its bounds
+/// gathered again if they are stale ([`Call::NodeRebound`], then bit 7 cleared), then
+/// [`crate::atv_moto::Scene::world_box`].
+fn node_box<S: Steps>(o: &mut Own<'_, S>, car: &mut Car, body: &mut Body) -> (Vf, Vf) {
+    if o.v.scene.bounds_stale(0) {
+        o.rest.call(Call::NodeRebound, car, body);
+        o.v.scene.rebounded(0);
+    }
+    o.v.scene.world_box(0)
+}
+
+/// A collidable's sync (as the quad's): the car's node's frame brought up to date, the part stood at
+/// it, and its box moved in the database ([`Call::PartMove`]) if it has an entry.
+fn part_sync<S: Steps>(o: &mut Own<'_, S>, p: crate::quad::Part, car: &mut Car, body: &mut Body) {
+    let v = &mut *o.v;
+    v.scene.update(0);
+    let frame = v.scene.nodes[0].world;
+    let part = &mut v.collidables.states[crate::atv_sync::slot(p)];
+    if let Some((centre, half, reach)) = crate::atv_sync::part_sync(part, &frame) {
+        o.rest.call(Call::PartMove { part: p, centre, half, reach }, car, body);
+    }
+}
+
+/// A sibling list of the subtree marked out of date, as the original recurses: the rest of the list
+/// first, then the node, and if it was current, its children.
+fn out_of_date(below: &mut [Below], n: usize) {
+    if let Some(next) = below[n].sibling {
+        out_of_date(below, next);
+    }
+    if below[n].flags & 1 != 0 {
+        below[n].flags &= !1;
+        if let Some(c) = below[n].child {
+            out_of_date(below, c);
+        }
+    }
 }
 
 /// A world direction into node `n`'s frame (the landing's call): its world frame brought up to date,
@@ -1430,16 +1590,17 @@ fn set_inertia(v: &mut Vehicle, body: &mut Body, mut i: Vf) -> Vf {
 ///   or still, the body keeps [`EDGE_KEEP`] of its velocity and the car unwrecks. Tipped, not yet
 ///   counting, past it and still: the unwreck, and the clock starts again counting.
 #[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's `c.ole.s` / `c.olt.s` branched on false
-pub fn wreck_timer(v: &mut Vehicle, car: &mut Car, body: &mut Body, dt: F, s: &mut impl Steps) {
-    if !v.wrecks_on {
+pub fn wreck_timer<S: Steps>(o: &mut Own<'_, S>, car: &mut Car, body: &mut Body, dt: F) {
+    if !o.v.wrecks_on {
         return;
     }
-    if v.bounded && car.state != WRECK_EDGE {
-        s.call(Call::OutOfBounds, car, body);
-        if v.out_of_bounds {
-            wreck(v, car, body, WRECK_EDGE, s);
+    if o.v.bounded && car.state != WRECK_EDGE {
+        o.call(Call::OutOfBounds, car, body);
+        if o.v.out_of_bounds {
+            wreck(o, car, body, WRECK_EDGE);
         }
     }
+    let v = &mut *o.v;
     if car.state == RIDING {
         // The node's own frame's up row, dotted with the rodata's (0, 1, 0).
         let up = v.scene.nodes[0].local[1];
@@ -1449,9 +1610,9 @@ pub fn wreck_timer(v: &mut Vehicle, car: &mut Car, body: &mut Body, dt: F, s: &m
             && (car.one_side || !car.grounded)
             && level < F(f32::from_bits(TIPPED_UP))
         {
-            wreck(v, car, body, WRECK_TIPPED, s);
-            v.clock = v.max_wreck_time - F(TIPPED_HEAD_START);
-            v.tipped_wreck = true;
+            wreck(o, car, body, WRECK_TIPPED);
+            o.v.clock = o.v.max_wreck_time - F(TIPPED_HEAD_START);
+            o.v.tipped_wreck = true;
         }
         return;
     }
@@ -1460,20 +1621,20 @@ pub fn wreck_timer(v: &mut Vehicle, car: &mut Car, body: &mut Body, dt: F, s: &m
         if !v.counting && !(v.clock <= v.max_wreck_time) {
             v.counting = true;
             v.clock = F::ZERO;
-            s.call(Call::Cue(12), car, body);
+            o.call(Call::Cue(12), car, body);
         }
-        if v.counting && (!(v.clock <= v.max_wreck_time) || ground_speed(car) < F(STILL_SPEED)) {
+        if o.v.counting && (!(o.v.clock <= o.v.max_wreck_time) || ground_speed(car) < F(STILL_SPEED)) {
             body.velocity = scale_xyz(body.velocity, EDGE_KEEP);
-            unwreck(v, car, body, s);
+            unwreck(o, car, body);
         }
     } else if car.state == WRECK_TIPPED
         && !v.counting
         && !(v.clock <= v.max_wreck_time)
         && ground_speed(car) < F(STILL_SPEED)
     {
-        unwreck(v, car, body, s);
-        v.counting = true;
-        v.clock = F::ZERO;
+        unwreck(o, car, body);
+        o.v.counting = true;
+        o.v.clock = F::ZERO;
     }
 }
 
@@ -1481,22 +1642,23 @@ pub fn wreck_timer(v: &mut Vehicle, car: &mut Car, body: &mut Body, dt: F, s: &m
 /// rumble ([`Call::Rumble`]) if it is the player's; unless the vehicle is of kind 0 or 1, both the
 /// body's dampings `WreckDamping` and its inertia `WreckInertia` times its own (`xyz`); cue 11 — then
 /// the car's: the body's rates spun up by [`WRECK_SPIN`], and the wrecked look on.
-pub fn wreck(v: &mut Vehicle, car: &mut Car, body: &mut Body, state: u32, s: &mut impl Steps) {
+pub fn wreck<S: Steps>(o: &mut Own<'_, S>, car: &mut Car, body: &mut Body, state: u32) {
     car.state = state;
-    v.clock = F::ZERO;
-    v.counting = false;
-    if v.rumble {
-        s.call(Call::Rumble, car, body);
+    o.v.clock = F::ZERO;
+    o.v.counting = false;
+    if o.v.rumble {
+        o.call(Call::Rumble, car, body);
     }
+    let v = &mut *o.v;
     if v.kind != 1 && v.kind != 0 {
         let i = v.wreck_inertia.merge(Dest::XYZ, v.wreck_inertia.mul(v.inertia));
         body.damping = v.wreck_damping;
         body.ang_damping = v.wreck_damping;
         set_inertia(v, body, i);
     }
-    s.call(Call::Cue(11), car, body);
+    o.call(Call::Cue(11), car, body);
     body.rates = scale_xyz(body.rates, WRECK_SPIN);
-    s.call(Call::WreckLook(true), car, body);
+    o.call(Call::WreckLook(true), car, body);
 }
 
 /// **The car's unwreck** (vt `+0x36c`, with 1): the car's — the latch set, the tipped wreck's flag
@@ -1505,14 +1667,15 @@ pub fn wreck(v: &mut Vehicle, car: &mut Car, body: &mut Body, state: u32, s: &mu
 /// divided back by [`EDGE_DRAG`]; riding, the clock at 0 (counting is left as it is); unless the
 /// vehicle is of kind 0 or 1, both dampings back to [`UNDAMPED`] and the body's own inertia back
 /// (its `w` set to 1 where it is kept); cue 13.
-pub fn unwreck(v: &mut Vehicle, car: &mut Car, body: &mut Body, s: &mut impl Steps) {
+pub fn unwreck<S: Steps>(o: &mut Own<'_, S>, car: &mut Car, body: &mut Body) {
     car.latch = true;
-    v.tipped_wreck = false;
+    o.v.tipped_wreck = false;
     body.velocity = scale_xyz(body.velocity, UNWRECK_KEEP);
-    if v.look {
-        s.call(Call::WreckLook(false), car, body);
+    if o.v.look {
+        o.call(Call::WreckLook(false), car, body);
     }
-    s.call(Call::Respawn, car, body);
+    o.call(Call::Respawn, car, body);
+    let v = &mut *o.v;
     if car.state == WRECK_EDGE {
         v.drag = v.drag / F(EDGE_DRAG);
     }
@@ -1524,7 +1687,7 @@ pub fn unwreck(v: &mut Vehicle, car: &mut Car, body: &mut Body, s: &mut impl Ste
         let own = v.inertia;
         v.inertia = set_inertia(v, body, own);
     }
-    s.call(Call::Cue(13), car, body);
+    o.call(Call::Cue(13), car, body);
 }
 
 // --- MX Unleashed's tire step (MD124) ----------------------------------------------------------------
