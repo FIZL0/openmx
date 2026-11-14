@@ -1356,6 +1356,32 @@ mod rider_left_out_line {
     }
 }
 
+/// The track's `hit.dat` — free ride's events: its activities' start zones, the stunt zones and the
+/// AI riders' seeker databases — as text, through `read`, for a ride that is not a Race (P338). A
+/// Race loads none of them, as the original's does not: no challenge markers, no radar zones, no
+/// event prompt.
+fn free_ride_hit_dat(racing: bool, read: impl FnOnce() -> Option<Vec<u8>>) -> Option<String> {
+    (!racing).then(read).flatten().map(|b| String::from_utf8_lossy(&b).into_owned())
+}
+
+#[cfg(test)]
+mod free_ride_hit_dat_reads {
+    use super::free_ride_hit_dat;
+
+    #[test]
+    fn a_race_loads_no_hit_events() {
+        let file = || Some(b"[ASZ 0]\nType = HitStunt\n".to_vec());
+        assert_eq!(free_ride_hit_dat(true, file), None);
+        assert_eq!(free_ride_hit_dat(false, file).as_deref(), Some("[ASZ 0]\nType = HitStunt\n"));
+        assert_eq!(free_ride_hit_dat(false, || None), None);
+        // Nothing for a race's zones, its event or its seeker world to build from.
+        let none = super::free_ride_hit_dat(true, file).unwrap_or_default();
+        assert!(super::portal::spots(&none).is_empty());
+        assert!(super::overlay::zones(&none).is_empty());
+        assert!(super::portal::stunt_event(&[], &none).zones.is_empty());
+    }
+}
+
 /// The view's HUD tracker a frame on from its seat's score card (P121, P68): each view follows its
 /// own rider's, so a split or an online ride shows every player their own tricks.
 fn track_score(seat: &Seat, rig: &mut Rig, table: &Stunts, now: Instant) {
@@ -7279,19 +7305,13 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     );
     // The activities' start zones the radar marks (P92): the track's `hit.dat`, in its second
     // archive. A track with none (the MX tracks) marks none.
-    let radar_zones = archives
-        .iter()
-        .find_map(|a| a.read_suffix(&format!("{stem}\\hit.dat")).ok())
-        .map(|b| overlay::zones(&String::from_utf8_lossy(&b)))
-        .unwrap_or_default();
+    // None of it in a Race (P338).
+    let hit_dat = free_ride_hit_dat(args.race.is_some(), || archives.iter().find_map(|a| a.read_suffix(&format!("{stem}\\hit.dat")).ok())).unwrap_or_default();
+    let radar_zones = overlay::zones(&hit_dat);
     // And drawn in the world (V51) as the original draws them, the session markers as small ones:
     // the same file's zones, and the portal's art out of the same archive — or, on a track whose
     // archive lacks the numbers (the MX tracks'), a free-ride track's, which has them all.
-    let zone_spots = archives
-        .iter()
-        .find_map(|a| a.read_suffix(&format!("{stem}\\hit.dat")).ok())
-        .map(|b| portal::spots(&String::from_utf8_lossy(&b)))
-        .unwrap_or_default();
+    let zone_spots = portal::spots(&hit_dat);
     let portal_art = {
         let read = |archives: &[Res], name: &str| archives.iter().find_map(|a| a.read_suffix(name).ok());
         let own = portal::Art::load(|name| read(&archives, name)).filter(portal::Art::numbered);
@@ -7486,7 +7506,6 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // its rider, so each rider meets them where its own state has them.
     seats.iter_mut().for_each(|s| s.sim.traffic = cars.clone());
     // The freestyle event (P155) on every seat's state: the track's stunt zones and target.
-    let hit_dat = archives.iter().find_map(|a| a.read_suffix(&format!("{stem}\\hit.dat")).ok()).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
     let stunt = portal::stunt_event(&zone_spots, &hit_dat);
     if !stunt.zones.is_empty() {
         println!("freestyle event: {} stunt zones, target {}", stunt.zones.len(), stunt.target);
