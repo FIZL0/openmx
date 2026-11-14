@@ -1197,6 +1197,28 @@ path_route_free             boot 0x0026c9f0 (track, route*, also_owned) the rout
 #                                           the third argument, owned too). The race passes 0 (S293)
 prop_bound                  boot 0x001b44b0 (prop, centre out, half extents out)
 activity_supercross_load    boot 0x002f9f40 (activity) the loader: gates off the props, then the lane table
+# P313b — the drop gate's swing. The loader makes it at activity +0x3ac when the track's .toy has a
+# [DropGate] section (scene(app+0x3cc)+0xb4, read by 0x002af2e0). Ported as race_start::GateSwing
+# (render side, f32).
+drop_gate_ctor              boot 0x002ff110 (obj, 1) 0xd0 bytes, vtable 0x004584d0. +0x80 axis (1,0,0),
+#                                           +0x90 angle pi/4, +0x94 length 2.0, +0x9c turned, +0xa0 on
+drop_gate_init              boot 0x002ff2e0 (obj, prop node) +0x30 = the [DropGate] words, +0x34 = the
+#                                           gate prop's node (the loader's own name lookup). 0 with no words
+drop_gate_bind              boot 0x002ff3d0 (obj, activity+0x160, +0x180) the line spots; MoveGateDown
+#                                           -> 0x002ff540 (pieces by name: GateName, or GateName%02d)
+drop_gate_start             boot 0x002ff4e0 (obj) called by race_drop: axis = words +0x60, angle =
+#                                           words +0x70 * 0.01745329, length = 0.15 (0x3e19999a; the
+#                                           words' RotationRateInSeconds +0x74 is never read), on = 1
+drop_gate_update            boot 0x002ff900 (dt, obj) vt +0x38. With on: step = angle * (dt / length),
+#                                           cut to angle - turned and off when it would pass the angle;
+#                                           turned += step; node_turn(step, node, axis). MoveGateDown's
+#                                           sink to y -100 over MoveTime runs here too (+0x50/+0x54/+0x58)
+drop_gate_snap              boot 0x002ffc50 (obj, activity) the whole turn at once, called by 0x0031a620
+node_turn                   boot 0x001b2c20 (angle f12, node, axis) angle != 0: node +0x40's rows =
+#                                           axis_angle(axis, cos 0x00110e10, sin 0x00110ce0) * rows,
+#                                           place kept (0x00110ba0, axis made unit), then 0x001b1930
+# Checked live (P313b, copy 4 on c31-sx01-race-start): node rows go from (0,.866,-.5)/(0,.5,.866) to
+# (0,-.0017,-1)/(0,1,-.0017) in 5 frames, -0.2327 a step, the first on the frame the start gate opens.
 prop_find_fallback          boot 0x00212af0 (0x004e18c0's list, name, 1) -> holder; the prop is holder
 #                                           +0xb0 -> +0x30
 scene_prop_find             boot 0x001a6040 scene vt +0x120 (scene, name, 1) -> the first holder's prop

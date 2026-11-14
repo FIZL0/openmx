@@ -5760,6 +5760,16 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     if let Some(s) = &stadium_flashes {
         println!("race: {} camera flashes, floor {}", s.len(), s.flashes.floor.0);
     }
+    // P313b: a race's drop gate falls at the drop: its prop, named in the track's `.toy`
+    // `[DropGate]`, is taken out of the scene's static props and drawn turned as it swings down.
+    let gate_swing = race_start.as_ref().and_then(|_| {
+        let toy = archives.iter().find_map(|a| a.read_suffix(&format!("\\{stem}.toy")).ok()).map(|b| ini::text(&b)).unwrap_or_default();
+        race_start::GateSwing::take(&mut look, &toy)
+    });
+    if let Some(g) = &gate_swing {
+        let up = g.at().0[1];
+        println!("race: drop gate {} drawn up {:.2},{:.2},{:.2}", g.model(), up[0], up[1], up[2]);
+    }
     let node_at = |name: &str| -> Option<Vf> {
         let chassis = assets.models.get(CHASSIS)?;
         let i = chassis.model.nodes.iter().position(|n| n.name == name)?;
@@ -6199,7 +6209,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             })
         }
     };
-    Ok(Ok((mods, disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, kit, table, place, look, ground, sky, assets, vehicle, tables, phy_bytes, phy, other_phys, stock_phys, bike_words, other_riders, riders, body, ragdolled, chassis, layout, cpresets, camera, lot, flight_for, plane_files, online_bays, online_bodies, plane_starts, stock_plane, garage, plane_presets, plane_camera, plane_drawn, plane_fx, fx_sheet, soft_sheet, sim, traffic, animated, cars, traffic_time, traffic_before, traffic_at, rider, others, head, recorder, pre_chunks, at, car_shift, pack_clips, stunts, race_start, stadium_flashes)))
+    Ok(Ok((mods, disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, kit, table, place, look, ground, sky, assets, vehicle, tables, phy_bytes, phy, other_phys, stock_phys, bike_words, other_riders, riders, body, ragdolled, chassis, layout, cpresets, camera, lot, flight_for, plane_files, online_bays, online_bodies, plane_starts, stock_plane, garage, plane_presets, plane_camera, plane_drawn, plane_fx, fx_sheet, soft_sheet, sim, traffic, animated, cars, traffic_time, traffic_before, traffic_at, rider, others, head, recorder, pre_chunks, at, car_shift, pack_clips, stunts, race_start, stadium_flashes, gate_swing)))
         }
     };
     let mut load_screen = LoadScreen::default();
@@ -6208,7 +6218,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         None if std::env::var_os(loading::THREADED).is_some() => loading::on_worker(progress, build, || Ok(None::<Leave>))?.unwrap_or_else(Err),
         None => build()?,
     };
-    let (mut mods, mut disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, mut kit, table, place, mut look, ground, sky, mut assets, vehicle, tables, phy_bytes, phy, other_phys, mut stock_phys, mut bike_words, other_riders, riders, body, ragdolled, chassis, mut layout, cpresets, camera, mut lot, flight_for, plane_files, online_bays, online_bodies, plane_starts, mut stock_plane, garage, plane_presets, plane_camera, mut plane_drawn, mut plane_fx, mut fx_sheet, soft_sheet, mut sim, traffic, animated, cars, mut traffic_time, mut traffic_before, mut traffic_at, rider, others, mut head, recorder, pre_chunks, at, car_shift, pack_clips, stunts, race_start, mut stadium_flashes) = match built {
+    let (mut mods, mut disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, mut kit, table, place, mut look, ground, sky, mut assets, vehicle, tables, phy_bytes, phy, other_phys, mut stock_phys, mut bike_words, other_riders, riders, body, ragdolled, chassis, mut layout, cpresets, camera, mut lot, flight_for, plane_files, online_bays, online_bodies, plane_starts, mut stock_plane, garage, plane_presets, plane_camera, mut plane_drawn, mut plane_fx, mut fx_sheet, soft_sheet, mut sim, traffic, animated, cars, mut traffic_time, mut traffic_before, mut traffic_at, rider, others, mut head, recorder, pre_chunks, at, car_shift, pack_clips, stunts, race_start, mut stadium_flashes, mut gate_swing) = match built {
         Ok(built) => built,
         Err(leave) => return Ok(leave),
     };
@@ -9434,6 +9444,14 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             let place = &mut world.place;
             fx.step_over(dt.0, &mut |at| plane_fx_ground(place, at));
         }
+        // P313b: the drop gate swings down once the race's gate drops, a step for each tick simulated.
+        if simulated && let Some(g) = &mut gate_swing {
+            let closed = world.seats[0].sim.race.as_ref().is_some_and(|r| r.gate.flags & game_sim::race::flags::CLOSED != 0);
+            if g.follow(closed, dt.0) {
+                let up = g.at().0[1];
+                println!("race: drop gate down at tick {}, turned {:.2} rad, up {:.2},{:.2},{:.2}", world.seats[0].sim.ticks, g.turned(), up[0], up[1], up[2]);
+            }
+        }
         // The stadium's camera flashes (V127), a tick for each simulated, and `--race-win`'s finish
         // when its time comes: the flashes' burst and, the winner's, the track's fireworks.
         if simulated && let Some(s) = &mut stadium_flashes {
@@ -10812,6 +10830,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             }
             // The stadium's lit camera flashes (V127), each at its fade.
             actors.extend(stadium_flashes.iter().flat_map(|s| s.actors()));
+            // The race's drop gate (P313b), standing or swung down.
+            actors.extend(gate_swing.iter().map(|g| g.actor()));
             // A view's own player's markers (P88), faint bikes where each was put down: in that
             // player's view and nobody else's, so a view with any has the shared list and them.
             let marked: Vec<Vec<Actor>> = world
@@ -11266,6 +11286,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             }
             // The stadium's lit camera flashes (V127): the software path draws them solid.
             actor.extend(stadium_flashes.iter().flat_map(|s| s.shown()).map(|(model, at, _)| (model, at)));
+            actor.extend(gate_swing.iter().map(|g| (g.model(), g.at())));
             // On a wrapped world (MD43) every rider, plane and car at its copy nearest the camera.
             if soft_wrap.is_some() {
                 for a in &mut actor {
