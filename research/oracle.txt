@@ -12254,6 +12254,36 @@ atv_heap_free_in            atv 0x001b6760 = a block freed into a given heap (a0
 #   0x00272300 -> 0x0025e740, name bit 0x00214b30 -> 0x002166b0; tire phy 0x004bb880 -> 0x004dde40, put back
 #   0x004b8e30 -> 0x004db460, animate 0x004be3c0 -> 0x004e0980, pose nodes 0x004be8d0 -> 0x004e0e20, net
 #   unpack 0x004bdd20 -> 0x004e02f0.
+# MD81c — MX vs. ATV Untamed's (SLUS-21701) car step (the monster truck's) against SLUS-21104's. Static, as
+# MD81a/b; research/untamed-machines.md has the verdicts. Journal: research/journal/2026-11-14-md81c-untamed-monster.
+# Comment rows only. Truck vtable 0x003cff80 -> 0x003f1840. Twins, SLUS-21104 -> SLUS-21701:
+#   the same code (fields moved): truck PreProcess 0x004cb0c0 -> 0x004e8ae0, Force 0x004cbb60 -> 0x004e9570,
+#   travel cofg 0x004cb000 -> 0x004e8a20, anti-slide 0x004cb500 -> 0x004e8f20, launch 0x004cba30 -> 0x004e9440,
+#   aero 0x004cb200 -> 0x004e8c20, truck PostProcess 0x004d7ea0 -> 0x004efeb0, ground query 0x004833c0 ->
+#   0x004b0910, wreck clock 0x004cd0b0 -> 0x004eaa80, engine 0x004b3f30 -> 0x004d65e0, shift 0x004b3c90 ->
+#   0x004d6340, tire step 0x004b5ca0 -> 0x004d8320 (part 0x004b62c0 -> 0x004d8930), tire clear 0x004b50d0 ->
+#   0x004d7770, wreck/unwreck 0x004cd3c0/0x004cd420 -> 0x004ead80/0x004eade0, respawn 0x004cab10 -> 0x004e8510,
+#   ghost step 0x004a74e0 -> 0x004cae70, base update 0x004a79c0 -> 0x004cb340, body linear half 0x00495d30 ->
+#   0x004bc160, end substep 0x0049bde0 -> 0x004c22b0, local force/moment, add force 0x0049c050/0x0049c1a0/
+#   0x0049c0b0 -> 0x004c2520/0x004c2670/0x004c2580, set cofg 0x00493b40 -> 0x004b9fb0, 0x00494370 -> 0x004ba7c0,
+#   node local 0x00195320 -> 0x00191160, node position 0x00194c20 -> 0x00190830.
+#   scheduling / registers / lhu: controls 0x004ca450 -> 0x004e7e90, tire step parts 0x004b5cf0 -> 0x004d8370
+#   and 0x004b6400 -> 0x004d8a70, contact sort 0x004cad90 -> 0x004e87b0, probe 0x004b51f0 -> 0x004d7890,
+#   vehicle post 0x004940b0 -> 0x004ba500 (placement 0x00194650 -> 0x00190270), world step 0x00496b70 ->
+#   0x004bd040, add moment 0x00497530 -> 0x004bda00.
+#   loaders: car 0x004c7fd0 -> 0x004e5980 (239 keys), base 0x004a7e70 -> 0x004cb7e0 (6), truck 0x004d6ce0 ->
+#   0x004eebe0 (4): the same keys and defaults, the reader handed as file+60.
+#   reworked: car PostProcess 0x004cbd80 -> 0x004e9790 (yaw clamp by compares); input step 0x004ca010 ->
+#   0x004e79c0 (controls block stick [0xdf]/[0xe0], strengths +8+0x18*idx, pad word +0x1114 = command 0x51
+#   player 0 entry idx+32, -1 guards, hand brake id 0x18 -> 0x19 tested <= 0, clutch s <= 0); car update
+#   0x004cc4e0 -> 0x004e9eb0 (hazard clock 0x004ce3a0 straight, a2 = any tire +0xa4; class slot +0x488 ->
+#   +0x480); truck class update 0x004d7f40 -> 0x004eff50 (odometer !(v <= 0)); vehicle force 0x00493f60 ->
+#   0x004ba390 (second body vt +0x80 add of zero); preload 0x004cb7f0 -> 0x004e9210 (cue while firing);
+#   truck class step 0x004d6f20 -> 0x004eee20 (adds four 0x0018f930 calls; posing only).
+#   body integrate (vt +0x54) 0x00496240 -> 0x004bc670: h > 0: k = 0.333/h (0x3eaa7efa); abs(k-1) > 0.1 ->
+#   each of +0x150/+0x154/+0x158 through 0x0033e580 (thunk to powf 0x0033a8b0, f12 d, f13 k), else as is;
+#   h <= 0: rodata 0x003b5f70. Then rates +0x1d0 = d*rates + h*accel +0x1e0, clamps +0x210..+0x218 as
+#   SLUS-21104's. Tire curve 0x004a25b0 -> 0x004c6260 already called powf (0x0034ff40) in SLUS-21104.
 # V127 — a supercross stadium's camera flashes (the race activity's +0x414), held against S13d's capture
 # (context/capture/s13d/sx01-finish.jsonl, its 0x70-byte "flash" field). camera_flash::CameraFlashes.
 camera_flash_load           boot 0x002faa50 (the race activity's loader, its part): track name holding "sx"

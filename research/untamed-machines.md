@@ -280,6 +280,50 @@ part (a `beq`/`bne` swap), the event post (`lhu`), two unnamed callees of the up
 did not pair), and the quad's `.phy` tire reader, put-back, animate, node pose, net unpack and wreck path,
 which the walk did not reach.
 
+## SLUS-21701's car step against SLUS-21104's (MD81c)
+
+Static, as MD81a/b's: the monster truck's vtable (SLUS-21104 and SLUS-21701 side by side) paired its
+slots, the rest was paired by layout order (car code about +0x1d9d0 higher in Untamed, truck code about
++0x18000) and each pair compared by `research/md81c/fp.py`, a fingerprint blind to order: the function
+cut at the first prologue after its `jr $ra`, branch-likely folded into the plain branch, nops dropped,
+then the op multiset, the float `lui` constants, the small immediates and the call count compared. The
+ones it called different were read by eye (`./kit fn`, `./kit dis --limit 100000`). The loaders' key
+lists were diffed by `research/md81c/keys.py` (it resolves each `lui`/`addiu $a1` pair to its string).
+Addresses are in `research/oracle.txt # MD81c`.
+
+The car's fields moved −0x10 through the `+0xb..+0x12` block (state `+0xbc4` → `+0xbb4`, wreck words
+`+0xc80` → `+0xc70`, the tires `+0x1254` → `+0x1244`, the yaw limit `+0x124c` → `+0x123c`), the body
+pointer `+0xb8` → `+0xe8` and the `+0x3xx` words +0x30; the node's words +0x30 (as MD81b's). The car-class
+slots from about `+0x45c` on are 8 lower (`+0x488` → `+0x480`, `+0x47c` → `+0x474`, `+0x484` → `+0x47c`).
+
+| function | SLUS-21701 against SLUS-21104 | port |
+|---|---|---|
+| truck PreProcess, Force, travel centre of gravity, anti-slide, launch, aero, PostProcess (the truck's); engine, shift; tire step (and a part), tire clear, probe; wreck clock, wreck and unwreck, respawn; ghost step, base update; the body's linear half, end of substep, local force/moment, add force, set centre of gravity; ground query; node local and position | the same code, fields moved | — |
+| controls, two tire-step parts, contact sort, vehicle post (and its placement), world step, add moment | scheduling, registers, `lhu` counts | — |
+| loaders (car, base, truck) | the same 239, 6 and 4 keys with the same float defaults; the reader is handed as file+60 | — |
+| PostProcess (the car's) | the yaw clamp rewritten: SLUS-21104's `!(abs(r) <= L) → r = L·sign(r)` became `r > L → L`, `r < -L → -L`. The same for any normal `L` (and a NaN `r` is kept by both); they part on a denormal `L` only | not ported |
+| **input step** | reads the controls block (stick bytes, per-command strengths) in place of the pad record; the pad word is player 0's lookup of the pad command; every command lookup gains a "−1 = unbound → not pressed" guard; the hand brake is the next command id and tests `<= 0`; the clutch is `s <= 0 ? 0 : 1` (SLUS-21104's `s == 0 ? 0 : 1`: they part on a negative strength only) | not ported (the shell's controls already hand the port strengths, not pad bits) |
+| update (the car's) | the hazard clock called straight with the grounded word (any tire's `+0xa4`), as MD81b's quad | `handling::untamed::stuck` (MD81b) |
+| class update (the truck's) | the odometer's clause as MD81b's distance (`!(speed <= 0)`): parts only on a `-0` odometer, which never happens | not ported |
+| vehicle force | after the gravity, a second body add of `(0, 0, 0, 0)`: changes nothing but a `-0` or denormal component | not ported |
+| preload | the state logic is the same; the cue posted while firing, as the bike's (MD93). The truck's `[Preload]` is off, but the cue still posts when it fires with timer 0: only the port's `cued` latch | not ported |
+| class step (the truck's) | model posing (scene-node calls) only; Untamed adds four node calls. Not ported for SLUS-21104 either | — |
+| **body integrate** (every machine's rigid body) | the angular damping is made per-time: with `h > 0`, `k = 0.333/h` (the literal is `0x3eaa7efa`, 0.333f); if `abs(k − 1) > 0.1`, each damping lane becomes `powf(d, k)`, else `d` as is; with `h <= 0` a rodata vector. Then the same `rates = d·rates + h·accel` and per-axis clamps as SLUS-21104's. The quaternion step works on a copy before normalising (the same values) | not ported |
+
+**The body-integrate change is not on a plain truck ride.** The truck's `DefaultAngularRateDamping` and
+`ImpactAngularRateDamping` are `1, 1, 1` (unchanged from SLUS-21104's file) and fdlibm's `powf(1, y)` is
+1 for every `y`. It shows the moment something lowers a lane below 1: the contact pass's collider damping
+(`contact.rs`, `damp_angular`), a ragdoll's, or a `.phy` that sets it. Then `powf(d, 0.333/h)` at the
+substep `h` damps far harder than SLUS-21104's `d`. It touches the Untamed bike and ATV rides too
+(MD81a/b did not reach it). Untamed's powf (the thunk's target, 2032 B) has fdlibm's shape (its zero
+tests read `< 0x00800000`, as SLUS-21104's) but was not proved against `ps2_float`'s.
+
+**Nothing was captured and nothing was ported.** No Untamed monster-truck save state exists, and the
+Untamed menus are not yet driven by tape. The capture, the port of the four live changes (input guards,
+clamp form, preload cue, body damping) behind an Untamed switch, and the openmx-mods pack are follow-ups.
+The truck's `.phy` changes themselves (Weight, GravityScale, FrictionZone1, `[Preload]` off) need no code:
+the loaders read the same keys.
+
 ## Not checked
 
 - **Code** (MD81a compared the bike step, above; the other machines' steps are still unchecked). No function of SLUS-21701 was compared with SLUS-21104's. "Same classes" means the same
