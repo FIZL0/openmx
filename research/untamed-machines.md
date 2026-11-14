@@ -318,8 +318,9 @@ substep `h` damps far harder than SLUS-21104's `d`. It touches the Untamed bike 
 (MD81a/b did not reach it). Untamed's powf (the thunk's target, 2032 B) has fdlibm's shape (its zero
 tests read `< 0x00800000`, as SLUS-21104's) but was not proved against `ps2_float`'s.
 
-**Nothing was captured and nothing was ported.** No Untamed monster-truck save state exists, and the
-Untamed menus are not yet driven by tape. The capture, the port of the four live changes (input guards,
+**Captured (MD160), not ported.** MD160 drove the Untamed menus by tape and kept spawn and in-air states
+and seven truck drives (research/journal/2026-11-14-md160-untamed-monster-capture). Its wreck drive shows
+the powf damping live: ×0.85219 per tick in the air from a stored 0.999. The port of the four live changes (input guards,
 clamp form, preload cue, body damping) behind an Untamed switch, and the openmx-mods pack are follow-ups.
 The truck's `.phy` changes themselves (Weight, GravityScale, FrictionZone1, `[Preload]` off) need no code:
 the loaders read the same keys.
