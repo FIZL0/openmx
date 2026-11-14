@@ -3211,6 +3211,69 @@ const FRAME_LISTENERS: [(u32, &str); 7] = [
     (0x0051_b2a0, "empty"),
 ];
 
+/// **F31b5p — the HUD on a heap of its own**: the original's heap keeps eight heaps behind one
+/// manager (the pointer at [`HEAP_MANAGER`]); an allocation takes the current one (the manager's
+/// `+0x18`, an id), a free the one its block's header names, so a block goes back where it came
+/// from. [`hud_heap`] makes a second heap (the original's [`HEAP_MAKE`]) over RAM no frame touches
+/// ([`HUD_HEAP`], between the boot heap's end and the calls' stack) and makes the HUD's receive run
+/// with it current: the HUD's allocations and frees leave the frame's heap alone. On C15's flip the
+/// HUD's receive makes 124 blocks on row 59 and frees 120 of them, and frees two of the frame heap's
+/// (its own from before the image), which stay put ([`HEAP_FREE_IN`]).
+const HEAP_MANAGER: u32 = 0x0038_f750;
+const HEAP_MAKE: u32 = 0x001b_5d90;
+/// The C++ `new` the heap's making takes its lock object from (the C library's malloc): handed
+/// [`HUD_HEAP`]'s first bytes instead.
+const HEAP_LOCK_NEW: u32 = 0x0032_c280;
+/// The time stamp the heap's making takes (off the hardware counter, which the interpreter has not):
+/// stamped 0.
+const HEAP_STAMP: u32 = 0x0014_6ab0;
+/// The free behind every heap's (a0 the heap, a1 the block): while the HUD's receive runs, a block
+/// of the frame's heap (the HUD's own from before the RAM image) is left where it is, as in a frame
+/// with no HUD; the HUD's own heap's go back.
+const HEAP_FREE_IN: u32 = 0x001b_6760;
+const HUD_HEAP: u32 = 0x01f8_0000;
+const HUD_HEAP_LEN: u32 = 0x3_0000;
+const HUD_RECEIVE: u32 = FRAME_LISTENERS[0].0;
+
+/// Makes the HUD's heap ([`HUD_HEAP`]) in `ee`'s heap manager and hooks the HUD's receive to run
+/// with it current, the frame's heap current again after. Answers the new heap's id.
+fn hud_heap(ee: &mut Ee) -> u32 {
+    let m = ee.u32_at(HEAP_MANAGER);
+    assert_eq!(ee.u32_at(m + 0x18), 0, "the boot heap is current");
+    ee.hooks.insert(HEAP_LOCK_NEW, Box::new(|ee: &mut Ee| ee.set(2, u64::from(HUD_HEAP))));
+    ee.hooks.insert(HEAP_STAMP, Box::new(|ee: &mut Ee| {
+        let (at, n) = (ee.r(4) as u32, ee.r(5) as u32);
+        ee.set_u32(at, 0);
+        ee.set_u32(at + 4, n);
+    }));
+    ee.set(28, GP);
+    let (at, n) = (HUD_HEAP + 0x40, HUD_HEAP_LEN - 0x40);
+    ee.call(HEAP_MAKE, &[u64::from(m), u64::from(at), u64::from(n), u64::from(n)], &[], BUDGET);
+    ee.hooks.remove(&HEAP_LOCK_NEW);
+    ee.hooks.remove(&HEAP_STAMP);
+    let id = ee.r(2) as u32;
+    assert_eq!((id, ee.u32_at(m + 0x1c + 0x4c), ee.u32_at(m + 0x18)), (1, 1, 0), "the HUD's heap made in the second slot, the boot heap current");
+    ee.hooks.insert(HUD_RECEIVE, Box::new(move |ee: &mut Ee| {
+        let m = ee.u32_at(HEAP_MANAGER);
+        let was = ee.u32_at(m + 0x18);
+        ee.set_u32(m + 0x18, id);
+        let args = [ee.r(4), ee.r(5), ee.r(6)];
+        let heap = m + 0x1c + 0x4c;
+        let had = ee.hooks.insert(HEAP_FREE_IN, Box::new(move |ee: &mut Ee| {
+            if ee.r(4) as u32 == heap {
+                let a = [ee.r(4), ee.r(5)];
+                call_from_hook(ee, HEAP_FREE_IN, &a);
+            }
+        }));
+        assert!(had.is_none(), "the heap's free hooked already");
+        let v = call_from_hook_dt(ee, HUD_RECEIVE, &args, F(ee.f(12)));
+        ee.hooks.remove(&HEAP_FREE_IN);
+        ee.set_u32(m + 0x18, was);
+        ee.set(2, v);
+    }));
+    id
+}
+
 /// The frame post's outside: the message laid out in scratch as the poster lays it on its stack, and
 /// each listener told the original's ([`FRAME_LISTENERS`]; `$f12` the frame's `dt`, as the original
 /// post leaves it), booked by name. Every tell is watched: it may not change a word of the bike or its
@@ -9435,6 +9498,10 @@ fn replay_pure(name: &str, rust: &[&'static str]) -> Option<(Vec<bool>, BTreeMap
     for (at, mask, v) in words {
         a.set_u32(at, a.u32_at(at) & !mask | v & mask);
     }
+    // F31b5p: the handing run's HUD on its own heap, made in both.
+    if rust.contains(&"hud on its own heap") {
+        hud_heap(&mut a);
+    }
     let mut b = hooked(image()?);
     b.ram.clone_from(&a.ram);
     let (mut noise_a, mut noise_b) = (None, None);
@@ -9447,7 +9514,8 @@ fn replay_pure(name: &str, rust: &[&'static str]) -> Option<(Vec<bool>, BTreeMap
         // F31b5m: with the other listeners dropped, the second run's frame reads no byte where the
         // two RAMs differ going into it.
         // F31b5o: so too with the frame post's tells dropped.
-        let watch = ["other listeners dropped", "frame post tells but the hud's dropped"].iter().any(|n| rust.contains(n));
+        // F31b5p: and with every tell dropped, the HUD on its own heap.
+        let watch = ["other listeners dropped", "frame post tells but the hud's dropped", "hud on its own heap"].iter().any(|n| rust.contains(n));
         let parted = if watch { differing_bytes(&a, &b) } else { Vec::new() };
         let counted = INTERPRETED.with(|m| std::mem::take(&mut *m.borrow_mut()));
         posts_frame(&mut a, dt, &map, &mut noise_a, false);
@@ -9570,10 +9638,12 @@ fn flip_replays_bit_exact_with_nothing_handed_on() {
 /// dropped"`: the race progress is presentation, the rest change nothing the frame reads; the HUD,
 /// presentation too, allocates and frees on the heap the frame allocates from, and a wreck's ini read
 /// copies a reused block's stale bytes), so the frame is watched to read no byte where the RAM parts
-/// from the handing run's ([`replay_pure`]).
+/// from the handing run's ([`replay_pure`]). F31b5p: and not the HUD either (`"frame post tells
+/// dropped"`): the handing run's HUD allocates on a heap of its own (`"hud on its own heap"`,
+/// [`hud_heap`]), so the frame's heap is the same in both runs.
 fn replay_whole(name: &str) -> Option<(Vec<bool>, BTreeMap<String, u32>, Vec<String>, BTreeMap<String, u64>)> {
     INTERPRETED.with(|m| m.borrow_mut().clear());
-    let ran = replay_pure(name, &["PartMove", "Gather", "record sweep", "record search", "frame post", "fade search", "kind clear", "frame post tells but the hud's dropped"]);
+    let ran = replay_pure(name, &["PartMove", "Gather", "record sweep", "record search", "frame post", "fade search", "kind clear", "frame post tells dropped", "hud on its own heap"]);
     let all = INTERPRETED.with(|m| std::mem::take(&mut *m.borrow_mut()));
     let (w, answered, off) = ran?;
     eprintln!("{name}: every port at once, the interpreter ran {all:?}");
@@ -9581,13 +9651,13 @@ fn replay_whole(name: &str) -> Option<(Vec<bool>, BTreeMap<String, u32>, Vec<Str
 }
 
 /// **F31b5 — C15's ride, every port at once**: ride-2 bit-exact and the RAM the handing run's
-/// (F31b5o: but for the race progress's words, its tell left out).
+/// (F31b5o: but for the race progress's words, its tell left out; F31b5p: and the HUD's).
 #[test]
 fn ride_replays_with_every_port_at_once() {
     let Some((w, all, off, ran)) = replay_whole("ride-2") else { return };
     let mut want = RACE_PROGRESS_WORDS.to_vec();
     want.push("0x16d1b54..0x16d1b58");
-    assert_eq!(off, want, "the RAM parts only at the race progress's words");
+    assert_eq!(but_the_huds(&off), sorted(&want), "the RAM parts only at the HUD's and the race progress's words");
     assert_eq!(w.len(), 459);
     assert!(w.iter().all(|w| !w), "the ride never wrecks");
     let handed: Vec<(&str, u32)> = all.iter().filter(|(k, _)| k.starts_with("> ")).map(|(k, &n)| (&k[2..], n)).collect();
@@ -9602,13 +9672,13 @@ fn ride_replays_with_every_port_at_once() {
 
 /// **F31b5 — C15's flip, every port at once**: flip-1 bit-exact, wrecked on row 125 and put back on
 /// row 193, the RAM the handing run's but for the dropped cue's word (F31b5o: and the race
-/// progress's words).
+/// progress's words; F31b5p: and the HUD's).
 #[test]
 fn flip_replays_with_every_port_at_once() {
     let Some((w, all, off, ran)) = replay_whole("flip-1") else { return };
     let mut want = RACE_PROGRESS_WORDS.to_vec();
     want.push("0x851fec..0x851ff0");
-    assert_eq!(off, want, "the RAM parts only at the race progress's words and the cue's write");
+    assert_eq!(but_the_huds(&off), sorted(&want), "the RAM parts only at the HUD's and the race progress's words and the cue's write");
     assert_eq!(w.len(), 465);
     let changes: Vec<usize> = (1..w.len()).filter(|&r| w[r] != w[r - 1]).collect();
     assert_eq!(changes, [125, 193], "wrecked on row 125, put back on row 193");
@@ -9643,6 +9713,61 @@ const RACE_PROGRESS_WORDS: [&str; 12] = [
     "0x16d1c2c..0x16d1c30",
 ];
 
+/// F31b5p: where the RAM parts from the handing run's with every frame-post tell left out, besides
+/// the race progress's words and the HUD's own heap ([`HUD_HEAP`]): the HUD's. Its gauges' words
+/// (0x340 apart, the parts the F31b5o journal names), then, from the row its receive allocates on
+/// (59): its heap's slot in the manager, the construction tally of the class it makes (bumped only by
+/// that class's constructors), the two frame-heap blocks it held from before the image and frees
+/// (written before their free, which [`hud_heap`] leaves undone), and the two words that held them.
+const HUD_WORDS: [&str; 27] = [
+    "0x16b1f3c..0x16b1f40",
+    "0x16b1f94..0x16b1f98",
+    "0x16b28cc..0x16b28d0",
+    "0x16b2920..0x16b2924",
+    "0x16b2c0c..0x16b2c10",
+    "0x16b2c60..0x16b2c64",
+    "0x16b2f4c..0x16b2f50",
+    "0x16b2fa0..0x16b2fa4",
+    "0x16b328c..0x16b3290",
+    "0x16b32e0..0x16b32e4",
+    "0x16b35cc..0x16b35d0",
+    "0x16b3620..0x16b3624",
+    "0x16b390c..0x16b3910",
+    "0x16b3960..0x16b3964",
+    "0x16b3c4c..0x16b3c50",
+    "0x16b3ca0..0x16b3ca4",
+    "0x16b3f8c..0x16b3f90",
+    "0x16b42cc..0x16b42d0",
+    "0x16b460c..0x16b4610",
+    "0x16b49ac..0x16b49b0",
+    "0x3f6e94..0x3f6e9c",
+    "0x42e200..0x42e204",
+    "0x797cc0..0x797cc4",
+    "0x1636e94..0x1636e98",
+    "0x1636ea4..0x1636ea8",
+    "0x15d7674..0x15d767c",
+    "0x169f064..0x169f068",
+];
+
+/// F31b5p: the RAM ranges where a run parts from the handing run's ([`replay_pure`]) but the HUD's
+/// ([`HUD_WORDS`], [`HUD_HEAP`]: every one of them must be among them), sorted.
+fn but_the_huds(off: &[String]) -> Vec<String> {
+    let start = |r: &str| u32::from_str_radix(&r[2..r.find("..").unwrap()], 16).unwrap();
+    for h in HUD_WORDS {
+        assert!(off.iter().any(|o| o == h), "the HUD's word {h} is the handing run's: {off:?}");
+    }
+    assert!(off.iter().any(|o| (HUD_HEAP..HUD_HEAP + HUD_HEAP_LEN).contains(&start(o))), "the HUD's heap unused: {off:?}");
+    let mut rest: Vec<String> = off.iter().filter(|o| !HUD_WORDS.contains(&o.as_str()) && !(HUD_HEAP..HUD_HEAP + HUD_HEAP_LEN).contains(&start(o))).cloned().collect();
+    rest.sort();
+    rest
+}
+
+fn sorted(words: &[&str]) -> Vec<String> {
+    let mut v: Vec<String> = words.iter().map(|w| w.to_string()).collect();
+    v.sort();
+    v
+}
+
 /// F31b5l: the tail's frame post, the wreck fade's search and the kind clear are the ports', never
 /// the interpreter's.
 fn three_served(ran: &BTreeMap<String, u64>) {
@@ -9651,8 +9776,9 @@ fn three_served(ran: &BTreeMap<String, u64>) {
     }
     // F31b5o: and the frame post tells no listener, and the kind clear's show hands on neither the
     // object's switch-on nor the spatial insert.
+    // F31b5p: not even the HUD's (its heap its own in the handing run).
     let told: Vec<&String> = ran.keys().filter(|k| k.starts_with("the tail: the frame post tells")).collect();
-    assert_eq!(told, ["the tail: the frame post tells the hud"], "the frame post told: {ran:?}");
+    assert_eq!(told, Vec::<&String>::new(), "the frame post told: {ran:?}");
     for k in ["the tail: the update's ObjectOn", "the tail: the update's Insert"] {
         assert!(!ran.contains_key(k), "{k} handed on: {ran:?}");
     }

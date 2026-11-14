@@ -12149,6 +12149,19 @@ atv_pair_log_grow           atv 0x0025b840 = a growable log's resize to a1 entri
 atv_spatial_insert          atv 0x0018d590 = a collidable's entry put in a world (a0 entry, a1 cell, a2 kind, a3 centre, t0 half, t1 1, t2 own record, t3 0; f12 reach)
 atv_record_new              atv 0x0018fd90 = a record taken up (the link pool made if none, counted)
 atv_record_drop             atv 0x0018fe20 = a record let go of (a1 -1; the pool deleted with the last)
+# F31b5p — the HUD's frame-post tell on a heap of its own in the handing run (tests mxvatv_bike_ride.rs
+# hud_heap; replay_whole "frame post tells dropped" + "hud on its own heap"; journal research/journal/
+# 2026-11-13-f31b5p-*). Heap manager *0x0038f750 = 0x003f6e10: +4 made, +8 size, +0xc base, +0x10 end,
+# +0x14 next id, +0x18 current id; eight heaps of 0x4c at +0x1c (+0 made, +4 size, +0x10 base, +0x2c id
+# (short, -1 free slot), +0x3c stamp 0x00146ab0 (RCNT0), +0x48 lock = new 0x0032c280(0x18) + 0x001d6660 (two
+# CreateSema)). State 4: one heap, id 0, 0x005a5390..0x01f7dfff; RAM 0x01f7e300..0x01fece00 is zero.
+# Alloc entries (0x001b7340/7620/73d0/7470/7530/7740) take the current id's heap (0x001b5ec0), free 0x001b76d0
+# the block's (0x001b5ed0 on its header's short at -0xe) into 0x001b6760(heap, block). 0x001b5d90(mgr, base,
+# size, limit) makes a heap in the first unmade slot with id +0x14++ (0x001b6030 inits); 0x001b5f10 also makes
+# it current (vt +0xc). C15 flip-1: the HUD's receive 0x002fbc80 allocates on row 59 only: 124 blocks
+# (file 0x003a0170), 120 freed, and frees two boot-heap blocks (0x00797cc0, 0x01636e90; left in place).
+atv_heap_make               atv 0x001b5d90 = a heap made over a range in the manager's first free slot (a0 manager, a1 base, a2 size, a3 limit; returns its id)
+atv_heap_free_in            atv 0x001b6760 = a block freed into a given heap (a0 heap, a1 block)
 
 # F62a: the rider's idle layer vt +0xd4 0x004eb380 in Rust (handling::rider::idle, idle_state, idle_clips;
 # anim::blend4; tests/mxvatv_bike_ride.rs rider_leaf serves Call::Idle). Journal: research/journal/*-f62a-*/.
