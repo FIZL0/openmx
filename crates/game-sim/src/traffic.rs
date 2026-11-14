@@ -498,6 +498,20 @@ impl Traffic {
         Traffic { specs: Arc::new(specs), cars, first: None, toys: Default::default(), props: Default::default(), physics: Vec::new() }
     }
 
+    /// **Another track's cars after these** (MD153): a world's tiles' cars, each tile's loaded alone,
+    /// with their physics objects (none for a car without), before [`Traffic::attach`].
+    pub fn join(&mut self, other: Traffic) {
+        let (mine, theirs) = (self.cars.len(), other.cars.len());
+        if !self.physics.is_empty() || !other.physics.is_empty() {
+            self.physics.resize_with(mine, || None);
+            let mut more = other.physics;
+            more.resize_with(theirs, || None);
+            self.physics.extend(more);
+        }
+        Arc::make_mut(&mut self.specs).extend(other.specs.iter().cloned());
+        self.cars.extend(other.cars);
+    }
+
     /// Put the cars' meshes at the end of the world's props, each where its car stands now, and
     /// remember where they begin: the props [`Traffic::frame`] moves.
     pub fn attach(&mut self, props: &mut Props) {

@@ -244,6 +244,32 @@ impl Animated {
         out.sim = Toys::new(motions, specs);
         out
     }
+
+    /// **Another track's toys after these** (MD153): a world's tile's, loaded alone, each stood `by`
+    /// (`x`, `z`) further out, the tile's offset, and its model named `prefix` + its own (the tile's
+    /// name in the ride's assets). The toys are made again as their load leaves them, every clip at
+    /// its `InitialTime`, which is where a toy just loaded alone stands.
+    pub fn join(&mut self, other: Animated, by: [f32; 2], prefix: &str) {
+        if other.models.is_empty() {
+            self.skipped.extend(other.skipped);
+            return;
+        }
+        let first = self.sim.motions.len();
+        let mut motions: Vec<_> = self.sim.motions.iter().cloned().collect();
+        motions.extend(other.sim.motions.iter().cloned());
+        let mut specs: Vec<Spec> = self.sim.specs.iter().cloned().collect();
+        specs.extend(other.sim.specs.iter().cloned().map(|mut s| {
+            s.motion += first;
+            let t = &mut s.place.0[3];
+            *t = Vf::new((F(t.x()) + F(by[0])).0, t.y(), (F(t.z()) + F(by[1])).0, t.w());
+            s
+        }));
+        self.sim = Toys::new(motions, specs);
+        self.models.extend(other.models.into_iter().map(|m| format!("{prefix}{m}")));
+        self.names.extend(other.names);
+        self.bones.extend(other.bones);
+        self.skipped.extend(other.skipped);
+    }
 }
 
 /// One `.mcf`'s part of the load: its skeleton and model, and its clips by name with the motion each

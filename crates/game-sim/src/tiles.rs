@@ -54,6 +54,17 @@
 //!
 //! **The plane** searches one set of shapes in one space, so it is handed every tile's together
 //! ([`Tiled::every_shape`]), read once and kept; the bike's own sweeps go tile by tile as above.
+//!
+//! **What moves** (MD153): every tile's path cars, and the animated toys' collision parts, stand in
+//! one list of the world's own ([`Tiled::moving`]), in world feet, which the traffic stands where
+//! its cars are as it does a track's props ([`crate::traffic::Traffic::attach`]). The list is the
+//! whole world's, loaded with the ride for every tile rather than by distance, so two seats that
+//! load one world have the same list whoever is where. Every set of shapes the searches are handed
+//! — [`Tiled::every_shape`] and each near set — starts with a mirror of it, so a car is the same
+//! index in all of them and in the list, as the ride's car contacts number it
+//! ([`crate::mover_contact`]); the mirror is put right before each set is handed out, and a strike
+//! heard on a mirror is the list's ([`World::moving`]). The sweep meets the list after the tiles'
+//! shapes, numbered from [`MOVING_OWNER`].
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
 use crate::biplane::Area;
@@ -245,7 +256,12 @@ pub struct Tiled {
     /// [`Tiled::every_shape`]'s boxes on the ground plane, `[x0, z0, x1, z1]`, and the near sets cut
     /// from it lately, newest last ([`World::wooded_near`], MD28).
     boxes: Vec<[F; 4]>,
-    near: Vec<([i32; 2], Props)>,
+    /// Each near set's count of [`Tiled::moving`]'s mirror at its head, as last put.
+    near: Vec<([i32; 2], Props, usize)>,
+    /// The world's moving shapes (MD153): see the module note.
+    moving: Props,
+    /// How many of them [`Tiled::every`] mirrors at its head.
+    every_head: usize,
     /// How many near sets have been cut, kept or not ([`Tiled::near_cuts`]).
     cuts: usize,
 }
@@ -253,6 +269,43 @@ pub struct Tiled {
 /// How many near sets a world keeps cut: one for each rider of a full local ride, and their moves
 /// back over a square's edge.
 const NEAR_KEPT: usize = 8;
+
+/// Where the sweep's owner numbers for [`Tiled::moving`]'s shapes start: past every tile's.
+pub const MOVING_OWNER: i32 = 1 << 24;
+
+/// A prop as it stands, its struck listener not yet told.
+fn copy_of(p: &Prop) -> Prop {
+    Prop {
+        mesh: p.mesh.clone(),
+        to_world: p.to_world,
+        from_world: p.from_world,
+        centre: p.centre,
+        radius: p.radius,
+        moving: p.moving,
+        heard: Default::default(),
+    }
+}
+
+/// Put `moving` at the head of `into`, whose head held `head` of them, as they stand now: where each
+/// is, how it moves, and its mesh when a ghost's frame took it out or gave it back
+/// ([`crate::traffic::hide`]).
+fn mirror(moving: &Props, into: &mut Props, head: &mut usize) {
+    if *head != moving.props.len() {
+        into.props.splice(0..*head, moving.props.iter().map(copy_of));
+        *head = moving.props.len();
+        return;
+    }
+    for (to, from) in into.props.iter_mut().zip(&moving.props) {
+        if to.mesh.triangles.len() != from.mesh.triangles.len() || to.mesh.nodes.len() != from.mesh.nodes.len() {
+            to.mesh = from.mesh.clone();
+        }
+        to.to_world = from.to_world;
+        to.from_world = from.from_world;
+        to.centre = from.centre;
+        to.radius = from.radius;
+        to.moving = from.moving;
+    }
+}
 
 /// The index square a world point is in.
 fn bucket(x: F, z: F) -> (i32, i32) {
@@ -331,6 +384,8 @@ impl Tiled {
             wrap: [false, false],
             boxes: Vec::new(),
             near: Vec::new(),
+            moving: Props::default(),
+            every_head: 0,
             cuts: 0,
         })
     }
@@ -674,6 +729,7 @@ impl Tiled {
                 looked |= loaded.props.sweep_owned(bundle, record, self.tiles[i].first_owner);
             }
         }
+        looked |= self.moving.sweep_owned(bundle, record, MOVING_OWNER);
         looked
     }
 
@@ -734,8 +790,11 @@ impl Tiled {
             }
             all.props.extend(copied);
             self.every = Some(all);
+            self.every_head = 0;
         }
-        self.every.get_or_insert_with(Props::default)
+        let every = self.every.get_or_insert_with(Props::default);
+        mirror(&self.moving, every, &mut self.every_head);
+        every
     }
 
     /// [`Tiled::every_shape`] and the near sets of the squares around `at` cut ahead of the ride
@@ -754,12 +813,13 @@ impl Tiled {
     /// [`NEAR_KEPT`] asked; a pure function of the square, so a search is the same whichever
     /// rider asked first.
     fn near(&mut self, key: [i32; 2]) -> &Props {
-        if let Some(i) = self.near.iter().position(|(k, _)| *k == key) {
+        if let Some(i) = self.near.iter().position(|(k, _, _)| *k == key) {
             let kept = self.near.remove(i);
             self.near.push(kept);
         } else {
             self.every_shape();
-            let every = self.every.as_ref().map_or(&[][..], |p| &p.props[..]);
+            // The tiles' shapes, after the moving ones' mirror.
+            let every = self.every.as_ref().map_or(&[][..], |p| &p.props[self.every_head..]);
             if self.boxes.len() != every.len() {
                 self.boxes = every
                     .iter()
@@ -777,23 +837,31 @@ impl Tiled {
                 .iter()
                 .zip(&self.boxes)
                 .filter(|(_, b)| b[0] <= hi[0] && lo[0] <= b[2] && b[1] <= hi[1] && lo[1] <= b[3])
-                .map(|(p, _)| Prop {
-                    mesh: p.mesh.clone(),
-                    to_world: p.to_world,
-                    from_world: p.from_world,
-                    centre: p.centre,
-                    radius: p.radius,
-                    moving: p.moving,
-                    heard: Default::default(),
-                })
+                .map(|(p, _)| copy_of(p))
                 .collect();
             if NEAR_KEPT <= self.near.len() {
                 self.near.remove(0);
             }
             self.cuts += 1;
-            self.near.push((key, Props { props }));
+            self.near.push((key, Props { props }, 0));
         }
-        &self.near.last().expect("just kept").1
+        let (_, near, head) = self.near.last_mut().expect("just kept");
+        mirror(&self.moving, near, head);
+        near
+    }
+
+    /// **The world's moving shapes** (MD153, [`World::moving`]): every strike heard on a mirror of
+    /// them since last asked told to the shape it mirrors, and the list, for the traffic to stand.
+    fn moving_list(&mut self) -> &mut Props {
+        let sets = self.every.iter().map(|p| (p, self.every_head)).chain(self.near.iter().map(|(_, p, h)| (p, *h)));
+        for (set, head) in sets {
+            for (copy, shape) in set.props.iter().take(head).zip(&self.moving.props) {
+                if copy.take_heard() {
+                    shape.strike_heard();
+                }
+            }
+        }
+        &mut self.moving
     }
 
     /// Whether the put-back record may keep a spot ([`World::keeps`], MD14): a tile owns the ground
@@ -1028,12 +1096,16 @@ impl World for Tiled {
         // The bike's searches build their broad phase from every prop handed over, each tick: only
         // the shapes near, or a tick costs the whole world's (MD28).
         self.near(near_key(at));
-        let (this, near) = (&*self, self.near.last().map(|(_, p)| p));
+        let (this, near) = (&*self, self.near.last().map(|(_, p, _)| p));
         (Some(Box::new(this.field())), near, None)
     }
 
     fn near_set(&self, at: Vf) -> Option<[i32; 2]> {
         Some(near_key(at))
+    }
+
+    fn moving(&mut self) -> Option<&mut Props> {
+        Some(self.moving_list())
     }
 }
 

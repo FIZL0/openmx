@@ -391,6 +391,111 @@ pub fn take(
     Dressed { index: b.index, prefix, props: b.props, grove: b.grove, traffic, shift, taken, posed: Vec::new(), wheels, grounds: Vec::new() }
 }
 
+/// A world's moving things for the simulation (MD153): every tile's path cars and their physics
+/// objects, its animated toys and its knockable props, each read from the tile's own folder and
+/// moved by the tile's offset, one tile after another in the world's order.
+pub struct Moving {
+    pub traffic: game_sim::traffic::Traffic,
+    /// The toys, each model `prefix`ed + `toy:` in the ride's assets, which hold it for the ride.
+    pub animated: game_render::animated_toy::Animated,
+    /// Every tile's scene models, moved, one tile after another: what the props' bodies number
+    /// ([`game_sim::prop_set::PropSet::models`]).
+    pub models: Vec<track::Placement>,
+    /// What each tile said, for the log.
+    pub notes: Vec<String>,
+}
+
+/// Read a world's [`Moving`] things: every tile, whatever is near, so two seats that load the
+/// world hold the same ones (the props' edge and the woken cars' put-back are the world's `edge`).
+/// The toys' models go into `assets` for the ride.
+pub fn moving(w: &WorldMod, edge: game_sim::prop_world::Edge, bike_frame: Option<Arc<track::Mesh>>, assets: &mut Assets) -> Moving {
+    use game_render::animated_toy::Animated;
+    use ps2_float::F;
+    let mut out = Moving {
+        traffic: game_sim::traffic::Traffic::default(),
+        animated: Animated::default(),
+        models: Vec::new(),
+        notes: Vec::new(),
+    };
+    let area = game_sim::biplane::Area { width: edge.max[0], depth: edge.max[1] };
+    for piece in &w.pieces[..w.tile_count] {
+        let Some(scene) = &piece.scene else { continue };
+        let mut archives = match piece.archives() {
+            Ok(a) => a,
+            Err(e) => {
+                out.notes.push(format!("{}: {e}", piece.stem));
+                continue;
+            }
+        };
+        let by = piece.tile.at.map(|a| a.0);
+        let prefix = prefix(&piece.tile);
+        // The cars: no ground for the picture's path, which the simulation's cars find for themselves.
+        let drawn = Traffic::load(&archives, &piece.stem, &mut |p| (p, game_render::mat::v3(0.0, 1.0, 0.0)));
+        let cars = drawn.sim_moved(&archives, by).with_physics(drawn.physics(&archives, Some(edge)));
+        let toys = Animated::load(&mut archives, &piece.stem);
+        let toy_prefix = format!("{prefix}toy:");
+        for model in &toys.models {
+            assets.load_as(&archives, model, &format!("{toy_prefix}{model}"));
+        }
+        // The knockable props over the tile's scene models, as the tile alone has them, moved.
+        let read = |name: &str| archives.iter().find_map(|a| a.read_suffix(name).ok());
+        let mut props = game_sim::prop_set::PropSet::default();
+        let first = out.models.len();
+        if let Some(toy) = read(&format!("{}.toy", piece.stem)) {
+            // A model outside the tile's keep stands on a neighbour's ground or a join's, and is left
+            // out of the picture there ([`build`]): it is made no body, its name matching no entry.
+            let kept = worlds::keep_feet(piece.tile.keep, piece.tile.spacing);
+            let models: Vec<track::Placement> = scene
+                .models
+                .iter()
+                .map(|m| {
+                    let mut m = m.clone();
+                    if !worlds::inside(kept, m.position[0].0, m.position[2].0) {
+                        m.file = String::new();
+                    }
+                    m.position[0] = m.position[0] + F(by[0]);
+                    m.position[2] = m.position[2] + F(by[1]);
+                    m
+                })
+                .collect();
+            let mut pco = |p: &str| archives.iter().find_map(|a| a.read(p).ok()).or_else(|| read(p.rsplit('\\').next().unwrap_or(p)));
+            let (set, said) = game_sim::prop_set::PropSet::load(
+                &game_sim::phy::Ini::parse_bytes(&toy),
+                &format!("Tracks\\{}\\", piece.stem),
+                &models,
+                &mut pco,
+                &mut |p| read(p),
+                Some(area),
+            );
+            out.notes.extend(said.into_iter().map(|why| format!("{}: {why}", piece.stem)));
+            props = set;
+            out.models.extend(models);
+        }
+        if !cars.cars.is_empty() || !toys.models.is_empty() || !props.is_empty() {
+            out.notes.push(format!(
+                "{}: {} cars, {} toys, {} prop collections",
+                piece.stem,
+                cars.cars.len(),
+                toys.models.len(),
+                props.collections.len()
+            ));
+        }
+        out.traffic.join(cars);
+        out.animated.join(toys, by, &toy_prefix);
+        out.traffic.props.join(props, first);
+    }
+    out.traffic.props.bike_frame = bike_frame;
+    out
+}
+
+/// The tile a world point in feet stands on, inside its keep: [`Dressed::index`].
+pub fn tile_at(w: &WorldMod, x: f32, z: f32) -> Option<usize> {
+    w.pieces[..w.tile_count].iter().position(|p| {
+        let [dx, dz] = p.tile.at.map(|a| a.0);
+        worlds::inside(worlds::keep_feet(p.tile.keep, p.tile.spacing), x - dx, z - dz)
+    })
+}
+
 /// The wheels of each of `traffic`'s cars, its model `prefix`ed in `assets`.
 fn wheels_of(traffic: &Traffic, assets: &Assets, prefix: &str) -> Vec<Option<toy::Wheels>> {
     traffic.cars.iter().map(|(car, path)| toy::Wheels::new(&assets.models.get(&format!("{prefix}{}", car.stem()))?.model, car, path)).collect()

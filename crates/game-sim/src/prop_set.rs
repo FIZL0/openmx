@@ -215,6 +215,24 @@ impl PropSet {
         (set, said)
     }
 
+    /// **Another set's collections after this one's** (MD153): a world's tiles' props, each tile's
+    /// loaded alone ([`PropSet::load`]) over its own scene's models, which follow on in one list from
+    /// `models` (the count before them). The sets tick one after another in this order, as one.
+    pub fn join(&mut self, other: PropSet, models: usize) {
+        if other.is_empty() {
+            return;
+        }
+        let base = self.collections.len();
+        self.collections.extend(other.collections);
+        Arc::make_mut(&mut self.models).extend(other.models.iter().map(|on| on.iter().map(|m| m + models).collect::<Vec<_>>()));
+        Arc::make_mut(&mut self.rays).extend(other.rays.iter().cloned());
+        Arc::make_mut(&mut self.shapes).extend(other.shapes.iter().cloned());
+        self.listeners.extend(other.listeners.into_iter().map(|(c, l)| (c + base, l)));
+        if self.tables.is_none() {
+            self.tables = other.tables;
+        }
+    }
+
     /// Every collection's material listeners hear the frame's searches afresh (F27a).
     fn heard_afresh(&mut self) {
         for c in &mut self.collections {
