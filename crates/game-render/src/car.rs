@@ -153,12 +153,12 @@ pub fn node_at(model: &Model, name: &str) -> Option<V3> {
     Some(model.world(i).point(v3(0.0, 0.0, 0.0)))
 }
 
-fn find(model: &Model, name: &str) -> Option<usize> {
+pub(crate) fn find(model: &Model, name: &str) -> Option<usize> {
     model.nodes.iter().position(|n| n.name.eq_ignore_ascii_case(name))
 }
 
 /// Every node's matrix in the model's space, `local` composed down the tree.
-fn compose(model: &Model, local: &[M4]) -> Vec<M4> {
+pub(crate) fn compose(model: &Model, local: &[M4]) -> Vec<M4> {
     (0..model.nodes.len())
         .map(|node| {
             let (mut m, mut at, mut guard) = (M4::IDENTITY, Some(node), 0);
@@ -172,13 +172,13 @@ fn compose(model: &Model, local: &[M4]) -> Vec<M4> {
         .collect()
 }
 
-fn origin(m: M4) -> V3 {
+pub(crate) fn origin(m: M4) -> V3 {
     v3(m.0[3][0], m.0[3][1], m.0[3][2])
 }
 
 /// A point of the model's space in the frame `m` places, as the frame's own (its rows may be
 /// scaled).
-fn into(m: M4, p: V3) -> V3 {
+pub(crate) fn into(m: M4, p: V3) -> V3 {
     let d = p.sub(origin(m));
     let row = |i: usize| v3(m.0[i][0], m.0[i][1], m.0[i][2]);
     let along = |i: usize| {
@@ -190,7 +190,7 @@ fn into(m: M4, p: V3) -> V3 {
 }
 
 /// Turn a node about its own `axis` by `angle`, its place kept.
-fn turn(local: &mut M4, axis: V3, angle: f32) {
+pub(crate) fn turn(local: &mut M4, axis: V3, angle: f32) {
     *local = about(axis, angle).mul(*local);
 }
 
@@ -221,7 +221,7 @@ fn turn_between(from: V3, to: V3, axis: Option<V3>) -> Option<M4> {
 /// Aim node `i` at `target` as it was aimed at `bind_target` in the bind pose: turned in its own
 /// frame (about its own `axis` only, where given) by what takes the one to the other. `now` is every
 /// node's matrix as posed so far and `bind` the model's own.
-fn aim(local: &mut [M4], i: usize, now: &[M4], bind: &[M4], target: V3, bind_target: V3, axis: Option<V3>) {
+pub(crate) fn aim(local: &mut [M4], i: usize, now: &[M4], bind: &[M4], target: V3, bind_target: V3, axis: Option<V3>) {
     let was = into(bind[i], bind_target);
     let is = into(now[i], target);
     if let Some(r) = turn_between(was, is, axis) {
@@ -230,7 +230,7 @@ fn aim(local: &mut [M4], i: usize, now: &[M4], bind: &[M4], target: V3, bind_tar
 }
 
 /// The tire's matrix spun about its own x and stretched in its parent's y about its own middle.
-fn spin_and_stretch(local: &mut M4, tire: &Tire, stretch: bool) {
+pub(crate) fn spin_and_stretch(local: &mut M4, tire: &Tire, stretch: bool) {
     turn(local, v3(1.0, 0.0, 0.0), tire.spin);
     if stretch && (tire.scale - 1.0).abs() > 1e-6 {
         let keep = local.0[3];
@@ -255,7 +255,7 @@ pub fn pose(model: &Model, tires: &[Tire; 4]) -> Vec<M4> {
     compose(model, &local)
 }
 
-fn lift(local: &mut M4, by: f32) {
+pub(crate) fn lift(local: &mut M4, by: f32) {
     local.0[3][1] += by;
 }
 
