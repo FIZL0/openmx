@@ -477,6 +477,8 @@ fn the_settings_file_reads_back_as_it_was_written() {
         backwards_bail: true,
         // A quad picked (MD37d).
         atv: "atv_Race250P".into(),
+        // An MX vs. ATV car picked (MD39c).
+        mxvatv_car: "baja".into(),
         // Vibration off (P183).
         vibration: false,
         // Button Icons Xbox (P281).
@@ -2465,6 +2467,32 @@ fn the_quad_row_picks_a_handling_file_and_the_pause_offers_it() {
     m.switched(0, Machine::Atv);
     assert!(!m.choices(0).contains(&Machine::Atv));
     assert_eq!(m.choices(0).first(), Some(&Machine::Bike));
+}
+
+/// MD39c: MX vs. ATV's cars are off by default: no `mxvatv_car` in the settings file and nothing in
+/// the switch row. settings.txt's `mxvatv_car` picks one, written back only when set, and the switch
+/// row offers it after the quad to a player the shell says has one.
+#[test]
+fn an_mxvatv_car_is_off_by_default_and_the_pause_offers_a_picked_one() {
+    let mut m = Menu::new(Settings::default(), Controls::default());
+    assert!(m.settings.mxvatv_car.is_empty(), "off is the default");
+    assert!(!m.settings.text().contains("mxvatv_car"), "{}", m.settings.text());
+    assert!(Settings::parse("mxvatv_car = off\n").mxvatv_car.is_empty());
+    let picked = Settings::parse("mxvatv_car = sandrail\n");
+    assert_eq!(picked.mxvatv_car, "sandrail");
+    assert!(picked.text().contains("mxvatv_car = sandrail\n"), "{}", picked.text());
+
+    assert!(!m.choices(0).contains(&Machine::MxvatvCar));
+    m.atv[0] = true;
+    m.mxvatv_car[0] = true;
+    assert_eq!(m.choices(0)[m.choices(0).len() - 2..], [Machine::Atv, Machine::MxvatvCar]);
+    assert_eq!((Machine::MxvatvCar.word(), Machine::MxvatvCar.label()), ("mxvatv_car", "MX vs. ATV Car"));
+    assert_eq!(Machine::from_word("mxvatv_car"), Some(Machine::MxvatvCar));
+    assert_eq!(Kind::parse("mxvatv_car").map(Kind::name), Ok("mxvatv_car"));
+    m.switched(0, Machine::MxvatvCar);
+    assert!(!m.choices(0).contains(&Machine::MxvatvCar));
+    // And a start on it is refused: it is only ever switched to.
+    assert!(Garage::new(Kind::MxvatvCar, None).is_err());
 }
 
 /// P315d: the Bike tab's Handling row offers the original's and, for each installed trick pack whose

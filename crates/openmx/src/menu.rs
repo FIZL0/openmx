@@ -486,6 +486,10 @@ pub struct Settings {
     /// MX vs. ATV's quad (MD37d), an addition: the handling file the Garage's Quad row picked
     /// (`atv_Race250P`), which the pause's switch row then offers; empty, the default, for none.
     pub atv: String,
+    /// MX vs. ATV's cars (MD39c), an addition: the car (`buggy`, `monstertruck`, `baja`, `golfcart`,
+    /// `sandrail`) the pause's switch row offers off the installed car pack; empty, the default, for
+    /// none. Only settings.txt's `mxvatv_car` sets it yet: the Garage has no row for it.
+    pub mxvatv_car: String,
     /// Whether a wreck rumbles the rider's pad (P183): the original's controller vibration option.
     /// On by default, the original's.
     pub vibration: bool,
@@ -1373,6 +1377,9 @@ pub enum Machine {
     /// MX vs. ATV's quad (MD37d), an addition the Garage turns on: the switch row offers it last,
     /// and the cameras' screens frame it as the bike.
     Atv,
+    /// MX vs. ATV's cars (MD39c), an addition the `mxvatv_car` setting turns on: the switch row offers
+    /// the picked one after the quad, and the cameras' screens frame it as the bike.
+    MxvatvCar,
 }
 
 impl Machine {
@@ -1380,7 +1387,8 @@ impl Machine {
 
     /// Every machine the pause can switch to, in the switch row's order: [`Machine::ALL`], then the
     /// cars.
-    pub const SWITCH: [Machine; 7] = [Machine::Bike, Machine::Biplane, Machine::Buggy, Machine::Monster, Machine::Baja, Machine::Helicopter, Machine::Atv];
+    pub const SWITCH: [Machine; 8] =
+        [Machine::Bike, Machine::Biplane, Machine::Buggy, Machine::Monster, Machine::Baja, Machine::Helicopter, Machine::Atv, Machine::MxvatvCar];
 
     /// The file's word, which is also `--vehicle`'s.
     pub fn word(self) -> &'static str {
@@ -1392,6 +1400,7 @@ impl Machine {
             Machine::Baja => "baja",
             Machine::Helicopter => "helicopter",
             Machine::Atv => "atv",
+            Machine::MxvatvCar => "mxvatv_car",
         }
     }
 
@@ -1408,13 +1417,16 @@ impl Machine {
             Machine::Baja => "Baja",
             Machine::Helicopter => "Helicopter",
             Machine::Atv => "Quad",
+            Machine::MxvatvCar => "MX vs. ATV Car",
         }
     }
 
     pub fn other(self) -> Machine {
         match self {
             Machine::Bike => Machine::Biplane,
-            Machine::Biplane | Machine::Buggy | Machine::Monster | Machine::Baja | Machine::Helicopter | Machine::Atv => Machine::Bike,
+            Machine::Biplane | Machine::Buggy | Machine::Monster | Machine::Baja | Machine::Helicopter | Machine::Atv | Machine::MxvatvCar => {
+                Machine::Bike
+            }
         }
     }
 }
@@ -1433,6 +1445,7 @@ impl Default for Settings {
             air_wrecks: true,
             backwards_bail: false,
             atv: String::new(),
+            mxvatv_car: String::new(),
             vibration: true,
             track: TRACKS[0].0.into(),
             split: Split::default(),
@@ -1646,6 +1659,7 @@ impl Settings {
                 "air_wrecks" => s.air_wrecks = v != "off",
                 "backwards_bail" => s.backwards_bail = v == "on",
                 "atv" => s.atv = if v == "off" { String::new() } else { v.to_string() },
+                "mxvatv_car" => s.mxvatv_car = if v == "off" { String::new() } else { v.to_string() },
                 "vibration" => s.vibration = v != "off",
                 "store_rules" => s.store_rules = v == "agreed",
                 "track" if v == OLD_SPLICED => s.track = "world_mxu_free".to_string(),
@@ -1825,6 +1839,7 @@ impl Settings {
             + &self.air_wrecks_text()
             + &self.backwards_bail_text()
             + &self.atv_text()
+            + &self.mxvatv_car_text()
             + &self.vibration_text()
             + if self.store_rules { "store_rules = agreed\n" } else { "" }
             + &self.hud_text()
@@ -1873,6 +1888,11 @@ impl Settings {
     /// The Quad pick (MD37d), only when there is one, so a file from before it is written as it was.
     fn atv_text(&self) -> String {
         if self.atv.is_empty() { String::new() } else { format!("atv = {}\n", self.atv) }
+    }
+
+    /// The car pick (MD39c), only when there is one, so a file from before it is written as it was.
+    fn mxvatv_car_text(&self) -> String {
+        if self.mxvatv_car.is_empty() { String::new() } else { format!("mxvatv_car = {}\n", self.mxvatv_car) }
     }
 
     /// The Vibration switch (P183), only when it is off, so a file from before it is written as it
@@ -3262,6 +3282,8 @@ pub struct Menu {
     pub heli: [bool; SEATS_MAX],
     /// Each player has the quad (MD37d): the switch row offers it past the helicopter.
     pub atv: [bool; SEATS_MAX],
+    /// Each player has an MX vs. ATV car (MD39c): the switch row offers it past the quad.
+    pub mxvatv_car: [bool; SEATS_MAX],
     /// The seat whose Start opened the pause, whose machine its switch row is.
     pauser: usize,
     /// The machine the pause's switch row has picked (P102): left and right step it through the
@@ -3614,6 +3636,7 @@ impl Menu {
             cars: [[false; 3]; SEATS_MAX],
             heli: [false; SEATS_MAX],
             atv: [false; SEATS_MAX],
+            mxvatv_car: [false; SEATS_MAX],
             pauser: 0,
             switch_pick: None,
             catalogue: Default::default(),
@@ -4548,6 +4571,9 @@ impl Menu {
         if self.atv.get(seat).copied().unwrap_or(false) && up != Machine::Atv {
             out.push(Machine::Atv);
         }
+        if self.mxvatv_car.get(seat).copied().unwrap_or(false) && up != Machine::MxvatvCar {
+            out.push(Machine::MxvatvCar);
+        }
         out
     }
 
@@ -4748,6 +4774,7 @@ impl Menu {
                     self.cars[i] = [false; 3];
                     self.heli[i] = false;
                     self.atv[i] = false;
+                    self.mxvatv_car[i] = false;
                 }
                 self.note = Some(format!("Player {} joined the ride.", i + 1));
             }
@@ -4758,6 +4785,7 @@ impl Menu {
                     self.cars[k] = self.cars.get(k + 1).copied().unwrap_or_default();
                     self.heli[k] = self.heli.get(k + 1).copied().unwrap_or(false);
                     self.atv[k] = self.atv.get(k + 1).copied().unwrap_or(false);
+                    self.mxvatv_car[k] = self.mxvatv_car.get(k + 1).copied().unwrap_or(false);
                 }
                 // each later rider's own pause (P84) moves up a seat with them
                 let gone = i.max(1);

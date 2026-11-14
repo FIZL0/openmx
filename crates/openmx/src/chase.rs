@@ -33,6 +33,9 @@ pub fn ridden(garage: &Garage, ride: &Ride) -> Ridden {
     if let Some(r) = garage.atv_up().and_then(|a| a.quad()) {
         return quad(r);
     }
+    if let Some(r) = garage.mxvatv_car_up().and_then(|c| c.ridden.as_deref()) {
+        return mxvatv_car(r);
+    }
     match (garage.up, &garage.plane) {
         // The plane: its flight's block (V29), or a parked plane's origin when there is no flight.
         (Kind::Biplane, Some(plane)) => match &plane.flight {
@@ -105,6 +108,20 @@ pub fn quad(r: &game_sim::quad::Ride) -> Ridden {
         target: Target { body_point: one(r.body.last_position), forward: one(m[2]), up: one(m[1]), vel: one(r.body.velocity), lean: F::ZERO },
         airborne: r.q.airborne,
         speed: r.q.speed_len,
+    }
+}
+
+/// An MX vs. ATV car's target block (MD39c), filled the way the quad's is: the body's centre of mass
+/// where the frame's last substep began, its scene node's rows, the body's velocity, no lean, "no
+/// tire down" and the flat speed. Which words MX vs. ATV's car writes there was not read.
+pub fn mxvatv_car(r: &game_sim::atv_car::Ride) -> Ridden {
+    let one = |v: Vf| Vf::new(v.x(), v.y(), v.z(), 1.0);
+    let m = r.vehicle.scene.nodes[0].world;
+    let v = r.body.velocity;
+    Ridden {
+        target: Target { body_point: one(r.body.last_position), forward: one(m[2]), up: one(m[1]), vel: one(v), lean: F::ZERO },
+        airborne: !r.car.tires.iter().any(|t| t.grounded),
+        speed: F(v.x().hypot(v.z())),
     }
 }
 

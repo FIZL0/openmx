@@ -704,6 +704,10 @@ fn switch_machine(seat: &mut Seat, rig: &mut Rig, to: Kind, place: &mut dyn sim_
     if let Some(said) = seat.garage.atv_up().and_then(vehicle::AtvRide::report) {
         println!("{said}");
     }
+    // And MX vs. ATV's car (MD39c).
+    if let Some(said) = seat.garage.mxvatv_car_up().and_then(vehicle::MxvatvCarRide::report) {
+        println!("{said}");
+    }
     match seat.garage.switch(to, &mut seat.sim, place) {
         Ok(up) => {
             took(rig, up);
@@ -2667,6 +2671,11 @@ struct Args {
     /// installed quad pack rides it on, which the pause's switch row then offers; under the front
     /// end the Garage's Quad row. Empty, the default, for none: the ride is the original's.
     atv: String,
+    /// MX vs. ATV's cars (MD39c), an addition: `--mxvatv-car NAME`, the car (`buggy`, `monstertruck`,
+    /// `baja`, `golfcart`, `sandrail`) the installed car pack rides on MX vs. ATV's step, which the
+    /// pause's switch row then offers; under the front end settings.txt's `mxvatv_car`. Empty, the
+    /// default, for none: the ride is the original's.
+    mxvatv_car: String,
     /// Whether a wreck rumbles the rider's pad (P183, [`pad::WreckRumble`]): `--no-vibration` turns
     /// it off, and under the front end the Controls tab's Vibration row does, live.
     vibration: bool,
@@ -3666,6 +3675,9 @@ async fn front_end(args: Args) -> Result<(), String> {
                 if args.atv.is_empty() {
                     a.atv = shell.front.menu.settings.atv.clone();
                 }
+                if args.mxvatv_car.is_empty() {
+                    a.mxvatv_car = shell.front.menu.settings.mxvatv_car.clone();
+                }
                 if args.modifiers.is_original() {
                     a.modifiers = shell.front.menu.settings.modifiers;
                 }
@@ -3788,6 +3800,8 @@ async fn front_end(args: Args) -> Result<(), String> {
                 a.backwards_bail = room.backwards_bail;
                 // The quad is offline only (MD37d).
                 a.atv = String::new();
+                // And the cars (MD39c).
+                a.mxvatv_car = String::new();
                 // This machine's rider in the first seat's look (P86), as the room was told.
                 a.look = shell.front.menu.picks.0[0].look.clone();
                 a.wiring = shell.front.wiring();
@@ -5422,6 +5436,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     garage.cars = lot.cars_for(0);
     garage.heli = lot.heli_for(0);
     garage.atv = ride_atv(&args);
+    garage.mxvatv_car = ride_mxvatv_car(&args);
     garage.modify(&lot, &mods, 0);
     if !garage.cars.is_empty() {
         let names: Vec<&str> = garage.cars.iter().map(|c| c.machine.section()).collect();
@@ -7460,6 +7475,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 garage.cars = lot.cars_for(i + 1);
                 garage.heli = lot.heli_for(i + 1);
                 garage.atv = seats[0].garage.atv.clone();
+                garage.mxvatv_car = seats[0].garage.mxvatv_car.clone();
                 garage.modify(&lot, &mods, i + 1);
                 garage
             },
@@ -7584,6 +7600,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             }
             front.menu.heli[i] = seat.garage.heli.is_some();
             front.menu.atv[i] = seat.garage.atv.is_some();
+            front.menu.mxvatv_car[i] = seat.garage.mxvatv_car.is_some();
         }
     }
     let mut start_readers: Vec<Reader> = (1..world.seats.len()).map(|_| Reader::at(RIDE_HZ)).collect();
@@ -8718,6 +8735,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                         garage.cars = lot.cars_for(i);
                         garage.heli = lot.heli_for(i);
                         garage.atv = world.seats[0].garage.atv.clone();
+                        garage.mxvatv_car = world.seats[0].garage.mxvatv_car.clone();
                         garage.modify(&lot, &mods, i);
                         let body = match &rider_member {
                             Some(member) => Body::load(vec![disc.res(member)?], &args.rider, Sex::Male, "", &table.stunts, phy.motion()).ok(),
@@ -11679,6 +11697,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         if let Some(said) = world.seats[0].garage.atv_up().and_then(vehicle::AtvRide::report) {
             println!("{said}");
         }
+        // Or MX vs. ATV's car (MD39c).
+        if let Some(said) = world.seats[0].garage.mxvatv_car_up().and_then(vehicle::MxvatvCarRide::report) {
+            println!("{said}");
+        }
     }
 
     let opened = front.as_deref().is_some_and(|f| f.menu.opening == menu::Opening::Open);
@@ -12640,6 +12662,11 @@ fn machine_offers(packs: &[machine_packs::Pack]) -> Vec<roster::PackMachine> {
             }
             continue;
         }
+        // The cars (MD39c): ridden off `--mxvatv-car` and settings.txt alone yet, so not offered,
+        // and not greyed as a machine openmx cannot ride.
+        if !pack.cars.is_empty() {
+            continue;
+        }
         if pack.skins.is_empty() && pack.machine != "fliers" {
             out.push(roster::PackMachine {
                 pack: pack.id.clone(),
@@ -12686,6 +12713,43 @@ fn ride_atv(args: &Args) -> Option<vehicle::AtvRide> {
         }
         Err(e) => {
             println!("atv: {e}");
+            None
+        }
+    }
+}
+
+/// The MX vs. ATV car the ride offers (MD39c): `--mxvatv-car`'s car (settings.txt's `mxvatv_car`
+/// under the front end) off the installed car pack. None with none picked, online, or with no pack
+/// or car to read, a line saying why.
+fn ride_mxvatv_car(args: &Args) -> Option<vehicle::MxvatvCarRide> {
+    let want = &args.mxvatv_car;
+    if want.is_empty() {
+        return None;
+    }
+    if args.online.is_some() {
+        println!("mxvatv car: {want} picked, but the cars are offline only");
+        return None;
+    }
+    let Some(dir) = mods_dir(args) else {
+        println!("mxvatv car: {want} picked, but the mods folder is off");
+        return None;
+    };
+    let packs = machine_packs::find(&dir).0;
+    let Some(pack) = packs.iter().find(|p| !p.cars.is_empty()) else {
+        println!("mxvatv car: {want} picked, but {} has no car pack", dir.join(machine_packs::MACHINES_DIR).display());
+        return None;
+    };
+    let Some(c) = pack.cars.iter().find(|c| c.car.eq_ignore_ascii_case(want)) else {
+        println!("mxvatv car: {} lists no {want}", pack.id);
+        return None;
+    };
+    match vehicle::MxvatvCarRide::read(&pack.id, &c.car, &c.phy, &c.psg, &mut |n| pack.files.read(&n.replace('/', "\\")).ok()) {
+        Ok(car) => {
+            println!("mxvatv car: {} ({}) off {} (switch from the pause)", car.label(), c.car, pack.id);
+            Some(car)
+        }
+        Err(e) => {
+            println!("mxvatv car: {e}");
             None
         }
     }
@@ -14195,6 +14259,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         air_wrecks: true,
         backwards_bail: false,
         atv: String::new(),
+        mxvatv_car: String::new(),
         vibration: true,
         modifiers: game_sim::modifiers::Mods::original(),
         trace: None,
@@ -14537,6 +14602,7 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--no-air-wrecks" => args.air_wrecks = false,
             "--backwards-bail" => args.backwards_bail = true,
             "--atv" => args.atv = next("a quad's handling file, like atv_Race250P")?,
+            "--mxvatv-car" => args.mxvatv_car = next("an MX vs. ATV car: buggy, monstertruck, baja, golfcart or sandrail")?,
             "--no-vibration" => args.vibration = false,
             "--modifiers" => {
                 args.modifiers =
@@ -14955,6 +15021,10 @@ fn parse_args() -> Result<Option<Args>, String> {
                      out (off by default); --atv atv_Race250P offers MX vs. ATV's\n\
                      quad on that handling file in the pause's switch row, off its\n\
                      installed machine pack (offline only; none by default);\n\
+                     --mxvatv-car buggy (or monstertruck, baja, golfcart, sandrail) offers\n\
+                     that MX vs. ATV car, on its own .phy and MX vs. ATV's step, in the\n\
+                     pause's switch row, off its installed machine pack (offline only;\n\
+                     none by default);\n\
                      --no-vibration keeps the pad still\n\
                      when its rider wrecks; --modifiers sets the\n\
                      game modifiers, percentages of what the ride loads (a tape keeps its own);\n\

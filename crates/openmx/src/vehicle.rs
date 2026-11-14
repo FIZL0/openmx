@@ -80,6 +80,9 @@ pub enum Kind {
     /// MX vs. ATV's quad off a machine pack (MD37d, [`AtvRide`]): an addition, there only when the
     /// Garage's Quad row picks one.
     Atv,
+    /// One of MX vs. ATV's five cars off a car pack (MD39c, [`MxvatvCarRide`]): an addition, there
+    /// only when `--mxvatv-car` (settings' `mxvatv_car`) picks one.
+    MxvatvCar,
 }
 
 impl Kind {
@@ -93,7 +96,8 @@ impl Kind {
             "baja" => Ok(Kind::Baja),
             "helicopter" | "kiowa" | "heli" => Ok(Kind::Kiowa),
             "atv" | "quad" => Ok(Kind::Atv),
-            _ => Err(format!("--vehicle: {word:?} is not a vehicle; it is bike, biplane, helicopter, buggy, monster, baja or atv")),
+            "mxvatv_car" => Ok(Kind::MxvatvCar),
+            _ => Err(format!("--vehicle: {word:?} is not a vehicle; it is bike, biplane, helicopter, buggy, monster, baja, atv or mxvatv_car")),
         }
     }
 
@@ -107,6 +111,7 @@ impl Kind {
             Kind::Baja => "baja",
             Kind::Kiowa => "helicopter",
             Kind::Atv => "atv",
+            Kind::MxvatvCar => "mxvatv_car",
         }
     }
 
@@ -115,7 +120,7 @@ impl Kind {
     pub fn other(self) -> Kind {
         match self {
             Kind::Bike => Kind::Biplane,
-            Kind::Biplane | Kind::Buggy | Kind::Monster | Kind::Baja | Kind::Kiowa | Kind::Atv => Kind::Bike,
+            Kind::Biplane | Kind::Buggy | Kind::Monster | Kind::Baja | Kind::Kiowa | Kind::Atv | Kind::MxvatvCar => Kind::Bike,
         }
     }
 
@@ -125,7 +130,7 @@ impl Kind {
             Kind::Buggy => Some(Machine::Buggy),
             Kind::Monster => Some(Machine::Monster),
             Kind::Baja => Some(Machine::Baja),
-            Kind::Bike | Kind::Biplane | Kind::Kiowa | Kind::Atv => None,
+            Kind::Bike | Kind::Biplane | Kind::Kiowa | Kind::Atv | Kind::MxvatvCar => None,
         }
     }
 }
@@ -1340,6 +1345,9 @@ pub struct Garage {
     pub heli: Option<KiowaRide>,
     /// This player's quad (MD37d), where the Garage picks one off a quad pack ([`AtvRide`]).
     pub atv: Option<AtvRide>,
+    /// This player's MX vs. ATV car (MD39c), where `--mxvatv-car` picks one off a car pack
+    /// ([`MxvatvCarRide`]).
+    pub mxvatv_car: Option<MxvatvCarRide>,
 }
 
 /// How far above a machine's origin the ground under it is looked for when the other is spawned
@@ -1449,8 +1457,8 @@ pub fn markers_of(kind: Kind) -> markers::Vehicle {
         Kind::Buggy | Kind::Monster | Kind::Baja => markers::Vehicle::Bike,
         // So does the helicopter (P216).
         Kind::Kiowa => markers::Vehicle::Bike,
-        // And the quad (MD37d).
-        Kind::Atv => markers::Vehicle::Bike,
+        // And the quad (MD37d), and MX vs. ATV's cars (MD39c).
+        Kind::Atv | Kind::MxvatvCar => markers::Vehicle::Bike,
     }
 }
 
@@ -1479,10 +1487,10 @@ impl Garage {
         if up == Kind::Biplane && plane.is_none() {
             return Err("--vehicle biplane: this ride has no biplane (the disc's machine.res has no biplane.phy)".into());
         }
-        if up.car().is_some() || up == Kind::Kiowa || up == Kind::Atv {
+        if up.car().is_some() || up == Kind::Kiowa || up == Kind::Atv || up == Kind::MxvatvCar {
             return Err(format!("--vehicle {}: a ride starts on the bike or the plane; switch to it from the pause", up.name()));
         }
-        Ok(Garage { up, plane, taken: up == Kind::Biplane, cars: Vec::new(), heli: None, atv: None })
+        Ok(Garage { up, plane, taken: up == Kind::Biplane, cars: Vec::new(), heli: None, atv: None, mxvatv_car: None })
     }
 
     /// **The plane put in the air** (V96's `--fly-at`, a measurement start): stood at `at` along
@@ -1508,6 +1516,9 @@ impl Garage {
         }
         if self.atv.is_some() {
             out.push(Kind::Atv);
+        }
+        if self.mxvatv_car.is_some() {
+            out.push(Kind::MxvatvCar);
         }
         out.extend(self.cars.iter().filter_map(|c| c.machine.car_kind()));
         out
@@ -1545,7 +1556,7 @@ impl Garage {
                 let spot = under(plane, sim, world).ok_or("there is no ground under the plane to stand the bike on")?;
                 sim.rider.teleport_to(spot);
             }
-            Kind::Buggy | Kind::Monster | Kind::Baja | Kind::Kiowa | Kind::Atv => return self.switch_car(to, sim, world),
+            Kind::Buggy | Kind::Monster | Kind::Baja | Kind::Kiowa | Kind::Atv | Kind::MxvatvCar => return self.switch_car(to, sim, world),
         }
         // A trick or combo in progress fails as a bail fails it (P161): the trick stopped, the
         // chain's points lost and not banked, so the HUD plays the pop-up out as a bail's and the
@@ -1634,8 +1645,8 @@ impl Garage {
             // A car has no markers yet (S149e): the d-pad steers it. Nor the helicopter (P216),
             // whose d-pad is its stick's.
             Kind::Buggy | Kind::Monster | Kind::Baja | Kind::Kiowa => None,
-            // Nor the quad (MD37d).
-            Kind::Atv => None,
+            // Nor the quad (MD37d), nor MX vs. ATV's cars (MD39c).
+            Kind::Atv | Kind::MxvatvCar => None,
         };
         (said, did)
     }
@@ -1657,6 +1668,9 @@ impl Garage {
         }
         if let Some(atv) = self.atv_up() {
             return atv.spot(world);
+        }
+        if let Some(car) = self.mxvatv_car_up() {
+            return car.spot(world);
         }
         match (self.up, &self.plane) {
             (Kind::Biplane, Some(plane)) => {
@@ -1772,6 +1786,12 @@ impl Garage {
         if let (Kind::Atv, Some(atv)) = (self.up, self.atv.as_mut()) {
             sim.traffic.frame(dt, world);
             atv.step(controls, dt, world);
+            return rider::Frame::default();
+        }
+        // MX vs. ATV's car (MD39c) on the seat's pad through the ride's bindings, as a car's.
+        if let (Kind::MxvatvCar, Some(car)) = (self.up, self.mxvatv_car.as_mut()) {
+            sim.traffic.frame(dt, world);
+            car.step(sim.input.pad(0), sim.table(), dt, world);
             return rider::Frame::default();
         }
         if detour(self.up) {
@@ -1945,8 +1965,8 @@ impl Wanted {
             Some(Kind::Baja) => 5,
             // Online flies no helicopter (P216): its pick is no pick.
             Some(Kind::Kiowa) => 0,
-            // Nor any quad (MD37d): an offline addition.
-            Some(Kind::Atv) => 0,
+            // Nor any quad (MD37d) or MX vs. ATV car (MD39c): offline additions.
+            Some(Kind::Atv | Kind::MxvatvCar) => 0,
         };
         (to & 3) | (to >> 2) << 7 | (self.every_bank as u8) << 2 | (self.round_stick as u8) << 3 | (self.dpad_rides as u8) << 4 | (self.together as u8) << 5 | (self.paused as u8) << 6
     }
@@ -2016,7 +2036,7 @@ pub fn switch_lane_among(to: Kind, template: Option<&Flight>, cars: &[CarRide], 
             c.struck = lane.struck;
         }
     }
-    let mut garage = Garage { up, plane, taken: true, cars, heli: None, atv: None };
+    let mut garage = Garage { up, plane, taken: true, cars, heli: None, atv: None, mxvatv_car: None };
     let result = garage.switch(to, sim, world);
     // Refused, the seat stays on what it was on, the lane as it was.
     let now = garage.up;
@@ -2200,7 +2220,7 @@ pub fn settle_lane(sim: &mut Sim, mut plane: Plane, ready: Readied) -> bool {
 /// it while it is on or near the ground, the bike's spot on the bike.
 pub fn lane_spot(sim: &Sim, world: &mut dyn World) -> Spot {
     match &sim.plane {
-        Some(f) => Garage { up: Kind::Biplane, plane: Some(Plane::around(f.clone())), taken: true, cars: Vec::new(), heli: None, atv: None }.spot(sim, world),
+        Some(f) => Garage { up: Kind::Biplane, plane: Some(Plane::around(f.clone())), taken: true, cars: Vec::new(), heli: None, atv: None, mxvatv_car: None }.spot(sim, world),
         None => match &sim.car {
             // In a car (S249), [`CarRide::spot`]'s: on the ground under it, upright, stopped.
             Some(car) => car_spot(&car.machine, world),
@@ -2673,6 +2693,10 @@ impl Garage {
                 let heli = self.heli.as_mut().ok_or("this ride has no helicopter")?;
                 heli.take(&from, world).ok_or("there is no ground here to stand the helicopter on")?;
             }
+            None if to == Kind::MxvatvCar => {
+                let car = self.mxvatv_car.as_mut().ok_or("this ride has no MX vs. ATV car")?;
+                car.take(&from, world).ok_or("there is no ground here to stand the car on")?;
+            }
             None if to == Kind::Atv => {
                 let atv = self.atv.as_mut().ok_or("this ride has no quad")?;
                 atv.take(&from, world).ok_or("there is no ground here to stand the quad on")?;
@@ -2689,6 +2713,9 @@ impl Garage {
         }
         if let (Kind::Atv, Some(atv)) = (self.up, self.atv.as_mut()) {
             atv.ridden = None;
+        }
+        if let (Kind::MxvatvCar, Some(car)) = (self.up, self.mxvatv_car.as_mut()) {
+            car.ridden = None;
         }
         sim.rider.trick_lost();
         self.up = to;
@@ -3198,7 +3225,7 @@ fn blade_tables() -> &'static game_sim::ragdoll::Tables {
 
 /// A machine the switch spawns on the player and takes away again: a car or the helicopter.
 fn detour(kind: Kind) -> bool {
-    kind.car().is_some() || kind == Kind::Kiowa || kind == Kind::Atv
+    kind.car().is_some() || kind == Kind::Kiowa || kind == Kind::Atv || kind == Kind::MxvatvCar
 }
 
 impl Garage {
@@ -3464,6 +3491,192 @@ impl Garage {
     /// The quad, while it is up.
     pub fn atv_up(&self) -> Option<&AtvRide> {
         self.atv.as_ref().filter(|_| self.up == Kind::Atv)
+    }
+}
+
+// ---- MX vs. ATV's cars (MD39c) -----------------------------------------------------------------
+
+/// The machine a car pack's `cars` word is (openmx-mods' `import-atv cars`): `buggy`,
+/// `monstertruck`, `baja`, `golfcart` or `sandrail`, any case.
+pub fn mxvatv_machine(word: &str) -> Option<game_sim::car::MxvatvMachine> {
+    use game_sim::car::MxvatvMachine as M;
+    match word.to_ascii_lowercase().as_str() {
+        "buggy" => Some(M::Buggy),
+        "monstertruck" => Some(M::MonsterTruck),
+        "baja" => Some(M::Baja),
+        "golfcart" => Some(M::GolfCart),
+        "sandrail" => Some(M::Sandrail),
+        _ => None,
+    }
+}
+
+/// What the shell calls one of the five.
+pub fn mxvatv_car_label(machine: game_sim::car::MxvatvMachine) -> &'static str {
+    use game_sim::car::MxvatvMachine as M;
+    match machine {
+        M::Buggy => "Buggy",
+        M::MonsterTruck => "Monster Truck",
+        M::Baja => "Baja",
+        M::GolfCart => "Golf Cart",
+        M::Sandrail => "Sandrail",
+    }
+}
+
+/// **One of MX vs. ATV's five cars in the ride** (MD39c): its `.phy` and chassis model off a car
+/// pack (openmx-mods' `mxvatv_cars`), built into the car as it loads with no RAM image
+/// ([`game_sim::atv_car::Load`], MD150's) and, each time it is taken, made into the car SLUS-21104's
+/// step drives on an MX Unleashed world ([`game_sim::atv_car::Ride`], MD149's), stepped on the
+/// seat's pad. Like the quad, the switch spawns it on the player and takes it away again; nothing
+/// parks one.
+#[derive(Clone)]
+pub struct MxvatvCarRide {
+    /// The pack's `mod.json` id.
+    pub pack: String,
+    pub machine: game_sim::car::MxvatvMachine,
+    /// The car as its files build it, standing at the origin.
+    pub load: std::sync::Arc<game_sim::atv_car::Load>,
+    /// The car while the player is in it.
+    pub ridden: Option<Box<game_sim::atv_car::Ride>>,
+    /// Where it was last taken, and the flattened heading it was taken along.
+    pub taken_at: Vf,
+    pub taken_along: Vf,
+    /// How many times it has wrecked since it was last taken, and whether it was down last tick.
+    pub wrecks: u32,
+    was_down: bool,
+}
+
+impl std::fmt::Debug for MxvatvCarRide {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MxvatvCarRide").field("pack", &self.pack).field("machine", &self.machine).field("ridden", &self.ridden.is_some()).field("wrecks", &self.wrecks).finish()
+    }
+}
+
+impl MxvatvCarRide {
+    /// The car `car` (a car pack's word for it) off a car pack, its `.phy` `phy` and its chassis
+    /// model `psg` (`read` by their paths in the pack): the `.phy` read as MX vs. ATV's car and the
+    /// model's tire nodes and box, placed at the origin facing `+z` as the car's setup places them
+    /// ([`game_sim::atv_car::tire_points`]). `Err` with what is missing or does not read.
+    pub fn read(pack: &str, car: &str, phy: &str, psg: &str, read: &mut dyn FnMut(&str) -> Option<Vec<u8>>) -> Result<MxvatvCarRide, String> {
+        let machine = mxvatv_machine(car).ok_or_else(|| format!("{pack}: {car:?} is none of MX vs. ATV's five cars"))?;
+        let mut file = |name: &str| read(name).ok_or_else(|| format!("{pack} has no {name}"));
+        let ini = Ini::parse_bytes(&file(phy)?);
+        let model = game_sim::quad::Model::parse(&file(psg)?).map_err(|e| format!("{psg}: {e}"))?;
+        let origin = game_sim::quad::spawn_frame(Vf::new(0.0, 0.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 1.0));
+        let points = game_sim::atv_car::tire_points(&model, &origin).map_err(|e| format!("{psg}: {e}"))?;
+        let curve = game_sim::camera::CurveTable::build();
+        let load = game_sim::atv_car::Load::read(&ini, machine, model.half_box(&origin), points, &curve);
+        Ok(MxvatvCarRide { pack: pack.to_string(), machine, load: std::sync::Arc::new(load), ridden: None, taken_at: Vf::default(), taken_along: Vf::default(), wrecks: 0, was_down: false })
+    }
+
+    /// What the shell calls it.
+    pub fn label(&self) -> &'static str {
+        mxvatv_car_label(self.machine)
+    }
+
+    /// How high over the ground its node stands for its lowest tire bottom to be a foot over it.
+    pub fn lift(&self) -> f32 {
+        let car = self.load.car();
+        car.tires.iter().map(|t| t.radius.0 - t.mount.y()).fold(0.0f32, f32::max) + 1.0
+    }
+
+    /// The car made standing over `at` (on its ground) facing `forward` (flattened), still.
+    pub fn made(&self, at: Vf, forward: Vf) -> game_sim::atv_car::Ride {
+        let yaw = forward.x().atan2(forward.z());
+        let quat = Vf::new(0.0, (yaw / 2.0).sin(), 0.0, (yaw / 2.0).cos());
+        self.load.ride(Vf::new(at.x(), at.y() + self.lift(), at.z(), 1.0), quat, F::ZERO)
+    }
+
+    /// The car taken at `from`: made standing over the ground under the spot, facing along it, at
+    /// rest. `None`, and nothing taken, with no ground there.
+    pub fn take(&mut self, from: &Spot, world: &mut dyn World) -> Option<()> {
+        let g = ground_under(world, from.at)?;
+        let at = Vf::new(from.at.x(), g, from.at.z(), 1.0);
+        let f = level(from.forward).unwrap_or(Vf::new(0.0, 0.0, 1.0, 0.0));
+        self.ridden = Some(Box::new(self.made(at, f)));
+        (self.taken_at, self.taken_along, self.wrecks, self.was_down) = (at, f, 0, false);
+        Some(())
+    }
+
+    /// One tick of it on `pad` through `table` (the ride's bindings), over `world`.
+    pub fn step(&mut self, pad: &game_sim::input::Pad, table: &game_sim::bindings::Table, dt: F, world: &mut dyn World) {
+        let Some(r) = self.ridden.as_deref_mut() else { return };
+        r.rest.clear();
+        r.step(pad, table, dt, world);
+        let down = r.down();
+        if down && !self.was_down {
+            self.wrecks += 1;
+        }
+        self.was_down = down;
+    }
+
+    /// The matrix it is drawn by: its scene node's world rows and origin, while it is out.
+    pub fn matrix(&self) -> Option<game_sim::math::Mat4> {
+        Some(game_sim::math::Mat4(self.ridden.as_ref()?.vehicle.scene.nodes[0].world))
+    }
+
+    /// Its scene node's origin and forward row, while it is out.
+    fn place(&self) -> Option<(Vf, Vf)> {
+        let m = self.matrix()?.0;
+        Some((Vf::new(m[3].x(), m[3].y(), m[3].z(), 1.0), Vf::new(m[2].x(), m[2].y(), m[2].z(), 0.0)))
+    }
+
+    /// What the shell says of it while it is out: which car, how far it went from where it was
+    /// taken, how fast, whether all four are down, in the air or wrecked, how many times it
+    /// wrecked, its body's position and velocity words, and the ground point and heading it was taken
+    /// at (the bits, for comparing runs and for making the same car again).
+    pub fn report(&self) -> Option<String> {
+        let r = self.ridden.as_ref()?;
+        let (at, _) = self.place()?;
+        let gone = (at.x() - self.taken_at.x()).hypot(at.z() - self.taken_at.z());
+        let grounded = r.car.tires.iter().filter(|t| t.grounded).count();
+        let state = match (r.down(), grounded) {
+            (true, _) => "wrecked",
+            (false, 0) => "in the air",
+            (false, 4) => "on all four",
+            (false, _) => "on some wheels",
+        };
+        let (p, v) = (r.body.position, r.body.velocity);
+        let speed = v.x().hypot(v.z());
+        Some(format!(
+            "mxvatv car: {} {gone:.1} ft from where it was taken, at {:.1}, {:.1}, {:.1}, {speed:.1} ft/s, {state}, wrecked {} times, body {:08x} {:08x} {:08x} {:08x} {:08x} {:08x}, taken at {:08x} {:08x} {:08x} along {:08x} {:08x}",
+            mxvatv_car_label(self.machine),
+            at.x(),
+            at.y(),
+            at.z(),
+            self.wrecks,
+            p.x().to_bits(),
+            p.y().to_bits(),
+            p.z().to_bits(),
+            v.x().to_bits(),
+            v.y().to_bits(),
+            v.z().to_bits(),
+            self.taken_at.x().to_bits(),
+            self.taken_at.y().to_bits(),
+            self.taken_at.z().to_bits(),
+            self.taken_along.x().to_bits(),
+            self.taken_along.z().to_bits(),
+        ))
+    }
+
+    /// The player in it, for whatever is put where they are: on the ground under the car, upright,
+    /// along its heading flattened, stopped; its own place with no ground under it.
+    pub fn spot(&self, world: &mut dyn World) -> Spot {
+        let up = Vf::new(0.0, 1.0, 0.0, 0.0);
+        let Some((at, forward)) = self.place() else {
+            return Spot::still(self.taken_at, Vf::new(0.0, 0.0, 1.0, 0.0), up);
+        };
+        let forward = level(forward).unwrap_or(Vf::new(0.0, 0.0, 1.0, 0.0));
+        match ground_under(world, at) {
+            Some(g) => Spot::still(Vf::new(at.x(), g, at.z(), 1.0), forward, up),
+            None => Spot::still(at, forward, up),
+        }
+    }
+}
+
+impl Garage {
+    /// The MX vs. ATV car, while it is up.
+    pub fn mxvatv_car_up(&self) -> Option<&MxvatvCarRide> {
+        self.mxvatv_car.as_ref().filter(|_| self.up == Kind::MxvatvCar)
     }
 }
 
