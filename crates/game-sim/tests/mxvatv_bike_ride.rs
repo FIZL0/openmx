@@ -20753,7 +20753,7 @@ fn write_sphere(ee: &mut Ee, s: u32, p: &atv_sphere::Sphere) {
     ee.set_u32(s + at::REACH, p.reach.0.to_bits());
 }
 
-/// The sphere's pair, still the original's (S279a): each pair handed on, counted by the other's kind.
+/// The sphere's pair, the port's (S279a, [`sphere_pair_in_ram`]): counted by the other's kind.
 struct SpherePairInRam<'w, 'e> {
     world: &'w mut PartWorldInRam<'e>,
 }
@@ -20768,10 +20768,8 @@ impl ws::Narrow for SpherePairInRam<'_, '_> {
     fn pair(&mut self, _: &mut [ws::Collidable], probe: usize, other: usize) -> bool {
         let [s, c] = [probe, other].map(|k| self.world.items[k] - 0x18);
         let kind = self.world.ee.u32_at(c + 0x78);
-        *self.world.kinds.entry(format!("> sphere pair, kind {kind}")).or_default() += 1;
-        self.world.ee.set(28, GP);
-        self.world.ee.call(SPHERE_PAIR, &[u64::from(s), u64::from(c)], &[], BUDGET);
-        self.world.ee.v0() != 0
+        *self.world.kinds.entry(format!("sphere pair, kind {kind}")).or_default() += 1;
+        sphere_pair_in_ram(self.world.ee, s, c)
     }
     fn parts(&mut self, objects: &mut [ws::Collidable], group: usize) -> usize {
         self.world.parts(objects, group)
@@ -20795,7 +20793,7 @@ impl ws::Narrow for SpherePairInRam<'_, '_> {
 
 /// **S279 — a rider part's sphere searched over its pool in Rust**: [`atv_search::search`] with
 /// [`atv_sphere::Search`] (the clear the port's: the hit bit, the record emptied and made the
-/// current one), a plant group's parts stood by the original and the pairs handed on
+/// current one), a plant group's parts stood by the original and the pairs the port's
 /// ([`SpherePairInRam`]); the flags and groups written back. Answers the hit bit.
 fn sphere_search_in_ram(ee: &mut Ee, sphere: u32, pool: u32, kinds: &mut BTreeMap<String, u32>) -> bool {
     use game_sim::atv_search;
@@ -20849,8 +20847,8 @@ fn sphere_search_in_ram(ee: &mut Ee, sphere: u32, pool: u32, kinds: &mut BTreeMa
 /// ([`atv_sphere::place`], [`atv_sphere::refresh`]), the probe's segment (F46c's set and place,
 /// [`sweep_set_points_in_ram`]), the sphere's pool search ([`sphere_search_in_ram`]) and the probe's
 /// (F46c/F51's, [`sweep_search_in_ram`]), and the probe's whole-scene search (F51's,
-/// [`sweep_all_in_ram`]). Still the original's: the sphere's pair (S279a), a sphere's whole-scene
-/// search, and a mover's two virtuals (the other side's own code). Counts every call by what it was.
+/// [`sweep_all_in_ram`]), and the sphere's pair (S279a, [`SpherePairInRam`]). Still the original's: a
+/// sphere's whole-scene search, and a mover's two virtuals (the other side's own code). Counts every call by what it was.
 #[derive(Default)]
 struct PortScene {
     /// The probe's segments, from its segment to its search.
@@ -21060,4 +21058,317 @@ fn the_rider_spheres_place_is_the_originals() {
         }
     }
     assert!(paths.values().all(|&n| n >= 1000) && paths.len() == 4, "{paths:?}");
+}
+
+/// S279a: a sphere's record as the pair reads and writes it, word for word.
+fn sphere_record_in_ram(ee: &Ee, r: u32) -> atv_sphere::Record {
+    let three = |o: u32| [0, 1, 2].map(|i| ee.u32_at(r + o + 4 * i));
+    atv_sphere::Record {
+        capacity: ee.u32_at(r) as i32,
+        count: ee.u32_at(r + 4) as i32,
+        distance: word_f(ee, r + 8),
+        centre: raw_quad(ee, r + 0x20),
+        normals: [0, 1, 2].map(|i| raw_quad(ee, r + 0x30 + 0x10 * i)),
+        points: [0, 1, 2].map(|i| raw_quad(ee, r + 0x60 + 0x10 * i)),
+        others: three(0x90).map(|a| (a != 0).then_some(a as usize)),
+        claimed: three(0x9c),
+        words: three(0xa8),
+    }
+}
+
+fn write_sphere_record(ee: &mut Ee, r: u32, p: &atv_sphere::Record) {
+    ee.set_u32(r, p.capacity as u32);
+    ee.set_u32(r + 4, p.count as u32);
+    ee.set_u32(r + 8, p.distance.0.to_bits());
+    set_vf(ee, r + 0x20, p.centre);
+    for i in 0..3 {
+        let k = i as u32;
+        set_vf(ee, r + 0x30 + 0x10 * k, p.normals[i]);
+        set_vf(ee, r + 0x60 + 0x10 * k, p.points[i]);
+        ee.set_u32(r + 0x90 + 4 * k, p.others[i].map_or(0, |a| a as u32));
+        ee.set_u32(r + 0x9c + 4 * k, p.claimed[i]);
+        ee.set_u32(r + 0xa8 + 4 * k, p.words[i]);
+    }
+}
+
+fn raw_matrix(ee: &Ee, a: u32) -> atv_sphere::Matrix {
+    [0, 1, 2, 3].map(|k| raw_quad(ee, a + 0x10 * k))
+}
+
+/// **S279a — the sphere's pair in Rust**: sphere `s` against collidable `c` by [`atv_sphere::pair`],
+/// `c` read as its kind has it (a mesh's or a hierarchy's parts' trees, triangles' packed normals and
+/// frames; a sphere's point, frame and radius; a box), the record the current one
+/// (`SWEEP_RECORD_AT`, the sphere's clear set it), written back, and the last mesh walked's
+/// descriptor in its global (`SWEEP_DESCRIPTOR_AT`). Answers the pair's.
+fn sphere_pair_in_ram(ee: &mut Ee, s: u32, c: u32) -> bool {
+    use atv_sphere::Shape;
+    use f51_at as at;
+    let kind = ee.u32_at(c + at::KIND);
+    let meshes: Vec<u32> = match kind {
+        0 => vec![c],
+        1 => (0..ee.u32_at(c + at::PARTS)).map(|i| ee.u32_at(ee.u32_at(c + at::PART_LIST) + 4 * i)).collect(),
+        _ => vec![],
+    };
+    let read: Vec<(SweptMesh, Vec<[i16; 3]>)> = meshes
+        .iter()
+        .map(|&m| {
+            let mesh = SweptMesh::read(ee, m);
+            let tris = ee.u32_at(m + at::TRIANGLES);
+            let normals = (0..mesh.triangles.len() as u32).map(|i| [0, 2, 4].map(|k| ee.u16_at(tris + 0x14 * i + 0xc + k) as i16)).collect();
+            (mesh, normals)
+        })
+        .collect();
+    let placed: Vec<atv_sphere::Placed> =
+        meshes.iter().zip(&read).map(|(&m, (mesh, normals))| atv_sphere::Placed { frame: raw_matrix(ee, m + at::TRANSFORM), mesh: mesh.mesh(), normals }).collect();
+    let v3 = |a: u32| [0, 4, 8].map(|k| word_f(ee, a + k));
+    let shape = match kind {
+        0 => Shape::Mesh(placed[0]),
+        1 => Shape::Hierarchy { centre: v3(c + 0x130), half: v3(c + 0x140), frame: raw_matrix(ee, c + 0x1b0), parts: &placed },
+        5 => Shape::Sphere { local: raw_quad(ee, c + 0x130), frame: raw_matrix(ee, c + 0x140), radius: word_f(ee, c + 0x180) },
+        6 => Shape::Box { centre: v3(c + 0x170), half: v3(c + 0x180), frame: raw_matrix(ee, c + 0x130) },
+        _ => Shape::Other,
+    };
+    let target = atv_sphere::Target { nearby: ee.u8_at(c + at::NEARBY) & 1 != 0, shape, object: c as usize };
+    let sphere = sphere_in_ram(ee, s);
+    let r = ee.u32_at(SWEEP_RECORD_AT);
+    let mut record = sphere_record_in_ram(ee, r);
+    let (hit, walked) = atv_sphere::pair(&sphere, &mut record, &target);
+    write_sphere_record(ee, r, &record);
+    if let Some(i) = walked {
+        ee.set_u32(SWEEP_DESCRIPTOR_AT, meshes[i] + at::VERTICES);
+    }
+    hit
+}
+
+/// A random turn's three rows (a unit quaternion's), `w` junk one time in four.
+#[allow(clippy::float_arithmetic)]
+fn s279a_rows(g: &mut Gen) -> [Vf; 3] {
+    let [x, y, z, w] = g.unit_quaternion().0;
+    let rows = [
+        [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y + z * w), 2.0 * (x * z - y * w)],
+        [2.0 * (x * y - z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z + x * w)],
+        [2.0 * (x * z + y * w), 2.0 * (y * z - x * w), 1.0 - 2.0 * (x * x + y * y)],
+    ];
+    rows.map(|r| Vf::new(r[0], r[1], r[2], if g.one_in(4) { g.f(-1.0, 1.0) } else { 0.0 }))
+}
+
+/// A frame of turn `rows` that places `local` at `at` (host arithmetic: only for aiming).
+#[allow(clippy::float_arithmetic)]
+fn s279a_frame_to(rows: [Vf; 3], local: Vf, at: [f32; 3], w: f32) -> atv_sphere::Matrix {
+    let zero = [rows[0], rows[1], rows[2], Vf::ZERO];
+    let off = f51_place(&zero, [local.x(), local.y(), local.z()]);
+    [rows[0], rows[1], rows[2], Vf::new(at[0] - off[0], at[1] - off[1], at[2] - off[2], w)]
+}
+
+/// **S279a — a rider part's sphere pairs as the original does**: 12,000 calls of SLUS-21104's pair
+/// (vt `+0xb4`) on state 4's nine rider spheres and of [`sphere_pair_in_ram`] from the same words.
+/// The others: nat05's meshes, their turned and moved copies and hierarchies of them (F51's
+/// [`sweep_scene`], each hierarchy's box and frame drawn), the plant spheres of the bike's world
+/// stood by the original (a group's part through its eco), boxes (kind 6) and other kinds made up,
+/// and one time in twelve any of them not nearby. The sphere is aimed at a triangle (on it, inside
+/// or out, above or below by up to its radius and a half), at a plant sphere's point or at a box,
+/// its radius, square, frame and point drawn (now and then any bits). The record is drawn too: its
+/// room `0..=3`, a count within it, the nearest distance, contacts, others, claims and spare words.
+/// The answers agree, the record's 45 words and the descriptor global come out the same, and the
+/// original writes nowhere else (but its stack).
+#[test]
+#[allow(clippy::float_arithmetic)]
+fn the_rider_spheres_pair_is_the_originals() {
+    use f51_at as at;
+    let Some(mut ee) = image() else { return };
+    ee.set(28, GP);
+    let mut g = Gen(0x5279_a000_0000_0001);
+    let s = sweep_scene(&mut ee, &mut g);
+    let spheres: Vec<u32> = rider_parts(&ee).into_iter().map(|p| ee.u32_at(p + bone::SPHERE)).collect();
+    assert_eq!(spheres.len(), 9);
+    let (made, made_len) = (B_AREA, 0x200);
+    assert!(ee.ram[made as usize..(made + made_len) as usize].iter().all(|&b| b == 0), "the made-up collidable's room is not free");
+    let (m, world, _) = GatherInRam::read(&ee, s.probe);
+    let groups: Vec<u32> = (1..world.len()).filter(|&k| world[k].class == ws::Class::Group).map(|k| m.items[k]).collect();
+    assert!(!groups.is_empty(), "the bike's world has no plants");
+    let hierarchies: Vec<usize> = (0..s.objects.len()).filter(|&k| ee.u32_at(s.objects[k] + at::KIND) == 1).collect();
+    let pick = |g: &mut Gen, n: usize| (g.bits() as usize) % n;
+    let mut t: BTreeMap<String, u32> = BTreeMap::new();
+    let tally = |t: &mut BTreeMap<String, u32>, k: String| *t.entry(k).or_default() += 1;
+    let mut case = 0;
+    while case < 12_000 {
+        let sphere = spheres[case % 9];
+        let r = g.f(0.05, 2.5);
+        // The other, and the world point the sphere is aimed at.
+        let (c, label, aim): (u32, &str, [f32; 3]) = match g.bits() % 20 {
+            0..=11 => {
+                let k = if g.one_in(3) { hierarchies[pick(&mut g, hierarchies.len())] } else { s.aims[pick(&mut g, s.aims.len())] };
+                let c = s.objects[k];
+                let solid: Vec<usize> = s.parts[k].iter().copied().filter(|&j| s.meshes[j].as_ref().is_some_and(|m| !m.triangles.is_empty())).collect();
+                let j = solid[pick(&mut g, solid.len())];
+                let mesh = s.meshes[j].as_ref().unwrap();
+                let tri = &mesh.triangles[pick(&mut g, mesh.triangles.len())];
+                let frame = f51_transform(&ee, s.objects[j]);
+                let [a, b, d] = tri.vertices.map(|v| {
+                    let p = mesh.mesh().vertex(v);
+                    f51_place(&frame, [p.x(), p.y(), p.z()])
+                });
+                let (u, v) = if g.one_in(4) { (g.f(-0.4, 1.4), g.f(-0.4, 1.4)) } else { (g.f(0.0, 1.0), g.f(0.0, 1.0)) };
+                let (u, v) = if u + v > 1.0 && !g.one_in(4) { (1.0 - u, 1.0 - v) } else { (u, v) };
+                let p: [f32; 3] = std::array::from_fn(|i| a[i] + u * (b[i] - a[i]) + v * (d[i] - a[i]));
+                let (e1, e2): ([f32; 3], [f32; 3]) = (std::array::from_fn(|i| b[i] - a[i]), std::array::from_fn(|i| d[i] - a[i]));
+                let n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+                let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-6);
+                let up = g.f(-0.5, 1.5) * r;
+                if k == j {
+                    (c, "mesh", std::array::from_fn(|i| p[i] + n[i] / l * up))
+                } else {
+                    // The hierarchy's box round its sphere, in a drawn frame there.
+                    let rows = s279a_rows(&mut g);
+                    let around = vf_at(&ee, c + at::CENTRE);
+                    let jitter = [0; 3].map(|_| g.f(-1.0, 1.0));
+                    let frame = s279a_frame_to(rows, Vf::ZERO, std::array::from_fn(|i| around.0[i] + jitter[i]), 1.0);
+                    for (k, row) in frame.iter().enumerate() {
+                        set_vf(&mut ee, c + 0x1b0 + 0x10 * k as u32, *row);
+                    }
+                    let reach = word_f(&ee, c + at::RADIUS).0;
+                    for i in 0..3u32 {
+                        ee.set_u32(c + 0x130 + 4 * i, g.f(-1.0, 1.0).to_bits());
+                        ee.set_u32(c + 0x140 + 4 * i, (reach * g.f(0.2, 1.2)).to_bits());
+                    }
+                    (c, "hierarchy", std::array::from_fn(|i| p[i] + n[i] / l * up))
+                }
+            }
+            12..=14 => {
+                let group = groups[pick(&mut g, groups.len())];
+                let n = PartWorldInRam::species_parts(&ee, group).len();
+                if n == 0 {
+                    continue;
+                }
+                let i = pick(&mut g, n);
+                ee.set(28, GP);
+                ee.call(ECO_PART, &[u64::from(group), i as u64], &[], BUDGET);
+                let part = ee.v0() as u32;
+                if part == 0 {
+                    continue;
+                }
+                assert_eq!(ee.u32_at(part + at::KIND), 5, "a plant part that is no sphere");
+                if g.one_in(3) {
+                    ee.set_u32(part + 0x180, g.f(0.0, 3.0).to_bits());
+                }
+                let local = raw_quad(&ee, part + 0x130);
+                let w = f51_place(&raw_matrix(&ee, part + 0x140), [local.x(), local.y(), local.z()]);
+                let reach = word_f(&ee, part + 0x180).0 + r;
+                let off = f51_unit(&mut g).map(|x| x * reach * g.f(0.5, 1.5));
+                (part, "plant sphere", std::array::from_fn(|i| w[i] + off[i]))
+            }
+            15..=18 => {
+                let c = made;
+                ee.set_u32(c + at::KIND, 6);
+                let frame = s279a_frame_to(s279a_rows(&mut g), Vf::ZERO, [0; 3].map(|_| g.f(-60.0, 60.0)), g.near(1.0, -1.0, 1.0));
+                for (k, row) in frame.iter().enumerate() {
+                    set_vf(&mut ee, c + 0x130 + 0x10 * k as u32, *row);
+                }
+                let centre = [0; 3].map(|_| g.f(-2.0, 2.0));
+                let half = [0; 3].map(|_| g.near(0.0, 0.0, 3.0));
+                for i in 0..3 {
+                    ee.set_u32(c + 0x170 + 4 * i as u32, centre[i].to_bits());
+                    ee.set_u32(c + 0x180 + 4 * i as u32, half[i].to_bits());
+                }
+                let w = f51_place(&frame, centre);
+                let off = f51_unit(&mut g).map(|x| x * (half[0].max(half[1]).max(half[2]) * 1.5 + r) * g.f(0.0, 1.2));
+                (c, "box", std::array::from_fn(|i| w[i] + off[i]))
+            }
+            _ => {
+                let c = made;
+                ee.set_u32(c + at::KIND, [2, 3, 4, 7, 9][pick(&mut g, 5)]);
+                (c, "other kind", [0; 3].map(|_| g.f(-50.0, 50.0)))
+            }
+        };
+        let nearby = !g.one_in(12);
+        let byte = (ee.u8_at(c + at::NEARBY) & !1) | u8::from(nearby);
+        set_u8(&mut ee, c + at::NEARBY, byte);
+        // The sphere: aimed at `aim`, its frame and point drawn.
+        let local = Vf(g.lanes(1.0));
+        let frame = s279a_frame_to(s279a_rows(&mut g), local, aim, g.near(1.0, -1.0, 1.0));
+        let centre = Vf::new(aim[0], aim[1], aim[2], g.near(1.0, -1.0, 1.0));
+        let mut words = vec![(s279_at::LOCAL, local), (s279_at::CENTRE, centre)];
+        words.extend(frame.iter().enumerate().map(|(k, row)| (s279_at::FRAME + 0x10 * k as u32, *row)));
+        for (o, v) in words {
+            set_vf(&mut ee, sphere + o, v);
+        }
+        let (rw, r2w) = if g.one_in(16) { (s279_word(&mut g, 3.0), s279_word(&mut g, 9.0)) } else if g.one_in(8) { (r.to_bits(), g.f(0.0, 9.0).to_bits()) } else { (r.to_bits(), (r * r).to_bits()) };
+        ee.set_u32(sphere + s279_at::RADIUS, rw);
+        ee.set_u32(sphere + s279_at::RADIUS2, r2w);
+        // The record, left as a search would have it or anyhow.
+        let rec = ee.u32_at(sphere + s279_at::RECORD);
+        ee.set_u32(SWEEP_RECORD_AT, rec);
+        let room = if g.one_in(8) { 0 } else { 1 + pick(&mut g, 3) as u32 };
+        let count = if g.one_in(2) { 0 } else { pick(&mut g, room as usize + 1) as u32 };
+        ee.set_u32(rec, room);
+        ee.set_u32(rec + 4, count);
+        ee.set_u32(rec + 8, if g.one_in(8) { s279_word(&mut g, 3.0) } else { g.f(0.0, r).to_bits() });
+        for o in (0x20..0x90).step_by(4) {
+            ee.set_u32(rec + o, s279_word(&mut g, 100.0));
+        }
+        for i in 0..3 {
+            let other = match pick(&mut g, 4) {
+                0 => 0,
+                1 => g.bits(),
+                _ => s.objects[pick(&mut g, s.objects.len())],
+            };
+            ee.set_u32(rec + 0x90 + 4 * i, other);
+            ee.set_u32(rec + 0x9c + 4 * i, if g.one_in(3) { 1 } else { 0 });
+            ee.set_u32(rec + 0xa8 + 4 * i, g.bits());
+        }
+        ee.set_u32(SWEEP_DESCRIPTOR_AT, g.bits());
+        let mut before: Vec<u32> = (0..0xb4).step_by(4).map(|o| ee.u32_at(rec + o)).collect();
+        before.push(ee.u32_at(SWEEP_DESCRIPTOR_AT));
+        // The original's.
+        ee.written.clear();
+        ee.set(28, GP);
+        ee.call(SPHERE_PAIR, &[u64::from(sphere), u64::from(c)], &[], BUDGET);
+        let theirs = ee.v0() != 0;
+        // (The tree walk recurses deep: 0x10000 of stack.)
+        let stack = ee.stack.saturating_sub(0x10000)..ee.stack + 0x400;
+        let stray: Vec<u32> = ee.written.iter().copied().filter(|&w| !(rec..rec + 0xb4).contains(&(w & 0x0fff_ffff)) && !(SWEEP_DESCRIPTOR_AT..SWEEP_DESCRIPTOR_AT + 4).contains(&(w & 0x0fff_ffff)) && !stack.contains(&(w & 0x0fff_ffff))).collect();
+        assert!(stray.is_empty(), "case {case}: the original wrote {stray:x?}");
+        let words = |ee: &Ee| (0..0xb4).step_by(4).map(|o| ee.u32_at(rec + o)).chain([ee.u32_at(SWEEP_DESCRIPTOR_AT)]).collect::<Vec<u32>>();
+        let want = words(&ee);
+        // The port's, from the same words.
+        for (k, w) in before[..45].iter().enumerate() {
+            ee.set_u32(rec + 4 * k as u32, *w);
+        }
+        ee.set_u32(SWEEP_DESCRIPTOR_AT, before[45]);
+        let ours = sphere_pair_in_ram(&mut ee, sphere, c);
+        let got = words(&ee);
+        let d: Vec<String> = (0..want.len()).filter(|&k| want[k] != got[k]).map(|k| format!("+{:#x}: {:#010x} want {:#010x}", 4 * k, got[k], want[k])).collect();
+        assert!(theirs == ours && d.is_empty(), "case {case} ({label}, nearby {nearby}, room {room}, count {count}): answers {theirs} {ours}; {}", d.join(", "));
+        // What the case reached.
+        let label = if nearby { label } else { "not nearby" };
+        let outcome = if !ours {
+            "miss"
+        } else if want == before {
+            "hit"
+        } else if count >= room && (label == "mesh" || label == "hierarchy") {
+            "hit, record full"
+        } else {
+            "hit, taken"
+        };
+        tally(&mut t, format!("{label}: {outcome}"));
+        if !ours && count > 0 && count < room && (label == "mesh" || label == "hierarchy") {
+            // Missed with a contact held: would it have been taken from an empty record?
+            ee.set_u32(rec + 4, 0);
+            if sphere_pair_in_ram(&mut ee, sphere, c) {
+                tally(&mut t, format!("{label}: not nearer"));
+            }
+        }
+        if ours && count > 0 && count < room && (label == "mesh" || label == "hierarchy") {
+            tally(&mut t, format!("{label}: nearer"));
+        }
+        if ours && got[0x24] != before[0x24] && count > 1 {
+            tally(&mut t, "contacts claimed".into());
+        }
+        case += 1;
+    }
+    eprintln!("{t:#?}");
+    let get = |k: &str| t.get(k).copied().unwrap_or(0);
+    for k in ["mesh: miss", "mesh: hit, taken", "mesh: hit, record full", "mesh: nearer", "mesh: not nearer", "hierarchy: nearer", "hierarchy: not nearer", "contacts claimed", "hierarchy: miss", "hierarchy: hit, taken", "hierarchy: hit, record full", "plant sphere: miss", "plant sphere: hit", "box: miss", "box: hit", "other kind: miss", "not nearby: miss"] {
+        assert!(get(k) >= 20, "{k}: {} cases\n{t:#?}", get(k));
+    }
 }
