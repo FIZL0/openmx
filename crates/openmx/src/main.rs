@@ -5672,32 +5672,53 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     if !traffic.cars.is_empty() || !traffic.skipped.is_empty() {
         println!("traffic: {} cars on clips, {} left out", traffic.cars.len(), traffic.skipped.len());
     }
-    // A world's tiles' cars stay the picture's alone (MD15): a tiled world has no props list to put
-    // their meshes in.
+    // A world's moving things (MD153): every tile's cars, toys and knockable props, read for every
+    // tile whatever is near and moved by its offset, in the world's own moving list
+    // (`Tiled::moving`). The picture draws the cars from each dressed tile's clips (MD15).
+    let mut world_moving = world_mod.as_ref().zip(world_area).map(|(w, area)| {
+        let edge = game_sim::prop_world::Edge { min: [F::ZERO, F::ZERO], max: [area.width, area.depth] };
+        let m = world_dress::moving(w, edge, bike_box.clone().map(Arc::new), &mut assets);
+        m.notes.iter().for_each(|n| println!("world moving: {n}"));
+        m
+    });
     // The track's animated toys (V43): the windmills, the shovel, the gondolas, the gates and blimps,
     // each a model on a clip of its own. Their clips are the simulation's, stepped with the cars and
-    // their collision moved with them; a world's tiles have none (no props list, as for the cars).
+    // their collision moved with them; a world's are its tiles' (MD153), their models loaded there.
     let mut archives = archives;
-    let animated = match &world_mod {
-        Some(_) => game_render::animated_toy::Animated::default(),
+    // The props' bodies number a world's tiles' models, one tile after another, as a track's number
+    // its scene's.
+    let mut place = place;
+    if let Some(m) = &world_moving {
+        place.models = m.models.clone();
+    }
+    let animated = match &mut world_moving {
+        Some(m) => std::mem::take(&mut m.animated),
         None => game_render::animated_toy::Animated::load(&mut archives, &stem),
     };
     let archives = archives;
-    for model in &animated.models {
-        assets.load(&archives, model);
+    if world_moving.is_none() {
+        for model in &animated.models {
+            assets.load(&archives, model);
+        }
     }
     if !animated.models.is_empty() || !animated.skipped.is_empty() {
         println!("animated toys: {} on clips, {} left out", animated.models.len(), animated.skipped.len());
         animated.skipped.iter().for_each(|why| println!("  {why}"));
     }
-    let mut cars = traffic.sim(&archives);
+    let mut cars = match &mut world_moving {
+        Some(m) => std::mem::take(&mut m.traffic),
+        None => traffic.sim(&archives),
+    };
     cars.toys = animated.sim.clone();
+    if world_moving.is_some() {
+        println!("world moving: {} cars, {} toys, {} prop collections, {} bodies", cars.cars.len(), cars.toys.specs.len(), cars.props.collections.len(), cars.props.nodes().count());
+    }
     if let Some(props) = sim_world::World::moving(&mut sim) {
         cars.attach(props);
     }
     // The knockable props (S131): the `.toy`'s collections over the scene's models, each a body asleep
-    // where its model stands, stepped with the cars and drawn where their bodies are. A world's tiles
-    // have none, as they have no cars.
+    // where its model stands, stepped with the cars and drawn where their bodies are. A world's are its
+    // tiles' (MD153, above).
     if world_mod.is_none() {
         let read = |name: &str| archives.iter().find_map(|a| a.read_suffix(name).ok());
         if let Some(toy) = read(&format!("{stem}.toy")) {
@@ -6446,7 +6467,36 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             Some((k, look.models[k].clone(), *rest))
         })
         .collect();
-    let unseen = prop_looks.iter().filter(|p| p.is_none()).count();
+    // A world's bodies (MD153) are its tiles' models, drawn among each dressed tile's props
+    // (`world_dress::Dressed::props`, which keep where the scene stands them): each body's tile, its
+    // model's name there and where it stands, and the node it rests at. Which of the tile's props it
+    // is, is found the first time it is drawn off that node; the GPU's copy is moved, and the
+    // software path's drawn from `world_props_shown`.
+    let world_props: Vec<Option<(usize, String, game_render::mat::V3, game_sim::contact::Node)>> = match &world_mod {
+        Some(w) => cars
+            .props
+            .nodes()
+            .map(|(model, rest)| {
+                let p = &place.models[model];
+                let tile = world_dress::tile_at(w, p.position[0].0, p.position[2].0)?;
+                let name = format!("{}{}", world_dress::prefix(&w.pieces[tile].tile), view::slt_name(&p.file));
+                Some((tile, name, v3(p.position[0].0, p.position[1].0, p.position[2].0), *rest))
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    let prop_looks = match world_props.is_empty() {
+        true => prop_looks,
+        false => vec![None; prop_looks.len()],
+    };
+    // Every body's node as loaded, which a headless ride's end compares it with.
+    let props_rest: Vec<game_sim::contact::Node> = cars.props.nodes().map(|(_, n)| *n).collect();
+    let mut world_prop_k: std::collections::HashMap<usize, Option<usize>> = std::collections::HashMap::new();
+    let mut world_props_shown: std::collections::HashMap<(usize, usize), M4> = std::collections::HashMap::new();
+    let unseen = match world_props.is_empty() {
+        true => prop_looks.iter().filter(|p| p.is_none()).count(),
+        false => world_props.iter().filter(|p| p.is_none()).count(),
+    };
     if unseen > 0 {
         println!("props: {unseen} bodies with no model in the picture, drawn where the scene stands them");
     }
@@ -10516,6 +10566,43 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 *drawn = shown;
             }
         }
+        // A world's (MD153), the same way among its dressed tiles' props: a body off its rest node is
+        // drawn at its node every picture, as a tile dressed again starts at the scene's places, and
+        // once more where the scene stands it when it is put back there.
+        for (i, (_, node)) in world.seats[0].sim.traffic.props.nodes().enumerate() {
+            let Some(Some((tile, name, pos, rest))) = world_props.get(i) else { continue };
+            let before = props_before.get(i).filter(|b| *b != node);
+            let off = node != rest || before.is_some();
+            let Some(d) = dressed.iter().find(|d| d.index == *tile) else { continue };
+            if !off && !world_props_shown.keys().any(|(t, _)| t == tile) {
+                continue;
+            }
+            let found = *world_prop_k.entry(i).or_insert_with(|| d.props.iter().position(|p| p.model.eq_ignore_ascii_case(name) && p.pos.sub(*pos).len() < 0.01));
+            let Some(k) = found else { continue };
+            if !off && !world_props_shown.contains_key(&(*tile, k)) {
+                continue;
+            }
+            let made = &d.props[k];
+            let at = |node: &game_sim::contact::Node| match node == rest {
+                true => made.clone(),
+                false => {
+                    let xyz = |v: Vf| v3(v.x(), v.y(), v.z());
+                    view::Placement { model: made.model.clone(), pos: xyz(node.origin), look: xyz(node.rows[2]), up: xyz(node.rows[1]) }
+                }
+            };
+            let shown = match before {
+                Some(before) => blend.placement(&at(before), &at(node)),
+                None => at(node),
+            }
+            .transform();
+            if let Some(r) = renderer_of(&mut offscreen, window) {
+                r.move_owned_prop(*tile as u32, k, shown);
+            }
+            match off {
+                true => world_props_shown.insert((*tile, k), shown),
+                false => world_props_shown.remove(&(*tile, k)),
+            };
+        }
         // The animated toys (V43) where the first seat's simulation has them: at their places, posed
         // at their clips' clocks blended between the tick before the last and the last.
         let shown_toys = &world.seats[0].sim.traffic.toys;
@@ -11550,9 +11637,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 plant_cameras.extend(w.copies(camera.eye, light.fog_far).into_iter().map(|k| w.moved(camera, k)));
             }
             for d in &dressed {
-                for p in &d.props {
+                for (k, p) in d.props.iter().enumerate() {
                     let radius = assets.models.get(&p.model).map_or(0.0, |l| l.radius);
-                    let at = nearest_drawn(soft_wrap, camera.eye, p.transform());
+                    let at = nearest_drawn(soft_wrap, camera.eye, world_props_shown.get(&(d.index, k)).copied().unwrap_or_else(|| p.transform()));
                     if v3(at.0[3][0], at.0[3][1], at.0[3][2]).sub(camera.eye).len() - radius <= light.fog_far {
                         actor.push((p.model.as_str(), at));
                     }
@@ -11848,6 +11935,23 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         // And where the first rider ended, so a ride on a track can be seen to have gone somewhere (MD2).
         let end = world.seats[0].sim.rider.ride.position();
         println!("end: {:.0}, {:.0}, {:.0}", end.x(), end.y(), end.z());
+        // And the knockable props' bodies a foot or more off where they were loaded (MD153).
+        let moved: Vec<String> = world.seats[0]
+            .sim
+            .traffic
+            .props
+            .nodes()
+            .zip(&props_rest)
+            .filter(|((_, n), rest)| { let d = n.origin.sub(rest.origin); d.x().hypot(d.y()).hypot(d.z()) >= 1.0 })
+            .map(|((m, n), rest)| {
+                let (a, b) = (rest.origin, n.origin);
+                format!("{} from {:.1},{:.1},{:.1} to {:.1},{:.1},{:.1}", view::slt_name(&place.models[m].file), a.x(), a.y(), a.z(), b.x(), b.y(), b.z())
+            })
+            .collect();
+        if !props_rest.is_empty() {
+            println!("props moved: {} of {} bodies", moved.len(), props_rest.len());
+            moved.iter().for_each(|m| println!("prop moved: {m}"));
+        }
         // And a world's ground there as the GPU holds it, to compare a streamed ground with the
         // whole one (MD17).
         if ground_stream.is_some()
