@@ -115,6 +115,7 @@ mod interface; // S322: the rider's interface defaults and the race start
 mod lane; // S323: the Sim's AI lane
 mod drive; // S314: the base AI's mode drivers
 mod race4; // S12e: free09's four racers through the Sim (C33)
+mod zone_open; // S315: a start zone's open flags from the save profile
 
 use avoidance::*;
 use path_nets::*;

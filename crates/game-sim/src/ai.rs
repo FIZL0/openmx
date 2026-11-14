@@ -3309,6 +3309,89 @@ pub mod seek {
     /// How many players a zone keeps an open flag for.
     pub const OPEN_PLAYERS: usize = 2;
 
+    /// A zone's flag byte, per player: open (the progress has opened it to the player), shown (the
+    /// progress has shown it once), and placed (on the radar).
+    pub const ZONE_OPEN: u8 = 1;
+    pub const ZONE_SHOWN: u8 = 2;
+    pub const ZONE_PLACED: u8 = 4;
+
+    /// A map's record in the save profile — the one whose name is the event's track — as its bytes
+    /// from the record's start: the race zone's shown word at +0x14, the stunt zone's at +0x18, and a
+    /// byte per hit progression place from +0x20 and per run place from +0x25 (bit 0 unlocked, bit 1
+    /// shown). The game indexes the bytes by place without a bound; a byte past the end reads 0 here.
+    #[derive(Clone, Debug, Default, PartialEq, Eq)]
+    pub struct Progress(pub Vec<u8>);
+
+    impl Progress {
+        fn byte(&self, at: i64) -> u8 {
+            usize::try_from(at).ok().and_then(|i| self.0.get(i)).copied().unwrap_or(0)
+        }
+
+        fn word(&self, at: usize) -> u32 {
+            u32::from_le_bytes(std::array::from_fn(|k| self.byte((at + k) as i64)))
+        }
+    }
+
+    /// What else the opening reads besides the profile, as the free-ride session has it.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct Opening {
+        /// The rider manager's +0x58 word is set (0 in every free-ride image; what sets it is not
+        /// traced): every zone is only placed, for a player under [`OPEN_PLAYERS`], none opened.
+        pub held: bool,
+        /// One of the session's riders answers "HitProgression": no hit zone opens.
+        pub hit_running: bool,
+        /// The race activity has a machine in its list (its count is non-zero; 0 while the player
+        /// rides one): the race zone opens.
+        pub race_live: bool,
+    }
+
+    /// **A start zone's flag byte for one player at the map's load** — from 0, as the zones' load
+    /// leaves every byte — from the player's map record in the save profile (`None`: the profile has
+    /// no record for the track). An AI rider's byte is left. Held ([`Opening::held`]), the zone is
+    /// [`ZONE_PLACED`] only. Otherwise a zone that opens is [`ZONE_OPEN`] and [`ZONE_PLACED`], and
+    /// [`ZONE_SHOWN`] too when the profile shows it, and one that does not stays 0:
+    ///
+    /// - a hit zone opens when its place's hit byte has bit 0 and no rider runs a hit progression,
+    ///   shown by the byte's bit 1 (a zone with no place reads the byte before the first);
+    /// - a run zone the same off its place's run byte;
+    /// - the race zone opens when the race is live, shown by the profile's race word;
+    /// - the stunt zone always opens, shown by the profile's stunt word;
+    /// - a zone of no activity never opens.
+    pub fn open_flags(zone: Zone, player: usize, ai: bool, progress: Option<&Progress>, at: Opening) -> u8 {
+        if ai {
+            return 0;
+        }
+        if at.held {
+            return if player < OPEN_PLAYERS { ZONE_PLACED } else { 0 };
+        }
+        let Some(p) = progress else { return 0 };
+        let place = zone.place.map_or(-1, |n| n as i64);
+        let (open, shown) = match zone.activity {
+            Some(Activity::Hit) => {
+                let b = p.byte(0x20 + place);
+                (b & 1 != 0 && !at.hit_running, b & 2 != 0)
+            }
+            Some(Activity::Run) => {
+                let b = p.byte(0x25 + place);
+                (b & 1 != 0, b & 2 != 0)
+            }
+            Some(Activity::Race) => (at.race_live, p.word(0x14) != 0),
+            Some(Activity::Stunt) => (true, p.word(0x18) != 0),
+            None => (false, false),
+        };
+        if !open {
+            return 0;
+        }
+        ZONE_OPEN | ZONE_PLACED | if shown { ZONE_SHOWN } else { 0 }
+    }
+
+    /// The `open` answer [`load`] takes, by [`open_flags`]: a zone is open to player `p` when `p` is
+    /// one of the session's human players (`humans`, by player number) and its byte has
+    /// [`ZONE_OPEN`].
+    pub fn opener<'a>(humans: &'a [usize], progress: Option<&'a Progress>, at: Opening) -> impl Fn(usize, Zone) -> bool + 'a {
+        move |p, zone| humans.contains(&p) && open_flags(zone, p, false, progress, at) & ZONE_OPEN != 0
+    }
+
     /// The two database files a map's `hit.dat` names under `[HitData]` (`HitDBFilename`,
     /// `HitSetDBFilename`), as written: the game puts its track folder in front of each.
     pub fn databases(hit_dat: &Ini) -> (Option<&str>, Option<&str>) {
