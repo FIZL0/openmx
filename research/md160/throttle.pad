@@ -1,0 +1,6 @@
+# MD160: gas from the Rocksbury spawn, straight on (Cross gas, as MD39a's car card).
+sleep 15t
+down cross
+sleep 240t
+up cross
+sleep 60t

@@ -1,0 +1,6 @@
+# MD160 menu step 1, from copy 9's SLUS-21701 state 5 (Free Ride's track list, cursor on Rocksbury): Cross -> Player 1 Options.
+sleep 30t
+down cross
+sleep 9t
+up cross
+sleep 150t

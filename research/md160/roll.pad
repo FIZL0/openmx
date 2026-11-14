@@ -1,0 +1,15 @@
+# MD160: jump.pad with full left steer up the jump's face (jump.csv rows 114-132), to land the truck on
+# its side: the tipped wreck sets the body's dampings to WreckDamping.
+sleep 15t
+down cross
+sleep 40t
+stick l -1 0
+sleep 30t
+stick l 0 0
+sleep 25t
+stick l -1 0
+sleep 30t
+stick l 0 0
+sleep 260t
+release
+sleep 30t

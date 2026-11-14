@@ -1,0 +1,10 @@
+# MD160 menu step 2 (from step 1's end): down to Vehicle, right -> ATV.
+sleep 20t
+down down
+sleep 9t
+up down
+sleep 36t
+down right
+sleep 9t
+up right
+sleep 90t

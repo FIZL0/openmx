@@ -1,0 +1,6 @@
+# MD160 menu step 3: right -> MONSTER TRUCK.
+sleep 20t
+down right
+sleep 9t
+up right
+sleep 90t

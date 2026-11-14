@@ -1,0 +1,4 @@
+# MD160: no input from the flipped state (flip.py: the in-air state, slot 16, with the body's rates set to
+# (6, 0, 0)), through the landing, the tipped wreck and its put-back.
+release
+sleep 420t
