@@ -234,8 +234,8 @@ fn the_installed_mx_unleashed_worlds_ride_promptly() {
 /// rode as "Cleveland flattened": Bridgeport crossed 6,606 ft of it to Cleveland over the wrap.
 #[test]
 fn world_mxu_free_is_built_off_the_disc_as_openmx_mods_builds_it() {
-    let Some(said) = rides_off_the_disc("world_mxu_free", 5, 36 + 16) else { return };
-    assert!(after(&said, "world: world_mxu_free ").contains(", 5 tiles and 52 joins, 28503 x 6462 feet,"), "{said}");
+    let Some(said) = rides_off_the_disc("world_mxu_free", 5, 47) else { return };
+    assert!(after(&said, "world: world_mxu_free ").contains(", 5 tiles and 47 joins, 27585 x 5589 feet,"), "{said}");
     let crossings = crossings(&said);
     assert_eq!(crossings.len(), 5, "each map crosses along the row to the next: {crossings:?}");
     for (a, b, seam, ft) in &crossings {
@@ -330,9 +330,10 @@ fn world_mxu_has_every_freeride_and_national_with_the_freerides_together() {
         })
         .collect();
     assert_eq!(crossings.len(), 2 * 27, "{said}");
-    for (a, b, seam, ft) in &crossings {
-        let most = if *seam { 2900.0 } else { 1800.0 };
-        assert!(*ft <= most, "{a} > {b}: {ft} ft of join (at most {most})");
+    // MD155: one cap, the wrap's included (it was 2900 there, up to 2,740 ft built); the build widens
+    // a steep join past the coarse layout's 1,500 (nat16 > free06, 2,008 ft at a slope of 0.567).
+    for (a, b, _, ft) in &crossings {
+        assert!(*ft <= 2100.0, "{a} > {b}: {ft} ft of join (at most 2100)");
     }
     // The freerides are one cluster: each crosses straight to another, the five joined up.
     let mut together = vec![FREE[0].0];
@@ -344,7 +345,7 @@ fn world_mxu_has_every_freeride_and_national_with_the_freerides_together() {
         together.push(next);
     }
     assert_eq!(together.len(), 5, "the freerides are not one cluster: {together:?} of {crossings:?}");
-    assert!(after(&said, "world spawn: ").starts_with("mxu_free"), "{said}");
+    assert!(after(&said, "world spawn: ").starts_with("mxu_free07 "), "{said}");
     let radar = after(&said, "radar maps: ").strip_prefix("27: ").unwrap_or_else(|| panic!("not 27 maps:\n{said}"));
     for (name, town) in FREE {
         assert!(said.contains(&format!("world props drawn: {name} ")), "{name} not drawn:\n{said}");
@@ -363,11 +364,11 @@ fn world_mxu_has_every_freeride_and_national_with_the_freerides_together() {
 /// fade, rumble), and each ends past the edge or seam it rode at. A wreck of the ground's own is not
 /// asked here; on these starts there is none (11-10).
 fn no_edge_anywhere(said: &str, json: &str, mods: &Path) {
-    // "world spawn: mxu_free07 at 9556.0,11855.0"
+    // "world spawn: mxu_free07 at 8836.0,10559.0"
     let spawn = after(said, "world spawn: ");
     let (tile, at) = spawn.split_once(" at ").unwrap();
     let at: Vec<f32> = at.split(',').map(|v| v.parse().unwrap()).collect();
-    // "world wraps: x every 21853 feet and z every 19828 feet, ..."
+    // "world wraps: x every 22294 feet and z every 19243 feet, ..."
     let wraps: Vec<f32> = after(said, "world wraps: x every ").split_whitespace().filter_map(|w| w.parse().ok()).collect();
     let (width, depth) = (wraps[0], wraps[1]);
     // The spawn map's kept rectangle in world feet: its `at`, and its `keep` in samples of its spacing.
