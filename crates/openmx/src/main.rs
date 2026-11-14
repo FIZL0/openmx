@@ -240,6 +240,7 @@ mod particles;
 mod plane_draw;
 mod kiowa_draw;
 mod car_draw;
+mod quad_draw;
 mod perf;
 mod portal;
 mod ride_hud;
@@ -2037,6 +2038,31 @@ fn car_drivers(seats: &[Seat], rigs: &mut [Rig], assets: &Assets, before: &[Opti
             let mut root = M4::IDENTITY;
             root.0[3] = [pelvis.x, pelvis.y, pelvis.z, 1.0];
             Some(Pilot { plane: at, at: root.mul(at), palette })
+        })
+        .collect()
+}
+
+/// Where a seat's quad is drawn this frame (MD138): its matrix, slid from the tick before's
+/// (`before`) as the car is.
+fn quad_drawn(atv: &vehicle::AtvRide, before: Option<M4>, blend: &pace::Blend) -> Option<M4> {
+    let now = quad_draw::placed(atv)?;
+    Some(before.map_or(now, |b| blend.slide(b, now)))
+}
+
+/// Every seat's rider on the quad (MD138): the rider's own body posed by the pack's ATV motion set
+/// and held to the posed chassis' pegs and grips ([`quad_draw::rider`]), its root at the quad's
+/// origin, the clips being in the quad's space. `None` for a seat not on it.
+fn quad_riders(seats: &[Seat], rigs: &mut [Rig], assets: &Assets, look: Option<&quad_draw::Look>, before: &[Option<M4>], cut: &[bool], blend: &pace::Blend) -> Vec<Option<Pilot>> {
+    seats
+        .iter()
+        .zip(rigs.iter_mut())
+        .enumerate()
+        .map(|(p, (seat, rig))| {
+            let (atv, look) = (seat.garage.atv_up()?, look?);
+            let was = before.get(p).copied().flatten().filter(|_| !cut.get(p).copied().unwrap_or(true));
+            let at = quad_drawn(atv, was, blend)?;
+            let palette = quad_draw::rider(look, rig.body.as_mut()?, atv, assets)?;
+            Some(Pilot { plane: at, at, palette })
         })
         .collect()
 }
@@ -6241,6 +6267,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         .flat_map(|&m| (0..vehicle::LIVERIES).map(move |l| car_draw::model_name(m, l)))
         .filter_map(|name| game_render::car::Car::found(&assets, name))
         .collect();
+    // And the quad's chassis, parts and rider clips, drawn while it is out (MD138).
+    let quad_look = garage.atv.as_ref().and_then(|atv| atv_look(&args, &mut assets, atv));
     // The helicopter's own camera (P216), built as the plane's is, on `HeloCPresets.ini` (in a
     // freeride track's second archive, or free06's) and starting on its first preset.
     // The file's bytes are kept, as the plane's are, for a split's copy of its presets and the
@@ -7908,6 +7936,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let mut before_helis: Vec<Option<(M4, Rotor)>> = Vec::new();
     // And each seat's driven car's (S245).
     let mut before_cars: Vec<Option<M4>> = Vec::new();
+    // And each seat's quad's (MD138).
+    let mut before_quads: Vec<Option<M4>> = Vec::new();
     // Each plane's moving parts before the tick, which the picture blends them from (V79).
     let mut before_surfaces: Vec<Option<game_sim::biplane_anim::Surfaces>> = Vec::new();
     // Each seat's cut test (P120): whether the last tick's picture is a jump from the one before.
@@ -8974,6 +9004,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         before_planes = world.seats.iter().map(|seat| seat.garage.plane.as_ref().map(plane_at)).collect();
         before_helis = world.seats.iter().map(|seat| seat.garage.heli_up().and_then(|h| Some((heli_at(h)?, heli_rotor(h))))).collect();
         before_cars = world.seats.iter().map(|seat| Some(car_draw::placed(seat.garage.car_up()?.driven.as_ref()?))).collect();
+        before_quads = world.seats.iter().map(|seat| quad_draw::placed(seat.garage.atv_up()?)).collect();
         before_surfaces = world.seats.iter().map(|seat| seat.garage.plane.as_ref().map(Plane::surfaces)).collect();
         cuts.resize_with(world.seats.len(), pace::Cut::default);
         pause_holds.resize_with(world.seats.len(), chase::PauseHold::default);
@@ -9687,6 +9718,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 let by = seams.and_then(|s| seat_seam(s, seat, before.get(i).map(|b| b.bike), flown_before, car_before))?;
                 // A driven car's spot before the tick slides over with it (MD120), as the plane's does.
                 if let Some(Some(m)) = before_cars.get_mut(i) {
+                    m.0[3][0] += by[0];
+                    m.0[3][2] += by[2];
+                }
+                if let Some(Some(m)) = before_quads.get_mut(i) {
                     m.0[3][0] += by[0];
                     m.0[3][2] += by[2];
                 }
@@ -10583,6 +10618,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         // And each flying the helicopter's (P216b).
         let heli_pilots = heli_pilots(&world.seats, &mut rigs, &before_helis, &cut, &blend);
         let car_drivers = car_drivers(&world.seats, &mut rigs, &assets, &before_cars, &cut, &blend);
+        let quad_riders = quad_riders(&world.seats, &mut rigs, &assets, quad_look.as_ref(), &before_quads, &cut, &blend);
         // Each view's buttons and the join cue's, under Button Icons (P281).
         let hud_buttons: Vec<menu::pads::Buttons> = (0..world.seats.len()).map(|v| front.as_deref().map(|f| f.menu.seat_buttons(v)).unwrap_or_default()).collect();
         let join_buttons = front.as_deref().map(|f| f.menu.join_buttons()).unwrap_or_default();
@@ -10787,6 +10823,27 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     car_draw::trace(p, "gpu", drawn, at, &car_draw::tires(car));
                 }
                 if let (Some(Some(pilot)), Some(model)) = (car_drivers.get(p), &rigs[p].body_model) {
+                    gpu_poses.push(pilot.palette.clone());
+                    actors.push(Actor { model: model.as_str(), at: pilot.at, pose: Some(gpu_poses.len() - 1), lod_from: None, alpha, casts: false });
+                    if args.trace_picture {
+                        let nodes: Vec<V3> = pilot.palette.iter().map(|m| m.mul(pilot.at)).map(|m| V3 { x: m.0[3][0], y: m.0[3][1], z: m.0[3][2] }).collect();
+                        trace_pilot(p, "gpu", model, pilot, &nodes);
+                    }
+                }
+            }
+            // And every player's quad while it is out (MD138), at its matrix, posed from the step, slid
+            // as the car is; with its rider on it.
+            for (p, seat) in world.seats.iter().enumerate().filter(|_| !args.overview) {
+                let (Some(atv), Some(look)) = (seat.garage.atv_up(), quad_look.as_ref()) else { continue };
+                let before = before_quads.get(p).copied().flatten().filter(|_| !cut[p]);
+                let Some(at) = quad_drawn(atv, before, &blend) else { continue };
+                let alpha = vehicle::shown_alpha(1.0, seat.paused);
+                let wheels = quad_draw::wheels(atv);
+                actors.extend(quad_draw::actors(look, &assets, &wheels, at, alpha, &mut gpu_poses));
+                if args.trace_picture {
+                    quad_draw::trace(p, "gpu", look, at, &wheels, atv);
+                }
+                if let (Some(Some(pilot)), Some(model)) = (quad_riders.get(p), &rigs[p].body_model) {
                     gpu_poses.push(pilot.palette.clone());
                     actors.push(Actor { model: model.as_str(), at: pilot.at, pose: Some(gpu_poses.len() - 1), lod_from: None, alpha, casts: false });
                     if args.trace_picture {
@@ -11074,6 +11131,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             let heli_copies: Vec<String> = (0..world.seats.len()).map(|p| format!("kiowa@seat{p}")).collect();
             // And of its driven car's, which its tires' pose is skinned into (S245).
             let car_copies: Vec<String> = (0..world.seats.len()).map(|p| format!("car@seat{p}")).collect();
+            let quad_copies: Vec<String> = (0..world.seats.len()).map(|p| format!("quad@seat{p}")).collect();
             let mut actor: Vec<(&str, M4)> = Vec::new();
             for (p, (seat, rig)) in world.seats.iter().zip(&rigs).enumerate() {
                 // With the plane up the bike is nowhere (P102), and the rider is the plane's pilot —
@@ -11212,6 +11270,28 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     car_draw::trace(p, "software", drawn, at, &car_draw::tires(car));
                 }
                 if let (Some(Some(pilot)), Some(model)) = (car_drivers.get(p), &rigs[p].body_model) {
+                    if let Some(loaded) = assets.models.get_mut(model.as_str()) {
+                        loaded.tris = perf.time(Stage::Skinning, || game_render::skin::skin(&loaded.model, &pilot.palette, RIDER_GROUP));
+                        skinned[p] = None;
+                        if args.trace_picture {
+                            let corners: Vec<V3> = loaded.tris.iter().flat_map(|t| t.v.iter().map(|v| pilot.at.point(v.pos))).collect();
+                            trace_pilot(p, "software", model, pilot, &corners);
+                        }
+                    }
+                    actor.push((model.as_str(), pilot.at));
+                }
+            }
+            // And the quad out (MD138), slid as the GPU's is, with its rider.
+            for (p, seat) in world.seats.iter().enumerate().filter(|_| !args.overview) {
+                let (Some(atv), Some(look)) = (seat.garage.atv_up(), quad_look.as_ref()) else { continue };
+                let before = before_quads.get(p).copied().flatten().filter(|_| !cut[p]);
+                let Some(at) = quad_drawn(atv, before, &blend) else { continue };
+                let wheels = quad_draw::wheels(atv);
+                actor.extend(quad_draw::skinned(look, &quad_copies[p], &mut assets, &wheels, at));
+                if args.trace_picture {
+                    quad_draw::trace(p, "software", look, at, &wheels, atv);
+                }
+                if let (Some(Some(pilot)), Some(model)) = (quad_riders.get(p), &rigs[p].body_model) {
                     if let Some(loaded) = assets.models.get_mut(model.as_str()) {
                         loaded.tris = perf.time(Stage::Skinning, || game_render::skin::skin(&loaded.model, &pilot.palette, RIDER_GROUP));
                         skinned[p] = None;
@@ -12665,6 +12745,22 @@ fn ride_atv(args: &Args) -> Option<vehicle::AtvRide> {
         }
         Err(e) => {
             println!("atv: {e}");
+            None
+        }
+    }
+}
+
+/// What the picked quad is drawn with (MD138): its pack's build loaded into `assets`
+/// ([`quad_draw::load`]), and a line saying which.
+fn atv_look(args: &Args, assets: &mut Assets, atv: &vehicle::AtvRide) -> Option<quad_draw::Look> {
+    let packs = machine_packs::find(&mods_dir(args)?).0;
+    match quad_draw::load(assets, &packs, atv) {
+        Ok(look) => {
+            println!("atv: drawn as {} ({} parts, {} rider clips, {} quad clips)", look.sub, look.parts.len(), look.clips.len(), look.machine_clips.len());
+            Some(look)
+        }
+        Err(e) => {
+            println!("atv: undrawn: {e}");
             None
         }
     }
