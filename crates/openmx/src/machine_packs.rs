@@ -59,6 +59,8 @@ pub struct Pack {
     cameras: String,
     engine: String,
     particles: String,
+    /// `particles.zones` (MD136): the list's zone table (`Part/atvparticlezones.dat`).
+    zones: String,
     /// What the importer could not bring (`todo`).
     pub todo: Vec<String>,
     /// `skins` (MD80d): a flier pack's skins, each with its models and its collision pair. Empty
@@ -249,6 +251,7 @@ pub fn read(folder: &Path) -> Result<Option<Pack>, String> {
         cameras: s(json.get("cameras")),
         engine: s(json.get("sounds").and_then(|j| j.get("engine"))),
         particles: s(json.get("particles").and_then(|j| j.get("list"))),
+        zones: s(json.get("particles").and_then(|j| j.get("zones"))),
         helicopter_engine: s(json.get("sounds").and_then(|j| j.get("helicopter"))),
         machine_sounds: s(json.get("sounds").and_then(|j| j.get("machine"))),
         todo,
@@ -365,6 +368,22 @@ impl Pack {
         };
         let sounds = BikeSounds::read(&text, &mut lib);
         Ok((sounds, why))
+    }
+
+    /// The particle list's name in the pack (`Part/atvparticles.dat`), `""` for none (MD136).
+    pub fn particle_list(&self) -> &str {
+        &self.particles
+    }
+
+    /// The particle list's zone table's name in the pack (`Part/atvparticlezones.dat`), `""` for
+    /// none (MD136).
+    pub fn particle_zones(&self) -> &str {
+        &self.zones
+    }
+
+    /// The engine `.aud`'s name in the pack (`Aud/vehicle.aud`), `""` for none (MD136).
+    pub fn engine_file(&self) -> &str {
+        &self.engine
     }
 
     /// The particle list's emitters, each with its `.emt` read (`None` for one the pack lacks).

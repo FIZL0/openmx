@@ -6317,7 +6317,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // ceiling, no plane's), on its kind's presets file (in a freeride track's second archive, or
     // free06's) and starting on its first preset, "Race Cam 1", where S149a's states have all three.
     // The files' bytes are kept, as the helicopter's are, for a display's copy of their presets.
-    let car_presets: Vec<(Kind, Vec<u8>)> = garage
+    let mut car_presets: Vec<(Kind, Vec<u8>)> = garage
         .cars
         .iter()
         .filter_map(|c| {
@@ -6329,13 +6329,22 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             Some((kind, archives.iter().chain(&kit).find_map(|a| a.read_suffix(file).ok())?))
         })
         .collect();
+    // And the quad's (MD136), on its pack's own camera file, built as the cars' are.
+    let atv_files = garage.atv.as_ref().and_then(|a| atv_own(&args, a));
+    if let Some((bytes, _)) = atv_files.as_ref().and_then(|o| o.camera.clone()) {
+        car_presets.push((Kind::Atv, bytes));
+    }
     let car_cameras: Vec<(Kind, Race)> = car_presets
         .iter()
         .map(|(kind, bytes)| {
             let file = car_presets_file(*kind);
-            let mut cam = Race::new(layout_presets(bytes, layout, Display::Television, file), F(REVERSE_SPEED));
+            let file = match *kind {
+                Kind::Atv => atv_files.as_ref().and_then(|o| o.camera.as_ref()).map_or(file, |(_, f)| *f),
+                _ => file,
+            };
+            let mut cam = Race::new(kind_presets(*kind, bytes, layout, Display::Television, file), F(REVERSE_SPEED));
             cam.cam.ceiling = Race::ceiling_for_fog(F(look.fog_far));
-            if let Some(start) = Preset::find(&cam.cam.presets, CAR_CAMERA) {
+            if let Some(start) = Preset::find(&cam.cam.presets, CAR_CAMERA).filter(|_| *kind != Kind::Atv) {
                 cam.cam.set_preset(start);
             }
             if !cam.cam.presets.is_empty() {
@@ -6469,6 +6478,25 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         }
     }
     let mut car_fx: Vec<Vec<particles::PlaneFx>> = Vec::new();
+    // The quad's (MD136): its pack's own list, one manager a seat stepped off the quad while it is
+    // up, off otherwise, so what it threw runs out.
+    let atv_fx_list = match (&atv_files, &garage.atv) {
+        (Some(own), Some(atv)) => match load_atv_fx(&archives, &stem, own, &atv.model) {
+            Ok((fx, nodes, sheet)) => {
+                if fx_sheet.is_none() {
+                    fx_sheet = Some(sheet.clone());
+                }
+                soft_sheet = soft_sheet.or(Some(sheet));
+                Some((fx, nodes))
+            }
+            Err(why) => {
+                println!("atv: no particles: {why}");
+                None
+            }
+        },
+        _ => None,
+    };
+    let mut atv_fx: Vec<particles::PlaneFx> = Vec::new();
     // nat01's rain (V73): the `.toy`'s weather box and the triggers that turn it up and down, drawn as
     // glows of the box's texture. A world's tiles have none.
     let (mut rain, rain_art) = match world_mod {
@@ -6558,6 +6586,13 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             // Each seat's fliers off a pack sound as the pack's (MD108).
             let read = read.map(|mut s| {
                 set_own_flier_sounds(&mut s, &flown_fliers, &(0..vehicle::LIVERIES).collect::<Vec<_>>());
+                s
+            });
+            // And the quad as its pack's engine (MD136).
+            let read = read.map(|mut s| {
+                for seat in 0..s.seats.len() {
+                    s.set_own_atv(seat, atv_files.as_ref().and_then(|o| o.sounds.clone()));
+                }
                 s
             });
             match read {
@@ -10257,6 +10292,15 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 }
             }
         }
+        // The quad's (MD136): each seat's off its quad after the tick while it is up.
+        if simulated && !args.overview && let Some((list, nodes)) = &atv_fx_list {
+            atv_fx.resize_with(world.seats.len(), || list.clone());
+            let place = &mut world.place;
+            for (seat, fx) in world.seats.iter().zip(&mut atv_fx) {
+                let frame = seat.garage.atv_up().map_or_else(particles::PlaneFrame::default, |a| atv_fx_frame(a, nodes));
+                fx.step_over(&frame, dt.0, &mut |at| plane_fx_ground(place, at));
+            }
+        }
         perf.lap(Stage::Scene, scene_at, spent);
 
         // The frame's sound (P42), off what the ride just did, heard from every view's camera. A
@@ -10949,6 +10993,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 let b = fx_blend(blend.0, &cut, p);
                 fxs.iter().flat_map(move |fx| plane_sprites(fx, b))
             }));
+            sprites.extend(atv_fx.iter().enumerate().flat_map(|(p, fx)| plane_sprites(fx, fx_blend(blend.0, &cut, p))));
             let (fw, fh) = (frame.width as u32, frame.height as u32);
             // A shot this frame is read back from a frame drawn offscreen at the frame's own size.
             let shooting = shot.is_some() && engine.frame >= args.shot_frame;
@@ -11395,6 +11440,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                         tris += 2 * game_render::particle::draw(target, camera, sheet, &plane_particles(fx, fx_blend(blend.0, &cut, p)), &light);
                     }
                 }
+                for (p, fx) in atv_fx.iter().enumerate() {
+                    tris += 2 * game_render::particle::draw(target, camera, sheet, &plane_particles(fx, fx_blend(blend.0, &cut, p)), &light);
+                }
             }
             // The start zones' and the markers' portals (V51), over the particles as the GPU lays them.
             if let Some(glows) = glows.get(v) {
@@ -11739,6 +11787,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         // Or the quad (MD37d).
         if let Some(said) = world.seats[0].garage.atv_up().and_then(vehicle::AtvRide::report) {
             println!("{said}");
+            // And its particles in the air (MD136).
+            if let Some(fx) = atv_fx.first() {
+                let counts: Vec<String> = fx.counts().iter().filter(|(_, n)| *n > 0).map(|(name, n)| format!("{name} {n}")).collect();
+                let counts = if counts.is_empty() { "none".to_string() } else { counts.join(", ") };
+                println!("atv: particles: {counts} in the air");
+            }
         }
         // Or MX vs. ATV's car (MD39c).
         if let Some(said) = world.seats[0].garage.mxvatv_car_up().and_then(vehicle::MxvatvCarRide::report) {
@@ -11964,6 +12018,8 @@ fn seat_sound(seat: &Seat, area: Option<game_sim::biplane::Area>, land: &dyn sim
             vel: e.vel,
         }),
         bike: audio::BikeCrash::of(&seat.sim.rider),
+        // The quad's engine note (MD136), while it is up and out.
+        atv: seat.garage.atv_up().and_then(atv_hands),
         touchdown,
         edge,
         body: audio::RiderBody::of(&seat.sim.rider),
@@ -12262,7 +12318,16 @@ fn car_presets_file(kind: Kind) -> &'static str {
 
 /// The cars' presets (S246) for `display`, each kind's off its file's bytes.
 fn cars_for_display(layout: Layout, display: Display, cars: &[(Kind, Vec<u8>)]) -> Vec<(Kind, Vec<Preset>)> {
-    cars.iter().map(|(kind, bytes)| (*kind, layout_presets(bytes, layout, display, car_presets_file(*kind)))).collect()
+    cars.iter().map(|(kind, bytes)| (*kind, kind_presets(*kind, bytes, layout, display, car_presets_file(*kind)))).collect()
+}
+
+/// A ground camera's presets off its file's bytes (MD136): the cars' MX-format files by
+/// [`layout_presets`], the quad's MX vs. ATV `.pb`/`.ini` by [`flier_layout_presets`].
+fn kind_presets(kind: Kind, bytes: &[u8], layout: Layout, display: Display, file: &str) -> Vec<Preset> {
+    match kind {
+        Kind::Atv => flier_layout_presets(bytes, layout, display),
+        _ => layout_presets(bytes, layout, display, file),
+    }
 }
 
 /// [`frame_rig`] for the cars' cameras (S246): each onto `cars`' presets for its kind, with the seat's
@@ -12759,6 +12824,162 @@ fn ride_atv(args: &Args) -> Option<vehicle::AtvRide> {
             None
         }
     }
+}
+
+/// The quad's own camera, engine and particles (MD136), off the pack it rides off.
+struct AtvOwn {
+    pack: machine_packs::Pack,
+    /// The camera file its follow camera reads ([`chase::atv_presets`]'s pick) and its name.
+    camera: Option<(Vec<u8>, &'static str)>,
+    /// Its `vehicle.aud`, where the pack reads any engine sounds.
+    sounds: Option<Arc<audio::BikeSounds>>,
+}
+
+/// The quad's pack read again for its own files (MD136): its camera file, `Cam\FC_ATVDefault.pb`
+/// (or `Cam\FC_ATV.ini` where that has none), and its engine's `.aud` through the bike's reader
+/// ([`machine_packs::Pack::engine_sounds`]). Says what each read. `None`, a line saying why, where
+/// the pack cannot be read again.
+fn atv_own(args: &Args, atv: &vehicle::AtvRide) -> Option<AtvOwn> {
+    let dir = mods_dir(args)?;
+    let Some(pack) = machine_packs::find(&dir).0.into_iter().find(|p| p.id == atv.pack) else {
+        println!("atv: {} is gone; the bike's camera, no engine and no particles", atv.pack);
+        return None;
+    };
+    let file = |name: &str| pack.files.read(name).ok();
+    let (pb, ini) = (file(chase::mod_presets(chase::ModMachine::Atv)), file(chase::ATV_CAMERA_INI));
+    let (presets, from) = chase::atv_presets(pb.as_deref(), ini.as_deref(), game_sim::camera::Aspect::Standard, game_sim::camera::Viewport::Full);
+    let camera = match from {
+        "" => {
+            println!("atv: {} has no camera presets of its own; the bike's camera follows it", pack.id);
+            None
+        }
+        f if f == chase::ATV_CAMERA_INI => ini.map(|b| (b, f)),
+        f => pb.map(|b| (b, f)),
+    };
+    if camera.is_some() {
+        let names: Vec<&str> = presets.iter().map(|p| p.name.as_str()).collect();
+        println!("atv: {}'s camera, {} presets in {from}: {}", pack.id, presets.len(), names.join(", "));
+    }
+    let sounds = match pack.engine_sounds() {
+        Ok((s, why)) => {
+            for w in &why {
+                println!("atv: {}'s engine: {w} not read", pack.id);
+            }
+            let n = [&s.idle, &s.low, &s.high, &s.power, &s.sputter, &s.decel, &s.clutch, &s.panic].iter().map(|l| l.sounds.len()).sum::<usize>();
+            match n {
+                0 => {
+                    println!("atv: {} reads no engine sounds of its own; the bike's", pack.id);
+                    None
+                }
+                _ => {
+                    println!("atv: {}'s engine, {n} sounds in {}, {} wreck", pack.id, pack.engine_file(), s.wreck.list.sounds.len());
+                    Some(Arc::new(s))
+                }
+            }
+        }
+        Err(e) => {
+            println!("atv: {}'s engine: {e}; the bike's", pack.id);
+            None
+        }
+    };
+    Some(AtvOwn { pack, camera, sounds })
+}
+
+/// The quad's particles (MD136): its pack's list (`Part/atvparticles.dat`) and each `.emt` it names
+/// out of the pack, on the track's particle sheet as the fliers' own lists ride it (MD108). The zone
+/// table is the pack's (`Part/atvparticlezones.dat`), not the track's as the fliers keep: the disc's
+/// names no descriptor, and the quad's list names `WaterRoost` and `Dust2`, which only its own turns
+/// off off the water; the track's where the pack has none. Says what it runs and what it skips: the
+/// tire tracks, which are not particles, and the entries on nodes the quad's chassis model lacks.
+fn load_atv_fx(archives: &[Res], track: &str, own: &AtvOwn, model: &game_sim::quad::Model) -> Result<(particles::PlaneFx, Vec<String>, game_render::pst::Texture), String> {
+    let pack = &own.pack;
+    let name = pack.particle_list();
+    if name.is_empty() {
+        return Err(format!("{} names no particle list", pack.id));
+    }
+    let list = pack.files.read(&name.replace('/', "\\"))?;
+    let track_read = |n: &str| archives.iter().find_map(|a| a.read_suffix(&format!("\\{n}")).ok());
+    let zones = Some(pack.particle_zones()).filter(|z| !z.is_empty()).and_then(|z| pack.files.read(&z.replace('/', "\\")).ok());
+    println!("atv: particles: zones off {}", if zones.is_some() { pack.particle_zones() } else { particles::ZONES });
+    let read = |n: &str| match n.eq_ignore_ascii_case(particles::ZONES) {
+        true => zones.clone().or_else(|| track_read(n)),
+        false => pack.files.read_suffix(&format!("\\{n}")).ok().or_else(|| track_read(n)),
+    };
+    let sheet = read(&particles::sheet(track)).ok_or(format!("no {}", particles::sheet(track)))?;
+    let texture = read(&particles::sheet_texture(track)).ok_or(format!("no {}", particles::sheet_texture(track)))?;
+    let texture = game_render::pst::Texture::parse(&texture)?;
+    let atlas = particles::Atlas::parse(&ini::text(&sheet), texture.width, texture.height);
+    let fx = particles::PlaneFx::new(&biplane::emitters(&ini::text(&list)), atlas, read);
+    let mut nodes: Vec<String> = Vec::new();
+    for e in &fx.entries {
+        let Some(node) = e.node.as_deref() else { continue };
+        match model.nodes.iter().any(|n| n.name.eq_ignore_ascii_case(node)) {
+            true if !nodes.iter().any(|n| n.eq_ignore_ascii_case(node)) => nodes.push(node.to_string()),
+            true => {}
+            false => println!("atv: particles: {} rides {node}, which the chassis model does not have", e.name),
+        }
+    }
+    let (laid, skipped): (Vec<_>, Vec<_>) = fx.skipped.iter().partition(|(_, why)| why.eq_ignore_ascii_case("TireTrack"));
+    let names = |l: &[&(String, String)]| l.iter().map(|(n, w)| format!("{n} ({w})")).collect::<Vec<_>>().join(", ");
+    println!("atv: particles: {} entries off {}'s {name}; {} tire tracks not laid; {} not run: {}", fx.entries.len(), pack.id, laid.len(), skipped.len(), names(&skipped));
+    Ok((fx, nodes, texture))
+}
+
+/// What the quad's particles read off it this frame (MD136): its emitters' nodes where its chassis
+/// model hangs under its scene node, the throttle after its rate limit, its speed, the clutch lever,
+/// its wreck, the body's velocity, and its four wheels (front left, front right, rear left, rear
+/// right, as `AttachedToTire`'s 0 to 3 count them): ground and object contact, compression, the
+/// surface record and the tire's spin and side force. Its collision object's contacts are not fed.
+fn atv_fx_frame(atv: &vehicle::AtvRide, nodes: &[String]) -> particles::PlaneFrame {
+    let Some(r) = atv.quad() else { return particles::PlaneFrame::default() };
+    let worlds = atv.model.worlds(&game_sim::math::Mat4(r.bike.parts.scene.nodes[0].world));
+    let row = |r: Vf, w: f32| [r.x(), r.y(), r.z(), w];
+    let placed = nodes
+        .iter()
+        .filter_map(|name| {
+            let i = atv.model.nodes.iter().position(|n| n.name.eq_ignore_ascii_case(name))?;
+            let m = worlds[i].0;
+            Some((name.clone(), M4([row(m[0], 0.0), row(m[1], 0.0), row(m[2], 0.0), row(m[3], 1.0)])))
+        })
+        .collect();
+    let tire = |i: usize| {
+        let (w, s) = (&r.bike.wheels[i], &r.bike.spins[i]);
+        particles::TireFrame {
+            ground: w.ray_hit != 0,
+            object: w.swept_contact != 0,
+            compression: w.compression.0,
+            zone: r.bike.more[i].record,
+            spinning: s.slip.spinning,
+            side: s.side_per_load.0,
+        }
+    };
+    particles::PlaneFrame {
+        nodes: placed,
+        throttle: r.q.gas_limited.0,
+        airspeed: r.q.speed_len.0,
+        clutch: r.q.clutch_in.0,
+        wrecked: r.down(),
+        vel: vector(r.body.velocity),
+        tires: (0..4).map(tire).collect(),
+        ..Default::default()
+    }
+}
+
+/// What the quad's engine note hears (MD136): the bike's four hands off the quad's own words — on
+/// the ground, the throttle after its rate limit, the clutch lever, the body's speed — where its body
+/// is, off the levers while it is down.
+fn atv_hands(atv: &vehicle::AtvRide) -> Option<audio::Hands> {
+    let r = atv.quad()?;
+    let (p, v) = (r.body.position, r.body.velocity);
+    let hands = audio::Hands {
+        grounded: r.q.on_ground,
+        gas: r.q.gas_limited.0,
+        clutch: r.q.clutch_in.0,
+        speed: r.q.speed_len.0,
+        at: [p.x(), p.y(), p.z()],
+        vel: [v.x(), v.y(), v.z()],
+    };
+    Some(hands.wrecked(r.down()))
 }
 
 /// The MX vs. ATV car the ride offers (MD39c): `--mxvatv-car`'s car (settings.txt's `mxvatv_car`
