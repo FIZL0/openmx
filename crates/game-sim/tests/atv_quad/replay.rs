@@ -182,3 +182,69 @@ rides! {
     s_jump_replays_by_the_originals_frame, s_jump_replays_by_the_port: "s-jump" off "atv-s-air" upto 300;
     s_jump_side_replays_by_the_originals_frame, s_jump_side_replays_by_the_port: "s-jump-side" off "atv-s-air" upto 300;
 }
+
+/// MD133b — **an MX Unleashed-sized landing and a face, by the original's frame and the port's**:
+/// race-jump off its air image, its pad, and on row 47 (a row before its own landing) the body's
+/// velocity laid at the shell's free09 landing (the horizontal × 1.55, about 66 ft/s, and 40 ft/s
+/// down), every row by the original's whole frame and the port's pieces and tail beside it, every RAM
+/// word equal. The original lands it flat with a vertical load of 69 (under the `.phy`'s 80 mph ×
+/// 1.46666) and the fore-aft small, and rides on; at 67 ft/s it meets the next face and wrecks front,
+/// the fore-aft −33 past the front limit 12.5 mph × 1.46666, as race-jump's own capture wrecks front
+/// on that face at 50 ft/s (−23.2). So the shell's quad wrecking front where it lands on free09's next
+/// face at 65 ft/s (−20.5) is the original's wreck, not the port's loads (the journal).
+#[test]
+fn an_mxu_sized_landing_rides_out_and_its_face_wrecks_front_by_the_original_and_the_port() {
+    const LAID: usize = 47;
+    const FRAMES: usize = 62;
+    image::set_heap(c28_heap("atv-r-air"));
+    let Some(rows) = rows("race-jump") else { return };
+    let pad = |row: &Row| {
+        let o = obj(row);
+        READER.iter().flat_map(|&(at, len)| (0..len / 4).map(|i| (C28_QUAD + at + 4 * i, o[(at / 4 + i) as usize])).collect::<Vec<_>>()).collect::<Vec<_>>()
+    };
+    let before = |r: usize, ee: &Ee| {
+        let mut lay = pad(&rows[r]);
+        if r == LAID {
+            let body = ee.u32_at(C28_QUAD + 0xb8);
+            let v = get_v(ee, body + 0x80);
+            for (k, x) in [v.x() * 1.55, -40.0, v.z() * 1.55].into_iter().enumerate() {
+                lay.push((body + 0x80 + 4 * k as u32, x.to_bits()));
+            }
+        }
+        lay
+    };
+    // Each row: the body's velocity, a wheel down, the loads (+0x1250 side, vertical, fore and aft),
+    // the reason, and the clauses' front, side and freestyle-down limits.
+    let seen = RefCell::new(Vec::<(Vf, bool, Vf, u32, [f32; 3])>::new());
+    let after = |_: usize, ee: &Ee| {
+        let f = |o: u32| f32::from_bits(ee.u32_at(C28_QUAD + o));
+        let body = ee.u32_at(C28_QUAD + 0xb8);
+        let row = (get_v(ee, body + 0x80), ee.u32_at(C28_QUAD + 0x324) != 0, get_v(ee, C28_QUAD + 0x1250), ee.u32_at(C28_QUAD + 0xc80), [f(0x13e8), f(0x13f0), f(0x13f4)]);
+        seen.borrow_mut().push(row);
+        Vec::new()
+    };
+    let Some(_) = sim_chain(FRAMES, Some(Pieces::Port), None, true, before, after) else { return };
+    let seen = seen.into_inner();
+    let say = seen
+        .iter()
+        .enumerate()
+        .skip(LAID)
+        .map(|(r, (v, down, l, reason, _))| format!("{r}: vel {:.1} {:.1} {:.1} down {down} loads {:.2} {:.2} {:.2} reason {reason}", v.x(), v.y(), v.z(), l.x(), l.y(), l.z()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    eprintln!("MD133b\n{say}");
+    let mph = |x: f32| (F(x) * game_sim::phy::MPH).0;
+    let speed = |v: Vf| (v.x() * v.x() + v.y() * v.y() + v.z() * v.z()).sqrt();
+    let [front, side, down] = seen[0].4;
+    assert_eq!((front, side, down), (mph(12.5), mph(10.0), mph(80.0)), "the limits are the .phy's in ft/s");
+    let landing = seen.iter().position(|s| s.1).expect("it lands");
+    assert!(landing > LAID && seen[landing - 1].0.y() < -40.0 && seen[landing - 1].0.x() > 60.0, "lands at the shell's speeds:\n{say}");
+    let face = seen.iter().position(|s| s.3 != 0).unwrap_or_else(|| panic!("no wreck:\n{say}"));
+    let peak = seen[landing..face].iter().map(|s| s.2.y()).fold(0.0, f32::max);
+    assert!(peak > 60.0 && peak <= down, "the landing's vertical peak {peak}:\n{say}");
+    assert!(seen[landing..face].iter().all(|s| s.2.x().abs() <= side && s.2.z() >= -front), "the landing's loads within the limits:\n{say}");
+    assert!(face >= landing + 8, "the landing rides out before the face:\n{say}");
+    let (v, _, loads, reason, _) = seen[face];
+    assert_eq!(reason, 1, "the face wrecks front:\n{say}");
+    assert!(loads.z() < -front && speed(seen[face - 1].0) > 60.0, "fore-aft {} past −{front} at {} ft/s:\n{say}", loads.z(), speed(v));
+}
