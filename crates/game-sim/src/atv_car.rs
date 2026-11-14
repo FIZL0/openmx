@@ -2976,3 +2976,304 @@ pub fn tire_points(model: &crate::quad::Model, frame: &crate::math::Mat4) -> Res
     }
     Ok(out)
 }
+
+// --- MD149: the car on MX Unleashed's worlds -------------------------------------------------------
+
+/// The car's physics world (SLUS-21104's: one iteration a substep, 115 substeps a second).
+pub const WORLD: crate::biplane::World = crate::biplane::World { iterations: 1, rate: F(115.0) };
+
+/// The rodata quadwords the car's respawn clears a tire's vectors to, and stands its normals on.
+const TIRE_CLEAR: Vf = Vf([0.0, 0.0, 0.0, 0.0]);
+const TIRE_UP: Vf = Vf([0.0, 1.0, 0.0, 0.0]);
+
+/// The probe the put-back spot is kept from, in the car node's frame (the quad's).
+const BACK_PROBE: Vf = Vf([0.0, 3.0, 0.0, 1.0]);
+/// How far over the ground the put-back stands the car's lowest tire bottom, ft.
+const BACK_CLEAR: f32 = 1.0;
+/// How far under the spot it is put down at the world's floor lies, ft: an MX Unleashed world has no
+/// floor word, so below this the car is out of the world (bit 6 of [`Vehicle::flags`]).
+const FLOOR_BELOW: f32 = 1000.0;
+
+impl Load {
+    /// **The pieces' running words as the car is put in the world** (MD149), as MD39a's five spawn
+    /// images hold them: driven by a person (the vehicle state's mode 1, a pad, no wheel), not held,
+    /// with the gas and both-pedal reverse let through; the vehicle's gravity; and the engine in first
+    /// ([`EngineKeys`]' first gear times the final drive), its revs and wheel revs at 0 (the
+    /// respawn's engine reset), a full tank of nitrous (`NOXVolume`) and its torque curve's cursor on
+    /// its second point. Everything else is 0.
+    pub fn state(&self) -> State {
+        let mut s = State {
+            human: true,
+            driven: true,
+            reverse_enabled: true,
+            throttle_enabled: true,
+            gravity: self.part.gravity.force,
+            ..State::default()
+        };
+        if let Some(e) = self.engine_keys() {
+            s.engine.gear = 1;
+            s.engine.ratio = e.final_gear_ratio * e.gear_ratios[0];
+            s.engine.inv_ratio = F::ONE / s.engine.ratio;
+        }
+        (s.engine.nox_left, s.engine.cursor_index) = (self.file.car.engine.nox_volume, 1);
+        s.rear_friction = [SPAWN_FRICTION_SCALE; 2];
+        s
+    }
+
+    /// **The car as a shell steps it** (MD149), stood with its node at `at` (`w` 1) turned to the
+    /// quaternion `quat`, still, on `world` (its drag word `drag`; [`Ride::new`]).
+    pub fn ride(&self, at: Vf, quat: Vf, drag: F) -> Ride {
+        let mut car = self.car();
+        for t in &mut car.tires {
+            // Every tire has the world's ground to ask, and stands on its up until it has asked.
+            t.on_ground = true;
+            (t.probe_normal, t.ground_normal, t.car_normal) = (TIRE_UP, TIRE_UP, TIRE_UP);
+        }
+        let mut r = Ride {
+            keys: self.keys(),
+            state: self.state(),
+            input_keys: self.input_keys(),
+            input: Input::default(),
+            car,
+            body: self.body(),
+            vehicle: self.vehicle(drag),
+            update: Update { vehicle_state: Some(MODE_RIDING), ..Update::default() },
+            updated: Updated::default(),
+            table: AcosTable::build(),
+            noise: crate::noise::SmoothNoise::build(&mut crate::rng::Rng::default()),
+            back: None,
+            cache: None,
+            spot: (at, quat),
+            rest: Vec::new(),
+        };
+        // The vehicle base is a player's: a vehicle state, a player, no rumbler.
+        (r.updated.vehicle.state, r.updated.vehicle.player) = (1, 1);
+        r.vehicle.bounds.floor = F(at.y()) - F(FLOOR_BELOW);
+        r.put(at, quat);
+        r
+    }
+}
+
+/// **MX vs. ATV's car as a shell steps it on an MX Unleashed world** (MD149): the pieces' keys and
+/// running words, the input step's, the car, its rigid body, MXVehicle's words, the update's, and
+/// whoever answers what nobody here does (`rest`, a list its owner clears), one [`Ride::step`] a
+/// tick: the pad through the car's input step ([`input`]), [`frame`] with [`Own`] over [`Pieces`]
+/// over [`OnWorld`], then [`class_update`] the same way, then the put-back spot kept.
+///
+/// What the frame and the update call, and who answers on an MX Unleashed world:
+///
+/// - the tires' ground ([`Call::TireGround`]) and the ground under the body ([`Call::GroundUnder`]):
+///   [`crate::world::World::ground`] (and the wheel's surface, [`crate::quad::world_ground`]);
+/// - the shared smooth noise ([`Call::Noise`]): [`crate::noise::SmoothNoise`] built as the original
+///   builds it, off a fresh generator;
+/// - the contact sort's search ([`Call::SortSearch`]): nothing struck. MX Unleashed's props are not
+///   SLUS-21104 objects, so the sort ray probe has nothing to strike; the tires find the ground by
+///   their probes alone. [`Call::SortPlace`] goes to `rest`;
+/// - the node's position, the map-edge test and throw, the body's reset, the spatial update, the
+///   node's bounds and the collision sync: [`Own`], on [`Vehicle`] with the world's box
+///   ([`crate::quad::world_bounds`]) and map area ([`crate::world::World::area`]);
+/// - the wreck and the unwreck: [`Own`]'s [`wreck_timer`]; the respawn ([`Call::Respawn`]) and the
+///   hazard clock's put-back ([`Call::PutBack`]): [`Ride`]'s put-back, which stands the car at the
+///   spot MX Unleashed's put-back record keeps ([`crate::ride::keep_back_on`]), still and enabled;
+///   the respawn also runs the car's tire and engine resets;
+/// - the ghost, the hazard clock and the base update: [`OwnUpdate`] (no ghost runs; the hazard
+///   table is empty, so the clock frees the car each frame).
+///
+/// Dropped (`rest`): [`Call::GravityRecord`] (no collision record runs on an MX Unleashed world:
+/// [`Vehicle::touching`] stays false, so the tipped wreck never starts), [`Call::SpatialMove`],
+/// [`Call::PartMove`], [`Call::Gather`] (SLUS-21104's spatial database), [`Call::LeaveWorld`]
+/// (its physics lists), [`Call::RidingLetGo`] and [`Call::ReleaseRecord`] (the record), the sound
+/// cues, the landing and shift sounds, the preload's cue, the rumbles, the wrecked look,
+/// [`Call::SortPlace`], [`Call::CollisionOn`], [`Call::Unlist`], [`Call::Place`], the class's own
+/// step ([`Call::ClassStep`]: posing the model's parts, not ported), and the base update's prepare,
+/// ride, sync, snapshot, network and parts.
+#[derive(Clone)]
+pub struct Ride {
+    pub keys: Keys,
+    pub state: State,
+    pub input_keys: InputKeys,
+    pub input: Input,
+    pub car: Car,
+    pub body: Body,
+    pub vehicle: Vehicle,
+    pub update: Update,
+    pub updated: Updated,
+    pub table: AcosTable,
+    pub noise: crate::noise::SmoothNoise,
+    /// MX Unleashed's put-back record, and its search's cache.
+    pub back: Option<crate::ride::Back>,
+    pub cache: Option<Box<crate::back_search::Cache>>,
+    /// Where the put-back stands the car's node, and its turn.
+    pub spot: (Vf, Vf),
+    pub rest: Vec<Call>,
+}
+
+/// The curve table the put-back record's search reads, built once.
+fn back_curve() -> &'static crate::camera::CurveTable {
+    static CURVE: std::sync::OnceLock<crate::camera::CurveTable> = std::sync::OnceLock::new();
+    CURVE.get_or_init(crate::camera::CurveTable::build)
+}
+
+impl Ride {
+    /// The car's node stood at `at` turned to `quat`: the body there (its centre of mass turned
+    /// out from the node), still, enabled, with its last pose the same; the scene node placed.
+    pub fn put(&mut self, at: Vf, quat: Vf) {
+        let b = &mut self.body;
+        let at = at.merge(Dest::W, Vf::new(0.0, 0.0, 0.0, 1.0));
+        b.position = plus(at, crate::chassis::turn(quat, self.car.cofg));
+        b.quat = quat;
+        (b.last_position, b.last_quat) = (b.position, b.quat);
+        (b.velocity, b.rates, b.force, b.moment) = (Vf::ZERO, Vf::ZERO, Vf::ZERO, Vf::ZERO);
+        (b.last_force, b.last_moment, b.accel, b.ang_accel) = (Vf::ZERO, Vf::ZERO, Vf::ZERO, Vf::ZERO);
+        b.enabled = true;
+        self.vehicle.scene.place(0, quat, at);
+    }
+
+    /// The car's input step on `pad` through `table` (the ride's bindings), the stick read through
+    /// `stick`'s range, and its words laid where the controls read them.
+    pub fn pad(&mut self, pad: &crate::input::Pad, stick: &crate::input::AxisRange, table: &crate::bindings::Table) {
+        use crate::input::Axis;
+        let s = (pad.axis_through(Axis::LeftX, stick), pad.axis_through(Axis::LeftY, stick));
+        let (speed, side_slip) = (self.car.speed, self.car.side_slip);
+        input(&self.input_keys, &mut self.input, speed, side_slip, s, F::ZERO, |c| table.value(pad, c));
+        self.controls();
+    }
+
+    /// The input step's words laid into the pieces' state, as the controls read them.
+    pub fn controls(&mut self) {
+        let (p, s) = (&self.input, &mut self.state);
+        (s.stick, s.lean, s.pad_word, s.clutch) = (p.stick, p.lean, p.pad_word, p.clutch);
+        (s.gas_pedal, s.vehicle_brake, s.hand_brake, s.dpad) = (p.gas_pedal, p.vehicle_brake, p.hand_brake, p.dpad);
+    }
+
+    /// One tick as the shell steps it: the pad's input step ([`Ride::pad`]), then [`Ride::frame_on`].
+    pub fn step(&mut self, pad: &crate::input::Pad, table: &crate::bindings::Table, dt: F, world: &mut dyn crate::world::World) {
+        self.pad(pad, &crate::input::AxisRange::PLAYER, table);
+        self.frame_on(dt, world);
+    }
+
+    /// One tick on an MX Unleashed world, its controls laid already: the world's box and map area
+    /// into [`Vehicle`], the car's [`frame`], its [`class_update`], then the put-back spot kept
+    /// ([`Ride::keep_back`]).
+    pub fn frame_on(&mut self, dt: F, world: &mut dyn crate::world::World) {
+        let v = &mut self.vehicle;
+        v.bounds = crate::quad::world_bounds(world, v.bounds.floor);
+        v.area = world.area();
+        let mut pieces = Pieces { keys: std::mem::take(&mut self.keys), state: self.state, rest: OnWorld { world: &mut *world, noise: &self.noise, rest: &mut self.rest } };
+        {
+            let mut back = PutBack { pieces: &mut pieces, spot: self.spot };
+            let mut own = Own { v: &mut self.vehicle, rest: &mut back };
+            frame(&WORLD, &mut self.car, &mut self.body, dt, &self.table, &mut own);
+            // The update reads the tires' surfaces and the node's axes as the frame left them.
+            self.update.tire_surface = self.car.tires.map(|t| t.surface & 15);
+            let node = own.v.scene.nodes[0].world;
+            (self.updated.vehicle.side, self.updated.vehicle.ahead) = (node[0], node[2]);
+            class_update(&mut self.update, &mut self.updated, &mut self.car, &mut self.body, dt, &mut own);
+        }
+        (self.keys, self.state) = (pieces.keys, pieces.state);
+        self.keep_back(world);
+    }
+
+    /// **The put-back spot kept** (MX Unleashed's put-back record, [`crate::ride::keep_back_on`]),
+    /// while the car rides with its body in the world: probed from [`BACK_PROBE`] in the node's frame
+    /// at the body's height, facing the node's forward row. A spot kept stands the node over it, on
+    /// its ground's up, high enough that the lowest tire bottom clears the ground by [`BACK_CLEAR`].
+    pub fn keep_back(&mut self, world: &mut dyn crate::world::World) {
+        if self.car.state != RIDING || !self.body.enabled {
+            return;
+        }
+        let v = &mut self.vehicle;
+        v.scene.update(0);
+        let frame = v.scene.nodes[0].world;
+        let probe = crate::math::transform_point(&crate::math::Mat4(frame), BACK_PROBE);
+        let probe = Vf::new(probe.x(), self.body.position.y(), probe.z(), probe.w());
+        let mut back = self.back.unwrap_or_default();
+        if !crate::ride::keep_back_on(&mut back, &mut self.cache, probe, frame[2], world, back_curve()) {
+            return;
+        }
+        self.back = Some(back);
+        let m = crate::math::basis(back.at, back.facing, back.up, true, false);
+        let lift = self.car.tires.iter().map(|t| t.radius - F(t.mount.y())).fold(F::ZERO, F::max) + F(BACK_CLEAR);
+        let up = m.0[1];
+        let node = Vf::new(back.at.x(), back.at.y(), back.at.z(), 1.0);
+        self.spot = (node.merge(Dest::XYZ, node.add(scaled(up, lift))), crate::math::mat4_to_quat(&m));
+    }
+
+    /// The car is down: wrecked ([`Car::state`] not [`RIDING`]).
+    pub fn down(&self) -> bool {
+        self.car.state != RIDING
+    }
+}
+
+/// **The car's calls answered by an MX Unleashed world** (MD149, [`Ride`]): the tires' ground and the
+/// ground under the body, the smooth noise, and the sort's search (nothing struck); every other call
+/// goes on to `rest`.
+pub struct OnWorld<'a, 'w> {
+    pub world: &'a mut (dyn crate::world::World + 'w),
+    pub noise: &'a crate::noise::SmoothNoise,
+    pub rest: &'a mut Vec<Call>,
+}
+
+impl Steps for OnWorld<'_, '_> {
+    fn call(&mut self, c: Call, car: &mut Car, _body: &mut Body) {
+        match c {
+            Call::TireGround(k, at) => {
+                let t = &mut car.tires[k];
+                let mut surface = t.surface;
+                t.query = crate::quad::world_ground(self.world, at, &mut surface);
+                t.surface = surface;
+            }
+            Call::GroundUnder(at) => car.ground_normal = self.world.ground(at).1,
+            Call::Noise(t) => car.noise = self.noise.at_accumulated(t),
+            Call::SortSearch => car.sort = SortAnswer::default(),
+            c => self.rest.push(c),
+        }
+    }
+}
+
+/// The respawn and the put-back answered for [`Ride`] in front of the pieces (whose tire and engine
+/// words the respawn resets); every other call goes on to them.
+struct PutBack<'a, 'b, 'w> {
+    pieces: &'a mut Pieces<OnWorld<'b, 'w>>,
+    spot: (Vf, Vf),
+}
+
+impl Steps for PutBack<'_, '_, '_> {
+    fn call(&mut self, c: Call, car: &mut Car, body: &mut Body) {
+        match c {
+            Call::Respawn => {
+                put_back(self.spot, car, body);
+                respawn_reset(car, &mut self.pieces.state);
+            }
+            Call::PutBack => put_back(self.spot, car, body),
+            c => self.pieces.call(c, car, body),
+        }
+    }
+}
+
+/// The car's put-back on an MX Unleashed world: its body stood still at `spot` (the node's place and
+/// turn, the centre of mass turned out from it), enabled.
+fn put_back(spot: (Vf, Vf), car: &Car, body: &mut Body) {
+    let (at, quat) = spot;
+    body.position = plus(at, crate::chassis::turn(quat, car.cofg));
+    body.quat = quat;
+    (body.velocity, body.rates, body.force, body.moment) = (Vf::ZERO, Vf::ZERO, Vf::ZERO, Vf::ZERO);
+    body.enabled = true;
+}
+
+/// **The car's respawn resets** (its respawn's, after the put-back, when it has all four tires and
+/// its engine): each tire's contact forgotten (solid, sorted, what it stands on), its spin, slips,
+/// torque, compression and load at 0, its contact, point and local velocities, velocity and force
+/// cleared, its ground, car and probe normals stood up; the engine's revs and wheel revs at 0 and
+/// its gear word 1 (the ratio is left as it was).
+fn respawn_reset(car: &mut Car, s: &mut State) {
+    for (t, ts) in car.tires.iter_mut().zip(&mut s.tires) {
+        (t.solid, t.sorted, t.stands_on) = (false, false, [0, 0]);
+        (ts.spin, ts.slip_ratio, ts.slip_angle, ts.slip_tan) = (F::ZERO, F::ZERO, F::ZERO, F::ZERO);
+        (ts.torque, ts.compression, t.load) = (F::ZERO, F::ZERO, F::ZERO);
+        (ts.contact, ts.point_velocity, t.local_velocity) = (TIRE_CLEAR, TIRE_CLEAR, TIRE_CLEAR);
+        (ts.velocity, ts.force) = (TIRE_CLEAR, TIRE_CLEAR);
+        (t.ground_normal, t.car_normal, t.probe_normal) = (TIRE_UP, TIRE_UP, TIRE_UP);
+    }
+    (s.engine.rpm, s.engine.wheel_rpm, s.engine.gear) = (F::ZERO, F::ZERO, 1);
+}
