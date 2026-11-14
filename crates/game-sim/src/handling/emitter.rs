@@ -7,7 +7,7 @@
 //! 1. runs the emitter's [`gate`]: brings its spot (`+0x30`, last frame's at `+0x40`) to its node, if
 //!    it has one (`+0x80`), and runs its clocks; a non-zero answer ends the frame;
 //! 2. with its definition's (`+0xd8`) bit [`DEF_OTHER`] set, does the other kind's work instead
-//!    ([`Call::Other`], not ported: F57a);
+//!    ([`other`], F57a: the same walk, spawning into the pool's batch);
 //! 3. from the spot's move over `dt` (its speed) and a draw of `rand`, takes a number of particles to
 //!    spawn ([`count`]), and from a second draw a walk through the spread table ([`SPREAD`]): a start
 //!    and a step of 1 to 3 entries, either way;
@@ -113,7 +113,7 @@ const WALKS: [(u32, i32, i32); 5] = [(0x3e19_999a, 1, 1), (0x3e99_999a, 2, 2), (
 const PI: u32 = 0x4049_0fd0;
 
 /// What the emitter hands out, each the original's own (the [`Call::Rand`] answer is `rand`'s; the
-/// [`Call::Other`] and [`Call::Probe`] answers are their returns; the rest answer nothing).
+/// [`Call::Probe`] answer is its return; the rest answer nothing).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Call {
     /// The C library's `rand`.
@@ -123,8 +123,9 @@ pub enum Call {
     /// The emitter lit (vt `+0xa4`) and doused (vt `+0xa8`).
     Light(u32),
     Douse(u32),
-    /// The other kind's step ([`DEF_OTHER`]): not ported (F57a).
-    Other { emitter: u32, dt: F },
+    /// The other kind's batch ([`other`]) handed on with its count: the original's own sends it
+    /// (with a start of 0, a kind of 2 and no force).
+    Send { batch: u32, count: u32 },
     /// With the definition's `+0x168` above 0: the owner (`+0xd0`) placed at `at` with the word
     /// after `+0xcc`'s `+0x20`, its own virtual (vt at its `+0xc`, `+0xc8`), the emitter's own
     /// follow-up, and a probe of the world at the spot answering a float's bits.
@@ -495,7 +496,7 @@ fn entry(m: &mut impl Emitters, i: i32) -> F {
 }
 
 /// **The emitter's step** for a frame of `dt` (the thunk's target, on the object `o`): the
-/// [`gate`], then the spawns. Answers what the original answers (1, or [`Call::Other`]'s).
+/// [`gate`], then the spawns (or [`other`]'s). Answers 1, as the original does.
 #[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
 pub fn step(m: &mut impl Emitters, o: u32, dt: F) -> u32 {
     if gate(m, o, dt) != 0 {
@@ -503,7 +504,7 @@ pub fn step(m: &mut impl Emitters, o: u32, dt: F) -> u32 {
     }
     let d = def(m, o);
     if byte(m, d + DEF_OPTIONS) & DEF_OTHER != 0 {
-        return m.out(Call::Other { emitter: o, dt });
+        return other(m, o, dt);
     }
     let n = m.word(o + NODE);
     if n != 0 {
@@ -734,4 +735,293 @@ fn place(m: &mut impl Emitters, o: u32) {
     } else if mode == 1 {
         m.set(o + BIND, 0);
     }
+}
+
+/// The other kind's switch: a word that, while 0, keeps every emitter of the other kind idle.
+pub const OTHER_ON: u32 = 0x0052_53e0;
+/// Two switches the other kind reads per particle: the look always the definition's first (not by
+/// the entry), and no look rate (the particle's `+0x3c` 0) with stepped looks.
+pub const LOOK_FIRST: u32 = 0x0054_2d70;
+pub const NO_LOOK_RATE: u32 = 0x0054_2d78;
+/// The scene's lights (a pointer): the other kind tints its batch by kinds 4 and 2.
+pub const LIGHTS: u32 = 0x003e_ac28;
+/// The seats' table (a pointer: its count at `+0x340`, the seats' words at `+0x548`).
+pub const SEATS: u32 = 0x0044_c220;
+/// The pool's batch (`+0x174`) the other kind spawns into: on (`+0x58`), its particles (`+0x50`,
+/// 0x40 bytes apart), count `+0x5c`, room `+0x6c`.
+pub const POOL_BATCH: u32 = 0x174;
+pub const BATCH_ON: u32 = 0x58;
+pub const BATCH_ARRAY: u32 = 0x50;
+pub const BATCH_COUNT: u32 = 0x5c;
+pub const BATCH_ROOM: u32 = 0x6c;
+/// The definition flags' bits: the batch's tint the definition's own (`+0x80`), not the lights';
+/// and a fall (`+0x2c` times gravity).
+pub const OWN_TINT: u32 = 0x800;
+pub const FALLS: u32 = 0x2_0000;
+
+/// The light list's entry of `kind` (its `+0x70`), or entry `i` of the kinds 2 and 4 kept apart;
+/// 0 for none.
+pub fn light(m: &mut impl Emitters, list: u32, kind: u32, i: u32) -> u32 {
+    let kept = match kind {
+        2 => m.word(list + 0x4c),
+        4 => m.word(list + 0x54),
+        _ => 0,
+    };
+    if kept != 0 {
+        return m.word(kept.wrapping_add(i.wrapping_mul(4)));
+    }
+    let n = m.word(list + 0x2c) as i32;
+    let array = m.word(list + 0x50);
+    for k in 0..n.max(0) as u32 {
+        let e = m.word(array + 4 * k);
+        if m.word(e + 0x70) == kind {
+            return e;
+        }
+    }
+    0
+}
+
+/// The batch's seat (`+0x388`): which of the seats' table (no more than 15) holds the word the
+/// listener's `+4` does, the last that does; 15 for none. The listener is kept at `+0x384`.
+pub fn seat(m: &mut impl Emitters, batch: u32, listener: u32) {
+    m.set(batch + 0x384, listener);
+    let mut at = 15;
+    let l = m.word(batch + 0x384);
+    if l != 0 {
+        let seats = m.word(SEATS);
+        let n = (m.word(seats + 0x340) as i32).min(15);
+        if n > 0 {
+            let mut e = m.word(seats + 0x548);
+            let w = m.word(l + 4);
+            for k in 0..n {
+                if m.word(e) == w {
+                    at = k as u32;
+                }
+                e = e.wrapping_add(4);
+            }
+        }
+    }
+    m.set(batch + 0x388, at);
+}
+
+/// The batch tinted: by the definition's own colour with [`OWN_TINT`], else by the lights' kind 4
+/// plus 0.8 of kind 2, each lane at most 1, times 128 (untouched with no kind 4 light).
+fn tint(m: &mut impl Emitters, o: u32, batch: u32) {
+    let d = def(m, o);
+    let one = 1.0f32.to_bits();
+    if m.word(d + DEF_FLAGS) & OWN_TINT != 0 {
+        let c = [m.word(d + 0x80), m.word(d + 0x84), m.word(d + 0x88)];
+        put_quad(m, batch + 0x20, [c[0], c[1], c[2], one]);
+        return;
+    }
+    let lights = m.word(LIGHTS);
+    let a = light(m, lights, 4, 0);
+    if a == 0 {
+        return;
+    }
+    let mut c = [f(m, a + 0x30), f(m, a + 0x34), f(m, a + 0x38)];
+    let lights = m.word(LIGHTS);
+    let b = light(m, lights, 2, 0);
+    if b != 0 {
+        let k = F(f32::from_bits(0x3f4c_cccd));
+        for (i, c) in c.iter_mut().enumerate() {
+            *c = Acc::adda(0.0, *c).madd(f(m, b + 0x30 + 4 * i as u32), k);
+        }
+    }
+    let c = c.map(|c| mul(F(128.0), F(fpu::min(1.0, c.0))).to_bits());
+    put_quad(m, batch + 0x20, [c[0], c[1], c[2], one]);
+}
+
+/// **The other kind's step** ([`DEF_OTHER`]; [`step`] runs it after the [`gate`]): with
+/// [`OTHER_ON`] and its pool's batch on (switched on here, with the pool's `+0x114`, if it can be),
+/// as the first kind from the spot's move, the speed and two `rand` draws ([`count`], the walk); the
+/// batch set from the definition (scales, tint, fall), and the particles spawned into the batch
+/// (each placed along the move, an offset and push off the spread table, its look, life and size,
+/// fade and two flags), the batch then seated and handed on ([`Call::Send`]). Answers 1.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
+pub fn other(m: &mut impl Emitters, o: u32, dt: F) -> u32 {
+    if m.word(OTHER_ON) == 0 {
+        return 1;
+    }
+    let d = def(m, o);
+    let pool = m.word(d + POOL);
+    let batch = m.word(pool + POOL_BATCH);
+    if batch == 0 {
+        return 1;
+    }
+    if m.word(batch + BATCH_ON) == 0 {
+        let w = m.word(pool + 0x114);
+        if m.word(batch + BATCH_ON) == 0 && m.word(batch + 0x70) != 0 {
+            m.set(batch + 0x38c, w);
+            m.set(batch + BATCH_ON, 1);
+        }
+        if m.word(batch + BATCH_ON) == 0 {
+            return 1;
+        }
+    }
+    let n = m.word(o + NODE);
+    if n != 0 {
+        let owner = m.word(n + 8);
+        if owner != 0 {
+            let at = m.word(owner + 4) + 0xa4;
+            if half(m, FRAME_ID) != half(m, at) {
+                return 1;
+            }
+        }
+    }
+    let spot = quad(m, o + SPOT);
+    let moved = xyz(v(spot).sub(v(quad(m, o + LAST))), spot);
+    let (x, y, z) = (F::from_bits(moved[0]), F::from_bits(moved[1]), F::from_bits(moved[2]));
+    let dist = F(fpu::sqrt(Acc::mula(x, x).madda(y, y).madd(z, z).0));
+    let speed = div(dist, dt);
+    let d = def(m, o);
+    let mut vel = if byte(m, d + DEF_OPTIONS) & DEF_VELOCITY != 0 {
+        let q = vu::div(1.0, dt.0);
+        xyz(v(moved).mul_q(q), moved)
+    } else {
+        quad(m, ZERO_QUAD)
+    };
+    let fast = !(speed <= f(m, o + FAST_ABOVE));
+    if speed < f(m, o + SLOWEST) {
+        return 1;
+    }
+    let u = draw(m);
+    let count = count(m, o, fast, dt, dist, speed, u);
+    let u2 = draw(m);
+    let (mut dir, mut stride) = WALKS.iter().find(|w| u2 <= f32::from_bits(w.0)).map_or((-3, 3), |w| (w.1, w.2));
+    // the batch's scales (32767 over the definition's `+0x90`..`+0x98`), its pair of words, tint
+    // and fall
+    let d = def(m, o);
+    let big = F(32767.0);
+    for k in 0..3 {
+        let s = div(big, f(m, d + 0x90 + 4 * k));
+        set_f(m, batch + 0x30 + 4 * k, s);
+    }
+    let d = def(m, o);
+    let (a, b) = (m.word(d + 0x70), m.word(d + 0x74));
+    m.set(batch + 0x60, a);
+    m.set(batch + 0x64, b);
+    tint(m, o, batch);
+    let d = def(m, o);
+    if m.word(d + DEF_FLAGS) & FALLS != 0 {
+        let g = mul(F(f32::from_bits(0xc200_cccd)), f(m, d + 0x2c));
+        set_f(m, batch + 0x14, g);
+    } else {
+        m.set(batch + 0x14, 0);
+    }
+    m.set(batch + 0x44, (-100.0f32).to_bits());
+    if count <= 0 {
+        return 1;
+    }
+    let d = def(m, o);
+    if m.word(d + DEF_MODE) == 1 {
+        let b = byte(m, o + FLAGS);
+        m.set_byte(o + FLAGS, (b & !LIT) | LIT);
+    }
+    let mut base = base(m, o, &mut vel);
+    let d = def(m, o);
+    if byte(m, d + DEF_OPTIONS) & DEF_POOL_PUSH != 0 {
+        let pool = m.word(d + POOL);
+        base = xyz(v(base).add(v(quad(m, pool + 0x140))), base);
+    }
+    let mut pos = quad(m, o + SPOT);
+    let q = vu::div(1.0, fpu::from_i32(count));
+    let step = xyz(v(moved).mul_q(q), moved);
+    let mut idx = fpu::to_i32(fpu::mul(f32::from_bits(0x4412_8000), u.0));
+    let d = def(m, o);
+    let stepped = m.word(d + DEF_FLAGS) & LOOK_STEPPED != 0;
+    let at = |i: i32| SPREAD.wrapping_add((i as u32).wrapping_mul(4));
+    let one = 1.0f32.to_bits();
+    for _ in 0..count {
+        let k = m.word(batch + BATCH_COUNT);
+        if !((k as i32) < m.word(batch + BATCH_ROOM) as i32) {
+            break;
+        }
+        if (dir > 0 && idx + 13 * stride >= SPREAD_LEN) || (dir < 0 && idx < 13 * stride) {
+            dir = -dir;
+            if dir >= 2 {
+                dir -= 1;
+                stride -= 1;
+            } else if dir < -1 {
+                dir += 1;
+                stride += 1;
+            }
+        }
+        let p = m.word(batch + BATCH_ARRAY).wrapping_add(k << 6);
+        // the offset: the definition's `+0xd0` plus its `+0xf0` by the next three entries; the
+        // push: `+0x130` plus `+0x150` by the three after
+        let e = [m.word(at(idx + dir)), m.word(at(idx + 2 * dir)), m.word(at(idx + 3 * dir)), one];
+        let d = def(m, o);
+        let r = quad(m, d + 0xf0);
+        let along = xyz(v(r).mul(v(e)), r);
+        let c = quad(m, d + 0xd0);
+        let mut offset = xyz(v(c).add(v(along)), c);
+        let e = [m.word(at(idx + 4 * dir)), m.word(at(idx + 5 * dir)), m.word(at(idx + 6 * dir)), one];
+        idx += 6 * dir;
+        let r = quad(m, d + 0x150);
+        let along = xyz(v(r).mul(v(e)), r);
+        let c = quad(m, d + 0x130);
+        let mut push = xyz(v(c).add(v(along)), c);
+        let b = byte(m, o + FLAGS);
+        if b & IN_FRAME != 0 {
+            let rows = m.word(o + FRAME);
+            push = in_frame(m, rows, push);
+            let rows = m.word(o + FRAME);
+            offset = in_frame(m, rows, offset);
+        } else if b & TURNED != 0 {
+            push = turned(m, o + TURN, push);
+            offset = turned(m, o + TURN, offset);
+        }
+        let lk = if m.word(LOOK_FIRST) != 0 {
+            let d = def(m, o);
+            m.word(d + 0x38)
+        } else {
+            idx += dir;
+            let t = entry(m, idx);
+            look(m, o, t, stepped)
+        };
+        m.set(p + 0x38, lk);
+        let a = entry(m, idx + dir);
+        idx += 2 * dir;
+        let b = entry(m, idx);
+        size(m, o, p + 0x2c, p + 0x24, fast, speed, a, b);
+        let rate = if !stepped || m.word(NO_LOOK_RATE) != 0 {
+            0
+        } else {
+            let d = def(m, o);
+            let n = F(fpu::from_i32(m.word(d + 0x44) as i32));
+            div(n, mul(F(f32::from_bits(0x3a83_126f)), f(m, p + 0x24))).to_bits()
+        };
+        m.set(p + 0x3c, rate);
+        put_quad(m, p + 0x10, xyz(v(base).add(v(push)), base));
+        let d = def(m, o);
+        let s = mul(f(m, p + 0x24), f(m, d + 0x10c));
+        set_f(m, p + 0x20, s);
+        put_quad(m, p, xyz(v(pos).add(v(offset)), pos));
+        let t = entry(m, idx + dir);
+        let d = def(m, o);
+        let fade = Acc::adda(0.0, f(m, d + 0x118)).madd(f(m, d + 0x120), t);
+        set_f(m, p + 0x30, fade);
+        let lo = !(entry(m, idx + 2 * dir) <= 0.5);
+        idx += 3 * dir;
+        let hi = !(entry(m, idx) <= 0.5);
+        m.set(p + 0x34, u32::from(hi) << 1 | u32::from(lo));
+        let k = m.word(batch + BATCH_COUNT);
+        m.set(batch + BATCH_COUNT, k.wrapping_add(1));
+        pos = xyz(v(pos).sub(v(step)), pos);
+        if !stepped {
+            idx += dir;
+            let t = entry(m, idx);
+            let d = def(m, o);
+            let (lo, hi) = (m.word(d + 0x38), m.word(d + 0x3c));
+            let span = fpu::from_i32(hi.wrapping_sub(lo) as i32);
+            let k = fpu::to_i32(fpu::mul(span, t.0));
+            m.set_byte(o + LOOK, lo.wrapping_add(k as u32) as u8);
+        }
+    }
+    let l = m.word(o + 8);
+    seat(m, batch, l);
+    let n = m.word(batch + BATCH_COUNT);
+    m.out(Call::Send { batch, count: n });
+    1
 }

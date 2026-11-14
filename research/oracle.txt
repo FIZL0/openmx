@@ -11508,6 +11508,28 @@ atv_heap_free               atv 0x001b76d0 = free
 #   plus +0x50 (turned by node 0x00195230 with flags 0x10); +8 != 0 -> notice 0x0018d690(obj, spot, 0x0052b9e0, f12
 #   2.0); skip bit 1; hold +0xb8; +0xb1 bit 0 with *0x005253c8; modes 1/2/3 on def +0x58 with the clock +0xbc,
 #   spans def +0x60/+0x68 (rand) and +0x64/+0x6c (fixed), light/douse at object vt (+4) +0xa4/+0xa8.
+# F57a — the first emitter kind's other branch in Rust (game_sim::handling::emitter::{other, light, seat}, Call::Send;
+#   tests/mxvatv_bike_ride.rs the_other_emitter_kind_is_the_originals (20,000 cases); PartWalk books "emitter other
+#   kind steps"/"send"). Journal research/journal/2026-11-14-f57a-other-emitter-kind. Step 0x0050db60(obj, f12 dt),
+#   2872 bytes, answers 1: *0x005253e0 == 0 -> 1; batch = (*def)+0x174; +0x58 == 0 -> start 0x005147c0(batch,
+#   (*def)+0x114, 200, 100) (+0x58 == 0 and +0x70 != 0: +0x38c = word, +0x58 = 1); no batch or still off -> 1;
+#   node owner frame id as F57; moved/dist/speed/velocity/fast/slowest as F57; rand twice (count 0x0050e6a0 with
+#   its 0x40 scale by batch +0x84, the walk's five thresholds); scales 0x00514840 (batch +0x30..+0x38 = 32767 /
+#   def +0x90..+0x98); 0x00514870 (batch +0x60/+0x64 = def +0x70/+0x74); tint: def +0x28 bit 0x800 -> batch
+#   +0x20.. = def +0x80..+0x88, w 1.0; else lights 0x00130100(*0x003eac28, 4, 0) (kind 2/4 kept at list +0x4c/
+#   +0x54 [i], else scan +0x50[+0x2c] for entry +0x70 == kind) found -> +0x30..+0x38 (+ 0.8 * kind 2's, adda 0 /
+#   madd) min'd to 1 times 128, w 1.0; def +0x28 bit 0x20000 -> batch +0x14 = -32.2 * def +0x2c else 0; batch
+#   +0x44 = -100.0; count <= 0 -> 1 (no send); mode 1 -> flags |= 0x80; base 0x0050e7e0, pool push bit 0x10;
+#   idx = cvt.w.s(586 * u1); loop (batch count +0x5c < room +0x6c, p = +0x50 + count*0x40): bounce as F57;
+#   offset = def +0xd0 + def +0xf0 * e[1..3] (w 1.0 in the entries); push = def +0x130 + def +0x150 * e[4..6];
+#   in frame / turned as F57 (push first); *0x00542d70 != 0 -> p+0x38 = def +0x38 (no entry used) else look
+#   0x0050eab0 by the next entry (a word, not F57's half); life/size 0x0050e980 into p+0x2c/p+0x24; stepped ->
+#   p+0x3c = cvt(def +0x44) / (0.001 * p+0x24) unless *0x00542d78, else 0; p+0x10 = base + push; p+0x20 =
+#   p+0x24 * def +0x10c; p+0 = pos + offset; p+0x30 = def +0x118 + def +0x120 * e; p+0x34 = (e > 0.5) | (e' >
+#   0.5) << 1; count++; pos -= move/count; !stepped -> look byte as F57. Then seat 0x00514dc0(batch, obj +8):
+#   +0x384 = listener; +0x388 = last k < min(*0x0044c220 +0x340, 15) with (+0x548)[k] == listener +4, else 15;
+#   send 0x00514e40(batch, 0, batch +0x5c, 2, 0) (580 bytes, handed out). In the state 4 image *0x005253e0 is 1,
+#   *0x00542d70 and *0x00542d78 are 0 (the words just after the spread table).
 # F58 — the effects items' steps in Rust (game_sim::handling::effects::{item_step, Kind, Steps}, Call::Move;
 #   tests/mxvatv_bike_ride.rs the_effects_items_steps_are_the_originals (20,000 cases), PartWalk's FX_KINDS).
 #   Journal research/journal/2026-11-13-f58-effects-items-steps. Vt +0x14 by vtable: 0x003d1650 0x004ff170 (jr ra,
