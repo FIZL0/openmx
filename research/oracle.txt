@@ -10862,14 +10862,45 @@ atv_heap_free               atv 0x001b76d0 = free
 #   +0x140 = frame; +0x50 = m3 + 0, madd m0·x, m1·y, m2·z (xyz), w the point's; +0x70 = +0x180.
 #   vt +0xb0 0x001c1ed0 clear: +0x126 &= ~0x20, *0x003dc618 = +0x7c record, record +4 = 0.
 #   vt +0xb4 0x001c2230 = j 0x001c2ec0 pair: other +0x45 bit 0 gate, then by kind: 6 box, 5 sphere/sphere
-#   0x00106f70, 1 a hierarchy's parts, 0 mesh 0x001095c0 -> 0x00108ba0; writes the record's contacts. Not
-#   ported (S279a).
+#   0x00106f70, 1 a hierarchy's parts, 0 mesh 0x001095c0 -> 0x00108ba0; writes the record's contacts.
+#   Ported in S279a (below).
 #   C15, both replays served by the port side by side with the original scene (rows bit-exact, RAM equal
 #   outside the stack after every frame): ride-2 147 places and segments, 294 searches over pools of 0;
 #   flip-1 2,574 places and segments, 5,148 searches over pools of 13 or 19. No pair (nothing within
 #   reach), no hit, never the whole-scene search 0x001148e0. A capture with a scene hit: S279b.
 #   Oracle: 12,000 places and refreshes on the nine spheres (special floats, all four place arms >= 1,000),
 #   all 0x1a0 bytes equal and nothing written outside the sphere.
+# S279a: the sphere's pair 0x001c2ec0 (vt +0xb4 0x001c2230 is a j to it), ported as atv_sphere::pair;
+# tests/mxvatv_bike_ride.rs (sphere_pair_in_ram, the_rider_spheres_pair_is_the_originals; PortScene's
+# SpherePairInRam now the port's). Journal: research/journal/2026-11-14-s279a-rider-sphere-pair/.
+#   a0 sphere, a1 other. other +0x45 bit 0 clear -> 0. By other +0x78:
+#   6 box: the sphere frame +0x140 inverted (3x3 transposed lane by lane, each moved lane 0+x, w the rows'
+#     own; position 0 - R^T.m3 by vmsuba, w kept), other +0x130 composed onto it (rows through it, m3 onto
+#     inv3+0), then 0x00106e30(other +0x170 centre, +0x180 half, sphere +0x130 point, that matrix, f12 r
+#     +0x180, f13 r2 +0x184). Bool only.
+#   5 sphere: 0x00106f70(f12 sphere r, f13 other +0x180, sphere +0x130/+0x140, other +0x130/+0x140): each
+#     point placed (m3+0, madd; xyz, w kept), d = b - a, mula/madda/madd d.d <= (r1+r2)^2. Bool only.
+#   1 hierarchy: 0x00106e30(other +0x130 centre, +0x140 half, sphere +0x50, other +0x1b0 frame, r, r2), then
+#     each part (+0x224 list, +0x210 count) through 0x001095c0 (a0 sphere +0x50, a1 word 0, a2 {+0x244,
+#     +0x248} on the stack, a3 part +0x130, t0 part +0x230, t1 1); the first part touched -> record write
+#     with that part's frame, others = the hierarchy. 0 mesh: the same on the mesh itself (t1 1, set at
+#     0x001c2f18 before the kind 1 branch). Other kinds 0.
+#   0x001095c0 stores t0 (the vertex descriptor) to 0x003dce38 and jumps to 0x00108ba0 with t0 = t1: the
+#     global is the last mesh walked's +0x230 (the test glue writes it; the port answers which mesh).
+#   Record write (record = *0x003dc618, the clear's): memset +0xa8 12 bytes (0x003544c8); +0x20 = sphere
+#     +0x50; for i < +4 with +0x9c+4i == 0: +0x30+16i rotated (vmula/vmadd xyz, w kept), +0x60+16i placed
+#     (vaddax m3, xyz), +0x90+4i = other, +0x9c+4i = 1. Answers 1.
+#   0x00108ba0 = MX's sphere_mesh_descend (ragdoll_scene) but for addresses (vertex scale global
+#     0x00390590) and its edge distance 0x00109050: along <= 0 -> sqrt(ww); not along < ee ->
+#     sqrt(ee + msub(adda(0, ww), 2, along)); else t = along/ee, k = msub(adda(0, ww), 2t, along),
+#     sqrt(madd(adda(0, k), ee, t*t)). Node box test 0x00106e30 = atv_part::node_reaches_sphere. Leaf:
+#     packed normal at tri +0xc, n.w 1; dist = n.(c - a) 0..=r; foot inside (0x00109180) or an edge < r;
+#     room (+0 > +4): taken when +4 == 0 or dist < +8 (+0x30 unit n, +0x60 foot, +8 dist, +0x9c 0, +4 1),
+#     else no; no room: yes. Radius words are FPU operands (a NaN pattern the largest, as the oracle found).
+#   Oracle: 12,000 pairs on the nine rider spheres against nat05's meshes and F51's copies/hierarchies (box
+#     and frame drawn), plant parts stood by ECO_PART, made-up boxes and other kinds, 1 in 12 not nearby;
+#     drawn records (room 0..=3); the answer, 45 record words and 0x003dce38 equal, no other writes but the
+#     stack (the walk recurses: 0x10000 of it).
 # S285: the rider's wreck arm body 0x004efe10..0x004f0274 (in 0x004ef320, mode 2), ported as
 # game_sim::handling::rider::wreck_arm (aim, let_go, release_bike, ground_y, clauses; release, pose_targets,
 # body_target). tests/mxvatv_rider_modes.rs (the S278b oracle, the arm no longer skipped). Journal:

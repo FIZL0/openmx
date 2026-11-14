@@ -214,7 +214,7 @@ fn box_reached(node: &track::Node, frame: &Node, centre: Vf, r: F, r2: F) -> boo
 
 /// **Whether `p`, on the plane, is inside the triangle**: the corner tests round `b` and then round
 /// `c`, each `n · (e × q)` and `n · (q × e')` not negative.
-fn inside(p: Vf, n: Vf, [a, b, c]: [Vf; 3]) -> bool {
+pub(crate) fn inside(p: Vf, n: Vf, [a, b, c]: [Vf; 3]) -> bool {
     let n = Vf::new(n.x(), n.y(), n.z(), 0.0);
     let round = |at: Vf, e1: Vf, e2: Vf| {
         let (e1, e2, q) = (minus(e1, at), minus(e2, at), minus(p, at));
@@ -245,13 +245,13 @@ fn edge(p: Vf, a: Vf, b: Vf) -> F {
 
 /// A triangle's packed normal as the loader's helper unpacks it: each short onto `768.0`'s bits,
 /// less `768.0` through the FPU, and `w` one.
-fn unpack(n: [i16; 3]) -> Vf {
+pub(crate) fn unpack(n: [i16; 3]) -> Vf {
     let one = |s: i16| fpu::sub(f32::from_bits(0x4440_0000u32.wrapping_add(s as i32 as u32)), 768.0);
     Vf::new(one(n[0]), one(n[1]), one(n[2]), 1.0)
 }
 
 /// `vmul.xyz`, `vadday.x`, `vmaddz.x` (by one), `vrsqrt`, `vmulq.xyz`: unit length, `w` kept.
-fn unit(v: Vf) -> Vf {
+pub(crate) fn unit(v: Vf) -> Vf {
     let sq = v.mul(v);
     let len2 = vu::madd(vu::add(sq.x(), sq.y()), 1.0, sq.z());
     let q = vu::rsqrt(1.0, len2);
@@ -259,7 +259,7 @@ fn unit(v: Vf) -> Vf {
 }
 
 /// `a.xyz − b.xyz`, `w` from `a`.
-fn minus(a: Vf, b: Vf) -> Vf {
+pub(crate) fn minus(a: Vf, b: Vf) -> Vf {
     a.merge(Dest::XYZ, a.sub(b))
 }
 
@@ -269,7 +269,7 @@ fn cross(a: Vf, b: Vf) -> Vf {
 }
 
 /// The FPU's three-term dot product, `mula.s` / `madda.s` / `madd.s`, in this operand order.
-fn dot(a: Vf, b: Vf) -> F {
+pub(crate) fn dot(a: Vf, b: Vf) -> F {
     Acc::mula(a.x(), b.x()).madda(a.y(), b.y()).madd(a.z(), b.z())
 }
 
