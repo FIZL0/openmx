@@ -5381,7 +5381,11 @@ impl emitter::Emitters for PartWalk<'_> {
         use emitter::Call;
         let a = |x: u32| u64::from(x);
         let (f, ints, floats, kind) = match c {
-            Call::Rand => (RAND, vec![], vec![], "rand".to_string()),
+            // F31b5n: the C library's `rand` is the port's ([`game_sim::rng::Rng`]), on its state in RAM.
+            Call::Rand => {
+                book("the tail: the update's emitter rand draws", 1);
+                return rand_in_ram(self.ee) as u32;
+            }
             Call::Notice(o) => (EMIT_NOTICE, vec![a(o), a(o + emitter::SPOT), a(emitter::NOTICE_KIND)], vec![2.0], "notice".into()),
             Call::Light(o) | Call::Douse(o) => {
                 let slot = if matches!(c, Call::Light(_)) { 0xa4 } else { 0xa8 };
@@ -5409,6 +5413,15 @@ impl emitter::Emitters for PartWalk<'_> {
         self.original(f, &ints, &floats, &format!("emitter {kind}"), vec![]);
         self.ee.r(2) as u32
     }
+}
+
+/// F31b5n: one draw of the C library's `rand` on its state in RAM ([`rand_state`]), the port's
+/// [`game_sim::rng::Rng::rand`] standing in for the original's.
+fn rand_in_ram(ee: &mut Ee) -> i32 {
+    let mut r = game_sim::rng::Rng::from_state(rand_state(ee));
+    let v = r.rand();
+    ee.write(ee.u32_at(RAND_BLOCK) + 0xa8, 8, u128::from(r.state()));
+    v
 }
 
 /// F59: the second emitter kind's own hand-outs: `srand` is the original's; no C15 frame reads the
@@ -9694,6 +9707,11 @@ fn flip_replays_with_every_port_at_once() {
     assert!(ran.contains_key("the tail: the update's effects item steps"), "no effects item stepped: {ran:?}");
     assert!(ran.contains_key("the tail: the update's effects item emitter steps"), "no effects item moved its emitter: {ran:?}");
     assert!(!objects.iter().any(|k| k.contains("+0x98 ")), "an effects item's move handed on: {ran:?}");
+    // F31b5n: the emitters drew `rand` on the port's; what the part walk hands on draws it only in
+    // the first kind's other branch, still the original's (F57a).
+    assert!(ran.contains_key("the tail: the update's emitter rand draws"), "no emitter drew rand: {ran:?}");
+    let drew: Vec<&String> = ran.keys().filter(|k| k.starts_with("the tail: the update's") && k.ends_with("that drew rand")).collect();
+    assert_eq!(drew, ["the tail: the update's emitter other kind steps that drew rand"], "the part walk handed on a rand draw: {ran:?}");
 }
 
 /// F31b5o: where the RAM parts from the handing run's with the frame post's tells but the HUD's left
@@ -9805,6 +9823,8 @@ fn walk_served(ran: &BTreeMap<String, u64>) {
     assert!(!ran.contains_key("the tail: the update's second emitter"), "the second emitter handed on: {ran:?}");
     // (no C15 frame of it spawns: none draws rand, so its spawning loop is the oracle's alone)
     assert!(!ran.contains_key("the tail: the update's second emitter steps that drew rand"), "the second emitter drew rand: {ran:?}");
+    // F31b5n: and the emitters' draws on `rand`, which feed the bike (the trick hold's noise).
+    assert!(!ran.contains_key("the tail: the update's emitter rand"), "an emitter's rand handed on: {ran:?}");
     // F56: and its items' turning virtuals.
     // F58: and their steps.
     for slot in ["+0x8 ", "+0x14 ", "+0x18 ", "+0x1c "] {
