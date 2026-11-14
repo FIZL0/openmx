@@ -24,7 +24,9 @@ impl Deck {
 }
 
 /// The player's box on the stage, in ems: under the pause's side panel, over the hint tab.
-pub(super) const BOX: [f32; 4] = [34.0, 29.4, 32.0, 6.4];
+pub(super) const BOX: [f32; 4] = [34.0, 29.4, 28.0, 6.4];
+/// The pause's LAST MACHINE widget (P341), beside the player and styled like it.
+pub(super) const LAST_BOX: [f32; 4] = [62.6, 29.4, 15.0, 6.4];
 /// Each control's disc's radius, in ems.
 pub(super) const RADIUS: f32 = 1.45;
 

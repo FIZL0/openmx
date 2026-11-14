@@ -67,9 +67,9 @@ const TRICK_STAGE: [f32; 4] = [49.5, 2.5, 28.0, 18.5];
 /// stage ([`PILL_PAD`] in the stage's ems).
 const ITEM: f32 = 1.7;
 /// A row of an option page, and the gap under it.
-const ROW_H: f32 = 2.55;
-const ROW_GAP: f32 = 0.2;
-const HEAD_H: f32 = 2.0;
+pub(super) const ROW_H: f32 = 2.55;
+pub(super) const ROW_GAP: f32 = 0.2;
+pub(super) const HEAD_H: f32 = 2.0;
 
 /// The face buttons and the others the hints and the pad draw.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -185,6 +185,9 @@ pub(super) fn trick_stage(size: (usize, usize)) -> [f32; 4] {
 
 /// An option page's column (P277, for a click's sake too): its left, its width, and its first row's
 /// top, under the tabs where it has them.
+/// The room each side of the hints in their tab (P341).
+const HINT_MARGIN: f32 = 2.0;
+
 pub(super) fn page_column(tabs: bool) -> (f32, f32, f32) {
     (3.8, 36.4, if tabs { 11.4 } else { 8.2 })
 }
@@ -194,6 +197,18 @@ pub(super) fn page_column(tabs: bool) -> (f32, f32, f32) {
 /// and past the bottom.
 pub(super) fn row_spots(rows: &[Row], at: usize, x: f32, w: f32, top: f32) -> (Vec<(usize, Box4)>, bool, bool) {
     let bottom = STAGE.1 - BAND - 0.4;
+    // P341: tiles in lines, scrolled so the lit row shows, as far down as it can be centred.
+    if rows.iter().any(|r| r.kind == Kind::Tile) {
+        let (all, total) = tiles::tile_layout(rows, x, w);
+        let room = bottom - top;
+        let shift = all.iter().find(|s| s.0 == at).map_or(0.0, |(_, b)| (b[1] + b[3] / 2.0 - room / 2.0).clamp(0.0, (total - room).max(0.0)));
+        let spots = all
+            .into_iter()
+            .map(|(i, b)| (i, [b[0], b[1] - shift + top, b[2], b[3]]))
+            .filter(|(_, b)| b[1] >= top - 0.01 && b[1] + b[3] <= bottom + 0.01)
+            .collect();
+        return (spots, shift > 0.01, shift + room < total - 0.01);
+    }
     let shown = (((bottom - top) / (ROW_H + ROW_GAP)) as usize).max(1);
     let first = at.saturating_sub(shown / 2).min(rows.len().saturating_sub(shown));
     let mut y = top;
@@ -386,6 +401,22 @@ impl<'a> Pen<'a> {
         let image = self.art.track_image(menu.track_at(at).0, i)?;
         let all = self.art.images();
         all.get(image).map(|t| (self.base + image, *t))
+    }
+
+    /// A machine tile's baked picture (P341) and its place in [`Art::images`].
+    fn icon(&self, key: &str) -> Option<(usize, &'a Texture)> {
+        let image = self.art.icon_image(key)?;
+        self.art.images().get(image).map(|t| (self.base + image, *t))
+    }
+
+    /// The whole texture in the box, its shape kept, centred.
+    fn contain(&mut self, image: usize, t: &Texture, b: Box4, tint: [u8; 4]) {
+        let (w, h) = (t.width as f32, t.height as f32);
+        let k = (b[2] / w.max(1.0)).min(b[3] / h.max(1.0));
+        let (dw, dh) = (w * k, h * k);
+        let pb = self.b([b[0] + (b[2] - dw) / 2.0, b[1] + (b[3] - dh) / 2.0, dw, dh]);
+        let tint = self.c(tint);
+        ink::picture(self.out, image, t, [0.0, 0.0, w, h], pb, tint);
     }
 
     /// The texture's middle, the box's shape, over the box.
@@ -810,8 +841,10 @@ impl<'a> Pen<'a> {
             hints.iter().map(|(b, s)| pen.button_wide(*b, d) + gap + pen.wide(Weight::Bold, s, size)).collect()
         };
         let right = self.clear_of_the_pedals(STAGE.0.min(self.right()));
-        // The tab's slanted end leans 3 ems over its foot, and the hints sit 4 in from it.
-        let room = right - 2.0 - 4.0 - 3.0 - self.left().max(0.0) - spacing;
+        // The tab's slanted end leans 3 ems over its foot; the hints sit HINT_MARGIN in from its
+        // middle and from `right`, so the tab fits them with the same margin each side (P341).
+        let lead = 1.5 + HINT_MARGIN;
+        let room = right - HINT_MARGIN - lead - self.left().max(0.0) - spacing;
         let mut size = 1.55;
         let full: f32 = widths_at(self, size).iter().sum();
         if full > room && room > 0.0 {
@@ -821,20 +854,20 @@ impl<'a> Pen<'a> {
         let gap = 0.45 * size;
         let widths = widths_at(self, size);
         let content: f32 = widths.iter().sum::<f32>() + spacing;
-        let x0 = right - 2.0 - content - 4.0;
+        let x0 = right - HINT_MARGIN - content - lead;
         let (top, h) = (foot - 3.4, 3.4);
         let pb = self.b([x0, top, self.right() - x0, h]);
         let c = self.c(INK);
         ink::tab(self.out, pb, 3.0 / 3.4, c);
         let mid = top + h / 2.0;
-        let mut x = x0 + 4.0;
+        let mut x = x0 + lead;
         for ((b, s), w) in hints.iter().zip(widths) {
             let bw = self.button_wide(*b, d);
             self.button(*b, x + bw / 2.0, mid, d);
             self.text(Weight::Bold, s, x + bw + gap, Pen::mid(mid, size), size, 0.0, CHALK, Align::Left);
             x += w + 1.6;
         }
-        let hb = self.b([x0 + 4.0, mid - d / 2.0, content, d]);
+        let hb = self.b([x0 + lead, mid - d / 2.0, content, d]);
         self.parts.push(Part::Hints(hb));
     }
 
@@ -955,7 +988,7 @@ impl<'a> Pen<'a> {
 
     /// An option page's rows from `top` in a column `x` to `x + w`, scrolled so the cursor shows;
     /// row `open`'s dropdown open (P277).
-    fn rows(&mut self, rows: &[Row], at: usize, x: f32, w: f32, top: f32, open: Option<usize>) {
+    fn rows(&mut self, rows: &[Row], tiles: &[tiles::Tile], at: usize, x: f32, w: f32, top: f32, open: Option<usize>) {
         let (spots, above, below) = row_spots(rows, at, x, w, top);
         if above {
             self.arrow(x + w / 2.0, top - 0.6, [0.0, -1.0], 0.7, BONE);
@@ -968,6 +1001,12 @@ impl<'a> Pen<'a> {
             if r.kind == Kind::Heading {
                 let base = Pen::mid(b[1] + HEAD_H / 2.0 + 0.2, 1.0);
                 self.text(Weight::Bold, &r.label.to_uppercase(), x + 0.4, base, 1.0, 0.0, HEADING, Align::Left);
+                continue;
+            }
+            if let (Kind::Tile, Key::Tile(t)) = (r.kind, r.key) {
+                if let Some(t) = tiles.get(t) {
+                    self.tile(t, b, lit);
+                }
                 continue;
             }
             self.fade = if r.off.is_some() { 0.4 } else { 1.0 };
@@ -1039,6 +1078,81 @@ impl<'a> Pen<'a> {
         if d.below {
             self.arrow(cx, b[1] + b[3] - 0.35, [0.0, 1.0], 0.45, BONE);
         }
+    }
+
+    /// A machine tile (P341): its baked picture on cream, the name under it, the red pill when
+    /// lit, RIDING on the one ridden, greyed with a lock when it cannot be ridden.
+    fn tile(&mut self, t: &tiles::Tile, b: Box4, lit: bool) {
+        let r = 0.7;
+        if lit {
+            self.pill([b[0] - 0.15, b[1] - 0.15, b[2] + 0.3, b[3] + 0.3], 0.25, 0.1);
+        }
+        self.fade = if t.locked.is_some() { 0.45 } else { 1.0 };
+        let card = [b[0] + 0.2, b[1] + 0.2, b[2] - 0.4, b[3] - 2.1];
+        self.round([card[0] + 0.12, card[1] + 0.18, card[2], card[3]], r, SHADOW, SHADOW);
+        self.round(card, r, [0xff, 0xfd, 0xf8, 255], [0xe7, 0xe0, 0xd4, 255]);
+        let pic = [card[0] + 0.3, card[1] + 0.3, card[2] - 0.6, card[3] - 0.6];
+        if let Some((image, tex)) = t.picture.as_deref().and_then(|k| self.icon(k)) {
+            self.contain(image, tex, pic, [255, 255, 255, 255]);
+        } else {
+            let word = t.class.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default();
+            let size = 0.5 * card[3];
+            self.text(Weight::Heavy, &word, card[0] + card[2] / 2.0, Pen::mid(card[1] + card[3] / 2.0, size), size, 0.0, DUST, Align::Centre);
+        }
+        let size = 1.0;
+        let (w, c) = if lit { (Weight::Heavy, CHALK) } else { (Weight::Bold, BONE) };
+        let name = self.fit(w, &t.name, size, b[2] - 0.6);
+        let mid = b[1] + b[3] - 0.95;
+        let lb = self.text(w, &name, b[0] + b[2] / 2.0, Pen::mid(mid, size), size, if lit { SLANT } else { 0.0 }, c, Align::Centre);
+        // the name sits on the pill's band under the card, which the layout tests see as its pill
+        if lit {
+            self.parts.push(Part::Pill { pill: self.b([b[0], mid - 0.95, b[2], 1.9]), label: lb });
+        } else {
+            self.parts.push(Part::Item(lb));
+        }
+        if t.locked.is_some() {
+            self.fade = 1.0;
+            self.lock(card[0] + card[2] - 1.1, card[1] + 1.1, 0.55);
+        }
+        if t.riding {
+            self.fade = 1.0;
+            self.tag("Riding", card[0] + 0.4, card[1] + 1.0);
+        }
+        self.fade = 1.0;
+    }
+
+    /// "L1 ◀ livery ▶ R1" (P341) from `y`: the shoulders that turn a tile's livery round its name.
+    fn livery_line(&mut self, livery: &str, x: f32, y: f32, w: f32) -> f32 {
+        let chip = 0.95;
+        let size = 1.3;
+        let h = chip * 1.5;
+        let mid = y + h / 2.0;
+        let mut at = x;
+        for (i, c) in [Control::L1, Control::R1].into_iter().enumerate() {
+            let word = self.shoulder_word(c);
+            let sw = self.wide(Weight::Heavy, &word, chip) + 1.1 * chip;
+            if i == 1 {
+                let room = w - (at - x) - sw - 2.0 * 1.4;
+                let name = self.fit(Weight::Heavy, livery, size, room.max(2.0));
+                self.arrow(at + 0.5, mid, [-1.0, 0.0], 0.6, CHALK);
+                at += 1.4;
+                self.text(Weight::Heavy, &name, at, Pen::mid(mid, size), size, SLANT, CHALK, Align::Left);
+                at += self.wide(Weight::Heavy, &name, size) + 0.3;
+                self.arrow(at + 0.5, mid, [1.0, 0.0], 0.6, CHALK);
+                at += 1.4;
+            }
+            self.round([at, mid - h / 2.0, sw, h], 0.45 * chip, SHOULDER, SHOULDER);
+            self.text(Weight::Heavy, &word, at + sw / 2.0, Pen::mid(mid, chip), chip, 0.0, CHALK, Align::Centre);
+            at += sw + 0.3;
+        }
+        y + h
+    }
+
+    /// A padlock `r` ems across its body, centred on (`x`, `y`).
+    fn lock(&mut self, x: f32, y: f32, r: f32) {
+        self.disc(x, y, 1.15 * r, LIT_BOTTOM);
+        self.ring([x - 0.38 * r, y - 0.85 * r, 0.76 * r, 0.9 * r], 0.38 * r, 0.14 * r, CHALK);
+        self.round([x - 0.55 * r, y - 0.2 * r, 1.1 * r, 0.8 * r], 0.12 * r, CHALK, CHALK);
     }
 
     /// A small chalk tag, `1P` or `World`, from `x` centred on `mid`; how wide it is.
@@ -1157,8 +1271,11 @@ impl<'a> Pen<'a> {
             y = self.note(why, x, y + 0.9, w);
         }
         let room = STAGE.1 - BAND - 3.8;
+        if r.kind == Kind::Tile && r.choices.len() > 1 {
+            y = self.livery_line(&r.value, x, y + 1.0, w);
+        }
         match r.kind {
-            Kind::Choice | Kind::Player if !r.choices.is_empty() => {
+            Kind::Choice | Kind::Player | Kind::Tile if !r.choices.is_empty() => {
                 let size = 1.25;
                 let pitch = size * 1.35;
                 y += 1.1;
@@ -1378,7 +1495,6 @@ fn pause_panel(row: &str) -> (String, &'static str) {
         QUIT if cfg!(target_arch = "wasm32") => "Ends the ride and goes back to the launcher page.",
         QUIT => "Ends the ride and closes the game.",
         "Leave Session" => "Takes you out of the online ride. The others ride on without you.",
-        r if r.starts_with("Switch") => "The original pause's machine switch. Your bike waits where you left it.",
         r if r.starts_with("Seats") => "How many seats the online ride has. Left and right change it.",
         _ => "Lets online players drop into this ride with the seats the lobby last chose. Your seat stays yours; the code appears here, and Seats under it.",
     };
@@ -1497,7 +1613,7 @@ impl Pen<'_> {
         }
         let Some(screen) = menu.screen() else { return };
         match screen {
-            Screen::Pause | Screen::Tricks => {
+            Screen::Pause | Screen::Tricks | Screen::PauseGarage => {
                 let whole = self.whole();
                 self.fill(whole, PAUSE_DIM);
             }
@@ -1507,6 +1623,7 @@ impl Pen<'_> {
         match screen {
             Screen::Main => self.main(menu),
             Screen::Pause => self.pause(menu),
+            Screen::PauseGarage => self.pause_garage(menu),
             Screen::Tricks => self.tricks(menu),
             Screen::Online => self.online(menu),
             Screen::Settings | Screen::Garage | Screen::Modifiers | Screen::Mods | Screen::Original => self.page(menu, screen),
@@ -1676,15 +1793,41 @@ impl Pen<'_> {
         if menu.player_shown() {
             self.music_player(menu);
         }
+        self.last_machine(menu);
         if let Some((ask, rows, row)) = menu.confirming() {
             self.hints(&[(Btn::Circle, "Stay"), (Btn::Cross, "Select")]);
             self.popup(ask, &rows, row);
-        } else if let Some((kind, shown, choices, row)) = menu.flier_picker() {
-            self.hints(&[(Btn::Circle, "Back"), (Btn::L1R1, "Skin"), (Btn::Cross, "Switch")]);
-            self.flier_popup(&kind, shown, &choices, row);
         } else {
             self.hints(&[(Btn::Circle, "Resume"), (Btn::Cross, "Select")]);
         }
+    }
+
+    /// The pause's Garage page (P341): the pausing player's machines as tiles over the dimmed
+    /// ride, and right of them the lit one's picture, name and liveries.
+    fn pause_garage(&mut self, menu: &Menu) {
+        let rows = menu.pause_garage_rows();
+        let tiles = menu.pause_tiles();
+        let at = menu.cursor(Screen::PauseGarage).min(rows.len().saturating_sub(1));
+        self.strip(3.0, 38.0);
+        self.logo(true);
+        let (x, w, top) = page_column(false);
+        self.rows(&rows, &tiles, at, x, w, top, None);
+        let title = if menu.riders > 1 { format!("{}P Garage", menu.pauser + 1) } else { "Garage".into() };
+        self.title(&title);
+        self.hints(&[(Btn::Circle, "Back"), (Btn::L1R1, "Livery"), (Btn::Cross, "Ride")]);
+        let Some(r) = rows.get(at) else { return };
+        let (sx, sw) = (45.0, 31.0);
+        let pic = [sx, top, sw, 13.0];
+        self.round([pic[0] + 0.4, pic[1] + 0.45, pic[2], pic[3]], 1.6, SHADOW, SHADOW);
+        self.round(pic, 1.6, [0xff, 0xfd, 0xf8, 255], [0xe7, 0xe0, 0xd4, 255]);
+        let tile = match r.key {
+            Key::Tile(i) => tiles.get(i),
+            _ => None,
+        };
+        if let Some((image, tex)) = tile.and_then(|t| t.picture.as_deref()).and_then(|k| self.icon(k)) {
+            self.contain(image, tex, [pic[0] + 0.8, pic[1] + 0.6, pic[2] - 1.6, pic[3] - 1.2], [255, 255, 255, 255]);
+        }
+        self.side(menu, Screen::PauseGarage, &rows, r, sx, top + pic[3] + 1.2, sw);
     }
 
     /// The pause's Tricks page (P259): the ride's tricks down the left, each its name, its gesture
@@ -1779,6 +1922,35 @@ impl Pen<'_> {
         let title = if menu.riders > 1 { format!("{}P Tricks", menu.pauser + 1) } else { "Tricks".into() };
         self.title(&title);
         self.hints(&[(Btn::Circle, "Back"), (Btn::Start, "Resume")]);
+    }
+
+    /// The pause's LAST MACHINE widget (P341), beside the music player and styled like it: the
+    /// machine Triangle swaps to and a disc with △ under it, dimmed while there is none.
+    fn last_machine(&mut self, menu: &Menu) {
+        let b = super::player::LAST_BOX;
+        let r = super::player::RADIUS;
+        self.round([b[0] + 0.3, b[1] + 0.35, b[2], b[3]], 0.9, SHADOW, SHADOW);
+        self.round(b, 0.9, GLASS, GLASS);
+        self.ring(b, 0.9, 0.08, RIM);
+        let (x, y) = (b[0] + b[2] - 1.6 - r, b[1] + 2.9);
+        let text_w = x - r - 1.0 - (b[0] + 1.2);
+        self.text(Weight::Bold, "LAST MACHINE", b[0] + 1.2, b[1] + 1.4 + CAP, 0.9, 0.0, EYEBROW, Align::Left);
+        let name = menu.last_machine_name();
+        let size = 1.3;
+        let word = self.fit(Weight::Heavy, name.as_deref().unwrap_or("None"), size, text_w);
+        self.text(Weight::Heavy, &word, b[0] + 1.2, b[1] + 3.6 + CAP * size, size, 0.0, if name.is_some() { CHALK } else { DUST }, Align::Left);
+        let was = self.fade;
+        if name.is_none() {
+            self.fade = was * 0.45;
+        }
+        self.disc(x, y, r, SHOULDER);
+        self.ring([x - r, y - r, 2.0 * r, 2.0 * r], r, 0.1, RIM);
+        // two heads, one each way: the swap
+        let k = r * 0.42;
+        self.arrow(x + k * 0.35, y - k * 0.45, [1.0, 0.0], k * 0.9, CHALK);
+        self.arrow(x - k * 0.35, y + k * 0.45, [-1.0, 0.0], k * 0.9, CHALK);
+        self.button(Btn::Triangle, x, y + r + 0.95, 1.05);
+        self.fade = was;
     }
 
     /// The pause's music player (P174): a glass box with the song playing and its three controls,
@@ -1903,13 +2075,15 @@ impl Pen<'_> {
         self.logo(true);
         let tabs = menu.tabs(screen);
         if !tabs.is_empty() {
-            self.tabs(tabs, menu.tab(screen), 4.0, 7.6);
+            let by = if screen == Screen::Garage { [Control::L2, Control::R2] } else { [Control::L1, Control::R1] };
+            self.tabs_on(tabs, menu.tab(screen), 4.0, 7.6, by);
         }
         let page = menu.page_of(screen);
         let at = menu.cursor(screen).min(page.len().saturating_sub(1));
         let (x, w, top) = page_column(!tabs.is_empty());
         let open = menu.listing();
-        self.rows(&page, at, x, w, top, open.map(|o| o.0));
+        let tiles = if menu.on_machines() { menu.garage_tiles() } else { Vec::new() };
+        self.rows(&page, &tiles, at, x, w, top, open.map(|o| o.0));
         let Some(r) = page.get(at) else { return };
         let mut side = if screen == Screen::Settings && menu.tab(screen) == pages::TAB_CONTROLS { 4.5 } else { 7.6 };
         if screen == Screen::Garage {
@@ -1942,11 +2116,13 @@ impl Pen<'_> {
             _ => "Change",
         };
         let mut hints = vec![(Btn::Circle, "Back")];
-        if !tabs.is_empty() {
+        if screen == Screen::Garage {
+            hints.push((Btn::L2R2, "Tabs"));
+            if menu.on_machines() {
+                hints.push((Btn::L1R1, "Livery"));
+            }
+        } else if !tabs.is_empty() {
             hints.push((Btn::L1R1, "Tabs"));
-        }
-        if screen == Screen::Garage && menu.on_machines() {
-            hints.push((Btn::L2R2, "Skin"));
         }
         hints.push((Btn::Cross, ok));
         // A Save Over's question (P229), over the page.
@@ -1964,8 +2140,13 @@ impl Pen<'_> {
     /// The tabs between L1 and R1, the one on lit, their words made smaller where they would run
     /// past the page's strip (Settings' six since P128).
     fn tabs(&mut self, tabs: &[&str], on: usize, x: f32, top: f32) {
+        self.tabs_on(tabs, on, x, top, [Control::L1, Control::R1]);
+    }
+
+    /// The tabs with the shoulders that move them: L2/R2 on the Garage (P341), whose L1/R1 turn the livery.
+    fn tabs_on(&mut self, tabs: &[&str], on: usize, x: f32, top: f32, by: [Control; 2]) {
         let chip = 0.95;
-        let (l1, r1) = (self.shoulder_word(Control::L1), self.shoulder_word(Control::R1));
+        let (l1, r1) = (self.shoulder_word(by[0]), self.shoulder_word(by[1]));
         let shoulders: f32 = [&l1, &r1].iter().map(|w| self.wide(Weight::Heavy, w, chip) + 1.1 * chip).sum();
         let per: f32 = tabs.iter().map(|t| self.wide(Weight::Heavy, t, 1.0) + 1.6).sum();
         let room = 40.6 - x - shoulders - 0.3 * (tabs.len() + 1) as f32;
@@ -2948,7 +3129,7 @@ impl Pen<'_> {
         refresh.kind = Kind::Action;
         refresh.label = "Refresh".into();
         rows.push(refresh);
-        self.rows(&rows, at, 3.8, 36.4, 8.2, None);
+        self.rows(&rows, &[], at, 3.8, 36.4, 8.2, None);
         let (x, w) = (45.0, 31.0);
         if let Some(l) = menu.lobby.found.get(at) {
             let track = TRACKS.iter().find(|t| t.0 == l.track).map_or(l.track.as_str(), |t| t.1);
@@ -3136,27 +3317,6 @@ impl Pen<'_> {
 
     /// A two-row question over the screen, dimmed under it: the splash's Quit and the pause's
     /// confirm (P110).
-    /// The pause's flier picker (P315g), over the pause as its confirm is: the kind, its skin between
-    /// arrows and Switch, and under them the skin's game and what it is, and the kind's skins
-    /// openmx cannot fly with why — the Garage's Fliers row, for the machine being switched to.
-    fn flier_popup(&mut self, kind: &str, shown: Option<&roster::Flier>, choices: &[&roster::Flier], row: usize) {
-        let name = shown.map_or_else(|| "None".to_string(), |f| f.name.clone());
-        let flyable = choices.iter().filter(|f| f.why.is_none()).count();
-        let skin = if flyable > 1 { format!("< {name} >") } else { name };
-        self.popup(kind, &[skin.as_str(), "Switch"], row);
-        let w = 26.0;
-        if let Some(f) = shown {
-            let about = self.fit(Weight::Bold, &format!("{}. {}", f.game, f.about), 0.9, w);
-            self.text(Weight::Bold, &about, 40.0, 29.4, 0.9, 0.0, BONE, Align::Centre);
-        }
-        let greyed: Vec<String> = choices.iter().filter_map(|f| f.why.as_ref().map(|why| format!("{}: {why}", f.name))).collect();
-        if let Some(first) = greyed.first() {
-            let more = if greyed.len() > 1 { format!(" (and {} more)", greyed.len() - 1) } else { String::new() };
-            let line = self.fit(Weight::Bold, &format!("{first}{more}"), 0.8, w);
-            self.text(Weight::Bold, &line, 40.0, 30.6, 0.8, 0.0, DUST, Align::Centre);
-        }
-    }
-
     fn popup(&mut self, ask: &str, rows: &[&str], row: usize) {
         let whole = self.whole();
         self.fill(whole, [0, 0, 0, 150]);

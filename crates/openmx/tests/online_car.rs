@@ -656,8 +656,8 @@ fn an_online_bike_is_stopped_by_the_other_seats_parked_car() {
 
 /// T2: the pause of a rider online offers the cars. Set as the shell sets it in an online ride
 /// (main.rs: `menu.cars` from the seat's garage, which has its copies of the disc's cars, and
-/// `menu.session`), the switch row goes Buggy, Monster Truck, Baja and round again, the session's
-/// Leave row beside it; Cross on each asks for that machine, whose word is a car this machine's
+/// `menu.session`), the pause's Garage (P341) has the bike and Buggy, Monster Truck and Baja tiles,
+/// the session's Leave row beside it; Cross on one asks for that machine, whose word is a car this machine's
 /// online lane can take (the copies `Lot::online_cars` hands the session are the same kit).
 #[test]
 fn the_online_pause_offers_the_cars() {
@@ -691,16 +691,20 @@ fn the_online_pause_offers_the_cars() {
     tap(&mut m, Some(Control::Start));
     assert_eq!(m.screen(), Some(Screen::Pause));
     let rows = m.pause_rows();
-    let at = rows.iter().position(|r| r.starts_with("Switch To Machine")).expect("a switch row");
+    let at = rows.iter().position(|r| r == "Garage").expect("a Garage row");
     assert!(rows.iter().any(|r| r == "Leave Session"), "the online pause: {rows:?}");
     for _ in 0..at {
         tap(&mut m, Some(Control::Down));
     }
-    for want in [Pick::Buggy, Pick::Monster, Pick::Baja, Pick::Buggy] {
-        assert_eq!(m.pause_rows()[at], format!("Switch To Machine: < {} >", want.label()));
-        tap(&mut m, Some(Control::Right));
-    }
-    // On the truck (one Right on from the round), Cross asks for it.
+    // P341: the Garage's tiles are the bike ridden and the room's cars, the cursor on the bike.
+    tap(&mut m, Some(Control::Cross));
+    assert_eq!(m.screen(), Some(Screen::PauseGarage));
+    let tiles: Vec<bool> = m.pause_tiles().iter().map(|t| t.riding).collect();
+    assert_eq!(tiles, [true, false, false, false]);
+    assert!(m.pause_tile().is_some_and(|t| t.riding));
+    // On the truck (two Rights on), Cross asks for it.
+    tap(&mut m, Some(Control::Right));
+    tap(&mut m, Some(Control::Right));
     let acts = tap(&mut m, Some(Control::Cross));
     assert!(acts.contains(&Act::Switch(0, Pick::Monster)), "{acts:?}");
     let to = Kind::parse(Pick::Monster.word()).unwrap();

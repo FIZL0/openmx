@@ -3619,6 +3619,10 @@ async fn front_end(args: Args) -> Result<(), String> {
     let (mut menu_sprites, mut menu_images) = (Vec::new(), false);
     // The Garage's bike and rider (P213), dressed in the pick it shows.
     let mut garage = garage_view::Stage::default();
+    // The Garage tiles' pictures (P341), baked one at a time off a stage of their own: the one
+    // under way, and how many are in since the GPU last took the menu's pictures.
+    let mut baker = garage_view::Stage::default();
+    let (mut baking, mut baked): (Option<(String, garage_view::Picture)>, usize) = (None, 0);
     // What the menu's frames cost before their sleep, for `--timings` (P47).
     let mut busy = Duration::ZERO;
     let mut limiter = pace::Limiter::default();
@@ -4127,13 +4131,30 @@ async fn front_end(args: Args) -> Result<(), String> {
             (None, Some(pick)) => {
                 // Off the menu's thread (P258): the stage shows the last pick it has until this one
                 // is dressed, and dresses the row's neighbours ahead.
-                garage.dress(pick);
+                garage.dress(&pick);
                 garage.ahead(&shell.front.menu.garage_neighbours());
                 if shot.is_some() {
                     garage.settle();
                 }
             }
             (None, None) => garage.leave(),
+        }
+        if baking.is_none() && (baked > 0 || shell.front.menu.tick % 30 == 0) {
+            baking = shell.front.menu.tile_pictures().into_iter().find(|(k, _)| !shell.front.art.has_icon(k));
+            if baking.is_none() && baked > 0 {
+                // the last one in: the GPU takes them, the stage lets its dresses go
+                (shown_look, menu_images, baked) = (None, false, 0);
+                baker.leave();
+            }
+        }
+        if let Some((key, picture)) = &baking
+            && let Some(texture) = baker.bake(picture, 320, 200)
+        {
+            shell.front.art.set_icon(key, texture);
+            (baking, baked) = (None, baked + 1);
+            if baked >= 8 {
+                (shown_look, menu_images, baked) = (None, false, 1);
+            }
         }
         // A shot stands it where the stand starts, so two shots of two picks compare.
         let turn = garage_view::Stage::turn(if shot.is_some() { 0 } else { shell.front.menu.tick });
@@ -7597,6 +7618,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         front.menu.riders = args.players.min(world.seats.len());
         front.menu.modified = !mods.is_original();
         front.menu.up = [menu::Machine::Bike; menu::SEATS_MAX];
+        // a new ride has no machine before this one for Triangle to go back to (P341)
+        front.menu.last_up = [None; menu::SEATS_MAX];
         front.menu.switchable = [false; menu::SEATS_MAX];
         for (i, seat) in world.seats.iter().enumerate().take(menu::SEATS_MAX) {
             front.menu.up[i] = menu::Machine::from_word(seat.garage.up.name()).unwrap_or_default();

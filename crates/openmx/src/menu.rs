@@ -77,6 +77,8 @@ pub mod trick_list;
 pub use store::{Card, Got, Listed, PACKS_ONLINE, PACKS_TAB, PackRow, Phase, Posted, STORE_COLUMNS, STORE_PAGES, STORE_RULES, STORE_TABS, Shop, StoreAsk, TEXTURES_TAB, UPLOAD_TAB, UpRow, Upload, size_words};
 #[path = "menu_player.rs"]
 mod player;
+#[path = "menu_tiles.rs"]
+pub mod tiles;
 #[path = "menu_drag.rs"]
 mod drag;
 #[allow(unused_imports)]
@@ -2700,10 +2702,13 @@ pub enum Screen {
     RaceSetup,
     /// P327's results, after a race's ride.
     Results,
+    /// P341's Garage over the ride: the pausing player's machines as a grid of tiles, picking one
+    /// switching to it.
+    PauseGarage,
 }
 
 impl Screen {
-    pub const ALL: [Screen; 25] = [
+    pub const ALL: [Screen; 26] = [
         Screen::Splash,
         Screen::Main,
         Screen::Tracks,
@@ -2729,6 +2734,7 @@ impl Screen {
         Screen::Race,
         Screen::RaceSetup,
         Screen::Results,
+        Screen::PauseGarage,
     ];
 
     fn index(self) -> usize {
@@ -2763,6 +2769,7 @@ impl Screen {
             Screen::Race => "race",
             Screen::RaceSetup => "race-setup",
             Screen::Results => "results",
+            Screen::PauseGarage => "pause-garage",
         }
     }
 
@@ -2797,6 +2804,7 @@ impl Screen {
             Screen::Race => "Race",
             Screen::RaceSetup => "Race Setup",
             Screen::Results => "Results",
+            Screen::PauseGarage => "Garage",
         }
     }
 }
@@ -2845,16 +2853,16 @@ const MAIN_GARAGE: usize = 4;
 const MAIN_MODS: usize = 5;
 const MAIN_SETTINGS: usize = 6;
 const MAIN_CONTROLLERS: usize = 7;
-/// The pause's rows. The third is the original pause menu's "Switch To Machine: %s", with the
-/// machine a switch would go to. "Game Modifiers" (P134) is the old front end's way in from the
+/// The pause's rows. The third was the original pause menu's "Switch To Machine: %s"; since P341 it
+/// is the Garage, a grid of the player's machines over the ride ([`Screen::PauseGarage`]). "Game Modifiers" (P134) is the old front end's way in from the
 /// pause, put back: the host's page of every seat's, or the pausing player's own. "Controllers" is
 /// P210's screen, over the ride. "Tricks" is P259's page of the ride's tricks. Audio is only
 /// Settings' tab and the port's Clear Markers is gone (P211); a ride's markers clear from the
 /// spawn's Down (P135). The online rows go in above Main Menu, which stays right above Quit
 /// ([`Menu::pause_layout`]).
 pub const PAUSE: [&str; 9] =
-    ["Resume", "Restart", "Switch To Machine", "Settings", "Controllers", "Game Modifiers", "Tricks", "Main Menu", QUIT];
-const PAUSE_SWITCH: usize = 2;
+    ["Resume", "Restart", "Garage", "Settings", "Controllers", "Game Modifiers", "Tricks", "Main Menu", QUIT];
+const PAUSE_GARAGE: usize = 2;
 /// The seats that fly fliers of their own picking (P315g): a ride builds one flier a livery, and a
 /// seat past them wears the first's or the second's (the shell's `vehicle::LIVERIES`).
 const OWN_FLIERS: usize = 2;
@@ -3284,11 +3292,11 @@ pub struct Menu {
     pub atv: [bool; SEATS_MAX],
     /// Each player has an MX vs. ATV car (MD39c): the switch row offers it past the quad.
     pub mxvatv_car: [bool; SEATS_MAX],
+    /// The machine each player rode before the one they are on (P341), which Triangle in the pause
+    /// switches back to. `None` until a seat's first switch of the ride.
+    pub last_up: [Option<Machine>; SEATS_MAX],
     /// The seat whose Start opened the pause, whose machine its switch row is.
     pauser: usize,
-    /// The machine the pause's switch row has picked (P102): left and right step it through the
-    /// pauser's [`Menu::choices`], and OK switches to it. `None` until a step, which is the first.
-    switch_pick: Option<Machine>,
     /// What the garage offers, off the disc; empty until [`Menu::with_garage`] gives it one. Shared,
     /// so a copy of the menu ([`Menu::look`], each frame) does not copy every rider (P254).
     pub catalogue: std::sync::Arc<Catalogue>,
@@ -3334,9 +3342,6 @@ pub struct Menu {
     /// The pause's confirm (P110): what its leave row asks, and its row, 1 being Stay. The pauser
     /// alone answers it, as they alone drive the pause.
     leaving: Option<(Leaving, usize)>,
-    /// The pause's flier picker (P315g), up over the pause: the flier kind its switch row goes to
-    /// (the pack word, `biplane`, `kiowa`), and its row, 1 being Switch.
-    picking: Option<(String, usize)>,
     /// Where the pause's Main Menu row goes, as the shell says.
     pub leave_to: LeaveTo,
     /// The ride under the pause is online (N11), as the shell says: its Leave Session row.
@@ -3526,9 +3531,7 @@ struct Side {
     tab: [usize; Screen::ALL.len()],
     player: usize,
     pauser: usize,
-    switch_pick: Option<Machine>,
     leaving: Option<(Leaving, usize)>,
-    picking: Option<(String, usize)>,
     typing: String,
     typing_for: Typing,
     key: (usize, usize),
@@ -3544,9 +3547,7 @@ impl Side {
             // the pages' Player rows open on the rider whose pause it is
             player: seat,
             pauser: seat,
-            switch_pick: None,
             leaving: None,
-            picking: None,
             typing: String::new(),
             typing_for: Typing::Name,
             key: (0, 0),
@@ -3637,8 +3638,8 @@ impl Menu {
             heli: [false; SEATS_MAX],
             atv: [false; SEATS_MAX],
             mxvatv_car: [false; SEATS_MAX],
+            last_up: [None; SEATS_MAX],
             pauser: 0,
-            switch_pick: None,
             catalogue: Default::default(),
             lists: ListCache::default(),
             picks: Picks::default(),
@@ -3659,7 +3660,6 @@ impl Menu {
             claimed: None,
             quit: None,
             leaving: None,
-            picking: None,
             leave_to: LeaveTo::Main,
             session: false,
             seats_open: false,
@@ -4345,9 +4345,7 @@ impl Menu {
         std::mem::swap(&mut self.tab, &mut side.tab);
         std::mem::swap(&mut self.player, &mut side.player);
         std::mem::swap(&mut self.pauser, &mut side.pauser);
-        std::mem::swap(&mut self.switch_pick, &mut side.switch_pick);
         std::mem::swap(&mut self.leaving, &mut side.leaving);
-        std::mem::swap(&mut self.picking, &mut side.picking);
         std::mem::swap(&mut self.typing, &mut side.typing);
         std::mem::swap(&mut self.typing_for, &mut side.typing_for);
         std::mem::swap(&mut self.key, &mut side.key);
@@ -4401,7 +4399,6 @@ impl Menu {
         self.ride_stack.clear();
         self.pauser = self.focus;
         self.leaving = None;
-        self.picking = None;
         self.close_sides();
     }
 
@@ -4441,9 +4438,7 @@ impl Menu {
     fn open_pause(&mut self) {
         self.stack = vec![Screen::Pause];
         self.cursor[Screen::Pause.index()] = 0;
-        self.switch_pick = None;
         self.leaving = None;
-        self.picking = None;
     }
 
     /// The pause's confirm, if it is up (P110): its question, its two rows, the leaving one first
@@ -4488,25 +4483,7 @@ impl Menu {
         Act::Stay
     }
 
-    /// The flier kind (its pack word) the pause's switch row would put its player in, where that
-    /// player picks its skin there (P315g): the plane or the helicopter, for a seat that flies its own
-    /// picks — the first two, as a ride builds one flier a livery and a third seat wears the first's.
-    /// Online, the first player's plane where the shell said the ride's fliers (P318,
-    /// [`Menu::set_online_fliers`]), every seat's machine running every seat's.
-    fn switch_flier(&self) -> Option<String> {
-        let online = self.session || self.opening == Opening::Open;
-        if (online && (self.flier_online.is_none() || self.pauser > 0)) || self.pauser >= OWN_FLIERS {
-            return None;
-        }
-        let kind = match self.switch_to()? {
-            Machine::Biplane => "biplane",
-            Machine::Helicopter => "kiowa",
-            _ => return None,
-        };
-        (!roster::flier_choices(self.fliers_here(), kind).is_empty()).then(|| kind.to_string())
-    }
-
-    /// The fliers the pause's picker offers: an online ride's ([`Menu::flier_online`]), else every one.
+    /// The fliers the pause's Garage offers: an online ride's ([`Menu::flier_online`]), else every one.
     fn fliers_here(&self) -> &[roster::Flier] {
         self.flier_online.as_deref().unwrap_or(&self.flier_offer)
     }
@@ -4515,42 +4492,6 @@ impl Menu {
     /// off line again.
     pub fn set_online_fliers(&mut self, rows: Option<Vec<roster::Flier>>) {
         self.flier_online = rows;
-    }
-
-    /// The pause's flier picker, if it is up (P315g): the kind's label, the pauser's skin of it (the
-    /// one the switch flies), every skin of the kind on offer as the Garage's Fliers tab lists them
-    /// ([`roster::flier_choices`], greyed ones with why), and the row it is on, 1 being Switch.
-    pub fn flier_picker(&self) -> Option<(String, Option<&roster::Flier>, Vec<&roster::Flier>, usize)> {
-        let (kind, row) = self.picking.as_ref().filter(|_| self.screen() == Some(Screen::Pause))?;
-        let pick = self.picks.0.get(self.pauser)?;
-        let choices = roster::flier_choices(self.fliers_here(), kind);
-        Some((roster::flier_label(kind), roster::flier_of(self.fliers_here(), pick, kind), choices, *row))
-    }
-
-    /// One press on the pause's flier picker (P315g): up and down move between the skin and Switch,
-    /// left and right (or L1 and R1) step the skin past the ones that cannot fly, saved in the
-    /// seat's picks as the Garage saves them; Cross switches, Circle goes back to the pause.
-    fn pick_flier(&mut self, p: Press) -> Act {
-        let Some((kind, row)) = self.picking.clone() else { return Act::Stay };
-        if p.up || p.down {
-            self.picking = Some((kind, 1 - row));
-        } else if p.left || p.right || p.l1 || p.r1 {
-            let offer = self.fliers_here().to_vec();
-            if let Some(pick) = self.picks.0.get_mut(self.pauser) {
-                let was = pick.clone();
-                roster::step_flier(&offer, pick, &kind, if p.left || p.l1 { -1 } else { 1 });
-                self.picks_changed |= *pick != was;
-            }
-        } else if p.ok {
-            self.picking = None;
-            if let Some(to) = self.switch_to() {
-                self.stack.clear();
-                return Act::Switch(self.pauser, to);
-            }
-        } else if p.back || p.start {
-            self.picking = None;
-        }
-        Act::Stay
     }
 
     /// The machines `seat` can be switched to from the one they are on, in [`Machine::ALL`]'s
@@ -4577,17 +4518,20 @@ impl Menu {
         out
     }
 
-    /// The machine the pause's switch row would put its player on, if any.
-    pub fn switch_to(&self) -> Option<Machine> {
-        let choices = self.choices(self.pauser);
-        self.switch_pick.filter(|m| choices.contains(m)).or(choices.first().copied())
-    }
-
     /// The shell's answer to [`Act::Switch`]: `seat` is on `up` now.
     pub fn switched(&mut self, seat: usize, up: Machine) {
         if let Some(m) = self.up.get_mut(seat) {
+            if *m != up {
+                self.last_up[seat] = Some(*m);
+            }
             *m = up;
         }
+    }
+
+    /// The machine Triangle in the pause would switch the pauser back to (P341): the one they rode
+    /// before, while they can still switch to it.
+    pub fn last_machine(&self) -> Option<Machine> {
+        self.last_up.get(self.pauser).copied().flatten().filter(|m| self.choices(self.pauser).contains(m))
     }
 
     /// Why Air Wrecks cannot be changed here: the ride under the pause holds it (P138).
@@ -4703,21 +4647,11 @@ impl Menu {
         rows
     }
 
-    /// The pause's rows as drawn: the switch row names the machine it would go to, or says there is
-    /// none for this player.
+    /// The pause's rows as drawn.
     pub fn pause_rows(&self) -> Vec<String> {
-        let seat = self.pauser;
         self.pause_layout()
             .into_iter()
             .map(|row| match row {
-                PauseRow::Fixed(PAUSE_SWITCH) => {
-                    let row = PAUSE[PAUSE_SWITCH];
-                    match self.switch_to() {
-                        Some(m) if self.choices(seat).len() > 1 => format!("{row}: < {} >", m.label()),
-                        Some(m) => format!("{row}: {}", m.label()),
-                        None => format!("{row}: None"),
-                    }
-                }
                 PauseRow::Fixed(i) => PAUSE[i].to_string(),
                 PauseRow::Online => match self.opening {
                     Opening::Open if self.lobby.code.is_empty() => "Online: opening...".into(),
@@ -4843,6 +4777,10 @@ impl Menu {
                 self.pause();
                 self.open_tricks();
             }
+            Screen::PauseGarage => {
+                self.pause();
+                self.open_pause_garage();
+            }
             // Settings' tabs (P118), which were screens of their own: Audio over the pause, as
             // Settings there opens on it.
             Screen::Audio => {
@@ -4937,6 +4875,7 @@ impl Menu {
             Screen::Tricks => self.trick_rows.len().max(1),
             Screen::Split => layouts(self.riders).len(),
             Screen::Race | Screen::RaceSetup | Screen::Results => self.race_rows(screen),
+            Screen::PauseGarage => self.pause_garage_rows().len().max(1),
         }
     }
 
@@ -5141,8 +5080,8 @@ impl Menu {
         if screen == Screen::Pause && self.leaving.is_some() {
             return self.confirm(p);
         }
-        if screen == Screen::Pause && self.picking.is_some() {
-            return self.pick_flier(p);
+        if screen == Screen::PauseGarage {
+            return self.walk_pause_garage(p);
         }
         let rows = self.rows(screen);
         // The lobby's and the list's rows come and go with what the network says.
@@ -5274,6 +5213,10 @@ impl Menu {
             }
             Screen::Race | Screen::RaceSetup | Screen::Results => return self.race_press(screen, at, p),
             Screen::Pause => {
+                // P341: Triangle, which is Back too, swaps to the last machine ridden.
+                if p.triangle {
+                    return self.quick_switch();
+                }
                 if p.back || p.start {
                     self.stack.clear();
                     return Act::Resume;
@@ -5287,14 +5230,6 @@ impl Menu {
                 if row == Some(PauseRow::Seats) {
                     if p.ok || p.left || p.right {
                         self.pause_seats_by(if p.left { -1 } else { 1 });
-                    }
-                    return Act::Stay;
-                }
-                if row == Some(PauseRow::Fixed(PAUSE_SWITCH)) && (p.left || p.right) {
-                    let choices = self.choices(self.pauser);
-                    if let Some(now) = self.switch_to().and_then(|m| choices.iter().position(|c| *c == m)) {
-                        let n = choices.len();
-                        self.switch_pick = Some(choices[if p.left { (now + n - 1) % n } else { (now + 1) % n }]);
                     }
                     return Act::Stay;
                 }
@@ -5321,14 +5256,7 @@ impl Menu {
                             self.stack.clear();
                             return Act::Restart;
                         }
-                        // A flier's skin is picked first (P315g).
-                        Some(PauseRow::Fixed(PAUSE_SWITCH)) if self.switch_flier().is_some() => self.picking = self.switch_flier().map(|k| (k, 1)),
-                        Some(PauseRow::Fixed(PAUSE_SWITCH)) => {
-                            if let Some(to) = self.switch_to() {
-                                self.stack.clear();
-                                return Act::Switch(self.pauser, to);
-                            }
-                        }
+                        Some(PauseRow::Fixed(PAUSE_GARAGE)) => self.open_pause_garage(),
                         Some(PauseRow::Fixed(PAUSE_SETTINGS)) => self.open_settings(self.tab(Screen::Settings)),
                         // 1P's pause only: the screen moves every rider's device, and the other
                         // riders' pauses are their own (P84).
@@ -5359,7 +5287,7 @@ impl Menu {
             Screen::Online => self.online(p, at),
             Screen::Games => self.games(p, at),
             Screen::Lobby => self.in_lobby(p, at),
-            Screen::Keyboard | Screen::Splash | Screen::Join | Screen::Assign | Screen::Store | Screen::Settings | Screen::Garage | Screen::Modifiers | Screen::Mods | Screen::Original => unreachable!(),
+            Screen::Keyboard | Screen::Splash | Screen::Join | Screen::Assign | Screen::Store | Screen::Settings | Screen::Garage | Screen::Modifiers | Screen::Mods | Screen::Original | Screen::PauseGarage => unreachable!(),
         }
         Act::Stay
     }
@@ -6699,6 +6627,9 @@ pub struct Art {
     /// The mod tracks' pictures (P70), by id: a mod's own, or the still the shell took of its
     /// spawn. Counted after the stills in [`Art::images`].
     mod_pictures: Vec<(String, Texture)>,
+    /// The machine tiles' pictures (P341), baked off the Garage's stage, by [`tiles::Picture::key`].
+    /// Counted after the mods' pictures.
+    icons: Vec<(String, Texture)>,
 }
 
 /// How far a pill reaches past each end of its label, in the stage's ems (the concept's
@@ -6751,7 +6682,7 @@ impl Art {
             }
             stills.push(these);
         }
-        Ok(Art { textures, stills, mod_pictures: Vec::new() })
+        Ok(Art { textures, stills, mod_pictures: Vec::new(), icons: Vec::new() })
     }
 
     /// A mod track's picture (P70), in place of the one it had. The GPU has to be given
@@ -6761,6 +6692,26 @@ impl Art {
             Some(p) => p.1 = picture,
             None => self.mod_pictures.push((id.to_string(), picture)),
         }
+    }
+
+    /// A machine tile's picture (P341), baked by the shell, under its key. The GPU has to be given
+    /// [`Art::images`] again after it.
+    pub fn set_icon(&mut self, key: &str, picture: Texture) {
+        match self.icons.iter_mut().find(|(k, _)| k == key) {
+            Some(p) => p.1 = picture,
+            None => self.icons.push((key.to_string(), picture)),
+        }
+    }
+
+    /// Whether a tile's picture is baked.
+    pub fn has_icon(&self, key: &str) -> bool {
+        self.icons.iter().any(|(k, _)| k == key)
+    }
+
+    /// Which of [`Art::images`] a tile's picture is, if it is baked.
+    pub fn icon_image(&self, key: &str) -> Option<usize> {
+        let at = self.icons.iter().position(|(k, _)| k == key)?;
+        Some(TEXTURES.len() + 1 + self.stills.iter().map(Vec::len).sum::<usize>() + self.mod_pictures.len() + at)
     }
 
     /// Which of [`Art::images`] a track's card shows as its `i`th picture: a disc track's still
@@ -6803,6 +6754,7 @@ impl Art {
         all.push(&ink::ink().atlas);
         all.extend(self.stills.iter().flatten());
         all.extend(self.mod_pictures.iter().map(|(_, t)| t));
+        all.extend(self.icons.iter().map(|(_, t)| t));
         all
     }
 
