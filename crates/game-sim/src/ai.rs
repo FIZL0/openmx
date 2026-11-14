@@ -1341,8 +1341,8 @@ pub mod path {
         /// and its next the node after it on the same path (`None` on a path's last node: a path
         /// goes on only through its branches).
         ///
-        /// The original snaps every point's height onto the ground once the file is read (a ray
-        /// down from 1000 above it into the track's collision); these are the heights as filed.
+        /// The heights are the track's as it stands: [`Net::load`] makes the net the way the race
+        /// activity's load does, with its points stood on the ground first.
         pub fn from_track(track: &crate::race::TrackPaths) -> Net {
             let mut net = Net::default();
             for p in &track.paths {
@@ -1360,6 +1360,26 @@ pub mod path {
                 net.paths.push(Path { flags: p.flags, length: p.length, first, branches: p.links.clone() });
             }
             net
+        }
+
+        /// A race file's net as the race activity's load leaves it (S310), for either file: every
+        /// point stood on `terrain` with a floor at 0, and the flagged nodes' first points lifted onto
+        /// `props` ([`crate::race::TrackFile::snap_to_ground`], then
+        /// [`crate::race::TrackFile::raise_on_props`]), then the paths walked
+        /// ([`crate::race::TrackPaths::new`]) and made a net ([`Net::from_track`]). The snap only
+        /// writes heights and the walk only reads flags and links, so their order does not matter.
+        ///
+        /// `None` for a file whose paths do not walk. With no `props` the flagged nodes stay on the
+        /// terrain, as do they on a track whose file has none (sx01's two).
+        pub fn load(
+            file: &crate::race::TrackFile, terrain: Option<&mut dyn crate::world::World>, props: Option<crate::back_search::Scene<'_>>,
+        ) -> Option<Net> {
+            let mut file = file.clone();
+            let raise = file.snap_to_ground(terrain);
+            if let Some(scene) = props {
+                file.raise_on_props(&raise, scene);
+            }
+            Some(Net::from_track(&crate::race::TrackPaths::new(&file)?))
         }
     }
 
