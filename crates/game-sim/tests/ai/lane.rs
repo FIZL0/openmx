@@ -33,7 +33,7 @@ const S323_TICKS: usize = 60;
 
 /// free09 off the disc, as the Sim's world is made of it: the terrain and its layout (for the ground),
 /// the props across both archives, and the plants on the image's curve table.
-fn s323_free09(kit: &Kit, ee: &Ee) -> Option<(Vec<u8>, track::Scene, Props, Trees)> {
+pub(crate) fn s323_free09(kit: &Kit, ee: &Ee) -> Option<(Vec<u8>, track::Scene, Props, Trees)> {
     let at = kit.ctx("iso").join("MX.PSR");
     let Ok(mut file) = std::fs::File::open(&at) else {
         skip(&format!("no {} — `./kit extract MX.PSR`", at.display()));
