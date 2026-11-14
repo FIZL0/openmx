@@ -12435,3 +12435,22 @@ atv_out_of_bounds           atv 0x004a4f20 (vt +0x16c, the bike in a0): body pos
 #   Wheel +0x1f0 owner, +0x1f4 vehicle: set by 0x004a0c80 (F52), zeroed by the wheel clear 0x004a0c30, read by
 #   the contact velocity 0x004a1150 while +0x1a0 is clear (MD74's offsets). Vehicle alone: vtable at
 #   vehicle +4, jalr vt +0xc4 (spin) then vt +0xc0 (velocity), a0 = a stack quadword, a1 = vehicle, v0 = a0.
+# MD81d — MX vs. ATV Untamed's (SLUS-21701) car step (the baja's) against SLUS-21104's. Static (beside MD81c);
+# research/untamed-machines.md has the verdicts. Journal: research/journal/2026-11-14-md81d-untamed-baja.
+# Comment rows only. Baja/buggy vtable 0x003cec60 (SLUS-21104). Pairs, SLUS-21104 -> SLUS-21701:
+#   input step 0x004ca010 -> 0x004e79c0, controls 0x004ca450 -> 0x004e7e90, contact sort 0x004cad90 -> 0x004e87b0,
+#   travel cofg 0x004cb000 -> 0x004e8a20, PreProcess 0x004cb0c0 -> 0x004e8ae0, aero 0x004cb200 -> 0x004e8c20
+#   (rodata 0x00396fc0/0x00396fd0/0x00397000 = 0x003b5f60/0x003b5f70/0x003b5fa0), anti-slide 0x004cb500 ->
+#   0x004e8f20, preload 0x004cb7f0 -> 0x004e9210, Force 0x004cbb60 -> 0x004e9570, PostProcess 0x004cbd80 ->
+#   0x004e9790, update 0x004cc4e0 -> 0x004e9eb0 (hazard clock 0x004ce3a0), class update 0x004c6ce0 -> 0x004e46c0,
+#   vehicle force 0x00493f60 -> 0x004ba390 (add force 0x004ba450: vadd.xyz into body +0xa0, listeners +0xe8 lhu),
+#   vehicle pre 0x00494090 -> 0x004ba4e0, vehicle post 0x004940b0 -> 0x004ba500, 0x004942c0 -> 0x004ba710,
+#   ground query 0x004833c0 -> 0x004b0910; tires 0x004b50d0/0x004b5ca0/0x004b62c0 identical, 0x004b51f0 ->
+#   0x004d7890, 0x004b5740 -> 0x004d7dd0, 0x004b5cf0 -> 0x004d8370, 0x004b6400 -> 0x004d8a70; engine 0x004b3f30,
+#   shift 0x004b3c90, 0x004b3f10 identical, 0x004b4e10 rodata only.
+#   Untamed preload's words: state +0xc70, ready +0xc40, active +0xc44, armed +0xc48, PreloadTime +0xc4c, timer
+#   +0xc50, min/max time +0xc54/+0xc58, MaxPreload +0xc5c, force +0xc60, cued +0x724, grounded +0x354, brake +0x340,
+#   velocity +0x380, lean +0x11bc, pad word +0x1114, body +0xe8 (velocity +0x80, vt +0x110: +0x80 add force); cue
+#   = event post 0x0025e740 (a0 [0x00475bd0], a1 car+0x698, 8, 14, t0 [car+0xd10]). Vehicle force: gravity
+#   [car+0x118]+0x40, record car+0xf8 (vt +0x88, a1 1), flags byte car+0x75 bit 5 cleared.
+#   Proved: tests/untamed_car.rs (untamed_car_preload_is_the_originals, untamed_vehicle_force_is_the_originals).

@@ -294,6 +294,7 @@ fn read_keys(img: &Image) -> Keys {
         wings: (0..wings.max(0) as u32).map(|i| wing(wing_ptr + 0x20 * i)).collect(),
         tires: core::array::from_fn(|k| read_tire_keys(img, img.tires[k])),
         engine: Some(read_engine_keys(img)),
+        untamed: false,
     }
 }
 

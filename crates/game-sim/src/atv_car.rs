@@ -225,6 +225,9 @@ pub enum Call {
     /// per-frame slot (vt `+0x488`); and last, always, the vehicle's base update.
     Ghost(F),
     HazardClock { dt: F, time: F, sunk: bool },
+    /// Untamed's hazard clock (MD81d, with [`Update::untamed`]): called straight, as the quad's
+    /// ([`crate::quad::Call::UntamedHazardSurface`]), told also whether any tire is solidly down.
+    UntamedHazardClock { dt: F, time: F, sunk: bool, grounded: bool },
     ClassStep,
     VehicleUpdate(F),
     /// What SLUS-21104's own calls hand out in turn, when [`Own`] answers them (MD106b). The vehicle
@@ -450,6 +453,8 @@ pub struct Update {
     pub tire_surface: [u8; 4],
     /// Some tire is on a hazard surface; kept from the last frame it was measured.
     pub on_hazard: bool,
+    /// Untamed's update (MD81d): the hazard clock is [`Call::UntamedHazardClock`]. Off, SLUS-21104's.
+    pub untamed: bool,
 }
 
 /// Counted past this many frames, the latch ([`Car::latch`]) is let go.
@@ -476,11 +481,16 @@ pub fn update(u: &mut Update, car: &mut Car, body: &mut Body, dt: F, s: &mut imp
         } else {
             let surface = u.tire_surface.map(|k| u.surfaces[usize::from(k)]);
             u.on_hazard = surface.iter().any(|s| s.hazard);
-            let sunk = u.on_hazard && car.tires.iter().any(|t| t.solid);
+            let grounded = car.tires.iter().any(|t| t.solid);
+            let sunk = u.on_hazard && grounded;
             let time = surface[REAR_LEFT].time.max(surface[REAR_RIGHT].time);
             let time = surface[FRONT_RIGHT].time.max(time);
             let time = surface[FRONT_LEFT].time.max(time);
-            s.call(Call::HazardClock { dt, time, sunk }, car, body);
+            if u.untamed {
+                s.call(Call::UntamedHazardClock { dt, time, sunk, grounded }, car, body);
+            } else {
+                s.call(Call::HazardClock { dt, time, sunk }, car, body);
+            }
         }
         s.call(Call::ClassStep, car, body);
     }
@@ -543,6 +553,9 @@ impl<S: Steps> Steps for OwnUpdate<'_, S> {
             Call::Ghost(dt) => ghost_step(self.w, car, body, dt, self.rest),
             Call::HazardClock { dt, time, sunk } => {
                 crate::handling::tail::stuck(&mut Base { w: &mut *self.w, rest: &mut *self.rest, car, body }, sunk, dt, time)
+            }
+            Call::UntamedHazardClock { dt, time, sunk, grounded } => {
+                crate::handling::untamed::stuck(&mut Base { w: &mut *self.w, rest: &mut *self.rest, car, body }, sunk, grounded, dt, time)
             }
             Call::VehicleUpdate(dt) => crate::handling::tail::base(&mut Base { w: &mut *self.w, rest: &mut *self.rest, car, body }, dt),
             c => self.rest.call(c, car, body),
@@ -806,6 +819,9 @@ pub struct Keys {
     /// The engine's (MD125): with them [`Pieces`] runs the engine's step, its shift and its reverse
     /// switch; without, those go to the rest.
     pub engine: Option<EngineKeys>,
+    /// Untamed's preload cue (MD81d): played while the push is on rather than while its timer is
+    /// above 0 (they differ with `PreloadTime` 0, Untamed's baja, and while armed). Off, SLUS-21104's.
+    pub untamed: bool,
 }
 
 /// The preload's state: it may wind up, it is pushing, it is armed by a forward lean; the wind-up
@@ -1051,6 +1067,19 @@ const HAND_BRAKE: crate::bindings::Command = crate::bindings::Command(0x18);
 ///
 /// SLUS-21104 adds to MX Unleashed's the held brake; the remap is inline (`adda.s`/`madd.s`).
 pub fn input(k: &InputKeys, p: &mut Input, speed: F, side_slip: F, stick: (F, F), pad_word: F, value: impl Fn(crate::bindings::Command) -> F) {
+    input_on(false, k, p, speed, side_slip, stick, pad_word, value);
+}
+
+/// **Untamed's input step** (MD81d, SLUS-21701's): [`input`] with the clutch any strength over 0
+/// (SLUS-21104's any but 0; they part on a negative strength). Untamed also reads each command but the
+/// gas as not pressed when it is unbound, reads the stick and the strengths off the controls block and
+/// the pad word as player 0's preload command: the caller's `stick`, `pad_word` and `value`.
+pub fn input_untamed(k: &InputKeys, p: &mut Input, speed: F, side_slip: F, stick: (F, F), pad_word: F, value: impl Fn(crate::bindings::Command) -> F) {
+    input_on(true, k, p, speed, side_slip, stick, pad_word, value);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn input_on(untamed: bool, k: &InputKeys, p: &mut Input, speed: F, side_slip: F, stick: (F, F), pad_word: F, value: impl Fn(crate::bindings::Command) -> F) {
     use crate::bindings::Command;
     (p.stick, p.lean) = stick;
     p.pad_word = pad_word;
@@ -1074,7 +1103,13 @@ pub fn input(k: &InputKeys, p: &mut Input, speed: F, side_slip: F, stick: (F, F)
     }
     p.vehicle_brake = if !(value(Command::BRAKE) <= 0.0) || !p.gassed { F::ONE } else { F::ZERO };
     p.hand_brake = if value(HAND_BRAKE) <= 0.0 { F::ZERO } else { F::ONE };
-    p.clutch = if value(Command::CLUTCH) == 0.0 { F::ZERO } else { F::ONE };
+    p.clutch = if untamed {
+        if value(Command::CLUTCH) <= 0.0 { F::ZERO } else { F::ONE }
+    } else if value(Command::CLUTCH) == 0.0 {
+        F::ZERO
+    } else {
+        F::ONE
+    };
     if value(Command::LEFT) != 0.0 {
         p.stick = F(-1.0);
         p.dpad = true;
@@ -1297,7 +1332,7 @@ fn preload(k: &Keys, s: &mut State, car: &Car, body: &mut Body, h: F) -> bool {
         }
     }
     if !p.cued {
-        if !(p.timer <= 0.0) {
+        if if k.untamed { p.active } else { !(p.timer <= 0.0) } {
             p.cued = true;
             return true;
         }
@@ -1595,6 +1630,9 @@ pub struct Vehicle {
     pub held: Option<crate::atv_contact::Held>,
     /// Node 0's subtree, its first child first; empty, and [`Call::SubtreeOutOfDate`] goes on.
     pub below: Vec<Below>,
+    /// Untamed's vehicle force (MD81d): after the gravity it adds a zero force as well (`xyz`), which
+    /// turns a -0 into +0. Off, SLUS-21104's.
+    pub untamed: bool,
 }
 
 /// A node of the car node's subtree as marking it out of date sees it: its first child and next
@@ -1671,6 +1709,9 @@ pub fn vehicle_force<S: Steps>(o: &mut Own<'_, S>, body: &mut Body, car: &mut Ca
         return;
     }
     body.force = body.force.merge(Dest::XYZ, body.force.add(o.v.gravity));
+    if o.v.untamed {
+        body.force = body.force.merge(Dest::XYZ, body.force.add(Vf::ZERO));
+    }
     if o.v.record {
         o.call(Call::GravityRecord, car, body);
     }
@@ -2744,13 +2785,17 @@ pub struct Load {
     /// The tire nodes' points in the car's frame (before `TireWidth`), in [`FRONT_LEFT`]..[`REAR_RIGHT`]
     /// order.
     pub points: [Vf; 4],
+    /// Driven by MX vs. ATV Untamed's (SLUS-21701) car step (MD81d): the keys' preload cue, the
+    /// vehicle's force and the update's hazard clock are Untamed's ([`Keys::untamed`],
+    /// [`Vehicle::untamed`], [`Update::untamed`]). Off (as read), SLUS-21104's.
+    pub untamed: bool,
 }
 
 impl Load {
     /// Read a parsed file for one of the five cars.
     pub fn read(ini: &crate::phy::Ini, machine: crate::car::MxvatvMachine, half_box: Vf, points: [Vf; 4], curve: &crate::camera::CurveTable) -> Load {
         let part = crate::handling::mass::Part::read(&ini.section("Mass Properties"), half_box, curve);
-        Load { file: crate::car::Car::read_mxvatv(ini, machine), part, points }
+        Load { file: crate::car::Car::read_mxvatv(ini, machine), part, points, untamed: false }
     }
 
     /// Read the file's bytes.
@@ -2822,6 +2867,7 @@ impl Load {
             },
             tires: core::array::from_fn(|k| self.tire_keys(k)),
             engine: self.engine_keys(),
+            untamed: self.untamed,
         }
     }
 
@@ -2951,6 +2997,7 @@ impl Load {
             gravity: self.part.gravity.force,
             drag,
             flags: SPAWN_FLAGS | u8::from(f.reset_off_edge) | (u8::from(f.reset_below_minimum) << 6),
+            untamed: self.untamed,
             ..Vehicle::default()
         }
     }
@@ -3037,7 +3084,7 @@ impl Load {
             car,
             body: self.body(),
             vehicle: self.vehicle(drag),
-            update: Update { vehicle_state: Some(MODE_RIDING), ..Update::default() },
+            update: Update { vehicle_state: Some(MODE_RIDING), untamed: self.untamed, ..Update::default() },
             updated: Updated::default(),
             table: AcosTable::build(),
             noise: crate::noise::SmoothNoise::build(&mut crate::rng::Rng::default()),
@@ -3135,7 +3182,11 @@ impl Ride {
         use crate::input::Axis;
         let s = (pad.axis_through(Axis::LeftX, stick), pad.axis_through(Axis::LeftY, stick));
         let (speed, side_slip) = (self.car.speed, self.car.side_slip);
-        input(&self.input_keys, &mut self.input, speed, side_slip, s, F::ZERO, |c| table.value(pad, c));
+        if self.update.untamed {
+            input_untamed(&self.input_keys, &mut self.input, speed, side_slip, s, F::ZERO, |c| table.value(pad, c));
+        } else {
+            input(&self.input_keys, &mut self.input, speed, side_slip, s, F::ZERO, |c| table.value(pad, c));
+        }
         self.controls();
     }
 
