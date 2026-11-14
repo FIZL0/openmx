@@ -289,3 +289,37 @@ which the walk did not reach.
   `Vehicles.dat` unlocks `MX Pro Physics` and `ATV Pro Physics` from the start, where Unleashed locks them.
 - `AIChrctr.aip` (AI riders) has no Unleashed file under that name and was not compared.
 - The VehUI models, materials and textures (render data) were listed, not compared.
+
+## SLUS-21701's car step against SLUS-21104's (MD81d)
+
+Static, as MD81a/b's, done beside MD81c (the monster truck, branch `task/MD81c`, same day) and agreeing
+with it function for function. The baja's object is the buggy's class (vtable `0x003cec60` in SLUS-21104),
+so its world step, update, class update and input step were paired by layout order and compared by
+`research/md81d/opdiff.py`: a mnemonic-only diff that folds branch-likely, drops nops, moves, `$sp` and
+64/128-bit loads and stores, keeps `$zero`-based immediates and cancels a deletion matched by an equal
+insertion elsewhere. Each span runs to the next function's start (Ghidra's sizes were short). Addresses are
+in `research/oracle.txt # MD81d`.
+
+| function | SLUS-21701 against SLUS-21104 | port |
+|---|---|---|
+| controls, travel cofg, PreProcess, aero (rodata equal), anti-slide, Force; tire step and its parts, probe, tire clear; engine, shift; vehicle pre/post; ground query | the same, fields moved (register renames, frame shifts, pointer reloads kept in registers) | — |
+| contact sort | the count read `lhu` | — |
+| buggy/baja class update | the distance clause `!(d <= 0)` (as MD81b's quad; parts only on a `-0` distance) and an assert's line | not ported |
+| PostProcess | the yaw clamp by two compares (as MD81c: the same for any normal limit) | not ported |
+| **preload** | the cue posted while the push is on (`+0xc44`), not while its timer is above 0 | `Keys::untamed`, proved |
+| **vehicle force** | a second body add-force of a zero quad after the gravity | `Vehicle::untamed`, proved |
+| **update** | the hazard clock called straight with the grounded word (any tire's `+0xa4`) | `Update::untamed` → `handling::untamed::stuck` (MD81b) |
+| **input step** | reworked (MD81c's row): the clutch `<= 0 ? 0 : 1`, unbound commands read as not pressed, the controls block's stick and strengths, the pad word off the preload command | the clutch only: `atv_car::input_untamed` |
+| body integrate | MD81c's per-time angular damping (`powf(d, 0.333/h)`) | not ported: the baja's damping keys are `1, 1, 1` in both files, and `powf(1, y)` is 1 |
+
+**Where the preload parts.** With `PreloadTime` 0 (Untamed's baja has `[Preload]` off) a fired preload
+is active with its timer 0: Untamed posts the cue, SLUS-21104 does not. And while armed the timer winds
+above 0: SLUS-21104 posts the cue while winding, Untamed only once it fires. The state words are the same.
+
+**Switched together.** `atv_car::Load::untamed` (false as read) sets the three switches in `Load::keys`,
+`Load::vehicle` and `Load::ride`, and `Ride::pad` takes Untamed's input step with it. Nothing sets it yet,
+so every replay and hash is SLUS-21104's. The node world update (MD81b's `Scene::update_untamed`) is not
+routed for the car, as it is not for the quad: the scene's methods call `update` inside.
+
+No Untamed baja drive was captured and there is no pack: see the journal
+(`research/journal/2026-11-14-md81d-untamed-baja`) and its follow-ups.

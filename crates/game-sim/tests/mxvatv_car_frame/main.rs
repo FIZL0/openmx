@@ -1085,6 +1085,7 @@ fn read_mx(ee: &Ee, p: &Ptrs) -> Mx {
         wings: Vec::new(),
         tires: core::array::from_fn(|k| read_tire_keys(ee, p.tires[k])),
         engine: Some(read_engine_keys(ee, p)),
+        untamed: false,
     };
     let wheel_word = ee.u32_at(vstate_object + mx::WHEEL);
     let penalty_object = ee.u32_at(c(mx::PENALTY_OBJECT));
