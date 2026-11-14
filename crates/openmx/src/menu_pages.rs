@@ -1753,6 +1753,8 @@ impl Menu {
             M::Biplane => Category::Biplane,
             M::Buggy | M::Monster | M::Baja => Category::Cars,
             M::Helicopter => Category::Kiowa,
+            // MX vs. ATV's cars (MD39c) have no knobs of their own yet: the bike's page.
+            M::MxvatvCar => Category::Bike,
         })
     }
 
