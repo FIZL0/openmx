@@ -640,6 +640,27 @@ impl State for crate::race::Race {
                     w.f("odometer", e.card.odometer);
                     w.vf("ahead", e.card.ahead);
                     w.vf("to_track", e.card.to_track);
+                    let (j, n) = (&e.card.jumps, &e.card.warnings);
+                    w.i32("jumps", j.count);
+                    for (name, x) in [
+                        ("length", j.length),
+                        ("best_length", j.best_length),
+                        ("height", j.height),
+                        ("best_height", j.best_height),
+                        ("air_time", j.air_time),
+                        ("best_air_time", j.best_air_time),
+                        ("rise", j.rise),
+                        ("grounded", j.grounded),
+                        ("off_warning", n.off),
+                        ("off_blink", n.off_blink),
+                        ("off_nag", n.off_nag),
+                        ("wrong_way", n.wrong),
+                        ("wrong_blink", n.wrong_blink),
+                    ] {
+                        w.f(name, x);
+                    }
+                    w.vf("takeoff", j.takeoff);
+                    w.vf("landing", j.landing);
                     w.u32("records", c.records.len() as u32);
                 }
             });

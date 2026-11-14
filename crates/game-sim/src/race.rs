@@ -904,6 +904,14 @@ pub mod race_flags {
     /// The zone list is live: the handlers ask [`super::zone_crossings`] of every rider's step (S292),
     /// and the race handler tests each card against it ([`super::LineLists::others`], S294a).
     pub const ZONES: u32 = 0x200;
+    /// Each card's off-track warning runs ([`super::RaceRules::off_warning`], S302).
+    pub const OFF_WARNINGS: u32 = 0x800;
+    /// Each card's wrong-way warning runs ([`super::RaceRules::wrong_way`], S302).
+    pub const WRONG_WAY_WARNINGS: u32 = 0x1000;
+    /// Cleared by every card's jump watch once a landing has settled ([`super::RaceRules::jumps`]).
+    /// The watch's own card bit, [`super::race_card_flags::JUMP_TO_JUDGE`], is never cleared there: the
+    /// original clears this manager bit in its place.
+    pub const JUMP_JUDGED: u32 = 0x10_0000;
 }
 
 /// The score manager's race kind (its `+0x60`). Not the event's activity type: a live sx01 single race
@@ -1966,8 +1974,22 @@ pub mod race_card_flags {
     pub const OUT_OF_TIME: u64 = 0x4000;
     /// The card's time is held: it does not count down.
     pub const CLOCK_HELD: u64 = 0x4_0000;
-    /// A computer rider's aim: the handler aims it through a helper the port leaves out.
+    /// The rider is aimed along the path ahead of its kept spot ([`super::RaceRules::computer_aim`]).
+    /// Every card of sx01's live race carries it, the human's too (C31).
     pub const COMPUTER_AIM: u64 = 0x80_0000;
+    /// The card's jumps are watched ([`super::RaceRules::jumps`]).
+    pub const WATCHES_JUMPS: u64 = 0x8_0000;
+    /// The rider is on the ground, as the card is told from outside the handler (what sets it was not
+    /// traced; the jump watch reads it so: it times a jump while the bit is clear).
+    pub const GROUNDED: u64 = 0x400;
+    /// The jump watch's copy of [`GROUNDED`] from the tick before.
+    pub const WAS_GROUNDED: u64 = 0x800;
+    /// A landing waits to be judged against the card's bests. The handler never clears it.
+    pub const JUMP_TO_JUDGE: u64 = 0x10_0000;
+    /// The off-track warning shows ([`super::RaceRules::off_warning`]; it blinks).
+    pub const OFF_WARNING: u64 = 0x1000;
+    /// The wrong-way warning shows ([`super::RaceRules::wrong_way`]; it blinks).
+    pub const WRONG_WAY: u64 = 0x2000;
     /// The off-track clock has a limit ([`super::RaceRules::off_limit`]).
     pub const OFF_TRACK_LIMIT: u64 = 0x100_0000;
     /// The race does not wait for this card even if it is [`WAITED_FOR`].
@@ -1991,6 +2013,70 @@ pub struct RaceCard {
     pub ahead: Vf,
     /// Off the track, the unit step from the rider back to the path (`+0x180`).
     pub to_track: Vf,
+    /// The jump watch's words ([`RaceRules::jumps`]).
+    pub jumps: Jumps,
+    /// The off-track and wrong-way warnings' clocks ([`RaceRules::off_warning`],
+    /// [`RaceRules::wrong_way`]).
+    pub warnings: Warnings,
+}
+
+/// A score card's jump watch (S302): each jump's take-off and landing, its length, height and time in
+/// the air, and the card's best of each.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Jumps {
+    /// Jumps taken (`+0xe8`).
+    pub count: i32,
+    /// The last jump's length, take-off to landing in a straight line (`+0xec`), and the best
+    /// (`+0xf0`).
+    pub length: F,
+    pub best_length: F,
+    /// The last jump's height, the most of [`Jumps::rise`] while in the air (`+0xf4`), and the best
+    /// (`+0xf8`).
+    pub height: F,
+    pub best_height: F,
+    /// The last jump's time in the air (`+0xfc`), and the best (`+0x100`).
+    pub air_time: F,
+    pub best_air_time: F,
+    /// The rider's height as the card is told it from outside the handler (`+0x104`; not traced).
+    pub rise: F,
+    /// Where the rider took off (`+0x190`) and landed (`+0x1a0`).
+    pub takeoff: Vf,
+    pub landing: Vf,
+    /// How long the rider has been on the ground since it landed (`+0x1b0`).
+    pub grounded: F,
+}
+
+/// A score card's warning clocks (S302).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Warnings {
+    /// How long the rider has been off the track (`+0x150`), the warning's blink clock (`+0x154`) and
+    /// its nag clock (`+0x15c`).
+    pub off: F,
+    pub off_blink: F,
+    pub off_nag: F,
+    /// How long the rider has been facing away from the path (`+0x160`), and that warning's blink clock
+    /// (`+0x164`).
+    pub wrong: F,
+    pub wrong_blink: F,
+}
+
+/// The score manager's words the jump watch, the warnings and the computer aim read (S302); sx01's
+/// live race in brackets (C31).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WatchRules {
+    /// How long after a landing it is judged (`+0xf4`; 0.5).
+    pub jump_settle: F,
+    /// How long off the track before the off-track warning shows (`+0xcc`; −1), how fast it blinks
+    /// (`+0xd0`; 0 or less: it does not) and how often the off-track nag repeats (`+0xdc`; 1).
+    pub off_after: F,
+    pub off_blink: F,
+    pub off_nag: F,
+    /// How long facing away from the path before the wrong-way warning shows (`+0xe0`; 1; below 0: at
+    /// once), and how fast it blinks (`+0xe4`; −1).
+    pub wrong_after: F,
+    pub wrong_blink: F,
+    /// How far along the paths the computer aim looks ahead (`+0x104`; 45).
+    pub aim_ahead: F,
 }
 
 /// The score manager's words the race handler reads, beside the lap line's.
@@ -2008,6 +2094,8 @@ pub struct RaceRules {
     /// Off the track and far from the line, the rider is pointed this many of the track's search
     /// reaches ahead along the path (`+0xd8`).
     pub aim_reach: F,
+    /// The words of the per-card helpers behind the manager's and the card's flags (S302).
+    pub watch: WatchRules,
 }
 
 /// What the race handler tells a card's listeners, in the order it tells them.
@@ -2021,6 +2109,26 @@ pub enum RaceNotice {
     OffTrack,
     /// The rider has been off the track for [`RaceRules::off_limit`].
     OffTooLong,
+    /// The rider took off ([`RaceRules::jumps`]; the owner and chain's `+0x90` with 0, the manager's
+    /// listeners' `+0x88`).
+    TookOff,
+    /// The rider landed (the same slots with 1).
+    Landed,
+    /// The landed jump is the card's longest, highest, longest in the air (told to the manager's
+    /// listeners first: `+0x7c` / `+0x80` / `+0x84`, then the owner and chain's `+0x74` / `+0x78` /
+    /// `+0x7c`).
+    LongestJump,
+    HighestJump,
+    LongestAir,
+    /// The off-track nag, every [`WatchRules::off_nag`] while the rider is off the track (manager's
+    /// listeners `+0x64` first, then owner and chain `+0x54`).
+    OffNag,
+    /// The off-track warning shows or goes ([`race_card_flags::OFF_WARNING`]; listeners `+0x60`, then
+    /// owner and chain `+0x50`).
+    OffWarning { on: bool },
+    /// The wrong-way warning shows or goes ([`race_card_flags::WRONG_WAY`]; listeners `+0x68`, then
+    /// owner and chain `+0x58`).
+    WrongWay { on: bool },
     /// The card's time ran out.
     OutOfTime,
     /// The rider crossed checkpoint `line` (its index in [`LineLists::checkpoints`]): through it, or
@@ -2085,9 +2193,12 @@ impl RaceRules {
     /// race clock of the manager's first card, which a card still out when every waited-for rider is
     /// done ([`race_flags::ALL_OUT`]) is timed from.
     ///
-    /// The card's spots and the line's must name nodes. Left out (see the S293 journal): the helpers
-    /// behind manager flags `0x800` / `0x1000` and card flag `0x8_0000`, and
-    /// [`race_card_flags::COMPUTER_AIM`]'s aim. A track with no line lists; see
+    /// Beside these, behind flags: the jump watch after the odometer
+    /// ([`race_card_flags::WATCHES_JUMPS`], [`RaceRules::jumps`]), the computer aim in place of the
+    /// kept-spot one ([`race_card_flags::COMPUTER_AIM`], [`RaceRules::computer_aim`]), and after the way
+    /// back the two warnings ([`race_flags::OFF_WARNINGS`], [`race_flags::WRONG_WAY_WARNINGS`]).
+    ///
+    /// The card's spots and the line's must name nodes. A track with no line lists; see
     /// [`RaceRules::card_on_lines`].
     #[allow(clippy::too_many_arguments)]
     pub fn card(
@@ -2137,9 +2248,17 @@ impl RaceRules {
         if fl & rf::COMPUTER_AIM == 0 {
             said.push(RaceNotice::Aim { point: card.lap.seen.now, ahead: card.look });
             card.aim = card.lap.kept_spot;
+        } else if let Some(aim) = self.computer_aim(card, track, course) {
+            said.push(aim);
         }
         if card.lap.on_track == 0 {
             self.back_to_track(card, track, course, &mut said);
+        }
+        if self.lap.flags & race_flags::OFF_WARNINGS != 0 {
+            said.extend(self.off_warning(dt, card));
+        }
+        if self.lap.flags & race_flags::WRONG_WAY_WARNINGS != 0 {
+            said.extend(self.wrong_way(dt, card));
         }
         if read(self.time_limit) > F::ZERO && read(card.lap.time_left) > F::ZERO {
             let fl = card.lap.flags;
@@ -2175,6 +2294,9 @@ impl RaceRules {
         let step = card.lap.seen.now.sub(card.lap.seen.last);
         let len = fpu::madd(fpu::madda(fpu::mula(step.x(), step.x()), step.y(), step.y()), step.z(), step.z());
         card.odometer = card.odometer + F(fpu::sqrt(len));
+        if card.lap.flags & rf::WATCHES_JUMPS != 0 {
+            said.extend(self.jumps(dt, card));
+        }
         track.path_ahead(card.lap.spot, &mut card.ahead);
         let (reach_ahead, reach_behind) = (track.ahead, track.behind);
         let start = card.lap.kept_spot;
@@ -2367,6 +2489,234 @@ impl RaceRules {
             card.lap.off_track = F::ZERO;
             said.push(RaceNotice::OffTooLong);
         }
+    }
+}
+
+// --- the race handler's per-card helpers (S302) ---------------------------------------------------
+
+/// The word the computer aim's look-ahead reads as its first draw: it passes no draws, and the original
+/// reads through the null pointer, the word at the bottom of memory (the kernel's first instruction,
+/// as C31's RAM image holds it). Only a fork of path flag `0x20` reads it; as a draw it picks the first
+/// link of any fork with fewer than 106.
+const NULL_DRAW: u32 = 0x3c1a_8001;
+
+/// How near the line, by path distance from the kept spot, the computer aim's point is drawn back
+/// along the way ahead (the handler's 10).
+const AIM_PULL_NEAR: F = F(10.0);
+
+/// The handler's helpers tell the card's owner and chain first, the manager's listeners after, or the
+/// other way round; the notice says which slots, and the port keeps the order in its list.
+impl RaceRules {
+    /// The jump watch, `dt` long, for a card with [`race_card_flags::WATCHES_JUMPS`]. In the air
+    /// ([`race_card_flags::GROUNDED`] clear) the ground clock is 0; the first tick off the ground
+    /// (by [`race_card_flags::WAS_GROUNDED`]) marks the take-off, counts the jump and starts its height
+    /// and air time over; every tick in the air the height keeps the most of [`Jumps::rise`] and the
+    /// air time runs. On the ground the ground clock runs, and the first tick there marks the landing
+    /// and the jump's length and sets [`race_card_flags::JUMP_TO_JUDGE`]. A landing to judge is held
+    /// against the card's bests once the rider has stood [`WatchRules::jump_settle`] on the ground —
+    /// every tick from then, since the card's bit stays: the original clears the manager's
+    /// [`race_flags::JUMP_JUDGED`] instead.
+    pub fn jumps(&mut self, dt: F, card: &mut RaceCard) -> Vec<RaceNotice> {
+        use race_card_flags as rf;
+        let mut said = Vec::new();
+        let now = card.lap.seen.now;
+        let flags = &mut card.lap.flags;
+        let j = &mut card.jumps;
+        if *flags & rf::GROUNDED == 0 {
+            j.grounded = F::ZERO;
+            if *flags & rf::WAS_GROUNDED != 0 {
+                j.takeoff = now;
+                j.height = F::ZERO;
+                j.count = j.count.wrapping_add(1);
+                said.push(RaceNotice::TookOff);
+                j.air_time = F::ZERO;
+            }
+            if lt(j.height, j.rise) {
+                j.height = j.rise;
+            }
+            j.air_time = j.air_time + dt;
+            *flags &= !rf::WAS_GROUNDED;
+        } else {
+            j.grounded = j.grounded + dt;
+            if *flags & rf::WAS_GROUNDED == 0 {
+                j.landing = now;
+                let d = j.landing.sub(j.takeoff);
+                j.length = F(fpu::sqrt(fpu::madd(fpu::madda(fpu::mula(d.x(), d.x()), d.y(), d.y()), d.z(), d.z())));
+                *flags |= rf::JUMP_TO_JUDGE;
+                said.push(RaceNotice::Landed);
+            }
+            *flags |= rf::WAS_GROUNDED;
+        }
+        if *flags & rf::JUMP_TO_JUDGE != 0 && le(self.watch.jump_settle, j.grounded) {
+            if lt(j.best_length, j.length) {
+                j.best_length = j.length;
+                said.push(RaceNotice::LongestJump);
+            }
+            if lt(j.best_height, j.height) {
+                j.best_height = j.height;
+                said.push(RaceNotice::HighestJump);
+            }
+            if lt(j.best_air_time, j.air_time) {
+                j.best_air_time = j.air_time;
+                said.push(RaceNotice::LongestAir);
+            }
+            self.lap.flags &= !race_flags::JUMP_JUDGED;
+        }
+        said
+    }
+
+    /// The off-track warning, `dt` long, under [`race_flags::OFF_WARNINGS`]. On the track its clocks
+    /// are 0 and a showing warning goes. Off it the clock runs; the nag is told whenever its clock is
+    /// 0, the clock running on and back to 0 past [`WatchRules::off_nag`]; and once off for
+    /// [`WatchRules::off_after`] the warning shows — for good with no blink, else turned over each time
+    /// its blink clock runs past [`WatchRules::off_blink`] (and on the tick it starts, when the clock is
+    /// still 0).
+    pub fn off_warning(&self, dt: F, card: &mut RaceCard) -> Vec<RaceNotice> {
+        use race_card_flags as rf;
+        let mut said = Vec::new();
+        let w = &mut card.warnings;
+        let flags = &mut card.lap.flags;
+        let mut turned = false;
+        if card.lap.on_track != 0 {
+            w.off = F::ZERO;
+            w.off_blink = F::ZERO;
+            w.off_nag = F::ZERO;
+            if *flags & rf::OFF_WARNING != 0 {
+                turned = true;
+                *flags &= !rf::OFF_WARNING;
+            }
+        } else {
+            w.off = w.off + dt;
+            if is_zero(w.off_nag) {
+                said.push(RaceNotice::OffNag);
+            }
+            w.off_nag = w.off_nag + dt;
+            if !le(w.off_nag, self.watch.off_nag) {
+                w.off_nag = F::ZERO;
+            }
+            if !lt(w.off, self.watch.off_after) {
+                if le(self.watch.off_blink, F::ZERO) {
+                    if *flags & rf::OFF_WARNING == 0 {
+                        turned = true;
+                        *flags |= rf::OFF_WARNING;
+                    }
+                } else {
+                    w.off_blink = w.off_blink + dt;
+                    if !lt(w.off_blink, self.watch.off_blink) {
+                        w.off_blink = F::ZERO;
+                    }
+                    if is_zero(w.off_blink) {
+                        turned = true;
+                        *flags ^= rf::OFF_WARNING;
+                    }
+                }
+            }
+        }
+        if turned {
+            said.push(RaceNotice::OffWarning { on: *flags & rf::OFF_WARNING != 0 });
+        }
+        said
+    }
+
+    /// The wrong-way warning, `dt` long, under [`race_flags::WRONG_WAY_WARNINGS`]. A card not taking
+    /// part, or whose rider looks along the path's way ahead ([`RaceCard::look`] against
+    /// [`RaceCard::ahead`], above 0), has its clocks at 0 and a showing warning goes. Else the clock
+    /// runs, and once at [`WatchRules::wrong_after`] (or that below 0) the warning shows — for good with
+    /// no blink, else turned over each time its blink clock runs past [`WatchRules::wrong_blink`].
+    pub fn wrong_way(&self, dt: F, card: &mut RaceCard) -> Vec<RaceNotice> {
+        use race_card_flags as rf;
+        let mut said = Vec::new();
+        let (l, a) = (card.look, card.ahead);
+        let w = &mut card.warnings;
+        let flags = &mut card.lap.flags;
+        let mut turned = false;
+        let along = F(fpu::madd(fpu::madda(fpu::mula(l.x(), a.x()), l.y(), a.y()), l.z(), a.z()));
+        if *flags & card_flags::TAKING_PART == 0 || !le(along, F::ZERO) {
+            w.wrong = F::ZERO;
+            w.wrong_blink = F::ZERO;
+            if *flags & rf::WRONG_WAY != 0 {
+                turned = true;
+                *flags &= !rf::WRONG_WAY;
+            }
+        } else {
+            w.wrong = w.wrong + dt;
+            if !lt(w.wrong, self.watch.wrong_after) || lt(self.watch.wrong_after, F::ZERO) {
+                if !le(self.watch.wrong_blink, F::ZERO) {
+                    w.wrong_blink = w.wrong_blink + dt;
+                    if !lt(w.wrong_blink, self.watch.wrong_blink) {
+                        w.wrong_blink = F::ZERO;
+                    }
+                    if is_zero(w.wrong_blink) {
+                        turned = true;
+                        *flags ^= rf::WRONG_WAY;
+                    }
+                } else if *flags & rf::WRONG_WAY == 0 {
+                    turned = true;
+                    *flags |= rf::WRONG_WAY;
+                }
+            }
+        }
+        if turned {
+            said.push(RaceNotice::WrongWay { on: *flags & rf::WRONG_WAY != 0 });
+        }
+        said
+    }
+
+    /// The computer aim, for a racing card with [`race_card_flags::COMPUTER_AIM`] in place of the
+    /// kept-spot aim: `None`, nothing written, unless the rider is on the track and its kept spot names
+    /// a node with one after it.
+    ///
+    /// From the kept spot the aim walks on node by node (each at its start) past nodes whose `+4` word
+    /// has bit 0, stopping at the line's node or a path's last node — and from a last node it steps
+    /// back to the end of the stretch before. That spot is the card's [`RaceCard::aim`]. From its point
+    /// (the rider's own when it has none) the rider looks [`WatchRules::aim_ahead`] along the paths
+    /// ([`crate::ai::follow::look_ahead`], at the card's `+0x108` speed): the way is the unit step to
+    /// the place found, or else the path's way ahead at the aim's node (none: `(0, 0, 0, 1)`). Within
+    /// 10 of the line from the kept spot the point is drawn back along the way by what is left of the
+    /// 10. The owner and chain hear the point and the way.
+    pub fn computer_aim(&self, card: &mut RaceCard, track: &mut TrackPaths, course: &Course) -> Option<RaceNotice> {
+        if card.lap.on_track == 0 {
+            return None;
+        }
+        let kept = card.lap.kept_spot;
+        let (p, first) = kept.at()?;
+        let len = track.paths[p].nodes.len();
+        if first + 1 >= len {
+            return None;
+        }
+        let (mut node, mut along) = (first, kept.along);
+        while node + 1 < len && track.paths[p].nodes[node].word_04 & 1 != 0 && course.line_spot.at() != Some((p, node)) {
+            node += 1;
+            along = F::ZERO;
+        }
+        if node + 1 == len {
+            node -= 1;
+            along = F::ONE;
+        }
+        let mut aim = Spot::on(p, node, along);
+        card.aim = aim;
+        let now = card.lap.seen.now;
+        let mut point = now;
+        if !track.spot_point(&mut aim, &mut point) {
+            point = now;
+        }
+        let speed = F(f32::from_bits(card.lap.record_word));
+        let draws = [F(f32::from_bits(NULL_DRAW)); 10];
+        let mut there = Spot::default();
+        let mut ahead = Vf::new(0.0, 0.0, 0.0, 1.0);
+        if crate::ai::follow::look_ahead(track, self.watch.aim_ahead, speed, F(-1.0), aim, now, &draws, false, false, &mut there, None) {
+            // The place found is never on a path's last node, so its point is always written.
+            let mut at = ahead;
+            track.spot_point(&mut there, &mut at);
+            ahead = unit(at.merge(Dest::XYZ, at.sub(point)));
+        } else if !track.path_ahead(aim, &mut ahead) {
+            ahead = Vf::new(0.0, 0.0, 0.0, 1.0);
+        }
+        if lt(card.lap.to_line_kept, AIM_PULL_NEAR) {
+            let pull = ahead.mul(Vf::splat((AIM_PULL_NEAR - card.lap.to_line_kept).0));
+            point = point.merge(Dest::XYZ, point.sub(pull));
+        }
+        Some(RaceNotice::Aim { point, ahead })
     }
 }
 
@@ -2698,7 +3048,7 @@ pub struct TrackPath {
 pub struct PathNode {
     /// Its id (`+0`).
     pub id: i32,
-    /// Tag `0x17`'s word (`+4`).
+    /// Tag `0x17`'s word (`+4`). The computer aim walks on past a node with bit 0 set.
     pub word_04: u32,
     /// Its three points (`+0x10`, `+0x20`, `+0x30`; tags 9, `0xa`, `0xb`), `w` 0. The first is the
     /// path's own line.
@@ -4265,7 +4615,7 @@ impl Default for TrackPaths {
 /// The score manager's words on a supercross race, as sx01's live race holds them (S282c's image,
 /// C31's boot): a ranked race (`0x5e00`; the drop sets bit 1) of `laps` laps keeping ten lap records,
 /// a 30-second finish wait, no time limit, no below-the-path limit, five seconds off the track, an aim
-/// one reach ahead.
+/// one reach ahead, and the jump watch's and the warnings' words as C31's manager holds them.
 pub fn supercross_rules(laps: i32) -> RaceRules {
     RaceRules {
         lap: LapRules {
@@ -4283,12 +4633,22 @@ pub fn supercross_rules(laps: i32) -> RaceRules {
         time_limit: F::ZERO,
         off_limit: F(5.0),
         aim_reach: F(1.0),
+        watch: WatchRules {
+            jump_settle: F(0.5),
+            off_after: F(-1.0),
+            off_blink: F(-1.0),
+            off_nag: F(1.0),
+            wrong_after: F(1.0),
+            wrong_blink: F(-1.0),
+            aim_ahead: F(45.0),
+        },
     }
 }
 
 /// A human's score card flags before the drop, as sx01's live race holds them: a player the race
-/// waits for, with the off-track limit and the bits whose helpers are not ported (`0x400`, `0x800`,
-/// `0x8_0000`, `0x80_0000`).
+/// waits for, with the off-track limit, the jump watch and the computer aim, standing on the ground
+/// (`0x400`, `0x800`). Nothing in the ride tells the card its rider left the ground: the jump watch
+/// sees it standing throughout.
 pub const HUMAN_CARD: u64 = 0x0188_0c04;
 /// A computer rider's: no player bit, `0x08` and `0x10_0000` beside the rest.
 pub const COMPUTER_CARD: u64 = 0x0198_0c08;

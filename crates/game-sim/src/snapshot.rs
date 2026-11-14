@@ -1061,13 +1061,16 @@ wire!(crate::race::Race { gate, cards, music_in, music_held, tip_in, stage, tip_
 // A race's laps (P313): the track's paths go with them, as their checkpoint marks and route words
 // change on the way round.
 wire!(crate::race::Laps { rules, course, lists, cards, track });
-wire!(crate::race::RaceRules { lap, below_limit, time_limit, off_limit, aim_reach });
+wire!(crate::race::RaceRules { lap, below_limit, time_limit, off_limit, aim_reach, watch });
+wire!(crate::race::WatchRules { jump_settle, off_after, off_blink, off_nag, wrong_after, wrong_blink, aim_ahead });
 wire!(crate::race::LapRules { flags, kind, laps, ghost_runs, record_limit, free_records, finish_wait, finish_clock, time_limit });
 wire!(crate::race::Course { line, line_spot, lap_length });
 wire!(crate::race::LineLists { checkpoints, others, reach });
 wire!(crate::race::ListGate { gate, spot });
 wire!(crate::race::Entry { player, card });
-wire!(crate::race::RaceCard { lap, on_path, odometer, aim, look, ahead, to_track });
+wire!(crate::race::RaceCard { lap, on_path, odometer, aim, look, ahead, to_track, jumps, warnings });
+wire!(crate::race::Jumps { count, length, best_length, height, best_height, air_time, best_air_time, rise, takeoff, landing, grounded });
+wire!(crate::race::Warnings { off, off_blink, off_nag, wrong, wrong_blink });
 wire!(crate::race::LapCard { flags, to_line_kept, to_line, progress, laps_length, lap_length, place, laps, runs, on_track, lap_time, lap_start, best_lap, best_lap_no, seen, spot, kept_spot, race_time, lap_clock, gap, off_track, time_left, attack_clock, record_word, lines_passed, records, gate, gates_this_lap, gates_passed });
 wire!(crate::race::LapRecord { time, start, word, lap, place });
 wire!(crate::race::Spot { path, piece, along });
