@@ -604,6 +604,11 @@ impl Seat {
             if was_closed && !closed(&self.sim) {
                 let at = self.sim.rider.ride.transform().0[3];
                 println!("race: gate dropped at tick {}, rider at {:.2},{:.2},{:.2}", self.sim.ticks, at.x(), at.y(), at.z());
+                // P313a: and where the AI riders were held behind it.
+                for i in 1..self.sim.players().min(self.sim.ai.as_ref().map_or(0, |l| l.pilots.len() + 1)) {
+                    let at = self.sim.rider_of(i).ride.transform().0[3];
+                    println!("race: AI rider {} at {:.2},{:.2},{:.2} at the drop", i + 1, at.x(), at.y(), at.z());
+                }
             }
         }
         self.pass_back(dt, me, controls, did);
@@ -5795,7 +5800,15 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             race_start::finish_prop(&[p], bound)
         });
         let laps = args.race.as_ref().map_or(0, |r| r.laps as i32);
-        s.laps = file.as_deref().and_then(|f| race_start::laps(f, &mut sim, finish.as_ref(), laps, &[(at, game_sim::race::HUMAN_CARD)]));
+        // P313a: in a one-player race the grid's other lanes are AI riders', a computer's card each.
+        let mut cards = vec![(at, game_sim::race::HUMAN_CARD)];
+        if riders == 1 {
+            for &(spot, _) in &s.grid[1..] {
+                let (on, _) = sim_world::World::ground(&mut sim, Vf::new(spot.x(), 1.0e4, spot.z(), 1.0));
+                cards.push((Vf::new(spot.x(), on.y(), spot.z(), 1.0), game_sim::race::COMPUTER_CARD));
+            }
+        }
+        s.laps = file.as_deref().and_then(|f| race_start::laps(f, &mut sim, finish.as_ref(), laps, &cards));
         match &s.laps {
             Some(l) => println!(
                 "race: laps on {} — lap {:.2}, line at {:.2},{:.2},{:.2}{}",
@@ -5934,6 +5947,37 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         let p = r.ride.position();
         println!("player {}: starts at {:.0}, {:.0}, {:.0}", i + 2, p.x(), p.y(), p.z());
     }
+    // P313a: a one-player race's AI riders, on the first's bike, each in its card's lane of the
+    // grid, stood on the ground under it and facing the way the grid does.
+    let race_ai: Vec<Rider> = match &race_start {
+        Some(s) if riders == 1 => s.grid[1..]
+            .iter()
+            .map(|&(spot, facing)| {
+                let (on, _) = sim_world::World::ground(&mut sim, Vf::new(spot.x(), 1.0e4, spot.z(), 1.0));
+                let mut rider = new_rider(&phy, Vf::new(spot.x(), on.y(), spot.z(), 1.0), Vf::new(facing.x(), 0.0, facing.z(), 0.0));
+                rider.fifty = game_sim::track::fifty_reach(&bike_words[0]);
+                rider
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    let race_start = race_start.map(|mut s| {
+        for (card, r) in race_ai.into_iter().enumerate().map(|(k, r)| (k + 1, r)) {
+            let p = r.ride.position();
+            let card_i = card as i32;
+            println!(
+                "race: AI rider {} in lane {} place {}; grid {:.2},{:.2},{:.2}",
+                card + 1,
+                s.activity.lanes[card],
+                s.activity.starting_place(card_i),
+                p.x(),
+                p.y(),
+                p.z()
+            );
+            s.ai.push(r);
+        }
+        s
+    });
     // Where a plane with no parked copy starts (P113): beside the start line on this ride's own
     // ground — a mod map's or a world's too — on its wheels, one a seat, a local seat's or an online
     // one's. Empty without the plane.
@@ -7505,8 +7549,17 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // P327: the race the first seat's session steps, its gate closed over the rider where it stands.
     if let Some(start) = &race_start {
         let sim = &mut seats[0].sim;
-        let m = sim.rider.ride.transform();
-        sim.race = Some(Box::new(start.race((m.0[3], m.0[2]))));
+        // P313a: and its AI riders, the session's players after the human, on the first's bike.
+        for r in &start.ai {
+            sim.add_player(phy.clone(), r.clone());
+        }
+        let riders: Vec<(Vf, Vf)> = (0..sim.players())
+            .map(|i| {
+                let m = sim.rider_of(i).ride.transform();
+                (m.0[3], m.0[2])
+            })
+            .collect();
+        sim.race = Some(Box::new(start.race_of(&riders)));
     }
     for (i, (rider, phy)) in others.into_iter().zip(other_phys).enumerate() {
         // Every player has a plane of their own, parked in their bay of the lot (P87) or, on a map
@@ -7605,6 +7658,22 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             let w = s.sim.seek.as_deref().expect("loaded");
             println!("ai seek: {} targets, {} zones, {} riders, {slots} slots", w.targets.len(), w.groups.len(), w.sets.len());
         }
+    }
+    // P313a: the race's AI riders get their brains, off the bike's character file, once the
+    // seeker world is in.
+    if let Some(start) = race_start.as_ref().filter(|s| !s.ai.is_empty()) {
+        let file = disc.res(&bike_member).and_then(|res| res.read_suffix("AIChrctr.aip"));
+        if let Err(e) = &file {
+            println!("race: no AI character file — {e}");
+        }
+        let file = file.ok().map(|b| game_sim::phy::Ini::parse_bytes(&b));
+        let roster = race_start::spawn_ai(&mut seats[0].sim, start.riders, file.as_ref(), race_start::AI_SEED);
+        let skills: Vec<String> = roster.ai.iter().map(|r| format!("{}", r.skill)).collect();
+        println!("race: {} AI riders, skills {}", roster.ai.len(), skills.join(" "));
+    }
+    if let Some(laps) = race_start.as_ref().and_then(|s| s.laps.as_ref()) {
+        let computers = laps.cards.iter().filter(|e| e.player != 0).count();
+        println!("race: {} cards, {} computer", laps.cards.len(), computers);
     }
     let mut world = World { place: sim, seats, tape: recorder, played_dt: None };
     // `--fly-at` (V96): the first seat's plane flying high over the world from the first tick, at

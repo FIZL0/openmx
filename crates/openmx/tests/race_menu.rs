@@ -84,3 +84,34 @@ fn a_free_ride_on_the_same_track_is_no_race() {
     let Some(said) = ride(&[]) else { return };
     assert!(said.lines().all(|l| !l.starts_with("race:")), "{said}");
 }
+
+/// P313a: a one-player race fills the grid's other lanes with AI riders. `--racers 4` gives three,
+/// each in a lane of its own behind the closed gate, with its brain spawned, and a computer's card
+/// each beside the human's on the lap line. The gate holds them until the drop.
+#[test]
+fn a_race_of_four_has_three_ai_riders_behind_the_gate() {
+    let Some(said) = ride(&["--race", "--laps", "3", "--racers", "4"]) else { return };
+    let start = line(&said, "race: 3 laps, 4 riders;").unwrap_or_else(|| panic!("no race start:\n{said}"));
+    let gate = xyz(start, "gate at");
+    let human_lane: i32 = start.split("lane ").nth(1).and_then(|l| l.split_whitespace().next()).and_then(|n| n.parse().ok()).unwrap_or_else(|| panic!("{start}"));
+    let ai: Vec<&str> = said.lines().filter(|l| l.starts_with("race: AI rider ") && l.contains(" in lane ")).collect();
+    assert_eq!(ai.len(), 3, "{said}");
+    let mut lanes = vec![human_lane];
+    for (k, l) in ai.iter().enumerate() {
+        assert!(l.starts_with(&format!("race: AI rider {} in lane ", k + 2)), "{l}");
+        lanes.push(l.split("lane ").nth(1).and_then(|n| n.split_whitespace().next()).and_then(|n| n.parse().ok()).unwrap_or_else(|| panic!("{l}")));
+        let grid = xyz(l, "grid");
+        assert!(grid[2] < gate[2] - 2.0 && (grid[0] - gate[0]).abs() < 60.0, "{l} behind {start}");
+    }
+    lanes.sort_unstable();
+    lanes.dedup();
+    assert_eq!(lanes.len(), 4, "every rider in a lane of its own: {ai:?}, {start}");
+    assert!(line(&said, "race: 3 AI riders, skills ").is_some(), "no AI brains:\n{said}");
+    assert!(line(&said, "race: 4 cards, 3 computer").is_some(), "no computer cards:\n{said}");
+    // Still behind the gate when it drops.
+    for k in 2..=4 {
+        let held = line(&said, &format!("race: AI rider {k} at ")).unwrap_or_else(|| panic!("AI rider {k} not seen at the drop:\n{said}"));
+        let at = xyz(held, "at");
+        assert!(at[2] < gate[2], "{held}: through the closed gate at {gate:?}");
+    }
+}
