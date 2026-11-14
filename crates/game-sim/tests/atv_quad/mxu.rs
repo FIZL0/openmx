@@ -134,7 +134,7 @@ fn md123a_rigs(pre: &Ee, at: &image::Image, ride: &mut quad::Ride) {
     let record = game_sim::handling::record::read(&|a| pre.u32_at(a), at.record);
     let held = game_sim::handling::record::held(&|a| pre.u32_at(a), at.record).expect("the record's resolution fields");
     let handles = quad::Rays { active: riding, active_too: riding, record: riding, wreck, riding };
-    ride.recorded = Some(quad::Recorded { record, held, riding: rays(riding), wreck: rays(wreck), rays: handles });
+    ride.recorded = Some(quad::Recorded { record, held, riding: rays(riding), wreck: rays(wreck), rays: handles, parts: Default::default() });
     // The wreck body built on WreckATVm.col when the file is there: its rays are the image's wreck part's.
     let col = Kit::load().ok().map(|kit| kit.ctx("mxvatv-ps2/md37a").join(quad::WRECK_FILE));
     if let Some(bytes) = col.and_then(|p| std::fs::read(p).ok()) {
@@ -142,8 +142,8 @@ fn md123a_rigs(pre: &Ee, at: &image::Image, ride: &mut quad::Ride) {
         let from_file = game_sim::flight_search::Rays::of(&file).pairs();
         let bits = |r: &[[Vf; 2]]| r.iter().flat_map(|s| s.iter().flat_map(|v| [v.x(), v.y(), v.z(), v.w()].map(f32::to_bits))).collect::<Vec<_>>();
         assert_eq!(bits(&from_file), bits(&rays(wreck)), "WreckATVm.col's rays are the image's wreck part's");
-        let mut w = quad::WreckBody { riding: quad::Col::made(riding), ..quad::WreckBody::default() };
-        ride.build_wreck(&mut w, &file, at.parts[3], wreck, image::IMAGE_QUAD, |_| 0);
+        let w = quad::WreckBody { riding: quad::Col::made(riding), ..quad::WreckBody::default() };
+        ride.build_wreck(&w, &mut |name: &str| (name == quad::WRECK_FILE).then(|| file.clone()), at.parts[3], wreck, image::IMAGE_QUAD, |_| 0);
         let r = ride.recorded.as_ref().unwrap();
         assert_eq!((r.rays.wreck, r.rays.riding, r.wreck.len()), (wreck, riding, from_file.len()));
         println!("wreck body built on {}: {} rays, bit for bit the image's", quad::WRECK_FILE, from_file.len());
@@ -892,4 +892,133 @@ fn the_quad_ridden_off_free09s_edge_is_out_of_bounds() {
         assert!((put - k) as f32 > window + max, "put back {} frames after the throw, inside the window and MaxWreckTime", put - k);
         assert!(!ride.down(), "put back but still down");
     });
+}
+
+/// The image's trigger probe and wreck rays as MD133a reads them: their flag bytes (`+0x126`), owner
+/// (`+0x88`), record (`+0x90`), node (`+0x174`), whether their scene child (`+0x24`) hangs under the
+/// quad's (its parent, `+0x38`, the quad's `+0xc`), and the probe's kind and stood box.
+struct ImagePart {
+    flags: u8,
+    owner: u32,
+    record: u32,
+    node: u32,
+    hung: bool,
+    state: game_sim::atv_sync::Collidable,
+}
+
+fn image_part(pre: &Ee, part: u32) -> ImagePart {
+    let q = image::IMAGE_QUAD;
+    ImagePart {
+        flags: pre.u8_at(part + 0x126),
+        owner: pre.u32_at(part + 0x88),
+        record: pre.u32_at(part + 0x90),
+        node: pre.u32_at(part + 0x174),
+        hung: pre.u32_at(part + 0x38) == q + 0xc,
+        state: image::collidable(pre, part, &mut Vec::new()),
+    }
+}
+
+/// MD133a — **the wreck body's parts against the spawned quad's** (MD37a's image), built on
+/// WreckATVm.col as the image-seeded ride builds them ([`md123a_rigs`], [`quad::Ride::build_wreck`]):
+///
+/// - both made, hung under the quad's node and on its scene node, as the image's are (the scene
+///   child's parent and `+0x174`), owned by the quad and the wreck rays by its record;
+/// - the flag bytes: the wreck rays' the image's whole (the constructor's bits 1|2, then flags 3); the
+///   trigger probe's in the three bits its flags call writes (bit 4 the image's own, see the journal);
+/// - the wreck rays' box off the file (the tree's root box and the first segment) the image part's,
+///   and readied: stood at the frame the image's part was stood at (its `+0x130`), the centre and reach
+///   are the image's `+0x50` and `+0x70` bit for bit; the ride's own stand is at its scene node's frame.
+#[test]
+fn the_quads_wreck_parts_are_the_images() {
+    use game_sim::atv_sync::{Kind, slot};
+    let Some(pre) = image() else { return };
+    if quad_cols().is_none() {
+        return;
+    }
+    let (r, at) = image::read_ride(&pre, image::IMAGE_QUAD, F::from_bits(0x3d08_850a)).unwrap_or_else(|e| panic!("{e}"));
+    let mut ride = quad::Ride::new(r.s.p.clone(), r.s.q.clone(), seed::body(&|a| pre.u32_at(a), at.body), r.bike.clone(), Vec::<Call>::new());
+    md123a_rigs(&pre, &at, &mut ride);
+    let q = image::IMAGE_QUAD;
+    let (trigger, wreck) = (image_part(&pre, at.parts[3]), image_part(&pre, at.parts[4]));
+    let parts = &ride.recorded.as_ref().expect("the record").parts;
+    for (what, ours, img) in [("trigger probe", parts.trigger, &trigger), ("wreck rays", parts.wreck, &wreck)] {
+        assert!(ours.made && ours.hung, "the {what}: {ours:?}");
+        assert!(img.hung, "the image's {what} hangs under the quad's node");
+        assert_eq!(img.node, pre.u32_at(q + 0xe4), "the image's {what} is on the quad's scene node");
+        assert_eq!(img.owner, q, "the image's {what} is the quad's");
+    }
+    // The image-seeded ride's trigger is not shaped (its node attach is the image's): only the wreck
+    // rays' load put them on the node.
+    assert!(parts.wreck.on_node && !parts.trigger.on_node);
+    assert!(parts.body.trigger_owned && parts.body.wreck_owned && parts.body.wreck_record);
+    assert_eq!((trigger.record, wreck.record), (0, pre.u32_at(q + 0xc8)), "the image's records");
+    assert_eq!(parts.wreck.flags, wreck.flags, "the wreck rays' flag byte");
+    assert_eq!(parts.trigger.flags & 0x0e, trigger.flags & 0x0e, "the trigger probe's flag byte, its flags call's bits");
+    assert_eq!(parts.trigger.flags, quad::part_flags(quad::PART_MADE_FLAGS, 2));
+
+    let ours = ride.bike.parts.collidables.states[slot(quad::Part::Wreck)];
+    let bits = |v: Vf| [v.x(), v.y(), v.z(), v.w()].map(f32::to_bits);
+    let (Kind::Rays { tree: Some(t), bound }, Kind::Rays { tree: Some(it), bound: ib }) = (ours.kind, wreck.state.kind) else {
+        panic!("the wreck rays' kinds: ours {:?}, the image's {:?}", ours.kind, wreck.state.kind)
+    };
+    assert_eq!([bits(t.0), bits(t.1), bits(bound.0), bits(bound.1)], [bits(it.0), bits(it.1), bits(ib.0), bits(ib.1)], "the wreck rays' tree box and bound");
+    let mut scene = ride.bike.parts.scene;
+    scene.update(0);
+    assert_eq!(ours.frame.map(bits), scene.nodes[0].world.map(bits), "the wreck rays stood at the quad's node");
+    let mut again = ours;
+    again.centre = wreck.state.centre;
+    game_sim::atv_sync::stand(&mut again, &wreck.state.frame);
+    assert_eq!((bits(again.centre), again.reach.to_bits()), (bits(wreck.state.centre), wreck.state.reach.to_bits()), "readied at the image's frame");
+    println!(
+        "MD133a: wreck rays flags {:#04x}, trigger {:#04x} (image {:#04x}), reach {} at the image's frame",
+        parts.wreck.flags, parts.trigger.flags, trigger.flags, again.reach.0
+    );
+}
+
+/// MD133a — **the trigger probe's segments and the wreck file from the loader**, on the quad made from
+/// its files ([`quad::Ride::rig_on`]): the wreck rays' file is asked for once, by
+/// [`quad::WRECK_FILE`]'s name; the trigger probe is shaped on the loaded wheels, its four segments
+/// C28's spawned quad's trigger probe's (its `*(+0x180)`, four `0x20` rays, in its tree's order) bit
+/// for bit; and with the file not
+/// there the parts are still made and hung, the wreck rays empty and their box the default.
+#[test]
+fn the_quads_trigger_and_wreck_file_come_from_its_loader() {
+    use game_sim::atv_sync::slot;
+    let (Some(files), Some(cols)) = (quad_files(), quad_cols()) else { return };
+    let path = Kit::load().unwrap().ctx("mxvatv-ps2/md37a").join("c28-atv-r-spawn.ee.bin");
+    let Ok(pre) = Ee::from_ram(&path) else {
+        skip(&format!("{} is not there (C28's; memory: md37a ATV states live in s2)", path.display()));
+        return;
+    };
+    const QUAD: u32 = 0x0150_a990;
+    let trigger = pre.u32_at(QUAD + 0x1430);
+    let v = |a: u32| Vf::new(pre.f32_at(a), pre.f32_at(a + 4), pre.f32_at(a + 8), pre.f32_at(a + 12));
+    let (mut ride, load) = from_files(&files, v(QUAD + 0x50), v(QUAD + 0x60), None);
+    let mut asked = Vec::new();
+    ride.rig_on(&load, &cols.0, &mut |name: &str| {
+        asked.push(name.to_string());
+        Some(cols.1.clone())
+    });
+    assert_eq!(asked, [quad::WRECK_FILE], "the names the wreck body asked its loader for");
+    let r = ride.recorded.as_ref().unwrap();
+    assert_eq!(r.wreck.len(), cols.1.segments.len());
+    let segs = ride.trigger_segments().expect("the trigger probe's segments");
+    assert!(r.parts.trigger.on_node, "the shaped trigger probe is on the quad's node");
+    let rays = pre.u32_at(trigger + 0x180);
+    assert_eq!(pre.u32_at(trigger + 0x178), 4, "the image's trigger probe has four rays");
+    // The probe's rays are stored in its tree's order (the shape rebuilds the tree), not the wheels':
+    // the four are compared as a set, each bit for bit.
+    let bits = |s: [Vf; 2]| s.map(|v| [v.x(), v.y(), v.z(), v.w()].map(f32::to_bits));
+    let mut ours: Vec<_> = segs.iter().map(|s| bits(*s)).collect();
+    let mut img: Vec<_> = (0..4u32).map(|k| bits([v(rays + 0x20 * k), v(rays + 0x20 * k + 0x10)])).collect();
+    ours.sort();
+    img.sort();
+    assert_eq!(ours, img, "the trigger probe's segments: ours {segs:?}");
+
+    let (mut bare, load) = from_files(&files, v(QUAD + 0x50), v(QUAD + 0x60), None);
+    bare.rig_on(&load, &cols.0, &mut |_: &str| None);
+    let p = &bare.recorded.as_ref().unwrap().parts;
+    assert!(p.wreck.made && p.wreck.hung && p.trigger.made && bare.trigger_segments().is_some());
+    assert!(bare.recorded.as_ref().unwrap().wreck.is_empty(), "no file, no wreck rays");
+    assert_eq!(bare.bike.parts.collidables.states[slot(quad::Part::Wreck)].kind, game_sim::atv_sync::Kind::default());
 }
