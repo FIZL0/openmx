@@ -305,6 +305,8 @@ pub(crate) fn s12e_racer(ee: &Ee, lists: &S12eLists, b: u32, r: u32) -> Racer {
         weights: Weights { heading: s12e_f(ee, r + 0x1138), aim: s12e_f(ee, r + 0x113c) },
         listening,
         listeners: Vec::new(),
+        follower: ai::follow::Follower::default(),
+        driver: ai::DriverWords::default(),
     }
 }
 
@@ -650,6 +652,7 @@ fn s12e_the_joined_tick_is_the_originals_on_free09() {
                 levers: &mut bike.levers,
                 yaw_rate: &mut bike.yaw_rate,
                 velocity: &mut bike.velocity,
+                racing: None,
             };
             let told: Told = racer.tick(&mut around, &mut rng, F(dt));
             bike.recovery = around.recovery;

@@ -7,6 +7,10 @@
 // cases each, every query and brain slot they call hooked at its real address: the hook logs what it was
 // handed (pointers by what they point at) and plays scripted answers and writes, which the port's side
 // plays too. The race driver runs once more on sx01's race image, on the three brains as they stand.
+//
+// S314b joins both into `ai::Racer`: on the same image the original's drivers run whole, nothing
+// hooked, against `Racer::drive` on racers read from it — the race driver as the brains stand, the gate
+// driver on them put in mode 4, with a stand-in gate, on the AI net and without it.
 
 use super::*;
 use game_sim::ai::Alod;
@@ -1002,4 +1006,282 @@ fn the_speed_step_matches_on_sx01s_race_image() {
         assert_eq!(each.r(2), u64::from(answer), "{b:#x}: the answer");
         assert_eq!(each.u32_at(b + 0x1e0), mine.0.to_bits(), "{b:#x}: the speed");
     }
+}
+
+/// A world the race driver must not ask.
+struct NoGround;
+
+impl World for NoGround {
+    fn ground(&mut self, at: Vf) -> (Vf, Vf) {
+        panic!("the joined race driver asked the ground at {at:?}")
+    }
+    fn solid(&mut self, _: &Bundle, _: &mut Record) -> bool {
+        panic!("the joined race driver swept the scene")
+    }
+}
+
+/// The joined race driver on sx01's race image (S314b): `ai_race_drive` run whole in the interpreter,
+/// nothing hooked — the point query on the race track, the path reach and route follower on the AI
+/// net, the motocross avoidance, the trick plan and the interface's assist all the original's own —
+/// against `ai::Racer::drive` on a racer read from the same image, its race, card, track and net. Each
+/// of the three brains drives once as it stands and then 200 more times, moved along its own heading at
+/// its own target speed between (the same on both sides). Each drive: the answer, the brain's words,
+/// the follower's, the trick clocks, the body's yaw rate and velocity, the net's scratch words and
+/// pools, and the generator.
+#[test]
+fn the_joined_race_driver_rides_sx01s_race_image() {
+    let Some(seen) = ride_sx01_joined(2, true, false) else { return };
+    assert!(seen["drives"] == 3 * 201 && seen.get("changed path").copied().unwrap_or(0) > 3, "{seen:?}");
+    assert!(seen["avoided"] > 0 && seen["kept goal"] > 0, "{seen:?}");
+}
+
+/// The joined gate driver on the same image, its brains put in mode 4 with the gate watch up: no brain
+/// is in mode 4 in any image, so the race's brains stand in. `ai_gate_drive` whole — the own path reach,
+/// the route follower, the start gate's crossing test, the net's distance and look-ahead, the seek
+/// reach and hand-off all the original's — against `ai::Racer::drive`, as the race driver above, the
+/// card's step following the ride and the seeker's words compared too.
+#[test]
+fn the_joined_gate_driver_rides_sx01s_race_image() {
+    let Some(seen) = ride_sx01_joined(4, true, true) else { return };
+    assert!(seen["drives"] == 3 * 201 && seen.get("changed path").copied().unwrap_or(0) > 3, "{seen:?}");
+    assert!(seen.get("turning back").copied().unwrap_or(0) > 0, "{seen:?}");
+}
+
+/// The joined gate driver with the brains' AI net taken away, so it aims at the card's next gate and
+/// the seek reach and hand-off run.
+#[test]
+fn the_joined_gate_driver_aims_at_the_gate_on_sx01s_race_image() {
+    let Some(seen) = ride_sx01_joined(4, false, true) else { return };
+    assert!(seen["drives"] == 3 * 201 && seen.get("handed off").copied().unwrap_or(0) > 0, "{seen:?}");
+}
+
+/// Drives each of sx01's race brains in `mode` 201 times, the original's driver against the joined
+/// port's, with or without the brain's AI `net`, the gate watch up with `watch`. What it rode through.
+fn ride_sx01_joined(mode: i32, with_net: bool, watch: bool) -> Option<std::collections::BTreeMap<&'static str, u32>> {
+    use super::path_branch::{s309_bits, s309_follower, s309_paths, s309_spot};
+    use super::sim::{S12eLists, s12e_bike, s12e_f, s12e_racer};
+    use game_sim::ai::{Around, DriverWords, Racing};
+    let image = race_image()?;
+    let at = named(&["ai_race_drive", "ai_gate_drive", "rand_state"])?;
+    let [two, four, rand_state] = at[..] else { unreachable!() };
+    let driver = if mode == 4 { four } else { two };
+    let tables = super::controls::tables(&image);
+    let dt = 0.033_333_335_f32;
+    let mut seen = std::collections::BTreeMap::<&str, u32>::new();
+    for b in S282C_RIDERS {
+        let mut ee = race_image()?;
+        // The stand-ins' changes, made alike to the image and (read after) the port's racer: the mode;
+        // the gate watch; the avoidance down in mode 4, where it is the generic vehicle pass, whose
+        // scene this test does not build;
+        let mut flags = ee.read(b + 0x30, 8) as u64 | if watch { drive::WATCH_GATE } else { 0 };
+        if mode == 4 {
+            flags &= !game_sim::ai::follow::AVOIDS;
+        }
+        // no net, and the seeker's set and target words, which index the free-ride seek world, which a
+        // race has none of.
+        ee.set_u32(b + 0xd0, mode as u32);
+        ee.set_u32(b + 0x30, flags as u32);
+        ee.set_u32(b + 0x34, (flags >> 32) as u32);
+        let net_at = ee.u32_at(b + 0xdc);
+        if !with_net {
+            ee.set_u32(b + 0xdc, 0);
+        }
+        for o in [0x340, 0x344, 0x348, 0x34c] {
+            ee.set_u32(b + o, 0);
+        }
+        let iface = ee.u32_at(b + 0x40);
+        let r = ee.u32_at(iface + 0xc);
+        let body = ee.u32_at(r + 0x7a4);
+        let race_at = ee.u32_at(b + 0xd8);
+        let (track_at, card_at) = (ee.u32_at(race_at + 0x68), ee.u32_at(b + 0xd4));
+        let line_at = ee.u32_at(track_at + 0x5c);
+        let (mut net, recs, nodes) = s309_paths(&ee, net_at);
+        let (track, track_recs, track_nodes) = s309_paths(&ee, track_at);
+        let lists = S12eLists { sets: Vec::new(), targets: Vec::new() };
+        let mut racer = s12e_racer(&ee, &lists, b, r);
+        racer.follower = s309_follower(&ee, b, &recs, &nodes).expect("the image's spot is on the AI net");
+        racer.driver = DriverWords {
+            gate_gain: s12e_f(&ee, b + 0x258),
+            goal_word: ee.u32_at(b + 0x31c),
+            goal_speed: s12e_f(&ee, b + 0x320),
+            last_speed: s12e_f(&ee, b + 0x324),
+        };
+        let mut bike = s12e_bike(&ee, b, r);
+        if mode == 4 {
+            // No card has a next gate: a copy of the track's line gate stands in, at the brain's own
+            // spot on the AI net.
+            let stand = 0x01f8_0000;
+            assert!((0..0xc0).step_by(4).all(|k| ee.u32_at(stand + k) == 0), "{stand:#x} is free in the image");
+            for k in (0..0xc0).step_by(4) {
+                ee.set_u32(stand + k, ee.u32_at(line_at + k));
+            }
+            for k in (0..12).step_by(4) {
+                ee.set_u32(stand + 0x94 + k, ee.u32_at(b + 0x220 + k));
+            }
+            ee.set_u32(card_at + 0x80, stand);
+        }
+        let gate_at = ee.u32_at(card_at + 0x80);
+        let (_, race, card, _, _) = read_drive(&ee, b);
+        let on_track = |at: u32| s309_spot(&ee, at, &track_recs, &track_nodes).expect("a spot on the race track");
+        let race = race.map(|r| Race { line_spot: on_track(line_at + 0x94), ..r });
+        let on_net = |at: u32| s309_spot(&ee, at, &recs, &nodes).expect("a spot on the AI net");
+        let mut card = card.map(|c| Card {
+            kept_spot: on_track(card_at + 0x94),
+            gate: c.gate.map(|g| Gate { spot: on_net(gate_at + 0x94), ..g }),
+            ..c
+        });
+        let gate = (gate_at != 0).then(|| game_sim::race::Gate {
+            flags: ee.u32_at(gate_at + 0x30),
+            centre: raw(got(&ee, gate_at + 0x40)),
+            normal: raw(got(&ee, gate_at + 0x50)),
+            across: raw(got(&ee, gate_at + 0x60)),
+            width: s12e_f(&ee, gate_at + 0x70),
+            height: s12e_f(&ee, gate_at + 0x74),
+            reach_sq: s12e_f(&ee, gate_at + 0x7c),
+        });
+        assert!(mode != 4 || gate.is_some(), "{b:#x}: the card has a next gate");
+        let line = (raw(got(&ee, line_at + 0x40)), raw(got(&ee, line_at + 0x50)));
+        let race_word = ee.u32_at(race_at + 0x5c);
+        assert_eq!((racer.brain.mode, racer.brain.flags), (mode, flags), "{b:#x}: the stand-in's words");
+        bike.path_net = with_net;
+        assert_eq!(racer.brain.flags & flag::KEEP_ON_TRACK, 0, "{b:#x}: the avoidance's edge push needs the track's edge");
+        assert!(bike.card.is_some_and(|c| c.bike_word != 0), "{b:#x}: the motocross avoidance");
+        let mut rng = Rng::from_state(ee.read(rand_state, 8) as u64);
+        let mut world = NoGround;
+        let mut seek_world = sk::World::default();
+
+        for step in 0..=200 {
+            let before = racer.clone();
+            ee.call(driver, &[u64::from(b)], &[dt], BUDGET * 20);
+            let told = {
+                let mut around = Around {
+                    rider: bike.rider,
+                    world: &mut world,
+                    seek_world: &mut seek_world,
+                    tables: &tables,
+                    speed_scale: bike.speed_scale,
+                    slow_radius: bike.slow_radius,
+                    slow_speed: bike.slow_speed,
+                    player: bike.player,
+                    air_cone: bike.air_cone,
+                    card: bike.card,
+                    race_phase: bike.race_phase,
+                    path_net: bike.path_net,
+                    others: &bike.others,
+                    edge: None,
+                    vehicle: None,
+                    jump: None,
+                    node: None,
+                    spot: None,
+                    tricks: None,
+                    race_state: None,
+                    live: bike.live,
+                    recovery: bike.recovery,
+                    levers: &mut bike.levers,
+                    yaw_rate: &mut bike.yaw_rate,
+                    velocity: &mut bike.velocity,
+                    racing: Some(Racing {
+                        race,
+                        card,
+                        net: with_net.then_some(&mut net),
+                        track: Some(&track),
+                        gate,
+                        line: Some(line),
+                        race_word: Some(race_word),
+                    }),
+                };
+                racer.drive(&mut around, &mut rng, F(dt))
+            };
+            let what = format!("brain {b:#x} step {step}");
+            assert!(told.missing.is_empty(), "{what}: {:?}", told.missing);
+            assert_eq!(ee.v0(), u64::from(told.answer), "{what}: the answer");
+
+            let mut theirs = written(&ee, b);
+            theirs.retain(|(n, _)| *n != "spot");
+            let rc = &racer;
+            let mine = vec![
+                ("flags", vec![rc.brain.flags as u32, (rc.brain.flags >> 32) as u32]),
+                ("controls", vec![fb(rc.brain.throttle), fb(rc.brain.brake), fb(rc.brain.steer), fb(rc.brain.pitch)]),
+                ("aim", bits(rc.seeker.aim)),
+                ("heading", bits(rc.seeker.heading)),
+                ("target speed", vec![fb(rc.seeker.speed)]),
+                ("assist", vec![fb(rc.assist_x), fb(rc.assist_z)]),
+                ("goal", vec![rc.driver.goal_word, fb(rc.driver.goal_speed)]),
+                ("last speed", vec![fb(rc.driver.last_speed)]),
+            ];
+            for ((name, got), (_, want)) in theirs.into_iter().zip(mine) {
+                assert_eq!(got, want, "{what}: {name}");
+            }
+            let theirs = s309_follower(&ee, b, &recs, &nodes).expect("the original's spot is on the AI net");
+            let mut f = rc.follower;
+            f.flags = rc.brain.flags;
+            f.state = rc.seeker.state;
+            (f.position, f.forward, f.own_speed) = (rc.senses.frame[3], rc.senses.frame[2], rc.senses.speed);
+            (f.aim, f.heading, f.speed) = (rc.seeker.aim, rc.seeker.heading, rc.seeker.speed);
+            f.reach = rc.reach;
+            f.angles = Vf::new(rc.controls.aim.0, rc.controls.heading.0, rc.controls.roll.0, f.angles.w());
+            assert_eq!(s309_bits(&theirs), s309_bits(&f), "{what}: the follower\n original {theirs:?}\n port     {f:?}");
+            assert_eq!(
+                [ee.u32_at(b + 0x15c), ee.u32_at(b + 0x200)],
+                [fb(rc.plan.since), fb(rc.plan.air)],
+                "{what}: the trick clocks"
+            );
+            assert_eq!(ee.u32_at(body + 0x284), fb(bike.yaw_rate), "{what}: the yaw rate");
+            assert_eq!(got(&ee, body + 0x260).to_vec(), bits(bike.velocity), "{what}: the velocity");
+            let (now, _, _) = s309_paths(&ee, net_at);
+            for (k, (x, y)) in now.paths.iter().zip(&net.paths).enumerate() {
+                assert_eq!((x.flags, x.dist.0.to_bits(), x.best), (y.flags, y.dist.0.to_bits(), y.best), "{what}: path {k}'s scratch words");
+            }
+            assert_eq!(
+                (now.free_routes, now.free_parents, now.free_candidates),
+                (net.free_routes, net.free_parents, net.free_candidates),
+                "{what}: the pools"
+            );
+            assert_eq!(rng.state(), ee.read(rand_state, 8) as u64, "{what}: the generator");
+            // The seeker's flag words are the brain's, compared above, and its follow word the spot's.
+            let theirs = lists.seeker(&ee, b);
+            assert_eq!(theirs.flags2, rc.moves, "{what}: the moves");
+            let theirs = sk::Seeker { follow: rc.seeker.follow, flags: rc.seeker.flags, flags2: rc.seeker.flags2, ..theirs };
+            assert_eq!(theirs, rc.seeker, "{what}: the seeker");
+            assert_eq!(got(&ee, b + 0x290).to_vec(), bits(rc.senses.last_position), "{what}: the last position");
+
+            let mut count = |k: &'static str| *seen.entry(k).or_default() += 1;
+            count("drives");
+            if rc.follower.spot.path != before.follower.spot.path {
+                count("changed path");
+            }
+            if rc.follower.draws != before.follower.draws {
+                count("drew again");
+            }
+            if rc.brain.flags & game_sim::ai::follow::AVOIDS != 0 {
+                count("avoided");
+            }
+            if card.is_some_and(|c| c.kept_spot.path != 0) {
+                count("kept goal");
+            }
+            if rc.brain.flags & drive::TURNING_BACK != 0 {
+                count("turning back");
+            }
+            if rc.seeker != before.seeker && !with_net {
+                count("handed off");
+            }
+
+            // Ride on: along the heading at the target speed, on both sides alike.
+            let go = rc.seeker.speed.0 * dt;
+            let (p, h) = (rc.senses.frame[3], rc.seeker.heading);
+            let (position, speed) = (Vf::new(p.x() + h.x() * go, p.y(), p.z() + h.z() * go, p.w()), rc.seeker.speed);
+            (racer.senses.frame[3], racer.senses.frame[2], racer.senses.speed) = (position, h, speed);
+            put(&mut ee, b + 0xc0, position);
+            put(&mut ee, b + 0xb0, h);
+            ee.set_f32(b + 0x80, speed.0);
+            // The card's step, which the gate test reads, is the ride's.
+            if let Some(c) = card.as_mut() {
+                c.seen = Seen { now: position, last: p };
+                put(&mut ee, card_at + 0x60, position);
+                put(&mut ee, card_at + 0x70, p);
+            }
+        }
+    }
+    eprintln!("sx01 joined mode {mode} (net {with_net}): {seen:?}");
+    Some(seen)
 }

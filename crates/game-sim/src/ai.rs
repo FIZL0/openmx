@@ -4855,6 +4855,26 @@ pub struct Racer {
     /// The listening bit and the listeners [`listener_walk`] tells.
     pub listening: bool,
     pub listeners: Vec<Listener>,
+    /// The path follower's own words, which the race and gate drivers' path reach and route follower
+    /// read and write ([`Racing`]). Its flag word, seeker state, position, forward, own speed, aim,
+    /// heading, speed and reach are the brain's shared ones above and are put in before each call; its
+    /// angles' first three lanes are [`Controls::aim`], [`Controls::heading`] and [`Controls::roll`].
+    pub follower: follow::Follower,
+    pub driver: DriverWords,
+}
+
+/// The race and gate drivers' own words of the brain (the rest of [`drive::Brain`] is shared: its
+/// gate speed is [`Racer::min_speed`], its gate lead the seeker's [`seek::Seeker::lead`], its longest
+/// reach [`seek::Reach::max`], its spot [`follow::Follower::spot`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DriverWords {
+    /// What the gate driver's target speed gains as the heading turns off the forward.
+    pub gate_gain: F,
+    /// The race driver's goal: the word its reach and route follower are told, and its speed.
+    pub goal_word: u32,
+    pub goal_speed: F,
+    /// The target speed as the race driver left it before its speed step.
+    pub last_speed: F,
 }
 
 /// The rider's race card, as the tick reads it.
@@ -4916,6 +4936,28 @@ pub struct Around<'a> {
     /// The body's yaw rate and velocity the assist pulls.
     pub yaw_rate: &'a mut F,
     pub velocity: &'a mut Vf,
+    /// What a brain in mode 2 or 4 drives by ([`drive::mode_two`], [`drive::mode_four`]); `None`
+    /// tells [`Told::missing`] `"mode two"` or `"mode four"` instead.
+    pub racing: Option<Racing<'a>>,
+}
+
+/// The race a mode-2 or mode-4 brain drives in, as its drivers read it.
+pub struct Racing<'a> {
+    /// The brain's race and its card ([`drive::Card::flags`] is the same word as [`Card::flags`]).
+    pub race: Option<drive::Race>,
+    pub card: Option<drive::Card>,
+    /// The brain's AI path net, `None` with none.
+    pub net: Option<&'a mut crate::race::TrackPaths>,
+    /// The race track's own paths, which the card's kept spot is on and the race driver's goal point
+    /// is asked of (on sx01 two paths, apart from the AI net's 38). `None` answers a zero point.
+    pub track: Option<&'a crate::race::TrackPaths>,
+    /// The card's next gate as the crossing test reads it (`None` answers [`crate::race::Crossing::Not`]).
+    pub gate: Option<crate::race::Gate>,
+    /// The race track's line gate's centre and normal, which the path reach looks for its spot 20
+    /// back from when its first float is below its second.
+    pub line: Option<(Vf, Vf)>,
+    /// The race's word whose bit 0 lets the route follower's side step run (`None` with no race).
+    pub race_word: Option<u32>,
 }
 
 /// What a [`Racer::tick`] asks of the rest of the game.
@@ -4933,7 +4975,9 @@ pub struct Told {
     pub vehicle: Option<VehiclePass>,
     /// Steps the tick reached that the port has not got, in order: `"path"` (the path follower after
     /// the seeker), `"vehicle avoid"` (the generic avoidance with no [`Around::vehicle`]), `"fly"` (the
-    /// flying interfaces' controller), `"mode two"` and `"mode four"`.
+    /// flying interfaces' controller), `"mode two"` and `"mode four"` (a driving brain with no
+    /// [`Around::racing`]), and `"speed step"` (the drivers' speed step under [`drive::SLOWS`], which
+    /// leaves the target speed as it is).
     pub missing: Vec<&'static str>,
 }
 
@@ -5154,14 +5198,274 @@ impl Steps for Join<'_, '_> {
         update_base(b, self, dt)
     }
 
-    fn mode_two(&mut self, _: &mut Brain, _: F) -> bool {
-        self.told.missing.push("mode two");
-        false
+    fn mode_two(&mut self, b: &mut Brain, dt: F) -> bool {
+        self.drive(b, dt, false)
     }
 
-    fn mode_four(&mut self, _: &mut Brain, _: F) -> bool {
-        self.told.missing.push("mode four");
-        false
+    fn mode_four(&mut self, b: &mut Brain, dt: F) -> bool {
+        self.drive(b, dt, true)
+    }
+}
+
+impl Join<'_, '_> {
+    /// The race driver, or with `four` the gate driver, on the brain's shared words and the
+    /// [`Around::racing`] it drives by.
+    fn drive(&mut self, b: &mut Brain, dt: F, four: bool) -> bool {
+        let Some(mut racing) = self.around.racing.take() else {
+            self.told.missing.push(if four { "mode four" } else { "mode two" });
+            return false;
+        };
+        let mut d = self.drive_brain(b);
+        let (race, card, net) = (racing.race, racing.card, racing.net.is_some());
+        let mut calls = Driven { join: self, brain: b, racing: &mut racing };
+        let answer = if four {
+            drive::mode_four(&mut d, race.is_some(), card.as_ref(), net, &mut calls, dt)
+        } else {
+            drive::mode_two(&mut d, race.as_ref(), card.as_ref(), net, &mut calls, dt)
+        };
+        self.drive_back(b, &d);
+        self.around.racing = Some(racing);
+        answer
+    }
+
+    /// The drivers' view of the brain, out of each word's home.
+    fn drive_brain(&self, b: &Brain) -> drive::Brain {
+        let r = &*self.racer;
+        drive::Brain {
+            flags: b.flags,
+            speed: r.senses.speed,
+            forward: r.senses.frame[2],
+            position: r.senses.frame[3],
+            throttle: b.throttle,
+            brake: b.brake,
+            steer: b.steer,
+            pitch: b.pitch,
+            aim: r.seeker.aim,
+            heading: r.seeker.heading,
+            target_speed: r.seeker.speed,
+            assist_x: r.assist_x,
+            assist_z: r.assist_z,
+            spot: r.follower.spot,
+            reach_max: r.reach.max,
+            gate_speed: r.min_speed,
+            gate_gain: r.driver.gate_gain,
+            gate_lead: r.seeker.lead,
+            goal_word: r.driver.goal_word,
+            goal_speed: r.driver.goal_speed,
+            last_speed: r.driver.last_speed,
+        }
+    }
+
+    /// The words the drivers write, back to their homes (the ones they only read stay).
+    fn drive_back(&mut self, b: &mut Brain, d: &drive::Brain) {
+        let r = &mut *self.racer;
+        b.flags = d.flags;
+        (b.throttle, b.brake, b.steer, b.pitch) = (d.throttle, d.brake, d.steer, d.pitch);
+        (r.seeker.aim, r.seeker.heading, r.seeker.speed) = (d.aim, d.heading, d.target_speed);
+        (r.assist_x, r.assist_z) = (d.assist_x, d.assist_z);
+        r.follower.spot = d.spot;
+        r.driver.goal_word = d.goal_word;
+        r.driver.goal_speed = d.goal_speed;
+        r.driver.last_speed = d.last_speed;
+    }
+
+    /// The path follower with the brain's shared words put in.
+    fn follower<'f>(r: &'f mut Racer, b: &Brain) -> &'f mut follow::Follower {
+        let f = &mut r.follower;
+        f.flags = b.flags;
+        f.state = r.seeker.state;
+        f.position = r.senses.frame[3];
+        f.forward = r.senses.frame[2];
+        f.own_speed = r.senses.speed;
+        (f.aim, f.heading, f.speed) = (r.seeker.aim, r.seeker.heading, r.seeker.speed);
+        f.reach = r.reach;
+        f.angles = Vf::new(r.controls.aim.0, r.controls.heading.0, r.controls.roll.0, f.angles.w());
+        f
+    }
+
+    /// The path follower's shared words, back to their homes.
+    fn follower_back(r: &mut Racer, b: &mut Brain) {
+        let f = &r.follower;
+        b.flags = f.flags;
+        r.seeker.state = f.state;
+        (r.seeker.aim, r.seeker.heading, r.seeker.speed) = (f.aim, f.heading, f.speed);
+        (r.controls.aim, r.controls.heading, r.controls.roll) = (F(f.angles.x()), F(f.angles.y()), F(f.angles.z()));
+    }
+
+    /// The avoidance (the brain's vt+0x74) once on the heading and the target speed, as the route's
+    /// tail runs it but without the tail's 45° cone: the motocross pass ([`avoid`]) for a mode-2 brain
+    /// whose card has its bike word, else the generic one ([`avoid_vehicle`]), else nothing and
+    /// `"vehicle avoid"` told.
+    fn avoid_once(&mut self, b: &mut Brain) {
+        let (r, a) = (&mut *self.racer, &mut *self.around);
+        let me = Me {
+            position: r.senses.frame[3],
+            heading: r.seeker.heading,
+            velocity: r.senses.velocity,
+            speed: r.seeker.speed,
+            held_speed: r.senses.speed,
+            progress: a.card.map_or(F(0.0), |c| c.progress),
+        };
+        let mut steer = Steer { direction: r.seeker.heading, speed: r.seeker.speed };
+        if b.mode == 2 && a.card.is_some_and(|c| c.bike_word != 0) {
+            let edge = a.edge.as_mut().map(|e| &mut **e as &mut dyn FnMut(Vf) -> Option<Vf>);
+            self.told.feelers = avoid(&r.avoid, &me, &mut b.flags, a.others, edge, &mut steer, &a.tables.curve);
+        } else if let Some(v) = a.vehicle.as_mut() {
+            self.told.vehicle = avoid_vehicle(
+                &r.avoid, &r.vehicle, &me, &mut b.flags, a.others, v, a.world, &mut steer, &mut a.recovery, self.rng,
+                &a.tables.curve,
+            );
+        } else {
+            self.told.missing.push("vehicle avoid");
+            return;
+        }
+        (r.seeker.heading, r.seeker.speed) = (steer.direction, steer.speed);
+    }
+}
+
+/// The drivers' calls ([`drive::Calls`]) answered by the ported pieces: the path queries on the
+/// brain's net, the path reach and route follower ([`follow::reach`], [`follow::route_follow`]), the
+/// gate's crossing test, the seeker's reach and hand-off, the avoidance, the trick plan and the rider
+/// assist as the route's tail runs them. Each call puts the drivers' words into their homes first and
+/// takes them back after. The speed step is not ported: it tells [`Told::missing`] `"speed step"`.
+struct Driven<'j, 'r, 'a> {
+    join: &'j mut Join<'r, 'a>,
+    brain: &'j mut Brain,
+    racing: &'j mut Racing<'a>,
+}
+
+impl Driven<'_, '_, '_> {
+    /// Run `f` on the joined brain with the drivers' words in their homes, and take them back.
+    fn with<T>(&mut self, d: &mut drive::Brain, f: impl FnOnce(&mut Join, &mut Brain, &mut Racing) -> T) -> T {
+        self.join.drive_back(self.brain, d);
+        let out = f(self.join, self.brain, self.racing);
+        *d = self.join.drive_brain(self.brain);
+        out
+    }
+
+    /// The seeker's view of the ride, as the route builds it.
+    fn ride(j: &Join) -> seek::Ride {
+        let (r, a) = (&*j.racer, &*j.around);
+        seek::Ride {
+            position: r.senses.frame[3],
+            last_position: r.senses.last_position,
+            forward: r.senses.frame[2],
+            speed: r.senses.speed,
+            min_speed: r.min_speed,
+            speed_scale: a.speed_scale,
+            slow_radius: a.slow_radius,
+            slow_speed: a.slow_speed,
+            player: a.player,
+            reach: r.reach,
+            race_phase: a.race_phase,
+            bike: a.card.map(|c| seek::Mount { flags: c.flags, settle: c.settle }),
+            path_net: a.path_net,
+        }
+    }
+}
+
+impl drive::Calls for Driven<'_, '_, '_> {
+    fn spot_point(&mut self, spot: crate::race::Spot) -> Vf {
+        // The original goes on with its stack buffer when the query fails; the port's is zero.
+        let (mut spot, mut out) = (spot, Vf::new(0.0, 0.0, 0.0, 0.0));
+        if let Some(track) = self.racing.track {
+            track.spot_point(&mut spot, &mut out);
+        }
+        out
+    }
+
+    fn place(&mut self, b: &mut drive::Brain) {
+        if let Some(net) = self.racing.net.as_deref_mut() {
+            follow::spot(net, b.position, false, &mut b.spot, None);
+        }
+    }
+
+    fn reach(&mut self, d: &mut drive::Brain, point: Vf, a: F, bb: F) -> F {
+        let follow = d.goal_word != 0;
+        self.with(d, |j, b, racing| {
+            let Some(net) = racing.net.as_deref_mut() else { return F(0.0) };
+            let line = racing.line;
+            let out = follow::reach(Join::follower(j.racer, b), net, a, bb, follow, point, line);
+            Join::follower_back(j.racer, b);
+            out
+        })
+    }
+
+    fn path_reach(&mut self, d: &mut drive::Brain, _: F) -> F {
+        let keep = self.racing.card.is_some_and(|c| c.flags & crate::race::card_flags::OUT != 0);
+        self.with(d, |j, _, racing| {
+            let r = &mut *j.racer;
+            let mut point = Vf::new(0.0, 0.0, 0.0, 0.0);
+            if let Some(net) = racing.net.as_deref() {
+                net.spot_point(&mut r.follower.spot, &mut point);
+            }
+            let (position, reach) = (r.senses.frame[3], r.reach);
+            drive::path_reach(position, point, reach.base, reach.gain, reach.max, keep, &mut r.senses.last_position)
+        })
+    }
+
+    fn route_follow(&mut self, d: &mut drive::Brain, follow: u32, dt: F, reach: F) {
+        self.with(d, |j, b, racing| {
+            let Some(net) = racing.net.as_deref_mut() else { return };
+            let race_word = racing.race_word;
+            follow::route_follow(Join::follower(j.racer, b), net, dt, reach, follow != 0, None, race_word, j.rng);
+            Join::follower_back(j.racer, b);
+        });
+    }
+
+    fn crossed(&mut self, _: &drive::Gate, seen: crate::race::Seen) -> crate::race::Crossing {
+        self.racing.gate.map_or(crate::race::Crossing::Not, |g| g.crossed(seen.now, seen.last))
+    }
+
+    fn distance(&mut self, from: crate::race::Spot, to: crate::race::Spot) -> F {
+        self.racing.net.as_deref_mut().map_or(F(0.0), |net| net.distance(from, to, true))
+    }
+
+    fn look_ahead(&mut self, b: &mut drive::Brain, from: crate::race::Spot, reach: F, speed: F, limit: F) {
+        let draws = self.join.racer.follower.draws;
+        if let Some(net) = self.racing.net.as_deref_mut() {
+            follow::look_ahead(net, reach, speed, limit, from, b.position, &draws, false, false, &mut b.spot, None);
+        }
+    }
+
+    fn seek_reach(&mut self, b: &mut drive::Brain, point: Vf, dir: Vf) -> F {
+        seek::reach(b.position, point, dir, &self.join.racer.reach)
+    }
+
+    fn seek_hand_off(&mut self, d: &mut drive::Brain, point: Vf, dir: Vf, speed: F, distance: F, lead: F, _: F, reach: F) {
+        self.with(d, |j, b, _| {
+            let ride = Driven::ride(j);
+            let s = &mut j.racer.seeker;
+            s.flags = b.flags;
+            seek::hand_off(s, &ride, point, dir, speed, distance, lead, reach);
+            b.flags = s.flags;
+        });
+    }
+
+    fn avoid(&mut self, d: &mut drive::Brain) {
+        self.with(d, |j, b, _| j.avoid_once(b));
+    }
+
+    fn plan(&mut self, d: &mut drive::Brain, dt: F) {
+        self.with(d, |j, b, _| {
+            let (r, a) = (&mut *j.racer, &mut *j.around);
+            let s = &r.senses;
+            let at = Flight { vertical_speed: F(s.velocity.y()), height: F(s.frame[3].y()), ground: s.ground, jump: a.jump };
+            let rider = a.tricks.as_mut().map(|(set, t)| (*set, &mut **t));
+            plan_trick(dt, &mut b.flags, &mut r.plan, at, rider, j.rng);
+        });
+    }
+
+    fn slow(&mut self, _: &mut drive::Brain) {
+        self.join.told.missing.push("speed step");
+    }
+
+    fn assist(&mut self, d: &mut drive::Brain, _: F) {
+        self.with(d, |j, b, _| {
+            let (r, a) = (&*j.racer, &mut *j.around);
+            let on_ground = b.flags & flag::ON_GROUND != 0;
+            assist(&r.weights, r.controls.heading, (r.assist_x, r.assist_z), on_ground, a.yaw_rate, a.velocity);
+        });
     }
 }
 
@@ -5174,6 +5478,23 @@ impl Racer {
         let mut brain = self.brain;
         let mut join = Join { racer: self, around, rng, told: Told::default() };
         let answer = update(&mut brain, &mut join, dt);
+        let mut told = join.told;
+        told.answer = answer;
+        self.brain = brain;
+        told
+    }
+
+    /// The brain's mode driver alone, joined as [`Racer::tick`] joins it inside the base update:
+    /// [`drive::mode_two`] for mode 2, [`drive::mode_four`] for mode 4. Any other mode answers false
+    /// and does nothing.
+    pub fn drive(&mut self, around: &mut Around, rng: &mut Rng, dt: F) -> Told {
+        let mut brain = self.brain;
+        let mut join = Join { racer: self, around, rng, told: Told::default() };
+        let answer = match brain.mode {
+            2 => join.drive(&mut brain, dt, false),
+            4 => join.drive(&mut brain, dt, true),
+            _ => false,
+        };
         let mut told = join.told;
         told.answer = answer;
         self.brain = brain;
@@ -5378,8 +5699,9 @@ pub fn spawn(rng: &mut Rng, kind: i32, mode: Option<i32>, event_kind: i32) -> Sp
         weights: Weights::default(),
         listening: false,
         listeners: Vec::new(),
+        follower: follow::Follower::default(),
+        driver: DriverWords::default(),
     };
-    racer.take(&character);
     let wander = Wander {
         draws,
         kick_time: F(3.0),
@@ -5388,6 +5710,22 @@ pub fn spawn(rng: &mut Rng, kind: i32, mode: Option<i32>, event_kind: i32) -> Sp
         cruise: F(50.0),
         ..Wander::default()
     };
+    racer.follower = follow::Follower {
+        draws: wander.draws,
+        drift: wander.drift,
+        kick: wander.kick,
+        kick_time: wander.kick_time,
+        kick_decay: wander.kick_decay,
+        kick_clock: wander.kick_clock,
+        drift_target: wander.drift_target,
+        drift_clock: wander.drift_clock,
+        period_low: wander.period_low,
+        period_high: wander.period_high,
+        period: wander.period,
+        cruise: wander.cruise,
+        ..follow::Follower::default()
+    };
+    racer.take(&character);
     Spawned { racer, character, wander }
 }
 
@@ -5408,6 +5746,10 @@ impl Racer {
         self.filter.jitter = c.steering_jitter_filter;
         self.reach.base = c.min_look_ahead;
         self.reach.max = c.max_look_ahead;
+        let f = &mut self.follower;
+        (f.drift_low, f.drift_high) = (c.min_random_offset, c.max_random_offset);
+        (f.drift_rate, f.drift_max) = (c.max_drift_rate, c.max_drift_size);
+        (f.look, f.look_cone) = (c.no_track_look_ahead, c.no_track_min_turn);
         self.plan.cooldown = c.min_stunt_interval;
         self.plan.chance = c.stunt_probability;
         let (h, p) = (&mut self.habits, &c.profile);
@@ -5767,6 +6109,7 @@ impl Pilot {
             levers: &mut self.levers,
             yaw_rate: mount.yaw_rate,
             velocity: mount.velocity,
+            racing: None,
         };
         let told = self.racer.tick(&mut around, rng, dt);
         self.recovery = around.recovery;

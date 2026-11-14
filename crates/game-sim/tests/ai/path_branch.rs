@@ -6,7 +6,7 @@ use super::*;
 
 /// A track object's paths read out of RAM as the port holds them, with the RAM addresses of the
 /// paths and of each path's nodes.
-fn s309_paths(ee: &ps2_oracle::Ee, track: u32) -> (game_sim::race::TrackPaths, Vec<u32>, Vec<Vec<u32>>) {
+pub(crate) fn s309_paths(ee: &ps2_oracle::Ee, track: u32) -> (game_sim::race::TrackPaths, Vec<u32>, Vec<Vec<u32>>) {
     use game_sim::race::{PathNode, RacePath, TrackPaths};
     let f = |a: u32| F(f32::from_bits(ee.u32_at(a)));
     let quad = |a: u32| Vf(core::array::from_fn(|k| f32::from_bits(ee.u32_at(a + 4 * k as u32))));
@@ -71,7 +71,7 @@ fn s309_paths(ee: &ps2_oracle::Ee, track: u32) -> (game_sim::race::TrackPaths, V
 }
 
 /// A spot's three words in RAM as the port's, `None` for a node that is not on the spot's path.
-fn s309_spot(ee: &ps2_oracle::Ee, at: u32, recs: &[u32], nodes: &[Vec<u32>]) -> Option<game_sim::race::Spot> {
+pub(crate) fn s309_spot(ee: &ps2_oracle::Ee, at: u32, recs: &[u32], nodes: &[Vec<u32>]) -> Option<game_sim::race::Spot> {
     let (path, node) = (ee.u32_at(at), ee.u32_at(at + 4));
     let along = F(f32::from_bits(ee.u32_at(at + 8)));
     if path == 0 {
@@ -83,7 +83,7 @@ fn s309_spot(ee: &ps2_oracle::Ee, at: u32, recs: &[u32], nodes: &[Vec<u32>]) -> 
 }
 
 /// The follower's words of a brain in RAM.
-fn s309_follower(ee: &ps2_oracle::Ee, ai: u32, recs: &[u32], nodes: &[Vec<u32>]) -> Option<game_sim::ai::follow::Follower> {
+pub(crate) fn s309_follower(ee: &ps2_oracle::Ee, ai: u32, recs: &[u32], nodes: &[Vec<u32>]) -> Option<game_sim::ai::follow::Follower> {
     let w = |o: u32| F(f32::from_bits(ee.u32_at(ai + o)));
     let q = |o: u32| Vf(got(ee, ai + o).map(f32::from_bits));
     Some(game_sim::ai::follow::Follower {
@@ -120,7 +120,7 @@ fn s309_follower(ee: &ps2_oracle::Ee, ai: u32, recs: &[u32], nodes: &[Vec<u32>])
 }
 
 /// A follower as words, `-0` told from `0`.
-fn s309_bits(f: &game_sim::ai::follow::Follower) -> Vec<u32> {
+pub(crate) fn s309_bits(f: &game_sim::ai::follow::Follower) -> Vec<u32> {
     let mut v = vec![f.flags as u32, (f.flags >> 32) as u32, f.state as u32, f.spot.path, f.spot.piece, f.spot.along.0.to_bits()];
     for q in [f.position, f.forward, f.aim, f.heading, f.angles] {
         v.extend(q.to_bits());
