@@ -7867,6 +7867,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // blend came a tick's cost later on the frames that ran one than on those that did not, though
     // each went up at the display's next refresh, and the faster the ride the more that showed.
     let mut moment = clock.now();
+    // On iOS, the moments on the screen's refresh (P340, [`pace::Refreshes`]).
+    let mut refreshes = pace::Refreshes::default();
+    // The least and most time between two pictures' moments this second, for the phone's line.
+    let mut apart: Option<(Duration, Duration)> = None;
     // What the last tick left for the picture: whether it simulated, and each player's ride for the
     // camera and the overlay.
     let mut simulated = false;
@@ -11390,11 +11394,24 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             timing(format!("     {}; {}; {}", stages.line(), stages.worst_line(), second.line()));
             stages_since = Instant::now();
         } else if PHONE && stages_since.elapsed() >= Duration::from_secs(1) {
-            println!("     {}; {}", stages.brief(), second.line());
+            // How evenly the pictures' moments came (P340): a refresh apart on a steady screen.
+            let apart = apart.take().map_or(String::new(), |(a, b)| format!(", pictures {:.1}-{:.1} ms apart", a.as_secs_f64() * 1000.0, b.as_secs_f64() * 1000.0));
+            println!("     {}; {}{apart}", stages.brief(), second.line());
             stages_since = Instant::now();
         }
         top = Instant::now();
+        let was_moment = moment;
         moment = clock.now();
+        // iOS's present waits for the refresh in the next frame's drawable, after the frame is
+        // blended (P340): the moment is put on the refresh the picture goes up on.
+        if cfg!(target_os = "ios") && !clock.is_steady() {
+            let waits = window.as_ref().is_some_and(|w| w.waits()) && args.draw_frame().is_none();
+            moment = refreshes.moment(moment, refresh.filter(|_| waits));
+        }
+        if PHONE {
+            let step = moment.saturating_duration_since(was_moment);
+            apart = Some(apart.map_or((step, step), |(a, b)| (a.min(step), b.max(step))));
+        }
         perf.begin();
     }
 

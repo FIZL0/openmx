@@ -271,6 +271,52 @@ impl Limiter {
     }
 }
 
+/// The moments a phone's pictures are of, on the display's refresh (P340). iOS's present waits for
+/// the display in the next frame's drawable, after that frame's scene is already blended, so the
+/// moment read after a present follows the CPU's frame ends, not the refreshes the pictures go up on:
+/// the user's iPhone log (v0.13.0, the screen at 60) had about thirty of the sixty frame ends a
+/// second over 16.7 ms apart and the widest 19-22 ms, while each picture still went up 16.7 ms after
+/// the last. A ride blended at those moments moved by uneven steps on an even screen — the stutter.
+/// Here each moment is the last one plus a whole number of refreshes, the number the wall clock is
+/// nearest, drawn a thirty-second of the way to the wall clock so a refresh that is not quite its
+/// nominal rate never drifts it off; a moment more than a refresh from the wall clock is taken
+/// from it again (a frame ended early, with nothing to wait on), though never from before the last
+/// one; a stall is so many refreshes missed and lands on the one nearest the wall clock.
+#[derive(Default)]
+pub struct Refreshes {
+    last: Option<Instant>,
+}
+
+impl Refreshes {
+    /// The moment the next picture is of, from the wall clock's `now` at the end of the last one,
+    /// and the display's `refresh`; `now` itself with no refresh to keep to.
+    pub fn moment(&mut self, now: Instant, refresh: Option<Duration>) -> Instant {
+        let (Some(refresh), Some(last)) = (refresh.filter(|r| !r.is_zero()), self.last) else {
+            self.last = Some(now);
+            return now;
+        };
+        let r = refresh.as_secs_f64();
+        let since = signed(now, last);
+        let shown = (since / r).round().max(1.0) * r;
+        let off = since - shown;
+        // Never back past the last picture's moment: a frame ended early is shown no sooner.
+        let moment = match off.abs() > r {
+            true => now.max(last),
+            false => last + Duration::from_secs_f64(shown + off / 32.0),
+        };
+        self.last = Some(moment);
+        moment
+    }
+}
+
+/// `a - b` in seconds, either way round.
+fn signed(a: Instant, b: Instant) -> f64 {
+    match a.checked_duration_since(b) {
+        Some(d) => d.as_secs_f64(),
+        None => -b.duration_since(a).as_secs_f64(),
+    }
+}
+
 /// The end of a picture (P196): nothing on the desktop, whose loop has slept to its floor in
 /// [`Limiter::wait`]; in the browser, the page's turn until its next animation frame, which is what
 /// paces the page's pictures and lets it hand over keys, pads, sound and the network's messages.
@@ -856,5 +902,91 @@ mod tests {
         // Put back past SNAP: not slid across.
         let reset = at(v(10.0 + SNAP * 2.0, 5.0, 20.0), v(0.0, 0.0, 1.0), v(0.0, 1.0, 0.0));
         assert_eq!(Blend(0.5).placement(&now, &reset).pos, reset.pos);
+    }
+
+    /// Frame ends as the user's iPhone log has them (P340): a picture up every 16.7 ms refresh, the
+    /// loop's end after it moved off it by 0-7 ms with each frame's work. `jitter(i)` is frame `i`'s.
+    fn frame_ends(start: Instant, refresh: f64, frames: usize, jitter: impl Fn(usize) -> f64) -> Vec<Instant> {
+        (0..frames).map(|i| start + Duration::from_secs_f64(i as f64 * refresh + 0.004 + jitter(i))).collect()
+    }
+
+    /// The steps between moments, in ms.
+    fn steps(moments: &[Instant]) -> Vec<f64> {
+        moments.windows(2).map(|w| w[1].duration_since(w[0]).as_secs_f64() * 1000.0).collect()
+    }
+
+    /// A cheap repeatable 0..1 for frame `i`.
+    fn noise(i: usize) -> f64 {
+        let x = (i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(17).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        (x >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    /// P340: frame ends that wander by the log's few ms make moments a whole refresh apart, so the
+    /// picture moves by even steps on the even screen; the raw ends were 13-21 ms apart.
+    #[test]
+    fn a_phones_moments_keep_to_the_refresh() {
+        let start = Instant::now();
+        let r = 1.0 / 60.0;
+        let ends = frame_ends(start, r, 600, |i| (noise(i) - 0.5) * 0.007);
+        let raw = steps(&ends);
+        let widest = raw.iter().cloned().fold(0.0, f64::max);
+        let over = raw.iter().filter(|s| **s > 1000.0 * r + 0.05).count();
+        assert!(widest > 19.0 && over > 200, "the frame ends are not the log's: widest {widest:.2} ms, {over} over 16.7");
+        let mut clock = Refreshes::default();
+        let moments: Vec<Instant> = ends.iter().map(|&now| clock.moment(now, Some(Duration::from_secs_f64(r)))).collect();
+        let kept = steps(&moments[60..]);
+        let (least, most) = kept.iter().fold((f64::MAX, 0.0f64), |(a, b), s| (a.min(*s), b.max(*s)));
+        assert!(least > 16.3 && most < 17.05, "moments {least:.2}-{most:.2} ms apart");
+        // And they stay with the wall clock.
+        for (m, e) in moments.iter().zip(&ends) {
+            assert!(signed(*m, *e).abs() < r, "a moment {:.2} ms off its frame's end", signed(*m, *e) * 1000.0);
+        }
+    }
+
+    /// A refresh missed is a picture two refreshes on, and its moment is too; a refresh a little off
+    /// its nominal rate never drifts the moments off the wall clock.
+    #[test]
+    fn a_phones_moments_follow_a_missed_refresh_and_a_drifting_one() {
+        let start = Instant::now();
+        let r = Duration::from_secs_f64(1.0 / 60.0);
+        let mut ends = frame_ends(start, r.as_secs_f64(), 20, |i| (noise(i) - 0.5) * 0.004);
+        for e in &mut ends[10..] {
+            *e += r;
+        }
+        let mut clock = Refreshes::default();
+        let moments: Vec<Instant> = ends.iter().map(|&now| clock.moment(now, Some(r))).collect();
+        let s = steps(&moments);
+        assert!((s[9] - 33.3).abs() < 0.6, "the missed refresh's step is {:.2} ms", s[9]);
+        // A screen at 59.7 when it says 60, ten minutes of it.
+        let true_r = 1.0 / 59.7;
+        let ends = frame_ends(start, true_r, 36_000, |i| (noise(i) - 0.5) * 0.007);
+        let mut clock = Refreshes::default();
+        for (i, &now) in ends.iter().enumerate() {
+            let m = clock.moment(now, Some(r));
+            assert!(signed(m, now).abs() < r.as_secs_f64(), "frame {i}: {:.2} ms off", signed(m, now) * 1000.0);
+        }
+    }
+
+    /// A stall or a frame with nothing to wait on: the moment comes back to the wall clock, and never
+    /// goes back past the last one. A stall is so many refreshes missed: the moment lands on the
+    /// refresh nearest the wall clock.
+    #[test]
+    fn a_phones_moments_take_up_a_stall_and_never_go_back() {
+        let start = Instant::now();
+        let r = Duration::from_secs_f64(1.0 / 60.0);
+        let mut clock = Refreshes::default();
+        assert_eq!(clock.moment(start, Some(r)), start);
+        let late = start + Duration::from_millis(509);
+        let after = clock.moment(late, Some(r));
+        assert!(signed(after, late).abs() <= r.as_secs_f64() / 2.0, "{:.2} ms off after a stall", signed(after, late) * 1000.0);
+        let mut last = after;
+        for i in 1..50 {
+            let m = clock.moment(late + Duration::from_micros(300 * i), Some(r));
+            assert!(m >= last, "frame {i} went back");
+            last = m;
+        }
+        // No refresh known: the wall clock as it is.
+        let now = late + Duration::from_secs(1);
+        assert_eq!(clock.moment(now, None), now);
     }
 }
