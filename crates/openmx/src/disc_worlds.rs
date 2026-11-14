@@ -359,4 +359,41 @@ mod tests {
             assert!(j.width <= most, "{} side {} to {}: {:.0} ft of join (at most {most})", name(j.tile), j.side, name(to), j.width);
         }
     }
+
+    /// The most join between two neighbouring maps of MX Unleashed: WORLD (MD155).
+    const EVEN_GAP: f64 = 1500.0;
+
+    /// MD155: MX Unleashed: WORLD is laid out evenly. Every listed tile is placed once, and every side
+    /// of every map faces another map within [`EVEN_GAP`] of join, round the wrap as well as inside it
+    /// (the wrap joins were up to 2,740 ft, nationals that could not start before their own trimmed
+    /// ground), so riding off any map reaches the next one across about the same stretch. With
+    /// `$OPENMX_LAYOUT_DUMP` set it writes each tile's interior there, `id x0 z0 x1 z1`, and the
+    /// world's extent, to draw. Without the disc it skips.
+    #[test]
+    fn world_mxu_is_laid_out_evenly() {
+        let Ok(mut disc) = Disc::open_configured() else {
+            eprintln!("skipped: no disc");
+            return;
+        };
+        let (maps, p) = stitch_tiles(&mut disc, "world_mxu").unwrap();
+        let plan = stitch::build::layout(&maps, &p).unwrap();
+        let mut ids: Vec<&str> = plan.placed.iter().enumerate().map(|(t, _)| maps[t].id.as_str()).collect();
+        assert_eq!(ids, tiles("world_mxu"));
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), 27, "a tile placed twice");
+        if let Ok(out) = std::env::var("OPENMX_LAYOUT_DUMP") {
+            let mut s = format!("extent {} {}\n", f64::from(plan.size[0]) * plan.spacing, f64::from(plan.size[1]) * plan.spacing);
+            for src in &plan.sources[..plan.placed.len()] {
+                let r = src.rect;
+                s += &format!("{} {} {} {} {}\n", maps[src.tile].id, r[0], r[1], r[2], r[3]);
+            }
+            std::fs::write(out, s).unwrap();
+        }
+        let name = |t: usize| maps[t].id.as_str();
+        for j in plan.join_widths(p.wrap.as_deref()) {
+            let to = j.to.unwrap_or_else(|| panic!("{} faces no map on side {}", name(j.tile), j.side));
+            assert!(j.width <= EVEN_GAP, "{} side {} to {}: {:.0} ft of join (at most {EVEN_GAP})", name(j.tile), j.side, name(to), j.width);
+        }
+    }
 }

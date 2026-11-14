@@ -540,3 +540,17 @@ hardware. A build with P336 names the stage of the frame that broke, and then ri
 2. The ride should fail once and the page restart itself onto `?webgl2`. Pick the ride again there; it should ride.
 3. Save log, and put `openmx-log.txt` in the repo's `context/p336a/`. The line that matters is
    `worker log: gpu: validation error in <stage>, frame N: …`. Say in P336a whether the WebGL2 ride worked.
+
+## See MX Unleashed: WORLD's new layout (MD155)
+
+MD155 shares MX Unleashed: WORLD's joins out evenly. Before, the wrap's joins ran up to 2,750 ft; now the
+widest join anywhere is 2,008 ft (a steep one), and the ride starts on Norfolk (mxu_free07) in the middle. The
+pictures are in `research/journal/2026-11-14-md155-world-mxu-even/` (`before.svg`, `after.svg`). The
+main checkout still rides the old world_mxu it installed from openmx-mods, so it still shows the old
+layout. To see the new one (about 3 min, on a build with MD155 in it):
+
+1. In `~/repos/openmx`, move `mods/tracks/world_mxu` out of the way (keep it until you have ridden).
+2. Free Ride → MX Unleashed: WORLD. The first ride builds the joins from the disc (about a minute).
+3. Ride off a few maps, the world's edges included, and say in MD155's follow-up whether the stretches
+   between maps now look even. If you want it installed again, reinstall from openmx's cache (rebuild
+   openmx-mods' copy with stitch VERSION 5 first, or it brings the old layout back).

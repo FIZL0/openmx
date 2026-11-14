@@ -36,6 +36,10 @@ pub struct Params {
     /// Tiles laid out in the grid's middle cells, whatever their height ([`plan`]; openmx P253): on a
     /// wrapped world the ride starts there (MD50). Empty, the height order alone lays the grid out.
     pub middle: Vec<String>,
+    /// A unit layout's tile in the central cell of the [`Params::middle`] block, and on a wrapped one
+    /// laid across the world's middle where its lines allow (a spec's `centre`, MD155), so the ride
+    /// starts on it with the block round it: MD50 starts on the tile nearest the middle.
+    pub centre: Option<String>,
     /// Lay the tiles out by [`units_layout`] (a spec's `"layout": "units"`, P251), not [`plan`]'s grid.
     pub units: bool,
     /// Feet of each tile's own ground kept past its scene's placements ([`Tile::trim_cut`], P251).
@@ -119,6 +123,7 @@ impl Params {
             wrap: None,
             todo: Vec::new(),
             middle: Vec::new(),
+            centre: None,
             trim: None,
             units: false,
             threads: 0,
@@ -136,7 +141,7 @@ impl Params {
 
 impl Params {
     /// A world spec's build parameters (`worlds/<id>.json`: `id`, `name`, and optional `sky`, `wrap`,
-    /// `max_slope`, `min_gap`, `fade`, `chunk`, `todo`, `middle`, `trim`, `layout`), as openmx-mods' `stitch --mods --out` reads
+    /// `max_slope`, `min_gap`, `fade`, `chunk`, `todo`, `middle`, `centre`, `trim`, `layout`), as openmx-mods' `stitch --mods --out` reads
     /// them; its `tiles` are the caller's to find.
     pub fn from_spec(j: &Json) -> Result<Params, String> {
         let g = |k: &str| j.get(k).and_then(Json::str).map(str::to_owned);
@@ -158,6 +163,7 @@ impl Params {
             p.chunk = v as u32;
         }
         p.trim = j.get("trim").and_then(Json::f64);
+        p.centre = g("centre");
         p.units = match j.get("layout").and_then(Json::str) {
             None | Some("grid") => false,
             Some("units") => true,
@@ -636,6 +642,9 @@ impl Widen {
     }
 }
 
+/// How many times [`units_layout`] sets each tile of a wrapped axis in the middle of its room.
+const RELAX: usize = 200;
+
 /// Where [`units_layout`] puts the tiles.
 struct Layout {
     at: Vec<[f64; 2]>,
@@ -677,8 +686,18 @@ fn unit_shapes(units: usize, kmax: [usize; 2]) -> Vec<(usize, usize)> {
 /// in height order and a snake; other tiles wider than a unit next, at the first units free in a
 /// snake; then the one-unit tiles: with a middle, the units nearest it take the tiles nearest the
 /// middle's height (the nationals next to the freeride maps are the tallest), else the snake takes
-/// them in height order, as [`plan`]'s grid does.
-fn unit_pack(order: &[usize], middle: &[usize], k: &[[usize; 2]], rings: &[crate::Ring], cols: usize, rows: usize) -> Option<Vec<(usize, usize)>> {
+/// them in height order, as [`plan`]'s grid does. A `centre` among the middle's tiles swaps into the
+/// block's most central cell, the first row's on a tie (MD155), so the others stand round it.
+#[allow(clippy::too_many_arguments)]
+fn unit_pack(
+    order: &[usize],
+    middle: &[usize],
+    centre: Option<usize>,
+    k: &[[usize; 2]],
+    rings: &[crate::Ring],
+    cols: usize,
+    rows: usize,
+) -> Option<Vec<(usize, usize)>> {
     let n = k.len();
     let mut occ = vec![vec![false; cols]; rows];
     let mut cell = vec![None; n];
@@ -705,6 +724,12 @@ fn unit_pack(order: &[usize], middle: &[usize], k: &[[usize; 2]], rings: &[crate
             let (x, y) = (ox + c * km[0], oy + r * km[1]);
             take(&mut occ, x, y, km);
             cell[t] = Some((x, y));
+        }
+        if let Some(c) = centre.filter(|c| inner.contains(c)) {
+            // Twice the distance from a cell's middle to the block's, in units.
+            let off = |&(x, y): &(usize, usize)| (2 * x + km[0]).abs_diff(2 * ox + cm * km[0]) + (2 * y + km[1]).abs_diff(2 * oy + rm * km[1]);
+            let mid = inner.iter().copied().min_by_key(|t| cell[*t].map(|xy| (off(&xy), xy.1)))?;
+            cell.swap(c, mid);
         }
     }
     for &t in order.iter().filter(|t| !middle.contains(t) && !one(**t)) {
@@ -763,12 +788,17 @@ fn units_layout(
         .iter()
         .map(|m| tiles.iter().position(|t| &t.id == m).ok_or_else(|| format!("middle {m} is not one of the tiles")))
         .collect::<Result<_, _>>()?;
+    let centre = p
+        .centre
+        .as_ref()
+        .map(|c| tiles.iter().position(|t| &t.id == c).ok_or_else(|| format!("centre {c} is not one of the tiles")))
+        .transpose()?;
     let units: usize = k.iter().map(|s| s[0] * s[1]).sum();
     let kmax = [0, 1].map(|a| k.iter().map(|s| s[a]).max().unwrap_or(1));
     let cell = unit_shapes(units, kmax)
         .into_iter()
         .take(64)
-        .find_map(|(c, r)| unit_pack(&order, &middle, &k, rings, c, r))
+        .find_map(|(c, r)| unit_pack(&order, &middle, centre, &k, rings, c, r))
         .ok_or("the tiles fit no unit grid")?;
     let mut at = vec![[0.0; 2]; n];
     let mut keep = cuts.to_vec();
@@ -786,15 +816,22 @@ fn units_layout(
         (at[t][a] + f64::from(keep[t][a]) * s, at[t][a] + f64::from(keep[t][a + 2]) * s)
     };
     for axis in 0..2 {
-        // The world wraps, so any line no tile runs across can be the first. Each is tried and the
-        // shortest world kept: a tile cannot start before its own ground does (this layout keeps every
-        // tile origin at or past 0, though game-sim allows less since MD61), so a first line of
-        // nationals, whose trimmed ground is ~2000 ft before their interiors, leaves that much more join
-        // over the wrap than a freeride map's ridge.
+        // Any line no tile runs across can be the first. Each is tried. On an axis with edges a tile
+        // cannot start before its own ground does, so a first line of nationals, whose trimmed ground is
+        // ~2000 ft before their interiors, leaves that much more join over the wrap than a freeride map's
+        // ridge, and the shortest world is kept. On a wrapped axis (MD155) a tile stands over the near
+        // seam as in [`plan`]'s grid (MD61: game-sim lets a tile stand at a negative `at` while its kept
+        // cells start at or past 0), its interior two lattice cells in, so every line is as good a
+        // first as any for the wrap. The one kept has the spec's `centre` tile across the world's
+        // middle, where the ride starts, then leaves the narrowest widest join (each tile's to the
+        // nearest map before it, round the wrap too), then the shortest world. No tile's interior
+        // runs over the seam, so the first line is the only way to turn the world round its wrap.
+        let wrapped = p.wraps()[axis];
+        let end = if wrapped { 2.0 * step } else { pad };
         let unit = |t: usize| if axis == 0 { cell[t].0 } else { cell[t].1 };
         let lines = (0..n).map(|t| unit(t) + k[t][axis]).max().unwrap_or(1);
         let whole: Vec<usize> = (0..lines).filter(|&r| (0..n).all(|t| !(unit(t) < r && r < unit(t) + k[t][axis]))).collect();
-        let mut best: Option<(f64, Vec<[f64; 2]>, Vec<[u32; 4]>)> = None;
+        let mut best: Option<((f64, f64, f64), Vec<[f64; 2]>, Vec<[u32; 4]>)> = None;
         for r in whole {
             let mut at = at.clone();
             let mut keep = keep.clone();
@@ -824,7 +861,7 @@ fn units_layout(
                 .collect();
             let mut order: Vec<usize> = (0..n).collect();
             order.sort_by_key(|&t| first(t));
-            let lowest = |t: usize| pad.max(f64::from(cuts[t][axis]) * tiles[t].spacing);
+            let lowest = |t: usize| if wrapped { end } else { pad.max(f64::from(cuts[t][axis]) * tiles[t].spacing) };
             // Place each tile at `want`'s interior start or past every tile before it that it faces.
             let pass = |want: &dyn Fn(usize) -> f64, at: &mut Vec<[f64; 2]>, keep: &mut Vec<[u32; 4]>| {
                 for &t in &order {
@@ -842,7 +879,7 @@ fn units_layout(
             // The world's extent: past every interior by a pad, and round the wrap every facing pair's
             // gap from the later one's far side to the earlier one's near side (a tile's own included).
             let extent = |at: &[[f64; 2]], keep: &[[u32; 4]]| {
-                let mut e = (0..n).map(|t| span(at, keep, t, axis).1 + pad).fold(0.0, f64::max);
+                let mut e = (0..n).map(|t| span(at, keep, t, axis).1 + end).fold(0.0, f64::max);
                 for b in 0..n {
                     for t in (0..n).filter(|&t| face[b][t] && first(b) <= first(t)) {
                         e = e.max(span(at, keep, t, axis).1 + gap(axis, t, b) - span(at, keep, b, axis).0);
@@ -860,7 +897,7 @@ fn units_layout(
             let e = extent(&at, &keep);
             let mut high = vec![0.0f64; n];
             for &t in order.iter().rev() {
-                let mut hi = e - pad - width[t];
+                let mut hi = e - end - width[t];
                 for b in (0..n).filter(|&b| face[t][b]) {
                     if first(b) <= first(t) {
                         hi = hi.min(low[b] + e - gap(axis, t, b) - width[t]);
@@ -871,14 +908,71 @@ fn units_layout(
                 }
                 high[t] = hi.max(low[t]);
             }
-            pass(&|t| low[t] + (high[t] - low[t]) * low[t] / e, &mut at, &mut keep);
+            let shared: Vec<f64> = (0..n).map(|t| low[t] + (high[t] - low[t]) * low[t] / e).collect();
+            // On a wrapped axis (MD155) that share leaves a short line's slack bunched (2,240 ft beside
+            // a freeride map whose column is a few hundred feet short of the nationals'). Each tile goes
+            // to the middle of the room its facing neighbours leave it in a world `period` long, before
+            // and after, round the wrap too, over and over: every line's slack ends up shared evenly
+            // among its gaps, and no gap is narrower than its pair needs.
+            let relax = |period: f64| {
+                let mut start = shared.clone();
+                for _ in 0..RELAX {
+                    for &t in &order {
+                        let mut lo = end;
+                        let mut hi = period - end - width[t];
+                        for b in (0..n).filter(|&b| b != t) {
+                            if face[b][t] {
+                                let wrap = if last(b) < first(t) { 0.0 } else { period };
+                                lo = lo.max(start[b] + width[b] + gap(axis, b, t) - wrap);
+                            }
+                            if face[t][b] {
+                                let wrap = if last(t) < first(b) { 0.0 } else { period };
+                                hi = hi.min(start[b] + wrap - gap(axis, t, b) - width[t]);
+                            }
+                        }
+                        if lo <= hi {
+                            start[t] = (lo + hi) / 2.0;
+                        }
+                    }
+                }
+                start
+            };
+            let start = if wrapped { relax(e) } else { shared };
+            pass(&|t| start[t], &mut at, &mut keep);
             let e = extent(&at, &keep);
-            if best.as_ref().is_none_or(|b| e < b.0) {
-                best = Some((e, at, keep));
+            let key = if wrapped {
+                // The widest join each tile leaves on its near side, to the nearest map straight before
+                // it (one in its rows on x; on z one its kept x overlap, round the x wrap too).
+                let sp: Vec<(f64, f64)> = (0..n).map(|t| span(&at, &keep, t, axis)).collect();
+                let straight = |b: usize, t: usize| {
+                    if axis == 0 {
+                        return face[b][t];
+                    }
+                    let (sa, sb) = (span(&at, &keep, t, 0), span(&at, &keep, b, 0));
+                    [0.0, size[0], -size[0]].iter().any(|o| sb.0 + o < sa.1 && sa.0 < sb.1 + o)
+                };
+                let widest = (0..n)
+                    .map(|t| {
+                        (0..n)
+                            .filter(|&b| b != t && straight(b, t) && (sp[b].1 <= sp[t].0 || sp[t].1 <= sp[b].0))
+                            .map(|b| (sp[t].0 - sp[b].1).rem_euclid(e))
+                            .fold(e - (sp[t].1 - sp[t].0), f64::min)
+                    })
+                    .fold(0.0, f64::max);
+                // The spec's `centre` tile is the start where the world's middle is across its interior
+                // (MD50 starts on the tile nearest the middle; the lines come a unit at a time, so it
+                // can be most of half a freeride map off).
+                let off = centre.map_or(0.0, |c| if sp[c].0 <= e / 2.0 && e / 2.0 <= sp[c].1 { 0.0 } else { 1.0 });
+                (off, widest.round(), e)
+            } else {
+                (e, 0.0, 0.0)
+            };
+            if best.as_ref().is_none_or(|b| key < b.0) {
+                best = Some((key, at, keep));
             }
         }
-        let (e, a, kp) = best.ok_or("no line to start the world on")?;
-        (size[axis], at, keep) = (e, a, kp);
+        let ((k0, _, k2), a, kp) = best.ok_or("no line to start the world on")?;
+        (size[axis], at, keep) = (if wrapped { k2 } else { k0 }, a, kp);
     }
     let tail = [0, 1].map(|a| size[a] - (0..n).map(|t| span(&at, &keep, t, a).1).fold(0.0, f64::max));
     Ok(Layout { at, keep, cell, tail })
