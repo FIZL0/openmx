@@ -5278,6 +5278,11 @@ impl Listeners for PartWalk<'_> {
             // F57: the emitter's own work is the port's ([`emitter::step`], the thunk's object
             // twelve bytes before its listener); what it hands out is the original's.
             book("the tail: the update's emitter steps", 1);
+            // F57a: its other kind's too ([`emitter::other`])
+            let d = self.ee.u32_at(e - 0xc + emitter::DEF);
+            if self.ee.u32_at(d + emitter::DEF_OPTIONS) as u8 & emitter::DEF_OTHER != 0 {
+                book("the tail: the update's emitter other kind steps", 1);
+            }
             emitter::step(self, e - 0xc, dt);
         } else if name == "second emitter" {
             // F59: and the second kind's ([`ring::step`]), its hand-outs the original's too.
@@ -5392,7 +5397,8 @@ impl emitter::Emitters for PartWalk<'_> {
                 let f = self.ee.u32_at(self.ee.u32_at(o + 4) + slot);
                 (f, vec![a(o)], vec![], format!("object +{slot:#x} {f:#x}"))
             }
-            Call::Other { emitter, dt } => (EMIT_OTHER, vec![a(emitter)], vec![dt.0], "other kind".into()),
+            // F57a: the other kind's own work is the port's ([`emitter::other`]); its batch's send the original's
+            Call::Send { batch, count } => (EMIT_SEND, vec![a(batch), 0, a(count), 2, 0], vec![], "other kind send".into()),
             Call::Place { owner, at, with } => (EMIT_PLACE, vec![a(owner), a(at), a(with)], vec![], "place".into()),
             Call::Owner(x) => {
                 let f = self.ee.u32_at(self.ee.u32_at(x + 0xc) + 0xc8);
@@ -5442,10 +5448,10 @@ const RING_SRAND: u32 = 0x0035_6190;
 const RING_STEP: u32 = 0x004f_bcc0;
 
 /// F57: the functions the emitter port hands out (research/oracle.txt `# F57`): the listener's
-/// notice, the other kind's step, the owner's place, the emitter's follow-up, the world probe, the
+/// notice, the other kind's batch send (F57a), the owner's place, the emitter's follow-up, the world probe, the
 /// particle's settle (on the world the word holds) and bind.
 const EMIT_NOTICE: u32 = 0x0018_d690;
-const EMIT_OTHER: u32 = 0x0050_db60;
+const EMIT_SEND: u32 = 0x0051_4e40;
 const EMIT_PLACE: u32 = 0x001c_1e90;
 const EMIT_FOLLOW: u32 = 0x0050_c5c0;
 const EMIT_PROBE: u32 = 0x0012_5be0;
@@ -9707,11 +9713,12 @@ fn flip_replays_with_every_port_at_once() {
     assert!(ran.contains_key("the tail: the update's effects item steps"), "no effects item stepped: {ran:?}");
     assert!(ran.contains_key("the tail: the update's effects item emitter steps"), "no effects item moved its emitter: {ran:?}");
     assert!(!objects.iter().any(|k| k.contains("+0x98 ")), "an effects item's move handed on: {ran:?}");
-    // F31b5n: the emitters drew `rand` on the port's; what the part walk hands on draws it only in
-    // the first kind's other branch, still the original's (F57a).
+    // F31b5n: the emitters drew `rand` on the port's; F57a: the first kind's other branch is the
+    // port's too ([`emitter::other`]), so nothing the part walk hands on draws it.
     assert!(ran.contains_key("the tail: the update's emitter rand draws"), "no emitter drew rand: {ran:?}");
     let drew: Vec<&String> = ran.keys().filter(|k| k.starts_with("the tail: the update's") && k.ends_with("that drew rand")).collect();
-    assert_eq!(drew, ["the tail: the update's emitter other kind steps that drew rand"], "the part walk handed on a rand draw: {ran:?}");
+    assert_eq!(drew, Vec::<&String>::new(), "the part walk handed on a rand draw: {ran:?}");
+    assert!(ran.contains_key("the tail: the update's emitter other kind send"), "no other kind's batch was sent: {ran:?}");
 }
 
 /// F31b5o: where the RAM parts from the handing run's with the frame post's tells but the HUD's left
@@ -10603,7 +10610,8 @@ type EmitCall = (&'static str, Vec<u32>);
 
 /// What each call of F57's oracle does, on the interpreter's side and the port's: `rand` steps an
 /// LCG kept at `seed`; the rest change a word the step reads after them (the particle's height and
-/// flags, the emitter's bind) or answer something (the other kind 0x77, the probe the spot's `x`).
+/// flags, the emitter's bind) or answer something (the probe the spot's `x`); the other kind's send
+/// (F57a) halves its batch's count.
 fn emit_react(ee: &mut Ee, seed: u32, (kind, args): &EmitCall) -> u32 {
     match *kind {
         "rand" => {
@@ -10611,7 +10619,10 @@ fn emit_react(ee: &mut Ee, seed: u32, (kind, args): &EmitCall) -> u32 {
             ee.set_u32(seed, s);
             (s >> 1) & 0x7fff_ffff
         }
-        "other" => 0x77,
+        "send" => {
+            ee.set_u32(args[0] + emitter::BATCH_COUNT, args[2] / 2);
+            0
+        }
         "probe" => {
             let x = ee.u32_at(args[1]);
             ee.set_u32(args[2], x);
@@ -10667,7 +10678,7 @@ impl emitter::Emitters for EmitOracle<'_> {
             Call::Notice(o) => ("notice", vec![o, o + emitter::SPOT, emitter::NOTICE_KIND, 2.0f32.to_bits()]),
             Call::Light(o) => ("light", vec![o]),
             Call::Douse(o) => ("douse", vec![o]),
-            Call::Other { emitter, dt } => ("other", vec![emitter, dt.to_bits()]),
+            Call::Send { batch, count } => ("send", vec![batch, 0, count, 2, 0]),
             Call::Place { owner, at, with } => ("place", vec![owner, at, with]),
             Call::Owner(x) => ("owner", vec![x]),
             Call::Follow(o) => ("follow", vec![o]),
@@ -10719,12 +10730,12 @@ fn the_emitter_step_is_the_originals() {
     let region = (o.0, ee.scratch(241) - o.0);
     let globals = [(emitter::GAME, 4), (emitter::HELD, 4), (emitter::FRAME_ID & !3, 4)];
     let log: Rc<RefCell<Vec<EmitCall>>> = Rc::default();
-    let hooked: [(u32, &'static str, usize, bool); 10] = [
+    // (the other kind's step, [`DEF_OTHER`], is F57a's oracle's: left clear here)
+    let hooked: [(u32, &'static str, usize, bool); 9] = [
         (RAND, "rand", 0, false),
         (EMIT_NOTICE, "notice", 3, true),
         (EMIT_FAKE + 0xa4, "light", 1, false),
         (EMIT_FAKE + 0xa8, "douse", 1, false),
-        (EMIT_OTHER, "other", 1, true),
         (EMIT_PLACE, "place", 3, false),
         (EMIT_FAKE + 0xc8, "owner", 1, false),
         (EMIT_FOLLOW, "follow", 1, false),
@@ -10821,7 +10832,7 @@ fn the_emitter_step_is_the_originals() {
         setup.push((d + 0x38, g.bits() % 64));
         setup.push((d + 0x3c, g.bits() % 64));
         setup.push((d + 0x44, g.bits() % 8));
-        setup.push((d + emitter::DEF_OPTIONS, g.bits() & if g.one_in(8) { 0xff } else { 0xbf }));
+        setup.push((d + emitter::DEF_OPTIONS, g.bits() & 0xbf));
         setup.push((d + emitter::DEF_MODE, g.bits() % 5));
         for at in [0x60, 0x64, 0x68, 0x6c] {
             setup.push((d + at, g.f(0.0, 0.2).to_bits()));
@@ -10878,8 +10889,189 @@ fn the_emitter_step_is_the_originals() {
         *seen.entry(format!("{}{kinds:?}", if spawned { "spawned " } else { "" })).or_default() += 1;
     }
     eprintln!("emitter oracle: {seen:#?}");
-    for want in ["spawned", "notice", "light", "douse", "other", "place", "owner", "follow", "probe", "settle", "bind"] {
+    for want in ["spawned", "notice", "light", "douse", "place", "owner", "follow", "probe", "settle", "bind"] {
         assert!(seen.keys().any(|k| k.contains(want)), "no case made {want}: {seen:?}");
+    }
+}
+
+/// F57a's oracle: the other kind's batch send.
+const EMIT_SEND_ORACLE: [(u32, &str, usize); 2] = [(RAND, "rand", 0), (EMIT_SEND, "send", 5)];
+
+/// **F57a — the other kind's step is the original's**: 20 000 emitters of the first kind with
+/// [`emitter::DEF_OTHER`] in scratch RAM (F57's emitter words and definition, plus the pool's batch:
+/// on or not, with room for up to eight; the scene's lights: kinds 4 and 2 kept apart or found by
+/// a scan, or none; the seats' table and the listener's word in it or not; the switches on or off),
+/// run through SLUS-21104's other kind (its batch's send hooked, [`emit_react`]; every other callee
+/// the original's own) and through [`emitter::other`]: the calls come in the same order with the
+/// same arguments, it answers the same, and the scratch RAM and the globals come out the same. The
+/// spread table, its centre and the zero quad are the image's.
+#[test]
+fn the_other_emitter_kind_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let slots = |ee: &Ee, k: u32, n: u32| (ee.scratch(k), n * 0x40);
+    let (o, def, pool, batch, parts, node, misc, rows, lights, seats) = (
+        slots(&ee, 100, 4),
+        slots(&ee, 104, 6),
+        slots(&ee, 110, 6),
+        slots(&ee, 116, 15),
+        slots(&ee, 131, 8),
+        slots(&ee, 139, 5),
+        slots(&ee, 144, 4),
+        slots(&ee, 148, 1),
+        slots(&ee, 149, 10),
+        slots(&ee, 159, 22),
+    );
+    let seed = ee.scratch(181);
+    let region = (o.0, seed - o.0);
+    let globals = [
+        (emitter::OTHER_ON, 4),
+        (emitter::LOOK_FIRST, 4),
+        (emitter::NO_LOOK_RATE, 4),
+        (emitter::LIGHTS, 4),
+        (emitter::SEATS, 4),
+        (emitter::FRAME_ID & !3, 4),
+    ];
+    let log: Rc<RefCell<Vec<EmitCall>>> = Rc::default();
+    for (at, kind, n) in EMIT_SEND_ORACLE {
+        let l = log.clone();
+        ee.hooks.insert(
+            at,
+            Box::new(move |ee: &mut Ee| {
+                let call = (kind, (0..n).map(|k| ee.r(4 + k) as u32).collect());
+                let r = emit_react(ee, seed, &call);
+                l.borrow_mut().push(call);
+                ee.set(2, u64::from(r));
+            }),
+        );
+    }
+    let mut g = Gen(0x0f57_a0a1);
+    let mut seen = BTreeMap::<String, u32>::new();
+    for case in 0..20_000 {
+        let mut setup = Vec::<(u32, u32)>::new();
+        let fl = |g: &mut Gen, at: f32, lo: f32, hi: f32| g.near(at, lo, hi).to_bits();
+        for k in (0..region.1).step_by(4) {
+            setup.push((region.0 + k, fl(&mut g, 0.0, -2.0, 2.0)));
+        }
+        let (ob, d, p, b) = (o.0, def.0, pool.0, batch.0);
+        // the emitter
+        let spot = [g.f(-50.0, 50.0), g.f(-5.0, 5.0), g.f(-50.0, 50.0)];
+        for k in 0..3 {
+            setup.push((ob + emitter::SPOT + 4 * k, spot[k as usize].to_bits()));
+            let moved = if g.one_in(6) { 0.0 } else { g.f(-1.0, 1.0) };
+            setup.push((ob + emitter::LAST + 4 * k, (spot[k as usize] - moved).to_bits()));
+        }
+        let listener = if g.one_in(3) { 0 } else { misc.0 };
+        setup.push((ob + 8, listener));
+        setup.push((misc.0 + 4, g.bits() % 24));
+        let n = if g.one_in(3) { node.0 } else { 0 };
+        setup.push((ob + emitter::NODE, n));
+        setup.push((ob + emitter::FRAME, rows.0));
+        setup.push((ob + emitter::LOOK, g.bits()));
+        setup.push((ob + emitter::FLAGS, g.bits()));
+        setup.push((ob + emitter::RATE, fl(&mut g, 1.0, 0.0, 2.0)));
+        setup.push((ob + emitter::DEF, d));
+        setup.push((ob + emitter::CARRY, g.f(0.0, 1.0).to_bits()));
+        for at in [emitter::LIFE_BY_SPEED, emitter::SIZE_BY_SPEED, emitter::COUNT_BY_DISTANCE, emitter::COUNT_BY_SPEED] {
+            setup.push((ob + at, fl(&mut g, 0.0, -1.0, 3.0)));
+        }
+        setup.push((ob + emitter::SLOWEST, fl(&mut g, 0.0, 0.0, 10.0)));
+        setup.push((ob + emitter::FAST_ABOVE, fl(&mut g, 0.0, 0.0, 30.0)));
+        // the node: its owner's frame id matching or not
+        setup.push((node.0 + 8, if g.one_in(2) { 0 } else { misc.0 + 0x10 }));
+        setup.push((misc.0 + 0x14, misc.0 + 0x20));
+        let id = g.bits() & 0xffff;
+        setup.push((misc.0 + 0x20 + 0xa4, if g.one_in(4) { id ^ 1 } else { id }));
+        // the globals
+        setup.push((emitter::OTHER_ON, u32::from(!g.one_in(20))));
+        setup.push((emitter::LOOK_FIRST, u32::from(g.one_in(4))));
+        setup.push((emitter::NO_LOOK_RATE, u32::from(g.one_in(4))));
+        setup.push((emitter::LIGHTS, lights.0));
+        setup.push((emitter::SEATS, seats.0));
+        setup.push((emitter::FRAME_ID & !3, id << (8 * (emitter::FRAME_ID & 2))));
+        // the definition
+        setup.push((d + emitter::POOL, p));
+        setup.push((d + 0x24, fl(&mut g, 0.0, -1.0, 3.0)));
+        setup.push((d + emitter::DEF_FLAGS, g.bits() & 0x0002_0c0f));
+        setup.push((d + 0x38, g.bits() % 64));
+        setup.push((d + 0x3c, g.bits() % 64));
+        setup.push((d + 0x44, g.bits() % 8));
+        setup.push((d + emitter::DEF_OPTIONS, g.bits() & 0xff | u32::from(emitter::DEF_OTHER)));
+        setup.push((d + emitter::DEF_MODE, g.bits() % 3));
+        for at in [0x90, 0x94, 0x98] {
+            setup.push((d + at, fl(&mut g, 0.0, 0.5, 400.0)));
+        }
+        setup.push((d + 0xb8, g.f(0.05, 1.0).to_bits()));
+        for at in [0x110, 0x114] {
+            setup.push((d + at, fl(&mut g, 0.0, 0.0, 150.0)));
+        }
+        // the pool and its batch: on or not, room for up to eight, some taken
+        setup.push((p + emitter::POOL_BATCH, if g.one_in(12) { 0 } else { b }));
+        setup.push((b + emitter::BATCH_ON, u32::from(!g.one_in(6))));
+        setup.push((b + 0x70, u32::from(!g.one_in(3))));
+        let room = g.bits() % 9;
+        setup.push((b + emitter::BATCH_COUNT, g.bits() % (room + 1)));
+        setup.push((b + emitter::BATCH_ROOM, room));
+        setup.push((b + emitter::BATCH_ARRAY, parts.0));
+        // the lights: kinds 4 and 2 kept apart, or found among three, or missing
+        let entries = [lights.0 + 0x100, lights.0 + 0x180, lights.0 + 0x200];
+        setup.push((lights.0 + 0x4c, if g.one_in(2) { lights.0 + 0x80 } else { 0 }));
+        setup.push((lights.0 + 0x54, if g.one_in(2) { lights.0 + 0x84 } else { 0 }));
+        setup.push((lights.0 + 0x80, entries[g.bits() as usize % 3]));
+        setup.push((lights.0 + 0x84, if g.one_in(5) { 0 } else { entries[g.bits() as usize % 3] }));
+        setup.push((lights.0 + 0x2c, g.bits() % 4));
+        setup.push((lights.0 + 0x50, lights.0 + 0x90));
+        for (k, &e) in entries.iter().enumerate() {
+            setup.push((lights.0 + 0x90 + 4 * k as u32, e));
+            setup.push((e + 0x70, [1, 2, 4, 5][g.bits() as usize % 4]));
+            for at in [0x30, 0x34, 0x38] {
+                setup.push((e + at, fl(&mut g, 1.0, 0.0, 1.5)));
+            }
+        }
+        // the seats: up to twenty, the listener's word among them or not
+        setup.push((seats.0 + 0x340, g.bits() % 21));
+        setup.push((seats.0 + 0x548, seats.0 + 0x400));
+        for k in 0..20 {
+            setup.push((seats.0 + 0x400 + 4 * k, g.bits() % 24));
+        }
+        let dt = F(g.near(0.0333, 0.0, 0.1));
+        setup.push((seed, g.bits()));
+        let lay = |ee: &mut Ee| {
+            for &(at, w) in &setup {
+                ee.set_u32(at, w);
+            }
+        };
+        lay(&mut ee);
+        log.borrow_mut().clear();
+        ee.set(28, GP);
+        ee.call(0x0050_db60, &[u64::from(ob)], &[dt.0], 5_000_000);
+        let want_r = ee.r(2) as u32;
+        let want = std::mem::take(&mut *log.borrow_mut());
+        let want_ram = snap_regions(&ee, &[region]);
+        let want_globals = snap_regions(&ee, &globals);
+        lay(&mut ee);
+        let mut port = EmitOracle { ee: &mut ee, seed, log: vec![] };
+        let got_r = emitter::other(&mut port, ob, dt);
+        let got = std::mem::take(&mut port.log);
+        assert_eq!(got, want, "case {case}: the calls");
+        assert_eq!(got_r, want_r, "case {case}: the answer");
+        let got_ram = snap_regions(&ee, &[region]);
+        let parted: Vec<String> = got_ram
+            .iter()
+            .zip(&want_ram)
+            .enumerate()
+            .filter(|(_, (a, b))| a != b)
+            .map(|(k, (a, b))| format!("{:#x}: {b:#010x} want, {a:#010x} got", region.0 + 4 * k as u32))
+            .collect();
+        assert!(parted.is_empty(), "case {case}: the scratch RAM parts:\n  {}", parted.join("\n  "));
+        assert_eq!(snap_regions(&ee, &globals), want_globals, "case {case}: the globals");
+        let spawned = want.iter().find(|c| c.0 == "send").map(|c| c.1[2]) != setup.iter().rfind(|s| s.0 == b + emitter::BATCH_COUNT).map(|s| s.1);
+        let sent = want.iter().any(|c| c.0 == "send");
+        let draws = want.iter().filter(|c| c.0 == "rand").count();
+        *seen.entry(format!("{}{}draws {draws}", if sent { "sent " } else { "" }, if sent && spawned { "spawned " } else { "" })).or_default() += 1;
+    }
+    eprintln!("other emitter kind oracle: {seen:#?}");
+    for want in ["draws 0", "sent draws 2", "sent spawned draws 2"] {
+        assert!(seen.keys().any(|k| k == want), "no case made {want}: {seen:?}");
     }
 }
 

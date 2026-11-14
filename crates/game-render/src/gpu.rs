@@ -2762,6 +2762,18 @@ impl Renderer {
         }
     }
 
+    /// Draw `owner`'s prop `k` (its index in the props [`Renderer::add_props`] was given) at `at` from
+    /// now on: a world tile's knocked prop where its body is (MD153).
+    pub fn move_owned_prop(&mut self, owner: u32, k: usize, at: M4) {
+        if let Some(p) = self.props.iter_mut().filter(|p| p.owner == owner).nth(k) {
+            p.at = at;
+            if !p.moved {
+                p.moved = true;
+                self.sun.world.generation += 1;
+            }
+        }
+    }
+
     /// More props drawn in every frame from now on, and a grove, as `owner`'s (MD15: a world tile's,
     /// already moved to where the tile is), until [`Renderer::drop_owner`] lets them go.
     pub fn add_props(&mut self, owner: u32, props: &[crate::scene::Placement], grove: Option<crate::eco::Grove>) {

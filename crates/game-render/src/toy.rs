@@ -482,6 +482,16 @@ impl Traffic {
     /// nothing hits, when the file is missing or does not parse; said once). A car whose path the
     /// simulation cannot walk is a car with one key, which the original does not drive either.
     pub fn sim(&self, archives: &[crate::disc::Res]) -> game_sim::traffic::Traffic {
+        self.sim_with(archives, None)
+    }
+
+    /// [`Traffic::sim`] for a world's tile (MD153): every key moved by the tile's offset `by`
+    /// (`x`, `z`), so the cars drive in world feet and find their ground there.
+    pub fn sim_moved(&self, archives: &[crate::disc::Res], by: [f32; 2]) -> game_sim::traffic::Traffic {
+        self.sim_with(archives, Some(by))
+    }
+
+    fn sim_with(&self, archives: &[crate::disc::Res], by: Option<[f32; 2]>) -> game_sim::traffic::Traffic {
         use ps2_float::{F, Vf};
         let specs = self
             .cars
@@ -501,6 +511,10 @@ impl Traffic {
                 };
                 // The clip's own keys: the simulation's car presamples them itself, on its first frame.
                 let points: Vec<(F, Vf)> = path.keys.iter().zip(&path.clip).map(|(k, p)| (F(k.t), Vf::new(p.x, p.y, p.z, 1.0))).collect();
+                let points = match by {
+                    None => points,
+                    Some([x, z]) => points.into_iter().map(|(t, p)| (t, Vf::new((F(p.x()) + F(x)).0, p.y(), (F(p.z()) + F(z)).0, 1.0))).collect(),
+                };
                 let f = F;
                 let spec = game_sim::traffic::Spec::new(&points, f(car.time_scale), f(car.heading_filter), f(car.normal_filter), f(car.lag), mesh);
                 spec.map(|mut spec| {
