@@ -9,6 +9,7 @@
 // plays too. The race driver runs once more on sx01's race image, on the three brains as they stand.
 
 use super::*;
+use game_sim::ai::Alod;
 use game_sim::ai::drive::{self, Calls, Card, Gate, Race};
 use game_sim::race::{Crossing, Seen, Spot};
 use ps2_oracle::{Ee, Kit};
@@ -856,4 +857,149 @@ fn ai_brains_carry_no_listeners() {
 fn any_w(pick: &mut Pick, r: f32) -> Vf {
     let w = pick.range(-1.0, 1.0);
     pick.vec(r, w)
+}
+
+/// `ai_speed_step` (the brain's vt+0xa0, through to the leader cap it calls) against
+/// `ai::drive::speed_step` over ten thousand calls: no route node, a node that frees the speed, no race,
+/// no leader, a rider behind or level, within the lead window, between the windows (left, capped) and
+/// past the outer window (left, down to the upper limit, down to the lower), and caps that stop at the
+/// adaptive speed. Gaps and speeds land on the windows and caps exactly now and then, signed zeros too.
+#[test]
+fn the_speed_step_matches_over_ten_thousand_calls() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let Some(at) = named(&["ai_speed_step"]) else { return };
+    let [step] = at[..] else { unreachable!() };
+    const NODE: u32 = 0x01c0_c000;
+    let mut pick = Pick(0x5314_00a0_5bee_d000);
+    // off, no leader, behind, lead, mid left, mid capped, far left, far upper, far lower, at the speed
+    let mut seen = [0u32; 10];
+    for case in 0..10_000 {
+        for at in [D_BRAIN, D_CARD, D_RACE, D_CARD + 0x400, NODE] {
+            ee.load(at, &[0u8; 0x400]);
+        }
+        let b = D_BRAIN;
+        let leader_at = D_CARD + 0x400;
+        let node = match pick.below(16) {
+            0 => None,
+            1 => Some(pick.next() as u32 | drive::NODE_FREE_SPEED),
+            _ => Some(pick.next() as u32 & !drive::NODE_FREE_SPEED),
+        };
+        let race = !pick.chance(16);
+        let has_leader = !pick.chance(16);
+        let window = pick.range(50.0, 300.0);
+        let lead_window = if pick.chance(16) { window + pick.range(0.0, 50.0) } else { pick.range(0.0, window) };
+        let upper = if pick.chance(16) { 1.0 } else { pick.range(0.4, 1.3) };
+        let lower = pick.range(0.2, 1.1);
+        let min = if pick.chance(16) { f32::from_bits(pick.below(0x7f_ffff) as u32) } else { pick.range(20.0, 110.0) };
+        let leader_speed = if pick.chance(8) { min } else { pick.range(0.0, 130.0) };
+        let leader_progress = if pick.chance(16) { -0.0 } else { pick.range(0.0, 20_000.0) };
+        let gap = match pick.below(8) {
+            0 => float(&mut pick, 400.0).min(0.0),
+            1 => lead_window,
+            2 => window,
+            3 => pick.range(0.0, lead_window),
+            4 | 5 => pick.range(lead_window, window),
+            _ => pick.range(window, 2000.0),
+        };
+        let progress = leader_progress + gap;
+        let base = leader_speed.max(min);
+        let speed = match pick.below(8) {
+            0 => base * upper,
+            1 => base + (5.0 + gap * ((5.0 + base) * (upper - 1.0)) / window),
+            2 => float(&mut pick, 150.0),
+            _ => pick.range(0.0, 150.0),
+        };
+        if let Some(flags) = node {
+            ee.set_u32(b + 0x224, NODE);
+            ee.set_u32(NODE + 4, flags);
+        }
+        ee.set_u32(b + 0xd4, D_CARD);
+        ee.set_u32(b + 0xd8, if race { D_RACE } else { 0 });
+        ee.set_u32(D_RACE + 0xa4, if has_leader { leader_at } else { 0 });
+        ee.set_f32(D_CARD + 0x1c, progress);
+        ee.set_f32(leader_at + 0x1c, leader_progress);
+        ee.set_f32(leader_at + 0x108, leader_speed);
+        for (off, v) in [(0x44, window), (0x48, upper), (0x4c, lower), (0x2e4, min), (0x2e8, lead_window), (0x1e0, speed)] {
+            ee.set_f32(b + off, v);
+        }
+        ee.call(step, &[u64::from(b), u64::from(b + 0x1e0)], &[], BUDGET);
+
+        let alod = Alod {
+            window: F(window),
+            lower_limit: F(lower),
+            upper_limit: F(upper),
+            speed: F(min),
+            lead_window: F(lead_window),
+        };
+        let leader = (race && has_leader).then_some(drive::Leader { progress: F(leader_progress), speed: F(leader_speed) });
+        let mut mine = F(speed);
+        let answer = drive::speed_step(node, &alod, F(progress), leader, &mut mine);
+        assert_eq!(ee.r(2), u64::from(answer), "case {case}: the answer");
+        assert_eq!(ee.u32_at(b + 0x1e0), mine.0.to_bits(), "case {case}: the speed");
+
+        let g = progress - leader_progress;
+        let changed = mine.0.to_bits() != speed.to_bits();
+        let k = if !answer {
+            0
+        } else if leader.is_none() {
+            1
+        } else if g <= 0.0 {
+            2
+        } else if g <= lead_window && g <= window {
+            3
+        } else if g <= window {
+            if changed { 5 } else { 4 }
+        } else if !changed {
+            6
+        } else if base * upper >= speed * lower {
+            7
+        } else {
+            8
+        };
+        seen[k] += 1;
+        seen[9] += u32::from(changed && mine.0.to_bits() == min.to_bits());
+    }
+    println!("speed step: off, no leader, behind, lead, mid left, mid capped, far left, far upper, far lower, at the speed {seen:?}");
+    for (k, n) in seen.iter().enumerate() {
+        assert!(*n >= 100, "branch {k} reached only {n} times: {seen:?}");
+    }
+}
+
+/// The speed step on sx01's race image, on each of the three AI brains as it stands (its route node,
+/// its card, the race's leading card and its adaptive difficulty), matches the port.
+#[test]
+fn the_speed_step_matches_on_sx01s_race_image() {
+    let Some(ee) = race_image() else { return };
+    let Some(at) = named(&["ai_speed_step"]) else { return };
+    let [step] = at[..] else { unreachable!() };
+    for b in S282C_RIDERS {
+        let Some(mut each) = race_image() else { return };
+        let f = |a: u32| F(ee.f32_at(a));
+        let raw_f = |a: u32| F(f32::from_bits(ee.u32_at(a)));
+        let node_at = ee.u32_at(b + 0x224);
+        let node = (node_at != 0).then(|| ee.u32_at(node_at + 4));
+        let race_at = ee.u32_at(b + 0xd8);
+        let leader_at = if race_at != 0 { ee.u32_at(race_at + 0xa4) } else { 0 };
+        let leader =
+            (leader_at != 0).then(|| drive::Leader { progress: f(leader_at + 0x1c), speed: raw_f(leader_at + 0x108) });
+        let alod = Alod {
+            window: raw_f(b + 0x44),
+            upper_limit: raw_f(b + 0x48),
+            lower_limit: raw_f(b + 0x4c),
+            speed: raw_f(b + 0x2e4),
+            lead_window: raw_f(b + 0x2e8),
+        };
+        let progress = raw_f(ee.u32_at(b + 0xd4) + 0x1c);
+        let mut mine = raw_f(b + 0x1e0);
+        each.call(step, &[u64::from(b), u64::from(b + 0x1e0)], &[], BUDGET);
+        let answer = drive::speed_step(node, &alod, progress, leader, &mut mine);
+        println!(
+            "{b:#x}: flags {:#x}, node {node:x?}, leader {leader:?}, progress {progress:?}, {alod:?}, speed {} -> {}",
+            ee.u32_at(b + 0x30),
+            ee.f32_at(b + 0x1e0),
+            mine.0
+        );
+        assert_eq!(each.r(2), u64::from(answer), "{b:#x}: the answer");
+        assert_eq!(each.u32_at(b + 0x1e0), mine.0.to_bits(), "{b:#x}: the speed");
+    }
 }
