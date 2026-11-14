@@ -47,6 +47,11 @@
 //! ([`Mods::atv`]: [`Knob::AtvSpeed`], [`Knob::AtvAccel`], [`Knob::AtvGrip`], [`Knob::AtvSuspension`]),
 //! the bike's four reasoned the same way on the quad's fields, each skipped at its default.
 //!
+//! P288 gave MX vs. ATV's five cars, an addition too, their own [`Category::MxvatvCars`] on their loaded
+//! `.phy` ([`Mods::mxvatv_car`]: [`Knob::MxvatvCarSpeed`], [`Knob::MxvatvCarAccel`],
+//! [`Knob::MxvatvCarGrip`], [`Knob::MxvatvCarSuspension`]): SLUS-21104 reads MX Unleashed's car keys,
+//! so they are the stock cars' four on the same fields, each skipped at its default.
+//!
 //! I8's [`Knob::StickDeadZone`] is experimental, and the other exception to "a percentage": its value
 //! is the dead zone itself in hundredths ([`DEAD_ZONES`]), and its default, [`ORIGINAL`], is off —
 //! the original's ±0.3 ([`crate::input::AxisRange::PLAYER`]). On, [`Mods::bike`] narrows the range
@@ -103,10 +108,14 @@ pub enum Knob {
     AtvAccel,
     AtvGrip,
     AtvSuspension,
+    MxvatvCarSpeed,
+    MxvatvCarAccel,
+    MxvatvCarGrip,
+    MxvatvCarSuspension,
 }
 
 /// How many modifiers there are.
-pub const KNOBS: usize = 32;
+pub const KNOBS: usize = 36;
 
 /// A modifier's default, which leaves its fields untouched: 100%.
 pub const ORIGINAL: u16 = 100;
@@ -137,6 +146,9 @@ pub enum Category {
     Cars,
     /// MX vs. ATV's quad (P287), an addition: offered only while it is on, so not in [`Category::ALL`].
     Atv,
+    /// MX vs. ATV's five cars (P288), an addition: offered only while one is picked, so not in
+    /// [`Category::ALL`].
+    MxvatvCars,
     World,
 }
 
@@ -152,6 +164,7 @@ impl Category {
             Category::Kiowa => "Kiowa",
             Category::Cars => "Cars",
             Category::Atv => "ATV",
+            Category::MxvatvCars => "MX vs. ATV Cars",
             Category::World => "World",
         }
     }
@@ -196,6 +209,10 @@ impl Knob {
         Knob::AtvAccel,
         Knob::AtvGrip,
         Knob::AtvSuspension,
+        Knob::MxvatvCarSpeed,
+        Knob::MxvatvCarAccel,
+        Knob::MxvatvCarGrip,
+        Knob::MxvatvCarSuspension,
     ];
 
     /// The ones the menu has a row for, in its order: all but [`Knob::PlaneSpeed`], which P95 split
@@ -232,6 +249,10 @@ impl Knob {
         Knob::AtvAccel,
         Knob::AtvGrip,
         Knob::AtvSuspension,
+        Knob::MxvatvCarSpeed,
+        Knob::MxvatvCarAccel,
+        Knob::MxvatvCarGrip,
+        Knob::MxvatvCarSuspension,
     ];
 
     /// The machine it is for, or the world (P272): the menu's category it shows under.
@@ -252,6 +273,7 @@ impl Knob {
             Knob::KiowaSpeed | Knob::KiowaClimb | Knob::KiowaTurn | Knob::KiowaCeiling => Category::Kiowa,
             Knob::CarSpeed | Knob::CarAccel | Knob::CarGrip | Knob::CarSuspension => Category::Cars,
             Knob::AtvSpeed | Knob::AtvAccel | Knob::AtvGrip | Knob::AtvSuspension => Category::Atv,
+            Knob::MxvatvCarSpeed | Knob::MxvatvCarAccel | Knob::MxvatvCarGrip | Knob::MxvatvCarSuspension => Category::MxvatvCars,
             Knob::Gravity | Knob::AirDrag | Knob::TimeScale => Category::World,
         }
     }
@@ -295,6 +317,10 @@ impl Knob {
             Knob::AtvAccel => "atv_accel",
             Knob::AtvGrip => "atv_grip",
             Knob::AtvSuspension => "atv_suspension",
+            Knob::MxvatvCarSpeed => "mxvatv_car_speed",
+            Knob::MxvatvCarAccel => "mxvatv_car_accel",
+            Knob::MxvatvCarGrip => "mxvatv_car_grip",
+            Knob::MxvatvCarSuspension => "mxvatv_car_suspension",
         }
     }
 
@@ -337,6 +363,10 @@ impl Knob {
             Knob::AtvAccel => "ATV acceleration",
             Knob::AtvGrip => "ATV tire grip",
             Knob::AtvSuspension => "ATV suspension",
+            Knob::MxvatvCarSpeed => "MX vs. ATV car top speed",
+            Knob::MxvatvCarAccel => "MX vs. ATV car acceleration",
+            Knob::MxvatvCarGrip => "MX vs. ATV car tire grip",
+            Knob::MxvatvCarSuspension => "MX vs. ATV car suspension",
         }
     }
 
@@ -440,6 +470,10 @@ impl Knob {
             Knob::AtvAccel => "how fast the quad gets up to speed, not its top",
             Knob::AtvGrip => "every quad tire's grip on every surface",
             Knob::AtvSuspension => "the quad's spring stiffness, damped alike",
+            Knob::MxvatvCarSpeed => "the MX vs. ATV car's top speed, not the pull off the line",
+            Knob::MxvatvCarAccel => "how fast the MX vs. ATV car gets up to speed, not its top",
+            Knob::MxvatvCarGrip => "every MX vs. ATV car tire's grip on every surface",
+            Knob::MxvatvCarSuspension => "the MX vs. ATV car's spring stiffness, damped alike",
         }
     }
 
@@ -473,7 +507,7 @@ impl Knob {
             Knob::KiowaClimb => "kiowa [Flight Controller] ClimbRateGain, DescentRateGain x k; above 100%, [Main Rotor] MaxCollectivePitchAngle x k^(1/2)",
             Knob::KiowaTurn => "kiowa [Flight Controller] MaxRateCommand (yaw, roll), MinRateCommand (roll) x k; [Main/Tail Rotor] MaxRotorMoment (yaw, roll) x k",
             Knob::KiowaCeiling => "kiowa [Flight Controller] MaxAltitude x k",
-            Knob::CarSpeed => "car [Engine] torque curve, PumpTorqueScale, MaxPumpTorque x k; FinalGearRatio / k; [Aerodynamics] AeroSurfaceArea / k^2",
+            Knob::CarSpeed => "car [Engine] torque curve, PumpTorqueScale, MaxPumpTorque, EngineBraking x k; FinalGearRatio / k; [Aerodynamics] AeroSurfaceArea / k^2",
             Knob::CarAccel => "car [Engine] torque curve, PumpTorqueScale, MaxPumpTorque x k; [Aerodynamics] AeroSurfaceArea, every tire surface's WheelFriction x k",
             Knob::CarGrip => "car every tire surface's FrictionPeak x k",
             Knob::CarSuspension => "car every tire's Spring x k; BounceDamping, ReboundDamping x k^(1/2)",
@@ -485,6 +519,10 @@ impl Knob {
             }
             Knob::AtvGrip => "quad every tire surface's SideForce, SlippingSideForce, MaxDriveForce, MaxSideForce, MaxSlippingSideForce, Skid*Force x k",
             Knob::AtvSuspension => "quad [Front/Rear Tire] Spring, SpringWhenStopped x k; the dampers' rates x k^(1/2)",
+            Knob::MxvatvCarSpeed => "MX vs. ATV car [Engine] torque curve, PumpTorqueScale, MaxPumpTorque, EngineBraking x k; FinalGearRatio / k; [Aerodynamics] AeroSurfaceArea / k^2",
+            Knob::MxvatvCarAccel => "MX vs. ATV car [Engine] torque curve, PumpTorqueScale, MaxPumpTorque x k; [Aerodynamics] AeroSurfaceArea, every tire surface's WheelFriction x k",
+            Knob::MxvatvCarGrip => "MX vs. ATV car every tire surface's FrictionPeak x k",
+            Knob::MxvatvCarSuspension => "MX vs. ATV car every tire's Spring x k; BounceDamping, ReboundDamping x k^(1/2)",
             Knob::StickDeadZone => "not a key: the ride's stick consumers' dead zone, ±0.30 in the original, set to ±k/100 and each side stretched to the full range from its edge",
         }
     }
@@ -982,7 +1020,20 @@ impl Mods {
 
     /// Player `seat`'s car, any of the three, on its loaded `.phy` before it is taken (P272).
     pub fn car(&self, seat: usize, car: &mut car::Car) {
-        if let Some(k) = self.factor(seat, Knob::CarAccel) {
+        self.car_knobs(seat, [Knob::CarSpeed, Knob::CarAccel, Knob::CarGrip, Knob::CarSuspension], car);
+    }
+
+    /// Player `seat`'s MX vs. ATV car, any of the five (P288), on what its `.phy` loaded
+    /// ([`crate::car::MxvatvCar::car`], which SLUS-21104 reads with MX Unleashed's car loader) before
+    /// it is taken: the stock cars' four on the same fields, on knobs of its own.
+    pub fn mxvatv_car(&self, seat: usize, car: &mut car::Car) {
+        self.car_knobs(seat, [Knob::MxvatvCarSpeed, Knob::MxvatvCarAccel, Knob::MxvatvCarGrip, Knob::MxvatvCarSuspension], car);
+    }
+
+    /// A car's top speed, acceleration, grip and suspension on `knobs` (in that order).
+    fn car_knobs(&self, seat: usize, knobs: [Knob; 4], car: &mut car::Car) {
+        let [speed, accel, grip, suspension] = knobs;
+        if let Some(k) = self.factor(seat, accel) {
             // k times the engine and its converter, and k times what holds the car back on the flat
             // (the air on its wings, the tires' rolling friction): the force left over is k times
             // the file's at every speed below the top, and the top is where it was.
@@ -994,25 +1045,28 @@ impl Mods {
                 }
             }
         }
-        if let Some(k) = self.factor(seat, Knob::CarSpeed) {
+        if let Some(k) = self.factor(seat, speed) {
             // As the bike's: k times the torque on the final drive / k is the file's force at the
             // wheel at any revs, the wheel turning k times as fast for them (and the redline's top
             // wheel speed k times); the wings' area / k^2 leaves k times the speed the file's lift
-            // and drag. The pull off the line is the file's.
+            // and drag. The pull off the line is the file's. The engine's braking (EngineBraking x
+            // revs^2) goes up with its torque, as the bike's and the quad's do (P288): left alone, at
+            // 50% it holds a car's revs down to a twelfth of its top speed rather than half.
             car_power(&mut car.engine, k);
             let e = &mut car.engine;
+            e.engine_braking = e.engine_braking * k;
             e.final_gear_ratio = e.final_gear_ratio / k;
             e.first = e.first_gear();
             car.aero.aero_surface_area = car.aero.aero_surface_area / (k * k);
         }
-        if let Some(k) = self.factor(seat, Knob::CarGrip) {
+        if let Some(k) = self.factor(seat, grip) {
             for t in &mut car.tires {
                 for s in &mut t.surfaces {
                     s.friction_peak = s.friction_peak * k;
                 }
             }
         }
-        if let Some(k) = self.factor(seat, Knob::CarSuspension) {
+        if let Some(k) = self.factor(seat, suspension) {
             // The dampers are the file's ratios of critical damping turned into rates against the
             // spring (`phy::damping`, which goes with its square root): stiffer, damped as much.
             let d = k.sqrt();

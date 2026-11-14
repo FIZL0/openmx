@@ -3259,6 +3259,10 @@ impl Garage {
         if let Some(atv) = self.atv.as_mut() {
             (atv.mods, atv.seat) = (*mods, seat);
         }
+        // MX vs. ATV's car's (P288) likewise, as it is made.
+        if let Some(car) = self.mxvatv_car.as_mut() {
+            (car.mods, car.seat) = (*mods, seat);
+        }
     }
 }
 
@@ -3543,6 +3547,9 @@ pub struct MxvatvCarRide {
     /// How many times it has wrecked since it was last taken, and whether it was down last tick.
     pub wrecks: u32,
     was_down: bool,
+    /// The modifiers it is made on, and whose (P288, [`Garage::modify`]): read as it is taken.
+    pub mods: game_sim::modifiers::Mods,
+    pub seat: usize,
 }
 
 impl std::fmt::Debug for MxvatvCarRide {
@@ -3565,7 +3572,7 @@ impl MxvatvCarRide {
         let points = game_sim::atv_car::tire_points(&model, &origin).map_err(|e| format!("{psg}: {e}"))?;
         let curve = game_sim::camera::CurveTable::build();
         let load = game_sim::atv_car::Load::read(&ini, machine, model.half_box(&origin), points, &curve);
-        Ok(MxvatvCarRide { pack: pack.to_string(), machine, load: std::sync::Arc::new(load), ridden: None, taken_at: Vf::default(), taken_along: Vf::default(), wrecks: 0, was_down: false })
+        Ok(MxvatvCarRide { pack: pack.to_string(), machine, load: std::sync::Arc::new(load), ridden: None, taken_at: Vf::default(), taken_along: Vf::default(), wrecks: 0, was_down: false, mods: game_sim::modifiers::Mods::original(), seat: 0 })
     }
 
     /// What the shell calls it.
@@ -3579,11 +3586,19 @@ impl MxvatvCarRide {
         car.tires.iter().map(|t| t.radius.0 - t.mount.y()).fold(0.0f32, f32::max) + 1.0
     }
 
-    /// The car made standing over `at` (on its ground) facing `forward` (flattened), still.
+    /// The car made standing over `at` (on its ground) facing `forward` (flattened), still, on the
+    /// seat's modifiers (P288): with every one of its knobs at the default, on the pack's file as read.
     pub fn made(&self, at: Vf, forward: Vf) -> game_sim::atv_car::Ride {
         let yaw = forward.x().atan2(forward.z());
         let quat = Vf::new(0.0, (yaw / 2.0).sin(), 0.0, (yaw / 2.0).cos());
-        self.load.ride(Vf::new(at.x(), at.y() + self.lift(), at.z(), 1.0), quat, F::ZERO)
+        let at = Vf::new(at.x(), at.y() + self.lift(), at.z(), 1.0);
+        let modded = game_sim::modifiers::Category::MxvatvCars.knobs().into_iter().any(|k| self.mods.get(self.seat, k) != game_sim::modifiers::ORIGINAL);
+        if !modded {
+            return self.load.ride(at, quat, F::ZERO);
+        }
+        let mut load = (*self.load).clone();
+        self.mods.mxvatv_car(self.seat, &mut load.file.car);
+        load.ride(at, quat, F::ZERO)
     }
 
     /// The car taken at `from`: made standing over the ground under the spot, facing along it, at

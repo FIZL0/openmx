@@ -1445,6 +1445,10 @@ impl Menu {
         if knob.category() == Category::Atv && (self.guest || self.lobby.room.is_some()) {
             return Some("Online rides have no quad yet.");
         }
+        // MD39c: MX vs. ATV's cars are offline only.
+        if knob.category() == Category::MxvatvCars && (self.guest || self.lobby.room.is_some()) {
+            return Some("Online rides have no MX vs. ATV car yet.");
+        }
         match self.mods_own() {
             None => None,
             Some(_) if !knob.per_seat() => Some("The world's: only the host sets it."),
@@ -1559,13 +1563,22 @@ impl Menu {
     /// The categories the modifiers page's Machine row offers (P272): each machine the game has, then
     /// the world's. A mod machine's goes in here, while its addition is on, once it has knobs: MX vs.
     /// ATV's quad (P287) before the world's, while the Garage's Quad row picks one or the ride under
-    /// the pause has one.
+    /// the pause has one; MX vs. ATV's cars (P288) after it, on the same terms.
     pub fn mods_categories(&self) -> Vec<Category> {
         let mut all = Category::ALL.to_vec();
         if self.atv_on() {
             all.insert(all.len() - 1, Category::Atv);
         }
+        if self.mxvatv_car_on() {
+            all.insert(all.len() - 1, Category::MxvatvCars);
+        }
         all
+    }
+
+    /// The MX vs. ATV car addition is on (MD39c): a car picked in settings' `mxvatv_car`, or under the
+    /// pause a ride that offers one (`--mxvatv-car`).
+    fn mxvatv_car_on(&self) -> bool {
+        !self.settings.mxvatv_car.is_empty() || (self.stack.first() == Some(&Screen::Pause) && self.mxvatv_car.iter().any(|&a| a))
     }
 
     /// The quad addition is on (MD37d): a handling file picked on the Garage's Quad row, or under the
@@ -1617,7 +1630,7 @@ impl Menu {
             M::Biplane => Category::Biplane,
             M::Buggy | M::Monster | M::Baja => Category::Cars,
             M::Helicopter => Category::Kiowa,
-            // MX vs. ATV's cars (MD39c) have no knobs of their own yet: the bike's page.
+            M::MxvatvCar if self.mxvatv_car_on() => Category::MxvatvCars,
             M::MxvatvCar => Category::Bike,
         })
     }
