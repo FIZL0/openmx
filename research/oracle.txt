@@ -12369,3 +12369,16 @@ atv_out_of_bounds           atv 0x004a4f20 (vt +0x16c, the bike in a0): body pos
 #   Wheel +0x1f0 owner, +0x1f4 vehicle: set by 0x004a0c80 (F52), zeroed by the wheel clear 0x004a0c30, read by
 #   the contact velocity 0x004a1150 while +0x1a0 is clear (MD74's offsets). Vehicle alone: vtable at
 #   vehicle +4, jalr vt +0xc4 (spin) then vt +0xc0 (velocity), a0 = a stack quadword, a1 = vehicle, v0 = a0.
+# MD138a — the quad's own clips and the rider's stunt clips (game_render::quad::Driver, quad_draw::stunts /
+#   chassis_locals / rider_stunt; tests/atv_clips.rs). Comment rows only; journal research/journal/*-md138a-atv-clips.
+#   The quad's clip binder atv_stunt_specials 0x004dd280 binds "ATV_bike_%s" only for the stunt table's
+#   UsedForBike rows (mxvatv_atv's ATV_Rider_Stunts.ini: 0 Taunt, 6 nacnac, 7 flatliner, 12 kod, 15
+#   9oclockindianair, 16 tsunami, 22 9oclocknac, 33 kodindianair, 35 ragdoll, 36 Varial, 44/45 threesixtyL/R);
+#   row 41 backflip is UsedForBike=F, so no ATV_Bike_BackFlip is bound and the quad's driver (game_sim::quad::
+#   animate, MD65c) plays clip 47 (Air_Mid) at 0.5 for it. The rider's binder 0x0027ac30 binds "ATV_rider_%s"
+#   for every HasAnimation row. Every build .mcf (ATV_R.mcf ...) maps ATV_Bike_Air_Fwd/Mid/Bck all to
+#   ATV_Bike_Air_Mid.MOT. The stunt word: atv_bike_start_stunt 0x004e6370 (S223 above), atv_bike_end_stunt
+#   0x004e4db0, the clock and the 46/0xff choice in atv_stunt_idle 0x004e5d20 / atv_stunt_request 0x004e49c0
+#   (a flip or 360 holds while +0x1194 / +0x11d0, else it ends at the row's Duration +0x48), restart +0x1650
+#   cleared by atv_bike_vehicle_update 0x004e1b90. The rider's motion-set row and lean words (rider anim
+#   +0x310..+0x344) have no reader found yet: the port keeps its own choice (MD138a's follow-up).

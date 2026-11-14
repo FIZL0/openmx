@@ -3967,10 +3967,12 @@ impl<R: Moto + Default> Ride<R> {
     }
 
     /// The pad's levers and stick where the pad reader stores them: the gas and brake into the quad,
-    /// the stick into the input limiter's.
+    /// the stick into the input limiter's, and the trick buttons into the steps' byte (MD138a: the
+    /// backflip arms on R1 alone, [`crate::handling::R1_ALONE`]).
     pub fn controls(&mut self, c: &crate::ride::Controls) {
         (self.q.gas, self.q.brake) = (c.gas, c.brake);
         (self.bike.stick.x, self.bike.stick.y) = c.stick;
+        self.bike.buttons = crate::handling::trick_nibble(c.trick);
     }
 
     /// One tick of [`frame`], with `ground` and `sweep` answering [`Steps`]' ground query and sweep.

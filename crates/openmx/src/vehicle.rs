@@ -3360,6 +3360,9 @@ pub struct AtvRide {
     /// take reads them ([`game_sim::modifiers::Mods::atv`]); the original's until then.
     pub mods: game_sim::modifiers::Mods,
     pub seat: usize,
+    /// MD138a: the rider's stunt table as the quad's clips read it, which the drawn quad's look sets
+    /// (`quad_draw::stunts`); empty, no clips are ticked.
+    pub stunts: Vec<game_render::quad::Stunt>,
 }
 
 impl std::fmt::Debug for AtvRide {
@@ -3375,6 +3378,9 @@ pub struct Quad {
     pub segments: [[Vf; 2]; 4],
     /// Whether it was down (wrecked) last tick, for counting wrecks.
     pub was_down: bool,
+    /// MD138a: its clips, ticked after each step ([`game_render::quad::Driver`]); `None` with no
+    /// stunt table ([`AtvRide::stunts`]).
+    pub clips: Option<game_render::quad::Driver>,
 }
 
 impl AtvRide {
@@ -3389,7 +3395,7 @@ impl AtvRide {
         let rays = |b: Vec<u8>, what: &str| game_sim::track::Rays::parse(&b).map_err(|e| format!("{what}: {e}"));
         let riding = rays(file(&format!("Veh/Col/{col}"))?, col)?;
         let wreck = rays(file(&format!("Veh/Col/{}", game_sim::quad::WRECK_FILE))?, game_sim::quad::WRECK_FILE)?;
-        let atv = AtvRide { pack: pack.to_string(), phy: atv_stem(phy).to_string(), ini, model: std::sync::Arc::new(model), riding, wreck, ridden: None, taken_at: Vf::default(), wrecks: 0, mods: game_sim::modifiers::Mods::original(), seat: 0 };
+        let atv = AtvRide { pack: pack.to_string(), phy: atv_stem(phy).to_string(), ini, model: std::sync::Arc::new(model), riding, wreck, ridden: None, taken_at: Vf::default(), wrecks: 0, mods: game_sim::modifiers::Mods::original(), seat: 0, stunts: Vec::new() };
         atv.made(Vf::new(0.0, 0.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 1.0), None)?;
         Ok(atv)
     }
@@ -3404,7 +3410,8 @@ impl AtvRide {
         ride.rig(&load, &self.riding, &self.wreck);
         let segments = ride.trigger_segments().ok_or_else(|| format!("{}: no trigger probe", self.phy))?;
         self.mods.atv_body(self.seat, &mut ride.body);
-        Ok(Quad { ride, segments, was_down: false })
+        let clips = (!self.stunts.is_empty()).then(|| game_render::quad::Driver::new(self.stunts.clone()));
+        Ok(Quad { ride, segments, was_down: false, clips })
     }
 
     /// The quad taken at `from`: made standing on the ground under the spot, facing along it, at
@@ -3426,6 +3433,9 @@ impl AtvRide {
         let Some(q) = self.ridden.as_deref_mut() else { return };
         q.ride.rest.clear();
         q.ride.step(controls, dt, world, q.segments);
+        if let Some(clips) = &mut q.clips {
+            clips.tick(&q.ride, dt.0);
+        }
         let down = q.ride.down();
         if down && !q.was_down {
             self.wrecks += 1;
