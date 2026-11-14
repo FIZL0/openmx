@@ -114,6 +114,7 @@ mod spawn; // S12e: the brain spawn
 mod interface; // S322: the rider's interface defaults and the race start
 mod lane; // S323: the Sim's AI lane
 mod drive; // S314: the base AI's mode drivers
+mod race4; // S12e: free09's four racers through the Sim (C33)
 
 use avoidance::*;
 use path_nets::*;

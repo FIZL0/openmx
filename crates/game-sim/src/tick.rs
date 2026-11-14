@@ -796,8 +796,11 @@ impl crate::Sim {
     /// avoidance walks and sweeps its props and plants) with the other players as its race list, its
     /// trick plan asks the rider's own trick state (which the frame's request then takes through
     /// [`crate::ai::gesture_gate`]), the assist pulls the body's yaw rate and velocity, and the levers
-    /// it hands off come back as the controls for the bike's frame. `None` for a player no brain
-    /// drives.
+    /// it hands off are the controls for the bike's next frame. `None` for a player no brain drives.
+    ///
+    /// The bike's frame rides the levers as they stood before this think: the hand-off lands after the
+    /// bike has read them, so each AI rider launches a tick after its gate opens. S12e's replay of
+    /// C33's four free09 racers agrees 14-18 ticks per AI body with the lag and 0-17 without it.
     pub fn think(&mut self, i: usize, dt: F, world: &mut dyn crate::world::World) -> Option<crate::ride::Controls> {
         let k = self.ai.as_deref()?.pilots.iter().position(|(p, _)| *p == i)?;
         let others: Vec<crate::ai::Other> =
@@ -811,12 +814,13 @@ impl crate::Sim {
         let crate::ai::Lane { seek, tables, rng, pilots } = lane;
         let mount = crate::ai::Mount { rider: seen, cofg, yaw_rate: &mut yaw_rate, velocity: &mut velocity };
         let tricks = Some((&rider.set, &mut rider.tricks));
-        let thought = pilots[k].1.think(mount, world, seek, tables, &others, tricks, rng, dt);
+        let ridden = crate::ai::ride_controls(&pilots[k].1.levers, pilots[k].1.racer.habits.clutch);
+        pilots[k].1.think(mount, world, seek, tables, &others, tricks, rng, dt);
         let ch = &mut rider.ride.chassis;
         let w = ch.world_ang_vel;
         ch.world_ang_vel = ps2_float::Vf::new(w.x(), yaw_rate.to_f32(), w.z(), w.w());
         ch.vel = velocity;
-        Some(thought.controls)
+        Some(ridden)
     }
 }
 
