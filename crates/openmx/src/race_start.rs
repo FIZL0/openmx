@@ -10,7 +10,9 @@
 //! warning window (S290, S304), and the gate's watch catches a rider who rolls through after that;
 //! the intro is counted as seen and not shown.
 
-use game_render::scene::Placement;
+use game_render::gpu::Actor;
+use game_render::mat::M4;
+use game_render::scene::{Placement, Scene};
 use game_render::V3;
 use game_sim::race::{self, GridStart, Prop, Race, Supercross};
 use game_sim::rng::Rng;
@@ -270,6 +272,135 @@ pub fn hand_over(laps: &race::Laps, laps_run: u8, player: &str, overs: &[race::R
     HandOver { cards, end, overs: overs.to_vec() }
 }
 
+/// P313b: how long the drop gate takes to swing down, in seconds. The race's drop hands the gate
+/// object its turn with this fixed length. The track's `RotationRateInSeconds` is read but never used.
+pub const SWING_SECONDS: f32 = 0.15;
+
+/// P313b: the drop gate as it falls at the drop. The race activity makes a gate object from the
+/// track's `.toy` `[DropGate]` section: the scene prop named `GateName`, turned about its own
+/// `RotationAxisLocal` by `RotationAngleDegrees`. The drop starts the turn. Each frame after it, the
+/// turn moves the prop's rotation on by the whole angle times `dt / 0.15`, until the angle is reached.
+/// The steps all turn about the same axis, so the prop at time `t` is turned by
+/// `angle × min(t / 0.15, 1)` from where the scene stands it.
+pub struct GateSwing {
+    placed: Placement,
+    axis: V3,
+    /// The whole turn, in radians, and how far it has gone.
+    angle: f32,
+    turned: f32,
+    swinging: bool,
+    /// The gate has dropped since it last closed.
+    down: bool,
+}
+
+impl GateSwing {
+    /// The `[DropGate]` words of a track's `.toy`: the prop's name (its quotes taken off), its local
+    /// axis and the turn in degrees. A missing axis is `1,0,0` and a missing angle 45, the reader's
+    /// defaults. `None` with no section: the original then makes no gate object.
+    pub fn words(toy: &str) -> Option<(String, V3, f32)> {
+        let sections = game_render::ini::parse(toy);
+        let s = sections.iter().find(|s| s.name.eq_ignore_ascii_case("DropGate"))?;
+        let name = s.get("GateName").unwrap_or("").trim().trim_matches('"').to_string();
+        let axis = match s.numbers("RotationAxisLocal").as_deref() {
+            Some(&[x, y, z, ..]) => V3 { x, y, z },
+            _ => V3 { x: 1.0, y: 0.0, z: 0.0 },
+        };
+        Some((name, axis, s.number("RotationAngleDegrees").unwrap_or(45.0)))
+    }
+
+    /// The gate's prop taken out of `scene`, so the static props drawn from it never show it standing
+    /// after the drop. The prop is found by the `[DropGate]` name, ignoring case. `None`, with the
+    /// scene left alone, when the toy has no section or the scene has no such prop.
+    pub fn take(scene: &mut Scene, toy: &str) -> Option<GateSwing> {
+        let (name, axis, degrees) = Self::words(toy)?;
+        let at = scene.models.iter().position(|p| p.model.eq_ignore_ascii_case(&name))?;
+        let placed = scene.models.remove(at);
+        // The turn's angle as the drop gives it (degrees × 0.01745329), and its axis made unit length
+        // as the rotation's builder does.
+        Some(GateSwing { placed, axis: axis.norm(), angle: degrees * 0.01745329, turned: 0.0, swinging: false, down: false })
+    }
+
+    /// The prop's model name.
+    pub fn model(&self) -> &str {
+        &self.placed.model
+    }
+
+    /// The gate dropped: its turn starts from where the scene stands it.
+    pub fn drop(&mut self) {
+        self.turned = 0.0;
+        self.swinging = true;
+        self.down = true;
+    }
+
+    /// The gate closed again: it is drawn standing. This is the port's own. The original's reset
+    /// was not traced as far as the gate object.
+    pub fn close(&mut self) {
+        self.turned = 0.0;
+        self.swinging = false;
+        self.down = false;
+    }
+
+    /// One frame of the race's gate as the sim has it: closed, it stands. On the first frame it is
+    /// open, it drops, and that frame already steps the turn, as the original's does: its start gate
+    /// opens and its turn takes its first step on the same frame. Returns true on the frame the turn
+    /// ends.
+    pub fn follow(&mut self, closed: bool, dt: f32) -> bool {
+        if closed {
+            self.close();
+            return false;
+        }
+        if !self.down {
+            self.drop();
+        }
+        self.tick(dt)
+    }
+
+    /// One frame of the turn, as the gate object's update steps it. Returns true on the frame the
+    /// turn reaches its angle.
+    pub fn tick(&mut self, dt: f32) -> bool {
+        if !self.swinging {
+            return false;
+        }
+        let whole = self.angle;
+        let mut step = whole * (dt / SWING_SECONDS);
+        let end = (whole < 0.0 && self.turned + step <= whole) || (whole > 0.0 && whole <= self.turned + step) || whole == 0.0;
+        if end {
+            self.swinging = false;
+            step = whole - self.turned;
+        }
+        self.turned += step;
+        end
+    }
+
+    /// How far the gate has turned, in radians.
+    pub fn turned(&self) -> f32 {
+        self.turned
+    }
+
+    /// Where the prop is drawn: the turn about its local axis, then the scene's placement. The rows
+    /// are the rotation builder's, with `c` and `s` the turn's cosine and sine and `t = 1 − c`.
+    pub fn at(&self) -> M4 {
+        let place = self.placed.transform();
+        if self.turned == 0.0 {
+            return place;
+        }
+        let (s, c) = self.turned.sin_cos();
+        let (a, t) = (self.axis, 1.0 - c);
+        let turn = M4([
+            [t * a.x * a.x + c, t * a.x * a.y + s * a.z, t * a.x * a.z - s * a.y, 0.0],
+            [t * a.y * a.x - s * a.z, t * a.y * a.y + c, t * a.y * a.z + s * a.x, 0.0],
+            [t * a.z * a.x + s * a.y, t * a.z * a.y - s * a.x, t * a.z * a.z + c, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]);
+        turn.mul(place)
+    }
+
+    /// The gate as an actor, where [`GateSwing::at`] puts it.
+    pub fn actor(&self) -> Actor<'_> {
+        Actor { model: &self.placed.model, at: self.at(), pose: None, lod_from: None, alpha: 1.0, casts: false }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,5 +486,68 @@ mod tests {
         let race = s.race((s.spot, s.facing));
         assert_eq!(race.activity.as_ref().map(|a| a.start_delay), Some(s.delay));
         assert_eq!(race.countdown.length, s.delay);
+    }
+
+    /// sx01's `[DropGate]` as its `.toy` has it, and its `THQsxdropgate` placement.
+    const SX01_DROP_GATE: &str = "[Other]\nGateName=x\n[DropGate]\nGateName=\"THQsxdropgate\"\nInitialPosition=101.493164,90.123070,458.479828\nLookVector=0.000000,0.500000,0.866025\nUpVector=0.000000,0.866025,-0.500000\nRotationAxisLocal=1.0,0.0,0.0\nRotationAngleDegrees=-60.0\nRotationRateInSeconds=3.0\nMoveGateDown=FALSE\n;DownPosition\n";
+
+    fn sx01_scene() -> Scene {
+        let mut scene = Scene::parse("");
+        let gate = Placement {
+            model: "THQsxdropgate".into(),
+            pos: V3 { x: 101.493164, y: 90.12307, z: 458.47986 },
+            look: V3 { x: 0.0, y: 0.5, z: 0.866025 },
+            up: V3 { x: 0.0, y: 0.866025, z: -0.5 },
+        };
+        scene.models = vec![Placement { model: "stands".into(), ..gate.clone() }, gate];
+        scene
+    }
+
+    #[test]
+    fn the_drop_gate_words_and_their_defaults() {
+        let (name, axis, degrees) = GateSwing::words(SX01_DROP_GATE).unwrap();
+        assert_eq!((name.as_str(), (axis.x, axis.y, axis.z), degrees), ("THQsxdropgate", (1.0, 0.0, 0.0), -60.0));
+        let (_, axis, degrees) = GateSwing::words("[dropgate]\nGateName=g\n").unwrap();
+        assert_eq!(((axis.x, axis.y, axis.z), degrees), ((1.0, 0.0, 0.0), 45.0));
+        assert!(GateSwing::words("[CameraFlash]\n").is_none());
+    }
+
+    #[test]
+    fn the_gate_is_taken_out_of_the_scene_and_swings_flat_at_the_drop() {
+        let mut scene = sx01_scene();
+        let mut g = GateSwing::take(&mut scene, SX01_DROP_GATE).unwrap();
+        assert_eq!(scene.models.len(), 1, "the static props no longer draw the gate");
+        assert_eq!(scene.models[0].model, "stands");
+        // Standing, it is drawn where the scene put it.
+        let standing = g.at();
+        assert_eq!(standing, scene.models[0].transform());
+        let near = |got: [f32; 4], want: [f32; 3]| (0..3).all(|i| (got[i] - want[i]).abs() < 1e-5);
+        // Closed, it stays standing.
+        for _ in 0..10 {
+            assert!(!g.follow(true, 1.0 / 30.0));
+        }
+        assert_eq!(g.at(), standing);
+        // Open: −60° about its across row in 0.15 s, 4.5 ticks at 30 Hz, so the fifth ends it, the
+        // last step cut short to land on the angle.
+        let ends: Vec<bool> = (0..6).map(|_| g.follow(false, 1.0 / 30.0)).collect();
+        assert_eq!(ends, [false, false, false, false, true, false]);
+        assert_eq!(g.turned(), -60.0 * 0.01745329);
+        // Its 30° lean back becomes flat: up along −z, look straight up, across unchanged, in place.
+        let m = g.at();
+        assert!(near(m.0[0], [1.0, 0.0, 0.0]) && near(m.0[1], [0.0, 0.0, -1.0]) && near(m.0[2], [0.0, 1.0, 0.0]), "{m:?}");
+        assert_eq!(m.0[3], standing.0[3]);
+        // Partway the up row is between the two.
+        g.close();
+        g.follow(false, 1.0 / 30.0);
+        let up = g.at().0[1];
+        assert!(up[2] < -0.5 && up[2] > -1.0 && up[1] > 0.0 && up[1] < 0.866, "{up:?}");
+    }
+
+    #[test]
+    fn no_drop_gate_section_or_prop_leaves_the_scene_alone() {
+        let mut scene = sx01_scene();
+        assert!(GateSwing::take(&mut scene, "[CameraFlash]\n").is_none());
+        assert!(GateSwing::take(&mut scene, "[DropGate]\nGateName=Nat15_Dropgate01\n").is_none());
+        assert_eq!(scene.models.len(), 2);
     }
 }

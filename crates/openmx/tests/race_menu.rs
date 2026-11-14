@@ -64,6 +64,19 @@ fn a_race_starts_on_the_grid_behind_a_closed_gate_that_drops() {
     assert!(laps.ends_with(" on the finish gate"), "{laps}");
     // Ranked from the drop: the one card leads.
     assert!(line(&said, "race: player 1 in place 1").is_some(), "{said}");
+    // P313b: the drawn gate, `THQsxdropgate`, stands leaning 30° back as the scene places it until the
+    // drop. Then it swings flat, −60° about its across row in 0.15 s: five 30 Hz steps from the drop's
+    // tick, the last cut short. The original's node ends with its up row along −z.
+    let standing = line(&said, "race: drop gate THQsxdropgate drawn up").unwrap_or_else(|| panic!("no drop gate drawn:\n{said}"));
+    for (got, want) in xyz(standing, "drawn up").into_iter().zip([0.0, 0.87, -0.5]) {
+        assert!((got - want).abs() < 0.01, "{standing}");
+    }
+    let down = line(&said, "race: drop gate down at tick ").unwrap_or_else(|| panic!("the drawn gate never fell:\n{said}"));
+    let at: f32 = down.split_whitespace().nth(6).and_then(|t| t.trim_end_matches(',').parse().ok()).unwrap_or_else(|| panic!("{down}"));
+    assert_eq!(at, tick + 4.0, "{down} after {dropped}");
+    for (got, want) in xyz(down, " up").into_iter().zip([0.0, 0.0, -1.0]) {
+        assert!((got - want).abs() < 0.01, "{down}");
+    }
 }
 
 #[test]
