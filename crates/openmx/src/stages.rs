@@ -35,7 +35,15 @@ pub enum Stage {
     Scene,
     /// The overlay and the front end's art, and a split view's copy into the frame.
     Hud,
-    /// The frame onto the window.
+    /// Inside the GPU's frame (P342): the models it uploaded as it first saw them.
+    Upload,
+    /// Inside the GPU's frame (P342): its commands handed to the GPU.
+    Submit,
+    /// Inside the GPU's frame (P342): the window's wait for a picture to draw into and to show it, on
+    /// a GPU still busy with the frames before.
+    Wait,
+    /// The frame onto the window: the GPU's frame, less what the stages above took of it, which is
+    /// its encoding.
     Present,
     /// `--shot`'s file and the line a second.
     Log,
@@ -45,7 +53,7 @@ pub enum Stage {
 }
 
 /// Every stage, for naming them in order.
-pub const STAGES: [Stage; 13] = [
+pub const STAGES: [Stage; 16] = [
     Stage::Input,
     Stage::Menu,
     Stage::Sim,
@@ -56,6 +64,9 @@ pub const STAGES: [Stage; 13] = [
     Stage::Ground,
     Stage::Scene,
     Stage::Hud,
+    Stage::Upload,
+    Stage::Submit,
+    Stage::Wait,
     Stage::Present,
     Stage::Log,
     Stage::Pace,
@@ -74,6 +85,9 @@ impl Stage {
             Stage::Ground => "ground",
             Stage::Scene => "scene",
             Stage::Hud => "hud",
+            Stage::Upload => "upload",
+            Stage::Submit => "submit",
+            Stage::Wait => "wait",
             Stage::Present => "present",
             Stage::Log => "log",
             Stage::Pace => "pace",
