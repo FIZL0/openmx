@@ -1895,9 +1895,17 @@ ai_gate_drive               boot 0x00285090 VehicleAI vt+0x9c, ai_update_base's 
 ai_own_path_reach           boot 0x00283460 VehicleAI vt+0x7c (ai, net, -, f12 unused): card+8 & 1 -> +0x290 =
 #                                           +0xc0; path_spot_point(net, +0x220, sp); +0x210 + +0x218 * flat
 #                                           distance, at most +0x214. S314: ai::drive::path_reach
-ai_speed_step               boot 0x00388120 MXVehicleAI vt+0xa0 (ai, speed*): +0x224 path set and its +4 bit 4
-#                                           clear -> 0x00286960 (the speed cap off the race leader's
-#                                           progress, race +0xa4), else 0. Not ported (S314 calls it)
+ai_speed_step               boot 0x00388120 MXVehicleAI vt+0xa0 (ai, speed*): +0x224 route node set and its +4
+#                                           & 4 clear -> 0x00286960 (the speed cap off the race leader's
+#                                           progress, race +0xa4), else 0. S314a: inner
+#                                           (ai, speed*): speed* 0 -> 0; no race +0xd8 or leader +0xa4 ->
+#                                           1; base = leader +0x108 < +0x2e4 (ALODSpeed) ? +0x2e4 : it;
+#                                           gap = card(+0xd4) +0x1c - leader +0x1c; gap <= 0 -> 1; gap <=
+#                                           +0x44 (ALODWindow): gap <= +0x2e8 (lead window) -> 1, cap =
+#                                           base + (5 + gap*((5+base)*(+0x48 - 1))/+0x44), speed > cap ->
+#                                           cap; past it: speed > base*+0x48 -> max(that, speed*+0x4c)
+#                                           (c.ole: equal takes speed*lower); a store under +0x2e4 ->
+#                                           +0x2e4 raw. 1. ai::drive::speed_step, oracled (tests/ai/drive.rs)
 mx_vehicle_ai_vtable        boot 0x0045c4a0 MXVehicleAI's vtable (VehicleAI's is 0x00455390)
 ai_stuck_rescue             boot 0x00281460 (rider) interface vt+0x40 (thunk 0x00281c00): app +0x3cc ->
 #                                           +0x74 race object; none or its +0x34 == 3 -> rider's vtable at

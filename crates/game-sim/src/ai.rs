@@ -2566,7 +2566,7 @@ pub fn habits(h: &mut Habits, spot_point: Option<&mut dyn FnMut(&mut Vf)>, rng: 
 pub mod drive {
     use super::flag::{NO_RIDER_SWEEP, QUIET_AREA};
     use super::follow::{ASSIST, AVOIDS, SWEEP_BY_BIKE};
-    use super::{add, op, scale, sub, unit};
+    use super::{Alod, add, op, scale, sub, unit};
     use crate::race::{Crossing, Seen, Spot};
     use ps2_float::fpu::Acc;
     use ps2_float::{F, Vf, fpu};
@@ -2705,7 +2705,7 @@ pub mod drive {
         fn avoid(&mut self, b: &mut Brain);
         /// The trick plan (vt+0x84).
         fn plan(&mut self, b: &mut Brain, dt: F);
-        /// The brain's speed step on the target speed (vt+0xa0), under [`SLOWS`].
+        /// The brain's speed step on the target speed (vt+0xa0, [`speed_step`]), under [`SLOWS`].
         fn slow(&mut self, b: &mut Brain);
         /// The interface's rider assist, under [`ASSIST`].
         fn assist(&mut self, b: &mut Brain, dt: F);
@@ -2906,6 +2906,67 @@ pub mod drive {
         }
         c.plan(b, dt);
         tail(b, c, dt);
+        true
+    }
+
+    /// A route node's flag bit: the speed step leaves the target speed alone while the rider heads for it.
+    pub const NODE_FREE_SPEED: u32 = 0x4;
+
+    /// The leading race card, as the speed step reads it.
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    pub struct Leader {
+        /// How far into the race it is, along the path ([`crate::race`]'s card progress).
+        pub progress: F,
+        /// Its `+0x108` word, read as a speed (the word lap records copy).
+        pub speed: F,
+    }
+
+    /// The brain's speed step (its vt+0xa0), which the drivers' tail runs under [`SLOWS`]: the
+    /// adaptive difficulty's cap on the target speed of a rider ahead of the race's leader.
+    ///
+    /// It answers false, leaving `speed` alone, while the rider heads for no route node (`node`
+    /// `None`) or for one flagged [`NODE_FREE_SPEED`]. Otherwise true, and with no race or no leading
+    /// card nothing more. `progress` is the rider's own card's (the original reads the card unchecked).
+    ///
+    /// The base is the leader's speed, at least [`Alod::speed`]; the gap the rider's progress less the
+    /// leader's. A gap of 0 or less, or within [`Alod::lead_window`], leaves the speed. Past
+    /// [`Alod::window`] the speed, if over the base times [`Alod::upper_limit`], comes down to that,
+    /// or to the speed times [`Alod::lower_limit`] when that is the more. Between the two windows the
+    /// cap is `base + (gap · (base + 5) · (upper − 1)) / window + 5`, and a speed over it comes down
+    /// to it. Either cap stops at [`Alod::speed`].
+    pub fn speed_step(node: Option<u32>, alod: &Alod, progress: F, leader: Option<Leader>, speed: &mut F) -> bool {
+        match node {
+            Some(flags) if flags & NODE_FREE_SPEED == 0 => {}
+            _ => return false,
+        }
+        let Some(leader) = leader else { return true };
+        let min = alod.speed;
+        let base = if op(leader.speed) < op(min) { min } else { leader.speed };
+        let upper = op(alod.upper_limit);
+        let high = base * upper;
+        let gap = progress - leader.progress;
+        let now = *speed;
+        let low = now * alod.lower_limit;
+        if gap <= F(0.0) {
+            return true;
+        }
+        let window = op(alod.window);
+        let cap = if gap <= window {
+            if gap <= op(alod.lead_window) {
+                return true;
+            }
+            let cap = base + (F(5.0) + gap * ((F(5.0) + base) * (upper - F(1.0))) / window);
+            if op(now) <= cap {
+                return true;
+            }
+            cap
+        } else {
+            if op(now) <= high {
+                return true;
+            }
+            if high <= low { low } else { high }
+        };
+        *speed = if cap < op(min) { min } else { cap };
         true
     }
 
