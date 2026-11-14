@@ -3889,7 +3889,7 @@ fn the_modifiers_page_shows_one_machines_knobs_at_a_time() {
         seen.extend(knobs);
     }
     seen.sort_by_key(|k| Knob::MENU.iter().position(|m| m == k));
-    let disc: Vec<Knob> = Knob::MENU.into_iter().filter(|k| k.category() != Category::Atv).collect();
+    let disc: Vec<Knob> = Knob::MENU.into_iter().filter(|k| !matches!(k.category(), Category::Atv | Category::MxvatvCars)).collect();
     assert_eq!(seen, disc, "every knob is under one machine");
     for k in [Knob::KiowaSpeed, Knob::KiowaClimb, Knob::KiowaTurn, Knob::KiowaCeiling, Knob::CarSpeed, Knob::CarAccel, Knob::CarGrip, Knob::CarSuspension] {
         assert_eq!(Knob::from_word(k.word()), Some(k));
@@ -3965,6 +3965,57 @@ fn the_atv_category_shows_while_the_quad_addition_is_on() {
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.page()[1].value, "ATV");
     assert!(m.page().iter().any(|row| row.key == Key::Knob(Knob::AtvSuspension)));
+}
+
+/// P288: the Machine row offers MX vs. ATV's cars, before the world's, only while that addition is on
+/// — a car in settings' `mxvatv_car`, or a ride under the pause that has one; its page is the cars'
+/// four knobs, and under the pause in the car it opens there. Online they are held: the cars are
+/// offline only.
+#[test]
+fn the_mxvatv_cars_category_shows_while_the_car_addition_is_on() {
+    use game_sim::modifiers::Category;
+    use menu::Key;
+    let (mut m, mut r) = fresh();
+    settings_at(&mut m, &mut r, "Ride");
+    down_to(&mut m, &mut r, Key::Modifiers);
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(!m.page()[1].choices.iter().any(|c| c == "MX vs. ATV Cars"), "off by default");
+    m.settings.mxvatv_car = "buggy".into();
+    let mut want: Vec<String> = Category::ALL.map(|c| c.label().to_string()).to_vec();
+    want.insert(4, "MX vs. ATV Cars".into());
+    assert_eq!(m.page()[1].choices, want);
+    // With the quad on too, the quad's first, then the cars'.
+    m.settings.atv = "atv_Race250P".into();
+    assert_eq!(&m.page()[1].choices[4..], ["ATV", "MX vs. ATV Cars", "World"]);
+    m.settings.atv.clear();
+    pick_category(&mut m, &mut r, Category::MxvatvCars);
+    let knobs: Vec<Knob> = m.page().iter().filter_map(|row| match row.key { Key::Knob(k) => Some(k), _ => None }).collect();
+    assert_eq!(knobs, [Knob::MxvatvCarSpeed, Knob::MxvatvCarAccel, Knob::MxvatvCarGrip, Knob::MxvatvCarSuspension]);
+    assert!(!m.page().iter().any(|row| row.label == "Wrecks"));
+    down_to(&mut m, &mut r, Key::Knob(Knob::MxvatvCarGrip));
+    tap(&mut m, &mut r, Control::Right);
+    assert_eq!(m.settings.modifiers.get(0, Knob::MxvatvCarGrip), 110);
+    assert_eq!(m.settings.modifiers.get(0, Knob::CarGrip), 100, "not the stock cars' knob");
+    assert!(m.page()[1].tips.iter().any(|t| t == "1 changed"), "{:?}", m.page()[1].tips);
+    // Off again, the row goes and the page falls back to the first machine's; the value is kept.
+    m.settings.mxvatv_car.clear();
+    assert_eq!(m.page()[1].value, "Bike");
+    assert_eq!(m.settings.modifiers.get(0, Knob::MxvatvCarGrip), 110);
+
+    // Under the pause, a ride with a car (`--mxvatv-car`) offers it, and in the car the page opens there.
+    let (mut m, mut r) = fresh();
+    m.mxvatv_car[0] = true;
+    m.up[0] = Machine::MxvatvCar;
+    m.pause();
+    tap_until(&mut m, &mut r, Control::Down, |m| m.pause_rows()[m.cursor(Screen::Pause)] == "Game Modifiers");
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.page()[1].value, "MX vs. ATV Cars");
+    let row = m.page().into_iter().find(|row| row.key == Key::Knob(Knob::MxvatvCarSuspension)).expect("the cars' knobs");
+    assert_eq!(row.off, None, "offline, they are the player's own");
+    // An online guest's are held.
+    m.guest = true;
+    let row = m.page().into_iter().find(|row| row.key == Key::Knob(Knob::MxvatvCarSuspension)).expect("still shown");
+    assert_eq!(row.off.as_deref(), Some("Online rides have no MX vs. ATV car yet."));
 }
 
 /// P55: the Ride tab's Game Modifiers row opens the modifiers; the arrows step a modifier by ten

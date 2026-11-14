@@ -419,6 +419,10 @@ fn every_modifier_off_its_default_reaches_the_ride() {
                 Knob::AtvSpeed | Knob::AtvAccel | Knob::AtvGrip | Knob::AtvSuspension => {
                     assert!(!bike && !time && !flown, "{knob:?} at {pct} reached the bike or the biplane")
                 }
+                // MX vs. ATV's cars' (P288) reach those cars (tests/mxvatv_car_modifiers.rs).
+                Knob::MxvatvCarSpeed | Knob::MxvatvCarAccel | Knob::MxvatvCarGrip | Knob::MxvatvCarSuspension => {
+                    assert!(!bike && !time && !flown, "{knob:?} at {pct} reached the bike or the biplane")
+                }
                 _ => assert!(bike && !time, "{knob:?} at {pct} left the bike alone"),
             }
         }
