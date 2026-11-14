@@ -9883,7 +9883,7 @@ fn roof_landings_wreck_as_the_original_does_air_wrecks_on_and_off() {
                      want.map_or("rides it out".to_string(), |(c, r)| format!("wrecks at {c}, reason {r}")));
             assert!(want.is_some(), "{name}: the capture's original wrecks within {ticks} ticks");
             for air_wrecks in [true, false] {
-                let mut rider = Rider::new(&phy, mounts.clone(), Vf::new(0.0, 0.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+                let mut rider = Rider::new(&phy, mounts, Vf::new(0.0, 0.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
                 rider.carries_bike_col(Arc::clone(&col));
                 let mut sim = Sim::with_rider(0, Arc::clone(&tables), phy.clone(), rider);
                 st.seed_ride(&mut sim.rider.ride).expect("the state's whole bike");
@@ -13396,3 +13396,121 @@ fn native_tolerance_save_states() {
     assert!(failed.is_empty(), "{}", failed.join("\n"));
 }
 
+
+// --- S325: high nose-first drops, with Air Wrecks on and off --------------------------------------
+
+/// S325's captures (`research/s325/drop.sh`, S138's `hits.toml` and `research/s138_nose.py`), in
+/// `context/capture/s138/` beside S138's: recording2's bike teleported to free09's farmyard, thrown
+/// 60 or 85 ft/s up and 15 forward, and once airborne given a forward pitch rate, which the air control
+/// damps to nothing within a few ticks and so sets the nose's angle for the whole fall. The capture,
+/// the state the port starts from, the ticks ridden, and what it is.
+const S325_DROPS: [(&str, u64, u64, &str); 4] = [
+    ("s138/s325-nose22", 2604, 40, "22 degrees nose down from 50 ft, 53 a second down"),
+    ("s138/s325-nose76", 2604, 40, "76 degrees nose down from 50 ft, 53 a second down"),
+    ("s138/s325-dive", 2515, 30, "pitched past the airborne limit (85 degrees) on the way up"),
+    ("s138/s325-flat", 2643, 40, "level from 110 ft, 75 a second down"),
+];
+
+/// **A high nose-first drop wrecks, or rides out, as the original's does — and Air Wrecks off changes
+/// only what the bike's attitude in the air does** (S325). Each of [`S325_DROPS`] ridden by the port
+/// from the original's own save state, on free09 with its props and the bike's body rays, as
+/// [`walls_and_nose_landings_wreck_as_the_original_does`] rides S138's. With the switch on (the
+/// original) the first wreck's tick (±1, the rows' phases) and reason are held to the capture's: the
+/// 22 degree landing rides out, the 76 degree one wrecks off the front on the ground pitch on its
+/// touchdown tick, the dive past 85 degrees is a nose dive in the air on its first tick, and the
+/// level drop wrecks flat on its vertical g. Off (the port's own switch, P138), the three landings are
+/// the same, tick for tick, and the dive is not thrown in the air at all. Prints the touchdown tick's g
+/// peak and pitch beside the bike's limits.
+#[test]
+fn high_nose_first_drops_wreck_as_the_original_does() {
+    let dir = private_dir("capture");
+    let (mut compared, mut parted) = (0, Vec::new());
+    for (name, asked, ticks, what) in S325_DROPS {
+        let Ok(text) = std::fs::read_to_string(dir.join(format!("{name}.csv"))) else {
+            println!("no {name}.csv — S325's journal says how it is recorded");
+            continue;
+        };
+        let whole = Capture::parse(&text).unwrap_or_else(|e| panic!("{name}.csv: {e}"));
+        let at = dir.join(format!("{name}-{asked}.ee.bin"));
+        let Some(st) = SaveState::open_either(&at) else {
+            println!("no {} with the human's rider in it", at.display());
+            continue;
+        };
+        let Some((_, acc)) = acceptance_capture() else { return };
+        in_the_world_of(&acc, |world, _, bike| {
+            let Some(Ridden { tables, phy, mounts }) = bike else {
+                println!("no Race 125 on this disc");
+                return;
+            };
+            let Some(col) = Disc::open().and_then(|mut disc| the_bike_col(&mut disc)) else {
+                println!("no bike collision files on this disc");
+                return;
+            };
+            let col = Arc::new(col);
+            let saved = u64::from(st.word(SaveState::FRAME_COUNTER).unwrap());
+            let cap = dense_run(&whole, saved);
+            let tape = PadTape::from_capture(&cap).unwrap_or_else(|e| panic!("{name}.csv: {e}"));
+            let rows = rows_by_counter(&cap);
+            // The recorder polls the pad buffer stamped two frames back (S67). The pad is idle for the
+            // whole of every drop, so a state saved on the capture's first row rides its first frame.
+            let pad_of = |counter: u64| rows.get(&counter).map(|&r| tape.frames[r.saturating_sub(2)]);
+            let want = first_wreck(&cap, saved).filter(|&(c, _)| c <= saved + ticks);
+            println!("{name} ({what}), from the state at frame {saved}: the original {}",
+                     want.map_or("rides it out".to_string(), |(c, r)| format!("wrecks at {c}, reason {r}")));
+            let p = &phy.air;
+            println!("  limits: vertical {:.2}, fore-aft {:.2}, ground pitch {:.2} deg, airborne pitch {:.2} deg",
+                     p.freestyle_down_wreck_speed_limit.0, p.front_wreck_speed_limit.0,
+                     p.ground_pitch_down_wreck_angle.0.to_degrees(), p.airborne_pitch_down_wreck_angle.0.to_degrees());
+            // Each tick's (counter, airborne after it, wreck so far) with the switch as `air`.
+            let mut ride = |air: bool| {
+                let mut rider = Rider::new(&phy, mounts, Vf::new(0.0, 0.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+                rider.carries_bike_col(Arc::clone(&col));
+                let mut sim = Sim::with_rider(0, Arc::clone(&tables), phy.clone(), rider);
+                st.seed_ride(&mut sim.rider.ride).expect("the state's whole bike");
+                sim.rider.sense.air_wrecks = air;
+                let mut seen = Vec::new();
+                let mut was_airborne = sim.rider.ride.air.airborne;
+                for counter in saved + 1..=saved + ticks {
+                    let Some(pad) = pad_of(counter) else {
+                        println!("  {counter}: no row in the capture");
+                        break;
+                    };
+                    sim.frame(pad.dt(), &pad.reports, world);
+                    let r = &sim.rider.ride;
+                    if was_airborne && !r.air.airborne {
+                        let (g, e) = (r.mv.g_peak, r.chassis.euler);
+                        println!("  air wrecks {}: touchdown at {counter}: g side {:.2} vertical {:.2} fore-aft {:.2}, pitch {:.2} deg",
+                                 if air { "on" } else { "off" }, g.x(), g.y(), g.z(), e.x().to_degrees());
+                    }
+                    was_airborne = r.air.airborne;
+                    seen.push((counter, r.air.airborne, sim.rider.state.wreck.map(|w| w.0)));
+                }
+                seen
+            };
+            let first = |seen: &[(u64, bool, Option<u8>)]| seen.iter().find_map(|&(c, a, w)| w.map(|w| (c, w, a)));
+            let (on, off) = (ride(true), ride(false));
+            let (got, got_off) = (first(&on), first(&off));
+            println!("  the port, on: {got:?}; off: {got_off:?} (tick, reason, airborne)");
+            let agrees = match (want, got) {
+                (None, None) => true,
+                (Some((wc, wr)), Some((gc, gr, _))) => gr == wr && gc.abs_diff(wc) <= 1,
+                _ => false,
+            };
+            if !agrees {
+                parted.push(format!("{name} ({what}): the original {want:?}, the port {got:?} (tick, reason, airborne)"));
+            }
+            let thrown_in_the_air = off.iter().any(|&(_, a, w)| a && w.is_some());
+            let off_agrees = if want.is_some_and(|(_, r)| r == game_sim::air::Wreck::NoseDive as u8) {
+                !thrown_in_the_air
+            } else {
+                got_off == got
+            };
+            if !off_agrees {
+                parted.push(format!("{name} ({what}): air wrecks off {got_off:?} against on {got:?}"));
+            }
+            compared += 1;
+        });
+    }
+    println!("{compared} drops compared");
+    assert!(parted.is_empty(), "{}", parted.join("\n"));
+}

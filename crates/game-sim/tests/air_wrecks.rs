@@ -208,3 +208,35 @@ fn off_leaves_a_rolled_no_hander_to_the_touch() {
     let level = air::Step { up: Vf::new(0.0, 1.0, 0.0, 0.0), ..step };
     assert_eq!(ask(aloft, &level, true), None, "level, on: no wreck");
 }
+
+/// S325: a high drop on the front wheel, nose down, 6 ft over the flat floor and falling at 50 a
+/// second (a 40 ft fall): forward `deg` degrees past level, going forward at 30. Each tick until the
+/// first wreck or 120 ticks, as [`ride`] gives them.
+fn nose_drop(air: bool, deg: f32) -> Vec<(bool, Option<Wreck>)> {
+    let mut sim = session(air);
+    let a = deg.to_radians();
+    let at = Vf::new(stock::SPAWN.x(), stock::SPAWN.y() + 6.0, stock::SPAWN.z(), 1.0);
+    sim.rider.ride.place_on(at, Vf::new(0.0, -a.sin(), a.cos(), 0.0), Vf::new(0.0, a.cos(), a.sin(), 0.0));
+    sim.rider.ride.chassis.vel = Vf::new(0.0, -50.0, 30.0, 0.0);
+    ride(&mut sim, 120)
+}
+
+/// S325: on (the original), a bike nosed down past straight down is thrown in the air on its first
+/// tick — the airborne clause reads it rolled half over — while one nosed 65 degrees down (inside the
+/// air's limits, past the ground's 60) wrecks off the front on its touchdown. Off, the 65 degree drop
+/// is the same wreck on the same tick; the one past straight down touches down on its front wheel with
+/// its euler pitch folded back inside the ground's limit (115 degrees down reads 65 less, 55 at the
+/// touch), and is ridden out — the landing the Air Wrecks help now names. The original's verdicts at
+/// both angles, from its own save states, are `tests/replay.rs`' `high_nose_first_drops_wreck_as_the_original_does`.
+#[test]
+fn off_rides_out_a_nose_landing_past_straight_down() {
+    const FRONT: Wreck = Wreck(air::Wreck::Front as u8);
+    let (on, off) = (nose_drop(true, 115.0), nose_drop(false, 115.0));
+    assert_eq!(on.as_slice(), &[(true, Some(NOSE_DIVE))], "on: past straight down is a nose dive in the air at once");
+    assert!(off.iter().all(|(_, w)| w.is_none()), "off: the front-wheel landing past straight down wrecked: {off:?}");
+    assert!(off.iter().any(|(a, _)| !a), "off: the bike never came down");
+
+    let (on, off) = (nose_drop(true, 65.0), nose_drop(false, 65.0));
+    assert_eq!(on, off, "the switch changed a drop that never passed the air's limits");
+    assert_eq!(on.last(), Some(&(false, Some(FRONT))), "65 degrees nose down lands off the front: {on:?}");
+}
