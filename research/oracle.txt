@@ -1008,6 +1008,41 @@ score_ghost_gaps            boot 0x002629d0 (mgr) a ghost race's gap of each pla
 #                                           0x00267d90 (card 0x80000), 0x00268350 /
 #                                           0x00268660 (mgr 0x800/0x1000), the computer aim 0x0026d780
 #                                           (card 0x800000), and everything after the card loop.
+#                                           S302: those three and the aim, below; still not ported:
+#                                           everything after the card loop.
+# S302 — score_race_tick's per-card helpers. Each returns 1; the notices fan out to the card's owner
+#   (card+4, vt +0x20) and chain (card+0x1c4, next +0x1c, vt +0x20), and the manager's listener (mgr+0x30,
+#   vt +0x1c) and its list (+4, next +0x18). The draws pointer the aim hands path_look_ahead is null, so
+#   the look-ahead reads the word at address 0 (0x3c1a8001 in C31's image) when a fork picks by draw.
+score_card_jumps            boot 0x00267d90 (dt f12, mgr a0, card a1) -> 1: the jump watch, called at
+#                                           0x262c8c (and by score_machine_race_tick) on card 0x80000.
+#                                           Card +0x400 grounded, +0x800 was grounded; +0x190 takeoff,
+#                                           +0x1a0 landing, +0xe8 count, +0xec length (best +0xf0),
+#                                           +0xf4 height (best +0xf8) the max of +0x104 in the air,
+#                                           +0xfc air time (best +0x100), +0x1b0 ground time against
+#                                           mgr+0xf4. Takeoff/landing: owner, chain vt+0x90, listeners
+#                                           +0x88 (4th arg 0 / 1). Bests: listeners +0x7c/+0x80/+0x84
+#                                           first, then owner/chain +0x74/+0x78/+0x7c. Clears mgr+0x5c
+#                                           0x100000 (not the card's). RaceRules::jumps
+score_card_off_warning      boot 0x00268350 (dt f12, mgr a0, card a1) -> 1: mgr 0x800, called at 0x263ba4
+#                                           after the way back. Card +0x1b4 off clock against mgr+0xcc,
+#                                           +0x1b8 blink against +0xd0, +0x1bc nag against +0xdc; card
+#                                           0x1000 = warned. Listeners first: on/off +0x60 / owner +0x50,
+#                                           nag +0x64 / +0x54. RaceRules::off_warning
+score_card_wrong_way        boot 0x00268660 (dt f12, mgr a0, card a1) -> 1: mgr 0x1000, called at 0x263bc4.
+#                                           Facing = look . ahead (mula/madda/madd); taking part and
+#                                           c.ole.s facing <= 0 runs card +0x1c0 against mgr+0xe0, the
+#                                           blink +0x1c8 against +0xe4; card 0x2000 = warned; listeners
+#                                           +0x68 then owner/chain +0x58. RaceRules::wrong_way
+score_race_aim              boot 0x00263628 inside score_race_tick: the computer aim (card 0x800000), to
+#                                           0x002638f0. On track with kept path, node and node.next:
+#                                           walk past nodes with +4 bit 0 (not the line's node), the end
+#                                           steps back to prev at along 1; +0xa0 = that spot; point =
+#                                           path_spot_point or +0x60; path_look_ahead(mgr+0x104, card
+#                                           +0x108, -1, near/draws null) -> ahead = unit(its point -
+#                                           point) else path_ahead or (0,0,0,1); +0x10 < 10 pulls the
+#                                           point back along ahead by 10 - +0x10; owner/chain vt+0x20.
+#                                           RaceRules::computer_aim
 # S292: the other handlers' line tests. Mode (+0x64) 1 is the machine race (S92's store scan), 3 the
 #   freeride/stunt mode; 4, 5 and 6 are never stored (S92), so their gate tests (0x00265040 twice,
 #   0x00265c70, 0x00266750) are dead and not ported.

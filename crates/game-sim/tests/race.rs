@@ -157,7 +157,7 @@ use game_sim::chassis::{Chassis, Deriv};
 use game_sim::race::{
     self, CheckPart, Checkpoint, Course, Crossing, Gate, GridStart, LANES, LapCard, LapRecord, LapRules, LineLists, LineNotice, Link, ListGate,
     MachineNotice, PathNode, Prop, Race, RaceCard, FinishNotice, RaceNotice, RacePath, RaceRules, Refused, Seen, Spot, StartItem, StartStep, Axes, Supercross, TrackFile, TrackPath, TrackPaths, card_flags,
-    flags, race_card_flags, race_flags, race_kind,
+    flags, race_card_flags, race_flags, race_kind, Jumps, Warnings, WatchRules,
 };
 use game_sim::math::Mat4;
 use game_sim::prop_world::BoundsNode;
@@ -2830,6 +2830,7 @@ fn put_paths(ee: &mut Ee, p: &mut Pick, t: &TrackPaths) {
             for o in (0..0x60).step_by(4) {
                 ee.set_u32(a + o, p.next() as u32);
             }
+            ee.set_u32(a + 4, node.word_04);
             for (k, pt) in node.points.iter().enumerate() {
                 put_quad(ee, a + 0x10 + 0x10 * k as u32, *pt);
             }
@@ -3620,7 +3621,68 @@ fn race_card_at(ee: &Ee, at: u32, lines: usize) -> RaceCard {
         look: quad(ee, at + 0x120),
         ahead: quad(ee, at + 0x140),
         to_track: quad(ee, at + 0x180),
+        jumps: jumps_at(&|o| ee.u32_at(at + o)),
+        warnings: warnings_at(&|o| ee.u32_at(at + o)),
     }
+}
+
+/// A card's jump watch words, off its words by offset.
+fn jumps_at(u: &dyn Fn(u32) -> u32) -> Jumps {
+    let f = |o: u32| F(f32::from_bits(u(o)));
+    let v = |o: u32| Vf::new(f(o).0, f(o + 4).0, f(o + 8).0, f(o + 12).0);
+    Jumps {
+        count: u(0xe8) as i32,
+        length: f(0xec),
+        best_length: f(0xf0),
+        height: f(0xf4),
+        best_height: f(0xf8),
+        air_time: f(0xfc),
+        best_air_time: f(0x100),
+        rise: f(0x104),
+        takeoff: v(0x190),
+        landing: v(0x1a0),
+        grounded: f(0x1b0),
+    }
+}
+
+/// A card's warning clocks, off its words by offset.
+fn warnings_at(u: &dyn Fn(u32) -> u32) -> Warnings {
+    let f = |o: u32| F(f32::from_bits(u(o)));
+    Warnings { off: f(0x150), off_blink: f(0x154), off_nag: f(0x15c), wrong: f(0x160), wrong_blink: f(0x164) }
+}
+
+fn put_jumps(ee: &mut Ee, at: u32, j: &Jumps, w: &Warnings) {
+    ee.set_u32(at + 0xe8, j.count as u32);
+    for (o, x) in [
+        (0xec, j.length),
+        (0xf0, j.best_length),
+        (0xf4, j.height),
+        (0xf8, j.best_height),
+        (0xfc, j.air_time),
+        (0x100, j.best_air_time),
+        (0x104, j.rise),
+        (0x1b0, j.grounded),
+        (0x150, w.off),
+        (0x154, w.off_blink),
+        (0x15c, w.off_nag),
+        (0x160, w.wrong),
+        (0x164, w.wrong_blink),
+    ] {
+        put_f(ee, at + o, x);
+    }
+    put_quad(ee, at + 0x190, j.takeoff);
+    put_quad(ee, at + 0x1a0, j.landing);
+}
+
+fn jumps_words(j: &Jumps, w: &Warnings) -> Vec<u64> {
+    let f = |x: F| u64::from(x.0.to_bits());
+    let mut v = vec![j.count as u64];
+    v.extend([j.length, j.best_length, j.height, j.best_height, j.air_time, j.best_air_time, j.rise, j.grounded].map(f));
+    v.extend([w.off, w.off_blink, w.off_nag, w.wrong, w.wrong_blink].map(f));
+    for q in [j.takeoff, j.landing] {
+        v.extend(q.to_bits().map(u64::from));
+    }
+    v
 }
 
 /// A race card into RAM at `at`, its spots pointing into the track `put_paths` lays out.
@@ -3635,6 +3697,7 @@ fn put_race_card(ee: &mut Ee, at: u32, c: &RaceCard, lines: u32, records: u32) {
     put_quad(ee, at + 0x120, c.look);
     put_quad(ee, at + 0x140, c.ahead);
     put_quad(ee, at + 0x180, c.to_track);
+    put_jumps(ee, at, &c.jumps, &c.warnings);
 }
 
 fn race_card_words(c: &RaceCard) -> Vec<u64> {
@@ -3644,6 +3707,7 @@ fn race_card_words(c: &RaceCard) -> Vec<u64> {
     for q in [c.look, c.ahead, c.to_track] {
         v.extend(q.to_bits().map(u64::from));
     }
+    v.extend(jumps_words(&c.jumps, &c.warnings));
     v
 }
 
@@ -3675,6 +3739,13 @@ fn race_told(n: RaceNotice, owner: bool, chain: bool) -> Vec<(u32, u32)> {
         RaceNotice::OffTrack => fan(true, 0x5c, 0x6c),
         RaceNotice::OffTooLong => fan(true, 0x60, 0x70),
         RaceNotice::OutOfTime => fan(false, 0x64, 0x74),
+        RaceNotice::TookOff | RaceNotice::Landed => fan(false, 0x90, 0x88),
+        RaceNotice::LongestJump => fan(true, 0x74, 0x7c),
+        RaceNotice::HighestJump => fan(true, 0x78, 0x80),
+        RaceNotice::LongestAir => fan(true, 0x7c, 0x84),
+        RaceNotice::OffNag => fan(true, 0x54, 0x64),
+        RaceNotice::OffWarning { .. } => fan(true, 0x50, 0x60),
+        RaceNotice::WrongWay { .. } => fan(true, 0x58, 0x68),
         RaceNotice::Checkpoint { .. } | RaceNotice::OtherLine { .. } => unreachable!("no line lists here"),
     }
 }
@@ -3713,7 +3784,7 @@ fn the_race_handler_matches_the_score_managers_per_card() {
     };
     let heard: Rc<RefCell<Vec<(u32, u32)>>> = Rc::default();
     for who in [OWNER, CHAIN, TO_LISTENER] {
-        for slot in (0..0x80).step_by(4) {
+        for slot in (0..0xa0).step_by(4) {
             let at = L_HOOKS + who * 0x100 + slot;
             ee.set_u32(L_VT + who * 0x100 + slot, at);
             let heard = heard.clone();
@@ -3721,10 +3792,13 @@ fn the_race_handler_matches_the_score_managers_per_card() {
         }
     }
     let mut p = Pick(0x7d02_c4e9_15ab_3f68);
-    let mut said = [0usize; 5];
+    let mut said = [0usize; 13];
+    // The computer aim's tells, and those that walked past a marked node.
+    let (mut aimed, mut walked, mut looked) = (0, 0, 0);
     let (mut laps, mut progressed, mut timed_off, mut ticked_off) = (0, 0, 0, 0);
     for case in 0..20_000 {
         let mut t = t_paths(&mut p);
+        aim_marks(&mut p, &mut t);
         let (g, line_spot) = line_on(&mut p, &t);
         let course = Course { line: g, line_spot, lap_length: t.lap_length };
         let lines = p.below(4) as usize;
@@ -3734,6 +3808,12 @@ fn the_race_handler_matches_the_score_managers_per_card() {
         let mut lap_flags = (p.next() as u32 & !0x7e56) | race_flags::FINISHED | 0x2000;
         if p.below(2) == 0 {
             lap_flags |= race_flags::KEEP_LAPS;
+        }
+        // The per-card helpers (S302).
+        for bit in [race_flags::OFF_WARNINGS, race_flags::WRONG_WAY_WARNINGS] {
+            if p.below(2) == 0 {
+                lap_flags |= bit;
+            }
         }
         let mut rules = RaceRules {
             lap: LapRules {
@@ -3753,6 +3833,7 @@ fn the_race_handler_matches_the_score_managers_per_card() {
             time_limit: if p.below(3) == 0 { F::ZERO } else { F(p.range(10.0, 300.0)) },
             off_limit: F(p.range(0.0, 5.0)),
             aim_reach: F(p.range(0.0, 2.0)),
+            watch: watch_rules(&mut p),
         };
         let mut lap = lap_card(&mut p, lines);
         for (bit, odds) in [
@@ -3763,6 +3844,9 @@ fn the_race_handler_matches_the_score_managers_per_card() {
             (race_card_flags::CLOCK_HELD, 6),
             (race_card_flags::OFF_TRACK_LIMIT, 2),
             (race_card_flags::NOT_WAITED_FOR, 8),
+            (race_card_flags::COMPUTER_AIM, 2),
+            (race_card_flags::WATCHES_JUMPS, 2),
+            (race_card_flags::JUMP_TO_JUDGE, 2),
         ] {
             if p.below(odds) == 0 { lap.flags |= bit } else { lap.flags &= !bit }
         }
@@ -3826,7 +3910,13 @@ fn the_race_handler_matches_the_score_managers_per_card() {
             look: p.quad([0.0, 0.0, 0.0]),
             ahead: p.quad([0.0, 0.0, 0.0]),
             to_track: p.quad([0.0, 0.0, 0.0]),
+            jumps: jumps_of(&mut p),
+            warnings: warnings_of(&mut p),
         };
+        card.lap.record_word = aim_speed(&mut p);
+        if p.below(6) == 0 {
+            card.look = Vf::ZERO;
+        }
         let owner = p.below(5) != 0;
         let chain = p.below(3) == 0;
         let mut ghost = (owner && p.below(5) != 0).then(|| {
@@ -3855,6 +3945,7 @@ fn the_race_handler_matches_the_score_managers_per_card() {
         put_f(&mut ee, L_MGR + 0xb8, rules.below_limit);
         put_f(&mut ee, L_MGR + 0xd4, rules.off_limit);
         put_f(&mut ee, L_MGR + 0xd8, rules.aim_reach);
+        put_watch(&mut ee, L_MGR, &rules.watch);
         ee.set_u32(L_MGR + 0xf0, rules.lap.ghost_runs as u32);
         for k in 0..rules.lap.free_records {
             let next = if k + 1 < rules.lap.free_records { L_POOL + 0x20 * (k + 1) } else { 0 };
@@ -3882,6 +3973,7 @@ fn the_race_handler_matches_the_score_managers_per_card() {
         ee.set_u32(stale, 0);
         ee.set_u32(0x14, 0);
         ee.set_u32(0x54, 0);
+        ee.set_u32(0, NULL_DRAW_WORD);
         heard.borrow_mut().clear();
         ee.call(tick, &[u64::from(L_MGR)], &[dt.0], BUDGET * 20);
         let answer = ee.v0() as u32;
@@ -3917,8 +4009,25 @@ fn the_race_handler_matches_the_score_managers_per_card() {
                 RaceNotice::OffTrack => 2,
                 RaceNotice::OffTooLong => 3,
                 RaceNotice::OutOfTime => 4,
+                RaceNotice::TookOff => 5,
+                RaceNotice::Landed => 6,
+                RaceNotice::LongestJump | RaceNotice::HighestJump | RaceNotice::LongestAir => 7,
+                RaceNotice::OffNag => 8,
+                RaceNotice::OffWarning { on: true } => 9,
+                RaceNotice::OffWarning { on: false } => 10,
+                RaceNotice::WrongWay { on: true } => 11,
+                RaceNotice::WrongWay { on: false } => 12,
                 RaceNotice::Checkpoint { .. } | RaceNotice::OtherLine { .. } => unreachable!("no line lists here"),
             }] += 1;
+        }
+        if before.lap.flags & race_card_flags::COMPUTER_AIM != 0 && notices.iter().any(|n| matches!(n, RaceNotice::Aim { .. })) {
+            aimed += 1;
+            walked += usize::from(card.aim.at() != before.lap.kept_spot.at());
+            // Whether the look-ahead found a place: its way differs from the aim spot's own.
+            let mut own = Vf::new(0.0, 0.0, 0.0, 1.0);
+            t.path_ahead(card.aim, &mut own);
+            let Some(RaceNotice::Aim { ahead, .. }) = notices.iter().find(|n| matches!(n, RaceNotice::Aim { .. })) else { unreachable!() };
+            looked += usize::from(ahead.0.map(f32::to_bits) != own.0.map(f32::to_bits));
         }
         laps += usize::from(notices.contains(&RaceNotice::Line(LineNotice::Lap)));
         progressed += usize::from(card.lap.progress.0.to_bits() != before.lap.progress.0.to_bits());
@@ -3926,9 +4035,341 @@ fn the_race_handler_matches_the_score_managers_per_card() {
         ticked_off += usize::from(card.lap.off_track != before.lap.off_track);
     }
     assert!(
-        said.iter().all(|&k| k > 200) && laps > 300 && progressed > 1000 && timed_off > 300 && ticked_off > 3000,
-        "{said:?} laps {laps} progressed {progressed} out {timed_off} off-clock {ticked_off}"
+        said.iter().all(|&k| k > 200) && laps > 300 && progressed > 1000 && timed_off > 300 && ticked_off > 3000 && aimed > 1000 && walked > 300 && looked > 300,
+        "{said:?} laps {laps} progressed {progressed} out {timed_off} off-clock {ticked_off} computer aims {aimed} walked {walked} looked {looked}"
     );
+}
+
+
+// --- S302: the race handler's per-card helpers ----------------------------------------------------
+
+/// The word at the bottom of memory the computer aim's look-ahead reads as its draw (see
+/// `RaceRules::computer_aim`), as C31's RAM image holds it.
+const NULL_DRAW_WORD: u32 = 0x3c1a_8001;
+
+/// A time word for the helpers' clocks: an ordinary small clock, now and then exactly 0, −0, negative,
+/// a denormal or exactly a limit's value.
+fn helper_clock(p: &mut Pick, limits: &[F]) -> F {
+    match p.below(10) {
+        0 => F::ZERO,
+        1 => F(-0.0),
+        2 => F(-p.range(0.0, 2.0)),
+        3 => F(f32::from_bits(p.next() as u32 & 0x807f_ffff)),
+        4 if !limits.is_empty() => limits[p.below(limits.len() as u64) as usize],
+        _ => F(p.range(0.0, 2.0)),
+    }
+}
+
+/// The manager's helper words: sx01's now and then, else limits about the clocks' size, 0 or below.
+fn watch_rules(p: &mut Pick) -> WatchRules {
+    if p.below(4) == 0 {
+        return WatchRules {
+            jump_settle: F(0.5),
+            off_after: F(-1.0),
+            off_blink: F(-1.0),
+            off_nag: F(1.0),
+            wrong_after: F(1.0),
+            wrong_blink: F(-1.0),
+            aim_ahead: F(45.0),
+        };
+    }
+    let mut limit = |p: &mut Pick| match p.below(6) {
+        0 => F::ZERO,
+        1 => F(-1.0),
+        2 => F(f32::from_bits(p.next() as u32 & 0x807f_ffff)),
+        _ => F(p.range(0.0, 1.5)),
+    };
+    WatchRules {
+        jump_settle: limit(p),
+        off_after: limit(p),
+        off_blink: limit(p),
+        off_nag: limit(p),
+        wrong_after: limit(p),
+        wrong_blink: limit(p),
+        aim_ahead: match p.below(5) {
+            0 => F::ZERO,
+            1 => F(-p.range(0.0, 20.0)),
+            _ => F(p.range(0.0, 300.0)),
+        },
+    }
+}
+
+fn put_watch(ee: &mut Ee, mgr: u32, w: &WatchRules) {
+    for (o, x) in [
+        (0xf4, w.jump_settle),
+        (0xcc, w.off_after),
+        (0xd0, w.off_blink),
+        (0xdc, w.off_nag),
+        (0xe0, w.wrong_after),
+        (0xe4, w.wrong_blink),
+        (0x104, w.aim_ahead),
+    ] {
+        put_f(ee, mgr + o, x);
+    }
+}
+
+fn jumps_of(p: &mut Pick) -> Jumps {
+    let mut j = Jumps {
+        count: p.next() as i32,
+        length: helper_clock(p, &[]),
+        best_length: helper_clock(p, &[]),
+        height: helper_clock(p, &[]),
+        best_height: helper_clock(p, &[]),
+        air_time: helper_clock(p, &[]),
+        best_air_time: helper_clock(p, &[]),
+        rise: helper_clock(p, &[]),
+        takeoff: p.quad([0.0, 0.0, 0.0]),
+        landing: p.quad([0.0, 0.0, 0.0]),
+        grounded: helper_clock(p, &[F(0.5)]),
+    };
+    // A landing that ties a best, now and then.
+    match p.below(8) {
+        0 => j.best_height = j.rise,
+        1 => j.best_air_time = j.air_time,
+        _ => {}
+    }
+    j
+}
+
+fn warnings_of(p: &mut Pick) -> Warnings {
+    Warnings {
+        off: helper_clock(p, &[F(1.0)]),
+        off_blink: helper_clock(p, &[]),
+        off_nag: helper_clock(p, &[F(1.0)]),
+        wrong: helper_clock(p, &[F(1.0)]),
+        wrong_blink: helper_clock(p, &[]),
+    }
+}
+
+/// The card's `+0x108` as the look-ahead reads it, a speed: mostly sensible, now and then any word.
+fn aim_speed(p: &mut Pick) -> u32 {
+    match p.below(8) {
+        0 => p.next() as u32,
+        1 => 0,
+        _ => p.range(0.0, 200.0).to_bits(),
+    }
+}
+
+/// The marks the computer aim walks past (node `+4` bit 0), on about half the nodes; and now and then a
+/// fork that picks by speed (path flag `0x8`) at speeds near the riders'.
+fn aim_marks(p: &mut Pick, t: &mut TrackPaths) {
+    for path in &mut t.paths {
+        for n in &mut path.nodes {
+            n.word_04 = p.next() as u32 & 0x13;
+        }
+        path.word_0c = p.range(0.0, 200.0).to_bits();
+    }
+}
+
+/// Who heard what, as (who, slot, then the arguments after the object: the manager, the card and the
+/// fourth argument as that slot passes them).
+type HelperHeard = (u32, u32, u32, u32, u32);
+
+const H_MGR: u32 = 0x01a8_0000;
+const H_CARD: u32 = 0x01a8_1000;
+const H_OWNER: u32 = 0x01a8_2000;
+const H_CHAIN: u32 = 0x01a8_2100;
+const H_LISTENER: u32 = 0x01a8_2200;
+const H_LIST: u32 = 0x01a8_2300;
+const H_VT: u32 = 0x01a8_3000;
+const H_HOOKS: u32 = 0x01a8_4000;
+
+/// Every listener slot lands on a hook that writes down the call and checks what it is passed; a
+/// second manager listener on the listener's list (`+4`, next `+0x18`) hears it as `LIST`.
+const H_LISTED: u32 = 3;
+
+fn helper_hooks(ee: &mut Ee) -> Rc<RefCell<Vec<HelperHeard>>> {
+    let heard: Rc<RefCell<Vec<HelperHeard>>> = Rc::default();
+    for who in [OWNER, CHAIN, TO_LISTENER, H_LISTED] {
+        for slot in (0..0xa0).step_by(4) {
+            let at = H_HOOKS + who * 0x100 + slot;
+            ee.set_u32(H_VT + who * 0x100 + slot, at);
+            let heard = heard.clone();
+            ee.hooks.insert(at, Box::new(move |ee| heard.borrow_mut().push((who, slot, ee.r(5) as u32, ee.r(6) as u32, ee.r(7) as u32))));
+        }
+    }
+    heard
+}
+
+/// The manager with its listener (and, now and then, a second on its list) and the card with its owner
+/// and chain, as the helpers find them; which of them there are.
+fn put_helper_listeners(ee: &mut Ee, p: &mut Pick) -> (bool, bool, bool, bool) {
+    let (owner, chain, listener, listed) = (p.below(5) != 0, p.below(3) == 0, p.below(6) != 0, p.below(4) == 0);
+    ee.set_u32(H_MGR + 0x30, if listener { H_LISTENER } else { 0 });
+    ee.set_u32(H_LISTENER + 4, if listed { H_LIST } else { 0 });
+    ee.set_u32(H_LISTENER + 0x1c, H_VT + TO_LISTENER * 0x100);
+    ee.set_u32(H_LIST + 0x18, 0);
+    ee.set_u32(H_LIST + 0x1c, H_VT + H_LISTED * 0x100);
+    ee.set_u32(H_CARD + 4, if owner { H_OWNER } else { 0 });
+    ee.set_u32(H_CARD + 0x1c4, if chain { H_CHAIN } else { 0 });
+    ee.set_u32(H_OWNER + 0x20, H_VT + OWNER * 0x100);
+    ee.set_u32(H_CHAIN + 0x1c, 0);
+    ee.set_u32(H_CHAIN + 0x20, H_VT + CHAIN * 0x100);
+    (owner, chain, listener, listed)
+}
+
+/// The calls a helper's notice makes: the slots, whether the manager's listeners go first, and the
+/// fourth argument the owner's slot and the listeners' carry (the jump's 0 / 1; else none checked).
+fn helper_told(n: RaceNotice, who: (bool, bool, bool, bool)) -> Vec<HelperHeard> {
+    let (owner, chain, listener, listed) = who;
+    let (o, l, first, arg) = match n {
+        RaceNotice::TookOff => (0x90, 0x88, false, Some(0)),
+        RaceNotice::Landed => (0x90, 0x88, false, Some(1)),
+        RaceNotice::LongestJump => (0x74, 0x7c, true, None),
+        RaceNotice::HighestJump => (0x78, 0x80, true, None),
+        RaceNotice::LongestAir => (0x7c, 0x84, true, None),
+        RaceNotice::OffNag => (0x54, 0x64, true, None),
+        RaceNotice::OffWarning { .. } => (0x50, 0x60, true, None),
+        RaceNotice::WrongWay { .. } => (0x58, 0x68, true, None),
+        other => panic!("not a helper's notice: {other:?}"),
+    };
+    let a = arg.unwrap_or(u32::MAX);
+    let mut cards = Vec::new();
+    if owner {
+        cards.push((OWNER, o, H_MGR, H_CARD, a));
+    }
+    if chain {
+        cards.push((CHAIN, o, H_MGR, H_CARD, a));
+    }
+    let mut lists = Vec::new();
+    if listener {
+        lists.push((TO_LISTENER, l, H_MGR, H_CARD, a));
+        if listed {
+            lists.push((H_LISTED, l, H_MGR, H_CARD, a));
+        }
+    }
+    if first {
+        lists.extend(cards);
+        lists
+    } else {
+        cards.extend(lists);
+        cards
+    }
+}
+
+/// The heard calls with the fourth argument blanked where the slot passes none (all but the jump's
+/// takeoff and landing slots, owner `0x90` and listener `0x88`).
+fn helper_heard(heard: &[HelperHeard]) -> Vec<HelperHeard> {
+    heard
+        .iter()
+        .map(|&(w, s, m, c, a)| {
+            let told = (w == OWNER || w == CHAIN) && s == 0x90 || (w == TO_LISTENER || w == H_LISTED) && s == 0x88;
+            (w, s, m, c, if told { a } else { u32::MAX })
+        })
+        .collect()
+}
+
+/// A helper card: its flags (each helper's bits often both ways), its spot test, look and way ahead,
+/// position, and its jump and warning words.
+fn helper_card(p: &mut Pick) -> RaceCard {
+    let mut lap = LapCard { flags: p.next(), ..LapCard::default() };
+    lap.on_track = match p.below(3) {
+        0 => 0,
+        1 => 2,
+        _ => 1,
+    };
+    let now = [p.range(-500.0, 500.0), p.range(-50.0, 50.0), p.range(-500.0, 500.0)];
+    lap.seen = Seen { now: p.quad(now), last: p.quad([0.0, 0.0, 0.0]) };
+    let mut card = RaceCard {
+        lap,
+        look: p.quad([0.0, 0.0, 0.0]),
+        ahead: p.quad([0.0, 0.0, 0.0]),
+        jumps: jumps_of(p),
+        warnings: warnings_of(p),
+        ..RaceCard::default()
+    };
+    if p.below(6) == 0 {
+        card.look = Vf::ZERO;
+    }
+    card
+}
+
+fn put_helper_card(ee: &mut Ee, c: &RaceCard) {
+    ee.set_u32(H_CARD + 8, c.lap.flags as u32);
+    ee.set_u32(H_CARD + 12, (c.lap.flags >> 32) as u32);
+    ee.set_u32(H_CARD + 0x40, c.lap.on_track as u32);
+    put_quad(ee, H_CARD + 0x60, c.lap.seen.now);
+    put_quad(ee, H_CARD + 0x120, c.look);
+    put_quad(ee, H_CARD + 0x140, c.ahead);
+    put_jumps(ee, H_CARD, &c.jumps, &c.warnings);
+}
+
+fn helper_card_words(ee: &Ee) -> (u64, Vec<u64>) {
+    let flags = u64::from(ee.u32_at(H_CARD + 8)) | u64::from(ee.u32_at(H_CARD + 12)) << 32;
+    let u = |o: u32| ee.u32_at(H_CARD + o);
+    (flags, jumps_words(&jumps_at(&u), &warnings_at(&u)))
+}
+
+/// One of the three helpers, by its oracle name, called alone against the port's over 20,000
+/// generated cards and managers.
+fn helper_oracle(name: &str, seed: u64, mut port: impl FnMut(&mut RaceRules, F, &mut RaceCard) -> Vec<RaceNotice>) -> [usize; 3] {
+    let Some(mut ee) = game_or_skip() else { return [usize::MAX; 3] };
+    let at = match addr(name) {
+        Ok(a) => a,
+        Err(why) => {
+            skip(&why);
+            return [usize::MAX; 3];
+        }
+    };
+    let heard = helper_hooks(&mut ee);
+    let mut p = Pick(seed);
+    // Cases that told something, cases with a flag turned, cases with the manager's word changed.
+    let mut seen = [0usize; 3];
+    for case in 0..20_000 {
+        let mut rules = RaceRules { watch: watch_rules(&mut p), ..RaceRules::default() };
+        rules.lap.flags = p.next() as u32;
+        let mut card = helper_card(&mut p);
+        let dt = F([1.0 / 30.0, 1.0 / 60.0, 0.0, 0.1, 0.5][p.below(5) as usize]);
+        let who = put_helper_listeners(&mut ee, &mut p);
+        put_watch(&mut ee, H_MGR, &rules.watch);
+        ee.set_u32(H_MGR + 0x5c, rules.lap.flags);
+        put_helper_card(&mut ee, &card);
+        heard.borrow_mut().clear();
+        ee.call(at, &[u64::from(H_MGR), u64::from(H_CARD)], &[dt.0], BUDGET);
+        let answer = ee.v0() as u32;
+
+        let (flags, mgr_flags) = (card.lap.flags, rules.lap.flags);
+        let notices = port(&mut rules, dt, &mut card);
+        let what = format!("{name} case {case}: dt {dt:?} {:?} {card:?} -> {notices:?}", rules.watch);
+        assert_eq!(answer, 1, "{what}: the answer");
+        let (got_flags, got_words) = helper_card_words(&ee);
+        assert_eq!(got_flags, card.lap.flags, "{what}: the card's flags");
+        assert_eq!(got_words, jumps_words(&card.jumps, &card.warnings), "{what}: the card's words");
+        assert_eq!(ee.u32_at(H_MGR + 0x5c), rules.lap.flags, "{what}: the manager's flags");
+        let want: Vec<HelperHeard> = notices.iter().flat_map(|&n| helper_told(n, who)).collect();
+        assert_eq!(helper_heard(&heard.borrow()), want, "{what}: the listeners");
+        seen[0] += usize::from(!notices.is_empty());
+        seen[1] += usize::from(flags != card.lap.flags);
+        seen[2] += usize::from(mgr_flags != rules.lap.flags);
+    }
+    seen
+}
+
+#[test]
+fn the_jump_watch_matches_the_score_cards() {
+    let seen = helper_oracle("score_card_jumps", 0x2f61_9a0c_77e4_1b35, |r, dt, c| r.jumps(dt, c));
+    if seen[0] == usize::MAX {
+        return;
+    }
+    assert!(seen.iter().all(|&k| k > 2000), "told / flags turned / manager's flag cleared: {seen:?}");
+}
+
+#[test]
+fn the_off_track_warning_matches_the_score_cards() {
+    let seen = helper_oracle("score_card_off_warning", 0x6b02_e5d1_3c98_a047, |r, dt, c| r.off_warning(dt, c));
+    if seen[0] == usize::MAX {
+        return;
+    }
+    assert!(seen[0] > 2000 && seen[1] > 2000, "told / flags turned: {seen:?}");
+}
+
+#[test]
+fn the_wrong_way_warning_matches_the_score_cards() {
+    let seen = helper_oracle("score_card_wrong_way", 0x91c7_40ad_5e23_f86b, |r, dt, c| r.wrong_way(dt, c));
+    if seen[0] == usize::MAX {
+        return;
+    }
+    assert!(seen[0] > 2000 && seen[1] > 2000, "told / flags turned: {seen:?}");
 }
 
 // --- S294: the race's finish -------------------------------------------------------------------------
@@ -4505,13 +4946,23 @@ fn c31_card(raw: &[u8], track: &C31Track) -> Option<RaceCard> {
         record_word: u(0x108),
         ..LapCard::default()
     };
-    Some(RaceCard { lap, on_path: f(0x18), odometer: f(0x20), aim: spot(0xa0)?, look: v(0x120), ahead: v(0x140), to_track: v(0x180) })
+    let word = |o: u32| u(o as usize);
+    Some(RaceCard {
+        lap,
+        on_path: f(0x18),
+        odometer: f(0x20),
+        aim: spot(0xa0)?,
+        look: v(0x120),
+        ahead: v(0x140),
+        to_track: v(0x180),
+        jumps: jumps_at(&word),
+        warnings: warnings_at(&word),
+    })
 }
 
-/// The card flags that change in C31 by work outside the ported handler: the helpers behind card flag
-/// `0x8_0000`, manager flags `0x800` / `0x1000` and the computer aim (S302), and the listeners. No bit
-/// the lap line or the ported handler writes is among them.
-const C31_UNPORTED_FLAGS: u64 = 0x18_3ce0;
+/// The card flags that change in C31 by work outside the ported handler: the listeners'. No bit the
+/// lap line or the ported handler writes is among them.
+const C31_UNPORTED_FLAGS: u64 = 0xe0;
 
 /// The handler's words a card is compared on, named, as raw bits.
 fn c31_words(c: &RaceCard) -> Vec<(&'static str, u64)> {
@@ -4543,6 +4994,9 @@ fn c31_words(c: &RaceCard) -> Vec<(&'static str, u64)> {
         ("time_left", b(l.time_left)),
         ("ahead", q(c.ahead)),
         ("to_track", q(c.to_track)),
+        ("aim", s(c.aim)),
+        ("jumps", jumps_words(&c.jumps, &Warnings::default()).iter().fold(0u64, |h, w| h.rotate_left(13) ^ w)),
+        ("warnings", jumps_words(&Jumps::default(), &c.warnings).iter().fold(0u64, |h, w| h.rotate_left(13) ^ w)),
     ]
 }
 
@@ -4567,6 +5021,15 @@ fn c31_rules(raw: &[u8]) -> RaceRules {
         time_limit: f(0xa0),
         off_limit: f(0xd4),
         aim_reach: f(0xd8),
+        watch: WatchRules {
+            jump_settle: f(0xf4),
+            off_after: f(0xcc),
+            off_blink: f(0xd0),
+            off_nag: f(0xdc),
+            wrong_after: f(0xe0),
+            wrong_blink: f(0xe4),
+            aim_ahead: f(0x104),
+        },
     }
 }
 
@@ -4578,7 +5041,9 @@ fn hex_bytes(s: &str) -> Vec<u8> {
 /// before's, its rider moved to this tick's place, through the whole race handler per card
 /// ([`RaceRules::card`]: the spot search on sx01's paths out of C31's RAM image, the distances to the
 /// line, the lap line ([`LapRules::line`]) and the card set back on it, the progress, the off-track clock
-/// and the way back, the clocks), against the captured card bit for bit. Every lap counted, every best
+/// and the way back, the computer aim, the jump watch and the two warnings, the clocks), against the
+/// captured card bit for bit; the rider's ground bit, height and look are taken from the captured card,
+/// as the bike writes them before the handler. Every lap counted, every best
 /// lap, the finish at the last lap (manager flag [`race_flags::FINISHED`]) and every off-track episode of
 /// the gas-held human go through it.
 #[test]
@@ -4656,7 +5121,7 @@ fn c31_hold(text: &str, prefix: &str, track: &C31Track, what: &str) -> C31Held {
     let mut paths = track.paths.clone();
     let (mut stepped, mut laps, mut bests, mut finished, mut off, mut back, mut torn) = (0, 0, 0, 0, 0, 0, 0);
     let mut xor = 0u64;
-    let (mut long_way, mut too_long) = (0, 0);
+    let (mut long_way, mut too_long, mut watch_turned) = (0, 0, 0);
     let mut lap_ticks = Vec::new();
     let mut bad: std::collections::BTreeMap<&str, (usize, String)> = Default::default();
     for w in rows.windows(2) {
@@ -4687,7 +5152,36 @@ fn c31_hold(text: &str, prefix: &str, track: &C31Track, what: &str) -> C31Held {
             }
             let mut card = a.clone();
             card.lap.seen.now = b.lap.seen.now;
-            let said = rules.card(now.dt, &mut card, None, &mut paths, &track.course, F::ZERO);
+            // The rider's own words the helpers read, written by the bike before the handler runs: on
+            // the ground or not, the height, the look.
+            card.lap.flags = card.lap.flags & !race_card_flags::GROUNDED | b.lap.flags & race_card_flags::GROUNDED;
+            card.jumps.rise = b.jumps.rise;
+            card.look = b.look;
+            // The card's owner turns the jump watch off and on, on the human's card before the handler,
+            // on a computer's after, and clears the jump to judge while the watch is off: on a tick with
+            // the watch off before or after, the watch runs on whichever bit matches and the two bits
+            // are the owner's.
+            let watch = race_card_flags::WATCHES_JUMPS | race_card_flags::JUMP_TO_JUDGE;
+            let said = if a.lap.flags & b.lap.flags & race_card_flags::WATCHES_JUMPS != 0 {
+                rules.card(now.dt, &mut card, None, &mut paths, &track.course, F::ZERO)
+            } else {
+                watch_turned += usize::from((a.lap.flags ^ b.lap.flags) & race_card_flags::WATCHES_JUMPS != 0);
+                let tries: Vec<_> = [a, b]
+                    .map(|from| {
+                        let (mut r, mut c, mut t) = (rules, card.clone(), paths.clone());
+                        c.lap.flags = c.lap.flags & !race_card_flags::WATCHES_JUMPS | from.lap.flags & race_card_flags::WATCHES_JUMPS;
+                        let said = r.card(now.dt, &mut c, None, &mut t, &track.course, F::ZERO);
+                        c.lap.flags = c.lap.flags & !watch | b.lap.flags & watch;
+                        (r, c, t, said)
+                    })
+                    .into_iter()
+                    .collect();
+                let same = |c: &RaceCard| jumps_words(&c.jumps, &c.warnings) == jumps_words(&b.jumps, &b.warnings);
+                let pick = tries.iter().position(|(_, c, _, _)| same(c)).unwrap_or(0);
+                let (r, c, t, said) = tries.into_iter().nth(pick).unwrap();
+                (rules, card, paths) = (r, c, t);
+                said
+            };
             stepped += 1;
             if card.lap.laps != a.lap.laps {
                 laps += 1;
@@ -4702,9 +5196,10 @@ fn c31_hold(text: &str, prefix: &str, track: &C31Track, what: &str) -> C31Held {
             // The rider a little behind its kept spot on the same stretch: the spot search's distance is
             // the route forward from the kept spot, the long way round the lap, and that route's answer
             // hangs on the scratch the route searches leave on the paths. The original's drifts tick to
-            // tick for a rider standing still (the other cards' searches and the unported computer aim,
-            // S302, run first). Both are far past the search's reach, so the progress test, the one
-            // reader of the word, reads them alike.
+            // tick for a rider standing still: the other cards' searches and their computer aims (S302)
+            // run first, and so do the AI riders' own path searches, which are not ported — with the
+            // aims in, one tick of gas-held sx01 is left (frame 293, the human). Both are far past the
+            // search's reach, so the progress test, the one reader of the word, reads them alike.
             let behind_kept = b.lap.spot.path == a.lap.kept_spot.path && b.lap.spot.piece == a.lap.kept_spot.piece && b.lap.spot.along < a.lap.kept_spot.along;
             let far = |x: F| x.0 > track.paths.ahead.0;
             for ((name, got), (_, want)) in c31_words(&card).into_iter().zip(c31_words(b)) {
@@ -4722,7 +5217,7 @@ fn c31_hold(text: &str, prefix: &str, track: &C31Track, what: &str) -> C31Held {
             }
         }
     }
-    eprintln!("{what}: {stepped} steps, {torn} torn, {laps} laps, {bests} bests, {finished} finished, {off} off-track ticks, {too_long} off too long, {back} back on, {long_way} long way round, flags xor {xor:#x}; laps (frame, rider, lap) {lap_ticks:?}");
+    eprintln!("{what}: {stepped} steps, {torn} torn, {laps} laps, {bests} bests, {finished} finished, {off} off-track ticks, {too_long} off too long, {back} back on, {long_way} long way round, {watch_turned} jump watches turned, flags xor {xor:#x}; laps (frame, rider, lap) {lap_ticks:?}");
     assert!(bad.is_empty(), "{what}: words that differ (count, first four): {bad:#?}");
     assert!(xor & !C31_UNPORTED_FLAGS == 0, "{what}: flags {xor:#x}");
     C31Held { stepped, torn, laps, bests, finished, off, too_long, back }
@@ -5731,6 +6226,7 @@ fn the_line_lists_match_the_race_handlers_card_stretch() {
             look: p.quad([0.0, 0.0, 0.0]),
             ahead: p.quad([0.0, 0.0, 0.0]),
             to_track: p.quad([0.0, 0.0, 0.0]),
+            ..RaceCard::default()
         };
         let owner = p.below(5) != 0;
         let chain = p.below(3) == 0;

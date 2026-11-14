@@ -66,6 +66,8 @@ pub struct Pack {
     pub skins: Vec<Skin>,
     /// `fliers`: each flier's own files.
     pub fliers: Vec<Flier>,
+    /// `cars` (MD39c): a car pack's cars (openmx-mods' `import-atv cars`), each with its files.
+    pub cars: Vec<CarFiles>,
     helicopter_engine: String,
     machine_sounds: String,
 }
@@ -95,6 +97,17 @@ pub struct Skin {
     /// The garage set its `_ui` model and textures came out of (`UI/Res/Veh_BiPlane1.res`): where
     /// they came from, not a file in the pack.
     pub garage: String,
+}
+
+/// One car of a car pack (MD39c), as `mod.json`'s `cars` lists it: the car's word (`buggy`,
+/// `monstertruck`, `baja`, `golfcart`, `sandrail`), its `.phy`, its chassis model and its collision
+/// object, by their paths in the pack.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CarFiles {
+    pub car: String,
+    pub phy: String,
+    pub psg: String,
+    pub col: String,
 }
 
 /// One flier's files, `mod.json`'s `fliers.<machine>`.
@@ -203,8 +216,14 @@ pub fn read(folder: &Path) -> Result<Option<Pack>, String> {
             });
         }
     }
-    if builds.is_empty() && skins.is_empty() {
-        return Err("mod.json lists neither builds nor skins".into());
+    let mut cars = Vec::new();
+    if let Some(Json::Arr(list)) = json.get("cars") {
+        for c in list {
+            cars.push(CarFiles { car: s(c.get("car")), phy: s(c.get("phy")), psg: s(c.get("psg")), col: s(c.get("col")) });
+        }
+    }
+    if builds.is_empty() && skins.is_empty() && cars.is_empty() {
+        return Err("mod.json lists neither builds, skins nor cars".into());
     }
     let rider = json.get("rider");
     let todo = match json.get("todo") {
@@ -235,6 +254,7 @@ pub fn read(folder: &Path) -> Result<Option<Pack>, String> {
         todo,
         skins,
         fliers,
+        cars,
         id,
     }))
 }
