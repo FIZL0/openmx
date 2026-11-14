@@ -1838,6 +1838,27 @@ ai_seek_zone_open           boot 0x003256f0 +0x44: two open bytes (players 0, 1)
 #                                           0x00330f10..0x00331030 sets bit 0 (+bit 4) from the save
 #                                           profile (Hit: byte place+0x20 bit 0; Run: place+0x25;
 #                                           Race: a setting; Stunt: +0x18); bit 2 = shown
+#                                           S315: corrected — value 1 open, 4 placed, 2 shown (from
+#                                           the profile's bit 1 / race word +0x14 / stunt word +0x18)
+ai_zone_open_players        boot 0x00330bc0 a vtable-only function (no Ghidra function): per player of the
+#                                           activity (count fp+0x184, 0x00331410 gets one, +0x54
+#                                           owner) opens the start zones. Kind 2 (AI) skips. Profile =
+#                                           0x0036c2e0(*(*(0x41f770)+0x3f4)+0xb0, event+8): the map
+#                                           record named by the track (+0x40 list, +0x58 count)
+ai_zone_open_stretch        boot 0x00330ec0 inside it: s5 = owner, s7 = zone list (*(0x4e2778)+0x44);
+#                                           mgr+0x58 set -> 0x003aa460(mgr, owner+0x30, 1) (bit 4 to
+#                                           every zone, player < 2); null profile -> none. Else per
+#                                           mgr+0x40 record (12 bytes: +0 place, +4 number, +8 type)
+#                                           and zone i: Hit byte profile+0x20+place bit 0 and not
+#                                           0x003aa780 -> open, shown = byte & 2; Run +0x25+place;
+#                                           Race: *(*(*(0x4e1df8)+0x58)+0x20)+0x14 (activity 8's list
+#                                           count), shown = profile+0x14; Stunt always, shown +0x18.
+#                                           Open: byte |= 1, |= 4, bit 2 set or cleared by shown.
+#                                           Ported as ai::seek::open_flags, oracled (tests/ai/zone_open.rs)
+ai_zone_open_stretch_end    boot 0x00331058 the zone loop's exit (after the last record)
+ai_zone_open_stretch_skip   boot 0x003310b8 the player loop's next (the held and no-profile exits)
+ai_zone_hit_running         boot 0x003aa780 (mgr) 1 when a rider in mgr+0x30/+0x38 has an owner that
+#                                           answers vt+0xac(name_bit("HitProgression")) (0x00444af0)
 ai_feed                     boot 0x0027fbd0 MXVehicleAIInterface vt+0x8: bike frame (+0x18's
 #                                           +0x80..+0xbc) into ai +0x90..+0xcc, body velocity/spin
 #                                           into +0x50/+0x60/+0x70, |v| into +0x80, ground normal
