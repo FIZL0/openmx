@@ -1037,6 +1037,12 @@ pub struct Drawn {
     /// whose model never reached the GPU or that is wholly see-through, so a shell can say a rider
     /// was left out of the picture.
     pub actors: Vec<Vec<usize>>,
+    /// The models this frame uploaded as it first saw them, and what that took on the CPU (P342):
+    /// the share of a frame's draw that is uploads rather than drawing.
+    pub uploads: usize,
+    pub upload_time: std::time::Duration,
+    /// What handing the frame's commands to the GPU took on the CPU (P342).
+    pub submit_time: std::time::Duration,
 }
 
 impl Drawn {
@@ -1180,7 +1186,16 @@ pub struct Renderer {
     /// Each stage of a frame in an encoder and a watched scope of its own ([`Renderer::stage`],
     /// P336): on a browser's WebGPU with a [`Watcher`].
     staged: bool,
+    /// How long a frame may spend uploading the props' and plants' models it finds not on the GPU
+    /// (P342), or no limit. Set by [`Renderer::give_back_models`], whose next frames would upload
+    /// every model of the ride at once (an iPhone's 462 ms frame back from the app switcher), and
+    /// lifted by the frame that finds them all up again: the rest wait for the next frame, drawn
+    /// without them till then.
+    upload_budget: Option<std::time::Duration>,
 }
+
+/// [`Renderer::upload_budget`]'s share of a frame (P342).
+pub const LAZY_UPLOADS_A_FRAME: std::time::Duration = std::time::Duration::from_millis(4);
 
 /// What a [`Renderer`] hands each validation error scope it pushed around a create, with what the
 /// scope covered (P257): the browser's page pops it and says what failed. A browser reports an
@@ -2691,6 +2706,7 @@ impl Renderer {
             over: false,
             lod_bias: 1.0,
             staged: watcher.is_some() && info.backend == wgpu::Backend::BrowserWebGpu,
+            upload_budget: None,
             watch: { drop(made); watcher },
         })
     }
@@ -3614,6 +3630,8 @@ impl Renderer {
         self.grove = None;
         self.groves.clear();
         self.sun.world.generation += 1;
+        // The next ride's first frame uploads all it draws, whatever a give-back left (P342).
+        self.upload_budget = None;
         self.view_skies.clear();
         self.sky_cubes.clear();
         self.view_lights.clear();
@@ -3639,6 +3657,7 @@ impl Renderer {
         }
         self.depth = None;
         self.sun.world.generation += 1;
+        self.upload_budget = Some(LAZY_UPLOADS_A_FRAME);
         // Freed once the device has seen that no submission still holds them; no GPU work is made.
         let _ = self.device.poll(wgpu::PollType::Poll);
         let_go
@@ -4114,9 +4133,19 @@ impl Renderer {
             }
         }
         // Resolve what the frame names before the palette is written, so a model seen for the first
-        // time has its bind pose in this frame's palette.
+        // time has its bind pose in this frame's palette. The actors always; the props and plants
+        // within the upload budget, when there is one (P342).
+        let resolve_at = Instant::now();
+        let known = self.model_ids.len();
+        let budget = self.upload_budget;
+        let spent = |at: Instant| budget.is_some_and(|b| at.elapsed() >= b);
+        let mut left = false;
         for p in 0..self.props.len() {
             if self.props[p].model.is_none() {
+                if spent(resolve_at) {
+                    left = true;
+                    break;
+                }
                 let name = std::mem::take(&mut self.props[p].name);
                 self.props[p].model = Some(self.model(assets, &name));
                 self.props[p].name = name;
@@ -4136,8 +4165,16 @@ impl Renderer {
             .cloned()
             .collect();
         for name in names {
+            if spent(resolve_at) {
+                left = true;
+                break;
+            }
             self.model(assets, &name);
         }
+        if !left {
+            self.upload_budget = None;
+        }
+        let (uploads, upload_time) = (self.model_ids.len() - known, resolve_at.elapsed());
         // The sun's shadow maps (V108), each with uniforms of its own after the passes': planned once
         // the frame's models are resolved, so an actor seen for the first time casts from its first
         // frame (the original's maps skipped it, unknown, for one).
@@ -4168,6 +4205,9 @@ impl Renderer {
             props: 0,
             ground_time: std::time::Duration::ZERO,
             actors: views.iter().map(|v| vec![0; v.actors.len()]).collect(),
+            uploads,
+            upload_time,
+            submit_time: std::time::Duration::ZERO,
         };
         self.scratch.clear();
         let mut origins = Vec::with_capacity(passes.len());
@@ -4468,7 +4508,9 @@ impl Renderer {
         if let (Some(t), Some(k)) = (self.timer.as_mut(), timed) {
             t.end(&mut encoder, k);
         }
+        let submit_at = Instant::now();
         self.queue.submit([encoder.finish()]);
+        drawn.submit_time = submit_at.elapsed();
         drop(scope);
         if let (Some(t), Some(k)) = (self.timer.as_mut(), timed) {
             t.submitted(k);

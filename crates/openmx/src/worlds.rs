@@ -1331,8 +1331,10 @@ impl GroundStream {
         while let Ok(done) = self.built.try_recv() {
             take(self, done);
         }
-        // Coarse ground underfoot is waited for too (a teleport into the far ring).
-        while let Some(i) = (0..self.tiles.len()).find(|&i| gaps[i] == 0.0 && self.asked[i].is_some() && self.held[i] != Some(true)) {
+        // Coarse ground underfoot is waited for too (a teleport into the far ring). But not the fine
+        // over coarse held already (P342: a jump to a marker stopped the iPhone's ride 140 ms for
+        // it): the coarse is drawn till the fine comes.
+        while let Some(i) = (0..self.tiles.len()).find(|&i| gaps[i] == 0.0 && self.asked[i].is_some() && self.held[i].is_none()) {
             let at = Instant::now();
             let Ok(done) = self.built.recv() else { break };
             self.log.push(format!("world ground: waited {:.0} ms for {}", at.elapsed().as_secs_f32() * 1000.0, self.tiles[i].name));
@@ -2569,5 +2571,53 @@ mod far_ring {
         assert_eq!(s.wanted(0, 8000.0), Some(true));
         s.failed[0] = true;
         assert_eq!(s.wanted(0, 0.0), None);
+    }
+
+    /// P342: a rider on a piece held coarse (a jump to a marker into the far ring) rides on over the
+    /// coarse while the fine is built, rather than the frame waiting for it; a piece not held at all
+    /// is still waited for.
+    #[test]
+    fn the_fine_over_coarse_underfoot_is_not_waited_for() {
+        let tile = Tile { name: "p".into(), at: [F(0.0), F(0.0)], layout: TerrainLayout::default(), spacing: F(62.5), levels: 1, keep: [0, 0, 16, 16], first_owner: 0 };
+        let (send, built) = channel();
+        let mut s = GroundStream {
+            held: vec![Some(false)],
+            asked: vec![None],
+            failed: vec![false],
+            redo: vec![false],
+            tiles: vec![tile],
+            reach: Reach { load: F(6000.0), drop: F(9000.0) },
+            fine: Some(Reach { load: F(2500.0), drop: F(3500.0) }),
+            work: Arc::new((Mutex::new((Vec::new(), false)), Condvar::new())),
+            built,
+            pending: VecDeque::new(),
+            chunks_a_frame: CHUNKS_A_FRAME,
+            log: Vec::new(),
+            heading: Vec::new(),
+        };
+        // The builder answers a while after it is asked.
+        let late = std::time::Duration::from_millis(300);
+        let answer = |send: std::sync::mpsc::Sender<(usize, bool, Result<GroundPiece, String>)>| {
+            std::thread::spawn(move || {
+                std::thread::sleep(late);
+                let _ = send.send((0, true, Err("built late".into())));
+            })
+        };
+        let builder = answer(send.clone());
+        let at = Instant::now();
+        s.update(&[[500.0, 500.0]]);
+        assert!(at.elapsed() < late, "the frame waited {:?} for the fine over the coarse", at.elapsed());
+        assert_eq!(s.asked[0], Some(true), "the fine is asked for");
+        assert!(!s.log.iter().any(|l| l.contains("waited")), "{:?}", s.log);
+        builder.join().unwrap();
+
+        // Held not at all: waited for.
+        (s.held[0], s.asked[0], s.failed[0]) = (None, None, false);
+        s.work.0.lock().unwrap().0.clear();
+        while s.built.try_recv().is_ok() {}
+        let builder = answer(send);
+        s.update(&[[500.0, 500.0]]);
+        assert!(s.log.iter().any(|l| l.contains("waited")), "{:?}", s.log);
+        builder.join().unwrap();
     }
 }

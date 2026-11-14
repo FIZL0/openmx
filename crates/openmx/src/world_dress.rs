@@ -33,6 +33,10 @@ pub struct Built {
     pub grove: Option<Grove>,
     /// The cars' models, by their names in the tile's own folder.
     pub cars: usize,
+    /// Its `.toy`'s cars and their wheels, read here off the ride's thread (P342: free06's 23 cars
+    /// took the iPhone's ride a 160 ms frame to read), or `None` when a car presamples the ground,
+    /// which [`take`] stands it on.
+    pub traffic: Option<(Traffic, Vec<Option<toy::Wheels>>)>,
     /// What did not come out, for the log.
     pub notes: Vec<String>,
 }
@@ -170,14 +174,23 @@ pub fn build(piece: &WorldPiece, index: usize, lod: Lod) -> Result<Built, String
             None
         }
     };
-    // The cars its `.toy` drives: their models now, their clips on the ride's thread, which stands
-    // them on the ground.
+    // The cars its `.toy` drives: their models, and their clips too unless one is stood on the
+    // ground, which is the ride's and waits for its thread.
     let mut cars = 0;
     if let Ok(toy_text) = archives[0].read_suffix(&format!("{}.toy", piece.stem)) {
         for car in toy::cars(&ini::text(&toy_text)).iter() {
             cars += assets.load_placed(&archives, car.stem()) as usize;
         }
     }
+    let mut grounded = false;
+    let traffic = Traffic::load(&archives, &piece.stem, &mut |p| {
+        grounded = true;
+        (p, game_render::mat::v3(0.0, 1.0, 0.0))
+    });
+    let traffic = (!grounded).then(|| {
+        let wheels = wheels_of(&traffic, &assets, "");
+        (traffic, wheels)
+    });
     // What stands outside the tile's keep stands over ground the world gives a join or a neighbour
     // (MD27): on a national cut to its track, most of its trees, which floated over the join's blend
     // (V125). The tile's own props and plants are left out there, as its collision shapes are.
@@ -211,7 +224,7 @@ pub fn build(piece: &WorldPiece, index: usize, lod: Lod) -> Result<Built, String
         g.lod = lod;
         g
     });
-    Ok(Built { index, assets, props, grove, cars, notes })
+    Ok(Built { index, assets, props, grove, cars, traffic, notes })
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -367,16 +380,20 @@ pub fn take(
     let prefix = prefix(&piece.tile);
     let shift = piece.tile.at.map(|a| a.0);
     let taken = assets.take_in(b.assets, &prefix);
-    let traffic = match piece.archives() {
-        Ok(archives) => Traffic::load(&archives, &piece.stem, &mut |p| ground(p, shift)),
-        Err(_) => Traffic::default(),
-    };
-    let wheels = traffic
-        .cars
-        .iter()
-        .map(|(car, path)| toy::Wheels::new(&assets.models.get(&format!("{prefix}{}", car.stem()))?.model, car, path))
-        .collect();
+    let (traffic, wheels) = b.traffic.unwrap_or_else(|| {
+        let traffic = match piece.archives() {
+            Ok(archives) => Traffic::load(&archives, &piece.stem, &mut |p| ground(p, shift)),
+            Err(_) => Traffic::default(),
+        };
+        let wheels = wheels_of(&traffic, assets, &prefix);
+        (traffic, wheels)
+    });
     Dressed { index: b.index, prefix, props: b.props, grove: b.grove, traffic, shift, taken, posed: Vec::new(), wheels, grounds: Vec::new() }
+}
+
+/// The wheels of each of `traffic`'s cars, its model `prefix`ed in `assets`.
+fn wheels_of(traffic: &Traffic, assets: &Assets, prefix: &str) -> Vec<Option<toy::Wheels>> {
+    traffic.cars.iter().map(|(car, path)| toy::Wheels::new(&assets.models.get(&format!("{prefix}{}", car.stem()))?.model, car, path)).collect()
 }
 
 /// A world's ground as the software renderer draws it (MD15): every piece within [`ground::REACH`]

@@ -7165,6 +7165,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             }
         );
     }
+    // Whether the rows above are a preset or picked by hand, and whether Auto picked them (P342):
+    // a phone log of a hitching ride says which defaults it rode on.
+    if let Some(f) = front.as_deref() {
+        let s = &f.menu.settings;
+        println!("video: {}, {}", if s.video_auto { "auto" } else { "chosen" }, menu::video::name(menu::video::Look::of(s)));
+    }
 
     // ---- the loop ------------------------------------------------------------------------------
     let mut light = Lighting::of(&look);
@@ -7855,6 +7861,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let mut view_triangles = vec![0usize; args.players];
     // The GPU ground's quadtree nodes looked at (V65): over the session, the most in a frame, frames.
     let mut ground_visits = (0usize, 0usize, 0usize);
+    // The models the GPU's frames uploaded as they first saw them since the last line a second (P342).
+    let mut lazy_uploads = 0usize;
     let mut cameras: Vec<Camera> = Vec::with_capacity(args.players);
     // How the ride ended, for the front end: anything but the pause's own two is a quit.
     let mut leave = Leave::Quit;
@@ -10989,6 +10997,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     println!("first frame: at tick {}, near sets cut in the ride {cut}, ground parts written {}", pacer.ticks(), d.ground_written);
                 }
                 stages.shift(stages::Stage::Present, stages::Stage::Ground, d.ground_time);
+                // And its uploads, its submit and the window's wait (P342): what is left is encoding.
+                stages.shift(stages::Stage::Present, stages::Stage::Upload, d.upload_time);
+                stages.shift(stages::Stage::Present, stages::Stage::Submit, d.submit_time);
+                stages.shift(stages::Stage::Present, stages::Stage::Wait, waited);
+                lazy_uploads += d.uploads;
                 ground_visits = (ground_visits.0 + d.ground_visits, ground_visits.1.max(d.ground_visits), ground_visits.2 + 1);
                 for (v, tris) in d.triangles.iter().enumerate() {
                     view_triangles[v] += tris;
@@ -11467,13 +11480,20 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             timing(format!("     {slow} at tick {}", pacer.ticks()));
         }
         second.frame(Instant::now(), frame_waited, if gpu_on { gpu_sprites.len() } else { 0 });
+        let uploaded = match stages_since.elapsed() >= Duration::from_secs(1) {
+            true => match std::mem::take(&mut lazy_uploads) {
+                0 => String::new(),
+                n => format!(", {n} models uploaded in the draw"),
+            },
+            false => String::new(),
+        };
         if args.timings && stages_since.elapsed() >= Duration::from_secs(1) {
-            timing(format!("     {}; {}; {}", stages.line(), stages.worst_line(), second.line()));
+            timing(format!("     {}; {}; {}{uploaded}", stages.line(), stages.worst_line(), second.line()));
             stages_since = Instant::now();
         } else if PHONE && stages_since.elapsed() >= Duration::from_secs(1) {
             // How evenly the pictures' moments came (P340): a refresh apart on a steady screen.
             let apart = apart.take().map_or(String::new(), |(a, b)| format!(", pictures {:.1}-{:.1} ms apart", a.as_secs_f64() * 1000.0, b.as_secs_f64() * 1000.0));
-            println!("     {}; {}{apart}", stages.brief(), second.line());
+            println!("     {}; {}{apart}{uploaded}", stages.brief(), second.line());
             stages_since = Instant::now();
         }
         top = Instant::now();

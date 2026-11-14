@@ -104,3 +104,69 @@ fn models_given_back_draw_again_on_the_next_frame() {
     gpu.give_back_models();
     assert!(picture(&mut gpu) == before, "the second give-back drew a different picture");
 }
+
+/// P342: the frames after a give-back upload what they draw a few milliseconds' worth at a time
+/// rather than all of it in the first — a ride of hundreds of models came back to the front in one
+/// 576 ms frame on the phone. The first frame leaves some for the next, every frame brings some
+/// back, and in the end it is all there and the picture is the one before.
+#[test]
+fn many_models_given_back_come_back_over_frames() {
+    let mut gpu = match Renderer::headless() {
+        Ok(g) => g,
+        Err(why) => {
+            println!("SKIPPED: {why}");
+            return;
+        }
+    };
+    const WALLS: usize = 400;
+    let mut assets = Assets::default();
+    let mut props = Vec::new();
+    for i in 0..WALLS {
+        let rgba = [(i * 7 % 200) as u8 + 40, (i * 13 % 200) as u8 + 40, (i * 29 % 200) as u8 + 40, 255];
+        assets.textures.push(Texture { width: 128, height: 128, rgba: rgba.repeat(128 * 128) });
+        let name = format!("wall{i}");
+        assets.models.insert(name.clone(), wall(4.0, i));
+        let (col, row) = ((i % 20) as f32, (i / 20) as f32);
+        props.push(Placement { model: name, ..at(col * 5.0 - 47.5, row * 5.0 - 47.5, 120.0) });
+    }
+    let scene = Scene::parse("[Fog]\nColorRGB=61,68,76\nMinimumFogDistance=5000.00\nMaximumFogDistance=9000.00\n");
+    let light = Lighting::of(&scene);
+    gpu.set_scene(&scene);
+    gpu.add_props(7, &props, None);
+    gpu.set_sky(None);
+
+    let (w, h) = (160u32, 120u32);
+    let texture = gpu.offscreen(w, h);
+    let view = texture.create_view(&Default::default());
+    let camera = Camera { eye: v3(0.0, 0.0, 0.0), at: v3(0.0, 0.0, 10.0), fov: 1.2, near: 0.5, far: 2000.0 };
+    let picture = |gpu: &mut Renderer| {
+        let views = [View { rect: [0, 0, w, h], camera: &camera, actors: &[] }];
+        let target = Target { view: &view, size: (w, h), frame: [0, 0, w, h], scale: 1 };
+        let drawn = gpu.render(&target, &assets, &Scene3 { views: &views, poses: &[], overlay: &[], sprites: &[], light: &light });
+        (drawn, gpu.read(&texture))
+    };
+
+    let (first, before) = picture(&mut gpu);
+    assert_eq!(first.uploads, WALLS, "a ride's first frame has no limit");
+    let held = gpu.uploaded();
+    gpu.give_back_models();
+
+    let mut frames = 0;
+    let after = loop {
+        let (drawn, after) = picture(&mut gpu);
+        frames += 1;
+        assert!(drawn.uploads > 0, "frame {frames} after the give-back brought nothing back");
+        if frames == 1 {
+            assert!(drawn.uploads < WALLS, "the first frame back uploaded all {WALLS} models");
+        }
+        if gpu.uploaded() == held {
+            break after;
+        }
+        assert!(frames < WALLS, "still not all back after {frames} frames");
+    };
+    println!("{WALLS} models back over {frames} frames");
+    // Once all are back, the next frame has no limit and nothing to upload.
+    assert_eq!(picture(&mut gpu).0.uploads, 0);
+    let differ = before.iter().zip(&after).filter(|(a, b)| a != b).count();
+    assert_eq!(differ, 0, "{differ} bytes differ once all are back");
+}
