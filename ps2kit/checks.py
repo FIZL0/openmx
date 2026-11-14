@@ -678,7 +678,22 @@ def cmd_done(argv: list[str]) -> int:
     c = cfg(False)
     cwd = Path.cwd() if (Path.cwd() / '.git').exists() else ROOT
 
-    if c.test_cmd:
+    # Under a run (KIT_RUN=1) the merge gate tests every finished task together, so a task's own wrap-up only
+    # builds the tests ([build] run_test): testing here as well held a slot an hour for a gate that runs anyway.
+    in_run = os.environ.get('KIT_RUN') == '1' and bool(c.run_test_cmd)
+    if in_run:
+        _cap_build_dirs(cwd)
+        log = _log_path()
+        with open(log, 'w', encoding='utf-8') as fh:
+            rc = subprocess.run(c.run_test_cmd, shell=True, cwd=str(cwd), stdout=fh, stderr=subprocess.STDOUT).returncode
+        for l in summarise(rc, log, what='BUILD'):
+            print(l)
+        if rc:
+            print(f'\nNothing ticked, nothing committed. Fix the build, or commit what is solid by hand and\n'
+                  f'    ./kit done {a.id} "<msg>" --blocked "<why + what unblocks it>"', file=sys.stderr)
+            return 1
+        print('(a run: the tests run in the merge gate, with the other finished tasks)')
+    elif c.test_cmd:
         _take_slot()
         try:
             _cap_build_dirs(cwd)

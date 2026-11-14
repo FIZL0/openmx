@@ -247,6 +247,16 @@ class Config:
         return self.raw.get('build', {}).get('test', '') or ''
 
     @property
+    def run_test_cmd(self) -> str:
+        """What `done` runs under a run (KIT_RUN=1): `[build] run_test`, else a cargo `test` with --no-run (the
+        merge gate runs the tests; a slot's kit.toml is a copy taken once, so the default lives here)."""
+        b = self.raw.get('build', {})
+        if 'run_test' in b:
+            return b['run_test'] or ''
+        t = self.test_cmd
+        return t + ' --no-run' if re.match(r'^\s*cargo\s+test(\s|$)', t) else ''
+
+    @property
     def lint_cmd(self) -> str:
         return self.raw.get('build', {}).get('lint', '') or ''
 

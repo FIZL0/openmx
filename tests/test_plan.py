@@ -327,6 +327,21 @@ def test_done_plan_calls():
         has(todo, r'- \[~\] \*\*T2\*\* two .*BLOCKED: \(after T3\) needs T3 first', 'block --after records the wait')
         check((repo / 'ctx/notes/agent-runner.toml').exists(), 'with the generated settings')
 
+def test_done_run_test():
+    print('done: under a run, only builds the tests')
+    with tempfile.TemporaryDirectory() as tmp:
+        toml = Path(tmp) / 'kit.toml'
+        code = 'from ps2kit.config import cfg; print(repr(cfg(False).run_test_cmd))'
+        for build, want, what in (
+                ('test = "cargo test -q --message-format=short"', "'cargo test -q --message-format=short --no-run'",
+                 'a cargo test gets --no-run'),
+                ('test = "meson test"', "''", 'any other test command: done tests as before'),
+                ('test = "cargo test"\nrun_test = ""', "''", 'an empty run_test turns it off'),
+                ('test = "cargo test"\nrun_test = "make"', "'make'", 'run_test given is taken as it is')):
+            toml.write_text(f'[paths]\ncontext = "ctx"\n[build]\n{build}\n', encoding='utf-8')
+            eq(kit_py(code, toml).strip(), want, what)
+
+
 def test_cli_help():
     print('cli: every command of this layer explains itself with no kit.toml')
     for cmd in ('plan', 'journal', 'check', 'done', 'run', 'stop', 'oracle'):
@@ -338,7 +353,7 @@ def test_cli_help():
 
 def main() -> int:
     for t in (test_shipped_backlog, test_journal, test_check_summary, test_audit, test_guard, test_inbox,
-              test_oracle_join, test_runner_config, test_done_plan_calls, test_cli_help):
+              test_oracle_join, test_runner_config, test_done_plan_calls, test_done_run_test, test_cli_help):
         t()
     print()
     if FAILED:
