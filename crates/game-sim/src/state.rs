@@ -165,7 +165,10 @@ pub struct Sense {
     /// [`crate::air::wreck_test`] — nosed over, looped back or rolled past the bike's airborne limits
     /// while neither flipping nor spinning. The original always asks it, so true is the original; a
     /// player's Air Wrecks switch turned off makes it false, and the rider rides the jump out. The
-    /// landing is judged as ever either way.
+    /// landing is judged as ever either way — which lets one landing through that the original never
+    /// sees (S325): the ground's pitch limit reads the euler pitch, which folds back past straight
+    /// down, so a bike nosed over beyond it reads well inside the limit on its touchdown and rides
+    /// on from its front wheel. On, the airborne clause has thrown it long before.
     pub air_wrecks: bool,
     /// Not the original's (S161): a landing more than a quarter turn crossed up — the bike pointing
     /// back against where it is going — wrecks ([`crate::air::backwards_landing`]). The original's
