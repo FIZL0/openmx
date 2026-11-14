@@ -128,7 +128,9 @@ fn tab_to(m: &mut Menu, r: &mut Reader, tab: &str) {
     }
     let screen = m.screen().unwrap();
     assert!(m.tabs(screen).contains(&tab), "{screen:?} has no {tab} tab");
-    tap_until(m, r, Control::R1, |m| m.tabs(screen)[m.tab(screen)] == tab);
+    // the Garage's tabs are L2 and R2's since P341, its L1 and R1 the livery
+    let next = if screen == Screen::Garage { Control::R2 } else { Control::R1 };
+    tap_until(m, r, next, |m| m.tabs(screen)[m.tab(screen)] == tab);
 }
 
 /// Down the main menu to the row named `row`, and Cross.
@@ -212,16 +214,23 @@ fn press_every_row(m: &mut Menu, r: &mut Reader, upward: bool) -> Vec<menu::Key>
         if !row.selectable() {
             continue;
         }
-        tap_until(m, r, Control::Down, |m| m.cursor(screen) == i);
+        // On the Machines grid (P341) Left/Right walk the tiles and R1 turns a tile's livery.
+        let tile = row.kind == menu::Kind::Tile;
+        if m.page().iter().any(|row| row.kind == menu::Kind::Tile) {
+            walk_grid_to(m, r, screen, i);
+        } else {
+            tap_until(m, r, Control::Down, |m| m.cursor(screen) == i);
+        }
+        let turn = if tile { Control::R1 } else { Control::Right };
         let before = key(m);
         if let Some(why) = &row.off {
             assert!(!why.is_empty(), "{screen:?} {:?} is dimmed without saying why", row.key);
-            tap(m, r, Control::Right);
+            tap(m, r, turn);
             tap(m, r, Control::Cross);
             assert_eq!(key(m), before, "{screen:?} {:?} is dimmed ({why}) but a press changed it", row.key);
             continue;
         }
-        tap(m, r, Control::Right);
+        tap(m, r, turn);
         if key(m) == before {
             tap(m, r, Control::Cross);
         }
@@ -244,6 +253,28 @@ fn press_every_row(m: &mut Menu, r: &mut Reader, upward: bool) -> Vec<menu::Key>
         }
     }
     changed
+}
+
+/// The cursor to row `i` of a page with a tile grid: Up/Down between lines and plain rows,
+/// Left/Right along the tiles.
+fn walk_grid_to(m: &mut Menu, r: &mut Reader, screen: Screen, i: usize) {
+    for _ in 0..64 {
+        let at = m.cursor(screen);
+        if at == i {
+            return;
+        }
+        let page = m.page();
+        let both = [at, i].iter().all(|&k| page.get(k).is_some_and(|row| row.kind == menu::Kind::Tile));
+        let control = match (both, i > at) {
+            (true, true) => Control::Right,
+            (true, false) => Control::Left,
+            (false, true) => Control::Down,
+            (false, false) => Control::Up,
+        };
+        tap(m, r, control);
+        assert_ne!(m.cursor(screen), at, "{screen:?}: {} from row {at} toward {i} did not move", control.name());
+    }
+    panic!("{screen:?}: 64 taps did not reach row {i}");
 }
 
 /// Every selectable row of the open page changes by pad in at least one of two walks, top down and
@@ -1662,6 +1693,11 @@ fn tap_seat(m: &mut Menu, readers: &mut [Reader], garages: &mut [Garage], seat: 
     acts
 }
 
+/// The names of the tiles the pause's Garage shows `seat`, in its order.
+fn pause_tile_names(m: &Menu, seat: usize) -> Vec<String> {
+    m.view(seat).pause_tiles().into_iter().map(|t| t.name).collect()
+}
+
 #[test]
 fn picking_the_biplane_in_the_pause_puts_that_player_in_it() {
     // Two riders on the bike, each with a plane parked (the second only in this file: the disc's
@@ -1683,50 +1719,57 @@ fn picking_the_biplane_in_the_pause_puts_that_player_in_it() {
     tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Start);
     assert_eq!(m.view(1).screen(), Some(Screen::Pause));
     assert!(m.paused(1) && !m.paused(0) && m.screen().is_none());
-    assert_eq!(m.view(1).pause_rows()[2], "Switch To Machine: Biplane");
+    assert_eq!(m.view(1).pause_rows()[2], "Garage");
     tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Down);
     assert_eq!(m.view(1).cursor(Screen::Pause), 0);
-    // Down twice and Cross on 2P's pad: 2P is in the plane, the ride carries on, 1P is on the bike.
-    // That Cross opens the plane's skin picker first (P315g), and Cross on it switches.
+    // Down twice and Cross on 2P's pad opens 2P's Garage on the bike they ride (P341); Right to
+    // the plane and Cross: 2P is in the plane, the ride carries on, 1P is on the bike.
     tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Down);
     tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Down);
     assert!(tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Cross).iter().all(|a| *a == Act::Stay));
-    assert!(m.view(1).flier_picker().is_some());
+    assert_eq!(m.view(1).screen(), Some(Screen::PauseGarage));
+    assert!(m.view(1).pause_tile().is_some_and(|t| t.riding));
+    assert_eq!(pause_tile_names(&m, 1).len(), 2);
+    tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Right);
     let acts = tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Cross);
     assert!(acts.contains(&Act::Switch(1, Machine::Biplane)), "{acts:?}");
     assert!(m.riding());
     assert_eq!((garages[0].up, garages[1].up), (Kind::Bike, Kind::Biplane));
     assert_eq!(m.up[..2], [Machine::Bike, Machine::Biplane]);
 
-    // 1P's own pause switches 1P, and the row now offers 2P the bike back.
+    // 1P's own pause switches 1P, and 2P's Garage now has the plane ridden, the bike to go back to.
     tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Start);
     assert!(m.paused(0) && !m.paused(1));
     tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Down);
     tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Down);
     tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Cross);
+    tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Right);
     let acts = tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Cross);
     assert!(acts.contains(&Act::Switch(0, Machine::Biplane)), "{acts:?}");
     assert_eq!((garages[0].up, garages[1].up), (Kind::Biplane, Kind::Biplane));
     tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Start);
-    assert_eq!(m.view(1).pause_rows()[2], "Switch To Machine: Bike");
+    let tiles = m.view(1).pause_tiles();
+    assert_eq!(tiles.iter().map(|t| (t.section, t.riding)).collect::<Vec<_>>(), [(0, false), (1, true)]);
     tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Start);
     assert!(m.riding(), "2P's Start resumes 2P's pause");
 
-    // A player with no plane to take: the row says so and pressing it switches nothing.
+    // A player with no plane to take: the Garage has only what they ride, and Cross on it resumes.
     m.switchable[1] = false;
     tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Start);
-    assert_eq!(m.view(1).pause_rows()[2], "Switch To Machine: None");
     tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Down);
     tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Down);
+    tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Cross);
+    assert_eq!(pause_tile_names(&m, 1).len(), 1);
+    tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Right);
     let acts = tap_seat(&mut m, &mut readers, &mut garages, 1, Control::Cross);
     assert!(!acts.iter().any(|a| matches!(a, Act::Switch(..))), "{acts:?}");
-    assert_eq!(m.view(1).screen(), Some(Screen::Pause));
+    assert!(acts.contains(&Act::Resume), "{acts:?}");
     assert_eq!(garages[1].up, Kind::Biplane);
 }
 
-/// P315g: the pause's Switch To Machine into the plane opens the Garage's plane picker over the
-/// pause; its arrows step the seat's skin (kept as the Garage keeps it), Circle backs out with the
-/// skin kept and no switch, and Cross switches. Online it switches at once, as before.
+/// P315g, in the pause's Garage since P341: the plane's tile lists its skins, L1 and R1 step the
+/// seat's (kept as the Garage keeps it), Circle backs out with the skin kept and no switch, and
+/// Cross switches.
 #[test]
 fn the_pause_switch_picks_the_plane_skin() {
     let (mut m, mut r) = fresh();
@@ -1739,35 +1782,94 @@ fn the_pause_switch_picks_the_plane_skin() {
     m.switchable[0] = true;
     let mut readers = vec![r];
     ride_frame(&mut m, &mut readers, &[Report::idle()], &mut garages);
-    let skin = |m: &Menu| m.view(0).flier_picker().and_then(|(_, f, _, _)| f.map(|f| f.skin.clone()));
+    let skin = |m: &Menu| m.picks.0[0].flier("biplane").map(|f| f.skin.clone());
 
     tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Start);
     tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Down);
     tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Down);
     tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Cross);
-    let view = m.view(0);
-    let (kind, _, choices, row) = view.flier_picker().expect("the plane picker");
-    assert_eq!((kind.as_str(), choices.len(), row), ("Plane", 2, 1), "the disc's two planes, Switch picked");
-    assert_eq!(skin(&m).as_deref(), Some("biplane"));
     tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Right);
-    assert_eq!(skin(&m).as_deref(), Some("biplane2"));
-    assert_eq!(m.picks.0[0].flier("biplane").map(|f| f.skin.as_str()), Some("biplane2"), "kept in the seat's picks");
+    let tile = m.view(0).pause_tile().expect("the plane's tile");
+    assert_eq!((tile.liveries.len(), tile.livery, tile.riding), (2, 0, false), "the disc's two planes");
+    assert_eq!(skin(&m), None, "no skin picked yet");
+    tap_seat(&mut m, &mut readers, &mut garages, 0, Control::R1);
+    assert_eq!(skin(&m).as_deref(), Some("biplane2"), "kept in the seat's picks");
+    assert_eq!(m.view(0).pause_tile().map(|t| t.livery), Some(1));
     assert!(m.take_picks_changed());
     tap_seat(&mut m, &mut readers, &mut garages, 0, Control::R1);
-    assert_eq!(skin(&m).as_deref(), Some("biplane"), "R1 steps it too, round");
+    assert_eq!(skin(&m).as_deref(), Some("biplane"), "R1 steps it round");
     tap_seat(&mut m, &mut readers, &mut garages, 0, Control::L1);
     let acts = tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Circle);
     assert!(!acts.iter().any(|a| matches!(a, Act::Switch(..))), "{acts:?}");
-    assert!(m.view(0).flier_picker().is_none());
     assert_eq!(m.view(0).screen(), Some(Screen::Pause), "Circle backs out to the pause");
     assert_eq!(garages[0].up, Kind::Bike);
 
     tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Cross);
-    assert_eq!(skin(&m).as_deref(), Some("biplane2"), "the picker opens on the kept skin");
+    tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Right);
+    assert_eq!(m.view(0).pause_tile().map(|t| t.livery), Some(1), "the Garage opens on the kept skin");
     let acts = tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Cross);
     assert!(acts.contains(&Act::Switch(0, Machine::Biplane)), "{acts:?}");
     assert!(m.riding());
     assert_eq!(garages[0].up, Kind::Biplane);
+}
+
+/// P341: pause Garage switches the machine and Triangle swaps the last two. Triangle does nothing
+/// before a second machine has been ridden; after one it goes back to the one before, from the
+/// pause list or its Garage, and each swap makes the other the last.
+#[test]
+fn pause_garage_switches_the_machine_and_triangle_swaps_the_last_two() {
+    let (mut m, mut r) = fresh();
+    m.riders = 1;
+    tap(&mut m, &mut r, Control::Cross);
+    tap(&mut m, &mut r, Control::Cross);
+    assert!(m.riding());
+    let mut garages = vec![garage(0, Kind::Bike)];
+    m.up[0] = Machine::Bike;
+    m.switchable[0] = true;
+    let mut readers = vec![r];
+    ride_frame(&mut m, &mut readers, &[Report::idle()], &mut garages);
+
+    // Nothing ridden before: Triangle on the pause does nothing, the pause stays.
+    tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Start);
+    assert_eq!(m.last_machine_name(), None);
+    let acts = tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Triangle);
+    assert!(acts.iter().all(|a| *a == Act::Stay), "{acts:?}");
+    assert_eq!(m.screen(), Some(Screen::Pause));
+    // Nor on its Garage, where the plane's tile switches.
+    tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Down);
+    tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Down);
+    tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::PauseGarage));
+    let acts = tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Triangle);
+    assert!(acts.iter().all(|a| *a == Act::Stay), "{acts:?}");
+    assert_eq!(m.screen(), Some(Screen::PauseGarage));
+    tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Right);
+    let acts = tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Cross);
+    assert!(acts.contains(&Act::Switch(0, Machine::Biplane)), "{acts:?}");
+    assert_eq!(garages[0].up, Kind::Biplane);
+    assert_eq!(m.last_up[0], Some(Machine::Bike));
+
+    // Triangle on the pause: back on the bike, the plane the last now.
+    tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Start);
+    assert!(m.last_machine_name().is_some());
+    let acts = tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Triangle);
+    assert!(acts.contains(&Act::Switch(0, Machine::Bike)), "{acts:?}");
+    assert!(m.riding());
+    assert_eq!((garages[0].up, m.last_up[0]), (Kind::Bike, Some(Machine::Biplane)));
+    // And on the Garage page: the plane again.
+    tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Start);
+    tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Down);
+    tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Down);
+    tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::PauseGarage));
+    let acts = tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Triangle);
+    assert!(acts.contains(&Act::Switch(0, Machine::Biplane)), "{acts:?}");
+    assert_eq!((garages[0].up, m.last_up[0]), (Kind::Biplane, Some(Machine::Bike)));
+    // Riding, Triangle is the ride's: no switch.
+    let acts = tap_seat(&mut m, &mut readers, &mut garages, 0, Control::Triangle);
+    assert!(!acts.iter().any(|a| matches!(a, Act::Switch(..))), "{acts:?}");
+    assert_eq!(garages[0].up, Kind::Biplane);
+
 }
 
 /// P177: no pick of a start machine is left. The ride setup's Square, L1 and R1 change nothing,
@@ -2157,13 +2259,34 @@ fn the_garage_rows_carry_the_originals_names() {
             panic!("no {label} row in {:?}", m.page().iter().map(|row| &row.label).collect::<Vec<_>>())
         })
     };
-    assert_eq!(row(&m, "Bike Class"), "125cc");
+    // P341: the bike is the ridden tile, its class over its name.
+    let riding = m.garage_tiles().into_iter().find(|t| t.riding).expect("the ridden bike's tile");
+    assert_eq!(riding.class, "125cc");
     assert_eq!(row(&m, "Driving Model"), "Race Physics");
-    let bike = row(&m, "Bike");
+    let bike = riding.name;
     assert!(["KTM", "Honda", "Kawasaki", "Suzuki", "Yamaha"].iter().any(|maker| bike.starts_with(maker)), "{bike}");
     tab_to(&mut m, r, "Rider");
     row(&m, "Gear Set");
     row(&m, "Jersey/Pants");
+}
+
+/// The Machines tab's tile named `name` (P341).
+fn tile_named(m: &Menu, name: &str) -> menu::tiles::Tile {
+    m.garage_tiles().into_iter().find(|t| t.name == name).unwrap_or_else(|| panic!("no {name} tile"))
+}
+
+/// The Machines tab's cursor onto the tile named `name` (P341): down off the Player row onto the
+/// tiles, then right along them.
+fn tile_to(m: &mut Menu, r: &mut Reader, name: &str) {
+    let on = |m: &Menu| m.page()[m.cursor(Screen::Garage)].clone();
+    if on(m).kind != menu::Kind::Tile {
+        down_to(m, r, menu::Key::Player);
+        tap(m, r, Control::Down);
+    }
+    let tiles: Vec<String> = m.page().iter().filter(|row| row.kind == menu::Kind::Tile).map(|row| row.label.clone()).collect();
+    let (here, there) = (tiles.iter().position(|t| *t == on(m).label).unwrap(), tiles.iter().position(|t| t == name).unwrap());
+    let way = if there < here { Control::Left } else { Control::Right };
+    tap_until(m, r, way, |m| m.page()[m.cursor(Screen::Garage)].label == name);
 }
 
 /// P315: the Garage's Fliers tab lists every kind on offer, MX Unleashed's skins first and then a
@@ -2172,7 +2295,6 @@ fn the_garage_rows_carry_the_originals_names() {
 /// seat's when the Garage closes. An older settings file's Fliers row becomes 1P's picks once.
 #[test]
 fn the_fliers_tab_picks_a_renamed_packs_skins_per_seat() {
-    use menu::Key;
     use roster::{Catalogue, Flier, Picks};
     let mut disc = match game_render::Disc::open_configured() {
         Ok(d) => d,
@@ -2208,39 +2330,43 @@ fn the_fliers_tab_picks_a_renamed_packs_skins_per_seat() {
     let r = &mut reader;
     main_to(&mut m, r, "Garage");
     tab_to(&mut m, r, "Machines");
-    let labels: Vec<String> = m.page().iter().map(|row| row.label.clone()).collect();
-    assert_eq!(labels, ["Player", "Bike Class", "Bike", "Paint", "Driving Model", "Handling", "Plane", "Helicopter", "Hovercraft"]);
+    // P341: the kinds are the Fliers section's tiles, their skins the tiles' liveries.
+    let fliers: Vec<String> = m.garage_tiles().into_iter().filter(|t| t.section == 1).map(|t| t.name).collect();
+    assert_eq!(fliers, ["Plane", "Helicopter", "Hovercraft"]);
     assert_eq!(m.garage_flier(), None, "on the Player row the stage shows the bike");
-    let row = |m: &Menu, i: usize| m.page().iter().find(|row| row.key == Key::Flier(i)).cloned().unwrap();
-    assert_eq!(row(&m, 0).value, "Biplane");
-    assert_eq!(row(&m, 0).choices, ["Biplane", "Biplane, Second Livery", "Red Baron", "Broken (cannot fly)"]);
-    assert_eq!(row(&m, 2).off.as_deref(), Some("openmx cannot fly a hovercraft yet"));
-    down_to(&mut m, r, Key::Flier(0));
-    tap(&mut m, r, Control::Right);
-    tap(&mut m, r, Control::Right);
-    assert_eq!(row(&m, 0).value, "Red Baron");
-    assert_eq!(row(&m, 0).note.as_deref(), Some("Some Game. Its own."));
-    tap(&mut m, r, Control::Right);
-    assert_eq!(row(&m, 0).value, "Biplane", "Broken is stepped over");
-    // P315a: the stage turns the row's pick, and its arrows step it, as left and right do.
-    assert_eq!(m.garage_flier().map(|f| f.skin.as_str()), Some("biplane"), "the stage shows the plane row's pick");
+    let skin = |m: &Menu| tile_named(m, "Plane").liveries[tile_named(m, "Plane").livery].0.clone();
+    assert_eq!(skin(&m), "Biplane");
+    let names: Vec<(String, bool)> = tile_named(&m, "Plane").liveries.into_iter().map(|(n, why)| (n, why.is_some())).collect();
+    let want = [("Biplane", false), ("Biplane, Second Livery", false), ("Red Baron", false), ("Broken", true)];
+    assert_eq!(names, want.map(|(n, w)| (n.to_string(), w)));
+    assert_eq!(tile_named(&m, "Hovercraft").locked.as_deref(), Some("openmx cannot fly a hovercraft yet"));
+    tile_to(&mut m, r, "Plane");
+    tap(&mut m, r, Control::R1);
+    tap(&mut m, r, Control::R1);
+    assert_eq!(skin(&m), "Red Baron");
+    assert_eq!(tile_named(&m, "Plane").class, "Some Game");
+    tap(&mut m, r, Control::R1);
+    assert_eq!(skin(&m), "Biplane", "Broken is stepped over");
+    // P315a: the stage turns the tile's pick, and its arrows step it, as L1 and R1 do.
+    assert_eq!(m.garage_flier().map(|f| f.skin.as_str()), Some("biplane"), "the stage shows the plane tile's pick");
     let size = (1280, 720);
-    let arrow = |m: &Menu, side: usize| m.flier_arrow_point(side, size).expect("the Fliers tab's stage has its arrows");
+    let arrow = |m: &Menu, side: usize| m.flier_arrow_point(side, size).expect("the Machines tab's stage has its arrows");
     assert!(m.click(arrow(&m, 1), size));
-    assert_eq!(row(&m, 0).value, "Biplane, Second Livery", "the right arrow steps the skin");
+    assert_eq!(skin(&m), "Biplane, Second Livery", "the right arrow steps the skin");
     assert_eq!(m.garage_flier().map(|f| f.skin.as_str()), Some("biplane2"));
     let ahead: Vec<String> = m.garage_flier_neighbours().iter().map(|f| f.skin.clone()).collect();
     assert_eq!(ahead, ["biplane3", "biplane"], "its neighbours, dressed ahead");
     assert!(m.click(arrow(&m, 0), size));
-    assert_eq!(row(&m, 0).value, "Biplane", "the left arrow steps it back");
-    tap(&mut m, r, Control::Down);
-    assert_eq!(m.garage_flier().map(|f| f.skin.as_str()), Some("kiowa"), "on the helicopter row it shows the helicopter");
+    assert_eq!(skin(&m), "Biplane", "the left arrow steps it back");
+    tap(&mut m, r, Control::Right);
+    assert_eq!(m.garage_flier().map(|f| f.skin.as_str()), Some("kiowa"), "on the helicopter's tile it shows the helicopter");
     assert!(m.click(arrow(&m, 1), size));
-    assert_eq!(row(&m, 1).value, "Kiowa, Second Livery", "and the arrows step the helicopter");
+    let heli = tile_named(&m, "Helicopter");
+    assert_eq!(heli.liveries[heli.livery].0, "Kiowa, Second Livery", "and the arrows step the helicopter");
     assert!(m.click(arrow(&m, 0), size));
-    tap(&mut m, r, Control::Up);
-    assert_eq!(m.page()[m.cursor(Screen::Garage)].key, Key::Flier(0));
     tap(&mut m, r, Control::Left);
+    assert_eq!(m.page()[m.cursor(Screen::Garage)].label, "Plane");
+    tap(&mut m, r, Control::L1);
     tap(&mut m, r, Control::Circle);
     assert!(m.take_picks_changed());
     let picked = m.picks.0[0].flier("biplane").expect("a plane picked");
@@ -2261,13 +2387,12 @@ fn the_fliers_tab_picks_a_renamed_packs_skins_per_seat() {
     assert!(!m.settings.text().contains("flier"));
 }
 
-/// P315f: L2 and R2 step the shown machine's skin on the Machines tab — the flier on a flier row,
-/// the bike's paint off them — while L1 and R1 stay the Garage's tabs, as on every page; on the
-/// other tabs L2 and R2 do nothing.
+/// P341 (was P315f): on the Garage L1 and R1 turn the lit tile's livery — a flier's skin, the
+/// bike's paint — and L2 and R2 move the tabs; on the Garage's other tabs L1 and R1 do nothing.
 #[test]
-fn l2_and_r2_step_the_machines_tabs_skin_and_l1_r1_stay_the_tabs() {
-    use menu::{GARAGE_TABS, Key};
-    use roster::{Catalogue, Picks, Row as G};
+fn l1_and_r1_turn_the_livery_and_l2_r2_move_the_garage_tabs() {
+    use menu::GARAGE_TABS;
+    use roster::{Catalogue, Picks};
     let mut disc = match game_render::Disc::open_configured() {
         Ok(d) => d,
         Err(e) => {
@@ -2282,37 +2407,37 @@ fn l2_and_r2_step_the_machines_tabs_skin_and_l1_r1_stay_the_tabs() {
     let r = &mut reader;
     main_to(&mut m, r, "Garage");
     tab_to(&mut m, r, "Machines");
-    let row = |m: &Menu, key: Key| m.page().iter().find(|row| row.key == key).cloned().unwrap().value;
-    let on = |m: &Menu| m.page()[m.cursor(Screen::Garage)].key;
+    let on = |m: &Menu| m.cursor(Screen::Garage);
 
-    // A flier row: R2 and L2 step its skin, the cursor staying put.
-    down_to(&mut m, r, Key::Flier(0));
+    // A flier's tile: R1 and L1 step its skin, the cursor staying put.
+    tile_to(&mut m, r, "Plane");
+    let at = on(&m);
     assert_eq!(m.garage_flier().map(|f| f.skin.as_str()), Some("biplane"));
-    tap(&mut m, r, Control::R2);
-    assert_eq!(m.garage_flier().map(|f| f.skin.as_str()), Some("biplane2"), "R2 steps the plane's skin");
-    assert_eq!(row(&m, Key::Flier(0)), "Biplane, Second Livery");
-    assert_eq!(on(&m), Key::Flier(0));
-    tap(&mut m, r, Control::L2);
-    assert_eq!(m.garage_flier().map(|f| f.skin.as_str()), Some("biplane"), "L2 steps it back");
-
-    // Off the flier rows the stage shows the bike, and they step its paint, as the arrows do.
-    down_to(&mut m, r, Key::Garage(G::Class));
-    let paint = row(&m, Key::Garage(G::Livery));
-    tap(&mut m, r, Control::R2);
-    assert_ne!(row(&m, Key::Garage(G::Livery)), paint, "R2 steps the bike's paint");
-    assert_eq!(row(&m, Key::Garage(G::Class)), "125cc", "and not the row the cursor is on");
-    tap(&mut m, r, Control::L2);
-    assert_eq!(row(&m, Key::Garage(G::Livery)), paint);
-
-    // L1 and R1 are still the tabs, and L2 and R2 are nothing on the other tabs.
     tap(&mut m, r, Control::R1);
+    assert_eq!(m.garage_flier().map(|f| f.skin.as_str()), Some("biplane2"), "R1 steps the plane's skin");
+    assert_eq!(on(&m), at);
+    tap(&mut m, r, Control::L1);
+    assert_eq!(m.garage_flier().map(|f| f.skin.as_str()), Some("biplane"), "L1 steps it back");
+
+    // The ridden bike's tile: they step its paint, as the arrows do.
+    let riding = m.garage_tiles().into_iter().find(|t| t.riding).unwrap();
+    tile_to(&mut m, r, &riding.name);
+    let paint = m.garage(0).unwrap().pick.bike.clone();
+    tap(&mut m, r, Control::R1);
+    assert_ne!(m.garage(0).unwrap().pick.bike, paint, "R1 steps the bike's paint");
+    assert!(m.garage_tiles().into_iter().find(|t| t.name == riding.name).unwrap().riding, "the same bike");
+    tap(&mut m, r, Control::L1);
+    assert_eq!(m.garage(0).unwrap().pick.bike, paint);
+
+    // L2 and R2 are the tabs, and L1 and R1 are nothing on the other tabs.
+    tap(&mut m, r, Control::R2);
     assert_eq!(GARAGE_TABS[m.tab(Screen::Garage)], "Gear");
     let gear = m.page();
-    tap(&mut m, r, Control::R2);
-    tap(&mut m, r, Control::L2);
-    assert_eq!(m.page(), gear, "L2 and R2 change nothing on the Gear tab");
-    assert_eq!(GARAGE_TABS[m.tab(Screen::Garage)], "Gear");
+    tap(&mut m, r, Control::R1);
     tap(&mut m, r, Control::L1);
+    assert_eq!(m.page(), gear, "L1 and R1 change nothing on the Gear tab");
+    assert_eq!(GARAGE_TABS[m.tab(Screen::Garage)], "Gear");
+    tap(&mut m, r, Control::L2);
     assert_eq!(GARAGE_TABS[m.tab(Screen::Garage)], "Machines");
 }
 
@@ -2349,44 +2474,35 @@ fn the_machine_picker_lists_pack_bikes_and_round_trips_garage_txt() {
     let r = &mut reader;
     main_to(&mut m, r, "Garage");
     tab_to(&mut m, r, "Machines");
-    let labels: Vec<String> = m.page().iter().map(|row| row.label.clone()).collect();
-    assert_eq!(labels, ["Player", "Bike Class", "Bike", "Paint", "Driving Model", "Handling", "Plane", "Helicopter", "Quad"]);
-    let row = |m: &Menu, key: Key| m.page().iter().find(|row| row.key == key).cloned().unwrap();
-    let class = row(&m, Key::Garage(G::Class));
-    assert_eq!(class.value, "125cc");
-    assert_eq!(class.choices.last().map(String::as_str), Some("450cc (cannot ride)"), "{:?}", class.choices);
-    assert_eq!(class.choices[class.now.unwrap()], "125cc");
-    assert_eq!(row(&m, Key::Garage(G::Model)).note.as_deref(), Some("MX Unleashed's own."));
-    let quad = row(&m, Key::Machine(0));
-    assert_eq!((quad.value.as_str(), quad.off.as_deref()), ("Test quads", Some("openmx cannot ride a quad yet")));
-    assert_eq!(quad.note.as_deref(), Some("Test Game"));
+    // P341: the pack's bikes are greyed tiles among the disc's, by class and game; so is its quad.
+    let t250 = tile_named(&m, "Test 250");
+    assert_eq!((t250.section, t250.class.as_str(), t250.locked.as_deref()), (0, "Test Game 250cc", Some(ride)));
+    let quad = tile_named(&m, "Quad");
+    assert_eq!((quad.section, quad.locked.as_deref(), quad.class.as_str()), (2, Some("openmx cannot ride a quad yet"), "Test Game"));
+    let riding = m.garage_tiles().into_iter().find(|t| t.riding).expect("the ridden bike's tile");
+    assert_eq!(riding.class, "125cc");
 
-    // The stage shows the bike off the flier rows, and its arrows step the paint.
-    down_to(&mut m, r, Key::Garage(G::Livery));
+    // The stage shows the bike on its tile, and its arrows step the paint.
+    tile_to(&mut m, r, &riding.name);
     assert_eq!(m.garage_flier(), None);
     let size = (1280, 720);
-    let paint = row(&m, Key::Garage(G::Livery)).value;
+    let paint = m.garage(0).unwrap().pick.bike.clone();
     assert!(m.click(m.flier_arrow_point(1, size).expect("the stage's arrows"), size));
-    assert_ne!(row(&m, Key::Garage(G::Livery)).value, paint, "the right arrow steps the paint");
+    assert_ne!(m.garage(0).unwrap().pick.bike, paint, "the right arrow steps the paint");
     assert_eq!(m.garage(0).unwrap().pick.bike, "125sx_one");
 
-    // 250cc lists the pack's 250 after the disc's, and left and right never land on it.
-    down_to(&mut m, r, Key::Garage(G::Class));
-    tap(&mut m, r, Control::Right);
-    assert_eq!(row(&m, Key::Garage(G::Class)).value, "250cc");
-    let bike = row(&m, Key::Garage(G::Model));
-    assert_eq!(bike.choices.last().map(String::as_str), Some("Test 250 (cannot ride)"));
-    assert!(!bike.choices.iter().any(|c| c.starts_with("Test 450")), "only this class's");
-    assert_eq!(bike.note.as_deref(), Some(format!("MX Unleashed's own. Also Test Game's 250cc: {ride}.").as_str()));
-    down_to(&mut m, r, Key::Garage(G::Model));
-    for _ in 0..bike.choices.len() {
-        tap(&mut m, r, Control::Right);
-        assert!(!row(&m, Key::Garage(G::Model)).value.starts_with("Test"), "a pack's bike is stepped over");
-    }
+    // Cross on a pack's bike picks nothing; on a disc 250 it is ridden.
+    tile_to(&mut m, r, "Test 250");
+    tap(&mut m, r, Control::Cross);
+    assert_eq!(m.garage(0).unwrap().pick.bike, "125sx_one", "a pack's bike is not picked");
+    let disc250 = m.garage_tiles().into_iter().find(|t| t.class == "250cc" && t.locked.is_none()).expect("a disc 250");
+    tile_to(&mut m, r, &disc250.name);
+    tap(&mut m, r, Control::Cross);
+    assert!(tile_named(&m, &disc250.name).riding);
     down_to(&mut m, r, Key::Garage(G::Tier));
     tap(&mut m, r, Control::Right);
-    down_to(&mut m, r, Key::Flier(0));
-    tap(&mut m, r, Control::Right);
+    tile_to(&mut m, r, "Plane");
+    tap(&mut m, r, Control::R1);
     assert_eq!(m.garage_flier().map(|f| f.skin.as_str()), Some("biplane2"));
     tap(&mut m, r, Control::Circle);
     assert!(m.take_picks_changed());
@@ -2409,7 +2525,7 @@ fn the_machine_picker_lists_pack_bikes_and_round_trips_garage_txt() {
 /// read back, and the pause's switch row offers the quad, last, to a player the shell says has one.
 #[test]
 fn the_quad_row_picks_a_handling_file_and_the_pause_offers_it() {
-    use menu::{Key, Machine};
+    use menu::Machine;
     use roster::{Catalogue, PackMachine, Picks};
     let mut disc = match game_render::Disc::open_configured() {
         Ok(d) => d,
@@ -2437,23 +2553,23 @@ fn the_quad_row_picks_a_handling_file_and_the_pause_offers_it() {
     let r = &mut reader;
     main_to(&mut m, r, "Garage");
     tab_to(&mut m, r, "Machines");
-    let row = |m: &Menu| m.page().iter().find(|row| row.key == Key::Machine(0)).cloned().unwrap();
+    // P341: the Quad tile's liveries are Off and the files, L1 and R1 the pick.
+    let row = |m: &Menu| m.page().iter().find(|row| row.label == "Quad").cloned().unwrap();
     let q = row(&m);
-    assert_eq!(q.label, "Quad");
     assert_eq!(q.choices, ["Off", "Race 250 P", "Pro 250 A Sport"]);
     assert_eq!((q.value.as_str(), q.off.as_deref()), ("Off", None));
-    down_to(&mut m, r, Key::Machine(0));
-    tap(&mut m, r, Control::Right);
+    tile_to(&mut m, r, "Quad");
+    tap(&mut m, r, Control::R1);
     assert_eq!(m.settings.atv, "atv_Race250P");
     assert_eq!(row(&m).value, "Race 250 P");
-    tap(&mut m, r, Control::Right);
+    tap(&mut m, r, Control::R1);
     assert_eq!((m.settings.atv.as_str(), row(&m).value.as_str()), ("atv_s_Pro250A", "Pro 250 A Sport"));
     assert!(m.settings.text().contains("atv = atv_s_Pro250A\n"), "{}", m.settings.text());
     let dir = scratch("md37d-quad");
     menu::save(&dir, &m.settings, &m.controls).unwrap();
     assert_eq!(menu::load(&dir).0.atv, "atv_s_Pro250A");
     std::fs::remove_dir_all(dir).ok();
-    tap(&mut m, r, Control::Right);
+    tap(&mut m, r, Control::R1);
     assert!(m.settings.atv.is_empty(), "round to Off");
     assert!(Settings::parse("atv = off\n").atv.is_empty());
 
@@ -2590,24 +2706,27 @@ fn a_picked_bike_and_rider_reach_the_ride_that_starts_per_seat() {
     main_to(&mut m, r, "Garage");
     assert_eq!(m.screen(), Some(Screen::Garage));
     assert_eq!(m.page()[0].value, "1P");
-    // 1P: the Bike tab's class right (125 to 250) and Tier to Pro, then the Rider tab's next rider.
+    // 1P: a 250's tile (P341) and Tier to Pro, then the Rider tab's next rider.
     tab_to(&mut m, r, "Machines");
-    down_to(&mut m, r, Key::Garage(G::Class));
-    tap(&mut m, r, Control::Right);
+    let of_class = |m: &Menu, class: &str| m.garage_tiles().into_iter().find(|t| t.class == class && t.locked.is_none()).unwrap().name;
+    let t250 = of_class(&m, "250cc");
+    tile_to(&mut m, r, &t250);
+    tap(&mut m, r, Control::Cross);
     down_to(&mut m, r, Key::Garage(G::Tier));
     tap(&mut m, r, Control::Right);
     tab_to(&mut m, r, "Rider");
     down_to(&mut m, r, Key::Garage(G::Rider));
     tap(&mut m, r, Control::Right);
-    // 2P: class left (125 to 50), and the rider two along in its second colours. There is no Tuning
+    // 2P: a 50's tile, and the rider two along in its second colours. There is no Tuning
     // row: a player always rides the P files, the AI riders' A ones never.
     tab_to(&mut m, r, "Machines");
     down_to(&mut m, r, Key::Player);
     tap(&mut m, r, Control::Right);
     assert_eq!(m.page()[0].value, "2P");
     assert!(!m.page().iter().any(|row| row.label == "Tuning"), "the Bike tab has no Tuning row");
-    down_to(&mut m, r, Key::Garage(G::Class));
-    tap(&mut m, r, Control::Left);
+    let t50 = of_class(&m, "50cc");
+    tile_to(&mut m, r, &t50);
+    tap(&mut m, r, Control::Cross);
     tab_to(&mut m, r, "Rider");
     assert_eq!(m.page()[0].value, "2P", "the Player row is every tab's");
     down_to(&mut m, r, Key::Garage(G::Rider));
@@ -5073,7 +5192,8 @@ fn the_mods_page_lists_music_packs_beside_the_track_packs() {
 }
 
 /// P118: L1 and R1 walk Settings' six tabs (P128's Graphics third; P126's Original a page of Ride's
-/// since P179) and the Garage's three round from either end, each tab opening on its first row.
+/// since P179), and L2 and R2 the Garage's three (P341), round from either end, each tab opening on
+/// its first row.
 #[test]
 fn l1_and_r1_walk_every_tab_round_from_either_end() {
     use menu::Key;
@@ -5106,11 +5226,11 @@ fn l1_and_r1_walk_every_tab_round_from_either_end() {
     assert_eq!(menu::GARAGE_TABS, ["Rider", "Machines", "Gear"]);
     for i in [0, 1, 2, 0] {
         assert_eq!(here(&m, Screen::Garage), (i, Key::Player));
-        tap(&mut m, &mut r, Control::R1);
+        tap(&mut m, &mut r, Control::R2);
     }
     assert_eq!(m.tab(Screen::Garage), 1);
-    tap(&mut m, &mut r, Control::L1);
-    tap(&mut m, &mut r, Control::L1);
+    tap(&mut m, &mut r, Control::L2);
+    tap(&mut m, &mut r, Control::L2);
     assert_eq!(here(&m, Screen::Garage), (2, Key::Player), "L1 from Rider is Gear");
 }
 
@@ -5429,7 +5549,7 @@ fn the_pauses_rows_are_trimmed_and_main_menu_sits_above_quit() {
     m.pause();
     let rows = m.pause_rows();
     assert_eq!(rows[0..2], ["Resume", "Restart"]);
-    assert!(rows[2].starts_with("Switch To Machine"), "{rows:?}");
+    assert_eq!(rows[2], "Garage");
     assert_eq!(rows[3..], ["Settings", "Controllers", "Game Modifiers", "Tricks", "Open to Online", "Main Menu", "Quit"]);
     // The cursor walks exactly those rows: Up from Resume is Quit.
     tap(&mut m, &mut r, Control::Up);

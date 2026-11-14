@@ -645,9 +645,47 @@ pub fn rect(menu: &Menu, size: (usize, usize)) -> Option<[usize; 4]> {
     Some([x.max(0.0) as usize, y.max(0.0) as usize, w.max(0.0) as usize, h.max(0.0) as usize])
 }
 
-/// The pick the Garage shows: the seat its Player row is on.
-pub fn shown_pick(menu: &Menu) -> Option<&roster::Pick> {
-    menu.garage_pick()
+/// The pick the Garage shows: the seat its Player row is on, on the lit bike tile's bike (P341).
+pub fn shown_pick(menu: &Menu) -> Option<roster::Pick> {
+    menu.garage_shown()
+}
+
+/// A machine tile's picture (P341), as [`Menu::tile_pictures`] lists them.
+pub use crate::menu::tiles::Picture;
+
+impl Stage {
+    /// `picture` drawn alone, standing as a shot's stage starts, into a `w` by `h` texture clear
+    /// where nothing is: a tile's picture (P341). None while it dresses; one that cannot be
+    /// dressed comes back empty, so it is not asked for again.
+    pub fn bake(&mut self, picture: &Picture, w: usize, h: usize) -> Option<game_render::pst::Texture> {
+        let shown = match picture {
+            Picture::Bike(pick) => Shown::Ride(shown_of(pick)),
+            Picture::Flier(flier) => Shown::Flier(flier.clone()),
+        };
+        self.show(shown.clone());
+        if self.pick.as_ref() != Some(&shown) {
+            return None;
+        }
+        let empty = game_render::pst::Texture { width: 1, height: 1, rgba: vec![0; 4] };
+        let Some(camera) = self.camera(w, h) else { return Some(empty) };
+        let Some(d) = self.dressed.as_ref() else { return Some(empty) };
+        let mut stage = Frame::new(w, h, [0, 0, 0]);
+        let vp = camera.view_projection(w, h);
+        let light = Stage::light();
+        for (model, at, _) in self.actors(Stage::turn(0)) {
+            if let Some(loaded) = d.assets.models.get(model) {
+                draw_model(&mut stage, loaded, &d.assets, at, vp, camera.eye, &light);
+            }
+        }
+        let mut rgba = vec![0u8; w * h * 4];
+        for i in 0..w * h {
+            if stage.depth[i] > 0.0 {
+                rgba[i * 4..i * 4 + 3].copy_from_slice(&stage.color[i * 3..i * 3 + 3]);
+                rgba[i * 4 + 3] = 255;
+            }
+        }
+        Some(game_render::pst::Texture { width: w, height: h, rgba })
+    }
 }
 
 /// The flier the Garage shows on its Fliers tab (P315a), in place of the pick's bike and rider.

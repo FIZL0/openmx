@@ -162,7 +162,8 @@ fn tap_seat(
     acts
 }
 
-/// `seat`'s pause, Down twice to the switch row, which offers `offered`, and Cross on it.
+/// `seat`'s pause, Down twice to the Garage row and Cross on it (P341), over to the tile of
+/// `offered`, and Cross on that.
 #[allow(clippy::too_many_arguments)]
 fn switch_from_the_pause(
     m: &mut Menu,
@@ -176,14 +177,22 @@ fn switch_from_the_pause(
     tap_seat(m, readers, garages, sims, world, seat, Control::Start);
     // the seat's own pause (P84), in its own view
     assert_eq!(m.view(seat).screen(), Some(Screen::Pause));
-    assert_eq!(m.view(seat).pause_rows()[2], format!("Switch To Machine: {}", offered.label()));
+    assert_eq!(m.view(seat).pause_rows()[2], "Garage");
     tap_seat(m, readers, garages, sims, world, seat, Control::Down);
     tap_seat(m, readers, garages, sims, world, seat, Control::Down);
-    let mut acts = tap_seat(m, readers, garages, sims, world, seat, Control::Cross);
-    // the first two seats' Cross into a flier opens its skin picker, and Cross on that switches (P315g)
-    if m.view(seat).flier_picker().is_some() {
-        acts = tap_seat(m, readers, garages, sims, world, seat, Control::Cross);
+    tap_seat(m, readers, garages, sims, world, seat, Control::Cross);
+    assert_eq!(m.view(seat).screen(), Some(Screen::PauseGarage));
+    let on = |m: &Menu| m.view(seat).pause_tile().is_some_and(|t| matches!(t.of, menu::tiles::TileOf::Switch(x) if x == offered));
+    for way in [Control::Right, Control::Left] {
+        for _ in 0..Machine::SWITCH.len() {
+            if on(m) {
+                break;
+            }
+            tap_seat(m, readers, garages, sims, world, seat, way);
+        }
     }
+    assert!(on(m), "seat {seat}: no {offered:?} tile in {:?}", m.view(seat).pause_tiles().iter().map(|t| &t.name).collect::<Vec<_>>());
+    let acts = tap_seat(m, readers, garages, sims, world, seat, Control::Cross);
     assert!(acts.contains(&Act::Switch(seat, offered)), "seat {seat}: {acts:?}");
     assert!(m.riding());
 }
