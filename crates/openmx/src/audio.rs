@@ -3766,6 +3766,9 @@ pub struct SeatFrame {
     pub heli: Option<HeliFrame>,
     /// In a car (S247): what its engine voice reads.
     pub car: Option<CarFrame>,
+    /// On MX vs. ATV's quad (MD136): what its engine note reads, the quad's own levers, ground and
+    /// speed, as the bike's [`SeatFrame::hands`] are the bike's.
+    pub atv: Option<Hands>,
     /// What the bike's wreck clank reads (P144).
     pub bike: BikeCrash,
     /// The plane's wheels touched down this tick (P146): the body's speed then.
@@ -3793,6 +3796,10 @@ pub struct SeatSound {
     heli: HeliNote,
     /// A driven car's engine voice (S247).
     pub car: CarNote,
+    /// MX vs. ATV's quad's engine note (MD136), a machine of its own beside the bike's.
+    pub atv_engine: Engine,
+    /// The quad's own `vehicle.aud` off its pack (MD136), else the bike's [`SeatSound::bike`].
+    own_atv: Option<Arc<BikeSounds>>,
     pub clank: WreckClank,
     /// The bike's `[Wreck]` clank (P144), an emitter of its own.
     pub bike_clank: WreckClank,
@@ -3849,6 +3856,8 @@ impl SeatSound {
             plane: PlaneNote::default(),
             heli: HeliNote::default(),
             car: CarNote::default(),
+            atv_engine: Engine::new(seed.wrapping_mul(17).wrapping_add(3)),
+            own_atv: None,
             clank: WreckClank::default(),
             bike_clank: WreckClank::default(),
             tires: TireTouchdown::default(),
@@ -3872,6 +3881,7 @@ impl SeatSound {
         out.extend(&self.plane.voices);
         out.extend(self.heli.voice());
         out.extend(self.car.voices());
+        out.extend(self.atv_engine.voices());
         out.extend(self.tires.voice());
         out.extend(self.edge.voices());
         out.extend(self.drive_on.voice());
@@ -3960,6 +3970,16 @@ impl Sound {
         s.own = own;
     }
 
+    /// Rider `seat`'s quad's own engine sounds (MD136), from here on: its note is stopped, so the next
+    /// tick on the quad starts it at the idle off the new lists.
+    pub fn set_own_atv(&mut self, seat: usize, own: Option<Arc<BikeSounds>>) {
+        let Some(s) = self.seats.get_mut(seat) else { return };
+        if let Ok(mut m) = self.mixer.lock() {
+            s.atv_engine.silence(&mut m);
+        }
+        s.own_atv = own;
+    }
+
     /// **A tick's collision sounds** (F27a): the material table's update over the frame's queue
     /// ([`game_sim::material_hit::play`], which empties it), each sound played over the last.
     pub fn hits(&mut self, queue: &mut Vec<game_sim::material_hit::Hit>) {
@@ -4030,6 +4050,19 @@ impl Sound {
                 continue;
             }
             s.car.silence(m);
+            // MX vs. ATV's quad (MD136): its `vehicle.aud`, which is the bike's kind of file, on the
+            // bike's engine note fed the quad's own hands, and nothing else of the seat's.
+            if let Some(q) = &f.atv {
+                s.engine.silence(m);
+                s.edge.stop_rumble(m);
+                s.drive_on.stop(m);
+                s.plane.silence(m);
+                s.heli.silence(m);
+                let sounds = s.own_atv.clone().unwrap_or_else(|| s.bike.clone());
+                s.atv_engine.update(q, dt, m, &sounds);
+                continue;
+            }
+            s.atv_engine.silence(m);
             // The Kiowa (V114): its one loop on the filtered collective, stopped while wrecked, and
             // its wreck clank on the plane's emitter with the helicopter's list. It has no touchdown.
             if let Some(heli) = &f.heli {

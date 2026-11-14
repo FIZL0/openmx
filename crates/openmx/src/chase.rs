@@ -195,6 +195,30 @@ pub fn flier_presets(bytes: &[u8], aspect: game_sim::camera::Aspect, viewport: g
     }
 }
 
+/// The quad's second camera file in MX vs. ATV's camera archive (MD136), beside
+/// `Cam\FC_ATVDefault.pb`: the same sections with a few numbers of its own (Race Camera 1 is "Race
+/// Cam 1" there, 13.0 ft and AngleX 43 against the `.pb`'s 14.5 and 42).
+pub const ATV_CAMERA_INI: &str = "Cam\\FC_ATV.ini";
+
+/// The quad's follow cameras for one screen (MD136): `Cam\FC_ATVDefault.pb`'s (`pb`, the file
+/// SLUS-21104 picks by the quad's kind, [`mod_presets`]), read as [`flier_presets`] reads a flier's;
+/// where there is no `.pb` or it holds none for the screen, [`ATV_CAMERA_INI`]'s (`ini`). The
+/// presets and the file they came from; none and `""` where neither has any.
+pub fn atv_presets(
+    pb: Option<&[u8]>,
+    ini: Option<&[u8]>,
+    aspect: game_sim::camera::Aspect,
+    viewport: game_sim::camera::Viewport,
+) -> (Vec<game_sim::camera::Preset>, &'static str) {
+    for (bytes, file) in [(pb, mod_presets(ModMachine::Atv)), (ini, ATV_CAMERA_INI)] {
+        let presets = bytes.map(|b| flier_presets(b, aspect, viewport)).unwrap_or_default();
+        if !presets.is_empty() {
+            return (presets, file);
+        }
+    }
+    (Vec::new(), "")
+}
+
 /// A car's target block (S149e, S246), as the original's car fills it once a frame in its post
 /// listener after the measure (`research/oracle.txt`, S246): the rows are the measure's, the velocity
 /// the body's, the lean word the measure's world rates (the camera reads the yaw), the flag "no tire
