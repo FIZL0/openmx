@@ -4169,6 +4169,9 @@ pub struct Recorded {
     pub riding: Vec<[Vf; 2]>,
     pub wreck: Vec<[Vf; 2]>,
     pub rays: Rays,
+    /// MD133a's: the wreck body's lists, parts and trigger segments ([`Ride::build_wreck`],
+    /// [`Ride::shape_trigger`]).
+    pub parts: WreckParts,
 }
 
 impl Recorded {
@@ -4714,34 +4717,112 @@ impl<R: Moto + Default> Ride<R> {
     }
 }
 
-/// The wreck body's calls on an MX Unleashed world: the wreck rays' load ([`Call::PartLoad`] of
-/// [`Part::Wreck`]) answered with `file`'s segments, every other call handed to `rest`.
-struct WreckLoad<'a, R> {
-    file: &'a crate::track::Rays,
+/// The flag byte a part's constructor leaves (bits 1 and 2), before its flags call ([`part_flags`]).
+pub const PART_MADE_FLAGS: u8 = 0x06;
+
+/// **A part's flags call** (MD133a): the flags word's bits 8, 2 and 4 set or clear the flag byte's
+/// bits 3, 1 and 2, in that order; its other bits are kept. The trigger probe's word 2 and the wreck
+/// rays' 3 both leave bit 1 alone of the three.
+pub fn part_flags(byte: u8, word: u32) -> u8 {
+    let bit = |w: u32, b: u8| if word & w != 0 { b } else { 0 };
+    let byte = (byte & !0x08) | bit(8, 0x08);
+    let byte = (byte & !0x02) | bit(2, 0x02);
+    (byte & !0x04) | bit(4, 0x04)
+}
+
+/// One of the wreck body's two ray-probe parts beyond its lists (MD133a), as the quad's init leaves
+/// it: made, its flag byte ([`PART_MADE_FLAGS`] through [`part_flags`]), hung in the scene tree under
+/// the quad's node, and on the quad's scene node (the node whose frame it stands at: the wreck rays'
+/// load and the trigger probe's segments name it).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Made {
+    pub made: bool,
+    pub flags: u8,
+    pub hung: bool,
+    pub on_node: bool,
+}
+
+/// **The wreck body as [`Ride`] keeps it** (MD133a): the five collidables' lists
+/// ([`build_wreck_body`]), the trigger probe's and the wreck rays' own words ([`Made`]; their boxes
+/// are [`crate::atv_moto::Collidables::states`]' two slots), and the trigger probe's segments
+/// ([`trigger_segments`], set once when the quad's nodes are attached; `None` with no trigger probe).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WreckParts {
+    pub body: WreckBody,
+    pub trigger: Made,
+    pub wreck: Made,
+    pub segments: Option<[[Vf; 2]; 4]>,
+}
+
+/// A `.col` the wreck body's load asks for by name ([`WRECK_FILE`]), parsed; `None`, not there.
+pub type ReadRays<'a> = dyn FnMut(&str) -> Option<crate::track::Rays> + 'a;
+
+/// The wreck body's calls on an MX Unleashed world (MD133a): each part made (its box state cleared,
+/// its flag byte the constructor's), flagged ([`part_flags`]) and hung; the wreck rays loaded from
+/// [`WRECK_FILE`] asked of `read` (their segments, and their box: the file's tree's root box, else
+/// the first segment's ends), then readied (the part's vt `+0xc0`, which is its own vt `+0xc8`: stood
+/// at its node's frame, `node`, [`crate::atv_sync::stand`]). Every other call is handed to `rest`.
+struct WreckLoad<'a, 'r, R> {
+    read: &'a mut ReadRays<'r>,
     loaded: Option<Vec<[Vf; 2]>>,
+    parts: &'a mut WreckParts,
+    states: &'a mut [crate::atv_sync::Collidable; 5],
+    node: [Vf; 4],
     rest: &'a mut R,
 }
 
-impl<R: Moto> Moto for WreckLoad<'_, R> {
+impl<R> WreckLoad<'_, '_, R> {
+    fn made(&mut self, p: Part) -> Option<&mut Made> {
+        match p {
+            Part::Trigger => Some(&mut self.parts.trigger),
+            Part::Wreck => Some(&mut self.parts.wreck),
+            _ => None,
+        }
+    }
+}
+
+impl<R: Moto> Moto for WreckLoad<'_, '_, R> {
     fn call(&mut self, c: Call, q: &mut Quad, body: &mut Body) {
+        use crate::atv_sync::{Collidable, Kind, slot};
         match c {
-            Call::PartLoad(Part::Wreck) => self.loaded = Some(crate::flight_search::Rays::of(self.file).pairs()),
+            Call::PartMade(p @ (Part::Trigger | Part::Wreck)) => {
+                *self.made(p).expect("a wreck part") = Made { made: true, flags: PART_MADE_FLAGS, ..Made::default() };
+                self.states[slot(p)] = Collidable::default();
+            }
+            Call::PartFlags(p @ (Part::Trigger | Part::Wreck), word) => {
+                let m = self.made(p).expect("a wreck part");
+                m.flags = part_flags(m.flags, word);
+            }
+            Call::PartHung(p @ (Part::Trigger | Part::Wreck)) => self.made(p).expect("a wreck part").hung = true,
+            Call::PartLoad(Part::Wreck) => {
+                self.parts.wreck.on_node = true;
+                let Some(file) = (self.read)(WRECK_FILE) else { return };
+                let rays = crate::flight_search::Rays::of(&file);
+                let xyz = |v: crate::track::V3| Vf::new(v[0].0, v[1].0, v[2].0, 0.0);
+                let tree = file.nodes.first().map(|n| (xyz(n.centre), xyz(n.half_extent)));
+                let bound = rays.segments.first().map_or((Vf::ZERO, Vf::ZERO), |s| (s.from, s.to));
+                self.states[slot(Part::Wreck)].kind = Kind::Rays { tree, bound };
+                self.loaded = Some(rays.pairs());
+            }
+            Call::PartReady(Part::Wreck) => crate::atv_sync::stand(&mut self.states[slot(Part::Wreck)], &self.node),
             c => self.rest.call(c, q, body),
         }
     }
 }
 
 impl<R: Moto + Default> Ride<R> {
-    /// **The wreck body built** (MD123a, [`build_wreck_body`]) for the collision record: the wreck
-    /// rays loaded from `file` (the quad's [`WRECK_FILE`], parsed with
-    /// [`crate::track::Rays::parse`]) into [`Recorded::wreck`], and the record's rays left on the
-    /// riding ones with the wreck rays' handle (`wreck`) to swap to ([`Ride::swap`]). The other calls
-    /// (the two parts made, flagged, readied and hung) go to `rest`. Nothing is done without a record.
-    #[allow(clippy::too_many_arguments)] // build_wreck_body's inputs and the file
+    /// **The wreck body built** (MD123a, [`build_wreck_body`]; MD133a its parts) for the collision
+    /// record: the parts' calls answered as the init's ([`Made`], the wreck rays' box stood at the
+    /// quad's scene node's frame, the node brought up to date first), the wreck rays asked of `read` by
+    /// [`WRECK_FILE`] into [`Recorded::wreck`], and the record's rays left on the riding ones with the
+    /// wreck rays' handle (`wreck`) to swap to ([`Ride::swap`]). The lists and the parts' words are
+    /// kept in [`Recorded::parts`] (`w` is the lists before; the riding rays' handle is its
+    /// [`WreckBody::riding`]'s). Nothing is done without a record.
+    #[allow(clippy::too_many_arguments)] // build_wreck_body's inputs and the reader
     pub fn build_wreck(
         &mut self,
-        w: &mut WreckBody,
-        file: &crate::track::Rays,
+        w: &WreckBody,
+        read: &mut ReadRays<'_>,
         trigger: u32,
         wreck: u32,
         actor: u32,
@@ -4749,14 +4830,41 @@ impl<R: Moto + Default> Ride<R> {
     ) {
         let Some(r) = self.recorded.as_mut() else { return };
         let mut view = self.body.view();
-        let mut m = WreckLoad { file, loaded: None, rest: &mut self.rest };
-        build_wreck_body(w, trigger, wreck, actor, category, &mut self.q, &mut view, &mut m);
-        if let Some(rays) = m.loaded {
+        let mut scene = self.bike.parts.scene;
+        scene.update(0);
+        let mut m = WreckLoad {
+            read,
+            loaded: None,
+            parts: &mut r.parts,
+            states: &mut self.bike.parts.collidables.states,
+            node: scene.nodes[0].world,
+            rest: &mut self.rest,
+        };
+        let mut body = w.clone();
+        build_wreck_body(&mut body, trigger, wreck, actor, category, &mut self.q, &mut view, &mut m);
+        let loaded = m.loaded.take();
+        r.parts.body = body;
+        if let Some(rays) = loaded {
             r.wreck = rays;
         }
-        let riding = w.riding_kept;
-        r.rays = Rays { active: riding, active_too: riding, record: riding, wreck: w.wreck.handle, riding };
+        let riding = r.parts.body.riding_kept;
+        r.rays = Rays { active: riding, active_too: riding, record: riding, wreck: r.parts.body.wreck.handle, riding };
         self.body.set_view(&view);
+    }
+
+    /// **The trigger probe shaped** (MD133a, the quad's node attach's last call, vt `+0x474`): with a
+    /// trigger probe made, its four segments off the wheels ([`trigger_segments`]) kept in
+    /// [`WreckParts::segments`], and the probe put on the quad's scene node. Nothing without a record.
+    pub fn shape_trigger(&mut self, tires: &TireSetup) {
+        let Some(r) = self.recorded.as_mut() else { return };
+        r.parts.segments = trigger_segments(tires, r.parts.trigger.made);
+        r.parts.trigger.on_node |= r.parts.segments.is_some();
+    }
+
+    /// The trigger probe's segments ([`Ride::shape_trigger`]), which the sweep on an MX Unleashed world
+    /// takes ([`OnWorld`]); `None` with no record or no trigger probe.
+    pub fn trigger_segments(&self) -> Option<[[Vf; 2]; 4]> {
+        self.recorded.as_ref().and_then(|r| r.parts.segments)
     }
 }
 
@@ -5039,12 +5147,14 @@ impl<R: Moto + Default> Ride<R> {
     ///   `CheckForHighSpeedCollisions` say, rests and damping of one, a body, the terrain, the
     ///   near-field list, one contact a riding ray, and the two probes; the held list's body is the
     ///   ride's.
-    /// - The riding rays are `riding`'s (the bike's `m.col`, a ray probe), the wreck body is built on
-    ///   `wreck` ([`WRECK_FILE`], [`Ride::build_wreck`]).
+    /// - The riding rays are `riding`'s (the bike's `m.col`, a ray probe), the wreck body is built
+    ///   with its parts ([`Ride::build_wreck`]), the wreck rays' file asked of `read` by its name
+    ///   ([`WRECK_FILE`]) as the init's load asks for it, and the trigger probe shaped on the loaded
+    ///   wheels ([`Ride::shape_trigger`]).
     /// - The tail has the vehicle state's mode [`SPAWN_VEHICLE_MODE`] and the stunt speed
     ///   [`SPAWN_STUNT_SPEED`], every surface no hazard; the wreck the `.phy`'s `MaxWreckTime` and the
     ///   struck class [`SPAWN_STRUCK_CLASS`].
-    pub fn rig(&mut self, load: &Load, riding: &crate::track::Rays, wreck: &crate::track::Rays) {
+    pub fn rig_on(&mut self, load: &Load, riding: &crate::track::Rays, read: &mut ReadRays<'_>) {
         use crate::handling::record;
         let riding = crate::flight_search::Rays::of(riding).pairs();
         let r = &load.part.record;
@@ -5089,9 +5199,11 @@ impl<R: Moto + Default> Ride<R> {
             riding,
             wreck: Vec::new(),
             rays: Rays { active: RIDING_RAYS, active_too: RIDING_RAYS, record: RIDING_RAYS, wreck: RIDING_RAYS, riding: RIDING_RAYS },
+            parts: WreckParts::default(),
         });
-        let mut body = WreckBody { riding: Col::made(RIDING_RAYS), ..WreckBody::default() };
-        self.build_wreck(&mut body, wreck, TRIGGER_PROBE, WRECK_RAYS, QUAD_ACTOR, |_| 0);
+        let body = WreckBody { riding: Col::made(RIDING_RAYS), ..WreckBody::default() };
+        self.build_wreck(&body, read, TRIGGER_PROBE, WRECK_RAYS, QUAD_ACTOR, |_| 0);
+        self.shape_trigger(&load.tires);
         let tail = Tail { vehicle_state: Some(SPAWN_VEHICLE_MODE), stunt_speed: F(SPAWN_STUNT_SPEED), ..Tail::default() };
         self.tailed = Some(Tailed { tail, ..Tailed::default() });
         self.wrecked = Some(Wrecked {
@@ -5109,5 +5221,10 @@ impl<R: Moto + Default> Ride<R> {
             crossup: F(SPAWN_CROSSUP),
             ..Wrecked::default()
         });
+    }
+
+    /// [`Ride::rig_on`] with the wreck rays' file already read: `wreck` answers [`WRECK_FILE`].
+    pub fn rig(&mut self, load: &Load, riding: &crate::track::Rays, wreck: &crate::track::Rays) {
+        self.rig_on(load, riding, &mut |name: &str| (name == WRECK_FILE).then(|| wreck.clone()));
     }
 }

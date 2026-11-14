@@ -3373,9 +3373,9 @@ impl AtvRide {
         let curve = game_sim::camera::CurveTable::build();
         let mut load = game_sim::quad::Load::read_model(&self.ini, &self.model, at, heading, &curve).map_err(|e| format!("{}: {e}", self.phy))?;
         self.mods.atv(self.seat, &mut load);
-        let segments = game_sim::quad::trigger_segments(&load.tires, true).ok_or_else(|| format!("{}: no trigger probe", self.phy))?;
         let mut ride = game_sim::quad::Ride::spawn(&load, &self.model, at, heading, bounds, Vec::new());
         ride.rig(&load, &self.riding, &self.wreck);
+        let segments = ride.trigger_segments().ok_or_else(|| format!("{}: no trigger probe", self.phy))?;
         self.mods.atv_body(self.seat, &mut ride.body);
         Ok(Quad { ride, segments, was_down: false })
     }

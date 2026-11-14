@@ -12263,6 +12263,24 @@ atv_out_of_bounds           atv 0x004a4f20 (vt +0x16c, the bike in a0): body pos
 #                                           xyz = dir * speed, y += 240/root + 0x4180cccd * root (adda/
 #                                           madd); body drag *= 0.5 (0x00526598); rates = (0.5, 0x3ecccccd,
 #                                           0x3f333333) * three rand units, w 1. Returns 1 thrown.
+# MD133a — the quad's wreck body's parts in quad::Ride (quad::part_flags, Made, WreckParts, Ride::build_wreck/
+#   rig_on/shape_trigger; tests/atv_quad/mxu.rs the_quads_wreck_parts_are_the_images, the_quads_trigger_and_
+#   wreck_file_come_from_its_loader). Journal: research/journal/2026-11-13-md133a-atv-on-mxu/.
+#   Flags 0x00114270 (reached by 0x001bb1c0, a bare j): +0x126 = (b & ~8) | (a1&8 ? 8 : 0), then bit 1 from a1&2,
+#   bit 2 from a1&4 (three sb); then sb 0 to 0x003dd300 and j 0x001288a0(part+0x24) (jr ra, returns a0).
+#   Ready, part vt +0xc0 (vtable 0x003b6c20 +0xc0 = 0x001bcfd0): lw vt, jr vt +0xc8 (the sync's node frame +
+#   stand, MD75c2). Vt +0xbc 0x001bcfa0 clears +0x126 bit 4 (andi of $zero) and j 0x00128af0(part+0x24).
+#   Trigger segments vt +0x474 called once from the node attach 0x004ba310 (quad vt +0x470), its last call;
+#   other vt +0x474 calls 0x004cbc68 (car listener) and 0x004d4dd4 (kiowa forces) are other classes'.
+#   0x001bb3f0 rebuilds the probe's tree from the segments (allocates: 0x001b7620/0x001b7740, tree 0x00110720
+#   /0x00110960/0x00110ac0), +0x170 = 0x8000 then 0, +0x174 = t0 (the node), +0x184 = a3, +0x178 = a1; no
+#   +0x126 write. MD37a spawn image: trigger 0x0162cd30 +0x126 0x12 (bit 4 from elsewhere, not found), +0x88
+#   quad, +0x90 0, +0x94 0x12, +0x174 quad +0xe4, tree 4 rays; wreck 0x0162cef0 +0x126 0x02, +0x88 quad, +0x90
+#   record, +0x94 0x1000, +0x130 the node's frame at init (not since: the wreck rays sync only once active);
+#   riding 0x0159c500 +0x126 0x02, +0x88 0. Scene child +0x24: +0x38 (child +0x14) parent = quad +0xc for
+#   trigger and wreck, 0 for riding; +0x2c/+0x30 the sibling links (trigger -> wreck child).
+#   C28 image (quad 0x0150a990): the trigger's four rays at *(+0x180) are the wheels' segments in tree order
+#   (RF, LF, RR, LR), each bit for bit what vt +0x474 makes off +0x17b0.. +0x90/+0x3c/+0x214.
 # F63 — the bike's wheel owner and vehicle through the Steps route (src steps::ground / read_with, quad::Bike
 #   ground_of, quad::Sweep tell / ground / object_cofg; tests/mxvatv_bike_ride.rs
 #   the_steps_routes_owned_wheel_contacts_are_the_originals). Comment rows only. Journal
