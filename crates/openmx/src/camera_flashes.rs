@@ -95,6 +95,14 @@ impl Stadium {
         let levels = self.levels;
         Supercross::new().race_over(&card, None, &event, -1, &HallOfFame::default(), Some(self.podium()), &levels)
     }
+
+    /// P313: a card of the race's lap line has finished, and [`Supercross::race_over`] hears it as
+    /// [`Stadium::player_wins`] does, with the card's own place and flags.
+    pub fn card_finishes(&mut self, card: &LapCard, laps: u8) -> RaceOver {
+        let event = ResultEvent { activity: 2, laps, ..ResultEvent::default() };
+        let levels = self.levels;
+        Supercross::new().race_over(card, None, &event, -1, &HallOfFame::default(), Some(self.podium()), &levels)
+    }
 }
 
 #[cfg(test)]

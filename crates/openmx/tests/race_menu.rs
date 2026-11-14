@@ -58,6 +58,12 @@ fn a_race_starts_on_the_grid_behind_a_closed_gate_that_drops() {
     assert!((tick / 30.0 - delay).abs() < 0.2, "{dropped} for a drop in {delay}s");
     let rider = xyz(dropped, "rider at");
     assert!(rider[2] < gate[2], "{dropped}: the rider got past the closed gate");
+    // P313: the race's lap line, off sx01's race file, its lap the track's (S196's image: 4153.4) and
+    // its line on the finish-gate prop.
+    let laps = line(&said, "race: laps on tracks\\sx01\\sx01.tdf — lap 4153.").unwrap_or_else(|| panic!("no lap line:\n{said}"));
+    assert!(laps.ends_with(" on the finish gate"), "{laps}");
+    // Ranked from the drop: the one card leads.
+    assert!(line(&said, "race: player 1 in place 1").is_some(), "{said}");
 }
 
 #[test]

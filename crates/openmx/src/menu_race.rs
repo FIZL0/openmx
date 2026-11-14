@@ -370,10 +370,16 @@ impl Menu {
         self.race.hand = None;
     }
 
+    /// Seat `seat`'s rider's name, for the cards a race hands over (P313).
+    #[allow(dead_code)] // web.rs mounts the menu without the shell's race
+    pub fn racer_name(&self, seat: usize) -> String {
+        self.rider_name(seat)
+    }
+
     /// The race under way has ended (P330): what its two answers handed over, kept for the results
     /// the ride's leave shows. A player's win counts in their seat's record now, as the original's
     /// profile counts it at the finish (`race_over`'s [`game_sim::race::RaceOver::win`]).
-    #[allow(dead_code)] // the shell's once the Sim runs the race's two answers (S301)
+    #[allow(dead_code)] // web.rs mounts the menu without the shell's race
     pub fn race_ended(&mut self, hand: HandOver) {
         if self.race.racing.is_none() {
             return;

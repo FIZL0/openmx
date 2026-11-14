@@ -602,6 +602,48 @@ impl State for crate::race::Race {
         }
         w.f("scene_clock", self.scene_clock);
         w.field("rng", &self.rng);
+        // The race's laps (P313), on a race that counts them: a start alone walks as before.
+        if let Some(l) = &self.laps {
+            w.group("laps", |w| {
+                let r = &l.rules;
+                w.u32("flags", r.lap.flags);
+                w.u32("free_records", r.lap.free_records);
+                w.f("finish_clock", r.lap.finish_clock);
+                w.u32("cards", l.cards.len() as u32);
+                for e in &l.cards {
+                    let c = &e.card.lap;
+                    w.u32("player", e.player as u32);
+                    w.u64("flags", c.flags);
+                    w.f("to_line_kept", c.to_line_kept);
+                    w.f("to_line", c.to_line);
+                    w.f("progress", c.progress);
+                    w.f("laps_length", c.laps_length);
+                    w.f("lap_length", c.lap_length);
+                    w.i32("place", c.place);
+                    w.i32("laps", c.laps);
+                    w.i32("on_track", c.on_track);
+                    w.f("lap_time", c.lap_time);
+                    w.f("lap_start", c.lap_start);
+                    w.f("best_lap", c.best_lap);
+                    w.vf("now", c.seen.now);
+                    w.vf("last", c.seen.last);
+                    for s in [c.spot, c.kept_spot, e.card.aim] {
+                        w.u32("path", s.path);
+                        w.u32("piece", s.piece);
+                        w.f("along", s.along);
+                    }
+                    w.f("race_time", c.race_time);
+                    w.f("lap_clock", c.lap_clock);
+                    w.f("gap", c.gap);
+                    w.f("off_track", c.off_track);
+                    w.f("on_path", e.card.on_path);
+                    w.f("odometer", e.card.odometer);
+                    w.vf("ahead", e.card.ahead);
+                    w.vf("to_track", e.card.to_track);
+                    w.u32("records", c.records.len() as u32);
+                }
+            });
+        }
     }
 }
 
