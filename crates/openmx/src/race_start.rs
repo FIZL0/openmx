@@ -42,13 +42,25 @@ pub struct Start {
     /// The race's laps off the track's race file (P313), its cards where the riders stand: `None`, a
     /// start alone.
     pub laps: Option<race::Laps>,
+    /// P313a: every card's grid spot and facing, card 0 the human's ([`Start::spot`]) and the rest
+    /// the AI riders', before the ground snaps them.
+    pub grid: Vec<(Vf, Vf)>,
+    /// P313a: the AI riders' bikes standing on their grid spots, card 1 first: the Sim's players
+    /// after the human, in card order.
+    pub ai: Vec<game_sim::rider::Rider>,
 }
 
 impl Start {
     /// The race `Sim::race` steps, with the rider standing at `rider` (its bike's translation and
     /// forward row).
     pub fn race(&self, rider: (Vf, Vf)) -> Race {
-        let mut race = Race::new(self.gate, &[rider], self.delay, self.rng.clone());
+        self.race_of(&[rider])
+    }
+
+    /// [`Start::race`] with every rider on the grid in player order (P313a): the human, then the AI
+    /// riders, each as its bike's translation and forward row.
+    pub fn race_of(&self, riders: &[(Vf, Vf)]) -> Race {
+        let mut race = Race::new(self.gate, riders, self.delay, self.rng.clone());
         race.activity = Some(self.activity.clone());
         race.laps = self.laps.clone().map(Box::new);
         race
@@ -115,9 +127,47 @@ pub fn lay_out(prop: &Prop, drops: Vec<F>, riders: i32, seed: u32) -> Option<Sta
     let mut rng = Rng::from_seed(seed);
     s.reset(&mut start, &mut rng);
     s.shuffle_lanes(riders as usize, false, &mut rng);
-    let (spot, facing) = s.grid_spot(GridStart::Gate { centre: start.centre, normal: start.normal, width: start.width }, 0, riders);
+    let grid: Vec<(Vf, Vf)> =
+        (0..riders).map(|card| s.grid_spot(GridStart::Gate { centre: start.centre, normal: start.normal, width: start.width }, card, riders)).collect();
+    let (spot, facing) = grid[0];
     let (lane, place, delay) = (s.lanes[0], s.starting_place(0), s.start_delay);
-    Some(Start { spot, facing, lane, place, riders, gate: start, delay, rng, activity: s, laps: None })
+    Some(Start { spot, facing, lane, place, riders, gate: start, delay, rng, activity: s, laps: None, grid, ai: Vec::new() })
+}
+
+/// P313a: how many entries the rider database holds, which the roster's identity draws pick from
+/// (the same in every RAM image read: C33's and S138's).
+pub const RIDER_IDENTITIES: i32 = 99;
+
+/// P313a: the seed of the generator the roster and the AI riders' spawns draw from. The port's own:
+/// the original's comes off the wall clock.
+pub const AI_SEED: u32 = 0;
+
+/// P313a: the event's AI difficulty, the event's default (no menu here writes one).
+pub const AI_DIFFICULTY: u8 = 90;
+
+/// P313a: the event's kind word an AI rider's brain picks its mode from: a race's (0 and 1 both
+/// give the race driver's mode, [`game_sim::ai::spawn_mode`]).
+pub const RACE_EVENT_KIND: i32 = 0;
+
+/// P313a: what an AI rider's seat and card start a race with ([`game_sim::ai::Entry`]): live, no
+/// race phase or path net yet, and a computer's card.
+pub fn ai_entry() -> game_sim::ai::Entry {
+    let card = game_sim::ai::Card { flags: race::COMPUTER_CARD, ..game_sim::ai::Card::default() };
+    game_sim::ai::Entry { race_phase: None, path_net: false, live: true, card: Some(card) }
+}
+
+/// P313a: the race's AI riders in `sim` at the load: the roster for `riders` racers, one human
+/// ([`game_sim::ai::spawn_roster`] at [`AI_DIFFICULTY`] over [`RIDER_IDENTITIES`]), then each AI
+/// rider's brain off the bike's character file `file` ([`game_sim::Sim::spawn_ai`]), drawing from
+/// one generator seeded `seed`. The Sim must hold every AI rider's bike after the human's, and its
+/// seeker world (`Sim::load_seek`) first. Answers the roster.
+pub fn spawn_ai(sim: &mut game_sim::Sim, riders: i32, file: Option<&game_sim::phy::Ini>, seed: u32) -> game_sim::ai::Roster {
+    use game_sim::ai::{RosterIn, spawn_roster};
+    let mut rng = Rng::from_seed(seed);
+    let input = RosterIn { racers: riders, humans: 1, difficulty: AI_DIFFICULTY, identities: RIDER_IDENTITIES, all_ai: false, ghost_race: false };
+    let roster = spawn_roster(&mut rng, input);
+    sim.spawn_ai(&roster, file, AI_DIFFICULTY, RACE_EVENT_KIND, &ai_entry(), rng);
+    roster
 }
 
 /// The finish-gate prop off the scene, read as [`drop_prop`] reads the drop gate's: the first
