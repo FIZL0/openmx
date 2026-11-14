@@ -244,6 +244,7 @@ mod perf;
 mod portal;
 mod ride_hud;
 mod race_start;
+mod race_laps;
 mod camera_flashes;
 // N8: the one-seat online ride against the offline one, tick for tick.
 #[cfg(test)]
@@ -1302,8 +1303,13 @@ impl RideHud<'_> {
             buttons: self.buttons.get(v).cloned().unwrap_or_default(),
             join_buttons: self.join_buttons.clone(),
             fps: self.fps,
-            // Laps and places are the simulation's to count (S13c, S13d): dashes till then.
-            race: self.race.filter(|_| seat.sim.race.is_some()).map(|r| ride_hud::RaceShown { lap: None, laps: r.laps, place: None, riders: r.riders }),
+            // The lap the seat's card is on and its place, once its laps count (S301): dashes till then.
+            race: self.race.filter(|_| seat.sim.race.is_some()).map(|r| {
+                let card = seat.sim.race.as_ref().and_then(|race| race.laps.as_ref()).and_then(|l| l.card_of(0));
+                let lap = card.map(|c| (c.lap.laps + 1).clamp(1, r.laps as i32) as u32);
+                let place = card.and_then(|c| u32::try_from(c.lap.place).ok()).filter(|&p| p > 0);
+                ride_hud::RaceShown { lap, laps: r.laps, place, riders: r.riders }
+            }),
         };
         rig.ride_hud.note_event(now, shown.event.as_ref());
         draw(&shown, &rig.ride_hud, now);
@@ -2811,9 +2817,6 @@ struct Args {
     /// P327: the ride is a race — `--race`, `--laps N`, `--racers N`, or the menu's Race. Its track
     /// is [`Args::track`]'s; the ride starts on the start grid behind the closed gate.
     race: Option<menu::RaceSetup>,
-    /// `--race-win SECS` (V127): the player wins the race that many seconds in, as the lap line will
-    /// say once the shell counts laps — the finish's fireworks and camera flashes, for a look.
-    race_win: Option<f32>,
     /// Whether a flag picked a ride, which skips the front end unless `--menu` says otherwise.
     ride_flag: bool,
     /// `--screen`: the front end's screen to open on.
@@ -5703,6 +5706,22 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     if let Some(s) = &stadium_flashes {
         println!("race: {} camera flashes, floor {}", s.len(), s.flashes.floor.0);
     }
+    // S301: the race's laps on the race file's paths (the first of the activity's two: the start run
+    // and the lap), stood on the ground and walked, its finish line the lap line.
+    let race_course = race_start.as_ref().and_then(|_| {
+        let res = second.as_ref().and_then(|m| disc.res(m).ok())?;
+        let name = game_sim::race::race_file_names(&stem.to_ascii_lowercase(), None, None)[0].clone();
+        let mut file = game_sim::race::TrackFile::parse(&res.read(&name).ok()?).ok()?;
+        file.snap_to_ground(Some(&mut sim));
+        let course = race_laps::course(&file, args.race.as_ref().map_or(0, |r| r.laps));
+        if course.is_none() {
+            println!("race: {name} gives no lap — no laps counted");
+        }
+        course
+    });
+    if let Some((_, track, course, _)) = &race_course {
+        println!("race: {} paths, lap {:.3} ft, line at {:.2},{:.2},{:.2}", track.paths.len(), track.lap_length.0, course.line.centre.x(), course.line.centre.y(), course.line.centre.z());
+    }
     let node_at = |name: &str| -> Option<Vf> {
         let chassis = assets.models.get(CHASSIS)?;
         let i = chassis.model.nodes.iter().position(|n| n.name == name)?;
@@ -6142,7 +6161,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             })
         }
     };
-    Ok(Ok((mods, disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, kit, table, place, look, ground, sky, assets, vehicle, tables, phy_bytes, phy, other_phys, stock_phys, bike_words, other_riders, riders, body, ragdolled, chassis, layout, cpresets, camera, lot, flight_for, plane_files, online_bays, online_bodies, plane_starts, stock_plane, garage, plane_presets, plane_camera, plane_drawn, plane_fx, fx_sheet, soft_sheet, sim, traffic, animated, cars, traffic_time, traffic_before, traffic_at, rider, others, head, recorder, pre_chunks, at, car_shift, pack_clips, stunts, race_start, stadium_flashes)))
+    Ok(Ok((mods, disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, kit, table, place, look, ground, sky, assets, vehicle, tables, phy_bytes, phy, other_phys, stock_phys, bike_words, other_riders, riders, body, ragdolled, chassis, layout, cpresets, camera, lot, flight_for, plane_files, online_bays, online_bodies, plane_starts, stock_plane, garage, plane_presets, plane_camera, plane_drawn, plane_fx, fx_sheet, soft_sheet, sim, traffic, animated, cars, traffic_time, traffic_before, traffic_at, rider, others, head, recorder, pre_chunks, at, car_shift, pack_clips, stunts, race_start, stadium_flashes, race_course)))
         }
     };
     let mut load_screen = LoadScreen::default();
@@ -6151,7 +6170,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         None if std::env::var_os(loading::THREADED).is_some() => loading::on_worker(progress, build, || Ok(None::<Leave>))?.unwrap_or_else(Err),
         None => build()?,
     };
-    let (mut mods, mut disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, mut kit, table, place, mut look, ground, sky, mut assets, vehicle, tables, phy_bytes, phy, other_phys, mut stock_phys, mut bike_words, other_riders, riders, body, ragdolled, chassis, mut layout, cpresets, camera, mut lot, flight_for, plane_files, online_bays, online_bodies, plane_starts, mut stock_plane, garage, plane_presets, plane_camera, mut plane_drawn, mut plane_fx, mut fx_sheet, soft_sheet, mut sim, traffic, animated, cars, mut traffic_time, mut traffic_before, mut traffic_at, rider, others, mut head, recorder, pre_chunks, at, car_shift, pack_clips, stunts, race_start, mut stadium_flashes) = match built {
+    let (mut mods, mut disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, mut kit, table, place, mut look, ground, sky, mut assets, vehicle, tables, phy_bytes, phy, other_phys, mut stock_phys, mut bike_words, other_riders, riders, body, ragdolled, chassis, mut layout, cpresets, camera, mut lot, flight_for, plane_files, online_bays, online_bodies, plane_starts, mut stock_plane, garage, plane_presets, plane_camera, mut plane_drawn, mut plane_fx, mut fx_sheet, soft_sheet, mut sim, traffic, animated, cars, mut traffic_time, mut traffic_before, mut traffic_at, rider, others, mut head, recorder, pre_chunks, at, car_shift, pack_clips, stunts, race_start, mut stadium_flashes, race_course) = match built {
         Ok(built) => built,
         Err(leave) => return Ok(leave),
     };
@@ -7375,8 +7394,13 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     if let Some(start) = &race_start {
         let sim = &mut seats[0].sim;
         let m = sim.rider.ride.transform();
-        sim.race = Some(Box::new(start.race((m.0[3], m.0[2]))));
+        let mut race = start.race((m.0[3], m.0[2]));
+        race.laps = race_course.as_ref().map(|c| Box::new(race_laps::start(c, &[m.0[3]])));
+        sim.race = Some(Box::new(race));
     }
+    // S301: the event the race's answers read, and what they have handed over so far.
+    let race_event = race_laps::event(&args.track, args.race.as_ref().map_or(0, |r| r.laps));
+    let mut race_overs: Vec<game_sim::race::RaceOver> = Vec::new();
     for (i, (rider, phy)) in others.into_iter().zip(other_phys).enumerate() {
         // Every player has a plane of their own, parked in their bay of the lot (P87) or, on a map
         // that parks none for them, starting beside the start line (P113). A local seat starts on the
@@ -9382,19 +9406,46 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             let place = &mut world.place;
             fx.step_over(dt.0, &mut |at| plane_fx_ground(place, at));
         }
-        // The stadium's camera flashes (V127), a tick for each simulated, and `--race-win`'s finish
-        // when its time comes: the flashes' burst and, the winner's, the track's fireworks.
+        // The stadium's camera flashes (V127), a tick for each simulated.
         if simulated && let Some(s) = &mut stadium_flashes {
-            let was = s.clock;
             s.tick(dt);
-            if let Some(at) = args.race_win
-                && was < at
-                && s.clock >= at
-            {
-                let over = s.player_wins();
-                println!("race: won at {:.2}s — fireworks {}, flashes toward {}", s.clock, over.fireworks, s.levels.player_win.0);
+        }
+        // What the race's laps told since the last frame (S301), answered by its activity: each
+        // finish at the line bursts the flashes and, the winner's, sets off the track's fireworks;
+        // the race's end hands the cards, the tips and every finish's answer to the front end.
+        if let Some(race) = world.seats[0].sim.race.as_mut()
+            && let (Some(laps), Some(activity)) = (race.laps.as_mut(), race.activity.as_mut())
+        {
+            let told = std::mem::take(&mut laps.told);
+            let (podium, levels) = match &mut stadium_flashes {
+                Some(s) => {
+                    let levels = s.levels;
+                    (Some(s.podium()), levels)
+                }
+                None => (None, game_sim::race::FlashLevels::default()),
+            };
+            let answers = race_laps::answer(&told, activity, &race_event, podium, &levels);
+            for (rider, over) in answers.overs {
+                let place = told.finished.iter().find(|f| f.0 == rider).map_or(0, |f| f.1.place);
+                println!("race: rider {} finished {place} — fireworks {}, win {:?}, {} Hall of Fame", rider + 1, over.fireworks, over.win, over.fame.len());
                 if over.fireworks && let Some(fx) = &mut track_fx {
                     fx.finish();
+                }
+                race_overs.push(over);
+            }
+            if let Some(end) = answers.end {
+                println!("race: over — results {}, {} tips, outro {:?}", end.results, end.tips.len(), end.cue);
+                let cards = laps
+                    .cards
+                    .iter()
+                    .map(|c| {
+                        let who = menu::results::Who::Player(front.as_deref().map(|f| f.menu.player_name(c.rider)).unwrap_or_default());
+                        menu::results::ResultCard::take(&c.card.lap, who, &menu::results::CardStats::default())
+                    })
+                    .collect();
+                let hand = menu::results::HandOver { cards, end, overs: std::mem::take(&mut race_overs) };
+                if let Some(front) = front.as_deref_mut() {
+                    front.menu.race_ended(hand);
                 }
             }
         }
@@ -14144,7 +14195,6 @@ fn parse_args() -> Result<Option<Args>, String> {
         display: std::env::var("DISPLAY").unwrap_or_else(|_| ":0".to_string()),
         menu: false,
         race: None,
-        race_win: None,
         ride_flag: false,
         screen: None,
         screen_tab: None,
@@ -14193,7 +14243,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         if matches!(
             a.as_str(),
             "--track" | "--play" | "--record" | "--moment" | "--vehicle" | "--phy" | "--ride" | "--headless"
-                | "--players" | "--frames" | "--online" | "--set" | "--garage" | "--race" | "--laps" | "--racers" | "--race-win"
+                | "--players" | "--frames" | "--online" | "--set" | "--garage" | "--race" | "--laps" | "--racers"
         ) || a.starts_with("--trace")
         {
             args.ride_flag = true;
@@ -14211,10 +14261,6 @@ fn parse_args() -> Result<Option<Args>, String> {
                 } else {
                     r.riders = n.clamp(1, menu::race::MOST_RIDERS);
                 }
-            }
-            "--race-win" => {
-                args.race_win = Some(next("seconds")?.parse().map_err(|e| format!("{a}: {e}"))?);
-                _ = args.race.get_or_insert_with(menu::RaceSetup::default);
             }
             "--open-list" => args.open_list = true,
             "--menu-row" => args.menu_row = Some(next("a row's label")?),

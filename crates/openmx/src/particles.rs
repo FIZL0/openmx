@@ -1796,7 +1796,7 @@ impl TrackFx {
 
     /// The race's finish, when its winner crosses the line: every `Fireworks01`, `Fireworks02`… the
     /// `.toy` lists, until a number it does not, switched on: when the race's end says so
-    /// (`Supercross::race_over`'s fireworks, V127; `--race-win` until the shell counts laps).
+    /// (`Supercross::race_over`'s fireworks, V127; S301's finishes at the line).
     pub fn finish(&mut self) {
         for n in 1.. {
             let name = format!("Fireworks{n:02}");

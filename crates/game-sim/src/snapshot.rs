@@ -1057,7 +1057,22 @@ wire!(crate::r#move::Ride { g_peak, clutch_timer, clutch_scale_start, clutch_cof
 wire!(crate::ride::Wheel { mv, w, surface, inv_inertia, steer_axis, slip, gyro, angle, chassis_local_velocity, local_velocity, local_force, frame, side_per_load });
 wire!(crate::tire::Slip { spinning, locked, sliding });
 wire!(crate::rng::Rng { state });
-wire!(crate::race::Race { gate, cards, music_in, music_held, tip_in, stage, tip_armed, countdown, activity, scene_clock, rng });
+wire!(crate::race::Race { gate, cards, music_in, music_held, tip_in, stage, tip_armed, countdown, activity, scene_clock, rng, laps });
+// The laps (S301): what they told is the shell's to take, not state.
+wire!(crate::race::Laps { rules, track, course, lists, cards } skip { told });
+wire!(crate::race::RaceRules { lap, below_limit, time_limit, off_limit, aim_reach });
+wire!(crate::race::LapRules { flags, kind, laps, ghost_runs, record_limit, free_records, finish_wait, finish_clock, time_limit });
+wire!(crate::race::TrackPaths { word_34, ahead, behind, lap_length, pick, paths, free_routes, free_parents, free_candidates });
+wire!(crate::race::RacePath { flags, length, word_0c, nodes, links, dist, best });
+wire!(crate::race::PathNode { id, word_04, points, span, word_44, word_48, word_4c });
+wire!(crate::race::Course { line, line_spot, lap_length });
+wire!(crate::race::Spot { path, piece, along });
+wire!(crate::race::LineLists { checkpoints, others, reach });
+wire!(crate::race::ListGate { gate, spot });
+wire!(crate::race::RiderCard { rider, card });
+wire!(crate::race::RaceCard { lap, on_path, odometer, aim, look, ahead, to_track });
+wire!(crate::race::LapCard { flags, to_line_kept, to_line, progress, laps_length, lap_length, place, laps, runs, on_track, lap_time, lap_start, best_lap, best_lap_no, seen, spot, kept_spot, race_time, lap_clock, gap, off_track, time_left, attack_clock, record_word, lines_passed, records, gate, gates_this_lap, gates_passed });
+wire!(crate::race::LapRecord { time, start, word, lap, place });
 wire!(crate::race::Gate { flags, centre, normal, across, width, height, reach_sq });
 wire!(crate::race::Seen { now, last });
 wire!(crate::race::Countdown { length, elapsed, running, interval, acc });

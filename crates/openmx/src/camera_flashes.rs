@@ -2,7 +2,7 @@
 //! on a track whose name holds `sx`, takes every `cameraflash` model out of the scene (sx01's 1200 in
 //! its stands) and hides them; [`CameraFlashes`] then lights a batch of them at a time, a handful all
 //! race long and a burst at each podium finish, and the lit ones are drawn here as actors, each at its
-//! fade. A finish's burst is handed to [`Supercross::race_over`] through [`Stadium::podium`].
+//! fade. A finish's burst is handed to [`Supercross::race_over`](game_sim::race::Supercross::race_over) through [`Stadium::podium`].
 //!
 //! The draws are the shell's own generator's, not the simulation's (the original's come off the
 //! generator everything shares: V127's journal).
@@ -12,7 +12,7 @@ use game_render::ini;
 use game_render::mat::M4;
 use game_render::scene::{Placement, Scene};
 use game_sim::camera_flash::{self, CameraFlashes};
-use game_sim::race::{FlashLevels, HallOfFame, LapCard, PodiumFlashes, RaceOver, ResultEvent, Supercross, card_flags};
+use game_sim::race::{FlashLevels, PodiumFlashes};
 use game_sim::rng::Rng;
 use ps2_float::F;
 
@@ -41,8 +41,6 @@ pub struct Stadium {
     placed: Vec<Placement>,
     pub levels: FlashLevels,
     rng: Rng,
-    /// Seconds since the race started, for `--race-win`.
-    pub clock: f32,
 }
 
 impl Stadium {
@@ -57,7 +55,7 @@ impl Stadium {
         scene.models = kept;
         let (levels, floor) = levels(toy);
         let flashes = CameraFlashes::new(placed.len() as u32, floor)?;
-        Some(Stadium { flashes, placed, levels, rng: Rng::new(), clock: 0.0 })
+        Some(Stadium { flashes, placed, levels, rng: Rng::new() })
     }
 
     /// How many flashes the stadium has.
@@ -68,10 +66,9 @@ impl Stadium {
     /// One tick of the flashes.
     pub fn tick(&mut self, dt: F) {
         self.flashes.tick(dt, &mut self.rng);
-        self.clock += dt.0;
     }
 
-    /// The burst a podium finish sets going, for [`Supercross::race_over`].
+    /// The burst a podium finish sets going, for [`Supercross::race_over`](game_sim::race::Supercross::race_over).
     pub fn podium(&mut self) -> &mut PodiumFlashes {
         &mut self.flashes.burst
     }
@@ -85,21 +82,12 @@ impl Stadium {
     pub fn actors(&self) -> impl Iterator<Item = Actor<'_>> + '_ {
         self.shown().map(|(model, at, alpha)| Actor { model, at, pose: None, lod_from: None, alpha, casts: false })
     }
-
-    /// `--race-win`: the human's card wins a single race at the line, as the lap line will tell
-    /// [`Supercross::race_over`] once the shell counts laps (S301): the flashes burst toward the
-    /// player's win, and what it answers (the fireworks) is the caller's to show.
-    pub fn player_wins(&mut self) -> RaceOver {
-        let card = LapCard { place: 1, flags: card_flags::PLAYER | card_flags::TAKING_PART | card_flags::OUT, ..LapCard::default() };
-        let event = ResultEvent { activity: 2, ..ResultEvent::default() };
-        let levels = self.levels;
-        Supercross::new().race_over(&card, None, &event, -1, &HallOfFame::default(), Some(self.podium()), &levels)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use game_sim::race::{HallOfFame, LapCard, ResultEvent, Supercross, card_flags};
 
     const SX01: &str = "[CameraFlash]\nConstantFlashPercent=0.01\nBurstDuration=2.0\nPlayerWinBurstPercent=0.3\nPlayerStuntBurstPercent=0.4\n\
         AIFinishBurstPercent=0.3\nAIStuntWinBurstPercent0.3\n\n[CameraFlash]\nConstantFlashPercent=0.025\nBurstDuration=2.0\n";
@@ -123,7 +111,11 @@ mod tests {
         let mut sx = Scene::parse(text);
         let mut s = Stadium::take(&mut sx, "sx01", SX01).unwrap();
         assert_eq!((s.len(), sx.models.len()), (2, 1));
-        let over = s.player_wins();
+        // A player's win at the line, as the race's laps answer it (S301).
+        let card = LapCard { place: 1, flags: card_flags::PLAYER | card_flags::TAKING_PART | card_flags::OUT, ..LapCard::default() };
+        let event = ResultEvent { activity: 2, ..ResultEvent::default() };
+        let levels = s.levels;
+        let over = Supercross::new().race_over(&card, None, &event, -1, &HallOfFame::default(), Some(s.podium()), &levels);
         assert!(over.fireworks);
         assert_eq!((s.flashes.burst.length.0, s.flashes.burst.half.0), (2.0, 1.0));
         for _ in 0..30 {

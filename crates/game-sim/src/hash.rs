@@ -602,6 +602,73 @@ impl State for crate::race::Race {
         }
         w.f("scene_clock", self.scene_clock);
         w.field("rng", &self.rng);
+        // The laps (S301), on a race that has them: a walk without them is what it was. The track's
+        // paths are the race file's; what the handler changes in them is walked.
+        if let Some(l) = &self.laps {
+            w.group("laps", |w| {
+                w.u32("flags", l.rules.lap.flags);
+                w.f("finish_clock", l.rules.lap.finish_clock);
+                w.u32("free_records", l.rules.lap.free_records);
+                let t = &l.track;
+                w.u32("free_routes", t.free_routes as u32);
+                w.u32("free_parents", t.free_parents as u32);
+                w.u32("free_candidates", t.free_candidates as u32);
+                for p in &t.paths {
+                    w.u32("path.flags", p.flags);
+                    w.f("path.dist", p.dist);
+                    w.u32("path.best", p.best.map_or(u32::MAX, |b| b as u32));
+                }
+                let spot = |w: &mut Walk<'_>, s: crate::race::Spot| {
+                    w.u32("path", s.path);
+                    w.u32("piece", s.piece);
+                    w.f("along", s.along);
+                };
+                w.u32("cards", l.cards.len() as u32);
+                for rc in &l.cards {
+                    let (k, c) = (&rc.card, &rc.card.lap);
+                    w.u32("rider", rc.rider as u32);
+                    w.u64("flags", c.flags);
+                    w.f("to_line_kept", c.to_line_kept);
+                    w.f("to_line", c.to_line);
+                    w.f("progress", c.progress);
+                    w.f("laps_length", c.laps_length);
+                    w.f("lap_length", c.lap_length);
+                    w.i32("place", c.place);
+                    w.i32("laps", c.laps);
+                    w.i32("runs", c.runs);
+                    w.i32("on_track", c.on_track);
+                    w.f("lap_time", c.lap_time);
+                    w.f("lap_start", c.lap_start);
+                    w.f("best_lap", c.best_lap);
+                    w.i32("best_lap_no", c.best_lap_no);
+                    w.vf("now", c.seen.now);
+                    w.vf("last", c.seen.last);
+                    spot(w, c.spot);
+                    spot(w, c.kept_spot);
+                    w.f("race_time", c.race_time);
+                    w.f("lap_clock", c.lap_clock);
+                    w.f("gap", c.gap);
+                    w.f("off_track", c.off_track);
+                    w.f("time_left", c.time_left);
+                    w.f("attack_clock", c.attack_clock);
+                    w.u32("lines_passed", c.lines_passed.len() as u32);
+                    c.lines_passed.iter().for_each(|&p| w.u32("line", p));
+                    w.u32("records", c.records.len() as u32);
+                    for r in &c.records {
+                        w.f("time", r.time);
+                        w.f("start", r.start);
+                        w.i32("lap", r.lap);
+                        w.i32("place", r.place);
+                    }
+                    w.f("on_path", k.on_path);
+                    w.f("odometer", k.odometer);
+                    spot(w, k.aim);
+                    w.vf("look", k.look);
+                    w.vf("ahead", k.ahead);
+                    w.vf("to_track", k.to_track);
+                }
+            });
+        }
     }
 }
 

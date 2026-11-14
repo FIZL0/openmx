@@ -947,6 +947,34 @@ score_race_tick             boot 0x00262aa0 (dt f12, mgr) the score manager's ra
 #                                           +0xc4, then the 30 s (mgr+0x9c) finish countdown, ranking,
 #                                           0x00261b80 / 0x002628f0. The lap line is ported (S13c), the finish (S294; below), the
 #                                           line lists (S294a, score_race_lines).
+#                                           S301: whole, as RaceRules::tick (look_for_waited_for, each
+#                                           card in list order timed off the head's +0xb4, the close),
+#                                           stepped by race::Laps from the tick after the drop.
+score_card_join             boot 0x0025f370 (mgr, card) -> 1 (0 for no card): the card join the manager
+#                                           reset 0x0025fad0 runs on every card. flags &= 0x1a8801c, |=
+#                                           0x800; no 0x10: kind 3 or track +0x34 & 4 -> 0x10000, & 8 ->
+#                                           0x20000. +0x10/+0x14 = 1e6, counts and clocks 0, best (+0x50
+#                                           0, +0x54 -1) unless card 0x200000 or mgr 0x10000, +0xc4 =
+#                                           mgr+0xa0, +0x80 = mgr+0x70, mgr 0x40: clear +0xe4 (mgr+0x88
+#                                           words). Owner/chain vt+8 (the bike's look at the card), last
+#                                           = now. Mode (+0x64) 2 with a track: path_spot(+0x60 -> +0x88,
+#                                           holding only), +0x94 = +0xa0 = +0x88, +0x40 = path_find_spot
+#                                           (-1, -1, out null), path_ahead (+0x140, written over below),
+#                                           +0x28 = path_distance(+0x88, line +0x94, 1) or track +0x54
+#                                           with no line, +0x24 = 0. Mode 1: the gate chain's length.
+#                                           mgr 0x10000 clear: +0x20 odometer and the jump words 0.
+#                                           +0x110/+0x120/+0x140 = vf0, +0x150..+0x168 0, +0x180 =
+#                                           (0, 0, 1, w kept) off mode 1. Listener vt+0x6c, owner/chain
+#                                           vt+0x5c, records back to mgr+0x58; card 8: owner vt+0x70;
+#                                           listener vt+0x60, owner/chain vt+0x50. S301: RaceRules::join
+#                                           (oracled 20,000 cards). path_find_spot with out null and a
+#                                           negative reach takes the first candidate and skips both
+#                                           path_distance calls (paths' +0x1c untouched): holds_any
+bike_card_look              boot 0x0027dc80 (bike, card) the bike's look at its card (owner vt+8, thunk
+#                                           0x00281b40): card +0x60 xyz = frame translation, +0x110 the
+#                                           velocity, +0x108 speed, +0x120 = frame +0xa0, +0x130 = frame
+#                                           +0x90, +0x104 height above ground, card 0x400 from bike+0x574.
+#                                           S301: Laps::tick takes the position and +0x120 only
 # S294 — the race handler's finish, oracled as stretches of score_race_tick (each stretch called at its
 # first pc with $16 = card, $19 = mgr, $f25 = dt, $f24 = 0, its end pc hooked with ra = DONE):
 score_race_over_end         boot 0x00262b90 the opening over check's end (call the handler, hook here):
