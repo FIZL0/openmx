@@ -822,6 +822,34 @@ impl crate::Sim {
         ch.vel = velocity;
         Some(ridden)
     }
+
+    /// **The AI lane at a map's load** (S331): `roster`'s AI riders ([`crate::ai::spawn_roster`])
+    /// take the Sim's players after its humans, in spawn order — the original numbers its players
+    /// the same way, so the AI rider spawned `k`th is player `humans + k` — and each gets its brain,
+    /// seat and card ([`crate::ai::Lane::spawn`]: the character file `file`, the event's
+    /// `difficulty` and kind, the race's `entry`, the spawns drawing from `rng`). The lane learns
+    /// into the map's seeker world, which it takes from [`crate::Sim::seek`] ([`crate::Sim::load_seek`]
+    /// first; an empty world when the map has none), and its controllers read the game's tables.
+    ///
+    /// The bikes come first: every AI player must already be in the Sim ([`crate::Sim::add_player`]).
+    /// A roster with no AI rider leaves the Sim with no lane.
+    pub fn spawn_ai(
+        &mut self, roster: &crate::ai::Roster, file: Option<&crate::phy::Ini>, difficulty: u8, event_kind: i32,
+        entry: &crate::ai::Entry, rng: Rng,
+    ) {
+        if roster.ai.is_empty() {
+            self.ai = None;
+            return;
+        }
+        let humans = roster.humans.max(0) as usize;
+        let riders: Vec<(usize, crate::ai::AiRider)> = roster.ai.iter().enumerate().map(|(k, &r)| (humans + k, r)).collect();
+        let last = riders.last().map_or(0, |r| r.0);
+        assert!(last < self.players(), "AI player {last} has no bike: the Sim has {} players", self.players());
+        let seek = self.seek.take().map_or_else(crate::ai::seek::World::default, |w| *w);
+        let tables = std::sync::Arc::new(crate::ragdoll::Tables::build());
+        let lane = crate::ai::Lane::spawn(seek, tables, rng, &riders, file, difficulty, event_kind, entry);
+        self.ai = Some(Box::new(lane));
+    }
 }
 
 impl Game for crate::Sim {

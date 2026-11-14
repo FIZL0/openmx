@@ -5704,6 +5704,84 @@ pub struct Lane {
     pub pilots: Vec<(usize, Pilot)>,
 }
 
+// --- the lane at a map's load (S331) -------------------------------------------------------------------
+
+/// The interface type the vehicle build gives an AI rider's interface once its bike is built (the
+/// interface's `+4` word, 1 on every AI rider of C33's and recording2's images), which the brain's
+/// spawn keeps as its [`Brain::kind`].
+pub const AI_INTERFACE: i32 = 1;
+
+/// The interface constructor's words of a [`Seat`]: the seeker's speed scale 1, slow radius 100 and
+/// slow speed 20, and the tail's air cone 0.99. Nothing after it writes them.
+pub const SEAT_SPEED_SCALE: f32 = 1.0;
+pub const SEAT_SLOW_RADIUS: f32 = 100.0;
+pub const SEAT_SLOW_SPEED: f32 = 20.0;
+pub const SEAT_AIR_CONE: f32 = 0.99;
+/// The bike constructor's look-ahead time, which nothing after it writes.
+pub const SEAT_LOOK_AHEAD: f32 = 0.5;
+
+/// What an AI rider's race gives its seat and card at the spawn ([`Lane::spawn`]): the race's phase
+/// and whether it has an AI path net ([`Seat::race_phase`], [`Seat::path_net`]), whether the rider is
+/// live ([`Seat::live`]), and its race card ([`Pilot::card`]). The lane keeps them as they are handed
+/// in: nothing in the Sim moves them on with the race yet.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Entry {
+    pub race_phase: Option<i32>,
+    pub path_net: bool,
+    pub live: bool,
+    pub card: Option<Card>,
+}
+
+impl Seat {
+    /// The seat of player `player`'s AI rider as its constructors and character file leave it: the
+    /// interface constructor's speed scale, slow radius and speed and air cone, the bike
+    /// constructor's look-ahead, the bump chance the character's preload success spread put at the
+    /// event's difficulty (the rider's word both are, which the reader writes after the constructor's
+    /// 100), the player's number as the vehicle build writes it, and the race's words off `entry`.
+    pub fn spawn(player: usize, character: &Character, entry: &Entry) -> Seat {
+        Seat {
+            speed_scale: F(SEAT_SPEED_SCALE),
+            slow_radius: F(SEAT_SLOW_RADIUS),
+            slow_speed: F(SEAT_SLOW_SPEED),
+            player,
+            air_cone: F(SEAT_AIR_CONE),
+            look_ahead: F(SEAT_LOOK_AHEAD),
+            bump_chance: character.profile.preload_success.value,
+            race_phase: entry.race_phase,
+            path_net: entry.path_net,
+            live: entry.live,
+        }
+    }
+}
+
+impl Lane {
+    /// **The Sim's AI riders at a map's load**: for each of `riders` in spawn order (its Sim player
+    /// and its roster entry, [`spawn_roster`]'s identity and skill), the vehicle build's brain
+    /// ([`Pilot::spawn`] on an [`AI_INTERFACE`] interface, the mode the event's kind picks, the
+    /// character file `file` read at the rider's skill and the event's `difficulty`) in its
+    /// [`Seat::spawn`] with `entry`'s card. Every spawn draws from `rng` — ten draws for the brain and
+    /// two for the reader (none without a file), rider after rider — and the lane goes on with the
+    /// generator where the last one left it. `seek` is the map's seeker world ([`seek::load`], the
+    /// riders its owners), which the lane then learns into; `tables` the controllers' tables.
+    #[allow(clippy::too_many_arguments)] // the map's, the event's and the race's
+    pub fn spawn(
+        seek: seek::World, tables: std::sync::Arc<Tables>, mut rng: Rng, riders: &[(usize, AiRider)],
+        file: Option<&crate::phy::Ini>, difficulty: u8, event_kind: i32, entry: &Entry,
+    ) -> Lane {
+        let pilots = riders
+            .iter()
+            .map(|&(player, rider)| {
+                let mut pilot =
+                    Pilot::spawn(&mut rng, AI_INTERFACE, None, event_kind, file, rider.skill, difficulty, Seat::default());
+                pilot.seat = Seat::spawn(player, &pilot.character, entry);
+                pilot.card = entry.card;
+                (player, pilot)
+            })
+            .collect();
+        Lane { seek, tables, rng, pilots }
+    }
+}
+
 /// What a Sim rider shows its brain ([`Pilot::think`]'s [`Mount`], without the assist's two words):
 /// the bike's drawn frame (its rows the side, up, forward and position), the body's velocity,
 /// acceleration and turn rates in its own frame, its speed along its own forward axis, whether a wheel

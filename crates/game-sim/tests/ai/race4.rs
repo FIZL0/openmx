@@ -508,3 +508,167 @@ impl Lane5 {
         }
     }
 }
+
+// ---------------------------------------------------------------------------------------------------
+// S331 — the AI lane at a map's load: `Sim::spawn_ai` against C33's image
+// ---------------------------------------------------------------------------------------------------
+
+/// C33's four riders in the game's player order (the interface's player word, the human 0): their
+/// index into [`C33_RIDERS`].
+fn c33_by_player(ee: &Ee) -> Vec<usize> {
+    let player = |k: usize| {
+        let (r, _, b) = C33_RIDERS[k];
+        if b == 0 { 0 } else { ee.u32_at(r + 0x10d0 + 0x1e4) as usize }
+    };
+    let mut order: Vec<usize> = (0..C33_RIDERS.len()).collect();
+    order.sort_by_key(|&k| player(k));
+    assert_eq!(order.iter().map(|&k| player(k)).collect::<Vec<_>>(), [0, 1, 2, 3], "C33's player numbers");
+    order
+}
+
+/// The lane `Sim::spawn_ai` builds at the load, against the one C33's image holds: free09's four
+/// riders in a Sim in the game's player order (the human 0, then the AI riders as their interfaces
+/// number them), the map's seeker world loaded over them (`Sim::load_seek`, the image's slot count),
+/// and the roster's three AI riders (the image's skills, the event's difficulty and kind) spawned
+/// with the retail character file. Held against the image:
+/// - the seeker world, field for field, against the one built with the image's own owners;
+/// - each pilot's seat: the constructors' speed scale, slow radius and speed, air cone and
+///   look-ahead, the player number, and the bump chance the character file put at the difficulty;
+/// - each brain's interface type and mode, its spawn flags, and every tuning word the spawn and the
+///   reader write that the first ticks do not (the controller's, the avoidance's, the vehicle's, the
+///   reach's least and most, the trick plan's, the steering filter's, the assist's weights, the least
+///   speed, and the habits' numbers);
+/// - the controllers' tables, the game's curve table.
+#[test]
+fn s331_the_lane_spawns_at_the_load_as_c33_holds_it() {
+    use game_sim::ai::{AiRider, Entry, Roster, skill_range};
+    use game_sim::world::Props;
+    use std::io::Read;
+
+    let kit = match Kit::load() {
+        Ok(k) => k,
+        Err(w) => return skip(&w),
+    };
+    let state = kit.ctx(C33_STATE);
+    if !state.exists() {
+        return skip(&format!("{} is not there: C33's capture", state.display()));
+    }
+    let Some(retail) = super::character::ch_retail() else {
+        return skip("no MX.PSR (or no Bike\\250sx.res in it): the retail character file is needed");
+    };
+    let character = Ini::parse_bytes(&retail);
+    let mut ee = Ee::from_ram(&state).unwrap_or_else(|e| panic!("{e}"));
+    ee.set(28, u64::from(addr("boot_gp").unwrap()));
+    let Some(at) = named(&["app_pointer", "rand_state"]) else { return };
+    let app = ee.u32_at(at[0]);
+    let event = ee.u32_at(ee.u32_at(app + 0x3d4) + 0xc);
+    let (difficulty, event_kind) = (ee.read(event + 0x117, 1) as u8, ee.u32_at(event) as i32);
+    let Some((image_seek, lists)) = s12e_seek_world(&kit, &ee) else { return };
+
+    // The Sim: the four bikes seeded off the image, in player order.
+    let tables = Arc::new(Tables::build());
+    let Some(mut bikes) = Bikes::open() else { return };
+    let names = C33_RIDERS.map(|(_, _, b)| track::physics_file(track::Engine::Cc250, false, if b == 0 { C33_HUMAN_TUNING } else { track::Tuning::A }));
+    let phys: Vec<Phy> = names.iter().map(|n| bikes.phy(n, &tables)).collect();
+    let order = c33_by_player(&ee);
+    let seeded = |k: usize| c33_bike(&ee, C33_RIDERS[k].0, &phys[k], &names[k], &bikes.col);
+    let mut sim = Sim::with_rider(0, Arc::clone(&tables), phys[order[0]].clone(), seeded(order[0]));
+    for &k in &order[1..] {
+        sim.add_player(phys[k].clone(), seeded(k));
+    }
+
+    // The map's seeker world, as the shell loads it, with the image's slots and zones.
+    let mut f = std::fs::File::open(kit.ctx("iso").join("MX.PSR")).expect("MX.PSR");
+    let mut front = vec![0u8; 64 << 10];
+    f.read_exact(&mut front).unwrap();
+    let psr = game_sim::archive::Psr::parse(&front).unwrap();
+    let track_res = super::seek_world::s313_member(&mut f, &psr, "Tracks\\free09.res");
+    let scene = game_sim::track::Scene::parse(&super::seek_world::s313_file(&track_res, "tracks\\free09\\free09.scn")).unwrap();
+    let terrain_bytes = super::seek_world::s313_file(&track_res, "tracks\\free09\\free09.ps2.trn");
+    let terrain = Terrain::parse(&terrain_bytes).unwrap();
+    let mut place = Place { ground: Ground::new(&terrain, &scene.terrain), props: Props::default() };
+    let data = super::seek_world::s313_member(&mut f, &psr, "Tracks\\free09_2.res");
+    let hit_dat = Ini::parse_bytes(&super::seek_world::s313_file(&data, "tracks\\free09\\hit.dat"));
+    let mut read = |name: &str| Some(super::seek_world::s313_file(&data, &format!("tracks\\free09\\{name}")));
+    let slots = image_seek.targets[0].done.len();
+    let open = |player: usize, zone: game_sim::ai::seek::Zone| player == 0 && zone.place == Some(0);
+    assert!(sim.load_seek(&hit_dat, &mut read, slots, &open, &mut place), "free09's seeker world");
+
+    // The roster: the image's AI riders in player order, at their skills.
+    let skills: Vec<i32> = order[1..].iter().map(|&k| ee.u32_at(C33_RIDERS[k].0 + 0x10d0 + 0x104) as i32).collect();
+    let (low, high) = skill_range(difficulty);
+    assert!(skills.iter().all(|s| (low..=high).contains(s)), "skills {skills:?} outside the difficulty's {low}..={high}");
+    let roster = Roster {
+        humans: 1,
+        ghost: false,
+        ai: skills.iter().map(|&skill| AiRider { identity: game_sim::ai::FIRST_AI_IDENTITY, skill }).collect(),
+        all_ai: None,
+    };
+    // The race's words as the image holds them on the first AI rider (all three agree).
+    let pilots: Vec<Pilot> = order[1..].iter().map(|&k| c33_pilot(&ee, &lists, C33_RIDERS[k].2, C33_RIDERS[k].0)).collect();
+    for p in &pilots[1..] {
+        assert_eq!((p.seat.race_phase, p.seat.path_net, p.seat.live, p.card), (pilots[0].seat.race_phase, pilots[0].seat.path_net, pilots[0].seat.live, pilots[0].card));
+    }
+    let entry = Entry { race_phase: pilots[0].seat.race_phase, path_net: pilots[0].seat.path_net, live: pilots[0].seat.live, card: pilots[0].card };
+    let before = Rng::from_state(s12e_u64(&ee, at[1]));
+    sim.spawn_ai(&roster, Some(&character), difficulty, event_kind, &entry, before);
+    assert_eq!(sim.seek, None, "the lane takes the seeker world");
+    let lane = sim.ai.as_deref().expect("a lane");
+
+    // The draws: ten for each brain and two for each reader.
+    let mut twelve = before;
+    (0..12 * pilots.len()).for_each(|_| _ = twelve.rand());
+    assert_eq!(lane.rng.state(), twelve.state(), "the spawns' draws");
+
+    // The seeker world, against the image's owners.
+    let mut wrong = Vec::new();
+    for (i, (ours, theirs)) in lane.seek.sets.iter().zip(&image_seek.sets).enumerate() {
+        if ours.owner != theirs.owner {
+            wrong.push(format!("set {i}'s owner: {:?}, the image's {:?}", ours.owner, theirs.owner));
+        }
+    }
+    let owned = game_sim::ai::seek::World { sets: image_seek.sets.clone(), ..lane.seek.clone() };
+    if owned != image_seek {
+        wrong.push("the seeker world (owners aside) is not the image's".into());
+    }
+
+    // The pilots, against the image's.
+    assert_eq!(lane.pilots.iter().map(|(p, _)| *p).collect::<Vec<_>>(), [1, 2, 3], "the AI players");
+    let mut compared = 0;
+    for ((player, ours), theirs) in lane.pilots.iter().zip(&pilots) {
+        let who = format!("player {player}");
+        let mut same = |what: &str, a: String, b: String| {
+            compared += 1;
+            if a != b {
+                wrong.push(format!("{who}: {what} is {a}, the image's {b}"));
+            }
+        };
+        same("seat", format!("{:?}", ours.seat), format!("{:?}", theirs.seat));
+        let (o, t) = (&ours.racer, &theirs.racer);
+        same("interface type", format!("{:?}", o.brain.kind), format!("{:?}", t.brain.kind));
+        same("mode", format!("{}", o.brain.mode), format!("{}", t.brain.mode));
+        same("spawn flags", format!("{:#x}", game_sim::ai::SPAWN_FLAGS), format!("{:#x}", t.brain.flags & game_sim::ai::SPAWN_FLAGS));
+        same("tuning", format!("{:?}", o.tuning), format!("{:?}", t.tuning));
+        same("avoidance", format!("{:?}", o.avoid), format!("{:?}", t.avoid));
+        same("vehicle", format!("{:?}", o.vehicle), format!("{:?}", t.vehicle));
+        same("reach", format!("{:?}", (o.reach.base, o.reach.max)), format!("{:?}", (t.reach.base, t.reach.max)));
+        same("trick plan", format!("{:?}", (o.plan.cooldown, o.plan.chance)), format!("{:?}", (t.plan.cooldown, t.plan.chance)));
+        same("filter", format!("{:?}", (o.filter.rate, o.filter.jitter, o.filter.gain)), format!("{:?}", (t.filter.rate, t.filter.jitter, t.filter.gain)));
+        same("weights", format!("{:?}", o.weights), format!("{:?}", t.weights));
+        same("least speed", format!("{:?}", o.min_speed), format!("{:?}", t.min_speed));
+        let numbers = |h: &game_sim::ai::Habits| {
+            format!(
+                "{:?}",
+                [
+                    h.low_air, h.preload_per_speed, h.pull_back_amount, h.lag_hang_time, h.lag_chance, h.lag_time, h.horse_power,
+                    h.brilliant_chance, h.brilliant_min, h.brilliant_random, h.cross_up_chance, h.cross_up_min, h.cross_up_max,
+                    h.cross_up_height, h.low_air_bar,
+                ]
+            )
+        };
+        same("habits' numbers", numbers(&o.habits), numbers(&t.habits));
+    }
+    assert!(compared >= 3 * 13, "only {compared} words compared");
+    assert_eq!(lane.tables.curve, controls::tables(&ee).curve, "the controllers' curve table");
+    assert!(wrong.is_empty(), "the lane at the load is not C33's:\n{}", wrong.join("\n"));
+}
