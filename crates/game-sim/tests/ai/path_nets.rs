@@ -4,8 +4,9 @@
 
 use super::*;
 
-/// sx01's race files out of `Tracks\sx01_2.res`, inside MX.PSR, by their names in the archive.
-fn sx01_files(names: &[&str]) -> Option<Vec<Vec<u8>>> {
+/// sx01's files out of `archive` (`Tracks\sx01_2.res`, `Tracks\sx01.res`), inside MX.PSR, by their
+/// names in the archive or, failing that, the member whose name ends with it (case ignored).
+fn sx01_files(archive: &str, names: &[&str]) -> Option<Vec<Vec<u8>>> {
     let kit = ps2_oracle::Kit::load().map_err(|why| skip(&why)).ok()?;
     let at = kit.ctx("iso").join("MX.PSR");
     let Ok(mut f) = std::fs::File::open(&at) else {
@@ -16,7 +17,7 @@ fn sx01_files(names: &[&str]) -> Option<Vec<Vec<u8>>> {
     let mut front = vec![0u8; 64 << 10];
     f.read_exact(&mut front).expect("read the front of MX.PSR");
     let psr = game_sim::archive::Psr::parse(&front).expect("MX.PSR's directory");
-    let e = psr.find("Tracks\\sx01_2.res").expect("sx01's second track archive");
+    let e = psr.find(archive).unwrap_or_else(|| panic!("{archive} in MX.PSR"));
     f.seek(SeekFrom::Start(e.at)).expect("seek");
     let mut bytes = vec![0u8; e.size as usize];
     f.read_exact(&mut bytes).expect("read");
@@ -24,7 +25,10 @@ fn sx01_files(names: &[&str]) -> Option<Vec<Vec<u8>>> {
     let out = names
         .iter()
         .map(|n| {
-            let e = res.entries.iter().find(|e| e.name.eq_ignore_ascii_case(n)).unwrap_or_else(|| panic!("{n} in sx01_2.res"));
+            let tail = n.to_ascii_lowercase();
+            let e = res.entries.iter().find(|e| e.name.eq_ignore_ascii_case(n));
+            let e = e.or_else(|| res.entries.iter().find(|e| e.name.to_ascii_lowercase().ends_with(&tail)));
+            let e = e.unwrap_or_else(|| panic!("{n} in {archive}"));
             res.read(&bytes, e).expect("inflate")
         })
         .collect();
@@ -38,7 +42,8 @@ pub(crate) const S282C_STATE: &str = "s282c-sx01-race.ee.bin";
 pub(crate) const S282C_RIDERS: [u32; 3] = [0x008c_9af0, 0x0090_3050, 0x0111_de50];
 
 /// A net in RAM against the port's: every path's flags, length, first node and branches, every
-/// node's centre and edges (`x`, `z`, `w`: the heights are the ground's), its length and its next.
+/// node's centre and edges (all four lanes: the heights are the load's ground snap, S310), its
+/// length and its next.
 /// Hands back the RAM addresses of the paths and nodes, in the port's order.
 fn same_net(ee: &ps2_oracle::Ee, track: u32, net: &Net, what: &str) -> (Vec<u32>, Vec<u32>) {
     let count = ee.u32_at(track + 0x40) as usize;
@@ -67,14 +72,9 @@ fn same_net(ee: &ps2_oracle::Ee, track: u32, net: &Net, what: &str) -> (Vec<u32>
         );
     }
     for (i, (&a, n)) in nodes.iter().zip(&net.nodes).enumerate() {
-        let flat = |v: [u32; 4]| [v[0], v[2], v[3]];
-        let mine = |v: Vf| {
-            let b = v.to_bits();
-            [b[0], b[2], b[3]]
-        };
         assert_eq!(
-            (flat(got(ee, a + 0x10)), flat(got(ee, a + 0x20)), flat(got(ee, a + 0x30)), ee.u32_at(a + 0x40), node_index(ee.u32_at(a + 0x54))),
-            (mine(n.centre), mine(n.edges[0]), mine(n.edges[1]), n.length.0.to_bits(), n.next),
+            (got(ee, a + 0x10), got(ee, a + 0x20), got(ee, a + 0x30), ee.u32_at(a + 0x40), node_index(ee.u32_at(a + 0x54))),
+            (n.centre.to_bits(), n.edges[0].to_bits(), n.edges[1].to_bits(), n.length.0.to_bits(), n.next),
             "{what}: node {i}"
         );
     }
@@ -83,8 +83,15 @@ fn same_net(ee: &ps2_oracle::Ee, track: u32, net: &Net, what: &str) -> (Vec<u32>
 
 #[test]
 fn sx01s_path_nets_off_the_disc_are_the_race_images() {
-    use game_sim::race::{TrackFile, TrackPaths};
-    let Some(files) = sx01_files(&["tracks\\sx01\\sx01.tdf", "tracks\\sx01\\sx01ai.tdf"]) else { return };
+    use game_sim::race::TrackFile;
+    let Some(files) = sx01_files("Tracks\\sx01_2.res", &["tracks\\sx01\\sx01.tdf", "tracks\\sx01\\sx01ai.tdf"]) else { return };
+    let Some(track) = sx01_files("Tracks\\sx01.res", &["tracks\\sx01\\sx01.scn"]) else { return };
+    let scene = game_sim::track::Scene::parse(&track[0]).expect("sx01's scene");
+    // The scene names the terrain as `.trn`; the archive's member is the `.ps2.trn` (sx01's own).
+    let trn = scene.terrain_file.to_ascii_lowercase().replace(".ps2.trn", ".trn").replace(".trn", ".ps2.trn");
+    let trn = sx01_files("Tracks\\sx01.res", &[&trn]).expect("sx01.res read once already");
+    let terrain = game_sim::track::Terrain::parse(&trn[0]).expect("sx01's terrain");
+    let mut ground = game_sim::world::Ground::new(&terrain, &scene.terrain);
     let kit = match ps2_oracle::Kit::load() {
         Ok(k) => k,
         Err(why) => return skip(&why),
@@ -102,9 +109,15 @@ fn sx01s_path_nets_off_the_disc_are_the_race_images() {
     ee.set(28, u64::from(gp));
     let act = ee.u32_at(ee.u32_at(ee.u32_at(manager) + 0x58));
     let (race_track, ai_track) = (ee.u32_at(act + 0xb8), ee.u32_at(act + 0xbc));
-    let net = |bytes: &[u8]| {
+    // Both files stood on sx01's terrain as the race activity's load does (S310). Neither has a
+    // node for the props to raise, so no props are asked.
+    let mut net = |bytes: &[u8]| {
         let file = TrackFile::parse(bytes).expect("the race file reads");
-        Net::from_track(&TrackPaths::new(&file).expect("its paths walk"))
+        let raise = file.clone().snap_to_ground(None);
+        assert!(raise.is_empty(), "sx01's race files have no node for the props to raise");
+        let net = Net::load(&file, Some(&mut ground), None).expect("its paths walk");
+        assert!(net.nodes.iter().any(|n| n.centre.y() > 0.0), "no centre stands above 0");
+        net
     };
     let (race, ai) = (net(&files[0]), net(&files[1]));
     assert_eq!((race.paths.len(), race.nodes.len()), (2, 96), "sx01.tdf: a start run and the lap");
