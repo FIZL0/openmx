@@ -743,3 +743,98 @@ fn linked<M: Items>(m: &mut M, item: u32, dt: F) {
         k += 1;
     }
 }
+
+/// F31b5: the particle object's own switches the items and emitters hand it ([`Call::Light`],
+/// [`Call::Douse`], [`Call::Halt`]) for the object classes state 4's items and emitters hold. The
+/// particle system's flags byte is its `+0xb0`: bit 0 started, [`OBJECT_LIT`] lit, bit 2 settled.
+pub const OBJECT_FLAGS: u32 = 0xb0;
+pub const OBJECT_LIT: u32 = 2;
+
+fn object_flags(m: &mut impl super::node::Ram, o: u32) -> u32 {
+    let a = o + OBJECT_FLAGS;
+    (m.word(a & !3) >> (8 * (a & 3))) & 0xff
+}
+
+fn set_object_flags(m: &mut impl super::node::Ram, o: u32, b: u32) {
+    let a = o + OBJECT_FLAGS;
+    let shift = 8 * (a & 3);
+    let w = m.word(a & !3) & !(0xff << shift) | (b & 0xff) << shift;
+    m.set(a & !3, w);
+}
+
+/// **A particle system lit**: unless already lit, lit and started, its clock (`+0xac`) back to 0.
+pub fn object_light(m: &mut impl super::node::Ram, o: u32) {
+    let f = object_flags(m, o);
+    if f & OBJECT_LIT != 0 {
+        return;
+    }
+    set_object_flags(m, o, f & !OBJECT_LIT | OBJECT_LIT);
+    m.set(o + 0xac, 0);
+    let f = object_flags(m, o);
+    set_object_flags(m, o, f & !1 | 1);
+}
+
+/// **A particle system doused**: not lit, not settled, its spot (`+0x30`) kept as its last
+/// (`+0x40`), its clock (`+0xac`) back to 0.
+pub fn object_douse(m: &mut impl super::node::Ram, o: u32) {
+    let f = object_flags(m, o);
+    set_object_flags(m, o, f & !OBJECT_LIT);
+    let f = object_flags(m, o);
+    set_object_flags(m, o, f & !4);
+    for k in (0..16).step_by(4) {
+        let w = m.word(o + 0x30 + k);
+        m.set(o + 0x40 + k, w);
+    }
+    m.set(o + 0xac, 0);
+}
+
+/// **A sound-like object halted** (the effects items' `+0x84`): once (`+0x34` set after), and with a
+/// count (`+0x30`) over 0 the count and `+0xc0` cleared.
+pub fn object_halt(m: &mut impl super::node::Ram, o: u32) {
+    if m.word(o + 0x34) != 0 {
+        return;
+    }
+    if m.word(o + 0x30) as i32 > 0 {
+        m.set(o + 0x30, 0);
+        m.set(o + 0xc0, 0);
+    }
+    m.set(o + 0x34, 1);
+}
+
+/// **A key's pick handed to its object** ([`Call::Pick`]) for the object class state 4's picked
+/// items hold: the object's player (`+0xd8`) takes the pick (`+0x40`) and the pick's row of twelve
+/// bytes, from its clip's own table (the player's `+0x0` then `+0x174`, its `+0x8c`) when the
+/// player's byte `+0x4c` has bit 6 and the clip has one, else the clip's `+0x120`: the row's `+4`
+/// is the first frame (`+0x38`, and the object's byte `+0xa4`), its `+8` the last (`+0x3c`). With
+/// bit 6 the frame count (`+0x44`) is held to the span and its reciprocal kept (`+0x48`); with the
+/// player's flag `0x400` (`+0x28`) its rate (`+0xb8`) is one over the span over the count.
+pub fn object_pick(m: &mut impl super::node::Ram, o: u32, pick: u32) {
+    let p = m.word(o + 0xd8);
+    m.set(p + 0x40, pick);
+    let own = (m.word(p + 0x4c) >> 6) & 1 != 0;
+    let clip = m.word(p);
+    let table = m.word(clip + 0x174);
+    let rows = if own && table != 0 { m.word(table + 0x8c) } else { m.word(clip + 0x120) };
+    let row = rows.wrapping_add(pick.wrapping_mul(12));
+    let last = m.word(row + 8);
+    m.set(p + 0x3c, last);
+    let first = m.word(row + 4);
+    m.set(p + 0x38, first);
+    let a = o + 0xa4;
+    let shift = 8 * (a & 3);
+    let w = m.word(a & !3) & !(0xff << shift) | (first & 0xff) << shift;
+    m.set(a & !3, w);
+    if own {
+        let count = fpu::from_i32(m.word(p + 0x44) as i32);
+        let span = fpu::from_i32(m.word(p + 0x3c).wrapping_sub(m.word(p + 0x38)).wrapping_add(1) as i32);
+        m.set(p + 0x44, fpu::to_i32(fpu::min(count, span)) as u32);
+        let r = fpu::div(1.0, fpu::from_i32(m.word(p + 0x44) as i32));
+        m.set(p + 0x48, r.to_bits());
+    }
+    if m.word(p + 0x28) & 0x400 != 0 {
+        let span = fpu::sub(fpu::from_i32(m.word(p + 0x3c) as i32), fpu::from_i32(m.word(p + 0x38) as i32));
+        let span = fpu::add(1.0, span);
+        let per = fpu::div(span, fpu::from_i32(m.word(p + 0x44) as i32));
+        m.set(p + 0xb8, fpu::div(1.0, per).to_bits());
+    }
+}

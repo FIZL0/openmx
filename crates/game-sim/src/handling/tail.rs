@@ -105,6 +105,71 @@ pub fn list_remove(m: &mut impl Ram, list: u32, i: i32) -> bool {
     true
 }
 
+/// **A name's bit in a name registry** (the lookup the pause check makes, with no adding): the
+/// registry's first entry (`+0x4`) holds bit 1, each next (`+0x8`) the bit above. An entry's first
+/// word points at its name, compared with `name` as the original's bounded string compare (equal up
+/// to the first NUL, or over all `0x80` bytes). Answers the matching entry's bit, or −1 with no match
+/// (the original then adds the name only when asked to, which the pause check never is).
+pub fn name_bit(m: &mut impl Ram, registry: u32, name: u32) -> i32 {
+    let mut e = m.word(registry + 4);
+    let mut bit = 1i32;
+    while e != 0 {
+        let entry = m.word(e);
+        if names_equal(m, name, entry) {
+            return bit;
+        }
+        e = m.word(e + 8);
+        bit = bit.wrapping_shl(1);
+    }
+    -1
+}
+
+fn byte(m: &mut impl Ram, at: u32) -> u8 {
+    (m.word(at & !3) >> (8 * (at & 3))) as u8
+}
+
+/// Whether the strings at `a` and `b` are equal over at most `0x80` bytes.
+fn names_equal(m: &mut impl Ram, a: u32, b: u32) -> bool {
+    for k in 0..0x80 {
+        let (x, y) = (byte(m, a.wrapping_add(k)), byte(m, b.wrapping_add(k)));
+        if x != y {
+            return false;
+        }
+        if x == 0 {
+            return true;
+        }
+    }
+    true
+}
+
+/// **The bike's state holding a rider** (the state's vt `+0xac`): the first item on the state's list
+/// (`+0x30`, each node's item at `+0x0` and next at `+0x8`) whose first word is `bit`, or 0.
+pub fn state_item(m: &mut impl Ram, state: u32, bit: u32) -> u32 {
+    let mut node = m.word(state + 0x30);
+    while node != 0 {
+        let item = m.word(node);
+        if m.word(item) == bit {
+            return item;
+        }
+        node = m.word(node + 8);
+    }
+    0
+}
+
+/// **Whether the game is paused**, as the bike's update asks it: the rider the state holds by the
+/// rider class's bit (`names`: the registry and the class name "MotocrossRider", looked up by
+/// [`name_bit`]; [`state_item`]; the item sits `0x2ec` into the rider), and its
+/// pause object's flag (`+0x378`, then `+0x14`). With none held the rider is address 0 less `0x2ec`
+/// and the words read are what is there, as the original reads them.
+pub fn paused(m: &mut impl Ram, bike: u32, names: (u32, u32)) -> bool {
+    let bit = name_bit(m, names.0, names.1);
+    let state = m.word(bike + STATE);
+    let g = state_item(m, state, bit as u32);
+    let rider = if g == 0 { 0 } else { g.wrapping_sub(0x2ec) };
+    let o = m.word(rider.wrapping_add(0x378));
+    m.word(o.wrapping_add(0x14)) != 0
+}
+
 /// The bike's state word (`+0xbc4`, what the bike rides in) and its kind (the state's `+0x28`): the
 /// wreck's kinds, and the one the pad rumbles and the lap clock runs in.
 pub const STATE: u32 = 0xbc4;
