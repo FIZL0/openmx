@@ -1,0 +1,6 @@
+# MD147 (MD164's throttle.pad, unchanged): gas from the Rocksbury spawn, straight on (Cross gas), as MD160's throttle.pad.
+sleep 15t
+down cross
+sleep 300t
+up cross
+sleep 60t

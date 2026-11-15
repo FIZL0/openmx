@@ -272,6 +272,17 @@ nothing, so every replay and hash is SLUS-21104's. No Untamed ATV ride was captu
 state exists (copy 9's are a Free Ride bike), and the pack, the Untamed routing of the quad's steps and the
 capture are follow-ups.
 
+**Captured (MD147), not ported.** Vehicle ATV with Physics Type RACE is `atv_Race250P.phy` (named at quad
++0x134; vtable 0x003f0470, kind 1). MD147 kept spawn and in-air states on Rocksbury and seven rides at the
+moved offsets (research/journal/2026-11-15-md147-untamed-atv-capture, research/md147): throttle twice (the
+same ride; the rows that differ are late or torn reads), steer, a jump with a wreck, a landing from the air
+state, and two hazard rides. **Rocksbury's hazard table is all zero** (quad +0xde4, 16 entries of hazard
+word and time, indexed by each wheel's surface byte +0x110), so the hazard rides poke it. With hazard 0 and
+time 1, the clock counts in the air only (every wheel's +0xd0 clear) and puts the quad back on the tick
+it passes 1 s: Untamed's new branch, which SLUS-21104 never takes. With hazard 1 the quad is put back to
+the spawn every second, and its rear wheels are off the ground for a few ticks after each drop. The
+stick moved −0x10 (+0x1298), the ramped stick +0x10 (+0x12f8): not every 0x12xx word follows one rule.
+
 Not classified (they differ, but are world, collision or presentation code the quad shares with every
 machine, or were not reached): the plant's axis-angle turn (628 → 312 B: likely a Ghidra size split), the
 quaternion-to-euler (MD93d found the same clamps; a new `jal` past its end at the larger size), the collide

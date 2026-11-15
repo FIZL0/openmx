@@ -1,0 +1,8 @@
+# MD147: jump.pad cut at tick 155: the quad is in the air off the second jump (jump.csv rows 150-183) -> air.p2s.
+sleep 15t
+down cross
+sleep 40t
+stick l -1 0
+sleep 30t
+stick l 0 0
+sleep 70t

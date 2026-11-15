@@ -1,0 +1,5 @@
+# MD147: from air.p2s, gas held through the landing (as MD164's land.pad).
+down cross
+sleep 130t
+release
+sleep 10t
