@@ -258,6 +258,7 @@ fn ride_of(table: &AcosTable) -> atv_car::Ride {
         back: None,
         cache: None,
         spot: (Vf::ZERO, Vf::ZERO),
+        recorded: None,
         rest: Vec::new(),
     }
 }
