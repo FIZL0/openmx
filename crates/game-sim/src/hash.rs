@@ -680,6 +680,31 @@ impl State for crate::race::Race {
                 }
             });
         }
+        // A stadium's camera flashes (S321), on an sx track's race: any other walks as before.
+        if let Some(f) = &self.flashes {
+            w.group("flashes", |w| {
+                let b = &f.burst;
+                w.f("from", b.from);
+                w.f("length", b.length);
+                w.f("rate", b.rate);
+                w.f("half", b.half);
+                w.f("floor", f.floor);
+                w.bool("ready", f.ready);
+                w.u32("head", f.head as u32);
+                w.u32("count", f.count as u32);
+                w.u32("pool", f.pool.len() as u32);
+                for &k in &f.pool {
+                    w.u32("hidden", k);
+                }
+                for (&t, &k) in f.times.iter().zip(&f.lit) {
+                    w.f("time", t);
+                    w.u32("lit", k);
+                }
+                for &x in &f.fade {
+                    w.f("fade", x);
+                }
+            });
+        }
     }
 }
 

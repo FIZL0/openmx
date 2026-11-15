@@ -16,8 +16,10 @@
 //! ([`CameraFlashes::shown`]); nothing in the simulation reads it.
 //!
 //! The draws: the original takes them from the one `rand()` everything shares, so a race on an sx
-//! track moves the shared generator about a dozen draws every 0.18 s. [`CameraFlashes::tick`] takes
-//! the generator it is handed; the shell hands it one of its own (see V127's journal).
+//! track moves the shared generator about a dozen draws every 0.18 s. The object is a child of the
+//! score manager's node, whose tick walks its children last, and the race manager's tick ends with
+//! the score manager's: so the flashes tick at the very end of [`crate::race::Race::tick`], on the
+//! race's generator ([`crate::race::Race::flashes`], S321).
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
 use crate::race::PodiumFlashes;
@@ -61,16 +63,16 @@ pub struct CameraFlashes {
     /// No batch is lit: the next tick picks one (`+0x58`).
     pub ready: bool,
     /// The hidden flashes (`+0x30`), in the order the swap-removes and returns leave them.
-    pool: Vec<u32>,
+    pub(crate) pool: Vec<u32>,
     /// The queue of lit flashes (`+0x48`), a ring as long as there are flashes (`+0x54`): each
     /// entry's time and flash, from `head` (`+0x50`), `count` (`+0x4c`) of them.
-    times: Vec<F>,
-    lit: Vec<u32>,
-    head: usize,
-    count: usize,
+    pub(crate) times: Vec<F>,
+    pub(crate) lit: Vec<u32>,
+    pub(crate) head: usize,
+    pub(crate) count: usize,
     /// Each flash's fade (the model's `+0x16c`), set while it is lit: 1 as its batch is picked,
     /// running down to 0 as the batch's time does.
-    fade: Vec<F>,
+    pub(crate) fade: Vec<F>,
 }
 
 impl CameraFlashes {

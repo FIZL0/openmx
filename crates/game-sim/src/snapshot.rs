@@ -1057,7 +1057,9 @@ wire!(crate::r#move::Ride { g_peak, clutch_timer, clutch_scale_start, clutch_cof
 wire!(crate::ride::Wheel { mv, w, surface, inv_inertia, steer_axis, slip, gyro, angle, chassis_local_velocity, local_velocity, local_force, frame, side_per_load });
 wire!(crate::tire::Slip { spinning, locked, sliding });
 wire!(crate::rng::Rng { state });
-wire!(crate::race::Race { gate, cards, music_in, music_held, tip_in, stage, tip_armed, countdown, activity, scene_clock, rng, laps });
+wire!(crate::race::Race { gate, cards, music_in, music_held, tip_in, stage, tip_armed, countdown, activity, scene_clock, rng, laps, flashes });
+wire!(crate::camera_flash::CameraFlashes { burst, floor, ready, pool, times, lit, head, count, fade });
+wire!(crate::race::PodiumFlashes { from, length, rate, half });
 // A race's laps (P313): the track's paths go with them, as their checkpoint marks and route words
 // change on the way round.
 wire!(crate::race::Laps { rules, course, lists, cards, track });

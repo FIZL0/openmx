@@ -676,6 +676,10 @@ pub struct Race {
     /// The race's laps (P313), on a race read off its track's file: `None` — a start alone, as S13b
     /// ported it — and the tick does nothing after the drop.
     pub laps: Option<Box<Laps>>,
+    /// A supercross stadium's camera flashes (the activity's `+0x414`, S321), on a race on a track
+    /// whose name holds `sx`: ticked last, on [`Race::rng`]. `None` — every other race — and the tick
+    /// draws what it did.
+    pub flashes: Option<Box<crate::camera_flash::CameraFlashes>>,
 }
 
 /// What one [`Race::tick`] did that is not in the race itself.
@@ -716,6 +720,7 @@ impl Race {
             scene_clock: F::ZERO,
             rng,
             laps: None,
+            flashes: None,
         }
     }
 
@@ -729,7 +734,9 @@ impl Race {
     /// — or, at zero, is armed once from the lesson stage; and then the score manager's countdown,
     /// whose last tick drops the gate ([`Race::drop`]). The watch runs before the drop, so a rider
     /// through the gate on the drop's own tick is still caught. Then, on a race with laps, the drop
-    /// starts them and every later tick runs them ([`Laps`]).
+    /// starts them and every later tick runs them ([`Laps`]). Last, the stadium's camera flashes, a
+    /// child the score manager's tick walks at its end ([`crate::camera_flash::CameraFlashes::tick`]),
+    /// drawing their picks on [`Race::rng`].
     pub fn tick(&mut self, dt: F, riders: &[CardFeed]) -> Frame {
         let mut frame = Frame::default();
         let started = !self.countdown.running;
@@ -791,6 +798,9 @@ impl Race {
             } else if frame.dropped {
                 laps.start();
             }
+        }
+        if let Some(flashes) = &mut self.flashes {
+            flashes.tick(dt, &mut self.rng);
         }
         frame
     }

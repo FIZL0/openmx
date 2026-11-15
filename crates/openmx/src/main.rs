@@ -5863,7 +5863,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         _ => None,
     };
     if let Some(s) = &stadium_flashes {
-        println!("race: {} camera flashes, floor {}", s.len(), s.flashes.floor.0);
+        println!("race: {} camera flashes, floor {}", s.len(), s.flashes.as_ref().map_or(0.0, |f| f.floor.0));
     }
     // P313b: a race's drop gate falls at the drop: its prop, named in the track's `.toy`
     // `[DropGate]`, is taken out of the scene's static props and drawn turned as it swings down.
@@ -7665,7 +7665,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 (m.0[3], m.0[2])
             })
             .collect();
-        sim.race = Some(Box::new(start.race_of(&riders)));
+        let mut race = start.race_of(&riders);
+        // S321: an sx track's camera flashes tick in the race, on its generator.
+        if let Some(s) = &mut stadium_flashes {
+            s.hand_to(&mut race);
+        }
+        sim.race = Some(Box::new(race));
     }
     for (i, (rider, phy)) in others.into_iter().zip(other_phys).enumerate() {
         // Every player has a plane of their own, parked in their bay of the lot (P87) or, on a map
@@ -9707,7 +9712,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 println!("race: drop gate down at tick {}, turned {:.2} rad, up {:.2},{:.2},{:.2}", world.seats[0].sim.ticks, g.turned(), up[0], up[1], up[2]);
             }
         }
-        // The stadium's camera flashes (V127), a tick for each simulated, and `--race-win`'s finish
+        // The stadium's camera flashes (V127; the race ticks them, S321), and `--race-win`'s finish
         // when its time comes: the flashes' burst and, the winner's, the track's fireworks.
         if simulated && let Some(s) = &mut stadium_flashes {
             let was = s.clock;
@@ -9715,8 +9720,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             if let Some(at) = args.race_win
                 && was < at
                 && s.clock >= at
+                && let Some(flashes) = world.seats[0].sim.race.as_mut().and_then(|r| r.flashes.as_deref_mut())
             {
-                let over = s.player_wins();
+                let over = s.player_wins(&mut flashes.burst);
                 println!("race: won at {:.2}s — fireworks {}, flashes toward {}", s.clock, over.fireworks, s.levels.player_win.0);
                 if over.fireworks && let Some(fx) = &mut track_fx {
                     fx.finish();
@@ -9727,6 +9733,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         // finish at the line heard as the original's `race_over` (the flashes' burst, the winner's
         // fireworks: S192), and at the Over the cards handed to the results, which the ride's leave
         // shows once the outro's wait has run.
+        // The race's flashes' burst (S321), which a finish sets going: put back in the race below.
+        let mut burst = world.seats[0].sim.race.as_ref().and_then(|r| r.flashes.as_ref()).map(|f| f.burst);
         if simulated && let Some(laps) = world.seats[0].sim.race.as_ref().and_then(|r| r.laps.as_deref()) {
             let laps_run = laps.rules.lap.laps.clamp(0, 255) as u8;
             for change in race_watch.look(laps) {
@@ -9735,9 +9743,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     race_start::Change::Place { player, place } => println!("race: player {} in place {place}", player + 1),
                     race_start::Change::Finished { player, place } => {
                         let Some(card) = laps.card(player) else { continue };
-                        let over = match &mut stadium_flashes {
-                            Some(s) => s.card_finishes(card, laps_run),
-                            None => {
+                        let over = match (&stadium_flashes, &mut burst) {
+                            (Some(s), Some(burst)) => s.card_finishes(card, laps_run, burst),
+                            _ => {
                                 let event = game_sim::race::ResultEvent { activity: 2, laps: laps_run, ..Default::default() };
                                 let flash = game_sim::race::FlashLevels::default();
                                 game_sim::race::Supercross::new().race_over(card, None, &event, -1, &game_sim::race::HallOfFame::default(), None, &flash)
@@ -9766,6 +9774,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     break;
                 }
             }
+        }
+        if let (Some(b), Some(f)) = (burst, world.seats[0].sim.race.as_mut().and_then(|r| r.flashes.as_deref_mut())) {
+            f.burst = b;
         }
         // The track's rain (V73): who rode into its triggers, then a frame of its box where the
         // camera it follows is.
@@ -11170,7 +11181,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 actors.push(Actor { model, at: *at, pose: Some(gpu_poses.len() - 1), lod_from: None, alpha: 1.0, casts: false });
             }
             // The stadium's lit camera flashes (V127), each at its fade.
-            actors.extend(stadium_flashes.iter().flat_map(|s| s.actors()));
+            let flashes = world.seats[0].sim.race.as_ref().and_then(|r| r.flashes.as_deref());
+            actors.extend(stadium_flashes.iter().zip(flashes).flat_map(|(s, f)| s.actors(f)));
             // The race's drop gate (P313b), standing or swung down.
             actors.extend(gate_swing.iter().map(|g| g.actor()));
             // A view's own player's markers (P88), faint bikes where each was put down: in that
@@ -11655,7 +11667,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 }
             }
             // The stadium's lit camera flashes (V127): the software path draws them solid.
-            actor.extend(stadium_flashes.iter().flat_map(|s| s.shown()).map(|(model, at, _)| (model, at)));
+            let flashes = world.seats[0].sim.race.as_ref().and_then(|r| r.flashes.as_deref());
+            actor.extend(stadium_flashes.iter().zip(flashes).flat_map(|(s, f)| s.shown(f)).map(|(model, at, _)| (model, at)));
             actor.extend(gate_swing.iter().map(|g| (g.model(), g.at())));
             // On a wrapped world (MD43) every rider, plane and car at its copy nearest the camera.
             if soft_wrap.is_some() {
