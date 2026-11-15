@@ -1,5 +1,5 @@
 #!/bin/bash
-# tools/build.sh [linux|windows|android|all|features] [--exact-sim] — the optimised builds players download, into dist/ (as opentennis's tools/build.sh):
+# tools/build.sh [linux|windows|android|macos|all|features] [--exact-sim] — the optimised builds players download, into dist/ (as opentennis's tools/build.sh):
 #   dist/linux/         openmx, openmx.png (the icon, for a launcher or Steam shortcut), README.txt: unpack,
 #                       ./openmx "your disc.iso" (or drop the .iso on it) the first time, ./openmx after that;
 #                       settings, controls and mods/ in ~/.local/share/openmx (P190)
@@ -9,6 +9,10 @@
 #   dist/openmx.apk     P308: the Android app (tools/apk.sh, its SDK/NDK setup there; arm64 phones, OPENMX_ABIS adds
 #                       the emulator's x86_64): the player picks the ISO on first start. Not in `all`, as the iPhone
 #                       app is not: tools/release.sh builds it beside.
+#   dist/macos/openmx-macos-arm64.dmg  P351 (opentennis's M162): openMX.app for Apple Silicon (tools/macos-app.sh),
+#                       ad-hoc signed, not notarized (open it once with right-click → Open); the first start asks for
+#                       the ISO, like Linux. Needs MacOSX.sdk in ~/.local/share/hst-ios and rcodesign (see
+#                       tools/macos-build.sh, tools/macos-app.sh). Not in `all` either: tools/release.sh builds it beside.
 # The sim (P262): player builds run the native sim, the simulation on the host's plain f32 rather than the PS2's
 # arithmetic (openmx's `native-sim` feature, F15) — about twice as fast on a Steam Deck, not bit-exact, online only
 # with other native builds (its online build id ends ", native sim"; the corner and --version do not say, P267),
@@ -32,7 +36,7 @@ features="--features ship,native-sim" exact=
 case $2 in
     --exact-sim) features="--features ship" exact=1 ;;
     --native-sim|"") ;;
-    *) echo "usage: tools/build.sh [linux|windows|android|all|features] [--exact-sim]" >&2; exit 2 ;;
+    *) echo "usage: tools/build.sh [linux|windows|android|macos|all|features] [--exact-sim]" >&2; exit 2 ;;
 esac
 [ "$what" != features ] || { echo "$features"; exit 0; }
 
@@ -111,6 +115,7 @@ case $what in
     linux) linux ;;
     windows) windows ;;
     android) tools/apk.sh ${exact:+--exact-sim} ;;  # apk.sh builds native and ship unless told --exact-sim
+    macos) mkdir -p dist/macos && tools/macos-app.sh dist/macos/openmx-macos-arm64.dmg ${exact:+--exact-sim} ;;
     all) linux; windows ;;
-    *) echo "usage: tools/build.sh [linux|windows|android|all|features] [--exact-sim]" >&2; exit 2 ;;
+    *) echo "usage: tools/build.sh [linux|windows|android|macos|all|features] [--exact-sim]" >&2; exit 2 ;;
 esac

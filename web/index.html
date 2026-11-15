@@ -59,8 +59,8 @@
     "https://openmx.dev/shots/biplane.jpg", "https://openmx.dev/shots/rain-nat01.jpg", "https://openmx.dev/shots/split-4p.jpg",
     "https://openmx.dev/shots/menu-main.jpg"],
   "genre": ["Racing", "Sports", "Motocross"],
-  "gamePlatform": ["Web browser", "PC", "Windows", "Linux", "Steam Deck"],
-  "operatingSystem": "Windows, Linux, SteamOS, any browser with WebGPU or WebGL2",
+  "gamePlatform": ["Web browser", "PC", "Windows", "macOS", "Linux", "Steam Deck"],
+  "operatingSystem": "Windows, macOS, Linux, SteamOS, any browser with WebGPU or WebGL2",
   "applicationCategory": "GameApplication",
   "playMode": ["SinglePlayer", "MultiPlayer"],
   "numberOfPlayers": { "@type": "QuantitativeValue", "minValue": 1, "maxValue": 16 },
@@ -559,6 +559,14 @@ footer a { color: var(--bone); }
           <div class="row" style="margin-top:14px"><a class="pill" data-file="openmx-windows-x86_64.zip">Download for Windows</a><a class="pill ghost" id="builds" target="_blank" rel="noopener">All builds</a></div>
         </div>
         <div class="card">
+          <h3>Mac</h3>
+          <p>Apple Silicon (M1 and later), macOS 11 and newer. Open the .dmg and drag openMX onto Applications. It isn't notarized,
+            so the first time right-click it → Open; on macOS 15 and later open it once, then System Settings → Privacy &amp;
+            Security → Open Anyway. It asks for your disc image on first start. Settings and mods live in
+            <code>~/Library/Application Support/openmx</code>.</p>
+          <div class="row" style="margin-top:14px"><a class="pill" id="macdl" data-file="openmx-macos-arm64.dmg">Download for Mac</a></div>
+        </div>
+        <div class="card">
           <h3>iPhone &amp; iPad</h3>
           <p>Add FIZL0's app source to Feather, AltStore or SideStore, install openMX from it and get every update there. Then put
             your disc image in Files → On My iPhone → openMX. <a href="ios.html">Step by step</a>.</p>
@@ -576,7 +584,7 @@ footer a { color: var(--bone); }
           reads the tracks, bikes, rider, textures, menus and sound from an .iso you make of your own PlayStation 2 disc
           (the US release, SLUS-20767), on your own machine. Nothing from the disc is on this site or uploaded anywhere.</p></details>
         <details><summary>Can I play MX Unleashed on PC?</summary><p>Yes. openMX is a remaster of MX Unleashed that runs in a web
-          browser and natively on Windows, Linux and the Steam Deck. It isn't an emulator: the game is rewritten,
+          browser and natively on Windows, Mac (Apple Silicon), Linux and the Steam Deck. It isn't an emulator: the game is rewritten,
           so it runs at any resolution, in widescreen and at a high frame rate, with a pad or the keyboard.</p></details>
         <details><summary>Is it the same game as the original?</summary><p>On the bike, yes. The physics, tricks, wrecks, biplane
           and timing are ported from MX Unleashed and proved against it in an emulator, so the same inputs ride out the same
@@ -1165,6 +1173,8 @@ footer a { color: var(--bone); }
       () => { getSelection().selectAllChildren($('#srcurl')); e.target.textContent = 'Select and copy the URL below'; });
   };
   for (const a of document.querySelectorAll('[data-file]')) a.href = `${RELEASES}/${BETA ? 'download/beta' : 'latest/download'}/${a.dataset.file}`;
+  // P351: the Mac app is built by tools/release.sh only, so the beta has none: the beta site offers the latest release's
+  $('#macdl').href = `${RELEASES}/latest/download/openmx-macos-arm64.dmg`;
   $('#builds').href = `${RELEASES}/${BETA ? 'tag/beta' : 'latest'}`;
   const built = () =>
     fetch('version.txt', { cache: 'no-store' })

@@ -204,6 +204,9 @@ mod android;
 // The Windows build's pads and sound (P192).
 #[cfg(windows)]
 mod win;
+// The Mac app's log when it is opened from the Finder (P351).
+#[cfg(target_os = "macos")]
+mod mac_log;
 mod ground;
 mod hud;
 // What the CPU still draws over the GPU's picture (P44), as patches.
@@ -423,6 +426,9 @@ const STUNT_TABLE: &str = "stunts.ini";
 fn main() {
     dev_env();
     launched();
+    // P351: openmx-log.txt beside settings.txt when nobody reads the output, as on the phones (`mac_log.rs`)
+    #[cfg(target_os = "macos")]
+    mac_log::unwatched_to(&player::data_dir());
     // The iPhone runs UIKit on this thread and the shell on another (P200).
     #[cfg(target_os = "ios")]
     return ios::main();

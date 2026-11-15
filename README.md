@@ -42,6 +42,10 @@ SideStore, or add `https://fizl0.github.io/apps/source.json` under Sources: inst
 updates arrive through the app. You sign it with your own certificate; the ISO goes in Files → On My
 iPhone → openMX. Each release also carries the unsigned `openmx-ios.ipa`.
 
+**Mac.** Each release carries `openmx-macos-arm64.dmg`, openMX.app for Apple Silicon (M1 and later, macOS
+11+): open it and drag openMX onto Applications. The app isn't notarized: the first time, right-click openMX →
+Open, or on macOS 15 and later open it once, then System Settings → Privacy & Security → Open Anyway.
+
 **Additions, layered on top.** Track and music mods (`mods/`, `--mods`), including tracks imported from
 MX vs. ATV and Untamed, gameplay modifiers, markers you can drop and return to, camera and FOV
 settings. With them off the ride is the original's, and the replay tests say so.

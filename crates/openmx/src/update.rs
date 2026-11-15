@@ -58,6 +58,8 @@ const ASSET: Option<&str> = if cfg!(all(target_os = "linux", target_arch = "x86_
     // P308: one .apk for every Android phone (arm64, and x86_64 for the emulator), opentennis's M140.
     Some("openmx-android.apk")
 } else {
+    // P351: a Mac's openMX.app is ad-hoc signed as a whole (tools/macos-app.sh): a swapped binary breaks the
+    // signature and won't start, so Macs (and the iPhone) get the release page.
     None
 };
 

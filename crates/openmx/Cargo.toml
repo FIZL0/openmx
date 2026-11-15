@@ -109,6 +109,11 @@ gilrs = { version = "0.11", default-features = false, features = ["xinput"] }
 windows = { version = "0.62", features = ["Gaming_Input"] }
 cpal = "0.16"
 
+# The Mac app (P351): the sound through cpal's CoreAudio, and the log file a Finder launch writes (`src/mac_log.rs`).
+[target.'cfg(target_os = "macos")'.dependencies]
+cpal = "0.16"
+libc = "0.2"
+
 # The browser's build (N4), as opentennis's is: wasm-bindgen for the page's calls, and ggrs' clock and
 # random numbers from the page (its `wasm-bindgen` feature).
 [target.'cfg(target_arch = "wasm32")'.dependencies]

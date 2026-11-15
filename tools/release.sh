@@ -1,7 +1,7 @@
 #!/bin/bash
 # tools/release.sh VERSION [notes.md] [publish|--dry-run] — a full release (v1.0.0, "openMX 1.0.0"), as opentennis's tools/release.sh:
 # set the workspace's version to VERSION (a "Release vVERSION" commit if it changes), build every platform tools/build.sh
-# builds (Linux, Windows) and the website (tools/web.sh), every one on the native sim (P262; the notes say so), sign SHA256SUMS with the minisign key
+# builds (Linux, Windows), the Android, iPhone and Mac apps, and the website (tools/web.sh), every one on the native sim (P262; the notes say so), sign SHA256SUMS with the minisign key
 # (~/.config/openmx/release.key, asks its password unless ~/.config/openmx/release.pass holds it) and upload to GitHub:
 #   openmx-linux-x86_64.tar.gz   what players download: openmx and README.txt. ./openmx "disc.iso" (or drop the .iso on
 #                                it) the first time, ./openmx after: it remembers the disc, and keeps settings, controls and
@@ -13,6 +13,11 @@
 #   openmx-android.apk           P308: the Android app (tools/build.sh android, tools/apk.sh; needs ~/Android/Sdk), signed with
 #                                this machine's ~/.android/debug.keystore: keep that file, a phone only takes an update (the
 #                                in-game updater's too, M140) signed with the same key
+#   openmx-macos-arm64.dmg       P351 (opentennis's M162): openMX.app for Apple Silicon (tools/macos-app.sh; needs
+#                                MacOSX.sdk and rcodesign), ad-hoc signed, not notarized (its row says how to open it). No
+#                                updater asset: swapping the binary would break the bundle's signature, so a Mac's update
+#                                notice opens the release page. Built here only: pages.yml has no macOS job (its runners
+#                                were dropped 11-03), so the beta has no Mac app
 #   altstore-source.json         P201: that app as an AltStore / SideStore / Feather source (tools/ios-source.sh). FIZL0's
 #                                shared source (github.com/FIZL0/apps) merges it; players add https://fizl0.github.io/apps/source.json
 #                                (web/ios.html), which a published release rebuilds at once (`gh workflow run source -R FIZL0/apps`)
@@ -53,13 +58,15 @@ command -v zip >/dev/null || { echo "zip missing: sudo pacman -S zip" >&2; exit 
 command -v jq >/dev/null || { echo "jq missing: sudo pacman -S jq" >&2; exit 1; }
 sdk=${OPENMX_IOS_SDK:-$HOME/.local/share/hst-ios/iPhoneOS.sdk}
 [ -d "$sdk" ] || { echo "no iOS SDK at $sdk (the release carries openmx-ios.ipa): run tools/ios-sdk.py Xcode.xip" >&2; exit 1; }
+macsdk=${OPENMX_MACOS_SDK:-$HOME/.local/share/hst-ios/MacOSX.sdk}
+[ -d "$macsdk" ] || { echo "no macOS SDK at $macsdk (the release carries openmx-macos-arm64.dmg): see tools/macos-build.sh" >&2; exit 1; }
 [ -d "${ANDROID_HOME:-$HOME/Android/Sdk}" ] || { echo "no Android SDK (the release carries openmx-android.apk): see tools/apk.sh" >&2; exit 1; }
 # P312 (opentennis's B492): every player build drops the developers' OPENMX_* variables (openmx's `ship` feature)
-for f in tools/build.sh tools/apk.sh tools/ios-ipa.sh tools/web.sh; do
+for f in tools/build.sh tools/apk.sh tools/ios-ipa.sh tools/macos-app.sh tools/web.sh; do
     grep -q 'features="--features [a-z,-]*ship' "$f" || { echo "$f doesn't build with --features ship (B492)" >&2; exit 1; }
 done
 # what the release uploads, in dist/release
-assets=(openmx-linux-x86_64.tar.gz openmx-windows-x86_64.zip openmx-ios.ipa openmx-android.apk openmx-linux-x86_64
+assets=(openmx-linux-x86_64.tar.gz openmx-windows-x86_64.zip openmx-macos-arm64.dmg openmx-ios.ipa openmx-android.apk openmx-linux-x86_64
     openmx-windows-x86_64.exe web.tar.gz SHA256SUMS SHA256SUMS.sig altstore-source.json)
 if [ -n "$dry" ]; then
     out=dist/release-dry pub=$(tail -1 "$pubfile" 2>/dev/null || echo "<the key in $pubfile>")
@@ -95,6 +102,12 @@ cp dist/linux/openmx "$out/openmx-linux-x86_64"
 cp dist/windows/openmx.exe "$out/openmx-windows-x86_64.exe"
 tools/ios-ipa.sh "$out/openmx-ios.ipa"
 tools/build.sh android
+# P351: the Mac app, a .dmg (its UDIF trailer, "koly", in the last 512 bytes); tools/macos-app.sh signs the app before
+# it packs it (an unsigned arm64 binary won't start at all)
+tools/build.sh macos
+mac=dist/macos/openmx-macos-arm64.dmg
+[ "$(tail -c 512 "$mac" 2>/dev/null | head -c 4)" = koly ] || { echo "$mac is missing or not a .dmg (tools/macos-app.sh)" >&2; exit 1; }
+cp "$mac" "$out/openmx-macos-arm64.dmg"
 cp dist/openmx.apk "$out/openmx-android.apk"
 # P201: the sideloading source, at a URL that always serves the latest release's copy (FIZL0/apps reads it there)
 tools/ios-source.sh "$version" "$out/openmx-ios.ipa" >/dev/null
@@ -120,12 +133,13 @@ body=$out/notes.md
     echo "| Platform | File | How to play |"
     echo "|---|---|---|"
     echo "| **Windows** 10/11 | [\`openmx-windows-x86_64.zip\`](https://github.com/$repo/releases/download/$tag/openmx-windows-x86_64.zip) | Unzip, then drop your ISO on \`openmx.exe\` once; start \`openmx.exe\` after |"
+    echo "| **Mac** (Apple Silicon: M1 and later, macOS 11+) | [\`openmx-macos-arm64.dmg\`](https://github.com/$repo/releases/download/$tag/openmx-macos-arm64.dmg) | Open it and drag openMX onto Applications. It isn't notarized, so the first time: right-click it → Open; on macOS 15 and later, open it once, then System Settings → Privacy & Security → Open Anyway. It asks for your ISO on first start; the game's update notice opens the release page |"
     echo "| **Linux** / **Steam Deck** | [\`openmx-linux-x86_64.tar.gz\`](https://github.com/$repo/releases/download/$tag/openmx-linux-x86_64.tar.gz) | Unpack, run \`./openmx your.iso\` (or drop the ISO on it) once; \`./openmx\` after. For Steam (with artwork): run \`add-to-steam.sh\` |"
     echo "| **iPhone** / **iPad** (iOS 15+) | [add the source in one tap](https://openmx.dev/ios.html) | Easiest: add the source in one tap (Feather, AltStore, SideStore), or add \`https://fizl0.github.io/apps/source.json\` under Sources by hand; install openMX from it and updates arrive there. Then put your ISO in Files → On My iPhone → openMX. Touch controls or a controller. Signing it yourself instead: [\`openmx-ios.ipa\`](https://github.com/$repo/releases/download/$tag/openmx-ios.ipa) (unsigned; Sideloadly, AltStore…) |"
     echo "| **Android** 8+ | [\`openmx-android.apk\`](https://github.com/$repo/releases/download/$tag/openmx-android.apk) | Install it (allow unknown apps), then pick your ISO on first start. Touch controls or a controller; the game offers its updates |"
     echo "| **Browser** | [openmx.dev](https://openmx.dev/) | Nothing to install |"
     echo
-    # P262: which sim the downloads run (tools/build.sh, tools/web.sh and tools/ios-ipa.sh build the player builds native)
+    # P262: which sim the downloads run (tools/build.sh, tools/web.sh, tools/ios-ipa.sh and tools/macos-app.sh build the player builds native)
     echo "Every download above runs the **native sim**: the original's physics on your machine's plain floats, faster"
     echo "than the PS2's arithmetic and not bit-for-bit with it;"
     echo "online, it meets every other native build of $version. (The exact, PS2-arithmetic build is \`tools/build.sh --exact-sim\`.)"
