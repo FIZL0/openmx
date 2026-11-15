@@ -363,19 +363,57 @@ impl WorldStep<'_> {
         self.asked[4] += 1;
         let was = scene.nodes;
         let p = scene.tip(0, v);
-        for (k, (a, b)) in was.iter().zip(&scene.nodes).enumerate().take(at.len()) {
-            let n = at[k];
-            for r in 0..4 {
-                if a.world[r].to_bits() != b.world[r].to_bits() {
-                    put_v(ee, n + 0x70 + 0x10 * r as u32, b.world[r]);
-                }
-            }
-            if a.flags != b.flags {
-                let w = ee.u32_at(n + 0x100);
-                ee.set_u32(n + 0x100, w & !0xff | u32::from(b.flags));
-            }
-        }
+        nodes_write(ee, &was, scene, at);
         p
+    }
+
+    /// MD139 — the quad's scene node set at `v` after a sweep hit (the record's put-out), the port's
+    /// scene's ([`atv_moto::Scene::set_position`]: the quad's node has no parent), what it changed (the
+    /// own frame's position row at `+0x30`, the flags) written to the nodes in RAM.
+    fn node_set(&mut self, ee: &mut Ee, node: u32, v: Vf) {
+        let (scene, at) = self.scene.as_mut().expect("the pass's scene");
+        assert_eq!(node, at[0], "the record's node is the quad's");
+        let was = scene.nodes;
+        scene.set_position(0, v).expect("the quad's node has no parent");
+        // The move marks the node's whole subtree out of date (`atv_node_moved`), and the quad's
+        // subtree in RAM goes on past the nodes the scene holds (its wheels' and the rider's).
+        if was[0].flags & 1 != 0 {
+            let child = ee.u32_at(node + 0xf4);
+            out_of_date_in_ram(ee, child, at);
+        }
+        nodes_write(ee, &was, scene, at);
+        *self.outside.entry("record node set".into()).or_default() += 1;
+    }
+
+    /// MD139 — **the part's place after a sweep hit** (`atv_part_sync` on the record's active part
+    /// `part`, a ray probe on the quad's node): the node's world frame brought up to date (the port's
+    /// scene, [`atv_moto::Scene::update`]), the part stood at it and its box moved
+    /// ([`game_sim::atv_sync::part_sync`]), as [`quad::Steps`] answers [`quad::Call::PartSync`]; its
+    /// frame, centre and reach written to RAM, and its database entry moved
+    /// ([`record_outside::spatial_move_in_ram`]).
+    fn part_place(&mut self, ee: &mut Ee, part: u32) {
+        let (scene, at) = self.scene.as_mut().expect("the pass's scene");
+        assert_eq!(ee.u32_at(part + 0x174), at[0], "the part's node is the quad's");
+        let mut gaps = Vec::new();
+        let mut c = image::collidable(ee, part, &mut gaps);
+        assert!(gaps.is_empty() && matches!(c.kind, game_sim::atv_sync::Kind::Rays { .. }), "the record's part at {part:#x} is no ray probe");
+        let was = scene.nodes;
+        scene.update(0);
+        nodes_write(ee, &was, scene, at);
+        let frame = scene.nodes[0].world;
+        let moved = game_sim::atv_sync::part_sync(&mut c, &frame);
+        for (r, row) in c.frame.iter().enumerate() {
+            put_v(ee, part + 0x130 + 0x10 * r as u32, *row);
+        }
+        put_v(ee, part + 0x50, c.centre);
+        ee.set_u32(part + 0x70, c.reach.0.to_bits());
+        let what = if let Some((centre, half, reach)) = moved {
+            record_outside::spatial_move_in_ram(ee, part + 0x18, centre, half, reach);
+            "record part place, its entry moved"
+        } else {
+            "record part place, no entry"
+        };
+        *self.outside.entry(what.into()).or_default() += 1;
     }
 
     fn step(&mut self, ee: &mut Ee, dt: F, held: Option<atv_contact::Held>) {
@@ -643,6 +681,49 @@ fn quad_body_words(b: &Body, at: u32) -> Vec<(u32, u32)> {
     out
 }
 
+/// `atv_node_out_of_date` on the nodes in RAM from `first` (down a sibling list at `+0xf8`, into a
+/// node's children at `+0xf4` only if it was current: its flags' bit 0), as [`atv_moto::Scene`]'s
+/// move marks its own: the flags of the nodes past the scene's (`held`), which [`nodes_write`] does
+/// not write; the held ones' it leaves to the scene, read here as they were before the move.
+fn out_of_date_in_ram(ee: &mut Ee, first: u32, held: &[u32]) {
+    let mut at = first;
+    while at != 0 {
+        let w = ee.u32_at(at + 0x100);
+        if w & 1 != 0 {
+            if !held.contains(&at) {
+                ee.set_u32(at + 0x100, w & !1);
+            }
+            out_of_date_in_ram(ee, ee.u32_at(at + 0xf4), held);
+        }
+        at = ee.u32_at(at + 0xf8);
+    }
+}
+
+/// The little-endian word at byte `i` of `ram`.
+fn word_le(ram: &[u8], i: usize) -> u32 {
+    u32::from_le_bytes(ram[i..i + 4].try_into().expect("four bytes"))
+}
+
+/// The scene's nodes (`at`, node 0 the quad's) written to RAM where they changed from `was`: each
+/// node's own frame (`+0x30`), world frame (`+0x70`) and flags byte (`+0x100`).
+fn nodes_write(ee: &mut Ee, was: &[atv_moto::Node], scene: &atv_moto::Scene, at: &[u32]) {
+    for (k, (a, b)) in was.iter().zip(&scene.nodes).enumerate().take(at.len()) {
+        let n = at[k];
+        for r in 0..4 {
+            if a.local[r].to_bits() != b.local[r].to_bits() {
+                put_v(ee, n + 0x30 + 0x10 * r as u32, b.local[r]);
+            }
+            if a.world[r].to_bits() != b.world[r].to_bits() {
+                put_v(ee, n + 0x70 + 0x10 * r as u32, b.world[r]);
+            }
+        }
+        if a.flags != b.flags {
+            let w = ee.u32_at(n + 0x100);
+            ee.set_u32(n + 0x100, w & !0xff | u32::from(b.flags));
+        }
+    }
+}
+
 /// The record at `at` in the interpreter's RAM as [`record`]'s port sees its outside
 /// (`tests/mxvatv_bike_ride.rs`' F31b4 glue): each call is the original's (scratch slots 0..2 hold
 /// the arguments), the other records a world ray hands a contact to are read on first use and held,
@@ -665,6 +746,23 @@ impl RecordInRam<'_, '_, '_> {
     fn run(&mut self, f: u32, ints: &[u64]) {
         self.ee.set(28, GP);
         self.ee.call(f, ints, &[], BUDGET);
+    }
+    /// MD139: the original's call `f` run on the RAM as it is, what it left kept, and the RAM put
+    /// back, for [`RecordInRam::is_the_originals`] to compare the port's call with.
+    fn original_aside(&mut self, f: u32, ints: &[u64]) -> Vec<u8> {
+        let before = self.ee.ram.clone();
+        self.run(f, ints);
+        std::mem::replace(&mut self.ee.ram, before)
+    }
+    /// Every RAM word outside the stack as the original's call left it (`theirs`) after the port's.
+    fn is_the_originals(&self, theirs: &[u8], what: &str) {
+        let stack = (self.ee.stack as usize).saturating_sub(0x10_0000);
+        let differ: Vec<String> = (0..stack)
+            .step_by(4)
+            .filter(|&i| theirs[i..i + 4] != self.ee.ram[i..i + 4])
+            .map(|i| format!("{i:#010x}: original {:08x}, port {:08x}", word_le(theirs, i), word_le(&self.ee.ram, i)))
+            .collect();
+        assert!(differ.is_empty(), "{what}: {} words differ from the original's call:\n  {}", differ.len(), differ.join("\n  "));
     }
     fn put(&mut self, k: u32, v: Vf) -> u64 {
         let a = self.ee.scratch(k);
@@ -754,8 +852,14 @@ impl Collides for RecordInRam<'_, '_, '_> {
         vf_at(self.ee, out)
     }
     fn node_move(&mut self, at: Vf) {
-        let p = self.put(0, at);
         let node = self.word(0xe8);
+        if self.port.is_some() {
+            let p = self.put(0, at);
+            let theirs = self.original_aside(NODE_SET, &[u64::from(node), 0, p]);
+            self.port.as_mut().expect("the port").node_set(self.ee, node, at);
+            return self.is_the_originals(&theirs, "the node's set after a sweep hit");
+        }
+        let p = self.put(0, at);
         self.run(NODE_SET, &[u64::from(node), 0, p]);
     }
     fn node_up(&self) -> [F; 3] {
@@ -810,6 +914,11 @@ impl Collides for RecordInRam<'_, '_, '_> {
     }
     fn place_part(&mut self) {
         let part = self.word(0x200);
+        if self.port.is_some() {
+            let theirs = self.original_aside(PROBE_PLACE, &[u64::from(part)]);
+            self.port.as_mut().expect("the port").part_place(self.ee, part);
+            return self.is_the_originals(&theirs, "the part's place after a sweep hit");
+        }
         self.run(PROBE_PLACE, &[u64::from(part)]);
     }
     fn part_rays(&self) -> Vec<[Vf; 2]> {
@@ -1289,6 +1398,12 @@ fn the_sweep_that_hits_the_palm_is_the_ports() {
     let [searches, _, sweeps, pairs, _, swept] = seen.port_asked;
     assert_eq!((searches, sweeps), (FAST_PALM_RIDE as u32, FAST_PALM_RIDE as u32), "a part search and a sweep a frame");
     assert!(pairs > 0 && swept > 0, "the fast ride's sweep never hit: {:?}", seen.port_asked);
+    // MD139: the put-out after a hit, its node set and part place, is the port's too.
+    let o = &seen.port_outside;
+    assert!(o.keys().all(|k| !k.starts_with("> ")), "an outside call was handed on: {o:?}");
+    assert!(o.get("record node set").is_some_and(|&n| n > 0), "the fast ride never set the node: {o:?}");
+    assert!(o.keys().any(|k| k.starts_with("record part place")), "the fast ride never placed the part: {o:?}");
+    eprintln!("MD139 fast palm: asked {:?}, outside {o:?}", seen.port_asked);
 }
 
 /// The fast palm ride: the frame whose velocity is scaled and by how much, and how long it runs.
