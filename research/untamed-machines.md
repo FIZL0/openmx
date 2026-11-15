@@ -336,6 +336,40 @@ drives and the pack itself are follow-ups (see `plan/`).
 The truck's `.phy` changes themselves (Weight, GravityScale, FrictionZone1, `[Preload]` off) need no code:
 the loaders read the same keys.
 
+## The hazard clock's callers and the node update on every machine (MD145)
+
+Untamed's hazard clock (MD81b) has three callers, each handing its own `grounded` (addresses in
+`research/oracle.txt # MD145`):
+
+| caller | `grounded` | `on` | port | proof |
+|---|---|---|---|---|
+| bike update (twin of SLUS-21104's Motocross override) | either wheel's ray down (`+0xd0`) | it and the held word (either wheel's surface holding) | `handling::untamed::bike_hazard`, in `handling::tail::vehicle_update_untamed` | `untamed_bike_hands_the_clock_either_rays_hit`: a stretch of the update, the clock run, 6000 states |
+| car update | any tire solidly down (`+0xa4`) | it and some tire on a hazard surface | `atv_car::Update::untamed` (MD81d) | `untamed_car_hands_the_clock_any_tire_solid`: a stretch, the clock's arguments against the port's call, 6000 states |
+| quad update | any wheel's ray down (`+0xd0`) | it and the hazard surface | `quad::Tail::untamed` (MD81b) | MD81b's static read |
+
+Beside the clock, Untamed's bike update changes the rumble pad's slot (presentation) and the run's distance
+clause, as the quad's: `if !(d <= 0) { dist += d·dt }`. `vehicle_update_untamed` takes both. Its inner update is
+still SLUS-21104's `tail::inner`; Untamed's is `untamed::vehicle_update` (MD93c), with another shape.
+
+**The `Handling::Untamed` bike ride has neither.** `ride.rs` rides MX Unleashed's sim with MX vs. ATV's steps:
+it has no hazard clock (its put-back is its own) and no scene graph. `tail::vehicle_update` runs only in the
+SLUS-21104 frame tests (`tests/mxvatv_bike_ride.rs`). So nothing on that ride takes SLUS-21104's clock or node
+update, and there is nothing to swap. The Untamed versions are ready for a ride of the MX vs. ATV bike's own
+frame.
+
+**The node update.** `atv_moto::Scene::untamed` makes `Scene::update` Untamed's (`update_untamed`), so every
+scene method that brings a node up to date goes through it. `atv_car::Load::untamed` sets it with the other
+switches. The quad's scene takes it with the quad's other Untamed routing (MD144). Untamed's change only
+touches the topmost stale node **with a parent**. In MD164's trophy-truck spawn and air images, the truck's
+node has no parent, and the port's car scene holds the truck's node alone, as a root. So on a car ride the
+switch changes no word (`untamed_car_node_has_no_parent`).
+
+**MD81c-f's trucks** (monster truck, baja, golf cart, sandrail: all the car class) need the car's clock,
+which MD81d routed, and no more: they share the car update, so `grounded` is any tire's `+0xa4` for all four.
+They need nothing from the node update while their scene is the truck's node alone. It would matter only
+when a truck's model nodes (tires, body parts under the truck's node) come into the port's scene, because
+each of those has a parent.
+
 ## Not checked
 
 - **Code** (MD81a compared the bike step, above; the other machines' steps are still unchecked). No function of SLUS-21701 was compared with SLUS-21104's. "Same classes" means the same

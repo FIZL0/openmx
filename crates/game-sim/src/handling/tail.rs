@@ -574,6 +574,20 @@ fn run_over(m: &mut impl Vehicles, dt: F, riders: u32) {
 
 /// **The bike's vehicle update**: the tail's step of the bike's listener.
 pub fn vehicle_update(m: &mut impl Vehicles, dt: F) {
+    vehicle_update_on(m, dt, false);
+}
+
+/// **Untamed's bike vehicle update** (MD145): [`vehicle_update`] with SLUS-21701's two changes in it:
+/// the hazard clock is Untamed's, handed whether either wheel's ray is down
+/// ([`super::untamed::bike_hazard`]), and the run's distance adds only a distance above 0 (SLUS-21104
+/// raises one under 0 to 0 and adds it: they part only on a `-0` distance). [`inner`] is still
+/// SLUS-21104's; Untamed's is [`super::untamed::vehicle_update`] (MD93c).
+pub fn vehicle_update_untamed(m: &mut impl Vehicles, dt: F) {
+    vehicle_update_on(m, dt, true);
+}
+
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
+fn vehicle_update_on(m: &mut impl Vehicles, dt: F, untamed: bool) {
     if m.vehicle().state == 0 {
         inner(m, dt);
         return;
@@ -585,12 +599,16 @@ pub fn vehicle_update(m: &mut impl Vehicles, dt: F) {
     let slow = v.speed < v.slow_below;
     inner(m, dt);
 
-    let v = m.vehicle();
-    let [front, rear] = v.wheels;
-    v.held = u32::from(front.surface_holds || rear.surface_holds);
-    let on = v.held != 0 && (front.ray_hit || rear.ray_hit);
-    let limit = front.stuck_limit.max(rear.stuck_limit);
-    stuck(m, on, dt, limit);
+    if untamed {
+        super::untamed::bike_hazard(m, dt);
+    } else {
+        let v = m.vehicle();
+        let [front, rear] = v.wheels;
+        v.held = u32::from(front.surface_holds || rear.surface_holds);
+        let on = v.held != 0 && (front.ray_hit || rear.ray_hit);
+        let limit = front.stuck_limit.max(rear.stuck_limit);
+        stuck(m, on, dt, limit);
+    }
 
     let v = m.vehicle();
     if v.put_back_due != 0 && v.put_back_was != 0 {
@@ -641,8 +659,12 @@ pub fn vehicle_update(m: &mut impl Vehicles, dt: F) {
             let b = v.body_velocity;
             F(fpu::madd(fpu::adda(0.0, fpu::mul(b.z(), n.z())), b.x(), n.x()))
         };
-        let along = if along < F::ZERO { F::ZERO } else { along };
-        v.distance = F(fpu::madd(fpu::adda(0.0, v.distance.0), along.0, dt.0));
+        if !untamed {
+            let along = if along < F::ZERO { F::ZERO } else { along };
+            v.distance = F(fpu::madd(fpu::adda(0.0, v.distance.0), along.0, dt.0));
+        } else if !(along <= F::ZERO) {
+            v.distance = F(fpu::madd(fpu::adda(0.0, v.distance.0), along.0, dt.0));
+        }
         if v.landed != 0 && v.run_landed == 0 {
             v.landings = v.landings.wrapping_add(1);
         }

@@ -2830,7 +2830,8 @@ pub struct Load {
     pub points: [Vf; 4],
     /// Driven by MX vs. ATV Untamed's (SLUS-21701) car step (MD81d): the keys' preload cue, the
     /// vehicle's force and the update's hazard clock are Untamed's ([`Keys::untamed`],
-    /// [`Vehicle::untamed`], [`Update::untamed`]); with it the ride's frame is [`frame_untamed`] (MD161:
+    /// [`Vehicle::untamed`], [`Update::untamed`]), and so is the scene's node update (MD145,
+    /// [`crate::atv_moto::Scene::untamed`]); with it the ride's frame is [`frame_untamed`] (MD161:
     /// the body's per-time angular damping, the PostProcess's yaw hold by compares). Off (as read),
     /// SLUS-21104's.
     pub untamed: bool,
@@ -3043,6 +3044,7 @@ impl Load {
             drag,
             flags: SPAWN_FLAGS | u8::from(f.reset_off_edge) | (u8::from(f.reset_below_minimum) << 6),
             untamed: self.untamed,
+            scene: crate::atv_moto::Scene { untamed: self.untamed, ..crate::atv_moto::Scene::default() },
             ..Vehicle::default()
         }
     }

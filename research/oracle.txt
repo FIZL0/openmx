@@ -12530,3 +12530,12 @@ atv_out_of_bounds           atv 0x004a4f20 (vt +0x16c, the bike in a0): body pos
 #   damping vector is built at sp-52 below the caller's sp and its w is never written: the rates' w takes it.
 #   car PostProcess 0x004e9790 run as a stretch on a car at 0x01c00000 (body pointer +0xe8, yaw limit +0x123c),
 #   vehicle post 0x004c8b20 hooked to return, shift 0x004d6340 hooked to end the call.
+# MD145 — the grounded word each SLUS-21701 caller hands Untamed's hazard clock 0x004ce3a0 (a1 on, a2 grounded,
+# f12 dt, f13 the longest surface time). Journal: research/journal/2026-11-15-md145-untamed-hazard-clock.
+#   bike update 0x004f21c0 (2128 B; twin of SLUS-21104's Motocross override 0x004da210): call at 0x004f2344.
+#   Held +0xc10 = either wheel's (+0x17f0/+0x17f4) surface (byte +0x110) table word at +0xde4 (12 B each, time
+#   +0xde8); a2 = either wheel's +0xd0; a1 = held && a2. Stretch 0x004f2278..0x004f234c ($s4 bike, $f20 dt).
+#   Also: rumble slot moved; the distance +0x748 adds only when !(d <= 0) (0x004f2828 c.ole/bc1t).
+#   car update 0x004e9eb0: call at 0x004ea0a8. On-hazard +0xc10 = any tire's (+0x1244..+0x1250) table word by
+#   its byte +0xf0; a2 = any tire's +0xa4; a1 = on && a2. Stretch 0x004e9f10..0x004ea0b0 ($s0 car, $f20 dt).
+#   MD164's trophy truck 0x01be4740: node +0x114, its parent word (+0x120) 0 in spawn and air images.
