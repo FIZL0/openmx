@@ -12476,3 +12476,11 @@ atv_out_of_bounds           atv 0x004a4f20 (vt +0x16c, the bike in a0): body pos
 #   = event post 0x0025e740 (a0 [0x00475bd0], a1 car+0x698, 8, 14, t0 [car+0xd10]). Vehicle force: gravity
 #   [car+0x118]+0x40, record car+0xf8 (vt +0x88, a1 1), flags byte car+0x75 bit 5 cleared.
 #   Proved: tests/untamed_car.rs (untamed_car_preload_is_the_originals, untamed_vehicle_force_is_the_originals).
+
+# F53
+0x001bbbc0 part clear (vt +0xb0)
+0x001bbe60 part pair (vt +0xb4) -> 0x001bc880, kind table 0x0039a880
+0x0010a100 kind 6 box pair; 0x00109fe0 its tree walk (0x001068c0 leaf, 0x001062e0 node)
+0x00108820 mesh descent: writes 0x003dce30 (1), 0x003dce38 (mesh+0x230), 0x003dce40/48 (stack)
+0x003dce50-0x003dceef leaf-test scratch (0x00107000-0x0010a000 only)
+0x001bb0b0 probe constructor, only writer of +0x188 (profiler, 0)
