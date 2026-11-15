@@ -77,7 +77,7 @@ const MAGIC: [u8; 4] = *b"OMX1";
 pub fn encode(sim: &Sim) -> Vec<u8> {
     let mut out = Vec::with_capacity(16 * 1024);
     out.extend_from_slice(&MAGIC);
-    let Sim { ticks, rng, tables: _, phy: _, bindings: _, input, rider, plane, car, others, markers, home: _, traffic, event, race, ai: _, seek: _ } = sim;
+    let Sim { ticks, rng, tables: _, phy: _, bindings: _, input, rider, plane, car, quad: _, others, markers, home: _, traffic, event, race, ai: _, seek: _ } = sim;
     ticks.put(&mut out);
     rng.put(&mut out);
     input.put(&mut out);
@@ -409,6 +409,9 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         rider,
         plane,
         car,
+        // A seat's quad (MD152) is not on the wire: the shell's online ride sends no state while one
+        // is out, so a state decoded is one with none.
+        quad: None,
         others,
         markers,
         home: Arc::clone(&sim.home),

@@ -126,6 +126,37 @@ pub struct Online {
     car_ticks: std::collections::BTreeMap<usize, Vec<Option<CarAfter>>>,
     /// The flier packs' planes a seat can pick (P318, [`crate::online_fliers`]).
     fliers: Fliers,
+    /// MD152: each seat's quad as its pick names it, read off its pack on this machine, never ridden:
+    /// what a seat's switch to the quad takes ([`Online::quads_here`]).
+    quads: Vec<Option<vehicle::AtvRide>>,
+    /// MD152: this machine's quad pick (`pack/stem`, empty for none), which `--peer`s send with their
+    /// saved markers ([`wrap_quad`]), and what reads a seat's pick off its pack here.
+    quad_mine: String,
+    quad_read: Option<Box<dyn FnMut(&str) -> Result<vehicle::AtvRide, String>>>,
+}
+
+/// MD152, `--peer`s: a machine's quad pick (`pack/stem`, empty for none) wrapped around its P318
+/// blob (`inner`), as no room carries it: [`QUAD_WRAP`], the key's length, the key, the rest.
+pub fn wrap_quad(key: &str, inner: Vec<u8>) -> Vec<u8> {
+    if key.is_empty() || key.len() > 255 {
+        return inner;
+    }
+    let mut out = QUAD_WRAP.to_vec();
+    out.push(key.len() as u8);
+    out.extend(key.as_bytes());
+    out.extend(inner);
+    out
+}
+
+/// [`wrap_quad`]'s first bytes.
+pub const QUAD_WRAP: &[u8; 4] = b"Q152";
+
+/// [`wrap_quad`] read back: the quad pick and the blob inside. Bytes not wrapped have no quad.
+pub fn unwrap_quad(bytes: &[u8]) -> (String, &[u8]) {
+    let Some(rest) = bytes.strip_prefix(&QUAD_WRAP[..]) else { return (String::new(), bytes) };
+    let Some((&len, rest)) = rest.split_first() else { return (String::new(), bytes) };
+    let Some((key, inner)) = rest.split_at_checked(len as usize) else { return (String::new(), bytes) };
+    (String::from_utf8_lossy(key).into_owned(), inner)
 }
 
 /// One plane skin of a flier pack this machine holds (P318): the skin, its `biplane.phy`-like file
@@ -329,6 +360,9 @@ impl Online {
             spare: None,
             car_ticks: Default::default(),
             fliers: Fliers::default(),
+            quads: Vec::new(),
+            quad_mine: String::new(),
+            quad_read: None,
         })
     }
 
@@ -397,6 +431,9 @@ impl Online {
             spare: None,
             car_ticks: Default::default(),
             fliers: Fliers::default(),
+            quads: Vec::new(),
+            quad_mine: String::new(),
+            quad_read: None,
         })
     }
 
@@ -438,6 +475,9 @@ impl Online {
             spare: None,
             car_ticks: Default::default(),
             fliers: Fliers::default(),
+            quads: Vec::new(),
+            quad_mine: String::new(),
+            quad_read: None,
         })
     }
 
@@ -479,6 +519,9 @@ impl Online {
             spare,
             car_ticks: Default::default(),
             fliers: Fliers::default(),
+            quads: Vec::new(),
+            quad_mine: String::new(),
+            quad_read: None,
         })
     }
 
@@ -491,6 +534,9 @@ impl Online {
         self.net.mods = self.mods.text();
         self.stock = stock;
         self.cars = rides::cars_on(&self.stock_cars, &self.mods);
+        for quad in self.quads.iter_mut().flatten() {
+            quad.mods = self.mods;
+        }
     }
 
     /// The ride's biplane (N17): `stock`, the disc's `biplane.phy`, built on the modifiers the ride
@@ -584,7 +630,7 @@ impl Online {
     pub fn saved_markers(&mut self, mine: &game_sim::markers::Markers, track: &str, bike: &str) {
         if let (Wire::Udp(udp), Some(marks)) = (&mut self.wire, &mut self.marks) {
             self.fliers.marks = crate::saved_markers::to_wire(mine, bike, track);
-            udp.set_markers(crate::online_fliers::wrap(&self.fliers.marks, &self.fliers.packs));
+            udp.set_markers(wrap_quad(&self.quad_mine, crate::online_fliers::wrap(&self.fliers.marks, &self.fliers.packs)));
             (marks.track, marks.bike) = (track.to_string(), bike.to_string());
         }
     }
@@ -604,7 +650,11 @@ impl Online {
         }
         let Some(all) = udp.markers(&self.net.lineup, &self.net.me) else { return false };
         self.fliers.seat_packs = vec![None; all.len()];
+        let mut quads = Vec::new();
         for (s, (sim, bytes)) in self.sims.iter_mut().zip(&all).enumerate() {
+            // and each machine's quad pick (MD152), for every seat of its, wrapped around them
+            let (quad, bytes) = unwrap_quad(bytes);
+            quads.push((s, quad));
             // and each seat's machine's packs (P318), wrapped with them
             let (bytes, packs) = crate::online_fliers::unwrap(bytes);
             if lineup_first(&self.net.lineup, s) {
@@ -618,7 +668,94 @@ impl Online {
         }
         marks.owed = false;
         self.offer_fliers();
+        self.build_quads(quads);
         true
+    }
+
+    /// MD152: this machine's quad pick `mine` (`pack/stem`, empty for none) and what reads a pick off
+    /// its pack here, the ride's modifiers known ([`Online::modifiers`]). The lobby's ride and a
+    /// drop-in build every seat's quad at once off the room's picks; a `--peer` machine sends its
+    /// pick with its saved markers and builds every seat's once every peer's are in
+    /// ([`Online::take_markers`]), before the first tick. Every machine holds the same pack files
+    /// (MD37e's handshake), so every machine builds the same quads.
+    pub fn quads_here(&mut self, mine: String, read: Box<dyn FnMut(&str) -> Result<vehicle::AtvRide, String>>) {
+        (self.quad_mine, self.quad_read) = (mine, Some(read));
+        if let Wire::Udp(udp) = &mut self.wire {
+            udp.set_markers(wrap_quad(&self.quad_mine, crate::online_fliers::wrap(&self.fliers.marks, &self.fliers.packs)));
+        } else if let Some(room) = &self.room {
+            let picks = room.seats.iter().enumerate().map(|(s, seat)| (s, seat.as_ref().map_or(String::new(), |seat| seat.pick.quad.clone()))).collect();
+            self.build_quads(picks);
+        } else {
+            // a ride opened to online: this machine's seats alone
+            let picks = self.my_seats().into_iter().map(|s| (s, self.quad_mine.clone())).collect();
+            self.build_quads(picks);
+        }
+    }
+
+    /// MD152: the room changed (a seat came or went): each seat's quad as its pick in the room now
+    /// names it, where that differs from the one built and the seat is not on it. A joiner's machine
+    /// builds every seat's off the same room, so both have the joiner's before it is taken on.
+    fn quads_from_room(&mut self) {
+        let Some(room) = &self.room else { return };
+        let built = |q: Option<&vehicle::AtvRide>| q.map_or(String::new(), |q| format!("{}/{}", q.pack, vehicle::atv_stem(&q.phy)));
+        let picks: Vec<(usize, String)> = room
+            .seats
+            .iter()
+            .enumerate()
+            .map(|(s, seat)| (s, seat.as_ref().map_or(String::new(), |seat| seat.pick.quad.clone())))
+            .filter(|(s, key)| *key != built(self.quad(*s)) && self.sims.get(*s).is_none_or(|sim| sim.quad.is_none()))
+            .collect();
+        for &(s, _) in picks.iter().filter(|(_, k)| k.is_empty()) {
+            if let Some(q) = self.quads.get_mut(s) {
+                *q = None;
+            }
+        }
+        self.build_quads(picks);
+    }
+
+    /// Each seat's quad off its pick (`picks`, seat and `pack/stem`), on its own row of the ride's
+    /// modifiers. A pick that does not read here leaves the seat without one, and says so; every
+    /// machine holds the same files, so every machine does the same.
+    fn build_quads(&mut self, picks: Vec<(usize, String)>) {
+        let Some(read) = self.quad_read.as_mut() else { return };
+        for (s, key) in picks.into_iter().filter(|(_, k)| !k.is_empty()) {
+            if self.quads.len() <= s {
+                self.quads.resize_with(s + 1, || None);
+            }
+            match read(&key) {
+                Ok(mut quad) => {
+                    (quad.mods, quad.seat) = (self.mods, s);
+                    println!("online: seat {} quad {key}", s + 1);
+                    self.quads[s] = Some(quad);
+                }
+                Err(e) => println!("online: seat {} picked the quad {key}, but it does not read here: {e}", s + 1),
+            }
+        }
+    }
+
+    /// Seat `s`'s quad as built (MD152), never ridden; `None` with no quad picked.
+    pub fn quad(&self, s: usize) -> Option<&vehicle::AtvRide> {
+        self.quads.get(s)?.as_ref()
+    }
+
+    /// What each seat rides of its quad as the ride ends (MD152), for the shell's last lines:
+    /// `online: quads 1P off, 2P atv_Race250P 41.2 ft 0 wrecks` (how far from where it was taken) —
+    /// off the ride's last ticks run.
+    pub fn quads_ridden(&self) -> Option<String> {
+        if self.quads.iter().all(Option::is_none) {
+            return None;
+        }
+        let seat = |n: usize, sim: &Sim| match (sim.quad.as_ref(), self.quad(n)) {
+            (Some(lane), Some(quad)) => {
+                let at = lane.ride.bike.parts.scene.nodes[0].world[3];
+                let gone = ((at.x() - lane.taken_at.x()).powi(2) + (at.z() - lane.taken_at.z()).powi(2)).sqrt();
+                format!("{} {gone:.1} ft {} wrecks", vehicle::atv_stem(&quad.phy), lane.wrecks)
+            }
+            (None, Some(_)) => "off".to_string(),
+            _ => "none".to_string(),
+        };
+        let seats: Vec<String> = self.sims.iter().enumerate().map(|(n, sim)| format!("{}P {}", n + 1, seat(n, sim))).collect();
+        Some(format!("online: quads {}", seats.join(", ")))
     }
 
     /// This machine's flier packs and their plane skins (P318), the ride's modifiers known
@@ -628,7 +765,7 @@ impl Online {
     pub fn fliers_here(&mut self, packs: Vec<openmx_net::Pack>, local: Vec<LocalFlier>) {
         (self.fliers.packs, self.fliers.local) = (packs, local);
         if let Wire::Udp(udp) = &mut self.wire {
-            udp.set_markers(crate::online_fliers::wrap(&self.fliers.marks, &self.fliers.packs));
+            udp.set_markers(wrap_quad(&self.quad_mine, crate::online_fliers::wrap(&self.fliers.marks, &self.fliers.packs)));
         }
         if self.room.is_some() {
             self.offer_fliers();
@@ -1205,6 +1342,7 @@ impl Online {
         let closed = self.fliers.templates.iter().filter(|t| t.closed).count();
         if std::mem::take(&mut self.fliers.owed) || closed != self.fliers.closed {
             self.offer_fliers();
+            self.quads_from_room();
         }
         if !self.take_markers() {
             self.last = Instant::now();
@@ -1235,7 +1373,7 @@ impl Online {
                 }
             };
             // The ride steps with the cars Modded holds, which a change of the modifiers builds again.
-            let mut rides = Rides { fliers: &mut self.fliers.templates, sims: &mut self.sims, world: place, after: Some(&mut after), time_scale: self.time_scale, plane: self.plane.as_mut(), cars: &[] };
+            let mut rides = Rides { fliers: &mut self.fliers.templates, sims: &mut self.sims, world: place, after: Some(&mut after), time_scale: self.time_scale, plane: self.plane.as_mut(), cars: &[], quads: &mut self.quads };
             let cars = Some((&self.stock_cars[..], &mut self.cars));
             let game = Modded { rides: &mut rides, stock: &self.stock, mods: &mut self.mods, stock_plane: self.stock_plane.as_ref(), cars };
             let mut game = Watched { game, sims: |m| &m.rides.sims[..], ticks: &mut self.car_ticks };

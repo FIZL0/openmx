@@ -1953,7 +1953,7 @@ pub struct Wanted {
 impl Wanted {
     /// The byte: the machine in the low two bits and the top one (0 none, 1 the bike, 2 the biplane,
     /// 3 the buggy, 4 the monster truck, 5 the baja: S249, the cars past the two bits the bike and
-    /// plane had, in the one bit left), then the two scheme bits, then the markers-off bit, then the
+    /// plane had, in the one bit left; 6 the seat's quad, MD152), then the two scheme bits, then the markers-off bit, then the
     /// together chord's, then the paused bit.
     pub fn byte(self) -> u8 {
         let to: u8 = match self.to {
@@ -1965,8 +1965,10 @@ impl Wanted {
             Some(Kind::Baja) => 5,
             // Online flies no helicopter (P216): its pick is no pick.
             Some(Kind::Kiowa) => 0,
-            // Nor any quad (MD37d) or MX vs. ATV car (MD39c): offline additions.
-            Some(Kind::Atv | Kind::MxvatvCar) => 0,
+            // The quad (MD152): the seat's own, which every machine holds a copy of.
+            Some(Kind::Atv) => 6,
+            // Nor any MX vs. ATV car (MD39c): an offline addition.
+            Some(Kind::MxvatvCar) => 0,
         };
         (to & 3) | (to >> 2) << 7 | (self.every_bank as u8) << 2 | (self.round_stick as u8) << 3 | (self.dpad_rides as u8) << 4 | (self.together as u8) << 5 | (self.paused as u8) << 6
     }
@@ -1979,6 +1981,7 @@ impl Wanted {
             3 => Some(Kind::Buggy),
             4 => Some(Kind::Monster),
             5 => Some(Kind::Baja),
+            6 => Some(Kind::Atv),
             _ => None,
         };
         Wanted { to, every_bank: byte & 4 != 0, round_stick: byte & 8 != 0, dpad_rides: byte & 16 != 0, together: byte & 32 != 0, paused: byte & 64 != 0 }
@@ -1986,11 +1989,12 @@ impl Wanted {
 }
 
 /// The machine a seat's [`Sim`] is on online: the plane while its lane holds one, the car while it
-/// holds a car (S249).
+/// holds a car (S249), the quad while it holds one (MD152).
 pub fn lane_up(sim: &Sim) -> Kind {
     match (&sim.plane, &sim.car) {
         (Some(_), _) => Kind::Biplane,
         (None, Some(car)) => car_of(car.kind).unwrap_or(Kind::Bike),
+        (None, None) if sim.quad.is_some() => Kind::Atv,
         (None, None) => Kind::Bike,
     }
 }
@@ -2015,6 +2019,22 @@ pub fn switch_lane(to: Kind, template: Option<&Flight>, sim: &mut Sim, world: &m
 /// own track, where the player is off it), into the seat's [`Sim::car`]; off one, the machine taken
 /// spawned where the car is and the lane's car gone. The same [`Garage::switch`] as offline.
 pub fn switch_lane_among(to: Kind, template: Option<&Flight>, cars: &[CarRide], sim: &mut Sim, world: &mut dyn World) -> Result<Kind, String> {
+    switch_lane_quad(to, template, cars, None, sim, world)
+}
+
+/// [`switch_lane_among`] with the seat's `quad` (MD152), its copy of the quad as read at the ride's
+/// start, never ridden: onto the quad, taken where the player is as offline takes it
+/// ([`AtvRide::take`]), into the seat's [`Sim::quad`]; off it, the machine taken spawned where the
+/// quad is and the lane's quad gone. The same [`Garage::switch`] as offline. `None`, a seat asking
+/// for the quad stays where it is.
+pub fn switch_lane_quad(
+    to: Kind,
+    template: Option<&Flight>,
+    cars: &[CarRide],
+    quad: Option<&AtvRide>,
+    sim: &mut Sim,
+    world: &mut dyn World,
+) -> Result<Kind, String> {
     let up = lane_up(sim);
     if to == up {
         return Ok(to);
@@ -2036,10 +2056,28 @@ pub fn switch_lane_among(to: Kind, template: Option<&Flight>, cars: &[CarRide], 
             c.struck = lane.struck;
         }
     }
-    let mut garage = Garage { up, plane, taken: true, cars, heli: None, atv: None, mxvatv_car: None };
+    // The quad only where it is wanted or up, its lane's quad in it if it is out.
+    let atv = match sim.quad.take() {
+        Some(lane) => match quad {
+            Some(q) => Some(lane_atv_of(*lane, q)),
+            None => {
+                sim.quad = Some(lane);
+                return Err("this seat has no quad to leave".into());
+            }
+        },
+        None => quad.filter(|_| to == Kind::Atv).cloned(),
+    };
+    let mut garage = Garage { up, plane, taken: true, cars, heli: None, atv, mxvatv_car: None };
     let result = garage.switch(to, sim, world);
     // Refused, the seat stays on what it was on, the lane as it was.
     let now = garage.up;
+    if now == Kind::Atv
+        && let Some(atv) = garage.atv.as_mut()
+        && let Some(q) = atv.ridden.take()
+    {
+        let Quad { ride, segments, was_down, .. } = *q;
+        sim.quad = Some(Box::new(game_sim::quad::Lane { ride, segments, was_down, taken_at: atv.taken_at, wrecks: atv.wrecks }));
+    }
     if now == Kind::Biplane {
         let mut plane = garage.plane.take().expect("the switch keeps the plane");
         let spawn = plane.spawn;
@@ -2114,6 +2152,42 @@ pub fn lane_car(sim: &Sim, cars: &[CarRide]) -> Option<CarRide> {
     let lane = sim.car.as_ref()?;
     let template = cars.iter().find(|c| c.machine.car_physics() == Some(lane.kind))?;
     Some(CarRide { driven: Some(lane.machine.clone()), struck: lane.struck.clone(), ..template.clone() })
+}
+
+/// A seat's quad from its lane (MD152) on its copy `quad` (the files and modifiers it was made on):
+/// the [`AtvRide`] offline would hold with that quad out.
+fn lane_atv_of(lane: game_sim::quad::Lane, quad: &AtvRide) -> AtvRide {
+    let game_sim::quad::Lane { ride, segments, was_down, taken_at, wrecks } = lane;
+    AtvRide { ridden: Some(Box::new(Quad { ride, segments, was_down, clips: None })), taken_at, wrecks, ..quad.clone() }
+}
+
+/// [`AtvRide::spot`] off a seat's lane (MD152): on the ground under the quad, upright, along its
+/// heading flattened, stopped.
+fn quad_spot(lane: &game_sim::quad::Lane, world: &mut dyn World) -> Spot {
+    let m = lane.ride.bike.parts.scene.nodes[0].world;
+    let (at, forward) = (Vf::new(m[3].x(), m[3].y(), m[3].z(), 1.0), Vf::new(m[2].x(), m[2].y(), m[2].z(), 0.0));
+    let up = Vf::new(0.0, 1.0, 0.0, 0.0);
+    let forward = level(forward).unwrap_or(Vf::new(0.0, 0.0, 1.0, 0.0));
+    match ground_under(world, at) {
+        Some(g) => Spot::still(Vf::new(at.x(), g, at.z(), 1.0), forward, up),
+        None => Spot::still(at, forward, up),
+    }
+}
+
+/// **One tick of a seat's quad online** (MD152): [`Garage::step_among`]'s quad on the quad in its
+/// [`Sim::quad`]: the track's path cars, then the quad on the seat's `controls` (its bike's hands,
+/// as offline), the bike not stepped. A seat not on its quad does nothing; `false` then.
+pub fn ride_lane(sim: &mut Sim, controls: &Controls, dt: F, world: &mut dyn World) -> bool {
+    let Some(lane) = sim.quad.as_deref_mut() else { return false };
+    sim.traffic.frame(dt, world);
+    lane.ride.rest.clear();
+    lane.ride.step(controls, dt, world, lane.segments);
+    let down = lane.ride.down();
+    if down && !lane.was_down {
+        lane.wrecks += 1;
+    }
+    lane.was_down = down;
+    true
 }
 
 /// **A seat that starts the ride in the plane online** (N18): a copy of `template` (the ride's
@@ -2224,7 +2298,11 @@ pub fn lane_spot(sim: &Sim, world: &mut dyn World) -> Spot {
         None => match &sim.car {
             // In a car (S249), [`CarRide::spot`]'s: on the ground under it, upright, stopped.
             Some(car) => car_spot(&car.machine, world),
-            None => Spot::of(&sim.rider),
+            // On the quad (MD152), [`AtvRide::spot`]'s, the same.
+            None => match &sim.quad {
+                Some(q) => quad_spot(q, world),
+                None => Spot::of(&sim.rider),
+            },
         },
     }
 }
@@ -2284,6 +2362,17 @@ impl Garage {
                     c.driven = None;
                     c.struck = None;
                 }
+            }
+        }
+        // The quad the lane rides, drawn where it is (MD152); none, put away.
+        if let Some(atv) = self.atv.as_mut() {
+            match sim.quad.as_deref() {
+                Some(l) => {
+                    let clips = atv.ridden.take().and_then(|q| q.clips);
+                    atv.ridden = Some(Box::new(Quad { ride: l.ride.clone(), segments: l.segments, was_down: l.was_down, clips }));
+                    (atv.taken_at, atv.wrecks) = (l.taken_at, l.wrecks);
+                }
+                None => atv.ridden = None,
             }
         }
         let was = std::mem::replace(&mut self.up, up);

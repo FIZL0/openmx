@@ -53,6 +53,11 @@ pub struct Rides<'a> {
     /// seat whose pad's [`super::FLIER`] byte names one takes a copy of it, not of
     /// [`Rides::plane`], at its next switch onto the plane. Empty, every seat flies the ride's own.
     pub fliers: &'a mut [Flier],
+    /// Every seat's quad as read at the ride's start and never ridden (MD152,
+    /// [`crate::vehicle::AtvRide`]), by seat: what a seat's switch to the quad takes it from into its
+    /// [`Sim::quad`], and whose files that quad is stepped with. A seat with `None` (or past the end)
+    /// stays where it is when it asks for the quad.
+    pub quads: &'a mut [Option<vehicle::AtvRide>],
 }
 
 /// **A flier pack's plane online** (P318): the skin's plane as the ride built it on its modifiers,
@@ -220,7 +225,7 @@ impl Game for Rides<'_> {
         );
         let driven: Vec<usize> = hulls[flown.len()..].iter().map(|h| h.seat).collect();
         let on: Vec<(&game_sim::rider::Rider, bool)> =
-            self.sims.iter().zip(&touching).map(|(s, &t)| (&s.rider, t && s.plane.is_none() && s.car.is_none())).collect();
+            self.sims.iter().zip(&touching).map(|(s, &t)| (&s.rider, t && s.plane.is_none() && s.car.is_none() && s.quad.is_none())).collect();
         let met = rider_contact::contacts_met(&on, &hulls, dt, &*self.world);
         drop((on, hulls));
         let (mut lists, mut mirrors) = match met {
@@ -277,7 +282,7 @@ impl Game for Rides<'_> {
             // original's walk meets them (S88): the riders this one can joust (S224), and the bikes
             // in its plane's world if it flies (S225). A seat on the plane has left its bike.
             let on: Vec<(&game_sim::rider::Rider, bool)> =
-                self.sims.iter().zip(&touching).map(|(s, &t)| (&s.rider, t && s.plane.is_none() && s.car.is_none())).collect();
+                self.sims.iter().zip(&touching).map(|(s, &t)| (&s.rider, t && s.plane.is_none() && s.car.is_none() && s.quad.is_none())).collect();
             let rivals = rider_contact::rivals_among(&on, seat, &*self.world);
             let flying = self.sims[seat].plane.as_ref().map(|f| f.body.position);
             let bikes = flying.map(|at| rider_contact::plane_bikes(&on, seat, at, &*self.world)).unwrap_or_default();
@@ -298,9 +303,11 @@ impl Game for Rides<'_> {
             let wanted = Wanted::of(reports[0].0[super::SWITCH]);
             let cars = self.cars.get(seat).map_or(&[][..], |c| &c[..]);
             // The plane it takes is the flier its pad picked (P318), else the ride's own.
+            // The quad it takes is its own (MD152), read at the ride's start.
             if let Some(to) = wanted.to {
                 let template = template_to(reports[0].0[super::FLIER], self.plane.as_deref(), self.fliers);
-                let _ = vehicle::switch_lane_among(to, template, cars, sim, self.world);
+                let quad = self.quads.get(seat).and_then(Option::as_ref);
+                let _ = vehicle::switch_lane_quad(to, template, cars, quad, sim, self.world);
             }
             // The shell's hands, the d-pad the markers' and not the ride's (P93) — unless the seat's
             // Markers switch is off (P129, in its byte), and then the d-pad is the original's.
@@ -315,6 +322,10 @@ impl Game for Rides<'_> {
                 && let Some((readied, ready)) = vehicle::ready_lane(sim, dt, wanted, self.world, props.as_mut())
             {
                 held.push(Held { seat, k: plane, plane: readied, ready, met, bikes, wanted });
+                continue;
+            }
+            // On the quad (MD152) neither, as offline's quad has none: the quad on the bike's hands.
+            if vehicle::ride_lane(sim, &hands, dt, self.world) {
                 continue;
             }
             // In a car (S249) the bike is not stepped either, nor are any markers: offline a car has
@@ -384,7 +395,13 @@ impl Game for Rides<'_> {
     /// sends a peer that fell out of step and a restart sends everyone; the constants (tables, bike,
     /// the rider's disc files) stay each machine's own, all but the preset (N13), which a seat a
     /// join added on another machine could not know otherwise.
+    ///
+    /// A seat's quad (MD152) is not in the codec: while one is out the ride cannot say its state, and
+    /// a resync, a join or a restart waits for (or goes without) one.
     fn encode(&self) -> Option<Vec<u8>> {
+        if self.sims.iter().any(|s| s.quad.is_some()) {
+            return None;
+        }
         let mut out = (self.sims.len() as u32).to_le_bytes().to_vec();
         for sim in self.sims.iter() {
             let bytes = seat_bytes(sim);
@@ -715,7 +732,7 @@ impl Modded<'_, '_> {
             Some(a) => Some(&mut **a),
             None => None,
         };
-        let mut on = Rides { fliers: &mut *r.fliers, sims: &mut *r.sims, world: &mut *r.world, after, time_scale: r.time_scale, plane: r.plane.as_deref_mut(), cars: &cars[..] };
+        let mut on = Rides { quads: &mut *r.quads, fliers: &mut *r.fliers, sims: &mut *r.sims, world: &mut *r.world, after, time_scale: r.time_scale, plane: r.plane.as_deref_mut(), cars: &cars[..] };
         f(&mut on)
     }
 }
@@ -788,6 +805,10 @@ impl Game for Modded<'_, '_> {
         // step, which reads its file off them.
         if let Some((stock, cars)) = self.cars.as_mut() {
             **cars = cars_on(stock, &to);
+        }
+        // And each seat's quad (MD152), which reads them as its next take makes it.
+        for quad in self.rides.quads.iter_mut().flatten() {
+            quad.mods = to;
         }
         *self.mods = to;
         self.rides.time_scale = to.time_scale();
