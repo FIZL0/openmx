@@ -45,7 +45,14 @@ fn session_ms(said: &str, stage: &str) -> f64 {
 /// The budget is four 60 Hz frames: room for a loaded machine and a test build, and well short of
 /// what the slow shell cost. It rides the software rasteriser, which is what P47 made fast: the
 /// GPU (P44's default) draws its ground in one pass the stages here do not see.
+///
+/// Out of the gate (user 2026-11-14): it reads the wall clock, so the other slots' load reds it with
+/// no change (S302a's merge gate: 106 ms, then 75.6 ms on a rerun holding every check slot, at load
+/// ~25), and the process's CPU time is no stand-in, since the rasteriser's threads spend ~5x the wall
+/// time. Run it by hand on a quiet machine after touching the software ground, sky or props:
+/// `./kit check -- -p openmx --test one_fps -- --ignored`.
 #[test]
+#[ignore = "wall-clock budget: run on a quiet machine after touching the software renderer"]
 fn a_headless_ride_at_the_default_frame_keeps_to_its_budget() {
     let Some(said) = ride(&["--renderer", "software", "--frames", "120"]) else { return };
     assert!(said.contains("headless, drawing 640x448"), "not the default frame:\n{said}");

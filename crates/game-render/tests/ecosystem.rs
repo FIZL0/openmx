@@ -682,7 +682,13 @@ fn plants_at_one_distance_do_not_change_on_one_frame() {
 /// The eco's draw time on free09's densest view (most plants within 600 feet ahead) is no worse under
 /// the smooth rule than under the original's, on the software renderer: the grove's draws and the
 /// scene they are drawn into, the best of interleaved runs.
+///
+/// Out of the gate (user 2026-11-14): it reads the wall clock, and the other slots' load reds it with
+/// no change (V58, V61: 3.01 vs 2.37 ms), even on the rerun holding every check slot. Run it by hand on
+/// a quiet machine after touching the eco's draws or the smooth rule:
+/// `./kit check -- -p game-render --test ecosystem -- --ignored the_densest_view`.
 #[test]
+#[ignore = "wall-clock comparison: run on a quiet machine after touching the eco's draws"]
 fn the_densest_view_draws_no_slower() {
     let _quiet = alone();
     let Some(mut disc) = disc() else { return };
