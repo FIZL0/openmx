@@ -1096,3 +1096,18 @@ pub fn stuck(m: &mut impl super::tail::Vehicles, on: bool, grounded: bool, dt: F
         }
     }
 }
+
+/// **The bike's hazard words and clock in Untamed's bike update** (MD145): as SLUS-21104's (the held
+/// word is either wheel's surface holding, `on` is it with either wheel's ray down, the limit the
+/// longer of the two surfaces' times), but the clock is Untamed's ([`stuck`]), called straight and
+/// handed either wheel's ray down as `grounded`. The car's update hands its own (any tire solidly
+/// down, [`crate::atv_car::update`]) and the quad's any wheel's ray down ([`crate::quad::update`]).
+pub fn bike_hazard(m: &mut impl super::tail::Vehicles, dt: F) {
+    let v = m.vehicle();
+    let [front, rear] = v.wheels;
+    v.held = u32::from(front.surface_holds || rear.surface_holds);
+    let grounded = front.ray_hit || rear.ray_hit;
+    let on = v.held != 0 && grounded;
+    let limit = front.stuck_limit.max(rear.stuck_limit);
+    stuck(m, on, grounded, dt, limit);
+}

@@ -611,7 +611,7 @@ pub fn read_ride(ee: &Ee, quad: u32, dt: F) -> Result<(Ride, Image), String> {
         flags: ee.u8_at(o + 0x45),
         record: true,
         spin,
-        scene: atv_moto::Scene { nodes },
+        scene: atv_moto::Scene { nodes, untamed: false },
         bounds: atv_moto::Bounds { floor: f(ee, wo + 0x98), area: (at.area != 0).then(|| (v(ee, at.area + 0x30), v(ee, at.area + 0x40))) },
         spatial: b(ee, o + 8),
         collidables: atv_moto::Collidables {

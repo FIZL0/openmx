@@ -108,7 +108,7 @@ pub(crate) fn read_vehicle(ee: &Ee, p: &Ptrs, o: &OwnPtrs) -> atv_car::Vehicle {
         gravity: get_v(ee, o.world + own::GRAVITY),
         drag: F(ee.f32_at(o.world + own::DRAG)),
         flags: ee.u8_at(car_at() + own::FLAGS_WORD + 1),
-        scene: game_sim::atv_moto::Scene { nodes },
+        scene: game_sim::atv_moto::Scene { nodes, untamed: false },
         subtree: ee.u32_at(p.node + 0xf4) != 0,
         bounds: game_sim::atv_moto::Bounds {
             floor: F(ee.f32_at(o.world + own::FLOOR)),

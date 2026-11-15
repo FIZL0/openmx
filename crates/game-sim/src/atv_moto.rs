@@ -398,6 +398,8 @@ pub struct Node {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Scene {
     pub nodes: [Node; NODES],
+    /// Untamed's scene graph (MD145): [`Scene::update`] is [`Scene::update_untamed`]. Off, SLUS-21104's.
+    pub untamed: bool,
 }
 
 /// The world's bounds (quad `+0xe8`): its floor (`+0x98`) and the box (`+0xa8`, `None` for none; its
@@ -512,8 +514,12 @@ pub fn quat_frame(q: Vf, pos: Vf) -> [Vf; 4] {
 impl Scene {
     /// **The node's world frame brought up to date** (`atv_node_world_update`): unless it is current, the
     /// parents up to the first current one (or the root), then each from the top down, its frame
-    /// times its parent's world frame (the root's own frame as it is), marked current.
+    /// times its parent's world frame (the root's own frame as it is), marked current. With
+    /// [`Scene::untamed`], Untamed's ([`Scene::update_untamed`]).
     pub fn update(&mut self, n: usize) {
+        if self.untamed {
+            return self.update_untamed(n);
+        }
         if self.nodes[n].flags & CLEAN != 0 {
             return;
         }
