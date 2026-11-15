@@ -1247,7 +1247,7 @@ fn the_drop_and_an_early_rider_match_a_captured_sx01_start() {
     race.countdown.elapsed = length;
     race.music_in = music_in;
     race.tip_in = tip_in;
-    let frame = race.tick(F(dt), &[(through, facing)]);
+    let frame = race.tick(F(dt), &[race::CardFeed::standing(through, facing)]);
     assert_eq!(frame.caught.len(), 1, "the rider is caught");
     assert!(frame.dropped, "the gate drops");
     let mut port = chassis_from(&words);
@@ -3566,7 +3566,7 @@ fn the_loaded_track_object_matches_trackpaths_load() {
         ee.call(ctor, &[u64::from(TRACK_OBJ)], &[], BUDGET);
         ee.set_u32(TRACK_OBJ + 0x80, 0);
         ee.set_u32(TRACK_OBJ + 0x88, 0);
-        ee.call(load, &[u64::from(TRACK_OBJ), u64::from(TRACK_NAME)], &[], 50_000_000);
+        ee.call(load, &[u64::from(TRACK_OBJ), u64::from(TRACK_NAME)], &[], 5_000_000);
         let what = format!("case {case}: {file:02x?}");
         assert_eq!(ee.v0() as u32, 1, "{what}: the load");
         assert_eq!(freed.get(), 0, "{what}: the load freed memory");
@@ -4372,6 +4372,105 @@ fn the_wrong_way_warning_matches_the_score_cards() {
     assert!(seen[0] > 2000 && seen[1] > 2000, "told / flags turned: {seen:?}");
 }
 
+// --- S302a: the bike's word to its card --------------------------------------------------------------
+
+/// Free RAM for the card feed's bike, its chassis, the chassis' node, the card and the world.
+const B_BIKE: u32 = 0x01e8_0000;
+const B_CHASSIS: u32 = 0x01e8_1000;
+const B_NODE: u32 = 0x01e8_2000;
+const B_CARD: u32 = 0x01e8_3000;
+const B_WORLD: u32 = 0x01e8_4000;
+
+/// S302a: the motocross bike's word to its score card (its card listener's slot 2, which the race
+/// handler calls first for every card), called alone over 20,000 generated bikes and cards, the
+/// ground query hooked to answer with a generated point: the card's position, speed, look, height and
+/// flags against [`RaceCard::feed`] bit for bit. The query is asked about the card's new position
+/// (the card's own `w`) in the bike's world, and the card's velocity and up words, which the port does
+/// not keep, are the chassis' velocity and the frame's up row.
+#[test]
+fn the_bikes_word_to_its_card_matches_the_original() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let (Ok(at), Ok(query)) = (addr("score_card_feed"), addr("ground_query")) else { return skip("no score_card_feed / ground_query in research/oracle.txt") };
+    let asked: Rc<RefCell<Vec<Vf>>> = Rc::default();
+    let answer: Rc<Cell<Vf>> = Rc::new(Cell::new(Vf::ZERO));
+    let (a, q) = (asked.clone(), answer.clone());
+    ee.hooks.insert(
+        query,
+        Box::new(move |ee| {
+            assert_eq!((ee.r(4) as u32, ee.r(6), ee.r(7), ee.r(8)), (B_WORLD, 0, 0, 0), "the ground query's world, normal, flags and record");
+            let point = ee.r(5) as u32;
+            a.borrow_mut().push(quad(ee, point));
+            put_quad(ee, point, q.get());
+        }),
+    );
+    ee.set_u32(B_BIKE + 0x7a4, B_CHASSIS);
+    ee.set_u32(B_BIKE + 0x7ac, B_WORLD);
+    ee.set_u32(B_CHASSIS + 0x254, B_NODE);
+    ee.call(at, &[u64::from(B_BIKE), 0], &[], BUDGET);
+    assert_eq!(ee.v0(), 0, "no card: the answer");
+    let mut p = Pick(0x5e0a_17c3_d94b_2f68);
+    let (mut flipped, mut cleared, mut grounded) = (0, 0, 0);
+    for case in 0..20_000 {
+        let mut card = helper_card(&mut p);
+        card.lap.record_word = p.next() as u32;
+        let rows: [Vf; 3] = std::array::from_fn(|_| {
+            let v = p.unit_vector();
+            p.quad(v)
+        });
+        let where_ = [p.range(-800.0, 800.0), p.range(-60.0, 120.0), p.range(-800.0, 800.0)];
+        let at_bike = p.quad(where_);
+        let scale = [0.0, 1.0, 30.0, 150.0][p.below(4) as usize] * p.unit();
+        let way = p.unit_vector().map(|c| c * scale);
+        let velocity = p.quad(way);
+        let under = [p.range(-800.0, 800.0), at_bike.y() - p.range(-5.0, 40.0), p.range(-800.0, 800.0)];
+        let ground = p.quad(under);
+        let any = p.next() as u32;
+        let wheel_word = [0, 1, any][p.below(3) as usize];
+        let wreck_word = if p.below(4) == 0 { (p.next() as u32).max(1) } else { 0 };
+        let (old_w, old_look_w, up_w, velocity_w) = (card.lap.seen.now.w(), card.look.w(), p.range(-2.0, 2.0), p.range(-2.0, 2.0));
+        // The card at its own place: the helper card's words, copied to the feed's card.
+        put_helper_card(&mut ee, &card);
+        for o in (0..0x1d0).step_by(4) {
+            let w = ee.u32_at(H_CARD + o);
+            ee.set_u32(B_CARD + o, w);
+        }
+        ee.set_u32(B_CARD + 0x108, card.lap.record_word);
+        put_quad(&mut ee, B_CARD + 0x110, Vf([1.0, 2.0, 3.0, velocity_w]));
+        put_quad(&mut ee, B_CARD + 0x130, Vf([4.0, 5.0, 6.0, up_w]));
+        // The frame's across, up and look rows, then its position.
+        put_quad(&mut ee, B_NODE + 0x80, rows[0]);
+        put_quad(&mut ee, B_NODE + 0x90, rows[1]);
+        put_quad(&mut ee, B_NODE + 0xa0, rows[2]);
+        put_quad(&mut ee, B_NODE + 0xb0, at_bike);
+        put_quad(&mut ee, B_CHASSIS + 0x260, velocity);
+        ee.set_u32(B_BIKE + 0x574, wheel_word);
+        ee.set_u32(B_BIKE + 0x748, wreck_word);
+        answer.set(ground);
+        asked.borrow_mut().clear();
+        ee.call(at, &[u64::from(B_BIKE), u64::from(B_CARD)], &[], BUDGET);
+        let what = format!("case {case}: bike at {at_bike:?} rows {rows:?} velocity {velocity:?} ground {ground:?} wheels {wheel_word:#x} wreck {wreck_word:#x} {card:?}");
+        assert_eq!(ee.v0(), 1, "{what}: the answer");
+
+        let before = card.lap.flags;
+        card.feed(&race::CardFeed { at: at_bike, look: rows[2], velocity, ground: F(ground.y()), on_ground: wheel_word != 0, wrecked: wreck_word != 0 });
+        let u = |o: u32| ee.u32_at(B_CARD + o);
+        let point = Vf([at_bike.x(), at_bike.y(), at_bike.z(), old_w]).to_bits();
+        assert_eq!(asked.borrow().iter().map(|v| v.to_bits()).collect::<Vec<_>>(), vec![point], "{what}: the ground query's point");
+        assert_eq!(u64::from(u(8)) | u64::from(u(12)) << 32, card.lap.flags, "{what}: the flags");
+        assert_eq!(quad(&ee, B_CARD + 0x60).to_bits(), card.lap.seen.now.to_bits(), "{what}: the position");
+        assert_eq!(u(0x104), card.jumps.rise.0.to_bits(), "{what}: the height");
+        assert_eq!(u(0x108), card.lap.record_word, "{what}: the speed");
+        assert_eq!(quad(&ee, B_CARD + 0x120).to_bits(), card.look.to_bits(), "{what}: the look");
+        assert_eq!(card.look.w().to_bits(), old_look_w.to_bits(), "{what}: the look's w is the card's");
+        assert_eq!(quad(&ee, B_CARD + 0x110).to_bits(), velocity.to_bits(), "{what}: the velocity, the chassis' whole");
+        assert_eq!(quad(&ee, B_CARD + 0x130).to_bits(), Vf([rows[1].x(), rows[1].y(), rows[1].z(), up_w]).to_bits(), "{what}: the up row");
+        flipped += usize::from((before ^ card.lap.flags) & race_card_flags::GROUNDED != 0);
+        cleared += usize::from((before ^ card.lap.flags) & race_card_flags::JUMP_TO_JUDGE != 0);
+        grounded += usize::from(card.lap.flags & race_card_flags::GROUNDED != 0);
+    }
+    assert!(flipped > 2000 && cleared > 1000 && grounded > 5000, "ground bit turned / judge cleared / grounded: {flipped} {cleared} {grounded}");
+}
+
 // --- S294: the race's finish -------------------------------------------------------------------------
 
 /// Free RAM for the finish's manager, its cards (0x200 apart), their owners, chains and ghost cards,
@@ -5042,8 +5141,10 @@ fn hex_bytes(s: &str) -> Vec<u8> {
 /// ([`RaceRules::card`]: the spot search on sx01's paths out of C31's RAM image, the distances to the
 /// line, the lap line ([`LapRules::line`]) and the card set back on it, the progress, the off-track clock
 /// and the way back, the computer aim, the jump watch and the two warnings, the clocks), against the
-/// captured card bit for bit; the rider's ground bit, height and look are taken from the captured card,
-/// as the bike writes them before the handler. Every lap counted, every best
+/// captured card bit for bit; each card first takes its bike's word ([`RaceCard::feed`], S302a) off
+/// the captured card's position, look, velocity and ground bit (C31 has no bike words), and the
+/// speed it works out is the captured card's in every row; the height is the captured card's, as C31
+/// holds no ground. Every lap counted, every best
 /// lap, the finish at the last lap (manager flag [`race_flags::FINISHED`]) and every off-track episode of
 /// the gas-held human go through it.
 #[test]
@@ -5093,6 +5194,8 @@ fn c31_hold(text: &str, prefix: &str, track: &C31Track, what: &str) -> C31Held {
         dt: F,
         mgr: Vec<u8>,
         cards: Vec<Option<RaceCard>>,
+        /// Each card's velocity word (`+0x110`), which the port's card does not keep.
+        velocity: Vec<Vf>,
         /// The rider ids in the manager's list order (its `+0x34`, each card's next at `+0x1c8`).
         order: Vec<usize>,
     }
@@ -5114,6 +5217,7 @@ fn c31_hold(text: &str, prefix: &str, track: &C31Track, what: &str) -> C31Held {
                 dt: F(v[c_dt].parse::<f32>().expect("dt")),
                 order: order(&mgr, &raws),
                 cards: raws.iter().map(|r| c31_card(r, track)).collect(),
+                velocity: raws.iter().map(|r| Vf([0, 4, 8, 12].map(|o| f32::from_bits(u32::from_le_bytes(r[0x110 + o..0x114 + o].try_into().unwrap()))))).collect(),
                 mgr,
             }
         })
@@ -5121,7 +5225,7 @@ fn c31_hold(text: &str, prefix: &str, track: &C31Track, what: &str) -> C31Held {
     let mut paths = track.paths.clone();
     let (mut stepped, mut laps, mut bests, mut finished, mut off, mut back, mut torn) = (0, 0, 0, 0, 0, 0, 0);
     let mut xor = 0u64;
-    let (mut long_way, mut too_long, mut watch_turned) = (0, 0, 0);
+    let (mut long_way, mut too_long, mut watch_turned, mut speed_off) = (0, 0, 0, 0);
     let mut lap_ticks = Vec::new();
     let mut bad: std::collections::BTreeMap<&str, (usize, String)> = Default::default();
     for w in rows.windows(2) {
@@ -5151,12 +5255,23 @@ fn c31_hold(text: &str, prefix: &str, track: &C31Track, what: &str) -> C31Held {
                 continue;
             }
             let mut card = a.clone();
-            card.lap.seen.now = b.lap.seen.now;
-            // The rider's own words the helpers read, written by the bike before the handler runs: on
-            // the ground or not, the height, the look.
-            card.lap.flags = card.lap.flags & !race_card_flags::GROUNDED | b.lap.flags & race_card_flags::GROUNDED;
+            // The bike's word to its card, the handler's first call (S302a, [`RaceCard::feed`]), off
+            // what the capture holds of the bike: where the card says it is, its look, its velocity,
+            // the ground bit. C31 has no bike words and no ground under the rider, so the height is
+            // the captured card's; the speed the feed works out is the captured one's, bit for bit.
+            let feed = race::CardFeed {
+                at: b.lap.seen.now,
+                look: b.look,
+                velocity: now.velocity[k],
+                ground: F::ZERO,
+                on_ground: b.lap.flags & race_card_flags::GROUNDED != 0,
+                wrecked: false,
+            };
+            card.feed(&feed);
             card.jumps.rise = b.jumps.rise;
-            card.look = b.look;
+            if card.lap.record_word != b.lap.record_word {
+                speed_off += 1;
+            }
             // The card's owner turns the jump watch off and on, on the human's card before the handler,
             // on a computer's after, and clears the jump to judge while the watch is off: on a tick with
             // the watch off before or after, the watch runs on whichever bit matches and the two bits
@@ -5219,6 +5334,7 @@ fn c31_hold(text: &str, prefix: &str, track: &C31Track, what: &str) -> C31Held {
     }
     eprintln!("{what}: {stepped} steps, {torn} torn, {laps} laps, {bests} bests, {finished} finished, {off} off-track ticks, {too_long} off too long, {back} back on, {long_way} long way round, {watch_turned} jump watches turned, flags xor {xor:#x}; laps (frame, rider, lap) {lap_ticks:?}");
     assert!(bad.is_empty(), "{what}: words that differ (count, first four): {bad:#?}");
+    assert_eq!(speed_off, 0, "{what}: cards whose speed is not their velocity's length");
     assert!(xor & !C31_UNPORTED_FLAGS == 0, "{what}: flags {xor:#x}");
     C31Held { stepped, torn, laps, bests, finished, off, too_long, back }
 }
@@ -9691,7 +9807,7 @@ fn riders_walked_round_sx01_run_their_laps_to_the_over() {
     let mut rng = Rng::from_state(0x1234_5678);
     let (mut counted, mut finished, mut over_at, mut human_done) = ([0; 2], Vec::new(), None, None);
     for tick in 1..6000 {
-        let riders: Vec<(Vf, Vf)> = walks.iter().map(|w| (w[tick.min(w.len() - 1)], Vf::new(0.0, 0.0, 1.0, 0.0))).collect();
+        let riders: Vec<race::CardFeed> = walks.iter().map(|w| race::CardFeed::standing(w[tick.min(w.len() - 1)], Vf::new(0.0, 0.0, 1.0, 0.0))).collect();
         let frame = laps.tick(dt, &riders, &mut rng);
         for (player, n) in &frame.cards {
             match n {
@@ -9733,3 +9849,4 @@ fn riders_walked_round_sx01_run_their_laps_to_the_over() {
     assert_eq!(game_sim::hash::of(&back), game_sim::hash::of(&sim));
     assert!(back.race.as_ref().and_then(|r| r.laps.as_ref()).is_some_and(|l| l.rules.lap.flags & 1 != 0), "the drop came through");
 }
+

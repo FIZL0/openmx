@@ -719,8 +719,9 @@ impl Race {
         }
     }
 
-    /// **The race manager's tick**, before the riders': each rider in `riders` is where its bike is
-    /// and which way it faces (its transform's translation and forward row), in player order.
+    /// **The race manager's tick**, before the riders': each rider in `riders` is its bike's word to
+    /// its card ([`CardFeed`]: where it is and which way it faces, its transform's translation and
+    /// forward row, and the rest), in player order.
     ///
     /// In the original's order: the music clock, which only runs while above zero and not held, and
     /// starts the track on the tick it reaches zero or below (then reads zero); the gate's watch over
@@ -729,7 +730,7 @@ impl Race {
     /// whose last tick drops the gate ([`Race::drop`]). The watch runs before the drop, so a rider
     /// through the gate on the drop's own tick is still caught. Then, on a race with laps, the drop
     /// starts them and every later tick runs them ([`Laps`]).
-    pub fn tick(&mut self, dt: F, riders: &[(Vf, Vf)]) -> Frame {
+    pub fn tick(&mut self, dt: F, riders: &[CardFeed]) -> Frame {
         let mut frame = Frame::default();
         let started = !self.countdown.running;
         if !(read(self.music_in) <= F::ZERO) && !self.music_held {
@@ -740,12 +741,12 @@ impl Race {
             }
         }
         // A rider who joined since the start is seen where it stands first.
-        for &(at, _) in &riders[self.cards.len().min(riders.len())..] {
-            self.cards.push(Seen { now: at, last: at });
+        for f in &riders[self.cards.len().min(riders.len())..] {
+            self.cards.push(Seen { now: f.at, last: f.at });
         }
         if self.gate.flags & flags::CLOSED != 0 {
-            for (i, &(at, facing)) in riders.iter().enumerate() {
-                if let Some(hit) = self.gate.watch(&mut self.cards[i], at, facing, &mut self.rng) {
+            for (i, f) in riders.iter().enumerate() {
+                if let Some(hit) = self.gate.watch(&mut self.cards[i], f.at, f.look, &mut self.rng) {
                     frame.caught.push((i, hit));
                 }
             }
@@ -1979,8 +1980,8 @@ pub mod race_card_flags {
     pub const COMPUTER_AIM: u64 = 0x80_0000;
     /// The card's jumps are watched ([`super::RaceRules::jumps`]).
     pub const WATCHES_JUMPS: u64 = 0x8_0000;
-    /// The rider is on the ground, as the card is told from outside the handler (what sets it was not
-    /// traced; the jump watch reads it so: it times a jump while the bit is clear).
+    /// Either of the rider's wheels touches, as its bike tells the card ([`super::RaceCard::feed`]);
+    /// the jump watch times a jump while the bit is clear.
     pub const GROUNDED: u64 = 0x400;
     /// The jump watch's copy of [`GROUNDED`] from the tick before.
     pub const WAS_GROUNDED: u64 = 0x800;
@@ -2020,6 +2021,57 @@ pub struct RaceCard {
     pub warnings: Warnings,
 }
 
+/// What a rider's bike tells its score card, first thing in the race handler's tick for every card
+/// (S302a): its frame's position and look rows, its chassis' velocity, where the ground is under it,
+/// whether a wheel is down and whether it is wrecked ([`RaceCard::feed`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CardFeed {
+    /// The bike's frame: its position row and its look row.
+    pub at: Vf,
+    pub look: Vf,
+    /// The chassis' velocity.
+    pub velocity: Vf,
+    /// The height of the world's ground under the card's new position (the ground query's answer).
+    pub ground: F,
+    /// Either wheel touches.
+    pub on_ground: bool,
+    /// The rider is down: a wreck is running.
+    pub wrecked: bool,
+}
+
+impl CardFeed {
+    /// A rider where `at` is, facing `look`, standing still on the ground there.
+    pub fn standing(at: Vf, look: Vf) -> CardFeed {
+        CardFeed { at, look, ground: F(at.y()), on_ground: true, ..CardFeed::default() }
+    }
+}
+
+impl RaceCard {
+    /// **The bike's word to its card** (S302a), the card owner's first call in the race handler: the
+    /// position ([`Seen::now`]'s `xyz`), the speed (the velocity's length, kept in
+    /// [`LapCard::record_word`]), the look (`xyz`), the height over the ground ([`Jumps::rise`]: the
+    /// position's `y` less the ground's), [`race_card_flags::GROUNDED`] while a wheel is down, and a
+    /// wrecked rider's landing no longer waits to be judged ([`race_card_flags::JUMP_TO_JUDGE`]
+    /// cleared). The card's velocity and up words, which nothing in the handler reads, are not kept.
+    pub fn feed(&mut self, f: &CardFeed) {
+        let card = &mut self.lap;
+        card.seen.now = card.seen.now.merge(Dest::XYZ, f.at);
+        let v = f.velocity;
+        let speed = fpu::sqrt(fpu::madd(fpu::madda(fpu::mula(v.x(), v.x()), v.y(), v.y()), v.z(), v.z()));
+        card.record_word = speed.to_bits();
+        self.look = self.look.merge(Dest::XYZ, f.look);
+        self.jumps.rise = F(fpu::sub(card.seen.now.y(), f.ground.0));
+        if f.on_ground {
+            card.flags |= race_card_flags::GROUNDED;
+        } else {
+            card.flags &= !race_card_flags::GROUNDED;
+        }
+        if f.wrecked {
+            card.flags &= !race_card_flags::JUMP_TO_JUDGE;
+        }
+    }
+}
+
 /// A score card's jump watch (S302): each jump's take-off and landing, its length, height and time in
 /// the air, and the card's best of each.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -2037,7 +2089,8 @@ pub struct Jumps {
     /// The last jump's time in the air (`+0xfc`), and the best (`+0x100`).
     pub air_time: F,
     pub best_air_time: F,
-    /// The rider's height as the card is told it from outside the handler (`+0x104`; not traced).
+    /// The rider's height over the ground under it, as its bike tells the card (`+0x104`,
+    /// [`RaceCard::feed`]).
     pub rise: F,
     /// Where the rider took off (`+0x190`) and landed (`+0x1a0`).
     pub takeoff: Vf,
@@ -4647,8 +4700,7 @@ pub fn supercross_rules(laps: i32) -> RaceRules {
 
 /// A human's score card flags before the drop, as sx01's live race holds them: a player the race
 /// waits for, with the off-track limit, the jump watch and the computer aim, standing on the ground
-/// (`0x400`, `0x800`). Nothing in the ride tells the card its rider left the ground: the jump watch
-/// sees it standing throughout.
+/// (`0x400`, `0x800`). The bike's word ([`RaceCard::feed`]) sets and clears `0x400` every tick.
 pub const HUMAN_CARD: u64 = 0x0188_0c04;
 /// A computer rider's: no player bit, `0x08` and `0x10_0000` beside the rest.
 pub const COMPUTER_CARD: u64 = 0x0198_0c08;
@@ -4718,10 +4770,10 @@ impl Laps {
         }
     }
 
-    /// One tick of the race handler, `dt` long, every rider at `riders` (in player order): the opening
-    /// look for a rider still raced, each card in list order — its owner telling it where its rider is,
-    /// then the card's step timed off the list head's clock — and the close.
-    pub fn tick(&mut self, dt: F, riders: &[(Vf, Vf)], rng: &mut Rng) -> LapsFrame {
+    /// One tick of the race handler, `dt` long, every rider's bike as `riders` tells it (in player
+    /// order): the opening look for a rider still raced, each card in list order — its owner's word
+    /// ([`RaceCard::feed`]), then the card's step timed off the list head's clock — and the close.
+    pub fn tick(&mut self, dt: F, riders: &[CardFeed], rng: &mut Rng) -> LapsFrame {
         let mut frame = LapsFrame::default();
         if self.cards.is_empty() {
             return frame;
@@ -4731,8 +4783,8 @@ impl Laps {
         for k in 0..self.cards.len() {
             let leader_time = self.cards[0].card.lap.race_time;
             let e = &mut self.cards[k];
-            if let Some(&(at, _)) = riders.get(e.player) {
-                e.card.lap.seen.now = e.card.lap.seen.now.merge(Dest::XYZ, at);
+            if let Some(f) = riders.get(e.player) {
+                e.card.feed(f);
             }
             let said = self.rules.card_on_lines(dt, &mut e.card, None, track, &self.course, &self.lists, leader_time);
             frame.cards.extend(said.into_iter().map(|n| (e.player, n)));
