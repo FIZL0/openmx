@@ -212,3 +212,23 @@ fn each_pack_has_its_machines_own_follow_and_race_cameras() {
         }
     }
 }
+
+/// **MD161:** a car's `step` word picks MX vs. ATV Untamed's car step; a car without one (every
+/// MX vs. ATV Unleashed pack's) stays on Unleashed's.
+#[test]
+fn a_cars_step_word_picks_untameds_car_step() {
+    let dir = std::env::temp_dir().join(format!("openmx-md161-pack-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("mod.json"),
+        r#"{"kind": "machine", "id": "untamed_test", "machine": "car", "cars": [
+            {"car": "MonsterTruck", "phy": "Veh/monstertruck.phy.bpb", "psg": "Veh/monstertruck.psg", "col": "", "step": "untamed"},
+            {"car": "Truck", "phy": "Veh/truck.phy", "psg": "Veh/truck.psg", "col": ""}]}"#,
+    )
+    .unwrap();
+    let pack = machine_packs::read(&dir);
+    std::fs::remove_dir_all(&dir).unwrap();
+    let pack = pack.unwrap().unwrap();
+    let steps: Vec<(&str, bool)> = pack.cars.iter().map(|c| (c.car.as_str(), c.untamed())).collect();
+    assert_eq!(steps, [("MonsterTruck", true), ("Truck", false)]);
+}

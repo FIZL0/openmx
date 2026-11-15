@@ -3559,7 +3559,8 @@ impl MxvatvCarRide {
     pub fn read(pack: &str, car: &str, phy: &str, psg: &str, read: &mut dyn FnMut(&str) -> Option<Vec<u8>>) -> Result<MxvatvCarRide, String> {
         let machine = mxvatv_machine(car).ok_or_else(|| format!("{pack}: {car:?} is none of MX vs. ATV's five cars"))?;
         let mut file = |name: &str| read(name).ok_or_else(|| format!("{pack} has no {name}"));
-        let ini = Ini::parse_bytes(&file(phy)?);
+        // MX vs. ATV Untamed's `.phy` is a BPB (MD161's pack: `Veh/monstertruck.phy.bpb`).
+        let ini = if phy.to_ascii_lowercase().ends_with(".bpb") { game_sim::bpb::ini(&file(phy)?).map_err(|e| format!("{phy}: {e}"))? } else { Ini::parse_bytes(&file(phy)?) };
         let model = game_sim::quad::Model::parse(&file(psg)?).map_err(|e| format!("{psg}: {e}"))?;
         let origin = game_sim::quad::spawn_frame(Vf::new(0.0, 0.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 1.0));
         let points = game_sim::atv_car::tire_points(&model, &origin).map_err(|e| format!("{psg}: {e}"))?;
@@ -3571,6 +3572,19 @@ impl MxvatvCarRide {
     /// What the shell calls it.
     pub fn label(&self) -> &'static str {
         mxvatv_car_label(self.machine)
+    }
+
+    /// The car made to ride on MX vs. ATV Untamed's car step (MD161, [`game_sim::atv_car::Load::untamed`]:
+    /// the preload cue, the vehicle force, the hazard clock, the input step's clutch, the PostProcess's
+    /// yaw hold and the body's per-time angular damping), as an Untamed car pack's `step` says.
+    pub fn on_untamed_step(mut self) -> MxvatvCarRide {
+        std::sync::Arc::make_mut(&mut self.load).untamed = true;
+        self
+    }
+
+    /// Whether it rides on MX vs. ATV Untamed's car step.
+    pub fn untamed(&self) -> bool {
+        self.load.untamed
     }
 
     /// How high over the ground its node stands for its lowest tire bottom to be a foot over it.
