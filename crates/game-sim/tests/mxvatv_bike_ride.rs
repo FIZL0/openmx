@@ -21619,3 +21619,505 @@ fn the_rider_spheres_pair_is_the_originals() {
         assert!(get(k) >= 20, "{k}: {} cases\n{t:#?}", get(k));
     }
 }
+
+// --- F53: the part's pair kinds C15 never makes, against the original ---------------------------------
+
+/// The part's clear (vt `+0xb0`) and pair (vt `+0xb4`).
+const F53_CLEAR: u32 = 0x001b_bbc0;
+const F53_PAIR: u32 = 0x001b_be60;
+/// The globals a mesh descent leaves: the mesh's vertex descriptor (its `+0x230`), a flag set to 1, and
+/// two pointers into the descent's own stack frame (its node and ray array pairs).
+const F53_DESCRIPTOR_AT: u32 = 0x003d_ce38;
+const F53_DESCENT_FLAG_AT: u32 = 0x003d_ce30;
+const F53_STACK_POINTERS: [u32; 2] = [0x003d_ce40, 0x003d_ce48];
+/// The descents' leaf tests' scratch (their probe-space vectors and box rows): read and written only
+/// inside 0x00107000-0x0010a000, so not compared.
+const F53_SCRATCH: std::ops::Range<u32> = 0x003d_ce50..0x003d_cef0;
+/// The room the oracle builds its probes and made-up collidables in.
+const F53_AREA: u32 = 0x000e_0000;
+const F53_AREA_LEN: u32 = 0x2000;
+const F53_CASES: usize = 10_000;
+const F53_MAX_RAYS: usize = 16;
+
+/// The part probe's rays and tree as RAM has them: `+0x180` the rays, `+0x178` their count, `+0x170`
+/// the root and `+0x17c` the nodes, read from the root (and node 0 besides when the root is a ray but
+/// the tree is there: the group gate boxes node 0 whenever `+0x17c` is set).
+fn f53_probe_in_ram(ee: &Ee, part: u32) -> (ray_probe::Matrix, u16, Vec<track::Node>, Vec<ray_probe::Segment>) {
+    let root = ee.u16_at(part + 0x170);
+    let at = ee.u32_at(part + 0x17c);
+    let nodes = if at == 0 {
+        Vec::new()
+    } else if root & 0x8000 != 0 {
+        let three = |a: u32| [0, 4, 8].map(|k| word_f(ee, a + k));
+        vec![track::Node { volume: word_f(ee, at), centre: three(at + 12), half_extent: three(at + 24), children: [ee.u16_at(at + 8), ee.u16_at(at + 10)] }]
+    } else {
+        tree_in_ram(ee, at, root).0
+    };
+    let segs = ee.u32_at(part + 0x180);
+    let segments = (0..ee.u32_at(part + 0x178)).map(|i| ray_probe::Segment { from: vf_at(ee, segs + 0x20 * i), to: vf_at(ee, segs + 0x20 * i + 0x10) }).collect();
+    (matrix_at(ee, part + 0x130), root, nodes, segments)
+}
+
+/// A kind 6 collidable as the part's pair reads it: its centre `+0x170`, half extents `+0x180`, frame
+/// `+0x130`.
+fn f53_box_in_ram(ee: &Ee, c: u32) -> atv_part::OrientedBox {
+    atv_part::OrientedBox { centre: vf_at(ee, c + 0x170), half: vf_at(ee, c + 0x180), frame: matrix_at(ee, c + 0x130) }
+}
+
+/// The oracle's world for [`atv_part::PartRays`]: every collidable read from RAM by its kind (meshes
+/// read once beforehand, a hierarchy's gate box, frame and switched-on parts per case). Notes the
+/// meshes the original would descend, in order (whose descriptor the last one leaves in a global).
+struct F53World<'e> {
+    ee: &'e Ee,
+    items: Vec<u32>,
+    meshes: &'e HashMap<u32, MeshInRam>,
+    parts: Vec<ray_probe::Part<'e>>,
+    descended: Vec<u32>,
+    probe: Option<(ray_probe::Matrix, u16, Vec<track::Node>, Vec<ray_probe::Segment>)>,
+}
+
+impl atv_part::Outside for F53World<'_> {
+    fn shape(&mut self, other: usize) -> ray_probe::Shape<'_> {
+        let (ee, c) = (self.ee, self.items[other]);
+        match ee.u32_at(c + 0x78) {
+            0 => {
+                self.descended.push(c);
+                ray_probe::Shape::Mesh(self.meshes[&c].mesh())
+            }
+            1 => {
+                let n = ee.u32_at(c + 0x210);
+                let (list, on) = (ee.u32_at(c + 0x224), ee.u32_at(c + 0x214));
+                self.parts = (0..n)
+                    .map(|i| ray_probe::Part { enabled: ee.u32_at(on + 4 * i) != 0, mesh: self.meshes[&ee.u32_at(list + 4 * i)].mesh() })
+                    .collect();
+                let group = ray_probe::Hierarchy { centre: vf_at(ee, c + 0x130), half: vf_at(ee, c + 0x140), frame: matrix_at(ee, c + 0x1b0), parts: &self.parts };
+                let (m, root, nodes, segments) = self.probe.as_ref().unwrap();
+                let probe = ray_probe::RayProbe { transform: *m, root: *root, nodes, segments };
+                if ray_probe::group_reaches(&probe, &group) {
+                    self.descended.extend(self.parts.iter().filter(|p| p.enabled).map(|p| p.mesh.id));
+                }
+                ray_probe::Shape::Hierarchy(group)
+            }
+            5 | 6 => unreachable!("the part's own tests"),
+            _ => ray_probe::Shape::Never,
+        }
+    }
+    fn sphere(&mut self, other: usize) -> Option<atv_part::Sphere> {
+        let (ee, c) = (self.ee, self.items[other]);
+        (ee.u32_at(c + 0x78) == 5).then(|| atv_part::Sphere { centre: vf_at(ee, c + 0x50), radius: word_f(ee, c + 0x180), radius2: word_f(ee, c + 0x184) })
+    }
+    fn oriented_box(&mut self, other: usize) -> Option<atv_part::OrientedBox> {
+        let (ee, c) = (self.ee, self.items[other]);
+        (ee.u32_at(c + 0x78) == 6).then(|| f53_box_in_ram(ee, c))
+    }
+}
+
+impl ws::Narrow for F53World<'_> {
+    fn clear(&mut self, _: &mut [ws::Collidable], _: usize) {
+        unreachable!()
+    }
+    fn prepare(&mut self, _: &mut [ws::Collidable], _: usize) {
+        unreachable!()
+    }
+    fn pair(&mut self, _: &mut [ws::Collidable], _: usize, _: usize) -> bool {
+        unreachable!()
+    }
+    fn parts(&mut self, _: &mut [ws::Collidable], _: usize) -> usize {
+        unreachable!()
+    }
+    fn part(&mut self, _: &mut [ws::Collidable], _: usize, _: usize) -> Option<usize> {
+        unreachable!()
+    }
+    fn heard_hit(&mut self, _: &mut [ws::Collidable], _: usize, _: usize, _: usize) {
+        unreachable!()
+    }
+    fn heard_struck(&mut self, _: &mut [ws::Collidable], _: usize, _: usize, _: usize) {
+        unreachable!()
+    }
+    fn on_hit(&mut self, _: &mut [ws::Collidable], _: usize, _: usize, _: usize) {
+        unreachable!()
+    }
+    fn on_struck(&mut self, _: &mut [ws::Collidable], _: usize, _: usize, _: usize) {
+        unreachable!()
+    }
+}
+
+/// A random tree over the segments `idx` (pre-order node numbers), each node's box round its
+/// segments' ends, now and then grown, shrunk or anyhow, its volume key the box's or drawn. Answers
+/// the subtree's child word.
+#[allow(clippy::float_arithmetic)]
+fn f53_tree(g: &mut Gen, segs: &[ray_probe::Segment], idx: &[usize], nodes: &mut Vec<track::Node>) -> u16 {
+    if idx.len() == 1 {
+        return 0x8000 | idx[0] as u16;
+    }
+    let me = nodes.len();
+    nodes.push(track::Node { volume: F::ZERO, centre: [F::ZERO; 3], half_extent: [F::ZERO; 3], children: [0, 0] });
+    let k = 1 + (g.bits() as usize) % (idx.len() - 1);
+    let c0 = f53_tree(g, segs, &idx[..k], nodes);
+    let c1 = f53_tree(g, segs, &idx[k..], nodes);
+    let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for &i in idx {
+        for p in [segs[i].from, segs[i].to] {
+            for a in 0..3 {
+                lo[a] = lo[a].min(p.0[a]);
+                hi[a] = hi[a].max(p.0[a]);
+            }
+        }
+    }
+    let scale = if g.one_in(8) { g.f(0.2, 1.0) } else if g.one_in(16) { 0.0 } else { g.f(1.0, 1.3) };
+    let centre: [f32; 3] = std::array::from_fn(|a| (lo[a] + hi[a]) * 0.5 + if g.one_in(10) { g.f(-1.0, 1.0) } else { 0.0 });
+    let half: [f32; 3] = std::array::from_fn(|a| (hi[a] - lo[a]) * 0.5 * scale + if g.one_in(4) { 0.05 } else { 0.0 });
+    let volume = if g.one_in(3) { g.near(0.0, 0.0, 200.0) } else { 8.0 * half[0] * half[1] * half[2] };
+    nodes[me] = track::Node { volume: F(volume), centre: centre.map(F), half_extent: half.map(F), children: [c0, c1] };
+    me as u16
+}
+
+/// **F53 — the part's pair kinds C15 never makes, as the original does**: 10,000 cases on state 4's
+/// riding part (record `+0x200`), each a generated probe — up to 16 rays aimed through nat05's
+/// triangles, plant spheres and made-up boxes and spheres (or anywhere), under a random tree or none,
+/// in a drawn frame — cleared and paired with up to three others by SLUS-21104's clear and pair (vt
+/// `+0xb0`/`+0xb4`) and by [`atv_part::PartRays`] from the same words. The others: nat05's meshes
+/// (kind 0) and F51's turned copies, F51's hierarchies (kind 1, each case's gate box, frame and
+/// switched-on parts drawn), plant spheres stood by the original and made-up spheres (kind 5),
+/// made-up boxes (kind 6) and other kinds. The record is drawn too: one contact a ray or not, listed
+/// or not, sometimes room for only 1-4, junk in what the clear keeps. Every return agrees, and every word of the record, its
+/// arrays, the probe's flags and the globals comes out the same; the original writes nowhere else but
+/// its stack and the scratchpad (the descents' frames).
+#[test]
+#[allow(clippy::float_arithmetic)]
+fn the_parts_pair_kinds_are_the_originals() {
+    use f51_at as at;
+    let Some(mut ee) = image() else { return };
+    ee.set(28, GP);
+    let mut g = Gen(0x0f53_0000_0000_0001);
+    let s = sweep_scene(&mut ee, &mut g);
+    for a in (F53_AREA..F53_AREA + F53_AREA_LEN).step_by(4) {
+        assert_eq!(ee.u32_at(a), 0, "{a:#x} of the oracle's room is not free");
+    }
+    let part = ee.u32_at(ee.u32_at(BIKE + seed::RECORD) + 0x200);
+    assert_eq!(ee.u32_at(part + 0x188), 0, "the part has a profiler");
+    assert_eq!(ee.u32_at(part + 0x184), 0, "the part smooths its normals: not ported");
+    let r = ee.u32_at(part + 0x7c);
+    let cap = ee.u32_at(r + 0x88);
+    let rays_at = ee.u32_at(r + 0x90);
+    let one_per_ray = ee.u8_at(r + 0xbc);
+    eprintln!("F53: part {part:#x}, record {r:#x}, capacity {cap}, rays {rays_at:#x}, one a ray {one_per_ray}, {} rays", ee.u32_at(part + 0x178));
+    // Where the oracle builds things.
+    let (nodes_at, segs_at, on_at) = (F53_AREA, F53_AREA + 0x800, F53_AREA + 0xa00);
+    let [made_sphere, made_box, made_other] = [0, 1, 2].map(|k| F53_AREA + 0xc00 + 0x200 * k);
+    let class = ee.u8_at(s.objects[0] + 2);
+    set_u8(&mut ee, made_sphere + 2, class);
+    ee.set_u32(made_sphere + at::KIND, 5);
+    ee.set_u32(made_box + at::KIND, 6);
+    // The hierarchies' switches.
+    let hierarchies: Vec<usize> = (0..s.objects.len()).filter(|&k| ee.u32_at(s.objects[k] + at::KIND) == 1).collect();
+    for (h, &k) in hierarchies.iter().enumerate() {
+        ee.set_u32(s.objects[k] + 0x214, on_at + 0x10 * h as u32);
+    }
+    // The meshes, read once (a mesh without a tree is left out: the descent would read node 0 at 0).
+    let meshes: HashMap<u32, MeshInRam> =
+        s.objects.iter().copied().filter(|&c| ee.u32_at(c + at::KIND) == 0 && ee.u32_at(c + at::NODES) != 0).map(|c| (c, MeshInRam::read(&ee, c))).collect();
+    let pairable: Vec<usize> = (0..s.objects.len()).filter(|&k| ee.u32_at(s.objects[k] + at::KIND) != 0 || meshes.contains_key(&s.objects[k])).collect();
+    let treeless = s.objects.iter().filter(|&&c| ee.u32_at(c + at::KIND) == 0 && ee.u32_at(c + at::NODES) == 0).count();
+    let (m, world, _) = GatherInRam::read(&ee, s.probe);
+    let groups: Vec<u32> = (1..world.len()).filter(|&k| world[k].class == ws::Class::Group).map(|k| m.items[k]).collect();
+    let pick = |g: &mut Gen, n: usize| (g.bits() as usize) % n;
+    // The regions the pair and the clear may write.
+    let mut regions: Vec<(u32, u32)> = vec![(r, 0xc0), (part + 0x124, 4)];
+    for (o, size) in [(0x90, 0x20), (0x94, 0x10), (0x98, 0x10), (0x9c, 4), (0xa0, 4), (0xa8, 4), (0xac, 4), (0xb0, 2)] {
+        regions.push((ee.u32_at(r + o), (size * cap + 3) & !3));
+    }
+    for a in [PART_SMOOTH_AT, SWEEP_RECORD_AT, SWEEP_ZEROED[0], SWEEP_ZEROED[1], F53_DESCRIPTOR_AT, F53_DESCENT_FLAG_AT, F53_STACK_POINTERS[0], F53_STACK_POINTERS[1]] {
+        regions.push((a, 4));
+    }
+    let in_regions = |a: u32| regions.iter().any(|&(at, len)| (at..at + len).contains(&(a & 0x0fff_ffff)));
+    let mut t: BTreeMap<String, u32> = BTreeMap::new();
+    let tally = |t: &mut BTreeMap<String, u32>, k: String| *t.entry(k).or_default() += 1;
+    let mut case = 0;
+    while case < F53_CASES {
+        // The others, and the world points the rays are aimed at.
+        let mut items = s.objects.clone();
+        let mut others: Vec<(usize, &str)> = Vec::new();
+        let mut aims: Vec<[f32; 3]> = Vec::new();
+        let tri_point = |g: &mut Gen, j: usize| -> [f32; 3] {
+            let mesh = s.meshes[j].as_ref().unwrap();
+            let tri = &mesh.triangles[pick(g, mesh.triangles.len())];
+            let frame = f51_transform(&ee, s.objects[j]);
+            let [a, b, d] = tri.vertices.map(|v| {
+                let p = mesh.mesh().vertex(v);
+                f51_place(&frame, [p.x(), p.y(), p.z()])
+            });
+            let (u, v) = (g.f(0.0, 1.0), g.f(0.0, 1.0));
+            let (u, v) = if u + v > 1.0 { (1.0 - u, 1.0 - v) } else { (u, v) };
+            std::array::from_fn(|i| a[i] + u * (b[i] - a[i]) + v * (d[i] - a[i]))
+        };
+        let solid = |k: usize| -> Vec<usize> { s.parts[k].iter().copied().filter(|&j| meshes.contains_key(&s.objects[j]) && s.meshes[j].as_ref().is_some_and(|m| !m.triangles.is_empty())).collect() };
+        match g.bits() % 20 {
+            0..=7 => {
+                let k = loop {
+                    let k = s.aims[pick(&mut g, s.aims.len())];
+                    if s.meshes[k].is_some() && !solid(k).is_empty() {
+                        break k;
+                    }
+                };
+                for _ in 0..1 + pick(&mut g, 4) {
+                    aims.push(tri_point(&mut g, k));
+                }
+                others.push((k, "mesh"));
+            }
+            8..=11 => {
+                let k = hierarchies[pick(&mut g, hierarchies.len())];
+                let c = s.objects[k];
+                let sol = solid(k);
+                for _ in 0..1 + pick(&mut g, 4) {
+                    let j = sol[pick(&mut g, sol.len())];
+                    aims.push(tri_point(&mut g, j));
+                }
+                let around = vf_at(&ee, c + at::CENTRE);
+                let jitter = [0; 3].map(|_| g.f(-1.0, 1.0));
+                let frame = s279a_frame_to(s279a_rows(&mut g), Vf::ZERO, std::array::from_fn(|i| around.0[i] + jitter[i]), 1.0);
+                for (i, row) in frame.iter().enumerate() {
+                    set_vf(&mut ee, c + 0x1b0 + 0x10 * i as u32, *row);
+                }
+                let reach = word_f(&ee, c + at::RADIUS).0;
+                let centre = Vf(g.lanes(1.0));
+                let half = Vf([0; 4].map(|_| reach * g.f(0.2, 1.2)));
+                set_vf(&mut ee, c + 0x130, centre);
+                set_vf(&mut ee, c + 0x140, half);
+                let on = ee.u32_at(c + 0x214);
+                for i in 0..ee.u32_at(c + 0x210) {
+                    ee.set_u32(on + 4 * i, u32::from(!g.one_in(5)) * if g.one_in(3) { g.bits() | 1 } else { 1 });
+                }
+                others.push((k, "hierarchy"));
+            }
+            12..=13 => {
+                let group = groups[pick(&mut g, groups.len())];
+                let n = PartWorldInRam::species_parts(&ee, group).len();
+                if n == 0 {
+                    continue;
+                }
+                ee.set(28, GP);
+                ee.call(ECO_PART, &[u64::from(group), pick(&mut g, n) as u64], &[], BUDGET);
+                let p = ee.v0() as u32;
+                if p == 0 {
+                    continue;
+                }
+                assert_eq!(ee.u32_at(p + at::KIND), 5, "a plant part that is no sphere");
+                let c = vf_at(&ee, p + 0x50);
+                let reach = word_f(&ee, p + 0x180).0;
+                for _ in 0..1 + pick(&mut g, 3) {
+                    let off = f51_unit(&mut g).map(|x| x * reach * g.f(0.0, 1.5));
+                    aims.push(std::array::from_fn(|i| c.0[i] + off[i]));
+                }
+                items.push(p);
+                others.push((items.len() - 1, "plant sphere"));
+            }
+            14..=15 => {
+                let c = made_sphere;
+                let centre = Vf::new(g.f(-60.0, 60.0), g.f(-60.0, 60.0), g.f(-60.0, 60.0), g.near(1.0, -1.0, 1.0));
+                let rad = g.near(0.0, 0.0, 4.0);
+                set_vf(&mut ee, c + 0x50, centre);
+                ee.set_u32(c + 0x180, rad.to_bits());
+                ee.set_u32(c + 0x184, if g.one_in(8) { g.f(0.0, 16.0) } else { rad * rad }.to_bits());
+                for _ in 0..1 + pick(&mut g, 3) {
+                    let off = f51_unit(&mut g).map(|x| x * rad * g.f(0.0, 1.5));
+                    aims.push(std::array::from_fn(|i| centre.0[i] + off[i]));
+                }
+                items.push(c);
+                others.push((items.len() - 1, "sphere"));
+            }
+            16..=18 => {
+                let c = made_box;
+                let frame = s279a_frame_to(s279a_rows(&mut g), Vf::ZERO, [0; 3].map(|_| g.f(-60.0, 60.0)), g.near(1.0, -1.0, 1.0));
+                for (i, row) in frame.iter().enumerate() {
+                    set_vf(&mut ee, c + 0x130 + 0x10 * i as u32, *row);
+                }
+                let centre = Vf(g.lanes(2.0));
+                let half = Vf([0; 4].map(|_| g.near(0.0, 0.0, 3.0)));
+                set_vf(&mut ee, c + 0x170, centre);
+                set_vf(&mut ee, c + 0x180, half);
+                let w = f51_place(&frame, [centre.x(), centre.y(), centre.z()]);
+                for _ in 0..1 + pick(&mut g, 3) {
+                    let off = f51_unit(&mut g).map(|x| x * half.x().max(half.y()).max(half.z()) * g.f(0.0, 1.8));
+                    aims.push(std::array::from_fn(|i| w[i] + off[i]));
+                }
+                items.push(c);
+                others.push((items.len() - 1, "box"));
+            }
+            _ => {
+                ee.set_u32(made_other + at::KIND, [2, 3, 4, 7, 9][pick(&mut g, 5)]);
+                aims.push([0; 3].map(|_| g.f(-50.0, 50.0)));
+                items.push(made_other);
+                others.push((items.len() - 1, "other kind"));
+            }
+        }
+        for _ in 0..pick(&mut g, 3) {
+            others.push((pairable[pick(&mut g, pairable.len())], "any"));
+        }
+        // The probe: its frame near the first aim, its rays through the aims (or anywhere).
+        let n = 1 + pick(&mut g, F53_MAX_RAYS);
+        let rows = s279a_rows(&mut g);
+        let t0: [f32; 3] = std::array::from_fn(|i| aims[0][i] + g.f(-4.0, 4.0));
+        let frame: ray_probe::Matrix = [rows[0], rows[1], rows[2], Vf::new(t0[0], t0[1], t0[2], g.near(1.0, -1.0, 1.0))];
+        let local = |p: [f32; 3]| -> [f32; 3] { std::array::from_fn(|r| (0..3).map(|k| (p[k] - t0[k]) * rows[r].0[k]).sum()) };
+        let segments: Vec<ray_probe::Segment> = (0..n)
+            .map(|_| {
+                let w = |g: &mut Gen| g.near(1.0, -1.0, 1.0);
+                if g.one_in(8) {
+                    return ray_probe::Segment { from: Vf([0; 4].map(|_| g.f(-8.0, 8.0))), to: Vf([0; 4].map(|_| g.f(-8.0, 8.0))) };
+                }
+                let p = local(aims[pick(&mut g, aims.len())]);
+                let d = f51_unit(&mut g);
+                let len = if g.one_in(30) { 0.0 } else { g.f(0.1, 6.0) };
+                let at = g.f(-0.3, 1.3) * len;
+                let from = std::array::from_fn::<f32, 3, _>(|i| p[i] - d[i] * at);
+                let to = std::array::from_fn::<f32, 3, _>(|i| from[i] + d[i] * len);
+                ray_probe::Segment { from: Vf::new(from[0], from[1], from[2], w(&mut g)), to: Vf::new(to[0], to[1], to[2], w(&mut g)) }
+            })
+            .collect();
+        let mut nodes = Vec::new();
+        let (root, nodes_ptr) = if n == 1 || g.one_in(10) {
+            let root = 0x8000 | pick(&mut g, n) as u16;
+            if g.one_in(3) {
+                // A tree present but its root a ray: node 0 is junk the gate boxes.
+                f53_tree(&mut g, &segments, &(0..n).collect::<Vec<_>>(), &mut nodes);
+                if nodes.is_empty() {
+                    nodes.push(track::Node { volume: F(1.0), centre: [F(g.f(-1.0, 1.0)); 3], half_extent: [F(g.f(0.0, 3.0)); 3], children: [0x8000, 0x8000] });
+                }
+                (root, nodes_at)
+            } else {
+                (root, 0)
+            }
+        } else {
+            let mut idx: Vec<usize> = (0..n).collect();
+            for i in (1..n).rev() {
+                idx.swap(i, pick(&mut g, i + 1));
+            }
+            (f53_tree(&mut g, &segments, &idx, &mut nodes), nodes_at)
+        };
+        for (i, row) in frame.iter().enumerate() {
+            set_vf(&mut ee, part + 0x130 + 0x10 * i as u32, *row);
+        }
+        ee.set_u32(part + 0x170, u32::from(root) | ee.u32_at(part + 0x170) & 0xffff_0000);
+        ee.set_u32(part + 0x178, n as u32);
+        ee.set_u32(part + 0x17c, nodes_ptr);
+        ee.set_u32(part + 0x180, segs_at);
+        for (i, sg) in segments.iter().enumerate() {
+            set_vf(&mut ee, segs_at + 0x20 * i as u32, sg.from);
+            set_vf(&mut ee, segs_at + 0x20 * i as u32 + 0x10, sg.to);
+        }
+        for (i, nd) in nodes.iter().enumerate() {
+            let a = nodes_at + 36 * i as u32;
+            ee.set_u32(a, nd.volume.0.to_bits());
+            ee.set_u32(a + 4, g.f(0.0, 100.0).to_bits());
+            ee.set_u32(a + 8, u32::from(nd.children[0]) | u32::from(nd.children[1]) << 16);
+            for k in 0..3u32 {
+                ee.set_u32(a + 12 + 4 * k, nd.centre[k as usize].0.to_bits());
+                ee.set_u32(a + 24 + 4 * k, nd.half_extent[k as usize].0.to_bits());
+            }
+        }
+        // The record: one a ray or not, listed or not, junk in what the clear keeps.
+        let listed = !g.one_in(8);
+        ee.set_u32(r + 0x90, if listed { rays_at } else { 0 });
+        set_u8(&mut ee, r + 0xbc, if g.one_in(3) { 1 - one_per_ray.min(1) } else { one_per_ray });
+        for o in (0..0x80).step_by(4) {
+            ee.set_u32(r + o, s279_word(&mut g, 100.0));
+        }
+        ee.set_u32(r + 0x80, s279_word(&mut g, 2.0));
+        ee.set_u32(r + 0x84, g.bits());
+        let case_cap = if g.one_in(3) { 1 + pick(&mut g, 4) as u32 } else { cap };
+        ee.set_u32(r + 0x88, case_cap);
+        ee.set_u32(r + 0x8c, pick(&mut g, case_cap as usize + 1) as u32);
+        ee.set_u32(r + 0xb4, s279_word(&mut g, 2.0));
+        set_u8(&mut ee, r + 0xb8, (g.bits() & 3) as u8);
+        set_u8(&mut ee, part + 0x126, g.bits() as u8);
+        let before = snap_regions(&ee, &regions);
+        // The original's.
+        ee.written.clear();
+        ee.set(28, GP);
+        ee.call(F53_CLEAR, &[u64::from(part)], &[], BUDGET);
+        let mut theirs = Vec::new();
+        for &(o, _) in &others {
+            ee.set(28, GP);
+            ee.call(F53_PAIR, &[u64::from(part), u64::from(items[o])], &[], BUDGET);
+            theirs.push(ee.v0() != 0);
+        }
+        let stack = ee.stack.saturating_sub(0x10000)..ee.stack + 0x400;
+        let stray: Vec<u32> = ee.written.iter().copied().filter(|&w| w >> 28 != 7 && !in_regions(w) && !stack.contains(&(w & 0x0fff_ffff)) && !F53_SCRATCH.contains(&w)).collect();
+        let kinds: Vec<String> = others.iter().map(|&(o, l)| format!("{l} {:#x} kind {}", items[o], ee.u32_at(items[o] + at::KIND))).collect();
+        assert!(stray.is_empty(), "case {case} ({kinds:?}, answers {theirs:?}): the original wrote {stray:x?}");
+        let want = snap_regions(&ee, &regions);
+        let stack_pointers = F53_STACK_POINTERS.map(|a| ee.u32_at(a));
+        restore_regions(&mut ee, &regions, &before);
+        // The port's, from the same words.
+        let probe_words = f53_probe_in_ram(&ee, part);
+        let record = part_record_in_ram(&ee, r);
+        let mut objects = vec![ws::Collidable::default(); items.len() + 1];
+        let me = items.len();
+        objects[me].flags = ee.u8_at(part + 0x126);
+        let mut world = F53World { ee: &ee, items: items.clone(), meshes: &meshes, parts: Vec::new(), descended: Vec::new(), probe: Some(probe_words.clone()) };
+        let (fm, root, nodes, segments) = &probe_words;
+        let probe = ray_probe::RayProbe { transform: *fm, root: *root, nodes, segments };
+        let mut pr = atv_part::PartRays { probe, record, world: &mut world, pairs: 0 };
+        ws::Narrow::clear(&mut pr, &mut objects, me);
+        let ours: Vec<bool> = others.iter().map(|&(o, _)| ws::Narrow::pair(&mut pr, &mut objects, me, o)).collect();
+        let (record, pairs) = (pr.record, pr.pairs);
+        let descended = std::mem::take(&mut world.descended);
+        write_part_record(&mut ee, part, r, &record, pairs);
+        set_u8(&mut ee, part + 0x126, objects[me].flags);
+        if let Some(&last) = descended.last() {
+            ee.set_u32(F53_DESCRIPTOR_AT, last + 0x230);
+            ee.set_u32(F53_DESCENT_FLAG_AT, 1);
+            for (a, v) in F53_STACK_POINTERS.into_iter().zip(stack_pointers) {
+                assert!(stack.contains(&v), "case {case}: {a:#x} = {v:#x}, not the stack");
+                ee.set_u32(a, v);
+            }
+        }
+        let got = snap_regions(&ee, &regions);
+        if want != got || theirs != ours {
+            let mut d = Vec::new();
+            let mut k = 0;
+            for &(at, len) in &regions {
+                for o in (0..len).step_by(4) {
+                    if want[k] != got[k] {
+                        d.push(format!("{:#x}: {:#010x} want {:#010x}", at + o, got[k], want[k]));
+                    }
+                    k += 1;
+                }
+            }
+            panic!("case {case} ({n} rays, root {root:#x}, listed {listed}, others {kinds:?}): answers {theirs:?} {ours:?}; {}", d.join(", "));
+        }
+        // What the case reached.
+        for (&(o, label), &hit) in others.iter().zip(&ours) {
+            let label = if label == "any" {
+                match ee.u32_at(items[o] + at::KIND) {
+                    0 => "mesh",
+                    1 => "hierarchy",
+                    5 => "sphere",
+                    6 => "box",
+                    _ => "other kind",
+                }
+            } else {
+                label
+            };
+            tally(&mut t, format!("{label}: {}", if hit { "hit" } else { "miss" }));
+        }
+        tally(&mut t, format!("contacts: {}", if record.contacts.is_empty() { "none" } else if record.contacts.len() as u32 == case_cap { "full" } else { "some" }));
+        if record.contacts.iter().any(|c| c.object != record.contacts[0].object) {
+            tally(&mut t, "contacts from two meshes".into());
+        }
+        if !listed {
+            tally(&mut t, format!("unlisted: {}", if ours.iter().any(|&h| h) { "hit" } else { "miss" }));
+        }
+        tally(&mut t, format!("root: {}", if root & 0x8000 != 0 { if nodes_ptr != 0 { "a ray, tree set" } else { "a ray" } } else { "a node" }));
+        if n == F53_MAX_RAYS {
+            tally(&mut t, "sixteen rays".into());
+        }
+        case += 1;
+    }
+    eprintln!("F53: {treeless} meshes without a tree left out\n{t:#?}");
+    let get = |k: &str| t.get(k).copied().unwrap_or(0);
+    for k in ["mesh: hit", "mesh: miss", "hierarchy: hit", "hierarchy: miss", "plant sphere: hit", "plant sphere: miss", "sphere: hit", "sphere: miss", "box: hit", "box: miss", "other kind: miss", "contacts: some", "contacts: full", "contacts from two meshes", "unlisted: hit", "root: a ray", "root: a ray, tree set", "sixteen rays"] {
+        assert!(get(k) >= 50, "{k}: {} cases\n{t:#?}", get(k));
+    }
+}

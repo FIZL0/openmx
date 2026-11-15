@@ -5,18 +5,23 @@
 //! The probe is MX Unleashed's ray probe ([`crate::ray_probe`]) with its fields moved up `0x10`, as the
 //! quad's trigger probe is ([`crate::atv_search`]): `+0x130` its frame, `+0x170` its tree's root,
 //! `+0x178` the ray count, `+0x17c` the tree's nodes, `+0x180` the rays (two quads each), `+0x184` the
-//! smooth flag, `+0x188` a per-ray filter, `+0x7c` its record. The search is
+//! smooth flag, `+0x188` a debug profiler (below), `+0x7c` its record. The search is
 //! [`crate::atv_search::search`] with [`PartRays`]:
 //!
 //! - **the clear** (vt `+0xb0`): MX Unleashed's ([`ray_probe::clear`]): the hit bit lowered, the
 //!   record's nearest segment, push, low and high to `(0, 0, 0, 1)`, its nearest and its pair's first
 //!   to 1, no contacts. Besides, two globals zeroed and the record made the current one (the caller's
-//!   to write, [`PartRays`] has no memory), and with a filter its reset (the filter is not here);
+//!   to write, [`PartRays`] has no memory), and with a profiler its reset (not here);
 //! - **the pair** (vt `+0xb4`): the smooth flag made the global the segment test reads (the caller's
 //!   to write), the per-contact words at the record's `+0xac` zeroed, the pair's first set to 1, then
 //!   by the other's kind (`+0x78`): 0 a mesh and 1 a placed hierarchy ([`ray_probe::pair`]), 5 a
-//!   sphere ([`sphere_reaches`]: the hit bit alone, no contact), anything else nothing struck (kind 6
-//!   has a test of its own, not here: the bike never meets one).
+//!   sphere ([`sphere_reaches`]) and 6 an oriented box ([`box_reaches`]), both the hit bit alone with
+//!   no contact, anything else nothing struck.
+//!
+//! The "filter" at `+0x188` is a debug cost profiler, not a filter: with one attached, the clear resets
+//! its table, a mesh pair copies the mesh's name into it and descends breadth first through a queue,
+//! timing every step on the hardware counter. Only the probe's constructor writes the word (0), so the
+//! game never attaches one and it is not here; callers assert it is 0.
 //!
 //! The riding part searches the placed groups (it does not carry `NO_GROUPS`): a plant's parts are
 //! its spheres, stood at the plant by the caller ([`Narrow::part`]). What hears a hit (the probe's
@@ -36,6 +41,54 @@ pub trait Outside: Narrow {
     /// The other as a sphere (kind 5), which the pair tests itself: `None` for the rest.
     fn sphere(&mut self, _other: usize) -> Option<Sphere> {
         None
+    }
+    /// The other as an oriented box (kind 6), which the pair tests itself: `None` for the rest.
+    fn oriented_box(&mut self, _other: usize) -> Option<OrientedBox> {
+        None
+    }
+}
+
+/// A box collidable (kind 6) as the probe's pair reads it: its centre and half extents (`xyz`) in its
+/// own frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OrientedBox {
+    pub centre: Vf,
+    pub half: Vf,
+    pub frame: Matrix,
+}
+
+/// The probe's tree against an oriented box: the two frames related as for a mesh (the box into the
+/// probe's frame, and back), then from the root a node whose box reaches the box ([`ray_probe::boxes`],
+/// the probe's node taken into the box's frame) goes on to its first child, and to its second only if
+/// the first missed; a segment reaches it by [`ray_probe::segment_reaches`]. Struck or not is all it
+/// says: no contact is written.
+pub fn box_reaches(probe: &RayProbe, b: &OrientedBox) -> bool {
+    let to_probe = ray_probe::compose(&ray_probe::invert(&probe.transform), &b.frame);
+    let to_box = ray_probe::invert(&to_probe);
+    let walk = BoxWalk { probe, b, to_box, to_box_abs: ray_probe::abs_rows(&to_box) };
+    walk.reach(probe.root)
+}
+
+struct BoxWalk<'a, 'p> {
+    probe: &'a RayProbe<'p>,
+    b: &'a OrientedBox,
+    to_box: Matrix,
+    to_box_abs: [Vf; 3],
+}
+
+impl BoxWalk<'_, '_> {
+    fn reach(&self, word: u16) -> bool {
+        let half = [self.b.half.x(), self.b.half.y(), self.b.half.z()].map(F);
+        if word & 0x8000 != 0 {
+            let seg = self.probe.segments[(word & 0x7fff) as usize];
+            return ray_probe::segment_reaches(self.b.centre, half, seg.from, seg.to, &self.to_box);
+        }
+        let n = &self.probe.nodes[word as usize];
+        let point = |v: [F; 3]| Vf::new(v[0].0, v[1].0, v[2].0, 0.0);
+        if !ray_probe::boxes(self.b.centre, self.b.half, point(n.centre), point(n.half_extent), &self.to_box, &self.to_box_abs) {
+            return false;
+        }
+        self.reach(n.children[0]) || self.reach(n.children[1])
     }
 }
 
@@ -150,6 +203,10 @@ impl Narrow for PartRays<'_, '_> {
         if let Some(sphere) = self.world.sphere(other) {
             self.record.first = F::ONE;
             return sphere_reaches(&self.probe, &sphere);
+        }
+        if let Some(b) = self.world.oriented_box(other) {
+            self.record.first = F::ONE;
+            return box_reaches(&self.probe, &b);
         }
         let shape = self.world.shape(other);
         ray_probe::pair(&self.probe, &shape, &mut self.record)
