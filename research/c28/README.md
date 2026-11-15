@@ -10,3 +10,6 @@ Journal: research/journal/2026-11-05-c28-md37a-recapture. Every input is a from-
 
 MD160 did the same for Untamed's monster truck (SLUS-21701): research/md160, journal
 research/journal/2026-11-14-md160-untamed-monster-capture.
+
+MD147 moved record.sh's recorder to Untamed's race quad (research/md147/quad.toml, play.sh), journal
+research/journal/2026-11-15-md147-untamed-atv-capture.

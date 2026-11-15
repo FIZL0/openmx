@@ -1,0 +1,16 @@
+# MD147: steer at speed. The quad reaches Rocksbury's wall at z~236 by row ~83 (throttle.csv), so MD164's
+# tick-90 steer came too late: gas from the spawn, full right at tick 50 (~37 ft/s), full left, half
+# right, straight.
+sleep 15t
+down cross
+sleep 35t
+stick l 1 0
+sleep 20t
+stick l -1 0
+sleep 30t
+stick l 0.5 0
+sleep 20t
+stick l 0 0
+sleep 60t
+release
+sleep 30t

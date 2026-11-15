@@ -1,0 +1,135 @@
+# MD147: MX vs. ATV Untamed's (SLUS-21701) race quad (atv_Race250P) in Free Ride, every tick. research/md37a/atv.toml
+# (C28's recorder) at Untamed's quad offsets (research/untamed-machines.md, MD81b): -0x10 through the
+# +0xb..+0xd block, the engine +0x10, the wheels +0x40, the body and the +0x3xx words +0x30, the run's
+# +0x6xx/+0x7xx words +0x24. The columns placed by rule are checked by their values only (the comments say which).
+# QUAD is replaced by the quad object's address (vtable 0x003f0470 at +4); play.sh adds the start trigger.
+[watch]
+name        = "md147-untamed-quad"
+description = "MX vs. ATV Untamed (SLUS-21701) Free Ride race quad played from a generated tape: attitude, hazard clock, body, engine, four wheels, raw object"
+every       = 1
+frames      = 900
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "vsync"          # 0x410318, +2 a tick
+addr = "0x410318"
+type = "u32"
+
+[[field]]
+name = "vptr"           # the quad's vtable word (+4), 0x003f0470
+addr = "QUAD + 0x4"
+type = "u32"
+
+[[field]]
+name = "hazard"         # stuck +0xc00, free +0xc04 (SLUS-21104 +0xc10/+0xc14), then +0xc08, +0xc0c
+addr = "QUAD + 0xc00"
+type = "bytes:16"
+
+[[field]]
+name = "stuck_time"     # the hazard clock's time +0xde0 (SLUS-21104 +0xdf0)
+addr = "QUAD + 0xde0"
+type = "f32"
+
+[[field]]
+name = "rates"          # body +0x1d0 (research/md160's)
+addr = "QUAD + 0xe8 -> 0x1d0"
+type = "f32x4"
+
+[[field]]
+name = "euler"          # +0x390 pitch, +0x394 heading, +0x398 roll (SLUS-21104 +0x360)
+addr = "QUAD + 0x390"
+type = "f32x4"
+
+[[field]]
+name = "speed"          # +0xc28 (SLUS-21104 +0xc38)
+addr = "QUAD + 0xc28"
+type = "f32"
+
+[[field]]
+name = "ground"         # +0x354 by the +0x30 rule (SLUS-21104 +0x324: a wheel touches); 0 exactly on the rows no wheel is grounded
+addr = "QUAD + 0x354"
+type = "u32"
+
+[[field]]
+name = "stick"          # +0x1298 x, +0x129c y, +0x12a0 y flick, +0x12a4 x flick (SLUS-21104 +0x12a8; placed by jump.csv's values, the stick's angle and length follow at +0x12a8/+0x12ac)
+addr = "QUAD + 0x1298"
+type = "f32x4"
+
+[[field]]
+name = "ctl"            # +0x338..+0x344 (SLUS-21104 +0x308: +0x310 brake, +0x314 throttle)
+addr = "QUAD + 0x338"
+type = "f32x4"
+
+[[field]]
+name = "stick_lim"      # +0x12f8 x, +0x12fc y: the input limiter's ramped stick (SLUS-21104 +0x12e8; placed by its values)
+addr = "QUAD + 0x12f8"
+type = "f32x4"
+
+[[field]]
+name = "wreck"          # +0x708 by the run's +0x24 (SLUS-21104 +0x6e4, the wreck word, M19); 1 from the rider's fall on
+addr = "QUAD + 0x708"
+type = "u32"
+
+[[field]]
+name = "pos"            # rigid body (+0xe8; SLUS-21104 +0xb8) +0x60
+addr = "QUAD + 0xe8 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "quat"           # body +0x170
+addr = "QUAD + 0xe8 -> 0x170"
+type = "f32x4"
+
+[[field]]
+name = "angvel"         # body +0x1c0
+addr = "QUAD + 0xe8 -> 0x1c0"
+type = "f32x4"
+
+[[field]]
+name = "body"           # the rigid body, raw
+addr = "QUAD + 0xe8 -> 0x0"
+type = "bytes:640"
+
+[[field]]
+name = "engine"         # *(+0x143c; SLUS-21104 +0x142c), raw (engine_update reads up to +0x1d4)
+addr = "QUAD + 0x143c -> 0x0"
+type = "bytes:512"
+
+[[field]]
+name = "obj0"           # the ATV object, raw, +0x0..+0xc00
+addr = "QUAD + 0x0"
+type = "bytes:3072"
+
+[[field]]
+name = "obj1"           # +0xc00..+0x1900 (the wheel pointers at +0x17f0)
+addr = "QUAD + 0xc00"
+type = "bytes:3328"
+
+[[array]]
+name   = "wheel"        # left front, right front, left rear, right rear
+addr   = "QUAD + 0x17f0"
+count  = 4
+stride = 4
+deref  = true
+
+[[array.field]]
+name = "touch"          # +0xdc (the Force body's down test)
+off  = 0xdc
+type = "u32"
+
+[[array.field]]
+name = "grounded"       # +0xd0: the hazard clock's grounded word (MD81b)
+off  = 0xd0
+type = "u32"
+
+[[array.field]]
+name = "flag_b4"        # +0xb4: rears set when a front is down and both rears are up
+off  = 0xb4
+type = "u32"
+
+[[array.field]]
+name = "raw"            # +0x0..+0x300 (the per-surface tables past it are static)
+off  = 0x0
+type = "bytes:768"

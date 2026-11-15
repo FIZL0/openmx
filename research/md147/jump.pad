@@ -1,0 +1,11 @@
+# MD147 (MD164's jump.pad, unchanged): from the Rocksbury spawn, gas, a left turn onto the supercross track beside the start, then
+# straight on over its jumps.
+sleep 15t
+down cross
+sleep 40t
+stick l -1 0
+sleep 30t
+stick l 0 0
+sleep 260t
+release
+sleep 30t
