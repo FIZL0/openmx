@@ -1,0 +1,6 @@
+# MD81e menu step 1, from MD164's vehicle-trophy.p2s (Player 1 Options, Vehicle = TROPHY TRUCK): right -> the next machine.
+sleep 20t
+down right
+sleep 9t
+up right
+sleep 90t

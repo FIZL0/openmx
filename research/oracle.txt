@@ -12508,6 +12508,21 @@ atv_out_of_bounds           atv 0x004a4f20 (vt +0x16c, the bike in a0): body pos
 #   The menus' TROPHY TRUCK: baja/buggy vtable 0x003f09d0 in SLUS-21701 (class update 0x004e46c0 at +0x10c), kind
 #   +0xbac = 6. Heap addresses (Free Ride Rocksbury, kept-context/md164/addresses.txt): truck 0x01be4740, body
 #   0x01c16d80, record 0x01c19540, engine 0x01c2b7f0 (4 gears 6/3/1.7/1.1, final 5); idle second truck 0x01c2e250.
+# MD81e — Untamed's golf cart: static diff against SLUS-21104's and captured (comment rows only; journal
+#   research/journal/2026-11-15-md81e-untamed-golfcart). Golf cart vtable 0x003cf600 in SLUS-21104, 0x003f1370
+#   in SLUS-21701 (car 0x003f0ea0, baja 0x003f09d0, truck 0x003f1840). Car-class slots from about +0x45c are 8
+#   lower in SLUS-21701 (class step +0x488 -> +0x480). Its own slots, SLUS-21104 -> SLUS-21701:
+#     +0x8 destructor 0x004cec90 -> 0x004ec630; +0xf4 loader 0x004cf690 -> 0x004ed030; +0x10c class update
+#     0x004d0250 -> 0x004edbe0; +0x340 node finder 0x004ceda0 -> 0x004ec740; +0x354 0x004cf420 -> 0x004ecdc0;
+#     +0x37c 0x004cf7f0 -> 0x004ed190; +0x3dc 0x004d05d0 -> 0x004edf40; +0x3e4 thunk 0x004d05c0 -> 0x004edf30;
+#     class step 0x004cf9b0 (+0x488) -> 0x004ed350 (+0x480).
+#   Destructor, node finder, +0x354, +0x37c and the class step: the same (research/md81c/fp.py). Loader: the
+#   same 11 keys, the reader handed at file+60 differs (MD81c's). +0x3dc and the thunk: fields moved by the
+#   layout rule only. Class update: SLUS-21104's golf one is the buggy's (0x004c6ce0); SLUS-21701's is the
+#   baja's (0x004e46c0): MD81d's `!(d <= 0)` distance clause, not ported.
+#   Heap (Free Ride Rocksbury, kept-context/md81e/addresses.txt): cart 0x01be4740 (kind +0xbac = 7), body
+#   0x01c00060, record 0x01c02cb0, engine 0x01c151a0 (3 gears 2.8/2.6/2.2, final 3.8); idle second cart
+#   0x01c17c00. Car +0x344 the gas pedal (SLUS-21104's +0x314), +0x1134 MaxAnalogThrottle 0.1.
 # MD138a — the quad's own clips and the rider's stunt clips (game_render::quad::Driver, quad_draw::stunts /
 #   chassis_locals / rider_stunt; tests/atv_clips.rs). Comment rows only; journal research/journal/*-md138a-atv-clips.
 #   The quad's clip binder atv_stunt_specials 0x004dd280 binds "ATV_bike_%s" only for the stunt table's

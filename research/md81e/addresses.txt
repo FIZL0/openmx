@@ -1,0 +1,10 @@
+MD81e — MX vs. ATV Untamed (SLUS-21701), Free Ride Rocksbury, Vehicle = GOLF CART. Heap addresses in
+spawn.p2s (research/md81e/ram.py STATE.p2s prints them).
+
+vtable (golf cart class)   0x003f1370   (class update 0x004edbe0 at vtable +0x10c; car kind +0xbac = 7)
+player's cart              0x01be4740   body 0x01c00060  record 0x01c02cb0  engine 0x01c151a0
+                                        tires 0x01c152f0 0x01c15cc0 0x01c16690 0x01c17060
+idle second cart           0x01c17c00
+vsync word                 0x00410318   (+2 a tick)
+spawn.p2s vsync 28047, pos (395.66, 0.48, 156.18); engine 3 gears 2.8/2.6/2.2, final 3.8, redline 7000;
+MaxAnalogThrottle 0.1, DigitalThrottleSpeed 36.6665 at car +0x1134.. (SLUS-21104's +0x1144..)

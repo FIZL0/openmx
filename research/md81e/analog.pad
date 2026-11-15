@@ -1,0 +1,40 @@
+# MD81e: the analog throttle. Under DigitalThrottleSpeed (36.67 ft/s) the gas is Cross's strength over
+# MaxAnalogThrottle (0.1 in Untamed's golfcart.phy, 0.8 in Unleashed's), clamped to 1. A first try read
+# pressure bytes 5-20 as no gas and 51 as full gas, so this steps Cross's pressure byte from 21 to 49,
+# each held 10 ticks, then full. Found (analog.csv): no gas through byte 23, then the whole gas from
+# about byte 25 (row 33), with no part gas between: a strength of (25+1)/256 is already over 0.1.
+sleep 15t
+down cross 0.082353
+sleep 10t
+down cross 0.090196
+sleep 10t
+down cross 0.098039
+sleep 10t
+down cross 0.105882
+sleep 10t
+down cross 0.113725
+sleep 10t
+down cross 0.121569
+sleep 10t
+down cross 0.129412
+sleep 10t
+down cross 0.137255
+sleep 10t
+down cross 0.145098
+sleep 10t
+down cross 0.152941
+sleep 10t
+down cross 0.160784
+sleep 10t
+down cross 0.168627
+sleep 10t
+down cross 0.176471
+sleep 10t
+down cross 0.184314
+sleep 10t
+down cross 0.192157
+sleep 10t
+down cross
+sleep 30t
+up cross
+sleep 30t
