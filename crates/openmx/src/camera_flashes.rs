@@ -2,18 +2,19 @@
 //! on a track whose name holds `sx`, takes every `cameraflash` model out of the scene (sx01's 1200 in
 //! its stands) and hides them; [`CameraFlashes`] then lights a batch of them at a time, a handful all
 //! race long and a burst at each podium finish, and the lit ones are drawn here as actors, each at its
-//! fade. A finish's burst is handed to [`Supercross::race_over`] through [`Stadium::podium`].
+//! fade. A finish's burst is handed to [`Supercross::race_over`] ([`Stadium::card_finishes`]).
 //!
-//! The draws are the shell's own generator's, not the simulation's (the original's come off the
-//! generator everything shares: V127's journal).
+//! The object itself is the race's (S321): handed to the first seat's [`Race`] as it is made
+//! ([`Stadium::hand_to`]), the simulation ticks it at the end of the race's tick and its picks draw on
+//! the race's generator, as the original's draw on the one `rand()` everything shares. The stadium
+//! keeps where each flash stands and the track's levels, and draws what the race's object shows.
 
 use game_render::gpu::Actor;
 use game_render::ini;
 use game_render::mat::M4;
 use game_render::scene::{Placement, Scene};
 use game_sim::camera_flash::{self, CameraFlashes};
-use game_sim::race::{FlashLevels, HallOfFame, LapCard, PodiumFlashes, RaceOver, ResultEvent, Supercross, card_flags};
-use game_sim::rng::Rng;
+use game_sim::race::{FlashLevels, HallOfFame, LapCard, PodiumFlashes, Race, RaceOver, ResultEvent, Supercross, card_flags};
 use ps2_float::F;
 
 /// The track's flash words off its `.toy`'s first `[CameraFlash]` (sx01 has two; the original keeps
@@ -34,13 +35,13 @@ pub fn has_flashes(track: &str) -> bool {
     track.contains("sx")
 }
 
-/// The stadium's flashes: the object, the models it lights in its numbering, the track's levels and
-/// the generator its picks draw on.
+/// The stadium's flashes: the object until the race takes it, the models it lights in its numbering
+/// and the track's levels.
 pub struct Stadium {
-    pub flashes: CameraFlashes,
+    /// The flash object, until [`Stadium::hand_to`] gives it to the race that ticks it.
+    pub flashes: Option<CameraFlashes>,
     placed: Vec<Placement>,
     pub levels: FlashLevels,
-    rng: Rng,
     /// Seconds since the race started, for `--race-win`.
     pub clock: f32,
 }
@@ -57,7 +58,7 @@ impl Stadium {
         scene.models = kept;
         let (levels, floor) = levels(toy);
         let flashes = CameraFlashes::new(placed.len() as u32, floor)?;
-        Some(Stadium { flashes, placed, levels, rng: Rng::new(), clock: 0.0 })
+        Some(Stadium { flashes: Some(flashes), placed, levels, clock: 0.0 })
     }
 
     /// How many flashes the stadium has.
@@ -65,43 +66,43 @@ impl Stadium {
         self.placed.len()
     }
 
-    /// One tick of the flashes.
+    /// The flash object goes to `race`, whose tick ticks it from now on (S321).
+    pub fn hand_to(&mut self, race: &mut Race) {
+        race.flashes = self.flashes.take().map(Box::new);
+    }
+
+    /// The race's clock, a tick on (the flashes themselves tick in the race).
     pub fn tick(&mut self, dt: F) {
-        self.flashes.tick(dt, &mut self.rng);
         self.clock += dt.0;
     }
 
-    /// The burst a podium finish sets going, for [`Supercross::race_over`].
-    pub fn podium(&mut self) -> &mut PodiumFlashes {
-        &mut self.flashes.burst
-    }
-
-    /// The lit flashes' models where the scene placed them, and their fades.
-    pub fn shown(&self) -> impl Iterator<Item = (&str, M4, f32)> + '_ {
-        self.flashes.shown().filter_map(|(k, fade)| self.placed.get(k as usize).map(|p| (p.model.as_str(), p.transform(), fade.0)))
+    /// `flashes`' lit flashes' models where the scene placed them, and their fades.
+    pub fn shown<'a>(&'a self, flashes: &'a CameraFlashes) -> impl Iterator<Item = (&'a str, M4, f32)> + 'a {
+        flashes.shown().filter_map(|(k, fade)| self.placed.get(k as usize).map(|p| (p.model.as_str(), p.transform(), fade.0)))
     }
 
     /// [`Stadium::shown`] as actors, see-through by their fade (one at 0 is not drawn).
-    pub fn actors(&self) -> impl Iterator<Item = Actor<'_>> + '_ {
-        self.shown().map(|(model, at, alpha)| Actor { model, at, pose: None, lod_from: None, alpha, casts: false })
+    pub fn actors<'a>(&'a self, flashes: &'a CameraFlashes) -> impl Iterator<Item = Actor<'a>> + 'a {
+        self.shown(flashes).map(|(model, at, alpha)| Actor { model, at, pose: None, lod_from: None, alpha, casts: false })
     }
 
     /// `--race-win`: the human's card wins a single race at the line, as the lap line will tell
     /// [`Supercross::race_over`] once the shell counts laps (S301): the flashes burst toward the
-    /// player's win, and what it answers (the fireworks) is the caller's to show.
-    pub fn player_wins(&mut self) -> RaceOver {
+    /// player's win (`burst`, the race's flashes'), and what it answers (the fireworks) is the
+    /// caller's to show.
+    pub fn player_wins(&self, burst: &mut PodiumFlashes) -> RaceOver {
         let card = LapCard { place: 1, flags: card_flags::PLAYER | card_flags::TAKING_PART | card_flags::OUT, ..LapCard::default() };
         let event = ResultEvent { activity: 2, ..ResultEvent::default() };
         let levels = self.levels;
-        Supercross::new().race_over(&card, None, &event, -1, &HallOfFame::default(), Some(self.podium()), &levels)
+        Supercross::new().race_over(&card, None, &event, -1, &HallOfFame::default(), Some(burst), &levels)
     }
 
     /// P313: a card of the race's lap line has finished, and [`Supercross::race_over`] hears it as
     /// [`Stadium::player_wins`] does, with the card's own place and flags.
-    pub fn card_finishes(&mut self, card: &LapCard, laps: u8) -> RaceOver {
+    pub fn card_finishes(&self, card: &LapCard, laps: u8, burst: &mut PodiumFlashes) -> RaceOver {
         let event = ResultEvent { activity: 2, laps, ..ResultEvent::default() };
         let levels = self.levels;
-        Supercross::new().race_over(card, None, &event, -1, &HallOfFame::default(), Some(self.podium()), &levels)
+        Supercross::new().race_over(card, None, &event, -1, &HallOfFame::default(), Some(burst), &levels)
     }
 }
 
@@ -131,13 +132,18 @@ mod tests {
         let mut sx = Scene::parse(text);
         let mut s = Stadium::take(&mut sx, "sx01", SX01).unwrap();
         assert_eq!((s.len(), sx.models.len()), (2, 1));
-        let over = s.player_wins();
+        let mut race = Race::new(game_sim::race::Gate::new(), &[], F(3.0), game_sim::rng::Rng::new());
+        s.hand_to(&mut race);
+        assert!(s.flashes.is_none());
+        let flashes = race.flashes.as_deref_mut().unwrap();
+        let over = s.player_wins(&mut flashes.burst);
         assert!(over.fireworks);
-        assert_eq!((s.flashes.burst.length.0, s.flashes.burst.half.0), (2.0, 1.0));
+        assert_eq!((flashes.burst.length.0, flashes.burst.half.0), (2.0, 1.0));
         for _ in 0..30 {
-            s.tick(F(1.0 / 30.0));
+            race.tick(F(1.0 / 30.0), &[]);
         }
-        assert!(s.flashes.brightness().0 > 0.25);
-        assert_eq!(s.shown().count(), s.flashes.lit_count());
+        let flashes = race.flashes.as_deref().unwrap();
+        assert!(flashes.brightness().0 > 0.25);
+        assert_eq!(s.shown(flashes).count(), flashes.lit_count());
     }
 }
