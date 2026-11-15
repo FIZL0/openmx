@@ -432,3 +432,14 @@ steer (it tips over by itself: car state 14, damping 0.999), brake, a jump throu
 from the air state, and a **preload fire**: armed clears and the timer goes to −1/120 with a zero push, and
 the body stays as the jump's without it. The cue latch rises and falls inside the tick, so the cue post is
 inferred from the state words, not seen.
+
+## SLUS-21701's golf cart against SLUS-21104's (MD81e)
+
+The golf cart class (vtable `0x003cf600` → `0x003f1370`) keeps SLUS-21104's code for its own slots:
+destructor, node finder, `+0x354`, `+0x37c` and the class step are the same; the loader reads the same 11
+keys (MD81c's reader change only); `+0x3dc` and its thunk move fields by the layout rule. Its class update
+is the baja's (SLUS-21104's golf one was the buggy's), so it carries MD81d's `!(d <= 0)` clause, not
+ported. Nothing else to port: `atv_car::Load::untamed` and Untamed's golfcart.phy (`MaxAnalogThrottle`
+0.1, `[Preload]` off). Addresses in `research/oracle.txt # MD81e`; journal
+`research/journal/2026-11-15-md81e-untamed-golfcart`. With `MaxAnalogThrottle` 0.1 any counted press is
+the whole gas: the capture shows no gas through pressure byte 23 and all of it from about 25.

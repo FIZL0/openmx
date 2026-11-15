@@ -3,7 +3,8 @@
   python3 -I research/c15/tape.py TEMPLATE.p2m2 SCRIPT.pad OUT.p2m2 [--game NAME]
 
 TEMPLATE gives the header's version, emulator and author (context/recordings/animandpump.p2m2); the game
-name is rewritten. SCRIPT is ./kit pad's language: `down/up <btn>`, `stick l|r <x> <y>` (-1..1, y -1 up),
+name is rewritten. SCRIPT is ./kit pad's language: `down/up <btn>` (`down <btn> <0..1>` presses it that hard: the
+pressure byte, 0xff otherwise; MD81e), `stick l|r <x> <y>` (-1..1, y -1 up),
 `release`, `sleep <N>t` (N game ticks) or `sleep <ms>` (rounded to ticks), `# comment`. Each tick is two
 fields: the tapes this project made play two fields a game tick in PCSX2 (S100, C8). Pad 2 is blank.
 
@@ -40,9 +41,10 @@ def parse(path):
         if not w:
             continue
         if w[0] == 'down':
-            held.add(w[1])
+            held.discard(next((h for h in held if h.split('@')[0] == w[1]), None))
+            held.add(f'{w[1]}@{round(float(w[2]) * 0xff)}' if len(w) > 2 else w[1])
         elif w[0] == 'up':
-            held.discard(w[1])
+            held.discard(next((h for h in held if h.split('@')[0] == w[1]), None))
         elif w[0] == 'stick':
             stick[w[1]] = (float(w[2]), float(w[3]))
         elif w[0] == 'release':
@@ -54,17 +56,18 @@ def parse(path):
         else:
             raise SystemExit(f'{path}: unknown command {line.strip()!r}')
         for b in held:
-            assert b in BUTTONS, f'unknown button {b}'
+            assert b.split('@')[0] in BUTTONS, f'unknown button {b}'
     return spans
 
 
 def field(held, lx, ly, rx, ry):
     f = bytearray([0xff, 0xff, axis(rx), axis(ry), axis(lx), axis(ly)] + [0] * 12)
     for b in held:
-        byte, bit, p = BUTTONS[b]
+        name, _, level = b.partition('@')
+        byte, bit, p = BUTTONS[name]
         f[byte] &= ~bit & 0xff
         if p is not None:
-            f[6 + p] = 0xff
+            f[6 + p] = int(level) if level else 0xff
     return bytes(f) + bytes(18)
 
 
