@@ -1034,6 +1034,19 @@ score_card_wrong_way        boot 0x00268660 (dt f12, mgr a0, card a1) -> 1: mgr 
 #                                           c.ole.s facing <= 0 runs card +0x1c0 against mgr+0xe0, the
 #                                           blink +0x1c8 against +0xe4; card 0x2000 = warned; listeners
 #                                           +0x68 then owner/chain +0x58. RaceRules::wrong_way
+score_card_feed             boot 0x0027dc80 (bike a0, card a1) -> 1 (0 for no card): the motocross bike's
+#                                           word to its score card, reached by its card listener's
+#                                           slot +8 (0x00281b40, vtable 0x0045504c, this - 0xf9c), the
+#                                           race handler's first call per card (owner only, no chain).
+#                                           node = *(bike+0x7a4)+0x254: card +0x60 xyz = node +0xb0,
+#                                           +0x110 = chassis +0x260 (whole qword), +0x108 = |that|
+#                                           (mula/madda/madd x,y,z, sqrt.s), +0x120 xyz = node +0xa0
+#                                           (look), +0x130 xyz = node +0x90 (up); ground_query(bike
+#                                           +0x7ac, copy of card +0x60 qword, 0, 0, 0); +0x104 = card
+#                                           +0x64 - the point's y; bike +0x574 (a wheel down) sets card
+#                                           0x400 else clears it; bike +0x748 (wreck reason) != 0 clears
+#                                           0x100000. 0x003a0980 / 0x003e1d50 are other vehicles' copies
+#                                           (their frames at +0x18c / +0x160). S302a: RaceCard::feed
 score_race_aim              boot 0x00263628 inside score_race_tick: the computer aim (card 0x800000), to
 #                                           0x002638f0. On track with kept path, node and node.next:
 #                                           walk past nodes with +4 bit 0 (not the line's node), the end
@@ -12476,3 +12489,16 @@ atv_out_of_bounds           atv 0x004a4f20 (vt +0x16c, the bike in a0): body pos
 #   = event post 0x0025e740 (a0 [0x00475bd0], a1 car+0x698, 8, 14, t0 [car+0xd10]). Vehicle force: gravity
 #   [car+0x118]+0x40, record car+0xf8 (vt +0x88, a1 1), flags byte car+0x75 bit 5 cleared.
 #   Proved: tests/untamed_car.rs (untamed_car_preload_is_the_originals, untamed_vehicle_force_is_the_originals).
+# MD138a — the quad's own clips and the rider's stunt clips (game_render::quad::Driver, quad_draw::stunts /
+#   chassis_locals / rider_stunt; tests/atv_clips.rs). Comment rows only; journal research/journal/*-md138a-atv-clips.
+#   The quad's clip binder atv_stunt_specials 0x004dd280 binds "ATV_bike_%s" only for the stunt table's
+#   UsedForBike rows (mxvatv_atv's ATV_Rider_Stunts.ini: 0 Taunt, 6 nacnac, 7 flatliner, 12 kod, 15
+#   9oclockindianair, 16 tsunami, 22 9oclocknac, 33 kodindianair, 35 ragdoll, 36 Varial, 44/45 threesixtyL/R);
+#   row 41 backflip is UsedForBike=F, so no ATV_Bike_BackFlip is bound and the quad's driver (game_sim::quad::
+#   animate, MD65c) plays clip 47 (Air_Mid) at 0.5 for it. The rider's binder 0x0027ac30 binds "ATV_rider_%s"
+#   for every HasAnimation row. Every build .mcf (ATV_R.mcf ...) maps ATV_Bike_Air_Fwd/Mid/Bck all to
+#   ATV_Bike_Air_Mid.MOT. The stunt word: atv_bike_start_stunt 0x004e6370 (S223 above), atv_bike_end_stunt
+#   0x004e4db0, the clock and the 46/0xff choice in atv_stunt_idle 0x004e5d20 / atv_stunt_request 0x004e49c0
+#   (a flip or 360 holds while +0x1194 / +0x11d0, else it ends at the row's Duration +0x48), restart +0x1650
+#   cleared by atv_bike_vehicle_update 0x004e1b90. The rider's motion-set row and lean words (rider anim
+#   +0x310..+0x344) have no reader found yet: the port keeps its own choice (MD138a's follow-up).

@@ -1080,7 +1080,7 @@ impl Sim {
         };
         self.lend_cars();
         self.event_frame(dt);
-        self.race_frame(dt);
+        self.race_frame(dt, world);
         let cars = self.car_contacts(0, world, dt);
         let players = bump.as_deref().map_or(1, |b| b.vehicles.len() + b.planes.len());
         let strike = match shared.as_ref() {

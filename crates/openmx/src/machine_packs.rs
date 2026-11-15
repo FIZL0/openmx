@@ -325,6 +325,13 @@ impl Pack {
         Ok(out)
     }
 
+    /// A build's own motion set (`mcf`, by its name anywhere in the pack: `ATV_R.mcf`), its clips by
+    /// name (MD138a: the quad's riding pose, `ATV_Bike_Air_Fwd`/`_Mid`/`_Bck`).
+    pub fn build_clips(&self, mcf: &str) -> Result<Vec<(String, Clip)>, String> {
+        let set = MotionSet::parse(&ini::text(&self.files.read_suffix(&member(mcf))?));
+        set.motions.iter().map(|m| Ok((m.name.clone(), self.files.read_suffix(&m.clip).and_then(|b| Clip::parse(&b)).map_err(|e| format!("{mcf}: {} ({}): {e}", m.name, m.clip))?))).collect()
+    }
+
     /// The rider's stunt table, read as a trick pack's is.
     pub fn stunts(&self) -> Result<Vec<Row>, String> {
         trick_pack::table(&self.files.read(&member(&self.table))?).map_err(|e| format!("{}: {e}", self.table))

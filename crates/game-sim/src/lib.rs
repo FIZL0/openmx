@@ -346,7 +346,7 @@ impl Sim {
         };
         self.lend_cars();
         self.event_frame(dt);
-        self.race_frame(dt);
+        self.race_frame(dt, world);
         if self.plane.is_some() {
             // The other riders' bikes, where they stand, are in the plane's world (S95). Player 1's
             // own bike is not: the original takes it out of the world when its rider switches to the
@@ -456,15 +456,24 @@ impl Sim {
     /// them, in player order; a rider the closed gate caught is thrown back ([`race::push`]) and gets
     /// its penalty on its card; when the countdown called the start's timeline (S304), every rider's
     /// chassis takes what it did ([`race::StartStep::apply`]: held at the countdown's zero, freed in
-    /// the warning window); and on the drop every rider is let go ([`race::release`]).
-    fn race_frame(&mut self, dt: F) {
-        if self.race.is_none() {
-            return;
-        }
-        let riders: Vec<(Vf, Vf)> = (0..self.players())
+    /// the warning window); and on the drop every rider is let go ([`race::release`]). With laps, each
+    /// bike tells its card where it is, its speed, its height over the world's ground and whether a
+    /// wheel is down ([`race::RaceCard::feed`], S302a).
+    fn race_frame(&mut self, dt: F, world: &mut dyn World) {
+        let Some(race) = &self.race else { return };
+        let laps = race.laps.is_some();
+        let riders: Vec<race::CardFeed> = (0..self.players())
             .map(|i| {
-                let m = self.rider_of(i).ride.transform();
-                (m.0[3], m.0[2])
+                let r = self.rider_of(i);
+                let m = r.ride.transform();
+                let mut feed = race::CardFeed::standing(m.0[3], m.0[2]);
+                if laps {
+                    feed.velocity = r.ride.chassis.vel;
+                    feed.ground = F(world.ground(m.0[3]).0.y());
+                    feed.on_ground = r.ride.air.on_ground;
+                    feed.wrecked = r.state.wreck.is_some();
+                }
+                feed
             })
             .collect();
         let frame = self.race.as_mut().expect("a race").tick(dt, &riders);
@@ -579,7 +588,7 @@ impl Sim {
         let mut prop_movers = self.frame_held_wrecked(dt, world, &sides);
         self.lend_cars();
         self.event_frame(dt);
-        self.race_frame(dt);
+        self.race_frame(dt, world);
         let mut frames = Vec::with_capacity(controls.len());
         // Rider against rider (S78): every bike's contacts, from where the last tick left them all.
         // On a world that wraps (MD44), each bike against every other's nearest copy.
