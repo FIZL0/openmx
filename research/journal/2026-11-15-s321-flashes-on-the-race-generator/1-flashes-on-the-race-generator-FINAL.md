@@ -79,7 +79,7 @@ Task S321. 2026-11-15.
   the tick) and written into the race's flashes, as before. The race is the first seat's only, so online
   rollback does not replay a finish's burst.
 - **Every race on the wire is one byte longer** (the `None` tag of `flashes`). Netplay tests that assume
-  a race's byte length would move. The gate (`./kit check --all`) passed with it.
+  a race's byte length would move. `kit done` here only built; the full suite runs in the merge gate.
 
 ## Next
 
