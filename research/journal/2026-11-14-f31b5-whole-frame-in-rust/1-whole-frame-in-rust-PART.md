@@ -1,4 +1,4 @@
-# 1 — the whole frame in Rust (PART)
+# 1 — the whole frame in Rust (PART, superseded by 2)
 
 Task F31b5. 2026-11-14. Cut off by a usage limit; work in progress, the session resumes here.
 
