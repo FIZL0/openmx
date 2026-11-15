@@ -410,9 +410,46 @@ pub fn dot<const N: usize>(a: [f32; N], b: [f32; N]) -> f32 {
 ///
 /// `madd` / `msub` name the instruction where the original has one; they are bit for bit `self + a * b`.
 /// An `f32` on either side is taken as an FPU operand, so constants and struct fields need no wrapping.
-#[derive(Clone, Copy, Debug, Default, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Default)]
 #[repr(transparent)]
 pub struct F(pub f32);
+
+/// A side of a comparison as `c.eq.s` / `c.lt.s` / `c.le.s` read it: an operand ([`operand`]), so a
+/// denormal is `±0` and an exponent-255 pattern is `±max`. F64: the derived comparisons read host `f32`s,
+/// and `F(-1e-40) < F::ZERO` was true where `c.lt.s` says false. The `native` build compares plainly.
+#[inline(always)]
+fn compared(x: f32) -> f32 {
+    if crate::NATIVE { x } else { f32::from_bits(ee_bits(x)) }
+}
+
+impl PartialEq for F {
+    #[inline]
+    fn eq(&self, o: &F) -> bool {
+        compared(self.0) == compared(o.0)
+    }
+}
+impl PartialOrd for F {
+    #[inline]
+    fn partial_cmp(&self, o: &F) -> Option<core::cmp::Ordering> {
+        compared(self.0).partial_cmp(&compared(o.0))
+    }
+    #[inline]
+    fn lt(&self, o: &F) -> bool {
+        compared(self.0) < compared(o.0)
+    }
+    #[inline]
+    fn le(&self, o: &F) -> bool {
+        compared(self.0) <= compared(o.0)
+    }
+    #[inline]
+    fn gt(&self, o: &F) -> bool {
+        compared(self.0) > compared(o.0)
+    }
+    #[inline]
+    fn ge(&self, o: &F) -> bool {
+        compared(self.0) >= compared(o.0)
+    }
+}
 
 /// `F(x)`, shorter inside a formula.
 pub const fn f(x: f32) -> F {
@@ -580,7 +617,7 @@ impl PartialEq<F> for Acc {
 }
 impl PartialEq<f32> for Acc {
     fn eq(&self, o: &f32) -> bool {
-        self.0.0 == *o
+        self.0 == F(*o)
     }
 }
 impl core::fmt::Display for Acc {
@@ -605,23 +642,27 @@ impl From<F> for f32 {
     }
 }
 impl PartialEq<f32> for F {
+    #[inline]
     fn eq(&self, o: &f32) -> bool {
-        self.0 == *o
+        *self == F(*o)
     }
 }
 impl PartialOrd<f32> for F {
+    #[inline]
     fn partial_cmp(&self, o: &f32) -> Option<core::cmp::Ordering> {
-        self.0.partial_cmp(o)
+        self.partial_cmp(&F(*o))
     }
 }
 impl PartialEq<F> for f32 {
+    #[inline]
     fn eq(&self, o: &F) -> bool {
-        *self == o.0
+        F(*self) == *o
     }
 }
 impl PartialOrd<F> for f32 {
+    #[inline]
     fn partial_cmp(&self, o: &F) -> Option<core::cmp::Ordering> {
-        self.partial_cmp(&o.0)
+        F(*self).partial_cmp(o)
     }
 }
 
