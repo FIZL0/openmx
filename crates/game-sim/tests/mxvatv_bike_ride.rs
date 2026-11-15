@@ -21144,16 +21144,26 @@ impl<'a> bone::Scene<RiderRam<'a>> for PortScene {
     }
 }
 
-/// **The rider's bone collisions with the port's scene, both C15 replays bit-exact** (S279): every
+/// The scratchpad matrix stack's top (a pointer word) and base, and the levels the side-by-side
+/// leaves out above it (scene-1's sweeps reach 8).
+const MATRIX_TOP: u32 = 0x0038_d358;
+const MATRIX_BASE: u32 = 0x7000_0000;
+const MATRIX_LEVELS: u32 = 16;
+
+/// **The rider's bone collisions with the port's scene, the C15 replays bit-exact** (S279): every
 /// bone solve [`bone::solve`]'s, on one interpreter with the original's scene ([`OriginalScene`]) and
 /// on another with the port's ([`PortScene`]: the sphere's place, refresh, clear and pool search,
-/// the probe's segment, place and searches), run side by side. Every row of ride-2 and flip-1 is the
+/// the probe's segment, place and searches), run side by side. Every row of ride-2, flip-1 and scene-1 is the
 /// capture's on both, and after every frame the two RAMs (outside the stack) and scratchpads are the
-/// same, word for word. On C15 the rider's pool (its nearby list) holds 0 to 19 candidates, none of
-/// them within a part's reach: no pair runs, nothing is hit (S279a, S279b).
+/// same, word for word. On ride-2 and flip-1 the rider's pool (its nearby list) holds 0 to 19
+/// candidates, none of them within a part's reach: no pair runs, nothing is hit. scene-1 (S279b,
+/// `research/c15/scene.pad`) runs the bike into a nat05 mesh on row 188: the rider's spheres and
+/// sweeps pair with meshes and hit them, and the parts are pushed out by the scene's contacts and
+/// sweeps. The mesh sweep's scratchpad matrix stack is left out above its top (dead levels the
+/// original pushes and pops, and the port does not keep).
 #[test]
 fn the_bone_collisions_scene_is_the_ports() {
-    for (name, n) in [("ride-2", 459usize), ("flip-1", 465)] {
+    for (name, n) in [("ride-2", 459usize), ("flip-1", 465), ("scene-1", 300)] {
         let (Some(ia), Some(ib)) = (image(), image()) else { return };
         let (mut a, mut b) = (hooked(ia), hooked(ib));
         let Some(rows) = rows(name) else { return };
@@ -21176,6 +21186,18 @@ fn the_bone_collisions_scene_is_the_ports() {
             Box::new(move |ee: &mut Ee| {
                 let (part, dt) = (ee.r(4) as u32, F(ee.f(12)));
                 bone::solve(&mut RiderRam { ee, overlay: None }, &mut *s.borrow_mut(), part, dt, Some(map), curve);
+                // What the scene gave the part: the sphere's contacts (each one a push-out, against
+                // the mesh it names), or the sweep's one.
+                let (sphere, k) = (ee.u32_at(part + bone::SPHERE), &mut s.borrow_mut().kinds);
+                if ee.u8_at(sphere + bone::S_HIT_BYTE) & bone::S_HIT_BIT as u8 != 0 {
+                    let hits = ee.u32_at(sphere + bone::S_RECORD);
+                    *k.entry("sphere contact".into()).or_default() += ee.u32_at(hits + bone::R_COUNT);
+                    if ee.u32_at(part + bone::OTHER) != 0 {
+                        *k.entry("sphere contact, other set".into()).or_default() += 1;
+                    }
+                } else if ee.u32_at(part + bone::SWEPT) != 0 {
+                    *k.entry("swept push-out".into()).or_default() += 1;
+                }
                 ee.pc = BONE_SOLVE;
             }),
         );
@@ -21188,14 +21210,24 @@ fn the_bone_collisions_scene_is_the_ports() {
                 assert!(d.is_empty(), "{name} row {r} ({side}): {} words differ\n  {}", d.len(), d.iter().take(20).cloned().collect::<Vec<_>>().join("\n  "));
                 poke(ee, row, &SPOT);
             }
-            let parted = differing_bytes(&a, &b);
+            // The mesh sweep's matrix stack: the original pushes 0x40-byte levels above its top
+            // and pops them, leaving them behind; the port works its frames out without it. Back at
+            // its base after every frame, the levels above are dead until pushed again.
+            assert_eq!([a.u32_at(MATRIX_TOP), b.u32_at(MATRIX_TOP)], [MATRIX_BASE; 2], "{name} row {r}: the matrix stack is back at its base");
+            let dead = MATRIX_BASE + 0x40..MATRIX_BASE + 0x40 * MATRIX_LEVELS;
+            let parted: Vec<_> = differing_bytes(&a, &b).into_iter().filter(|p| !(dead.start <= p.start && p.end <= dead.end)).collect();
             assert!(parted.is_empty(), "{name} row {r}: the scenes part at {:x?}", &parted[..parted.len().min(20)]);
         }
         let k = &scene.borrow().kinds;
         eprintln!("{name}: {k:?}");
         let get = |s: &str| k.get(s).copied().unwrap_or(0);
         assert!(get("place") > 0 && get("segment") > 0, "{name}: the scene was asked");
-        assert_eq!(get("search hit 0"), 2 * get("place"), "{name}: a sphere and a probe search for every place, none hit");
+        if name == "scene-1" {
+            assert!(get("search hit 1") > 0 && get("sphere pair, kind 0") > 0 && get("sweep pair, kind 0") > 0, "{name}: the rider's spheres and sweeps pair with nat05's meshes and hit them: {k:?}");
+            assert!(get("sphere contact") > 0 && get("sphere contact, other set") > 0 && get("swept push-out") > 0, "{name}: push-outs from the scene's contacts and sweeps: {k:?}");
+        } else {
+            assert_eq!(get("search hit 0"), 2 * get("place"), "{name}: a sphere and a probe search for every place, none hit");
+        }
         assert!(k.keys().all(|s| !s.starts_with('>')), "{name}: something was handed to the original: {k:?}");
     }
 }

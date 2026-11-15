@@ -10914,6 +10914,21 @@ atv_heap_free               atv 0x001b76d0 = free
 #     and frame drawn), plant parts stood by ECO_PART, made-up boxes and other kinds, 1 in 12 not nearby;
 #     drawn records (room 0..=3); the answer, 45 record words and 0x003dce38 equal, no other writes but the
 #     stack (the walk recurses: 0x10000 of it).
+# S279b: a capture where the rider's spheres and sweeps hit the scene, replayed side by side on the port's
+# scene (tests/mxvatv_bike_ride.rs the_bone_collisions_scene_is_the_ports, scene-1). Journal:
+# research/journal/2026-11-14-s279b-rider-scene-capture/.
+#   Tape research/c15/scene.pad from state 4: gas, full left ticks 5..30, then straight on; the bike runs
+#   into a nat05 mesh (kind 0) near (2421, 402, 3348): wreck count 0 -> 2 on row 188, gas read 0 from 189,
+#   speed 76.6 -> 7.9 on row 196, put back ~row 257. Captured twice with research/c15/play.sh (300 rows,
+#   vsync 13109..13707, steps all 2): context/capture/c15/scene-{1,2}.csv, identical.
+#   The port's scene on scene-1: 2,517 places, 2,308 segments, 1,716 sphere pairs and 1,313 sweep pairs
+#   with kind 0 meshes, 224 searches hit; 209 sphere hits (each 1 contact, other = the mesh) and 15 swept
+#   push-outs; rows bit-exact on both sides, nothing handed to the original (no whole-scene search, no
+#   mover spin/velocity: a mesh is no mover).
+#   Matrix stack: the mesh sweep 0x0010c080 (atv program) pushes 0x40-byte levels at *0x0038d358 (base
+#   0x70000000, the scratchpad; 8 levels deep on scene-1) and pops them; levels above the top are left
+#   behind and only read after a push writes them. The port keeps no such stack: the side-by-side asserts
+#   the top is back at the base after every frame and leaves 0x70000040..0x70000400 out.
 # S285: the rider's wreck arm body 0x004efe10..0x004f0274 (in 0x004ef320, mode 2), ported as
 # game_sim::handling::rider::wreck_arm (aim, let_go, release_bike, ground_y, clauses; release, pose_targets,
 # body_target). tests/mxvatv_rider_modes.rs (the S278b oracle, the arm no longer skipped). Journal:

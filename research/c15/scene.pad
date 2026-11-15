@@ -1,0 +1,9 @@
+# S279b: from state 4 (rolling at 15 ft/s toward the first lip), gas, full left for 25 ticks, then
+# straight on: the bike runs into a nat05 mesh near (2421, 402, 3348) and wrecks on row ~189, the
+# rider's spheres and sweeps pairing with it (and hitting it) from that row.
+down cross
+sleep 5t
+stick l -1 0
+sleep 25t
+stick l 0 0
+sleep 300t
