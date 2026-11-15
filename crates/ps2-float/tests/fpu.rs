@@ -472,6 +472,62 @@ fn min_and_max_compare_the_bit_patterns() {
     }
 }
 
+/// `c.lt.s` / `c.le.s` / `c.eq.s` as an integer model: each side read as an operand (no exponent →
+/// zero, exponent 255 → max), the two zeros one value, then sign-magnitude order on the patterns.
+fn compare_key(bits: u32) -> i64 {
+    let mag = match bits & 0x7f80_0000 {
+        0 => 0,
+        0x7f80_0000 => 0x7f7f_ffff,
+        _ => bits & 0x7fff_ffff,
+    } as i64;
+    if bits & 0x8000_0000 != 0 { -mag } else { mag }
+}
+
+#[test]
+fn comparisons_read_denormals_as_zero() {
+    // F64: S296's oracle caught the derived (host) order in a ported `c.lt.s`.
+    let tiny = F(-1.0e-40);
+    assert!(tiny.0 < 0.0, "the host orders a denormal below zero");
+    assert!(!(tiny < F::ZERO), "c.lt.s reads it as -0, which is not below +0");
+    assert!(tiny == F::ZERO && tiny <= F::ZERO && tiny >= F::ZERO);
+    assert!(!(F(1.0e-40) > 0.0) && !(0.0 < F(1.0e-40)), "the f32 forms too");
+    assert!(F(f32::INFINITY) == F::MAX && F(f32::NAN) == F::MAX, "exponent 255 reads as max");
+    assert!(F(f32::NEG_INFINITY) < F(-3.0e38));
+
+    let edges = edge_patterns();
+    let mut pairs: Vec<(u32, u32)> = edges.iter().flat_map(|&a| edges.iter().map(move |&b| (a, b))).collect();
+    let mut rng = Rng(0x00f6_4f64);
+    for _ in 0..200_000 {
+        // two patterns near each other and around zero: the denormal band is where host and FPU differ
+        let e = (rng.next() % 6) as i32;
+        let a = rng.near(e);
+        let b = if rng.next() & 1 == 0 {
+            let d = (rng.next() % 3) as i32 - 1;
+            rng.near(e + d)
+        } else {
+            rng.next()
+        };
+        pairs.push((a, b));
+    }
+    let mut host_differs = 0;
+    for (a, b) in pairs {
+        let (x, y) = (F(f32::from_bits(a)), F(f32::from_bits(b)));
+        let (ka, kb) = (compare_key(a), compare_key(b));
+        let what = format!("{a:#010x} vs {b:#010x}");
+        assert_eq!(x < y, ka < kb, "c.lt.s {what}");
+        assert_eq!(x <= y, ka <= kb, "c.le.s {what}");
+        assert_eq!(x == y, ka == kb, "c.eq.s {what}");
+        assert_eq!(x > y, kb < ka, "gt {what}");
+        assert_eq!(x >= y, kb <= ka, "ge {what}");
+        assert_eq!(x.partial_cmp(&y), Some(ka.cmp(&kb)), "partial_cmp {what}");
+        assert_eq!(x < y.0, ka < kb, "F < f32 {what}");
+        assert_eq!(x.0 <= y, ka <= kb, "f32 <= F {what}");
+        assert_eq!(fpu::Acc(x) == y.0, ka == kb, "Acc == f32 {what}");
+        host_differs += ((x.0 < y.0) != (ka < kb)) as u32;
+    }
+    assert!(host_differs > 1000, "only {host_differs} pairs where the host order differs: not exercising DAZ");
+}
+
 #[test]
 fn cvt_w_s_turns_over_at_two_to_the_31() {
     // the largest float below 2^31 converts; 2^31 itself and everything above saturates by sign
