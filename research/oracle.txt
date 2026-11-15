@@ -11624,6 +11624,23 @@ atv_heap_free               atv 0x001b76d0 = free
 #   +0x384 = listener; +0x388 = last k < min(*0x0044c220 +0x340, 15) with (+0x548)[k] == listener +4, else 15;
 #   send 0x00514e40(batch, 0, batch +0x5c, 2, 0) (580 bytes, handed out). In the state 4 image *0x005253e0 is 1,
 #   *0x00542d70 and *0x00542d78 are 0 (the words just after the spread table).
+# F31b5q — the other kind's batch send in Rust (game_sim::handling::emitter::send; tests/mxvatv_bike_ride.rs
+#   the_batch_send_is_the_originals (12,000 cases), PartWalk switch "batch send"). Journal research/journal/
+#   2026-11-15-f31b5q-batch-send-in-rust. Send 0x00514e40(batch, start, count, kind, force), 580 bytes, void,
+#   kind unread: +0x58 == 0, paused bit 3 of (*0x003eab60)+0x225, +0x74 != 0 with force 0, or count <= 0 -> out.
+#   Look 0x00514ac0(batch, &short) (756 bytes, answers 1): 1/+0x30, 1/+0x34 (div.s), times 32767.0; over the
+#   +0x3a8 entries (table +0x3a0, +0x660 + k*0x30; scales at batch +0xa0 + k*12) all of |scale - s| < *0x00525488
+#   (10), |(0 + e+0x20..28) - 0.5 * b+0x10..18| < *0x00525490 (0.1; adda/msub), |e+0..8 - b+0x20..28| <
+#   *0x00525498 (5), |e+0x18 - b+0x60| and |e+0xc - (b+0x64 - b+0x60)| < *0x005254a0 (10) -> +0x2c8[k] = clock
+#   (+0x54); none -> +0x3a8 < 46 grows it, else k = the last with clock - used > *0x005254a8 (10000) or used <
+#   every earlier, written from the batch (+0x67c = -1000.0). Fill 0x00514910(batch, +0x390 + slot*0x210,
+#   &+0x3c0, &start, &count, look) (432 bytes): while *fill < 12 and count != 0, writes from the slot's first
+#   place whatever *fill was: +0x20 quad (xyz, clock - p+0x20), +0xf0 halves cvt(p+0x10..18 * b+0x30..38),
+#   cvt(p+0x30), +0x160 cvt(1638.35 * p+0x2c), cvt(p+0x24), p+0x34, cvt(2184.4666 * p+0x3c), +0x1d0 bytes look,
+#   p+0x38 < b+0x98 ? p+0x38 : 0, b+0x388, 0. After each fill the slot's stamp (+0x3b8)[slot] = cvt(clock +
+#   max(cvt(stamp) - clock, the filled particles' +0x24)); none filled or +0x3c0 >= 12 -> slot + 1 (wrap at
+#   +0x68), unless +0x78 past every slot with cvt(stamp) - stale > clock (stale +0x7c, += +0x80 each), +0x3c0 = 0.
+#   Then +0x5c = 0. The state 4 image's tolerances are the ones above.
 # F58 — the effects items' steps in Rust (game_sim::handling::effects::{item_step, Kind, Steps}, Call::Move;
 #   tests/mxvatv_bike_ride.rs the_effects_items_steps_are_the_originals (20,000 cases), PartWalk's FX_KINDS).
 #   Journal research/journal/2026-11-13-f58-effects-items-steps. Vt +0x14 by vtable: 0x003d1650 0x004ff170 (jr ra,

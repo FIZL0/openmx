@@ -5516,6 +5516,14 @@ impl emitter::Emitters for PartWalk<'_> {
                 (f, vec![a(o)], vec![], format!("object +{slot:#x} {f:#x}"))
             }
             // F57a: the other kind's own work is the port's ([`emitter::other`]); its batch's send the original's
+            Call::Send { batch, count } if in_rust("batch send") => {
+                // F31b5q: and its send ([`emitter::send`]).
+                book("the tail: the update's emitter other kind sends in Rust", 1);
+                let before = bike_and_blocks(self.ee);
+                emitter::send(self, batch, 0, count, 0);
+                assert!(before == bike_and_blocks(self.ee), "the batch send wrote the bike");
+                return 0;
+            }
             Call::Send { batch, count } => (EMIT_SEND, vec![a(batch), 0, a(count), 2, 0], vec![], "other kind send".into()),
             Call::Place { owner, at, with } => (EMIT_PLACE, vec![a(owner), a(at), a(with)], vec![], "place".into()),
             Call::Owner(x) => {
@@ -5617,6 +5625,152 @@ fn the_particle_object_switches_are_the_originals() {
         }
     }
     assert_eq!(tally.len(), 8, "every pick path: {tally:?}");
+}
+
+/// **F31b5q — the other kind's batch send is the original's**: [`emitter::send`] against
+/// SLUS-21104's over 12,000 generated batches in a zero area of state 4's RAM (on or off, paused or
+/// not, forced-only with and without force, counts of both signs, slots part full or full, stale
+/// slots kept or skipped, looks found, new or replacing the stalest); every word of the batch, its
+/// particles, looks, slots and stamps the same after, and each path reached ≥100 times.
+#[test]
+#[allow(clippy::float_arithmetic)]
+fn the_batch_send_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let Some(mut port) = image() else { return };
+    // the batch, its particles (64), its looks' table (46 entries from +0x660), slots (up to 6) and stamps
+    let b = F54_AREA + 0x10000;
+    let (particles, table, slots, stamps, end) = (b + 0x400, b + 0x1400, b + 0x2400, b + 0x3200, b + 0x3300);
+    let game = ee.u32_at(emitter::GAME) + emitter::GAME_PAUSED;
+    let paused = ee.u32_at(game & !3);
+    let mut g = Gen(0x5e4d_ba7c);
+    let mut paths: BTreeMap<&'static str, u32> = BTreeMap::new();
+    for case in 0..12_000u32 {
+        let mut words: Vec<(u32, u32)> = vec![];
+        let mut put = |at: u32, w: u32| words.push((at, w));
+        for at in (b..end).step_by(4) {
+            put(at, g.bits());
+        }
+        let clock = g.f(0.0, 200.0);
+        let n_slots = 1 + g.bits() % 6;
+        let fill = if g.one_in(8) { 12 + g.bits() % 3 } else { g.bits() % 12 };
+        let looks = if g.one_in(3) { 46 } else { g.bits() % 47 };
+        // now and then no look near the batch's, and looks past the stale age ([`emitter::LOOK_STALE`], 10,000 in the image)
+        let (far, old) = (g.one_in(3), g.one_in(3));
+        let near = |g: &mut Gen, x: f32| if far || g.one_in(4) { g.f(-2.0, 2.0) } else if g.one_in(3) { x + g.f(-0.01, 0.01) } else { x };
+        let scale = |g: &mut Gen| if g.one_in(20) { [0.0, -0.0, 1e-30, 3e38][(g.bits() % 4) as usize] } else { g.f(0.5, 300.0) };
+        let (sx, sy) = (scale(&mut g), scale(&mut g));
+        let size = [g.f(0.0, 4.0), g.f(0.0, 4.0), g.f(0.0, 4.0)];
+        let tint = [g.f(0.0, 128.0), g.f(0.0, 128.0), g.f(0.0, 128.0)];
+        let (lo, hi) = (g.f(0.0, 4.0), g.f(0.0, 8.0));
+        put(b + 0x10, size[0].to_bits());
+        put(b + 0x14, size[1].to_bits());
+        put(b + 0x18, size[2].to_bits());
+        put(b + 0x20, tint[0].to_bits());
+        put(b + 0x24, tint[1].to_bits());
+        put(b + 0x28, tint[2].to_bits());
+        put(b + 0x30, sx.to_bits());
+        put(b + 0x34, sy.to_bits());
+        put(b + 0x38, scale(&mut g).to_bits());
+        put(b + emitter::BATCH_ARRAY, particles);
+        put(b + emitter::BATCH_CLOCK, clock.to_bits());
+        put(b + emitter::BATCH_ON, u32::from(!g.one_in(20)));
+        put(b + 0x60, lo.to_bits());
+        put(b + 0x64, hi.to_bits());
+        put(b + emitter::BATCH_SLOTS, n_slots);
+        put(b + emitter::BATCH_FORCED, u32::from(g.one_in(10)));
+        put(b + emitter::BATCH_KEEP_STALE, u32::from(g.one_in(3)));
+        put(b + emitter::BATCH_STALE, g.f(-5.0, 20.0).to_bits());
+        put(b + emitter::BATCH_STALE_STEP, g.f(0.0, 10.0).to_bits());
+        put(b + emitter::BATCH_LOOKS_HAD, g.bits() % 64);
+        put(b + 0x388, g.bits() % 16);
+        put(b + emitter::BATCH_SLOT_AT, slots);
+        put(b + emitter::BATCH_LOOK_TABLE, table);
+        put(b + emitter::BATCH_LOOK_COUNT, looks);
+        put(b + emitter::BATCH_STAMPS, stamps);
+        put(b + emitter::BATCH_SLOT, g.bits() % n_slots);
+        put(b + emitter::BATCH_FILL, fill);
+        for k in 0..46 {
+            // each look's scales and table entry: the batch's, near it or elsewhere
+            let s = b + emitter::BATCH_LOOK_SCALES + 12 * k;
+            put(s, near(&mut g, ps2_float::fpu::mul(32767.0, ps2_float::fpu::div(1.0, sx))).to_bits());
+            put(s + 4, near(&mut g, ps2_float::fpu::mul(32767.0, ps2_float::fpu::div(1.0, sy))).to_bits());
+            let age = if old && g.one_in(2) { g.f(9000.0, 11000.0) } else { g.f(-2.0, 60.0) };
+            put(b + emitter::BATCH_LOOK_USED + 4 * k, (clock - age).to_bits());
+            let e = table + 0x660 + 0x30 * k;
+            for i in 0..3 {
+                put(e + 4 * i, near(&mut g, tint[i as usize]).to_bits());
+                put(e + 0x20 + 4 * i, near(&mut g, ps2_float::fpu::mul(0.5, size[i as usize])).to_bits());
+            }
+            put(e + 0xc, near(&mut g, ps2_float::fpu::sub(hi, lo)).to_bits());
+            put(e + 0x18, near(&mut g, lo).to_bits());
+        }
+        for k in 0..6 {
+            put(stamps + 4 * k, (clock + g.f(-40.0, 60.0)) as i32 as u32);
+        }
+        for k in 0..64 {
+            let p = particles + 0x40 * k;
+            for i in 0..3 {
+                put(p + 4 * i, g.f(-500.0, 500.0).to_bits());
+                put(p + 0x10 + 4 * i, g.f(-2.0, 2.0).to_bits());
+            }
+            put(p + 0x20, (clock - g.f(-1.0, 10.0)).to_bits());
+            put(p + 0x24, g.f(0.0, 50.0).to_bits());
+            put(p + 0x2c, g.f(0.0, 20.0).to_bits());
+            put(p + 0x30, g.f(-300.0, 300.0).to_bits());
+            put(p + 0x34, g.bits() % 4);
+            put(p + 0x38, g.bits() % 64);
+            put(p + 0x3c, g.f(0.0, 15.0).to_bits());
+        }
+        let start = g.bits() % 32;
+        let count = match g.bits() % 8 {
+            0 => 0,
+            1 => (g.bits() % 4) as i32 as u32 ^ u32::MAX,
+            _ => 1 + g.bits() % 32,
+        };
+        let force = u32::from(g.one_in(2));
+        let pause = if g.one_in(20) { 0x08 << (8 * (game & 3)) } else { 0 };
+        put(game & !3, paused & !(0x08 << (8 * (game & 3))) | pause);
+        for &(at, w) in &words {
+            ee.set_u32(at, w);
+            port.set_u32(at, w);
+        }
+        let (on, forced) = (port.u32_at(b + emitter::BATCH_ON) != 0, port.u32_at(b + emitter::BATCH_FORCED) != 0);
+        let sends = on && pause == 0 && (!forced || force != 0) && (count as i32) > 0;
+        let stale = (0..46).any(|k| f32::from_bits(port.u32_at(b + emitter::BATCH_LOOK_USED + 4 * k)) < clock - 10_000.0);
+        ee.set(28, GP);
+        ee.call(EMIT_SEND, &[u64::from(b), u64::from(start), u64::from(count), 2, u64::from(force)], &[], BUDGET);
+        let mut m = EmitOracle { ee: &mut port, seed: 0, log: vec![] };
+        emitter::send(&mut m, b, start, count, force);
+        assert!(m.log.is_empty(), "case {case}: the send handed out {:?}", m.log);
+        for at in (b..end).step_by(4) {
+            assert_eq!(port.u32_at(at), ee.u32_at(at), "case {case}: {:#x} (batch +{:#x})", at, at - b);
+        }
+        assert_eq!(port.u32_at(game & !3), ee.u32_at(game & !3), "case {case}: the game's pause word");
+        if !sends {
+            tally(&mut paths, "not sent");
+            continue;
+        }
+        let grown = ee.u32_at(b + emitter::BATCH_LOOK_COUNT) != looks;
+        tally(&mut paths, match (grown, looks == 46) {
+            (true, _) => "sent, a new look",
+            (false, false) => "sent, a look found",
+            (false, true) => "sent, the table full",
+        });
+        if looks == 46 && stale && far {
+            tally(&mut paths, "sent, the table full, a look stale");
+        }
+        if fill >= 12 {
+            tally(&mut paths, "sent, the slot full on entry");
+        }
+        if ee.u32_at(b + emitter::BATCH_FILL) < fill || count as i32 + fill as i32 > 12 {
+            let keep = ee.u32_at(b + emitter::BATCH_KEEP_STALE) != 0;
+            tally(&mut paths, if keep { "sent, moved on, stale kept" } else { "sent, moved on, stale skipped" });
+        } else {
+            tally(&mut paths, "sent into one slot");
+        }
+    }
+    eprintln!("{paths:?}");
+    assert!(paths.len() == 9 && paths.values().all(|&n| n >= 100), "every path: {paths:?}");
 }
 
 /// F31b5n: one draw of the C library's `rand` on its state in RAM ([`rand_state`]), the port's
@@ -9976,6 +10130,7 @@ fn replay_in_pure_rust(name: &str) -> Option<(Vec<bool>, Vec<String>, BTreeMap<S
             "rumble dropped",
             "object switches",
             "noise build",
+            "batch send",
         ],
     );
     let census = INTERPRETED.with(|m| std::mem::take(&mut *m.borrow_mut()));
