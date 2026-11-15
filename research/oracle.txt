@@ -12538,3 +12538,36 @@ atv_out_of_bounds           atv 0x004a4f20 (vt +0x16c, the bike in a0): body pos
 # 0x00108820 mesh descent: writes 0x003dce30 (1), 0x003dce38 (mesh+0x230), 0x003dce40/48 (stack)
 # 0x003dce50-0x003dceef leaf-test scratch (0x00107000-0x0010a000 only)
 # 0x001bb0b0 probe constructor, only writer of +0x188 (profiler, 0)
+# ---------------------------------------------------------------------------------------------------
+# S319 — the rider's statistics tracker the results menu reads (game_sim::race::Tracker; tests/race.rs
+# items 45-50). Journal: research/journal/2026-11-14-s319-rider-statistics-tracker.
+#   The tracker is inline in the motocross bike (type 2, ctor 0x00279ed0, 0x14e0 bytes) at bike+0x12c4.
+#   Bike words: +0x12e4 gates a per-lap list (only the ctor writes it, 0), +0x12d0 list tail, +0x12d4
+#   count, +0x12d8/+0x12dc words moved into each record; +0x12e8 laps led, +0x12ec times in lead,
+#   +0x12f0 passes, +0x12f4 times passed, +0x12f8 wrecks, +0x12fc preloads, +0x1300 clutches, +0x1304 0,
+#   +0x1308 -1.0, +0x130c air clock (dt while card 0x400 clear), +0x1310 max of card+0x108, +0x1314
+#   preload latch, +0x1318 clutch latch, +0x133c odometer. bike+0xf9c its own card. The results menu's
+#   jump/hang are the card's +0xf0/+0x100, written only by score_card_jumps (S302).
+bike_lap_counted            boot 0x0027ddd0 (bike, _, card) -> 0 on a null card, else 1: card owner slot
+#                                           +0xc (thunk 0x00281b30, this-0xf9c), the lap line's Lap
+#                                           notice. If +0x12d4 < 1000 and +0x12e4 != 0 appends a 0x10
+#                                           record {card+0x30, card+0x48, +0x12d8, +0x12dc} (allocator
+#                                           0x001e4ff0); then +0x12e8 += 1 when card+0x2c == 1.
+#                                           bike_place_change_crowd (above): kind 0 passes += 1 and, when
+#                                           *(bike+0xf9c)+0x2c == 1, times in lead += 1; kind 1 times
+#                                           passed += 1; others neither. Crowd sounds first, counts after.
+#                                           player_wreck_entry (above) ends with +0x14b4 = (reason != 0)
+#                                           and +0x12f8 += 1, unconditionally.
+bike_stats_controls         boot 0x0027cc2c inside the player update 0x0027c890 ($18 bike), after the base
+#                                           update: latch +0x1314 clear and !(+0x4b0 <= 0) -> preloads
+#                                           += 1, latch 1; latch set and +0x4b0 <= 0 -> latch 0. The same
+#                                           for latch +0x1318, clutches +0x1300 and the lever +0x644.
+bike_stats_controls_end     boot 0x0027ccdc the stretch's end (reads +0xf9c next).
+bike_grid_reset             boot 0x0027f9e0 (bike, at, facing) -> 1: card owner slot +0x8c (thunk 0x002819c0;
+#                                           the grid's "entity vt+0x8c"). bike_grid_place, VU0 writes of
+#                                           +0x3b0..+0x3f0 and +0x1350..+0x1370, +0x1380 = 0,
+#                                           ride_reset_request(bike, 0, 0); then unless the activity type
+#                                           *(*(app+0x3d4)+0xc)+4 == 5 (freestyle) zeroes +0x12e8..+0x1304,
+#                                           +0x1308 = -1.0, zeroes +0x130c, +0x1310, +0x1314, +0x1318,
+#                                           +0x133c.
+bike_grid_place             boot 0x0027e530 (bike, at, facing, bike+0x3d0, 0) the grid reset's first call.
