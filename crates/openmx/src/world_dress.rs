@@ -79,12 +79,16 @@ impl Dressed {
     /// poses them; but each car past [`CARS_NEAR`] of every `eyes` (world `x`, `z`) keeps its last
     /// pose but on every [`CARS_FAR_EVERY`]th `picture`. A pose is a function of the clock alone,
     /// so a car posed late is where it would have been: nothing here is the simulation's.
+    ///
+    /// A car `woken` answers for (MD153a, [`woken_pose`]) is drawn where it says instead: a
+    /// `HasPhysics` car something struck, where the simulation's body has it.
     pub fn cars_near(
         &mut self,
         elapsed: f64,
         eyes: &[[f32; 2]],
         picture: u64,
         ground: &mut dyn FnMut(game_render::mat::V3, [f32; 2]) -> (game_render::mat::V3, game_render::mat::V3),
+        woken: &dyn Fn(usize) -> Option<game_render::mat::M4>,
     ) -> Vec<(String, game_render::mat::M4)> {
         let shift = self.shift;
         self.posed.resize(self.traffic.cars.len(), None);
@@ -99,7 +103,9 @@ impl Dressed {
                 Some(m) => near(m) || (picture + i as u64) % CARS_FAR_EVERY == 0,
                 None => true,
             };
-            if due {
+            if let Some(m) = woken(i) {
+                *posed = Some(m);
+            } else if due {
                 let at = toy::clock(elapsed, car.time_scale, path.last());
                 let mut m = path.pose_kept(car, at, toy::SCENE_STEP * car.time_scale, &mut |p| ground(p, shift), kept).transform;
                 m.0[3][0] += shift[0];
@@ -403,6 +409,10 @@ pub struct Moving {
     pub models: Vec<track::Placement>,
     /// What each tile said, for the log.
     pub notes: Vec<String>,
+    /// Where each tile's cars begin in [`Moving::traffic`], and how many, by the tile's index
+    /// (MD153a): `None` for a tile with nothing on it. [`Dressed::cars_near`]'s car `k` of tile `i` is
+    /// the simulation's car `first + k`, when the counts agree.
+    pub car_firsts: Vec<Option<(usize, usize)>>,
 }
 
 /// Read a world's [`Moving`] things: every tile, whatever is near, so two seats that load the
@@ -416,9 +426,10 @@ pub fn moving(w: &WorldMod, edge: game_sim::prop_world::Edge, bike_frame: Option
         animated: Animated::default(),
         models: Vec::new(),
         notes: Vec::new(),
+        car_firsts: vec![None; w.tile_count],
     };
     let area = game_sim::biplane::Area { width: edge.max[0], depth: edge.max[1] };
-    for piece in &w.pieces[..w.tile_count] {
+    for (index, piece) in w.pieces[..w.tile_count].iter().enumerate() {
         let Some(scene) = &piece.scene else { continue };
         let mut archives = match piece.archives() {
             Ok(a) => a,
@@ -480,12 +491,45 @@ pub fn moving(w: &WorldMod, edge: game_sim::prop_world::Edge, bike_frame: Option
                 props.collections.len()
             ));
         }
+        out.car_firsts[index] = Some((out.traffic.cars.len(), cars.cars.len()));
         out.traffic.join(cars);
         out.animated.join(toys, by, &toy_prefix);
         out.traffic.props.join(props, first);
     }
     out.traffic.props.bike_frame = bike_frame;
     out
+}
+
+/// **Where a world's woken car is drawn** (MD153a): car `k` of tile `index`'s [`Dressed::cars_near`],
+/// when it is a `HasPhysics` car whose body is awake in the simulation's `traffic`, at the pose the
+/// simulation gave it, slid `by` of the way from its pose on the tick before (`before`, by car) as a
+/// track's cars are (S81). `None` for every other car — on its path, it is drawn on its clip (MD15) —
+/// and when the tile's count of cars is not the simulation's (`firsts`, [`Moving::car_firsts`]), so a
+/// car is never drawn at another's body. The simulation's cars drive in world feet already.
+pub fn woken_pose(
+    traffic: &game_sim::traffic::Traffic,
+    before: &[game_sim::math::Mat4],
+    firsts: &[Option<(usize, usize)>],
+    index: usize,
+    cars: usize,
+    k: usize,
+    by: f32,
+) -> Option<game_render::mat::M4> {
+    let (first, count) = (*firsts.get(index)?)?;
+    if count != cars || k >= count {
+        return None;
+    }
+    let g = first + k;
+    traffic.physics.get(g)?.as_ref().filter(|p| p.physical)?;
+    let now = &traffic.cars.get(g)?.pose;
+    let was = before.get(g).unwrap_or(now);
+    let by = by.clamp(0.0, 1.0);
+    Some(game_render::mat::M4(std::array::from_fn(|r| {
+        std::array::from_fn(|c| {
+            let (a, b) = (was.0[r].0[c], now.0[r].0[c]);
+            a + (b - a) * by
+        })
+    })))
 }
 
 /// The tile a world point in feet stands on, inside its keep: [`Dressed::index`].
@@ -936,7 +980,7 @@ mod tests {
                 n += 1;
                 let (on, normal) = faceted(v3(p.x + by[0], p.y, p.z + by[1]));
                 (v3(p.x, on.y, p.z), normal)
-            });
+            }, &|_| None);
             if picture == 0 {
                 first = n;
             } else {

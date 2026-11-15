@@ -65,6 +65,13 @@
 //! ([`crate::mover_contact`]); the mirror is put right before each set is handed out, and a strike
 //! heard on a mirror is the list's ([`World::moving`]). The sweep meets the list after the tiles'
 //! shapes, numbered from [`MOVING_OWNER`].
+//!
+//! On a world that wraps (MD153a) each moving shape has [`SEAM_COPIES`] more places in every set's
+//! mirror, after the list's own: where it stands again one width over while it is by a seam, as the
+//! tiles' still shapes do in [`Tiled::every_shape`], else a place with no mesh and no reach. The
+//! places are always there, so a still shape's number in a set never changes as the cars come and go
+//! by a seam; a strike heard on a copy is its shape's. The sweep needs none: it is swept again one
+//! width over by a seam ([`Tiled::sweep`]), the list with it.
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
 use crate::biplane::Area;
@@ -286,13 +293,81 @@ fn copy_of(p: &Prop) -> Prop {
     }
 }
 
+/// How many places each of [`Tiled::moving`]'s shapes has for its copies one width over in a
+/// wrapped world's sets: one by an edge, three by a corner ([`Tiled::copies`]).
+pub const SEAM_COPIES: usize = 3;
+
+/// A prop's mesh taken out: its frame kept, nothing in it to strike ([`crate::traffic::hide`]'s).
+fn emptied(mesh: &Mesh) -> Mesh {
+    Mesh {
+        version: mesh.version,
+        surface: mesh.surface,
+        transform: mesh.transform,
+        vertices: crate::track::Points::Wide(Vec::new()),
+        normals: None,
+        nodes: Vec::new(),
+        triangles: Vec::new(),
+    }
+}
+
+/// A world matrix moved `by` feet on the ground: the translation row.
+fn shifted_frame(m: &crate::math::Mat4, by: [F; 2]) -> crate::math::Mat4 {
+    let mut out = *m;
+    out.0[3] = shifted(m.0[3], by);
+    out
+}
+
+/// A world-to-mesh matrix for a mesh moved `by` feet: a point taken back `by` first, so the
+/// translation row less `by` through the rows of `x` and `z`.
+fn shifted_inverse(m: &crate::math::Mat4, by: [F; 2]) -> crate::math::Mat4 {
+    let mut out = *m;
+    let [x, _, z, t] = m.0;
+    let row = |i: usize| F(t.0[i]) - by[0] * F(x.0[i]) - by[1] * F(z.0[i]);
+    out.0[3] = Vf::new(row(0).0, row(1).0, row(2).0, t.w());
+    out
+}
+
+/// Make `to` the copy of `from` one width over, `by` feet, or with `None` an empty place.
+fn seam_sync(to: &mut Prop, from: &Prop, by: Option<[F; 2]>) {
+    match by {
+        Some(by) => {
+            if to.mesh.triangles.len() != from.mesh.triangles.len() || to.mesh.nodes.len() != from.mesh.nodes.len() {
+                to.mesh = from.mesh.clone();
+            }
+            to.to_world = shifted_frame(&from.to_world, by);
+            to.from_world = shifted_inverse(&from.from_world, by);
+            to.centre = shifted(from.centre, by);
+            to.radius = from.radius;
+            to.moving = from.moving.map(|m| crate::traffic::Moving { pose: shifted_frame(&m.pose, by), ..m });
+        }
+        None => {
+            if !to.mesh.nodes.is_empty() || !to.mesh.triangles.is_empty() {
+                to.mesh = emptied(&from.mesh);
+            }
+            to.to_world = from.to_world;
+            to.from_world = from.from_world;
+            to.centre = from.centre;
+            to.radius = F::ZERO;
+            to.moving = None;
+        }
+    }
+}
+
 /// Put `moving` at the head of `into`, whose head held `head` of them, as they stand now: where each
 /// is, how it moves, and its mesh when a ghost's frame took it out or gave it back
-/// ([`crate::traffic::hide`]).
-fn mirror(moving: &Props, into: &mut Props, head: &mut usize) {
-    if *head != moving.props.len() {
-        into.props.splice(0..*head, moving.props.iter().map(copy_of));
-        *head = moving.props.len();
+/// ([`crate::traffic::hide`]); then on a wrapped world each one's copies one width over, `seams`
+/// ([`Tiled::seams`], [`SEAM_COPIES`] a shape).
+fn mirror(moving: &Props, seams: &[Option<[F; 2]>], into: &mut Props, head: &mut usize) {
+    let n = moving.props.len();
+    if *head != n + seams.len() {
+        let copies = seams.iter().enumerate().map(|(s, by)| {
+            let from = &moving.props[s / SEAM_COPIES];
+            let mut to = copy_of(from);
+            seam_sync(&mut to, from, *by);
+            to
+        });
+        into.props.splice(0..*head, moving.props.iter().map(copy_of).chain(copies));
+        *head = n + seams.len();
         return;
     }
     for (to, from) in into.props.iter_mut().zip(&moving.props) {
@@ -304,6 +379,9 @@ fn mirror(moving: &Props, into: &mut Props, head: &mut usize) {
         to.centre = from.centre;
         to.radius = from.radius;
         to.moving = from.moving;
+    }
+    for (s, (to, by)) in into.props[n..*head].iter_mut().zip(seams).enumerate() {
+        seam_sync(to, &moving.props[s / SEAM_COPIES], *by);
     }
 }
 
@@ -792,8 +870,9 @@ impl Tiled {
             self.every = Some(all);
             self.every_head = 0;
         }
+        let seams = self.seams();
         let every = self.every.get_or_insert_with(Props::default);
-        mirror(&self.moving, every, &mut self.every_head);
+        mirror(&self.moving, &seams, every, &mut self.every_head);
         every
     }
 
@@ -845,18 +924,46 @@ impl Tiled {
             self.cuts += 1;
             self.near.push((key, Props { props }, 0));
         }
+        let seams = self.seams();
         let (_, near, head) = self.near.last_mut().expect("just kept");
-        mirror(&self.moving, near, head);
+        mirror(&self.moving, &seams, near, head);
         near
+    }
+
+    /// Where each of [`Tiled::moving`]'s shapes stands again one width over (MD153a): for shape `k`,
+    /// places `k * SEAM_COPIES ..` hold the shifts [`Tiled::copies`] gives its sphere, the rest
+    /// `None`. Empty on a world that does not wrap.
+    fn seams(&self) -> Vec<Option<[F; 2]>> {
+        if self.wrap == [false, false] {
+            return Vec::new();
+        }
+        let mut out = Vec::with_capacity(self.moving.props.len() * SEAM_COPIES);
+        for p in &self.moving.props {
+            let mut by = self.copies(p.centre, p.radius);
+            by.truncate(SEAM_COPIES);
+            let n = by.len();
+            out.extend(by.into_iter().map(Some));
+            out.extend(std::iter::repeat_n(None, SEAM_COPIES - n));
+        }
+        out
     }
 
     /// **The world's moving shapes** (MD153, [`World::moving`]): every strike heard on a mirror of
     /// them since last asked told to the shape it mirrors, and the list, for the traffic to stand.
     fn moving_list(&mut self) -> &mut Props {
         let sets = self.every.iter().map(|p| (p, self.every_head)).chain(self.near.iter().map(|(_, p, h)| (p, *h)));
+        let n = self.moving.props.len();
         for (set, head) in sets {
-            for (copy, shape) in set.props.iter().take(head).zip(&self.moving.props) {
+            for (copy, shape) in set.props.iter().take(head.min(n)).zip(&self.moving.props) {
                 if copy.take_heard() {
+                    shape.strike_heard();
+                }
+            }
+            // A copy one width over is its shape's (MD153a).
+            for (s, copy) in set.props.iter().take(head).skip(n).enumerate() {
+                if copy.take_heard()
+                    && let Some(shape) = self.moving.props.get(s / SEAM_COPIES)
+                {
                     shape.strike_heard();
                 }
             }

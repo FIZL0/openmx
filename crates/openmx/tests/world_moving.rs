@@ -8,7 +8,9 @@
 //!
 //! - full gas square at Dallas's train (tests/train.rs's user's path): the bike is thrown at the
 //!   train's side and never comes out the far side;
-//! - full gas at free09's beach balls by the pool: the balls move.
+//! - full gas at free09's beach balls by the pool: the balls move;
+//! - full gas head on at free06's company truck (S207's ctruck, a `HasPhysics` car) on its line: the
+//!   woken truck is drawn where its body is, not on its clip (MD153a).
 //!
 //! The world is openmx-mods' stitch of the user's disc: `$OPENMX_WORLDS/tracks/world_mxu_free`, else
 //! the main checkout's `mods/` (as tests/disc_worlds.rs looks); without it, or the disc, they skip.
@@ -35,14 +37,22 @@ fn worlds() -> Option<PathBuf> {
 
 /// A pad tape of `frames` frames of full throttle (Cross on full pressure).
 fn gas(frames: usize) -> PathBuf {
+    tape(0, frames)
+}
+
+/// A pad tape of `still` frames with nothing held, then `held` of full throttle.
+fn tape(still: usize, held: usize) -> PathBuf {
+    let frames = still + held;
     let mut text = format!("# game-sim pad tape: {frames} frames\nformat 1\ntape gas\n");
-    let report = format!("0079ff{:02x}7f7f7f7f000000000000{:02x}{}", 0xbf, 0xff, "00".repeat(17));
-    for _ in 0..frames {
+    let gas = format!("0079ff{:02x}7f7f7f7f000000000000{:02x}{}", 0xbf, 0xff, "00".repeat(17));
+    let none = format!("0079ffff7f7f7f7f{}", "00".repeat(24));
+    for f in 0..frames {
+        let report = if f < still { &none } else { &gas };
         text += &format!("frame 0x3d08850a 0x{report} -\n");
     }
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("md153-world-moving");
     std::fs::create_dir_all(&dir).expect("the scratch folder");
-    let path = dir.join(format!("gas-{frames}.tape"));
+    let path = dir.join(format!("gas-{still}-{held}.tape"));
     std::fs::write(&path, text).expect("the tape is written");
     path
 }
@@ -50,6 +60,11 @@ fn gas(frames: usize) -> PathBuf {
 /// The shell headless on world_mxu_free from `--trace-at at` on the gas for `frames` frames: what
 /// it said, or `None` with no disc or no world to ride.
 fn ride(at: &str, frames: usize) -> Option<String> {
+    ride_tape(at, frames, gas(frames))
+}
+
+/// [`ride`] on `tape`.
+fn ride_tape(at: &str, frames: usize, tape: PathBuf) -> Option<String> {
     if let Err(e) = game_render::disc::Disc::open_configured() {
         eprintln!("skipped: {e}");
         return None;
@@ -64,7 +79,7 @@ fn ride(at: &str, frames: usize) -> Option<String> {
         .current_dir(&root)
         .args(["--headless", "--no-sound", "--track", "world_mxu_free", "--mods", mods.to_str().unwrap()])
         .args(["--size", "640x448", "--overlay", "none", "--controls", "original"])
-        .args(["--trace-at", at, "--play", gas(frames).to_str().unwrap(), "--frames", &frames.to_string()])
+        .args(["--trace-at", at, "--play", tape.to_str().unwrap(), "--frames", &frames.to_string()])
         .output()
         .expect("the shell runs");
     let said = String::from_utf8_lossy(&out.stdout).to_string();
@@ -109,3 +124,29 @@ fn full_gas_into_the_beach_balls_moves_them() {
     assert!(moved.iter().any(|m| m.starts_with("BeachBall ")), "no beach ball moved: {moved:?}\n{said}");
     assert!(!said.contains("bodies with no model in the picture"), "a knocked body has no prop in the picture:\n{said}");
 }
+
+#[test]
+fn a_woken_truck_is_drawn_where_its_body_is() {
+    // free06's company truck `Car22` (a `HasPhysics` car) drives west along world z 2960 about
+    // 28 ft/s: at x 4145 a second in, 4033 at 5 s. The bike rides east at it on the gas from the
+    // start and strikes it head on, which wakes it; 10 s, so it is not yet put back (`ResetTime`,
+    // 10 s after it comes to rest).
+    let Some(said) = ride_tape("3950,2960,90", 300, tape(0, 300)) else { return };
+    let woken: Vec<&str> = said.lines().filter_map(|l| l.strip_prefix("woken car: ")).collect();
+    let cars = said.lines().find(|l| l.starts_with("physics cars: ")).unwrap_or("no physics cars line");
+    assert!(!woken.is_empty(), "no truck woke; {cars}:\n{said}");
+    for w in &woken {
+        eprintln!("woken car: {w}");
+        // `<model> body x,z drawn x,z`
+        let words: Vec<&str> = w.split_whitespace().collect();
+        let xz = |s: &str| -> [f32; 2] {
+            let v: Vec<f32> = s.split(',').map(|n| n.parse().expect("a number")).collect();
+            [v[0], v[1]]
+        };
+        let (body, drawn) = (xz(words[2]), xz(words[4]));
+        // Blended from the tick before at most: a tick of a truck's slide.
+        let off = (body[0] - drawn[0]).hypot(body[1] - drawn[1]);
+        assert!(off < 3.0, "{w}: drawn {off:.1} ft from its body:\n{said}");
+    }
+}
+

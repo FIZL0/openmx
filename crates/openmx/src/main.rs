@@ -5716,6 +5716,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         None => traffic.sim(&archives),
     };
     cars.toys = animated.sim.clone();
+    // Where each tile's cars begin among the simulation's, for the picture to draw a woken one where
+    // its body is (MD153a).
+    let car_firsts = world_moving.as_ref().map(|m| m.car_firsts.clone()).unwrap_or_default();
     if world_moving.is_some() {
         println!("world moving: {} cars, {} toys, {} prop collections, {} bodies", cars.cars.len(), cars.toys.specs.len(), cars.props.collections.len(), cars.props.nodes().count());
     }
@@ -6342,7 +6345,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             })
         }
     };
-    Ok(Ok((mods, disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, kit, table, place, look, ground, sky, assets, vehicle, tables, phy_bytes, phy, other_phys, stock_phys, bike_words, other_riders, riders, body, ragdolled, chassis, layout, cpresets, camera, lot, flight_for, plane_files, online_bays, online_bodies, plane_starts, stock_plane, garage, plane_presets, plane_camera, plane_drawn, plane_fx, fx_sheet, soft_sheet, sim, traffic, animated, cars, traffic_time, traffic_before, traffic_at, rider, others, head, recorder, pre_chunks, at, car_shift, pack_clips, stunts, race_start, stadium_flashes, gate_swing)))
+    Ok(Ok((mods, disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, kit, table, place, look, ground, sky, assets, vehicle, tables, phy_bytes, phy, other_phys, stock_phys, bike_words, other_riders, riders, body, ragdolled, chassis, layout, cpresets, camera, lot, flight_for, plane_files, online_bays, online_bodies, plane_starts, stock_plane, garage, plane_presets, plane_camera, plane_drawn, plane_fx, fx_sheet, soft_sheet, sim, traffic, animated, cars, traffic_time, traffic_before, traffic_at, rider, others, head, recorder, pre_chunks, at, car_shift, pack_clips, stunts, race_start, stadium_flashes, gate_swing, car_firsts)))
         }
     };
     let mut load_screen = LoadScreen::default();
@@ -6351,7 +6354,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         None if std::env::var_os(loading::THREADED).is_some() => loading::on_worker(progress, build, || Ok(None::<Leave>))?.unwrap_or_else(Err),
         None => build()?,
     };
-    let (mut mods, mut disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, mut kit, table, place, mut look, ground, sky, mut assets, vehicle, tables, phy_bytes, phy, other_phys, mut stock_phys, mut bike_words, other_riders, riders, body, ragdolled, chassis, mut layout, cpresets, camera, mut lot, flight_for, plane_files, online_bays, online_bodies, plane_starts, mut stock_plane, garage, plane_presets, plane_camera, mut plane_drawn, mut plane_fx, mut fx_sheet, soft_sheet, mut sim, traffic, animated, cars, mut traffic_time, mut traffic_before, mut traffic_at, rider, others, mut head, recorder, pre_chunks, at, car_shift, pack_clips, stunts, race_start, mut stadium_flashes, mut gate_swing) = match built {
+    let (mut mods, mut disc, track_member, world_mod, modded, stem, bike_member, second, rider_member, archives, mut kit, table, place, mut look, ground, sky, mut assets, vehicle, tables, phy_bytes, phy, other_phys, mut stock_phys, mut bike_words, other_riders, riders, body, ragdolled, chassis, mut layout, cpresets, camera, mut lot, flight_for, plane_files, online_bays, online_bodies, plane_starts, mut stock_plane, garage, plane_presets, plane_camera, mut plane_drawn, mut plane_fx, mut fx_sheet, soft_sheet, mut sim, traffic, animated, cars, mut traffic_time, mut traffic_before, mut traffic_at, rider, others, mut head, recorder, pre_chunks, at, car_shift, pack_clips, stunts, race_start, mut stadium_flashes, mut gate_swing, car_firsts) = match built {
         Ok(built) => built,
         Err(leave) => return Ok(leave),
     };
@@ -10651,8 +10654,13 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             let eyes: Vec<[f32; 2]> = cameras.iter().map(|c| [c.eye.x, c.eye.z]).collect();
             car_pictures += 1;
             traffic_pose.clear();
+            // A woken `HasPhysics` car where the first seat's body has it (MD153a), blended as the
+            // track's cars are.
+            let driven = &world.seats[0].sim.traffic;
             for d in dressed.iter_mut().filter(|d| !d.traffic.cars.is_empty() && !unshown.iter().any(|u| u.0 == d.index)) {
-                traffic_at.extend(d.cars_near(shown, &eyes, car_pictures, &mut |p, by| car_ground(place, p, by)));
+                let (index, count) = (d.index, d.traffic.cars.len());
+                let woken = |k: usize| world_dress::woken_pose(driven, &cars_before, &car_firsts, index, count, k, blend.0);
+                traffic_at.extend(d.cars_near(shown, &eyes, car_pictures, &mut |p, by| car_ground(place, p, by), &woken));
                 traffic_pose.extend(d.wheel_poses(shown, &eyes, &assets));
             }
         }
@@ -11978,6 +11986,32 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         if !props_rest.is_empty() {
             println!("props moved: {} of {} bodies", moved.len(), props_rest.len());
             moved.iter().for_each(|m| println!("prop moved: {m}"));
+        }
+        // And a world's woken `HasPhysics` cars, where the last picture drew each beside where its
+        // body is (MD153a), after where every `HasPhysics` car ended.
+        if world_mod.is_some() {
+            let sim = &world.seats[0].sim.traffic;
+            let at: Vec<String> = sim
+                .physics
+                .iter()
+                .zip(&sim.cars)
+                .enumerate()
+                .filter(|(_, (p, _))| p.is_some())
+                .map(|(g, (_, c))| format!("{g} at {:.0},{:.0}", c.pose.0[3].x(), c.pose.0[3].z()))
+                .collect();
+            println!("physics cars: {}", at.join("; "));
+        }
+        for d in &dressed {
+            let Some(&Some((first, count))) = car_firsts.get(d.index) else { continue };
+            for (k, posed) in d.posed.iter().enumerate().take(count) {
+                let sim = &world.seats[0].sim.traffic;
+                if !sim.physics.get(first + k).is_some_and(|p| p.as_ref().is_some_and(|p| p.physical)) {
+                    continue;
+                }
+                let body = sim.cars[first + k].pose.0[3];
+                let drawn = posed.map(|m| format!("{:.1},{:.1}", m.0[3][0], m.0[3][2])).unwrap_or_else(|| "nowhere".into());
+                println!("woken car: {}{} body {:.1},{:.1} drawn {drawn}", d.prefix, d.traffic.cars[k].0.stem(), body.x(), body.z());
+            }
         }
         // And a world's ground there as the GPU holds it, to compare a streamed ground with the
         // whole one (MD17).
