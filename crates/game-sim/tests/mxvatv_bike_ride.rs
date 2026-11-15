@@ -8106,6 +8106,21 @@ fn rand_state(ee: &Ee) -> u64 {
 fn noise_at(ee: &mut Ee, noise: &mut Option<SmoothNoise>, t: F) -> F {
     if ee.u32_at(NOISE_UNBUILT) != 0 {
         ee.set_u32(NOISE_UNBUILT, 0);
+        if in_rust("noise build") {
+            // The port's build off the same generator: the permutation and the gradients written
+            // where the original keeps them (each copied past the end); its 2-D and 3-D tables are
+            // left unwritten, and the read watch holds that the ride never reads them.
+            let mut rng = game_sim::rng::Rng::from_state(rand_state(ee));
+            let built = SmoothNoise::build(&mut rng);
+            ee.write(ee.u32_at(RAND_BLOCK) + 0xa8, 8, u128::from(rng.state()));
+            for k in 0..2 * game_sim::noise::KNOTS + 2 {
+                let i = k % game_sim::noise::KNOTS;
+                ee.set_u32(NOISE_PERM + 4 * k as u32, u32::from(built.perm[i]));
+                ee.set_u32(NOISE_G1 + 4 * k as u32, built.g1[i].to_bits());
+            }
+            *noise = Some(built);
+            return noise_at(ee, noise, t);
+        }
         ee.set(28, GP);
         ee.call(NOISE_BUILD, &[], &[], BUDGET);
         *noise = None;
@@ -9960,6 +9975,7 @@ fn replay_in_pure_rust(name: &str) -> Option<(Vec<bool>, Vec<String>, BTreeMap<S
             "paused",
             "rumble dropped",
             "object switches",
+            "noise build",
         ],
     );
     let census = INTERPRETED.with(|m| std::mem::take(&mut *m.borrow_mut()));
