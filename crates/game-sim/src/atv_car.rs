@@ -385,8 +385,23 @@ fn hand_off(t: &mut [Tire; 4]) {
 /// **The car's PostProcess**: once a frame, after the substeps.
 #[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's `c.ole.s` branched on false
 pub fn post_process(car: &mut Car, body: &mut Body, dt: F, table: &AcosTable, s: &mut impl Steps) {
+    post_process_on(car, body, dt, table, s, false);
+}
+
+/// **Untamed's car PostProcess** (MD161, SLUS-21701's): [`post_process`] with the yaw rate held by
+/// two compares ([`hold_yaw_rate_untamed`]).
+pub fn post_process_untamed(car: &mut Car, body: &mut Body, dt: F, table: &AcosTable, s: &mut impl Steps) {
+    post_process_on(car, body, dt, table, s, true);
+}
+
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's `c.ole.s` branched on false
+fn post_process_on(car: &mut Car, body: &mut Body, dt: F, table: &AcosTable, s: &mut impl Steps, untamed: bool) {
     s.call(Call::VehiclePost(dt), car, body);
-    hold_yaw_rate(&mut body.rates, car.yaw_rate_limit);
+    if untamed {
+        hold_yaw_rate_untamed(&mut body.rates, car.yaw_rate_limit);
+    } else {
+        hold_yaw_rate(&mut body.rates, car.yaw_rate_limit);
+    }
     s.call(Call::Shift(dt), car, body);
     s.call(Call::WreckTimer(dt), car, body);
     car.was_grounded = car.grounded;
@@ -437,6 +452,20 @@ fn hold_yaw_rate(rates: &mut Vf, limit: F) {
     if !(y.abs() <= limit) {
         let sign = if y < 0.0 { -1 } else { 1 };
         rates.0[1] = (limit * F::from(sign)).0;
+    }
+}
+
+/// Untamed's hold of the yaw rate (MD161): over `limit` (or not a number) it is `limit`, else under
+/// `-limit` it is `-limit`, the limit's own bits either way. [`hold_yaw_rate`]'s product by the sign
+/// gives the same for any normal positive limit; they part on a denormal or negative one.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's `c.ole.s` branched on false
+pub fn hold_yaw_rate_untamed(rates: &mut Vf, limit: F) {
+    // The compares read a denormal as 0 (`F`'s order is plain IEEE); the stores keep the bits.
+    let (y, l) = (F::from_bits(rates.y().to_bits()), F::from_bits(limit.to_bits()));
+    if !(y <= l) {
+        rates.0[1] = limit.0;
+    } else if y < -l {
+        rates.0[1] = (-limit).0;
     }
 }
 
@@ -718,6 +747,8 @@ struct Frame<'a, S> {
     body: &'a mut Body,
     table: &'a AcosTable,
     s: &'a mut S,
+    /// The body's integrate is Untamed's ([`Body::integrate_untamed`]).
+    untamed: bool,
 }
 
 impl<S: Steps> crate::biplane::Dynamics for Frame<'_, S> {
@@ -734,14 +765,18 @@ impl<S: Steps> crate::biplane::Dynamics for Frame<'_, S> {
         self.body.enabled
     }
     fn integrate(&mut self, _: i32, h: F) {
-        self.body.integrate(h);
+        if self.untamed {
+            self.body.integrate_untamed(h);
+        } else {
+            self.body.integrate(h);
+        }
     }
     fn end_substep(&mut self, _: i32) {
         self.body.end_substep();
     }
     fn constrain(&mut self, _: i32, _: bool) {}
     fn post(&mut self, _: i32, dt: F) {
-        post_process(self.car, self.body, dt, self.table, self.s);
+        post_process_on(self.car, self.body, dt, self.table, self.s, self.untamed);
     }
 }
 
@@ -754,7 +789,15 @@ impl<S: Steps> crate::biplane::Dynamics for Frame<'_, S> {
 /// In the game the world's PreProcess list holds the other vehicles' listeners too (the second car of
 /// the class and two more), run after the car's own; they are not part of this.
 pub fn frame(world: &crate::biplane::World, car: &mut Car, body: &mut Body, dt: F, table: &AcosTable, s: &mut impl Steps) {
-    world.step(dt, &mut Frame { car, body, table, s });
+    world.step(dt, &mut Frame { car, body, table, s, untamed: false });
+}
+
+/// **MX vs. ATV Untamed's car frame** (MD161): [`frame`] with the body's integrate Untamed's
+/// ([`Body::integrate_untamed`], the angular damping per time). The listeners are [`frame`]'s: what
+/// Untamed changes in them is switched by [`Keys::untamed`], [`Vehicle::untamed`] and
+/// [`Update::untamed`]; the PostProcess's yaw hold is [`post_process_untamed`]'s.
+pub fn frame_untamed(world: &crate::biplane::World, car: &mut Car, body: &mut Body, dt: F, table: &AcosTable, s: &mut impl Steps) {
+    world.step(dt, &mut Frame { car, body, table, s, untamed: true });
 }
 
 // --- MX Unleashed's pieces (MD106a) ----------------------------------------------------------------
@@ -2787,7 +2830,9 @@ pub struct Load {
     pub points: [Vf; 4],
     /// Driven by MX vs. ATV Untamed's (SLUS-21701) car step (MD81d): the keys' preload cue, the
     /// vehicle's force and the update's hazard clock are Untamed's ([`Keys::untamed`],
-    /// [`Vehicle::untamed`], [`Update::untamed`]). Off (as read), SLUS-21104's.
+    /// [`Vehicle::untamed`], [`Update::untamed`]); with it the ride's frame is [`frame_untamed`] (MD161:
+    /// the body's per-time angular damping, the PostProcess's yaw hold by compares). Off (as read),
+    /// SLUS-21104's.
     pub untamed: bool,
 }
 
@@ -3214,7 +3259,11 @@ impl Ride {
         {
             let mut back = PutBack { pieces: &mut pieces, spot: self.spot };
             let mut own = Own { v: &mut self.vehicle, rest: &mut back };
-            frame(&WORLD, &mut self.car, &mut self.body, dt, &self.table, &mut own);
+            if self.update.untamed {
+                frame_untamed(&WORLD, &mut self.car, &mut self.body, dt, &self.table, &mut own);
+            } else {
+                frame(&WORLD, &mut self.car, &mut self.body, dt, &self.table, &mut own);
+            }
             // The update reads the tires' surfaces and the node's axes as the frame left them.
             self.update.tire_surface = self.car.tires.map(|t| t.surface & 15);
             let node = own.v.scene.nodes[0].world;

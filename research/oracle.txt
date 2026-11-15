@@ -12517,3 +12517,12 @@ atv_out_of_bounds           atv 0x004a4f20 (vt +0x16c, the bike in a0): body pos
 #   (a flip or 360 holds while +0x1194 / +0x11d0, else it ends at the row's Duration +0x48), restart +0x1650
 #   cleared by atv_bike_vehicle_update 0x004e1b90. The rider's motion-set row and lean words (rider anim
 #   +0x310..+0x344) have no reader found yet: the port keeps its own choice (MD138a's follow-up).
+
+# MD161 — MX vs. ATV Untamed's (SLUS-21701) monster-truck changes ported behind atv_car::Load::untamed, proved by
+# crates/game-sim/tests/untamed_truck.rs off context/untamed/ram/nat_or.bin. Comment rows only, as # MD81c.
+# Journal: research/journal/2026-11-14-md161-untamed-monster-pack.
+#   body integrate 0x004bc670 (body vtable 0x003ef6a0), end substep 0x004c22b0, called on a 0x230-byte body at
+#   0x01c02000: damping +0x150..+0x15c, rates +0x1d0, accel +0x1e0, clamps +0x210. On the raised path the
+#   damping vector is built at sp-52 below the caller's sp and its w is never written: the rates' w takes it.
+#   car PostProcess 0x004e9790 run as a stretch on a car at 0x01c00000 (body pointer +0xe8, yaw limit +0x123c),
+#   vehicle post 0x004c8b20 hooked to return, shift 0x004d6340 hooked to end the call.

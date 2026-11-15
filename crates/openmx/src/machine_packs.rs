@@ -110,6 +110,19 @@ pub struct CarFiles {
     pub phy: String,
     pub psg: String,
     pub col: String,
+    /// `step` (MD161): whose car step it rides on: [`UNTAMED_STEP`] for MX vs. ATV Untamed's
+    /// (SLUS-21701, `game_sim::atv_car::Load::untamed`), empty for MX vs. ATV Unleashed's.
+    pub step: String,
+}
+
+/// A car's `step` word for MX vs. ATV Untamed's car step (MD161).
+pub const UNTAMED_STEP: &str = "untamed";
+
+impl CarFiles {
+    /// It rides on MX vs. ATV Untamed's car step.
+    pub fn untamed(&self) -> bool {
+        self.step.eq_ignore_ascii_case(UNTAMED_STEP)
+    }
 }
 
 /// One flier's files, `mod.json`'s `fliers.<machine>`.
@@ -221,7 +234,7 @@ pub fn read(folder: &Path) -> Result<Option<Pack>, String> {
     let mut cars = Vec::new();
     if let Some(Json::Arr(list)) = json.get("cars") {
         for c in list {
-            cars.push(CarFiles { car: s(c.get("car")), phy: s(c.get("phy")), psg: s(c.get("psg")), col: s(c.get("col")) });
+            cars.push(CarFiles { car: s(c.get("car")), phy: s(c.get("phy")), psg: s(c.get("psg")), col: s(c.get("col")), step: s(c.get("step")) });
         }
     }
     if builds.is_empty() && skins.is_empty() && cars.is_empty() {

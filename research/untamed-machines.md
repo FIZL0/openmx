@@ -301,14 +301,14 @@ slots from about `+0x45c` on are 8 lower (`+0x488` → `+0x480`, `+0x47c` → `+
 | truck PreProcess, Force, travel centre of gravity, anti-slide, launch, aero, PostProcess (the truck's); engine, shift; tire step (and a part), tire clear, probe; wreck clock, wreck and unwreck, respawn; ghost step, base update; the body's linear half, end of substep, local force/moment, add force, set centre of gravity; ground query; node local and position | the same code, fields moved | — |
 | controls, two tire-step parts, contact sort, vehicle post (and its placement), world step, add moment | scheduling, registers, `lhu` counts | — |
 | loaders (car, base, truck) | the same 239, 6 and 4 keys with the same float defaults; the reader is handed as file+60 | — |
-| PostProcess (the car's) | the yaw clamp rewritten: SLUS-21104's `!(abs(r) <= L) → r = L·sign(r)` became `r > L → L`, `r < -L → -L`. The same for any normal `L` (and a NaN `r` is kept by both); they part on a denormal `L` only | not ported |
-| **input step** | reads the controls block (stick bytes, per-command strengths) in place of the pad record; the pad word is player 0's lookup of the pad command; every command lookup gains a "−1 = unbound → not pressed" guard; the hand brake is the next command id and tests `<= 0`; the clutch is `s <= 0 ? 0 : 1` (SLUS-21104's `s == 0 ? 0 : 1`: they part on a negative strength only) | not ported (the shell's controls already hand the port strengths, not pad bits) |
+| PostProcess (the car's) | the yaw clamp rewritten: SLUS-21104's `!(abs(r) <= L) → r = L·sign(r)` became `r > L → L`, `r < -L → -L`. The same for any normal `L` (and a NaN `r` is kept by both); they part on a denormal `L` only | `atv_car::post_process_untamed` (MD161, proved by `tests/untamed_truck.rs` as a stretch) |
+| **input step** | reads the controls block (stick bytes, per-command strengths) in place of the pad record; the pad word is player 0's lookup of the pad command; every command lookup gains a "−1 = unbound → not pressed" guard; the hand brake is the next command id and tests `<= 0`; the clutch is `s <= 0 ? 0 : 1` (SLUS-21104's `s == 0 ? 0 : 1`: they part on a negative strength only) | the clutch: `atv_car::input_untamed` (MD81d); the guards need no code (the shell hands the port strengths, an unbound command's is 0); the hand brake is the port's `HAND_BRAKE` tested `<= 0` either way |
 | update (the car's) | the hazard clock called straight with the grounded word (any tire's `+0xa4`), as MD81b's quad | `handling::untamed::stuck` (MD81b) |
 | class update (the truck's) | the odometer's clause as MD81b's distance (`!(speed <= 0)`): parts only on a `-0` odometer, which never happens | not ported |
 | vehicle force | after the gravity, a second body add of `(0, 0, 0, 0)`: changes nothing but a `-0` or denormal component | not ported |
-| preload | the state logic is the same; the cue posted while firing, as the bike's (MD93). The truck's `[Preload]` is off, but the cue still posts when it fires with timer 0: only the port's `cued` latch | not ported |
+| preload | the state logic is the same; the cue posted while firing, as the bike's (MD93). The truck's `[Preload]` is off, but the cue still posts when it fires with timer 0: only the port's `cued` latch | `Keys::untamed` (MD81d) |
 | class step (the truck's) | model posing (scene-node calls) only; Untamed adds four node calls. Not ported for SLUS-21104 either | — |
-| **body integrate** (every machine's rigid body) | the angular damping is made per-time: with `h > 0`, `k = 0.333/h` (the literal is `0x3eaa7efa`, 0.333f); if `abs(k − 1) > 0.1`, each damping lane becomes `powf(d, k)`, else `d` as is; with `h <= 0` a rodata vector. Then the same `rates = d·rates + h·accel` and per-axis clamps as SLUS-21104's. The quaternion step works on a copy before normalising (the same values) | not ported |
+| **body integrate** (every machine's rigid body) | the angular damping is made per-time: with `h > 0`, `k = 0.333/h` (the literal is `0x3eaa7efa`, 0.333f); if `abs(k − 1) > 0.1`, each damping lane becomes `powf(d, k)`, else `d` as is; with `h <= 0` a rodata vector. Then the same `rates = d·rates + h·accel` and per-axis clamps as SLUS-21104's. The quaternion step works on a copy before normalising (the same values) | `atv_body::Body::integrate_untamed` on the car ride (MD161, proved by `tests/untamed_truck.rs`); not yet on Untamed's bike and ATV rides |
 
 **The body-integrate change is not on a plain truck ride.** The truck's `DefaultAngularRateDamping` and
 `ImpactAngularRateDamping` are `1, 1, 1` (unchanged from SLUS-21104's file) and fdlibm's `powf(1, y)` is
@@ -322,6 +322,17 @@ tests read `< 0x00800000`, as SLUS-21104's) but was not proved against `ps2_floa
 and seven truck drives (research/journal/2026-11-14-md160-untamed-monster-capture). Its wreck drive shows
 the powf damping live: ×0.85219 per tick in the air from a stored 0.999. The port of the four live changes (input guards,
 clamp form, preload cue, body damping) behind an Untamed switch, and the openmx-mods pack are follow-ups.
+
+**Ported (MD161).** `atv_car::Load::untamed` now also takes the body's per-time damping
+(`atv_body::per_time_damping`, `Body::integrate_untamed`) and the PostProcess's yaw hold by compares
+(`atv_car::hold_yaw_rate_untamed`) through `atv_car::frame_untamed`. `tests/untamed_truck.rs` proves both
+against the original over the RAM image: the integrate and end-of-substep over 20,000 bodies (damping lanes
+1, 0.999, 0, `-0`, denormal, above 1, negative; `h` at 1/120, 1/115, 1/60, 1/240, inside and at the edges of
+the `abs(k − 1) <= 0.1` band, 0, `-0`, negative), which proves Untamed's powf along the way; the yaw hold as a
+stretch of the PostProcess (the vehicle post stubbed). The one lane not 1:1: on the raised path the
+original's `w` is a stack word its integrate never writes; the port keeps the damping's `w`. A machine
+pack's car entry with `"step": "untamed"` rides on it (`--mxvatv-car CAR@PACK`). The replay of MD160's
+drives and the pack itself are follow-ups (see `plan/`).
 The truck's `.phy` changes themselves (Weight, GravityScale, FrictionZone1, `[Preload]` off) need no code:
 the loaders read the same keys.
 
@@ -350,12 +361,12 @@ in `research/oracle.txt # MD81d`.
 | controls, travel cofg, PreProcess, aero (rodata equal), anti-slide, Force; tire step and its parts, probe, tire clear; engine, shift; vehicle pre/post; ground query | the same, fields moved (register renames, frame shifts, pointer reloads kept in registers) | — |
 | contact sort | the count read `lhu` | — |
 | buggy/baja class update | the distance clause `!(d <= 0)` (as MD81b's quad; parts only on a `-0` distance) and an assert's line | not ported |
-| PostProcess | the yaw clamp by two compares (as MD81c: the same for any normal limit) | not ported |
+| PostProcess | the yaw clamp by two compares (as MD81c: the same for any normal limit) | `Load::untamed` → `post_process_untamed` (MD161) |
 | **preload** | the cue posted while the push is on (`+0xc44`), not while its timer is above 0 | `Keys::untamed`, proved |
 | **vehicle force** | a second body add-force of a zero quad after the gravity | `Vehicle::untamed`, proved |
 | **update** | the hazard clock called straight with the grounded word (any tire's `+0xa4`) | `Update::untamed` → `handling::untamed::stuck` (MD81b) |
 | **input step** | reworked (MD81c's row): the clutch `<= 0 ? 0 : 1`, unbound commands read as not pressed, the controls block's stick and strengths, the pad word off the preload command | the clutch only: `atv_car::input_untamed` |
-| body integrate | MD81c's per-time angular damping (`powf(d, 0.333/h)`) | not ported: the baja's damping keys are `1, 1, 1` in both files, and `powf(1, y)` is 1 |
+| body integrate | MD81c's per-time angular damping (`powf(d, 0.333/h)`) | `Load::untamed` → `integrate_untamed` (MD161); on a plain baja ride the keys are `1, 1, 1` in both files and `powf(1, y)` is 1 |
 
 **Where the preload parts.** With `PreloadTime` 0 (Untamed's baja has `[Preload]` off) a fired preload
 is active with its timer 0: Untamed posts the cue, SLUS-21104 does not. And while armed the timer winds

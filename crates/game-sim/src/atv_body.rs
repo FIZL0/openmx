@@ -123,6 +123,34 @@ fn spin(q: Vf, w: Vf) -> Vf {
     Vf::new(v.x(), v.y(), v.z(), s)
 }
 
+/// The time Untamed's angular damping is a share over: 0.333 s (the literal's bits; not a third).
+const DAMPING_TIME: u32 = 0x3eaa_7efa;
+
+/// How far the exponent may be off 1 before Untamed raises the damping to it.
+const DAMPING_NEAR: u32 = 0x3dcc_cccd;
+
+/// **Untamed's angular damping for a substep of `h`**: with `h` over 0, `k = 0.333 / h`; when `|k - 1|`
+/// is over 0.1 (or not a number) each lane is `powf(d, k)` (fdlibm's), else `d` as it is. With `h` 0
+/// or under, `(1, 1, 1, 1)`.
+///
+/// The original raises the three lanes into a stack quadword whose `w` it never writes, and that `w`
+/// ends up in the rates' `w`; here it is the damping's `w`, as on the other two paths' first (the
+/// live game's rates keep a `w` of 1, the damping's).
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's `c.ole.s` branched on false
+pub fn per_time_damping(d: Vf, h: F) -> Vf {
+    // A denormal `h` reads as 0, as the FPU's compare and divide read it.
+    let h = F::from_bits(h.to_bits());
+    if h <= 0.0 {
+        return Vf::splat(1.0);
+    }
+    let k = F(f32::from_bits(DAMPING_TIME)) / h;
+    if (k - F::ONE).abs() <= F(f32::from_bits(DAMPING_NEAR)) {
+        return d;
+    }
+    let lane = |x: f32| ps2_float::libm::powf(x, k.0);
+    Vf::new(lane(d.x()), lane(d.y()), lane(d.z()), d.w())
+}
+
 impl Body {
     /// The linear half of a substep. The position is remembered first, even when the body is pinned.
     ///
@@ -158,8 +186,20 @@ impl Body {
     /// second-order step `q' = q ⊗ (rates, 0) / 2`, `q'' = q ⊗ (alpha, 0) / 2 - q |q'|^2`,
     /// `q += q' h + ((q''/2) h) h` over all four lanes, then back onto the unit sphere. The rates take
     /// `ang_damping * rates + alpha h`, each then held within its [`Body::max_rates`] either way.
-    #[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's `c.ole.s` branched on false
     pub fn integrate(&mut self, h: F) {
+        self.integrate_on(h, false);
+    }
+
+    /// **MX vs. ATV Untamed's integrate** (MD161, SLUS-21701's): [`Body::integrate`] with the angular
+    /// damping made per time ([`per_time_damping`]): `powf(d, 0.333/h)` per lane where that exponent
+    /// is more than a tenth off 1, so a lane under 1 keeps the same share of the rates over 0.333 s
+    /// whatever the substep.
+    pub fn integrate_untamed(&mut self, h: F) {
+        self.integrate_on(h, true);
+    }
+
+    #[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's `c.ole.s` branched on false
+    fn integrate_on(&mut self, h: F, untamed: bool) {
         self.advance(h);
         self.last_quat = self.quat;
         if self.inv_inertia.to_bits() == CLEAR.to_bits() {
@@ -181,7 +221,8 @@ impl Body {
         let turn = d.mul(Vf::splat(h.0));
         self.quat = normalize(q.add(turn).add(curve));
         let push = scale(alpha, h);
-        let kept = mul_xyz(self.ang_damping, self.rates);
+        let damping = if untamed { per_time_damping(self.ang_damping, h) } else { self.ang_damping };
+        let kept = mul_xyz(damping, self.rates);
         self.rates = add_xyz(kept, push);
         for k in 0..3 {
             let (r, m) = (F(self.rates[k]), self.max_rates[k]);

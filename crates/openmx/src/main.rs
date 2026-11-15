@@ -13258,8 +13258,16 @@ fn ride_mxvatv_car(args: &Args) -> Option<vehicle::MxvatvCarRide> {
         return None;
     };
     let packs = machine_packs::find(&dir).0;
-    let Some(pack) = packs.iter().find(|p| !p.cars.is_empty()) else {
-        println!("mxvatv car: {want} picked, but {} has no car pack", dir.join(machine_packs::MACHINES_DIR).display());
+    // `CAR@PACK` (MD161) picks the pack too, as an Untamed car pack's; a bare car is off the first
+    // pack listing it on MX vs. ATV Unleashed's step, else the first car pack.
+    let (want, from) = want.split_once('@').map_or((want.as_str(), None), |(c, p)| (c, Some(p)));
+    let has = |p: &&machine_packs::Pack, untamed: bool| p.cars.iter().any(|c| c.car.eq_ignore_ascii_case(want) && c.untamed() == untamed);
+    let pack = match from {
+        Some(id) => packs.iter().find(|p| p.id == id && !p.cars.is_empty()),
+        None => packs.iter().find(|p| has(p, false)).or_else(|| packs.iter().find(|p| !p.cars.is_empty())),
+    };
+    let Some(pack) = pack else {
+        println!("mxvatv car: {want} picked, but {} has no car pack{}", dir.join(machine_packs::MACHINES_DIR).display(), from.map_or(String::new(), |id| format!(" {id}")));
         return None;
     };
     let Some(c) = pack.cars.iter().find(|c| c.car.eq_ignore_ascii_case(want)) else {
@@ -13268,7 +13276,9 @@ fn ride_mxvatv_car(args: &Args) -> Option<vehicle::MxvatvCarRide> {
     };
     match vehicle::MxvatvCarRide::read(&pack.id, &c.car, &c.phy, &c.psg, &mut |n| pack.files.read(&n.replace('/', "\\")).ok()) {
         Ok(car) => {
-            println!("mxvatv car: {} ({}) off {} (switch from the pause)", car.label(), c.car, pack.id);
+            let car = if c.untamed() { car.on_untamed_step() } else { car };
+            let step = if car.untamed() { ", on MX vs. ATV Untamed's step" } else { "" };
+            println!("mxvatv car: {} ({}) off {}{step} (switch from the pause)", car.label(), c.car, pack.id);
             Some(car)
         }
         Err(e) => {
