@@ -1025,3 +1025,263 @@ pub fn other(m: &mut impl Emitters, o: u32, dt: F) -> u32 {
     m.out(Call::Send { batch, count: n });
     1
 }
+
+/// The batch's send words: its clock (`+0x54`, the particles' ages are against it), a forced-only
+/// switch (`+0x74`), its slots' count (`+0x68`), whether a full slot skips the stale ones (`+0x78`,
+/// 0 skips), the first stale age and the step past each (`+0x7c`, `+0x80`), the looks it has
+/// (`+0x98`), its slots (`+0x390`, [`SLOT_SIZE`] apart), its looks' table (`+0x3a0`, entries
+/// [`LOOK_SIZE`] apart from `+0x660`) and how many it holds (`+0x3a8`, no more than [`LOOKS`]), each
+/// slot's stamp (`+0x3b8`, words), the slot it fills (`+0x3bc`) and how full it is (`+0x3c0`, no
+/// more than [`SLOT_ROOM`]). Each look's last use is at `+0x2c8` (words) and its scales at `+0xa0`
+/// (pairs, 12 bytes apart).
+pub const BATCH_CLOCK: u32 = 0x54;
+pub const BATCH_FORCED: u32 = 0x74;
+pub const BATCH_SLOTS: u32 = 0x68;
+pub const BATCH_KEEP_STALE: u32 = 0x78;
+pub const BATCH_STALE: u32 = 0x7c;
+pub const BATCH_STALE_STEP: u32 = 0x80;
+pub const BATCH_LOOKS_HAD: u32 = 0x98;
+pub const BATCH_SLOT_AT: u32 = 0x390;
+pub const BATCH_LOOK_TABLE: u32 = 0x3a0;
+pub const BATCH_LOOK_COUNT: u32 = 0x3a8;
+pub const BATCH_STAMPS: u32 = 0x3b8;
+pub const BATCH_SLOT: u32 = 0x3bc;
+pub const BATCH_FILL: u32 = 0x3c0;
+pub const BATCH_LOOK_USED: u32 = 0x2c8;
+pub const BATCH_LOOK_SCALES: u32 = 0xa0;
+pub const SLOT_SIZE: u32 = 0x210;
+pub const SLOT_ROOM: i32 = 12;
+pub const LOOK_SIZE: u32 = 0x30;
+pub const LOOKS: i32 = 46;
+/// The four tolerances a batch's look must be within of a table entry's (scales, half sizes, tint,
+/// the pair of words), and the age past which a look is stale when the table is full.
+pub const LOOK_NEAR: [u32; 4] = [0x0052_5488, 0x0052_5490, 0x0052_5498, 0x0052_54a0];
+pub const LOOK_STALE: u32 = 0x0052_54a8;
+
+/// **The other kind's batch sent** ([`Call::Send`]'s receiver): with the batch on, the game not
+/// paused and the batch not forced-only (or `force` set), its look picked ([`batch_look`]) and
+/// `count` of its particles from `start` packed into its slots, twelve to a slot ([`batch_fill`]),
+/// each slot's stamp the latest age among them; a full slot moves on to the next, past the stale
+/// ones. The batch's count is then 0. The original's fourth argument (a kind, 2) is read by nothing.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
+pub fn send(m: &mut impl Emitters, batch: u32, start: u32, count: u32, force: u32) {
+    if m.word(batch + BATCH_ON) == 0 {
+        return;
+    }
+    let game = m.word(GAME);
+    if byte(m, game + GAME_PAUSED) & 0x08 != 0 {
+        return;
+    }
+    if m.word(batch + BATCH_FORCED) != 0 && force == 0 {
+        return;
+    }
+    if count as i32 <= 0 {
+        return;
+    }
+    let look = batch_look(m, batch);
+    let (mut start, mut left) = (start as i32, count as i32);
+    while left > 0 {
+        let (from, had) = (start, left);
+        let slot = m.word(batch + BATCH_SLOT);
+        let at = m.word(batch + BATCH_SLOT_AT).wrapping_add(slot.wrapping_mul(SLOT_SIZE));
+        batch_fill(m, batch, at, &mut start, &mut left, look as u8);
+        let slot = m.word(batch + BATCH_SLOT);
+        let stamp = m.word(batch + BATCH_STAMPS).wrapping_add(slot << 2);
+        let clock = f(m, batch + BATCH_CLOCK);
+        let to = from.wrapping_add(had).wrapping_sub(left);
+        let mut top = F(fpu::sub(fpu::from_i32(m.word(stamp) as i32), clock.0));
+        if from < to {
+            let array = m.word(batch + BATCH_ARRAY);
+            for i in from..to {
+                let age = f(m, array.wrapping_add((i as u32) << 6) + 0x24);
+                if !(age <= top) {
+                    top = age;
+                }
+            }
+        }
+        m.set(stamp, fpu::to_i32(fpu::add(clock.0, top.0)) as u32);
+        if had == left || m.word(batch + BATCH_FILL) as i32 >= SLOT_ROOM {
+            batch_next_slot(m, batch);
+        }
+    }
+    m.set(batch + BATCH_COUNT, 0);
+}
+
+/// The slot after the full one (round its count); unless the batch keeps them, past every slot
+/// whose stamp less the stale age (stepping on with each) is still ahead of the clock. The new
+/// slot is empty.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
+fn batch_next_slot(m: &mut impl Emitters, batch: u32) {
+    let mut stale = f(m, batch + BATCH_STALE);
+    let s = m.word(batch + BATCH_SLOT).wrapping_add(1);
+    m.set(batch + BATCH_SLOT, s);
+    if !((m.word(batch + BATCH_SLOT) as i32) < m.word(batch + BATCH_SLOTS) as i32) {
+        m.set(batch + BATCH_SLOT, 0);
+    }
+    if m.word(batch + BATCH_KEEP_STALE) == 0 {
+        let mut i = 0i32;
+        while i < m.word(batch + BATCH_SLOTS) as i32 {
+            let slot = m.word(batch + BATCH_SLOT);
+            let clock = f(m, batch + BATCH_CLOCK);
+            let stamps = m.word(batch + BATCH_STAMPS);
+            let stamp = m.word(stamps.wrapping_add(slot << 2));
+            let ahead = F(fpu::sub(fpu::from_i32(stamp as i32), stale.0));
+            if ahead <= clock {
+                break;
+            }
+            m.set(batch + BATCH_SLOT, slot.wrapping_add(1));
+            if !((m.word(batch + BATCH_SLOT) as i32) < m.word(batch + BATCH_SLOTS) as i32) {
+                m.set(batch + BATCH_SLOT, 0);
+            }
+            i += 1;
+            stale = F(fpu::add(stale.0, f(m, batch + BATCH_STALE_STEP).0));
+        }
+    }
+    m.set(batch + BATCH_FILL, 0);
+}
+
+/// The batch's look: the first of its table's entries within [`LOOK_NEAR`] of the batch's
+/// scales (32767 over `+0x30`, `+0x34`), half sizes (`+0x10`..`+0x18`), tint (`+0x20`..`+0x28`) and
+/// pair (`+0x60`, and `+0x64` less it), its use stamped with the clock; else a new entry, or with
+/// the table full the stalest (the last past [`LOOK_STALE`], or older than every one before it),
+/// written from the batch.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
+fn batch_look(m: &mut impl Emitters, b: u32) -> i32 {
+    let one = 1.0f32;
+    let big = f32::from_bits(0x46ff_fe00);
+    let inv_x = fpu::div(one, f(m, b + 0x30).0);
+    let inv_y = fpu::div(one, f(m, b + 0x34).0);
+    let sx = F(fpu::mul(big, inv_x));
+    let sy = F(fpu::mul(big, inv_y));
+    let n = m.word(b + BATCH_LOOK_COUNT) as i32;
+    let mut found = -1;
+    if n > 0 {
+        let table = m.word(b + BATCH_LOOK_TABLE);
+        let [near_scale, near_size, near_tint, near_pair] = LOOK_NEAR.map(|at| f(m, at));
+        let half = F(0.5);
+        for k in 0..n {
+            let e = table.wrapping_add((k as u32).wrapping_mul(LOOK_SIZE)) + 0x660;
+            let s = b.wrapping_add((k as u32).wrapping_mul(12));
+            let off = |m: &mut _, a: u32, x: F| F(fpu::abs(fpu::sub(f(m, a).0, x.0)));
+            if !(off(m, s + BATCH_LOOK_SCALES, sx) < near_scale) || !(off(m, s + BATCH_LOOK_SCALES + 4, sy) < near_scale) {
+                continue;
+            }
+            let size_off = |m: &mut _, k: u32| F(fpu::abs(Acc::adda(0.0, f(m, e + 0x20 + k)).msub(half, f(m, b + 0x10 + k)).0));
+            if !(size_off(m, 0) < near_size) || !(size_off(m, 4) < near_size) || !(size_off(m, 8) < near_size) {
+                continue;
+            }
+            let tint_off = |m: &mut _, k: u32| F(fpu::abs(fpu::sub(f(m, e + k).0, f(m, b + 0x20 + k).0)));
+            if !(tint_off(m, 0) < near_tint) || !(tint_off(m, 4) < near_tint) || !(tint_off(m, 8) < near_tint) {
+                continue;
+            }
+            let lo = f(m, b + 0x60);
+            if !(F(fpu::abs(fpu::sub(f(m, e + 0x18).0, lo.0))) < near_pair) {
+                continue;
+            }
+            let span = fpu::sub(f(m, b + 0x64).0, lo.0);
+            if !(F(fpu::abs(fpu::sub(f(m, e + 0xc).0, span))) < near_pair) {
+                continue;
+            }
+            let clock = m.word(b + BATCH_CLOCK);
+            m.set(b + BATCH_LOOK_USED + 4 * k as u32, clock);
+            found = k;
+            break;
+        }
+    }
+    if found != -1 {
+        return found;
+    }
+    let n = m.word(b + BATCH_LOOK_COUNT) as i32;
+    let k = if n < LOOKS {
+        m.set(b + BATCH_LOOK_COUNT, (n + 1) as u32);
+        n
+    } else {
+        let mut oldest = f(m, b + BATCH_CLOCK);
+        let clock = oldest;
+        let stale = f(m, LOOK_STALE);
+        let mut k = 0;
+        for i in 0..n {
+            let used = f(m, b + BATCH_LOOK_USED + 4 * i as u32);
+            if !(F(fpu::sub(clock.0, used.0)) <= stale) {
+                k = i;
+            }
+            if used < oldest {
+                oldest = used;
+                k = i;
+            }
+        }
+        k
+    };
+    let table = m.word(b + BATCH_LOOK_TABLE);
+    let e = table.wrapping_add((k as u32).wrapping_mul(LOOK_SIZE)) + 0x660;
+    for i in [0, 4, 8] {
+        let w = m.word(b + 0x20 + i);
+        m.set(e + i, w);
+    }
+    let span = fpu::sub(f(m, b + 0x64).0, f(m, b + 0x60).0);
+    m.set(e + 0xc, span.to_bits());
+    m.set(e + 0x10, inv_x.to_bits());
+    m.set(e + 0x14, inv_y.to_bits());
+    let lo = m.word(b + 0x60);
+    m.set(e + 0x18, lo);
+    for i in [0, 4, 8] {
+        let h = fpu::mul(0.5, f(m, b + 0x10 + i).0);
+        m.set(e + 0x20 + i, h.to_bits());
+    }
+    m.set(e + 0x1c, (-1000.0f32).to_bits());
+    let s = b.wrapping_add((k as u32).wrapping_mul(12));
+    m.set(s + BATCH_LOOK_SCALES, sx.to_bits());
+    m.set(s + BATCH_LOOK_SCALES + 4, sy.to_bits());
+    k
+}
+
+/// Particles from `start` packed into the slot at `at` while it has room (counting from the slot's
+/// fill, but written from the slot's first place on) and `left` is not 0: per particle its place
+/// and age (`+0x20`, quads), its push by the batch's scales and its fade (`+0xf0`, four halves),
+/// its size, life, flags and look rate (`+0x160`, four halves), and the look, its byte (if the
+/// batch has that look, else 0), the batch's seat and 0 (`+0x1d0`, four bytes).
+fn batch_fill(m: &mut impl Emitters, b: u32, at: u32, start: &mut i32, left: &mut i32, look: u8) {
+    let mut n = m.word(b + BATCH_FILL) as i32;
+    let mut p = m.word(b + BATCH_ARRAY).wrapping_add((*start as u32) << 6);
+    let (mut place, mut push, mut size, mut tag) = (at + 0x20, at + 0xf0, at + 0x160, at + 0x1d0);
+    let cvt = |x: f32| fpu::to_i32(x) as u16;
+    while n < SLOT_ROOM && *left != 0 {
+        for k in [0, 4, 8] {
+            let w = m.word(p + k);
+            m.set(place + k, w);
+        }
+        let age = fpu::sub(f(m, b + BATCH_CLOCK).0, f(m, p + 0x20).0);
+        m.set(place + 12, age.to_bits());
+        place += 16;
+        for k in [0, 2, 4] {
+            let x = fpu::mul(f(m, p + 0x10 + 2 * k).0, f(m, b + 0x30 + 2 * k).0);
+            m.set_half(push + k, cvt(x));
+        }
+        let fade = f(m, p + 0x30).0;
+        m.set_half(push + 6, cvt(fade));
+        push += 8;
+        let s = fpu::mul(f32::from_bits(0x44cc_cb33), f(m, p + 0x2c).0);
+        m.set_half(size, cvt(s));
+        let life = f(m, p + 0x24).0;
+        m.set_half(size + 2, cvt(life));
+        let flags = m.word(p + 0x34);
+        m.set_half(size + 4, flags as u16);
+        let rate = fpu::mul(f32::from_bits(0x4508_8777), f(m, p + 0x3c).0);
+        m.set_half(size + 6, cvt(rate));
+        m.set_byte(tag, look);
+        size += 8;
+        let lk = m.word(p + 0x38);
+        let had = m.word(b + BATCH_LOOKS_HAD);
+        m.set_byte(tag + 1, if lk < had { lk as u8 } else { 0 });
+        let seat = m.word(b + 0x388);
+        n += 1;
+        p = p.wrapping_add(0x40);
+        m.set_byte(tag + 2, seat as u8);
+        m.set_byte(tag + 3, 0);
+        tag += 4;
+        *left -= 1;
+        let fill = m.word(b + BATCH_FILL);
+        m.set(b + BATCH_FILL, fill.wrapping_add(1));
+        *start += 1;
+    }
+}
