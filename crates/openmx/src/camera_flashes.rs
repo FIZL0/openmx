@@ -41,8 +41,6 @@ pub struct Stadium {
     placed: Vec<Placement>,
     pub levels: FlashLevels,
     rng: Rng,
-    /// Seconds since the race started, for `--race-win`.
-    pub clock: f32,
 }
 
 impl Stadium {
@@ -57,7 +55,7 @@ impl Stadium {
         scene.models = kept;
         let (levels, floor) = levels(toy);
         let flashes = CameraFlashes::new(placed.len() as u32, floor)?;
-        Some(Stadium { flashes, placed, levels, rng: Rng::new(), clock: 0.0 })
+        Some(Stadium { flashes, placed, levels, rng: Rng::new() })
     }
 
     /// How many flashes the stadium has.
@@ -68,7 +66,6 @@ impl Stadium {
     /// One tick of the flashes.
     pub fn tick(&mut self, dt: F) {
         self.flashes.tick(dt, &mut self.rng);
-        self.clock += dt.0;
     }
 
     /// The burst a podium finish sets going, for [`Supercross::race_over`].
@@ -86,18 +83,9 @@ impl Stadium {
         self.shown().map(|(model, at, alpha)| Actor { model, at, pose: None, lod_from: None, alpha, casts: false })
     }
 
-    /// `--race-win`: the human's card wins a single race at the line, as the lap line will tell
-    /// [`Supercross::race_over`] once the shell counts laps (S301): the flashes burst toward the
-    /// player's win, and what it answers (the fireworks) is the caller's to show.
-    pub fn player_wins(&mut self) -> RaceOver {
-        let card = LapCard { place: 1, flags: card_flags::PLAYER | card_flags::TAKING_PART | card_flags::OUT, ..LapCard::default() };
-        let event = ResultEvent { activity: 2, ..ResultEvent::default() };
-        let levels = self.levels;
-        Supercross::new().race_over(&card, None, &event, -1, &HallOfFame::default(), Some(self.podium()), &levels)
-    }
-
-    /// P313: a card of the race's lap line has finished, and [`Supercross::race_over`] hears it as
-    /// [`Stadium::player_wins`] does, with the card's own place and flags.
+    /// P313: a card of the race's lap line has finished, and [`Supercross::race_over`] hears it with
+    /// the card's own place and flags: the flashes burst toward a player's win, and what it answers
+    /// (the fireworks) is the caller's to show.
     pub fn card_finishes(&mut self, card: &LapCard, laps: u8) -> RaceOver {
         let event = ResultEvent { activity: 2, laps, ..ResultEvent::default() };
         let levels = self.levels;
@@ -131,7 +119,8 @@ mod tests {
         let mut sx = Scene::parse(text);
         let mut s = Stadium::take(&mut sx, "sx01", SX01).unwrap();
         assert_eq!((s.len(), sx.models.len()), (2, 1));
-        let over = s.player_wins();
+        let card = LapCard { place: 1, flags: card_flags::PLAYER | card_flags::TAKING_PART | card_flags::OUT, ..LapCard::default() };
+        let over = s.card_finishes(&card, 3);
         assert!(over.fireworks);
         assert_eq!((s.flashes.burst.length.0, s.flashes.burst.half.0), (2.0, 1.0));
         for _ in 0..30 {

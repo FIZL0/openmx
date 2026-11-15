@@ -2881,9 +2881,6 @@ struct Args {
     /// P327: the ride is a race — `--race`, `--laps N`, `--racers N`, or the menu's Race. Its track
     /// is [`Args::track`]'s; the ride starts on the start grid behind the closed gate.
     race: Option<menu::RaceSetup>,
-    /// `--race-win SECS` (V127): the player wins the race that many seconds in, as the lap line will
-    /// say once the shell counts laps — the finish's fireworks and camera flashes, for a look.
-    race_win: Option<f32>,
     /// Whether a flag picked a ride, which skips the front end unless `--menu` says otherwise.
     ride_flag: bool,
     /// `--screen`: the front end's screen to open on.
@@ -9686,21 +9683,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 println!("race: drop gate down at tick {}, turned {:.2} rad, up {:.2},{:.2},{:.2}", world.seats[0].sim.ticks, g.turned(), up[0], up[1], up[2]);
             }
         }
-        // The stadium's camera flashes (V127), a tick for each simulated, and `--race-win`'s finish
-        // when its time comes: the flashes' burst and, the winner's, the track's fireworks.
+        // The stadium's camera flashes (V127), a tick for each simulated; a finish's burst comes from
+        // the race's lap line below.
         if simulated && let Some(s) = &mut stadium_flashes {
-            let was = s.clock;
             s.tick(dt);
-            if let Some(at) = args.race_win
-                && was < at
-                && s.clock >= at
-            {
-                let over = s.player_wins();
-                println!("race: won at {:.2}s — fireworks {}, flashes toward {}", s.clock, over.fireworks, s.levels.player_win.0);
-                if over.fireworks && let Some(fx) = &mut track_fx {
-                    fx.finish();
-                }
-            }
         }
         // The race's lap line (P313), which the first seat's Sim counts: its laps and places said, a
         // finish at the line heard as the original's `race_over` (the flashes' burst, the winner's
@@ -14859,7 +14845,6 @@ fn parse_args() -> Result<Option<Args>, String> {
         display: std::env::var("DISPLAY").unwrap_or_else(|_| ":0".to_string()),
         menu: false,
         race: None,
-        race_win: None,
         ride_flag: false,
         screen: None,
         screen_tab: None,
@@ -14908,7 +14893,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         if matches!(
             a.as_str(),
             "--track" | "--play" | "--record" | "--moment" | "--vehicle" | "--phy" | "--ride" | "--headless"
-                | "--players" | "--frames" | "--online" | "--set" | "--garage" | "--race" | "--laps" | "--racers" | "--race-win"
+                | "--players" | "--frames" | "--online" | "--set" | "--garage" | "--race" | "--laps" | "--racers"
         ) || a.starts_with("--trace")
         {
             args.ride_flag = true;
@@ -14926,10 +14911,6 @@ fn parse_args() -> Result<Option<Args>, String> {
                 } else {
                     r.riders = n.clamp(1, menu::race::MOST_RIDERS);
                 }
-            }
-            "--race-win" => {
-                args.race_win = Some(next("seconds")?.parse().map_err(|e| format!("{a}: {e}"))?);
-                _ = args.race.get_or_insert_with(menu::RaceSetup::default);
             }
             "--open-list" => args.open_list = true,
             "--menu-row" => args.menu_row = Some(next("a row's label")?),
