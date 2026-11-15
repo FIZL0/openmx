@@ -368,3 +368,11 @@ routed for the car, as it is not for the quad: the scene's methods call `update`
 
 No Untamed baja drive was captured and there is no pack: see the journal
 (`research/journal/2026-11-14-md81d-untamed-baja`) and its follow-ups.
+
+**Captured (MD164), not ported.** The menus' TROPHY TRUCK is the baja: its vtable holds the buggy/baja
+class update and its kind is 6. MD164 kept spawn and in-air states and eight drives
+(research/journal/2026-11-14-md164-untamed-baja-capture): throttle twice (identical, raw blocks included),
+steer (it tips over by itself: car state 14, damping 0.999), brake, a jump through all 4 gears, a landing
+from the air state, and a **preload fire**: armed clears and the timer goes to −1/120 with a zero push, and
+the body stays as the jump's without it. The cue latch rises and falls inside the tick, so the cue post is
+inferred from the state words, not seen.

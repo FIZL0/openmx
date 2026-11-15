@@ -1,0 +1,6 @@
+# MD164: from the in-air state (air.p2s, jump.csv row 139-140), gas held through the landing (jump.csv
+# lands about row 158 and hits the stop at row ~175).
+down cross
+sleep 120t
+release
+sleep 20t

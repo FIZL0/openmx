@@ -1,0 +1,19 @@
+# MD164: gas straight from the Rocksbury spawn (throttle.csv: about 70 ft/s in 2nd by tick 95, the wall at
+# z~378 not yet reached), then Square brake held to a stop and on (MD39a's car card: Square brake), a short
+# Circle hand-brake pull with the gas, and the pad let go.
+sleep 15t
+down cross
+sleep 80t
+up cross
+down square
+sleep 120t
+up square
+sleep 20t
+down cross
+sleep 30t
+down circle
+sleep 20t
+up circle
+sleep 20t
+release
+sleep 40t

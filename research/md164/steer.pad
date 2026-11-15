@@ -1,0 +1,15 @@
+# MD164 (MD160's steer.pad, unchanged): steer at speed. Gas straight from the Rocksbury spawn (throttle.csv: about 51 ft/s by row 80,
+# the collider at row 162 not yet reached), then full right, full left, half right, straight.
+sleep 15t
+down cross
+sleep 75t
+stick l 1 0
+sleep 30t
+stick l -1 0
+sleep 45t
+stick l 0.5 0
+sleep 30t
+stick l 0 0
+sleep 60t
+release
+sleep 30t

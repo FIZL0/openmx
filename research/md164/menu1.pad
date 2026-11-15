@@ -1,0 +1,6 @@
+# MD164 menu step 1, from MD160's vehicle-truck.p2s (Player 1 Options, Vehicle = MONSTER TRUCK): right -> the next machine.
+sleep 20t
+down right
+sleep 9t
+up right
+sleep 90t
