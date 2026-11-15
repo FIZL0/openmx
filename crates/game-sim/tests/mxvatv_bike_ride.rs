@@ -4322,6 +4322,10 @@ impl Wrecks for WreckInRam<'_> {
                 update::sync(&mut UpdateInRam { ee: &mut *self.ee, x });
                 return 0;
             }
+            Out::OutOfBounds if in_rust("wreck check") => {
+                assert_eq!(slot(0x16c), OUT_OF_BOUNDS_FN, "the bike's vt +0x16c");
+                return wreck::out_of_bounds(self);
+            }
             Out::OutOfBounds => (slot(0x16c), vec![bike], x),
             Out::Bounds { node, at } => {
                 let out = u64::from(ee.scratch(WRECK_SCRATCH[2]));
@@ -4535,6 +4539,88 @@ fn the_ground_reset_is_the_originals() {
     }
     eprintln!("{t:#?}");
     assert!(t.values().all(|n| *n >= 1000), "every path taken: {t:#?}");
+    assert!(off.is_empty(), "{} differ:\n  {}", off.len(), off.iter().take(30).cloned().collect::<Vec<_>>().join("\n  "));
+}
+
+/// **F31b5s — the out-of-bounds check is the original's**: 12,000 times on state 4's bike, the
+/// held word (`+0x308`), the map's extent (the image's, under 300 ft so the middle is off the map,
+/// or anywhere), the body's position (each lane on an edge, a float off it, the middle, or anywhere
+/// on and around the map) and the world's drag word drawn at random — SLUS-21104's check (the bike's
+/// vt `+0x16c`) in the interpreter, and [`wreck::out_of_bounds`] with its `rand`s the original's.
+/// The answer, every word of RAM and the scratchpad come out the same; each path (not held, inside,
+/// out past each of the four edges, thrown from the middle) is taken.
+#[test]
+#[allow(clippy::float_arithmetic)]
+fn the_out_of_bounds_check_is_the_originals() {
+    let Some(mut ee) = image().map(hooked) else { return };
+    assert_eq!(vt(&ee, 0x16c), OUT_OF_BOUNDS_FN, "the bike's vt +0x16c");
+    let base = ee.ram.clone();
+    let mut g = Gen(0x0031_b5f5);
+    let mut t = BTreeMap::new();
+    let mut off = Vec::new();
+    let body = ee.u32_at(BIKE + wreck::BODY);
+    let extent = ee.u32_at(ee.u32_at(BIKE + 0x3b0) + 0x43c);
+    let world = ee.u32_at(BIKE + 0xe8);
+    let image_extent = (ee.f32_at(extent + 0x40), ee.f32_at(extent + 0x48));
+    for k in 0..12_000 {
+        ee.ram.clone_from(&base);
+        let held = !g.one_in(10);
+        ee.set_u32(BIKE + 0x308, u32::from(held));
+        let (w, d) = match g.bits() % 4 {
+            0 | 1 => image_extent,
+            2 => (g.f(0.0, 300.0), g.f(0.0, 300.0)),
+            _ => (g.f(300.0, 12_000.0), g.f(300.0, 12_000.0)),
+        };
+        ee.set_f32(extent + 0x40, w);
+        ee.set_f32(extent + 0x48, d);
+        let middle = g.one_in(8);
+        let lane = |g: &mut Gen, extent: f32| -> f32 {
+            if middle {
+                return 0.5 * extent;
+            }
+            let edge = if g.one_in(2) { 150.0 } else { extent - 150.0 };
+            match g.bits() % 6 {
+                0 => edge,
+                1 => f32::from_bits(edge.to_bits().wrapping_add(1)),
+                2 => f32::from_bits(edge.to_bits().wrapping_sub(1)),
+                _ => g.f(-500.0, extent + 500.0),
+            }
+        };
+        let (x, z) = (lane(&mut g, w), lane(&mut g, d));
+        for (i, v) in [x, g.f(-200.0, 800.0), z, g.near(1.0, -2.0, 2.0)].into_iter().enumerate() {
+            ee.set_f32(body + 0x70 + 4 * i as u32, v);
+        }
+        ee.set_f32(world + 4, g.near(1.0, -4.0, 4.0));
+        let path = if !held {
+            "not held"
+        } else if x < 150.0 {
+            "out low x"
+        } else if !(x <= w - 150.0) {
+            "out high x"
+        } else if z < 150.0 {
+            "out low z"
+        } else if !(z <= d - 150.0) {
+            "out high z"
+        } else {
+            "inside"
+        };
+        tally(&mut t, path);
+        if middle && path != "not held" && path != "inside" {
+            tally(&mut t, "thrown from the middle");
+        }
+        let (before, spr) = (ee.ram.clone(), ee.spr.clone());
+        ee.set(28, GP);
+        ee.call(OUT_OF_BOUNDS_FN, &[u64::from(BIKE)], &[0.0], BUDGET);
+        let said = ee.r(2) as u32;
+        let (want, want_spr) = (std::mem::replace(&mut ee.ram, before), std::mem::replace(&mut ee.spr, spr));
+        let got = wreck::out_of_bounds(&mut WreckInRam { ee: &mut ee, x: 0.0 });
+        let diff = bytes_differ(&want, &ee.ram, ee.stack);
+        if said != got || !diff.is_empty() || want_spr != ee.spr {
+            off.push(format!("{k} ({path}, {x} {z} in {w} x {d}): said {said}, port {got}, RAM differs at {diff:?}, scratchpad same {}", want_spr == ee.spr));
+        }
+    }
+    eprintln!("{t:#?}");
+    assert!(t.values().all(|n| *n >= 100), "every path taken: {t:#?}");
     assert!(off.is_empty(), "{} differ:\n  {}", off.len(), off.iter().take(30).cloned().collect::<Vec<_>>().join("\n  "));
 }
 
@@ -9976,6 +10062,7 @@ fn replay_in_pure_rust(name: &str) -> Option<(Vec<bool>, Vec<String>, BTreeMap<S
             "rumble dropped",
             "object switches",
             "noise build",
+            "wreck check",
         ],
     );
     let census = INTERPRETED.with(|m| std::mem::take(&mut *m.borrow_mut()));
@@ -13082,6 +13169,8 @@ enum Writer {
 /// The kind set and the settle (the bike's vt `+0x3a0` and `+0x4a8` on state 4).
 const KIND_SET_FN: u32 = 0x004e_19a0;
 const SETTLE_FN: u32 = 0x004e_4cd0;
+/// MXVehicle's out-of-bounds check, the bike's vt `+0x16c` on state 4 (F31b5s).
+const OUT_OF_BOUNDS_FN: u32 = 0x004a_4f20;
 /// The bike's vt `+0x53c` and `+0x540`, the settle's last two calls: a store of `a1` into `+0x1754`,
 /// one into `+0x1758`.
 const FLIP_CLIP_SET: u32 = 0x004e_7a30;
