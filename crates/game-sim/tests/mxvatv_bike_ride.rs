@@ -3287,6 +3287,312 @@ fn hud_heap(ee: &mut Ee) -> u32 {
     id
 }
 
+use game_sim::handling::heap;
+
+/// **F31b5r — the heap in Rust**: the second `new` (the first is [`HEAP_NEW`]), the flag that hands
+/// `new` and `delete` to the C library's allocator instead (0 on state 4), and the heap's own
+/// allocation, free and resize behind the entries (a0 the heap).
+const HEAP_NEW_TOO: u32 = 0x001b_7740;
+const HEAP_SYSTEM: u32 = 0x0040_c780;
+const HEAP_ALLOC_BODY: u32 = 0x001b_61a0;
+const HEAP_REALLOC_BODY: u32 = 0x001b_68d0;
+/// The size classes' table in the original's data ([`heap::SMALL`]).
+const HEAP_SMALL: u32 = 0x0039_0638;
+
+/// Asserts the heap's lock is free (no thread owns it), which the original's calls leave as they
+/// find it: the port does not take it.
+fn heap_idle(ee: &mut Ee, heap: u32) {
+    let lock = ee.u32_at(heap + heap::LOCK);
+    assert_eq!((ee.u32_at(lock + 8), ee.u32_at(lock + 0xc)), (u32::MAX, 0), "heap {heap:#x}'s lock is free");
+}
+
+/// F31b5r: hooks the heap's entries in `ee` with [`heap`]'s port: the plain allocation and both
+/// `new`s off the current heap, `delete`, and `realloc`. Each served call is counted under
+/// `heap … in Rust` in [`HEAP_SERVED`].
+fn heap_hooks(ee: &mut Ee) {
+    let mgr = ee.u32_at(HEAP_MANAGER);
+    assert_ne!(ee.u32_at(mgr + heap::MADE), 0, "the heap manager is made");
+    for f in [HEAP_ALLOC, HEAP_NEW, HEAP_NEW_TOO] {
+        ee.hooks.insert(f, Box::new(move |ee: &mut Ee| {
+            if f != HEAP_ALLOC {
+                assert_eq!(ee.u32_at(HEAP_SYSTEM), 0, "new on the game's heap");
+            }
+            let bytes = ee.r(4) as u32;
+            let h = heap::current(&mut NodeRam(ee), mgr);
+            heap_idle(ee, h);
+            let v = heap::alloc(&mut NodeRam(ee), h, bytes);
+            served("new");
+            ee.set(2, u64::from(v));
+        }));
+    }
+    ee.hooks.insert(HEAP_FREE, Box::new(move |ee: &mut Ee| {
+        assert_eq!(ee.u32_at(HEAP_SYSTEM), 0, "delete on the game's heap");
+        assert!(!ee.hooks.contains_key(&HEAP_FREE_IN), "a free hooked inside (the HUD's receive) runs only in the handing run");
+        let block = ee.r(4) as u32;
+        if block != 0 {
+            let h = heap::of_block(&mut NodeRam(ee), mgr, block);
+            heap_idle(ee, h);
+        }
+        heap::delete(&mut NodeRam(ee), mgr, block);
+        served("delete");
+    }));
+    ee.hooks.insert(HEAP_REALLOC, Box::new(move |ee: &mut Ee| {
+        let (block, bytes) = (ee.r(4) as u32, ee.r(5) as u32);
+        let h = if block == 0 { heap::current(&mut NodeRam(ee), mgr) } else { heap::of_block(&mut NodeRam(ee), mgr, block) };
+        heap_idle(ee, h);
+        let v = heap::resize(&mut NodeRam(ee), mgr, block, bytes);
+        served("realloc");
+        ee.set(2, u64::from(v));
+    }));
+}
+
+thread_local! {
+    /// F31b5r: the heap calls [`heap_hooks`] served, by entry, until taken.
+    static HEAP_SERVED: RefCell<BTreeMap<&'static str, u32>> = RefCell::default();
+}
+
+fn served(what: &'static str) {
+    HEAP_SERVED.with(|m| *m.borrow_mut().entry(what).or_default() += 1);
+}
+
+/// A heap's RAM as the port sees it in [`the_heap_is_the_originals`]: its own copy of the heap's
+/// range and its slot in the manager, nothing else (any other address panics).
+#[derive(Clone)]
+struct HeapCopy {
+    slot: u32,
+    slot_words: Vec<u32>,
+    base: u32,
+    words: Vec<u32>,
+}
+
+impl HeapCopy {
+    fn of(ee: &Ee, slot: u32, base: u32, len: u32) -> HeapCopy {
+        let read = |at: u32, n: u32| (0..n / 4).map(|k| ee.u32_at(at + 4 * k)).collect();
+        HeapCopy { slot, slot_words: read(slot, heap::HEAP_BYTES), base, words: read(base, len) }
+    }
+    fn at(&mut self, a: u32) -> &mut u32 {
+        if (self.slot..self.slot + heap::HEAP_BYTES).contains(&a) {
+            return &mut self.slot_words[(a - self.slot) as usize / 4];
+        }
+        let k = a.wrapping_sub(self.base) as usize / 4;
+        assert!(a & 3 == 0 && k < self.words.len(), "the port reached outside its heap: {a:#x}");
+        &mut self.words[k]
+    }
+    /// Where `ee`'s heap and slot differ from this copy, as `(address, original, port)`.
+    fn differs(&self, ee: &Ee) -> Vec<(u32, u32, u32)> {
+        let slot = self.slot_words.iter().enumerate().map(|(k, &w)| (self.slot + 4 * k as u32, w));
+        let range = self.words.iter().enumerate().map(|(k, &w)| (self.base + 4 * k as u32, w));
+        slot.chain(range).filter_map(|(a, w)| (ee.u32_at(a) != w).then(|| (a, ee.u32_at(a), w))).collect()
+    }
+}
+
+impl node::Ram for HeapCopy {
+    fn word(&mut self, at: u32) -> u32 {
+        *self.at(at)
+    }
+    fn set(&mut self, at: u32, w: u32) {
+        *self.at(at) = w;
+    }
+}
+
+/// **F31b5r — the heap's allocation, free and resize are the originals'** (oracle): a heap made by
+/// the original over free RAM ([`hud_heap`]'s, [`HUD_HEAP`]) driven through 12,000 generated
+/// calls, each on the original's code (the heap's own allocation, free and resize, a0 the heap) and
+/// on [`heap`]'s port over a copy of only the heap and its slot, which must agree word for word
+/// after every call, with the same answer. Blocks are filled with generated words, so a move's copy
+/// is compared too. Episodes start from the made heap again, some with blocks big enough to run it
+/// out (failed allocations, a free into an empty tree). Every path is tallied and asserted.
+#[test]
+fn the_heap_is_the_originals() {
+    let Some(ee) = image() else { return };
+    let mut ee = hooked(ee);
+    assert_eq!([0, 4, 8].map(|k| ee.u32_at(HEAP_SMALL + k)), heap::SMALL, "the size classes");
+    hud_heap(&mut ee);
+    let mgr = ee.u32_at(HEAP_MANAGER);
+    let h = mgr + heap::HEAPS + heap::HEAP_BYTES;
+    let (base, len) = (HUD_HEAP + 0x40, HUD_HEAP_LEN - 0x40);
+    let made = HeapCopy::of(&ee, h, base, len);
+    let mut g = Gen(0x5eed_f31b_5e0f);
+    let mut tally: BTreeMap<&'static str, u32> = BTreeMap::new();
+    let mut calls = 0u32;
+    while calls < 12_000 {
+        // Back to the heap as made, in both.
+        let mut port = HeapCopy { slot: made.slot, slot_words: made.slot_words.clone(), base, words: made.words.clone() };
+        for (k, &w) in made.slot_words.iter().enumerate() {
+            ee.set_u32(h + 4 * k as u32, w);
+        }
+        for (k, &w) in made.words.iter().enumerate() {
+            ee.set_u32(base + 4 * k as u32, w);
+        }
+        let big = g.one_in(4);
+        let mut live: Vec<u32> = Vec::new();
+        for _ in 0..40 + g.bits() % 160 {
+            let size = |g: &mut Gen| match g.bits() % 8 {
+                _ if big => 0x2000 + g.bits() % 0x8000,
+                0 => 0,
+                1 | 2 => g.bits() % 0x40,
+                3 => [0x10, 0x20, 0x30][(g.bits() % 3) as usize],
+                4 | 5 => g.bits() % 0x200,
+                _ => g.bits() % 0x1000,
+            };
+            let root = port.word(h + heap::ROOT);
+            let op = g.bits() % 8;
+            let (name, want, got, block) = if live.is_empty() || op < 3 {
+                // Now and then the tree's last block exactly, which empties the tree.
+                let leaf = root != 0 && port.word(root + 0x10) == 0 && port.word(root + 0x14) == 0;
+                let bytes = if leaf && g.one_in(3) { port.word(root + 0xc) & !0x8000_0000 } else { size(&mut g) };
+                let listed = heap::SMALL.iter().position(|&n| n == heap::rounded(bytes)).is_some_and(|k| ee.u32_at(h + heap::LISTS + 4 * k as u32) != 0);
+                ee.set(28, GP);
+                ee.call(HEAP_ALLOC_BODY, &[u64::from(h), bytes as i32 as u64, 0, 0], &[], BUDGET);
+                let got = heap::alloc(&mut port, h, bytes);
+                let want = ee.r(2) as u32;
+                *tally.entry(if want == 0 { "alloc: none fits" } else if listed { "alloc: off a small list" } else { "alloc" }).or_default() += 1;
+                (format!("alloc {bytes:#x}"), want, got, want)
+            } else if op < 6 {
+                let block = live.swap_remove((g.bits() as usize) % live.len());
+                let b = block - heap::HEADER;
+                let (back, size) = (port.word(b + 8), port.word(b + 0xc));
+                let prev_free = back as i32 > 0 && port.word(b - back - heap::HEADER + 0xc) & 0x8000_0000 != 0;
+                let next_free = port.word(b + size + heap::HEADER + 0xc) & 0x8000_0000 != 0;
+                *tally.entry(match (root == 0, prev_free, next_free) {
+                    (true, _, _) => "free: into an empty tree",
+                    (_, true, true) => "free: joined both sides",
+                    (_, true, false) => "free: joined before",
+                    (_, false, true) => "free: joined after",
+                    _ => "free: alone",
+                }).or_default() += 1;
+                ee.set(28, GP);
+                ee.call(HEAP_FREE_IN, &[u64::from(h), u64::from(block)], &[], BUDGET);
+                heap::free(&mut port, h, block);
+                (format!("free {block:#x}"), 0, 0, 0)
+            } else {
+                let k = (g.bits() as usize) % live.len();
+                let block = live[k];
+                let b = block - heap::HEADER;
+                let old = port.word(b + 0xc);
+                let next = port.word(b + old + heap::HEADER + 0xc);
+                let mut bytes = if g.one_in(8) {
+                    old
+                } else if next & 0x8000_0000 != 0 && g.one_in(3) {
+                    // Into the free block after: all of it, or most with the rest split off.
+                    (old + (next & !0x8000_0000) + heap::HEADER).wrapping_sub(g.bits() % 0x60)
+                } else {
+                    size(&mut g)
+                };
+                // A move the heap cannot hold would copy to 0: the same size instead.
+                if heap::rounded(bytes) != old && heap::alloc(&mut port.clone(), h, bytes) == 0 {
+                    bytes = old;
+                }
+                let new = heap::rounded(bytes);
+                *tally.entry(if new == old {
+                    "realloc: same size"
+                } else if (old as i32) < (new as i32) && next & 0x8000_0000 != 0 && (next & !0x8000_0000) as i32 >= (new - old) as i32 {
+                    if ((next & !0x8000_0000) - (new - old)) < 33 { "realloc: grown into all after" } else { "realloc: grown, rest split off" }
+                } else if new < old {
+                    "realloc: shrunk, moved"
+                } else {
+                    "realloc: grown, moved"
+                }).or_default() += 1;
+                ee.set(28, GP);
+                ee.call(HEAP_REALLOC_BODY, &[u64::from(h), u64::from(block), bytes as i32 as u64, 0, 0], &[], BUDGET);
+                let got = heap::realloc(&mut port, h, block, bytes);
+                let want = ee.r(2) as u32;
+                assert_ne!(want, 0, "a resize ran the heap out (the original copies to 0 then)");
+                live.swap_remove(k);
+                (format!("realloc {block:#x} to {bytes:#x}"), want, got, want)
+            };
+            calls += 1;
+            let d = port.differs(&ee);
+            assert!(d.is_empty() && want == got, "call {calls} ({name}): answered {want:#x} / port {got:#x}; {} words differ (address, original, port)\n  {:#x?}", d.len(), &d[..d.len().min(20)]);
+            if block != 0 {
+                live.push(block);
+                let n = port.word(block - 4) / 4;
+                for i in 0..n.min(16) {
+                    let w = g.bits();
+                    ee.set_u32(block + 4 * i, w);
+                    port.set(block + 4 * i, w);
+                }
+            }
+        }
+        // The rest back, the last ones in a heap whose tree may be empty.
+        while let Some(block) = live.pop() {
+            if port.word(h + heap::ROOT) == 0 {
+                *tally.entry("free: into an empty tree").or_default() += 1;
+            }
+            ee.set(28, GP);
+            ee.call(HEAP_FREE_IN, &[u64::from(h), u64::from(block)], &[], BUDGET);
+            heap::free(&mut port, h, block);
+            calls += 1;
+            let d = port.differs(&ee);
+            assert!(d.is_empty(), "call {calls} (free {block:#x}, emptying): {} words differ\n  {:#x?}", d.len(), &d[..d.len().min(20)]);
+        }
+    }
+    eprintln!("the heap: {calls} calls, {tally:?}");
+    for path in [
+        "alloc",
+        "alloc: none fits",
+        "alloc: off a small list",
+        "free: into an empty tree",
+        "free: joined both sides",
+        "free: joined before",
+        "free: joined after",
+        "free: alone",
+        "realloc: same size",
+        "realloc: grown into all after",
+        "realloc: grown, rest split off",
+        "realloc: shrunk, moved",
+        "realloc: grown, moved",
+    ] {
+        assert!(tally.get(path).copied().unwrap_or(0) >= 20, "{path} met under 20 times: {tally:?}");
+    }
+}
+
+/// **F31b5r — the heap's entries are the originals', on the game's own heap** (oracle): state 4's
+/// heap as the image holds it (26 MB, fragmented by the boot) driven through 2,000 generated calls of
+/// the plain allocation, both `new`s, `delete` and `realloc`, in one interpreter by the original and
+/// in another by [`heap_hooks`]' port; all of RAM but the stack must agree after every call, with the
+/// same answer.
+#[test]
+fn the_heap_entries_are_the_originals() {
+    let (Some(a), Some(b)) = (image(), image()) else { return };
+    let (mut a, mut b) = (hooked(a), hooked(b));
+    heap_hooks(&mut b);
+    let mut g = Gen(0x5eed_f31b_5e1f);
+    let mut live: Vec<u32> = Vec::new();
+    let mut tally: BTreeMap<&'static str, u32> = BTreeMap::new();
+    for call in 0..2_000 {
+        let bytes = match g.bits() % 4 {
+            0 => g.bits() % 0x40,
+            1 => g.bits() % 0x400,
+            2 => g.bits() % 0x4000,
+            _ => 0,
+        };
+        let (f, args, name): (u32, Vec<u64>, &'static str) = match g.bits() % 6 {
+            _ if live.is_empty() => (HEAP_NEW, vec![bytes as i32 as u64, 0, 0], "new"),
+            0 => (HEAP_ALLOC, vec![bytes as i32 as u64, 0, 0], "alloc"),
+            1 => (HEAP_NEW, vec![bytes as i32 as u64, 0, 0], "new"),
+            2 => (HEAP_NEW_TOO, vec![bytes as i32 as u64, 0, 0], "new too"),
+            3 | 4 => (HEAP_FREE, vec![u64::from(live.swap_remove(g.bits() as usize % live.len()))], "delete"),
+            _ if g.one_in(4) => (HEAP_REALLOC, vec![0, bytes as i32 as u64, 0, 0], "realloc of null"),
+            _ => (HEAP_REALLOC, vec![u64::from(live.swap_remove(g.bits() as usize % live.len())), bytes as i32 as u64, 0, 0], "realloc"),
+        };
+        *tally.entry(name).or_default() += 1;
+        for ee in [&mut a, &mut b] {
+            ee.set(28, GP);
+            ee.call(f, &args, &[], BUDGET);
+        }
+        let (want, got) = (a.r(2) as u32, b.r(2) as u32);
+        let d = differing_bytes(&a, &b);
+        assert!(d.is_empty() && (f == HEAP_FREE || want == got), "call {call} ({name} {args:#x?}): answered {want:#x} / port {got:#x}; RAM differs at {d:#x?}");
+        if f != HEAP_FREE && want != 0 {
+            live.push(want);
+        }
+    }
+    let served = HEAP_SERVED.with(|m| std::mem::take(&mut *m.borrow_mut()));
+    eprintln!("the heap's entries: {tally:?}, the port served {served:?}");
+    assert_eq!(served.values().sum::<u32>(), 2_000, "the port served every call");
+}
+
 /// The frame post's outside: the message laid out in scratch as the poster lays it on its stack, and
 /// each listener told the original's ([`FRAME_LISTENERS`]; `$f12` the frame's `dt`, as the original
 /// post leaves it), booked by name. Every tell is watched: it may not change a word of the bike or its
@@ -9896,6 +10202,10 @@ fn replay_pure(name: &str, rust: &[&'static str]) -> Option<(Vec<bool>, BTreeMap
     }
     let mut b = hooked(image()?);
     b.ram.clone_from(&a.ram);
+    // F31b5r: the second run's heap calls on the port.
+    if rust.contains(&"heap") {
+        heap_hooks(&mut b);
+    }
     let (mut noise_a, mut noise_b) = (None, None);
     let rows = rows(name)?;
     let dt = F(f32::from_bits(DT));
@@ -10131,12 +10441,14 @@ fn replay_in_pure_rust(name: &str) -> Option<(Vec<bool>, Vec<String>, BTreeMap<S
             "object switches",
             "noise build",
             "batch send",
+            "heap",
         ],
     );
     let census = INTERPRETED.with(|m| std::mem::take(&mut *m.borrow_mut()));
     let total = FRAME_RAN.with(|n| n.replace(0));
+    let heap = HEAP_SERVED.with(|m| std::mem::take(&mut *m.borrow_mut()));
     let (w, _, off) = ran?;
-    eprintln!("{name}: the whole frame in Rust, the interpreter ran {total} instructions: {census:?}");
+    eprintln!("{name}: the whole frame in Rust, the interpreter ran {total} instructions: {census:?}; the heap's port served {heap:?}");
     Some((w, off, census, total))
 }
 
