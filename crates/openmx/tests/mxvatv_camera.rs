@@ -15,6 +15,12 @@
 //! terrain object the camera holds. Every row's look-at (the look lags), eye (the viewport's), distance,
 //! yaw, pitch and lift must be the original's bit for bit.
 //!
+//! The recorder polls once a tick, at no fixed point in the frame, and under load it lands anywhere
+//! (MD82, 2026-11-15): a row's camera can be read before or while this tick's camera step ran (each
+//! field is then the port's from before the step or after it, bit for bit), and a row whose target
+//! block is the last row's, or two ticks on, or a dropped tick, loses the target the camera stepped
+//! on, so the replay reseeds after it. The counts are printed for every capture.
+//!
 //! Each machine skips without its capture, its camera file or the map.
 
 #[allow(dead_code)]
@@ -30,7 +36,7 @@ use std::path::PathBuf;
 use chase::ModMachine;
 use game_sim::archive::Res;
 use game_sim::atv_ground::{self, Terrain};
-use game_sim::camera::{Aspect, CurveTable, ModFollow, Preset, Ridden, Surface, Switches, Target, Viewport};
+use game_sim::camera::{Aspect, CurveTable, ModFollow, Preset, Race, Ridden, Surface, Switches, Target, Viewport};
 use game_sim::phy::Ini;
 use game_sim::track;
 use ps2_float::{F, Vf};
@@ -97,15 +103,26 @@ impl Capture {
         [F(q.x()), F(q.y()), F(q.z())]
     }
 
-    /// Whether the camera's state in `row` is the last row's word for word (its distance, angles,
-    /// lift, lags and eye) while its target moved: a frame the camera was not run.
-    fn held(&self, row: usize) -> bool {
-        let camera = ["cam_dyp", "cam_lift", "look0", "look1", "look2", "pos0", "pos1", "pos2", "fovlag", "vp_eye"];
-        let same = |col: &str| {
-            self.columns.iter().filter(|(k, _)| *k == col || k.starts_with(&format!("{col}.")))
-                .all(|(_, &i)| self.rows[row][i] == self.rows[row - 1][i])
-        };
-        camera.iter().all(|c| same(c)) && !same("a_point")
+    /// Whether row `row`'s target block is the last row's word for word under the next tick's vsync:
+    /// the poll landed before the machine's frame ran (the camera may or may not have run), so this
+    /// tick's target is lost and the next row is two steps on with no target block for the step
+    /// between. A moving machine's block never repeats.
+    fn doubled(&self, row: usize) -> bool {
+        let target = ["a_point", "a_fwd", "a_up", "a_vel", "a_lean", "a_flag"];
+        self.columns.iter().filter(|(k, _)| target.iter().any(|t| k.starts_with(&format!("{t}."))))
+            .all(|(_, &i)| self.rows[row][i] == self.rows[row - 1][i])
+            && self.num(row, "a_flag.y") >= 0.0001
+    }
+
+    /// Whether row `row`'s target block is two ticks on from the last row's: the poll read the next
+    /// tick's machine, so the block the camera stepped on this tick is lost. Told by the body point
+    /// moving about twice the distance the two rows' speeds cover in a tick (a step covers 0.8–1.2 of
+    /// it in every capture).
+    fn jumped(&self, row: usize) -> bool {
+        let (p, q) = (self.quad(row, "a_point"), self.quad(row - 1, "a_point"));
+        let moved = (0..3).map(|k| (p[k] - q[k]) * (p[k] - q[k])).sum::<f32>().sqrt();
+        let speed = (self.num(row, "a_flag.y") + self.num(row - 1, "a_flag.y")) / 2.0;
+        speed > 5.0 && moved > 1.6 * speed * DT
     }
 
     /// Whether the camera held a target block that tick (a wrecked ATV rider has none).
@@ -176,13 +193,20 @@ fn seeded(c: &Capture, row: usize, presets: Vec<Preset>) -> ModFollow {
 
 /// Every way row `row` and the port's camera after its frame differ.
 fn differences(c: &Capture, row: usize, cam: &ModFollow, eye: Vf) -> Vec<String> {
+    fields(c, row, cam, eye).into_iter().filter(|(_, want, got)| want.to_bits() != got.to_bits())
+        .map(|(what, want, got)| format!("{what}: capture {want:?}, port {got:?}")).collect()
+}
+
+/// Whether each field is the port's after a tick's step or before it, bit for bit.
+fn either(after: &[(String, f32, f32)], prior: &[(String, f32, f32)]) -> bool {
+    after.iter().zip(prior).all(|((_, want, a), (_, _, b))| want.to_bits() == a.to_bits() || want.to_bits() == b.to_bits())
+}
+
+/// Each field the replay compares: its name, row `row`'s value and the port camera's.
+fn fields(c: &Capture, row: usize, cam: &ModFollow, eye: Vf) -> Vec<(String, f32, f32)> {
     let f = &cam.race.cam;
     let mut bad = Vec::new();
-    let mut check = |what: String, want: f32, got: F| {
-        if want.to_bits() != got.0.to_bits() {
-            bad.push(format!("{what}: capture {want:?}, port {:?}", got.0));
-        }
-    };
+    let mut check = |what: String, want: f32, got: F| bad.push((what, want, got.0));
     let dyp = c.quad(row, "cam_dyp");
     check("distance".into(), dyp.x(), f.distance);
     check("yaw".into(), dyp.y(), f.yaw);
@@ -221,21 +245,39 @@ fn each_mod_machines_eye_and_target_replay_slus_21104s() {
         let presets = Preset::read_layout(&ini, Aspect::Standard, Viewport::Full);
         assert!(c.rows.len() > 700, "{name}: {} rows", c.rows.len());
         // A row can be torn (the poll lands while the frame is still being written), the first one most
-        // often: seed from the first of three rows from `r` on that steps into the next.
+        // often, or doubled (the frame after it lost): seed from the first of twelve rows from `r` on that
+        // steps into the next.
         let ground = || Ground(Terrain::of(&map));
+        // The three rows after the seed may each be read late as any row can (below), but one of them
+        // at least must hold this tick's lags: a seed one tick off never steps the lags onto a row's bits.
         let steps = |r: usize| {
             let mut cam = seeded(&c, r, presets.clone());
-            let view = cam.update(F(DT), &c.rider(r + 1), F::ONE, &curve, Switches::default(), &mut ground());
-            differences(&c, r + 1, &cam, view.position).is_empty()
+            let (mut eye, mut ground, mut on_time) = (c.quad(r, "vp_eye"), ground(), false);
+            for row in r + 1..r + 4 {
+                if c.word(row, "vsync") != c.word(row - 1, "vsync") + 2 || !c.has_actor(row) || c.doubled(row) || c.jumped(row) {
+                    return false;
+                }
+                let (before, eye_before) = (ModFollow { race: Race { cam: cam.race.cam.clone() } }, eye);
+                eye = cam.update(F(DT), &c.rider(row), F::ONE, &curve, Switches::default(), &mut ground).position;
+                let after = fields(&c, row, &cam, eye);
+                if !either(&after, &fields(&c, row, &before, eye_before)) {
+                    return false;
+                }
+                on_time |= after.iter().filter(|(what, ..)| what.starts_with("look.") || what.starts_with("pos lag."))
+                    .all(|(_, want, got)| want.to_bits() == got.to_bits());
+            }
+            on_time
         };
-        let seed = |r: usize| (r..r + 3).find(|&r| steps(r)).unwrap_or_else(|| panic!("{name}: none of rows {r}-{} steps into the next", r + 2));
+        let seed = |r: usize| (r..(r + 12).min(c.rows.len() - 4)).find(|&r| steps(r))
+            .unwrap_or_else(|| panic!("{name}: none of rows {r}-{} steps into the next three", r + 11));
         let first = seed(0);
         let mut cam = seeded(&c, first, presets.clone());
+        let mut eye = c.quad(first, "vp_eye");
         let mut ground = ground();
-        let (mut replayed, mut airborne, mut still, mut wrecked, mut skipped, mut held) = (0, 0, 0, 0, 0, 0);
+        let (mut replayed, mut airborne, mut still, mut wrecked, mut skipped) = (0, 0, 0, 0, 0);
+        let (mut held, mut doubled) = (0, 0);
         let mut row = first + 1;
         while row < c.rows.len() {
-            assert_eq!(c.word(row, "vsync"), c.word(row - 1, "vsync") + 2, "{name} row {row}: a dropped tick");
             assert_eq!(c.word(row, "still") & 0x800, 0, "{name} row {row}: the still bit");
             if !c.has_actor(row) {
                 // The rider is down (an ATV wreck): the camera holds no target block and the original
@@ -243,38 +285,67 @@ fn each_mod_machines_eye_and_target_replay_slus_21104s() {
                 // respawned rider up again, from the first row after that steps cleanly.
                 let end = (row..c.rows.len()).find(|&r| c.has_actor(r)).unwrap_or(c.rows.len());
                 wrecked += end - row;
-                if end + 4 > c.rows.len() {
+                if end + 16 > c.rows.len() {
                     break;
                 }
                 let at = seed(end);
                 skipped += at - end + 1;
                 cam = seeded(&c, at, presets.clone());
+                eye = c.quad(at, "vp_eye");
                 row = at + 1;
                 continue;
             }
             assert_eq!(c.num(row, "vp_near"), 1.0, "{name} row {row}: the near clip");
-            if c.held(row) {
-                // The camera's every field is the last row's while its target moved on: the poll read the
-                // camera before its frame ran (the next row is two steps on). Step the port on this row's
-                // target without comparing.
-                cam.update(F(DT), &c.rider(row), F::ONE, &curve, Switches::default(), &mut ground);
-                held += 1;
-                row += 1;
+            let gap = c.word(row, "vsync") != c.word(row - 1, "vsync") + 2;
+            if gap || c.doubled(row) || c.jumped(row) {
+                // The poll read the last frame's target again or the next one's, or the recorder fell
+                // behind and skipped ticks: a tick has no target block, so the camera cannot be stepped through it. Reseed from the first row
+                // from here on that steps cleanly.
+                doubled += 1;
+                if row + 16 > c.rows.len() {
+                    break;
+                }
+                let at = seed(row);
+                skipped += at - row + 1;
+                cam = seeded(&c, at, presets.clone());
+                eye = c.quad(at, "vp_eye");
+                row = at + 1;
                 continue;
             }
             let rider = c.rider(row);
             airborne += rider.airborne as usize;
             still += (rider.speed < 0.0001) as usize;
-            let view = cam.update(F(DT), &rider, F::ONE, &curve, Switches::default(), &mut ground);
-            let bad = differences(&c, row, &cam, view.position);
-            assert!(bad.is_empty(), "{name} row {row} (vsync {}):\n  {}", c.word(row, "vsync"), bad.join("\n  "));
-            replayed += 1;
+            let (before, eye_before) = (ModFollow { race: Race { cam: cam.race.cam.clone() } }, eye);
+            eye = cam.update(F(DT), &rider, F::ONE, &curve, Switches::default(), &mut ground).position;
+            let bad = differences(&c, row, &cam, eye);
+            if bad.is_empty() {
+                replayed += 1;
+            } else {
+                // The poll read this tick's target block but the camera, which steps after the machine,
+                // before or while its frame ran: the lift is written first, the lags next and the
+                // viewport's eye last, and a read can land between any two. Each field must then be the
+                // port's after this tick's step or before it, bit for bit. Under load such late reads
+                // come in runs, each row's camera a tick behind its target.
+                let after = fields(&c, row, &cam, eye);
+                let prior = fields(&c, row, &before, eye_before);
+                let late = differences(&c, row, &before, eye_before);
+                assert!(
+                    either(&after, &prior),
+                    "{name} row {row} (vsync {}), after this tick's step:\n  {}\nand before it:\n  {}",
+                    c.word(row, "vsync"), bad.join("\n  "), late.join("\n  ")
+                );
+                held += 1;
+            }
             row += 1;
         }
-        assert!(replayed > 600, "{name}: only {replayed} rows replayed");
         eprintln!(
             "{name}: {file}, {replayed} rows replayed bit for bit from row {first} ({airborne} airborne, {still} standing; \
-             {held} held, {wrecked} wrecked, {skipped} reseeded after)"
+             {held} read late, {doubled} doubled or dropped, {wrecked} wrecked, {skipped} reseeded after)"
+        );
+        // Every row compared, on time or late, is bit for bit; the reseeds must leave most of the ride.
+        assert!(
+            (replayed + held) * 5 > (c.rows.len() - wrecked) * 4,
+            "{name}: only {} of {} rows with a target compared", replayed + held, c.rows.len() - wrecked
         );
         checked += 1;
     }
