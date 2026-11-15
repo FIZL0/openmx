@@ -9023,8 +9023,8 @@ fn the_race_files_raised_onto_their_props_are_the_track_objects_in_the_images() 
         let act = ee.u32_at(ee.u32_at(ee.u32_at(manager) + 0x58));
         let ram = track_at(&ee, ee.u32_at(act + 0xb8));
 
-        // Stood on the terrain by the terrain object's own query; `Ground` refuses the field's last
-        // sample row and column, which that query answers (sx11 has a point there).
+        // Stood on the terrain by the terrain object's own query, and by `Ground`, which answers the
+        // same out to the field's box (S320: sx11 has a point in the last sample row).
         let mut t = TrackFile::parse(&file).expect("the race file reads");
         let raise = t.snap_to_ground(Some(&mut TerrainQuery(ground.field())));
         let on_terrain = t.clone();
@@ -9033,11 +9033,9 @@ fn the_race_files_raised_onto_their_props_are_the_track_objects_in_the_images() 
         assert_eq!(by_ground.snap_to_ground(Some(&mut own)), raise);
         for (a, b) in on_terrain.paths.iter().flatten().flat_map(|p| &p.nodes).zip(by_ground.paths.iter().flatten().flat_map(|p| &p.nodes)) {
             for (p, q) in a.points.iter().zip(&b.points) {
-                if p.to_bits() != q.to_bits() {
-                    let last = |v: f32, max: f32| !(F(v) < F(max) - ground.spacing);
-                    assert!((last(p.x(), field.max.x()) || last(p.z(), field.max.z())) && q.y() == 0.0, "{track}: Ground's snap differs off the last row: {p:?} against {q:?}");
-                    edge += 1;
-                }
+                assert_eq!(p.to_bits(), q.to_bits(), "{track}: Ground's snap against the field query's");
+                let last = |v: f32, max: f32| !(F(v) < F(max) - ground.spacing);
+                edge += usize::from(last(p.x(), field.max.x()) || last(p.z(), field.max.z()));
             }
         }
         t.raise_on_props(&raise, game_sim::back_search::Scene { props: &props.props, trees: trees.as_ref(), field: Some(bounds) });
@@ -9075,7 +9073,7 @@ fn the_race_files_raised_onto_their_props_are_the_track_objects_in_the_images() 
     if tracks > 0 {
         assert!(flagged > 0 && lifted > 0, "{tracks} tracks raised nothing: {flagged} flagged, {lifted} lifted");
     }
-    eprintln!("{edge} points Ground leaves at 0 in the field's last sample row or column");
+    eprintln!("{edge} points in the field's last sample row or column, stood the same by Ground");
 }
 
 /// A track's knockable props, loaded as the shell loads them (both of its archives asked).
