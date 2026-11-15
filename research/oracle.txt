@@ -12504,6 +12504,10 @@ atv_out_of_bounds           atv 0x004a4f20 (vt +0x16c, the bike in a0): body pos
 #   = event post 0x0025e740 (a0 [0x00475bd0], a1 car+0x698, 8, 14, t0 [car+0xd10]). Vehicle force: gravity
 #   [car+0x118]+0x40, record car+0xf8 (vt +0x88, a1 1), flags byte car+0x75 bit 5 cleared.
 #   Proved: tests/untamed_car.rs (untamed_car_preload_is_the_originals, untamed_vehicle_force_is_the_originals).
+# MD164 — Untamed's baja captured (comment rows only; journal research/journal/2026-11-14-md164-untamed-baja-capture).
+#   The menus' TROPHY TRUCK: baja/buggy vtable 0x003f09d0 in SLUS-21701 (class update 0x004e46c0 at +0x10c), kind
+#   +0xbac = 6. Heap addresses (Free Ride Rocksbury, kept-context/md164/addresses.txt): truck 0x01be4740, body
+#   0x01c16d80, record 0x01c19540, engine 0x01c2b7f0 (4 gears 6/3/1.7/1.1, final 5); idle second truck 0x01c2e250.
 # MD138a — the quad's own clips and the rider's stunt clips (game_render::quad::Driver, quad_draw::stunts /
 #   chassis_locals / rider_stunt; tests/atv_clips.rs). Comment rows only; journal research/journal/*-md138a-atv-clips.
 #   The quad's clip binder atv_stunt_specials 0x004dd280 binds "ATV_bike_%s" only for the stunt table's

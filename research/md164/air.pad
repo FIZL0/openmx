@@ -1,0 +1,8 @@
+# MD164 (MD160's air.pad, unchanged): jump.pad cut at tick 140, the truck in the air off the supercross jump (jump.csv: all four tires off rows 137-158).
+sleep 15t
+down cross
+sleep 40t
+stick l -1 0
+sleep 30t
+stick l 0 0
+sleep 55t

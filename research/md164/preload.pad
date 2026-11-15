@@ -1,0 +1,19 @@
+# MD164: jump.pad with the preload fired on the jump's face. jump.csv has the preload ready (+0xc40, grounded,
+# rising, fast) on rows 119-126: the stick held down (lean past 0.8) from tick 110 arms it as it turns ready,
+# and the stick up at tick 121 (lean past -0.8) fires it. [Preload] is off (PreloadTime 0): the push lasts no
+# time, but Untamed still posts the cue (research/untamed-machines.md, MD81d).
+sleep 15t
+down cross
+sleep 40t
+stick l -1 0
+sleep 30t
+stick l 0 0
+sleep 25t
+stick l 0 1
+sleep 11t
+stick l 0 -1
+sleep 6t
+stick l 0 0
+sleep 218t
+release
+sleep 30t
