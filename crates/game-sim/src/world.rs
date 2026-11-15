@@ -398,7 +398,10 @@ impl<'a> Ground<'a> {
             return None;
         }
         let (sx, sz) = (ix as u32, iz as u32);
-        if sx + 1 >= self.samples_x || sz + 1 >= self.samples_z {
+        // `samples_x` × `samples_z` counts cells: each leaf block's 17th row and column carry the far
+        // corners, so the last cell (out to the field's box, [`Ground::field`]) is read as any other
+        // (S320: sx11's race file has a node point in it).
+        if sx >= self.samples_x || sz >= self.samples_z {
             return None;
         }
         let quad = self.terrain.cell(sx, sz, 1)?;
