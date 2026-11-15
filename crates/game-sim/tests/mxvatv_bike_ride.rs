@@ -3358,6 +3358,15 @@ impl Listeners for TreeInRam<'_> {
         } else if e == BIKE + 0xc {
             assert_eq!(f, VEHICLE_THUNK, "the bike's listener's step");
             assert_eq!(vt(self.ee, 0x45c), STUCK, "the bike's stuck timer");
+            if in_rust("no original beside") {
+                // F31b5: the pure frame runs the port alone; the check beside it is the other tests'.
+                let mut m = TailInRam { ee: &mut *self.ee, v: tail::Vehicle::default(), last: Vec::new() };
+                m.read();
+                tail::vehicle_update(&mut m, dt);
+                m.write();
+                self.bikes += 1;
+                return;
+            }
             let (ram, spr) = (self.ee.ram.clone(), self.ee.spr.clone());
             self.ee.set(28, GP);
             let r0 = self.ee.ran;
@@ -9219,6 +9228,12 @@ thread_local! {
     static INTERPRETED: RefCell<BTreeMap<String, u64>> = const { RefCell::new(BTreeMap::new()) };
 }
 
+thread_local! {
+    /// F31b5: every instruction the interpreter ran in [`replay_pure`]'s second run's frames, summed
+    /// until taken.
+    static FRAME_RAN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// Books `n` instructions to `part` (a part nested in one of [`posts_frame`]'s, counted in both).
 fn book(part: impl Into<String>, n: u64) {
     if n > 0 {
@@ -9543,7 +9558,9 @@ fn replay_pure(name: &str, rust: &[&'static str]) -> Option<(Vec<bool>, BTreeMap
         if watch {
             b.reads.replace(Some(Default::default()));
         }
+        let r0 = b.ran;
         let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| posts_frame(&mut b, dt, &map, &mut noise_b, true)));
+        FRAME_RAN.with(|n| n.set(n.get() + (b.ran - r0)));
         IN_RUST.with(|x| x.borrow_mut().clear());
         let (heads, steps, posts, answered) = ran.unwrap_or_else(|e| std::panic::resume_unwind(e));
         if watch {
@@ -9722,6 +9739,65 @@ fn flip_replays_with_every_port_at_once() {
     let drew: Vec<&String> = ran.keys().filter(|k| k.starts_with("the tail: the update's") && k.ends_with("that drew rand")).collect();
     assert_eq!(drew, Vec::<&String>::new(), "the part walk handed on a rand draw: {ran:?}");
     assert!(ran.contains_key("the tail: the update's emitter other kind send"), "no other kind's batch was sent: {ran:?}");
+}
+
+/// **F31b5 — the whole frame in Rust**: [`replay_pure`] with every port of [`replay_whole`], the
+/// rider leaf's (F31b5i), the wheel contacts' (F52), the other listeners dropped (F31b5m), the part
+/// walk's models dropped (F31b5j: they give the bike nothing) and the original vehicle update not run
+/// beside its port (`"no original beside"`). Each row is C15's word for word, the bike and its blocks
+/// the handing run's, and the frame reads no byte where the RAM parts from it. Answers the wreck
+/// state per row, where the RAM parts, the interpreter's census by part, and every instruction the
+/// interpreter ran in the second run's frames ([`FRAME_RAN`]).
+fn replay_in_pure_rust(name: &str) -> Option<(Vec<bool>, Vec<String>, BTreeMap<String, u64>, u64)> {
+    INTERPRETED.with(|m| m.borrow_mut().clear());
+    FRAME_RAN.with(|n| n.set(0));
+    let ran = replay_pure(
+        name,
+        &[
+            "PartMove",
+            "Gather",
+            "record sweep",
+            "record search",
+            "wheel contacts",
+            "frame post",
+            "fade search",
+            "kind clear",
+            "frame post tells dropped",
+            "hud on its own heap",
+            "rider leaf",
+            "other listeners dropped",
+            "part leaf dropped: models",
+            "no original beside",
+        ],
+    );
+    let census = INTERPRETED.with(|m| std::mem::take(&mut *m.borrow_mut()));
+    let total = FRAME_RAN.with(|n| n.replace(0));
+    let (w, _, off) = ran?;
+    eprintln!("{name}: the whole frame in Rust, the interpreter ran {total} instructions: {census:?}");
+    Some((w, off, census, total))
+}
+
+/// **F31b5 — C15's ride, the whole frame in Rust**: ride-2 bit-exact on all 459 rows with the
+/// interpreter running no instruction of any frame.
+#[test]
+#[ignore = "F31b5: the interpreter still runs ~1.6k instructions a frame (journal 2026-11-14)"]
+fn ride_replays_in_pure_rust() {
+    let Some((w, _off, census, total)) = replay_in_pure_rust("ride-2") else { return };
+    assert_eq!(w.len(), 459);
+    assert!(w.iter().all(|w| !w), "the ride never wrecks");
+    assert_eq!(total, 0, "the interpreter ran: {census:?}");
+}
+
+/// **F31b5 — C15's flip, the whole frame in Rust**: flip-1 bit-exact on all 465 rows, wrecked on row
+/// 125 and put back on row 193, with the interpreter running no instruction of any frame.
+#[test]
+#[ignore = "F31b5: the interpreter still runs ~1.6k instructions a frame (journal 2026-11-14)"]
+fn flip_replays_in_pure_rust() {
+    let Some((w, _off, census, total)) = replay_in_pure_rust("flip-1") else { return };
+    assert_eq!(w.len(), 465);
+    let changes: Vec<usize> = (1..w.len()).filter(|&r| w[r] != w[r - 1]).collect();
+    assert_eq!(changes, [125, 193], "wrecked on row 125, put back on row 193");
+    assert_eq!(total, 0, "the interpreter ran: {census:?}");
 }
 
 /// F31b5o: where the RAM parts from the handing run's with the frame post's tells but the HUD's left
