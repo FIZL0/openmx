@@ -6406,17 +6406,23 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     if let Some((bytes, _)) = atv_files.as_ref().and_then(|o| o.camera.clone()) {
         car_presets.push((Kind::Atv, bytes));
     }
+    // And the MX vs. ATV car's (MD82d), on its pack's own copy of its kind's camera file.
+    let car_camera_file = garage.mxvatv_car.as_ref().and_then(|c| mxvatv_car_camera(&args, c));
+    if let Some((bytes, _)) = &car_camera_file {
+        car_presets.push((Kind::MxvatvCar, bytes.clone()));
+    }
     let car_cameras: Vec<(Kind, Race)> = car_presets
         .iter()
         .map(|(kind, bytes)| {
             let file = car_presets_file(*kind);
             let file = match *kind {
                 Kind::Atv => atv_files.as_ref().and_then(|o| o.camera.as_ref()).map_or(file, |(_, f)| *f),
+                Kind::MxvatvCar => car_camera_file.as_ref().map_or(file, |(_, f)| *f),
                 _ => file,
             };
             let mut cam = Race::new(kind_presets(*kind, bytes, layout, Display::Television, file), F(REVERSE_SPEED));
             cam.cam.ceiling = Race::ceiling_for_fog(F(look.fog_far));
-            if let Some(start) = Preset::find(&cam.cam.presets, CAR_CAMERA).filter(|_| *kind != Kind::Atv) {
+            if let Some(start) = Preset::find(&cam.cam.presets, CAR_CAMERA).filter(|_| !matches!(*kind, Kind::Atv | Kind::MxvatvCar)) {
                 cam.cam.set_preset(start);
             }
             if !cam.cam.presets.is_empty() {
@@ -10106,6 +10112,13 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             let flying = seat.garage.up == Kind::Biplane && rig.plane_camera.is_some();
             // A car has its own (S246), on its kind's presets, sharing the bike's slots.
             let up = seat.garage.up;
+            // A mod machine on its own FC_ file is followed as SLUS-21104 follows it (MD82d).
+            let own_camera = match up {
+                Kind::Biplane => flying && rig.flier_cameras[0].is_some(),
+                Kind::Kiowa => rig.heli_camera.is_some() && rig.flier_cameras[1].is_some(),
+                _ => rig.car_cameras.iter().any(|(k, _)| *k == up),
+            };
+            let mod_follows = chase::mod_follows(up, own_camera);
             let car = rig.car_cameras.iter_mut().find(|(k, _)| *k == up);
             let (follow, fov_ease, look_back) = match (up, &mut rig.plane_camera, &mut rig.heli_camera, car) {
                 (Kind::Biplane, Some(cam), _, _) | (Kind::Kiowa, _, Some(cam), _) => (cam, &mut rig.fov_ease.1, &mut rig.look_back.1),
@@ -10241,7 +10254,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 // the dirt on the first dip, and under the eye, which keeps it 4.8 ft over the ground
                 // (S103). This frame has no obstacle push-out — the base class's did, and the base
                 // class's frame is not the one the disc runs.
-                let mut view = follow.update(
+                let step = if mod_follows { chase::mod_follow } else { Race::update };
+                let mut view = step(
+                    follow,
                     dt,
                     &rider,
                     F(NEAR_CLIP),
@@ -12474,7 +12489,7 @@ fn cars_for_display(layout: Layout, display: Display, cars: &[(Kind, Vec<u8>)]) 
 /// [`layout_presets`], the quad's MX vs. ATV `.pb`/`.ini` by [`flier_layout_presets`].
 fn kind_presets(kind: Kind, bytes: &[u8], layout: Layout, display: Display, file: &str) -> Vec<Preset> {
     match kind {
-        Kind::Atv => flier_layout_presets(bytes, layout, display),
+        Kind::Atv | Kind::MxvatvCar => flier_layout_presets(bytes, layout, display),
         _ => layout_presets(bytes, layout, display, file),
     }
 }
@@ -13129,6 +13144,24 @@ fn atv_hands(atv: &vehicle::AtvRide) -> Option<audio::Hands> {
         vel: [v.x(), v.y(), v.z()],
     };
     Some(hands.wrecked(r.down()))
+}
+
+/// The MX vs. ATV car's own follow-camera file (MD82d): its kind's `Cam\FC_<kind>Default.pb`
+/// ([`chase::mod_presets`], the file SLUS-21104 picks by the car's class) off the car's pack, and its
+/// name. `None`, a line saying so, where the pack is gone or lacks the file or it holds no presets
+/// for the full screen: the bike's camera follows the car then.
+fn mxvatv_car_camera(args: &Args, car: &vehicle::MxvatvCarRide) -> Option<(Vec<u8>, &'static str)> {
+    let file = chase::mod_presets(chase::mxvatv_car_machine(car.machine));
+    let pack = machine_packs::find(&mods_dir(args)?).0.into_iter().find(|p| p.id == car.pack);
+    let bytes = pack.as_ref().and_then(|p| p.files.read(file).ok());
+    let presets = bytes.as_deref().map(|b| chase::flier_presets(b, game_sim::camera::Aspect::Standard, game_sim::camera::Viewport::Full)).unwrap_or_default();
+    if presets.is_empty() {
+        println!("mxvatv car: {} has no {file} with presets; the bike's camera follows it", car.pack);
+        return None;
+    }
+    let names: Vec<&str> = presets.iter().map(|p| p.name.as_str()).collect();
+    println!("mxvatv car: {}'s camera, {} presets in {file}: {}", car.pack, presets.len(), names.join(", "));
+    bytes.map(|b| (b, file))
 }
 
 /// The MX vs. ATV car the ride offers (MD39c): `--mxvatv-car`'s car (settings.txt's `mxvatv_car`

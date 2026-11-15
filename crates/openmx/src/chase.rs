@@ -219,6 +219,53 @@ pub fn atv_presets(
     (Vec::new(), "")
 }
 
+/// Which of [`mod_presets`]' files one of MX vs. ATV's five cars reads (MD82d): its kind's.
+pub fn mxvatv_car_machine(m: game_sim::car::MxvatvMachine) -> ModMachine {
+    use game_sim::car::MxvatvMachine as M;
+    match m {
+        M::Buggy => ModMachine::Buggy,
+        M::MonsterTruck => ModMachine::MonsterTruck,
+        M::Baja => ModMachine::Baja,
+        M::GolfCart => ModMachine::GolfCart,
+        M::Sandrail => ModMachine::Sandrail,
+    }
+}
+
+/// Is the machine `up` followed by SLUS-21104's camera ([`mod_follow`]) rather than MX Unleashed's
+/// race camera (MD82d): MX vs. ATV's quad and cars and a flier off a flier pack, each while its camera
+/// is on its own `FC_` file (`own`). A mod machine without one rides the bike's (or the disc flier's)
+/// presets, and that camera steps as MX Unleashed's does.
+pub fn mod_follows(up: Kind, own: bool) -> bool {
+    own && matches!(up, Kind::Atv | Kind::MxvatvCar | Kind::Biplane | Kind::Kiowa)
+}
+
+/// One frame of a mod machine's follow camera (MD82d): the shell keeps every follow camera as MX
+/// Unleashed's [`game_sim::camera::Race`] (the look-back, the stick, the presets and framing all reach
+/// it there), and this steps it as SLUS-21104's `MXCameraFollow` steps
+/// ([`game_sim::camera::ModFollow::update`], MD82b, MD82c) — which every MX vs. ATV machine, fliers
+/// included, is followed by. For the frame the eye has that camera's no ceiling and its speed
+/// reference; the shell's own (the fog's ceiling) are put back after, for a camera the machine may
+/// later share with MX Unleashed's presets.
+pub fn mod_follow(
+    cam: &mut game_sim::camera::Race,
+    dt: F,
+    rider: &Ridden,
+    near_clip: F,
+    curve: &game_sim::camera::CurveTable,
+    switches: game_sim::camera::Switches,
+    scene: &mut impl game_sim::camera::Surface,
+) -> game_sim::camera::View {
+    let mut follow = game_sim::camera::ModFollow::new(Vec::new());
+    let (ceiling, reference) = (follow.race.cam.ceiling, follow.race.cam.speed_reference);
+    std::mem::swap(&mut follow.race, cam);
+    let kept = (follow.race.cam.ceiling, follow.race.cam.speed_reference);
+    (follow.race.cam.ceiling, follow.race.cam.speed_reference) = (ceiling, reference);
+    let view = follow.update(dt, rider, near_clip, curve, switches, scene);
+    (follow.race.cam.ceiling, follow.race.cam.speed_reference) = kept;
+    std::mem::swap(&mut follow.race, cam);
+    view
+}
+
 /// A car's target block (S149e, S246), as the original's car fills it once a frame in its post
 /// listener after the measure (`research/oracle.txt`, S246): the rows are the measure's, the velocity
 /// the body's, the lean word the measure's world rates (the camera reads the yaw), the flag "no tire
