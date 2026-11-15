@@ -53,6 +53,10 @@ pub struct Ee {
     /// Every byte address read while this is `Some` — what a function depends on, for finding which
     /// parts of a RAM dump a replay has to lay in. Off (`None`) unless a test turns it on.
     pub reads: std::cell::RefCell<Option<BTreeSet<u32>>>,
+    /// Every byte written while this is `Some`, in order, as (pc of the store, address, byte) — the
+    /// machine's every instant inside a call, for telling which point of a frame a mid-frame capture
+    /// row was read at. Off (`None`) unless a test turns it on; nothing clears it but the test.
+    pub log: std::cell::RefCell<Option<Vec<(u32, u32, u8)>>>,
     /// Instructions executed by the last call.
     pub steps: u64,
     /// Instructions executed by every call since the machine was made (nested calls too, counted once).
@@ -97,6 +101,7 @@ impl Ee {
             spr: vec![0; SPR],
             written: BTreeSet::new(),
             reads: std::cell::RefCell::new(None),
+            log: std::cell::RefCell::new(None),
             steps: 0,
             ran: 0,
             stack,
@@ -212,6 +217,10 @@ impl Ee {
         let m = if spr { &mut self.spr } else { &mut self.ram };
         for k in 0..n {
             m[o + k] = (v >> (8 * k)) as u8;
+        }
+        if let Some(log) = self.log.get_mut().as_mut() {
+            let pc = self.pc.wrapping_sub(4);
+            log.extend((0..n).map(|k| (pc, a.wrapping_add(k as u32), (v >> (8 * k)) as u8)));
         }
         self.written.extend(a..a.wrapping_add(n as u32));
     }
