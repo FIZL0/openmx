@@ -9687,6 +9687,9 @@ fn ride_replays_with_every_port_at_once() {
     // F31b5k: the connection's queue is the port's; the interpreter runs none of it.
     assert!(!ran.keys().any(|k| k.contains("NetQueue")), "{ran:?}");
     three_served(&ran);
+    // F31b5n: nothing the part walk hands on draws `rand`.
+    let drew: Vec<&String> = ran.keys().filter(|k| k.starts_with("the tail: the update's") && k.ends_with("that drew rand")).collect();
+    assert_eq!(drew, Vec::<&String>::new(), "the part walk handed on a rand draw: {ran:?}");
 }
 
 /// **F31b5 — C15's flip, every port at once**: flip-1 bit-exact, wrecked on row 125 and put back on
