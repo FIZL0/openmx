@@ -24,9 +24,35 @@ pub struct Look {
     pub parts: Vec<Part>,
     /// The ATV motion set's clips by name, which [`rider`] binds into the rider's own set.
     pub clips: Vec<(String, Clip)>,
-    /// The quad's own clips (`ATV_Bike_*`), by the name after the prefix: read, and played by
-    /// nothing yet — the quad starts no stunt (MD123).
+    /// The quad's own clips (`ATV_Bike_*`), by the name after the prefix, lowercase.
     pub machine_clips: Vec<(String, Clip)>,
+    /// MD138a: the rider's stunt table as the quad's clips read it ([`stunts`]), each row's clip in
+    /// [`Look::machine_clips`] and its rider's clip in [`Look::clips`] (`None` for none), and the
+    /// riding pose's three clips (fore, middle, back) off the build's motion set.
+    pub stunts: Vec<quad::Stunt>,
+    pub stunt_clips: Vec<Option<usize>>,
+    pub rider_stunts: Vec<Option<usize>>,
+    pub pose_clips: Vec<Clip>,
+}
+
+/// The stunts the original's quad has a row for: the table's first 46, the ids below its riding pose.
+const STUNTS: usize = game_sim::quad::RIDING_POSE as usize;
+
+/// The quad's clip table off the pack's stunt table (MD138a), as the original binds it: a row of the
+/// first [`STUNTS`] marked `UsedForBike` takes the quad's `ATV_Bike_<Name>` when the pack has it,
+/// and one with `HasAnimation` the rider's `ATV_rider_<Name>`. The rows, and each one's place in
+/// `machine` and in `rider` (the motion sets' clips by name).
+pub fn stunts(rows: &[game_sim::trick_pack::Row], machine: &[(String, Clip)], rider: &[(String, Clip)]) -> (Vec<quad::Stunt>, Vec<Option<usize>>, Vec<Option<usize>>) {
+    let (mut table, mut on_quad, mut on_rider) = (Vec::new(), Vec::new(), Vec::new());
+    for r in rows.iter().take(STUNTS) {
+        let name = &r.stunt.name;
+        let own = r.stunt.for_bike.then(|| machine.iter().position(|(n, _)| n.eq_ignore_ascii_case(name))).flatten();
+        let ridden = r.has_animation.then(|| rider.iter().position(|(n, _)| n.eq_ignore_ascii_case(&format!("ATV_rider_{name}")))).flatten();
+        table.push(quad::Stunt { name: name.clone(), duration: r.stunt.duration.0, machine: own.map(|i| machine[i].1.duration()) });
+        on_quad.push(own);
+        on_rider.push(ridden);
+    }
+    (table, on_quad, on_rider)
 }
 
 /// The build a quad of `phy` is drawn as: the first of the pack's whose chassis is the one
@@ -64,7 +90,14 @@ pub fn load(assets: &mut Assets, packs: &[Pack], atv: &AtvRide) -> Result<Look, 
         .collect();
     let clips = pack.rider_clips()?.0;
     let machine_clips = pack.machine_clips()?;
-    Ok(Look { sub: build.sub.clone(), chassis, parts, clips, machine_clips })
+    let (stunts, stunt_clips, rider_stunts) = stunts(&pack.stunts()?, &machine_clips, &clips);
+    let pose_clips = pack
+        .build_clips(&build.mcf)?
+        .into_iter()
+        .filter(|(n, _)| n.to_ascii_lowercase().starts_with("atv_bike_air_"))
+        .map(|(_, c)| c)
+        .collect();
+    Ok(Look { sub: build.sub.clone(), chassis, parts, clips, machine_clips, stunts, stunt_clips, rider_stunts, pose_clips })
 }
 
 /// The four wheels as the rig reads them off the quad out: each wheel's spin angle, its steer and its
@@ -86,9 +119,53 @@ pub fn placed(atv: &AtvRide) -> Option<M4> {
     Some(M4(std::array::from_fn(|r| std::array::from_fn(|c| m.0[r].0[c]))))
 }
 
-/// The chassis posed by `wheels` ([`quad::pose`]); empty if it is not in `assets`.
-pub fn pose(look: &Look, assets: &Assets, wheels: &[Tire; 4]) -> Vec<M4> {
-    assets.models.get(&look.chassis).map_or(Vec::new(), |l| quad::pose(&l.model, wheels, bars(wheels)))
+/// The chassis posed by `wheels` over its clip ([`chassis_locals`], [`quad::pose_from`]); empty if
+/// it is not in `assets`.
+pub fn pose(look: &Look, assets: &Assets, wheels: &[Tire; 4], atv: &AtvRide) -> Vec<M4> {
+    assets.models.get(&look.chassis).map_or(Vec::new(), |l| quad::pose_from(&l.model, chassis_locals(look, &l.model, atv), wheels, bars(wheels)))
+}
+
+/// The quad's clip by its place in the clip table ([`quad::clip_of`]).
+fn clip(look: &Look, id: i32) -> Option<&Clip> {
+    quad::clip_of(id, |i| look.stunt_clips.get(i).copied().flatten().map(|k| &look.machine_clips[k].1), |k| look.pose_clips.get(k))
+}
+
+/// The chassis' locals as this frame's clip leaves them (MD138a, [`quad::Driver::played`]), faded
+/// from the one before the last stop over the model's own: the model's own with no clip.
+pub fn chassis_locals(look: &Look, model: &game_render::psg::Model, atv: &AtvRide) -> Vec<M4> {
+    let skeleton = game_render::skin::Skeleton::of(model);
+    let rest = skeleton.nodes(&game_render::skin::Pose::new(model.nodes.len()));
+    let driver = atv.ridden.as_ref().and_then(|q| q.clips.as_ref());
+    let Some(played) = driver.and_then(|d| d.played) else { return model.nodes.iter().map(|n| n.local).collect() };
+    let under = driver.and_then(|d| d.under).and_then(|u| quad::lay(u, &skeleton, &rest, |id| clip(look, id))).map_or(rest.clone(), |p| skeleton.nodes(&p));
+    match quad::lay(played, &skeleton, &under, |id| clip(look, id)) {
+        Some(p) => skeleton.locals(&p),
+        None => model.nodes.iter().map(|n| n.local).collect(),
+    }
+}
+
+/// The names of this frame's clips, for the trace: the chassis' (`ATV_Bike_<name>` or the riding
+/// pose's) and the rider's stunt's.
+pub fn clip_names(look: &Look, atv: &AtvRide) -> (String, String) {
+    let Some(d) = atv.ridden.as_ref().and_then(|q| q.clips.as_ref()) else { return ("none".into(), "none".into()) };
+    let name = |id: i32| -> String {
+        let p = game_sim::quad::POSE_CLIPS;
+        match d.name(id) {
+            Some(n) if clip(look, id).is_some() => format!("ATV_Bike_{n}"),
+            _ if (p[0]..=p[2]).contains(&id) => ["ATV_Bike_Air_Fwd", "ATV_Bike_Air_Mid", "ATV_Bike_Air_Bck"][(id - p[0]) as usize].into(),
+            _ => "none".into(),
+        }
+    };
+    let chassis = d.played.map_or("none".into(), |p| name(p.clip()));
+    let rider = rider_stunt(look, atv).map_or("none".into(), |(n, _)| n.to_owned());
+    (chassis, rider)
+}
+
+/// The rider's stunt clip playing (MD138a): its name in [`Look::clips`] and how far into it.
+pub fn rider_stunt<'a>(look: &'a Look, atv: &AtvRide) -> Option<(&'a str, f32)> {
+    let (id, t) = atv.ridden.as_ref()?.clips.as_ref()?.rider?;
+    let k = (*look.rider_stunts.get(usize::try_from(id).ok()?)?)?;
+    Some((look.clips[k].0.as_str(), t))
 }
 
 /// Where each part hangs: its placement node's posed matrix, or the chassis' origin for `Bike` (or a
@@ -103,8 +180,8 @@ fn part_at(look: &Look, assets: &Assets, pose: &[M4], part: &Part, at: M4) -> M4
 
 /// The quad placed at `at` as the GPU draws it: the chassis skinned by its pose, pushed on the end of
 /// `poses`, which the actor names, and each part on its node. A machine casts no shadow.
-pub fn actors<'a>(look: &'a Look, assets: &Assets, wheels: &[Tire; 4], at: M4, alpha: f32, poses: &mut Vec<Vec<M4>>) -> Vec<Actor<'a>> {
-    let pose = pose(look, assets, wheels);
+pub fn actors<'a>(look: &'a Look, assets: &Assets, wheels: &[Tire; 4], atv: &AtvRide, at: M4, alpha: f32, poses: &mut Vec<Vec<M4>>) -> Vec<Actor<'a>> {
+    let pose = pose(look, assets, wheels, atv);
     let mut out: Vec<Actor<'a>> = look
         .parts
         .iter()
@@ -121,8 +198,8 @@ pub fn actors<'a>(look: &'a Look, assets: &Assets, wheels: &[Tire; 4], at: M4, a
 /// The quad as the software path draws it: the chassis skinned by its pose into `copy`, the seat's
 /// own copy (made here the first time), and the parts on their nodes, as [`crate::car_draw::skinned`]
 /// the cars.
-pub fn skinned<'a>(look: &'a Look, copy: &'a str, assets: &mut Assets, wheels: &[Tire; 4], at: M4) -> Vec<(&'a str, M4)> {
-    let pose = pose(look, assets, wheels);
+pub fn skinned<'a>(look: &'a Look, copy: &'a str, assets: &mut Assets, wheels: &[Tire; 4], atv: &AtvRide, at: M4) -> Vec<(&'a str, M4)> {
+    let pose = pose(look, assets, wheels, atv);
     let mut out: Vec<(&'a str, M4)> = look.parts.iter().map(|part| (part.model.as_str(), part_at(look, assets, &pose, part, at))).collect();
     if !assets.models.contains_key(copy)
         && let Some(own) = assets.models.get(&look.chassis).cloned()
@@ -163,10 +240,10 @@ pub fn rider(look: &Look, body: &mut game_render::rider::Body, atv: &AtvRide, as
     }
     let loaded = &assets.models.get(&look.chassis)?.model;
     let wheels = wheels(atv);
-    let posed = quad::pose(loaded, &wheels, bars(&wheels));
+    let posed = quad::pose_from(loaded, chassis_locals(look, loaded, atv), &wheels, bars(&wheels));
     let anchors = game_render::rider::anchors_of(&game_render::skin::Skeleton::of(loaded), &posed);
     let (row, phase, fore_aft) = row(atv);
-    quad::rider_palette(body, &anchors, row, phase, fore_aft)
+    quad::rider_palette_stunt(body, &anchors, row, phase, fore_aft, rider_stunt(look, atv))
 }
 
 /// `--trace-picture`'s line for the quad drawn this frame: the renderer, the chassis, where its
@@ -176,8 +253,9 @@ pub fn trace(p: usize, renderer: &str, look: &Look, at: M4, wheels: &[Tire; 4], 
     let o = at.0[3];
     let w: Vec<String> = wheels.iter().map(|t| format!("{:.2}/{:.2}/{:.2}", t.spin, t.steer, t.compression)).collect();
     let (row, phase, fore_aft) = row(atv);
+    let (chassis, stunt) = clip_names(look, atv);
     println!(
-        "picture atv: seat {p} {renderer} {} at {:.2} {:.2} {:.2} wheels {} parts {} row {} {:.2} {:.2}",
+        "picture atv: seat {p} {renderer} {} at {:.2} {:.2} {:.2} wheels {} parts {} row {} {:.2} {:.2} clip {chassis} stunt {stunt}",
         look.chassis,
         o[0],
         o[1],

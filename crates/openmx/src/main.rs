@@ -6380,6 +6380,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         .collect();
     // And the quad's chassis, parts and rider clips, drawn while it is out (MD138).
     let quad_look = garage.atv.as_ref().and_then(|atv| atv_look(&args, &mut assets, atv));
+    // MD138a: and its clips ticked with its ride, off the look's stunt table (the other seats' quads
+    // are this one's, copied).
+    let mut garage = garage;
+    if let (Some(atv), Some(look)) = (garage.atv.as_mut(), quad_look.as_ref()) {
+        atv.stunts = look.stunts.clone();
+    }
     // The helicopter's own camera (P216), built as the plane's is, on `HeloCPresets.ini` (in a
     // freeride track's second archive, or free06's) and starting on its first preset.
     // The file's bytes are kept, as the plane's are, for a split's copy of its presets and the
@@ -11106,7 +11112,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 let Some(at) = quad_drawn(atv, before, &blend) else { continue };
                 let alpha = vehicle::shown_alpha(1.0, seat.paused);
                 let wheels = quad_draw::wheels(atv);
-                actors.extend(quad_draw::actors(look, &assets, &wheels, at, alpha, &mut gpu_poses));
+                actors.extend(quad_draw::actors(look, &assets, &wheels, atv, at, alpha, &mut gpu_poses));
                 if args.trace_picture {
                     quad_draw::trace(p, "gpu", look, at, &wheels, atv);
                 }
@@ -11562,7 +11568,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 let before = before_quads.get(p).copied().flatten().filter(|_| !cut[p]);
                 let Some(at) = quad_drawn(atv, before, &blend) else { continue };
                 let wheels = quad_draw::wheels(atv);
-                actor.extend(quad_draw::skinned(look, &quad_copies[p], &mut assets, &wheels, at));
+                actor.extend(quad_draw::skinned(look, &quad_copies[p], &mut assets, &wheels, atv, at));
                 if args.trace_picture {
                     quad_draw::trace(p, "software", look, at, &wheels, atv);
                 }
