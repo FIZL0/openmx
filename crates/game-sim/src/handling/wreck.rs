@@ -42,6 +42,7 @@
 
 use crate::air::{cross, normalize};
 use ps2_float::vu::{Dest, Field};
+use ps2_float::fpu::Acc;
 use ps2_float::{F, Vf, fpu};
 
 /// The quadword the wreck test compares a handed-in position with, and the unwreck's rest (0, 0, 0,
@@ -53,6 +54,18 @@ pub const REST_DAMPING: u32 = 0x0039_6fd0;
 pub const WRECKS_ON: u32 = 0x0052_5350;
 pub const STRUCK_CLASS: u32 = 0x0054_2db0;
 pub const THROW_SCALE: u32 = 0x0052_6598;
+/// The quadword the out-of-bounds throw's direction is built in (its `w` stays): rodata.
+pub const THROW_START: u32 = 0x0052_5240;
+
+/// The out-of-bounds check's margin to the map's edge; the throw's fall (its time is `k = 2·sqrt`
+/// of it), its cap on the speed toward the middle, and its lift `240/k + 16.1·k`; the spin each
+/// `rand` unit is scaled by (MXVehicle's, as [`crate::biplane::throw_mxvatv`]'s).
+const EDGE_MARGIN: f32 = 150.0;
+const THROW_FALL: f32 = f32::from_bits(0x416e_8262);
+const THROW_CAP: f32 = f32::from_bits(0x4501_9999);
+const THROW_LIFT: f32 = 240.0;
+const THROW_UP: f32 = f32::from_bits(0x4180_cccd);
+const THROW_SPIN: [f32; 3] = [0.5, f32::from_bits(0x3ecc_cccd), f32::from_bits(0x3f33_3333)];
 
 /// The wreck's reasons the frame itself enters: out of bounds, no control, and the striker's and
 /// flat's 5, scenery 6, joust 7, struck 15.
@@ -436,6 +449,63 @@ pub fn wreck_test(m: &mut impl Wrecks, at: u32, dt: F) {
         let n = w(m, 0x6c4).wrapping_add(1);
         put(m, 0x6c4, n);
     }
+}
+
+/// **The out-of-bounds check** (MXVehicle's vt `+0x16c`, [`Out::OutOfBounds`]; F31b5s): with the
+/// bike held to the map (`+0x308`), the body's position (its `+0x70`) against the map's extent (the
+/// world's `+0x3b0` terrain, its extent block at `+0x43c`: width `+0x40`, depth `+0x48`) with
+/// [`EDGE_MARGIN`] to spare on every side. Inside, or not held: 0. Outside, the throw back toward the
+/// middle — [`crate::biplane::throw_mxvatv`]'s arithmetic on the bike's words: the body's velocity
+/// (`+0x80`, then its `y` lifted), the world's drag word (the bike's `+0xe8` target's `+4`) halved,
+/// three `rand`s into the body's rates (`+0x1d0`, `w` 1) — and 1.
+pub fn out_of_bounds(m: &mut impl Wrecks) -> u32 {
+    if w(m, 0x308) == 0 {
+        return 0;
+    }
+    let body = w(m, BODY);
+    let terrain = w(m, 0x3b0);
+    let extent = m.word(terrain + 0x43c);
+    let (depth, width) = (f(m, extent + 0x48), f(m, extent + 0x40));
+    let margin = F(EDGE_MARGIN);
+    let x = f(m, body + 0x70);
+    let inside = !(x < margin) && x <= width - margin && {
+        let z = f(m, body + 0x78);
+        !(z < margin) && z <= depth - margin
+    };
+    if inside {
+        return 0;
+    }
+    let half = F(0.5);
+    let start = quad(m, THROW_START);
+    let target = Vf::new((half * width).to_f32(), f(m, body + 0x74).to_f32(), (half * depth).to_f32(), start.w());
+    let at = quad(m, body + 0x70);
+    let mut toward = target.merge(Dest::XYZ, target.sub(at));
+    let length = Acc::mula(F(toward.x()), F(toward.x())).madda(F(toward.y()), F(toward.y())).madd(F(toward.z()), F(toward.z()));
+    if F::ZERO == length {
+        toward = quad(m, ORIGIN);
+    } else {
+        let r = F::ONE.rsqrt(length);
+        toward = Vf::new((F(toward.x()) * r).to_f32(), (F(toward.y()) * r).to_f32(), (F(toward.z()) * r).to_f32(), toward.w());
+    }
+    let k = F(2.0) * F(THROW_FALL).sqrt();
+    let speed = F(THROW_CAP).min(half * width) / k;
+    let lift = Acc::adda(F::ZERO, F(THROW_LIFT) / k).madd(F(THROW_UP), k);
+    let velocity = toward.merge(Dest::XYZ, toward.mul(Vf::splat(speed.to_f32())));
+    set_quad(m, body + 0x80, velocity);
+    let y = f(m, body + 0x84) + lift;
+    m.set(body + 0x84, y.to_bits());
+    let world = w(m, 0xe8);
+    let drag = f(m, world + 4) * half;
+    m.set(world + 4, drag.to_bits());
+    for (k, spin) in THROW_SPIN.into_iter().enumerate() {
+        let x = m.out(Out::Rand) as i32;
+        let unit = fpu::mul(f32::from_bits(0x3000_0000), fpu::from_i32(x));
+        let body = w(m, BODY);
+        m.set(body + 0x1d0 + 4 * k as u32, (F(spin) * F(unit)).to_bits());
+    }
+    let body = w(m, BODY);
+    m.set(body + 0x1dc, F::ONE.to_bits());
+    1
 }
 
 /// **The settle** (vt `+0x4a8`, [`Out::Settle`]), the stunts' end with a player on the bike (the run
