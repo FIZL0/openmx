@@ -12,6 +12,15 @@ const READER: [(u32, u32); 7] =
     [(0x310, 8), (0x12a0, 0x18), (0x12c0, 8), (0x14c8, 4), (0x14d4, 4), (0x14ec, 4), (0x17ac, 4)];
 /// The put-back spot and its orientation, quad-relative (F31's).
 const SPOT: [(u32, u32); 1] = [(0xd38, 0x38)];
+/// The rider settled, quad-relative (MD148): the rider's update copies "a ragdoll bone touches" here
+/// every frame, after the quad's wreck clock has read it, so the clock arms on the frame after the one
+/// that set it. The interpreter's ragdoll leaves the original's at the wreck's first frame, so the word
+/// is laid with the spot, from the row that holds that frame's copy ([`RIDER_COPY`]).
+const SETTLED: [(u32, u32); 1] = [(0x920, 4)];
+/// A word the rider's update copies into the quad every frame (a bone's position, F31's): equal to the
+/// machine's in row r when the recorder read the row after the rider's update, and in row r + 1 when
+/// it read the row after the quad's frame but before the rider's (the s- rides').
+const RIDER_COPY: u32 = 0x930;
 
 type Row = HashMap<String, String>;
 
@@ -82,9 +91,10 @@ fn c28_heap(state: &str) -> image::Heap {
 /// Replays capture `name`'s first `upto` rows off C28's image `state` through [`sim_chain`] (the
 /// original's whole sim frame, and with `port` the frame in pieces beside it, every RAM word equal):
 /// before each row's frame the pad reader's stores are laid on both machines, after it every captured
-/// word of the body, engine and wheels must be the row's, and the row's put-back spot is laid for the
-/// next. The quad's own words that differ are told apart by whether the frame wrote them, and listed
-/// (to `MD37B_LOG` if set): they are bookkeeping the physics does not read back (see the journal).
+/// word of the body, engine and wheels must be the row's, and the row's put-back spot and the rider's
+/// settled word ([`SETTLED`]) are laid for the next. The quad's own words that differ are told apart
+/// by whether the frame wrote them, and listed (to `MD37B_LOG` if set): they are bookkeeping the physics
+/// does not read back (see the journal).
 fn replay(name: &str, state: &str, upto: usize, port: Option<Pieces>, tail: bool) -> Option<Palm> {
     image::set_heap(c28_heap(state));
     let rows = rows(name)?;
@@ -100,8 +110,21 @@ fn replay(name: &str, state: &str, upto: usize, port: Option<Pieces>, tail: bool
     let inside = RefCell::new(BTreeMap::<u32, (usize, usize, u32, u32)>::new());
     let torn = RefCell::new(Vec::<usize>::new());
     let first = RefCell::new(String::new());
+    // Which row holds frame r's rider copy: the last row whose copy is the machine's, bit for bit.
+    let late = Cell::new(false);
+    let settled = |r: usize, ee: &Ee| {
+        let next = &rows[(r + 1).min(rows.len() - 1)];
+        let got = ee.u32_at(C28_QUAD + RIDER_COPY);
+        if got == obj(&rows[r])[RIDER_COPY as usize / 4] {
+            late.set(false);
+        } else if got == obj(next)[RIDER_COPY as usize / 4] {
+            late.set(true);
+        }
+        words(if late.get() { next } else { &rows[r] }, &SETTLED)
+    };
     let after = |r: usize, ee: &Ee| {
         let row = &rows[r];
+        let mut lay = settled(r, ee);
         let (d, quad) = diff(ee, row);
         // A row the recorder read while the game's frame ran differs (s-jump's row 74: a substep
         // short, its forces summed and not yet integrated), and a later row is equal again: the
@@ -112,7 +135,8 @@ fn replay(name: &str, state: &str, upto: usize, port: Option<Pieces>, tail: bool
                 *first.borrow_mut() = format!("row {r} (vsync {}): {} words differ\n  {}", row["vsync"], d.len(), d.iter().take(40).cloned().collect::<Vec<_>>().join("\n  "));
             }
             torn.borrow_mut().push(r);
-            return words(row, &SPOT);
+            lay.extend(words(row, &SPOT));
+            return lay;
         }
         for (off, got, want) in quad {
             let wrote = (0..4).any(|b| ee.written.contains(&(C28_QUAD + off + b)));
@@ -122,7 +146,8 @@ fn replay(name: &str, state: &str, upto: usize, port: Option<Pieces>, tail: bool
         if r % 50 == 0 {
             eprintln!("MD37b {name} row {r} equal");
         }
-        words(row, &SPOT)
+        lay.extend(words(row, &SPOT));
+        lay
     };
     let seen = sim_chain(n, port, None, tail, before, after);
     let show = |m: &BTreeMap<u32, (usize, usize, u32, u32)>| {
@@ -146,10 +171,10 @@ fn replay(name: &str, state: &str, upto: usize, port: Option<Pieces>, tail: bool
 
 /// Each ride twice: by the original's frame alone, and by the port's pieces and tail beside it (every
 /// RAM word of the twin equal to the original's after each frame, and both equal to the capture). A ride
-/// is replayed up to the row before its rows stop equalling the capture (race-jump-side 257, s-stoppie-short
-/// 120, s-wheelie-launch 81). The two s- rides' rows from there on are read mid-frame, at the same point
-/// in emulated time whatever the emulator's speed, so a slower re-record does not move them; race-jump-side
-/// is not a read: the frame puts the quad back a frame before the original does (C32's journal).
+/// is replayed up to the row before its rows stop equalling the capture (s-stoppie-short 120, s-wheelie-launch
+/// 81). The two s- rides' rows from there on are read mid-frame, at the same point in emulated time whatever
+/// the emulator's speed, so a slower re-record does not move them (C32's journal). race-jump-side's put-back
+/// is timed by the rider's ragdoll settling, laid from the rows (MD148).
 macro_rules! rides {
     ($($orig:ident, $port:ident: $name:literal off $state:literal upto $upto:literal;)*) => {$(
         #[test]
@@ -173,7 +198,7 @@ rides! {
     race_still_replays_by_the_originals_frame, race_still_replays_by_the_port: "race-still" off "atv-r-spawn" upto 300;
     race_probe_replays_by_the_originals_frame, race_probe_replays_by_the_port: "race-probe" off "atv-r-spawn" upto 300;
     race_jump_replays_by_the_originals_frame, race_jump_replays_by_the_port: "race-jump" off "atv-r-air" upto 300;
-    race_jump_side_replays_by_the_originals_frame, race_jump_side_replays_by_the_port: "race-jump-side" off "atv-r-air" upto 257;
+    race_jump_side_replays_by_the_originals_frame, race_jump_side_replays_by_the_port: "race-jump-side" off "atv-r-air" upto 300;
     s_steer_replays_by_the_originals_frame, s_steer_replays_by_the_port: "s-steer" off "atv-s-spawn" upto 300;
     s_steer_slow_replays_by_the_originals_frame, s_steer_slow_replays_by_the_port: "s-steer-slow" off "atv-s-spawn" upto 300;
     s_stoppie_short_replays_by_the_originals_frame, s_stoppie_short_replays_by_the_port: "s-stoppie-short" off "atv-s-spawn" upto 120;
