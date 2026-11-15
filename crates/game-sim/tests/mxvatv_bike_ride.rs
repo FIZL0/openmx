@@ -3031,6 +3031,8 @@ const STUCK: u32 = 0x004a_ad60;
 /// two names, the pad's rumble test, the network step and the vehicle's parts and listeners.
 const LOOKUP: u32 = 0x0021_4b30;
 const LOOKUP_ARGS: [u64; 3] = [0x0054_23e0, 0x0052_9b0c, 0];
+/// The bike's state's vt `+0xac`: the item its list holds by a bit ([`tail::state_item`]).
+const STATE_ITEM: u32 = 0x0050_7710;
 const RUMBLE_READY: u32 = 0x0051_a250;
 const NETWORK: u32 = 0x0025_e8d0;
 const PARTS: u32 = 0x0049_4370;
@@ -3101,6 +3103,13 @@ impl Vehicles for TailInRam<'_> {
     }
     fn paused(&mut self) -> bool {
         label("tail Paused");
+        if in_rust("paused") {
+            // F31b5: the lookup and the state's rider, the port's ([`tail::paused`]).
+            let state = self.ee.u32_at(BIKE + tail::STATE);
+            assert_eq!(self.ee.u32_at(self.ee.u32_at(state + 4) + 0xac), STATE_ITEM, "the state's rider lookup");
+            self.write();
+            return tail::paused(&mut NodeRam(self.ee), BIKE, (LOOKUP_ARGS[0] as u32, LOOKUP_ARGS[1] as u32));
+        }
         let m = self.run(LOOKUP, &LOOKUP_ARGS, 0.0);
         let state = self.ee.u32_at(BIKE + tail::STATE);
         let g = self.run(self.ee.u32_at(self.ee.u32_at(state + 4) + 0xac), &[u64::from(state), m], 0.0) as u32;
@@ -3109,6 +3118,10 @@ impl Vehicles for TailInRam<'_> {
     }
     fn rumble_ready(&mut self) -> bool {
         label("tail RumbleReady");
+        if in_rust("rumble dropped") {
+            // F31b5: the pad's rumble is output only; the pure frame has no pad to ask or shake.
+            return false;
+        }
         let state = self.ee.u32_at(BIKE + tail::STATE);
         self.run(RUMBLE_READY, &[u64::from(self.ee.u32_at(state + 0x6ac))], 0.0) as u32 != 0
     }
@@ -3334,6 +3347,95 @@ impl Resets for FramePost<'_> {
 /// How far below the interpreter's stack top the calls' frames reach, at most: RAM there is left out
 /// of the vehicle update's comparison, the port's calls sitting at other depths than the original's.
 const STACK_USE: usize = 0x4_0000;
+
+/// **F31b5 — the pause check's lookups are the originals'**: [`tail::name_bit`] against SLUS-21104's
+/// name lookup (no adding) and [`tail::state_item`] against the state's vt `+0xac`, over 12,000
+/// generated registries and state lists in a zero area of state 4's RAM. Names run 0..0x90 bytes from
+/// a three-letter alphabet, so near-misses, prefixes and names past the compare's 0x80 bytes (equal
+/// there, different after) all come up; queries are an entry's copy (aligned or not), a near-miss or
+/// a stranger.
+#[test]
+fn the_pause_lookups_are_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let base = F54_AREA;
+    let mut g = Gen(0x5eed_f31b_0005);
+    let mut tally: BTreeMap<&'static str, u32> = BTreeMap::new();
+    let put = |ee: &mut Ee, at: u32, bytes: &[u8]| {
+        for (k, &b) in bytes.iter().enumerate() {
+            let a = at + k as u32;
+            let w = ee.u32_at(a & !3) & !(0xff << (8 * (a & 3))) | u32::from(b) << (8 * (a & 3));
+            ee.set_u32(a & !3, w);
+        }
+    };
+    for case in 0..12_000u32 {
+        for a in (base..base + 0x4000).step_by(4) {
+            ee.set_u32(a, 0);
+        }
+        let n = g.bits() % 9;
+        let mut name = |g: &mut Gen| -> Vec<u8> {
+            let len = if g.one_in(6) { 0x80 + g.bits() % 0x10 } else { g.bits() % 12 };
+            (0..len).map(|_| b"abc"[(g.bits() % 3) as usize]).collect()
+        };
+        let names: Vec<Vec<u8>> = (0..n).map(|_| name(&mut g)).collect();
+        let (registry, mut at) = (base, base + 0x10);
+        let mut prev = registry + 4 - 8;
+        for nm in &names {
+            let s = at + 0xc + g.bits() % 4;
+            put(&mut ee, s, nm);
+            put(&mut ee, s + nm.len() as u32, &[0]);
+            ee.set_u32(at, s);
+            ee.set_u32(prev + 8, at);
+            prev = at;
+            at = (s + nm.len() as u32 + 4) & !3;
+        }
+        let q = match g.bits() % 4 {
+            0 | 1 if n > 0 => names[(g.bits() % n) as usize].clone(),
+            2 if n > 0 => {
+                let mut q = names[(g.bits() % n) as usize].clone();
+                if q.is_empty() || g.one_in(2) {
+                    q.push(b'a');
+                } else {
+                    let k = (g.bits() as usize) % q.len();
+                    q[k] = b'z';
+                }
+                q
+            }
+            _ => name(&mut g),
+        };
+        let qa = at + g.bits() % 4;
+        put(&mut ee, qa, &q);
+        put(&mut ee, qa + q.len() as u32, &[0]);
+        ee.set(28, GP);
+        ee.call(LOOKUP, &[u64::from(registry), u64::from(qa), 0], &[], BUDGET);
+        let want = ee.r(2) as i32;
+        let got = tail::name_bit(&mut NodeRam(&mut ee), registry, qa);
+        assert_eq!(got, want, "case {case}: names {names:?}, query {q:?}");
+        *tally.entry(if want < 0 { "no match" } else if q.len() >= 0x80 { "long match" } else { "match" }).or_default() += 1;
+
+        // The state's list: items whose first word is a bit, some repeated, some lists empty.
+        let state = base + 0x2000;
+        let k = g.bits() % 6;
+        let mut prev = state + 0x30 - 8;
+        for i in 0..k {
+            let node = state + 0x100 + 0x40 * i;
+            let item = node + 0x20;
+            ee.set_u32(item, 1 << (g.bits() % 5));
+            ee.set_u32(node, item);
+            ee.set_u32(prev + 8, node);
+            prev = node;
+        }
+        let bit = if g.one_in(8) { u32::MAX } else { 1 << (g.bits() % 6) };
+        ee.set(28, GP);
+        ee.call(STATE_ITEM, &[u64::from(state), u64::from(bit)], &[], BUDGET);
+        let want = ee.r(2) as u32;
+        assert_eq!(tail::state_item(&mut NodeRam(&mut ee), state, bit), want, "case {case}: state list of {k}, bit {bit:#x}");
+        *tally.entry(if want == 0 { "no item" } else { "item" }).or_default() += 1;
+    }
+    eprintln!("the pause lookups: {tally:?}");
+    for path in ["no match", "match", "long match", "no item", "item"] {
+        assert!(tally.get(path).copied().unwrap_or(0) >= 100, "{path} came up too rarely: {tally:?}");
+    }
+}
 
 /// The sim's listener tree in RAM, walked by [`tail::walk`]: a group's step (the walk itself) is the
 /// port's walk one level down, the bike's step is the port's [`tail::vehicle_update`] through
@@ -5316,6 +5418,13 @@ impl PartWalk<'_> {
     /// word of the bike or its blocks; a step that moved `rand`'s state or built the smooth noise is
     /// counted.
     fn original(&mut self, f: u32, ints: &[u64], floats: &[f32], name: &str, walks: Vec<(u32, u32)>) {
+        if in_rust("object switches") && OBJECT_SWITCHES.iter().any(|s| s.0 == f) {
+            // F31b5: the particle object's switches, the port's ([`object_switch`]).
+            let before = bike_and_blocks(self.ee);
+            object_switch(self.ee, f, ints[0] as u32, ints.get(1).copied().unwrap_or(0) as u32);
+            assert!(walks.is_empty() && before == bike_and_blocks(self.ee), "{name}: a switch that walks or writes the bike");
+            return;
+        }
         let (before, rand, noise_unbuilt) = (bike_and_blocks(self.ee), rand_state(self.ee), self.ee.u32_at(NOISE_UNBUILT) != 0);
         let walked: Rc<RefCell<Vec<(u32, u32)>>> = Rc::default();
         let w = walked.clone();
@@ -5428,6 +5537,86 @@ impl emitter::Emitters for PartWalk<'_> {
         self.original(f, &ints, &floats, &format!("emitter {kind}"), vec![]);
         self.ee.r(2) as u32
     }
+}
+
+/// F31b5: the particle objects' switches state 4's items and emitters reach, by function: light,
+/// douse ([`effects::object_light`], [`effects::object_douse`]), the items' halt
+/// ([`effects::object_halt`]) and a key's pick ([`FX_PICK`], [`effects::object_pick`]).
+const OBJECT_SWITCHES: [(u32, &str); 4] = [(0x0050_aaa0, "light"), (0x0050_ab00, "douse"), (0x004e_9f00, "halt"), (FX_PICK, "pick")];
+
+fn object_switch(ee: &mut Ee, f: u32, o: u32, pick: u32) {
+    let m = &mut NodeRam(ee);
+    match OBJECT_SWITCHES.iter().find(|s| s.0 == f).unwrap().1 {
+        "light" => effects::object_light(m, o),
+        "douse" => effects::object_douse(m, o),
+        "pick" => effects::object_pick(m, o, pick),
+        _ => effects::object_halt(m, o),
+    }
+}
+
+/// **F31b5 — the particle objects' switches are the originals'**: [`OBJECT_SWITCHES`] against
+/// SLUS-21104's, over 12,000 generated objects (every flags byte, counts of both signs, the halt's
+/// once-word zero or not) in a zero area of state 4's RAM; every word of the object the same after.
+#[test]
+fn the_particle_object_switches_are_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let o = F54_AREA + 0x100;
+    let mut g = Gen(0x0b1e_c75f);
+    let Some(mut b) = image() else { return };
+    // The pick's: the object's player, its clip, the clip's own table and the two row arrays.
+    let (p, clip, table, rows, own_rows) = (o + 0x200, o + 0x300, o + 0x500, o + 0x600, o + 0x700);
+    let mut tally: BTreeMap<String, u32> = BTreeMap::new();
+    for case in 0..16_000u32 {
+        let (f, name) = OBJECT_SWITCHES[case as usize % 4];
+        let pick = g.bits() % 8;
+        let mut put = |ee: &mut Ee, b: &mut Ee, at: u32, w: u32| {
+            ee.set_u32(at, w);
+            b.set_u32(at, w);
+        };
+        for k in (0..0x100).step_by(4) {
+            let w = match k {
+                0x34 if g.one_in(2) => 0,
+                0x30 => [0, 1, u32::MAX, g.bits()][(g.bits() % 4) as usize],
+                0xd8 => p,
+                _ => g.bits(),
+            };
+            put(&mut ee, &mut b, o + k, w);
+        }
+        if name == "pick" {
+            for k in (0..0x100).step_by(4) {
+                let w = match k {
+                    0 => clip,
+                    0x28 => (if g.one_in(2) { 0x400 } else { 0 }) | g.bits() & !0x400,
+                    0x44 => [0, 1, (g.bits() % 40) as i32, -((g.bits() % 4) as i32), g.bits() as i32][(g.bits() % 5) as usize] as u32,
+                    0x4c => g.bits(),
+                    _ => g.bits(),
+                };
+                put(&mut ee, &mut b, p + k, w);
+            }
+            for k in (0..0x200).step_by(4) {
+                put(&mut ee, &mut b, clip + k, g.bits());
+            }
+            put(&mut ee, &mut b, clip + 0x174, if g.one_in(3) { 0 } else { table });
+            put(&mut ee, &mut b, table + 0x8c, own_rows);
+            put(&mut ee, &mut b, clip + 0x120, rows);
+            for at in [rows, own_rows] {
+                for k in (0..0x60).step_by(4) {
+                    let w = if g.one_in(2) { g.bits() % 64 } else { g.bits() };
+                    put(&mut ee, &mut b, at + k, w);
+                }
+            }
+            let own = b.u32_at(p + 0x4c) >> 6 & 1 != 0;
+            let k = format!("pick, own {own}, table {}, rate {}", b.u32_at(clip + 0x174) != 0, b.u32_at(p + 0x28) & 0x400 != 0);
+            *tally.entry(k).or_default() += 1;
+        }
+        ee.set(28, GP);
+        ee.call(f, &[u64::from(o), u64::from(pick)], &[], BUDGET);
+        object_switch(&mut b, f, o, pick);
+        for at in (o..o + 0x100).chain(p..p + 0x100).step_by(4) {
+            assert_eq!(b.u32_at(at), ee.u32_at(at), "case {case}, {name}: {at:#x}");
+        }
+    }
+    assert_eq!(tally.len(), 8, "every pick path: {tally:?}");
 }
 
 /// F31b5n: one draw of the C library's `rand` on its state in RAM ([`rand_state`]), the port's
@@ -9768,6 +9957,9 @@ fn replay_in_pure_rust(name: &str) -> Option<(Vec<bool>, Vec<String>, BTreeMap<S
             "other listeners dropped",
             "part leaf dropped: models",
             "no original beside",
+            "paused",
+            "rumble dropped",
+            "object switches",
         ],
     );
     let census = INTERPRETED.with(|m| std::mem::take(&mut *m.borrow_mut()));
