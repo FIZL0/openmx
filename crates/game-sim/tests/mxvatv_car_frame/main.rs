@@ -2447,6 +2447,7 @@ mod whole; // MD106c: the whole frame off the image
 mod class_update; // MD106e: the car classes' update slots, the update's calls unhooked
 mod own_hand_outs; // MD128: what the own calls hand out in turn, unhooked
 mod drives; // MD135: MD107's five drives, the port's frame beside the interpreter's
+mod class_step; // MD151: the buggy's class step
 
 use own_calls::*;
 use own_hand_outs::*;

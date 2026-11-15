@@ -5,8 +5,6 @@ use game_sim::handling::tail;
 /// The car classes' update slots (vt `+0x10c`): the buggy's, the golf cart's and the truck's, one
 /// code over three copies of the same rodata. Each runs on the buggy image's car.
 const SLOTS: [(&str, u32); 3] = [("buggy", 0x004c_6ce0), ("golf cart", 0x004d_0250), ("truck", 0x004d_7f40)];
-/// What stays hooked: the class's per-frame step (MD148).
-const CLASS_STEP: u32 = 0x004c_5510;
 /// The ghost step's calls: the collision probe's mode switch (a1 0, then 1) round its search, and
 /// the node's alpha (f12).
 const PROBE_MODE: u32 = 0x0011_5890;
@@ -82,7 +80,7 @@ struct Case {
     ready: bool,
 }
 
-/// Hook what stays a call: the class step, the ghost step's, the base update's, the hazard clock's
+/// Hook what stays a call: the ghost step's, the base update's, the hazard clock's
 /// put-back, and the slot's. Every one logs in the port's terms; the probe's mode switch logs to
 /// `modes` (its a1, and 9 for the search between), the rumbler's vt `+0x4c` its level to `rumbled`.
 fn hook_class(ee: &mut Ee, p: &Ptrs, state: u32, log: Shared<Vec<Call>>, modes: Shared<Vec<u64>>, rumbled: Shared<Vec<i32>>, ready: Shared<bool>) {
@@ -107,11 +105,6 @@ fn hook_class(ee: &mut Ee, p: &Ptrs, state: u32, log: Shared<Vec<Call>>, modes: 
             l.borrow_mut().push(c);
         }));
     }
-    let l = log.clone();
-    ee.hooks.insert(CLASS_STEP, Box::new(move |ee| {
-        assert_eq!(ee.r(4) as u32, CAR, "the class step on something else");
-        l.borrow_mut().push(Call::ClassStep);
-    }));
     let l = log.clone();
     ee.hooks.insert(NETWORK, Box::new(move |ee| {
         assert_eq!(ee.r(4) as u32, CAR + 0x400, "the network's step on something else");
@@ -289,7 +282,8 @@ fn read_class(ee: &Ee, p: &Ptrs) -> Updated {
 
 /// **The car classes' update slots are the originals'** (MD106e): the buggy's, golf cart's and
 /// truck's vt `+0x10c` on the buggy image's car with the update's ghost step, hazard clock and base
-/// update unhooked (only what they and the slot hand out hooked, and the class's per-frame step),
+/// update unhooked (only what they and the slot hand out hooked; since MD151 the class's per-frame
+/// step runs too, its parts' words against [`atv_car::class_step`]),
 /// against [`atv_car::class_update`] over 10,000 generated cases on MD106d's: every compared word of
 /// the car, its tires and the slot's and base update's words equal, the same calls in the same order
 /// with the same arguments, nothing else written in the car, its tires or its body, the rumbler
@@ -322,6 +316,11 @@ fn the_car_classes_update_slots_are_the_originals() {
             *seen.entry(what).or_insert(0) += 1;
         }
     };
+    // The class step runs (MD151): the port answers it over the RAM the slot starts on.
+    let curve = class_step::curve_table(&ee);
+    let acos = class_step::acos_table(&ee);
+    let parts = class_step::read_parts(&ee);
+    let nodes = class_step::nodes(&parts);
     let blocks: Vec<(u32, u32)> = [(CAR, 0x1500), (p.body, 0x230)].into_iter().chain(p.tires.map(|t| (t, 0x200))).collect();
     let probe = ee.u32_at(CAR + ue::PROBE);
     const CASES: usize = 10_000;
@@ -388,6 +387,9 @@ fn the_car_classes_update_slots_are_the_originals() {
         log.borrow_mut().clear();
         modes.borrow_mut().clear();
         rumbled.borrow_mut().clear();
+        let mut over = class_step::Over { ee: &ee, words: std::collections::BTreeMap::new() };
+        atv_car::class_step(&mut over, &parts, &class_step::read_posing(&ee), &curve, &acos);
+        let posed = over.words;
         ee.set(28, GP);
         ee.call(SLOTS[k.slot].1, &[u64::from(CAR)], &[dt.0], 1_000_000);
         let written = ee.written_ranges();
@@ -406,8 +408,14 @@ fn the_car_classes_update_slots_are_the_originals() {
             .map(|&(a, x)| format!("  {a:#x}: port {x:#010x}, original {:#010x}", ee.u32_at(a)))
             .collect();
         assert!(bad.is_empty(), "case {case} ({}, {u:?}, {w:?}, dt {dt:?}): {} words differ\n{}", SLOTS[k.slot].0, bad.len(), bad.join("\n"));
+        // The class step ran in the original: its parts' words are the port's exactly when the
+        // port's update calls it, and untouched when not.
+        let stepped = port.contains(&Call::ClassStep);
+        let posed = if stepped { posed } else { std::collections::BTreeMap::new() };
+        let bad = class_step::compare_nodes(&ee, &posed, &nodes);
+        assert!(bad.is_empty(), "case {case} ({}): the class step's parts (stepped {stepped}): {} words differ\n{}", SLOTS[k.slot].0, bad.len(), bad.join("\n"));
         let theirs = log.borrow().iter().map(|c| format!("{c:?}")).collect::<Vec<_>>();
-        let ours = port.iter().map(|c| format!("{c:?}")).collect::<Vec<_>>();
+        let ours = port.iter().filter(|&c| *c != Call::ClassStep).map(|c| format!("{c:?}")).collect::<Vec<_>>();
         assert_eq!(ours, theirs, "case {case} ({}, {u:?}, {w:?}): the calls", SLOTS[k.slot].0);
         let searched = port.contains(&Call::GhostSearch);
         assert_eq!(*modes.borrow(), if searched { vec![0, 9, 1] } else { vec![] }, "case {case}: the probe's modes");
@@ -454,6 +462,7 @@ fn the_car_classes_update_slots_are_the_originals() {
         see("base update, no state", !measured && has(&Call::Parts(dt)) && !calls(|c| matches!(c, Call::Ride(_))));
         see("base update, free kept", measured && w.vehicle.free != 0);
         see("hazard clock put back", has(&Call::PutBack));
+        see("class step", stepped);
         see("hazard clock stuck counting", pw.vehicle.stuck_time > w.vehicle.stuck_time);
 
         if case == 0 {
@@ -477,5 +486,5 @@ fn the_car_classes_update_slots_are_the_originals() {
     for (what, &n) in &seen {
         assert!(n >= 30, "{what} seen only {n} times");
     }
-    assert_eq!(seen.len(), 30, "a branch was never seen: {seen:?}");
+    assert_eq!(seen.len(), 31, "a branch was never seen: {seen:?}");
 }

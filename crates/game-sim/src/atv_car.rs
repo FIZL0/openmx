@@ -24,7 +24,7 @@
 //! code ported, its calls handed out. [`class_update`] is the buggy's, golf cart's and truck's slot
 //! around it (MD106e), and [`OwnUpdate`] answers the update's own calls: the ghost step, the hazard
 //! clock and the base update (the bike's [`crate::handling::tail`]); the class's per-frame step stays
-//! a call.
+//! a call, which [`class_step`] answers on scene nodes (MD151).
 //!
 //! Proof: `tests/mxvatv_car_frame/`, SLUS-21104's world step and the car's update off MD39a's buggy
 //! image with every call hooked; and (MD106c) the image's frame whole, with [`Pieces`] and [`Own`]
@@ -34,6 +34,8 @@
 
 use crate::air::AcosTable;
 use crate::atv_body::Body;
+use crate::camera::CurveTable;
+use crate::handling::node;
 use ps2_float::{Acc, Dest, F, Vf};
 
 /// The tires, in the car's order: the steered pair, then the rear pair.
@@ -228,6 +230,7 @@ pub enum Call {
     /// Untamed's hazard clock (MD81d, with [`Update::untamed`]): called straight, as the quad's
     /// ([`crate::quad::Call::UntamedHazardSurface`]), told also whether any tire is solidly down.
     UntamedHazardClock { dt: F, time: F, sunk: bool, grounded: bool },
+    /// The class's per-frame step: [`class_step`] on the model's scene nodes (MD151).
     ClassStep,
     VehicleUpdate(F),
     /// What SLUS-21104's own calls hand out in turn, when [`Own`] answers them (MD106b). The vehicle
@@ -738,6 +741,181 @@ pub fn class_update(u: &mut Update, w: &mut Updated, car: &mut Car, body: &mut B
     }
     update(u, car, body, dt, &mut OwnUpdate { w, rest: s });
     s.call(Call::Cue(4), car, body);
+}
+
+/// One front corner's posed parts (MD151), scene nodes in the model's graph: the upright (steered,
+/// then tilted to its two ends), the arm (swung by the tire's compression), the knuckle (tilted to
+/// the two ends round the corner's pivot), the two ends, and the top the upright's tilt is measured
+/// from.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FrontParts {
+    pub upright: u32,
+    pub arm: u32,
+    pub knuckle: u32,
+    pub ends: [u32; 2],
+    pub top: u32,
+}
+
+/// **The buggy's posed parts** (MD151): the car's own node (the frame the parts are measured and
+/// aimed in), the four wheels (in the tires' order), the two front corners (in the tires' order),
+/// the rear axle, the four links (aimed in pairs, all or none), the two spinners (turned by the
+/// engine, both or neither), and the eight rods, each pair aimed at each other (every second pair
+/// both or neither). Research/oracle.txt `# MD151` has where the car keeps them.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Parts {
+    pub car: u32,
+    pub wheels: [u32; 4],
+    pub fronts: [FrontParts; 2],
+    pub axle: u32,
+    pub links: [u32; 4],
+    pub spinners: [u32; 2],
+    pub rods: [[u32; 2]; 8],
+}
+
+/// What the class step reads off the car (MD151): the front tires' steer, every tire's angle,
+/// compression, maximum compression and stretch (the wheel's `y` scale at full compression), the
+/// left rear's mount, the arms' swing per unit of compression, the two front pivots (in the tires'
+/// order) and the rear's, and the engine's rpm.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Posing {
+    pub steer: [F; 2],
+    pub angle: [F; 4],
+    pub compression: [F; 4],
+    pub max_compression: [F; 4],
+    pub stretch: [F; 4],
+    pub rear_mount: Vf,
+    pub swing: F,
+    pub pivots: [Vf; 2],
+    pub rear_pivot: Vf,
+    pub rpm: F,
+}
+
+/// The class step's axes (rodata): up, side and ahead, each `w` 1.
+const POSE_UP: [F; 3] = [F::ZERO, F::ONE, F::ZERO];
+const POSE_SIDE: [F; 3] = [F::ONE, F::ZERO, F::ZERO];
+const POSE_AHEAD: [F; 3] = [F::ZERO, F::ZERO, F::ONE];
+/// Ahead negated lane by lane (`-0`, `-0`, `-1`): the axis the left arm alone is spun about.
+const POSE_BEHIND: [F; 3] = [F(f32::from_bits(0x8000_0000)), F(f32::from_bits(0x8000_0000)), F(f32::from_bits(0xbf80_0000))];
+const POSE_UP_QUAD: [u32; 4] = [0, 0x3f80_0000, 0, 0x3f80_0000];
+const POSE_AHEAD_QUAD: [u32; 4] = [0, 0, 0x3f80_0000, 0x3f80_0000];
+/// The arms' swing's own factor on the compression (a data word, 1.25 in the buggy's image), the
+/// spinners' turn per rpm, and a quarter turn.
+const SWING_FACTOR: F = F(1.25);
+const SPIN_PER_RPM: u32 = 0x3a03_126f;
+const QUARTER_TURN: u32 = 0x3fc9_0fdb;
+
+/// The angle a tilt's sine-like cross product gives: clamped to −1..1 (the original's three clamps
+/// in a row are the one), a quarter turn less its arc cosine off the table.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
+fn tilt(c: F, acos: &AcosTable) -> F {
+    let c = if !(c <= F::ONE) {
+        F::ONE
+    } else if c < F(-1.0) {
+        F(-1.0)
+    } else {
+        c
+    };
+    F::from_bits(QUARTER_TURN) - acos.at(c)
+}
+
+/// `a × b` (`vopmula a, b`, `vopmsub b, a`), its `z`.
+fn cross_z(a: Vf, b: Vf) -> F {
+    F(Vf::opmsub(Vf::opmula(a, b), b, a).z())
+}
+
+/// `xyz` of `a - b`, `w` `a`'s.
+fn less(a: Vf, b: Vf) -> Vf {
+    a.merge(Dest::XYZ, a.sub(b))
+}
+
+/// **The buggy's per-frame class step** (MD151; its vt `+0x488`, the update's [`Call::ClassStep`]):
+/// the model's parts posed off the tires and the engine, on the scene nodes in `m`:
+///
+/// 1. the front uprights spun about up by their tire's steer, the front wheels about the side by
+///    their tire's angle;
+/// 2. each front corner, the right first: the arm spun about ahead by the swing times
+///    [`SWING_FACTOR`] times its tire's compression (the left arm about ahead negated); the
+///    knuckle spun to 0, then about ahead by the [`tilt`] of the two ends as seen from the corner's
+///    pivot (each end's position in the car's frame less it, normalised; the second × the first);
+///    the upright turned further about ahead by the tilt of the two ends as seen from the top (the
+///    first × the second);
+/// 3. the rear axle aimed (with up) from the left rear's mount, raised by the larger rear
+///    compression and on the centre line, to the rear pivot; the rear wheels spun by their angles;
+/// 4. each wheel, the rears first, stretched along `y` ([`node::stretch`]): with no maximum
+///    compression by 1, else from 1 at none towards its stretch at full, kept between the two;
+/// 5. with all four links, each pair (the second and fourth, then the third and first) aimed along
+///    the direction from the second of the pair to the first, in the car's frame, the first of the
+///    pair first; with both spinners, each turned about ahead by the rpm times [`SPIN_PER_RPM`];
+/// 6. each rod pair (skipping every second pair unless it has both) aimed the same way, the second
+///    of the pair first, along the direction from it to the first.
+///
+/// Nothing in the car's physics reads the parts back.
+pub fn class_step(m: &mut impl node::Ram, parts: &Parts, p: &Posing, curve: &CurveTable, acos: &AcosTable) {
+    let car = parts.car;
+    fn at(m: &mut impl node::Ram, n: u32, car: u32) -> Vf {
+        Vf::from_bits(node::position_in(m, n, car))
+    }
+    /// The pair aimed along the direction from its second to its first, in the car's frame.
+    fn aim_pair(m: &mut impl node::Ram, [first, second]: [u32; 2], car: u32, second_first: bool) {
+        let d = normalize(less(at(m, first, car), at(m, second, car))).to_bits();
+        let order = if second_first { [second, first] } else { [first, second] };
+        for n in order {
+            node::aim_along(m, n, car, POSE_AHEAD_QUAD, d);
+        }
+    }
+    let [left, right] = parts.fronts;
+    node::spin_about(m, left.upright, POSE_UP, p.steer[FRONT_LEFT], curve);
+    node::spin_about(m, parts.wheels[FRONT_LEFT], POSE_SIDE, p.angle[FRONT_LEFT], curve);
+    node::spin_about(m, right.upright, POSE_UP, p.steer[FRONT_RIGHT], curve);
+    node::spin_about(m, parts.wheels[FRONT_RIGHT], POSE_SIDE, p.angle[FRONT_RIGHT], curve);
+
+    for (k, f, swing_axis) in [(FRONT_RIGHT, right, POSE_AHEAD), (FRONT_LEFT, left, POSE_BEHIND)] {
+        node::spin_about(m, f.arm, swing_axis, p.swing * (SWING_FACTOR * p.compression[k]), curve);
+        node::spin_about(m, f.knuckle, POSE_AHEAD, F::ZERO, curve);
+        let a = normalize(less(at(m, f.ends[0], car), p.pivots[k]));
+        let b = normalize(less(at(m, f.ends[1], car), p.pivots[k]));
+        node::spin_about(m, f.knuckle, POSE_AHEAD, tilt(cross_z(b, a), acos), curve);
+        let top = at(m, f.top, car);
+        let a = normalize(less(at(m, f.ends[0], car), top));
+        let b = normalize(less(at(m, f.ends[1], car), top));
+        node::turn_about(m, f.upright, POSE_AHEAD, tilt(cross_z(a, b), acos), curve);
+    }
+
+    let lift = p.compression[REAR_LEFT].max(p.compression[REAR_RIGHT]);
+    let mount = Vf::new(0.0, (F(p.rear_mount.y()) + lift).0, p.rear_mount.z(), 1.0);
+    let d = normalize(less(p.rear_pivot, mount));
+    node::aim(m, parts.axle, d.to_bits(), POSE_UP_QUAD);
+    node::spin_about(m, parts.wheels[REAR_LEFT], POSE_SIDE, p.angle[REAR_LEFT], curve);
+    node::spin_about(m, parts.wheels[REAR_RIGHT], POSE_SIDE, p.angle[REAR_RIGHT], curve);
+
+    for k in [REAR_LEFT, REAR_RIGHT, FRONT_LEFT, FRONT_RIGHT] {
+        let full = p.max_compression[k];
+        let s = if full == F::ZERO {
+            F::ONE
+        } else {
+            let t = (p.compression[k] - F::ZERO) / (full - F::ZERO);
+            let k = p.stretch[k];
+            Acc::adda(F::ZERO, F::ONE).madd(t, k - F::ONE).max(F::ONE.min(k)).min(F::ONE.max(k))
+        };
+        node::stretch(m, parts.wheels[k], s);
+    }
+
+    let l = parts.links;
+    if l.iter().all(|&n| n != 0) {
+        aim_pair(m, [l[3], l[1]], car, false);
+        aim_pair(m, [l[2], l[0]], car, false);
+    }
+    if parts.spinners.iter().all(|&n| n != 0) {
+        let a = F::from_bits(SPIN_PER_RPM) * p.rpm;
+        for n in parts.spinners {
+            node::turn_about(m, n, POSE_AHEAD, a, curve);
+        }
+    }
+    for (k, &pair) in parts.rods.iter().enumerate() {
+        if k % 2 == 0 || pair.iter().all(|&n| n != 0) {
+            aim_pair(m, pair, car, true);
+        }
+    }
 }
 
 /// SLUS-21104's physics world as the car's frame sees it: one rigid body, the car's three
@@ -3243,8 +3421,9 @@ impl Load {
 /// (its physics lists), [`Call::RidingLetGo`] and [`Call::ReleaseRecord`] (the record), the sound
 /// cues, the landing and shift sounds, the preload's cue, the rumbles, the wrecked look,
 /// [`Call::SortPlace`], [`Call::CollisionOn`], [`Call::Unlist`], [`Call::Place`], the class's own
-/// step ([`Call::ClassStep`]: posing the model's parts, not ported), and the base update's prepare,
-/// ride, sync, snapshot, network and parts.
+/// step ([`Call::ClassStep`]: posing the model's parts, ported as [`class_step`] over scene nodes,
+/// which a ride has none of), and the base update's prepare, ride, sync, snapshot, network and
+/// parts.
 #[derive(Clone)]
 pub struct Ride {
     pub keys: Keys,
