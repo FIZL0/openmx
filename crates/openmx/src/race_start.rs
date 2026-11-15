@@ -300,8 +300,8 @@ impl Watch {
 /// What the race hands the results screen at its Over: the cards in the lap line's list order (the
 /// human's named `player`, the rest the computer's), `race_end`'s answer, and the finishes' answers.
 ///
-/// The port's own: the riders' statistics trackers are not kept (their words are 0), and the human's
-/// seat reports no preloads or clutches.
+/// Each card's statistics are its bike's tracker (S319) beside the card's longest jump and longest
+/// time in the air; the human's seat reports its tracker's preloads and clutches.
 pub fn hand_over(laps: &race::Laps, laps_run: u8, player: &str, overs: &[race::RaceOver]) -> crate::menu::results::HandOver {
     use crate::menu::results::{CardStats, HandOver, ResultCard, Who};
     let cards = laps
@@ -309,13 +309,25 @@ pub fn hand_over(laps: &race::Laps, laps_run: u8, player: &str, overs: &[race::R
         .iter()
         .map(|e| {
             let who = if e.player == 0 { Who::Player(player.to_string()) } else { Who::Ai(format!("Rider {}", e.player + 1)) };
-            ResultCard::take(&e.card.lap, who, &CardStats::default())
+            let t = &e.stats;
+            let stats = CardStats {
+                laps_led: t.laps_led,
+                times_in_lead: t.times_in_lead,
+                passes: t.passes,
+                times_passed: t.times_passed,
+                wrecks: t.wrecks,
+                preloads: t.preloads,
+                clutches: t.clutches,
+                jump: e.card.jumps.best_length,
+                hang: e.card.jumps.best_air_time,
+            };
+            ResultCard::take(&e.card.lap, who, &stats)
         })
         .collect();
     let seats: Vec<(i32, Option<race::EndSeat>)> = laps
         .cards
         .iter()
-        .map(|e| (e.card.lap.place, (e.player == 0).then_some(race::EndSeat { seat: 0, preloads: 0, clutches: 0 })))
+        .map(|e| (e.card.lap.place, (e.player == 0).then_some(race::EndSeat { seat: 0, preloads: e.stats.preloads as u32, clutches: e.stats.clutches as u32 })))
         .collect();
     let event = race::ResultEvent { activity: 2, laps: laps_run, ..race::ResultEvent::default() };
     let end = Supercross::new().race_end(&seats, &event, false);
@@ -457,7 +469,7 @@ mod tests {
 
     /// A race of two whose cards are moved by hand, as the lap line would move them.
     fn two_cards() -> race::Laps {
-        let card = |player, flags| race::Entry { player, card: race::RaceCard { lap: race::LapCard { flags, ..race::LapCard::default() }, ..race::RaceCard::default() } };
+        let card = |player, flags| race::Entry { player, card: race::RaceCard { lap: race::LapCard { flags, ..race::LapCard::default() }, ..race::RaceCard::default() }, stats: race::Tracker::default() };
         race::Laps {
             rules: race::supercross_rules(2),
             course: race::Course { line: race::Gate::new(), line_spot: race::Spot::default(), lap_length: F(100.0) },
@@ -500,6 +512,14 @@ mod tests {
         assert_eq!(hand.cards[0].who, crate::menu::results::Who::Player("Me".into()));
         assert_eq!(hand.cards[1].who, crate::menu::results::Who::Ai("Rider 2".into()));
         assert_eq!(hand.cards[1].words[0], F(2.0));
+        // S319: each card's statistics are its bike's tracker and its card's longest jump and air.
+        laps.cards[1].stats = race::Tracker { laps_led: 2, times_in_lead: 1, passes: 3, times_passed: 4, wrecks: 5, preloads: 6, clutches: 7, ..race::Tracker::default() };
+        laps.cards[1].card.jumps.best_length = F(81.5);
+        laps.cards[1].card.jumps.best_air_time = F(2.25);
+        laps.cards[0].stats.preloads = 1;
+        let hand = hand_over(&laps, 2, "Me", &w.overs);
+        assert_eq!(hand.cards[1].words[4..], [2.0, 1.0, 81.5, 2.25, 3.0, 4.0, 5.0, 6.0, 7.0].map(F));
+        assert_eq!(hand.cards[0].words[11..], [F(1.0), F::ZERO]);
     }
 
     #[test]

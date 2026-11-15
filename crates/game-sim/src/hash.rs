@@ -662,6 +662,21 @@ impl State for crate::race::Race {
                     w.vf("takeoff", j.takeoff);
                     w.vf("landing", j.landing);
                     w.u32("records", c.records.len() as u32);
+                    let t = &e.stats;
+                    for (name, x) in [
+                        ("laps_led", t.laps_led),
+                        ("times_in_lead", t.times_in_lead),
+                        ("passes", t.passes),
+                        ("times_passed", t.times_passed),
+                        ("wrecks", t.wrecks),
+                        ("preloads", t.preloads),
+                        ("clutches", t.clutches),
+                        ("entries_seen", t.entries_seen.unwrap_or(-1)),
+                    ] {
+                        w.i32(name, x);
+                    }
+                    w.u32("preload_held", u32::from(t.preload_held));
+                    w.u32("clutch_held", u32::from(t.clutch_held));
                 }
             });
         }

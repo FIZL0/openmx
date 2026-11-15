@@ -152,6 +152,19 @@
 //!     heights and both gates included.
 //! 44. **Every track's second file**: a scan of the disc's 56 second archives: the 46 race tracks'
 //!     AI files, what they hold, and that no activity file renames them.
+//! 45. **The bike's lap listener** (S319): the score card owner's lap notice on 20,000 trackers, places
+//!     and null cards, against [`race::Tracker::lap`]: laps led and the answer.
+//! 46. **The bike's place listener**: the place-change answer (crowd sounds hooked) on 20,000
+//!     trackers, kinds, own and told cards, against [`race::Tracker::place_changed`].
+//! 47. **The wreck entry's count**: the player's wreck entry, its callees hooked, on 10,000 reasons,
+//!     against [`race::Tracker::wrecked`] and the shown flag; the ride's entries counted on by
+//!     [`race::Tracker::bike`].
+//! 48. **The preload and clutch counts**: the player update's stretch on 40,000 latches, timers and
+//!     levers (signed zeros, denormals, NaNs), against [`race::Tracker::controls`].
+//! 49. **The grid's reset**: the bike's grid slot on 10,000 trackers and event kinds, against
+//!     [`race::Tracker::placed`].
+//! 50. **sx01's laps led and passes**: two riders walked round sx01, their trackers against the lap and
+//!     place notices each tick told.
 
 use game_sim::chassis::{Chassis, Deriv};
 use game_sim::race::{
@@ -9850,3 +9863,322 @@ fn riders_walked_round_sx01_run_their_laps_to_the_over() {
     assert!(back.race.as_ref().and_then(|r| r.laps.as_ref()).is_some_and(|l| l.rules.lap.flags & 1 != 0), "the drop came through");
 }
 
+
+// --- the rider's statistics tracker (S319) -----------------------------------------------------------
+
+const T_BIKE: u32 = 0x01ea_0000;
+const T_CARD: u32 = 0x01ea_2000;
+const T_OWN: u32 = 0x01ea_2400;
+const T_OTHER: u32 = 0x01ea_2800;
+const T_APP: u32 = 0x01ea_3000;
+const T_SOUND: u32 = 0x01ea_3800;
+const T_SETTINGS: u32 = 0x01ea_3a00;
+const T_EVENT: u32 = 0x01ea_3c00;
+const T_PART: u32 = 0x01ea_4000;
+const T_CAMERA: u32 = 0x01ea_4400;
+const T_PLAYER: u32 = 0x01ea_4800;
+const T_AT: u32 = 0x01ea_5000;
+const T_FACING: u32 = 0x01ea_5010;
+
+/// The tracker's words in the bike (`+0x12c4` on): laps led to clutches, then the two latches.
+const T_COUNTS: u32 = T_BIKE + 0x12e8;
+const T_LATCHES: u32 = T_BIKE + 0x1314;
+
+/// A count as the tracker might hold one: small, at the wrap, or any word.
+fn count(p: &mut Pick) -> i32 {
+    match p.below(8) {
+        0 => i32::MAX,
+        1 => -1,
+        2 => p.next() as i32,
+        _ => p.below(40) as i32,
+    }
+}
+
+/// A tracker with any counts and latches, its words written into the bike.
+fn tracker(ee: &mut Ee, p: &mut Pick) -> race::Tracker {
+    let t = race::Tracker {
+        laps_led: count(p),
+        times_in_lead: count(p),
+        passes: count(p),
+        times_passed: count(p),
+        wrecks: count(p),
+        preloads: count(p),
+        clutches: count(p),
+        preload_held: p.below(2) == 0,
+        clutch_held: p.below(2) == 0,
+        entries_seen: None,
+    };
+    let words = [t.laps_led, t.times_in_lead, t.passes, t.times_passed, t.wrecks, t.preloads, t.clutches];
+    for (k, w) in words.into_iter().enumerate() {
+        ee.set_u32(T_COUNTS + 4 * k as u32, w as u32);
+    }
+    // A held latch is any word but 0, as the update only tests it.
+    let latch = |p: &mut Pick, held: bool| if !held { 0 } else if p.below(4) == 0 { p.next() as u32 | 1 } else { 1 };
+    let (a, b) = (latch(p, t.preload_held), latch(p, t.clutch_held));
+    ee.set_u32(T_LATCHES, a);
+    ee.set_u32(T_LATCHES + 4, b);
+    t
+}
+
+/// The tracker as the bike's words hold it.
+fn tracker_at(ee: &Ee) -> race::Tracker {
+    let w = |k: u32| ee.u32_at(T_COUNTS + 4 * k) as i32;
+    race::Tracker {
+        laps_led: w(0),
+        times_in_lead: w(1),
+        passes: w(2),
+        times_passed: w(3),
+        wrecks: w(4),
+        preloads: w(5),
+        clutches: w(6),
+        preload_held: ee.u32_at(T_LATCHES) != 0,
+        clutch_held: ee.u32_at(T_LATCHES + 4) != 0,
+        entries_seen: None,
+    }
+}
+
+/// A place as a card might hold one: first now and then, any word too.
+fn place(p: &mut Pick) -> i32 {
+    match p.below(6) {
+        0 | 1 => 1,
+        2 => p.next() as i32,
+        _ => p.below(8) as i32,
+    }
+}
+
+/// A preload timer or a clutch lever: at rest, pulled, or any word.
+fn lever(p: &mut Pick) -> F {
+    let x = match p.below(4) {
+        0 => 0.0,
+        1 => 1.0,
+        2 => p.range(-1.0, 2.0),
+        _ => p.range(0.0, 0.5),
+    };
+    F(p.stray(x))
+}
+
+#[test]
+fn the_lap_notice_counts_laps_led_as_the_bikes_listener_does() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let at = match addr("bike_lap_counted") {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    let mut p = Pick(0x5319_0045);
+    let mut led = 0;
+    for case in 0..20_000 {
+        let mut want = tracker(&mut ee, &mut p);
+        // The per-lap list's gate: only the constructor writes it, with 0.
+        ee.set_u32(T_BIKE + 0x12e4, 0);
+        ee.set_u32(T_BIKE + 0x12d4, p.below(1200) as u32);
+        let place = place(&mut p);
+        ee.set_u32(T_CARD + 0x2c, place as u32);
+        let null = p.below(20) == 0;
+        let card = if null { 0 } else { T_CARD };
+        ee.call(at, &[u64::from(T_BIKE), 0, u64::from(card)], &[], BUDGET);
+        if !null {
+            want.lap(place);
+            led += i32::from(place == 1);
+        }
+        assert_eq!(ee.v0() as u32, u32::from(!null), "case {case}: the answer");
+        assert_eq!(tracker_at(&ee), want, "case {case}: place {place}, null {null}");
+    }
+    assert!(led > 4000, "laps led counted: {led}");
+}
+
+#[test]
+fn a_place_change_counts_passes_as_the_bikes_listener_does() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let [at, crowd, app] = match addrs(["bike_place_change_crowd", "crowd_play", "app_pointer"]) {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    let played = Rc::new(Cell::new(0u32));
+    let heard = played.clone();
+    ee.hooks.insert(crowd, Box::new(move |_| heard.set(heard.get() + 1)));
+    ee.set_u32(app, T_APP);
+    ee.set_u32(T_APP + 0x3cc, T_SOUND);
+    let mut p = Pick(0x5319_0046);
+    let mut lead = 0;
+    for case in 0..20_000 {
+        let mut want = tracker(&mut ee, &mut p);
+        // The crowd: there or not, the cards' flags and places what its sounds read.
+        ee.set_u32(T_SOUND + 0xc0, if p.below(2) == 0 { 0 } else { T_SOUND });
+        for c in [T_CARD, T_OTHER] {
+            ee.set_u32(c + 8, p.next() as u32 & 0x0f);
+            ee.set_u32(c + 0xc, 0);
+            ee.set_u32(c + 0x2c, place(&mut p) as u32);
+            put_f(&mut ee, c + 0xb4, F(p.range(0.0, 10.0)));
+        }
+        // Its own card is the card told, but the count reads the bike's own.
+        let own = if p.below(4) == 0 { T_OWN } else { T_CARD };
+        ee.set_u32(T_OWN + 0x2c, place(&mut p) as u32);
+        ee.set_u32(T_BIKE + 0xf9c, own);
+        let kind = match p.below(10) {
+            0 => p.next() as u32,
+            1 => 2,
+            k => k as u32 & 1,
+        };
+        ee.call(at, &[u64::from(T_BIKE), 0, u64::from(T_CARD), u64::from(T_OTHER), kind as i32 as i64 as u64], &[], BUDGET);
+        let own_place = ee.u32_at(own + 0x2c) as i32;
+        if kind <= 1 {
+            want.place_changed(kind == 1, own_place);
+            lead += i32::from(kind == 0 && own_place == 1);
+        }
+        assert_eq!(ee.v0() as u32, 1, "case {case}: the answer");
+        assert_eq!(tracker_at(&ee), want, "case {case}: kind {kind}, own place {own_place}");
+    }
+    assert!(lead > 2000 && played.get() > 1000, "times in the lead {lead}, crowd calls {}", played.get());
+}
+
+#[test]
+fn every_wreck_entry_is_counted_as_the_players_entry_does() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let [at, record_end, base, camera, crowd, app] =
+        match addrs(["player_wreck_entry", "jump_record_end", "bike_wreck_entry", "camera_wreck_cut", "crowd_play", "app_pointer"]) {
+            Ok(a) => a,
+            Err(why) => return skip(&why),
+        };
+    for f in [record_end, base, camera, crowd] {
+        ee.hooks.insert(f, Box::new(|_| {}));
+    }
+    ee.set_u32(app, T_APP);
+    ee.set_u32(T_APP + 0x3cc, T_SOUND);
+    ee.set_u32(T_BIKE + 0x7a8, T_PART);
+    ee.set_u32(T_BIKE + 0x1498, T_CAMERA);
+    ee.set_u32(T_BIKE + 0x7a4, T_OTHER);
+    // No wreck camera, sound or hud objects behind the bike; a player record that is not a seat's.
+    for slot in [0xfd8, 0xfdc, 0xfe0] {
+        ee.set_u32(T_BIKE + slot, 0);
+    }
+    ee.set_u32(T_PLAYER + 0x34, 2);
+    ee.set_u32(T_PLAYER + 0x50, 0);
+    let mut p = Pick(0x5319_0047);
+    let mut ride = game_sim::state::Ride::default();
+    let mut t = race::Tracker::default();
+    for case in 0..10_000 {
+        let mut want = tracker(&mut ee, &mut p);
+        ee.set_u32(T_SOUND + 0xc0, if p.below(2) == 0 { 0 } else { T_SOUND });
+        ee.set_u32(T_BIKE + 0x20, if p.below(2) == 0 { 0 } else { T_PLAYER });
+        ee.set_u32(T_PART + 0x120, p.next() as u32);
+        let reason = match p.below(4) {
+            0 => 0,
+            1 => p.next() as u32,
+            _ => p.below(12) as u32,
+        };
+        ee.call(at, &[u64::from(T_BIKE), u64::from(reason)], &[], BUDGET);
+        want.wrecked();
+        assert_eq!(tracker_at(&ee), want, "case {case}: reason {reason}");
+        assert_eq!(ee.u32_at(T_BIKE + 0x14b4), u32::from(reason != 0), "case {case}: the shown flag");
+        // The ride's entry counts every one of them, and the tracker counts on from it.
+        let before = t.wrecks;
+        ride.enter(game_sim::trick::Wreck(reason as u8));
+        t.bike(race::BikeCounts { wreck_entries: ride.entries, ..race::BikeCounts::default() });
+        assert_eq!(t.wrecks, if case == 0 { before } else { before + 1 }, "case {case}: the ride's entries");
+    }
+}
+
+#[test]
+fn the_preload_and_clutch_counts_match_the_player_updates_stretch() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let [start, end] = match addrs(["bike_stats_controls", "bike_stats_controls_end"]) {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    ee.hooks.insert(end, Box::new(|ee| ee.set(31, u64::from(ps2_oracle::DONE) | 0xffff_ffff_0000_0000)));
+    let mut p = Pick(0x5319_0048);
+    let (mut preloads, mut clutches) = (0, 0);
+    for case in 0..40_000 {
+        let mut want = tracker(&mut ee, &mut p);
+        let (timer, clutch) = (lever(&mut p), lever(&mut p));
+        put_f(&mut ee, T_BIKE + 0x4b0, timer);
+        put_f(&mut ee, T_BIKE + 0x644, clutch);
+        ee.set(18, u64::from(T_BIKE));
+        ee.call(start, &[], &[], BUDGET);
+        let was = want;
+        want.controls(timer, clutch);
+        preloads += i32::from(want.preloads != was.preloads);
+        clutches += i32::from(want.clutches != was.clutches);
+        assert_eq!(tracker_at(&ee), want, "case {case}: timer {:#010x}, clutch {:#010x}", timer.0.to_bits(), clutch.0.to_bits());
+    }
+    assert!(preloads > 5000 && clutches > 5000, "counted {preloads} preloads, {clutches} clutches");
+}
+
+#[test]
+fn the_grid_starts_the_tracker_over_as_the_bikes_reset_does() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let [at, place_bike, reset_request, app] = match addrs(["bike_grid_reset", "bike_grid_place", "ride_reset_request", "app_pointer"]) {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    ee.hooks.insert(place_bike, Box::new(|_| {}));
+    ee.hooks.insert(reset_request, Box::new(|_| {}));
+    ee.set_u32(app, T_APP);
+    ee.set_u32(T_APP + 0x3d4, T_SETTINGS);
+    ee.set_u32(T_SETTINGS + 0xc, T_EVENT);
+    let mut p = Pick(0x5319_0049);
+    for case in 0..10_000 {
+        let mut want = tracker(&mut ee, &mut p);
+        let kind = if p.below(3) == 0 { 5 } else { p.below(8) as u32 };
+        ee.set_u32(T_EVENT + 4, kind);
+        let words: Vec<u32> = (0..4).map(|_| p.next() as u32).collect();
+        for (k, &w) in words.iter().enumerate() {
+            ee.set_u32(T_AT + 4 * k as u32, w);
+            ee.set_u32(T_FACING + 4 * k as u32, w.rotate_left(7));
+        }
+        ee.set_u32(T_BIKE + 0x1304, p.next() as u32);
+        ee.call(at, &[u64::from(T_BIKE), u64::from(T_AT), u64::from(T_FACING)], &[], BUDGET);
+        want.placed(kind == 5);
+        assert_eq!(ee.v0() as u32, 1, "case {case}: the answer");
+        assert_eq!(tracker_at(&ee), want, "case {case}: event kind {kind}");
+        if kind != 5 {
+            assert_eq!(ee.u32_at(T_BIKE + 0x1304), 0, "case {case}: the word after the clutches");
+        }
+    }
+    // A fresh ride's tracker is the grid's.
+    let mut fresh = race::Tracker { wrecks: 3, preload_held: true, ..race::Tracker::default() };
+    fresh.placed(false);
+    assert_eq!(fresh, race::Tracker::default());
+}
+
+#[test]
+fn riders_walked_round_sx01_count_their_laps_led_and_passes() {
+    let Some(file) = sx01_race_file() else { return };
+    let mut t = TrackFile::parse(&file).expect("sx01's race file reads");
+    t.snap_to_ground(None);
+    let (paths, spots) = TrackPaths::load(&t).expect("sx01's track loads");
+    let course = Course { line: t.line.clone().expect("a line"), line_spot: spots[1].expect("a line spot"), lap_length: paths.lap_length };
+    let grid = spots[0].expect("a grid spot").path as usize;
+    let dt = F(1.0 / 30.0);
+    // The computer is the faster but leaves two seconds late: it passes the human on the way round.
+    let walks = [track_walk(&paths, grid, 4.0, 6000), track_walk(&paths, grid, 3.0, 6000)];
+    let mut laps = race::Laps::new(race::supercross_rules(3), course, paths, &[(walks[1][0], race::HUMAN_CARD), (walks[0][0], race::COMPUTER_CARD)]);
+    laps.start();
+    let mut rng = Rng::from_state(0x5319_0050);
+    let mut want = [race::Tracker::default(); 2];
+    for tick in 1..6000usize {
+        let before: Vec<i32> = (0..2).map(|i| laps.card(i).unwrap().place).collect();
+        let riders: Vec<race::CardFeed> =
+            [(1, tick), (0, tick.saturating_sub(60))].iter().map(|&(w, t)| race::CardFeed::standing(walks[w][t.min(walks[w].len() - 1)], Vf::new(0.0, 0.0, 1.0, 0.0))).collect();
+        let frame = laps.tick(dt, &riders, &mut rng);
+        for (player, n) in &frame.cards {
+            if *n == RaceNotice::Line(LineNotice::Lap) {
+                want[*player].lap(before[*player]);
+            }
+        }
+        for n in &frame.finish {
+            match *n {
+                FinishNotice::PlaceLost { card, .. } => want[card].place_changed(true, laps.card(card).unwrap().place),
+                FinishNotice::PlaceGained { card, .. } => want[card].place_changed(false, laps.card(card).unwrap().place),
+                _ => {}
+            }
+        }
+        if laps.over() {
+            break;
+        }
+    }
+    let got = [*laps.stats(0).unwrap(), *laps.stats(1).unwrap()];
+    eprintln!("trackers {got:?}");
+    assert_eq!(got, want);
+    assert!(got[1].laps_led >= 2 && got[1].passes > 0 && got[1].times_in_lead > 0 && got[0].times_passed > 0, "laps led and passes counted: {got:?}");
+}

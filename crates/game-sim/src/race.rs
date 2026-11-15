@@ -4633,6 +4633,8 @@ impl Supercross {
 pub struct Entry {
     pub player: usize,
     pub card: RaceCard,
+    /// The bike's statistics tracker (S319): what its card's notices and its frames count.
+    pub stats: Tracker,
 }
 
 impl AsRef<LapCard> for Entry {
@@ -4755,7 +4757,7 @@ impl Laps {
                 kept_spot: spot,
                 ..LapCard::default()
             };
-            cards.push(Entry { player, card: RaceCard { lap, aim: spot, ..RaceCard::default() } });
+            cards.push(Entry { player, card: RaceCard { lap, aim: spot, ..RaceCard::default() }, stats: Tracker::default() });
         }
         Laps { rules, course, lists: LineLists { reach: F(20.0), ..LineLists::default() }, cards, track: std::sync::Arc::new(track) }
     }
@@ -4787,10 +4789,21 @@ impl Laps {
                 e.card.feed(f);
             }
             let said = self.rules.card_on_lines(dt, &mut e.card, None, track, &self.course, &self.lists, leader_time);
+            // The owner hears its lap with the place the last close left on the card.
+            for _ in said.iter().filter(|n| **n == RaceNotice::Line(LineNotice::Lap)) {
+                e.stats.lap(e.card.lap.place);
+            }
             frame.cards.extend(said.into_iter().map(|n| (e.player, n)));
         }
         let before: Vec<usize> = self.cards.iter().map(|e| e.player).collect();
         let said = self.rules.lap.close(dt, &mut self.cards, &[], rng);
+        // Each place change, to the card's owner, with the card's place as the ranking left it.
+        for n in &said {
+            if let FinishNotice::PlaceLost { card, .. } | FinishNotice::PlaceGained { card, .. } = *n {
+                let place = self.cards[card].card.lap.place;
+                self.cards[card].stats.place_changed(matches!(n, FinishNotice::PlaceLost { .. }), place);
+            }
+        }
         let after = |k: usize| self.cards[k].player;
         frame.finish = said
             .into_iter()
@@ -4814,5 +4827,121 @@ impl Laps {
     /// and the others' times are made up from their gaps.
     pub fn over(&self) -> bool {
         self.rules.lap.flags & race_flags::OVER_TOLD != 0
+    }
+}
+
+// --- the rider's statistics tracker (S319) -----------------------------------------------------------
+
+/// **A bike's statistics tracker** (S319): the counts the results menu shows beside each card, kept
+/// in the bike itself (the tracker inside a motocross bike, which its card's owner listeners and its
+/// own update write). Only the words the results read are kept, and the two latches behind the
+/// preload and clutch counts; the tracker's air clock, top speed, wheelie clocks, odometer and
+/// per-lap list are not ported.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Tracker {
+    /// Laps counted while the card held first place (`+0x24`).
+    pub laps_led: i32,
+    /// Places gained into first (`+0x28`).
+    pub times_in_lead: i32,
+    /// Places gained (`+0x2c`) and lost (`+0x30`).
+    pub passes: i32,
+    pub times_passed: i32,
+    /// Wreck entries, every one, re-wrecks and a reason of 0 among them (`+0x34`).
+    pub wrecks: i32,
+    /// Preloads (`+0x38`) and clutch pulls (`+0x3c`): each counted once as it starts.
+    pub preloads: i32,
+    pub clutches: i32,
+    /// Whether the preload (`+0x50`) and the clutch (`+0x54`) are being held, as last counted.
+    pub preload_held: bool,
+    pub clutch_held: bool,
+    /// The ride's wreck entries ([`crate::state::Ride::entries`]) as last seen, which
+    /// [`Tracker::bike`] counts on from. The port's own: the original counts in the wreck entry
+    /// itself. `None` until the first look, which only takes the baseline.
+    pub entries_seen: Option<i32>,
+}
+
+impl Tracker {
+    /// The card's owner heard that its lap was counted: one more lap led if the card is first.
+    pub fn lap(&mut self, place: i32) {
+        if place == 1 {
+            self.laps_led = self.laps_led.wrapping_add(1);
+        }
+    }
+
+    /// The card's owner heard that it lost (`lost`) or gained a place, `place` being its card's place
+    /// as it is told: a gain into first is a time in the lead as well as a pass.
+    pub fn place_changed(&mut self, lost: bool, place: i32) {
+        if lost {
+            self.times_passed = self.times_passed.wrapping_add(1);
+        } else {
+            self.passes = self.passes.wrapping_add(1);
+            if place == 1 {
+                self.times_in_lead = self.times_in_lead.wrapping_add(1);
+            }
+        }
+    }
+
+    /// The rider came off (any wreck entry).
+    pub fn wrecked(&mut self) {
+        self.wrecks = self.wrecks.wrapping_add(1);
+    }
+
+    /// The bike's update, after its physics: a preload counts as the preload timer (`+0x4b0`) leaves
+    /// 0, a clutch pull as the clutch lever (`+0x644`) does, each once until it is back at or under 0.
+    pub fn controls(&mut self, preload_timer: F, clutch: F) {
+        fn edge(held: &mut bool, count: &mut i32, x: F) {
+            if !*held {
+                if !le(x, F::ZERO) {
+                    *count = count.wrapping_add(1);
+                    *held = true;
+                }
+            } else if le(x, F::ZERO) {
+                *held = false;
+            }
+        }
+        edge(&mut self.preload_held, &mut self.preloads, preload_timer);
+        edge(&mut self.clutch_held, &mut self.clutches, clutch);
+    }
+
+    /// The race grid placed the bike: the counts and latches start over, except in a freestyle event,
+    /// which keeps them. The port's own baseline of wreck entries is kept either way.
+    pub fn placed(&mut self, freestyle: bool) {
+        if !freestyle {
+            *self = Tracker { entries_seen: self.entries_seen, ..Tracker::default() };
+        }
+    }
+
+    /// The bike's frame is over: the wreck entries since the last look counted, then the preload and
+    /// clutch latches. A count of entries that went back is taken as a fresh ride's.
+    pub fn bike(&mut self, b: BikeCounts) {
+        if let Some(seen) = self.entries_seen {
+            let new = if b.wreck_entries >= seen { b.wreck_entries - seen } else { b.wreck_entries };
+            (0..new).for_each(|_| self.wrecked());
+        }
+        self.entries_seen = Some(b.wreck_entries);
+        self.controls(b.preload_timer, b.clutch);
+    }
+}
+
+/// What a bike's frame leaves for its [`Tracker`]: its preload timer, its clutch lever, and its ride's
+/// wreck entries so far.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BikeCounts {
+    pub preload_timer: F,
+    pub clutch: F,
+    pub wreck_entries: i32,
+}
+
+impl Laps {
+    /// Player `player`'s bike has had its frame ([`Tracker::bike`]).
+    pub fn bike(&mut self, player: usize, b: BikeCounts) {
+        if let Some(e) = self.cards.iter_mut().find(|e| e.player == player) {
+            e.stats.bike(b);
+        }
+    }
+
+    /// Player `player`'s tracker.
+    pub fn stats(&self, player: usize) -> Option<&Tracker> {
+        self.cards.iter().find(|e| e.player == player).map(|e| &e.stats)
     }
 }

@@ -417,6 +417,7 @@ impl Sim {
             self.traffic.props.pushed(&bump.props);
             said
         };
+        self.race_bike(0, controls.clutch);
         // What the wreck bike's rays pushed in its frame (S244).
         self.wreck_pushed_back(0);
         self.props_step(dt, &prop_movers);
@@ -487,6 +488,17 @@ impl Sim {
         }
         if frame.dropped {
             all.iter_mut().for_each(|r| race::release(&mut r.ride.chassis));
+        }
+    }
+
+    /// Player `i`'s bike has had its frame, on `clutch` for a lever: its race card's statistics
+    /// tracker counts on ([`race::Laps::bike`], S319), as the original's bike update does after its
+    /// physics.
+    fn race_bike(&mut self, i: usize, clutch: F) {
+        let r = self.rider_of(i);
+        let b = race::BikeCounts { preload_timer: r.ride.air.preload_timer, clutch, wreck_entries: r.state.entries };
+        if let Some(laps) = self.race.as_mut().and_then(|r| r.laps.as_mut()) {
+            laps.bike(i, b);
         }
     }
 
@@ -636,6 +648,7 @@ impl Sim {
                 p.rider.frame_bumped(&p.phy, tables, c, dt, world, &rivals, bump.as_mut())
             };
             self.props_back(i);
+            self.race_bike(i, c.clutch);
             if let Some(b) = &bump {
                 self.bumped(b);
                 self.traffic.props.pushed(&b.props);
