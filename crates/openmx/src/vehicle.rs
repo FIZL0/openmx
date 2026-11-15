@@ -3560,6 +3560,9 @@ pub struct MxvatvCarRide {
     /// The modifiers it is made on, and whose (P288, [`Garage::modify`]): read as it is taken.
     pub mods: game_sim::modifiers::Mods,
     pub seat: usize,
+    /// Its `<car>m.col` ray probe (MD149b, [`MxvatvCarRide::with_record`]): each car made is rigged
+    /// with its collision record on it. `None`, and the car meets only the ground, by its tires.
+    pub riding: Option<game_sim::track::Rays>,
 }
 
 impl std::fmt::Debug for MxvatvCarRide {
@@ -3583,7 +3586,19 @@ impl MxvatvCarRide {
         let points = game_sim::atv_car::tire_points(&model, &origin).map_err(|e| format!("{psg}: {e}"))?;
         let curve = game_sim::camera::CurveTable::build();
         let load = game_sim::atv_car::Load::read(&ini, machine, model.half_box(&origin), points, &curve);
-        Ok(MxvatvCarRide { pack: pack.to_string(), machine, load: std::sync::Arc::new(load), ridden: None, taken_at: Vf::default(), taken_along: Vf::default(), wrecks: 0, was_down: false, mods: game_sim::modifiers::Mods::original(), seat: 0 })
+        Ok(MxvatvCarRide { pack: pack.to_string(), machine, load: std::sync::Arc::new(load), ridden: None, taken_at: Vf::default(), taken_along: Vf::default(), wrecks: 0, was_down: false, mods: game_sim::modifiers::Mods::original(), seat: 0, riding: None })
+    }
+
+    /// The car with its collision record (MD149b): `col`, its `<car>m.col` (`read` by its path in the
+    /// pack), the ray probe every car made is rigged on ([`game_sim::atv_car::Ride::rig`]). An empty
+    /// `col` (a pack listing none) leaves it without. `Err` with a `col` that is missing or does not read.
+    pub fn with_record(mut self, col: &str, read: &mut dyn FnMut(&str) -> Option<Vec<u8>>) -> Result<MxvatvCarRide, String> {
+        if col.is_empty() {
+            return Ok(self);
+        }
+        let bytes = read(col).ok_or_else(|| format!("{} has no {col}", self.pack))?;
+        self.riding = Some(game_sim::track::Rays::parse(&bytes).map_err(|e| format!("{col}: {e}"))?);
+        Ok(self)
     }
 
     /// What the shell calls it.
@@ -3617,12 +3632,19 @@ impl MxvatvCarRide {
         let quat = Vf::new(0.0, (yaw / 2.0).sin(), 0.0, (yaw / 2.0).cos());
         let at = Vf::new(at.x(), at.y() + self.lift(), at.z(), 1.0);
         let modded = game_sim::modifiers::Category::MxvatvCars.knobs().into_iter().any(|k| self.mods.get(self.seat, k) != game_sim::modifiers::ORIGINAL);
+        let rigged = |load: &game_sim::atv_car::Load| {
+            let mut ride = load.ride(at, quat, F::ZERO);
+            if let Some(riding) = &self.riding {
+                ride.rig(load, riding);
+            }
+            ride
+        };
         if !modded {
-            return self.load.ride(at, quat, F::ZERO);
+            return rigged(&self.load);
         }
         let mut load = (*self.load).clone();
         self.mods.mxvatv_car(self.seat, &mut load.file.car);
-        load.ride(at, quat, F::ZERO)
+        rigged(&load)
     }
 
     /// The car taken at `from`: made standing over the ground under the spot, facing along it, at

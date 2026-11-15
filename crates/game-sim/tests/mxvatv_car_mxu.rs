@@ -7,8 +7,13 @@
 //! off a lip and lands, and wrecks at the map's edge, has its wreck clock run out and is put back at
 //! the spot MX Unleashed's put-back record kept, riding on. Every call the ride hands on unanswered is
 //! one [`atv_car::Ride`] drops on purpose.
+//!
+//! MD149b rigs the car's collision record (its `<car>m.col`, [`atv_car::Ride::rig`]): the record built
+//! from the files is the images' (MD39a), a rigged car rolled over wrecks tipped and is put back, and
+//! one driven head on into a prop stops on it. The gravity call is answered once rigged; it stays in
+//! [`DROPPED`] for the un-rigged rides above.
 use game_render::disc::Disc;
-use game_sim::atv_car::{self, Call, Load, RIDING, WRECK_EDGE};
+use game_sim::atv_car::{self, Call, Load, RIDING, WRECK_EDGE, WRECK_TIPPED};
 use game_sim::bindings::{Command, Table};
 use game_sim::camera::CurveTable;
 use game_sim::car::MxvatvMachine;
@@ -331,6 +336,302 @@ fn each_car_rides_free09_jumps_wrecks_and_is_put_back() {
             assert!(on > 10.0, "{name}: rode {on} ft on after the put-back");
 
             eprintln!("{name}: handed on {handed:?}");
+            assert!(unexpected(&handed).is_empty(), "{name}: calls handed on unanswered: {:?}", unexpected(&handed));
+        }
+    });
+}
+
+// --- MD149b: the car's collision record ------------------------------------------------------------
+
+/// Each car's MD39a image (`mxvatv-ps2/md39a/<name>.ee.bin`) and where its car is
+/// (tests/mxvatv_car_captures.rs's), in [`CARS`] order.
+const IMAGES: [(&str, u32); 5] = [("buggy", 0x0159_8e10), ("baja", 0x0159_8e10), ("sandrail", 0x01b1_58a0), ("golf", 0x01b0_dac0), ("truck", 0x0159_8e10)];
+
+impl Files {
+    /// The car's `<model>m.col`, the ray probe its record runs (MXVSATV.PSR's `Veh\\Col`, MD39's).
+    fn riding(&self, model: &str) -> game_sim::track::Rays {
+        let path = self.kit.ctx("mxvatv-ps2/md39/model").join(format!("{model}m.col"));
+        let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        game_sim::track::Rays::parse(&bytes).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    }
+    /// The car built from its files and rigged with its record, at `at` turned to `quat`.
+    fn rigged(&self, machine: MxvatvMachine, phy: &str, model: &str, world: &mut Place<'_>, at: (f32, f32), quat: Vf) -> (atv_car::Ride, Load) {
+        let load = self.load_car(machine, phy, model);
+        let mut ride = load.ride(over(world, &load, at), quat, F::ZERO);
+        ride.rig(&load, &self.riding(model));
+        (ride, load)
+    }
+}
+
+/// Each car's record made from its files ([`atv_car::Load::record`] on its `.phy` and `m.col`) is
+/// the one its MD39a image holds, in every word the ride does not move: the record's flags and
+/// tuning, its resolution's fields, and the riding rays bit for bit (the image's active part's). The
+/// record's last sweep and contacts, and its resolution's speeds, are state; its inverse inertia is
+/// the part reader's off the model's box (MD150's, within 1%).
+#[test]
+fn each_cars_record_from_its_files_is_its_images() {
+    use game_sim::handling::record;
+    let Some(files) = Files::load() else { return };
+    let mut seen = 0;
+    for ((name, machine, phy, model), (image, car)) in CARS.into_iter().zip(IMAGES) {
+        let path = files.kit.ctx("mxvatv-ps2/md39a").join(format!("{image}.ee.bin"));
+        if !path.exists() {
+            skip(&format!("{} is not there: MD39a's {image} (C29 remade it)", path.display()));
+            continue;
+        }
+        let pre = ps2_oracle::Ee::from_ram(&path).unwrap_or_else(|e| panic!("{e}"));
+        let at = pre.u32_at(car + 0xc8);
+        let w = |a: u32| pre.u32_at(a);
+        let (theirs, their_held) = (record::read(&w, at), record::held(&w, at).expect("the image's record is held"));
+        let part = pre.u32_at(at + 0x200);
+        let their_rays: Vec<u32> = (0..pre.u32_at(part + 0x178) * 8).map(|k| pre.u32_at(pre.u32_at(part + 0x180) + 4 * k)).collect();
+
+        let load = files.load_car(machine, phy, model);
+        let (ours, our_held, riding) = load.record(&files.riding(model));
+        let still = |r: &record::Record| {
+            let mut r = r.clone();
+            (r.swept_from, r.swept_to, r.contacts) = (Vf::ZERO, Vf::ZERO, Vec::new());
+            r
+        };
+        assert_eq!(still(&ours), still(&theirs), "{name}: the record");
+        let collider = |h: &game_sim::atv_contact::Held| {
+            let mut c = h.record.clone();
+            (c.collider.cofg_world, c.collider.normal_speed, c.collider.relative, c.collider.inv_inertia) = (Vf::ZERO, F::ZERO, Vf::ZERO, Vf::ZERO);
+            (c, h.mass, h.entries.len(), h.movers.len())
+        };
+        assert_eq!(collider(&our_held), collider(&their_held), "{name}: the record's resolution fields");
+        let (ii, ij) = (our_held.record.collider.inv_inertia, their_held.record.collider.inv_inertia);
+        let off = ii.0.iter().zip(ij.0).map(|(x, y)| (x - y).abs() / y.abs().max(1e-6)).fold(0.0f32, f32::max);
+        // The box the part reader takes the inertia from is the model's, in a frame the image does not
+        // keep: within 1% (tests/mxvatv_car_load.rs, `the_models_box_is_the_records_within_a_percent`).
+        assert!(off < 1e-2, "{name}: the record's inverse inertia: ours {ii:?}, the image's {ij:?}");
+        let ours_rays: Vec<u32> = riding.iter().flat_map(|s| s.iter().flat_map(|v| v.0.map(f32::to_bits))).collect();
+        assert_eq!(ours_rays, their_rays, "{name}: the riding rays");
+        eprintln!("{name}: the record from the files is the image's; {} riding rays, inverse inertia {off} off", riding.len());
+        seen += 1;
+    }
+    eprintln!("MD149b: {seen} cars' records against their images");
+}
+
+/// The quaternion turning `+z` to `yaw` about `+y` and then rolling the car `roll` radians about its
+/// own forward axis.
+fn rolled(yaw: f32, roll: f32) -> Vf {
+    let (sy, cy) = (yaw / 2.0).sin_cos();
+    let (sr, cr) = (roll / 2.0).sin_cos();
+    // (the yaw) · (the roll about z), Hamilton's product.
+    Vf::new(-sy * sr, sy * cr, cy * sr, cy * cr)
+}
+
+/// How long a tipped car gets to wreck, and then to be put back.
+const TIP_TICKS: usize = 150;
+const BACK_TICKS: usize = 600;
+
+/// Each car, rigged, ridden to keep a put-back spot and then rolled over on free09 and let go: its
+/// record's heightfield rays hold it on the ground (its body never sinks under it), it wrecks tipped
+/// ([`WRECK_TIPPED`]), is put back upright at the kept spot when its clock runs out, and rides on.
+///
+/// Rolled onto its roof, not its side: on an MX Unleashed world a tire's ground is the world's
+/// straight-down query ([`game_sim::quad::world_ground`]), so the tires of a car on its side read
+/// ground under them, the car counts as grounded on both sides and its suspension stands it back up
+/// before the tipped clause can hold.
+#[test]
+fn each_car_rolled_over_wrecks_tipped_and_is_put_back() {
+    let Some(files) = Files::load() else { return };
+    let mut disc = match Disc::open_configured() {
+        Ok(d) => d,
+        Err(why) => {
+            skip(&why);
+            return;
+        }
+    };
+    in_free09(&mut disc, |world| {
+        for (name, machine, phy, model) in CARS {
+            let (mut ride, load) = files.rigged(machine, phy, model, world, SPOT, yaw_quat(0.0));
+            let mut hands = Hands::new();
+            let mut handed = std::collections::BTreeSet::new();
+            for _ in 0..KEEP {
+                hands.step(&mut ride, world, true, 0x80);
+                handed.extend(ride.rest.drain(..).map(|c| call_name(&c)));
+            }
+            let back = ride.back.unwrap_or_else(|| panic!("{name}: no put-back spot kept"));
+            assert_eq!(ride.car.state, RIDING, "{name}: wrecked riding to keep a spot");
+
+            // Rolled onto its roof, a little off the ground, where it is.
+            let p = ride.body.position;
+            let lift = Vf::new(p.x(), over(world, &load, (p.x(), p.z())).y(), p.z(), 1.0);
+            ride.put(lift, rolled(0.0, std::f32::consts::PI));
+            let (mut tipped, mut touched, mut lowest) = (None, 0usize, f32::MAX);
+            for tick in 0..TIP_TICKS {
+                hands.step(&mut ride, world, false, 0x80);
+                handed.extend(ride.rest.drain(..).map(|c| call_name(&c)));
+                let p = ride.body.position;
+                assert!(p.0.iter().all(|v| v.is_finite()), "{name}: tick {tick} at {p:?}");
+                let (floor, _) = world.ground(Vf::new(p.x(), 1.0e4, p.z(), 1.0));
+                lowest = lowest.min(p.y() - floor.y());
+                let r = &ride.recorded.as_ref().unwrap().record;
+                touched += usize::from(r.on_ground);
+                if ride.car.state == WRECK_TIPPED {
+                    tipped = Some(tick);
+                    break;
+                }
+            }
+            eprintln!("{name}: rolled over, the record on the ground {touched} ticks, lowest body {lowest:.2} ft over the ground, tipped wreck at {tipped:?}");
+            assert!(touched > 0, "{name}: the record's heightfield rays never touched the ground");
+            assert!(lowest > -0.5, "{name}: the body sank {lowest} ft under the ground rolled over");
+            let tipped = tipped.unwrap_or_else(|| panic!("{name}: no tipped wreck in {TIP_TICKS} ticks rolled over"));
+            assert!(ride.vehicle.tipped_wreck, "{name}: the tipped wreck's flag is not set");
+
+            let mut put = None;
+            for tick in 0..BACK_TICKS {
+                hands.step(&mut ride, world, false, 0x80);
+                handed.extend(ride.rest.drain(..).map(|c| call_name(&c)));
+                if ride.car.state == RIDING {
+                    put = Some((tick, ride.body.position));
+                    break;
+                }
+            }
+            let (put, p) = put.unwrap_or_else(|| panic!("{name}: never put back after the tipped wreck at {tipped}"));
+            let from = (p.x() - back.at.x()).hypot(p.z() - back.at.z());
+            // The node is placed by the next tick's post; the body is put back already.
+            let q = ride.body.quat;
+            let up = 1.0 - 2.0 * (q.x() * q.x() + q.z() * q.z());
+            eprintln!("{name}: put back {put} ticks after the tipped wreck, {from:.1} ft from the kept spot, up {up:.3}");
+            assert!(from < 10.0, "{name}: put back {from} ft from the kept spot {:?}", back.at);
+            assert!(up > 0.9, "{name}: put back with its up row's y {up}");
+            assert!(!ride.vehicle.tipped_wreck, "{name}: the tipped wreck's flag is still set");
+
+            let p0 = ride.body.position;
+            for tick in 0..120 {
+                hands.step(&mut ride, world, true, 0x80);
+                handed.extend(ride.rest.drain(..).map(|c| call_name(&c)));
+                assert_eq!(ride.car.state, RIDING, "{name}: wrecked again at tick {tick} after the put-back");
+            }
+            let p1 = ride.body.position;
+            let on = (p1.x() - p0.x()).hypot(p1.z() - p0.z());
+            assert!(on > 10.0, "{name}: rode {on} ft on after the put-back");
+            assert!(!handed.contains("GravityRecord"), "{name}: the rigged car's gravity call went unanswered");
+            assert!(unexpected(&handed).is_empty(), "{name}: calls handed on unanswered: {:?}", unexpected(&handed));
+        }
+    });
+}
+
+/// How far the car runs up to a prop, ft, and how long it is driven at it.
+const RUN_UP: f32 = 60.0;
+const PROP_TICKS: usize = 240;
+/// How long after the strike the car is looked at, and the speed it has to fall under, ft/s.
+const HELD: usize = 30;
+const STOPPED: f32 = 5.0;
+
+/// The static prop nearest [`SPOT`] with a face a car's height tall and near upright, met head on by
+/// a run up to it on the ground (tests/atv_quad/mxu.rs's search, then turned along the face's normal):
+/// a level ray from the run's start at one and at four feet strikes this prop first, near the far end,
+/// on a face whose level normal points back along the run. The prop's index, and the run's start and
+/// heading.
+fn prop_run(world: &mut Place<'_>) -> (usize, (f32, f32), f32) {
+    let level = |world: &mut Place<'_>, a: Vf, b: Vf| {
+        use game_sim::collide::{Bundle, Probe, Record};
+        let mut bundle = Bundle { count: 1, centre: a, radius: F(RUN_UP + 40.0), ..Bundle::default() };
+        bundle.probes[0] = Probe::between(a, b);
+        let mut record = Record::new();
+        world.solid(&bundle, &mut record);
+        record.hit[0].then_some((record.fraction[0].0, record.owner[0], record.normal[0], record.point[0]))
+    };
+    let mut candidates: Vec<(usize, Vf, f32)> = world
+        .props
+        .props
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.moving.is_none() && (1.0..20.0).contains(&p.radius.0))
+        .map(|(i, p)| {
+            let (dx, dz) = (SPOT.0 - p.centre.x(), SPOT.1 - p.centre.z());
+            (i, p.centre, (dx * dx + dz * dz).sqrt())
+        })
+        .collect();
+    candidates.sort_by(|a, b| a.2.total_cmp(&b.2));
+    candidates
+        .iter()
+        .take(400)
+        .find_map(|&(i, c, d)| {
+            let r = world.props.props[i].radius.0;
+            let (ux, uz) = ((SPOT.0 - c.x()) / d.max(1.0), (SPOT.1 - c.z()) / d.max(1.0));
+            let run = r + RUN_UP;
+            let first = (c.x() + ux * run, c.z() + uz * run);
+            let g = world.ground.at(F(first.0), F(first.1))?.y.0;
+            let (_, owner, n, at) = level(world, Vf::new(first.0, g + 1.0, first.1, 1.0), Vf::new(c.x(), g + 1.0, c.z(), 1.0))?;
+            let flat = n.x().hypot(n.z());
+            if owner != i as i32 || flat < 0.95 {
+                return None;
+            }
+            // Back along the face's level normal from where the ray struck it.
+            let (nx, nz) = (n.x() / flat, n.z() / flat);
+            let start = (at.x() + nx * RUN_UP, at.z() + nz * RUN_UP);
+            let g = world.ground.at(F(start.0), F(start.1))?.y.0;
+            let ok = [1.0f32, 4.0].iter().all(|&h| {
+                let a = Vf::new(start.0, g + h, start.1, 1.0);
+                let b = Vf::new(at.x() - nx * 10.0, g + h, at.z() - nz * 10.0, 1.0);
+                level(world, a, b).is_some_and(|(f, owner, m, _)| owner == i as i32 && f * (RUN_UP + 10.0) > RUN_UP - 10.0 && (m.x() * nx + m.z() * nz) > 0.95 * m.x().hypot(m.z()).max(1e-6))
+            });
+            ok.then_some((i, start, (-nx).atan2(-nz)))
+        })
+        .expect("a tall upright prop face on free09's ground with a clear run up to it")
+}
+
+/// Each car, rigged, driven on the gas straight at a free09 prop: its record's world rays strike it
+/// (the record on an object, the prop's owner number plus one struck), and the car stops on its face —
+/// its body never gets past the face, and is all but still against it at the end.
+#[test]
+fn each_car_driven_into_a_prop_stops_on_it() {
+    let Some(files) = Files::load() else { return };
+    let mut disc = match Disc::open_configured() {
+        Ok(d) => d,
+        Err(why) => {
+            skip(&why);
+            return;
+        }
+    };
+    in_free09(&mut disc, |world| {
+        let (prop, start, yaw) = prop_run(world);
+        let (ux, uz) = (yaw.sin(), yaw.cos());
+        let face = RUN_UP;
+        eprintln!("MD149b: prop {prop} at {:?}, its face {RUN_UP} ft along a run from {start:?} yaw {yaw}", world.props.props[prop].centre);
+        for (name, machine, phy, model) in CARS {
+            let (mut ride, _) = files.rigged(machine, phy, model, world, start, yaw_quat(yaw));
+            let mut hands = Hands::new();
+            let mut handed = std::collections::BTreeSet::new();
+            let (mut on_prop, mut struck, mut furthest, mut top) = (0usize, 0u32, 0.0f32, 0.0f32);
+            // The first strike's tick, and the first tick after it slower than STOPPED.
+            let (mut hit, mut stopped) = (None, None);
+            for tick in 0..PROP_TICKS {
+                hands.step(&mut ride, world, true, 0x80);
+                handed.extend(ride.rest.drain(..).map(|c| call_name(&c)));
+                let p = ride.body.position;
+                assert!(p.0.iter().all(|v| v.is_finite()), "{name}: tick {tick} at {p:?}");
+                let r = &ride.recorded.as_ref().unwrap().record;
+                if r.on_object {
+                    on_prop += 1;
+                    if hit.is_none() {
+                        (hit, struck) = (Some(tick), r.struck);
+                    }
+                }
+                let v = ride.body.velocity;
+                let speed = v.x().hypot(v.z());
+                top = top.max(speed);
+                // Held against it, on the gas, a car may climb the face and slide off round its
+                // side (the golf cart does); only the meeting is looked at.
+                if hit.is_some_and(|h| tick <= h + HELD) {
+                    furthest = furthest.max((p.x() - start.0) * ux + (p.z() - start.1) * uz);
+                    if speed < STOPPED && stopped.is_none() {
+                        stopped = Some(tick);
+                    }
+                }
+            }
+            let hit = hit.unwrap_or_else(|| panic!("{name}: the record never touched the prop"));
+            eprintln!("{name}: top {top:.1} ft/s, the record on the prop {on_prop} ticks (struck {struck} at tick {hit}, stopped at {stopped:?}), body furthest {furthest:.1} ft along the run in the {HELD} ticks after, the face at {face:.1}");
+            assert!(top > 20.0, "{name}: only {top} ft/s at the prop");
+            assert_eq!(struck, prop as u32 + 1, "{name}: struck {struck}, not the prop");
+            assert!(furthest < face, "{name}: its body went {furthest} ft along the run, past the prop's face at {face}");
+            assert!(stopped.is_some(), "{name}: not under {STOPPED} ft/s in the {HELD} ticks after it struck the prop");
+            assert!(!handed.contains("GravityRecord"), "{name}: the rigged car's gravity call went unanswered");
             assert!(unexpected(&handed).is_empty(), "{name}: calls handed on unanswered: {:?}", unexpected(&handed));
         }
     });

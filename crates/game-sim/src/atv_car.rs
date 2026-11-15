@@ -3048,7 +3048,67 @@ impl Load {
             ..Vehicle::default()
         }
     }
+
+    /// **The car's collision record as loaded** (MD149b), on `riding` (its `<car>m.col`, a ray
+    /// probe): what the part reader writes ([`crate::handling::mass::Part::words`], laid at scratch
+    /// places and read back as the record and its resolution's fields) over the record's constructor,
+    /// as each car's image holds it (MD39a): the world rays, the rays and the sweep on as
+    /// `CheckForCollisions` and `CheckForHighSpeedCollisions` say, rests and damping of one, a body,
+    /// the terrain, the near-field list, one contact a riding ray, the two probes, and the car's
+    /// class word [`RECORD_CLASS`]. The heightfield rays are off: the frame turns them on with the
+    /// car tipped ([`Car::tipped`]). The held list has no body (the car's resolution reads the ride's).
+    pub fn record(&self, riding: &crate::track::Rays) -> (crate::handling::record::Record, crate::atv_contact::Held, Vec<[Vf; 2]>) {
+        use crate::handling::record;
+        let riding = crate::flight_search::Rays::of(riding).pairs();
+        let r = &self.part.record;
+        let mut words = std::collections::BTreeMap::new();
+        for (a, mask, v) in self.part.words(RECORD_AT) {
+            let w = words.entry(a).or_insert(0u32);
+            *w = (*w & !mask) | (v & mask);
+        }
+        let at = RECORD_AT.record;
+        let one = F::ONE.to_bits();
+        for (o, v) in [
+            (0x28, 1),
+            (0x2c, u32::from(r.check_for_collisions != 0)),
+            (0x30, u32::from(r.check_high_speed != 0)),
+            (0x48, one),
+            (0x4c, one),
+            (0x50, one),
+            (0x54, one),
+            (0xe4, RECORD_AT.body),
+            (0xec, 1),
+            (0xf4, riding.len() as u32),
+            (0xfc, 1),
+            (0x100, RECORD_ACTORS),
+            (0x104, RECORD_COLLIDES),
+            (0x200, 1),
+            (0x204, 1),
+            (0x208, RECORD_CLASS_AT),
+        ] {
+            words.insert(at + o, v);
+        }
+        // The `w` lanes of the centre of mass in the world and the relative velocity.
+        for o in [0x9c, 0x1fc] {
+            words.insert(at + o, one);
+        }
+        words.insert(RECORD_CLASS_AT + 0x94, RECORD_CLASS);
+        let w = |a: u32| words.get(&a).copied().unwrap_or(0);
+        let held = record::held(&w, at).expect("a record with no contacts is held");
+        (record::read(&w, at), held, riding)
+    }
 }
+
+/// Where [`Load::record`] lays the part reader's words to read the collision record back: scratch
+/// places, nobody's RAM.
+const RECORD_AT: crate::handling::mass::Layout = crate::handling::mass::Layout { object: 0x1000, body: 0x2000, record: 0x3000, gravity: 0x4000 };
+const RECORD_CLASS_AT: u32 = 0x5000;
+/// The record's constructor words no `.phy` key writes, as each car's image holds them (MD39a's five):
+/// the actor bit it is, what it collides with (everything), and its class word (the record's `+0x208`
+/// object's `+0x94`).
+const RECORD_ACTORS: u32 = 0x1000;
+const RECORD_COLLIDES: u32 = !0;
+pub const RECORD_CLASS: u32 = 0x0004_3806;
 
 /// **The car's tire nodes' points** off its chassis model (`<car>.psg`) placed at `frame`: each
 /// [`crate::car::TIRE_NODES`] node's world origin carried back into `frame`, as the quad's wheel
@@ -3138,6 +3198,7 @@ impl Load {
             back: None,
             cache: None,
             spot: (at, quat),
+            recorded: None,
             rest: Vec::new(),
         };
         // The vehicle base is a player's: a vehicle state, a player, no rumbler.
@@ -3151,8 +3212,9 @@ impl Load {
 /// **MX vs. ATV's car as a shell steps it on an MX Unleashed world** (MD149): the pieces' keys and
 /// running words, the input step's, the car, its rigid body, MXVehicle's words, the update's, and
 /// whoever answers what nobody here does (`rest`, a list its owner clears), one [`Ride::step`] a
-/// tick: the pad through the car's input step ([`input`]), [`frame`] with [`Own`] over [`Pieces`]
-/// over [`OnWorld`], then [`class_update`] the same way, then the put-back spot kept.
+/// tick: the pad through the car's input step ([`input`]), the collision record's pass when the car
+/// has one ([`Ride::record_on`], MD149b), [`frame`] with [`Own`] over [`Pieces`] over [`OnWorld`],
+/// then [`class_update`] the same way, then the put-back spot kept.
 ///
 /// What the frame and the update call, and who answers on an MX Unleashed world:
 ///
@@ -3171,9 +3233,11 @@ impl Load {
 ///   spot MX Unleashed's put-back record keeps ([`crate::ride::keep_back_on`]), still and enabled;
 ///   the respawn also runs the car's tire and engine resets;
 /// - the ghost, the hazard clock and the base update: [`OwnUpdate`] (no ghost runs; the hazard
-///   table is empty, so the clock frees the car each frame).
+///   table is empty, so the clock frees the car each frame);
+/// - the collision record's gravity call ([`Call::GravityRecord`]), with the car rigged
+///   ([`Ride::rig`]): [`Own`], resolving the contacts [`Ride::record_on`] filed against the world.
 ///
-/// Dropped (`rest`): [`Call::GravityRecord`] (no collision record runs on an MX Unleashed world:
+/// Dropped (`rest`): [`Call::GravityRecord`] on a car not rigged (no record runs:
 /// [`Vehicle::touching`] stays false, so the tipped wreck never starts), [`Call::SpatialMove`],
 /// [`Call::PartMove`], [`Call::Gather`] (SLUS-21104's spatial database), [`Call::LeaveWorld`]
 /// (its physics lists), [`Call::RidingLetGo`] and [`Call::ReleaseRecord`] (the record), the sound
@@ -3199,7 +3263,19 @@ pub struct Ride {
     pub cache: Option<Box<crate::back_search::Cache>>,
     /// Where the put-back stands the car's node, and its turn.
     pub spot: (Vf, Vf),
+    /// MD149b's: the collision record run before each frame ([`Ride::record_on`]); `None`, none runs.
+    pub recorded: Option<Recorded>,
     pub rest: Vec<Call>,
+}
+
+/// **The car's collision record on an MX Unleashed world** (MD149b), as [`Ride`] keeps it: the
+/// record ([`crate::handling::record::Record`]) and its riding rays (the `<car>m.col` ray probe, in
+/// the scene node's frame). Its resolution's fields and list are [`Vehicle::held`], where the
+/// gravity's call reads them.
+#[derive(Clone, Debug)]
+pub struct Recorded {
+    pub record: crate::handling::record::Record,
+    pub riding: Vec<[Vf; 2]>,
 }
 
 /// The curve table the put-back record's search reads, built once.
@@ -3250,10 +3326,47 @@ impl Ride {
         self.frame_on(dt, world);
     }
 
-    /// One tick on an MX Unleashed world, its controls laid already: the world's box and map area
-    /// into [`Vehicle`], the car's [`frame`], its [`class_update`], then the put-back spot kept
-    /// ([`Ride::keep_back`]).
+    /// **The car's collision record rigged** (MD149b) on `riding`, its `<car>m.col`
+    /// ([`Load::record`]): the record kept in [`Ride::recorded`], its resolution's fields and list in
+    /// [`Vehicle::held`] (with the ride's body).
+    pub fn rig(&mut self, load: &Load, riding: &crate::track::Rays) {
+        let (record, mut held, riding) = load.record(riding);
+        held.body = Some(self.body);
+        self.vehicle.held = Some(held);
+        self.recorded = Some(Recorded { record, riding });
+    }
+
+    /// **The collision record's clear and pass** (MD149b, [`crate::handling::record::clear`] and
+    /// [`crate::handling::record::pass`]), before the frame, as the world runs its records before its
+    /// step: on [`crate::quad::RecordOn`] (the riding rays stood at the car's node and swept against
+    /// [`crate::world::World::solid`] and [`crate::world::World::groups`], the heightfield rays against
+    /// [`crate::world::World::ground`]), with the heightfield rays on as the last frame left
+    /// [`Car::tipped`]. The pass's contacts refill [`Vehicle::held`] (none is ever with another record
+    /// or a mover on an MX Unleashed world), and its touch is [`Vehicle::touching`].
+    pub fn record_on(&mut self, dt: F, world: &mut dyn crate::world::World) {
+        let Some(r) = self.recorded.as_mut() else { return };
+        r.record.heightfield = self.car.tipped;
+        let mut on = crate::quad::RecordOn { world, scene: &mut self.vehicle.scene, rays: &r.riding, damped: None, category: 0, nobody: Default::default() };
+        crate::handling::record::clear(&mut r.record, &mut on);
+        let mut view = self.body.view();
+        let body = if r.record.body { Some(&mut view) } else { None };
+        // `me` names the record to another one's contact: there is no other on an MX Unleashed world.
+        crate::handling::record::pass(&mut r.record, 1, body, dt, &mut on);
+        if let Some((linear, angular)) = on.damped {
+            (self.body.damping, self.body.ang_damping) = (linear, angular);
+        }
+        self.body.set_view(&view);
+        if let Some(h) = self.vehicle.held.as_mut() {
+            h.refill(&r.record.contacts);
+        }
+        self.vehicle.touching = r.record.touching;
+    }
+
+    /// One tick on an MX Unleashed world, its controls laid already: the collision record's pass
+    /// ([`Ride::record_on`]), the world's box and map area into [`Vehicle`], the car's [`frame`], its
+    /// [`class_update`], then the put-back spot kept ([`Ride::keep_back`]).
     pub fn frame_on(&mut self, dt: F, world: &mut dyn crate::world::World) {
+        self.record_on(dt, world);
         let v = &mut self.vehicle;
         v.bounds = crate::quad::world_bounds(world, v.bounds.floor);
         v.area = world.area();

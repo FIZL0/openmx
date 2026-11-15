@@ -13347,7 +13347,8 @@ fn ride_mxvatv_car(args: &Args) -> Option<vehicle::MxvatvCarRide> {
         println!("mxvatv car: {} lists no {want}", pack.id);
         return None;
     };
-    match vehicle::MxvatvCarRide::read(&pack.id, &c.car, &c.phy, &c.psg, &mut |n| pack.files.read(&n.replace('/', "\\")).ok()) {
+    let read = |n: &str| pack.files.read(&n.replace('/', "\\")).ok();
+    match vehicle::MxvatvCarRide::read(&pack.id, &c.car, &c.phy, &c.psg, &mut |n| read(n)).and_then(|car| car.with_record(&c.col, &mut |n| read(n))) {
         Ok(car) => {
             let car = if c.untamed() { car.on_untamed_step() } else { car };
             let step = if car.untamed() { ", on MX vs. ATV Untamed's step" } else { "" };
