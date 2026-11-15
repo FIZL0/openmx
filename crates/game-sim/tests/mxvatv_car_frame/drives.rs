@@ -114,7 +114,7 @@ fn world_step_inside(ee: &mut Ee) -> (u32, F) {
 /// read ([`Pieces`] and [`atv_car::Own`] answering what they port, [`Oasis`] the ground queries on
 /// Desert Oasis and the smooth noise, the sort's search the original's): every word the port keeps
 /// must equal the original's after it, every frame.
-fn beside(d: &Drive) -> Option<Seen> {
+fn beside(d: &Drive, through: Through) -> Option<Seen> {
     let pre = drive::image(d.name)?;
     let ticks = drive::tape()?;
     let rows = drive::rows(d.name)?;
@@ -132,6 +132,7 @@ fn beside(d: &Drive) -> Option<Seen> {
     let seen: Shared<Seen> = Rc::default();
     let frame_no: Shared<usize> = Rc::default();
     let (keep, at_frame, name) = (seen.clone(), frame_no.clone(), d.name);
+    let ride: Shared<Option<atv_car::Ride>> = Rc::default();
     ee.hooks.insert(WORLD_STEP, Box::new(move |ee: &mut Ee| {
         let k = *at_frame.borrow();
         let p = ptrs(ee);
@@ -160,7 +161,20 @@ fn beside(d: &Drive) -> Option<Seen> {
         let oasis = Oasis { terrain, noise: noise.clone(), knot: None, asked: Vec::new(), rest: Vec::new() };
         let sort = sort_answer(ee, &p);
         let mut pieces = Pieces { keys: m.keys(), state: m.state, rest: Beside { oasis, sort } };
-        atv_car::frame(&world, &mut car, &mut body, dt, table, &mut atv_car::Own { v: &mut v, rest: &mut pieces });
+        match through {
+            Through::Frame => atv_car::frame(&world, &mut car, &mut body, dt, table, &mut atv_car::Own { v: &mut v, rest: &mut pieces }),
+            Through::Ride => {
+                assert_eq!(world, atv_car::WORLD, "the Ride's world is the frame's");
+                let mut r = ride.borrow_mut();
+                let r = r.get_or_insert_with(|| ride_of(table));
+                (r.keys, r.state, r.car, r.body, r.vehicle) = (std::mem::take(&mut pieces.keys), pieces.state, car, body, v);
+                let rest = std::mem::replace(&mut pieces.rest, Beside { oasis: Oasis { terrain, noise: noise.clone(), knot: None, asked: Vec::new(), rest: Vec::new() }, sort });
+                pieces.rest = r.frame_with(dt, rest);
+                (pieces.keys, pieces.state) = (std::mem::take(&mut r.keys), r.state);
+                (car, body) = (r.car.clone(), r.body.clone());
+                v = r.vehicle.clone();
+            }
+        }
         let pm = Mx { keys: Keys { tires: pieces.keys.tires.clone(), ..m.keys.clone() }, state: pieces.state, ..m };
         // What the resolution writes of the record and its list, when it holds contacts (the body is
         // the frame's, compared whole beside).
@@ -205,39 +219,115 @@ fn beside(d: &Drive) -> Option<Seen> {
     let seen = std::mem::take(&mut *seen.borrow_mut());
     assert_eq!(seen.frames, rows.len(), "{}: the world step ran once a frame", d.name);
     eprintln!(
-        "MD135 {}: {} frames, {} words in all equal to the original's; handed out {:?}; the sort struck on {} frames, the record held contacts on {}; wrecked on {}; {} other world steps",
+        "{} {}: {} frames, {} words in all equal to the original's; handed out {:?}; the sort struck on {} frames, the record held contacts on {}; wrecked on {}; {} other world steps",
+        match through {
+            Through::Frame => "MD135",
+            Through::Ride => "MD149a (through Ride)",
+        },
         d.name, seen.frames, seen.words, seen.handed, seen.sort_struck, seen.touching, seen.wrecked, seen.other_worlds
     );
     Some(seen)
+}
+
+/// Which way the port's frame is stepped beside the interpreter's: [`atv_car::frame`] with
+/// [`atv_car::Own`] over [`Pieces`] built here (MD135), or through the shell's own type,
+/// [`atv_car::Ride::frame_with`]: its chain of [`atv_car::Own`] over its put-back over [`Pieces`],
+/// the keys and state taken out of the Ride and put back (MD149a).
+#[derive(Clone, Copy)]
+enum Through {
+    Frame,
+    Ride,
+}
+
+/// A Ride to carry each frame's words read off the machine: everything but its acos table is laid
+/// over before each frame; nothing it holds besides those is read by [`atv_car::Ride::frame_with`]
+/// (its put-back spot only by the respawn and the put-back, which these drives never hand out).
+fn ride_of(table: &AcosTable) -> atv_car::Ride {
+    atv_car::Ride {
+        keys: Keys::default(),
+        state: atv_car::State::default(),
+        input_keys: atv_car::InputKeys::default(),
+        input: atv_car::Input::default(),
+        car: Car::default(),
+        body: Body::default(),
+        vehicle: atv_car::Vehicle::default(),
+        update: atv_car::Update::default(),
+        updated: atv_car::Updated::default(),
+        table: table.clone(),
+        noise: SmoothNoise::build(&mut game_sim::rng::Rng::default()),
+        back: None,
+        cache: None,
+        spot: (Vf::ZERO, Vf::ZERO),
+        rest: Vec::new(),
+    }
 }
 
 /// **The buggy's drive is the port's**: every frame of MD107's replay, the port's car frame beside
 /// the interpreter's world step, every word equal.
 #[test]
 fn the_buggys_drive_is_the_ports() {
-    beside(&drive::BUGGY);
+    beside(&drive::BUGGY, Through::Frame);
 }
 
 /// **The baja's.**
 #[test]
 fn the_bajas_drive_is_the_ports() {
-    beside(&drive::BAJA);
+    beside(&drive::BAJA, Through::Frame);
 }
 
 /// **The sandrail's.**
 #[test]
 fn the_sandrails_drive_is_the_ports() {
-    beside(&drive::SANDRAIL);
+    beside(&drive::SANDRAIL, Through::Frame);
 }
 
 /// **The golf cart's.**
 #[test]
 fn the_golf_carts_drive_is_the_ports() {
-    beside(&drive::GOLF);
+    beside(&drive::GOLF, Through::Frame);
 }
 
 /// **The monster truck's.**
 #[test]
 fn the_trucks_drive_is_the_ports() {
-    beside(&drive::TRUCK);
+    beside(&drive::TRUCK, Through::Frame);
+}
+
+/// **MD149a: the buggy's drive through [`atv_car::Ride`]**: every frame of MD135's replay stepped by
+/// the Ride's own chain ([`atv_car::Ride::frame_with`]) with the image's world answers in place of
+/// [`atv_car::OnWorld`], every word equal to the interpreter's; no frame wrecks, so the Ride's
+/// put-back never answers.
+#[test]
+fn the_buggys_drive_is_the_rides() {
+    ridden(&drive::BUGGY);
+}
+
+/// **The baja's.**
+#[test]
+fn the_bajas_drive_is_the_rides() {
+    ridden(&drive::BAJA);
+}
+
+/// **The sandrail's.**
+#[test]
+fn the_sandrails_drive_is_the_rides() {
+    ridden(&drive::SANDRAIL);
+}
+
+/// **The golf cart's.**
+#[test]
+fn the_golf_carts_drive_is_the_rides() {
+    ridden(&drive::GOLF);
+}
+
+/// **The monster truck's.**
+#[test]
+fn the_trucks_drive_is_the_rides() {
+    ridden(&drive::TRUCK);
+}
+
+fn ridden(d: &Drive) {
+    let Some(seen) = beside(d, Through::Ride) else { return };
+    assert_eq!(seen.wrecked, 0, "{}: a wrecked frame would reach the Ride's put-back, not the original's", d.name);
+    assert!(!seen.handed.contains_key("Respawn"), "{}: the Ride answers the respawn itself", d.name);
 }
