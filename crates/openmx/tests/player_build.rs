@@ -1,6 +1,6 @@
 //! P262: the builds players download run the native sim (openmx's `native-sim`, F15), and the gate's do not.
 //! Player builds come out of tools/build.sh (Linux, the Steam Deck's, Windows), tools/web.sh (the page),
-//! tools/ios-ipa.sh (the iPhone app, the release's alone), tools/apk.sh (the Android app, P308), and .github/workflows/pages.yml (the beta, which builds
+//! tools/ios-ipa.sh (the iPhone app, the release's alone), tools/apk.sh (the Android app, P308), tools/macos-app.sh (the Mac app, the release's alone, P351), and .github/workflows/pages.yml (the beta, which builds
 //! Linux without build.sh); tools/release.sh runs the first three. Plain `cargo build`/`cargo run`, the ./kit check gate,
 //! ci.yml and `tools/web.sh --check` (the tests' page) stay exact.
 
@@ -61,6 +61,13 @@ fn the_page_the_app_and_the_beta_are_native() {
     assert!(apk.contains("--example openmx $features"), "tools/apk.sh drops the features");
     assert!(read("tools/build.sh").contains("android) tools/apk.sh ${exact:+--exact-sim} ;;"), "build.sh android drops --exact-sim");
 
+    // P351: the Mac app, as the iPhone app; build.sh macos passes --exact-sim on
+    let mac = read("tools/macos-app.sh");
+    assert!(mac.contains("features=\"--features ship,native-sim\""), "the Mac app is not native, or not ship");
+    assert!(mac.contains("--exact-sim) features=\"--features ship\" ;;"), "the Mac app's exact build is not ship");
+    assert!(mac.contains("--bin openmx $features"), "tools/macos-app.sh drops the features");
+    assert!(read("tools/build.sh").contains("openmx-macos-arm64.dmg ${exact:+--exact-sim} ;;"), "build.sh macos drops --exact-sim");
+
     let pages = read(".github/workflows/pages.yml");
     assert!(pages.contains("cargo build --locked --release -p openmx --bin openmx $(bash tools/build.sh features)"), "the beta's Linux build is not build.sh's");
     assert!(pages.contains("tools/build.sh windows\n"), "the beta's Windows build is not build.sh's default");
@@ -73,7 +80,8 @@ fn the_page_the_app_and_the_beta_are_native() {
     assert!(release.contains("tools/build.sh android\n") && release.contains("openmx-android.apk"), "the release has no Android app");
     assert!(!release.contains("--exact-sim\n") && !release.contains("ios-ipa.sh \"$out/openmx-ios.ipa\" --exact-sim"));
     // P312: and refuses a player build script that drops `ship` (opentennis's release.sh grep)
-    assert!(release.contains("for f in tools/build.sh tools/apk.sh tools/ios-ipa.sh tools/web.sh; do"), "the release does not check the builds are ship");
+    assert!(release.contains("tools/build.sh macos\n") && release.contains("openmx-macos-arm64.dmg"), "the release has no Mac app");
+    assert!(release.contains("for f in tools/build.sh tools/apk.sh tools/ios-ipa.sh tools/macos-app.sh tools/web.sh; do"), "the release does not check the builds are ship");
 }
 
 /// The gate's builds are exact: native-sim is no default feature of openmx (nor ps2-float's native of
