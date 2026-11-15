@@ -11793,12 +11793,30 @@ ai_rider_name               boot 0x00373340 (AI entry, buf, size) an AI rider's 
 #   spawn), the record's vt +0x88 x4 (0x00205730), subtree out of date, spatial update, node bounds,
 #   collision sync (0x004942c0, writes the car node's +0 halfword, a stamp), map-edge test (inside).
 #   The noise's knot 0x003f6d88 is the car's engine's (tables 0x003f3540 perm, 0x003f6580 g1, built).
+# MD151 — the buggy's class step, vt +0x488 0x004c5510 (a0 car; game_sim::atv_car::class_step over node::Ram;
+#   tests/mxvatv_car_frame/class_step.rs the_buggys_class_step_is_the_originals, 10,000 cases off md39a/buggy.ee.bin,
+#   nothing hooked; MD106e's test runs it unhooked). Journal: research/journal/2026-11-15-md151-mxvatv-car-class-step.
+#   Parts (car words): node +0xe4; wheels +0x12d0/d4/d8/dc (T0..T3); front corner T0: upright +0x12f8, arm +0x12e8,
+#   knuckle +0x12e4, ends +0x12ec/+0x12f0, top +0x12f4, pivot +0x13c0; T1: upright +0x1310, arm +0x1300, knuckle
+#   +0x12fc, ends +0x1304/+0x1308, top +0x130c, pivot +0x13a0; axle +0x12e0, rear pivot +0x13e0; links
+#   +0x1354/58/5c/60; spinners +0x1368/6c; rods 8 pairs from +0x1314 (8 bytes each); swing +0x1370; rpm engine
+#   (+0x1250) +0x11c. Tire: steer +0x250, angle +0x190, compression +0xcc, max compression +0x30, stretch +0x54;
+#   T2 +0x70 the rear mount. The buggy image has no links or spinners (all 0); the test borrows rod nodes.
+#   Rodata axes 0x00396ff0 (1,0,0,1), 0x00397000 (0,1,0,1), 0x00397010 (0,0,1,1); swing factor 0x005252b0 = 1.25;
+#   spin per rpm 0x3a03126f; acos table *0x003ea9c0 (scale 14999.5), curve table *0x003eab20.
+#   Calls: 0x00195210 spin (node::spin; a1 axis), 0x001950d0 turn further (angle 0 returns; coarse cos 0x0010ffa0 /
+#   sin 0x0010fe70, no step; 0x0010fd30 the rotation; rows 0-2 = R * own; +0x60 16 bytes put back; moved),
+#   0x00194c20 position in a frame (a2 out), 0x00194260 aim along (t0 0, t1 1, t2 1 here), 0x001941b0 aim (the axle).
+#   The LEFT arm (T0, +0x12e8) is spun about the negated ahead (-0,-0,-1) built on the stack (sp+992 -> sp+1216);
+#   the right arm about 0x00397010. Tilt = pi/2 (0x3fc90fdb) - acos(clamp(cross z, -1, 1)), acos by mula(frac,
+#   t[i+1]) madd(1-frac, t[i]). Wheel stretch inline: s = 1 if max 0 else adda(0,1).madd(c/max, k-1) clamped
+#   between 1 and k; rows times diag(1,s,1,1) by vmulax/vmadday/vmaddaz/vmaddw, +0x60 xyz put back, no moved.
 # MD106e — the car classes' update slots (vt +0x10c): buggy 0x004c6ce0, golf cart 0x004d0250, truck 0x004d7f40,
 #   one code (instruction diff equal; rodata 0x005252b8/c0/c8, 0x005252f8/0x00525300/08, 0x00525338/40/48 =
 #   0.3, 5.0, 55.0 each) (a0 car, f12 dt; game_sim::atv_car::class_update with OwnUpdate; tests/
 #   mxvatv_car_frame.rs the_car_classes_update_slots_are_the_originals, 10,000 cases off md39a/buggy.ee.bin,
 #   ghost step 0x004a74e0, hazard clock 0x004aad60 and base update 0x004a79c0 unhooked; class step 0x004c5510
-#   hooked, split off). Journal: research/journal/2026-11-12-md106e-mxvatv-car-step.
+#   hooked, split off: MD151). Journal: research/journal/2026-11-12-md106e-mxvatv-car-step.
 #   +0xbc4 0: 0x004cc4e0 alone. Else odometer: +0x324 -> speed = +0xc38; else n = node +0x90 if -1 < its y < 1,
 #   else node +0x80; y = 0, VU-normalised (rsqrt); speed = adda(0, vel.z*n.z).madd(vel.x, n.x) (body +0x80);
 #   speed < 0 -> 0; +0x724 = adda(0, +0x724).madd(speed, dt). Collision: (+0x48c && its +0xe4 && (that +8 &

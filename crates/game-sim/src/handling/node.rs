@@ -382,6 +382,110 @@ pub fn sin_cos(angle: F, curve: &CurveTable) -> (F, F) {
     (Acc::adda(F::ZERO, F(sin)).madd(d, F(cos)), Acc::adda(F::ZERO, F(cos)).msub(d, F(sin)))
 }
 
+// --- MD151: the calls the buggy's class step makes -----------------------------------------------
+
+/// **Where the node is in another's frame** (MD151; the original's position call with a frame of
+/// reference): asked of itself, its own position row's `xyz` words; else its world position row's
+/// `xyz` words (brought up to date first), taken into `of`'s frame ([`unplace`]) unless `of` is 0.
+/// The `w` 1.
+pub fn position_in(m: &mut impl Ram, n: u32, of: u32) -> Quad {
+    let at = if of == n {
+        n + POSITION
+    } else {
+        update(m, n);
+        n + WORLD + 0x30
+    };
+    let p = [m.word(at), m.word(at + 4), m.word(at + 8), F::ONE.to_bits()];
+    if of == n || of == 0 { p } else { unplace(m, of, p) }
+}
+
+/// **The node spun about an axis given by value** (MD151): [`spin`], the axis's three lanes handed
+/// in rather than read from RAM.
+pub fn spin_about(m: &mut impl Ram, n: u32, [x, y, z]: [F; 3], angle: F, curve: &CurveTable) {
+    let pos = quad(m, n + POSITION);
+    let s = F::ONE.rsqrt(Acc::mula(y, y).madda(x, x).madd(z, z));
+    let (sin, cos) = sin_cos(angle, curve);
+    let f = turn([x * s, y * s, z * s], sin, cos);
+    put_rows(m, n + LOCAL, &f);
+    set_position(m, n, pos);
+}
+
+/// **The node turned further about an axis** (MD151): nothing for an angle equal to 0; else the
+/// axis normalized as [`spin`]'s, the angle's sine and cosine off the curve table's entry below it
+/// with no step between entries ([`coarse_sin_cos`]), and the own frame's three rows the rotation
+/// ([`turn`]) times them ([`frame_mul`]'s rows); the position row's 16 bytes put back as they were;
+/// then [`moved`].
+pub fn turn_about(m: &mut impl Ram, n: u32, [x, y, z]: [F; 3], angle: F, curve: &CurveTable) {
+    if angle == F::ZERO {
+        return;
+    }
+    let s = F::ONE.rsqrt(Acc::mula(y, y).madda(x, x).madd(z, z));
+    let (sin, cos) = coarse_sin_cos(angle, curve);
+    let keep = quad(m, n + POSITION);
+    let f = frame_mul(&turn([x * s, y * s, z * s], sin, cos), &rows(m, n + LOCAL));
+    for (r, row) in f.iter().take(3).enumerate() {
+        put_v(m, n + LOCAL + 0x10 * r as u32, *row);
+    }
+    put_quad(m, n + POSITION, keep);
+    moved(m, n);
+}
+
+/// An angle's sine and cosine off the curve table's entry below it (each its own call in the
+/// original, the same wraps as [`sin_cos`]'s), with no step to the next.
+pub fn coarse_sin_cos(angle: F, curve: &CurveTable) -> (F, F) {
+    let i = ((PI + wrap(wrap(angle))) * CURVE_INV_STEP).to_i32();
+    let [cos, sin] = curve.entries()[i as usize];
+    (F(sin), F(cos))
+}
+
+/// **The node aimed along a direction in another's frame** (MD151; the original's aim with its
+/// three flags 0, 1, 1): the rows `dir × ahead` (`vopmula`/`vopmsub`), `dir`, `ahead`, each `w` 0,
+/// and the own position (`w` 1). Aimed in its own frame (`of` the node itself), those times the own
+/// frame are the own frame, then [`moved`]. Otherwise times `of`'s world frame (brought up to date
+/// first) unless `of` is 0, taken into the parent's (brought up to date, inverted) if there is one,
+/// as the own frame; the position row's `xyz` words put back as they were; then [`moved`].
+pub fn aim_along(m: &mut impl Ram, n: u32, of: u32, ahead: Quad, dir: Quad) {
+    let keep = [0, 4, 8].map(|k| m.word(n + POSITION + k));
+    let (d, a) = (Vf::from_bits(dir), Vf::from_bits(ahead));
+    let w0 = |v: Vf| v.merge(Dest::W, Vf::ZERO);
+    let pos = Vf::from_bits([keep[0], keep[1], keep[2], F::ONE.to_bits()]);
+    let mut f = [w0(Vf::opmsub(Vf::opmula(d, a), a, d)), w0(d), w0(a), pos];
+    if of == n {
+        let f = frame_mul(&f, &rows(m, n + LOCAL));
+        put_rows(m, n + LOCAL, &f);
+        moved(m, n);
+        return;
+    }
+    if of != 0 {
+        update(m, of);
+        f = frame_mul(&f, &rows(m, of + WORLD));
+    }
+    match m.word(n + PARENT) {
+        0 => put_rows(m, n + LOCAL, &f),
+        parent => {
+            update(m, parent);
+            let f = frame_mul(&f, &frame_inverse(&rows(m, parent + WORLD)));
+            put_rows(m, n + LOCAL, &f);
+        }
+    }
+    set_position(m, n, [keep[0], keep[1], keep[2], 0]);
+}
+
+/// **The own frame stretched along `y`** (MD151, inline in the class step): each of the four rows
+/// times `diag(1, s, 1, 1)` (`vmulax`, `vmadday`, `vmaddaz`, `vmaddw`, so a `-0` lane comes out
+/// `+0`), the position row's `xyz` words put back as they were. Nothing is marked moved.
+pub fn stretch(m: &mut impl Ram, n: u32, s: F) {
+    let keep = [0, 4, 8].map(|k| m.word(n + POSITION + k));
+    let d = [Vf::new(1.0, 0.0, 0.0, 0.0), Vf::new(0.0, s.0, 0.0, 0.0), Vf::new(0.0, 0.0, 1.0, 0.0), Vf::new(0.0, 0.0, 0.0, 1.0)];
+    let f = rows(m, n + LOCAL).map(|r| {
+        Vf::madd(Vf::madd(Vf::madd(d[0].mul(r.bc(Field::X)), d[1], r.bc(Field::Y)), d[2], r.bc(Field::Z)), d[3], r.bc(Field::W))
+    });
+    put_rows(m, n + LOCAL, &f);
+    for (k, x) in keep.into_iter().enumerate() {
+        m.set(n + POSITION + 4 * k as u32, x);
+    }
+}
+
 // --- F47: the node's box, for a node in the spatial database --------------------------------------
 
 /// The node's bounds words: its own bounds' centre and half extent, the box's centre and half extent
