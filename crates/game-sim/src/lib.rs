@@ -123,6 +123,9 @@ pub struct Sim {
     /// The car, while the seat drives one online (S249, [`car::Lane`]): with one here the bike stands
     /// where it was left and is not stepped. `None`, a walk and the bytes are what they were before.
     pub car: Option<Box<car::Lane>>,
+    /// The quad, while the seat rides one online (MD152, [`quad::Lane`]): with one here the bike stands
+    /// where it was left and is not stepped. `None`, a walk and the bytes are what they were before.
+    pub quad: Option<Box<quad::Lane>>,
     /// Players 2 to 8, in player order ([`Sim::add_player`]). Player 1 is [`Sim::rider`], on
     /// [`Sim::phy`], as it always was; an empty list is a one-player session, which steps, walks and
     /// hashes exactly as the simulation did before there could be a second ([`Sim::step_all`]).
@@ -258,6 +261,7 @@ impl Sim {
             rider,
             plane: None,
             car: None,
+            quad: None,
             others: Vec::new(),
             markers: markers::Markers::default(),
             home: Arc::default(),
@@ -755,6 +759,7 @@ impl Clone for Sim {
             rider: self.rider.clone(),
             plane: self.plane.clone(),
             car: self.car.clone(),
+            quad: self.quad.clone(),
             others: self.others.clone(),
             markers: self.markers.clone(),
             home: Arc::clone(&self.home),

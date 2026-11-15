@@ -5230,3 +5230,46 @@ impl<R: Moto + Default> Ride<R> {
         self.rig_on(load, riding, &mut |name: &str| (name == WRECK_FILE).then(|| wreck.clone()));
     }
 }
+
+// --- MD152: a quad in a seat's lane ----------------------------------------------------------------
+
+/// **A seat's quad while it is out online** (MD152), as [`crate::Sim::quad`] holds it: the ride, its
+/// trigger probe's segments, whether it was down last tick (for counting wrecks), where it was taken
+/// and how many times it has wrecked since. What a tick changes and a rollback puts back, so it lives
+/// in the seat's state as a car does ([`crate::car::Lane`]); the quad's `.phy`, chassis and collision
+/// files are constants the shell keeps, one copy a seat.
+#[derive(Clone)]
+pub struct Lane {
+    pub ride: Ride,
+    pub segments: [[Vf; 2]; 4],
+    pub was_down: bool,
+    pub taken_at: Vf,
+    pub wrecks: u32,
+}
+
+impl Lane {
+    /// What the state's hash walks of it, as one blob: every field a tick writes, by its `Debug`
+    /// print (each float there prints the shortest digits that read back as its bits, so two
+    /// differing bit patterns print differently; NaN payloads alone print alike). The arc cosine
+    /// table is a constant and left out, as are the wreck rays' and riding rays' files, which
+    /// [`Ride::rig`] lays and nothing moves.
+    pub fn hash_bytes(&self) -> Vec<u8> {
+        let r = &self.ride;
+        let text = format!(
+            "{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}",
+            r.q,
+            r.body,
+            r.bike,
+            r.rest,
+            r.recorded.as_ref().map(|c| (&c.record, &c.held, &c.rays, &c.parts)),
+            r.tailed,
+            r.wrecked,
+            r.p,
+            self.segments,
+            self.was_down,
+            self.taken_at,
+            self.wrecks,
+        );
+        text.into_bytes()
+    }
+}

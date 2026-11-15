@@ -3839,8 +3839,8 @@ async fn front_end(args: Args) -> Result<(), String> {
                 a.wrecks = room.wrecks;
                 a.air_wrecks = room.air_wrecks;
                 a.backwards_bail = room.backwards_bail;
-                // The quad is offline only (MD37d).
-                a.atv = String::new();
+                // This machine's quad (MD152), its pick's stem: the room's picks build every seat's.
+                a.atv = shell.front.menu.lobby.pick.quad.rsplit('/').next().unwrap_or("").to_string();
                 // And the cars (MD39c).
                 a.mxvatv_car = String::new();
                 // This machine's rider in the first seat's look (P86), as the room was told.
@@ -8012,6 +8012,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         on.bays_on(online_bays.clone(), online_bodies.clone());
         // And every seat's cars (S249), which its switch to a car takes.
         on.cars_on(lot.online_cars.clone());
+        // And every seat's quad (MD152), off its pick: the lobby's from the room, `--peer`s' heard
+        // with their saved markers.
+        on.quads_here(world.seats[0].garage.atv.as_ref().map_or(String::new(), quad_key), quad_reader(&args));
         if let Some(flies) = &lobby_planes {
             on.start_planes(flies)?;
         }
@@ -8805,8 +8808,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 Act::Switch(i, to) if online.is_some() => {
                     // A car is had where this seat's copy of it is (S249).
                     let car = |to: Kind| online.as_ref().is_some_and(|on| on.cars(on.seat_of().1).iter().any(|c| Some(c.machine) == to.car()));
+                    // And a quad where this seat picked one (MD152).
+                    let quad = || online.as_ref().is_some_and(|on| on.quad(on.seat_of().1).is_some());
                     match (i, Kind::parse(to.word())) {
-                        (0, Ok(to)) if (to == Kind::Biplane && world.seats[0].garage.plane.is_some()) || to == Kind::Bike || car(to) => {
+                        (0, Ok(to)) if (to == Kind::Biplane && world.seats[0].garage.plane.is_some()) || to == Kind::Bike || car(to) || (to == Kind::Atv && quad()) => {
                             online_want = Some(to);
                             // The plane in the skin the pause's picker left on (P318), where the
                             // ride offers it; the ride's own where it does not any more.
@@ -8887,6 +8892,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                         pick.preset = net::rides::preset(&world.seats[0].sim).unwrap_or(0) as u8;
                         pick.look = front.menu.lobby.pick.look.clone();
                         pick.model = args.bike.clone();
+                        // and its quad (MD152), which a joiner's machine builds this seat's from,
+                        // its pack held to the host's files by the handshake (MD37e)
+                        if let Some(atv) = world.seats[0].garage.atv.as_ref() {
+                            pick.quad = quad_key(atv);
+                            pick.packs = openmx_net::handshake::pack_key(menu::FLIER_PACK_KIND, &atv.pack);
+                        }
                         room.take(openmx_net::HOST, &[pick]);
                         (room.riding, room.drop_in) = (true, true);
                         let net = front.network.open(&mut front.menu, room);
@@ -8903,6 +8914,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                                 // a joiner whose setup picked the plane rides in from its own bay (N19)
                                 on.bays_on(online_bays.clone(), online_bodies.clone());
                                 on.cars_on(lot.online_cars.clone());
+                                on.quads_here(world.seats[0].garage.atv.as_ref().map_or(String::new(), quad_key), quad_reader(&args));
                                 online_want = None;
                                 front.menu.mods_lock = mods_lock(head.is_some(), Some((on.host(), on.own_rows())));
                                 front.menu.air_lock = air_lock(head.is_some(), true);
@@ -9568,6 +9580,13 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 {
                     seat.garage.cars.retain(|c| c.machine != car.machine);
                     seat.garage.cars.push(vehicle::CarRide { driven: None, struck: None, ..car });
+                }
+                // A seat on its quad (MD152) is drawn off its own pick's quad, in this machine's look.
+                if seat.sim.quad.is_some()
+                    && seat.garage.atv.is_none()
+                    && let Some(quad) = on.drawn().get(d).and_then(|&s| on.quad(s))
+                {
+                    seat.garage.atv = Some(quad.clone());
                 }
                 // Its machine is its `Sim`'s (N17): the garage follows, and a switch the session
                 // made snaps the camera onto the machine taken, as offline. Not before every seat's
@@ -12137,6 +12156,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             println!("{said}");
         }
         println!("{}", on.fliers_flown());
+        if let Some(line) = on.quads_ridden() {
+            println!("{line}");
+        }
         println!("{}", on.summary());
         // What the lobby said while the ride ran (a drop, the lobby as it is now, chat) is the menu's.
         if let Some(front) = front.as_deref_mut() {
@@ -13124,11 +13146,7 @@ fn ride_atv(args: &Args) -> Option<vehicle::AtvRide> {
     if args.atv.is_empty() {
         return None;
     }
-    if args.online.is_some() {
-        println!("atv: {} picked, but the quad is offline only", args.atv);
-        return None;
-    }
-    let Some(dir) = mods_dir(args) else {
+    let Some(dir) = args.room_machines.clone().or_else(|| mods_dir(args)) else {
         println!("atv: {} picked, but the mods folder is off", args.atv);
         return None;
     };
@@ -13151,6 +13169,26 @@ fn ride_atv(args: &Args) -> Option<vehicle::AtvRide> {
             None
         }
     }
+}
+
+/// MD152: a quad's online pick, `pack/stem`, as the lobby's [`openmx_net::Pick::quad`] says it.
+fn quad_key(atv: &vehicle::AtvRide) -> String {
+    format!("{}/{}", atv.pack, vehicle::atv_stem(&atv.phy))
+}
+
+/// MD152: what reads a seat's quad pick (`pack/stem`) off its pack in this machine's mods folder,
+/// as [`ride_atv`] reads this machine's own.
+fn quad_reader(args: &Args) -> Box<dyn FnMut(&str) -> Result<vehicle::AtvRide, String>> {
+    let dir = args.room_machines.clone().or_else(|| mods_dir(args));
+    let mut packs: Option<Vec<machine_packs::Pack>> = None;
+    Box::new(move |key: &str| {
+        let (id, stem) = key.rsplit_once('/').ok_or_else(|| format!("{key} names no pack"))?;
+        let dir = dir.as_ref().ok_or("the mods folder is off")?;
+        let packs = packs.get_or_insert_with(|| machine_packs::find(dir).0);
+        let pack = packs.iter().find(|p| p.id == id && p.machine == roster::ATV_KIND).ok_or_else(|| format!("no quad pack {id} here"))?;
+        let phy = pack.phy.iter().find(|p| vehicle::atv_stem(p).eq_ignore_ascii_case(stem)).ok_or_else(|| format!("{id} lists no {stem}.phy"))?;
+        vehicle::AtvRide::read(&pack.id, phy, &mut |n| pack.files.read(&n.replace('/', "\\")).ok())
+    })
 }
 
 /// The quad's own camera, engine and particles (MD136), off the pack it rides off.
