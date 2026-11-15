@@ -12346,6 +12346,29 @@ atv_record_drop             atv 0x0018fe20 = a record let go of (a1 -1; the pool
 # (file 0x003a0170), 120 freed, and frees two boot-heap blocks (0x00797cc0, 0x01636e90; left in place).
 atv_heap_make               atv 0x001b5d90 = a heap made over a range in the manager's first free slot (a0 manager, a1 base, a2 size, a3 limit; returns its id)
 atv_heap_free_in            atv 0x001b6760 = a block freed into a given heap (a0 heap, a1 block)
+# F31b5r — the heap in Rust (src handling::heap; tests mxvatv_bike_ride.rs the_heap_is_the_originals (12,000
+# generated calls on a heap made at 0x01f80040, port on a copy of only the heap and its slot) and
+# the_heap_entries_are_the_originals (2,000 entry calls on state 4's boot heap, all RAM compared); replay_pure
+# switch "heap" = heap_hooks on 0x001b7340/7620/7740/76d0/7470; journal research/journal/2026-11-15-f31b5r-*).
+# Block header 16 bytes: +2 heap id (short), +4 0 when filed, +8 the block before's size (0: first), +0xc size |
+# 0x80000000 free; free: +0x10/+0x14/+0x18 tree left/right/parent, or list prev/next for sizes 0x10/0x20/0x30
+# (table 0x00390638 -> heap +0x20/+0x24/+0x28). Heap +0x1c tree root, +0x2c id, +0x48 lock (vt 0x003b7960:
+# +8 0x001d66f0 take: owner +8 (-1 free) = thread, +0xc count++; +0xc 0x001d67d0 give: count--, owner -1 at 0).
+# Fit 0x001b71d0: the size's list head, else tree (unsigned): == returns, < right, > left (node if left gives 0).
+# Alloc 0x001b61a0: round 16 (signed remainder, 0 -> 16); fit; bigger -> fit(size+0x20) and split, else whole.
+# Free-in 0x001b6760: root 0 -> filed alone; else join a free before (+8 > 0) and after, file. Realloc 0x001b68d0:
+# grow in place into a free next when it holds the growth (rest < 33 taken whole); else alloc, memcpy 0x00354310
+# min(old, new) (signed), free-in. Stats 0x001b72a0 / out-of-memory 0x001b72b0 do nothing. Unlink 0x001b6f00,
+# file 0x001b6d70 (tree leaf: < left, >= right; list at the front). Entry args are the game's sign-extended words:
+# an oracle passing a zero-extended "negative" size rounds differently (bgez on 64 bits).
+atv_heap_alloc_in_heap      atv 0x001b61a0 = a block from a given heap (a0 heap, a1 bytes, a2 file, a3 line)
+atv_heap_realloc_in_heap    atv 0x001b68d0 = a block resized in a given heap (a0 heap, a1 block, a2 bytes, a3 file, t0 line)
+atv_heap_fit                atv 0x001b71d0 = the free block a size takes (a0 heap, a1 tree node, a2 rounded size)
+atv_heap_unlink             atv 0x001b6f00 = a free block out of its list or the tree (a0 heap, a1 header, a2 size)
+atv_heap_file               atv 0x001b6d70 = a free block into its list or the tree (a0 heap, a1 header, a2 size)
+atv_heap_current            atv 0x001b5ec0 = the manager's current heap (a0 manager)
+atv_heap_with_id            atv 0x001b5ed0 = the manager's heap with an id (a0 manager, a1 id)
+atv_heap_new_too            atv 0x001b7740 = allocate with a file and line, as atv_heap_new (a0 bytes)
 
 # F62a: the rider's idle layer vt +0xd4 0x004eb380 in Rust (handling::rider::idle, idle_state, idle_clips;
 # anim::blend4; tests/mxvatv_bike_ride.rs rider_leaf serves Call::Idle). Journal: research/journal/*-f62a-*/.
