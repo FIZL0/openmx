@@ -3255,23 +3255,19 @@ impl Ride {
         let v = &mut self.vehicle;
         v.bounds = crate::quad::world_bounds(world, v.bounds.floor);
         v.area = world.area();
-        let mut pieces = Pieces { keys: std::mem::take(&mut self.keys), state: self.state, rest: OnWorld { world: &mut *world, noise: &self.noise, rest: &mut self.rest } };
-        {
-            let mut back = PutBack { pieces: &mut pieces, spot: self.spot };
-            let mut own = Own { v: &mut self.vehicle, rest: &mut back };
-            if self.update.untamed {
-                frame_untamed(&WORLD, &mut self.car, &mut self.body, dt, &self.table, &mut own);
-            } else {
-                frame(&WORLD, &mut self.car, &mut self.body, dt, &self.table, &mut own);
-            }
-            // The update reads the tires' surfaces and the node's axes as the frame left them.
-            self.update.tire_surface = self.car.tires.map(|t| t.surface & 15);
-            let node = own.v.scene.nodes[0].world;
-            (self.updated.vehicle.side, self.updated.vehicle.ahead) = (node[0], node[2]);
-            class_update(&mut self.update, &mut self.updated, &mut self.car, &mut self.body, dt, &mut own);
-        }
-        (self.keys, self.state) = (pieces.keys, pieces.state);
+        let Ride { keys, state, car, body, vehicle, update, updated, table, noise, spot, rest, .. } = self;
+        let on = OnWorld { world: &mut *world, noise, rest };
+        chain(Chain { keys, state, car, body, vehicle, update, updated, table, spot: *spot }, dt, on, true);
         self.keep_back(world);
+    }
+
+    /// **The car's [`frame`] alone through the Ride's own chain** (MD149a): [`Own`] over the
+    /// put-back over [`Pieces`] (the keys and state taken out and put back), as [`Ride::frame_on`]
+    /// steps it, with `rest` answering in place of [`OnWorld`] what the pieces do not; `rest` back.
+    /// No world box or area is laid, no [`class_update`] runs and no put-back spot is kept.
+    pub fn frame_with<R: Steps>(&mut self, dt: F, rest: R) -> R {
+        let Ride { keys, state, car, body, vehicle, update, updated, table, spot, .. } = self;
+        chain(Chain { keys, state, car, body, vehicle, update, updated, table, spot: *spot }, dt, rest, false)
     }
 
     /// **The put-back spot kept** (MX Unleashed's put-back record, [`crate::ride::keep_back_on`]),
@@ -3331,14 +3327,51 @@ impl Steps for OnWorld<'_, '_> {
     }
 }
 
-/// The respawn and the put-back answered for [`Ride`] in front of the pieces (whose tire and engine
-/// words the respawn resets); every other call goes on to them.
-struct PutBack<'a, 'b, 'w> {
-    pieces: &'a mut Pieces<OnWorld<'b, 'w>>,
+/// What [`Ride`]'s chain steps, borrowed apart from the world's answers.
+struct Chain<'a> {
+    keys: &'a mut Keys,
+    state: &'a mut State,
+    car: &'a mut Car,
+    body: &'a mut Body,
+    vehicle: &'a mut Vehicle,
+    update: &'a mut Update,
+    updated: &'a mut Updated,
+    table: &'a AcosTable,
     spot: (Vf, Vf),
 }
 
-impl Steps for PutBack<'_, '_, '_> {
+/// [`Ride`]'s chain: [`Own`] over the put-back over [`Pieces`] over `rest`, the keys and state taken
+/// out and put back; the car's [`frame`], then with `with_update` its [`class_update`] the same way.
+fn chain<R: Steps>(c: Chain<'_>, dt: F, rest: R, with_update: bool) -> R {
+    let mut pieces = Pieces { keys: std::mem::take(c.keys), state: *c.state, rest };
+    {
+        let mut back = PutBack { pieces: &mut pieces, spot: c.spot };
+        let mut own = Own { v: &mut *c.vehicle, rest: &mut back };
+        if c.update.untamed {
+            frame_untamed(&WORLD, c.car, c.body, dt, c.table, &mut own);
+        } else {
+            frame(&WORLD, c.car, c.body, dt, c.table, &mut own);
+        }
+        if with_update {
+            // The update reads the tires' surfaces and the node's axes as the frame left them.
+            c.update.tire_surface = c.car.tires.map(|t| t.surface & 15);
+            let node = own.v.scene.nodes[0].world;
+            (c.updated.vehicle.side, c.updated.vehicle.ahead) = (node[0], node[2]);
+            class_update(c.update, c.updated, c.car, c.body, dt, &mut own);
+        }
+    }
+    (*c.keys, *c.state) = (pieces.keys, pieces.state);
+    pieces.rest
+}
+
+/// The respawn and the put-back answered for [`Ride`] in front of the pieces (whose tire and engine
+/// words the respawn resets); every other call goes on to them.
+struct PutBack<'a, R> {
+    pieces: &'a mut Pieces<R>,
+    spot: (Vf, Vf),
+}
+
+impl<R: Steps> Steps for PutBack<'_, R> {
     fn call(&mut self, c: Call, car: &mut Car, body: &mut Body) {
         match c {
             Call::Respawn => {
