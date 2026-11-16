@@ -1866,3 +1866,157 @@ fn the_spatial_insert_is_the_originals() {
     }
     println!("{N} generated inserts, the original's and the port's the same: {tally:?}");
 }
+
+/// F31b5t: the wreck's unhook (a0 the entry) and the rider's reattach (a0 the attachment, a1 the
+/// cell, a2 the kind, a3 1).
+const REMOVE: u32 = 0x0018_d540;
+const REATTACH: u32 = 0x0026_6c90;
+
+/// F31b5t: the remove ([`attach::remove`]) against the original's on MD75c1's generated databases:
+/// the mover (filed in its cell's sub-database, list or tree, with extra cells or none; a record in no
+/// cell is not drawn) taken out,
+/// its extras' links given back, its record let go of and freed; now and then the last record (the
+/// pool deleted), and now and then an entry with no record (nothing done). Every byte written outside
+/// the stack the same, and the heap calls and the pool's delete.
+#[test]
+fn the_spatial_remove_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let heap: Shared = Rc::default();
+    let calls: Calls = Rc::default();
+    hook_logged_heap(&mut ee, &heap, &calls);
+    let c = calls.clone();
+    ee.hooks.insert(POOL_DELETE, Box::new(move |ee| c.borrow_mut().push((POOL_DELETE, vec![ee.r(4) as u32]))));
+    let mut g = Gen(0xf31b_5701);
+    let mut tally: BTreeMap<String, u32> = BTreeMap::new();
+    let keep = [(AREA, AREA_END), (CURRENT, CURRENT + 4), (POOL_AT, POOL_AT + 12)];
+    const N: usize = 10_000;
+    for k in 0..N {
+        // A filed record only: the original calls through its sub-database's vtable unasked.
+        let c = loop {
+            let c = case(&mut g);
+            if c.rec.cell.is_some() {
+                break c;
+            }
+        };
+        lay(&mut ee, &heap, &c.db, &c.rec, c.mover);
+        // The laid pool's class, which the last record's drop deletes it through.
+        ee.set_u32(POOL + 4, POOL_CLASS);
+        let entry = item_addr(c.mover);
+        let none = g.chance(0.1);
+        if none {
+            ee.set_u32(entry + 8, 0);
+        }
+        let last = g.chance(0.2);
+        ee.set_u32(POOL_AT + 8, if last { 1 } else { 2 + g.below(4) as u32 });
+        ee.set_u32(CURRENT, 0);
+        let (tree, extras) = (matches!(ee.u32_at(ee.u32_at(REC + 8) + 4), TREE_VT), ee.u32_at(REC) != 0);
+        let r = twin(&mut ee, &heap, &calls, &keep, |ee| ee.call(REMOVE, &[u64::from(entry)], &[], BUDGET), |m| attach::remove(m, &GLOBALS, entry));
+        match r {
+            Ok((_, made)) => {
+                let what = if none { "no record".to_string() } else { format!("{} extras {extras}", if tree { "tree" } else { "list" }) };
+                *tally.entry(what).or_default() += 1;
+                for (f, _) in made {
+                    *tally.entry(if f == POOL_DELETE { "pool deleted" } else if f == FREE { "free" } else { "other call" }.to_string()).or_default() += 1;
+                }
+            }
+            Err(e) => panic!("case {k} (no record {none}, last {last}): the port's remove is not the original's: {e}"),
+        }
+    }
+    for want in ["list extras false", "list extras true", "tree extras false", "tree extras true", "no record", "pool deleted", "free"] {
+        assert!(tally.get(want).copied().unwrap_or(0) >= 10, "only {:?} of {want:?}: {tally:?}", tally.get(want));
+    }
+    assert!(!tally.contains_key("other call"), "{tally:?}");
+    println!("{N} generated removes, the original's and the port's the same: {tally:?}");
+}
+
+/// F31b5t: the reattach ([`attach::reattach`]) against the original's: an attachment off MD75c1's
+/// generated databases' area (its node, with a parent or none, every word random but the flags and
+/// links, signed zeros among the lanes, as [`the_attachment_box_is_the_originals`]) put in a random
+/// cell under a kind the cell has a list or tree for, with a record off the heap; now and then with
+/// no link pool. Every byte written outside the stack the same (the reach kept at `+0x60` among
+/// them), and the heap calls and the pool's delete.
+#[test]
+fn the_reattach_is_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let heap: Shared = Rc::default();
+    let calls: Calls = Rc::default();
+    hook_logged_heap(&mut ee, &heap, &calls);
+    let c = calls.clone();
+    ee.hooks.insert(POOL_DELETE, Box::new(move |ee| c.borrow_mut().push((POOL_DELETE, vec![ee.r(4) as u32]))));
+    let mut g = Gen(0xf31b_5702);
+    let mut tally: BTreeMap<String, u32> = BTreeMap::new();
+    let keep = [(AREA, AREA_END), (CURRENT, CURRENT + 4), (POOL_AT, POOL_AT + 12)];
+    const ENTRY: u32 = AREA + 0x3000;
+    const NODE: u32 = AREA + 0x3200;
+    const PARENT: u32 = AREA + 0x3400;
+    let lane = |g: &mut Gen| -> u32 {
+        match g.below(8) {
+            0 => 0,
+            1 => 0x8000_0000,
+            2 => 0x3f80_0000,
+            _ => F((g.signed() * 50.0) as f32).0.to_bits(),
+        }
+    };
+    // The insert's own record: the reattach's frame is 112 bytes, the insert's 192 below it, the
+    // record at its 160.
+    let temp = ee.stack - 144;
+    const N: usize = 10_000;
+    for k in 0..N {
+        let c = case(&mut g);
+        let map = lay(&mut ee, &heap, &c.db, &c.rec, c.mover);
+        for n in [NODE, PARENT] {
+            for o in (0..0x100).step_by(4) {
+                let w = lane(&mut g);
+                ee.set_u32(n + o, w);
+            }
+        }
+        let parent = g.chance(0.5);
+        for (n, up) in [(NODE, if parent { PARENT } else { 0 }), (PARENT, 0)] {
+            ee.set_u32(n + 0xf0, up);
+            ee.set_u32(n + 0x100, g.chance(0.5) as u32);
+        }
+        for o in (0x40..0x70).step_by(4) {
+            let w = lane(&mut g);
+            ee.set_u32(ENTRY + o, w);
+        }
+        ee.set_u32(ENTRY + 0x34, NODE);
+        let cell = map.cells[g.below(map.cells.len())];
+        let has = |ee: &Ee, o: u32| matches!(ee.u32_at(ee.u32_at(cell + o) + 4), LIST_VT | TREE_VT);
+        let kind = match (has(&ee, 0x28), g.below(3)) {
+            (true, 0) => 1,
+            (true, 1) => 3,
+            _ => 2,
+        };
+        let no_pool = g.chance(0.2);
+        if no_pool {
+            ee.set_u32(POOL_AT, 0);
+            ee.set_u32(POOL_AT + 8, g.below(2) as u32);
+        } else {
+            ee.set_u32(POOL_AT + 8, 1 + g.below(4) as u32);
+        }
+        ee.set_u32(CURRENT, 0);
+        let r = twin(
+            &mut ee,
+            &heap,
+            &calls,
+            &keep,
+            |ee| ee.call(REATTACH, &[ENTRY, cell, kind, 1].map(u64::from), &[], BUDGET),
+            |m| attach::reattach(m, &GLOBALS, attach::PoolClass(POOL_CLASS), ENTRY, cell, kind, temp),
+        );
+        match r {
+            Ok((_, made)) => {
+                let tree = matches!(ee.u32_at(ee.u32_at(cell + if kind & 1 != 0 { 0x28 } else { 0x2c }) + 4), TREE_VT);
+                *tally.entry(format!("{} kind {kind}", if tree { "tree" } else { "list" })).or_default() += 1;
+                *tally.entry(format!("parent {parent}")).or_default() += 1;
+                for (f, _) in made {
+                    *tally.entry(if f == POOL_DELETE { "pool deleted".to_string() } else { format!("{f:#x}") }).or_default() += 1;
+                }
+            }
+            Err(e) => panic!("case {k} (kind {kind}, no pool {no_pool}, parent {parent}): the port's reattach is not the original's: {e}"),
+        }
+    }
+    for want in ["list kind 1", "list kind 2", "list kind 3", "tree kind 1", "tree kind 3", "parent true", "parent false"] {
+        assert!(tally.get(want).copied().unwrap_or(0) >= 10, "only {:?} of {want:?}: {tally:?}", tally.get(want));
+    }
+    println!("{N} generated reattaches, the original's and the port's the same: {tally:?}");
+}

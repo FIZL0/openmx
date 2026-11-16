@@ -919,3 +919,45 @@ pub fn part_in_world(m: &mut impl Space, g: &Globals, class: PoolClass, part: u3
     let flags = m.word(part + 0x124) >> 16 & 0xff;
     insert(m, g, class, part + 0x18, cell, kind, centre, half, reach, temp, flags & 8 != 0);
 }
+
+// --- an entry taken out of its world and put back (F31b5t) ----------------------------------------------
+
+/// **An entry taken out of its world** (`atv_spatial_remove`): with a record (`+8`), the entry out of
+/// the record's sub-database ([`out`]) and out of each extra's, each extra link handed back to the
+/// pool; the record let go of ([`record_drop`]) and freed, and the entry left with none.
+pub fn remove(m: &mut impl Space, g: &Globals, entry: u32) {
+    let rec = m.word(entry + 8);
+    if rec == 0 {
+        return;
+    }
+    let (s, at) = (m.word(rec + 8), m.word(rec + 0xc));
+    out(m, g, s, entry, at);
+    let mut e = m.word(rec);
+    while e != 0 {
+        let (s, at) = (m.word(e + 8), m.word(e + 0xc));
+        out(m, g, s, entry, at);
+        let next = m.word(e);
+        let pool = m.word(g.links);
+        give(m, pool, e);
+        e = next;
+    }
+    let rec = m.word(entry + 8);
+    record_drop(m, g, rec);
+    if rec != 0 {
+        m.free(rec);
+    }
+    m.set(entry + 8, 0);
+}
+
+/// **An attachment put back in its world** (the rider's reattach): its box ([`bounds`]), its reach
+/// the half's length (`mula`, `madda`, `madd`, `sqrt.s`) kept at `+0x60`, and the attachment
+/// [`insert`]ed in `cell` under `kind` with a record of its own off the heap.
+#[allow(clippy::too_many_arguments)]
+pub fn reattach(m: &mut impl Space, g: &Globals, class: PoolClass, entry: u32, cell: u32, kind: u32, temp: u32) {
+    let (centre, half) = bounds(m, entry);
+    let [x, y, z] = [half.x(), half.y(), half.z()];
+    let reach = F(ps2_float::fpu::sqrt(ps2_float::fpu::madd(ps2_float::fpu::madda(ps2_float::fpu::mula(x, x), y, y), z, z)));
+    set_f(m, entry + 0x60, reach);
+    let reach = word_f(m, entry + 0x60);
+    insert(m, g, class, entry, cell, kind, centre, half, reach, temp, false);
+}

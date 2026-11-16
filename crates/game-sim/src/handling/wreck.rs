@@ -44,6 +44,7 @@ use crate::air::{cross, normalize};
 use ps2_float::vu::{Dest, Field};
 use ps2_float::fpu::Acc;
 use ps2_float::{F, Vf, fpu};
+use super::update::{CATEGORY_NAMES, CLEARED_NAMES, LOADED_CATEGORY};
 
 /// The quadword the wreck test compares a handed-in position with, and the unwreck's rest (0, 0, 0,
 /// 1), and the body's rest damping the unwreck's base hands it: rodata.
@@ -172,6 +173,23 @@ pub enum Out {
     Spatial,
     NodeBounds(u32),
     PartSync(u32),
+    /// F31b5t, the stance's cancel's ([`stance_cancel`]): the run closed and tallied (the run, the
+    /// player, flag 0, `x` 0); and the kind set's ([`kind_set`]): a part's category list grown to
+    /// `bytes` (the heap's reallocation, an answer).
+    RunClose { run: u32, player: u32 },
+    RunTally { run: u32, player: u32 },
+    Realloc { at: u32, bytes: u32 },
+    /// The camera's reset's ([`camera_moved`]): a node of its list handed back to the heap, and a
+    /// listener (its vt at `+0x44`, `+0x18`) told the actor moved.
+    NodeFree(u32),
+    CameraTell { listener: u32, actor: u32 },
+    /// The trail's reset's ([`trail_reset`]): an item's own reset (its class, `+0x10`, at `+0x28`);
+    /// and an item's emitter (`+0x14`; its vt at `+4`) doused (`+0xa8`), halted (`+0x84`) or stopped
+    /// (`+0x88`).
+    TrailItem(u32),
+    Douse(u32),
+    Halt(u32),
+    Stop(u32),
 }
 
 /// The wreck's outside world: words by address (the bike is `bike`), and its calls. A call's answer
@@ -995,5 +1013,212 @@ pub fn ground(m: &mut impl Wrecks) {
     if w(m, 0xcc) != 0 {
         on(m, 0xcc);
         on(m, 0xd4);
+    }
+}
+
+// --- the wreck's hand-outs (F31b5t) ----------------------------------------------------------------
+
+/// **The stance cancelled** ([`Out::Stance`] with −1, vt `+0x4b0`): with a run (`+0x684`), a player
+/// (`+0x680`) and the player's run open (its `+8` bit 5), the run closed then tallied
+/// ([`Out::RunClose`], [`Out::RunTally`]). Answers 1.
+pub fn stance_cancel(m: &mut impl Wrecks) -> u32 {
+    let run = w(m, 0x684);
+    if run == 0 {
+        return 1;
+    }
+    let player = w(m, RUN);
+    if player == 0 || m.word(player + 8) & 0x20 == 0 {
+        return 1;
+    }
+    m.out(Out::RunClose { run, player });
+    let (run, player) = (w(m, 0x684), w(m, RUN));
+    m.out(Out::RunTally { run, player });
+    1
+}
+
+/// **A category's bit** by name, as [`super::update::category`] for the wreck's words: `1 << i` for
+/// the name's place `i` in the table ([`CATEGORY_NAMES`]), else the name added at the end, counted.
+pub fn category(m: &mut impl Wrecks, name: &[u8]) -> u32 {
+    let table = m.word(CATEGORY_NAMES);
+    let mut n = m.word(table);
+    let mut i = 0u32;
+    while (i as i32) < n as i32 {
+        let at = table.wrapping_add(4 + 32 * i);
+        let same = (0..=name.len()).all(|k| byte(m, at.wrapping_add(k as u32)) == u32::from(name.get(k).copied().unwrap_or(0)));
+        if same {
+            return 1 << (i & 31);
+        }
+        n = m.word(table);
+        i += 1;
+    }
+    let at = table.wrapping_add(4 + 32 * n);
+    for k in 0..=name.len() {
+        set_byte(m, at.wrapping_add(k as u32), u32::from(name.get(k).copied().unwrap_or(0)));
+    }
+    let count = m.word(table);
+    m.set(table, count.wrapping_add(1));
+    1 << (n & 31)
+}
+
+/// **A category added to a part** (its list at `+0xfc`, the count at `+0x100`), once: nothing if the
+/// list has it, else the first empty (0) slot takes it, else the list grown by one
+/// ([`Out::Realloc`]) and it is put last.
+pub fn add_category(m: &mut impl Wrecks, p: u32, bit: u32) {
+    let n = m.word(p + 0x100);
+    let list = m.word(p + 0xfc);
+    for i in 0..(n as i32).max(0) as u32 {
+        if m.word(list + 4 * i) == bit {
+            return;
+        }
+    }
+    let list = m.word(p + 0xfc);
+    for i in 0..(n as i32).max(0) as u32 {
+        if m.word(list + 4 * i) == 0 {
+            m.set(list + 4 * i, bit);
+            return;
+        }
+    }
+    let at = m.word(p + 0xfc);
+    let list = m.out(Out::Realloc { at, bytes: n.wrapping_add(1) << 2 });
+    m.set(p + 0xfc, list);
+    let n = m.word(p + 0x100);
+    let list = m.word(p + 0xfc);
+    m.set(list.wrapping_add(n << 2), bit);
+    let n = m.word(p + 0x100);
+    m.set(p + 0x100, n.wrapping_add(1));
+}
+
+/// **The kind set** ([`Out::Kind`] true, vt `+0x3a0`, [`super::update::kind_clear`]'s mirror): each
+/// hung part (`+0x1470` of them at `+0x1474`) faded to one half (its `+0x17c`); the riding part off
+/// ([`Out::Part`]); the collision record's part (`+0xcc`) and `+0xd4`, each there, set colliding
+/// (`+0xe0` 1) and given ([`add_category`]) DYNAMICOBJECT, the bike's own (`+0x30c`),
+/// [`LOADED_CATEGORY`]'s, PHYSICSBODY and PHYSICSOBJECT; `+0x9a8` 2; and with a state of kind 3 the
+/// rider's model (`+0xe4`) faded to one half too and `+0xde8` 0.
+pub fn kind_set(m: &mut impl Wrecks) {
+    const HALF: u32 = 0x3f00_0000;
+    let mut i = 0;
+    while (i as i32) < w(m, 0x1470) as i32 {
+        let parts = w(m, 0x1474);
+        let p = m.word(parts.wrapping_add(4 * i));
+        m.set(p.wrapping_add(0x17c), HALF);
+        i += 1;
+    }
+    m.out(Out::Part(false));
+    for at in [0xcc, 0xd4] {
+        let part = w(m, at);
+        if part == 0 {
+            continue;
+        }
+        m.set(part.wrapping_add(0xe0), 1);
+        let bit = category(m, CLEARED_NAMES[0]);
+        let part = w(m, at);
+        add_category(m, part, bit);
+        let (part, own) = (w(m, at), w(m, 0x30c));
+        add_category(m, part, own);
+        let loaded = m.word(LOADED_CATEGORY);
+        let part = w(m, at);
+        add_category(m, part, loaded);
+        for name in &CLEARED_NAMES[1..] {
+            let bit = category(m, name);
+            let part = w(m, at);
+            add_category(m, part, bit);
+        }
+    }
+    put(m, 0x9a8, 2);
+    let state = w(m, STATE);
+    if state != 0 && m.word(state.wrapping_add(0x28)) == 3 {
+        let model = w(m, 0xe4);
+        m.set(model.wrapping_add(0x17c), HALF);
+        put(m, 0xde8, 0);
+    }
+}
+
+/// **The camera told the actor moved** ([`Out::Camera`], on the bike's `+0x43c`): its list at
+/// `+0x30` emptied (the count 0, each node's first word 0 and the node handed back,
+/// [`Out::NodeFree`]; then the first and last 0), and each of its listeners (`+0x40`, the next at
+/// `+8`) told ([`Out::CameraTell`]).
+pub fn camera_moved(m: &mut impl Wrecks, c: u32) {
+    m.set(c + 0x30, 0);
+    let mut n = m.word(c + 0x34);
+    while n != 0 {
+        m.set(n, 0);
+        let next = m.word(n + 8);
+        m.out(Out::NodeFree(n));
+        n = next;
+    }
+    m.set(c + 0x34, 0);
+    m.set(c + 0x38, 0);
+    let mut l = m.word(c + 0x40);
+    while l != 0 {
+        let listener = m.word(l);
+        m.out(Out::CameraTell { listener, actor: c });
+        l = m.word(l + 8);
+    }
+}
+
+/// **The trail reset** ([`Out::Trail`], on the bike's `+0x10dc`): each of its items (`+0x30`, the
+/// count at `+0x28`, read again each pass) reset by its class ([`Out::TrailItem`]).
+pub fn trail_reset(m: &mut impl Wrecks, t: u32) {
+    let mut i = 0u32;
+    while (i as i32) < m.word(t + 0x28) as i32 {
+        let items = m.word(t + 0x30);
+        let item = m.word(items.wrapping_add(4 * i));
+        m.out(Out::TrailItem(item));
+        i += 1;
+    }
+}
+
+/// An item off and its marker's byte (`(+4)+0x29`) 0xff: every class's reset starts so.
+fn trail_item_off(m: &mut impl Wrecks, item: u32) {
+    set_byte(m, item + 8, 0);
+    let mark = m.word(item + 4);
+    if mark != 0 {
+        set_byte(m, mark + 0x29, 0xff);
+    }
+}
+
+/// **A trail item's reset**, most classes': off ([`trail_item_off`]), its emitter doused
+/// ([`Out::Douse`]); with `timed`, its clock (`+0x90`) 0 after.
+pub fn trail_item_reset(m: &mut impl Wrecks, item: u32, timed: bool) {
+    trail_item_off(m, item);
+    let o = m.word(item + 0x14);
+    m.out(Out::Douse(o));
+    if timed {
+        m.set(item + 0x90, 0);
+    }
+}
+
+/// **A sounding trail item's reset**: off ([`trail_item_off`]), its emitter halted
+/// ([`Out::Halt`]), its `+0x44` 0 and `+0x4c` back to `+0x48`, then its emitter stopped
+/// ([`Out::Stop`]).
+pub fn trail_sound_reset(m: &mut impl Wrecks, item: u32) {
+    trail_item_off(m, item);
+    let o = m.word(item + 0x14);
+    m.out(Out::Halt(o));
+    m.set(item + 0x44, 0);
+    let x = m.word(item + 0x48);
+    m.set(item + 0x4c, x);
+    let o = m.word(item + 0x14);
+    m.out(Out::Stop(o));
+}
+
+/// **A sounding emitter stopped** ([`Out::Stop`] for the sounding items' class): its count
+/// (`+0x30`), `+0xc0` and `+0x2c` 0, then its voices (`+0xe0`) silenced: for each of the voice
+/// table's `+0x40` channels (signed), its word in the `+0x38` array 0 and its block's (`+0x30`,
+/// 1008 bytes apart) 24 slots from `+0x4c` (16 apart) −1.
+pub fn sound_stop(m: &mut impl Wrecks, o: u32) {
+    m.set(o + 0x30, 0);
+    m.set(o + 0xc0, 0);
+    m.set(o + 0x2c, 0);
+    let v = m.word(o + 0xe0);
+    let mut i = 0u32;
+    while (i as i32) < m.word(v + 0x40) as i32 {
+        let words = m.word(v + 0x38);
+        let block = m.word(v + 0x30).wrapping_add(1008u32.wrapping_mul(i));
+        m.set(words.wrapping_add(4 * i), 0);
+        for k in 0..24 {
+            m.set(block.wrapping_add(0x4c + 16 * k), u32::MAX);
+        }
+        i += 1;
     }
 }

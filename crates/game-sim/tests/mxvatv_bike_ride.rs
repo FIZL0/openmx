@@ -3869,10 +3869,13 @@ const MANAGER_STEP: u32 = 0x002c_f9f0;
 
 /// The bike object's words and its physics blocks' ([`physics`]), each with its address.
 fn bike_and_blocks(ee: &Ee) -> Vec<(u32, u32)> {
+    // F31b5t: the test's own look, not the frame's read ([`replay_pure`]'s watch).
+    let reads = ee.reads.replace(None);
     let mut out: Vec<(u32, u32)> = (0..0x1800).step_by(4).map(|o| (BIKE + o, ee.u32_at(BIKE + o))).collect();
     for (_, at, n) in physics(ee) {
         out.extend((0..n).step_by(4).map(|o| (at + o, ee.u32_at(at + o))));
     }
+    ee.reads.replace(reads);
     out
 }
 
@@ -4525,6 +4528,22 @@ const BODY_COMMIT: u32 = 0x0049_3070;
 const REHANG: u32 = 0x0019_6c10;
 const TRAIL_RESET: u32 = 0x004f_a760;
 const CAMERA_RESET: u32 = 0x004f_7590;
+/// F31b5t: the wreck's hand-outs' (research/oracle.txt `# F31b5t`): the bike's stance (vt +0x4b0)
+/// ([`KIND_SET_FN`] the kind set's); the category list's growth's source file and line for the heap; the
+/// camera list's node free and its file and line.
+const STANCE_FN: u32 = 0x004e_4e50;
+const CATEGORY_FILE: u32 = 0x0039_683e;
+const NODE_FREE: u32 = 0x001b_75d0;
+const CAMERA_LIST_FILE: u32 = 0x0039_a808;
+/// F31b5t: the trail items' resets on state 4 (each class's vt `+0x28`): the five plain ones, the
+/// timed one (`+0x90` too) and the sounding one; and the emitters' douse (vt `+0xa8`), halt (`+0x84`)
+/// and the sounding emitter's stop (`+0x88`).
+const TRAIL_PLAIN: [u32; 5] = [0x004f_f300, 0x004f_f460, 0x004f_f600, 0x004f_f740, 0x004f_f9b0];
+const TRAIL_TIMED: u32 = 0x004f_f830;
+const TRAIL_SOUND: u32 = 0x004f_e840;
+const EMITTER_DOUSE: u32 = OBJECT_SWITCHES[1].0;
+const EMITTER_HALT: u32 = OBJECT_SWITCHES[2].0;
+const EMITTER_STOP: u32 = 0x004e_9f30;
 /// The bike's vtable slots the wreck calls, the port's own first (each with its function).
 const WRECK_OWN: [(u32, u32); 7] = [
     (0x49c, WRECK_TEST),
@@ -4560,6 +4579,101 @@ impl WreckInRam<'_> {
         let f = WRECK_OWN.iter().find(|s| s.0 == slot).unwrap().1;
         assert_eq!(vt(self.ee, slot), f, "the bike's vt +{slot:#x}");
     }
+    /// **F31b5t — a wreck hand-out served by its port** (`"wreck hand-outs"`), where the original's
+    /// slot holds the one the port stands for, or dropped where it reaches no word of the frame (the
+    /// event posts with `"wreck posts dropped"`, the pad's rumble with `"rumble dropped"`). `None`
+    /// leaves it to the original.
+    fn handed(&mut self, c: wreck::Out) -> Option<u32> {
+        use wreck::Out;
+        let x = self.x;
+        let ee = &*self.ee;
+        let part_fn = |p: u32, s: u32| ee.u32_at(ee.u32_at(p + 0x28) + s);
+        let flat = |p: u32| [RAYS_VTABLE, MESH_VTABLE].contains(&ee.u32_at(p + 0xc));
+        let sweep = |p: u32| ee.u32_at(p + 0xc) == SWEEP_VT;
+        let temp = ee.scratch(INSERT_SCRATCH);
+        let pose = |buf: u32| ee.scratch(WRECK_SCRATCH[3] + buf);
+        let item_fn = |it: u32| ee.u32_at(ee.u32_at(it + 0x10) + 0x28);
+        let obj_fn = |o: u32, s: u32| ee.u32_at(ee.u32_at(o + 4) + s);
+        let v = match c {
+            Out::Stance(-1) if vt(ee, 0x4b0) == STANCE_FN => wreck::stance_cancel(self),
+            Out::RunClose { run: r, player } => run::close(&mut RunInRam { ee: &mut *self.ee, posts: 0 }, F::ZERO, r, player, 0),
+            Out::RunTally { run: r, player } => run::tally(&mut RunInRam { ee: &mut *self.ee, posts: 0 }, F::ZERO, r, player, 0),
+            Out::Kind(true) if vt(ee, 0x3a0) == KIND_SET_FN => {
+                wreck::kind_set(self);
+                0
+            }
+            Out::Realloc { at, bytes } => NodeRam(self.ee).heap(HEAP_REALLOC, &[at, bytes, CATEGORY_FILE, 1354]),
+            Out::Unhook(at) => {
+                attach::remove(&mut NodeRam(self.ee), &ATTACH_GLOBALS, at);
+                0
+            }
+            Out::Attach { part, a, b } if flat(part) => {
+                let (centre, half) = part_box_in_ram(ee, part);
+                attach::part_in_world(&mut NodeRam(self.ee), &ATTACH_GLOBALS, attach::PoolClass(POOL_CLASS), part, a, b, centre, half, temp);
+                0
+            }
+            // F31b5t: the record's sweep probe put back (its box vt +0xc4 the segments' bounds).
+            Out::Attach { part, a, b } if sweep(part) => {
+                let box_ = game_sim::atv_sweep::bounds(&sweep_segments_in_ram(ee, part));
+                attach::part_in_world(&mut NodeRam(self.ee), &ATTACH_GLOBALS, attach::PoolClass(POOL_CLASS), part, a, b, box_.centre, box_.half, temp);
+                0
+            }
+            Out::Rider { a, b } => {
+                attach::reattach(&mut NodeRam(self.ee), &ATTACH_GLOBALS, attach::PoolClass(POOL_CLASS), a, b, 1, temp);
+                0
+            }
+            Out::PartOn(p) if part_fn(p, 0x20) == NODE_OFF => {
+                update::trail_off(&mut UpdateInRam { ee: &mut *self.ee, x }, p + 0x24);
+                0
+            }
+            Out::PartOff(p) if part_fn(p, 0x18) == NODE_ON => {
+                update::trail_on(&mut UpdateInRam { ee: &mut *self.ee, x }, p + 0x24);
+                0
+            }
+            Out::Pose { bone, buf } => {
+                let at = pose(buf);
+                node::frame(&mut NodeRam(self.ee), bone, at);
+                0
+            }
+            Out::Place { part, buf } => {
+                let at = pose(buf);
+                node::set_frame(&mut NodeRam(self.ee), part, at);
+                0
+            }
+            Out::Camera(at) => {
+                wreck::camera_moved(self, at);
+                0
+            }
+            Out::Post { .. } if in_rust("wreck posts dropped") => 0,
+            Out::RumbleReady(_) | Out::Rumble(_) if in_rust("rumble dropped") => 0,
+            Out::Trail(t) => {
+                wreck::trail_reset(self, t);
+                0
+            }
+            Out::TrailItem(it) if TRAIL_PLAIN.contains(&item_fn(it)) || item_fn(it) == TRAIL_TIMED => {
+                wreck::trail_item_reset(self, it, item_fn(it) == TRAIL_TIMED);
+                0
+            }
+            Out::TrailItem(it) if item_fn(it) == TRAIL_SOUND => {
+                wreck::trail_sound_reset(self, it);
+                0
+            }
+            Out::Douse(o) if obj_fn(o, 0xa8) == EMITTER_DOUSE => {
+                effects::object_douse(&mut NodeRam(self.ee), o);
+                0
+            }
+            Out::Halt(o) if obj_fn(o, 0x84) == EMITTER_HALT => {
+                effects::object_halt(&mut NodeRam(self.ee), o);
+                0
+            }
+            Out::Stop(o) if obj_fn(o, 0x88) == EMITTER_STOP => {
+                wreck::sound_stop(self, o);
+                0
+            }
+            _ => return None,
+        };
+        Some(v)
+    }
 }
 
 impl Wrecks for WreckInRam<'_> {
@@ -4575,12 +4689,19 @@ impl Wrecks for WreckInRam<'_> {
     fn normal(&mut self, terrain: u32, at: u32) -> Vf {
         let out = self.ee.scratch(WRECK_SCRATCH[1]);
         label("wreck Normal");
+        let r0 = self.ee.ran;
         self.call(TERRAIN_NORMAL, &[u64::from(terrain), u64::from(at), u64::from(out), 0, 0], self.x);
+        book("the wreck hands on: Normal", self.ee.ran - r0);
         Vf::from_bits([0, 4, 8, 12].map(|k| self.ee.u32_at(out + k)))
     }
     fn out(&mut self, c: wreck::Out) -> u32 {
         use wreck::Out;
         label(&format!("wreck {c:?}"));
+        if in_rust("wreck hand-outs")
+            && let Some(v) = self.handed(c)
+        {
+            return v;
+        }
         let bike = u64::from(BIKE);
         let x = self.x;
         let ee = &*self.ee;
@@ -4728,8 +4849,20 @@ impl Wrecks for WreckInRam<'_> {
             Out::Trail(at) => (TRAIL_RESET, vec![u64::from(at)], x),
             Out::Camera(at) => (CAMERA_RESET, vec![u64::from(at)], x),
             Out::Normal { .. } => unreachable!("asked through normal()"),
+            Out::RunClose { .. } | Out::RunTally { .. } | Out::Realloc { .. } => unreachable!("only the ports hand out {c:?}"),
+            Out::NodeFree(n) => (NODE_FREE, vec![u64::from(n), u64::from(CAMERA_LIST_FILE), 56], x),
+            Out::CameraTell { listener, actor } => (ee.u32_at(ee.u32_at(listener + 0x44) + 0x18), vec![u64::from(listener), u64::from(actor)], x),
+            Out::TrailItem(it) => (ee.u32_at(ee.u32_at(it + 0x10) + 0x28), vec![u64::from(it)], x),
+            Out::Douse(o) => (ee.u32_at(ee.u32_at(o + 4) + 0xa8), vec![u64::from(o)], x),
+            Out::Halt(o) => (ee.u32_at(ee.u32_at(o + 4) + 0x84), vec![u64::from(o)], x),
+            Out::Stop(o) => (ee.u32_at(ee.u32_at(o + 4) + 0x88), vec![u64::from(o)], x),
         };
-        self.call(f, &ints, x)
+        let name = format!("{c:?}");
+        let name = name.split(['(', ' ', '{']).next().unwrap_or_default().to_owned();
+        let r0 = self.ee.ran;
+        let v = self.call(f, &ints, x);
+        book(format!("the wreck hands on: {name}"), self.ee.ran - r0);
+        v
     }
 }
 
@@ -4762,7 +4895,9 @@ fn wreck_steps(ee: &mut Ee, c: Call, dt: f32) {
                 set_vf(ee, h, half);
                 let entry = parts[game_sim::atv_sync::slot(part)] + 0x18;
                 ee.set(28, GP);
+                let r0 = ee.ran;
                 census(ee, |ee| ee.call(SPATIAL_MOVE, &[u64::from(entry), u64::from(c), u64::from(h)], &[reach.0], BUDGET));
+                book("the wreck hands on: PartMove", ee.ran - r0);
             }
             r => panic!("the ground reset's steps hand on no {r:?} (dt {dt})"),
         }
@@ -10329,7 +10464,10 @@ fn replay_pure(name: &str, rust: &[&'static str]) -> Option<(Vec<bool>, BTreeMap
         let d = diff(&b, row);
         assert!(d.is_empty(), "{name} row {r} (vsync {}), nothing handed on: {} words differ\n  {}", row["vsync"], d.len(), d.iter().take(40).cloned().collect::<Vec<_>>().join("\n  "));
         let (wa, wb) = (bike_and_blocks(&a), bike_and_blocks(&b));
-        let words: Vec<String> = wa.iter().zip(&wb).filter(|(x, y)| x != y).map(|(x, y)| format!("{:#x}: {:#010x} / {:#010x}", x.0, x.1, y.1)).collect();
+        // F31b5t: with the wreck's posts dropped, the camera controller's two words (F31b5f: read
+        // by later posts only, never by the frame) stay the handing run's from row 125.
+        let unread: &[u32] = if rust.contains(&"wreck posts dropped") { &[BIKE + 0x460, BIKE + 0x468] } else { &[] };
+        let words: Vec<String> = wa.iter().zip(&wb).filter(|(x, y)| x != y && !unread.contains(&x.0)).map(|(x, y)| format!("{:#x}: {:#010x} / {:#010x}", x.0, x.1, y.1)).collect();
         assert!(words.is_empty(), "{name} row {r}: the bike and its blocks differ from the handing run's at {} words\n  {}", words.len(), words.iter().take(40).cloned().collect::<Vec<_>>().join("\n  "));
         for x in ram_differs(&a, &b) {
             if !off.contains(&x) {
@@ -10497,8 +10635,9 @@ fn flip_replays_with_every_port_at_once() {
 
 /// **F31b5 — the whole frame in Rust**: [`replay_pure`] with every port of [`replay_whole`], the
 /// rider leaf's (F31b5i), the wheel contacts' (F52), the other listeners dropped (F31b5m), the part
-/// walk's models dropped (F31b5j: they give the bike nothing) and the original vehicle update not run
-/// beside its port (`"no original beside"`). Each row is C15's word for word, the bike and its blocks
+/// walk's models dropped (F31b5j: they give the bike nothing), the original vehicle update not run
+/// beside its port (`"no original beside"`) and the wreck's hand-outs served (F31b5t; its posts stay
+/// the original's: their camera switch is on the frame's heap and spatial database). Each row is C15's word for word, the bike and its blocks
 /// the handing run's, and the frame reads no byte where the RAM parts from it. Answers the wreck
 /// state per row, where the RAM parts, the interpreter's census by part, and every instruction the
 /// interpreter ran in the second run's frames ([`FRAME_RAN`]).
@@ -10529,6 +10668,7 @@ fn replay_in_pure_rust(name: &str) -> Option<(Vec<bool>, Vec<String>, BTreeMap<S
             "batch send",
             "heap",
             "wreck check",
+            "wreck hand-outs",
         ],
     );
     let census = INTERPRETED.with(|m| std::mem::take(&mut *m.borrow_mut()));
@@ -10553,7 +10693,7 @@ fn ride_replays_in_pure_rust() {
 /// **F31b5 — C15's flip, the whole frame in Rust**: flip-1 bit-exact on all 465 rows, wrecked on row
 /// 125 and put back on row 193, with the interpreter running no instruction of any frame.
 #[test]
-#[ignore = "F31b5: the interpreter still runs ~1.6k instructions a frame (journal 2026-11-14)"]
+#[ignore = "F31b5: the interpreter still runs the wreck posts' camera switch and the rider leaf (journal 2026-11-16 F31b5t)"]
 fn flip_replays_in_pure_rust() {
     let Some((w, _off, census, total)) = replay_in_pure_rust("flip-1") else { return };
     assert_eq!(w.len(), 465);
@@ -22959,5 +23099,163 @@ fn the_parts_pair_kinds_are_the_originals() {
     let get = |k: &str| t.get(k).copied().unwrap_or(0);
     for k in ["mesh: hit", "mesh: miss", "hierarchy: hit", "hierarchy: miss", "plant sphere: hit", "plant sphere: miss", "sphere: hit", "sphere: miss", "box: hit", "box: miss", "other kind: miss", "contacts: some", "contacts: full", "contacts from two meshes", "unlisted: hit", "root: a ray", "root: a ray, tree set", "sixteen rays"] {
         assert!(get(k) >= 50, "{k}: {} cases\n{t:#?}", get(k));
+    }
+}
+
+
+/// F31b5t's oracles' RAM: the category table, the name asked, the part, its list and where a grown
+/// list goes (state 4 leaves it zero: [`F54_AREA`]'s).
+const F31B5T_AREA: u32 = F54_AREA;
+const CATEGORY_OF: u32 = 0x0011_3d00;
+const CATEGORY_ADD: u32 = 0x0011_58a0;
+
+/// The wreck's words in RAM for [`the_kind_sets_categories_are_the_originals`]: every word in place,
+/// a list's growth answered with `grown` and logged.
+struct CategoryRam<'a> {
+    ee: &'a mut Ee,
+    grown: u32,
+    log: Vec<(u32, u32)>,
+}
+
+impl Wrecks for CategoryRam<'_> {
+    fn bike(&self) -> u32 {
+        BIKE
+    }
+    fn word(&mut self, at: u32) -> u32 {
+        self.ee.u32_at(at)
+    }
+    fn set(&mut self, at: u32, w: u32) {
+        self.ee.set_u32(at, w);
+    }
+    fn out(&mut self, c: wreck::Out) -> u32 {
+        let wreck::Out::Realloc { at, bytes } = c else { panic!("the categories hand out no {c:?}") };
+        self.log.push((at, bytes));
+        self.grown
+    }
+    fn normal(&mut self, _: u32, _: u32) -> Vf {
+        unreachable!()
+    }
+}
+
+/// **F31b5t — the kind set's category lookup and add are the originals'** (oracle): 12,000 generated
+/// cases in a zero area of state 4's RAM, each run on SLUS-21104's category lookup (the table handed,
+/// the name in RAM; a name not there copied in) and add (unique, into the first empty slot, else the
+/// list grown through the heap's resize, hooked to answer a fixed spot and log its arguments) and on
+/// [`wreck::category`] and [`wreck::add_category`] (the table through [`update::CATEGORY_NAMES`],
+/// saved and put back). The area, the answers and the resizes asked must agree. Tables of 0..12
+/// names from a three-letter alphabet with junk after each name's end; queries an entry's name, a
+/// near-miss (one letter changed, one more, one fewer) or a stranger. Lists of 0..8 words with zeros
+/// and repeats; bits one of them, a fresh one or 0.
+#[test]
+fn the_kind_sets_categories_are_the_originals() {
+    let Some(mut ee) = image() else { return };
+    let base = F31B5T_AREA;
+    let (table, name_at, part, list, grown) = (base, base + 0x800, base + 0x900, base + 0xa40, base + 0xb00);
+    let saved = ee.u32_at(update::CATEGORY_NAMES);
+    let asked: Rc<RefCell<Vec<(u32, u32)>>> = Rc::default();
+    let log = asked.clone();
+    ee.hooks.insert(HEAP_REALLOC, Box::new(move |ee: &mut Ee| {
+        log.borrow_mut().push((ee.r(4) as u32, ee.r(5) as u32));
+        ee.set(2, u64::from(grown));
+    }));
+    let put = |ee: &mut Ee, at: u32, bytes: &[u8]| {
+        for (k, &b) in bytes.iter().enumerate() {
+            let a = at + k as u32;
+            let w = ee.u32_at(a & !3) & !(0xff << (8 * (a & 3))) | u32::from(b) << (8 * (a & 3));
+            ee.set_u32(a & !3, w);
+        }
+    };
+    let area = |ee: &Ee| (base..base + 0xc00).step_by(4).map(|a| ee.u32_at(a)).collect::<Vec<u32>>();
+    let mut g = Gen(0x5eed_f31b_5700);
+    let mut tally: BTreeMap<&'static str, u32> = BTreeMap::new();
+    for case in 0..12_000u32 {
+        // The lookup.
+        for a in (base..base + 0xc00).step_by(4) {
+            ee.set_u32(a, 0);
+        }
+        let name = |g: &mut Gen| -> Vec<u8> { (0..g.bits() % 12).map(|_| b"abc"[(g.bits() % 3) as usize]).collect() };
+        let n = g.bits() % 13;
+        let names: Vec<Vec<u8>> = (0..n).map(|_| name(&mut g)).collect();
+        ee.set_u32(table, n);
+        for (i, nm) in names.iter().enumerate() {
+            let slot = table + 4 + 32 * i as u32;
+            let junk: Vec<u8> = (0..32).map(|_| g.bits() as u8).collect();
+            put(&mut ee, slot, &junk);
+            put(&mut ee, slot, nm);
+            put(&mut ee, slot + nm.len() as u32, &[0]);
+        }
+        let q = match g.bits() % 4 {
+            0 | 1 if n > 0 => names[(g.bits() % n) as usize].clone(),
+            2 if n > 0 => {
+                let mut q = names[(g.bits() % n) as usize].clone();
+                match g.bits() % 3 {
+                    0 => q.push(b'a'),
+                    1 if !q.is_empty() => {
+                        q.pop();
+                    }
+                    _ if !q.is_empty() => {
+                        let k = (g.bits() as usize) % q.len();
+                        q[k] = b'z';
+                    }
+                    _ => q.push(b'b'),
+                }
+                q
+            }
+            _ => name(&mut g),
+        };
+        put(&mut ee, name_at, &q);
+        put(&mut ee, name_at + q.len() as u32, &[0]);
+        let before = area(&ee);
+        ee.set(28, GP);
+        ee.call(CATEGORY_OF, &[u64::from(table), u64::from(name_at)], &[], BUDGET);
+        let (want, after) = (ee.r(2) as u32, area(&ee));
+        for (k, w) in before.iter().enumerate() {
+            ee.set_u32(base + 4 * k as u32, *w);
+        }
+        ee.set_u32(update::CATEGORY_NAMES, table);
+        let got = wreck::category(&mut CategoryRam { ee: &mut ee, grown, log: vec![] }, &q);
+        ee.set_u32(update::CATEGORY_NAMES, saved);
+        assert_eq!(got, want, "case {case}: names {names:?}, query {q:?}");
+        assert!(area(&ee) == after, "case {case}: the table differs; names {names:?}, query {q:?}");
+        *tally.entry(if ee.u32_at(table) > n { "name added" } else { "name found" }).or_default() += 1;
+
+        // The add.
+        let k = g.bits() % 9;
+        let words: Vec<u32> = (0..k).map(|_| if g.one_in(3) { 0 } else { 1 << (g.bits() % 6) }).collect();
+        for (i, &w) in words.iter().enumerate() {
+            ee.set_u32(list + 4 * i as u32, w);
+        }
+        ee.set_u32(part + 0xfc, list);
+        ee.set_u32(part + 0x100, k);
+        let bit = match g.bits() % 4 {
+            0 if k > 0 => words[(g.bits() % k) as usize],
+            1 => 0,
+            _ => 1 << (g.bits() % 8),
+        };
+        let before = area(&ee);
+        asked.borrow_mut().clear();
+        ee.set(28, GP);
+        ee.call(CATEGORY_ADD, &[u64::from(part), u64::from(bit)], &[], BUDGET);
+        let (after, want_asked) = (area(&ee), asked.borrow().clone());
+        for (k, w) in before.iter().enumerate() {
+            ee.set_u32(base + 4 * k as u32, *w);
+        }
+        let mut m = CategoryRam { ee: &mut ee, grown, log: vec![] };
+        wreck::add_category(&mut m, part, bit);
+        let got_asked = std::mem::take(&mut m.log);
+        assert_eq!(got_asked, want_asked, "case {case}: list {words:?}, bit {bit:#x}: the resizes");
+        assert!(area(&ee) == after, "case {case}: list {words:?}, bit {bit:#x}: the part or list differs");
+        let path = if !want_asked.is_empty() {
+            "list grown"
+        } else if words.contains(&bit) {
+            "bit there"
+        } else {
+            "empty slot"
+        };
+        *tally.entry(path).or_default() += 1;
+    }
+    eprintln!("the kind set's categories: {tally:?}");
+    for path in ["name found", "name added", "bit there", "empty slot", "list grown"] {
+        assert!(tally.get(path).copied().unwrap_or(0) >= 100, "{path} came up too rarely: {tally:?}");
     }
 }
