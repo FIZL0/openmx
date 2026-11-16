@@ -1707,6 +1707,17 @@ impl Hands {
             false => self,
         }
     }
+
+    /// The hands with MX vs. ATV's quad's throttle lock (its throttle-enabled word cleared, as at a
+    /// start gate). The quad's note decides as the bike's but for one test: on the ground it revs
+    /// freely when the clutch is in *or* the throttle is locked. The clutch is read nowhere else, so
+    /// a locked throttle is the clutch held in to the note.
+    pub fn throttle_locked(self, locked: bool) -> Hands {
+        match locked {
+            true => Hands { clutch: 1.0, ..self },
+            false => self,
+        }
+    }
 }
 
 /// One of a bike's engine samples: the list it is in (as [`BikeSounds::list`] names them) and its
@@ -2630,6 +2641,42 @@ impl HeliFrame {
             at: [p.x(), p.y(), p.z()],
             vel: [v.x(), v.y(), v.z()],
             crash: PlaneCrash { wrecked: r.crash.reason != 0, touching, impulse: length([peak.x(), peak.y(), peak.z()]) },
+        }
+    }
+}
+
+/// What MX vs. ATV's quad's sounds read in a tick, after the tick (MD162). Its engine note is the
+/// bike's class in the original too (the same lists, states and decision), wired to the quad's own
+/// words: any wheel down, the gas lever after its cut (not the rate-limited throttle MX Unleashed's
+/// bike gives it), the body's speed and the clutch lever as pressed, with its throttle lock
+/// ([`Hands::throttle_locked`]). Nothing reads the engine's rpm. Its `[Wreck]` clank is the plane's
+/// emitter on the quad's words.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AtvFrame {
+    pub hands: Hands,
+    /// The wreck word, the collision record's touching flag and the length of the peak-rates vector
+    /// the contacts leave.
+    pub crash: PlaneCrash,
+}
+
+impl AtvFrame {
+    /// The ridden quad's, off its ride after the tick. While it is down the hands are off the levers
+    /// ([`Hands::wrecked`]).
+    pub fn of<R>(r: &game_sim::quad::Ride<R>) -> AtvFrame {
+        let (p, v, a) = (r.body.position, r.body.velocity, r.q.attitude);
+        let down = r.wrecked.as_ref().is_some_and(|w| w.reason != 0);
+        let hands = Hands {
+            grounded: r.q.on_ground,
+            gas: r.q.gas.0,
+            clutch: r.bike.clutch.0,
+            speed: r.q.speed_len.0,
+            at: [p.x(), p.y(), p.z()],
+            vel: [v.x(), v.y(), v.z()],
+        };
+        let touching = r.recorded.as_ref().is_some_and(|x| x.record.touching);
+        AtvFrame {
+            hands: hands.throttle_locked(r.bike.held.lock.throttle).wrecked(down),
+            crash: PlaneCrash { wrecked: down, touching, impulse: length([a.x(), a.y(), a.z()]) },
         }
     }
 }
@@ -3767,8 +3814,8 @@ pub struct SeatFrame {
     /// In a car (S247): what its engine voice reads.
     pub car: Option<CarFrame>,
     /// On MX vs. ATV's quad (MD136): what its engine note reads, the quad's own levers, ground and
-    /// speed, as the bike's [`SeatFrame::hands`] are the bike's.
-    pub atv: Option<Hands>,
+    /// speed, as the bike's [`SeatFrame::hands`] are the bike's, and its wreck clank (MD162).
+    pub atv: Option<AtvFrame>,
     /// What the bike's wreck clank reads (P144).
     pub bike: BikeCrash,
     /// The plane's wheels touched down this tick (P146): the body's speed then.
@@ -4051,7 +4098,8 @@ impl Sound {
             }
             s.car.silence(m);
             // MX vs. ATV's quad (MD136): its `vehicle.aud`, which is the bike's kind of file, on the
-            // bike's engine note fed the quad's own hands, and nothing else of the seat's.
+            // bike's engine note fed the quad's own hands (MD162: as the original wires them), and its
+            // wreck clank.
             if let Some(q) = &f.atv {
                 s.engine.silence(m);
                 s.edge.stop_rumble(m);
@@ -4059,7 +4107,9 @@ impl Sound {
                 s.plane.silence(m);
                 s.heli.silence(m);
                 let sounds = s.own_atv.clone().unwrap_or_else(|| s.bike.clone());
-                s.atv_engine.update(q, dt, m, &sounds);
+                s.atv_engine.update(&q.hands, dt, m, &sounds);
+                // Its `[Wreck]` (MD162): the plane's emitter, on the quad's pack's list and ranges.
+                s.clank.tick(m, &sounds.wreck, &q.crash, q.hands.at, dt, &mut s.dice);
                 continue;
             }
             s.atv_engine.silence(m);

@@ -13391,21 +13391,10 @@ fn atv_fx_frame(atv: &vehicle::AtvRide, nodes: &[String]) -> particles::PlaneFra
     }
 }
 
-/// What the quad's engine note hears (MD136): the bike's four hands off the quad's own words — on
-/// the ground, the throttle after its rate limit, the clutch lever, the body's speed — where its body
-/// is, off the levers while it is down.
-fn atv_hands(atv: &vehicle::AtvRide) -> Option<audio::Hands> {
-    let r = atv.quad()?;
-    let (p, v) = (r.body.position, r.body.velocity);
-    let hands = audio::Hands {
-        grounded: r.q.on_ground,
-        gas: r.q.gas_limited.0,
-        clutch: r.q.clutch_in.0,
-        speed: r.q.speed_len.0,
-        at: [p.x(), p.y(), p.z()],
-        vel: [v.x(), v.y(), v.z()],
-    };
-    Some(hands.wrecked(r.down()))
+/// What the quad's sounds hear (MD136, MD162): its engine note's hands and its wreck clank, off
+/// the quad's own words as MX vs. ATV wires them.
+fn atv_hands(atv: &vehicle::AtvRide) -> Option<audio::AtvFrame> {
+    atv.quad().map(audio::AtvFrame::of)
 }
 
 /// The MX vs. ATV car's own follow-camera file (MD82d): its kind's `Cam\FC_<kind>Default.pb`

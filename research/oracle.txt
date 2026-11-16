@@ -12733,3 +12733,17 @@ score_card_join             boot 0x0025f370 (mgr, card) -> 1 (0 for no card): th
 #   +0x43c.. (+0x460 = 3, +0x468 a heap block). On the frame's heap and database: dropping them parts the heap
 #   by row 193 (read watch). Left to the original (~11.3k instructions on rows 125 and 193). The rumble is
 #   dropped ("rumble dropped"): nothing the frame reads.
+# MD162 — MX vs. ATV's quad engine note and wreck clank (SLUS-21104, atv program). Journal:
+# research/journal/2026-11-16-md162-atv-engine-note. The note is MX Unleashed's engine-note class (same lists
+# +0x204..+0x2ac, state +0x2d8); no rpm is read. Hands at emitter +0x200, vehicle-relative.
+atv_vehicle_sound_build     atv 0x002d07b0 VehicleSound: builds the engine note and wreck emitter for a vehicle
+atv_engine_note_new         atv 0x004a2d40 the engine-note constructor (MXU layout)
+atv_engine_note_decide      atv 0x004a3520 the frame's decision; grounded branch revs on 0.1 < clutch || !throttle_enabled
+atv_engine_hands_a          atv 0x004bb710 (vtable 0x3ce598) wires the five hands: +0x324 grounded, +0xdd4 throttle enabled,
+#                                           +0x314 gas after its cut, +0x32c speed, +0x12c0 clutch lever in
+atv_engine_hands_b          atv 0x004dacf0 (vtable 0x3d0798) the same five hands. PC: MXVehicleMotocross/MXVehicleAtv vf35
+atv_wreck_clank_load        atv 0x004ffe20 [Wreck] loader: MinImpulse/MaxImpulse as the machine wreck loader (no x1.4667)
+# wreck clank wiring: atv 0x00500000 (emitter, body+0x70, body+0x80, quad+0xc80 wreck word, *(quad+0xc8)+0x34 touching)
+atv_wreck_clank_impulse     atv 0x00500350 the impulse pointer = quad+0x1250 (the peak-rates vector)
+atv_wreck_clank_frame       atv 0x005001e0 gate && touching && idle -> atv_wreck_clank_play
+atv_wreck_clank_play        atv 0x00500040 no-repeat pick at clamp(|impulse|/Max*100), impulse >= Min
