@@ -805,6 +805,7 @@ impl crate::Sim {
         let k = self.ai.as_deref()?.pilots.iter().position(|(p, _)| *p == i)?;
         let others: Vec<crate::ai::Other> =
             (0..1 + self.others.len()).filter(|&j| j != i).map(|j| crate::ai::other_of(self.rider_of(j))).collect();
+        let bikes: Vec<crate::ai::Ridden> = (0..1 + self.others.len()).filter_map(|j| crate::ai::Ridden::of(self.rider_of(j))).collect();
         let lane = self.ai.as_deref_mut()?;
         let rider = if i == 0 { &mut self.rider } else { &mut self.others[i - 1].rider };
         rider.sense.ai_route = true;
@@ -815,7 +816,7 @@ impl crate::Sim {
         let mount = crate::ai::Mount { rider: seen, cofg, yaw_rate: &mut yaw_rate, velocity: &mut velocity };
         let tricks = Some((&rider.set, &mut rider.tricks));
         let ridden = crate::ai::ride_controls(&pilots[k].1.levers, pilots[k].1.racer.habits.clutch);
-        pilots[k].1.think(mount, world, seek, tables, &others, tricks, rng, dt);
+        pilots[k].1.think_among(mount, world, &bikes, seek, tables, &others, tricks, rng, dt);
         let ch = &mut rider.ride.chassis;
         let w = ch.world_ang_vel;
         ch.world_ang_vel = ps2_float::Vf::new(w.x(), yaw_rate.to_f32(), w.z(), w.w());

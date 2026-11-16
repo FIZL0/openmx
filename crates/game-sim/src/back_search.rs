@@ -209,8 +209,15 @@ fn gather(scene: Scene<'_>, bundle: &Bundle, cache: &mut Cache, race: Race<'_>) 
 pub fn sweep_object(bundle: &Bundle, prop: &Prop, record: &mut Record) -> bool {
     let (at, _) = flight_search::prop_box(prop);
     let at = Vf::new(at[0].0, at[1].0, at[2].0, at[3].0);
+    sweep_placed(bundle, &prop.mesh, &prop.to_world, at, prop.radius, record)
+}
+
+/// [`sweep_object`] against any mesh object: `mesh` stood by `to_world`, its sphere at `at` with
+/// `radius` (the object's `+0x40` and `+0x60`) — a riding bike's frame collidable on its chassis'
+/// transform as well as a prop.
+pub fn sweep_placed(bundle: &Bundle, mesh: &crate::track::Mesh, to_world: &Mat4, at: Vf, radius: F, record: &mut Record) -> bool {
     let d = bundle.centre.sub(at);
-    let reach = prop.radius + bundle.radius;
+    let reach = radius + bundle.radius;
     if !(Acc::mula(d.x(), d.x()).madda(d.y(), d.y()).madd(d.z(), d.z()) < reach * reach) {
         return false;
     }
@@ -219,18 +226,18 @@ pub fn sweep_object(bundle: &Bundle, prop: &Prop, record: &mut Record) -> bool {
     record.fraction = [F(-1.0); collide::MAX_PROBES];
     record.hits = 0;
     record.nearest = F::ONE;
-    let into = inverse(&prop.to_world);
+    let into = inverse(to_world);
     let mut local = Bundle { count: n, centre: point(&into, bundle.centre), radius: bundle.radius, ..*bundle };
     for (l, p) in local.probes[..n].iter_mut().zip(&bundle.probes[..n]) {
         *l = Probe { origin: point(&into, p.origin), dir: direction(&into, p.dir), length: p.length };
     }
-    collide::sweep(&local, &MeshRef::of(&prop.mesh), record);
+    collide::sweep(&local, &MeshRef::of(mesh), record);
     let mut met = false;
     for i in 0..n {
         if record.hit[i] {
             met = true;
-            record.point[i] = point(&prop.to_world, record.point[i]);
-            record.normal[i] = direction(&prop.to_world, record.normal[i]);
+            record.point[i] = point(to_world, record.point[i]);
+            record.normal[i] = direction(to_world, record.normal[i]);
         }
     }
     met

@@ -1622,7 +1622,15 @@ ai_iface_walk_begin         boot 0x00281b90 the AI interface's vt+0x2c thunk (th
 #                                           ai::WorldScene::walk (Query::begin kind 3, WALK_HALF). The
 #                                           brain's bundle (+0x2a0, made on first use) has radius
 #                                           +0x160 = the feeler length (+0x2ac) and centre +0x150 =
-#                                           the position; per-feeler hits at (bundle+0x6c)+0xa4
+#                                           the position; per-feeler hits at (bundle+0x6c)+0xa4.
+#                                           S326: its probes' arrays are +0x134 lengths, +0x138
+#                                           origins, +0x13c directions (w 1.0). The walk's moving
+#                                           part hands out every rider's bike frame (class 0, cat
+#                                           0x9a048), wheel rays (class 2, 0x18008) and sphere
+#                                           (class 3, 0x8), ragdoll parts (classes 3, 5), toys
+#                                           (0x48 meshes) etc. class_bit("AI_IGNORE") = 0x8000 =
+#                                           [0x4e2128], the word the bike builder ORs into every
+#                                           bike collidable: the avoidance sweeps no bike, ever
 ai_iface_walk_next          boot 0x00281b80 vt+0x30 thunk (j 0x00280b00): the walk's next object, or 0
 ai_iface_walk_end           boot 0x00281b70 vt+0x34 thunk (j 0x00280b10): closes the walk's query
 #                                           (0x001bb890 on rider+0x13b0); v0 = 1 (S323)

@@ -5930,11 +5930,16 @@ impl crate::world::World for &Lent<'_> {
 /// [`WALK_HALF`] round `cofg`, over the world's props and plants as the plane's world holds them
 /// ([`crate::flight_search::world_flown`]): a prop is a [`Thing::Solid`] by its collidable's index (it
 /// is collidable, and none is of the `AI_IGNORE` class), a plant a [`Thing::Group`] by its cell, and
-/// the port's own two probes are left out. The sweep is the bundle against the one prop
-/// ([`crate::back_search::sweep_object`]): the feelers as its probes, its sphere at `centre` with
-/// `radius`.
+/// the port's own two probes are left out. Then the moving world (S326): every one of `ridden`, in
+/// the order given, wherever it is — the moving structure hands out all it holds, with no box —
+/// each a [`Thing::Solid`] by [`MOVING`] plus its place in `ridden`: collidable, and of the
+/// `AI_IGNORE` class ([`Ridden`]), so the avoidance passes over it. The sweep is the bundle against the one prop
+/// ([`crate::back_search::sweep_object`]) or the one bike's frame ([`crate::back_search::sweep_placed`]):
+/// the feelers as its probes, its sphere at `centre` with `radius`.
 pub struct WorldScene<'s, 'w> {
     pub world: &'s Lent<'w>,
+    /// The riders' bikes in the moving structure, in the Sim's player order ([`Ridden::of`]).
+    pub ridden: &'s [Ridden],
     /// The bike's centre of gravity.
     pub cofg: Vf,
     /// The feeler bundle's sphere: the rider's position and the feelers' length.
@@ -5943,6 +5948,54 @@ pub struct WorldScene<'s, 'w> {
     /// What the tick's walk handed out, and each solid swept with the feelers it hit if it met it.
     pub walked: Vec<Thing>,
     pub swept: Vec<(u32, Option<Vec<bool>>)>,
+}
+
+/// The first [`WorldScene`] id of the moving world: bike `k` of [`WorldScene::ridden`] is
+/// `MOVING + k`, past every id of the static tree's.
+pub const MOVING: u32 = 0x8000_0000;
+
+/// One of the Sim's riders' bikes as its AI riders' scene walk hands it out (S326): its frame
+/// collidable (`bikef.col`, [`crate::bike_col::BikeCol::frame`], class 0: a mesh) where its chassis'
+/// transform stands it, as another rider's body rays meet it ([`crate::rider_contact`]).
+///
+/// A riding bike's frame is of the `AI_IGNORE` class: the bike's builder ORs the ride start's words
+/// ([`crate::bike_col::RIDE_START`]) into the category of every collidable of the bike's, and the
+/// first of them is the bit the class registry gives `AI_IGNORE` (recording2's riders, and S93's
+/// three images). So the original's avoidance walks every bike and sweeps none, and an AI rider's
+/// feelers never stop on another rider's bike: the riders are kept apart by the race list's
+/// look at them instead ([`Other`]).
+///
+/// The original's moving structure holds more of each rider than this: its bike's wheel rays (class
+/// 2), the rider's sphere and the ragdoll's parts (classes 3 and 5), which the walk hands out and
+/// the avoidance passes over or sweeps without meeting (the rays share the frame's category; the
+/// per-object sweep answers only a mesh or a hierarchy), so they change nothing the brain reads and
+/// are not walked here.
+#[derive(Clone)]
+pub struct Ridden {
+    pub col: std::sync::Arc<crate::bike_col::BikeCol>,
+    pub at: crate::math::Mat4,
+}
+
+impl Ridden {
+    /// A rider's bike, if it is in the moving structure: it carries its collision files and its
+    /// rider is up on it (a downed rider rides the wreck bike, whose object is another), and it is
+    /// no ghost (a ghost's is out of the broad phase), as [`crate::rider_contact`] lists them.
+    pub fn of(rider: &crate::rider::Rider) -> Option<Ridden> {
+        let col = rider.bike_col.clone()?;
+        let up = rider.state.wreck.is_none() && rider.crash.is_none() && !rider.ghost.on;
+        up.then(|| Ridden { col, at: rider.ride.transform() })
+    }
+
+    /// The frame collidable's sphere: the mesh's root box's centre where the transform stands it
+    /// (the object's `+0x40`, as a prop's, [`crate::broad_build::mesh_box`]) and its reach
+    /// ([`crate::bike_col::BikeCol::frame_radius`], the object's `+0x60`).
+    pub fn sphere(&self) -> (Vf, F) {
+        let (at, _) = match self.col.frame.nodes.first() {
+            Some(n) => crate::broad_build::mesh_box(&self.at, n.centre, n.half_extent),
+            None => ([F(self.at.0[3].x()), F(self.at.0[3].y()), F(self.at.0[3].z()), F(1.0)], [F(0.0); 4]),
+        };
+        (Vf::new(at[0].0, at[1].0, at[2].0, at[3].0), self.col.frame_radius)
+    }
 }
 
 impl Scene for WorldScene<'_, '_> {
@@ -5970,22 +6023,29 @@ impl Scene for WorldScene<'_, '_> {
             }
         }
         q.end(&mut broad);
+        things.extend((0..self.ridden.len() as u32).map(|k| Thing::Solid { id: MOVING + k, collidable: true, ai_ignore: true }));
         self.walked.clone_from(&things);
         Some(things)
     }
 
     fn sweep(&mut self, id: u32, fan: &[Feeler]) -> Option<Vec<bool>> {
         use crate::collide::{Bundle, MAX_PROBES, Probe, Record};
-        let mut world = self.world.0.borrow_mut();
-        let (_, props, _) = world.wooded();
-        let prop = props?.props.get((id as usize).checked_sub(crate::flight_search::FIRST)?)?;
         let n = fan.len().min(MAX_PROBES);
         let mut bundle = Bundle { count: n, centre: self.centre, radius: self.radius, ..Bundle::default() };
         for (p, f) in bundle.probes.iter_mut().zip(fan) {
             *p = Probe { origin: f.origin, dir: f.direction, length: f.length };
         }
         let mut record = Record::new();
-        let met = crate::back_search::sweep_object(&bundle, prop, &mut record);
+        let met = if id >= MOVING {
+            let bike = self.ridden.get((id - MOVING) as usize)?;
+            let (at, reach) = bike.sphere();
+            crate::back_search::sweep_placed(&bundle, &bike.col.frame, &bike.at, at, reach, &mut record)
+        } else {
+            let mut world = self.world.0.borrow_mut();
+            let (_, props, _) = world.wooded();
+            let prop = props?.props.get((id as usize).checked_sub(crate::flight_search::FIRST)?)?;
+            crate::back_search::sweep_object(&bundle, prop, &mut record)
+        };
         let hits = met.then(|| (0..fan.len()).map(|i| i < n && record.hit[i]).collect::<Vec<bool>>());
         self.swept.push((id, hits.clone()));
         hits
@@ -6084,6 +6144,18 @@ impl Pilot {
         &mut self, mount: Mount<'_>, world: &mut dyn crate::world::World, seek_world: &mut seek::World,
         tables: &Tables, others: &[Other], tricks: Option<(&Set, &mut Tricks)>, rng: &mut Rng, dt: F,
     ) -> Thought {
+        self.think_among(mount, world, &[], seek_world, tables, others, tricks, rng, dt)
+    }
+
+    /// [`Pilot::think`] with the riders' bikes in its scene's moving world (S326, [`Ridden`]): the
+    /// walk hands each out after the static tree's things — this rider's own bike as well, as the
+    /// original's does — and the avoidance passes over them, as `AI_IGNORE`.
+    #[allow(clippy::too_many_arguments)] // the tick's world, as Around has it
+    pub fn think_among(
+        &mut self, mount: Mount<'_>, world: &mut dyn crate::world::World, ridden: &[Ridden],
+        seek_world: &mut seek::World, tables: &Tables, others: &[Other], tricks: Option<(&Set, &mut Tricks)>,
+        rng: &mut Rng, dt: F,
+    ) -> Thought {
         let cell = world.wooded().2.map_or(F(0.0), |t| t.cell());
         let lent = Lent::new(world);
         let mut ground = &lent;
@@ -6091,6 +6163,7 @@ impl Pilot {
         let rider = Rider { look_ahead: seat.look_ahead, bump_chance: seat.bump_chance, ..mount.rider };
         let mut scene = WorldScene {
             world: &lent,
+            ridden,
             cofg: mount.cofg,
             centre: rider.frame[3],
             radius: self.racer.avoid.feeler_length,
