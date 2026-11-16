@@ -12648,6 +12648,28 @@ atv_out_of_bounds           atv 0x004a4f20 (vt +0x16c, the bike in a0): body pos
 #   cleared by atv_bike_vehicle_update 0x004e1b90. The rider's motion-set row and lean words (rider anim
 #   +0x310..+0x344) have no reader found yet: the port keeps its own choice (MD138a's follow-up).
 
+# MD165 — the ATV rider's motion row and lean (game_render::quad::Motion / Ask / seat_motion /
+# rider_palette_motion, quad_draw::row / rider). Comment rows only; journal research/journal/*-md165-*.
+#   The reader MD138a missed: the shared clip cache's ATV block (rider +0xb18 points at it; MD138a's
+#   "+0x310..+0x344" were the block's cache offsets, cache + 0x248 + 4 id) filled by the binder 0x0027ac30
+#   (through 0x00279e60 / 0x00279cf0): ids 0..45 ATV_rider_%s, 0x32..0x34 atv_turn_stop_Fwd/Mid/Bck,
+#   0x35..0x37 atv_turn_still_*, 0x38..0x3a atv_turn_riding_*, 0x3b/0x3c atv_reverse_l/r, 0x3d..0x3f
+#   atv_air_*, 0x40 atv_wreck_air_flail, 0x41..0x45 the shared hold_* names, 0x46 atv_get_ready_idle_01.
+#   Read by id through the vtable-only accessor 0x004f2d30 (rider vt 0x3d11b0 slot +0x174; pc
+#   MXMotocrossRider::vf59) from the idle layer vt +0xd4 0x004eb380 / 0x004eb6f0, the same code F62a ported
+#   as game_sim::handling::rider::idle_state / idle_clips (pc twin FUN_004685a0 under MotocrossRider::vf50).
+#   The rider's record (+0x378) on the quad is the quad's +0x730, filled by atv_quad_stunt_state_pack
+#   0x004ba690: record +0x10 = +0xd08, +0x130 = (+0x324 == 0), +0x134 = (+0x1524 == +0x152c), +0x138 =
+#   +0xc80, +0x190 = +0x318 (gas limited), +0x194 = +0x12cc, +0x198 = +0x12d4, +0x19c = +0x12c4 (reverse),
+#   +0x1a0 = +0x14b4 (crossup blend), +0x1a4 = +0x14b8 (fore-aft blend), +0x1a8 = +0x32c (speed), byte
+#   +0x1d4 = +0x1528 if < 0x29 or one of +0x13b8/+0x13bc/+0x13c0 else 0xff, +0x1d0 = +0x1650, +0x1d8 = +0x14e4.
+#   Checked on c28-atv-s-air: rider 0x01bf09b0 state 0x3d, record 0x0150b0c0
+#   air 1, pose 0.4991, fore-aft 0.5, band 53.97; c28-atv-s-spawn state 0x38, band 0.73.
+#   Constants (constructor 0x004ea3a8..0x004ea3f0): +0x890 1.46666, +0x894/+0x898/+0x89c 7.3333 / 14.6666 /
+#   21.9999, +0x8b4/+0x8b8 15 / 45; axis records 0x004ea968..0x004ea9f0 tau 0.125 (+0x5c0) / 0.15 (+0x5c4)
+#   from 0.5. Fade rates +0x618..+0x628 are stored from the caller's f1 there; every quad rider image of
+#   md37a reads 0.25, 0.25, 2, 3, 2 (and the bike rider of state04).
+
 # MD161 — MX vs. ATV Untamed's (SLUS-21701) monster-truck changes ported behind atv_car::Load::untamed, proved by
 # crates/game-sim/tests/untamed_truck.rs off context/untamed/ram/nat_or.bin. Comment rows only, as # MD81c.
 # Journal: research/journal/2026-11-14-md161-untamed-monster-pack.
