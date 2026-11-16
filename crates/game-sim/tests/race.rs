@@ -165,6 +165,8 @@
 //!     [`race::Tracker::placed`].
 //! 50. **sx01's laps led and passes**: two riders walked round sx01, their trackers against the lap and
 //!     place notices each tick told.
+//! 51. **The card join** (S301): [`RaceRules::join`] against the score manager's on 20,000 generated
+//!     cards, tracks and managers: the card, the free records, the paths and the listeners.
 
 use game_sim::chassis::{Chassis, Deriv};
 use game_sim::race::{
@@ -10179,4 +10181,240 @@ fn riders_walked_round_sx01_count_their_laps_led_and_passes() {
     eprintln!("trackers {got:?}");
     assert_eq!(got, want);
     assert!(got[1].laps_led >= 2 && got[1].passes > 0 && got[1].times_in_lead > 0 && got[0].times_passed > 0, "laps led and passes counted: {got:?}");
+}
+
+// --- S301: the card join --------------------------------------------------
+
+/// Free RAM for the join's manager, line, listener, vtables and hooks, the
+/// checkpoint list's head (never read), the record pool, and the cards (0x200 apart) with their owners
+/// and chains (0x100 apart), line words and records.
+const W_MGR: u32 = 0x01e8_0000;
+const W_LINE: u32 = 0x01e8_1000;
+const W_LISTENER: u32 = 0x01e8_2000;
+const W_VT: u32 = 0x01e8_3000;
+const W_HOOKS: u32 = 0x01e8_4000;
+const W_GATES: u32 = 0x01e8_6000;
+const W_POOL: u32 = 0x01e8_8000;
+const W_CARDS: u32 = 0x01e9_0000;
+const W_OWNERS: u32 = 0x01e9_2000;
+const W_CHAINS: u32 = 0x01e9_3000;
+const W_LINES: u32 = 0x01e9_4000;
+const W_RECORDS: u32 = 0x01e9_8000;
+
+/// Every listener slot of owners, chains and the manager's listener lands on a hook that writes down
+/// (who, slot, the object).
+fn w_hooks(ee: &mut Ee) -> Rc<RefCell<Vec<(u32, u32, u32)>>> {
+    let heard: Rc<RefCell<Vec<(u32, u32, u32)>>> = Rc::default();
+    for who in [OWNER, CHAIN, TO_LISTENER] {
+        for slot in (0..0x80).step_by(4) {
+            let at = W_HOOKS + who * 0x100 + slot;
+            ee.set_u32(W_VT + who * 0x100 + slot, at);
+            let heard = heard.clone();
+            ee.hooks.insert(at, Box::new(move |ee| heard.borrow_mut().push((who, slot, ee.r(4) as u32))));
+        }
+    }
+    heard
+}
+
+/// The object a listener call of `who` on card `k` lands on.
+fn w_object(who: u32, k: usize) -> u32 {
+    match who {
+        OWNER => W_OWNERS + 0x100 * k as u32,
+        CHAIN => W_CHAINS + 0x100 * k as u32,
+        _ => W_LISTENER,
+    }
+}
+
+/// The manager's record pool, `n` records.
+fn put_w_pool(ee: &mut Ee, p: &mut Pick, n: u32) {
+    for k in 0..n {
+        let next = if k + 1 < n { W_POOL + 0x20 * (k + 1) } else { 0 };
+        put_record(ee, W_POOL + 0x20 * k, &record(p), next);
+    }
+    ee.set_u32(W_MGR + 0x58, if n == 0 { 0 } else { W_POOL });
+}
+
+/// Card `k` in RAM with its owner (no ghost card on it) and chain, linked on to `next`.
+fn put_w_card(ee: &mut Ee, k: usize, c: &RaceCard, lines: usize, owner: bool, chain: bool, next: u32) {
+    let at = W_CARDS + 0x200 * k as u32;
+    put_race_card(ee, at, c, W_LINES + 0x100 * k as u32, W_RECORDS + 0x400 * k as u32);
+    let _ = lines;
+    let (own, ch) = (w_object(OWNER, k), w_object(CHAIN, k));
+    ee.set_u32(at + 4, if owner { own } else { 0 });
+    ee.set_u32(at + 0x1c4, if chain { ch } else { 0 });
+    ee.set_u32(at + 0x1c8, next);
+    ee.set_u32(at + 0xc8, 0);
+    ee.set_u32(own + 8, 0);
+    ee.set_u32(own + 0x1c, 0);
+    ee.set_u32(own + 0x20, W_VT + OWNER * 0x100);
+    ee.set_u32(ch + 0x1c, 0);
+    ee.set_u32(ch + 0x20, W_VT + CHAIN * 0x100);
+}
+
+/// The listener with no chain behind it.
+fn put_w_listener(ee: &mut Ee) {
+    for (o, w) in [(4, 0), (0x10, 0), (0x14, 0), (0x18, 0), (0x1c, W_VT + TO_LISTENER * 0x100)] {
+        ee.set_u32(W_LISTENER + o, w);
+    }
+}
+
+/// The card join on 20,000 generated cards, tracks and managers (path race, with a line or none,
+/// checkpoint lists of none to three, the manager keeping cards or not, the card keeping its best or
+/// not), against [`RaceRules::join`]: every word of the card the port keeps, the next checkpoint, the
+/// free records, the paths and pools, and every listener call in order.
+#[test]
+fn the_card_join_matches_the_score_managers_join() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let join = match addr("score_card_join") {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    let heard = w_hooks(&mut ee);
+    let mut p = Pick(0x51c3_9e07_d2a8_64bf);
+    let (mut found, mut lined, mut kept_best, mut behind) = (0, 0, 0, 0);
+    for case in 0..20_000 {
+        let mut t = t_paths(&mut p);
+        t.word_34 = p.next() as u32 & 0xff;
+        let (g, line_spot) = line_on(&mut p, &t);
+        let has_line = p.below(5) != 0;
+        let n = p.below(4) as usize;
+        let lists = LineLists {
+            checkpoints: (0..n).map(|_| ListGate { gate: finish_line(&mut p), spot: Spot::default() }).collect(),
+            ..LineLists::default()
+        };
+        let kind = [race_kind::RACE, race_kind::PRACTICE, race_kind::GHOST_RACE, 0][p.below(4) as usize];
+        let mut flags = p.next() as u32;
+        for (bit, odds) in [(race_flags::CHECKPOINTS, 2), (race::join_flags::KEEP_CARDS, 3)] {
+            if p.below(odds) == 0 { flags |= bit } else { flags &= !bit }
+        }
+        let mut rules = RaceRules {
+            lap: LapRules { flags, kind, free_records: p.below(4) as u32, ..LapRules::default() },
+            time_limit: if p.below(3) == 0 { F::ZERO } else { F(p.range(10.0, 300.0)) },
+            ..RaceRules::default()
+        };
+        // Line words for every checkpoint: the original would allocate them for a card with none.
+        let mut lap = lap_card(&mut p, n);
+        if p.below(3) == 0 {
+            lap.flags |= race::join_flags::KEEPS_BEST;
+        }
+        lap.spot = t_spot_on(&mut p, &t);
+        lap.kept_spot = t_spot_on(&mut p, &t);
+        let s = t_spot_on(&mut p, &t);
+        let (i, k) = s.at().unwrap();
+        let q = t.paths[i].nodes[k].points[0];
+        let now = if p.below(6) == 0 {
+            p.quad([q.x() + 300.0, q.y(), q.z()])
+        } else {
+            Vf([q.x() + p.range(-10.0, 10.0), q.y() + p.range(-4.0, 3.0), q.z() + p.range(-10.0, 10.0), p.range(0.0, 1.0)])
+        };
+        lap.seen = Seen { now, last: p.quad([0.0, 0.0, 0.0]) };
+        let mut card = RaceCard {
+            lap,
+            on_path: time_word(&mut p, 150.0),
+            odometer: time_word(&mut p, 5000.0),
+            aim: t_spot_on(&mut p, &t),
+            look: p.quad([0.0, 0.0, 0.0]),
+            ahead: p.quad([0.0, 0.0, 0.0]),
+            to_track: p.quad([0.0, 0.0, 0.0]),
+            jumps: jumps_of(&mut p),
+            warnings: warnings_of(&mut p),
+        };
+        let owner = p.below(4) != 0;
+        let chain = p.below(3) == 0;
+
+        put_paths(&mut ee, &mut p, &t);
+        ee.set_u32(T_TRACK + 0x4c, t_rec(0));
+        ee.set_u32(T_TRACK + 0x5c, if has_line { W_LINE } else { 0 });
+        put_gate(&mut ee, W_LINE, &g);
+        put_t_spot(&mut ee, W_LINE + 0x94, line_spot);
+        ee.set_u32(W_MGR + 0x30, W_LISTENER);
+        ee.set_u32(W_MGR + 0x40, 0);
+        ee.set_u32(W_MGR + 0x48, 0);
+        ee.set_u32(W_MGR + 0x5c, rules.lap.flags);
+        ee.set_u32(W_MGR + 0x60, kind as u32);
+        ee.set_u32(W_MGR + 0x64, 2);
+        ee.set_u32(W_MGR + 0x68, T_TRACK);
+        ee.set_u32(W_MGR + 0x70, if n == 0 { 0 } else { W_GATES });
+        ee.set_u32(W_MGR + 0x88, n as u32);
+        put_f(&mut ee, W_MGR + 0xa0, rules.time_limit);
+        put_w_pool(&mut ee, &mut p, rules.lap.free_records);
+        put_w_listener(&mut ee);
+        put_w_card(&mut ee, 0, &card, n, owner, chain, 0);
+        let at = W_CARDS;
+        ee.set_u32(at + 0x80, p.next() as u32);
+        ee.set_u32(at + 0x84, p.next() as u32);
+        ee.set_u32(at + 0x1c0, p.next() as u32);
+        ee.set_u32(0x14, 0);
+        ee.set_u32(0x54, 0);
+        heard.borrow_mut().clear();
+        ee.call(join, &[u64::from(W_MGR), u64::from(at)], &[], BUDGET * 20);
+        let answer = ee.v0() as u32;
+
+        let before = card.clone();
+        rules.join(&mut card, None, &mut t, has_line.then_some(line_spot), &lists);
+        let what = format!("case {case}: kind {kind}, flags {:#x}, card {:#x}", rules.lap.flags, before.lap.flags);
+        assert_eq!(answer, 1, "{what}: the answer");
+        // The reader leaves the next checkpoint out: its word is checked by itself below.
+        let mut got = race_card_at(&ee, at, n);
+        got.lap.gate = card.lap.gate;
+        assert_eq!(race_card_words(&got), race_card_words(&card), "{what}: the card");
+        assert_eq!(ee.u32_at(at + 0x80), if card.lap.gate == Some(0) { W_GATES } else { 0 }, "{what}: the next checkpoint");
+        assert_eq!((ee.u32_at(at + 0x84), ee.u32_at(at + 0x1c0)), (0, 0), "{what}: the gates this lap and the penalty");
+        assert_eq!(pool_len(&ee, ee.u32_at(W_MGR + 0x58), 0x14), rules.lap.free_records as usize, "{what}: the free records");
+        check_paths(&ee, &t, &what);
+        let both = |slot: u32| {
+            let mut v = Vec::new();
+            if owner {
+                v.push((OWNER, slot, w_object(OWNER, 0)));
+            }
+            if chain {
+                v.push((CHAIN, slot, w_object(CHAIN, 0)));
+            }
+            v
+        };
+        let mut want = both(8);
+        want.push((TO_LISTENER, 0x6c, W_LISTENER));
+        want.extend(both(0x5c));
+        if card.lap.flags & 8 != 0 {
+            want.extend(both(0x70));
+        }
+        want.push((TO_LISTENER, 0x60, W_LISTENER));
+        want.extend(both(0x50));
+        assert_eq!(*heard.borrow(), want, "{what}: the listeners");
+
+        found += usize::from(card.lap.spot != before.lap.spot);
+        lined += usize::from(has_line);
+        kept_best += usize::from(card.lap.best_lap_no == before.lap.best_lap_no && before.lap.best_lap_no != -1);
+        behind += usize::from(card.lap.flags & card_flags::BEHIND_LINE != 0);
+    }
+    assert!(found > 5000 && lined > 10_000 && kept_best > 3000 && behind > 3000, "found {found} lined {lined} kept {kept_best} behind {behind}");
+}
+
+
+/// S301: [`race::Laps::new`] joins its cards as the manager's reset does: on sx01's grid, a human's
+/// card comes out with the flags C31's live race holds before the drop (the standing bike's word
+/// setting the grounded bit), a computer's the same less the jump watch's judge bit, which only a
+/// landing sets; each on the track, a million feet from the line until the handler's first step, and
+/// its lap the path distance from its spot to the line.
+#[test]
+fn laps_join_their_cards_with_the_live_races_flags() {
+    let Some(file) = sx01_race_file() else { return };
+    let mut t = TrackFile::parse(&file).expect("sx01's race file reads");
+    t.snap_to_ground(None);
+    let (paths, spots) = TrackPaths::load(&t).expect("sx01's track loads");
+    let line_spot = spots[1].expect("a line spot");
+    let course = Course { line: t.line.clone().expect("a line"), line_spot, lap_length: F::ZERO };
+    let grid = spots[0].expect("a grid spot").path as usize;
+    let at = track_walk(&paths, grid, 4.0, 2);
+    let mut measure = paths.clone();
+    let laps = race::Laps::new(race::supercross_rules(3), course, paths, &[(at[0], race::HUMAN_CARD), (at[1], race::COMPUTER_CARD)]);
+    assert_eq!(laps.course.lap_length, laps.track.lap_length, "the lap line reads the track's lap");
+    let flags: Vec<u64> = laps.cards.iter().map(|e| e.card.lap.flags).collect();
+    assert_eq!(flags, [race::HUMAN_CARD, race::COMPUTER_CARD & !race_card_flags::JUMP_TO_JUDGE]);
+    for e in &laps.cards {
+        let c = &e.card.lap;
+        assert_eq!((c.on_track, c.to_line, c.to_line_kept), (1, F(1.0e6), F(1.0e6)), "player {}", e.player);
+        assert_eq!(c.lap_length, measure.distance(c.spot, line_spot, true), "player {}", e.player);
+        assert_eq!((c.kept_spot, e.card.aim), (c.spot, c.spot));
+    }
 }

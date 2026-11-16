@@ -12653,3 +12653,26 @@ bike_grid_place             boot 0x0027e530 (bike, at, facing, bike+0x3d0, 0) th
 #   car update 0x004e9eb0: call at 0x004ea0a8. On-hazard +0xc10 = any tire's (+0x1244..+0x1250) table word by
 #   its byte +0xf0; a2 = any tire's +0xa4; a1 = on && a2. Stretch 0x004e9f10..0x004ea0b0 ($s0 car, $f20 dt).
 #   MD164's trophy truck 0x01be4740: node +0x114, its parent word (+0x120) 0 in spawn and air images.
+# S301
+score_card_join             boot 0x0025f370 (mgr, card) -> 1 (0 for no card): the card join the manager
+#                                           reset 0x0025fad0 runs on every card. flags &= 0x1a8801c, |=
+#                                           0x800; no 0x10: kind 3 or track +0x34 & 4 -> 0x10000, & 8 ->
+#                                           0x20000. +0x10/+0x14 = 1e6, counts and clocks 0, best (+0x50
+#                                           0, +0x54 -1) unless card 0x200000 or mgr 0x10000, +0xc4 =
+#                                           mgr+0xa0, +0x80 = mgr+0x70, mgr 0x40: clear +0xe4 (mgr+0x88
+#                                           words). Owner/chain vt+8 (the bike's look at the card), last
+#                                           = now. Mode (+0x64) 2 with a track: path_spot(+0x60 -> +0x88,
+#                                           holding only), +0x94 = +0xa0 = +0x88, +0x40 = path_find_spot
+#                                           (-1, -1, out null), path_ahead (+0x140, written over below),
+#                                           +0x28 = path_distance(+0x88, line +0x94, 1) or track +0x54
+#                                           with no line, +0x24 = 0. Mode 1: the gate chain's length.
+#                                           mgr 0x10000 clear: +0x20 odometer, +0xe8/+0xf0/+0xf8/+0x100
+#                                           jump count and bests 0. Always: +0xec/+0xf4/+0xfc/+0x104/
+#                                           +0x108 0, +0x110/+0x120/+0x140 = vf0, +0x150..+0x168 0, +0x1b0
+#                                           0, +0x180 = (0, 0, 1, w kept) off mode 1, +0x190/+0x1a0 = vf0.
+#                                           Listener vt+0x6c, owner/chain vt+0x5c, records back to
+#                                           mgr+0x58; card 8: owner vt+0x70; listener vt+0x60, owner/chain
+#                                           vt+0x50. RaceRules::join (oracled 20,000 cards), run by
+#                                           Laps::new. path_find_spot with out null and a negative reach
+#                                           takes the first candidate and skips both path_distance calls
+#                                           (paths' scratch untouched): TrackPaths::holds_any.
