@@ -867,6 +867,7 @@ impl Wire for crate::prop_world::Collision {
         self.nearby.put(out);
         self.regather.put(out);
         self.wrecks.put(out);
+        self.gathered_bikes.put(out);
     }
     fn take(r: &mut Reader<'_>) -> Result<Self, String> {
         let collider = Wire::take(r)?;
@@ -896,7 +897,7 @@ impl Wire for crate::prop_world::Collision {
             struck: Wire::take(r)?,
         };
         let categories = Wire::take(r)?;
-        Ok(crate::prop_world::Collision { collider, record, categories, nearby: Wire::take(r)?, regather: Wire::take(r)?, wrecks: Wire::take(r)? })
+        Ok(crate::prop_world::Collision { collider, record, categories, nearby: Wire::take(r)?, regather: Wire::take(r)?, wrecks: Wire::take(r)?, gathered_bikes: Wire::take(r)? })
     }
 }
 wire!(crate::prop_world::Joint { pin, on, limited });

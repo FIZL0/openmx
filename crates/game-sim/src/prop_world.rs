@@ -152,6 +152,13 @@ pub struct Collision {
     /// How many wreck bikes' hulls the world the list was gathered in had ([`Wreck`]): the plants come
     /// after them, so a list gathered with another count is gathered again.
     pub wrecks: usize,
+    /// **The ridden bikes as the list's last gather measured them** (S239): each bike's chassis
+    /// transform where that gather found it (`None` for one out of the world), by player. The bikes'
+    /// frame collidables are in the original's list, always gathered (no bound on them), each with
+    /// the distance the gather measured; the search tests only the candidates whose distance is
+    /// within the probe's reach. So a bike is tested by a prop's rays only where it was near at the
+    /// gather, wherever it has gone since ([`flight_search::bike_listed`]).
+    pub gathered_bikes: Vec<Option<crate::math::Mat4>>,
 }
 
 /// The sweep probe's category list a prop's init gives it (S243, both the prop's and the wreck bike's
@@ -214,7 +221,7 @@ impl Collision {
         record.nearby = rays.is_some();
         record.sweeps = rays.is_some();
         record.rays = rays;
-        Collision { collider, record, categories: EVERY_CATEGORY, nearby: flight_search::search(), regather: None, wrecks: 0 }
+        Collision { collider, record, categories: EVERY_CATEGORY, nearby: flight_search::search(), regather: None, wrecks: 0, gathered_bikes: Vec::new() }
     }
 }
 
@@ -478,6 +485,7 @@ impl Collection {
         // The wake gathers the list where the body is.
         if let Some(c) = o.collision.as_mut() {
             c.regather.get_or_insert_with(|| c.categories.clone());
+            c.gathered_bikes = gathered(&self.heard.1.bikes);
         }
     }
 
@@ -756,6 +764,10 @@ impl Collection {
                     c.nearby.nearby.found.clear();
                     c.wrecks = hulls.len();
                 }
+                // A list gathered afresh here sees the bikes where they are now.
+                if !c.nearby.built {
+                    c.gathered_bikes = gathered(&self.heard.1.bikes);
+                }
                 let probe = flight_search::Probe {
                     categories: c.categories.clone(),
                     sweep: Some(sweep_categories()),
@@ -784,20 +796,30 @@ impl Collection {
                 }
             }
             o.node = std::mem::take(&mut c.record.node);
+            let mut on_bikes = false;
             if let Some(s) = &scene {
                 self.heard.0.extend(s.sounded().iter().map(|&struck| (k, struck)));
                 // The ridden bikes' frame collidables are on the original's node too, which the
                 // material listener hears struck (F27a2), filed behind the prop's own hits.
                 if let (Some(tree), Some(mesh)) = (rays.get(k).and_then(Option::as_ref), self.heard.1.mesh.as_deref()) {
-                    let bikes = flight_search::Bikes { mesh, bikes: &self.heard.1.bikes };
+                    let listed = listed_bikes(tree, &searched.0, mesh, &self.heard.1.bikes, &c.gathered_bikes);
+                    let bikes = flight_search::Bikes { mesh, bikes: &listed };
                     let probed = flight_search::bikes_probed(tree, &searched.0, &searched.1, bikes);
                     self.heard.0.extend(probed.iter().map(|&(j, _)| (k, crate::material_hit::Struck::Bike(j))));
+                    on_bikes = !probed.is_empty();
                     if self.heard.1.file {
                         file_on_bikes(&mut c.record, k, probed, &mut self.heard.1.probed);
                     }
                 }
             }
-            let heard = scene.map(|s| s.heard()).unwrap_or_default();
+            let mut heard = scene.map(|s| s.heard()).unwrap_or_default();
+            // A hit on a bike's frame calls the probe's two listeners as any hit does (S239): the
+            // bike's category (the ridden and the AI riders' alike) has the wake mask's bit, so the
+            // hit listener wakes an asleep body, and the collection's listener activates it.
+            if on_bikes {
+                heard.woke |= asleep && flight_search::BIKE & flight_search::WAKE_MASK != 0;
+                heard.struck = true;
+            }
             if heard.woke {
                 self.enable(k);
             }
@@ -824,7 +846,8 @@ impl Collection {
         let (Some(tree), Some(mesh)) = (rays.get(k).and_then(Option::as_ref), self.heard.1.mesh.as_deref()) else { return };
         let o = &self.objects[k];
         let (true, Some(c)) = (o.filed, o.collision.as_ref()) else { return };
-        let bikes = flight_search::Bikes { mesh, bikes: &self.heard.1.bikes };
+        let listed = listed_bikes(tree, &o.node, mesh, &self.heard.1.bikes, &c.gathered_bikes);
+        let bikes = flight_search::Bikes { mesh, bikes: &listed };
         let struck = flight_search::bikes_struck(tree, &o.node, &c.categories, bikes);
         self.heard.0.extend(struck.into_iter().map(|j| (k, crate::material_hit::Struck::Bike(j))));
     }
@@ -839,6 +862,7 @@ impl Collection {
             // The asleep check gathers the list while the body detects collisions asleep.
             if let (true, Some(c)) = (o.detect_when_disabled, o.collision.as_mut()) {
                 c.regather.get_or_insert_with(|| c.categories.clone());
+                c.gathered_bikes = gathered(&self.heard.1.bikes);
             }
             if o.countdown < F::ZERO {
                 return false;
@@ -993,6 +1017,7 @@ impl Collection {
             // The post gathers the list where the step left the body.
             if let Some(c) = o.collision.as_mut() {
                 c.regather.get_or_insert_with(|| c.categories.clone());
+                c.gathered_bikes = gathered(&self.heard.1.bikes);
             }
         } else {
             self.disable(k);
@@ -1289,6 +1314,25 @@ fn ordered(a: f32, b: f32, low: bool) -> f32 {
 /// which the bike's strike files after its own entries ([`crate::prop_contact::strike`]). f27a1's
 /// image 2904: ball 2's list holds its probe's entry on the bike behind the bike's strike's mirror,
 /// and the bike's the entry's mirror behind its own.
+/// The ridden bikes as a gather finds them (S239): each one's transform, or `None` out of the world.
+fn gathered(bikes: &[flight_search::Bike]) -> Vec<Option<crate::math::Mat4>> {
+    bikes.iter().map(|b| b.in_world.then_some(b.transform)).collect()
+}
+
+/// The ridden bikes a probe standing at `node` tests (S239): those in the world now that its list
+/// holds within the probe's reach, measured where its last gather found them (`gathered`); the others
+/// out of the world for this search. A bike the gather did not see is not in the list.
+fn listed_bikes(rays: &Rays, node: &Node, mesh: &crate::track::Mesh, bikes: &[flight_search::Bike], gathered: &[Option<crate::math::Mat4>]) -> Vec<flight_search::Bike> {
+    bikes
+        .iter()
+        .enumerate()
+        .map(|(j, b)| {
+            let listed = gathered.get(j).copied().flatten().is_some_and(|at| flight_search::bike_listed(rays, node, mesh, &at));
+            flight_search::Bike { in_world: b.in_world && listed, ..*b }
+        })
+        .collect()
+}
+
 fn file_on_bikes(rec: &mut Record, k: usize, probed: Vec<(usize, Vec<crate::ray_probe::Contact>)>, mirrors: &mut Vec<(usize, usize, contact::Contact)>) {
     for (j, hits) in probed {
         for h in hits {

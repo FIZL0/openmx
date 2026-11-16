@@ -311,6 +311,18 @@ pub fn bikes_probed(rays: &Rays, node: &Frame, categories: &Categories, bikes: B
     out
 }
 
+/// **Whether a nearby list gathered round `rays` standing at `node` lets its search test a bike
+/// whose chassis stood at `t` at the gather** (S239): the bike's frame collidable is always gathered,
+/// with its distance from the probe's centre less its reach ([`broad_phase::collidable_distance`]: its
+/// box's centre, its box's half diagonal), and the search tests a candidate within the probe's
+/// reach ([`world_search::search_nearby`]).
+pub fn bike_listed(rays: &Rays, node: &Frame, mesh: &track::Mesh, t: &Mat4) -> bool {
+    let (centre, reach_radius) = reach(rays, &matrix(node));
+    let (c, _) = bike_box(mesh, t);
+    let (_, radius) = bike_sphere(mesh, t);
+    broad_phase::reach_distance(c, radius, four(centre)) <= reach_radius
+}
+
 /// A bike's box in the world: its mesh's root node's through the chassis' frame.
 pub fn bike_box(mesh: &track::Mesh, t: &Mat4) -> ([F; 4], [F; 4]) {
     match mesh.nodes.first() {
