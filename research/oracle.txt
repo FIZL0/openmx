@@ -12653,3 +12653,28 @@ bike_grid_place             boot 0x0027e530 (bike, at, facing, bike+0x3d0, 0) th
 #   car update 0x004e9eb0: call at 0x004ea0a8. On-hazard +0xc10 = any tire's (+0x1244..+0x1250) table word by
 #   its byte +0xf0; a2 = any tire's +0xa4; a1 = on && a2. Stretch 0x004e9f10..0x004ea0b0 ($s0 car, $f20 dt).
 #   MD164's trophy truck 0x01be4740: node +0x114, its parent word (+0x120) 0 in spawn and air images.
+# F31b5u — the wreck cue's audio in Rust (src handling::sound; tests mxvatv_bike_ride.rs
+# the_wreck_sounds_are_the_originals (12,000 generated cases on state 4's driver); replay_pure switch
+# "wreck sound" in LeafRider: rand = rand_in_ram, cue busy / made playing, sound busy / play = the port;
+# journal research/journal/2026-11-16-f31b5u-*). Driver = *(0x003dc5e0) + 0x100. Voice handle = gen<<6 |
+# slot<<1 | bank (2 banks x 24); status half +0x340 + bank*0x60 + slot*4, generation +0x1418 + bank*0x30 +
+# slot*2, flags byte / asked / asked-too / 0 / level +0x1478.. + bank*0x1e0 + slot*0x14, streamed word +0x1840 +
+# bank*0x180 + slot*0x10. Index table: count +0x400, used +0x1408 ->, level +0x1410 ->, entry (8 B) +0x1414 ->;
+# two banks +0x135ac; pans +0x1b44; queue count +0x1b4c, queue -> +0xa5c8 (own count +0, command n at
+# n*0x114). Streams *(+0x13050)+0x34 (12 B each, +4 -> -> header; count *(+0x13050)+8).
+atv_cue_busy                atv 0x00197ef0 = cue vt +0x98 (list +0x38: count, +0x40 array)
+atv_cue_made_playing        atv 0x001985d0 = cue vt +0x84 (cue, sound, a2: a2 != 0 -> cue vt +0xa4 first)
+atv_list_push               atv 0x00102f00 = (list, v; a2 file 0x00399b00, a3 line 0x3aa) grow 0x00103130 -> realloc 0x001b7470
+atv_list_clear              atv 0x00102fa0 = memset 0x003544c8 of count*4, count 0
+atv_list_get                atv 0x00102f80
+# The plain sound's vtable 0x003b42c0: +0x1c play 0x0014ea30, +0x20 busy 0x0014ede0, +0x28 stop 0x0014ed40
+atv_voice_busy              atv 0x00188550 = (driver, handle)
+atv_stream_start            atv 0x00185d40 = (driver, name, out f, owner word, pair, restart, vol, pan; stack +0 pitch, +8 index,
+#                                           +0x10 two, +0x18 byte). Reads its sp+0x144 (caller's frame - 0x11c) unwritten into
+#                                           a lone voice's start command +0x30. Name path: sprintf 0x0026cb20, strlen 0x003577d0,
+#                                           strcmp 0x00357158.
+atv_stream_header           atv 0x001886f0 = (driver, index) the header's +4 float (-106.0 for index < 0)
+atv_voice_index_pick        atv 0x00183070 = (driver, two)
+atv_voice_pick              atv 0x00183180 = (driver, asked, asked too, top, restart); pair pick 0x00183510
+atv_sample_start            atv 0x00187850 = (handed out whole with the play)
+atv_sound_queue_flush       atv 0x001840c0 = (driver, 0) the SIF send (handed out)

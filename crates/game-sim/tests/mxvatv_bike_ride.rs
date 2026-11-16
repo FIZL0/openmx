@@ -10529,6 +10529,7 @@ fn replay_in_pure_rust(name: &str) -> Option<(Vec<bool>, Vec<String>, BTreeMap<S
             "batch send",
             "heap",
             "wreck check",
+            "wreck sound",
         ],
     );
     let census = INTERPRETED.with(|m| std::mem::take(&mut *m.borrow_mut()));
@@ -19597,6 +19598,24 @@ impl rider::Rider for LeafRider<'_> {
         let vt = |ee: &Ee, holder: u32, slot: u32| ee.u32_at(ee.u32_at(holder) + slot);
         let r0 = self.ee.ran;
         let v = match c {
+            // F31b5u: rand the port's ([`rand_in_ram`]), the cue's and the sound's calls [`sound`]'s.
+            C::Rand if in_rust("wreck sound") => rand_in_ram(self.ee) as u32 as u64,
+            C::CueBusy { cue } if in_rust("wreck sound") => {
+                assert_eq!(vt(self.ee, cue + 4, 0x98), CUE_BUSY_FN, "the cue's vt +0x98");
+                u64::from(sound::cue_busy(&mut LeafSounds { m: self, dt }, cue))
+            }
+            C::SoundBusy { sound } if in_rust("wreck sound") => {
+                use sound::Sounds;
+                u64::from(LeafSounds { m: self, dt }.busy_of(sound))
+            }
+            C::SoundPlay { sound, how } if in_rust("wreck sound") => {
+                assert_eq!(vt(self.ee, sound + 4, 0x1c), SOUND_PLAY, "the sound's vt +0x1c");
+                u64::from(sound::play(&mut LeafSounds { m: self, dt }, sound, how))
+            }
+            C::CuePlaying { cue, sound } if in_rust("wreck sound") => {
+                assert_eq!(vt(self.ee, cue + 4, 0x84), CUE_PLAYING_FN, "the cue's vt +0x84");
+                u64::from(sound::cue_playing(&mut LeafSounds { m: self, dt }, cue, sound, 0))
+            }
             C::Rand => call_from_hook_dt(self.ee, RAND, &[], dt),
             C::RidingReset => {
                 rider::riding_reset(self, RIDER, dt);
@@ -19766,6 +19785,382 @@ impl rider::Rider for LeafRider<'_> {
         leaf_served(name);
         v as u32
     }
+}
+
+use game_sim::handling::sound;
+
+/// F31b5u: the wreck cue's audio on [`sound`]'s port. What the port hands out (the sound's stop, a
+/// play it does not port, the cue's own pick, the heap's resize, the queue's flush) runs in the
+/// interpreter, booked under the leaf's call that made it.
+struct LeafSounds<'a, 'b> {
+    m: &'a mut LeafRider<'b>,
+    dt: F,
+}
+
+impl node::Ram for LeafSounds<'_, '_> {
+    fn word(&mut self, at: u32) -> u32 {
+        self.m.ee.u32_at(at)
+    }
+    fn set(&mut self, at: u32, w: u32) {
+        self.m.ee.set_u32(at, w)
+    }
+}
+
+impl sound::Sounds for LeafSounds<'_, '_> {
+    fn driver(&mut self) -> u32 {
+        self.m.ee.u32_at(SOUND_DRIVER) + 0x100
+    }
+    fn busy_of(&mut self, s: u32) -> u32 {
+        let ee = &*self.m.ee;
+        assert_eq!(ee.u32_at(ee.u32_at(s + 4) + 0x20), SOUND_BUSY, "sound {s:#x}'s vt +0x20");
+        sound::busy(self, s)
+    }
+    fn stop(&mut self, s: u32) {
+        let f = self.m.ee.u32_at(self.m.ee.u32_at(s + 4) + 0x28);
+        call_from_hook_dt(self.m.ee, f, &[u64::from(s), 0], self.dt);
+    }
+    fn play_handed(&mut self, s: u32, how: u32) -> u32 {
+        call_from_hook_dt(self.m.ee, SOUND_PLAY, &[u64::from(s), u64::from(how)], self.dt) as u32
+    }
+    fn cue_chose(&mut self, cue: u32, s: u32, word: u32) {
+        let f = self.m.ee.u32_at(self.m.ee.u32_at(cue + 4) + 0xa4);
+        call_from_hook_dt(self.m.ee, f, &[u64::from(cue), u64::from(s), u64::from(word)], self.dt);
+    }
+    fn resize(&mut self, block: u32, bytes: u32) -> u32 {
+        call_from_hook_dt(self.m.ee, HEAP_RESIZE, &[u64::from(block), u64::from(bytes), SOUND_LIST_FILE, SOUND_LIST_LINE], self.dt) as u32
+    }
+    fn flush(&mut self, d: u32) {
+        call_from_hook_dt(self.m.ee, SOUND_FLUSH, &[u64::from(d), 0], self.dt);
+    }
+    fn stack_word(&mut self) -> u32 {
+        // The play's frame (0x70) and the stream start's (0x260) under where `call_from_hook_dt` would
+        // call from; the start reads its caller's frame less 0x11c.
+        let sp = self.m.ee.r(29) as u32;
+        self.m.ee.u32_at(((sp - 0x80) & !0xf) - SOUND_UNDER)
+    }
+}
+
+/// F31b5u: the sound driver's global, the plain sound's play, busy and the stream start's read
+/// under its frame (from the play's caller's `sp`), the cue's busy and "made playing", the driver's
+/// queue flush, and the file and line the playing list's push hands the heap.
+const SOUND_DRIVER: u32 = 0x003d_c5e0;
+const SOUND_PLAY: u32 = 0x0014_ea30;
+const SOUND_BUSY: u32 = 0x0014_ede0;
+const SOUND_UNDER: u32 = 0x70 + 0x11c;
+const CUE_BUSY_FN: u32 = 0x0019_7ef0;
+const CUE_PLAYING_FN: u32 = 0x0019_85d0;
+const SOUND_FLUSH: u32 = 0x0018_40c0;
+const SOUND_LIST_FILE: u64 = 0x0039_9b00;
+const SOUND_LIST_LINE: u64 = 0x3aa;
+
+/// F31b5u: the plain sound's vtable, its stop, and the cue's pick the oracle hands its fake cue.
+const SOUND_VT: u32 = 0x003b_42c0;
+const SOUND_STOP: u32 = 0x0014_ed40;
+/// F31b5u: the driver's voice pick and voice index pick.
+const VOICE_PICK: u32 = 0x0018_3180;
+const INDEX_PICK: u32 = 0x0018_3070;
+
+/// F31b5u: the oracle's side of [`sound`]: `ee`'s RAM, its hand-outs the original's calls (the stop,
+/// the cue's pick, the resize and the flush hooked to log in the oracle; a play the port does not
+/// port the original's whole).
+struct SoundsInRam<'a> {
+    ee: &'a mut Ee,
+}
+
+/// What [`SoundsInRam`] answers for a play it hands out: the oracle checks the port hands those out,
+/// not the original's whole play against itself.
+const HANDED: u32 = 0x5a5a_0001;
+
+impl node::Ram for SoundsInRam<'_> {
+    fn word(&mut self, at: u32) -> u32 {
+        self.ee.u32_at(at)
+    }
+    fn set(&mut self, at: u32, w: u32) {
+        self.ee.set_u32(at, w)
+    }
+}
+
+impl SoundsInRam<'_> {
+    fn original(&mut self, f: u32, ints: &[u64]) -> u32 {
+        self.ee.set(28, GP);
+        self.ee.call(f, ints, &[], BUDGET);
+        self.ee.v0() as u32
+    }
+}
+
+impl sound::Sounds for SoundsInRam<'_> {
+    fn driver(&mut self) -> u32 {
+        self.ee.u32_at(SOUND_DRIVER) + 0x100
+    }
+    fn busy_of(&mut self, s: u32) -> u32 {
+        assert_eq!(self.ee.u32_at(self.ee.u32_at(s + 4) + 0x20), SOUND_BUSY, "sound {s:#x}'s vt +0x20");
+        sound::busy(self, s)
+    }
+    fn stop(&mut self, s: u32) {
+        let f = self.ee.u32_at(self.ee.u32_at(s + 4) + 0x28);
+        self.original(f, &[u64::from(s), 0]);
+    }
+    fn play_handed(&mut self, _: u32, _: u32) -> u32 {
+        HANDED
+    }
+    fn cue_chose(&mut self, cue: u32, s: u32, word: u32) {
+        let f = self.ee.u32_at(self.ee.u32_at(cue + 4) + 0xa4);
+        self.original(f, &[u64::from(cue), u64::from(s), u64::from(word)]);
+    }
+    fn resize(&mut self, block: u32, bytes: u32) -> u32 {
+        self.original(HEAP_RESIZE, &[u64::from(block), u64::from(bytes), SOUND_LIST_FILE, SOUND_LIST_LINE])
+    }
+    fn flush(&mut self, d: u32) {
+        self.original(SOUND_FLUSH, &[u64::from(d), 0]);
+    }
+    fn stack_word(&mut self) -> u32 {
+        self.ee.u32_at(self.ee.stack - SOUND_UNDER)
+    }
+}
+
+/// **F31b5u — the wreck cue's audio is the original's**: 15 000 cases on state 4's sound driver,
+/// a sixth each of a cue's busy, a cue's sound made playing, a sound's busy, a sound's play, a voice
+/// picked (from the first or the top) and a voice index picked. The
+/// driver's voice index table (used or not, levels with ties and zeros, two banks or not), its 48
+/// voices (status clear or not, 8 among them, generations near 500, flags, levels about 2.5 and 180,
+/// streamed words 1 and 99), its panning and queue count (near full) drawn; the sound's handle
+/// (live, stale or none), levels about every range edge, stream or sample, pair or not, by index or
+/// by name, restart or not, and its `how`; the cue's stopped word, its playing list (full or not,
+/// growing or not) and the word it is handed. Run through SLUS-21104's and through [`sound`]'s
+/// [`sound::cue_busy`], [`sound::cue_playing`], [`sound::busy`], [`sound::play`], [`sound::voice_pick`]
+/// and [`sound::index_pick`]. The stop, the
+/// cue's pick, the resize and the flush are hooked to log on both sides (a play the port hands out
+/// whole is checked to be handed out, nothing else); the answers, the calls and
+/// every word of the driver, its tables, its queue, the cue and the sounds come out the same, and the
+/// original writes nothing else outside its stack.
+#[test]
+#[allow(clippy::float_arithmetic)]
+fn the_wreck_sounds_are_the_originals() {
+    let Some(mut ee) = image().map(hooked) else { return };
+    let d = ee.u32_at(SOUND_DRIVER) + 0x100;
+    assert_eq!(ee.u32_at(SOUND_VT + 0x1c), SOUND_PLAY, "the plain sound's vt +0x1c");
+    assert_eq!((ee.u32_at(SOUND_VT + 0x20), ee.u32_at(SOUND_VT + 0x28)), (SOUND_BUSY, SOUND_STOP));
+    let voices = ee.u32_at(d + 0x400);
+    assert!((3..=16).contains(&voices), "the driver's {voices} voice indexes");
+    let streams = ee.u32_at(ee.u32_at(d + 0x1_3050) + 8);
+    assert!(streams >= 1, "the driver's streams");
+    let area = WRECK_AREA;
+    let (cue, cue_vt, array, owner, named, sample, chose) = (area, area + 0x100, area + 0x200, area + 0x300, area + 0x380, area + 0x3c0, area + 0x400);
+    let sounds: Vec<u32> = (0..6).map(|i| area + 0x1000 + 0x100 * i).collect();
+    let grown = area + 0x2000;
+    let queue = ee.u32_at(d + 0xa5c8);
+    let regions = [
+        (d + 0x300, 0x1850),
+        (d + 0x1_35ac, 4),
+        (ee.u32_at(d + 0x1408), 4 * voices),
+        (ee.u32_at(d + 0x1410), 4 * voices),
+        (ee.u32_at(d + 0x1414), 8 * voices),
+        (queue, 65 * 0x114),
+        (area, 0x2100),
+    ];
+    let image_words = snap_regions(&ee, &regions);
+    let log: Rc<RefCell<Vec<String>>> = Rc::default();
+    let l = log.clone();
+    ee.hooks.insert(SOUND_STOP, Box::new(move |ee: &mut Ee| {
+        l.borrow_mut().push(format!("stop {:#x} {}", ee.r(4), ee.r(5)));
+        let s = ee.r(4) as u32;
+        ee.set_u32(s + sound::HANDLE, u32::MAX);
+        ee.set(2, 1);
+    }));
+    let l = log.clone();
+    ee.hooks.insert(chose, Box::new(move |ee: &mut Ee| l.borrow_mut().push(format!("chose {:#x} {:#x} {:#x}", ee.r(4), ee.r(5), ee.r(6)))));
+    let l = log.clone();
+    ee.hooks.insert(HEAP_RESIZE, Box::new(move |ee: &mut Ee| {
+        l.borrow_mut().push(format!("resize {:#x} {:#x} {:#x} {:#x}", ee.r(4), ee.r(5) as u32, ee.r(6), ee.r(7)));
+        ee.set(2, u64::from(grown));
+    }));
+    let l = log.clone();
+    ee.hooks.insert(SOUND_FLUSH, Box::new(move |ee: &mut Ee| {
+        l.borrow_mut().push(format!("flush {:#x} {}", ee.r(4), ee.r(5)));
+        let d = ee.r(4) as u32;
+        ee.set_u32(d + 0x1b4c, 0);
+    }));
+    let mut g = Gen(0x0031_b5f5);
+    let mut t = BTreeMap::new();
+    let level = |g: &mut Gen, around: &[f32]| -> f32 {
+        match g.bits() % 8 {
+            0 => 0.0,
+            1 => -0.0,
+            2 => f32::from_bits(0x0000_0400),
+            3 | 4 => around[(g.bits() % around.len() as u32) as usize],
+            _ => g.f(-10.0, 300.0),
+        }
+    };
+    let pick = |g: &mut Gen, xs: &[i32]| -> u32 {
+        if g.one_in(4) { g.bits() } else { xs[(g.bits() % xs.len() as u32) as usize] as u32 }
+    };
+    for k in 0..15_000 {
+        restore_regions(&mut ee, &regions, &image_words);
+        // The driver: its index table, voices, panning and queue.
+        ee.set_u32(d + 0x1_35ac, u32::from(g.one_in(3)));
+        let used = g.bits() % 3;
+        let ties = [1.0, 2.0, 2.0, 5.0];
+        for i in 0..voices {
+            let u = match used {
+                0 => 0,
+                1 => u32::from(g.one_in(2)),
+                _ => u32::from(!g.one_in(8)),
+            };
+            ee.set_u32(ee.u32_at(d + 0x1408) + 4 * i, u);
+            let x = level(&mut g, &ties);
+            ee.set_f32(ee.u32_at(d + 0x1410) + 4 * i, x);
+        }
+        let full = g.one_in(6);
+        let around = [2.5, 2.500_001, 3.0, 179.99998, 180.0, 180.00002, 200.0];
+        for bank in 0..2 {
+            for slot in 0..24 {
+                let at = d + bank * 0x60 + slot * 4 + 0x340;
+                let status = if full || g.one_in(2) { [1, 2, 5, 8, 8, g.bits() & 0xffff | 1][(g.bits() % 6) as usize] } else { 0 };
+                ee.set_u32(at, g.bits() << 16 | status);
+                let gn = if g.one_in(4) { 498 + g.bits() % 5 } else { g.bits() % 600 };
+                ee.write(d + bank * 0x30 + slot * 2 + 0x1418, 2, u128::from(gn));
+                let voice = d + bank * 0x1e0 + slot * 0x14;
+                ee.write(voice + 0x1478, 1, u128::from(g.bits() & 0xff));
+                let x = level(&mut g, &around);
+                ee.set_f32(voice + 0x1488, x);
+                ee.set_u32(d + bank * 0x180 + slot * 0x10 + 0x1840, pick(&mut g, &[0, 1, 1, 99, 2]));
+            }
+        }
+        ee.set_u32(d + 0x1b44, u32::from(!g.one_in(3)));
+        let queued = if g.one_in(6) { 61 + g.bits() % 3 } else { g.bits() % 60 };
+        ee.set_u32(d + 0x1b4c, queued);
+        ee.set_u32(queue, g.bits() % 100);
+        // A live handle: a voice's bank, slot and generation.
+        let live = |ee: &Ee, g: &mut Gen| -> u32 {
+            let (bank, slot) = (g.bits() % 2, g.bits() % 24);
+            let gn = u32::from(ee.u16_at(d + bank * 0x30 + slot * 2 + 0x1418));
+            (gn << 6 | slot << 1 | bank) << 16 | g.bits() & 0xffff
+        };
+        for &s in &sounds {
+            ee.set_u32(s + 4, SOUND_VT);
+            let h = match g.bits() % 4 {
+                0 => u32::MAX,
+                1 => g.bits(),
+                _ => live(&ee, &mut g),
+            };
+            ee.set_u32(s + sound::HANDLE, h);
+            ee.set_u32(s + 0x1c, g.bits());
+            ee.set_u32(s + 0x24, named);
+            ee.set_u32(s + 0x28, sample);
+            ee.set_u32(s + sound::OWNER, owner);
+            for at in [sound::LEVELS, sound::HELD_LEVELS] {
+                ee.set_u32(s + at, pick(&mut g, &[-2, -1, 0, 1, 50, 99, 100, 101]));
+                ee.set_u32(s + at + 4, pick(&mut g, &[-5, -1, 0, 1, 90, 179, 180, 181, 270, 359, 360, 361]));
+                ee.set_u32(s + at + 8, pick(&mut g, &[-2, -1, 0, 0xaaa, 0x1000, 0x3fff, 0x4000]));
+            }
+            ee.set_u32(s + sound::STARTED, g.bits() % 2);
+            ee.set_u32(s + sound::BYTE, g.bits());
+            ee.set_u32(s + sound::STREAM, u32::from(!g.one_in(8)));
+            ee.set_u32(s + sound::PAIR, u32::from(g.one_in(10)));
+            ee.set_u32(s + sound::RESTART, if g.one_in(5) { 1 + g.bits() % 3 } else { 0 });
+            ee.set_u32(s + sound::INDEX, if g.one_in(12) { u32::MAX } else { g.bits() % streams });
+        }
+        ee.set_u32(owner + sound::OWNER_WORD, g.bits());
+        ee.set_u32(named, if g.one_in(2) { 0x0061_6161 } else { 0 });
+        ee.set_u32(sample, u32::from(!g.one_in(4)));
+        ee.set_u32(sample + 0x40, pick(&mut g, &[-1, 0, 0x1_0000, 0x2_0000]));
+        // The cue: its vtable (the pick the logged stub), stopped word and playing list.
+        ee.set_u32(cue + 4, cue_vt);
+        ee.set_u32(cue_vt + 0xa4, chose);
+        ee.set_u32(cue + sound::CUE_STOPPED, u32::from(g.one_in(6)));
+        let n = g.bits() % 5;
+        let list = cue + sound::CUE_PLAYING;
+        ee.set_u32(list + sound::COUNT, n);
+        ee.set_u32(list + sound::ARRAY, array);
+        ee.set_u32(list + sound::STEP, g.bits() % 4);
+        ee.set_u32(list + sound::CAP, n + g.bits() % 3 - u32::from(n > 0 && g.one_in(4)));
+        ee.set_u32(list + sound::MAX, n + g.bits() % 6);
+        for i in 0..8 {
+            ee.set_u32(array + 4 * i, sounds[(g.bits() % 6) as usize]);
+        }
+        let under = g.bits();
+        ee.set_u32(ee.stack - SOUND_UNDER, under);
+        let s = sounds[(g.bits() % 6) as usize];
+        let how = g.bits() % 8;
+        let word = if g.one_in(5) { g.bits() } else { 0 };
+        let kind = k % 6;
+        let (asked, asked_too, top, restart) = (g.bits() % 8, g.bits() & 0xffff, g.one_in(2), g.bits() % 4);
+        let two = u32::from(g.one_in(2));
+        if kind == 3 && (ee.u32_at(s + sound::STREAM) == 0 || ee.u32_at(s + sound::PAIR) != 0 || (ee.u32_at(s + sound::INDEX) as i32) < 0) {
+            // A sample, a pair or a stream by name: the original's play, whole.
+            let before = snap_regions(&ee, &regions);
+            assert_eq!(sound::play(&mut SoundsInRam { ee: &mut ee }, s, how), HANDED, "case {k}: handed out");
+            assert_eq!(snap_regions(&ee, &regions), before, "case {k}: a handed play writes nothing first");
+            assert!(log.borrow().is_empty(), "case {k}: a handed play calls nothing first");
+            tally(&mut t, "play: handed");
+            continue;
+        }
+        let before = snap_regions(&ee, &regions);
+        log.borrow_mut().clear();
+        ee.set(28, GP);
+        match kind {
+            0 => ee.call(CUE_BUSY_FN, &[u64::from(cue)], &[], BUDGET),
+            1 => ee.call(CUE_PLAYING_FN, &[u64::from(cue), u64::from(s), u64::from(word)], &[], BUDGET),
+            2 => ee.call(SOUND_BUSY, &[u64::from(s)], &[], BUDGET),
+            4 => ee.call(VOICE_PICK, &[u64::from(d), u64::from(asked), u64::from(asked_too), u64::from(top), u64::from(restart)], &[], BUDGET),
+            5 => ee.call(INDEX_PICK, &[u64::from(d), u64::from(two)], &[], BUDGET),
+            _ => ee.call(SOUND_PLAY, &[u64::from(s), u64::from(how)], &[], BUDGET),
+        }
+        let outside = written_outside(&ee, &regions);
+        assert!(outside.is_empty(), "case {k}: the original wrote {outside:?}");
+        let want_v = ee.v0() as u32;
+        let (want, want_log) = (snap_regions(&ee, &regions), std::mem::take(&mut *log.borrow_mut()));
+        restore_regions(&mut ee, &regions, &before);
+        ee.set_u32(ee.stack - SOUND_UNDER, under);
+        let m = &mut SoundsInRam { ee: &mut ee };
+        let got_v = match kind {
+            0 => sound::cue_busy(m, cue),
+            1 => sound::cue_playing(m, cue, s, word),
+            2 => sound::busy(m, s),
+            4 => sound::voice_pick(m, d, asked, asked_too, top, restart) as u32,
+            5 => sound::index_pick(m, d, two) as u32,
+            _ => sound::play(m, s, how),
+        };
+        let (got, got_log) = (snap_regions(&ee, &regions), std::mem::take(&mut *log.borrow_mut()));
+        let path = match kind {
+            0 => ["cue: quiet", "cue: stopped", "cue: busy 0", "cue: busy 1", "cue: busy 2", "cue: busy 3"][match (n, ee.u32_at(cue + sound::CUE_STOPPED)) {
+                (0, _) => 0,
+                (_, 1) => 1,
+                _ => 2 + want_v.min(3) as usize,
+            }],
+            1 if want_log.iter().any(|c| c.starts_with("resize")) => "made playing: grown",
+            1 if ee.u32_at(list + sound::COUNT) == 0 => "made playing: full",
+            1 => "made playing",
+            2 => ["sound: busy 0", "sound: busy 1", "sound: busy 2", "sound: busy 3"][want_v.min(3) as usize],
+            4 if want_v == u32::MAX => "voice pick: none",
+            4 if want_v >> 6 == 0 => "voice pick: generation wrapped",
+            4 if top => "voice pick: from the top",
+            4 => "voice pick: from the first",
+            5 if want_v == u32::MAX => "index pick: none",
+            5 if ee.u32_at(d + 0x1_35ac) != 0 => "index pick: two banks",
+            5 => "index pick",
+            _ => match ee.u32_at(s + sound::HANDLE) as i32 {
+                sound::NO_INDEX => "play: no index",
+                sound::NO_VOICE => "play: no voice",
+                sound::BAD_VOLUME => "play: bad volume",
+                sound::BAD_PITCH => "play: bad pitch",
+                h if h >= 0 && want_log.iter().any(|c| c.starts_with("flush")) => "play: started, flushed",
+                h if h >= 0 => "play: started",
+                _ => "play: other",
+            },
+        };
+        tally(&mut t, path);
+        if kind == 3 && want_log.iter().any(|c| c.starts_with("stop")) {
+            tally(&mut t, "play: stopped first");
+        }
+        assert_eq!((got_v, &got_log), (want_v, &want_log), "case {k} ({path}): the answer and the calls");
+        let addrs: Vec<u32> = regions.iter().flat_map(|&(at, len)| (0..len).step_by(4).map(move |o| at + o)).collect();
+        let off: Vec<String> = (0..want.len()).filter(|&i| want[i] != got[i]).map(|i| format!("{:#x}: original {:#010x}, port {:#010x}", addrs[i], want[i], got[i])).collect();
+        assert!(off.is_empty(), "case {k} ({path}): {}\n  tables {:#x} {:#x} {:#x}, queue {queue:#x} at {queued}, log {want_log:?}", off.join("\n  "), ee.u32_at(d + 0x1408), ee.u32_at(d + 0x1410), ee.u32_at(d + 0x1414));
+    }
+    eprintln!("{t:?}");
+    assert!(!t.contains_key("play: other"), "{t:?}");
+    assert!(t.len() == 28 && t.values().all(|&n| n >= 20), "every path: {t:?}");
 }
 
 /// The clip start's controller (F62b): the leaf's RAM, a stop's saved buffers made through
