@@ -312,6 +312,9 @@ pub struct Driver {
     /// This frame's clip on the chassis, and the one it fades from (the clip before the last stop).
     pub played: Option<Played>,
     pub under: Option<Played>,
+    /// MD165: the rider's motion, ticked after the chassis' off what the quad's state pack hands the
+    /// rider ([`Ask`]).
+    pub motion: Motion,
 }
 
 /// The quad's clips as [`game_sim::quad::animate`] asks for them.
@@ -345,7 +348,7 @@ impl Driver {
             crossup_blend: F(0.5),
             fore_aft_blend: F(0.5),
         };
-        Driver { stunts, anim, current: NO_STUNT, clock: 0.0, rider: None, played: None, under: None }
+        Driver { stunts, anim, current: NO_STUNT, clock: 0.0, rider: None, played: None, under: None, motion: Motion::default() }
     }
 
     fn named(&self, id: i32, names: &[&str]) -> bool {
@@ -426,6 +429,18 @@ impl Driver {
             }
         }
         self.anim.restart = 0;
+        let kept = (0..0x29).contains(&self.current) || self.named(self.current, &FLIPS[..3]);
+        let ask = Ask {
+            airborne,
+            wrecked: q.control_off,
+            stunt: if kept { self.current as u8 } else { NO_STATE },
+            reverse: q.push_gate.0,
+            gas: q.gas_limited.0,
+            pose: self.anim.crossup_blend.0,
+            fore_aft: self.anim.fore_aft_blend.0,
+            speed: q.speed_len.0,
+        };
+        self.motion.tick(&ask, dt);
     }
 }
 
@@ -462,6 +477,338 @@ pub fn lay<'a>(played: Played, skeleton: &Skeleton, under: &Pose, clip: impl Fn(
 /// The chassis' locals off a pose of its skeleton: the model's own where the pose wrote nothing.
 pub fn locals_of(model: &Model, pose: &Pose) -> Vec<M4> {
     Skeleton::of(model).locals(pose)
+}
+
+// --- MD165: the rider's row and lean, the original's own choice -----------------------------------
+
+/// The rider's motion clips by the original's ids, from [`MOTION_FIRST`]: the three turn rows
+/// (stopped, still, riding; forward, middle, back each), the reverse pair (left, right), the air row,
+/// the wreck's flail. [`motion_clip`] names them, and the get-ready pause.
+pub const MOTION_FIRST: u8 = 0x32;
+pub const MOTION: [&str; 15] = [
+    "ATV_turn_stop_Fwd",
+    "ATV_turn_stop_Mid",
+    "ATV_turn_stop_Bck",
+    "ATV_turn_still_Fwd",
+    "ATV_turn_still_Mid",
+    "ATV_turn_still_Bck",
+    "ATV_turn_riding_Fwd",
+    "ATV_turn_riding_Mid",
+    "ATV_turn_riding_Bck",
+    "ATV_reverse_l",
+    "ATV_reverse_r",
+    "ATV_air_Fwd",
+    "ATV_air_Mid",
+    "ATV_air_Bck",
+    "ATV_wreck_air_flail",
+];
+/// The get-ready pause's clip.
+pub const PAUSE_CLIP: &str = "ATV_get_ready_idle_01";
+
+/// The motion's states: the still grid (and none, which plays it too), the reverse pair, the air,
+/// the wreck's flail and the pause. A state below [`RIDING_POSE`](game_sim::quad::RIDING_POSE) is the
+/// stunt of that id.
+pub const STILL: u8 = 0x38;
+pub const REVERSE: [u8; 2] = [0x3b, 0x3c];
+pub const AIR_STATE: u8 = 0x3d;
+pub const WRECK_STATE: u8 = 0x40;
+pub const PAUSE_STATE: u8 = 0x46;
+pub const NO_STATE: u8 = 0xff;
+
+/// The speeds the grid's rows change at (feet a second: 1, 5, 10 and 15 mph): the pause's top, the
+/// stopped row's end, the still row's end and the riding row's start.
+pub const PAUSE_SPEED: f32 = 1.46666;
+pub const BANDS: [f32; 3] = [7.3333, 14.6666, 21.9999];
+/// How long the rider sits still before the pause, drawn between these (seconds).
+pub const PAUSE_WAIT: [f32; 2] = [15.0, 45.0];
+/// The fade's rates a second on a change of state: to the pause, a wreck pose, a reverse or the
+/// grid, the air, a stunt.
+pub const FADE_RATES: [f32; 5] = [0.25, 0.25, 2.0, 3.0, 2.0];
+/// The reverse pair's lap per foot a second of speed, a second.
+pub const LAP_RATE: f32 = 0.03;
+/// The two eased axes' times: the fore and aft (which pair of a row) and the turn's lean (where in
+/// the clips).
+pub const MIX_TAU: f32 = 0.125;
+pub const PHASE_TAU: f32 = 0.15;
+
+/// The motion clip of an id ([`MOTION`], [`PAUSE_CLIP`]); `None` for another.
+pub fn motion_clip(id: u8) -> Option<&'static str> {
+    match id {
+        PAUSE_STATE => Some(PAUSE_CLIP),
+        _ => MOTION.get(usize::from(id.checked_sub(MOTION_FIRST)?)).copied(),
+    }
+}
+
+/// What the rider's motion reads off the quad each frame: the quad's state pack (MD165), the words
+/// the original's rider is asked by.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Ask {
+    pub airborne: bool,
+    pub wrecked: bool,
+    /// The stunt asked for: an id below 41 or the flip's or a 360's, else [`NO_STATE`].
+    pub stunt: u8,
+    /// The reverse held, and the gas.
+    pub reverse: f32,
+    pub gas: f32,
+    /// The quad's two pose blends, each 0 to 1 (a half at rest): the crossup's, which is where in the
+    /// clips, and the stick fore and aft's, which pair; and its speed.
+    pub pose: f32,
+    pub fore_aft: f32,
+    pub speed: f32,
+}
+
+/// One frame's motion clips by id ([`motion_clip`]): two at the phase mixed (`mix` 1 the first, 0
+/// the second), two pairs so mixed and crossed (`cross` 1 the first pair, 0 the second), one clip
+/// running by itself from its change, or nothing new (the pose as it was).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Seat {
+    None,
+    Two { a: u8, b: u8, phase: f32, mix: f32 },
+    Four { a: u8, b: u8, c: u8, d: u8, phase: f32, mix: f32, cross: f32 },
+    Free { clip: u8, time: f32 },
+}
+
+/// **The rider's motion** (MD165): the original's state chosen off the quad ([`Ask`]) and its clips
+/// picked, the ATV rider's twin of MX Unleashed's grid (`game_sim::vehicle_anim`) and the same step
+/// `game_sim::handling::rider::idle` runs on MX vs. ATV's RAM (F62a).
+///
+/// The state: wrecked, the flail; a stunt asked, that stunt; in the air, [`AIR_STATE`]; reversing,
+/// the reverse pair's left or right by the lean; else [`STILL`], or after [`PAUSE_WAIT`] sat still
+/// (under [`PAUSE_SPEED`], both blends at a half, no gas) the pause, once through. The clips: the
+/// fore and aft picks the pair (forward and middle under a half, middle and back over); the grid's
+/// row by the speed's band ([`BANDS`], two rows crossed between the stopped and still and the still
+/// and riding); the reverse pair at a lap run by the speed; the air row. A change of state fades in
+/// from the pose it left ([`Motion::under`]) at [`FADE_RATES`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct Motion {
+    /// The state this frame and the one before.
+    pub state: u8,
+    pub was: u8,
+    /// The two eased axes: the fore and aft (`mix`) and the lean (`phase`).
+    pub mix: f32,
+    pub phase: f32,
+    /// The fade from [`Motion::under`] (1 at a change, run down by `rate`).
+    pub fade: f32,
+    pub rate: f32,
+    /// The reverse pair's lap, 0 to 1.
+    pub lap: f32,
+    /// The pause: its clock, asked, and its clip's length (the pause ends with its clip).
+    pub pause_clock: f32,
+    pub pause_asked: bool,
+    pub pause_length: f32,
+    /// This frame's clips, the ones the change left (frozen where they were), and how long the
+    /// state has run.
+    pub seat: Seat,
+    pub under: Seat,
+    pub time: f32,
+    seed: u32,
+}
+
+impl Default for Motion {
+    fn default() -> Motion {
+        Motion {
+            state: NO_STATE,
+            was: NO_STATE,
+            mix: 0.5,
+            phase: 0.5,
+            fade: 0.0,
+            rate: 0.0,
+            lap: 0.0,
+            pause_clock: 0.0,
+            pause_asked: false,
+            pause_length: 0.0,
+            seat: Seat::None,
+            under: Seat::None,
+            time: 0.0,
+            seed: 0x1234_5678,
+        }
+    }
+}
+
+impl Motion {
+    /// A number in `0..1` off the motion's own generator (not the ride's).
+    fn unit(&mut self) -> f32 {
+        self.seed = self.seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+        (self.seed >> 8) as f32 / (1u32 << 24) as f32
+    }
+
+    /// The state asked for this frame.
+    fn choose(&mut self, ask: &Ask, dt: f32) -> u8 {
+        if ask.wrecked {
+            return WRECK_STATE;
+        }
+        if ask.stunt != NO_STATE {
+            return ask.stunt;
+        }
+        if ask.airborne {
+            return AIR_STATE;
+        }
+        if ask.reverse != 0.0 {
+            return if ask.pose < 0.5 { REVERSE[0] } else { REVERSE[1] };
+        }
+        let mut want = self.state;
+        if ask.speed.abs() < PAUSE_SPEED && ask.pose == 0.5 && ask.fore_aft == 0.5 && ask.gas == 0.0 {
+            if self.pause_clock <= 0.0 {
+                let u = self.unit();
+                self.pause_clock = PAUSE_WAIT[0] + u * (PAUSE_WAIT[1] - PAUSE_WAIT[0]);
+            } else {
+                self.pause_clock -= dt;
+                if self.pause_clock < 0.0 {
+                    want = PAUSE_STATE;
+                    self.pause_asked = true;
+                }
+            }
+        }
+        let ended = self.state == PAUSE_STATE && self.time >= self.pause_length;
+        if !self.pause_asked {
+            want = STILL;
+        } else if ended {
+            self.pause_asked = false;
+        }
+        if !(ask.speed <= BANDS[0]) {
+            self.pause_clock = 0.0;
+            self.pause_asked = false;
+        }
+        want
+    }
+
+    /// One frame: the state chosen, the fade and the axes run, the clips picked into
+    /// [`Motion::seat`].
+    pub fn tick(&mut self, ask: &Ask, dt: f32) {
+        let want = self.choose(ask, dt);
+        self.time += dt;
+        if want != self.state {
+            self.rate = if ask.stunt != NO_STATE {
+                FADE_RATES[4]
+            } else {
+                match want {
+                    0x3b | 0x3c => {
+                        self.lap = 0.0;
+                        FADE_RATES[2]
+                    }
+                    AIR_STATE => FADE_RATES[3],
+                    0x40..=0x45 => FADE_RATES[1],
+                    PAUSE_STATE => FADE_RATES[0],
+                    _ => FADE_RATES[2],
+                }
+            };
+            if self.seat != Seat::None {
+                self.under = self.seat;
+            }
+            self.fade = 1.0;
+            self.time = 0.0;
+        }
+        self.was = self.state;
+        self.state = want;
+        self.fade -= self.rate * dt;
+        self.mix += dt.min(MIX_TAU) / MIX_TAU * (ask.fore_aft - self.mix);
+        self.phase += dt.min(PHASE_TAU) / PHASE_TAU * (ask.pose - self.phase);
+        let (mix, phase) = (self.mix, self.phase);
+        let pair = |ids: [u8; 2]| if mix < 0.5 { ([ids[0] + 1, ids[0]], 2.0 * mix) } else { ([ids[1] + 1, ids[1]], 2.0 * (mix - 0.5)) };
+        let band = |x: f32, lo: f32, hi: f32| if lo == hi { 1.0 } else { (1.0 - (x - lo) / (hi - lo)).clamp(0.0, 1.0) };
+        let two = |ids: [u8; 2]| {
+            let ([a, b], mix) = pair(ids);
+            Seat::Two { a, b, phase, mix }
+        };
+        let four = |low: u8, high: u8, cross: f32| {
+            let ([a, b], mix) = pair([low, low + 1]);
+            let ([c, d], _) = pair([high, high + 1]);
+            Seat::Four { a, b, c, d, phase, mix, cross }
+        };
+        let (stop, still, riding) = (MOTION_FIRST, MOTION_FIRST + 3, MOTION_FIRST + 6);
+        self.seat = match self.state {
+            s if s < game_sim::quad::RIDING_POSE as u8 => Seat::None,
+            0x3b | 0x3c => {
+                if ask.speed > 0.0 {
+                    self.lap = (self.lap + dt * ask.speed * LAP_RATE) % 1.0;
+                }
+                Seat::Two { a: REVERSE[1], b: REVERSE[0], phase: self.lap, mix: phase }
+            }
+            AIR_STATE => two([AIR_STATE, AIR_STATE + 1]),
+            NO_STATE | STILL => {
+                let x = ask.speed;
+                if x < BANDS[0] {
+                    four(stop, still, band(x, 0.0, BANDS[0]))
+                } else if x <= BANDS[1] {
+                    two([still, still + 1])
+                } else if x <= BANDS[2] {
+                    four(still, riding, band(x, BANDS[1], BANDS[2]))
+                } else {
+                    two([riding, riding + 1])
+                }
+            }
+            0x40..=0x46 => Seat::Free { clip: self.state, time: self.time },
+            _ => self.seat,
+        };
+        self.fade = self.fade.clamp(0.0, 1.0);
+    }
+
+    /// The row the rider is mostly on, by its middle clip's name: the first pair's of four while it
+    /// leads; `None` with no row (a stunt, the flail, the pause).
+    pub fn row(&self) -> Option<&'static str> {
+        let middle = |id: u8| match id {
+            AIR_STATE.. => motion_clip(AIR_STATE + 1),
+            _ => motion_clip(MOTION_FIRST + (id - MOTION_FIRST) / 3 * 3 + 1),
+        };
+        match self.seat {
+            Seat::Two { a, .. } if REVERSE.contains(&a) => motion_clip(a),
+            Seat::Two { a, .. } => middle(a),
+            Seat::Four { a, c, cross, .. } => middle(if cross >= 0.5 { a } else { c }),
+            _ => None,
+        }
+    }
+}
+
+/// Lay a [`Seat`] into the rider's `set` over `under` (what it fades back to by `fade`): false where
+/// a clip is not bound ([`bind`]) or for [`Seat::None`], the pose left as it was.
+pub fn seat_motion(set: &mut Set, seat: Seat, fade: f32, under: &Pose) -> bool {
+    let id = |set: &Set, c: u8| motion_clip(c).and_then(|n| set.id(n)).map(|i| i.0 as usize);
+    match seat {
+        Seat::None => false,
+        Seat::Two { a, b, phase, mix } => {
+            let (Some(a), Some(b)) = (id(set, a), id(set, b)) else { return false };
+            let (x, y) = (&set.clips[a], &set.clips[b]);
+            x.clip.pose_mixed_faded(&y.clip, phase.clamp(0.0, 1.0) * x.clip.duration(), mix, &x.joints, fade, under, &mut set.pose);
+            true
+        }
+        Seat::Four { a, b, c, d, phase, mix, cross } => {
+            let (Some(a), Some(b), Some(c), Some(d)) = (id(set, a), id(set, b), id(set, c), id(set, d)) else { return false };
+            let [w, x, y, z] = [a, b, c, d].map(|k| &set.clips[k]);
+            w.clip.pose_four_faded(&x.clip, &y.clip, &z.clip, phase.clamp(0.0, 1.0) * w.clip.duration(), mix, cross, &w.joints, fade, under, &mut set.pose);
+            true
+        }
+        Seat::Free { clip, time } => {
+            let Some(k) = id(set, clip) else { return false };
+            let b = &set.clips[k];
+            b.clip.pose_faded(time.min(b.clip.duration()), &b.joints, fade, under, &mut set.pose);
+            true
+        }
+    }
+}
+
+/// The rider's node matrices on the quad off its [`Motion`]: the clips the change left laid first
+/// (what the new state fades in from), then this frame's, with the stunt's clip laid over them as
+/// [`rider_palette_stunt`]; held to the chassis' `anchors`. `None` if neither seat is bound.
+pub fn rider_palette_motion(body: &mut Body, anchors: &Anchors, motion: &Motion, stunt: Option<(&str, f32)>) -> Option<Vec<M4>> {
+    let (pose, hold, feet) = (body.rig.set.pose.clone(), body.hold, body.feet);
+    body.hold = 1.0;
+    body.feet = Default::default();
+    let set = &mut body.rig.set;
+    let rest = set.pose.clone();
+    let under_seated = seat_motion(set, motion.under, 0.0, &rest);
+    let under = set.pose.clone();
+    let seated = seat_motion(set, motion.seat, motion.fade, &under) || under_seated;
+    if let (true, Some((name, time))) = (seated, stunt)
+        && let Some(id) = set.id(name)
+    {
+        let b = &set.clips[id.0 as usize];
+        b.clip.pose(time.min(b.clip.duration()), &b.joints, &mut set.pose);
+    }
+    let palette = seated.then(|| body.palette(Some(anchors)).0);
+    body.rig.set.pose = pose;
+    body.hold = hold;
+    body.feet = feet;
+    palette
 }
 
 #[cfg(test)]
@@ -607,5 +954,111 @@ mod tests {
         assert_eq!((d.current, d.rider), (NO_STUNT, None));
         d.tick_on(&[Call::StartStunt(42)], &quad(true), false, false, Default::default(), DT);
         assert_eq!((d.current, d.rider.map(|r| r.0)), (NO_STUNT, Some(42)));
+    }
+
+    fn ask(speed: f32) -> Ask {
+        Ask { airborne: false, wrecked: false, stunt: NO_STATE, reverse: 0.0, gas: 1.0, pose: 0.5, fore_aft: 0.5, speed }
+    }
+
+    #[test]
+    fn the_grid_picks_its_rows_by_the_speeds_bands() {
+        let seat = |speed: f32| {
+            let mut m = Motion::default();
+            m.tick(&ask(speed), DT);
+            assert_eq!(m.state, STILL);
+            m.seat
+        };
+        // At rest, a half each way: the middle and back of the stopped and still rows, all the middle.
+        assert_eq!(seat(0.0), Seat::Four { a: 0x34, b: 0x33, c: 0x37, d: 0x36, phase: 0.5, mix: 0.0, cross: 1.0 });
+        let Seat::Four { cross, .. } = seat(BANDS[0] / 4.0) else { panic!() };
+        assert!((cross - 0.75).abs() < 1e-6, "cross {cross}");
+        assert_eq!(seat(10.0), Seat::Two { a: 0x37, b: 0x36, phase: 0.5, mix: 0.0 });
+        let Seat::Four { a, c, cross, .. } = seat(BANDS[1] + (BANDS[2] - BANDS[1]) * 0.75) else { panic!() };
+        assert_eq!((a, c), (0x37, 0x3a));
+        assert!((cross - 0.25).abs() < 1e-4, "cross {cross}");
+        assert_eq!(seat(30.0), Seat::Two { a: 0x3a, b: 0x39, phase: 0.5, mix: 0.0 });
+        let mut m = Motion::default();
+        m.tick(&ask(30.0), DT);
+        assert_eq!(m.row(), Some("ATV_turn_riding_Mid"));
+    }
+
+    #[test]
+    fn the_fore_and_aft_picks_the_pair_and_eases_in() {
+        let mut m = Motion::default();
+        let forward = Ask { fore_aft: 0.0, pose: 1.0, ..ask(30.0) };
+        m.tick(&forward, DT);
+        // One frame of a 0.125 s ease: a quarter (and a bit) of the way, under a half: forward and middle.
+        let k = DT / MIX_TAU;
+        assert!((m.mix - (0.5 - 0.5 * k)).abs() < 1e-6, "mix {}", m.mix);
+        let Seat::Two { a, b, mix, phase } = m.seat else { panic!("{:?}", m.seat) };
+        assert_eq!((a, b), (0x39, 0x38));
+        assert!((mix - 2.0 * m.mix).abs() < 1e-6 && (phase - (0.5 + 0.5 * DT / PHASE_TAU)).abs() < 1e-6);
+        for _ in 0..30 {
+            m.tick(&forward, DT);
+        }
+        assert!(m.mix.abs() < 1e-3 && (m.phase - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn air_reverse_wreck_and_stunts_take_their_states() {
+        let mut m = Motion::default();
+        m.tick(&Ask { airborne: true, ..ask(30.0) }, DT);
+        assert_eq!((m.state, m.seat), (AIR_STATE, Seat::Two { a: 0x3f, b: 0x3e, phase: 0.5, mix: 0.0 }));
+        assert_eq!((m.fade, m.rate), (1.0 - 3.0 * DT, 3.0));
+        assert_eq!(m.row(), Some("ATV_air_Mid"));
+        // Reversing: right by a lean at or past a half, its lap run by the speed.
+        m.tick(&Ask { reverse: 1.0, ..ask(10.0) }, DT);
+        assert_eq!(m.state, REVERSE[1]);
+        let Seat::Two { a, b, phase, .. } = m.seat else { panic!() };
+        assert_eq!((a, b), (REVERSE[1], REVERSE[0]));
+        assert!((phase - DT * 10.0 * LAP_RATE).abs() < 1e-6);
+        m.tick(&Ask { reverse: 1.0, pose: 0.2, ..ask(10.0) }, DT);
+        assert_eq!(m.state, REVERSE[0]);
+        // A stunt asked holds the last clips under it; a wreck plays the flail.
+        let held = m.seat;
+        m.tick(&Ask { stunt: 41, ..ask(10.0) }, DT);
+        assert_eq!((m.state, m.seat, m.under, m.rate), (41, Seat::None, held, 2.0));
+        m.tick(&Ask { wrecked: true, ..ask(10.0) }, DT);
+        assert_eq!((m.state, m.seat, m.rate), (WRECK_STATE, Seat::Free { clip: WRECK_STATE, time: 0.0 }, 0.25));
+        assert_eq!(motion_clip(WRECK_STATE), Some("ATV_wreck_air_flail"));
+    }
+
+    #[test]
+    fn sat_still_the_rider_pauses_once() {
+        let mut m = Motion { pause_length: 2.0, ..Motion::default() };
+        let still = Ask { gas: 0.0, ..ask(0.5) };
+        m.tick(&still, DT);
+        let wait = m.pause_clock;
+        assert!((PAUSE_WAIT[0]..=PAUSE_WAIT[1]).contains(&wait), "wait {wait}");
+        let mut frames = 0;
+        while m.state != PAUSE_STATE {
+            m.tick(&still, DT);
+            frames += 1;
+            assert!(frames < 2000);
+        }
+        assert!(((frames as f32) * DT - wait).abs() < 2.0 * DT);
+        assert_eq!(m.seat, Seat::Free { clip: PAUSE_STATE, time: 0.0 });
+        for _ in 0..70 {
+            m.tick(&still, DT);
+        }
+        assert_eq!(m.state, STILL, "back on the grid after its clip");
+        // Any gas, and the clock is drawn again from the top.
+        m.tick(&Ask { gas: 1.0, speed: 10.0, ..still }, DT);
+        assert_eq!((m.pause_clock, m.pause_asked), (0.0, false));
+    }
+
+    #[test]
+    fn the_driver_hands_the_quads_blends_to_the_rider() {
+        let mut d = Driver::new(table());
+        let mut q = quad(true);
+        q.lean = F(-1.0);
+        q.speed_len = F(30.0);
+        for _ in 0..30 {
+            d.tick_on(&[], &q, false, false, Default::default(), DT);
+        }
+        // The stick hard left: the crossup's blend at nought, the lean eased to it.
+        assert_eq!(d.motion.state, STILL);
+        assert!(d.motion.phase < 0.01, "phase {}", d.motion.phase);
+        assert_eq!(d.motion.row(), Some("ATV_turn_riding_Mid"));
     }
 }
