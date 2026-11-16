@@ -152,7 +152,9 @@ pub struct Sim {
     pub race: Option<Box<race::Race>>,
     /// The AI riders (S323, [`ai::Lane`]): each one's brain thinks before its bike's frame and
     /// hands it the controls ([`Sim::step_all`]). `None` — every ride with no AI rider — steps and
-    /// hashes as before. Not on the wire yet: a resync keeps this machine's lane.
+    /// hashes as before. Not on the wire yet: a resync keeps this machine's lane. In a race the
+    /// brains draw on [`race::Race::rng`], the one generator, after the race manager's tick (S333).
+    /// The lane's own is for a ride with no race.
     pub ai: Option<Box<ai::Lane>>,
     /// A free ride's seeker world (S316): the map's jumps, targets and start zones the AI riders
     /// seek from, with a set per rider, built once at the map's load ([`Sim::load_seek`]). `None` —

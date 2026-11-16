@@ -167,6 +167,10 @@
 //!     place notices each tick told.
 //! 51. **The card join** (S301): [`RaceRules::join`] against the score manager's on 20,000 generated
 //!     cards, tracks and managers: the card, the free records, the paths and the listeners.
+//! 52. **One generator for a race** (S333): a Sim's race and its AI riders draw on the race's
+//!     generator, the race manager's draws first and the brains' after them in the same tick; the
+//!     lane's own never moves, and the spawns at the load leave the race on the generator they left.
+//!     The order is S13d's over tick's: the tie draw is the frame's first `rand()` (item 32).
 
 use game_sim::chassis::{Chassis, Deriv};
 use game_sim::race::{
@@ -7340,7 +7344,8 @@ fn the_results_hold_s13ds_live_sx01_finish() {
         // The path work before the clocks, unported here, moves the progress the ranking reads.
         c.progress = s13d_card(&now.cards[c.record_word as usize]).progress;
     }
-    // The draw is one rand() somewhere in the tick: the riders' and the world's own draws come first.
+    // The draw is the tick's first rand(): the race manager ticks before the riders, whose brains draw
+    // after it on the same generator (S333).
     let want: Vec<LapCard> = now.order(&addresses).into_iter().map(|k| s13d_card(&now.cards[k])).collect();
     let key = |c: &LapCard| (c.record_word, c.flags & card_flags::OUT, c.place, c.laps, c.race_time.0.to_bits(), c.lap_time.0.to_bits(), c.best_lap.0.to_bits());
     let mut rng = Rng::from_state(was.rand);
@@ -7359,6 +7364,7 @@ fn the_results_hold_s13ds_live_sx01_finish() {
         rules.close(now.dt, &mut cs, &[], &mut Rng::from_state(was.rand));
         panic!("frame {}: no draw gives the captured results:\n got {:?}\nwant {:?}", now.frame, cs.iter().map(key).collect::<Vec<_>>(), want.iter().map(key).collect::<Vec<_>>());
     };
+    assert_eq!(draws, 0, "frame {}: the race manager's tie draw is the frame's first rand()", now.frame);
     let mask = race_flags::OVER | race_flags::OVER_TOLD;
     assert_eq!(flags & mask, w(&now.mgr, 0x5c) & mask, "frame {}: the manager's flags", now.frame);
     // The tick's last state is on from the draw.
@@ -10417,4 +10423,74 @@ fn laps_join_their_cards_with_the_live_races_flags() {
         assert_eq!(c.lap_length, measure.distance(c.spot, line_spot, true), "player {}", e.player);
         assert_eq!((c.kept_spot, e.card.aim), (c.spot, c.spot));
     }
+}
+
+// --- one generator for a race (S333) -----------------------------------------------------------------
+
+/// S333: a Sim with a race and AI riders keeps one generator, the race's. Two players, the second an
+/// AI rider spawned with no character file, on a flat floor; the race long started (gate open, the
+/// countdown over, no laps), so its tick draws only its camera flashes. Every tick:
+/// - the lane's own generator does not move;
+/// - the race's moves from `s` to where the brains' draws take it from the flashes' end: the same
+///   tick stepped with no race and the lane's generator put at the flashes' end lands on the race's
+///   state, so the race's draws come first and the brains' follow on the one sequence.
+///
+/// And at the load: `Sim::spawn_ai` leaves the race on the generator its spawns left.
+#[test]
+fn a_races_ai_riders_draw_on_the_races_generator_after_the_race() {
+    use game_sim::ai::{AiRider, Entry, FIRST_AI_IDENTITY, Roster};
+    use game_sim::camera_flash::CameraFlashes;
+    use game_sim::world::Flat;
+
+    let mut sim = game_sim::Sim::new(7);
+    let (phy, rider) = ((*sim.phy).clone(), sim.rider.clone());
+    sim.add_player(phy, rider);
+    let mut race = Race::new(Gate::new(), &[], F(3.0), Rng::from_state(0x1234_5678));
+    race.gate.flags &= !flags::CLOSED;
+    race.countdown.running = false;
+    race.flashes = Some(Box::new(CameraFlashes::new(1200, F(0.01)).unwrap()));
+    sim.race = Some(Box::new(race));
+    let roster = Roster { humans: 1, ghost: false, ai: vec![AiRider { identity: FIRST_AI_IDENTITY, skill: 5 }], all_ai: None };
+    let entry = Entry { race_phase: None, path_net: false, live: true, card: None };
+    let spawned = Rng::from_state(0x0bad_cafe);
+    sim.spawn_ai(&roster, None, 90, 0, &entry, spawned);
+    let lane_rng = sim.ai.as_ref().unwrap().rng;
+    assert_ne!(lane_rng, spawned, "the spawns drew");
+    assert_eq!(sim.race.as_ref().unwrap().rng, lane_rng, "the race takes the generator the spawns left");
+
+    let dt = F(1.0 / 30.0);
+    let controls = vec![game_sim::ride::Controls::default(); 2];
+    let (mut flash_draws, mut brain_draws, mut both) = (0u32, 0u32, 0);
+    for t in 0..600 {
+        let before = sim.clone();
+        let s = before.race.as_ref().unwrap().rng;
+        sim.step_all(dt, &controls, &mut Flat::default());
+        let after = sim.race.as_ref().unwrap().rng;
+        assert_eq!(sim.ai.as_ref().unwrap().rng, lane_rng, "tick {t}: the lane's own generator moved");
+        // The race's tick alone: where the flashes leave the generator.
+        let mut alone = before.race.as_deref().unwrap().clone();
+        alone.tick(dt, &[]);
+        let flashed = alone.rng;
+        // The same tick with no race, the brains drawing on the lane's generator from there.
+        let mut brains = before.clone();
+        brains.race = None;
+        brains.ai.as_mut().unwrap().rng = flashed;
+        brains.step_all(dt, &controls, &mut Flat::default());
+        assert_eq!(brains.ai.as_ref().unwrap().rng, after, "tick {t}: the brains' draws do not follow the race's");
+        assert_eq!(brains.rider_of(1).ride.chassis.cofg_world, sim.rider_of(1).ride.chassis.cofg_world, "tick {t}: the AI rider rode otherwise");
+        let count = |from: Rng, to: Rng| {
+            let mut r = from;
+            (0..100_000u32).find(|_| {
+                let hit = r == to;
+                r.rand();
+                hit
+            })
+        };
+        let (f, b) = (count(s, flashed).unwrap(), count(flashed, after).unwrap());
+        flash_draws += f;
+        brain_draws += b;
+        both += usize::from(f > 0 && b > 0);
+    }
+    println!("{flash_draws} flash draws, {brain_draws} brain draws, {both} ticks with both");
+    assert!(flash_draws > 0 && brain_draws > 0 && both > 0, "{flash_draws} flash draws, {brain_draws} brain draws, {both} ticks with both");
 }

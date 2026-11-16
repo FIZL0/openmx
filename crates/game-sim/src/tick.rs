@@ -788,7 +788,8 @@ impl Engine {
 /// The generator: the Sim's subsystems keep their own, each drawing what its part of the scene walk
 /// draws in the original — the race's start included (S13b): its manager's tick runs ahead of the
 /// riders in the walk, its gate's watch draws for every rider it catches and its drop draws once
-/// ([`crate::race::Race::tick`]) — so the fixed update's is not handed on.
+/// ([`crate::race::Race::tick`]) — so the fixed update's is not handed on. In a race, the AI riders'
+/// brains draw on the race's generator after it (S333).
 /// The Sim's AI lane (S323).
 impl crate::Sim {
     /// Player `i`'s AI tick, when [`crate::Sim::ai`] has a pilot in its seat: its brain thinks
@@ -813,6 +814,11 @@ impl crate::Sim {
         let ch = &mut rider.ride.chassis;
         let (mut yaw_rate, mut velocity) = (F(ch.world_ang_vel.y()), ch.vel);
         let crate::ai::Lane { seek, tables, rng, pilots } = lane;
+        // In a race the brains draw on the race's generator, after its manager's tick drew (S333).
+        let rng = match self.race.as_deref_mut() {
+            Some(race) => &mut race.rng,
+            None => rng,
+        };
         let mount = crate::ai::Mount { rider: seen, cofg, yaw_rate: &mut yaw_rate, velocity: &mut velocity };
         let tricks = Some((&rider.set, &mut rider.tricks));
         let ridden = crate::ai::ride_controls(&pilots[k].1.levers, pilots[k].1.racer.habits.clutch);
@@ -834,6 +840,10 @@ impl crate::Sim {
     ///
     /// The bikes come first: every AI player must already be in the Sim ([`crate::Sim::add_player`]).
     /// A roster with no AI rider leaves the Sim with no lane.
+    ///
+    /// A Sim with a race keeps one generator, as the original's one `rand()` (S333): the race's is
+    /// the one `rng` left after the spawns' draws, and the brains then draw on it
+    /// ([`crate::Sim::think`]), so the lane's own is not drawn while the race lasts.
     pub fn spawn_ai(
         &mut self, roster: &crate::ai::Roster, file: Option<&crate::phy::Ini>, difficulty: u8, event_kind: i32,
         entry: &crate::ai::Entry, rng: Rng,
@@ -849,6 +859,9 @@ impl crate::Sim {
         let seek = self.seek.take().map_or_else(crate::ai::seek::World::default, |w| *w);
         let tables = std::sync::Arc::new(crate::ragdoll::Tables::build());
         let lane = crate::ai::Lane::spawn(seek, tables, rng, &riders, file, difficulty, event_kind, entry);
+        if let Some(race) = self.race.as_deref_mut() {
+            race.rng = lane.rng;
+        }
         self.ai = Some(Box::new(lane));
     }
 }
