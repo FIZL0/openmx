@@ -31,21 +31,21 @@ use game_sim::world::{Ground, Place};
 use ps2_oracle::{Ee, Kit};
 use std::sync::Arc;
 
-const C33_STATE: &str = "capture/c33/free09-ai4.ee.bin";
+pub(crate) const C33_STATE: &str = "capture/c33/free09-ai4.ee.bin";
 const C33_CSV: &str = "capture/c33/free09-ai4-agreed.csv";
 /// The image's frame counter: its RAM holds tick 2, and the first row is tick 3.
 const C33_FROM: u64 = 2;
 
 /// The four riders in the actor list's order (C33's `free09-ai4.riders.json`): rider, body, brain (0
 /// for the human's, which has no brain).
-const C33_RIDERS: [(u32, u32, u32); 4] = [
+pub(crate) const C33_RIDERS: [(u32, u32, u32); 4] = [
     (0x005f_f210, 0x0089_9860, 0x008a_8800),
     (0x008c_7b10, 0x008c_f9b0, 0x0088_8360),
     (0x0088_8770, 0x0088_cfc0, 0),
     (0x0149_c910, 0x0090_14b0, 0x0094_53b0),
 ];
 /// The capture's column prefix for each rider of [`C33_RIDERS`].
-const C33_NAMES: [&str; 4] = ["ai0", "ai1", "human", "ai2"];
+pub(crate) const C33_NAMES: [&str; 4] = ["ai0", "ai1", "human", "ai2"];
 
 /// The last tick each of [`C33_LANES`] agrees with the original's, bit for bit, on every agreed row up
 /// to it but the torn ones: the regression mark.

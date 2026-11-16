@@ -5359,6 +5359,14 @@ emit                 boot 0x00150540 places the frame's particles along prev..po
 #                                    ApplyEmitterVelocity
 emit_count           boot 0x00151d80 carry += rate * dt, emits floor(carry), at least
 #                                    MinParticlesPerFrame
+emit_other           boot 0x001512b0 (2748 bytes) the other emit path (emitter +0x23c set): like emit,
+#                                    two rand draws a particle (returns 0x001514a0 and 0x001514d8)
+# S328: the shared generator's draws in C33 (free09, four racers, ticks 3-62, whole frame in Ee) that
+#   are not the AI's, by return address: rider_animation 0x00249208 (the look timer's re-arm, one per
+#   body: the three AI bodies at tick 7, the human's at 8); sound_pick 0x001b5858 and engine_note_accel
+#   0x00310618 (two each for ai0 and ai2 at tick 15); emit 0x0015070c and 0x00150744 (two a particle
+#   from tick 17, emitters off each rider's +0x1490); emit_other from tick 20. From tick 17 the capture
+#   also steps 2-3 a tick more than the sim pass: not in the frame's sim half (the render is not run).
 particle_life_size   boot 0x00152030 draws a particle's life, size and growth between the file's two
 #                                    P185: (emitter a0, size out a1, life out a2, moving a3; f12 speed,
 #                                    f13/f14 the size and life draws). moving && ISR (+0x3b4) > 0: size =
