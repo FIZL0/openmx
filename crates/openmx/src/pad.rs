@@ -923,6 +923,8 @@ impl Rumble {
 pub struct WreckRumble {
     /// The plane's crash word was up last frame.
     plane_was: bool,
+    /// An MX vs. ATV plane's count of wreck entries last frame (MD112), `None` with no such plane.
+    entries_was: Option<u32>,
 }
 
 impl WreckRumble {
@@ -931,6 +933,18 @@ impl WreckRumble {
         let crashed = plane_wrecked && !self.plane_was;
         self.plane_was = plane_wrecked;
         ((wreck || crashed) && vibration).then_some(Rumble::WRECK)
+    }
+
+    /// [`WreckRumble::frame`] with an MX vs. ATV plane's count of wreck entries (MD112,
+    /// `game_sim::flight::Posts::wreck`): SLUS-21104's plane asks on every entry, so a crashed plane
+    /// thrown back from the map's edge asks again though its crash word never went down. `None` (no
+    /// such plane) is [`WreckRumble::frame`]'s crash word; the first frame a count is seen asks nothing.
+    pub fn frame_posted(&mut self, wreck: bool, plane_wrecked: bool, entries: Option<u32>, vibration: bool) -> Option<Rumble> {
+        let was = std::mem::replace(&mut self.entries_was, entries);
+        let Some(n) = entries else { return self.frame(wreck, plane_wrecked, vibration) };
+        self.plane_was = plane_wrecked;
+        let entered = was.is_some_and(|w| w != n);
+        ((wreck || entered) && vibration).then_some(Rumble::WRECK)
     }
 }
 

@@ -138,3 +138,19 @@ fn a_plane_crash_rumbles_on_its_first_tick_only() {
     let mut asks = WreckRumble::default();
     assert_eq!(asks.frame(true, true, true), Some(Rumble::WRECK));
 }
+
+/// **An MX vs. ATV plane rumbles on every wreck entry** (MD112): its count of entries going up asks,
+/// a crashed plane thrown back from the edge (a second entry, the crash word still up) asks again,
+/// the first frame a count is seen asks nothing, and Vibration off holds it.
+#[test]
+fn an_mxvatv_plane_rumbles_on_every_wreck_entry() {
+    let mut asks = WreckRumble::default();
+    let frames = [(false, 3), (true, 4), (true, 4), (true, 5), (false, 5), (true, 6)];
+    let got: Vec<bool> = frames.iter().map(|&(c, n)| asks.frame_posted(false, c, Some(n), true).is_some()).collect();
+    assert_eq!(got, [false, true, false, true, false, true]);
+    let mut asks = WreckRumble::default();
+    assert!(frames.iter().all(|&(c, n)| asks.frame_posted(false, c, Some(n), false).is_none()));
+    // no such plane: the crash word's rule
+    let mut asks = WreckRumble::default();
+    assert_eq!(asks.frame_posted(false, true, None, true), Some(Rumble::WRECK));
+}
