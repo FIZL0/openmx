@@ -292,13 +292,10 @@ fn untamed_wreck_capture() {
 
 // --- The port's frame beside SLUS-21701's ---------------------------------------------------------
 
-/// SLUS-21701's ground query (`world, point in/out, normal out, 0, record byte out`; SLUS-21104's
-/// 0x004833c0).
+/// SLUS-21701's ground query (`world, point in/out, normal out, 0, record byte out`).
 pub(crate) const U_GROUND_QUERY: u32 = 0x004b_0910;
-/// SLUS-21701's two collidable classes' vtables: the ray probe and the mesh (SLUS-21104's 0x003b6c20
-/// and 0x003b6d00).
-/// SLUS-21701's smooth noise (`f12` the place, `f0` the noise; SLUS-21104's 0x00134580) and the
-/// engine's call of it for the sound's pitch.
+/// SLUS-21701's smooth noise (`f12` the place, `f0` the noise) and the engine's call of it for the
+/// sound's pitch.
 pub(crate) const U_SMOOTH_NOISE: u32 = 0x0013_24b0;
 const U_NOISE_FROM: u32 = 0x004d_6cac;
 /// The collision record's resolution (vt +0x88 of 0x003db860; `a0` the record).
