@@ -294,7 +294,7 @@ fn s323_the_lane_thinks_on_the_sims_own_world() {
             let (seen, cofg, yaw_rate, velocity) = &mut bodies[k];
             let mut watched = Watched { world: &mut world, asked: Vec::new() };
             let mount = Mount { rider: ai::Rider { velocity: *velocity, ..*seen }, cofg: *cofg, yaw_rate, velocity };
-            let thought = pilots[k].think(mount, &mut watched, &mut seek_world, &tables, &others[k], None, &mut rng, dt);
+            let thought = pilots[k].think(mount, &mut watched, &mut seek_world, &tables, &others[k], None, None, None, &mut rng, dt);
             let pilot = &pilots[k];
 
             // The ground: every point asked, and the port's answer to it.

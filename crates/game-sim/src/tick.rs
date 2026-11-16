@@ -795,7 +795,8 @@ impl crate::Sim {
     /// against the Sim's own `world` ([`crate::ai::Pilot::think`]: its ground probes ask it, its
     /// avoidance walks and sweeps its props and plants) with the other players as its race list, its
     /// trick plan asks the rider's own trick state (which the frame's request then takes through
-    /// [`crate::ai::gesture_gate`]), the assist pulls the body's yaw rate and velocity, and the levers
+    /// [`crate::ai::gesture_gate`]), a brain in mode 2 or 4 drives by the Sim's race and the lane's
+    /// AI path net (S332, [`crate::ai::Racing::of`]), the assist pulls the body's yaw rate and velocity, and the levers
     /// it hands off are the controls for the bike's next frame. `None` for a player no brain drives.
     ///
     /// The bike's frame rides the levers as they stood before this think: the hand-off lands after the
@@ -803,8 +804,13 @@ impl crate::Sim {
     /// C33's four free09 racers agrees 14-18 ticks per AI body with the lag and 0-17 without it.
     pub fn think(&mut self, i: usize, dt: F, world: &mut dyn crate::world::World) -> Option<crate::ride::Controls> {
         let k = self.ai.as_deref()?.pilots.iter().position(|(p, _)| *p == i)?;
-        let others: Vec<crate::ai::Other> =
-            (0..1 + self.others.len()).filter(|&j| j != i).map(|j| crate::ai::other_of(self.rider_of(j))).collect();
+        // In a race with laps, each rider's progress is its lap card's (S332).
+        let laps = self.race.as_deref().and_then(|r| r.laps.as_deref());
+        let progress = |j: usize| laps.and_then(|l| l.card(j)).map_or(F(0.0), |c| c.progress);
+        let others: Vec<crate::ai::Other> = (0..1 + self.others.len())
+            .filter(|&j| j != i)
+            .map(|j| crate::ai::Other { progress: progress(j), ..crate::ai::other_of(self.rider_of(j)) })
+            .collect();
         let bikes: Vec<crate::ai::Ridden> = (0..1 + self.others.len()).filter_map(|j| crate::ai::Ridden::of(self.rider_of(j))).collect();
         let lane = self.ai.as_deref_mut()?;
         let rider = if i == 0 { &mut self.rider } else { &mut self.others[i - 1].rider };
@@ -812,11 +818,12 @@ impl crate::Sim {
         let (seen, cofg) = crate::ai::mount_of(rider);
         let ch = &mut rider.ride.chassis;
         let (mut yaw_rate, mut velocity) = (F(ch.world_ang_vel.y()), ch.vel);
-        let crate::ai::Lane { seek, tables, rng, pilots } = lane;
+        let crate::ai::Lane { seek, tables, rng, pilots, net } = lane;
         let mount = crate::ai::Mount { rider: seen, cofg, yaw_rate: &mut yaw_rate, velocity: &mut velocity };
         let tricks = Some((&rider.set, &mut rider.tricks));
         let ridden = crate::ai::ride_controls(&pilots[k].1.levers, pilots[k].1.racer.habits.clutch);
-        pilots[k].1.think_among(mount, world, &bikes, seek, tables, &others, tricks, rng, dt);
+        let race = self.race.as_deref();
+        pilots[k].1.think_among(mount, world, &bikes, seek, tables, &others, tricks, race, net.as_mut(), rng, dt);
         let ch = &mut rider.ride.chassis;
         let w = ch.world_ang_vel;
         ch.world_ang_vel = ps2_float::Vf::new(w.x(), yaw_rate.to_f32(), w.z(), w.w());
@@ -850,6 +857,24 @@ impl crate::Sim {
         let tables = std::sync::Arc::new(crate::ragdoll::Tables::build());
         let lane = crate::ai::Lane::spawn(seek, tables, rng, &riders, file, difficulty, event_kind, entry);
         self.ai = Some(Box::new(lane));
+    }
+
+    /// **The race's AI path net** (S332): the track's AI race file (`<track>AI.tdf`) as the race
+    /// activity's load leaves it ([`crate::ai::path::load_paths`]: stood on `terrain`, the flagged
+    /// nodes lifted onto `props`), searching as far ahead and behind as a race's track does
+    /// ([`crate::race::RACE_REACH`], as sx01's live race holds its AI net), put in the AI lane for its
+    /// brains to drive by. False — and no net — with no lane ([`crate::Sim::spawn_ai`] first) or a
+    /// file whose paths do not walk.
+    pub fn load_ai_net(
+        &mut self, file: &crate::race::TrackFile, terrain: Option<&mut dyn crate::world::World>,
+        props: Option<crate::back_search::Scene<'_>>,
+    ) -> bool {
+        let Some(lane) = self.ai.as_deref_mut() else { return false };
+        lane.net = crate::ai::path::load_paths(file, terrain, props).map(|mut t| {
+            (t.ahead, t.behind) = crate::race::RACE_REACH;
+            t
+        });
+        lane.net.is_some()
     }
 }
 

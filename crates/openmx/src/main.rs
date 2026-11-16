@@ -7952,6 +7952,20 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         let roster = race_start::spawn_ai(&mut seats[0].sim, start.riders, file.as_ref(), race_start::AI_SEED);
         let skills: Vec<String> = roster.ai.iter().map(|r| format!("{}", r.skill)).collect();
         println!("race: {} AI riders, skills {}", roster.ai.len(), skills.join(" "));
+        // S332: and the AI path net they drive by, off the track's AI race file, stood on the ground
+        // as the race's own paths are (its prop-raised nodes left on the terrain, as the laps' are).
+        let name = race_start::ai_file_name(&stem);
+        let net = second.as_ref().and_then(|m| disc.res(m).ok()).and_then(|res| res.read(&name).ok());
+        let net = net.and_then(|b| game_sim::race::TrackFile::parse(&b).ok());
+        let terrain: &mut dyn game_sim::world::World = &mut sim;
+        match net {
+            Some(f) if seats[0].sim.load_ai_net(&f, Some(terrain), None) => {
+                let paths = seats[0].sim.ai.as_deref().and_then(|l| l.net.as_ref()).map_or(0, |n| n.paths.len());
+                println!("race: AI path net {name}, {paths} paths");
+            }
+            Some(_) => println!("race: AI path net {name} does not load — the AI riders stand"),
+            None => println!("race: no AI path net — {name} not found or does not read; the AI riders stand"),
+        }
     }
     if let Some(laps) = race_start.as_ref().and_then(|s| s.laps.as_ref()) {
         let computers = laps.cards.iter().filter(|e| e.player != 0).count();

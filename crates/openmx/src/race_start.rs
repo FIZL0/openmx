@@ -191,6 +191,11 @@ pub fn race_file_name(stem: &str) -> String {
     format!("tracks\\{stem}\\{stem}.tdf")
 }
 
+/// S332: the AI's race file beside it, whose paths the AI riders drive by: `tracks\<stem>\<stem>AI.tdf`.
+pub fn ai_file_name(stem: &str) -> String {
+    format!("tracks\\{stem}\\{stem}AI.tdf")
+}
+
 /// P313: a race's laps off the track's race file, as the track object and the supercross loader leave
 /// it — the file read, its paths snapped to `terrain` (S295), the paths walked and their gate spots
 /// found (S293), and the finish line stood in the finish-gate prop facing along the path at its new
