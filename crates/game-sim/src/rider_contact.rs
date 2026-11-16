@@ -560,8 +560,23 @@ pub fn scenery_heard(
     world: &mut dyn World,
     dt: F,
 ) -> Option<(Vec<Contact>, Vec<crate::contact::Mover>, Vec<crate::material_hit::Struck>)> {
+    scenery_heard_among(col, at, nearby, world, crate::flight_search::Knocks::default(), dt)
+}
+
+/// [`scenery_heard`] with the knockable props lent for the frame in the bike's world (F8, `knocks`),
+/// as its list is gathered with them ([`crate::ride::Ride::gather_nearby`]): the body rays leave them
+/// out ([`crate::ride::nearby_scene_among`]), as [`crate::prop_contact`] meets them.
+#[allow(clippy::type_complexity)]
+pub fn scenery_heard_among(
+    col: &BikeCol,
+    at: &Mat4,
+    nearby: &mut Option<Box<crate::broad_phase::Search>>,
+    world: &mut dyn World,
+    knocks: crate::flight_search::Knocks<'_>,
+    dt: F,
+) -> Option<(Vec<Contact>, Vec<crate::contact::Mover>, Vec<crate::material_hit::Struck>)> {
     let at = node(at);
-    crate::ride::nearby_scene(nearby, world, &col.rays, &at, |scene| {
+    crate::ride::nearby_scene_among(nearby, world, &col.rays, &at, knocks, false, |scene| {
         scene.listen_material();
         let (contacts, movers) = scenery_search(at, scene, dt);
         (contacts, movers, scene.sounded().to_vec())

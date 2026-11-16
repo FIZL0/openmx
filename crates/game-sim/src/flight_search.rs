@@ -696,6 +696,9 @@ struct Kept {
     bikes: usize,
     /// The first other plane's collidable (N22a1), after the bikes'.
     planes: usize,
+    /// The first knockable prop's collidable (F8, [`Knocks`]), and the awake ones', in order.
+    knocked: usize,
+    awake: Vec<usize>,
     /// Each prop's box ([`prop_box`]); the trunks' boxes together ([`boxes_box`]), with plants; and
     /// the box the tree is laid over.
     boxes: Vec<([F; 4], [F; 4])>,
@@ -753,7 +756,7 @@ pub fn kept(
     radius: F,
     toys: bool,
 ) -> (Broad, Vec<Collidable>) {
-    kept_world(props, trees, bikes, &[], field, centre, radius, toys, |broad, built, _| (broad.clone(), built.to_vec()))
+    kept_world(props, trees, bikes, &[], Knocks::default(), field, centre, radius, toys, |broad, built, _| (broad.clone(), built.to_vec()))
 }
 
 fn generation() -> u64 {
@@ -834,6 +837,35 @@ fn stamp_world(
     at
 }
 
+/// What the knockable props give a world's build (F8, [`Knocks`]), after [`stamp_world`]'s: their
+/// count, and each one's sleep; a sleeping one's reach, centre and box, which file it in the tree.
+/// An awake one's place is put each search ([`Kept::place`]).
+fn stamp_knocks(stamp: &mut Vec<u32>, knocks: Knocks<'_>) {
+    stamp.push(knocks.knocks.len() as u32);
+    for (n, &asleep) in knocks.knocks.iter().zip(knocks.asleep) {
+        stamp.push(u32::from(asleep));
+        if asleep {
+            let (c, h) = bike_box(n.mesh, &n.to_world);
+            stamp.push(n.radius.0.to_bits());
+            stamp.extend(n.centre.0.iter().map(|f| f.to_bits()).chain(bits(&c)).chain(bits(&h)));
+        }
+    }
+}
+
+/// A knockable prop's collidable in the riding bike's world (F8): a prop's, of `radius`.
+fn knock_collidable(radius: F) -> Collidable {
+    Collidable {
+        class: Class::Object,
+        flags: flags::ENABLED,
+        nearby: true,
+        radius,
+        category: crate::prop_world::COLLIDABLE,
+        collides_with: crate::prop_world::COLLIDES_WITH,
+        categories: any_category(),
+        ..Collidable::default()
+    }
+}
+
 /// The box [`wooded_of`]'s tree is laid over, from the props' boxes together (`bare`) and, with
 /// plants, the trunks': the field if it has edges, else the props'; with plants, the field only where
 /// it is not the props' box, else the props' and the trunks' together, if that has edges.
@@ -859,6 +891,7 @@ impl Kept {
         trees: Option<&Trees>,
         bikes: Option<&Bikes<'_>>,
         planes: &[Plane<'_>],
+        knocks: Knocks<'_>,
         field: Option<([F; 2], [F; 2])>,
         centre: Vf,
         radius: F,
@@ -866,7 +899,21 @@ impl Kept {
         stamp: &[u32],
         props_at: std::ops::Range<usize>,
     ) -> Kept {
-        let (mut broad, objects, filing) = wooded_unfiled(props, trees, bikes, planes, field, centre, radius, toys);
+        let (mut broad, mut objects, mut filing) = wooded_unfiled(props, trees, bikes, planes, field, centre, radius, toys);
+        // The knockable props after everything else (F8): the sleeping ones filed after the plants.
+        let knocked = objects.len();
+        let mut awake = Vec::new();
+        for (n, &asleep) in knocks.knocks.iter().zip(knocks.asleep) {
+            let o = objects.len();
+            objects.push(knock_collidable(n.radius));
+            broad.places.push(Placement { centre: four(n.centre), ..Placement::default() });
+            if asleep {
+                let (c, h) = bike_box(n.mesh, &n.to_world);
+                filing.items.push((o, c, h));
+            } else {
+                awake.push(o);
+            }
+        }
         let Structure::Tree(tree) = &mut broad.structures[0] else { unreachable!("the table's first structure is its tree") };
         let mut log = broad_build::Log::default();
         let mut filed = Vec::with_capacity(filing.items.len());
@@ -885,6 +932,8 @@ impl Kept {
             moving: (moving + 2).min(MOVING_BLOCK as usize) as i32,
             bikes: FIRST + props.len(),
             planes: FIRST + props.len() + bikes.map_or(0, |b| b.bikes.len()),
+            knocked,
+            awake,
             boxes: props.iter().map(prop_box).collect(),
             trunks: trees.map(|t| boxes_box(t.props.props.iter().map(prop_box))),
             lo: filing.lo,
@@ -949,7 +998,7 @@ impl Kept {
 
     /// The two probes at the ray probe's reach, and the bikes on their transforms and, those in the
     /// world, in the moving list after the probes: what [`world_unfiled`] gives them.
-    fn place(&mut self, bikes: Option<&Bikes<'_>>, planes: &[Plane<'_>], centre: Vf, radius: F) {
+    fn place(&mut self, bikes: Option<&Bikes<'_>>, planes: &[Plane<'_>], knocks: Knocks<'_>, centre: Vf, radius: F) {
         self.objects[RAY].radius = radius;
         for p in [RAY, SWEEP] {
             self.broad.places[p].centre = four(centre);
@@ -960,6 +1009,16 @@ impl Kept {
             *slot = None;
         }
         let mut last = self.moving;
+        // The awake knockable props where their nodes stand them now (F8), after the probes.
+        for &o in &self.awake {
+            let n = &knocks.knocks[o - self.knocked];
+            self.objects[o].radius = n.radius;
+            self.broad.places[o].centre = four(n.centre);
+            if (last as usize) < block.len() {
+                block[last as usize] = Some(o);
+                last += 1;
+            }
+        }
         for (j, p) in planes.iter().enumerate() {
             let o = self.planes + j;
             let (_, centre, radius) = Prop::posed(p.mesh, &p.at);
@@ -1017,6 +1076,7 @@ fn kept_world<R>(
     trees: Option<&Trees>,
     bikes: Option<&Bikes<'_>>,
     planes: &[Plane<'_>],
+    knocks: Knocks<'_>,
     field: Option<([F; 2], [F; 2])>,
     centre: Vf,
     radius: F,
@@ -1027,6 +1087,7 @@ fn kept_world<R>(
     KEPT.with(|kept| {
         let (kept, stamp) = &mut *kept.borrow_mut();
         let at = stamp_world(stamp, props, trees, count, planes.len(), field, toys);
+        stamp_knocks(stamp, knocks);
         let k = match kept.iter().position(|w| w.stamp == *stamp) {
             Some(k) => k,
             None => {
@@ -1049,7 +1110,7 @@ fn kept_world<R>(
                         k
                     }
                     None => {
-                        kept.insert(0, Kept::build(props, trees, bikes, planes, field, centre, radius, toys, stamp, at));
+                        kept.insert(0, Kept::build(props, trees, bikes, planes, knocks, field, centre, radius, toys, stamp, at));
                         kept.truncate(WORLDS_KEPT);
                         0
                     }
@@ -1061,7 +1122,7 @@ fn kept_world<R>(
             kept.insert(0, w);
         }
         let w = &mut kept[0];
-        w.place(bikes, planes, centre, radius);
+        w.place(bikes, planes, knocks, centre, radius);
         w.rewind();
         f(&mut w.broad, &w.objects, w.generation)
     })
@@ -1138,6 +1199,8 @@ pub struct Scene<'a> {
     knocks_at: usize,
     knocked_from: usize,
     knock_facets: std::collections::HashMap<usize, Vec<Facet>>,
+    /// The knocks the ray probe has struck (F8, [`Scene::knocks_struck`]), each once, in strike order.
+    knocks_struck: Vec<usize>,
     /// What the ray probe's material listener heard it strike ([`Scene::listen_material`], F27a).
     sounded: Vec<crate::material_hit::Struck>,
     /// The downed wreck bikes' hulls in the plane's search (F35, [`Scene::wrecking`]), as the knocks.
@@ -1167,6 +1230,19 @@ pub struct Knock<'a> {
     pub velocity: Vf,
     /// Its collision record's room for contacts.
     pub capacity: usize,
+}
+
+/// **The knockable props in the riding bike's world** (F8): each of `knocks` a collidable after the
+/// plants' trunks, knock `k` at the world's end less `knocks.len()` plus `k`, a prop's collidable
+/// (category [`crate::prop_world::COLLIDABLE`], `+0x116` `0x04`: listed wherever the query's cells
+/// reach it, its distance not asked). One `asleep` stands in the track's static tree, filed after
+/// the plants from its mesh's root box where its node stands it (F7's order); an awake one is in the
+/// moving list after the two probes, in `knocks`' order, as the original files a woken prop's mesh in
+/// the moving structure (S240). Each is measured from its posed centre, less its reach.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Knocks<'a> {
+    pub knocks: &'a [Knock<'a>],
+    pub asleep: &'a [bool],
 }
 
 /// A prop's ray probe's listeners (S200), in the order the prop's init puts them on it: the prop's
@@ -1280,7 +1356,7 @@ fn refresh_of(
 ) {
     let props = props.map_or(&[][..], |p| &p.props[..]);
     let (centre, radius) = reach(rays, &matrix(node));
-    kept_world(props, trees, bikes, planes, field, centre, radius, toys, |broad, built, generation| {
+    kept_world(props, trees, bikes, planes, Knocks::default(), field, centre, radius, toys, |broad, built, generation| {
         let mut objects = lend(generation, built);
         refill(&mut objects, broad, search);
         give_back(generation, objects);
@@ -1307,9 +1383,42 @@ pub fn refresh_ridden(
     search: &mut broad_phase::Search,
     ignore: &[u32],
 ) {
-    let props = props.map_or(&[][..], |p| &p.props[..]);
+    refresh_knocked(props, trees, Knocks::default(), field, rays, node, search, ignore);
+}
+
+/// [`refresh_ridden`] with the knockable props in the world (F8, [`Knocks`]): a regather lists them
+/// at their places in the query's walk, the sleeping ones among the scene's and the plants' in the
+/// static tree, the awake ones in the moving list, and a kept list measures them again.
+#[allow(clippy::too_many_arguments)]
+pub fn refresh_knocked(
+    props: Option<&Props>,
+    trees: Option<&Trees>,
+    knocks: Knocks<'_>,
+    field: Option<([F; 2], [F; 2])>,
+    rays: &Rays,
+    node: &Frame,
+    search: &mut broad_phase::Search,
+    ignore: &[u32],
+) {
     let (centre, radius) = reach(rays, &matrix(node));
-    kept_world(props, trees, None, &[], field, centre, radius, true, |broad, built, generation| {
+    gather_knocked(props, trees, knocks, field, centre, radius, search, ignore);
+}
+
+/// [`refresh_knocked`] with the body rays' reach given, `centre` and `radius`, as the probe's
+/// collidable holds it (`+0x40`, `+0x60`).
+#[allow(clippy::too_many_arguments)]
+pub fn gather_knocked(
+    props: Option<&Props>,
+    trees: Option<&Trees>,
+    knocks: Knocks<'_>,
+    field: Option<([F; 2], [F; 2])>,
+    centre: Vf,
+    radius: F,
+    search: &mut broad_phase::Search,
+    ignore: &[u32],
+) {
+    let props = props.map_or(&[][..], |p| &p.props[..]);
+    kept_world(props, trees, None, &[], knocks, field, centre, radius, true, |broad, built, generation| {
         let mut objects = lend(generation, built);
         let own = std::mem::replace(&mut objects[RAY].categories, Categories { mode: 1, list: ignore.to_vec() });
         refill(&mut objects, broad, search);
@@ -1391,7 +1500,7 @@ impl<'a> Scene<'a> {
         node: &Frame,
         search: &mut broad_phase::Search,
     ) -> Scene<'a> {
-        Scene::of(props, trees, bikes, &[], field, rays, node, search, false, None)
+        Scene::of(props, trees, bikes, &[], Knocks::default(), field, rays, node, search, false, None)
     }
 
     /// [`Scene::wooded`] in the plane's own world (S141, [`world_flown`]): the path cars are toys,
@@ -1407,7 +1516,45 @@ impl<'a> Scene<'a> {
         node: &Frame,
         search: &mut broad_phase::Search,
     ) -> Scene<'a> {
-        Scene::of(props, trees, bikes, &[], field, rays, node, search, true, None)
+        Scene::of(props, trees, bikes, &[], Knocks::default(), field, rays, node, search, true, None)
+    }
+
+    /// **The riding bike's scene with the knockable props in its world** (F8, [`Knocks`]): [`Scene::flown`]
+    /// on the list [`refresh_knocked`] gathers. With `meet`, the ray probe meets the props it lists
+    /// where they are listed, interleaved with the scene's, as the original's wheel probe searches its
+    /// bike's list ([`Scene::knocks_struck`]: which it struck); without, they are taken off the list
+    /// (the body rays and the sweep back, which meet the props through [`crate::prop_contact`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn ridden(
+        props: Option<&'a Props>,
+        trees: Option<&'a Trees>,
+        knocks: Knocks<'a>,
+        field: Option<([F; 2], [F; 2])>,
+        rays: &'a Rays,
+        node: &Frame,
+        search: &mut broad_phase::Search,
+        meet: bool,
+    ) -> Scene<'a> {
+        let mut scene = Scene::of(props, trees, None, &[], knocks, field, rays, node, search, true, None);
+        let at = scene.objects.objects.len() - knocks.knocks.len();
+        if meet && !knocks.knocks.is_empty() {
+            scene.knocks = knocks.knocks;
+            scene.knocks_at = at;
+        } else {
+            scene.nearby.found.retain(|c| c.object < at);
+        }
+        scene
+    }
+
+    /// The knocks the ray probe struck in the searches so far, in the order it struck them, each once
+    /// ([`Scene::ridden`] with `meet`): what its hit listeners hear, in the list's order.
+    pub fn knocks_struck(&self) -> &[usize] {
+        &self.knocks_struck
+    }
+
+    /// The knock a hit's struck object names ([`KNOCKED`]` + k`), in [`Scene::ridden`]'s scene.
+    pub fn knocked(&self, object: usize) -> Option<usize> {
+        object.checked_sub(KNOCKED).filter(|&k| k < self.knocks.len())
     }
 
     /// [`Scene::flown`] with the ride's other planes in the world (N22a1, [`Plane`]): each one's hull
@@ -1428,7 +1575,7 @@ impl<'a> Scene<'a> {
         node: &Frame,
         search: &mut broad_phase::Search,
     ) -> Scene<'a> {
-        let mut scene = Scene::of(props, trees, bikes, planes, field, rays, node, search, true, None);
+        let mut scene = Scene::of(props, trees, bikes, planes, Knocks::default(), field, rays, node, search, true, None);
         scene.first_plane = first;
         scene
     }
@@ -1450,7 +1597,7 @@ impl<'a> Scene<'a> {
         asleep: bool,
     ) -> Scene<'a> {
         let probe = Probe { categories: categories.clone(), ..Probe::default() };
-        let mut scene = Scene::of(props, trees, None, &[], field, rays, node, search, true, Some(&probe));
+        let mut scene = Scene::of(props, trees, None, &[], Knocks::default(), field, rays, node, search, true, Some(&probe));
         scene.asleep = asleep;
         scene
     }
@@ -1473,7 +1620,7 @@ impl<'a> Scene<'a> {
         probe: &Probe,
         asleep: bool,
     ) -> Scene<'a> {
-        let mut scene = Scene::of(props, trees, None, wrecks, field, rays, node, search, true, Some(probe));
+        let mut scene = Scene::of(props, trees, None, wrecks, Knocks::default(), field, rays, node, search, true, Some(probe));
         scene.asleep = asleep;
         scene
     }
@@ -1544,6 +1691,7 @@ impl<'a> Scene<'a> {
         trees: Option<&'a Trees>,
         bikes: Option<Bikes<'a>>,
         planes: &'a [Plane<'a>],
+        knocks: Knocks<'a>,
         field: Option<([F; 2], [F; 2])>,
         rays: &'a Rays,
         node: &Frame,
@@ -1555,7 +1703,7 @@ impl<'a> Scene<'a> {
         let transform = matrix(node);
         let (centre, radius) = reach(rays, &transform);
         let hulls_at = FIRST + props.len() + bikes.map_or(0, |b| b.bikes.len());
-        let objects = kept_world(props, trees, bikes.as_ref(), planes, field, centre, radius, toys, |broad, built, generation| {
+        let objects = kept_world(props, trees, bikes.as_ref(), planes, knocks, field, centre, radius, toys, |broad, built, generation| {
             let mut objects = lend(generation, built);
             let mut hulls = 0..0;
             if let Some(probe) = probe {
@@ -1621,6 +1769,7 @@ impl<'a> Scene<'a> {
             knocks_at: 0,
             knocked_from: 0,
             knock_facets: std::collections::HashMap::new(),
+            knocks_struck: Vec::new(),
             sounded: Vec::new(),
             wrecks: &[],
             wrecks_at: 0,
@@ -1865,6 +2014,9 @@ impl Scene<'_> {
         let mut cache = std::mem::take(&mut self.knock_facets);
         let hit = self.pair_placed(probe, other, &n, cache.entry(k).or_insert_with(|| facets(n.mesh)));
         self.knock_facets = cache;
+        if hit && probe == RAY && !self.knocks_struck.contains(&k) {
+            self.knocks_struck.push(k);
+        }
         hit
     }
 

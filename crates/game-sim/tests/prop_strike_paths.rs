@@ -22,7 +22,8 @@ use game_sim::rider::Rider;
 use game_sim::rider_contact;
 use game_sim::track::Scene;
 use game_sim::trick::Set;
-use game_sim::world::Flat;
+use game_sim::world::{Flat, World};
+use game_sim::contact_search::Heightfield;
 use game_sim::Sim;
 use ps2_float::{F, Vf};
 use ps2_oracle::skip;
@@ -400,4 +401,103 @@ fn a_wheel_stands_on_the_ball_in_every_path() {
             assert!(!ball(&sims[1 - over], c).0, "{path}: the other seat's ball sleeps on");
         }
     }
+}
+
+// --- F8: the wheel meets the ball through the bike's list -------------------------------------------
+
+/// [`Flat`] with a field bounded round free09's props: what the bike's kept list's tree is laid over.
+#[derive(Clone, Copy)]
+struct Bounded {
+    flat: Flat,
+    lo: Vf,
+    hi: Vf,
+}
+
+impl Heightfield for Bounded {
+    fn min(&self) -> Vf {
+        self.lo
+    }
+    fn max(&self) -> Vf {
+        self.hi
+    }
+    fn per_sample(&self) -> F {
+        self.flat.per_sample()
+    }
+    fn height_scale(&self) -> F {
+        self.flat.height_scale()
+    }
+    fn coarse(&self) -> bool {
+        self.flat.coarse()
+    }
+    fn split_one_way(&self) -> bool {
+        self.flat.split_one_way()
+    }
+    fn cell(&self, ix: i32, iz: i32, step: i32) -> Option<game_sim::contact_search::Cell> {
+        self.flat.cell(ix, iz, step)
+    }
+}
+
+/// A flat world that hands the bike's searches its field and a scene of no props: the riding bike's
+/// probes search its kept list ([`game_sim::ride::Ride::nearby`]), the knockable props in it (F8),
+/// where [`Flat`] answers only [`game_sim::world::World::solid`].
+struct Listed {
+    field: Bounded,
+    props: game_sim::world::Props,
+}
+
+impl Listed {
+    fn round(set: &PropSet) -> Listed {
+        let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+        for o in set.collections.iter().flat_map(|c| &c.objects) {
+            let at = o.node.origin;
+            lo = [lo[0].min(at.x()), lo[1].min(at.z())];
+            hi = [hi[0].max(at.x()), hi[1].max(at.z())];
+        }
+        let field = Bounded { flat: Flat::default(), lo: Vf::new(lo[0] - 200.0, 0.0, lo[1] - 200.0, 1.0), hi: Vf::new(hi[0] + 200.0, 0.0, hi[1] + 200.0, 1.0) };
+        Listed { field, props: game_sim::world::Props::default() }
+    }
+}
+
+impl World for Listed {
+    fn ground(&mut self, at: Vf) -> (Vf, Vf) {
+        self.field.flat.ground(at)
+    }
+    fn solid(&mut self, bundle: &game_sim::collide::Bundle, record: &mut game_sim::collide::Record) -> bool {
+        self.field.flat.solid(bundle, record)
+    }
+    fn heightfield(&mut self) -> Option<Box<dyn game_sim::contact_search::Heightfield + '_>> {
+        Some(Box::new(self.field))
+    }
+    fn collision(&mut self) -> (Option<Box<dyn game_sim::contact_search::Heightfield + '_>>, Option<&game_sim::world::Props>) {
+        (Some(Box::new(self.field)), Some(&self.props))
+    }
+}
+
+/// **A wheel meets the ball through the bike's list** (F8): the bike stood where [`on_a_ball`] finds a
+/// wheel on a ball, in a world that hands its searches a scene ([`Listed`]), gathers the ball into its
+/// kept list ([`game_sim::ride::Ride::nearby`]) with the scene, and its wheel's search meets it there:
+/// the wheel's owner word the ball's, the ball woken by the hit, and the props back in the traffic.
+/// The same bike a tick later still stands on it through the kept list. With no props in the Sim,
+/// nothing.
+#[test]
+fn a_wheel_meets_the_ball_through_the_bikes_list() {
+    let Some((set, phy, col)) = disc() else { return };
+    let base = one(&set, &phy, &col);
+    let (c, at, handle) = on_a_ball(&base).expect("some spot over some ball where a wheel stands on it");
+    let mut world = Listed::round(&set);
+
+    let mut sim = base.clone();
+    sim.rider.place(at, facing());
+    sim.step(DT, &Controls::default(), &mut world);
+    assert!(owners(&sim.rider).contains(&handle), "a wheel on the ball through the list: {:?}", owners(&sim.rider));
+    assert!(ball(&sim, c).0, "the wheel's hit wakes the ball");
+    assert!(sim.rider.ride.props.is_none() && !sim.traffic.props.is_empty(), "the props are back in the traffic");
+    let nearby = sim.rider.ride.nearby.as_ref().expect("the bike keeps its list");
+    assert!(nearby.built && !nearby.nearby.found.is_empty(), "the list gathered with the props");
+
+    let mut none = base.clone();
+    none.traffic.props = PropSet::default();
+    none.rider.place(at, facing());
+    none.step(DT, &Controls::default(), &mut Listed::round(&set));
+    assert_eq!(owners(&none.rider), [0, 0], "no props, no owner");
 }
