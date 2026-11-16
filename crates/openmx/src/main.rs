@@ -13119,9 +13119,25 @@ fn machine_offers(packs: &[machine_packs::Pack]) -> Vec<roster::PackMachine> {
             }
             continue;
         }
-        // The cars (MD39c): ridden off `--mxvatv-car` and settings.txt alone yet, so not offered,
-        // and not greyed as a machine openmx cannot ride.
+        // The cars (MD39c): each of MX vs. ATV Unleashed's five, the Garage's Car tile's (MD158), as
+        // a bare `mxvatv_car` word rides it, off the first pack listing it on Unleashed's step. An
+        // Untamed car (MD161) is picked by `CAR@PACK` alone, so not here.
         if !pack.cars.is_empty() {
+            for c in pack.cars.iter().filter(|c| !c.untamed()) {
+                let Some(m) = vehicle::mxvatv_machine(&c.car) else { continue };
+                if out.iter().any(|o: &roster::PackMachine| o.machine == roster::MXVATV_CAR_KIND && o.skin.eq_ignore_ascii_case(&c.car)) {
+                    continue;
+                }
+                out.push(roster::PackMachine {
+                    pack: pack.id.clone(),
+                    game: pack.game.clone(),
+                    machine: roster::MXVATV_CAR_KIND.into(),
+                    class: String::new(),
+                    skin: c.car.clone(),
+                    name: vehicle::mxvatv_car_label(m).into(),
+                    why: None,
+                });
+            }
             continue;
         }
         if pack.skins.is_empty() && pack.machine != "fliers" {
@@ -13477,6 +13493,35 @@ mod machine_offers_test {
         // and a bike pack's skins are not fliers
         assert!(flier_offers(&packs).iter().all(|f| f.pack == roster::ORIGINAL_PACK));
         std::fs::remove_dir_all(&mods).ok();
+    }
+
+    /// MD158: a car pack offers MX vs. ATV Unleashed's cars to the Garage's Car tile, once each by
+    /// their words; an Untamed car, or one openmx does not know, is not offered.
+    #[test]
+    fn a_car_packs_unleashed_cars_are_offered() {
+        let mods = std::env::temp_dir().join(format!("openmx-md158-mods-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&mods);
+        let write = |id: &str, cars: &str| {
+            let pack = mods.join(machine_packs::MACHINES_DIR).join(id);
+            std::fs::create_dir_all(&pack).unwrap();
+            let json = format!(r#"{{"kind": "machine", "id": "{id}", "machine": "mxvatv_car", "source": {{"game": "MX vs. ATV Unleashed"}}, "cars": [{cars}]}}"#);
+            std::fs::write(pack.join("mod.json"), json).unwrap();
+        };
+        let car = |w: &str, step: &str| format!(r#"{{"car": "{w}", "phy": "Veh/{w}.phy", "psg": "Veh/{w}.psg", "col": ""{step}}}"#);
+        write("a_cars", &[car("buggy", ""), car("sandrail", ""), car("Truck", ""), car("baja", r#", "step": "untamed""#)].join(","));
+        write("b_cars", &[car("Buggy", ""), car("golfcart", "")].join(","));
+        let offer = machine_offers(&machine_packs::find(&mods).0);
+        std::fs::remove_dir_all(&mods).ok();
+        let seen: Vec<(&str, &str, &str, &str, bool)> =
+            offer.iter().map(|m| (m.pack.as_str(), m.machine.as_str(), m.skin.as_str(), m.name.as_str(), m.why.is_some())).collect();
+        assert_eq!(
+            seen,
+            [
+                ("a_cars", "mxvatv_car", "buggy", "Buggy", false),
+                ("a_cars", "mxvatv_car", "sandrail", "Sandrail", false),
+                ("b_cars", "mxvatv_car", "golfcart", "Golf Cart", false),
+            ]
+        );
     }
 }
 

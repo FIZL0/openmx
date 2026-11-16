@@ -22,6 +22,8 @@ pub enum TileOf {
     Flier(String),
     /// The quad (MD37d): Off, then the handling files the installed quad pack rides.
     Quad(Vec<String>),
+    /// MX vs. ATV's cars (MD158): Off, then the cars the installed car pack lists, by their words.
+    Car(Vec<String>),
     /// What openmx cannot ride, listed greyed with why.
     Locked,
     /// A machine of the ride under the pause, which Cross switches to.
@@ -177,7 +179,7 @@ pub(super) fn tile_rows(tiles: &[Tile]) -> Vec<Row> {
 impl Menu {
     /// The Machines tab's tiles for the Garage's seat (P341): every disc bike model by its class
     /// and every machine pack's bike greyed, each flier kind with its skins, the quad, and the
-    /// kinds openmx cannot ride greyed. The cars are the worlds', so not here.
+    /// kinds openmx cannot ride greyed. The worlds' cars are not here; MX vs. ATV's are (MD158).
     pub fn garage_tiles(&self) -> Vec<Tile> {
         let Some(g) = self.garages.get(self.garage_seat()) else { return Vec::new() };
         let (c, offer, fliers) = (&self.catalogue, &self.machine_offer, self.garage_fliers());
@@ -250,6 +252,22 @@ impl Menu {
                 });
                 continue;
             }
+            if kind == roster::MXVATV_CAR_KIND && !picks.is_empty() {
+                let cars: Vec<String> = picks.iter().map(|m| m.skin.clone()).collect();
+                let livery = cars.iter().position(|c| c.eq_ignore_ascii_case(&self.settings.mxvatv_car)).map_or(0, |k| k + 1);
+                tiles.push(Tile {
+                    section: 2,
+                    name: roster::machine_label(&kind),
+                    class: game,
+                    picture: None,
+                    liveries: std::iter::once(("Off".to_string(), None)).chain(picks.iter().map(|m| (m.name.clone(), None))).collect(),
+                    livery,
+                    riding: false,
+                    locked: None,
+                    of: TileOf::Car(cars),
+                });
+                continue;
+            }
             let why = of.iter().find_map(|m| m.why.clone()).unwrap_or_default();
             tiles.push(Tile {
                 section: 2,
@@ -314,7 +332,8 @@ impl Menu {
 
     /// L1 or R1 on the Machines tab (P341), `by` -1 or 1: the lit tile's next livery. A bike's
     /// is that bike in its next paint, picked; a flier's its next skin that can fly; the quad's
-    /// its next handling, or Off. Whether anything changed.
+    /// its next handling, or Off, and the car's its next car, or Off (MD158). Whether anything
+    /// changed.
     pub(super) fn turn_tile(&mut self, by: i32) -> bool {
         let Some(t) = self.garage_tile().filter(|t| t.locked.is_none()) else { return false };
         let seat = self.garage_seat();
@@ -331,11 +350,19 @@ impl Menu {
                 self.changed = true;
                 true
             }
+            TileOf::Car(cars) => {
+                let n = cars.len() + 1;
+                let to = (t.livery as i64 + by as i64).rem_euclid(n as i64) as usize;
+                self.settings.mxvatv_car = if to == 0 { String::new() } else { cars[to - 1].clone() };
+                self.changed = true;
+                true
+            }
             _ => false,
         }
     }
 
-    /// Cross on the Machines tab's tile: a bike's is picked in its lit paint, the quad's steps on.
+    /// Cross on the Machines tab's tile: a bike's is picked in its lit paint, the quad's and the
+    /// car's step on.
     pub(super) fn take_tile(&mut self) {
         let Some(t) = self.garage_tile().filter(|t| t.locked.is_none()) else { return };
         match t.of {
@@ -344,7 +371,7 @@ impl Menu {
                     self.pick_bike(self.garage_seat(), &bike.clone());
                 }
             }
-            TileOf::Quad(_) => {
+            TileOf::Quad(_) | TileOf::Car(_) => {
                 self.turn_tile(1);
             }
             _ => {}
