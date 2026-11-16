@@ -38,7 +38,7 @@ mod cs {
 }
 
 pub(crate) fn read_parts(ee: &Ee) -> Parts {
-    let c = |o: u32| ee.u32_at(CAR + o);
+    let c = |o: u32| ee.u32_at(car_at() + o);
     Parts {
         car: c(at::NODE),
         wheels: cs::WHEELS.map(c),
@@ -57,7 +57,7 @@ pub(crate) fn read_parts(ee: &Ee) -> Parts {
 }
 
 pub(crate) fn read_posing(ee: &Ee) -> Posing {
-    let tires = at::TIRES.map(|o| ee.u32_at(CAR + o));
+    let tires = at::TIRES.map(|o| ee.u32_at(car_at() + o));
     let f = |a: u32| F::from_bits(ee.u32_at(a));
     let t = |o: u32| tires.map(|t| f(t + o));
     Posing {
@@ -67,10 +67,10 @@ pub(crate) fn read_posing(ee: &Ee) -> Posing {
         max_compression: t(cs::MAX_COMPRESSION),
         stretch: t(cs::STRETCH),
         rear_mount: get_v(ee, tires[2] + at::MOUNT),
-        swing: f(CAR + cs::SWING),
-        pivots: cs::PIVOTS.map(|o| get_v(ee, CAR + o)),
-        rear_pivot: get_v(ee, CAR + cs::REAR_PIVOT),
-        rpm: f(ee.u32_at(CAR + at::ENGINE) + cs::RPM),
+        swing: f(car_at() + cs::SWING),
+        pivots: cs::PIVOTS.map(|o| get_v(ee, car_at() + o)),
+        rear_pivot: get_v(ee, car_at() + cs::REAR_PIVOT),
+        rpm: f(ee.u32_at(car_at() + at::ENGINE) + cs::RPM),
     }
 }
 

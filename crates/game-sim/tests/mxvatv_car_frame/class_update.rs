@@ -4,18 +4,18 @@ use game_sim::handling::tail;
 
 /// The car classes' update slots (vt `+0x10c`): the buggy's, the golf cart's and the truck's, one
 /// code over three copies of the same rodata. Each runs on the buggy image's car.
-const SLOTS: [(&str, u32); 3] = [("buggy", 0x004c_6ce0), ("golf cart", 0x004d_0250), ("truck", 0x004d_7f40)];
+pub(crate) const SLOTS: [(&str, u32); 3] = [("buggy", 0x004c_6ce0), ("golf cart", 0x004d_0250), ("truck", 0x004d_7f40)];
 /// The ghost step's calls: the collision probe's mode switch (a1 0, then 1) round its search, and
 /// the node's alpha (f12).
 const PROBE_MODE: u32 = 0x0011_5890;
-const PROBE_SEARCH: u32 = 0x0011_48e0;
+pub(crate) const PROBE_SEARCH: u32 = 0x0011_48e0;
 const NODE_ALPHA: u32 = 0x0018_d170;
 /// The base update's plain calls: the network's step and the vehicle's parts and listeners.
 const NETWORK: u32 = 0x0025_e8d0;
 const PARTS: u32 = 0x0049_4370;
 /// The slot's plain calls: the list's take-off, the rumble's switch, the cue and its queue.
 const UNLIST: u32 = 0x0020_3ff0;
-const RUMBLE_ON: u32 = 0x0051_a250;
+pub(crate) const RUMBLE_ON: u32 = 0x0051_a250;
 const CUE: u32 = 0x0027_2300;
 const CUE_QUEUE: u32 = 0x0044_2eb0;
 /// The buggy's virtuals the update and the slot hand out.
@@ -31,15 +31,15 @@ const SLOT_CALLS: [(u32, Call); 9] = [
     (0x3ac, Call::Place),
 ];
 /// The settings pointer and its still-camera bit (MD106d's).
-const SETTINGS: u32 = 0x003e_ab60;
-const STILL_BYTE: u32 = 0x225;
-const STILL_BIT: u8 = 0x08;
+pub(crate) const SETTINGS: u32 = 0x003e_ab60;
+pub(crate) const STILL_BYTE: u32 = 0x225;
+pub(crate) const STILL_BIT: u8 = 0x08;
 /// Free RAM (zero in the image) for a carrying object and its node.
 const CARRIER: u32 = 0x01fe_6000;
 const CARRIER_NODE: u32 = 0x01fe_6400;
 
 /// The words of the slot, the ghost step and the base update (research/oracle.txt `# MD106e`).
-mod ue {
+pub(crate) mod ue {
     pub const GHOST: u32 = 0xde8;
     pub const GHOST_LENGTH: u32 = 0xdec;
     pub const PROBE: u32 = 0xcc;
@@ -83,12 +83,12 @@ struct Case {
 /// Hook what stays a call: the ghost step's, the base update's, the hazard clock's
 /// put-back, and the slot's. Every one logs in the port's terms; the probe's mode switch logs to
 /// `modes` (its a1, and 9 for the search between), the rumbler's vt `+0x4c` its level to `rumbled`.
-fn hook_class(ee: &mut Ee, p: &Ptrs, state: u32, log: Shared<Vec<Call>>, modes: Shared<Vec<u64>>, rumbled: Shared<Vec<i32>>, ready: Shared<bool>) {
+pub(crate) fn hook_class(ee: &mut Ee, p: &Ptrs, state: u32, log: Shared<Vec<Call>>, modes: Shared<Vec<u64>>, rumbled: Shared<Vec<i32>>, ready: Shared<bool>) {
     let node = p.node;
     for (slot, c) in SLOT_CALLS {
         let l = log.clone();
-        ee.hooks.insert(ee.u32_at(BUGGY_VTABLE + slot), Box::new(move |ee| {
-            assert_eq!(ee.r(4) as u32, CAR, "{c:?} on something else, from {:#x}", ee.r(31));
+        ee.hooks.insert(ee.u32_at(ee.u32_at(car_at() + 4) + slot), Box::new(move |ee| {
+            assert_eq!(ee.r(4) as u32, car_at(), "{c:?} on something else, from {:#x}", ee.r(31));
             let c = match c {
                 Call::Ride(_) => Call::Ride(F(ee.f(12))),
                 Call::PutBack => {
@@ -107,15 +107,15 @@ fn hook_class(ee: &mut Ee, p: &Ptrs, state: u32, log: Shared<Vec<Call>>, modes: 
     }
     let l = log.clone();
     ee.hooks.insert(NETWORK, Box::new(move |ee| {
-        assert_eq!(ee.r(4) as u32, CAR + 0x400, "the network's step on something else");
+        assert_eq!(ee.r(4) as u32, car_at() + 0x400, "the network's step on something else");
         l.borrow_mut().push(Call::Network(F(ee.f(12))));
     }));
     let l = log.clone();
     ee.hooks.insert(PARTS, Box::new(move |ee| {
-        assert_eq!(ee.r(4) as u32, CAR, "the parts on something else");
+        assert_eq!(ee.r(4) as u32, car_at(), "the parts on something else");
         l.borrow_mut().push(Call::Parts(F(ee.f(12))));
     }));
-    let probe = ee.u32_at(CAR + ue::PROBE);
+    let probe = ee.u32_at(car_at() + ue::PROBE);
     let m = modes.clone();
     ee.hooks.insert(PROBE_MODE, Box::new(move |ee| {
         assert_eq!(ee.r(4) as u32, probe, "the probe's mode on something else");
@@ -135,7 +135,7 @@ fn hook_class(ee: &mut Ee, p: &Ptrs, state: u32, log: Shared<Vec<Call>>, modes: 
     let l = log.clone();
     ee.hooks.insert(UNLIST, Box::new(move |ee| {
         let args = (ee.r(4) as u32, ee.r(5) as u32);
-        assert_eq!(args, (ee.u32_at(CAR + ue::LIST), CAR + 0x40), "the list's take-off");
+        assert_eq!(args, (ee.u32_at(car_at() + ue::LIST), car_at() + 0x40), "the list's take-off");
         l.borrow_mut().push(Call::Unlist);
     }));
     let l = log.clone();
@@ -145,17 +145,19 @@ fn hook_class(ee: &mut Ee, p: &Ptrs, state: u32, log: Shared<Vec<Call>>, modes: 
         l.borrow_mut().push(Call::RideRumble(ee.r(17) as i32));
         ee.set(2, u64::from(*ready.borrow()));
     }));
-    let rumbler = ee.u32_at(state + ue::RUMBLER);
-    assert_ne!(rumbler, 0, "the image's vehicle state has a rumbler");
-    ee.hooks.insert(ee.u32_at(ee.u32_at(rumbler + 0x1c) + 0x4c), Box::new(move |ee| {
-        assert_eq!((ee.r(4) as u32, ee.r(5)), (rumbler, 0), "the rumbler and its softness");
-        assert_eq!(F(ee.f(12)), F(atv_car::RIDE_RUMBLE_TIME), "the rumble's time");
-        rumbled.borrow_mut().push(ee.r(6) as i32);
-    }));
+    // A car with no vehicle state or no rumbler never rings one (MD156's drives).
+    let rumbler = if state != 0 { ee.u32_at(state + ue::RUMBLER) } else { 0 };
+    if rumbler != 0 {
+        ee.hooks.insert(ee.u32_at(ee.u32_at(rumbler + 0x1c) + 0x4c), Box::new(move |ee| {
+            assert_eq!((ee.r(4) as u32, ee.r(5)), (rumbler, 0), "the rumbler and its softness");
+            assert_eq!(F(ee.f(12)), F(atv_car::RIDE_RUMBLE_TIME), "the rumble's time");
+            rumbled.borrow_mut().push(ee.r(6) as i32);
+        }));
+    }
     let l = log;
     ee.hooks.insert(CUE, Box::new(move |ee| {
         let args = (ee.r(4) as u32, ee.r(5) as u32, ee.r(6), ee.r(7), ee.r(8) as u32, ee.r(9));
-        let want = (ee.u32_at(CUE_QUEUE), CAR + ue::CUE_SOURCE, 8, 4, ee.u32_at(CAR + ue::ID), 0);
+        let want = (ee.u32_at(CUE_QUEUE), car_at() + ue::CUE_SOURCE, 8, 4, ee.u32_at(car_at() + ue::ID), 0);
         assert_eq!(args, want, "the frame's cue");
         l.borrow_mut().push(Call::Cue(4));
     }));
@@ -225,9 +227,9 @@ fn generate_class(r: &mut Rng, image: &Updated, image_body: &Body, state: Option
 }
 
 /// The slot's and the base update's words, as the port leaves them.
-fn class_words(w: &Updated, flags_word: u32) -> Vec<(u32, u32)> {
+pub(crate) fn class_words(w: &Updated, flags_word: u32) -> Vec<(u32, u32)> {
     let v = &w.vehicle;
-    let c = |o: u32| CAR + o;
+    let c = |o: u32| car_at() + o;
     let mut out = vec![
         (c(ue::GHOST), w.ghost.to_bits()),
         (c(ue::DISTANCE), v.distance.to_bits()),
@@ -246,8 +248,8 @@ fn class_words(w: &Updated, flags_word: u32) -> Vec<(u32, u32)> {
 }
 
 /// The image's words of the slot and the base update.
-fn read_class(ee: &Ee, p: &Ptrs) -> Updated {
-    let c = |o: u32| CAR + o;
+pub(crate) fn read_class(ee: &Ee, p: &Ptrs) -> Updated {
+    let c = |o: u32| car_at() + o;
     let f = |o: u32| F(ee.f32_at(c(o)));
     let run = ee.u32_at(c(ue::RUN));
     Updated {
@@ -300,6 +302,7 @@ fn the_car_classes_update_slots_are_the_originals() {
     assert_ne!(state, 0, "the image's car has a vehicle state");
     assert!(image_w.probe, "the image's car has a collision probe");
     let rumbler = ee.u32_at(state + ue::RUMBLER);
+    assert_ne!(rumbler, 0, "the image's vehicle state has a rumbler");
     let still_at = ee.u32_at(SETTINGS) + STILL_BYTE;
     for a in (CARRIER..CARRIER_NODE + 0x100).step_by(4) {
         assert_eq!(ee.u32_at(a), 0, "the scratch at {a:#x} is not free");
