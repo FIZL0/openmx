@@ -113,6 +113,7 @@ mod avoid_vehicle; // S317: the generic vehicle avoidance
 mod spawn; // S12e: the brain spawn
 mod interface; // S322: the rider's interface defaults and the race start
 mod lane; // S323: the Sim's AI lane
+mod moving; // S326: the moving world in the lane's scene
 mod drive; // S314: the base AI's mode drivers
 mod race4; // S12e: free09's four racers through the Sim (C33)
 mod zone_open; // S315: a start zone's open flags from the save profile

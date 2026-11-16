@@ -496,7 +496,7 @@ fn s323_the_lanes_walk_is_the_originals_on_the_fixed_world() {
         ee.call(end, &[u64::from(iface)], &[], S12E_BUDGET);
 
         let lent = ai::Lent::new(&mut world);
-        let mut ws = ai::WorldScene { world: &lent, cofg, centre: cofg, radius: F(100.0), walked: Vec::new(), swept: Vec::new() };
+        let mut ws = ai::WorldScene { world: &lent, ridden: &[], cofg, centre: cofg, radius: F(100.0), walked: Vec::new(), swept: Vec::new() };
         let ours: Vec<Seen> = ai::Scene::walk(&mut ws)
             .expect("the port's walk opens")
             .iter()
