@@ -77,7 +77,7 @@ const MAGIC: [u8; 4] = *b"OMX1";
 pub fn encode(sim: &Sim) -> Vec<u8> {
     let mut out = Vec::with_capacity(16 * 1024);
     out.extend_from_slice(&MAGIC);
-    let Sim { ticks, rng, tables: _, phy: _, bindings: _, input, rider, plane, car, quad: _, others, markers, home: _, traffic, event, race, ai: _, seek: _ } = sim;
+    let Sim { ticks, rng, tables: _, phy: _, bindings: _, input, rider, plane, car, quad, others, markers, home: _, traffic, event, race, ai: _, seek: _ } = sim;
     ticks.put(&mut out);
     rng.put(&mut out);
     input.put(&mut out);
@@ -138,6 +138,11 @@ pub fn encode(sim: &Sim) -> Vec<u8> {
         CAR_LANE.put(&mut out);
         car.put(&mut out);
     }
+    // A seat's quad while it is out (MD172) the same way, behind its own.
+    if let Some(quad) = quad {
+        QUAD_LANE.put(&mut out);
+        quad.put(&mut out);
+    }
     // A race's start (S13b) the same way, behind its own.
     if let Some(race) = race {
         RACE.put(&mut out);
@@ -148,6 +153,9 @@ pub fn encode(sim: &Sim) -> Vec<u8> {
 
 /// What begins [`encode`]'s race section.
 const RACE: u64 = u64::from_le_bytes(*b"S13brace");
+
+/// What begins [`encode`]'s ridden quad section.
+const QUAD_LANE: u64 = u64::from_le_bytes(*b"MD172qd\0");
 
 /// What begins [`encode`]'s driven car section.
 const CAR_LANE: u64 = u64::from_le_bytes(*b"S249car\0");
@@ -195,7 +203,7 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
     let tagged = |r: &Reader<'_>| r.bytes.get(r.at..r.at + 8) == Some(&MARKERS.to_le_bytes()[..]);
     // No players' list ahead of any tagged section (S131: the props' tag was read as one; P155: nor
     // the event's).
-    let section = |r: &Reader<'_>| [MARKERS, CARS, TOYS, PROPS, PHYSICS, EVENT, CAR_LANE, RACE].iter().any(|t| r.bytes.get(r.at..r.at + 8) == Some(&t.to_le_bytes()[..]));
+    let section = |r: &Reader<'_>| [MARKERS, CARS, TOYS, PROPS, PHYSICS, EVENT, CAR_LANE, QUAD_LANE, RACE].iter().any(|t| r.bytes.get(r.at..r.at + 8) == Some(&t.to_le_bytes()[..]));
     let mut others_riders: Vec<Rider> =
         if r.at < bytes.len() && !section(&r) { Wire::take(&mut r)? } else { Vec::new() };
     let mut markers = crate::markers::Markers::default();
@@ -325,6 +333,11 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         r.at += 8;
         car = Some(Box::new(Wire::take(&mut r)?));
     }
+    let mut quad: Option<Box<crate::quad::Lane>> = None;
+    if r.bytes.get(r.at..r.at + 8) == Some(&QUAD_LANE.to_le_bytes()[..]) {
+        r.at += 8;
+        quad = Some(Box::new(Wire::take(&mut r)?));
+    }
     let mut race: Option<Box<crate::race::Race>> = None;
     if r.bytes.get(r.at..r.at + 8) == Some(&RACE.to_le_bytes()[..]) {
         r.at += 8;
@@ -409,9 +422,7 @@ pub fn decode(sim: &mut Sim, bytes: &[u8]) -> Result<(), String> {
         rider,
         plane,
         car,
-        // A seat's quad (MD152) is not on the wire: the shell's online ride sends no state while one
-        // is out, so a state decoded is one with none.
-        quad: None,
+        quad,
         others,
         markers,
         home: Arc::clone(&sim.home),
@@ -1359,6 +1370,501 @@ impl Wire for crate::kiowa::Collision {
             rays: Arc::new(crate::flight_search::Rays::default()),
             nearby: Wire::take(r)?,
             mass: Wire::take(r)?,
+        })
+    }
+}
+
+// A seat's quad (MD172, [`crate::quad::Lane`]).
+wire!(crate::quad::Lane { ride, segments, was_down, taken_at, wrecks });
+
+impl Wire for crate::quad::Ride {
+    /// Less its arc cosine table, a constant [`decode`] builds again.
+    fn put(&self, out: &mut Vec<u8>) {
+        let crate::quad::Ride { p, q, body, bike, rest, table: _, recorded, tailed, wrecked } = self;
+        p.put(out);
+        q.put(out);
+        body.put(out);
+        bike.put(out);
+        rest.put(out);
+        recorded.put(out);
+        tailed.put(out);
+        wrecked.put(out);
+    }
+    fn take(r: &mut Reader<'_>) -> Result<Self, String> {
+        Ok(crate::quad::Ride {
+            p: Wire::take(r)?,
+            q: Wire::take(r)?,
+            body: Wire::take(r)?,
+            bike: Wire::take(r)?,
+            rest: Wire::take(r)?,
+            table: crate::air::AcosTable::build(),
+            recorded: Wire::take(r)?,
+            tailed: Wire::take(r)?,
+            wrecked: Wire::take(r)?,
+        })
+    }
+}
+wire!(crate::quad::Params { max_pitch_command, pitch_gain, pitch_rate_gain, inv_wheelie_top_speed, max_stoppie_pitch_command, stoppie_pitch_gain, stoppie_yaw_rate_scale, stoppie_top_speed, steer_speed_1, steer_scale_1, steer_speed_2, steer_scale_2, full_lock, full_lock_angle, full_lock_time, max_donut_speed, donut_angle, donut_angle_back, front_spring, rear_spring });
+wire!(crate::quad::Quad { on_ground, all_down, front_down, rear_down, balancing, contact_vel, brake, gas, gas_limited, euler, world_ang_vel, front_brake, rear_brake, clutch_in, lean, lean_fore_aft, pitch_integral, stoppie, push, push_target, push_gain, push_gate, gravity, wheels, active, control_off, speed_len, steer_command, full_lock_timer, stick_angle, deflection, attitude, local_vel, heading, up, was_airborne, airborne, hang_time, crossup, flipping, spinning, authority, authority_time, tipped, node_pos, node_pos_kept, node_local });
+wire!(crate::quad::Wheel { steered, rear_pair, touching, normal, contact_vel, balancing, max_steer_angle, steer_command, donut, spring, inv_radius });
+wire!(crate::quad::Bike { held, gas_cut, cut_time, joystick, stick, clutch, gate_cut, clutch_keys, ride, engine, air_keys, air, stick_hold, preload_cue, spin_applied, spin_active, touching, struck_class, buttons, right_y, up_y, stunt_id, rider_stunt, flip_clip, flip_stunt, gas_gyro_torque, gyro, wheels, more, ground, ground_of, cofg, spins, parts, contacts });
+wire!(crate::atv_body::Body { enabled, linear_axes, inv_mass, damping, last_position, position, velocity, last_force, force, accel, correction_peak, correction, max_speed, max_accel, angular_axes, inv_inertia, ang_damping, last_quat, quat, moment, last_moment, rates, ang_accel, twist_peak, twist, max_rates, max_ang_accel });
+wire!(crate::quad::Recorded { record, held, riding, wreck, rays, parts });
+wire!(crate::quad::Tailed { tail, vehicle, put_back });
+wire!(crate::quad::Wrecked { reason, clock, max_time, class, category, spot, node, counting, edge, wrecks, small, limits, balance, wanted, blend, trick_wrecked, racing, crossup, rng, back, search });
+wire!(crate::quad::Rays { active, active_too, record, wreck, riding });
+wire!(crate::quad::WreckParts { body, trigger, wreck, segments });
+wire!(crate::quad::Tail { vehicle_state, rider_held, stunt_speed, surfaces, wheel_surface, wheel_sunk, wheel_squeeze, on_hazard, request, request_was, pad, rumble_on, wheelie_clock, stoppie_clock, wheelie_stunt, stoppie_stunt, wheelie_time, stoppie_time, wheelie_dist, stoppie_dist, best_wheelie_time, best_stoppie_time, best_wheelie_dist, best_stoppie_dist, player, race, ride_time, top_speed, distance, word_falls, word_was, node_up, node_forward, second_on, second_countdown, clock, post, untamed });
+wire!(crate::quad::PutBack { flags, hung, respawn, player_respawn, settle, request });
+wire!(crate::quad::Limits { front, back, side, racing_down, freestyle_down, ground_pitch_down, ground_pitch_up, airborne_pitch_down, airborne_pitch_up, airborne_roll, no_hander, no_hander_max_roll, joust_height, crossup, crossup_time });
+wire!(crate::quad::BackSearch; cache);
+wire!(crate::handling::step::GasCut { latched, timer });
+wire!(crate::handling::Gyro { brake, gas });
+wire!(crate::quad::Made { made, flags, hung, on_node });
+wire!(crate::quad::WreckBody { riding, frame, sweep, trigger, wreck, wreck_category, wreck_owned, wreck_record, trigger_owned, riding_kept });
+wire!(crate::air::Params { airborne_control_moment, airborne_damping, airborne_control_force, brake_gyro_torque, unroll_gain, unroll_torque, unyaw_gain, unyaw_torque, control_authority_time, preload_time, max_preload, min_preload_time, max_preload_time, min_dpad_preload_time, max_dpad_preload_time, min_backflip_time, max_backflip_time, min_backflip_torque, max_backflip_torque, backflip_torque_rate_increase, backflip_torque_rate_decrease, front_wreck_speed_limit, back_wreck_speed_limit, side_wreck_speed_limit, racing_down_wreck_speed_limit, freestyle_down_wreck_speed_limit, ground_pitch_down_wreck_angle, ground_pitch_up_wreck_angle, airborne_pitch_down_wreck_angle, airborne_pitch_up_wreck_angle, airborne_roll_wreck_angle, no_hander_wreck_speed_limit, no_hander_max_roll_angle, joust_wreck_height, crossup_wreck, crossup_wreck_time, rotation_speed });
+wire!(crate::atv_contact::Held { record, entries, movers, mass, body });
+wire!(crate::atv_moto::Parts { drive, driven, cofg_off, last_position, body_on, flags, record, spin, scene, bounds, spatial, collidables, rear_node });
+wire!(crate::atv_wheel::More { record, kept, chassis_velocity_local, ground_known, ground_velocity, ground_point_velocity, steer_axis });
+wire!(crate::atv_wheel::Spin { brake, parametric, donut, inv_inertia, tire_inertia, arm, no_moment, rear_pair, other_load_scale, slip, angle, spin, torque, cleared, side_per_load, surfaces, inv_radius, local_velocity, local_force, frame });
+wire!(crate::phy::Joystick { x_axis_rate_limit, y_axis_rate_limit, x_dpad_rate_limit, y_dpad_rate_limit, gas_rate_limit, brake_rate_limit, clutch_in_rate_limit, clutch_out_rate_limit });
+wire!(crate::quad::Player { flags, step, word, speed, countdown, listeners });
+wire!(crate::quad::Race { clock, watchers });
+wire!(crate::quad::Surface { hazard, time });
+wire!(crate::r#move::Params { cofg, balance_cofg, cofg_travel_forward, cofg_travel_back, brake_cofg_travel_forward, clutch_cofg_travel_back, steer_speed_1, steer_scale_1, steer_speed_2, steer_scale_2, max_donut_speed, donut_angle, donut_angle_back, front_spring_when_stopped, front_spring, rear_spring_when_stopped, rear_spring, clutch_torque_scale_time, max_clutch_torque_scale_speed, max_clutch_torque_scale, up_shift_rpm, down_shift_rpm, reverse_speed, reverse_gain, drag, gravity, donut_roll_angle_scale, max_roll_command, max_roll_speed, roll_gain, min_stand_upright_speed, max_stand_upright_speed, roll_control_gain, roll_control_rate_gain, roll_control_max_cg, max_roll_rate_disturbance, max_pitch_command, pitch_gain, pitch_rate_gain, inv_wheelie_top_speed, max_stoppie_pitch_command, stoppie_pitch_gain, stoppie_yaw_rate_scale, stoppie_top_speed, balance_inertia_rate, min_balance_inertia, max_balance_inertia, input_inertia, max_balance_point, balance_noise_amplitude, balance_noise_time_scale });
+wire!(crate::handling::record::Record { heightfield, world_rays, rays, sweep, touching, touching_other, on_ground, on_object, damp, rest_linear, rest_angular, offset, lead, push_out, facing, swept_from, swept_to, body, terrain, contacts, capacity, nearby, mask, part, probe, struck });
+wire!(crate::handling::tail::Vehicle { state, kind, rumbler, speed, slow_below, speed_len, side, ahead, body_position, body_velocity, wheels, held, put_back_due, put_back_was, free, stuck, stuck_time, last_free, on_ground, airborne, hang_time, wreck_reason, wheelie_clock, stoppie_clock, wheelie, stoppie, wheelie_distance, stoppie_distance, best_wheelie, best_stoppie, best_wheelie_distance, best_stoppie_distance, wheelie_trick, stoppie_trick, run, player, run_flags, run_step, run_top_speed, run_landed, run_left, player_left, run_time, top_speed, distance, landings, landed, lap, lap_left, clock, id, countdown, fade, fade_object, frame_word, ride_clock, down, up, cleared });
+wire!(crate::handling::FlipClip; clip);
+wire!(crate::atv_wheel::Chassis { cofg, velocity, spin, node });
+wire!(crate::atv_wheel::Mover { node, origin, velocity, spin });
+
+impl Wire for crate::atv_wheel::Ground {
+    fn put(&self, out: &mut Vec<u8>) {
+        use crate::atv_wheel::Ground;
+        match self {
+            Ground::Still => 0u8.put(out),
+            Ground::Object { cofg, cofg_world, on } => {
+                1u8.put(out);
+                cofg.put(out);
+                cofg_world.put(out);
+                on.put(out);
+            }
+            Ground::Mover(m) => {
+                2u8.put(out);
+                m.put(out);
+            }
+        }
+    }
+    fn take(r: &mut Reader<'_>) -> Result<Self, String> {
+        use crate::atv_wheel::Ground;
+        Ok(match u8::take(r)? {
+            0 => Ground::Still,
+            1 => Ground::Object { cofg: Wire::take(r)?, cofg_world: Wire::take(r)?, on: Wire::take(r)? },
+            2 => Ground::Mover(Wire::take(r)?),
+            i => return Err(format!("a quad wheel's ground has no variant {i}")),
+        })
+    }
+}
+
+impl Wire for crate::atv_wheel::Holder {
+    fn put(&self, out: &mut Vec<u8>) {
+        use crate::atv_wheel::Holder;
+        match self {
+            Holder::Body(b) => {
+                0u8.put(out);
+                b.put(out);
+            }
+            Holder::Chassis(c) => {
+                1u8.put(out);
+                c.put(out);
+            }
+        }
+    }
+    fn take(r: &mut Reader<'_>) -> Result<Self, String> {
+        use crate::atv_wheel::Holder;
+        Ok(match u8::take(r)? {
+            0 => Holder::Body(Wire::take(r)?),
+            1 => Holder::Chassis(Wire::take(r)?),
+            i => return Err(format!("a quad wheel's holder has no variant {i}")),
+        })
+    }
+}
+wire!(crate::quad::Col { handle, objects, categories });
+wire!(crate::atv_moto::Collidables { sync, riding, frame, active, states });
+wire!(crate::quad::TireSurface { drive, side, drag });
+wire!(crate::atv_contact::Entry { contact, relative });
+wire!(crate::atv_contact::Record { collider, impulse_mask });
+wire!(crate::atv_moto::Bounds { floor, area });
+wire!(crate::atv_moto::Drive { spin, torque, from_torque, forward });
+wire!(crate::atv_moto::Scene { nodes, untamed });
+wire!(crate::atv_moto::Spin { armed, min_time, max_time, grace, min_pitch, max_pitch, min_yaw, max_yaw, rate, moment, heading, dir, flick, stunt_right, stunt_left, clip });
+wire!(crate::atv_wheel::Body { position, velocity, force, moment, correction, orientation, cofg, spin });
+wire!(crate::contact::Mover { spin, velocity, node, origin });
+wire!(crate::handling::record::Contact { kind, from, to, normal, point, surface, other, mover });
+wire!(crate::handling::tail::Wheel { ray_hit, touching, rough, surface_holds, stuck_limit });
+wire!(crate::air::RotationSpeed; speed);
+wire!(crate::atv_moto::Node { local, world, parent, child, sibling, flags, spatial, centre, half, more, reach, own_centre, own_half, radius, list, listed });
+wire!(crate::atv_sync::Collidable { kind, frame, centre, reach, spatial });
+wire!(crate::quad::List { mode, list });
+wire_enum!(crate::quad::Part { Riding, Frame, Sweep, Trigger, Wreck }); 
+
+impl Wire for crate::atv_sync::Kind {
+    fn put(&self, out: &mut Vec<u8>) {
+        use crate::atv_sync::Kind;
+        match self {
+            Kind::Rays { tree, bound } => {
+                0u8.put(out);
+                tree.put(out);
+                bound.put(out);
+            }
+            Kind::Mesh { local, centre, half, stood, before } => {
+                1u8.put(out);
+                local.put(out);
+                centre.put(out);
+                half.put(out);
+                stood.put(out);
+                before.put(out);
+            }
+        }
+    }
+    fn take(r: &mut Reader<'_>) -> Result<Self, String> {
+        use crate::atv_sync::Kind;
+        Ok(match u8::take(r)? {
+            0 => Kind::Rays { tree: Wire::take(r)?, bound: Wire::take(r)? },
+            1 => Kind::Mesh { local: Wire::take(r)?, centre: Wire::take(r)?, half: Wire::take(r)?, stood: Wire::take(r)?, before: Wire::take(r)? },
+            i => return Err(format!("a quad collidable has no kind {i}")),
+        })
+    }
+}
+impl Wire for crate::quad::Call {
+    /// As the variant's place in the list, then what it carries.
+    fn put(&self, out: &mut Vec<u8>) {
+        use crate::quad::Call;
+        match self {
+            Call::InputLimiter(a) => {
+                0u8.put(out);
+                a.put(out);
+            }
+            Call::AutoShift { dt, inv_radius } => {
+                1u8.put(out);
+                dt.put(out);
+                inv_radius.put(out);
+            }
+            Call::Clutch(a) => {
+                2u8.put(out);
+                a.put(out);
+            }
+            Call::HeadTail => 3u8.put(out),
+            Call::Gravity => 4u8.put(out),
+            Call::Preload(a) => {
+                5u8.put(out);
+                a.put(out);
+            }
+            Call::Backflip(a) => {
+                6u8.put(out);
+                a.put(out);
+            }
+            Call::SpinAir(a) => {
+                7u8.put(out);
+                a.put(out);
+            }
+            Call::EngineUpdate(a) => {
+                8u8.put(out);
+                a.put(out);
+            }
+            Call::AirDrag(a) => {
+                9u8.put(out);
+                a.put(out);
+            }
+            Call::AirborneControl(a) => {
+                10u8.put(out);
+                a.put(out);
+            }
+            Call::WheelClear(a) => {
+                11u8.put(out);
+                a.put(out);
+            }
+            Call::Contacts => 12u8.put(out),
+            Call::Suspension(a, b) => {
+                13u8.put(out);
+                a.put(out);
+                b.put(out);
+            }
+            Call::TireForces(a, b) => {
+                14u8.put(out);
+                a.put(out);
+                b.put(out);
+            }
+            Call::WheelIntegrate(a, b) => {
+                15u8.put(out);
+                a.put(out);
+                b.put(out);
+            }
+            Call::RevLimit => 16u8.put(out),
+            Call::PeakRates => 17u8.put(out),
+            Call::VehiclePost(a) => {
+                18u8.put(out);
+                a.put(out);
+            }
+            Call::NodePosition => 19u8.put(out),
+            Call::BikeVehicleUpdate(a) => {
+                20u8.put(out);
+                a.put(out);
+            }
+            Call::HazardSurface { dt, time, sunk } => {
+                21u8.put(out);
+                dt.put(out);
+                time.put(out);
+                sunk.put(out);
+            }
+            Call::UntamedHazardSurface { dt, time, sunk, grounded } => {
+                22u8.put(out);
+                dt.put(out);
+                time.put(out);
+                sunk.put(out);
+                grounded.put(out);
+            }
+            Call::Rumble { soft, strength } => {
+                23u8.put(out);
+                soft.put(out);
+                strength.put(out);
+            }
+            Call::StartStunt(a) => {
+                24u8.put(out);
+                a.put(out);
+            }
+            Call::EndStunt => 25u8.put(out),
+            Call::CountdownOut => 26u8.put(out),
+            Call::CountdownListener(a) => {
+                27u8.put(out);
+                a.put(out);
+            }
+            Call::CountdownWatcher(a) => {
+                28u8.put(out);
+                a.put(out);
+            }
+            Call::Post(a) => {
+                29u8.put(out);
+                a.put(out);
+            }
+            Call::WheelReset(a) => {
+                30u8.put(out);
+                a.put(out);
+            }
+            Call::Detach => 31u8.put(out),
+            Call::VehiclePutBack { place, keep, flags } => {
+                32u8.put(out);
+                place.put(out);
+                keep.put(out);
+                flags.put(out);
+            }
+            Call::Reattach => 33u8.put(out),
+            Call::ReadFrame(a) => {
+                34u8.put(out);
+                a.put(out);
+            }
+            Call::SetFrame { hung, frame } => {
+                35u8.put(out);
+                hung.put(out);
+                frame.put(out);
+            }
+            Call::NetPack => 36u8.put(out),
+            Call::ActorMoved => 37u8.put(out),
+            Call::NodeOrientation => 38u8.put(out),
+            Call::NodeLocal => 39u8.put(out),
+            Call::NetPost(a) => {
+                40u8.put(out);
+                a.put(out);
+            }
+            Call::PreloadCue => 41u8.put(out),
+            Call::Wreck(a) => {
+                42u8.put(out);
+                a.put(out);
+            }
+            Call::SurfaceDrag(a, b) => {
+                43u8.put(out);
+                a.put(out);
+                b.put(out);
+            }
+            Call::SpinIntegrate(a, b) => {
+                44u8.put(out);
+                a.put(out);
+                b.put(out);
+            }
+            Call::GravityRecord => 45u8.put(out),
+            Call::BodyReset => 46u8.put(out),
+            Call::Respawn => 47u8.put(out),
+            Call::SpatialUpdate => 48u8.put(out),
+            Call::NodeBounds => 49u8.put(out),
+            Call::CollisionSync => 50u8.put(out),
+            Call::NodeRebound => 51u8.put(out),
+            Call::SpatialMove { node, centre, half, reach } => {
+                52u8.put(out);
+                node.put(out);
+                centre.put(out);
+                half.put(out);
+                reach.put(out);
+            }
+            Call::PartSync(a) => {
+                53u8.put(out);
+                a.put(out);
+            }
+            Call::Gather(a) => {
+                54u8.put(out);
+                a.put(out);
+            }
+            Call::PartMove { part, centre, half, reach } => {
+                55u8.put(out);
+                part.put(out);
+                centre.put(out);
+                half.put(out);
+                reach.put(out);
+            }
+            Call::PartMade(a) => {
+                56u8.put(out);
+                a.put(out);
+            }
+            Call::PartFlags(a, b) => {
+                57u8.put(out);
+                a.put(out);
+                b.put(out);
+            }
+            Call::PartHung(a) => {
+                58u8.put(out);
+                a.put(out);
+            }
+            Call::PartLoad(a) => {
+                59u8.put(out);
+                a.put(out);
+            }
+            Call::PartReady(a) => {
+                60u8.put(out);
+                a.put(out);
+            }
+            Call::PartHide(a) => {
+                61u8.put(out);
+                a.put(out);
+            }
+            Call::PartShow(a) => {
+                62u8.put(out);
+                a.put(out);
+            }
+            Call::PartOffWorld(a) => {
+                63u8.put(out);
+                a.put(out);
+            }
+            Call::PartInWorld(a) => {
+                64u8.put(out);
+                a.put(out);
+            }
+            Call::LevelSetup => 65u8.put(out),
+            Call::NetInterpolate { older, newer, t } => {
+                66u8.put(out);
+                older.put(out);
+                newer.put(out);
+                t.put(out);
+            }
+            Call::NetUnpack(a) => {
+                67u8.put(out);
+                a.put(out);
+            }
+            Call::NetPutBack => 68u8.put(out),
+            Call::AnimStop => 69u8.put(out),
+            Call::PlayClip { clip, weight, fade } => {
+                70u8.put(out);
+                clip.put(out);
+                weight.put(out);
+                fade.put(out);
+            }
+            Call::BlendClips { clips, weight, mix, fade } => {
+                71u8.put(out);
+                clips.put(out);
+                weight.put(out);
+                mix.put(out);
+                fade.put(out);
+            }
+            Call::PoseNodes => 72u8.put(out),
+            Call::AttachmentMoved => 73u8.put(out),
+        }
+    }
+    fn take(r: &mut Reader<'_>) -> Result<Self, String> {
+        use crate::quad::Call;
+        Ok(match u8::take(r)? {
+            0 => Call::InputLimiter(Wire::take(r)?),
+            1 => Call::AutoShift { dt: Wire::take(r)?, inv_radius: Wire::take(r)? },
+            2 => Call::Clutch(Wire::take(r)?),
+            3 => Call::HeadTail,
+            4 => Call::Gravity,
+            5 => Call::Preload(Wire::take(r)?),
+            6 => Call::Backflip(Wire::take(r)?),
+            7 => Call::SpinAir(Wire::take(r)?),
+            8 => Call::EngineUpdate(Wire::take(r)?),
+            9 => Call::AirDrag(Wire::take(r)?),
+            10 => Call::AirborneControl(Wire::take(r)?),
+            11 => Call::WheelClear(Wire::take(r)?),
+            12 => Call::Contacts,
+            13 => Call::Suspension(Wire::take(r)?, Wire::take(r)?),
+            14 => Call::TireForces(Wire::take(r)?, Wire::take(r)?),
+            15 => Call::WheelIntegrate(Wire::take(r)?, Wire::take(r)?),
+            16 => Call::RevLimit,
+            17 => Call::PeakRates,
+            18 => Call::VehiclePost(Wire::take(r)?),
+            19 => Call::NodePosition,
+            20 => Call::BikeVehicleUpdate(Wire::take(r)?),
+            21 => Call::HazardSurface { dt: Wire::take(r)?, time: Wire::take(r)?, sunk: Wire::take(r)? },
+            22 => Call::UntamedHazardSurface { dt: Wire::take(r)?, time: Wire::take(r)?, sunk: Wire::take(r)?, grounded: Wire::take(r)? },
+            23 => Call::Rumble { soft: Wire::take(r)?, strength: Wire::take(r)? },
+            24 => Call::StartStunt(Wire::take(r)?),
+            25 => Call::EndStunt,
+            26 => Call::CountdownOut,
+            27 => Call::CountdownListener(Wire::take(r)?),
+            28 => Call::CountdownWatcher(Wire::take(r)?),
+            29 => Call::Post(Wire::take(r)?),
+            30 => Call::WheelReset(Wire::take(r)?),
+            31 => Call::Detach,
+            32 => Call::VehiclePutBack { place: Wire::take(r)?, keep: Wire::take(r)?, flags: Wire::take(r)? },
+            33 => Call::Reattach,
+            34 => Call::ReadFrame(Wire::take(r)?),
+            35 => Call::SetFrame { hung: Wire::take(r)?, frame: Wire::take(r)? },
+            36 => Call::NetPack,
+            37 => Call::ActorMoved,
+            38 => Call::NodeOrientation,
+            39 => Call::NodeLocal,
+            40 => Call::NetPost(Wire::take(r)?),
+            41 => Call::PreloadCue,
+            42 => Call::Wreck(Wire::take(r)?),
+            43 => Call::SurfaceDrag(Wire::take(r)?, Wire::take(r)?),
+            44 => Call::SpinIntegrate(Wire::take(r)?, Wire::take(r)?),
+            45 => Call::GravityRecord,
+            46 => Call::BodyReset,
+            47 => Call::Respawn,
+            48 => Call::SpatialUpdate,
+            49 => Call::NodeBounds,
+            50 => Call::CollisionSync,
+            51 => Call::NodeRebound,
+            52 => Call::SpatialMove { node: Wire::take(r)?, centre: Wire::take(r)?, half: Wire::take(r)?, reach: Wire::take(r)? },
+            53 => Call::PartSync(Wire::take(r)?),
+            54 => Call::Gather(Wire::take(r)?),
+            55 => Call::PartMove { part: Wire::take(r)?, centre: Wire::take(r)?, half: Wire::take(r)?, reach: Wire::take(r)? },
+            56 => Call::PartMade(Wire::take(r)?),
+            57 => Call::PartFlags(Wire::take(r)?, Wire::take(r)?),
+            58 => Call::PartHung(Wire::take(r)?),
+            59 => Call::PartLoad(Wire::take(r)?),
+            60 => Call::PartReady(Wire::take(r)?),
+            61 => Call::PartHide(Wire::take(r)?),
+            62 => Call::PartShow(Wire::take(r)?),
+            63 => Call::PartOffWorld(Wire::take(r)?),
+            64 => Call::PartInWorld(Wire::take(r)?),
+            65 => Call::LevelSetup,
+            66 => Call::NetInterpolate { older: Wire::take(r)?, newer: Wire::take(r)?, t: Wire::take(r)? },
+            67 => Call::NetUnpack(Wire::take(r)?),
+            68 => Call::NetPutBack,
+            69 => Call::AnimStop,
+            70 => Call::PlayClip { clip: Wire::take(r)?, weight: Wire::take(r)?, fade: Wire::take(r)? },
+            71 => Call::BlendClips { clips: Wire::take(r)?, weight: Wire::take(r)?, mix: Wire::take(r)?, fade: Wire::take(r)? },
+            72 => Call::PoseNodes,
+            73 => Call::AttachmentMoved,
+            i => return Err(format!("the quad's step log has no call {i}")),
         })
     }
 }

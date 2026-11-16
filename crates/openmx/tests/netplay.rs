@@ -2649,3 +2649,230 @@ fn a_joiner_lacking_a_fliers_pack_closes_it_at_the_join_on_every_machine() {
     there.decode(&open_state).unwrap();
     assert!(!there.fliers[0].closed, "a state that says no closed flier opens it");
 }
+
+// ---------------------------------------------------------------------------------------------------
+// MD172: the quad on the snapshot wire
+// ---------------------------------------------------------------------------------------------------
+
+/// MX vs. ATV's quad off the pack's Race 250 P handling file, as tests/atv_modifiers.rs reads it, or
+/// `None` without the pack.
+fn the_packs_quad() -> Option<vehicle::AtvRide> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../mods/machines/mxvatv_atv");
+    if !dir.join("mod.json").is_file() {
+        println!("SKIPPED: no mods/machines/mxvatv_atv (openmx-mods' import-atv makes it)");
+        return None;
+    }
+    let files = game_render::disc::Res::folder(&dir).expect("the pack's folder reads");
+    Some(vehicle::AtvRide::read("mxvatv_atv", "Veh/atv_Race250P.phy", &mut |n| files.read(&n.replace('/', "\\")).ok()).expect("the quad builds"))
+}
+
+/// Seat `seat`'s pad at `tick` with its quad asked for from tick `10 + 5 × seat` on (a level, as the
+/// shell's pad says it every tick): the mashed pad otherwise, its throttle the quad's gas.
+fn on_the_quad(seat: usize, tick: usize) -> Report {
+    let mut pad = mash(seat, tick);
+    if tick >= 10 + 5 * seat {
+        pad.0[net::SWITCH] = vehicle::Wanted { to: Some(vehicle::Kind::Atv), ..Default::default() }.byte();
+    }
+    pad
+}
+
+/// The ride with every seat's quad (MD152's `quads`, one copy a seat, as the shell reads them), each
+/// seat but `biker` asking for its quad ([`on_the_quad`]); `glitch` knocks the biker's bike sideways
+/// at [`GLITCH`] on this machine only (the steps' hook does not run for a seat on its quad).
+struct QuadRide {
+    ride: Ride,
+    quads: Vec<Option<vehicle::AtvRide>>,
+    biker: Option<usize>,
+}
+
+impl QuadRide {
+    fn new(seats: usize, quad: &vehicle::AtvRide) -> QuadRide {
+        QuadRide { ride: Ride::new(seats), quads: vec![Some(quad.clone()); 4], biker: None }
+    }
+}
+
+impl Machine for QuadRide {
+    type S = rides::State;
+    fn frame(&mut self, np: &mut Netplay<rides::State>, local: &[Report]) {
+        let seats = np.lineup.mine(&np.me);
+        let biker = self.biker;
+        let pads: Vec<Report> = seats.iter().map(|&s| if Some(s) == biker { mash(s, np.tick()) } else { on_the_quad(s, np.tick()) }).collect();
+        assert_eq!(pads.len(), local.len());
+        let glitch = self.ride.glitch;
+        let mut after = |seat: usize, _: F, sim: &mut Sim, _: &game_sim::ride::Controls| {
+            if glitch && Some(seat) == biker && sim.ticks == GLITCH {
+                sim.rider.ride.chassis.vel = Vf::new(0.5, 0.0, 0.0, 0.0);
+            }
+        };
+        let mut game = Rides { quads: &mut self.quads, fliers: &mut [], sims: &mut self.ride.sims, world: &mut self.ride.world, after: Some(&mut after), time_scale: None, plane: None, cars: &[] };
+        np.frame(&mut game, &pads, ROUND.as_secs_f32());
+    }
+    fn hash(&self) -> u64 {
+        self.ride.hash()
+    }
+}
+
+/// A ride with quads out says itself in bytes (MD172): the state goes over with seat 1 and 2 on
+/// their quads and seat 3 on its bike, comes back the same ride bit for bit (the same hash, the same
+/// bytes again), and both copies ride on as one.
+#[test]
+fn a_ride_with_quads_out_says_itself_in_bytes() {
+    let Some(quad) = the_packs_quad() else { return };
+    let pads = |t: usize| (0..3).map(|s| if s < 2 { on_the_quad(s, t) } else { mash(s, t) }).collect::<Vec<_>>();
+    let (mut quads, mut there, mut world) = (vec![Some(quad.clone()); 3], sims(3), Flat::default());
+    let mut game = Rides { quads: &mut quads, fliers: &mut [], sims: &mut there, world: &mut world, after: None, time_scale: None, plane: None, cars: &[] };
+    for t in 0..150 {
+        game.step(t, &pads(t));
+    }
+    assert!(game.sims[0].quad.is_some() && game.sims[1].quad.is_some() && game.sims[2].quad.is_none(), "seats 1 and 2 on their quads");
+    let bytes = game.encode().expect("a ride with a quad out has a codec");
+    let hash = game.hash();
+    let (mut quads2, mut here, mut world2) = (vec![Some(quad.clone()); 3], sims(3), Flat::default());
+    let mut mine = Rides { quads: &mut quads2, fliers: &mut [], sims: &mut here, world: &mut world2, after: None, time_scale: None, plane: None, cars: &[] };
+    assert_ne!(mine.hash(), hash);
+    mine.decode(&bytes).unwrap();
+    assert!(mine.sims[0].quad.is_some() && mine.sims[1].quad.is_some() && mine.sims[2].quad.is_none());
+    assert_eq!(mine.hash(), hash);
+    assert_eq!(mine.encode().unwrap(), bytes);
+    for t in 150..300 {
+        mine.step(t, &pads(t));
+        game.step(t, &pads(t));
+    }
+    assert_eq!(mine.hash(), game.hash(), "the decoded ride rides on as the one it came from");
+    let lane = game.sims[0].quad.as_ref().unwrap();
+    let (at, from) = (lane.ride.body.position, lane.taken_at);
+    assert!((at.x() - from.x()).hypot(at.z() - from.z()) > 1.0, "seat 1's quad stayed where it was taken");
+}
+
+/// MD172's resync: seats 1 and 2 on their quads, seat 3 on its bike; one machine's ride parts from
+/// the other's at [`GLITCH`] (seat 3's bike knocked sideways); both see it, the host's state goes
+/// over with both quads out, the guest takes it on, and from then every settled tick agrees, the
+/// quads' state in every hash — one resync each side, nothing out of sync after. Before MD172 the
+/// host could not say this state and the desync stayed.
+#[test]
+fn a_desync_with_quads_out_is_resynced() {
+    let Some(quad) = the_packs_quad() else { return };
+    let link = Link { loss: 0.05, lag: 3, outage: 0..0, oneway: false };
+    let biker = |n| QuadRide { biker: Some(2), ..QuadRide::new(n, &quad) };
+    let r = run("host,g,g", Timing::default(), biker, &link, 0..900, |round, r, _| {
+        if round == 0 {
+            r.games[1].ride.glitch = true;
+        }
+    });
+    let fresh = r.nets[1].resync.fresh as usize;
+    for np in &r.nets {
+        assert!(!np.desyncs.is_empty(), "{} saw no desync", np.me);
+        assert_eq!(np.resync.done, 1, "{}: resyncs", np.me);
+        assert!(!np.desynced, "{} still out of sync", np.me);
+        if let Some(at) = &np.report {
+            let _ = std::fs::remove_file(at);
+        }
+    }
+    for i in 0..2 {
+        let on: Vec<bool> = r.games[i].ride.sims.iter().map(|s| s.quad.is_some()).collect();
+        assert_eq!(on, [true, true, false], "{}: seats 1 and 2 on their quads", r.names[i]);
+    }
+    assert!(fresh > 330, "taken at {fresh}");
+    let n = r.agree(&[0, 1], fresh);
+    assert!(n > 300, "only {n} ticks agreed after the resync");
+    assert_eq!(r.nets[0].hashes[..320], r.nets[1].hashes[..320]);
+    assert_ne!(r.nets[0].hashes[330], r.nets[1].hashes[330]);
+}
+
+/// MD172's restart: of three machines, every seat on its quad, `g` leaves from the pause. The
+/// restart that takes its seat out hands the host's state, quads and all, to `k`: the ride goes on
+/// with both left agreeing. Before MD172 the state could not be said and the leave ended the ride.
+#[test]
+fn a_leave_with_quads_out_restarts_and_the_ride_goes_on() {
+    let Some(quad) = the_packs_quad() else { return };
+    let link = Link { loss: 0.05, lag: 3, outage: 0..0, oneway: false };
+    let mut asked = 0;
+    let r = run("host,g,k", short(), |n| QuadRide::new(n, &quad), &link, 0..700, |round, r, _| {
+        if round == 200 {
+            asked = r.nets[1].tick();
+            r.nets[1].leave(&[]).unwrap();
+        }
+    });
+    let (h, g, k) = (&r.nets[0], &r.nets[1], &r.nets[2]);
+    assert_eq!(g.end.as_deref(), Some("you left the ride"));
+    let t = h.leave.left.first().expect("g's seat went").2 as usize;
+    assert!((asked - 10..asked + 30).contains(&t), "g's seat went at tick {t}, asked at {asked}");
+    for np in [h, k] {
+        assert_eq!(np.lineup.text(), "host,-,k", "{}", np.me);
+        assert_eq!((np.recover.restarts, np.end.as_deref()), (1, None), "{}", np.me);
+        assert!(np.desyncs.is_empty(), "{}: {:?}", np.me, np.desyncs);
+    }
+    for i in [0, 2] {
+        let s = &r.games[i].ride.sims;
+        assert!(s[0].quad.is_some() && s[2].quad.is_some(), "{}: the riders left on their quads", r.names[i]);
+    }
+    let n = r.agree(&[0, 2], t);
+    assert!(n > 300, "the host and k agree on {n} ticks from {t}");
+}
+
+/// MD172's drop-in: a one-machine freeride with its rider on the quad takes a joiner mid-ride, the
+/// quad still out — before MD172 the join waited for it to be put away. The joiner takes the host's
+/// state, seat 1's quad in it, and rides its own seat to its quad too; from the join both agree.
+#[test]
+fn a_freeride_with_a_quad_out_takes_a_peer_mid_ride() {
+    let Some(quad) = the_packs_quad() else { return };
+    let join = 200;
+    ggrs::clock::drive(true);
+    let spawn = rides::seat_bytes(&sims(1)[0]);
+    let mut r: Run<QuadRide> = Run {
+        names: vec!["host".into()],
+        nets: vec![Netplay::new(Lineup::parse("host").unwrap(), "host", Timing::default(), dumps()).unwrap()],
+        games: vec![QuadRide::new(1, &quad)],
+        ran: vec![Vec::new()],
+        biggest: 0,
+        sent: Vec::new(),
+    };
+    let mut wire: Vec<(usize, u32, String, Vec<u8>)> = Vec::new();
+    for round in 0..800u32 {
+        if round == join {
+            assert!(r.games[0].ride.sims[0].quad.is_some(), "the host's rider is on the quad when g comes");
+            r.names.push("g".into());
+            r.nets.push(Netplay::joining("host", "g", Timing::default(), dumps()).unwrap());
+            r.games.push(QuadRide::new(1, &quad));
+            r.ran.push(Vec::new());
+        }
+        if round + 30 == join {
+            r.nets[0].admit("g", &[1], rides::spawn_on(&spawn, &[])).unwrap();
+        }
+        for (to, at, from, d) in std::mem::take(&mut wire) {
+            if at > round {
+                wire.push((to, at, from, d));
+            } else {
+                r.nets[to].heard(&from, &d);
+            }
+        }
+        for i in 0..r.names.len() {
+            let np = &mut r.nets[i];
+            let local: Vec<Report> = np.lineup.mine(&np.me).into_iter().map(|s| mash(s, np.tick())).collect();
+            r.games[i].frame(np, &local);
+            for (to, d) in np.outgoing() {
+                if let Some(j) = r.names.iter().position(|n| *n == to) {
+                    wire.push((j, round + 2, r.names[i].clone(), d));
+                }
+            }
+            np.said.clear();
+            r.ran[i].push(np.tick());
+        }
+        ggrs::clock::advance(ROUND);
+    }
+    ggrs::clock::drive(false);
+    let (h, g) = (&r.nets[0], &r.nets[1]);
+    let joins: Vec<&str> = h.admit.joins.iter().map(|(p, _)| p.as_str()).collect();
+    assert_eq!(joins, ["g"]);
+    let t = h.admit.joins[0].1 as usize;
+    assert!(t > join as usize && t < join as usize + 40, "g taken on at tick {t}, up at round {join}");
+    for np in [h, g] {
+        assert_eq!((np.lineup.text().as_str(), np.end.as_deref()), ("host,g", None), "{}", np.me);
+        assert!(np.desyncs.is_empty() && !np.desynced, "{}: {:?}", np.me, np.desyncs);
+    }
+    for i in 0..2 {
+        assert!(r.games[i].ride.sims.len() == 2 && r.games[i].ride.sims.iter().all(|s| s.quad.is_some()), "{}: both seats on their quads", r.names[i]);
+    }
+    let n = r.agree(&[0, 1], t);
+    assert!(n > 400, "host and g agree on {n} ticks from the join at {t}");
+}
