@@ -543,6 +543,9 @@ pub(crate) struct UBeside {
     /// The tire steps handed out for a tire standing on an object, which the port leaves to its
     /// caller and this harness cannot answer: the frame is not compared.
     unported: Vec<Call>,
+    /// The original unwrecked and put the truck back this frame (not compared): a query the original
+    /// never asked is answered with its nearest.
+    put_back: bool,
     /// The drive and frame, for the panics.
     at: String,
     pub(crate) asked: usize,
@@ -553,7 +556,7 @@ impl UBeside {
     fn answer(&mut self, at: Vf) -> UGround {
         self.asked += 1;
         let mut k = self.ground.iter().position(|g| g.asked == at.to_bits());
-        if k.is_none() && (!self.unported.is_empty() || std::env::var("PROBE_AT").is_ok()) {
+        if k.is_none() && (self.put_back || !self.unported.is_empty() || std::env::var("PROBE_AT").is_ok()) {
             let d = |g: &UGround| { let v = Vf(g.asked.map(f32::from_bits)); (0..3).map(|i| (v.0[i] - at.0[i]).abs()).sum::<f32>() };
             k = (0..self.ground.len()).min_by(|&x, &y| d(&self.ground[x]).total_cmp(&d(&self.ground[y])));
         }
@@ -625,6 +628,8 @@ pub(crate) struct USeen {
     pub(crate) wrecked: usize,
     /// Frames not compared: a tire stood on an object ([`UBeside::unported`]).
     pub(crate) on_objects: Vec<usize>,
+    /// Frames not compared: the truck unwrecked and was put back at its spot.
+    pub(crate) respawned: Vec<usize>,
     /// Frames whose record held contacts with another record.
     pub(crate) with_others: usize,
 }
@@ -731,14 +736,15 @@ pub(crate) fn u_beside(d: &UDrive, ride: bool) -> Option<USeen> {
                 eprintln!("G {:x} {:08x?} {:?} {:?} {:?}", g.from, g.asked, g.point, g.normal, g.record);
             }
         }
-        let beside = UBeside { ground: std::mem::take(&mut *ground.borrow_mut()), noise: noise.borrow_mut().drain(..).map(|(_, at, f)| (at, f)).collect(), used: Vec::new(), sort: u_sort_answer(ee, car_at_), held, resolves: 0, unported: Vec::new(), at: String::new(), asked: 0, rest: Vec::new() };
-        let mut pieces = Pieces { keys: m.keys(), state: m.state, rest: UBeside { at: format!("{name} frame {k}"), ..beside } };
+        let beside = UBeside { ground: std::mem::take(&mut *ground.borrow_mut()), noise: noise.borrow_mut().drain(..).map(|(_, at, f)| (at, f)).collect(), used: Vec::new(), sort: u_sort_answer(ee, car_at_), held, resolves: 0, unported: Vec::new(), put_back: false, at: String::new(), asked: 0, rest: Vec::new() };
+        let put_back = car.state != atv_car::RIDING && read_car(&va, &p).state == atv_car::RIDING;
+        let mut pieces = Pieces { keys: m.keys(), state: m.state, rest: UBeside { at: format!("{name} frame {k}"), put_back, ..beside } };
         if ride {
             let mut r = the_ride.borrow_mut();
             let r = r.get_or_insert_with(|| super::drives::ride_of(table));
             r.update.untamed = true;
             (r.keys, r.state, r.car, r.body, r.vehicle) = (std::mem::take(&mut pieces.keys), pieces.state, car, body, v);
-            let rest = std::mem::replace(&mut pieces.rest, UBeside { ground: Vec::new(), noise: Vec::new(), used: Vec::new(), sort: SortAnswer::default(), held: None, resolves: 0, unported: Vec::new(), at: String::new(), asked: 0, rest: Vec::new() });
+            let rest = std::mem::replace(&mut pieces.rest, UBeside { ground: Vec::new(), noise: Vec::new(), used: Vec::new(), sort: SortAnswer::default(), held: None, resolves: 0, unported: Vec::new(), put_back: false, at: String::new(), asked: 0, rest: Vec::new() });
             pieces.rest = r.frame_with(dt, rest);
             (pieces.keys, pieces.state) = (std::mem::take(&mut r.keys), r.state);
             (car, body) = (r.car.clone(), r.body.clone());
@@ -748,6 +754,13 @@ pub(crate) fn u_beside(d: &UDrive, ride: bool) -> Option<USeen> {
         }
         if !pieces.rest.unported.is_empty() {
             keep.borrow_mut().on_objects.push(k);
+            return;
+        }
+        // The unwreck's respawn stands the truck at its spot through Untamed's own put-back
+        // (0x4ca900: a ground query under the spot, the node's rows, the body placed from the node),
+        // not MX Unleashed's the port has.
+        if put_back {
+            keep.borrow_mut().respawned.push(k);
             return;
         }
         let pm = Mx { keys: Keys { tires: pieces.keys.tires.clone(), ..m.keys.clone() }, state: pieces.state, ..m };
@@ -807,7 +820,7 @@ pub(crate) fn u_beside(d: &UDrive, ride: bool) -> Option<USeen> {
     }
     let seen = std::mem::take(&mut *seen.borrow_mut());
     eprintln!(
-        "MD161a {} ({}): {} frames, {} words in all equal to SLUS-21701's; {} ground queries answered; handed out {:?}; wrecked on {}; {} other world steps; contacts with another record on {}; not compared, a tire on an object: {:?}",
+        "MD161a {} ({}): {} frames, {} words in all equal to SLUS-21701's; {} ground queries answered; handed out {:?}; wrecked on {}; {} other world steps; contacts with another record on {}; not compared, a tire on an object: {:?}, put back: {:?}",
         d.name,
         if ride { "through Ride" } else { "frame_untamed" },
         seen.frames,
@@ -817,7 +830,8 @@ pub(crate) fn u_beside(d: &UDrive, ride: bool) -> Option<USeen> {
         seen.wrecked,
         seen.other_worlds,
         seen.with_others,
-        seen.on_objects
+        seen.on_objects,
+        seen.respawned
     );
     Some(seen)
 }
