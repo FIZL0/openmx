@@ -12,8 +12,9 @@
 // before, `Sim::think`), and every agreed row's generator
 // and AI bodies are held against the port's.
 //
-// The bodies part from the original early (`C33_AGREES_THROUGH`); the test holds the agreement it has
-// reached, so that a fix shows as a raised mark and a regression as a failure.
+// The AI bodies part from the original early (`C33_AGREES_THROUGH`); the test holds the agreement it
+// has reached, so that a fix shows as a raised mark and a regression as a failure. The human, with no
+// pad but the stick its image was saved holding on the first step, agrees on every row (S329).
 
 use super::lane::s323_free09;
 use super::sim::{s12e_bike, s12e_racer, s12e_seek_world, s12e_u64};
@@ -35,6 +36,7 @@ pub(crate) const C33_STATE: &str = "capture/c33/free09-ai4.ee.bin";
 const C33_CSV: &str = "capture/c33/free09-ai4-agreed.csv";
 /// The image's frame counter: its RAM holds tick 2, and the first row is tick 3.
 const C33_FROM: u64 = 2;
+const HOLD_N: usize = 2;
 
 /// The four riders in the actor list's order (C33's `free09-ai4.riders.json`): rider, body, brain (0
 /// for the human's, which has no brain).
@@ -49,7 +51,7 @@ pub(crate) const C33_NAMES: [&str; 4] = ["ai0", "ai1", "human", "ai2"];
 
 /// The last tick each of [`C33_LANES`] agrees with the original's, bit for bit, on every agreed row up
 /// to it but the torn ones: the regression mark.
-const C33_AGREES_THROUGH: [u64; 5] = [14, 18, 0, 16, 6];
+const C33_AGREES_THROUGH: [u64; 5] = [14, 18, 1802, 16, 6];
 
 /// One rider's words off an image, at the offsets `tests/two_p_rider.rs` (S174) seeds a rider from.
 struct Image<'a> {
@@ -421,12 +423,17 @@ fn s12e_free09s_four_racers_ride_as_the_capture() {
     println!("the original's draws (tick, rand() calls) over the first second: {draws:?}");
 
     let mut lanes: [Lane5; 5] = Default::default();
-    let controls = vec![Controls::default(); C33_RIDERS.len()];
+    // The AI riders' levers are their brains'. The human has no pad, but the first step after a
+    // load rides on the controls the state was saved holding (S117): the image's stick.
+    let mut controls = vec![Controls::default(); C33_RIDERS.len()];
+    controls[c33_player(2)] = c33_saved_controls(&ee, C33_RIDERS[2].0);
     for (n, pair) in rows.windows(2).enumerate() {
         let (last, row) = (&pair[0], &pair[1]);
         assert_eq!(row.frame, C33_FROM + 2 + n as u64, "the capture's rows run on from the image, one a tick");
         // The step into a row is the frame length the row before it read.
         sim.step_all(last.dt, &controls, &mut world);
+        // The human's pad from the second step on: none, so nothing held.
+        controls[c33_player(2)] = Controls::default();
         if !row.agreed {
             continue;
         }
@@ -470,8 +477,24 @@ fn s12e_free09s_four_racers_ride_as_the_capture() {
     }
 }
 
-/// The human's physics file: the shell's P tuning (the AI riders ride A). A and P replay the same
-/// marks here, so the capture does not tell them apart.
+/// The controls rider `r`'s image was saved holding: its stick, read back from the limiter's
+/// squared copy (`+0x628`/`+0x62c`). Only a stick at rest or at full throw is read back, which is
+/// what C33's holds (the human's pulled fully forward, -1); the levers there are all let go.
+fn c33_saved_controls(ee: &Ee, r: u32) -> Controls {
+    let im = Image { ee, rider: r };
+    let axis = |off: u32| {
+        let v = im.float(r + off);
+        assert!(v == F::ZERO || v.abs() == F::ONE, "rider {r:#x}'s saved stick +{off:#x} is {v:?}: not at rest or full throw");
+        v
+    };
+    for off in [0x650, 0x654, 0x658] {
+        assert_eq!(im.float(r + off), F::ZERO, "rider {r:#x}'s saved lever +{off:#x}");
+    }
+    Controls { stick: (axis(0x628), axis(0x62c)), ..Controls::default() }
+}
+
+/// The human's physics file: the shell's P tuning (the AI riders ride A). The capture tells them
+/// apart (S329): on A the human parts at tick 6, on P it agrees on every row.
 const C33_HUMAN_TUNING: track::Tuning = track::Tuning::P;
 
 /// What the replay's comparisons read, in [`C33_AGREES_THROUGH`]'s order: each rider's body in the
