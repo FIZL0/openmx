@@ -57,7 +57,6 @@ the commit is safe locally and the next wrap-up pushes it. `[git] push = false` 
 ```sh
 ./kit run once                  # one task, then stop
 ./kit run 3                     # three agents at a time, each in its own worktree
-./kit run 3 --mode p            # ... strictly in TODO.md order (mode d, the default, keeps them off each other's files)
 ./kit run --dry-run 3           # what would start, and why the rest wait
 ./kit stop                      # running tasks finish and merge, nothing new starts
 ```

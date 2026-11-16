@@ -3,7 +3,7 @@
 # fix_*), then a kit.toml `[agent-runner]` table on top, and writes the result to <context>/notes/agent-runner.toml.
 
 [plan]
-# `plan add` refuses a task line with no `files:` and no `test:` field: mode d keeps tasks apart by
+# `plan add` refuses a task line with no `files:` and no `test:` field: the run keeps tasks apart by
 # those files, and a line naming none ran beside anything (agent-runner 0.19.5).
 need_files = true
 # `./kit plan <name>` also finds a heading in these (a code map section, a task-mechanics topic)
@@ -12,7 +12,6 @@ lookup = ["PLAN.md", "docs/agent/CODEMAP.md", "docs/agent/TASKS.md"]
 [run]
 # d: never two running tasks on one file, and a Next (in this order) section one task at a time. agent-runner
 # 0.13.3+ defaults to p (strict plan order, both checks off), which put MD97, P299 and MD95 (all worlds.rs) side by side.
-mode = "d"
 command = "./kit"
 test = "./kit check --all"
 # A merge tests only what changed since {base}, a commit that already passed a gate (the shared branch moves on
