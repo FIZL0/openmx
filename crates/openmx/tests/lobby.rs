@@ -822,6 +822,10 @@ mod online;
 #[allow(dead_code)]
 mod online_fliers;
 
+#[path = "../src/online_quads.rs"]
+#[allow(dead_code)]
+mod online_quads;
+
 #[path = "../src/vehicle.rs"]
 #[allow(dead_code)]
 mod vehicle;

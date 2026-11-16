@@ -9,6 +9,10 @@
 //!
 //! Under it, the pad byte: the quad's switch is byte 6 and reads back as the quad.
 //!
+//! MD174: `--peer`s have no handshake, so each machine's pick goes out with every quad pack it holds
+//! and their hashes, and a pick rides only where every machine holds its pack with the same files.
+//! Two shells whose packs differ by one file refuse both quads on both machines and still agree.
+//!
 //! Skips with no disc, and with no `mods/machines/mxvatv_atv` (openmx-mods' import-atv makes it).
 
 #[allow(unused)]
@@ -50,6 +54,8 @@ mod vehicle;
 #[allow(dead_code)]
 #[path = "../src/net/mod.rs"]
 mod net;
+#[path = "../src/online_quads.rs"]
+mod online_quads;
 
 use game_render::Disc;
 use std::path::{Path, PathBuf};
@@ -81,13 +87,18 @@ fn line_with<'a>(said: &'a str, part: &str) -> &'a str {
 /// guest's quad picks `atv` and scripts `scripts`: each one's output. As tests/online_car.rs's
 /// `ride_online`: each shell binds a port of its own, the host says it, the guest starts on it.
 fn ride_online(track: &str, frames: u32, atv: [&str; 2], scripts: [&str; 2]) -> [String; 2] {
+    ride_online_on(track, frames, atv, scripts, ["mods", "mods"])
+}
+
+/// [`ride_online`] with each shell's own mods folder, host's and guest's `mods`.
+fn ride_online_on(track: &str, frames: u32, atv: [&str; 2], scripts: [&str; 2], mods: [&str; 2]) -> [String; 2] {
     let root = root();
     let frames = frames.to_string();
-    let ride = |me: &str, peer: &str, atv: &str, script: &str| {
+    let ride = |me: &str, peer: &str, atv: &str, script: &str, mods: &str| {
         let mut shell = Command::new(env!("CARGO_BIN_EXE_openmx"));
         shell
             .current_dir(&root)
-            .args(["--headless", "--track", track, "--frames", &frames, "--seats", "host,g", "--mods", "mods", "--atv", atv])
+            .args(["--headless", "--track", track, "--frames", &frames, "--seats", "host,g", "--mods", mods, "--atv", atv])
             .args(["--online", me, "--peer", peer, "--online-script", script])
             .stdout(std::process::Stdio::piped());
         let mut kid = shell.spawn().expect("the shell starts");
@@ -105,7 +116,7 @@ fn ride_online(track: &str, frames: u32, atv: [&str; 2], scripts: [&str; 2]) -> 
         });
         (kid, reader, heard)
     };
-    let (mut host, host_said, heard) = ride("host@127.0.0.1:0", "g@127.0.0.1:0", atv[0], scripts[0]);
+    let (mut host, host_said, heard) = ride("host@127.0.0.1:0", "g@127.0.0.1:0", atv[0], scripts[0], mods[0]);
     let at = loop {
         match heard.recv_timeout(std::time::Duration::from_secs(600)) {
             Ok(l) if l.starts_with("online: host on ") => break l["online: host on ".len()..].split(',').next().unwrap().to_string(),
@@ -117,7 +128,7 @@ fn ride_online(track: &str, frames: u32, atv: [&str; 2], scripts: [&str; 2]) -> 
             }
         }
     };
-    let (guest, guest_said, _) = ride("g@127.0.0.1:0", &format!("host@{at}"), atv[1], scripts[1]);
+    let (guest, guest_said, _) = ride("g@127.0.0.1:0", &format!("host@{at}"), atv[1], scripts[1], mods[1]);
     // A shell that fails takes its peer down with it: the peer would wait for its pads for ever.
     let mut kids = [host, guest];
     let readers = [host_said, guest_said];
@@ -186,4 +197,78 @@ fn two_online_shells_both_ride_their_quads_and_agree() {
     assert_eq!(line_with(&said[0], "online: quads "), line_with(&said[1], "online: quads "));
     let state = |s: &str| line_with(s, "state before tick 300").rsplit(' ').next().unwrap().to_string();
     assert_eq!(state(&said[0]), state(&said[1]), "the two machines' rides parted with the quads out");
+}
+
+fn card(pick: &str, held: &[(&str, u64)]) -> online_quads::Card {
+    online_quads::Card { pick: pick.into(), held: held.iter().map(|&(id, h)| (id.to_string(), h)).collect() }
+}
+
+#[test]
+fn a_quad_card_wraps_the_markers_and_reads_back() {
+    let inner = b"P318 markers".to_vec();
+    let mine = card("mxvatv_atv/atv_Race250P", &[("mxvatv_atv", 0x0123_4567_89ab_cdef), ("other", 7)]);
+    let wrapped = online_quads::wrap(&mine, inner.clone());
+    assert_eq!(online_quads::unwrap(&wrapped), (mine, &inner[..]));
+    // No pick but packs held: still sent, as the others' picks need this machine's hashes.
+    let holds = card("", &[("mxvatv_atv", 9)]);
+    assert_eq!(online_quads::unwrap(&online_quads::wrap(&holds, inner.clone())), (holds, &inner[..]));
+    // Nothing to say: the blob alone, and bytes not wrapped (or cut short) have an empty card.
+    assert_eq!(online_quads::wrap(&card("", &[]), inner.clone()), inner);
+    assert_eq!(online_quads::unwrap(&inner), (card("", &[]), &inner[..]));
+    let cut = &wrapped[..wrapped.len() - inner.len() - 3];
+    assert_eq!(online_quads::unwrap(cut), (card("", &[]), cut));
+}
+
+#[test]
+fn a_quad_pick_rides_only_where_every_machine_holds_the_same_pack() {
+    let pick = "mxvatv_atv/atv_Race250P";
+    let same = [card(pick, &[("mxvatv_atv", 5)]), card("", &[("mxvatv_atv", 5), ("more", 1)])];
+    assert_eq!(online_quads::refused(&same, 0), None);
+    assert_eq!(online_quads::refused(&same, 1), None, "no pick, nothing to refuse");
+    let differs = [card(pick, &[("mxvatv_atv", 5)]), card(pick, &[("mxvatv_atv", 6)])];
+    assert_eq!(online_quads::refused(&differs, 0).as_deref(), Some("seat 2's mxvatv_atv differs from seat 1's"));
+    assert_eq!(online_quads::refused(&differs, 1).as_deref(), Some("seat 1's mxvatv_atv differs from seat 2's"));
+    let lacks = [card(pick, &[("mxvatv_atv", 5)]), card("", &[])];
+    assert_eq!(online_quads::refused(&lacks, 0).as_deref(), Some("seat 2's machine has no quad pack mxvatv_atv"));
+    let unsent = [card(pick, &[]), card("", &[("mxvatv_atv", 5)])];
+    assert_eq!(online_quads::refused(&unsent, 0).as_deref(), Some("seat 1's machine sent no hash of mxvatv_atv"));
+    assert!(online_quads::refused(&[card("nopack", &[])], 0).is_some());
+}
+
+/// `from` copied to `to`, every file under it.
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).expect("a folder");
+    for e in std::fs::read_dir(from).expect("the pack's folder") {
+        let path = e.expect("an entry").path();
+        let into = to.join(path.file_name().unwrap());
+        if path.is_dir() {
+            copy_tree(&path, &into);
+        } else {
+            std::fs::copy(&path, &into).expect("a copy");
+        }
+    }
+}
+
+#[test]
+fn two_online_shells_refuse_quads_whose_packs_differ() {
+    if !ready() {
+        return;
+    }
+    // The guest's mods folder: the same quad pack and one file more.
+    let guest = Path::new(env!("CARGO_TARGET_TMPDIR")).join("md174_mods");
+    let _ = std::fs::remove_dir_all(&guest);
+    copy_tree(&root().join("mods/machines/mxvatv_atv"), &guest.join("machines/mxvatv_atv"));
+    std::fs::write(guest.join("machines/mxvatv_atv/extra.txt"), "not on the host").expect("the extra file");
+    let said = ride_online_on("free09", 320, ["atv_Race250P", "atv_Pro250A"], ["40:atv,41:gas", "60:atv,61:gas"], ["mods", guest.to_str().unwrap()]);
+    let _ = std::fs::remove_dir_all(&guest);
+    for (who, s) in ["host", "guest"].iter().zip(&said) {
+        // Both picks refused on both machines, neither quad built, nobody switched.
+        assert!(s.contains("online: seat 1 picked the quad mxvatv_atv/atv_Race250P, refused on every machine: seat 2's mxvatv_atv differs from seat 1's"), "{who}:\n{s}");
+        assert!(s.contains("online: seat 2 picked the quad mxvatv_atv/atv_Pro250A, refused on every machine: seat 1's mxvatv_atv differs from seat 2's"), "{who}:\n{s}");
+        assert!(!s.contains("online: seat 1 quad ") && !s.contains("online: seat 2 quad "), "{who}:\n{s}");
+        assert!(!s.lines().any(|l| l == "vehicle: atv"), "{who}:\n{s}");
+        assert!(line_with(s, "desyncs").contains(" 0 desyncs"), "{who}:\n{s}");
+    }
+    let state = |s: &str| line_with(s, "state before tick 300").rsplit(' ').next().unwrap().to_string();
+    assert_eq!(state(&said[0]), state(&said[1]), "the two machines' rides parted");
 }
