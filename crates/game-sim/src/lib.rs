@@ -350,7 +350,6 @@ impl Sim {
         };
         self.lend_cars();
         self.event_frame(dt);
-        self.race_frame(dt, world);
         if self.plane.is_some() {
             // The other riders' bikes, where they stand, are in the plane's world (S95). Player 1's
             // own bike is not: the original takes it out of the world when its rider switches to the
@@ -424,6 +423,8 @@ impl Sim {
         self.race_bike(0, controls.clutch);
         // What the wreck bike's rays pushed in its frame (S244).
         self.wreck_pushed_back(0);
+        // The race manager walks after the bikes (S291): it sees where this frame left them.
+        self.race_frame(dt, world);
         self.props_step(dt, &prop_movers);
         self.traffic.frame_late(dt, world);
         let mut said = said;
@@ -457,9 +458,11 @@ impl Sim {
         self.event.tick(dt, &riders, &mut cards);
     }
 
-    /// The race manager's tick (S13b, [`race::Race::tick`]): every rider where the last tick left
-    /// them, in player order; a rider the closed gate caught is thrown back ([`race::push`]) and gets
-    /// its penalty on its card; when the countdown called the start's timeline (S304), every rider's
+    /// The race manager's tick (S13b, [`race::Race::tick`]): after every rider's frame, so each
+    /// rider where this tick left it (S291's live sx01 start: the cards see the bikes' new places and
+    /// a push is the chassis' velocity at the tick's end); a rider the closed gate caught is thrown
+    /// back ([`race::push`]) and gets its penalty on its card, already run down a tick as the score
+    /// manager's tick inside the race's does; when the countdown called the start's timeline (S304), every rider's
     /// chassis takes what it did ([`race::StartStep::apply`]: held at the countdown's zero, freed in
     /// the warning window); and on the drop every rider is let go ([`race::release`]). With laps, each
     /// bike tells its card where it is, its speed, its height over the world's ground and whether a
@@ -485,7 +488,9 @@ impl Sim {
         let mut all: Vec<&mut Rider> = std::iter::once(&mut self.rider).chain(self.others.iter_mut().map(|p| &mut p.rider)).collect();
         for (i, hit) in frame.caught {
             race::push(&mut all[i].ride.chassis, hit.push);
-            all[i].score.gate_penalty = hit.penalty;
+            // The score manager's tick runs every card's penalty down after the watch, in the same
+            // race tick; the card's own run-down (`Score::grow`) is in its rider's frame, before it.
+            all[i].score.gate_penalty = hit.penalty - dt;
         }
         if let Some(step) = frame.start {
             all.iter_mut().for_each(|r| step.apply(&mut r.ride.chassis));
@@ -604,7 +609,6 @@ impl Sim {
         let mut prop_movers = self.frame_held_wrecked(dt, world, &sides);
         self.lend_cars();
         self.event_frame(dt);
-        self.race_frame(dt, world);
         let mut frames = Vec::with_capacity(controls.len());
         // Rider against rider (S78): every bike's contacts, from where the last tick left them all.
         // On a world that wraps (MD44), each bike against every other's nearest copy.
@@ -661,6 +665,8 @@ impl Sim {
             frames.push(frame);
         }
         frames.reverse();
+        // The race manager walks after every bike (S291).
+        self.race_frame(dt, world);
         self.props_step(dt, &prop_movers);
         self.traffic.frame_late(dt, world);
         // Over a seam (MD29), each rider after every rider has moved.

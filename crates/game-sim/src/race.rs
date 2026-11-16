@@ -689,7 +689,8 @@ pub struct Frame {
     pub music: bool,
     /// The tip clock ran out: the "preload and clutch" tip shows.
     pub tip: bool,
-    /// The riders the closed gate caught, by player, in the order it caught them: each is to be
+    /// The riders the closed gate caught, by player, in the order it caught them (the cards' list
+    /// order): each is to be
     /// [`push`]ed and given the penalty on its score card.
     pub caught: Vec<(usize, Caught)>,
     /// The countdown ended and the gate dropped: every rider is to be [`release`]d.
@@ -724,7 +725,7 @@ impl Race {
         }
     }
 
-    /// **The race manager's tick**, before the riders': each rider in `riders` is its bike's word to
+    /// **The race manager's tick**, after the riders' (S291): each rider in `riders` is its bike's word to
     /// its card ([`CardFeed`]: where it is and which way it faces, its transform's translation and
     /// forward row, and the rest), in player order.
     ///
@@ -752,7 +753,17 @@ impl Race {
             self.cards.push(Seen { now: f.at, last: f.at });
         }
         if self.gate.flags & flags::CLOSED != 0 {
-            for (i, f) in riders.iter().enumerate() {
+            // The watch walks the score cards' list, so several riders caught in one tick draw in its
+            // order (S291's live sx01 start, its list relinked out of player order): with laps the
+            // list is theirs, and without, the cards were made in player order.
+            let mut order: Vec<usize> = match &self.laps {
+                Some(laps) => laps.cards.iter().map(|e| e.player).filter(|&i| i < riders.len()).collect(),
+                None => Vec::new(),
+            };
+            // A rider with no card in the laps' list yet is watched after it, in player order.
+            order.extend((0..riders.len()).filter(|i| !order.contains(i)).collect::<Vec<_>>());
+            for i in order {
+                let f = &riders[i];
                 if let Some(hit) = self.gate.watch(&mut self.cards[i], f.at, f.look, &mut self.rng) {
                     frame.caught.push((i, hit));
                 }

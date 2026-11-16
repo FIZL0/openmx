@@ -1080,7 +1080,6 @@ impl Sim {
         };
         self.lend_cars();
         self.event_frame(dt);
-        self.race_frame(dt, world);
         let cars = self.car_contacts(0, world, dt);
         let players = bump.as_deref().map_or(1, |b| b.vehicles.len() + b.planes.len());
         let strike = match shared.as_ref() {
@@ -1121,6 +1120,8 @@ impl Sim {
             self.traffic.props.pushed(&b.props);
         }
         self.wreck_pushed_back(0);
+        // The race manager walks after the bike (S291).
+        self.race_frame(dt, world);
         // Shared, the set goes back out before the props' step, which is the set's.
         if let Some((s, _)) = shared.as_mut() {
             s.back(self);

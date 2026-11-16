@@ -165,6 +165,13 @@
 //!     [`race::Tracker::placed`].
 //! 50. **sx01's laps led and passes**: two riders walked round sx01, their trackers against the lap and
 //!     place notices each tick told.
+//! 51. **A live sx01 start with riders through the closed gate** (S291): research/s291/gate.py's two
+//!     PCSX2 captures from C31's start state, the human alone and then all four riders moved through
+//!     the gate in one paused frame with the card list relinked out of id order, one row per race
+//!     manager tick. [`Race::tick`] replayed on each row's bike positions: every card's two positions,
+//!     the penalty run down each tick, the push as the chassis' velocity at the tick's end, the gate,
+//!     the countdown and the catch's draws (the tick's last, in the list's order).
+//!     On the Sim the race's tick comes after the riders' frames, as those rows show.
 
 use game_sim::chassis::{Chassis, Deriv};
 use game_sim::race::{
@@ -10179,4 +10186,204 @@ fn riders_walked_round_sx01_count_their_laps_led_and_passes() {
     eprintln!("trackers {got:?}");
     assert_eq!(got, want);
     assert!(got[1].laps_led >= 2 && got[1].passes > 0 && got[1].times_in_lead > 0 && got[0].times_passed > 0, "laps led and passes counted: {got:?}");
+}
+
+/// One row of an S291 capture (research/s291/gate.py): a race manager tick, or the paused frame
+/// before (`pause`) and after (`moved`) the bikes were moved through the gate. Per card, by id.
+struct LiveGateRow {
+    phase: String,
+    dt: F,
+    rng: u64,
+    gate_flags: u32,
+    elapsed: F,
+    order: Vec<usize>,
+    length: F,
+    tip: F,
+    music: F,
+    gate: Vec<u32>,
+    now: Vec<Vf>,
+    last: Vec<Vf>,
+    pen: Vec<F>,
+    pos: Vec<Vf>,
+    look: Vec<Vf>,
+    vel: Vec<Vf>,
+}
+
+fn live_gate_rows(text: &str) -> Vec<LiveGateRow> {
+    let mut lines = text.lines();
+    let head: Vec<&str> = lines.next().unwrap_or("").split(',').collect();
+    let col = |name: &str| head.iter().position(|h| *h == name).unwrap_or_else(|| panic!("no column {name}"));
+    let ids: Vec<usize> = (0..8).filter(|k| head.contains(&format!("k{k}_now").as_str())).collect();
+    let words = |v: &str| -> Vec<u32> { v.split(':').map(|w| u32::from_str_radix(w, 16).unwrap()).collect() };
+    let one = |v: &str| F(f32::from_bits(words(v)[0]));
+    let q = |v: &str| {
+        let w = words(v);
+        Vf([0, 1, 2, 3].map(|i| f32::from_bits(w[i])))
+    };
+    lines
+        .filter(|l| !l.is_empty())
+        .map(|l| {
+            let c: Vec<&str> = l.split(',').collect();
+            let per = |n: &str| ids.iter().map(|k| c[col(&format!("k{k}_{n}"))]).collect::<Vec<_>>();
+            LiveGateRow {
+                phase: c[col("phase")].to_string(),
+                dt: one(c[col("dt")]),
+                rng: u64::from_str_radix(c[col("rng")], 16).unwrap(),
+                gate_flags: words(c[col("gate_flags")])[0],
+                elapsed: one(c[col("elapsed")]),
+                order: c[col("order")].split('/').map(|k| k.parse().unwrap()).collect(),
+                length: one(c[col("length")]),
+                tip: one(c[col("tip")]),
+                music: one(c[col("music")]),
+                gate: words(c[col("gate")]),
+                now: per("now").into_iter().map(q).collect(),
+                last: per("last").into_iter().map(q).collect(),
+                pen: per("pen").into_iter().map(one).collect(),
+                pos: per("pos").into_iter().map(q).collect(),
+                look: per("look").into_iter().map(q).collect(),
+                vel: per("vel").into_iter().map(q).collect(),
+            }
+        })
+        .collect()
+}
+
+/// How many draws take the generator from `from` to `to`.
+fn draws_between(from: u64, to: u64) -> Option<usize> {
+    let mut rng = Rng::from_state(from);
+    (0..1000).find(|_| {
+        let hit = rng.state() == to;
+        rng.rand();
+        hit
+    })
+}
+
+#[test]
+fn the_gate_catches_match_a_live_sx01_start() {
+    let Ok(kit) = Kit::load() else { return skip("no kit.toml") };
+    // The human alone; then all four, the list relinked to 2/0/3/1 in the paused frame.
+    for (name, order, want) in [("human", vec![0, 1, 2, 3], vec![0]), ("four", vec![2, 0, 3, 1], vec![2, 0, 3, 1])] {
+        let rel = format!("capture/s291/{name}.csv");
+        let local = kit.root.join("context").join(&rel);
+        let path = if local.exists() { local } else { kit.ctx(&rel) };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return skip(&format!("{} is not there: research/s291/gate.py's capture", path.display()));
+        };
+        let rows = live_gate_rows(&text);
+        let m = rows.iter().position(|r| r.phase == "moved").expect("a moved row");
+        let start = &rows[m];
+        assert_eq!(start.order, order, "{name}: the list as relinked");
+        let w = |o: usize| start.gate[o / 4];
+        let wq = |o: usize| Vf([0, 1, 2, 3].map(|i| f32::from_bits(w(o + 4 * i))));
+        let gate = Gate {
+            flags: w(0x30),
+            centre: wq(0x40),
+            normal: wq(0x50),
+            across: wq(0x60),
+            width: F(f32::from_bits(w(0x70))),
+            height: F(f32::from_bits(w(0x74))),
+            reach_sq: F(f32::from_bits(w(0x7c))),
+        };
+        assert_eq!(gate.flags & flags::CLOSED, flags::CLOSED, "{name}: the gate is closed");
+        let n = start.now.len();
+        let riders: Vec<(Vf, Vf)> = (0..n).map(|k| (start.pos[k], start.look[k])).collect();
+        let mut race = Race::new(gate, &riders, start.length, Rng::from_state(start.rng));
+        race.gate.flags = gate.flags;
+        for k in 0..n {
+            race.cards[k] = Seen { now: start.now[k], last: start.last[k] };
+        }
+        race.countdown.elapsed = start.elapsed;
+        race.tip_in = start.tip;
+        race.music_in = start.music;
+        // The cards' list, as the laps keep it; the countdown runs on past these rows, so they never tick.
+        let course = Course { line: gate, line_spot: Spot::default(), lap_length: F::ZERO };
+        let track = TrackPaths {
+            word_34: 0,
+            ahead: F::ZERO,
+            behind: F::ZERO,
+            lap_length: F::ZERO,
+            pick: 3,
+            paths: Vec::new(),
+            free_routes: 0,
+            free_parents: 0,
+            free_candidates: 0,
+        };
+        let cards = start
+            .order
+            .iter()
+            .map(|&player| race::Entry { player, card: RaceCard::default(), stats: race::Tracker::default() })
+            .collect();
+        race.laps = Some(Box::new(race::Laps { rules: RaceRules::default(), course, lists: LineLists::default(), cards, track: std::sync::Arc::new(track) }));
+        let mut pen = start.pen.clone();
+        let mut caught = Vec::new();
+        for (t, row) in rows.iter().enumerate().skip(m + 1) {
+            let was = &rows[t - 1];
+            assert_eq!(row.phase, "run", "{name}: row {t}");
+            assert_eq!(row.order, order, "{name} row {t}: the list kept its order");
+            assert!(row.elapsed < row.length, "{name} row {t}: the rows end before the drop");
+            // The bikes moved first: the race reads where this tick left them.
+            let feeds: Vec<race::CardFeed> = (0..n).map(|k| race::CardFeed::standing(row.pos[k], row.look[k])).collect();
+            // The rest of the frame drew before the race manager's tick: the catches' two draws each
+            // are the tick's last (a dry run counts them; the catches do not hang on the draws).
+            let mut dry = race.clone();
+            let catches = dry.tick(row.dt, &feeds).caught.len();
+            let total = draws_between(was.rng, row.rng).unwrap_or_else(|| panic!("{name} row {t}: the generator lost"));
+            assert!(total >= 2 * catches, "{name} row {t}: {total} draws for {catches} catches");
+            let mut rng = Rng::from_state(was.rng);
+            (0..total - 2 * catches).for_each(|_| {
+                rng.rand();
+            });
+            race.rng = rng;
+            let frame = race.tick(row.dt, &feeds);
+            assert_eq!(race.rng.state(), row.rng, "{name} row {t}: the generator");
+            for p in pen.iter_mut() {
+                if F::ZERO < *p {
+                    *p = *p - row.dt;
+                }
+            }
+            for &(k, hit) in &frame.caught {
+                pen[k] = hit.penalty - row.dt;
+                assert_eq!(row.vel[k].to_bits(), hit.push.to_bits(), "{name} row {t}: card {k}'s push is its chassis' velocity");
+            }
+            if !frame.caught.is_empty() {
+                caught.push((t, frame.caught.iter().map(|c| c.0).collect::<Vec<_>>()));
+            }
+            assert_eq!(row.gate_flags, race.gate.flags, "{name} row {t}: the gate's flags");
+            assert_eq!(row.elapsed.0.to_bits(), race.countdown.elapsed.0.to_bits(), "{name} row {t}: the countdown");
+            for k in 0..n {
+                assert_eq!(row.now[k].to_bits(), race.cards[k].now.to_bits(), "{name} row {t}: card {k}'s now");
+                assert_eq!(row.last[k].to_bits(), race.cards[k].last.to_bits(), "{name} row {t}: card {k}'s last");
+                assert_eq!(row.pen[k].0.to_bits(), pen[k].0.to_bits(), "{name} row {t}: card {k}'s penalty");
+            }
+        }
+        assert_eq!(caught, vec![(m + 1, want.clone())], "{name}: caught once, on the first tick, in list order");
+        assert!(rows.len() - m > 50, "{name}: {} ticks after the move", rows.len() - m - 1);
+    }
+}
+
+#[test]
+fn on_the_sim_the_race_sees_the_riders_after_their_frames() {
+    // S291's capture: the card's now is the bike where its own frame of the tick left it, and a caught
+    // bike's chassis ends the tick going at the push.
+    let mut sim = race_ride(3.0, 30.0);
+    let mut n = 0;
+    let mut rng = sim.race.as_ref().unwrap().rng.clone();
+    loop {
+        rng = sim.race.as_ref().unwrap().rng.clone();
+        sim.tick(gas());
+        n += 1;
+        assert!(n < 300, "the rider never reached the gate");
+        let race = sim.race.as_ref().unwrap();
+        let m = sim.rider.ride.transform();
+        assert_eq!(race.cards[0].now.to_bits(), m.0[3].to_bits(), "tick {n}: the card saw this tick's place");
+        if sim.rider.score.gate_penalty > F::ZERO {
+            break;
+        }
+    }
+    // The tick's two draws: the push along the facing the bike's frame left, and the penalty, run
+    // down once in the same tick.
+    let facing = sim.rider.ride.transform().0[2];
+    let push = facing.merge(ps2_float::Dest::XYZ, facing.mul_q(race::gate_push_back(&mut rng).0));
+    let penalty = race::gate_penalty(&mut rng) - F(game_sim::tick::DeltaTime::CAP_30);
+    assert_eq!(sim.rider.ride.chassis.vel.to_bits(), push.to_bits(), "the push, untouched by a frame");
+    assert_eq!(sim.rider.score.gate_penalty.0.to_bits(), penalty.0.to_bits(), "the penalty");
 }
