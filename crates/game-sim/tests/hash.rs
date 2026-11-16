@@ -598,7 +598,9 @@ fn the_size_of_the_state_type_is_pinned() {
     // 12280 since MD152: a seat's quad online (`Sim::quad`, `quad::Lane`), boxed, walked as `quad`
     // only while a quad is out, so the leaves do not move; not on the wire (the online ride sends no
     // state while one is out).
+    // 12288 since MD112: the MX vs. ATV plane's posted messages counted (`Flight::posts`), for the
+    // shell's rumble, so not walked and not on the wire.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(size_of::<Sim>(), 12280, "Sim grew or shrank: does its walk still cover every field?");
+    assert_eq!(size_of::<Sim>(), 12288, "Sim grew or shrank: does its walk still cover every field?");
     assert_eq!(Dump::of(&Sim::new(0)).fields.len(), 909, "the walk's leaf count moved with it");
 }
