@@ -131,6 +131,9 @@ and wait for it to finish: under the other slots' load the gate can run past an 
 time limit, and a gate cut off there commits nothing. Never start a second one while the first still runs.
 Then stop and report. Don't merge tasks, don't skip ahead. If a
 task turns out to be too big, split it into sub-tasks first (`./kit plan add`), then do the first one.
+A worktree of another repo (an openmx-mods branch for your task) or other ad-hoc work goes in
+`$(agent-runner home)/wt/<slug>`, never beside the checkouts in `~/repos` (`../openmx-mods-<id>`); remove it
+(`git worktree remove`) once its branch is pushed.
 
 **Never merge, rebase, push the shared branch or resolve a conflict by hand.** `./kit done` pushes the
 branch it committed on, as long as that branch is your own — your `task/<ID>` in a worktree, or any topic
