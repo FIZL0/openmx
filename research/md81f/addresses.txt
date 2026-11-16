@@ -1,0 +1,10 @@
+MD81f — MX vs. ATV Untamed (SLUS-21701), Free Ride Rocksbury, Vehicle = SAND RAIL. Heap addresses in
+spawn.p2s (research/md81f/ram.py STATE.p2s prints them).
+
+vtable (buggy/baja class)  0x003f09d0   (class update 0x004e46c0 at vtable +0x10c; car kind +0xbac = 8)
+player's sandrail          0x01be46c0   body 0x01c10fa0  record 0x01c13f90  engine 0x01c263f0
+                                        tires 0x01c26540 0x01c26f10 0x01c278e0 0x01c282b0
+idle second sandrail       0x01c28e50
+vsync word                 0x00410318   (+2 a tick)
+spawn.p2s vsync 28285, pos (395.66, 0.60, 157.00); engine 5 gears 6/2.8/2.1/1.6/1.2, final 4.5, redline 7000;
+Inertia (813.97, 1789.72, 845.09) at car +0xcb0; preload words all 0.

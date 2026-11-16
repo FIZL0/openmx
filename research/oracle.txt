@@ -12581,6 +12581,12 @@ atv_out_of_bounds           atv 0x004a4f20 (vt +0x16c, the bike in a0): body pos
 #   Heap (Free Ride Rocksbury, kept-context/md81e/addresses.txt): cart 0x01be4740 (kind +0xbac = 7), body
 #   0x01c00060, record 0x01c02cb0, engine 0x01c151a0 (3 gears 2.8/2.6/2.2, final 3.8); idle second cart
 #   0x01c17c00. Car +0x344 the gas pedal (SLUS-21104's +0x314), +0x1134 MaxAnalogThrottle 0.1.
+# MD81f — Untamed's sandrail: the buggy/baja class in both games and captured (comment rows only; journal
+#   research/journal/2026-11-16-md81f-untamed-sandrail). SLUS-21104's MD39a sandrail image: object 0x01b158a0,
+#   vtable 0x003cec60 (class update 0x004c6ce0), kind +0xbbc = 8. SLUS-21701's spawn image: vtable 0x003f09d0
+#   (class update 0x004e46c0), kind +0xbac = 8: the baja's pair, so MD81d's static diff is the sandrail's.
+#   Heap (Free Ride Rocksbury, kept-context/md81f/addresses.txt): sandrail 0x01be46c0, body 0x01c10fa0, record
+#   0x01c13f90, engine 0x01c263f0 (5 gears 6/2.8/2.1/1.6/1.2, final 4.5); idle second sandrail 0x01c28e50.
 # MD138a — the quad's own clips and the rider's stunt clips (game_render::quad::Driver, quad_draw::stunts /
 #   chassis_locals / rider_stunt; tests/atv_clips.rs). Comment rows only; journal research/journal/*-md138a-atv-clips.
 #   The quad's clip binder atv_stunt_specials 0x004dd280 binds "ATV_bike_%s" only for the stunt table's

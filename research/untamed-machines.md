@@ -443,3 +443,15 @@ ported. Nothing else to port: `atv_car::Load::untamed` and Untamed's golfcart.ph
 0.1, `[Preload]` off). Addresses in `research/oracle.txt # MD81e`; journal
 `research/journal/2026-11-15-md81e-untamed-golfcart`. With `MaxAnalogThrottle` 0.1 any counted press is
 the whole gas: the capture shows no gas through pressure byte 23 and all of it from about 25.
+
+## SLUS-21701's sandrail against SLUS-21104's (MD81f)
+
+The sandrail is the buggy/baja class in both games: SLUS-21104's MD39a image holds it on the buggy vtable
+`0x003cec60` (kind 8), and SLUS-21701's spawn image on the baja's `0x003f09d0` (class update `0x004e46c0`,
+kind 8). So MD81d's function-by-function diff is the sandrail's step, and `atv_car::Load::untamed` with
+Untamed's sandrail.phy is all of it; the class update's `!(d <= 0)` clause is not ported, as for the baja.
+The `.phy` changes need no code: the loader reads the same keys, and a missing `CofGTravelBack` reads 0,
+the value Unleashed's file had. `tests/untamed_sandrail_load.rs` proves the pack's sandrail is the spawn
+image word for word. Addresses in `research/oracle.txt # MD81f`; journal
+`research/journal/2026-11-16-md81f-untamed-sandrail`. Captured (throttle twice, steer, jump); their
+replay waits on MD161a's harness.

@@ -1,0 +1,147 @@
+# MD81f: MX vs. ATV Untamed's (SLUS-21701) sandrail in Free Ride, every tick. research/md39a/car.toml
+# at Untamed's car offsets (research/untamed-machines.md, MD81c): the body pointer +0xb8 -> +0xe8, the
+# +0x3xx words +0x30, the +0xb..+0x12 block -0x10 (engine +0x1250 -> +0x1240, tires +0x1254 -> +0x1244,
+# state +0xbc4 -> +0xbb4, wreck words +0xc80 -> +0xc70). CAR is replaced by the truck object's address
+# (vtable 0x003f09d0 at +4, the buggy/baja class, kind 8); play.sh adds the start trigger. research/md81e/golf.toml: research/md164/baja.toml (MD160's truck.toml
+# with the preload words, the lean and the pad word decoded), plus the gas pedal.
+[watch]
+name        = "md81f-untamed-sandrail"
+description = "MX vs. ATV Untamed (SLUS-21701) Free Ride sandrail played from a generated tape: the truck, body, record, engine and four tires per tick"
+every       = 1
+frames      = 900
+
+[setup]
+warmup = 0
+
+[[field]]
+name = "vsync"          # 0x410318, +2 a tick
+addr = "0x410318"
+type = "u32"
+
+[[field]]
+name = "vptr"           # the truck's vtable word (+4), 0x003f09d0
+addr = "CAR + 0x4"
+type = "u32"
+
+[[field]]
+name = "ctl"            # +0x338..+0x344 (SLUS-21104's +0x308): two ints, then brake +0x340 and gas +0x344
+addr = "CAR + 0x338"
+type = "f32x4"
+
+[[field]]
+name = "gas"            # +0x344 the gas pedal (the input step's, analog under DigitalThrottleSpeed), +0x348 it slewed
+addr = "CAR + 0x344"
+type = "f32x4"
+
+[[field]]
+name = "state"          # +0xbb4 (SLUS-21104's +0xbc4): the vehicle-state object's pointer, not the car's state
+                        # (that is obj +0xc70, SLUS-21104's +0xc80: 0 riding, 13 off the edge, 14 tipped)
+addr = "CAR + 0xbb4"
+type = "u32"
+
+[[field]]
+name = "pos"            # body +0x60
+addr = "CAR + 0xe8 -> 0x60"
+type = "f32x4"
+
+[[field]]
+name = "vel"            # body +0x80
+addr = "CAR + 0xe8 -> 0x80"
+type = "f32x4"
+
+[[field]]
+name = "quat"           # body +0x170
+addr = "CAR + 0xe8 -> 0x170"
+type = "f32x4"
+
+[[field]]
+name = "rate"           # body +0x1d0, the angular rates the integrate damps
+addr = "CAR + 0xe8 -> 0x1d0"
+type = "f32x4"
+
+[[field]]
+name = "angdamp"        # body +0x150..+0x158, the angular damping lanes (powf'd per time in Untamed)
+addr = "CAR + 0xe8 -> 0x150"
+type = "f32x4"
+
+[[field]]
+name = "lindamp"        # body +0x140, the linear damping lanes
+addr = "CAR + 0xe8 -> 0x140"
+type = "f32x4"
+
+[[field]]
+name = "preload"        # +0xc40 ready, +0xc44 active, +0xc48 armed (oracle.txt # MD81d)
+addr = "CAR + 0xc40"
+type = "bytes:12"
+
+[[field]]
+name = "pretime"        # +0xc4c PreloadTime, +0xc50 timer, +0xc54/+0xc58 min/max time
+addr = "CAR + 0xc4c"
+type = "f32x4"
+
+[[field]]
+name = "cued"           # +0x724, the preload cue's latch
+addr = "CAR + 0x724"
+type = "u32"
+
+[[field]]
+name = "lean"           # +0x11bc, the lean the preload arms and fires on (+-0.8)
+addr = "CAR + 0x11bc"
+type = "f32"
+
+[[field]]
+name = "padword"        # +0x1114, the preload command's strength (the push's size)
+addr = "CAR + 0x1114"
+type = "f32"
+
+[[field]]
+name = "carstate"       # +0xc70: 0 riding, 13 off the edge, 14 tipped
+addr = "CAR + 0xc70"
+type = "u32"
+
+[[field]]
+name = "obj0"           # the truck object, raw, +0x0..+0xc00
+addr = "CAR"
+type = "bytes:3072"
+
+[[field]]
+name = "obj1"           # +0xc00..+0x1800
+addr = "CAR + 0xc00"
+type = "bytes:3072"
+
+[[field]]
+name = "body"           # the rigid body, raw
+addr = "CAR + 0xe8 -> 0x0"
+type = "bytes:640"
+
+[[field]]
+name = "record"         # the collision record (+0xf8, as the Untamed bike's): +0x34 touching, +0x44 damp
+addr = "CAR + 0xf8 -> 0x0"
+type = "bytes:640"
+
+[[field]]
+name = "engine"         # *(+0x1240), raw
+addr = "CAR + 0x1240 -> 0x0"
+type = "bytes:512"
+
+[[array]]
+name   = "tire"         # *(+0x1244..+0x1250)
+addr   = "CAR + 0x1244"
+count  = 4
+stride = 4
+deref  = true
+
+[[array.field]]
+name = "touch"          # +0xa4
+off  = 0xa4
+type = "u32"
+
+[[array.field]]
+name = "compress"       # +0xcc, ft
+off  = 0xcc
+type = "f32"
+
+[[array.field]]
+name = "raw"            # +0x0..+0x300
+off  = 0x0
+type = "bytes:768"
