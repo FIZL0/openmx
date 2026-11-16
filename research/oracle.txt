@@ -12653,3 +12653,40 @@ bike_grid_place             boot 0x0027e530 (bike, at, facing, bike+0x3d0, 0) th
 #   car update 0x004e9eb0: call at 0x004ea0a8. On-hazard +0xc10 = any tire's (+0x1244..+0x1250) table word by
 #   its byte +0xf0; a2 = any tire's +0xa4; a1 = on && a2. Stretch 0x004e9f10..0x004ea0b0 ($s0 car, $f20 dt).
 #   MD164's trophy truck 0x01be4740: node +0x114, its parent word (+0x120) 0 in spawn and air images.
+# P334 — the Hall of Fame: its tables made at boot, the insertion a name entry leads to (openmx
+#   menu_fame.rs; tests/hall_of_fame.rs). Journal: research/journal/2026-11-15-p334-hall-of-fame.
+#   Base tables (copied to the stack by the maker): supercross 0x00421540 / 0x004215a0 / 0x00421600 /
+#   0x00421660 (24 floats, a class each), nationals 0x004216c0 / 0x00421720 / 0x00421780 / 0x004217e0
+#   (22). Names at struct +0x3ab8, 30 bytes each, blocks: SX 5 laps 0, best 480, 3 laps 960, 10 laps
+#   1440, Nat best 1920, 5 laps 2360, 3 laps 2800, 10 laps 3240, score 3680, count 3705, time 3730
+#   (+ track*20 + class*5; arenas + arena*5). Counts: +0x1e00 SX, +0x3984 Nat, +0x3ab4 arenas,
+#   +0x1f2c4 riders. The arena loop 0x00376108 dispatches arenas 0..4 to 0x00377220 / 0x00377400 /
+#   0x003775e0 / 0x003777c0 / 0x00377998 (Ghidra shows three); each stores fixed words and names
+#   score 0..4, count 0..4, time 0..4. The insert's body runs to 0x00378fb8 behind the jump table at
+#   0x00441140 (Ghidra sizes it 172 bytes). Name entry: hof_name_entered snprintf(menu+0xfc, 30, "%s")
+#   and strcpy to front +8 +0x34 (the last name), then hof_entry_insert per entry-page flag
+#   (+200/+0xcc/+0xd0/+0xd4 SX, +0xd8..+0xe4 Nat, +0xe8/+0xec/+0xf0 freestyle); seat 1 next if +0xb4.
+hall_of_fame_init           boot 0x003755b0 (hof) the counts from the league lists (app+0x3d8 +0x10) and
+#                                           the rider list (+0x14), then hall_of_fame_defaults
+hall_of_fame_defaults       boot 0x00375890 (hof) every table made: per track and class, best lap
+#                                           k = step(k-1) from the base, then 3/5/10 laps from
+#                                           step(best[0] * n), each value then its name
+fame_default_step           boot 0x00375810 (f12 x) -> x + 7 * max(2^-31 * rand(), 0.1)
+fame_default_name           boot 0x00375680 (hof, dest): srand(clock seed) once (rand_seeded == 0;
+#                                           sec + min*60 + hour*0x168 + day*0x15180, BCD bytes of
+#                                           0x0041a068), a rider at cvt.w.s(count * 2^-31 rand()), its
+#                                           second " \n" token, snprintf(dest, 30, "%s")
+cd_read_clock               boot 0x0041a068 (buf) sceCdReadClock: +1 sec, +2 min, +3 hour, +5 day (BCD)
+list_at                     boot 0x0037e530 (list, k) -> (list+8)[k]
+string_copy                 boot 0x00231f20 (src, dst) the name copied for the tokenizer
+tokenizer_init              boot 0x001c6040 (tok, s, skip_leading) +0 skip, +8 s (0 when empty)
+tokenizer_next              boot 0x001c60a0 (tok, delims) strtok-like, strpbrk 0x00411a50
+hall_of_fame_insert         boot 0x00378040 (f12 value, a0 hof, a1 table, a2 track, a3 class, t0 name)
+#                                           -> 1 if put in: first i of five the value beats (c.olt;
+#                                           score !(c.ole); count int kept < cvt.w.s), entries and
+#                                           names (strcpy) moved down, value (count: cvt.w.s) and name
+#                                           at i
+hof_entry_insert            boot 0x002a1280 (menu, name) each flagged table's insert
+hof_entry_page              boot 0x002a1a40 (menu) the flags (hall_of_fame_beats per table; laps
+#                                           tables only at 3 / 5 / 10 laps) and the page's lines
+hof_name_entered            boot 0x002a41a0 (menu, name) the keyboard's answer

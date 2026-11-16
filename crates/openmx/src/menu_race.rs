@@ -8,6 +8,7 @@
 //! are, whose lap and place fields are `None` — shown as dashes — until the simulation has them
 //! (P313 wires them in).
 
+use super::fame::{FameBook, FameTry, table_title};
 use super::results::{Board, FameMarks, HandOver, Records, Tip, tips_of};
 use super::{Act, Menu, Press, Screen};
 use ps2_float::F;
@@ -127,6 +128,21 @@ pub struct Results {
     pub stage: Stage,
     pub tips: Vec<Tip>,
     pub fame: FameMarks,
+    /// P334: each player's card as the Hall of Fame reads it, the seat whose name the Hall of Fame
+    /// asks now, the records that seat earned (each table's name and the value as shown), and
+    /// what the names typed went in as.
+    pub tries: Vec<FameTry>,
+    pub fame_at: Option<i32>,
+    pub earned: Vec<(String, String)>,
+    pub fame_tables: Vec<FameTable>,
+}
+
+/// One of the Hall of Fame's tables after a name went in, as the screen shows it: its title and
+/// five entries, value and name, the ones the name took marked.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FameTable {
+    pub title: String,
+    pub rows: Vec<(String, String, bool)>,
 }
 
 /// What the results screen shows of the race's end, in turn: the preload and clutch tip popup
@@ -138,6 +154,8 @@ pub enum Stage {
     #[default]
     Board,
     Fame,
+    /// P334: the tables the names typed went in.
+    Table,
 }
 
 impl Results {
@@ -154,6 +172,10 @@ impl Results {
             stage: Stage::Board,
             tips: Vec::new(),
             fame: FameMarks::default(),
+            tries: Vec::new(),
+            fame_at: None,
+            earned: Vec::new(),
+            fame_tables: Vec::new(),
         }
     }
 
@@ -177,10 +199,40 @@ impl Results {
     pub fn next_stage(&mut self) -> bool {
         let next = match self.stage {
             Stage::Tips => Some(Stage::Board),
-            Stage::Board if self.fame.waiting => Some(Stage::Fame),
+            Stage::Board if self.fame.waiting => {
+                self.fame_at = Some(if self.fame.seat0 { 0 } else { 1 });
+                Some(Stage::Fame)
+            }
+            Stage::Fame => self.next_fame_seat(),
             _ => None,
         };
         next.map(|n| self.stage = n).is_some()
+    }
+
+    /// P334: the seat the Hall of Fame asks next once seat `fame_at` is done (seat 1 after seat 0,
+    /// when both were marked, as the original's name entry goes on), else the tables the names
+    /// went in, if any did.
+    fn next_fame_seat(&mut self) -> Option<Stage> {
+        if self.fame_at == Some(0) && self.fame.seat1 {
+            self.fame_at = Some(1);
+            return Some(Stage::Fame);
+        }
+        self.fame_at = None;
+        (!self.fame_tables.is_empty()).then_some(Stage::Table)
+    }
+
+    /// P334: the card the Hall of Fame asks a name for now, if the race handed one over.
+    pub fn fame_try(&self) -> Option<&FameTry> {
+        let seat = self.fame_at?;
+        self.tries.iter().find(|t| t.seat == seat)
+    }
+
+    /// P334: the entry page's lines for the seat asked now, from the tables as they stand.
+    pub fn fame_page(&mut self, book: &FameBook) {
+        self.earned = match self.fame_try() {
+            Some(t) => book.earned(t).into_iter().map(|(table, v)| (table_title(table).to_string(), FameBook::value_text(table, v.0.to_bits()))).collect(),
+            None => Vec::new(),
+        };
     }
 }
 
@@ -259,6 +311,11 @@ pub struct RaceMenu {
     /// last saved them.
     pub records: Records,
     pub records_changed: bool,
+    /// P334: the Hall of Fame (`fame.txt`), whether a name went in since the shell last saved it,
+    /// and the players' cards the race under way handed over for it.
+    pub fame: FameBook,
+    pub fame_changed: bool,
+    pub tries: Vec<FameTry>,
 }
 
 impl Menu {
@@ -311,6 +368,11 @@ impl Menu {
             }
             Screen::Results => {
                 let pages = super::results::PAGES.len();
+                // P334: the Hall of Fame's entry page — Cross types the seat's name.
+                if (p.ok || p.start) && self.race.results.as_ref().is_some_and(|r| r.stage == Stage::Fame && r.fame_try().is_some_and(|_| !r.earned.is_empty())) {
+                    self.type_for(super::Typing::Fame);
+                    return Act::Stay;
+                }
                 if let Some(r) = self.race.results.as_mut().filter(|r| r.board.is_some() && r.stage == Stage::Board)
                     && (p.left || p.right || p.l1 || p.r1)
                 {
@@ -319,6 +381,8 @@ impl Menu {
                     if !self.race.results.as_mut().is_some_and(Results::next_stage) {
                         self.race.results = None;
                         self.stack = vec![Screen::Main];
+                    } else if let Some(r) = self.race.results.as_mut() {
+                        r.fame_page(&self.race.fame);
                     }
                 }
             }
@@ -335,6 +399,7 @@ impl Menu {
         }
         self.race.racing = Some(setup.clone());
         self.race.hand = None;
+        self.race.tries.clear();
         self.ride_stack = std::mem::take(&mut self.stack);
         Act::Ride(setup.track)
     }
@@ -356,10 +421,12 @@ impl Menu {
         let Some(setup) = self.race.racing.take() else { return false };
         let name = self.rider_name(0);
         let number = self.garages.first().map(|g| g.pick.look.number.clone()).unwrap_or_default();
-        self.race.results = Some(match self.race.hand.take() {
+        let mut results = match self.race.hand.take() {
             Some(hand) => Results::handed(&setup, &name, &number, &hand),
             None => Results::stand_in(&setup, &name, &number),
-        });
+        };
+        results.tries = std::mem::take(&mut self.race.tries);
+        self.race.results = Some(results);
         self.stack = vec![Screen::Main, Screen::Results];
         true
     }
@@ -368,6 +435,7 @@ impl Menu {
     pub fn race_dropped(&mut self) {
         self.race.racing = None;
         self.race.hand = None;
+        self.race.tries.clear();
     }
 
     /// Seat `seat`'s rider's name, for the cards a race hands over (P313).
@@ -391,6 +459,44 @@ impl Menu {
             }
         }
         self.race.hand = Some(hand);
+    }
+
+    /// P334: the players' cards of the race under way as the Hall of Fame reads them, handed over
+    /// with its end, for the name entry after the results.
+    #[allow(dead_code)] // web.rs mounts the menu without the shell's race
+    pub fn fame_tries(&mut self, tries: Vec<FameTry>) {
+        if self.race.racing.is_some() {
+            self.race.tries = tries;
+        }
+    }
+
+    /// P334: the name typed on the Hall of Fame's keyboard: put in the tables the seat's card
+    /// earned, the tables shown after, and on to the next seat's page.
+    pub(super) fn finish_fame_name(&mut self, typed: &str) {
+        let name = typed.trim();
+        if name.is_empty() {
+            return;
+        }
+        let Some(r) = self.race.results.as_mut() else { return };
+        let Some(t) = r.fame_try().copied() else { return };
+        let went = self.race.fame.enter(&t, name);
+        self.race.fame_changed = true;
+        for (table, took) in went {
+            let rows = self.race.fame.entries(table, t.track, t.class);
+            let rows = rows.into_iter().enumerate().map(|(k, (w, n))| (FameBook::value_text(table, w), n, took == Some(k))).collect();
+            r.fame_tables.push(FameTable { title: table_title(table).to_string(), rows });
+        }
+        if r.next_stage() {
+            r.fame_page(&self.race.fame);
+        } else {
+            self.race.results = None;
+            self.stack = vec![Screen::Main];
+        }
+    }
+
+    /// Whether the Hall of Fame changed since the last call, for the shell to save it.
+    pub fn take_fame_changed(&mut self) -> bool {
+        std::mem::take(&mut self.race.fame_changed)
     }
 
     /// Whether the riders' records changed since the last call, for the shell to save them.
