@@ -4112,8 +4112,13 @@ impl<R: Moto + Default> Ride<R> {
     /// The pad's levers and stick where the pad reader stores them: the gas and brake into the quad,
     /// the stick into the input limiter's, and the trick buttons into the steps' byte (MD138a: the
     /// backflip arms on R1 alone, [`crate::handling::R1_ALONE`]).
+    ///
+    /// MD178: the clutch lever goes into [`Bike::clutch`] as the pad reader leaves it, a switch: 1.0
+    /// held whatever the strength, 0 let go ([`crate::ride::switch`]). The input limiter walks the
+    /// engine's clutch toward it, the clutch ramp reads it and the engine note hears it.
     pub fn controls(&mut self, c: &crate::ride::Controls) {
         (self.q.gas, self.q.brake) = (c.gas, c.brake);
+        self.bike.clutch = crate::ride::switch(c.clutch);
         (self.bike.stick.x, self.bike.stick.y) = c.stick;
         self.bike.buttons = crate::handling::trick_nibble(c.trick);
     }

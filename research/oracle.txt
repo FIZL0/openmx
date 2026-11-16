@@ -12898,3 +12898,13 @@ atv_voice_index_pick        atv 0x00183070 = (driver, two)
 atv_voice_pick              atv 0x00183180 = (driver, asked, asked too, top, restart); pair pick 0x00183510
 atv_sample_start            atv 0x00187850 = (handed out whole with the play)
 atv_sound_queue_flush       atv 0x001840c0 = (driver, 0) the SIF send (handed out)
+# MD178 — the quad's clutch lever off its pad reader (crates/game-sim/src/quad.rs Ride::controls; proof
+#   crates/game-sim/tests/atv_quad/clutch_lever.rs, 10,000 cases on md37a/atv-r-spawn.ee.bin). Journal:
+#   research/journal/2026-11-16-md178-atv-clutch-lever.
+atv_bike_pad_reader         atv 0x004e36c0 = the bike/quad pad reader (quad vtable 0x003ce250 +0x4cc direct, +0x1c0 thunk 0x004bfa80)
+#   Gate: +0xbc4 set and atv_vehicle_live() == 1. Wrecked (+0xc80 != 0): stick, gas, brake, clutch +0x12c0
+#   and +0x14d4 zeroed. Else command 0x10 (L1) through atv_binding_lookup: strength != 0 -> +0x12c0 = 1.0,
+#   and when the latch +0x17ac != 1.0 a listeners' message 0x00272300(0x00442eb0, quad + 0x674, 8, 0xf,
+#   +0xd20, 0) (the press cue), then +0x17ac = +0x12c0; strength 0 -> +0x12c0 = 0, +0x17ac = 0. Only the
+#   reader reads +0x17ac (and the reset 0x004de778 zeroes it); writers of +0x12c0 elsewhere: 0x004c3ef4,
+#   0x004c752c, 0x004cda3c, 0x004de304, 0x004e1538/0x004e1560/0x004e1cac, 0x004e3728/0x004e39c8 (the reader).

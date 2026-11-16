@@ -6197,3 +6197,7 @@ mod frame;
 /// MD75e: the partner borrow on objects and movers.
 #[path = "atv_quad/borrow.rs"]
 mod borrow;
+
+/// MD178: the clutch lever off the pad reader.
+#[path = "atv_quad/clutch_lever.rs"]
+mod clutch_lever;
