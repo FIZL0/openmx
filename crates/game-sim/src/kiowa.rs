@@ -2118,6 +2118,67 @@ impl Surroundings for Grounded<'_> {
     }
 }
 
+/// **The helicopter on SLUS-21104's ground** (MD115): MX vs. ATV's collision record on the Kiowa
+/// (the bike's record class, the biplane's: [`crate::flight::MxvatvRecord`]) and its terrain, as the
+/// frame's [`Surroundings`].
+///
+/// - [`OnMxvatv::pass`], before the frame's world step: the record's clear and pass, its
+///   heightfield rays on `terrain` from the measure's matrix (the helicopter's scene node).
+/// - The body wrapper's response ([`Surroundings::resolve`]): the record's resolve (vt `+0x88`,
+///   handed 1) on the contacts the pass filed, [`crate::atv_contact::resolve`] with impulses.
+/// - The touching flag and the entries are the record's (an entry's `+0x24` is its ray's end's `y`,
+///   as [`Grounded`]'s).
+///   SLUS-21104's props are not in the port's worlds, so the record strikes no object and the speed
+///   test's surface is never [`Surroundings::ignored`].
+/// - The strike: the rotor's collision spheres' `centres` (the rotor's collision object, `+0x11c8`)
+///   through the measure's matrix, each asked of the terrain's ground query
+///   ([`crate::atv_ground::query`], the helicopter's terrain `+0x3b4`; none, never in the ground),
+///   [`rotor_in_ground`]. The rotor's contact search strikes nothing, there being no props.
+///
+/// What a crash test asks for is left in [`OnMxvatv::asked`].
+pub struct OnMxvatv<'a> {
+    pub record: &'a mut crate::flight::MxvatvRecord,
+    pub terrain: Option<crate::atv_ground::Terrain<'a>>,
+    pub centres: &'a [Vf],
+    pub asked: Vec<Crashed>,
+}
+
+impl OnMxvatv<'_> {
+    /// The record's clear and pass ([`crate::flight::MxvatvRecord::pass`]) on the helicopter's body,
+    /// its node the measure's matrix, once a frame before the world step.
+    pub fn pass(&mut self, ride: &mut Ride, dt: F) {
+        self.record.pass(&mut ride.body, &mut ride.measure.matrix.0, self.terrain, dt);
+    }
+}
+
+impl Surroundings for OnMxvatv<'_> {
+    fn resolve(&mut self, body: &mut Body) {
+        let h = &mut self.record.held;
+        let mut me = crate::contact::Weighed { body, mass: h.mass };
+        crate::atv_contact::resolve(&mut h.record, &mut crate::contact::Own::Body(&mut me), &mut h.entries, &mut [], &h.movers, true);
+    }
+    fn touching(&self) -> bool {
+        self.record.record.touching
+    }
+    fn ignored(&self) -> bool {
+        false
+    }
+    fn entries(&self) -> Vec<Touch> {
+        self.record.record.contacts.iter().map(|c| Touch { kind: c.kind, t: F(c.to.y()) }).collect()
+    }
+    fn strike(&mut self, matrix: &Mat4) -> Strike {
+        let Some(t) = self.terrain else { return Strike::default() };
+        let in_ground = rotor_in_ground(matrix, self.centres, |mut p| {
+            crate::atv_ground::query(&t, &mut p, None, None);
+            p
+        });
+        Strike { in_ground, struck: false }
+    }
+    fn crashed(&mut self, asked: &Crashed, _: &mut Ride, _: &mut Rng) {
+        self.asked.push(*asked);
+    }
+}
+
 // --- the wreck and the put-back ----------------------------------------------------------------------
 
 /// What every accumulator and a body's start velocity and rates are reset to: the constant

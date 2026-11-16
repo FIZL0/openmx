@@ -15,13 +15,18 @@
 //! **The port** flies them too: a [`Kiowa`] and its [`Ride`] seeded off the interpreter's RAM every
 //! [`STRETCH`] frames and flown beside it through [`Kiowa::tick_mxvatv`] on the same pad words, its
 //! body word for word against the game's after each frame, as far as [`KIOWA_AGREES_THROUGH`] and
-//! [`KIOWA3_AGREES_THROUGH`] pin.
+//! [`KIOWA3_AGREES_THROUGH`] pin. Since MD115 it flies on the ground too: its collision record (the
+//! biplane's class, [`flight::MxvatvRecord`], seeded off RAM) runs its pass on Desert Oasis's terrain
+//! and resolves its contacts ([`kiowa::OnMxvatv`]), and the record's words are compared as well.
 //!
-//! Skips without the images, the captures or the tapes.
+//! Skips without the images, the captures, the tapes or Desert Oasis's `mc02.res` (MD37a's).
 
 use game_sim::biplane::{Body, World};
 use game_sim::camera::{CURVE_ENTRIES, CurveTable};
+use game_sim::flight;
+use game_sim::handling::{ground, record};
 use game_sim::kiowa::{self, Kiowa, Mxvatv, Pad, Ride};
+use game_sim::track;
 use ps2_float::{F, Vf};
 use ps2_oracle::{Ee, Kit, skip};
 use std::collections::HashMap;
@@ -632,15 +637,14 @@ fn the_kiowa_strike_matches_the_original() {
 /// flight (the first seed is the image itself) and flown on until the next.
 const STRETCH: usize = 100;
 
-/// **How far the port flies each stretch** with every body word equal to the game's, frame by frame
-/// (a ratchet: raise it as the port gains SLUS-21104's ground contact). One entry per stretch,
-/// `STRETCH` the most; the last stretch of each flight ends with its capture. Every stretch seeded in
-/// the air agrees to its end but the one each landing is in (kiowa's at frame 1092, kiowa3's at
-/// 1191); the stretches seeded on the ground (the first, before the take-off, and those after the
-/// landing) part on their first frame, the game's record touching: the port's [`Air`] has no
-/// ground contact (MD112).
-const KIOWA_AGREES_THROUGH: &[usize] = &[0, 100, 100, 100, 100, 100, 100, 100, 100, 100, 92, 0, 0];
-const KIOWA3_AGREES_THROUGH: &[usize] = &[0, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 91, 0, 0];
+/// **How far the port flies each stretch** with every body and record word equal to the game's,
+/// frame by frame (a ratchet). One entry per stretch, `STRETCH` the most; the last stretch of each
+/// flight ends with its capture. Since MD115 every stretch agrees to its end: the take-off from the
+/// ground, the flight, the landing (kiowa's at frame 1092, kiowa3's at 1191) and the stretches
+/// seeded on the ground after it, the record's contacts resolved on Desert Oasis's terrain
+/// ([`kiowa::OnMxvatv`]).
+const KIOWA_AGREES_THROUGH: &[usize] = &[100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 71];
+const KIOWA3_AGREES_THROUGH: &[usize] = &[100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 85];
 
 /// The helicopter's further words the seed reads (`# MD80c`).
 mod seed_at {
@@ -908,30 +912,52 @@ fn seeded(ee: &Ee, heli: u32) -> (Kiowa, Ride, Mxvatv) {
     (k, ride, Mxvatv { pedal, unmanned: unmanned(ee, heli) })
 }
 
-/// The open air: no contact to resolve, the record never touching, no surface, no entries, the rotor
-/// striking nothing; a wreck asked for is noted (the stretch has left what the port flies).
-#[derive(Default)]
-struct Air {
-    wrecked: bool,
+/// The helicopter's collision record (`*(heli + 0xc8)`, the bike's record class, the biplane's:
+/// research/oracle.txt `# F31b4`, `# MD110`) as [`flight::MxvatvRecord`] holds it: its flags, tuning
+/// and list ([`record::read`]), its resolution's fields ([`record::held`], the body left to the
+/// helicopter) and the active part's rays (`+0x200`'s `+0x178` of them at `+0x180`, start and end).
+fn read_record(ee: &Ee, heli: u32) -> flight::MxvatvRecord {
+    let at = ee.u32_at(heli + at::RECORD);
+    let w = |a: u32| ee.u32_at(a);
+    let mut held = record::held(&w, at).expect("the helicopter's record names no other record or mover");
+    held.body = None;
+    let part = ee.u32_at(at + 0x200);
+    let rays = ee.u32_at(part + 0x180);
+    let rays = (0..ee.u32_at(part + 0x178)).map(|i| [quad(ee, rays + 0x20 * i), quad(ee, rays + 0x20 * i + 0x10)]).collect();
+    flight::MxvatvRecord { record: record::read(&w, at), held, rays }
 }
 
-impl kiowa::Surroundings for Air {
-    fn resolve(&mut self, _: &mut Body) {}
-    fn touching(&self) -> bool {
-        false
+/// The words where the port's record and the game's differ: what the pass writes ([`record::words`])
+/// and what the resolution writes ([`record::held_words`]).
+fn record_diff(r: &flight::MxvatvRecord, ee: &Ee, heli: u32) -> Vec<String> {
+    let at = ee.u32_at(heli + at::RECORD);
+    let w = |a: u32| ee.u32_at(a);
+    // The resolution writes the arms over the pass's blanks: its word stands.
+    let mut words: std::collections::BTreeMap<u32, u32> = record::words(&r.record, at, ee.u32_at(at + 0xf8)).into_iter().collect();
+    words.extend(record::held_words(&r.held, at, &w));
+    words
+        .into_iter()
+        .filter(|&(a, v)| ee.u32_at(a) != v)
+        .map(|(a, v)| format!("record+{:#x}: {v:#010x} ({}) want {:#010x} ({})", a - at, f32::from_bits(v), ee.u32_at(a), ee.f32_at(a)))
+        .collect()
+}
+
+/// The rotor's collision spheres' centres, in the model's frame (`*(heli + 0x11c8)`'s spheres).
+fn rotor_centres(ee: &Ee, heli: u32) -> Vec<Vf> {
+    let obj = ee.u32_at(heli + ROTOR_OBJECT);
+    assert_ne!(obj, 0, "the rotor's collision object");
+    let (count, entries) = (ee.u32_at(obj + SPHERES.0), ee.u32_at(obj + SPHERES.1));
+    (0..count).map(|k| quad(ee, entries + 32 * k + 0x10)).collect()
+}
+
+/// Desert Oasis's `Env\mc02` archive off MX vs. ATV's disc (MD37a's copy).
+fn mc02_res() -> Option<Vec<u8>> {
+    let path = Kit::load().ok()?.ctx("mxvatv-ps2/md37a").join("mc02.res");
+    let bytes = std::fs::read(&path).ok();
+    if bytes.is_none() {
+        skip(&format!("no {} (Desert Oasis's Env/MC02 off MX vs. ATV's disc)", path.display()));
     }
-    fn ignored(&self) -> bool {
-        false
-    }
-    fn entries(&self) -> Vec<kiowa::Touch> {
-        Vec::new()
-    }
-    fn strike(&mut self, _: &game_sim::math::Mat4) -> kiowa::Strike {
-        kiowa::Strike::default()
-    }
-    fn crashed(&mut self, asked: &kiowa::Crashed, _: &mut Ride, _: &mut game_sim::rng::Rng) {
-        self.wrecked |= asked.wreck.is_some();
-    }
+    bytes
 }
 
 /// A stretch flown: its first frame, whether the game's record was touching there, how many frames
@@ -993,8 +1019,9 @@ fn others_diff(k: &Kiowa, ride: &Ride, ee: &Ee, heli: u32) -> Vec<String> {
 
 /// The interpreter replays the flight from its image as [`interpret`] does (fed off the tape); at
 /// every [`STRETCH`]th frame a port helicopter is seeded off its RAM ([`seeded`]) and flown on
-/// beside it through [`Kiowa::tick_mxvatv`] in the open air ([`Air`]) on the same pad words, its body
-/// compared with the game's after each frame.
+/// beside it through [`Kiowa::tick_mxvatv`] on Desert Oasis's ground ([`kiowa::OnMxvatv`]: the record's
+/// pass before the frame, its resolve in the body wrapper, the rotor's strike on the terrain) on the
+/// same pad words, its body and its record compared with the game's after each frame.
 fn port_flies(f: &Flight) -> Option<Vec<Stretch>> {
     let (mut ee, ticks) = (hooked(image(f.name)?), tape(f.name)?);
     let frames = by_frame(&ee, f.heli, &rows(f.name)?).iter().map(|&(j, _)| j).max()? + 1;
@@ -1005,21 +1032,35 @@ fn port_flies(f: &Flight) -> Option<Vec<Stretch>> {
     let record = ee.u32_at(f.heli + at::RECORD);
     let dt = F(f32::from_bits(DT));
     let world = World { iterations: 1, rate: F(115.0) };
+    // Desert Oasis's terrain, the object SLUS-21104 builds over the map's file, checked against the
+    // helicopter's (+0x3b4): the record's heightfield rays and the rotor's strike both ask it.
+    let res = mc02_res()?;
+    let trn = ground::terrain_file(&res, "mc02").expect("mc02.res holds Env\\mc02\\MC02.ps2.trn");
+    let map = track::Terrain::parse(&trn).unwrap();
+    let terrain = ground::terrain(&map);
+    let terrain_at = ee.u32_at(f.heli + TERRAIN);
+    let read = ground::read_terrain(&|a| ee.u32_at(a), terrain_at, Some(&map));
+    assert_eq!(ground::terrain_words(&read, terrain_at), ground::terrain_words(&terrain, terrain_at), "{}: the terrain object", f.name);
+    let centres = rotor_centres(&ee, f.heli);
     let mut out: Vec<Stretch> = Vec::new();
-    let mut port: Option<(Kiowa, Ride, Mxvatv)> = None;
+    let mut port: Option<(Kiowa, Ride, Mxvatv, flight::MxvatvRecord)> = None;
     let mut rng = game_sim::rng::Rng::from_seed(1);
     let mut j = 0;
     while j < frames {
         if j % STRETCH == 0 {
-            port = Some(seeded(&ee, f.heli));
+            let (k, ride, m) = seeded(&ee, f.heli);
+            port = Some((k, ride, m, read_record(&ee, f.heli)));
             out.push(Stretch { from: j, touching: ee.u32_at(record + 0x34) != 0, agreed: 0, parted: Vec::new(), drift: None });
         }
         step(&mut ee, s, f.heli, &ticks, &mut j);
         let pad = pad_of(&ee, f.heli);
-        if let Some((k, ride, m)) = port.as_mut() {
-            let mut air = Air::default();
-            k.tick_mxvatv(m, ride, &world, Some(pad), &curve, &tables.acos, &mut rng, dt, &mut air);
-            let d = body_diff(&ride.body, &read_body(&ee, body_at));
+        if let Some((k, ride, m, rec)) = port.as_mut() {
+            let mut on = kiowa::OnMxvatv { record: rec, terrain: Some(terrain), centres: &centres, asked: Vec::new() };
+            on.pass(ride, dt);
+            k.tick_mxvatv(m, ride, &world, Some(pad), &curve, &tables.acos, &mut rng, dt, &mut on);
+            let wrecked = on.asked.iter().any(|a| a.wreck.is_some());
+            let mut d = body_diff(&ride.body, &read_body(&ee, body_at));
+            d.extend(record_diff(rec, &ee, f.heli));
             let last = out.last_mut().unwrap();
             if d.is_empty() {
                 last.agreed += 1;
@@ -1037,7 +1078,7 @@ fn port_flies(f: &Flight) -> Option<Vec<Stretch>> {
                     b.position,
                     ee.u32_at(record + 0x34),
                     ee.u32_at(f.heli + at::REASON),
-                    air.wrecked
+                    wrecked
                 ));
                 last.parted.extend(others_diff(k, ride, &ee, f.heli));
                 port = None;
