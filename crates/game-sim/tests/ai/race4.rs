@@ -8,8 +8,8 @@
 // that image: each of the four riders built as the shell builds one and seeded as S174 seeds the 2p
 // riders (chassis, wheels, drivetrain, balance, air, levers), the three AI brains read out of RAM into
 // pilots as S323 reads recording2's, and free09 off the disc as the world. Then `Sim::step_all` runs
-// the four, each AI rider's brain thinking in its bike's turn (the bike riding the levers of the tick
-// before, `Sim::think`), and every agreed row's generator
+// the four, each AI rider's brain thinking after its bike's frame (the bike riding the levers of the
+// tick before, `Sim::think`, the others read off their cards, S330), and every agreed row's generator
 // and AI bodies are held against the port's.
 //
 // The AI bodies part from the original early (`C33_AGREES_THROUGH`); the test holds the agreement it
@@ -51,7 +51,7 @@ pub(crate) const C33_NAMES: [&str; 4] = ["ai0", "ai1", "human", "ai2"];
 
 /// The last tick each of [`C33_LANES`] agrees with the original's, bit for bit, on every agreed row up
 /// to it but the torn ones: the regression mark.
-const C33_AGREES_THROUGH: [u64; 5] = [14, 18, 1802, 16, 6];
+const C33_AGREES_THROUGH: [u64; 5] = [28, 28, 1802, 206, 6];
 
 /// One rider's words off an image, at the offsets `tests/two_p_rider.rs` (S174) seeds a rider from.
 struct Image<'a> {
@@ -396,7 +396,7 @@ fn s12e_free09s_four_racers_ride_as_the_capture() {
         .map(|(k, &(r, _, b))| (c33_player(k), c33_pilot(&ee, &lists, b, r)))
         .collect();
     let gen0 = s12e_u64(&ee, rand_state);
-    sim.ai = Some(Box::new(Lane { seek, tables: Arc::new(controls::tables(&ee)), rng: Rng::from_state(gen0), pilots }));
+    sim.ai = Some(Box::new(Lane { seek, tables: Arc::new(controls::tables(&ee)), rng: Rng::from_state(gen0), pilots, cards: Vec::new() }));
 
     // The image's RAM already holds the bodies of the first row: it is tick 3's, saved before its
     // frame counter moved on. Each step from it is the next row.
