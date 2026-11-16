@@ -45,7 +45,7 @@ const PAD_DIR: &str = "/dev/input";
 
 /// A joystick device as it is read: a `/dev/input/js*` node, or in the browser one of the page's
 /// gamepads put out as the same events (P196, [`crate::web_host::PadNode`]).
-#[cfg(not(any(target_arch = "wasm32", target_os = "ios", target_os = "android", windows)))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "ios", target_os = "android", windows, target_os = "macos")))]
 type Node = std::fs::File;
 #[cfg(target_arch = "wasm32")]
 type Node = crate::web_host::PadNode;
@@ -53,15 +53,15 @@ type Node = crate::web_host::PadNode;
 // and the Android phone's (P308).
 #[cfg(any(target_os = "ios", target_os = "android"))]
 type Node = crate::phone::PadNode;
-// Windows' XInput pads through gilrs, put out as the same events (P192).
-#[cfg(windows)]
+// Windows' XInput pads through gilrs, put out as the same events (P192), and the Mac's (P352).
+#[cfg(any(windows, target_os = "macos"))]
 type Node = crate::win::PadNode;
 const PAD_SYS: &str = "/sys/class/input";
 
 /// `O_NONBLOCK`, so a frame with no pad event does not wait for one. The value is Linux's, and this
 /// is the one place the shell needs a number from a header rather than from std.
-// Android reads no js nodes (`android.rs`).
-#[cfg_attr(target_os = "android", allow(dead_code))]
+// Android reads no js nodes (`android.rs`), nor the Mac (`win.rs`).
+#[cfg_attr(any(target_os = "android", target_os = "macos"), allow(dead_code))]
 const O_NONBLOCK: i32 = 0o4000;
 
 /// One joystick event: a millisecond stamp, a value, a type and which control it is.
@@ -1597,14 +1597,14 @@ fn has_key(bitmap: &str, code: usize) -> bool {
 impl DeviceInfo {
     /// `sys/<node>/device/…`, as much of it as is there. A node with no sysfs entry (a test's fifo,
     /// or a container with no `/sys`) is known by its path alone.
-    #[cfg_attr(any(target_os = "ios", target_os = "android", windows), allow(unreachable_code, unused_variables))]
+    #[cfg_attr(any(target_os = "ios", target_os = "android", windows, target_os = "macos"), allow(unreachable_code, unused_variables))]
     fn read(sys: &std::path::Path, node: &str) -> DeviceInfo {
         // A page's gamepad has a name and nothing else (P196).
         #[cfg(target_arch = "wasm32")]
         return DeviceInfo { name: crate::web_host::pad_name(node), ..DeviceInfo::default() };
         #[cfg(any(target_os = "ios", target_os = "android"))]
         return DeviceInfo { name: crate::phone::pad_name(node), ..DeviceInfo::default() };
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         return DeviceInfo { name: crate::win::pad_name(node), ..DeviceInfo::default() };
         let dir = sys.join(node).join("device");
         let text = |name: &str| {
@@ -2808,9 +2808,9 @@ impl Seats {
         let mut found = crate::web_host::pads();
         #[cfg(any(target_os = "ios", target_os = "android"))]
         let mut found = crate::phone::pads();
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         let mut found = crate::win::pads();
-        #[cfg(not(any(target_arch = "wasm32", target_os = "ios", target_os = "android", windows)))]
+        #[cfg(not(any(target_arch = "wasm32", target_os = "ios", target_os = "android", windows, target_os = "macos")))]
         let mut found: Vec<(u32, std::path::PathBuf)> = match &self.only {
             Some(path) => vec![(0, path.clone())],
             None => std::fs::read_dir(&self.dir)
@@ -2839,15 +2839,15 @@ impl Seats {
                 });
                 continue;
             }
-            #[cfg(not(any(target_arch = "wasm32", target_os = "ios", target_os = "android", windows)))]
+            #[cfg(not(any(target_arch = "wasm32", target_os = "ios", target_os = "android", windows, target_os = "macos")))]
             use std::os::unix::fs::OpenOptionsExt;
-            #[cfg(not(any(target_arch = "wasm32", target_os = "ios", target_os = "android", windows)))]
+            #[cfg(not(any(target_arch = "wasm32", target_os = "ios", target_os = "android", windows, target_os = "macos")))]
             let Ok(file) = std::fs::OpenOptions::new().read(true).custom_flags(O_NONBLOCK).open(&path)
             else {
                 continue;
             };
-            #[cfg(any(target_arch = "wasm32", target_os = "ios", target_os = "android", windows))]
-            #[cfg_attr(any(target_os = "ios", target_os = "android", windows), allow(unused_mut))]
+            #[cfg(any(target_arch = "wasm32", target_os = "ios", target_os = "android", windows, target_os = "macos"))]
+            #[cfg_attr(any(target_os = "ios", target_os = "android", windows, target_os = "macos"), allow(unused_mut))]
             let Ok(mut file) = Node::open(&path) else { continue };
             #[cfg(target_arch = "wasm32")]
             let fresh = started;
@@ -2947,7 +2947,7 @@ impl Seats {
             j.pads.drain();
             // Its node gone from the directory is the pad gone too (K47): udev takes `jsN` away as
             // the pad goes, and an open file can still read "nothing waiting" for a moment after.
-            #[cfg(not(any(target_arch = "wasm32", target_os = "ios", target_os = "android", windows)))]
+            #[cfg(not(any(target_arch = "wasm32", target_os = "ios", target_os = "android", windows, target_os = "macos")))]
             if std::fs::symlink_metadata(&j.path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
                 j.pads.gone = true;
             }

@@ -201,8 +201,8 @@ mod ios;
 // The Android app (P308).
 #[cfg(target_os = "android")]
 mod android;
-// The Windows build's pads and sound (P192).
-#[cfg(windows)]
+// The Windows build's pads and sound (P192), and the Mac app's pads (P352).
+#[cfg(any(windows, target_os = "macos"))]
 mod win;
 // The Mac app's log when it is opened from the Finder (P351).
 #[cfg(target_os = "macos")]

@@ -1,7 +1,8 @@
 //! The Windows build's pads (P192): gilrs' XInput backend (Xbox pads, and every pad Steam Input
 //! drives) and Windows.Gaming.Input's raw controllers for PlayStation pads, read into the standard
 //! mapping and put out as js events, as `ios.rs` and `web_host.rs` put theirs out, so the pad layer
-//! reads them like `/dev/input/js*`.
+//! reads them like `/dev/input/js*`. The Mac app's pads (P352) are gilrs' default backend there (IOKit's HID
+//! manager, which maps PlayStation, Xbox and Switch pads to the standard layout itself), read the same way.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -64,12 +65,14 @@ fn snapshot() -> Vec<(u32, String, Pad)> {
 }
 
 /// Sony's USB vendor id: the DualShock 4 and the DualSense.
+#[cfg(windows)]
 const SONY: u16 = 0x054c;
 
 /// The PlayStation pads connected now, by 100 + their place in Windows.Gaming.Input's list. Both
 /// pads report buttons square, cross, circle, triangle, L1, R1, L2, R2, share, options, L3, R3, PS;
 /// the d-pad as switch 0; axes 0..1 as LX, LY, RX, L2, R2, RY.
 // ponytail: only Sony's; a Steam Controller or Deck without Steam running is still unseen, add its HID here if asked.
+#[cfg(windows)]
 fn sony() -> Vec<(u32, String, Pad)> {
     use windows::Gaming::Input::{GameControllerSwitchPosition as S, RawGameController};
     let Ok(all) = RawGameController::RawGameControllers() else { return Vec::new() };
@@ -99,6 +102,12 @@ fn sony() -> Vec<(u32, String, Pad)> {
             Some((100 + i, if name.is_empty() { "PlayStation pad".into() } else { name }, Pad { buttons, axes }))
         })
         .collect()
+}
+
+/// The Mac's PlayStation pads come through gilrs itself, whose IOKit backend reads them.
+#[cfg(target_os = "macos")]
+fn sony() -> Vec<(u32, String, Pad)> {
+    Vec::new()
 }
 
 /// The pads as the pad layer's device nodes: `gamepad/<id>`.
