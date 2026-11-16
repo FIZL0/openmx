@@ -9070,6 +9070,22 @@ car_post                    boot 0x003a02f0 (dt, car): measure, then vtable +0x2
 #                                           0x0039edb0, truck 0x003e07b0), 0x0039ed00, 0x0039e9c0,
 #                                           0x0039e850.
 car_preload                 boot 0x00397c60 (dt, car): the held jump; reads |+0x3e8| and the lean.
+# S335 — the car's stuck reset and its knockable props. Port: game_sim::car::Machine::{put_upright,
+# step_props}; tests car_drive.rs a_car_on_its_roof_is_put_back_on_its_wheels, car_props.rs. Journal:
+# research/journal/2026-11-16-s335-car-body-collision.
+car_wreck_step              boot 0x00398820 (dt, car): from the post. Edge throw -> body push, vt+0x1d0(car, 13);
+#                                           wrecked -> unwreck vt+0x1d4(car, 0); else touching (+0x170's
+#                                           record +0x40), gas > 0, speed < 10 -> clock += dt; past
+#                                           MaxWreckTime vt+0x19c (the reset), clock = 0.
+car_reset                   boot 0x00396f50 (car): car vt+0x19c. buf = body +0x60; terrain query 0x001dce80
+#                                           (car+0x2b0, buf); the answer through the app+0x108 holder
+#                                           (vtable 0x0044daf0: +8 0x00132540 copy, +0x14 0x00132620 lift
+#                                           s (0), +0x18 0x00132630 point P, +0x1c 0x00132640 normal N);
+#                                           P.xyz -= N*s; quat +0x170 = axes_to_quat(car+0x590 forward, N)
+#                                           (a2 = N; Ghidra drops it); t = turn(quat, cofg +0x180);
+#                                           +0x60.xyz = P + ((-0.5*N) + t), w P's; then body vt+0x34.
+body_stop                   boot 0x001f7910 (body): +0x70 velocity, +0x90 force, +0x1b0 rates, +0x190 moment,
+#                                           +0x1e0 twist = 0x00426d70 (0,0,0,1). +0x50/+0x160 untouched.
 # MD63 — MX vs. ATV's clutch and preload, ported under Handling::MxVsAtv (crates/game-sim/src/handling/step.rs;
 # tests/mxvatv_step.rs runs both off state04.ee.bin). Journal: research/journal/2026-10-29-md63-mxvatv-step.
 # Clutch fields, bike-relative: +0x12c0 clutch lever, +0x314 gas lever, +0xc38 speed, +0x1348 ramp timer,

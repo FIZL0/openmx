@@ -2115,8 +2115,7 @@ pub fn drive_lane_met(sim: &mut Sim, cars: &[CarRide], dt: F, world: &mut dyn Wo
     };
     let lane = *lane;
     let mut car = CarRide { driven: Some(lane.machine), struck: lane.struck, ..template.clone() };
-    sim.traffic.frame(dt, world);
-    car.step_met(sim.input.pad(0), &sim.phy.stick, sim.table(), &sim.tables.ride, dt, world, met);
+    car.step_traffic(sim, dt, world, met);
     let kind = lane.kind;
     sim.car = car.driven.take().map(|machine| Box::new(game_sim::car::Lane { kind, machine, struck: car.struck.take() }));
     true
@@ -2630,6 +2629,39 @@ impl CarRide {
     }
 }
 
+impl CarRide {
+    /// **The track's path cars, then [`CarRide::step_met`] among the knockable props** (S335): the
+    /// props held out of the traffic's frame ([`game_sim::traffic::Traffic::frame_held`]) while the
+    /// car strikes and pushes them ([`game_sim::car::Machine::step_props`], the car the props' one
+    /// striker), then their own step with the car's body as that striker, then the traffic's late
+    /// half — as the plane's [`Plane::step_traffic`] has them. A track with no props, or a car with
+    /// no collision object, is the traffic's frame and [`CarRide::step_met`].
+    pub fn step_traffic(&mut self, sim: &mut Sim, dt: F, world: &mut dyn World, met: Option<&mut flight::Met>) {
+        if sim.traffic.props.is_empty() || self.struck.is_none() || self.driven.is_none() {
+            sim.traffic.frame(dt, world);
+            self.step_met(sim.input.pad(0), &sim.phy.stick, sim.table(), &sim.tables.ride, dt, world, met);
+            return;
+        }
+        use game_sim::input::Axis;
+        let movers = sim.traffic.frame_held(dt, world);
+        let mut set = std::mem::take(&mut sim.traffic.props);
+        let (pad, table) = (sim.input.pad(0), sim.table());
+        let (m, c) = (self.driven.as_mut().expect("checked"), self.struck.as_mut().expect("checked"));
+        let stick = (pad.axis_through(Axis::LeftX, &sim.phy.stick), pad.axis_through(Axis::LeftY, &sim.phy.stick));
+        m.controls.input(&self.car, stick, F::ZERO, m.ground_speed, m.side_slip, |k| table.value(pad, k));
+        let (noise, rng) = (&mut self.noise, &mut self.rng);
+        let mut sample = |t: F| noise.get_or_insert_with(|| game_sim::noise::SmoothNoise::build(rng)).at(t);
+        let props = game_sim::car::CarProps { set: &mut set, me: 0, hull: self.hull.as_deref() };
+        let tables = &sim.tables.ride;
+        m.step_props(&self.car, &mut Through(world), c, met, Some(props), dt, &tables.acos, &tables.curve, &mut sample);
+        let mut weighed = game_sim::contact::Weighed { body: &mut m.body, mass: c.mass };
+        let mut strikers = [game_sim::contact::Other { collider: &mut c.collider, side: game_sim::contact::Side::Body(&mut weighed) }];
+        set.step_with(dt, &movers, &mut strikers);
+        sim.traffic.props = set;
+        sim.traffic.frame_late(dt, world);
+    }
+}
+
 /// What a driven car's engine voice reads ([`CarRide::engine_sound`]).
 #[derive(Clone, Copy, Debug)]
 pub struct EngineSound {
@@ -2817,10 +2849,11 @@ impl Garage {
     /// With a car up, `met` is the riders' bikes that struck its hull this tick (F26,
     /// [`CarRide::step_met`]).
     fn drive_met(&mut self, sim: &mut Sim, dt: F, world: &mut dyn World, met: Option<&mut flight::Met>) -> rider::Frame {
-        sim.traffic.frame(dt, world);
         let m = self.up.car();
-        if let Some(car) = self.cars.iter_mut().find(|c| Some(c.machine) == m) {
-            car.step_met(sim.input.pad(0), &sim.phy.stick, sim.table(), &sim.tables.ride, dt, world, met);
+        match self.cars.iter_mut().find(|c| Some(c.machine) == m) {
+            // The car strikes the knockable props in the traffic's frame (S335).
+            Some(car) => car.step_traffic(sim, dt, world, met),
+            None => sim.traffic.frame(dt, world),
         }
         if let (Kind::Kiowa, Some(heli)) = (self.up, self.heli.as_mut()) {
             heli.step_through(sim.input.pad(0), &sim.phy.stick, sim.table(), &sim.tables.ride, dt, world);

@@ -1942,6 +1942,46 @@ impl Collision {
         (movers, struck)
     }
 
+    /// **[`Collision::search`] among the knockable props** (S335, the car's): `knocks` in the search
+    /// after the world, each a record after this one's, by its distance where it stands now
+    /// ([`crate::flight_search::Scene::knocking`], as the plane's search has them). An entry on knock
+    /// `k` names [`crate::flight::KNOCK_FROM`]` + k`; the answer's second list is the mirrors each
+    /// knock's record took, in `knocks`' order, naming no one yet.
+    #[allow(clippy::type_complexity)]
+    pub fn search_props(
+        &mut self,
+        body: &mut Body,
+        world: &mut dyn crate::world::World,
+        dt: F,
+        knocks: &[Knock<'_>],
+    ) -> (Vec<crate::contact::Mover>, Vec<Vec<crate::contact::Contact>>) {
+        use crate::contact_search::{self, Search};
+        use crate::flight_search::{self, Scene};
+        let rays = self.rays.clone();
+        self.record.node = crate::wreck_bike::node_of(body);
+        contact_search::clear(&mut self.record, Some(&mut *body));
+        let (field, props, trees) = flight_search::near_world(world, &rays, &self.record.node, &mut self.nearby);
+        let bounds = field.as_deref().map(field_box);
+        let mut scene =
+            Scene::flown(props, trees, None, bounds, &rays, &self.record.node, &mut self.nearby).sweep_of(crate::prop_world::sweep_categories());
+        if !knocks.is_empty() {
+            scene = scene.knocking(knocks, 1);
+        }
+        let mut records = vec![std::mem::take(&mut self.record)];
+        records.extend(knocks.iter().map(|n| contact_search::Record { capacity: n.capacity, ..contact_search::Record::default() }));
+        contact_search::collide(&mut records, 0, Some(body), field.as_deref(), &mut scene, dt);
+        let movers = Search::movers(&scene);
+        drop(scene);
+        let mut records = records.into_iter();
+        self.record = records.next().unwrap_or_default();
+        for e in &mut self.record.contacts {
+            if let Some(k) = e.other.and_then(|o| o.checked_sub(1)) {
+                e.other = Some(crate::flight::KNOCK_FROM + k);
+            }
+        }
+        (movers, records.map(|r| r.contacts).collect())
+    }
+
     /// The body wrapper's post: the nearby list gathered again round the ray probe placed where the body
     /// now stands ([`crate::flight_search::refresh_flown`]).
     pub fn refresh(&mut self, body: &Body, world: &mut dyn crate::world::World) {

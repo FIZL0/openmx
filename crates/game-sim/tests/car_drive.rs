@@ -1103,3 +1103,61 @@ fn check_collision(ee: &Ee, c: &Collision) {
         assert_eq!((s.from.to_bits(), s.to.to_bits()), (quad(ee, a).to_bits(), quad(ee, a + 0x10).to_bits()), "ray {i}");
     }
 }
+
+/// **A car on its roof comes back** (S335): the buggy and the monster truck dropped upside down onto
+/// free07 with the gas held land on their roofs, the body's collision holds them off the ground, and
+/// once the stuck timer runs out the original's reset stands them on their wheels on the ground,
+/// every speed cleared.
+#[test]
+fn a_car_on_its_roof_is_put_back_on_its_wheels() {
+    let Some(kit) = Kit::load().map_err(|w| skip(&w)).ok() else { return };
+    let (acos, curve) = (AcosTable::build(), CurveTable::build());
+    for (kind, psg) in [(Kind::Buggy, "buggy\\anim\\buggy.psg"), (Kind::MonsterTruck, "monstertruck\\anim\\monstertruck.psg")] {
+        let (Some(phy), Some(psg), Some(rays)) = (machine_file(&kit, kind.phy()), machine_file(&kit, psg), machine_file(&kit, kind.rays())) else {
+            return;
+        };
+        let car = Car::read_bytes(&phy, kind);
+        let model = game_sim::car::CarModel::read(&psg).unwrap();
+        let rays = game_sim::track::Rays::parse(&rays).unwrap();
+        in_free07(|g| {
+            let (gp, _) = g.ground(Vf::new(4020.0, 0.0, 2357.0, 1.0));
+            let start = Vf::new(4020.0, gp.y() + 12.0, 2357.0, 1.0);
+            let mut m = Machine::new(&car, &model, start, Vf::new(0.0, 0.0, -1.0, 0.0), Vf::new(0.0, -1.0, 0.0, 0.0));
+            m.drive(true);
+            let mut c = game_sim::car::collision_of_model(&car, &model, &m.body, Rays::of(&rays));
+            c.refresh(&m.body, g);
+            c.record.search_ground = m.searches_terrain(g);
+            let dt = F(1.0 / 30.0);
+            let gas = |cmd| if cmd == game_sim::bindings::Command::GAS { F::ONE } else { F::ZERO };
+            let mut reset = None;
+            for frame in 0..400 {
+                m.controls.input(&car, (F::ZERO, F::ZERO), F::ZERO, m.ground_speed, m.side_slip, gas);
+                m.step_struck(&car, g, &mut c, dt, &acos, &curve, &mut |_| F::ZERO);
+                if m.event == Some(game_sim::car::CarEvent::Reset) {
+                    reset = Some(frame);
+                    break;
+                }
+                // On its roof the body's collision holds it up: its origin stays over the ground.
+                let (under, _) = g.ground(m.body.position);
+                assert!(m.body.position.y() > under.y() - 1.0, "{kind:?} frame {frame}: the body sank through the ground");
+            }
+            let frame = reset.unwrap_or_else(|| panic!("{kind:?}: the stuck timer never reset the car"));
+            let (under, _) = g.ground(m.body.position);
+            assert!((m.body.position.y() - under.y()).abs() < 10.0, "{kind:?}: put back {} ft off the ground", m.body.position.y() - under.y());
+            let clear = Vf::new(0.0, 0.0, 0.0, 1.0).to_bits();
+            for (name, v) in [("velocity", m.body.velocity), ("rates", m.body.rates), ("force", m.body.force), ("moment", m.body.moment)] {
+                assert_eq!(v.to_bits(), clear, "{kind:?}: {name} not cleared");
+            }
+            // The turn is built from the car's last nose, which on its roof need not lie along the
+            // ground, so it stands near upright; two seconds off the gas settle it on its wheels.
+            for _ in 0..60 {
+                m.controls.input(&car, (F::ZERO, F::ZERO), F::ZERO, m.ground_speed, m.side_slip, |_| F::ZERO);
+                m.step_struck(&car, g, &mut c, dt, &acos, &curve, &mut |_| F::ZERO);
+            }
+            let (_, normal) = g.ground(m.body.position);
+            let up = m.up;
+            let facing = up.x() * normal.x() + up.y() * normal.y() + up.z() * normal.z();
+            assert!(m.grounded && facing > 0.95, "{kind:?} reset at frame {frame}: not back on its wheels (up {up:?}, grounded {})", m.grounded);
+        });
+    }
+}
