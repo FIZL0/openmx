@@ -933,7 +933,7 @@ wire!(crate::rider_anim::Clocked { played, snapshot });
 /// skin's); [`decode`] puts this machine's back.
 impl Wire for crate::flight::Flight {
     fn put(&self, out: &mut Vec<u8>) {
-        let Self { joystick, autopilot, engine, aero, body, measure, tires, cg_braking, max_g, max_g_roll, pad, surfaces, attitude, air, crash, gravity, gravity_scale, mass, inv_inertia, edge_scale, wrecks, spawn, spawn_up, area, noise, rng, collider, record, rays: _, nearby, bike: _, hull: _, heard: _, wreck: _, mxvatv: _, skin: _, record_mxvatv: _ } = self;
+        let Self { joystick, autopilot, engine, aero, body, measure, tires, cg_braking, max_g, max_g_roll, pad, surfaces, attitude, air, crash, gravity, gravity_scale, mass, inv_inertia, edge_scale, wrecks, spawn, spawn_up, area, noise, rng, collider, record, rays: _, nearby, bike: _, hull: _, heard: _, wreck: _, mxvatv: _, skin: _, record_mxvatv: _, posts: _ } = self;
         joystick.put(out);
         autopilot.put(out);
         engine.put(out);
@@ -1004,6 +1004,7 @@ impl Wire for crate::flight::Flight {
             skin: 0,
             // SLUS-21104's record (MD110) is no shell plane's: none rides the wire.
             record_mxvatv: None,
+            posts: Default::default(),
         })
     }
 }

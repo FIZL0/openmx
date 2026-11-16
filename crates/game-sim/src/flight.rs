@@ -188,6 +188,10 @@ pub struct Flight {
     /// What the material table's listener heard the probe strike in the frame's search (F27a,
     /// [`crate::material_hit`]): a bike by player. Sound only.
     pub heard: crate::material_hit::Heard,
+    /// The messages an MX vs. ATV plane ([`Flight::mxvatv`]) has posted, counted (MD112): what the
+    /// shell's rumble hears. Never counted on an MX Unleashed plane. Not in the hash walk nor on the
+    /// wire, and [`Flight::put_back`] keeps the plane's own, so a rollback never counts one again.
+    pub posts: Posts,
     /// MX vs. ATV's plane (MD80b, [`Flight::new_mxvatv`]): the controls, the autopilot, the engine,
     /// the aerodynamics and the edge test and throw are SLUS-21104's twins of MX Unleashed's
     /// ([`biplane::controls_mxvatv`] and the rest), and the body steps as SLUS-21104's later body
@@ -207,6 +211,21 @@ pub struct Flight {
     /// Unleashed's search and resolution. None as every plane is built; boxed, so a plane without one
     /// is a word bigger; not in the hash walk.
     pub record_mxvatv: Option<Box<MxvatvRecord>>,
+}
+
+/// **What SLUS-21104's plane posts to its listeners** (MD112), each kind counted as it goes out
+/// (wrapping): the camera controller among them, the pad's rumble beside the wreck entry's.
+///
+/// - `wreck`: the wreck entry's message 11, on every wreck — a crashed plane thrown back from the
+///   edge enters again, and posts again. The entry also rumbles a human's pad when the vehicle
+///   state's rumble is on, beside the message; the shell rumbles off this count.
+/// - `latch`: the thrown plane come down (its landed latch, [`biplane::Crashed::latched`]): 12.
+/// - `unwreck`: the recovery's 13, the waited-out wreck's, the reset chord's and a reset's alike.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Posts {
+    pub wreck: u32,
+    pub latch: u32,
+    pub unwreck: u32,
 }
 
 /// **SLUS-21104's collision record on its plane** (MD110): the record its pass fills
@@ -536,6 +555,7 @@ impl Flight {
         back.bike = self.bike.clone();
         back.mxvatv = self.mxvatv;
         back.skin = self.skin;
+        back.posts = self.posts;
         *self = back;
     }
 
@@ -1378,6 +1398,9 @@ impl Flight {
         if out.wreck.is_some() {
             self.wreck();
         }
+        if self.mxvatv && out.latched {
+            self.posts.latch = self.posts.latch.wrapping_add(1);
+        }
         if out.recover {
             self.unwreck(acos);
         }
@@ -1388,17 +1411,26 @@ impl Flight {
     /// damping, its inertia scaled by `WreckInertia` and its gravity by `WreckGravity`, the throttle
     /// and the engine's note cut (P187: the original zeroes the note the engine sound reads, not the
     /// power, which keeps its last value through the wreck — the engine is not stepped while wrecked).
+    ///
+    /// An MX vs. ATV plane's is MXVehicle's wreck entry (MD112): the inertia `WreckInertia` times
+    /// the body's own, inverted ([`biplane::wreck_inertia_mxvatv`]), where MX Unleashed's divides the
+    /// inverse; and its message 11 counted ([`Flight::posts`]).
     fn wreck(&mut self) {
         let w = &self.wrecks;
         let b = &mut self.body;
         b.rates = b.rates.merge(Dest::XYZ, b.rates.mul(Vf::splat(WRECK_SPIN)));
         b.damping = w.wreck_damping;
         b.ang_damping = w.wreck_damping;
-        let mut inv = self.inv_inertia;
-        for k in 0..3 {
-            inv[k] = (F(inv[k]) / F(w.wreck_inertia[k])).to_f32();
+        if self.mxvatv {
+            b.inv_inertia = biplane::wreck_inertia_mxvatv(w.wreck_inertia, INERTIA);
+            self.posts.wreck = self.posts.wreck.wrapping_add(1);
+        } else {
+            let mut inv = self.inv_inertia;
+            for k in 0..3 {
+                inv[k] = (F(inv[k]) / F(w.wreck_inertia[k])).to_f32();
+            }
+            b.inv_inertia = inv;
         }
-        b.inv_inertia = inv;
         self.gravity = gravity_force(w.wreck_gravity, self.mass);
         self.surfaces.throttle = F::ZERO;
         self.engine.note = F::ZERO;
@@ -1416,6 +1448,9 @@ impl Flight {
         self.body.damping = UNDAMPED;
         self.body.ang_damping = UNDAMPED;
         self.body.inv_inertia = self.inv_inertia;
+        if self.mxvatv {
+            self.posts.unwreck = self.posts.unwreck.wrapping_add(1);
+        }
         self.gravity = gravity_force(self.gravity_scale, self.mass);
         let s = &mut self.surfaces;
         (s.throttle, s.elevator, s.elevator_command, s.aileron, s.rudder) = (F::ZERO, F::ZERO, F::ZERO, F::ZERO, F::ZERO);
