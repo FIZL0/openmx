@@ -61,6 +61,10 @@ pub const ARMS: [[&str; 4]; 2] = [
 /// The node the baja's and the buggy's rear tires hang under.
 pub const SWING_ARM: &str = "SwingArm";
 
+/// MX vs. ATV's golf cart's front hubs, left then right (MD157): each under its upper A-arm and the
+/// parent of its tire. The rest of its rig is the buggy's ([`ARMS`]' nodes it lacks are passed by).
+pub const CART_HUBS: [&str; 2] = ["LeftHub", "RightHub"];
+
 /// How far the original swings an upper arm for a foot of compression, over its length.
 const ARM_SWING: f32 = 1.25;
 
@@ -251,8 +255,22 @@ pub fn pose(model: &Model, tires: &[Tire; 4]) -> Vec<M4> {
         truck(model, &mut local, &bind, tires);
     } else {
         arms(model, &mut local, &bind, tires);
+        cart(model, &mut local, tires);
     }
     compose(model, &local)
+}
+
+/// The golf cart's front (MD157, the port's own rig, by eye): each hub lifted by its compression and
+/// steered, its tire spun. Nothing on a model without [`CART_HUBS`].
+fn cart(model: &Model, local: &mut [M4], tires: &[Tire; 4]) {
+    for (side, hub) in CART_HUBS.iter().enumerate() {
+        let Some(h) = find(model, hub) else { continue };
+        lift(&mut local[h], tires[side].compression);
+        turn(&mut local[h], v3(0.0, 1.0, 0.0), tires[side].steer);
+        if let Some(t) = find(model, TIRES[side]) {
+            spin_and_stretch(&mut local[t], &tires[side], false);
+        }
+    }
 }
 
 pub(crate) fn lift(local: &mut M4, by: f32) {

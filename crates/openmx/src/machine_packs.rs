@@ -9,7 +9,7 @@
 //! kind of file, and says what it could not read. Nothing rides it yet: the quad's step is MD37b and
 //! picking it is MD37d, so with no pack, or a pack and no quad picked, every ride is as it was.
 
-use crate::audio::{BikeSounds, Clip as Sound, HeliEngine, LoopEngine, MachineTouchdown, MachineWreck};
+use crate::audio::{BikeSounds, CarEngine, Clip as Sound, HeliEngine, LoopEngine, MachineTouchdown, MachineWreck};
 use crate::particles::Emt;
 use crate::track_mods::Json;
 use game_render::biplane::{self, Emitter};
@@ -399,6 +399,33 @@ impl Pack {
         };
         let sounds = BikeSounds::read(&text, &mut lib);
         Ok((sounds, why))
+    }
+
+    /// One car's engine off a car pack (MD157): `profile`'s keyed loops in the pack's engine file
+    /// (`Aud/carengine.aud`), each `.vag` read from the pack's `Aud\` as [`Pack::engine_sounds`] does.
+    /// A loop whose sample the pack lacks or openmx cannot decode is left out, and named in the lines.
+    pub fn car_engine(&self, profile: &str) -> Result<(CarEngine, Vec<String>), String> {
+        let text = self.text(&self.engine)?;
+        let mut loaded: HashMap<String, Option<Arc<Sound>>> = HashMap::new();
+        let mut why = Vec::new();
+        let mut lib = |name: &str| -> Option<Arc<Sound>> {
+            let mut path = format!("Aud\\{}", name.trim().trim_matches('"'));
+            if !path.rsplit('\\').next().unwrap_or("").contains('.') {
+                path = [".VAG", ".vig"].iter().map(|x| format!("{path}{x}")).find(|p| self.files.find_suffix(p).is_some()).unwrap_or(path);
+            }
+            loaded
+                .entry(path.to_ascii_lowercase())
+                .or_insert_with(|| match self.files.read(&path).and_then(|b| Sound::read(&path, &b)) {
+                    Ok(c) => Some(Arc::new(c)),
+                    Err(e) => {
+                        why.push(format!("{path}: {e}"));
+                        None
+                    }
+                })
+                .clone()
+        };
+        let engine = CarEngine::read(&text, profile, &mut lib);
+        Ok((engine, why))
     }
 
     /// The particle list's name in the pack (`Part/atvparticles.dat`), `""` for none (MD136).

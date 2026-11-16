@@ -3630,6 +3630,31 @@ pub fn mxvatv_machine(word: &str) -> Option<game_sim::car::MxvatvMachine> {
     }
 }
 
+/// One of the five's profile in MX vs. ATV's `Aud\\carengine.aud`, spelt as the file spells it (MD157).
+pub fn mxvatv_car_profile(machine: game_sim::car::MxvatvMachine) -> &'static str {
+    use game_sim::car::MxvatvMachine as M;
+    match machine {
+        M::Buggy => "buggy",
+        M::MonsterTruck => "monstertruck",
+        M::Baja => "baja",
+        M::GolfCart => "golfcart",
+        M::Sandrail => "SandRail",
+    }
+}
+
+/// The name the shell keeps one of the five's engine under among the ride's car engines (MD157):
+/// its own, as MX Unleashed's cars' `carengine.aud` has a `[buggy]` and a `[baja]` of its own.
+pub fn mxvatv_car_voice(machine: game_sim::car::MxvatvMachine) -> &'static str {
+    use game_sim::car::MxvatvMachine as M;
+    match machine {
+        M::Buggy => "mxvatv:buggy",
+        M::MonsterTruck => "mxvatv:monstertruck",
+        M::Baja => "mxvatv:baja",
+        M::GolfCart => "mxvatv:golfcart",
+        M::Sandrail => "mxvatv:sandrail",
+    }
+}
+
 /// What the shell calls one of the five.
 pub fn mxvatv_car_label(machine: game_sim::car::MxvatvMachine) -> &'static str {
     use game_sim::car::MxvatvMachine as M;
@@ -3785,6 +3810,24 @@ impl MxvatvCarRide {
     fn place(&self) -> Option<(Vf, Vf)> {
         let m = self.matrix()?.0;
         Some((Vf::new(m[3].x(), m[3].y(), m[3].z(), 1.0), Vf::new(m[2].x(), m[2].y(), m[2].z(), 0.0)))
+    }
+
+    /// What its engine voice reads while it is out (MD157), as [`CarRide::engine_sound`] a car's: the
+    /// step's sound pitch, the engine's redline, the gas after its rate limit, where its node is and
+    /// how fast its body goes. The profile is [`mxvatv_car_voice`]'s, which the shell keys the pack's
+    /// `carengine.aud` profile under. `None` without an engine.
+    pub fn engine_sound(&self) -> Option<EngineSound> {
+        let r = self.ridden.as_ref()?;
+        let (at, _) = self.place()?;
+        let v = r.body.velocity;
+        Some(EngineSound {
+            profile: mxvatv_car_voice(self.machine),
+            pitch: r.state.engine.pitch.0,
+            top: r.keys.engine.as_ref()?.redline.0,
+            throttle: r.state.gas.0,
+            at: [at.x(), at.y(), at.z()],
+            vel: [v.x(), v.y(), v.z()],
+        })
     }
 
     /// What the shell says of it while it is out: which car, how far it went from where it was
