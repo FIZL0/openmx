@@ -1961,6 +1961,18 @@ const UPRIGHT: f32 = f32::from_bits(0x3eae_147b);
 const STUCK_SPEED: f32 = 10.0;
 /// How near the map's edge throws the car.
 const EDGE_MARGIN: f32 = 150.0;
+/// The edge throw's arc (S337): the fall its time is reckoned on, the farthest it carries, and its
+/// lift's two terms, `rate · k + reach / k`.
+const THROW_G: f32 = f32::from_bits(0x413c_d1e3);
+const THROW_REACH: f32 = f32::from_bits(0x44c9_9999);
+const THROW_LIFT_RATE: f32 = f32::from_bits(0x4180_cccd);
+const THROW_LIFT_REACH: f32 = 190.0;
+/// The thrown car's random spin about x, y and z, each times a `rand()` unit.
+const THROW_SPIN: [f32; 3] = [0.5, f32::from_bits(0x3ecc_cccd), f32::from_bits(0x3f33_3333)];
+/// What of its velocity a car keeps when the edge throw's wreck ends.
+const UNWRECK_KEEP: f32 = f32::from_bits(0x3e99_999a);
+/// [`Machine::edge_scale`] as the vehicle's constructor sets it.
+const EDGE_SCALE: f32 = 20.0;
 
 /// One corner of the car: the tire's own state and the words its probe and suspension keep.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -2096,6 +2108,9 @@ pub struct Machine {
     pub up: Vf,
     /// What the last measure asked for.
     pub event: Option<CarEvent>,
+    /// The vehicle's scale the edge throw halves and the unwreck doubles back ([`EDGE_SCALE`] to
+    /// start). Nothing in the car reads it; kept as the original keeps it.
+    pub edge_scale: F,
 }
 
 impl Wheel {
@@ -2609,8 +2624,10 @@ impl Machine {
     }
 
     /// A wrecked car waits to leave the ground and come back; a whole one near the map's edge is
-    /// thrown, and one stuck on the gas against something for `MaxWreckTime` is reset.
-    fn wreck_timer(&mut self, car: &Car, world: &impl crate::world::World, dt: F) -> Option<CarEvent> {
+    /// thrown, and one stuck on the gas against something for `MaxWreckTime` is reset. Only asks:
+    /// the post acts on [`CarEvent::Reset`] and [`CarEvent::Unwreck`], the owner on
+    /// [`CarEvent::Thrown`] ([`Machine::throw_back`]).
+    pub fn wreck_timer(&mut self, car: &Car, world: &impl crate::world::World, dt: F) -> Option<CarEvent> {
         use crate::contact::dot;
         if self.wrecked {
             if !self.grounded && !self.touching {
@@ -2660,6 +2677,50 @@ impl Machine {
         self.body.position = point.merge(Dest::XYZ, point.add(lift));
         let b = &mut self.body;
         (b.velocity, b.force, b.rates, b.moment, b.twist) = (CLEAR, CLEAR, CLEAR, CLEAR, CLEAR);
+    }
+
+    /// **The edge throw** (S337): what the original's wreck step does to a car its measure finds near
+    /// the map's edge ([`CarEvent::Thrown`]). The body is sent toward the middle of the map, level
+    /// with where it is, as fast as an arc of half the map's width (at most [`THROW_REACH`]) needs,
+    /// with the arc's lift on top, and tumbled by three `rand()` units; [`Machine::edge_scale`] is
+    /// halved, and the car is wrecked (reason 13) until it has lifted off and come down again
+    /// ([`Machine::unwreck`]). `area` is the map's, `rng` the session's `rand()`.
+    pub fn throw_back(&mut self, area: &crate::biplane::Area, rng: &mut crate::rng::Rng) {
+        let half = F(0.5);
+        let mid_x = half * area.width;
+        let at = self.body.position;
+        let target = Vf::new(mid_x.0, at.y(), (half * area.depth).0, 1.0);
+        let d = target.merge(Dest::XYZ, target.sub(at));
+        let (x, y, z) = (F(d.x()), F(d.y()), F(d.z()));
+        let len2 = Acc::mula(x, x).madda(y, y).madd(z, z);
+        let dir = if F::ZERO == len2 {
+            Vf::new(0.0, 0.0, 0.0, 1.0)
+        } else {
+            let k = F::ONE.rsqrt(len2);
+            Vf::new((x * k).0, (y * k).0, (z * k).0, d.w())
+        };
+        let root = F(2.0) * F(THROW_G).sqrt();
+        let speed = F(THROW_REACH).min(mid_x) / root;
+        let lift = F(THROW_LIFT_RATE) * root + F(THROW_LIFT_REACH) / root;
+        let v = dir.merge(Dest::XYZ, dir.mul(Vf::splat(speed.0)));
+        self.body.velocity = Vf::new(v.x(), (F(v.y()) + lift).0, v.z(), v.w());
+        self.edge_scale = self.edge_scale * half;
+        let [sx, sy, sz] = THROW_SPIN.map(|s| (F(s) * rng.unit()).0);
+        self.body.rates = Vf::new(sx, sy, sz, 1.0);
+        self.wrecked = true;
+        self.wreck_lifted = false;
+    }
+
+    /// **The unwreck** (S337): the edge throw's wreck ends — [`Machine::edge_scale`] doubled back,
+    /// the measure's latch raised, and the body keeping [`UNWRECK_KEEP`] of its velocity.
+    pub fn unwreck(&mut self) {
+        if self.wrecked {
+            self.edge_scale = self.edge_scale / F(0.5);
+        }
+        self.wrecked = false;
+        self.latch = true;
+        let v = self.body.velocity;
+        self.body.velocity = v.merge(Dest::XYZ, v.mul(Vf::splat(UNWRECK_KEEP)));
     }
 }
 
@@ -2736,9 +2797,13 @@ impl<W: crate::world::World, N: FnMut(F) -> F> crate::biplane::Dynamics for Step
             c.refresh(&self.m.body, &mut *self.world);
         }
         self.m.measure(self.car, self.world, dt, self.acos);
-        // The stuck reset runs in the post's wreck step, after the measure (S335).
-        if self.m.event == Some(CarEvent::Reset) {
-            self.m.put_upright(&mut *self.world);
+        // The stuck reset and the unwreck run in the post's wreck step, after the measure (S335,
+        // S337). The edge throw draws on the session's `rand()`, which the owner holds
+        // ([`Machine::throw_back`]).
+        match self.m.event {
+            Some(CarEvent::Reset) => self.m.put_upright(&mut *self.world),
+            Some(CarEvent::Unwreck) => self.m.unwreck(),
+            _ => {}
         }
     }
 }
@@ -2934,6 +2999,7 @@ impl Machine {
             forward: Vf::default(),
             up: Vf::default(),
             event: None,
+            edge_scale: F(EDGE_SCALE),
         }
     }
 

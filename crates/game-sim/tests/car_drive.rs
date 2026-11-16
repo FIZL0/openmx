@@ -179,6 +179,7 @@ const TAIL: usize = 0x9b0;
 mod car_at {
     pub const GRAVITY: u32 = 0x140;
     pub const BODY: u32 = 0x160;
+    pub const EDGE_SCALE: usize = 0x194;
     pub const LAST_COFG: usize = 0x250;
     pub const GROUND_VELOCITY: usize = 0x2a0;
     pub const LATCHED: usize = 0x2bc;
@@ -702,6 +703,7 @@ fn machine_of(car: &Car, ee: &Ee, body: &Body, r: &DriveRow) -> Machine {
         forward: c.v(FORWARD),
         up: c.v(UP),
         event: None,
+        edge_scale: c.f(EDGE_SCALE),
     }
 }
 
