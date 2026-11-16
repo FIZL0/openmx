@@ -5531,6 +5531,7 @@ pub fn ride_controls(levers: &Levers, clutch: F) -> crate::ride::Controls {
         brake: levers.brake,
         reverse: levers.reverse,
         stick: (levers.steer, levers.lean),
+        squared: true,
         ..crate::ride::Controls::default()
     }
 }
@@ -6148,6 +6149,9 @@ pub struct Lane {
     pub tables: std::sync::Arc<Tables>,
     pub rng: Rng,
     pub pilots: Vec<(usize, Pilot)>,
+    /// Every player's card as the riders' brains read each other off it, by player index
+    /// ([`Lane::feed_cards`]); empty until the first feed.
+    pub cards: Vec<Other>,
 }
 
 // --- the lane at a map's load (S331) -------------------------------------------------------------------
@@ -6224,7 +6228,19 @@ impl Lane {
                 (player, pilot)
             })
             .collect();
-        Lane { seek, tables, rng, pilots }
+        Lane { seek, tables, rng, pilots, cards: Vec::new() }
+    }
+
+    /// **Every rider tells its card where it is** (S330), once a frame after every rider's: the race
+    /// handler's card feed, which the free ride runs too. A brain's list of the others is their
+    /// cards, so it reads each rider as the last frame's end left it, whether that rider has had its
+    /// frame in this one or not. Where the empty lane first fills, the cards are the riders as they
+    /// stand (an image's cards were fed at the end of its frame).
+    pub fn feed_cards(&mut self, riders: &[&crate::rider::Rider]) {
+        self.cards.resize(riders.len(), Other::FRESH);
+        for (card, r) in self.cards.iter_mut().zip(riders) {
+            *card = card.fed(r);
+        }
     }
 }
 
@@ -6246,6 +6262,35 @@ pub fn mount_of(rider: &crate::rider::Rider) -> (Rider, Vf) {
         bump_chance: F(0.0),
     };
     (seen, ch.cofg_world)
+}
+
+impl Other {
+    /// A card nothing has fed: its constructor's zeros, and the look's `w` 1.
+    pub const FRESH: Other = Other {
+        active: true,
+        marked: false,
+        position: Vf::new(0.0, 0.0, 0.0, 0.0),
+        velocity: Vf::new(0.0, 0.0, 0.0, 0.0),
+        heading: Vf::new(0.0, 0.0, 0.0, 1.0),
+        speed: F(0.0),
+        progress: F(0.0),
+    };
+
+    /// The card after its bike's word ([`crate::race::RaceCard::feed`]): the `xyz` of the bike's
+    /// frame's position and look rows (each `w` kept), the chassis' whole velocity and its length.
+    pub fn fed(self, rider: &crate::rider::Rider) -> Other {
+        use ps2_float::fpu;
+        let m = rider.ride.transform();
+        let v = rider.ride.chassis.vel;
+        Other {
+            active: rider.state.wreck.is_none(),
+            position: Vf::new(m.0[3].x(), m.0[3].y(), m.0[3].z(), self.position.w()),
+            velocity: v,
+            heading: Vf::new(m.0[2].x(), m.0[2].y(), m.0[2].z(), self.heading.w()),
+            speed: F(fpu::sqrt(fpu::madd(fpu::madda(fpu::mula(v.x(), v.x()), v.y(), v.y()), v.z(), v.z()))),
+            ..self
+        }
+    }
 }
 
 /// Another Sim rider as an AI rider's race list holds it: active unless wrecked, where its body is,

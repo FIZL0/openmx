@@ -157,6 +157,10 @@ pub struct Controls {
     /// cuts the gas lever before its limiter reads it (P158, [`Controls::gate_cut`]). A pad leaves it
     /// false; the rider fills it in.
     pub gas_cut: bool,
+    /// **The brain's, not the pad's:** [`Controls::stick`] is already the squared stick (S330). An
+    /// AI rider's hand-off writes `+0x628`/`+0x62c` itself, which the player's pad read writes
+    /// squared, so [`Held::step`] takes it as it is. A pad leaves it false.
+    pub squared: bool,
 }
 
 impl Controls {
@@ -226,6 +230,7 @@ impl Controls {
             extra: [false; trick::EXTRA_BUTTONS],
             hands_off: false,
             gas_cut: false,
+            squared: false,
         }
     }
 }
@@ -430,7 +435,7 @@ impl Held {
         let raw = trick::stick(c.stick.0, c.stick.1, c.dpad);
         self.flick = self.ring.sample(raw.y, dt);
         self.digital = raw.digital;
-        self.stick = (squared(raw.x), squared(raw.y));
+        self.stick = if c.squared { (raw.x, raw.y) } else { (squared(raw.x), squared(raw.y)) };
         let rx = if raw.digital[0] { j.x_dpad_rate_limit } else { j.x_axis_rate_limit } * dt;
         let ry = if raw.digital[1] { j.y_dpad_rate_limit } else { j.y_axis_rate_limit } * dt;
         // Steering off holds the sideways lean at 0 (`+0x670`); the fore-aft lean still walks.

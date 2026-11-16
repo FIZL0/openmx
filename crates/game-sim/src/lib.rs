@@ -495,6 +495,15 @@ impl Sim {
         }
     }
 
+    /// Every rider's card fed, for the AI riders' brains to read each other off (S330,
+    /// [`ai::Lane::feed_cards`]); nothing without AI riders.
+    fn feed_cards(&mut self) {
+        let Some(mut lane) = self.ai.take() else { return };
+        let riders: Vec<&Rider> = (0..self.players()).map(|j| self.rider_of(j)).collect();
+        lane.feed_cards(&riders);
+        self.ai = Some(lane);
+    }
+
     /// Player `i`'s bike has had its frame, on `clutch` for a lever: its race card's statistics
     /// tracker counts on ([`race::Laps::bike`], S319), as the original's bike update does after its
     /// physics.
@@ -606,6 +615,9 @@ impl Sim {
         self.event_frame(dt);
         self.race_frame(dt, world);
         let mut frames = Vec::with_capacity(controls.len());
+        if self.ai.as_ref().is_some_and(|l| l.cards.is_empty()) {
+            self.feed_cards();
+        }
         // Rider against rider (S78): every bike's contacts, from where the last tick left them all.
         // On a world that wraps (MD44), each bike against every other's nearest copy.
         let mut lists = self.bike_contacts_in(dt, &*world);
@@ -641,9 +653,8 @@ impl Sim {
                 .collect();
             // The wheels stand on the props for the frame (S210, [`prop_wheel`]).
             self.lend_props(i);
-            // An AI rider's brain thinks first, and its levers are the bike's controls (S323).
-            let thought = self.think(i, dt, world);
-            let c = thought.as_ref().unwrap_or(c);
+            // An AI rider's levers are the bike's controls (S323); its brain thinks after the frame.
+            let c = &self.levers_of(i).unwrap_or(*c);
             let tables = &self.tables;
             let frame = if i == 0 {
                 self.rider.frame_bumped(&self.phy, tables, c, dt, world, &rivals, bump.as_mut())
@@ -652,6 +663,7 @@ impl Sim {
                 p.rider.frame_bumped(&p.phy, tables, c, dt, world, &rivals, bump.as_mut())
             };
             self.props_back(i);
+            self.think(i, dt, world);
             self.race_bike(i, c.clutch);
             if let Some(b) = &bump {
                 self.bumped(b);
@@ -668,6 +680,7 @@ impl Sim {
             let rider = if i == 0 { &mut self.rider } else { &mut self.others[i - 1].rider };
             frame.seam = rider.wrap_round(&*world);
         }
+        self.feed_cards();
         self.ticks += 1;
         frames
     }

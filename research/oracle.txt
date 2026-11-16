@@ -12490,6 +12490,19 @@ camera_flash_tick           boot 0x002f95c0 (object, f12 dt): ring +0x48 (times,
 # * The actor list (game_manager +0x34 -> +0x34) nodes' actors' first word is no type: riders read 2 on
 #   recording2 and 1 on C33's boot. Every rider has an interface (vtable 0x004550e4 at +8, the rider at
 #   +0xc, the brain or 0 at +0); research/c33/riders.py finds the riders that way.
+# S330 — C33's AI bodies at the launch (journal 2026-11-16-s330-s12-ai-in-the-sim). Comment rows only.
+#   The whole frame in Ee from C33's image: app_pointer -> +0x378 the scene root, its vt +0x38 (0x00133500,
+#   a0 root, f12 dt), with interrupts_off/on hooked and the Timer 0 read in 0x00167da0 skipped (hook pc
+#   0x00167dc0, ra 0x00167dd0). 20 frames keep ai0's body bit-exact through row 23; the riders' vt +0xe0
+#   or collision_node_update alone part at row 15, because neither feeds the cards.
+#   The cards are fed once a frame after every rider (score_grow 0x00267a90 -> the race handler ->
+#   score_card_feed 0x0027dc80), on free09 too. Hooking 0x0027dc80 out of the whole frame makes ai0 steer
+#   1.0 and part at row 15. C33's cards: human 0x017af920, ai2 0x017afb00, ai0 0x017afce0, ai1 0x017afec0
+#   (+0x1c8 next); +4 the owner, +0x60 w 0 and +0x120 w 1 as the feed leaves them; the image's were fed at
+#   the end of its own frame (velocity -1.0626, the image tick's).
+#   The hand-off (0x002806ec +0x644, 0x0027fee4 +0x628, 0x0027fef0 +0x62c, 0x0027ff2c +0x63c, 0x0027ff48
+#   +0x640) is the last lever store in a frame, after the bike's limiter (0x00251b4c +0x670 ...); +0x628 is
+#   the stick as the bike's limiter reads it, so an AI rider's steer is not squared again.
 # F62b: the rider controller's clip advance vt +0x88 0x0013c7b0 and clip start 0x0013ea90 in Rust (anim::advance,
 # anim::start, anim::set_clip; tests/mxvatv_bike_ride.rs rider_leaf serves Call::ClipAdvance / Call::ClipStart).
 # Journal: research/journal/2026-11-13-f62b-clip-advance-and-crossfade.
