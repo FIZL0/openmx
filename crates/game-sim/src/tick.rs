@@ -801,7 +801,10 @@ impl crate::Sim {
     /// On a race with laps (S331b) the pilot first reads its card, race kind and live again off
     /// [`crate::Sim::race`]'s laps ([`crate::ai::Pilot::read_laps`]), and a mode-2 brain drives by
     /// them, the race track and the lane's AI net ([`crate::ai::racing_of`]). The race's tick runs
-    /// before the riders', so it reads them as this tick's race left them.
+    /// before the riders', so it reads them as this tick's race left them. The avoidance's
+    /// keep-on-the-track edge and the habits' cross-up spot ask the race track at the card's spot
+    /// (S331c, [`crate::ai::on_track_of`]), and the trick plan and the habits read the node the
+    /// brain's own spot is on in the lane's AI net ([`crate::ai::route_node`]).
     ///
     /// The bike's frame rides the levers as they stood before this think: the hand-off lands after the
     /// bike has read them, so each AI rider launches a tick after its gate opens. S12e's replay of
@@ -816,7 +819,7 @@ impl crate::Sim {
         let (seen, cofg) = crate::ai::mount_of(rider);
         let ch = &mut rider.ride.chassis;
         let (mut yaw_rate, mut velocity) = (F(ch.world_ang_vel.y()), ch.vel);
-        let crate::ai::Lane { seek, tables, rng, pilots, net } = lane;
+        let crate::ai::Lane { seek, tables, rng, pilots, net, edge } = lane;
         let mount = crate::ai::Mount { rider: seen, cofg, yaw_rate: &mut yaw_rate, velocity: &mut velocity };
         let tricks = Some((&rider.set, &mut rider.tricks));
         let ridden = crate::ai::ride_controls(&pilots[k].1.levers, pilots[k].1.racer.habits.clutch);
@@ -826,7 +829,14 @@ impl crate::Sim {
             pilots[k].1.read_laps(laps, net.is_some());
         }
         let racing = laps.map(|l| crate::ai::racing_of(l, i, net.as_mut().map(std::sync::Arc::make_mut)));
-        pilots[k].1.think(mount, world, seek, tables, &others, tricks, racing, rng, dt);
+        // S331c: and its card's spot on the race track, which the avoidance's edge and the habits ask.
+        if let Some(l) = laps
+            && edge.is_none()
+        {
+            *edge = Some(std::sync::Arc::new(crate::ai::path::Net::from_track(&l.track)));
+        }
+        let track = laps.zip(edge.as_deref()).and_then(|(l, e)| crate::ai::on_track_of(l, e, i));
+        pilots[k].1.think(mount, world, seek, tables, &others, tricks, racing, track, rng, dt);
         let ch = &mut rider.ride.chassis;
         let w = ch.world_ang_vel;
         ch.world_ang_vel = ps2_float::Vf::new(w.x(), yaw_rate.to_f32(), w.z(), w.w());
