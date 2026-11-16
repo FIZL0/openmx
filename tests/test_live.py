@@ -963,7 +963,7 @@ def _():
         os.environ.pop('KIT_PCSX2', None)
 
 
-@check('copies live in `agent-runner home slots`, or beside the main checkout when the runner lacks it')
+@check('copies live in `agent-runner home slots`, or the runner default ~/runs/<main> without one')
 def _(copies_root=PLAT.copies_root):
     bin_ = WORK / 'runner-bin'
     bin_.mkdir(exist_ok=True)
@@ -974,11 +974,11 @@ def _(copies_root=PLAT.copies_root):
     main = Path(out.stdout.splitlines()[0].split(' ', 1)[1])
     try:
         os.environ['PATH'] = str(bin_)
-        assert copies_root() == main.parent / f'{main.name}-slots' / 'pcsx2', 'no agent-runner at all'
+        assert copies_root() == Path.home() / 'runs' / main.name / 'pcsx2', 'no agent-runner at all'
         runner.write_text('#!/bin/sh\necho "usage: agent-runner ..." >&2\nexit 2\n')
         runner.chmod(0o755)
-        assert copies_root() == main.parent / f'{main.name}-slots' / 'pcsx2', \
-            'agent-runner before 0.13.1 has no `home`: every worktree shares <main>-slots, not <worktree>-slots'
+        assert copies_root() == Path.home() / 'runs' / main.name / 'pcsx2', \
+            'a runner that cannot answer: every worktree shares ~/runs/<main>, not ~/runs/<worktree>'
         runner.write_text('#!/bin/sh\n[ "$1 $2" = "home slots" ] && echo /runs/openmx && exit 0\nexit 2\n')
         assert copies_root() == Path('/runs/openmx/pcsx2'), 'the runner\'s answer wins'
     finally:
