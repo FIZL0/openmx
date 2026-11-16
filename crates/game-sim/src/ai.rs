@@ -1374,13 +1374,22 @@ pub mod path {
         pub fn load(
             file: &crate::race::TrackFile, terrain: Option<&mut dyn crate::world::World>, props: Option<crate::back_search::Scene<'_>>,
         ) -> Option<Net> {
-            let mut file = file.clone();
-            let raise = file.snap_to_ground(terrain);
-            if let Some(scene) = props {
-                file.raise_on_props(&raise, scene);
-            }
-            Some(Net::from_track(&crate::race::TrackPaths::new(&file)?))
+            Some(Net::from_track(&load_paths(file, terrain, props)?))
         }
+    }
+
+    /// [`Net::load`]'s paths before they are made a net: the race file's paths as the race activity's
+    /// load leaves them, stood on `terrain` and lifted onto `props`, then walked. What the drivers
+    /// ride ([`super::Racing::net`], [`super::Lane::net`]).
+    pub fn load_paths(
+        file: &crate::race::TrackFile, terrain: Option<&mut dyn crate::world::World>, props: Option<crate::back_search::Scene<'_>>,
+    ) -> Option<crate::race::TrackPaths> {
+        let mut file = file.clone();
+        let raise = file.snap_to_ground(terrain);
+        if let Some(scene) = props {
+            file.raise_on_props(&raise, scene);
+        }
+        crate::race::TrackPaths::new(&file)
     }
 
     /// A point on the line: the stretch from `node` to its next, `along` that far through it (0..1).
@@ -4980,6 +4989,41 @@ pub struct Racing<'a> {
     pub race_word: Option<u32>,
 }
 
+impl<'a> Racing<'a> {
+    /// **What player `player`'s brain drives by in a race with `laps`** (S332), as the driver reads it
+    /// through the brain's race, card and net words: the race's kind (the score manager's `+0x60`),
+    /// its track's ahead reach (`+0x38`, [`crate::race::RACE_REACH`] in a race) and the line's spot;
+    /// the player's card's flags, distances to the line, on-the-track word, step and kept spot; the
+    /// AI path `net`; the race track's own paths; the line gate's centre and normal; and the score
+    /// manager's flag word (`+0x5c`) as the race word.
+    ///
+    /// The card's next gate is `None`: the laps' cards keep a gate only as an index into a gate race's
+    /// list, which [`crate::race::Laps`] does not hold (a lap race's cards have none, as sx01's). With
+    /// no `laps` (no race, or a start alone) there is no race or card, and the drivers answer false,
+    /// as the original's do with a null race; a player with no card in the laps drives with no card.
+    pub fn of(laps: Option<&'a crate::race::Laps>, player: usize, net: Option<&'a mut crate::race::TrackPaths>) -> Racing<'a> {
+        let race = laps.map(|l| drive::Race { kind: l.rules.lap.kind, track_reach: l.track.ahead, line_spot: l.course.line_spot });
+        let card = laps.and_then(|l| l.card(player)).map(|c| drive::Card {
+            flags: c.flags,
+            to_line_kept: c.to_line_kept,
+            to_line: c.to_line,
+            on_track: c.on_track as u32,
+            seen: c.seen,
+            kept_spot: c.kept_spot,
+            gate: None,
+        });
+        Racing {
+            race,
+            card,
+            net,
+            track: laps.map(|l| &*l.track),
+            gate: None,
+            line: laps.map(|l| (l.course.line.centre, l.course.line.normal)),
+            race_word: laps.map(|l| l.rules.lap.flags),
+        }
+    }
+}
+
 /// What a [`Racer::tick`] asks of the rest of the game.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Told {
@@ -6079,10 +6123,16 @@ impl Pilot {
     /// rider's `tricks`, and the levers it hands off come back as the bike's controls
     /// ([`ride_controls`], the clutch the habits pull). The card's settle word and racing bit are the
     /// habits' air time and racing bit, which the original keeps in the card.
+    ///
+    /// A brain in mode 2 or 4 drives by the Sim's `race` (S332, [`Racing::of`]: its laps, this
+    /// rider's card in them by [`Seat::player`]) and the race's AI path `net`; the rider has a path
+    /// net when its seat says so or a `net` is handed in. In a race with laps the pilot's card reads
+    /// its flag word and progress off the rider's lap card, which is the same card in the original.
     #[allow(clippy::too_many_arguments)] // the tick's world, as Around has it
     pub fn think(
         &mut self, mount: Mount<'_>, world: &mut dyn crate::world::World, seek_world: &mut seek::World,
-        tables: &Tables, others: &[Other], tricks: Option<(&Set, &mut Tricks)>, rng: &mut Rng, dt: F,
+        tables: &Tables, others: &[Other], tricks: Option<(&Set, &mut Tricks)>, race: Option<&crate::race::Race>,
+        net: Option<&mut crate::race::TrackPaths>, rng: &mut Rng, dt: F,
     ) -> Thought {
         let cell = world.wooded().2.map_or(F(0.0), |t| t.cell());
         let lent = Lent::new(world);
@@ -6098,10 +6148,13 @@ impl Pilot {
             swept: Vec::new(),
         };
         let habits = &self.racer.habits;
-        let card = self.card.map(|c| Card {
-            settle: habits.air_time,
-            flags: c.flags & !0x8_0000 | if habits.racing { 0x8_0000 } else { 0 },
-            ..c
+        let laps = race.and_then(|r| r.laps.as_deref());
+        // In a race with laps the card is the laps' own: its flag word and progress move on with the
+        // race (S332).
+        let lap = laps.and_then(|l| l.card(seat.player));
+        let card = self.card.map(|c| {
+            let (flags, progress) = lap.map_or((c.flags, c.progress), |l| (l.flags, l.progress));
+            Card { settle: habits.air_time, flags: flags & !0x8_0000 | if habits.racing { 0x8_0000 } else { 0 }, progress, ..c }
         });
         let mut around = Around {
             rider,
@@ -6115,7 +6168,7 @@ impl Pilot {
             air_cone: seat.air_cone,
             card,
             race_phase: seat.race_phase,
-            path_net: seat.path_net,
+            path_net: seat.path_net || net.is_some(),
             others,
             edge: None,
             vehicle: Some(VehicleScene { scene: &mut scene, cell, ignore: &self.ignore, off_path: None }),
@@ -6129,7 +6182,7 @@ impl Pilot {
             levers: &mut self.levers,
             yaw_rate: mount.yaw_rate,
             velocity: mount.velocity,
-            racing: None,
+            racing: Some(Racing::of(laps, seat.player, net)),
         };
         let told = self.racer.tick(&mut around, rng, dt);
         self.recovery = around.recovery;
@@ -6148,6 +6201,10 @@ pub struct Lane {
     pub tables: std::sync::Arc<Tables>,
     pub rng: Rng,
     pub pilots: Vec<(usize, Pilot)>,
+    /// The race's AI path net (S332), which every pilot's brain shares, as the original's brains
+    /// share the race activity's. `None` until [`crate::Sim::load_ai_net`] puts one in: a brain in
+    /// mode 2 or 4 drives with no net till then.
+    pub net: Option<crate::race::TrackPaths>,
 }
 
 // --- the lane at a map's load (S331) -------------------------------------------------------------------
@@ -6224,7 +6281,7 @@ impl Lane {
                 (player, pilot)
             })
             .collect();
-        Lane { seek, tables, rng, pilots }
+        Lane { seek, tables, rng, pilots, net: None }
     }
 }
 
@@ -6273,6 +6330,39 @@ mod tests {
         assert_eq!(skill_range(90), (4, 4));
         assert_eq!(skill_range(100), (1, 1));
         assert_eq!(skill_range(75), (7, 9)); // 0.5 + 4 + 6 × 0.75 = 9 against the flat 7
+    }
+
+    /// S332: a race's AI rider (mode 2) thinks with the Sim's race fed in, so its tick drives by the
+    /// race driver and never tells "mode two" missing; with no race the driver answers as the
+    /// original's does with a null race.
+    #[test]
+    fn a_race_pilot_drives_by_the_sims_race() {
+        let mut rng = Rng::from_seed(1);
+        let seat = Seat { live: true, ..Seat::default() };
+        let mut pilot = Pilot::spawn(&mut rng, AI_INTERFACE, None, 0, None, 4, 90, seat);
+        assert_eq!(pilot.racer.brain.mode, 2, "a race's kind gives the race driver's mode");
+        let tables = Tables::build();
+        let mut world = crate::world::Flat::default();
+        let mut seek_world = seek::World::default();
+        let id = [Vf::new(1.0, 0.0, 0.0, 0.0), Vf::new(0.0, 1.0, 0.0, 0.0), Vf::new(0.0, 0.0, 1.0, 0.0), Vf::new(0.0, 0.0, 0.0, 1.0)];
+        let zero = Vf::new(0.0, 0.0, 0.0, 0.0);
+        let rider = Rider {
+            frame: id,
+            velocity: zero,
+            acceleration: zero,
+            spin: zero,
+            forward_speed: F(0.0),
+            on_ground: true,
+            tricking: false,
+            look_ahead: F(0.0),
+            bump_chance: F(0.0),
+        };
+        for _ in 0..3 {
+            let (mut yaw, mut vel) = (F(0.0), zero);
+            let mount = Mount { rider, cofg: zero, yaw_rate: &mut yaw, velocity: &mut vel };
+            let thought = pilot.think(mount, &mut world, &mut seek_world, &tables, &[], None, None, None, &mut rng, F(1.0 / 30.0));
+            assert!(!thought.told.missing.contains(&"mode two"), "{:?}", thought.told.missing);
+        }
     }
 
     /// The identities are all different and none comes from below the AI range.
