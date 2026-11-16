@@ -429,11 +429,13 @@ pub(crate) fn u_view(ee: &Ee, car: u32) -> Ee {
             }
         }
     }
-    // The vehicle state's pad (the rumble's), SLUS-21104's +0x5c, is at +0x54.
+    // The vehicle state's pad (the rumble's), SLUS-21104's +0x5c, is at +0x54, and its wheel word,
+    // SLUS-21104's +0x54, at +0x58 (the controls 0x4e7e90 read it).
     let vstate = ee.u32_at(car + u(0xbc4));
     if vstate != 0 {
         for o in 0..4 {
             ram[(vstate + 0x5c + o) as usize] = ee.ram[(vstate + 0x54 + o) as usize];
+            ram[(vstate + 0x54 + o) as usize] = ee.ram[(vstate + 0x58 + o) as usize];
         }
     }
     // The terrain's extent pointer, SLUS-21104's +0x43c, is at +0x42c.
@@ -541,6 +543,8 @@ pub(crate) struct UBeside {
     /// The tire steps handed out for a tire standing on an object, which the port leaves to its
     /// caller and this harness cannot answer: the frame is not compared.
     unported: Vec<Call>,
+    /// The drive and frame, for the panics.
+    at: String,
     pub(crate) asked: usize,
     pub(crate) rest: Vec<Call>,
 }
@@ -553,7 +557,7 @@ impl UBeside {
             let d = |g: &UGround| { let v = Vf(g.asked.map(f32::from_bits)); (0..3).map(|i| (v.0[i] - at.0[i]).abs()).sum::<f32>() };
             k = (0..self.ground.len()).min_by(|&x, &y| d(&self.ground[x]).total_cmp(&d(&self.ground[y])));
         }
-        let k = k.unwrap_or_else(|| panic!("the port asked the ground at {:08x?}, the original never did (it asked {:08x?})", at.to_bits(), self.ground.iter().map(|g| g.asked).collect::<Vec<_>>()));
+        let k = k.unwrap_or_else(|| panic!("{}: the port asked the ground at {:08x?}, the original never did (it asked {:08x?})", self.at, at.to_bits(), self.ground.iter().map(|g| g.asked).collect::<Vec<_>>()));
         let g = self.ground.remove(k);
         self.used.push(g);
         g
@@ -727,14 +731,14 @@ pub(crate) fn u_beside(d: &UDrive, ride: bool) -> Option<USeen> {
                 eprintln!("G {:x} {:08x?} {:?} {:?} {:?}", g.from, g.asked, g.point, g.normal, g.record);
             }
         }
-        let beside = UBeside { ground: std::mem::take(&mut *ground.borrow_mut()), noise: noise.borrow_mut().drain(..).map(|(_, at, f)| (at, f)).collect(), used: Vec::new(), sort: u_sort_answer(ee, car_at_), held, resolves: 0, unported: Vec::new(), asked: 0, rest: Vec::new() };
-        let mut pieces = Pieces { keys: m.keys(), state: m.state, rest: beside };
+        let beside = UBeside { ground: std::mem::take(&mut *ground.borrow_mut()), noise: noise.borrow_mut().drain(..).map(|(_, at, f)| (at, f)).collect(), used: Vec::new(), sort: u_sort_answer(ee, car_at_), held, resolves: 0, unported: Vec::new(), at: String::new(), asked: 0, rest: Vec::new() };
+        let mut pieces = Pieces { keys: m.keys(), state: m.state, rest: UBeside { at: format!("{name} frame {k}"), ..beside } };
         if ride {
             let mut r = the_ride.borrow_mut();
             let r = r.get_or_insert_with(|| super::drives::ride_of(table));
             r.update.untamed = true;
             (r.keys, r.state, r.car, r.body, r.vehicle) = (std::mem::take(&mut pieces.keys), pieces.state, car, body, v);
-            let rest = std::mem::replace(&mut pieces.rest, UBeside { ground: Vec::new(), noise: Vec::new(), used: Vec::new(), sort: SortAnswer::default(), held: None, resolves: 0, unported: Vec::new(), asked: 0, rest: Vec::new() });
+            let rest = std::mem::replace(&mut pieces.rest, UBeside { ground: Vec::new(), noise: Vec::new(), used: Vec::new(), sort: SortAnswer::default(), held: None, resolves: 0, unported: Vec::new(), at: String::new(), asked: 0, rest: Vec::new() });
             pieces.rest = r.frame_with(dt, rest);
             (pieces.keys, pieces.state) = (std::mem::take(&mut r.keys), r.state);
             (car, body) = (r.car.clone(), r.body.clone());
@@ -759,7 +763,7 @@ pub(crate) fn u_beside(d: &UDrive, ride: bool) -> Option<USeen> {
         let bad: Vec<String> = after
             .iter()
             .filter(|&&(a, x)| va.u32_at(a) != x)
-            .take(40)
+            .take(if std::env::var("PROBE_AT").is_ok() { 1000 } else { 40 })
             .map(|&(a, x)| {
                 let o = a.wrapping_sub(car_at_);
                 let at = if o < U_CAR_SIZE { format!("car +{:#x} (21104 +{o:#x})", u(o)) } else { format!("{a:#x}") };
@@ -818,10 +822,51 @@ pub(crate) fn u_beside(d: &UDrive, ride: bool) -> Option<USeen> {
     Some(seen)
 }
 
+/// Drive `d` beside, through the frame or the Ride: every frame compared but those with a tire on an
+/// object, and none of those but where the original's tire stands on one.
+fn u_beside_test(d: &UDrive, ride: bool) {
+    let Some(s) = u_beside(d, ride) else { return };
+    assert!(s.frames > 0, "{}: no frame compared", d.name);
+}
+
 #[test]
-fn probe_untamed_beside() {
-    let Some(s) = u_beside(&U_THROTTLE, false) else { return };
-    panic!("frames {} words {} grounds {} handed {:?} other {}", s.frames, s.words, s.grounds, s.handed, s.other_worlds);
+fn untamed_throttle_frame_beside() {
+    u_beside_test(&U_THROTTLE, false);
+}
+
+#[test]
+fn untamed_throttle_ride_beside() {
+    u_beside_test(&U_THROTTLE, true);
+}
+
+#[test]
+fn untamed_steer_frame_beside() {
+    u_beside_test(&U_STEER, false);
+}
+
+#[test]
+fn untamed_steer_ride_beside() {
+    u_beside_test(&U_STEER, true);
+}
+
+#[test]
+fn untamed_jump_frame_beside() {
+    u_beside_test(&U_JUMP, false);
+}
+
+#[test]
+fn untamed_jump_ride_beside() {
+    u_beside_test(&U_JUMP, true);
+}
+
+#[test]
+fn untamed_wreck_frame_beside() {
+    u_beside_test(&U_WRECK, false);
+}
+
+#[test]
+fn untamed_wreck_ride_beside() {
+    u_beside_test(&U_WRECK, true);
 }
 
 #[test]
