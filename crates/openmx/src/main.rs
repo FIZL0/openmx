@@ -1539,6 +1539,16 @@ impl Rig {
     }
 }
 
+/// One of a one-player race's AI riders as the picture has it (V128): player `player` of the first
+/// seat's Sim (P313a), its body and bike posed as a seat's [`Rig`] poses its own — the body's machine
+/// and the chassis' off the rider the Sim steps — and drawn in the first seat's bike, parts and rider
+/// models, which on the GPU are shared and posed by node matrices of their own.
+struct AiRig {
+    player: usize,
+    body: Option<Body>,
+    chassis: Option<Chassis>,
+}
+
 /// What the picture shows of one seat at a tick (P52), kept from the tick before the last so a drawn
 /// frame can blend it into the last.
 #[derive(Clone)]
@@ -1559,23 +1569,37 @@ struct Shown {
 
 impl Shown {
     fn of(seat: &Seat, rig: &Rig, assets: &Assets, ragdolled: Option<&game_render::rider::Ragdolled>, poses: bool) -> Shown {
-        let bike = match &seat.sim.rider.crash {
+        Shown::of_rider(&seat.sim.rider, rig.body.as_ref(), rig.chassis.as_ref(), assets, ragdolled, poses)
+    }
+
+    /// [`Shown::of`] for any rider, with the body and chassis posed for it: a seat's, or an AI
+    /// rider's (V128).
+    fn of_rider(
+        rider: &game_sim::rider::Rider,
+        body: Option<&Body>,
+        chassis: Option<&Chassis>,
+        assets: &Assets,
+        ragdolled: Option<&game_render::rider::Ragdolled>,
+        poses: bool,
+    ) -> Shown {
+        let rig_chassis = chassis;
+        let bike = match &rider.crash {
             Some(crash) => chassis_wrecked(crash),
-            None => chassis_at(&seat.sim.rider.ride),
+            None => chassis_at(&rider.ride),
         };
         if !poses {
             return Shown { bike, chassis: Vec::new(), body: None, thrown: false };
         }
-        let chassis = rig.chassis.as_ref().map_or(Vec::new(), |c| c.world.clone());
-        let down = match (seat.sim.rider.drawn_ragdoll(), &seat.sim.rider.ragdoll_kit, ragdolled) {
+        let chassis = rig_chassis.map_or(Vec::new(), |c| c.world.clone());
+        let down = match (rider.drawn_ragdoll(), &rider.ragdoll_kit, ragdolled) {
             (Some(doll), Some(kit), Some(rigged)) => Some((doll.nodes(kit), rigged)),
             _ => None,
         };
-        let riding = riding_bones(seat, ragdolled).filter(|_| down.is_none());
-        let body = match (&rig.body, down.as_ref().or(riding.as_ref())) {
+        let riding = riding_bones_of(rider, ragdolled).filter(|_| down.is_none());
+        let body = match (body, down.as_ref().or(riding.as_ref())) {
             (Some(body), Some((bones, rigged))) => Some(body.ragdoll_palette(rigged, bones, bike)),
             (Some(body), None) if body.posed => {
-                let grips = match &rig.chassis {
+                let grips = match rig_chassis {
                     Some(chassis) => chassis_grips(chassis),
                     None => match assets.models.get(CHASSIS) {
                         Some(loaded) => anchors_of(&Skeleton::of(&loaded.model), &[]),
@@ -1608,12 +1632,94 @@ impl Shown {
     }
 }
 
+/// One frame of the race's AI riders' bodies and bikes (V128): each [`AiRig`]'s body machine and
+/// chassis run off its player's rider in `sim`, as the shell's frame runs a seat's (Body::ride,
+/// Chassis::ride), with the controls its brain's levers stand at now. The riding ragdoll's
+/// skeleton, holds and drawn nodes are handed back the same way.
+fn ai_ride(rigs: &mut [AiRig], sim: &mut Sim, dt: F, ragdolled: Option<&game_render::rider::Ragdolled>, original_wheels: bool) {
+    for rig in rigs.iter_mut() {
+        let i = rig.player;
+        if i == 0 || i >= sim.players() {
+            continue;
+        }
+        let pilot = sim.ai.as_deref().and_then(|l| l.pilots.iter().find(|(p, _)| *p == i)).map(|(_, p)| p);
+        let hands = pilot.map_or_else(Controls::default, |p| game_sim::ai::ride_controls(&p.levers, p.racer.habits.clutch));
+        let rider = &mut sim.others[i - 1].rider;
+        if let Some(body) = &mut rig.body {
+            body.ride(dt, rider, &hands, rider::Gate::default());
+            if let (Some(doll), true) = (ragdolled, rider.ragdoll_kit.is_some()) {
+                rider.skeleton = Some(Arc::new(body.ragdoll_posed(doll)));
+            }
+            body.drawn = riding_bones_of(rider, ragdolled).map(|(bones, rigged)| body.ragdoll_palette(rigged, &bones, chassis_at(&rider.ride)));
+        }
+        if let Some(chassis) = &mut rig.chassis {
+            let ride = &rider.ride;
+            let want = match rig.body {
+                Some(_) => chassis.want_under(ride, &rider.tricks, rider.body.veh.want),
+                None => chassis.want_with_pack(ride, &rider.tricks),
+            };
+            let request = chassis.riding_under(rider, want);
+            chassis.original_wheels = original_wheels;
+            chassis.ride(dt, want, &request, rider, Drive::of(ride));
+            if let Some(body) = &mut rig.body {
+                body.bare = chassis.bare_under(&rider.body.veh);
+            }
+        }
+        if rider.ragdoll_kit.is_some() {
+            rider.holds = ride_holds_of(rig.chassis.as_ref()).map(Arc::new);
+        }
+    }
+}
+
+/// What the picture shows of each of the race's AI riders now (V128), in [`AiRig`] order: [`Shown`]
+/// off its rider in the first seat's Sim, `sim`.
+fn ai_shown(rigs: &[AiRig], sim: &Sim, assets: &Assets, ragdolled: Option<&game_render::rider::Ragdolled>) -> Vec<Shown> {
+    rigs.iter()
+        .filter(|r| r.player < sim.players())
+        .map(|r| Shown::of_rider(sim.rider_of(r.player), r.body.as_ref(), r.chassis.as_ref(), assets, ragdolled, true))
+        .collect()
+}
+
+/// An AI rider's bike, its parts and its body as actors (V128), as a seat's are drawn: in the first
+/// seat's models (`rig`), posed by the AI rider's own `shown` node matrices, pushed onto `poses`.
+fn ai_actors<'a>(rig: &'a Rig, ai: &AiRig, shown: Shown, alpha: f32, assets: &Assets, poses: &mut Vec<Vec<M4>>) -> Vec<Actor<'a>> {
+    let mut actors = Vec::new();
+    let bike_at = shown.bike;
+    let pose = (!shown.chassis.is_empty()).then(|| {
+        poses.push(shown.chassis.clone());
+        poses.len() - 1
+    });
+    actors.push(Actor { model: rig.bike_model.as_str(), at: bike_at, pose, lod_from: None, alpha, casts: true });
+    let node_now = |name: &str| -> Option<M4> {
+        let blended = ai.chassis.as_ref().and_then(|c| c.stance.set.skeleton.find(name));
+        blended.and_then(|j| shown.chassis.get(j).copied()).or_else(|| {
+            let model = &assets.models.get(CHASSIS)?.model;
+            let i = model.nodes.iter().position(|n| n.name.eq_ignore_ascii_case(name))?;
+            Some(model.world(i))
+        })
+    };
+    for part in &rig.parts {
+        let at = node_now(&part.placement).map_or(bike_at, |node| node.mul(bike_at));
+        actors.push(Actor { model: part.model.as_str(), at, pose: None, lod_from: None, alpha, casts: true });
+    }
+    if let (Some(pose), Some(model)) = (shown.body, &rig.body_model) {
+        poses.push(pose);
+        actors.push(Actor { model: model.as_str(), at: bike_at, pose: Some(poses.len() - 1), lod_from: None, alpha, casts: true });
+    }
+    actors
+}
+
 /// **What the drawn bike hands the riding ragdoll** (S109, S110): the chassis' "Bike" node (below the
 /// chassis node) and its grips and pegs as they are drawn this frame, in the chassis' model frame. The
 /// rider's next frame steps its riding ragdoll held to them ([`game_sim::rider::Rider::holds`]), which is
 /// what a wreck is thrown from. `None` before the chassis has a frame or without all four holds.
 fn ride_holds(rig: &Rig) -> Option<game_sim::ragdoll_riding::Holds> {
-    let chassis = rig.chassis.as_ref()?;
+    ride_holds_of(rig.chassis.as_ref())
+}
+
+/// [`ride_holds`] off any chassis: a seat's, or an AI rider's (V128).
+fn ride_holds_of(chassis: Option<&Chassis>) -> Option<game_sim::ragdoll_riding::Holds> {
+    let chassis = chassis?;
     let [Some(foot_l), Some(foot_r), Some(hand_l), Some(hand_r)] = chassis_grips(chassis) else { return None };
     let point = |a: V3| Vf::new(a.x, a.y, a.z, 1.0);
     let root = chassis.nodes.root.and_then(|i| chassis.world.get(i));
@@ -1658,8 +1764,16 @@ fn riding_bones<'a>(
     seat: &Seat,
     ragdolled: Option<&'a game_render::rider::Ragdolled>,
 ) -> Option<(Vec<game_sim::math::Mat4>, &'a game_render::rider::Ragdolled)> {
-    match (&seat.sim.rider.riding, &seat.sim.rider.ragdoll_kit, ragdolled) {
-        (Some(r), Some(kit), Some(rigged)) if riding_ragdoll_on() && r.placed() && seat.sim.rider.drawn_ragdoll().is_none() => {
+    riding_bones_of(&seat.sim.rider, ragdolled)
+}
+
+/// [`riding_bones`] for any rider: a seat's, or an AI rider's (V128).
+fn riding_bones_of<'a>(
+    rider: &game_sim::rider::Rider,
+    ragdolled: Option<&'a game_render::rider::Ragdolled>,
+) -> Option<(Vec<game_sim::math::Mat4>, &'a game_render::rider::Ragdolled)> {
+    match (&rider.riding, &rider.ragdoll_kit, ragdolled) {
+        (Some(r), Some(kit), Some(rigged)) if riding_ragdoll_on() && r.placed() && rider.drawn_ragdoll().is_none() => {
             Some((r.nodes(kit), rigged))
         }
         _ => None,
@@ -7064,6 +7178,40 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             modified: !mods.seat_is_original(0),
         },
     );
+    // V128: a one-player race's AI riders (P313a), players 1.. of the first seat's Sim on its bike,
+    // each with a body and chassis of its own posed as a seat's are. On the GPU only: there the
+    // first seat's models are shared and posed by node matrices, while the software path skins
+    // into one model per rider.
+    let ai_count = race_start.as_ref().map_or(0, |s| s.ai.len());
+    let mut ai_rigs: Vec<AiRig> = Vec::with_capacity(ai_count);
+    if gpu_on {
+        for k in 0..ai_count {
+            let body = match &rider_member {
+                None => None,
+                Some(member) => Body::load(vec![disc.res(member)?], &args.rider, Sex::Male, "", &table.stunts, phy.motion()).ok(),
+            };
+            let body = body.map(|mut b| {
+                if let Some(p) = &pack_clips {
+                    b.add_pack(p, &stunts.stunts);
+                }
+                b
+            });
+            let chassis = match vehicle.mcf.is_empty() {
+                true => None,
+                false => Chassis::load(vec![disc.res(&bike_member)?], &vehicle.mcf, BIKE_PREFIX, &table.stunts, vehicle_params()).ok(),
+            };
+            let chassis = chassis.map(|mut c| {
+                if let Some(p) = &pack_clips {
+                    c.add_pack(p, &stunts.stunts);
+                }
+                c.stop_fork_in(&assets.models, CHASSIS, &vehicle.parts);
+                c
+            });
+            ai_rigs.push(AiRig { player: k + 1, body, chassis });
+        }
+    } else if ai_count > 0 {
+        println!("race: {ai_count} AI riders not drawn — the software path draws the seats' riders only");
+    }
 
     // A world's tiles dressed (MD15): every tile's props, plants and cars near the start now, the
     // rest as the riders come, each read from its own folder and moved by its offset.
@@ -8192,6 +8340,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // What the tick before the last one showed, for the picture to blend from: each seat's pose,
     // each view's camera and the plane.
     let mut before: Vec<Shown> = Vec::new();
+    // And each of the race's AI riders' (V128).
+    let mut before_ai: Vec<Shown> = Vec::new();
     let mut before_cameras: Vec<Camera> = Vec::new();
     // Each view's markers' slot display (P88).
     let mut banners: Vec<hud::MarkerBanner> = Vec::new();
@@ -9275,6 +9425,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         // seats after it (N5). Its frames count toward `--frames`, the engine's not being run.
         // Where everything is before this tick, which the picture blends from until the next.
         before = world.seats.iter().zip(&rigs).map(|(seat, rig)| Shown::of(seat, rig, &assets, ragdolled.as_ref(), gpu_on)).collect();
+        before_ai = ai_shown(&ai_rigs, &world.seats[0].sim, &assets, ragdolled.as_ref());
         before_cameras.clone_from(&cameras);
         before_planes = world.seats.iter().map(|seat| seat.garage.plane.as_ref().map(plane_at)).collect();
         before_helis = world.seats.iter().map(|seat| seat.garage.heli_up().and_then(|h| Some((heli_at(h)?, heli_rotor(h))))).collect();
@@ -10126,6 +10277,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             // body from it is riding_ragdoll_on's (S90).
             if moving && bike_up && online.is_none() && seat.sim.rider.ragdoll_kit.is_some() {
                 seat.sim.rider.holds = ride_holds(rig).map(Arc::new);
+            }
+            // V128: the race's AI riders on the first seat's Sim, posed as the seat's own rider is
+            // above, off their own riders and the controls their brains hand the bikes.
+            if i == 0 && moving && bike_up && online.is_none() {
+                perf.time(Stage::Animation, || ai_ride(&mut ai_rigs, &mut seat.sim, dt, ragdolled.as_ref(), args.original_wheels));
             }
             stages.mark(stages::Stage::Animation);
 
@@ -11116,6 +11272,20 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                         casts: true,
                     });
                 }
+            }
+            // The race's AI riders (V128), each on the first seat's bike, parts and rider models,
+            // blended between the last two ticks as a seat's are, and cut on a put-back.
+            let ai_now = perf.time(Stage::Skinning, || ai_shown(&ai_rigs, &world.seats[0].sim, &assets, ragdolled.as_ref()));
+            for (k, now) in ai_now.into_iter().enumerate() {
+                let sim = &world.seats[0].sim;
+                let Some(rider) = ai_rigs.get(k).filter(|r| r.player < sim.players()).map(|r| sim.rider_of(r.player)) else { continue };
+                let shown = match before_ai.get(k) {
+                    Some(b) if !rider.drawn_jumps() => b.blend(&now, &blend),
+                    _ => now,
+                };
+                let rig = &rigs[0];
+                let alpha = vehicle::shown_alpha(rider.ghost.shown(), world.seats[0].paused);
+                actors.extend(ai_actors(rig, &ai_rigs[k], shown, alpha, &assets, &mut gpu_poses));
             }
             // Every player's plane, in its own livery (P87), while it is flown.
             for (p, seat) in world.seats.iter().enumerate() {
