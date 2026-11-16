@@ -25,6 +25,16 @@ This is a re-implementation of a PlayStation 2 game: same behaviour, better rend
   gaps are written down is recoverable; one where they are silent is not, and the person who finds out is
   always someone later with less context than you.
 
+## How to write replies
+
+- Put the answer first, in a sentence or two. Then details only if they're needed.
+- Use short sentences and plain words, with no jargon the reader has to unpack.
+- Use bullets over paragraphs, with one idea per bullet.
+- Use names the user knows (the task id, the file), not internal function names.
+- When you offer options, give a few words each and say which one you'd pick.
+- Leave out recaps, caveats nobody asked for, and lists of things you're not doing.
+- This is only about how replies read. Do the work as carefully as ever.
+
 ## What has to be exact, and what does not
 
 Decide this per area once, write it here, and then stop relitigating it. A sensible default:
