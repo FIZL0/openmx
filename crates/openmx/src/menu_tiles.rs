@@ -28,6 +28,9 @@ pub enum TileOf {
     Locked,
     /// A machine of the ride under the pause, which Cross switches to.
     Switch(Machine),
+    /// One of the disc's cars on the Garage's grid (P353): every seat has each in a ride, taken from
+    /// the pause's Garage, so the tile has nothing to pick.
+    DiscCar(Machine),
 }
 
 /// One tile.
@@ -156,6 +159,12 @@ pub(super) fn grid_step(rows: &[Row], at: usize, p: Press) -> Option<usize> {
         .map(|s| s.0)
 }
 
+/// The disc's cars, in the pause's switch order (P353).
+pub const CARS: [Machine; 3] = [Machine::Buggy, Machine::Monster, Machine::Baja];
+
+/// What a car tile's side panel says: where the car is ridden.
+pub const CAR_ABOUT: &str = "Every rider has one in a ride: switch to it from the pause's Garage.";
+
 /// Tiles as page rows: each section's heading and its tiles (none for an empty section).
 pub(super) fn tile_rows(tiles: &[Tile]) -> Vec<Row> {
     let mut rows = Vec::new();
@@ -165,7 +174,8 @@ pub(super) fn tile_rows(tiles: &[Tile]) -> Vec<Row> {
             if std::mem::take(&mut heading) {
                 rows.push(Row::heading(name));
             }
-            let mut r = Row::new(Key::Tile(i), Kind::Tile, &t.name, "");
+            let about = if matches!(t.of, TileOf::DiscCar(_)) { CAR_ABOUT } else { "" };
+            let mut r = Row::new(Key::Tile(i), Kind::Tile, &t.name, about);
             r.choices = t.liveries.iter().map(|(n, _)| n.clone()).collect();
             r.now = Some(t.livery);
             r.tips = t.liveries.iter().map(|(_, why)| why.clone().unwrap_or_default()).collect();
@@ -179,7 +189,8 @@ pub(super) fn tile_rows(tiles: &[Tile]) -> Vec<Row> {
 impl Menu {
     /// The Machines tab's tiles for the Garage's seat (P341): every disc bike model by its class
     /// and every machine pack's bike greyed, each flier kind with its skins, the quad, and the
-    /// kinds openmx cannot ride greyed. The worlds' cars are not here; MX vs. ATV's are (MD158).
+    /// kinds openmx cannot ride greyed. The disc's cars (P353) lead the Quads & cars section, as on
+    /// the pause's Garage; MX vs. ATV's cars follow (MD158).
     pub fn garage_tiles(&self) -> Vec<Tile> {
         let Some(g) = self.garages.get(self.garage_seat()) else { return Vec::new() };
         let (c, offer, fliers) = (&self.catalogue, &self.machine_offer, self.garage_fliers());
@@ -230,6 +241,19 @@ impl Menu {
                 riding: false,
                 locked: shown.is_none().then_some(why),
                 of: TileOf::Flier(kind),
+            });
+        }
+        for m in CARS {
+            tiles.push(Tile {
+                section: section_of(m),
+                name: m.label().to_string(),
+                class: "MX Unleashed".into(),
+                picture: None,
+                liveries: Vec::new(),
+                livery: 0,
+                riding: false,
+                locked: None,
+                of: TileOf::DiscCar(m),
             });
         }
         for kind in roster::other_kinds(offer, fliers) {

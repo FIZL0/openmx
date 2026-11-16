@@ -282,7 +282,10 @@ fn walk_grid_to(m: &mut Menu, r: &mut Reader, screen: Screen, i: usize) {
 /// other walk then reaches first).
 fn every_row_changes(start: &dyn Fn() -> (Menu, Reader), what: &str) {
     let (m, _) = start();
-    let rows: Vec<menu::Row> = m.page().into_iter().filter(|r| r.selectable()).collect();
+    // A disc car's Garage tile (P353) only tells where the car is ridden: nothing on it to change.
+    let tiles = m.garage_tiles();
+    let car = |r: &menu::Row| matches!(r.key, menu::Key::Tile(i) if matches!(tiles.get(i).map(|t| &t.of), Some(menu::tiles::TileOf::Car(_))));
+    let rows: Vec<menu::Row> = m.page().into_iter().filter(|r| r.selectable() && !car(r)).collect();
     assert!(!rows.is_empty(), "{what}: no rows");
     let mut changed = Vec::new();
     for upward in [false, true] {
@@ -2289,6 +2292,33 @@ fn tile_to(m: &mut Menu, r: &mut Reader, name: &str) {
     let (here, there) = (tiles.iter().position(|t| *t == on(m).label).unwrap(), tiles.iter().position(|t| t == name).unwrap());
     let way = if there < here { Control::Left } else { Control::Right };
     tap_until(m, r, way, |m| m.page()[m.cursor(Screen::Garage)].label == name);
+}
+
+/// P353: the Garage's Machines tab shows the disc's buggy, monster truck and baja under Quads &
+/// cars, as the pause's Garage does, ahead of the quad; a press on one changes nothing.
+#[test]
+fn the_machines_tab_shows_the_cars() {
+    let mut reader = Reader::new();
+    let mut m = Menu::new(Settings::default(), Controls::default());
+    m.step(reader.read(&Report::idle()));
+    let r = &mut reader;
+    main_to(&mut m, r, "Garage");
+    tab_to(&mut m, r, "Machines");
+    let cars: Vec<(String, usize, bool)> =
+        m.garage_tiles().into_iter().filter(|t| matches!(t.of, menu::tiles::TileOf::Car(_))).map(|t| (t.name, t.section, t.locked.is_none())).collect();
+    let want = |n: &str| (n.to_string(), 2, true);
+    assert_eq!(cars, vec![want("Buggy"), want("Monster Truck"), want("Baja")]);
+    let headings: Vec<String> = m.page().iter().filter(|row| row.kind == menu::Kind::Heading).map(|row| row.label.clone()).collect();
+    assert!(headings.iter().any(|h| h == "Quads & cars"), "{headings:?}");
+    tile_to(&mut m, r, "Monster Truck");
+    let row = m.page()[m.cursor(Screen::Garage)].clone();
+    assert_eq!((row.off.is_none(), row.about.as_str()), (true, menu::tiles::CAR_ABOUT));
+    let before = key(&m);
+    for c in [Control::R1, Control::L1, Control::Cross] {
+        tap(&mut m, r, c);
+    }
+    assert_eq!(key(&m), before, "a car tile picks nothing");
+    assert_eq!(m.page()[m.cursor(Screen::Garage)].label, "Monster Truck");
 }
 
 /// P315: the Garage's Fliers tab lists every kind on offer, MX Unleashed's skins first and then a
