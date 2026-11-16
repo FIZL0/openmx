@@ -2502,6 +2502,7 @@ mod class_step; // MD151: the buggy's class step
 mod movers; // MD131: the tire step on what a tire stands on
 mod update_beside; // MD156: the drives' updates, the port's beside the interpreter's
 mod own_back; // MD154: the car's respawn, unhooked
+mod golf_step; // MD156a: the golf cart's class step
 
 use own_back::*;
 use own_calls::*;

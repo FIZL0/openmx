@@ -11885,6 +11885,26 @@ ai_rider_name               boot 0x00373340 (AI entry, buf, size) an AI rider's 
 #   +0xdec 3.0, +0xcc 0x0160cea0 (ray probe), +0xd0 0x0160e4d0 (mesh), +0xd4 0x0160f650 (sweep, vt 0x003b6b40),
 #   +0xb0 0x006545c0, +0xb4 0x00654680, +0xc0 2, +0x44 0xa3, +0x45 0x07.
 
+# MD156a — the golf cart's class step, vt +0x488 0x004cf9b0 (2196 bytes; a0 car; game_sim::atv_car::golf_class_step
+#   over node::Ram; tests/mxvatv_car_frame/golf_step.rs the_golf_carts_class_step_is_the_originals, 10,000 cases off
+#   md39a/golf.ee.bin (car 0x01b0dac0, vt 0x003cf600), nothing hooked; update_beside.rs runs it on the golf drive).
+#   Journal: research/journal/2026-11-16-md156a-mxvatv-golf-class-step. Tires T0..T3 = car +0x1254/58/5c/60.
+#   +0x14ac = 1.0; basis 0x001340b0(out +0x14b0, origin 0x00396fc0 (0,0,0,1), fwd 0x00397010, up +0x14a0, 1, 0).
+#   T0 steer coarse entry (wraps mul.s/sub.s, no step) -> (sin, 0, cos) through +0x14b0 (vaddax/vmadd, xyz) ->
+#   0x001941b0(+0x1350, dir, up +0x14a0, a3 0, t0 1, t1 1) = rows (up x dir, up, dir, pos w 1) as they are, moved
+#   (node::aim_as_is). Spin 0x00195210: +0x12d4 by T0 angle, +0x12d8 by T1, about 0x00396ff0.
+#   Corners: T1 c = T1 comp, block +0x14f0; T0 c = -T0 comp (neg.s), block +0x1590. Arms (node, ahead, up) =
+#   (+0x131c/+0x1304, B+0, B+0x20), (+0x1328/+0x1310, B+0x60, B+0x70), (+0x1320/+0x1308, B+0x10, B+0x30): up turned
+#   by 0x00293a70 (xy about z: mula x c msub y s; mula y c madd x s; z kept; w from the quad's +0xc) ->
+#   0x00194260(node, car node, ahead, up, 1,1,1) = basis(own pos, ahead, up, 1, 1) then aim_along's tail
+#   (node::aim_squared). Knuckle +0x12f0 (T1) / +0x12e4 (T0): up = norm(pos(+0x12f4) - pos(+0x1324)) /
+#   norm(pos(+0x12e8) - pos(+0x130c)); ahead = 0x002938f0 (xz about y: x c + z s, z c - x s) of B+0x40 by the
+#   tire's steer. Links: d = norm(pos(+0x12fc) - pos(+0x1300)), aim along (0,0,1) +0x1300 then +0x12fc (flags
+#   0,1,1); d = norm(pos(+0x1318) - pos(+0x1314)), +0x1314 then +0x1318. Rear: lift = max.s(T2, T3 comp); from =
+#   (0, +0x1494 + lift, (T3 +0x70 + (0,1,0)*lift).z, 1); 0x001941b0(+0x1330, norm(+0x1490 - from), 0x00397000, 1,
+#   1, 0) = node::aim; spin +0x132c by T3 angle; 0x00194af0(+0x134c, +0x13d0 with y + lift); shocks +0x1334 /
+#   +0x133c: norm(+0x1410 / +0x1420 - pos(+0x1338 / +0x1340)), 0x00194260(.., up 0x00397000, 1,1,1).
+#   No null checks, no other branches than the wraps and max.s.
 # MD151 — the buggy's class step, vt +0x488 0x004c5510 (a0 car; game_sim::atv_car::class_step over node::Ram;
 #   tests/mxvatv_car_frame/class_step.rs the_buggys_class_step_is_the_originals, 10,000 cases off md39a/buggy.ee.bin,
 #   nothing hooked; MD106e's test runs it unhooked). Journal: research/journal/2026-11-15-md151-mxvatv-car-class-step.
