@@ -284,7 +284,7 @@ fn every_row_changes(start: &dyn Fn() -> (Menu, Reader), what: &str) {
     let (m, _) = start();
     // A disc car's Garage tile (P353) only tells where the car is ridden: nothing on it to change.
     let tiles = m.garage_tiles();
-    let car = |r: &menu::Row| matches!(r.key, menu::Key::Tile(i) if matches!(tiles.get(i).map(|t| &t.of), Some(menu::tiles::TileOf::Car(_))));
+    let car = |r: &menu::Row| matches!(r.key, menu::Key::Tile(i) if matches!(tiles.get(i).map(|t| &t.of), Some(menu::tiles::TileOf::DiscCar(_))));
     let rows: Vec<menu::Row> = m.page().into_iter().filter(|r| r.selectable() && !car(r)).collect();
     assert!(!rows.is_empty(), "{what}: no rows");
     let mut changed = Vec::new();
@@ -2305,7 +2305,7 @@ fn the_machines_tab_shows_the_cars() {
     main_to(&mut m, r, "Garage");
     tab_to(&mut m, r, "Machines");
     let cars: Vec<(String, usize, bool)> =
-        m.garage_tiles().into_iter().filter(|t| matches!(t.of, menu::tiles::TileOf::Car(_))).map(|t| (t.name, t.section, t.locked.is_none())).collect();
+        m.garage_tiles().into_iter().filter(|t| matches!(t.of, menu::tiles::TileOf::DiscCar(_))).map(|t| (t.name, t.section, t.locked.is_none())).collect();
     let want = |n: &str| (n.to_string(), 2, true);
     assert_eq!(cars, vec![want("Buggy"), want("Monster Truck"), want("Baja")]);
     let headings: Vec<String> = m.page().iter().filter(|row| row.kind == menu::Kind::Heading).map(|row| row.label.clone()).collect();
