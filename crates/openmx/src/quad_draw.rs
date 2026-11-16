@@ -216,19 +216,26 @@ pub fn skinned<'a>(look: &'a Look, copy: &'a str, assets: &mut Assets, wheels: &
     out
 }
 
-/// Which of the motion set's rows the rider is on, and where on it: the air's while the quad is in
-/// the air, the stopped one's under a foot a second, else the riding one's; the turn's lean the
-/// stick's sideways (0 left, 1 right), the fore and aft the stick's (forward -1). The original's
-/// choice is not ported (MD138's journal): this is the port's, matched by eye.
-pub fn row(atv: &AtvRide) -> ([&'static str; 3], f32, f32) {
-    let Some(q) = atv.ridden.as_ref() else { return (quad::STOPPED, 0.5, 0.0) };
-    let q = &q.ride.q;
-    let row = match (q.airborne, q.speed_len.0 < 1.0) {
-        (true, _) => quad::AIR,
-        (false, true) => quad::STOPPED,
-        (false, false) => quad::RIDING,
-    };
-    (row, 0.5 + 0.5 * q.lean.0.clamp(-1.0, 1.0), q.lean_fore_aft.0.clamp(-1.0, 1.0))
+/// Which of the motion set's rows the rider is on, and where on it: the original's choice (MD165,
+/// [`quad::Motion`]) — the row it is mostly on by its middle clip (`none` on a stunt, the flail or
+/// the pause; the reverse pair by its leading clip), the eased lean (where in the clips, a half at
+/// rest) and the eased fore and aft (0 forward, a half at rest). The stopped row at rest for a quad
+/// not out or without its clips.
+pub fn row(atv: &AtvRide) -> (&'static str, f32, f32) {
+    match motion(atv) {
+        Some(m) => (m.row().unwrap_or("none"), m.phase, m.mix),
+        None => (quad::STOPPED[1], 0.5, 0.5),
+    }
+}
+
+/// The rider's motion, while the quad is out with its clips.
+pub fn motion(atv: &AtvRide) -> Option<&quad::Motion> {
+    Some(&atv.ridden.as_ref()?.clips.as_ref()?.motion)
+}
+
+/// The length of the get-ready pause's clip in the look's motion set (0 without it).
+pub fn pause_length(look: &Look) -> f32 {
+    look.clips.iter().find(|(n, _)| n.eq_ignore_ascii_case(quad::PAUSE_CLIP)).map_or(0.0, |(_, c)| c.duration())
 }
 
 /// The rider's node matrices on the quad, in the quad's space (the clips' own), held to the posed
@@ -242,8 +249,11 @@ pub fn rider(look: &Look, body: &mut game_render::rider::Body, atv: &AtvRide, as
     let wheels = wheels(atv);
     let posed = quad::pose_from(loaded, chassis_locals(look, loaded, atv), &wheels, bars(&wheels));
     let anchors = game_render::rider::anchors_of(&game_render::skin::Skeleton::of(loaded), &posed);
-    let (row, phase, fore_aft) = row(atv);
-    quad::rider_palette_stunt(body, &anchors, row, phase, fore_aft, rider_stunt(look, atv))
+    let stunt = rider_stunt(look, atv);
+    match motion(atv) {
+        Some(m) => quad::rider_palette_motion(body, &anchors, m, stunt).or_else(|| quad::rider_palette_stunt(body, &anchors, quad::STOPPED, 0.5, 0.0, stunt)),
+        None => quad::rider_palette_stunt(body, &anchors, quad::STOPPED, 0.5, 0.0, stunt),
+    }
 }
 
 /// `--trace-picture`'s line for the quad drawn this frame: the renderer, the chassis, where its
@@ -262,7 +272,7 @@ pub fn trace(p: usize, renderer: &str, look: &Look, at: M4, wheels: &[Tire; 4], 
         o[2],
         w.join(" "),
         look.parts.len(),
-        row[1],
+        row,
         phase,
         fore_aft
     );

@@ -6394,6 +6394,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let mut garage = garage;
     if let (Some(atv), Some(look)) = (garage.atv.as_mut(), quad_look.as_ref()) {
         atv.stunts = look.stunts.clone();
+        atv.rider_pause = quad_draw::pause_length(look);
     }
     // The helicopter's own camera (P216), built as the plane's is, on `HeloCPresets.ini` (in a
     // freeride track's second archive, or free06's) and starting on its first preset.

@@ -3456,6 +3456,8 @@ pub struct AtvRide {
     /// MD138a: the rider's stunt table as the quad's clips read it, which the drawn quad's look sets
     /// (`quad_draw::stunts`); empty, no clips are ticked.
     pub stunts: Vec<game_render::quad::Stunt>,
+    /// MD165: the length of the rider's get-ready pause clip, which ends the pause; the look sets it.
+    pub rider_pause: f32,
 }
 
 impl std::fmt::Debug for AtvRide {
@@ -3488,7 +3490,7 @@ impl AtvRide {
         let rays = |b: Vec<u8>, what: &str| game_sim::track::Rays::parse(&b).map_err(|e| format!("{what}: {e}"));
         let riding = rays(file(&format!("Veh/Col/{col}"))?, col)?;
         let wreck = rays(file(&format!("Veh/Col/{}", game_sim::quad::WRECK_FILE))?, game_sim::quad::WRECK_FILE)?;
-        let atv = AtvRide { pack: pack.to_string(), phy: atv_stem(phy).to_string(), ini, model: std::sync::Arc::new(model), riding, wreck, ridden: None, taken_at: Vf::default(), wrecks: 0, mods: game_sim::modifiers::Mods::original(), seat: 0, stunts: Vec::new() };
+        let atv = AtvRide { pack: pack.to_string(), phy: atv_stem(phy).to_string(), ini, model: std::sync::Arc::new(model), riding, wreck, ridden: None, taken_at: Vf::default(), wrecks: 0, mods: game_sim::modifiers::Mods::original(), seat: 0, stunts: Vec::new(), rider_pause: 0.0 };
         atv.made(Vf::new(0.0, 0.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 1.0), None)?;
         Ok(atv)
     }
@@ -3503,7 +3505,11 @@ impl AtvRide {
         ride.rig(&load, &self.riding, &self.wreck);
         let segments = ride.trigger_segments().ok_or_else(|| format!("{}: no trigger probe", self.phy))?;
         self.mods.atv_body(self.seat, &mut ride.body);
-        let clips = (!self.stunts.is_empty()).then(|| game_render::quad::Driver::new(self.stunts.clone()));
+        let clips = (!self.stunts.is_empty()).then(|| {
+            let mut d = game_render::quad::Driver::new(self.stunts.clone());
+            d.motion.pause_length = self.rider_pause;
+            d
+        });
         Ok(Quad { ride, segments, was_down: false, clips })
     }
 
