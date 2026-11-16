@@ -7952,6 +7952,13 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         let roster = race_start::spawn_ai(&mut seats[0].sim, start.riders, file.as_ref(), race_start::AI_SEED);
         let skills: Vec<String> = roster.ai.iter().map(|r| format!("{}", r.skill)).collect();
         println!("race: {} AI riders, skills {}", roster.ai.len(), skills.join(" "));
+        // S331b: and the track's AI net their race drivers follow, beside the race file.
+        let name = race_start::ai_file_name(&stem);
+        let file = second.as_ref().and_then(|m| disc.res(m).ok()).and_then(|res| res.read(&name).ok());
+        match file.as_deref().and_then(|f| race_start::give_ai_net(&mut seats[0].sim, f, &mut sim)) {
+            Some(paths) => println!("race: AI net {name}, {paths} paths"),
+            None => println!("race: no AI net — {name} {}", if file.is_some() { "does not load" } else { "not found" }),
+        }
     }
     if let Some(laps) = race_start.as_ref().and_then(|s| s.laps.as_ref()) {
         let computers = laps.cards.iter().filter(|e| e.player != 0).count();

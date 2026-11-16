@@ -798,6 +798,11 @@ impl crate::Sim {
     /// [`crate::ai::gesture_gate`]), the assist pulls the body's yaw rate and velocity, and the levers
     /// it hands off are the controls for the bike's next frame. `None` for a player no brain drives.
     ///
+    /// On a race with laps (S331b) the pilot first reads its card, race kind and live again off
+    /// [`crate::Sim::race`]'s laps ([`crate::ai::Pilot::read_laps`]), and a mode-2 brain drives by
+    /// them, the race track and the lane's AI net ([`crate::ai::racing_of`]). The race's tick runs
+    /// before the riders', so it reads them as this tick's race left them.
+    ///
     /// The bike's frame rides the levers as they stood before this think: the hand-off lands after the
     /// bike has read them, so each AI rider launches a tick after its gate opens. S12e's replay of
     /// C33's four free09 racers agrees 14-18 ticks per AI body with the lag and 0-17 without it.
@@ -812,11 +817,17 @@ impl crate::Sim {
         let (seen, cofg) = crate::ai::mount_of(rider);
         let ch = &mut rider.ride.chassis;
         let (mut yaw_rate, mut velocity) = (F(ch.world_ang_vel.y()), ch.vel);
-        let crate::ai::Lane { seek, tables, rng, pilots } = lane;
+        let crate::ai::Lane { seek, tables, rng, pilots, net } = lane;
         let mount = crate::ai::Mount { rider: seen, cofg, yaw_rate: &mut yaw_rate, velocity: &mut velocity };
         let tricks = Some((&rider.set, &mut rider.tricks));
         let ridden = crate::ai::ride_controls(&pilots[k].1.levers, pilots[k].1.racer.habits.clutch);
-        pilots[k].1.think_among(mount, world, &bikes, seek, tables, &others, tricks, rng, dt);
+        // S331b: on a race with laps the brain reads its card and race as the race's tick left them.
+        let laps = self.race.as_deref().and_then(|r| r.laps.as_deref());
+        if let Some(laps) = laps {
+            pilots[k].1.read_laps(laps, net.is_some());
+        }
+        let racing = laps.map(|l| crate::ai::racing_of(l, i, net.as_mut().map(std::sync::Arc::make_mut)));
+        pilots[k].1.think_among(mount, world, &bikes, seek, tables, &others, tricks, racing, rng, dt);
         let ch = &mut rider.ride.chassis;
         let w = ch.world_ang_vel;
         ch.world_ang_vel = ps2_float::Vf::new(w.x(), yaw_rate.to_f32(), w.z(), w.w());
@@ -850,6 +861,15 @@ impl crate::Sim {
         let tables = std::sync::Arc::new(crate::ragdoll::Tables::build());
         let lane = crate::ai::Lane::spawn(seek, tables, rng, &riders, file, difficulty, event_kind, entry);
         self.ai = Some(Box::new(lane));
+    }
+
+    /// **The AI lane's path net** (S331b): the track's AI net ([`crate::ai::race_net`]) every AI
+    /// rider's race driver follows, the brains' shared `+0xdc`. Answers whether there was a lane to
+    /// take it ([`crate::Sim::spawn_ai`] first).
+    pub fn give_ai_net(&mut self, net: crate::race::TrackPaths) -> bool {
+        let Some(lane) = self.ai.as_deref_mut() else { return false };
+        lane.net = Some(std::sync::Arc::new(net));
+        true
     }
 }
 
