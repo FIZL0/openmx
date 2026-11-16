@@ -326,7 +326,9 @@ slots from about `+0x45c` on are 8 lower (`+0x488` → `+0x480`, `+0x47c` → `+
 1 for every `y`. It shows the moment something lowers a lane below 1: the contact pass's collider damping
 (`contact.rs`, `damp_angular`), a ragdoll's, or a `.phy` that sets it. Then `powf(d, 0.333/h)` at the
 substep `h` damps far harder than SLUS-21104's `d`. It touches the Untamed bike and ATV rides too
-(MD81a/b did not reach it). Untamed's powf (the thunk's target, 2032 B) has fdlibm's shape (its zero
+(MD81a/b did not reach it). The port's Untamed bike ride does not take it (MD161c): it integrates MX Unleashed's
+chassis (`chassis::integrate`, no angular damping lanes), not `atv_body::Body`, so there is nothing to route
+until a Handling bike ride runs on that body (MD175). Untamed's powf (the thunk's target, 2032 B) has fdlibm's shape (its zero
 tests read `< 0x00800000`, as SLUS-21104's) but was not proved against `ps2_float`'s.
 
 **Captured (MD160), not ported.** MD160 drove the Untamed menus by tape and kept spawn and in-air states
