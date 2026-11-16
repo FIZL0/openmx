@@ -407,6 +407,7 @@ fn the_seeded_bikes_first_frame_is_ride2_row_0() {
 // --- F31b1: the bike's PreProcess, the port's ----------------------------------------------------------
 
 use game_sim::handling::bike;
+use game_sim::handling::camera;
 use game_sim::handling::effects::{self, Effects};
 use game_sim::handling::emitter;
 use game_sim::handling::ring;
@@ -3650,6 +3651,207 @@ impl Resets for FramePost<'_> {
     }
 }
 
+/// F67: the wreck's event post in Rust ([`reset::post`] on state 4's queue for the bike's poster,
+/// the message kind 8 with `id` and the bike's word `+0xd20`), each listener told [`WreckPost`]'s.
+fn wreck_post(ee: &mut Ee, id: u32, arg: u32, x: f32) {
+    let queue = ee.u32_at(POST_QUEUE);
+    reset::post(&mut WreckPost { ee, x, id }, queue, BIKE + 0x674, [8, id, 0, arg]);
+}
+
+struct WreckPost<'a> {
+    ee: &'a mut Ee,
+    x: f32,
+    id: u32,
+}
+
+impl Resets for WreckPost<'_> {
+    fn word(&mut self, at: u32) -> u32 {
+        self.ee.u32_at(at)
+    }
+    fn set(&mut self, at: u32, w: u32) {
+        self.ee.set_u32(at, w);
+    }
+    fn out(&mut self, c: reset::Out) -> u32 {
+        match c {
+            reset::Out::Message(words) => {
+                let at = self.ee.scratch(MESSAGE_SCRATCH);
+                for (k, w) in words.into_iter().enumerate() {
+                    self.ee.set_u32(at + 4 * k as u32, w);
+                }
+                at
+            }
+            reset::Out::Tell { to, from, message } => {
+                let f = self.ee.u32_at(self.ee.u32_at(to + 8) + 0xc);
+                let Some(&(_, name)) = FRAME_LISTENERS.iter().find(|l| l.0 == f) else {
+                    panic!("a wreck post listener other than the known: {to:#x}, receive {f:#x}")
+                };
+                // F67: the camera controller's kind-8 receive on the port (behind its thunk at the
+                // controller's +0x38).
+                if name == "camera controller" && in_rust("wreck camera") && self.ee.u32_at(message) == 8 {
+                    return camera::receive(&mut CameraInRam { ee: &mut *self.ee, x: self.x }, &CAMERA_GLOBALS, to - 0x38, from, message);
+                }
+                // F67: the other listeners write no byte the frame reads (the watch, [`replay_pure`]).
+                if name != "camera controller" && in_rust("wreck listeners dropped") {
+                    return 0;
+                }
+                let r0 = self.ee.ran;
+                self.ee.set(28, GP);
+                census(self.ee, |ee| ee.call(f, &[u64::from(to), u64::from(from), u64::from(message)], &[self.x], BUDGET));
+                book(format!("the wreck post {:#x} tells the {name}", self.id), self.ee.ran - r0);
+                self.ee.r(2) as u32
+            }
+            c => unreachable!("the wreck post makes no {c:?}"),
+        }
+    }
+}
+
+/// F67: the words the camera controller reads that are the game's (research/oracle.txt `# F67`):
+/// the players' table, the screen (its faders), the quad `(0, 0, 0, 1)` and a spread's start.
+const CAMERA_GLOBALS: camera::Globals = camera::Globals { players: 0x003e_ab60, screen: 0x0038_f768, unit: 0x0039_6fc0, origin: 0x0039_0ad0 };
+/// The scratch an interface's offer is handed back in (the connect's is on its stack): under the top
+/// `0x400` the RAM comparisons leave out with the stack, as [`INSERT_SCRATCH`].
+const CAMERA_SCRATCH: u32 = 12;
+/// The functions the controller's virtuals land on, each served by its port ([`CameraInRam`]).
+const CAMERA_SWITCH: u32 = 0x0049_0b30;
+const CAMERA_A_LEAVE: u32 = 0x001c_49f0;
+const CAMERA_A_ENTER: u32 = 0x001c_4960;
+const CAMERA_B_LEAVE: u32 = 0x0023_5580;
+const CAMERA_B_ENTER: u32 = 0x0023_5370;
+const CAMERA_B_SPREAD: u32 = 0x0023_55e0;
+const CONNECTOR_UNLIST: u32 = 0x0050_7470;
+const CONNECTOR_ADD: u32 = 0x0050_7380;
+const CONNECTOR_CONNECT: u32 = 0x0050_75b0;
+const CONNECTOR_DROP: u32 = 0x0050_7330;
+const CONNECTOR_OWN: u32 = 0x0050_7320;
+/// The interfaces' slots, behind their thunks (`base` the interface less `k`): the two cameras' (`k`
+/// 0x24), the rider's (0x2ec) and the bike's (0x43c), and the two every class shares.
+const CAMERA_A_COUNT: u32 = 0x0048_7660;
+const CAMERA_A_OFFER: u32 = 0x0048_7650;
+const CAMERA_A_CONNECT: u32 = 0x0048_7640;
+const CAMERA_A_DISCONNECT: u32 = 0x0048_7620;
+const CAMERA_B_COUNT: u32 = 0x0048_d3a0;
+const CAMERA_B_OFFER: u32 = 0x0048_d390;
+const CAMERA_B_CONNECT: u32 = 0x0048_d380;
+const CAMERA_B_DISCONNECT: u32 = 0x0048_d360;
+const RIDER_COUNT: u32 = 0x004f_23c0;
+const RIDER_OFFER: u32 = 0x004f_23b0;
+const RIDER_CONNECT: u32 = 0x004f_23a0;
+const RIDER_TAKE: u32 = 0x004f_3080;
+const BIKE_TAKE: u32 = 0x004d_e110;
+const NO_COUNT: u32 = 0x004f_71b0;
+const NO_TAKE: u32 = 0x004f_7200;
+const ITEM_PAIR: u32 = 0x004f_7210;
+const ITEM_CLEAR: u32 = 0x004f_73b0;
+/// The heap calls' files: the connector's list and the interface's pairs, and the second camera's.
+const CONNECTOR_FILE: u32 = 0x0052_b9a0;
+const PAIR_FILE: u32 = 0x0052_afd0;
+const CAMERA_FILE: u32 = 0x003a_0670;
+
+/// F67: the camera controller's words in RAM as [`camera`] sees them, each virtual served by the port
+/// of the function in its slot ([`CameraInRam::call`]), else the original's (its census `camera`).
+struct CameraInRam<'a> {
+    ee: &'a mut Ee,
+    x: f32,
+}
+
+impl CameraInRam<'_> {
+    fn call(&mut self, f: u32, [a0, a1, a2, _]: [u32; 4]) -> u32 {
+        let g = &CAMERA_GLOBALS;
+        let ee = &*self.ee;
+        let unit: [u32; 4] = std::array::from_fn(|k| ee.u32_at(g.unit + 4 * k as u32));
+        let quad = |at: u32| -> [u32; 4] { std::array::from_fn(|k| ee.u32_at(at + 4 * k as u32)) };
+        let x = self.x;
+        match f {
+            CAMERA_SWITCH => return camera::controller_switch(self, g, a0, a1, a2),
+            NODE_ON => update::trail_on(&mut UpdateInRam { ee: &mut *self.ee, x }, a0),
+            NODE_OFF => update::trail_off(&mut UpdateInRam { ee: &mut *self.ee, x }, a0),
+            // The first class's arms for a part at +0xbc are not ported.
+            CAMERA_A_LEAVE if ee.u32_at(a0 + 0xbc) == 0 => camera::leave_a(self, a0),
+            CAMERA_A_ENTER if ee.u32_at(a0 + 0xbc) == 0 => camera::enter_a(self, a0, a1),
+            CAMERA_B_LEAVE => camera::leave_b(self, g, a0),
+            // Nor the second's entered with an offset of (0, 0, 0, 1).
+            CAMERA_B_ENTER if a1 == 0 || quad(a0 + 0xb0) != unit => camera::enter_b(self, a0, a1),
+            CAMERA_B_SPREAD => camera::spread(self, g, a0),
+            CONNECTOR_UNLIST => camera::unlist(self, a0, a1),
+            CONNECTOR_ADD => return camera::list_add(self, a0, a1),
+            CONNECTOR_CONNECT => camera::connect(self, a0),
+            CONNECTOR_DROP => camera::drop_item(self, a1),
+            CONNECTOR_OWN => camera::own(self, a0, a1),
+            CAMERA_A_COUNT | CAMERA_B_COUNT | RIDER_COUNT => return 1,
+            NO_COUNT | NO_TAKE => return 0,
+            CAMERA_A_OFFER | CAMERA_B_OFFER => return camera::offer(self, a0 - 0x24, a1, a2, 0x7c),
+            RIDER_OFFER => return camera::offer(self, a0 - 0x2ec, a1, a2, 0x374),
+            CAMERA_A_CONNECT => camera::connect_a(self, a0 - 0x24, a1, a2),
+            CAMERA_B_CONNECT => camera::connect_b(self, a0 - 0x24, a1, a2),
+            // The rider's connect past its two checks is not ported.
+            RIDER_CONNECT if ee.u32_at(a0 - 0x2ec + 0x378) != 0 || a1 & ee.u32_at(a0 - 0x2ec + 0x374) == 0 => {}
+            CAMERA_A_DISCONNECT => camera::disconnect_a(self, a0 - 0x24),
+            CAMERA_B_DISCONNECT => camera::targets_drop(self, a0 - 0x24),
+            RIDER_TAKE => return camera::take(self, a0.wrapping_sub(0x2ec), a1, &camera::RIDER_TAKES),
+            BIKE_TAKE => return camera::take(self, a0.wrapping_sub(0x43c), a1, &camera::BIKE_TAKES),
+            ITEM_PAIR => camera::pair(self, a0, a1, a2),
+            ITEM_CLEAR => camera::clear(self, a0),
+            _ => return self.original(f, &[a0, a1, a2]),
+        }
+        0
+    }
+    fn original(&mut self, f: u32, args: &[u32]) -> u32 {
+        label(&format!("camera {f:#x}"));
+        let ints: Vec<u64> = args.iter().map(|&a| u64::from(a)).collect();
+        self.ee.set(28, GP);
+        let r0 = self.ee.ran;
+        census(self.ee, |ee| ee.call(f, &ints, &[self.x], BUDGET));
+        book(format!("the wreck post's camera: the original {f:#x}"), self.ee.ran - r0);
+        self.ee.r(2) as u32
+    }
+}
+
+impl camera::Cameras for CameraInRam<'_> {
+    fn word(&mut self, at: u32) -> u32 {
+        self.ee.u32_at(at)
+    }
+    fn set(&mut self, at: u32, w: u32) {
+        self.ee.set_u32(at, w);
+    }
+    fn local(&mut self) -> u32 {
+        self.ee.scratch(CAMERA_SCRATCH)
+    }
+    fn out(&mut self, c: camera::Out) -> u32 {
+        use camera::{Out, Site};
+        let file = |s: Site| match s {
+            Site::ListAppend => (CONNECTOR_FILE, 0x2bf),
+            Site::ListInsert => (CONNECTOR_FILE, 0x2c3),
+            Site::Pair => (PAIR_FILE, 0x69),
+            Site::PairAppend => (PAIR_FILE, 0x6e),
+            Site::Targets => (CAMERA_FILE, 0xae),
+            Site::Spots => (CAMERA_FILE, 0xb1),
+        };
+        match c {
+            Out::Call { f, args } => self.call(f, args),
+            Out::Alloc { bytes, site } => NodeRam(self.ee).heap(HEAP_ALLOC, &[bytes, file(site).0, file(site).1]),
+            Out::New { bytes, site } => NodeRam(self.ee).heap(HEAP_NEW, &[bytes, file(site).0, file(site).1]),
+            Out::Realloc { at, bytes, site } => NodeRam(self.ee).heap(HEAP_REALLOC, &[at, bytes, file(site).0, file(site).1]),
+            // The frees with a file and line (the list's, the camera's) are the plain free on the
+            // frame's heap (the system heap's check aside: [`heap_hooks`]).
+            Out::Free(at) => NodeRam(self.ee).heap(HEAP_FREE, &[at]),
+            Out::Remove(entry) => {
+                attach::remove(&mut NodeRam(self.ee), &ATTACH_GLOBALS, entry);
+                0
+            }
+            Out::Insert { entry, cell, kind, centre, half } => {
+                let (centre, half) = (vf_at(self.ee, centre), vf_at(self.ee, half));
+                let temp = self.ee.scratch(INSERT_SCRATCH);
+                attach::insert_with(&mut NodeRam(self.ee), &ATTACH_GLOBALS, attach::PoolClass(POOL_CLASS), entry, cell, kind, centre, half, F::ZERO, temp, false, false);
+                0
+            }
+            Out::Join { item, with } => self.original(JOIN_FN, &[item, with]),
+        }
+    }
+}
+
+/// The switch's other arm: an interface joined to the controller's `+0x34`.
+const JOIN_FN: u32 = 0x004f_75f0;
+
 /// How far below the interpreter's stack top the calls' frames reach, at most: RAM there is left out
 /// of the vehicle update's comparison, the port's calls sitting at other depths than the original's.
 const STACK_USE: usize = 0x4_0000;
@@ -4645,6 +4847,10 @@ impl WreckInRam<'_> {
                 0
             }
             Out::Post { .. } if in_rust("wreck posts dropped") => 0,
+            Out::Post { id, arg } if in_rust("wreck post") => {
+                wreck_post(self.ee, id, arg, x);
+                0
+            }
             Out::RumbleReady(_) | Out::Rumble(_) if in_rust("rumble dropped") => 0,
             Out::Trail(t) => {
                 wreck::trail_reset(self, t);
@@ -10438,7 +10644,8 @@ fn replay_pure(name: &str, rust: &[&'static str]) -> Option<(Vec<bool>, BTreeMap
         // two RAMs differ going into it.
         // F31b5o: so too with the frame post's tells dropped.
         // F31b5p: and with every tell dropped, the HUD on its own heap.
-        let watch = ["other listeners dropped", "frame post tells but the hud's dropped", "hud on its own heap"].iter().any(|n| rust.contains(n));
+        // F67: and with the wreck posts' listeners but the camera controller dropped.
+        let watch = ["other listeners dropped", "frame post tells but the hud's dropped", "hud on its own heap", "wreck listeners dropped"].iter().any(|n| rust.contains(n));
         let parted = if watch { differing_bytes(&a, &b) } else { Vec::new() };
         let counted = INTERPRETED.with(|m| std::mem::take(&mut *m.borrow_mut()));
         posts_frame(&mut a, dt, &map, &mut noise_a, false);
@@ -10670,6 +10877,9 @@ fn replay_in_pure_rust(name: &str) -> Option<(Vec<bool>, Vec<String>, BTreeMap<S
             "wreck check",
             "wreck hand-outs",
             "wreck sound",
+            "wreck post",
+            "wreck camera",
+            "wreck listeners dropped",
         ],
     );
     let census = INTERPRETED.with(|m| std::mem::take(&mut *m.borrow_mut()));
@@ -10694,7 +10904,6 @@ fn ride_replays_in_pure_rust() {
 /// **F31b5 — C15's flip, the whole frame in Rust**: flip-1 bit-exact on all 465 rows, wrecked on row
 /// 125 and put back on row 193, with the interpreter running no instruction of any frame.
 #[test]
-#[ignore = "F31b5: the interpreter still runs the wreck posts' camera switch and the rider leaf (journal 2026-11-16 F31b5t)"]
 fn flip_replays_in_pure_rust() {
     let Some((w, _off, census, total)) = replay_in_pure_rust("flip-1") else { return };
     assert_eq!(w.len(), 465);
