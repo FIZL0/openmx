@@ -181,6 +181,35 @@ pub struct Car {
     pub sort: SortAnswer,
     /// The shared smooth noise's answer to [`Call::Noise`] (MD125).
     pub noise: F,
+    /// What a tire's stands-on words point at, as [`Call::StandsOn`] answers it (MD131).
+    pub stood_on: Under,
+}
+
+/// What a tire's two stands-on words ([`Tire::stands_on`]) point at, as the tire step's contact
+/// velocity reads it (MD131): a struck object (the first word), else a kept mover (the second).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Under {
+    /// Both words zero, or nothing answered: the ground does not move.
+    #[default]
+    Still,
+    /// A collision object: `cofg` its own centre of mass (`+0x80`), on what holds it.
+    Object { cofg: Vf, on: Holder },
+    /// A moving piece of scenery: its transform (`+0x244`, already up to date), the point it turns
+    /// about in that frame (`+0x180`), and what its two virtuals answer (`+0xc4` the spin, asked
+    /// first, then `+0xc0` the velocity).
+    Mover { node: crate::contact::Node, origin: Vf, spin: Vf, velocity: Vf },
+}
+
+/// What a collision object under a tire belongs to.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Holder {
+    /// A rigid body (the object's `+0xe4`): its position, velocity, quaternion and rates (`+0x70`,
+    /// `+0x80`, `+0x190`, `+0x1d0`).
+    Body { position: Vf, velocity: Vf, quat: Vf, rates: Vf },
+    /// With no body, a vehicle's chassis (`+0xe0`): its centre of mass in the transform's frame
+    /// (`+0x180`), its velocity (`+0x250`) and its rates in the transform's frame (`+0x280`); placed by
+    /// the object's transform (`+0xe8`, already up to date).
+    Chassis { cofg: Vf, velocity: Vf, rates: Vf, node: crate::contact::Node },
 }
 
 /// What the car's three listeners call, and this module does not port, in the order the original
@@ -269,6 +298,11 @@ pub enum Call {
     SortSearch,
     Struck(usize),
     TireGround(usize, Vf),
+    /// What the tire step's contact velocity hands out (MD131, [`Pieces`]): the thing a tire's
+    /// stands-on words point at asked (into [`Car::stood_on`]); and a struck object's centre of mass
+    /// turned into the world, which it writes back to the object (its `+0x90`).
+    StandsOn([u32; 2]),
+    ObjectCofg(u32, Vf),
     /// The car's node placed while current, with a subtree under it (its model's parts, past what
     /// [`Vehicle::scene`] holds): every current node of the subtree marked out of date. [`Own`]
     /// answers it when [`Vehicle::below`] holds the subtree (MD128).
@@ -1121,8 +1155,8 @@ pub struct State {
 /// aero, and (MD124) each tire's step ([`tire_step`]), run on [`Keys`] and [`State`]; and (MD127) the
 /// contact sort and each tire's probe, on the [`Car`]'s and [`Tire`]s' words; and (MD125), given the
 /// engine's keys, the engine's step, its shift and its reverse switch. Every other call, the
-/// controls' reverse switch without the engine's keys, the preload's cue, a tire step on or handed a
-/// mover's contact, and what the sort, the probe and the engine hand out go to `rest`.
+/// controls' reverse switch without the engine's keys, the preload's cue, and what the sort, the
+/// probe, the engine and the tire step (MD131: what a tire stands on) hand out go to `rest`.
 pub struct Pieces<R> {
     pub keys: Keys,
     pub state: State,
@@ -1162,14 +1196,16 @@ impl<R: Steps> Pieces<R> {
             Call::Launch(h) => launch(&self.keys, &mut self.state, car, h),
             Call::Aero(_) => aero(&self.keys, &self.state, car, body),
             Call::TireStep(i, h) => {
-                // What stands on a mover (its velocity and its contact list) is the rest's.
-                let t = car.tires[i];
-                if t.stands_on != [0, 0] || (t.handed && t.handed_on != [0, 0]) {
-                    return false;
-                }
-                let mut s = self.state.tires[i];
-                tire_step(&self.keys.tires[i], &mut car.tires[i], &mut s, &self.state, car.cofg, body, h);
-                self.state.tires[i] = s;
+                // What a tire stands on is the rest's to say (MD131), asked into the car's word.
+                let (mut t, mut s, cofg) = (car.tires[i], self.state.tires[i], car.cofg);
+                let rest = &mut self.rest;
+                let mut ask = |c: Call, body: &mut Body| {
+                    car.stood_on = Under::Still;
+                    rest.call(c, car, body);
+                    car.stood_on
+                };
+                tire_step(&self.keys.tires[i], &mut t, &mut s, &self.state, cofg, body, h, &mut ask);
+                (car.tires[i], self.state.tires[i]) = (t, s);
             }
             Call::SortContacts => sort_contacts(car, body, &mut self.rest),
             Call::Probe(k, _) => probe(k, car, body, &mut self.rest),
@@ -2341,16 +2377,54 @@ fn add_velocity(body: &mut Body, v: Vf) {
     body.correction = plus(body.correction, v);
 }
 
+/// How the tire step asks about what a tire stands on (MD131): handed [`Call::StandsOn`] or
+/// [`Call::ObjectCofg`] with the body, it makes the call and answers [`Car::stood_on`].
+pub type Ask<'a> = &'a mut dyn FnMut(Call, &mut Body) -> Under;
+
+/// `a × b` as VU0 takes it (`vopmula`, `vopmsub`); `w` from `a`.
+fn cross(a: Vf, b: Vf) -> Vf {
+    a.merge(Dest::XYZ, Vf::opmsub(Vf::opmula(a, b), b, a))
+}
+
 /// The contact's velocity: the body's, with its rates' spin about the centre of mass at the contact;
-/// and the body's alone, in the world and in the body's frame.
-fn contact_velocity(t: &mut Tire, s: &mut TireState, body: &Body) {
+/// and the body's alone, in the world and in the body's frame. Each is taken against the ground's
+/// (MD131): still unless the tire's stands-on words name something, which `ask` answers. A struck
+/// object's ground velocity is its holder's velocity, and its point's that plus the holder's spin
+/// about the object's centre of mass at the tire's ground point: a rigid body's by its quaternion
+/// (the centre of mass turned into the world is written back to the object), a chassis's in its
+/// transform's frame; a mover's, its velocity plus its spin about its origin, in its transform's.
+fn contact_velocity(t: &mut Tire, s: &mut TireState, body: &mut Body, ask: Ask) {
+    use crate::biplane::unturn;
+    use crate::chassis::turn;
     let q = body.quat;
-    let local = crate::biplane::unturn(q, minus(s.contact, body.position));
-    let r = body.rates;
-    let spin = r.merge(Dest::XYZ, Vf::opmsub(Vf::opmula(r, local), local, r));
-    s.point_velocity = minus(plus(body.velocity, crate::chassis::turn(q, spin)), CLEAR);
-    s.body_velocity = minus(body.velocity, CLEAR);
-    t.local_velocity = crate::biplane::unturn(q, s.body_velocity);
+    let local = unturn(q, minus(s.contact, body.position));
+    let at = plus(body.velocity, turn(q, cross(body.rates, local)));
+    let (velocity, point) = if t.stands_on == [0, 0] {
+        (CLEAR, CLEAR)
+    } else {
+        match ask(Call::StandsOn(t.stands_on), body) {
+            Under::Still => (CLEAR, CLEAR),
+            Under::Object { cofg, on: Holder::Body { position, velocity, quat, rates } } => {
+                let cofg_world = turn(quat, cofg);
+                ask(Call::ObjectCofg(t.stands_on[0], cofg_world), body);
+                let arm = unturn(quat, minus(t.ground_point, plus(position, cofg_world)));
+                (velocity, plus(turn(quat, cross(rates, arm)), velocity))
+            }
+            Under::Object { cofg, on: Holder::Chassis { cofg: centre, velocity, rates, node } } => {
+                let cofg_world = node.rotate(cofg);
+                ask(Call::ObjectCofg(t.stands_on[0], cofg_world), body);
+                let arm = minus(node.unplace(t.ground_point), plus(centre, cofg_world));
+                (velocity, plus(node.rotate(cross(rates, arm)), velocity))
+            }
+            Under::Mover { node, origin, spin, velocity } => {
+                let arm = minus(node.unplace(t.ground_point), origin);
+                (velocity, plus(node.rotate(cross(spin, arm)), velocity))
+            }
+        }
+    };
+    s.point_velocity = minus(at, point);
+    s.body_velocity = minus(body.velocity, velocity);
+    t.local_velocity = unturn(q, s.body_velocity);
 }
 
 /// **The suspension**: the wheel's travel from its mount down to its drop, in the world; where the
@@ -2360,7 +2434,7 @@ fn contact_velocity(t: &mut Tire, s: &mut TireState, body: &Body) {
 /// the damper (clamped rate) is the load, pushed at the contact. Not down, the rears take what the
 /// fronts handed them. Last, the compression eases back no faster than the decompression rate.
 #[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's `c.ole.s` branched on false
-fn suspension(k: &TireKeys, t: &mut Tire, s: &mut TireState, cofg: Vf, body: &mut Body, h: F) {
+fn suspension(k: &TireKeys, t: &mut Tire, s: &mut TireState, cofg: Vf, body: &mut Body, h: F, ask: Ask) {
     s.compression = F::ZERO;
     t.grounded = false;
     let mut ratio = F::ZERO;
@@ -2382,7 +2456,7 @@ fn suspension(k: &TireKeys, t: &mut Tire, s: &mut TireState, cofg: Vf, body: &mu
         }
         if !(s.compression <= 0.0) {
             t.grounded = true;
-            contact_velocity(t, s, body);
+            contact_velocity(t, s, body, ask);
             let max = k.max_compression;
             if !(s.compression <= max) {
                 if t.solid || ratio < BOTTOM_RATIO {
@@ -2392,7 +2466,7 @@ fn suspension(k: &TireKeys, t: &mut Tire, s: &mut TireState, cofg: Vf, body: &mu
                     add_velocity(body, scaled(n, -into));
                 }
                 s.compression = max;
-                contact_velocity(t, s, body);
+                contact_velocity(t, s, body, ask);
             }
             let rate = k.max_compression_rate;
             let v = dot(s.point_velocity, n).max(-rate).min(rate);
@@ -2407,7 +2481,7 @@ fn suspension(k: &TireKeys, t: &mut Tire, s: &mut TireState, cofg: Vf, body: &mu
             t.stands_on = t.handed_on;
             t.lever = plus(t.mount, t.drop);
             t.lower = crate::chassis::turn(q, t.lever);
-            contact_velocity(t, s, body);
+            contact_velocity(t, s, body, ask);
         } else {
             t.load = F::ZERO;
             s.point_velocity = CLEAR;
@@ -2612,8 +2686,9 @@ fn forces(k: &TireKeys, t: &Tire, s: &mut TireState, body: &mut Body, steer: Opt
 }
 
 /// **One tire's step** (MX Unleashed's): its suspension, roll and forces, reading the brake and steer
-/// words its pointers name, with `cofg` the body's centre of mass ([`Car::cofg`]).
-pub fn tire_step(k: &TireKeys, t: &mut Tire, s: &mut TireState, levers: &State, cofg: Vf, body: &mut Body, h: F) {
+/// words its pointers name, with `cofg` the body's centre of mass ([`Car::cofg`]). A tire standing on
+/// something asks `ask` what (MD131, [`Ask`]).
+pub fn tire_step(k: &TireKeys, t: &mut Tire, s: &mut TireState, levers: &State, cofg: Vf, body: &mut Body, h: F, ask: Ask) {
     let read = |l: Option<Lever>| {
         l.map(|l| match l {
             Lever::Brake => levers.brake,
@@ -2623,7 +2698,7 @@ pub fn tire_step(k: &TireKeys, t: &mut Tire, s: &mut TireState, levers: &State, 
         })
     };
     let (brake, steer) = (read(k.brake), read(k.steer));
-    suspension(k, t, s, cofg, body, h);
+    suspension(k, t, s, cofg, body, h, ask);
     roll(k, t, s, brake);
     forces(k, t, s, body, steer, brake, h);
 }

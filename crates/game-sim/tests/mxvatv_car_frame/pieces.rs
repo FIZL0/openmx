@@ -129,6 +129,13 @@ pub(crate) type Seen = std::collections::BTreeMap<&'static str, u32>;
 /// SLUS-21104's own code and the port's answered by MX Unleashed's [`Pieces`]: the listeners' branches
 /// seen, and the pieces'.
 fn run(seed: u64, cases: usize, unhooked: &[u32]) -> Option<(Seen, Seen)> {
+    run_with(seed, cases, unhooked, false)
+}
+
+/// [`run`], and with `movers` (MD131) the sort's struck objects and kept movers stay in its hits with
+/// the tire step unhooked too, laid out by [`movers::put_unders`]: each object's world centre of mass
+/// as the port wrote it back, and the movers' virtuals asked as the port asked, besides every word.
+pub(crate) fn run_with(seed: u64, cases: usize, unhooked: &[u32], movers: bool) -> Option<(Seen, Seen)> {
     let pristine = image()?;
     let mut ee = image()?;
     let p = ptrs(&ee);
@@ -140,6 +147,8 @@ fn run(seed: u64, cases: usize, unhooked: &[u32]) -> Option<(Seen, Seen)> {
     let script: Shared<Script> = Rc::default();
     hook(&mut ee, p, log.clone(), script.clone());
     hook_cue(&mut ee, log.clone());
+    let asked: Shared<Vec<bool>> = Rc::default();
+    movers::hook_movers(&mut ee, script.clone(), asked.clone());
     for a in unhooked {
         assert!(ee.hooks.remove(a).is_some(), "{a:#x} was not hooked");
     }
@@ -153,6 +162,7 @@ fn run(seed: u64, cases: usize, unhooked: &[u32]) -> Option<(Seen, Seen)> {
     let mut r = Rng(seed);
     let mut r2 = Rng(seed ^ 0x0127_5eed_0127_5eed);
     let mut r3 = Rng(seed ^ 0x0125_e061_0125_e061);
+    let mut r4 = Rng(seed ^ 0x0131_3017_0131_3017);
     let engine = unhooked.contains(&ENGINE_STEP);
     let mut seen = Seen::new();
     let mut pieces_seen = Seen::new();
@@ -175,16 +185,21 @@ fn run(seed: u64, cases: usize, unhooked: &[u32]) -> Option<(Seen, Seen)> {
         if unhooked.contains(&SORT_CONTACTS) || unhooked.contains(&PROBE) {
             generate_probe(&mut r2, &mut car, &body);
             generate_sort(&mut r2, &mut s, &body);
-            // With the tire step unhooked too, what the port's step leaves to the rest or does
-            // not prove (MD124) stays out: a tire standing on a struck object or a kept mover, and
-            // a surface byte past the sixteen tables.
-            if unhooked.contains(&TIRE_STEP) {
+            // With movers (MD131) the hits keep their struck objects and kept movers, laid out in
+            // RAM; without, a tire standing on one stays out. With the tire step unhooked, a surface
+            // byte past the sixteen tables stays out (MD124).
+            if movers {
+                assert!(unhooked.contains(&TIRE_STEP), "movers with the tire step unhooked");
+                movers::generate_unders(&mut r4, &mut s);
+            } else if unhooked.contains(&TIRE_STEP) {
                 for h in &mut s.sort.hits {
                     h.object = 0;
                     if h.mover_kind == 2 {
                         h.mover_kind = 3;
                     }
                 }
+            }
+            if unhooked.contains(&TIRE_STEP) {
                 for g in s.ground.iter_mut().flatten() {
                     g.surface &= 15;
                 }
@@ -200,19 +215,23 @@ fn run(seed: u64, cases: usize, unhooked: &[u32]) -> Option<(Seen, Seen)> {
 
         // The original.
         poke(&mut ee, &before);
+        if movers {
+            movers::put_unders(&mut ee, &s);
+        }
         *script.borrow_mut() = s.clone();
         log.borrow_mut().clear();
+        asked.borrow_mut().clear();
         ee.set(28, GP);
         ee.call(WORLD_STEP, &[u64::from(WORLD)], &[dt.0], 20_000_000);
         let written = ee.written_ranges();
 
         // The port.
         let (mut pc, mut pb) = (car, body);
-        let port = Port { log: Vec::new(), script: s };
+        let port = Port::new(s);
         let keys = Keys { engine: if engine { m.keys.engine.clone() } else { None }, ..m.keys() };
         let mut port = Unhooked { pieces: Pieces { keys, state: m.state, rest: port }, unhooked, seen: Seen::new() };
         atv_car::frame(&world, &mut pc, &mut pb, dt, &table, &mut port);
-        for (what, k) in std::mem::take(&mut port.seen) {
+        for (what, k) in std::mem::take(&mut port.seen).into_iter().chain(std::mem::take(&mut port.pieces.rest.seen)) {
             *pieces_seen.entry(what).or_insert(0) += k;
         }
         let pm = Mx { keys: Keys { tires: port.pieces.keys.tires, ..m.keys.clone() }, state: port.pieces.state, ..m };
@@ -228,6 +247,16 @@ fn run(seed: u64, cases: usize, unhooked: &[u32]) -> Option<(Seen, Seen)> {
         let theirs = log.borrow().iter().map(|c| format!("{c:?}")).collect::<Vec<_>>();
         let ours = port.log.iter().map(|c| format!("{c:?}")).collect::<Vec<_>>();
         assert_eq!(ours, theirs, "case {case}: the calls");
+        assert_eq!(port.asked, *asked.borrow(), "case {case}: the movers' virtuals");
+        for i in 0..SORT_HITS {
+            let o = sort::object(i);
+            let want = port.cofgs.iter().find(|&&(p, _)| p == o).map_or(movers::STALE_COFG, |&(_, v)| v);
+            if movers {
+                assert_eq!(get_v(&ee, o + 0x90).to_bits(), want.to_bits(), "case {case}: object {i}'s world centre of mass");
+            } else {
+                assert!(port.cofgs.is_empty(), "case {case}: an object's centre of mass without movers");
+            }
+        }
         let compared: std::collections::BTreeSet<u32> = after.iter().map(|&(a, _)| a).collect();
         for &(from, to) in &written {
             for a in (from & !3..to).step_by(4) {
