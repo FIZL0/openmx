@@ -16,7 +16,7 @@ use drive::Drive;
 /// and search (the search answered by the original's, [`sort_answer`]), a struck object's listeners,
 /// the database's moves and the gather, the node's rebound, the respawn, and the sound, pad and look
 /// calls (the shift's sound and the preload's cue among them).
-const HANDED_OUT: [&str; 17] = [
+pub(crate) const HANDED_OUT: [&str; 17] = [
     "SortPlace",
     "SortSearch",
     "Struck",
@@ -39,7 +39,7 @@ const HANDED_OUT: [&str; 17] = [
 /// The sort probe's search as the original's left it in RAM (the struck flag, and each hit's ray,
 /// point, normal and record: MD127's [`hook_sort`] the other way round), for the port's
 /// [`Call::SortSearch`].
-fn sort_answer(ee: &Ee, p: &Ptrs) -> SortAnswer {
+pub(crate) fn sort_answer(ee: &Ee, p: &Ptrs) -> SortAnswer {
     let mut a = SortAnswer { found: ee.u8_at(p.sort_probe + sort::FLAGS) & 0x20 != 0, ..SortAnswer::default() };
     if !a.found {
         return a;
@@ -269,7 +269,7 @@ enum Through {
 /// A Ride to carry each frame's words read off the machine: everything but its acos table is laid
 /// over before each frame; nothing it holds besides those is read by [`atv_car::Ride::frame_with`]
 /// (its put-back spot only by the respawn and the put-back, which these drives never hand out).
-fn ride_of(table: &AcosTable) -> atv_car::Ride {
+pub(crate) fn ride_of(table: &AcosTable) -> atv_car::Ride {
     atv_car::Ride {
         keys: Keys::default(),
         state: atv_car::State::default(),
