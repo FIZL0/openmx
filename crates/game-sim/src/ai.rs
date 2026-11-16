@@ -3473,6 +3473,28 @@ pub mod seek {
         move |p, zone| humans.contains(&p) && open_flags(zone, p, false, progress, at) & ZONE_OPEN != 0
     }
 
+    /// The event's activity types (the event's +4 word): free ride, practice, single race, ghost
+    /// race, fast-lap attack and freestyle.
+    pub const ACTIVITY_FREE_RIDE: i32 = 0;
+    pub const ACTIVITY_PRACTICE: i32 = 1;
+    pub const ACTIVITY_SINGLE_RACE: i32 = 2;
+    pub const ACTIVITY_GHOST_RACE: i32 = 3;
+    pub const ACTIVITY_FAST_LAP: i32 = 4;
+    pub const ACTIVITY_FREESTYLE: i32 = 5;
+
+    /// **Whether a map's load builds a seeker world** (S331a): only a fast-lap attack's or a
+    /// freestyle's does. Every other activity, the races among them, returns from the activity
+    /// load before the seeker root is made, so its AI riders have no world to seek in.
+    pub fn loads_world(activity: i32) -> bool {
+        matches!(activity, ACTIVITY_FAST_LAP | ACTIVITY_FREESTYLE)
+    }
+
+    /// The seeker world's slot count at the load (S331a): one per player of the activity — the
+    /// humans and the AI riders.
+    pub fn slots(players: usize) -> usize {
+        players
+    }
+
     /// The two database files a map's `hit.dat` names under `[HitData]` (`HitDBFilename`,
     /// `HitSetDBFilename`), as written: the game puts its track folder in front of each.
     pub fn databases(hit_dat: &Ini) -> (Option<&str>, Option<&str>) {

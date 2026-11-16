@@ -1869,6 +1869,12 @@ ai_seek_load                boot 0x003a9680 (root, hit.dat ini, slots): param_3 
 #                                           player, +0x34 kind). recording2: 5 = the 4 riders (kind
 #                                           1, 2, 2, 2) and a static player at 0x004ec290 (player 4,
 #                                           kind 2, no set; what it is not traced). S316
+#                                           S331a: 0x0021b74c returns before the root is made unless
+#                                           the event's activity type (event+4) is 4 or 5 (fast lap,
+#                                           freestyle): races and practices have root 0 (c31/s282c
+#                                           sx01, s296a nat03, s196 sx01, s133 nat11). Slots = the
+#                                           riders: free10/free11 alone 1, C33 four racers 4; only
+#                                           recording2's session has the static fifth player
 ai_seek_hit_db              boot 0x00323b00 hit DB: [General] TotalHits, NextHitID (u16 base 10,
 #                                           default 1); per n [Hit n] HitID (0 -> the counter, which
 #                                           counts on, 0x00323c90). Record 0x130, u16 id +0x120
