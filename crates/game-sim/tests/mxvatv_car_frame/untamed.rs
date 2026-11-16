@@ -1,0 +1,685 @@
+// --- MD161a: MD160's Untamed monster-truck drives, SLUS-21701's frame and the port's beside it -------
+
+use super::*;
+use game_sim::atv_car::{Input, InputKeys};
+use game_sim::bindings::Command;
+
+#[path = "../mxvatv_car_replay/drive.rs"]
+#[allow(dead_code)]
+mod drive;
+use drive::Row;
+
+/// SLUS-21701's sim frame (the sim object's vt +0x44; SLUS-21104's +0x40), its `$gp`, the game's
+/// tick, the sim object in MD160's images and the physics world's step (research/oracle.txt `# MD161a`).
+pub(crate) const U_FRAME: u32 = 0x0020_4ab0;
+pub(crate) const U_GP: u64 = 0x003f_d070;
+pub(crate) const U_DT: u32 = 0x3d08_850a;
+pub(crate) const U_SIM: u32 = 0x006d_2440;
+pub(crate) const U_WORLD_STEP: u32 = 0x004b_d040;
+pub(crate) const U_BUDGET: u64 = 400_000_000;
+/// The monster truck's class vtable.
+pub(crate) const U_TRUCK_VTABLE: u32 = 0x003f_1840;
+/// The car block the recorder keeps, and the port's readers read.
+pub(crate) const U_CAR_SIZE: u32 = 0x1800;
+
+/// Where SLUS-21701 keeps the car word SLUS-21104 keeps at `o` (research/oracle.txt `# MD81c`, `# MD81d`:
+/// +0x30 low, −0x10 from the `+0xb..` block; MD81b's quad: the run from +0x680 +0x24). Between, as MD160's
+/// spawn image matches SLUS-21104's truck image word for word (`# MD161a`): +0x28 from +0x440, +0x24 from
+/// +0x49c, +0x20 from about +0x718 (+0x734 and +0x8d0 matched), −0x10 from about +0x9c0 (+0x9c4 on matched).
+/// The edges inside the unmatched gaps are guesses; the readers read nothing in them.
+pub(crate) fn u(o: u32) -> u32 {
+    match o {
+        ..0x440 => o + 0x30,
+        ..0x49c => o + 0x28,
+        ..0x718 => o + 0x24,
+        ..0x9c0 => o + 0x20,
+        _ => o - 0x10,
+    }
+}
+
+/// A drive of MD160's: its capture and tape's name, the state it starts from and the player's car.
+pub(crate) struct UDrive {
+    pub(crate) name: &'static str,
+    pub(crate) image: &'static str,
+    pub(crate) car: u32,
+    pub(crate) vtable: u32,
+}
+
+pub(crate) const U_THROTTLE: UDrive = UDrive { name: "throttle", image: "spawn", car: 0x01be_47b0, vtable: U_TRUCK_VTABLE };
+pub(crate) const U_STEER: UDrive = UDrive { name: "steer", image: "spawn", car: 0x01be_47b0, vtable: U_TRUCK_VTABLE };
+pub(crate) const U_JUMP: UDrive = UDrive { name: "jump", image: "spawn", car: 0x01be_47b0, vtable: U_TRUCK_VTABLE };
+pub(crate) const U_WRECK: UDrive = UDrive { name: "wreck", image: "flipped", car: 0x01be_47b0, vtable: U_TRUCK_VTABLE };
+
+/// A state's RAM image and scratchpad (MD160's, `context/untamed/md160`; the flipped state's
+/// pulled out of its `.p2s`).
+pub(crate) fn u_image(name: &str) -> Option<Ee> {
+    let kit = Kit::load().map_err(|w| skip(&w)).ok()?;
+    let dir = kit.ctx("untamed/md160");
+    let (ram, spr) = (dir.join(format!("{name}.ee{}", ".bin")), dir.join(format!("{name}.spr{}", ".bin")));
+    if !ram.exists() || !spr.exists() {
+        skip(&format!("no {} and its .spr.bin (MD160's images; a copy is in openmx-slots/kept-context/md160)", ram.display()));
+        return None;
+    }
+    let mut ee = Ee::from_ram(&ram).unwrap();
+    ee.spr = std::fs::read(spr).unwrap();
+    Some(ee)
+}
+
+pub(crate) fn u_rows(name: &str) -> Option<Vec<Row>> {
+    drive::csv(Kit::load().ok()?.ctx("capture/md160").join(format!("{name}{}", ".csv")))
+}
+
+pub(crate) fn u_tape(name: &str) -> Option<Vec<Row>> {
+    drive::csv(Kit::load().ok()?.ctx("recordings/md160").join(format!("{name}.p2m2.ticks{}", ".csv")))
+}
+
+/// The syscall stubs (`addiu v1, zero, n; syscall; jr ra`) answer `a0`, GetThreadId 1 (F31's); the
+/// sim frame reaches nothing else the interpreter lacks but the 64-bit multiply.
+pub(crate) fn u_hooked(mut ee: Ee) -> Ee {
+    for a in (0x0032_0000..0x0034_0000u32).step_by(4) {
+        if ee.u32_at(a) >> 16 == 0x2403 && ee.u32_at(a + 4) == 0x0000_000c && ee.u32_at(a + 8) == 0x03e0_0008 {
+            let n = ee.u32_at(a) & 0xffff;
+            ee.hooks.insert(a, Box::new(move |ee: &mut Ee| {
+                let v = if n == 0x2f { 1 } else { ee.r(4) };
+                ee.set(2, v);
+            }));
+        }
+    }
+    // The compiler's 64-bit multiply (its `madd` is an MMI op the interpreter lacks): the low 64 bits.
+    ee.hooks.insert(0x0034_a3e0, Box::new(|ee: &mut Ee| {
+        let v = ee.r(4).wrapping_mul(ee.r(5));
+        ee.set(2, v);
+    }));
+    ee
+}
+
+/// The stick word SLUS-21701's input step leaves for each stick the tapes hold, as MD160's captures
+/// read it (steer.csv row 166 for the half stick; the rows after hold its square, the controls'
+/// `SquareSteeringInput` written back).
+fn stick_of(x: f32) -> F {
+    match x {
+        0.0 | 1.0 | -1.0 => F(x),
+        0.5 => F(f32::from_bits(0x3e90_d9ff)),
+        x => panic!("no stick word known for the tape's {x}"),
+    }
+}
+
+fn keys_of(ee: &Ee, car: u32) -> InputKeys {
+    let f = |o: u32| F(ee.f32_at(car + u(o)));
+    InputKeys {
+        max_analog_throttle: f(drive::at::MAX_ANALOG_THROTTLE),
+        digital_throttle_speed: f(drive::at::DIGITAL_THROTTLE_SPEED),
+        digital_side_slip_angle: f(drive::at::DIGITAL_SIDE_SLIP_ANGLE),
+    }
+}
+
+fn input_of(ee: &Ee, car: u32) -> Input {
+    use drive::at;
+    let f = |o: u32| F(ee.f32_at(car + u(o)));
+    Input {
+        stick: f(at::STICK),
+        lean: f(at::LEAN),
+        pad_word: f(at::PAD_WORD),
+        gas_pedal: f(at::GAS_PEDAL),
+        vehicle_brake: f(at::VEHICLE_BRAKE),
+        hand_brake: f(at::HAND_BRAKE),
+        clutch: f(at::CLUTCH),
+        dpad: ee.u32_at(car + u(at::DPAD)) != 0,
+        gassed: ee.u32_at(car + u(at::GASSED)) != 0,
+    }
+}
+
+fn put_input(ee: &mut Ee, car: u32, p: &Input) {
+    use drive::at;
+    for (o, v) in [
+        (at::STICK, p.stick),
+        (at::LEAN, p.lean),
+        (at::PAD_WORD, p.pad_word),
+        (at::GAS_PEDAL, p.gas_pedal),
+        (at::VEHICLE_BRAKE, p.vehicle_brake),
+        (at::HAND_BRAKE, p.hand_brake),
+        (at::CLUTCH, p.clutch),
+    ] {
+        ee.set_u32(car + u(o), v.to_bits());
+    }
+    ee.set_u32(car + u(at::DPAD), u32::from(p.dpad));
+    ee.set_u32(car + u(at::GASSED), u32::from(p.gassed));
+}
+
+/// The input step's words for frame `j` (the `j`th from the image) off tape tick `j - 2`, through
+/// [`atv_car::input_untamed`]: Cross the gas at a strength of one (the tapes hold nothing else but
+/// the stick), the stick [`stick_of`] the tape's, the pad word's command untouched; the image's own
+/// before that.
+fn u_feed(ee: &mut Ee, d: &UDrive, ticks: &[Row], j: usize) {
+    let Some(t) = j.checked_sub(2).and_then(|t| ticks.get(t)) else { return };
+    let held: Vec<&str> = t["buttons"].split(' ').collect();
+    let mut p = input_of(ee, d.car);
+    let (speed, side_slip) = (F(ee.f32_at(d.car + u(drive::at::SPEED))), F(ee.f32_at(d.car + u(drive::at::SIDE_SLIP))));
+    let value = |c: Command| if c == Command::GAS && held.contains(&"cross") { F::ONE } else { F::ZERO };
+    let stick = (stick_of(t["lx"].parse().unwrap()), stick_of(t["ly"].parse().unwrap()));
+    atv_car::input_untamed(&keys_of(ee, d.car), &mut p, speed, side_slip, stick, F::ZERO, value);
+    put_input(ee, d.car, &p);
+}
+
+/// The car's put-back spot (+0xd30 its place, +0xd40 and +0xd50 its turn's rows, +0xd60 the
+/// look's): Free Ride's script keeps it where the truck last stood (its message 4 to the car,
+/// 0x004ff110), outside the sim frame; the respawn stands the truck there.
+pub(crate) const U_SPOT: std::ops::Range<u32> = 0xd30..0xd6c;
+
+/// The words the game writes outside the sim frame, laid in before frame `j` off the row read after
+/// frame `j - 1` (the image's before frame 2).
+fn u_lay(ee: &mut Ee, d: &UDrive, rows: &[Row], j: usize) {
+    let Some(row) = j.checked_sub(2).and_then(|r| rows.get(r)) else { return };
+    let car = row_block(row, "car");
+    for o in U_SPOT.step_by(4) {
+        ee.set_u32(d.car + o, u32::from_le_bytes(car[o as usize..o as usize + 4].try_into().unwrap()));
+    }
+}
+
+/// One frame of SLUS-21701's: the script's words off the capture, the input step's off the tape,
+/// then the sim's frame.
+fn u_step(ee: &mut Ee, d: &UDrive, rows: &[Row], ticks: &[Row], j: usize) {
+    u_lay(ee, d, rows, j);
+    u_feed(ee, d, ticks, j);
+    ee.set(28, U_GP);
+    ee.call(U_FRAME, &[u64::from(U_SIM)], &[f32::from_bits(U_DT)], U_BUDGET);
+}
+
+/// Runs SLUS-21701's world step from inside its hook, as drives.rs's `world_step_inside`.
+pub(crate) fn u_world_step_inside(ee: &mut Ee) -> (u32, F) {
+    let (world, dt) = (ee.r(4) as u32, F(ee.f(12)));
+    u_run_inside(ee, U_WORLD_STEP);
+    (world, dt)
+}
+
+/// Runs the hooked function at `addr` from inside its hook (the interpreter keeps the hook out while
+/// it runs) on the eight integer and eight float argument registers it was called with.
+pub(crate) fn u_run_inside(ee: &mut Ee, addr: u32) {
+    let (sp, ra, stack) = (ee.r(29), ee.r(31), ee.stack);
+    ee.stack = (sp as u32 - 0x100) & !0xf;
+    let ints: Vec<u64> = (4..12).map(|k| ee.r(k)).collect();
+    let floats: Vec<f32> = (12..20).map(|k| ee.f(k)).collect();
+    let (steps, written) = (ee.steps, ee.written.clone());
+    ee.call(addr, &ints, &floats, U_BUDGET);
+    ee.written.extend(written);
+    (ee.stack, ee.pc, ee.steps) = (stack, addr, steps + ee.steps);
+    ee.set(29, sp);
+    ee.set(31, ra);
+}
+
+fn row_bytes(row: &Row, key: &str) -> Vec<u8> {
+    let s = &row[key];
+    (0..s.len() / 2).map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap()).collect()
+}
+
+/// The blocks the recorder keeps: the car (both halves), its body, engine and four tires; each its
+/// address in RAM and its bytes in a row.
+fn u_blocks(ee: &Ee, d: &UDrive) -> Vec<(&'static str, u32, usize)> {
+    let mut out = vec![("car", d.car, 0x1800), ("body", ee.u32_at(d.car + 0xe8), 0x230), ("engine", ee.u32_at(d.car + u(0x1250)), 0x200)];
+    for (k, name) in ["tire0", "tire1", "tire2", "tire3"].into_iter().enumerate() {
+        out.push((name, ee.u32_at(d.car + u(0x1254) + 4 * k as u32), 0x300));
+    }
+    out
+}
+
+fn row_block(row: &Row, name: &str) -> Vec<u8> {
+    match name {
+        "car" => [row_bytes(row, "obj0"), row_bytes(row, "obj1")].concat(),
+        "body" | "engine" => row_bytes(row, name),
+        t => row_bytes(row, &format!("{t}.raw")),
+    }
+}
+
+/// The interpreter's frames against MD160's capture: the body, engine and tires a row holds are the
+/// interpreter's after that row's frame, bit for bit, but on early rows (the frame before's: the
+/// recorder read before the frame ran) and torn ones (it read while the frame ran: words of the frames
+/// around it and of steps between).
+/// The rows after a torn one match again, and one of the last ten does, so the interpreter never
+/// drifts off the game. Returns the rows it ran and the torn ones.
+pub(crate) fn u_capture_check(d: &UDrive) -> Option<(usize, Vec<usize>, Vec<usize>)> {
+    let pre = u_image(d.image)?;
+    let rows = u_rows(d.name)?;
+    let ticks = u_tape(d.name)?;
+    assert_eq!(pre.u32_at(d.car + 4), d.vtable, "{}: not the truck at {:#x}", d.name, d.car);
+    let mut ee = u_hooked(pre);
+    let blocks = u_blocks(&ee, d)[1..].to_vec();
+    let snap = |ee: &Ee| -> Vec<u32> { blocks.iter().flat_map(|&(_, at, len)| (0..len as u32).step_by(4).map(move |o| (at, o))).map(|(at, o)| ee.u32_at(at + o)).collect() };
+    let (mut early, mut torn) = (Vec::new(), Vec::new());
+    let mut before = snap(&ee);
+    for (r, row) in rows.iter().enumerate() {
+        u_step(&mut ee, d, &rows, &ticks, r + 1);
+        let now = snap(&ee);
+        let want: Vec<u32> = blocks.iter().flat_map(|b| row_block(row, b.0).chunks(4).take(b.2 / 4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect::<Vec<_>>()).collect();
+        assert_eq!(want.len(), now.len(), "{} row {r}: short blocks", d.name);
+        if want == before {
+            early.push(r);
+        } else if want != now {
+            torn.push(r);
+            if (80..86).contains(&r) {
+                let names: Vec<String> = blocks.iter().flat_map(|&(n, _, len)| (0..len).step_by(4).map(move |o| format!("{n}+{o:#x}"))).collect();
+                let why: Vec<String> = (0..now.len()).filter(|&k| now[k] != want[k]).map(|k| format!("{}:{:08x}/{:08x}", names[k], now[k], want[k])).collect();
+                eprintln!("PROBE row {r}: {} {}", why.len(), why.iter().take(24).cloned().collect::<Vec<_>>().join(" "));
+            }
+        }
+        before = now;
+    }
+    let n = rows.len();
+    let off = early.len() + torn.len();
+    assert!(off * 3 < n, "{}: {off} of {n} rows are not the frame's: early {early:?}, torn {torn:?}", d.name);
+    assert!((n - 10..n).any(|r| !early.contains(&r) && !torn.contains(&r)), "{}: none of the last ten rows match", d.name);
+    Some((n, early, torn))
+}
+
+#[test]
+fn probe_untamed_replay() {
+    let mut out = Vec::new();
+    for d in [&U_THROTTLE, &U_STEER, &U_JUMP, &U_WRECK] {
+        let Some((n, early, torn)) = u_capture_check(d) else { return };
+        out.push(format!("{}: {n} rows, {} early {early:?}, {} torn {torn:?}", d.name, early.len(), torn.len()));
+    }
+    panic!("{}", out.join("\n"));
+}
+
+#[test]
+fn probe_wreck_writer() {
+    let d = &U_THROTTLE;
+    let Some(pre) = u_image(d.image) else { return };
+    let Some(ticks) = u_tape(d.name) else { return };
+    let Some(rows) = u_rows(d.name) else { return };
+    let mut ee = u_hooked(pre);
+    let list = 0x01c2_aa80u32;
+    let mut out = std::collections::BTreeMap::new();
+    *ee.log.borrow_mut() = Some(Vec::new());
+    for j in 1..40 {
+        u_step(&mut ee, d, &rows, &ticks, j);
+        for (pc, a, _) in ee.log.borrow_mut().as_mut().unwrap().drain(..) {
+            if a >= list && a < list + 0x90 {
+                out.entry((a - list) & !3).or_insert_with(std::collections::BTreeSet::new).insert(pc);
+            }
+        }
+    }
+    panic!("{:x?}", out);
+}
+
+
+// --- The port's frame beside SLUS-21701's ---------------------------------------------------------
+
+/// SLUS-21701's ground query (`world, point in/out, normal out, 0, record byte out`; SLUS-21104's
+/// 0x004833c0).
+pub(crate) const U_GROUND_QUERY: u32 = 0x004b_0910;
+/// SLUS-21701's two collidable classes' vtables: the ray probe and the mesh (SLUS-21104's 0x003b6c20
+/// and 0x003b6d00).
+/// SLUS-21701's smooth noise (`f12` the place, `f0` the noise; SLUS-21104's 0x00134580) and the
+/// engine's call of it for the sound's pitch.
+pub(crate) const U_SMOOTH_NOISE: u32 = 0x0013_24b0;
+const U_NOISE_FROM: u32 = 0x004d_6cac;
+/// The tire probe's ground query returns here (SLUS-21104's probe 0x004b51f0 is 0x004d7890).
+const U_TIRE_PROBE_FROM: u32 = 0x004d_7af4;
+const U_RAYS_VTABLE: u32 = 0x003d_9120;
+const U_MESH_VTABLE: u32 = 0x003d_9200;
+
+/// One ground query the original's frame made: the point asked, the point and normal it answered
+/// and the record byte it left (none without a record).
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) struct UGround {
+    from: u32,
+    /// Where the answer's record goes (a tire's +0xf0 for the tire probes), 0 for none.
+    to: u32,
+    asked: [u32; 4],
+    point: Vf,
+    normal: Vf,
+    record: Option<u8>,
+}
+
+/// `ee`'s RAM with the car block laid out as SLUS-21104 keeps it (`view[car + o] = ram[car + u(o)]`),
+/// and its scene nodes' words moved back 0x30, so the readers of the SLUS-21104 harness read
+/// SLUS-21701's car.
+pub(crate) fn u_view(ee: &Ee, car: u32) -> Ee {
+    let mut ram = ee.ram.clone();
+    for o in 0..U_CAR_SIZE {
+        ram[(car + o) as usize] = ee.ram.get((car + u(o)) as usize).copied().unwrap_or(0);
+    }
+    // The car's scene node, its parents and its subtree: their words +0x30 on (research/untamed-machines.md,
+    // MD81b); parent, child and sibling at +0x120, +0x124, +0x128.
+    let first = ee.u32_at(car + u(0xe4));
+    let mut nodes = vec![first];
+    while let n @ 1.. = ee.u32_at(nodes[nodes.len() - 1] + 0x120) {
+        assert!(!nodes.contains(&n), "a loop of parents");
+        nodes.push(n);
+    }
+    let mut todo = vec![ee.u32_at(first + 0x124)];
+    while let Some(n) = todo.pop() {
+        if n == 0 {
+            continue;
+        }
+        assert!(!nodes.contains(&n), "a loop in the subtree");
+        nodes.push(n);
+        todo.push(ee.u32_at(n + 0x128));
+        todo.push(ee.u32_at(n + 0x124));
+    }
+    for n in nodes {
+        for o in 0x30..0x110 {
+            ram[(n + o) as usize] = ee.ram[(n + o + 0x30) as usize];
+        }
+    }
+    // The car's two collidables (the riding ray probe and the frame mesh, car +0xcc and +0xd0): the
+    // database entry +0x20 at +0x4c, the centre and reach +0x30 on, the frame and what follows it +0x20
+    // on (a ray probe's frame and tree, a mesh's frame to its mesh pointer); their vtables told by
+    // SLUS-21104's.
+    for o in [0xcc, 0xd0] {
+        let a = ee.u32_at(car + u(o));
+        if a == 0 {
+            continue;
+        }
+        let vt = match ee.u32_at(a + 0xc) {
+            U_RAYS_VTABLE => 0x003b_6c20u32,
+            U_MESH_VTABLE => 0x003b_6d00,
+            vt => panic!("a collidable at {a:#x} of vtable {vt:#010x}"),
+        };
+        let mut mv = |at: u32, len: u32, from: u32| {
+            for k in 0..len {
+                ram[(a + at + k) as usize] = ee.ram[(a + from + k) as usize];
+            }
+        };
+        mv(0x20, 4, 0x4c);
+        mv(0x50, 0x24, 0x80);
+        // A ray probe's tree lives in its own tail (+0x1e0), which the copy must not reach.
+        mv(0x130, if vt == 0x003b_6c20 { 0x58 } else { 0x118 }, 0x150);
+        ram[(a + 0xc) as usize..(a + 0x10) as usize].copy_from_slice(&vt.to_le_bytes());
+    }
+    // The tires' lever pointers point into the car: at the view's words.
+    for k in 0..4 {
+        let t = ee.u32_at(car + u(0x1254) + 4 * k);
+        for o in [0x24, 0x28] {
+            let x = ee.u32_at(t + o);
+            if (car..car + U_CAR_SIZE).contains(&x) {
+                let r = x - car;
+                let back = (0..U_CAR_SIZE).find(|&o| u(o) == r).unwrap_or_else(|| panic!("a lever at car +{r:#x}"));
+                ram[(t + o) as usize..(t + o + 4) as usize].copy_from_slice(&(car + back).to_le_bytes());
+            }
+        }
+    }
+    // The vehicle state's pad (the rumble's), SLUS-21104's +0x5c, is at +0x54.
+    let vstate = ee.u32_at(car + u(0xbc4));
+    if vstate != 0 {
+        for o in 0..4 {
+            ram[(vstate + 0x5c + o) as usize] = ee.ram[(vstate + 0x54 + o) as usize];
+        }
+    }
+    // The terrain's extent pointer, SLUS-21104's +0x43c, is at +0x42c.
+    let terrain = ee.u32_at(car + u(0x3b0));
+    if terrain != 0 {
+        for o in 0..4 {
+            ram[(terrain + 0x43c + o) as usize] = ee.ram[(terrain + 0x42c + o) as usize];
+        }
+    }
+    Ee::with_ram(ram)
+}
+
+/// The ground query hooked to run as it is and log what it was asked and answered.
+fn u_hook_ground(ee: &mut Ee, log: Shared<Vec<UGround>>) {
+    ee.hooks.insert(U_GROUND_QUERY, Box::new(move |ee: &mut Ee| {
+        let (pt, n, rec) = (ee.r(5) as u32, ee.r(6) as u32, ee.r(8) as u32);
+        assert_eq!(ee.r(7), 0, "the ground query's fourth argument");
+        let (from, asked) = (ee.r(31) as u32, get_v(ee, pt).to_bits());
+        u_run_inside(ee, U_GROUND_QUERY);
+        log.borrow_mut().push(UGround { from, to: rec, asked, point: get_v(ee, pt), normal: get_v(ee, n), record: (rec != 0).then(|| ee.u8_at(rec)) });
+    }));
+}
+
+/// The smooth noise hooked to run as it is and log the engine's places and answers, with the
+/// engine asking (`s0`).
+fn u_hook_noise(ee: &mut Ee, log: Shared<Vec<(u32, u32, F)>>) {
+    ee.hooks.insert(U_SMOOTH_NOISE, Box::new(move |ee: &mut Ee| {
+        let (from, engine, at) = (ee.r(31) as u32, ee.r(16) as u32, ee.f(12).to_bits());
+        u_run_inside(ee, U_SMOOTH_NOISE);
+        if from == U_NOISE_FROM {
+            log.borrow_mut().push((engine, at, F(ee.f(0))));
+        }
+    }));
+}
+
+/// The port's calls answered beside SLUS-21701's frame: the ground queries by the original's
+/// answers to the same point, the sort's search by the original's; the rest listed.
+pub(crate) struct UBeside {
+    ground: Vec<UGround>,
+    noise: Vec<(u32, F)>,
+    used: Vec<UGround>,
+    sort: SortAnswer,
+    pub(crate) asked: usize,
+    pub(crate) rest: Vec<Call>,
+}
+
+impl UBeside {
+    fn answer(&mut self, at: Vf) -> UGround {
+        self.asked += 1;
+        let k = self.ground.iter().position(|g| g.asked == at.to_bits());
+        let k = k.unwrap_or_else(|| panic!("the port asked the ground at {:08x?}, the original never did (it asked {:08x?})", at.to_bits(), self.ground.iter().map(|g| g.asked).collect::<Vec<_>>()));
+        let g = self.ground.remove(k);
+        self.used.push(g);
+        g
+    }
+
+    /// The original's queries the port did not make: none but repeats of one it made (the same
+    /// caller, point and answer).
+    fn unasked(&self) -> Vec<UGround> {
+        self.ground.iter().filter(|g| !self.used.contains(g)).copied().collect()
+    }
+}
+
+impl Steps for UBeside {
+    fn call(&mut self, c: Call, car: &mut Car, _body: &mut Body) {
+        match c {
+            Call::GroundUnder(at) => car.ground_normal = self.answer(at).normal,
+            Call::TireGround(k, at) => {
+                let g = self.answer(at);
+                car.tires[k].query = (g.point, g.normal);
+                if let Some(r) = g.record {
+                    car.tires[k].surface = r;
+                }
+            }
+            Call::Noise(at) => {
+                let k = self.noise.iter().position(|&(x, _)| x == at.to_bits());
+                let k = k.unwrap_or_else(|| panic!("the port asked the noise at {at:?}, the original's engine never did ({:?})", self.noise));
+                car.noise = self.noise.remove(k).1;
+            }
+            Call::SortSearch => {
+                car.sort = self.sort;
+                self.rest.push(c);
+            }
+            c => self.rest.push(c),
+        }
+    }
+}
+
+/// What a drive beside came to.
+#[derive(Default)]
+pub(crate) struct USeen {
+    pub(crate) frames: usize,
+    pub(crate) words: usize,
+    pub(crate) grounds: usize,
+    /// The original's queries that repeat one the port made.
+    pub(crate) repeats: usize,
+    pub(crate) handed: std::collections::BTreeMap<String, usize>,
+    pub(crate) other_worlds: usize,
+    pub(crate) wrecked: usize,
+}
+
+/// Replays drive `d` as [`u_capture_check`] does, and at each frame's world step on the truck's world
+/// reads the car (through [`u_view`]), body, engine, tires, keys, state and vehicle words, runs
+/// SLUS-21701's step, then the port's Untamed frame ([`atv_car::frame_untamed`], or through
+/// [`atv_car::Ride`] with its update Untamed's) on what it read: every word the port keeps must equal
+/// the original's after it, every frame.
+pub(crate) fn u_beside(d: &UDrive, ride: bool) -> Option<USeen> {
+    let pre = u_image(d.image)?;
+    let rows = u_rows(d.name)?;
+    let ticks = u_tape(d.name)?;
+    assert_eq!(pre.u32_at(d.car + 4), d.vtable, "{}: not the truck at {:#x}", d.name, d.car);
+    THE_CAR.with(|c| c.set(d.car));
+    let table: &'static AcosTable = Box::leak(Box::new(AcosTable::build()));
+    let mut ee = u_hooked(pre);
+    let ground: Shared<Vec<UGround>> = Rc::default();
+    u_hook_ground(&mut ee, ground.clone());
+    let probes: Shared<Vec<u32>> = Rc::default();
+    if std::env::var("PROBE_AT").is_ok() {
+        let l = probes.clone();
+        ee.hooks.insert(0x004d_7890, Box::new(move |ee: &mut Ee| {
+            l.borrow_mut().push(ee.r(31) as u32);
+            u_run_inside(ee, 0x004d_7890);
+        }));
+    }
+    let noise: Shared<Vec<(u32, u32, F)>> = Rc::default();
+    u_hook_noise(&mut ee, noise.clone());
+    let seen: Shared<USeen> = Rc::default();
+    let frame_no: Shared<usize> = Rc::default();
+    let (keep, at_frame, name, car_at_) = (seen.clone(), frame_no.clone(), d.name, d.car);
+    let the_ride: Shared<Option<atv_car::Ride>> = Rc::default();
+    ee.hooks.insert(U_WORLD_STEP, Box::new(move |ee: &mut Ee| {
+        let k = *at_frame.borrow();
+        let w = ee.r(4) as u32;
+        let listeners: Vec<u32> = (0..u32::from(ee.u16_at(w + 0x50))).map(|i| ee.u32_at(ee.u32_at(w + 0x58) + 4 * i)).collect();
+        if !listeners.contains(&(car_at_ + 0x60)) {
+            u_run_inside(ee, U_WORLD_STEP);
+            keep.borrow_mut().other_worlds += 1;
+            return;
+        }
+        let vb = u_view(ee, car_at_);
+        let p = ptrs(&vb);
+        let o = own_ptrs(&vb, &p);
+        let mut car = read_car(&vb, &p);
+        let mut body = game_sim::handling::seed::body(&|a| vb.u32_at(a), p.body);
+        let mut v = read_vehicle(&vb, &p, &o);
+        v.untamed = true;
+        v.scene.untamed = true;
+        let contacts = vb.u32_at(p.record + 0xf0);
+        if contacts != 0 {
+            if std::env::var("PROBE_AT").is_ok() {
+                let list = vb.u32_at(p.record + 0xf8);
+                for i in 0..contacts.min(3) {
+                    let w: Vec<u32> = (0..0x48).map(|k| vb.u32_at(list + 0x90 * i + 4 * k)).collect();
+                    eprintln!("C {contacts} {i} {:08x?}", w);
+                }
+            }
+            v.held = game_sim::handling::record::held(&|a| vb.u32_at(a), p.record);
+        }
+        let mut m = read_mx(&vb, &p);
+        m.keys.untamed = true;
+        ground.borrow_mut().clear();
+        noise.borrow_mut().clear();
+        let (_, dt) = u_world_step_inside(ee);
+        // The world steps every car; keep this car's tire probes and engine noise.
+        let tires: Vec<u32> = (0..4).map(|k| ee.u32_at(car_at_ + u(0x1254) + 4 * k) + 0xf0).collect();
+        ground.borrow_mut().retain(|g| g.from != U_TIRE_PROBE_FROM || tires.contains(&g.to));
+        let engine = ee.u32_at(car_at_ + u(0x1250));
+        noise.borrow_mut().retain(|&(e, _, _)| e == engine);
+        let va = u_view(ee, car_at_);
+        let all_from: Vec<u32> = ground.borrow().iter().map(|g| g.from).collect();
+        if std::env::var("PROBE_AT").is_ok() {
+            for g in ground.borrow().iter() {
+                eprintln!("G {:x} {:08x?} {:?} {:?} {:?}", g.from, g.asked, g.point, g.normal, g.record);
+            }
+        }
+        let beside = UBeside { ground: std::mem::take(&mut *ground.borrow_mut()), noise: noise.borrow_mut().drain(..).map(|(_, at, f)| (at, f)).collect(), used: Vec::new(), sort: super::drives::sort_answer(&va, &p), asked: 0, rest: Vec::new() };
+        let mut pieces = Pieces { keys: m.keys(), state: m.state, rest: beside };
+        if ride {
+            let mut r = the_ride.borrow_mut();
+            let r = r.get_or_insert_with(|| super::drives::ride_of(table));
+            r.update.untamed = true;
+            (r.keys, r.state, r.car, r.body, r.vehicle) = (std::mem::take(&mut pieces.keys), pieces.state, car, body, v);
+            let rest = std::mem::replace(&mut pieces.rest, UBeside { ground: Vec::new(), noise: Vec::new(), used: Vec::new(), sort: SortAnswer::default(), asked: 0, rest: Vec::new() });
+            pieces.rest = r.frame_with(dt, rest);
+            (pieces.keys, pieces.state) = (std::mem::take(&mut r.keys), r.state);
+            (car, body) = (r.car.clone(), r.body.clone());
+            v = r.vehicle.clone();
+        } else {
+            atv_car::frame_untamed(&atv_car::WORLD, &mut car, &mut body, dt, table, &mut atv_car::Own { v: &mut v, rest: &mut pieces });
+        }
+        let pm = Mx { keys: Keys { tires: pieces.keys.tires.clone(), ..m.keys.clone() }, state: pieces.state, ..m };
+        let resolved: Vec<(u32, u32)> = v
+            .held
+            .as_ref()
+            .filter(|_| contacts != 0)
+            .map_or(Vec::new(), |h| game_sim::handling::record::held_words(&game_sim::atv_contact::Held { body: None, ..h.clone() }, p.record, &|a| va.u32_at(a)));
+        let parts = [car_words(&car, &p), game_sim::handling::seed::body_words(&body, p.body), mx_words(&pm, &p), vehicle_words(&va, &v, &p, &o), resolved];
+        let counts = parts.clone().map(|ws| ws.iter().filter(|&&(a, x)| va.u32_at(a) != x).count());
+        let after: Vec<(u32, u32)> = parts.concat();
+        let bad: Vec<String> = after
+            .iter()
+            .filter(|&&(a, x)| va.u32_at(a) != x)
+            .take(40)
+            .map(|&(a, x)| {
+                let o = a.wrapping_sub(car_at_);
+                let at = if o < U_CAR_SIZE { format!("car +{:#x} (21104 +{o:#x})", u(o)) } else { format!("{a:#x}") };
+                format!("  {at}: port {x:#010x} ({}), original {:#010x} ({})", f32::from_bits(x), va.u32_at(a), va.f32_at(a))
+            })
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "{name} frame {k}: words of the port's Untamed frame differ from SLUS-21701's (car, body, pieces, vehicle, record: {counts:?}; {contacts} contacts, state {}, handed out {:?}):\n{}",
+            car.state,
+            pieces.rest.rest,
+            bad.join("\n")
+        );
+        assert!(pieces.rest.noise.is_empty(), "{name} frame {k}: the original's engine asked the noise {} times the port did not", pieces.rest.noise.len());
+        let unasked = pieces.rest.unasked();
+        assert!(
+            unasked.is_empty(),
+            "{name} frame {k}: the original asked the ground {} times the port did not (the port {}): from {:x?} of {all_from:x?}; probes from {:x?}",
+            unasked.len(),
+            pieces.rest.asked,
+            unasked.iter().map(|g| g.from).collect::<Vec<_>>(),
+            probes.borrow()
+        );
+        let mut s = keep.borrow_mut();
+        for c in &pieces.rest.rest {
+            let n = format!("{c:?}").split([' ', '(', '{']).next().unwrap().to_string();
+            assert!(super::drives::HANDED_OUT.contains(&n.as_str()), "{name} frame {k}: the port's frame handed out {c:?}");
+            *s.handed.entry(n).or_default() += 1;
+        }
+        s.frames += 1;
+        s.words += after.len();
+        s.grounds += pieces.rest.asked;
+        s.repeats += pieces.rest.ground.len();
+        s.wrecked += usize::from(car.state != atv_car::RIDING);
+    }));
+    for r in 0..rows.len() {
+        *frame_no.borrow_mut() = r + 1;
+        u_step(&mut ee, d, &rows, &ticks, r + 1);
+    }
+    let seen = std::mem::take(&mut *seen.borrow_mut());
+    eprintln!(
+        "MD161a {} ({}): {} frames, {} words in all equal to SLUS-21701's; {} ground queries answered; handed out {:?}; wrecked on {}; {} other world steps",
+        d.name,
+        if ride { "through Ride" } else { "frame_untamed" },
+        seen.frames,
+        seen.words,
+        seen.grounds,
+        seen.handed,
+        seen.wrecked,
+        seen.other_worlds
+    );
+    Some(seen)
+}
+
+#[test]
+fn probe_untamed_beside() {
+    let Some(s) = u_beside(&U_THROTTLE, false) else { return };
+    panic!("frames {} words {} grounds {} handed {:?} other {}", s.frames, s.words, s.grounds, s.handed, s.other_worlds);
+}
+
+#[test]
+fn probe_layout() {
+    let Some(ee) = u_image("spawn") else { return };
+    let Some(old) = drive::image("truck") else { return };
+    let (car, oc) = (U_THROTTLE.car, drive::TRUCK.car);
+    let mut out = Vec::new();
+    for (name, x, y, n) in [("vstate", ee.u32_at(car + u(0xbc4)), old.u32_at(oc + 0xbc4), 0x80u32), ("engine", ee.u32_at(car + u(0x1250)), old.u32_at(oc + 0x1250), 0x200)] {
+        out.push(format!("== {name} {x:#x} {y:#x}"));
+        for k in (0..n).step_by(4) {
+            let (p, q) = (ee.u32_at(x + k), old.u32_at(y + k));
+            out.push(format!("+{k:03x}: {p:08x} {:>12.4} | {q:08x} {:>12.4}", f32::from_bits(p), f32::from_bits(q)));
+        }
+    }
+    std::fs::write(std::env::var("PROBE_OUT").unwrap(), out.join("\n")).unwrap();
+    panic!("written");
+}
