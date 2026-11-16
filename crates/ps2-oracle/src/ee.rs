@@ -689,6 +689,14 @@ impl Ee {
                 let w = |v: u128, k: u32| v >> (32 * k) & 0xffff_ffff;
                 q(self, w(qt, 2) | w(qs, 2) << 32 | w(qt, 3) << 64 | w(qs, 3) << 96);
             }
+            (0x28, 0x18) => {
+                // paddub: sixteen byte additions, each saturating at 0xff on its own. With $zero as
+                // rt it is a quadword move — the Hall of Fame's insert (P334) copies a pointer so.
+                let byte = |v: u128, k: u32| (v >> (8 * k)) as u8;
+                q(self, (0..16).fold(0u128, |a, k| {
+                    a | (byte(qs, k).saturating_add(byte(qt, k)) as u128) << (8 * k)
+                }));
+            }
             (0x29, 0x1e) => {
                 // pexcw: the two middle words of rt swapped, the outer two left alone. One operand,
                 // so `rs` is whatever the assembler put there.

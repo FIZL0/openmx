@@ -3014,11 +3014,51 @@ impl Pen<'_> {
                 self.title(Screen::Results.title());
                 self.hints(&[(Btn::Cross, "OK")]);
             }
+            race::Stage::Fame if r.fame_try().is_some() && !r.earned.is_empty() => {
+                // P334: the entry page — the seat's new records, then its name on the keyboard.
+                let seat = r.fame_at.unwrap_or(0);
+                let y = self.heading("Hall of Fame", &name, &format!("Congratulations, Player {}!", seat + 1), x, 8.0, w, 2.6);
+                let y = self.para("You set a new record. Enter your name for the Hall of Fame.", x, y + 1.4, w, 1.1, 1.5, CHALK) + 1.0;
+                let size = 1.15;
+                let h = size * 2.2;
+                let mut y = y;
+                for (title, value) in &r.earned {
+                    self.round([x, y, w, h], 0.6 * size, GLASS, GLASS);
+                    let mid = Pen::mid(y + h / 2.0, size);
+                    self.text(Weight::Heavy, title, x + 0.9, mid, size, 0.0, PEACH, Align::Left);
+                    self.text(Weight::Heavy, value, x + w - 0.9, mid, size, 0.0, CHALK, Align::Right);
+                    y += h + 0.4;
+                }
+                self.title(Screen::Results.title());
+                self.hints(&[(Btn::Cross, "Enter Name"), (Btn::Circle, "Skip")]);
+            }
             race::Stage::Fame => {
                 let y = self.heading("Hall of Fame", &name, "A new record!", x, 8.0, w, 2.6);
                 let seats: Vec<String> = [(r.fame.seat0, 1), (r.fame.seat1, 2)].iter().filter(|(m, _)| *m).map(|(_, n)| format!("Player {n}")).collect();
                 let said = format!("{} set a time that earns a place in the Hall of Fame.", seats.join(" and "));
                 self.para(&said, x, y + 1.4, w, 1.1, 1.5, CHALK);
+                self.title(Screen::Results.title());
+                self.hints(&[(Btn::Cross, "Main Menu")]);
+            }
+            race::Stage::Table => {
+                // P334: the tables the names went in, the new entries picked out.
+                let mut y = self.heading("Hall of Fame", &name, &about, x, 8.0, w, 2.6) + 1.4;
+                let size = 1.0;
+                let h = size * 2.0;
+                for t in &r.fame_tables {
+                    self.text(Weight::Bold, &t.title.to_uppercase(), x + 0.9, y + CAP * 1.0, 1.0, 0.0, DUST, Align::Left);
+                    y += 1.8;
+                    for (k, (value, who, new)) in t.rows.iter().enumerate() {
+                        self.round([x, y, w, h], 0.6 * size, GLASS, GLASS);
+                        let mid = Pen::mid(y + h / 2.0, size);
+                        let colour = if *new { PEACH } else { CHALK };
+                        self.text(Weight::Heavy, &(k + 1).to_string(), x + 0.9, mid, size, 0.0, colour, Align::Left);
+                        self.text(Weight::Heavy, who, x + 5.9, mid, size, 0.0, colour, Align::Left);
+                        self.text(Weight::Heavy, value, x + w - 0.9, mid, size, 0.0, colour, Align::Right);
+                        y += h + 0.3;
+                    }
+                    y += 1.0;
+                }
                 self.title(Screen::Results.title());
                 self.hints(&[(Btn::Cross, "Main Menu")]);
             }

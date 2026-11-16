@@ -70,6 +70,9 @@ pub use race::{RaceSetup, Results};
 // P330: the race's end — the results menu's pages, the tip popup, the Hall of Fame marks, the wins.
 #[path = "menu_results.rs"]
 pub mod results;
+// P334: the Hall of Fame — its tables made at boot, the name entry and the insertion.
+#[path = "menu_fame.rs"]
+pub mod fame;
 pub use transfers::{PLAY_ROWS, Transfers};
 // The pause's Tricks page (P259): the ride's tricks, their gestures and points.
 #[path = "menu_tricks.rs"]
@@ -4901,6 +4904,11 @@ impl Menu {
             },
             Typing::Name => self.settings.name.clone(),
             Typing::Number if garage => self.garages.get(seat).map(|g| g.pick.look.number.clone()).unwrap_or_default(),
+            // P334: the name last typed into the Hall of Fame, else the seat's rider's.
+            Typing::Fame => match self.race.fame.last_name.as_str() {
+                "" => self.rider_name(self.race.results.as_ref().and_then(|r| r.fame_at).map_or(seat, |s| s as usize)).chars().take(fame::NAME_KEYS).collect(),
+                n => n.chars().take(fame::NAME_KEYS).collect(),
+            },
             _ => String::new(),
         };
         self.typing_for = purpose;
@@ -5323,7 +5331,7 @@ impl Menu {
                     // code is all capitals.
                     let word_start = self.typing.is_empty() || self.typing.ends_with(' ');
                     let upper = match self.typing_for {
-                        Typing::Name | Typing::Preset | Typing::Camera => word_start,
+                        Typing::Name | Typing::Preset | Typing::Camera | Typing::Fame => word_start,
                         Typing::Code => true,
                         Typing::Chat | Typing::Number => false,
                     };
@@ -5382,6 +5390,11 @@ impl Menu {
                 if !name.is_empty() {
                     self.save_camera(&name);
                 }
+            }
+            Typing::Fame => {
+                let typed = std::mem::take(&mut self.typing);
+                self.pop();
+                self.finish_fame_name(&typed);
             }
             Typing::Number => {
                 let number = roster::clean_number(&self.typing);
@@ -5681,6 +5694,8 @@ enum Typing {
     Number,
     /// A camera preset of the player's own (P163).
     Camera,
+    /// The name a Hall of Fame record goes in under (P334).
+    Fame,
 }
 
 impl Typing {
@@ -5692,6 +5707,7 @@ impl Typing {
             Typing::Chat => 40,
             Typing::Preset | Typing::Camera => NAME_MAX,
             Typing::Number => roster::NUMBER_MAX,
+            Typing::Fame => fame::NAME_KEYS,
         }
     }
 
@@ -5703,6 +5719,7 @@ impl Typing {
             Typing::Preset => "Preset Name",
             Typing::Camera => "Camera Name",
             Typing::Number => "Number",
+            Typing::Fame => "Hall of Fame",
         }
     }
 }

@@ -3387,6 +3387,12 @@ impl Front {
         {
             println!("records: {e}");
         }
+        // And the Hall of Fame (P334), when a name went in.
+        if self.menu.take_fame_changed()
+            && let Err(e) = self.menu.race.fame.save(&self.dir)
+        {
+            println!("fame: {e}");
+        }
         if self.menu.take_changed() {
             match menu::save(&self.dir, &self.menu.settings, &self.menu.controls) {
                 Ok(()) => println!("settings: saved in {}", self.dir.display()),
@@ -3533,6 +3539,7 @@ async fn front_end(args: Args) -> Result<(), String> {
     let car_camera_names = car_camera_names(&mut disc);
     // The rider's own 24 (MD77), which the Ride tab's trick pack rows count each pack's extras past.
     let rider_stunts = front_rider_stunts(&mut disc);
+    let fame_riders = fame_riders(&mut disc);
     drop(disc);
     // The front end's music and clicks (P65), when anything plays them.
     if sound.live().is_some() {
@@ -3575,6 +3582,8 @@ async fn front_end(args: Args) -> Result<(), String> {
     front.menu.car_camera_names = car_camera_names;
     // The riders' race records (P330), which a race's win counts in.
     front.menu.race.records = menu::results::Records::load(&front.dir);
+    // The Hall of Fame (P334): `fame.txt`, or the tables the original makes at boot when there is none.
+    front.menu.race.fame = load_fame(&front.dir, &fame_riders);
     // The track mods (MD2), after the disc's tracks in the pick; read again when the Mods row turns.
     let mut mods_on = front.menu.settings.mods;
     let listed = mod_tracks(&args, &front.dir, mods_on);
@@ -9755,13 +9764,16 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         let mut burst = world.seats[0].sim.race.as_ref().and_then(|r| r.flashes.as_ref()).map(|f| f.burst);
         if simulated && let Some(laps) = world.seats[0].sim.race.as_ref().and_then(|r| r.laps.as_deref()) {
             let laps_run = laps.rules.lap.laps.clamp(0, 255) as u8;
+            // P334: the event as the Hall of Fame reads it — the track's league and number in it, and
+            // the first seat's bike class — on a track with race tables.
+            let fame_event = menu::fame::fame_track(&args.track).map(|(league, track)| (league, track, args.set.unwrap_or(roster::Set::FREERIDE).engine as i32));
             for change in race_watch.look(laps) {
                 match change {
                     race_start::Change::Lap { player, lap } => println!("race: player {} on lap {lap}", player + 1),
                     race_start::Change::Place { player, place } => println!("race: player {} in place {place}", player + 1),
                     race_start::Change::Finished { player, place } => {
                         let Some(card) = laps.card(player) else { continue };
-                        let over = match (&stadium_flashes, &mut burst) {
+                        let mut over = match (&stadium_flashes, &mut burst) {
                             (Some(s), Some(burst)) => s.card_finishes(card, laps_run, burst),
                             _ => {
                                 let event = game_sim::race::ResultEvent { activity: 2, laps: laps_run, ..Default::default() };
@@ -9769,6 +9781,23 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                                 game_sim::race::Supercross::new().race_over(card, None, &event, -1, &game_sim::race::HallOfFame::default(), None, &flash)
                             }
                         };
+                        // P334: the human's finish heard again as the original hears a player's — seat 0,
+                        // keeping records, with the event and the Hall of Fame's tables — for the win it
+                        // counts and the records it earns.
+                        if player == 0
+                            && let (Some(front), Some((league, track, class))) = (front.as_deref(), fame_event)
+                        {
+                            let event = game_sim::race::ResultEvent { league, activity: 2, class, laps: laps_run, ..Default::default() };
+                            let seat = game_sim::race::ResultSeat { seat: 0, keeps_records: true, profile: true };
+                            let mine = game_sim::race::LapCard { flags: card.flags | game_sim::race::card_flags::PLAYER, ..card.clone() };
+                            let flash = game_sim::race::FlashLevels::default();
+                            let heard = game_sim::race::Supercross::new().race_over(&mine, Some(seat), &event, track, &front.menu.race.fame.tables, None, &flash);
+                            over.win = heard.win;
+                            over.fame = heard.fame;
+                            if !over.fame.is_empty() {
+                                println!("race: player 1 earned {} Hall of Fame record(s)", over.fame.len());
+                            }
+                        }
                         println!("race: player {} finished in place {place} at {:.2}s — fireworks {}", player + 1, card.race_time.0, over.fireworks);
                         if over.fireworks && let Some(fx) = &mut track_fx {
                             fx.finish();
@@ -9780,6 +9809,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                         println!("race: over — places {}", places.join(" "));
                         if let Some(front) = front.as_deref_mut() {
                             let name = front.menu.racer_name(0);
+                            // P334: the human's card for the Hall of Fame's name entry.
+                            if let (Some((league, track, class)), Some(card)) = (fame_event, laps.card(0)) {
+                                let t = menu::fame::FameTry { seat: 0, league, track, class, laps: laps_run, best_lap: card.best_lap, race_time: card.race_time };
+                                front.menu.fame_tries(vec![t]);
+                            }
                             front.menu.race_ended(race_start::hand_over(laps, laps_run, &name, &race_watch.overs));
                         }
                     }
@@ -12592,6 +12626,36 @@ fn own_flier_cameras(rigs: &mut [Rig], fliers: &[vehicle::Fliers], layout: Layou
 /// The disc's camera presets the camera button cycles through (P163), the bike's and the plane's, by
 /// name, for the Camera page's Preset row: free06's files, whose names every track's shares (the
 /// freerides' and the races' read alike). Empty where they cannot be read.
+/// P334: the riders the Hall of Fame names the entries it makes after: the disc's
+/// `rider\riders.dat`, in its order.
+fn fame_riders(disc: &mut Disc) -> Vec<String> {
+    let text = disc.res("appstart.res").and_then(|app| app.read_suffix("rider\\riders.dat")).map(|b| game_render::ini::text(&b));
+    match text {
+        Ok(t) => menu::fame::riders_of(&t),
+        Err(e) => {
+            println!("fame: no riders list ({e}), so the Hall of Fame's made entries go unnamed");
+            Vec::new()
+        }
+    }
+}
+
+/// P334: the Hall of Fame out of `dir`'s `fame.txt`, or — with none — made as the original makes it
+/// at boot (its tracks, nationals and arenas as the tables hold them, `rand` as the game starts it,
+/// seeded from the clock at the first name) and saved.
+fn load_fame(dir: &std::path::Path, riders: &[String]) -> menu::fame::FameBook {
+    use menu::fame::{ARENAS, Dice, FameBook, NAT_TRACKS, SX_TRACKS, clock_now};
+    if let Some(book) = FameBook::load(dir) {
+        return book;
+    }
+    let mut dice = Dice::new(game_sim::rng::Rng::new());
+    let book = FameBook::generate(SX_TRACKS, NAT_TRACKS, ARENAS, riders, &mut dice, &mut clock_now);
+    match book.save(dir) {
+        Ok(()) => println!("fame: made the Hall of Fame (seed {}) in {}", dice.seeded, dir.display()),
+        Err(e) => println!("fame: {e}"),
+    }
+    book
+}
+
 fn camera_names(disc: &mut Disc) -> [Vec<String>; 2] {
     let Some(kit) = member_ending(disc, PLANE_KIT_ARCHIVE).ok().and_then(|name| disc.res(&name).ok()) else {
         println!("camera: no {PLANE_KIT_ARCHIVE}, so no presets to list on the Camera page");
