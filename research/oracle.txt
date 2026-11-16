@@ -12676,3 +12676,39 @@ score_card_join             boot 0x0025f370 (mgr, card) -> 1 (0 for no card): th
 #                                           Laps::new. path_find_spot with out null and a negative reach
 #                                           takes the first candidate and skips both path_distance calls
 #                                           (paths' scratch untouched): TrackPaths::holds_any.
+# F31b5t — the wreck's hand-outs on flip-1 in Rust (src handling::wreck stance_cancel / category / add_category /
+# kind_set / camera_moved, handling::attach remove / reattach; tests mxvatv_bike_ride.rs flip_replays_in_pure_rust
+# switch "wreck hand-outs", the_kind_sets_categories_are_the_originals; atv_spatial.rs the_spatial_remove_is_the_
+# originals, the_reattach_is_the_originals; journal research/journal/2026-11-16-f31b5t-*).
+#   Stance 0x004e4e50 (bike vt +0x4b0; a0 bike, a1 id) -> 1. id < 0 with run +0x684, player +0x680 and player+8
+#   bit 5 set: run close 0x0046b4c0 (f12 0; run, player, 0), then run tally 0x0046a760 (f12 0; run, player, 0).
+#   Kind set 0x004e19a0 (vt +0x3a0, a1 1): hung parts +0x17c = 0.5 (0x0018d170); 0x004a7350 = vt +0x398(0); for
+#   +0xcc and +0xd4: 0x001155f0 (p+0xe0 = 1), then 0x001158a0 unique-add of DYNAMICOBJECT's bit, +0x30c,
+#   *0x00542388, PHYSICSBODY's, PHYSICSOBJECT's; +0x9a8 = 2; state kind 3: (+0xe4)+0x17c = 0.5, +0xde8 = 0.
+#   Category 0x00113d00 (a0 *0x0038d400 table, a1 name): count +0, 32-byte names from +4 (strcmp 0x00357158,
+#   count re-read each pass); not found: strcpy 0x00357638 to slot count, count++; -> 1 << index.
+#   Unique-add 0x001158a0 (a0 part, a1 bit): n = +0x100 once; bit present -> done; first zero of +0xfc[n] takes
+#   it; else realloc 0x001b7470(+0xfc, (n+1)*4, file 0x0039683e, line 1354), +0xfc = new, new[n] = bit, n++.
+#   Unhook 0x0018d540 (a0 entry): rec = +8; 0x00190640: sub vt +0x2c(rec+8, entry, rec+0xc), each extra out,
+#   next, give 0x00105f40 to pool *0x0040c460; 0x0018fe20(rec, 1) record drop, free 0x001b76d0(rec); +8 = 0.
+#   Rider reattach 0x00266c90 (a0 entry, a1 cell, a2 kind, a3 1): box 0x00267120, reach = sqrt(mula/madda/madd
+#   of the half) stored +0x60 and reloaded, insert 0x0018d590(entry, cell, kind, c, h, 1, 0, 0).
+#   Camera reset 0x004f7590 (a0 bike+0x43c): 0x001b56a0 on +0x30 (+0 = 0; nodes from +4: node[0] = 0, next =
+#   +8, free 0x001b75d0(node, file 0x0039a808, 56); +4 = +8 = 0); each listener at +0x40 (next +8):
+#   vt(*l+0x44)+0x18(*l, c). Both lists empty on flip-1.
+#   Trail reset 0x004fa760 (bike +0x10dc; wreck::trail_reset): items +0x30[i] for i < +0x28 (re-read each pass),
+#   each vt(+0x10)+0x28. Classes 0x004ff300 0x004ff460 0x004ff600 0x004ff740 0x004ff9b0 (trail_item_reset): +8 = 0
+#   byte, +4 set -> (+4)+0x29 = 0xff byte, tail emitter +0x14 vt +0xa8 (vtables 0x003d22d0, 0x003d1770: 0x0050ab00
+#   = effects::object_douse); 0x004ff830 the same then +0x90 = 0; 0x004fe840 (trail_sound_reset): the same off,
+#   0x004fe890 = obj vt +0x84 (0x003d0fa0: 0x004e9f00 = effects::object_halt), +0x44 = 0, +0x4c = +0x48, then obj
+#   vt +0x88 = 0x004e9f30 (wreck::sound_stop): +0x30/+0xc0/+0x2c = 0, j 0x0024be50(v = +0xe0): for i < v+0x40
+#   (signed, re-read) (v+0x38)[i] = 0 and block v+0x30 + 1008 i, +0x4c + 16 k = -1 for k < 24.
+#   The record's sweep probe (vt 0x003b6b40) is put back by the attach 0x001143e0; its box vt +0xc4 0x001bad00 is
+#   atv_sweep::bounds of its segments read from RAM (nodes' rows +0x70.., place +0xa0).
+#   The wreck's posts (kind 8) go to the camera controller 0x00490e60 (ids 0x15, 7, 6, 0xd, 0xc, 0xb); it switches
+#   cameras through 0x00490b30 -> 0x00113290: 0x004f75f0, unhook 0x0018d540 and insert (the camera's attachment
+#   in the spatial database), sorted list add 0x00507380 (file 0x0052b9a0 line 0x2bf), 0x0048d2e0 -> realloc
+#   pushes 0x00234db0 (file 0x003a0670), new 0x004f72ac (file 0x0052afd0 0x69) and alloc 0xc (0x6e); writes bike
+#   +0x43c.. (+0x460 = 3, +0x468 a heap block). On the frame's heap and database: dropping them parts the heap
+#   by row 193 (read watch). Left to the original (~11.3k instructions on rows 125 and 193). The rumble is
+#   dropped ("rumble dropped"): nothing the frame reads.
