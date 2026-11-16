@@ -256,8 +256,8 @@ words `+0xc80` → `+0xc70`, hazard words `+0xc10`/`+0xc14` → `+0xc00`/`+0xc04
 | ground head, stand upright, roll/pitch, pitch torque, wheel contacts | moved fields, a moved slot, scheduling; the contact counts read `lhu` (as the bike's) | — |
 | air state (the quad's) | `$s0` → `$s1`, a 16 B larger frame; the same signature and float ops; no vtable call, so none of the bike's out-of-world rework | — |
 | wheel suspension, tire forces, wheel integrate, rev limit, wheel clear, peak rates, clutch, auto shift, air drag, contact velocity, hinge force, steer and spin integrate, quaternion axes, ground query, terrain cell, node rotate/unplace, curve value | the same code (branch-likely and scheduling only) | — |
-| airborne control | `slti 41` → `49`, `46` → `54`: the trick bounds, which the port does not read | — |
-| preload, backflip, spin in the air (the bike's, called by the quad's ground step) | reworked, as on the bike | MD93, MD93a, MD93b: `handling::untamed::{preload, ride_backflip, ride_spin}` |
+| airborne control | `slti 41` → `49`, `46` → `54`: the trick bounds on the rider's stunt id. The port does read them (`handling::airborne_control`'s `stunt_id`); Untamed's ids are SLUS-21104's + 8 (MD147's spawn image: backflip 49 at quad `+0x13c8`, 360s 52/53 at `+0x13cc`/`+0x13d0`), so both compares come out the same | MD144: the quad hands it its stunt id − 8 (`quad::Steps`, `untamed_atv.rs` `the_quads_untamed_air_control_reads_the_stunt_id_8_lower`) |
+| preload, backflip, spin in the air (the bike's, called by the quad's ground step) | reworked, as on the bike | MD93, MD93a, MD93b: `handling::untamed::{preload, backflip, spin}`; MD144 routes the quad's calls to them (`quad::Ride::untamed`) |
 | update | the bike's vehicle update is Untamed's (MD93c); the hazard clock is called straight, not through vt `+0x45c`, with a **third word**; the rumble pad's slots moved (`+0x1c`/`+0x4c` → `+8`/`+0x40`); the distance's `if d < 0 { d = 0 } dist += d·dt` became `if !(d <= 0) { dist += d·dt }` (the same sum but on a `-0` distance; below) | `quad::Tail::untamed` |
 | **hazard clock** | handed `grounded` (any wheel's `+0xd0`, the port's `wheel_sunk`) beside `on`. With it clear, the free reset is passed over: the vehicle is not free, stuck unless the run's flag says not, and the clock runs by the surface time (−1 put back at once, ≤ 0 time zeroed, > 0 counted and put back past it). With it set, SLUS-21104's | `handling::untamed::stuck`, proved by `untamed_hazard_clock_is_the_originals` (4000 states) |
 | **node world update** (the scene graph's, every machine's) | the topmost node brought up to date, when it has a parent, has its new world frame made orthonormal again (a new call: the first row the second × the third, the second the third × that, both normalised by `rsqrt`, the first their cross). The node's words moved +0x30 | `atv_moto::Scene::update_untamed`, `atv_moto::untamed_orthonormal`, proved by `untamed_node_world_update_is_the_originals` (2000 three-node chains) and `untamed_orthonormaliser_is_the_originals` |
@@ -267,10 +267,15 @@ Untamed adds only when `!(d <= 0)` (a NaN is added too, a `-0` not, and `dist + 
 only on a negative `d` with the distance `-0`: SLUS-21104's `-0 + +0` is `+0`, Untamed's stays `-0`. The stat
 starts at `+0` and only adds, so it is never `-0`. Not ported.
 
-**Neither change is on any ride yet.** `Tail::untamed` is false by default and `update_untamed` is called by
-nothing, so every replay and hash is SLUS-21104's. No Untamed ATV ride was captured: no Untamed ATV save
-state exists (copy 9's are a Free Ride bike), and the pack, the Untamed routing of the quad's steps and the
-capture are follow-ups.
+**On the quad since MD144.** `quad::Ride::untamed` (called after `rig`) sets the scene's `untamed` (the node
+update is `update_untamed`), `Tail::untamed` (the hazard clock), the stunt ids (+8), and the quad's steps
+then call Untamed's preload, backflip and 360, hand air control the id − 8, and integrate the body with
+`integrate_untamed` (MD81c's per-time angular damping). Off by default: every replay and hash is
+SLUS-21104's. The routing is held to the SLUS-21104 path on states where the two originals agree, and to
+differ where R1 is held with another trick button (`tests/untamed_atv/route.rs`); no Untamed ride is
+replayed through it yet (MD168). openmx-mods' `untamed_atv` pack (`import-atv untamed-atv`) lists
+`atv_Race250P`/`atv_Pro250P` `.phy.bpb` with `"step": "untamed"`; the shell rides it as
+`--atv atv_Race250P@untamed_atv`.
 
 **Captured (MD147), not ported.** Vehicle ATV with Physics Type RACE is `atv_Race250P.phy` (named at quad
 +0x134; vtable 0x003f0470, kind 1). MD147 kept spawn and in-air states on Rocksbury and seven rides at the

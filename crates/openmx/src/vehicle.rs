@@ -3386,8 +3386,7 @@ pub const ATV_PACK_WORD: &str = "atv";
 /// taken off, the driving model and the class spaced out, and the sport twin (`atv_s_`) said:
 /// `atv_Race250P` is "Race 250 P", `atv_s_Pro250A` "Pro 250 A Sport".
 pub fn atv_label(phy: &str) -> String {
-    let stem = phy.rsplit(['/', '\\']).next().unwrap_or(phy);
-    let stem = stem.strip_suffix(".phy").unwrap_or(stem);
+    let stem = atv_stem(phy);
     let lower = stem.to_ascii_lowercase();
     let (sport, rest) = match lower.strip_prefix("atv_s_") {
         Some(_) => (true, &stem[6..]),
@@ -3413,6 +3412,8 @@ pub fn atv_label(phy: &str) -> String {
 /// The stem a pick is kept by (`atv_Race250P`), off a `.phy`'s path in the pack.
 pub fn atv_stem(phy: &str) -> &str {
     let stem = phy.rsplit(['/', '\\']).next().unwrap_or(phy);
+    // MX vs. ATV Untamed's quads' are BPBs (MD144: `Veh/atv_Race250P.phy.bpb`).
+    let stem = stem.strip_suffix(".bpb").unwrap_or(stem);
     stem.strip_suffix(".phy").unwrap_or(stem)
 }
 
@@ -3455,7 +3456,9 @@ pub struct AtvRide {
     pub seat: usize,
     /// MD138a: the rider's stunt table as the quad's clips read it, which the drawn quad's look sets
     /// (`quad_draw::stunts`); empty, no clips are ticked.
-    pub stunts: Vec<game_render::quad::Stunt>,
+    pub stunts: Vec<game_render::quad::Stunt>,    /// MD144: whether it rides on MX vs. ATV Untamed's step ([`game_sim::quad::Ride::untamed`]), as an
+    /// Untamed quad pack's `step` says.
+    pub untamed: bool,
 }
 
 impl std::fmt::Debug for AtvRide {
@@ -3483,12 +3486,15 @@ impl AtvRide {
     pub fn read(pack: &str, phy: &str, read: &mut dyn FnMut(&str) -> Option<Vec<u8>>) -> Result<AtvRide, String> {
         let (psg, col) = atv_chassis(phy);
         let mut file = |name: &str| read(name).ok_or_else(|| format!("{pack} has no {name}"));
-        let ini = Ini::parse_bytes(&file(phy)?);
+        let ini = match phy.to_ascii_lowercase().ends_with(".bpb") {
+            true => game_sim::bpb::ini(&file(phy)?).map_err(|e| format!("{phy}: {e}"))?,
+            false => Ini::parse_bytes(&file(phy)?),
+        };
         let model = game_sim::quad::Model::parse(&file(&format!("Veh/Anim/{psg}"))?).map_err(|e| format!("{psg}: {e}"))?;
         let rays = |b: Vec<u8>, what: &str| game_sim::track::Rays::parse(&b).map_err(|e| format!("{what}: {e}"));
         let riding = rays(file(&format!("Veh/Col/{col}"))?, col)?;
         let wreck = rays(file(&format!("Veh/Col/{}", game_sim::quad::WRECK_FILE))?, game_sim::quad::WRECK_FILE)?;
-        let atv = AtvRide { pack: pack.to_string(), phy: atv_stem(phy).to_string(), ini, model: std::sync::Arc::new(model), riding, wreck, ridden: None, taken_at: Vf::default(), wrecks: 0, mods: game_sim::modifiers::Mods::original(), seat: 0, stunts: Vec::new() };
+        let atv = AtvRide { pack: pack.to_string(), phy: atv_stem(phy).to_string(), ini, model: std::sync::Arc::new(model), riding, wreck, ridden: None, taken_at: Vf::default(), wrecks: 0, mods: game_sim::modifiers::Mods::original(), seat: 0, stunts: Vec::new(), untamed: false };
         atv.made(Vf::new(0.0, 0.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 1.0), None)?;
         Ok(atv)
     }
@@ -3501,10 +3507,21 @@ impl AtvRide {
         self.mods.atv(self.seat, &mut load);
         let mut ride = game_sim::quad::Ride::spawn(&load, &self.model, at, heading, bounds, Vec::new());
         ride.rig(&load, &self.riding, &self.wreck);
+        if self.untamed {
+            ride.untamed();
+        }
         let segments = ride.trigger_segments().ok_or_else(|| format!("{}: no trigger probe", self.phy))?;
         self.mods.atv_body(self.seat, &mut ride.body);
         let clips = (!self.stunts.is_empty()).then(|| game_render::quad::Driver::new(self.stunts.clone()));
         Ok(Quad { ride, segments, was_down: false, clips })
+    }
+
+    /// The quad made to ride on MX vs. ATV Untamed's step (MD144, [`game_sim::quad::Ride::untamed`]: its
+    /// preload, backflip, 360, hazard clock, node update and stunt ids), as an Untamed quad pack's `step`
+    /// says.
+    pub fn on_untamed_step(mut self) -> AtvRide {
+        self.untamed = true;
+        self
     }
 
     /// The quad taken at `from`: made standing on the ground under the spot, facing along it, at
