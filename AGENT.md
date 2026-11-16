@@ -1,29 +1,23 @@
 # Agent notes
 
-Rules for whoever does the work here, human or agent. Short on purpose: read this, then the task's own
-file, then the files the task names. Nothing else.
+Rules for whoever works here, human or agent. Read this, `PLAN.md`, the task's own file and the files it names;
+other docs only when the task needs them (pointers below).
 
-This is a re-implementation of a PlayStation 2 game: same behaviour, better rendering, maintainable code.
-`kit.toml` says which game. `./kit` is the entry point for everything.
+A re-implementation of a PlayStation 2 game (`kit.toml` says which): same behaviour, better rendering,
+maintainable code. `./kit` is the entry point for everything.
 
-## The non-negotiable ones
+## Non-negotiable
 
 - **Game data is read from the user's own disc at runtime.** Never commit game data, extracted assets,
-  decompiled code, dumps, captures or screenshots. Those live in `context/`, which is git-ignored. If you
-  are about to `git add` something under `context/`, stop.
-- **No retail addresses or decompiler-generated names in shipped code.** No `FUN_00123456`, no
-  `DAT_00456789`, no bare hex addresses in the port. Describe the behaviour instead: a comment saying
-  *what* a function does is worth more than one saying where it lived. Addresses belong in
-  `research/oracle.txt` and in journal entries — research notes, not product. `./kit audit` checks this
-  and `./kit done` gates on it, so you find out before the commit rather than after the release.
-- **Match the original exactly, where it matters.** Simulation behaviour — physics, AI, state machines,
-  scoring, timing — is ported, not approximated, and proved against the original. No placeholders, no
-  "close enough", no TODO left behind as if it were finished work.
-- **Say what you did not verify.** Every journal entry ends with a `## Not verified / not 1:1` section
-  listing everything you could not check against the original or could not match exactly, each with its
-  reason, or the single word `none`. This is the most important habit in the project. A port where the
-  gaps are written down is recoverable; one where they are silent is not, and the person who finds out is
-  always someone later with less context than you.
+  decompiled code, dumps, captures or screenshots: they live in git-ignored `context/`. About to `git add`
+  something under `context/`? Stop.
+- **No retail addresses or decompiler names in shipped code** (no `FUN_…`, `DAT_…`, bare hex addresses).
+  Describe what a function does, not where it lived. Addresses go in `research/oracle.txt` and journals only.
+  `./kit audit` checks; `./kit done` gates on it.
+- **Match the original exactly, where it matters.** Simulation (physics, AI, state machines, scoring, timing)
+  is ported, not approximated, and proved. No placeholders, no "close enough", no TODO passed off as done.
+- **Say what you did not verify.** Every journal entry ends with `## Not verified / not 1:1`: each thing you
+  could not check or match, with its reason, or `none`. The most important habit here.
 
 ## How to write replies
 
@@ -35,124 +29,64 @@ This is a re-implementation of a PlayStation 2 game: same behaviour, better rend
 - Leave out recaps, caveats nobody asked for, and lists of things you're not doing.
 - This is only about how replies read. Do the work as carefully as ever.
 
-## What has to be exact, and what does not
+## What is exact and what is not
 
-Decide this per area once, write it here, and then stop relitigating it. A sensible default:
+Decided per area; don't relitigate.
 
-- **Simulation: bit-exact.** Floating-point results must match the original bit for bit, which means
-  going through `ps2-float`'s `F`/`Vf` types rather than host `f32`. Enable the float lint in those
-  modules so a stray host-float operation cannot creep in.
-- **Rendering: ours, and fast.** The original is a reference for what the world looks like, not a spec
-  for how it is drawn: match by eye, never 1:1, and choose the optimised way over the faithful one. The
-  GPU renderer is the default and must run well on desktop, in the browser (wasm) and later on phones;
-  the software rasteriser is a reference and fallback only. The game logic runs at the original's rate, bit for bit, and the picture does not: draw well above 60 fps, up to the monitor's refresh, interpolating between simulation ticks on the render side only (user, 2026-10-20). Do not replay the GS's rasterisation, and do
-  not open follow-up tasks to chase render differences — note them and move on (user, 2026-10-20).
-- **Menus and front-end: yours to design.** The original is a reference, not a spec.
-- **Presentation: feels right.** Cameras, cutaways, effects, audio cues — match by eye. Just check they
-  do not touch the simulation's RNG or its timing.
-- **Additions are layered on top.** Mods, widescreen, upscaled textures: with them off, the game must
-  still behave exactly like the original, and the replay tests must still pass bit-exact.
+- **Simulation: bit-exact.** Floats through `ps2-float`'s `F`/`Vf`, never host `f32`; enable the float lint in
+  those modules.
+- **Rendering: ours, and fast.** The original is a reference for what the world looks like, not how it is drawn:
+  match by eye, never 1:1, prefer the optimised way. The GPU renderer is the default and must run well on
+  desktop, wasm and later phones; the software rasteriser is reference/fallback only. Logic runs at the
+  original's rate bit for bit; the picture draws well above 60 fps up to the monitor's refresh, interpolating
+  between ticks on the render side only (user, 2026-10-20). Don't replay the GS's rasterisation or open tasks to
+  chase render differences: note them and move on (user, 2026-10-20).
+- **Menus and front-end: ours to design.** The original is a reference, not a spec.
+- **Presentation: feels right.** Cameras, cutaways, effects, audio cues — match by eye. Just check they do not
+  touch the simulation's RNG or its timing.
+- **Additions are layered on top** (mods, widescreen, upscaled textures): off, the game behaves exactly like the
+  original and the replay tests pass bit-exact.
 
-## Take it from opentennis first
-
-`/home/rycs/repos/opentennis` is the same owner's port of another PS2 game (Hot Shots Tennis, Rust and
-Bevy) and is further along. Its code is ours, so copy from it freely rather than reinventing anything it
-already has: the oracle and float layers it shares with this kit, the PCSX2 tools (`tools/record_*.py`,
-`play_p2m2.py`, `vpad.py`), local seats and pad hot-plug (`crates/hst-base/src/seats.rs`,
-`crates/hst-play/src/play/controls.rs`), the menus, settings files and on-screen keyboard
-(`crates/hst/src/play/main_menu/`, `crates/hst-base/src/lib.rs`'s `store`), and the whole of online play:
-ggrs rollback (`crates/hst-play/src/play/rollback.rs`, `snapshot.rs`, `netplay.rs`, `resync.rs`,
-`recover.rs`) over iroh QUIC with room codes and LAN (`crates/hst-base/src/net.rs`, `handshake.rs`), and
-its design in `plan/M2.md`. Before starting any task, look there for the same problem solved once already, and
-say in the journal what you took and what you changed. The menus here are in MX Unleashed's style, not
-tennis's: opentennis gives the structure (screens, seats, settings, lobby), and the original disc gives the look.
+Before any task, look in `../opentennis` (same owner's further-along PS2 port, our code: copy freely) for the
+problem solved already, and say in the journal what you took and changed. What it has: `docs/agent/OPENTENNIS.md`.
 
 ## Proving it
 
-Pick the cheapest method that actually proves the thing (`docs/PROVING.md` has the detail):
+Cheapest method that actually proves it (`docs/PROVING.md`): pure function of args + RAM → **the oracle** over
+≥10,000 generated inputs; timing/frame flow/state → **a live capture** (`./kit record`); tables, layouts → **a
+save-state RAM image**; the whole thing → **the replay harness** (same input and seed, same per-tick hash).
+First read the function in MX vs. ATV's PC exe (`./kit fn … -o pc`, `research/mxvatv-pc.md`), list its
+branches, clauses and constants, aim oracle inputs and short captures at each, file any clause the port lacks.
+The exe is a guide, never the oracle; bit-exact proofs are against the PS2 ELF and PCSX2. No proof, or "I read
+the decompilation carefully", means not done.
 
-- a pure function of its arguments and RAM → **the oracle**, over ≥10,000 generated inputs. No emulator,
-  runs as a unit test, catches the cases you would never have thought to record.
-- timing, frame flow, anything stateful → **a live capture** (`./kit record`) compared against the port.
-- tables, static data, struct layouts → **a save-state RAM image**. Cheap, and it does not disturb a
-  running capture the way a second PINE connection does.
-- the whole thing → **the replay harness**: same input and seed in, same per-tick state hash out.
+## Context and tests
 
-Before writing the proof, read the same function in MX vs. ATV's PC exe (`./kit fn … -o pc`,
-`research/mxvatv-pc.md`) and list its branches, clauses and constants; aim the oracle's inputs and a few
-short captures at each one rather than recording many rides, and file any clause the port lacks. The exe
-is a guide, never the oracle: x87, Xbox-derived, a later game. Bit-exact proofs stay against the PS2 ELF
-and PCSX2 (`docs/PROVING.md`, "Reading the PC exe first").
+Everything read is paid for every turn (`docs/CONTEXT.md`). Never read a decompilation dump whole (`./kit fn`,
+`./kit xref [--similar]`, `./kit dis`; a hook blocks it). Pipe output through `head`/`tail`/`grep`, read files by
+line range. Tests only via `./kit check` (one line; says whether the build broke or a test failed), and while
+working only the ones you touched (`./kit check -- -p game-sim --test ride`); three check slots serve every agent,
+the full suite runs once, in `./kit done`. A run skips `gate.toml`'s `[[slow]]` binaries unless your branch
+touches their paths, and reruns `[flaky]` load flakes alone once: touch what one proves without matching → `./kit
+check --all` and add the path to `gate.toml`. Where code lives: `docs/agent/CODEMAP.md` (`./kit plan <crate>`),
+never grep.
 
-A port with no proof is not done. A port whose proof is "I read the decompilation carefully" is not done
-either — that is how you get something that works for two hundred frames.
+## The live game
 
-## Spending context carefully
+Detail in `docs/PCSX2.md`. One PINE connection at a time (read static values from a save state during a
+capture); don't touch the emulator while a capture runs; never send `select` on the virtual pad; run multi-step
+jobs as one `./kit pcsx2 with -- CMD`; `CAPTURE FAILED` = incomplete file, fix and re-record; close your copy
+with `./kit pcsx2 stop`, never kill it by name.
 
-The whole conversation is re-read every turn, so what you read is what you pay for, every turn, for the
-rest of the session. `docs/CONTEXT.md` explains each measure; the short version:
+## Other docs
 
-- **Never read a decompilation dump whole.** `./kit fn <addr>` for one function, `./kit xref <addr>` for
-  its neighbours, `./kit xref <addr> --similar` to find look-alikes (a `ported` mark means there is Rust
-  to copy the shape of), `./kit dis` for instructions. A hook blocks the whole-file read.
-- Pipe long output through `head`/`tail`/`grep`; read files by line range. Never dump a whole log.
-- `./kit check` for tests, not the raw build command — it reduces a build log to one line, and it
-  distinguishes "the build broke" from "a test failed", which is the only thing you need to know.
-  While working, run only the tests you touched (`./kit check -- -p game-sim --test ride`, or a name
-  filter after a second `--`): three check slots serve every slot's agent, and the full suite runs once,
-  in `./kit done`. A whole run leaves out `gate.toml`'s `[[slow]]` oracle binaries (camera, tick) unless
-  your branch touches their paths, and reruns its `[flaky]` load flakes alone once; touch what one proves
-  without matching its paths → `./kit check --all`, and add the path to `gate.toml`.
-- `./kit plan brief <ID>` gives you a task's entire starting context in one call: its line, its own file,
-  its journal, the files it names and their recent commits. Use it instead of gathering that yourself.
-- Don't grep the repo to find where things live. `PLAN.md`'s code map says.
+Read one only when the task touches it: `docs/PCSX2.md` (emulator), `PROVING.md`, `PS2.md` (hardware),
+`GHIDRA.md`, `TROUBLESHOOTING.md` (a tool fails), `INTERNALS.md` (changing `ps2kit/`), `WORKFLOW.md` (long runs),
+`docs/agent/TASKS.md` (plan commands, push rules, `./kit run`), `docs/agent/CODEMAP.md`.
 
-## Working on the live game
+## Merging
 
-`docs/PCSX2.md` has the detail. The parts that bite:
-
-- **One PINE connection at a time.** A second client while a recorder is polling hangs both. To read
-  static values during a capture, read them from a save state instead.
-- **Don't touch the emulator while a capture is running.**
-- **Never send `select`** on the virtual pad — PCSX2's hotkeys are Select plus a shoulder button.
-- Drive multi-step jobs (load state → send input → record → screenshot) as one `./kit pcsx2 with -- CMD`
-  so you hold the emulator for the whole job and release it afterwards.
-- `CAPTURE FAILED` from any tool means the output file is incomplete. Fix the cause and re-record; do not
-  use it.
-- Close the emulator copy you started when you are done with it: `./kit pcsx2 stop`. Never kill it by
-  name — that is someone else's emulator too.
-
-## One task at a time
-
-"Continue" means: `./kit plan next`, read `./kit plan brief <ID>`, do that task completely, write the
-journal entry, then `./kit done <ID> "<message>"` — which runs the tests, ticks the task, commits and
-pushes the branch you are on, in one call. Run it, and any `./kit check --all`, as a background command
-and wait for it to finish: under the other slots' load the gate can run past an hour, past your shell's own
-time limit, and a gate cut off there commits nothing. Never start a second one while the first still runs.
-Then stop and report. Don't merge tasks, don't skip ahead. If a
-task turns out to be too big, split it into sub-tasks first (`./kit plan add`), then do the first one.
-A worktree of another repo (an openmx-mods branch for your task) or other ad-hoc work goes in
-`$(agent-runner home)/wt/<slug>`, never beside the checkouts in `~/repos` (`../openmx-mods-<id>`); remove it
-(`git worktree remove`) once its branch is pushed.
-
-**Never merge, rebase, push the shared branch or resolve a conflict by hand.** `./kit done` pushes the
-branch it committed on, as long as that branch is your own — your `task/<ID>` in a worktree, or any topic
-branch — so the branch of a task whose merge went wrong is on the remote. The runner merges your branch
-when your session ends; a conflict it cannot join mechanically goes to a session of its own that reads
-both sides and finishes the merge, and then the runner runs the tests and pushes the shared branch. In the
-main checkout a wrap-up prints the `git push` instead of running it. If a push cannot be made it is one
-logged line, never a failed task: the commit is already safe in the local repo and the next wrap-up pushes
-it. `[git] push` in `kit.toml` is the switch for all of it, `[git] push_merge = false` for the policy where
-a run's merges wait for a person to push them.
-
-## If you get stuck, move on
-
-Never loop on one obstacle. If a tool hangs, the emulator will not cooperate, the same fix fails twice,
-something genuinely needs the human, or about twenty minutes pass with no progress:
-
-1. write what happened and what you tried in the task's journal entry,
-2. `./kit done <ID> "<what is solid>" --blocked "<why + what would unblock it>"`,
-3. start the next open task — preferably in a different area.
-
-"The emulator is not running" is not a blocker; start it. A usage limit is not a blocker either; commit
-what is solid and wait. Things only a human can do go in `plan/HUMAN.md`, never into the code as a guess.
+**Never merge, rebase, push the shared branch or resolve a conflict by hand.** `./kit done` pushes your own
+branch; the runner merges, tests and pushes the shared one (`docs/agent/TASKS.md`). A worktree of another repo
+(an openmx-mods branch for your task) or other ad-hoc work goes in `$(agent-runner home)/wt/<slug>`, never beside
+the checkouts in `~/repos` (`../openmx-mods-<id>`); `git worktree remove` it once its branch is pushed.
