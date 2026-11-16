@@ -152,4 +152,4 @@ git-ignored, and `./kit audit` keeps retail addresses out of the shipped code.
 
 ## Licence
 
-MIT — see [LICENSE](LICENSE). It covers this code, not MX Unleashed, which belongs to its owners.
+GPL-3.0-or-later — see [LICENSE](LICENSE). It covers this code, not MX Unleashed, which belongs to its owners. The crates under `third_party/` keep their own licences.
