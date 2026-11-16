@@ -12898,3 +12898,9 @@ atv_voice_index_pick        atv 0x00183070 = (driver, two)
 atv_voice_pick              atv 0x00183180 = (driver, asked, asked too, top, restart); pair pick 0x00183510
 atv_sample_start            atv 0x00187850 = (handed out whole with the play)
 atv_sound_queue_flush       atv 0x001840c0 = (driver, 0) the SIF send (handed out)
+# --- MD176: MX vs. ATV's cars' particles (crates/openmx/src/main.rs mxvatv_car_list / load_mxvatv_car_fx)
+# The vehicle's particle loader switches on the vehicle kind (+0xbbc): 0 mx (ai list for the AI), 1 atv
+# (ai list for the AI; zones atvparticlezones.dat), 2 biplane, 3 helicopter, 5 monster, 6 baja, 7 golf,
+# 8 SR, any other buggy; every kind but 1 zones off mxparticlezones.dat. The cars' lists are one for a
+# person and the AI. It hands the manager the vehicle at +0xb90 as its frame source (not read here).
+atv_vehicle_particles_load  atv 0x004a6810 = (vehicle, ai)
