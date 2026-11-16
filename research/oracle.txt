@@ -11856,6 +11856,35 @@ ai_rider_name               boot 0x00373340 (AI entry, buf, size) an AI rider's 
 #   spawn), the record's vt +0x88 x4 (0x00205730), subtree out of date, spatial update, node bounds,
 #   collision sync (0x004942c0, writes the car node's +0 halfword, a stamp), map-edge test (inside).
 #   The noise's knot 0x003f6d88 is the car's engine's (tables 0x003f3540 perm, 0x003f6580 g1, built).
+# MD154 — the car's respawn, MXVehicle vt +0xe8 0x004cab10 (a0 car; game_sim::atv_car::Own on Call::Respawn with
+#   Vehicle::back, atv_car::tire_reset / engine_reset in Pieces). tests/mxvatv_car_frame/own_back.rs:
+#   the_cars_respawn_is_the_originals (2,000 cases, the respawn called alone) and
+#   the_respawns_tire_and_engine_resets_are_the_originals; MD106b's frame test runs it unhooked.
+#   Journal: research/journal/2026-11-16-md154-mxvatv-car-respawn.
+#   0x004cab10: put back 0x004a6f70 (car, 1, 1); then +0x1254, +0x1258, +0x125c, +0x1260, +0x1250 all non-zero ->
+#   tire reset 0x004b4e10 on each tire in that order, engine reset 0x004b3f10 on +0x1250.
+#   0x004a6f70 (a0 car, a1 snap, a2 kind): +0x50 = +0xd40; run +0x680 set and +0xd70, +0xd74 both non-zero -> run
+#   +0x94/+0x98/+0x9c = +0xd70/+0xd74/+0xd78 (word, word, lwc1/swc1); snap and terrain +0x3b4: ground query
+#   0x004833c0 (terrain, car+0x50, out sp+80, 0, 0; ra 0x004a6ff8), +0x50.xyz += out.xyz x 0x3e99999a
+#   (vmulx.xyz, vadd.xyz), +0x60 = +0xd50, +0x70 = out (whole quad); else +0x60 = +0xd50, +0x70 = +0xd60.
+#   0x004a4c60 = ground reset 0x00492ca0 then +0x31c = 1. kind: +0xde8 = +0xdec, vt +0x3a0 (0x004cd4d0, j 0x004a7350);
+#   else +0xde8 = 0, vt +0x39c (0x004cd4c0, j 0x004a71c0). +0x10dc set: 0x004fa760 (a0 it). Post 0x00272300
+#   (*0x00442eb0, car+0x674, 8, 0x15, +0xd20, 0). So SLUS-21104's put back DOES lift and take the normal (MD93's
+#   note "drops the normal" above is not so for this function).
+#   Ground reset 0x00492ca0 = the bike's (handling::wreck::ground): +0x45 bit 1 -> unhook 0x0018d540(+0xe4); +0xd0
+#   set -> unhook(+0xd0 + 0x18); +0xcc set -> unhook(+0xcc + 0x18), unhook(+0xd4 + 0x18) (no test of +0xd4); body
+#   vt +0x14 (staged velocity +0x50 = 0x00396fc0); vt +0xf0 0x00492e50 (orient, the bike's) on +0x50/+0x60/+0x70;
+#   bit 1 -> rehang 0x00196c10(+0xe4, +0xb0, 1, 1); +0x44 bit 0 -> for +0xd0 (if set), then +0xcc and +0xd4 (if
+#   +0xcc set): (p+0x28)->vt +0x20 (0x00128080 on the image) with p+0x24, then attach 0x001143e0(p, +0xb4, +0xc0, 1).
+#   The orient's node set position marks the node's subtree out of date when the node was current
+#   (Call::SubtreeOutOfDate, as the post's place).
+#   Tire reset 0x004b4e10: zero +0xa4 +0xa8 +0x194 +0x1fc +0x200 +0x1e0 +0xcc +0xd4 +0x204 +0x19c +0x1a0; +0x130
+#   +0x160 +0x180 +0x210 +0x230 = 0x00396fc0 (0,0,0,1); +0x110 +0x120 +0x1c0 = 0x00397000 (0,1,0,1).
+#   Engine reset 0x004b3f10: +0x11c = 0, +0xe0 = 0, +0xc0 = 1.
+#   Image (md39a/buggy.ee.bin): run +0x680 0x00bcb550 (+0xd70/+0xd74 0), terrain 0x0184c7d0, trail 0x01617bb0,
+#   +0xdec 3.0, +0xcc 0x0160cea0 (ray probe), +0xd0 0x0160e4d0 (mesh), +0xd4 0x0160f650 (sweep, vt 0x003b6b40),
+#   +0xb0 0x006545c0, +0xb4 0x00654680, +0xc0 2, +0x44 0xa3, +0x45 0x07.
+
 # MD151 — the buggy's class step, vt +0x488 0x004c5510 (a0 car; game_sim::atv_car::class_step over node::Ram;
 #   tests/mxvatv_car_frame/class_step.rs the_buggys_class_step_is_the_originals, 10,000 cases off md39a/buggy.ee.bin,
 #   nothing hooked; MD106e's test runs it unhooked). Journal: research/journal/2026-11-15-md151-mxvatv-car-class-step.
