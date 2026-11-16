@@ -92,6 +92,11 @@ struct Seen {
     touching: usize,
     other_worlds: usize,
     wrecked: usize,
+    /// The first wrecked frame and its state, and the car's up row's `y` at the last frame.
+    first_wreck: Option<(usize, u32)>,
+    last_up: f32,
+    /// The frame whose respawn ended a run on its side.
+    respawned: Option<usize>,
 }
 
 /// Runs the original's world step from inside its hook, on the world and tick it was handed, and
@@ -115,7 +120,13 @@ fn world_step_inside(ee: &mut Ee) -> (u32, F) {
 /// Desert Oasis and the smooth noise, the sort's search the original's): every word the port keeps
 /// must equal the original's after it, every frame.
 fn beside(d: &Drive, through: Through) -> Option<Seen> {
-    let pre = drive::image(d.name)?;
+    beside_posed(d, through, None)
+}
+
+/// [`beside`], with the car first put on its side when `side` is given ([`put_on_side`]): as many
+/// frames as [`SIDE_FRAMES`] then, not the capture's rows.
+fn beside_posed(d: &Drive, through: Through, side: Option<f32>) -> Option<Seen> {
+    let mut pre = drive::image(d.name)?;
     let ticks = drive::tape()?;
     let rows = drive::rows(d.name)?;
     let trn = terrain_file()?;
@@ -127,6 +138,9 @@ fn beside(d: &Drive, through: Through) -> Option<Seen> {
     let terrain: &'static atv_ground::Terrain<'static> = Box::leak(Box::new(atv_ground::Terrain::of(map)));
     let noise = SmoothNoise::from_tables(&std::array::from_fn(|k| pre.u32_at(NOISE_PERM + 4 * k as u32)), &std::array::from_fn(|k| F(pre.f32_at(NOISE_G1 + 4 * k as u32))));
     let table: &'static AcosTable = Box::leak(Box::new(AcosTable::build()));
+    if let Some(roll) = side {
+        put_on_side(&mut pre, d.car, roll);
+    }
     let s = drive::sim(&pre);
     let mut ee = drive::hooked(pre);
     let seen: Shared<Seen> = Rc::default();
@@ -175,6 +189,11 @@ fn beside(d: &Drive, through: Through) -> Option<Seen> {
                 v = r.vehicle.clone();
             }
         }
+        // On its side, the original's respawn (which the port hands out) ends the comparison.
+        if side.is_some() && pieces.rest.oasis.rest.iter().any(|c| matches!(c, Call::Respawn)) {
+            keep.borrow_mut().respawned = Some(k);
+            return;
+        }
         let pm = Mx { keys: Keys { tires: pieces.keys.tires.clone(), ..m.keys.clone() }, state: pieces.state, ..m };
         // What the resolution writes of the record and its list, when it holds contacts (the body is
         // the frame's, compared whole beside).
@@ -208,16 +227,24 @@ fn beside(d: &Drive, through: Through) -> Option<Seen> {
         s.sort_struck += usize::from(sort.found);
         s.touching += usize::from(contacts != 0);
         s.wrecked += usize::from(car.state != atv_car::RIDING);
+        if s.first_wreck.is_none() && car.state != atv_car::RIDING {
+            s.first_wreck = Some((k, car.state));
+        }
+        s.last_up = car.up.y();
     }));
     // As many frames as the capture has rows (MD107's test steps one past the row the last vsync
     // names); every frame's input two tape ticks back, as there.
     let mut j = 0;
-    for _ in 0..rows.len() {
+    for _ in 0..side.map_or(rows.len(), |_| SIDE_FRAMES) {
         *frame_no.borrow_mut() = j + 1;
         drive::step(&mut ee, s, d, &ticks, &mut j, 2);
+        if seen.borrow().respawned.is_some() {
+            break;
+        }
     }
     let seen = std::mem::take(&mut *seen.borrow_mut());
-    assert_eq!(seen.frames, rows.len(), "{}: the world step ran once a frame", d.name);
+    let want = seen.respawned.map_or(side.map_or(rows.len(), |_| SIDE_FRAMES), |k| k - 1);
+    assert_eq!(seen.frames, want, "{}: the world step ran once a frame", d.name);
     eprintln!(
         "{} {}: {} frames, {} words in all equal to the original's; handed out {:?}; the sort struck on {} frames, the record held contacts on {}; wrecked on {}; {} other world steps",
         match through {
@@ -331,4 +358,55 @@ fn ridden(d: &Drive) {
     let Some(seen) = beside(d, Through::Ride) else { return };
     assert_eq!(seen.wrecked, 0, "{}: a wrecked frame would reach the Ride's put-back, not the original's", d.name);
     assert!(!seen.handed.contains_key("Respawn"), "{}: the Ride answers the respawn itself", d.name);
+}
+
+// --- MD169: a car put on its side ------------------------------------------------------------------
+
+/// How many frames a car put on its side is stepped.
+const SIDE_FRAMES: usize = 150;
+
+/// How far (ft) a car put on its side is lifted.
+const SIDE_LIFT: f32 = 3.0;
+
+/// The car in image `ee` put on its side where it stands: its body turned `roll` radians about its
+/// own forward axis, lifted [`SIDE_LIFT`] ft, still (velocity, rates and the last substep's pose
+/// with it).
+fn put_on_side(ee: &mut Ee, car: u32, roll: f32) {
+    let b = ee.u32_at(car + at::BODY);
+    let q = get_v(ee, b + 0x190);
+    let (s, c) = (roll / 2.0).sin_cos();
+    let (x, y, z, w) = (q.x(), q.y(), q.z(), q.w());
+    // q · (s about z, c), Hamilton's product.
+    let r = Vf::new(x * c + y * s, y * c - x * s, z * c + w * s, w * c - z * s);
+    let p = get_v(ee, b + 0x70);
+    let p = Vf::new(p.x(), p.y() + SIDE_LIFT, p.z(), p.w());
+    for (o, v) in [(0x170, r), (0x190, r), (0x60, p), (0x70, p), (0x80, Vf::ZERO), (0x1d0, Vf::ZERO)] {
+        put_v(ee, b + o, v);
+    }
+}
+
+/// What the original's car does put on its side at its image's spot ([`put_on_side`]): the frame its
+/// tipped wreck starts, `None` when it stands back up on its wheels.
+const ON_ITS_SIDE: [(&Drive, Option<usize>); 5] =
+    [(&drive::BUGGY, None), (&drive::BAJA, Some(2)), (&drive::SANDRAIL, Some(2)), (&drive::GOLF, Some(11)), (&drive::TRUCK, Some(6))];
+
+/// **MD169: each car put on its side is the port's**: MD135's frame beside the interpreter's, from
+/// the image with the car turned a quarter about its forward axis and dropped [`SIDE_LIFT`] ft, every
+/// word equal for [`SIDE_FRAMES`] frames or up to the original's respawn (which the port hands out).
+/// The tires' probes ask the ground straight down on their side as upright (the heightfield query
+/// keeps the asked `x`, `z`), and the original's buggy stands back up on its wheels while the other
+/// four wreck tipped ([`ON_ITS_SIDE`]).
+#[test]
+fn each_car_put_on_its_side_is_the_ports() {
+    for (d, wreck) in ON_ITS_SIDE {
+        let Some(seen) = beside_posed(d, Through::Frame, Some(std::f32::consts::FRAC_PI_2)) else { return };
+        eprintln!("MD169 {}: {} frames on its side equal to the original's; wrecked {:?}, respawned {:?}, up {}", d.name, seen.frames, seen.first_wreck, seen.respawned, seen.last_up);
+        assert_eq!(seen.first_wreck, wreck.map(|k| (k, atv_car::WRECK_TIPPED)), "{}: the original's wreck on its side", d.name);
+        if wreck.is_none() {
+            assert_eq!(seen.frames, SIDE_FRAMES, "{}: respawned", d.name);
+            assert!(seen.last_up > 0.9, "{}: not back on its wheels (up {})", d.name, seen.last_up);
+        } else {
+            assert!(seen.respawned.is_some(), "{}: never respawned after its tipped wreck", d.name);
+        }
+    }
 }

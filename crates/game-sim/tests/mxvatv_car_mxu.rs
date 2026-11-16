@@ -430,10 +430,8 @@ const BACK_TICKS: usize = 600;
 /// record's heightfield rays hold it on the ground (its body never sinks under it), it wrecks tipped
 /// ([`WRECK_TIPPED`]), is put back upright at the kept spot when its clock runs out, and rides on.
 ///
-/// Rolled onto its roof, not its side: on an MX Unleashed world a tire's ground is the world's
-/// straight-down query ([`game_sim::quad::world_ground`]), so the tires of a car on its side read
-/// ground under them, the car counts as grounded on both sides and its suspension stands it back up
-/// before the tipped clause can hold.
+/// Rolled onto its roof; for a car on its side, see
+/// [`each_car_dropped_on_its_side_wrecks_tipped_or_stands_up`].
 #[test]
 fn each_car_rolled_over_wrecks_tipped_and_is_put_back() {
     let Some(files) = Files::load() else { return };
@@ -634,5 +632,106 @@ fn each_car_driven_into_a_prop_stops_on_it() {
             assert!(!handed.contains("GravityRecord"), "{name}: the rigged car's gravity call went unanswered");
             assert!(unexpected(&handed).is_empty(), "{name}: calls handed on unanswered: {:?}", unexpected(&handed));
         }
+    });
+}
+
+
+// --- MD169: a car on its side ----------------------------------------------------------------------
+
+/// How far (ft) over its riding height a car is dropped onto its side, as
+/// tests/mxvatv_car_frame/drives.rs puts the original's on its side (3 ft over the image's riding
+/// pose; [`over`] stands a car a foot over its tires).
+const SIDE_DROP: f32 = 2.0;
+
+/// Each car, rigged, ridden to keep a put-back spot, then turned onto its side on free09 and dropped
+/// [`SIDE_DROP`] ft: the world's ground under every tire is straight down, the point it answers
+/// keeping the asked `x` and `z` bit for bit (the original's heightfield query does, on its side as upright:
+/// tests/mxvatv_car_frame/drives.rs, `each_car_put_on_its_side_is_the_ports`), and the car either
+/// wrecks tipped and is put back upright, or stands back up on its wheels and rides on, as the
+/// original's do (its buggy stands up off its side, its other four wreck).
+#[test]
+fn each_car_dropped_on_its_side_wrecks_tipped_or_stands_up() {
+    let Some(files) = Files::load() else { return };
+    let mut disc = match Disc::open_configured() {
+        Ok(d) => d,
+        Err(why) => {
+            skip(&why);
+            return;
+        }
+    };
+    in_free09(&mut disc, |world| {
+        let (mut wrecked, mut stood) = (0, 0);
+        for (name, machine, phy, model) in CARS {
+            let (mut ride, load) = files.rigged(machine, phy, model, world, SPOT, yaw_quat(0.0));
+            let mut hands = Hands::new();
+            for _ in 0..KEEP {
+                hands.step(&mut ride, world, true, 0x80);
+                ride.rest.clear();
+            }
+            assert!(ride.back.is_some(), "{name}: no put-back spot kept");
+            let p = ride.body.position;
+            let drop = Vf::new(p.x(), over(world, &load, (p.x(), p.z())).y() + SIDE_DROP, p.z(), 1.0);
+            ride.put(drop, rolled(0.0, std::f32::consts::FRAC_PI_2));
+            let up = |ride: &atv_car::Ride| {
+                let q = ride.body.quat;
+                1.0 - 2.0 * (q.x() * q.x() + q.z() * q.z())
+            };
+            let (mut tipped, mut asked) = (None, 0usize);
+            for tick in 0..TIP_TICKS {
+                hands.step(&mut ride, world, false, 0x80);
+                ride.rest.clear();
+                // The ground the world answers under each tire's axle bottom (as the suspension left
+                // it) keeps its x and z.
+                for (k, t) in ride.car.tires.iter().enumerate().filter(|(_, t)| t.probes > 0) {
+                    let (point, _) = world.ground(t.lower);
+                    assert!(
+                        point.x().to_bits() == t.lower.x().to_bits() && point.z().to_bits() == t.lower.z().to_bits(),
+                        "{name} tick {tick}: tire {k}'s ground {point:?} is not straight under {:?}",
+                        t.lower
+                    );
+                    asked += 1;
+                }
+                if ride.car.state == WRECK_TIPPED {
+                    tipped = Some(tick);
+                    break;
+                }
+            }
+            assert!(asked > 0, "{name}: no tire probed the ground on its side");
+            if let Some(tipped) = tipped {
+                // The spot kept by the wreck (a car on its side that rolls about before it wrecks
+                // keeps newer ones).
+                let back = ride.back.unwrap_or_else(|| panic!("{name}: no put-back spot kept"));
+                let mut put = None;
+                for tick in 0..BACK_TICKS {
+                    hands.step(&mut ride, world, false, 0x80);
+                    ride.rest.clear();
+                    if ride.car.state == RIDING {
+                        put = Some(ride.body.position);
+                        break;
+                    }
+                }
+                let p = put.unwrap_or_else(|| panic!("{name}: never put back after its tipped wreck on its side at {tipped}"));
+                let from = (p.x() - back.at.x()).hypot(p.z() - back.at.z());
+                eprintln!("{name}: dropped on its side, tipped wreck at {tipped}, put back {from:.1} ft from the kept spot, up {:.3}", up(&ride));
+                assert!(from < 10.0, "{name}: put back {from} ft from the kept spot");
+                assert!(up(&ride) > 0.9, "{name}: put back with its up row's y {}", up(&ride));
+                wrecked += 1;
+            } else {
+                eprintln!("{name}: dropped on its side, back on its wheels, up {:.3}", up(&ride));
+                assert_eq!(ride.car.state, RIDING, "{name}: wrecked on its side, not tipped");
+                assert!(up(&ride) > 0.9, "{name}: neither wrecked nor back on its wheels in {TIP_TICKS} ticks (up {})", up(&ride));
+                stood += 1;
+            }
+            let p0 = ride.body.position;
+            for tick in 0..120 {
+                hands.step(&mut ride, world, true, 0x80);
+                ride.rest.clear();
+                assert_eq!(ride.car.state, RIDING, "{name}: wrecked again at tick {tick} riding on");
+            }
+            let p1 = ride.body.position;
+            let on = (p1.x() - p0.x()).hypot(p1.z() - p0.z());
+            assert!(on > 10.0, "{name}: rode {on} ft on after its side");
+        }
+        eprintln!("MD169: {wrecked} cars wrecked tipped on their side and were put back, {stood} stood back up");
     });
 }
