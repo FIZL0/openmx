@@ -57,3 +57,8 @@ The work is done and pushed on task/P221, but `./kit done` could not tick it. Ma
 A third failure, `world_ultra_load`'s first frame at 35 s against a 20 s limit, passed when rerun alone
 (load).
 Once P294 and F33 land, rerun `./kit done P221 "<msg>"` to tick it. The code needs no change.
+
+## 2026-11-16 rerun
+
+The P221 commit (8acf8c51f) already reached main through a merge. P294 is fixed, and the kiowa test
+now skips when its image is missing. This rerun is only `./kit done`, to tick the task. No code changed.
