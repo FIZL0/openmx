@@ -313,6 +313,8 @@ pub(crate) const U_GROUND_QUERY: u32 = 0x004b_0910;
 /// engine's call of it for the sound's pitch.
 pub(crate) const U_SMOOTH_NOISE: u32 = 0x0013_24b0;
 const U_NOISE_FROM: u32 = 0x004d_6cac;
+/// The collision record's resolution (vt +0x88 of 0x003db860; `a0` the record).
+const U_RESOLVE: u32 = 0x0020_6170;
 /// The tire probe's ground query returns here (SLUS-21104's probe 0x004b51f0 is 0x004d7890).
 const U_TIRE_PROBE_FROM: u32 = 0x004d_7af4;
 const U_RAYS_VTABLE: u32 = 0x003d_9120;
@@ -362,12 +364,25 @@ pub(crate) fn u_view(ee: &Ee, car: u32) -> Ee {
             ram[(n + o) as usize] = ee.ram[(n + o + 0x30) as usize];
         }
     }
-    // The car's two collidables (the riding ray probe and the frame mesh, car +0xcc and +0xd0): the
-    // database entry +0x20 at +0x4c, the centre and reach +0x30 on, the frame and what follows it +0x20
-    // on (a ray probe's frame and tree, a mesh's frame to its mesh pointer); their vtables told by
-    // SLUS-21104's.
-    for o in [0xcc, 0xd0] {
-        let a = ee.u32_at(car + u(o));
+    // The car's two collidables (the riding ray probe and the frame mesh, car +0xcc and +0xd0), and
+    // those of the records its record's contacts are with: the database entry +0x20 at +0x4c, the
+    // centre and reach +0x30 on, the owner, record and category +0x2c on, the frame and what follows
+    // it +0x20 on (a ray probe's frame and tree, a mesh's frame to its mesh pointer); their vtables
+    // told by SLUS-21104's.
+    let record = ee.u32_at(car + u(0xc8));
+    let mut collidables = vec![ee.u32_at(car + u(0xcc)), ee.u32_at(car + u(0xd0))];
+    if record != 0 {
+        let list = ee.u32_at(record + 0xf8);
+        for i in 0..ee.u32_at(record + 0xf0).min(0x100) {
+            let other = ee.u32_at(list + 0x90 * i + 0x80);
+            if other != 0 {
+                collidables.push(ee.u32_at(other + 0x208));
+            }
+        }
+    }
+    collidables.sort();
+    collidables.dedup();
+    for a in collidables {
         if a == 0 {
             continue;
         }
@@ -383,6 +398,7 @@ pub(crate) fn u_view(ee: &Ee, car: u32) -> Ee {
         };
         mv(0x20, 4, 0x4c);
         mv(0x50, 0x24, 0x80);
+        mv(0x88, 0x10, 0xb4);
         // A ray probe's tree lives in its own tail (+0x1e0), which the copy must not reach.
         mv(0x130, if vt == 0x003b_6c20 { 0x58 } else { 0x118 }, 0x150);
         ram[(a + 0xc) as usize..(a + 0x10) as usize].copy_from_slice(&vt.to_le_bytes());
@@ -396,6 +412,20 @@ pub(crate) fn u_view(ee: &Ee, car: u32) -> Ee {
                 let r = x - car;
                 let back = (0..U_CAR_SIZE).find(|&o| u(o) == r).unwrap_or_else(|| panic!("a lever at car +{r:#x}"));
                 ram[(t + o) as usize..(t + o + 4) as usize].copy_from_slice(&(car + back).to_le_bytes());
+            }
+        }
+    }
+    // The car's record's contacts (0x90 each): SLUS-21701 files the kind and the surface as halves of
+    // +0, and the other and the mover at +0x80/+0x84; SLUS-21104 keeps the kind a word and the
+    // surface, the other and the mover at +0x80/+0x84/+0x88.
+    if record != 0 {
+        let list = ee.u32_at(record + 0xf8);
+        for i in 0..ee.u32_at(record + 0xf4).min(0x100) {
+            let e = list + 0x90 * i;
+            let (kind, surface) = (ee.u32_at(e) & 0xffff, ee.u32_at(e) as i32 >> 16);
+            let (other, mover) = (ee.u32_at(e + 0x80), ee.u32_at(e + 0x84));
+            for (o, x) in [(0, kind), (0x80, surface as u32), (0x84, other), (0x88, mover)] {
+                ram[(e + o) as usize..(e + o + 4) as usize].copy_from_slice(&x.to_le_bytes());
             }
         }
     }
@@ -439,6 +469,66 @@ fn u_hook_noise(ee: &mut Ee, log: Shared<Vec<(u32, u32, F)>>) {
     }));
 }
 
+/// The sort probe's search as SLUS-21701 left it in RAM ([`super::drives::sort_answer`] at its
+/// offsets: the probe's struck flag at +0x144 and list at +0x1b0, SLUS-21104's +0x126 and +0x7c; a
+/// hit collidable's object and mover at +0xbc and +0xb8, SLUS-21104's +0x90 and +0x8c). A mover is
+/// not met.
+fn u_sort_answer(ee: &Ee, car: u32) -> SortAnswer {
+    let probe = ee.u32_at(car + u(0x1264));
+    let mut a = SortAnswer { found: ee.u8_at(probe + 0x144) & 0x20 != 0, ..SortAnswer::default() };
+    if !a.found {
+        return a;
+    }
+    let list = ee.u32_at(probe + 0x1b0);
+    a.count = ee.u32_at(list + sort::COUNT) as usize;
+    assert!(a.count <= SORT_HITS, "the sort struck {} times", a.count);
+    let (froms, normals, points, records) = (ee.u32_at(list + 0x90), ee.u32_at(list + 0x94), ee.u32_at(list + 0x98), ee.u32_at(list + 0x9c));
+    for (i, h) in a.hits.iter_mut().enumerate().take(a.count) {
+        let record = ee.u32_at(records + 4 * i as u32);
+        let mover = ee.u32_at(record + 0xb8);
+        assert_eq!(mover, 0, "the sort struck a mover");
+        *h = atv_car::SortHit {
+            from: get_v(ee, froms + 0x20 * i as u32),
+            point: get_v(ee, points + 0x10 * i as u32),
+            normal: get_v(ee, normals + 0x10 * i as u32),
+            object: ee.u32_at(record + 0xbc),
+            mover,
+            mover_kind: 0,
+            record,
+        };
+    }
+    a
+}
+
+/// The car's record's contacts when one is with another record, which the port's vehicle does not
+/// hold ([`atv_car::Vehicle::held`]): the car's held as if none were, and the other records' (their
+/// own lists left out, their bodies whole), which [`Call::GravityRecord`] resolves.
+pub(crate) struct UHeld {
+    car: game_sim::atv_contact::Held,
+    others: Vec<game_sim::atv_contact::Held>,
+}
+
+/// [`UHeld`] read from `w` (the view) for the car's record at `record` with `contacts` contacts;
+/// `None` when none is with another record. A mover is not met.
+fn u_held(w: &Ee, record: u32, contacts: u32) -> Option<UHeld> {
+    use game_sim::handling::record::held;
+    let list = w.u32_at(record + 0xf8);
+    let entries: Vec<u32> = (0..contacts).map(|i| list + 0x90 * i).collect();
+    assert!(entries.iter().all(|&e| w.u32_at(e + 0x88) == 0), "a contact with a mover");
+    let with: Vec<u32> = entries.iter().map(|&e| w.u32_at(e + 0x84)).collect();
+    if with.iter().all(|&o| o == 0) {
+        return None;
+    }
+    let mut records: Vec<u32> = with.iter().copied().filter(|&o| o != 0).collect();
+    records.dedup();
+    let mut car = held(&|a| if entries.iter().any(|&e| a == e + 0x84) { 0 } else { w.u32_at(a) }, record).expect("no other, no mover");
+    for (e, &o) in car.entries.iter_mut().zip(&with) {
+        e.contact.other = (o != 0).then(|| records.iter().position(|&r| r == o).unwrap());
+    }
+    let others = records.iter().map(|&r| held(&|a| if a == r + 0xf0 { 0 } else { w.u32_at(a) }, r).expect("an empty list")).collect();
+    Some(UHeld { car, others })
+}
+
 /// The port's calls answered beside SLUS-21701's frame: the ground queries by the original's
 /// answers to the same point, the sort's search by the original's; the rest listed.
 pub(crate) struct UBeside {
@@ -446,6 +536,11 @@ pub(crate) struct UBeside {
     noise: Vec<(u32, F)>,
     used: Vec<UGround>,
     sort: SortAnswer,
+    held: Option<UHeld>,
+    resolves: usize,
+    /// The tire steps handed out for a tire standing on an object, which the port leaves to its
+    /// caller and this harness cannot answer: the frame is not compared.
+    unported: Vec<Call>,
     pub(crate) asked: usize,
     pub(crate) rest: Vec<Call>,
 }
@@ -453,7 +548,11 @@ pub(crate) struct UBeside {
 impl UBeside {
     fn answer(&mut self, at: Vf) -> UGround {
         self.asked += 1;
-        let k = self.ground.iter().position(|g| g.asked == at.to_bits());
+        let mut k = self.ground.iter().position(|g| g.asked == at.to_bits());
+        if k.is_none() && (!self.unported.is_empty() || std::env::var("PROBE_AT").is_ok()) {
+            let d = |g: &UGround| { let v = Vf(g.asked.map(f32::from_bits)); (0..3).map(|i| (v.0[i] - at.0[i]).abs()).sum::<f32>() };
+            k = (0..self.ground.len()).min_by(|&x, &y| d(&self.ground[x]).total_cmp(&d(&self.ground[y])));
+        }
         let k = k.unwrap_or_else(|| panic!("the port asked the ground at {:08x?}, the original never did (it asked {:08x?})", at.to_bits(), self.ground.iter().map(|g| g.asked).collect::<Vec<_>>()));
         let g = self.ground.remove(k);
         self.used.push(g);
@@ -468,8 +567,24 @@ impl UBeside {
 }
 
 impl Steps for UBeside {
-    fn call(&mut self, c: Call, car: &mut Car, _body: &mut Body) {
+    fn call(&mut self, c: Call, car: &mut Car, body: &mut Body) {
         match c {
+            Call::GravityRecord if self.held.is_some() => {
+                use game_sim::atv_contact::{Weighed, resolve};
+                use game_sim::contact::{Other, Own, Side};
+                let UHeld { car: h, others } = self.held.as_mut().expect("tested");
+                let mut me = Weighed { body, mass: h.mass, cofg: car.cofg };
+                let mut bodies: Vec<_> = others
+                    .iter_mut()
+                    .map(|o| {
+                        let cofg = o.record.collider.cofg;
+                        (&mut o.record.collider, Weighed { body: o.body.as_mut().expect("the other's body"), mass: o.mass, cofg })
+                    })
+                    .collect();
+                let mut others: Vec<Other<'_>> = bodies.iter_mut().map(|(c, b)| Other { collider: &mut **c, side: Side::Body(b) }).collect();
+                resolve(&mut h.record, &mut Own::Body(&mut me), &mut h.entries, &mut others, &h.movers, true);
+                self.resolves += 1;
+            }
             Call::GroundUnder(at) => car.ground_normal = self.answer(at).normal,
             Call::TireGround(k, at) => {
                 let g = self.answer(at);
@@ -483,6 +598,7 @@ impl Steps for UBeside {
                 let k = k.unwrap_or_else(|| panic!("the port asked the noise at {at:?}, the original's engine never did ({:?})", self.noise));
                 car.noise = self.noise.remove(k).1;
             }
+            Call::TireStep(..) => self.unported.push(c),
             Call::SortSearch => {
                 car.sort = self.sort;
                 self.rest.push(c);
@@ -503,6 +619,10 @@ pub(crate) struct USeen {
     pub(crate) handed: std::collections::BTreeMap<String, usize>,
     pub(crate) other_worlds: usize,
     pub(crate) wrecked: usize,
+    /// Frames not compared: a tire stood on an object ([`UBeside::unported`]).
+    pub(crate) on_objects: Vec<usize>,
+    /// Frames whose record held contacts with another record.
+    pub(crate) with_others: usize,
 }
 
 /// Replays drive `d` as [`u_capture_check`] does, and at each frame's world step on the truck's world
@@ -530,6 +650,25 @@ pub(crate) fn u_beside(d: &UDrive, ride: bool) -> Option<USeen> {
     }
     let noise: Shared<Vec<(u32, u32, F)>> = Rc::default();
     u_hook_noise(&mut ee, noise.clone());
+    // The car's record's resolution, when a contact is with another record: the records and bodies
+    // as they are when it runs (the others' may have stepped earlier in the world step).
+    let resolving: Shared<Vec<UHeld>> = Rc::default();
+    {
+        let (log, car) = (resolving.clone(), d.car);
+        ee.hooks.insert(U_RESOLVE, Box::new(move |ee: &mut Ee| {
+            let rec = ee.u32_at(car + u(0xc8));
+            if ee.r(4) as u32 == rec && ee.u32_at(rec + 0xf0) != 0 {
+                let w = u_view(ee, car);
+                if let Some(h) = u_held(&w, rec, w.u32_at(rec + 0xf0)) {
+                    if std::env::var("PROBE_AT").is_ok() {
+                        eprintln!("R ra {:x} a1 {:x} entries {} body {:?}", ee.r(31), ee.r(5), h.car.entries.len(), h.others[0].body.as_ref().map(|b| (b.position, b.velocity)));
+                    }
+                    log.borrow_mut().push(h);
+                }
+            }
+            u_run_inside(ee, U_RESOLVE);
+        }));
+    }
     let seen: Shared<USeen> = Rc::default();
     let frame_no: Shared<usize> = Rc::default();
     let (keep, at_frame, name, car_at_) = (seen.clone(), frame_no.clone(), d.name, d.car);
@@ -555,17 +694,22 @@ pub(crate) fn u_beside(d: &UDrive, ride: bool) -> Option<USeen> {
         if contacts != 0 {
             if std::env::var("PROBE_AT").is_ok() {
                 let list = vb.u32_at(p.record + 0xf8);
-                for i in 0..contacts.min(3) {
-                    let w: Vec<u32> = (0..0x48).map(|k| vb.u32_at(list + 0x90 * i + 4 * k)).collect();
+                for i in 0..contacts {
+                    let w: Vec<u32> = [0, 0x80, 0x84, 0x88].map(|k| vb.u32_at(list + 0x90 * i + k)).to_vec();
                     eprintln!("C {contacts} {i} {:08x?}", w);
                 }
             }
             v.held = game_sim::handling::record::held(&|a| vb.u32_at(a), p.record);
         }
+        let held = u_held(&vb, p.record, contacts);
+        if std::env::var("PROBE_AT").is_ok() {
+            eprintln!("F {k} contacts {contacts} held {} other {} state {} pos {:?}", v.held.is_some(), held.is_some(), car.state, body.position);
+        }
         let mut m = read_mx(&vb, &p);
         m.keys.untamed = true;
         ground.borrow_mut().clear();
         noise.borrow_mut().clear();
+        resolving.borrow_mut().clear();
         let (_, dt) = u_world_step_inside(ee);
         // The world steps every car; keep this car's tire probes and engine noise.
         let tires: Vec<u32> = (0..4).map(|k| ee.u32_at(car_at_ + u(0x1254) + 4 * k) + 0xf0).collect();
@@ -573,20 +717,24 @@ pub(crate) fn u_beside(d: &UDrive, ride: bool) -> Option<USeen> {
         let engine = ee.u32_at(car_at_ + u(0x1250));
         noise.borrow_mut().retain(|&(e, _, _)| e == engine);
         let va = u_view(ee, car_at_);
+        let mut resolved_with = std::mem::take(&mut *resolving.borrow_mut());
+        assert_eq!(resolved_with.is_empty(), held.is_none(), "{name} frame {k}: the original resolved the record with others {} times", resolved_with.len());
+        let resolves = resolved_with.len();
+        let held = (!resolved_with.is_empty()).then(|| resolved_with.remove(0));
         let all_from: Vec<u32> = ground.borrow().iter().map(|g| g.from).collect();
         if std::env::var("PROBE_AT").is_ok() {
             for g in ground.borrow().iter() {
                 eprintln!("G {:x} {:08x?} {:?} {:?} {:?}", g.from, g.asked, g.point, g.normal, g.record);
             }
         }
-        let beside = UBeside { ground: std::mem::take(&mut *ground.borrow_mut()), noise: noise.borrow_mut().drain(..).map(|(_, at, f)| (at, f)).collect(), used: Vec::new(), sort: super::drives::sort_answer(&va, &p), asked: 0, rest: Vec::new() };
+        let beside = UBeside { ground: std::mem::take(&mut *ground.borrow_mut()), noise: noise.borrow_mut().drain(..).map(|(_, at, f)| (at, f)).collect(), used: Vec::new(), sort: u_sort_answer(ee, car_at_), held, resolves: 0, unported: Vec::new(), asked: 0, rest: Vec::new() };
         let mut pieces = Pieces { keys: m.keys(), state: m.state, rest: beside };
         if ride {
             let mut r = the_ride.borrow_mut();
             let r = r.get_or_insert_with(|| super::drives::ride_of(table));
             r.update.untamed = true;
             (r.keys, r.state, r.car, r.body, r.vehicle) = (std::mem::take(&mut pieces.keys), pieces.state, car, body, v);
-            let rest = std::mem::replace(&mut pieces.rest, UBeside { ground: Vec::new(), noise: Vec::new(), used: Vec::new(), sort: SortAnswer::default(), asked: 0, rest: Vec::new() });
+            let rest = std::mem::replace(&mut pieces.rest, UBeside { ground: Vec::new(), noise: Vec::new(), used: Vec::new(), sort: SortAnswer::default(), held: None, resolves: 0, unported: Vec::new(), asked: 0, rest: Vec::new() });
             pieces.rest = r.frame_with(dt, rest);
             (pieces.keys, pieces.state) = (std::mem::take(&mut r.keys), r.state);
             (car, body) = (r.car.clone(), r.body.clone());
@@ -594,10 +742,15 @@ pub(crate) fn u_beside(d: &UDrive, ride: bool) -> Option<USeen> {
         } else {
             atv_car::frame_untamed(&atv_car::WORLD, &mut car, &mut body, dt, table, &mut atv_car::Own { v: &mut v, rest: &mut pieces });
         }
+        if !pieces.rest.unported.is_empty() {
+            keep.borrow_mut().on_objects.push(k);
+            return;
+        }
         let pm = Mx { keys: Keys { tires: pieces.keys.tires.clone(), ..m.keys.clone() }, state: pieces.state, ..m };
         let resolved: Vec<(u32, u32)> = v
             .held
             .as_ref()
+            .or(pieces.rest.held.as_ref().map(|h| &h.car))
             .filter(|_| contacts != 0)
             .map_or(Vec::new(), |h| game_sim::handling::record::held_words(&game_sim::atv_contact::Held { body: None, ..h.clone() }, p.record, &|a| va.u32_at(a)));
         let parts = [car_words(&car, &p), game_sim::handling::seed::body_words(&body, p.body), mx_words(&pm, &p), vehicle_words(&va, &v, &p, &o), resolved];
@@ -620,6 +773,7 @@ pub(crate) fn u_beside(d: &UDrive, ride: bool) -> Option<USeen> {
             pieces.rest.rest,
             bad.join("\n")
         );
+        assert_eq!(pieces.rest.resolves, resolves, "{name} frame {k}: the port resolved the record with others {} times, the original {resolves}", pieces.rest.resolves);
         assert!(pieces.rest.noise.is_empty(), "{name} frame {k}: the original's engine asked the noise {} times the port did not", pieces.rest.noise.len());
         let unasked = pieces.rest.unasked();
         assert!(
@@ -637,6 +791,7 @@ pub(crate) fn u_beside(d: &UDrive, ride: bool) -> Option<USeen> {
             *s.handed.entry(n).or_default() += 1;
         }
         s.frames += 1;
+        s.with_others += usize::from(resolves != 0);
         s.words += after.len();
         s.grounds += pieces.rest.asked;
         s.repeats += pieces.rest.ground.len();
@@ -648,7 +803,7 @@ pub(crate) fn u_beside(d: &UDrive, ride: bool) -> Option<USeen> {
     }
     let seen = std::mem::take(&mut *seen.borrow_mut());
     eprintln!(
-        "MD161a {} ({}): {} frames, {} words in all equal to SLUS-21701's; {} ground queries answered; handed out {:?}; wrecked on {}; {} other world steps",
+        "MD161a {} ({}): {} frames, {} words in all equal to SLUS-21701's; {} ground queries answered; handed out {:?}; wrecked on {}; {} other world steps; contacts with another record on {}; not compared, a tire on an object: {:?}",
         d.name,
         if ride { "through Ride" } else { "frame_untamed" },
         seen.frames,
@@ -656,7 +811,9 @@ pub(crate) fn u_beside(d: &UDrive, ride: bool) -> Option<USeen> {
         seen.grounds,
         seen.handed,
         seen.wrecked,
-        seen.other_worlds
+        seen.other_worlds,
+        seen.with_others,
+        seen.on_objects
     );
     Some(seen)
 }
