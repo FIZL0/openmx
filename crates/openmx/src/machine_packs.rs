@@ -70,6 +70,9 @@ pub struct Pack {
     pub fliers: Vec<Flier>,
     /// `cars` (MD39c): a car pack's cars (openmx-mods' `import-atv cars`), each with its files.
     pub cars: Vec<CarFiles>,
+    /// `step` (MD144): whose step a quad pack's quads ride on, [`UNTAMED_STEP`] for MX vs. ATV
+    /// Untamed's (openmx-mods' `import-atv untamed-atv`), empty for MX vs. ATV Unleashed's.
+    pub step: String,
     helicopter_engine: String,
     machine_sounds: String,
 }
@@ -117,6 +120,13 @@ pub struct CarFiles {
 
 /// A car's `step` word for MX vs. ATV Untamed's car step (MD161).
 pub const UNTAMED_STEP: &str = "untamed";
+
+impl Pack {
+    /// Its quads ride on MX vs. ATV Untamed's step (MD144).
+    pub fn untamed(&self) -> bool {
+        self.step.eq_ignore_ascii_case(UNTAMED_STEP)
+    }
+}
 
 impl CarFiles {
     /// It rides on MX vs. ATV Untamed's car step.
@@ -271,6 +281,7 @@ pub fn read(folder: &Path) -> Result<Option<Pack>, String> {
         skins,
         fliers,
         cars,
+        step: s(json.get("step")),
         id,
     }))
 }

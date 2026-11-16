@@ -687,6 +687,11 @@ pub trait Moto {
     /// it where the calls read and write it (the original reads each word where it uses it).
     fn tail_out(&mut self, _t: &Tail) {}
     fn tail_in(&mut self, _t: &mut Tail) {}
+    /// MD144: whether the frame's body integrate is MX vs. ATV Untamed's
+    /// ([`crate::atv_body::Body::integrate_untamed`], its angular damping per time).
+    fn untamed(&self) -> bool {
+        false
+    }
 }
 
 impl Moto for Vec<Call> {
@@ -1762,7 +1767,11 @@ impl<M: Moto> crate::biplane::Dynamics for Frame<'_, M> {
         self.body.enabled
     }
     fn integrate(&mut self, _: i32, h: F) {
-        self.body.integrate(h);
+        if self.m.untamed() {
+            self.body.integrate_untamed(h);
+        } else {
+            self.body.integrate(h);
+        }
     }
     fn end_substep(&mut self, _: i32) {
         self.body.end_substep();
@@ -1876,6 +1885,19 @@ pub struct Bike {
     pub contacts: Option<crate::atv_contact::Held>,
 }
 
+/// How far Untamed moved the rider's stunt ids up (MD81b, MD93): the backflip's 41 → 49, the 360s' 44,
+/// 45 → 52, 53, the air control's and the clears' bounds alike.
+const UNTAMED_STUNT_SHIFT: i32 = 8;
+
+impl Bike {
+    /// MD144: the quad rides MX vs. ATV Untamed's step ([`Ride::untamed`]): its preload, backflip, 360
+    /// and air control are SLUS-21701's ([`crate::handling::untamed`]). The one switch is the scene's
+    /// ([`crate::atv_moto::Scene::untamed`]), which turns Untamed's node update on with them.
+    pub fn untamed(&self) -> bool {
+        self.parts.scene.untamed
+    }
+}
+
 /// The other wheel of each wheel's pair (its `+0xbc`): the left front and left rear, the right front
 /// and right rear.
 const PARTNER: [usize; 4] = [2, 3, 0, 1];
@@ -1885,6 +1907,12 @@ const PARTNER: [usize; 4] = [2, 3, 0, 1];
 fn curve() -> &'static crate::camera::CurveTable {
     static CURVE: std::sync::OnceLock<crate::camera::CurveTable> = std::sync::OnceLock::new();
     CURVE.get_or_init(crate::camera::CurveTable::build)
+}
+
+/// The arc cosine table Untamed's 360 reads its heading off ([`Steps::spin_untamed`]), built once.
+fn acos() -> &'static crate::air::AcosTable {
+    static TABLE: std::sync::OnceLock<crate::air::AcosTable> = std::sync::OnceLock::new();
+    TABLE.get_or_init(crate::air::AcosTable::build)
 }
 
 /// **The quad's [`Moto`] with SLUS-21104's bike steps ported**: the input limiter and clutch
@@ -1984,6 +2012,9 @@ impl<S: Sweep + ?Sized> Sweep for &mut S {
 }
 
 impl<R: Moto, G: FnMut(Vf, &mut u8) -> (Vf, Vf), S: Sweep> Moto for Steps<R, G, S> {
+    fn untamed(&self) -> bool {
+        self.bike.untamed()
+    }
     fn call(&mut self, c: Call, q: &mut Quad, body: &mut Body) {
         // MD75e: the backflip reads the node's right and up rows' heights where the node keeps them
         // (`+0x84`, `+0x94`), so a call that brings the node's world frame up to date moves them too.
@@ -2025,7 +2056,11 @@ impl<R: Moto, G: FnMut(Vf, &mut u8) -> (Vf, Vf), S: Sweep> Steps<R, G, S> {
             }
             Call::Preload(dt) => {
                 let (keys, mut air, mut ch, st) = self.air_in(q, body, dt);
-                let posted = crate::handling::step::preload(&keys, &mut air, &mut ch, &st, &mut self.bike.preload_cue);
+                // MD144: Untamed's preload (MD93), its analogue preload unbound as on the quad's pad.
+                let posted = match self.bike.untamed() {
+                    true => crate::handling::untamed::preload(&keys, &mut air, &mut ch, &st, None, &mut self.bike.preload_cue),
+                    false => crate::handling::step::preload(&keys, &mut air, &mut ch, &st, &mut self.bike.preload_cue),
+                };
                 self.air_out(q, body, air, ch);
                 if posted {
                     self.rest.call(Call::PreloadCue, q, body);
@@ -2035,7 +2070,10 @@ impl<R: Moto, G: FnMut(Vf, &mut u8) -> (Vf, Vf), S: Sweep> Steps<R, G, S> {
             Call::AirborneControl(dt) => {
                 let (keys, mut air, mut ch, st) = self.air_in(q, body, dt);
                 let b = &self.bike;
-                let inp = crate::handling::AirIn { stunt_id: b.rider_stunt, gas: q.gas_limited, gyro: b.gyro };
+                // MD144: Untamed's air control compares the stunt id with bounds 8 higher (49, 54 for 41,
+                // 46), so the id 8 lower meets SLUS-21104's bounds the same way.
+                let stunt_id = if b.untamed() { b.rider_stunt.wrapping_sub(UNTAMED_STUNT_SHIFT) } else { b.rider_stunt };
+                let inp = crate::handling::AirIn { stunt_id, gas: q.gas_limited, gyro: b.gyro };
                 crate::handling::airborne_control(&keys, b.gas_gyro_torque, &mut air, &mut ch, &st, &inp);
                 self.air_out(q, body, air, ch);
             }
@@ -2161,6 +2199,7 @@ impl<R: Moto, G: FnMut(Vf, &mut u8) -> (Vf, Vf), S: Sweep> Steps<R, G, S> {
             }
             Call::RevLimit => crate::atv_moto::rev_limit(&self.bike.engine, &mut self.bike.parts.drive, self.bike.parts.driven),
             Call::PeakRates => crate::atv_moto::peak_rates(q, body),
+            Call::SpinAir(dt) if self.bike.untamed() => self.spin_untamed(q, body, dt),
             Call::SpinAir(dt) => {
                 let (keys, ..) = self.air_in(q, body, dt);
                 let b = &mut self.bike;
@@ -2388,16 +2427,103 @@ impl<R: Moto, G, S: Sweep> Steps<R, G, S> {
         let loads = crate::air::Loads { side: F(q.attitude.x()), fore_aft: F(q.attitude.z()), ..Default::default() };
         let steep = crate::handling::step::flip_wreck_steep(&keys, b.struck_class, q.airborne, &loads);
         let mut started = false;
-        let out = crate::handling::backflip(&keys, &mut air, &mut ch, &st, &inp, &mut b.flip_clip, || {
+        let start = || {
             started = true;
             true
-        }, || steep);
+        };
+        // MD144: Untamed's (MD93a): the fourth trick button arms it with others held, the flight's torque
+        // decays with none held, a flip that ends clears an id over 48; no bound control on the quad's pad.
+        let out = match b.untamed() {
+            true => {
+                let nibble = b.buttons & 0xf;
+                let inp = crate::handling::untamed::FlipIn {
+                    arm_button: nibble & crate::handling::R1_ALONE != 0,
+                    trick_held: nibble != 0,
+                    lip_y: st.stick.1,
+                    hold: st.stick_hold,
+                    button: None,
+                    right_y: inp.right_y,
+                    up_y: inp.up_y,
+                    stunt_id: inp.stunt_id,
+                };
+                crate::handling::untamed::backflip(&keys, &mut air, &mut ch, &st, &inp, &mut b.flip_clip, start, || steep)
+            }
+            false => crate::handling::backflip(&keys, &mut air, &mut ch, &st, &inp, &mut b.flip_clip, start, || steep),
+        };
         if out.stunt_cleared {
             b.stunt_id = 255;
         }
         let stunt = b.flip_stunt;
         self.air_out(q, body, air, ch);
         if started {
+            self.rest.call(Call::StartStunt(stunt), q, body);
+        }
+        if out.stunt_ended {
+            self.rest.call(Call::EndStunt, q, body);
+        }
+        if let Some(reason) = out.wreck {
+            self.rest.call(Call::Wreck(reason), q, body);
+        }
+    }
+
+    /// MD144: Untamed's 360 ([`crate::handling::untamed::spin`], MD93b) on the quad's 360 words
+    /// ([`crate::atv_moto::Spin`], which [`crate::atv_moto::spin_air`] keeps on SLUS-21104), read as
+    /// that one reads them: both sticks the limited stick's `x`, the flick its own, the fourth trick
+    /// button the arming one and any of the four a hold, no bound control. The node's forward axis is
+    /// read only on a 360 that is on, where both read it; the stunt started is the quad's word by the
+    /// direction, as on SLUS-21104 (the stunt start answers yes).
+    fn spin_untamed(&mut self, q: &mut Quad, body: &mut Body, dt: F) {
+        let (keys, mut air, mut ch, st) = self.air_in(q, body, dt);
+        let b = &mut self.bike;
+        let loads = crate::air::Loads { side: F(q.attitude.x()), fore_aft: F(q.attitude.z()), ..Default::default() };
+        let steep = crate::handling::step::flip_wreck_steep(&keys, b.struck_class, q.airborne, &loads);
+        let forward = if b.spin_active { b.parts.scene.axes(0).0 } else { Vf::ZERO };
+        let w = b.parts.spin;
+        let tuning = crate::air::SpinTuning {
+            min_time: w.min_time,
+            max_time: w.max_time,
+            min_torque_x: w.min_pitch,
+            max_torque_x: w.max_pitch,
+            min_torque_y: w.min_yaw,
+            max_torque_y: w.max_yaw,
+            rate_increase: F::ZERO,
+            rate_decrease: w.rate,
+        };
+        let mut s = crate::air::Spin {
+            applied: b.spin_applied,
+            ramp: q.spinning,
+            active: b.spin_active,
+            armed: w.armed,
+            grace: w.grace,
+            dir: w.dir,
+            start: w.heading,
+            torque: w.moment,
+            clip: w.clip as u8,
+            ..crate::air::Spin::default()
+        };
+        let nibble = b.buttons & 0xf;
+        let inp = crate::handling::untamed::SpinIn {
+            arm_button: nibble & crate::handling::R1_ALONE != 0,
+            trick_held: nibble != 0,
+            lip_x: b.stick.x,
+            x: b.stick.x,
+            hold: w.flick,
+            button: None,
+            forward,
+            stunt_id: b.stunt_id,
+        };
+        let out = crate::handling::untamed::spin(&tuning, &keys, &mut air, &mut s, &mut ch, &st, &inp, acos(), |_| true, || steep);
+        let w = &mut b.parts.spin;
+        (w.armed, w.grace, w.dir, w.heading, w.moment, w.clip) = (s.armed, s.grace, s.dir, s.start, s.torque, i32::from(s.clip));
+        (b.spin_applied, b.spin_active, q.spinning) = (s.applied, s.active, s.ramp);
+        if out.stunt_cleared {
+            b.stunt_id = 255;
+        }
+        let stunt = if w.dir > 0 { w.stunt_left } else { w.stunt_right };
+        // The 360 moves only the chassis's moment and the authority of the air step's words, as
+        // SLUS-21104's does.
+        (body.moment, q.authority) = (ch.moment, air.authority);
+        if out.stunt_started {
             self.rest.call(Call::StartStunt(stunt), q, body);
         }
         if out.stunt_ended {
@@ -3964,6 +4090,23 @@ pub const WORLD: crate::biplane::World = crate::biplane::World { iterations: 1, 
 impl<R: Moto + Default> Ride<R> {
     pub fn new(p: Params, q: Quad, body: crate::atv_body::Body, bike: Bike, rest: R) -> Ride<R> {
         Ride { p, q, body, bike, rest, table: crate::air::AcosTable::build(), recorded: None, tailed: None, wrecked: None }
+    }
+
+    /// **MD144: the quad on MX vs. ATV Untamed's step** (SLUS-21701, off by default), after
+    /// [`Ride::spawn`] and [`Ride::rig`]: its preload, backflip, 360 and air control are Untamed's
+    /// ([`Bike::untamed`]), its scene nodes go through Untamed's node update
+    /// ([`crate::atv_moto::Scene::update_untamed`]), its tail hands the hazard clock Untamed's
+    /// grounded word ([`Tail::untamed`]), and its stunt ids are Untamed's, 8 up (the backflip 49, the
+    /// 360s 52 and 53, as MD147's spawn image holds them). Everything else is SLUS-21104's step on
+    /// the same fields (MD81b's static diff).
+    pub fn untamed(&mut self) {
+        self.bike.parts.scene.untamed = true;
+        self.bike.flip_stunt = crate::handling::untamed::BACKFLIP_STUNT as u32;
+        let s = &mut self.bike.parts.spin;
+        (s.stunt_right, s.stunt_left) = (SPIN_STUNTS.0 + UNTAMED_STUNT_SHIFT as u32, SPIN_STUNTS.1 + UNTAMED_STUNT_SHIFT as u32);
+        if let Some(t) = self.tailed.as_mut() {
+            t.tail.untamed = true;
+        }
     }
 
     /// The pad's levers and stick where the pad reader stores them: the gas and brake into the quad,

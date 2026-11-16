@@ -6508,7 +6508,8 @@ impl Menu {
     pub fn quad_pick(&self) -> Option<(String, String)> {
         let want = &self.settings.atv;
         let m = self.machine_offer.iter().find(|m| m.machine == roster::ATV_KIND && m.why.is_none() && !want.is_empty() && m.skin.eq_ignore_ascii_case(want))?;
-        Some((m.pack.clone(), m.skin.clone()))
+        // An Untamed pack's pick is `STEM@PACK` (MD144); the stem alone names the file in its pack.
+        Some((m.pack.clone(), m.skin.split('@').next().unwrap_or(&m.skin).to_string()))
     }
 
     pub fn trick_packs(&self) -> &[TrickPack] {

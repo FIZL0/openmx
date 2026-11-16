@@ -320,3 +320,8 @@ fn untamed_node_world_update_is_the_originals() {
         assert!(tally.get(want).copied().unwrap_or(0) >= 100, "too few cases went {want:?}: {tally:?}");
     }
 }
+
+/// MD144: the quad on Untamed's step ([`game_sim::quad::Ride::untamed`]) against SLUS-21104's where
+/// the two agree, its stunt ids against MD147's spawn image.
+#[path = "untamed_atv/route.rs"]
+mod route;

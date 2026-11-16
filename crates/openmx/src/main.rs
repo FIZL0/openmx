@@ -2704,9 +2704,9 @@ struct Args {
     /// ([`game_sim::state::Sense::backwards_bail`], S161): the Settings screen's Backwards Landings
     /// Bail row, which `--backwards-bail` turns on. Off by default, the original's.
     backwards_bail: bool,
-    /// MX vs. ATV's quad (MD37d), an addition: `--atv NAME`, the handling file (`atv_Race250P`) the
-    /// installed quad pack rides it on, which the pause's switch row then offers; under the front
-    /// end the Garage's Quad row. Empty, the default, for none: the ride is the original's.
+    /// MX vs. ATV's quad (MD37d), an addition: `--atv NAME`, the handling file (`atv_Race250P`; MD144's
+    /// `atv_Race250P@untamed_atv` names the pack too) the installed quad pack rides it on, which the
+    /// pause's switch row then offers; under the front end the Garage's Quad row. Empty, the default, for none: the ride is the original's.
     atv: String,
     /// MX vs. ATV's cars (MD39c), an addition: `--mxvatv-car NAME`, the car (`buggy`, `monstertruck`,
     /// `baja`, `golfcart`, `sandrail`) the installed car pack rides on MX vs. ATV's step, which the
@@ -13104,16 +13104,21 @@ fn machine_offers(packs: &[machine_packs::Pack]) -> Vec<roster::PackMachine> {
                 why: Some("openmx rides only MX Unleashed's own bikes yet".into()),
             });
         }
-        // The quads (MD37d): one a handling file, ridden.
+        // The quads (MD37d): one a handling file, ridden. An Untamed pack's (MD144) is offered by its
+        // `STEM@PACK` pick, as `--atv` takes it, so the Quad row tells it from Unleashed's of that name.
         if pack.machine == roster::ATV_KIND && !pack.phy.is_empty() {
             for phy in &pack.phy {
+                let (skin, name) = match pack.untamed() {
+                    true => (format!("{}@{}", vehicle::atv_stem(phy), pack.id), format!("{} (Untamed)", vehicle::atv_label(phy))),
+                    false => (vehicle::atv_stem(phy).to_string(), vehicle::atv_label(phy)),
+                };
                 out.push(roster::PackMachine {
                     pack: pack.id.clone(),
                     game: pack.game.clone(),
                     machine: pack.machine.clone(),
                     class: String::new(),
-                    skin: vehicle::atv_stem(phy).to_string(),
-                    name: vehicle::atv_label(phy),
+                    skin,
+                    name,
                     why: None,
                 });
             }
@@ -13151,17 +13156,27 @@ fn ride_atv(args: &Args) -> Option<vehicle::AtvRide> {
         return None;
     };
     let packs = machine_packs::find(&dir).0;
-    let Some(pack) = packs.iter().find(|p| p.machine == roster::ATV_KIND && !p.phy.is_empty()) else {
-        println!("atv: {} picked, but {} has no quad pack", args.atv, dir.join(machine_packs::MACHINES_DIR).display());
+    // `STEM@PACK` (MD144) picks the pack too, as an Untamed quad pack's; a bare stem is off the first
+    // quad pack on MX vs. ATV Unleashed's step, else the first quad pack.
+    let (want, from) = args.atv.split_once('@').map_or((args.atv.as_str(), None), |(q, p)| (q, Some(p)));
+    let quads = |p: &&machine_packs::Pack| p.machine == roster::ATV_KIND && !p.phy.is_empty();
+    let pack = match from {
+        Some(id) => packs.iter().filter(quads).find(|p| p.id == id),
+        None => packs.iter().filter(quads).find(|p| !p.untamed()).or_else(|| packs.iter().find(quads)),
+    };
+    let Some(pack) = pack else {
+        println!("atv: {} picked, but {} has no quad pack{}", args.atv, dir.join(machine_packs::MACHINES_DIR).display(), from.map_or(String::new(), |id| format!(" {id}")));
         return None;
     };
-    let Some(phy) = pack.phy.iter().find(|p| vehicle::atv_stem(p).eq_ignore_ascii_case(&args.atv)) else {
-        println!("atv: {} lists no {}.phy", pack.id, args.atv);
+    let Some(phy) = pack.phy.iter().find(|p| vehicle::atv_stem(p).eq_ignore_ascii_case(want)) else {
+        println!("atv: {} lists no {want}.phy", pack.id);
         return None;
     };
     match vehicle::AtvRide::read(&pack.id, phy, &mut |n| pack.files.read(&n.replace('/', "\\")).ok()) {
         Ok(atv) => {
-            println!("atv: {} ({}) off {} (switch from the pause)", vehicle::atv_label(phy), vehicle::atv_stem(phy), pack.id);
+            let atv = if pack.untamed() { atv.on_untamed_step() } else { atv };
+            let step = if atv.untamed { ", on MX vs. ATV Untamed's step" } else { "" };
+            println!("atv: {} ({}) off {}{step} (switch from the pause)", vehicle::atv_label(phy), vehicle::atv_stem(phy), pack.id);
             Some(atv)
         }
         Err(e) => {
@@ -13187,7 +13202,8 @@ fn quad_reader(args: &Args) -> Box<dyn FnMut(&str) -> Result<vehicle::AtvRide, S
         let packs = packs.get_or_insert_with(|| machine_packs::find(dir).0);
         let pack = packs.iter().find(|p| p.id == id && p.machine == roster::ATV_KIND).ok_or_else(|| format!("no quad pack {id} here"))?;
         let phy = pack.phy.iter().find(|p| vehicle::atv_stem(p).eq_ignore_ascii_case(stem)).ok_or_else(|| format!("{id} lists no {stem}.phy"))?;
-        vehicle::AtvRide::read(&pack.id, phy, &mut |n| pack.files.read(&n.replace('/', "\\")).ok())
+        let atv = vehicle::AtvRide::read(&pack.id, phy, &mut |n| pack.files.read(&n.replace('/', "\\")).ok())?;
+        Ok(if pack.untamed() { atv.on_untamed_step() } else { atv })
     })
 }
 
@@ -15275,7 +15291,7 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--no-wrecks" => args.wrecks = false,
             "--no-air-wrecks" => args.air_wrecks = false,
             "--backwards-bail" => args.backwards_bail = true,
-            "--atv" => args.atv = next("a quad's handling file, like atv_Race250P")?,
+            "--atv" => args.atv = next("a quad's handling file, like atv_Race250P (atv_Race250P@untamed_atv for a pack's)")?,
             "--mxvatv-car" => args.mxvatv_car = next("an MX vs. ATV car: buggy, monstertruck, baja, golfcart or sandrail")?,
             "--no-vibration" => args.vibration = false,
             "--modifiers" => {
