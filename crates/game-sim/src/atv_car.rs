@@ -164,7 +164,8 @@ pub struct Car {
     pub up: Vf,
     /// The body's centre of mass in its own frame, which the frame's origin is taken back by.
     pub cofg: Vf,
-    /// The ground's normal under the body, as [`Call::GroundUnder`] answers it; and whether the up
+    /// The ground's normal under the body, as [`Call::GroundUnder`] answers it (and under the
+    /// put-back's spot, as [`Call::BackGround`] does); and whether the up
     /// row is 45 degrees or more off it (the collision record's word).
     pub ground_normal: Vf,
     pub tipped: bool,
@@ -349,6 +350,22 @@ pub enum Call {
     LeaveWorld(usize),
     RidingLetGo,
     ReleaseRecord,
+    /// What the respawn hands out, when [`Own`] answers it (MD154). The put-back's: the ground query
+    /// at the spot (answered into [`Car::ground_normal`]), the ghost started (vt `+0x3a0`), the trail
+    /// reset. The ground reset's: the node taken out of the spatial database and hung back in its
+    /// scene (with bit 1 of the flag byte); a collidable's database entry taken out; with the sync's
+    /// switch, a collidable turned on and attached in the world. Then each tire's reset and the
+    /// engine's, which [`Pieces`] answers ([`tire_reset`], [`engine_reset`]).
+    BackGround(Vf),
+    GhostStart,
+    TrailReset,
+    NodeUnhook,
+    NodeRehang,
+    PartUnhook(crate::quad::Part),
+    PartOn(crate::quad::Part),
+    PartAttach(crate::quad::Part),
+    TireReset(usize),
+    EngineReset,
 }
 
 /// Whoever runs the calls the car's listeners make. A `Vec<Call>` just lists them.
@@ -1156,7 +1173,8 @@ pub struct State {
 /// contact sort and each tire's probe, on the [`Car`]'s and [`Tire`]s' words; and (MD125), given the
 /// engine's keys, the engine's step, its shift and its reverse switch. Every other call, the
 /// controls' reverse switch without the engine's keys, the preload's cue, and what the sort, the
-/// probe, the engine and the tire step (MD131: what a tire stands on) hand out go to `rest`.
+/// probe, the engine and the tire step (MD131: what a tire stands on) hand out go to `rest`. (MD154)
+/// The respawn's tire and engine resets ([`tire_reset`], [`engine_reset`]).
 pub struct Pieces<R> {
     pub keys: Keys,
     pub state: State,
@@ -1223,6 +1241,8 @@ impl<R: Steps> Pieces<R> {
                 let Keys { engine: Some(e), tires, .. } = &mut self.keys else { return false };
                 reverse(e, tires, &mut self.state, r);
             }
+            Call::TireReset(k) => tire_reset(&mut car.tires[k], &mut self.state.tires[k]),
+            Call::EngineReset => engine_reset(&mut self.state.engine),
             _ => return false,
         }
         true
@@ -1890,6 +1910,39 @@ pub struct Vehicle {
     /// Untamed's vehicle force (MD81d): after the gravity it adds a zero force as well (`xyz`), which
     /// turns a -0 into +0. Off, SLUS-21104's.
     pub untamed: bool,
+    /// The respawn's words (MD154); `None`, and [`Call::Respawn`] goes on.
+    pub back: Option<Back>,
+}
+
+/// What the car's respawn reads and writes beyond [`Car`], the body and the rest of [`Vehicle`]
+/// (MD154).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Back {
+    /// The put-back spot: its position, forward and up (`+0xd40`, `+0xd50`, `+0xd60`); and the
+    /// put-back's copy of it (`+0x50`, `+0x60`, `+0x70`), which the orient squares and normalizes.
+    pub spot: [Vf; 3],
+    pub at: [Vf; 3],
+    /// The run's spot words (`+0xd70`, `+0xd74`, `+0xd78`), and the run's own three (its `+0x94`);
+    /// `None`, the car has no run.
+    pub run_spot: [u32; 3],
+    pub run: Option<[u32; 3]>,
+    /// The car has a terrain (`+0x3b4`): the put-back stands the spot on its ground
+    /// ([`Call::BackGround`]).
+    pub terrain: bool,
+    /// The ghost's clock (`+0xde8`) and how long a ghost lasts (`+0xdec`).
+    pub ghost: F,
+    pub ghost_time: F,
+    /// The car has a trail (`+0x10dc`), which the put-back resets ([`Call::TrailReset`]).
+    pub trail: bool,
+    /// The car has its engine and all four tires: the respawn resets them ([`Call::TireReset`],
+    /// [`Call::EngineReset`]).
+    pub parts: bool,
+    /// The body's staged words, which its commit makes its own: the position (`+0x40`), velocity
+    /// (`+0x50`), spin (`+0x160`) and orientation (`+0x180`).
+    pub staged_position: Vf,
+    pub staged_velocity: Vf,
+    pub staged_spin: Vf,
+    pub staged_quat: Vf,
 }
 
 /// A node of the car node's subtree as marking it out of date sees it: its first child and next
@@ -1904,8 +1957,9 @@ pub struct Below {
 /// **SLUS-21104's own calls answered** (MD106b): the vehicle force and post, the wreck timer, the
 /// landing's node-local turn and the node's position, each ported; and (MD128) what those hand out:
 /// the map-edge test and throw, the body's reset, the spatial update, the node's bounds, the collision
-/// sync and each collidable's, the record's gravity call and the subtree's marking. Every other call,
-/// and what these hand out in turn, goes on to `rest`.
+/// sync and each collidable's, the record's gravity call and the subtree's marking; and (MD154), given
+/// [`Vehicle::back`] and a node with no parent, the respawn ([`respawn`]). Every other call, and what
+/// these hand out in turn, goes on to `rest`.
 pub struct Own<'a, S> {
     pub v: &'a mut Vehicle,
     pub rest: &'a mut S,
@@ -1931,6 +1985,7 @@ impl<S: Steps> Steps for Own<'_, S> {
                 crate::atv_contact::resolve(&mut h.record, side, &mut h.entries, &mut [], &h.movers, true);
             }
             Call::SubtreeOutOfDate if !self.v.below.is_empty() => out_of_date(&mut self.v.below, 0),
+            Call::Respawn if self.v.back.is_some() && self.v.scene.nodes[0].parent.is_none() => respawn(self, car, body),
             Call::SpatialUpdate => {
                 if self.v.spatial {
                     let (centre, half) = node_box(self, car, body);
@@ -2068,6 +2123,175 @@ fn part_sync<S: Steps>(o: &mut Own<'_, S>, p: crate::quad::Part, car: &mut Car, 
     if let Some((centre, half, reach)) = crate::atv_sync::part_sync(part, &frame) {
         o.rest.call(Call::PartMove { part: p, centre, half, reach }, car, body);
     }
+}
+
+/// The quadword the respawn's resets and the orient read for "none" (`0, 0, 0, 1`), and the tire
+/// reset's up (`0, 1, 0, 1`).
+const BACK_ORIGIN: Vf = Vf([0.0, 0.0, 0.0, 1.0]);
+const BACK_UP: Vf = Vf([0.0, 1.0, 0.0, 1.0]);
+/// How far the put-back lifts the spot along the ground's normal (0.3).
+const BACK_LIFT: u32 = 0x3e99_999a;
+
+/// **The car's respawn** (MXVehicle's vt `+0xe8`; MD154): the put-back, snapped to the ground and
+/// starting the ghost; then, with the engine and all four tires, each tire's reset and the engine's
+/// ([`Call::TireReset`], [`Call::EngineReset`]).
+///
+/// The put-back: the spot's position copied in; with a run whose spot's first two words are both
+/// set, the run's three words the spot's; with a terrain, the ground queried at the position
+/// ([`Call::BackGround`]), the position lifted along its normal by 0.3 (`xyz`), the forward the
+/// spot's and the up the normal; without, the forward and up the spot's. Then the ground reset
+/// ([`respawn_ground`]) and the latch set; the ghost's clock its length and the ghost started
+/// ([`Call::GhostStart`]); with a trail, [`Call::TrailReset`]; and the put-back's cue
+/// ([`Call::Cue`] 21).
+fn respawn<S: Steps>(o: &mut Own<'_, S>, car: &mut Car, body: &mut Body) {
+    let b = o.v.back.as_mut().expect("tested");
+    b.at[0] = b.spot[0];
+    if let Some(run) = b.run.as_mut().filter(|_| b.run_spot[0] != 0 && b.run_spot[1] != 0) {
+        *run = b.run_spot;
+    }
+    if b.terrain {
+        let at = b.at[0];
+        o.rest.call(Call::BackGround(at), car, body);
+        let n = car.ground_normal;
+        let b = o.v.back.as_mut().expect("tested");
+        b.at[0] = b.at[0].merge(Dest::XYZ, b.at[0].add(scale_xyz(n, BACK_LIFT)));
+        (b.at[1], b.at[2]) = (b.spot[1], n);
+    } else {
+        (b.at[1], b.at[2]) = (b.spot[1], b.spot[2]);
+    }
+    respawn_ground(o, car, body);
+    car.latch = true;
+    let b = o.v.back.as_mut().expect("tested");
+    b.ghost = b.ghost_time;
+    let trail = b.trail;
+    o.rest.call(Call::GhostStart, car, body);
+    if trail {
+        o.rest.call(Call::TrailReset, car, body);
+    }
+    o.rest.call(Call::Cue(21), car, body);
+    if o.v.back.as_ref().expect("tested").parts {
+        for k in 0..4 {
+            o.rest.call(Call::TireReset(k), car, body);
+        }
+        o.rest.call(Call::EngineReset, car, body);
+    }
+}
+
+/// **The ground reset** (the put-back's, as the bike's [`crate::handling::wreck::ground`]): with bit 1
+/// of the flag byte the node taken out of the database ([`Call::NodeUnhook`]); the frame's entry
+/// taken out if there is a frame, the riding probe's and the sweep's if there is a riding probe
+/// ([`Call::PartUnhook`]); the body's staged velocity [`BACK_ORIGIN`]; the orient ([`respawn_orient`]);
+/// with that bit the node hung back ([`Call::NodeRehang`]); and with the sync's switch, the frame,
+/// then the riding probe and the sweep (with a riding probe), each turned on and attached
+/// ([`Call::PartOn`], [`Call::PartAttach`]).
+fn respawn_ground<S: Steps>(o: &mut Own<'_, S>, car: &mut Car, body: &mut Body) {
+    use crate::quad::Part;
+    let bit = o.v.flags & 0x02 != 0;
+    if bit {
+        o.rest.call(Call::NodeUnhook, car, body);
+    }
+    let c = o.v.collidables;
+    if let Some(p) = c.frame {
+        o.rest.call(Call::PartUnhook(p), car, body);
+    }
+    if let Some(p) = c.riding {
+        o.rest.call(Call::PartUnhook(p), car, body);
+        o.rest.call(Call::PartUnhook(Part::Sweep), car, body);
+    }
+    o.v.back.as_mut().expect("tested").staged_velocity = BACK_ORIGIN;
+    respawn_orient(o, car, body);
+    if bit {
+        o.rest.call(Call::NodeRehang, car, body);
+    }
+    if !c.sync {
+        return;
+    }
+    let mut on = |p: Part, o: &mut Own<'_, S>| {
+        o.rest.call(Call::PartOn(p), car, body);
+        o.rest.call(Call::PartAttach(p), car, body);
+    };
+    if let Some(p) = c.frame {
+        on(p, o);
+    }
+    if let Some(p) = c.riding {
+        on(p, o);
+        on(Part::Sweep, o);
+    }
+}
+
+/// **The car's orient** (its vt `+0xf0`, the bike's [`crate::handling::wreck::orient`]) on the
+/// put-back's position, forward and up: the up made square to the forward (`(forward × up) ×
+/// forward`, its `w` the forward's) and both normalized, the position's `w` 1; the body staged there,
+/// turned to the frame's quaternion with no spin, and made so ([`respawn_commit`]); the node set at the
+/// body's centre less its turned centre of mass (its subtree marked out of date,
+/// [`Call::SubtreeOutOfDate`], if it was current), and aimed along the forward and up; then
+/// [`Call::SpatialUpdate`], [`Call::NodeBounds`] with bit 1 of the flag byte, and with the sync's
+/// switch the frame's and the riding probe's syncs.
+fn respawn_orient<S: Steps>(o: &mut Own<'_, S>, car: &mut Car, body: &mut Body) {
+    use crate::air::{cross, normalize};
+    let b = o.v.back.as_mut().expect("tested");
+    let (f, u) = (b.at[1], b.at[2]);
+    let t = f.merge(Dest::XYZ, cross(f, u));
+    b.at[2] = t.merge(Dest::XYZ, cross(t, f));
+    b.at[1] = normalize(b.at[1]);
+    b.at[2] = normalize(b.at[2]);
+    b.at[0].0[3] = 1.0;
+    let (f, u) = (b.at[1], b.at[2]);
+    let q = crate::math::mat4_to_quat(&crate::math::basis(BACK_ORIGIN, f, u, false, true));
+    (b.staged_position, b.staged_quat, b.staged_spin) = (b.at[0], q, BACK_ORIGIN);
+    respawn_commit(b, body, car.cofg);
+    let r = crate::handling::wreck::turned(body.quat, car.cofg);
+    let c = body.position;
+    let current = o.v.scene.nodes[0].flags & 1 != 0;
+    o.v.scene.set_position(0, c.merge(Dest::XYZ, c.sub(r))).expect("tested: no parent");
+    if current && o.v.subtree {
+        o.call(Call::SubtreeOutOfDate, car, body);
+    }
+    o.v.scene.aim(0, f, u);
+    o.call(Call::SpatialUpdate, car, body);
+    if o.v.flags & 0x02 != 0 {
+        o.call(Call::NodeBounds, car, body);
+    }
+    let c = o.v.collidables;
+    if c.sync {
+        for p in [c.frame, c.riding].into_iter().flatten() {
+            part_sync(o, p, car, body);
+        }
+    }
+}
+
+/// **The body's staged state made its own** (its vt `+0x3c`, the bike's
+/// [`crate::handling::wreck::body_commit`]): the centre at the staged position, the velocity the
+/// staged one, the accumulators cleared; the orientation the staged one, the rates the staged spin;
+/// the centre moved by the centre of mass turned by it (`xyz`), the last centre the same; the moments
+/// and twists cleared.
+fn respawn_commit(b: &Back, body: &mut Body, cofg: Vf) {
+    (body.last_position, body.position, body.velocity) = (b.staged_position, b.staged_position, b.staged_velocity);
+    (body.last_force, body.force, body.accel) = (BACK_ORIGIN, BACK_ORIGIN, BACK_ORIGIN);
+    (body.correction_peak, body.correction) = (BACK_ORIGIN, BACK_ORIGIN);
+    (body.last_quat, body.quat, body.rates) = (b.staged_quat, b.staged_quat, b.staged_spin);
+    let r = crate::handling::wreck::turned(body.quat, cofg);
+    body.position = body.position.merge(Dest::XYZ, body.position.add(r));
+    body.last_position = body.position;
+    (body.moment, body.last_moment, body.ang_accel) = (BACK_ORIGIN, BACK_ORIGIN, BACK_ORIGIN);
+    (body.twist_peak, body.twist) = (BACK_ORIGIN, BACK_ORIGIN);
+}
+
+/// **A tire's reset** (the respawn's, MD154): its contact flags, spin, slips, torque, compression,
+/// load and what it stands on cleared; its contact, point and local velocities, velocity and force
+/// to `0, 0, 0, 1`; its ground, car and probe normals to `0, 1, 0, 1`.
+pub fn tire_reset(t: &mut Tire, s: &mut TireState) {
+    (t.solid, t.sorted, t.stands_on) = (false, false, [0, 0]);
+    (s.spin, s.slip_ratio, s.slip_angle, s.slip_tan) = (F::ZERO, F::ZERO, F::ZERO, F::ZERO);
+    (s.torque, s.compression, t.load) = (F::ZERO, F::ZERO, F::ZERO);
+    (s.contact, s.point_velocity, t.local_velocity) = (BACK_ORIGIN, BACK_ORIGIN, BACK_ORIGIN);
+    (s.velocity, s.force) = (BACK_ORIGIN, BACK_ORIGIN);
+    (t.ground_normal, t.car_normal, t.probe_normal) = (BACK_UP, BACK_UP, BACK_UP);
+}
+
+/// **The engine's reset** (the respawn's, MD154): its rpm and the wheels' cleared, first gear.
+pub fn engine_reset(e: &mut EngineState) {
+    (e.rpm, e.wheel_rpm, e.gear) = (F::ZERO, F::ZERO, 1);
 }
 
 /// A sibling list of the subtree marked out of date, as the original recurses: the rest of the list
