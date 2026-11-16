@@ -423,6 +423,8 @@ impl Sim {
         self.race_bike(0, controls.clutch);
         // What the wreck bike's rays pushed in its frame (S244).
         self.wreck_pushed_back(0);
+        // The body's look-around clock, after the bike (S328a).
+        self.bodies_look(dt, std::slice::from_ref(controls));
         // The race manager walks after the bikes (S291): it sees where this frame left them.
         self.race_frame(dt, world);
         self.props_step(dt, &prop_movers);
@@ -456,6 +458,29 @@ impl Sim {
             .chain(self.others.iter_mut().map(|p| &mut p.rider.score))
             .collect();
         self.event.tick(dt, &riders, &mut cards);
+    }
+
+    /// **The bodies' look-around clocks** (S328a, [`crate::rider::Rider::body_look`]): every rider's
+    /// body, after every bike's frame, with the controls each bike rode in `rode`. The original's
+    /// bodies are actors of their own, walked after the riders in the game's player order — C33's
+    /// four bodies run human, then the AI riders by their interfaces' player numbers — so a human
+    /// (no pilot) goes first, in Sim order, and an AI rider by its seat's player number. Each draws
+    /// on the game's one generator: the AI lane's, or the race's when there is no lane; with neither
+    /// it is a free ride's presentation, and each body draws on its own pool.
+    fn bodies_look(&mut self, dt: F, rode: &[Controls]) {
+        let seat = |i: usize| self.ai.as_deref().and_then(|l| l.pilots.iter().find(|(p, _)| *p == i)).map(|(_, p)| p.seat.player);
+        let mut order: Vec<(bool, usize, usize)> =
+            (0..rode.len()).map(|i| seat(i).map_or((false, i, i), |player| (true, player, i))).collect();
+        order.sort();
+        for (_, _, i) in order {
+            let rider = if i == 0 { &mut self.rider } else { &mut self.others[i - 1].rider };
+            let rng = match (self.ai.as_deref_mut(), self.race.as_deref_mut()) {
+                (Some(lane), _) => Some(&mut lane.rng),
+                (None, Some(race)) => Some(&mut race.rng),
+                (None, None) => None,
+            };
+            rider.body_look(dt, &rode[i], rng);
+        }
     }
 
     /// The race manager's tick (S13b, [`race::Race::tick`]): after every rider's frame, so each
@@ -610,6 +635,7 @@ impl Sim {
         self.lend_cars();
         self.event_frame(dt);
         let mut frames = Vec::with_capacity(controls.len());
+        let mut rode = controls.to_vec();
         // Rider against rider (S78): every bike's contacts, from where the last tick left them all.
         // On a world that wraps (MD44), each bike against every other's nearest copy.
         let mut lists = self.bike_contacts_in(dt, &*world);
@@ -648,6 +674,7 @@ impl Sim {
             // An AI rider's brain thinks first, and its levers are the bike's controls (S323).
             let thought = self.think(i, dt, world);
             let c = thought.as_ref().unwrap_or(c);
+            rode[i] = *c;
             let tables = &self.tables;
             let frame = if i == 0 {
                 self.rider.frame_bumped(&self.phy, tables, c, dt, world, &rivals, bump.as_mut())
@@ -665,6 +692,8 @@ impl Sim {
             frames.push(frame);
         }
         frames.reverse();
+        // The bodies' look-around clocks, after every bike (S328a).
+        self.bodies_look(dt, &rode);
         // The race manager walks after every bike (S291).
         self.race_frame(dt, world);
         self.props_step(dt, &prop_movers);

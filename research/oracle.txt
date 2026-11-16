@@ -12898,3 +12898,6 @@ atv_voice_index_pick        atv 0x00183070 = (driver, two)
 atv_voice_pick              atv 0x00183180 = (driver, asked, asked too, top, restart); pair pick 0x00183510
 atv_sample_start            atv 0x00187850 = (handed out whole with the play)
 atv_sound_queue_flush       atv 0x001840c0 = (driver, 0) the SIF send (handed out)
+# S328a: rider_animation 0x00248a70's look clock: look +0xa30, request ptr +0x488 (cut at req+0x140),
+#   band[0] +0xa14. C33: bodies run after all AI feeds, in game player order (human 0, ai2 1, ai0 2,
+#   ai1 3); re-arms at tick 7 (ai2, ai0, ai1) and tick 8 (human). The Sim runs it as Body::look_timer.
