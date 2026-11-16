@@ -395,13 +395,8 @@ impl Game for Rides<'_> {
     /// sends a peer that fell out of step and a restart sends everyone; the constants (tables, bike,
     /// the rider's disc files) stay each machine's own, all but the preset (N13), which a seat a
     /// join added on another machine could not know otherwise.
-    ///
-    /// A seat's quad (MD152) is not in the codec: while one is out the ride cannot say its state, and
-    /// a resync, a join or a restart waits for (or goes without) one.
+    /// A seat's quad out (MD172) goes in its state as a car does.
     fn encode(&self) -> Option<Vec<u8>> {
-        if self.sims.iter().any(|s| s.quad.is_some()) {
-            return None;
-        }
         let mut out = (self.sims.len() as u32).to_le_bytes().to_vec();
         for sim in self.sims.iter() {
             let bytes = seat_bytes(sim);
