@@ -2487,6 +2487,7 @@ mod own_hand_outs; // MD128: what the own calls hand out in turn, unhooked
 mod drives; // MD135: MD107's five drives, the port's frame beside the interpreter's
 mod class_step; // MD151: the buggy's class step
 mod movers; // MD131: the tire step on what a tire stands on
+mod shell; // MD159: MD39b's five drives through the shell's car
 
 use own_calls::*;
 use own_hand_outs::*;

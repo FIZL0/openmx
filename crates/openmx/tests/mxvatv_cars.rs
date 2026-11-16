@@ -8,8 +8,9 @@
 //! The shell's car is held to the type MD135's replays prove the step on: each of the five, switched
 //! to and driven on the gas, says its body's position and velocity words as it is left, and the same
 //! car made here off the same pack files at the spot the shell took it, stepped on the same pad over
-//! the same free09, must come to those words bit for bit. (MD39b's drives through the Ride itself
-//! are MD149a's, still open.)
+//! the same free09, must come to those words bit for bit. MD39b's five drives through this very car
+//! (seeded from each drive's image, fed its tape) are MD159's, in game-sim's
+//! tests/mxvatv_car_frame/shell.rs, beside the interpreter whose readers live there.
 //!
 //! This rides the binary headless on hand-written tapes, as mxvatv_atv.rs does. It skips with no
 //! disc, and the car half with no pack in this checkout's `mods/machines/`.

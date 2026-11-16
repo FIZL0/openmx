@@ -3827,11 +3827,40 @@ impl MxvatvCarRide {
         let Some(r) = self.ridden.as_deref_mut() else { return };
         r.rest.clear();
         r.step(pad, table, dt, world);
+        self.count_wreck();
+    }
+
+    /// One more wreck when it went down this tick.
+    fn count_wreck(&mut self) {
+        let Some(r) = self.ridden.as_deref() else { return };
         let down = r.down();
         if down && !self.was_down {
             self.wrecks += 1;
         }
         self.was_down = down;
+    }
+
+    /// The car seeded as `ride` (MD159: a car read off a RAM image of the original's), taken where its
+    /// node stands, along its forward row flattened, with no wrecks yet.
+    pub fn seed(&mut self, ride: game_sim::atv_car::Ride) {
+        self.was_down = ride.down();
+        self.ridden = Some(Box::new(ride));
+        let (at, forward) = self.place().expect("a car is out");
+        (self.taken_at, self.taken_along, self.wrecks) = (at, level(forward).unwrap_or(Vf::new(0.0, 0.0, 1.0, 0.0)), 0);
+    }
+
+    /// **One tick of it on `pad` through `table`, the car's frame answered by `rest`** (MD159): the
+    /// pad's input step as [`MxvatvCarRide::step`] takes it, then the car's frame alone through the
+    /// Ride's own chain with `rest` in place of an MX Unleashed world
+    /// ([`game_sim::atv_car::Ride::frame_with`]: no collision record, world box, class update or
+    /// put-back spot), and its wrecks counted; `rest` back, `None` with no car out.
+    pub fn step_with<R: game_sim::atv_car::Steps>(&mut self, pad: &game_sim::input::Pad, table: &game_sim::bindings::Table, dt: F, rest: R) -> Option<R> {
+        let r = self.ridden.as_deref_mut()?;
+        r.rest.clear();
+        r.pad(pad, &game_sim::input::AxisRange::PLAYER, table);
+        let rest = r.frame_with(dt, rest);
+        self.count_wreck();
+        Some(rest)
     }
 
     /// The matrix it is drawn by: its scene node's world rows and origin, while it is out.
