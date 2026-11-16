@@ -2562,14 +2562,20 @@ impl Machine {
     }
 
     /// Once a frame after the substeps: the yaw-rate hold, the gear change, the wreck and stuck
-    /// timer, and the car's speeds, angles and frame.
-    pub fn measure(&mut self, car: &Car, world: &impl crate::world::World, dt: F, acos: &AcosTable) {
+    /// timer (and the stuck reset it calls, [`Machine::put_upright`]), and the car's speeds, angles
+    /// and frame. The wreck step runs ahead of the speeds and the frame, as the original's measure
+    /// calls it (C34's capture: the reset frame's speeds and frame are the reset body's, and its turn
+    /// is built from the frame before's forward).
+    pub fn measure(&mut self, car: &Car, world: &mut impl crate::world::World, dt: F, acos: &AcosTable) {
         use crate::contact::{dot, minus};
         hold_yaw_rate(&mut self.body.rates, self.controls.yaw_rate_limit);
         let mut tires = self.drive_tires(car);
         self.drivetrain.shift(self.controls.engaged_clutch, dt, &mut tires);
         self.put_drive_tires(car, &tires);
         self.event = self.wreck_timer(car, world, dt);
+        if self.event == Some(CarEvent::Reset) {
+            self.put_upright(world);
+        }
         self.was_grounded = self.grounded;
         self.grounded = self.wheels.iter().any(|w| w.s.grounded);
         let b = &self.body;
@@ -2644,9 +2650,10 @@ impl Machine {
     /// **The stuck reset** (S335): what the original does to a car its stuck timer gives up on
     /// ([`CarEvent::Reset`]) — a car on its roof with the gas held, or one wedged against something.
     /// The ground under the body is asked where it is and which way it faces; the body is turned to
-    /// stand on that ground, its nose along the car's last forward, and moved so that a point half a
-    /// foot under the ground along its normal is the model's origin. Every speed, push and spin is
-    /// cleared. The integrator's history (the last position and turn) is left as it was.
+    /// stand on that ground, its nose along the car's forward as the frame before's measure left it,
+    /// and moved so that a point half a foot under the ground along its normal is the model's origin.
+    /// Every speed, push and spin is cleared. The integrator's history (the last position and turn) is
+    /// left as it was. Bit-exact against the original's reset (C34, car_drive.rs `the_roof_reset_*`).
     pub fn put_upright(&mut self, world: &mut impl crate::world::World) {
         use crate::chassis::{CLEAR, turn};
         let (point, normal) = world.ground(self.body.position);
@@ -2736,10 +2743,6 @@ impl<W: crate::world::World, N: FnMut(F) -> F> crate::biplane::Dynamics for Step
             c.refresh(&self.m.body, &mut *self.world);
         }
         self.m.measure(self.car, self.world, dt, self.acos);
-        // The stuck reset runs in the post's wreck step, after the measure (S335).
-        if self.m.event == Some(CarEvent::Reset) {
-            self.m.put_upright(&mut *self.world);
-        }
     }
 }
 

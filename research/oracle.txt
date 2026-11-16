@@ -9108,6 +9108,16 @@ car_reset                   boot 0x00396f50 (car): car vt+0x19c. buf = body +0x6
 #                                           +0x60.xyz = P + ((-0.5*N) + t), w P's; then body vt+0x34.
 body_stop                   boot 0x001f7910 (body): +0x70 velocity, +0x90 force, +0x1b0 rates, +0x190 moment,
 #                                           +0x1e0 twist = 0x00426d70 (0,0,0,1). +0x50/+0x160 untouched.
+# C34 — the reset and a prop strike captured (context/capture/c34/{roof,ball}.csv). Journal:
+# research/journal/2026-11-16-c34-car-roof-and-prop-capture. Tests car_drive.rs the_roof_reset_*,
+# the_ball_strike_runs_on_its_own.
+#   car_measure 0x00398150: body_wrapper_post, engine shift 0x00399bb0, then the wreck step 0x00398820
+#   (vt +0x1cc, its jalr at 0x003981d4), and only then the speeds, matrix and angles. So the reset
+#   (vt +0x19c, 0x00396f50) runs before the frame's measure and reads the frame before's forward
+#   (car +0x590); the measure that follows sees the stopped, stood-up body. (S335's "from the post"
+#   above is the post's measure.)
+#   free06 in C34's buggy state: car 0x005ff210 (body 0x006137a0); the six EyeBall bodies 0x00e0ac70,
+#   0x00e0b460, 0x00e15b60, 0x00e18650, 0x00e1b140, 0x00e1dc30 (port collections 0..5).
 # MD63 — MX vs. ATV's clutch and preload, ported under Handling::MxVsAtv (crates/game-sim/src/handling/step.rs;
 # tests/mxvatv_step.rs runs both off state04.ee.bin). Journal: research/journal/2026-10-29-md63-mxvatv-step.
 # Clutch fields, bike-relative: +0x12c0 clutch lever, +0x314 gas lever, +0xc38 speed, +0x1348 ramp timer,
