@@ -87,7 +87,8 @@ fn a_free_ride_on_the_same_track_is_no_race() {
 
 /// P313a: a one-player race fills the grid's other lanes with AI riders. `--racers 4` gives three,
 /// each in a lane of its own behind the closed gate, with its brain spawned, and a computer's card
-/// each beside the human's on the lap line. The gate holds them until the drop.
+/// each beside the human's on the lap line. The gate holds them until the drop, and then they race
+/// (S331b).
 #[test]
 fn a_race_of_four_has_three_ai_riders_behind_the_gate() {
     let Some(said) = ride(&["--race", "--laps", "3", "--racers", "4"]) else { return };
@@ -114,4 +115,10 @@ fn a_race_of_four_has_three_ai_riders_behind_the_gate() {
         let at = xyz(held, "at");
         assert!(at[2] < gate[2], "{held}: through the closed gate at {gate:?}");
     }
+    // S331b: after the drop they race, on sx01's AI net, reading their cards as the race moves them
+    // on: one of them takes the lead from the human, who sits still on the grid.
+    assert!(line(&said, "race: AI net tracks\\sx01\\sx01AI.tdf, 38 paths").is_some(), "no AI net:\n{said}");
+    let after = said.split("race: gate dropped at tick ").nth(1).unwrap_or_default();
+    let led = (2..=4).any(|k| after.lines().any(|l| l == format!("race: player {k} in place 1")));
+    assert!(led, "no AI rider took the lead after the drop:\n{said}");
 }

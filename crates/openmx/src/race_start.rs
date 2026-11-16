@@ -191,6 +191,21 @@ pub fn race_file_name(stem: &str) -> String {
     format!("tracks\\{stem}\\{stem}.tdf")
 }
 
+/// S331b: the track's AI path file, beside its race file: `tracks\<stem>\<stem>AI.tdf`.
+pub fn ai_file_name(stem: &str) -> String {
+    format!("tracks\\{stem}\\{stem}AI.tdf")
+}
+
+/// S331b: the track's AI net off its AI file `file`, stood on `terrain` ([`game_sim::ai::race_net`]),
+/// handed to `sim`'s AI lane for its race drivers to follow. Answers the net's path count, `None` for
+/// a file that does not read or load, or a Sim with no lane.
+pub fn give_ai_net(sim: &mut game_sim::Sim, file: &[u8], terrain: &mut dyn game_sim::world::World) -> Option<usize> {
+    let t = race::TrackFile::parse(file).ok()?;
+    let net = game_sim::ai::race_net(&t, Some(terrain))?;
+    let paths = net.paths.len();
+    sim.give_ai_net(net).then_some(paths)
+}
+
 /// P313: a race's laps off the track's race file, as the track object and the supercross loader leave
 /// it — the file read, its paths snapped to `terrain` (S295), the paths walked and their gate spots
 /// found (S293), and the finish line stood in the finish-gate prop facing along the path at its new

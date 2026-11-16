@@ -6160,13 +6160,15 @@ impl Pilot {
     /// `world`, its generic avoidance walks and sweeps a [`WorldScene`] of it, the trick plan asks the
     /// rider's `tricks`, and the levers it hands off come back as the bike's controls
     /// ([`ride_controls`], the clutch the habits pull). The card's settle word and racing bit are the
-    /// habits' air time and racing bit, which the original keeps in the card.
+    /// habits' air time and racing bit, which the original keeps in the card. A mode-2 or mode-4
+    /// brain drives by `racing` ([`racing_of`]); `None` tells [`Told::missing`] so.
     #[allow(clippy::too_many_arguments)] // the tick's world, as Around has it
     pub fn think(
         &mut self, mount: Mount<'_>, world: &mut dyn crate::world::World, seek_world: &mut seek::World,
-        tables: &Tables, others: &[Other], tricks: Option<(&Set, &mut Tricks)>, rng: &mut Rng, dt: F,
+        tables: &Tables, others: &[Other], tricks: Option<(&Set, &mut Tricks)>, racing: Option<Racing<'_>>, rng: &mut Rng,
+        dt: F,
     ) -> Thought {
-        self.think_among(mount, world, &[], seek_world, tables, others, tricks, rng, dt)
+        self.think_among(mount, world, &[], seek_world, tables, others, tricks, racing, rng, dt)
     }
 
     /// [`Pilot::think`] with the riders' bikes in its scene's moving world (S326, [`Ridden`]): the
@@ -6176,7 +6178,7 @@ impl Pilot {
     pub fn think_among(
         &mut self, mount: Mount<'_>, world: &mut dyn crate::world::World, ridden: &[Ridden],
         seek_world: &mut seek::World, tables: &Tables, others: &[Other], tricks: Option<(&Set, &mut Tricks)>,
-        rng: &mut Rng, dt: F,
+        racing: Option<Racing<'_>>, rng: &mut Rng, dt: F,
     ) -> Thought {
         let cell = world.wooded().2.map_or(F(0.0), |t| t.cell());
         let lent = Lent::new(world);
@@ -6224,7 +6226,7 @@ impl Pilot {
             levers: &mut self.levers,
             yaw_rate: mount.yaw_rate,
             velocity: mount.velocity,
-            racing: None,
+            racing,
         };
         let told = self.racer.tick(&mut around, rng, dt);
         self.recovery = around.recovery;
@@ -6243,6 +6245,10 @@ pub struct Lane {
     pub tables: std::sync::Arc<Tables>,
     pub rng: Rng,
     pub pilots: Vec<(usize, Pilot)>,
+    /// The track's AI path net the race driver follows (S331b, [`race_net`]): the brains' `+0xdc`,
+    /// one net they all share. `None` — a free ride, or a race whose track has no AI file — and a
+    /// mode-2 brain's race driver answers false. Shared with every copy of the lane until one walks it.
+    pub net: Option<std::sync::Arc<crate::race::TrackPaths>>,
 }
 
 // --- the lane at a map's load (S331) -------------------------------------------------------------------
@@ -6263,8 +6269,8 @@ pub const SEAT_LOOK_AHEAD: f32 = 0.5;
 
 /// What an AI rider's race gives its seat and card at the spawn ([`Lane::spawn`]): the race's phase
 /// and whether it has an AI path net ([`Seat::race_phase`], [`Seat::path_net`]), whether the rider is
-/// live ([`Seat::live`]), and its race card ([`Pilot::card`]). The lane keeps them as they are handed
-/// in: nothing in the Sim moves them on with the race yet.
+/// live ([`Seat::live`]), and its race card ([`Pilot::card`]). On a race with laps the Sim reads them
+/// again before every think ([`Pilot::read_laps`], S331b); otherwise they stay as handed in.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Entry {
     pub race_phase: Option<i32>,
@@ -6319,7 +6325,78 @@ impl Lane {
                 (player, pilot)
             })
             .collect();
-        Lane { seek, tables, rng, pilots }
+        Lane { seek, tables, rng, pilots, net: None }
+    }
+}
+
+// --- the lane's race words, each tick (S331b) ----------------------------------------------------------
+
+/// The score manager's started bit (its `+0x5c` bit 0, [`crate::race::Laps::start`] at the drop):
+/// with it down, or no card, an AI rider's hand-off lets go of the levers ([`hand_off`]'s `live`).
+pub const RACE_STARTED: u32 = 0x01;
+
+/// **The track's AI path net** (S331b), as the race activity's load leaves it: `<track>AI.tdf` read,
+/// every node's points stood on `terrain` with a floor at 0 ([`crate::race::TrackFile::snap_to_ground`],
+/// as [`path::Net::load`] does), the paths walked, their gate spots found and the lap measured
+/// ([`crate::race::TrackPaths::load`], as the race file's), and the reach a spot is looked for in set
+/// to the race's [`crate::race::RACE_REACH`], 125 ahead and 75 behind, as the load sets it on both of
+/// the race's files. `None` for a file whose paths do not walk or load.
+///
+/// The nodes the original raises onto the scene's props stay on the terrain, as the shell's race file
+/// does ([`crate::race::TrackFile::raise_on_props`] is not asked).
+pub fn race_net(file: &crate::race::TrackFile, terrain: Option<&mut dyn crate::world::World>) -> Option<crate::race::TrackPaths> {
+    let mut file = file.clone();
+    file.snap_to_ground(terrain);
+    let (mut t, _) = crate::race::TrackPaths::load(&file)?;
+    (t.ahead, t.behind) = crate::race::RACE_REACH;
+    Some(t)
+}
+
+impl Pilot {
+    /// **The race's words, read again each tick** (S331b). The original's brain holds pointers to
+    /// its card (`+0xd4`) and race (`+0xd8`) and reads their words as they stand at its tick; the
+    /// port's seat and card are copies, so the lane copies them from the race's `laps` before every
+    /// think: the card's flags and progress from the player's lap card (its settle word and bike word
+    /// stay the pilot's, [`Pilot::think`] writes the one), the race phase from the manager's race
+    /// kind (its `+0x60`, which the seeker holds a fast-lap rider by), the path net from whether the
+    /// lane has one, and live from the card and the manager's [`RACE_STARTED`] bit, as the hand-off
+    /// reads them (the rider's card word, and its manager's `+0x5c` bit 0). A player with no card on
+    /// the laps has none, and is not live.
+    pub fn read_laps(&mut self, laps: &crate::race::Laps, net: bool) {
+        let lap = laps.card(self.seat.player);
+        self.card = lap.map(|l| Card { flags: l.flags, progress: l.progress, ..self.card.unwrap_or_default() });
+        self.seat.race_phase = Some(laps.rules.lap.kind);
+        self.seat.path_net = net;
+        self.seat.live = lap.is_some() && laps.rules.lap.flags & RACE_STARTED != 0;
+    }
+}
+
+/// **What player `player`'s race driver drives by** (S331b, [`Around::racing`]), off the race's
+/// `laps` as they stand this tick: the race's kind, the race track's reach (its `+0x38`) and the
+/// line's spot; the player's lap card's flags, distances to the line, on-the-track word, where it
+/// saw the rider and its kept spot; the race track's paths and its line gate's centre and normal;
+/// the manager's flag word (its `+0x5c`); and `net`, the lane's AI net.
+///
+/// The card's next gate is `None`: the laps keep no chain of gates (only a gate race has one, and
+/// only the gate driver, mode 4, reads it).
+pub fn racing_of<'a>(laps: &'a crate::race::Laps, player: usize, net: Option<&'a mut crate::race::TrackPaths>) -> Racing<'a> {
+    let card = laps.card(player).map(|l| drive::Card {
+        flags: l.flags,
+        to_line_kept: l.to_line_kept,
+        to_line: l.to_line,
+        on_track: l.on_track as u32,
+        seen: l.seen,
+        kept_spot: l.kept_spot,
+        gate: None,
+    });
+    Racing {
+        race: Some(drive::Race { kind: laps.rules.lap.kind, track_reach: laps.track.ahead, line_spot: laps.course.line_spot }),
+        card,
+        net,
+        track: Some(&laps.track),
+        gate: None,
+        line: Some((laps.course.line.centre, laps.course.line.normal)),
+        race_word: Some(laps.rules.lap.flags),
     }
 }
 

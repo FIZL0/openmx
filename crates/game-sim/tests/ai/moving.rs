@@ -250,7 +250,7 @@ fn s326_the_feelers_meet_another_riders_bike() {
             let t = std::mem::take(&mut *theirs.borrow_mut());
 
             let mount = Mount { rider: ai::Rider { velocity, ..bike.rider }, cofg, yaw_rate: &mut yaw_rate, velocity: &mut velocity };
-            let thought = pilot.think_among(mount, &mut world, &ridden, &mut seek_world, &tables, &bike.others, None, &mut rng, dt);
+            let thought = pilot.think_among(mount, &mut world, &ridden, &mut seek_world, &tables, &bike.others, None, None, &mut rng, dt);
 
             // The walk: the four bikes, collidable and of the AI_IGNORE class, as the port's moving
             // world; and so neither side sweeps one.
