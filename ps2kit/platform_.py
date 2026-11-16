@@ -148,7 +148,7 @@ def pcsx2_config_dir(instance_n: str = '') -> Path:
 
 def copies_root() -> Path:
     """Where kit-managed PCSX2 copies live: beside the runner's worktrees (`agent-runner home slots`, from
-    runner settings), never inside the repo."""
+    runner settings), never inside the repo or beside it in the repos folder."""
     from ps2kit.config import ROOT
     try:
         out = subprocess.run(['agent-runner', 'home', 'slots'], cwd=ROOT, capture_output=True, text=True)
@@ -156,17 +156,11 @@ def copies_root() -> Path:
         out = None
     if out is not None and not out.returncode and out.stdout.strip():
         return Path(out.stdout.strip()) / 'pcsx2'
-    return _slots_home_before_0_13() / 'pcsx2'
-
-
-def _slots_home_before_0_13() -> Path:
-    """`agent-runner home slots` for a runner without the subcommand (before 0.13.1, or none installed):
-    those keep worktrees in `<main checkout>-slots/` beside the main checkout, whichever worktree asks."""
-    from ps2kit.config import ROOT
+    # no runner to ask: its default home, ~/runs/<main checkout's folder name>
     out = subprocess.run(['git', 'rev-parse', '--path-format=absolute', '--git-common-dir'], cwd=ROOT,
                          capture_output=True, text=True)
     main = Path(out.stdout.strip()).parent if not out.returncode and out.stdout.strip() else ROOT
-    return main.parent / f'{main.name}-slots'
+    return Path.home() / 'runs' / main.name / 'pcsx2'
 
 
 def pcsx2_cmd(cmd: str) -> list[str]:
