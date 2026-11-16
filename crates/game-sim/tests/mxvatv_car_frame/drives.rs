@@ -16,7 +16,7 @@ use drive::Drive;
 /// and search (the search answered by the original's, [`sort_answer`]), a struck object's listeners,
 /// the database's moves and the gather, the node's rebound, the respawn, and the sound, pad and look
 /// calls (the shift's sound and the preload's cue among them).
-const HANDED_OUT: [&str; 17] = [
+pub(crate) const HANDED_OUT: [&str; 17] = [
     "SortPlace",
     "SortSearch",
     "Struck",
@@ -39,7 +39,7 @@ const HANDED_OUT: [&str; 17] = [
 /// The sort probe's search as the original's left it in RAM (the struck flag, and each hit's ray,
 /// point, normal and record: MD127's [`hook_sort`] the other way round), for the port's
 /// [`Call::SortSearch`].
-fn sort_answer(ee: &Ee, p: &Ptrs) -> SortAnswer {
+pub(crate) fn sort_answer(ee: &Ee, p: &Ptrs) -> SortAnswer {
     let mut a = SortAnswer { found: ee.u8_at(p.sort_probe + sort::FLAGS) & 0x20 != 0, ..SortAnswer::default() };
     if !a.found {
         return a;
@@ -66,9 +66,9 @@ fn sort_answer(ee: &Ee, p: &Ptrs) -> SortAnswer {
 }
 
 /// [`Oasis`] with the sort's search answered as the original's frame answered it.
-struct Beside<'t> {
-    oasis: Oasis<'t>,
-    sort: SortAnswer,
+pub(crate) struct Beside<'t> {
+    pub(crate) oasis: Oasis<'t>,
+    pub(crate) sort: SortAnswer,
 }
 
 impl Steps for Beside<'_> {
@@ -101,7 +101,7 @@ struct Seen {
 
 /// Runs the original's world step from inside its hook, on the world and tick it was handed, and
 /// leaves the machine as a return from it would.
-fn world_step_inside(ee: &mut Ee) -> (u32, F) {
+pub(crate) fn world_step_inside(ee: &mut Ee) -> (u32, F) {
     let (world, dt) = (ee.r(4) as u32, F(ee.f(12)));
     let (sp, ra, stack) = (ee.r(29), ee.r(31), ee.stack);
     ee.stack = (sp as u32 - 0x100) & !0xf;
