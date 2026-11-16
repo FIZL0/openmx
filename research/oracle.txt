@@ -10145,6 +10145,14 @@ atv_car_crash_test          atv 0x004cd110 = the car's crash test (a0 car, f12 d
 # atv_vehicle_unwreck (13 divides the scale by the throw's; reason 0, clock 0, latch kept). 0x00490ecc reads
 # max - clock. Crash capture: context/capture/md80a/biplane3crash.csv (research/md80a/biplane3crash.pad from
 # biplane3.ee.bin): reason 1 at row 297 (frame 298), back to 0 at row 448 (frame 449).
+# MD113 — the crash mask (tests/mxvatv_biplane_wreck.rs the_mxvatv_crash_mask_is_the_ports_vehicle_category;
+# journal research/journal/2026-11-16-md113-mxvatv-crash-mask). +0x30c = atv_category_of(*0x0038d400, "VEHICLE"
+# 0x005265a1), written once, by MXVehicle's ctor 0x004a49c0 (bit 0x4: VEHICLE is name 2 of 19 in biplane3's table).
+# A collidable's +0x94 is its category word; the biplane's init 0x004c0150 ORs MACHINE (0x00527ac7) | +0x30c |
+# DYNAMICOBJECT (0x00527acf) into its frame mesh (+0xd0): 0x43804 with PHYSICSBODY|PHYSICSOBJECT. MX Unleashed's
+# table (pointer 0x0041db50, 22 names) has VEHICLE at 13 = 0x2000 (biplane_vehicle_flag): same rule by name, other
+# bits (MXU's 0x4 is SOLIDFOLIAGE, the port's TREE). Every machine image (md39a, md80a) has one VEHICLE collidable
+# in the world, the player's own: the class's second object is out (+0x20 0).
 
 # MD89 — the quadtree sub-database's moving-entry virtuals (game-sim atv_spatial.rs Tree; atv_spatial's Database
 # dispatches List/Tree). Journal: research/journal/2026-11-02-md75-atv-frame/8-spatial-move.md "MD89". Proof:
