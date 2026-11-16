@@ -1364,7 +1364,8 @@ impl Flight {
         self.aero.true_speed = true_speed;
         let m = &self.measure;
         // What the world rays last struck, in the plane's mask of categories the speed rule spares.
-        // SLUS-21104's record strikes no object in the port's worlds (no props: [`RecordOnPlane`]).
+        // SLUS-21104's record strikes no object in the port's worlds (no props: [`RecordOnPlane`]). Its
+        // mask is the same category by name, VEHICLE, in its own table's bit (MD113).
         let ignored = self.record_mxvatv.is_none() && self.record.struck.is_some_and(|o| flight_search::category(o) & VEHICLE != 0);
         let c = CrashContact { touching, ignored, grounded: m.grounded, speed: m.airspeed, up_y: F(m.up.y()), holed, bare };
         let b = &mut self.body;

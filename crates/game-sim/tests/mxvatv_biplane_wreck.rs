@@ -8,7 +8,7 @@
 //! the plane recovers (a thrown one keeping 0.3 of its velocity). The wreck entry starts the clock at
 //! zero.
 //!
-//! Two proofs:
+//! Three proofs:
 //!
 //! 1. **the oracle**: ten thousand generated cases of the crash test on MD80a's biplane3 image
 //!    (`context/mxvatv-ps2/md80a/biplane3.ee.bin`), with the real wreck check, terrain edge test and
@@ -21,6 +21,9 @@
 //!    with a port [`Crash`] beside it, fed each frame from the plane's words; the port's reason, clock
 //!    and latch must equal the original's after every frame, the port's own clock running from the
 //!    wreck to the recovery.
+//! 3. **the crash mask** (MD113): the plane's mask and a struck object's class are categories by name,
+//!    VEHICLE in each game's own bit; the original's crash test, struck by each class on the image,
+//!    spares exactly what the port's [`game_sim::flight_search::VEHICLE`] rule spares.
 //!
 //! Skips without the image, the capture or its tape.
 
@@ -528,4 +531,114 @@ fn the_mxvatv_wreck_clock_matches_the_crash_capture() {
     assert_eq!(b.wrecked[0].1, 1, "the capture's wreck is a crash");
     assert_eq!(b.recovered.len(), 1, "the port's recoveries {:?}", b.recovered);
     assert!(b.recovered[0] > b.wrecked[0].0 + 140, "recovered {} frames after the wreck", b.recovered[0] - b.wrecked[0].0);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// 3 — the crash mask (MD113)
+// ---------------------------------------------------------------------------------------------------
+
+/// The pointers to the collision categories' name tables: SLUS-21104's (the port's
+/// [`game_sim::handling::update::CATEGORY_NAMES`]) and MX Unleashed's (read by its plane's loader).
+const MXU_CATEGORY_NAMES: u32 = 0x0041_db50;
+/// The collidables' vtables in biplane3's image (at `+0xc`, their second at `+0x1c`, `+0x94` the class;
+/// a moving one's `+0x20` the world it is in, 0 when out: the static scenery's is 0 too).
+const COLLIDABLE_VTABLES: std::ops::Range<u32> = 0x003b_0000..0x003d_0000;
+
+/// A name table's names in bit order: bit `i` is `1 << i` (game_sim::handling::update::category).
+fn category_names(ee: &Ee, pointer: u32) -> Vec<String> {
+    let table = ee.u32_at(pointer);
+    (0..ee.u32_at(table))
+        .map(|i| {
+            let at = table + 4 + 32 * i;
+            (0..32).map(|k| ee.u8_at(at + k)).take_while(|&b| b != 0).map(char::from).collect()
+        })
+        .collect()
+}
+
+/// A class word of one game's table in another's, by name.
+fn translate(class: u32, from: &[String], to: &[String]) -> u32 {
+    (0..32).filter(|i| class & 1 << i != 0).fold(0, |w, i| {
+        let name = from.get(i as usize).unwrap_or_else(|| panic!("class bit {i} of {class:#x} has no name"));
+        let j = to.iter().position(|n| n == name).unwrap_or_else(|| panic!("{name} is not in the other table"));
+        w | 1 << j
+    })
+}
+
+/// The plane's crash mask (`+0x30c`) is MXVehicle's category("VEHICLE"), and the struck object's class
+/// (`+0x94`) is a collidable's category word. Categories are bits by a name's place in a table built as
+/// the game asks for them, so the same name has another bit in each game: SLUS-21104's VEHICLE is 0x4,
+/// MX Unleashed's (the port's [`flight_search::VEHICLE`]) 0x2000. Every collidable in biplane3's world
+/// struck by the plane, through the original crash test, wrecks it exactly when its class in MX
+/// Unleashed's names misses the port's VEHICLE; and the port's own categories are those classes by name.
+#[test]
+fn the_mxvatv_crash_mask_is_the_ports_vehicle_category() {
+    use game_sim::flight_search;
+    let Some(mut ee) = image() else { return };
+    let kit = Kit::load().unwrap();
+    let path = kit.ctx("states").join(format!("biplane.p2m2_SaveState.eeMemory{}", ".bin"));
+    if !path.exists() {
+        skip(&format!("{} is not there: `./kit state ram` of biplane.p2m2_SaveState.p2s", path.display()));
+        return;
+    }
+    let mxu = Ee::from_ram(&path).unwrap_or_else(|e| panic!("{e}"));
+    let atv_names = category_names(&ee, game_sim::handling::update::CATEGORY_NAMES);
+    let mxu_names = category_names(&mxu, MXU_CATEGORY_NAMES);
+    let bit = |names: &[String], name: &str| 1u32 << names.iter().position(|n| n == name).unwrap_or_else(|| panic!("no {name}"));
+    let to_port = |class: u32| translate(class, &atv_names, &mxu_names);
+
+    // the mask: VEHICLE by name in both games, the port's VEHICLE in MX Unleashed's bits
+    assert_eq!(ee.u32_at(PLANE + at::MASK), bit(&atv_names, "VEHICLE"), "the plane's mask");
+    assert_eq!(bit(&mxu_names, "VEHICLE"), flight_search::VEHICLE, "MX Unleashed's VEHICLE");
+    assert_eq!(to_port(ee.u32_at(PLANE + at::MASK)), flight_search::VEHICLE);
+
+    // the image's collidables
+    let mut world: Vec<(u32, u32)> = Vec::new();
+    for a in (0x0010_0000..0x01ff_ff00u32).step_by(4) {
+        let vt = ee.u32_at(a + 0xc);
+        if COLLIDABLE_VTABLES.contains(&vt) && ee.u32_at(a + 0x1c) == vt + 0x10 {
+            world.push((a, ee.u32_at(a + at::CLASS)));
+        }
+    }
+    let plane_mesh = ee.u32_at(PLANE + 0xd0);
+    let classes: std::collections::BTreeSet<u32> = world.iter().map(|&(_, c)| c).collect();
+    println!("biplane3's image: {} collidables, classes {:x?}", world.len(), classes);
+    let class_of = |a: u32| world.iter().find(|&&(o, _)| o == a).map(|&(_, c)| c);
+    // the port's categories are the same names in MX Unleashed's bits: the plane's collidable, the
+    // scenery's meshes (STATICOBJECT | CAMERACOLLISION) and the foliage (SOLIDFOLIAGE: the port's trunks)
+    assert_eq!(class_of(plane_mesh).map(to_port), Some(game_sim::flight::COLLIDABLE), "the plane's collidable");
+    assert!(classes.contains(&(bit(&atv_names, "STATICOBJECT") | bit(&atv_names, "CAMERACOLLISION"))));
+    assert_eq!(to_port(bit(&atv_names, "STATICOBJECT") | bit(&atv_names, "CAMERACOLLISION")), flight_search::SCENERY);
+    assert_eq!(to_port(bit(&atv_names, "SOLIDFOLIAGE")), flight_search::TREE);
+    // the only VEHICLE in the world is the plane itself: the second plane's is out of it
+    let in_world = |a: u32| ee.u32_at(a + 0x20) != 0;
+    let vehicles: Vec<(u32, bool)> = world.iter().filter(|&&(_, c)| c & ee.u32_at(PLANE + at::MASK) != 0).map(|&(a, _)| (a, in_world(a))).collect();
+    assert_eq!(vehicles.iter().filter(|v| v.1).map(|v| v.0).collect::<Vec<_>>(), [plane_mesh], "VEHICLE collidables in biplane3's world: {vehicles:x?}");
+
+    // each class struck, flying fast and level: the original wrecks unless the port's rule spares it
+    ee.hooks.insert(RAND, Box::new(|ee| ee.set(2, 0)));
+    ee.hooks.insert(POST_EVENT, Box::new(|_| {}));
+    ee.hooks.insert(UNWRECK, Box::new(|_| {}));
+    ee.hooks.insert(RUMBLE_ON, Box::new(|ee| ee.set(2, 0)));
+    let record = ee.u32_at(PLANE + at::RECORD);
+    // a struck class of every collidable, and every single bit of either table
+    let struck: Vec<u32> = classes.iter().copied().chain((0..atv_names.len()).map(|i| 1 << i)).collect();
+    // (each case sets every word the test reads; the wreck entry's writes are not among them)
+    let (mut spared, mut wrecked) = (0, 0);
+    for class in struck {
+        let thing = world.iter().find(|&&(_, c)| c == class).map_or(0x01f8_0100, |&(a, _)| a);
+        ee.set_u32(thing + at::CLASS, class);
+        ee.set_u32(PLANE + at::REASON, 0);
+        ee.set_u32(record + at::TOUCHING, 1);
+        ee.set_u32(record + at::STRUCK, thing);
+        ee.set_f32(PLANE + at::SPEED, 150.0);
+        ee.set_f32(PLANE + at::UP_Y, 1.0);
+        ee.call(CRASH_TEST, &[u64::from(PLANE)], &[f32::from_bits(DT)], CALL_BUDGET);
+        let port_spares = to_port(class) & flight_search::VEHICLE != 0;
+        let wrecks = ee.u32_at(PLANE + at::REASON) == 1;
+        assert_eq!(wrecks, !port_spares, "struck class {class:#x} (the port's {:#x})", to_port(class));
+        spared += usize::from(port_spares);
+        wrecked += usize::from(wrecks);
+    }
+    println!("the crash mask: {spared} classes spared, {wrecked} wreck");
+    assert!(spared >= 2 && wrecked >= 10, "the classes miss a side");
 }
