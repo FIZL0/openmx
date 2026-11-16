@@ -244,6 +244,7 @@ mod plane_draw;
 mod kiowa_draw;
 mod car_draw;
 mod quad_draw;
+mod mxvatv_car_draw;
 mod perf;
 mod portal;
 mod ride_hud;
@@ -2055,6 +2056,13 @@ fn car_drivers(seats: &[Seat], rigs: &mut [Rig], assets: &Assets, before: &[Opti
             Some(Pilot { plane: at, at: root.mul(at), palette })
         })
         .collect()
+}
+
+/// Where a seat's MX vs. ATV car is drawn this frame (MD157): its scene node, slid from the tick
+/// before's (`before`) as the car is.
+fn mxvatv_car_drawn(car: &vehicle::MxvatvCarRide, before: Option<M4>, blend: &pace::Blend) -> Option<M4> {
+    let now = mxvatv_car_draw::placed(car)?;
+    Some(before.map_or(now, |b| blend.slide(b, now)))
 }
 
 /// Where a seat's quad is drawn this frame (MD138): its matrix, slid from the tick before's
@@ -6389,6 +6397,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         .collect();
     // And the quad's chassis, parts and rider clips, drawn while it is out (MD138).
     let quad_look = garage.atv.as_ref().and_then(|atv| atv_look(&args, &mut assets, atv));
+    // And the MX vs. ATV car's chassis, drawn while it is out (MD157).
+    let mxvatv_car_model = garage.mxvatv_car.as_ref().and_then(|car| mxvatv_car_look(&args, &mut assets, car));
     // MD138a: and its clips ticked with its ride, off the look's stunt table (the other seats' quads
     // are this one's, copied).
     let mut garage = garage;
@@ -6444,6 +6454,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     }
     // And the MX vs. ATV car's (MD82d), on its pack's own copy of its kind's camera file.
     let car_camera_file = garage.mxvatv_car.as_ref().and_then(|c| mxvatv_car_camera(&args, c));
+    // And its engine (MD157), off its pack's `carengine.aud`.
+    let mxvatv_car_sound = garage.mxvatv_car.as_ref().and_then(|c| mxvatv_car_engine(&args, c));
     if let Some((bytes, _)) = &car_camera_file {
         car_presets.push((Kind::MxvatvCar, bytes.clone()));
     }
@@ -6736,6 +6748,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 for seat in 0..s.seats.len() {
                     s.set_own_atv(seat, atv_files.as_ref().and_then(|o| o.sounds.clone()));
                 }
+                s
+            });
+            // And the MX vs. ATV car as its pack's (MD157), among the ride's car engines.
+            let read = read.map(|mut s| {
+                s.cars.extend(mxvatv_car_sound.clone());
                 s
             });
             match read {
@@ -8179,6 +8196,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let mut before_cars: Vec<Option<M4>> = Vec::new();
     // And each seat's quad's (MD138).
     let mut before_quads: Vec<Option<M4>> = Vec::new();
+    let mut before_mxvatv_cars: Vec<Option<M4>> = Vec::new();
     // Each plane's moving parts before the tick, which the picture blends them from (V79).
     let mut before_surfaces: Vec<Option<game_sim::biplane_anim::Surfaces>> = Vec::new();
     // Each seat's cut test (P120): whether the last tick's picture is a jump from the one before.
@@ -9256,6 +9274,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         before_helis = world.seats.iter().map(|seat| seat.garage.heli_up().and_then(|h| Some((heli_at(h)?, heli_rotor(h))))).collect();
         before_cars = world.seats.iter().map(|seat| Some(car_draw::placed(seat.garage.car_up()?.driven.as_ref()?))).collect();
         before_quads = world.seats.iter().map(|seat| quad_draw::placed(seat.garage.atv_up()?)).collect();
+        before_mxvatv_cars = world.seats.iter().map(|seat| mxvatv_car_draw::placed(seat.garage.mxvatv_car_up()?)).collect();
         before_surfaces = world.seats.iter().map(|seat| seat.garage.plane.as_ref().map(Plane::surfaces)).collect();
         cuts.resize_with(world.seats.len(), pace::Cut::default);
         pause_holds.resize_with(world.seats.len(), chase::PauseHold::default);
@@ -9994,6 +10013,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     m.0[3][2] += by[2];
                 }
                 if let Some(Some(m)) = before_quads.get_mut(i) {
+                    m.0[3][0] += by[0];
+                    m.0[3][2] += by[2];
+                }
+                if let Some(Some(m)) = before_mxvatv_cars.get_mut(i) {
                     m.0[3][0] += by[0];
                     m.0[3][2] += by[2];
                 }
@@ -11163,6 +11186,19 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     }
                 }
             }
+            // And every player's MX vs. ATV car while it is out (MD157), at its scene node, posed by its
+            // tires, slid as the car is. No driver sits in it.
+            for (p, seat) in world.seats.iter().enumerate().filter(|_| !args.overview) {
+                let (Some(car), Some(drawn)) = (seat.garage.mxvatv_car_up(), mxvatv_car_model.as_ref()) else { continue };
+                let before = before_mxvatv_cars.get(p).copied().flatten().filter(|_| !cut[p]);
+                let Some(at) = mxvatv_car_drawn(car, before, &blend) else { continue };
+                let alpha = vehicle::shown_alpha(1.0, seat.paused);
+                let tires = mxvatv_car_draw::tires(car);
+                actors.extend(car_draw::actors(drawn, &assets, &tires, at, alpha, &mut gpu_poses));
+                if args.trace_picture {
+                    mxvatv_car_draw::trace(p, "gpu", drawn, &assets, at, &tires);
+                }
+            }
             // And every player's quad while it is out (MD138), at its matrix, posed from the step, slid
             // as the car is; with its rider on it.
             for (p, seat) in world.seats.iter().enumerate().filter(|_| !args.overview) {
@@ -11473,6 +11509,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             // And of its driven car's, which its tires' pose is skinned into (S245).
             let car_copies: Vec<String> = (0..world.seats.len()).map(|p| format!("car@seat{p}")).collect();
             let quad_copies: Vec<String> = (0..world.seats.len()).map(|p| format!("quad@seat{p}")).collect();
+            let mxvatv_car_copies: Vec<String> = (0..world.seats.len()).map(|p| format!("mxvatv_car@seat{p}")).collect();
             let mut actor: Vec<(&str, M4)> = Vec::new();
             for (p, (seat, rig)) in world.seats.iter().zip(&rigs).enumerate() {
                 // With the plane up the bike is nowhere (P102), and the rider is the plane's pilot —
@@ -11620,6 +11657,17 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                         }
                     }
                     actor.push((model.as_str(), pilot.at));
+                }
+            }
+            // And the MX vs. ATV car out (MD157), slid as the GPU's is.
+            for (p, seat) in world.seats.iter().enumerate().filter(|_| !args.overview) {
+                let (Some(car), Some(drawn)) = (seat.garage.mxvatv_car_up(), mxvatv_car_model.as_ref()) else { continue };
+                let before = before_mxvatv_cars.get(p).copied().flatten().filter(|_| !cut[p]);
+                let Some(at) = mxvatv_car_drawn(car, before, &blend) else { continue };
+                let tires = mxvatv_car_draw::tires(car);
+                actor.push(car_draw::skinned(drawn, &mxvatv_car_copies[p], &mut assets, &tires, at));
+                if args.trace_picture {
+                    mxvatv_car_draw::trace(p, "software", drawn, &assets, at, &tires);
                 }
             }
             // And the quad out (MD138), slid as the GPU's is, with its rider.
@@ -12358,7 +12406,8 @@ fn seat_sound(seat: &Seat, area: Option<game_sim::biplane::Area>, land: &dyn sim
         // The Kiowa's loop and clank (V114), while it is up and out.
         heli: seat.garage.heli_up().and_then(|k| k.flown.as_ref()).map(|h| audio::HeliFrame::of(&h.kiowa, &h.ride, h.touching())),
         // A driven car's engine voice (S247): its sound pitch, its top revs and the gas.
-        car: seat.garage.car_up().and_then(vehicle::CarRide::engine_sound).map(|e| audio::CarFrame {
+        // MX vs. ATV's car's too (MD157), on its pack's profile.
+        car: seat.garage.car_up().and_then(vehicle::CarRide::engine_sound).or_else(|| seat.garage.mxvatv_car_up().and_then(vehicle::MxvatvCarRide::engine_sound)).map(|e| audio::CarFrame {
             profile: e.profile,
             pitch: e.pitch,
             top: e.top,
@@ -13365,6 +13414,36 @@ fn mxvatv_car_camera(args: &Args, car: &vehicle::MxvatvCarRide) -> Option<(Vec<u
     bytes.map(|b| (b, file))
 }
 
+/// The MX vs. ATV car's own engine (MD157): its profile in its pack's `carengine.aud`
+/// ([`machine_packs::Pack::car_engine`]), kept under [`vehicle::mxvatv_car_voice`]'s name. `None`, a
+/// line saying so, where the pack is gone or reads no loop for it: the car is silent then.
+fn mxvatv_car_engine(args: &Args, car: &vehicle::MxvatvCarRide) -> Option<audio::CarEngine> {
+    let pack = machine_packs::find(&mods_dir(args)?).0.into_iter().find(|p| p.id == car.pack)?;
+    let profile = vehicle::mxvatv_car_profile(car.machine);
+    if pack.engine_file().is_empty() {
+        println!("mxvatv car: {} names no engine file; the car is silent", pack.id);
+        return None;
+    }
+    match pack.car_engine(profile) {
+        Ok((mut e, why)) => {
+            for w in &why {
+                println!("mxvatv car: {}'s engine: {w} not read", pack.id);
+            }
+            if e.loops.is_empty() {
+                println!("mxvatv car: {} reads no [{profile}] loops in {}; the car is silent", pack.id, pack.engine_file());
+                return None;
+            }
+            println!("mxvatv car: {}'s engine, [{profile}]'s {} loops in {}, {}..{} rpm", pack.id, e.loops.len(), pack.engine_file(), e.min_rpm, e.max_rpm);
+            e.name = vehicle::mxvatv_car_voice(car.machine).to_string();
+            Some(e)
+        }
+        Err(e) => {
+            println!("mxvatv car: {}'s engine: {e}; the car is silent", pack.id);
+            None
+        }
+    }
+}
+
 /// The MX vs. ATV car the ride offers (MD39c): `--mxvatv-car`'s car (settings.txt's `mxvatv_car`
 /// under the front end) off the installed car pack. None with none picked, online, or with no pack
 /// or car to read, a line saying why.
@@ -13408,6 +13487,26 @@ fn ride_mxvatv_car(args: &Args) -> Option<vehicle::MxvatvCarRide> {
         }
         Err(e) => {
             println!("mxvatv car: {e}");
+            None
+        }
+    }
+}
+
+/// What the picked MX vs. ATV car is drawn with (MD157): its pack's chassis model loaded into
+/// `assets` ([`mxvatv_car_draw::load`]), and a line saying which.
+fn mxvatv_car_look(args: &Args, assets: &mut Assets, car: &vehicle::MxvatvCarRide) -> Option<game_render::car::Car> {
+    let packs = machine_packs::find(&mods_dir(args)?).0;
+    match mxvatv_car_draw::load(assets, &packs, car) {
+        Ok((drawn, psg)) => {
+            let loaded = assets.models.get(&drawn.model);
+            let tris = loaded.map_or(0, |l| l.tris.len());
+            let textured = loaded.map_or(0, |l| l.textures.iter().filter(|t| t.is_some()).count());
+            let slots = loaded.map_or(0, |l| l.textures.len());
+            println!("mxvatv car: drawn as {psg} off {} ({tris} triangles, {textured} of {slots} materials textured)", car.pack);
+            Some(drawn)
+        }
+        Err(e) => {
+            println!("mxvatv car: undrawn: {e}");
             None
         }
     }
