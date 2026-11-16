@@ -325,3 +325,7 @@ fn untamed_node_world_update_is_the_originals() {
 /// the two agree, its stunt ids against MD147's spawn image.
 #[path = "untamed_atv/route.rs"]
 mod route;
+
+/// MD144a: the quad's out-of-bounds test and throw on Untamed's step against SLUS-21701's.
+#[path = "untamed_atv/throw.rs"]
+mod throw;
