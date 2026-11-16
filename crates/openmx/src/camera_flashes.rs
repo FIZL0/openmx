@@ -14,7 +14,7 @@ use game_render::ini;
 use game_render::mat::M4;
 use game_render::scene::{Placement, Scene};
 use game_sim::camera_flash::{self, CameraFlashes};
-use game_sim::race::{FlashLevels, HallOfFame, LapCard, PodiumFlashes, Race, RaceOver, ResultEvent, Supercross, card_flags};
+use game_sim::race::{FlashLevels, HallOfFame, LapCard, PodiumFlashes, Race, RaceOver, ResultEvent, Supercross};
 use ps2_float::F;
 
 /// The track's flash words off its `.toy`'s first `[CameraFlash]` (sx01 has two; the original keeps
@@ -42,8 +42,6 @@ pub struct Stadium {
     pub flashes: Option<CameraFlashes>,
     placed: Vec<Placement>,
     pub levels: FlashLevels,
-    /// Seconds since the race started, for `--race-win`.
-    pub clock: f32,
 }
 
 impl Stadium {
@@ -58,7 +56,7 @@ impl Stadium {
         scene.models = kept;
         let (levels, floor) = levels(toy);
         let flashes = CameraFlashes::new(placed.len() as u32, floor)?;
-        Some(Stadium { flashes: Some(flashes), placed, levels, clock: 0.0 })
+        Some(Stadium { flashes: Some(flashes), placed, levels })
     }
 
     /// How many flashes the stadium has.
@@ -71,11 +69,6 @@ impl Stadium {
         race.flashes = self.flashes.take().map(Box::new);
     }
 
-    /// The race's clock, a tick on (the flashes themselves tick in the race).
-    pub fn tick(&mut self, dt: F) {
-        self.clock += dt.0;
-    }
-
     /// `flashes`' lit flashes' models where the scene placed them, and their fades.
     pub fn shown<'a>(&'a self, flashes: &'a CameraFlashes) -> impl Iterator<Item = (&'a str, M4, f32)> + 'a {
         flashes.shown().filter_map(|(k, fade)| self.placed.get(k as usize).map(|p| (p.model.as_str(), p.transform(), fade.0)))
@@ -86,19 +79,9 @@ impl Stadium {
         self.shown(flashes).map(|(model, at, alpha)| Actor { model, at, pose: None, lod_from: None, alpha, casts: false })
     }
 
-    /// `--race-win`: the human's card wins a single race at the line, as the lap line will tell
-    /// [`Supercross::race_over`] once the shell counts laps (S301): the flashes burst toward the
-    /// player's win (`burst`, the race's flashes'), and what it answers (the fireworks) is the
-    /// caller's to show.
-    pub fn player_wins(&self, burst: &mut PodiumFlashes) -> RaceOver {
-        let card = LapCard { place: 1, flags: card_flags::PLAYER | card_flags::TAKING_PART | card_flags::OUT, ..LapCard::default() };
-        let event = ResultEvent { activity: 2, ..ResultEvent::default() };
-        let levels = self.levels;
-        Supercross::new().race_over(&card, None, &event, -1, &HallOfFame::default(), Some(burst), &levels)
-    }
-
-    /// P313: a card of the race's lap line has finished, and [`Supercross::race_over`] hears it as
-    /// [`Stadium::player_wins`] does, with the card's own place and flags.
+    /// P313: a card of the race's lap line has finished, and [`Supercross::race_over`] hears it in a
+    /// single race of `laps` laps: the flashes burst toward its finish (`burst`, the race's
+    /// flashes'), and what it answers (the fireworks) is the caller's to show.
     pub fn card_finishes(&self, card: &LapCard, laps: u8, burst: &mut PodiumFlashes) -> RaceOver {
         let event = ResultEvent { activity: 2, laps, ..ResultEvent::default() };
         let levels = self.levels;
@@ -109,6 +92,7 @@ impl Stadium {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use game_sim::race::card_flags;
 
     const SX01: &str = "[CameraFlash]\nConstantFlashPercent=0.01\nBurstDuration=2.0\nPlayerWinBurstPercent=0.3\nPlayerStuntBurstPercent=0.4\n\
         AIFinishBurstPercent=0.3\nAIStuntWinBurstPercent0.3\n\n[CameraFlash]\nConstantFlashPercent=0.025\nBurstDuration=2.0\n";
@@ -136,7 +120,8 @@ mod tests {
         s.hand_to(&mut race);
         assert!(s.flashes.is_none());
         let flashes = race.flashes.as_deref_mut().unwrap();
-        let over = s.player_wins(&mut flashes.burst);
+        let card = LapCard { place: 1, flags: card_flags::PLAYER | card_flags::TAKING_PART | card_flags::OUT, ..LapCard::default() };
+        let over = s.card_finishes(&card, 3, &mut flashes.burst);
         assert!(over.fireworks);
         assert_eq!((flashes.burst.length.0, flashes.burst.half.0), (2.0, 1.0));
         for _ in 0..30 {

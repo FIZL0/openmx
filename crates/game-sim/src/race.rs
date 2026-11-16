@@ -4747,29 +4747,25 @@ pub struct LapsFrame {
 
 impl Laps {
     /// The laps of a race on `track`, its line `course`, one card per rider in `riders` (where each
-    /// stands and its card flags, in player order) with its spot found where it stands, its distance to
-    /// the line its lap's length, and no progress yet.
-    pub fn new(rules: RaceRules, course: Course, mut track: TrackPaths, riders: &[(Vf, u64)]) -> Laps {
+    /// stands and its card flags, in player order), each joined as the manager's reset joins it
+    /// ([`RaceRules::join`]), its bike's word that of a rider standing there. The lap line reads the
+    /// lap's length off the track, as the load measured it ([`TrackPaths::load`]).
+    ///
+    /// The port's own: a fresh card's spot starts at the line's, so a rider on no stretch keeps a spot
+    /// on the paths (the original's fresh card holds none).
+    pub fn new(mut rules: RaceRules, mut course: Course, mut track: TrackPaths, riders: &[(Vf, u64)]) -> Laps {
         (track.ahead, track.behind) = RACE_REACH;
+        course.lap_length = track.lap_length;
+        let lists = LineLists { reach: F(20.0), ..LineLists::default() };
         let mut cards = Vec::with_capacity(riders.len());
         for (player, &(at, flags)) in riders.iter().enumerate() {
-            let mut spot = course.line_spot;
-            crate::ai::follow::spot(&mut track, at, false, &mut spot, None);
-            let to_line = track.distance(spot, course.line_spot, true);
-            let lap = LapCard {
-                flags,
-                to_line_kept: to_line,
-                to_line,
-                lap_length: to_line,
-                on_track: 1,
-                seen: Seen { now: at, last: at },
-                spot,
-                kept_spot: spot,
-                ..LapCard::default()
-            };
-            cards.push(Entry { player, card: RaceCard { lap, aim: spot, ..RaceCard::default() }, stats: Tracker::default() });
+            let lap = LapCard { flags, seen: Seen { now: at, last: at }, spot: course.line_spot, ..LapCard::default() };
+            let mut card = RaceCard { lap, ..RaceCard::default() };
+            let feed = CardFeed::standing(at, Vf::default());
+            rules.join(&mut card, Some(&feed), &mut track, Some(course.line_spot), &lists);
+            cards.push(Entry { player, card, stats: Tracker::default() });
         }
-        Laps { rules, course, lists: LineLists { reach: F(20.0), ..LineLists::default() }, cards, track: std::sync::Arc::new(track) }
+        Laps { rules, course, lists, cards, track: std::sync::Arc::new(track) }
     }
 
     /// The drop: the manager started, and every card that takes a line test taking part.
@@ -4953,5 +4949,166 @@ impl Laps {
     /// Player `player`'s tracker.
     pub fn stats(&self, player: usize) -> Option<&Tracker> {
         self.cards.iter().find(|e| e.player == player).map(|e| &e.stats)
+    }
+}
+
+// --- the card join (S301) ----------------------------------------------------------------------------
+
+/// Flag bits the card join reads beside [`card_flags`] and [`race_flags`].
+pub mod join_flags {
+    /// The card's flags a join keeps; every other bit is cleared and [`JOINED`] set.
+    pub const KEPT: u64 = 0x1a8_801c;
+    /// Set by every join: the jump watch's [`super::race_card_flags::WAS_GROUNDED`].
+    pub const JOINED: u64 = 0x800;
+    /// A card that keeps its best lap through a join (what sets it was not traced).
+    pub const KEEPS_BEST: u64 = 0x20_0000;
+    /// The score manager's: every card keeps its best lap, its odometer and its jump bests through a
+    /// join (what sets it was not traced).
+    pub const KEEP_CARDS: u32 = 0x1_0000;
+    /// The track's [`super::TrackPaths::word_34`] bits a join reads, for a card that takes the line
+    /// test: the card starts [`super::card_flags::BEHIND_LINE`], and its first lap cannot be its best,
+    /// [`super::card_flags::NO_BEST`].
+    pub const TRACK_BEHIND_LINE: u32 = 0x4;
+    pub const TRACK_NO_BEST: u32 = 0x8;
+}
+
+impl TrackPaths {
+    /// [`TrackPaths::find_spot`] asked for no spot, with `ahead` and `behind` negative (the card
+    /// join's on-track word): 1 when any searched stretch's ring holds `point`, else 0. With no out the
+    /// original takes the first candidate and measures nothing, so the paths' scratch words are
+    /// untouched; the candidates are gathered (and a pool that runs dry is left short) as there.
+    pub fn holds_any(&mut self, ahead: F, behind: F, point: Vf) -> i32 {
+        let (px, pz) = (F(point.x()), F(point.z()));
+        let reach = ahead + behind;
+        let mut taken = 0;
+        for i in 0..self.paths.len() {
+            if self.paths[i].flags & path_flags::NOT_SEARCHED != 0 {
+                continue;
+            }
+            for n in 0..self.paths[i].nodes.len() - 1 {
+                let (here, next) = (&self.paths[i].nodes[n], &self.paths[i].nodes[n + 1]);
+                let (hx, hz) = (F(here.points[0].x()), F(here.points[0].z()));
+                let r = here.span + reach;
+                if !(flat_sq(hx - px, hz - pz) < r * r) || !ring_holds(point, here, next) {
+                    continue;
+                }
+                if self.free_candidates == 0 {
+                    return 0;
+                }
+                self.free_candidates -= 1;
+                taken += 1;
+            }
+        }
+        self.free_candidates += taken;
+        i32::from(taken != 0)
+    }
+}
+
+impl RaceRules {
+    /// **The card join** of a path race (the score manager's mode 2, with a track), as the manager's
+    /// reset runs it on each card before the countdown.
+    ///
+    /// The card's flags keep [`join_flags::KEPT`] and take [`join_flags::JOINED`]; a card that takes
+    /// the line test starts behind the line in a ghost race or on a track that says so, and on its
+    /// track's word without a best lap ([`join_flags`]). The distances to the line are a million, the
+    /// race's counts and clocks 0, the best lap gone (unless the card or the manager keeps it), the
+    /// time left the race's limit, the next checkpoint the first, and the checkpoint words cleared
+    /// under [`race_flags::CHECKPOINTS`]. Then the owner's look at the card, its bike's word (`feed`,
+    /// [`RaceCard::feed`]; `None` for an owner that says nothing), and the card sees its rider where
+    /// it is, now and the tick before.
+    ///
+    /// Then the path: the rider's spot (the path spot at its position, holding stretches only —
+    /// [`crate::ai::follow::spot`] — left as it was when there is none) is kept and aimed at; on the
+    /// track by the spot search with no reach ([`TrackPaths::holds_any`]); and the lap is the path
+    /// distance from the spot to the line (`line_spot`; the track's lap length with no line), none of
+    /// it behind. Unless the manager keeps them, the odometer and the jump count and bests go. The
+    /// last jump, the height and speed words, the look and the path's way ahead (`(0, 0, 0, 1)`), the
+    /// warnings' clocks, the attack clock, the take-off and landing (`(0, 0, 0, 1)`) and the time on
+    /// the ground go too, the way back to the track is `(0, 0, 1)` (`w` kept), and the lap records go
+    /// back to the manager's pool.
+    ///
+    /// Left out: the words of the card the port does not keep, the listeners' calls, and a gate race's
+    /// or fast-lap attack's own work.
+    pub fn join(&mut self, card: &mut RaceCard, feed: Option<&CardFeed>, track: &mut TrackPaths, line_spot: Option<Spot>, lists: &LineLists) {
+        let c = &mut card.lap;
+        c.flags = c.flags & join_flags::KEPT | join_flags::JOINED;
+        if c.flags & card_flags::NO_LINE == 0 {
+            if self.lap.kind == race_kind::GHOST_RACE || track.word_34 & join_flags::TRACK_BEHIND_LINE != 0 {
+                c.flags |= card_flags::BEHIND_LINE;
+            }
+            if track.word_34 & join_flags::TRACK_NO_BEST != 0 {
+                c.flags |= card_flags::NO_BEST;
+            }
+        }
+        c.to_line_kept = F(1.0e6);
+        c.to_line = F(1.0e6);
+        card.on_path = F::ZERO;
+        c.progress = F::ZERO;
+        c.place = 0;
+        c.laps = 0;
+        c.runs = 0;
+        c.gates_passed = 0;
+        c.lap_time = F::ZERO;
+        c.lap_start = F::ZERO;
+        let keep = self.lap.flags & join_flags::KEEP_CARDS != 0;
+        if c.flags & join_flags::KEEPS_BEST == 0 && !keep {
+            c.best_lap = F::ZERO;
+            c.best_lap_no = -1;
+        }
+        c.race_time = F::ZERO;
+        c.lap_clock = F::ZERO;
+        c.gap = F::ZERO;
+        c.off_track = F::ZERO;
+        c.time_left = self.time_limit;
+        c.gates_this_lap = 0;
+        c.gate = (!lists.checkpoints.is_empty()).then_some(0);
+        if self.lap.flags & race_flags::CHECKPOINTS != 0 {
+            let n = lists.checkpoints.len();
+            if c.lines_passed.is_empty() {
+                c.lines_passed = vec![0; n];
+            } else {
+                c.lines_passed.iter_mut().take(n).for_each(|w| *w = 0);
+            }
+        }
+        if let Some(f) = feed {
+            card.feed(f);
+        }
+        let c = &mut card.lap;
+        c.seen.last = c.seen.now;
+        crate::ai::follow::spot(track, c.seen.now, true, &mut c.spot, None);
+        c.kept_spot = c.spot;
+        card.aim = c.kept_spot;
+        // The original hands the spot search no answer to write, which skips its measuring.
+        c.on_track = track.holds_any(F(-1.0), F(-1.0), c.seen.now);
+        c.lap_length = match line_spot {
+            Some(line) => track.distance(c.spot, line, true),
+            None => track.lap_length,
+        };
+        c.laps_length = F::ZERO;
+        let j = &mut card.jumps;
+        if !keep {
+            card.odometer = F::ZERO;
+            j.count = 0;
+            j.best_length = F::ZERO;
+            j.best_height = F::ZERO;
+            j.best_air_time = F::ZERO;
+        }
+        j.length = F::ZERO;
+        j.height = F::ZERO;
+        j.air_time = F::ZERO;
+        j.rise = F::ZERO;
+        c.record_word = 0;
+        // The path's way ahead the join asks for at the spot is written over here: neither is kept.
+        let unit_w = Vf([0.0, 0.0, 0.0, 1.0]);
+        card.look = unit_w;
+        card.ahead = unit_w;
+        card.warnings = Warnings::default();
+        c.attack_clock = F::ZERO;
+        j.grounded = F::ZERO;
+        card.to_track = Vf([0.0, 0.0, 1.0, card.to_track.w()]);
+        j.takeoff = unit_w;
+        j.landing = unit_w;
+        self.lap.free_records = self.lap.free_records.wrapping_add(c.records.len() as u32);
+        c.records.clear();
     }
 }
