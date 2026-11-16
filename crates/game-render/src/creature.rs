@@ -328,6 +328,8 @@ pub struct Bird {
 pub struct Scare {
     pub at: V3,
     pub distance: f32,
+    /// `ScareDelay`, read and never used: a nonzero delay takes the scare's other path (one pending
+    /// scare held by the manager, due delay × 1000 ms on), but every ScareBirds on the disc has 0 (V119).
     pub delay: f32,
 }
 

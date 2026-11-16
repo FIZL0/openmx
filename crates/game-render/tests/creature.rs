@@ -277,3 +277,29 @@ fn an_actor_is_in_until_its_box_leaves() {
     c.step(TICK, &[inside]);
     assert_eq!((c.triggers[0].count, runs(&c), c.triggers[0].inside.clone()), (3, [0, 2], vec![Some(0)]));
 }
+
+/// V119: a nonzero `ScareDelay` takes a scare path the port does not have. A scan of every archive's
+/// every file finds ScareBirds only in nat01, nat02 and nat19's `.toy`: 21 actions, each with a
+/// `ScareDelay` of 0. The text is scanned, not the loaded triggers, which keep only the 5 that a
+/// trigger's counts reach (nat01's 16 are past them).
+#[test]
+fn no_scare_on_the_disc_is_delayed() {
+    let Some(mut disc) = disc() else { return };
+    let (mut scares, mut delays) = (0, 0);
+    for t in ["nat01", "nat02", "nat19"] {
+        let arch = archives(&mut disc, t);
+        let text = String::from_utf8_lossy(&arch[0].read_suffix(&format!("{t}.toy")).expect("the toy file")).to_ascii_lowercase();
+        for line in text.lines().map(|l| l.replace(' ', "")) {
+            if line.starts_with("actiontype=scarebirds") {
+                scares += 1;
+            }
+            if let Some(v) = line.strip_prefix("scaredelay=") {
+                delays += 1;
+                assert_eq!(v.trim().parse::<f32>().ok(), Some(0.0), "{t}: {line}");
+            }
+        }
+    }
+    assert_eq!((scares, delays), (21, 21));
+    let c = Creatures::load(&archives(&mut disc, "nat02"), "nat02");
+    assert!(c.triggers.iter().flat_map(|t| t.scares()).all(|s| s.delay == 0.0));
+}
