@@ -187,3 +187,29 @@ fn two_online_shells_both_ride_their_quads_and_agree() {
     let state = |s: &str| line_with(s, "state before tick 300").rsplit(' ').next().unwrap().to_string();
     assert_eq!(state(&said[0]), state(&said[1]), "the two machines' rides parted with the quads out");
 }
+
+/// MD137: one seat on its quad, the other on its bike. The guest switches, the host rides on; both
+/// machines must see the guest's switch, run its quad alone, and agree on the settled state.
+#[test]
+fn one_seat_switches_to_its_quad_and_both_agree() {
+    if !ready() {
+        return;
+    }
+    let said = ride_online("free09", 420, ["atv_Race250P", "atv_Pro250A"], ["40:gas", "60:atv,61:gas"]);
+    for (who, s) in ["host", "guest"].iter().zip(&said) {
+        let switched: Vec<&str> = s.lines().filter(|l| l.starts_with("vehicle: ") && !l.contains("every machine agrees")).collect();
+        assert_eq!(switched.first(), Some(&"vehicle: bike"), "{who}:\n{s}");
+        // The switch line names no seat: both machines print the guest's.
+        assert!(switched.contains(&"vehicle: atv"), "{who}:\n{s}");
+        assert!(line_with(s, "desyncs").contains(" 0 desyncs"), "{who}:\n{s}");
+        let quads = line_with(s, "online: quads ");
+        assert!(quads.contains("1P off"), "{who}: the host left its bike: {quads}");
+        let at = "2P atv_Pro250A ";
+        let rest = &quads[quads.find(at).unwrap_or_else(|| panic!("{who}: 2P is not on its quad: {quads}")) + at.len()..];
+        let gone: f32 = rest.split(' ').next().unwrap().parse().expect("a distance");
+        assert!(gone > 5.0, "{who}: 2P's quad stayed where it was taken: {quads}");
+    }
+    assert_eq!(line_with(&said[0], "online: quads "), line_with(&said[1], "online: quads "));
+    let state = |s: &str| line_with(s, "state before tick 300").rsplit(' ').next().unwrap().to_string();
+    assert_eq!(state(&said[0]), state(&said[1]), "the two machines' rides parted with one quad out");
+}
