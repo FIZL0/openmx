@@ -118,6 +118,7 @@ mod drive; // S314: the base AI's mode drivers
 mod race4; // S12e: free09's four racers through the Sim (C33)
 mod zone_open; // S315: a start zone's open flags from the save profile
 mod draws; // S328: C33's draws that are not the AI's
+mod seek_activity; // S331a: which loads build a seeker world, and its slots
 
 use avoidance::*;
 use path_nets::*;
