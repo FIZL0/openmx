@@ -255,11 +255,6 @@ pub(crate) fn u_capture_check(d: &UDrive) -> Option<(usize, Vec<usize>, Vec<usiz
             early.push(r);
         } else if want != now {
             torn.push(r);
-            if (80..86).contains(&r) {
-                let names: Vec<String> = blocks.iter().flat_map(|&(n, _, len)| (0..len).step_by(4).map(move |o| format!("{n}+{o:#x}"))).collect();
-                let why: Vec<String> = (0..now.len()).filter(|&k| now[k] != want[k]).map(|k| format!("{}:{:08x}/{:08x}", names[k], now[k], want[k])).collect();
-                eprintln!("PROBE row {r}: {} {}", why.len(), why.iter().take(24).cloned().collect::<Vec<_>>().join(" "));
-            }
         }
         before = now;
     }
@@ -270,35 +265,28 @@ pub(crate) fn u_capture_check(d: &UDrive) -> Option<(usize, Vec<usize>, Vec<usiz
     Some((n, early, torn))
 }
 
-#[test]
-fn probe_untamed_replay() {
-    let mut out = Vec::new();
-    for d in [&U_THROTTLE, &U_STEER, &U_JUMP, &U_WRECK] {
-        let Some((n, early, torn)) = u_capture_check(d) else { return };
-        out.push(format!("{}: {n} rows, {} early {early:?}, {} torn {torn:?}", d.name, early.len(), torn.len()));
-    }
-    panic!("{}", out.join("\n"));
+fn u_capture_test(d: &UDrive) {
+    let _ = u_capture_check(d);
 }
 
 #[test]
-fn probe_wreck_writer() {
-    let d = &U_THROTTLE;
-    let Some(pre) = u_image(d.image) else { return };
-    let Some(ticks) = u_tape(d.name) else { return };
-    let Some(rows) = u_rows(d.name) else { return };
-    let mut ee = u_hooked(pre);
-    let list = 0x01c2_aa80u32;
-    let mut out = std::collections::BTreeMap::new();
-    *ee.log.borrow_mut() = Some(Vec::new());
-    for j in 1..40 {
-        u_step(&mut ee, d, &rows, &ticks, j);
-        for (pc, a, _) in ee.log.borrow_mut().as_mut().unwrap().drain(..) {
-            if a >= list && a < list + 0x90 {
-                out.entry((a - list) & !3).or_insert_with(std::collections::BTreeSet::new).insert(pc);
-            }
-        }
-    }
-    panic!("{:x?}", out);
+fn untamed_throttle_capture() {
+    u_capture_test(&U_THROTTLE);
+}
+
+#[test]
+fn untamed_steer_capture() {
+    u_capture_test(&U_STEER);
+}
+
+#[test]
+fn untamed_jump_capture() {
+    u_capture_test(&U_JUMP);
+}
+
+#[test]
+fn untamed_wreck_capture() {
+    u_capture_test(&U_WRECK);
 }
 
 
@@ -556,7 +544,7 @@ impl UBeside {
     fn answer(&mut self, at: Vf) -> UGround {
         self.asked += 1;
         let mut k = self.ground.iter().position(|g| g.asked == at.to_bits());
-        if k.is_none() && (self.put_back || !self.unported.is_empty() || std::env::var("PROBE_AT").is_ok()) {
+        if k.is_none() && (self.put_back || !self.unported.is_empty()) {
             let d = |g: &UGround| { let v = Vf(g.asked.map(f32::from_bits)); (0..3).map(|i| (v.0[i] - at.0[i]).abs()).sum::<f32>() };
             k = (0..self.ground.len()).min_by(|&x, &y| d(&self.ground[x]).total_cmp(&d(&self.ground[y])));
         }
@@ -649,14 +637,6 @@ pub(crate) fn u_beside(d: &UDrive, ride: bool) -> Option<USeen> {
     let mut ee = u_hooked(pre);
     let ground: Shared<Vec<UGround>> = Rc::default();
     u_hook_ground(&mut ee, ground.clone());
-    let probes: Shared<Vec<u32>> = Rc::default();
-    if std::env::var("PROBE_AT").is_ok() {
-        let l = probes.clone();
-        ee.hooks.insert(0x004d_7890, Box::new(move |ee: &mut Ee| {
-            l.borrow_mut().push(ee.r(31) as u32);
-            u_run_inside(ee, 0x004d_7890);
-        }));
-    }
     let noise: Shared<Vec<(u32, u32, F)>> = Rc::default();
     u_hook_noise(&mut ee, noise.clone());
     // The car's record's resolution, when a contact is with another record: the records and bodies
@@ -669,9 +649,6 @@ pub(crate) fn u_beside(d: &UDrive, ride: bool) -> Option<USeen> {
             if ee.r(4) as u32 == rec && ee.u32_at(rec + 0xf0) != 0 {
                 let w = u_view(ee, car);
                 if let Some(h) = u_held(&w, rec, w.u32_at(rec + 0xf0)) {
-                    if std::env::var("PROBE_AT").is_ok() {
-                        eprintln!("R ra {:x} a1 {:x} entries {} body {:?}", ee.r(31), ee.r(5), h.car.entries.len(), h.others[0].body.as_ref().map(|b| (b.position, b.velocity)));
-                    }
                     log.borrow_mut().push(h);
                 }
             }
@@ -701,19 +678,9 @@ pub(crate) fn u_beside(d: &UDrive, ride: bool) -> Option<USeen> {
         v.scene.untamed = true;
         let contacts = vb.u32_at(p.record + 0xf0);
         if contacts != 0 {
-            if std::env::var("PROBE_AT").is_ok() {
-                let list = vb.u32_at(p.record + 0xf8);
-                for i in 0..contacts {
-                    let w: Vec<u32> = [0, 0x80, 0x84, 0x88].map(|k| vb.u32_at(list + 0x90 * i + k)).to_vec();
-                    eprintln!("C {contacts} {i} {:08x?}", w);
-                }
-            }
             v.held = game_sim::handling::record::held(&|a| vb.u32_at(a), p.record);
         }
         let held = u_held(&vb, p.record, contacts);
-        if std::env::var("PROBE_AT").is_ok() {
-            eprintln!("F {k} contacts {contacts} held {} other {} state {} pos {:?}", v.held.is_some(), held.is_some(), car.state, body.position);
-        }
         let mut m = read_mx(&vb, &p);
         m.keys.untamed = true;
         ground.borrow_mut().clear();
@@ -731,11 +698,6 @@ pub(crate) fn u_beside(d: &UDrive, ride: bool) -> Option<USeen> {
         let resolves = resolved_with.len();
         let held = (!resolved_with.is_empty()).then(|| resolved_with.remove(0));
         let all_from: Vec<u32> = ground.borrow().iter().map(|g| g.from).collect();
-        if std::env::var("PROBE_AT").is_ok() {
-            for g in ground.borrow().iter() {
-                eprintln!("G {:x} {:08x?} {:?} {:?} {:?}", g.from, g.asked, g.point, g.normal, g.record);
-            }
-        }
         let beside = UBeside { ground: std::mem::take(&mut *ground.borrow_mut()), noise: noise.borrow_mut().drain(..).map(|(_, at, f)| (at, f)).collect(), used: Vec::new(), sort: u_sort_answer(ee, car_at_), held, resolves: 0, unported: Vec::new(), put_back: false, at: String::new(), asked: 0, rest: Vec::new() };
         let put_back = car.state != atv_car::RIDING && read_car(&va, &p).state == atv_car::RIDING;
         let mut pieces = Pieces { keys: m.keys(), state: m.state, rest: UBeside { at: format!("{name} frame {k}"), put_back, ..beside } };
@@ -776,7 +738,7 @@ pub(crate) fn u_beside(d: &UDrive, ride: bool) -> Option<USeen> {
         let bad: Vec<String> = after
             .iter()
             .filter(|&&(a, x)| va.u32_at(a) != x)
-            .take(if std::env::var("PROBE_AT").is_ok() { 1000 } else { 40 })
+            .take(40)
             .map(|&(a, x)| {
                 let o = a.wrapping_sub(car_at_);
                 let at = if o < U_CAR_SIZE { format!("car +{:#x} (21104 +{o:#x})", u(o)) } else { format!("{a:#x}") };
@@ -795,11 +757,10 @@ pub(crate) fn u_beside(d: &UDrive, ride: bool) -> Option<USeen> {
         let unasked = pieces.rest.unasked();
         assert!(
             unasked.is_empty(),
-            "{name} frame {k}: the original asked the ground {} times the port did not (the port {}): from {:x?} of {all_from:x?}; probes from {:x?}",
+            "{name} frame {k}: the original asked the ground {} times the port did not (the port {}): from {:x?} of {all_from:x?}",
             unasked.len(),
             pieces.rest.asked,
-            unasked.iter().map(|g| g.from).collect::<Vec<_>>(),
-            probes.borrow()
+            unasked.iter().map(|g| g.from).collect::<Vec<_>>()
         );
         let mut s = keep.borrow_mut();
         for c in &pieces.rest.rest {
@@ -883,19 +844,3 @@ fn untamed_wreck_ride_beside() {
     u_beside_test(&U_WRECK, true);
 }
 
-#[test]
-fn probe_layout() {
-    let Some(ee) = u_image("spawn") else { return };
-    let Some(old) = drive::image("truck") else { return };
-    let (car, oc) = (U_THROTTLE.car, drive::TRUCK.car);
-    let mut out = Vec::new();
-    for (name, x, y, n) in [("vstate", ee.u32_at(car + u(0xbc4)), old.u32_at(oc + 0xbc4), 0x80u32), ("engine", ee.u32_at(car + u(0x1250)), old.u32_at(oc + 0x1250), 0x200)] {
-        out.push(format!("== {name} {x:#x} {y:#x}"));
-        for k in (0..n).step_by(4) {
-            let (p, q) = (ee.u32_at(x + k), old.u32_at(y + k));
-            out.push(format!("+{k:03x}: {p:08x} {:>12.4} | {q:08x} {:>12.4}", f32::from_bits(p), f32::from_bits(q)));
-        }
-    }
-    std::fs::write(std::env::var("PROBE_OUT").unwrap(), out.join("\n")).unwrap();
-    panic!("written");
-}
