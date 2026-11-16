@@ -129,34 +129,11 @@ pub struct Online {
     /// MD152: each seat's quad as its pick names it, read off its pack on this machine, never ridden:
     /// what a seat's switch to the quad takes ([`Online::quads_here`]).
     quads: Vec<Option<vehicle::AtvRide>>,
-    /// MD152: this machine's quad pick (`pack/stem`, empty for none), which `--peer`s send with their
-    /// saved markers ([`wrap_quad`]), and what reads a seat's pick off its pack here.
-    quad_mine: String,
+    /// MD152: this machine's quad pick (`pack/stem`, empty for none) and the quad packs it holds
+    /// (MD174), which `--peer`s send with their saved markers ([`crate::online_quads::wrap`]), and
+    /// what reads a seat's pick off its pack here.
+    quad_mine: crate::online_quads::Card,
     quad_read: Option<Box<dyn FnMut(&str) -> Result<vehicle::AtvRide, String>>>,
-}
-
-/// MD152, `--peer`s: a machine's quad pick (`pack/stem`, empty for none) wrapped around its P318
-/// blob (`inner`), as no room carries it: [`QUAD_WRAP`], the key's length, the key, the rest.
-pub fn wrap_quad(key: &str, inner: Vec<u8>) -> Vec<u8> {
-    if key.is_empty() || key.len() > 255 {
-        return inner;
-    }
-    let mut out = QUAD_WRAP.to_vec();
-    out.push(key.len() as u8);
-    out.extend(key.as_bytes());
-    out.extend(inner);
-    out
-}
-
-/// [`wrap_quad`]'s first bytes.
-pub const QUAD_WRAP: &[u8; 4] = b"Q152";
-
-/// [`wrap_quad`] read back: the quad pick and the blob inside. Bytes not wrapped have no quad.
-pub fn unwrap_quad(bytes: &[u8]) -> (String, &[u8]) {
-    let Some(rest) = bytes.strip_prefix(&QUAD_WRAP[..]) else { return (String::new(), bytes) };
-    let Some((&len, rest)) = rest.split_first() else { return (String::new(), bytes) };
-    let Some((key, inner)) = rest.split_at_checked(len as usize) else { return (String::new(), bytes) };
-    (String::from_utf8_lossy(key).into_owned(), inner)
 }
 
 /// One plane skin of a flier pack this machine holds (P318): the skin, its `biplane.phy`-like file
@@ -361,7 +338,7 @@ impl Online {
             car_ticks: Default::default(),
             fliers: Fliers::default(),
             quads: Vec::new(),
-            quad_mine: String::new(),
+            quad_mine: Default::default(),
             quad_read: None,
         })
     }
@@ -432,7 +409,7 @@ impl Online {
             car_ticks: Default::default(),
             fliers: Fliers::default(),
             quads: Vec::new(),
-            quad_mine: String::new(),
+            quad_mine: Default::default(),
             quad_read: None,
         })
     }
@@ -476,7 +453,7 @@ impl Online {
             car_ticks: Default::default(),
             fliers: Fliers::default(),
             quads: Vec::new(),
-            quad_mine: String::new(),
+            quad_mine: Default::default(),
             quad_read: None,
         })
     }
@@ -520,7 +497,7 @@ impl Online {
             car_ticks: Default::default(),
             fliers: Fliers::default(),
             quads: Vec::new(),
-            quad_mine: String::new(),
+            quad_mine: Default::default(),
             quad_read: None,
         })
     }
@@ -630,7 +607,7 @@ impl Online {
     pub fn saved_markers(&mut self, mine: &game_sim::markers::Markers, track: &str, bike: &str) {
         if let (Wire::Udp(udp), Some(marks)) = (&mut self.wire, &mut self.marks) {
             self.fliers.marks = crate::saved_markers::to_wire(mine, bike, track);
-            udp.set_markers(wrap_quad(&self.quad_mine, crate::online_fliers::wrap(&self.fliers.marks, &self.fliers.packs)));
+            udp.set_markers(crate::online_quads::wrap(&self.quad_mine, crate::online_fliers::wrap(&self.fliers.marks, &self.fliers.packs)));
             (marks.track, marks.bike) = (track.to_string(), bike.to_string());
         }
     }
@@ -650,11 +627,12 @@ impl Online {
         }
         let Some(all) = udp.markers(&self.net.lineup, &self.net.me) else { return false };
         self.fliers.seat_packs = vec![None; all.len()];
-        let mut quads = Vec::new();
+        let mut cards = Vec::new();
         for (s, (sim, bytes)) in self.sims.iter_mut().zip(&all).enumerate() {
-            // and each machine's quad pick (MD152), for every seat of its, wrapped around them
-            let (quad, bytes) = unwrap_quad(bytes);
-            quads.push((s, quad));
+            // and each machine's quad pick (MD152) and quad packs (MD174), for every seat of its,
+            // wrapped around them
+            let (card, bytes) = crate::online_quads::unwrap(bytes);
+            cards.push(card);
             // and each seat's machine's packs (P318), wrapped with them
             let (bytes, packs) = crate::online_fliers::unwrap(bytes);
             if lineup_first(&self.net.lineup, s) {
@@ -668,26 +646,37 @@ impl Online {
         }
         marks.owed = false;
         self.offer_fliers();
+        // a pick rides only where every machine holds its pack, the same files (MD174)
+        let quads = (0..cards.len())
+            .map(|s| match crate::online_quads::refused(&cards, s) {
+                Some(why) => {
+                    println!("online: seat {} picked the quad {}, refused on every machine: {why}", s + 1, cards[s].pick);
+                    (s, String::new())
+                }
+                None => (s, cards[s].pick.clone()),
+            })
+            .collect();
         self.build_quads(quads);
         true
     }
 
-    /// MD152: this machine's quad pick `mine` (`pack/stem`, empty for none) and what reads a pick off
-    /// its pack here, the ride's modifiers known ([`Online::modifiers`]). The lobby's ride and a
-    /// drop-in build every seat's quad at once off the room's picks; a `--peer` machine sends its
-    /// pick with its saved markers and builds every seat's once every peer's are in
-    /// ([`Online::take_markers`]), before the first tick. Every machine holds the same pack files
-    /// (MD37e's handshake), so every machine builds the same quads.
-    pub fn quads_here(&mut self, mine: String, read: Box<dyn FnMut(&str) -> Result<vehicle::AtvRide, String>>) {
+    /// MD152: this machine's quad pick and quad packs `mine` and what reads a pick off its pack here,
+    /// the ride's modifiers known ([`Online::modifiers`]). The lobby's ride and a drop-in build every
+    /// seat's quad at once off the room's picks: every machine holds the same pack files (MD37e's
+    /// handshake). A `--peer` machine sends its card with its saved markers and builds every seat's
+    /// once every peer's are in ([`Online::take_markers`]), before the first tick, refusing any pick
+    /// whose pack some machine lacks or holds other files under (MD174), so every machine builds the
+    /// same quads.
+    pub fn quads_here(&mut self, mine: crate::online_quads::Card, read: Box<dyn FnMut(&str) -> Result<vehicle::AtvRide, String>>) {
         (self.quad_mine, self.quad_read) = (mine, Some(read));
         if let Wire::Udp(udp) = &mut self.wire {
-            udp.set_markers(wrap_quad(&self.quad_mine, crate::online_fliers::wrap(&self.fliers.marks, &self.fliers.packs)));
+            udp.set_markers(crate::online_quads::wrap(&self.quad_mine, crate::online_fliers::wrap(&self.fliers.marks, &self.fliers.packs)));
         } else if let Some(room) = &self.room {
             let picks = room.seats.iter().enumerate().map(|(s, seat)| (s, seat.as_ref().map_or(String::new(), |seat| seat.pick.quad.clone()))).collect();
             self.build_quads(picks);
         } else {
             // a ride opened to online: this machine's seats alone
-            let picks = self.my_seats().into_iter().map(|s| (s, self.quad_mine.clone())).collect();
+            let picks = self.my_seats().into_iter().map(|s| (s, self.quad_mine.pick.clone())).collect();
             self.build_quads(picks);
         }
     }
@@ -765,7 +754,7 @@ impl Online {
     pub fn fliers_here(&mut self, packs: Vec<openmx_net::Pack>, local: Vec<LocalFlier>) {
         (self.fliers.packs, self.fliers.local) = (packs, local);
         if let Wire::Udp(udp) = &mut self.wire {
-            udp.set_markers(wrap_quad(&self.quad_mine, crate::online_fliers::wrap(&self.fliers.marks, &self.fliers.packs)));
+            udp.set_markers(crate::online_quads::wrap(&self.quad_mine, crate::online_fliers::wrap(&self.fliers.marks, &self.fliers.packs)));
         }
         if self.room.is_some() {
             self.offer_fliers();

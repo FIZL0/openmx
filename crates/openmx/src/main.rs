@@ -221,6 +221,7 @@ mod moment;
 mod net;
 mod online;
 mod online_fliers;
+mod online_quads;
 mod peer_looks;
 mod garage_view;
 // The original's own HUD (V26) is drawn by none of the shell since P170, which took it off the
@@ -8185,7 +8186,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         on.cars_on(lot.online_cars.clone());
         // And every seat's quad (MD152), off its pick: the lobby's from the room, `--peer`s' heard
         // with their saved markers.
-        on.quads_here(world.seats[0].garage.atv.as_ref().map_or(String::new(), quad_key), quad_reader(&args));
+        on.quads_here(quad_card(&args, world.seats[0].garage.atv.as_ref()), quad_reader(&args));
         if let Some(flies) = &lobby_planes {
             on.start_planes(flies)?;
         }
@@ -9088,7 +9089,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                                 // a joiner whose setup picked the plane rides in from its own bay (N19)
                                 on.bays_on(online_bays.clone(), online_bodies.clone());
                                 on.cars_on(lot.online_cars.clone());
-                                on.quads_here(world.seats[0].garage.atv.as_ref().map_or(String::new(), quad_key), quad_reader(&args));
+                                on.quads_here(quad_card(&args, world.seats[0].garage.atv.as_ref()), quad_reader(&args));
                                 online_want = None;
                                 front.menu.mods_lock = mods_lock(head.is_some(), Some((on.host(), on.own_rows())));
                                 front.menu.air_lock = air_lock(head.is_some(), true);
@@ -13468,6 +13469,26 @@ fn ride_atv(args: &Args) -> Option<vehicle::AtvRide> {
 /// MD152: a quad's online pick, `pack/stem`, as the lobby's [`openmx_net::Pick::quad`] says it.
 fn quad_key(atv: &vehicle::AtvRide) -> String {
     format!("{}/{}", atv.pack, vehicle::atv_stem(&atv.phy))
+}
+
+/// MD174: this machine's quad card, its pick (`atv`'s [`quad_key`], empty for none) and every quad
+/// pack in its mods folder with its files' hash, as the lobby hashes a pack: what a `--peer` sends,
+/// so every machine refuses a pick some machine lacks the files of.
+fn quad_card(args: &Args, atv: Option<&vehicle::AtvRide>) -> online_quads::Card {
+    let dir = args.room_machines.clone().or_else(|| mods_dir(args));
+    let packs = dir.map(|d| machine_packs::find(&d).0).unwrap_or_default();
+    let held = packs
+        .iter()
+        .filter(|p| p.machine == roster::ATV_KIND)
+        .filter_map(|p| match lobby::folder_hash(&p.folder) {
+            Ok(h) => Some((p.id.clone(), h)),
+            Err(e) => {
+                println!("online: quad pack {} does not hash: {e}", p.id);
+                None
+            }
+        })
+        .collect();
+    online_quads::Card { pick: atv.map_or(String::new(), quad_key), held }
 }
 
 /// MD152: what reads a seat's quad pick (`pack/stem`) off its pack in this machine's mods folder,

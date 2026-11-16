@@ -194,6 +194,11 @@ fn read_pack(folder: &Path, manifest: &[u8], files: &[(String, PathBuf)]) -> Opt
     Some(openmx_net::Pack { kind, id, hash: pack_hash(files).ok()?, name, how })
 }
 
+/// The files under a pack's `folder`, hashed as [`installed_packs`] hashes a pack (MD174).
+pub fn folder_hash(folder: &Path) -> Result<u64, String> {
+    pack_hash(&pack_files(folder)?)
+}
+
 /// Every file under a pack's folder by its path from the folder (`/`-separated, lower case), in that
 /// order: what [`pack_hash`] hashes.
 fn pack_files(dir: &Path) -> Result<Vec<(String, PathBuf)>, String> {
