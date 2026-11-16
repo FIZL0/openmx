@@ -133,6 +133,11 @@ fn beside(d: &Drive, through: Through) -> Option<Seen> {
     let frame_no: Shared<usize> = Rc::default();
     let (keep, at_frame, name) = (seen.clone(), frame_no.clone(), d.name);
     let ride: Shared<Option<atv_car::Ride>> = Rc::default();
+    // MD156: the car's update stepped beside too, on the frame's way (the Ride's way skips it).
+    let updates: Shared<super::update_beside::UpdateSeen> = Rc::default();
+    if matches!(through, Through::Frame) {
+        super::update_beside::hook_update(&mut ee, d.name, frame_no.clone(), updates.clone());
+    }
     ee.hooks.insert(WORLD_STEP, Box::new(move |ee: &mut Ee| {
         let k = *at_frame.borrow();
         let p = ptrs(ee);
@@ -218,6 +223,14 @@ fn beside(d: &Drive, through: Through) -> Option<Seen> {
     }
     let seen = std::mem::take(&mut *seen.borrow_mut());
     assert_eq!(seen.frames, rows.len(), "{}: the world step ran once a frame", d.name);
+    if matches!(through, Through::Frame) {
+        let u = std::mem::take(&mut *updates.borrow_mut());
+        assert_eq!(u.frames, rows.len(), "{}: the car's update ran once a frame", d.name);
+        eprintln!(
+            "MD156 {}: {} updates, {} words in all equal to the original's; handed out {:?}; {} class steps' parts compared; off the ground on {}, on a hazard on {}; {} slot runs on other objects",
+            d.name, u.frames, u.words, u.handed, u.posed, u.airborne, u.hazard, u.others
+        );
+    }
     eprintln!(
         "{} {}: {} frames, {} words in all equal to the original's; handed out {:?}; the sort struck on {} frames, the record held contacts on {}; wrecked on {}; {} other world steps",
         match through {
