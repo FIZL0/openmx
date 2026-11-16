@@ -12898,3 +12898,13 @@ atv_voice_index_pick        atv 0x00183070 = (driver, two)
 atv_voice_pick              atv 0x00183180 = (driver, asked, asked too, top, restart); pair pick 0x00183510
 atv_sample_start            atv 0x00187850 = (handed out whole with the play)
 atv_sound_queue_flush       atv 0x001840c0 = (driver, 0) the SIF send (handed out)
+# MD168a — Untamed's quad put-back (journal research/journal/2026-11-16-md168a-untamed-quad-put-back).
+#   quad put-back 0x004db460: wheel reset 0x004c41a0 on each wheel (zero +0xd0 +0xd4 +0x1d4 +0x224 +0x228
+#   +0x210 +0xf0 +0xf8; (0,0,0,1) at +0x140 +0x170 +0x180 +0x190 +0x840 +0x850; (0,1,0,1) at +0x130 +0x200),
+#   detach, vehicle put-back 0x004ca900, quad words. Vehicle put-back: pos = +0xd30 snapped by ground query
+#   0x004b0910, += 0.3 normal; forward +0xd40, up normal; ground reset 0x004b9130 -> orient 0x004b92c0
+#   (SLUS 0x00492e50) -> body commit 0x004b94e0. Constants 0x003b5f60 (0,0,0,1), 0x003b5fa0 (0,1,0,1).
+#   Keep spot vt +0x3ac 0x004cda80: spot = +0xbf0 if stuck else body +0x70; only with +0xc10 == 0 (set by quad
+#   update 0x004dd000) and normal.y > 0.8; forward y = 0, normalised; clearance check 0x004cdfc0 not ported.
+#   Caller: region tracker 0x0018bb70 / 0x0018bf20 via thunk 0x004ce960 (not traced). Also read: 0x004cb340,
+#   0x004cddf0. +0xbf0 written at the tail start while free (the previous tick's clock).
