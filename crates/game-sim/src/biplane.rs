@@ -2363,6 +2363,9 @@ pub struct Crash {
 pub struct Crashed {
     pub wreck: Option<u32>,
     pub recover: bool,
+    /// The thrown plane came down this call (its landed latch set, the clock started again): where
+    /// SLUS-21104's crash test posts its message 12 ([`Crash::step_mxvatv`]).
+    pub latched: bool,
 }
 
 impl Crash {
@@ -2452,6 +2455,7 @@ impl Crash {
             if !self.landed && !(self.clock <= THROWN_FOR) && (c.grounded || c.touching || c.bare) {
                 self.landed = true;
                 self.clock = F::ZERO;
+                out.latched = true;
             }
             if self.landed && !(self.clock <= self.wreck_time) {
                 *velocity = scaled(*velocity, F(RECOVER_KEEP));
@@ -2507,10 +2511,26 @@ impl Crash {
             self.clock = F::ZERO;
         }
         match thrown {
-            Some(t) => Crashed { wreck: t.wreck, recover: out.recover },
+            Some(t) => Crashed { wreck: t.wreck, ..out },
             None => out,
         }
     }
+}
+
+/// **MXVehicle's wrecked inertia** (its wreck entry, MD112): `WreckInertia` times the body's own
+/// inertia, lane by lane in `x`, `y` and `z`, handed to the body's inertia setter
+/// ([`inverse_inertia_mxvatv`]). Its wreck entry does this, and sets `WreckDamping` on both of the
+/// body's dampings, for every vehicle kind but 0 (a bike) and 1 (a quad); a plane is kind 2, so every
+/// plane's wreck does.
+pub fn wreck_inertia_mxvatv(wreck_inertia: Vf, inertia: Vf) -> Vf {
+    inverse_inertia_mxvatv(wreck_inertia.merge(Dest::XYZ, wreck_inertia.mul(inertia)))
+}
+
+/// **SLUS-21104's body inertia setter**, as the body holds it: the inverse of each of `x`, `y` and
+/// `z`, or 0 for a lane that is not above 0, and `w` 1.
+pub fn inverse_inertia_mxvatv(inertia: Vf) -> Vf {
+    let lane = |v: f32| if F(v) <= F::ZERO { 0.0 } else { (F::ONE / F(v)).to_f32() };
+    Vf::new(lane(inertia.x()), lane(inertia.y()), lane(inertia.z()), 1.0)
 }
 
 /// MXVehicle's throw back from the edge: toward the middle of the area at the body's height, as fast

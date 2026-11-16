@@ -10112,10 +10112,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 println!("{who}put back");
             }
             // The wreck's rumble (P183), the original's on a human's pad: the bike's wreck entry, or
-            // the plane's crash word going up, asks this player's pad seat. Online only the players
-            // at this machine have a pad here.
-            let crashed = seat.garage.plane_flown().and_then(|p| p.flight.as_ref()).is_some_and(|f| f.crash.reason != 0);
-            if let Some(r) = wreck_rumbles[i].frame(seat.said.wreck.is_some(), crashed, vibration)
+            // the plane's crash word going up, asks this player's pad seat; an MX vs. ATV plane's
+            // every wreck entry (MD112). Online only the players at this machine have a pad here.
+            let flight = seat.garage.plane_flown().and_then(|p| p.flight.as_ref());
+            let crashed = flight.is_some_and(|f| f.crash.reason != 0);
+            let entries = flight.filter(|f| f.mxvatv).map(|f| f.posts.wreck);
+            if let Some(r) = wreck_rumbles[i].frame_posted(seat.said.wreck.is_some(), crashed, entries, vibration)
                 && i < args.players
                 && let Some(seats) = pad_seats.as_mut()
             {

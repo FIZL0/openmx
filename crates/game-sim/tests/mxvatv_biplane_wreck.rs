@@ -24,7 +24,7 @@
 //!
 //! Skips without the image, the capture or its tape.
 
-use game_sim::biplane::{Area, Crash, CrashContact, THROWN};
+use game_sim::biplane::{Area, Crash, CrashContact, THROWN, inverse_inertia_mxvatv, wreck_inertia_mxvatv};
 use game_sim::input::{PlaneCommand, PlaneInput};
 use game_sim::rng::Rng;
 use ps2_float::{Dest, F, Vf};
@@ -309,6 +309,7 @@ fn the_mxvatv_crash_test_matches_the_original() {
         let entered = posts.borrow().iter().filter(|&&e| e == 11).count();
         assert_eq!(entered, usize::from(out.wreck.is_some()), "{}: the wreck entry", what());
         assert_eq!(posts.borrow().iter().filter(|&&e| e == 12).count(), usize::from(crash.landed && !s.crash.landed), "{}: the latch", what());
+        assert_eq!(posts.borrow().iter().filter(|&&e| e == 12).count(), usize::from(out.latched), "{}: the latch's post", what());
         assert_eq!(bits(vector(&ee, body + BODY_VEL)), bits(v), "{}: the velocity", what());
         // the wreck entry spins the body up by four (the port's Flight::wreck)
         let spin = if out.wreck.is_some() { spin.merge(Dest::XYZ, spin.mul(Vf::splat(4.0))) } else { spin };
@@ -528,4 +529,121 @@ fn the_mxvatv_wreck_clock_matches_the_crash_capture() {
     assert_eq!(b.wrecked[0].1, 1, "the capture's wreck is a crash");
     assert_eq!(b.recovered.len(), 1, "the port's recoveries {:?}", b.recovered);
     assert!(b.recovered[0] > b.wrecked[0].0 + 140, "recovered {} frames after the wreck", b.recovered[0] - b.wrecked[0].0);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// 3 — the wreck entry and the recovery's messages (MD112)
+// ---------------------------------------------------------------------------------------------------
+
+/// The plane's wreck entry (biplane vt `+0x368`) and MXVehicle's recovery, research/oracle.txt
+/// `# MD101c`.
+const WRECK: u32 = 0x004c_0cc0;
+const VEHICLE_UNWRECK: u32 = 0x004a_8500;
+/// The plane's words the entry reads: the vehicle kind, the vehicle state, `WreckGravity`,
+/// `WreckDamping`, `WreckInertia` and the body's own inertia.
+const KIND: u32 = 0xbbc;
+const STATE: u32 = 0xbc4;
+const WRECK_GRAVITY: u32 = 0xc90;
+const WRECK_DAMPING: u32 = 0xca0;
+const WRECK_INERTIA: u32 = 0xcb0;
+const INERTIA: u32 = 0xcc0;
+/// The body's: mass, damping, angular damping, inertia and its inverse.
+const BODY_MASS: u32 = 0x18;
+const BODY_DAMPING: u32 = 0x30;
+const BODY_ANG_DAMPING: u32 = 0x150;
+const BODY_INV_INERTIA: u32 = 0x140;
+
+/// SLUS-21104's wreck entry on the plane, called with generated `[Wrecks]`, inertias, kinds and
+/// spins: it posts 11 once and asks the rumble's switch once (the image's vehicle state is the
+/// player's); for every kind but 0 and 1 the body's dampings are `WreckDamping` and its inverse
+/// inertia [`wreck_inertia_mxvatv`]'s, as the port's [`Flight`] wreck sets them (a plane is kind 2);
+/// the rates spun up by four and the gravity `-WreckGravity·m·32.2`. Then MXVehicle's recovery posts
+/// 13 and puts back the body's own inverse inertia ([`inverse_inertia_mxvatv`]) and undamped dampings.
+#[test]
+fn the_mxvatv_wreck_entry_posts_and_damps_as_the_original() {
+    let Some(mut ee) = image() else { return };
+    let posts = Rc::new(RefCell::new(Vec::new()));
+    let p = posts.clone();
+    ee.hooks.insert(POST_EVENT, Box::new(move |ee| p.borrow_mut().push(ee.r(7) as u32)));
+    let asked = Rc::new(RefCell::new(0usize));
+    let a = asked.clone();
+    ee.hooks.insert(RUMBLE_ON, Box::new(move |ee| {
+        *a.borrow_mut() += 1;
+        ee.set(2, 0);
+    }));
+    assert_ne!(ee.u32_at(PLANE + STATE), 0, "the image's plane has no vehicle state");
+    let body = ee.u32_at(PLANE + at::BODY);
+    let gravity = ee.u32_at(PLANE + at::GRAVITY) + 0x40;
+    let mass = F(ee.f32_at(body + BODY_MASS));
+    let mut pick = Pick(0x0d11_2b1a_9e0f_77c3);
+    let lanes = |pick: &mut Pick| {
+        [0; 3].map(|_| match pick.next() % 8 {
+            0 => 0.0,
+            1 => -pick.range(0.0, 2.0),
+            2 => 0.5,
+            _ => pick.range(0.0, 20_000.0),
+        })
+    };
+    let mut gated = 0;
+    for case in 0..2_000 {
+        let kind = match pick.next() % 8 {
+            0 => 0,
+            1 => 1,
+            2 => pick.next() as u32,
+            _ => 2,
+        };
+        let reason = if pick.one_in(2) { 1 } else { THROWN };
+        let [wx, wy, wz] = lanes(&mut pick);
+        let [ix, iy, iz] = lanes(&mut pick);
+        let wreck_inertia = [wx, wy, wz, pick.range(0.0, 2.0)];
+        let inertia = [ix, iy, iz, 1.0];
+        let damping = [0; 4].map(|_| pick.range(0.9, 1.0));
+        let before = [0; 4].map(|_| pick.range(0.0, 2.0));
+        let rates = [0; 4].map(|_| pick.range(-3.0, 3.0));
+        let wreck_gravity = pick.range(0.0, 3.0);
+        ee.set_u32(PLANE + KIND, kind);
+        ee.set_u32(PLANE + at::REASON, 0);
+        ee.set_f32(PLANE + WRECK_GRAVITY, wreck_gravity);
+        put_vector(&mut ee, PLANE + WRECK_DAMPING, damping);
+        put_vector(&mut ee, PLANE + WRECK_INERTIA, wreck_inertia);
+        put_vector(&mut ee, PLANE + INERTIA, inertia);
+        put_vector(&mut ee, body + BODY_DAMPING, before);
+        put_vector(&mut ee, body + BODY_ANG_DAMPING, before);
+        put_vector(&mut ee, body + BODY_INV_INERTIA, before);
+        put_vector(&mut ee, body + BODY_RATES, rates);
+        posts.borrow_mut().clear();
+        *asked.borrow_mut() = 0;
+        ee.call(WRECK, &[u64::from(PLANE), u64::from(reason)], &[], CALL_BUDGET);
+
+        let what = format!("case {case}: kind {kind} reason {reason} {wreck_inertia:?} {inertia:?}");
+        assert_eq!(*posts.borrow(), [11], "{what}: the posts");
+        assert_eq!(*asked.borrow(), 1, "{what}: the rumble's switch");
+        assert_eq!(ee.u32_at(PLANE + at::REASON), reason, "{what}: the reason");
+        let gate = kind != 0 && kind != 1;
+        let (want_damping, want_inv) = if gate {
+            (bits(Vf(damping)), bits(wreck_inertia_mxvatv(Vf(wreck_inertia), Vf(inertia))))
+        } else {
+            (bits(Vf(before)), bits(Vf(before)))
+        };
+        assert_eq!(bits(vector(&ee, body + BODY_DAMPING)), want_damping, "{what}: the damping");
+        assert_eq!(bits(vector(&ee, body + BODY_ANG_DAMPING)), want_damping, "{what}: the angular damping");
+        assert_eq!(bits(vector(&ee, body + BODY_INV_INERTIA))[..3], want_inv[..3], "{what}: the inverse inertia");
+        let spin = Vf(rates).merge(Dest::XYZ, Vf(rates).mul(Vf::splat(4.0)));
+        assert_eq!(bits(vector(&ee, body + BODY_RATES)), bits(spin), "{what}: the rates");
+        let g = F(f32::from_bits(0x4200_cccd)) * (-F(wreck_gravity) * mass);
+        assert_eq!(ee.f32_at(gravity + 4).to_bits(), g.to_bits(), "{what}: the gravity");
+        gated += usize::from(gate);
+
+        posts.borrow_mut().clear();
+        put_vector(&mut ee, body + BODY_INV_INERTIA, before);
+        ee.set_u32(PLANE + at::REASON, 1);
+        ee.call(VEHICLE_UNWRECK, &[u64::from(PLANE), 1], &[], CALL_BUDGET);
+        assert_eq!(*posts.borrow(), [13], "{what}: the recovery's posts");
+        if gate {
+            assert_eq!(bits(vector(&ee, body + BODY_DAMPING)), [1.0f32.to_bits(); 4], "{what}: undamped");
+            let own = bits(inverse_inertia_mxvatv(Vf(inertia)));
+            assert_eq!(bits(vector(&ee, body + BODY_INV_INERTIA))[..3], own[..3], "{what}: the inertia back");
+        }
+    }
+    assert!(gated > 1_000, "the cases miss the gate");
 }
