@@ -294,7 +294,7 @@ fn s323_the_lane_thinks_on_the_sims_own_world() {
             let (seen, cofg, yaw_rate, velocity) = &mut bodies[k];
             let mut watched = Watched { world: &mut world, asked: Vec::new() };
             let mount = Mount { rider: ai::Rider { velocity: *velocity, ..*seen }, cofg: *cofg, yaw_rate, velocity };
-            let thought = pilots[k].think(mount, &mut watched, &mut seek_world, &tables, &others[k], None, &mut rng, dt);
+            let thought = pilots[k].think(mount, &mut watched, &mut seek_world, &tables, &others[k], None, None, None, &mut rng, dt);
             let pilot = &pilots[k];
 
             // The ground: every point asked, and the port's answer to it.
@@ -512,4 +512,51 @@ fn s323_the_lanes_walk_is_the_originals_on_the_fixed_world() {
     }
     assert!(solids >= centres.len(), "each prop's own walk hands it out");
     println!("{} walks, one on each prop: {solids} props and {plants} plant groups, alike", centres.len());
+}
+
+/// S331b: an AI pilot reads its seat and card off the race's laps each tick: behind the closed gate
+/// its computer's card does not take part and the manager has not started, so it is not live and its
+/// seeker would hold it; after the drop ([`game_sim::race::Laps::start`]) the card takes part and
+/// it is live. The race phase is the race's kind, the card's progress the lap card's, and its bike
+/// word stays the pilot's. A player with no card on the laps has none. The driver's view
+/// (`ai::racing_of`) carries the same card and the race track's words.
+#[test]
+fn s331b_a_pilot_reads_its_race_off_the_laps() {
+    use game_sim::ai::{Card, Pilot, Seat, racing_of};
+    use game_sim::race::{self, card_flags, race_kind};
+    let card = |player, flags| race::Entry {
+        player,
+        card: race::RaceCard { lap: race::LapCard { flags, progress: F(12.5), ..race::LapCard::default() }, ..race::RaceCard::default() },
+        stats: race::Tracker::default(),
+    };
+    let mut laps = race::Laps {
+        rules: race::supercross_rules(3),
+        course: race::Course { line: race::Gate::new(), line_spot: race::Spot::on(0, 3, F(0.0)), lap_length: F(100.0) },
+        lists: race::LineLists::default(),
+        cards: vec![card(0, race::HUMAN_CARD), card(1, race::COMPUTER_CARD)],
+        track: std::sync::Arc::new(race::TrackPaths::default()),
+    };
+    let mut rng = Rng::from_seed(7);
+    let mut pilot = Pilot::spawn(&mut rng, 1, None, 0, None, 0, 90, Seat { player: 1, live: true, ..Seat::default() });
+    pilot.card = Some(Card { bike_word: 0x55, ..Card::default() });
+
+    pilot.read_laps(&laps, false);
+    let c = pilot.card.expect("a card on the laps");
+    assert_eq!((c.flags, c.progress, c.bike_word), (race::COMPUTER_CARD, F(12.5), 0x55));
+    assert_eq!(c.flags & card_flags::TAKING_PART, 0, "not taking part behind the gate");
+    assert_eq!((pilot.seat.race_phase, pilot.seat.live, pilot.seat.path_net), (Some(race_kind::RACE), false, false));
+
+    laps.start();
+    pilot.read_laps(&laps, true);
+    let c = pilot.card.expect("a card on the laps");
+    assert_ne!(c.flags & card_flags::TAKING_PART, 0, "taking part after the drop");
+    assert_eq!((pilot.seat.live, pilot.seat.path_net), (true, true));
+    let r = racing_of(&laps, 1, None);
+    assert_eq!(r.card.map(|k| k.flags), Some(c.flags));
+    assert_eq!(r.race.map(|k| (k.kind, k.line_spot)), Some((race_kind::RACE, laps.course.line_spot)));
+    assert_eq!(r.race_word, Some(laps.rules.lap.flags));
+
+    pilot.seat.player = 2;
+    pilot.read_laps(&laps, true);
+    assert_eq!((pilot.card, pilot.seat.live), (None, false), "no card, not live");
 }

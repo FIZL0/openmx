@@ -193,3 +193,60 @@ fn paths_len(net: &Net, k: usize) -> usize {
     }
     n
 }
+
+/// S331b: what the Sim's AI lane reads off its race each tick, against sx01's live race image (frame
+/// 604, the gate long down). The lane's AI net off the disc (`ai::race_net`) is the act's `+0xbc` as
+/// the race's load left it: its reach words, the fork pick, the tag word, the lap length and every
+/// path's flags, length, speed word and links. And each AI brain's card (`+0xd4`) and race (`+0xd8`)
+/// are the very words its hand-off reads through its rider (`+0xf9c`, `+0xfa0`), so the seat's live,
+/// race phase and card (`ai::Pilot::read_laps`) are one read of the laps: here the manager's started
+/// bit up, its kind a race's, and each card taking part.
+#[test]
+fn s331b_the_lane_reads_its_race_where_the_brains_do() {
+    use game_sim::race::{TrackFile, card_flags, race_kind};
+    let Some(files) = sx01_files("Tracks\\sx01_2.res", &["tracks\\sx01\\sx01ai.tdf"]) else { return };
+    let Some(track) = sx01_files("Tracks\\sx01.res", &["tracks\\sx01\\sx01.scn"]) else { return };
+    let scene = game_sim::track::Scene::parse(&track[0]).expect("sx01's scene");
+    let trn = scene.terrain_file.to_ascii_lowercase().replace(".ps2.trn", ".trn").replace(".trn", ".ps2.trn");
+    let trn = sx01_files("Tracks\\sx01.res", &[&trn]).expect("sx01.res read once already");
+    let terrain = game_sim::track::Terrain::parse(&trn[0]).expect("sx01's terrain");
+    let mut ground = game_sim::world::Ground::new(&terrain, &scene.terrain);
+    let kit = match ps2_oracle::Kit::load() {
+        Ok(k) => k,
+        Err(why) => return skip(&why),
+    };
+    let image = kit.ctx("states").join(S282C_STATE);
+    if !image.exists() {
+        return skip(&format!("{} is not there (research/c31's race start, S282c)", image.display()));
+    }
+    let Some(at) = named(&["activity_manager", "boot_gp"]) else { return };
+    let [manager, gp] = at[..] else { unreachable!() };
+    let mut ee = ps2_oracle::Ee::from_ram(&image).unwrap_or_else(|e| panic!("{e}"));
+    ee.set(28, u64::from(gp));
+    let act = ee.u32_at(ee.u32_at(ee.u32_at(manager) + 0x58));
+    let ai_track = ee.u32_at(act + 0xbc);
+
+    let file = TrackFile::parse(&files[0]).expect("sx01AI.tdf reads");
+    let mine = game_sim::ai::race_net(&file, Some(&mut ground)).expect("its paths walk");
+    let (theirs, _, _) = super::path_branch::s309_paths(&ee, ai_track);
+    let head = |t: &game_sim::race::TrackPaths| (t.word_34, t.ahead.0.to_bits(), t.behind.0.to_bits(), t.pick, t.lap_length.0.to_bits());
+    assert_eq!(head(&mine), head(&theirs), "sx01AI.tdf: reach, pick, tag word and lap length");
+    assert_eq!(mine.paths.len(), theirs.paths.len(), "sx01AI.tdf: the path count");
+    for (k, (m, t)) in mine.paths.iter().zip(&theirs.paths).enumerate() {
+        assert_eq!(
+            (m.flags, m.length.0.to_bits(), m.word_0c, &m.links, m.nodes.len()),
+            (t.flags, t.length.0.to_bits(), t.word_0c, &t.links, t.nodes.len()),
+            "sx01AI.tdf: path {k}"
+        );
+    }
+
+    for b in S282C_RIDERS {
+        let (card, race) = (ee.u32_at(b + 0xd4), ee.u32_at(b + 0xd8));
+        let rider = ee.u32_at(ee.u32_at(b + 0x40) + 0xc);
+        assert_eq!((ee.u32_at(rider + 0xf9c), ee.u32_at(rider + 0xfa0)), (card, race), "brain {b:#x}: the hand-off's card and race");
+        assert_eq!(ee.u32_at(b + 0xdc), ai_track, "brain {b:#x}: the follower's net");
+        assert_eq!(ee.i32_at(race + 0x60), race_kind::RACE, "brain {b:#x}: the race phase is the manager's kind");
+        assert_ne!(ee.u32_at(race + 0x5c) & game_sim::ai::RACE_STARTED, 0, "brain {b:#x}: the manager has started");
+        assert_ne!(ee.read(card + 8, 8) as u64 & card_flags::TAKING_PART, 0, "brain {b:#x}: the card takes part");
+    }
+}
