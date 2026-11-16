@@ -1551,15 +1551,15 @@ pub const WRECK_FROM: usize = 1 << 21;
 
 /// A knockable prop in the plane's search (S241): its collection and object, and its mesh where its
 /// node stands it.
-struct Posed<'a> {
-    collection: usize,
-    object: usize,
-    knock: flight_search::Knock<'a>,
+pub(crate) struct Posed<'a> {
+    pub(crate) collection: usize,
+    pub(crate) object: usize,
+    pub(crate) knock: flight_search::Knock<'a>,
 }
 
 /// Every prop of `set` with a collidable mesh (`shapes`, the set's) and a collision object, in
 /// collection and object order, as [`crate::prop_contact::strike`] poses them.
-fn knocks<'a>(set: &PropSet, shapes: &'a [Vec<Option<track::Mesh>>]) -> Vec<Posed<'a>> {
+pub(crate) fn knocks<'a>(set: &PropSet, shapes: &'a [Vec<Option<track::Mesh>>]) -> Vec<Posed<'a>> {
     let mut out = Vec::new();
     for (c, (coll, meshes)) in set.collections.iter().zip(shapes).enumerate() {
         for (o, (object, mesh)) in coll.objects.iter().zip(meshes).enumerate() {

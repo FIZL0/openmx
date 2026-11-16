@@ -2331,7 +2331,7 @@ impl Machine {
         noise: &mut impl FnMut(F) -> F,
     ) {
         let physics = crate::biplane::World { iterations: 1, rate: F(115.0) };
-        physics.step(dt, &mut Stepping { m: self, car, world, acos, curve, noise, struck: None, met: None });
+        physics.step(dt, &mut Stepping { m: self, car, world, acos, curve, noise, struck: None, met: None, props: &mut [], knocks: &[] });
     }
 
     /// Once a frame before the substeps: the controls, the centre of mass's travel, and the probes.
@@ -2640,6 +2640,27 @@ impl Machine {
         }
         None
     }
+
+    /// **The stuck reset** (S335): what the original does to a car its stuck timer gives up on
+    /// ([`CarEvent::Reset`]) — a car on its roof with the gas held, or one wedged against something.
+    /// The ground under the body is asked where it is and which way it faces; the body is turned to
+    /// stand on that ground, its nose along the car's last forward, and moved so that a point half a
+    /// foot under the ground along its normal is the model's origin. Every speed, push and spin is
+    /// cleared. The integrator's history (the last position and turn) is left as it was.
+    pub fn put_upright(&mut self, world: &mut impl crate::world::World) {
+        use crate::chassis::{CLEAR, turn};
+        let (point, normal) = world.ground(self.body.position);
+        // The ground's answer goes through an object that hands it back with a lift of zero, which
+        // the original takes off along the normal.
+        let point = point.merge(Dest::XYZ, point.sub(normal.merge(Dest::XYZ, normal.mul(Vf::splat(0.0)))));
+        let q = crate::math::mat4_to_quat(&crate::math::basis(Vf::new(0.0, 0.0, 0.0, 1.0), self.forward, normal, false, true));
+        self.body.quat = q;
+        let below = normal.merge(Dest::XYZ, normal.mul(Vf::splat(-0.5)));
+        let lift = below.merge(Dest::XYZ, below.add(turn(q, self.body.cofg)));
+        self.body.position = point.merge(Dest::XYZ, point.add(lift));
+        let b = &mut self.body;
+        (b.velocity, b.force, b.rates, b.moment, b.twist) = (CLEAR, CLEAR, CLEAR, CLEAR, CLEAR);
+    }
 }
 
 /// The car's listeners on the physics world: one body, and one of each list but the constraints.
@@ -2654,6 +2675,10 @@ struct Stepping<'a, W, N> {
     struck: Option<(&'a mut Collision, &'a [crate::contact::Mover])>,
     /// The riders' bikes its mirrors name (F26), the others of its resolve.
     met: Option<&'a mut crate::flight::Met>,
+    /// The knockable props it struck (S335), the others of its resolve after the bikes.
+    props: &'a mut [crate::prop_contact::Pushed],
+    /// The knockable props' meshes, in its tires' sort as in its search (S335).
+    knocks: &'a [crate::flight_search::Knock<'a>],
 }
 
 impl<W: crate::world::World, N: FnMut(F) -> F> crate::biplane::Dynamics for Stepping<'_, W, N> {
@@ -2663,14 +2688,17 @@ impl<W: crate::world::World, N: FnMut(F) -> F> crate::biplane::Dynamics for Step
     fn preforce(&mut self, _: i32, dt: F) {
         match &mut self.struck {
             None => self.m.preforce(self.car, self.world, dt, self.curve),
-            Some((c, _)) => self.m.preforce_with(self.car, self.world, dt, self.curve, |m, world| m.sort_contacts(self.car, c, world)),
+            Some((c, _)) => {
+                let knocks = self.knocks;
+                self.m.preforce_with(self.car, self.world, dt, self.curve, |m, world| m.sort_contacts_knocking(self.car, c, world, knocks))
+            }
         }
     }
     fn force(&mut self, _: i32, h: F) {
         match &mut self.struck {
             None => self.m.force(self.car, h, self.acos, self.curve, self.noise),
             Some((c, movers)) => {
-                let met = &mut self.met;
+                let (met, props) = (&mut self.met, &mut *self.props);
                 self.m.force_with(self.car, h, self.acos, self.curve, self.noise, |body| {
                     let mut weighed = crate::contact::Weighed { body, mass: c.mass };
                     let mut others: Vec<crate::contact::Other<'_>> = match met.as_deref_mut() {
@@ -2682,6 +2710,10 @@ impl<W: crate::world::World, N: FnMut(F) -> F> crate::biplane::Dynamics for Step
                             .collect(),
                         None => Vec::new(),
                     };
+                    let mut bodies: Vec<_> = props.iter_mut().map(|p| p.weighed()).collect();
+                    others.extend(
+                        bodies.iter_mut().map(|(collider, body)| crate::contact::Other { collider: &mut **collider, side: crate::contact::Side::Body(body) }),
+                    );
                     crate::contact::resolve(&mut c.collider, &mut weighed, &mut c.record.contacts, &mut others, movers, true);
                 })
             }
@@ -2704,6 +2736,10 @@ impl<W: crate::world::World, N: FnMut(F) -> F> crate::biplane::Dynamics for Step
             c.refresh(&self.m.body, &mut *self.world);
         }
         self.m.measure(self.car, self.world, dt, self.acos);
+        // The stuck reset runs in the post's wreck step, after the measure (S335).
+        if self.m.event == Some(CarEvent::Reset) {
+            self.m.put_upright(&mut *self.world);
+        }
     }
 }
 
@@ -3021,8 +3057,116 @@ impl Machine {
         }
         self.touching = collision.record.touching;
         let physics = crate::biplane::World { iterations: 1, rate: F(115.0) };
-        physics.step(dt, &mut Stepping { m: self, car, world, acos, curve, noise, struck: Some((collision, &movers)), met });
+        physics.step(dt, &mut Stepping { m: self, car, world, acos, curve, noise, struck: Some((collision, &movers)), met, props: &mut [], knocks: &[] });
         collision.record.search_ground = self.searches_terrain(world);
+    }
+
+    /// **[`Machine::step_met`] among the knockable props** (S335): with `props`, every prop of the set
+    /// with a collidable mesh is in the collision object's search after the world
+    /// ([`Collision::search_props`]) and in its tires' sort; the props its rays struck are woken with
+    /// their mirrors on their lists naming the car as [`CarProps::me`] ([`PropSet::strike`]), the
+    /// props' own rays strike its hull where it has one ([`crate::prop_wreck::struck_on`]), and its
+    /// resolve pushes the struck props' bodies, after the riders' bikes among its others, which are
+    /// written back ([`PropSet::pushed`]). All of it as the plane's frame has it
+    /// ([`crate::flight::Flight::frame_props`]). The props' own step, which resolves their mirrors
+    /// against the car, is the caller's, after this. Without `props`, [`Machine::step_met`] exactly.
+    ///
+    /// [`PropSet::strike`]: crate::prop_set::PropSet::strike
+    /// [`PropSet::pushed`]: crate::prop_set::PropSet::pushed
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_props(
+        &mut self,
+        car: &Car,
+        world: &mut impl crate::world::World,
+        collision: &mut Collision,
+        met: Option<&mut crate::flight::Met>,
+        props: Option<CarProps<'_>>,
+        dt: F,
+        acos: &AcosTable,
+        curve: &CurveTable,
+        noise: &mut impl FnMut(F) -> F,
+    ) {
+        let Some(mut props) = props else { return self.step_met(car, world, collision, met, dt, acos, curve, noise) };
+        let shapes = std::sync::Arc::clone(&props.set.shapes);
+        let posed = crate::flight::knocks(props.set, &shapes);
+        let knocks: Vec<crate::flight_search::Knock<'_>> = posed.iter().map(|p| p.knock).collect();
+        let (movers, knocked) = collision.search_props(&mut self.body, &mut *world, dt, &knocks);
+        if let Some(m) = met.as_deref() {
+            collision.file_mirrors(&m.mirrors);
+        }
+        let first = met.as_deref().map_or(0, |m| m.vehicles.len());
+        let mut bodies = self.knocked(collision, &mut props, first, &posed, knocked);
+        self.touching = collision.record.touching;
+        let physics = crate::biplane::World { iterations: 1, rate: F(115.0) };
+        physics.step(
+            dt,
+            &mut Stepping { m: self, car, world, acos, curve, noise, struck: Some((collision, &movers)), met, props: &mut bodies, knocks: &knocks },
+        );
+        collision.record.search_ground = self.searches_terrain(world);
+        props.set.pushed(&bodies);
+    }
+
+    /// [`Machine::step_props`]' strike: the props the search struck (`knocked`, the mirrors on each of
+    /// `posed`) woken and their mirrors filed, in the order the car's entries first name them, then
+    /// the props' rays on its hull; the car's entries and the hull's mirrors renamed to the struck
+    /// bodies' places after the `first` others of its resolve. Answers the struck bodies.
+    fn knocked(
+        &mut self,
+        collision: &mut Collision,
+        props: &mut CarProps<'_>,
+        first: usize,
+        posed: &[crate::flight::Posed<'_>],
+        knocked: Vec<Vec<crate::contact::Contact>>,
+    ) -> Vec<crate::prop_contact::Pushed> {
+        use crate::flight::KNOCK_FROM;
+        let me = props.me;
+        let mut order: Vec<usize> = Vec::new();
+        for k in collision.record.contacts.iter().filter_map(|e| e.other).filter_map(|o| o.checked_sub(KNOCK_FROM)) {
+            if !order.contains(&k) {
+                order.push(k);
+            }
+        }
+        for (k, m) in knocked.iter().enumerate() {
+            if !m.is_empty() && !order.contains(&k) {
+                order.push(k);
+            }
+        }
+        let struck = order
+            .iter()
+            .map(|&k| {
+                let mirrors = knocked[k].iter().map(|e| crate::contact::Contact { other: Some(me), ..*e }).collect();
+                (posed[k].collection, posed[k].object, mirrors)
+            })
+            .collect();
+        let mut bodies = props.set.strike(&crate::prop_contact::Strike { contacts: Vec::new(), struck, ..Default::default() });
+        for e in &mut collision.record.contacts {
+            if let Some(k) = e.other.and_then(|o| o.checked_sub(KNOCK_FROM)) {
+                e.other = order.iter().position(|&j| j == k).map(|i| first + i);
+            }
+        }
+        let Some(hull) = props.hull else { return bodies };
+        let node = &collision.record.node;
+        let at = [node.rows[0], node.rows[1], node.rows[2], node.origin];
+        let on = crate::prop_wreck::struck_on(props.set, hull, at, COLLIDABLE, collision.collider.collides_with, me);
+        if on.is_empty() {
+            return bodies;
+        }
+        let places: Vec<usize> = on
+            .struck
+            .iter()
+            .map(|p| match bodies.iter().position(|b| (b.collection, b.object) == (p.collection, p.object)) {
+                Some(i) => i,
+                None => {
+                    bodies.push(p.clone());
+                    bodies.len() - 1
+                }
+            })
+            .collect();
+        let r = &mut collision.record;
+        (r.touching, r.on_object, r.touching_other) = (true, true, true);
+        let room = r.capacity.saturating_sub(r.contacts.len());
+        r.contacts.extend(on.mirrors.iter().map(|e| crate::contact::Contact { other: e.other.map(|i| first + places[i]), ..*e }).take(room));
+        bodies
     }
 
     /// **Its hull as the riders' bikes meet it** (F26): `mesh` (the car's `f.col`, [`Kind::hull`])
@@ -3122,13 +3266,25 @@ impl Machine {
     /// struck object and mover a tire keeps for its contact's velocity — S229a's capture sorts onto a
     /// still prop only, whose ground velocity is zero as the terrain's is.
     pub fn sort_contacts(&mut self, car: &Car, collision: &mut Collision, world: &mut impl crate::world::World) {
+        self.sort_contacts_knocking(car, collision, world, &[]);
+    }
+
+    /// [`Machine::sort_contacts`] with the knockable props' meshes in its scene after the world's
+    /// (S335, [`flight_search::Scene::knocking`]): a tire meets a prop as it meets a scenery one.
+    pub fn sort_contacts_knocking(
+        &mut self,
+        car: &Car,
+        collision: &mut Collision,
+        world: &mut impl crate::world::World,
+        knocks: &[crate::flight_search::Knock<'_>],
+    ) {
         use crate::contact_search::Search;
         use crate::flight_search::{self, Scene};
         let rays = sort_rays(self.wheels.each_ref().map(|w| w.mount), &car.tires);
         let node = crate::rider_contact::node(&self.matrix);
         let world: &mut dyn crate::world::World = world;
         let (field, props, trees) = flight_search::near_world(world, &rays, &node, &mut collision.nearby);
-        if props.is_none() && trees.is_none() {
+        if props.is_none() && trees.is_none() && knocks.is_empty() {
             return;
         }
         let bounds = field.as_deref().map(|f| {
@@ -3136,10 +3292,22 @@ impl Machine {
             ([F(lo.x()), F(lo.z())], [F(hi.x()), F(hi.z())])
         });
         let mut scene = Scene::flown(props, trees, None, bounds, &rays, &node, &mut collision.nearby);
+        if !knocks.is_empty() {
+            scene = scene.knocking(knocks, 1);
+        }
         for hit in scene.rays(true) {
             self.wheels[sorted_tire(hit.from)].set_contact(hit.point, hit.normal);
         }
     }
+}
+
+/// The knockable props a car drives among (S335, [`Machine::step_props`]): the set, the index the
+/// props' step gives the car among its strikers, which their mirrors name, and its collidable mesh
+/// (the car's `f.col`, [`Kind::hull`]) for the props' own rays, if the disc has it.
+pub struct CarProps<'a> {
+    pub set: &'a mut crate::prop_set::PropSet,
+    pub me: usize,
+    pub hull: Option<&'a crate::track::Mesh>,
 }
 
 // --- a car in a seat's lane (S249) -----------------------------------------------------------------
