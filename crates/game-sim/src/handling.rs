@@ -40,6 +40,7 @@ pub mod ragdoll;
 pub mod record;
 pub mod reset;
 pub mod seed;
+pub mod sound;
 pub mod step;
 pub mod steps;
 pub mod run;
