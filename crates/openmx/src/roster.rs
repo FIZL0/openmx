@@ -829,11 +829,15 @@ pub struct PackMachine {
 /// The quads' kind word (MD37d), a quad pack's `machine`.
 pub const ATV_KIND: &str = "atv";
 
+/// MX vs. ATV's cars' kind word (MD158), a car pack's `machine` (openmx-mods' `mxvatv_cars`).
+pub const MXVATV_CAR_KIND: &str = "mxvatv_car";
+
 /// The picker's name for a kind of machine: a bike, a quad, else [`flier_label`].
 pub fn machine_label(machine: &str) -> String {
     match machine {
         BIKE_KIND => "Bike".into(),
         "atv" => "Quad".into(),
+        MXVATV_CAR_KIND => "Car".into(),
         _ => flier_label(machine),
     }
 }

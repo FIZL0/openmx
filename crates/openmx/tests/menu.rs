@@ -2611,6 +2611,74 @@ fn an_mxvatv_car_is_off_by_default_and_the_pause_offers_a_picked_one() {
     assert!(Garage::new(Kind::MxvatvCar, None).is_err());
 }
 
+/// MD158: with MX vs. ATV's car pack installed, the Garage's Machines tab has a Car tile: Off, the
+/// default and the original's, or one of the five. A pick is written to the settings file and read
+/// back, only while set, and the pause offers the car to a player the shell says has one.
+#[test]
+fn the_car_tile_picks_an_mxvatv_car_and_the_pause_offers_it() {
+    use menu::Machine;
+    use menu::tiles::TileOf;
+    use roster::{Catalogue, PackMachine, Picks};
+    let mut disc = match game_render::Disc::open_configured() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    let catalogue = Catalogue::read(&mut disc).unwrap();
+    let car = |skin: &str, name: &str| PackMachine {
+        pack: "mxvatv_cars".into(),
+        game: "MX vs. ATV Unleashed".into(),
+        machine: roster::MXVATV_CAR_KIND.into(),
+        class: String::new(),
+        skin: skin.into(),
+        name: name.into(),
+        why: None,
+    };
+    let five = [("buggy", "Buggy"), ("monstertruck", "Monster Truck"), ("baja", "Baja"), ("golfcart", "Golf Cart"), ("sandrail", "Sandrail")];
+    let mut reader = Reader::new();
+    let mut m = Menu::new(Settings::default(), Controls::default()).with_garage(catalogue, Picks::default());
+    m.set_machines(five.iter().map(|(s, n)| car(s, n)).collect());
+    m.step(reader.read(&Report::idle()));
+    let r = &mut reader;
+    main_to(&mut m, r, "Garage");
+    tab_to(&mut m, r, "Machines");
+    let row = |m: &Menu| m.page().iter().find(|row| row.label == "Car").cloned().unwrap();
+    let c = row(&m);
+    assert_eq!(c.choices, ["Off", "Buggy", "Monster Truck", "Baja", "Golf Cart", "Sandrail"]);
+    assert_eq!((c.value.as_str(), c.off.as_deref()), ("Off", None));
+    assert!(!m.page().iter().any(|row| row.label == "Quad"), "no quad pack, no Quad tile");
+    tile_to(&mut m, r, "Car");
+    tap(&mut m, r, Control::R1);
+    assert_eq!((m.settings.mxvatv_car.as_str(), row(&m).value.as_str()), ("buggy", "Buggy"));
+    tap(&mut m, r, Control::L1);
+    tap(&mut m, r, Control::L1);
+    assert_eq!((m.settings.mxvatv_car.as_str(), row(&m).value.as_str()), ("sandrail", "Sandrail"), "L1 from Off wraps to the last");
+    assert!(m.settings.text().contains("mxvatv_car = sandrail\n"), "{}", m.settings.text());
+    let dir = scratch("md158-car");
+    menu::save(&dir, &m.settings, &m.controls).unwrap();
+    assert_eq!(menu::load(&dir).0.mxvatv_car, "sandrail");
+    std::fs::remove_dir_all(dir).ok();
+    // The tile lights the settings' pick.
+    let tile = |m: &Menu| m.garage_tiles().into_iter().find(|t| matches!(t.of, TileOf::Car(_)));
+    assert_eq!(tile(&m).map(|t| t.livery), Some(5));
+    tap(&mut m, r, Control::R1);
+    assert!(m.settings.mxvatv_car.is_empty(), "round to Off");
+    assert!(!m.settings.text().contains("mxvatv_car"), "{}", m.settings.text());
+    assert_eq!(tile(&m).map(|t| t.livery), Some(0));
+
+    // The pause: the car for a player who has one, a tile on its Garage page.
+    assert!(!m.choices(0).contains(&Machine::MxvatvCar));
+    m.mxvatv_car[0] = true;
+    assert_eq!(m.choices(0).last(), Some(&Machine::MxvatvCar));
+    let switch = |m: &Menu| m.pause_tiles().into_iter().find(|t| t.of == TileOf::Switch(Machine::MxvatvCar));
+    assert_eq!(switch(&m).map(|t| (t.name, t.section, t.riding)), Some(("MX vs. ATV Car".into(), 2, false)));
+    m.switched(0, Machine::MxvatvCar);
+    assert!(!m.choices(0).contains(&Machine::MxvatvCar));
+    assert_eq!(switch(&m).map(|t| t.riding), Some(true));
+}
+
 /// P315d: the Bike tab's Handling row offers the original's and, for each installed trick pack whose
 /// manifest lists bike files, MX vs. ATV's and Untamed's on them; each seat picks its own, kept in
 /// garage.txt when the Garage closes. Settings → Ride has no Handling rows. An older settings file's

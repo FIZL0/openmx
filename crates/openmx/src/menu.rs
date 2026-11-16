@@ -490,7 +490,7 @@ pub struct Settings {
     pub atv: String,
     /// MX vs. ATV's cars (MD39c), an addition: the car (`buggy`, `monstertruck`, `baja`, `golfcart`,
     /// `sandrail`) the pause's switch row offers off the installed car pack; empty, the default, for
-    /// none. Only settings.txt's `mxvatv_car` sets it yet: the Garage has no row for it.
+    /// none. The Garage's Car tile picks it (MD158), as does settings.txt's `mxvatv_car`.
     pub mxvatv_car: String,
     /// Whether a wreck rumbles the rider's pad (P183): the original's controller vibration option.
     /// On by default, the original's.
