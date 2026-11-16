@@ -3,12 +3,11 @@
 use super::*;
 
 /// What the five calls MD106b ports still hand out in turn now MD128 runs the rest: the rumble's
-/// switch, the sound cue, the wrecked look on and off, and the car's respawn.
+/// switch, the sound cue, the wrecked look on and off (the car's respawn runs since MD154).
 const RUMBLE_ON: u32 = 0x0051_a250;
 const RUMBLE_RA: u32 = 0x004a_841c;
 const LOOK_ON: u32 = 0x0019_86c0;
 const LOOK_OFF: u32 = 0x004b_82c0;
-const RESPAWN: u32 = 0x004c_ab10;
 
 /// The vehicle's words MD106b's calls keep (research/oracle.txt `# MD106b`).
 mod own {
@@ -163,6 +162,9 @@ pub(crate) fn vehicle_words(ee: &Ee, v: &atv_car::Vehicle, p: &Ptrs, o: &OwnPtrs
         }
     }
     out.extend(hand_words(ee, v, p, o));
+    if let Some(b) = &v.back {
+        out.extend(back_words(ee, b, p));
+    }
     out
 }
 
@@ -172,11 +174,11 @@ pub(crate) fn vehicle_words(ee: &Ee, v: &atv_car::Vehicle, p: &Ptrs, o: &OwnPtrs
 /// collision sync, the record's gravity call and the subtree's marking run too, and what they hand
 /// out is hooked by [`hook_hand_outs`]. A call from anything but the car (or its look) fails the
 /// test: these hooks run nothing, for every caller.
-fn hook_own(ee: &mut Ee, p: Ptrs, o: &OwnPtrs, log: Shared<Vec<Call>>) {
+pub(crate) fn hook_own(ee: &mut Ee, p: Ptrs, o: &OwnPtrs, log: Shared<Vec<Call>>) {
     for a in [VEHICLE_FORCE, VEHICLE_POST, WRECK_TIMER, NODE_LOCAL, NODE_POSITION] {
         ee.hooks.remove(&a).expect("hooked");
     }
-    let on: [(u32, u32, Call); 2] = [(RESPAWN, CAR, Call::Respawn), (LOOK_OFF, o.look, Call::WreckLook(false))];
+    let on: [(u32, u32, Call); 1] = [(LOOK_OFF, o.look, Call::WreckLook(false))];
     for (addr, this, c) in on {
         let l = log.clone();
         ee.hooks.insert(addr, Box::new(move |ee| {
@@ -213,7 +215,7 @@ fn hook_own(ee: &mut Ee, p: Ptrs, o: &OwnPtrs, log: Shared<Vec<Call>>) {
 /// A generated state of MD106b's words: wrecks on or off, the clock about `MaxWreckTime`, the kinds,
 /// the flag byte's bits, the world's box round the body (in and out), the rumble and the look; and
 /// MD128's ([`generate_hand_outs`]).
-fn generate_own(r: &mut Rng, image: &atv_car::Vehicle, car: &mut Car, body: &Body, s: &mut Script) -> atv_car::Vehicle {
+pub(crate) fn generate_own(r: &mut Rng, image: &atv_car::Vehicle, car: &mut Car, body: &Body, s: &mut Script) -> atv_car::Vehicle {
     let mut v = image.clone();
     v.wrecks_on = r.chance(0.9);
     v.bounded = r.chance(0.7);
@@ -261,6 +263,7 @@ fn generate_own(r: &mut Rng, image: &atv_car::Vehicle, car: &mut Car, body: &Bod
         }
     }
     generate_hand_outs(r, &mut v, body);
+    generate_back(r, &mut v, body, s);
     v
 }
 
@@ -281,7 +284,8 @@ fn the_cars_own_calls_are_the_originals() {
     let o = own_ptrs(&ee, &p);
     let image_car = read_car(&ee, &p);
     let image_body = seed::body(&|a| ee.u32_at(a), p.body);
-    let image_v = read_vehicle(&ee, &p, &o);
+    let mut image_v = read_vehicle(&ee, &p, &o);
+    image_v.back = Some(read_back(&ee, &p));
     assert!(image_v.look && image_v.record && o.state != 0 && ee.u32_at(o.state + own::PAD) != 0, "the image's look, record and pad");
     assert!(image_v.held.is_some() && image_v.area.is_some() && image_v.owned, "the image's empty record list, map and record owner");
     assert!(image_v.collidables.riding.is_some() && image_v.collidables.frame.is_some() && image_v.below.len() == 44, "the image's collidables and subtree");
@@ -293,6 +297,7 @@ fn the_cars_own_calls_are_the_originals() {
     hook(&mut ee, p, log.clone(), script.clone());
     hook_own(&mut ee, p, &o, log.clone());
     hook_hand_outs(&mut ee, p, &o, log.clone(), rng.clone());
+    hook_back(&mut ee, p, log.clone());
     let world = World { iterations: 1, rate: F(115.0) };
     let table = AcosTable::build();
     let mut r = Rng(0x0106_b0b0_0000_0001);
@@ -308,6 +313,7 @@ fn the_cars_own_calls_are_the_originals() {
         .collect();
     blocks.extend(o.nodes.iter().map(|&n| (n, 0x110)));
     blocks.extend(hand_blocks(&ee, &p));
+    blocks.extend(back_blocks(&ee));
     const CASES: usize = 3000;
     for case in 0..CASES {
         let (mut car, body, dt) = generate(&mut r, &image_car, &image_body, &p);
@@ -391,6 +397,8 @@ fn the_cars_own_calls_are_the_originals() {
         see("flag word bit cleared", pv.flag_word != v.flag_word);
         see("subtree marked", pv.below != v.below);
         see("subtree current, not marked", !v.below.iter().all(|b| b.flags & 1 == 0) && pv.below == v.below);
+        // MD154's.
+        see("respawn", has("GhostStart"));
 
         // Put the image back.
         for (from, to) in written {
@@ -403,5 +411,5 @@ fn the_cars_own_calls_are_the_originals() {
     for (what, &k) in &seen {
         assert!(k >= 30, "{what} seen only {k} times");
     }
-    assert_eq!(seen.len(), 35, "a branch was never seen: {seen:?}");
+    assert_eq!(seen.len(), 36, "a branch was never seen: {seen:?}");
 }

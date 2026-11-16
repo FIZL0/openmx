@@ -85,6 +85,8 @@ const POST_LANDED: [u32; 2] = [0x004c_bf60, 0x004c_bf88];
 const POST_GROUND: u32 = 0x004c_c428;
 /// Where the probe asks the ground (MD127).
 const PROBE_GROUND: u32 = 0x004b_5464;
+/// Where the respawn's put-back asks the ground (MD154).
+const BACK_GROUND: u32 = 0x004a_6ff8;
 /// The sort's ray probe's place (its vt `+0xcc`) and search, and where the sort calls them (MD127).
 const SORT_PLACE: u32 = 0x001b_cfe0;
 const SORT_SEARCH: u32 = 0x0011_51c0;
@@ -469,6 +471,8 @@ struct Script {
     ground: [[Ground; 5]; 4],
     asked: [usize; 4],
     sort: SortAnswer,
+    /// The normal the respawn's ground query answers (MD154).
+    back_normal: Vf,
 }
 
 /// One answer of a probe's ground query: the height a step from the point asked, or from the tire's
@@ -550,6 +554,7 @@ impl Steps for Port {
             Call::Probe(k, _) => self.script.probe(k, &mut car.tires[k]),
             Call::TireStep(k, _) => self.script.step(k, &mut car.tires[k]),
             Call::GroundUnder(_) => car.ground_normal = self.script.normal,
+            Call::BackGround(_) => car.ground_normal = self.script.back_normal,
             Call::NodePosition => car.node_pos = self.script.node_pos,
             Call::TireGround(k, at) => {
                 let (point, normal, surface) = self.script.ground(k, at, &car.tires[k]);
@@ -673,8 +678,16 @@ fn hook(ee: &mut Ee, p: Ptrs, log: Shared<Vec<Call>>, script: Shared<Script>) {
             l.borrow_mut().push(Call::TireGround(k, asked));
             return;
         }
+        if ee.r(31) as u32 == BACK_GROUND {
+            // The respawn's (MD154), on the car's terrain at its put-back position.
+            assert_eq!((ee.r(4) as u32, ee.r(5) as u32, ee.r(7), ee.r(8)), (ee.u32_at(CAR + at::GROUND_WORLD), CAR + 0x50, 0, 0), "the respawn's ground query");
+            l.borrow_mut().push(Call::BackGround(get_v(ee, CAR + 0x50)));
+            put_v(ee, ee.r(6) as u32, s.borrow().back_normal);
+            return;
+        }
         assert_eq!(ee.r(31) as u32, POST_GROUND, "a ground query from elsewhere");
-        assert_eq!((ee.r(4) as u32, ee.r(7), ee.r(8)), (p.ground_world, 0, 0), "the ground query's world, fourth and record");
+        // The car's terrain word, which MD154's respawn test clears at times.
+        assert_eq!((ee.r(4) as u32, ee.r(7), ee.r(8)), (ee.u32_at(CAR + at::GROUND_WORLD), 0, 0), "the ground query's world, fourth and record");
         l.borrow_mut().push(Call::GroundUnder(get_v(ee, ee.r(5) as u32)));
         put_v(ee, ee.r(6) as u32, s.borrow().normal);
     }));
@@ -2448,7 +2461,9 @@ mod class_update; // MD106e: the car classes' update slots, the update's calls u
 mod own_hand_outs; // MD128: what the own calls hand out in turn, unhooked
 mod drives; // MD135: MD107's five drives, the port's frame beside the interpreter's
 mod class_step; // MD151: the buggy's class step
+mod own_back; // MD154: the car's respawn, unhooked
 
+use own_back::*;
 use own_calls::*;
 use own_hand_outs::*;
 use pieces::*;
