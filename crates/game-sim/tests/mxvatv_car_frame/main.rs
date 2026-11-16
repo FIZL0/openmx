@@ -300,6 +300,7 @@ fn read_car(ee: &Ee, p: &Ptrs) -> Car {
         sort_rays: b(at::SORT_RAYS),
         sort: SortAnswer::default(),
         noise: F::ZERO,
+        stood_on: atv_car::Under::Still,
     }
 }
 
@@ -469,6 +470,9 @@ struct Script {
     ground: [[Ground; 5]; 4],
     asked: [usize; 4],
     sort: SortAnswer,
+    /// What each hit's object and mover are (MD131, [`movers`]).
+    objects: [atv_car::Under; SORT_HITS],
+    movers: [atv_car::Under; SORT_HITS],
 }
 
 /// One answer of a probe's ground query: the height a step from the point asked, or from the tire's
@@ -538,10 +542,22 @@ impl Script {
     }
 }
 
-/// The port's side of the hooked calls.
+/// The port's side of the hooked calls. What the tire step's contact velocity asks (MD131) is the
+/// original's reads of RAM, answered here and not logged: what a tire stands on is [`movers::under`]'s,
+/// the mover's virtuals counted in `asked` (spin first), and each object's world centre of mass kept
+/// in `cofgs` (the last written); what each answer was is seen.
 struct Port {
     log: Vec<Call>,
     script: Script,
+    asked: Vec<bool>,
+    cofgs: Vec<(u32, Vf)>,
+    seen: Seen,
+}
+
+impl Port {
+    fn new(script: Script) -> Port {
+        Port { log: Vec::new(), script, asked: Vec::new(), cofgs: Vec::new(), seen: Seen::new() }
+    }
 }
 
 impl Steps for Port {
@@ -558,6 +574,26 @@ impl Steps for Port {
             }
             Call::SortSearch => car.sort = self.script.sort,
             Call::Noise(at) => car.noise = F(fake_noise(at.0)),
+            Call::StandsOn(on) => {
+                car.stood_on = movers::under(&self.script, on);
+                let what = match car.stood_on {
+                    atv_car::Under::Object { .. } if on[1] != 0 => "under: an object over a mover",
+                    atv_car::Under::Object { on: atv_car::Holder::Body { .. }, .. } => "under: a body",
+                    atv_car::Under::Object { .. } => "under: a chassis",
+                    atv_car::Under::Mover { .. } => {
+                        self.asked.extend([true, false]);
+                        "under: a mover"
+                    }
+                    atv_car::Under::Still => unreachable!(),
+                };
+                *self.seen.entry(what).or_insert(0) += 1;
+                return;
+            }
+            Call::ObjectCofg(o, v) => {
+                self.cofgs.retain(|&(p, _)| p != o);
+                self.cofgs.push((o, v));
+                return;
+            }
             _ => {}
         }
         self.log.push(c);
@@ -2286,6 +2322,8 @@ fn tire_tags(k: &TireKeys, s0: &State, s1: &State, i: usize, t0: &Tire, t: &Tire
         }
     };
     tag("tire: down", t.grounded);
+    // MD131: a rear handed what a front stands on (never in the runs without movers).
+    tag("tire: handed a mover's", !t.grounded && t.handed && t.handed_on != [0, 0]);
     tag("tire: bottomed, pushed", pushed);
     tag("tire: bottomed, held", t.grounded && !pushed && st.compression == k.max_compression && !t.solid);
     tag("tire: handed", !t.grounded && t0.handed);
@@ -2448,6 +2486,7 @@ mod class_update; // MD106e: the car classes' update slots, the update's calls u
 mod own_hand_outs; // MD128: what the own calls hand out in turn, unhooked
 mod drives; // MD135: MD107's five drives, the port's frame beside the interpreter's
 mod class_step; // MD151: the buggy's class step
+mod movers; // MD131: the tire step on what a tire stands on
 
 use own_calls::*;
 use own_hand_outs::*;

@@ -326,7 +326,7 @@ fn the_cars_own_calls_are_the_originals() {
 
         // The port.
         let (mut pc, mut pb, mut pv) = (car, body, v.clone());
-        let mut port = Port { log: Vec::new(), script: s };
+        let mut port = Port::new(s);
         atv_car::frame(&world, &mut pc, &mut pb, dt, &table, &mut atv_car::Own { v: &mut pv, rest: &mut port });
         let after = [car_words(&pc, &p), seed::body_words(&pb, p.body), vehicle_words(&pristine, &pv, &p, &o)].concat();
 

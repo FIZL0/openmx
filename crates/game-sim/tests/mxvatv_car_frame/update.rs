@@ -141,7 +141,7 @@ fn the_cars_update_is_the_originals() {
 
         // The port.
         let (mut pu, mut pc, mut pb) = (u, car, Body::default());
-        let mut port = Port { log: Vec::new(), script: Script::default() };
+        let mut port = Port::new(Script::default());
         atv_car::update(&mut pu, &mut pc, &mut pb, dt, &mut port);
         let mut after = car_words(&pc, &p);
         after.push((CAR + up::ON_HAZARD, word(pu.on_hazard)));
