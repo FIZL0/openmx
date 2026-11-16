@@ -1424,6 +1424,50 @@ fn mips(t: &Texture) -> Vec<(u32, u32, Vec<u8>)> {
     out
 }
 
+/// A texture's mip chain for a material that never reads its alpha (V129): each level half the
+/// last, all four channels box-filtered alike. [`mips`] weighs the colour by alpha and repaints
+/// every clear texel with a coarser level's colour, which is right for a cut-out's holes but not
+/// for an alpha that is a gloss mask: the cars' tire texture keeps its rubber at alpha 0, and its
+/// sidewalls and treads came out in blocks of the coarse levels' white, grey and orange.
+fn solid_mips(t: &Texture) -> Vec<(u32, u32, Vec<u8>)> {
+    let mut out = vec![(t.width as u32, t.height as u32, t.rgba.clone())];
+    while let Some((w, h, px)) = out.last()
+        && (*w > 1 || *h > 1)
+    {
+        let (w, h) = (*w as usize, *h as usize);
+        let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
+        let mut next = vec![0u8; nw * nh * 4];
+        for y in 0..nh {
+            for x in 0..nw {
+                let at = |xx: usize, yy: usize, k: usize| px[(yy.min(h - 1) * w + xx.min(w - 1)) * 4 + k] as u32;
+                for k in 0..4 {
+                    let s = at(2 * x, 2 * y, k) + at(2 * x + 1, 2 * y, k) + at(2 * x, 2 * y + 1, k) + at(2 * x + 1, 2 * y + 1, k);
+                    next[(y * nw + x) * 4 + k] = ((s + 2) / 4) as u8;
+                }
+            }
+        }
+        out.push((nw as u32, nh as u32, next));
+    }
+    out
+}
+
+/// The `keep` [`Mips::of`] takes for a material whose texture's alpha is never drawn ([`solid_mips`]).
+pub const SOLID_MIPS: u8 = 1;
+
+/// Which levels a material's texture is uploaded with, as [`Mips::of`] takes it: its cutoff for a
+/// cut-out that keeps its coverage (never under 2, so it cannot be taken for [`SOLID_MIPS`]),
+/// [`SOLID_MIPS`] for one that neither tests, blends nor adds by its alpha, and 0, [`mips`]'
+/// plain levels, for the rest.
+pub fn mip_keep(s: &Surface) -> u8 {
+    if s.keep_coverage && s.cutoff > 0 {
+        s.cutoff.max(2)
+    } else if s.cutoff == 0 && s.depth_cutoff == 0 && !s.blend && !s.additive {
+        SOLID_MIPS
+    } else {
+        0
+    }
+}
+
 fn upload_texture(device: &wgpu::Device, queue: &wgpu::Queue, t: &Texture) -> wgpu::TextureView {
     upload_texture_keeping(device, queue, t, 0)
 }
@@ -1569,7 +1613,8 @@ fn upload_texture_keeping(device: &wgpu::Device, queue: &wgpu::Queue, t: &Textur
 pub struct Mips(Vec<(u32, u32, Vec<u8>)>);
 
 impl Mips {
-    /// `t`'s levels, keeping the coverage of alpha `cutoff` when it is not 0.
+    /// `t`'s levels, keeping the coverage of alpha `cutoff` when it is not 0, and for an alpha
+    /// that is never drawn at [`SOLID_MIPS`] ([`mip_keep`]).
     pub fn of(t: &Texture, cutoff: u8) -> Mips {
         let fallback;
         let t = match t.width == 0 || t.height == 0 || t.rgba.len() < t.width * t.height * 4 {
@@ -1583,7 +1628,10 @@ impl Mips {
             }
             false => t,
         };
-        Mips(mips_keeping(t, cutoff))
+        match cutoff {
+            SOLID_MIPS => Mips(solid_mips(t)),
+            _ => Mips(mips_keeping(t, cutoff)),
+        }
     }
 }
 
@@ -3710,9 +3758,9 @@ impl Renderer {
             for m in 0..loaded.model.materials.len().max(1) {
                 let texture = loaded.textures.get(m).copied().flatten().filter(|&t| t < assets.textures.len());
                 let surface = loaded.surfaces.get(m).copied().unwrap_or_default();
-                let keep = if surface.keep_coverage { surface.cutoff } else { 0 };
+                let keep = mip_keep(&surface);
                 if let Some(t) = texture
-                    && keep > 0
+                    && keep > SOLID_MIPS
                     && !self.textures.contains_key(&(t, keep))
                     && !out.contains(&(t, keep))
                 {
@@ -3801,7 +3849,7 @@ impl Renderer {
     /// A material's bind groups and pipelines, its texture uploaded if it is not yet.
     fn make_material(&mut self, assets: &Assets, texture: Option<usize>, surface: &Surface) -> GpuMaterial {
         let key = MaterialKey::of(texture, surface);
-        let keep = if surface.keep_coverage { surface.cutoff } else { 0 };
+        let keep = mip_keep(surface);
         let view = match texture {
             Some(t) => self
                 .textures
@@ -3819,7 +3867,7 @@ impl Renderer {
         // drawn from half of the filtered alpha (V80).
         let uniform = |cutoff: u8, below: f32| MaterialUniform {
             constant,
-            cutoff: if keep > 0 { KEEP_EDGE as f32 } else { cutoff as f32 },
+            cutoff: if keep > SOLID_MIPS { KEEP_EDGE as f32 } else { cutoff as f32 },
             shading: key.shading.0 as u32,
             coverage: key.keep_coverage as u32 | if key.pipeline.blend == Blend::Add { ADDITIVE } else { 0 },
             below,
@@ -6133,6 +6181,36 @@ mod tests {
         let big = Texture { width: 512, height: 512, rgba: [t.rgba.clone(), t.rgba.clone(), t.rgba.clone(), t.rgba].concat() };
         mips_keeping(&big, 128);
         println!("a 512x512 cut-out's levels in {:.0} ms", start.elapsed().as_secs_f64() * 1000.0);
+    }
+
+    /// V129: an opaque material's alpha is a gloss mask, not holes. The cars' tire texture keeps its
+    /// rubber at alpha 0 beside white at 255; its levels keep the rubber dark, as the full size has
+    /// it, where the cut-out levels paint it with the coarser levels' white. A cut-out, a blended
+    /// material and one that keeps its coverage still get theirs.
+    #[test]
+    fn an_opaque_materials_levels_ignore_its_alpha() {
+        let n = 64;
+        let rgba = (0..n * n).flat_map(|i| if i % n < n / 4 { [255, 255, 255, 255] } else { [40, 40, 40, 0] }).collect();
+        let t = Texture { width: n, height: n, rgba };
+        let tire = Surface { cutoff: 0, ..Surface::default() };
+        assert_eq!(mip_keep(&tire), SOLID_MIPS);
+        let solid = Mips::of(&t, mip_keep(&tire)).0;
+        let holes = Mips::of(&t, 0).0;
+        assert_eq!(solid.len(), holes.len());
+        // A rubber texel well inside the dark part, at every level down to 4x4.
+        for (level, ((w, _, a), (_, _, b))) in solid.iter().zip(&holes).enumerate().take(5) {
+            let i = ((*w as usize / 2) * *w as usize + *w as usize * 3 / 4) * 4;
+            assert_eq!(&a[i..i + 3], &[40, 40, 40], "level {level}: the rubber is not its own colour");
+            if level > 0 {
+                assert_eq!(&b[i..i + 3], &[255, 255, 255], "level {level}: the cut-out levels no longer fill holes");
+            }
+        }
+        assert_eq!(mip_keep(&Surface::default()), 0, "a cut-out");
+        assert_eq!(mip_keep(&Surface { cutoff: 0, blend: true, ..Surface::default() }), 0, "blended");
+        assert_eq!(mip_keep(&Surface { cutoff: 0, additive: true, ..Surface::default() }), 0, "additive");
+        assert_eq!(mip_keep(&Surface { cutoff: 0, depth_cutoff: 64, ..Surface::default() }), 0, "depth by alpha");
+        assert_eq!(mip_keep(&Surface { cutoff: 128, keep_coverage: true, ..Surface::default() }), 128);
+        assert_eq!(mip_keep(&Surface { cutoff: 1, keep_coverage: true, ..Surface::default() }), 2);
     }
 
     #[test]

@@ -409,7 +409,7 @@ fn mips_of(assets: &Assets) -> Vec<(usize, u8, Mips)> {
         for m in 0..loaded.model.materials.len().max(1) {
             let Some(t) = loaded.textures.get(m).copied().flatten().filter(|&t| t < assets.textures.len()) else { continue };
             let surface = loaded.surfaces.get(m).copied().unwrap_or_default();
-            let keep = if surface.keep_coverage { surface.cutoff } else { 0 };
+            let keep = game_render::gpu::mip_keep(&surface);
             if !mips.iter().any(|&(at, k, _)| (at, k) == (t, keep)) {
                 mips.push((t, keep, Mips::of(&assets.textures[t], keep)));
             }
