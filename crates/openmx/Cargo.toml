@@ -110,8 +110,10 @@ windows = { version = "0.62", features = ["Gaming_Input"] }
 cpal = "0.16"
 
 # The Mac app (P351): the sound through cpal's CoreAudio, and the log file a Finder launch writes (`src/mac_log.rs`).
+# Its pads (P352) through gilrs' default backend, IOKit's HID manager, read by `src/win.rs` as Windows' are.
 [target.'cfg(target_os = "macos")'.dependencies]
 cpal = "0.16"
+gilrs = "0.11"
 libc = "0.2"
 
 # The browser's build (N4), as opentennis's is: wasm-bindgen for the page's calls, and ggrs' clock and
