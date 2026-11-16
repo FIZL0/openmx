@@ -2067,13 +2067,14 @@ fn quad_drawn(atv: &vehicle::AtvRide, before: Option<M4>, blend: &pace::Blend) -
 /// Every seat's rider on the quad (MD138): the rider's own body posed by the pack's ATV motion set
 /// and held to the posed chassis' pegs and grips ([`quad_draw::rider`]), its root at the quad's
 /// origin, the clips being in the quad's space. `None` for a seat not on it.
-fn quad_riders(seats: &[Seat], rigs: &mut [Rig], assets: &Assets, look: Option<&quad_draw::Look>, before: &[Option<M4>], cut: &[bool], blend: &pace::Blend) -> Vec<Option<Pilot>> {
+fn quad_riders(seats: &[Seat], rigs: &mut [Rig], assets: &Assets, looks: &[(String, quad_draw::Look)], before: &[Option<M4>], cut: &[bool], blend: &pace::Blend) -> Vec<Option<Pilot>> {
     seats
         .iter()
         .zip(rigs.iter_mut())
         .enumerate()
         .map(|(p, (seat, rig))| {
-            let (atv, look) = (seat.garage.atv_up()?, look?);
+            let atv = seat.garage.atv_up()?;
+            let look = quad_look_of(looks, atv)?;
             let was = before.get(p).copied().flatten().filter(|_| !cut.get(p).copied().unwrap_or(true));
             let at = quad_drawn(atv, was, blend)?;
             let palette = quad_draw::rider(look, rig.body.as_mut()?, atv, assets)?;
@@ -6387,12 +6388,17 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         .flat_map(|&m| (0..vehicle::LIVERIES).map(move |l| car_draw::model_name(m, l)))
         .filter_map(|name| game_render::car::Car::found(&assets, name))
         .collect();
-    // And the quad's chassis, parts and rider clips, drawn while it is out (MD138).
-    let quad_look = garage.atv.as_ref().and_then(|atv| atv_look(&args, &mut assets, atv));
+    // And the quad's chassis, parts and rider clips, drawn while it is out (MD138); online, each
+    // other seat's pick's beside it, loaded when its quad first shows (MD171), by `quad_key`.
+    let mut quad_looks: Vec<(String, quad_draw::Look)> = garage.atv.as_ref().and_then(|atv| Some((quad_key(atv), atv_look(&args, &mut assets, atv)?))).into_iter().collect();
+    // The picks whose look did not load, not tried again.
+    let mut quad_unlooked: Vec<String> = Vec::new();
+    // MD171: the session tick each shell seat's quad clips were last ticked at.
+    let mut quad_clip_ticks: Vec<u64> = Vec::new();
     // MD138a: and its clips ticked with its ride, off the look's stunt table (the other seats' quads
-    // are this one's, copied).
+    // are this one's, copied, offline).
     let mut garage = garage;
-    if let (Some(atv), Some(look)) = (garage.atv.as_mut(), quad_look.as_ref()) {
+    if let (Some(atv), Some((_, look))) = (garage.atv.as_mut(), quad_looks.first()) {
         atv.stunts = look.stunts.clone();
     }
     // The helicopter's own camera (P216), built as the plane's is, on `HeloCPresets.ini` (in a
@@ -9581,12 +9587,31 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     seat.garage.cars.retain(|c| c.machine != car.machine);
                     seat.garage.cars.push(vehicle::CarRide { driven: None, struck: None, ..car });
                 }
-                // A seat on its quad (MD152) is drawn off its own pick's quad, in this machine's look.
+                // A seat on its quad (MD152) is drawn off its own pick's quad, in that pick's look
+                // (MD171), loaded the first time a seat shows it, its clips off the look's stunts.
+                // A garage dressed as this machine's (a copy of its quad) takes the seat's own too.
                 if seat.sim.quad.is_some()
-                    && seat.garage.atv.is_none()
                     && let Some(quad) = on.drawn().get(d).and_then(|&s| on.quad(s))
+                    && seat.garage.atv.as_ref().is_none_or(|a| quad_key(a) != quad_key(quad))
                 {
-                    seat.garage.atv = Some(quad.clone());
+                    let mut quad = quad.clone();
+                    let key = quad_key(&quad);
+                    if !quad_looks.iter().any(|(k, _)| *k == key) && !quad_unlooked.contains(&key) {
+                        match seat_quad_look(&args, &mut assets, &quad) {
+                            Some(look) => {
+                                if let (true, Some(r)) = (gpu_on, renderer_of(&mut offscreen, window)) {
+                                    let models: Vec<&String> = std::iter::once(&look.chassis).chain(look.parts.iter().map(|p| &p.model)).collect();
+                                    r.upload_models(&assets, &models);
+                                }
+                                quad_looks.push((key.clone(), look));
+                            }
+                            None => quad_unlooked.push(key.clone()),
+                        }
+                    }
+                    if let Some(look) = quad_look_of(&quad_looks, &quad) {
+                        quad.stunts = look.stunts.clone();
+                    }
+                    seat.garage.atv = Some(quad);
                 }
                 // Its machine is its `Sim`'s (N17): the garage follows, and a switch the session
                 // made snaps the camera onto the machine taken, as offline. Not before every seat's
@@ -9599,6 +9624,15 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     if let (0, Some(front)) = (d, front.as_deref_mut()) {
                         front.menu.switched(0, menu::Machine::from_word(up.name()).unwrap_or_default());
                     }
+                }
+                // Its quad's clips ticked off its lane (MD171), once for each tick run since the last.
+                if quad_clip_ticks.len() <= d {
+                    quad_clip_ticks.resize(d + 1, on.ticks());
+                }
+                let ran = on.ticks().saturating_sub(quad_clip_ticks[d]);
+                quad_clip_ticks[d] = on.ticks();
+                if let Some(atv) = seat.garage.atv.as_mut() {
+                    tick_lane_clips(atv, ran, on.dt());
                 }
                 // Drawn in its flier pack's model where its plane is one (P318), else in its livery.
                 if let Some(plane) = seat.garage.plane.as_mut() {
@@ -10950,7 +10984,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         // And each flying the helicopter's (P216b).
         let heli_pilots = heli_pilots(&world.seats, &mut rigs, &before_helis, &cut, &blend);
         let car_drivers = car_drivers(&world.seats, &mut rigs, &assets, &before_cars, &cut, &blend);
-        let quad_riders = quad_riders(&world.seats, &mut rigs, &assets, quad_look.as_ref(), &before_quads, &cut, &blend);
+        let quad_riders = quad_riders(&world.seats, &mut rigs, &assets, &quad_looks, &before_quads, &cut, &blend);
         // Each view's buttons and the join cue's, under Button Icons (P281).
         let hud_buttons: Vec<menu::pads::Buttons> = (0..world.seats.len()).map(|v| front.as_deref().map(|f| f.menu.seat_buttons(v)).unwrap_or_default()).collect();
         let join_buttons = front.as_deref().map(|f| f.menu.join_buttons()).unwrap_or_default();
@@ -11166,7 +11200,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             // And every player's quad while it is out (MD138), at its matrix, posed from the step, slid
             // as the car is; with its rider on it.
             for (p, seat) in world.seats.iter().enumerate().filter(|_| !args.overview) {
-                let (Some(atv), Some(look)) = (seat.garage.atv_up(), quad_look.as_ref()) else { continue };
+                let Some((atv, look)) = seat.garage.atv_up().and_then(|atv| Some((atv, quad_look_of(&quad_looks, atv)?))) else { continue };
                 let before = before_quads.get(p).copied().flatten().filter(|_| !cut[p]);
                 let Some(at) = quad_drawn(atv, before, &blend) else { continue };
                 let alpha = vehicle::shown_alpha(1.0, seat.paused);
@@ -11624,7 +11658,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             }
             // And the quad out (MD138), slid as the GPU's is, with its rider.
             for (p, seat) in world.seats.iter().enumerate().filter(|_| !args.overview) {
-                let (Some(atv), Some(look)) = (seat.garage.atv_up(), quad_look.as_ref()) else { continue };
+                let Some((atv, look)) = seat.garage.atv_up().and_then(|atv| Some((atv, quad_look_of(&quad_looks, atv)?))) else { continue };
                 let before = before_quads.get(p).copied().flatten().filter(|_| !cut[p]);
                 let Some(at) = quad_drawn(atv, before, &blend) else { continue };
                 let wheels = quad_draw::wheels(atv);
@@ -12158,6 +12192,22 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         println!("{}", on.fliers_flown());
         if let Some(line) = on.quads_ridden() {
             println!("{line}");
+            // MD171: and each seat's quad as drawn, in seat order: its look's build and how long
+            // its clips have ticked, `online: quads drawn 1P …ATV_Race250P.sub, clips 12.30 s, …`.
+            let order = on.drawn();
+            let mut seats: Vec<(usize, String)> = world
+                .seats
+                .iter()
+                .enumerate()
+                .filter_map(|(d, seat)| {
+                    let (s, atv) = (*order.get(d)?, seat.garage.atv_up()?);
+                    let look = quad_look_of(&quad_looks, atv).map_or("undrawn", |l| l.sub.as_str());
+                    let clips = atv.ridden.as_ref().and_then(|q| q.clips.as_ref()).map_or("no clips".to_string(), |c| format!("clips {:.2} s{}", c.clock, if c.played.is_some() { ", played" } else { "" }));
+                    Some((s, format!("{}P {look}, {clips}", s + 1)))
+                })
+                .collect();
+            seats.sort();
+            println!("online: quads drawn {}", seats.into_iter().map(|(_, l)| l).collect::<Vec<_>>().join("; "));
         }
         println!("{}", on.summary());
         // What the lobby said while the ride ran (a drop, the lobby as it is now, chat) is the menu's.
@@ -13427,6 +13477,52 @@ fn atv_look(args: &Args, assets: &mut Assets, atv: &vehicle::AtvRide) -> Option<
             None
         }
     }
+}
+
+/// MD171: the look of another seat's quad online, its pick's pack read where [`quad_reader`] read
+/// its handling (the room's files, else the mods folder), loaded into `assets` as [`atv_look`] does
+/// this machine's own.
+fn seat_quad_look(args: &Args, assets: &mut Assets, atv: &vehicle::AtvRide) -> Option<quad_draw::Look> {
+    let packs = machine_packs::find(&args.room_machines.clone().or_else(|| mods_dir(args))?).0;
+    match quad_draw::load(assets, &packs, atv) {
+        Ok(look) => {
+            println!("atv: {} drawn as {} ({} parts, {} rider clips, {} quad clips)", quad_key(atv), look.sub, look.parts.len(), look.clips.len(), look.machine_clips.len());
+            Some(look)
+        }
+        Err(e) => {
+            println!("atv: {} undrawn: {e}", quad_key(atv));
+            None
+        }
+    }
+}
+
+/// MD171: the look a quad is drawn in, its pick's among `looks` (by [`quad_key`]).
+fn quad_look_of<'a>(looks: &'a [(String, quad_draw::Look)], atv: &vehicle::AtvRide) -> Option<&'a quad_draw::Look> {
+    let key = quad_key(atv);
+    looks.iter().find(|(k, _)| *k == key).map(|(_, l)| l)
+}
+
+/// The most ticks one drawn frame catches a quad's clips up by (MD171): past it, a stall's.
+const LANE_CLIP_CATCH_UP: u64 = 8;
+
+/// MD171: an online seat's quad clips ticked off its lane, as offline's step ticks them
+/// ([`vehicle::AtvRide::step`]): `ran` ticks of `dt` since the frame before, the last on the shown
+/// tick's calls, the ones before it on none (the frame shows only the last tick's). Made on the
+/// look's stunts when the quad first shows; none with no stunt table.
+fn tick_lane_clips(atv: &mut vehicle::AtvRide, ran: u64, dt: F) {
+    let vehicle::AtvRide { ridden, stunts, .. } = atv;
+    let Some(q) = ridden.as_deref_mut() else { return };
+    if stunts.is_empty() || ran == 0 {
+        return;
+    }
+    let clips = q.clips.get_or_insert_with(|| game_render::quad::Driver::new(stunts.clone()));
+    let ride = &q.ride;
+    for _ in 1..ran.min(LANE_CLIP_CATCH_UP) {
+        let held = ride.bike.air.flip_active || ride.bike.spin_active;
+        let pb = ride.tailed.as_ref().map(|t| t.put_back.clone()).unwrap_or_default();
+        clips.tick_on(&[], &ride.q, ride.down(), held, pb, dt.0);
+    }
+    clips.tick(ride, dt.0);
 }
 
 /// The machines besides the fliers the Garage offers (P315c): [`machine_offers`] off the mods

@@ -7,6 +7,10 @@
 //! see both switches, build both quads, move them the same distance, and agree on the settled
 //! ticks' state hash (no desync, the same state before tick 300) while both quads are out.
 //!
+//! MD171: the guest's pick is a sport quad (`atv_s_`), another build: each machine draws each seat's
+//! quad in its own pick's look (the host's `ATV_R_` build, the guest's `ATV_S_`), and ticks every
+//! drawn seat's clips off its lane.
+//!
 //! Under it, the pad byte: the quad's switch is byte 6 and reads back as the quad.
 //!
 //! Skips with no disc, and with no `mods/machines/mxvatv_atv` (openmx-mods' import-atv makes it).
@@ -163,11 +167,11 @@ fn two_online_shells_both_ride_their_quads_and_agree() {
     if !ready() {
         return;
     }
-    let said = ride_online("free09", 420, ["atv_Race250P", "atv_Pro250A"], ["40:atv,41:gas", "60:atv,61:gas"]);
+    let said = ride_online("free09", 420, ["atv_Race250P", "atv_s_Pro250A"], ["40:atv,41:gas", "60:atv,61:gas"]);
     for (who, s) in ["host", "guest"].iter().zip(&said) {
         // Every seat's quad, read here off its machine's pick.
         assert!(s.contains("online: seat 1 quad mxvatv_atv/atv_Race250P"), "{who}:\n{s}");
-        assert!(s.contains("online: seat 2 quad mxvatv_atv/atv_Pro250A"), "{who}:\n{s}");
+        assert!(s.contains("online: seat 2 quad mxvatv_atv/atv_s_Pro250A"), "{who}:\n{s}");
         // This machine's seat's switch: the load's bike, then the quad.
         let switched: Vec<&str> = s.lines().filter(|l| l.starts_with("vehicle: ") && !l.contains("every machine agrees")).collect();
         assert_eq!(switched.first(), Some(&"vehicle: bike"), "{who}:\n{s}");
@@ -175,11 +179,20 @@ fn two_online_shells_both_ride_their_quads_and_agree() {
         assert!(line_with(s, "desyncs").contains(" 0 desyncs"), "{who}:\n{s}");
         // Both quads out at the end, each gone somewhere on the throttle.
         let quads = line_with(s, "online: quads ");
-        for (seat, stem) in [("1P", "atv_Race250P"), ("2P", "atv_Pro250A")] {
+        for (seat, stem) in [("1P", "atv_Race250P"), ("2P", "atv_s_Pro250A")] {
             let at = format!("{seat} {stem} ");
             let rest = &quads[quads.find(&at).unwrap_or_else(|| panic!("{who}: {seat} is not on its quad: {quads}")) + at.len()..];
             let gone: f32 = rest.split(' ').next().unwrap().parse().expect("a distance");
             assert!(gone > 5.0, "{who}: {seat}'s quad stayed where it was taken: {quads}");
+        }
+        // MD171: each seat's quad drawn in its own pick's build, its clips ticked and playing.
+        let drawn = line_with(s, "online: quads drawn ");
+        let seats: Vec<&str> = drawn["online: quads drawn ".len()..].split("; ").collect();
+        assert_eq!(seats.len(), 2, "{who}: {drawn}");
+        for (seat, (want, build)) in seats.iter().zip([("1P ", "/ATV_R_"), ("2P ", "/ATV_S_")]) {
+            assert!(seat.starts_with(want) && seat.contains(build), "{who}: {want}is not drawn as its own {build} build: {drawn}");
+            let clock: f32 = seat.split("clips ").nth(1).and_then(|c| c.split(' ').next()).and_then(|c| c.parse().ok()).unwrap_or_else(|| panic!("{who}: {want}has no clips: {drawn}"));
+            assert!(clock > 1.0 && seat.ends_with(", played"), "{who}: {want}'s clips did not tick: {drawn}");
         }
     }
     // And both machines rode both quads to the same place, on the same state.
