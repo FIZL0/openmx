@@ -1630,7 +1630,12 @@ ai_iface_walk_begin         boot 0x00281b90 the AI interface's vt+0x2c thunk (th
 #                                           (class 3, 0x8), ragdoll parts (classes 3, 5), toys
 #                                           (0x48 meshes) etc. class_bit("AI_IGNORE") = 0x8000 =
 #                                           [0x4e2128], the word the bike builder ORs into every
-#                                           bike collidable: the avoidance sweeps no bike, ever
+#                                           bike collidable: the avoidance sweeps no bike, ever.
+#                                           S336, recording2: the moving part's order is free09's 6
+#                                           path cars (0x48, the .toy's order: cab, trailer x3),
+#                                           the rustic windmill toy (0x20a), the parked biplane
+#                                           (0x52058 mesh, 0x10008 rays, 0x8 sphere), then the
+#                                           riders; none of the first three is AI_IGNORE
 ai_iface_walk_next          boot 0x00281b80 vt+0x30 thunk (j 0x00280b00): the walk's next object, or 0
 ai_iface_walk_end           boot 0x00281b70 vt+0x34 thunk (j 0x00280b10): closes the walk's query
 #                                           (0x001bb890 on rider+0x13b0); v0 = 1 (S323)

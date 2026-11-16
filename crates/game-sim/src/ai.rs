@@ -5952,7 +5952,13 @@ impl crate::world::World for &Lent<'_> {
 /// [`WALK_HALF`] round `cofg`, over the world's props and plants as the plane's world holds them
 /// ([`crate::flight_search::world_flown`]): a prop is a [`Thing::Solid`] by its collidable's index (it
 /// is collidable, and none is of the `AI_IGNORE` class), a plant a [`Thing::Group`] by its cell, and
-/// the port's own two probes are left out. Then the moving world (S326): every one of `ridden`, in
+/// the port's own two probes are left out. A prop told how it moves ([`crate::world::Prop::moving`]:
+/// the track's path cars and its animated toys' meshes, which the Sim's traffic attaches at the end
+/// of the props and marks every tick) is in that world's moving list, not its tree, so it is walked
+/// after the tree's things, wherever it stands, in the props' order, and swept like any prop: free09's
+/// six path cars and its rustic windmill, as the original's moving structure hands them out ahead of
+/// the riders (S336). The original's parked biplane, between them and the bikes, is not in the Sim.
+/// Then the moving world (S326): every one of `ridden`, in
 /// the order given, wherever it is — the moving structure hands out all it holds, with no box —
 /// each a [`Thing::Solid`] by [`MOVING`] plus its place in `ridden`: collidable, and of the
 /// `AI_IGNORE` class ([`Ridden`]), so the avoidance passes over it. The sweep is the bundle against the one prop
