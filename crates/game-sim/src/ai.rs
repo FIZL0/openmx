@@ -6140,7 +6140,8 @@ impl Pilot {
 }
 
 /// The Sim's AI riders ([`crate::Sim::ai`]): the free-ride map's seeker world they all learn into, the
-/// tables their controllers read, the generator they draw from (the original's `rand()`), and each
+/// tables their controllers read, the generator they draw from (the original's `rand()`; in a race the
+/// race's instead, S333), and each
 /// AI player's [`Pilot`] by its player index, in the order the scene runs their brains.
 #[derive(Clone)]
 pub struct Lane {
