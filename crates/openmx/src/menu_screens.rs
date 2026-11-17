@@ -3316,11 +3316,13 @@ impl Pen<'_> {
     }
 
     /// The build's version or commit, small in the splash's top left (F14, opentennis's B660; the
-    /// main menu has it top right, where the splash's New version card goes).
+    /// main menu has it top right, where the splash's New version card goes). B32: it hangs from the
+    /// frame's top edge, not the stage's, which on a phone held upright is mid-screen over the scene.
     fn splash_build(&mut self) {
         let size = 1.0;
-        let (x, y) = (self.left().max(0.0) + 1.5, self.top().max(0.0) + 1.2 + CAP * size);
-        self.shadowed(Weight::Bold, build_label(), x, y, size, 0.0, DUST, Align::Left, [0.07, 0.09], [0, 0, 0, 89]);
+        let (x, y) = (self.left().max(0.0) + 1.5, self.top() + 1.2 + CAP * size);
+        let b = self.shadowed(Weight::Bold, build_label(), x, y, size, 0.0, DUST, Align::Left, [0.07, 0.09], [0, 0, 0, 89]);
+        self.parts.push(Part::Build(b));
     }
 
     /// The splash's New version card (F14, opentennis's B581), pinned to the top right: the newer

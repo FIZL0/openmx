@@ -6674,7 +6674,8 @@ pub enum Part {
     /// The hints' buttons and words over the band's right end (P208).
     Hints(Bounds),
     /// The band's line: whose ride this is, a note, or the lobby's word (P208).
-    Line(Bounds),
+    Line(Bounds),    /// The splash's build label, top left (B32).
+    Build(Bounds),
 }
 
 impl Art {
