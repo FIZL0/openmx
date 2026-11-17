@@ -636,6 +636,73 @@ fn each_car_driven_into_a_prop_stops_on_it() {
 }
 
 
+/// How far (ft) [`each_car_touching_a_prop_holds_its_air_control_off`] lifts the car off the prop,
+/// and the forward speed (ft/s) it gives it there: well past the air control's 10.
+const LIFT: f32 = 40.0;
+const AIR_SPEED: f32 = 30.0;
+
+/// MD182: each car, rigged, driven on the gas into a free09 prop: every tick the pieces' touching
+/// word ([`atv_car::State::touching`]) is the record's, as the vehicle's is. At the first tick its
+/// record touches the prop, the car is lifted [`LIFT`] ft into the air, level and still but for [`AIR_SPEED`] along the run, and stepped
+/// two frames (no record runs, so the touch holds) with the stick hard over and centred: touching,
+/// the stick moves nothing (no air control); the same car not touching turns on it.
+#[test]
+fn each_car_touching_a_prop_holds_its_air_control_off() {
+    let Some(files) = Files::load() else { return };
+    let mut disc = match Disc::open_configured() {
+        Ok(d) => d,
+        Err(why) => {
+            skip(&why);
+            return;
+        }
+    };
+    in_free09(&mut disc, |world| {
+        let (_, start, yaw) = prop_run(world);
+        for (name, machine, phy, model) in CARS {
+            let (mut ride, _) = files.rigged(machine, phy, model, world, start, yaw_quat(yaw));
+            let mut hands = Hands::new();
+            let mut touched = None;
+            for tick in 0..PROP_TICKS {
+                hands.step(&mut ride, world, true, 0x80);
+                ride.rest.clear();
+                let r = ride.recorded.as_ref().unwrap().record.touching;
+                assert_eq!((ride.state.touching, ride.vehicle.touching), (r, r), "{name}: tick {tick}, the record's touch {r}");
+                if r && !ride.down() {
+                    touched = Some(tick);
+                    break;
+                }
+            }
+            let tick = touched.unwrap_or_else(|| panic!("{name}: the record never touched the prop riding"));
+            // Two frames in the air with the stick at `stick`, touching or not: the body's turn after (what the air control moves).
+            let mut air = |touching: bool, stick: f32| {
+                let mut r = ride.clone();
+                let b = &mut r.body;
+                b.position.0[1] += LIFT;
+                (b.quat, b.rates) = (yaw_quat(yaw), Vf::ZERO);
+                (b.last_position, b.last_quat) = (b.position, b.quat);
+                b.velocity = Vf::new(yaw.sin() * AIR_SPEED, 0.0, yaw.cos() * AIR_SPEED, 0.0);
+                (r.state.touching, r.state.stick, r.state.lean) = (touching, F(stick), F(stick));
+                // The prop's contacts stay where they were struck, not up here with the car.
+                r.vehicle.held.as_mut().unwrap().refill(&[]);
+                let noise = r.noise.clone();
+                let mut rest = Vec::new();
+                // The first frame reads the car's grounded word as the ground left it; the second the air's.
+                for _ in 0..2 {
+                    r.frame_with(dt(), atv_car::OnWorld { world: &mut *world, noise: &noise, rest: &mut rest });
+                }
+                assert!(!r.car.grounded, "{name}: grounded {LIFT} ft up");
+                assert!(r.car.speed > 10.0, "{name}: only {:?} ft/s in the air", r.car.speed);
+                let b = &r.body;
+                format!("rates {:?}, moment {:?}, last moment {:?}", b.rates, b.moment, b.last_moment)
+            };
+            eprintln!("{name}: the record touches the prop at tick {tick}");
+            assert_eq!(air(true, 1.0), air(true, 0.0), "{name}: the stick turned a car touching a prop");
+            assert_ne!(air(false, 1.0), air(false, 0.0), "{name}: the stick did not turn the car in the air");
+        }
+    });
+}
+
+
 // --- MD169: a car on its side ----------------------------------------------------------------------
 
 /// How far (ft) over its riding height a car is dropped onto its side, as
