@@ -1097,6 +1097,10 @@ fn ride_sx01_joined(mode: i32, with_net: bool, watch: bool) -> Option<std::colle
         let line_at = ee.u32_at(track_at + 0x5c);
         let (mut net, recs, nodes) = s309_paths(&ee, net_at);
         let (track, track_recs, track_nodes) = s309_paths(&ee, track_at);
+        // S332: in a live race the AI net searches as far as the race track does, as
+        // `Sim::load_ai_net` sets it, and picks its forks the way every loader asks.
+        let (ahead, behind) = game_sim::race::RACE_REACH;
+        assert_eq!((net.ahead, net.behind, net.pick), (ahead, behind, 3), "{b:#x}: the AI net's words");
         let lists = S12eLists { sets: Vec::new(), targets: Vec::new() };
         let mut racer = s12e_racer(&ee, &lists, b, r);
         racer.follower = s309_follower(&ee, b, &recs, &nodes).expect("the image's spot is on the AI net");
@@ -1142,6 +1146,9 @@ fn ride_sx01_joined(mode: i32, with_net: bool, watch: bool) -> Option<std::colle
         assert!(mode != 4 || gate.is_some(), "{b:#x}: the card has a next gate");
         let line = (raw(got(&ee, line_at + 0x40)), raw(got(&ee, line_at + 0x50)));
         let race_word = ee.u32_at(race_at + 0x5c);
+        // S332: the race driver drives by the Sim's race as `Pilot::think` hands it on
+        // (`Racing::of`), over laps holding the image's race, track and card.
+        let mut laps = (mode == 2).then(|| s332_laps(&ee, race_at, card_at, line_at, &track, &on_track));
         assert_eq!((racer.brain.mode, racer.brain.flags), (mode, flags), "{b:#x}: the stand-in's words");
         bike.path_net = with_net;
         assert_eq!(racer.brain.flags & flag::KEEP_ON_TRACK, 0, "{b:#x}: the avoidance's edge push needs the track's edge");
@@ -1180,14 +1187,22 @@ fn ride_sx01_joined(mode: i32, with_net: bool, watch: bool) -> Option<std::colle
                     levers: &mut bike.levers,
                     yaw_rate: &mut bike.yaw_rate,
                     velocity: &mut bike.velocity,
-                    racing: Some(Racing {
-                        race,
-                        card,
-                        net: with_net.then_some(&mut net),
-                        track: Some(&track),
-                        gate,
-                        line: Some(line),
-                        race_word: Some(race_word),
+                    racing: Some(match laps.as_ref() {
+                        Some(l) => {
+                            let r = Racing::of(Some(l), 0, with_net.then_some(&mut net));
+                            let ours = (r.race, r.card, r.line, r.race_word, r.gate);
+                            assert_eq!(ours, (race, card, Some(line), Some(race_word), gate), "{b:#x} step {step}: the race as fed");
+                            r
+                        }
+                        None => Racing {
+                            race,
+                            card,
+                            net: with_net.then_some(&mut net),
+                            track: Some(&track),
+                            gate,
+                            line: Some(line),
+                            race_word: Some(race_word),
+                        },
                     }),
                 };
                 racer.drive(&mut around, &mut rng, F(dt))
@@ -1280,8 +1295,55 @@ fn ride_sx01_joined(mode: i32, with_net: bool, watch: bool) -> Option<std::colle
                 put(&mut ee, card_at + 0x60, position);
                 put(&mut ee, card_at + 0x70, p);
             }
+            if let Some(l) = laps.as_mut() {
+                l.cards[0].card.lap.seen = Seen { now: position, last: p };
+            }
         }
     }
     eprintln!("sx01 joined mode {mode} (net {with_net}): {seen:?}");
     Some(seen)
+}
+
+/// S332: a race's laps as the Sim holds them, filled from sx01's race image by the laps' own offsets —
+/// the score manager's flag word and kind (`+0x5c`, `+0x60`), its track's paths (`track`, whose
+/// `+0x38` the laps keep as their ahead reach) and line gate (the track's `+0x5c`) with the line's spot,
+/// and brain's card as player 0's (its flags at `+8`, its distances to the line, on-the-track word,
+/// step and kept spot). Everything else is the laps' defaults, which the drivers do not read.
+fn s332_laps(
+    ee: &Ee, race_at: u32, card_at: u32, line_at: u32, track: &game_sim::race::TrackPaths, on_track: &dyn Fn(u32) -> Spot,
+) -> game_sim::race::Laps {
+    use super::sim::s12e_f;
+    use game_sim::race::{Course, Entry, LapCard, LapRules, Laps, RaceCard, RaceRules};
+    let quad = |a: u32| raw(got(ee, a));
+    let rules = RaceRules {
+        lap: LapRules { flags: ee.u32_at(race_at + 0x5c), kind: ee.i32_at(race_at + 0x60), ..LapRules::default() },
+        ..RaceRules::default()
+    };
+    let line = game_sim::race::Gate {
+        flags: ee.u32_at(line_at + 0x30),
+        centre: quad(line_at + 0x40),
+        normal: quad(line_at + 0x50),
+        across: quad(line_at + 0x60),
+        width: s12e_f(ee, line_at + 0x70),
+        height: s12e_f(ee, line_at + 0x74),
+        reach_sq: s12e_f(ee, line_at + 0x7c),
+    };
+    let course = Course { line, line_spot: on_track(line_at + 0x94), lap_length: track.lap_length };
+    let lap = LapCard {
+        flags: ee.read(card_at + 8, 8) as u64,
+        to_line_kept: s12e_f(ee, card_at + 0x10),
+        to_line: s12e_f(ee, card_at + 0x14),
+        on_track: ee.i32_at(card_at + 0x40),
+        seen: Seen { now: quad(card_at + 0x60), last: quad(card_at + 0x70) },
+        kept_spot: on_track(card_at + 0x94),
+        ..LapCard::default()
+    };
+    let card = RaceCard { lap, ..RaceCard::default() };
+    Laps {
+        rules,
+        course,
+        lists: Default::default(),
+        cards: vec![Entry { player: 0, card, stats: Default::default() }],
+        track: std::sync::Arc::new(track.clone()),
+    }
 }
