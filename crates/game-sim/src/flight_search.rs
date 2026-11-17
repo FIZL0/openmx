@@ -1403,6 +1403,33 @@ fn refresh_of(
     });
 }
 
+/// **The knocks in a prop's gather's walk order** (S385): the indices into `knocks` of those a
+/// nearby list gathered afresh round `centre` (a probe of reach `radius`) lists, in the order the
+/// query's walk of the static tree reaches them, where the knocks stand with the scene's meshes and
+/// the plants ([`gather_knocked`]'s world, F68). The original's prop ray probe meets the other props in
+/// its kept list's order, which is this walk's.
+#[allow(clippy::too_many_arguments)]
+pub fn knocks_walked(
+    props: Option<&Props>,
+    trees: Option<&Trees>,
+    knocks: Knocks<'_>,
+    field: Option<([F; 2], [F; 2])>,
+    centre: Vf,
+    radius: F,
+) -> Vec<usize> {
+    let props = props.map_or(&[][..], |p| &p.props[..]);
+    let mut search = search();
+    kept_world(props, trees, None, &[], knocks, field, centre, radius, true, |broad, built, generation| {
+        let mut objects = lend(generation, built);
+        let own = std::mem::replace(&mut objects[RAY].categories, Categories { mode: 1, list: Vec::new() });
+        broad_phase::gather(&mut objects, broad, &mut search, RAY, 3);
+        objects[RAY].categories = own;
+        give_back(generation, objects);
+        let at = built.len() - knocks.knocks.len();
+        search.nearby.found.iter().filter_map(|c| c.object.checked_sub(at)).collect()
+    })
+}
+
 /// The ghost's category (S129, S189): what the put-back adds to the riding bike's body rays' category
 /// list, and what the path cars' meshes ([`TOY`]) and the bikes ([`BIKE`]) have in theirs.
 pub const GHOST: u32 = 0x40;

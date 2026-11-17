@@ -273,10 +273,11 @@ impl PropSet {
             self.collections[c].search(dt, &self.rays[c], field, props, trees);
             self.file_listeners();
         }
-        crate::prop_props::strike_props(self, &mut |set, c, k| {
+        let own = |set: &mut PropSet, c: usize, k: usize| {
             let rays = Arc::clone(&set.rays);
             set.collections[c].search_object(k, dt, &rays[c], field, props, trees);
-        });
+        };
+        crate::prop_props::strike_props(self, &mut crate::prop_props::Among { field, props, trees, own });
         props.map(|p| flight_search::movers(&p.props)).unwrap_or_default()
     }
 
@@ -301,10 +302,11 @@ impl PropSet {
             self.collections[k].search_wrecked(k, dt, &self.rays[k], field, props, trees, wrecks, &mut strikes);
             self.file_listeners();
         }
-        crate::prop_props::strike_props(self, &mut |set, c, k| {
+        let own = |set: &mut PropSet, c: usize, k: usize| {
             let rays = Arc::clone(&set.rays);
             set.collections[c].search_object_wrecked(c, k, dt, &rays[c], field, props, trees, wrecks, &mut strikes);
-        });
+        };
+        crate::prop_props::strike_props(self, &mut crate::prop_props::Among { field, props, trees, own });
         let strikes = crate::prop_wreck::wreck_rays_filed(self, rayed, strikes);
         (props.map(|p| flight_search::movers(&p.props)).unwrap_or_default(), strikes)
     }
@@ -373,7 +375,8 @@ impl PropSet {
             self.file_on(c);
         }
         // A prop the props' rays file searches against its collection's set, or one near it (S242).
-        crate::prop_props::strike_props(self, &mut |set, c, k| set.search_late(c, k, dt, world, wrecks, &mut out, &mut strikes));
+        let own = |set: &mut PropSet, world: &mut dyn crate::world::World, c: usize, k: usize| set.search_late(c, k, dt, world, wrecks, &mut out, &mut strikes);
+        crate::prop_props::strike_props(self, &mut crate::prop_props::InWorld { world, own });
         let strikes = crate::prop_wreck::wreck_rays_filed(self, rayed, strikes);
         (out, strikes)
     }

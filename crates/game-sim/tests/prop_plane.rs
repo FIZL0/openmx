@@ -730,10 +730,10 @@ fn a_ball_the_plane_wakes_searches_in_its_strike_tick() {
 const OBJECT_RESET: u32 = 0x0015_a030;
 
 /// How far past ball 0 [`a_ball_the_plane_wakes_strikes_the_ball_beside_it`] puts ball 1, in feet: a
-/// ball is about 6.8 across. Nearer, at 4.8, ball 1 also reaches ball 2, and its rays meet ball 2 before
-/// ball 0 in the original, after it in the port: the order of the gather the port does not keep
+/// ball is about 6.8 across. Nearer, at 4.8 and 4.4, ball 1 also reaches ball 2, and its rays meet
+/// ball 2 before ball 0, in the order its gather walks the static tree, not the props' flat order
 /// (prop_props.rs, S385).
-const GAPS: [f32; 4] = [6.4, 6.0, 5.6, 5.2];
+const GAPS: [f32; 6] = [6.4, 6.0, 5.6, 5.2, 4.8, 4.4];
 
 /// **A ball the plane wakes strikes the ball beside it in its strike tick** (B34b). No two of free06's
 /// balls stand within a ball's reach, and two put together in PCSX2 throw each other apart before
