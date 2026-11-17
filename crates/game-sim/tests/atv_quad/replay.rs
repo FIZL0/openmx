@@ -12,15 +12,25 @@ const READER: [(u32, u32); 7] =
     [(0x310, 8), (0x12a0, 0x18), (0x12c0, 8), (0x14c8, 4), (0x14d4, 4), (0x14ec, 4), (0x17ac, 4)];
 /// The put-back spot and its orientation, quad-relative (F31's).
 const SPOT: [(u32, u32); 1] = [(0xd38, 0x38)];
-/// The rider settled, quad-relative (MD148): the rider's update copies "a ragdoll bone touches" here
-/// every frame, after the quad's wreck clock has read it, so the clock arms on the frame after the one
-/// that set it. The interpreter's ragdoll leaves the original's at the wreck's first frame, so the word
-/// is laid with the spot, from the row that holds that frame's copy ([`RIDER_COPY`]).
-const SETTLED: [(u32, u32); 1] = [(0x920, 4)];
-/// A word the rider's update copies into the quad every frame (a bone's position, F31's): equal to the
-/// machine's in row r when the recorder read the row after the rider's update, and in row r + 1 when
-/// it read the row after the quad's frame but before the rider's (the s- rides').
-const RIDER_COPY: u32 = 0x930;
+/// The rider's update copies its ragdoll into the quad every frame (MD148): a spin vector at
+/// +0x870, a body's velocity at +0x880, bone positions and orientations at +0x930..+0x978. A row holds
+/// the frame's own copy on the race- rides and the frame before's on the s- rides (MD148's phases).
+const RAGDOLL: [(u32, u32); 2] = [(0x870, 0x20), (0x930, 0x48)];
+/// The C library's reentrancy struct; rand()'s 64-bit state is at +0xa8 in it, stepped by the newlib
+/// LCG (state × [`LCG`] + 1, the draw its high word & 0x7fff_ffff).
+const REENT: u32 = 0x0039_3a90;
+const LCG: u64 = 0x5851_f42d_4c95_7f2d;
+/// R37: the rand() draws the original made between the image and a ride's frame that the replayed sim
+/// frames do not make (the game draws rand() outside the sim frame too), as (ride, frame, draws): the
+/// RNG is stepped that many times before that frame on both machines. The wreck's first frame draws
+/// the rider's spin (three draws, base + spread × (2 × draw − 1) per axis) and race-jump-side's row 226
+/// an idle variant (one of five); with these race-jump-side's ragdoll copies equal the capture bit for
+/// bit on every row (s-jump's on all but its phase-flipped row 49), and race-jump-side's "a bone
+/// touches" (+0x920) arms its put-back on the capture's frame by itself. race-jump, race-wheelie-launch
+/// and s-wheelie-launch lag too (their copies part at first contact) but are not found yet; their
+/// bodies match without it. Found by inverting the captured spin through the frame's own quaternion and
+/// searching the LCG's stream for its draws (the journal).
+const RNG_LAG: [(&str, usize, u64); 3] = [("race-jump-side", 183, 41), ("race-jump-side", 226, 1), ("s-jump", 74, 33)];
 
 type Row = HashMap<String, String>;
 
@@ -152,10 +162,11 @@ fn c28_heap(state: &str) -> image::Heap {
 
 /// Replays capture `name`'s first `upto` rows off C28's image `state` through [`sim_chain`] (the
 /// original's whole sim frame, and with `port` the frame in pieces beside it, every RAM word equal):
-/// before each row's frame the pad reader's stores and the put-back spot that frame reads
-/// ([`spot_after`]) are laid on both machines, after it every captured word of the body, engine and
-/// wheels must be the row's, at the frame's end or at an instant inside it ([`mid_frame`]), and the
-/// rider's settled word ([`SETTLED`]) is laid for the next. The quad's own words that differ are told
+/// before each row's frame the pad reader's stores, the put-back spot that frame reads
+/// ([`spot_after`]) and the RNG's lag ([`RNG_LAG`]) are laid on both machines, after it every captured
+/// word of the body, engine and wheels must be the row's, at the frame's end or at an instant inside
+/// it ([`mid_frame`]), and the rider's ragdoll copies ([`RAGDOLL`]) are held against the row that has
+/// them. The quad's own words that differ are told
 /// apart by whether the frame wrote them, and listed (to `MD37B_LOG` if set): they are bookkeeping the
 /// physics does not read back (see the journal).
 fn replay(name: &str, state: &str, upto: usize, port: Option<Pieces>, tail: bool) -> Option<Palm> {
@@ -176,28 +187,31 @@ fn replay(name: &str, state: &str, upto: usize, port: Option<Pieces>, tail: bool
         // The spot frame r reads is row r-1's when the rows are read after the game writes it, row r's
         // when before (s-wheelie-launch's put-back on row 158 lands on row 158's spot).
         let spot = if after_spot { r.checked_sub(1).map_or(Vec::new(), |q| words(&rows[q], &SPOT)) } else { words(&rows[r], &SPOT) };
-        [words(&rows[r], &READER), spot].concat()
+        let mut rng = Vec::new();
+        for &(_, _, draws) in RNG_LAG.iter().filter(|&&(ride, at, _)| ride == name && at == r) {
+            let at = ee.u32_at(REENT) + 0xa8;
+            let state = (0..draws).fold(u64::from(ee.u32_at(at)) | u64::from(ee.u32_at(at + 4)) << 32, |x, _| x.wrapping_mul(LCG).wrapping_add(1));
+            rng = vec![(at, state as u32), (at + 4, (state >> 32) as u32)];
+        }
+        [words(&rows[r], &READER), spot, rng].concat()
     };
     let mid = RefCell::new(Vec::<(usize, usize, usize, u32)>::new());
     let outside = RefCell::new(BTreeMap::<u32, (usize, usize, u32, u32)>::new());
     let inside = RefCell::new(BTreeMap::<u32, (usize, usize, u32, u32)>::new());
     let torn = RefCell::new(Vec::<usize>::new());
     let first = RefCell::new(String::new());
-    // Which row holds frame r's rider copy: the last row whose copy is the machine's, bit for bit.
-    let late = Cell::new(false);
-    let settled = |r: usize, ee: &Ee| {
-        let next = &rows[(r + 1).min(rows.len() - 1)];
-        let got = ee.u32_at(C28_QUAD + RIDER_COPY);
-        if got == obj(&rows[r])[RIDER_COPY as usize / 4] {
-            late.set(false);
-        } else if got == obj(next)[RIDER_COPY as usize / 4] {
-            late.set(true);
+    // The ragdoll copies the frame left in the quad, against the row that holds them.
+    let late = !after_spot;
+    let ragdoll = RefCell::new(Vec::<usize>::new());
+    let copies = |r: usize, ee: &Ee| {
+        let Some(row) = rows.get(r + usize::from(late)) else { return };
+        if words(row, &RAGDOLL).iter().any(|&(a, w)| ee.u32_at(a) != w) {
+            ragdoll.borrow_mut().push(r);
         }
-        words(if late.get() { next } else { &rows[r] }, &SETTLED)
     };
     let after = |r: usize, ee: &Ee| {
         let row = &rows[r];
-        let mut lay = settled(r, ee);
+        copies(r, ee);
         let (d, quad) = diff(ee, row);
         // A row the recorder read while the game's frame ran differs at the frame's end (s-jump's
         // row 74: a substep short, its forces summed and not yet integrated), and must equal the
@@ -206,13 +220,13 @@ fn replay(name: &str, state: &str, upto: usize, port: Option<Pieces>, tail: bool
         if !d.is_empty() {
             if let Some((k, of, pc)) = mid_frame(ee, row, &pre.borrow()) {
                 mid.borrow_mut().push((r, k, of, pc));
-                return lay;
+                return Vec::new();
             }
             if torn.borrow().is_empty() {
                 *first.borrow_mut() = format!("row {r} (vsync {}): {} words differ\n  {}", row["vsync"], d.len(), d.iter().take(40).cloned().collect::<Vec<_>>().join("\n  "));
             }
             torn.borrow_mut().push(r);
-            return lay;
+            return Vec::new();
         }
         for (off, got, want) in quad {
             let wrote = (0..4).any(|b| ee.written.contains(&(C28_QUAD + off + b)));
@@ -222,16 +236,17 @@ fn replay(name: &str, state: &str, upto: usize, port: Option<Pieces>, tail: bool
         if r % 50 == 0 {
             eprintln!("MD37b {name} row {r} equal");
         }
-        lay
+        Vec::new()
     };
     let seen = sim_chain(n, port, None, tail, before, after);
     let show = |m: &BTreeMap<u32, (usize, usize, u32, u32)>| {
         m.iter().map(|(off, (r, n, got, want))| format!("+{off:#x} from row {r} on {n} rows ({got:#010x} want {want:#010x})")).collect::<Vec<_>>().join("\n  ")
     };
-    let (outside, inside, torn, mid) = (outside.into_inner(), inside.into_inner(), torn.into_inner(), mid.into_inner());
+    let (outside, inside, torn, mid, ragdoll) = (outside.into_inner(), inside.into_inner(), torn.into_inner(), mid.into_inner(), ragdoll.into_inner());
+    assert!(name != "race-jump-side" || ragdoll.is_empty(), "{name}: the rider's ragdoll copies differ from the capture on rows {ragdoll:?}");
     assert!(torn.is_empty(), "{name}: rows {torn:?} differ from the capture at every instant of their frames; the first was {}", first.borrow());
     let say = format!(
-        "MD37b {name} ({n} rows; rows read mid-frame (row: block writes landed of the frame's, at pc): {}; rows matching no instant {torn:?}): quad words the frame never wrote that differ from the capture:\n  {}\nquad words the frame wrote otherwise:\n  {}\n",
+        "MD37b {name} ({n} rows; rows read mid-frame (row: block writes landed of the frame's, at pc): {}; rows matching no instant {torn:?}; rows whose ragdoll copies differ {ragdoll:?}): quad words the frame never wrote that differ from the capture:\n  {}\nquad words the frame wrote otherwise:\n  {}\n",
         mid.iter().map(|(r, k, of, pc)| format!("{r}: {k}/{of} {pc:#x}")).collect::<Vec<_>>().join(", "),
         show(&outside),
         show(&inside)
@@ -246,8 +261,8 @@ fn replay(name: &str, state: &str, upto: usize, port: Option<Pieces>, tail: bool
 
 /// Each ride twice: by the original's frame alone, and by the port's pieces and tail beside it (every
 /// RAM word of the twin equal to the original's after each frame, and both equal to the capture). Every
-/// ride is replayed whole. race-jump-side's put-back is timed by the rider's ragdoll settling, laid from
-/// the rows (MD148). s-stoppie-short reads rows 124-133, 153 and 175-299 but a few mid-frame,
+/// ride is replayed whole. race-jump-side's put-back is timed by the rider's ragdoll settling, which
+/// follows from the RNG's lag ([`RNG_LAG`], R37). s-stoppie-short reads rows 124-133, 153 and 175-299 but a few mid-frame,
 /// s-wheelie-launch 81-83, s-jump 74 (A7's journal).
 macro_rules! rides {
     ($($orig:ident, $port:ident: $name:literal off $state:literal upto $upto:literal;)*) => {$(
