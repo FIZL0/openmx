@@ -12909,3 +12909,15 @@ atv_voice_index_pick        atv 0x00183070 = (driver, two)
 atv_voice_pick              atv 0x00183180 = (driver, asked, asked too, top, restart); pair pick 0x00183510
 atv_sample_start            atv 0x00187850 = (handed out whole with the play)
 atv_sound_queue_flush       atv 0x001840c0 = (driver, 0) the SIF send (handed out)
+# P328 — the race HUD's flags (journal 2026-11-16-p328-race-flags).
+race_overlay_bind           boot 0x002a6c60 (overlay) RacingOverlays' bind: children by name, +0xa4 Position,
+#                                           +0xa8 Lead, +0xac Lap, +0xb0 Time, +0xb8 WhiteFlag, +0xbc CheckerFlag,
+#                                           +0xc0 RaceWinnerDialog, +0xc8/+0xcc off-track, +0xd0 CountdownBoard,
+#                                           +0xb4 Best Lap
+race_overlay_tick           boot 0x002a7da0 (dt, overlay) card = +0x118 -> +0x14: flag 4 and laps +0x30 >
+#                                           +0x130 -> +0x124 = 1, +0x128 = 10.0; clock < 6 hides both flags; on
+#                                           the count (event type 2) laps == mgr+0x94 checkered, +1 white
+race_lap_listener           boot 0x002fc160 activity+0x160 listener slot +8 (Lap; thunk 0x00300500): lap time
+#                                           text, +0x4d0[player] = 1, message 0x0037abf0 7/8. No flag
+race_finish_listener        boot 0x002fc410 slot +0x14 (Finished; thunk 0x003004f0): winner message 10,
+#                                           camera speeds, HOF record checks. No flag

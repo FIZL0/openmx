@@ -1324,10 +1324,12 @@ impl RideHud<'_> {
             race: self.race.filter(|_| seat.sim.race.is_some()).map(|r| {
                 let card = seat.sim.race.as_ref().and_then(|race| race.laps.as_ref()).and_then(|l| l.card(0));
                 let (lap, place) = card.map_or((None, None), |c| race_start::shown(c, r.laps));
-                ride_hud::RaceShown { lap, laps: r.laps, place, riders: r.riders }
+                let run = card.map_or(0, |c| c.laps.max(0) as u32);
+                ride_hud::RaceShown { lap, laps: r.laps, place, riders: r.riders, run }
             }),
         };
         rig.ride_hud.note_event(now, shown.event.as_ref());
+        rig.ride_hud.note_race(now, shown.race.as_ref());
         draw(&shown, &rig.ride_hud, now);
     }
 }

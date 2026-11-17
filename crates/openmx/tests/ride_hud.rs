@@ -1168,3 +1168,67 @@ fn with_the_touch_pad_up_the_meters_sit_under_the_fps_line() {
         }
     }
 }
+
+/// P328: the race's flags. A lap counted on the view's card waves white as the last lap starts and
+/// checkered as the laps are run, for 4 s each, as the original's race overlay does
+/// (`racingoverlays.lyt`'s `WhiteFlag` / `CheckerFlag`, seen in PCSX2 on sx01); earlier laps wave
+/// none, and the flag stands under the lap and place, drawn white or checkered.
+#[test]
+fn the_last_lap_waves_white_and_the_finish_checkered() {
+    let t0 = Instant::now();
+    let g = gauges(Speedometer::Digital);
+    let race = |run: u32| ride_hud::RaceShown { lap: Some((run + 1).min(3)), laps: 3, place: Some(2), riders: 4, run };
+    let mut t = Tracker::default();
+    t.note_race(t0, Some(&race(0)));
+    assert_eq!(t.race_flag(t0), None, "no flag at the start");
+    t.note_race(t0, Some(&race(1)));
+    assert_eq!(t.race_flag(t0), None, "the first lap counted waves nothing of three");
+    let white = t0 + Duration::from_secs(60);
+    t.note_race(white, Some(&race(2)));
+    let at = |s: f32| white + Duration::from_secs_f32(s);
+    assert_eq!(t.race_flag(at(0.5)).map(|f| f.0), Some(ride_hud::RaceFlag::White));
+    assert_eq!(t.race_flag(at(3.9)).map(|f| f.0), Some(ride_hud::RaceFlag::White));
+    assert_eq!(t.race_flag(at(4.1)), None, "down after 4 s");
+    t.note_race(at(5.0), Some(&race(2)));
+    assert_eq!(t.race_flag(at(5.0)), None, "the same count waves it once");
+
+    let draw = |t: &Tracker, run: u32, now: Instant| {
+        let mut sh = shown(&g, &[], &[], None);
+        sh.race = Some(race(run));
+        let mut frame = Frame::new(1920, 1080, [90, 120, 160]);
+        let d = ride_hud::draw(&mut frame, &sh, t, now);
+        (frame, d)
+    };
+    let dark = |frame: &Frame, b: [f32; 4]| {
+        (b[1] as usize..b[3] as usize)
+            .flat_map(|y| (b[0] as usize..b[2] as usize).map(move |x| (x, y)))
+            .filter(|&(x, y)| frame.color[3 * (y * 1920 + x)] < 40)
+            .count()
+    };
+    let mut w = Tracker::default();
+    w.note_race(white, Some(&race(2)));
+    let (frame, d) = draw(&w, 2, at(0.3));
+    let (f, b) = d.flag.expect("the white flag is drawn");
+    assert_eq!(f, ride_hud::RaceFlag::White);
+    let pill = d.race.iter().map(|l| l.rect[3]).fold(f32::MIN, f32::max);
+    assert!(b[1] > pill, "under the lap and place: {b:?} vs {pill}");
+    assert!(near((b[0] + b[2]) / 2.0, 960.0, 0.12 * 1920.0), "near the middle: {b:?}");
+    assert!(count(&frame, b, [235, 235, 235, 255]) + count(&frame, b, [210, 210, 210, 255]) > 1000, "a white cloth");
+    assert_eq!(dark(&frame, b), 0, "no black on the white flag");
+
+    let mut c = Tracker::default();
+    c.note_race(white, Some(&race(2)));
+    c.note_race(at(30.0), Some(&race(3)));
+    let (frame, d) = draw(&c, 3, at(30.3));
+    let (f, b) = d.flag.expect("the checkered flag is drawn");
+    assert_eq!(f, ride_hud::RaceFlag::Checkered);
+    let dark = dark(&frame, b);
+    let light = count(&frame, b, [235, 235, 235, 255]) + count(&frame, b, [210, 210, 210, 255]);
+    assert!(dark > 500 && light > 500, "black and white squares: {dark} dark, {light} light");
+    let (_, d) = draw(&c, 3, at(34.5));
+    assert_eq!(d.flag, None, "the checkered flag goes after 4 s");
+
+    t.note_race(at(6.0), None);
+    t.note_race(at(7.0), Some(&race(0)));
+    assert_eq!(t.race_flag(at(7.0)), None, "a new race starts with none up");
+}
