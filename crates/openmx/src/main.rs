@@ -7306,9 +7306,15 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         let l = w.look_near(&archives[1..], ground::DIRT, Lighting::of(&look), near);
         let paged = l.paint.tiles.iter().filter(|t| t.pages.is_some()).count();
         let skies = l.skies.iter().filter(|s| s.is_some()).count();
-        println!("world look: {paged} of {} tiles painted from their pages, {skies} with a sky of their own", l.paint.tiles.len());
+        let later = l.sky_later.iter().filter(|&&s| s).count();
+        println!("world look: {paged} of {} tiles painted from their pages, {skies} with a sky of their own, {later} skies read near the riders", l.paint.tiles.len());
         l
     });
+    // And the far maps' skies read as an eye comes near them (F29).
+    let mut sky_stream = match (&world_mod, &world_look, &paint_near) {
+        (Some(w), Some(l), Some((_, reach))) if l.sky_later.contains(&true) => Some(worlds::SkyStream::start(w, l, *reach)),
+        _ => None,
+    };
     // `--seams` (MD51): the ground and its paint between each two maps that face, the wrap's too.
     if let (true, Some(w), Some(l), Land::Tiles(t)) = (args.seams, &world_mod, &world_look, &sim) {
         for line in w.crossings(t, &l.paint) {
@@ -7400,6 +7406,22 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     (_, None) => println!("world paint: no map has roads or ruts"),
                 }
             }
+            // The maps' pages are the GPU's now: the CPU's let go before the ground is built (F29: the
+            // load's peak was there), and the detail maps, which the GPU holds whole.
+            if let (Some(l), true) = (&mut world_look, paint_near.is_some()) {
+                for tile in &mut l.paint.tiles {
+                    if let Some(pages) = &mut tile.pages {
+                        worlds::hollow(pages, &mut tile.sharp);
+                        pages.detail = None;
+                    }
+                    // And a disc map's splat textures and light map, on the GPU or baked in now: its
+                    // passes and roads stay, which say how it is drawn.
+                    if let Some(splat) = tile.sharp.as_mut().and_then(|s| std::sync::Arc::get_mut(&mut s.splat)) {
+                        splat.textures = Vec::new();
+                        splat.shadow = None;
+                    }
+                }
+            }
             // The whole world at its coarsest under it, where a piece is not loaded yet, and its
             // props and plants faded out by the reach they come in at (V92).
             if args.world_stand_in {
@@ -7445,19 +7467,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 stream.chunks_a_frame = n;
             }
             ground_stream = Some(stream);
-            // The maps' pages are the GPU's now: the CPU's let go, and the far maps' streamed (P283).
-            if let (Some(l), true) = (&mut world_look, paint_near.is_some()) {
-                for tile in &mut l.paint.tiles {
-                    if let Some(pages) = &mut tile.pages {
-                        worlds::hollow(pages, &mut tile.sharp);
-                    }
-                    // And a disc map's splat textures and light map, on the GPU or baked in now: its
-                    // passes and roads stay, which say how it is drawn.
-                    if let Some(splat) = tile.sharp.as_mut().and_then(|s| std::sync::Arc::get_mut(&mut s.splat)) {
-                        splat.textures = Vec::new();
-                        splat.shadow = None;
-                    }
-                }
+            // The far maps' pages streamed (P283).
+            if let (Some(_), true) = (&world_look, paint_near.is_some()) {
                 wait_in_front("the world's paint");
                 let stream = paint_stream::PaintStream::start(w, reach, r);
                 if let Some((used, shown)) = r.world_paint_pool() {
@@ -11078,6 +11089,24 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         // A world's sky and light (MD9): under Per Map the tile each view's camera is over sets its
         // own (P142), mixed across a join and its sky the larger share's; under Global the whole
         // world's sky and fog for every view, but the sun and ambient still the map's below (V116).
+        // The far maps' skies near the eyes (F29).
+        if let (Some(stream), Some(wl)) = (&mut sky_stream, &mut world_look) {
+            let eyes: Vec<[f32; 2]> = cameras.iter().take(world.seats.len()).map(|c| [c.eye.x, c.eye.z]).collect();
+            stream.update(&wrapped_near(wrap, &eyes), &mut wl.skies);
+            // And the skies the views are over now, read at once if no eye came near them first.
+            if world_sky == menu::WorldSky::PerMap {
+                for e in &eyes {
+                    if let Some((pair, _)) = wl.looks.skies(e[0], e[1]) {
+                        for m in pair {
+                            stream.need(m, &mut wl.skies);
+                        }
+                    }
+                }
+            }
+            for line in stream.take_log() {
+                println!("{line} at tick {}", pacer.ticks());
+            }
+        }
         if let Some(wl) = &world_look {
             let views = cameras.len().min(world.seats.len());
             shown_look.resize(views, None);
@@ -11104,7 +11133,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 };
                 if let Some(r) = renderer_of(&mut offscreen, window) {
                     let pair = skies.map(|(pair, _)| pair);
-                    if shown_skies[v] != Some(pair) {
+                    // A sky still being read waits, the view keeping the skies it has (F29).
+                    let ready = pair.is_none_or(|p| p.iter().all(|&m| sky_stream.as_ref().is_none_or(|s| s.ready(m))));
+                    if shown_skies[v] != Some(pair) && ready {
                         shown_skies[v] = Some(pair);
                         // Each map's cube is uploaded the first time a view is over it, and kept.
                         r.set_view_skies(v, pair.map(|p| p.map(|m| (m, wl.skies[m].as_ref()))));
@@ -12389,6 +12420,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 stream.chunks_a_frame
             );
             println!("world ground: held at most {} chunks at once in the ride, room for {}", ground_most.0, ground_most.1);
+        }
+        // And the skies it read (F29).
+        if let Some(s) = &sky_stream {
+            println!("world sky: {} skies read in the ride, at most {} held at once, {} held at the end", s.read_in_ride, s.most_held, s.held());
         }
         // And the maps' pages it wrote (P283).
         if let Some(paint) = &paint_stream {

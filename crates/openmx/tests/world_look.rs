@@ -538,6 +538,25 @@ fn split_screen_views_each_take_their_own_maps_sky() {
     view_is(&bottom, SKIES[0], 3, "view 2 under the whole world's sky too");
 }
 
+/// F29: with a reach too short for `b`, `b`'s sky is not read at the load but left for an eye to
+/// come near; a view that jumps over `b` reads it there and then, and its first frames show `b`'s
+/// sky, not the one the view had.
+#[test]
+fn a_far_maps_sky_is_read_when_a_view_jumps_over_it() {
+    let mods = mods_folder_with_skies("split-sky-later");
+    let args = ["--shot-pose", UP_OVER_A, "--shot-pose", UP_OVER_B, "--world-sky", "per-map", "--world-reach", "100,150"];
+    let Some((said, [top, bottom])) = two_views("split-sky-later", &mods, &args) else { return };
+    if !said.contains("renderer: gpu") {
+        eprintln!("skipped: no GPU\n{said}");
+        return;
+    }
+    let look = said.lines().find(|l| l.starts_with("world look: ")).unwrap_or_else(|| panic!("no look line:\n{said}"));
+    assert!(look.ends_with("1 with a sky of their own, 1 skies read near the riders"), "{look}");
+    assert!(said.lines().any(|l| l.starts_with("world sky: b read at once at tick 1")), "b's sky not read as view 2 came over it:\n{said}");
+    view_is(&top, SKIES[0], 3, "view 1 under a's sky");
+    view_is(&bottom, SKIES[1], 3, "view 2 under b's sky");
+}
+
 /// One view crossing a join while the other sits still (P142): the still one's picture is the
 /// same to the pixel whether the other is over `a` or between `a` and `b`, and the crossing one
 /// shows the two skies mixed.
