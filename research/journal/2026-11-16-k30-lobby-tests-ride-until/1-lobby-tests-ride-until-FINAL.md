@@ -1,4 +1,4 @@
-# 1 — lobby tests ride until (PART)
+# 1 — lobby tests ride until (FINAL)
 
 Task K30. 2026-11-16.
 
