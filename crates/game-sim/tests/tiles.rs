@@ -292,6 +292,40 @@ fn a_far_tile_asked_every_tick_is_read_once() {
     assert!(!tiled.loaded().contains(&0));
 }
 
+/// F25: a picture's copy of the world, read while a tick has the world on the sim thread, answers
+/// the tiles loaded when it was brought up to date bit for bit, reads nothing itself, and follows
+/// the world's loads and drops at the next update.
+#[test]
+fn a_pictures_copy_answers_what_the_world_had_loaded() {
+    let (mut tiled, loads) = world([0, 0], Reach { load: F(300.0), drop: F(500.0) });
+    let points: Vec<(f32, f32)> = (0..400).map(|i| (4.3 * i as f32 + 0.37, 280.0 + (i % 7) as f32)).collect();
+    let whole: Vec<Option<Hit>> = points.iter().map(|&(x, z)| tiled.at(F(x), F(z))).collect();
+    let copy = tiled.picture_copy();
+    let read = loads.load(Ordering::Relaxed);
+    for (p, (a, &(x, z))) in points.iter().zip(whole.iter().zip(&points)) {
+        assert!(same_hit(*a, copy.at(F(x), F(z))), "{p:?}");
+    }
+    assert_eq!(copy.loaded(), tiled.loaded());
+    assert_eq!(loads.load(Ordering::Relaxed), read, "the copy read no terrain");
+    // a and its join dropped: the copy keeps them until it is brought up to date, then has no ground
+    // there, and never reads it back.
+    let rider = [Vf::new(1700.0, 0.0, 100.0, 1.0)];
+    tiled.stream(&rider);
+    tiled.stream(&rider);
+    assert!(!tiled.loaded().contains(&0));
+    let mut copy = copy;
+    assert!(copy.at(F(10.0), F(10.0)).is_some(), "still a's ground");
+    tiled.copy_into(&mut copy);
+    assert_eq!(copy.loaded(), tiled.loaded());
+    assert!(copy.at(F(10.0), F(10.0)).is_none(), "a is not in the copy");
+    assert!(!copy.hole(F(10.0), F(10.0)), "though a still owns the point");
+    assert_eq!(loads.load(Ordering::Relaxed), read);
+    // Read back by the world, it is the copy's again at the next update.
+    assert!(tiled.at(F(10.0), F(10.0)).is_some());
+    tiled.copy_into(&mut copy);
+    assert!(same_hit(tiled.at(F(10.0), F(10.0)), copy.at(F(10.0), F(10.0))));
+}
+
 /// A world refuses an offset the move into its coordinates could round.
 #[test]
 fn a_world_refuses_offsets_that_could_round() {

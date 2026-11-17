@@ -27,7 +27,7 @@ use std::time::Duration;
 /// `--sim-thread`: whether a tick may run on the worker.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Mode {
-    /// When the ride can (a window, offline, two seats or more, no tiled world) and the ticks and
+    /// When the ride can (a window, offline, two seats or more) and the ticks and
     /// the pictures do not both fit in a picture's time ([`Gauge::wants`]).
     #[default]
     Auto,

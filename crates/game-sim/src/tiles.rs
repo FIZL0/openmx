@@ -83,6 +83,7 @@ use crate::world::{self, Ground, Hit, Place, Prop, Props, World, NO_GROUND};
 use ps2_float::{Dest, F, Vf};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 pub mod generate;
 
@@ -202,9 +203,20 @@ pub trait Source: Send {
     fn forget(&mut self, _index: usize) {}
 }
 
+/// A picture's copy's source ([`Tiled::picture_copy`]): it reads nothing.
+struct Unread;
+
+impl Source for Unread {
+    fn load(&mut self, _index: usize) -> Result<Piece, String> {
+        Err("not loaded when the picture's copy was taken".into())
+    }
+}
+
 /// A tile in memory: its terrain's bytes and its shapes, stood in the world.
 struct Loaded {
-    bytes: Box<[u8]>,
+    /// Shared with a picture's copy of the world ([`Tiled::picture_copy`]), which reads them while
+    /// a tick has the world.
+    bytes: Arc<Vec<u8>>,
     props: Props,
 }
 
@@ -580,7 +592,7 @@ impl Tiled {
                     props: piece.shapes.into_iter().map(|(mesh, at)| Prop::place(mesh, &moved(&at, tile.at))).collect(),
                 };
                 self.log.borrow_mut().push(format!("world: {} loaded, {} shapes", tile.name, props.props.len()));
-                slots[i] = Slot::In(Loaded { bytes: piece.terrain.into_boxed_slice(), props });
+                slots[i] = Slot::In(Loaded { bytes: Arc::new(piece.terrain), props });
                 true
             }
             Err(e) => {
@@ -618,6 +630,36 @@ impl Tiled {
     pub fn loaded(&self) -> Vec<usize> {
         let slots = self.slots.borrow();
         (0..slots.len()).filter(|&i| matches!(slots[i], Slot::In(_))).collect()
+    }
+
+    /// A copy of this world for a picture drawn while a tick has the world on the sim thread (F25):
+    /// the same tiles and the same wraps, and the terrains loaded now, their bytes shared, not
+    /// copied. It reads nothing itself: a tile not loaded when the copy was last brought up to date
+    /// ([`Tiled::copy_into`]) has no ground there, and it has no shapes, which only the tick asks.
+    pub fn picture_copy(&self) -> Tiled {
+        let mut copy = Tiled::new(self.tiles.clone(), Box::new(Unread), self.reach)
+            .expect("a world's own tiles make a world")
+            .wrapped(self.wrap)
+            .expect("a world's own wraps wrap");
+        self.copy_into(&mut copy);
+        copy
+    }
+
+    /// Bring a [`Tiled::picture_copy`] up to date: the tiles loaded now are loaded in it, and those
+    /// dropped are dropped.
+    pub fn copy_into(&self, copy: &mut Tiled) {
+        let slots = self.slots.borrow();
+        let mut theirs = copy.slots.borrow_mut();
+        for (to, from) in theirs.iter_mut().zip(slots.iter()) {
+            *to = match from {
+                Slot::In(l) => Slot::In(Loaded { bytes: l.bytes.clone(), props: Props::default() }),
+                Slot::Out => Slot::Out,
+                Slot::Failed => Slot::Failed,
+            };
+        }
+        copy.asked.borrow_mut().fill(false);
+        copy.log.borrow_mut().clear();
+        copy.cuts = self.cuts;
     }
 
     /// The bytes held by the loaded tiles' terrains.

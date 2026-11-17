@@ -6500,9 +6500,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // Each seat's pad as the pause last read it, whose right stick turns the page's camera (P319).
     let mut trick_sticks: Vec<Report> = Vec::new();
     // What a picture drawn while a tick runs on the sim thread asks of the place (N23a): the same
-    // ground, and none of the props, which the tick has. A tiled world's ticks stay on the loop.
+    // ground, and none of the props, which the tick has. A world's is its tiles' copy (F25), brought
+    // up to date as each tick goes.
     let mut drawn_land = match (&sim, keep_terrain.get()) {
-        (Land::Tiles(_), _) | (_, None) => None,
+        (Land::Tiles(t), _) => Some(Land::Tiles(Box::new(t.picture_copy()))),
+        (_, None) => None,
         (_, Some(terrain)) => Some(Land::Track(Place { ground: sim_world::Ground::new(terrain, &place.terrain), props: Default::default() })),
     };
     // The Kiowa's skins the load put in `assets` (V113), one a livery.
@@ -8428,6 +8430,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     };
     let mut flight = None;
     let mut gauge = sim_thread::Gauge::default();
+    // How many ticks went there, which `--trace-hash` says at the end (F25).
+    let mut threaded_ticks = 0u64;
     loop {
         // The picture before this one is the page's until its next frame (P196). A tick is not a
         // picture: waiting for the page's frame after one as well spent a display frame on every
@@ -9483,13 +9487,17 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             && pacer.ticks() > 0
             && !pacer.backlog(moment)
             && !args.frames.is_some_and(|n| pacer.ticks() + 1 >= u64::from(n))
-            && let Some(place) = drawn_land.take()
+            && let Some(mut place) = drawn_land.take()
         {
+            if let (Land::Tiles(copy), Some(t)) = (&mut place, world.place.tiled()) {
+                t.copy_into(copy);
+            }
             let stand_in = World { place, seats: world.seats.clone(), tape: None, played_dt: world.played_dt };
             let input = engine_input(&world.seats[0].reports[0]);
             let now = pace::tick_clock(pacer.ticks());
             let world = std::mem::replace(&mut world, stand_in);
             flight = Some(Ticking { world, engine: engine.clone(), now, input, step: None, took: Duration::ZERO });
+            threaded_ticks += 1;
         }
         if flight.is_none() {
         let sim_at = Instant::now();
@@ -12231,6 +12239,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         }
         world = ran.world;
         engine = ran.engine;
+    }
+    if args.trace_hash && sim_worker.is_some() {
+        println!("sim thread: {threaded_ticks} ticks ran there");
     }
     // A split session's last word on each view: whose it was, how often that player's simulation
     // ran, where they and their camera ended up, and what their view drew — what a run nobody
@@ -16152,7 +16163,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                      by its pictures alone, each one exactly its floor, so a busy machine rides\n\
                      the same ride as an idle one (offline; for the tests). --sim-thread on\n\
                      runs each tick on a thread of its own while the picture before it is drawn\n\
-                     (offline, not in a tiled world), the same ride; auto does when a window's\n\
+                     (offline), the same ride; auto does when a window's\n\
                      split screen cannot fit a tick and a picture in a picture's time.\n\
                      The window opens at the screen's size and the frame fills it, re-made when\n\
                      the window is resized, wider or taller as the original's own 16:9 mode\n\
