@@ -644,10 +644,16 @@ struct Doll {
     doll_off: [f32; 2],
 }
 
-/// The plain whip ([`ride`]'s calls, the stick hard right from [`WHIP`]) with the riding ragdoll
-/// stepped beside it as the shell steps it (`main.rs`): the pose just drawn is its skeleton and the
-/// grips just drawn its holds, and the rider's next frame steps it at the top. So frame `k`'s ragdoll
-/// is read at the top of frame `k + 1`, placed by the ride as it was then.
+/// The shell's and the original's tick (T4): [`whip_with_doll`] steps at it, two of [`ride`]'s frames a tick.
+const TICK: F = F(1.0 / 30.0);
+/// [`WHIP`] and [`FRAMES`] in [`TICK`]s.
+const WHIP_TICK: usize = WHIP / 2;
+const TICKS: usize = FRAMES / 2;
+
+/// The plain whip ([`ride`]'s calls, the stick hard right from [`WHIP_TICK`]) with the riding ragdoll
+/// stepped beside it as the shell steps it (`main.rs`), at the shell's [`TICK`]: the pose just drawn
+/// is its skeleton and the grips just drawn its holds, and the rider's next tick steps it at the top.
+/// So tick `k`'s ragdoll is read at the top of tick `k + 1`, placed by the ride as it was then.
 fn whip_with_doll(kit: &mut Kit) -> Vec<Doll> {
     let mut disc = disc().expect("the disc opened once");
     let rider_res = disc.res(&member(&disc, &format!("{A_RIDER}.res"))).expect("the rider archive");
@@ -670,9 +676,9 @@ fn whip_with_doll(kit: &mut Kit) -> Vec<Doll> {
     let hand = HAND_ANCHORS.map(|n| skel.find(n).expect("a hand anchor"));
     let root = kit.chassis.nodes.root.expect("a chassis root");
     let mut out: Vec<Doll> = Vec::new();
-    for k in 0..FRAMES {
-        let c = Controls { gas: F::ONE, ..if k >= WHIP { whip.clone() } else { Controls::default() } };
-        r.frame(p, &kit.tables, &c, FRAME, &mut world);
+    for k in 0..TICKS {
+        let c = Controls { gas: F::ONE, ..if k >= WHIP_TICK { whip.clone() } else { Controls::default() } };
+        r.frame(p, &kit.tables, &c, TICK, &mut world);
         // The ragdoll the frame's end stepped (S90) towards last frame's pose, grips and root, which are
         // all still here, under the ride it just moved, which is where the shell draws it.
         let placed = game_render::chassis::placed(&r.ride);
@@ -684,11 +690,11 @@ fn whip_with_doll(kit: &mut Kit) -> Vec<Doll> {
                 last.doll_off = [0, 1].map(|i| at(&bones[hand[i]]).sub(v3(h.hands[i].x(), h.hands[i].y(), h.hands[i].z())).len());
             }
         }
-        kit.body.ride(FRAME, &mut r, &c, rider::Gate::default());
+        kit.body.ride(TICK, &mut r, &c, rider::Gate::default());
         r.skeleton = Some(std::sync::Arc::new(kit.body.ragdoll_posed(&doll)));
         let want = kit.chassis.want_under(&r.ride, &r.tricks, r.body.veh.want);
         let request = kit.chassis.riding_under(&r, want);
-        kit.chassis.ride(FRAME, want, &request, &r, Drive::of(&r.ride));
+        kit.chassis.ride(TICK, want, &request, &r, Drive::of(&r.ride));
         kit.body.bare = kit.chassis.bare_under(&r.body.veh);
         let g = grips(&kit.chassis);
         let (drawn, _) = kit.body.palette(Some(&g));
@@ -731,6 +737,22 @@ fn whip_with_doll(kit: &mut Kit) -> Vec<Doll> {
 /// Where the whip is all the way out: the crossup within a hundredth of the sweep's end.
 const FULL: f32 = 0.01;
 
+/// The original's pelvis off its clip's at a full whip, in the bike's frame, in feet: C20's capture
+/// (a right whip off free09's second jump, thq1 on the 250sx), the mean over its 36 full-whip ticks.
+/// The body rises along the bike's up; it does not slide to the bars or the side.
+const C20_LEAN: V3 = V3 { x: -0.093, y: 0.345, z: 0.133 };
+/// How close the ragdoll's mean full-whip lean comes to [`C20_LEAN`]'s direction. Measured: cosine
+/// 0.882, (-0.089, 0.361, -0.050) ft. The rise and the shift back are the original's; the z part is
+/// not, because the original's bike rolls through the flight and the ramp's keeps one attitude.
+const LEAN_COS: f32 = 0.85;
+/// How far the ragdoll's hands may be off the grips at the full whip, in feet: the original's own,
+/// C20's 0.158 and 0.174 at worst. Measured: 0.126 and 0.151 at the shell's tick (0.086 and 0.144
+/// when this ride stepped at 1/60).
+const DOLL_HELD: f32 = 0.18;
+/// How far the ragdoll's mean rise along the bike's up may be from [`C20_LEAN`]'s, in feet. Measured:
+/// 0.361 against 0.345. Stepped at 1/60 it rose 0.48 (C20's probe): the step, not the body.
+const RISE: f32 = 0.05;
+
 /// **V100:** a full whip alone keeps the drawn hands on the bars. The stick held hard right off the
 /// flip ramp takes the airborne row's crossup to the sweep's end (phase 0) on the body and the bike
 /// alike, and there the two clips pose the rider's right shoulder past its arm's reach of the grip:
@@ -739,20 +761,21 @@ const FULL: f32 = 0.01;
 /// riding ragdoll, whose hand pins drag the body after the hands. Stepped beside the same ride (the
 /// port's ragdoll, proved tick for tick against the original, S110), its pelvis moves 0.9 ft off
 /// the clip's, across to the bike box's side, and its hands stay within 0.2 ft of the grips.
-/// The drawn rider now leans in the same way ([`game_render::rider::lean_in`]): on every held
-/// frame of the flight the drawn hands are on the grips within [`SPIN_HELD`]; the body moves no
-/// further than the clips' shortfall; and at the full whip it moves the way the ragdoll's
-/// pelvis does (cosine over 0.9).
+/// The drawn rider leans in too ([`game_render::rider::lean_in`]): on every held tick of the flight
+/// the drawn hands are on the grips within [`SPIN_HELD`], and the body moves no further than the
+/// clips' shortfall. Which way it moves is not checked: C20 found it goes sideways where the
+/// original rises (B21). The ragdoll's own lean, averaged over the full whip, goes the original's
+/// way ([`C20_LEAN`], T4).
 #[test]
 fn a_full_whip_keeps_the_hands_on_the_bars() {
     let Some(mut kit) = kit() else { return };
     let ride = whip_with_doll(&mut kit);
-    let up = WHIP + ride[WHIP..].iter().position(|d| !d.seen.on_ground).unwrap_or(0);
-    let down = WHIP + ride[WHIP..].iter().position(|d| d.seen.on_ground).expect("a landing");
-    assert!(up == WHIP, "the bike is on the ground at {WHIP}");
-    let flight = WHIP..down - LANDING;
+    let up = WHIP_TICK + ride[WHIP_TICK..].iter().position(|d| !d.seen.on_ground).unwrap_or(0);
+    let down = WHIP_TICK + ride[WHIP_TICK..].iter().position(|d| d.seen.on_ground).expect("a landing");
+    assert!(up == WHIP_TICK, "the bike is on the ground at {WHIP_TICK}");
+    let flight = WHIP_TICK..down - LANDING;
     let full: Vec<usize> = flight.clone().filter(|&k| ride[k].seen.axes[0].0 < FULL && ride[k].seen.axes[1].0 < FULL).collect();
-    assert!(full.len() > 20, "the whip was all the way out {} frames before the landing at {down}", full.len());
+    assert!(full.len() > 10, "the whip was all the way out {} ticks before the landing at {down}", full.len());
     let (mut clips, mut drawn, mut moved) = ((0.0f32, 0usize), (0.0f32, 0usize), (0.0f32, 0usize));
     let worse = |m: &mut (f32, usize), v: f32, k: usize| {
         if v > m.0 {
@@ -776,7 +799,7 @@ fn a_full_whip_keeps_the_hands_on_the_bars() {
               at {last} the ragdoll's pelvis is {:.3} ft off the clips' (ours {:.3}, cosine {cos:.3}), its hands {:.3} {:.3} off the grips",
              full[0], clips.0, clips.1, drawn.0, drawn.1, moved.0, moved.1, doll.len(), ours.len(), d.doll_off[0], d.doll_off[1]);
     // Since S253a the bike's crossup is the motion driver's, which has no lag, while the body's machine
-    // lags it. So the clips part most while the whip comes in (0.660 ft at 224), before the full whip.
+    // lags it. So the clips part most while the whip comes in (0.658 ft at tick 112), before the full whip.
     assert!(clips.0 > 0.3, "the clips no longer take a hand off its grip in the whip: {:.3} ft at {}", clips.0, clips.1);
     assert!(drawn.0 <= SPIN_HELD, "the full whip drew a hand {:.3} ft off its grip, at {}", drawn.0, drawn.1);
     // Placed by the ride it was stepped under (S90), the ragdoll's hands are on the grips and its pelvis
@@ -784,9 +807,18 @@ fn a_full_whip_keeps_the_hands_on_the_bars() {
     // transform and not the root node (the body's root joint carries the crossup itself, -35° of roll
     // here against the root node's -56°), so the hands are held against a target that no longer leans
     // the crossup twice: 0.09 and 0.14 ft off, and the pelvis' move is no longer the stand-in's way
-    // (cosine -0.2, was over 0.75). Which way the original's goes at a full whip is S253's follow-up.
-    assert!(d.doll_off.iter().all(|&o| o < 0.15), "the ragdoll's hands {:?} ft off the grips", d.doll_off);
+    // (cosine -0.2, was over 0.75). C20 captured which way the original's goes (T4, below).
+    assert!(d.doll_off.iter().all(|&o| o < DOLL_HELD), "the ragdoll's hands {:?} ft off the grips", d.doll_off);
     assert!(doll.len() > ours.len(), "the drawn rider leans {ours:?}, the ragdoll {doll:?} (cosine {cos:.3})");
+    // T4: the ragdoll's lean, averaged over the full whip as C20's is, goes the original's way.
+    let held: Vec<V3> = full.iter().map(|&k| ride[k].doll_pelvis.sub(ride[k].seen.pelvis)).filter(|v| v.x.is_finite()).collect();
+    assert_eq!(held.len(), full.len(), "the ragdoll was not placed on every full-whip tick");
+    let mean = held.iter().fold(v3(0.0, 0.0, 0.0), |m, v| m.add(*v)).scale(1.0 / held.len() as f32);
+    let cos = mean.dot(C20_LEAN) / (mean.len() * C20_LEAN.len());
+    println!("the ragdoll's mean full-whip lean {mean:?} ({:.3} ft), the original's {C20_LEAN:?} ({:.3} ft): cosine {cos:.3}",
+             mean.len(), C20_LEAN.len());
+    assert!(cos > LEAN_COS, "the ragdoll leans {mean:?} at the full whip, the original {C20_LEAN:?}: cosine {cos:.3}");
+    assert!((mean.y - C20_LEAN.y).abs() < RISE, "the ragdoll rises {:.3} ft at the full whip, the original {:.3}", mean.y, C20_LEAN.y);
 }
 
 /// **MD78:** MX vs. ATV's 360 throws the rider off the bike and back. `MX_ThreeSixtyR` swings the
