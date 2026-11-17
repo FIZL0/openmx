@@ -1445,3 +1445,392 @@ fn the_balls_probe_is_heard_striking_the_bike() {
         assert_eq!(p.at.to_bits(), faster.to_bits(), "at the faster owner's place");
     }
 }
+
+
+// --- F68: the wheel probe's record through the bike's list -------------------------------------------
+
+/// The F68 knock state: 15 ticks after ball 2's strike (research/s195 aim.py `8 2 40 25 9`, knock.py
+/// `f68 9 2 --frames 60`): balls 1 and 2 awake, the rest of free09's props asleep.
+const F68_STATE: &str = "f68-2935";
+
+/// A collidable's fields (`research/oracle.txt` S105), a placed group's (S102), the space's table and
+/// its tree (`tests/prop_wheel_gather.rs`), and the bike's search (S189).
+mod col_at {
+    pub const SPACE: u32 = 0x04;
+    pub const CLASS: u32 = 0x02;
+    pub const CENTRE: u32 = 0x40;
+    pub const REACH: u32 = 0x60;
+    pub const CATEGORY: u32 = 0x84;
+    pub const GROUP_CELL: u32 = 0x08;
+    pub const GROUP_HEIGHT: u32 = 0x10;
+    pub const GROUP_WIDTH: u32 = 0x11;
+    pub const TABLE: u32 = 0x04;
+    pub const FIXED: u32 = 0x34;
+    pub const ROOT: u32 = 0x94;
+    pub const FOUND: u32 = 0x00;
+    pub const COUNT: u32 = 0x04;
+    pub const CENTRE_KEPT: u32 = 0x10;
+    pub const BOUND: u32 = 0x20;
+    pub const BUILT: u32 = 0x30;
+    pub const RIDER_SEARCH: u32 = 0x7bc;
+    pub const RIDER_RAYS: u32 = 0x7c4;
+    pub const RIDER_WHEEL: u32 = 0x7c8;
+}
+
+/// What a listed collidable is, on both sides: one of the scene's meshes (by its place in free09's
+/// props), one of the plants (by group), or a knockable prop (collection, object).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Listed {
+    Scenery(usize),
+    Plant(usize),
+    Prop(usize, usize),
+}
+
+/// Every entry in the static tree, each once (`tests/prop_wheel_gather.rs`).
+fn static_entries(ee: &Ee, tree: u32) -> Vec<u32> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut stack = vec![ee.u32_at(tree + col_at::ROOT)];
+    while let Some(node) = stack.pop() {
+        let mut c = ee.u32_at(node + 4);
+        while c != 0 {
+            for k in 1..=4 {
+                let o = ee.u32_at(c + 4 * k);
+                if o != 0 && seen.insert(o) {
+                    out.push(o);
+                }
+            }
+            c = ee.u32_at(c);
+        }
+        let children = ee.u32_at(node);
+        if children != 0 {
+            stack.extend((0..4).map(|i| ee.u32_at(children + 4 * i)).filter(|&k| k != 0));
+        }
+    }
+    out
+}
+
+/// The state's collidables the port has, by address: the static tree's scene meshes (the port's prop
+/// whose box centre and reach have its bits) and placed groups (the plant on its cell with its two
+/// size bytes), and every knockable prop's `f.col`, asleep in the tree or awake.
+fn listed_of(ee: &Ee, props: &Props, trees: &game_sim::eco::Trees, tree: u32) -> HashMap<u32, Listed> {
+    let mut by_place = HashMap::new();
+    for (i, p) in props.props.iter().enumerate() {
+        let (c, _) = game_sim::flight_search::prop_box(p);
+        by_place.insert((c.map(F::to_bits), p.radius.to_bits()), i);
+    }
+    let mut by_cell = HashMap::new();
+    for (j, g) in trees.groups().iter().enumerate() {
+        by_cell.insert((g.cell, g.height, g.blend), j);
+    }
+    let mut index = HashMap::new();
+    for o in static_entries(ee, tree) {
+        match ee.u8_at(o + col_at::CLASS) {
+            2 if ee.u32_at(o + col_at::CATEGORY) == game_sim::flight_search::SCENERY => {
+                let key = ([0, 4, 8, 12].map(|k| ee.u32_at(o + col_at::CENTRE + k)), ee.u32_at(o + col_at::REACH));
+                if let Some(&i) = by_place.get(&key) {
+                    index.insert(o, Listed::Scenery(i));
+                }
+            }
+            3 => {
+                let cell = [0, 2, 4].map(|k| ee.u16_at(o + col_at::GROUP_CELL + k));
+                let key = (cell, ee.u8_at(o + col_at::GROUP_HEIGHT) as i8, ee.u8_at(o + col_at::GROUP_WIDTH) as i8);
+                let j = *by_cell.get(&key).unwrap_or_else(|| panic!("the state's group {o:#x} {key:?} is none of the port's plants"));
+                index.insert(o, Listed::Plant(j));
+            }
+            _ => {}
+        }
+    }
+    let scenery = index.values().filter(|l| matches!(l, Listed::Scenery(_))).count();
+    assert_eq!(scenery, props.props.len(), "the state's scene meshes and free09's props");
+    for (c, objs) in objects(ee).iter().enumerate() {
+        for (k, &o) in objs.iter().enumerate() {
+            index.insert(ee.u32_at(o + MESH), Listed::Prop(c, k));
+        }
+    }
+    index
+}
+
+/// free09's plants on the state's curve table (`tests/prop_wheel_gather.rs`).
+fn free09_trees(ee: &Ee, free: &Free09) -> Option<game_sim::eco::Trees> {
+    let mut disc = Disc::open_configured().map_err(|why| skip(&why)).ok()?;
+    let name = disc.entries().iter().find(|e| e.name.eq_ignore_ascii_case("Tracks\\free09.res")).map(|e| e.name.clone())?;
+    let res = disc.res(&name).expect("free09's archive");
+    let parsed = Terrain::parse(&free.terrain).expect("free09's terrain");
+    let ground = Ground::new(&parsed, &free.scene.terrain);
+    let field = ground.field();
+    let mut eco = game_sim::eco::Ecosystem::parse(&res.read_suffix("free09.esb").expect("free09.esb")).expect("free09.esb parses");
+    let layout = &free.scene.terrain;
+    let extent = F::from(layout.width.max(layout.breadth) as i32 * game_sim::world::SAMPLES_PER_WIDTH as i32) * parsed.scale;
+    eco.stand(extent, |p| F(game_sim::contact_search::ground(&field, p).point.y()));
+    let base = ee.u32_at(addr("curve_table_ptr").unwrap());
+    let entries: Vec<[f32; 2]> =
+        (0..game_sim::camera::CURVE_ENTRIES as u32).map(|k| [ee.f32_at(base + 8 * k), ee.f32_at(base + 8 * k + 4)]).collect();
+    let curve = game_sim::camera::CurveTable::from_entries(&entries);
+    let (trees, missed) = game_sim::eco::Trees::new(&eco, game_sim::eco::cell_size(extent), &curve);
+    assert!(missed.is_empty(), "free09's solids the port does not build: {missed:?}");
+    Some(trees)
+}
+
+/// The world node's listener list as the port names it: each collection's settle and each object's
+/// listener, in the node's order; the ones no prop put on are left out.
+fn node_listeners(ee: &Ee) -> Vec<(usize, Listener)> {
+    let game = collections(ee);
+    let mut named = HashMap::new();
+    for (ci, &c) in game.iter().enumerate() {
+        named.insert(c + coll::LISTENER, (ci, Listener::Settle));
+        for k in 0..ee.u32_at(c + coll::BODIES) {
+            let o = ee.u32_at(ee.u32_at(c + coll::BODIES + 8) + 4 * k);
+            named.insert(o + obj::LISTENER, (ci, Listener::Object(k as usize)));
+        }
+    }
+    let node = ee.u32_at(game[0] + coll::NODE);
+    let (n, at) = (ee.u32_at(node + 0x48), ee.u32_at(node + 0x50));
+    (0..n).filter_map(|k| named.get(&ee.u32_at(at + 4 * k)).copied()).collect()
+}
+
+/// How many placements [`the_wheel_probe_meets_props_and_scenery_through_the_bikes_list`] tries a prop.
+const F68_PLACINGS: usize = 32;
+
+/// **The wheel probe's record through the bike's list is the original's** (F68): from F68's knock
+/// state (balls 1 and 2 awake, the rest asleep), the bike's node stood so a wheel segment ends in a
+/// prop's box — every free09 prop, [`F68_PLACINGS`] times (four times that for one resting on a scene
+/// mesh), half of them low over it with the node rolled so the other segment meets the mesh or ground
+/// under it — and then, as a tick does:
+/// the bike's list gathered afresh round the body rays (`+0x7c4`; the original's
+/// `collision_search_gather`, the port's [`flight_search::refresh_knocked`]) and the wheel probe
+/// (`+0x7c8`) searched against it (`collide_against_search`, the port's [`flight_search::Scene::ridden`]
+/// meeting the props). What the port's world does not hold (the trigger boxes, the bikes, the shack's
+/// hierarchy) is taken off the original's list before its search, so both search the same entries:
+/// the list (entries in order, distances), the record's contacts (what each struck, point, normal,
+/// fraction), and after each, the props struck woken in the order heard — which bodies are enabled,
+/// which collections active and the world node's listener list — bit for bit. The props woken stay
+/// awake, so later lists hold them, still in the static tree (re-keyed where they stand).
+#[test]
+fn the_wheel_probe_meets_props_and_scenery_through_the_bikes_list() {
+    use game_sim::contact_search::Heightfield;
+    use game_sim::flight_search;
+    use game_sim::prop_wheel;
+    let Ok(kit) = Kit::load().map_err(|why| skip(&why)) else { return };
+    let Some(mut ee) = knock_state(&kit, F68_STATE) else { return };
+    let Some(mut free) = free09() else { return };
+    let Some(trees) = free09_trees(&ee, &free) else { return };
+    let woken = seed(&ee, &mut free.set);
+    eprintln!("woken {woken:?}");
+    let bike = the_bike(&ee);
+    let (wheel, body_rays, search) =
+        (ee.u32_at(bike + col_at::RIDER_WHEEL), ee.u32_at(bike + col_at::RIDER_RAYS), ee.u32_at(bike + col_at::RIDER_SEARCH));
+    let node = ee.u32_at(bike + 0x18);
+    let wheel_rays = wheel_probe(&ee, wheel);
+    let gather_rays = wheel_probe(&ee, body_rays);
+    assert_eq!(wheel_rays.segments.len(), 2, "the wheel probe's two segments");
+    let tree = ee.u32_at(ee.u32_at(ee.u32_at(body_rays + col_at::SPACE) + col_at::TABLE) + col_at::FIXED);
+    let index = listed_of(&ee, &free.props, &trees, tree);
+    let objects = objects(&ee);
+    let (gather, pass, moved) =
+        (addr("collision_search_gather").unwrap(), addr("collide_against_search").unwrap(), addr("probe_object_moved").unwrap());
+
+    let terrain = Terrain::parse(&free.terrain).expect("free09's terrain");
+    let ground = Ground::new(&terrain, &free.scene.terrain);
+    let field = ground.field();
+    let (lo, hi) = (field.min(), field.max());
+    let bounds = Some(([F(lo.x()), F(lo.z())], [F(hi.x()), F(hi.z())]));
+    let n_scenery = free.props.props.len();
+    let groups_at = flight_search::FIRST + n_scenery;
+    let trunks_at = groups_at + trees.groups().len();
+    // The port's collidables as the original's index names them.
+    let port_listed = |o: usize, named: &[(usize, usize)], knocks_at: usize| -> Option<Listed> {
+        if o >= knocks_at {
+            named.get(o - knocks_at).map(|&(c, k)| Listed::Prop(c, k))
+        } else if (groups_at..trunks_at).contains(&o) {
+            Some(Listed::Plant(o - groups_at))
+        } else {
+            (flight_search::FIRST..groups_at).contains(&o).then(|| Listed::Scenery(o - flight_search::FIRST))
+        }
+    };
+    // A plant's trunk part by its group.
+    let trunk_group: HashMap<usize, usize> = trees
+        .groups()
+        .iter()
+        .enumerate()
+        .flat_map(|(j, g)| g.parts.iter().flatten().map(move |&p| (p, j)))
+        .collect();
+
+    let enabled_of = |set: &PropSet| -> Vec<bool> { set.collections.iter().flat_map(|c| c.bones.iter().map(|b| b.body.enabled)).collect() };
+    let state_enabled = |ee: &Ee| -> Vec<bool> {
+        objects.iter().flatten().map(|&o| ee.u32_at(ee.u32_at(o + obj::BODY) + body_at::ENABLED) != 0).collect()
+    };
+    let state_active = |ee: &Ee| -> Vec<bool> { collections(ee).iter().map(|&c| ee.u32_at(c + coll::FLAGS) & coll::ACTIVE != 0).collect() };
+    let port_active = |set: &PropSet| -> Vec<bool> { set.collections.iter().map(|c| c.active).collect() };
+    assert_eq!(enabled_of(&free.set), state_enabled(&ee), "enabled before");
+    assert_eq!(port_active(&free.set), state_active(&ee), "active before");
+    assert_eq!(free.set.listeners, node_listeners(&ee), "the node's listeners before");
+
+    // Where a segment aims: its lower end inside the prop's mesh's box where it stands, every other
+    // time low over its middle with the node rolled (the prop's top on that segment, the ground or
+    // scenery it rests on on the other), else anywhere up it, the state's turn or none.
+    let boxes: HashMap<(usize, usize), ([f32; 3], [f32; 3])> = prop_wheel::riding(Some(&free.set), |knocks, named| {
+        named
+            .iter()
+            .zip(knocks.knocks)
+            .map(|(&ck, n)| {
+                let game_sim::track::Points::Wide(v) = &n.mesh.vertices else { panic!("{ck:?}: a packed mesh") };
+                let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+                for p in v {
+                    let w = game_sim::math::transform_point(&n.to_world, Vf::new(p[0].0, p[1].0, p[2].0, 1.0));
+                    for i in 0..3 {
+                        (lo[i], hi[i]) = (lo[i].min(w.0[i]), hi[i].max(w.0[i]));
+                    }
+                }
+                (ck, (lo, hi))
+            })
+            .collect()
+    });
+    let turn = [0, 1, 2].map(|r| quad(&ee, node + 0x80 + 16 * r));
+    let mut pick = 0xf068_0000_5eed_ba11u64;
+    let mut next = || {
+        pick ^= pick << 13;
+        pick ^= pick >> 7;
+        pick ^= pick << 17;
+        (pick >> 40) as f32 / (1u64 << 24) as f32
+    };
+    let props: Vec<(usize, usize)> = (0..objects.len()).flat_map(|c| (0..objects[c].len()).map(move |k| (c, k))).collect();
+    let mut port = broad_phase_search();
+    let (mut tried, mut hit, mut both, mut kinds, mut contested, mut struck_many) = (0, 0, 0, [0usize; 3], 0, 0);
+    let mut woke_order = 0;
+    for &(c, k) in &props {
+        // A prop resting on a scene mesh (one listed at distance 0 the first time) is placed on four
+        // times over, the extra ones low.
+        let (mut n, mut placings) = (0, F68_PLACINGS);
+        while n < placings {
+            let (lo, hi) = boxes[&(c, k)];
+            let s = &wheel_rays.segments[n % 4 / 2];
+            let along = s.to.0;
+            let low = n % 8 < 4 || n >= F68_PLACINGS;
+            // A low placing rolls the node 20 to 29 degrees about its x axis, the aimed segment the
+            // higher: its end a foot or two up the prop, the other's 2 ft lower and 5 ft off.
+            let roll = (0.35 + 0.15 * next()) * -along[2].signum();
+            let rows = if low {
+                [Vf::new(1.0, 0.0, 0.0, 0.0), Vf::new(0.0, roll.cos(), roll.sin(), 0.0), Vf::new(0.0, -roll.sin(), roll.cos(), 0.0)]
+            } else if n % 2 == 0 {
+                turn
+            } else {
+                [Vf::new(1.0, 0.0, 0.0, 0.0), Vf::new(0.0, 1.0, 0.0, 0.0), Vf::new(0.0, 0.0, 1.0, 0.0)]
+            };
+            let across = |i: usize, u: f32| lo[i] + if low { 0.3 + 0.4 * u } else { 0.05 + 0.9 * u } * (hi[i] - lo[i]);
+            let up = if low { lo[1] + 1.1 + 0.8 * next() } else { lo[1] + next() * (hi[1] - lo[1]) };
+            let target = [across(0, next()), up, across(2, next())];
+            let origin = [0, 1, 2].map(|i| target[i] - (along[0] * rows[0].0[i] + along[1] * rows[1].0[i] + along[2] * rows[2].0[i]));
+            let origin = Vf::new(origin[0], origin[1], origin[2], 1.0);
+            for (r, row) in rows.iter().chain([&origin]).enumerate() {
+                for i in 0..4 {
+                    ee.set_u32(node + 0x80 + 16 * r as u32 + 4 * i as u32, row.0[i].to_bits());
+                }
+            }
+            let what = format!("prop {c}/{k} placing {n}: segment end at {target:?}");
+            // The original: both probes placed, the list gathered afresh, what the port has none of
+            // taken off it, and the wheel searched.
+            ee.call(moved, &[u64::from(body_rays)], &[], 50_000_000);
+            ee.call(moved, &[u64::from(wheel)], &[], 50_000_000);
+            ee.set_u32(search + col_at::BUILT, 0);
+            ee.call(gather, &[u64::from(search), u64::from(body_rays), 3], &[], 50_000_000);
+            let (list, count) = (ee.u32_at(search + col_at::FOUND), ee.u32_at(search + col_at::COUNT));
+            let entries: Vec<(u32, u32)> = (0..count).map(|e| (ee.u32_at(list + 8 * e), ee.u32_at(list + 8 * e + 4))).collect();
+            let kept: Vec<(u32, u32)> = entries.iter().copied().filter(|(a, _)| index.contains_key(a)).collect();
+            for (e, &(a, d)) in kept.iter().enumerate() {
+                ee.set_u32(list + 8 * e as u32, a);
+                ee.set_u32(list + 8 * e as u32 + 4, d);
+            }
+            ee.set_u32(search + col_at::COUNT, kept.len() as u32);
+            let original_list: Vec<(Listed, u32)> = kept.iter().map(|(a, d)| (index[a], *d)).collect();
+            let original_reach = ([0, 4, 8, 12].map(|o| ee.u32_at(search + col_at::CENTRE_KEPT + o)), ee.u32_at(search + col_at::BOUND));
+            ee.call(pass, &[u64::from(wheel), u64::from(search)], &[], 50_000_000);
+            let r = ee.u32_at(wheel + 0x6c);
+            let arr = |o: u32| ee.u32_at(r + o);
+            let original: Vec<(Option<Listed>, u32, [u32; 4], [u32; 4], u32)> = (0..ee.u32_at(r + 0x8c))
+                .map(|i| {
+                    let a = ee.u32_at(arr(0x9c) + 4 * i);
+                    (index.get(&a).copied(), a, quad(&ee, arr(0x98) + 16 * i).to_bits(), quad(&ee, arr(0x94) + 16 * i).to_bits(), ee.u32_at(arr(0xa8) + 4 * i))
+                })
+                .collect();
+
+            // The port: the bike's gather and the wheel's search, with the props lent.
+            let at = Mat4([rows[0], rows[1], rows[2], origin]);
+            let frame = rider_contact::node(&at);
+            let (port_list, ours, struck) = prop_wheel::riding(Some(&free.set), |knocks, named| {
+                let knocks_at = trunks_at + trees.props.props.len();
+                port.built = false;
+                flight_search::refresh_knocked(Some(&free.props), Some(&trees), knocks, bounds, &gather_rays, &frame, &mut port, &[]);
+                port.nearby.found.retain(|e| port_listed(e.object, named, knocks_at).is_some());
+                let listed: Vec<(Listed, u32)> =
+                    port.nearby.found.iter().map(|e| (port_listed(e.object, named, knocks_at).unwrap(), e.distance.to_bits())).collect();
+                let mut scene = flight_search::Scene::ridden(Some(&free.props), Some(&trees), knocks, bounds, &wheel_rays, &frame, &mut port, true);
+                let hits = game_sim::contact_search::Search::rays(&mut scene, true);
+                let record = scene.ray_record().clone();
+                let named_of = |o: usize| -> Option<Listed> {
+                    if let Some(k) = scene.knocked(o) {
+                        return named.get(k).map(|&(c, k)| Listed::Prop(c, k));
+                    }
+                    if let Some(j) = o.checked_sub(flight_search::TREES).filter(|&j| j < trees.props.props.len()) {
+                        return trunk_group.get(&j).map(|&g| Listed::Plant(g));
+                    }
+                    port_listed(o, named, knocks_at)
+                };
+                let ours: Vec<(Option<Listed>, [u32; 4], [u32; 4], u32)> = record
+                    .contacts
+                    .iter()
+                    .zip(&hits)
+                    .map(|(x, h)| (named_of(h.struck.object), x.point.to_bits(), x.normal.to_bits(), x.fraction.to_bits()))
+                    .collect();
+                let struck: Vec<(usize, usize)> = scene.knocks_struck().iter().map(|&k| named[k]).collect();
+                (listed, ours, struck)
+            });
+            assert_eq!(port_list, original_list, "{what}: the bike's list, in order, with its distances");
+            assert_eq!((port.centre.map(F::to_bits), port.bound.to_bits()), original_reach, "{what}: the list's centre and bound");
+            let theirs: Vec<(Option<Listed>, [u32; 4], [u32; 4], u32)> = original.iter().map(|&(l, _, p, nn, f)| (l, p, nn, f)).collect();
+            assert!(
+                original.iter().all(|o| o.0.is_some()),
+                "{what}: the original's record struck what the port's list has none of: {:x?}",
+                original.iter().filter(|o| o.0.is_none()).map(|o| (o.1, ee.u8_at(o.1 + col_at::CLASS), ee.u32_at(o.1 + col_at::CATEGORY))).collect::<Vec<_>>()
+            );
+            assert_eq!(ours, theirs, "{what}: the wheel probe's record");
+            for &(c, k) in &struck {
+                free.set.struck(c, k);
+            }
+            assert_eq!(enabled_of(&free.set), state_enabled(&ee), "{what}: the bodies enabled after (struck {struck:?})");
+            assert_eq!(port_active(&free.set), state_active(&ee), "{what}: the collections active after (struck {struck:?})");
+            assert_eq!(free.set.listeners, node_listeners(&ee), "{what}: the node's listeners after (struck {struck:?})");
+
+            tried += 1;
+            hit += usize::from(!ours.is_empty());
+            both += usize::from(ours.len() > 1);
+            for o in &ours {
+                kinds[match o.0 {
+                    Some(Listed::Scenery(_)) => 0,
+                    Some(Listed::Plant(_)) => 1,
+                    _ => 2,
+                }] += 1;
+            }
+            let has_scene = ours.iter().any(|o| matches!(o.0, Some(Listed::Scenery(_) | Listed::Plant(_))));
+            contested += usize::from(has_scene && !struck.is_empty());
+            struck_many += usize::from(struck.len() > 1);
+            woke_order += usize::from(!struck.is_empty());
+            if n == 0 && port_list.iter().any(|&(l, d)| matches!(l, Listed::Scenery(_)) && d == 0) {
+                placings = 4 * F68_PLACINGS;
+            }
+            n += 1;
+        }
+    }
+    eprintln!(
+        "{tried} placings, {hit} hit ({both} on both segments); contacts on scenery {}, plants {}, props {}; \
+         {contested} with scenery in the record and a prop struck; {woke_order} struck a prop, {struck_many} more than one",
+        kinds[0], kinds[1], kinds[2]
+    );
+    assert!(hit > tried / 4 && kinds[0] > 100 && kinds[2] > 1000 && contested > 60 && struck_many > 20, "the placings did not reach far enough");
+}
+
+/// The bike's nearby search as its collision object is built with it (`+0x7bc`: least 30, extra 50,
+/// room for 256).
+fn broad_phase_search() -> game_sim::broad_phase::Search {
+    game_sim::broad_phase::Search { least: F(30.0), extra: F(50.0), capacity: 256, ..game_sim::broad_phase::Search::default() }
+}

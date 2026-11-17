@@ -696,9 +696,8 @@ struct Kept {
     bikes: usize,
     /// The first other plane's collidable (N22a1), after the bikes'.
     planes: usize,
-    /// The first knockable prop's collidable (F8, [`Knocks`]), and the awake ones', in order.
+    /// The first knockable prop's collidable (F8, [`Knocks`]).
     knocked: usize,
-    awake: Vec<usize>,
     /// Each prop's box ([`prop_box`]); the trunks' boxes together ([`boxes_box`]), with plants; and
     /// the box the tree is laid over.
     boxes: Vec<([F; 4], [F; 4])>,
@@ -838,18 +837,9 @@ fn stamp_world(
 }
 
 /// What the knockable props give a world's build (F8, [`Knocks`]), after [`stamp_world`]'s: their
-/// count, and each one's sleep; a sleeping one's reach, centre and box, which file it in the tree.
-/// An awake one's place is put each search ([`Kept::place`]).
+/// count. Where each stands, and so where it is filed, is put each search ([`Kept::place`]).
 fn stamp_knocks(stamp: &mut Vec<u32>, knocks: Knocks<'_>) {
     stamp.push(knocks.knocks.len() as u32);
-    for (n, &asleep) in knocks.knocks.iter().zip(knocks.asleep) {
-        stamp.push(u32::from(asleep));
-        if asleep {
-            let (c, h) = bike_box(n.mesh, &n.to_world);
-            stamp.push(n.radius.0.to_bits());
-            stamp.extend(n.centre.0.iter().map(|f| f.to_bits()).chain(bits(&c)).chain(bits(&h)));
-        }
-    }
 }
 
 /// A knockable prop's collidable in the riding bike's world (F8): a prop's, of `radius`.
@@ -900,19 +890,15 @@ impl Kept {
         props_at: std::ops::Range<usize>,
     ) -> Kept {
         let (mut broad, mut objects, mut filing) = wooded_unfiled(props, trees, bikes, planes, field, centre, radius, toys);
-        // The knockable props after everything else (F8): the sleeping ones filed after the plants.
+        // The knockable props after everything else (F8), filed after the plants, asleep or awake
+        // (F68).
         let knocked = objects.len();
-        let mut awake = Vec::new();
-        for (n, &asleep) in knocks.knocks.iter().zip(knocks.asleep) {
+        for n in knocks.knocks {
             let o = objects.len();
             objects.push(knock_collidable(n.radius));
             broad.places.push(Placement { centre: four(n.centre), ..Placement::default() });
-            if asleep {
-                let (c, h) = bike_box(n.mesh, &n.to_world);
-                filing.items.push((o, c, h));
-            } else {
-                awake.push(o);
-            }
+            let (c, h) = bike_box(n.mesh, &n.to_world);
+            filing.items.push((o, c, h));
         }
         let Structure::Tree(tree) = &mut broad.structures[0] else { unreachable!("the table's first structure is its tree") };
         let mut log = broad_build::Log::default();
@@ -933,7 +919,6 @@ impl Kept {
             bikes: FIRST + props.len(),
             planes: FIRST + props.len() + bikes.map_or(0, |b| b.bikes.len()),
             knocked,
-            awake,
             boxes: props.iter().map(prop_box).collect(),
             trunks: trees.map(|t| boxes_box(t.props.props.iter().map(prop_box))),
             lo: filing.lo,
@@ -999,6 +984,7 @@ impl Kept {
     /// The two probes at the ray probe's reach, and the bikes on their transforms and, those in the
     /// world, in the moving list after the probes: what [`world_unfiled`] gives them.
     fn place(&mut self, bikes: Option<&Bikes<'_>>, planes: &[Plane<'_>], knocks: Knocks<'_>, centre: Vf, radius: F) {
+        self.place_knocks(knocks);
         self.objects[RAY].radius = radius;
         for p in [RAY, SWEEP] {
             self.broad.places[p].centre = four(centre);
@@ -1009,16 +995,6 @@ impl Kept {
             *slot = None;
         }
         let mut last = self.moving;
-        // The awake knockable props where their nodes stand them now (F8), after the probes.
-        for &o in &self.awake {
-            let n = &knocks.knocks[o - self.knocked];
-            self.objects[o].radius = n.radius;
-            self.broad.places[o].centre = four(n.centre);
-            if (last as usize) < block.len() {
-                block[last as usize] = Some(o);
-                last += 1;
-            }
-        }
         for (j, p) in planes.iter().enumerate() {
             let o = self.planes + j;
             let (_, centre, radius) = Prop::posed(p.mesh, &p.at);
@@ -1040,6 +1016,34 @@ impl Kept {
             }
         }
         list.last = last;
+    }
+
+    /// **The knockable props where their nodes stand them now** (F68): each one's reach and centre,
+    /// and its key in the tree from its mesh's root box there. The original's tree keeps a prop's mesh
+    /// asleep or awake (a strike only sets its `+0x116` bit `0x10`), keyed where it stands; the knocks
+    /// are filed last, so the tree is taken back to before the first whose key changed and the rest
+    /// filed again, as a fresh build files them.
+    fn place_knocks(&mut self, knocks: Knocks<'_>) {
+        let Structure::Tree(tree) = &mut self.broad.structures[0] else { unreachable!("the table's first structure is its tree") };
+        let mut first = None;
+        for (k, (o, key, _)) in self.filed.iter_mut().enumerate() {
+            let Some(n) = o.checked_sub(self.knocked).and_then(|j| knocks.knocks.get(j)) else { continue };
+            self.objects[*o].radius = n.radius;
+            self.broad.places[*o].centre = four(n.centre);
+            let (c, h) = bike_box(n.mesh, &n.to_world);
+            let now = broad_build::key(tree, self.hi, c, h);
+            if now != *key {
+                *key = now;
+                first.get_or_insert(k);
+            }
+        }
+        if let Some(first) = first {
+            broad_build::undo(tree, &mut self.log, self.filed[first].2);
+            for (o, key, start) in &mut self.filed[first..] {
+                *start = self.log.changes.len();
+                broad_build::insert_logged(tree, *o, *key, &mut self.log);
+            }
+        }
     }
 
     /// The broad phase's query state as a fresh world has it: what a query writes outside the
@@ -1235,10 +1239,10 @@ pub struct Knock<'a> {
 /// **The knockable props in the riding bike's world** (F8): each of `knocks` a collidable after the
 /// plants' trunks, knock `k` at the world's end less `knocks.len()` plus `k`, a prop's collidable
 /// (category [`crate::prop_world::COLLIDABLE`], `+0x116` `0x04`: listed wherever the query's cells
-/// reach it, its distance not asked). One `asleep` stands in the track's static tree, filed after
-/// the plants from its mesh's root box where its node stands it (F7's order); an awake one is in the
-/// moving list after the two probes, in `knocks`' order, as the original files a woken prop's mesh in
-/// the moving structure (S240). Each is measured from its posed centre, less its reach.
+/// reach it, its distance not asked). Each stands in the track's static tree, filed after the plants
+/// from its mesh's root box where its node stands it (F7's order), asleep or awake: the original's tree
+/// keeps a woken prop's mesh, re-keyed where it stands (F68; not the moving list). Each is measured
+/// from its posed centre, less its reach. `asleep` is not read by the world.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Knocks<'a> {
     pub knocks: &'a [Knock<'a>],
@@ -1387,8 +1391,8 @@ pub fn refresh_ridden(
 }
 
 /// [`refresh_ridden`] with the knockable props in the world (F8, [`Knocks`]): a regather lists them
-/// at their places in the query's walk, the sleeping ones among the scene's and the plants' in the
-/// static tree, the awake ones in the moving list, and a kept list measures them again.
+/// at their places in the query's walk, among the scene's and the plants' in the static tree, asleep
+/// or awake (F68), and a kept list measures them again.
 #[allow(clippy::too_many_arguments)]
 pub fn refresh_knocked(
     props: Option<&Props>,
