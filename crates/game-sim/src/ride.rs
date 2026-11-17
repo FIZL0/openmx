@@ -1869,6 +1869,22 @@ pub fn nearby_scene<R>(
     node: &crate::contact::Node,
     f: impl FnOnce(&mut flight_search::Scene<'_>) -> R,
 ) -> Option<R> {
+    nearby_scene_among(nearby, world, rays, node, flight_search::Knocks::default(), false, f)
+}
+
+/// [`nearby_scene`] with the knockable props lent for the frame in the bike's world (F8, `knocks`,
+/// [`crate::prop_wheel::riding`]), as [`Ride::gather_nearby`] gathers it: with `meet` the probe meets
+/// the ones it lists in the list's order ([`flight_search::Scene::ridden`]), the wheel probe's search;
+/// without, they are left out.
+pub fn nearby_scene_among<R>(
+    nearby: &mut Option<Box<broad_phase::Search>>,
+    world: &mut dyn World,
+    rays: &flight_search::Rays,
+    node: &crate::contact::Node,
+    knocks: flight_search::Knocks<'_>,
+    meet: bool,
+    f: impl FnOnce(&mut flight_search::Scene<'_>) -> R,
+) -> Option<R> {
     let made = nearby.is_none();
     let search = nearby.get_or_insert_with(|| Box::new(bike_search()));
     let (field, props, trees) = flight_search::near_world(world, rays, node, search);
@@ -1882,7 +1898,7 @@ pub fn nearby_scene<R>(
         let (lo, hi) = (f.min(), f.max());
         ([F(lo.x()), F(lo.z())], [F(hi.x()), F(hi.z())])
     });
-    let mut scene = flight_search::Scene::flown(props, trees, None, bounds, rays, node, search);
+    let mut scene = flight_search::Scene::ridden(props, trees, knocks, bounds, rays, node, search, meet);
     Some(f(&mut scene))
 }
 
@@ -1921,7 +1937,10 @@ impl Ride {
             ([F(lo.x()), F(lo.z())], [F(hi.x()), F(hi.z())])
         });
         let ignore: &[u32] = if ghost { &[flight_search::GHOST] } else { &[] };
-        flight_search::refresh_ridden(props, trees, bounds, rays, &node, search, ignore);
+        let set = self.props.as_deref().map(|l| &l.0);
+        crate::prop_wheel::riding(set, |knocks, _| {
+            flight_search::refresh_knocked(props, trees, knocks, bounds, rays, &node, search, ignore);
+        });
     }
 }
 
@@ -1988,9 +2007,9 @@ impl crate::contact_search::Search for SolidSweep<'_> {
 /// the collidable's vehicle (`+0x7c`) in the original, a vehicle of kind 2 (S136). The handle is the
 /// struck object's own number, which is never zero.
 ///
-/// The knockable props lent for the frame (`props`, S210) are searched after the scene, on the same
-/// record ([`crate::prop_wheel::search`]): a contact on one names the prop as its owner, and the
-/// props struck are woken. In a world that answers only [`World::solid`] they are searched on a record
+/// The knockable props lent for the frame (`props`, S210) are in the bike's list (F8,
+/// [`Ride::gather_nearby`]) and met where it lists them, interleaved with the scene's, on the same
+/// record: a contact on one names the prop as its owner, and the props struck are woken. In a world that answers only [`World::solid`] they are searched on a record
 /// of their own and merged a segment at a time. The woken trucks lent with them (S208,
 /// [`crate::truck_wheel`]) are searched after the props, on the same record, their path meshes stood
 /// down for the scene's search; a contact on one names the truck as its owner.
@@ -2012,22 +2031,46 @@ fn wheel_hits(rays: &flight_search::Rays, m: &Mat4, nearby: &mut Option<Box<broa
 fn wheel_hits_in(rays: &flight_search::Rays, m: &Mat4, nearby: &mut Option<Box<broad_phase::Search>>, world: &mut dyn World,
                  props: Option<&mut crate::prop_set::PropSet>, trucks: Option<&crate::truck_wheel::Trucks>) -> (Vec<WheelHit>, F) {
     let node = rider_contact::node(m);
-    let found = nearby_scene(nearby, world, rays, &node, |scene| {
-        let hits = crate::contact_search::Search::rays(scene, true);
-        let on = |object: usize| Some((object as u32, scene.prop_at(object)?.moving?));
-        // A mesh's material is its surface word's low byte (a file too old for one, and a tree's
-        // cylinder, have 0).
-        let material = |object: usize| scene.prop_at(object).and_then(|p| p.mesh.surface).map_or(0, |s| s as u8);
-        let hits: Vec<WheelHit> = hits.iter().map(|h| (h.from, h.point, h.normal, on(h.struck.object), material(h.struck.object), 0)).collect();
-        (hits, scene.ray_record().clone())
+    // The knockable props are in the bike's list (F8): the probe meets each where the list names it,
+    // interleaved with the scene's, a contact on one naming the prop as its owner.
+    let found = crate::prop_wheel::riding(props.as_deref(), |knocks, named| {
+        nearby_scene_among(nearby, world, rays, &node, knocks, true, |scene| {
+            let hits = crate::contact_search::Search::rays(scene, true);
+            let set = props.as_deref();
+            let knock = |object: usize| {
+                let k = scene.knocked(object)?;
+                let (c, o) = named[k];
+                Some((crate::prop_wheel::handle(set?, c, o), knocks.knocks[k].mesh.surface.map_or(0, |s| s as u8)))
+            };
+            let on = |object: usize| Some((object as u32, scene.prop_at(object)?.moving?));
+            // A mesh's material is its surface word's low byte (a file too old for one, and a tree's
+            // cylinder, have 0).
+            let material = |object: usize| scene.prop_at(object).and_then(|p| p.mesh.surface).map_or(0, |s| s as u8);
+            let hits: Vec<WheelHit> = hits
+                .iter()
+                .map(|h| match knock(h.struck.object) {
+                    Some((owner, material)) => (h.from, h.point, h.normal, None, material, owner),
+                    None => (h.from, h.point, h.normal, on(h.struck.object), material(h.struck.object), 0),
+                })
+                .collect();
+            let struck: Vec<(usize, usize)> = scene.knocks_struck().iter().map(|&k| named[k]).collect();
+            (hits, scene.ray_record().clone(), struck)
+        })
     });
-    if let Some((hits, mut record)) = found {
+    if let Some((hits, record, struck)) = found {
+        // Each prop struck is woken, in the order its listener heard it ([`PropSet::struck`]).
+        let props = props.map(|set| {
+            for &(c, o) in &struck {
+                set.struck(c, o);
+            }
+            set
+        });
         if props.is_none() && trucks.is_none() {
             let near = if hits.is_empty() { F::ONE } else { record.nearest };
             return (hits, near);
         }
-        let on = props.map(|set| crate::prop_wheel::search(rays, m, set, &mut record)).unwrap_or_default();
-        let on = on_after(on.on, trucks.map(|t| crate::truck_wheel::search(rays, m, t, &mut record)));
+        let mut record = record;
+        let on = on_after(Vec::new(), trucks.map(|t| crate::truck_wheel::search(rays, m, t, &mut record)));
         // The record's contacts as they stand after the props and the trucks: one of theirs in place
         // of the scene's one on its segment when nearer, or after them on a segment the scene left free.
         let hits: Vec<WheelHit> = record
@@ -2313,8 +2356,11 @@ impl Ride {
             }
         };
         let node = rec.node;
-        let moved = nearby_scene(&mut self.nearby, world, rays, &node, |scene| {
-            crate::contact_search::sweep_back_chassis(&mut rec, vel, scene, dt)
+        let (nearby, set) = (&mut self.nearby, self.props.as_deref().map(|l| &l.0));
+        let moved = crate::prop_wheel::riding(set, |knocks, _| {
+            nearby_scene_among(nearby, world, rays, &node, knocks, false, |scene| {
+                crate::contact_search::sweep_back_chassis(&mut rec, vel, scene, dt)
+            })
         });
         let moved = match moved {
             Some(m) => m,

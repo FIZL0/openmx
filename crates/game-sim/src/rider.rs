@@ -818,7 +818,11 @@ impl Rider {
             ride.sweep_back(p, bike_col.as_deref().map(|col| &col.rays), world, dt);
             let ground = bike_col.as_deref().map_or_else(Vec::new, |col| crate::rider_contact::ground(col, &ride.transform(), world, dt));
             in_ground = crate::rider_contact::ground_hits(&ground);
-            let (found, movers, sounded) = match bike_col.as_deref().and_then(|col| crate::rider_contact::scenery_heard(col, &ride.transform(), &mut ride.nearby, world, dt)) {
+            let (found, movers, sounded) = match bike_col.as_deref().and_then(|col| {
+                let at = ride.transform();
+                let (nearby, set) = (&mut ride.nearby, ride.props.as_deref().map(|l| &l.0));
+                crate::prop_wheel::riding(set, |knocks, _| crate::rider_contact::scenery_heard_among(col, &at, nearby, world, knocks, dt))
+            }) {
                 Some((f, m, s)) => (Some(f), m, s),
                 None => (None, Vec::new(), Vec::new()),
             };

@@ -9,7 +9,12 @@
 //! search. So a wheel on a prop is:
 //!
 //! 1. a contact of the wheel probe's record like any other, one a segment, the nearer kept
-//!    ([`ray_probe`]'s rule): here the props are tried after the scene, on the scene's record;
+//!    ([`ray_probe`]'s rule). The props are in the bike's kept list (F8, [`riding`]): a sleeping
+//!    one's `f.col` stands in the track's static tree, so the bike's gather after its substeps lists
+//!    it among the scene's meshes and the plants (`tests/prop_wheel_gather.rs`), and the wheel meets
+//!    it where the list names it, gated on the distance stored there. [`search`] is left for a world
+//!    that answers only [`crate::world::World::solid`], where there is no list: the props after the
+//!    world, on a record of their own;
 //! 2. a hit the `f.col`'s one listener hears — the prop's struck listener, which enables the body and
 //!    activates its collection ([`PropSet::struck`]), so a wheel rolling onto a bale wakes it as a body
 //!    ray striking it does (S197);
@@ -233,6 +238,20 @@ pub fn search(rays: &Rays, at: &Mat4, set: &mut PropSet, ray: &mut ray_probe::Re
         set.struck(c, o);
     }
     Found { on }
+}
+
+/// **The knockable props as the riding bike's world holds them** (F8, [`flight_search::Knocks`]):
+/// `f` run with every prop of `set` that has a collidable mesh and a collision object, in collection
+/// and object order ([`crate::flight::knocks`]), each asleep or not, and each one's collection and
+/// object. No props (none lent) is a world without them.
+pub fn riding<R>(set: Option<&PropSet>, f: impl FnOnce(flight_search::Knocks<'_>, &[(usize, usize)]) -> R) -> R {
+    let Some(set) = set.filter(|s| !s.is_empty()) else { return f(flight_search::Knocks::default(), &[]) };
+    let shapes = set.shapes.clone();
+    let posed = crate::flight::knocks(set, &shapes);
+    let knocks: Vec<flight_search::Knock<'_>> = posed.iter().map(|p| p.knock).collect();
+    let asleep: Vec<bool> = posed.iter().map(|p| !set.collections[p.collection].bones[p.object].body.enabled).collect();
+    let named: Vec<(usize, usize)> = posed.iter().map(|p| (p.collection, p.object)).collect();
+    f(flight_search::Knocks { knocks: &knocks, asleep: &asleep }, &named)
 }
 
 /// **What a wheel whose owner word is `owner` stands on** (S210): the prop's velocity and its

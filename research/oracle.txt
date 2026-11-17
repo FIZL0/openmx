@@ -13026,3 +13026,8 @@ atv_voice_index_pick        atv 0x00183070 = (driver, two)
 atv_voice_pick              atv 0x00183180 = (driver, asked, asked too, top, restart); pair pick 0x00183510
 atv_sample_start            atv 0x00187850 = (handed out whole with the play)
 atv_sound_queue_flush       atv 0x001840c0 = (driver, 0) the SIF send (handed out)
+# F8 — the knockable props in the riding bike's kept list (src flight_search::Knocks / gather_knocked,
+# prop_wheel::riding; tests prop_wheel_gather.rs the_bikes_list_holds_the_props_at_rest_as_the_originals:
+# collision_search_gather(*(rider+0x7bc), *(rider+0x7c4), 3) on recording2, 4000 lists bit-exact, sleeping
+# f.col listed among scene meshes and plants wherever the cells reach). The wheel probe +0x7c8 searches that
+# list: collide_against_search(+0x7c8, *(rider+0x7bc)) once a tick before the substeps.
