@@ -71,8 +71,9 @@ fn inside(ee: &mut Ee, addr: u32, car: u32, dt: F) {
 /// them; then the original's slot runs once on a copy of the machine with what the port hands out
 /// hooked (MD106e's [`hook_class`]: each logged, none run), the buggy class's own step run as the
 /// original's (its part words against [`atv_car::class_step`] over the RAM the slot started on, as
-/// MD106e's test), the golf cart's likewise against [`atv_car::golf_class_step`] (MD156a) and the
-/// truck's logged; every word the port keeps must equal the
+/// MD106e's test), the golf cart's and the monster truck's likewise against
+/// [`atv_car::golf_class_step`] (MD156a) and [`atv_car::truck_class_step`] (MD156b); every word the
+/// port keeps must equal the
 /// original's, the calls the same in the same order, and the original must write nothing else in the
 /// car, its tires or its body. The machine is put back and the original's slot runs for real, so the
 /// drive goes on as the original's.
@@ -84,6 +85,8 @@ pub(crate) fn hook_update(ee: &mut Ee, name: &'static str, frame_no: Shared<usiz
     let buggy = class_step == super::class_step::CLASS_STEP;
     // MD156a: the golf cart's own step, ported too.
     let golf = class_step == super::golf_step::GOLF_CLASS_STEP;
+    // MD156b: and the monster truck's.
+    let truck = class_step == super::truck_step::TRUCK_CLASS_STEP;
     let curve = super::class_step::curve_table(ee);
     let acos = super::class_step::acos_table(ee);
     let mut saved: Vec<u8> = Vec::new();
@@ -115,6 +118,8 @@ pub(crate) fn hook_update(ee: &mut Ee, name: &'static str, frame_no: Shared<usiz
             over.words
         } else if golf && stepped {
             super::golf_step::golf_port(ee, &curve)
+        } else if truck && stepped {
+            super::truck_step::truck_port(ee, &curve, &acos)
         } else {
             BTreeMap::new()
         };
@@ -133,7 +138,7 @@ pub(crate) fn hook_update(ee: &mut Ee, name: &'static str, frame_no: Shared<usiz
         let state = ee.u32_at(car_addr + up::VEHICLE_STATE);
         hook_class(ee, &p, state, log.clone(), modes.clone(), Rc::default(), Rc::default());
         let l = log.clone();
-        if buggy || golf {
+        if buggy || golf || truck {
             ee.hooks.insert(class_step, Box::new(move |ee: &mut Ee| {
                 assert_eq!(ee.r(4) as u32, car_at(), "the class step on something else");
                 l.borrow_mut().push(Call::ClassStep);
@@ -173,6 +178,11 @@ pub(crate) fn hook_update(ee: &mut Ee, name: &'static str, frame_no: Shared<usiz
             let bad = super::class_step::compare_nodes(ee, &posed, &nodes);
             assert!(bad.is_empty(), "{name} frame {k}: the golf cart's class step's parts (stepped {stepped}): {} words differ\n{}", bad.len(), bad.join("\n"));
         }
+        if truck {
+            let nodes = super::truck_step::truck_nodes(&super::truck_step::read_truck_parts(ee));
+            let bad = super::class_step::compare_nodes(ee, &posed, &nodes);
+            assert!(bad.is_empty(), "{name} frame {k}: the monster truck's class step's parts (stepped {stepped}): {} words differ\n{}", bad.len(), bad.join("\n"));
+        }
         // The class step's own car words (the golf cart's steering frame) are compared with its parts.
         let compared: std::collections::BTreeSet<u32> = after.iter().map(|&(a, _)| a).chain(posed.keys().copied()).collect();
         let blocks: Vec<(u32, u32)> = [(car_addr, 0x1500), (p.body, 0x230)].into_iter().chain(p.tires.map(|t| (t, 0x200))).collect();
@@ -198,7 +208,7 @@ pub(crate) fn hook_update(ee: &mut Ee, name: &'static str, frame_no: Shared<usiz
         }
         s.frames += 1;
         s.words += after.len();
-        s.posed += usize::from((buggy || golf) && stepped);
+        s.posed += usize::from((buggy || golf || truck) && stepped);
         s.airborne += usize::from(!car.grounded);
         s.hazard += usize::from(pu.on_hazard);
     }));

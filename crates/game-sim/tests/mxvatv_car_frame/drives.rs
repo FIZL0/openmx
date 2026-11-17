@@ -254,10 +254,8 @@ fn beside_posed(d: &Drive, through: Through, side: Option<f32>) -> Option<Seen> 
     if matches!(through, Through::Frame) && side.is_none() {
         let u = std::mem::take(&mut *updates.borrow_mut());
         assert_eq!(u.frames, rows.len(), "{}: the car's update ran once a frame", d.name);
-        // MD156a: every class step but the truck's is ported and compared.
-        if d.vtable != drive::TRUCK.vtable {
-            assert_eq!(u.posed, u.frames, "{}: the class step's parts compared each update", d.name);
-        }
+        // MD156a, MD156b: every class step is ported and compared.
+        assert_eq!(u.posed, u.frames, "{}: the class step's parts compared each update", d.name);
         eprintln!(
             "MD156 {}: {} updates, {} words in all equal to the original's; handed out {:?}; {} class steps' parts compared; off the ground on {}, on a hazard on {}; {} slot runs on other objects",
             d.name, u.frames, u.words, u.handed, u.posed, u.airborne, u.hazard, u.others

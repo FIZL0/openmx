@@ -11960,6 +11960,23 @@ ai_rider_name               boot 0x00373340 (AI entry, buf, size) an AI rider's 
 #   +0xdec 3.0, +0xcc 0x0160cea0 (ray probe), +0xd0 0x0160e4d0 (mesh), +0xd4 0x0160f650 (sweep, vt 0x003b6b40),
 #   +0xb0 0x006545c0, +0xb4 0x00654680, +0xc0 2, +0x44 0xa3, +0x45 0x07.
 
+# MD156b — the monster truck's class step, vt +0x488 0x004d6f20 (0x004d6f20..0x004d7e9c, ~3.9 KB: Ghidra's size
+#   1456 is short, the decompile is whole; a0 car; game_sim::atv_car::truck_class_step over node::Ram;
+#   tests/mxvatv_car_frame/truck_step.rs the_monster_trucks_class_step_is_the_originals, 10,000 cases off
+#   md39a/truck.ee.bin (car 0x01598e10, vt 0x003cff80), nothing hooked; update_beside.rs runs it on the truck drive).
+#   Journal: research/journal/2026-11-17-md156b-mxvatv-truck-class-step. Tires T0..T3 = car +0x1254/58/5c/60.
+#   Corners in order T0, T1, T3, T2: 0x00194af0(upright, point with y + T comp (add.s)) [uprights +0x12e0/e4/e8/ec,
+#   points +0x1350/60/70/80]; 0x00195210(upright, about 0x00397000 up, T steer; rears +0x1494 * steer (mul.s f1=+0x1494,
+#   f0=steer)); 0x00195210(wheel +0x12d0/d4/d8/dc, about 0x00396ff0 side, T angle +0x190).
+#   Wheel stretch inline, T2, T3, T0, T1, the buggy's code exactly (max comp T+0x30, stretch T+0x54; node::stretch).
+#   Mounts +0x12f0/f4/f8/fc (T0..T3) set at +0x1390/a0/b0/c0 with y + comp. Axles: front +0x1340 at +0x13d0, y =
+#   adda(0, y) madd(0.5, c0 + c1); lean = acos table (ptr 0x003ea9c0, scale 0x003ea9d8 14999.5; mula frac*hi, madd
+#   (1-frac)*lo) of clamp(+0x1490 * rsqrt(mula(w,w) madd(d,d))), d = c1 - c0, clamped twice (c.ole 1 / c.olt -1),
+#   neg.s if d < 0; spin about 0x00397010 ahead. Rear +0x1344 at +0x13e0 with T2, T3 the same (f21 reused, same result).
+#   Aims: d = norm(0x00194c20(from, car node +0xe4) - top) (vsub.xyz, w 1), 0x00194260(node, +0xe4, d, 0x00397000,
+#   1,1,1) = node::aim_squared, for (node, from, top) = (+0x1348, self, +0x13f0), (+0x134c, self, +0x1400), then
+#   (+0x1300 + 4k, +0x1320 + 4k, +0x1410 + 0x10k) k = 0..7. Writes nothing on the car; no null checks.
+#   The truck image: rear share +0x1494 = 1.0, every stretch 1.0, max comp 4.0, track 8.06.
 # MD156a — the golf cart's class step, vt +0x488 0x004cf9b0 (2196 bytes; a0 car; game_sim::atv_car::golf_class_step
 #   over node::Ram; tests/mxvatv_car_frame/golf_step.rs the_golf_carts_class_step_is_the_originals, 10,000 cases off
 #   md39a/golf.ee.bin (car 0x01b0dac0, vt 0x003cf600), nothing hooked; update_beside.rs runs it on the golf drive).
