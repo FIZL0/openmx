@@ -10281,30 +10281,23 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     race_start::Change::Place { player, place } => println!("race: player {} in place {place}", player + 1),
                     race_start::Change::Finished { player, place } => {
                         let Some(card) = laps.card(player) else { continue };
-                        let mut over = match (&stadium_flashes, &mut burst) {
-                            (Some(s), Some(burst)) => s.card_finishes(card, laps_run, burst),
-                            _ => {
-                                let event = game_sim::race::ResultEvent { activity: 2, laps: laps_run, ..Default::default() };
-                                let flash = game_sim::race::FlashLevels::default();
-                                game_sim::race::Supercross::new().race_over(card, None, &event, -1, &game_sim::race::HallOfFame::default(), None, &flash)
+                        // P354: the human's finish heard as the original hears a player's — seat 0,
+                        // keeping records, with the event and the profile's Hall of Fame tables —
+                        // for the win it counts and the records it earns (P334); any other card as an
+                        // AI rider's.
+                        let none = game_sim::race::HallOfFame::default();
+                        let finish = match (player, front.as_deref(), fame_event) {
+                            (0, Some(front), Some((league, track, class))) => {
+                                camera_flashes::Finish::player(card, 0, league, track, class, laps_run, &front.menu.race.fame.tables)
                             }
+                            _ => camera_flashes::Finish::single(card, laps_run, &none),
                         };
-                        // P334: the human's finish heard again as the original hears a player's — seat 0,
-                        // keeping records, with the event and the Hall of Fame's tables — for the win it
-                        // counts and the records it earns.
-                        if player == 0
-                            && let (Some(front), Some((league, track, class))) = (front.as_deref(), fame_event)
-                        {
-                            let event = game_sim::race::ResultEvent { league, activity: 2, class, laps: laps_run, ..Default::default() };
-                            let seat = game_sim::race::ResultSeat { seat: 0, keeps_records: true, profile: true };
-                            let mine = game_sim::race::LapCard { flags: card.flags | game_sim::race::card_flags::PLAYER, ..card.clone() };
-                            let flash = game_sim::race::FlashLevels::default();
-                            let heard = game_sim::race::Supercross::new().race_over(&mine, Some(seat), &event, track, &front.menu.race.fame.tables, None, &flash);
-                            over.win = heard.win;
-                            over.fame = heard.fame;
-                            if !over.fame.is_empty() {
-                                println!("race: player 1 earned {} Hall of Fame record(s)", over.fame.len());
-                            }
+                        let over = match (&stadium_flashes, &mut burst) {
+                            (Some(s), Some(burst)) => s.card_finishes(&finish, burst),
+                            _ => finish.heard(None, &game_sim::race::FlashLevels::default()),
+                        };
+                        if !over.fame.is_empty() {
+                            println!("race: player 1 earned {} Hall of Fame record(s)", over.fame.len());
                         }
                         println!("race: player {} finished in place {place} at {:.2}s — fireworks {}", player + 1, card.race_time.0, over.fireworks);
                         if over.fireworks && let Some(fx) = &mut track_fx {
