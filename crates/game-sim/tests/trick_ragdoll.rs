@@ -18,8 +18,8 @@
 //! to the clip it drew, and the port's riding nodes to the original's through each trick's entry tick
 //! and its exit.
 //!
-//! The capture is `context/s257/recording2.txt` (git-ignored; the journal's `capture/play.sh`).
-//! Without it the test says so and passes.
+//! The capture is `context/s257/recording2-parts.txt` (git-ignored; S261's journal's
+//! `capture/play.sh`), S257's own `recording2.txt` being lost. Without it the test says so and passes.
 
 use game_sim::math::{self, Mat4};
 use game_sim::ragdoll_body::Request;
@@ -446,6 +446,23 @@ fn stretch(ground: &mut dyn game_sim::world::World, kit: &Kit, nodes: &[usize], 
     stepped
 }
 
+/// The last frame of the 1700 S261's poller was asked for from 2374: its gaps carry rows past it.
+const LAST: u32 = 2374 + 1700 - 1;
+
+/// `rows` up to [`LAST`], without the rows the recorder read a tick off. Each part record holds its
+/// node as the tick before left it (S261), so a non-held row whose records are not the row before's
+/// nodes has one of the two read early or late (a repeat, or one next to a gap): both go, and the
+/// stretches stop there as at a gap.
+fn on_tick(rows: Vec<Row>, nodes: &[usize]) -> Vec<Row> {
+    let off: Vec<u32> = (1..rows.len())
+        .filter(|&k| rows[k].frame == rows[k - 1].frame + 1 && rows[k].mode() != HELD && rows[k].frame <= LAST)
+        .filter(|&k| nodes.iter().enumerate().any(|(i, &j)| bits(&rows[k].mat(&format!("prec{i}"), 0x60)) != bits(&rows[k - 1].world(j))))
+        .flat_map(|k| [rows[k - 1].frame, rows[k].frame])
+        .collect();
+    println!("rows read off their tick, dropped: {off:?}");
+    rows.into_iter().filter(|r| r.frame <= LAST && !off.contains(&r.frame)).collect()
+}
+
 /// **Every trick lets the riding ragdoll go and takes it back as the original's does.** On
 /// recording2 played back (its tricks: a taunt, a cancan, a lazyboy, a stalelin and two backflips,
 /// V61), the port's riding body is stepped through every tick the original's is held, riding or
@@ -456,7 +473,9 @@ fn stretch(ground: &mut dyn game_sim::world::World, kit: &Kit, nodes: &[usize], 
 #[test]
 fn a_trick_lets_the_riding_ragdoll_go_and_takes_it_back_as_the_originals() {
     let Some((kit, nodes)) = ride_kit() else { return };
-    let Some(rows) = capture_in("s257", "recording2") else { return };
+    // S257's own capture (`recording2.txt`) is lost; S261's re-recording carries the same regions.
+    let Some(rows) = capture_in("s257", "recording2-parts") else { return };
+    let rows = on_tick(rows, &nodes);
     // recording2 rides free09.
     let Some((scene, terrain)) = terrain_bytes("free09") else { return };
     let terrain = game_sim::track::Terrain::parse(&terrain).expect("free09's terrain parses");
@@ -504,8 +523,10 @@ fn a_trick_lets_the_riding_ragdoll_go_and_takes_it_back_as_the_originals() {
     // Out of the posed run the bones start at the clip's nodes as last tick left them, moving by their
     // last tick's move (journal): within 0.03 ft of the original's on all five exits.
     assert!(exits.ticks == 5 * EXIT && exits.worst_at.0 < 0.05 && exits.worst_turn.0 < 0.08, "exits: {}", exits.line());
+    // S261's capture has 4 gaps and 7 off rows dropped in pairs, each a fresh stretch with its
+    // second's settle: 845 compared riding ticks.
     let r = &run.riding;
-    assert!(r.ticks > 1000 && r.worst_at.0 < 0.3 && r.worst_turn.0 < 0.5 && r.mean_at() < 0.04, "riding: {}", r.line());
+    assert!(r.ticks > 800 && r.worst_at.0 < 0.3 && r.worst_turn.0 < 0.5 && r.mean_at() < 0.04, "riding: {}", r.line());
 }
 
 
