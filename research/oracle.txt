@@ -11710,7 +11710,15 @@ atv_heap_free               atv 0x001b76d0 = free
 #   +0x1c + part byte +0x3c, motion *(part +0x80) +0x80). Spots and Linked: pick != def (+0xd8) +0x40 ->
 #   0x0050a920(object, pick); object +0x40 = spot - motion*dt (.xyz, w the spot's), +0x30 = spot; object vt +0x98
 #   (object, f12 dt) = 0x0050ceb0, the first emitter kind's step (F57's port answers it in PartWalk). The steps call
-#   no rand themselves: flip-1's rand draws in 0x004fe010's steps are that emitter step's. 0x003d1740's step 0x004fd0c0 (700 bytes) no C15 item steps; not ported (handed on).
+#   no rand themselves: flip-1's rand draws in 0x004fe010's steps are that emitter step's. 0x003d1740's step 0x004fd0c0 (700 bytes) no C15 item steps; ported in F58a.
+# F58a — that seventh kind in Rust (effects::Kind::Held; the F58 oracle widened to seven kinds). Journal
+#   research/journal/2026-11-16-f58a-held-effects-item. 0x004fd0c0: table read first; latch item +0x74 (entry
+#   +8 sets 1, else entry +0xc clears); unlatched: fade +0x28 <= 0 or - dt <= 0 -> +0x28 = 0, douse (vt +0xa8);
+#   else def +0x110 = (+0x34 * fade) / 0.25, +0x114 = (+0x38 * re-read +0x28) / 0.25, light (vt +0xa4).
+#   Latched: object +0x60 = -(+0x2c) * *(entry +0x20); def +0x130 = adda(0,+0x50) msub 0.5*|+0x60|, +0x140 =
+#   adda(0,+0x60) madd; +0x150 = sub; c = clamp(1 - (1 + *(table +0x20)) * +0x44) as Swing; +0x134/+0x144 =
+#   +0x54/+0x64 madd c*+0x3c/+0x40, +0x154 = sub; +0x110/+0x114 raw +0x34/+0x38 then madd 0.5 * (k*c);
+#   +0x28 = 0.25; +0x70 -> object +0xb1 bit 0 picks def +0x28 bit 0x200 as Swing; light.
 # F59 — the part walk's second emitter kind in Rust (game_sim::handling::ring::{step, aim}, Rings; tests/
 #   mxvatv_bike_ride.rs the_second_emitter_step_is_the_originals (20,000 cases) and PartWalk's "second emitter").
 #   Journal research/journal/2026-11-13-f59-second-emitter-kind. Thunk 0x004ffd20 (a0 - 12, j 0x004fbcc0(obj, f12
