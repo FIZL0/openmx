@@ -1,0 +1,29 @@
+# R32: from biplane.p2m2's state (free06, the plane), the pause menu's "Switch To Machine: Bike"
+# (Start, d-pad down x3, Cross), as a from-savestate tape (research/c15/tape.py): /dev/uinput is
+# root's. Then both brakes held, for research/r32/along.py to teleport the bike under.
+sleep 1000
+down start
+sleep 300
+up start
+sleep 1500
+down down
+sleep 300
+up down
+sleep 1200
+down down
+sleep 300
+up down
+sleep 1200
+down down
+sleep 300
+up down
+sleep 1200
+down cross
+sleep 300
+up cross
+sleep 6000
+down square
+down r2
+sleep 11000
+release
+sleep 15000

@@ -5,6 +5,9 @@
 # speed (the turn on the rails) and two straight, and the pad let go.
 #
 #   ./kit record watch/s89-rails.toml --state 9 --pad watch/pads/s89-along.pad -n 600
+#
+# The state itself (lost by 2026-11-17) is rebuilt by research/r32/make.sh (R32); a copy of its RAM image
+# and .p2s is in kept-context/r32.
 sleep 4000
 down cross
 sleep 32000
