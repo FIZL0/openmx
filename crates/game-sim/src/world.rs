@@ -503,6 +503,20 @@ pub struct Prop {
     /// tick's searches are done ([`crate::traffic::Traffic::frame_late`]). A flag the searches can
     /// raise through the shared props they are lent; never set outside a tick, nor left set after one.
     pub heard: AtomicBool,
+    /// It is of MX vs. ATV's stadium class (MD72, [`stadium_class`]): what that game's reason-15 wreck
+    /// test asks of the thing its bike's collision record struck last.
+    pub stadium: bool,
+}
+
+/// **Whether a collision file is of MX vs. ATV's stadium class** (MD72): its name holds `sxcl.col`,
+/// with case not counted (the supercross clamp, `Data\Col\SxCl.col`, placed on the supercross and
+/// several freestyle and motocross tracks). At the start of every level that game's activity puts the
+/// class (the category "STADIUMCOLLISION", `0x20`) on each collision object of the level whose name
+/// holds it, and on no other; its reason-15 wreck test masks the struck object's categories with it.
+/// No file of MX Unleashed's has the name, so no prop of its worlds is of the class.
+pub fn stadium_class(file: &str) -> bool {
+    const NAME: &[u8] = b"sxcl.col";
+    file.as_bytes().windows(NAME.len()).any(|w| w.eq_ignore_ascii_case(NAME))
 }
 
 impl Prop {
@@ -521,7 +535,8 @@ impl Prop {
             true,
         );
         let (to_world, centre, radius) = stood(&mesh, &place);
-        Prop { mesh, from_world: invert_rigid(&to_world), to_world, centre, radius, moving: None, heard: AtomicBool::new(false) }
+        let stadium = stadium_class(&at.file);
+        Prop { mesh, from_world: invert_rigid(&to_world), to_world, centre, radius, moving: None, heard: AtomicBool::new(false), stadium }
     }
 
     /// A parsed mesh stood at a world matrix: a moving car's (S81, [`crate::traffic`]). The mesh's
@@ -529,7 +544,7 @@ impl Prop {
     pub fn on(mesh: Mesh, place: &Mat4) -> Prop {
         let (to_world, _, _) = stood(&mesh, place);
         let (centre, radius) = moved(&mesh, place);
-        Prop { mesh, from_world: invert_rigid(&to_world), to_world, centre, radius, moving: None, heard: AtomicBool::new(false) }
+        Prop { mesh, from_world: invert_rigid(&to_world), to_world, centre, radius, moving: None, heard: AtomicBool::new(false), stadium: false }
     }
 
     /// Where [`Prop::on`] would stand `mesh` at `place`, without making the prop: its mesh's world

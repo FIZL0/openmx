@@ -574,11 +574,16 @@ pub fn scenery_in(
     dt: F,
 ) -> Option<(Vec<Contact>, Vec<crate::contact::Mover>)> {
     let at = node(at);
-    crate::ride::nearby_scene(nearby, world, &col.rays, &at, |scene| scenery_search(at, scene, dt))
+    crate::ride::nearby_scene(nearby, world, &col.rays, &at, |scene| {
+        let (contacts, movers, _) = scenery_search(at, scene, dt);
+        (contacts, movers)
+    })
 }
 
 /// [`scenery_in`] with the material table's listener on the body rays (F27a,
-/// [`crate::flight_search::Scene::listen_material`]): also what it heard them strike, in order.
+/// [`crate::flight_search::Scene::listen_material`]): also what it heard them strike, in order, and
+/// whether the last thing the rays struck (the record's struck object) is a prop of MX vs. ATV's
+/// stadium class (MD72, [`crate::world::Prop::stadium`]; false when they struck nothing).
 #[allow(clippy::type_complexity)]
 pub fn scenery_heard(
     col: &BikeCol,
@@ -586,7 +591,7 @@ pub fn scenery_heard(
     nearby: &mut Option<Box<crate::broad_phase::Search>>,
     world: &mut dyn World,
     dt: F,
-) -> Option<(Vec<Contact>, Vec<crate::contact::Mover>, Vec<crate::material_hit::Struck>)> {
+) -> Option<(Vec<Contact>, Vec<crate::contact::Mover>, Vec<crate::material_hit::Struck>, bool)> {
     scenery_heard_among(col, at, nearby, world, crate::flight_search::Knocks::default(), dt)
 }
 
@@ -601,12 +606,13 @@ pub fn scenery_heard_among(
     world: &mut dyn World,
     knocks: crate::flight_search::Knocks<'_>,
     dt: F,
-) -> Option<(Vec<Contact>, Vec<crate::contact::Mover>, Vec<crate::material_hit::Struck>)> {
+) -> Option<(Vec<Contact>, Vec<crate::contact::Mover>, Vec<crate::material_hit::Struck>, bool)> {
     let at = node(at);
     crate::ride::nearby_scene_among(nearby, world, &col.rays, &at, knocks, false, |scene| {
         scene.listen_material();
-        let (contacts, movers) = scenery_search(at, scene, dt);
-        (contacts, movers, scene.sounded().to_vec())
+        let (contacts, movers, struck) = scenery_search(at, scene, dt);
+        let stadium = struck.and_then(|o| scene.prop_at(o)).is_some_and(|p| p.stadium);
+        (contacts, movers, scene.sounded().to_vec(), stadium)
     })
 }
 
@@ -639,7 +645,8 @@ pub fn heard_struck(b: &Bump) -> Vec<crate::material_hit::Struck> {
     out
 }
 
-fn scenery_search(at: Node, scene: &mut crate::flight_search::Scene<'_>, dt: F) -> (Vec<Contact>, Vec<crate::contact::Mover>) {
+/// The body rays' search: its contacts, the movers they name, and the record's struck object.
+fn scenery_search(at: Node, scene: &mut crate::flight_search::Scene<'_>, dt: F) -> (Vec<Contact>, Vec<crate::contact::Mover>, Option<usize>) {
     let mut records = [Record {
         search_ground: false,
         search: true,
@@ -655,7 +662,7 @@ fn scenery_search(at: Node, scene: &mut crate::flight_search::Scene<'_>, dt: F) 
     contact_search::collide(&mut records, 0, None, None, scene, dt);
     let movers = contact_search::Search::movers(scene);
     let [record] = records;
-    (record.contacts, movers)
+    (record.contacts, movers, record.struck)
 }
 
 /// The up the ground step's end turns the record's ground search on at or under (P147): the bike's

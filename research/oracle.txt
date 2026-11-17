@@ -7967,6 +7967,14 @@ atv_bike_start_stunt        atv 0x004e6370 = vt +0x4b8 (a0 bike, a1 stunt id, a2
 atv_bike_end_stunt          atv 0x004e4db0 = vt +0x4ac (a0 bike, a1 stunt id)
 atv_bike_set_flip_clip      atv 0x004e7a30 = vt +0x53c (sw a1, +0x1754)
 atv_bike_flip_wreck_steep   atv 0x004e8370 = the backflip's mid-clip wreck's reason test (v0: 0xf, else 0xb)
+atv_stadium_class_register  atv 0x0052cd00 = *0x00542db0 = atv_category_of(*0x0038d400, "STADIUMCOLLISION" @0x0052c5cc) (the 6th name: 0x20)
+atv_activity_tag_stadium    atv 0x00517600 = for each collision object of the level (a0 activity, +0x3d4 level, +0x3ec count, +0x3f0 entries, entry +0x28 object, 0 skipped) whose name (+0x9b) holds "sxcl.col" (case-insensitive strstr 0x0026cc80, through 0x0031c560): object +0x94 |= *0x00542db0; v0 1. Called from 0x0051d7d0 (an activity vt slot) at level start
+# MD72 (journal 2026-11-16-md72-stadium-class): the reason-15 class is STADIUMCOLLISION, put only on
+# objects named for Data\Col\SxCl.col (the supercross clamp, placed by SX01-20, FS01-08, MC06-08, SM03;
+# not nat05 or MC02, the tracks of every saved image). Static props of nat05 carry 0x600. MX Unleashed's
+# stadiums use wall_col.col: no MXU prop has the class. Three other users add the mask to an ignore list
+# (atv_ignore_category on +0xbc/+0xfc of 0x004855d0, 0x0048af30, 0x0048cd00, 0x0048d6a0): not followed.
+# Proved: tests/mxvatv_air.rs mxvatv_stadium_class_is_the_originals (10k generated levels).
 # S223 (journal 2026-11-02-s223-backflip-rider-side): atv_bike_start_stunt returns 1 on every path; a flip id
 # (+0x13b8..+0x13c8) is written to +0x1528 only from a current id >= 41 and not for the wheelie/stoppie (+0x13c4,
 # +0x13c8; R17: S223 read them as the 360's pair); a non-flip id always, and on the ground or with +0xc80 it returns at once. atv_bike_end_stunt

@@ -302,6 +302,7 @@ fn copy_of(p: &Prop) -> Prop {
         radius: p.radius,
         moving: p.moving,
         heard: Default::default(),
+        stadium: p.stadium,
     }
 }
 
