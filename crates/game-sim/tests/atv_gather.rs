@@ -1,8 +1,10 @@
 //! MD76a1, MD83 and MD83b — Desert Oasis's collidables and the quad's nearby list, proved against
 //! SLUS-21104.
 //!
-//! The oracle is MD37a's RAM image of Desert Oasis Free Ride with the atv_ quad at its spawn
-//! (`context/mxvatv-ps2/md37a/atv-r-spawn.ee.bin`): it holds the loaded world's quadtree, every
+//! The oracle is each of five RAM images of Desert Oasis Free Ride (MD116a): MD37a's with the atv_ quad
+//! at its spawn (`context/mxvatv-ps2/md37a/atv-r-spawn.ee.bin`) and C28's re-made four,
+//! `c28-atv-{r,s}-{spawn,air}.ee.bin` (the atv_ or atv_s_ quad, at the spawn or in the air), whose heap
+//! is another; the quad and what the tests read are found in each, not pinned. Each holds the loaded world's quadtree, every
 //! collidable in it, and the quad's nearby list (quad `+0xc4`) with its probe (quad `+0xd8`). The
 //! port builds the same world from the disc's files — `Env\mc02\MC02.scn` and its `Col\*.col` out of
 //! `mc02.res`, and `Env\MC02\MC02.esb` out of `MXVSATV.PSR` (both copied into the same folder) — and
@@ -24,7 +26,7 @@
 //!   round every mesh, and points over the whole map;
 //! - **each vehicle's own sphere** (MD83b), put again and again by the original's place
 //!   (`atv_vehicle_sphere_place`, gathering through `atv_vehicle_sphere_gather`) and by the port's on
-//!   MD37a's three R-quad images (`atv-r-spawn`, `atv-r-spawn-late`, `atv-r-air`): after each call the
+//!   each of the five images: after each call the
 //!   sphere, the vehicle's gathering point and distance, its list and the tree slots it is filed in.
 //!
 //! Without the image, the files or the captures the tests skip (and say so).
@@ -44,28 +46,96 @@ use std::path::Path;
 
 /// SLUS-21104's `$gp`, which the call needs (crt0 sets it at `0x001001ac`).
 const GP: u64 = 0x003d_baf0;
-/// The gather, the quad's list and its probe, the world's quadtree and the ecosystem object.
+/// The gather and the ecosystem object.
 const GATHER: u32 = 0x001d_6a60;
-const QUAD: u32 = 0x015e_0690;
-const LIST: u32 = 0x0162_7a40;
-const PROBE_AT: u32 = 0x0159_c500;
-const TREE: u32 = 0x0065_47c0;
 const ECO_AT: u32 = 0x0052_cd88;
 /// The scene mesh class's vtable.
 const MESH_VTABLE: u32 = 0x003b_6d00;
-/// The six vehicles (the player's quad first, another quad, four bikes), whose spheres (`+0xd80`) the
-/// tree holds in this order.
-const VEHICLES: [u32; 6] = [QUAD, 0x0165_7090, 0x019b_87f0, 0x01a0_5cf0, 0x01a4_85b0, 0x01a8_aed0];
+/// The vtables at `+4` of a quad and of a bike, of the zones' collidables (a sphere, a box), of a
+/// vehicle's sphere, and of the space's tree and list.
+const QUAD_VTABLE: u32 = 0x003c_e250;
+const BIKE_VTABLE: u32 = 0x003d_0450;
+const ZONE_VTABLES: [u32; 2] = [0x003b_6ec0, 0x003b_6a60];
+const SPHERE_VTABLE: u32 = 0x003b_6b40;
+const TREE_VTABLE: u32 = 0x003b_6700;
+const LIST_VTABLE: u32 = 0x003b_5510;
+/// A vehicle's sphere (`+0xd80`).
 const SPHERE: u32 = 0xd80;
-/// The quad's own collidables: the frame mesh, the sweep, the trigger probe and the wreck rays
-/// (the riding probe is [`PROBE_AT`]).
-const BODY_AT: u32 = 0x0162_7370;
-const SWEEP_AT: u32 = 0x0162_82b0;
-const TRIGGER_AT: u32 = 0x0162_cd30;
-const WRECK_AT: u32 = 0x0162_cef0;
-/// The space's moving list, and the zone collidables in the `.toy`'s order.
-const MOVING: u32 = 0x0065_52b0;
-const ZONES_AT: [u32; 6] = [0x013e_ded0, 0x013e_a4e0, 0x013e_acb0, 0x013e_b480, 0x013e_bc50, 0x013e_fe70];
+
+/// MD37a's image and C28's four (memory: md37a ATV states live in s2): Desert Oasis Free Ride with the
+/// R quad (`atv_`) or the S (`atv_s_`) at the spawn and in the air. C28's heap is not MD37a's, so what
+/// the tests read is found in each ([`Layout`]).
+const IMAGES: [&str; 5] = ["atv-r-spawn", "c28-atv-r-spawn", "c28-atv-r-air", "c28-atv-s-spawn", "c28-atv-s-air"];
+
+/// What the tests read in an image, found from its objects, not pinned: the player's quad (the lowest
+/// object with the quad's vtable, made before the idle one), its list (`+0xc4`), riding probe (`+0xd8`),
+/// frame mesh (`+0xd0`), sweep (`+0xd4`), trigger probe (`+0x1430`) and wreck rays (`+0x1434`); the
+/// space's tree and moving list (the probe's space's tables, `+0x28` and `+0x2c`); the six vehicles,
+/// whose spheres the tree holds in this order: the two quads, then the four bikes, lowest first.
+struct Layout {
+    quad: u32,
+    list: u32,
+    probe: u32,
+    body: u32,
+    sweep: u32,
+    trigger: u32,
+    wreck: u32,
+    tree: u32,
+    moving: u32,
+    vehicles: Vec<u32>,
+}
+
+/// Every object in the image with `vtable` at `+4`, lowest first.
+fn with_vtable(ee: &Ee, vtable: u32) -> Vec<u32> {
+    let vt = vtable.to_le_bytes();
+    (0x0010_0000..ee.ram.len() - 8).step_by(4).filter(|&a| ee.ram[a + 4..a + 8] == vt).map(|a| a as u32).collect()
+}
+
+fn layout(ee: &Ee, name: &str) -> Layout {
+    let (quads, bikes) = (with_vtable(ee, QUAD_VTABLE), with_vtable(ee, BIKE_VTABLE));
+    assert_eq!([quads.len(), bikes.len()], [2, 4], "{name}: Desert Oasis Free Ride's two quads and four bikes");
+    let quad = quads[0];
+    let probe = ee.u32_at(quad + 0xd8);
+    let tables = ee.u32_at(ee.u32_at(probe + 0x20) + 4);
+    let l = Layout {
+        quad,
+        list: ee.u32_at(quad + 0xc4),
+        probe,
+        body: ee.u32_at(quad + 0xd0),
+        sweep: ee.u32_at(quad + 0xd4),
+        trigger: ee.u32_at(quad + 0x1430),
+        wreck: ee.u32_at(quad + 0x1434),
+        tree: ee.u32_at(tables + 0x28),
+        moving: ee.u32_at(tables + 0x2c),
+        vehicles: quads.into_iter().chain(bikes).collect(),
+    };
+    assert_eq!([ee.u32_at(l.tree + 4), ee.u32_at(l.moving + 4)], [TREE_VTABLE, LIST_VTABLE], "{name}: the space's tree and list");
+    for &v in &l.vehicles {
+        assert_eq!(ee.u32_at(ee.u32_at(v + SPHERE) + at::VTABLE), SPHERE_VTABLE, "{name}: vehicle {v:#x}'s sphere");
+    }
+    l
+}
+
+/// The image's zone collidables in the `.toy`'s order: those of the tree with a zone's vtable, each
+/// matched to the port's `filed` zone by its centre and reach (the rest of its fields are
+/// [`mc02s_zones_are_the_toys_triggers`]'s).
+fn image_zones(ee: &Ee, tree: u32, w: &World, filed: &[usize], name: &str) -> Vec<u32> {
+    let mut found = Vec::new();
+    walk_entries(ee, ee.u32_at(tree + 0x8c), &mut |e| {
+        let c = e - at::ENTRY;
+        if ee.u8_at(e + 2) == 2 && ZONE_VTABLES.contains(&ee.u32_at(c + at::VTABLE)) && !found.contains(&c) {
+            found.push(c);
+        }
+    });
+    assert_eq!(found.len(), filed.len(), "{name}: the tree's zones");
+    filed
+        .iter()
+        .map(|&o| {
+            let id = Some(port_id(w, o));
+            *found.iter().find(|&&c| image_id(ee, c + at::ENTRY) == id).unwrap_or_else(|| panic!("{name}: no zone of the image is the port's {o}"))
+        })
+        .collect()
+}
 
 /// A collidable's fields (the entry the tree and the list hold is at `+0x18`).
 mod at {
@@ -92,6 +162,9 @@ enum Id {
 
 struct Data {
     ee: Ee,
+    at: Layout,
+    /// The image's zone collidables, in the `.toy`'s order.
+    zones_at: Vec<u32>,
     world: World,
     points: Vec<(String, [f32; 3])>,
     /// The image's collidables the port built one by one, and where.
@@ -101,11 +174,7 @@ struct Data {
     vehicles: std::ops::Range<usize>,
 }
 
-fn data() -> Option<Data> {
-    data_of("atv-r-spawn")
-}
-
-/// The world built and laid beside MD37a's image `name` (one of the R quad's).
+/// The world built and laid beside image `name` (one of [`IMAGES`]).
 fn data_of(name: &str) -> Option<Data> {
     let kit = Kit::load().map_err(|w| skip(&w)).ok()?;
     let dir = kit.ctx("mxvatv-ps2/md37a");
@@ -114,7 +183,7 @@ fn data_of(name: &str) -> Option<Data> {
     let esb = dir.join("MC02.esb");
     let rider = dir.join("mrider.phy");
     for (p, what) in [
-        (&image, "MD37a's eeMemory.bin of atv-r-spawn.p2s (memory: md37a ATV states live in s2)"),
+        (&image, "MD37a's or C28's eeMemory.bin of the state (memory: md37a ATV states live in s2)"),
         (&res, "Desert Oasis's mc02.res off MX vs. ATV's disc (Env/MC02)"),
         (&esb, "Env\\MC02\\MC02.esb out of MXVSATV.PSR on MX vs. ATV's disc"),
         (&rider, "Rider\\Anim\\mrider.phy out of MXVSATV.PSR on MX vs. ATV's disc"),
@@ -126,9 +195,7 @@ fn data_of(name: &str) -> Option<Data> {
     }
     let mut ee = Ee::from_ram(&image).unwrap_or_else(|e| panic!("{e}"));
     ee.set(28, GP);
-    if ee.u32_at(QUAD + 0xc4) != LIST || ee.u32_at(QUAD + 0xd8) != PROBE_AT {
-        panic!("{} is not the MX vs. ATV quad image these addresses are from", image.display());
-    }
+    let l = layout(&ee, name);
     let file = std::fs::read(&res).unwrap();
     let archive = Res::parse(&file).unwrap();
     let read = |name: &str| -> Result<Vec<u8>, String> {
@@ -143,28 +210,30 @@ fn data_of(name: &str) -> Option<Data> {
     let (groups, models) = atv_world::groups(&eco);
     let field = atv_world::terrain_box(&scene.terrain);
     let hi = field.1;
-    let mut world = World::new(collidable(&ee, PROBE_AT), &props.props, &groups, models, atv_world::plant_cell(field), field);
-    let mut port = BTreeMap::from([(PROBE_AT, PROBE)]);
+    let mut world = World::new(collidable(&ee, l.probe), &props.props, &groups, models, atv_world::plant_cell(field), field);
+    let mut port = BTreeMap::from([(l.probe, PROBE)]);
     // After the plants: the zones, the start zone's mesh again, the vehicles' spheres.
     let zones = atv_world::zones(&toy);
-    let filed = world.file_zones(&zones, hi);
-    port.extend(ZONES_AT.iter().copied().zip(filed));
+    let filed: Vec<usize> = world.file_zones(&zones, hi).into_iter().collect();
+    let zones_at = image_zones(&ee, l.tree, &world, &filed, name);
+    port.extend(zones_at.iter().copied().zip(filed));
     for i in atv_world::start_zones(&scene) {
         world.file_again(world.meshes.start + i, &props.props[i], hi);
     }
-    let vehicles = world.add_vehicles(VEHICLES.len(), hi);
-    port.extend(VEHICLES.iter().map(|v| ee.u32_at(v + SPHERE)).zip(vehicles.clone()));
-    // The player's was filed where it was put the call after the quad last gathered round it (the
-    // image keeps only the gathering point, quad `+0xd90`, whose slots are the same), and has moved on
-    // since by less than the 10 ft that files it again.
+    let vehicles = world.add_vehicles(l.vehicles.len(), hi);
+    port.extend(l.vehicles.iter().map(|v| ee.u32_at(v + SPHERE)).zip(vehicles.clone()));
+    // The player's was filed where its tree record last put it (record `+0x10`: in C28's air image
+    // that is not the gathering point, quad `+0xd90`, the sphere having been put since by less than
+    // the 10 ft that files it again), and has moved on since.
     let player = vehicles.start;
-    world.move_vehicle(player, [0, 4, 8].map(|i| F(ee.f32_at(QUAD + 0xd90 + i))), F(atv_world::VEHICLE_REACH));
-    world.broad.places[player].centre = centre(&ee, ee.u32_at(QUAD + SPHERE));
+    let record = ee.u32_at(ee.u32_at(l.quad + SPHERE) + at::ENTRY + 8);
+    world.move_vehicle(player, [0, 4, 8].map(|i| F(ee.f32_at(record + 0x10 + i))), F(atv_world::VEHICLE_REACH));
+    world.broad.places[player].centre = centre(&ee, ee.u32_at(l.quad + SPHERE));
     // The moving list: the quad's three, then (after slots freed) the riders' parts in pairs and the
     // two category-0 sweeps. The quad's other two are in no structure.
-    let block = ee.u32_at(ee.u32_at(MOVING + 0x34));
+    let block = ee.u32_at(ee.u32_at(l.moving + 0x34));
     let image_at = |slot: u32| ee.u32_at(block + 4 * slot) - at::ENTRY;
-    for (c, slot) in [(BODY_AT, Some(0)), (PROBE_AT, Some(1)), (SWEEP_AT, Some(2)), (TRIGGER_AT, None), (WRECK_AT, None)] {
+    for (c, slot) in [(l.body, Some(0)), (l.probe, Some(1)), (l.sweep, Some(2)), (l.trigger, None), (l.wreck, None)] {
         let o = match port.get(&c) {
             Some(&o) => o,
             None => world.add(collidable(&ee, c), centre(&ee, c)),
@@ -191,14 +260,14 @@ fn data_of(name: &str) -> Option<Data> {
         port.insert(c, o);
     }
     // The quad's parts' lists, naming the port's collidables.
-    for c in [BODY_AT, PROBE_AT, SWEEP_AT, TRIGGER_AT, WRECK_AT] {
+    for c in [l.body, l.probe, l.sweep, l.trigger, l.wreck] {
         let o = port[&c];
         world.objects[o].objects = objects(&ee, c + at::OBJECTS, &port);
         world.objects[o].more_objects = objects(&ee, c + at::MORE_OBJECTS, &port);
     }
-    world.broad.places[PROBE].centre = centre(&ee, PROBE_AT);
+    world.broad.places[PROBE].centre = centre(&ee, l.probe);
     let points = capture_points(&kit.ctx("capture/md37a"))?;
-    Some(Data { ee, world, points, port, zones, vehicles })
+    Some(Data { ee, at: l, zones_at, world, points, port, zones, vehicles })
 }
 
 /// A collidable's centre (`+0x50`).
@@ -372,10 +441,16 @@ fn port_nodes(w: &World, node: usize, path: String, out: &mut BTreeMap<String, V
 
 #[test]
 fn mc02s_tree_holds_every_collidable_of_the_originals_in_its_order() {
-    let Some(d) = data() else { return };
+    for name in IMAGES {
+        let Some(d) = data_of(name) else { return };
+        tree_holds(&d, name);
+    }
+}
+
+fn tree_holds(d: &Data, name: &str) {
     let (ee, w) = (&d.ee, &d.world);
     let Structure::Tree(t) = &w.broad.structures[0] else { unreachable!() };
-    let bits = |a: u32| ee.u32_at(TREE + a);
+    let bits = |a: u32| ee.u32_at(d.at.tree + a);
     assert_eq!([t.origin[0], t.origin[1], t.extent[0], t.extent[1], t.scale].map(|f| f.0.to_bits()),
         [bits(0x28), bits(0x30), bits(0x40), bits(0x44), bits(0x54)], "the tree's box and scale");
     assert_eq!(t.cell as u32, bits(0x50), "the tree's least cell");
@@ -398,7 +473,7 @@ fn mc02s_tree_holds_every_collidable_of_the_originals_in_its_order() {
     port_nodes(w, t.root.unwrap(), String::new(), &mut got);
     let count = |m: &BTreeMap<String, Vec<Option<Id>>>| m.values().flatten().flatten().count();
     let holes = |m: &BTreeMap<String, Vec<Option<Id>>>| m.values().flatten().filter(|i| i.is_none()).count();
-    println!("tree: {} entries in {} nodes ({} empty slots), {again} filed again in a node, {skipped} scene nodes; port {} in {} nodes ({} empty)",
+    println!("{name}: tree: {} entries in {} nodes ({} empty slots), {again} filed again in a node, {skipped} scene nodes; port {} in {} nodes ({} empty)",
         count(&want), want.len(), holes(&want), count(&got), got.len(), holes(&got));
     let differ: Vec<_> = want
         .iter()
@@ -409,14 +484,14 @@ fn mc02s_tree_holds_every_collidable_of_the_originals_in_its_order() {
         .map(|(p, ids)| (p, ids, got.get(p)))
         .collect();
     for (p, w, g) in &differ {
-        println!("node {p:?}: image {w:?}\n  port {g:?}");
+        println!("{name}: node {p:?}: image {w:?}\n  port {g:?}");
     }
-    assert!(differ.is_empty(), "{} nodes differ", differ.len());
-    assert_eq!(want.len(), got.len(), "nodes holding something");
-    assert_eq!(count(&want), count(&got), "entries");
-    assert_eq!(skipped, 239, "MC02's scene nodes");
-    assert_eq!(again, 2, "the start zone's mesh, a second time in each of its two nodes");
-    assert_eq!(holes(&want), 1, "the slot the player's sphere left");
+    assert!(differ.is_empty(), "{name}: {} nodes differ", differ.len());
+    assert_eq!(want.len(), got.len(), "{name}: nodes holding something");
+    assert_eq!(count(&want), count(&got), "{name}: entries");
+    assert_eq!(skipped, 239, "{name}: MC02's scene nodes");
+    assert_eq!(again, 2, "{name}: the start zone's mesh, a second time in each of its two nodes");
+    assert_eq!(holes(&want), 1, "{name}: the slot the player's sphere left");
 
     // Each collidable is the image's: every field the gather and the pair filter read. A mesh,
     // a zone or a sphere is found by its centre and reach.
@@ -429,37 +504,43 @@ fn mc02s_tree_holds_every_collidable_of_the_originals_in_its_order() {
         let c = e - at::ENTRY;
         let id = image_id(ee, e);
         let o = (0..w.objects.len()).find(|&o| w.objects[o].class == Class::Object && Some(port_id(w, o)) == id).expect("every image collidable is a port one");
-        same_fields(ee, c, w, o, &image, &format!("{c:#x}"));
+        same_fields(ee, c, w, o, &image, &format!("{name}: {c:#x}"));
         *kinds.entry((ee.u32_at(c + at::VTABLE), ee.u32_at(c + at::CATEGORY))).or_insert(0) += 1;
     });
-    println!("collidables by (vtable, category): {kinds:x?}");
+    println!("{name}: collidables by (vtable, category): {kinds:x?}");
     let filed = w.objects.iter().filter(|o| o.class == Class::Object).count();
     let moving = 3 + 108 + 2 + 2; // the moving list's, and the quad's two in no structure
-    assert_eq!(checked.len(), filed - moving, "every port collidable in the tree is one of the image's");
-    assert_eq!(kinds.get(&(MESH_VTABLE, atv_world::MESH)), Some(&w.meshes.len()), "the scene's meshes");
-    assert_eq!(kinds.get(&(0x003b_6b40, atv_world::VEHICLE)), Some(&6), "the vehicles' spheres");
+    assert_eq!(checked.len(), filed - moving, "{name}: every port collidable in the tree is one of the image's");
+    assert_eq!(kinds.get(&(MESH_VTABLE, atv_world::MESH)), Some(&w.meshes.len()), "{name}: the scene's meshes");
+    assert_eq!(kinds.get(&(SPHERE_VTABLE, atv_world::VEHICLE)), Some(&6), "{name}: the vehicles' spheres");
 }
 
 /// The zones are the `.toy`'s: each one's collidable, its frame and its reach, bit for bit.
 #[test]
 fn mc02s_zones_are_the_toys_triggers() {
-    let Some(d) = data() else { return };
+    for name in IMAGES {
+        let Some(d) = data_of(name) else { return };
+        zones_are_the_toys(&d);
+    }
+}
+
+fn zones_are_the_toys(d: &Data) {
     let ee = &d.ee;
-    assert_eq!(d.zones.len(), ZONES_AT.len());
-    for (z, &c) in d.zones.iter().zip(&ZONES_AT) {
+    assert_eq!(d.zones.len(), d.zones_at.len());
+    for (z, &c) in d.zones.iter().zip(&d.zones_at) {
         let w = |o: u32| ee.u32_at(c + o);
         assert_eq!(z.centre().map(|f| f.0.to_bits()), [0, 4, 8, 12].map(|i| w(at::CENTRE + i)), "{}: centre", z.name);
         assert_eq!(z.reach().0.to_bits(), w(at::RADIUS), "{}: reach", z.name);
         let f = z.frame().to_bits();
         match z.shape {
             atv_world::Shape::Sphere { radius } => {
-                assert_eq!(w(0xc), 0x003b_6ec0, "{}: a sphere", z.name);
+                assert_eq!(w(0xc), ZONE_VTABLES[0], "{}: a sphere", z.name);
                 assert_eq!(z.centre().map(|f| f.0.to_bits()), [0, 4, 8, 12].map(|i| w(0x130 + i)), "{}: local centre", z.name);
                 assert_eq!(f, std::array::from_fn(|i| w(0x140 + 4 * i as u32)), "{}: frame", z.name);
                 assert_eq!([radius.0.to_bits(), (radius * radius).0.to_bits()], [w(0x180), w(0x184)], "{}: radius", z.name);
             }
             atv_world::Shape::Box { half, .. } => {
-                assert_eq!(w(0xc), 0x003b_6a60, "{}: a box", z.name);
+                assert_eq!(w(0xc), ZONE_VTABLES[1], "{}: a box", z.name);
                 assert_eq!(f, std::array::from_fn(|i| w(0x130 + 4 * i as u32)), "{}: frame", z.name);
                 assert_eq!(half.map(|h| h.0.to_bits()), [0, 4, 8].map(|i| w(0x180 + i)), "{}: half sides", z.name);
             }
@@ -470,31 +551,42 @@ fn mc02s_zones_are_the_toys_triggers() {
 /// The moving list is the image's, slot for slot, and each collidable in it the image's.
 #[test]
 fn mc02s_moving_list_is_the_originals() {
-    let Some(d) = data() else { return };
+    for name in IMAGES {
+        let Some(d) = data_of(name) else { return };
+        moving_list(&d, name);
+    }
+}
+
+fn moving_list(d: &Data, name: &str) {
     let (ee, w) = (&d.ee, &d.world);
+    let moving = d.at.moving;
     let Structure::List(l) = &w.broad.structures[1] else { unreachable!() };
-    assert_eq!([l.flags, l.size as u32, l.last as u32], [0x0c, 0x28, 0x30].map(|o| ee.u32_at(MOVING + o)), "flags, block size, slots used");
+    // Of the flags word only the two bits the list reads and sets (bit 0 a query open, bit 1 reports the
+    // box): its begin ors in bit 0 and keeps the rest, which is what the heap held (0 in MD37a's image,
+    // `0x30028` in C28's).
+    let flags = ee.u32_at(moving + 0x0c) & 3;
+    assert_eq!([l.flags, l.size as u32, l.last as u32], [flags, ee.u32_at(moving + 0x28), ee.u32_at(moving + 0x30)], "{name}: flags, block size, slots used");
     let blocks = l.blocks.as_ref().expect("a block");
-    assert_eq!(blocks.len() as u32, ee.u32_at(MOVING + 0x2c), "blocks");
-    let block = ee.u32_at(ee.u32_at(MOVING + 0x34));
+    assert_eq!(blocks.len() as u32, ee.u32_at(moving + 0x2c), "{name}: blocks");
+    let block = ee.u32_at(ee.u32_at(moving + 0x34));
     let image: BTreeMap<usize, u32> = d.port.iter().map(|(&c, &o)| (o, c)).collect();
     let mut used = 0;
     for slot in 0..l.last as u32 {
         let e = ee.u32_at(block + 4 * slot);
         match blocks[0][slot as usize] {
-            None => assert!(e & 2 != 0, "slot {slot} is free"),
+            None => assert!(e & 2 != 0, "{name}: slot {slot} is free"),
             Some(o) => {
-                assert!(e & 2 == 0, "slot {slot} is used");
-                assert_eq!(image.get(&o), Some(&(e - at::ENTRY)), "slot {slot}");
-                same_fields(ee, e - at::ENTRY, w, o, &image, &format!("slot {slot}"));
+                assert!(e & 2 == 0, "{name}: slot {slot} is used");
+                assert_eq!(image.get(&o), Some(&(e - at::ENTRY)), "{name}: slot {slot}");
+                same_fields(ee, e - at::ENTRY, w, o, &image, &format!("{name}: slot {slot}"));
                 used += 1;
             }
         }
     }
-    assert_eq!(used, 3 + 108 + 2);
-    // The space's tables: the tree fixed, the list moving.
-    let tables = ee.u32_at(ee.u32_at(PROBE_AT + 0x20) + 4);
-    assert_eq!([ee.u32_at(tables + 0x28), ee.u32_at(tables + 0x2c), ee.u32_at(tables + 0x3c)], [TREE, MOVING, 0]);
+    assert_eq!(used, 3 + 108 + 2, "{name}: slots used");
+    // The space's tables: the tree fixed, the list moving (both found there, by [`layout`]), no third.
+    let tables = ee.u32_at(ee.u32_at(d.at.probe + 0x20) + 4);
+    assert_eq!(ee.u32_at(tables + 0x3c), 0, "{name}: the space's third table");
 }
 
 fn walk_entries(ee: &Ee, node: u32, f: &mut dyn FnMut(u32)) {
@@ -531,7 +623,14 @@ impl Gen {
 
 #[test]
 fn the_quads_nearby_list_is_the_originals() {
-    let Some(mut d) = data() else { return };
+    for name in IMAGES {
+        let Some(d) = data_of(name) else { return };
+        nearby_list(d, name);
+    }
+}
+
+fn nearby_list(mut d: Data, image: &str) {
+    let (list_at, probe) = (d.at.list, d.at.probe);
     let mut points = d.points.clone();
     let mut g = Gen(0x4d44_3736_6131);
     // Round every mesh, a few feet to its reach and more away, and over the whole map.
@@ -562,19 +661,19 @@ fn the_quads_nearby_list_is_the_originals() {
     for (n, (name, p)) in points.iter().enumerate() {
         let mode = if n < d.points.len() || n % 8 != 0 { modes[0] } else { modes[1 + (n / 8) % 3] };
         let ee = &mut d.ee;
-        ee.set_u32(LIST + 0x38, mode.0);
-        ee.set_u32(LIST + 0x3c, mode.1);
-        ee.set_u32(LIST + 0x2c, mode.2);
+        ee.set_u32(list_at + 0x38, mode.0);
+        ee.set_u32(list_at + 0x3c, mode.1);
+        ee.set_u32(list_at + 0x2c, mode.2);
         for (i, v) in p.iter().enumerate() {
-            ee.set_f32(PROBE_AT + at::CENTRE + 4 * i as u32, *v);
+            ee.set_f32(probe + at::CENTRE + 4 * i as u32, *v);
         }
-        ee.call(GATHER, &[u64::from(LIST), u64::from(PROBE_AT), 3], &[], 50_000_000);
-        let count = ee.u32_at(LIST + 4);
-        let at = ee.u32_at(LIST);
+        ee.call(GATHER, &[u64::from(list_at), u64::from(probe), 3], &[], 50_000_000);
+        let count = ee.u32_at(list_at + 4);
+        let at = ee.u32_at(list_at);
         let mut want = Vec::new();
         for i in 0..count {
             let e = ee.u32_at(at + 8 * i);
-            let id = image_id(ee, e).unwrap_or_else(|| panic!("{name}: a scene node gathered"));
+            let id = image_id(ee, e).unwrap_or_else(|| panic!("{image} {name}: a scene node gathered"));
             want.push((id, ee.u32_at(at + 8 * i + 4)));
             if ee.u8_at(e + 2) == 2 {
                 *kept.entry((mode.0 != 0, ee.u32_at(e - at::ENTRY + at::CATEGORY))).or_insert(0) += 1;
@@ -586,8 +685,8 @@ fn the_quads_nearby_list_is_the_originals() {
         w.place_probe(p.map(F));
         atv_world::gather(&mut w.objects, &mut w.broad, &mut list, PROBE, 3);
         let got: Vec<(Id, u32)> = list.found.iter().map(|c| (port_id(w, c.object), c.distance.0.to_bits())).collect();
-        assert_eq!(list.bound.0.to_bits(), d.ee.u32_at(LIST + 0x20), "{name} {p:?}: the bound");
-        assert_eq!(got, want, "{name} {p:?} (mode {mode:?}): the list");
+        assert_eq!(list.bound.0.to_bits(), d.ee.u32_at(list_at + 0x20), "{image} {name} {p:?}: the bound");
+        assert_eq!(got, want, "{image} {name} {p:?} (mode {mode:?}): the list");
 
         lists += 1;
         entries += got.len();
@@ -600,12 +699,12 @@ fn the_quads_nearby_list_is_the_originals() {
         }
         if palm_rows.contains(&name.as_str()) {
             let palm = |reach: f32| got.iter().any(|(id, _)| matches!(id, Id::Object(m) if (f32::from_bits(m[3]) - reach).abs() < 0.05));
-            assert!(palm(23.49) && palm(28.6), "{name}: the two palms are in the list: {got:?}");
+            assert!(palm(23.49) && palm(28.6), "{image} {name}: the two palms are in the list: {got:?}");
             palms += 1;
         }
     }
     println!(
-        "{lists} lists ({} from the captures), {entries} candidates ({meshes} collidables, {plants} plants), longest {longest}; \
+        "{image}: {lists} lists ({} from the captures), {entries} candidates ({meshes} collidables, {plants} plants), longest {longest}; \
          collidables by (filter, category): {kept:x?}; {palms} palm rows",
         d.points.len()
     );
@@ -616,9 +715,9 @@ fn the_quads_nearby_list_is_the_originals() {
     // Every list held zones, and without the filter the quad's own frame mesh, each as the
     // original's: what MD76a1's world lacked.
     for k in [(true, atv_world::ZONE), (false, atv_world::ZONE), (false, 0x3012)] {
-        assert!(kept.contains_key(&k), "no list held {k:x?}: {kept:x?}");
+        assert!(kept.contains_key(&k), "{image}: no list held {k:x?}: {kept:x?}");
     }
-    assert!(meshes > 1000 && plants > 1000, "the lists hold both meshes and plants");
+    assert!(meshes > 1000 && plants > 1000, "{image}: the lists hold both meshes and plants");
 }
 
 /// The vehicle's own sphere put and gathered round, the original's against the port's.
@@ -752,8 +851,7 @@ fn same_shape(ee: &Ee, root: u32, w: &World, port_root: usize, what: &str) -> us
 /// have the rider off.
 #[test]
 fn a_vehicles_sphere_is_placed_and_gathered_as_the_originals() {
-    // The R quad's three images: at the spawn, a moment later, and in the air.
-    for name in ["atv-r-spawn", "atv-r-spawn-late", "atv-r-air"] {
+    for name in IMAGES {
         let Some(d) = data_of(name) else { return };
         vehicle_walks(d, name);
     }
@@ -765,23 +863,26 @@ fn vehicle_walks(mut d: Data, name: &str) {
         d.ee.hooks.insert(at, Box::new(move |ee| ee.set(2, answer)));
     }
     let image: BTreeMap<usize, u32> = d.port.iter().map(|(&c, &o)| (o, c)).collect();
-    let root = d.ee.u32_at(TREE + 0x8c);
+    let root = d.ee.u32_at(d.at.tree + 0x8c);
+    let (quad, vehicles) = (d.at.quad, d.at.vehicles.clone());
     let Structure::Tree(t) = &d.world.broad.structures[0] else { unreachable!() };
     let port_root = t.root.unwrap();
     // Each vehicle's sphere as the image has it: the ride's state, taken as input.
-    let mut spheres: Vec<(u32, atv_world::VehicleSphere)> = VEHICLES
+    let mut spheres: Vec<(u32, atv_world::VehicleSphere)> = vehicles
         .iter()
         .zip(d.vehicles.clone())
         .map(|(&v, o)| {
             let ee = &d.ee;
             let s = ee.u32_at(v + SPHERE);
             let l = ee.u32_at(v + vehicle::LIST);
-            let list = Nearby::vehicle();
+            let mut list = Nearby::vehicle();
             assert_eq!(
                 [list.least.0.to_bits(), list.extra.0.to_bits(), list.capacity as u32, u32::from(list.filter), u32::from(list.flat), u32::from(list.no_groups), 0],
                 [0x24, 0x28, 0x34, 0x38, 0x3c, 0x2c, 4].map(|o| ee.u32_at(l + o)),
                 "{v:#x}'s list: least, extra, room, filter, flat, no plants, empty"
             );
+            // The bound its last gather left (10 in C28's air image): the ride's, taken as input.
+            list.bound = F(ee.f32_at(l + 0x20));
             let four = |a: u32| [0, 4, 8, 12].map(|i| F(ee.f32_at(a + i)));
             let top = ee.u32_at(s + 0x148);
             let sphere = atv_world::VehicleSphere {
@@ -807,14 +908,14 @@ fn vehicle_walks(mut d: Data, name: &str) {
     }
     same_shape(&d.ee, root, &d.world, port_root, &format!("{name}: at the start"));
     // The player's quad's rider, which the test turns off and on again.
-    let (rider, riding) = (d.ee.u32_at(QUAD + vehicle::RIDER), d.ee.u32_at(QUAD + vehicle::RIDING));
+    let (rider, riding) = (d.ee.u32_at(quad + vehicle::RIDER), d.ee.u32_at(quad + vehicle::RIDING));
     assert!(rider != 0 && riding != 0, "the player's quad has its rider");
     let (rider_was, riding_was) = (d.ee.u32_at(rider + 0x58), d.ee.u32_at(riding + 0x40));
 
     // The player drives the captures, then wanders; the others wander from the origin.
     let mut g = Gen(0x4d44_3833_62);
     let mut walks: Vec<Vec<[f32; 3]>> = vec![d.points.iter().map(|(_, p)| *p).collect()];
-    for k in 0..VEHICLES.len() {
+    for k in 0..vehicles.len() {
         let mut p = if k == 0 { *walks[0].last().unwrap() } else { [g.unit() * 5700.0, 120.0, g.unit() * 5700.0] };
         let mut walk = if k == 0 { std::mem::take(&mut walks[0]) } else { Vec::new() };
         let (mut heading, n) = (g.unit() * 6.283, if k == 0 { 3000 } else { 400 });
@@ -837,7 +938,7 @@ fn vehicle_walks(mut d: Data, name: &str) {
         let (v, entry) = (*v, d.ee.u32_at(*v + SPHERE) + at::ENTRY);
         for (n, p) in walk.iter().enumerate() {
             let gather = n % 13 != 5;
-            let off = v == QUAD && n % 97 >= 80;
+            let off = v == quad && n % 97 >= 80;
             let ee = &mut d.ee;
             ee.set_u32(rider + 0x58, if off { 2 } else { rider_was });
             ee.set_u32(riding + 0x40, if off { 1 } else { riding_was });
