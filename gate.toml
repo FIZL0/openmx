@@ -6,7 +6,8 @@
 # `./kit check -- -p game-sim --test camera` runs one by name. The paths are a guess (both binaries link
 # nearly all of game-sim), so only `done` goes by them.
 [[slow]]
-# 22 oracle proofs of the camera, each over a minute: 268 s, the gate's longest binary (2026-10-23).
+# 22 oracle proofs of the camera: 268 s, the gate's longest binary (2026-10-23); since K63 the slowest test
+# takes ~14 s (2026-11-17).
 test = "-p game-sim --test camera"
 paths = ["crates/game-sim/src/camera.rs", "crates/game-sim/src/air.rs", "crates/game-sim/tests/camera.rs",
          "crates/ps2-float/*", "crates/ps2-oracle/*", "research/oracle.txt"]

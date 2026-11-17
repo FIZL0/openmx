@@ -71,7 +71,23 @@ pub struct Ee {
     /// cutting a dependency on a subsystem you have not ported yet, and *recording* — a hook that only
     /// logs its arguments and then runs nothing turns the oracle into a tracer.
     pub hooks: BTreeMap<u32, Hook>,
+    /// RAM pages as they were at [`Ee::mark`], each saved by its first write since: see there.
+    journal: Option<Journal>,
+    /// Inside [`Ee::quietly`]: writes leave [`Ee::written`] alone.
+    quiet: bool,
 }
+
+/// What [`Ee::mark`] keeps: which pages have been written since, and each one's words before that.
+struct Journal {
+    seen: Vec<u64>,
+    pages: BTreeMap<u32, Box<[u8]>>,
+}
+
+/// How many words [`Ee::call`]'s hook filter tells apart.
+const HOOK_FILTER: usize = 1 << 16;
+
+/// The journal's page: 4 KiB.
+const PAGE: usize = 0x1000;
 
 impl Ee {
     /// A machine with `ram` bytes of zeroed RAM and nothing loaded. Useful on its own for running
@@ -106,6 +122,8 @@ impl Ee {
             ran: 0,
             stack,
             hooks: BTreeMap::new(),
+            journal: None,
+            quiet: false,
         }
     }
 
@@ -144,22 +162,43 @@ impl Ee {
         self.npc = addr.wrapping_add(4);
         self.written.clear();
         self.steps = 0;
+        // A call inside [`Ee::quietly`] is still noted: what it wrote is what a test checks.
+        let quiet = std::mem::replace(&mut self.quiet, false);
+        // Which words may have a hook, so that most steps skip the map. Hooks only change while one
+        // runs (Rust runs nowhere else inside a call), so it is made again after each.
+        let mut hooked = self.hook_filter();
         while self.pc != DONE {
             assert!(self.steps < budget,
                     "call {addr:#08x}: still running after {budget} instructions (pc {:#08x}). Either the \
                      budget is too low, or it is waiting for hardware this interpreter does not have — \
                      hook the function that waits.", self.pc);
-            if let Some(mut h) = self.hooks.remove(&self.pc) {
+            let slot = (self.pc >> 2) as usize & (HOOK_FILTER - 1);
+            if hooked[slot / 64] & 1 << (slot % 64) != 0
+                && let Some(mut h) = self.hooks.remove(&self.pc)
+            {
                 h(self);
                 self.hooks.insert(self.pc, h);
                 self.pc = self.r(31) as u32;
                 self.npc = self.pc.wrapping_add(4);
+                hooked = self.hook_filter();
                 continue;
             }
             self.step();
             self.steps += 1;
             self.ran += 1;
         }
+        self.quiet = quiet;
+    }
+
+    /// One bit per word of [`HOOK_FILTER`] words, set where a hook's address lands: a step whose bit is
+    /// clear has no hook, without the map's search (most of a step's cost with a few hundred hooks, K63).
+    fn hook_filter(&self) -> Vec<u64> {
+        let mut bits = vec![0u64; HOOK_FILTER / 64];
+        for &a in self.hooks.keys() {
+            let slot = (a >> 2) as usize & (HOOK_FILTER - 1);
+            bits[slot / 64] |= 1 << (slot % 64);
+        }
+        bits
     }
 
     /// The integer return value (`v0`).
@@ -209,20 +248,39 @@ impl Ee {
             reads.extend(a..a.wrapping_add(n as u32));
         }
         let m = if spr { &self.spr } else { &self.ram };
-        (0..n).fold(0u128, |v, k| v | (m[o + k] as u128) << (8 * k))
+        let mut b = [0u8; 16];
+        b[..n].copy_from_slice(&m[o..o + n]);
+        u128::from_le_bytes(b)
     }
     /// Write `n` bytes at `a`, little-endian, and remember that they changed.
     pub fn write(&mut self, a: u32, n: usize, v: u128) {
         let (spr, o) = self.loc(a);
-        let m = if spr { &mut self.spr } else { &mut self.ram };
-        for k in 0..n {
-            m[o + k] = (v >> (8 * k)) as u8;
+        if !spr && let Some(j) = self.journal.as_mut() {
+            for p in [o / PAGE, (o + n.max(1) - 1) / PAGE] {
+                if j.seen[p / 64] & 1 << (p % 64) == 0 {
+                    j.seen[p / 64] |= 1 << (p % 64);
+                    j.pages.insert((p * PAGE) as u32, self.ram[p * PAGE..(p + 1) * PAGE].into());
+                }
+            }
         }
+        let m = if spr { &mut self.spr } else { &mut self.ram };
+        m[o..o + n].copy_from_slice(&v.to_le_bytes()[..n]);
         if let Some(log) = self.log.get_mut().as_mut() {
             let pc = self.pc.wrapping_sub(4);
             log.extend((0..n).map(|k| (pc, a.wrapping_add(k as u32), (v >> (8 * k)) as u8)));
         }
-        self.written.extend(a..a.wrapping_add(n as u32));
+        if !self.quiet {
+            self.written.extend(a..a.wrapping_add(n as u32));
+        }
+    }
+    /// `f` with its writes left out of [`Ee::written`] (the journal still sees them): for a harness
+    /// laying out thousands of words between calls, which `call` forgets as it starts anyway. Noting
+    /// each byte in the set was most of the time of the oracles that lay out a whole vehicle a case (K63).
+    pub fn quietly<R>(&mut self, f: impl FnOnce(&mut Ee) -> R) -> R {
+        let was = std::mem::replace(&mut self.quiet, true);
+        let r = f(self);
+        self.quiet = was;
+        r
     }
     pub fn u8_at(&self, a: u32) -> u8 {
         self.read(a, 1) as u8
@@ -250,6 +308,40 @@ impl Ee {
     /// space a call uses for its own frame.
     pub fn scratch(&self, k: u32) -> u32 {
         self.stack + 0x40 + k * 0x40
+    }
+
+    /// Start a journal of RAM (not the scratchpad): from here the first [`Ee::write`] to each 4 KiB page
+    /// saves the page as it was, so that [`Ee::undo`] can put it back and [`Ee::at_mark`] can say what
+    /// it held. A cheap stand-in for copying all of RAM before a call and comparing all of it after,
+    /// which costs milliseconds a case (K63). Every store the interpreter makes goes through
+    /// [`Ee::write`]; a test that writes `ram` itself while the journal is on must put those bytes
+    /// back itself. Marking again starts a new journal.
+    pub fn mark(&mut self) {
+        self.journal = Some(Journal { seen: vec![0; self.ram.len().div_ceil(PAGE * 64)], pages: BTreeMap::new() });
+    }
+    /// Whether a journal is on.
+    pub fn marked(&self) -> bool {
+        self.journal.is_some()
+    }
+    /// Every page written since [`Ee::mark`] as it was then. The journal stays on, and keeps the pages:
+    /// they are still the ones written since the mark.
+    pub fn undo(&mut self) {
+        let j = self.journal.as_ref().expect("undo without a mark");
+        for (&at, page) in &j.pages {
+            self.ram[at as usize..at as usize + PAGE].copy_from_slice(page);
+        }
+    }
+    /// The RAM offsets of the pages written since [`Ee::mark`], lowest first.
+    pub fn marked_pages(&self) -> Vec<u32> {
+        self.journal.as_ref().map(|j| j.pages.keys().copied().collect()).unwrap_or_default()
+    }
+    /// The 4 KiB page at RAM offset `at` as it was at [`Ee::mark`].
+    pub fn at_mark(&self, at: u32) -> &[u8] {
+        let at = at as usize & !(PAGE - 1);
+        match self.journal.as_ref().and_then(|j| j.pages.get(&(at as u32))) {
+            Some(page) => page,
+            None => &self.ram[at..at + PAGE],
+        }
     }
 
     /// What the last call wrote, merged into `(start, end)` ranges — short enough to print.
