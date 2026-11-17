@@ -13514,3 +13514,165 @@ fn high_nose_first_drops_wreck_as_the_original_does() {
     println!("{compared} drops compared");
     assert!(parted.is_empty(), "{}", parted.join("\n"));
 }
+
+/// The thq1 render body and its ragdoll rig, loaded as [`the_ragdoll_kit`] loads the kit, for
+/// [`r24_posed`] to pose.
+fn r24_body() -> Option<(game_render::rider::Body, game_render::rider::Ragdolled)> {
+    use game_render::disc::Disc;
+    let mut disc = Disc::open_configured().ok()?;
+    let names: Vec<String> = disc.entries().iter().filter(|e| e.name.to_ascii_lowercase().ends_with(".res")).map(|e| e.name.clone()).collect();
+    let rider_name = names.iter().filter(|n| n.to_ascii_lowercase().ends_with("thq1.res")).min_by_key(|n| n.len())?.clone();
+    let res = disc.res(&rider_name).ok()?;
+    let rider_file = res.read_suffix("mrider.phy").ok()?;
+    let mut body = game_render::rider::Body::load(vec![disc.res(&rider_name).ok()?], "thq1", game_render::rider::Sex::Male, "", &[], game_sim::motion::Params::default()).ok()?;
+    let model = game_render::psg::Model::parse(&res.read_suffix(&format!("{}.psg", body.geometry())).ok()?).ok()?;
+    let doll = body.ragdoll_rig(&model, &rider_file)?;
+    Some((body, doll))
+}
+
+/// The animated skeleton in `st` as the shell hands it to the port ([`Rider::skeleton`]), under the
+/// ride transform `m`.
+///
+/// The body actor (vtable `0x00458eb0`, `+0x2e0` 18 bodies, the one nearest the bike) keeps 22 joint
+/// records at `+0x234` (stride 0x60: `+0x40` the translation, `+0x50` the quaternion). Their
+/// parents are the render skeleton's, so the quaternions go straight into the render body's pose and
+/// [`game_render::rider::Body::ragdoll_posed`] makes the bones. That puts them under the bike node
+/// (`rider + 0x18`, the rider at body `+0x488` − 0xb80), which is `m` to 1e-4; the last step takes
+/// them from the one frame to the other. The node world rows are not read: the teleport leaves some
+/// of them at the old spot.
+fn r24_posed(st: &SaveState, body: &mut game_render::rider::Body, doll: &game_render::rider::Ragdolled, m: &Mat4) -> game_sim::ragdoll_ride::Posed {
+    let ee = ps2_oracle::Ee::with_ram(st.ram.clone());
+    let quad = |at: u32| Vf::from_bits([0, 4, 8, 12].map(|k| ee.u32_at(at + k)));
+    let mat = |at: u32| Mat4([0, 0x10, 0x20, 0x30].map(|k| quad(at + k)));
+    let body_of = |a: u32, i: usize| ee.u32_at(ee.u32_at(a + 0x2f4) + 0xb0 * i as u32 + 0xa4);
+    let bike = m.0[3];
+    let near = |a: u32| {
+        let p = quad(body_of(a, 0) + 0x60);
+        (0..3).map(|l| (p[l] - bike[l]).powi(2)).sum::<f32>()
+    };
+    let a = (0x10_0000..0x200_0000u32).step_by(16).filter(|&a| ee.u32_at(a + 8) == 0x0045_8eb0 && ee.u32_at(a + 0x2e0) == 18).min_by(|&x, &y| near(x).total_cmp(&near(y))).unwrap();
+    let (n, arr) = (ee.u32_at(a + 0x230) as usize, ee.u32_at(a + 0x234));
+    assert_eq!(n, body.rig.set.skeleton.bones.len(), "the actor's joints are the render skeleton's");
+    let rider = ee.u32_at(a + 0x488) - 0xb80;
+    let bnode = mat(ee.u32_at(rider + 0x18) + 0x40);
+    let pose = &mut body.rig.set.pose;
+    for j in 0..n {
+        let q = quad(arr + 0x60 * j as u32 + 0x50);
+        pose.rot[j] = [q[0], q[1], q[2], q[3]];
+        pose.turned[j] = true;
+    }
+    let t = quad(arr + 0x40);
+    pose.pos[0] = [t[0], t[1], t[2], 1.0];
+    pose.moved[0] = true;
+    let posed = body.ragdoll_posed(doll);
+    let to = math::mul(&bnode, &math::inverse(m).unwrap());
+    let turn = |v: Vf| {
+        let r = |k: usize| v[0] * to.0[0][k] + v[1] * to.0[1][k] + v[2] * to.0[2][k];
+        Vf::new(r(0), r(1), r(2), 0.0)
+    };
+    let bones = posed.bones.iter().map(|b| game_sim::ragdoll_pose::Bone { at: math::transform_point(&to, b.at), forward: turn(b.forward), up: turn(b.up) }).collect();
+    game_sim::ragdoll_ride::Posed { bones, rests: posed.rests }
+}
+
+/// [`b19_ride`] with the original's animated skeleton ([`r24_posed`], handed in every tick as a
+/// shell would, held at the image's pose) and the game's generator taken from the image's
+/// word and stepped `draws` times. Also hands back the throw force the wreck drew.
+fn r24_ride(dir: &str, name: &str, ticks: usize, draws: u32) -> Option<(Vec<S211Tick>, Vec<B19Bones>, Option<Vf>)> {
+    let image = private_dir("capture").join(dir).join(format!("{name}-before.ram"));
+    let mut bones = Vec::new();
+    let mut force = None;
+    let (mut body, doll) = r24_body()?;
+    let skeleton = std::cell::RefCell::new(None);
+    let ride = s211_ride_seeded(
+        &image,
+        [0.0; 3],
+        ticks,
+        true,
+        |st, sim| {
+            let kit = sim.rider.ragdoll_kit.clone().expect("the kit");
+            let m = sim.rider.ride.transform();
+            let (riding, holds) = b19_riding(st, &kit, &m);
+            sim.rider.body.veh.state = riding.actor.clip;
+            sim.rider.riding = Some(Box::new(riding));
+            sim.rider.holds = Some(Arc::new(holds));
+            let state = u64::from(st.word(0x0042_3b30).unwrap()) | u64::from(st.word(0x0042_3b34).unwrap()) << 32;
+            let mut rng = game_sim::rng::Rng::from_state(state);
+            for _ in 0..draws {
+                rng.rand();
+            }
+            sim.rider.idles.rng = rng;
+            sim.rider.idles.seeded = true;
+            let p = Arc::new(r24_posed(st, &mut body, &doll, &m));
+            sim.rider.skeleton = Some(p.clone());
+            *skeleton.borrow_mut() = Some(p);
+        },
+        |sim| {
+            let r = &sim.rider;
+            let of = |bs: &[game_sim::ragdoll::Bone]| bs.iter().map(|b| (b.body.position, b.body.velocity)).collect();
+            bones.push(match (&r.ragdoll, &r.riding) {
+                (Some(d), _) => B19Bones { down: true, bones: of(&d.ragdoll.bones) },
+                (None, Some(rd)) => B19Bones { down: false, bones: of(&rd.actor.ragdoll.bones) },
+                (None, None) => B19Bones { down: false, bones: Vec::new() },
+            });
+            if let Some(d) = &r.ragdoll {
+                force.get_or_insert(d.ragdoll.launch.force);
+            }
+            sim.rider.skeleton = skeleton.borrow().clone();
+        },
+    )?;
+    Some((ride, bones, force))
+}
+
+/// **R24: the bones follow the original through the windmill's throw.** R14's south-bones, ridden as
+/// [`the_bones_enter_the_wreck_a_tick_after_the_verdict`] rides it, drifted ~0.12 ft a tick from the
+/// first tick, with the bones' x velocity low. Two of the test's seeds were not the original's, and
+/// neither is the port's:
+///
+/// * **The riding skeleton.** With no [`Rider::skeleton`] the riding spring pulls toward the kit's
+///   fixed riding pose; the original pulls toward its animated skeleton. Bones 1–4, 8 and 9 were ~8
+///   ft/s low in x on tick 1, before any wreck. Seeded from the image ([`r24_posed`]), tick 1's worst
+///   is 0.006 ft.
+/// * **The throw's draws.** Reason 4 throws with HitBack, `base + delta * (2u - 1)` on each lane and
+///   clock, off the game's one generator. The test left it at the program's start word, so the port
+///   drew y 250.5 / z −140.9 over 0.255 s. The original drew (−0, 200.15329, −185.22122) (the after
+///   image's body `+0x6d0`; its clock ended at −0.00796, so 0.22535 s): the 16th to 18th draws after
+///   the before image's generator word. The port makes one draw of its own first (the clank's), so
+///   14 steps hand it the same throw, bit for bit.
+///
+/// The worst bone off the csv (ft), each seed added in turn:
+///
+/// | tick | neither | skeleton | both |
+/// |---|---|---|---|
+/// | 11 | 2.26 | 0.93 | 0.30 |
+/// | 23 | 4.45 | 2.37 | 0.71 |
+///
+/// What remains is ~0.7 ft/s low in y, built up while the throw pulls (ticks 3–8) and then held: a
+/// follow-up. No bone touches the ground in these 24 ticks.
+#[test]
+fn the_windmill_throws_the_bones_with_the_originals_draws() {
+    let Some(rows) = columns_capture("r14", "south-bones") else { return };
+    let after = private_dir("capture").join("r14").join("south-bones-after.ram");
+    let Some(after) = SaveState::open_either(&after) else { return };
+    let Some((_, bones, force)) = r24_ride("r14", "south-bones", 23, 14) else { return };
+    let drawn = after.vf(0x017a_7700 + 0x6d0).expect("the drawn throw");
+    let force = force.expect("the wreck entered");
+    assert_eq!(force.to_bits()[..3], drawn.to_bits()[..3], "the port drew {force:?}, the original {drawn:?}");
+    let col = |r: &std::collections::HashMap<String, f32>, k: &str| [r[&format!("{k}x")], r[&format!("{k}y")], r[&format!("{k}z")]];
+    for (i, b) in bones.iter().enumerate() {
+        let t = i + 1;
+        let row = &rows[t + 1];
+        let (mut worst, mut dv) = (0.0f32, [0.0f32; 3]);
+        for (j, (p, v)) in b.bones.iter().enumerate() {
+            let (want, want_v) = (col(row, &format!("b{j}_")), col(row, &format!("b{j}_v")));
+            worst = worst.max((0..3).map(|c| (p[c] - want[c]).powi(2)).sum::<f32>().sqrt());
+            for c in 0..3 {
+                dv[c] += (v[c] - want_v[c]) / b.bones.len() as f32;
+            }
+        }
+        println!("t{t:2} down {} worst {worst:.3} mean dv ({:+.2},{:+.2},{:+.2})", b.down, dv[0], dv[1], dv[2]);
+        let bound = if t <= 2 { 0.05 } else if t <= 11 { 0.4 } else { 0.9 };
+        assert!(worst < bound, "tick {t}: a bone {worst} ft off the csv (bound {bound})");
+        assert!(dv[0].abs() < 0.3, "tick {t}: the bones' x velocity is {} ft/s off", dv[0]);
+        assert!(dv[1].abs() < 1.2 && dv[2].abs() < 0.6, "tick {t}: mean dv {dv:?}");
+    }
+}
