@@ -13,7 +13,11 @@ import sys
 import zipfile
 
 root = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
-copy = os.path.join(root + '-slots', 'pcsx2', 's' + os.environ.get('KIT_PCSX2', '1'), 'PCSX2')
+sys.path.insert(0, root)
+from ps2kit import emu  # noqa: E402
+
+# The copy's own config (openmx-slots/pcsx2/sN/PCSX2), as the kit finds it (B34: not root + '-slots').
+copy = str(emu.config_dir())
 mine = os.path.join(root, 'context', 's241')
 
 

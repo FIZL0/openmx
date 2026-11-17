@@ -388,7 +388,8 @@ impl Sim {
             } else {
                 // The plane's rays strike the knockable props, and theirs its hull; its world steps
                 // ahead of theirs, which resolve their mirrors against it as their striker 0 (S241).
-                plane.frame_props(dt, pad, world, &self.tables.ride, &bikes, meets, &mut self.traffic.props, 0)
+                // A prop it wakes searches in the props' pass (B34).
+                plane.frame_props_in(dt, pad, world, &self.tables.ride, &bikes, meets, &mut self.traffic.props, 0, &mut prop_movers)
             };
             wreck_plane::step_downed(&mut riders, plane, downed, &mut met, dt, &*world, false);
             drop(riders);

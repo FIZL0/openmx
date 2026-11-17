@@ -678,3 +678,49 @@ fn the_balls_push_each_other_as_the_originals() {
     eprintln!("{bad:#?}");
     assert!(bad.is_empty(), "{bad:#?}");
 }
+
+/// **A ball the plane's rays wake searches in its strike tick** (B34). The original's node walk
+/// re-reads its filed count, and the plane's collision object is filed first, so a ball its strike
+/// wakes and files at the list's end is searched in the same walk: its own ground entries go on its
+/// list behind the plane's mirrors. research/s241/strike.py `--at` remade the strike on copy 4
+/// (b34at-11065, ball 0 asleep; b34at-11066, the strike tick; the run is word for word the first's
+/// from 11067 on). One `Sim::step` of the plane lane from 11065 against 11066: ball 0's whole list,
+/// every field the search writes, in order.
+#[test]
+fn a_ball_the_plane_wakes_searches_in_its_strike_tick() {
+    let Ok(kit) = Kit::load().map_err(|why| skip(&why)) else { return };
+    let Some((plane, hull)) = the_plane(&kit) else { return };
+    let Some((mut set, mut ground)) = free06() else { return };
+    let Some(ee) = image(&kit, "b34at-11065") else { return };
+    let Some(after) = image(&kit, "b34at-11066") else { return };
+    seed_by_place(&ee, &set);
+    let balls = seed(&ee, &mut set);
+    let (c, o) = balls[0];
+    assert!(!set.collections[c].bones[o].body.enabled, "ball 0 is asleep in 11065");
+    assert!(after.u32_at(after.u32_at(BALLS[0] + 0x110)) != 0, "ball 0 is awake in 11066");
+    let mut sim = game_sim::Sim::new(0x5241);
+    let mut plane = plane.with_hull(hull);
+    plane.body = body_of(&ee, ee.u32_at(PLANE + 0x160));
+    sim.plane = Some(plane);
+    sim.traffic.props = set;
+    let dt = F(ee.f32_at(addr("frame_dt").unwrap()));
+    sim.step(dt, &Default::default(), &mut ground);
+    let ball = &sim.traffic.props.collections[c];
+    assert!(ball.bones[o].body.enabled, "the plane's rays wake ball 0 in one step");
+    let port = ball.objects[o].collision.as_ref().unwrap().record.contacts.clone();
+    let rec = after.u32_at(BALLS[0] + 0x120);
+    let orig = list_at(&after, rec);
+    let plane_rec = the_record(&after);
+    eprintln!("ball 0's list: port {:?}", port.iter().map(|e| (e.kind, e.other)).collect::<Vec<_>>());
+    eprintln!("ball 0's list: original {:?}", orig.iter().map(|e| (e.kind, e.other.map(|r| if r == plane_rec as usize { "plane" } else { "other" }))).collect::<Vec<_>>());
+    assert_eq!(port.len(), orig.len(), "ball 0's list\nport {port:?}\noriginal {orig:?}");
+    for (k, (p, e)) in port.iter().zip(&orig).enumerate() {
+        assert_eq!(searched_differ(p, e), Vec::<&str>::new(), "ball 0's entry {k}\nport {p:?}\noriginal {e:?}");
+        assert_eq!(p.other.is_some(), e.other.is_some(), "ball 0's entry {k}: the side it names\nport {p:?}\noriginal {e:?}");
+        if e.other == Some(plane_rec as usize) {
+            assert_eq!(p.other, Some(0), "ball 0's entry {k} names the plane, its striker 0");
+        }
+    }
+    let (b, a) = (ball.bones[o].body, body_of(&after, after.u32_at(BALLS[0] + 0x110)));
+    eprintln!("ball 0: port pos {:?} vel {:?}\n  original pos {:?} vel {:?}", b.position.0, b.velocity.0, a.position.0, a.velocity.0);
+}
