@@ -879,19 +879,26 @@ fn the_lobby_s_ride_goes_over_the_lobby_s_connection_in_step_and_a_leaver_lets_t
     let mut ho = online::Online::lobby(hn.clone(), &hroom, &hme, sims(&hroom)).unwrap();
     let mut go = online::Online::lobby(gn.clone(), &groom, &gme, sims(&groom)).unwrap();
     let (mut hw, mut gw) = (Flat::default(), Flat::default());
-    // Four seconds of riding at the ride's 30 Hz (N6): the host on the gas, the guest leaning.
+    // Riding at the ride's 30 Hz (N6), the host on the gas, the guest leaning, until two seconds of
+    // ticks have settled on both machines. K30: ridden until then, as K25's both() does, not for a
+    // number of rounds: how many ticks a round settles hangs on how soon the other machine's
+    // datagrams come through, which a busy machine stretches. The 900 rounds only call a hang.
     let gas = Report::from_buttons(game_sim::input::Control::Cross.mask());
     let mut lean = Report::idle();
     lean.set_axis(2, 0xe0);
-    for _ in 0..120 {
+    let settled = |ho: &online::Online, go: &online::Online| ho.settled().0.len().min(go.settled().0.len());
+    for _ in 0..900 {
         ho.frame(gas, &mut hw, None).unwrap();
         go.frame(lean, &mut gw, None).unwrap();
         std::thread::sleep(Duration::from_millis(33));
+        if settled(&ho, &go) >= 60 {
+            break;
+        }
     }
     let ((ha, hd), (ga, gd)) = (ho.settled(), go.settled());
     let both = ha.len().min(ga.len());
     println!("settled: host {} guest {} ticks; {}", ha.len(), ga.len(), ho.summary());
-    assert!(both >= 60, "only {both} ticks settled on both in 4 s");
+    assert!(both >= 60, "only {both} ticks settled on both in 900 rounds");
     assert_eq!(ha[..both], ga[..both], "the two machines' rides parted");
     assert_eq!((hd, gd), (0, 0), "desyncs");
     // The guest leaves from the pause's Leave Session (N11): its seat goes at a tick both agree on,
@@ -909,9 +916,13 @@ fn the_lobby_s_ride_goes_over_the_lobby_s_connection_in_step_and_a_leaver_lets_t
     };
     println!("guest's ride ended: {why}");
     assert!(why.contains("you left the ride"), "{why}");
-    for _ in 0..90 {
+    // and the host rides on until the guest's seat is out of its ride (K30: no fixed count)
+    for _ in 0..900 {
         ho.frame(gas, &mut hw, None).expect("the host's ride ended after the guest left");
         std::thread::sleep(Duration::from_millis(33));
+        if ho.riders() == 1 {
+            break;
+        }
     }
     assert_eq!(ho.riders(), 1, "the guest's seat is out of the host's ride");
     for e in ho.kept() {
@@ -1399,10 +1410,20 @@ fn a_lobby_ride_draws_each_peer_in_their_own_look() {
     let mut go = online::Online::lobby(gn.clone(), &groom, &gme, sims(&groom)).unwrap();
     let (mut hw, mut gw) = (Flat::default(), Flat::default());
     let gas = Report::from_buttons(Control::Cross.mask());
-    for _ in 0..60 {
+    // K30: ridden until each machine has gone a second and draws the other's seat with the other's
+    // pick, as K25's both() does, not for a number of rounds (how soon the other's datagrams come
+    // through hangs on how busy the machine is); the 900 rounds only call a hang.
+    let drawn = |on: &online::Online| {
+        let mut sim = game_sim::Sim::new(1);
+        on.ticks() >= 30 && on.show(1, &mut sim, None) && on.seat_pick(1).is_some()
+    };
+    for _ in 0..900 {
         ho.frame(gas, &mut hw, None).unwrap();
         go.frame(gas, &mut gw, None).unwrap();
         std::thread::sleep(Duration::from_millis(33));
+        if drawn(&ho) && drawn(&go) {
+            break;
+        }
     }
     for (who, on, room, me, other) in [("host", &ho, &hroom, &hme, &gme), ("guest", &go, &groom, &gme, &hme)] {
         let mut sim = game_sim::Sim::new(1);
