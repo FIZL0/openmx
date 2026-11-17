@@ -47,9 +47,9 @@ The bike's sound builder makes four emitters: the engine note, the wreck clank, 
 | Rider grunt on a landing | none: rider.aud has only `[Fall]` and `[IMPACT]`, both wreck-only | none: **same** |
 | Crowd bed (crowd, Ambient) | the track's `[Crowd] CrowdPresent`. It is commented out in all 54 track .aud files, so no track has a crowd | **same** (`WorldSounds` loads only when CrowdPresent is set) |
 | Crowd "Oh" | the bike's wreck entry, at the chassis | **played** on a wreck, but there is no crowd to hear it |
-| Crowd Cheer / PlayerCheer | a race place gained, once the gainer has ridden 5 s; a local human gets the unplaced PlayerCheer stream, an AI the panned Cheer | **missing**: the port has no race ranking. It could not sound anyway, with no crowd |
+| Crowd Cheer / PlayerCheer | a race place gained, once the gainer has ridden 5 s; a local human gets the unplaced PlayerCheer stream, an AI the panned Cheer | **missing**: the lap line ranks riders since P313; the crowd on it is C36. It could not sound anyway, with no crowd |
 | Crowd Boo | a human loses a place to an AI who is then first | **missing**, as above |
-| Cheer on a trick landing | none: the original never cheers for a trick | **different**: `audio.rs` plays `world.cheer` when `landed_trick` (P42). Never heard, because no track has a crowd |
+| Cheer on a trick landing | none: the original never cheers for a trick | **same** since C23, which took out P42's trick cheer |
 | Cannonball | the event emitter (P85) | **played** |
 | `machine.aud` Suspension tiers (buggy, baja, monstertruck) | the car's machine emitter on a landing | not the bike, so out of scope here. Unported (the `audio.rs` comment on those tiers) |
 
@@ -57,11 +57,9 @@ The bike's sound builder makes four emitters: the engine note, the wreck clank, 
 
 - **F, the material collision sounds.** This is the one missing group a rider can hear. The trigger is in
   the row above.
-- **C, low, the trick-landing cheer.** Remove it, or replace it with the place-change cheer and boo once
-  races rank riders. It costs nothing today because no track has a crowd.
-
-The overtake cheer and boo are left inside that C task and not filed on their own: the port does not
-rank a race, and no track enables a crowd, so they cannot be heard.
+- **C23, the trick-landing cheer.** Removed (2026-11-16).
+- **C36, low, the place-change cheer and boo.** The lap line ranks riders since P313; C36 hangs the
+  crowd on its place changes. No track enables a crowd, so they cannot be heard.
 
 ## By ear: the matched filter
 

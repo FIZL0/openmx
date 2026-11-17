@@ -3803,7 +3803,7 @@ pub struct SeatFrame {
     pub hands: Hands,
     /// The rider came off, for this reason.
     pub wreck: Option<i32>,
-    /// A trick was landed.
+    /// A trick was landed. No sound reads it: the original's crowd never cheers for a trick (C23).
     pub landed_trick: bool,
     /// In the plane, and its engine note `0..1`, where it is.
     pub plane: Option<(f32, [f32; 3])>,
@@ -3857,7 +3857,6 @@ pub struct SeatSound {
     /// The rear wheel's loop on a prop (P145).
     pub drive_on: DriveOn,
     last: [i32; 4],
-    was_grounded: bool,
     dice: Dice,
     pub edge: EdgeSound,
     /// The one-shots this rider started (their wreck's voice and clank), held with the rest by a
@@ -3911,7 +3910,6 @@ impl SeatSound {
             voice: RiderVoice::default(),
             drive_on: DriveOn::new(seed.wrapping_mul(131).wrapping_add(45)),
             last: [-1; 4],
-            was_grounded: true,
             dice: Dice::new(seed.wrapping_mul(31).wrapping_add(7)),
             edge: EdgeSound::default(),
             shots: Vec::new(),
@@ -4226,14 +4224,7 @@ impl Sound {
                     m.play(clip, Play { gain: 0.6, bus: Bus::Crowd, ..Play::default() });
                 }
             }
-            if h.grounded && !s.was_grounded && f.wreck.is_none() {
-                if f.landed_trick {
-                    if let Some((clip, _)) = self.world.cheer.pick(&mut self.dice, &mut self.last[2]) {
-                        m.play(clip, Play { gain: 0.6, bus: Bus::Crowd, ..Play::default() });
-                    }
-                }
-            }
-            s.was_grounded = h.grounded;
+            // No cheer on a landed trick (C23): the original's crowd cheers only on a race place gained.
         }
     }
 
