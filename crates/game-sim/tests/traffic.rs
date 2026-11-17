@@ -25,6 +25,8 @@
 //! 10. **the riding bike's world** (S213) — every riding bike's probes are in that one table too,
 //!    leaving no toy out, and a solid bike's kept list holds every toy; the port's bike ridden onto
 //!    the wagon's roof lists the cars as toys and its wheels name the wagon as their vehicle.
+//! 11. **the next car** (R16) — a bike rolled off the wagon's front lands on the car ahead, whose
+//!    motion its wheels take off once; the swing R16 was filed on is the stock bike's engine braking.
 
 use game_sim::archive::{Psr, Res};
 use game_sim::math::Mat4;
@@ -1770,4 +1772,121 @@ fn a_bike_ridden_onto_the_trains_roof_meets_it_as_a_toy() {
     eprintln!("still {still:?}");
     assert!(still.touching > 0, "the still roof was not met: {still:?}");
     assert_eq!(still.on_wagon, 0, "a still car is no vehicle: {still:?}");
+}
+
+
+// --- R16: a bike rolled off the wagon's front onto the next car ------------------------------------
+
+/// The disc bikes' `EngineBraking` (every `.phy` under `250sx/bike` writes `0.00000005`): the
+/// engine's pull against its revs is `EngineBraking · rpm²`, about 1 at their 4,500 rpm idle. The
+/// stock bike ([`game_sim::stock`], hand-written) writes `0.3`, six million times as much: shut, its
+/// engine pulls about 970,000 against its 1,800 rpm.
+const DISC_ENGINE_BRAKING: f32 = 0.000_000_05;
+
+/// The car ahead of [`WAGON`]: a hopper, its deck a bowl between two sloped ends.
+const NEXT: usize = WAGON - 1;
+
+/// How long [`rolled_off`] rides: two seconds, enough to leave the wagon, cross the gap and roll
+/// through [`NEXT`]'s bowl.
+const ROLLED: usize = 60;
+
+/// What [`rolled_off`] measured.
+#[derive(Debug)]
+struct RolledOff {
+    /// Ticks a wheel's contact named [`NEXT`] as its vehicle.
+    on_next: usize,
+    /// The least and the most of the chassis' world `x` velocity (the train runs `+x`), and its
+    /// greatest speed.
+    least_x: f32,
+    most_x: f32,
+    fastest: f32,
+    /// On the ticks a wheel stood on [`NEXT`], how far its contact velocity's `x` (what the tire and
+    /// the bottom-out read, `+0x170`) was off the chassis' `x` velocity less the car's (the most), and
+    /// off it less twice the car's (the least). Either way the arm's spin and the last substep's
+    /// change are in it; the car's motion is 55 ft/s.
+    once: f32,
+    twice: f32,
+}
+
+/// The stock bike let go two feet over [`WAGON`]'s roof ten feet ahead of its middle, rolling 35
+/// ft/s faster than the wagon (so it leaves the front and lands on [`NEXT`]), coasting with no
+/// drag, its engine braking `braking`, stepped among the moving cars for [`ROLLED`] ticks. S146's
+/// image: the same 21 cars as S89's (whose image is gone, R32), seeded as S146's replay seeds them.
+fn rolled_off(braking: F) -> Option<RolledOff> {
+    use game_sim::flight_search::FIRST;
+    let ee = image(ROOF_STATE)?;
+    let parts = archives()?;
+    let scn = member(&parts, "free06.scn").expect("free06.scn");
+    let scene = Scene::parse(&scn).expect("free06's scene");
+    let leaf = scene.terrain_file.to_ascii_lowercase().replace(".trn", ".ps2.trn");
+    let terrain_bytes = member(&parts, &leaf).expect("free06's terrain");
+    let terrain = Terrain::parse(&terrain_bytes).expect("free06's terrain");
+    let mut world = Place { ground: Ground::new(&terrain, &scene.terrain), props: Props::default() };
+    let mut traffic = traffic_of(&ee, &parts, &mut world.props);
+    let first = traffic.first.expect("attached");
+    traffic.frame(DT, &mut world);
+    let moving = world.props.props[first + WAGON].moving.expect("the wagon moves");
+    let next = (FIRST + first + NEXT) as u32;
+
+    let mut sim = game_sim::Sim::new(0x0016);
+    let phy = std::sync::Arc::make_mut(&mut sim.phy);
+    phy.mv.drag = F::ZERO;
+    phy.engine.engine_braking = braking;
+    sim.rider.ride.engine.engine_braking = braking;
+    let (pose, ahead) = (moving.pose.0[3], moving.pose.0[2]);
+    let at = Vf::new(pose.x() + 10.0 * ahead.x(), ROOF + 2.0 + game_sim::stock::SPAWN.y(), pose.z() + 10.0 * ahead.z(), 1.0);
+    sim.rider.ride.place(at, ahead);
+    let v = moving.velocity;
+    sim.rider.ride.chassis.vel = Vf::new(v.x() + 35.0 * ahead.x(), v.y(), v.z() + 35.0 * ahead.z(), 0.0);
+    let coast = ride::Controls::default();
+    let mut out = RolledOff { on_next: 0, least_x: f32::MAX, most_x: f32::MIN, fastest: 0.0, once: 0.0, twice: f32::MAX };
+    for _ in 0..ROLLED {
+        traffic.frame(DT, &mut world);
+        sim.step(DT, &coast, &mut world);
+        let ride = &sim.rider.ride;
+        let vel = ride.chassis.vel;
+        out.least_x = out.least_x.min(vel.x());
+        out.most_x = out.most_x.max(vel.x());
+        out.fastest = out.fastest.max((vel.x() * vel.x() + vel.y() * vel.y() + vel.z() * vel.z()).sqrt());
+        let car = world.props.props[first + NEXT].moving.expect("the next car moves").velocity;
+        let on: Vec<_> = [&ride.front, &ride.rear]
+            .into_iter()
+            .filter(|w| w.w.swept_contact != 0 && w.mv.fresh.scalars[3] == next)
+            .collect();
+        out.on_next += usize::from(!on.is_empty());
+        for w in on {
+            let cv = w.w.contact_velocity.x();
+            out.once = out.once.max((cv - (vel.x() - car.x())).abs());
+            out.twice = out.twice.min((cv - (vel.x() - 2.0 * car.x())).abs());
+        }
+    }
+    Some(out)
+}
+
+/// **R16: a bike rolled off the wagon's front meets the next car as a mover, once.** With the disc
+/// bikes' engine braking, the stock bike leaves the wagon's front at 35 ft/s over the train, lands
+/// on the hopper ahead and rolls through its bowl: its wheels name the hopper as their vehicle, the
+/// contact velocity they measure is the bike's less the car's (not less twice the car's), and the
+/// chassis never runs backwards over the world nor near the riding limit.
+///
+/// The control is the stock bike's own `EngineBraking` (0.3), from the same start: the chassis
+/// swings to about −130 then +133 ft/s in two ticks, in the air between the cars with neither wheel
+/// touching anything. That is the swing R16 was filed on, and it is the engine's: coasting, the
+/// stand-in's braking pins the revs at the 1,800 rpm floor; the hanging rear, with no load to hold
+/// it, spins up past them, the clutch locks on the crossing, and the engine's −970,000 goes to the
+/// rear's drive torque, which a tire with no load passes on whole (`tire::force`: its cap is the load,
+/// zero). `engine_update` is the original's bit for bit (S15, `tests/move.rs`), so it is the
+/// stand-in's number, not the car contact, that throws the bike.
+#[test]
+fn a_bike_rolled_off_the_wagons_front_meets_the_next_car_once() {
+    let Some(disc) = rolled_off(F(DISC_ENGINE_BRAKING)) else { return };
+    eprintln!("disc braking {disc:?}");
+    assert!(disc.on_next > 10, "the bike hardly rode the next car: {disc:?}");
+    assert!(disc.once < 20.0 && disc.twice > 35.0, "a wheel on the car took its motion off other than once: {disc:?}");
+    assert!(disc.least_x > 55.0, "the bike ran slower than the train: {disc:?}");
+    assert!(disc.fastest < 100.0, "the bike sped up: {disc:?}");
+
+    let stock = rolled_off(F(0.3)).expect("the same image");
+    eprintln!("the stand-in's braking {stock:?}");
+    assert!(stock.least_x < -100.0 && stock.fastest > 130.0, "the stand-in's engine did not throw the bike: {stock:?}");
 }
