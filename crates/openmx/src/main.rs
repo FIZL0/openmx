@@ -2180,6 +2180,30 @@ fn mxvatv_car_drawn(car: &vehicle::MxvatvCarRide, before: Option<M4>, blend: &pa
     Some(before.map_or(now, |b| blend.slide(b, now)))
 }
 
+/// Every seat's MX vs. ATV car driver (MD175), as [`car_drivers`] MX Unleashed's car's: the rider's
+/// own body posed by the plane's clips, its root in the car's seat ([`mxvatv_car_draw::seat`]) and
+/// its limbs held to the model's seat nodes. `None` for a seat without the car out.
+fn mxvatv_car_drivers(seats: &[Seat], rigs: &mut [Rig], assets: &Assets, drawn: Option<&game_render::car::Car>, before: &[Option<M4>], cut: &[bool], blend: &pace::Blend) -> Vec<Option<Pilot>> {
+    seats
+        .iter()
+        .zip(rigs.iter_mut())
+        .enumerate()
+        .map(|(p, (seat, rig))| {
+            let car = seat.garage.mxvatv_car_up()?;
+            let was = before.get(p).copied().flatten().filter(|_| !cut.get(p).copied().unwrap_or(true));
+            let at = mxvatv_car_drawn(car, was, blend)?;
+            let loaded = &assets.models.get(&drawn?.model)?.model;
+            let pelvis = mxvatv_car_draw::seat(loaded)?;
+            let anchors = mxvatv_car_draw::seat_nodes(loaded)?.map(|v| Some(v.sub(pelvis)));
+            let body = rig.body.as_mut()?;
+            let palette = biplane::pilot_palette(body, &anchors, rig.pilot_lean.weights())?;
+            let mut root = M4::IDENTITY;
+            root.0[3] = [pelvis.x, pelvis.y, pelvis.z, 1.0];
+            Some(Pilot { plane: at, at: root.mul(at), palette })
+        })
+        .collect()
+}
+
 /// Where a seat's quad is drawn this frame (MD138): its matrix, slid from the tick before's
 /// (`before`) as the car is.
 fn quad_drawn(atv: &vehicle::AtvRide, before: Option<M4>, blend: &pace::Blend) -> Option<M4> {
@@ -11267,6 +11291,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         // And each flying the helicopter's (P216b).
         let heli_pilots = heli_pilots(&world.seats, &mut rigs, &before_helis, &cut, &blend);
         let car_drivers = car_drivers(&world.seats, &mut rigs, &assets, &before_cars, &cut, &blend);
+        let mxvatv_car_drivers = mxvatv_car_drivers(&world.seats, &mut rigs, &assets, mxvatv_car_model.as_ref(), &before_mxvatv_cars, &cut, &blend);
         let quad_riders = quad_riders(&world.seats, &mut rigs, &assets, &quad_looks, &before_quads, &cut, &blend);
         // Each view's buttons and the join cue's, under Button Icons (P281).
         let hud_buttons: Vec<menu::pads::Buttons> = (0..world.seats.len()).map(|v| front.as_deref().map(|f| f.menu.seat_buttons(v)).unwrap_or_default()).collect();
@@ -11495,7 +11520,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 }
             }
             // And every player's MX vs. ATV car while it is out (MD157), at its scene node, posed by its
-            // tires, slid as the car is. No driver sits in it.
+            // tires, slid as the car is; with its driver in the seat (MD175).
             for (p, seat) in world.seats.iter().enumerate().filter(|_| !args.overview) {
                 let (Some(car), Some(drawn)) = (seat.garage.mxvatv_car_up(), mxvatv_car_model.as_ref()) else { continue };
                 let before = before_mxvatv_cars.get(p).copied().flatten().filter(|_| !cut[p]);
@@ -11505,6 +11530,14 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 actors.extend(car_draw::actors(drawn, &assets, &tires, at, alpha, &mut gpu_poses));
                 if args.trace_picture {
                     mxvatv_car_draw::trace(p, "gpu", drawn, &assets, at, &tires);
+                }
+                if let (Some(Some(pilot)), Some(model)) = (mxvatv_car_drivers.get(p), &rigs[p].body_model) {
+                    gpu_poses.push(pilot.palette.clone());
+                    actors.push(Actor { model: model.as_str(), at: pilot.at, pose: Some(gpu_poses.len() - 1), lod_from: None, alpha, casts: false });
+                    if args.trace_picture {
+                        let nodes: Vec<V3> = pilot.palette.iter().map(|m| m.mul(pilot.at)).map(|m| V3 { x: m.0[3][0], y: m.0[3][1], z: m.0[3][2] }).collect();
+                        trace_pilot(p, "gpu", model, pilot, &nodes);
+                    }
                 }
             }
             // And every player's quad while it is out (MD138), at its matrix, posed from the step, slid
@@ -11967,7 +12000,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     actor.push((model.as_str(), pilot.at));
                 }
             }
-            // And the MX vs. ATV car out (MD157), slid as the GPU's is.
+            // And the MX vs. ATV car out (MD157), slid as the GPU's is, with its driver (MD175).
             for (p, seat) in world.seats.iter().enumerate().filter(|_| !args.overview) {
                 let (Some(car), Some(drawn)) = (seat.garage.mxvatv_car_up(), mxvatv_car_model.as_ref()) else { continue };
                 let before = before_mxvatv_cars.get(p).copied().flatten().filter(|_| !cut[p]);
@@ -11976,6 +12009,17 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 actor.push(car_draw::skinned(drawn, &mxvatv_car_copies[p], &mut assets, &tires, at));
                 if args.trace_picture {
                     mxvatv_car_draw::trace(p, "software", drawn, &assets, at, &tires);
+                }
+                if let (Some(Some(pilot)), Some(model)) = (mxvatv_car_drivers.get(p), &rigs[p].body_model) {
+                    if let Some(loaded) = assets.models.get_mut(model.as_str()) {
+                        loaded.tris = perf.time(Stage::Skinning, || game_render::skin::skin(&loaded.model, &pilot.palette, RIDER_GROUP));
+                        skinned[p] = None;
+                        if args.trace_picture {
+                            let corners: Vec<V3> = loaded.tris.iter().flat_map(|t| t.v.iter().map(|v| pilot.at.point(v.pos))).collect();
+                            trace_pilot(p, "software", model, pilot, &corners);
+                        }
+                    }
+                    actor.push((model.as_str(), pilot.at));
                 }
             }
             // And the quad out (MD138), slid as the GPU's is, with its rider.
