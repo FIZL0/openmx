@@ -13307,3 +13307,12 @@ race_finish_listener        boot 0x002fc410 slot +0x14 (Finished; thunk 0x003004
 #   +0x132c..+0x1338 (vtable 0x003cce10: +0x130 start 0x004946c0, +0xf0 place = the orient 0x00492e50, so the
 #   blade's centre also moves on by its turned cofg (0, 0, 9)). Node world rows +0x70..+0xa0, brought up to date
 #   by 0x00193b30 (hooked in the oracle). rand 0x003561a8. 10000 cases bit-exact.
+# B34b — a prop the plane wakes strikes the props beside it in the same walk (src prop_props.rs
+#   strike_props_late, prop_contact.rs strike_in; test prop_plane.rs a_ball_the_plane_wakes_strikes_the_ball_beside_it;
+#   journal research/journal/2026-11-17-b34b-late-prop-strikes-props).
+#   Scene made in the interpreter: physics object reset 0x0015a030(object) re-files a moved sleeping prop
+#   (probes out 0x001ab1d0, vt +0xe4 place from +0x90/+0xa0/+0xb0, probes in 0x00119c60). b34at-11065, ball 1
+#   put 6.4/6.0/5.6/5.2 ft past ball 0 on the plane's line; the node walk (vt +0x74 each, then vt +0x7c(dt)
+#   re-reading node +0x30) against one Sim::step: balls 0 and 1 lists, flags, wake bit for bit. At 4.8/4.4
+#   ball 1 also meets ball 2, ball 2's entries first in the original (gather order, S385).
+#   Moving a sleeping ball by RAM alone leaves its static-tree key stale: nothing meets it.

@@ -724,3 +724,141 @@ fn a_ball_the_plane_wakes_searches_in_its_strike_tick() {
     let (b, a) = (ball.bones[o].body, body_of(&after, after.u32_at(BALLS[0] + 0x110)));
     eprintln!("ball 0: port pos {:?} vel {:?}\n  original pos {:?} vel {:?}", b.position.0, b.velocity.0, a.position.0, a.velocity.0);
 }
+
+/// A physics object put back at its placement (`+0x90` position, `+0xa0` nose, `+0xb0` up): its
+/// probes out of the broad phase, the object placed, and its probes filed again where it now stands.
+const OBJECT_RESET: u32 = 0x0015_a030;
+
+/// How far past ball 0 [`a_ball_the_plane_wakes_strikes_the_ball_beside_it`] puts ball 1, in feet: a
+/// ball is about 6.8 across. Nearer, at 4.8, ball 1 also reaches ball 2, and its rays meet ball 2 before
+/// ball 0 in the original, after it in the port: the order of the gather the port does not keep
+/// (prop_props.rs, S385).
+const GAPS: [f32; 4] = [6.4, 6.0, 5.6, 5.2];
+
+/// **A ball the plane wakes strikes the ball beside it in its strike tick** (B34b). No two of free06's
+/// balls stand within a ball's reach, and two put together in PCSX2 throw each other apart before
+/// they can sleep (research/b34b), so the scene is made in the original's own code: b34at-11065
+/// (the tick before the plane wakes ball 0) with ball 1, asleep, put back by its object's reset at a
+/// placement each of [`GAPS`] past ball 0 on the line from the plane, its mesh filed in the broad
+/// phase there. The original's node walk from that image (every filed list emptied, then each object
+/// searched in the list's order, the count read afresh at every step, so an object filed in the walk
+/// is searched at its end) against one `Sim::step` of the port's plane lane off the same image: the
+/// plane wakes ball 0, whose rays wake ball 1 where they reach it, whose rays strike ball 0 back.
+/// Both balls' whole lists, in order (kind, the side named, every field the search writes), their
+/// flags, whether each is awake, and the node's filed list.
+#[test]
+fn a_ball_the_plane_wakes_strikes_the_ball_beside_it() {
+    let Ok(kit) = Kit::load().map_err(|why| skip(&why)) else { return };
+    let Some((plane, hull)) = the_plane(&kit) else { return };
+    let mut met = 0;
+    let mut bad = Vec::new();
+    for gap in GAPS {
+        let Some((set, mut ground)) = free06() else { return };
+        let Some(mut ee) = image(&kit, "b34at-11065") else { return };
+        seed_by_place(&ee, &set);
+        let v3 = |ee: &Ee, a: u32| [0, 4, 8].map(|k| ee.f32_at(a + k));
+        let ball0 = v3(&ee, ee.u32_at(BALLS[0] + 0x110) + body_at::POSITION);
+        let from = v3(&ee, ee.u32_at(PLANE + 0x160) + body_at::POSITION);
+        let (dx, dz) = (ball0[0] - from[0], ball0[2] - from[2]);
+        let n = (dx * dx + dz * dz).sqrt();
+        let to = [ball0[0] + gap * dx / n, ball0[1], ball0[2] + gap * dz / n];
+        for (k, v) in to.iter().enumerate() {
+            ee.set_f32(BALLS[1] + 0x90 + 4 * k as u32, *v);
+        }
+        ee.call(OBJECT_RESET, &[u64::from(BALLS[1])], &[], 50_000_000);
+        let body1 = ee.u32_at(BALLS[1] + 0x110);
+        assert_eq!(v3(&ee, body1 + body_at::POSITION), to, "{gap} ft: ball 1 stands where it was put");
+        assert_eq!(ee.u32_at(body1), 0, "{gap} ft: ball 1 is still asleep");
+        let (found, wrong) = beside(ee, &plane, &hull, set, &mut ground);
+        met += usize::from(found);
+        bad.extend(wrong.into_iter().map(|w| format!("{gap} ft: {w}")));
+    }
+    assert!(met > 0, "ball 0's rays meet ball 1 at none of {GAPS:?}");
+    assert!(bad.is_empty(), "{bad:#?}");
+}
+
+/// [`a_ball_the_plane_wakes_strikes_the_ball_beside_it`] off one image: whether the original's ball 0
+/// meets ball 1, and what the port's step does otherwise than the original's walk.
+fn beside(mut ee: Ee, plane: &Flight, hull: &track::Mesh, mut set: PropSet, ground: &mut Ground<'static>) -> (bool, Vec<String>) {
+    let balls = seed(&ee, &mut set);
+    let records: Vec<u32> = BALLS.iter().map(|&o| ee.u32_at(o + 0x120)).collect();
+    let plane_rec = the_record(&ee);
+    let dt = ee.f32_at(addr("frame_dt").unwrap());
+
+    // The port: one step of the plane lane.
+    let mut sim = game_sim::Sim::new(0x5241);
+    let mut flier = plane.clone().with_hull(hull.clone());
+    flier.body = body_of(&ee, ee.u32_at(PLANE + 0x160));
+    sim.plane = Some(flier);
+    sim.traffic.props = set;
+    sim.step(F(dt), &Default::default(), ground);
+    let set = &sim.traffic.props;
+
+    // The original: the node's collide walk.
+    let filed = |ee: &Ee| (0..ee.u32_at(NODE + 0x30)).map(|k| ee.u32_at(ee.u32_at(NODE + 0x38) + 4 * k)).collect::<Vec<u32>>();
+    let before = filed(&ee);
+    for &o in &before {
+        ee.call(ee.u32_at(ee.u32_at(o + 8) + 0x74), &[u64::from(o)], &[], 50_000_000);
+    }
+    let mut k = 0;
+    while k < ee.u32_at(NODE + 0x30) {
+        let o = filed(&ee)[k as usize];
+        ee.call(ee.u32_at(ee.u32_at(o + 8) + 0x7c), &[u64::from(o)], &[dt], 50_000_000);
+        k += 1;
+    }
+    let walked = filed(&ee);
+
+    let flats: Vec<usize> = balls.iter().map(|&(c, o)| prop_props::flat(set, c, o)).collect();
+    let name_orig = |e: &Contact| match e.other.map(|o| o as u32) {
+        None => "-".to_string(),
+        Some(r) if r == plane_rec => "plane".to_string(),
+        Some(r) => records.iter().position(|&b| b == r).map_or(format!("{r:#x}"), |b| format!("ball{b}")),
+    };
+    let name_port = |e: &Contact| match e.other {
+        None => "-".to_string(),
+        Some(o) if o >= prop_props::PROP_OTHER => {
+            let f = o - prop_props::PROP_OTHER;
+            flats.iter().position(|&b| b == f).map_or(format!("prop{f}"), |b| format!("ball{b}"))
+        }
+        Some(0) => "plane".to_string(),
+        Some(o) => format!("?{o}"),
+    };
+    let show = |l: &[Contact], n: &dyn Fn(&Contact) -> String| l.iter().map(|e| format!("k{} {}", e.kind, n(e))).collect::<Vec<_>>();
+    let mut bad = Vec::new();
+    // The balls the walk filed, in its order, against the port's filed balls in theirs.
+    let woke: Vec<usize> = walked[before.len()..].iter().filter_map(|r| records.iter().position(|b| b == r)).collect();
+    let mut port_woke: Vec<usize> = (0..balls.len()).filter(|&b| set.collections[balls[b].0].objects[balls[b].1].filed).collect();
+    port_woke.sort_by_key(|&b| set.collections[balls[b].0].objects[balls[b].1].filed_at);
+    eprintln!("filed in the walk: port {port_woke:?} original {woke:?}");
+    if port_woke != woke {
+        bad.push(format!("the balls filed: port {port_woke:?} original {woke:?}"));
+    }
+    for (b, &(c, o)) in balls.iter().enumerate().take(2) {
+        let orig = list_at(&ee, records[b]);
+        let col = set.collections[c].objects[o].collision.as_ref().unwrap();
+        let port = &col.record.contacts;
+        eprintln!("ball {b}: port {:?}\n        original {:?}", show(port, &name_port), show(&orig, &name_orig));
+        let awake = ee.u32_at(ee.u32_at(BALLS[b] + 0x110)) != 0;
+        if set.collections[c].bones[o].body.enabled != awake {
+            bad.push(format!("ball {b} awake: port {} original {awake}", set.collections[c].bones[o].body.enabled));
+        }
+        if port.len() != orig.len() {
+            bad.push(format!("ball {b}: port {} entries, original {}", port.len(), orig.len()));
+        }
+        for (k, (p, e)) in port.iter().zip(&orig).enumerate() {
+            let d = searched_differ(p, e);
+            if !d.is_empty() || name_port(p) != name_orig(e) {
+                bad.push(format!("ball {b}'s entry {k}: {d:?}, port names {} original {}\nport {p:?}\noriginal {e:?}", name_port(p), name_orig(e)));
+            }
+        }
+        if !orig.is_empty() {
+            let r = &col.record;
+            let flags = [r.touching, r.touching_other, r.on_ground, r.on_object];
+            let want = [0x40, 0x44, 0x48, 0x4c].map(|a| ee.u32_at(records[b] + a) != 0);
+            if flags != want {
+                bad.push(format!("ball {b}'s flags: port {flags:?} original {want:?}"));
+            }
+        }
+    }
+    (list_at(&ee, records[0]).iter().any(|e| name_orig(e) == "ball1"), bad)
+}
