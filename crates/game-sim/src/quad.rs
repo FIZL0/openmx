@@ -4816,6 +4816,25 @@ impl<R: Moto + Default> Ride<R> {
         let mut m = TailOn { vehicle: &mut t.vehicle, put_back: &mut t.put_back, on: PutOn { spot, rest: &mut self.rest } };
         update(&mut t.tail, &mut self.q, &mut view, dt, &mut m);
         self.body.set_view(&view);
+        self.remote_let_go();
+    }
+
+    /// **MD178a: a remote quad's hands off the bars** — the stick, brake and clutch-lever clear of the
+    /// bike's vehicle update ([`Call::BikeVehicleUpdate`], which the tail only hands on): with the
+    /// vehicle state's mode 3 or 4 ([`crate::handling::tail::WRECK_KINDS`], a remote vehicle's), the
+    /// stick ([`Bike::stick`]), the brake ([`Quad::brake`]) and the clutch lever ([`Bike::clutch`])
+    /// are zeroed. With no tail, no vehicle state, another mode, or the rider held (the update runs
+    /// nothing, the vehicle update with it), they are left as they are. The shell's quad is always
+    /// driven (mode 1), so it never clears.
+    pub fn remote_let_go(&mut self) {
+        let Some(t) = self.tailed.as_ref() else { return };
+        let remote = t.tail.vehicle_state.is_some_and(|k| crate::handling::tail::WRECK_KINDS.contains(&k));
+        if t.tail.rider_held || !remote {
+            return;
+        }
+        (self.bike.stick.x, self.bike.stick.y) = (F::ZERO, F::ZERO);
+        self.q.brake = F::ZERO;
+        self.bike.clutch = F::ZERO;
     }
 
     /// **MD168a: the frame's tail on Untamed's step** ([`Tailed::untamed`]): [`Ride::tail_on`]'s, but
@@ -4848,6 +4867,7 @@ impl<R: Moto + Default> Ride<R> {
         for k in (0..4).filter(|&k| wheels[k]) {
             self.untamed_wheel_reset(k);
         }
+        self.remote_let_go();
     }
 
     /// **Untamed's wheel reset** (the put-back's, each wheel's): not down and no sweep, the squeeze,
