@@ -1,4 +1,4 @@
-# 1 — nat05 prop world (PART)
+# 1 — nat05 prop world (FINAL)
 
 Task F34. 2026-11-16.
 
