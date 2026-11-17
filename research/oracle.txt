@@ -1269,6 +1269,47 @@ drop_gate_update            boot 0x002ff900 (dt, obj) vt +0x38. With on: step = 
 #                                           turned += step; node_turn(step, node, axis). MoveGateDown's
 #                                           sink to y -100 over MoveTime runs here too (+0x50/+0x54/+0x58)
 drop_gate_snap              boot 0x002ffc50 (obj, activity) the whole turn at once, called by 0x0031a620
+# P313c — MoveGateDown's sink. Static reading only (no save state on a track that sinks). Ported as
+# game_sim::drop_gate::Sink (sim, F) + race_start::GateSwing::pieces (render), Race::sink.
+toy_reader_drop_gate        boot 0x002af2e0 [DropGate] -> scene(app+0x3cc)+0xb4: GateName +0 (0x40),
+#                                           LookVector +0x40, UpVector +0x50, RotationAxisLocal +0x60,
+#                                           RotationAngleDegrees +0x70 (45), RotationRateInSeconds
+#                                           +0x74, MoveGateDown +0x78 (0), MoveTime +0x7c (5.0),
+#                                           NumberSoultreePieces +0x80, NumberCollisionPieces +0x84.
+#                                           DownPosition is in the files, never read. [LowerGate] +0xb8,
+#                                           [RaiseGate] +0xbc: TriggerPosition +0x10 (0,0,0,1 at
+#                                           0x00426d70), TriggerLook +0x20, TriggerWidth +0x30 (10),
+#                                           TriggerHeight +0x34 (10), MoveTime +0x38 (5). nat12/16/19
+#                                           spell it Position= -> trigger at the origin. No [DropGate]
+#                                           -> +0xb4/+0xb8/+0xbc freed (their allocation not found)
+drop_gate_init_sink         boot 0x002ff2e0 also: +0x5c = group node (0x130 bytes, 0x001b1420) placed by
+#                                           0x002ff850 at +0x40 (0,0,0,1), look 0x00426dc0, up 0x00426db0
+#                                           (identity turn); +0xa8 = LowerGate words, +0xa4 = RaiseGate.
+#                                           ctor: +0xb8 = +0xbc = 1, +0xc0 = +0xc4 = 0, +0x50..+0x58 = 0,
+#                                           +0x60 list (count, grows by 5)
+drop_gate_bind_sink         boot 0x002ff3d0 +200 = mgr; +0xa8: path_spot(mgr+0x68, words+0x10, gate+0,
+#                                           0,1,0), +0xb0 = path_distance(track, that, line(track+0x5c)
+#                                           +0x94, 1); same for +0xa4 -> +0xb4. MoveGateDown -> 0x002ff540
+drop_gate_gather            boot 0x002ff540 (obj, scene) stem = GateName, last 2 chars cut when S != 1
+#                                           and strlen > 2. Soultree: S == 1 -> GateName, else "%s0%d"
+#                                           ("%s%d" from 10; 0x0043c450/458) k = 1..S. Collision:
+#                                           "%s0%d.col"/"%s%d.col" (0x0043c460/470) k = S+1..S+C. Holders
+#                                           (+0x3d0/+0x3d4, node +0x34) matched by stricmp 0x00410c50 ->
+#                                           0x001b3220 child of +0x5c (local kept); collision objects
+#                                           (+0x3e8/+0x3ec, collidable +0x34, name +0x8a) -> list +0x60
+drop_gate_update_sink       boot 0x002ff900 first: mgr && (+0xb8 || +0xbc): each card (mgr+0x34, next
+#                                           +0x1c8): +0xb8 && card+0x10 > +0xb0 && card+0x14 < +0xb0 ->
+#                                           ++c0; c0 > 0 -> t +0x50 = 0, len +0x54 = MoveTime, on +0x58 =
+#                                           MoveGateDown, +0xac = 1, +0xb8 = 0. Same on +0xb4 -> ++c4,
+#                                           c4 >= mgr+0x3c -> +0xbc = 0, nothing else. Then on: t < len ->
+#                                           y(+0x44) = (-100 - y) * (t / len) (sub, div, mul; not a lerp),
+#                                           else y = -100, on = 0; group placed at +0x40, identity turn;
+#                                           vt +0xa8 on each list piece; t += dt. Then the swing
+collidable_take_node        boot 0x001edc90 mesh class (vt 0x00451b50) slot +0xa8: 0x001b2a50(+0x230, 0,
+#                                           out) then vt +0xac(out). The scene's static collision object
+#                                           (vt 0x0044fe10, init 0x001aa760) loads with 0x0011b230(0, name,
+#                                           0xd): +0x230 = 0 -> identity. So a sink tick stands every
+#                                           gathered mesh at the world origin
 node_turn                   boot 0x001b2c20 (angle f12, node, axis) angle != 0: node +0x40's rows =
 #                                           axis_angle(axis, cos 0x00110e10, sin 0x00110ce0) * rows,
 #                                           place kept (0x00110ba0, axis made unit), then 0x001b1930

@@ -613,17 +613,34 @@ impl Props {
     /// one of its fences.
     pub fn load(
         scene: &track::Scene,
-        mut read: impl FnMut(&str) -> Result<Vec<u8>, String>,
+        read: impl FnMut(&str) -> Result<Vec<u8>, String>,
     ) -> (Props, Vec<String>) {
+        let (props, missed, _) = Props::load_indexed(scene, read);
+        (props, missed)
+    }
+
+    /// [`Props::load`], and where each of the scene's collision entries went among the props, in
+    /// the list's order: `None` for one skipped (P313c, the drop gate's pieces found by file name).
+    pub fn load_indexed(
+        scene: &track::Scene,
+        mut read: impl FnMut(&str) -> Result<Vec<u8>, String>,
+    ) -> (Props, Vec<String>, Vec<Option<usize>>) {
         let mut props = Props::default();
         let mut missed = Vec::new();
+        let mut at_index = Vec::with_capacity(scene.collision.len());
         for at in &scene.collision {
             match read(&at.file).and_then(|b| Mesh::parse(&b)) {
-                Ok(mesh) => props.props.push(Prop::place(mesh, at)),
-                Err(e) => missed.push(format!("{}: {e}", at.file)),
+                Ok(mesh) => {
+                    at_index.push(Some(props.props.len()));
+                    props.props.push(Prop::place(mesh, at));
+                }
+                Err(e) => {
+                    at_index.push(None);
+                    missed.push(format!("{}: {e}", at.file));
+                }
             }
         }
-        (props, missed)
+        (props, missed, at_index)
     }
 
     /// Sweep a world-space bundle against every prop it could reach.

@@ -489,6 +489,15 @@ impl Sim {
         if frame.dropped {
             all.iter_mut().for_each(|r| race::release(&mut r.ride.chassis));
         }
+        // P313c: the drop gate's sink, a scene object's update after the race manager's (the order
+        // between the two was not traced), its collision pieces stood on each tick it runs.
+        if let Some(race) = self.race.as_mut()
+            && let (Some(sink), Some(laps)) = (race.sink.as_deref_mut(), race.laps.as_deref())
+            && sink.tick(dt, &laps.cards)
+            && let Some(props) = world.moving()
+        {
+            sink.stand(props);
+        }
         if !guests.is_empty() {
             let caught = frame.caught.iter().filter(|(i, _)| *i >= players).map(|&(i, hit)| (i - players, hit)).collect();
             let did = race::Frame { caught, dropped: frame.dropped, start: frame.start, ..race::Frame::default() };
@@ -1386,6 +1395,10 @@ pub mod race;
 /// A supercross stadium's camera flashes (V127): the crowd's flashes the race activity shows all race
 /// long and bursts at each podium finish, a batch at a time off the track's `cameraflash` props.
 pub mod camera_flash;
+
+/// The drop gate's sink (P313c): on a track whose `[DropGate]` sets `MoveGateDown`, the gate's
+/// pieces lowered and its collision meshes moved off once a rider is past the `[LowerGate]`.
+pub mod drop_gate;
 
 /// The four-wheeled machines (S149): the monster truck's, the buggy's and the baja's shared `.phy`
 /// loader — part, tires and their surfaces, engine and gearbox, airborne controls, steer tables.
