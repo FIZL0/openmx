@@ -13,6 +13,9 @@
 //!    ray probe's hits through the plane's scene the same as with nothing kept;
 //! 3. **no build a steady tick** — a tick whose props stand still builds no world and updates none,
 //!    and one whose path cars drive updates one and builds none.
+//! 4. **no whole copy an update** (N23b) — the collidables a search is lent in a kept world brought up
+//!    to the driving cars are the fresh build's, put back from the list lent before the update rather
+//!    than copied whole.
 //!
 //! Everything is written here: posts for props, a two-species ecosystem, a cross of rays.
 
@@ -358,4 +361,48 @@ fn a_hidden_car_and_its_unhidden_world_are_both_kept() {
         search(&props(t), &format!("tick {t}, seen"));
     }
     assert_eq!(kept_builds, (2, 18), "one world built for each of the two searches, then each brought up to its cars");
+}
+
+/// **No whole copy an update** (N23b): while the path cars drive, the collidables lent to each tick's
+/// searches — the ride's world and the plane's, at two reaches — are the fresh build's bit for bit,
+/// and the list lent before is put back where it differs rather than the world's copied whole: one
+/// whole copy for each world built, none for each one brought up to the cars.
+#[test]
+fn an_updated_world_lends_without_a_whole_copy() {
+    let mesh = post();
+    let woods = trees();
+    let rays = rays();
+    for field in fields() {
+        for trees in [None, Some(&woods)] {
+            flight_search::forget_worlds();
+            let copies = flight_search::whole_copies();
+            let (mut built, mut updated) = (0, 0);
+            for t in 0..TICKS {
+                let props = props(t);
+                let riders = bikes(t);
+                let bikes = Some(Bikes { mesh: &mesh, bikes: &riders });
+                let (centre, radius) = flight_search::reach(&rays, &{
+                    let n = node(t);
+                    [n.rows[0], n.rows[1], n.rows[2], n.origin]
+                });
+                for toys in [false, true] {
+                    for (centre, radius) in [(centre, radius), (Vf::new(200.0, 3.0, 90.0, 1.0), F(0.5))] {
+                        let before = flight_search::world_builds();
+                        let lent = flight_search::lent(&props.props, trees, bikes.as_ref(), field, centre, radius, toys);
+                        let after = flight_search::world_builds();
+                        (built, updated) = (built + after.0 - before.0, updated + after.1 - before.1);
+                        let fresh = if toys {
+                            flight_search::world_flown(&props.props, trees, bikes.as_ref(), field, centre, radius)
+                        } else {
+                            flight_search::world_wooded(&props.props, trees, bikes.as_ref(), field, centre, radius)
+                        };
+                        let what = format!("tick {t}, field {field:?}, plants {}, toys {toys}", trees.is_some());
+                        assert!(lent == fresh.1, "{what}: the lent collidables");
+                    }
+                }
+            }
+            assert!(updated >= 20, "field {field:?}: only {updated} updates");
+            assert_eq!(flight_search::whole_copies() - copies, built, "field {field:?}: whole copies against worlds built");
+        }
+    }
 }

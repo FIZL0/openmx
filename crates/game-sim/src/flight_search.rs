@@ -686,7 +686,9 @@ struct Kept {
     stamp: Vec<u32>,
     /// Where the props' words are in the stamp ([`PROP_WORDS`] each).
     props_at: std::ops::Range<usize>,
-    /// Which build or update of a world this is, for the collidable lists searched in it ([`lend`]).
+    /// Which build of a world this is, for the collidable lists searched in it ([`lend`]). An update
+    /// keeps it (N23b): it changes no collidable but the moved props' reach, which [`lend`] puts back
+    /// on every collidable anyway, so a list lent before the update needs nothing more.
     generation: u64,
     broad: Broad,
     objects: Vec<Collidable>,
@@ -726,6 +728,35 @@ thread_local! {
     static BUILDS: std::cell::Cell<(u64, u64, u64)> = const { std::cell::Cell::new((0, 0, 0)) };
     /// Collidable lists a search was done with, each under the generation it was copied from.
     static SPARE: std::cell::RefCell<Vec<(u64, Vec<Collidable>)>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// How many collidable lists [`lend`] has copied whole on this thread ([`whole_copies`]).
+    static WHOLE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// How many collidable lists the searches on this thread have copied whole from their world, not put
+/// back where a search writes on a list lent from the same build ([`lend`]): one a build, none an
+/// update (N23b).
+pub fn whole_copies() -> u64 {
+    WHOLE.get()
+}
+
+/// The collidables a search with these would be lent ([`kept`]'s world), then handed back: the list
+/// to hold up against a fresh build's.
+#[allow(clippy::too_many_arguments)]
+pub fn lent(
+    props: &[Prop],
+    trees: Option<&Trees>,
+    bikes: Option<&Bikes<'_>>,
+    field: Option<([F; 2], [F; 2])>,
+    centre: Vf,
+    radius: F,
+    toys: bool,
+) -> Vec<Collidable> {
+    kept_world(props, trees, bikes, &[], Knocks::default(), field, centre, radius, toys, |_, built, generation| {
+        let objects = lend(generation, built);
+        let copy = objects.clone();
+        give_back(generation, objects);
+        copy
+    })
 }
 
 /// How many worlds the searches on this thread have built since it started, and how many kept ones
@@ -977,7 +1008,6 @@ impl Kept {
             }
         }
         self.stamp.copy_from_slice(stamp);
-        self.generation = generation();
         true
     }
 
@@ -1135,13 +1165,15 @@ fn kept_world<R>(
 /// A collidable list to search a kept world's collidables in, `built` of generation `generation`:
 /// one handed back by an earlier search ([`give_back`]), so nothing is allocated. One searched in
 /// this very generation differs from `built` only where a search writes — the flags, the group a part
-/// was last searched in, a probe's reach — so only those are put back; any other is copied whole.
+/// was last searched in, a probe's reach — so only those are put back; any other is copied whole, the
+/// oldest handed back when as many are kept as worlds, else a new one: each kept world searched in
+/// turn keeps a list of its own rather than taking another's (N23b).
 fn lend(generation: u64, built: &[Collidable]) -> Vec<Collidable> {
     let (had, mut objects) = SPARE
         .with(|s| {
             let mut s = s.borrow_mut();
-            let k = s.iter().position(|(g, _)| *g == generation).or(s.len().checked_sub(1));
-            k.map(|k| s.swap_remove(k))
+            let k = s.iter().position(|(g, _)| *g == generation).or((s.len() >= WORLDS_KEPT).then_some(0));
+            k.map(|k| s.remove(k))
         })
         .unwrap_or_default();
     if had == generation && objects.len() == built.len() {
@@ -1149,6 +1181,7 @@ fn lend(generation: u64, built: &[Collidable]) -> Vec<Collidable> {
             (o.flags, o.group, o.radius) = (b.flags, b.group, b.radius);
         }
     } else {
+        WHOLE.set(WHOLE.get() + 1);
         objects.truncate(built.len());
         let n = objects.len();
         objects.clone_from_slice(&built[..n]);
@@ -1157,11 +1190,14 @@ fn lend(generation: u64, built: &[Collidable]) -> Vec<Collidable> {
     objects
 }
 
+/// Keep `objects` for the next search of `generation` ([`lend`]), newest last, the oldest let go past
+/// one for each world kept.
 fn give_back(generation: u64, objects: Vec<Collidable>) {
     SPARE.with(|s| {
         let mut s = s.borrow_mut();
-        if s.len() < 4 {
-            s.push((generation, objects));
+        s.push((generation, objects));
+        if s.len() > WORLDS_KEPT {
+            s.remove(0);
         }
     });
 }
