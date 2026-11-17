@@ -77,9 +77,13 @@ Run in 100-frame stretches from each image, the whole tape holds except two stre
   substep is row 137911 to its digits: that row is torn (read mid-frame), and `held()` wants the tick's
   end, so the stretch "parts" on a row it matches. The first tick after the wreck (137856, row 137858)
   still matches no state of the port's; the wreck bike's seed is the suspect (follow-ups filed).
-- **P2 standing from 137810 parts at 137827**, 17 ticks before the plane reaches it. P2 is seeded from
-  its chassis only (standing_p2, the way fly_and_collide seeds P1). Its rider and suspension state is
-  not read.
+- **P2 standing from 137810 "parted" at 137827: a torn row, not the port** (S275). The split-screen
+  pass (`fly_two`) already seeds P2 whole off the image (`seeded_rider`: chassis, both wheels, engine,
+  balance, air, levers). The port's P2 equals every row's state bit for bit, except row 137829. That
+  row was read inside tick 137828's integrate: tick 137827's velocity, with the centre integrate
+  rebuilds from the transform first (`rebuilt_centre`, the transform after 137827 applied to the local
+  centre) to the bit. `p2_held` now takes that reading, and P2 holds 90/90 from 137810. It was the only
+  such row in the three joust runs.
 - **The Sim plane lane never steps the other bikes** (flight_search::Bike stands still). Only the
   split-screen pass reproduces a joust.
 - **Traffic (car0..5 in the capture) is not modelled.** No event here meets a car.

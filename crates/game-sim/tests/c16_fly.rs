@@ -605,6 +605,9 @@ struct Tick {
     /// P2's chassis velocity and centre, and the wreck its frame said ([`fly_two`]; in [`fly`], which
     /// does not step P2's rider, a downed P2's wreck bike's body velocity and position, S276).
     p2: [[u32; 3]; 2],
+    /// The centre P2's next integrate rebuilds from the transform before it writes the new one
+    /// ([`rebuilt_centre`]; [`fly_two`] only).
+    p2_rebuilt: [u32; 3],
     p2_wreck: Option<u8>,
     /// The plane's velocity and position after the tick's first substep, and how many substeps it
     /// took ([`game_sim::flight::substeps`]): where a row PINE read inside the frame stands (T8).
@@ -688,7 +691,7 @@ fn fly_by(
             let p2 = sim.others[0].rider.crash.as_ref().map_or([[0; 3]; 2], |c| [three(c.bike.body.velocity), three(c.bike.body.position)]);
             let state = [three(p.body.velocity), three(p.body.position)];
             let (first, substeps) = first_substep(&kept, state);
-            out.push(Tick { t, state, crash: p.crash.reason, p2, p2_wreck: None, first, substeps, wreck: None, plane_list: p.record.contacts.clone(), plane_body: p.body });
+            out.push(Tick { t, state, crash: p.crash.reason, p2, p2_rebuilt: [0; 3], p2_wreck: None, first, substeps, wreck: None, plane_list: p.record.contacts.clone(), plane_body: p.body });
         }
         Some((seed, out))
     })
@@ -829,6 +832,7 @@ fn fly_two_by(
                 state,
                 crash: p.crash.reason,
                 p2: [three(ch.vel), three(ch.cofg_world)],
+                p2_rebuilt: three(rebuilt_centre(&seats[1].rider.ride)),
                 p2_wreck: said.wreck.map(|w| w.0),
                 first,
                 substeps,
@@ -839,6 +843,18 @@ fn fly_two_by(
         }
         Some((seed, out))
     })
+}
+
+/// **The centre a ride's next integrate rebuilds first**: the chassis' local centre through the
+/// transform the last step left, as `chassis_integrate`'s first call writes it (ride.rs's
+/// `orientation_point`, the same madds). A row read inside integrate carries it.
+fn rebuilt_centre(ride: &Ride) -> Vf {
+    use ps2_float::{Dest, Field};
+    let (m, v) = (ride.transform(), ride.chassis.cofg);
+    let acc = m.0[3].add(Vf::new(0.0, 0.0, 0.0, 1.0).bc(Field::X));
+    let acc = Vf::madd(acc, m.0[0], v.bc(Field::X));
+    let acc = Vf::madd(acc, m.0[1], v.bc(Field::Y));
+    v.merge(Dest::XYZ, Vf::madd(acc, m.0[2], v.bc(Field::Z)))
 }
 
 /// The wreck bike's part and the rider's wreck set off the disc (`tests/replay.rs`'s `the_ragdoll_kit`).
@@ -923,17 +939,18 @@ fn held(cap: &Rows, seed: [[u32; 3]; 2], ticks: &[Tick]) -> usize {
     held_in(cap, &states, &firsts, ticks[0].t, ticks.last().unwrap().t, |r| cap.state(r))
 }
 
-/// [`held`] on P2's chassis, velocity and centre.
+/// [`held`] on P2's chassis, velocity and centre. A row may also be read inside the next tick's
+/// integrate, after it rebuilt the centre from the transform and before it wrote the new one: the
+/// state's velocity with [`Tick::p2_rebuilt`] (S275: row 137829 is tick 137827's velocity and
+/// rebuilt centre to the bit, and from 137810 P2 parted there before).
 fn p2_held(cap: &Rows, seed: [[u32; 3]; 2], ticks: &[Tick]) -> usize {
     let states: Vec<[[u32; 3]; 2]> = std::iter::once(seed).chain(ticks.iter().map(|k| k.p2)).collect();
-    held_by(cap, &states, ticks[0].t, ticks.last().unwrap().t, |r| [cap.v3(r, "p2_ch_vel"), cap.v3(r, "p2_ch_centre")])
+    let inside: Vec<[[u32; 3]; 2]> = std::iter::once(seed).chain(ticks.iter().map(|k| [k.p2[0], k.p2_rebuilt])).collect();
+    held_in(cap, &states, &inside, ticks[0].t, ticks.last().unwrap().t, |r| [cap.v3(r, "p2_ch_vel"), cap.v3(r, "p2_ch_centre")])
 }
 
-fn held_by(cap: &Rows, states: &[[[u32; 3]; 2]], from: u32, last: u32, read: impl Fn(u32) -> [[u32; 3]; 2]) -> usize {
-    held_in(cap, states, states, from, last, read)
-}
-
-/// [`held_by`], where state `j`'s tick also stands at `firsts[j]` inside its frame.
+/// [`held`]'s rule on any states read off the rows by `read`, where state `j`'s tick also stands at
+/// `firsts[j]` inside its frame.
 fn held_in(
     cap: &Rows,
     states: &[[[u32; 3]; 2]],
@@ -1045,8 +1062,7 @@ fn p2_wrecked_from(cap: &Rows, t: u32, to: u32) -> Option<(u32, u32)> {
 /// port's state after 137855's step is row 137857's, the wreck's row. Pinned ([`JOUSTS`]): from
 /// 137845 P2 holds to the end, through the hit (P2's ray reaching 4.58 on the plane's hull, past the
 /// 50cc limit: rider_contact::wreck_contacts) and the wreck, and the plane to the end (F35: its rays
-/// strike P2's wreck bike's hull); from 137810 P2, standing, parts at 137827, and the plane holds to
-/// the end.
+/// strike P2's wreck bike's hull); from 137810 both to the end, P2 standing until the hit (S275).
 #[test]
 fn the_plane_jousts_p2_as_the_original() {
     let Some(cap) = capture() else { return };
@@ -1079,9 +1095,10 @@ fn the_plane_jousts_p2_as_the_original() {
 /// first tick holds on row 137911, read after that tick's first substep ([`held`], T8). From 137845
 /// the plane holds through the wreck (it parted on tick 137856 before F32), and since F35 to the end:
 /// it parted on tick 137863 (18), where its ray 33 strikes P2's wreck bike's hull (research/r31),
-/// which is in its world now. From 137810 it holds to the end too (53 before F35). Pinned on C25's
+/// which is in its world now. From 137810 it holds to the end too (53 before F35), and P2 with it
+/// (17 before S275: row 137829 was read inside 137828's integrate, [`p2_held`]). Pinned on C25's
 /// capture.
-const JOUSTS: [(u32, u32, usize, usize); 3] = [(137810, 137900, 90, 17), (137845, 137900, 55, 55), (137910, 138010, 100, 100)];
+const JOUSTS: [(u32, u32, usize, usize); 3] = [(137810, 137900, 90, 90), (137845, 137900, 55, 55), (137910, 138010, 100, 100)];
 
 /// The whole tape as images every 100 frames cut it: each stretch from its image to the next, and
 /// how many of its ticks hold (S272's pins). One parts: 137810's on the joust's hit (137853's step),
@@ -1802,7 +1819,7 @@ fn fly_pair(from: u32, to: u32, zero: u32, order: [usize; 2]) -> Option<(Pair, V
     })
 }
 
-/// How many of [`fly_pair`]'s ticks the capture confirms for plane `k`, by [`held_by`]'s rule, and the
+/// How many of [`fly_pair`]'s ticks the capture confirms for plane `k`, by [`held_in`]'s rule, and the
 /// rows it let through as read inside a frame's step. [`flight::substeps`] keeps no bodies for planes
 /// flown together, so such a row (C16's T8) cannot be matched bit for bit here: a row that is none of
 /// the port's states passes only when every axis lies between two successive states — the reached one
