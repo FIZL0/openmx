@@ -19,16 +19,24 @@
 //! ([`crate::atv_part`]'s sphere and box tests) with no contact; on anything else the ride filed (a
 //! vehicle's or a rider's sphere) the caller's to say, here nothing struck.
 //!
+//! A plant's sphere (F69): each species' parts are one collidable apiece, shared by all its plants.
+//! A sphere solid of the `.esb` ([`eco::SPHERE`]) is the sphere class with its point the solid's `at`
+//! (`w` 1), the identity frame and the solid's radius ([`plant_spheres`]). Each time the search asks
+//! a plant for it, it is stood at the plant ([`atv_plant::stand`]) and the probe's pair reads its
+//! centre, radius and radius squared: struck or not, no contact, as a sphere zone.
+//!
 //! Proved against the original's stand, gather and search on state 4 (`tests/mxvatv_bike_props.rs`).
 
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
 use crate::archive::Res;
 use crate::atv_part::{self, OrientedBox, Sphere};
+use crate::atv_plant::{self, Part, Stood};
+use crate::atv_sphere;
 use crate::atv_search::{self, Wheels};
 use crate::atv_world::{self, World, Zone};
 use crate::camera::CurveTable;
-use crate::eco::{Ecosystem, Trees};
+use crate::eco::{self, Ecosystem, Solid, Trees};
 use crate::phy::Ini;
 use crate::ray_probe::{self, RayProbe, Record};
 use crate::track::Scene;
@@ -46,6 +54,42 @@ pub struct PropWorld {
     /// The `.toy`'s trigger zones' collidables, and the zones in that order.
     pub zones: std::ops::Range<usize>,
     pub zone_shapes: Vec<Zone>,
+    /// The plants' sphere parts.
+    pub spheres: PlantSpheres,
+}
+
+/// The plants' parts as the stand reads them: the eco's unit (`+0xc4`, the plants' cell) and, by
+/// species in loaded order, its four scale words and its parts, a sphere where the solid is one.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PlantSpheres {
+    pub unit: F,
+    pub species: Vec<(atv_plant::Species, Vec<Option<atv_sphere::Sphere>>)>,
+}
+
+/// A sphere solid as its part is built: the point the solid's `at` (`w` 1), the identity frame, the
+/// radius and its square ([`atv_sphere::place`]). Any other kind is not a sphere.
+pub fn solid_sphere(s: &Solid) -> Option<atv_sphere::Sphere> {
+    if s.kind != eco::SPHERE {
+        return None;
+    }
+    let mut sphere = atv_sphere::Sphere { frame: atv_sphere::IDENTITY, ..atv_sphere::Sphere::default() };
+    atv_sphere::place(&mut sphere, Some(Vf::new(s.at[0].0, s.at[1].0, s.at[2].0, 1.0)), Some(s.radius));
+    Some(sphere)
+}
+
+/// `eco`'s species' sphere parts and scale words (lean: the usual and least height; size: the usual
+/// and widest width), the plants' cell `unit`.
+pub fn plant_spheres(eco: &Ecosystem, unit: F) -> PlantSpheres {
+    let species = eco
+        .species
+        .iter()
+        .flatten()
+        .map(|s| {
+            let scales = atv_plant::Species { lean: [s.height[0], s.height[1]], size: [s.width[0], s.width[2]] };
+            (scales, s.solids.iter().map(solid_sphere).collect())
+        })
+        .collect();
+    PlantSpheres { unit, species }
 }
 
 /// A sphere zone as the probe's pair reads it: its centre, its radius and the radius squared (`mul.s`).
@@ -93,7 +137,8 @@ pub fn build(res: &[u8], esb: &[u8], map: &str, probe: Collidable) -> Result<Pro
     for i in atv_world::start_zones(&scene) {
         world.file_again(world.meshes.start + i, &props.props[i], field.1);
     }
-    Ok(PropWorld { world, props: props.props, eco, trees, scene, zones, zone_shapes })
+    let spheres = plant_spheres(&eco, cell);
+    Ok(PropWorld { world, props: props.props, eco, trees, scene, zones, zone_shapes, spheres })
 }
 
 /// A ray probe's record: a contact list `per_ray` contacts a ray long, one contact per ray.
@@ -103,12 +148,17 @@ pub fn record(rays: usize, per_ray: usize) -> Record {
 
 /// One of the bike's ray probes against the prop world: the quad's narrow phase ([`Wheels`]) on the
 /// scene's meshes and the plants' parts (collidables `parts`), the zones (collidables `zones`, shapes
-/// `zone_shapes`) struck or not, nothing struck on anything else.
+/// `zone_shapes`) struck or not, a plant's sphere (stood at the plant, `spheres`) struck or not,
+/// nothing struck on anything else.
 pub struct Rays<'a> {
     pub wheels: Wheels<'a>,
     pub parts: std::ops::Range<usize>,
     pub zones: std::ops::Range<usize>,
     pub zone_shapes: &'a [Zone],
+    /// The species' sphere parts, as last stood.
+    pub spheres: PlantSpheres,
+    /// The part collidable last handed out, when it is a sphere: as the pair reads it.
+    pub stood: Option<(usize, Sphere)>,
 }
 
 impl Narrow for Rays<'_> {
@@ -123,10 +173,14 @@ impl Narrow for Rays<'_> {
     fn pair(&mut self, objects: &mut [Collidable], probe: usize, other: usize) -> bool {
         let w = &self.wheels;
         let mesh = (w.first_mesh..w.first_mesh + w.props.len()).contains(&other);
+        let p = RayProbe { transform: w.transform, root: w.rays.root, nodes: &w.rays.nodes, segments: &w.rays.segments };
+        if let Some((_, s)) = self.stood.filter(|&(o, _)| o == other && self.parts.contains(&other)) {
+            self.wheels.record.first = F::ONE;
+            return atv_part::sphere_reaches(&p, &s);
+        }
         if mesh || self.parts.contains(&other) {
             return self.wheels.pair(objects, probe, other);
         }
-        let p = RayProbe { transform: w.transform, root: w.rays.root, nodes: &w.rays.nodes, segments: &w.rays.segments };
         if self.zones.contains(&other) {
             let z = &self.zone_shapes[other - self.zones.start];
             self.wheels.record.first = F::ONE;
@@ -143,8 +197,25 @@ impl Narrow for Rays<'_> {
         self.wheels.parts(objects, group)
     }
 
+    /// The part, stood at the plant: a sphere wholly ([`atv_plant::stand`]); any other the quad's.
     fn part(&mut self, objects: &mut [Collidable], group: usize, i: usize) -> Option<usize> {
-        self.wheels.part(objects, group, i)
+        self.stood = None;
+        let slot = self.wheels.part(objects, group, i)?;
+        let plants = &self.wheels.plants;
+        let g = &plants.trees.groups()[group - plants.first_group];
+        let model = usize::from(plants.models[group - plants.first_group]);
+        let Some((species, parts)) = self.spheres.species.get_mut(model) else { return Some(slot) };
+        let Some(Some(sphere)) = parts.get_mut(i) else { return Some(slot) };
+        // No plant the port loads is hidden or turned (the eco's turns are none on Nat05).
+        let plant = atv_plant::Plant { position: g.cell, lean: g.height, size: g.blend, flags: 0, turn: Vf::ZERO };
+        let mut scales = [F::ZERO; 2];
+        match atv_plant::stand(&plant, species, self.spheres.unit, Some(Part::Sphere { sphere, scales: &mut scales }), None) {
+            Stood::Nothing => None,
+            _ => {
+                self.stood = Some((slot, Sphere { centre: sphere.centre, radius: sphere.radius, radius2: sphere.radius2 }));
+                Some(slot)
+            }
+        }
     }
 
     fn heard_hit(&mut self, _objects: &mut [Collidable], _listener: usize, _probe: usize, _other: usize) {}
