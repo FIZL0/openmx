@@ -3820,7 +3820,7 @@ impl Ride {
     /// [`crate::world::World::solid`] and [`crate::world::World::groups`], the heightfield rays against
     /// [`crate::world::World::ground`]), with the heightfield rays on as the last frame left
     /// [`Car::tipped`]. The pass's contacts refill [`Vehicle::held`] (none is ever with another record
-    /// or a mover on an MX Unleashed world), and its touch is [`Vehicle::touching`].
+    /// or a mover on an MX Unleashed world), and its touch is [`Vehicle::touching`] and [`State::touching`].
     pub fn record_on(&mut self, dt: F, world: &mut dyn crate::world::World) {
         let Some(r) = self.recorded.as_mut() else { return };
         r.record.heightfield = self.car.tipped;
@@ -3837,7 +3837,9 @@ impl Ride {
         if let Some(h) = self.vehicle.held.as_mut() {
             h.refill(&r.record.contacts);
         }
-        self.vehicle.touching = r.record.touching;
+        // The original reads the record's touching word in both: the vehicle's tipped wreck and the
+        // pieces' air control.
+        (self.vehicle.touching, self.state.touching) = (r.record.touching, r.record.touching);
     }
 
     /// One tick on an MX Unleashed world, its controls laid already: the collision record's pass
