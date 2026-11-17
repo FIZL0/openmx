@@ -6553,3 +6553,67 @@ fn a_wreck_entry_clears_the_riding_record_before_the_hit_loop() {
     assert_eq!((ee.u32_at(record + 0x40), ee.u32_at(record + 0x100)), (0, 0), "the record's touched flag and count after the entry");
 }
 
+
+// --- MD93e: Untamed's analogue preload, handed in from the controls --------------------------------
+
+/// The disc's 125 on `handling`, throttle pinned and the stick centred up [`FLIP_RAMP`], with
+/// [`Controls::preload`] at `preload` throughout. Answers, per tick, whether the lip held, whether
+/// the preload fired, and the preload's force.
+fn ride_the_preload(handling: game_sim::handling::Handling, preload: Option<F>) -> Option<(F, Vec<(bool, bool, Vf)>)> {
+    let tables = rider::Tables::build();
+    let (mut p, wheels) = the_disc_125(&tables)?;
+    p.handling = handling;
+    let mut r = Rider::new(&p, wheels, Vf::new(0.0, 2.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+    let (start, slope, length) = FLIP_RAMP;
+    let mut world = Jump { origin: Vf::new(0.0, 0.0, 0.0, 1.0), dir: Vf::new(0.0, 0.0, 1.0, 0.0), start, slope, length };
+    let c = Controls { gas: F::ONE, preload, ..Controls::default() };
+    let mut seen = Vec::new();
+    for _ in 0..300 {
+        r.frame(&p, &tables, &c, DT, &mut world);
+        let air = &r.ride.air;
+        let lip = air.on_ground
+            && r.ride.chassis.vel.y() > 5.0
+            && air.contact_vel.z() > 30.0
+            && r.ride.held.brake == F::ZERO;
+        seen.push((lip, air.preload_firing, air.preload_force));
+    }
+    Some((p.air.max_preload, seen))
+}
+
+/// MD93e: on Untamed's handling a bound preload axis pushed home fires the preload as the lip
+/// arrives, at the full `MaxPreload`, with the stick centred (SLUS-21701's analogue preload,
+/// `handling::untamed::preload`, its axis now handed in from the ride). Unbound, as Untamed ships,
+/// or pushed no further than its dead zone, the centred stick never fires it; and the original's
+/// handling does not read the axis at all. Skips without the disc.
+#[test]
+fn an_untamed_bike_fires_its_bound_analogue_preload_on_the_lip() {
+    use game_sim::handling::Handling;
+    let Some((max, bound)) = ride_the_preload(Handling::Untamed, Some(F::ONE)) else { return };
+    assert!(max > F::ZERO, "the disc's 125 has no MaxPreload");
+    let lip = bound.iter().position(|t| t.0).expect("the ramp never held the lip");
+    let fired = bound.iter().position(|t| t.1).expect("the bound preload never fired");
+    // The lip here is read off the end of the tick and the preload off the substep before, so the
+    // fire can be one tick behind the first lip row; it stays on the lip.
+    assert!(bound[fired].0 && (lip..=lip + 1).contains(&fired), "the bound preload fired at tick {fired}, the lip came at {lip}");
+    assert_eq!(bound[fired].2.y().to_bits(), max.0.to_bits(), "the preload's force is not MaxPreload");
+
+    let fires = |h: Handling, axis: Option<F>| ride_the_preload(h, axis).unwrap().1.iter().any(|t| t.1);
+    assert!(!fires(Handling::Untamed, None), "an unbound preload fired off a centred stick");
+    assert!(!fires(Handling::Untamed, Some(F(0.001))), "the preload fired inside its dead zone");
+    assert!(!fires(Handling::Original, Some(F::ONE)), "the original's handling read Untamed's preload axis");
+}
+
+/// MD93e: the pad read leaves Untamed's preload unbound (MX Unleashed has no such command, and
+/// Untamed ships with nothing bound to it), and [`Controls::with_preload`] binds an axis, read
+/// through the range it is given.
+#[test]
+fn the_pad_read_leaves_the_preload_unbound_until_one_is_bound() {
+    use game_sim::input::{Axis, AxisRange, Pad};
+    let pad = Pad::new(0);
+    let c = Controls::from_pad(&pad);
+    assert_eq!(c.preload, None);
+    let range = AxisRange::PLAYER;
+    let bound = c.with_preload(&pad, Some(Axis::RightY), &range);
+    assert_eq!(bound.preload.map(|v| v.0.to_bits()), Some(pad.axis_through(Axis::RightY, &range).0.to_bits()));
+    assert_eq!(bound.with_preload(&pad, None, &range).preload, None);
+}
