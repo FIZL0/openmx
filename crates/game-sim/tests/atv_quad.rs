@@ -2195,13 +2195,18 @@ fn the_quads_tire_reader_is_the_originals() {
 
 /// The quad in each of MD37a's RAM images, and the files its `.phy` may be: the `r` images ride the
 /// `atv_` quad, the `s` ones the `atv_s_` (MD37a's poke), each a Race or a Pro, A or P.
-const QUAD_IMAGES: [(&str, u32, &str); 6] = [
+const QUAD_IMAGES: [(&str, u32, &str); 10] = [
     ("atv-r-spawn", 0x015e_0690, "atv_"),
     ("atv-r-air", 0x015e_0690, "atv_"),
     ("atv-r-spawn-late", 0x015e_0690, "atv_"),
     ("atv-s-spawn", 0x015e_0b90, "atv_s_"),
     ("atv-s-air", 0x015e_0b90, "atv_s_"),
     ("atv-s-spawn-late", 0x015e_0b90, "atv_s_"),
+    // C28's re-made states (2026-11-05), the quad on a new heap: the ones kept since MD37a's were lost.
+    ("c28-atv-r-spawn", 0x0150_a990, "atv_"),
+    ("c28-atv-r-air", 0x0150_a990, "atv_"),
+    ("c28-atv-s-spawn", 0x0150_a990, "atv_s_"),
+    ("c28-atv-s-air", 0x0150_a990, "atv_s_"),
 ];
 const QUAD_FILES: [&str; 4] = ["race250a", "race250p", "pro250a", "pro250p"];
 
