@@ -220,6 +220,99 @@ fn reads(before: &Row, row: &Row, tick: &Row) -> bool {
         && (o[0x14ec / 4] & 4 != 0) == (held("r1") && up)
 }
 
+/// The tape C15's capture `name` rode.
+fn tape_of(name: &str) -> &'static str {
+    if name.starts_with("flip") { "flip" } else { "ride" }
+}
+
+/// **F31 — the reader's words off a tape tick**: what the pad reader stores for `tick` (C15's tapes
+/// hold cross, square, R1 and a left stick at -1, 0 or 1, nothing else), the bike `up` (not wrecked)
+/// as the frame before left it. Gas cross (0 while wrecked), brake square, the stick as it is, the
+/// stick's way in +0x14c8 (up 1, down 2, left 3, right 4) and the trick byte's bits (left 0x10, right
+/// 0x20, up 0x40, down 0x80, R1 4 while up; its upper three bytes the image's), +0x14d4 the riding
+/// flag; the d-pad, the spin hold, clutch, reverse and +0x17ac 0. The one word not from the tape: the
+/// flip hold +0x12b0, the pad record's entry `0x21` as the reader copies it (−992.97 on MD164's
+/// Untamed rows, 992.97 here, unexplained), is `hold`, the row's.
+fn tape_words(tick: &Row, up: bool, trick_hi: u32, hold: u32) -> Vec<(u32, u32)> {
+    let held = |k: &str| tick["buttons"].split(' ').any(|x| x == k);
+    let stick = |k: &str| {
+        let v: f32 = tick[k].parse().unwrap();
+        assert!(v == -1.0 || v == 0.0 || v == 1.0, "C15's tapes hold the stick at -1, 0 or 1: {k} {v}");
+        v
+    };
+    for b in tick["buttons"].split(' ').filter(|b| !b.is_empty()) {
+        assert!(["cross", "square", "r1"].contains(&b), "C15's tapes press cross, square and R1 only: {b}");
+    }
+    assert_eq!((stick("rx"), stick("ry")), (0.0, 0.0), "C15's tapes leave the right stick alone");
+    let (lx, ly) = (stick("lx"), stick("ly"));
+    let lever = |on: bool| if on { 1.0f32.to_bits() } else { 0 };
+    let way = if ly < 0.0 {
+        1
+    } else if ly > 0.0 {
+        2
+    } else if lx < 0.0 {
+        3
+    } else if lx > 0.0 {
+        4
+    } else {
+        0
+    };
+    let mut bits = 0;
+    for (on, b) in [(lx < 0.0, 0x10), (lx > 0.0, 0x20), (ly < 0.0, 0x40), (ly > 0.0, 0x80), (held("r1") && up, 4)] {
+        if on {
+            bits |= b;
+        }
+    }
+    vec![
+        (0x310, lever(held("square"))),
+        (0x314, lever(held("cross") && up)),
+        (0x12a0, 0),
+        (0x12a4, 0),
+        (0x12a8, lx.to_bits()),
+        (0x12ac, ly.to_bits()),
+        (0x12b0, hold),
+        (0x12b4, 0),
+        (0x12c0, 0),
+        (0x12c4, 0),
+        (0x14c8, way),
+        (0x14d4, u32::from(up)),
+        (0x14ec, trick_hi & !0xff | bits),
+        (0x17ac, 0),
+    ]
+}
+
+/// Pokes [`tape_words`] into the bike: tick `tick`, the wreck state the bike's own, the flip hold
+/// `row`'s.
+fn feed_tape(ee: &mut Ee, tick: &Row, row: &Row, up: bool) {
+    let hold = obj(row)[0x12b0 / 4];
+    for (at, w) in tape_words(tick, up, ee.u32_at(BIKE + 0x14ec), hold) {
+        ee.set_u32(BIKE + at, w);
+    }
+}
+
+/// **F31**: [`tape_words`] are the reader's words of every row past the first, word for word, on
+/// both captures (tick t on row t + 1, the wreck state row t's), and cover every word [`READER`] pokes.
+#[test]
+fn the_tape_gives_every_reader_word() {
+    let mut covered: Vec<u32> = tape_words(&[("buttons", ""), ("lx", "0"), ("ly", "0"), ("rx", "0"), ("ry", "0")].iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(), true, 0, 0)
+        .iter()
+        .map(|w| w.0)
+        .collect();
+    covered.sort();
+    let mut want: Vec<u32> = READER.iter().flat_map(|&(at, len)| (0..len / 4).map(move |i| at + 4 * i)).collect();
+    want.sort();
+    assert_eq!(covered, want, "the tape's words are READER's");
+    for name in ["ride-2", "flip-1"] {
+        let (Some(rows), Some(ticks)) = (rows(name), ticks(tape_of(name))) else { return };
+        for r in 1..rows.len() {
+            let o = obj(&rows[r]);
+            let got = tape_words(&ticks[r - 1], !row_wrecked(&rows[r - 1]), o[0x14ec / 4], o[0x12b0 / 4]);
+            let bad: Vec<String> = got.iter().filter(|&&(at, w)| o[at as usize / 4] != w).map(|&(at, w)| format!("+{at:#x}: {w:#x}, the row {:#x}", o[at as usize / 4])).collect();
+            assert!(bad.is_empty(), "{name} row {r}: {}", bad.join(", "));
+        }
+    }
+}
+
 /// Tape tick t is read on row t + 1, and not on row t.
 #[test]
 fn ticks_land_one_row_later() {
@@ -10637,9 +10730,27 @@ fn replay_pure(name: &str, rust: &[&'static str]) -> Option<(Vec<bool>, BTreeMap
     let rows = rows(name)?;
     let dt = F(f32::from_bits(DT));
     let (mut out, mut all, mut off) = (Vec::new(), BTreeMap::<String, u32>::new(), Vec::<String>::new());
+    // F31: `"tape"` feeds the reader's words off the tape's ticks ([`feed_tape`]) instead of the rows,
+    // the wreck state the reader sees the second run's own.
+    let tape = if rust.contains(&"tape") { Some(ticks(tape_of(name))?) } else { None };
     for (r, row) in rows.iter().enumerate() {
-        poke(&mut a, row, &READER);
-        poke(&mut b, row, &READER);
+        match &tape {
+            // Row 0 reads the tick before the tape: the image holds its words already.
+            Some(_) if r == 0 => {
+                let o = obj(row);
+                let bad: Vec<u32> = READER.iter().flat_map(|&(at, len)| (0..len / 4).map(move |i| at + 4 * i)).filter(|&at| b.u32_at(BIKE + at) != o[at as usize / 4]).collect();
+                assert!(bad.is_empty(), "{name}: the image's reader words are not row 0's at {bad:#x?}");
+            }
+            Some(ticks) => {
+                let up = !wrecked(|o| b.u32_at(BIKE + o));
+                feed_tape(&mut a, &ticks[r - 1], row, up);
+                feed_tape(&mut b, &ticks[r - 1], row, up);
+            }
+            None => {
+                poke(&mut a, row, &READER);
+                poke(&mut b, row, &READER);
+            }
+        }
         // F31b5m: with the other listeners dropped, the second run's frame reads no byte where the
         // two RAMs differ going into it.
         // F31b5o: so too with the frame post's tells dropped.
@@ -10847,7 +10958,8 @@ fn flip_replays_with_every_port_at_once() {
 /// the camera controller on the port's and the other listeners dropped (F67). Each row is C15's word for word, the bike and its blocks
 /// the handing run's, and the frame reads no byte where the RAM parts from it. Answers the wreck
 /// state per row, where the RAM parts, the interpreter's census by part, and every instruction the
-/// interpreter ran in the second run's frames ([`FRAME_RAN`]).
+/// interpreter ran in the second run's frames ([`FRAME_RAN`]). F31: fed off the tape's ticks
+/// ([`feed_tape`]): the reader's words but the flip hold, and the wreck state it sees, are not the rows'.
 fn replay_in_pure_rust(name: &str) -> Option<(Vec<bool>, Vec<String>, BTreeMap<String, u64>, u64)> {
     INTERPRETED.with(|m| m.borrow_mut().clear());
     FRAME_RAN.with(|n| n.set(0));
@@ -10880,6 +10992,7 @@ fn replay_in_pure_rust(name: &str) -> Option<(Vec<bool>, Vec<String>, BTreeMap<S
             "wreck post",
             "wreck camera",
             "wreck listeners dropped",
+            "tape",
         ],
     );
     let census = INTERPRETED.with(|m| std::mem::take(&mut *m.borrow_mut()));
@@ -10891,7 +11004,7 @@ fn replay_in_pure_rust(name: &str) -> Option<(Vec<bool>, Vec<String>, BTreeMap<S
 }
 
 /// **F31b5 — C15's ride, the whole frame in Rust**: ride-2 bit-exact on all 459 rows with the
-/// interpreter running no instruction of any frame.
+/// interpreter running no instruction of any frame; F31: fed off the ride tape.
 #[test]
 fn ride_replays_in_pure_rust() {
     let Some((w, _off, census, total)) = replay_in_pure_rust("ride-2") else { return };
@@ -10901,7 +11014,8 @@ fn ride_replays_in_pure_rust() {
 }
 
 /// **F31b5 — C15's flip, the whole frame in Rust**: flip-1 bit-exact on all 465 rows, wrecked on row
-/// 125 and put back on row 193, with the interpreter running no instruction of any frame.
+/// 125 and put back on row 193, with the interpreter running no instruction of any frame; F31: fed
+/// off the flip tape.
 #[test]
 fn flip_replays_in_pure_rust() {
     let Some((w, _off, census, total)) = replay_in_pure_rust("flip-1") else { return };
