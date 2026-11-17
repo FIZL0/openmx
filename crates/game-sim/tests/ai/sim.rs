@@ -642,8 +642,6 @@ fn s12e_the_joined_tick_is_the_originals_on_free09() {
                     ignore: &ignore,
                     off_path: None,
                 }),
-                jump: None,
-                node: None,
                 spot: None,
                 tricks: None,
                 race_state: None,
