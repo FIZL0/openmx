@@ -602,3 +602,98 @@ fn a_bailed_trick_enters_the_wreck_from_the_clip_as_the_originals() {
     let (at, moving) = gap(&entry(&|r: &Row| drawn_nodes(if r.frame == last.frame { row } else { last }), &|_| Mat4::IDENTITY));
     assert!(at > 0.5 && moving > 10.0, "a tick late the starts would be {at} ft, {moving} ft/s off");
 }
+
+/// A matrix's 16 lanes as bits.
+fn bits(m: &Mat4) -> [[u32; 4]; 4] {
+    m.0.map(|r| r.0.map(f32::to_bits))
+}
+
+/// **The part records' drawn matrices, and the trick exits' starts from them** (S261). The writer
+/// of each part record's drawn matrix (`+0x60`, its translation `+0x90`) is the rider physics
+/// update's first call, the body's vt `+0xb0`: every part's node's world rows copied in, on every
+/// tick, after the body's mode (and so the riding entry's pose) has run and before the animation
+/// writes the tick's nodes. So on each tick the record holds the node as the tick before left it,
+/// and the riding entry out of a trick (tick E) reads the node as E−1 left it against the record
+/// copied on E−1: the node as E−2 left it.
+///
+/// This holds the records to the nodes of the row before on every tick of recording2, then each
+/// of the five trick exits' starts (`start{i}`, position and velocity) to the port's pose
+/// ([`Down::entry_starts`], the arithmetic [`Riding`]'s entry runs) bit for bit: from the
+/// original's nodes and its own records, and from the original's nodes with the drawn matrices
+/// rebuilt from them as the port keeps them ([`ragdoll_ride::drawn`]). From the skeleton composed
+/// off the captured joints (the port's skeleton, under the bike) they are within the composition's
+/// ulps.
+///
+/// [`Down::entry_starts`]: game_sim::ragdoll_ride::Down::entry_starts
+/// [`ragdoll_ride::drawn`]: game_sim::ragdoll_ride::drawn
+#[test]
+fn a_trick_exit_starts_the_bones_from_the_part_records_as_the_originals() {
+    use game_sim::ragdoll_ride::{self, Down};
+    let Some((kit, nodes)) = ride_kit() else { return };
+    let Some(rows) = capture_in("s257", "recording2-parts") else { return };
+    let skel = Skeleton::read(rows.iter().find(|r| r.mode() == HELD).expect("a held tick"));
+    let record = |r: &Row, i: usize| r.mat(&format!("prec{i}"), 0x60);
+
+    // The writer: every record is its node as the row before left it. A held tick's repose writes
+    // the records again after the copy (S201), and a row the recorder read a tick early or late
+    // (a repeat, or one next to a gap: S261's journal) leaves the next row's record matching no row
+    // or the one two back.
+    let (mut ticks, mut posed, mut missed) = (0, 0, Vec::new());
+    for k in 1..rows.len() {
+        let (row, before) = (&rows[k], &rows[k - 1]);
+        if row.frame != before.frame + 1 || row.mode() == HELD {
+            continue;
+        }
+        ticks += 1;
+        posed += usize::from(row.mode() == POSED);
+        if nodes.iter().enumerate().any(|(i, &j)| bits(&record(row, i)) != bits(&before.world(j))) {
+            missed.push(row.frame);
+        }
+    }
+    println!("records: {ticks} ticks ({posed} posed), {} not the row before's nodes: {missed:?}", missed.len());
+    assert!(ticks > 1600 && posed > 360, "{ticks} ticks, {posed} posed");
+    assert!(missed.len() * 100 < ticks, "{} of {ticks} records are not the row before's nodes: {missed:?}", missed.len());
+
+    // The exits: riding after posed.
+    let exits: Vec<usize> = (2..rows.len())
+        .filter(|&k| rows[k].mode() == RIDING && rows[k - 1].mode() == POSED && rows[k - 1].frame + 1 == rows[k].frame && rows[k - 2].frame + 1 == rows[k - 1].frame)
+        .collect();
+    assert_eq!(exits.iter().map(|&k| rows[k].frame).collect::<Vec<_>>(), [2595, 2698, 3388, 3813, 3981], "recording2's five trick exits");
+    let as_bone = |m: Mat4| Bone { at: m.0[3], forward: m.0[2], up: m.0[1] };
+    for &e in &exits {
+        let (row, last, prev) = (&rows[e], &rows[e - 1], &rows[e - 2]);
+        assert!(!missed.contains(&row.frame) && !missed.contains(&last.frame), "exit {}: a row read off its tick", row.frame);
+        let dt = F(row.float("dt", 0));
+        let theirs: Vec<(Vf, Vf)> = (0..nodes.len()).map(|i| (row.quad(&format!("start{i}"), 0), row.quad(&format!("start{i}"), 0x10))).collect();
+        let same = |ours: &[game_sim::ragdoll_pose::Start], how: &str| {
+            for (i, (o, (p, v))) in ours.iter().zip(&theirs).enumerate() {
+                assert_eq!(o.position.0.map(f32::to_bits)[..3], p.0.map(f32::to_bits)[..3], "exit {} {how}: part {i}'s start position", row.frame);
+                assert_eq!(o.velocity.0.map(f32::to_bits)[..3], v.0.map(f32::to_bits)[..3], "exit {} {how}: part {i}'s start velocity", row.frame);
+            }
+        };
+        let now: Vec<Bone> = nodes.iter().map(|&j| as_bone(last.world(j))).collect();
+        // The records the entry read are the ones E−1 copied: the nodes as E−2 left them.
+        let records: Vec<Mat4> = (0..nodes.len()).map(|i| record(last, i)).collect();
+        same(&Down::entry_starts(&kit, &now, Some(&records), dt), "from the records");
+        let rebuilt = ragdoll_ride::drawn(&nodes.iter().map(|&j| as_bone(prev.world(j))).collect::<Vec<_>>());
+        same(&Down::entry_starts(&kit, &now, Some(&rebuilt), dt), "from the rebuilt drawn matrices");
+
+        // From the skeleton composed off the captured joints, under the bike's node.
+        let composed = |r: &Row| {
+            let world = skel.world(r);
+            let posed = Posed { bones: nodes.iter().map(|&j| under(&world[j], &r.bike())).collect(), rests: Vec::new() };
+            ragdoll_ride::nodes(&kit, Some(&posed), &r.bike())
+        };
+        let ours = Down::entry_starts(&kit, &composed(last), Some(&ragdoll_ride::drawn(&composed(prev))), dt);
+        let (mut at, mut moving) = (0f32, 0f32);
+        for (o, (p, v)) in ours.iter().zip(&theirs) {
+            for l in 0..3 {
+                at = at.max((o.position[l] - p[l]).abs());
+                moving = moving.max((o.velocity[l] - v[l]).abs());
+            }
+        }
+        println!("exit {}: bit for bit from the original's nodes; from the composed skeleton {at} ft, {moving} ft/s off", row.frame);
+        // About 4000 ft out, 7 ulps of position.
+        assert!(at < 5e-3 && moving < 0.1, "exit {}: from the composed skeleton the starts are {at} ft, {moving} ft/s off", row.frame);
+    }
+}
