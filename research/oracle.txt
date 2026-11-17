@@ -1137,6 +1137,13 @@ score_machine_zones_end     boot 0x00264520 the pc after the zone list
 # sx01). It is the AI follower's net: ai+0xdc = act+0xbc in a racing image (s282c-sx01-race). The
 # avoidance's edge asks the race's own file instead (ai+0xd8 = act+0x50, its +0x68 = act+0xb8,
 # sx01.tdf, at card +0x88/+0x8c). A drop-in branch of 0x003a24f0 writes ai+0xdc = act+0xb8.
+# S339: 0x003a24f0 is MachineRace's add-player (vtable 0x0045d2b0, ctor 0x003a21b0 "MachineRace",
+#   made by 0x0021b880). For an interface with +0x34 == 2 and +0x6c0 == 1 it adds a card (0x80008)
+#   and writes the MXVehicleAIInterface's brain +0xd8 = act+0x50, +0xd4 = the card, +0xdc = act+0xb8
+#   (the race file; the freestyle archives' only one is <track>mr1.tdf). An ELF scan for a +0xdc
+#   store just after an act+0xb8/+0xbc load finds only this one; the race load's act+0xbc -> ai+0xdc
+#   copy goes some other way and was not found. Free-ride images (C33, recording2) have +0xdc 0, so
+#   a free-ride brain likely meets a net only in a machine race; no image of one, brain mode unread.
 # The .wpt files are not the path: 0x0034a660 reads a count and 0x20-byte records off one, and
 # 0x003a2e90 / 0x003a39d0 read a count list off another (unidentified; S282c).
 track_ctor                  boot 0x002693c0 (track) the track object (the score manager's +0x68 =

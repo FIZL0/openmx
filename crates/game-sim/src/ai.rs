@@ -3076,6 +3076,10 @@ pub mod seek {
         pub facing: Vf,
         /// The learnt count, 0..100.
         pub learnt: F,
+        /// Its place on the brain's AI path net (path 0 until found): the setup leg's is the path
+        /// branch's goal ([`super::follow::Goal`]), looked for once and kept on the jump, which
+        /// every rider shares.
+        pub spot: crate::race::Spot,
     }
 
     /// A target's jump: the original's record of three legs, 0x60 bytes apart.
@@ -3608,6 +3612,7 @@ pub mod seek {
             velocity: s.vector("TargetVelocity", zero),
             learnt: s.float_or("TargetPreload", F::ZERO),
             aim: s.vector("TargetPosition", zero),
+            spot: crate::race::Spot::default(),
         }
     }
 
@@ -3986,7 +3991,7 @@ pub mod seek {
 ///
 /// The race path follower itself (the original's ai_tick_flag with no seeker state and a path net:
 /// the path's look-ahead, the route follower's wobble and drift, the hand-over to the seeker when
-/// the path runs out) is not ported yet; see S282b's journal.
+/// the path runs out) is [`path`] (S309); [`super::Racer::path_branch`] joins it into the tick (S339).
 pub mod follow {
     use super::{add, scale, sub, unit};
     use crate::race::{Spot, TrackPaths, path_flags, ring_holds};
@@ -5014,9 +5019,9 @@ pub struct Told {
     /// What the generic avoidance did, when it ran.
     pub vehicle: Option<VehiclePass>,
     /// Steps the tick reached that the port has not got, in order: `"path"` (the path follower after
-    /// the seeker), `"vehicle avoid"` (the generic avoidance with no [`Around::vehicle`]), `"fly"` (the
-    /// flying interfaces' controller), `"mode two"` and `"mode four"` (a driving brain with no
-    /// [`Around::racing`]), and `"speed step"` (the drivers' speed step under [`drive::SLOWS`], which
+    /// the seeker, with no net in [`Around::racing`]), `"vehicle avoid"` (the generic avoidance with no
+    /// [`Around::vehicle`]), `"fly"` (the flying interfaces' controller), `"mode two"` and `"mode four"`
+    /// (a driving brain with no [`Around::racing`]), and `"speed step"` (the drivers' speed step under [`drive::SLOWS`], which
     /// leaves the target speed as it is).
     pub missing: Vec<&'static str>,
 }
@@ -5072,8 +5077,13 @@ impl Steps for Join<'_, '_> {
             seek::Seek::Still => return true,
             seek::Seek::Lost => return false,
             seek::Seek::Path => {
-                self.told.missing.push("path");
-                return true;
+                // The brain's AI net (its +0xdc) is the one the race driver reads.
+                let race_word = a.racing.as_ref().and_then(|g| g.race_word);
+                let Some(net) = a.racing.as_mut().and_then(|g| g.net.as_deref_mut()) else {
+                    self.told.missing.push("path");
+                    return true;
+                };
+                r.path_branch(b, net, a.seek_world, race_word, self.rng, dt);
             }
             seek::Seek::Steered => {}
         }
@@ -5523,6 +5533,28 @@ impl Racer {
         told.answer = answer;
         self.brain = brain;
         told
+    }
+
+    /// **The tick's path branch** (S339, [`seek::Seek::Path`]: the seeker has no state and the brain an
+    /// AI net), as [`Racer::tick`] runs it before the route's tail: [`follow::path`] on the brain's
+    /// follower words (the shared ones put in from their homes and taken back after), on `net`, with
+    /// the seeker's target jump's setup leg in `world` as its goal (none without a jump), whose spot
+    /// it keeps on the leg. `race_word` is the race's word the side step reads (`None` with no race).
+    #[allow(clippy::too_many_arguments)]
+    pub fn path_branch(
+        &mut self, b: &mut Brain, net: &mut crate::race::TrackPaths, world: &mut seek::World, race_word: Option<u32>,
+        rng: &mut Rng, dt: F,
+    ) {
+        let jump = self.seeker.jump;
+        let mut goal = jump.map(|j| {
+            let leg = &world.jumps[j].setup;
+            follow::Goal { point: leg.point, spot: leg.spot }
+        });
+        follow::path(Join::follower(self, b), net, dt, goal.as_mut(), race_word, rng);
+        Join::follower_back(self, b);
+        if let (Some(j), Some(g)) = (jump, goal) {
+            world.jumps[j].setup.spot = g.spot;
+        }
     }
 
     /// The brain's mode driver alone, joined as [`Racer::tick`] joins it inside the base update:
