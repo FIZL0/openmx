@@ -515,7 +515,7 @@ fn hold_yaw_rate(rates: &mut Vf, limit: F) {
 /// gives the same for any normal positive limit; they part on a denormal or negative one.
 #[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's `c.ole.s` branched on false
 pub fn hold_yaw_rate_untamed(rates: &mut Vf, limit: F) {
-    // The compares read a denormal as 0 (`F`'s order is plain IEEE); the stores keep the bits.
+    // The compares read a denormal as 0 (as `F`'s do since F64); the stores keep the bits.
     let (y, l) = (F::from_bits(rates.y().to_bits()), F::from_bits(limit.to_bits()));
     if !(y <= l) {
         rates.0[1] = limit.0;
