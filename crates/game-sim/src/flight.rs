@@ -242,6 +242,30 @@ pub struct MxvatvRecord {
     pub rays: Vec<[Vf; 2]>,
 }
 
+impl MxvatvRecord {
+    /// **The record's clear and pass** (MD110), before the world steps: [`crate::handling::record::clear`]
+    /// and [`crate::handling::record::pass`] on `body` with `matrix` the vehicle's scene node (the
+    /// measure's matrix, which a sweep's push moves), the heightfield rays on `terrain` (none, no
+    /// heightfield rays), and the contacts filed into the list the force listener resolves
+    /// ([`crate::atv_contact::Held::refill`]). The plane's ([`Flight`]) and, since MD115, the Kiowa's
+    /// ([`crate::kiowa::OnMxvatv`]).
+    pub fn pass(&mut self, b: &mut biplane::Body, matrix: &mut [Vf; 4], terrain: Option<crate::atv_ground::Terrain<'_>>, dt: F) {
+        self.record.terrain = terrain.is_some();
+        let mut on = RecordOnPlane { matrix, terrain, rays: &self.rays, damped: None, nobody: Default::default() };
+        crate::handling::record::clear(&mut self.record, &mut on);
+        let mut view = crate::quad::Body { orientation: b.quat, position: b.position, velocity: b.velocity, ..Default::default() };
+        let body = if self.record.body { Some(&mut view) } else { None };
+        // `me` names the record to another one's contact: no other record is in the port's worlds.
+        crate::handling::record::pass(&mut self.record, 1, body, dt, &mut on);
+        if let Some((linear, angular)) = on.damped {
+            (b.damping, b.ang_damping) = (linear, angular);
+        }
+        b.position = view.position;
+        // A contact is never with another record or a mover here, so the refill always holds.
+        self.held.refill(&self.record.contacts);
+    }
+}
+
 /// The record's outside on the plane ([`crate::handling::record::Collides`]): the node is the plane
 /// matrix, the heightfield rays ask the world's SLUS-21104 terrain ([`crate::handling::ground::under`]
 /// within its box). SLUS-21104's props are not in the port's worlds, so the part's search and the
@@ -1218,23 +1242,7 @@ impl Flight {
     /// contacts filed into the list the force listener resolves ([`crate::atv_contact::Held::refill`]).
     fn pass_mxvatv(&mut self, dt: F, world: &mut dyn world::World) {
         let Some(r) = self.record_mxvatv.as_mut() else { return };
-        let terrain = world.mxvatv_terrain();
-        r.record.terrain = terrain.is_some();
-        let mut matrix = self.measure.matrix.0;
-        let mut on = RecordOnPlane { matrix: &mut matrix, terrain, rays: &r.rays, damped: None, nobody: Default::default() };
-        crate::handling::record::clear(&mut r.record, &mut on);
-        let b = &mut self.body;
-        let mut view = crate::quad::Body { orientation: b.quat, position: b.position, velocity: b.velocity, ..Default::default() };
-        let body = if r.record.body { Some(&mut view) } else { None };
-        // `me` names the record to another one's contact: no other record is in the port's worlds.
-        crate::handling::record::pass(&mut r.record, 1, body, dt, &mut on);
-        if let Some((linear, angular)) = on.damped {
-            (b.damping, b.ang_damping) = (linear, angular);
-        }
-        b.position = view.position;
-        self.measure.matrix.0 = matrix;
-        // A contact is never with another record or a mover here, so the refill always holds.
-        r.held.refill(&r.record.contacts);
+        r.pass(&mut self.body, &mut self.measure.matrix.0, world.mxvatv_terrain(), dt);
     }
 
     /// The preforce listener.
