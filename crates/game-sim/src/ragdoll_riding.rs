@@ -408,7 +408,10 @@ impl Sources {
 /// The riding entry out of a trick (S257) reads `entry` too: the clip's nodes as the last posed tick
 /// drew them, each moving by its node's move over that tick (`before`, the drawn matrices from the
 /// tick before it, which the original's part records keep at the node all through a posed run).
-/// That is how the original starts its bones on recording2's five trick exits.
+/// That is how the original starts its bones on recording2's five trick exits, bit for bit from its
+/// nodes (S261): its physics update copies every part's node into the part record each tick, after
+/// the body's mode (and so this entry) has run, so the entry reads the node as the tick before the
+/// last left it.
 ///
 /// The riding entry after a put-back (S201) reads `entry` instead: the nodes as the last held tick
 /// left them, since the entry poses before this tick's animation moves them. Its drawn matrices are
