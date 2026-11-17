@@ -1,4 +1,4 @@
-# 1 — stock engine braking (PART)
+# 1 — stock engine braking
 
 Task S351. 2026-11-17.
 
