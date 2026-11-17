@@ -370,7 +370,8 @@ fn the_touch_pad_rides_on_a_phone() {
 /// WebGPU at the phone's whole canvas (P205), each on this machine's GPU
 /// (chromium's own Vulkan, not SwiftShader). Each must draw on the API asked for — not fall back to
 /// the software picture — show a frame that is not black, and ride at 30 pictures a second or more,
-/// as the worker counts them; what each rode at is printed. Each must also start one of the disc's
+/// as the worker counts them; what each rode at is printed, with the GPU's other users in that
+/// window, and a case under 30 rides once more before it fails (K41). Each must also start one of the disc's
 /// songs, which the page's console says. The module is `tools/web.sh --check`'s,
 /// served as the page's pkg/. Skips without the disc, node or chromium.
 #[test]
@@ -399,10 +400,12 @@ fn the_browser_rides_on_the_gpu() {
     // pixels to one (P223, opentennis's B547: 1688×780) — not the software picture's 640×448 cap —
     // with the phone's defaults.
     let phone = "844,390,3";
-    for (query, api, viewport) in [("", "webgpu", ""), ("webgl2", "webgl2", ""), ("", "webgpu", phone)] {
-        let api_seen = if viewport.is_empty() { api.to_string() } else { format!("{api} on a phone") };
+    // One ride of a case: its median pictures a second, and its text for a failure's message.
+    let ride = |query: &str, api: &str, viewport: &str, api_seen: &str| -> (f64, String) {
         let scratch = std::env::temp_dir().join(format!("openmx-web-gpu-{}-{api}{}", std::process::id(), if viewport.is_empty() { "" } else { "-phone" }));
         let _ = std::fs::remove_dir_all(&scratch);
+        let before = gpu_users();
+        let started = std::time::Instant::now();
         let run = Command::new("node")
             .arg(&drive)
             .arg(repo().join("web"))
@@ -416,6 +419,7 @@ fn the_browser_rides_on_the_gpu() {
             .env("OPENMX_GPU_PHONE", viewport)
             .output()
             .expect("run node");
+        let others = gpu_share(&before, &gpu_users(), started.elapsed());
         let _ = std::fs::remove_dir_all(&scratch);
         let text = String::from_utf8_lossy(&run.stdout).into_owned();
         assert!(run.status.success(), "gpu.mjs ({api}) failed:\n{}{text}", String::from_utf8_lossy(&run.stderr));
@@ -438,9 +442,79 @@ fn the_browser_rides_on_the_gpu() {
         assert!(!fps.is_empty(), "{api}: no pictures a second counted:\n{text}");
         fps.sort_by(f64::total_cmp);
         let median = fps[fps.len() / 2];
-        println!("{api_seen}: {median} fps (median of {:?}), {lit} of {pixels} pixels lit", fps);
-        assert!(median >= 30.0, "{api_seen} rides at {median} fps, under 30:\n{text}");
+        println!("{api_seen}: {median} fps (median of {:?}), {lit} of {pixels} pixels lit; the GPU's other users: {others}", fps);
+        (median, format!("{text}the GPU's other users in that ride: {others}"))
+    };
+    for (query, api, viewport) in [("", "webgpu", ""), ("webgl2", "webgl2", ""), ("", "webgpu", phone)] {
+        let api_seen = if viewport.is_empty() { api.to_string() } else { format!("{api} on a phone") };
+        let (mut median, mut text) = ride(query, api, viewport, &api_seen);
+        // The bar stays 30 (K41). The GPU is the machine's, shared with every slot's GPU tests and
+        // emulators, and two gates saw this ride far under it (19.7 fps, 0.3 fps) where CPU load
+        // alone never took it under 48 (K39). A slow ride names the GPU's other users in its
+        // window and rides once more; only a second slow ride fails.
+        if median < 30.0 {
+            println!("{api_seen}: {median} fps is under 30; riding once more");
+            let first = text;
+            (median, text) = ride(query, api, viewport, &api_seen);
+            text = format!("first ride:\n{first}\nsecond ride:\n{text}");
+        }
+        assert!(median >= 30.0, "{api_seen} rides at {median} fps, under 30 twice:\n{text}");
     }
+}
+
+/// Each GPU client on the machine that this user can read (`/proc/<pid>/fdinfo`'s DRM lines), by
+/// client id: its pid, its process name and the nanoseconds its contexts have held the GPU's
+/// engines, summed over them.
+fn gpu_users() -> std::collections::HashMap<u64, (u32, String, u64)> {
+    let mut users = std::collections::HashMap::new();
+    let Ok(procs) = std::fs::read_dir("/proc") else { return users };
+    for proc in procs.flatten() {
+        let Some(pid) = proc.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else { continue };
+        let Ok(fds) = std::fs::read_dir(proc.path().join("fdinfo")) else { continue };
+        for fd in fds.flatten() {
+            let Ok(info) = std::fs::read_to_string(fd.path()) else { continue };
+            let mut client = None;
+            let mut ns = 0;
+            for line in info.lines() {
+                let Some((key, value)) = line.split_once(':') else { continue };
+                let value = value.trim();
+                if key == "drm-client-id" {
+                    client = value.parse::<u64>().ok();
+                } else if key.starts_with("drm-engine-") && !key.starts_with("drm-engine-capacity") {
+                    ns += value.trim_end_matches(" ns").parse::<u64>().unwrap_or(0);
+                }
+            }
+            if let Some(client) = client {
+                let name = std::fs::read_to_string(proc.path().join("comm")).unwrap_or_default().trim().to_string();
+                users.insert(client, (pid, name, ns));
+            }
+        }
+    }
+    users
+}
+
+/// The GPU time each other client took between two [`gpu_users`] readings, as a share of the
+/// `wall` between them, busiest first: what else was drawing while a ride was timed. The ride's own
+/// chromium has exited by the second reading, so it is not among them; nor is any client that came
+/// and went between the two.
+fn gpu_share(
+    before: &std::collections::HashMap<u64, (u32, String, u64)>,
+    after: &std::collections::HashMap<u64, (u32, String, u64)>,
+    wall: std::time::Duration,
+) -> String {
+    let mut used: Vec<(u64, String)> = after
+        .iter()
+        .filter_map(|(client, (pid, name, ns))| {
+            let spent = ns - before.get(client).map_or(0, |b| b.2.min(*ns));
+            (spent > 0).then(|| (spent, format!("{name} {pid}")))
+        })
+        .collect();
+    if used.is_empty() {
+        return "none seen".into();
+    }
+    used.sort_by(|a, b| b.0.cmp(&a.0));
+    let wall = wall.as_nanos().max(1) as f64;
+    used.iter().take(6).map(|(ns, who)| format!("{who} {:.0}%", *ns as f64 * 100.0 / wall)).collect::<Vec<_>>().join(", ")
 }
 
 /// A WebGPU validation error on the menu (P257, `tests/web/gpu.mjs`'s fault): a phone's Safari

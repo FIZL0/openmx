@@ -33,6 +33,9 @@ tests = [
     "--test fixed_rate::",
     # a desktop peer and headless chromium over a loopback relay: chromium starts slowly under load (P213, 10-29)
     "--test netplay_browser::",
+    # rides the page for 10 s of wall clock on the machine's GPU, shared with every slot's GPU tests and emulators:
+    # 19.7 fps (10-29) and 0.3 fps (11-05) in gates, 48-60 fps under CPU load alone; it rides a slow case twice itself (K41)
+    "::(.*::)?the_browser_rides_on_the_gpu$",
 ]
 
 [alone]
