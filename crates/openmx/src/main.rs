@@ -10941,7 +10941,6 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     targets,
                     aspect::short_viewport(display, view_w, view_h),
                     NEAR_CLIP,
-                    &seat.sim.tables.ride.curve,
                     &mut world.place,
                 )),
                 (view, _) => view,
