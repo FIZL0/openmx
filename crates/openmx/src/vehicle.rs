@@ -1089,12 +1089,12 @@ impl Plane {
             sim.traffic.frame(dt, world);
             return self.step_met(sim, dt, world, bikes, met);
         }
-        let movers = sim.traffic.frame_held(dt, world);
+        let mut movers = sim.traffic.frame_held(dt, world);
         let mut props = std::mem::take(&mut sim.traffic.props);
         let respawned = match self.ready(sim, world) {
             Some(ready) => {
                 let f = self.flight.as_mut().expect("a readied plane has its flight");
-                let _struck = f.frame_props(dt, ready.pad, world, &sim.tables.ride, bikes, met, &mut props, 0);
+                let _struck = f.frame_props_in(dt, ready.pad, world, &sim.tables.ride, bikes, met, &mut props, 0, &mut movers);
                 self.settle(ready)
             }
             None => false,

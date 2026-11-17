@@ -862,7 +862,7 @@ impl Flight {
         bikes: &[flight_search::Bike],
         met: Option<&mut Met>,
     ) -> (Vec<Option<u32>>, [i8; 2]) {
-        self.frame_struck(dt, pad, ground, tables, bikes, met, None)
+        self.frame_struck(dt, pad, ground, tables, bikes, met, None, None)
     }
 
     /// **[`Flight::frame_met`] among the knockable props** (S241): the plane's rays strike a prop's
@@ -894,7 +894,29 @@ impl Flight {
         props: &mut PropSet,
         me: usize,
     ) -> (Vec<Option<u32>>, [i8; 2]) {
-        self.frame_struck(dt, pad, ground, tables, bikes, met, Some((props, me)))
+        self.frame_struck(dt, pad, ground, tables, bikes, met, Some((props, me)), None)
+    }
+
+    /// **[`Flight::frame_props`] in the props' collide pass** (B34): a prop the plane's strike files
+    /// (step 2, one asleep until its rays met it) searches at once ([`PropSet::strike_in`]), as the
+    /// original's node walk reaches it at the list's end behind the plane, filed first: its terrain
+    /// and scene entries go on its list after the plane's mirrors and before its rays' on the hull
+    /// (step 3), in `ground`, its set's movers added to the pass's `movers` (the props' search's,
+    /// [`crate::traffic::Traffic::frame_held`]). [`Flight::frame_props`] only hears it (B28).
+    #[allow(clippy::too_many_arguments)]
+    pub fn frame_props_in(
+        &mut self,
+        dt: F,
+        pad: Pad,
+        ground: &mut dyn world::World,
+        tables: &ride::Tables,
+        bikes: &[flight_search::Bike],
+        met: Option<&mut Met>,
+        props: &mut PropSet,
+        me: usize,
+        movers: &mut crate::prop_set::PropMovers,
+    ) -> (Vec<Option<u32>>, [i8; 2]) {
+        self.frame_struck(dt, pad, ground, tables, bikes, met, Some((props, me)), Some(movers))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -907,6 +929,7 @@ impl Flight {
         bikes: &[flight_search::Bike],
         met: Option<&mut Met>,
         props: Option<(&mut PropSet, usize)>,
+        pass: Option<&mut crate::prop_set::PropMovers>,
     ) -> (Vec<Option<u32>>, [i8; 2]) {
         let mut met = met;
         let shapes = props.as_ref().map(|(set, _)| Arc::clone(&set.shapes));
@@ -935,7 +958,11 @@ impl Flight {
         let mut props = props;
         if let Some((set, me)) = props.as_mut() {
             let first = met.as_deref().map_or(0, |m| m.vehicles.len());
-            self.knocked(set, *me, first, &posed, knocked, &mut bodies);
+            let late = match pass {
+                Some(m) => Some((dt, &mut *ground as &mut dyn world::World, m)),
+                None => None,
+            };
+            self.knocked(set, *me, first, &posed, knocked, &mut bodies, late);
         }
         let wrecks = met.as_deref_mut().map(|m| std::mem::take(&mut m.wrecks)).unwrap_or_default();
         let at = bodies.len();
@@ -995,6 +1022,9 @@ impl Flight {
     /// entries and the mirrors renamed to the struck bodies' places after the `first` vehicles of
     /// its resolve. The bodies are added to `bodies`, in that order, but a body already there (one
     /// another plane of [`frames_together`] struck) keeps its place, so the planes push one copy.
+    /// With `late` (dt, the world and the pass's movers, B34) a prop the strike files searches at once
+    /// ([`PropSet::strike_in`]); without, it is heard ([`PropSet::strike`]).
+    #[allow(clippy::too_many_arguments)]
     fn knocked(
         &mut self,
         set: &mut PropSet,
@@ -1003,6 +1033,7 @@ impl Flight {
         posed: &[Posed<'_>],
         knocked: Vec<Vec<contact::Contact>>,
         bodies: &mut Vec<crate::prop_contact::Pushed>,
+        late: Option<(F, &mut dyn world::World, &mut crate::prop_set::PropMovers)>,
     ) {
         // Names past [`WRECK_FROM`] are the wreck bikes' mirrors (S276), not props.
         let from = self.record.contacts.iter().filter_map(|e| e.other).filter(|o| (KNOCK_FROM..WRECK_FROM).contains(o)).collect::<Vec<_>>();
@@ -1027,7 +1058,18 @@ impl Flight {
             })
             .collect();
         let mut places = Vec::with_capacity(order.len());
-        for p in set.strike(&crate::prop_contact::Strike { contacts: Vec::new(), struck, ..Default::default() }) {
+        let mut strike = crate::prop_contact::Strike { contacts: Vec::new(), struck, ..Default::default() };
+        let pushed = match late {
+            // Named as the props' step's striker `me`; the late props' probes' mirrors that
+            // [`PropSet::strike_in`] puts on the strike's entries are a riding bike's frame's (B29),
+            // not the plane's: its rays meet the hull below.
+            Some((dt, world, movers)) => {
+                strike.by = Some((me, first));
+                set.strike_in(&mut strike, dt, world, movers)
+            }
+            None => set.strike(&strike),
+        };
+        for p in pushed {
             match bodies.iter().position(|b| (b.collection, b.object) == (p.collection, p.object)) {
                 Some(i) => places.push(i),
                 None => {
@@ -2197,7 +2239,7 @@ pub fn frames_together_props(
         for (i, (f, k)) in fleet.iter_mut().zip(knocked).enumerate() {
             // Its resolve's sides: its met's vehicles, the other planes, then the struck bodies.
             let first = f.met.as_deref().map_or(0, |m| m.vehicles.len()) + n - 1;
-            f.flight.knocked(set, me[i], first, &posed, k, &mut bodies);
+            f.flight.knocked(set, me[i], first, &posed, k, &mut bodies, None);
         }
     }
     // The downed riders' wreck bikes (S276a, [`Met::wrecks`]) after the props: one body each for the
