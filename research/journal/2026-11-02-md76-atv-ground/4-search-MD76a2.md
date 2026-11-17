@@ -100,7 +100,7 @@ How it was checked: `cargo test --release -p game-sim --test atv_search -- --noc
 
 ## Not verified / not 1:1
 
-- **The sphere ray test is not ported** (`atv_ray_sphere`). It writes no contact, so contacts are
+- **The sphere ray test is not ported** (`atv_ray_sphere`). *(Done by MD85, 2026-11-16: the hit bit now matches on every frame.)* It writes no contact, so contacts are
   unaffected (follow-up MD85), but the port's hit bit misses sphere-only strikes (131 of 6,001 frames). The distributor
   reads the record only when the hit bit is set, and an empty record gives no contacts either way.
   Anything else that reads the quad's hit bit would differ.
