@@ -2405,6 +2405,10 @@ pub struct Wreckage {
     /// unless the helicopter's owner keeps it.
     pub spawn: [Vf; 3],
     pub nodes: Nodes,
+    /// SLUS-21104's put-back and blade throw in place of MX Unleashed's (MD199): the spawn copied over
+    /// the place first, and the bodies placed by their model's origin ([`Wreckage::put_back`],
+    /// [`Wreckage::throw_blades`]). Off: MX Unleashed's.
+    pub mxvatv: bool,
     /// The four thrown blades. [`Wreckage::new`] leaves none: building them off the disc's files is
     /// [`Blades::new`]'s, and the caller's to put here.
     pub blades: Blades,
@@ -2431,6 +2435,18 @@ fn place(body: &mut Body, position: &mut Vf, facing: Vf, up: Vf) -> (Vf, Vf) {
     start.turn(turn, STILL);
     start.reset(body);
     crate::flight::spawn_axes(facing, up)
+}
+
+/// **SLUS-21104's place** (MXVehicle's orient on a body, MD199): [`place`], but the place is the model's
+/// origin, not the centre: the body's commit moves the centre (and the last one) on by the centre of
+/// gravity's offset turned by the new orientation ([`crate::handling::wreck::turned`], `xyz`).
+fn place_mxvatv(body: &mut Body, position: &mut Vf, facing: Vf, up: Vf) -> (Vf, Vf) {
+    let axes = place(body, position, facing, up);
+    let r = crate::handling::wreck::turned(body.quat, body.cofg);
+    let centre = body.position.merge(Dest::XYZ, body.position.add(r));
+    body.position = centre;
+    body.last_position = centre;
+    axes
 }
 
 /// `orientation_transform_point`: `p` through the transform, row 3 first (`+ vf0.x`), then `x`,
@@ -2549,7 +2565,11 @@ impl Wreckage {
             let swing = node_rotate(&throw.model, swing);
             let velocity = heli.velocity.merge(Dest::XYZ, heli.velocity.add(swing));
             if k < self.blades.set.bones.len() {
-                self.blades.throw(k, at, facing, up, velocity, heli.rates);
+                if self.mxvatv {
+                    self.blades.throw_mxvatv(k, at, facing, up, velocity, heli.rates);
+                } else {
+                    self.blades.throw(k, at, facing, up, velocity, heli.rates);
+                }
             }
         }
         ride.rotor_hidden = true;
@@ -2597,7 +2617,21 @@ impl Wreckage {
     ///
     /// Not here: the reset's taking out and putting back of the wrapper's collision probes, the
     /// player's camera snapped to it, and the presentation copy (`kiowa_mx_present_a`).
+    ///
+    /// SLUS-21104's ([`Wreckage::mxvatv`]: its unwreck, vt `+0x36c`, around MXVehicle's placement)
+    /// copies the spawn over the place first, whether owned or not, and stands the body by its model's
+    /// origin there ([`place_mxvatv`]); its owner's bit only leaves the 0.5. Not here: its ground search
+    /// when the helicopter has a ground (the place moved 0.3 along the ground's normal, the up that
+    /// normal).
     pub fn put_back(&mut self, ride: &mut Ride, owned: bool) -> F {
+        if self.mxvatv {
+            self.place = self.spawn;
+            let [mut at, facing, up] = self.place;
+            let (facing, up) = place_mxvatv(&mut ride.body, &mut at, facing, up);
+            self.place = [at, facing, up];
+            self.unwreck_mx(ride);
+            return if owned { F(0.5) } else { F::ZERO };
+        }
         let [mut at, facing, up] = self.place;
         let (facing, up) = place(&mut ride.body, &mut at, facing, up);
         self.place = [at, facing, up];
@@ -2788,6 +2822,20 @@ impl Blades {
         let b = &mut self.set.bones[k].body;
         b.velocity = velocity;
         b.rates = rates;
+    }
+
+    /// [`Blades::throw`] as SLUS-21104's blade wrapper places it (MD199): `at` is where the blade's
+    /// model's origin goes, the body's centre that moved on by its centre of gravity's offset turned
+    /// ([`place_mxvatv`]'s commit), and its node's origin the centre less that again.
+    pub fn throw_mxvatv(&mut self, k: usize, at: Vf, facing: Vf, up: Vf, velocity: Vf, rates: Vf) {
+        self.throw(k, at, facing, up, velocity, rates);
+        let b = &mut self.set.bones[k].body;
+        let r = crate::handling::wreck::turned(b.quat, b.cofg);
+        let centre = b.position.merge(Dest::XYZ, b.position.add(r));
+        b.position = centre;
+        b.last_position = centre;
+        let node = &mut self.set.objects[k].node;
+        node.origin = centre.merge(Dest::XYZ, centre.sub(r));
     }
 
     /// **The world node's collide pass, for the blades** (before any world steps): each filed

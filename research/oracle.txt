@@ -13162,3 +13162,16 @@ race_lap_listener           boot 0x002fc160 activity+0x160 listener slot +8 (Lap
 #                                           text, +0x4d0[player] = 1, message 0x0037abf0 7/8. No flag
 race_finish_listener        boot 0x002fc410 slot +0x14 (Finished; thunk 0x003004f0): winner message 10,
 #                                           camera speeds, HOF record checks. No flag
+# MD199 — the MX vs. ATV Kiowa's put-back placement and blade throw oracled (src kiowa::Wreckage::mxvatv,
+# place_mxvatv, Blades::throw_mxvatv; tests mxvatv_kiowa.rs the_mxvatv_put_back_places_as_the_original,
+# the_mxvatv_blade_throw_is_the_originals; journal research/journal/2026-11-17-md199-kiowa-put-back-and-blade-throw).
+#   Put-back 0x004d36a0 (vt +0xe8): 0x004a6f70(heli, 1, 1); owner +0x684 with +0x50 bit 0 -> +0x10f8 = 0.5;
+#   +0x48c vt +0xb0 if set; vt +0x378 (0x004d3230). The placement copies the spawn +0xd40..+0xd6c over the place
+#   +0x50..+0x7c first, always; with the ground +0x3b4 (set in md80a kiowa) it snaps (see the car's 0x004a6f70
+#   rows above): not ported (MD214). Ground reset's body commit 0x00493070: centre = place + q(+0x190) turning
+#   cofg +0x1a0 (Kiowa (0, 5.5, 0)); MX Unleashed's place puts the centre at the place. 10000 cases bit-exact,
+#   +0x3b4 zeroed.
+#   Blade throw 0x004d3720 (vt +0x478): kiowa_throw_blades unrolled; blade nodes +0x11ec..+0x11f8, wrappers
+#   +0x132c..+0x1338 (vtable 0x003cce10: +0x130 start 0x004946c0, +0xf0 place = the orient 0x00492e50, so the
+#   blade's centre also moves on by its turned cofg (0, 0, 9)). Node world rows +0x70..+0xa0, brought up to date
+#   by 0x00193b30 (hooked in the oracle). rand 0x003561a8. 10000 cases bit-exact.
