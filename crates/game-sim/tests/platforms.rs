@@ -459,7 +459,9 @@ const RIDERS_DIGEST: u64 = 0x74bcb1ae285c25dc;
 /// 13607 again since S250: S234's three bytes taken out (flips score as the original does).
 /// 13611 since F13: each rider's put-back record carries last tick's reverse command (a byte, four
 /// riders).
-const RIDERS_WIRE_DIGEST: u64 = 0xeca74fbe28cdf668;
+/// The bytes moved with S328a, the length did not: the Sim runs each body's look-around clock, which
+/// a free ride draws on the body's own idle pool.
+const RIDERS_WIRE_DIGEST: u64 = 0x55d33d134bb3fd55;
 const RIDERS_WIRE_LEN: usize = 13611;
 
 /// The riders' run: every tick's hash, and the session at the end. Rolled back over, eight ticks deep,
