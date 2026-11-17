@@ -3,7 +3,8 @@
 //! props it strikes, and the props' own step answers with the car as its striker, as the shell's
 //! `CarRide::step_traffic` runs them. free06's balls are the props; the terrain is free06's.
 //!
-//! Not proven against the original: no capture of a car striking a prop exists (see S335's journal).
+//! Against the original: C34 captured the buggy striking free06's balls (car_drive.rs
+//! `the_ball_strike_runs_on_its_own`): bit-exact up to the strike, the ball's answer to it not yet.
 
 use game_render::disc::Disc;
 use game_sim::air::AcosTable;

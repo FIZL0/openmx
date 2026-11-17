@@ -1,0 +1,152 @@
+# C34: free06's six EyeBalls' bodies in C34's free06 buggy state (research/c34/bodies.py found them; port
+# collection order 0..5). Appended to car_tire.toml by research/c34/capture.sh.
+
+[[field]]
+name = "ball0_enabled"
+addr = "0x00e0ac70"
+type = "u32"
+
+[[field]]
+name = "ball0_pos"
+addr = "0x00e0acd0"
+type = "f32x4"
+
+[[field]]
+name = "ball0_vel"
+addr = "0x00e0ace0"
+type = "f32x4"
+
+[[field]]
+name = "ball0_quat"
+addr = "0x00e0ade0"
+type = "f32x4"
+
+[[field]]
+name = "ball0_rate"
+addr = "0x00e0ae20"
+type = "f32x4"
+
+[[field]]
+name = "ball1_enabled"
+addr = "0x00e0b460"
+type = "u32"
+
+[[field]]
+name = "ball1_pos"
+addr = "0x00e0b4c0"
+type = "f32x4"
+
+[[field]]
+name = "ball1_vel"
+addr = "0x00e0b4d0"
+type = "f32x4"
+
+[[field]]
+name = "ball1_quat"
+addr = "0x00e0b5d0"
+type = "f32x4"
+
+[[field]]
+name = "ball1_rate"
+addr = "0x00e0b610"
+type = "f32x4"
+
+[[field]]
+name = "ball2_enabled"
+addr = "0x00e15b60"
+type = "u32"
+
+[[field]]
+name = "ball2_pos"
+addr = "0x00e15bc0"
+type = "f32x4"
+
+[[field]]
+name = "ball2_vel"
+addr = "0x00e15bd0"
+type = "f32x4"
+
+[[field]]
+name = "ball2_quat"
+addr = "0x00e15cd0"
+type = "f32x4"
+
+[[field]]
+name = "ball2_rate"
+addr = "0x00e15d10"
+type = "f32x4"
+
+[[field]]
+name = "ball3_enabled"
+addr = "0x00e18650"
+type = "u32"
+
+[[field]]
+name = "ball3_pos"
+addr = "0x00e186b0"
+type = "f32x4"
+
+[[field]]
+name = "ball3_vel"
+addr = "0x00e186c0"
+type = "f32x4"
+
+[[field]]
+name = "ball3_quat"
+addr = "0x00e187c0"
+type = "f32x4"
+
+[[field]]
+name = "ball3_rate"
+addr = "0x00e18800"
+type = "f32x4"
+
+[[field]]
+name = "ball4_enabled"
+addr = "0x00e1b140"
+type = "u32"
+
+[[field]]
+name = "ball4_pos"
+addr = "0x00e1b1a0"
+type = "f32x4"
+
+[[field]]
+name = "ball4_vel"
+addr = "0x00e1b1b0"
+type = "f32x4"
+
+[[field]]
+name = "ball4_quat"
+addr = "0x00e1b2b0"
+type = "f32x4"
+
+[[field]]
+name = "ball4_rate"
+addr = "0x00e1b2f0"
+type = "f32x4"
+
+[[field]]
+name = "ball5_enabled"
+addr = "0x00e1dc30"
+type = "u32"
+
+[[field]]
+name = "ball5_pos"
+addr = "0x00e1dc90"
+type = "f32x4"
+
+[[field]]
+name = "ball5_vel"
+addr = "0x00e1dca0"
+type = "f32x4"
+
+[[field]]
+name = "ball5_quat"
+addr = "0x00e1dda0"
+type = "f32x4"
+
+[[field]]
+name = "ball5_rate"
+addr = "0x00e1dde0"
+type = "f32x4"

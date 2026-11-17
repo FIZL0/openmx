@@ -1,0 +1,5 @@
+# C34: on its roof, gas held until the stuck reset and on after it
+release
+sleep 10t
+down cross
+sleep 420t

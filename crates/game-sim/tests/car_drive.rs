@@ -10,7 +10,7 @@ use game_render::disc::Disc;
 use game_sim::air::AcosTable;
 use game_sim::biplane::Body;
 use game_sim::camera::CurveTable;
-use game_sim::car::{COLLIDABLE, Car, Collision, Controls, Drivetrain, Kind, Launch, Machine, PreloadState, TireState, Wheel};
+use game_sim::car::{COLLIDABLE, Car, CarProps, Collision, Controls, Drivetrain, Kind, Launch, Machine, PreloadState, TireState, Wheel};
 use game_sim::eco::{Trees, Wooded};
 use game_sim::flight_search::Rays;
 use game_sim::math::Mat4;
@@ -91,14 +91,19 @@ fn on_free07<R>(then: impl FnOnce(&mut Ground<'_>) -> R) -> Option<R> {
 /// free07 as the shell builds it: the terrain, the scene's collision meshes out of free07's archives,
 /// and the ecosystem's plants.
 fn in_free07<R>(then: impl FnOnce(&mut Wooded<Place<'_>>) -> R) -> Option<R> {
+    in_track(&["Tracks\\free07.res", "Tracks\\free07_2.res"], then)
+}
+
+/// A track as the shell builds it (see [`in_free07`]), out of its archives `names`.
+fn in_track<R>(names: &[&str], then: impl FnOnce(&mut Wooded<Place<'_>>) -> R) -> Option<R> {
     use game_sim::archive::Res;
     let mut disc = Disc::open_configured().map_err(|why| skip(&why)).ok()?;
-    let parts: Vec<(Vec<u8>, Res)> = ["Tracks\\free07.res", "Tracks\\free07_2.res"]
+    let parts: Vec<(Vec<u8>, Res)> = names
         .iter()
         .filter_map(|n| disc.member(n).ok())
         .filter_map(|b| Res::parse(&b).ok().map(|r| (b, r)))
         .collect();
-    assert!(!parts.is_empty(), "no free07.res");
+    assert!(!parts.is_empty(), "no {}", names[0]);
     let by_end = |end: &str| {
         let want = end.to_ascii_lowercase();
         parts.iter().find_map(|(b, r)| {
@@ -110,18 +115,18 @@ fn in_free07<R>(then: impl FnOnce(&mut Wooded<Place<'_>>) -> R) -> Option<R> {
         })
     };
     let (bytes, res) = &parts[0];
-    let scn = res.entries.iter().find(|e| e.name.to_ascii_lowercase().ends_with(".scn")).expect("free07's scene");
+    let scn = res.entries.iter().find(|e| e.name.to_ascii_lowercase().ends_with(".scn")).unwrap_or_else(|| panic!("{}: no scene", names[0]));
     let scene = Scene::parse(&res.read(bytes, scn).unwrap()).expect("parse the scene");
     let leaf = scene.terrain_file.to_ascii_lowercase().replace(".trn", ".ps2.trn");
-    let terrain_bytes = by_end(leaf.rsplit('\\').next().unwrap()).expect("free07's terrain");
+    let terrain_bytes = by_end(leaf.rsplit('\\').next().unwrap()).unwrap_or_else(|| panic!("{}: no terrain", names[0]));
     let terrain = Terrain::parse(&terrain_bytes).expect("parse the terrain");
-    let esb = res.entries.iter().find(|e| e.name.to_ascii_lowercase().ends_with(".esb")).expect("free07's ecosystem");
+    let esb = res.entries.iter().find(|e| e.name.to_ascii_lowercase().ends_with(".esb")).unwrap_or_else(|| panic!("{}: no ecosystem", names[0]));
     let esb = res.read(bytes, esb).unwrap();
     let (props, missing) = Props::load(&scene, |want| by_end(want).ok_or_else(|| "no archive of this track has it".to_string()));
-    assert!(missing.is_empty(), "free07's props the archives lack: {missing:?}");
+    assert!(missing.is_empty(), "{}: props the archives lack: {missing:?}", names[0]);
     let ground = Ground::new(&terrain, &scene.terrain);
-    let (trees, missed) = Trees::on_ground(&esb, &ground, &CurveTable::build()).expect("free07's ecosystem");
-    assert!(missed.is_empty(), "free07's trees missing: {missed:?}");
+    let (trees, missed) = Trees::on_ground(&esb, &ground, &CurveTable::build()).expect("the track's ecosystem");
+    assert!(missed.is_empty(), "{}: trees missing: {missed:?}", names[0]);
     let mut place = Wooded { world: Place { ground, props }, trees };
     Some(then(&mut place))
 }
@@ -818,12 +823,17 @@ fn replay(kind: Kind, name: &str, carry: bool) -> Option<Tally> {
 /// [`replay`] of `context/capture/<task>/<name>.csv`, the car's constants out of S149a's switched
 /// image of the `car` drive.
 fn replay_in(kind: Kind, task: &str, name: &str, car_image: &str, carry: bool) -> Option<Tally> {
+    replay_from(kind, task, name, &format!("s149a-{car_image}-switched.ee.bin"), carry)
+}
+
+/// [`replay_in`] with the car's constants out of `context/states/<image>`.
+fn replay_from(kind: Kind, task: &str, name: &str, image: &str, carry: bool) -> Option<Tally> {
     let kit = Kit::load().map_err(|w| skip(&w)).ok()?;
     let rows = load_drive_rows_in(&kit, task, name)?;
     let car = Car::read_bytes(&car_file(&kit, kind)?, kind);
-    let image = kit.ctx("states").join(format!("s149a-{car_image}-switched.ee.bin"));
+    let image = kit.ctx("states").join(image);
     if !image.exists() {
-        skip(&format!("no {} — S149a's switch recipe makes it", image.display()));
+        skip(&format!("no {} — S149a's or C34's switch recipe makes it", image.display()));
         return None;
     }
     let ee = Ee::from_ram(&image).unwrap_or_else(|e| panic!("{e}"));
@@ -1160,4 +1170,180 @@ fn a_car_on_its_roof_is_put_back_on_its_wheels() {
             assert!(m.grounded && facing > 0.95, "{kind:?} reset at frame {frame}: not back on its wheels (up {up:?}, grounded {})", m.grounded);
         });
     }
+}
+
+/// **The original's stuck reset, row by row** (C34): the buggy, switched into on free07 and turned on
+/// its roof (`context/capture/c34/roof` + `.csv`, research/journal/2026-11-16-c34-car-roof-and-prop-capture),
+/// lies still with the gas held until the stuck timer runs out (`MaxWreckTime`), is stood back on its
+/// wheels, and drives off. Every row is replayed through the port, the reset's frame among them, and
+/// every word compared to the bit.
+fn check_roof(carry: bool) {
+    let Some(t) = replay_from(Kind::Buggy, "c34", "roof", "c34-buggy-switched.ee.bin", carry) else { return };
+    report("roof", carry, t);
+}
+
+#[test]
+fn the_roof_reset_replays() {
+    check_roof(false);
+}
+
+#[test]
+fn the_roof_reset_runs_on_its_own() {
+    check_roof(true);
+}
+
+/// One of free06's balls in a row of C34's ball capture: awake, and its body's place, speed, turn
+/// and spin.
+struct BallRow {
+    enabled: bool,
+    body: [Vf; 4],
+}
+
+/// The six balls' columns of `context/capture/<task>/<name>.csv` (research/c34/balls.toml), per row.
+fn load_balls(kit: &Kit, task: &str, name: &str) -> Option<Vec<[BallRow; 6]>> {
+    let text = std::fs::read_to_string(kit.ctx("capture").join(task).join(format!("{name}.csv"))).ok()?;
+    let mut lines = text.lines();
+    let head: HashMap<&str, usize> = lines.next()?.split(',').enumerate().map(|(i, h)| (h, i)).collect();
+    Some(
+        lines
+            .map(|l| {
+                let c: Vec<&str> = l.split(',').collect();
+                [0, 1, 2, 3, 4, 5].map(|k| BallRow {
+                    enabled: c[head[format!("ball{k}_enabled").as_str()]] != "0",
+                    body: ["pos", "vel", "quat", "rate"].map(|b| {
+                        let [x, y, z, w] = ["x", "y", "z", "w"].map(|l| c[head[format!("ball{k}_{b}.{l}").as_str()]].parse::<f32>().unwrap());
+                        Vf::new(x, y, z, w)
+                    }),
+                })
+            })
+            .collect(),
+    )
+}
+
+/// free06's knockable props as the ride loads them, over `area`.
+fn free06_props(area: Option<game_sim::biplane::Area>) -> Option<game_sim::prop_set::PropSet> {
+    let mut disc = Disc::open_configured().map_err(|why| skip(&why)).ok()?;
+    let res = disc.res("Tracks\\free06.res").unwrap_or_else(|e| panic!("free06: {e}"));
+    let toy = game_sim::phy::Ini::parse_bytes(&res.read_suffix("free06.toy").expect("free06.toy"));
+    let scene = Scene::parse(&res.read_suffix("free06.scn").expect("free06.scn")).expect("free06.scn parses");
+    let (set, said) = game_sim::prop_set::PropSet::load(
+        &toy,
+        "Tracks\\Free06\\",
+        &scene.models,
+        &mut |p| res.read(p).ok(),
+        &mut |p| res.read_suffix(p).ok(),
+        area,
+    );
+    assert!(said.is_empty(), "free06 loads whole: {said:?}");
+    Some(set)
+}
+
+/// **The original's car striking a prop** (C34): the buggy, switched into on free06 and set down 40 ft
+/// short of its first ball facing it (`context/capture/c34/ball` + `.csv`), drives at it on full gas,
+/// strikes it and three more, and drives on. The port runs the whole drive on its own from the first
+/// row, the balls asleep where the disc puts them, the car through [`Machine::step_props`] and the
+/// balls' step with the car as their striker, as the shell's car ride runs them; the car's body and
+/// every ball's are compared with each row. Answers the tally and the first row with a mismatch.
+fn replay_balls() -> Option<(Tally, Option<u32>)> {
+    let kit = Kit::load().map_err(|w| skip(&w)).ok()?;
+    let kind = Kind::Buggy;
+    let rows = load_drive_rows_in(&kit, "c34", "ball")?;
+    let balls = load_balls(&kit, "c34", "ball")?;
+    let car = Car::read_bytes(&car_file(&kit, kind)?, kind);
+    // The car's constants are the buggy's on any track: the roof capture's free07 image has them.
+    let image = kit.ctx("states").join("c34-buggy-switched.ee.bin");
+    if !image.exists() {
+        skip(&format!("no {} — C34's switch recipe makes it", image.display()));
+        return None;
+    }
+    let ee = Ee::from_ram(&image).unwrap_or_else(|e| panic!("{e}"));
+    let body = body_of(&ee);
+    let (acos, curve) = (AcosTable::build(), CurveTable::build());
+    let rays = game_sim::track::Rays::parse(&machine_file(&kit, kind.rays())?).expect("the car's rays");
+    let hull = game_sim::track::Mesh::parse(&machine_file(&kit, kind.hull())?).expect("the car's hull");
+    let inertia = quad(&ee, ee.u32_at(CAR + car_at::BODY) + 0x110);
+    let fresh = collision_of(&car, &body, inertia, Rays::of(&rays));
+    in_track(&["Tracks\\free06.res", "Tracks\\free06_2.res"], |g| {
+        let mut t = Tally::default();
+        let mut sim = game_sim::Sim::new(0xc34);
+        sim.traffic.props = free06_props(g.world.ground.area())?;
+        let ball = |sim: &game_sim::Sim, k: usize| sim.traffic.props.collections[k].bones[0].body.clone();
+        let fc = rows[0].frame_counter;
+        for (k, b) in balls[0].iter().enumerate() {
+            let p = ball(&sim, k);
+            for (i, lane) in ["x", "y", "z", "w"].iter().enumerate() {
+                t.word(format!("ball{k} seed pos.{lane}"), fc, p.position.0[i].to_bits(), b.body[0].0[i].to_bits());
+                t.word(format!("ball{k} seed quat.{lane}"), fc, p.quat.0[i].to_bits(), b.body[2].0[i].to_bits());
+            }
+        }
+        let mut m = machine_of(&car, &ee, &body, &rows[0]);
+        (m.body.last_position, m.body.last_quat) = (m.body.position, m.body.quat);
+        let mut col = fresh.clone();
+        col.refresh(&m.body, g);
+        col.record.search_ground = m.searches_terrain(g);
+        let mut first_bad = (!t.bad.is_empty()).then_some(fc);
+        for (i, pair) in rows.windows(2).enumerate() {
+            let (r0, r1) = (&pair[0], &pair[1]);
+            assert_eq!(r1.frame_counter, r0.frame_counter + 1, "the ball capture has no gaps");
+            let bad_before: usize = t.bad.values().sum();
+            if i > 0 {
+                take_input(&mut m, r0);
+            }
+            let dt = r1.dt;
+            let movers = sim.traffic.frame_held(dt, g);
+            let mut set = std::mem::take(&mut sim.traffic.props);
+            let props = CarProps { set: &mut set, me: 0, hull: Some(&hull) };
+            m.step_props(&car, g, &mut col, None, Some(props), dt, &acos, &curve, &mut |_| F::ZERO);
+            let mut weighed = game_sim::contact::Weighed { body: &mut m.body, mass: col.mass };
+            let mut strikers = [game_sim::contact::Other { collider: &mut col.collider, side: game_sim::contact::Side::Body(&mut weighed) }];
+            set.step_with(dt, &movers, &mut strikers);
+            sim.traffic.props = set;
+            sim.traffic.frame_late(dt, g);
+            t.rows += 1;
+            t.touched += m.touching as usize;
+            t.contacts += col.record.contacts.len();
+            let fc = r1.frame_counter;
+            let mut bodies = vec![("car".to_string(), m.body.clone(), r1.body)];
+            for (k, b) in balls[i + 1].iter().enumerate() {
+                let p = ball(&sim, k);
+                t.word(format!("ball{k} enabled"), fc, p.enabled as u32, b.enabled as u32);
+                bodies.push((format!("ball{k}"), p, b.body));
+            }
+            for (who, got, want) in bodies {
+                for (j, what) in ["pos", "vel", "quat", "rate"].iter().enumerate() {
+                    let got = [got.position, got.velocity, got.quat, got.rates][j];
+                    for (l, lane) in ["x", "y", "z"].iter().enumerate() {
+                        t.word(format!("{who} {what}.{lane}"), fc, got.0[l].to_bits(), want[j].0[l].to_bits());
+                    }
+                }
+            }
+            if first_bad.is_none() && t.bad.values().sum::<usize>() > bad_before {
+                first_bad = Some(fc);
+            }
+        }
+        Some((t, first_bad))
+    })?
+}
+
+/// The frame the buggy first strikes free06's ball: the ball's answer to the strike is not yet the
+/// original's (its speed about 2 % off, C34's journal), and the car's follows a frame on.
+const BALL_STRUCK: u32 = 776;
+
+/// The port runs C34's ball drive to the bit up to the strike: the balls asleep where the original
+/// has them, and the car's 49 frames of driving at them on free06. Past it, every ball the original
+/// wakes the port wakes on the same frame, and no other.
+#[test]
+fn the_ball_strike_runs_on_its_own() {
+    let Some((t, first_bad)) = replay_balls() else { return };
+    let mut s = format!("ball carried: {} rows, {} touching with {} contacts, first off at {first_bad:?}\n", t.rows, t.touched, t.contacts);
+    for (what, n) in &t.bad {
+        s += &format!("  {what}: {n}\n");
+    }
+    for l in &t.first {
+        s += &format!("  {l}\n");
+    }
+    assert!(t.rows > 200, "{s}");
+    assert!(first_bad.is_none_or(|f| f >= BALL_STRUCK), "off before the strike:\n{s}");
+    assert!(t.bad.keys().all(|k| !k.contains("enabled")), "a ball woke on another frame:\n{s}");
+    println!("{s}");
 }

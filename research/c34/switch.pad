@@ -1,0 +1,23 @@
+# C34: pause, down twice to "Switch To Machine", Cross; the card comes up; Cross accepts it
+release
+sleep 30t
+down start
+sleep 9t
+up start
+sleep 45t
+down down
+sleep 9t
+up down
+sleep 36t
+down down
+sleep 9t
+up down
+sleep 36t
+down cross
+sleep 9t
+up cross
+sleep 150t
+down cross
+sleep 9t
+up cross
+sleep 60t
