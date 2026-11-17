@@ -28,6 +28,7 @@ pub mod anim;
 pub mod attach;
 pub mod bone;
 pub mod bike;
+pub mod camera;
 pub mod effects;
 pub mod emitter;
 pub mod ring;

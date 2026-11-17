@@ -885,6 +885,13 @@ fn record_drop(m: &mut impl Space, g: &Globals, rec: u32) {
 /// centre (all four lanes); then the overlaps ([`overlaps`]).
 #[allow(clippy::too_many_arguments)]
 pub fn insert(m: &mut impl Space, g: &Globals, class: PoolClass, entry: u32, cell: u32, kind: u32, centre: Vf, half: Vf, reach: F, temp: u32, keep_temp: bool) {
+    insert_with(m, g, class, entry, cell, kind, centre, half, reach, temp, keep_temp, true);
+}
+
+/// [`insert`], with the overlaps run only when `overlap` (the call's sixth argument; F67: the
+/// camera attachment's re-insert hands in 0 and runs none).
+#[allow(clippy::too_many_arguments)]
+pub fn insert_with(m: &mut impl Space, g: &Globals, class: PoolClass, entry: u32, cell: u32, kind: u32, centre: Vf, half: Vf, reach: F, temp: u32, keep_temp: bool, overlap: bool) {
     record_new(m, g, class, temp);
     let rec = if keep_temp {
         temp
@@ -904,7 +911,9 @@ pub fn insert(m: &mut impl Space, g: &Globals, class: PoolClass, entry: u32, cel
     m.set(rec + 0xc, at);
     m.set(rec, 0);
     set_v(m, rec + 0x10, centre);
-    overlaps(m, g, rec, entry, centre, half, reach);
+    if overlap {
+        overlaps(m, g, rec, entry, centre, half, reach);
+    }
     record_drop(m, g, temp);
 }
 

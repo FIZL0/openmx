@@ -12930,6 +12930,26 @@ score_card_join             boot 0x0025f370 (mgr, card) -> 1 (0 for no card): th
 #   +0x43c.. (+0x460 = 3, +0x468 a heap block). On the frame's heap and database: dropping them parts the heap
 #   by row 193 (read watch). Left to the original (~11.3k instructions on rows 125 and 193). The rumble is
 #   dropped ("rumble dropped"): nothing the frame reads.
+# F67 — the wreck posts' camera switch in Rust (src handling::camera, handling::attach insert_with; tests
+# mxvatv_bike_ride.rs flip_replays_in_pure_rust switches "wreck camera", "wreck listeners dropped" (read watch);
+# journal research/journal/2026-11-16-f67-*). flip-1 runs no interpreted instruction on any row.
+#   Receive 0x00491270 (controller+0x38 thunk; a0 ctl+0x38, a1 from, a2 msg; kind 8 ids 0x15/7/6/0xd/0xc/0xb).
+#   Globals: players 0x003eab60, screen 0x0038f768 (faders), unit quad 0x00396fc0, spread start 0x00390ad0.
+#   Switch 0x00490b30 (ctl, cam, flag) -> 0x00113290; +0x34 join 0x004f75f0 left to the original.
+#   Camera A leave 0x001c49f0 / enter 0x001c4960 (ported only with +0xbc == 0); camera B leave 0x00235580,
+#   enter 0x00235370 (flag set with +0xb0 == unit quad not ported), spread 0x002355e0 (pushes file 0x003a0670
+#   lines 0xae targets, 0xb1 spots).
+#   Connector: unlist 0x00507470, sorted add 0x00507380 (file 0x0052b9a0 lines 0x2bf append, 0x2c3 insert),
+#   connect 0x005075b0, drop 0x00507330, own 0x00507320.
+#   Interfaces (thunk k: cameras 0x24, rider 0x2ec, bike 0x43c): counts 0x00487660 0x0048d3a0 0x004f23c0 -> 1,
+#   0x004f71b0 -> 0; offers 0x00487650 0x0048d390 (+0x7c) 0x004f23b0 (+0x374); connects 0x00487640 0x0048d380,
+#   rider 0x004f23a0 (only its two early outs ported: +0x378 != 0 or a1 & +0x374 == 0); disconnects 0x00487620,
+#   0x0048d360; takes rider 0x004f3080 (+0x9d4/+0x9d0, +0x904/+0x900, +0xa94/+0xa90), bike 0x004de110,
+#   none 0x004f7200; item pair 0x004f7210 (new file 0x0052afd0 0x69, alloc 0x6e), clear 0x004f73b0.
+#   The camera attachment's re-insert is 0x0018d590 with no overlap pass and the temp not kept
+#   (attach::insert_with ..., false, false), kind 2, centre actor+0x140, half the unit quad.
+#   The hud 0x002fbc80, race progress 0x002a2430, speed flag 0x002a2440, menu list 0x002aeed0, picker 0x002a3420
+#   receives write nothing the frame reads (read watch passes with them dropped).
 # MD162 — MX vs. ATV's quad engine note and wreck clank (SLUS-21104, atv program). Journal:
 # research/journal/2026-11-16-md162-atv-engine-note. The note is MX Unleashed's engine-note class (same lists
 # +0x204..+0x2ac, state +0x2d8); no rpm is read. Hands at emitter +0x200, vehicle-relative.
