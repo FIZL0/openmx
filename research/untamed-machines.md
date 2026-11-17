@@ -294,7 +294,36 @@ quaternion-to-euler (MD93d found the same clamps; a new `jal` past its end at th
 against search (slots `+0x11c`/`+0x120` → `+0x13c`/`+0x140`, counts `lhu`), the pair accept (`lhu`), the eco
 part (a `beq`/`bne` swap), the event post (`lhu`), two unnamed callees of the update, the name bit (its callees
 did not pair), and the quad's `.phy` tire reader, put-back, animate, node pose, net unpack and wreck path,
-which the walk did not reach.
+which the walk did not reach (classified by MD144a, next section).
+
+## The quad's callees MD81b did not reach (MD144a)
+
+Static, as MD81b's: twins paired by layout order or by vtable slot (the quad's vtable 0x003ce250 →
+0x003f0470), each pair compared with `research/md81c/fp.py` (order-blind fingerprint) and
+`research/md81d/opdiff.py` (operations only), then read side by side where they differed. Addresses are in
+`research/oracle.txt # MD144a`.
+
+| function | verdict | on the ride? |
+|---|---|---|
+| `.phy` tire reader | the same code on moved fields (wheels +0x40, engine +0x10); handed the file +60, as MD81c's loaders; the same 90 strings in order; its wheel setters the same | load (`quad::tire_phy`) |
+| put-back (the quad's) | the same code (fingerprint and size equal). Its callee, the vehicle put-back, is MD93's rework (`handling::untamed::put_back`), which MD168a routes | yes, after a wreck or the hazard clock |
+| animate | moved fields, stunt bounds +8 (46 → 54), a clip-ready null check dropped, the no-op self-copies of the body's words dropped; its base animate the same | no: presentation (game-render) |
+| node pose | the same builder and angle wraps; six linkage aims skip the `vrsqrt` normalise and go through the general builder (which normalises) instead of the fast cross-product path | no: presentation |
+| net unpack | moved fields; Untamed no longer stores the steering filter's fraction (the value is still used from its register) | no: online only |
+| wreck test | the bike's (MD81a): a trick is a stunt id ≤ 48. **Routed**: `quad::Ride::wreck_entries` on Untamed's step | yes |
+| wreck entry | the bike's, MD93's rework: also stops the preload. **Routed**: `quad::Ride::enter` clears it on Untamed's step; the reason-13 spin's `w` 0 comes from the throw | yes |
+| unwreck, remote wreck setter, part on/off, ray swaps to and from the wreck rays | the same code on moved fields (the swaps sit one slot over: Untamed's vt +0x484/+0x488) | yes |
+| out of bounds and the throw (vt +0x16c) | **reworked**: the band inside the box is 300 ft (Unleashed 150), and the spin is built in a zeroed local and stored whole, so its `w` is 0 (Unleashed 1). The box test it calls is the same code; Untamed's world holds the box at +0x42c (+0x43c) | yes |
+
+**The throw is ported and proved.** `quad::Ride::throw` takes Untamed's margin and `w` on Untamed's step
+(`quad::Ride::untamed`). `tests/untamed_atv/throw.rs` runs SLUS-21701's out-of-bounds test off the Free
+Ride image on 4000 generated quads (boxes from 400 ft, bodies in each band) and matches thrown or not, the
+body's velocity and angular velocity and the drag bit for bit; at least 200 cases are thrown only by the
+wider band. Untamed's margin set back to 150 fails it.
+
+**Left over.** game-render's quad pose (`crates/game-render/src/quad.rs`) compares the stunt id with
+Unleashed's riding pose 46; on an Untamed quad the ids are 8 up (a presentation follow-up). The node pose's
+aims can differ in the last bits; nothing on the sim reads them.
 
 ## SLUS-21701's car step against SLUS-21104's (MD81c)
 

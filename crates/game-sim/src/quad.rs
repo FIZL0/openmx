@@ -4641,7 +4641,8 @@ impl<R: Moto + Default> Ride<R> {
     /// switch on) on the quad's fields: the keys [`Bike::air_keys`] with the wreck limits
     /// [`Wrecked::limits`]; the air state's ground, airborne and hang words the quad's, the backflip's
     /// torque the bike's; the pitch and roll the quad's angles, the velocity the body's; the up the
-    /// quad's, touching the record's, in a trick the rider's stunt id at most 40; the loads the
+    /// quad's, touching the record's, in a trick the rider's stunt id at most 40 (48 on Untamed's
+    /// step, MD144a); the loads the
     /// quad's (`+0x1250` side, `+0x1254` vertical, `+0x1258` fore and aft) with the rider's words
     /// [`Wrecked`] holds; the size word's reach, the body's height, and each of the record's contacts
     /// (mirrored when its kind is not 0, its reach the ray's end's height) scenery: nothing on an MX
@@ -4664,7 +4665,9 @@ impl<R: Moto + Default> Ride<R> {
             vel: self.body.velocity,
             ..Default::default()
         };
-        let step = crate::air::Step { up: q.up, touching: b.touching, stunt: b.rider_stunt < TRICKS, ..Default::default() };
+        // MD144a: on Untamed's step a trick is an id under 49, its stunt ids 8 up (MD81a's wreck test).
+        let tricks = if b.untamed() { TRICKS + UNTAMED_STUNT_SHIFT } else { TRICKS };
+        let step = crate::air::Step { up: q.up, touching: b.touching, stunt: b.rider_stunt < tricks, ..Default::default() };
         let loads = crate::air::Loads {
             side: F(q.attitude.x()),
             vertical: F(q.attitude.y()),
@@ -4698,15 +4701,21 @@ impl<R: Moto + Default> Ride<R> {
     /// distance), at [`THROW_REACH`] or half the width, the less, over `2·√g` ([`THROW_G`]), lifted
     /// by [`THROW_OVER`] over it plus [`THROW_LIFT`] times it; the air drag halved
     /// ([`THROW_SCALE`]); spun by three draws ([`THROW_SPIN`], `w` 1). `true` when thrown.
+    ///
+    /// MD144a: on Untamed's step ([`Ride::untamed`]) the band is [`UNTAMED_EDGE_MARGIN`], twice
+    /// as wide, and the spin's `w` is 0 (SLUS-21701 builds the spin in a zeroed local and stores it
+    /// whole); the rest is the same code on moved fields.
     pub fn throw(&mut self, world: &dyn crate::world::World) -> bool {
         let Some(area) = world.area() else { return false };
+        let untamed = self.bike.untamed();
         let Some(w) = self.wrecked.as_mut() else { return false };
+        let (margin, spin_w) = if untamed { (UNTAMED_EDGE_MARGIN, 0.0) } else { (EDGE_MARGIN, 1.0) };
         let at = self.body.position;
         let wrap = world.wrap();
         let (x, z) = (F(at.x()), F(at.z()));
-        let off_x = !wrap[0] && (x < EDGE_MARGIN || area.width - EDGE_MARGIN < x);
-        let off_z = !wrap[1] && (z < EDGE_MARGIN || area.depth - EDGE_MARGIN < z);
-        if !(off_x || off_z || world.off_world(at, EDGE_MARGIN)) {
+        let off_x = !wrap[0] && (x < margin || area.width - margin < x);
+        let off_z = !wrap[1] && (z < margin || area.depth - margin < z);
+        if !(off_x || off_z || world.off_world(at, margin)) {
             return false;
         }
         let half = F(0.5);
@@ -4733,7 +4742,7 @@ impl<R: Moto + Default> Ride<R> {
         let sx = s[0] * w.rng.unit();
         let sy = s[1] * w.rng.unit();
         let sz = s[2] * w.rng.unit();
-        self.body.rates = Vf::new(sx.0, sy.0, sz.0, 1.0);
+        self.body.rates = Vf::new(sx.0, sy.0, sz.0, spin_w);
         true
     }
 
@@ -4742,7 +4751,14 @@ impl<R: Moto + Default> Ride<R> {
     /// ([`Ride::swap`]); the reason set, the clock at 0 and not counting. The rider's settle and
     /// stance, the riding part's off, the rumble, the body's damping (the quad's size word hands none)
     /// and the event are not the headless quad's.
+    ///
+    /// MD144a: on Untamed's step the entry is [`crate::handling::untamed::wreck_entry`]'s (MD93),
+    /// which also stops the preload (`firing` and `ready` cleared); its spin's `w` is 0, which the
+    /// throw's already is ([`Ride::throw`]).
     pub fn enter(&mut self, r: u8) {
+        if self.bike.untamed() {
+            (self.bike.air.preload_firing, self.bike.air.preload_ready) = (false, false);
+        }
         let Some(w) = self.wrecked.as_mut() else { return };
         if r == OUT_OF_BOUNDS {
             let x = w.rng.unit();
@@ -5039,6 +5055,8 @@ const TRICKS: i32 = 41;
 /// already out, and the throw back in: the gravity its `2·√g` reads, the reach it caps the
 /// horizontal speed at, the lift's two terms, the drag's scale, and the spin's three scales.
 const EDGE_MARGIN: F = F(150.0);
+/// MD144a: Untamed's quad out-of-bounds band (SLUS-21701's same test, its margin 300).
+const UNTAMED_EDGE_MARGIN: F = F(300.0);
 const THROW_G: F = F(f32::from_bits(0x416e_8262));
 const THROW_REACH: F = F(f32::from_bits(0x4501_9999));
 const THROW_OVER: F = F(240.0);

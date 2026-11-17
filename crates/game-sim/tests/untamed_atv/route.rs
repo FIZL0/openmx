@@ -21,7 +21,7 @@ use ps2_oracle::{Ee, Kit, skip};
 const QUAD: u32 = 0x01be_4760;
 
 /// Unleashed's race quad's `.phy` and chassis (MD123's files), which the generated states start from.
-fn quad_files() -> Option<(Ini, quad::Model)> {
+pub(super) fn quad_files() -> Option<(Ini, quad::Model)> {
     let kit = Kit::load().map_err(|w| skip(&w)).ok()?;
     let dir = kit.ctx("mxvatv-ps2/md37a");
     let (phy, psg) = (dir.join("phy/atv_race250p.phy"), dir.join("250r_atv_chasis.psg"));
@@ -32,7 +32,7 @@ fn quad_files() -> Option<(Ini, quad::Model)> {
     Some((Ini::parse_bytes(&phy), quad::Model::parse(&psg).unwrap_or_else(|e| panic!("250r_atv_chasis.psg: {e}"))))
 }
 
-fn spawned(files: &(Ini, quad::Model)) -> quad::Ride {
+pub(super) fn spawned(files: &(Ini, quad::Model)) -> quad::Ride {
     let (at, heading) = (Vf::new(0.0, 0.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 1.0));
     let curve = game_sim::camera::CurveTable::build();
     let load = quad::Load::read_model(&files.0, &files.1, at, heading, &curve).unwrap_or_else(|e| panic!("{e}"));
