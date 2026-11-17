@@ -15,6 +15,11 @@
 //! after it; and one still at a time is shot ([`shoot`]). A mod is meant to arrive with its own
 //! [`OWN`]: the store's upload bakes one into the mod's folder first ([`bake`]).
 //!
+//! F28: a world with no picture of its own gets a map instead, drawn here and not by a shell: a
+//! top-down picture of its ground's heights ([`map_picture`]), each tile's terrain read in turn and
+//! let go before the next, on the stills' thread and never beside a ride, kept as
+//! `previews/<id>.map.png` ([`map`]).
+//!
 //! Since P166 the still is of the map, not of the rider: the shell's `--overview` draws no bike, rider
 //! or plane, and looks from [`overview`]'s framing, raised and pulled back from the spawn over the
 //! ground's middle, after the world has had [`STILL_FRAME`] frames to load.
@@ -24,8 +29,12 @@
 //! (the stills are [`STILL_SIZE`]) shows whole. Nothing in here can panic on a mod's bytes: a PNG
 //! that does not read is one log line and a card with no picture.
 
+use game_render::disc::Res;
 use game_render::pst::Texture;
 use game_sim::archive::inflate;
+use game_sim::tiles::{Piece, Reach, Source, Tile, Tiled};
+use game_sim::track::{self, Terrain, TerrainHead, TerrainLayout, TerrainNode};
+use ps2_float::F;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -118,6 +127,11 @@ pub fn overview_line(f: &Framing) -> String {
     format!("overview: {}, {}, {}, {}, {}, {}", f.eye[0], f.eye[1], f.eye[2], f.yaw, f.pitch, f.fov)
 }
 
+/// The map picture drawn of world `id` (F28), `mods/previews/<id>.map.png`.
+pub fn map(mods: &Path, id: &str) -> PathBuf {
+    mods.join(STILLS_DIR).join(format!("{id}.map.png"))
+}
+
 /// The still the shell took of `id` before, of this framing or an older one (P282: kept whatever
 /// `mod.json`'s age or the framing's version, never taken again), the newest framing's first.
 pub fn kept(mods: &Path, id: &str) -> Option<PathBuf> {
@@ -176,9 +190,10 @@ pub fn own_picture(mods: &Path, id: &str) -> Option<PathBuf> {
     pngs.into_iter().next()
 }
 
-/// What the pick has for each of `ids` now, `(id, picture)`, and the ids that need a still taken.
-/// A picture that does not read is a line in `log` and no picture. The browser takes no still: a mod
-/// with no picture of its own is a card with none; nor is a world shot anywhere (P282).
+/// What the pick has for each of `ids` now, `(id, picture)`, and the ids that need a still taken, or
+/// a world's map drawn (F28: a world is shot nowhere, P282). A picture that does not read is a line
+/// in `log` and no picture. The browser takes no still and draws no map: a mod with no picture of
+/// its own is a card with none.
 pub fn gather(mods: &Path, ids: &[String], log: &mut Vec<String>) -> (Vec<(String, Texture)>, Vec<String>) {
     let (mut have, mut take) = (Vec::new(), Vec::new());
     for id in ids {
@@ -188,9 +203,8 @@ pub fn gather(mods: &Path, ids: &[String], log: &mut Vec<String>) -> (Vec<(Strin
             continue;
         } else if let Some(still) = kept(mods, id) {
             still
-        } else if is_world(mods, id) {
-            log.push(format!("mods: tracks/{id} has no picture, and a world is not shot here"));
-            continue;
+        } else if is_world(mods, id) && map(mods, id).is_file() {
+            map(mods, id)
         } else {
             take.push(id.clone());
             continue;
@@ -217,9 +231,10 @@ pub fn still_command(exe: &Path, mods: &Path, id: &str, out: &Path) -> Command {
     c
 }
 
-/// Take a still of each of `ids` in turn, off the menu's thread; each that is taken comes back as
-/// `(id, picture)`, and each that fails as `(id, why)`. None is shot while a ride loads or runs: the
-/// job waits for it, and one a ride stops is shot again after it (P282).
+/// Take a still of each of `ids` in turn, off the menu's thread, or draw a world's map (F28, no shell
+/// run); each that is taken comes back as `(id, picture)`, and each that fails as `(id, why)`. None is
+/// shot or drawn while a ride loads or runs: the job waits for it, and one a ride stops is taken
+/// again after it (P282).
 pub fn still_job(exe: PathBuf, mods: PathBuf, ids: Vec<String>) -> Receiver<(String, Result<Texture, String>)> {
     let (send, hear) = mpsc::channel();
     std::thread::spawn(move || {
@@ -228,7 +243,8 @@ pub fn still_job(exe: PathBuf, mods: PathBuf, ids: Vec<String>) -> Receiver<(Str
                 while riding() {
                     std::thread::sleep(WATCH);
                 }
-                match take_still(&exe, &mods, &id) {
+                let took = if is_world(&mods, &id) { take_map(&mods, &id) } else { take_still(&exe, &mods, &id) };
+                match took {
                     Err(Shot::Ride) => continue,
                     Err(Shot::Failed(why)) => break Err(why),
                     Ok(t) => break Ok(t),
@@ -300,6 +316,224 @@ fn take_still(exe: &Path, mods: &Path, id: &str) -> Result<Texture, Shot> {
         let _ = std::fs::remove_file(still_of(mods, id, v));
     }
     load(&out).map_err(Shot::Failed)
+}
+
+/// World `id`'s map drawn (F28) and kept as [`map`], alone ([`SHOOTING`]) and never beside a ride: a
+/// ride starting stops it between two tiles' reads.
+fn take_map(mods: &Path, id: &str) -> Result<Texture, Shot> {
+    let _one = SHOOTING.lock().unwrap_or_else(|e| e.into_inner());
+    if riding() {
+        return Err(Shot::Ride);
+    }
+    let pieces = map_pieces(mods, id).map_err(Shot::Failed)?;
+    let tiles = pieces.iter().map(|p| p.tile.clone()).collect();
+    let rgb = map_picture(tiles, |i| std::fs::read(&pieces[i].terrain).map_err(|e| format!("{}: {e}", pieces[i].terrain.display())), &riding)?;
+    let dir = mods.join(STILLS_DIR);
+    std::fs::create_dir_all(&dir).map_err(|e| Shot::Failed(format!("{}: {e}", dir.display())))?;
+    let (out, part) = (map(mods, id), dir.join(format!("{id}.map.part.png")));
+    let (w, h) = STILL_SIZE;
+    std::fs::write(&part, game_render::png::encode_rgb(w, h, &rgb)).map_err(|e| Shot::Failed(format!("{}: {e}", part.display())))?;
+    std::fs::rename(&part, &out).map_err(|e| Shot::Failed(format!("{}: {e}", out.display())))?;
+    load(&out).map_err(Shot::Failed)
+}
+
+/// One tile or join of a world as its map needs it: the simulation's statement of it, and its
+/// terrain file.
+struct MapPiece {
+    tile: Tile,
+    terrain: PathBuf,
+}
+
+/// A world's tiles, then its joins, out of its `mod.json`, each tile's scene and each terrain's header
+/// and tree root: what `worlds::find` reads, without the scenes kept, the `drop`s or a wrapped
+/// world's seam joins (the map leaves the seams' strips empty). No ground is read.
+fn map_pieces(mods: &Path, id: &str) -> Result<Vec<MapPiece>, String> {
+    use crate::track_mods::Json;
+    let dir = mods.join("tracks").join(id);
+    let text = std::fs::read_to_string(dir.join("mod.json")).map_err(|e| format!("{id}: mod.json: {e}"))?;
+    let json = Json::parse(&text).map_err(|e| format!("{id}: mod.json: {e}"))?;
+    let list = |key: &str| match json.get(key) {
+        Some(Json::Arr(a)) => a.clone(),
+        _ => Vec::new(),
+    };
+    let numbers = |v: Option<&Json>| -> Vec<f64> {
+        match v {
+            Some(Json::Arr(a)) => a.iter().filter_map(|n| n.num().and_then(|s| s.parse().ok())).collect(),
+            _ => Vec::new(),
+        }
+    };
+    let at_of = |v: Option<&Json>, name: &str| -> Result<[F; 2], String> {
+        match numbers(v)[..] {
+            [x, z] => Ok([F(x as f32), F(z as f32)]),
+            _ => Err(format!("{id}: {name}'s at is not two numbers")),
+        }
+    };
+    let mut out = Vec::new();
+    for t in list("tiles") {
+        let name = t.get("tile").and_then(Json::str).ok_or_else(|| format!("{id}: a tile with no name"))?.to_string();
+        let at = at_of(t.get("at"), &name)?;
+        let keep = match numbers(t.get("keep"))[..] {
+            [a, b, c, d] => [a as u32, b as u32, c as u32, d as u32],
+            _ => return Err(format!("{id}: {name}'s keep is not four numbers")),
+        };
+        let folder = dir.join("tiles").join(&name);
+        let res = Res::folder(&folder).map_err(|e| format!("{id}: {name} is not installed: {e}"))?;
+        let scenes: Vec<&str> = res.entries().iter().map(|e| e.name.as_str()).filter(|n| n.to_ascii_lowercase().ends_with(".scn")).collect();
+        let [scn] = scenes.as_slice() else { return Err(format!("{id}: {name}: {} .scn files, and a tile has one", scenes.len())) };
+        let scene = track::Scene::parse(&res.read(scn)?).map_err(|e| format!("{id}: {name}: {scn}: {e}"))?;
+        let terrain = crate::track_mods::terrain_path(&res, &folder, &scene.terrain_file).map_err(|e| format!("{id}: {name}: {e}"))?;
+        let (spacing, levels, _) = terrain_shape(&terrain).map_err(|e| format!("{id}: {name}: {e}"))?;
+        out.push(MapPiece { tile: Tile { name, at, layout: scene.terrain, spacing, levels, keep, first_owner: 0 }, terrain });
+    }
+    for j in list("joins") {
+        let name = j.get("join").and_then(Json::str).ok_or_else(|| format!("{id}: a join with no name"))?.to_string();
+        let at = at_of(j.get("at"), &name)?;
+        let folder = dir.join("joins").join(&name);
+        let tagged = folder.join(format!("{name}.ps2.trn"));
+        let terrain = if tagged.is_file() { tagged } else { folder.join(format!("{name}.trn")) };
+        let (spacing, levels, (width, breadth)) = terrain_shape(&terrain).map_err(|e| format!("{id}: {name}: {e}"))?;
+        let layout = TerrainLayout { width, breadth, width_scale: spacing, breadth_scale: spacing, ..TerrainLayout::default() };
+        let mut tile = Tile { name, at, layout, spacing, levels, keep: [0; 4], first_owner: 0 };
+        tile.keep = tile.every_cell();
+        out.push(MapPiece { tile, terrain });
+    }
+    Ok(out)
+}
+
+/// A terrain file's spacing, tree levels and root cells across and along, from its header and its
+/// tree's root alone, as `worlds::find` reads them: a few kilobytes of the file.
+fn terrain_shape(path: &Path) -> Result<(F, u32, (u32, u32)), String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let name = || path.display().to_string();
+    let mut file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", name()))?;
+    let len = file.metadata().map_err(|e| format!("{}: {e}", name()))?.len();
+    let mut read_at = |at: u64, n: usize| -> Result<Vec<u8>, String> {
+        let n = len.saturating_sub(at).min(n as u64) as usize;
+        let mut out = vec![0; n];
+        file.seek(SeekFrom::Start(at)).and_then(|_| file.read_exact(&mut out)).map_err(|e| format!("{}: {e}", name()))?;
+        Ok(out)
+    };
+    let head = TerrainHead::parse(&read_at(0, TerrainHead::MOST)?)?;
+    head.fits(len)?;
+    let root = TerrainNode::read(&read_at(u64::from(head.root_at), TerrainNode::BYTES)?).ok_or("no tree")?;
+    let (mut w, mut b) = (0, 0);
+    if root.children_at != 0 {
+        let table = read_at(u64::from(root.children_at), TerrainNode::TABLE_BYTES)?;
+        for cz in 0..track::TREE_ARITY {
+            for cx in 0..track::TREE_ARITY {
+                let at = (cx + cz * track::TREE_ARITY) as usize * 4;
+                if table.get(at..at + 4).is_some_and(|w| w != [0; 4]) {
+                    w = w.max(cx + 1);
+                    b = b.max(cz + 1);
+                }
+            }
+        }
+    }
+    Ok((head.scale, head.levels, (w.max(1), b.max(1))))
+}
+
+/// The owners a world's map asks, which read nothing.
+struct NoGround;
+
+impl Source for NoGround {
+    fn load(&mut self, _: usize) -> Result<Piece, String> {
+        Err("a map reads no piece through its owners".into())
+    }
+}
+
+/// The colour off the ground, and the ground's from low to high.
+const MAP_SEA: [f32; 3] = [24.0, 28.0, 34.0];
+const MAP_RAMP: [[f32; 3]; 3] = [[66.0, 104.0, 58.0], [150.0, 128.0, 88.0], [222.0, 218.0, 204.0]];
+/// How much steeper the shading draws the ground than it is, so a map miles across shows its hills.
+const MAP_RELIEF: f32 = 4.0;
+
+/// A world's map (F28), [`STILL_SIZE`] RGB, north (`+z`) up and east (`+x`) right as the HUD's map
+/// has them: the whole world fitted in and centred, each pixel the ground's height at its middle on the
+/// piece that owns the place ([`Tiled::owner`]), coloured low to high over the heights
+/// found and shaded as lit from the north-west; off the ground [`MAP_SEA`]. `terrain(i)` is piece
+/// `i`'s file, read one piece at a time and let go before the next, only for the pieces that own a
+/// pixel; `stop` is asked before each, and stops the map as [`Shot::Ride`].
+pub fn map_picture(tiles: Vec<Tile>, mut terrain: impl FnMut(usize) -> Result<Vec<u8>, String>, stop: &dyn Fn() -> bool) -> Result<Vec<u8>, Shot> {
+    let tiled = Tiled::new(tiles.clone(), Box::new(NoGround), Reach::DESKTOP).map_err(Shot::Failed)?;
+    let [width, depth] = tiled.extent().map(|e| e.0);
+    if !(width > 0.0 && depth > 0.0) {
+        return Err(Shot::Failed("a world with no ground".into()));
+    }
+    let (w, h) = STILL_SIZE;
+    let feet = (width / w as f32).max(depth / h as f32);
+    let (x0, z1) = (width / 2.0 - feet * w as f32 / 2.0, depth / 2.0 + feet * h as f32 / 2.0);
+    let mut asks: Vec<Vec<(usize, f32, f32)>> = vec![Vec::new(); tiles.len()];
+    for py in 0..h {
+        for px in 0..w {
+            let (x, z) = (x0 + (px as f32 + 0.5) * feet, z1 - (py as f32 + 0.5) * feet);
+            if let Some((i, lx, lz)) = tiled.owner(F(x), F(z)) {
+                asks[i].push((py * w + px, lx.0, lz.0));
+            }
+        }
+    }
+    let mut heights = vec![f32::NAN; w * h];
+    for (i, points) in asks.iter().enumerate().filter(|(_, p)| !p.is_empty()) {
+        if stop() {
+            return Err(Shot::Ride);
+        }
+        let bytes = terrain(i).map_err(Shot::Failed)?;
+        let t = Terrain::parse(&bytes).map_err(|e| Shot::Failed(format!("{}: terrain: {e}", tiles[i].name)))?;
+        for &(at, lx, lz) in points {
+            heights[at] = height_near(&t, &tiles[i], lx, lz).unwrap_or(f32::NAN);
+        }
+    }
+    let (lo, hi) = heights.iter().filter(|v| v.is_finite()).fold((f32::MAX, f32::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+    let rise = (hi - lo).max(1.0e-3);
+    let at = |x: usize, y: usize| heights[y.min(h - 1) * w + x.min(w - 1)];
+    // The light from the north-west and above: west is -x, north up the picture.
+    let light = {
+        let l = [-1.0f32, 1.5, 1.0];
+        let n = (l[0] * l[0] + l[1] * l[1] + l[2] * l[2]).sqrt();
+        l.map(|v| v / n)
+    };
+    let mut rgb = Vec::with_capacity(w * h * 3);
+    for y in 0..h {
+        for x in 0..w {
+            let v = at(x, y);
+            if !v.is_finite() {
+                rgb.extend(MAP_SEA.map(|c| c as u8));
+                continue;
+            }
+            // A neighbour off the ground stands at this pixel's height.
+            let near = |nx: usize, ny: usize| Some(at(nx, ny)).filter(|n| n.is_finite()).unwrap_or(v);
+            let east = (near(x + 1, y) - near(x.saturating_sub(1), y)) / (2.0 * feet) * MAP_RELIEF;
+            let north = (near(x, y.saturating_sub(1)) - near(x, y + 1)) / (2.0 * feet) * MAP_RELIEF;
+            let n = [-east, 1.0, -north];
+            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            let lit = (n[0] * light[0] + n[1] * light[1] + n[2] * light[2]) / len;
+            let shade = (0.35 + 0.65 * lit / light[1]).clamp(0.45, 1.25);
+            let t = ((v - lo) / rise).clamp(0.0, 1.0) * 2.0;
+            let (a, b, f) = if t < 1.0 { (MAP_RAMP[0], MAP_RAMP[1], t) } else { (MAP_RAMP[1], MAP_RAMP[2], t - 1.0) };
+            rgb.extend((0..3).map(|k| ((a[k] + (b[k] - a[k]) * f) * shade).clamp(0.0, 255.0) as u8));
+        }
+    }
+    Ok(rgb)
+}
+
+/// The height in world feet of a point in a piece's own feet: across the cell it is in, or where
+/// that cell does not read, the sample nearest it from a neighbour's corner, as `worlds::stand_in`
+/// finds its corners.
+fn height_near(t: &Terrain, tile: &Tile, lx: f32, lz: f32) -> Option<f32> {
+    let spacing = tile.spacing.0;
+    let [sx_n, sz_n] = tile.samples();
+    let (fx, fz) = ((lx / spacing).max(0.0), (lz / spacing).max(0.0));
+    let (cx, cz) = ((fx as u32).min(sx_n.saturating_sub(2)), (fz as u32).min(sz_n.saturating_sub(2)));
+    if let Some(q) = t.cell(cx, cz, 1) {
+        let (u, v) = ((fx - cx as f32).clamp(0.0, 1.0), (fz - cz as f32).clamp(0.0, 1.0));
+        let [a, b, c, d] = q.height.map(|h| h.0);
+        return Some(t.scale.0 * ((a * (1.0 - u) + b * u) * (1.0 - v) + (c * (1.0 - u) + d * u) * v));
+    }
+    let sx = (fx.round() as u32).min(sx_n.saturating_sub(1));
+    let sz = (fz.round() as u32).min(sz_n.saturating_sub(1));
+    [(0, 0, 0), (1, 1, 0), (2, 0, 1), (3, 1, 1)]
+        .into_iter()
+        .filter(|&(_, dx, dz)| sx >= dx && sz >= dz)
+        .find_map(|(k, dx, dz)| t.cell(sx - dx, sz - dz, 1).map(|q| t.scale.0 * q.height[k].0))
 }
 
 /// P282: `id`'s own [`OWN`] put in its folder if it has none, so the mod carries its picture wherever
@@ -506,8 +740,8 @@ mod tests {
     }
 
     /// P282: a picture is taken once and kept. A mod's own and a kept still (of this framing or an
-    /// older one) are shown however much newer its `mod.json` is, and no still is taken of them; a
-    /// world with no picture is shot by no one; only a track with none is.
+    /// older one) are shown however much newer its `mod.json` is, and no still is taken of them; only
+    /// a mod with none is taken, a world's as its map (F28).
     #[test]
     fn a_picture_is_kept_and_a_world_never_shot() {
         let mods = scratch("kept", &[("own", "track"), ("shot", "track"), ("old", "track"), ("bare", "track"), ("big", "world"), ("big_shot", "world")]);
@@ -525,8 +759,16 @@ mod tests {
         let mut log = Vec::new();
         let (have, take) = gather(&mods, &ids, &mut log);
         assert_eq!(have.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), ["own", "shot", "old", "big_shot"], "{log:?}");
-        assert_eq!(take, ["bare"], "only the track with no picture: {log:?}");
-        assert!(log.iter().any(|l| l.contains("tracks/big") && l.contains("world")), "{log:?}");
+        // The world with none is a map to draw (F28), which `still_job` draws with no shell.
+        assert_eq!(take, ["bare", "big"], "only the mods with no picture: {log:?}");
+        assert!(log.is_empty(), "{log:?}");
+        // A kept map is a world's picture, and not a track's.
+        let mods2 = scratch("kept-map", &[("big_map", "world"), ("trk", "track")]);
+        picture(&map(&mods2, "big_map"));
+        picture(&map(&mods2, "trk"));
+        let (have, take) = gather(&mods2, &["big_map".into(), "trk".into()], &mut log);
+        assert_eq!((have.len(), have[0].0.as_str(), take), (1, "big_map", vec!["trk".to_string()]));
+        let _ = std::fs::remove_dir_all(&mods2);
         assert_eq!(kept(&mods, "old"), Some(still_of(&mods, "old", 1)));
         let _ = std::fs::remove_dir_all(&mods);
     }
@@ -574,6 +816,72 @@ mod tests {
         let (_, got) = job.recv_timeout(Duration::from_secs(20)).expect("shot after the ride");
         assert!(got.is_err());
         assert_eq!(runs(), 3);
+        let _ = std::fs::remove_dir_all(&mods);
+    }
+
+    /// F28: a world with no picture gets a map of its ground drawn here, kept as `<id>.map.png` and
+    /// read back by the next gather; no shell is run for it (the stand-in shell marks every run), and
+    /// none is drawn while a ride is on. Two generated tiles side by side, the east one a hill.
+    #[cfg(unix)]
+    #[test]
+    fn a_world_with_no_picture_gets_a_map_and_no_child() {
+        use game_sim::tiles::generate;
+        use std::os::unix::fs::PermissionsExt;
+        let mods = scratch("map", &[]);
+        let world = mods.join("tracks").join("f28_world");
+        let write = |rel: &str, bytes: &[u8]| {
+            let path = world.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        };
+        // 4 x 4 root cells of 16 samples at 8 feet: 512 feet a tile, kept to 63 cells.
+        for (name, at, hill) in [("west", 0, false), ("east", 504, true)] {
+            let stem = name.to_uppercase();
+            let height = |sx: u32, sz: u32| if hill { 40.0 + 200.0 * (-(((sx as f64 - 32.0).powi(2) + (sz as f64 - 32.0).powi(2)) / 200.0)).exp() } else { 40.0 };
+            write(&format!("tiles/{name}/Env/{stem}/{stem}.ps2.trn"), &generate::terrain(name, (4, 4), 8.0, height, |_, _| 1));
+            let scene = format!("[SceneInfo]\r\nSceneName=F28 {name}\r\n[Environment]\r\nTerrainFile={stem}.trn\r\nTerrainWidth=4\r\nTerrainBreadth=4\r\nTerrainWidthScale=8.00\r\nTerrainBreadthScale=8.00\r\n");
+            write(&format!("tiles/{name}/Env/{stem}/{stem}.scn"), scene.as_bytes());
+        }
+        let json = r#"{"standard": 1, "kind": "world", "id": "f28_world", "name": "F28", "tiles": [{"tile": "west", "at": [0, 0], "keep": [0, 0, 63, 63]}, {"tile": "east", "at": [504, 0], "keep": [0, 0, 63, 63]}]}"#;
+        write("mod.json", json.as_bytes());
+        let (exe, marks) = (mods.join("shell.sh"), mods.join("marks"));
+        std::fs::write(&exe, format!("#!/bin/sh\necho run >> '{}'\n", marks.display())).unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let ids = vec!["f28_world".to_string()];
+        let mut log = Vec::new();
+        let (have, take) = gather(&mods, &ids, &mut log);
+        assert!(have.is_empty() && take == ids, "{log:?}");
+        let ride = Ride::on();
+        let job = still_job(exe.clone(), mods.clone(), take);
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(job.try_recv().is_err() && !map(&mods, "f28_world").exists(), "not drawn beside a ride");
+        drop(ride);
+        let (id, got) = job.recv_timeout(Duration::from_secs(60)).expect("drawn after the ride");
+        let t = got.unwrap_or_else(|e| panic!("{id}: {e}"));
+        assert!(!marks.exists(), "no shell was run");
+        assert_eq!((id.as_str(), (t.width, t.height)), ("f28_world", STILL_SIZE));
+        assert!(map(&mods, "f28_world").is_file() && kept(&mods, "f28_world").is_none(), "kept as the map, not a still");
+        // The world is 1008 x 504 feet: it fills the picture's width, centred up and down, north up.
+        let feet = 1008.0 / t.width as f32;
+        let px = |x: f32, z: f32| -> [u8; 3] {
+            let (col, row) = ((x / feet) as usize, ((t.height as f32 * feet / 2.0 + 252.0 - z) / feet) as usize);
+            let i = (row * t.width + col) * 4;
+            [t.rgba[i], t.rgba[i + 1], t.rgba[i + 2]]
+        };
+        let sea = MAP_SEA.map(|c| c as u8);
+        assert_eq!(&t.rgba[4 * (2 * t.width + 256)..][..3], &sea[..], "off the ground over the world");
+        // The hill's top on the east tile is the lightest, the flat west tile lower; and the hill's
+        // north-west side, toward the light, lighter than its south-east side.
+        let sum = |c: [u8; 3]| c.iter().map(|&v| v as u32).sum::<u32>();
+        let (west, top) = (px(250.0, 250.0), px(760.0, 256.0));
+        assert!(west != sea && sum(top) > sum(west) + 100, "the hill's top {top:?}, the flat {west:?}");
+        let (lit, dark) = (px(730.0, 286.0), px(790.0, 226.0));
+        assert!(sum(lit) > sum(dark) + 30, "lit {lit:?}, dark {dark:?}");
+        // Kept: the next gather shows it, and takes nothing.
+        let (have, take) = gather(&mods, &ids, &mut log);
+        assert!(have.len() == 1 && take.is_empty(), "{log:?}");
+        assert!(!marks.exists());
         let _ = std::fs::remove_dir_all(&mods);
     }
 
