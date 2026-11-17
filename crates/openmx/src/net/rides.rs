@@ -66,8 +66,9 @@ pub struct Rides<'a> {
 /// and every plane of it in flight from, as [`Modded::stock_plane`] is the ride's own plane's.
 ///
 /// `closed` (P318a): a seat that joined since lacks its pack, so no switch takes it any more —
-/// the ride's own plane in its place — though a seat already up in it flies on in it. Every
-/// machine closes it at one tick: the join's restart, whose state says it ([`Rides::encode`]).
+/// the ride's own plane in its place — and a seat already up in it is turned onto the ride's own
+/// where it is ([`turn_closed`], N26). Every machine closes it at one tick: the join's restart,
+/// whose state says it ([`Rides::encode`]).
 #[derive(Clone)]
 pub struct Flier {
     pub byte: u8,
@@ -82,6 +83,26 @@ pub fn template_for<'f>(byte: u8, plane: Option<&'f Flight>, fliers: &'f [Flier]
     match fliers.iter().find(|f| byte != 0 && f.byte == byte) {
         Some(f) => Some(&f.flight),
         None => plane,
+    }
+}
+
+/// **The seats up in a closed flier turned onto the ride's own plane** (N26): a join closes the
+/// fliers its machine lacks the pack of ([`Flier::closed`]), but the handshake let it in off the
+/// packs the host's ride last said it flies, so a seat may have switched onto one since. That seat's
+/// flight goes on where and how it is ([`Flight::put_back`]) in a copy of `plane`: its numbers, ray
+/// probe, steps and skin the ride's own, which every machine holds. A ride with no plane of its own
+/// leaves it be.
+pub fn turn_closed(sims: &mut [Sim], plane: Option<&Flight>, fliers: &[Flier]) {
+    let Some(plane) = plane else { return };
+    for sim in sims.iter_mut() {
+        if let Some(f) = sim.plane.as_mut()
+            && f.skin != 0
+            && fliers.iter().any(|t| t.closed && t.byte == f.skin)
+        {
+            let mut own = plane.clone();
+            own.put_back(f);
+            *f = own;
+        }
     }
 }
 
@@ -428,11 +449,19 @@ impl Game for Rides<'_> {
         }
         let mut at = 4;
         let mut sims = self.sims.clone();
+        // Each seat's skin before (N26): a seat the state has in another plane than here (a join's
+        // turn, [`turn_closed`]) takes that plane's ray probe and steps, not the ones it had.
+        let skins: Vec<u8> = self.sims.iter().map(|s| s.plane.as_ref().map_or(0, |f| f.skin)).collect();
         sims.resize(seats, self.sims[0].clone());
         for (seat, sim) in sims.iter_mut().enumerate() {
             let n = word(at, "a seat's length")?;
             let one = bytes.get(at + 4..at + 4 + n).ok_or(format!("seat {}'s state is cut short", seat + 1))?;
             from_seat_bytes(sim, one).map_err(|e| format!("seat {}: {e}", seat + 1))?;
+            if let Some(f) = sim.plane.as_mut()
+                && skins.get(seat).is_some_and(|&s| s != f.skin)
+            {
+                f.rays = None;
+            }
             at += 4 + n;
         }
         // And the fliers the state says are closed (P318a), every other one open: every machine
@@ -468,10 +497,20 @@ impl Game for Rides<'_> {
                 let (&m, rest) = rest.split_first().ok_or("the spawn's closed fliers are cut short")?;
                 let (closed, state) = rest.split_at_checked(m as usize).ok_or("the spawn's closed fliers are cut short")?;
                 self.fliers.iter_mut().filter(|f| closed.contains(&f.byte)).for_each(|f| f.closed = true);
+                // And a seat up in one of them now (N26): a switch the handshake's check missed,
+                // which the joiner could not fly, turned onto the ride's own plane at this tick.
+                turn_closed(self.sims, self.plane.as_deref(), self.fliers);
                 state
             }
         };
+        let first = sim.plane.as_ref().map_or(0, |f| f.skin);
         from_seat_bytes(&mut sim, state).map_err(|e| format!("the spawn: {e}"))?;
+        // Flying in another plane than the first seat's (N26), its own plane's probe and steps.
+        if let Some(f) = sim.plane.as_mut()
+            && f.skin != first
+        {
+            f.rays = None;
+        }
         if let Some(p) = presets.chunks(2).find(|p| p[0] as usize == seat) {
             sim.set_presets([p[1] as usize, 0]);
         }
