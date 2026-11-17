@@ -12909,3 +12909,17 @@ atv_voice_index_pick        atv 0x00183070 = (driver, two)
 atv_voice_pick              atv 0x00183180 = (driver, asked, asked too, top, restart); pair pick 0x00183510
 atv_sample_start            atv 0x00187850 = (handed out whole with the play)
 atv_sound_queue_flush       atv 0x001840c0 = (driver, 0) the SIF send (handed out)
+
+# MD166 — which camera SLUS-21104 hands a machine in a race. Not the race camera: every race (and free ride)
+# rides the follow camera (MXCameraFollow, game_sim::camera::ModFollow, MD82b) on its FC_ file; the race
+# camera and its RC_ files are Hill Climb's alone. tests/mxvatv_camera.rs replays context/capture/md166
+# (an Open Class race at Desert Oasis behind the ATV and a trophy truck). Journal: research/journal/*-md166-*.
+atv_camera_controller_ctor  atv 0x0048f4b0 = builds the race camera (+0x7c, 0x0048f670) and the follow camera (+0x80, 0x0048f790), then current +0x78 = +0x80 (follow)
+atv_camera_controller_vtable atv 0x003ccc90 = the camera controller's vtable (object +4); slot +0x84 = 0x00490b30, set current to +0x7c or +0x80 (no direct caller found)
+atv_camera_controller_target atv 0x0048ffd0 = (ctl, event holder): current = race camera (+0x7c) only when the event's type word is 5, else the follow camera (+0x80); a null holder (0x00249700, leaving a machine) picks follow. Callers 0x00249620 (get on), 0x00249700 (get off)
+atv_swap_current_camera     atv 0x00490470 = old = ctl +0x78; ctl +0x78 = new; return old
+atv_event_type              atv 0x0051a1e0 = *(*(holder + 0x3c0) + 0x14), the event descriptor's type: 0 Supercross, 1 National, 2 Short Track, 4 Waypoint, 5 Hill Climb, 8 Open Class (machine race), 9 A to B, 10 Airplane Race, 11 Super Moto, 13 High Score, 14 Combo, 16 Follow The Leader, 17 Free Ride (descriptors vtable 0x003c2eb0: +0x8 name, +0xc track, +0x20 .aty)
+atv_event_type_class        atv 0x00280210 = table 0x00390fa0 by type: 0 for 0..11, 1 from 12 (the freestyle events)
+atv_race_camera_update      atv 0x00485b20 = the race (Hill Climb) camera's frame: base frame only with no target; heading = forward (+0x30) on the ground, its y pulled to 0 by global 0x00542380, or velocity (+0x50) in the air (0x00486d10 / 0x00486bc0 on flag +0x230), y < 0 scaled 0.67, normalised; up + UP halved; both through own 3-lag sets (+0x1f0 heading, +0x1f4 up); vel swapped for (0,0,0,1) when over 4 ft/s, reversing and not on a look-back preset; aim 0x00486290, distance 0x004860d0, look-at 0x004866e0, position 0x004867f0, filter 0x00486e60, then 0x00487520; not ported (no hill climb in the shell)
+# atv_md166_state             context/mxvatv-ps2/md166/atv-race.p2s: Desert Baja Race (type 8), controller 0x1e1fcb0, race cam 0x1dfccf0, follow 0x1dfd090 = current
+# atv_md166_state             context/mxvatv-ps2/md166/car-race.p2s: Desert Baja Race (type 8), trophy truck, controller 0x1c8b590, race cam 0x1d25000, follow 0x1d253a0 = current
