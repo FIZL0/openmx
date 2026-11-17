@@ -22,13 +22,17 @@
 //! word, and every pair first zeroes a per-contact word array at `+0xac` that nothing the quad reads
 //! (or anything in the search) writes. A record holds three contacts a ray (12) and keeps one per ray.
 //!
-//! The plants' parts ([`Plants`]): the species with a sphere stand a sphere, whose ray test writes no
-//! contact (so the port does not test it: only the hit bit could tell); the two with a cylinder
-//! (MC02's models 7 and 8, prickly pear and weeds) stand MX Unleashed's trunk mesh
-//! ([`eco::Trees`]). MC02's two have no height, so nothing strikes them.
+//! The plants' parts ([`Plants`]): the species with a sphere stand a sphere at the plant
+//! ([`atv_plant::stand`]), whose ray test ([`atv_part::sphere_reaches`], MD85) writes no contact and
+//! can only raise the hit bit; the two with a cylinder (MC02's models 7 and 8, prickly pear and weeds)
+//! stand MX Unleashed's trunk mesh ([`eco::Trees`]). MC02's two have no height, so nothing strikes
+//! them.
 
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
 
+use crate::atv_part;
+use crate::atv_plant;
+use crate::atv_sphere::{self, Sphere};
 use crate::atv_world::World;
 use crate::eco::{self, Ecosystem, Trees};
 use crate::flight_search::{self, Rays};
@@ -102,8 +106,8 @@ pub fn search(
 
 /// A plant's parts as the probe tests them: each species' parts are collidables of their own, one
 /// for all the plants of the species, stood where the plant is each time the search asks for it.
-/// A sphere's ray test writes no contact; a cylinder is the trunk mesh [`Trees`] builds, at the
-/// plant's cell with the part's own rows (MC02's are all the identity).
+/// A sphere is stood by the plant stand and its ray test writes no contact; a cylinder is the trunk
+/// mesh [`Trees`] builds, at the plant's cell with the part's own rows (MC02's are all the identity).
 pub struct Plants<'a> {
     pub trees: &'a Trees,
     /// Each placed group's species (in loaded order), the first group at collidable `first_group`.
@@ -111,6 +115,18 @@ pub struct Plants<'a> {
     pub first_group: usize,
     /// Each species' first part collidable ([`part_collidables`]).
     pub slots: Vec<usize>,
+    /// Each species' (file slot) sphere parts as loaded ([`sphere_part`]; `None` for any other kind),
+    /// and the four words the stand scales a sphere by.
+    pub spheres: Vec<Vec<Option<Sphere>>>,
+    pub scales: Vec<atv_plant::Species>,
+}
+
+/// A sphere solid as the loader leaves its part: the point the solid's `at` (`w` 1), the identity
+/// frame, the radius and its square (MC02's image: every sphere part so).
+pub fn sphere_part(s: &eco::Solid) -> Sphere {
+    let mut sphere = Sphere { frame: atv_sphere::IDENTITY, ..Sphere::default() };
+    atv_sphere::place(&mut sphere, Some(Vf::new(s.at[0].0, s.at[1].0, s.at[2].0, 1.0)), Some(s.radius));
+    sphere
 }
 
 impl<'a> Plants<'a> {
@@ -123,7 +139,17 @@ impl<'a> Plants<'a> {
             at += s.solids.len();
         }
         let models = world.groups.clone().map(|g| world.broad.places[g].model).collect();
-        Plants { trees, models, first_group: world.groups.start, slots }
+        let spheres = eco
+            .species
+            .iter()
+            .map(|sp| sp.iter().flat_map(|s| &s.solids).map(|s| (s.kind == eco::SPHERE).then(|| sphere_part(s))).collect())
+            .collect();
+        let scales = eco
+            .species
+            .iter()
+            .map(|sp| sp.as_ref().map_or_else(atv_plant::Species::default, |s| atv_plant::Species { lean: [s.height[0], s.height[1]], size: [s.width[0], s.width[2]] }))
+            .collect();
+        Plants { trees, models, first_group: world.groups.start, slots, spheres, scales }
     }
 }
 
@@ -148,6 +174,8 @@ pub struct Wheels<'a> {
     trunks: Vec<Option<Vec<Facet>>>,
     /// The trunk the part last handed out is standing as.
     trunk: Option<usize>,
+    /// Or the sphere it stood.
+    sphere: Option<atv_part::Sphere>,
 }
 
 impl<'a> Wheels<'a> {
@@ -155,7 +183,7 @@ impl<'a> Wheels<'a> {
         let facets = props.iter().map(|p| flight_search::facets(&p.mesh)).collect();
         let trunks = vec![None; plants.trees.props.props.len()];
         let record = record(rays.segments.len());
-        Wheels { rays, transform, props, first_mesh, plants, record, facets, trunks, trunk: None }
+        Wheels { rays, transform, props, first_mesh, plants, record, facets, trunks, trunk: None, sphere: None }
     }
 
     fn group(&self, group: usize) -> &eco::Group {
@@ -184,6 +212,10 @@ impl Narrow for Wheels<'_> {
         }
         // A plant's part: a sphere strikes nothing a contact is made of, but the pair still starts
         // the record's nearest-of-this-pair afresh.
+        if let Some(sphere) = self.sphere {
+            self.record.first = F::ONE;
+            return atv_part::sphere_reaches(&probe, &sphere);
+        }
         let Some(j) = self.trunk else {
             return ray_probe::pair(&probe, &ray_probe::Shape::Never, &mut self.record);
         };
@@ -196,8 +228,20 @@ impl Narrow for Wheels<'_> {
         self.group(group).parts.len()
     }
 
+    /// The species' part `i` stood at the plant: a trunk is the one built at its cell; a sphere is
+    /// stood by the plant stand (no plant here is hidden or turned).
     fn part(&mut self, _objects: &mut [Collidable], group: usize, i: usize) -> Option<usize> {
-        self.trunk = self.group(group).parts[i];
+        let g = self.group(group);
+        let (trunk, cell, slot, lean, size) = (g.parts[i], g.cell, usize::from(g.model), g.height, g.blend);
+        self.trunk = trunk;
+        self.sphere = None;
+        if let Some(sphere) = self.plants.spheres[slot][i].as_mut() {
+            let plant = atv_plant::Plant { position: cell, lean, size, ..atv_plant::Plant::default() };
+            let mut scales = [F::ZERO; 2];
+            let part = atv_plant::Part::Sphere { sphere, scales: &mut scales };
+            atv_plant::stand(&plant, &self.plants.scales[slot], self.plants.trees.cell(), Some(part), None);
+            self.sphere = Some(atv_part::Sphere { centre: sphere.centre, radius: sphere.radius, radius2: sphere.radius2 });
+        }
         let model = self.plants.models[group - self.plants.first_group];
         Some(self.plants.slots[usize::from(model)] + i)
     }

@@ -467,14 +467,16 @@ fn the_trigger_probe_is_the_images() {
     let (c, radius) = atv_search::reach(&d.rays, &t);
     assert_eq!(bits(c)[..3], words(ee, p + at::CENTRE)[..3], "the probe's centre");
     assert_eq!(radius.0.to_bits(), ee.u32_at(p + at::RADIUS), "the probe's reach");
-    // The species' parts: a sphere where the port has none, a cylinder where it built a trunk — and
+    // The species' parts: a sphere as the port loads it, a cylinder where it built a trunk — and
     // the cylinder's tree, node for node, the port's. Each part is stood at the plant the search
     // asks for, at the plant's cell; the cells the image holds are the file's.
     let w = &d.world;
     let image = image_parts(ee);
     let solids: Vec<&eco::Species> = d.eco.species.iter().flatten().collect();
     assert_eq!((image.len(), d.slots.len()), (solids.len(), solids.len()), "the species");
-    let mut cylinders = 0;
+    let (mut cylinders, mut spheres) = (0, 0);
+    // The stand puts a sphere at the plant's cell by the eco's unit: the port's cell.
+    assert_eq!(ee.u32_at(ee.u32_at(ECO_AT) + 0xc4), d.trees.cell().0.to_bits(), "the eco's cell");
     for (m, parts) in image.iter().enumerate() {
         assert_eq!(parts.len(), solids[m].solids.len(), "species {m}'s part count");
         // A plant of the species, for its trunks.
@@ -489,6 +491,15 @@ fn the_trigger_probe_is_the_images() {
                 "species {m}'s part {k}: not retired, nobody listens, no body, no vehicle"
             );
             if sphere {
+                // The sphere as the loader left it: its point, frame, radius and square the port's.
+                let want = atv_search::sphere_part(&solids[m].solids[k]);
+                let got: Vec<[u32; 4]> = (0..5).map(|i| words(ee, c + 0x130 + 0x10 * i)).collect();
+                let mut built = vec![bits(want.local)];
+                built.extend(want.frame.map(bits));
+                assert_eq!(got, built, "species {m}'s sphere {k}'s point and frame");
+                let r = [ee.u32_at(c + 0x180), ee.u32_at(c + 0x184)];
+                assert_eq!(r, [want.radius.0.to_bits(), want.radius2.0.to_bits()], "species {m}'s sphere {k}'s radius");
+                spheres += 1;
                 continue;
             }
             let Some(j) = g.and_then(|g| g.parts[k]) else { panic!("species {m}'s part {k}: no trunk built") };
@@ -505,7 +516,7 @@ fn the_trigger_probe_is_the_images() {
             cylinders += 1;
         }
     }
-    assert!(cylinders > 0, "MC02 has cylinders");
+    assert!(cylinders > 0 && spheres > 0, "MC02 has cylinders and spheres");
     // MC02's cylinders are rings with no height (the file's height is 0, the image's trees are flat):
     // no ray strikes one, here or in the original.
     let flat = solids.iter().flat_map(|s| &s.solids).filter(|s| s.kind == eco::CYLINDER).all(|s| s.height == F::ZERO);
@@ -528,7 +539,7 @@ fn the_trigger_probe_is_the_images() {
     });
     assert_eq!(checked, w.meshes.len(), "every port mesh is one of the image's");
     println!(
-        "the trigger probe: {} rays, {} nodes, word for word; {checked} meshes' frames; {cylinders} cylinders' trees",
+        "the trigger probe: {} rays, {} nodes, word for word; {checked} meshes' frames; {cylinders} cylinders' trees, {spheres} spheres",
         d.rays.segments.len(),
         d.rays.nodes.len()
     );
@@ -674,11 +685,9 @@ fn the_quads_search_is_the_originals() {
     for (name, t) in &frames {
         let o = run(&mut d, &mut record, t);
         assert_eq!(o.got, o.want, "{name}: the record");
-        if o.hit.0 != o.hit.1 {
-            // Only a sphere the port does not test can tell them apart: no contact, a group in the list.
-            assert!(o.hit.0 && o.want.contacts.is_empty() && o.groups, "{name}: the hit bit {:?}", o.hit);
-            hit_only += 1;
-        }
+        assert_eq!(o.hit.1, o.hit.0, "{name}: the hit bit");
+        // A plant's sphere struck alone: the hit bit with no contact, a group in the list.
+        hit_only += usize::from(o.hit.0 && o.want.contacts.is_empty() && o.groups);
         hits += usize::from(o.hit.1);
         contacts += o.want.contacts.len();
         with_groups += usize::from(o.groups);
@@ -696,6 +705,7 @@ fn the_quads_search_is_the_originals() {
         frames.len(),
     );
     assert!(contacts > 1000 && meshes == d.props.len(), "the rays struck every mesh");
+    assert!(hit_only > 100, "the frames strike plants' spheres alone");
 }
 
 /// A quaternion turning by `yaw` about up, then `pitch` about across and `roll` about along.
