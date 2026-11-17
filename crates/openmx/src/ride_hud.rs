@@ -204,6 +204,33 @@ pub struct RaceShown {
     pub laps: u32,
     pub place: Option<u32>,
     pub riders: u32,
+    /// The laps the view's card has run, which the flags go by (P328).
+    pub run: u32,
+}
+
+/// The flag the race's HUD waves at a counted lap (P328): white as the last lap starts, checkered
+/// as the laps are run. The original's race overlay watches its rider's card and, on a lap counted,
+/// waves the one that fits for 4 s (its 10 s clock hides both under 6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RaceFlag {
+    White,
+    Checkered,
+}
+
+/// How long a race flag waves.
+pub const FLAG_UP: f32 = 4.0;
+
+impl RaceFlag {
+    /// The flag a card waves when its laps run reach `run` of `laps`, if any.
+    pub fn at(run: u32, laps: u32) -> Option<RaceFlag> {
+        if run == laps {
+            Some(RaceFlag::Checkered)
+        } else if run + 1 == laps {
+            Some(RaceFlag::White)
+        } else {
+            None
+        }
+    }
 }
 
 impl RaceShown {
@@ -329,6 +356,10 @@ pub struct Tracker {
     /// The event's target was reached at the last frame, and when it was (P155).
     reached: bool,
     reached_at: Option<Instant>,
+    /// The laps the race's card had run at the last frame, and the flag waved at the last count
+    /// with when (P328).
+    race_run: u32,
+    race_flag: Option<(RaceFlag, Instant)>,
 }
 
 /// The pop-up as it stands.
@@ -423,6 +454,24 @@ impl Tracker {
             self.reached_at = None;
         }
         self.reached = reached;
+    }
+
+    /// A frame of the race (P328): a lap counted on the view's card waves the flag it fits, and a
+    /// count that fits none takes the last one down, as the original's overlay does.
+    pub fn note_race(&mut self, now: Instant, race: Option<&RaceShown>) {
+        let Some(r) = race else {
+            (self.race_run, self.race_flag) = (0, None);
+            return;
+        };
+        if r.run > self.race_run {
+            self.race_flag = RaceFlag::at(r.run, r.laps).map(|f| (f, now));
+        }
+        self.race_run = r.run;
+    }
+
+    /// The race flag waving at `now` and how long it has waved.
+    pub fn race_flag(&self, now: Instant) -> Option<(RaceFlag, f32)> {
+        self.race_flag.map(|(f, at)| (f, since(now, at))).filter(|&(_, t)| t < FLAG_UP)
     }
 
     /// Whether the announcer's target line is up at `now`.
@@ -604,6 +653,8 @@ pub struct Drawn {
     pub event: Vec<Line>,
     /// The race's lap and place (P327), as drawn.
     pub race: Vec<Line>,
+    /// The race's flag (P328) and the box its cloth and pole fill.
+    pub flag: Option<(RaceFlag, [f32; 4])>,
 }
 
 // ---- the pen --------------------------------------------------------------------------------------
@@ -810,6 +861,9 @@ pub fn sprites_clear_of(out: &mut Vec<Sprite>, base: usize, view: [f32; 4], pad:
     }
     if let Some(r) = &shown.race {
         race(&mut pen, r, &mut drawn);
+        if let Some((f, t)) = tracker.race_flag(now) {
+            flag(&mut pen, f, t, &mut drawn);
+        }
     }
     if let Some(p) = tracker.popup(now) {
         let lines = trick(&mut pen, &p);
@@ -980,6 +1034,59 @@ fn race(pen: &mut Pen, r: &RaceShown, drawn: &mut Drawn) {
         drawn.race.push(Line { text: text.clone(), rect, colour: CHALK });
         x += width + gap;
     }
+}
+
+/// Where the race flag's pole stands, in layout pixels: under the lap and place, at the middle.
+/// The original's `racingoverlays.lyt` puts its `WhiteFlag` and `CheckerFlag` at 97,79, under its lap
+/// readout top left; ours stands under ours.
+const FLAG_FOOT: (f32, f32) = (320.0, 150.0);
+const FLAG_POLE: f32 = 80.0;
+const FLAG_CLOTH: (f32, f32) = (70.0, 52.0);
+/// One swing of the pole, there and back, in seconds.
+const FLAG_SWING: f32 = 1.44;
+
+/// The race flag `f`, waved `t` seconds (P328): a cloth on a thin pole rocking from its foot, the
+/// cloth trailing the swing and rippling, white with grey folds or checkered. The original plays
+/// `flag_white.fsh` / `flag_checkered.fsh`, Flash movies of the same; this is drawn by eye off
+/// PCSX2's frames, not off the movies.
+fn flag(pen: &mut Pen, f: RaceFlag, t: f32, drawn: &mut Drawn) {
+    pen.corner = Corner::TopLeft;
+    let phase = TAU * t / FLAG_SWING;
+    let lean = 0.35 * phase.sin();
+    let (fx, fy) = FLAG_FOOT;
+    let top = (fx + FLAG_POLE * lean.sin(), fy - FLAG_POLE * lean.cos());
+    let (w, h) = FLAG_CLOTH;
+    // The cloth trails the pole's way back: out to the left on the swing right, out to the right on
+    // the swing left, flipping over quickly at the ends.
+    let reach = -w * (1.6 * phase.cos()).clamp(-1.0, 1.0);
+    const STRIPS: usize = 24;
+    let rows = if f == RaceFlag::Checkered { 6 } else { 1 };
+    let mut b = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+    let mut grow = |p: [f32; 2]| b = [b[0].min(p[0]), b[1].min(p[1]), b[2].max(p[0]), b[3].max(p[1])];
+    pen.bar((fx, fy), top, 1.6, 1.3, [120, 78, 40, 255]);
+    grow(pen.px((fx, fy)));
+    grow(pen.px(top));
+    // The ripple runs out along the cloth, stronger at the free end; a fold's light follows its slope.
+    let wave = |k: f32| 1.6 * TAU * k - 2.5 * phase;
+    let edge = |i: usize| {
+        let k = i as f32 / STRIPS as f32;
+        (top.0 + reach * k, top.1 + 5.0 * k * wave(k).sin() + 3.0 * k * k)
+    };
+    for i in 0..STRIPS {
+        let ((x0, y0), (x1, y1)) = (edge(i), edge(i + 1));
+        let light = 0.84 + 0.14 * wave((i as f32 + 0.5) / STRIPS as f32).cos();
+        for r in 0..rows {
+            let (v0, v1) = (h * r as f32 / rows as f32, h * (r + 1) as f32 / rows as f32);
+            let cell = (i * rows / STRIPS + r) % 2 == 1;
+            let base = if f == RaceFlag::White || !cell { 245.0 } else { 18.0 };
+            let g = (base * light).round() as u8;
+            let corners = [pen.px((x0, y0 + v0)), pen.px((x1, y1 + v0)), pen.px((x1, y1 + v1)), pen.px((x0, y0 + v1))];
+            corners.iter().copied().for_each(&mut grow);
+            let c = pen.tint([g, g, g, 255]);
+            pen.out.push(Sprite { corners, uv: [[0.0; 2]; 4], local: [[0.0; 2]; 4], clamp: [0.0; 4], image: None, tint: c, shape: Shape::Plain });
+        }
+    }
+    drawn.flag = Some((f, b));
 }
 
 fn mix(a: [u8; 4], b: [u8; 4], k: f32) -> [u8; 4] {
