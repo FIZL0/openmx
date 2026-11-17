@@ -156,17 +156,19 @@ pub fn ai_entry() -> game_sim::ai::Entry {
     game_sim::ai::Entry { race_phase: None, path_net: false, live: true, card: Some(card) }
 }
 
-/// P313a: the race's AI riders in `sim` at the load: the roster for `riders` racers, one human
-/// ([`game_sim::ai::spawn_roster`] at [`AI_DIFFICULTY`] over [`RIDER_IDENTITIES`]), then each AI
-/// rider's brain off the bike's character file `file` ([`game_sim::Sim::spawn_ai`]), drawing from
-/// one generator seeded `seed`. The Sim must hold every AI rider's bike after the human's, and its
-/// seeker world (`Sim::load_seek`) first. Answers the roster.
-pub fn spawn_ai(sim: &mut game_sim::Sim, riders: i32, file: Option<&game_sim::phy::Ini>, seed: u32) -> game_sim::ai::Roster {
+/// P313a: the race's AI riders in `sim` at the load: the roster for `riders` racers, `humans` of
+/// them local seats ([`game_sim::ai::spawn_roster`] at [`AI_DIFFICULTY`] over [`RIDER_IDENTITIES`]),
+/// then each AI rider's brain off the bike's character file `file` ([`game_sim::Sim::spawn_ai`]),
+/// drawing from one generator seeded `seed`. The Sim must hold every AI rider's bike after the
+/// first human's, and its seeker world (`Sim::load_seek`) first. P350: the other seats' humans are
+/// Sims of their own, so in `sim` the AI riders follow the one human. Answers the roster as drawn.
+pub fn spawn_ai(sim: &mut game_sim::Sim, riders: i32, humans: i32, file: Option<&game_sim::phy::Ini>, seed: u32) -> game_sim::ai::Roster {
     use game_sim::ai::{RosterIn, spawn_roster};
     let mut rng = Rng::from_seed(seed);
-    let input = RosterIn { racers: riders, humans: 1, difficulty: AI_DIFFICULTY, identities: RIDER_IDENTITIES, all_ai: false, ghost_race: false };
+    let input = RosterIn { racers: riders, humans, difficulty: AI_DIFFICULTY, identities: RIDER_IDENTITIES, all_ai: false, ghost_race: false };
     let roster = spawn_roster(&mut rng, input);
-    sim.spawn_ai(&roster, file, AI_DIFFICULTY, RACE_EVENT_KIND, &ai_entry(), rng);
+    let in_sim = game_sim::ai::Roster { humans: 1, ..roster.clone() };
+    sim.spawn_ai(&in_sim, file, AI_DIFFICULTY, RACE_EVENT_KIND, &ai_entry(), rng);
     roster
 }
 
@@ -318,12 +320,22 @@ impl Watch {
 /// Each card's statistics are its bike's tracker (S319) beside the card's longest jump and longest
 /// time in the air; the human's seat reports its tracker's preloads and clutches.
 pub fn hand_over(laps: &race::Laps, laps_run: u8, player: &str, overs: &[race::RaceOver]) -> crate::menu::results::HandOver {
+    hand_over_seats(laps, laps_run, &[(0, player.to_string())], overs)
+}
+
+/// P350: [`hand_over`] with several local seats' humans: `players` is each seat's race player
+/// ([`Laps`](race::Laps)' card player) and name, seat 0 first; every other card is the computer's.
+pub fn hand_over_seats(laps: &race::Laps, laps_run: u8, players: &[(usize, String)], overs: &[race::RaceOver]) -> crate::menu::results::HandOver {
     use crate::menu::results::{CardStats, HandOver, ResultCard, Who};
+    let seat_of = |player: usize| players.iter().position(|p| p.0 == player);
     let cards = laps
         .cards
         .iter()
         .map(|e| {
-            let who = if e.player == 0 { Who::Player(player.to_string()) } else { Who::Ai(format!("Rider {}", e.player + 1)) };
+            let who = match seat_of(e.player) {
+                Some(k) => Who::Player(players[k].1.clone()),
+                None => Who::Ai(format!("Rider {}", e.player + 1)),
+            };
             let t = &e.stats;
             let stats = CardStats {
                 laps_led: t.laps_led,
@@ -342,7 +354,7 @@ pub fn hand_over(laps: &race::Laps, laps_run: u8, player: &str, overs: &[race::R
     let seats: Vec<(i32, Option<race::EndSeat>)> = laps
         .cards
         .iter()
-        .map(|e| (e.card.lap.place, (e.player == 0).then_some(race::EndSeat { seat: 0, preloads: e.stats.preloads as u32, clutches: e.stats.clutches as u32 })))
+        .map(|e| (e.card.lap.place, seat_of(e.player).map(|k| race::EndSeat { seat: k as i32, preloads: e.stats.preloads as u32, clutches: e.stats.clutches as u32 })))
         .collect();
     let event = race::ResultEvent { activity: 2, laps: laps_run, ..race::ResultEvent::default() };
     let end = Supercross::new().race_end(&seats, &event, false);

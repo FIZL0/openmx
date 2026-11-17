@@ -680,6 +680,14 @@ pub struct Race {
     /// whose name holds `sx`: ticked last, on [`Race::rng`]. `None` — every other race — and the tick
     /// draws what it did.
     pub flashes: Option<Box<crate::camera_flash::CameraFlashes>>,
+    /// P350: riders the race's Sim does not hold — a split-screen seat's, each seat its own Sim —
+    /// told after the Sim's players, in their order, by whoever holds them before the Sim's step.
+    /// Empty — every ride but a race over several seats — and the tick is what it was. Not walked
+    /// and not on the wire: worked out afresh before each step.
+    pub guests: Vec<CardFeed>,
+    /// P350: what the last tick did to [`Race::guests`] that their holder must do to their bikes:
+    /// the caught by guest (from 0), the start's step and the drop. Left for the holder to take.
+    pub guests_did: Frame,
 }
 
 /// What one [`Race::tick`] did that is not in the race itself.
@@ -722,6 +730,8 @@ impl Race {
             rng,
             laps: None,
             flashes: None,
+            guests: Vec::new(),
+            guests_did: Frame::default(),
         }
     }
 
@@ -2064,6 +2074,20 @@ impl CardFeed {
     /// A rider where `at` is, facing `look`, standing still on the ground there.
     pub fn standing(at: Vf, look: Vf) -> CardFeed {
         CardFeed { at, look, ground: F(at.y()), on_ground: true, ..CardFeed::default() }
+    }
+
+    /// `rider`'s bike as it tells its card after its frame: where it stands and faces, and on a race
+    /// with `laps` its velocity, the ground under it off `world`, a wheel down and a wreck running.
+    pub fn of(rider: &crate::rider::Rider, world: &mut dyn crate::world::World, laps: bool) -> CardFeed {
+        let m = rider.ride.transform();
+        let mut feed = CardFeed::standing(m.0[3], m.0[2]);
+        if laps {
+            feed.velocity = rider.ride.chassis.vel;
+            feed.ground = F(world.ground(m.0[3]).0.y());
+            feed.on_ground = rider.ride.air.on_ground;
+            feed.wrecked = rider.state.wreck.is_some();
+        }
+        feed
     }
 }
 
