@@ -542,6 +542,12 @@ fn seeded(ee: &Ee, at: &At, mut ride: quad::Ride) -> quad::Ride {
     // heading flattened, the ground's up).
     t.vehicle.last_free = qv(0xc00);
     t.untamed = Some(handling::untamed::PutBack { saved_position: qv(0xd40), saved_orientation: qv(0xd50), saved_up: qv(0xd60), has_ground: true, ..Default::default() });
+    // MD168b: the map edge's armed word (SLUS-21104's `+0x308`) is the image's, 0 in every MD147 state:
+    // Free Ride does not arm the out-of-bounds throw, whose band on Untamed's step (300 ft, MD144a)
+    // reaches Rocksbury's spawn.
+    if let Some(w) = ride.wrecked.as_mut() {
+        w.edge = qb(0x308);
+    }
     ride
 }
 
@@ -649,7 +655,9 @@ fn body_off(r: &Row, body: &game_sim::atv_body::Body) -> Vec<(u32, u32, u32)> {
 /// Whether a row is a bad read: a copy of the row before or after it (a late or early read), or read
 /// mid-tick (the body's force is cleared at the tick's end; MD147's torn rows).
 fn bad_read(rows: &[Row], n: usize) -> bool {
-    let body = |k: usize| rows.get(k).map(|r| hex_words(r, "body"));
+    // The body's own words (to `+0x224`): the record's words after them tick on regardless (steer's
+    // row 197 is row 196's body with `+0x260` one higher).
+    let body = |k: usize| rows.get(k).map(|r| hex_words(r, "body")[..0x224 / 4].to_vec());
     let here = body(n).unwrap();
     let copy = (n > 0 && body(n - 1).as_ref() == Some(&here)) || body(n + 1).as_ref() == Some(&here);
     copy || here[0xa0 / 4..0xac / 4].iter().any(|&w| w != 0)
@@ -764,7 +772,10 @@ fn the_untamed_quad_from_its_files_is_md147s_spawned_quad() {
 /// steer.csv from the spawn: gas, full right, full left, half right, straight, then a jump. The
 /// port's body is the row's, word for word, on every well-read row to the take-off (row 196). On the
 /// take-off the original's quad is knocked sideways (its `x` velocity −4 → +2.4 in a tick) by what
-/// the bare world here has not: Rocksbury's solids (MD168's journal).
+/// the bare world here has not: Rocksbury's solids (MD168's journal). MD168b: it is a knockable bale
+/// (`SX_A.scn`'s `TripleBale02` at (437.99, 9.28, 474.69), a 253 lb body with a collision record of its
+/// own), its two-way contact with the quad not yet ported; the bale's `f.col` stood still as a solid
+/// spins the port's quad instead.
 #[test]
 fn untamed_quad_replays_md147_steer() {
     let Some(kit) = kit() else { return };
