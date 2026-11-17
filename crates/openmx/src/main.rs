@@ -1236,6 +1236,18 @@ fn gauges(seat: &Seat, rig: &Rig, speedometer: menu::Speedometer) -> overlay::Ga
     }
 }
 
+/// P350: the grid's lanes a race's AI riders take, card order: every card's after the `seats` local
+/// seats', who take the first.
+fn race_ai_lanes(grid: &[(Vf, Vf)], seats: usize) -> &[(Vf, Vf)] {
+    grid.get(seats..).unwrap_or(&[])
+}
+
+/// P350: the race player seat `seat` rides as, the race's Sim being the first seat's with `players`
+/// riders (its human, then its AI riders): the other seats' humans come after them, in seat order.
+fn race_player(seat: usize, players: usize) -> usize {
+    if seat == 0 { 0 } else { players + seat - 1 }
+}
+
 /// What every view's ride HUD (P121) is drawn from besides its own seat: every rider's camera
 /// target, the original's HUD's per-view lists (tags, radar icons, switch offers), the radar's span,
 /// the speedometer style, the lineup's names and the stunt table that names the tricks.
@@ -1261,6 +1273,9 @@ struct RideHud<'a> {
     fps: bool,
     /// The race on, its laps and riders (P327).
     race: Option<&'a menu::RaceSetup>,
+    /// P350: the race's laps, which the first seat's Sim counts for every seat, and how many players
+    /// that Sim holds ([`race_player`]).
+    race_laps: Option<(&'a game_sim::race::Laps, usize)>,
 }
 
 impl RideHud<'_> {
@@ -1321,8 +1336,8 @@ impl RideHud<'_> {
             join_buttons: self.join_buttons.clone(),
             fps: self.fps,
             // Laps and places are the race's lap line's (P313): dashes till it counts them.
-            race: self.race.filter(|_| seat.sim.race.is_some()).map(|r| {
-                let card = seat.sim.race.as_ref().and_then(|race| race.laps.as_ref()).and_then(|l| l.card(0));
+            race: self.race.map(|r| {
+                let card = self.race_laps.and_then(|(l, players)| l.card(race_player(v, players)));
                 let (lap, place) = card.map_or((None, None), |c| race_start::shown(c, r.laps));
                 ride_hud::RaceShown { lap, laps: r.laps, place, riders: r.riders }
             }),
@@ -2289,6 +2304,11 @@ impl<P: sim_world::World> Game for World<P> {
         let together = flown.len() > 1;
         let mut held: Vec<Held> = Vec::new();
         for (step, &me) in order.iter().enumerate() {
+            // P350: a race over several seats is the first's Sim's: the others' riders are told to it
+            // before its pass, where theirs left them.
+            if me == 0 {
+                self.race_guests_in();
+            }
             let at = self.seats[me].sim.rider.ride.transform().0[3];
             let firsts: Vec<Vec<game_sim::contact::Contact>> = struck.iter_mut().map(|s| s.get_mut(me).map(std::mem::take).unwrap_or_default()).collect();
             let own = lists.as_mut().map(|l| std::mem::take(&mut l[me]));
@@ -2349,6 +2369,9 @@ impl<P: sim_world::World> Game for World<P> {
             };
             let among = vehicle::Among { bump: bump.as_mut(), rivals: &rivals, bikes: &bikes, met: met.as_mut(), props: props.as_mut().map(|p| (p, me)) };
             self.seats[me].pass(dt, &mut self.place, me, &spots, among);
+            if me == 0 {
+                self.race_guests_out(dt);
+            }
             if !downed.is_empty()
                 && let Some(m) = met.as_mut()
                 && let (mut riders, Some(f)) = flown_among(&mut self.seats, me, &on)
@@ -2400,6 +2423,55 @@ struct Held {
 }
 
 impl<P: sim_world::World> World<P> {
+    /// P350: the other seats' riders told to the first seat's race before its pass, as its own
+    /// players' bikes tell their cards after their frames ([`game_sim::race::CardFeed::of`]), and each
+    /// that rode its bike this pass counted on its card's tracker as a player's bike counts in its
+    /// Sim's step (S319). Nothing without a race, or with the first seat alone.
+    fn race_guests_in(&mut self) {
+        let (first, rest) = self.seats.split_first_mut().expect("a seat");
+        let players = first.sim.players();
+        let Some(race) = first.sim.race.as_deref_mut().filter(|_| !rest.is_empty()) else { return };
+        let laps = race.laps.is_some();
+        race.guests = rest.iter().map(|s| game_sim::race::CardFeed::of(&s.sim.rider, &mut self.place, laps)).collect();
+        race.guests_did = game_sim::race::Frame::default();
+        if let Some(l) = race.laps.as_deref_mut() {
+            for (k, s) in rest.iter().enumerate().filter(|(_, s)| !s.waiting && s.riding && s.garage.up == Kind::Bike) {
+                let r = &s.sim.rider;
+                let b = game_sim::race::BikeCounts { preload_timer: r.ride.air.preload_timer, clutch: s.hands.clutch, wreck_entries: r.state.entries };
+                l.bike(race_player(k + 1, players), b);
+            }
+        }
+    }
+
+    /// P350: what the first seat's race did to the other seats' riders on its pass, done to their
+    /// bikes as its Sim does to its own: a caught rider thrown back with the penalty on its card, the
+    /// start's step, and the drop's release.
+    fn race_guests_out(&mut self, dt: F) {
+        let (first, rest) = self.seats.split_first_mut().expect("a seat");
+        let Some(race) = first.sim.race.as_deref_mut() else { return };
+        let did = std::mem::take(&mut race.guests_did);
+        for (g, hit) in did.caught {
+            let Some(s) = rest.get_mut(g) else { continue };
+            println!("race: gate caught player {}", g + 2);
+            game_sim::race::push(&mut s.sim.rider.ride.chassis, hit.push);
+            s.sim.rider.score.gate_penalty = hit.penalty - dt;
+        }
+        for s in rest.iter_mut() {
+            if let Some(step) = did.start {
+                step.apply(&mut s.sim.rider.ride.chassis);
+            }
+            if did.dropped {
+                game_sim::race::release(&mut s.sim.rider.ride.chassis);
+            }
+        }
+        if did.dropped {
+            for (k, s) in rest.iter().enumerate() {
+                let at = s.sim.rider.ride.transform().0[3];
+                println!("race: player {} at {:.2},{:.2},{:.2} at the drop", k + 2, at.x(), at.y(), at.z());
+            }
+        }
+    }
+
     /// What a seat's pass leaves for the others (N22a, N22b): its plane's pushes on the riders'
     /// bikes and the mirrors of its strikes for their lists, and its bike's bumps.
     fn met_after(
@@ -5919,7 +5991,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             .map(|b| race_start::drop_times(&ini::text(&b), &args.bike))
             .unwrap_or_default();
         let prop = race_start::drop_prop(&look.models, |m| assets.models.get(m).and_then(|l| game_render::animated_toy::bound(&l.tris)));
-        let start = prop.and_then(|p| race_start::lay_out(&p, drops.clone(), r.riders as i32, RACE_SEED));
+        // P350: every local seat has a lane of the grid, so it holds at least as many riders.
+        let start = prop.and_then(|p| race_start::lay_out(&p, drops.clone(), (r.riders as i32).max(if args.online.is_none() { riders as i32 } else { 1 }), RACE_SEED));
         if start.is_none() {
             println!("race: {} has no start gate ({} start calls, drop gate {}) — a ride from the start line", args.track, drops.len(), if prop.is_some() { "found" } else { "not found" });
         }
@@ -5960,13 +6033,16 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             race_start::finish_prop(&[p], bound)
         });
         let laps = args.race.as_ref().map_or(0, |r| r.laps as i32);
-        // P313a: in a one-player race the grid's other lanes are AI riders', a computer's card each.
+        // P313a: the grid's lanes after the humans' are AI riders', a computer's card each. P350: in
+        // the race's player order — the first seat's Sim (its human, then its AI riders), then the
+        // other seats' humans, a human's card each in their own lanes after the first's.
         let mut cards = vec![(at, game_sim::race::HUMAN_CARD)];
-        if riders == 1 {
-            for &(spot, _) in &s.grid[1..] {
-                let (on, _) = sim_world::World::ground(&mut sim, Vf::new(spot.x(), 1.0e4, spot.z(), 1.0));
-                cards.push((Vf::new(spot.x(), on.y(), spot.z(), 1.0), game_sim::race::COMPUTER_CARD));
-            }
+        let shared = args.online.is_none() || riders == 1;
+        let computers = race_ai_lanes(&s.grid, riders).iter().filter(|_| shared).map(|g| (g.0, game_sim::race::COMPUTER_CARD));
+        let humans = s.grid.iter().take(riders).skip(1).filter(|_| shared).map(|g| (g.0, game_sim::race::HUMAN_CARD));
+        for (spot, kind) in computers.chain(humans).collect::<Vec<_>>() {
+            let (on, _) = sim_world::World::ground(&mut sim, Vf::new(spot.x(), 1.0e4, spot.z(), 1.0));
+            cards.push((Vf::new(spot.x(), on.y(), spot.z(), 1.0), kind));
         }
         s.laps = file.as_deref().and_then(|f| race_start::laps(f, &mut sim, finish.as_ref(), laps, &cards));
         match &s.laps {
@@ -6093,6 +6169,15 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let (under_first, _) = sim_world::World::ground(&mut sim, at);
     let others: Vec<Rider> = (1..riders)
         .map(|i| {
+            // P350: in a race each stands in its own lane of the grid, behind the gate, facing the
+            // way the grid does.
+            if let Some(&(spot, facing)) = race_start.as_ref().filter(|_| args.online.is_none()).and_then(|s| s.grid.get(i)) {
+                let (on, _) = sim_world::World::ground(&mut sim, Vf::new(spot.x(), 1.0e4, spot.z(), 1.0));
+                let mut rider = new_rider(&other_phys[i - 1], Vf::new(spot.x(), on.y(), spot.z(), 1.0), Vf::new(facing.x(), 0.0, facing.z(), 0.0));
+                rider.fifty = game_sim::track::fifty_reach(&bike_words[i]);
+                mods.ride(i, &mut rider.ride);
+                return rider;
+            }
             let side = if i % 2 == 1 { 1.0 } else { -1.0 };
             let off = side * SEAT_SPACING * i.div_ceil(2) as f32;
             let (x, z) = (at.x() + right.x() * off, at.z() + right.z() * off);
@@ -6107,10 +6192,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         let p = r.ride.position();
         println!("player {}: starts at {:.0}, {:.0}, {:.0}", i + 2, p.x(), p.y(), p.z());
     }
-    // P313a: a one-player race's AI riders, on the first's bike, each in its card's lane of the
-    // grid, stood on the ground under it and facing the way the grid does.
+    // P313a: a race's AI riders, on the first's bike, each in its card's lane of the grid, stood on
+    // the ground under it and facing the way the grid does. P350: the lanes after every local seat's.
     let race_ai: Vec<Rider> = match &race_start {
-        Some(s) if riders == 1 => s.grid[1..]
+        Some(s) if args.online.is_none() || riders == 1 => race_ai_lanes(&s.grid, riders)
             .iter()
             .map(|&(spot, facing)| {
                 let (on, _) = sim_world::World::ground(&mut sim, Vf::new(spot.x(), 1.0e4, spot.z(), 1.0));
@@ -6122,12 +6207,18 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         _ => Vec::new(),
     };
     let race_start = race_start.map(|mut s| {
-        for (card, r) in race_ai.into_iter().enumerate().map(|(k, r)| (k + 1, r)) {
+        // P350: the other seats in their lanes.
+        for (i, r) in others.iter().enumerate().map(|(k, r)| (k + 1, r)).filter(|_| args.online.is_none()) {
             let p = r.ride.position();
+            println!("race: player {} in lane {} place {}; grid {:.2},{:.2},{:.2}", i + 1, s.activity.lanes[i], s.activity.starting_place(i as i32), p.x(), p.y(), p.z());
+        }
+        for (k, r) in race_ai.into_iter().enumerate() {
+            let p = r.ride.position();
+            let card = k + riders;
             let card_i = card as i32;
             println!(
                 "race: AI rider {} in lane {} place {}; grid {:.2},{:.2},{:.2}",
-                card + 1,
+                k + 2,
                 s.activity.lanes[card],
                 s.activity.starting_place(card_i),
                 p.x(),
@@ -7960,7 +8051,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             println!("race: no AI character file — {e}");
         }
         let file = file.ok().map(|b| game_sim::phy::Ini::parse_bytes(&b));
-        let roster = race_start::spawn_ai(&mut seats[0].sim, start.riders, file.as_ref(), race_start::AI_SEED);
+        let roster = race_start::spawn_ai(&mut seats[0].sim, start.riders, riders as i32, file.as_ref(), race_start::AI_SEED);
         let skills: Vec<String> = roster.ai.iter().map(|r| format!("{}", r.skill)).collect();
         println!("race: {} AI riders, skills {}", roster.ai.len(), skills.join(" "));
         // S331b: and the track's AI net their race drivers follow, beside the race file.
@@ -7972,7 +8063,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         }
     }
     if let Some(laps) = race_start.as_ref().and_then(|s| s.laps.as_ref()) {
-        let computers = laps.cards.iter().filter(|e| e.player != 0).count();
+        // P350: by the card's player bit, now that a human's card can be any player's.
+        let computers = laps.cards.iter().filter(|e| e.card.lap.flags & game_sim::race::card_flags::PLAYER == 0).count();
         println!("race: {} cards, {} computer", laps.cards.len(), computers);
     }
     let mut world = World { place: sim, seats, tape: recorder, played_dt: None };
@@ -10011,7 +10103,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                                 let t = menu::fame::FameTry { seat: 0, league, track, class, laps: laps_run, best_lap: card.best_lap, race_time: card.race_time };
                                 front.menu.fame_tries(vec![t]);
                             }
-                            front.menu.race_ended(race_start::hand_over(laps, laps_run, &name, &race_watch.overs));
+                            // P350: every local seat's human named on their own card.
+                            let players = world.seats[0].sim.players();
+                            let mut seats = vec![(0, name)];
+                            seats.extend((1..world.seats.len()).map(|k| (race_player(k, players), front.menu.racer_name(k))));
+                            front.menu.race_ended(race_start::hand_over_seats(laps, laps_run, &seats, &race_watch.overs));
                         }
                     }
                 }
@@ -11194,6 +11290,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         let quad_riders = quad_riders(&world.seats, &mut rigs, &assets, &quad_looks, &before_quads, &cut, &blend);
         // Each view's buttons and the join cue's, under Button Icons (P281).
         let hud_buttons: Vec<menu::pads::Buttons> = (0..world.seats.len()).map(|v| front.as_deref().map(|f| f.menu.seat_buttons(v)).unwrap_or_default()).collect();
+        // P350: the race's laps every seat's HUD reads its card off.
+        let race_laps = world.seats[0].sim.race.as_ref().and_then(|r| r.laps.as_deref()).map(|l| (l, world.seats[0].sim.players()));
         let join_buttons = front.as_deref().map(|f| f.menu.join_buttons()).unwrap_or_default();
         if gpu_on {
             // The overlay first: each view's HUD, and the pause over the whole frame.
@@ -11212,7 +11310,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     let marker = shown_markers.get(v).and_then(Option::as_ref);
                     let view = [at.x as f32, at.y as f32, at.w as f32, at.h as f32];
                     let join = join_view == Some(v);
-                    let ctx = RideHud { ridden: &ridden, art: &hud_art, span: radar_span, maps: &map_names, wrap: hud_wrap, speedometer, names: &names, table: &table, simulated, join, buttons: &hud_buttons, join_buttons: &join_buttons, fps: show_fps, race: race_hud.as_ref() };
+                    let ctx = RideHud { ridden: &ridden, art: &hud_art, span: radar_span, maps: &map_names, wrap: hud_wrap, speedometer, names: &names, table: &table, simulated, join, buttons: &hud_buttons, join_buttons: &join_buttons, fps: show_fps, race: race_hud.as_ref(), race_laps };
                     ctx.with(seat, rig, v, marker, |shown, tracker, now| {
                         // clear of the page's touch pad while it is up (P208)
                         let pad = menu::touch_room::Room::of((frame.width, frame.height));
@@ -12041,7 +12139,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             if overlay_mode == menu::Overlay::Hud {
                 let marker = shown_markers.get(v).and_then(Option::as_ref);
                 let join = join_view == Some(v);
-                let ctx = RideHud { ridden: &ridden, art: &hud_art, span: radar_span, maps: &map_names, wrap: hud_wrap, speedometer, names: &names, table: &table, simulated, join, buttons: &hud_buttons, join_buttons: &join_buttons, fps: show_fps, race: race_hud.as_ref() };
+                let ctx = RideHud { ridden: &ridden, art: &hud_art, span: radar_span, maps: &map_names, wrap: hud_wrap, speedometer, names: &names, table: &table, simulated, join, buttons: &hud_buttons, join_buttons: &join_buttons, fps: show_fps, race: race_hud.as_ref(), race_laps };
                 ctx.with(seat, rig, v, marker, |shown, tracker, now| {
                     ride_hud::draw(target, shown, tracker, now);
                 });

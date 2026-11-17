@@ -470,23 +470,14 @@ impl Sim {
     fn race_frame(&mut self, dt: F, world: &mut dyn World) {
         let Some(race) = &self.race else { return };
         let laps = race.laps.is_some();
-        let riders: Vec<race::CardFeed> = (0..self.players())
-            .map(|i| {
-                let r = self.rider_of(i);
-                let m = r.ride.transform();
-                let mut feed = race::CardFeed::standing(m.0[3], m.0[2]);
-                if laps {
-                    feed.velocity = r.ride.chassis.vel;
-                    feed.ground = F(world.ground(m.0[3]).0.y());
-                    feed.on_ground = r.ride.air.on_ground;
-                    feed.wrecked = r.state.wreck.is_some();
-                }
-                feed
-            })
-            .collect();
+        let players = self.players();
+        // P350: and the riders of the other seats after the Sim's own, as their holder told them.
+        let guests = race.guests.clone();
+        let mut riders: Vec<race::CardFeed> = (0..players).map(|i| race::CardFeed::of(self.rider_of(i), world, laps)).collect();
+        riders.extend(guests.iter().copied());
         let frame = self.race.as_mut().expect("a race").tick(dt, &riders);
         let mut all: Vec<&mut Rider> = std::iter::once(&mut self.rider).chain(self.others.iter_mut().map(|p| &mut p.rider)).collect();
-        for (i, hit) in frame.caught {
+        for &(i, hit) in frame.caught.iter().filter(|(i, _)| *i < players) {
             race::push(&mut all[i].ride.chassis, hit.push);
             // The score manager's tick runs every card's penalty down after the watch, in the same
             // race tick; the card's own run-down (`Score::grow`) is in its rider's frame, before it.
@@ -497,6 +488,11 @@ impl Sim {
         }
         if frame.dropped {
             all.iter_mut().for_each(|r| race::release(&mut r.ride.chassis));
+        }
+        if !guests.is_empty() {
+            let caught = frame.caught.iter().filter(|(i, _)| *i >= players).map(|&(i, hit)| (i - players, hit)).collect();
+            let did = race::Frame { caught, dropped: frame.dropped, start: frame.start, ..race::Frame::default() };
+            self.race.as_mut().expect("a race").guests_did = did;
         }
     }
 

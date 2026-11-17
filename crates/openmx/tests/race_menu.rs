@@ -122,3 +122,29 @@ fn a_race_of_four_has_three_ai_riders_behind_the_gate() {
     let led = (2..=4).any(|k| after.lines().any(|l| l == format!("race: player {k} in place 1")));
     assert!(led, "no AI rider took the lead after the drop:\n{said}");
 }
+
+/// P350: a race with two local seats is one race over both. The second seat stands in a lane of its
+/// own behind the gate, the lanes after the seats' are the AI riders', the lap line has a card for
+/// every rider (two computer ones), the gate holds the second seat as it holds the first, and the lap
+/// line ranks it (race player 4, after the first seat's Sim's human and its two AI riders).
+#[test]
+fn a_two_seat_race_has_one_grid_and_one_lap_line() {
+    let Some(said) = ride(&["--race", "--laps", "3", "--racers", "4", "--players", "2"]) else { return };
+    let start = line(&said, "race: 3 laps, 4 riders;").unwrap_or_else(|| panic!("no race start:\n{said}"));
+    let gate = xyz(start, "gate at");
+    let lane_of = |l: &str| -> i32 { l.split("lane ").nth(1).and_then(|n| n.split_whitespace().next()).and_then(|n| n.parse().ok()).unwrap_or_else(|| panic!("{l}")) };
+    let second = line(&said, "race: player 2 in lane ").unwrap_or_else(|| panic!("the second seat has no lane:\n{said}"));
+    let grid = xyz(second, "grid");
+    assert!(grid[2] < gate[2] - 2.0 && (grid[0] - gate[0]).abs() < 60.0, "{second} behind {start}");
+    let ai: Vec<&str> = said.lines().filter(|l| l.starts_with("race: AI rider ") && l.contains(" in lane ")).collect();
+    assert_eq!(ai.len(), 2, "{said}");
+    let mut lanes: Vec<i32> = [start, second].into_iter().chain(ai.iter().copied()).map(lane_of).collect();
+    lanes.sort_unstable();
+    lanes.dedup();
+    assert_eq!(lanes.len(), 4, "every rider in a lane of its own:\n{said}");
+    assert!(line(&said, "race: 2 AI riders, skills ").is_some(), "no AI brains:\n{said}");
+    assert!(line(&said, "race: 4 cards, 2 computer").is_some(), "not one card each:\n{said}");
+    let held = line(&said, "race: player 2 at ").unwrap_or_else(|| panic!("the second seat not seen at the drop:\n{said}"));
+    assert!(xyz(held, "at")[2] < gate[2], "{held}: through the closed gate at {gate:?}");
+    assert!(said.lines().any(|l| l.starts_with("race: player 4 in place ")), "the second seat's card is not ranked:\n{said}");
+}
