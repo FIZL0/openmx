@@ -332,6 +332,59 @@ impl GatherInRam {
         (m, objects, broad)
     }
 
+    /// The walk state of the world [`GatherInRam::read`] read, read again into `broad` (F60: a
+    /// listener a search hands on may query the database part way through the walk): the global
+    /// stamp and the tree last queried, each entry's stamp, every structure's walk state (a tree's
+    /// open list as its nodes, kept here for the write-back). The structures' contents are as read.
+    pub fn read_walk(&mut self, ee: &Ee, broad: &mut bp::Broad) {
+        broad.stamp = ee.u16_at(STAMP_AT);
+        self.current = ee.u32_at(CURRENT_AT);
+        broad.current = self.structures.iter().position(|&x| x == self.current);
+        for (k, p) in broad.places.iter_mut().enumerate() {
+            p.stamp = ee.u16_at(self.items[k]);
+        }
+        for s in 0..self.structures.len() {
+            let a = self.structures[s];
+            match &mut broad.structures[s] {
+                bp::Structure::Tree(t) => {
+                    t.flags = ee.u32_at(a + 0xc);
+                    t.busy = ee.u32_at(a + 0x890);
+                    t.cells = [0x8a0, 0x8a4, 0x8a8, 0x8ac].map(|o| ee.i32_at(a + o));
+                    t.slot = ee.u32_at(a + 0xa4) as usize;
+                    (t.list, self.listed[s]) = (vec![], vec![]);
+                    let mut l = ee.u32_at(a + 0x9c);
+                    while l != 0 {
+                        let n = ee.u32_at(l + 4);
+                        t.list.push(self.nodes[s].iter().position(|&x| x == n).unwrap_or_else(|| panic!("listed node {n:#x} is none of the tree's")));
+                        self.listed[s].push(l);
+                        assert!(t.list.len() < 4096, "the open query's list does not end");
+                        l = ee.u32_at(l);
+                    }
+                    t.head = (!t.list.is_empty()).then_some(0);
+                    t.at = match ee.u32_at(a + 0xa0) {
+                        0 => None,
+                        at => Some(self.listed[s].iter().position(|&x| x == at).unwrap_or_else(|| panic!("the query is at {at:#x}, off its list"))),
+                    };
+                    t.chunk = match ee.u32_at(a + 0xa8) {
+                        0 => None,
+                        c => Some(
+                            self.chunks[s]
+                                .iter()
+                                .enumerate()
+                                .find_map(|(n, cs)| cs.iter().position(|&x| x == c).map(|k| (n, k)))
+                                .unwrap_or_else(|| panic!("the query's chunk {c:#x} is none of the tree's")),
+                        ),
+                    };
+                }
+                bp::Structure::List(l) => {
+                    l.flags = ee.u32_at(a + 0xc);
+                    l.block = ee.i32_at(a + 0x3c);
+                    l.entry = ee.i32_at(a + 0x40);
+                }
+            }
+        }
+    }
+
     /// The gather's outcome (`now`, read as `was`; `begun` the tree just after the query began, to
     /// tell a fresh list from a restarted one) written back where it changed: each entry's stamp and
     /// each collidable's flag byte, the global stamp and the tree last queried, every structure's

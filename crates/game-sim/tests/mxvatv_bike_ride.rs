@@ -9926,7 +9926,7 @@ impl Collides for RecordsInRam<'_, '_, '_> {
             sweep_in_ram(self.inner.ee, at, probe, list, from, to, self.answered)
         } else {
             sweep_set_in_ram(self.inner.ee, at, probe, from, to);
-            sweep_all_in_ram(self.inner.ee, probe, 0, self.answered).expect("a listener searched the database inside the record's sweep: not followed");
+            sweep_all_in_ram(self.inner.ee, probe, 0, self.answered);
             self.inner.ee.u8_at(probe + 0x126) & ws::flags::HIT != 0
         };
         if !hit {
@@ -15775,7 +15775,7 @@ fn sweep_search_in_ram(ee: &mut Ee, probe: u32, list: u32, segments: Vec<game_si
         }
     }
     let heard: Vec<ws::Collidable> = objects.clone();
-    let mut outside = SweepWorldInRam { world: &mut world, centre: stood.world.centre, radius: stood.world.radius, pairs: 0, descriptor: None };
+    let mut outside = SweepWorldInRam { world: &mut world, centre: stood.world.centre, radius: stood.world.radius, pairs: 0, descriptor: None, lent: None };
     let mut sweep = atv_sweep::Sweep::new(segments, more, &mut outside);
     sweep.probe = port;
     let hit = atv_search::search(&mut objects, 0, &found, &|o: usize| retired.get(o).copied().unwrap_or(false), &mut sweep);
@@ -21272,6 +21272,59 @@ struct SweepWorldInRam<'w, 'e> {
     radius: F,
     pairs: u32,
     descriptor: Option<u32>,
+    /// The global search's database, lent and taken back round each test (F60); `None` for the
+    /// nearby sweep, which walks its list.
+    lent: Option<LentInRam>,
+}
+
+/// The database [`sweep_all_in_ram`] read, as [`atv_sweep::Outside::lend`] lends it: where it is in
+/// RAM, the walk state RAM holds (`was`, and `begun`, what [`GatherInRam::write_query`] tells a
+/// fresh list by), and the walk as lent for the test running (`now`). A hand-on writes `now` to RAM
+/// first, so a listener that queries the database meets the walk where the original's would; after
+/// the test the walk is read back ([`GatherInRam::read_walk`]) and RAM holds it again.
+struct LentInRam {
+    m: GatherInRam,
+    was: (Vec<ws::Collidable>, bp::Broad),
+    begun: bp::Broad,
+    now: Option<(Vec<ws::Collidable>, bp::Broad)>,
+    /// A hand-on in this test wrote `now` to RAM.
+    written: bool,
+    /// A test's walk was taken back out of RAM: `was` and `begun` are what RAM holds since.
+    taken: bool,
+    /// Tests whose hand-ons queried the database (the stamp moved).
+    reentered: u32,
+}
+
+impl LentInRam {
+    /// `now` written to RAM where it is not `was` ([`sweep_walk_written`]); `was` stays until the
+    /// test is over.
+    fn write(&mut self, ee: &mut Ee) {
+        if self.written {
+            return;
+        }
+        let (no, nb) = self.now.as_ref().expect("a hand-on outside a lent test");
+        sweep_walk_written(ee, &self.m, (&self.was.0, &self.was.1), (no, nb), &self.begun);
+        self.written = true;
+    }
+}
+
+/// [`GatherInRam::write_query`] for the global search's walk: what the walk may change beyond flags
+/// and stamps — the probe's reach and place, the parts' groups — taken into `was` first (the groups
+/// written), then the walk written back.
+fn sweep_walk_written(ee: &mut Ee, m: &GatherInRam, was: (&[ws::Collidable], &bp::Broad), now: (&[ws::Collidable], &bp::Broad), begun: &bp::Broad) {
+    let (objects, broad) = now;
+    let mut wo = was.0.to_vec();
+    let mut wb = was.1.clone();
+    wo[0].radius = objects[0].radius;
+    let p = &broad.places[0];
+    (wb.places[0].centre, wb.places[0].budget, wb.places[0].last) = (p.centre, p.budget, p.last);
+    for (k, o) in objects.iter().enumerate() {
+        wo[k].group = o.group;
+        if let Some(g) = o.group {
+            ee.set_u32(m.items[k] - 0x18 + 0x88, m.items[g]);
+        }
+    }
+    m.write_query(ee, (&wo, &wb), (objects, broad), begun);
 }
 
 impl atv_sweep::Outside for SweepWorldInRam<'_, '_> {
@@ -21317,6 +21370,30 @@ impl atv_sweep::Outside for SweepWorldInRam<'_, '_> {
         }
         pair(Some(&Target { nearby, centre, radius, shape }))
     }
+
+    fn lend(&mut self, objects: &[ws::Collidable], broad: &bp::Broad) {
+        if let Some(l) = &mut self.lent {
+            l.now = Some((objects.to_vec(), broad.clone()));
+            l.written = false;
+        }
+    }
+
+    /// After a test that handed on: the walk read back out of RAM, and RAM's walk is the port's
+    /// again.
+    fn take_back(&mut self, objects: &mut [ws::Collidable], broad: &mut bp::Broad) {
+        let Some(l) = &mut self.lent else { return };
+        let (_, nb) = l.now.take().expect("a lent test");
+        if !l.written {
+            return;
+        }
+        if nb.stamp != self.world.ee.u16_at(STAMP_AT) {
+            l.reentered += 1;
+        }
+        l.m.read_walk(self.world.ee, broad);
+        l.was = (objects.to_vec(), broad.clone());
+        l.begun = broad.clone();
+        l.taken = true;
+    }
 }
 
 impl ws::Narrow for SweepWorldInRam<'_, '_> {
@@ -21336,16 +21413,29 @@ impl ws::Narrow for SweepWorldInRam<'_, '_> {
         self.world.part(objects, group, i)
     }
     fn heard_hit(&mut self, objects: &mut [ws::Collidable], l: usize, probe: usize, other: usize) {
+        self.write_lent();
         self.world.heard_hit(objects, l, probe, other)
     }
     fn heard_struck(&mut self, objects: &mut [ws::Collidable], l: usize, struck: usize, probe: usize) {
+        self.write_lent();
         self.world.heard_struck(objects, l, struck, probe)
     }
     fn on_hit(&mut self, objects: &mut [ws::Collidable], c: usize, probe: usize, other: usize) {
+        self.write_lent();
         self.world.on_hit(objects, c, probe, other)
     }
     fn on_struck(&mut self, objects: &mut [ws::Collidable], c: usize, struck: usize, probe: usize) {
+        self.write_lent();
         self.world.on_struck(objects, c, struck, probe)
+    }
+}
+
+impl SweepWorldInRam<'_, '_> {
+    /// The lent walk in RAM before a listener or callback is handed on ([`LentInRam::write`]).
+    fn write_lent(&mut self) {
+        if let Some(l) = &mut self.lent {
+            l.write(self.world.ee);
+        }
     }
 }
 
@@ -21435,9 +21525,9 @@ fn write_sweep_answer(ee: &mut Ee, rec: u32, count: usize, items: &[u32], a: &ga
 /// called `lazy`, and everything written back: the query's walk (F47's [`GatherInRam::write_query`]),
 /// the flags and groups, the budget and last centre, the clear's world form and globals, the pairs'
 /// globals, local forms and answer. Answers the nearest distance; counts the pairs by kind into
-/// `kinds`. `None` (nothing written back) when a listener handed on searched the database itself:
-/// the original's own walk goes on from what that search left, which the port's cannot follow.
-fn sweep_all_in_ram(ee: &mut Ee, probe: u32, lazy: u32, kinds: &mut BTreeMap<String, u32>) -> Option<F> {
+/// `kinds`. A listener handed on that searches the database itself meets the walk in RAM as it
+/// stands, and the walk goes on from what its search left ([`LentInRam`], F60).
+fn sweep_all_in_ram(ee: &mut Ee, probe: u32, lazy: u32, kinds: &mut BTreeMap<String, u32>) -> F {
     use f51_probe as pa;
     let (m, mut objects, mut broad) = GatherInRam::read(ee, probe);
     broad.places[0].budget = word_f(ee, probe + 0x74);
@@ -21475,43 +21565,35 @@ fn sweep_all_in_ram(ee: &mut Ee, probe: u32, lazy: u32, kinds: &mut BTreeMap<Str
     }
     let was_o = objects.clone();
     let was_b = broad.clone();
-    let stamp = world.ee.u16_at(STAMP_AT);
-    let mut outside = SweepWorldInRam { world: &mut world, centre: stood.world.centre, radius: stood.world.radius, pairs: 0, descriptor: None };
+    // The first query begun as the search begins it, on a copy (it tells write_query a fresh list).
+    let mut begun = was_b.clone();
+    if let Some(space) = begun.places[0].space {
+        let (mut lo, mut hi) = ([F::ZERO; 4], [F::ZERO; 4]);
+        bp::Query::begin(&mut begun, space, 1, b.centre.0.map(F), b.half.0.map(F), Some((&mut lo, &mut hi)), true);
+    }
+    let m = GatherInRam { items: world.items.clone(), ..m };
+    let lent = LentInRam { m, was: (was_o.clone(), was_b.clone()), begun: begun.clone(), now: None, written: false, taken: false, reentered: 0 };
+    let mut outside = SweepWorldInRam { world: &mut world, centre: stood.world.centre, radius: stood.world.radius, pairs: 0, descriptor: None, lent: Some(lent) };
     let mut sweep = atv_sweep::Sweep::new(segments, more, &mut outside);
     sweep.probe = port;
     let nearest = atv_sweep::search_world(&mut objects, &mut broad, 0, lazy, &|o| retired.get(o).copied().unwrap_or(false), &mut sweep);
     let (port, more) = (sweep.probe, sweep.more);
     let (pairs, descriptor) = (outside.pairs, outside.descriptor);
+    let lent = outside.lent.take().expect("the lent database");
     for (k, v) in std::mem::take(&mut world.kinds) {
         *kinds.entry(k).or_default() += v;
     }
-    let items = world.items;
-    if ee.u16_at(STAMP_AT) != stamp {
-        return None;
+    if lent.reentered > 0 {
+        *kinds.entry("sweep search reentered".into()).or_default() += lent.reentered;
     }
+    let items = world.items;
     // The clear ran (the search got past its budget): the world form is the one it stands.
     let cleared = port.world == stood.world;
-    // What the walk may change beyond flags and stamps: the probe's reach and place, the parts' groups.
-    let mut wo = was_o.clone();
-    let mut wb = was_b.clone();
-    wo[0].radius = objects[0].radius;
-    let p = &broad.places[0];
-    (wb.places[0].centre, wb.places[0].budget, wb.places[0].last) = (p.centre, p.budget, p.last);
-    for (k, o) in objects.iter().enumerate() {
-        wo[k].group = o.group;
-        if let Some(g) = o.group {
-            ee.set_u32(items[k] - 0x18 + 0x88, items[g]);
-        }
-    }
-    // The first query begun as the search begins it, on a copy.
-    let mut begun = was_b.clone();
-    if cleared {
-        let space = begun.places[0].space.expect("a searching probe in a space");
-        let (mut lo, mut hi) = ([F::ZERO; 4], [F::ZERO; 4]);
-        bp::Query::begin(&mut begun, space, 1, b.centre.0.map(F), b.half.0.map(F), Some((&mut lo, &mut hi)), true);
-    }
-    let m = GatherInRam { items: items.clone(), ..m };
-    m.write_query(ee, (&wo, &wb), (&objects, &broad), &begun);
+    // The walk written back from what RAM holds of it: as read, else as a hand-on's query left it
+    // and the walk then took back (F60). Before the search's first query began: the copy begun.
+    let (was, begun) = if lent.taken { (lent.was, lent.begun) } else { ((was_o, was_b.clone()), if cleared { begun } else { was_b }) };
+    let m = GatherInRam { items: items.clone(), ..lent.m };
+    sweep_walk_written(ee, &m, (&was.0, &was.1), (&objects, &broad), &begun);
     ee.set_u32(probe + 0x74, broad.places[0].budget.0.to_bits());
     for (i, w) in broad.places[0].last.iter().enumerate() {
         ee.set_u32(probe + 0x60 + 4 * i as u32, w.0.to_bits());
@@ -21537,7 +21619,7 @@ fn sweep_all_in_ram(ee: &mut Ee, probe: u32, lazy: u32, kinds: &mut BTreeMap<Str
     }
     sweep_pairs_write(ee, probe, count, &port, pairs, descriptor);
     write_sweep_answer(ee, rec, count, &items, &port.answer, &more);
-    Some(nearest)
+    nearest
 }
 
 /// A segment for F51's searches: one in three anywhere round `home` (60 or 400 ft out, up to 4 ft
@@ -21617,12 +21699,8 @@ fn the_sweeps_global_search_is_the_originals() {
         a.call(SEARCH_ALL, &[u64::from(probe), u64::from(lazy)], &[], BUDGET);
         let theirs = a.f0();
         let ctx = format!("search {n} (lazy {lazy}, flags {byte:#x})");
-        let Some(ours) = sweep_all_in_ram(&mut b, probe, lazy, &mut kinds) else {
-            // A struck plant's listener searched the database mid-walk: not followed (F51's journal).
-            *seen.entry("reentered").or_default() += 1;
-            b.ram.clone_from(&a.ram);
-            continue;
-        };
+        // F60: with a struck plant's listener that searches the database mid-walk too.
+        let ours = sweep_all_in_ram(&mut b, probe, lazy, &mut kinds);
         assert_eq!(theirs.to_bits(), ours.0.to_bits(), "{ctx}: the answer ({theirs} theirs, {} ours)", ours.0);
         let off = bytes_differ(&a.ram, &b.ram, a.stack);
         assert!(off.is_empty(), "{ctx}: RAM differs at {} ranges\n  {}", off.len(), off.iter().take(40).cloned().collect::<Vec<_>>().join("\n  "));
@@ -21633,6 +21711,7 @@ fn the_sweeps_global_search_is_the_originals() {
     assert!(seen.get("hit").copied().unwrap_or(0) >= 300, "the searches hit: {seen:?}");
     assert!(seen.get("inactive").copied().unwrap_or(0) >= 50, "{seen:?}");
     assert!(kinds.keys().any(|k| k.contains("part stand")), "no plant was searched: {kinds:?}");
+    assert!(kinds.get("sweep search reentered").copied().unwrap_or(0) >= 1, "no listener searched the database: {kinds:?}");
 }
 
 /// The nearby sweep with its pairs against the original's (F51; C15's sweeps pair nothing): the
@@ -21684,18 +21763,18 @@ fn the_nearby_sweep_with_its_pairs_is_the_originals() {
         let stamp = b.u16_at(STAMP_AT);
         let ours = sweep_in_ram(&mut b, rec, probe, list, ends[0], ends[1], &mut kinds);
         let theirs = a.u8_at(probe + f51_at::FLAGS) & ws::flags::HIT != 0;
-        if b.u16_at(STAMP_AT) != stamp {
-            // A struck plant's listener searched the database (as in the global search's test).
-            *seen.entry("reentered").or_default() += 1;
-            b.ram.clone_from(&a.ram);
-            continue;
-        }
         assert_eq!(theirs, ours, "{ctx}: the hit");
         let off = bytes_differ(&a.ram, &b.ram, a.stack);
         assert!(off.is_empty(), "{ctx}: RAM differs at {} ranges\n  {}", off.len(), off.iter().take(40).cloned().collect::<Vec<_>>().join("\n  "));
+        // F60: a struck plant's listener that searched the database (its query bumps the stamp) is
+        // followed too: the nearby walk is the list's, which that query leaves alone.
+        if b.u16_at(STAMP_AT) != stamp {
+            *seen.entry("reentered").or_default() += 1;
+        }
         *seen.entry(if theirs { "hit" } else if a.u32_at(list + 4) > 0 { "missed" } else { "empty" }).or_default() += 1;
     }
     eprintln!("F51 nearby: {seen:?}, pairs {kinds:?}");
+    assert!(seen.get("reentered").copied().unwrap_or(0) >= 1, "no listener searched the database: {seen:?}");
     assert!(seen.get("hit").copied().unwrap_or(0) >= 150, "the sweeps hit: {seen:?}");
     assert!(seen.get("missed").copied().unwrap_or(0) >= 100, "{seen:?}");
 }
@@ -22514,7 +22593,7 @@ impl<'a> bone::Scene<RiderRam<'a>> for PortScene {
         match ee.u32_at(shape + 0xc) {
             SWEEP_VT => {
                 self.segments = None;
-                in_hook(ee, |ee| sweep_all_in_ram(ee, shape, 0, kinds)).expect("a listener searched the database inside the probe's search");
+                in_hook(ee, |ee| sweep_all_in_ram(ee, shape, 0, kinds));
             }
             _ => {
                 *kinds.entry("> sphere whole-scene search".into()).or_default() += 1;

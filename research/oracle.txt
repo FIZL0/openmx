@@ -11567,6 +11567,14 @@ atv_heap_free               atv 0x001b76d0 = free
 # the walk. Plant part listener vt +0xc 0x00495690 runs a database query of its own (stamp 0x003d3b88 +1)
 # inside the walk: not followed (2 of 1500 global, 2 of 600 nearby cases skipped). State 4 probe
 # 0x00ea7310, record 0x00ea74a0, flags 0x13; no kind 1 or kind 8 objects on nat05.
+# F60 — the sweep searches follow a listener that queries the database (src atv_sweep Outside::lend /
+# take_back, search_world's test_lent; tests the_sweeps_global_search_is_the_originals and
+# the_nearby_sweep_with_its_pairs_is_the_originals, no case skipped). Plant part listener vt +0xc 0x00495690
+# = thunk (this-0x38) -> 0x00493d40: if +0x44 bit 1, vt +0x138 = 0x00494940 (the plant part's wake: allocs,
+# physics registration, ...; not ported, stays handed on). Its query bumps stamp 0x003d3b88 and ends the
+# tree's open query (tree 0x00672e10: +0xc bit 0 down, cells 0x80000000, +0x9c/+0xa0 0): the global walk's
+# next on the tree then answers none and it goes on to the moving list (0x00674430). The nearby walk is its
+# list's: the query leaves it alone, and the case matched with no change. 2 of 1500 global, 2 of 600 nearby.
 # F45a — the bike's net interpolate, the unpack's wheels and the net post in Rust (game_sim::quad::
 # net_interpolate_head / net_interpolate_tail, handling::bike::net_post; tests/mxvatv_bike_ride.rs
 # the_bikes_net_interpolate_is_the_originals, the_bikes_net_check_is_the_originals_with_the_interpolate_
