@@ -1987,6 +1987,96 @@ fn the_hints_and_the_band_stand_clear_of_the_touch_pad() {
     assert!(covered > 0, "the pad covered nothing with no room made for it, so this proves nothing");
 }
 
+/// F10: with the page's touch pad up, every screen's slanted title stands right of the stick's
+/// resting base and clear of the pad's other controls, in the frame, off the hints and off the
+/// screen's rows, pills and cards; the title and the hints, shrunk to share the band's top or the
+/// title a row up, stay at least half their size on the phones of P208 and a third on a small
+/// phone or a tablet. With the pad down the title is where it was, over the stick.
+#[test]
+fn the_title_stands_clear_of_the_touch_pads_stick() {
+    let mut disc = match game_render::Disc::open_configured() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    let art = menu::Art::load(&mut disc).expect("the menus' art");
+    let (mut titles, mut covered) = (0, 0);
+    // the least each was drawn at, against its unshrunk size: on the phones of P208, and anywhere
+    let (mut phone_least, mut least) = (f32::MAX, f32::MAX);
+    for (w, h) in [(844, 390), (667, 375), (932, 430), (1180, 820)] {
+        let phone = matches!((w, h), (844, 390) | (932, 430));
+        let (thumb, stick) = touch_controls((w as f32, h as f32));
+        let em = (w as f32 / 80.0).min(h as f32 / 45.0);
+        for screen in Screen::ALL {
+            let (mut m, _) = fresh();
+            m.open(screen);
+            let draw = |pad: bool| {
+                menu::touch_room::set(pad.then_some((w, h)));
+                let parts = art.parts(&m, &mut game_render::Frame::new(w, h, [90, 90, 90]));
+                menu::touch_room::set(None);
+                parts
+            };
+            let title = |parts: &[menu::Part]| parts.iter().find_map(|p| if let menu::Part::Title(b) = p { Some(*b) } else { None });
+            // what the title lies over, the hints excepted: some screens lay it over their own
+            // cards with the pad down too (the Tracks pick), which is no more F10's than its rows
+            let over = |parts: &[menu::Part], t: menu::Bounds| -> Vec<&'static str> {
+                let mut over: Vec<_> = parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        menu::Part::Item(b) => Some(("row", *b)),
+                        menu::Part::Pill { pill, .. } => Some(("pill", *pill)),
+                        menu::Part::Card { card, .. } => Some(("card", *card)),
+                        _ => None,
+                    })
+                    .filter(|(_, b)| overlap(t, *b))
+                    .map(|(what, _)| what)
+                    .collect();
+                over.sort();
+                over
+            };
+            let down = draw(false);
+            let was = title(&down).map(|b| {
+                covered += overlap(b, stick) as usize;
+                over(&down, b)
+            });
+            let up = draw(true);
+            let Some(t) = title(&up) else { continue };
+            titles += 1;
+            let at = format!("{screen:?} at {w}x{h}");
+            assert!(t[0] >= 0.0 && t[0] + t[2] <= w as f32 && t[1] >= 0.0, "{at}: the title {t:?} is off the frame");
+            assert!(!overlap(t, stick), "{at}: the title {t:?} under the stick {stick:?}");
+            for c in &thumb {
+                assert!(!overlap(t, *c), "{at}: the title {t:?} under the pad's {c:?}");
+            }
+            // the title's capitals, 0.73 of its size, against the unshrunk 3.1 ems
+            let mut sizes = vec![t[3] / (0.73 * 3.1 * em)];
+            for p in &up {
+                if let menu::Part::Hints(b) = p {
+                    sizes.push(b[3] / (1.15 * 1.55 * em));
+                    assert!(!overlap(t, *b), "{at}: the title {t:?} over the hints {b:?}");
+                }
+            }
+            for k in sizes {
+                least = least.min(k);
+                if phone {
+                    phone_least = phone_least.min(k);
+                }
+            }
+            let now = over(&up, t);
+            let was = was.unwrap_or_default();
+            assert!(now.iter().all(|w| now.iter().filter(|x| *x == w).count() <= was.iter().filter(|x| *x == w).count()), "{at}: the title {t:?} over {now:?}, not {was:?} with the pad down");
+        }
+    }
+    assert!(titles > 0, "no title drawn");
+    assert!(covered > 0, "the stick covered no title with no room made for it, so this proves nothing");
+    // a 667x375 phone's and a tablet's Tracks and Race pick have rows where the title would go up
+    // a row, so it and the hints share the band's top at about a third of their size
+    assert!(phone_least >= 0.5, "the title or the hints shrank past half on a phone: {phone_least}");
+    assert!(least >= 0.3, "the title or the hints shrank past a third: {least}");
+}
+
 /// P278: the splash has no band, so its hint tab sits on the frame's bottom edge: the gap under its
 /// buttons and words is less than their own height at 16:9, the Deck's 16:10, a phone held either
 /// way and a wide screen (it was the band's 4.6 ems more, the tab floating over the scene), and the
@@ -2149,7 +2239,7 @@ fn every_pill_fits_its_label_and_nothing_covers_the_logo() {
                                 assert!(!overlap(*logo, *b), "{screen:?} at {w}x{h}: an item on the logo");
                             }
                         }
-                        menu::Part::Plate(_) | menu::Part::Hints(_) | menu::Part::Line(_) | menu::Part::Build(_) => {}
+                        menu::Part::Plate(_) | menu::Part::Hints(_) | menu::Part::Line(_) | menu::Part::Build(_) | menu::Part::Title(_) => {}
                         // Unstretched: 512x64 at any shape.
                         menu::Part::Logo(b) => assert!((b[2] / b[3] - 8.0).abs() < 0.01, "{screen:?} at {w}x{h}"),
                         menu::Part::Card { card, .. } => {
