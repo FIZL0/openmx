@@ -1,1 +1,11 @@
 <!-- What's new since the last release, for players, in plain English: one "- " line per change. tools/release.sh puts this in the release and empties it. -->
+- **Races have riders to race.** AI riders line up on the grid and race you lap for lap, drawn on the track like any rider. Split-screen players race together in one race, with the AI riders behind them on the grid.
+- The race HUD waves the white flag on the last lap and the checkered flag at the finish, as the original does.
+- **Hall of Fame:** the original's record tables, with name entry when you set a mark and a Hall of Fame screen after the race. Wins, races and records are kept in your rider's profile.
+- **MX vs. ATV's cars can be seen and heard now.** Each car is drawn with its own chassis, tires and chase camera, plays its own engine sound, seats its driver, and throws dirt and dust. Pick one from the new Car row in the Garage (it still needs the cars pack from your own copy of *MX vs. ATV Unleashed*, as in 0.15.0).
+- The buggy and the monster truck show in the Garage's machine tiles with the other machines, and they get back on their wheels after landing on the roof.
+- MX vs. ATV's quad rides online and meets the bikes, online and in split screen.
+- A world mod with no picture gets a top-down map of its ground in the menu.
+- Big worlds use less memory, and give it back while you are in the menus.
+- On a Mac, game pads work.
+- In the browser and on iPhone, you can drag a Controllers card to change which pad is which player.
