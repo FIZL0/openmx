@@ -117,6 +117,9 @@ pub(super) struct Pen<'a> {
     /// The buttons are a ride's, not the menus' (a trick's gesture): the keyboard's Circle is its
     /// bound key and not Escape.
     ride_keys: bool,
+    /// The screen's title, held back while the page's touch pad is up (F10) for the hints to share
+    /// the band's top with it right of the stick ([`Pen::hints_on`], else [`Pen::finish`]).
+    title: Option<String>,
 }
 
 /// The stage in a `size` frame: an em's pixels, and where the stage's corner is.
@@ -187,6 +190,13 @@ pub(super) fn trick_stage(size: (usize, usize)) -> [f32; 4] {
 /// top, under the tabs where it has them.
 /// The room each side of the hints in their tab (P341).
 const HINT_MARGIN: f32 = 2.0;
+
+/// The screen title's size, in ems.
+const TITLE_SIZE: f32 = 3.1;
+
+/// How far the title and the hints may shrink to share the band's top beside the touch pad's
+/// stick (F10) before the title goes up a row over the tab instead.
+const SHARED_SHRINK: f32 = 0.5;
 
 pub(super) fn page_column(tabs: bool) -> (f32, f32, f32) {
     (3.8, 36.4, if tabs { 11.4 } else { 8.2 })
@@ -353,7 +363,7 @@ impl<'a> Pen<'a> {
     pub(super) fn new(art: &'a Art, out: &'a mut Vec<Sprite>, base: usize, size: (usize, usize)) -> Pen<'a> {
         let (w, h) = (size.0.max(1) as f32, size.1.max(1) as f32);
         let (em, o) = fit(size);
-        Pen { art, out, base, em, o, size: [w, h], fade: 1.0, parts: Vec::new(), buttons: Default::default(), ride_keys: false }
+        Pen { art, out, base, em, o, size: [w, h], fade: 1.0, parts: Vec::new(), buttons: Default::default(), ride_keys: false, title: None }
     }
 
     // ---- coordinates -------------------------------------------------------------------------
@@ -602,9 +612,54 @@ impl<'a> Pen<'a> {
     }
 
     /// The screen's name, slanted over the band's left end.
+    /// While the page's touch pad is up it starts right of the stick's resting base, and waits for
+    /// the hints to share the room left of the pedals with it (F10).
     fn title(&mut self, title: &str) {
-        let size = 3.1;
-        self.shadowed(Weight::Heavy, title, 4.5, STAGE.1 - BAND - 1.2, size, SLANT, CHALK, Align::Left, [0.08, 0.1], [0, 0, 0, 102]);
+        if self.pad_up() {
+            self.title = Some(title.to_string());
+            return;
+        }
+        self.title_at(title, 4.5, STAGE.1 - BAND - 1.2, TITLE_SIZE);
+    }
+
+    /// The title from `x` with its baseline at `base` (stage ems), `size` ems; [`Part::Title`] its
+    /// box with its lean and shadow.
+    fn title_at(&mut self, title: &str, x: f32, base: f32, size: f32) {
+        let drop = [0.08, 0.1];
+        let b = self.shadowed(Weight::Heavy, title, x, base, size, SLANT, CHALK, Align::Left, drop, [0, 0, 0, 102]);
+        let lean = Pen::title_lean(size) * self.em;
+        self.parts.push(Part::Title([b[0], b[1], b[2] + lean, b[3] + drop[1] * size * self.em]));
+    }
+
+    /// The ems a title of `size` reaches past its advance: its slant leans the capitals' tops
+    /// right, and its shadow falls right of the face.
+    fn title_lean(size: f32) -> f32 {
+        (SLANT * CAP + 0.08) * size
+    }
+
+    /// The held title (F10) on a screen with no hints, right of the stick at its full size.
+    pub(super) fn finish(&mut self) {
+        if let Some(t) = self.title.take() {
+            let x = self.clear_of_the_stick(4.5);
+            self.title_at(&t, x, STAGE.1 - BAND - 1.2, TITLE_SIZE);
+        }
+    }
+
+    /// Whether `b` (stage ems) lies over a row, a pill or a card drawn so far.
+    fn over_the_rows(&self, b: Box4) -> bool {
+        let [x, y, w, h] = self.b(b);
+        self.parts.iter().any(|p| {
+            let r = match p {
+                Part::Item(r) | Part::Pill { pill: r, .. } | Part::Card { card: r, .. } => r,
+                _ => return false,
+            };
+            x < r[0] + r[2] && r[0] < x + w && y < r[1] + r[3] && r[1] < y + h
+        })
+    }
+
+    /// Whether the page's touch pad is shown over this frame.
+    fn pad_up(&self) -> bool {
+        Room::of((self.size[0] as usize, self.size[1] as usize)).is_some()
     }
 
     /// The black band and its line: whose ride this is, a note, or the lobby's word.
@@ -847,7 +902,28 @@ impl<'a> Pen<'a> {
         let room = right - HINT_MARGIN - lead - self.left().max(0.0) - spacing;
         let mut size = 1.55;
         let full: f32 = widths_at(self, size).iter().sum();
-        if full > room && room > 0.0 {
+        if let Some(t) = self.title.take() {
+            // The title held back right of the touch pad's stick (F10) and the hints share the
+            // room up to the pedals, half an em apart, both shrunk alike where they must. Where
+            // that is past [`SHARED_SHRINK`] (a small phone, a tablet's big pad), the title goes up
+            // a row over the tab instead, as big as fits up to the pedals, and the hints keep
+            // theirs; unless that puts it over the screen's rows, and then they share anyway.
+            let x = self.clear_of_the_stick(4.5);
+            let title = self.wide(Weight::Heavy, &t, TITLE_SIZE) + Pen::title_lean(TITLE_SIZE);
+            let beside = right - HINT_MARGIN - lead - spacing - x - 0.5;
+            let k = if title + full > beside { (beside / (title + full)).max(0.0) } else { 1.0 };
+            let fit = ((right - x) / title).min(1.0);
+            let up = [x, foot - 3.8 - CAP * TITLE_SIZE * fit, title * fit, CAP * TITLE_SIZE * fit];
+            if k >= SHARED_SHRINK || self.over_the_rows(up) {
+                self.title_at(&t, x, foot - 1.2, TITLE_SIZE * k);
+                size *= k;
+            } else {
+                self.title_at(&t, x, foot - 3.8, TITLE_SIZE * fit);
+                if full > room && room > 0.0 {
+                    size *= room / full;
+                }
+            }
+        } else if full > room && room > 0.0 {
             size *= room / full;
         }
         let d = 1.15 * size;

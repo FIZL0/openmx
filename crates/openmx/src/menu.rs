@@ -6674,8 +6674,11 @@ pub enum Part {
     /// The hints' buttons and words over the band's right end (P208).
     Hints(Bounds),
     /// The band's line: whose ride this is, a note, or the lobby's word (P208).
-    Line(Bounds),    /// The splash's build label, top left (B32).
+    Line(Bounds),
+    /// The splash's build label, top left (B32).
     Build(Bounds),
+    /// The screen's slanted title over the band's left end, with its lean and shadow (F10).
+    Title(Bounds),
 }
 
 impl Art {
@@ -6788,6 +6791,7 @@ impl Art {
         let mut pen = screens::Pen::new(self, out, base, size);
         pen.buttons = menu.buttons();
         pen.screen(menu);
+        pen.finish();
         pen.parts
     }
 }
