@@ -1114,6 +1114,60 @@ struct Lists<'a, 'o> {
     others: &'a mut [Other<'o>],
 }
 
+impl Lists<'_, '_> {
+    /// Object `k`'s force listener when its list names a body of its own collection (F21): the
+    /// other sides are `others`, then the collection's objects in their order, each its own collider
+    /// and body in place (`k`'s own place a stand-in no entry names).
+    fn force_among_siblings(&mut self, k: usize) {
+        let movers = self.movers;
+        let mut bones: Vec<Option<&mut Bone>> = self.c.bones.iter_mut().map(Some).collect();
+        let mut objects: Vec<Option<&mut Object>> = self.c.objects.iter_mut().map(Some).collect();
+        let bone = bones[k].take().expect("object k's bone");
+        let o = objects[k].take().expect("object k");
+        let mut spare_body = Body::default();
+        let mut spare = Some(Weighed { body: &mut spare_body, mass: F(0.0) });
+        let mut weighed: Vec<Weighed<'_>> = bones
+            .into_iter()
+            .map(|b| match b {
+                Some(b) => Weighed { body: &mut b.body, mass: b.mass },
+                None => spare.take().expect("one stand-in"),
+            })
+            .collect();
+        let mut stand_ins = vec![Collider::default(); objects.len()];
+        let colliders: Vec<&mut Collider> = objects
+            .into_iter()
+            .zip(stand_ins.iter_mut())
+            .map(|(x, spare)| match x.and_then(|x| x.collision.as_mut()) {
+                Some(c) => &mut c.collider,
+                None => spare,
+            })
+            .collect();
+        let mut others: Vec<Other<'_>> = self
+            .others
+            .iter_mut()
+            .map(|x| Other {
+                collider: &mut *x.collider,
+                side: match &mut x.side {
+                    Side::Body(r) => Side::Body(&mut **r),
+                    Side::Vehicle(v) => Side::Vehicle(&mut **v),
+                },
+            })
+            .collect();
+        for (collider, w) in colliders.into_iter().zip(weighed.iter_mut()) {
+            others.push(Other { collider, side: Side::Body(w) });
+        }
+        let pushed = biplane::collision_force(&mut bone.body, o.gravity, |body| {
+            if let Some(c) = o.collision.as_mut() {
+                let mut rigid = Weighed { body, mass: bone.mass };
+                contact::resolve(&mut c.collider, &mut rigid, &mut c.record.contacts, &mut others, movers, true);
+            }
+        });
+        if pushed {
+            o.fresh = false;
+        }
+    }
+}
+
 impl Dynamics for Lists<'_, '_> {
     fn count(&self, list: List) -> i32 {
         let c = &self.c;
@@ -1139,9 +1193,15 @@ impl Dynamics for Lists<'_, '_> {
             return;
         }
         let k = self.c.forces[i as usize - springs];
+        let movers = self.movers;
+        let n = self.others.len();
+        let named = self.c.objects[k].collision.as_ref().is_some_and(|c| c.record.contacts.iter().any(|e| e.other.is_some_and(|x| x >= n)));
+        if named {
+            self.force_among_siblings(k);
+            return;
+        }
         let bone = &mut self.c.bones[k];
         let o = &mut self.c.objects[k];
-        let movers = self.movers;
         let others = &mut *self.others;
         let pushed = biplane::collision_force(&mut bone.body, o.gravity, |body| {
             if let Some(c) = o.collision.as_mut() {
