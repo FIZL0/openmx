@@ -807,6 +807,7 @@ impl Rider {
         // The body rays' material listener hears this tick's hits afresh (F27a): a rider who is down
         // rides the wreck bike, whose object is not filed with it.
         ride.heard = crate::material_hit::Heard::default();
+        ride.struck_stadium = false;
         if state.wreck.is_none() {
             // The body rays against the world's props (S138), from where the last tick left the bike,
             // as its collision object searches them before the bikes are updated: what they touch goes
@@ -818,13 +819,13 @@ impl Rider {
             ride.sweep_back(p, bike_col.as_deref().map(|col| &col.rays), world, dt);
             let ground = bike_col.as_deref().map_or_else(Vec::new, |col| crate::rider_contact::ground(col, &ride.transform(), world, dt));
             in_ground = crate::rider_contact::ground_hits(&ground);
-            let (found, movers, sounded) = match bike_col.as_deref().and_then(|col| {
+            let (found, movers, sounded, stadium) = match bike_col.as_deref().and_then(|col| {
                 let at = ride.transform();
                 let (nearby, set) = (&mut ride.nearby, ride.props.as_deref().map(|l| &l.0));
                 crate::prop_wheel::riding(set, |knocks, _| crate::rider_contact::scenery_heard_among(col, &at, nearby, world, knocks, dt))
             }) {
-                Some((f, m, s)) => (Some(f), m, s),
-                None => (None, Vec::new(), Vec::new()),
+                Some((f, m, s, st)) => (Some(f), m, s, st),
+                None => (None, Vec::new(), Vec::new(), false),
             };
             // What the listener heard (F27a): the riders, planes and props the list's own entries
             // strike, then the scenery the rays' own search struck.
@@ -834,6 +835,8 @@ impl Rider {
             on_scenery = found.as_deref().map_or_else(Vec::new, crate::mover_contact::wreck_contacts);
             searched = found.is_some();
             let scenery = Some(found.as_ref().is_some_and(|f| !f.is_empty()) || !ground.is_empty());
+            // The record touching a stadium-class prop (MD72), MX vs. ATV's reason-15 gate.
+            ride.struck_stadium = scenery == Some(true) && stadium;
             let mut alone = None;
             let bump = match (bump, found) {
                 (Some(b), found) => {
@@ -1097,10 +1100,10 @@ impl Rider {
         });
         let (spun, spun_aloft) = match flipped { Some(w) => (spun.or(Some(w)), spun_aloft || flipped_aloft), None => (spun, spun_aloft) };
         // MX vs. ATV's own wreck test and hits (MD63c), on its rides: the 360's torque as its `+0x11d0`
-        // (the last substep's). Its reason 15 asks an object class the port's world has none of.
+        // (the last substep's), and its reason 15's record touching a stadium-class prop (MD72).
         let mxvatv = ride.mxvatv.is_some().then(|| crate::handling::step::WreckIn {
             spin_applied: ride.tricks.as_ref().is_some_and(|t| t.spin.applied),
-            struck_class: false,
+            struck_class: ride.struck_stadium,
         });
         let thrown = &mut ride.chassis;
         let origin = &mut ride.origin;

@@ -151,3 +151,93 @@ fn an_unowned_mxvatv_rider_is_put_back_and_the_originals_is_not() {
     assert!(!back, "the original's machine has no owner to put the rider back for");
     assert_eq!(state.wreck, Some(Wreck::NO_CONTROL));
 }
+
+/// MD72's wiring: an airborne MX vs. ATV rider whose body rays strike a wall wrecks at reason 15
+/// ([`game_sim::air::Wreck::Struck`]) when the wall's collision file is the stadium class's
+/// (`Col\SxCl.col`, [`game_sim::world::stadium_class`]), and the same wall under another name does
+/// not; on the original's handling the name changes nothing. The class rule is proved against
+/// SLUS-21104 in `tests/mxvatv_air.rs`. Needs the disc's bike and its body rays (skips without).
+#[test]
+fn an_airborne_mxvatv_rider_wrecks_struck_on_a_stadium_wall_only() {
+    use game_render::disc::Disc;
+    use game_sim::bike_col::{self, BikeCol};
+    use game_sim::collide::{Bundle, Record};
+    use game_sim::contact_search::Heightfield;
+    use game_sim::rider::{self, Rider};
+    use game_sim::track::{Mesh, Node, Placement, Points, Triangle};
+    use game_sim::trick::{Set, Wreck};
+    use game_sim::world::{Prop, Props, World};
+    use std::sync::Arc;
+
+    struct Yard {
+        floor: Flat,
+        props: Props,
+    }
+    impl World for Yard {
+        fn ground(&mut self, at: Vf) -> (Vf, Vf) {
+            self.floor.ground(at)
+        }
+        fn solid(&mut self, bundle: &Bundle, record: &mut Record) -> bool {
+            self.props.sweep(bundle, record)
+        }
+        fn heightfield(&mut self) -> Option<Box<dyn Heightfield + '_>> {
+            Some(Box::new(self.floor))
+        }
+        fn collision(&mut self) -> (Option<Box<dyn Heightfield + '_>>, Option<&Props>) {
+            (Some(Box::new(self.floor)), Some(&self.props))
+        }
+    }
+    // A wall across the path at `z`, twenty feet wide and tall, wound to face the rider (-z).
+    let wall = |z: f32, file: &str| {
+        let v = |x: f32, y: f32| [F(x), F(y), F(z)];
+        let tri = |vertices| Triangle { distance: F::ZERO, normal: [F::ZERO; 3], vertices };
+        let mesh = Mesh {
+            version: 0,
+            surface: None,
+            transform: [[F::ONE, F::ZERO, F::ZERO], [F::ZERO, F::ONE, F::ZERO], [F::ZERO, F::ZERO, F::ONE], [F::ZERO; 3]],
+            vertices: Points::Wide(vec![v(-10.0, 0.0), v(10.0, 0.0), v(10.0, 20.0), v(-10.0, 20.0)]),
+            normals: None,
+            nodes: vec![Node {
+                volume: F::ZERO,
+                centre: [F::ZERO, F(10.0), F(z)],
+                half_extent: [F(10.0), F(10.0), F(0.5)],
+                children: [0x8000, 0x8001],
+            }],
+            triangles: vec![tri([0, 2, 1]), tri([0, 3, 2])],
+        };
+        Prop::place(mesh, &Placement { file: file.to_string(), ..Placement::default() })
+    };
+
+    let tables = Arc::new(rider::Tables::build());
+    let mut disc = match Disc::open_configured() {
+        Ok(d) => d,
+        Err(why) => return ps2_oracle::skip(&why),
+    };
+    let res = disc.res("Tracks\\free09_ss_2.res").expect("the split track's archive");
+    let read = |name: String| res.read_suffix(&name).unwrap_or_else(|e| panic!("{e}"));
+    let col = Arc::new(
+        BikeCol::load(&read(bike_col::rays_file(bike_col::MODEL)), &read(bike_col::shape_file(bike_col::MODEL)))
+            .expect("the bike's collision files"),
+    );
+    let ride = |handling: Handling, file: &str| {
+        let p = bike(&tables.ride, handling, Gyro::default());
+        let mut r = Rider::new(&p, game_sim::stock::MOUNTS, Vf::new(0.0, 4.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Set::default());
+        r.edge_armed = false;
+        r.carries_bike_col(Arc::clone(&col));
+        let mut yard = Yard { floor: Flat { y: F::ZERO, normal: Vf::new(0.0, 1.0, 0.0, 0.0) }, props: Props { props: vec![wall(1.0, file)] } };
+        assert_eq!(yard.props.props[0].stadium, game_sim::world::stadium_class(file));
+        // The first frame: the wall stands through the bike, so its body rays strike it at once, as
+        // the airborne attitude's reason 8 (asked after reason 15) also fires.
+        let out = r.frame(&p, &tables, &Controls::default(), DT, &mut yard);
+        assert!(r.ride.touching, "{handling:?} {file}: the body rays touch the wall");
+        assert_eq!(r.ride.struck_stadium, game_sim::world::stadium_class(file), "{handling:?} {file}: the struck prop's class");
+        out.wreck
+    };
+    let struck = Wreck::from(game_sim::air::Wreck::Struck);
+    let attitude = Some(Wreck(8));
+    assert_eq!(ride(Handling::MxVsAtv, "Col\\SxCl.col"), Some(struck), "MX vs. ATV on the stadium wall");
+    assert_eq!(ride(Handling::MxVsAtv, "Data\\Col\\sxcl.col"), Some(struck), "MX vs. ATV, the name in another case");
+    assert_eq!(ride(Handling::MxVsAtv, "Col\\wall_col.col"), attitude, "MX vs. ATV on a plain wall");
+    assert_eq!(ride(Handling::Original, "Col\\SxCl.col"), attitude, "the original's handling on the stadium wall");
+    assert_eq!(ride(Handling::Original, "Col\\wall_col.col"), attitude, "the original's handling on a plain wall");
+}

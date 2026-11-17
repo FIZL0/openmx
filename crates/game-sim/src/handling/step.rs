@@ -401,7 +401,9 @@ pub struct WreckIn {
     pub spin_applied: bool,
     /// The collision record is touching and its object (record `+0x20c`) is of the class the game
     /// keeps at `0x00542db0` (`0x20` in the Free Ride image): the reason-15 test's own gate
-    /// ([`Wreck::Struck`]).
+    /// ([`Wreck::Struck`]). The class is the category "STADIUMCOLLISION", which the level's start puts
+    /// on its collision objects named for the supercross clamp (`sxcl.col`, MD72,
+    /// [`crate::world::stadium_class`]); a ride reads it as [`crate::ride::Ride::struck_stadium`].
     pub struck_class: bool,
 }
 
