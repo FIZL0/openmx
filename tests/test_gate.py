@@ -79,7 +79,7 @@ def test_gate() -> None:
             (w / rel).parent.mkdir(parents=True, exist_ok=True)
             (w / rel).write_text(text)
         g('init', '-q', '-b', 'main', cwd=w)
-        (w / '.gitignore').write_text('target/\nstamps\nflake\ntimes.json\nlog\n')
+        (w / '.gitignore').write_text('target/\nstamps\nflake\ntimes.json\ntimes-cores.json\nlog\n')
         g('add', '-A', cwd=w)
         g('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'base', cwd=w)
         g('checkout', '-qb', 'task/T1', cwd=w)
@@ -200,7 +200,7 @@ def test_select() -> None:
             (w / rel).parent.mkdir(parents=True, exist_ok=True)
             (w / rel).write_text(text)
         g('init', '-q', '-b', 'main', cwd=w)
-        (w / '.gitignore').write_text('target/\ntimes.json\nlog\nCargo.lock\n')
+        (w / '.gitignore').write_text('target/\ntimes.json\ntimes-cores.json\nlog\nCargo.lock\n')
         g('add', '-A', cwd=w)
         g('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'base', cwd=w)
         g('checkout', '-qb', 'task/T2', cwd=w)
@@ -324,6 +324,14 @@ def test_threads_backfill() -> None:
           f'one that would delay it does not ({order})')
 
 
+def test_cores_cap() -> None:
+    check(cargo_gate.cores_cap(300, None) == 300, 'no time yet: one thread a test')
+    check(cargo_gate.cores_cap(300, 0.8) == 2, 'one that used under a core: 2 threads')
+    check(cargo_gate.cores_cap(22, 19.5) == 22, 'one that kept its threads busy keeps them')
+    check(cargo_gate.cores_cap(40, 5.2) == 11, 'twice what it used, so it can grow back')
+    check(cargo_gate.cores_cap(1, 0.1) == 1, 'never more than its tests')
+
+
 def test_give_way() -> None:
     import threading, time
     want, events, lock = threading.Event(), [], threading.Lock()
@@ -377,6 +385,8 @@ if __name__ == '__main__':
     test_gate()
     test_select()
     test_threads()
+    test_threads_backfill()
+    test_cores_cap()
     test_give_way()
     print(f'\n{ok} passed, {fail} failed')
     sys.exit(1 if fail else 0)

@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import math
 import os
 import re
 import shlex
@@ -251,7 +252,7 @@ class Binary:
                 'example': f'--example {name}'}.get(kind, f'--test {name}')
         self.args = f'-p {pkg} {flag}'
         self.filter = ''  # a variant's name filter (gate.toml [[variant]])
-        self.rc, self.out, self.secs = 0, '', 0.0
+        self.rc, self.out, self.secs, self.cpu = 0, '', 0.0, None
 
 
 def _pkg_name(package_id: str) -> str:
@@ -418,10 +419,20 @@ def count_tests(b: Binary, env: dict) -> int:
     return max(1, sum(l.endswith(': test') for l in r.stdout.splitlines()))
 
 
+def cores_cap(tests: int, cores: float | None) -> int:
+    """Threads for a binary that ran `tests` tests on `cores` cores last time (CPU seconds over wall): twice
+    what it used, at least 2, so one that keeps its threads busy keeps them and grows back, and one that
+    waits on a child process or a timer gives the rest to the pool. menu ran 481 s on 20 threads and on 8,
+    on under one core: its time is one test's sleep, and its 20 threads kept camera from starting (11-17)."""
+    if cores is None:
+        return tests
+    return min(tests, max(2, math.ceil(2 * cores)))
+
+
 def _run_one(b: Binary, env: dict, filters: list[str] | None = None, threads: Threads | None = None,
-             way: GiveWay | None = None, secs: float | None = None) -> None:
+             way: GiveWay | None = None, secs: float | None = None, cores: float | None = None) -> None:
     if threads is not None:
-        with threads.take(count_tests(b, env), secs) as k:
+        with threads.take(cores_cap(count_tests(b, env), cores), secs) as k:
             return _run_one(b, {**env, 'RUST_TEST_THREADS': str(k)}, filters, way=way)
     if way is not None:
         with way.turn():
@@ -429,9 +440,15 @@ def _run_one(b: Binary, env: dict, filters: list[str] | None = None, threads: Th
     e = {**env, 'CARGO_MANIFEST_DIR': b.dir, 'CARGO_PKG_NAME': b.pkg, 'CARGO_CRATE_NAME': b.name.replace('-', '_')}
     args = [b.exe, '-q'] + (['--exact', *filters] if filters else [b.filter] if b.filter else [])
     t = time.monotonic()
-    r = subprocess.run(args, cwd=b.dir, env=e, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                       errors='replace')
-    b.rc, b.out, b.secs = r.returncode, r.stdout, time.monotonic() - t
+    # wait4 rather than run(): its rusage is this binary's CPU time and its children's, not the gate's.
+    p = subprocess.Popen(args, cwd=b.dir, env=e, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                         errors='replace')
+    out = p.stdout.read()
+    p.stdout.close()
+    _, status, ru = os.wait4(p.pid, 0)
+    p.returncode = os.waitstatus_to_exitcode(status)
+    b.rc, b.out, b.secs = p.returncode, out, time.monotonic() - t
+    b.cpu = ru.ru_utime + ru.ru_stime
 
 
 def failed_tests(out: str) -> list[str]:
@@ -516,6 +533,11 @@ def run(cmd: str, cwd: Path, env: dict, jobs: int, log_path: Path, shared: str, 
             last = json.loads(times_path.read_text())
         except (OSError, ValueError):
             last = {}
+        cores_path = times_path.with_name(times_path.stem + '-cores.json')
+        try:
+            used = json.loads(cores_path.read_text())
+        except (OSError, ValueError):
+            used = {}
         bins.sort(key=lambda b: -float(last.get(b.args, 0)))
         # A binary that holds itself to a frame budget measures the machine as much as the code, and a pool
         # of other binaries is a busy machine: those run after it, one at a time.
@@ -540,7 +562,8 @@ def run(cmd: str, cwd: Path, env: dict, jobs: int, log_path: Path, shared: str, 
         with ThreadPoolExecutor(max_workers=workers) as pool:
             dfut = pool.submit(doc_tests)
             list(pool.map(lambda b: _run_one(b, benv, threads=threads, way=way,
-                                             secs=float(last[b.args]) if b.args in last else None), pooled))
+                                             secs=float(last[b.args]) if b.args in last else None,
+                                             cores=used.get(b.args)), pooled))
             drc, dout = dfut.result()
         for b in later:
             _run_one(b, benv, way=way)
@@ -591,6 +614,9 @@ def run(cmd: str, cwd: Path, env: dict, jobs: int, log_path: Path, shared: str, 
 
     try:
         times_path.write_text(json.dumps({**last, **{b.args: round(b.secs, 1) for b in bins}}, indent=0))
+        # Only binaries run in the pool with no filter: a rerun's few tests say nothing of the whole binary's.
+        cores_path.write_text(json.dumps({**used, **{b.args: round(b.cpu / b.secs, 2) for b in pooled
+                                                     if b.secs > 1 and b.cpu is not None}}, indent=0))
     except OSError:
         pass
     return (101 if failed or drc else 0), notes
