@@ -21,15 +21,18 @@
 //! * **The baja and the buggy** ([`ARMS`]): each front tire hangs under a wheel hub under the upper
 //!   arm. The hub is turned about y by the steer, the tire spun about x; the upper arm swings about
 //!   z by 1.25 × compression ÷ (the front right hub's distance from its upper arm) radians, up on
-//!   each side, and the hub is turned back by the same so it stays upright. The lower arm is aimed
-//!   at the hub's bottom node. The rear tires hang under one swing arm, which is aimed at the higher
+//!   each side. The lower arm is turned to meet the hub's bottom node, and the hub then turned so
+//!   that node meets the lower arm's end. The rear tires hang under one swing arm, which is aimed at the higher
 //!   of the two rear tires' compressions; they spin about x and are stretched as the truck's. Every
 //!   strut is a pair of nodes, each aimed at the other.
 //!
-//! Every aim here is the port's own form of the original's: the node turned, about its own axis
-//! where the original turns about one, by the turn that takes the target from where it was in the
-//! bind pose to where it is now, so a car at rest is drawn exactly as the model is. The original
-//! builds the aims' frames from scratch (an up vector and the target); the two agree by eye.
+//! The baja and the buggy are posed as the original writes them ([`buggy`], S264): every turn set
+//! afresh, each aim a frame built from an up vector and the target, matched node for node against
+//! the original's own matrices in a driven buggy's image (`tests/car.rs`). The truck's aims, and
+//! the rig of a model without the buggy's nodes (MD157's cars), are still the port's own form: the
+//! node turned, about its own axis where the original turns about one, by the turn that takes the
+//! target from where it was in the bind pose to where it is now, so such a car at rest is drawn
+//! exactly as the model is.
 //!
 //! **The driver.** The seat is where the plane's and the helicopter's pilots sit to the model's four
 //! limb nodes ([`SEAT`]), carried to the car ([`seat`]). The `.phy`'s `[Animation]`
@@ -57,6 +60,12 @@ pub const ARMS: [[&str; 4]; 2] = [
     ["FrontLeft_UpperARM", "FrontLeft_LowerARM", "FrontLeftWheelHub", "FrontLeftBottomHubNODE"],
     ["FrontRight_UpperARM", "FrontRight_LowerARM", "FrontRightWheelHub", "FrontRightBottomHubNODE"],
 ];
+
+/// The baja's and the buggy's other two front marks, left then right: the lower arm's bottom
+/// swingarm node and the upper arm's top one. With the hub's bottom node they set the lower arm's
+/// and the hub's angles.
+pub const SWINGARM_NODES: [[&str; 2]; 2] =
+    [["FrontLeftBottomSwingarmNODE", "FrontLeftTopSwingarmNODE"], ["FrontRightBottomSwingarmNODE", "FrontRightTopSwingarmNODE"]];
 
 /// The node the baja's and the buggy's rear tires hang under.
 pub const SWING_ARM: &str = "SwingArm";
@@ -254,7 +263,9 @@ pub fn pose(model: &Model, tires: &[Tire; 4]) -> Vec<M4> {
     if find(model, HUBS[0]).is_some() {
         truck(model, &mut local, &bind, tires);
     } else {
-        arms(model, &mut local, &bind, tires);
+        if !buggy(model, &mut local, &bind, tires) {
+            arms(model, &mut local, &bind, tires);
+        }
         cart(model, &mut local, tires);
     }
     compose(model, &local)
@@ -317,6 +328,111 @@ fn truck(model: &Model, local: &mut [M4], bind: &[M4], tires: &[Tire; 4]) {
             aim(local, i, &now, bind, origin(now[t]), origin(bind[t]), None);
         }
     }
+}
+
+/// Whether `model` carries every node of the baja's and the buggy's rig as the original poses it
+/// ([`buggy`]): the arms, hubs and marks of [`ARMS`] and [`SWINGARM_NODES`], the [`SWING_ARM`] and
+/// the four [`TIRES`]. A model without them (MD157's cars) is posed by the port's own aims.
+pub fn has_buggy_rig(model: &Model) -> bool {
+    ARMS.iter().flatten().chain(SWINGARM_NODES.iter().flatten()).chain(TIRES.iter()).chain([&SWING_ARM]).all(|n| find(model, n).is_some())
+}
+
+/// Replace a node's turn with `angle` about `axis`, its place kept.
+fn set(local: &mut M4, axis: V3, angle: f32) {
+    let keep = local.0[3];
+    *local = about(axis, angle);
+    local.0[3] = keep;
+}
+
+/// A matrix of the three rows and the place `at`.
+fn of_rows(x: V3, y: V3, z: V3, at: [f32; 4]) -> M4 {
+    M4([[x.x, x.y, x.z, 0.0], [y.x, y.y, y.z, 0.0], [z.x, z.y, z.z, 0.0], at])
+}
+
+/// The angle whose sine is `s`, `s` held to ±1.
+fn asin(s: f32) -> f32 {
+    s.clamp(-1.0, 1.0).asin()
+}
+
+/// The baja's and the buggy's rig as the original writes it (S264), every turn set afresh rather
+/// than added to the model's own, so a car at rest is not quite its model: the turns the model's
+/// tires, hubs and struts carry are dropped.
+///
+/// * Each front hub is set about y by its steer, each tire about x by its spin.
+/// * Right then left, each upper arm is set about z (−z on the left) by 1.25 × compression ÷ (the
+///   front right hub's distance from its upper arm). The lower arm is set about z by the angle whose
+///   sine is the z of (to its bottom swingarm node × to the hub's bottom node), both from its own
+///   place; then the hub is turned in its own frame about z by the angle whose sine is the z of (to
+///   the hub's bottom node × to the bottom swingarm node), both from the top swingarm node.
+/// * The swing arm's frame looks along from the rear left tire's rest place, lifted by the higher
+///   rear compression and brought to the middle, toward the swing arm, with y kept as near up as it
+///   goes.
+/// * The rear tires are set about x by their spin, and all four stretched in y by their scale.
+/// * Each strut pair's two nodes both take the frame whose y runs from the lower node to the upper,
+///   z the car's z and x the two's cross (neither squared nor made unit, as the original's).
+///
+/// False, and nothing written, for a model without the rig's nodes ([`has_buggy_rig`]).
+fn buggy(model: &Model, local: &mut [M4], bind: &[M4], tires: &[Tire; 4]) -> bool {
+    if !has_buggy_rig(model) {
+        return false;
+    }
+    let at = |name: &str| find(model, name).expect("checked by has_buggy_rig");
+    let (x, y, z) = (v3(1.0, 0.0, 0.0), v3(0.0, 1.0, 0.0), v3(0.0, 0.0, 1.0));
+    let tire = TIRES.map(at);
+    let length = origin(bind[at(ARMS[1][2])]).sub(origin(bind[at(ARMS[1][0])])).len();
+    let swing = if length > 1e-6 { ARM_SWING / length } else { 0.0 };
+    for side in 0..2 {
+        set(&mut local[at(ARMS[side][2])], y, tires[side].steer);
+        set(&mut local[tire[side]], x, tires[side].spin);
+    }
+    for side in [1, 0] {
+        let [upper, lower, hub, bottom] = ARMS[side].map(at);
+        let [arm_bottom, arm_top] = SWINGARM_NODES[side].map(at);
+        let up = if side == 1 { z } else { z.scale(-1.0) };
+        set(&mut local[upper], up, swing * tires[side].compression);
+        set(&mut local[lower], z, 0.0);
+        let now = compose(model, local);
+        let pivot = origin(bind[lower]);
+        let (a, b) = (origin(now[bottom]).sub(pivot).norm(), origin(now[arm_bottom]).sub(pivot).norm());
+        set(&mut local[lower], z, asin(b.cross(a).z));
+        let now = compose(model, local);
+        let top = origin(now[arm_top]);
+        let (a, b) = (origin(now[bottom]).sub(top).norm(), origin(now[arm_bottom]).sub(top).norm());
+        turn(&mut local[hub], z, asin(a.cross(b).z));
+    }
+    let arm = at(SWING_ARM);
+    let rest = origin(bind[tire[2]]);
+    let target = v3(0.0, rest.y + tires[2].compression.max(tires[3].compression), rest.z);
+    let along = origin(bind[arm]).sub(target).norm();
+    let square = along.cross(y.cross(along)).norm();
+    local[arm] = of_rows(square.cross(along), square, along, local[arm].0[3]);
+    for k in 2..4 {
+        set(&mut local[tire[k]], x, tires[k].spin);
+    }
+    for (k, t) in tire.iter().enumerate() {
+        let keep = local[*t].0[3];
+        let mut s = M4::IDENTITY;
+        s.0[1][1] = tires[k].scale;
+        local[*t] = local[*t].mul(s);
+        local[*t].0[3] = keep;
+    }
+    let now = compose(model, local);
+    for side in ["FrontLeft", "FrontRight", "RearLeft", "RearRight"] {
+        for n in ["01", "02"] {
+            let (Some(u), Some(l)) = (find(model, &format!("{side}Strut_{n}_Upper")), find(model, &format!("{side}Strut_{n}_Lower"))) else { continue };
+            let dir = origin(now[u]).sub(origin(now[l])).norm();
+            let frame = of_rows(dir.cross(z), dir, z, [0.0, 0.0, 0.0, 1.0]);
+            for i in [l, u] {
+                // Into the parent's frame: its turn undone (a rigid one, so turned back).
+                let p = model.nodes[i].parent.map_or(M4::IDENTITY, |p| now[p]);
+                let back = M4(std::array::from_fn(|r| if r == 3 { [0.0, 0.0, 0.0, 1.0] } else { [p.0[0][r], p.0[1][r], p.0[2][r], 0.0] }));
+                let keep = local[i].0[3];
+                local[i] = frame.mul(back);
+                local[i].0[3] = keep;
+            }
+        }
+    }
+    true
 }
 
 /// The baja's and the buggy's rig: the front arms swung and the hubs steered, the lower arms aimed,

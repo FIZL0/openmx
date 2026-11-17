@@ -8241,6 +8241,29 @@ atv_record_apply            atv 0x00207240 = collision_apply
 #   back through the inverse (0x001b3180); tire init 0x0039ac10, width setter 0x0039ae00 adds (width,0,0).
 #   Parked cars read: truck first_recording @0x00e1e210, baja s149a-free07 @0x00605270, buggy
 #   s149a-free11 @0x00611ba0; launch timer full, cofg = CofGAI, undriven tires at the undriven top speed.
+# S264 — the cars' pose against the original's node matrices (game-render/tests/car.rs against_the_original).
+# The driven buggy's car is at 0x00605270 in context/states/c34-buggy-switched.ee.bin (free06).
+# Scene node: +0x40 local, +0x80 world (translation +0xb0), +0x100 parent, +0x104 first child,
+#   +0x108 next sibling, +0x120 name; 0x001b2870(node, ref, out) is the node's place in ref's space.
+# Car: +0x18c root node; tires +0x548..+0x554 (FL FR RL RR): +0x1a0 spin, +0x260 steer, +0xdc compression,
+#   +0x3c MaxCompression, +0x60 MaxTireScale, +0x80 anchor (bind place + width in x). Axes 0x426da0 x,
+#   0x426db0 y, 0x426dc0 z. 0x001b2e50 replaces the 3x3 (place kept); 0x001b2c20 turns in the node's own
+#   frame (R x local). Baja/buggy node table +0xe04 FL tire, e08 FR, e0c RL, e10 RR, e14 SwingArm, e18..e2c
+#   FL lower arm, upper arm, bottom hub node, bottom swingarm node, top swingarm node, wheel hub; e30..e44
+#   the same right; e48..e84 strut Upper/Lower pairs (FL 01, FL 02, FR 01, ..., RR 02). Bind places in
+#   root space: e90 FL hub, ea0 FR hub, eb0 FR lower arm, ec0 FR upper arm, ed0 FL lower arm, ee0 FL upper
+#   arm, ef0 SwingArm; e88 = 1 / |FR hub - FR upper arm|.
+# 0x0039edb0, decoded and matched node for node (C34 image, steer 0): hubs set about y by steer, front
+#   tires about x by spin; right then left: upper arm set about +z (left -z) by e88*1.25*comp, lower arm
+#   set to identity, then about z by pi/2 - acos_table(z of n(swingarm node - lower) x n(hub node - lower))
+#   (VU opmula/opmsub: first operand x second); hub post-turned about z by the same of n(hub node - top)
+#   x n(swingarm node - top). The table (0x46a688, 30000 entries, index (v+1)*0x46a6a0) is lerped acos.
+#   SwingArm: 0x001b1d70(node, dir, y, 1,1,0), dir = n(ef0 - (0, RL anchor y + max rear comp, RL anchor
+#   z)), rows [up' x dir, up', dir] with up' = n(dir x (y x dir)). Rear tires set about x by spin; all four
+#   tires' rows times (1, scale, 1). Struts: dir = n(Upper - Lower) in root space, then 0x001b1e20(Lower,
+#   root, z, dir, 0,1,1) and the same for Upper: rows [dir x z, dir, z] (not squared) taken into the
+#   parent, place kept. The hub's bottom and top swingarm nodes keep the world 0x001b2870 left them,
+#   before the hub's post-turn. Truck 0x003e07b0 not compared (first_recording's parked truck @0x00e1e210).
 # S245 — the cars drawn (crates/game-render/src/car.rs, psg.rs node lists; tests game-render/tests/car.rs,
 #   openmx/tests/car_picture.rs; journal research/journal/2026-11-02-s245-cars-drawn). The pose steps:
 #   baja/buggy 0x0039edb0 (ctor 0x0039dcf0 looks up its node table at +0xe04..+0xe88), truck 0x003e07b0
