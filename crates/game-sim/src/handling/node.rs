@@ -486,6 +486,54 @@ pub fn stretch(m: &mut impl Ram, n: u32, s: F) {
     }
 }
 
+// --- MD156a: the calls the golf cart's class step makes beside MD151's ---------------------------
+
+/// **The node aimed along a direction with an up, both as they are** (MD156a; the original's aim
+/// with its flags 0, 1, 1): the rows `up × dir` (`vopmula`/`vopmsub`), `up`, `dir` (their `xyz`
+/// words as they are), each `w` 0, and the own position row's `xyz` words with `w` 1 as the own
+/// frame: nothing normalised or squared, the parent not taken into account; then [`moved`].
+pub fn aim_as_is(m: &mut impl Ram, n: u32, dir: Quad, up: Quad) {
+    let pos = quad(m, n + POSITION);
+    let right = Vf::opmsub(Vf::opmula(Vf::from_bits(up), Vf::from_bits(dir)), Vf::from_bits(dir), Vf::from_bits(up)).to_bits();
+    let w0 = |q: Quad| [q[0], q[1], q[2], 0];
+    for (r, q) in [w0(right), w0(up), w0(dir), [pos[0], pos[1], pos[2], F::ONE.to_bits()]].into_iter().enumerate() {
+        put_quad(m, n + LOCAL + 0x10 * r as u32, q);
+    }
+    moved(m, n);
+}
+
+/// **The node aimed in another's frame, squared to an up** (MD156a; the original's aim along with
+/// its three flags 1, 1, 1): [`crate::math::basis`] of `forward` and `up` at the own position (the
+/// up made square to the forward, both normalized) instead of [`aim_along`]'s rows, then the same:
+/// in its own frame (`of` the node itself) those times the own frame are the own frame, then
+/// [`moved`]; otherwise times `of`'s world frame (brought up to date first) unless `of` is 0, taken
+/// into the parent's (brought up to date, inverted) if there is one, as the own frame; the position
+/// row's `xyz` words put back as they were; then [`moved`].
+pub fn aim_squared(m: &mut impl Ram, n: u32, of: u32, forward: Quad, up: Quad) {
+    let keep = [0, 4, 8].map(|k| m.word(n + POSITION + k));
+    let pos = Vf::from_bits([keep[0], keep[1], keep[2], 0]);
+    let mut f = crate::math::basis(pos, Vf::from_bits(forward), Vf::from_bits(up), true, true).0;
+    if of == n {
+        let f = frame_mul(&f, &rows(m, n + LOCAL));
+        put_rows(m, n + LOCAL, &f);
+        moved(m, n);
+        return;
+    }
+    if of != 0 {
+        update(m, of);
+        f = frame_mul(&f, &rows(m, of + WORLD));
+    }
+    match m.word(n + PARENT) {
+        0 => put_rows(m, n + LOCAL, &f),
+        parent => {
+            update(m, parent);
+            let f = frame_mul(&f, &frame_inverse(&rows(m, parent + WORLD)));
+            put_rows(m, n + LOCAL, &f);
+        }
+    }
+    set_position(m, n, [keep[0], keep[1], keep[2], 0]);
+}
+
 // --- F47: the node's box, for a node in the spatial database --------------------------------------
 
 /// The node's bounds words: its own bounds' centre and half extent, the box's centre and half extent

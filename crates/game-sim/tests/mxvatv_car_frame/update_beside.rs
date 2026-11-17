@@ -71,7 +71,8 @@ fn inside(ee: &mut Ee, addr: u32, car: u32, dt: F) {
 /// them; then the original's slot runs once on a copy of the machine with what the port hands out
 /// hooked (MD106e's [`hook_class`]: each logged, none run), the buggy class's own step run as the
 /// original's (its part words against [`atv_car::class_step`] over the RAM the slot started on, as
-/// MD106e's test) and the golf cart's and truck's logged; every word the port keeps must equal the
+/// MD106e's test), the golf cart's likewise against [`atv_car::golf_class_step`] (MD156a) and the
+/// truck's logged; every word the port keeps must equal the
 /// original's, the calls the same in the same order, and the original must write nothing else in the
 /// car, its tires or its body. The machine is put back and the original's slot runs for real, so the
 /// drive goes on as the original's.
@@ -81,6 +82,8 @@ pub(crate) fn hook_update(ee: &mut Ee, name: &'static str, frame_no: Shared<usiz
     assert!(SLOTS.iter().any(|&(_, s)| s == slot), "{name}: the car's update slot {slot:#x} is not one of MD106e's");
     let class_step = ee.u32_at(vtable + CLASS_STEP_SLOT);
     let buggy = class_step == super::class_step::CLASS_STEP;
+    // MD156a: the golf cart's own step, ported too.
+    let golf = class_step == super::golf_step::GOLF_CLASS_STEP;
     let curve = super::class_step::curve_table(ee);
     let acos = super::class_step::acos_table(ee);
     let mut saved: Vec<u8> = Vec::new();
@@ -110,6 +113,8 @@ pub(crate) fn hook_update(ee: &mut Ee, name: &'static str, frame_no: Shared<usiz
             let mut over = super::class_step::Over { ee, words: BTreeMap::new() };
             atv_car::class_step(&mut over, &parts, &super::class_step::read_posing(ee), &curve, &acos);
             over.words
+        } else if golf && stepped {
+            super::golf_step::golf_port(ee, &curve)
         } else {
             BTreeMap::new()
         };
@@ -128,7 +133,7 @@ pub(crate) fn hook_update(ee: &mut Ee, name: &'static str, frame_no: Shared<usiz
         let state = ee.u32_at(car_addr + up::VEHICLE_STATE);
         hook_class(ee, &p, state, log.clone(), modes.clone(), Rc::default(), Rc::default());
         let l = log.clone();
-        if buggy {
+        if buggy || golf {
             ee.hooks.insert(class_step, Box::new(move |ee: &mut Ee| {
                 assert_eq!(ee.r(4) as u32, car_at(), "the class step on something else");
                 l.borrow_mut().push(Call::ClassStep);
@@ -163,7 +168,13 @@ pub(crate) fn hook_update(ee: &mut Ee, name: &'static str, frame_no: Shared<usiz
             let bad = super::class_step::compare_nodes(ee, &posed, &super::class_step::nodes(&parts));
             assert!(bad.is_empty(), "{name} frame {k}: the class step's parts (stepped {stepped}): {} words differ\n{}", bad.len(), bad.join("\n"));
         }
-        let compared: std::collections::BTreeSet<u32> = after.iter().map(|&(a, _)| a).collect();
+        if golf {
+            let nodes = super::golf_step::golf_nodes(&super::golf_step::read_golf_parts(ee));
+            let bad = super::class_step::compare_nodes(ee, &posed, &nodes);
+            assert!(bad.is_empty(), "{name} frame {k}: the golf cart's class step's parts (stepped {stepped}): {} words differ\n{}", bad.len(), bad.join("\n"));
+        }
+        // The class step's own car words (the golf cart's steering frame) are compared with its parts.
+        let compared: std::collections::BTreeSet<u32> = after.iter().map(|&(a, _)| a).chain(posed.keys().copied()).collect();
         let blocks: Vec<(u32, u32)> = [(car_addr, 0x1500), (p.body, 0x230)].into_iter().chain(p.tires.map(|t| (t, 0x200))).collect();
         for &(from, to) in &written {
             for a in (from & !3..to).step_by(4) {
@@ -187,7 +198,7 @@ pub(crate) fn hook_update(ee: &mut Ee, name: &'static str, frame_no: Shared<usiz
         }
         s.frames += 1;
         s.words += after.len();
-        s.posed += usize::from(buggy && stepped);
+        s.posed += usize::from((buggy || golf) && stepped);
         s.airborne += usize::from(!car.grounded);
         s.hazard += usize::from(pu.on_hazard);
     }));

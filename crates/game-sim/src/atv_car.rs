@@ -24,7 +24,8 @@
 //! code ported, its calls handed out. [`class_update`] is the buggy's, golf cart's and truck's slot
 //! around it (MD106e), and [`OwnUpdate`] answers the update's own calls: the ghost step, the hazard
 //! clock and the base update (the bike's [`crate::handling::tail`]); the class's per-frame step stays
-//! a call, which [`class_step`] answers on scene nodes (MD151).
+//! a call, which [`class_step`] answers on scene nodes (MD151), and [`golf_class_step`] for the golf
+//! cart (MD156a).
 //!
 //! Proof: `tests/mxvatv_car_frame/`, SLUS-21104's world step and the car's update off MD39a's buggy
 //! image with every call hooked; and (MD106c) the image's frame whole, with [`Pieces`] and [`Own`]
@@ -966,6 +967,151 @@ pub fn class_step(m: &mut impl node::Ram, parts: &Parts, p: &Posing, curve: &Cur
         if k % 2 == 0 || pair.iter().all(|&n| n != 0) {
             aim_pair(m, pair, car, true);
         }
+    }
+}
+
+/// One of the golf cart's front arms (MD156a), as the car keeps it: the direction it is aimed along
+/// and the up it is squared to before the tire's compression turns it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GolfArm {
+    pub ahead: Vf,
+    pub up: Vf,
+}
+
+/// One of the golf cart's front corners' posed parts (MD156a): the three arms (each squared to its
+/// up turned by the tire's compression), the knuckle (aimed along its ahead turned by the tire's
+/// steer, squared to the line between the two ends) and the two ends (the line from the second to
+/// the first).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GolfCorner {
+    pub arms: [u32; 3],
+    pub knuckle: u32,
+    pub ends: [u32; 2],
+}
+
+/// **The golf cart's posed parts** (MD156a): the car's own node (the frame the parts are measured
+/// and aimed in), the steering wheel, the two front wheels (in the tires' order), the two front
+/// corners (in the tires' order), two pairs of links aimed at each other, the rear axle, the rear
+/// wheel, the hub (set where the rear rides) and the two shocks (each the node aimed and its foot).
+/// Research/oracle.txt `# MD156a` has where the car keeps them.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GolfParts {
+    pub car: u32,
+    pub steering: u32,
+    pub wheels: [u32; 2],
+    pub corners: [GolfCorner; 2],
+    pub links: [[u32; 2]; 2],
+    pub axle: u32,
+    pub rear_wheel: u32,
+    pub hub: u32,
+    pub shocks: [[u32; 2]; 2],
+}
+
+/// What the golf cart's class step reads off the car and keeps on it (MD156a): the front tires'
+/// steer, every tire's angle and compression, the right rear's mount; the car's up (its `w` set to
+/// 1 by the step) and the steering frame the step builds off it; each front corner's arms (in the
+/// tires' order, the arms in [`GolfCorner::arms`]' order) and its knuckle's ahead; the point the
+/// rear axle is aimed at, the hub's point and the two shocks' tops.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GolfPosing {
+    pub steer: [F; 2],
+    pub angle: [F; 4],
+    pub compression: [F; 4],
+    pub rear_mount: Vf,
+    pub up: Vf,
+    pub steer_frame: [Vf; 4],
+    pub arms: [[GolfArm; 3]; 2],
+    pub knuckle_ahead: [Vf; 2],
+    pub axle_to: Vf,
+    pub hub: Vf,
+    pub shock_tops: [Vf; 2],
+}
+
+/// The steering frame's origin (rodata, `(0, 0, 0, 1)`).
+const GOLF_ORIGIN: [u32; 4] = [0, 0, 0, 0x3f80_0000];
+
+/// `v`'s `x` and `y` turned about `z` by `angle` (the curve table's [`node::sin_cos`]): `x·cos − y·sin`
+/// and `y·cos + x·sin` (`mula`, then `msub` or `madd`); `z` and `w` its words as they are.
+fn turn_xy(v: [u32; 4], angle: F, curve: &CurveTable) -> [u32; 4] {
+    let (sin, cos) = node::sin_cos(angle, curve);
+    let (x, y) = (F::from_bits(v[0]), F::from_bits(v[1]));
+    [Acc::mula(x, cos).msub(y, sin).to_bits(), Acc::mula(y, cos).madd(x, sin).to_bits(), v[2], v[3]]
+}
+
+/// `v`'s `x` and `z` turned about `y` by `angle`: `x·cos + z·sin` and `z·cos − x·sin`; `y` and `w`
+/// its words as they are.
+fn turn_xz(v: [u32; 4], angle: F, curve: &CurveTable) -> [u32; 4] {
+    let (sin, cos) = node::sin_cos(angle, curve);
+    let (x, z) = (F::from_bits(v[0]), F::from_bits(v[2]));
+    [Acc::mula(x, cos).madd(z, sin).to_bits(), v[1], Acc::mula(z, cos).msub(x, sin).to_bits(), v[3]]
+}
+
+/// **The golf cart's per-frame class step** (MD156a; its vt `+0x488`, the update's
+/// [`Call::ClassStep`]): the model's parts posed off the tires, on the scene nodes in `m`, and the
+/// steering frame kept in `p`:
+///
+/// 1. the up's `w` set to 1, and the steering frame built off it ([`crate::math::basis`] at the
+///    origin, ahead kept and the up squared to it); the steering wheel aimed ([`node::aim_as_is`],
+///    with the up) at the point of that frame the left front's steer points to (its sine and cosine
+///    off the curve table's entry below it, `(sin, 0, cos)`);
+/// 2. the front wheels spun about the side by their tire's angle;
+/// 3. each front corner, the right first: each arm aimed along its ahead squared to its up turned
+///    about `z` by the tire's compression (the left's negated) ([`node::aim_squared`] in the car's
+///    frame); the knuckle aimed along its ahead turned about `y` by the tire's steer, squared to the
+///    direction from the second end to the first;
+/// 4. each link pair aimed (the second first) along the direction from the second to the first;
+/// 5. the rear axle aimed (with up) at its point from one on the centre line, as high as the point
+///    raised by the larger rear compression and as far ahead as the right rear's mount; the rear
+///    wheel spun by the right rear's angle; the hub set at its point raised by that compression;
+/// 6. each shock aimed along the direction from its foot to its top, squared to up.
+///
+/// Nothing in the car's physics reads the parts back.
+pub fn golf_class_step(m: &mut impl node::Ram, parts: &GolfParts, p: &mut GolfPosing, curve: &CurveTable) {
+    let car = parts.car;
+    fn at(m: &mut impl node::Ram, n: u32, car: u32) -> Vf {
+        Vf::from_bits(node::position_in(m, n, car))
+    }
+    p.up.0[3] = 1.0;
+    let up = p.up.to_bits();
+    p.steer_frame = crate::math::basis(Vf::from_bits(GOLF_ORIGIN), Vf::from_bits(POSE_AHEAD_QUAD), p.up, true, false).0;
+    let (cos, sin) = curve.coarse(p.steer[FRONT_LEFT]);
+    let dir = crate::atv_moto::frame_point(&p.steer_frame, Vf::new(sin.0, 0.0, cos.0, 0.0));
+    node::aim_as_is(m, parts.steering, dir.to_bits(), up);
+    node::spin_about(m, parts.wheels[FRONT_LEFT], POSE_SIDE, p.angle[FRONT_LEFT], curve);
+    node::spin_about(m, parts.wheels[FRONT_RIGHT], POSE_SIDE, p.angle[FRONT_RIGHT], curve);
+
+    for (k, swing) in [(FRONT_RIGHT, p.compression[FRONT_RIGHT]), (FRONT_LEFT, -p.compression[FRONT_LEFT])] {
+        let c = parts.corners[k];
+        for (&n, arm) in c.arms.iter().zip(p.arms[k]) {
+            let up = turn_xy(arm.up.to_bits(), swing, curve);
+            node::aim_squared(m, n, car, arm.ahead.to_bits(), up);
+        }
+        let a = at(m, c.ends[0], car);
+        let b = at(m, c.ends[1], car);
+        let toward = normalize(less(a, b)).to_bits();
+        let ahead = turn_xz(p.knuckle_ahead[k].to_bits(), p.steer[k], curve);
+        node::aim_squared(m, c.knuckle, car, ahead, toward);
+    }
+
+    for [first, second] in parts.links {
+        let d = normalize(less(at(m, first, car), at(m, second, car))).to_bits();
+        for n in [second, first] {
+            node::aim_along(m, n, car, POSE_AHEAD_QUAD, d);
+        }
+    }
+
+    let lift = p.compression[REAR_LEFT].max(p.compression[REAR_RIGHT]);
+    let raised = p.rear_mount.merge(Dest::XYZ, p.rear_mount.add(Vf::from_bits(POSE_UP_QUAD).mul(Vf::splat(lift.0))));
+    let from = Vf::from_bits([0, (F(p.axle_to.y()) + lift).to_bits(), raised.z().to_bits(), F::ONE.to_bits()]);
+    let d = normalize(less(p.axle_to, from));
+    node::aim(m, parts.axle, d.to_bits(), POSE_UP_QUAD);
+    node::spin_about(m, parts.rear_wheel, POSE_SIDE, p.angle[REAR_RIGHT], curve);
+    let hub = p.hub.to_bits();
+    node::set_position(m, parts.hub, [hub[0], (F(p.hub.y()) + lift).to_bits(), hub[2], hub[3]]);
+
+    for ([shock, foot], top) in parts.shocks.into_iter().zip(p.shock_tops) {
+        let d = normalize(less(top, at(m, foot, car)));
+        node::aim_squared(m, shock, car, d.to_bits(), POSE_UP_QUAD);
     }
 }
 
