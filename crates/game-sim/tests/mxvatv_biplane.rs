@@ -791,3 +791,47 @@ fn the_mxvatv_biplane_file_reads_as_the_original_loads_it() {
         println!("{name}: model {}, read as loaded", if model_one { "one" } else { "two" });
     }
 }
+
+/// **The plane's inertia is its model's** (MD181): built off `biplane.phy` as model one and model
+/// two, the flight holds what MD80a's images hold for the player's plane — MXVehicle's inertia
+/// (`+0xcc0`, the body's `+0x130`), the body's inverse (`+0x140`) and the collision record's inverse
+/// (`+0x70`, scaled by `CollisionWeight`'s mass at `+0x58`) — and a wreck (the map's edge throwing it) gives the body
+/// `1 / (WreckInertia × inertia)` off the image's inertia, which its recovery puts back.
+#[test]
+fn the_mxvatv_biplane_starts_from_its_models_inertia() {
+    let Some(bytes) = phy() else { return };
+    let tables = game_sim::ride::Tables::build();
+    let acos = &tables.acos;
+    for (name, plane, model_one) in [("biplane", PLANE, true), ("biplane3", PLANE_TWO, false)] {
+        let Some(ee) = image(name, plane) else { return };
+        let p = Plane::read_mxvatv_bytes(&bytes, model_one);
+        assert_eq!(p.model_one, model_one, "{name}: the model read");
+        let mut f = Flight::new_mxvatv(&p);
+        let body = ee.u32_at(plane + at::BODY);
+        let record = ee.u32_at(plane + 0xc8);
+        same_quad(&format!("{name}: the inertia"), Flight::mxvatv_inertia(model_one), &ee, plane + 0xcc0);
+        same_quad(&format!("{name}: the body's inertia"), Flight::mxvatv_inertia(model_one), &ee, body + 0x130);
+        same_quad(&format!("{name}: the body's inverse inertia"), f.body.inv_inertia, &ee, body + 0x140);
+        same_quad(&format!("{name}: the inverse inertia kept"), f.inv_inertia, &ee, body + 0x140);
+        same_word(&format!("{name}: the record's mass"), f.collider.mass, &ee, record + 0x58);
+        same_quad(&format!("{name}: the record's inverse inertia"), f.collider.inv_inertia, &ee, record + 0x70);
+
+        // Wrecked: thrown back off the map's west edge, 2000 ft up.
+        let built = f.body.inv_inertia;
+        f.area = Some(Area::new(F(16.0), F(16.0), F(1.0), F(1.0)));
+        let facing = Vf::new(0.0, 0.0, 1.0, 0.0);
+        f.place(Vf::new(50.0, 2000.0, 2048.0, 1.0), facing, acos);
+        let mut ground = game_sim::world::Flat::default();
+        f.frame(F(1.0 / 30.0), Pad::default(), &mut ground, &tables);
+        assert_eq!(f.crash.reason, 13, "{name}: the map's edge did not throw the plane");
+        let inertia = Vf(std::array::from_fn(|k| f32::from_bits(ee.u32_at(plane + 0xcc0 + 4 * k as u32))));
+        let wreck = game_sim::biplane::wreck_inertia_mxvatv(p.plane.wrecks.wreck_inertia, inertia);
+        assert_eq!(f.body.inv_inertia.to_bits(), wreck.to_bits(), "{name}: the wreck's inverse inertia");
+        assert_ne!(wreck.to_bits(), built.to_bits(), "{name}: WreckInertia left the inertia alone");
+        assert!(f.reset_chord(true, acos), "{name}: the chord in a wreck did nothing");
+        assert_eq!(f.body.inv_inertia.to_bits(), built.to_bits(), "{name}: the recovery's inverse inertia");
+        println!("{name}: inertia {:?}, inverse {:?}, wrecked {:?}", Flight::mxvatv_inertia(model_one), built, wreck);
+    }
+    // Model one's is not MX Unleashed's, which the port built every MX vs. ATV plane with before.
+    assert_ne!(Flight::mxvatv_inertia(true).to_bits(), Flight::mxvatv_inertia(false).to_bits());
+}

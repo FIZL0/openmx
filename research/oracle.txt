@@ -10244,6 +10244,11 @@ atv_car_crash_test          atv 0x004cd110 = the car's crash test (a0 car, f12 d
 # +0x140 = 1/+0xcc0. biplane3: +0xbbc 2, +0xca0 (0.999 x3, 1), +0xcb0 (0.5 x3, 1), +0xcc0 (5199.0327,
 # 11892.645, 7951.833, 1) -> +0x140 (0x3949afcf, 0x38b0571b, 0x3903ddaf, 1): not the MX Unleashed plane's
 # inertia the port builds with (MD181).
+# MD181 — the port builds each model's (flight.rs MXVATV_INERTIA; tests/mxvatv_biplane.rs
+# the_mxvatv_biplane_starts_from_its_models_inertia). biplane.ee.bin's player plane 0x014de810 (model one) +0xcc0 =
+# body +0x130 (0x453118b1, 0x45b7c363, 0x45706cd4, 1), +0x140 (0x39b90774, 0x39325100, 0x39884abb, 1); its idle twin
+# 0x0150c9d0 and both biplane3 planes hold model two's. Record (+0xc8): +0x58 CollisionWeight mass 310.559, +0x60 the
+# body's inertia x mass ratio, +0x70 its inverse.
 
 # MD89 — the quadtree sub-database's moving-entry virtuals (game-sim atv_spatial.rs Tree; atv_spatial's Database
 # dispatches List/Tree). Journal: research/journal/2026-11-02-md75-atv-frame/8-spatial-move.md "MD89". Proof:

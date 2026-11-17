@@ -79,6 +79,18 @@ const INV_INERTIA: Vf = Vf([f32::from_bits(0x39b9_06ac), f32::from_bits(0x3932_5
 /// body's `+0x110`): what [`INV_INERTIA`] is the inverse of, as the original keeps both.
 const INERTIA: Vf = Vf([f32::from_bits(0x4531_1971), f32::from_bits(0x45b7_c3ca), f32::from_bits(0x4570_6cc5), 1.0]);
 
+/// SLUS-21104's plane's body inertia tensor as built (MD181), one per model: MXVehicle's copy of the
+/// body's (its `+0xcc0`, the body's `+0x130`) in MD80a's biplane (model one) and biplane3 (model two)
+/// save states. The original works each out of its model's bounding box and the file's
+/// `InertiaScale`, as MX Unleashed's does; the box is the model library's, not something this crate
+/// reads, so the built values are carried, as [`INERTIA`] is. Model one's is a few ulps off
+/// MX Unleashed's. The body holds the inverse ([`biplane::inverse_inertia_mxvatv`]).
+/// `tests/mxvatv_biplane.rs` holds both to the states.
+const MXVATV_INERTIA: [Vf; 2] = [
+    Vf([f32::from_bits(0x4531_18b1), f32::from_bits(0x45b7_c363), f32::from_bits(0x4570_6cd4), 1.0]),
+    Vf([f32::from_bits(0x45a2_7843), f32::from_bits(0x4639_d294), f32::from_bits(0x45f8_7eaa), 1.0]),
+];
+
 /// The plane's collidable's categories (the collision object's `+0x1f8`, its `+0x84`) and the object's
 /// actor and collides-with masks (`+0x110`, `+0x114`), off C7's save state: not keys of the file.
 pub const COLLIDABLE: u32 = 0x0004_2058;
@@ -502,8 +514,32 @@ impl Flight {
 
     /// MX vs. ATV's plane (MD80b): [`Flight::new`] off the model's half of MX vs. ATV's file
     /// ([`phy::Plane::read_mxvatv`]), flown by SLUS-21104's steps ([`Flight::mxvatv`]).
+    ///
+    /// The body starts from the model's own inertia ([`Flight::mxvatv_inertia`]), and the collision
+    /// object's is scaled from it.
     pub fn new_mxvatv(plane: &phy::MxvatvPlane) -> Flight {
-        Flight { mxvatv: true, ..Flight::new(&plane.plane) }
+        let mut f = Flight { mxvatv: true, ..Flight::new(&plane.plane) };
+        let inertia = Flight::mxvatv_inertia(plane.model_one);
+        let inv = biplane::inverse_inertia_mxvatv(inertia);
+        f.inv_inertia = inv;
+        f.body.inv_inertia = inv;
+        let m = &plane.plane.mass_properties;
+        f.collider.inv_inertia = wreck_bike::collider(m, m.mass, f.body.inv_mass, inertia).inv_inertia;
+        f
+    }
+
+    /// SLUS-21104's plane's body inertia as built, for model one or model two (MD181).
+    pub fn mxvatv_inertia(model_one: bool) -> Vf {
+        MXVATV_INERTIA[usize::from(!model_one)]
+    }
+
+    /// The inertia the plane was built with, of which [`Flight::inv_inertia`] is the inverse: one of
+    /// the three builds (a model of SLUS-21104's, or MX Unleashed's). The flight keeps only the
+    /// inverse, which is all a snapshot carries, so the tensor is found again by it; an inverse
+    /// none of them has (a flight seeded off other RAM) is taken as MX Unleashed's.
+    fn built_inertia(&self) -> Vf {
+        let inv = self.inv_inertia.to_bits();
+        MXVATV_INERTIA.into_iter().find(|&i| biplane::inverse_inertia_mxvatv(i).to_bits() == inv).unwrap_or(INERTIA)
     }
 
     /// **The plane's numbers changed under a flight going on** (P98): what [`Flight::new`] took off
@@ -1421,16 +1457,17 @@ impl Flight {
     /// power, which keeps its last value through the wreck — the engine is not stepped while wrecked).
     ///
     /// An MX vs. ATV plane's is MXVehicle's wreck entry (MD112): the inertia `WreckInertia` times
-    /// the body's own, inverted ([`biplane::wreck_inertia_mxvatv`]), where MX Unleashed's divides the
+    /// the body's own as built ([`Flight::new_mxvatv`], MD181), inverted ([`biplane::wreck_inertia_mxvatv`]), where MX Unleashed's divides the
     /// inverse; and its message 11 counted ([`Flight::posts`]).
     fn wreck(&mut self) {
+        let inertia = self.built_inertia();
         let w = &self.wrecks;
         let b = &mut self.body;
         b.rates = b.rates.merge(Dest::XYZ, b.rates.mul(Vf::splat(WRECK_SPIN)));
         b.damping = w.wreck_damping;
         b.ang_damping = w.wreck_damping;
         if self.mxvatv {
-            b.inv_inertia = biplane::wreck_inertia_mxvatv(w.wreck_inertia, INERTIA);
+            b.inv_inertia = biplane::wreck_inertia_mxvatv(w.wreck_inertia, inertia);
             self.posts.wreck = self.posts.wreck.wrapping_add(1);
         } else {
             let mut inv = self.inv_inertia;
