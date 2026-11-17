@@ -639,10 +639,10 @@ fn a_phone_race_on_sx01_rides_on_webgpu_and_a_broken_stage_is_named() {
     assert!(!log.contains("validation error"), "a WebGPU validation error in the race:\n{log}");
     assert_eq!(field(&text, "gpu"), "webgpu", "the race is not on WebGPU:\n{text}");
     assert_eq!(field(&text, "drawn"), "webgpu 1688 780", "no first WebGPU frame at the phone's size:\n{text}");
-    let list = text.split("\"fps\":[").nth(1).and_then(|s| s.split(']').next()).unwrap_or("");
-    let shown: f64 = list.split(',').filter_map(|f| f.parse::<f64>().ok()).sum();
-    assert!(shown >= 1400.0, "only {shown} pictures shown:\n{text}");
-    println!("sx01's race on a phone's WebGPU: {shown:.0} pictures, no validation error");
+    // the worker's own frames, counted until there are 1500 however slowly a loaded machine draws them (K57)
+    let shown: u64 = field(&text, "shown").parse().expect("shown");
+    assert!(shown >= 1500, "only {shown} pictures shown before they stopped coming:\n{text}");
+    println!("sx01's race on a phone's WebGPU: {shown} pictures, no validation error");
 
     let (text, log) = run("broken", &[("OPENMX_GPU_SECONDS", "3"), ("OPENMX_GPU_BREAK", "the ground meshes,120"), ("OPENMX_GPU_WANT", "webgl2")]);
     assert!(log.contains("break: the encoder of the ground meshes"), "no encoder was broken:\n{log}");
