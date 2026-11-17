@@ -173,6 +173,15 @@ pub fn pair(probe: &mut SweepProbe, more: &mut More, other: Option<&Target>) -> 
 pub trait Outside: Narrow {
     /// `other` as a [`Target`] (`None` a null one) handed to `pair`, and what it answers.
     fn target(&mut self, other: usize, pair: &mut dyn FnMut(Option<&Target>) -> bool) -> bool;
+
+    /// The database [`search_world`] walks, lent for one test part way through its walk: what the
+    /// listeners and callbacks the test hands on see if they query it themselves (a struck plant
+    /// part's does, as it wakes). Lends nothing by default.
+    fn lend(&mut self, _objects: &[Collidable], _broad: &Broad) {}
+
+    /// The database taken back after that test, as its listeners left it: the walk goes on from
+    /// there, as the original's does from what their query left (F60). Changes nothing by default.
+    fn take_back(&mut self, _objects: &mut [Collidable], _broad: &mut Broad) {}
 }
 
 /// The sweep probe's narrow phase for [`crate::atv_search::search`] and [`search_world`]: its own
@@ -248,7 +257,10 @@ impl Narrow for Sweep<'_> {
 /// - the probe's box (vt `+0xc4`) is [`bounds`] of its segments, and puts its centre and reach in the
 ///   collidable (`+0x50`, `+0x70`) as it answers.
 ///
-/// The budget and last centre are the probe's place's (`+0x74`, `+0x60`).
+/// The budget and last centre are the probe's place's (`+0x74`, `+0x60`). Each test lends the
+/// database to the sweep's world and takes it back ([`test_lent`]): a struck plant part's listener
+/// runs a query of its own, which ends the tree's open one, so the walk's rest of the tree is passed
+/// over (F60).
 pub fn search_world(objects: &mut [Collidable], broad: &mut Broad, probe: usize, lazy: u32, retired: &dyn Fn(usize) -> bool, sweep: &mut Sweep) -> F {
     let space = broad.places[probe].space;
     let Some(space) = space.filter(|_| objects[probe].flags & more_flags::ACTIVE != 0) else {
@@ -286,7 +298,7 @@ pub fn search_world(objects: &mut [Collidable], broad: &mut Broad, probe: usize,
                 if d == 0.0 {
                     nearest = F::ZERO;
                     if accepts(objects, probe, o, true) {
-                        test(objects, probe, o, sweep);
+                        test_lent(objects, broad, probe, o, sweep);
                     }
                 } else if d < nearest {
                     nearest = d;
@@ -304,7 +316,7 @@ pub fn search_world(objects: &mut [Collidable], broad: &mut Broad, probe: usize,
                             objects[p].group = Some(o);
                             nearest = F::ZERO;
                             objects[p].flags |= flags::SEARCHED;
-                            test(objects, probe, p, sweep);
+                            test_lent(objects, broad, probe, p, sweep);
                         }
                         i += 1;
                     }
@@ -333,7 +345,7 @@ pub fn search_world(objects: &mut [Collidable], broad: &mut Broad, probe: usize,
             }
             objects[o].flags |= flags::SEARCHED;
             if pair_distance(objects, broad, probe, o) == 0.0 && accepts(objects, probe, o, true) {
-                test(objects, probe, o, sweep);
+                test_lent(objects, broad, probe, o, sweep);
             }
         }
     }
@@ -343,6 +355,15 @@ pub fn search_world(objects: &mut [Collidable], broad: &mut Broad, probe: usize,
     }
     broad.places[probe].budget = nearest;
     nearest
+}
+
+/// [`test`] of `probe` against `other` with the database lent to the sweep's world, and taken back
+/// after it ([`Outside::lend`], [`Outside::take_back`]): a listener the test hands on may query the
+/// database, and the walk goes on from what that query left.
+fn test_lent(objects: &mut [Collidable], broad: &mut Broad, probe: usize, other: usize, sweep: &mut Sweep) {
+    sweep.rest.lend(objects, broad);
+    test(objects, probe, other, sweep);
+    sweep.rest.take_back(objects, broad);
 }
 
 /// How far the probe's reach is from placed group `g`'s on the ground plane: the group's point its
