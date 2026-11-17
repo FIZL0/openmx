@@ -461,6 +461,16 @@ impl Menu {
         self.race.hand = Some(hand);
     }
 
+    /// P335: the race under way's gate dropped: a race counted in the record of every seat in
+    /// `profiles` (a player seat's record, `None` for a seat without one), as the original's drop
+    /// counts it, so the win percentage reads wins over races.
+    #[allow(dead_code)] // web.rs mounts the menu without the shell's race
+    pub fn race_gate_dropped(&mut self, event: &game_sim::race::ResultEvent, profiles: &[Option<usize>]) {
+        if self.race.racing.is_some() && self.race.records.count_race(event, profiles) {
+            self.race.records_changed = true;
+        }
+    }
+
     /// P334: the players' cards of the race under way as the Hall of Fame reads them, handed over
     /// with its end, for the name entry after the results.
     #[allow(dead_code)] // web.rs mounts the menu without the shell's race

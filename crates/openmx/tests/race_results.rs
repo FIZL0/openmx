@@ -11,6 +11,8 @@
 //!   and the AI's name are hooked; the menu's own code runs.
 //! * `profile_stat_add` stats 9 and 10 over 20,000 counts and amounts against
 //!   [`results::RiderRecord`], and `fame_menu_mark` against [`results::FameMarks`].
+//! * P335: the gate drop's race count (`race_drop`'s loop) over 20,000 fronts against
+//!   [`results::Records::count_race`].
 //!
 //! The records file reads back as it was written, and the tips are the popup's words.
 
@@ -436,6 +438,80 @@ fn the_race_and_win_counts_match_the_profiles_stat_add() {
         divided += usize::from(rec.races != rec.wins);
     }
     assert!(divided > 10_000, "{divided}");
+}
+
+/// P335: the gate drop's race count (`race_drop`'s loop of `profile_stat_add` 9, run as a stretch with
+/// the stat add itself) over 20,000 fronts — play modes and activities either side of 0 and 2, no
+/// player to a dozen and past the profile list, seats with no profile, two seats on one record —
+/// against [`Records::count_race`]: every slot's races, wins and win percentage.
+#[test]
+fn the_race_count_matches_the_gate_drops() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let [app_pointer, start, end] = match addrs(["app_pointer", "race_drop_races", "race_drop_races_end"]) {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    const EVENT: u32 = FRONT + 0x100;
+    ee.hooks.insert(end, Box::new(|ee| ee.set(31, u64::from(ps2_oracle::DONE) | 0xffff_ffff_0000_0000)));
+    ee.set_u32(app_pointer, APP);
+    let mut p = Pick(0x5b71_d04e_93a2_c86f);
+    let (mut counted, mut skipped) = (0, 0);
+    for case in 0..20_000 {
+        let mut records = Records::default();
+        for slot in 0..6 {
+            let small = p.below(2) == 0;
+            *records.seat(slot) = RiderRecord {
+                races: if small { p.below(5) as u16 } else { p.next() as u16 },
+                wins: if small { p.below(5) as u16 } else { p.next() as u16 },
+                win_rate: F(f32::from_bits(p.next() as u32)),
+            };
+        }
+        let event = game_sim::race::ResultEvent {
+            mode: if p.below(4) == 0 { p.below(3) as i32 - 1 } else { 0 },
+            activity: if p.below(4) == 0 { p.below(5) as i32 } else { 2 },
+            ..Default::default()
+        };
+        let players = match p.below(8) {
+            0 => p.next() as u8,
+            1 => 0,
+            _ => p.below(13) as u8,
+        };
+        let profiles: Vec<Option<usize>> = (0..usize::from(players)).map(|_| (p.below(4) != 0).then(|| p.below(6) as usize)).collect();
+        zero(&mut ee, APP, 0x1000);
+        zero(&mut ee, FRONT, 0x400);
+        zero(&mut ee, STATS, 0x200);
+        zero(&mut ee, PROFILES, 0x100 * 256);
+        ee.set_u32(APP + 0x3d4, FRONT);
+        ee.set_u32(APP + 0x3e4, STATS);
+        ee.set_u32(FRONT + 4, event.mode as u32);
+        ee.set_u32(FRONT + 0xc, EVENT);
+        ee.set_u32(EVENT + 4, event.activity as u32);
+        ee.write(EVENT + 0x114, 1, u128::from(players));
+        for (k, slot) in profiles.iter().enumerate() {
+            if let Some(slot) = slot {
+                let profile = PROFILES + 0x100 * k as u32;
+                ee.set_u32(APP + 0x3f4 + 4 * k as u32, profile);
+                ee.set_u32(profile + 0xcc, *slot as u32);
+            }
+        }
+        for (slot, r) in records.seats.iter().enumerate() {
+            let slot = slot as u32;
+            ee.write(STATS + 0x168 + 2 * slot, 2, u128::from(r.races));
+            ee.write(STATS + 0x174 + 2 * slot, 2, u128::from(r.wins));
+            put_f(&mut ee, STATS + 0x30 + 4 * slot, r.win_rate);
+        }
+        // The stretch's first load takes the global's upper half from v0, set just before it.
+        ee.set(2, u64::from(app_pointer & 0xffff_0000) + if app_pointer & 0x8000 != 0 { 0x1_0000 } else { 0 });
+        ee.call(start, &[], &[], BUDGET);
+        let moved = records.count_race(&event, &profiles);
+        for (slot, r) in records.seats.iter().enumerate() {
+            let slot = slot as u32;
+            let got = (ee.u16_at(STATS + 0x168 + 2 * slot), ee.u16_at(STATS + 0x174 + 2 * slot), ee.u32_at(STATS + 0x30 + 4 * slot));
+            assert_eq!(got, (r.races, r.wins, r.win_rate.0.to_bits()), "case {case}: slot {slot} of {event:?}, {players} players {profiles:?}");
+        }
+        if moved { counted += 1 } else { skipped += 1 }
+    }
+    assert!(counted > 8_000 && skipped > 4_000, "{counted} counted, {skipped} not");
 }
 
 #[test]
