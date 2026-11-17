@@ -805,7 +805,8 @@ impl crate::Sim {
     /// before the riders', so it reads them as this tick's race left them. The avoidance's
     /// keep-on-the-track edge and the habits' cross-up spot ask the race track at the card's spot
     /// (S331c, [`crate::ai::on_track_of`]), and the trick plan and the habits read the node the
-    /// brain's own spot is on in the lane's AI net ([`crate::ai::route_node`]).
+    /// brain's own spot is on in the lane's AI net ([`crate::ai::route_node`]). Each other rider's
+    /// progress is its lap card's (S332).
     ///
     /// The brain thinks after its bike's frame (S330): the original's hand-off is the last thing its
     /// rider's update writes, so the bike rides the levers of the frame before and each AI rider
@@ -814,9 +815,13 @@ impl crate::Sim {
     pub fn think(&mut self, i: usize, dt: F, world: &mut dyn crate::world::World) {
         let Some(k) = self.ai.as_deref().and_then(|l| l.pilots.iter().position(|(p, _)| *p == i)) else { return };
         let bikes: Vec<crate::ai::Ridden> = (0..1 + self.others.len()).filter_map(|j| crate::ai::Ridden::of(self.rider_of(j))).collect();
+        let laps = self.race.as_deref().and_then(|r| r.laps.as_deref());
         let Some(lane) = self.ai.as_deref_mut() else { return };
-        // The others off their cards (S330), as the last frame's end fed them.
-        let others: Vec<crate::ai::Other> = lane.cards.iter().enumerate().filter(|&(j, _)| j != i).map(|(_, c)| *c).collect();
+        // The others off their cards (S330), as the last frame's end fed them; in a race with laps,
+        // each one's progress is its lap card's (S332).
+        let progress = |j: usize, c: &crate::ai::Other| laps.and_then(|l| l.card(j)).map_or(c.progress, |l| l.progress);
+        let others: Vec<crate::ai::Other> =
+            lane.cards.iter().enumerate().filter(|&(j, _)| j != i).map(|(j, c)| crate::ai::Other { progress: progress(j, c), ..*c }).collect();
         let rider = if i == 0 { &mut self.rider } else { &mut self.others[i - 1].rider };
         rider.sense.ai_route = true;
         let (seen, cofg) = crate::ai::mount_of(rider);
@@ -826,7 +831,6 @@ impl crate::Sim {
         let mount = crate::ai::Mount { rider: seen, cofg, yaw_rate: &mut yaw_rate, velocity: &mut velocity };
         let tricks = Some((&rider.set, &mut rider.tricks));
         // S331b: on a race with laps the brain reads its card and race as the race's tick left them.
-        let laps = self.race.as_deref().and_then(|r| r.laps.as_deref());
         if let Some(laps) = laps {
             pilots[k].1.read_laps(laps, net.is_some());
         }
@@ -887,6 +891,24 @@ impl crate::Sim {
         let Some(lane) = self.ai.as_deref_mut() else { return false };
         lane.net = Some(std::sync::Arc::new(net));
         true
+    }
+
+    /// **The race's AI path net** (S332): the track's AI race file (`<track>AI.tdf`) as the race
+    /// activity's load leaves it ([`crate::ai::path::load_paths`]: stood on `terrain`, the flagged
+    /// nodes lifted onto `props`), searching as far ahead and behind as a race's track does
+    /// ([`crate::race::RACE_REACH`], as sx01's live race holds its AI net), put in the AI lane for its
+    /// brains to drive by. False — and no net — with no lane ([`crate::Sim::spawn_ai`] first) or a
+    /// file whose paths do not walk.
+    pub fn load_ai_net(
+        &mut self, file: &crate::race::TrackFile, terrain: Option<&mut dyn crate::world::World>,
+        props: Option<crate::back_search::Scene<'_>>,
+    ) -> bool {
+        let Some(lane) = self.ai.as_deref_mut() else { return false };
+        lane.net = crate::ai::path::load_paths(file, terrain, props).map(|mut t| {
+            (t.ahead, t.behind) = crate::race::RACE_REACH;
+            std::sync::Arc::new(t)
+        });
+        lane.net.is_some()
     }
 }
 
