@@ -1134,8 +1134,10 @@ impl Rider {
             // rays' own scenery entries carry the rays that reach above it.
             // SLUS-21104's entry leaves the record touched, so on MX vs. ATV's handling the hits run
             // after a clause's entry too and a hit is the frame's second entry, the one that stays
-            // (B35, [`crate::handling::step::wreck_entries`]).
-            let hit = if mxvatv.is_some() && p.handling == crate::handling::Handling::MxVsAtv {
+            // (B35, [`crate::handling::step::wreck_entries`]). SLUS-21701's entry does too (R34).
+            let hit = if mxvatv.is_some()
+                && matches!(p.handling, crate::handling::Handling::MxVsAtv | crate::handling::Handling::Untamed)
+            {
                 crate::handling::step::hit_wreck(&p.air, air, touched, *fifty, height, &loads, &hits)
             } else if landed.is_some() {
                 None
