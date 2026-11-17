@@ -158,3 +158,9 @@ pub fn signature(fliers: &vehicle::Fliers, kind: vehicle::Machine) -> (Option<(S
     };
     (pack.map(|f| (f.id.clone(), f.skin.clone())), fliers.original_of(kind))
 }
+
+/// The key a pack flier's skin is drawn under (P325): its model's name under the pack's id, apart
+/// from the disc's model of the same name (`biplane`, `kiowa2`) and from its rotor parts and cones.
+pub fn model_key(f: &PackFlier) -> String {
+    game_render::world::pack_key(&f.id, &f.skin)
+}

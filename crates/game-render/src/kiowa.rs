@@ -43,7 +43,7 @@ use crate::disc::Res;
 use crate::mat::{M4, V3, v3};
 use crate::psg::Model;
 use crate::vehicle::about;
-use crate::world::Assets;
+use crate::world::{Assets, split_key};
 
 /// The helicopter's model for each skin, in the spawner's own order.
 pub const MODELS: [&str; 4] = ["kiowa", "kiowa2", "kiowa_ss", "kiowa2_ss"];
@@ -124,7 +124,13 @@ pub struct Kiowa {
     pub blades: [Option<usize>; 4],
     /// `TailRotor_Node`'s index.
     pub tail: Option<usize>,
+    /// The names its rotor parts are loaded under in [`Assets`], in [`PARTS`]' order: the disc's,
+    /// or a pack's own under its key (P325).
+    pub parts: [String; 4],
 }
+
+/// The rotor parts every helicopter loads beside its model, by name.
+pub const PARTS: [&str; 4] = [BLADE_BLUR, BLADE_BENT, TAIL_BLUR, TAIL_BENT];
 
 impl Kiowa {
     /// Load skin `skin` of the helicopter and its four blade parts into `assets`, from the first of
@@ -136,16 +142,19 @@ impl Kiowa {
     /// [`Kiowa::load`] of the helicopter's model `model` by name (`kiowa3`, MX vs. ATV's second
     /// model, MD80e), with the same rotor parts. SLUS-21104's helicopter loads the parts by these
     /// same four names for both its models, so a pack's `bladeblur2`-style files go unread (MD109).
+    /// A pack's model is asked for by its key ([`crate::world::pack_key`], P325), and its parts are
+    /// the pack's under the same pack part.
     pub fn load_model(assets: &mut Assets, archives: &[Res], model: &str) -> Option<Kiowa> {
-        if !assets.load(archives, model) {
+        if !assets.load_key(archives, model) {
             return None;
         }
-        for part in [BLADE_BLUR, BLADE_BENT, TAIL_BLUR, TAIL_BENT] {
-            assets.load(archives, part);
+        let parts = part_keys(model);
+        for part in &parts {
+            assets.load_key(archives, part);
         }
         // The blurs are see-through discs whose materials write depth, as the plane's prop cone is
         // (V107): left so, the disc hides what is drawn behind it after it.
-        for blur in [BLADE_BLUR, TAIL_BLUR] {
+        for blur in [&parts[0], &parts[2]] {
             if let Some(loaded) = assets.models.get_mut(blur) {
                 for s in loaded.surfaces.iter_mut().filter(|s| s.blend) {
                     s.depth_write = false;
@@ -165,7 +174,18 @@ impl Kiowa {
     pub fn found_model(assets: &Assets, model: &str) -> Option<Kiowa> {
         let loaded = &assets.models.get(model)?.model;
         let find = |name: &str| loaded.nodes.iter().position(|n| n.name.eq_ignore_ascii_case(name));
-        Some(Kiowa { model: model.to_string(), spindle: find(SPINDLE), blades: BLADES.map(find), tail: find(TAIL) })
+        Some(Kiowa { model: model.to_string(), spindle: find(SPINDLE), blades: BLADES.map(find), tail: find(TAIL), parts: part_keys(model) })
+    }
+
+    /// The name the bent main blade, what the wreck throws, is loaded under.
+    pub fn bent(&self) -> &str {
+        &self.parts[1]
+    }
+
+    /// The names of everything it draws in [`Assets`]: the helicopter and its four rotor parts,
+    /// what the GPU uploads for it.
+    pub fn models(&self) -> Vec<String> {
+        std::iter::once(self.model.clone()).chain(self.parts.iter().cloned()).collect()
     }
 
     /// The model's nodes posed by `rotor` (in the model's own space and node order): what the GPU
@@ -177,17 +197,23 @@ impl Kiowa {
 
     /// What to draw for a helicopter placed at `at` posed by `pose` ([`Kiowa::pose`]): the helicopter,
     /// then the rotor parts `rotor` has up, each at its node's posed matrix.
-    pub fn parts(&self, at: M4, pose: &[M4], rotor: &Rotor) -> Vec<(&'static str, M4)> {
+    pub fn parts(&self, at: M4, pose: &[M4], rotor: &Rotor) -> Vec<(&str, M4)> {
         let node = |i: Option<usize>| i.and_then(|i| pose.get(i)).map(|m| m.mul(at));
         let mut out = Vec::new();
         if rotor.blades {
-            out.extend(self.blades.iter().filter_map(|&b| node(b)).map(|m| (BLADE_BLUR, m)));
+            out.extend(self.blades.iter().filter_map(|&b| node(b)).map(|m| (self.parts[0].as_str(), m)));
         }
         if let Some(m) = node(self.tail) {
-            out.push((if rotor.wrecked { TAIL_BENT } else { TAIL_BLUR }, m));
+            out.push((self.parts[if rotor.wrecked { 3 } else { 2 }].as_str(), m));
         }
         out
     }
+}
+
+/// The keys of the rotor parts that go with the model keyed `model`: [`PARTS`] under its pack part.
+fn part_keys(model: &str) -> [String; 4] {
+    let scope = split_key(model).0;
+    PARTS.map(|part| format!("{scope}{part}"))
 }
 
 /// The helicopter's model posed by the rotor: `RotorSpindle`'s rotation replaced by a turn of the
@@ -278,7 +304,7 @@ mod tests {
 
     #[test]
     fn the_parts_follow_the_wreck() {
-        let k = Kiowa { model: "kiowa".into(), spindle: Some(1), blades: [Some(2), None, None, None], tail: Some(3) };
+        let k = Kiowa { model: "kiowa".into(), spindle: Some(1), blades: [Some(2), None, None, None], tail: Some(3), parts: part_keys("kiowa") };
         let p = pose(&heli(), &Rotor::WHOLE);
         let names = |r: Rotor| k.parts(M4::IDENTITY, &p, &r).into_iter().map(|(n, _)| n).collect::<Vec<_>>();
         assert_eq!(names(Rotor::WHOLE), [BLADE_BLUR, TAIL_BLUR]);
