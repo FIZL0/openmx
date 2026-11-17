@@ -728,6 +728,91 @@ fn mxvatv_flip_wreck_steep_is_the_originals() {
     }
 }
 
+/// MD72 — what objects are of the struck class the reason-15 test masks with (the category
+/// "STADIUMCOLLISION", `*0x00542db0`, `0x20` in the image): the activity's level start
+/// (`atv_activity_tag_stadium`) walks its level's collision objects (`+0x3d4` the level, `+0x3ec` its count,
+/// `+0x3f0` its list of entries, each entry's `+0x28` the object, `0` skipped) for every name
+/// (`+0x9b`) holding `sxcl.col` with case not counted, and ORs the mask into that object's categories
+/// (`+0x94`). Run as the original's own code over 10,000 generated levels against
+/// [`game_sim::world::stadium_class`]: names with the pattern in every case, at the start, the end
+/// and the middle, cut short, one letter off, overlapping a false start, and with non-ASCII letters.
+#[test]
+fn mxvatv_stadium_class_is_the_originals() {
+    const TAG: u32 = 0x0051_7600;
+    const ACT: u32 = 0x01c0_3000;
+    const LEVEL: u32 = 0x01c0_3400;
+    const LIST: u32 = 0x01c0_3800;
+    const ENTRIES: u32 = 0x01c0_3a00;
+    const OBJECTS: u32 = 0x01c0_5000;
+    const MAX: u32 = 32;
+    const SIZE: u32 = 0x100;
+    let Some(mut ee) = image() else { return };
+    let mask = ee.u32_at(0x0054_2db0);
+    assert_eq!(mask, 0x20, "the stadium class mask in the image");
+    let pieces = [
+        "sxcl.col", "SxCl.col", "SXCL.COL", "sXcL.CoL", "Col\\SxCl.col", "Data\\Col\\SxCl.col", "sxcl.co", "sxcl_col",
+        "xcl.col", "sxcl.cl", "ssxcl.col", "sxsxcl.col", "sxcl.colx", "sxcl.col.col", "sxcI.col", "sxc1.col", "s\u{e9}xcl.col",
+        "\u{17f}xcl.col", "sxcl.co\u{2c6}", "Col\\SX16BridgeCol03.col", "Col\\Nat05_Courthouse.col", "WreckBikem.col", "",
+    ];
+    let letters = "abcxyzSXCLOsxclo._\\0123\u{e9}\u{c9}\u{17f}";
+    let letters: Vec<char> = letters.chars().collect();
+    let mut g = Gen(0x0d72_0001);
+    let mut tally = std::collections::BTreeMap::new();
+    for k in 0..10_000 {
+        let count = g.bits() % (MAX + 1);
+        let mut want = Vec::new();
+        for i in 0..count {
+            let entry = ENTRIES + 0x30 * i;
+            let obj = OBJECTS + SIZE * i;
+            for o in (0..SIZE).step_by(4) {
+                ee.set_u32(obj + o, 0);
+            }
+            ee.set_u32(LIST + 4 * i, entry);
+            if g.one_in(10) {
+                ee.set_u32(entry + 0x28, 0);
+                *tally.entry("no object").or_insert(0u32) += 1;
+                continue;
+            }
+            ee.set_u32(entry + 0x28, obj);
+            let mut name = String::new();
+            for _ in 0..g.bits() % 3 {
+                name.push(letters[(g.bits() as usize) % letters.len()]);
+            }
+            name.push_str(pieces[(g.bits() as usize) % pieces.len()]);
+            for _ in 0..g.bits() % 3 {
+                name.push(letters[(g.bits() as usize) % letters.len()]);
+            }
+            let bytes = name.as_bytes();
+            assert!(bytes.len() < (SIZE - 0x9c) as usize);
+            for (n, &b) in bytes.iter().enumerate() {
+                ee.write(obj + 0x9b + n as u32, 1, u128::from(b));
+            }
+            ee.write(obj + 0x9b + bytes.len() as u32, 1, 0);
+            let before = match g.bits() % 3 {
+                0 => 0,
+                1 => mask,
+                _ => g.bits(),
+            };
+            ee.set_u32(obj + 0x94, before);
+            let stadium = game_sim::world::stadium_class(&name);
+            *tally.entry(if stadium { "stadium" } else { "not" }).or_insert(0u32) += 1;
+            want.push((obj, name, before | if stadium { mask } else { 0 }));
+        }
+        ee.set_u32(ACT + 0x3d4, LEVEL);
+        ee.set_u32(LEVEL + 0x3ec, count);
+        ee.set_u32(LEVEL + 0x3f0, LIST);
+        ee.call(TAG, &[u64::from(ACT)], &[], 5_000_000);
+        assert_eq!(ee.r(2) as u32, 1, "level {k}: the tagging answered");
+        for (obj, name, cats) in want {
+            assert_eq!(ee.u32_at(obj + 0x94), cats, "level {k}: {name:?}");
+        }
+    }
+    for want in ["stadium", "not", "no object"] {
+        let n = tally.get(want).copied().unwrap_or(0);
+        assert!(n >= 1000, "only {n} object(s) went down {want:?}: {tally:?}");
+    }
+}
+
 /// S223 — `atv_bike_start_stunt` asked for the backflip's stunt, as the original's code runs it on a
 /// bike with no animation objects (`+0x680`/`+0x684` null): it answers yes every time, and writes the
 /// stunt id (`+0x1528`) only where the id it found is 41 or more — what [`handling::ride_backflip`]

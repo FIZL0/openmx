@@ -862,6 +862,13 @@ pub struct Ride {
     /// Whether the body itself is against something solid — a prop, a wall, the scene. `air.rs`
     /// reads it to know a landing is not the only way to be stopped.
     pub touching: bool,
+    /// The collision record touching an object of MX vs. ATV's stadium class this tick (MD72): the
+    /// tick's search touched something (the frame's `scenery`) and the last thing the body rays struck
+    /// is a stadium-class prop ([`crate::world::Prop::stadium`]). What MX vs. ATV's reason-15 test asks
+    /// ([`crate::handling::step::WreckIn::struck_class`]). Its rider sets it from the tick's search
+    /// before the frame; false where no search ran. Worked out afresh each tick, so the snapshot
+    /// leaves it out.
+    pub struck_stadium: bool,
     /// The material the rear wheel rolls on when that is a prop (P145): the low byte of the struck
     /// mesh's surface word, an id into the track's `Col\template.cmt`, or 0 for none. The original's
     /// distributor keeps the rear wheel's last contact node, cleared each substep, and the drive-on
@@ -980,6 +987,7 @@ impl Ride {
             back: Back { at, facing, up: UP },
             near: F::ONE,
             touching: false,
+            struck_stadium: false,
             rear_material: 0,
             heard: crate::material_hit::Heard::default(),
             impact: crate::material_hit::Impact(NOTHING),
@@ -2364,7 +2372,7 @@ impl Ride {
         }
         let Ride {
             mv: ride, chassis, engine, air, front, rear, origin, node, held, near, touching, stunt,
-            drag_halved, tricks, mxvatv, rear_material, nearby, props, impact, ..
+            drag_halved, tricks, mxvatv, rear_material, nearby, props, impact, struck_stadium, ..
         } = self;
         *touching = false;
         // MX vs. ATV's moves (MD16), only for a bike a trick pack is laid over.
@@ -2666,13 +2674,15 @@ impl Ride {
                 // MX vs. ATV's own backflip (MD40) on its handling. Under a trick pack the rows above
                 // are MX vs. ATV's moves already and stay as MD16 laid them. A mid-clip end asks the
                 // reason-15 test (S223) on the frame's g loads so far, as the original's `+0x1250`
-                // stands before its peak rates run; the port's world has no struck class (MD63c).
+                // stands before its peak rates run, and the record's touch with a stadium-class
+                // prop (MD72), from the search before the frame.
                 _ => match mxvatv.as_deref_mut() {
                     Some(f) => {
                         let g = ride.g_peak;
                         let loads = air::Loads { side: F(g.x()), vertical: F(g.y()), fore_aft: F(g.z()), ..air::Loads::default() };
                         let airborne = air.airborne;
-                        let steep = || crate::handling::step::flip_wreck_steep(&p.air, false, airborne, &loads);
+                        let struck_class = *struck_stadium;
+                        let steep = || crate::handling::step::flip_wreck_steep(&p.air, struck_class, airborne, &loads);
                         // Untamed's own (MD93a) on its handling.
                         if p.handling == crate::handling::Handling::Untamed {
                             crate::handling::untamed::ride_backflip(&p.air, air, &mut ac, &astep, c.trick, &out.mat3(Frame::Chassis), f, steep)
