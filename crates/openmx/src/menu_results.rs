@@ -16,7 +16,7 @@
 
 #![allow(dead_code)] // the shell hands the race's end over once the Sim runs it (S301); the tests do now
 
-use game_sim::race::{EndTip, LapCard, RaceEnd, RaceOver};
+use game_sim::race::{EndTip, LapCard, RaceEnd, RaceOver, ResultEvent};
 use ps2_float::{F, fpu};
 use std::path::Path;
 
@@ -364,6 +364,21 @@ impl Records {
             self.seats.resize(seat + 1, RiderRecord::default());
         }
         &mut self.seats[seat]
+    }
+
+    /// The race the gate's drop counts (P335; the original counts races at the drop, not the
+    /// finish): in play mode 0 on a single race (activity 2), every player seat with a profile —
+    /// `profiles[k]` its record's slot — has one race added. Whether any record moved.
+    pub fn count_race(&mut self, event: &ResultEvent, profiles: &[Option<usize>]) -> bool {
+        if event.mode != 0 || event.activity != 2 {
+            return false;
+        }
+        let mut moved = false;
+        for slot in profiles.iter().flatten() {
+            self.seat(*slot).add_races(F::ONE);
+            moved = true;
+        }
+        moved
     }
 
     /// `seat.N = races wins rate` a line, the rate as its float's bits so it reads back exactly.

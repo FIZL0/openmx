@@ -8494,6 +8494,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let mut leave = Leave::Quit;
     // What the shell has seen of the race's lap line (P313), to say its laps, places and end.
     let mut race_watch = race_start::Watch::default();
+    // P335: whether seat 0's race gate stood open at the last look, for the race its drop counts.
+    let mut race_gate_open: Option<bool> = None;
     let mut escape = held(window, key::ESCAPE);
     let mut perf = perf::Perf::new(args.fps);
     let mut hushed = false;
@@ -10165,6 +10167,17 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         // shows once the outro's wait has run.
         // The race's flashes' burst (S321), which a finish sets going: put back in the race below.
         let mut burst = world.seats[0].sim.race.as_ref().and_then(|r| r.flashes.as_ref()).map(|f| f.burst);
+        // P335: the gate's drop counts a race in the human's record, as the original's drop does.
+        let gate_open = world.seats[0].sim.race.as_ref().map(|r| r.gate.flags & game_sim::race::flags::CLOSED == 0);
+        if simulated && race_gate_open == Some(false) && gate_open == Some(true)
+            && let Some(front) = front.as_deref_mut()
+        {
+            let event = game_sim::race::ResultEvent { activity: 2, ..Default::default() };
+            front.menu.race_gate_dropped(&event, &[Some(0)]);
+        }
+        if simulated {
+            race_gate_open = gate_open;
+        }
         if simulated && let Some(laps) = world.seats[0].sim.race.as_ref().and_then(|r| r.laps.as_deref()) {
             let laps_run = laps.rules.lap.laps.clamp(0, 255) as u8;
             // P334: the event as the Hall of Fame reads it — the track's league and number in it, and

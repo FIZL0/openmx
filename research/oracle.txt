@@ -839,6 +839,13 @@ race_drop                   boot 0x002fbdd0 (race) the gate drop: listener vtabl
 #                                           scene+0x74), then +0x4c0 = 1.0, gate +0x30 &= ~1, and one
 #                                           rand: scene(app+0x3cc)+0xf0 = 8 + 5 * (rand * 2^-31).
 #                                           race::Race::drop
+race_drop_races             boot 0x002fc040 race_drop's race count (P335), up to race_drop_races_end:
+#                                           front (app_pointer +0x3d4) +4 == 0 and its event (+0xc)
+#                                           +4 == 2 -> for k < event +0x114 (byte, re-read each pass):
+#                                           app+0x3f4[k] != 0 -> profile_stat_add(f12 1.0, app+0x3e4,
+#                                           9 races, profile +0xcc). The only stat-9 call in the ELF.
+#                                           menu::results::Records::count_race
+race_drop_races_end         boot 0x002fc0d0 the stretch's end (scene +0x74 next)
 race_reset                  boot 0x002fb2e0 (race) closes the gate (|= 1), picks +0x4ac by rand out of
 #                                           +0x47c entries, countdown length mgr+0xbc =
 #                                           table[+0x49c][+0x4ac] + 1.5, interval mgr+0xc0 = 0.1,
