@@ -232,14 +232,16 @@ fn the_installed_mx_unleashed_worlds_ride_promptly() {
 /// MD95: the five freeride maps are one row round the wrap, so no cell of the world is empty. The
 /// 3 x 2 grid left one, a map's width of join north of Dallas and west of Cleveland, which the user
 /// rode as "Cleveland flattened": Bridgeport crossed 6,606 ft of it to Cleveland over the wrap.
+/// MD186: the crossing over the seam is a stitched join and the strip, 252 ft beside 135 inside
+/// (it was 360, its maps each a leaf past where the layout put them); at most twice one inside.
 #[test]
 fn world_mxu_free_is_built_off_the_disc_as_openmx_mods_builds_it() {
-    let Some(said) = rides_off_the_disc("world_mxu_free", 5, 47) else { return };
-    assert!(after(&said, "world: world_mxu_free ").contains(", 5 tiles and 47 joins, 27585 x 5589 feet,"), "{said}");
+    let Some(said) = rides_off_the_disc("world_mxu_free", 5, 48) else { return };
+    assert!(after(&said, "world: world_mxu_free ").contains(", 5 tiles and 48 joins, 27477 x 5589 feet,"), "{said}");
     let crossings = crossings(&said);
     assert_eq!(crossings.len(), 5, "each map crosses along the row to the next: {crossings:?}");
     for (a, b, seam, ft) in &crossings {
-        let most = if *seam { 2900.0 } else { 1800.0 };
+        let most = if *seam { 270.0 } else { 1800.0 };
         assert!(*ft <= most, "{a} > {b}: {ft} ft of join (at most {most})");
     }
 }

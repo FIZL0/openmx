@@ -414,10 +414,14 @@ mod tests {
     /// MD102: a wrapped unit world's joins over the seam are joins like any other (MX Unleashed's
     /// three). Laid out as its build ends, each join is what its pair needs
     /// ([`stitch::build::unit_gaps`]) and a share of its line's slack, and no join over the seam has
-    /// more slack than the most any join inside the world has on that axis, give or take a leaf (a
-    /// tile's origin is on whole leaves). In world_mxu they had up to 200 ft more (nat10 > nat09 over
-    /// x: 833 ft past its need beside the line's 478-564), the slack each line's first and last tile
-    /// were held off the seam by. No join inside is over 1,800 ft. Without the disc it skips.
+    /// more slack than the most any join inside the world has on that axis, give or take half a leaf
+    /// (a tile's origin is on whole leaves, rounded to the nearest). In world_mxu they had up
+    /// to 200 ft more (nat10 > nat09 over x: 833 ft past its need beside the line's 478-564), the
+    /// slack each line's first and last tile were held off the seam by. MD186: in world_mxu_free, one
+    /// row of maps, the seam's join had 114 ft past its 120 where the others had 15, a 144 ft leaf
+    /// every map's origin was rounded up past where the relax put it, which the whole leaf this allowed
+    /// hid (126 ft for 120 now).
+    /// No join inside is over 1,800 ft. Without the disc it skips.
     #[test]
     fn seam_joins_are_like_the_others() {
         let Ok(mut disc) = Disc::open_configured() else {
@@ -443,10 +447,10 @@ mod tests {
                     *m = (j.width - need, format!("{} > {}, {:.0} ft for {need:.0}", name(a), name(b), j.width));
                 }
             }
-            let leaf = 16.0 * plan.spacing;
+            let half_leaf = 8.0 * plan.spacing;
             for (axis, [inside, seam]) in most.iter().enumerate().filter(|(_, [_, seam])| !seam.1.is_empty()) {
                 eprintln!("{id} axis {axis}: most slack {:.0} ft inside ({}), {:.0} over the seam ({})", inside.0, inside.1, seam.0, seam.1);
-                assert!(seam.0 <= inside.0.max(0.0) + leaf, "{id} axis {axis}: {} over the seam, {:.0} ft past its need; inside at most {:.0} ({})", seam.1, seam.0, inside.0, inside.1);
+                assert!(seam.0 <= inside.0.max(0.0) + half_leaf, "{id} axis {axis}: {} over the seam, {:.0} ft past its need; inside at most {:.0} ({})", seam.1, seam.0, inside.0, inside.1);
             }
         }
     }

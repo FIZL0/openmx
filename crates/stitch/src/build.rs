@@ -879,10 +879,13 @@ fn units_layout(
             order.sort_by_key(|&t| first(t));
             let lowest = |t: usize| if wrapped { end } else { pad.max(f64::from(cuts[t][axis]) * tiles[t].spacing) };
             // Place each tile at `want`'s interior start or past every tile before it that it faces.
+            // An origin is on whole leaves, so `want` goes to the nearest leaf, not up one, where the
+            // others leave it room (MD186: rounded up, world_mxu_free's one row of maps each went a
+            // 144 ft leaf past where the relax put them, and the join over the seam took the leaf).
             let pass = |want: &dyn Fn(usize) -> f64, at: &mut Vec<[f64; 2]>, keep: &mut Vec<[u32; 4]>| {
                 for &t in &order {
                     let s = tiles[t].spacing;
-                    let mut lo = want(t).max(lowest(t));
+                    let mut lo = (want(t) - 8.0 * s).max(lowest(t));
                     for b in (0..n).filter(|&b| face[b][t] && last(b) < first(t)) {
                         lo = lo.max(span(at, keep, b, axis).1 + gap(axis, b, t));
                     }
