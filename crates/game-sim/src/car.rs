@@ -3200,13 +3200,9 @@ impl Machine {
     /// wrote, where the car really is, as a plane's is ([`crate::flight::Flight::pushed`]).
     pub fn pushed(&mut self, collision: &mut Collision, p: &crate::rider_contact::Flown) {
         let (position, last_position) = (self.body.position, self.body.last_position);
-        let by = p.body.position.sub(position);
         self.body = p.body;
         (self.body.position, self.body.last_position) = (position, last_position);
         collision.collider = p.collider;
-        if p.body.position != position {
-            collision.collider.cofg_world = collision.collider.cofg_world.sub(by);
-        }
     }
 
     /// The measure's last word, on the collision record's terrain switch: the next frame's search

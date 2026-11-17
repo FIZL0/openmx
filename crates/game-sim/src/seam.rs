@@ -96,12 +96,11 @@ pub fn down(d: &mut Down, by: [F; 2]) {
     d.search.centre = moved(d.search.centre, by);
 }
 
-/// **A wreck**: the wreck bike's body, its collision record and its collider's centre of gravity,
-/// the transform's origin, and the rider's point.
+/// **A wreck**: the wreck bike's body, its collision record, the transform's origin, and the rider's
+/// point. Its collider's `cofg_world` is an offset, not a place ([`collision`]).
 pub fn crash(c: &mut Crash, by: [F; 2]) {
     body(&mut c.bike.body, by);
     record(&mut c.bike.record, by);
-    c.bike.collider.cofg_world = moved(c.bike.collider.cofg_world, by);
     c.origin = moved(c.origin, by);
     c.rider = moved(c.rider, by);
 }

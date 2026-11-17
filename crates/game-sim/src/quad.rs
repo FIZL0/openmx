@@ -4265,13 +4265,9 @@ impl<R: Moto + Default> Ride<R> {
     pub fn pushed(&mut self, p: &crate::rider_contact::Flown) {
         let (Some(q), Some(r)) = (p.quad.as_ref(), self.recorded.as_mut()) else { return };
         let (position, last_position) = (self.body.position, self.body.last_position);
-        let by = q.body.position.sub(position);
         self.body = q.body;
         (self.body.position, self.body.last_position) = (position, last_position);
         r.held.record.collider = p.collider;
-        if q.body.position != position {
-            r.held.record.collider.cofg_world = r.held.record.collider.cofg_world.sub(by);
-        }
     }
 }
 

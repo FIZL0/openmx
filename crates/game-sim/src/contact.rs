@@ -304,7 +304,8 @@ pub struct Collider {
     pub inv_mass: F,
     pub inv_inertia: Vf,
     /// `+0x90` the centre of mass in the body's frame; `+0xa0` the same turned into the world, written
-    /// by [`relative_velocity`].
+    /// by [`relative_velocity`] (and [`other_at`]) before every read. An offset from the body's
+    /// position, not a place: a seam's shift or a nearest copy leaves it alone.
     pub cofg: Vf,
     pub cofg_world: Vf,
     /// `+0x110`: the collidable flags that make an other an actor. `+0x114`: the ones this object
