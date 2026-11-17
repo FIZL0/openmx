@@ -20,7 +20,7 @@
 //! - **the list** the original's gather (`atv_gather_nearby`) fills, run on the image with the probe moved:
 //!   every candidate, in order, with its distance, and the bound, bit for bit. The points are every
 //!   row of MD37a's fifteen captures (the quad's position), among them the rows where the quad
-//!   touches the palms ahead of the spawn (race-jump, vsync 35805 and 35851-35863), points scattered
+//!   touches the palms ahead of the spawn (C28's race-jump, frames 21535-21741), points scattered
 //!   round every mesh, and points over the whole map;
 //! - **each vehicle's own sphere** (MD83b), put again and again by the original's place
 //!   (`atv_vehicle_sphere_place`, gathering through `atv_vehicle_sphere_gather`) and by the port's on
@@ -557,7 +557,8 @@ fn the_quads_nearby_list_is_the_originals() {
     let (mut lists, mut entries, mut palms, mut plants, mut meshes) = (0, 0, 0, 0, 0);
     let mut kept: BTreeMap<(bool, u32), usize> = BTreeMap::new();
     let mut longest = 0;
-    let palm_rows = ["race-jump@35805", "race-jump@35851", "race-jump@35855", "race-jump@35859", "race-jump@35861", "race-jump@35863"];
+    // C28's re-made race-jump (2026-11-05): both palms are in every row from 21535 to 21741.
+    let palm_rows = ["race-jump@21535", "race-jump@21537", "race-jump@21599", "race-jump@21661", "race-jump@21739", "race-jump@21741"];
     for (n, (name, p)) in points.iter().enumerate() {
         let mode = if n < d.points.len() || n % 8 != 0 { modes[0] } else { modes[1 + (n / 8) % 3] };
         let ee = &mut d.ee;
@@ -608,6 +609,9 @@ fn the_quads_nearby_list_is_the_originals() {
          collidables by (filter, category): {kept:x?}; {palms} palm rows",
         d.points.len()
     );
+    // The rows are named by the capture's frames, so a re-made capture (C28 did one) drops them all.
+    let missing: Vec<_> = palm_rows.iter().filter(|r| !d.points.iter().any(|(n, _)| n == *r)).collect();
+    assert!(missing.is_empty(), "the captures hold no row {missing:?}: race-jump.csv was re-made; name its rows where both palms are in the list");
     assert_eq!(palms, palm_rows.len(), "every palm row was asked");
     // Every list held zones, and without the filter the quad's own frame mesh, each as the
     // original's: what MD76a1's world lacked.
