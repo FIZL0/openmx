@@ -3432,11 +3432,13 @@ impl Pen<'_> {
 
     /// The splash's New version card (F14, opentennis's B581), pinned to the top right: the newer
     /// build `n`, then Square and what it does (Update, Download, Refresh), or once an install runs its
-    /// words.
+    /// words. P355: like the build label (B32) it hangs from the frame's top edge, not the stage's.
     fn new_version(&mut self, n: &str) {
         let (w, h) = (18.0, 9.6);
-        let (x, y) = (STAGE.0.min(self.right()) - 1.5 - w, self.top().max(0.0) + 1.2);
+        let (x, y) = (STAGE.0.min(self.right()) - 1.5 - w, self.top() + 1.2);
         let cx = x + w / 2.0;
+        let card = self.b([x, y, w, h]);
+        self.parts.push(Part::Update(card));
         self.round([x + 0.35, y + 0.4, w, h], 1.0, SHADOW, SHADOW);
         self.round([x, y, w, h], 1.0, [0x2a, 0x14, 0x08, 240], [0x12, 0x09, 0x04, 240]);
         self.ring([x, y, w, h], 1.0, 0.1, [255, 255, 255, 60]);
