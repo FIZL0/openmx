@@ -7913,10 +7913,34 @@ atv_bike_end_stunt          atv 0x004e4db0 = vt +0x4ac (a0 bike, a1 stunt id)
 atv_bike_set_flip_clip      atv 0x004e7a30 = vt +0x53c (sw a1, +0x1754)
 atv_bike_flip_wreck_steep   atv 0x004e8370 = the backflip's mid-clip wreck's reason test (v0: 0xf, else 0xb)
 # S223 (journal 2026-11-02-s223-backflip-rider-side): atv_bike_start_stunt returns 1 on every path; a flip id
-# (+0x13b8..+0x13c8) is written to +0x1528 only from a current id >= 41 and not for the 360's pair (+0x13c4,
-# +0x13c8); a non-flip id always, and on the ground or with +0xc80 it returns at once. atv_bike_end_stunt only
-# stops the clip on the rider's animation objects (+0x680/+0x684). +0x1524 copies +0x1528 once a frame
+# (+0x13b8..+0x13c8) is written to +0x1528 only from a current id >= 41 and not for the wheelie/stoppie (+0x13c4,
+# +0x13c8; R17: S223 read them as the 360's pair); a non-flip id always, and on the ground or with +0xc80 it returns at once. atv_bike_end_stunt
+# (R17: not a clip stop) finishes the stunt's score node on the card +0x680 / manager +0x684. +0x1524 copies +0x1528 once a frame
 # (0x004dd9cc's function). atv_bike_flip_wreck_steep = the wreck test's reason 15 (handling::step::flip_wreck_steep).
+# R17 (journal 2026-11-16-r17-mxvatv-backflip-score; tests/mxvatv_stunt_score.rs runs all of it on state04's
+# bike, card and table) corrects S223: +0x680 is the bike's score card and +0x684 the score manager, not
+# animation objects, and +0x13c4/+0x13c8 are the wheelie's and stoppie's ids (42, 43), not a 360 pair (the 360s
+# are +0x13bc/+0x13c0, 44/45). atv_bike_start_stunt IS the scorer: with both set it ends the live non-flip
+# nodes (vt +0x4ac) for a non-flip id, opens a combo (Open) unless one is open, and pushes a
+# node: base = max.s(row PointValue (+0x50) * entry mult, 10), rate = max.s(HoldPointValue (+0x54) * mult, 10),
+# extra 0, mult 1, granularity 1, flags 0xc (| 0x11: Score), then Mark(on = a2): marked nodes grow. The row is
+# atv_stunt_table_entry(+0x14f0, id): +0 the ini row, +4 the mult (1.0 on every state04 row). atv_bike_end_stunt
+# finishes that id's node (scale 1.0, ok); id -1 finishes every live one and banks the combo at its count.
+# Stance (vt +0x4b0) is the same with ok 0: the combo lost. The backflip (atv_bike_backflip): start(+0x13b8, 1)
+# when node +0x84 <= 0, +0x94 > 0 and the clip word 0; end(+0x13b8) when +0x84 > 0, +0x94 > -0.79 and clip 2.
+# The bank on landing: atv_stunt_land_bank in the stunt idle, 0.2 s (+0x14f4) on the ground then end(-1).
+# The run's calls are F31b5h's (below: Open, Score, Mark, End, Close, Tally; game_sim::handling::run), already
+# ported for the frame replay; the rider's points (game_sim::score) do not use them. Score's base and rate are
+# the ini row's PointValue and HoldPointValue (state04: tricks 0-40 1000/1000, backflip 41 2000/10000, wheelie
+# 42 and stoppie 43 1000/1000, 360s 44/45 2000/15000). End(-1) calls Tally with x = the node count: every node's points times the count.
+atv_score_grow              atv 0x0046b210 = score_grow's twin (dt f12, mgr): cards from mgr +0x28 (next
+#                                           +0x1d8) with 2 and 0x20: +0xd8 += dt; with 0x40 each node with
+#                                           0x30: held += dt, points = (adda 0, base; madd held, rate) * mult,
+#                                           rounded; +0xe0 = the counting nodes' sum floored to mgr +0x2a8
+atv_stunt_land_bank         atv 0x004e5bd0 = handling::update::stunt_clock, the stunt idle's first call (f12 dt, a0 bike): +0x14cc = the row
+#                                           (+0x1524) SafeTime (+0x40) <= +0x14d8; no wheelie/stoppie time
+#                                           (+0x704/+0x708) -> +0x14f4 = 0.2; on the ground, +0x14f4 > 0 and
+#                                           +0x1524 != +0x152c: +0x14f4 -= dt, <= 0 -> end(-1), +0x1528 = 0xff
 atv_body_add_moment         atv 0x00497530 = rigid body vt +0x78 (vadd.xyz into body +0x1b0, then its +0xe8 listeners)
 # MD75c — the vehicle post's three calls (atv_moto.rs Scene::bounds_stale / world_box / database_box,
 # collision_sync; quad::Steps runs them inline from the vehicle post; tests/atv_quad.rs unhooks all four under
