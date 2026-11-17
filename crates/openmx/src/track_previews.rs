@@ -37,7 +37,7 @@ use game_sim::track::{self, Terrain, TerrainHead, TerrainLayout, TerrainNode};
 use ps2_float::F;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -169,15 +169,23 @@ pub fn riding() -> bool {
     RIDES.load(Ordering::SeqCst) > 0
 }
 
+/// Whether this build can take a still: it spawns its own binary, which the browser cannot and iOS
+/// forbids (P303: every spawn there is `Operation not permitted`).
+pub const SHOOTS: bool = !cfg!(any(target_arch = "wasm32", target_os = "ios"));
+
 /// The picture `id` brings, read through [`crate::files`] (P261: the browser's OPFS `mods/` too): its
-/// [`OWN`]; in the browser, which cannot take a still, else the first other `previews/*.png` of its
-/// folder in name order, as a store zip may carry one.
+/// [`OWN`]; where no still is taken ([`SHOOTS`]), else the first other `previews/*.png` of its folder
+/// in name order, as a store zip may carry one.
 pub fn own_picture(mods: &Path, id: &str) -> Option<PathBuf> {
+    own_picture_on(mods, id, SHOOTS)
+}
+
+fn own_picture_on(mods: &Path, id: &str, shoots: bool) -> Option<PathBuf> {
     let own = own(mods, id);
     if crate::files::is_file(&own) {
         return Some(own);
     }
-    if !cfg!(target_arch = "wasm32") {
+    if shoots {
         return None;
     }
     let mut pngs: Vec<PathBuf> = crate::files::list(mods.join("tracks").join(id).join(STILLS_DIR))
@@ -190,16 +198,32 @@ pub fn own_picture(mods: &Path, id: &str) -> Option<PathBuf> {
     pngs.into_iter().next()
 }
 
+/// Whether the pick has said yet that this build takes no stills (P303: once a launch, not per track).
+static SAID_NO_STILLS: AtomicBool = AtomicBool::new(false);
+
 /// What the pick has for each of `ids` now, `(id, picture)`, and the ids that need a still taken, or
 /// a world's map drawn (F28: a world is shot nowhere, P282). A picture that does not read is a line
-/// in `log` and no picture. The browser takes no still and draws no map: a mod with no picture of
-/// its own is a card with none.
+/// in `log` and no picture. The browser and iOS take no still and draw no map ([`SHOOTS`]): a mod
+/// with no picture of its own is a card with none, said in one line the first time only.
 pub fn gather(mods: &Path, ids: &[String], log: &mut Vec<String>) -> (Vec<(String, Texture)>, Vec<String>) {
-    let (mut have, mut take) = (Vec::new(), Vec::new());
+    let say = SHOOTS || !SAID_NO_STILLS.load(Ordering::SeqCst);
+    let before = log.len();
+    let got = gather_on(mods, ids, log, SHOOTS, say);
+    if log.len() > before && !SHOOTS {
+        SAID_NO_STILLS.store(true, Ordering::SeqCst);
+    }
+    got
+}
+
+/// [`gather`] as a build that `shoots` stills or not; `say` whether to name the mods left with no
+/// picture where none is shot.
+fn gather_on(mods: &Path, ids: &[String], log: &mut Vec<String>, shoots: bool, say: bool) -> (Vec<(String, Texture)>, Vec<String>) {
+    let (mut have, mut take, mut bare) = (Vec::new(), Vec::new(), Vec::new());
     for id in ids {
-        let path = if let Some(own) = own_picture(mods, id) {
+        let path = if let Some(own) = own_picture_on(mods, id, shoots) {
             own
-        } else if cfg!(target_arch = "wasm32") {
+        } else if !shoots {
+            bare.push(id.as_str());
             continue;
         } else if let Some(still) = kept(mods, id) {
             still
@@ -213,6 +237,15 @@ pub fn gather(mods: &Path, ids: &[String], log: &mut Vec<String>) -> (Vec<(Strin
             Ok(t) => have.push((id.clone(), t)),
             Err(e) => log.push(format!("mods: tracks/{id}'s picture: {}: {e}", path.display())),
         }
+    }
+    if say && !bare.is_empty() {
+        let n = bare.len();
+        log.push(format!(
+            "mods: {n} track{} with no picture of {} own, and this build takes no stills: {}",
+            if n == 1 { "" } else { "s" },
+            if n == 1 { "its" } else { "their" },
+            bare.join(", ")
+        ));
     }
     (have, take)
 }
@@ -770,6 +803,30 @@ mod tests {
         assert_eq!((have.len(), have[0].0.as_str(), take), (1, "big_map", vec!["trk".to_string()]));
         let _ = std::fs::remove_dir_all(&mods2);
         assert_eq!(kept(&mods, "old"), Some(still_of(&mods, "old", 1)));
+        let _ = std::fs::remove_dir_all(&mods);
+    }
+
+    /// P303: where no still is taken (iOS, the browser) none is asked for; a store zip's picture stands
+    /// in for the mod's own, and the mods left with none are one line, said only when asked to.
+    #[test]
+    fn a_build_that_takes_no_stills_names_the_bare_ones_once() {
+        let ids: Vec<String> = (0..38).map(|i| format!("fs{i:02}")).chain(["store".into(), "own".into()]).collect();
+        let kinds: Vec<(&str, &str)> = ids.iter().map(|id| (id.as_str(), "track")).collect();
+        let mods = scratch("no-stills", &kinds);
+        picture(&own(&mods, "own"));
+        picture(&mods.join("tracks/store/previews/card.png"));
+        let mut log = Vec::new();
+        let (have, take) = gather_on(&mods, &ids, &mut log, false, true);
+        assert!(take.is_empty(), "{take:?}");
+        assert_eq!(have.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), ["store", "own"], "{log:?}");
+        assert_eq!(log.len(), 1, "{log:?}");
+        assert!(log[0].starts_with("mods: 38 tracks with no picture") && log[0].contains("fs00") && log[0].contains("fs37"), "{log:?}");
+        let mut again = Vec::new();
+        let (have, take) = gather_on(&mods, &ids, &mut again, false, false);
+        assert!(again.is_empty() && take.is_empty() && have.len() == 2, "{again:?}");
+        // where stills are taken, the store's picture is not read and the bare ones are taken
+        let (have, take) = gather_on(&mods, &ids, &mut Vec::new(), true, true);
+        assert_eq!((have.len(), take.len()), (1, 39));
         let _ = std::fs::remove_dir_all(&mods);
     }
 
