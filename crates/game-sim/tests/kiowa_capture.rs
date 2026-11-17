@@ -1509,6 +1509,8 @@ struct Replayed {
     nearest: Option<F>,
     /// Frames whose helicopter rays met a blade.
     struck: Vec<u32>,
+    /// On every frame, the helicopter's record and the four blades' as the frame left them (R25).
+    records: Vec<(u32, Vec<game_sim::contact::Contact>, [Vec<game_sim::contact::Contact>; 4])>,
     /// Rows read a frame late: each holds the body after the next frame (B23).
     late: Vec<u32>,
     /// Rows before the wreck read inside the next frame's step, after its controller had run (B24).
@@ -1575,7 +1577,7 @@ fn replay_wreck(capture: &str) -> Option<Replayed> {
         .expect("a wreck in the capture")
         .0;
     let rng_of = |row: usize| -> u64 { cap.text(row, "rng_state").parse().expect("rng_state") };
-    let mut seen = Replayed { wrecks: Vec::new(), put_backs: Vec::new(), offered: 0, nearest: None, struck: Vec::new(), late: Vec::new(), torn: Vec::new(), unread: None, last: 0 };
+    let mut seen = Replayed { wrecks: Vec::new(), put_backs: Vec::new(), offered: 0, nearest: None, struck: Vec::new(), records: Vec::new(), late: Vec::new(), torn: Vec::new(), unread: None, last: 0 };
     let mut torn: Option<(usize, Kiowa, Ride, Measure)> = None;
     // A row read a frame late, waiting for the end of the next frame (B23).
     let mut late: Option<usize> = None;
@@ -1598,7 +1600,8 @@ fn replay_wreck(capture: &str) -> Option<Replayed> {
             seen.nearest = Some(seen.nearest.map_or(near, |n| n.min(near)));
         }
         let (movers, struck) = s.collision.search_knocking(&mut s.ride.body, &mut s.place, dt, &offered);
-        if !struck.is_empty() {
+        let met = !struck.is_empty();
+        if met {
             seen.struck.push(frame);
         }
         let blades_out = wreckage.blades.started.iter().any(|b| b.out);
@@ -1690,6 +1693,10 @@ fn replay_wreck(capture: &str) -> Option<Replayed> {
             seen.late.push(frame);
         } else {
             torn = Some((row, s.kiowa, s.ride, measured_before));
+        }
+        {
+            let blade = |k: usize| wreckage.blades.set.objects[k].collision.as_ref().map(|c| c.record.contacts.clone()).unwrap_or_default();
+            seen.records.push((frame, s.collision.record.contacts.clone(), [blade(0), blade(1), blade(2), blade(3)]));
         }
         seen.last = frame;
     }
@@ -1801,4 +1808,212 @@ fn a_fast_left_descent_read_ever_later_replays_bit_exact() {
         seen.late.len(),
         seen.offered
     );
+}
+
+/// R25's fast tape: as [`FAST`] but Cross held for 60 ticks, so the helicopter climbs higher before
+/// it noses over (fields `60 120:cross 200:-:127,0 200:square:127,0 400`), captured with
+/// `watch/r25-kiowa-blades.toml` (every record's address, sixteen entries each).
+const FAST_HIGH: &str = "capture/r25/fast6.csv";
+
+/// Who an entry's other side is: the helicopter, a blade, or neither (scenery, or another record).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Side {
+    Heli,
+    Blade(usize),
+    Neither,
+}
+
+/// The captured record `name`'s entries on `row` (0x80 bytes each, the first sixteen): each entry's
+/// raw words and its other side, named off the row's record addresses.
+fn captured_entries(cap: &Capture, row: usize, name: &str) -> Vec<([u32; 32], Side)> {
+    let records: Vec<(u32, Side)> = std::iter::once(("heli_record".to_string(), Side::Heli))
+        .chain((0..4).map(|k| (format!("blade{k}_record"), Side::Blade(k))))
+        .map(|(c, side)| (cap.u32(row, &c), side))
+        .collect();
+    let n = cap.u32(row, &format!("{name}_contacts_n")) as usize;
+    let raw = cap.bytes(row, &format!("{name}_contacts"));
+    assert!(n <= raw.len() / 0x80, "tick {}: {name} holds {n} entries, more than were captured", cap.u32(row, "frame_counter"));
+    (0..n)
+        .map(|k| {
+            let words: [u32; 32] = std::array::from_fn(|w| u32::from_le_bytes(raw[k * 0x80 + w * 4..k * 0x80 + w * 4 + 4].try_into().unwrap()));
+            let other = words[0x74 / 4];
+            (words, records.iter().find(|r| r.0 == other && other != 0).map_or(Side::Neither, |r| r.1))
+        })
+        .collect()
+}
+
+/// The port's record `port` against the captured `name`'s on `row`, entry by entry, bit for bit: the
+/// kind, the ray's start, the contact on the body, the normal, the point, both levers, the surface
+/// and the other side (`side_of` names the port's). Each difference, as a line.
+///
+/// With `refilling`, the row was read while the next frame's collide pass refilled the record: it
+/// holds the first entries of `port` (the next frame's), their levers still zero as the search writes
+/// them, before the resolve measures them.
+fn entry_differences(cap: &Capture, row: usize, name: &str, port: &[game_sim::contact::Contact], side_of: impl Fn(Option<usize>) -> Side, refilling: bool) -> Vec<String> {
+    let want = captured_entries(cap, row, name);
+    let mut out = Vec::new();
+    if refilling && want.len() > port.len() {
+        out.push(format!("{name}: {} entries in the game, more than the port's {} after the next frame", want.len(), port.len()));
+    } else if !refilling && want.len() != port.len() {
+        out.push(format!("{name}: {} entries in the game, {} in the port", want.len(), port.len()));
+    }
+    for (k, ((w, side), c)) in want.iter().zip(port).enumerate() {
+        let quad = |off: usize| [w[off / 4], w[off / 4 + 1], w[off / 4 + 2], w[off / 4 + 3]];
+        let fields: [(&str, [u32; 4], [u32; 4]); 7] = [
+            ("from", quad(0x10), c.from.to_bits()),
+            ("on body", quad(0x20), c.on_body.to_bits()),
+            ("normal", quad(0x30), c.normal.to_bits()),
+            ("point", quad(0x40), c.point.to_bits()),
+            ("arm", quad(0x50), if refilling { [0; 4] } else { c.arm.to_bits() }),
+            ("other arm", quad(0x60), if refilling { [0; 4] } else { c.other_arm.to_bits() }),
+            ("kind, surface", [w[0], w[0x70 / 4], 0, 0], [c.kind, c.surface as u32, 0, 0]),
+        ];
+        for (what, game, ported) in fields {
+            // Only x, y, z of the quads are compared: the w lane is padding the writers leave as they find it.
+            let lanes = if what == "kind, surface" { 2 } else { 3 };
+            if game[..lanes] != ported[..lanes] {
+                out.push(format!("{name} entry {k} {what}: game {:08x?}, port {:08x?}", &game[..lanes], &ported[..lanes]));
+            }
+        }
+        if *side != side_of(c.other) {
+            out.push(format!("{name} entry {k}: other side {side:?} in the game, {:?} in the port", side_of(c.other)));
+        }
+    }
+    out
+}
+
+/// A frame's records as [`replay_wreck`] keeps them: the frame, the helicopter's, the four blades'.
+type ReplayedRecords = (u32, Vec<game_sim::contact::Contact>, [Vec<game_sim::contact::Contact>; 4]);
+
+/// Every record on `row` against the port's after its frame (`at`), or else as read part-way through
+/// the next frame's collide pass (`next`), which clears every record in turn and then refills each in
+/// turn, the helicopter's first. Read in the clearing ([`Refill::Clearing`]), the records before some
+/// cut are empty and the rest as `at` left them; read in the filling ([`Refill::Filling`]), the ones
+/// before it hold all of the next frame's entries, the one at it the first of them, each with its
+/// levers still zero, and the ones after it are empty. The differences when none holds; else where it
+/// was read, `None` when after the frame.
+fn records_read(cap: &Capture, row: usize, at: &ReplayedRecords, next: Option<&ReplayedRecords>) -> Result<Option<Refill>, Vec<String>> {
+    let names = ["heli", "blade0", "blade1", "blade2", "blade3"];
+    let record = |r: &ReplayedRecords, k: usize| -> Vec<game_sim::contact::Contact> { if k == 0 { r.1.clone() } else { r.2[k - 1].clone() } };
+    let side_of = |k: usize, o: Option<usize>| if k == 0 { o.map_or(Side::Neither, Side::Blade) } else if o == Some(0) { Side::Heli } else { Side::Neither };
+    let read = |k: usize, r: &ReplayedRecords, refilling: bool| entry_differences(cap, row, names[k], &record(r, k), |o| side_of(k, o), refilling);
+    let after: Vec<String> = (0..5).flat_map(|k| read(k, at, false)).collect();
+    if after.is_empty() {
+        return Ok(None);
+    }
+    let Some(next) = next else { return Err(after) };
+    let held = |k: usize| captured_entries(cap, row, names[k]).len();
+    let clearing = (1..5).find(|&cut| (0..cut).all(|k| held(k) == 0) && (cut..5).all(|k| read(k, at, false).is_empty())).map(Refill::Clearing);
+    let filling = || {
+        (0..5)
+            .find(|&cut| {
+                (0..cut).all(|k| held(k) == record(next, k).len() && read(k, next, true).is_empty())
+                    && read(cut, next, true).is_empty()
+                    && (cut + 1..5).all(|k| held(k) == 0)
+            })
+            .map(Refill::Filling)
+    };
+    clearing.or_else(filling).map(Some).ok_or(after)
+}
+
+/// Where in the next frame's collide pass a row's records were read ([`records_read`]): the record the
+/// clearing or the filling had reached (0 the helicopter's, then the blades').
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Refill {
+    Clearing(usize),
+    Filling(usize),
+}
+
+/// Every row's records of `capture` against [`replay_wreck`]'s ([`records_read`]), failing on the
+/// first that differs or names a blade on a blade's record: the frames whose captured helicopter
+/// record holds its own entry on a blade, and the rows read in the next frame's collide pass.
+fn records_bit_exact(capture: &str, seen: &Replayed) -> (Vec<u32>, Vec<(u32, Refill)>) {
+    let cap = Capture::load(&ctx(capture).expect("the capture"));
+    let mut met = Vec::new();
+    let mut refilled = Vec::new();
+    for (k, at) in seen.records.iter().enumerate() {
+        let row = cap.row_at(at.0);
+        let heli = captured_entries(&cap, row, "heli");
+        if heli.iter().any(|(w, side)| w[0] == 0 && matches!(side, Side::Blade(_))) {
+            met.push(at.0);
+        }
+        for b in 0..4 {
+            let on_blade = captured_entries(&cap, row, &format!("blade{b}")).iter().any(|(_, side)| matches!(side, Side::Blade(_)));
+            assert!(!on_blade, "tick {}: blade {b}'s record names another blade", at.0);
+        }
+        match records_read(&cap, row, at, seen.records.get(k + 1)) {
+            Ok(Some(cut)) => refilled.push((at.0, cut)),
+            Ok(None) => {}
+            Err(diffs) => panic!("tick {}: the records differ:\n{}", at.0, diffs.join("\n")),
+        }
+    }
+    (met, refilled)
+}
+
+/// **The helicopter's rays on a thrown blade** (R25): bit-exact to the capture's end, and the
+/// records with it. The climb is higher than [`FAST`]'s, so the helicopter comes down faster and
+/// slides further; on 1484, four frames after the wreck, its rays meet blade 3 lying in its path. The
+/// original's record then holds a kind-0 entry on blade 3 (its fifth, after four on the ground) and
+/// four kind-1 mirrors of blade 3's rays on the hull; blade 3's record holds the helicopter's mirror
+/// ahead of its own seven entries. Each of the port's five records equals the captured one, entry for
+/// entry and bit for bit (the kind, the ray's start, the contact on the body, the normal, the point,
+/// both levers, the surface and the other side named off the records' addresses), on every row:
+/// [`game_sim::kiowa::Collision::search_knocking`]'s entries and [`game_sim::kiowa::Blades::file_struck`]'s
+/// mirrors against the original's. Rows 1480..=1483 were read while the next frame's collide pass refilled
+/// the records (fewer entries, levers zero), as B23 found in C24's try5; each holds the first of the
+/// port's next-frame entries. 1484 is the only frame on which the original's helicopter files an entry
+/// on a blade, and the port's rays meet one on it alone. No blade's record names another blade.
+/// (Without [`game_sim::kiowa::Blades::file_struck`], the replay parts on 1484: speed 41.08868 in
+/// the game, 40.349094 in the port.)
+#[test]
+fn a_high_fast_wreck_meets_a_blade_bit_exact() {
+    let Some(seen) = replay_wreck(FAST_HIGH) else { return };
+    assert_eq!(seen.wrecks, vec![(1480, game_sim::biplane::CRASHED)], "the wrecks");
+    assert_eq!(seen.put_backs, vec![1631], "the put-backs");
+    assert_eq!(seen.late, Vec::<u32>::new(), "the rows read a frame late");
+    assert_eq!((seen.torn.clone(), seen.unread), (Vec::<u32>::new(), None), "the flying rows read in the next frame, the last row unread");
+    assert!(seen.offered > 0, "the slide never gathered the blades");
+    let (met, refilled) = records_bit_exact(FAST_HIGH, &seen);
+    let filling = |f: u32| (f, Refill::Filling(0));
+    assert_eq!(refilled, vec![filling(1480), filling(1481), filling(1482), filling(1483)], "the rows read in the next frame's collide pass");
+    assert_eq!(met, vec![1484], "frames whose captured helicopter record holds its own entry on a blade");
+    assert_eq!(seen.struck, met, "frames whose helicopter rays met a blade");
+    let (_, heli, blades) = &seen.records[seen.records.iter().position(|r| r.0 == 1484).unwrap()];
+    let pairs = |c: &[game_sim::contact::Contact]| c.iter().map(|c| (c.kind, c.other)).collect::<Vec<_>>();
+    assert_eq!(pairs(&heli[4..]), [(0, Some(3)), (1, Some(3)), (1, Some(3)), (1, Some(3)), (1, Some(3))], "1484's helicopter entries on blade 3");
+    assert_eq!(pairs(&blades[3][..1]), [(1, Some(0))], "1484's first entry on blade 3: the helicopter's mirror");
+    println!(
+        "the high fast wreck: 1205..={} bit-exact, wrecked on 1480, put back on 1631; blades offered on {} frames; the rays met blade 3 on 1484, as the original's; records bit-exact on {} rows, {:?} read mid-refill",
+        seen.last,
+        seen.offered,
+        seen.records.len(),
+        refilled
+    );
+}
+
+
+/// R25's capture of [`FAST`]'s tape again, with `watch/r25-kiowa-blades.toml`, to 1639.
+const FAST_AGAIN: &str = "capture/r25/fast1.csv";
+
+/// The fast wreck again (R25): bit-exact to 1639, as C24's capture of the same tape, and its records
+/// with it on every row. Its slide offers the helicopter's rays the blades and they meet none; its
+/// record holds the blades' mirrors on the hull on 1453 and 1454 and never an entry of its own on a
+/// blade. Nine rows were read inside the next frame's collide pass: in its clearing (1534 with only the
+/// helicopter's record cleared; 1523, 1538..=1540 and 1553 with all but blade 3's) or its filling
+/// (1442, 1443 and 1513, each still on the helicopter's record).
+#[test]
+fn a_fast_wreck_records_bit_exact() {
+    let Some(seen) = replay_wreck(FAST_AGAIN) else { return };
+    assert_eq!(seen.wrecks, vec![(1451, game_sim::biplane::CRASHED)], "the wrecks");
+    assert_eq!(seen.put_backs, vec![1602], "the put-backs");
+    assert_eq!(seen.late, Vec::<u32>::new(), "the rows read a frame late");
+    assert_eq!((seen.torn.clone(), seen.unread), (Vec::<u32>::new(), None), "the flying rows read in the next frame, the last row unread");
+    assert!(seen.offered > 0, "the slide never gathered the blades");
+    assert_eq!(seen.struck, Vec::<u32>::new(), "frames whose helicopter rays met a blade");
+    let (met, refilled) = records_bit_exact(FAST_AGAIN, &seen);
+    assert_eq!(met, Vec::<u32>::new(), "frames whose captured helicopter record holds its own entry on a blade");
+    let (fill, clear) = (|f: u32| (f, Refill::Filling(0)), |f: u32, k: usize| (f, Refill::Clearing(k)));
+    let want = vec![fill(1442), fill(1443), fill(1513), clear(1523, 4), clear(1534, 1), clear(1538, 4), clear(1539, 4), clear(1540, 4), clear(1553, 4)];
+    assert_eq!(refilled, want, "the rows read in the next frame's collide pass");
+    println!("the fast wreck again: 1205..={} bit-exact, records bit-exact on {} rows, {} read in the next frame's collide pass; blades offered on {} frames, none met", seen.last, seen.records.len(), refilled.len(), seen.offered);
 }
