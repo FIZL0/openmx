@@ -179,6 +179,25 @@ impl Scene {
     /// Read a `.scn`. Unknown sections and keys are ignored, the way the game's own INI reader ignores
     /// what the class asking does not claim.
     pub fn parse(bytes: &[u8]) -> Result<Scene, String> {
+        let (mut scene, activity) = Scene::read(bytes)?;
+        activity.apply(&mut scene);
+        Ok(scene)
+    }
+
+    /// Read a `.scn` keeping every collision shape, each with whether the Free Ride activity takes it
+    /// out of the world (F34). SLUS-21104 files a shape it takes out in the world all the same, its
+    /// "nearby" bit (`+0x45`) off: the gather lists it, no nearby search strikes it. The models are
+    /// [`Scene::parse`]'s.
+    pub fn parse_with_taken_out(bytes: &[u8]) -> Result<(Scene, Vec<bool>), String> {
+        let (mut scene, activity) = Scene::read(bytes)?;
+        let out = scene.collision.iter().map(|o| activity.takes_out(&o.file)).collect();
+        let collision = core::mem::take(&mut scene.collision);
+        activity.apply(&mut scene);
+        scene.collision = collision;
+        Ok((scene, out))
+    }
+
+    fn read(bytes: &[u8]) -> Result<(Scene, FreeRide), String> {
         let text = core::str::from_utf8(bytes).map_err(|e| format!("the scene is not text: {e}"))?;
         let mut scene = Scene::default();
         let mut section = String::new();
@@ -235,8 +254,7 @@ impl Scene {
         if scene.terrain_file.is_empty() {
             return Err("the scene names no terrain file".to_owned());
         }
-        activity.apply(&mut scene);
-        Ok(scene)
+        Ok((scene, activity))
     }
 
     fn flush(scene: &mut Scene, current: &mut Placement, collecting: &mut Option<bool>) {
@@ -379,11 +397,17 @@ impl FreeRide {
             at += 1;
             !self.hidden.contains(&(at - 1))
         });
+        scene.collision.retain(|o| !self.takes_out(&o.file));
+    }
+
+    /// Whether a collision shape of this name is out of the free ride's world: a hidden model's name
+    /// is in it and no start zone's is.
+    fn takes_out(&self, file: &str) -> bool {
         let named = |names: &[String], file: &str| {
             let file = squeezed(file);
             names.iter().any(|n| file.contains(n.as_str()))
         };
-        scene.collision.retain(|o| !named(&self.off, &o.file) || named(&self.on, &o.file));
+        named(&self.off, file) && !named(&self.on, file)
     }
 }
 
