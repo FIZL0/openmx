@@ -61,8 +61,15 @@ tests = []
 # it merges onto (`./kit check --since {base}`, K50), and `./kit check --all` runs everything once a day. Four full suites at once (three slots' `done` and the merge) held the machine at load ~100 and
 # made each one take an hour (user 2026-11-09: 'i dont want tests to take so long for quicker progress').
 oracle = "research/oracle.txt"
-data = ["research"]  # a file here reaches the tests that name its path or its directory
+data = ["research", "tools"]  # a file here reaches the tests that name its path or its directory
 ignore = ["*.md", "plan/*", "research/journal/*", ".github/*"]
+
+[select.reach]
+# The kit's own files reach the tests that run it (game-sim's demo runs `kit demo`), not every binary: a kit
+# commit that landed on main during a batch's gate made the runner test the whole batch again for an hour.
+# What runs the gate is the changed kit itself, so a broken selection shows in that very gate.
+"kit" = ['join("kit")']
+"ps2kit/*" = ['join("kit")']
 
 [display]
 # Every window a check's tests open goes to a private headless weston + Xwayland that ends with the check

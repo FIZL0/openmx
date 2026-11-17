@@ -133,7 +133,9 @@ def select(cwd: Path, shared: str, env: dict, sel: dict, why: list[str] | None =
     Cargo.toml, a tests/ helper or data) reaches the package and every workspace package that depends on
     it, dev-dependencies included. `oracle`'s edited lines reach the binaries whose sources name
     one of their names in quotes (`addr("name")`); a file under one of `data` reaches the binaries whose
-    sources name its path, or its directory below `data`. `ignore` globs reach nothing. Anything else (the
+    sources name its path, or its directory below `data`. A file a `reach` glob matches reaches the binaries
+    whose sources hold one of its words (the kit's own files: the tests that run `kit`). `ignore` globs reach
+    nothing. Anything else (the
     workspace's Cargo.toml or lock, the kit, the gate's own config) reaches everything. `shared` is the
     shared branch, or the commit a merge's gate starts from (`./kit check --since`); `why` gets the reason
     a None is everything."""
@@ -212,6 +214,8 @@ def select(cwd: Path, shared: str, env: dict, sel: dict, why: list[str] | None =
         elif (top := next((d for d in data if f.startswith(d)), None)) is not None:
             under = f[len(top):].split('/')[0]
             naming([f, f'{top}{under}', f'"{under}"'])
+        elif (words := next((w for g, w in sel.get('reach', {}).items() if fnmatch.fnmatch(f, g)), None)) is not None:
+            naming(list(words))
         elif (pkg := owner(path)) is not None:
             if (b := binary(pkg, path)) is not None:
                 out.part.setdefault(pkg, set()).add(b)
