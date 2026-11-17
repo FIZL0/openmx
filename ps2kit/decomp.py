@@ -346,8 +346,9 @@ REG = ('$zero', '$at', '$v0', '$v1', '$a0', '$a1', '$a2', '$a3', '$t0', '$t1', '
 
 # COP1 (op 0x11), fmt = S (0x10): the single-precision funcs that only the R5900 has. The accumulator ones
 # take no destination register — the result goes to ACC — which is exactly what generic disassemblers get
-# wrong, and `madda.s`/`madd.s` misread as `madd` (the integer one) has cost real time.
-COP1_R5900 = {0x16: 'rsqrt.s', 0x18: 'adda.s', 0x19: 'suba.s', 0x1a: 'mula.s', 0x1c: 'madd.s',
+# wrong, and `madda.s`/`madd.s` misread as `madd` (the integer one) has cost real time. `sqrt.s` is here
+# too: the R5900 reads its operand from ft, not fs, and llvm-mc refuses any word whose ft is not 0.
+COP1_R5900 = {0x04: 'sqrt.s', 0x16: 'rsqrt.s', 0x18: 'adda.s', 0x19: 'suba.s', 0x1a: 'mula.s', 0x1c: 'madd.s',
               0x1d: 'msub.s', 0x1e: 'madda.s', 0x1f: 'msuba.s', 0x28: 'max.s', 0x29: 'min.s'}
 COP1_ACC = {'adda.s', 'suba.s', 'mula.s', 'madda.s', 'msuba.s'}
 
@@ -420,6 +421,8 @@ def r5900(w: int) -> str | None:
         name = COP1_R5900[fn]
         if name in COP1_ACC:
             return f'{name:<9} $f{rd}, $f{rt}'                         # ACC = f(fs, ft); no fd
+        if name == 'sqrt.s':
+            return f'{name:<9} $f{sa}, $f{rt}'                         # fd = sqrt(ft); fs unused
         return f'{name:<9} $f{sa}, $f{rd}, $f{rt}'                     # fd, fs, ft
     if op == 0x1e:
         return f'{"lq":<9} {REG[rt]}, {simm}({REG[rs]})'
