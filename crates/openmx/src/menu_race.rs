@@ -9,7 +9,7 @@
 //! (P313 wires them in).
 
 use super::fame::{FameBook, FameTry, table_title};
-use super::results::{Board, FameMarks, HandOver, Records, Tip, tips_of};
+use super::results::{Board, FameMarks, HandOver, RaceTally, Records, Tip, tips_of};
 use super::{Act, Menu, Press, Screen};
 use ps2_float::F;
 
@@ -142,6 +142,8 @@ pub struct Results {
     pub league: bool,
     pub quitting: bool,
     pub after: Option<After>,
+    /// P358: what the race handed over for the stats commit Restart and Quit run on their way out.
+    pub tally: RaceTally,
 }
 
 /// The preload and clutch tip popup's two pages, preload first: each is shown when any player
@@ -227,6 +229,7 @@ impl Results {
             league: false,
             quitting: false,
             after: None,
+            tally: RaceTally::default(),
         }
     }
 
@@ -244,6 +247,7 @@ impl Results {
         }
         r.stage = if r.tips.is_empty() { Stage::Board } else { Stage::Tips };
         r.tip_page = if r.tips.iter().any(|t| t.preload) { TipPage::Preload } else { TipPage::Clutch };
+        r.tally = hand.tally.clone();
         r
     }
 
@@ -270,6 +274,14 @@ impl Results {
         self.after = Some(after);
         self.quitting = false;
         after != After::Next && self.next_stage()
+    }
+
+    /// P358: whether a button that leaves the results commits the race's statistics first, as the
+    /// original's Restart and Quit's yes do when no Hall of Fame mark is waiting. A mark waiting
+    /// goes to the Hall of Fame instead, and nothing on that way commits them; a league's Next goes
+    /// to the standings without them.
+    pub fn commits(&self, after: After) -> bool {
+        after != After::Next && !self.fame.waiting
     }
 
     /// Cross on the results screen: on to the next of its stages, `false` when it was the last.
@@ -476,6 +488,12 @@ impl Menu {
                     } else {
                         None
                     };
+                    if let Some(after) = pressed
+                        && r.commits(after)
+                        && self.race.records.commit_race(&r.tally)
+                    {
+                        self.race.records_changed = true;
+                    }
                     match pressed {
                         Some(after) if r.press(after) => r.fame_page(&self.race.fame),
                         Some(_) => return self.results_way_out(),

@@ -13,6 +13,9 @@
 //!   [`results::RiderRecord`], and `fame_menu_mark` against [`results::FameMarks`].
 //! * P335: the gate drop's race count (`race_drop`'s loop) over 20,000 fronts against
 //!   [`results::Records::count_race`].
+//! * P358: `profile_stat_add` stats 0 to 6 over 20,000 cases against [`results::RiderRecord::add_stat`],
+//!   and the results menu's stats commit, run whole, over 10,000 races against
+//!   [`results::Records::commit_race`].
 //!
 //! The records file reads back as it was written, and the tips are the popup's words.
 
@@ -25,7 +28,7 @@ mod results;
 use game_sim::race::{EndTip, LapCard};
 use ps2_float::{F, fpu};
 use ps2_oracle::{Ee, addr, game_or_skip, skip};
-use results::{Board, CardStats, FameMarks, Records, ResultCard, RiderRecord, Who};
+use results::{Board, CardStats, FameMarks, RaceTally, Records, ResultCard, RiderRecord, SeatTally, Who};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -418,6 +421,7 @@ fn the_race_and_win_counts_match_the_profiles_stat_add() {
             races: if small { p.below(5) as u16 } else { p.next() as u16 },
             wins: if small { p.below(5) as u16 } else { p.next() as u16 },
             win_rate: F(f32::from_bits(p.next() as u32)),
+            ..RiderRecord::default()
         };
         let stat = if p.below(2) == 0 { 9 } else { 10 };
         let amount = F(match p.below(5) {
@@ -464,6 +468,7 @@ fn the_race_count_matches_the_gate_drops() {
                 races: if small { p.below(5) as u16 } else { p.next() as u16 },
                 wins: if small { p.below(5) as u16 } else { p.next() as u16 },
                 win_rate: F(f32::from_bits(p.next() as u32)),
+                ..RiderRecord::default()
             };
         }
         let event = game_sim::race::ResultEvent {
@@ -512,6 +517,204 @@ fn the_race_count_matches_the_gate_drops() {
         if moved { counted += 1 } else { skipped += 1 }
     }
     assert!(counted > 8_000 && skipped > 4_000, "{counted} counted, {skipped} not");
+}
+
+/// P358: a record's race statistics where the profile keeps them (slot `slot` of the stats block).
+fn put_stats(ee: &mut Ee, slot: u32, r: &RiderRecord) {
+    ee.write(STATS + 0x114 + 2 * slot, 2, u128::from(r.play_time));
+    put_f(ee, STATS + 4 * slot, r.feet);
+    ee.write(STATS + 0x120 + 2 * slot, 2, u128::from(r.preloads));
+    ee.write(STATS + 0x12c + 2 * slot, 2, u128::from(r.clutches));
+    ee.write(STATS + 0x138 + 2 * slot, 2, u128::from(r.wrecks));
+    put_f(ee, STATS + 0x18 + 4 * slot, r.race_time);
+    ee.write(STATS + 0x168 + 2 * slot, 2, u128::from(r.races));
+    ee.write(STATS + 0x174 + 2 * slot, 2, u128::from(r.wins));
+    put_f(ee, STATS + 0x30 + 4 * slot, r.win_rate);
+}
+
+/// P358: the record's words as the profile holds them, floats as bits.
+fn got_stats(ee: &Ee, slot: u32) -> [u32; 9] {
+    [
+        u32::from(ee.u16_at(STATS + 0x114 + 2 * slot)),
+        ee.u32_at(STATS + 4 * slot),
+        u32::from(ee.u16_at(STATS + 0x120 + 2 * slot)),
+        u32::from(ee.u16_at(STATS + 0x12c + 2 * slot)),
+        u32::from(ee.u16_at(STATS + 0x138 + 2 * slot)),
+        ee.u32_at(STATS + 0x18 + 4 * slot),
+        u32::from(ee.u16_at(STATS + 0x168 + 2 * slot)),
+        u32::from(ee.u16_at(STATS + 0x174 + 2 * slot)),
+        ee.u32_at(STATS + 0x30 + 4 * slot),
+    ]
+}
+
+fn want_stats(r: &RiderRecord) -> [u32; 9] {
+    [
+        u32::from(r.play_time),
+        r.feet.0.to_bits(),
+        u32::from(r.preloads),
+        u32::from(r.clutches),
+        u32::from(r.wrecks),
+        r.race_time.0.to_bits(),
+        u32::from(r.races),
+        u32::from(r.wins),
+        r.win_rate.0.to_bits(),
+    ]
+}
+
+impl Pick {
+    /// A record with every word set: small counts, any 16 bits, any float bits, or a run's.
+    fn record(&mut self) -> RiderRecord {
+        let small = self.below(2) == 0;
+        let mut c = || if small { self.below(5) as u16 } else { self.next() as u16 };
+        let (races, wins, play_time, preloads, clutches, wrecks) = (c(), c(), c(), c(), c(), c());
+        let mut f = || F(if self.below(3) == 0 { f32::from_bits(self.next() as u32) } else { self.below(1 << 20) as f32 / 8.0 });
+        let (win_rate, feet, race_time) = (f(), f(), f());
+        RiderRecord { races, wins, win_rate, play_time, feet, preloads, clutches, wrecks, race_time }
+    }
+    /// An amount the stat add may be handed: any float, whole numbers either side of 16 bits,
+    /// fractions, a race's seconds or feet.
+    fn amount(&mut self) -> F {
+        F(match self.below(6) {
+            0 => f32::from_bits(self.next() as u32),
+            1 => self.below(200_000) as f32 - 100_000.0,
+            2 => self.below(400) as f32 / 7.0,
+            3 => [0.0, -0.0, 65535.0, 65536.0, 65536.5, -1.0, 2.147_483_6e9, -2.147_483_6e9, 1.0e10][self.below(9) as usize],
+            4 => self.below(1 << 24) as f32 / 30.0,
+            _ => 1.0,
+        })
+    }
+}
+
+/// P358: `profile_stat_add` stats 0 to 5 (and 6, which adds nothing) over 20,000 records, slots and
+/// amounts against [`RiderRecord::add_stat`]: every word of the slot after the add.
+#[test]
+fn the_race_stats_match_the_profiles_stat_add() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let add = match addr("profile_stat_add") {
+        Ok(a) => a,
+        Err(why) => return skip(&why),
+    };
+    let mut p = Pick(0x7d24_c85e_09b3_a61f);
+    let mut seen = [0; 7];
+    for case in 0..20_000 {
+        let slot = p.below(6) as u32;
+        let mut rec = p.record();
+        let stat = p.below(7) as u32;
+        let amount = p.amount();
+        zero(&mut ee, STATS, 0x200);
+        put_stats(&mut ee, slot, &rec);
+        ee.call(add, &[u64::from(STATS), u64::from(stat), u64::from(slot)], &[amount.0], BUDGET);
+        let before = rec;
+        rec.add_stat(stat, amount);
+        assert_eq!(got_stats(&ee, slot), want_stats(&rec), "case {case}: stat {stat} by {amount:?} on {before:?}");
+        seen[stat as usize] += usize::from(want_stats(&rec) != want_stats(&before));
+    }
+    assert!(seen[..6].iter().all(|&n| n > 2_000) && seen[6] == 0, "{seen:?}");
+}
+
+/// P358: the results menu's stats commit (`results_stats_commit`, run whole: the interface lookups,
+/// the player list and the items' interfaces hooked, with the real `profile_stat_add`) over 10,000
+/// races — activities either side of 2, no player to a dozen, any clock, feet and counts, player 0's
+/// profile on any slot — against [`Records::commit_race`]: every word of every slot.
+#[test]
+fn the_stats_commit_matches_the_results_menus_commit() {
+    let Some(mut ee) = game_or_skip() else { return };
+    let [commit, score_commit, bit, id, app_pointer] =
+        match addrs(["results_stats_commit", "results_score_commit", "name_bit", "interface_id", "app_pointer"]) {
+            Ok(a) => a,
+            Err(why) => return skip(&why),
+        };
+    const UI_BIT: u32 = 0x4000;
+    const TRACKER_ID: u32 = 0x1d;
+    const EVENT: u32 = FRONT + 0x100;
+    const SCENE: u32 = FRONT + 0x200;
+    const LIST_VT: u32 = FRONT + 0x300;
+    const HOOK_ITEM: u32 = 0x018a_2000;
+    const HOOK_IFACE: u32 = 0x018a_3000;
+    const IFACES: u32 = 0x018e_0000;
+    ee.hooks.insert(bit, Box::new(|ee| ee.set(2, u64::from(UI_BIT))));
+    ee.hooks.insert(id, Box::new(|ee| {
+        let out = ee.r(6) as u32;
+        ee.set_u32(out, TRACKER_ID);
+    }));
+    ee.hooks.insert(score_commit, Box::new(|_| {}));
+    ee.hooks.insert(HOOK_ITEM, Box::new(|ee| {
+        assert_eq!((ee.r(4) as u32, ee.r(5) as u32), (LIST, 1));
+        ee.set(2, u64::from(ITEMS + 0x100 * ee.r(6) as u32));
+    }));
+    ee.hooks.insert(HOOK_IFACE, Box::new(|ee| {
+        assert_eq!(ee.r(5) as u32, UI_BIT);
+        ee.set(2, u64::from(IFACES + (ee.r(4) as u32 - ITEMS)));
+    }));
+    ee.hooks.insert(HOOK_TRACKER, Box::new(|ee| {
+        assert_eq!(ee.r(5) as u32, TRACKER_ID);
+        let k = (ee.r(4) as u32 - OWNERS - 0x80) / 0x100;
+        ee.set(2, u64::from(TRACKERS + k * 0x100));
+    }));
+    ee.set_u32(app_pointer, APP);
+    let mut p = Pick(0x3e91_a75c_d20b_4f68);
+    let (mut counted, mut raced) = (0, 0);
+    for case in 0..10_000 {
+        let mut records = Records::default();
+        for slot in 0..6 {
+            *records.seat(slot) = p.record();
+        }
+        let players = if p.below(8) == 0 { 0 } else { 1 + p.below(12) as usize };
+        let n = |p: &mut Pick| match p.below(6) {
+            0 => p.next() as i32,
+            1 => -(p.below(5) as i32),
+            _ => p.below(40) as i32,
+        };
+        let tally = RaceTally {
+            activity: if p.below(4) == 0 { p.below(6) as i32 - 1 } else { 2 },
+            profile: Some(p.below(6) as usize),
+            clock: p.amount(),
+            seats: (0..players).map(|_| SeatTally { feet: p.amount(), preloads: n(&mut p), clutches: n(&mut p), wrecks: n(&mut p) }).collect(),
+        };
+        zero(&mut ee, APP, 0x1000);
+        zero(&mut ee, FRONT, 0x400);
+        zero(&mut ee, STATS, 0x200);
+        ee.set_u32(APP + 0x3d4, FRONT);
+        ee.set_u32(APP + 0x3e4, STATS);
+        ee.set_u32(APP + 0x3cc, SCENE);
+        ee.set_u32(APP + 0x3f4, PROFILES);
+        ee.set_u32(PROFILES + 0xcc, tally.profile.unwrap() as u32);
+        ee.set_u32(FRONT + 0xc, EVENT);
+        ee.set_u32(EVENT + 4, tally.activity as u32);
+        ee.write(EVENT + 0x114, 1, players as u128);
+        ee.set_u32(SCENE + 0x30, SCENE + 0x40);
+        ee.set_u32(SCENE + 0x40 + 0x30, LIST);
+        ee.set_u32(LIST + 8, LIST_VT);
+        ee.set_u32(LIST_VT + 0x84, HOOK_ITEM);
+        ee.set_u32(MGR + 0xf8, tally.clock.0.to_bits());
+        for (k, s) in tally.seats.iter().enumerate() {
+            let k = k as u32;
+            let (item, iface, card, owner, tracker) = (ITEMS + 0x100 * k, IFACES + 0x100 * k, CARDS + 0x200 * k, OWNERS + 0x100 * k, TRACKERS + 0x100 * k);
+            ee.set_u32(item + 8, ITEM_VT);
+            ee.set_u32(ITEM_VT + 0xa4, HOOK_IFACE);
+            ee.set_u32(iface + 0x14, card);
+            ee.set_u32(iface + 0x18, MGR);
+            ee.set_u32(card + 4, owner);
+            ee.set_u32(owner + 0x24, owner + 0x80);
+            ee.set_u32(owner + 0x80 + 0x48, ITEM_VT + 0x100);
+            ee.set_u32(ITEM_VT + 0x100 + 0x40, HOOK_TRACKER);
+            put_f(&mut ee, tracker + 0x78, s.feet);
+            ee.set_u32(tracker + 0x38, s.preloads as u32);
+            ee.set_u32(tracker + 0x3c, s.clutches as u32);
+            ee.set_u32(tracker + 0x34, s.wrecks as u32);
+        }
+        for (slot, r) in records.seats.iter().enumerate() {
+            put_stats(&mut ee, slot as u32, r);
+        }
+        ee.call(commit, &[], &[], BUDGET);
+        let moved = records.commit_race(&tally);
+        for (slot, r) in records.seats.iter().enumerate() {
+            assert_eq!(got_stats(&ee, slot as u32), want_stats(r), "case {case}: slot {slot} of {tally:?}");
+        }
+        counted += usize::from(moved);
+        raced += usize::from(moved && tally.activity == 2);
+    }
+    assert!(counted > 7_000 && raced > 5_000 && counted - raced > 1_000, "{counted} committed, {raced} raced");
 }
 
 #[test]
@@ -572,9 +775,18 @@ fn the_records_read_back_as_they_were_written() {
     r.seat(2).add_wins(F(2.0));
     assert_eq!(r.seats.len(), 3);
     assert_eq!(r.seats[0].win_rate.0.to_bits(), fpu::div(100.0, 3.0).to_bits());
+    // P358: the race statistics read back too, the floats bit for bit.
+    let tally = RaceTally { activity: 2, profile: Some(2), clock: F(95.3), seats: vec![SeatTally { feet: F(8123.456), preloads: 4, clutches: 9, wrecks: 2 }] };
+    assert!(r.commit_race(&tally));
+    assert!(!r.commit_race(&RaceTally { profile: None, ..tally.clone() }));
+    assert_eq!((r.seats[2].play_time, r.seats[2].preloads, r.seats[2].clutches, r.seats[2].wrecks), (95, 4, 9, 2));
+    assert_eq!((r.seats[2].feet, r.seats[2].race_time), (F(8123.456), F(95.3)));
     let text = r.text();
     assert_eq!(Records::parse(&text), r);
-    assert_eq!(Records::parse(&format!("junk\nseat.x = 1 2 3\nseat.1 = 1\n{text}")), r);
+    assert_eq!(Records::parse(&format!("junk\nseat.x = 1 2 3\nseat.1 = 1\nseat.0 = 1 2 3 4\n{text}")), r);
+    // A line from before P358 holds the first three alone.
+    let old = Records::parse("seat.0 = 3 1 42055555\n");
+    assert_eq!(old.seats[0], RiderRecord { races: 3, wins: 1, win_rate: F(f32::from_bits(0x4205_5555)), ..RiderRecord::default() });
     let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("p330-records");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();

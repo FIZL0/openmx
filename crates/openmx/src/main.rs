@@ -8623,6 +8623,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let mut race_watch = race_start::Watch::default();
     // P335: whether seat 0's race gate stood open at the last look, for the race its drop counts.
     let mut race_gate_open: Option<bool> = None;
+    // P358: the race's score manager clock, the seconds since the drop, for the stats commit.
+    let mut race_clock = F::ZERO;
     let mut escape = held(window, key::ESCAPE);
     let mut perf = perf::Perf::new(args.fps);
     let mut hushed = false;
@@ -10308,6 +10310,16 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             let event = game_sim::race::ResultEvent { activity: 2, ..Default::default() };
             front.menu.race_gate_dropped(&event, &[Some(0)]);
         }
+        if simulated && race_gate_open == Some(false) && gate_open == Some(true) {
+            race_clock = F::ZERO;
+        }
+        if simulated && gate_open == Some(true) {
+            race_clock = race_clock + dt;
+            // The manager runs on through the outro: the commit reads its clock as the ride is left.
+            if let Some(hand) = front.as_deref_mut().and_then(|f| f.menu.race.hand.as_mut()) {
+                hand.tally.clock = race_clock;
+            }
+        }
         if simulated {
             race_gate_open = gate_open;
         }
@@ -10360,7 +10372,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                             let players = world.seats[0].sim.players();
                             let mut seats = vec![(0, name)];
                             seats.extend((1..world.seats.len()).map(|k| (race_player(k, players), front.menu.racer_name(k))));
-                            front.menu.race_ended(race_start::hand_over_seats(laps, laps_run, &seats, &race_watch.overs));
+                            let mut hand = race_start::hand_over_seats(laps, laps_run, &seats, &race_watch.overs);
+                            hand.tally.clock = race_clock;
+                            front.menu.race_ended(hand);
                         }
                     }
                 }

@@ -11969,6 +11969,28 @@ tip_popup_arm               boot 0x0029abc0 (popup, 1) +0xb4 = any of +0xc0/+0xc
 #   vt 0x00455cd0): 0x0029e400 on yes: HOF waiting -> nothing more, else stats commit and app+0x404 = 2
 #   (to the front end); 0x0029e550 on yes: hof +0xb8 = 1, "HOFMenu"; both clear +0x94. Which dialog
 #   notice calls which of the two was not traced.
+# P358 — the results menu's stats commit (menu::results::{RiderRecord::add_stat, Records::commit_race};
+#   tests/race_results.rs). Journal: research/journal/2026-11-17-p358-race-stats-commit.
+results_stats_commit        boot 0x0029d1c0 () the commit Restart (0x0029cde0) and Quit's yes (0x0029e400,
+#                                           0x0029e600) run when no Hall of Fame mark waits: slot =
+#                                           (app+0x3f4)[0] +0xcc (player 0's, for every player);
+#                                           MXUIInterface bit (name_bit), StatisticsTracker id
+#                                           (interface_id); results_score_commit(app); then for k <
+#                                           event +0x114: item = list(app+0x3cc +0x30 +0x30) vt+0x84(1,
+#                                           k), iface = item vt+0xa4(bit), tracker = (iface+0x14 card
+#                                           +4 owner +0x24 vehicle) vt(+0x48)+0x40(id); event +4 == 2 ->
+#                                           stat 5 += mgr(iface+0x18) +0xf8 clock; stat 0 += clock, 1
+#                                           += tracker +0x78 (odometer), 2/3/4 += cvt.s.w of tracker
+#                                           +0x38 preloads / +0x3c clutches / +0x34 wrecks.
+results_score_commit        boot 0x002041a0 (app) for k < event +0x114 with (app+0x3f4)[k]: profile +0xc0
+#                                           += cvt.w.s(card(*(RaceStatusVehicleInterface item - 0x24))
+#                                           +0xdc banked total) through the identity 0x0036ea50. Not
+#                                           ported (P358 follow-up).
+#   profile_stat_add cases (stats +slot*2 u16 / +slot*4 f32; 6 slots): 0 u16 +0x114 += cvt.w.s
+#   (play time; the stats page's STR_TOTAL_GAMEPLAY_HOURS, returns 0), 1 f32 +0 += (feet; MILES/KILOMETERS
+#   DRIVEN), 2 u16 +0x120 (PRELOADS), 3 +0x12c (CLUTCHES), 4 +0x138 (WRECKS), 5 f32 +0x18 (HOURS_RACING),
+#   6 nothing, 7 u16 +0x150 and +0x144, 8 +0x15c and +0x144 (laps), 9 races, 10 wins. The stats page
+#   0x003b7030 reads them back with profile_stat_get 0x0037b4d0 (u16 as cvt.s.w, unsigned).
 # P330 — the results menu's own code, read (crates/openmx/src/menu_results.rs; tests/race_results.rs).
 race_results_sort           boot 0x0029b720 (record list, key) the insertion sort of the list (count +0,
 #                                           records +4.., key +0x2c) on record word key+1: skipped if

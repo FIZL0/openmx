@@ -329,7 +329,7 @@ pub fn hand_over(laps: &race::Laps, laps_run: u8, player: &str, overs: &[race::R
 /// P350: [`hand_over`] with several local seats' humans: `players` is each seat's race player
 /// ([`Laps`](race::Laps)' card player) and name, seat 0 first; every other card is the computer's.
 pub fn hand_over_seats(laps: &race::Laps, laps_run: u8, players: &[(usize, String)], overs: &[race::RaceOver]) -> crate::menu::results::HandOver {
-    use crate::menu::results::{CardStats, HandOver, ResultCard, Who};
+    use crate::menu::results::{CardStats, HandOver, RaceTally, ResultCard, SeatTally, Who};
     let seat_of = |player: usize| players.iter().position(|p| p.0 == player);
     let cards = laps
         .cards
@@ -361,7 +361,16 @@ pub fn hand_over_seats(laps: &race::Laps, laps_run: u8, players: &[(usize, Strin
         .collect();
     let event = race::ResultEvent { activity: 2, laps: laps_run, ..race::ResultEvent::default() };
     let end = Supercross::new().race_end(&seats, &event, false);
-    HandOver { cards, end, overs: overs.to_vec() }
+    // P358: each player seat's tally for the stats commit, seat 0 first, and seat 0's profile; the
+    // shell sets the manager's clock. The feet are the card's own odometer: the tracker's is not
+    // ported.
+    let tally_seats = players
+        .iter()
+        .filter_map(|(player, _)| laps.cards.iter().find(|e| e.player == *player))
+        .map(|e| SeatTally { feet: e.card.odometer, preloads: e.stats.preloads, clutches: e.stats.clutches, wrecks: e.stats.wrecks })
+        .collect();
+    let tally = RaceTally { activity: event.activity, profile: Some(0), clock: F::ZERO, seats: tally_seats };
+    HandOver { cards, end, overs: overs.to_vec(), tally }
 }
 
 /// P313b: how long the drop gate takes to swing down, in seconds. The race's drop hands the gate

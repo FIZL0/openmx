@@ -10451,6 +10451,7 @@ fn a_race_end_shows_its_tips_board_and_hall_of_fame_and_counts_the_win() {
         ],
         end: RaceEnd { results: true, tips: vec![EndTip { seat: 0, no_preload: true, no_clutch: false }], ..RaceEnd::default() },
         overs: vec![RaceOver { fireworks: true, win: Some(0), fame: vec![FameEntry { seat: 0, track: 0, table: 0 }] }],
+        tally: Default::default(),
     };
     m.race_ended(hand);
     assert!(m.take_records_changed());
@@ -10514,7 +10515,7 @@ fn the_results_menu_has_restart_and_quit_and_the_tips_come_page_by_page() {
         tap(m, r, Control::Cross);
         tap(m, r, Control::Cross);
         let cards = vec![ResultCard::take(&LapCard { place: 1, ..LapCard::default() }, Who::Player("Me".into()), &CardStats::default())];
-        m.race_ended(HandOver { cards, end: RaceEnd { results: true, tips, ..RaceEnd::default() }, overs: Vec::new() });
+        m.race_ended(HandOver { cards, end: RaceEnd { results: true, tips, ..RaceEnd::default() }, overs: Vec::new(), tally: Default::default() });
         m.main();
         assert!(m.race_left());
     };
@@ -10559,6 +10560,63 @@ fn the_results_menu_has_restart_and_quit_and_the_tips_come_page_by_page() {
     let acts = tap(&mut m, &mut r, Control::Cross);
     assert!(!acts.iter().any(|a| matches!(a, Act::Ride(_))), "{acts:?}");
     assert_eq!(m.screen(), Some(Screen::Main));
+}
+
+/// P358: Restart and Quit's yes commit the race's statistics to player 0's record before they leave;
+/// Quit's no, a waiting Hall of Fame mark and a league's Next do not.
+#[test]
+fn the_results_buttons_commit_the_race_statistics() {
+    use game_sim::race::{FameEntry, LapCard, RaceEnd, RaceOver};
+    use menu::results::{CardStats, HandOver, RaceTally, ResultCard, SeatTally, Who};
+    use ps2_float::F;
+    let (mut m, mut r) = fresh();
+    let tally = RaceTally { activity: 2, profile: Some(0), clock: F(60.0), seats: vec![SeatTally { feet: F(1000.0), preloads: 2, clutches: 3, wrecks: 1 }] };
+    let mut to_results = |m: &mut Menu, r: &mut Reader, fame: bool, league: bool| {
+        main_to(m, r, "Race");
+        tap(m, r, Control::Cross);
+        tap(m, r, Control::Cross);
+        let cards = vec![ResultCard::take(&LapCard { place: 1, ..LapCard::default() }, Who::Player("Me".into()), &CardStats::default())];
+        let overs = if fame { vec![RaceOver { fame: vec![FameEntry { seat: 0, track: 0, table: 0 }], ..RaceOver::default() }] } else { Vec::new() };
+        m.race_ended(HandOver { cards, end: RaceEnd { results: true, ..RaceEnd::default() }, overs, tally: tally.clone() });
+        m.main();
+        assert!(m.race_left());
+        m.race.results.as_mut().unwrap().league = league;
+        m.take_records_changed();
+    };
+    let stats = |m: &Menu| m.race.records.seats.first().map(|s| (s.play_time, s.feet, s.preloads, s.clutches, s.wrecks, s.race_time));
+    to_results(&mut m, &mut r, false, false);
+    let acts = tap(&mut m, &mut r, Control::Cross);
+    assert!(acts.contains(&Act::Ride("sx01".into())), "{acts:?}");
+    assert!(m.take_records_changed());
+    assert_eq!(stats(&m), Some((60, F(1000.0), 2, 3, 1, F(60.0))));
+    // The restarted race left at once: its stand-in results, left by Cross.
+    assert!(m.race_left());
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Main));
+    assert!(!m.take_records_changed());
+    // Quit's no commits nothing; its yes does.
+    to_results(&mut m, &mut r, false, false);
+    tap(&mut m, &mut r, Control::Triangle);
+    tap(&mut m, &mut r, Control::Circle);
+    assert!(!m.take_records_changed());
+    tap(&mut m, &mut r, Control::Triangle);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Main));
+    assert!(m.take_records_changed());
+    assert_eq!(stats(&m), Some((120, F(2000.0), 4, 6, 2, F(120.0))));
+    // A Hall of Fame mark waiting: Restart goes there, and nothing commits.
+    to_results(&mut m, &mut r, true, false);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.results().stage, menu::race::Stage::Fame);
+    assert!(!m.take_records_changed());
+    m.race.results = None;
+    m.main();
+    // A league's Next goes on without them.
+    to_results(&mut m, &mut r, false, true);
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.screen(), Some(Screen::Main));
+    assert!(!m.take_records_changed());
+    assert_eq!(stats(&m), Some((120, F(2000.0), 4, 6, 2, F(120.0))));
 }
 
 /// A Free Ride after a race is no race (P327), and a race whose load is cancelled goes back to its

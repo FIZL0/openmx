@@ -317,12 +317,20 @@ impl FameMarks {
     }
 }
 
-/// A rider's record as the profile keeps it: races, wins and the win percentage.
+/// A rider's record as the profile keeps it: races, wins and the win percentage, and the race
+/// statistics the results menu commits on its way out (P358): play time in whole seconds (stat 0),
+/// feet ridden (1), preloads (2), clutch pulls (3), wrecks (4) and seconds raced (5).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct RiderRecord {
     pub races: u16,
     pub wins: u16,
     pub win_rate: F,
+    pub play_time: u16,
+    pub feet: F,
+    pub preloads: u16,
+    pub clutches: u16,
+    pub wrecks: u16,
+    pub race_time: F,
 }
 
 impl RiderRecord {
@@ -347,6 +355,44 @@ impl RiderRecord {
         self.races = self.races.wrapping_add(fpu::to_i32(amount.0) as u16);
         self.rate();
     }
+
+    /// P358: one of the race statistics counted up by `amount`, as the profile's stat add does:
+    /// the counts (stats 0, 2, 3, 4) by `amount` cut to a whole number and kept in 16 bits, feet
+    /// ridden and seconds raced (1, 5) by `amount` itself. Any other stat is not one of these.
+    pub fn add_stat(&mut self, stat: u32, amount: F) {
+        let whole = fpu::to_i32(amount.0) as u16;
+        match stat {
+            0 => self.play_time = self.play_time.wrapping_add(whole),
+            1 => self.feet = F(fpu::add(self.feet.0, amount.0)),
+            2 => self.preloads = self.preloads.wrapping_add(whole),
+            3 => self.clutches = self.clutches.wrapping_add(whole),
+            4 => self.wrecks = self.wrecks.wrapping_add(whole),
+            5 => self.race_time = F(fpu::add(self.race_time.0, amount.0)),
+            _ => {}
+        }
+    }
+}
+
+/// What the results menu's stats commit reads of a race (P358): the event's activity (only a
+/// single race, 2, counts seconds raced), the profile slot of player 0 — which the commit counts
+/// every player in — the score manager's clock, the seconds it has run, and each player seat's
+/// tally, seat 0 first.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RaceTally {
+    pub activity: i32,
+    pub profile: Option<usize>,
+    pub clock: F,
+    pub seats: Vec<SeatTally>,
+}
+
+/// One player's words the stats commit reads from their statistics tracker: feet ridden (`+0x78`),
+/// preloads (`+0x38`), clutch pulls (`+0x3c`) and wrecks (`+0x34`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SeatTally {
+    pub feet: F,
+    pub preloads: i32,
+    pub clutches: i32,
+    pub wrecks: i32,
 }
 
 /// The riders' records, one per seat, kept in `records.txt`.
@@ -381,12 +427,48 @@ impl Records {
         moved
     }
 
-    /// `seat.N = races wins rate` a line, the rate as its float's bits so it reads back exactly.
+    /// P358: the results menu's stats commit, as Restart and Quit's yes run it on their way out of
+    /// a race: for each player seat, seconds raced (a single race only), then play time, feet
+    /// ridden, preloads, clutch pulls and wrecks, every seat's counted in player 0's profile slot.
+    /// No profile for player 0: nothing. Whether any record moved.
+    pub fn commit_race(&mut self, tally: &RaceTally) -> bool {
+        let Some(slot) = tally.profile else { return false };
+        let n = |v: i32| F(fpu::from_i32(v));
+        for s in &tally.seats {
+            let r = self.seat(slot);
+            if tally.activity == 2 {
+                r.add_stat(5, tally.clock);
+            }
+            r.add_stat(0, tally.clock);
+            r.add_stat(1, s.feet);
+            r.add_stat(2, n(s.preloads));
+            r.add_stat(3, n(s.clutches));
+            r.add_stat(4, n(s.wrecks));
+        }
+        !tally.seats.is_empty()
+    }
+
+    /// `seat.N = races wins rate play feet preloads clutches wrecks raced` a line, the floats as
+    /// their bits so they read back exactly. A line of the first three alone (before P358) reads
+    /// with the rest 0.
     pub fn text(&self) -> String {
         self.seats
             .iter()
             .enumerate()
-            .map(|(k, r)| format!("seat.{k} = {} {} {:08x}\n", r.races, r.wins, r.win_rate.0.to_bits()))
+            .map(|(k, r)| {
+                format!(
+                    "seat.{k} = {} {} {:08x} {} {:08x} {} {} {} {:08x}\n",
+                    r.races,
+                    r.wins,
+                    r.win_rate.0.to_bits(),
+                    r.play_time,
+                    r.feet.0.to_bits(),
+                    r.preloads,
+                    r.clutches,
+                    r.wrecks,
+                    r.race_time.0.to_bits()
+                )
+            })
             .collect()
     }
 
@@ -396,11 +478,21 @@ impl Records {
             let Some((key, value)) = line.split_once('=') else { continue };
             let Some(k) = key.trim().strip_prefix("seat.").and_then(|k| k.parse::<usize>().ok()).filter(|&k| k < 16) else { continue };
             let w: Vec<&str> = value.split_whitespace().collect();
-            if let [races, wins, rate] = w[..]
-                && let (Ok(races), Ok(wins), Ok(rate)) = (races.parse(), wins.parse(), u32::from_str_radix(rate, 16))
-            {
-                *out.seat(k) = RiderRecord { races, wins, win_rate: F(f32::from_bits(rate)) };
+            let bits = |s: &str| u32::from_str_radix(s, 16).ok().map(|b| F(f32::from_bits(b)));
+            let Some(([races, wins, rate], rest)) = w.split_first_chunk::<3>() else { continue };
+            let (Ok(races), Ok(wins), Some(win_rate)) = (races.parse(), wins.parse(), bits(rate)) else { continue };
+            let mut r = RiderRecord { races, wins, win_rate, ..RiderRecord::default() };
+            if let [play, feet, preloads, clutches, wrecks, raced] = rest[..] {
+                let (Ok(play_time), Some(feet), Ok(preloads), Ok(clutches), Ok(wrecks), Some(race_time)) =
+                    (play.parse(), bits(feet), preloads.parse(), clutches.parse(), wrecks.parse(), bits(raced))
+                else {
+                    continue;
+                };
+                r = RiderRecord { play_time, feet, preloads, clutches, wrecks, race_time, ..r };
+            } else if !rest.is_empty() {
+                continue;
             }
+            *out.seat(k) = r;
         }
         out
     }
@@ -424,4 +516,6 @@ pub struct HandOver {
     pub cards: Vec<ResultCard>,
     pub end: RaceEnd,
     pub overs: Vec<RaceOver>,
+    /// P358: what the stats commit on the way out of the results counts.
+    pub tally: RaceTally,
 }
