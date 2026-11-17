@@ -259,6 +259,18 @@ fn strikes_of(set: &PropSet, c: usize, k: usize, facets: &mut [Option<Vec<Facet>
 /// is filed at the end, searched at once by `own` (its collection, its object: the terrain and the
 /// scene, as [`Collection::search_object`]) and walked in its turn.
 pub fn strike_props(set: &mut PropSet, own: &mut dyn FnMut(&mut PropSet, usize, usize)) {
+    let order = set.node_order();
+    strike_props_from(set, order, own);
+}
+
+/// [`strike_props`]' walk from the objects `late` filed at the node list's end, in that order (B34b):
+/// a vehicle's strike put on in the props' pass ([`PropSet::strike_in`]) files them after every object
+/// the pass walked, so the walk reaches them, and what their rays file, last.
+pub(crate) fn strike_props_late(set: &mut PropSet, late: Vec<(usize, usize)>, own: &mut dyn FnMut(&mut PropSet, usize, usize)) {
+    strike_props_from(set, late, own);
+}
+
+fn strike_props_from(set: &mut PropSet, mut order: Vec<(usize, usize)>, own: &mut dyn FnMut(&mut PropSet, usize, usize)) {
     let total: usize = set.collections.iter().map(|c| c.objects.len()).sum();
     if set.tables.is_none() || total < 2 {
         return;
@@ -266,7 +278,6 @@ pub fn strike_props(set: &mut PropSet, own: &mut dyn FnMut(&mut PropSet, usize, 
     let mut facets: Vec<Option<Vec<Facet>>> = (0..total).map(|_| None).collect();
     // How many mirrors this pass put at the head of each list.
     let mut heads = vec![0usize; total];
-    let mut order = set.node_order();
     let mut i = 0;
     while i < order.len() {
         let (c, k) = order[i];

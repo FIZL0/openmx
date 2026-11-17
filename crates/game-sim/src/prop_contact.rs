@@ -322,11 +322,13 @@ impl PropSet {
     /// the striker's search sets them. Answers each struck body as the bike's resolve pushes it, in
     /// the strike's order.
     pub fn strike(&mut self, strike: &Strike) -> Vec<Pushed> {
-        self.strike_then(strike, &mut |set, c, o| {
+        self.strike_then(strike, &mut |set, fresh| {
             // Filed behind the bike, it searches in this pass too: heard only (B28) where the strike
             // is not put on in the pass ([`PropSet::strike_in`] searches it).
-            let rays = std::sync::Arc::clone(&set.rays);
-            set.collections[c].hear_filed_by_strike(o, &rays[c]);
+            for &(c, o) in fresh {
+                let rays = std::sync::Arc::clone(&set.rays);
+                set.collections[c].hear_filed_by_strike(o, &rays[c]);
+            }
         })
     }
 
@@ -335,15 +337,20 @@ impl PropSet {
     /// movers in `movers`), as the original's node walk reaches it at the list's end, behind the
     /// bike: its terrain, scene and bike-frame entries go on its list after the strike's mirrors, and
     /// its probe's mirrors on the striking bike's frame (B29) go on `strike`'s entries after the
-    /// bike's own and the earlier props'. A strike that is not a riding bike's ([`Strike::by`]) is
+    /// bike's own and the earlier props'. Then the late props' rays strike the other props
+    /// ([`crate::prop_props::strike_props_late`], B34b), as the walk's do: what they file is searched
+    /// and walked after them. A strike that is not a riding bike's ([`Strike::by`]) is
     /// [`PropSet::strike`].
     pub fn strike_in(&mut self, strike: &mut Strike, dt: F, world: &mut dyn crate::world::World, movers: &mut crate::prop_set::PropMovers) -> Vec<Pushed> {
         let Some((me, first)) = strike.by else { return self.strike(strike) };
         let mut late = Vec::new();
-        let pushed = self.strike_then(strike, &mut |set, c, o| {
-            set.stamp_filed();
-            set.search_late(c, o, dt, world, &[], movers, &mut []);
-            late.push((c, o));
+        let pushed = self.strike_then(strike, &mut |set, fresh| {
+            for &(c, o) in fresh {
+                set.stamp_filed();
+                set.search_late(c, o, dt, world, &[], movers, &mut []);
+                late.push((c, o));
+            }
+            crate::prop_props::strike_props_late(set, fresh.to_vec(), &mut |set, c, k| set.search_late(c, k, dt, world, &[], movers, &mut []));
         });
         for (c, o) in late {
             let Some(at) = strike.struck.iter().position(|s| (s.0, s.1) == (c, o)) else { continue };
@@ -357,17 +364,15 @@ impl PropSet {
     }
 
     /// [`PropSet::strike`]'s work: every struck body woken first, as the striker's search wakes them,
-    /// then `filed` for each the strike filed (in the strike's order, the order the node filed them),
+    /// then `filed` with those the strike filed (in the strike's order, the order the node filed them),
     /// then each one's mirrors at the head of its list.
-    fn strike_then(&mut self, strike: &Strike, filed: &mut dyn FnMut(&mut PropSet, usize, usize)) -> Vec<Pushed> {
+    fn strike_then(&mut self, strike: &Strike, filed: &mut dyn FnMut(&mut PropSet, &[(usize, usize)])) -> Vec<Pushed> {
         let fresh: Vec<(usize, usize)> =
             strike.struck.iter().filter(|(c, o, _)| !self.collections[*c].objects[*o].filed).map(|&(c, o, _)| (c, o)).collect();
         for (c, o, _) in &strike.struck {
             self.struck(*c, *o);
         }
-        for &(c, o) in &fresh {
-            filed(self, c, o);
-        }
+        filed(self, &fresh);
         let mut pushed = Vec::with_capacity(strike.struck.len());
         for (c, o, mirrors) in &strike.struck {
             let (c, o) = (*c, *o);
