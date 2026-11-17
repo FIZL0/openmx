@@ -14,7 +14,8 @@
 //! - The steering command ([`steer_command`], MD63a): `[Joystick]`'s input ramp brings part of the
 //!   lock in over a time while the stick is held hard over, when its option is on.
 //! - The rider's controllers ([`stand_upright`], [`balance`], [`roll_pitch`], MD63b): MX Unleashed's
-//!   arithmetic, with the frames off the body's quaternion and the yaw moments on every bike.
+//!   arithmetic, with the frames off the body's quaternion and the yaw moments on every bike; the
+//!   balance's sums and the pitch integral's start from `0 + x` (F31b2, MD73).
 //! - The steering hinge ([`steer_integrate`], MD63c): each sum starts from `0 + x`, so a `−0` rate or
 //!   angle comes out `+0`.
 //! - The wreck test ([`wreck_test`], [`hit_wreck`], MD63c): reason 15 first, the 360's torque beside the
@@ -327,7 +328,15 @@ pub fn balance(p: &Params, b: &mut Bike<'_>, s: &Step, t: &Tables<'_>, o: &mut d
 /// moments (the wheelie's zeroed one and the stoppie's) go through the body's world-moment call,
 /// into the body by its quaternion `orientation`, on every bike: there is no "has a transform"
 /// test. The noise and the node's axes are not asked for.
+///
+/// The pitch integral's sums start from `0 + x`, so a `−0` integral comes out `+0` before its
+/// `madd` (MD73's oracle). On the ground every path either does that sum or zeroes the integral, so
+/// it is folded here first; airborne it is left as it is. The listing's other `0 + x` starts (the
+/// stoppie's target, the torque's second read of the integral) cannot change a stored word.
 pub fn roll_pitch(p: &Params, b: &mut Bike<'_>, s: &Step, orientation: Vf, dt: F) {
+    if s.on_ground {
+        b.ride.pitch_integral = F::ZERO + b.ride.pitch_integral;
+    }
     let had = b.chassis.has_transform;
     b.chassis.has_transform = true;
     crate::r#move::roll_pitch(p, b, s, &mut Oriented { q: orientation, o: &mut Unasked }, dt);

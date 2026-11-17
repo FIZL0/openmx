@@ -987,6 +987,56 @@ impl Gen {
         t.q = self.quat();
         t
     }
+
+    /// A zero with a random sign one time in four, else `v`.
+    fn signed_zero_or(&mut self, v: F) -> F {
+        if self.one_in(4) { F(if self.b() { -0.0 } else { 0.0 }) } else { v }
+    }
+
+    /// [`Gen::rider`] with signed zeros in every float the controllers integrate or multiply into an
+    /// integration, and `dt` 0 one time in eight: the original starts each integration with `adda 0, x`,
+    /// which is `x` except that a `-0` comes out `+0` (MD73).
+    fn rider_zeros(&mut self) -> RiderState {
+        let mut t = self.rider();
+        let p = &mut t.p;
+        for v in [
+            &mut p.balance_inertia_rate,
+            &mut p.min_balance_inertia,
+            &mut p.input_inertia,
+            &mut p.max_balance_point,
+            &mut p.balance_noise_amplitude,
+            &mut p.balance_noise_time_scale,
+            &mut p.max_roll_rate_disturbance,
+            &mut p.roll_control_gain,
+            &mut p.roll_control_rate_gain,
+            &mut p.roll_control_max_cg,
+            &mut p.max_pitch_command,
+            &mut p.pitch_gain,
+            &mut p.pitch_rate_gain,
+            &mut p.max_stoppie_pitch_command,
+            &mut p.stoppie_pitch_gain,
+            &mut p.stoppie_yaw_rate_scale,
+        ] {
+            *v = self.signed_zero_or(*v);
+        }
+        let r = &mut t.r;
+        for v in [&mut r.balance_inertia, &mut r.balance_command, &mut r.balance_point, &mut r.balance_noise_time, &mut r.pitch_integral] {
+            *v = self.signed_zero_or(*v);
+        }
+        let s = &mut t.s;
+        for v in [&mut s.stick_x, &mut s.lean, &mut s.brake] {
+            *v = self.signed_zero_or(*v);
+        }
+        for v in [&mut t.ch.force, &mut t.ch.torque, &mut t.ch.cofg, &mut t.ch.euler, &mut t.ch.world_ang_vel, &mut t.ch.ang_vel, &mut t.p.gravity] {
+            for i in 0..3 {
+                v.0[i] = self.signed_zero_or(F(v.0[i])).0;
+            }
+        }
+        if self.one_in(8) {
+            t.s.dt = F::ZERO;
+        }
+        t
+    }
 }
 
 fn poke_rider(ee: &mut Ee, t: &RiderState) {
@@ -1102,6 +1152,7 @@ fn rider_touched_only_its_own(ee: &Ee) -> Result<(), String> {
 /// Run one controller both ways over 10,000 states and compare everything it can write.
 fn rider_oracle(
     seed: u64,
+    make: fn(&mut Gen) -> RiderState,
     at: u32,
     path: impl Fn(&RiderState) -> &'static str,
     port: impl Fn(&mut RiderState, &air::AcosTable),
@@ -1110,7 +1161,7 @@ fn rider_oracle(
     let Some((mut ee, table)) = rider_image() else { return tally };
     let mut g = Gen(seed);
     for k in 0..10_000 {
-        let s = g.rider();
+        let s = make(&mut g);
         let way = path(&s);
         *tally.entry(way).or_insert(0u32) += 1;
         rider_reset(&mut ee);
@@ -1156,10 +1207,21 @@ macro_rules! rider_bike {
 /// forward axis taken out of the body's quaternion by the original's own code and the force added
 /// through the body's own add-force.
 #[test]
-#[allow(clippy::float_arithmetic)]
 fn mxvatv_stand_upright_is_the_originals() {
+    stand_upright_oracle(0x0d63_b001, Gen::rider);
+}
+
+/// The same over states full of signed zeros and some `dt` 0 (MD73).
+#[test]
+fn mxvatv_stand_upright_keeps_signed_zeros() {
+    stand_upright_oracle(0x0d73_0001, Gen::rider_zeros);
+}
+
+#[allow(clippy::float_arithmetic)]
+fn stand_upright_oracle(seed: u64, make: fn(&mut Gen) -> RiderState) {
     let tally = rider_oracle(
-        0x0d63_b001,
+        seed,
+        make,
         STAND_UPRIGHT,
         |t| {
             let s = &t.s;
@@ -1185,10 +1247,21 @@ fn mxvatv_stand_upright_is_the_originals() {
 /// SLUS-21104's balance, the port's [`step::balance`]: 10,000 states, the noise hooked on both
 /// sides alike and the arc cosine read from the image's own table.
 #[test]
-#[allow(clippy::float_arithmetic)]
 fn mxvatv_balance_is_the_originals() {
+    balance_oracle(0x0d63_b002, Gen::rider);
+}
+
+/// The same over states full of signed zeros and some `dt` 0 (MD73).
+#[test]
+fn mxvatv_balance_keeps_signed_zeros() {
+    balance_oracle(0x0d73_0002, Gen::rider_zeros);
+}
+
+#[allow(clippy::float_arithmetic)]
+fn balance_oracle(seed: u64, make: fn(&mut Gen) -> RiderState) {
     let tally = rider_oracle(
-        0x0d63_b002,
+        seed,
+        make,
         BALANCE,
         |t| {
             if !t.front.contact {
@@ -1238,7 +1311,17 @@ fn roll_pitch_path(t: &RiderState) -> &'static str {
 /// through the body's own add-moment and world-moment calls.
 #[test]
 fn mxvatv_roll_pitch_is_the_originals() {
-    let tally = rider_oracle(0x0d63_b003, ROLL_PITCH, roll_pitch_path, |t, _| {
+    roll_pitch_oracle(0x0d63_b003, Gen::rider);
+}
+
+/// The same over states full of signed zeros and some `dt` 0 (MD73).
+#[test]
+fn mxvatv_roll_pitch_keeps_signed_zeros() {
+    roll_pitch_oracle(0x0d73_0003, Gen::rider_zeros);
+}
+
+fn roll_pitch_oracle(seed: u64, make: fn(&mut Gen) -> RiderState) {
+    let tally = rider_oracle(seed, make, ROLL_PITCH, roll_pitch_path, |t, _| {
         let (s, q) = (t.s.clone(), t.q);
         step::roll_pitch(&t.p.clone(), &mut rider_bike!(t), &s, q, s.dt);
     });
