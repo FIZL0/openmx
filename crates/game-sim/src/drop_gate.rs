@@ -5,7 +5,9 @@
 //! gathers its pieces by name when the words ask for the sink: the scene props named after
 //! `GateName` ([`soultree_names`]), hung under a group node of its own, and the scene's `.col`
 //! meshes numbered after them ([`collision_names`]). Its bind finds the path spot nearest the
-//! `[LowerGate]`'s `TriggerPosition` and measures from there to the lap line. Each tick it then
+//! `[LowerGate]`'s `TriggerPosition` and measures from there to the lap line — the race file's own
+//! line, as its load spotted it: the supercross loader binds the gate before it moves the line onto
+//! the finish gate (C40, measured on sx17). Each tick it then
 //! walks the race's cards, and the first card whose kept spot is farther from the line than that
 //! and whose spot is nearer sets the sink off: `MoveTime` seconds in which the group's height runs
 //! toward −100, and then stands at −100.
@@ -92,11 +94,13 @@ pub struct Sink {
 
 impl Sink {
     /// The gate bound to the race: the path spot nearest `trigger_at` (the `[LowerGate]`'s
-    /// `TriggerPosition`, every stretch), and its distance along the paths to the lap line, kept-off
-    /// paths counting −1. A track with no paths, or a pool run dry, leaves the spot at no path; the
-    /// original then measures from a null path, and the port counts the distance 0.
-    pub fn bind(laps: &mut Laps, trigger_at: Vf, move_down: bool, move_time: F, pieces: Vec<usize>) -> Sink {
-        let line = laps.course.line_spot;
+    /// `TriggerPosition`, every stretch), and its distance along the paths to `line`, kept-off
+    /// paths counting −1. `line` is the race file's own line spot, as the load spotted it, not the
+    /// course's: the supercross loader binds the gate before it moves the line onto the finish gate
+    /// and spots it again (C40: sx17's trigger is 2475.76 to the file's line, 2477.97 to the moved
+    /// one). A track with no paths, or a pool run dry, leaves the spot at no path; the original then
+    /// measures from a null path, and the port counts the distance 0.
+    pub fn bind(laps: &mut Laps, line: Spot, trigger_at: Vf, move_down: bool, move_time: F, pieces: Vec<usize>) -> Sink {
         let track = std::sync::Arc::make_mut(&mut laps.track);
         let mut spot = Spot::default();
         crate::ai::follow::spot(track, trigger_at, false, &mut spot, None);

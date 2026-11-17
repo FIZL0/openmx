@@ -1315,6 +1315,13 @@ node_turn                   boot 0x001b2c20 (angle f12, node, axis) angle != 0: 
 #                                           place kept (0x00110ba0, axis made unit), then 0x001b1930
 # Checked live (P313b, copy 4 on c31-sx01-race-start): node rows go from (0,.866,-.5)/(0,.5,.866) to
 # (0,-.0017,-1)/(0,1,-.0017) in 5 frames, -0.2327 a step, the first on the frame the start gate opens.
+# Checked live (C40, copy 4, an sx17 AI race, research/c40): the sink fires on the row the first card's
+# (+0x10, +0x14) pair crosses +0xb0 = 2475.7615: the gate is a child of the score manager node
+# (activity +0x50), walked by 0x00133500 at the end of score_manager_tick, after the card work.
+# y bits from that row 0x80000000, 0xc1554fdf ... 0xc2483c25, 0xc2c80000 on the 9th (dt 0.03333);
+# both collidables' +0x1a0 go placement -> identity on it (vt +0xac 0x001edb60: old -> +0x1e0, new
+# -> +0x1a0, +0x120 rebuilt). The loader binds the gate (0x002f9f40 line 166) BEFORE it moves the line
+# onto the finish gate (its +0x5c block), so +0xb0 is measured to the race file's line spot.
 prop_find_fallback          boot 0x00212af0 (0x004e18c0's list, name, 1) -> holder; the prop is holder
 #                                           +0xb0 -> +0x30
 scene_prop_find             boot 0x001a6040 scene vt +0x120 (scene, name, 1) -> the first holder's prop
