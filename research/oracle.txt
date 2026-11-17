@@ -6076,6 +6076,13 @@ rider_score_trick_abort     boot 0x00280d70 (rider) rider vt+0x114: the trick an
 #   unbanked, +0x13f0/+0x13f4/+0x1400 zeroed. Called by player_wreck_entry and ride_reset_request.
 # The scoring section of the player update 0x0027c890 is ported as Score::frame (one-wheel nodes,
 # the bank, the backflip watch); the manager's mode handler for mode 3 (0x00268d00) scores nothing.
+rider_flip_watch            boot 0x0027d2a0 inside the player update 0x0027c890 ($18 rider): the backflip
+#                                           watch +0x1400 steps only if +0x748 == 0, +0x57c != 0 and
+#                                           (card flag 0x1 clear or +0x1400 > 0); attitude at +0x7a4 ->
+#                                           +0x254 -> +0x94 up, +0xa4 forward; card +0x1c4 listeners told
+#                                           (6, &watch) on 0->1 and on a reset. S284: Score::watch_flip,
+#                                           oracled as a stretch to the pc below
+rider_flip_watch_end        boot 0x0027d498 the pc after the watch (all paths meet there)
 # S92 — the freestyle event: crates/game-sim/src/event.rs, proved in crates/game-sim/tests/event.rs
 # and the gate in crates/game-sim/tests/score.rs. How each was found is in
 # research/journal/2026-10-26-s92-freestyle-event.

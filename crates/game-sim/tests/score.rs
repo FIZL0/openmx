@@ -762,6 +762,109 @@ fn a_flip_scores_when_the_watch_comes_round() {
     assert_eq!(s.total, score::BACKFLIP_POINTS, "a full flip banked {}", s.total.0);
 }
 
+/// A full flip turned after the event's time ran out: the watch never starts, nothing goes on the
+/// line, nothing banks — the original's tick steps the watch only on a card not out (S284). The same
+/// flip begun before the time ran out goes round and banks, as an open watch is stepped on.
+#[test]
+fn a_flip_after_the_time_is_out_is_not_watched() {
+    let mut s = Score { lockout: true, out: true, ..Score::default() };
+    for k in 0..=36 {
+        s.frame(DT, &aloft(k as f32 * 10.0));
+        s.grow(DT);
+        assert_eq!(s.flip, 0, "tick {k}: the watch moved on a card out of time");
+    }
+    for _ in 0..90 {
+        s.frame(DT, &landed_at(360.0));
+        s.grow(DT);
+    }
+    assert!(!s.nodes.iter().any(|n| n.id == score::BACKFLIP), "a flip out of time went on the line");
+    assert_eq!(s.total, F::ZERO, "a flip out of time banked {}", s.total.0);
+
+    // Out of time half way round: the watch already past 0 goes on.
+    let mut s = Score { lockout: true, ..Score::default() };
+    for k in 0..=36 {
+        s.out = k >= 18;
+        s.frame(DT, &aloft(k as f32 * 10.0));
+        s.grow(DT);
+    }
+    for _ in 0..90 {
+        s.frame(DT, &landed_at(360.0));
+        s.grow(DT);
+    }
+    assert_eq!(s.total, score::BACKFLIP_POINTS, "a flip out of time half way round banked {}", s.total.0);
+}
+
+/// **The watch's step against the original (S284).** The end of the player update's scoring
+/// section — the backflip watch, a stretch from its first pc to the one after — on the human's rider,
+/// against [`Score::watch_flip`] over ten thousand cases: riding or down, in the air or not, the card
+/// out of time or not, every watch stage, and the attitude about the watch's three edges (0, -0.79,
+/// signed zeros among them). The card's listeners are cut off: they only hear of the watch.
+#[test]
+fn the_flip_watch_steps_like_the_original() {
+    let Some((mut ee, rider, _)) = card_machine() else { return };
+    let (start, end) = match (addr("rider_flip_watch"), addr("rider_flip_watch_end")) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(why), _) | (_, Err(why)) => {
+            skip(&why);
+            return;
+        }
+    };
+    ee.hooks.insert(end, Box::new(|ee| ee.set(31, ps2_oracle::DONE as i32 as i64 as u64)));
+    let card = ee.u32_at(rider + at::CARD);
+    ee.set_u32(card + 0x1c4, 0);
+    let attitude = ee.u32_at(ee.u32_at(rider + 0x7a4) + 0x254);
+    assert_ne!(attitude, 0, "the human's bike has no attitude");
+    let mut pick = Pick(0x5284_f11b_0000_0001);
+    let edge = |p: &mut Pick, near: f32| match p.below(10) {
+        0 => near,
+        1 => f32::from_bits(near.to_bits() ^ 1),
+        2 => -0.0,
+        3 => 0.0,
+        _ => p.range(-1.0, 1.0),
+    };
+    let mut seen = [[0u32; 4]; 4]; // [watch before][watch after]
+    let mut held_out = 0;
+    for case in 0..10_000 {
+        let s = Sense {
+            wrecked: pick.below(6) == 0,
+            airborne: pick.below(4) != 0,
+            up_y: F(edge(&mut pick, 0.0)),
+            forward_y: F(if pick.below(2) == 0 { edge(&mut pick, -0.79) } else { edge(&mut pick, 0.0) }),
+            ..Sense::default()
+        };
+        let mut port = Score { out: pick.below(2) == 0, flip: pick.below(4) as u8, ..Score::default() };
+        ee.set_u32(rider + at::WRECK, if s.wrecked { 12 } else { 0 });
+        ee.set_u32(rider + 0x57c, u32::from(s.airborne));
+        let flags = ee.u32_at(card + 8) & !1;
+        ee.set_u32(card + 8, flags | u32::from(port.out));
+        ee.set_u32(rider + at::FLIP, u32::from(port.flip));
+        ee.set_f32(attitude + 0x94, s.up_y.0);
+        ee.set_f32(attitude + 0xa4, s.forward_y.0);
+        ee.set(18, u64::from(rider));
+        ee.call(start, &[], &[], BUDGET);
+        let before = port.flip;
+        port.watch_flip(&s);
+        let want = ee.u32_at(rider + at::FLIP);
+        assert_eq!(
+            u32::from(port.flip),
+            want,
+            "case {case}: watch {before} out {} {s:?} (up {:08x} forward {:08x})",
+            port.out,
+            s.up_y.0.to_bits(),
+            s.forward_y.0.to_bits()
+        );
+        seen[before as usize][port.flip as usize] += 1;
+        if port.out && before == 0 && !s.wrecked && s.airborne && s.up_y.0 < 0.0 && 0.0 < s.forward_y.0 {
+            held_out += 1;
+        }
+    }
+    println!("flip watch: 10000 steps bit-exact; before->after {seen:?}; {held_out} starts held back out of time");
+    for (from, to) in [(0, 1), (1, 2), (2, 3), (1, 0), (2, 0), (3, 3), (0, 0)] {
+        assert!(seen[from][to] >= 50, "watch {from} -> {to} reached only {} times: {seen:?}", seen[from][to]);
+    }
+    assert!(held_out >= 50, "a start out of time was tried only {held_out} times");
+}
+
 /// The air's numbers and wreck limits past a full turn, as `tests/rotation_modifier.rs` has them —
 /// the test's own, not the disc's.
 const AIR: &str = "
