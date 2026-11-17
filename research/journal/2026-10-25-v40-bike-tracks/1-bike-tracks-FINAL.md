@@ -160,3 +160,10 @@ the bike does stop, and no mark shows behind it in the shot. Shots at frames 45,
 the jump, the brake) show none either. "Faint and thin" next to the original still rests on the old
 shot only. The marks' rules are proved by `tests/tire_tracks.rs`, not by eye. Shots are in
 `context/shots/s222/` (not committed). Journal `2026-11-02-s222-thirty-hz-tapes`.
+
+## V120 (2026-11-16): where the marks went
+
+On the fixed tape the port lays marks only at the launch, about 130 ft behind and 70 ft above the stop,
+so the follow camera never frames them. The braked stop lays none in either game. The original also
+lays a short rear strip when its brake lets go, which the port doesn't (S340). Journal
+`2026-11-16-v120-tracks-on-a-stop`.
