@@ -24,8 +24,8 @@
 //! code ported, its calls handed out. [`class_update`] is the buggy's, golf cart's and truck's slot
 //! around it (MD106e), and [`OwnUpdate`] answers the update's own calls: the ghost step, the hazard
 //! clock and the base update (the bike's [`crate::handling::tail`]); the class's per-frame step stays
-//! a call, which [`class_step`] answers on scene nodes (MD151), and [`golf_class_step`] for the golf
-//! cart (MD156a).
+//! a call, which [`class_step`] answers on scene nodes (MD151), [`golf_class_step`] for the golf
+//! cart (MD156a) and [`truck_class_step`] for the monster truck (MD156b).
 //!
 //! Proof: `tests/mxvatv_car_frame/`, SLUS-21104's world step and the car's update off MD39a's buggy
 //! image with every call hooked; and (MD106c) the image's frame whole, with [`Pieces`] and [`Own`]
@@ -1112,6 +1112,122 @@ pub fn golf_class_step(m: &mut impl node::Ram, parts: &GolfParts, p: &mut GolfPo
     for ([shock, foot], top) in parts.shocks.into_iter().zip(p.shock_tops) {
         let d = normalize(less(top, at(m, foot, car)));
         node::aim_squared(m, shock, car, d.to_bits(), POSE_UP_QUAD);
+    }
+}
+
+/// **The monster truck's posed parts** (MD156b): the car's own node (the frame the parts are
+/// measured and aimed in), the four wheels, the four uprights (each set where its tire rides and
+/// steered), the four mounts (set where their tire rides), the two axles (set between their pair of
+/// tires and leaned to them, the front first), the two shocks aimed from themselves, and the eight
+/// rods, each the node aimed and the node it is measured from. Wheels, uprights and mounts in the
+/// tires' order. Research/oracle.txt `# MD156b` has where the car keeps them.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TruckParts {
+    pub car: u32,
+    pub wheels: [u32; 4],
+    pub uprights: [u32; 4],
+    pub mounts: [u32; 4],
+    pub axles: [u32; 2],
+    pub shocks: [u32; 2],
+    pub rods: [[u32; 2]; 8],
+}
+
+/// What the monster truck's class step reads off the car (MD156b): every tire's steer, angle,
+/// compression, maximum compression and stretch (as [`Posing`]'s); the uprights' and mounts' points
+/// (each raised by its tire's compression), the axles' points (the front's, then the rear's), the
+/// track (the axle's half width the lean is measured over), the rear tires' share of the steer, and
+/// the points the shocks and rods are aimed from (the two shocks', then the eight rods').
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TruckPosing {
+    pub steer: [F; 4],
+    pub angle: [F; 4],
+    pub compression: [F; 4],
+    pub max_compression: [F; 4],
+    pub stretch: [F; 4],
+    pub upright_at: [Vf; 4],
+    pub mount_at: [Vf; 4],
+    pub axle_at: [Vf; 2],
+    pub track: F,
+    pub rear_steer: F,
+    pub tops: [Vf; 10],
+}
+
+/// A point's `xyz` words with its `y` raised by `by` (`add.s`).
+fn raised(p: Vf, by: F) -> [u32; 4] {
+    let q = p.to_bits();
+    [q[0], (F(p.y()) + by).to_bits(), q[2], q[3]]
+}
+
+/// An axle's lean off its two tires' compressions (MD156b): the arc cosine (the table's) of the
+/// track over the length of (`track`, the second's compression less the first's) (`rsqrt`), clamped
+/// to −1..1 (twice in the original, the same as once), negated when the second tire is the less
+/// compressed.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // the original's ordered compares
+fn truck_lean(track: F, first: F, second: F, acos: &AcosTable) -> F {
+    let d = second - first;
+    let c = track * F::ONE.rsqrt(Acc::mula(track, track).madd(d, d));
+    let c = if !(c <= F::ONE) {
+        F::ONE
+    } else if c < F(-1.0) {
+        F(-1.0)
+    } else {
+        c
+    };
+    let a = acos.at(c);
+    if d < F::ZERO { -a } else { a }
+}
+
+/// **The monster truck's per-frame class step** (MD156b; its vt `+0x488`, the update's
+/// [`Call::ClassStep`]): the model's parts posed off the tires, on the scene nodes in `m`:
+///
+/// 1. each corner (left front, right front, right rear, left rear): the upright set at its point
+///    raised by the tire's compression and spun about up by the tire's steer (a rear's times the
+///    rear share); the wheel spun about the side by the tire's angle;
+/// 2. each wheel, the rears first, stretched along `y` as the buggy's ([`class_step`]'s step 4);
+/// 3. each mount set at its point raised by its tire's compression;
+/// 4. each axle, the front first: set at its point raised by half its tires' summed compressions,
+///    and spun about ahead by their [`truck_lean`] (the left tire first);
+/// 5. each shock, then each rod, aimed (squared to up, in the car's frame) along the direction from
+///    its top to where it (a rod: the node it is measured from) is in the car's frame.
+///
+/// Nothing in the car's physics reads the parts back; the step keeps nothing on the car.
+pub fn truck_class_step(m: &mut impl node::Ram, parts: &TruckParts, p: &TruckPosing, curve: &CurveTable, acos: &AcosTable) {
+    let car = parts.car;
+    for k in [FRONT_LEFT, FRONT_RIGHT, REAR_RIGHT, REAR_LEFT] {
+        node::set_position(m, parts.uprights[k], raised(p.upright_at[k], p.compression[k]));
+        let steer = if k < REAR_LEFT { p.steer[k] } else { p.rear_steer * p.steer[k] };
+        node::spin_about(m, parts.uprights[k], POSE_UP, steer, curve);
+        node::spin_about(m, parts.wheels[k], POSE_SIDE, p.angle[k], curve);
+    }
+
+    for k in [REAR_LEFT, REAR_RIGHT, FRONT_LEFT, FRONT_RIGHT] {
+        let full = p.max_compression[k];
+        let s = if full == F::ZERO {
+            F::ONE
+        } else {
+            let t = (p.compression[k] - F::ZERO) / (full - F::ZERO);
+            let k = p.stretch[k];
+            Acc::adda(F::ZERO, F::ONE).madd(t, k - F::ONE).max(F::ONE.min(k)).min(F::ONE.max(k))
+        };
+        node::stretch(m, parts.wheels[k], s);
+    }
+
+    for k in [FRONT_LEFT, FRONT_RIGHT, REAR_LEFT, REAR_RIGHT] {
+        node::set_position(m, parts.mounts[k], raised(p.mount_at[k], p.compression[k]));
+    }
+
+    for (axle, at, [l, r]) in [(0, p.axle_at[0], [FRONT_LEFT, FRONT_RIGHT]), (1, p.axle_at[1], [REAR_LEFT, REAR_RIGHT])] {
+        let (cl, cr) = (p.compression[l], p.compression[r]);
+        let y = Acc::adda(F::ZERO, F(at.y())).madd(F(0.5), cl + cr);
+        let q = at.to_bits();
+        node::set_position(m, parts.axles[axle], [q[0], y.to_bits(), q[2], q[3]]);
+        node::spin_about(m, parts.axles[axle], POSE_AHEAD, truck_lean(p.track, cl, cr, acos), curve);
+    }
+
+    let aimed = parts.shocks.map(|n| [n, n]).into_iter().chain(parts.rods);
+    for ([n, from], top) in aimed.zip(p.tops) {
+        let d = normalize(less(Vf::from_bits(node::position_in(m, from, car)), top));
+        node::aim_squared(m, n, car, d.to_bits(), POSE_UP_QUAD);
     }
 }
 
