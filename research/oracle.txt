@@ -12909,3 +12909,28 @@ atv_voice_index_pick        atv 0x00183070 = (driver, two)
 atv_voice_pick              atv 0x00183180 = (driver, asked, asked too, top, restart); pair pick 0x00183510
 atv_sample_start            atv 0x00187850 = (handed out whole with the play)
 atv_sound_queue_flush       atv 0x001840c0 = (driver, 0) the SIF send (handed out)
+# ---------------------------------------------------------------------------------------------------
+# MD161a — MD160's Untamed (SLUS-21701) monster-truck drives replayed: SLUS-21701's sim frame in the
+# interpreter beside atv_car::frame_untamed and atv_car::Ride (tests/mxvatv_car_frame/untamed.rs). Comment
+# rows only, as # MD81c. Journal: research/journal/2026-11-16-md161a-untamed-monster-replay.
+#   sim frame 0x00204ab0 (sim object vt +0x44, a0 0x006d2440), $gp 0x003fd070, tick 0x3d08850a; physics
+#   world step 0x004bd040 (listeners: count u16 world+0x50, list world+0x58; the car's entry is car+0x60).
+#   Syscall stubs (addiu v1,n; syscall; jr ra) in 0x00320000..0x00340000; 64-bit multiply 0x0034a3e0.
+#   Truck 0x01be47b0 in md160 spawn/flipped, vtable 0x003f1840; body car+0xe8 (0x230 bytes), record car+0xf8,
+#   engine car+0x1240, tires car+0x1244..+0x1250, sort probe car+0x1254. Car offsets from SLUS-21104's o:
+#   +0x30 below 0x440, +0x28 below 0x49c, +0x24 below 0x718, +0x20 below 0x9c0, -0x10 from 0x9c0.
+#   Vehicle state (car+0xbb4): wheel word +0x58 (SLUS-21104 +0x54), pad +0x54 (SLUS-21104 +0x5c); controls
+#   vt +0x34c 0x004e7e90 read the wheel word. Terrain extent +0x42c (SLUS-21104 +0x43c); scene nodes +0x30.
+#   Ground query 0x004b0910; from the tire probe 0x004d7890 (truck PreProcess 0x004e8ae0) it returns to
+#   0x004d7af4, the ground-under query to 0x004e9e00. Smooth noise 0x001324b0 from 0x004d6cac (s0 engine).
+#   Contact entry 0x90: kind u16 +0, surface i16 +2, other +0x80, mover +0x84 (SLUS-21104: kind word +0,
+#   surface +0x80, other +0x84, mover +0x88); filer 0x002055d0. Record layout as SLUS-21104's.
+#   Record resolve 0x00206170 (vt +0x88 of 0x003db860), 4 calls a frame from 0x004ba408 (vehicle force).
+#   Collidable: entry +0x4c (SLUS-21104 +0x20), centre/reach +0x30 later, owner/record/category +0x2c later
+#   (+0x88..+0x98 -> +0xb4..), frame and tail +0x20 later; vtables 0x003d9120 rays, 0x003d9200 mesh.
+#   Sort search 0x004e87b0: probe flags byte +0x144 (SLUS-21104 +0x126), list +0x1b0 (+0x7c), list fields
+#   +0x8c..+0x9c the same; a hit collidable's object +0xbc, mover +0xb8 (SLUS-21104 +0x90/+0x8c).
+#   Unwreck vt +0x36c 0x004eade0 -> respawn vt +0xe8 0x004e8510 -> put-back 0x004ca900(car, 1, 1): node
+#   place from car+0xd30, look words +0xd60..+0xd68 to the camera (+0x6a4), a ground query under +0x80
+#   raised 0.3 along the normal, rows from +0xd40, then 0x004c8880, vt +0x3a0/+0x39c, event 0x0025e740;
+#   then the tire resets 0x004d74c0 x4 and engine reset 0x004d65c0 (SLUS-21104's shape). Not ported.

@@ -283,7 +283,7 @@ enum Through {
 /// A Ride to carry each frame's words read off the machine: everything but its acos table is laid
 /// over before each frame; nothing it holds besides those is read by [`atv_car::Ride::frame_with`]
 /// (its put-back spot only by the respawn and the put-back, which these drives never hand out).
-fn ride_of(table: &AcosTable) -> atv_car::Ride {
+pub(crate) fn ride_of(table: &AcosTable) -> atv_car::Ride {
     atv_car::Ride {
         keys: Keys::default(),
         state: atv_car::State::default(),
