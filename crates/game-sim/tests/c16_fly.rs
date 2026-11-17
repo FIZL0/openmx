@@ -279,7 +279,12 @@ fn in_free09_ss<R>(disc: &mut Disc, then: impl FnOnce(&mut Wooded<Place<'_>>, Ar
 /// whole body, the three tires, the engine, the pad and surfaces, the flown gate, the crash state,
 /// the spawn and the noise tables — then measured.
 fn seeded_plane(ee: &Ee, plane: &Plane, rays: &Rays, hull: &track::Mesh, bike: Option<&track::Mesh>, area: Area, tables: &Tables) -> Flight {
-    let p = plane0(ee);
+    seeded_plane_at(ee, plane0(ee), plane, rays, hull, bike, area, tables)
+}
+
+/// [`seeded_plane`] off the plane record `p`: plane 0's, or plane 1's (N24).
+#[allow(clippy::too_many_arguments)]
+fn seeded_plane_at(ee: &Ee, p: u32, plane: &Plane, rays: &Rays, hull: &track::Mesh, bike: Option<&track::Mesh>, area: Area, tables: &Tables) -> Flight {
     let word = |at: u32| F(ee.f32_at(at));
     let mut f = Flight::new(plane).with_rays(rays.clone()).with_hull(hull.clone());
     if let Some(mesh) = bike {
@@ -1658,5 +1663,279 @@ fn r31_the_joust_against_images_to_137866() {
                 }
             }
         }
+    }
+}
+
+// --- N24: both players' planes flown into each other, on a two-pad tape ---------------------------------
+
+/// N24's tape (research/n24/index.md): C16's state (P1 in plane 0), where P2 switches to plane 1 from
+/// its own pause menu, then P2 creeps forward on a little throttle and P1 taxis plane 0 into plane 1's
+/// tail at 32 ft/s and pushes it along. Its capture (watch/n24-meet.toml, both planes' blocks) and the
+/// original's RAM in the ticks around the touch (`context/states/n24/n24-<frame>.ram`).
+const MEET_TAPE: &str = "recordings/n24/meet.p2m2";
+const MEET_CAPTURE: &str = "capture/n24/meet.csv";
+
+fn meet_image(name: &str) -> Option<Ee> {
+    let path = ctx(&format!("states/n24/n24-{name}.ram"))?;
+    let mut ee = Ee::from_ram(&path).unwrap_or_else(|e| panic!("{e}"));
+    ee.set(28, u64::from(addr("boot_gp").unwrap()));
+    if let Ok(frame) = name.parse::<u32>() {
+        assert_eq!(ee.u32_at(addr("frame_counter").unwrap()), frame, "n24-{frame}.ram is not frame {frame}");
+    }
+    Some(ee)
+}
+
+/// Plane 1: the actor list's second entry, flown by P2 after its switch.
+fn plane1(ee: &Ee) -> u32 {
+    chain(ee, &[0x34, 0x34, 0x8, 0x0])
+}
+
+/// The player flying plane record `p` (its player record's index: 0 for P1, 1 for P2).
+fn flown_by(ee: &Ee, p: u32) -> u32 {
+    ee.u32_at(ee.u32_at(p + 0x20) + 0x30)
+}
+
+/// The level node's objects whose bodies are `bodies`, as (node, index of each in the node's array).
+/// The node is not at S88's address in this tape's heap, so it is found: every word naming a record
+/// whose +0xf4 is one of the bodies, then a node (+0x30 count, +0x38 array) whose array holds them.
+fn node_slots(ee: &Ee, bodies: [u32; 2]) -> (u32, [u32; 2]) {
+    let words: Vec<u32> = ee.ram.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect();
+    let ram = |a: u32| (a & 0x0fff_ffff) < ee.ram.len() as u32 && a & 3 == 0 && a >> 28 == 0;
+    let records = bodies.map(|b| {
+        let at: Vec<u32> = (0..words.len() as u32).filter(|&i| words[i as usize] == b && i >= 0x3d).map(|i| 4 * i - 0xf4).collect();
+        at
+    });
+    let mut found = Vec::new();
+    for (i, &w) in words.iter().enumerate() {
+        let (count, array) = (w, words.get(i + 2).copied().unwrap_or(0));
+        if !(2..64).contains(&count) || !ram(array) || array as usize + 4 * count as usize > ee.ram.len() {
+            continue;
+        }
+        let objects: Vec<u32> = (0..count).map(|k| ee.u32_at(array + 4 * k)).collect();
+        let index = |k: usize| objects.iter().position(|o| records[k].contains(o)).map(|j| j as u32);
+        if let (Some(a), Some(b)) = (index(0), index(1)) {
+            found.push((4 * i as u32 - 0x30, [a, b]));
+        }
+    }
+    assert_eq!(found.len(), 1, "one node holds both planes' records: {found:x?}");
+    found[0]
+}
+fn meet_capture() -> Option<Rows> {
+    let path = ctx(MEET_CAPTURE)?;
+    let file = std::io::BufReader::new(File::open(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())));
+    let keep = |c: &str| {
+        let c = c.strip_prefix("plane1_").unwrap_or(c);
+        c == "dt" || c == "crash" || c.starts_with("body_pos.") || c.starts_with("body_vel.")
+    };
+    let cap = game_sim::replay::two_p::read(file, keep).unwrap_or_else(|e| panic!("{}: {e:?}", path.display()));
+    Some(Rows { first: cap.frames[0], cols: cap.columns.clone(), rows: cap.rows })
+}
+
+impl Rows {
+    /// Plane `k`'s velocity and position on the row of `frame`, as bits.
+    fn plane_state(&self, frame: u32, k: usize) -> [[u32; 3]; 2] {
+        let pre = ["", "plane1_"][k];
+        [self.v3(frame, &format!("{pre}body_vel")), self.v3(frame, &format!("{pre}body_pos"))]
+    }
+}
+
+fn meet_tape() -> Option<P2m2> {
+    let path = ctx(MEET_TAPE)?;
+    Some(P2m2::parse(&std::fs::read(&path).unwrap()).unwrap_or_else(|e| panic!("{}: {e:?}", path.display())))
+}
+
+/// The frame whose tick polls the tape's first field: the state's + 2, as C16's ([`FIELD_ZERO`]; the
+/// same state). Not searched after the tape's pause-menu stretch: the runs below hold through the
+/// meeting on it, so the fields reach the ticks they hold on.
+const MEET_ZERO: u32 = 137404;
+
+/// Both planes' velocity and position, plane 0's then plane 1's.
+type Pair = [[[u32; 3]; 2]; 2];
+
+/// **Both planes by the port from image `from` through frame `to`**, one joint frame a tick
+/// ([`flight::frames_together`], each with a `Met` of its own and no bikes: both players' bikes are
+/// out of the world while they fly), plane `order[0]` searching and resolving first; each plane on its
+/// player's tape field `t - zero` and stepping at row `t + 1`'s `dt`. The seed, then each tick's
+/// planes.
+fn fly_pair(from: u32, to: u32, zero: u32, order: [usize; 2]) -> Option<(Pair, Vec<Pair>)> {
+    use game_sim::flight::{Fly, Met};
+    let cap = meet_capture()?;
+    let tape = meet_tape()?;
+    let ee = meet_image(&from.to_string())?;
+    let (plane, rays, hull) = machines()?;
+    let mut disc = Disc::open_configured().map_err(|why| skip(&why)).ok()?;
+    let tables = Arc::new(Tables::build());
+    let mesh = bike_box(&mut disc);
+    let wreck = wreck_hull(&mut disc);
+    let dt_of = |t: u32| F(cap.f((t + 1).max(cap.first as u32), "dt"));
+    let pads = |t: u32| [0, 1].map(|port| tape.field(t.saturating_sub(zero) as usize, port));
+    in_free09_ss(&mut disc, |world, area| {
+        let mut planes = [plane0(&ee), plane1(&ee)].map(|p| {
+            let f = seeded_plane_at(&ee, p, &plane, &rays, &hull, mesh.as_ref(), area, &tables);
+            match wreck.clone() {
+                Some(w) => f.with_wreck_hull(w),
+                None => f,
+            }
+        });
+        let state = |p: &[Flight; 2]| p.each_ref().map(|f| [three(f.body.velocity), three(f.body.position)]);
+        let mut input = game_sim::input::Manager::new();
+        // The pads the image's tick read, so the first tick's presses are not edges.
+        input.tick(dt_of(from - 1), &pads(from - 1));
+        let seed = state(&planes);
+        let mut out = Vec::new();
+        for t in from..to {
+            let dt = dt_of(t);
+            input.tick(dt, &pads(t));
+            let pad = [0, 1].map(|k| flight::pad(input.pad(k)));
+            let mut mets = [Met::default(), Met::default()];
+            let [m0, m1] = &mut mets;
+            let [a, b] = &mut planes;
+            let (first, second) = if order[0] == 0 { ((a, m0, pad[0]), (b, m1, pad[1])) } else { ((b, m1, pad[1]), (a, m0, pad[0])) };
+            let mut fleet = [
+                Fly { flight: first.0, pad: first.2, met: Some(first.1), bikes: &[] },
+                Fly { flight: second.0, pad: second.2, met: Some(second.1), bikes: &[] },
+            ];
+            let _ = flight::frames_together(dt, &mut fleet, world, &tables.ride);
+            out.push(state(&planes));
+        }
+        Some((seed, out))
+    })
+}
+
+/// How many of [`fly_pair`]'s ticks the capture confirms for plane `k`, by [`held_by`]'s rule, and the
+/// rows it let through as read inside a frame's step. [`flight::substeps`] keeps no bodies for planes
+/// flown together, so such a row (C16's T8) cannot be matched bit for bit here: a row that is none of
+/// the port's states passes only when every axis lies between two successive states — the reached one
+/// and the next, or for a second such row the next pair on — and a row after it is read exactly.
+fn pair_held(cap: &Rows, from: u32, seed: Pair, ticks: &[Pair], k: usize) -> (usize, Vec<u32>) {
+    let states: Vec<[[u32; 3]; 2]> = std::iter::once(seed[k]).chain(ticks.iter().map(|p| p[k])).collect();
+    let last = from + ticks.len() as u32 - 1;
+    let between = |row: [[u32; 3]; 2], a: [[u32; 3]; 2], b: [[u32; 3]; 2]| {
+        (0..2).all(|v| {
+            (0..3).all(|x| {
+                let (r, a, b) = (f32::from_bits(row[v][x]), f32::from_bits(a[v][x]), f32::from_bits(b[v][x]));
+                a.min(b) <= r && r <= a.max(b)
+            })
+        })
+    };
+    let (mut at, mut mid, mut pending) = (0, Vec::new(), Vec::new());
+    for r in from..=last + 2 {
+        if cap.row(r).is_none() {
+            continue;
+        }
+        let row = cap.plane_state(r, k);
+        let reads = |j: usize| {
+            let pair = [states[j.saturating_sub(1)], states[j]];
+            (0..2).all(|v| (0..3).all(|a| pair.iter().any(|s| s[v][a] == row[v][a])))
+        };
+        let window = at..(at + 3).min(states.len());
+        match window.clone().find(|&j| reads(j)) {
+            Some(j) => {
+                at = j;
+                mid.append(&mut pending);
+            }
+            None if r <= from + 1 && at == 0 => {}
+            None if pending.len() < 2 && at + pending.len() + 1 < states.len() && {
+                let m = at + pending.len();
+                between(row, states[m], states[m + 1])
+            } =>
+            {
+                pending.push(r)
+            }
+            None => {
+                if std::env::var("N24_DEBUG").is_ok() {
+                    let f = |b: [u32; 3]| b.map(f32::from_bits);
+                    eprintln!("plane {k} parts on row {r} at state {at}: row {:?} {:?}", f(row[0]), f(row[1]));
+                    for j in at.saturating_sub(1)..(at + 3).min(states.len()) {
+                        eprintln!("    state {j}: {:?} {:?}", f(states[j][0]), f(states[j][1]));
+                    }
+                }
+                break;
+            }
+        }
+    }
+    while at + 1 < states.len() && states[at + 1] == states[at] {
+        at += 1;
+    }
+    (at, mid)
+}
+
+/// **P1's plane is plane 0, whoever switched first** (N24): on the meeting tape's image before the
+/// touch (P1 switched first, C16's) and on `n24-order.ram` (P2 switched first, from C16's
+/// fly_and_collide state: research/n24/index.md), the actor list's first plane is P1's and its second
+/// P2's, and the level node's first two objects are those planes' bodies in that order — so the
+/// node's plane 0, which searches first and resolves first in each substep, is always seat 0's.
+#[test]
+fn n24_p1s_plane_is_plane_0_whoever_switched_first() {
+    for name in ["138200", "order"] {
+        let Some(ee) = meet_image(name) else { return };
+        let (a, b) = (plane0(&ee), plane1(&ee));
+        assert_eq!([ee.u32_at(a), ee.u32_at(b)], [1, 1], "{name}: the list's first two entries are planes");
+        assert_eq!([flown_by(&ee, a), flown_by(&ee, b)], [0, 1], "{name}: plane 0 is P1's, plane 1 P2's");
+        let (node, slots) = node_slots(&ee, [a, b].map(|p| ee.u32_at(p + plane_at::BODY)));
+        assert_eq!(slots, [0, 1], "{name}: the node at {node:#x} holds plane 0's object first, then plane 1's");
+    }
+}
+
+/// Runs from the original's RAM around the meeting: (image frame, ticks held for plane 0 and plane 1
+/// with plane 0 searching and resolving first, the same with plane 1 first), each of 100 ticks. P1's
+/// plane rides 32 ft/s into the tail of P2's taxiing plane at 138217, hits it hard at 138221 and pushes
+/// it along. Seat 0's plane first holds every tick, through the touch and the hit (two rows read inside
+/// a frame at 138212-138213); the other order parts within a few ticks of the meeting, and before it at
+/// 138500 where they touch again — so the original flies plane 0 first, and each plane's post refills
+/// against the other's hull as the original's does.
+const MEETS: [(u32, [usize; 2], [usize; 2]); 4] = [
+    (138200, [100, 100], [19, 19]),
+    (138213, [100, 100], [6, 6]),
+    (138219, [100, 100], [0, 0]),
+    (138500, [100, 100], [16, 16]),
+];
+
+/// **Two planes meeting hold in seat order, and only in it** (N24, [`MEETS`]).
+#[test]
+fn n24_planes_meet_as_the_original_flies_them() {
+    let Some(cap) = meet_capture() else { return };
+    for (from, first0, first1) in MEETS {
+        for (order, want) in [([0, 1], first0), ([1, 0], first1)] {
+            let Some((seed, ticks)) = fly_pair(from, from + 100, MEET_ZERO, order) else { return };
+            let got = [0, 1].map(|k| pair_held(&cap, from, seed, &ticks, k).0);
+            assert_eq!(got, want, "from {from}, plane {} first: ticks held", order[0]);
+        }
+    }
+}
+
+/// Prints each image's run both ways (`--ignored --nocapture`): what [`MEETS`] pins. 138000 and 138150
+/// part in the taxi before the meeting where rows read a tick late, then on time, then late again
+/// (torn in both planes alike, whichever order); 138225 parts on its third row, a torn read in the hit.
+#[test]
+#[ignore]
+fn n24_meeting_holds() {
+    let Some(cap) = meet_capture() else { return };
+    let only: Option<u32> = std::env::var("N24_FROM").ok().and_then(|v| v.parse().ok());
+    for from in [138000, 138150, 138200, 138210, 138213, 138215, 138217, 138219, 138221, 138225, 138230, 138260, 138300, 138400, 138500] {
+        if only.is_some_and(|o| o != from) {
+            continue;
+        }
+        for order in [[0, 1], [1, 0]] {
+            let to = (from + 100).min(138630);
+            let Some((seed, ticks)) = fly_pair(from, to, MEET_ZERO, order) else { return };
+            let n = [0, 1].map(|k| pair_held(&cap, from, seed, &ticks, k));
+            println!("{from}..{to} first {}: plane 0 holds {} (mid-frame rows {:?}), plane 1 {} ({:?}) of {}", order[0], n[0].0, n[0].1, n[1].0, n[1].1, ticks.len());
+        }
+    }
+}
+
+/// Prints the port's planes beside the rows from image `N24_FROM` (`--ignored --nocapture`).
+#[test]
+#[ignore]
+fn n24_rows_beside_the_port() {
+    let Some(cap) = meet_capture() else { return };
+    let from: u32 = std::env::var("N24_FROM").ok().and_then(|v| v.parse().ok()).unwrap_or(138200);
+    let Some((seed, ticks)) = fly_pair(from, from + 30, MEET_ZERO, [0, 1]) else { return };
+    let f = |b: [u32; 3]| b.map(f32::from_bits);
+    for (j, p) in std::iter::once(&seed).chain(&ticks).enumerate() {
+        let r = from + j as u32;
+        println!("after {r:>6}: port v0 {:?} v1 {:?}", f(p[0][0]), f(p[1][0]));
+        println!("   row {r:>6}:      v0 {:?} v1 {:?}", f(cap.plane_state(r, 0)[0]), f(cap.plane_state(r, 1)[0]));
     }
 }
