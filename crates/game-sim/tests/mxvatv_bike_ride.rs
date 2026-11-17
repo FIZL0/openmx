@@ -6348,10 +6348,10 @@ const FX_CLASSES: [(u32, effects::Class); 7] = {
 const FX_PICK: u32 = 0x0050_a920;
 
 /// F58: the effects items' step kinds by their vtables (research/oracle.txt `# F58`): the six C15's
-/// flip-1 steps. `0x003d1740`'s step is not ported (no C15 item steps with it): handed on.
-const FX_KINDS: [(u32, effects::Kind); 6] = {
+/// flip-1 steps, and (F58a) `0x003d1740`'s, which no C15 item steps.
+const FX_KINDS: [(u32, effects::Kind); 7] = {
     use effects::Kind::*;
-    [(0x003d_1650, Still), (0x003d_1680, Linked), (0x003d_16b0, Spots), (0x003d_1840, Swing), (0x003d_1870, Ramp), (0x003d_18a0, Gauge)]
+    [(0x003d_1650, Still), (0x003d_1680, Linked), (0x003d_16b0, Spots), (0x003d_1840, Swing), (0x003d_1870, Ramp), (0x003d_18a0, Gauge), (0x003d_1740, Held)]
 };
 
 fn fx_kind(ee: &Ee, item: u32) -> Option<effects::Kind> {
@@ -11409,7 +11409,7 @@ fn fx_maybe(g: &mut Gen) -> u32 {
 }
 
 /// **F58 — the effects items' steps are the original's**: 20 000 items in scratch RAM, each of one of
-/// the six step kinds C15's flip-1 steps ([`FX_KINDS`], by its real vtable), their words, the table's
+/// the seven step kinds ([`FX_KINDS`], by its real vtable: C15's six and F58a's), their words, the table's
 /// and entry's (each pointing into a pool of floats and zeros), the objects', the definitions', the
 /// spots' part and its spots and the linked parts junk floats and zeros, the picks a mix of
 /// [`effects::UNPICKED`] and small picks against the definitions' small picks; run through
@@ -11462,7 +11462,7 @@ fn the_effects_items_steps_are_the_originals() {
     let mut g = Gen(0x0000_f580);
     let mut seen = BTreeMap::<String, u32>::new();
     for case in 0..20_000 {
-        let (vtable, kind) = FX_KINDS[(g.bits() % 6) as usize];
+        let (vtable, kind) = FX_KINDS[(g.bits() % 7) as usize];
         let mut setup = Vec::<(u32, u32)>::new();
         for o in (0..region.1).step_by(4) {
             setup.push((l.item + o, fx_float(&mut g)));
@@ -11474,7 +11474,7 @@ fn the_effects_items_steps_are_the_originals() {
         setup.push((l.item + 0x10, vtable));
         setup.push((l.item + effects::ITEM_OBJECT, l.first));
         setup.push((l.item + effects::ITEM_MASK, if g.one_in(3) { 0 } else { g.bits() & 0x1f }));
-        for at in [0x30, 0x70, 0x90] {
+        for at in [0x30, 0x70, 0x74, 0x90] {
             setup.push((l.item + at, fx_maybe(&mut g)));
         }
         if g.one_in(2) {
@@ -11484,7 +11484,14 @@ fn the_effects_items_steps_are_the_originals() {
                 setup.push((l.item + o, b));
             }
         }
-        setup.push((l.item + 0x28, l.words + 4 * 31));
+        // (a Held item's fade is there: a float, a quarter, or a frame's worth)
+        let fade = match g.bits() % 4 {
+            0 => fx_maybe(&mut g),
+            1 => 0x3e80_0000,
+            2 => (1.0f32 / 30.0).to_bits(),
+            _ => g.f(0.0, 0.3).to_bits(),
+        };
+        setup.push((l.item + 0x28, if kind == effects::Kind::Held { fade } else { l.words + 4 * 31 }));
         setup.push((l.effects + effects::TABLE, l.table));
         // the table and the entry, pointing into the pool
         setup.push((l.table + effects::TABLE_PARTS, if g.one_in(8) { g.bits() | 0x8000_0000 } else { g.bits() % 9 }));
@@ -11567,10 +11574,16 @@ fn the_effects_items_steps_are_the_originals() {
         let calls: Vec<&str> = want.iter().map(|c| match c.0 { 0x84 => "halt", 0x98 => "move", 0xa4 => "light", 0xa8 => "douse", _ => "pick" }).collect();
         let mut calls = calls;
         calls.dedup();
-        *seen.entry(format!("{kind:?} {calls:?}")).or_default() += 1;
+        // a Held item swung (latched: a quarter's fade) or faded (unlatched)
+        let how = match (kind, ee.u32_at(l.item + effects::HELD_LATCH) != 0) {
+            (effects::Kind::Held, true) => " latched",
+            (effects::Kind::Held, false) => " unlatched",
+            _ => "",
+        };
+        *seen.entry(format!("{kind:?}{how} {calls:?}")).or_default() += 1;
     }
     eprintln!("effects items steps oracle: {seen:#?}");
-    for kind in ["Gauge", "Ramp", "Swing", "Spots", "Linked"] {
+    for kind in ["Gauge", "Ramp", "Swing", "Spots", "Linked", "Held unlatched"] {
         for call in ["light", "douse"] {
             assert!(seen.keys().any(|k| k.starts_with(kind) && k.contains(call)), "no {kind} case made {call}: {seen:?}");
         }
@@ -11581,6 +11594,7 @@ fn the_effects_items_steps_are_the_originals() {
         }
     }
     assert!(seen.keys().any(|k| k.starts_with("Still []")), "no Still case: {seen:?}");
+    assert!(seen.keys().any(|k| k.starts_with("Held latched") && k.contains("light")), "no latched Held case: {seen:?}");
 }
 
 /// F57's oracle: the emitter's objects' lighting virtuals and its owner's at fake addresses

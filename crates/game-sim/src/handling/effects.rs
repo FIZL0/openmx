@@ -344,6 +344,10 @@ pub enum Kind {
     /// Lights or douses its object by the table's bit, and moves it to each linked part's spot its
     /// mask lets through and whose flags it does not mask, less the part's motion over the frame.
     Linked,
+    /// F58a: latches by its entry's two words ([`HELD_LATCH`]); latched, swings its object's angle
+    /// and spans by the entry's and table's swing words as [`Kind::Swing`] does, lighting it;
+    /// unlatched, fades its counts out over a quarter of a second and douses it.
+    Held,
 }
 
 /// The table's words the steps read, each a pointer to the word: [`Kind::Gauge`]'s level and its
@@ -376,6 +380,9 @@ pub const DEF_PICK: u32 = 0x40;
 /// A [`Kind::Swing`] item's fade (`+0x28`): set to a quarter second each frame it swings.
 pub const SWING_FADE: u32 = 0x28;
 const QUARTER: u32 = 0x3e80_0000;
+/// A [`Kind::Held`] item's latch (`+0x74`): its entry's first word sets it, the second alone clears
+/// it. Its fade is at [`SWING_FADE`] as a [`Kind::Swing`] item's.
+pub const HELD_LATCH: u32 = 0x74;
 
 fn sf(m: &mut impl Items, at: u32) -> F {
     F::from_bits(m.word(at))
@@ -483,6 +490,7 @@ pub fn item_step(m: &mut impl Steps, item: u32, dt: F) {
         Kind::Swing => swing(m, item, dt),
         Kind::Spots => spots(m, item, dt),
         Kind::Linked => linked(m, item, dt),
+        Kind::Held => held(m, item, dt),
     }
 }
 
@@ -646,6 +654,92 @@ fn swing(m: &mut impl Items, item: u32, dt: F) {
         let k = sf(m, item + from);
         let d = object_def(m, item);
         let x = Acc::adda(F::ZERO, sf(m, d + to)).madd(k, h);
+        set_sf(m, d + to, x);
+    }
+    m.set(item + SWING_FADE, QUARTER);
+    if m.word(item + 0x70) != 0 {
+        let o = object(m, item);
+        let d = m.word(o + OBJECT_DEF);
+        let flags = m.word(d + DEF_FLAGS);
+        let spun = if item_byte(m, o + OBJECT_FLAGS2) & 1 != 0 { flags & !DEF_SPIN } else { flags | DEF_SPIN };
+        m.set(d + DEF_FLAGS, spun);
+    }
+    light(m, item);
+}
+
+/// [`Kind::Held`]: latched ([`HELD_LATCH`]), the object's angle is `-(+0x2c) * swing` (the entry's
+/// word), the definition's spans (`+0x130`/`+0x140`: `+0x50`/`+0x60` less and plus half the angle's
+/// size; `+0x134`/`+0x144`: `+0x54`/`+0x64` plus `+0x3c`/`+0x40` by a clamped `1 - (swing + 1) *
+/// +0x44`, the table's swing) and counts (`+0x110`/`+0x114`: its own `+0x34`/`+0x38` and half again
+/// by the clamp), the fade set ([`SWING_FADE`]), the spin bit by the object's ([`OBJECT_FLAGS2`])
+/// when `+0x70` says so, and it lights. Unlatched it runs the fade down by `dt` and the counts by
+/// it over a quarter, lit; out of fade it douses. [`Kind::Swing`]'s sums, but in its own operations
+/// (`adda`/`msub` for the x spans, the counts' half taken last).
+fn held(m: &mut impl Items, item: u32, dt: F) {
+    let t = item_table(m, item);
+    let entry = m.word(item + ITEM_ENTRY);
+    if through_word(m, entry + FIRST) != 0 {
+        m.set(item + HELD_LATCH, 1);
+    } else if through_word(m, entry + SECOND) != 0 {
+        m.set(item + HELD_LATCH, 0);
+    }
+    if m.word(item + HELD_LATCH) == 0 {
+        let fade = sf(m, item + SWING_FADE);
+        if fade <= 0.0 {
+            m.set(item + SWING_FADE, 0);
+            return douse(m, item);
+        }
+        let fade = sub(fade, dt);
+        set_sf(m, item + SWING_FADE, fade);
+        if fade <= 0.0 {
+            m.set(item + SWING_FADE, 0);
+            return douse(m, item);
+        }
+        let x = div(mul(sf(m, item + 0x34), fade), F::from_bits(QUARTER));
+        let d = object_def(m, item);
+        set_sf(m, d + 0x110, x);
+        let k = sf(m, item + 0x38);
+        let fade = sf(m, item + SWING_FADE);
+        let x = div(mul(k, fade), F::from_bits(QUARTER));
+        let d = object_def(m, item);
+        set_sf(m, d + 0x114, x);
+        return light(m, item);
+    }
+    let entry = m.word(item + ITEM_ENTRY);
+    let o = object(m, item);
+    let by = sf(m, item + 0x2c);
+    let s = sf_through(m, entry + ENTRY_SWING);
+    set_sf(m, o + OBJECT_ANGLE, mul(F(fpu::neg(by.0)), s));
+    for (base, to, less) in [(0x50, 0x130, true), (0x60, 0x140, false)] {
+        let a = Acc::adda(F::ZERO, sf(m, item + base));
+        let o = object(m, item);
+        let d = m.word(o + OBJECT_DEF);
+        let size = F(fpu::abs(sf(m, o + OBJECT_ANGLE).0));
+        let x = if less { a.msub(F(0.5), size) } else { a.madd(F(0.5), size) };
+        set_sf(m, d + to, x);
+    }
+    let d = object_def(m, item);
+    let x = sub(sf(m, d + 0x140), sf(m, d + 0x130));
+    set_sf(m, d + 0x150, x);
+    let s = sf_through(m, t + TABLE_SWING);
+    let c = Acc::adda(F::ZERO, F::ONE).msub(add(F::ONE, s), sf(m, item + 0x44));
+    let c = F(fpu::max(0.0, fpu::min(1.0, c.0)));
+    for (base, by, to) in [(0x54, 0x3c, 0x134), (0x64, 0x40, 0x144)] {
+        let x = Acc::adda(F::ZERO, sf(m, item + base)).madd(c, sf(m, item + by));
+        let d = object_def(m, item);
+        set_sf(m, d + to, x);
+    }
+    let d = object_def(m, item);
+    let x = sub(sf(m, d + 0x144), sf(m, d + 0x134));
+    set_sf(m, d + 0x154, x);
+    for (from, to) in [(0x34, 0x110), (0x38, 0x114)] {
+        let d = object_def(m, item);
+        copy(m, item + from, d + to);
+    }
+    for (from, to) in [(0x34, 0x110), (0x38, 0x114)] {
+        let k = mul(sf(m, item + from), c);
+        let d = object_def(m, item);
+        let x = Acc::adda(F::ZERO, sf(m, d + to)).madd(F(0.5), k);
         set_sf(m, d + to, x);
     }
     m.set(item + SWING_FADE, QUARTER);
