@@ -13403,3 +13403,35 @@ race_finish_listener        boot 0x002fc410 slot +0x14 (Finished; thunk 0x003004
 #   place from car+0xd30, look words +0xd60..+0xd68 to the camera (+0x6a4), a ground query under +0x80
 #   raised 0.3 along the normal, rows from +0xd40, then 0x004c8880, vt +0x3a0/+0x39c, event 0x0025e740;
 #   then the tire resets 0x004d74c0 x4 and engine reset 0x004d65c0 (SLUS-21104's shape). Not ported.
+# MD92 — Untamed's (SLUS-21701) MX ride with a wreck, replayed by the original's own frame
+# (tests/untamed_bike_ride.rs; captures wreck-1/wreck-3 off copy 9's state 8, 665 rows each, bit-exact).
+# Comment rows only. Journal: research/journal/2026-11-17-md92-untamed-ride-replay.
+#   Sim frame 0x00204ab0 (a0 sim 0x006d2440, f12 dt): skipped while *(0x003ff6b8)+0x11d bit 3; the +0x24
+#   list (vt +0x7c / +0x84), world step 0x004bd040 on sim +0x48, tail 0x00126c50, the +0x30 list (vt +8).
+#   gp 0x003fd070 (the ELF's .reginfo). Bike 0x01be47f0 (vt 0x003f1d10); body +0xe8, node +0x114,
+#   record +0xf8, wheels +0x17f0/+0x17f4, engine +0x143c.
+#   Interpreter stand-ins: DIntr 0x00337720 / EIntr 0x00337770 (mfc0) answer 0; libgcc __muldi3
+#   0x0034a3e0 (MMI madd); 111 profiling RCNT0 reads (lui rA,0x1000; jal EIntr; lw rT,0(rA) in its
+#   delay slot); syscall stubs (addiu $3,n; syscall; jr ra) answer a0, GetThreadId 1.
+#   Pad reader 0x004fb7d0 (outside the frame) stores bike +0x340/+0x344, +0x1290..+0x12ac,
+#   +0x12b4..+0x12c8, +0x12d0/+0x12d4, +0x14dc, +0x17ec and the pad record +0x14f4 (filled by 0x003a25b0).
+#   Visit mark: halfword 0x003f51b0 (lhu -0x7ec0($gp)); the spatial search 0x0017d720 bumps it (0x0017d440
+#   / 0x0017d820) and stamps body +0x260 and bike +0x1a70; the game bumps it 3-4 more times a tick outside
+#   the frame, and a frame that does not reach the body leaves its stamp.
+#   Engine tick (Untamed's twin of R3's 0x00131100, decomp line ~22695): raw dt = whole ms x 0.001 (min
+#   15 ms) at app 0x0040eb00 +0x150, a 30-entry mean (ring 0x003ff6c0, index 0x003ff738, primed
+#   0x003ff740), clamp 0.03333 under flag 0x003ff6a8; then dt x *(*(0x00462ff8)+0x34) (floor 0.001);
+#   app +0x13c dt, +0x140 1/dt.
+#   Slow motion object *(0x00462ff8) (class 0x0022dd70, vt 0x003dd4c0): +0x34 factor, +0x38/+0x3c
+#   bounds, +0x40 rate/s, +0x44 target, +0x30 delay. Set 0x0022e210(target f12, time f13, delay f14, a0
+#   obj, a1 cue): bounds = min/max(target, factor), rate = (target - factor) / time. Step 0x0022e350 (a
+#   process, outside the sim frame, after the tick's dt): factor = max(lo, min(hi, rate x app+0x150 +
+#   factor)) (adda/madd) while factor != target. Switch 0x001c3d70(settings *0x003ad698, on, instant):
+#   on -> target settings +0x161c (0.18) over +0x1620 (1 s); off -> 1.0 over +0x1624 (0.3 s); instant
+#   0x3a83126f; gated on *(0x00462ba0)+0x8e00 set, +0x89c0/+0x8df8 clear. Callers: wreck first
+#   0x004cbc60 (on, kind 1), wreck end 0x004cbda0 (off), the bike's event handler 0x004cb960 (off on any
+#   event while kind 1 and +0xc70 set; then the reset when buttons 0x4f and 0x50 both read).
+#   On wreck-1: the wreck (row 340) switches on inside the frame; the factor first shows in row 342's dt;
+#   Cross down on tape tick 450 switches off; the factor is 1 again from row 459. Bike +0x448 / +0xce8 /
+#   +0x1790 add dt every frame; +0x1180 hang time; +0x71c/+0x720 run clocks (0x004f21c0, paused while
+#   run +8 bit 0x200); +0xc74 wreck clock.
