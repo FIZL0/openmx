@@ -10482,13 +10482,83 @@ fn a_race_end_shows_its_tips_board_and_hall_of_fame_and_counts_the_win() {
     assert_eq!(m.results().page, 10);
     tap(&mut m, &mut r, Control::R1);
     assert_eq!(m.results().page, 0);
+    // P333: Cross is the single race's Restart, which goes by the Hall of Fame first and then
+    // rides the same race again.
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.results().stage, menu::race::Stage::Fame);
+    assert_eq!(m.results().after, Some(menu::race::After::Restart));
+    let acts = tap(&mut m, &mut r, Control::Cross);
+    assert!(acts.contains(&Act::Ride("sx01".into())), "{acts:?}");
+    assert_eq!(m.racing().map(|s| s.track.as_str()), Some("sx01"));
+    m.main();
+    assert!(m.race_left());
     tap(&mut m, &mut r, Control::Cross);
     assert_eq!(m.screen(), Some(Screen::Main));
     // A race end with no race under way is dropped.
     m.race_ended(HandOver { overs: vec![RaceOver { win: Some(0), ..RaceOver::default() }], ..HandOver::default() });
     assert!(!m.take_records_changed());
+}
+
+/// P333: the results menu's own buttons and the tip popup's pages. The popup shows the preload page
+/// then the clutch page, titled for the players who missed each, and takes only Cross; the single
+/// race's Triangle asks "Are you sure you want to quit?" (Circle stays, Cross quits); a league's
+/// results offer only Next.
+#[test]
+fn the_results_menu_has_restart_and_quit_and_the_tips_come_page_by_page() {
+    use game_sim::race::{EndTip, LapCard, RaceEnd};
+    use menu::race::{After, Stage, TipPage, tip_title};
+    use menu::results::{CardStats, HandOver, ResultCard, Who};
+    let (mut m, mut r) = fresh();
+    let mut to_results = |m: &mut Menu, r: &mut Reader, tips: Vec<EndTip>| {
+        main_to(m, r, "Race");
+        tap(m, r, Control::Cross);
+        tap(m, r, Control::Cross);
+        let cards = vec![ResultCard::take(&LapCard { place: 1, ..LapCard::default() }, Who::Player("Me".into()), &CardStats::default())];
+        m.race_ended(HandOver { cards, end: RaceEnd { results: true, tips, ..RaceEnd::default() }, overs: Vec::new() });
+        m.main();
+        assert!(m.race_left());
+    };
+    to_results(&mut m, &mut r, vec![EndTip { seat: 0, no_preload: true, no_clutch: true }, EndTip { seat: 1, no_preload: true, no_clutch: false }]);
+    let res = m.results();
+    assert_eq!((res.stage, res.tip_page), (Stage::Tips, TipPage::Preload));
+    assert_eq!(tip_title(&res.tips, TipPage::Preload), "Player 1 and Player 2 Preload Warning:");
+    assert_eq!(tip_title(&res.tips, TipPage::Clutch), "Player 1 Clutch Warning:");
+    // Circle and Triangle do not close the popup.
+    tap(&mut m, &mut r, Control::Circle);
+    tap(&mut m, &mut r, Control::Triangle);
+    assert_eq!((m.results().stage, m.results().tip_page), (Stage::Tips, TipPage::Preload));
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!((m.results().stage, m.results().tip_page), (Stage::Tips, TipPage::Clutch));
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.results().stage, Stage::Board);
+    assert_eq!(m.results().buttons(), &[After::Quit, After::Restart]);
+    // Triangle asks; Circle stays on the board; Triangle and Cross quit.
+    tap(&mut m, &mut r, Control::Triangle);
+    assert!(m.results().quitting);
+    tap(&mut m, &mut r, Control::Circle);
+    assert!(!m.results().quitting);
+    assert_eq!(m.screen(), Some(Screen::Results));
+    tap(&mut m, &mut r, Control::Triangle);
+    let acts = tap(&mut m, &mut r, Control::Cross);
+    assert!(!acts.iter().any(|a| matches!(a, Act::Ride(_))), "{acts:?}");
+    assert_eq!(m.screen(), Some(Screen::Main));
+    assert_eq!(m.racing(), None);
+
+    // Only seat 1 missed the clutch: the popup is its clutch page alone.
+    to_results(&mut m, &mut r, vec![EndTip { seat: 1, no_preload: false, no_clutch: true }]);
+    let res = m.results();
+    assert_eq!((res.stage, res.tip_page), (Stage::Tips, TipPage::Clutch));
+    assert_eq!(tip_title(&res.tips, TipPage::Clutch), "Player 2 Clutch Warning:");
+    tap(&mut m, &mut r, Control::Cross);
+    assert_eq!(m.results().stage, Stage::Board);
+    // A league's results: Next alone; Triangle does nothing, Cross leaves.
+    m.race.results.as_mut().unwrap().league = true;
+    assert_eq!(m.results().buttons(), &[After::Next]);
+    tap(&mut m, &mut r, Control::Triangle);
+    assert!(!m.results().quitting);
+    let acts = tap(&mut m, &mut r, Control::Cross);
+    assert!(!acts.iter().any(|a| matches!(a, Act::Ride(_))), "{acts:?}");
+    assert_eq!(m.screen(), Some(Screen::Main));
 }
 
 /// A Free Ride after a race is no race (P327), and a race whose load is cancelled goes back to its

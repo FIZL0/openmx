@@ -11944,7 +11944,31 @@ race_end                    boot 0x002fc970 (activity) the race's Over notice (l
 #                                           race::Supercross::race_end
 race_results_take           boot 0x0029d940 (results menu, score manager) the results menu takes the
 #                                           cards. Read in P330, below. menu::results::Board::take
-tip_popup_arm               boot 0x0029abc0 (popup, 1). Not read further.
+tip_popup_arm               boot 0x0029abc0 (popup, 1) +0xb4 = any of +0xc0/+0xc4 (preload missed, seats
+#                                           0/1), +0xb8 = any of +0xc8/+0xcc (clutch); with 1 writes the
+#                                           "STR_PRELOAD_TEXT1" / "STR_CLUTCH_TEXT1" fields from the %s of
+#                                           0x00435cf0 / 0x00435d50 ("You didn't use the "pre-load" /
+#                                           "clutch" feature during the last race!"), with 0 empties them.
+# P333 — the tip popup and the results menu's buttons (menu::race::{tip_title, Results::tip_ok, buttons, press}).
+#   Popup vtable 0x00455d30: ctor 0x0029aad0 ("Preload Movie"/"Clutch Movie" parts +0xa4/+0xac, their "Mode"
+#   +0xa8/+0xb0, the STR_WARNING field +0xd0); open 0x0029ad60 (button bar +0x8c: one button, icon 0,
+#   STR_OK, event 0x36; listens AnimOnDone/AnimOffDone on both parts; +0xb4 -> preload part plays,
+#   else +0xb8 -> clutch part; +0xbc = 1 busy); title 0x0029b3f0 ("Player 1 and Player 2 %s" when both
+#   seats, "Player 1 %s" when seat 0, else "Player 2 %s", of "Preload Warning:" / "Clutch Warning:");
+#   input 0x0029b050 (only event 0x36 while +0xbc == 0: the shown part plays with Mode 1, busy);
+#   anim done 0x0029b1a0 (AnimOnDone + Mode 1 -> not busy; AnimOffDone + Mode 1 -> that page done:
+#   preload done and +0xb8 -> the clutch part opens, else "RaceResultsMenu"); close 0x0029af20 clears
+#   +0xc0..+0xcc. The parts' animation lengths live in the UI scene, not read.
+#   Results menu (its input at 0x00455cb0): open 0x0029c690 and 0x0029cc80 build the button bar: event+0x116 == 0
+#   (single race) two buttons, slot 0 icon 1 STR_QUIT event 0x38, slot 1 icon 0 STR_RESTART event 0x36;
+#   else one, icon 0 STR_NEXT event 0x36. Input 0x0029cde0 (ignored while the Quit dialog +0x94 is up):
+#   0x38 (single race) -> dialog 0x002c2770 "Warning" / "Are you sure you want to quit?"; 0x36 single
+#   race -> HOFMenu (0x002a0ba0(hof, 0)) when 0x002a0b90 (hof +0x20c = 1, returns +0xc0 waiting), else
+#   stats commit 0x0029d1c0 (profile_stat_add 5 when activity 2, then 0..4 per player) and the restart;
+#   0x36 league -> 0x0021c850, "RaceLeagueStandingsMenu"; 0x3e/0x3f page +-1. Dialog listener (+0xa4,
+#   vt 0x00455cd0): 0x0029e400 on yes: HOF waiting -> nothing more, else stats commit and app+0x404 = 2
+#   (to the front end); 0x0029e550 on yes: hof +0xb8 = 1, "HOFMenu"; both clear +0x94. Which dialog
+#   notice calls which of the two was not traced.
 # P330 — the results menu's own code, read (crates/openmx/src/menu_results.rs; tests/race_results.rs).
 race_results_sort           boot 0x0029b720 (record list, key) the insertion sort of the list (count +0,
 #                                           records +4.., key +0x2c) on record word key+1: skipped if
