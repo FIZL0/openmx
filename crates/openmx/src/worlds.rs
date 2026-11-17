@@ -1160,6 +1160,11 @@ pub enum Change {
     Show(usize),
 }
 
+/// The most pieces a [`GroundStream`]'s first build has in flight at once (F29a): each holds its
+/// piece's whole chunk set until it is handed over, a coarse one before it is decimated, so 32 at
+/// once put world_ultra's desktop peak ~270 MB over 8 at once, for ~0.5 s less of build.
+pub const FIRST_BUILDERS: usize = 8;
+
 /// How far a rider goes before its heading is taken again (V92), in feet.
 const HEADING_FEET: f32 = 50.0;
 
@@ -1173,7 +1178,7 @@ const TELEPORT_FEET: f32 = 2000.0;
 impl GroundStream {
     /// The stream, and the pieces it built before the ride: those within `reach.load` of `near`,
     /// or with `all` every one (the whole world before the first frame, as before MD17). The
-    /// pieces are built on every core, all at full detail.
+    /// pieces are built on [`FIRST_BUILDERS`] threads at most, all at full detail.
     pub fn start(w: &WorldMod, cells: u32, reach: Reach, near: &[[f32; 2]], all: bool) -> (GroundStream, Vec<(usize, GroundPiece)>) {
         let mut out = Vec::new();
         let stream = GroundStream::start_into(w, cells, reach, None, near, all, &mut |i, piece| out.push((i, piece)));
@@ -1192,7 +1197,7 @@ impl GroundStream {
                 (all || gap <= reach.load.0).then(|| (i, fine.is_none_or(|f| gap <= f.load.0)))
             })
             .collect();
-        let threads = crate::thread::available_parallelism().map_or(4, |n| n.get()).min(first.len()).max(1);
+        let threads = crate::thread::available_parallelism().map_or(4, |n| n.get()).min(FIRST_BUILDERS).min(first.len()).max(1);
         let work = Arc::new((Mutex::new((Vec::new(), false)), Condvar::new()));
         let (send, built) = channel();
         let n = tiles.len();
