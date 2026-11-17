@@ -3613,8 +3613,7 @@ pub fn tire_points(model: &crate::quad::Model, frame: &crate::math::Mat4) -> Res
 /// The car's physics world (SLUS-21104's: one iteration a substep, 115 substeps a second).
 pub const WORLD: crate::biplane::World = crate::biplane::World { iterations: 1, rate: F(115.0) };
 
-/// The rodata quadwords the car's respawn clears a tire's vectors to, and stands its normals on.
-const TIRE_CLEAR: Vf = Vf([0.0, 0.0, 0.0, 0.0]);
+/// The quadword a fresh tire's normals stand on (`w` 0; the respawn's [`tire_reset`] puts `w` 1).
 const TIRE_UP: Vf = Vf([0.0, 1.0, 0.0, 0.0]);
 
 /// The probe the put-back spot is kept from, in the car node's frame (the quad's).
@@ -3991,15 +3990,11 @@ fn put_back(spot: (Vf, Vf), car: &Car, body: &mut Body) {
 /// its engine): each tire's contact forgotten (solid, sorted, what it stands on), its spin, slips,
 /// torque, compression and load at 0, its contact, point and local velocities, velocity and force
 /// cleared, its ground, car and probe normals stood up; the engine's revs and wheel revs at 0 and
-/// its gear word 1 (the ratio is left as it was).
+/// its gear word 1 (the ratio is left as it was): [`tire_reset`] and [`engine_reset`], so the
+/// vectors' `w` is 1 as SLUS-21104 puts it (MD180).
 fn respawn_reset(car: &mut Car, s: &mut State) {
     for (t, ts) in car.tires.iter_mut().zip(&mut s.tires) {
-        (t.solid, t.sorted, t.stands_on) = (false, false, [0, 0]);
-        (ts.spin, ts.slip_ratio, ts.slip_angle, ts.slip_tan) = (F::ZERO, F::ZERO, F::ZERO, F::ZERO);
-        (ts.torque, ts.compression, t.load) = (F::ZERO, F::ZERO, F::ZERO);
-        (ts.contact, ts.point_velocity, t.local_velocity) = (TIRE_CLEAR, TIRE_CLEAR, TIRE_CLEAR);
-        (ts.velocity, ts.force) = (TIRE_CLEAR, TIRE_CLEAR);
-        (t.ground_normal, t.car_normal, t.probe_normal) = (TIRE_UP, TIRE_UP, TIRE_UP);
+        tire_reset(t, ts);
     }
-    (s.engine.rpm, s.engine.wheel_rpm, s.engine.gear) = (F::ZERO, F::ZERO, 1);
+    engine_reset(&mut s.engine);
 }
