@@ -8658,6 +8658,17 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     if let Some(r) = renderer_of(&mut offscreen, window) {
                         let (models, materials, textures) = r.give_back_models();
                         println!("away: gave back {models} models, {materials} materials and {textures} textures in the background");
+                        // And a world's ground but its stand-in (P307: the phone's log still had a
+                        // ride at 1.3 GB in the background), built and painted again once it is back.
+                        if let Some(stream) = &mut ground_stream {
+                            let (pieces, chunks, bytes) = r.give_back_ground();
+                            let asked = stream.given_back();
+                            let maps = paint_stream.as_mut().map_or(0, |p| p.given_back());
+                            println!(
+                                "away: gave back {pieces} ground pieces ({chunks} chunks), {maps} maps' pages, {} MB, in the background; {asked} pieces to build again",
+                                bytes >> 20
+                            );
+                        }
                     }
                 }
                 away::answered(asked);
@@ -10279,6 +10290,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             {
                 ground_away = gpuwin::times_away();
                 println!("world ground: back in front at tick {}, {} pieces built again", pacer.ticks(), stream.build_again());
+                // The paint's arrays the background gave back, before a map's pages are written (P307).
+                if let Some(r) = renderer_of(&mut offscreen, window)
+                    && r.take_back_ground_paint()
+                {
+                    println!("world paint: page arrays made again at tick {}", pacer.ticks());
+                }
             }
             if let Some(stream) = ground_stream.as_mut().filter(|_| in_front) {
                 let near: Vec<[f32; 2]> = match (args.world_sweep, args.frames) {

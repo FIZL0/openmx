@@ -2210,6 +2210,22 @@ fn upload_world_paged(device: &wgpu::Device, queue: &wgpu::Queue, w: &WorldPaint
     (views, paged)
 }
 
+/// One of a world's page arrays as [`upload_world_paged`] makes it, empty, and its view (P307).
+fn paged_array(device: &wgpu::Device, (pw, ph): (u32, u32), layers: u32, mips: u32) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("world ground pages"),
+        size: wgpu::Extent3d { width: pw, height: ph, depth_or_array_layers: layers },
+        mip_level_count: mips,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() });
+    (texture, view)
+}
+
 /// The baked light map's tiles as one grey image, for the ground's shader.
 fn upload_shadow(device: &wgpu::Device, queue: &wgpu::Queue, s: &crate::splat::Shadow) -> wgpu::TextureView {
     let across = s.across.max(1);
@@ -3721,6 +3737,86 @@ impl Renderer {
         // Freed once the device has seen that no submission still holds them; no GPU work is made.
         let _ = self.device.poll(wgpu::PollType::Poll);
         let_go
+    }
+
+    /// Give the GPU back a streamed world's ground but its stand-in (P307: the iPhone app in the
+    /// background, after [`Renderer::give_back_models`]): every other piece's chunks, the vertex pages
+    /// past the last the stand-in's are on, and the paint's page arrays, each map back on its far
+    /// pages. No GPU work is made. The pieces come back as they are added again, and the arrays with
+    /// [`Renderer::take_back_ground_paint`], which must come before the next map's pages are written.
+    /// Returns how many pieces and chunks were let go, and the bytes of pages and arrays.
+    pub fn give_back_ground(&mut self) -> (usize, usize, u64) {
+        let Some(mut g) = self.ground.take() else { return (0, 0, 0) };
+        let mut pieces: Vec<u32> = g.hashes.keys().copied().filter(|&p| p != STAND_IN).collect();
+        pieces.sort_unstable();
+        let chunks = g.chunks.iter().filter(|c| c.piece != STAND_IN).count();
+        for &piece in &pieces {
+            g.forget(piece);
+            g.hashes.remove(&piece);
+            g.fades.remove(&piece);
+            g.changed(piece);
+        }
+        g.regrid();
+        // The pages after the last one in use: all but the last are full ones, so the rest still are.
+        let stride = u64::from((g.cells + 1) * (g.cells + 1)) * std::mem::size_of::<GroundVertex>() as u64;
+        let keep = g.chunks.iter().map(|c| c.page as usize + 1).max().unwrap_or(1);
+        let mut bytes: u64 = g.pages.iter().skip(keep).map(wgpu::Buffer::size).sum();
+        if keep < g.pages.len() {
+            g.pages.truncate(keep);
+            g.capacity = (keep as u32 - 1) * g.per_page + (g.pages[keep - 1].size() / stride) as u32;
+            let capacity = g.capacity;
+            g.free.retain(|&place| place < capacity);
+        }
+        // The page arrays, each for one of a layer: a world's paint views start with its first array,
+        // then the leaves and the details, then the arrays after the first.
+        if let Some(p) = &mut g.paged {
+            for tile in 0..p.tiles.len() {
+                if p.give_back(tile) {
+                    p.write_leaves(&self.queue, tile);
+                }
+            }
+            for k in 0..p.arrays.len() {
+                let (texture, (pw, ph), mips) = &p.arrays[k];
+                let (pw, ph, mips) = (*pw, *ph, *mips);
+                if texture.depth_or_array_layers() == 1 {
+                    continue;
+                }
+                bytes += (0..mips).map(|l| u64::from((pw >> l).max(1)) * u64::from((ph >> l).max(1)) * 4).sum::<u64>()
+                    * u64::from(texture.depth_or_array_layers());
+                let (texture, view) = paged_array(&self.device, (pw, ph), 1, mips);
+                p.arrays[k].0 = texture;
+                g.textures[if k == 0 { 0 } else { 2 + k }] = view;
+            }
+            g.bind = self.ground_bind(&g.layout, &g.shadow, &g.textures);
+        }
+        self.ground = Some(g);
+        let _ = self.device.poll(wgpu::PollType::Poll);
+        (pieces.len(), chunks, bytes)
+    }
+
+    /// The paint's page arrays [`Renderer::give_back_ground`] let go, made again at their own size
+    /// (P307), empty, every map still on its far pages. False if none was let go.
+    pub fn take_back_ground_paint(&mut self) -> bool {
+        let Some(mut g) = self.ground.take() else { return false };
+        let mut made = false;
+        if let Some(p) = &mut g.paged {
+            for k in 0..p.arrays.len() {
+                let ((pw, ph), mips) = (p.arrays[k].1, p.arrays[k].2);
+                let layers = array_layers(p.capacity[k].max(1), pw, ph);
+                if p.arrays[k].0.depth_or_array_layers() == layers {
+                    continue;
+                }
+                let (texture, view) = paged_array(&self.device, (pw, ph), layers, mips);
+                p.arrays[k].0 = texture;
+                g.textures[if k == 0 { 0 } else { 2 + k }] = view;
+                made = true;
+            }
+            if made {
+                g.bind = self.ground_bind(&g.layout, &g.shadow, &g.textures);
+            }
+        }
+        self.ground = Some(g);
+        made
     }
 
     /// Wait for everything submitted so far to be drawn.
