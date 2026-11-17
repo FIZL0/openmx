@@ -25,10 +25,13 @@ use std::process::Command;
 /// and 2671 MB on the desktop, after 4.4 s and ~1910 MB. CPU time, not the wall clock (K23): with
 /// the other slots' gates at load 44-69 the wall clock read 18.3 to 21.8 s (and 34.7 s at load 76)
 /// while the CPU time held at 48-52 s, 10-12 s of it the shell's thread; the bounds are ~1.6 times
-/// that, and the 24 s of seam reads P283 took out were the shell's thread's.
+/// that, and the 24 s of seam reads P283 took out were the shell's thread's. F29 took the peak from
+/// 1858-1929 MB to 1548-1735 MB at load 30-45 (and 1417 to 1094 MB on 8 cores, the Deck's), with
+/// the far maps' skies read near the riders, the look read 8 maps at a time and the CPU's paint let
+/// go before the ground is built.
 const FIRST_FRAME_CPU_S: f32 = 80.0;
 const FIRST_FRAME_THREAD_S: f32 = 20.0;
-const PEAK_MB: u64 = 2300;
+const PEAK_MB: u64 = 2000;
 /// The most CPU time a paint update that writes pages may take of a 60 Hz frame, in ms, at the
 /// median and the 90th percentile (K23: the wall clock's 8.69 ms under load was the thread waiting
 /// for a core; K53: the slowest update's cpu read 8.89 ms under load too, so it is not judged).
@@ -100,6 +103,11 @@ fn world_ultras_first_frame_is_quick_and_small_with_the_far_maps_not_built() {
     let held = numbers(held)[0] as usize;
     let maps = numbers(paint)[1] as usize;
     assert!(held > 0 && held * 4 < maps, "{held} of {maps} maps hold their pages at the start");
+    // And their skies (F29): the far maps' are read as an eye comes near.
+    let look = line(&said, "world look: ");
+    let n = numbers(look);
+    let (tiles, skies, later) = (n[1] as usize, n[2] as usize, n[3] as usize);
+    assert!(later * 4 > tiles * 3 && skies + later <= tiles, "{look}");
     // And the far ground not built.
     let ground = said.lines().find(|l| l.contains("pieces built before the ride")).unwrap_or_else(|| panic!("no ground:\n{said}"));
     let ground = numbers(ground);

@@ -1665,8 +1665,12 @@ fn sample_near(t: &Terrain, tile: &Tile, lx: f32, lz: f32) -> Option<GroundVerte
 pub struct WorldLook {
     pub paint: game_render::terrain::WorldPaint,
     pub looks: game_render::scene::Looks,
-    /// Each map's sky, in the regions' order; `None` where its scene names none that reads.
+    /// Each map's sky, in the regions' order; `None` where its scene names none that reads, or
+    /// where it is read later.
     pub skies: Vec<Option<game_render::sky::Sky>>,
+    /// The maps whose skies were left to read near the riders (F29, [`SkyStream`]): far maps whose
+    /// own archives hold their skies.
+    pub sky_later: Vec<bool>,
     /// Each map's name, for the log.
     pub names: Vec<String>,
 }
@@ -1705,15 +1709,18 @@ impl WorldMod {
     /// map's far pages kept, and the pages of a map `near` does not keep let go as soon as it is
     /// read ([`game_render::terrain::Pages::hollow`]), its far pages made, so the load never holds
     /// more than a core's map at a time besides; `reach` is how near a map stays held
-    /// ([`game_render::terrain::FarPaint::reach`]).
+    /// ([`game_render::terrain::FarPaint::reach`]). A map `near` does not keep has its sky left to
+    /// read near the riders too ([`WorldLook::sky_later`], F29), if its own archive holds it.
     pub fn look_near(&self, fallback: &[Res], dirt: [f32; 3], home: game_render::world::Lighting, near: Option<(&(dyn Fn(usize) -> bool + Sync), f32)>) -> WorldLook {
         let regions = self.regions();
-        let (mut tiles, mut lights, mut skies, mut names, mut far) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let (mut tiles, mut lights, mut skies, mut names, mut far, mut sky_later) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
         // Each map read on a core of its own (MD15: a disc map's paint is baked, which takes a while).
         let read_one = |(i, p): (usize, &WorldPiece)| {
             let read = || -> Result<_, String> {
                 let (mut pages, mut sharp, look, text, res) = map_paint(p)?;
-                let sky = game_render::sky::Sky::load(std::slice::from_ref(&res), &text).or_else(|| game_render::sky::Sky::load(fallback, &text));
+                let own = std::slice::from_ref(&res);
+                let later = near.is_some_and(|(keep, _)| !keep(i)) && game_render::sky::Sky::held_in(own, &text);
+                let sky = if later { None } else { game_render::sky::Sky::load(own, &text).or_else(|| game_render::sky::Sky::load(fallback, &text)) };
                 let mut far = Vec::new();
                 if let (Some((keep, _)), Some(pg)) = (near, &mut pages) {
                     far = pg.pages.iter().map(game_render::terrain::far_page).collect();
@@ -1721,15 +1728,15 @@ impl WorldMod {
                         hollow(pg, &mut sharp);
                     }
                 }
-                Ok((pages, sharp, game_render::world::Lighting::of(&look), sky, far))
+                Ok((pages, sharp, game_render::world::Lighting::of(&look), sky, far, later))
             };
             read().unwrap_or_else(|e| {
                 println!("world: {} looks like dirt: {e}", p.tile.name);
-                (None, None, home, None, Vec::new())
+                (None, None, home, None, Vec::new(), false)
             })
         };
         let maps = &self.pieces[..self.tile_count];
-        let threads = crate::thread::available_parallelism().map_or(4, |n| n.get()).min(maps.len()).max(1);
+        let threads = crate::thread::available_parallelism().map_or(4, |n| n.get()).min(LOOK_READERS).min(maps.len()).max(1);
         let mut read: Vec<(usize, _)> = crate::thread::scope(|scope| {
             let jobs: Vec<_> = (0..threads)
                 .map(|t| {
@@ -1740,12 +1747,13 @@ impl WorldMod {
             jobs.into_iter().flat_map(|j| j.join().expect("a map's look")).collect()
         });
         read.sort_by_key(|(i, _)| *i);
-        for (p, (_, (pages, sharp, light, sky, far_pages))) in maps.iter().zip(read) {
+        for (p, (_, (pages, sharp, light, sky, far_pages, later))) in maps.iter().zip(read) {
             let at = p.tile.at.map(|a| a.0);
             tiles.push(game_render::terrain::PaintTile { at, pages, sharp });
             far.push(far_pages);
             lights.push(light);
             skies.push(sky);
+            sky_later.push(later);
             names.push(p.tile.name.clone());
         }
         WorldLook {
@@ -1757,9 +1765,165 @@ impl WorldMod {
             },
             looks: game_render::scene::Looks { regions, lights },
             skies,
+            sky_later,
             names,
         }
     }
+}
+
+/// The most maps [`WorldMod::look_near`] reads at once (F29). Each read holds a whole map's pages,
+/// terrain and baked paint till it is done, and each reader thread keeps its own heap's freed memory:
+/// on a 32-core desktop world_ultra's look peaked ~300 MB higher read 32 at a time than 8 (the
+/// Deck's cores, so its own load is unchanged).
+pub const LOOK_READERS: usize = 8;
+
+/// A world's skies read near the riders (F29), as [`crate::paint_stream::PaintStream`] does the
+/// maps' pages: a far map's sky ([`WorldLook::sky_later`]) is read from its own archive on a thread
+/// of its own once an eye comes within [`Reach::load`] of the map, and let go past [`Reach::drop`]
+/// (the renderer keeps each map's cube once it is uploaded). world_ultra's 77 skies are 115 MB.
+pub struct SkyStream {
+    maps: Arc<Vec<WorldPiece>>,
+    owned: Vec<[f32; 4]>,
+    names: Vec<String>,
+    reach: Reach,
+    held: Vec<SkyHeld>,
+    ask: std::sync::mpsc::Sender<usize>,
+    read: Receiver<(usize, Result<Option<game_render::sky::Sky>, String>)>,
+    log: Vec<String>,
+    /// How many skies were read in the ride, and the most held at once.
+    pub read_in_ride: usize,
+    pub most_held: usize,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum SkyHeld {
+    /// Read at the load, or it has none: never read again.
+    Kept,
+    /// Not read yet, or let go.
+    Later,
+    Asked,
+    Read,
+}
+
+impl SkyStream {
+    /// The stream over `w`'s maps, `look` as [`WorldMod::look_near`] read it.
+    pub fn start(w: &WorldMod, look: &WorldLook, reach: Reach) -> SkyStream {
+        let maps = Arc::new(w.pieces[..w.tile_count].to_vec());
+        let held = (0..maps.len()).map(|i| if look.sky_later.get(i) == Some(&true) { SkyHeld::Later } else { SkyHeld::Kept }).collect();
+        let (ask, asked) = channel::<usize>();
+        let (send, read) = channel();
+        let theirs = maps.clone();
+        std::thread::spawn(move || {
+            while let Ok(i) = asked.recv() {
+                if send.send((i, map_sky(&theirs[i]))).is_err() {
+                    return;
+                }
+            }
+        });
+        SkyStream {
+            maps,
+            owned: w.regions().owned,
+            names: look.names.clone(),
+            reach,
+            held,
+            ask,
+            read,
+            log: Vec::new(),
+            read_in_ride: 0,
+            most_held: 0,
+        }
+    }
+
+    /// Let go of the skies past reach of `near` (the eyes, and their copies across a wrap's seams),
+    /// ask for those within reach nearest first, and put what was read in `skies`.
+    pub fn update(&mut self, near: &[[f32; 2]], skies: &mut [Option<game_render::sky::Sky>]) {
+        let gaps: Vec<f32> = self.owned.iter().map(|o| near.iter().map(|&p| rect_gap(o, p)).fold(f32::INFINITY, f32::min)).collect();
+        for i in 0..self.held.len() {
+            if self.held[i] == SkyHeld::Read && gaps[i] > self.reach.drop.0 {
+                skies[i] = None;
+                self.held[i] = SkyHeld::Later;
+                self.log.push(format!("world sky: {} let go", self.names[i]));
+            }
+        }
+        let mut want: Vec<usize> = (0..self.held.len()).filter(|&i| self.held[i] == SkyHeld::Later && gaps[i] <= self.reach.load.0).collect();
+        want.sort_by(|a, b| gaps[*a].total_cmp(&gaps[*b]));
+        for i in want {
+            if self.ask.send(i).is_ok() {
+                self.held[i] = SkyHeld::Asked;
+            }
+        }
+        while let Ok((i, sky)) = self.read.try_recv() {
+            if self.held[i] != SkyHeld::Asked {
+                // Read on the shell's thread meanwhile ([`SkyStream::need`]), or let go and not asked again.
+                continue;
+            }
+            match sky {
+                // Gone out of reach while it was read.
+                Ok(_) if gaps[i] > self.reach.drop.0 => self.held[i] = SkyHeld::Later,
+                Ok(sky) => {
+                    self.log.push(format!("world sky: {} read{}", self.names[i], if sky.is_some() { "" } else { ", and it does not decode" }));
+                    skies[i] = sky;
+                    self.held[i] = SkyHeld::Read;
+                    self.read_in_ride += 1;
+                }
+                Err(e) => {
+                    self.log.push(format!("world sky: {} has none: {e}", self.names[i]));
+                    self.held[i] = SkyHeld::Kept;
+                }
+            }
+        }
+        self.most_held = self.most_held.max(self.held());
+    }
+
+    /// Map `i`'s sky in `skies` now: read here if the stream has not read it yet, as when a view
+    /// jumps over a map no eye came near (a shot's pose, a camera moved).
+    pub fn need(&mut self, i: usize, skies: &mut [Option<game_render::sky::Sky>]) {
+        if self.ready(i) {
+            return;
+        }
+        let (sky, line) = match map_sky(&self.maps[i]) {
+            Ok(sky) => {
+                let line = format!("world sky: {} read at once{}", self.names[i], if sky.is_some() { "" } else { ", and it does not decode" });
+                (sky, line)
+            }
+            Err(e) => (None, format!("world sky: {} has none: {e}", self.names[i])),
+        };
+        self.log.push(line);
+        skies[i] = sky;
+        self.held[i] = SkyHeld::Read;
+        self.read_in_ride += 1;
+        self.most_held = self.most_held.max(self.held());
+    }
+
+    /// Whether map `i`'s sky is as it will be drawn: read, or never to be (a sky not read yet would
+    /// be uploaded as none, and kept so).
+    pub fn ready(&self, i: usize) -> bool {
+        matches!(self.held.get(i), Some(SkyHeld::Kept | SkyHeld::Read) | None)
+    }
+
+    /// How many of the streamed skies are held now.
+    pub fn held(&self) -> usize {
+        self.held.iter().filter(|h| **h == SkyHeld::Read).count()
+    }
+
+    /// What the stream did since the shell last took the lines.
+    pub fn take_log(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.log)
+    }
+}
+
+/// The sky a world map's scene names, from its own archive ([`SkyStream`]).
+fn map_sky(p: &WorldPiece) -> Result<Option<game_render::sky::Sky>, String> {
+    let res = p.res()?;
+    let (_, _, scn) = scene_of(&res)?;
+    Ok(game_render::sky::Sky::load(std::slice::from_ref(&res), &game_render::ini::text(&scn)))
+}
+
+/// How far `p` is from the rectangle `r` (x0, z0, x1, z1): 0 inside it.
+fn rect_gap(r: &[f32; 4], p: [f32; 2]) -> f32 {
+    let dx = (r[0] - p[0]).max(p[0] - r[2]).max(0.0);
+    let dz = (r[1] - p[1]).max(p[1] - r[3]).max(0.0);
+    dx.hypot(dz)
 }
 
 /// A map's pages and its sharp splat's modulate pages let go (P283, [`game_render::terrain::Pages::hollow`]).

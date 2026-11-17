@@ -109,6 +109,20 @@ impl Sky {
     /// The sky a scene names in its `[Environment]`, from the archives that hold it; `None` if it
     /// names none or the file does not decode.
     pub fn load(archives: &[Res], scene_text: &str) -> Option<Sky> {
+        let [ps2, cube] = Sky::names(scene_text)?;
+        let bytes = archives.iter().find_map(|a| a.read_suffix(&ps2).or_else(|_| a.read_suffix(&cube)).ok())?;
+        Sky::parse(&bytes).ok()
+    }
+
+    /// Whether one of the archives holds the sky a scene names, without reading it (F29): what
+    /// [`Sky::load`] would read it from.
+    pub fn held_in(archives: &[Res], scene_text: &str) -> bool {
+        Sky::names(scene_text).is_some_and(|[ps2, cube]| archives.iter().any(|a| a.find_suffix(&ps2).or_else(|| a.find_suffix(&cube)).is_some()))
+    }
+
+    /// The names the sky a scene's `[Environment]` names is looked for under: its `.ps2.cub`, then
+    /// its `CubeFile` as written.
+    fn names(scene_text: &str) -> Option<[String; 2]> {
         let cube = ini::parse(scene_text)
             .iter()
             .find(|s| s.name.eq_ignore_ascii_case("Environment"))?
@@ -116,10 +130,7 @@ impl Sky {
             .trim()
             .to_ascii_lowercase();
         let stem = cube.strip_suffix(".cub").unwrap_or(&cube);
-        let bytes = archives
-            .iter()
-            .find_map(|a| a.read_suffix(&format!("{stem}.ps2.cub")).or_else(|_| a.read_suffix(&cube)).ok())?;
-        Sky::parse(&bytes).ok()
+        Some([format!("{stem}.ps2.cub"), cube.clone()])
     }
 
     /// The sky's colour in a direction of the world.
