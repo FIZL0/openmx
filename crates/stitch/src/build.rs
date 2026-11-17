@@ -645,6 +645,29 @@ impl Widen {
 /// How many times [`units_layout`] sets each tile of a wrapped axis in the middle of its room.
 const RELAX: usize = 200;
 
+/// The gap [`units_layout`] leaves at least from `a`'s far side to `b`'s near side along `axis`: the
+/// widest of a smallest gap and what their edges' heights need ([`gap_for`]), times `a`'s widening
+/// there.
+#[allow(clippy::too_many_arguments)]
+fn unit_gap(rings: &[crate::Ring], gates: &[[f64; 4]], p: &Params, w: &Widen, step: f64, axis: usize, a: usize, b: usize) -> f64 {
+    let room = |t: usize, e: usize| gates[t][e] - (step + 2.0 * p.fade);
+    let wa = w.after(axis, a);
+    let dh = rings[a].edge_mean(axis + 2) - rings[b].edge_mean(axis);
+    gap_for(dh, p, room(a, axis + 2) + room(b, axis), wa).max(p.min_gap * wa)
+}
+
+/// Every pair's [`unit_gap`] for these tiles cut as [`layout`] cuts them, widened by `w`: `[x, z]`,
+/// each `[a][b]` from `a`'s far side to `b`'s near side. What a join between the two is held to
+/// wherever the unit layout puts it, over a wrapped world's seam too (MD102).
+pub fn unit_gaps(tiles: &[Tile], p: &Params, w: &Widen) -> [Vec<Vec<f64>>; 2] {
+    let cuts: Vec<[u32; 4]> = tiles.iter().map(|t| t.trim_cut(p.trim).keep).collect();
+    let step = lattice_spacing(tiles);
+    let gates: Vec<[f64; 4]> = tiles.iter().zip(&cuts).map(|(t, k)| cut_source(t, *k, step, p).gates).collect();
+    let rings: Vec<crate::Ring> = tiles.iter().zip(&cuts).map(|(t, k)| t.ring(*k)).collect();
+    let n = tiles.len();
+    [0, 1].map(|axis| (0..n).map(|a| (0..n).map(|b| unit_gap(&rings, &gates, p, w, step, axis, a, b)).collect()).collect())
+}
+
 /// Where [`units_layout`] puts the tiles.
 struct Layout {
     at: Vec<[f64; 2]>,
@@ -803,14 +826,7 @@ fn units_layout(
     let mut at = vec![[0.0; 2]; n];
     let mut keep = cuts.to_vec();
     let mut size = [0.0f64; 2];
-    let room = |t: usize, e: usize| gates[t][e] - (step + 2.0 * p.fade);
-    // The gap from `a`'s far side to `b`'s near side along `axis`: the widest of a smallest gap and
-    // what their edges' heights need ([`gap_for`]), times `a`'s widening there.
-    let gap = |axis: usize, a: usize, b: usize| {
-        let wa = w.after(axis, a);
-        let dh = rings[a].edge_mean(axis + 2) - rings[b].edge_mean(axis);
-        gap_for(dh, p, room(a, axis + 2) + room(b, axis), wa).max(p.min_gap * wa)
-    };
+    let gap = |axis: usize, a: usize, b: usize| unit_gap(rings, gates, p, w, step, axis, a, b);
     let span = |at: &[[f64; 2]], keep: &[[u32; 4]], t: usize, a: usize| {
         let s = tiles[t].spacing;
         (at[t][a] + f64::from(keep[t][a]) * s, at[t][a] + f64::from(keep[t][a + 2]) * s)
@@ -918,8 +934,7 @@ fn units_layout(
                 let mut start = shared.clone();
                 for _ in 0..RELAX {
                     for &t in &order {
-                        let mut lo = end;
-                        let mut hi = period - end - width[t];
+                        let (mut lo, mut hi) = (f64::NEG_INFINITY, f64::INFINITY);
                         for b in (0..n).filter(|&b| b != t) {
                             if face[b][t] {
                                 let wrap = if last(b) < first(t) { 0.0 } else { period };
@@ -930,8 +945,14 @@ fn units_layout(
                                 hi = hi.min(start[b] + wrap - gap(axis, t, b) - width[t]);
                             }
                         }
-                        if lo <= hi {
-                            start[t] = (lo + hi) / 2.0;
+                        // The middle of the room its neighbours leave it, round the wrap too, and
+                        // only then held off the seam (MD102: the room measured to the seam instead
+                        // left a line's first and last tile nearer their other neighbours, and the
+                        // join over the seam 150-330 ft wider than the line's others).
+                        let (lo2, hi2) = (lo.max(end), hi.min(period - end - width[t]));
+                        if lo2 <= hi2 {
+                            let mid = if lo.is_finite() && hi.is_finite() { (lo + hi) / 2.0 } else { (lo2 + hi2) / 2.0 };
+                            start[t] = mid.clamp(lo2, hi2);
                         }
                     }
                 }
