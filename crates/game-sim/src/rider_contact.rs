@@ -463,6 +463,37 @@ pub struct Flown {
     pub collider: Collider,
     pub body: crate::biplane::Body,
     pub mass: F,
+    /// MD179: a quad's body in place of [`Flown::body`] (which is then unread), as a bike's resolve
+    /// pushes it ([`crate::quad::Ride::flown`]).
+    pub quad: Option<FlownQuad>,
+}
+
+/// **A quad's body as a bike's resolve pushes it** (MD179): the quad's [`crate::atv_body::Body`]
+/// and its centre of mass in its frame, which [`crate::atv_contact::Weighed`] answers the resolve
+/// with.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FlownQuad {
+    pub body: crate::atv_body::Body,
+    pub cofg: Vf,
+}
+
+impl Flown {
+    /// The body's velocity: the quad's, for a quad.
+    pub fn velocity(&self) -> Vf {
+        match &self.quad {
+            Some(q) => q.body.velocity,
+            None => self.body.velocity,
+        }
+    }
+
+    /// Its collision object and its body as the other side of a bike's contact.
+    fn weighed(&mut self) -> (&mut Collider, Box<dyn contact::Rigid + '_>) {
+        let mass = self.mass;
+        match &mut self.quad {
+            Some(q) => (&mut self.collider, Box::new(crate::atv_contact::Weighed { body: &mut q.body, mass, cofg: q.cofg })),
+            None => (&mut self.collider, Box::new(contact::Weighed { body: &mut self.body, mass })),
+        }
+    }
 }
 
 impl Bump {
@@ -473,18 +504,14 @@ impl Bump {
             return;
         }
         let mut mine = self.colliders[self.me];
-        let mut planes: Vec<_> = self
-            .planes
-            .iter_mut()
-            .map(|p| (&mut p.collider, contact::Weighed { body: &mut p.body, mass: p.mass }))
-            .collect();
+        let mut planes: Vec<_> = self.planes.iter_mut().map(Flown::weighed).collect();
         let mut bodies: Vec<_> = self.props.iter_mut().map(crate::prop_contact::Pushed::weighed).collect();
         let mut others: Vec<Other<'_>> = self
             .colliders
             .iter_mut()
             .zip(self.vehicles.iter_mut())
             .map(|(collider, v)| Other { collider, side: Side::Vehicle(v) })
-            .chain(planes.iter_mut().map(|(collider, body)| Other { collider: &mut **collider, side: Side::Body(body) }))
+            .chain(planes.iter_mut().map(|(collider, body)| Other { collider: &mut **collider, side: Side::Body(&mut **body) }))
             .chain(bodies.iter_mut().map(|(collider, body)| Other { collider: &mut **collider, side: Side::Body(body) }))
             .collect();
         contact::resolve_ridden(&mut mine, own, &mut self.contacts, &mut others, &self.movers, first);
@@ -702,7 +729,7 @@ pub fn wreck_contacts(b: &Bump) -> Vec<crate::air::Contact> {
                 None => crate::air::Other::Scenery,
                 Some(o) => {
                     let f = o.checked_sub(players).and_then(|k| b.planes.get(k))?;
-                    crate::air::Other::Object { mass: f.mass, vel: f.body.velocity }
+                    crate::air::Other::Object { mass: f.mass, vel: f.velocity() }
                 }
             };
             Some(crate::air::Contact { mirrored: false, reach: F(c.on_body.y()), other })

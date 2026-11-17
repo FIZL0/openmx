@@ -3193,7 +3193,7 @@ impl Machine {
             body.position = near;
             body.last_position = body.last_position.add(by);
         }
-        crate::rider_contact::Flown { seat, collider: collision.collider, body, mass: collision.mass }
+        crate::rider_contact::Flown { seat, collider: collision.collider, body, mass: collision.mass, quad: None }
     }
 
     /// The body a bike's resolve pushed, written back (F26): its speeds, spins and what the resolve

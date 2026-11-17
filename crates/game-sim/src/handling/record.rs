@@ -463,6 +463,7 @@ pub fn held(w: &impl Words, at: u32) -> Option<crate::atv_contact::Held> {
         movers: Vec::new(),
         mass: if b != 0 { w.f(b + 0x18) } else { F::ZERO },
         body: (b != 0).then(|| super::seed::body(w, b)),
+        bikes: Vec::new(),
     })
 }
 

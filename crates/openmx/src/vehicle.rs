@@ -1785,7 +1785,8 @@ impl Garage {
         // run as they do under a car.
         if let (Kind::Atv, Some(atv)) = (self.up, self.atv.as_mut()) {
             sim.traffic.frame(dt, world);
-            atv.step(controls, dt, world);
+            // Among the seats, with the mirrors of the bikes' strikes on its hull (MD179).
+            atv.step_met(controls, dt, world, among.met.as_deref());
             return rider::Frame::default();
         }
         // MX vs. ATV's car (MD39c) on the seat's pad through the ride's bindings, as a car's.
@@ -2785,9 +2786,16 @@ impl Garage {
         self.cars.iter().find(|c| c.machine == m)
     }
 
-    /// The body a bike's resolve pushed (F26), written back to the machine it is: the car up, or
-    /// else the plane ([`Garage::plane_pushed`]).
+    /// The body a bike's resolve pushed (F26), written back to the machine it is: the quad up (MD179),
+    /// the car up, or else the plane ([`Garage::plane_pushed`]).
     pub fn hull_pushed(&mut self, by: &game_sim::rider_contact::Flown) {
+        // The quad up (MD179), whose body the flown copy carries.
+        if by.quad.is_some() {
+            if let Some(atv) = self.atv.as_mut().filter(|_| self.up == Kind::Atv) {
+                atv.pushed(by);
+            }
+            return;
+        }
         let m = self.up.car();
         match self.cars.iter_mut().find(|c| Some(c.machine) == m) {
             Some(car) => car.pushed(by),
@@ -3495,6 +3503,10 @@ pub struct AtvRide {
     pub untamed: bool,
     /// MD165: the length of the rider's get-ready pause clip, which ends the pause; the look sets it.
     pub rider_pause: f32,
+    /// MD179: the chassis' frame mesh (`Veh/Col/ATV_<R|S>_ChasisF.col`, [`game_sim::quad::hull_file`]),
+    /// what the riders' bikes strike ([`AtvRide::hull`]); `None` for a pack without it, whose quad is in
+    /// no bike's world.
+    pub hull: Option<std::sync::Arc<game_sim::track::Mesh>>,
 }
 
 impl std::fmt::Debug for AtvRide {
@@ -3530,7 +3542,17 @@ impl AtvRide {
         let rays = |b: Vec<u8>, what: &str| game_sim::track::Rays::parse(&b).map_err(|e| format!("{what}: {e}"));
         let riding = rays(file(&format!("Veh/Col/{col}"))?, col)?;
         let wreck = rays(file(&format!("Veh/Col/{}", game_sim::quad::WRECK_FILE))?, game_sim::quad::WRECK_FILE)?;
-        let atv = AtvRide { pack: pack.to_string(), phy: atv_stem(phy).to_string(), ini, model: std::sync::Arc::new(model), riding, wreck, ridden: None, taken_at: Vf::default(), wrecks: 0, mods: game_sim::modifiers::Mods::original(), seat: 0, stunts: Vec::new(), untamed: false, rider_pause: 0.0 };
+        let hull = game_sim::quad::hull_file(col).and_then(|f| {
+            let bytes = read(&format!("Veh/Col/{f}"))?;
+            match game_sim::track::Mesh::parse(&bytes) {
+                Ok(m) => Some(std::sync::Arc::new(m)),
+                Err(e) => {
+                    eprintln!("atv: {f}: {e}");
+                    None
+                }
+            }
+        });
+        let atv = AtvRide { pack: pack.to_string(), phy: atv_stem(phy).to_string(), ini, model: std::sync::Arc::new(model), riding, wreck, ridden: None, taken_at: Vf::default(), wrecks: 0, mods: game_sim::modifiers::Mods::original(), seat: 0, stunts: Vec::new(), untamed: false, rider_pause: 0.0, hull };
         atv.made(Vf::new(0.0, 0.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 1.0), None)?;
         Ok(atv)
     }
@@ -3580,9 +3602,15 @@ impl AtvRide {
 
     /// One tick of it on the seat's `controls` (the bike's, as its pad maps them), over `world`.
     pub fn step(&mut self, controls: &Controls, dt: F, world: &mut dyn World) {
+        self.step_met(controls, dt, world, None);
+    }
+
+    /// [`AtvRide::step`] among the riders' bikes (MD179): `met` the mirrors of their strikes on its
+    /// hull and their chassis ([`game_sim::quad::Ride::step_met`]).
+    pub fn step_met(&mut self, controls: &Controls, dt: F, world: &mut dyn World, met: Option<&flight::Met>) {
         let Some(q) = self.ridden.as_deref_mut() else { return };
         q.ride.rest.clear();
-        q.ride.step(controls, dt, world, q.segments);
+        q.ride.step_met(controls, dt, world, q.segments, met);
         if let Some(clips) = &mut q.clips {
             clips.tick(&q.ride, dt.0);
         }
@@ -3591,6 +3619,25 @@ impl AtvRide {
             self.wrecks += 1;
         }
         q.was_down = down;
+    }
+
+    /// Its hull as the riders' bikes meet it while it is out (MD179, [`game_sim::quad::Ride::hull`]),
+    /// for seat `seat`: `None` for a quad not out, or with no hull mesh or no record.
+    pub fn hull(&self, seat: usize) -> Option<game_sim::rider_contact::Hull<'_>> {
+        self.ridden.as_ref()?.ride.hull(seat, self.hull.as_deref()?)
+    }
+
+    /// Its body as a bike's resolve pushes it (MD179, [`game_sim::quad::Ride::flown`]), the copy
+    /// nearest `from`.
+    pub fn flown(&self, seat: usize, from: Vf, world: &dyn World) -> Option<game_sim::rider_contact::Flown> {
+        self.ridden.as_ref()?.ride.flown(seat, from, world)
+    }
+
+    /// The body a bike's resolve pushed, written back (MD179, [`game_sim::quad::Ride::pushed`]).
+    pub fn pushed(&mut self, by: &game_sim::rider_contact::Flown) {
+        if let Some(q) = self.ridden.as_deref_mut() {
+            q.ride.pushed(by);
+        }
     }
 
     /// Its ride, while it is out.
