@@ -680,6 +680,10 @@ pub struct Race {
     /// whose name holds `sx`: ticked last, on [`Race::rng`]. `None` — every other race — and the tick
     /// draws what it did.
     pub flashes: Option<Box<crate::camera_flash::CameraFlashes>>,
+    /// The drop gate's sink (P313c), on a race on a track whose `[DropGate]` sets `MoveGateDown`:
+    /// ticked after the race manager, off [`Race::laps`]'s cards ([`crate::Sim`]'s race frame, which
+    /// stands its collision pieces). `None` — every other race.
+    pub sink: Option<Box<crate::drop_gate::Sink>>,
     /// P350: riders the race's Sim does not hold — a split-screen seat's, each seat its own Sim —
     /// told after the Sim's players, in their order, by whoever holds them before the Sim's step.
     /// Empty — every ride but a race over several seats — and the tick is what it was. Not walked
@@ -730,6 +734,7 @@ impl Race {
             rng,
             laps: None,
             flashes: None,
+            sink: None,
             guests: Vec::new(),
             guests_did: Frame::default(),
         }

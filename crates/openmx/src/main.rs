@@ -5187,7 +5187,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     progress.reach(loading::Stage::Props)?;
     // Everything solid the scene stands on the ground, in its own space with its own place in the
     // world: this is what stops the rider at a fence instead of letting them through it.
-    let (props, missed) = sim_world::Props::load(&place, |name| {
+    let (props, missed, prop_at) = sim_world::Props::load_indexed(&place, |name| {
         archives.iter().find_map(|a| a.read_suffix(name).ok()).ok_or_else(|| "no such member".into())
     });
     println!(
@@ -6218,10 +6218,20 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     }
     // P313b: a race's drop gate falls at the drop: its prop, named in the track's `.toy`
     // `[DropGate]`, is taken out of the scene's static props and drawn turned as it swings down.
-    let gate_swing = race_start.as_ref().and_then(|_| {
-        let toy = archives.iter().find_map(|a| a.read_suffix(&format!("\\{stem}.toy")).ok()).map(|b| ini::text(&b)).unwrap_or_default();
-        race_start::GateSwing::take(&mut look, &toy)
-    });
+    let gate_toy = race_start.as_ref().map(|_| archives.iter().find_map(|a| a.read_suffix(&format!("\\{stem}.toy")).ok()).map(|b| ini::text(&b)).unwrap_or_default());
+    let gate_swing = gate_toy.as_deref().and_then(|toy| race_start::GateSwing::take(&mut look, toy));
+    // P313c: and on a track whose `[DropGate]` sets `MoveGateDown`, the race sinks it once a rider
+    // is past the `[LowerGate]`, its collision pieces with it.
+    let mut race_start = race_start;
+    // A world's tiles stand their own props, which the scene's collision list does not number.
+    if let (Some(s), Some(toy), None) = (race_start.as_mut(), gate_toy.as_deref(), &world_mod)
+        && let Some(laps) = s.laps.as_mut()
+    {
+        s.sink = race_start::gate_sink(toy, laps, place.collision.iter().map(|c| c.file.as_str()), &prop_at);
+        if let Some(k) = &s.sink {
+            println!("race: drop gate sinks {:.2} from the line, {} collision pieces", k.trigger.0, k.pieces.len());
+        }
+    }
     if let Some(g) = &gate_swing {
         let up = g.at().0[1];
         println!("race: drop gate {} drawn up {:.2},{:.2},{:.2}", g.model(), up[0], up[1], up[2]);
@@ -11863,8 +11873,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             // The stadium's lit camera flashes (V127), each at its fade.
             let flashes = world.seats[0].sim.race.as_ref().and_then(|r| r.flashes.as_deref());
             actors.extend(stadium_flashes.iter().zip(flashes).flat_map(|(s, f)| s.actors(f)));
-            // The race's drop gate (P313b), standing or swung down.
-            actors.extend(gate_swing.iter().map(|g| g.actor()));
+            // The race's drop gate (P313b), standing or swung down, and sunk (P313c).
+            let sunk = world.seats[0].sim.race.as_ref().and_then(|r| r.sink.as_deref()).map_or(0.0, |k| k.y.0);
+            actors.extend(gate_swing.iter().flat_map(|g| g.actors(sunk)));
             // A view's own player's markers (P88), faint bikes where each was put down: in that
             // player's view and nobody else's, so a view with any has the shared list and them.
             let marked: Vec<Vec<Actor>> = world
@@ -12373,7 +12384,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             // The stadium's lit camera flashes (V127): the software path draws them solid.
             let flashes = world.seats[0].sim.race.as_ref().and_then(|r| r.flashes.as_deref());
             actor.extend(stadium_flashes.iter().zip(flashes).flat_map(|(s, f)| s.shown(f)).map(|(model, at, _)| (model, at)));
-            actor.extend(gate_swing.iter().map(|g| (g.model(), g.at())));
+            let sunk = world.seats[0].sim.race.as_ref().and_then(|r| r.sink.as_deref()).map_or(0.0, |k| k.y.0);
+            actor.extend(gate_swing.iter().flat_map(|g| g.pieces(sunk)));
             // On a wrapped world (MD43) every rider, plane and car at its copy nearest the camera.
             if soft_wrap.is_some() {
                 for a in &mut actor {

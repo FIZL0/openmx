@@ -709,6 +709,18 @@ impl State for crate::race::Race {
                 }
             });
         }
+        // The drop gate's sink (P313c), on a track whose gate sinks: any other walks as before.
+        if let Some(k) = &self.sink {
+            w.group("sink", |w| {
+                w.f("trigger", k.trigger);
+                w.bool("armed", k.armed);
+                w.i32("count", k.count);
+                w.f("t", k.t);
+                w.f("length", k.length);
+                w.bool("on", k.on);
+                w.f("y", k.y);
+            });
+        }
     }
 }
 

@@ -48,6 +48,8 @@ pub struct Start {
     /// P313a: the AI riders' bikes standing on their grid spots, card 1 first: the Sim's players
     /// after the human, in card order.
     pub ai: Vec<game_sim::rider::Rider>,
+    /// P313c: the drop gate's sink, on a track whose gate sinks ([`gate_sink`]).
+    pub sink: Option<game_sim::drop_gate::Sink>,
 }
 
 impl Start {
@@ -63,6 +65,7 @@ impl Start {
         let mut race = Race::new(self.gate, riders, self.delay, self.rng.clone());
         race.activity = Some(self.activity.clone());
         race.laps = self.laps.clone().map(Box::new);
+        race.sink = self.sink.clone().map(Box::new);
         race
     }
 }
@@ -131,7 +134,7 @@ pub fn lay_out(prop: &Prop, drops: Vec<F>, riders: i32, seed: u32) -> Option<Sta
         (0..riders).map(|card| s.grid_spot(GridStart::Gate { centre: start.centre, normal: start.normal, width: start.width }, card, riders)).collect();
     let (spot, facing) = grid[0];
     let (lane, place, delay) = (s.lanes[0], s.starting_place(0), s.start_delay);
-    Some(Start { spot, facing, lane, place, riders, gate: start, delay, rng, activity: s, laps: None, grid, ai: Vec::new() })
+    Some(Start { spot, facing, lane, place, riders, gate: start, delay, rng, activity: s, laps: None, grid, ai: Vec::new(), sink: None })
 }
 
 /// P313a: how many entries the rider database holds, which the roster's identity draws pick from
@@ -365,6 +368,59 @@ pub fn hand_over_seats(laps: &race::Laps, laps_run: u8, players: &[(usize, Strin
 /// object its turn with this fixed length. The track's `RotationRateInSeconds` is read but never used.
 pub const SWING_SECONDS: f32 = 0.15;
 
+/// P313c: what a track's `.toy` says of its drop gate's sink: `[DropGate]`'s `GateName`,
+/// `MoveGateDown`, `MoveTime` and its two piece counts, and `[LowerGate]`'s `TriggerPosition`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SinkWords {
+    pub name: String,
+    pub move_down: bool,
+    pub move_time: f32,
+    pub soultree: i32,
+    pub collision: i32,
+    pub trigger_at: [f32; 3],
+}
+
+impl SinkWords {
+    /// The words, with the reader's defaults: no sink, 5 seconds, no pieces, and the trigger at the
+    /// origin. nat12, nat16 and nat19 spell the trigger's key `Position`, which the reader does not
+    /// know, so theirs is at the origin too. `None` with no `[DropGate]`.
+    pub fn read(toy: &str) -> Option<SinkWords> {
+        let sections = game_render::ini::parse(toy);
+        let s = sections.iter().find(|s| s.name.eq_ignore_ascii_case("DropGate"))?;
+        let lower = sections.iter().find(|s| s.name.eq_ignore_ascii_case("LowerGate"));
+        let trigger_at = match lower.and_then(|l| l.numbers("TriggerPosition")).as_deref() {
+            Some(&[x, y, z, ..]) => [x, y, z],
+            _ => [0.0; 3],
+        };
+        let count = |k: &str| s.get(k).and_then(|v| v.trim().parse().ok()).unwrap_or(0);
+        Some(SinkWords {
+            name: s.get("GateName").unwrap_or("").trim().trim_matches('"').to_string(),
+            move_down: s.get("MoveGateDown").is_some_and(|v| v.trim().eq_ignore_ascii_case("true")),
+            move_time: s.number("MoveTime").unwrap_or(5.0),
+            soultree: count("NumberSoultreePieces"),
+            collision: count("NumberCollisionPieces"),
+            trigger_at,
+        })
+    }
+
+    /// The scene prop names the sink lowers.
+    pub fn soultree_names(&self) -> Vec<String> {
+        game_sim::drop_gate::soultree_names(&self.name, self.soultree)
+    }
+}
+
+/// P313c: the drop gate's sink bound to the race's `laps`, on a track whose `.toy` sets
+/// `MoveGateDown`: its collision pieces found among the scene's collision `files` by name, each
+/// where the props hold it (`at_index`, [`game_sim::world::Props::load_indexed`]). `None` on any
+/// other track: there the original's trigger can fire but sinks nothing.
+pub fn gate_sink<'a>(toy: &str, laps: &mut race::Laps, files: impl IntoIterator<Item = &'a str>, at_index: &[Option<usize>]) -> Option<game_sim::drop_gate::Sink> {
+    let w = SinkWords::read(toy).filter(|w| w.move_down)?;
+    let names = game_sim::drop_gate::collision_names(&w.name, w.soultree, w.collision);
+    let pieces = game_sim::drop_gate::gathered(files, &names).into_iter().filter_map(|k| at_index.get(k).copied().flatten()).collect();
+    let [x, y, z] = w.trigger_at;
+    Some(game_sim::drop_gate::Sink::bind(laps, Vf::new(x, y, z, 1.0), true, F(w.move_time), pieces))
+}
+
 /// P313b: the drop gate as it falls at the drop. The race activity makes a gate object from the
 /// track's `.toy` `[DropGate]` section: the scene prop named `GateName`, turned about its own
 /// `RotationAxisLocal` by `RotationAngleDegrees`. The drop starts the turn. Each frame after it, the
@@ -380,6 +436,10 @@ pub struct GateSwing {
     swinging: bool,
     /// The gate has dropped since it last closed.
     down: bool,
+    /// P313c: on a track whose gate sinks, the prop is one of the pieces the sink lowers, and these
+    /// are the scene's other pieces, taken out to be drawn lowered with it.
+    lowered: bool,
+    sunk: Vec<Placement>,
 }
 
 impl GateSwing {
@@ -404,9 +464,15 @@ impl GateSwing {
         let (name, axis, degrees) = Self::words(toy)?;
         let at = scene.models.iter().position(|p| p.model.eq_ignore_ascii_case(&name))?;
         let placed = scene.models.remove(at);
+        // P313c: the sink's pieces, every scene prop with one of their names.
+        let names = SinkWords::read(toy).filter(|w| w.move_down).map(|w| w.soultree_names()).unwrap_or_default();
+        let named = |m: &str| names.iter().any(|n| n.eq_ignore_ascii_case(m));
+        let lowered = named(&placed.model);
+        let (sunk, kept) = std::mem::take(&mut scene.models).into_iter().partition(|p| named(&p.model));
+        scene.models = kept;
         // The turn's angle as the drop gives it (degrees × 0.01745329), and its axis made unit length
         // as the rotation's builder does.
-        Some(GateSwing { placed, axis: axis.norm(), angle: degrees * 0.01745329, turned: 0.0, swinging: false, down: false })
+        Some(GateSwing { placed, axis: axis.norm(), angle: degrees * 0.01745329, turned: 0.0, swinging: false, down: false, lowered, sunk })
     }
 
     /// The prop's model name.
@@ -484,9 +550,22 @@ impl GateSwing {
         turn.mul(place)
     }
 
-    /// The gate as an actor, where [`GateSwing::at`] puts it.
-    pub fn actor(&self) -> Actor<'_> {
-        Actor { model: &self.placed.model, at: self.at(), pose: None, lod_from: None, alpha: 1.0, casts: false }
+    /// P313c: every piece the gate draws and where, with the sink's group `y` below the scene (the
+    /// race's [`game_sim::drop_gate::Sink::y`], 0 with no sink): the gate turned as it swings
+    /// ([`GateSwing::at`]), then the other pieces where the scene stands them. The group stands at
+    /// `y` with no turn of its own, so a piece hung under it is only moved down by `y`.
+    pub fn pieces(&self, y: f32) -> Vec<(&str, M4)> {
+        let down = |mut m: M4| {
+            m.0[3][1] += y;
+            m
+        };
+        let gate = if self.lowered { down(self.at()) } else { self.at() };
+        std::iter::once((self.placed.model.as_str(), gate)).chain(self.sunk.iter().map(|p| (p.model.as_str(), down(p.transform())))).collect()
+    }
+
+    /// [`GateSwing::pieces`] as actors.
+    pub fn actors(&self, y: f32) -> Vec<Actor<'_>> {
+        self.pieces(y).into_iter().map(|(model, at)| Actor { model, at, pose: None, lod_from: None, alpha: 1.0, casts: false }).collect()
     }
 }
 
@@ -638,6 +717,68 @@ mod tests {
         g.follow(false, 1.0 / 30.0);
         let up = g.at().0[1];
         assert!(up[2] < -0.5 && up[2] > -1.0 && up[1] > 0.0 && up[1] < 0.866, "{up:?}");
+    }
+
+    /// nat19's `[DropGate]` and `[LowerGate]` as its `.toy` has them: its trigger's key is `Position`.
+    const NAT19_DROP_GATE: &str = "[DropGate]\nGateName=\"Nat19_Dropgate01\"\nPosition=3336.205078,173.670685,3135.009277\nLookVector=0.000000,0.500000,0.866025\nUpVector=-0.000000,0.866025,-0.500000\nRotationAxisLocal=1.0,0.0,0.0\nRotationAngleDegrees=-60.0\nRotationRateInSeconds=.1\nMoveGateDown=TRUE\nDownPosition=3336.205078,0,3135.009277\nMoveTime=0.25\nNumberSoultreePieces=2\nNumberCollisionPieces=1\n\n[LowerGate]\nPosition=2722.225830,234.692734,3035.601074\nTriggerLook=0.000000,1.000000,0.000000\nTriggerWidth=100.0\nTriggerHeight=100.0\n";
+
+    #[test]
+    fn the_sink_words_and_their_defaults() {
+        let w = SinkWords::read(NAT19_DROP_GATE).unwrap();
+        assert_eq!(w, SinkWords { name: "Nat19_Dropgate01".into(), move_down: true, move_time: 0.25, soultree: 2, collision: 1, trigger_at: [0.0; 3] });
+        assert_eq!(w.soultree_names(), ["Nat19_Dropgate01", "Nat19_Dropgate02"]);
+        // sx17's trigger is spelled as the reader reads it; nat16 writes `True`.
+        let sx17 = SinkWords::read("[DropGate]\nGateName=\"THQsxdropgate01\"\nMoveGateDown=True\n[LowerGate]\nTriggerPosition=604.6,93,704.9\n").unwrap();
+        assert!(sx17.move_down);
+        assert_eq!(sx17.trigger_at, [604.6, 93.0, 704.9]);
+        assert_eq!((sx17.move_time, sx17.soultree, sx17.collision), (5.0, 0, 0));
+        let sx01 = SinkWords::read(SX01_DROP_GATE).unwrap();
+        assert!(!sx01.move_down);
+        assert!(SinkWords::read("[CameraFlash]\n").is_none());
+    }
+
+    #[test]
+    fn a_sinking_gate_takes_its_other_pieces_and_draws_them_lowered() {
+        let mut scene = sx01_scene();
+        let piece = |m: &str, x: f32| Placement { model: m.into(), pos: V3 { x, y: 170.0, z: 3135.0 }, look: V3 { x: 0.0, y: 0.0, z: 1.0 }, up: V3 { x: 0.0, y: 1.0, z: 0.0 } };
+        scene.models = vec![piece("stands", 0.0), piece("Nat19_Dropgate01", 1.0), piece("NAT19_DROPGATE02", 2.0), piece("Nat19_Dropgate03", 3.0)];
+        let g = GateSwing::take(&mut scene, NAT19_DROP_GATE).unwrap();
+        let left: Vec<&str> = scene.models.iter().map(|p| p.model.as_str()).collect();
+        assert_eq!(left, ["stands", "Nat19_Dropgate03"], "piece 03 is the collision piece's number, not a scene piece");
+        let up = g.pieces(0.0);
+        assert_eq!(up.iter().map(|p| p.0).collect::<Vec<_>>(), ["Nat19_Dropgate01", "NAT19_DROPGATE02"]);
+        let down = g.pieces(-13.5);
+        for (u, d) in up.iter().zip(&down) {
+            assert_eq!(d.1.0[3][1], u.1.0[3][1] - 13.5);
+            assert_eq!((d.1.0[3][0], d.1.0[3][2], &d.1.0[..3]), (u.1.0[3][0], u.1.0[3][2], &u.1.0[..3]));
+        }
+        assert_eq!(g.actors(-13.5).len(), 2);
+        // A gate that does not sink takes only its prop, and draws it where it swings.
+        let mut scene = sx01_scene();
+        let g = GateSwing::take(&mut scene, SX01_DROP_GATE).unwrap();
+        assert_eq!(scene.models.len(), 1);
+        assert_eq!(g.pieces(-50.0), vec![("THQsxdropgate", g.at())]);
+    }
+
+    #[test]
+    fn the_sink_finds_its_collision_pieces_where_the_props_hold_them() {
+        let mut laps = two_cards();
+        let toy = "[DropGate]\nGateName=\"THQsxdropgate01\"\nMoveGateDown=TRUE\nMoveTime=0.25\nNumberSoultreePieces=2\nNumberCollisionPieces=2\n";
+        let files = ["a.col", "missing.col", "THQsxdropgate03.col", "thqsxdropgate04.col", "THQsxdropgate02.col"];
+        // `missing.col` did not load, so the props after it are one place down.
+        let at_index = [Some(0), None, Some(1), Some(2), Some(3)];
+        let sink = gate_sink(toy, &mut laps, files, &at_index).unwrap();
+        assert_eq!(sink.pieces, [1, 2]);
+        assert_eq!((sink.move_time, sink.move_down, sink.armed), (F(0.25), true, true));
+        // No paths to find a spot on: the port measures the trigger 0.
+        assert_eq!(sink.trigger, F::ZERO);
+        assert!(gate_sink(SX01_DROP_GATE, &mut laps, files, &at_index).is_none());
+        // A race with a sink hands it on.
+        let prop = Prop { across: Vf::new(1.0, 0.0, 0.0, 0.0), look: Vf::new(0.0, 0.0, 1.0, 0.0), at: Vf::new(0.0, 0.0, 0.0, 1.0), half_width: F(30.0), height: F(1.0) };
+        let mut s = lay_out(&prop, vec![F(1.54)], 1, 1).unwrap();
+        assert!(s.race((s.spot, s.facing)).sink.is_none());
+        s.sink = Some(sink.clone());
+        assert_eq!(s.race((s.spot, s.facing)).sink.as_deref(), Some(&sink));
     }
 
     #[test]
