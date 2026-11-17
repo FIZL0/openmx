@@ -2632,13 +2632,14 @@ fn a_joiner_lacking_a_fliers_pack_closes_it_at_the_join_on_every_machine() {
     there.decode(&state).unwrap();
     assert!(there.fliers[0].closed, "the restart's state closed the flier on every machine");
     assert_eq!(there.sims.len(), 3);
-    // seat 2's switch on the closed byte takes the ride's own; seat 1 flies on in the flier
+    // seat 2's switch on the closed byte takes the ride's own; seat 1, up in the flier, was turned
+    // onto the ride's own at the join (N26)
     for t in 10..20 {
         game.step(t, &[pad(true, 0x12), pad(true, 0x12), Report::missing()]);
         there.step(t, &[pad(true, 0x12), pad(true, 0x12), Report::missing()]);
     }
     for g in [&game, &there] {
-        assert_eq!(g.sims[0].plane.as_ref().map(|f| (f.skin, f.mxvatv)), Some((0x12, true)), "seat 1 flies on in the flier");
+        assert_eq!(g.sims[0].plane.as_ref().map(|f| (f.skin, f.mxvatv)), Some((0, false)), "seat 1 was turned onto the ride's own");
         assert_eq!(g.sims[1].plane.as_ref().map(|f| (f.skin, f.mxvatv)), Some((0, false)), "seat 2 took the ride's own");
     }
     assert_eq!(game.hash(), there.hash(), "both machines ride the same after the join");
@@ -2648,6 +2649,63 @@ fn a_joiner_lacking_a_fliers_pack_closes_it_at_the_join_on_every_machine() {
     open_state.truncate(open_state.len() - 2);
     there.decode(&open_state).unwrap();
     assert!(!there.fliers[0].closed, "a state that says no closed flier opens it");
+}
+
+/// N26: a seat up in a flier pack's plane when a joiner lacking the pack is let in (a switch after the
+/// host last said what the ride flies) is turned onto the ride's own plane at the join, where and how
+/// it flies: on the host, on a machine that flew it in the pack's plane until the restart, and on
+/// the joiner, which holds no flier at all — and the three ride on as one.
+#[test]
+fn a_seat_up_in_a_flier_a_joiner_lacks_is_turned_onto_the_rides_own_at_the_join() {
+    let Some(file) = the_discs_plane() else { return };
+    // the pack's plane on its own (empty) ray probe, the ride's own on none: which a seat flies by
+    let probe = std::sync::Arc::new(game_sim::flight_search::Rays { root: 0, nodes: Vec::new(), segments: Vec::new() });
+    let flier = game_sim::flight::Flight { mxvatv: true, skin: 0x12, rays: Some(probe), ..game_sim::flight::Flight::new(&file) };
+    let template = rides::Flier { byte: 0x12, stock: file.clone(), flight: flier, closed: false };
+    let mut own = [0, 1, 2].map(|_| game_sim::flight::Flight::new(&file));
+    let (mut fliers, mut fliers_there) = ([template.clone()], [template]);
+    let mut seats = [sims(2), sims(2), sims(1)];
+    let mut world = [Flat::default(), Flat::default(), Flat::default()];
+    let [own, own_there, own_lack] = &mut own;
+    let [seats, seats_there, seats_lack] = &mut seats;
+    let [world, world_there, world_lack] = &mut world;
+    let mut game = Rides { quads: &mut [], fliers: &mut fliers, sims: seats, world, after: None, time_scale: None, plane: Some(own), cars: &[] };
+    let mut there = Rides { quads: &mut [], fliers: &mut fliers_there, sims: seats_there, world: world_there, after: None, time_scale: None, plane: Some(own_there), cars: &[] };
+    let mut lack = Rides { quads: &mut [], fliers: &mut [], sims: seats_lack, world: world_lack, after: None, time_scale: None, plane: Some(own_lack), cars: &[] };
+    let pad = |up: bool, byte: u8| {
+        let mut pad = Report::idle();
+        pad.0[net::SWITCH] = vehicle::Wanted { to: up.then_some(vehicle::Kind::Biplane), ..Default::default() }.byte();
+        pad.0[net::FLIER] = byte;
+        pad
+    };
+    // seat 1 goes up in the pack's plane on both machines in the ride
+    for t in 0..10 {
+        game.step(t, &[pad(true, 0x12), pad(false, 0)]);
+        there.step(t, &[pad(true, 0x12), pad(false, 0)]);
+    }
+    assert_eq!(there.sims[0].plane.as_ref().map(|f| (f.skin, f.mxvatv, f.rays.is_some())), Some((0x12, true, true)));
+    let before = game.sims[0].plane.as_ref().unwrap().body.position;
+    // the join of a machine lacking the pack: the host turns seat 1 where it is
+    game.seat(2, &rides::spawn_closing(&rides::seat_bytes(&sims(1)[0]), &[(2, 0)], &[0x12])).unwrap();
+    let f = game.sims[0].plane.as_ref().unwrap();
+    assert_eq!((f.skin, f.mxvatv, f.rays.is_some()), (0, false, false), "the host turned seat 1 onto the ride's own");
+    assert_eq!(format!("{:?}", f.body.position), format!("{before:?}"), "where it was");
+    let state = game.encode().unwrap();
+    there.decode(&state).unwrap();
+    lack.decode(&state).unwrap();
+    for g in [&game, &there, &lack] {
+        assert_eq!(g.sims[0].plane.as_ref().map(|f| (f.skin, f.mxvatv, f.rays.is_some())), Some((0, false, false)), "seat 1 flies the ride's own on every machine");
+    }
+    assert_eq!(game.hash(), there.hash());
+    assert_eq!(game.hash(), lack.hash());
+    for t in 10..40 {
+        let pads = [pad(true, 0x12), pad(true, 0x12), Report::missing()];
+        game.step(t, &pads);
+        there.step(t, &pads);
+        lack.step(t, &pads);
+    }
+    assert_eq!(game.hash(), there.hash(), "the machine that flew the pack rides on as the host");
+    assert_eq!(game.hash(), lack.hash(), "the joiner rides on as the host");
 }
 
 // ---------------------------------------------------------------------------------------------------
