@@ -25,6 +25,9 @@
 //! a plant for it, it is stood at the plant ([`atv_plant::stand`]) and the probe's pair reads its
 //! centre, radius and radius squared: struck or not, no contact, as a sphere zone.
 //!
+//! The bike's record sweep (F70) searches the same world with [`atv_sweep::Sweep`] over [`Sweeps`]:
+//! a scene mesh swept in its own space, everything else tested and struck by nothing.
+//!
 //! Proved against the original's stand, gather and search on state 4 (`tests/mxvatv_bike_props.rs`).
 
 #![deny(clippy::float_arithmetic)] // the lint that keeps a bit-exact port bit-exact
@@ -33,12 +36,15 @@ use crate::archive::Res;
 use crate::atv_part::{self, OrientedBox, Sphere};
 use crate::atv_plant::{self, Part, Stood};
 use crate::atv_sphere;
+use crate::atv_sweep;
+use crate::collide::MeshRef;
 use crate::atv_search::{self, Wheels};
 use crate::atv_world::{self, World, Zone};
 use crate::camera::CurveTable;
 use crate::eco::{self, Ecosystem, Solid, Trees};
 use crate::phy::Ini;
 use crate::ray_probe::{self, RayProbe, Record};
+use crate::sweep_probe::{Placed, Shape as SweepShape, Target};
 use crate::track::Scene;
 use crate::world::{Prop, Props};
 use crate::world_search::{Candidate, Collidable, Narrow};
@@ -234,4 +240,115 @@ pub fn search(objects: &mut [Collidable], probe: usize, found: &[Candidate], ret
     let (_, radius) = atv_search::reach(rays.wheels.rays, &rays.wheels.transform);
     objects[probe].radius = radius;
     atv_search::search(objects, probe, found, retired, rays)
+}
+
+/// **The record's sweep over the prop world** (F70): what each collidable is to the sweep's pair
+/// ([`atv_sweep::pair`]) and a placed group's parts, for [`atv_sweep::Sweep`] over the bike's record
+/// list. A scene mesh is swept in its own space ([`Shape::Mesh`], its frame the prop's); anything
+/// else the ride or the world filed (a zone, a vehicle's or a rider's sphere) has its centre and
+/// reach tested and strikes nothing ([`Shape::Other`]), as the pair does every kind but a mesh, a
+/// hierarchy and a finite plane. A plant's sphere part is stood at the plant first ([`atv_plant::stand`])
+/// and tested at the centre and reach that leaves.
+///
+/// The nearby bits, centres and reaches are the world's as [`Sweeps::new`] finds them: the sweep
+/// changes none but the probe's. Nobody listens and no callback runs (on Nat05 no mesh, plant or
+/// zone the sweep can strike has either: a zone or a sphere is never struck).
+pub struct Sweeps<'a> {
+    pub props: &'a [Prop],
+    pub first_mesh: usize,
+    pub trees: &'a Trees,
+    /// Each placed group's species (loaded order), the first group at collidable `first_group`.
+    pub models: Vec<u8>,
+    pub first_group: usize,
+    /// Each species' first part collidable, as [`atv_search::Plants`] has them.
+    pub slots: Vec<usize>,
+    pub spheres: PlantSpheres,
+    /// Each collidable's nearby bit, centre and reach.
+    pub places: Vec<(bool, Vf, F)>,
+    /// How many pairs ran.
+    pub pairs: u32,
+    /// The part last handed out, when it is a stood sphere: its collidable, centre and reach.
+    stood: Option<(usize, Vf, F)>,
+}
+
+impl<'a> Sweeps<'a> {
+    /// The sweep's world over `world` as it stands, its meshes `props`, its plants `trees` with the
+    /// species' parts (`spheres`) as collidables from `first_part` on.
+    pub fn new(world: &World, props: &'a [Prop], trees: &'a Trees, eco: &Ecosystem, spheres: PlantSpheres, first_part: usize) -> Sweeps<'a> {
+        let mut slots = Vec::new();
+        let mut at = first_part;
+        for s in eco.species.iter().flatten() {
+            slots.push(at);
+            at += s.solids.len();
+        }
+        let places = (0..world.objects.len())
+            .map(|o| {
+                let c = world.broad.places.get(o).map_or([F::ZERO; 4], |p| p.centre);
+                (world.objects[o].nearby, Vf::new(c[0].0, c[1].0, c[2].0, c[3].0), world.objects[o].radius)
+            })
+            .collect();
+        let models = world.groups.clone().map(|g| world.broad.places[g].model).collect();
+        Sweeps { props, first_mesh: world.meshes.start, trees, models, first_group: world.groups.start, slots, spheres, places, pairs: 0, stood: None }
+    }
+}
+
+impl atv_sweep::Outside for Sweeps<'_> {
+    fn target(&mut self, other: usize, pair: &mut dyn FnMut(Option<&Target>) -> bool) -> bool {
+        self.pairs += 1;
+        if let Some((_, centre, radius)) = self.stood.filter(|&(o, ..)| o == other) {
+            return pair(Some(&Target { nearby: true, centre, radius, shape: SweepShape::Other }));
+        }
+        let (nearby, centre, radius) = self.places[other];
+        let shape = match other.checked_sub(self.first_mesh).filter(|&i| i < self.props.len()) {
+            Some(i) => SweepShape::Mesh(Placed { transform: self.props[i].to_world.0, mesh: MeshRef::of(&self.props[i].mesh), object: other }),
+            None => SweepShape::Other,
+        };
+        pair(Some(&Target { nearby, centre, radius, shape }))
+    }
+}
+
+impl Narrow for Sweeps<'_> {
+    fn clear(&mut self, _objects: &mut [Collidable], _probe: usize) {
+        unreachable!("the sweep's own clear")
+    }
+
+    /// Never asked: the record's list carries no terrain grid.
+    fn prepare(&mut self, _objects: &mut [Collidable], _probe: usize) {}
+
+    fn pair(&mut self, _objects: &mut [Collidable], _probe: usize, _other: usize) -> bool {
+        unreachable!("the sweep's own pair")
+    }
+
+    fn parts(&mut self, _objects: &mut [Collidable], group: usize) -> usize {
+        self.trees.groups()[group - self.first_group].parts.len()
+    }
+
+    /// The part, stood at the plant: a sphere as [`Rays`] stands it. A trunk's place as a collidable
+    /// is not ported (Nat05's plants have none).
+    fn part(&mut self, _objects: &mut [Collidable], group: usize, i: usize) -> Option<usize> {
+        self.stood = None;
+        let g = &self.trees.groups()[group - self.first_group];
+        let model = usize::from(self.models[group - self.first_group]);
+        let slot = self.slots[model] + i;
+        assert!(g.parts[i].is_none(), "the sweep searched a trunk part (group {group}, part {i}): its place is not ported");
+        let Some((species, parts)) = self.spheres.species.get_mut(model) else { return Some(slot) };
+        let Some(Some(sphere)) = parts.get_mut(i) else { return Some(slot) };
+        let plant = atv_plant::Plant { position: g.cell, lean: g.height, size: g.blend, flags: 0, turn: Vf::ZERO };
+        let mut scales = [F::ZERO; 2];
+        match atv_plant::stand(&plant, species, self.spheres.unit, Some(Part::Sphere { sphere, scales: &mut scales }), None) {
+            Stood::Nothing => None,
+            _ => {
+                self.stood = Some((slot, sphere.centre, sphere.reach));
+                Some(slot)
+            }
+        }
+    }
+
+    fn heard_hit(&mut self, _objects: &mut [Collidable], _listener: usize, _probe: usize, _other: usize) {}
+
+    fn heard_struck(&mut self, _objects: &mut [Collidable], _listener: usize, _struck: usize, _probe: usize) {}
+
+    fn on_hit(&mut self, _objects: &mut [Collidable], _callback: usize, _probe: usize, _other: usize) {}
+
+    fn on_struck(&mut self, _objects: &mut [Collidable], _callback: usize, _struck: usize, _probe: usize) {}
 }
