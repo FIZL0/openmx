@@ -13085,3 +13085,9 @@ atv_race_camera_update      atv 0x00485b20 = the race (Hill Climb) camera's fram
 #   update 0x004dd000) and normal.y > 0.8; forward y = 0, normalised; clearance check 0x004cdfc0 not ported.
 #   Caller: region tracker 0x0018bb70 / 0x0018bf20 via thunk 0x004ce960 (not traced). Also read: 0x004cb340,
 #   0x004cddf0. +0xbf0 written at the tail start while free (the previous tick's clock).
+# --- MD176: MX vs. ATV's cars' particles (crates/openmx/src/main.rs mxvatv_car_list / load_mxvatv_car_fx)
+# The vehicle's particle loader switches on the vehicle kind (+0xbbc): 0 mx (ai list for the AI), 1 atv
+# (ai list for the AI; zones atvparticlezones.dat), 2 biplane, 3 helicopter, 5 monster, 6 baja, 7 golf,
+# 8 SR, any other buggy; every kind but 1 zones off mxparticlezones.dat. The cars' lists are one for a
+# person and the AI. It hands the manager the vehicle at +0xb90 as its frame source (not read here).
+atv_vehicle_particles_load  atv 0x004a6810 = (vehicle, ai)

@@ -6808,6 +6808,25 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         _ => None,
     };
     let mut atv_fx: Vec<particles::PlaneFx> = Vec::new();
+    // MX vs. ATV's car's (MD176): its pack's list for its kind, one manager a seat stepped off the
+    // car while it is out, off otherwise, as the quad's.
+    let mxvatv_car_fx_list = match &garage.mxvatv_car {
+        Some(car) => match load_mxvatv_car_fx(&archives, &stem, &args, car, mxvatv_car_model.as_ref(), &assets) {
+            Ok((fx, binds, sheet)) => {
+                if fx_sheet.is_none() {
+                    fx_sheet = Some(sheet.clone());
+                }
+                soft_sheet = soft_sheet.or(Some(sheet));
+                Some((fx, binds))
+            }
+            Err(why) => {
+                println!("mxvatv car: no particles: {why}");
+                None
+            }
+        },
+        None => None,
+    };
+    let mut mxvatv_car_fx: Vec<particles::PlaneFx> = Vec::new();
     // nat01's rain (V73): the `.toy`'s weather box and the triggers that turn it up and down, drawn as
     // glows of the box's texture. A world's tiles have none.
     let (mut rain, rain_art) = match world_mod {
@@ -10833,6 +10852,15 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 fx.step_over(&frame, dt.0, &mut |at| plane_fx_ground(place, at));
             }
         }
+        // MX vs. ATV's car's (MD176): each seat's off its car after the tick while it is out.
+        if simulated && !args.overview && let Some((list, binds)) = &mxvatv_car_fx_list {
+            mxvatv_car_fx.resize_with(world.seats.len(), || list.clone());
+            let place = &mut world.place;
+            for (seat, fx) in world.seats.iter().zip(&mut mxvatv_car_fx) {
+                let frame = seat.garage.mxvatv_car_up().map_or_else(particles::PlaneFrame::default, |c| mxvatv_car_fx_frame(c, binds));
+                fx.step_over(&frame, dt.0, &mut |at| plane_fx_ground(place, at));
+            }
+        }
         perf.lap(Stage::Scene, scene_at, spent);
 
         // The frame's sound (P42), off what the ride just did, heard from every view's camera. A
@@ -11650,6 +11678,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 fxs.iter().flat_map(move |fx| plane_sprites(fx, b))
             }));
             sprites.extend(atv_fx.iter().enumerate().flat_map(|(p, fx)| plane_sprites(fx, fx_blend(blend.0, &cut, p))));
+            sprites.extend(mxvatv_car_fx.iter().enumerate().flat_map(|(p, fx)| plane_sprites(fx, fx_blend(blend.0, &cut, p))));
             let (fw, fh) = (frame.width as u32, frame.height as u32);
             // A shot this frame is read back from a frame drawn offscreen at the frame's own size.
             let shooting = shot.is_some() && engine.frame >= args.shot_frame;
@@ -12146,6 +12175,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 for (p, fx) in atv_fx.iter().enumerate() {
                     tris += 2 * game_render::particle::draw(target, camera, sheet, &plane_particles(fx, fx_blend(blend.0, &cut, p)), &light);
                 }
+                for (p, fx) in mxvatv_car_fx.iter().enumerate() {
+                    tris += 2 * game_render::particle::draw(target, camera, sheet, &plane_particles(fx, fx_blend(blend.0, &cut, p)), &light);
+                }
             }
             // The start zones' and the markers' portals (V51), over the particles as the GPU lays them.
             if let Some(glows) = glows.get(v) {
@@ -12548,6 +12580,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         // Or MX vs. ATV's car (MD39c).
         if let Some(said) = world.seats[0].garage.mxvatv_car_up().and_then(vehicle::MxvatvCarRide::report) {
             println!("{said}");
+            // And its particles in the air (MD176).
+            if let Some(fx) = mxvatv_car_fx.first() {
+                let counts: Vec<String> = fx.counts().iter().filter(|(_, n)| *n > 0).map(|(name, n)| format!("{name} {n}")).collect();
+                let counts = if counts.is_empty() { "none".to_string() } else { counts.join(", ") };
+                println!("mxvatv car: particles: {counts} in the air");
+            }
         }
     }
 
@@ -13849,6 +13887,91 @@ fn atv_fx_frame(atv: &vehicle::AtvRide, nodes: &[String]) -> particles::PlaneFra
         throttle: r.q.gas_limited.0,
         airspeed: r.q.speed_len.0,
         clutch: r.q.clutch_in.0,
+        wrecked: r.down(),
+        vel: vector(r.body.velocity),
+        tires: (0..4).map(tire).collect(),
+        ..Default::default()
+    }
+}
+
+/// The MX vs. ATV car's emitter list (MD176), by its kind, as SLUS-21104's vehicle loader picks it
+/// (`research/oracle.txt` MD176): one list for a person and the AI alike, the buggy's for any kind it
+/// does not name.
+fn mxvatv_car_list(machine: game_sim::car::MxvatvMachine) -> &'static str {
+    use game_sim::car::MxvatvMachine as M;
+    match machine {
+        M::MonsterTruck => "monsterparticles.dat",
+        M::Baja => "bajaparticles.dat",
+        M::GolfCart => "golfparticles.dat",
+        M::Sandrail => "SRparticles.dat",
+        M::Buggy => "buggyparticles.dat",
+    }
+}
+
+/// The MX vs. ATV car's particles (MD176): its list ([`mxvatv_car_list`]) and each `.emt` it names
+/// out of its pack, on the track's particle sheet as the quad's ride it (MD136), zoned by
+/// `mxparticlezones.dat`, which the loader hands every machine but the quad: the pack's own copy,
+/// else the track's. Each entry's node where the car's chassis model (`model`, its key in
+/// `assets`) holds it. Says what it runs and what it skips: the tire tracks, which are not
+/// particles, and the entries on nodes the chassis lacks.
+fn load_mxvatv_car_fx(
+    archives: &[Res],
+    track: &str,
+    args: &Args,
+    car: &vehicle::MxvatvCarRide,
+    drawn: Option<&game_render::car::Car>,
+    assets: &Assets,
+) -> Result<(particles::PlaneFx, Vec<(String, M4)>, game_render::pst::Texture), String> {
+    let dir = mods_dir(args).ok_or("the mods folder is off")?;
+    let pack = machine_packs::find(&dir).0.into_iter().find(|p| p.id == car.pack).ok_or_else(|| format!("{} is gone", car.pack))?;
+    let name = mxvatv_car_list(car.machine);
+    let own = |n: &str| pack.files.read_suffix(&format!("\\{n}")).ok();
+    let list = own(name).ok_or_else(|| format!("{} has no {name}", pack.id))?;
+    let track_read = |n: &str| archives.iter().find_map(|a| a.read_suffix(&format!("\\{n}")).ok());
+    let zones = own(particles::ZONES);
+    println!("mxvatv car: particles: zones off {}", if zones.is_some() { format!("{}'s {}", pack.id, particles::ZONES) } else { particles::ZONES.to_string() });
+    let read = |n: &str| match n.eq_ignore_ascii_case(particles::ZONES) {
+        true => zones.clone().or_else(|| track_read(n)),
+        false => own(n).or_else(|| track_read(n)),
+    };
+    let sheet = read(&particles::sheet(track)).ok_or(format!("no {}", particles::sheet(track)))?;
+    let texture = read(&particles::sheet_texture(track)).ok_or(format!("no {}", particles::sheet_texture(track)))?;
+    let texture = game_render::pst::Texture::parse(&texture)?;
+    let atlas = particles::Atlas::parse(&ini::text(&sheet), texture.width, texture.height);
+    let fx = particles::PlaneFx::new(&biplane::emitters(&ini::text(&list)), atlas, read);
+    let model = drawn.and_then(|d| assets.models.get(&d.model)).map(|l| &l.model);
+    let mut binds: Vec<(String, M4)> = Vec::new();
+    for e in &fx.entries {
+        let Some(node) = e.node.as_deref() else { continue };
+        match model.and_then(|m| m.nodes.iter().position(|n| n.name.eq_ignore_ascii_case(node)).map(|i| m.world(i))) {
+            Some(m) if !binds.iter().any(|(n, _)| n.eq_ignore_ascii_case(node)) => binds.push((node.to_string(), m)),
+            Some(_) => {}
+            None => println!("mxvatv car: particles: {} rides {node}, which the chassis model does not have", e.name),
+        }
+    }
+    let (laid, skipped): (Vec<_>, Vec<_>) = fx.skipped.iter().partition(|(_, why)| why.eq_ignore_ascii_case("TireTrack"));
+    let names = |l: &[&(String, String)]| l.iter().map(|(n, w)| format!("{n} ({w})")).collect::<Vec<_>>().join(", ");
+    println!("mxvatv car: particles: {} entries off {}'s {name}; {} tire tracks not laid; {} not run: {}", fx.entries.len(), pack.id, laid.len(), skipped.len(), names(&skipped));
+    Ok((fx, binds, texture))
+}
+
+/// What the MX vs. ATV car's particles read off it this frame (MD176), as MX Unleashed's car's do
+/// ([`particles::PlaneFrame::car`], S248), off the ported step's words: `binds` where the car is
+/// drawn, the gas after its rate limit, the clutch the engine reads, the body's speed, its wreck as
+/// the quad's is fed, the body's velocity, and its four tires (front left, front right, rear left,
+/// rear right): the probe's solid ground and the sort's contact, the compression, the surface
+/// byte, slipping and the side ratio. Its collision record's contacts are not fed.
+fn mxvatv_car_fx_frame(car: &vehicle::MxvatvCarRide, binds: &[(String, M4)]) -> particles::PlaneFrame {
+    let (Some(r), Some(at)) = (car.ridden.as_deref(), mxvatv_car_draw::placed(car)) else { return particles::PlaneFrame::default() };
+    let tire = |k: usize| {
+        let (t, s) = (&r.car.tires[k], &r.state.tires[k]);
+        particles::TireFrame { ground: t.solid, object: t.sorted, compression: s.compression.0, zone: t.surface, spinning: s.slipping, side: s.side_ratio.0 }
+    };
+    particles::PlaneFrame {
+        nodes: binds.iter().map(|(n, b)| (n.clone(), b.mul(at))).collect(),
+        throttle: r.state.gas.0,
+        airspeed: r.car.speed.0,
+        clutch: r.state.engaged_clutch.0,
         wrecked: r.down(),
         vel: vector(r.body.velocity),
         tires: (0..4).map(tire).collect(),
