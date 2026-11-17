@@ -531,6 +531,9 @@ pub(crate) struct UBeside {
     /// The original unwrecked and put the truck back this frame (not compared): a query the original
     /// never asked is answered with its nearest.
     put_back: bool,
+    /// MD234: the port's own world, answering in place of the original's answers (which are then
+    /// only checked against).
+    port: Option<super::untamed_terrain::UPort>,
     /// The drive and frame, for the panics.
     at: String,
     pub(crate) asked: usize,
@@ -549,6 +552,33 @@ impl UBeside {
         let g = self.ground.remove(k);
         self.used.push(g);
         g
+    }
+
+    /// [`UBeside::answer`], answered by the port's world when it has one: the terrain's answer to
+    /// the point asked must be the original's, bit for bit, on every frame compared. `surface` is
+    /// the tire's surface byte before (none for the query under the body).
+    fn ground_at(&mut self, at: Vf, surface: Option<u8>) -> UGround {
+        let orig = self.answer(at);
+        let Some(port) = &self.port else { return orig };
+        let (mut point, mut normal, mut record) = (at, orig.normal, surface.unwrap_or(0));
+        game_sim::atv_ground::query(port.terrain, &mut point, Some(&mut normal), surface.is_some().then_some(&mut record));
+        let mine = UGround { point, normal, record: surface.map(|_| record), ..orig };
+        if !self.put_back && self.unported.is_empty() {
+            assert!(
+                mine.point.to_bits() == orig.point.to_bits() && mine.normal.to_bits() == orig.normal.to_bits() && mine.record == orig.record,
+                "{}: the port's terrain answers {:08x?} at {:08x?} ({:08x?}, record {:?}), the original {:08x?} ({:08x?}, record {:?})",
+                self.at,
+                mine.point.to_bits(),
+                at.to_bits(),
+                mine.normal.to_bits(),
+                mine.record,
+                orig.point.to_bits(),
+                orig.normal.to_bits(),
+                orig.record
+            );
+        }
+        self.port.as_mut().expect("tested").answered += 1;
+        mine
     }
 
     /// The original's queries the port did not make: none but repeats of one it made (the same
@@ -577,9 +607,9 @@ impl Steps for UBeside {
                 resolve(&mut h.record, &mut Own::Body(&mut me), &mut h.entries, &mut others, &h.movers, true);
                 self.resolves += 1;
             }
-            Call::GroundUnder(at) => car.ground_normal = self.answer(at).normal,
+            Call::GroundUnder(at) => car.ground_normal = self.ground_at(at, None).normal,
             Call::TireGround(k, at) => {
-                let g = self.answer(at);
+                let g = self.ground_at(at, Some(car.tires[k].surface));
                 car.tires[k].query = (g.point, g.normal);
                 if let Some(r) = g.record {
                     car.tires[k].surface = r;
@@ -589,8 +619,15 @@ impl Steps for UBeside {
                 let k = self.noise.iter().position(|&(x, _)| x == at.to_bits());
                 let k = k.unwrap_or_else(|| panic!("the port asked the noise at {at:?}, the original's engine never did ({:?})", self.noise));
                 car.noise = self.noise.remove(k).1;
+                if let Some(port) = &mut self.port {
+                    let mine = port.noise.at_accumulated(at);
+                    assert_eq!(mine.to_bits(), car.noise.to_bits(), "{}: the port's noise at {at:?} is {mine:?}, the original's {:?}", self.at, car.noise);
+                    car.noise = mine;
+                    port.noised += 1;
+                }
             }
-            Call::TireStep(..) => self.unported.push(c),
+            // MD131 asks what a tire stands on in place of handing the tire step out.
+            Call::TireStep(..) | Call::StandsOn(..) | Call::ObjectCofg(..) => self.unported.push(c),
             Call::SortSearch => {
                 car.sort = self.sort;
                 self.rest.push(c);
@@ -617,6 +654,9 @@ pub(crate) struct USeen {
     pub(crate) respawned: Vec<usize>,
     /// Frames whose record held contacts with another record.
     pub(crate) with_others: usize,
+    /// MD234: the ground queries and noise samples the port's own world answered.
+    pub(crate) port_grounds: usize,
+    pub(crate) port_noises: usize,
 }
 
 /// Replays drive `d` as [`u_capture_check`] does, and at each frame's world step on the truck's world
@@ -625,6 +665,11 @@ pub(crate) struct USeen {
 /// [`atv_car::Ride`] with its update Untamed's) on what it read: every word the port keeps must equal
 /// the original's after it, every frame.
 pub(crate) fn u_beside(d: &UDrive, ride: bool) -> Option<USeen> {
+    u_beside_with(d, ride, None)
+}
+
+/// [`u_beside`], with the ground queries and the noise answered by `port` when given (MD234).
+pub(crate) fn u_beside_with(d: &UDrive, ride: bool, port: Option<super::untamed_terrain::UPort>) -> Option<USeen> {
     let pre = u_image(d.image)?;
     let rows = u_rows(d.name)?;
     let ticks = u_tape(d.name)?;
@@ -695,21 +740,26 @@ pub(crate) fn u_beside(d: &UDrive, ride: bool) -> Option<USeen> {
         let resolves = resolved_with.len();
         let held = (!resolved_with.is_empty()).then(|| resolved_with.remove(0));
         let all_from: Vec<u32> = ground.borrow().iter().map(|g| g.from).collect();
-        let beside = UBeside { ground: std::mem::take(&mut *ground.borrow_mut()), noise: noise.borrow_mut().drain(..).map(|(_, at, f)| (at, f)).collect(), used: Vec::new(), sort: u_sort_answer(ee, car_at_), held, resolves: 0, unported: Vec::new(), put_back: false, at: String::new(), asked: 0, rest: Vec::new() };
+        let beside = UBeside { ground: std::mem::take(&mut *ground.borrow_mut()), noise: noise.borrow_mut().drain(..).map(|(_, at, f)| (at, f)).collect(), used: Vec::new(), sort: u_sort_answer(ee, car_at_), held, resolves: 0, unported: Vec::new(), put_back: false, port: None, at: String::new(), asked: 0, rest: Vec::new() };
         let put_back = car.state != atv_car::RIDING && read_car(&va, &p).state == atv_car::RIDING;
-        let mut pieces = Pieces { keys: m.keys(), state: m.state, rest: UBeside { at: format!("{name} frame {k}"), put_back, ..beside } };
+        let mut pieces = Pieces { keys: m.keys(), state: m.state, rest: UBeside { at: format!("{name} frame {k}"), put_back, port: port.clone(), ..beside } };
         if ride {
             let mut r = the_ride.borrow_mut();
             let r = r.get_or_insert_with(|| super::drives::ride_of(table));
             r.update.untamed = true;
             (r.keys, r.state, r.car, r.body, r.vehicle) = (std::mem::take(&mut pieces.keys), pieces.state, car, body, v);
-            let rest = std::mem::replace(&mut pieces.rest, UBeside { ground: Vec::new(), noise: Vec::new(), used: Vec::new(), sort: SortAnswer::default(), held: None, resolves: 0, unported: Vec::new(), put_back: false, at: String::new(), asked: 0, rest: Vec::new() });
+            let rest = std::mem::replace(&mut pieces.rest, UBeside { ground: Vec::new(), noise: Vec::new(), used: Vec::new(), sort: SortAnswer::default(), held: None, resolves: 0, unported: Vec::new(), put_back: false, port: None, at: String::new(), asked: 0, rest: Vec::new() });
             pieces.rest = r.frame_with(dt, rest);
             (pieces.keys, pieces.state) = (std::mem::take(&mut r.keys), r.state);
             (car, body) = (r.car.clone(), r.body.clone());
             v = r.vehicle.clone();
         } else {
             atv_car::frame_untamed(&atv_car::WORLD, &mut car, &mut body, dt, table, &mut atv_car::Own { v: &mut v, rest: &mut pieces });
+        }
+        if let Some(w) = &pieces.rest.port {
+            let mut s = keep.borrow_mut();
+            s.port_grounds += w.answered;
+            s.port_noises += w.noised;
         }
         if !pieces.rest.unported.is_empty() {
             keep.borrow_mut().on_objects.push(k);
@@ -778,7 +828,7 @@ pub(crate) fn u_beside(d: &UDrive, ride: bool) -> Option<USeen> {
     }
     let seen = std::mem::take(&mut *seen.borrow_mut());
     eprintln!(
-        "MD161a {} ({}): {} frames, {} words in all equal to SLUS-21701's; {} ground queries answered; handed out {:?}; wrecked on {}; {} other world steps; contacts with another record on {}; not compared, a tire on an object: {:?}, put back: {:?}",
+        "MD161a {} ({}): {} frames, {} words in all equal to SLUS-21701's; {} ground queries answered; handed out {:?}; wrecked on {}; {} other world steps; contacts with another record on {}; not compared, a tire on an object: {:?}, put back: {:?}{}",
         d.name,
         if ride { "through Ride" } else { "frame_untamed" },
         seen.frames,
@@ -789,7 +839,8 @@ pub(crate) fn u_beside(d: &UDrive, ride: bool) -> Option<USeen> {
         seen.other_worlds,
         seen.with_others,
         seen.on_objects,
-        seen.respawned
+        seen.respawned,
+        if seen.port_grounds + seen.port_noises > 0 { format!("; the port's world answered {} ground queries and {} noise samples", seen.port_grounds, seen.port_noises) } else { String::new() }
     );
     Some(seen)
 }

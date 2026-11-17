@@ -13403,3 +13403,8 @@ race_finish_listener        boot 0x002fc410 slot +0x14 (Finished; thunk 0x003004
 #   place from car+0xd30, look words +0xd60..+0xd68 to the camera (+0x6a4), a ground query under +0x80
 #   raised 0.3 along the normal, rows from +0xd40, then 0x004c8880, vt +0x3a0/+0x39c, event 0x0025e740;
 #   then the tire resets 0x004d74c0 x4 and engine reset 0x004d65c0 (SLUS-21104's shape). Not ported.
+# MD234 — MD160's Untamed drives with the ground from Rocksbury's terrain and the noise from the port
+# (tests/mxvatv_car_frame/untamed_terrain.rs). Comment rows only. Journal: research/journal/2026-11-17-md234-untamed-terrain-replay.
+#   Smooth noise 0x001324b0: permutation words 0x00408080 (256), gradients 0x0040b0c0 (256), unbuilt flag
+#   0x003ad638 (0 in md160 spawn/flipped), knot 0x0040b8c8: SLUS-21104's 0x003f3540/0x003f6580/0x0038f708/
+#   0x003f6d88 layout moved. Free Ride map in md160 = Rocksbury = Env\SX_A\SX_A.ps2.trn (context/untamed/sx_a).
