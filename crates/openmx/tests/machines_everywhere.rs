@@ -431,15 +431,10 @@ fn two_online_machines_start_their_seats_in_the_plane_on_a_race_track() {
     if disc().is_none() {
         return;
     }
-    // Two ports the system has free now: fixed ones (47613/47614) were taken by the same test in
-    // another slot's gate running at the same moment.
-    let port = || std::net::UdpSocket::bind("127.0.0.1:0").and_then(|s| s.local_addr()).expect("a free port").port();
-    let (hp, mut gp) = (port(), port());
-    while gp == hp {
-        gp = port();
-    }
-    let (h, g) = (format!("host@127.0.0.1:{hp}"), format!("g@127.0.0.1:{gp}"));
-    let (h, g) = (h.as_str(), g.as_str());
+    // Each shell binds a port of its own (port 0) and keeps it: a port picked free here and bound
+    // by the shell after its load was a window another slot's test could take it in (K40, as K29
+    // did for online_car). The host says its port; the guest is started on it; the host takes the
+    // guest's from its first datagram (`net::udp`'s port-0 peer).
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let ride = |me: &str, peer: &str| {
         let mut shell = Command::new(env!("CARGO_BIN_EXE_openmx"));
@@ -448,21 +443,41 @@ fn two_online_machines_start_their_seats_in_the_plane_on_a_race_track() {
             .args(["--headless", "--track", "nat19", "--vehicle", "biplane", "--frames", "400", "--seats", "host,g"])
             .args(["--online", me, "--peer", peer])
             .stdout(std::process::Stdio::piped());
-        pad::tests::spawn(&mut shell)
+        let mut kid = pad::tests::spawn(&mut shell);
+        // Its output read as it comes, so it never blocks on a full pipe, each line also sent on
+        // (the host's port).
+        let mut out = std::io::BufReader::new(kid.stdout.take().expect("piped stdout"));
+        let (lines, heard) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut said = String::new();
+            let mut line = String::new();
+            while std::io::BufRead::read_line(&mut out, &mut line).is_ok_and(|n| n > 0) {
+                let _ = lines.send(line.clone());
+                said.push_str(&line);
+                line.clear();
+            }
+            said
+        });
+        (kid, reader, heard)
     };
+    let (mut host, host_said, heard) = ride("host@127.0.0.1:0", "g@127.0.0.1:0");
+    let at = loop {
+        match heard.recv_timeout(std::time::Duration::from_secs(600)) {
+            Ok(l) if l.starts_with("online: host on ") => break l["online: host on ".len()..].split(',').next().unwrap().to_string(),
+            Ok(_) => {}
+            Err(_) => {
+                let _ = host.kill();
+                let _ = host.wait();
+                panic!("the host said no port:\n{}", host_said.join().unwrap_or_default());
+            }
+        }
+    };
+    let (guest, guest_said, _) = ride("g@127.0.0.1:0", &format!("host@{at}"));
     // Each rides 400 of the session's ticks (K10), not 400 of its own frames on the wall clock, which
     // the one that loaded first spent waiting for the other on a busy machine. So a shell that
     // fails takes its peer down with it: the peer would wait for its pads for ever.
-    let mut kids = [ride(h, g), ride(g, h)];
-    // each one's stdout read as it comes, so neither blocks on a full pipe meanwhile
-    let readers = kids.each_mut().map(|c| {
-        let mut out = c.stdout.take().expect("piped stdout");
-        std::thread::spawn(move || {
-            let mut said = String::new();
-            std::io::Read::read_to_string(&mut out, &mut said).ok();
-            said
-        })
-    });
+    let mut kids = [host, guest];
+    let readers = [host_said, guest_said];
     let mut ended = [false; 2];
     while !ended.iter().all(|&e| e) {
         for i in 0..2 {
