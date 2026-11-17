@@ -178,3 +178,11 @@ type = "u32"
 name = "f1_listeners"
 addr = "@app_pointer -> 0x3d0 -> 0xd4 -> 0x44 -> 0x5c"
 type = "u32"
+
+# The bike's own clock (S194, S277): the player update adds the frame's dt to rider +0x13fc as its last
+# store, after the physics, so a row's clock says which tick its bike is at even when the recorder read
+# it after the bike's update (replay.rs `quarter_ticks`).
+[[field]]
+name = "bike_clock"      # +0x13fc
+addr = "@game_manager -> 0x34 -> 0x34 -> 0x8 -> 0x8 -> 0x0 -> 0x13fc"
+type = "f32"
