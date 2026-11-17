@@ -159,12 +159,14 @@ pub fn ai_entry() -> game_sim::ai::Entry {
 /// P313a: the race's AI riders in `sim` at the load: the roster for `riders` racers, `humans` of
 /// them local seats ([`game_sim::ai::spawn_roster`] at [`AI_DIFFICULTY`] over [`RIDER_IDENTITIES`]),
 /// then each AI rider's brain off the bike's character file `file` ([`game_sim::Sim::spawn_ai`]),
-/// drawing from one generator seeded `seed`. The Sim must hold every AI rider's bike after the
-/// first human's, and its seeker world (`Sim::load_seek`) first. P350: the other seats' humans are
-/// Sims of their own, so in `sim` the AI riders follow the one human. Answers the roster as drawn.
+/// drawing from the race's generator when the Sim has a race, else one seeded `seed`. The Sim must
+/// hold every AI rider's bike after the first human's, and its seeker world (`Sim::load_seek`)
+/// first. P350: the other seats' humans are Sims of their own, so in `sim` the AI riders follow the
+/// one human. Answers the roster as drawn.
 pub fn spawn_ai(sim: &mut game_sim::Sim, riders: i32, humans: i32, file: Option<&game_sim::phy::Ini>, seed: u32) -> game_sim::ai::Roster {
     use game_sim::ai::{RosterIn, spawn_roster};
-    let mut rng = Rng::from_seed(seed);
+    // S333: in a race, the roster draws on, and leaves, the race's generator: one for the load and the race.
+    let mut rng = sim.race.as_ref().map_or_else(|| Rng::from_seed(seed), |r| r.rng);
     let input = RosterIn { racers: riders, humans, difficulty: AI_DIFFICULTY, identities: RIDER_IDENTITIES, all_ai: false, ghost_race: false };
     let roster = spawn_roster(&mut rng, input);
     let in_sim = game_sim::ai::Roster { humans: 1, ..roster.clone() };
