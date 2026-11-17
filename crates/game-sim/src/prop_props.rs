@@ -27,8 +27,13 @@
 //! as copies after its strikers ([`step_named`]). The drop2 states are the proof:
 //! `tests/prop_props.rs`.
 //!
-//! What is not here: a body of the striker's own collection (each free09 ball is a collection of its
-//! own); the original's one narrow pass ordering a scene mesh and a prop by the walk's list and keeping
+//! A body of the striker's own collection is struck the same way (F21): a prop's probe ignores its own
+//! mesh and nothing else, so free11's pins strike each other as balls do (research/f21, the lean
+//! states: pin 1 tossed onto pin 0, one collection). The step hands such a body in place, not as a
+//! copy: its collection's world integrates it, and a sibling's entries name it by its place after
+//! the step's other sides ([`step_named`], [`Collection::lists`]).
+//!
+//! What is not here: the original's one narrow pass ordering a scene mesh and a prop by the walk's list and keeping
 //! one contact per ray between them — a prop's entries go after its scene's; the broad phase's gather,
 //! which is every prop with a mesh by its distance from the rays' centre.
 
@@ -174,7 +179,8 @@ fn frame(node: &Node) -> [Vf; 4] {
 /// on it, in the order the rays first met it.
 type Met = Vec<((usize, usize, usize), Vec<ray_probe::Contact>)>;
 
-/// Object `k` of collection `c`'s ray probe against every other collection's props with a mesh.
+/// Object `k` of collection `c`'s ray probe against every other prop with a mesh, its own
+/// collection's other bodies too.
 fn strikes_of(set: &PropSet, c: usize, k: usize, facets: &mut [Option<Vec<Facet>>]) -> Met {
     let coll = &set.collections[c];
     let o = &coll.objects[k];
@@ -185,7 +191,7 @@ fn strikes_of(set: &PropSet, c: usize, k: usize, facets: &mut [Option<Vec<Facet>
         for (po, (object, mesh)) in other.objects.iter().zip(shapes).enumerate() {
             let here = f;
             f += 1;
-            if pc == c || !object.collision_enabled || object.collision.is_none() {
+            if (pc, po) == (c, k) || !object.collision_enabled || object.collision.is_none() {
                 continue;
             }
             let Some(mesh) = mesh.as_ref() else { continue };
@@ -245,7 +251,7 @@ fn strikes_of(set: &PropSet, c: usize, k: usize, facets: &mut [Option<Vec<Facet>
 
 /// **The props' rays on the other props**, after every collection's own search: every filed object
 /// in the node's list order ([`PropSet::node_order`]), its probe where its node stands, its category
-/// list as its search left it, against every other collection's props. Each struck ray puts an entry
+/// list as its search left it, against every other prop. Each struck ray puts an entry
 /// on the striker's list after its own (at most its capacity), naming the struck prop
 /// (`PROP_OTHER + flat`), the striker's flags set as a hit sets them and its listeners told as its
 /// search's are; the struck prop is woken ([`PropSet::struck`]) and gets the mirror, at the head of
@@ -253,10 +259,10 @@ fn strikes_of(set: &PropSet, c: usize, k: usize, facets: &mut [Option<Vec<Facet>
 /// is filed at the end, searched at once by `own` (its collection, its object: the terrain and the
 /// scene, as [`Collection::search_object`]) and walked in its turn.
 pub fn strike_props(set: &mut PropSet, own: &mut dyn FnMut(&mut PropSet, usize, usize)) {
-    if set.tables.is_none() || set.collections.len() < 2 {
+    let total: usize = set.collections.iter().map(|c| c.objects.len()).sum();
+    if set.tables.is_none() || total < 2 {
         return;
     }
-    let total: usize = set.collections.iter().map(|c| c.objects.len()).sum();
     let mut facets: Vec<Option<Vec<Facet>>> = (0..total).map(|_| None).collect();
     // How many mirrors this pass put at the head of each list.
     let mut heads = vec![0usize; total];
@@ -338,19 +344,24 @@ fn names_a_prop(c: &Collection) -> bool {
 
 /// **Collection `c`'s step** with the props its lists name ([`strike_props`]) handed after
 /// `strikers`, as the step finds them, each written back after: what its impulse did to the body and
-/// the centre its object's resolve wrote. A list naming no prop steps as before. The listeners on the
+/// the centre its object's resolve wrote. A body of `c` itself is not a copy: its entries name it
+/// by its object's place after the copies, and the collection's force listener hands it in place
+/// ([`Collection::lists`]). A list naming no prop steps as before. The listeners on the
 /// node are not run: the set walks them after every collection's step ([`PropSet::walk_listeners`]).
 pub fn step_named(set: &mut PropSet, c: usize, dt: F, tables: &Tables, movers: &[crate::contact::Mover], strikers: &mut [Other<'_>]) {
     if !names_a_prop(&set.collections[c]) {
         set.collections[c].step_world_among(dt, tables, movers, strikers);
         return;
     }
-    // The named props, in the order the lists first name them, and each named entry's place.
+    // The named props of the other collections, in the order the lists first name them, and each
+    // named entry's place; this collection's own bodies follow them, object by object.
+    let own = flat(set, c, 0);
+    let mine = own..own + set.collections[c].objects.len();
     let mut named: Vec<usize> = Vec::new();
     for o in &set.collections[c].objects {
         for e in o.collision.iter().flat_map(|col| &col.record.contacts) {
             if let Some(f) = e.other.and_then(|o| o.checked_sub(PROP_OTHER)) {
-                if !named.contains(&f) {
+                if !mine.contains(&f) && !named.contains(&f) {
                     named.push(f);
                 }
             }
@@ -367,6 +378,7 @@ pub fn step_named(set: &mut PropSet, c: usize, dt: F, tables: &Tables, movers: &
         })
         .collect();
     let first = strikers.len();
+    let siblings = first + named.len();
     // Which entries named a prop, to name them back after the step.
     let marked: Vec<Vec<bool>> = set.collections[c]
         .objects
@@ -376,7 +388,7 @@ pub fn step_named(set: &mut PropSet, c: usize, dt: F, tables: &Tables, movers: &
     for o in &mut set.collections[c].objects {
         for e in o.collision.iter_mut().flat_map(|col| col.record.contacts.iter_mut()) {
             if let Some(f) = e.other.and_then(|x| x.checked_sub(PROP_OTHER)) {
-                e.other = Some(first + named.iter().position(|&n| n == f).expect("named above"));
+                e.other = Some(if mine.contains(&f) { siblings + f - own } else { first + named.iter().position(|&n| n == f).expect("named above") });
             }
         }
     }
@@ -399,7 +411,7 @@ pub fn step_named(set: &mut PropSet, c: usize, dt: F, tables: &Tables, movers: &
     for (o, marks) in set.collections[c].objects.iter_mut().zip(&marked) {
         for (e, &m) in o.collision.iter_mut().flat_map(|col| col.record.contacts.iter_mut()).zip(marks) {
             if m {
-                e.other = e.other.map(|x| PROP_OTHER + named[x - first]);
+                e.other = e.other.map(|x| PROP_OTHER + if x >= siblings { own + x - siblings } else { named[x - first] });
             }
         }
     }

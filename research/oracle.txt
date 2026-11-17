@@ -13085,3 +13085,18 @@ atv_race_camera_update      atv 0x00485b20 = the race (Hill Climb) camera's fram
 #   update 0x004dd000) and normal.y > 0.8; forward y = 0, normalised; clearance check 0x004cdfc0 not ported.
 #   Caller: region tracker 0x0018bb70 / 0x0018bf20 via thunk 0x004ce960 (not traced). Also read: 0x004cb340,
 #   0x004cddf0. +0xbf0 written at the tail start while free (the previous tick's clock).
+# F21 — props by props within one collection (journal research/journal/*-f21-*). A prop's probe (object
+#   +0x124, category 0x8, mask 0xffffffff) ignores only its own mesh collidable (+0xd0 count, +0xd4 array =
+#   object +0x128 = collision object +0x1f8; mesh category 0x18, owner +0x80 = its collision object), so a
+#   sibling in the same collection is struck exactly as another collection's prop (S242): struck woken
+#   (activate collection 0x003b27a0, enable object 0x0015b790), filed at the node's end and searched in the
+#   same pass, mirror (kind 1) at the head when later in node order. Every multi-body collection in the
+#   s196-sx01 and s196-free11 images reads the same ignore list.
+#   free11 boot (no bike): list 0x00a9d7d4 (count, +4 head cell), props node 0x007a3d40 (+0x30 count,
+#   +0x38 filed; 0x008c77c0 first, not a prop), node listeners +0x48/+0x4c/+0x50 walked at 0x0026f8e0
+#   (item vt +8 (item, f12 dt), nonzero return swap-removes at 0x002735d0). Pins collection 0x00d08680
+#   (vtable 0x0045da90), objects 0xd08ae0.. (pin0 col 0xd0e980, pin1 col 0xd11a40).
+#   Wake method (research/f21/toss.py): a one-shot fake listener on the node list (cave 0x01dc7800, vt
+#   slot +8 -> stub: activate, enable, body +0x70 = velocity, return 1). lean-209..214 (pin1 tossed
+#   5.2,6,-2.96 at 191): 212 pin1 strikes pin0, pin0 filed after it with pin1's mirror at its head; 213 each
+#   on the other in node order.
