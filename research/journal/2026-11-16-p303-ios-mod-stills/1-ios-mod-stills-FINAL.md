@@ -1,4 +1,4 @@
-# 1 — ios mod stills (PART)
+# 1 — ios mod stills (FINAL)
 
 Task P303. 2026-11-16.
 
