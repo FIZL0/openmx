@@ -13307,3 +13307,13 @@ race_finish_listener        boot 0x002fc410 slot +0x14 (Finished; thunk 0x003004
 #   +0x132c..+0x1338 (vtable 0x003cce10: +0x130 start 0x004946c0, +0xf0 place = the orient 0x00492e50, so the
 #   blade's centre also moves on by its turned cofg (0, 0, 9)). Node world rows +0x70..+0xa0, brought up to date
 #   by 0x00193b30 (hooked in the oracle). rand 0x003561a8. 10000 cases bit-exact.
+# S328b: the engine note's switch-on and C33's picks. engine_sound_hands 0x00280fb0 makes the note (rider
+#   +0x1494) and sets the rider's +0x14a4 = rand * 2^-31 (a start delay, seconds). The player update
+#   0x0027c890: if 0 < +0x14a4 { -= dt; if <= 0 { note vt+0x88 (0x001b6b80 -> 0x00132b20: +0x29 |= 3);
+#   = 0 } }. The child walk 0x00133500 runs engine_sound_frame (vt+0x38) only with +0x29 bit 0 set,
+#   bits 2/3 clear and +0x20 bit 1. Switching on also sets the emitter gate +0x1f0 bit 1 (0x64 -> 0x66)
+#   and starts the queued idle that frame. sound_3d 0x00104480 hears nothing at distance >= max (note
+#   +0x8c, 200 in C33) from the nearest listener (0x001045d0), measured from +0xb0 (last frame's place).
+#   C33: ai2's note on at tick 9, ai0's at 14; both pick low accel 1 at 15 (sound_pick + jitter draw),
+#   in actor order; ai1 picks at 30; power chains at 48 (33 ticks after 15: the voice clock starts a
+#   frame after the key-on). The Sim runs it as engine_note::Notes.

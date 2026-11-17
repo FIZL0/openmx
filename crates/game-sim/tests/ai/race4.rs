@@ -16,7 +16,7 @@
 // has reached, so that a fix shows as a raised mark and a regression as a failure. The human, with no
 // pad but the stick its image was saved holding on the first step, agrees on every row (S329).
 
-use super::draws::c33_looks;
+use super::draws::{C33_NOTE_PICKS, C33_NOTES_ON, c33_looks};
 use super::lane::s323_free09;
 use super::sim::{s12e_bike, s12e_racer, s12e_seek_world, s12e_u64};
 use super::*;
@@ -25,6 +25,7 @@ use game_sim::Sim;
 use game_sim::ai::{Lane, Pilot, Seat};
 use game_sim::bike_col::{self, BikeCol};
 use game_sim::eco::Wooded;
+use game_sim::engine_note;
 use game_sim::phy::Phy;
 use game_sim::ride::{Controls, Ride, Wheel};
 use game_sim::rider::{Rider as Bike, Tables};
@@ -52,7 +53,7 @@ pub(crate) const C33_NAMES: [&str; 4] = ["ai0", "ai1", "human", "ai2"];
 
 /// The last tick each of [`C33_LANES`] agrees with the original's, bit for bit, on every agreed row up
 /// to it but the torn ones: the regression mark.
-const C33_AGREES_THROUGH: [u64; 5] = [28, 28, 1802, 206, 14];
+const C33_AGREES_THROUGH: [u64; 5] = [28, 28, 1802, 206, 16];
 
 /// One rider's words off an image, at the offsets `tests/two_p_rider.rs` (S174) seeds a rider from.
 struct Image<'a> {
@@ -402,6 +403,8 @@ fn s12e_free09s_four_racers_ride_as_the_capture() {
         .collect();
     let gen0 = s12e_u64(&ee, rand_state);
     sim.ai = Some(Box::new(Lane { seek, tables: Arc::new(controls::tables(&ee)), rng: Rng::from_state(gen0), pilots, net: None, cards: Vec::new(), edge: None }));
+    // S328b: the four engine notes, as the image holds them, on the lane's generator.
+    sim.notes = Some(Box::new(c33_notes(&ee)));
 
     // The image's RAM already holds the bodies of the first row: it is tick 3's, saved before its
     // frame counter moved on. Each step from it is the next row.
@@ -438,6 +441,23 @@ fn s12e_free09s_four_racers_ride_as_the_capture() {
         // The step into a row is the frame length the row before it read.
         let looks_were: Vec<F> = (0..C33_RIDERS.len()).map(|k| sim.rider_of(c33_player(k)).body.look).collect();
         sim.step_all(last.dt, &controls, &mut world);
+        // S328b: the notes switch on and pick as the original's do (draws.rs's C33_NOTES_ON and
+        // C33_NOTE_PICKS), through 16.
+        if row.frame <= 16 {
+            let notes = &sim.notes.as_ref().unwrap().riders;
+            for (k, name) in C33_NAMES.iter().enumerate() {
+                let note = &notes[c33_player(k)];
+                if let Some(&(on, _)) = C33_NOTES_ON.iter().find(|(_, n)| n == name) {
+                    assert_eq!(note.on, row.frame >= on, "tick {}: {name}'s note switched on", row.frame);
+                }
+                let (tick, picked, index) = C33_NOTE_PICKS;
+                let want = match row.frame >= tick && picked.contains(name) {
+                    true => (engine_note::Note::LowAccel, index),
+                    false => (engine_note::Note::Idle, 0),
+                };
+                assert_eq!((note.brain.note, note.brain.current.index), want, "tick {}: {name}'s note", row.frame);
+            }
+        }
         // S328a: the bodies' look-around clocks re-arm on the generator as the original's do
         // (draws.rs's C33_LOOKS), through 14: ai0 and ai2 launch at 15.
         if row.frame < 15 && last.agreed {
@@ -493,6 +513,80 @@ fn s12e_free09s_four_racers_ride_as_the_capture() {
             println!("{what} now agrees through tick {}: raise C33_AGREES_THROUGH[{i}]", lane.through);
         }
     }
+}
+
+/// S328b: a rider's engine note (`+0x1494`) and the delay its update switches it on after
+/// (`+0x14a4`, the loader's unit draw), the note's words as `tests/audio.rs`'s oracle reads them.
+mod c33_note {
+    /// The lists' counts and arrays, in `Note::slot` order.
+    pub const LISTS: [u32; 8] = [0x204, 0x21c, 0x234, 0x264, 0x27c, 0x24c, 0x2ac, 0x294];
+    pub const FAR: u32 = 0x8c;
+    pub const AT: u32 = 0xb0;
+    pub const SWITCHED: u32 = 0x29;
+    pub const LAST: u32 = 0x2c4;
+    pub const NOTE: u32 = 0x2d8;
+    pub const NEXT: u32 = 0x2dc;
+    pub const OFF_GAS: u32 = 0x2e0;
+    pub const AIR_TO_DECEL: u32 = 0x2e4;
+    pub const AIR: u32 = 0x2e8;
+    pub const HOLD_OFF_GAS: u32 = 0x2ec;
+    pub const AIR_REVS: u32 = 0x2f0;
+    pub const WAS_GAS: u32 = 0x2f4;
+    pub const HELD: u32 = 0x2f8;
+    pub const MUTED: u32 = 0x2fc;
+    pub const LOW_TORQUE: u32 = 0x300;
+    pub const OVERLAP: u32 = 0x304;
+    pub const VARIANCE: u32 = 0x308;
+    pub const MIDPOINT: u32 = 0x30c;
+    /// One sound's length in seconds and its looping flag.
+    pub const LENGTH: u32 = 0x24;
+    pub const LOOPING: u32 = 0xbc;
+}
+
+/// The image's four engine notes as the Sim's, by Sim player. Each is still the loader's: idle
+/// queued, nothing picked, not yet switched on.
+fn c33_notes(ee: &Ee) -> engine_note::Notes {
+    use c33_note::*;
+    use engine_note::{Note, NoteSounds, RiderNote};
+    let mut riders: Vec<(usize, RiderNote)> = C33_RIDERS
+        .iter()
+        .enumerate()
+        .map(|(k, &(r, _, _))| {
+            let n = ee.u32_at(r + 0x1494);
+            assert_eq!(ee.read(n + SWITCHED, 1) & 3, 0, "{}'s note is switched on already", C33_NAMES[k]);
+            assert_eq!((ee.i32_at(n + NOTE), ee.i32_at(n + NEXT)), (Note::Idle as i32, Note::Off as i32), "{}'s note", C33_NAMES[k]);
+            let lists = LISTS.map(|l| {
+                let array = ee.u32_at(n + l + 8);
+                (0..ee.i32_at(n + l).max(0) as u32)
+                    .map(|i| ee.u32_at(array + 4 * i))
+                    .map(|p| (ee.f32_at(p + LENGTH), ee.i32_at(p + LOOPING) != 0))
+                    .collect()
+            });
+            let sounds = NoteSounds {
+                lists,
+                low_torque_speed: ee.f32_at(n + LOW_TORQUE),
+                airborne_to_decel: ee.f32_at(n + AIR_TO_DECEL),
+                rev_midpoint: ee.f32_at(n + MIDPOINT),
+                overlap: ee.f32_at(n + OVERLAP),
+                pitch_variance: ee.i32_at(n + VARIANCE),
+                far: ee.f32_at(n + FAR),
+            };
+            let mut note = RiderNote::new(Arc::new(sounds), F(ee.f32_at(r + 0x14a4)));
+            let b = &mut note.brain;
+            b.off_gas = ee.f32_at(n + OFF_GAS);
+            b.air = ee.f32_at(n + AIR);
+            b.hold_off_gas = ee.i32_at(n + HOLD_OFF_GAS) != 0;
+            b.air_revs = ee.i32_at(n + AIR_REVS) != 0;
+            b.was_gas = ee.i32_at(n + WAS_GAS) != 0;
+            b.held = ee.i32_at(n + HELD) != 0;
+            b.muted = ee.i32_at(n + MUTED) != 0;
+            b.last = [0, 4, 8, 12, 16].map(|o| ee.i32_at(n + LAST + o));
+            note.at = Some(Vf([0, 4, 8, 12].map(|o| ee.f32_at(n + AT + o))));
+            (c33_player(k), note)
+        })
+        .collect();
+    riders.sort_by_key(|r| r.0);
+    engine_note::Notes { riders: riders.into_iter().map(|r| r.1).collect() }
 }
 
 /// The controls rider `r`'s image was saved holding: its stick, read back from the limiter's
