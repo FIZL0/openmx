@@ -523,7 +523,9 @@ impl Menu {
     /// shot of a row further down). Nothing where none does.
     pub fn point_at_row(&mut self, label: &str) {
         let Some(screen) = self.screen() else { return };
-        if let Some(at) = self.page_of(screen).iter().position(|r| r.selectable() && r.label.starts_with(label)) {
+        // the pause's Garage (P326's shot): its tiles by name
+        let rows = if screen == Screen::PauseGarage { self.pause_garage_rows() } else { self.page_of(screen) };
+        if let Some(at) = rows.iter().position(|r| r.selectable() && r.label.starts_with(label)) {
             self.cursor[screen.index()] = at;
         }
     }

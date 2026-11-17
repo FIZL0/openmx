@@ -495,6 +495,23 @@ impl Menu {
         self.pause_tiles().into_iter().nth(i)
     }
 
+    /// The flier the pause's Garage turns in its picture panel (P326): the lit tile's, in the skin
+    /// the pauser has of it.
+    pub fn pause_flier(&self) -> Option<roster::Flier> {
+        if self.screen() != Some(Screen::PauseGarage) {
+            return None;
+        }
+        let TileOf::Switch(m) = self.pause_tile()?.of else { return None };
+        let pick = self.picks.0.get(self.pauser)?;
+        roster::flier_of(self.fliers_here(), pick, flier_word(m)?).cloned()
+    }
+
+    /// Where the pause's Garage turns [`Menu::pause_flier`] in a `size` frame's pixels, while it
+    /// has one.
+    pub fn pause_flier_stage(&self, size: (usize, usize)) -> Option<[f32; 4]> {
+        self.pause_flier().map(|_| super::screens::pause_garage_stage(size))
+    }
+
     /// The pause's Garage row (P341): its page of tiles over the ride, the cursor on the ridden one.
     pub(super) fn open_pause_garage(&mut self) {
         let rows = self.pause_garage_rows();

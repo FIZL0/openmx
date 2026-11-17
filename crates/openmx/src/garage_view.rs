@@ -19,7 +19,7 @@ use game_render::psg::Tri;
 use game_render::raster::Frame;
 use game_render::rider::{Body, Sex, Skeleton, anchors_of};
 use game_render::scene::Vehicle;
-use game_render::world::{Assets, Camera, Lighting, draw_model};
+use game_render::world::{Assets, Camera, Lighting, Taken, draw_model};
 use game_render::ini;
 use game_sim::vehicle_anim::Blend;
 use ps2_float::F;
@@ -688,6 +688,114 @@ impl Stage {
     }
 }
 
+/// The pause Garage's flier turning over the paused ride (P326): the lit flier tile's skin, dressed
+/// on a [`Stage`] of its own as the Garage's Fliers tab dresses it. The software path draws the
+/// stage's own dress; the GPU's holds the ride's models and textures, which [`Stage::draw_gpu`]
+/// would forget, so the dress is copied into the ride's assets under a name of its own and let go of
+/// again when another skin shows or the page closes.
+#[derive(Default)]
+pub struct PauseFlier {
+    stage: Stage,
+    /// What is in the ride's assets, and its models and textures there.
+    taken: Option<(Shown, Taken)>,
+}
+
+/// Where a [`PauseFlier`] is drawn this frame: its camera and models in the ride's assets.
+pub struct PauseFlierPose {
+    rect: [u32; 4],
+    camera: Camera,
+    actors: Vec<(String, M4)>,
+}
+
+/// The ride's name for the pause Garage's dress, before its own.
+const PAUSE_FLIER: &str = "pause-flier:";
+
+/// The owner the renderer's dropped models of a [`PauseFlier`] go under: no world's props.
+const PAUSE_FLIER_OWNER: u32 = u32::MAX;
+
+impl PauseFlier {
+    /// Show `flier`, or nothing; `settle` waits for its dress, for a shot.
+    pub fn show(&mut self, flier: Option<&roster::Flier>, settle: bool) {
+        match flier {
+            Some(f) => {
+                self.stage.dress_flier(f);
+                if settle {
+                    self.stage.settle();
+                }
+            }
+            None => self.stage.leave(),
+        }
+    }
+
+    /// Whether the dress asked for is the one on show.
+    fn ready(&self) -> bool {
+        self.stage.wanted.as_ref().is_some_and(|(w, _)| self.stage.pick.as_ref() == Some(w)) && self.stage.dressed.is_some()
+    }
+
+    /// The dress on show copied into the ride's `assets`, the one before let go of (and dropped from
+    /// `gpu`, where the ride draws on one); nothing while nothing shows.
+    pub fn take_into(&mut self, assets: &mut Assets, gpu: Option<&mut Renderer>) {
+        let now = self.ready().then(|| self.stage.pick.clone()).flatten();
+        if self.taken.as_ref().map(|(s, _)| s) == now.as_ref() {
+            return;
+        }
+        let mut gpu = gpu;
+        if let Some((_, taken)) = self.taken.take() {
+            if let Some(r) = gpu.as_deref_mut() {
+                r.drop_owner(PAUSE_FLIER_OWNER, &taken.models, taken.textures.clone());
+            }
+            assets.let_go(&taken);
+        }
+        let (Some(now), Some(d)) = (now, &self.stage.dressed) else { return };
+        let mut copy = Assets::default();
+        copy.textures = d.assets.textures.clone();
+        copy.models = d.assets.models.clone();
+        let taken = assets.take_in(copy, PAUSE_FLIER);
+        if let Some(r) = gpu {
+            r.upload_models(assets, &taken.models.iter().collect::<Vec<_>>());
+        }
+        self.taken = Some((now, taken));
+    }
+
+    /// Where it is drawn this frame, into `rect` of the frame, `turn` radians round: once
+    /// [`PauseFlier::take_into`] has it in the ride's assets.
+    pub fn pose(&mut self, rect: [usize; 4], turn: f32) -> Option<PauseFlierPose> {
+        self.taken.as_ref()?;
+        let camera = self.stage.camera(rect[2], rect[3])?;
+        let actors = self.stage.actors(turn).into_iter().map(|(model, at, _)| (format!("{PAUSE_FLIER}{model}"), at)).collect();
+        Some(PauseFlierPose { rect: rect.map(|v| v as u32), camera, actors })
+    }
+
+    /// Draw `pose` over the frame the GPU just drew with the ride's `assets`.
+    pub fn draw_gpu(r: &mut Renderer, t: &Target, assets: &Assets, pose: &PauseFlierPose) {
+        let actors: Vec<Actor> = pose
+            .actors
+            .iter()
+            .map(|(model, at)| Actor { model, at: *at, pose: None, lod_from: None, alpha: 1.0, casts: false })
+            .collect();
+        let light = Stage::light();
+        let views = [View { rect: pose.rect, camera: &pose.camera, actors: &actors }];
+        r.render_over(t, assets, &Scene3 { views: &views, poses: &[], overlay: &[], sprites: &[], light: &light });
+    }
+
+    /// Draw it into `rect` of the software frame the pause is in, off the stage's own dress.
+    pub fn draw_soft(&mut self, frame: &mut Frame, rect: [usize; 4], turn: f32) {
+        if self.ready() {
+            self.stage.draw_soft(frame, rect, turn, true);
+        }
+    }
+}
+
+/// The flier the pause's Garage turns (P326) in `rects`' views of `players`: the first paused view
+/// whose page has one, and where in the frame's pixels.
+pub fn pause_flier(menu: &mut Menu, rects: &[crate::split::Rect], players: usize) -> Option<(roster::Flier, [usize; 4])> {
+    menu.pause_views(rects, players).into_iter().find_map(|(v, at)| {
+        let (flier, [x, y, w, h]) = menu.with_seat(v, |m| Some((m.pause_flier()?, m.pause_flier_stage((at.w, at.h))?)))?;
+        let px = |f: f32| f.max(0.0) as usize;
+        Some((flier, [at.x + px(x), at.y + px(y), px(w), px(h)]))
+    })
+}
+
 /// The flier the Garage shows on its Fliers tab (P315a), in place of the pick's bike and rider.
 pub fn shown_flier(menu: &Menu) -> Option<&roster::Flier> {
     menu.garage_flier()
@@ -742,6 +850,39 @@ mod tests {
             assert!(d.radius > 0.5 && d.body.is_none() && d.parts.is_empty(), "{}: radius {}", f.skin, d.radius);
             println!("{} from {}: {} triangles, radius {:.2}", f.skin, f.pack, loaded.tris.len(), d.radius);
         }
+    }
+
+    /// P326: the pause Garage's flier goes into a ride's assets after the ride's own textures, the
+    /// next skin in its place with the last let go of, and nothing stays when the page closes; the
+    /// ride's own model and texture are untouched throughout.
+    #[test]
+    fn the_pause_flier_takes_turns_in_the_rides_assets() {
+        if let Err(e) = Disc::open_configured() {
+            return println!("skipped: no disc ({e})");
+        }
+        let offer = roster::original_fliers();
+        let mut ride = Assets::default();
+        let own = game_render::pst::Texture { width: 1, height: 1, rgba: vec![1, 2, 3, 4] };
+        ride.textures.push(own.clone());
+        let mut p = PauseFlier::default();
+        let mut taken = Vec::new();
+        for f in offer.iter().take(2) {
+            p.show(Some(f), true);
+            p.take_into(&mut ride, None);
+            let (_, t) = p.taken.as_ref().expect("taken");
+            assert_eq!(t.models, vec![format!("{PAUSE_FLIER}{FLIER}")], "{}", f.skin);
+            assert!(t.textures.start >= 1 && !t.textures.is_empty(), "{}: after the ride's own", f.skin);
+            assert!(ride.textures[t.textures.clone()].iter().any(|x| x.width > 0), "{}: its pixels in", f.skin);
+            taken.push(t.textures.clone());
+            let pose = p.pose([0, 0, 320, 200], Stage::turn(0)).expect("posed");
+            assert!(pose.actors.iter().all(|(m, _)| ride.models.contains_key(m)), "{}: drawn off the ride's", f.skin);
+        }
+        assert!(ride.textures[taken[0].clone()].iter().all(|x| x.width == 0), "the first skin let go");
+        p.show(None, false);
+        p.take_into(&mut ride, None);
+        assert!(p.taken.is_none() && ride.models.is_empty(), "nothing stays once the page closes");
+        assert!(ride.textures[taken[1].clone()].iter().all(|x| x.width == 0));
+        assert_eq!(ride.textures[0].rgba, own.rgba, "the ride's own texture");
     }
 
     /// P258: ten quick Paint presses, three frames apart, leave the stage on the tenth pick; no
