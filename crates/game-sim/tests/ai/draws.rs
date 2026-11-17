@@ -131,11 +131,32 @@ fn steps_between(mut from: u64, to: u64) -> Option<usize> {
 /// The ticks the whole frame is run through.
 const TICKS: usize = 60;
 
+/// S328a: the bodies whose look-around clock re-arms in C33 before tick 15, by tick, in the order they
+/// draw: the three AI bodies at 7 and the human's at 8. The bodies walk after the riders in the game's
+/// player order (the human 0, then ai2, ai0, ai1 as their interfaces number them). The original's
+/// (`s328_…`, off each body's own look word) and the Sim's (race4.rs's replay) are both held to it.
+pub(crate) const C33_LOOKS: [(u64, &[&str]); 2] = [(7, &["ai2", "ai0", "ai1"]), (8, &["human"])];
+
+/// What each body of [`C33_LOOKS`] re-arms to at `tick`: one unit draw each, in their order, off the
+/// generator as the row before left it (`rng`). Empty on a tick no body re-arms.
+pub(crate) fn c33_looks(tick: u64, rng: u64) -> Vec<(&'static str, F)> {
+    let mut g = Rng::from_state(rng);
+    let p = game_sim::rider_anim::Params::built();
+    C33_LOOKS.iter().filter(|(t, _)| *t == tick).flat_map(|(_, names)| names.iter()).map(|&n| (n, p.rearm(g.unit()))).collect()
+}
+
+/// A body's animation object: its look-around clock (`+0xa30`), and the request block it reads
+/// (`+0x488`) with the gate's cut flag at `+0x140`.
+const BODY_LOOK: u32 = 0xa30;
+const BODY_REQUEST: u32 = 0x488;
+const REQUEST_CUT: u32 = 0x140;
+
 /// S328: run C33's frames whole in the interpreter, with a neutral pad, and say which functions draw
 /// on the shared generator. The four bodies stay bit for bit with the capture on every row, and the
 /// generator through tick 16. The draws that are not the AI's are the body look timers (tick 7: the
 /// three AI riders, tick 8: the human), the engine note (tick 15: two each for ai0 and ai2), and the
-/// dust emitters from 17. From 17 the capture steps further than the frame's sim half: the rest is in
+/// dust emitters from 17 (S328a: each re-armed look clock is the port's remap of its draw, the
+/// bodies drawing in the game's player order). From 17 the capture steps further than the frame's sim half: the rest is in
 /// the render, which is not run here.
 #[test]
 fn s328_c33s_other_draws_are_looks_notes_and_dust() {
@@ -193,6 +214,11 @@ fn s328_c33s_other_draws_are_looks_notes_and_dust() {
         }),
     );
     // A body's animation object is held at its rider's +0xdb4.
+    let anim = |ee: &Ee, k: usize| ee.u32_at(C33_RIDERS[k].0 + 0xdb4);
+    // No body is at the gate: the Sim's riders are seeded without a start line (race4.rs).
+    for k in 0..C33_RIDERS.len() {
+        assert_eq!(ee.u32_at(ee.u32_at(anim(&ee, k) + BODY_REQUEST) + REQUEST_CUT), 0, "{}'s body is at the gate", C33_NAMES[k]);
+    }
     let look_owner = |ee: &Ee, obj: u32| C33_RIDERS.iter().position(|&(r, _, _)| ee.u32_at(r + 0xdb4) == obj).map_or("?", |k| C33_NAMES[k]);
     let mut clock = f64::from(ee.u32_at(wall_ticks)) * 100.0;
     let mut generator_through = rows[0].0;
@@ -219,9 +245,9 @@ fn s328_c33s_other_draws_are_looks_notes_and_dust() {
             count(Site::Other)
         );
         assert_eq!(count(Site::Other), 0, "tick {tick}: a draw from an unnamed site: {calls:x?}");
+        let rearmed: Vec<&str> = c33_looks(tick, w[0].2).iter().map(|l| l.0).collect();
         let want: (usize, usize, usize, &[&str]) = match tick {
-            7 => (0, 0, 0, &["ai2", "ai0", "ai1"]),
-            8 => (0, 0, 0, &["human"]),
+            7 | 8 => (0, 0, 0, &rearmed),
             15 => (4, 0, 0, &[]),
             ..17 => (0, 0, 0, &[]),
             _ => (count(Site::Note), count(Site::Dust), count(Site::Ai), &looks),
@@ -229,6 +255,11 @@ fn s328_c33s_other_draws_are_looks_notes_and_dust() {
         assert_eq!((count(Site::Note), count(Site::Dust), count(Site::Ai), &looks[..]), want, "tick {tick}");
         if tick >= 17 {
             assert!(count(Site::Dust) > 0, "tick {tick}: no dust");
+        }
+        // S328a: each re-armed body's clock holds the port's remap of its own draw, in that order.
+        for (name, look) in c33_looks(tick, w[0].2) {
+            let k = C33_NAMES.iter().position(|n| *n == name).unwrap();
+            assert_eq!(ee.u32_at(anim(&ee, k) + BODY_LOOK), look.0.to_bits(), "tick {tick}: {name}'s look-around clock");
         }
         if generator_through + 1 == tick && s12e_u64(&ee, rand_state) == w[1].2 {
             generator_through = tick;
