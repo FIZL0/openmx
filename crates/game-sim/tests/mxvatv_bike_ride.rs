@@ -10843,8 +10843,8 @@ fn flip_replays_with_every_port_at_once() {
 /// **F31b5 — the whole frame in Rust**: [`replay_pure`] with every port of [`replay_whole`], the
 /// rider leaf's (F31b5i), the wheel contacts' (F52), the other listeners dropped (F31b5m), the part
 /// walk's models dropped (F31b5j: they give the bike nothing), the original vehicle update not run
-/// beside its port (`"no original beside"`) and the wreck's hand-outs served (F31b5t; its posts stay
-/// the original's: their camera switch is on the frame's heap and spatial database). Each row is C15's word for word, the bike and its blocks
+/// beside its port (`"no original beside"`) and the wreck's hand-outs served (F31b5t), with their posts to
+/// the camera controller on the port's and the other listeners dropped (F67). Each row is C15's word for word, the bike and its blocks
 /// the handing run's, and the frame reads no byte where the RAM parts from it. Answers the wreck
 /// state per row, where the RAM parts, the interpreter's census by part, and every instruction the
 /// interpreter ran in the second run's frames ([`FRAME_RAN`]).
@@ -10893,7 +10893,6 @@ fn replay_in_pure_rust(name: &str) -> Option<(Vec<bool>, Vec<String>, BTreeMap<S
 /// **F31b5 — C15's ride, the whole frame in Rust**: ride-2 bit-exact on all 459 rows with the
 /// interpreter running no instruction of any frame.
 #[test]
-#[ignore = "F31b5: the interpreter still runs ~1.6k instructions a frame (journal 2026-11-14)"]
 fn ride_replays_in_pure_rust() {
     let Some((w, _off, census, total)) = replay_in_pure_rust("ride-2") else { return };
     assert_eq!(w.len(), 459);
