@@ -538,6 +538,10 @@ fn seeded(ee: &Ee, at: &At, mut ride: quad::Ride) -> quad::Ride {
         quad::Surface { hazard: ee.u32_at(a) != 0, time: f(ee, a + 4) }
     });
     (t.vehicle.free, t.vehicle.stuck, t.vehicle.stuck_time) = (ee.u32_at(o + u(0xc14)), ee.u32_at(o + u(0xc10)), qf(0xdf0));
+    // MD168a: where it was last free, and the place its put-back stands it at (the spot, the
+    // heading flattened, the ground's up).
+    t.vehicle.last_free = qv(0xc00);
+    t.untamed = Some(handling::untamed::PutBack { saved_position: qv(0xd40), saved_orientation: qv(0xd50), saved_up: qv(0xd60), has_ground: true, ..Default::default() });
     ride
 }
 
@@ -659,14 +663,19 @@ struct Replayed {
     skipped: Vec<usize>,
     /// The port's hazard clock after each tick, and the row's.
     clock: Vec<(F, F)>,
+    /// MD168a: the rows read before the tick's put-back: off the port's after the tick, but the
+    /// port's with the put-back held off (the tick stepped again from before it with the clock
+    /// zeroed, so that it does not pass its limit).
+    before_put_back: Vec<usize>,
 }
 
 fn replay(kit: &Kit, state: &str, csv: &str, last: usize) -> Option<Replayed> {
     let rows = rows(kit, csv)?;
     let mut s = setup(kit, state)?;
     let dt = F(f32::from_bits(DT));
-    let mut out = Replayed { off: Vec::new(), skipped: Vec::new(), clock: Vec::new() };
+    let mut out = Replayed { off: Vec::new(), skipped: Vec::new(), clock: Vec::new(), before_put_back: Vec::new() };
     for (n, r) in rows.iter().enumerate().take(last + 1) {
+        let before = s.ride.clone();
         s.ride.step(&controls(r), dt, &mut s.world, s.segments);
         out.clock.push((s.ride.tailed.as_ref().unwrap().vehicle.stuck_time, F(r.f("stuck_time"))));
         if bad_read(&rows, n) {
@@ -674,6 +683,20 @@ fn replay(kit: &Kit, state: &str, csv: &str, last: usize) -> Option<Replayed> {
             continue;
         }
         let off = body_off(r, &s.ride.body);
+        if !off.is_empty() {
+            // Held off as well: the map edge, which the port's world box puts nearer than Rocksbury's
+            // (hazard-time's row 180 and 238 throw it, reason 13; the original rides on).
+            let mut held = before;
+            held.tailed.as_mut().unwrap().vehicle.stuck_time = F::ZERO;
+            if let Some(w) = held.wrecked.as_mut() {
+                w.edge = false;
+            }
+            held.step(&controls(r), dt, &mut s.world, s.segments);
+            if body_off(r, &held.body).is_empty() {
+                out.before_put_back.push(n);
+                continue;
+            }
+        }
         if !off.is_empty() {
             let show: Vec<String> = off.iter().take(4).map(|(o, w, g)| format!("+{o:#x} {:e} (port {:e})", f32::from_bits(*w), f32::from_bits(*g))).collect();
             out.off.push(format!("row {n}: {} words off: {}", off.len(), show.join(", ")));
@@ -755,34 +778,42 @@ fn untamed_quad_replays_md147_steer() {
 fn clock_matches(clock: &[(F, F)], from: usize) {
     for n in from..clock.len() {
         let (port, row) = clock[n];
-        assert!(row.to_bits() == port.to_bits() || row.to_bits() == clock[n - 1].0.to_bits(), "row {n}: the stuck time is {row:?}, the port's {port:?} (and {:?} a tick before)", clock[n - 1].0);
+        // A put-back tick's row may hold the count that passed 1, read before the put-back zeroes it
+        // (hazard-on's row 92).
+        let passed = port == F::ZERO && row.to_bits() == (clock[n - 1].0 + F(f32::from_bits(DT))).to_bits();
+        assert!(row.to_bits() == port.to_bits() || row.to_bits() == clock[n - 1].0.to_bits() || passed, "row {n}: the stuck time is {row:?}, the port's {port:?} (and {:?} a tick before)", clock[n - 1].0);
     }
 }
 
 /// hazard-time.csv: the spawn with every surface (hazard 0, time 1), jump.pad. In the air Untamed's
 /// clock counts ([`quad::Tail::untamed`]; SLUS-21104's would take the free reset) and passes 1 on
-/// the 31st tick in the air, row 180, where it puts the quad back. The port's body is the row's on
-/// every well-read row to there, its clock the row's from row 140. The put-back itself is not the
-/// original's: the original's quad is moved a tick later (row 181) and to where it was last free
-/// (`+0xbf0`), the port's stood where it is at once (MD168's journal).
+/// the 31st tick in the air, row 180, where it puts the quad back (MD168a: Untamed's put-back,
+/// [`quad::Ride::tail_on_untamed`]) to where it was last free, the tick it left the ground (row 150),
+/// stood on the ground. The port's body is the row's on every well-read row through the put-back and
+/// the landing after it to row 190, its clock the row's from row 140. Row 180 itself was read before
+/// the tick's tail: it is the port's tick with the put-back held off.
 #[test]
-fn untamed_quad_replays_md147_hazard_time_to_the_put_back() {
+fn untamed_quad_replays_md147_hazard_time_through_the_put_back() {
     let Some(kit) = kit() else { return };
-    let Some(r) = replay(&kit, "hazard-time", "hazard-time", 179) else { return };
+    let Some(r) = replay(&kit, "hazard-time", "hazard-time", 190) else { return };
     assert!(r.off.is_empty(), "{} rows off:\n{}", r.off.len(), r.off.join("\n"));
     assert!(r.skipped.len() < 4, "rows {:?} were read badly", r.skipped);
+    assert_eq!(r.before_put_back, [180], "the rows read before a put-back");
     clock_matches(&r.clock, 140);
-    assert!(F(1.0) < r.clock[179].0 + F(f32::from_bits(DT)), "the clock is not about to put the quad back");
 }
 
 /// hazard-on.csv: the spawn with every surface (hazard 1, time 1), jump.pad. The clock counts on the
-/// ground from the first tick and puts the quad back on the 31st (row 30). The port's body and clock
-/// are the rows' to there; the put-back is MD168's gap as in hazard-time's.
+/// ground from the first tick and puts the quad back on the 31st (row 30), and every 31 ticks it
+/// stays on the hazard after. With a wheel on a hazard the spot is never kept (MD168a), so each
+/// put-back stands it at the spawn's. The port's body is the row's on every well-read row of the
+/// capture, its clock the row's; the six put-back rows were read before their tick's tail.
 #[test]
-fn untamed_quad_replays_md147_hazard_on_to_the_put_back() {
+fn untamed_quad_replays_md147_hazard_on_through_the_put_backs() {
     let Some(kit) = kit() else { return };
-    let Some(r) = replay(&kit, "hazard-on", "hazard-on", 29) else { return };
+    let Some(r) = replay(&kit, "hazard-on", "hazard-on", 369) else { return };
     assert!(r.off.is_empty(), "{} rows off:\n{}", r.off.len(), r.off.join("\n"));
     assert!(r.skipped.len() < 4, "rows {:?} were read badly", r.skipped);
+    assert_eq!(r.before_put_back, [30, 61, 216, 278, 309, 340], "the rows read before a put-back");
     clock_matches(&r.clock, 1);
 }
+

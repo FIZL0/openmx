@@ -13075,3 +13075,13 @@ atv_event_type_class        atv 0x00280210 = table 0x00390fa0 by type: 0 for 0..
 atv_race_camera_update      atv 0x00485b20 = the race (Hill Climb) camera's frame: base frame only with no target; heading = forward (+0x30) on the ground, its y pulled to 0 by global 0x00542380, or velocity (+0x50) in the air (0x00486d10 / 0x00486bc0 on flag +0x230), y < 0 scaled 0.67, normalised; up + UP halved; both through own 3-lag sets (+0x1f0 heading, +0x1f4 up); vel swapped for (0,0,0,1) when over 4 ft/s, reversing and not on a look-back preset; aim 0x00486290, distance 0x004860d0, look-at 0x004866e0, position 0x004867f0, filter 0x00486e60, then 0x00487520; not ported (no hill climb in the shell)
 # atv_md166_state             context/mxvatv-ps2/md166/atv-race.p2s: Desert Baja Race (type 8), controller 0x1e1fcb0, race cam 0x1dfccf0, follow 0x1dfd090 = current
 # atv_md166_state             context/mxvatv-ps2/md166/car-race.p2s: Desert Baja Race (type 8), trophy truck, controller 0x1c8b590, race cam 0x1d25000, follow 0x1d253a0 = current
+# MD168a — Untamed's quad put-back (journal research/journal/2026-11-16-md168a-untamed-quad-put-back).
+#   quad put-back 0x004db460: wheel reset 0x004c41a0 on each wheel (zero +0xd0 +0xd4 +0x1d4 +0x224 +0x228
+#   +0x210 +0xf0 +0xf8; (0,0,0,1) at +0x140 +0x170 +0x180 +0x190 +0x840 +0x850; (0,1,0,1) at +0x130 +0x200),
+#   detach, vehicle put-back 0x004ca900, quad words. Vehicle put-back: pos = +0xd30 snapped by ground query
+#   0x004b0910, += 0.3 normal; forward +0xd40, up normal; ground reset 0x004b9130 -> orient 0x004b92c0
+#   (SLUS 0x00492e50) -> body commit 0x004b94e0. Constants 0x003b5f60 (0,0,0,1), 0x003b5fa0 (0,1,0,1).
+#   Keep spot vt +0x3ac 0x004cda80: spot = +0xbf0 if stuck else body +0x70; only with +0xc10 == 0 (set by quad
+#   update 0x004dd000) and normal.y > 0.8; forward y = 0, normalised; clearance check 0x004cdfc0 not ported.
+#   Caller: region tracker 0x0018bb70 / 0x0018bf20 via thunk 0x004ce960 (not traced). Also read: 0x004cb340,
+#   0x004cddf0. +0xbf0 written at the tail start while free (the previous tick's clock).

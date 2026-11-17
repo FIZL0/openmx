@@ -4106,6 +4106,10 @@ impl<R: Moto + Default> Ride<R> {
         (s.stunt_right, s.stunt_left) = (SPIN_STUNTS.0 + UNTAMED_STUNT_SHIFT as u32, SPIN_STUNTS.1 + UNTAMED_STUNT_SHIFT as u32);
         if let Some(t) = self.tailed.as_mut() {
             t.tail.untamed = true;
+            let at = self.body.position;
+            let heading = t.tail.node_forward;
+            t.untamed = Some(crate::handling::untamed::PutBack { saved_position: at, saved_orientation: heading, saved_up: Vf::new(0.0, 1.0, 0.0, 1.0), has_ground: true, ..Default::default() });
+            t.vehicle.last_free = at;
         }
     }
 
@@ -4145,7 +4149,11 @@ impl<R: Moto + Default> Ride<R> {
                 r.held = h;
             }
         }
-        self.tail_on(dt);
+        if self.tailed.as_ref().is_some_and(|t| t.untamed.is_some()) {
+            self.tail_on_untamed(dt, world);
+        } else {
+            self.tail_on(dt);
+        }
         self.wreck_on(dt, world);
     }
 
@@ -4334,6 +4342,9 @@ pub struct Tailed {
     pub tail: Tail,
     pub vehicle: crate::handling::tail::Vehicle,
     pub put_back: PutBack,
+    /// MD168a: the vehicle's put-back words on Untamed's step (its saved place, [`untamed_keep_spot`]),
+    /// and with them Untamed's put-back ([`Ride::tail_on_untamed`]); `None`, MX Unleashed's.
+    pub untamed: Option<crate::handling::untamed::PutBack>,
 }
 
 /// The hazard clock's outside ([`crate::handling::tail::stuck`]): the vehicle's words, and the
@@ -4420,6 +4431,117 @@ impl<R: Moto> Moto for PutOn<'_, R> {
         }
     }
 }
+
+// --- MD168a: Untamed's put-back -------------------------------------------------------------------
+
+/// The tail's calls on Untamed's step (MD168a; [`Ride::tail_on_untamed`]): the hazard clock is
+/// Untamed's ([`crate::handling::untamed::stuck`]), its put-back [`put_back`] (place and keep set) with
+/// the vehicle's put-back Untamed's ([`UntamedPutOn`]); every other call handed to `rest`.
+struct UntamedTailOn<'a, R> {
+    vehicle: &'a mut crate::handling::tail::Vehicle,
+    put_back: &'a mut PutBack,
+    on: UntamedPutOn<'a, R>,
+}
+
+impl<R: Moto> Moto for UntamedTailOn<'_, R> {
+    fn call(&mut self, c: Call, q: &mut Quad, body: &mut Body) {
+        match c {
+            Call::UntamedHazardSurface { dt, time, sunk, grounded } => {
+                let mut clock = Clock { v: self.vehicle, put_backs: 0 };
+                crate::handling::untamed::stuck(&mut clock, sunk, grounded, dt, time);
+                for _ in 0..clock.put_backs {
+                    put_back(self.put_back, q, body, true, true, &mut self.on);
+                }
+            }
+            c => self.on.rest.call(c, q, body),
+        }
+    }
+}
+
+/// The vehicle's put-back on Untamed's step: [`crate::handling::untamed::put_back`] on the saved
+/// place, its ground the world's (the point moved onto it, its normal back), then the ground reset
+/// at where it came to ([`untamed_settle`]): the body's view there at once, the whole body after the
+/// tail (`settled`). The rays, the attachment and the post are handed to no one: nothing headless
+/// reads them.
+struct UntamedPutOn<'a, R> {
+    back: &'a mut crate::handling::untamed::PutBack,
+    world: &'a mut dyn crate::world::World,
+    cofg: Vf,
+    settled: &'a mut Option<crate::atv_body::Body>,
+    base: crate::atv_body::Body,
+    /// The wheels reset ([`Call::WheelReset`]), done after the tail ([`Ride::untamed_wheel_reset`]).
+    wheels: &'a mut [bool; 4],
+    rest: &'a mut R,
+}
+
+impl<R: Moto> Moto for UntamedPutOn<'_, R> {
+    fn call(&mut self, c: Call, q: &mut Quad, body: &mut Body) {
+        match c {
+            Call::WheelReset(k) => {
+                self.wheels[k] = true;
+                self.rest.call(c, q, body);
+            }
+            Call::VehiclePutBack { place, keep, .. } => {
+                let world = &mut *self.world;
+                let ground = |at: &mut Vf| {
+                    let (to, normal) = world.ground(*at);
+                    *at = to;
+                    normal
+                };
+                crate::handling::untamed::put_back(self.back, place, keep, ground, |_| {});
+                let b = &self.back;
+                let mut full = self.settled.unwrap_or(self.base);
+                full.set_view(body);
+                untamed_settle(&mut full, self.cofg, b.position, b.orientation, b.up);
+                *body = full.view();
+                *self.settled = Some(full);
+                self.rest.call(c, q, body);
+            }
+            c => self.rest.call(c, q, body),
+        }
+    }
+}
+
+/// **Untamed's ground reset of the quad's body** (the put-back's settle): the staged velocity zero
+/// (`(0, 0, 0, 1)`), then the orient on `at`, `forward` and `up` as SLUS-21104's
+/// ([`crate::handling::wreck::orient`]): the up made square to the forward, both normalized, the body
+/// turned to their frame with no spin and made so ([`crate::handling::wreck::body_commit`]): both
+/// positions at `at` (`w` 1) moved by the centre of gravity turned, both orientations the frame's,
+/// the velocity, rates and every accumulator `(0, 0, 0, 1)`.
+pub fn untamed_settle(body: &mut crate::atv_body::Body, cofg: Vf, at: Vf, forward: Vf, up: Vf) {
+    use crate::air::{cross, normalize};
+    let origin = Vf::new(0.0, 0.0, 0.0, 1.0);
+    let t = forward.merge(Dest::XYZ, cross(forward, up));
+    let (forward, up) = (normalize(forward), normalize(t.merge(Dest::XYZ, cross(t, forward))));
+    let q = crate::math::mat4_to_quat(&crate::math::basis(origin, forward, up, false, true));
+    let at = at.merge(Dest::W, origin);
+    let p = at.merge(Dest::XYZ, at.add(crate::handling::wreck::turned(q, cofg)));
+    (body.last_position, body.position, body.velocity) = (p, p, origin);
+    (body.last_force, body.force, body.accel, body.correction_peak, body.correction) = (origin, origin, origin, origin, origin);
+    (body.last_quat, body.quat, body.rates) = (q, q, origin);
+    (body.moment, body.last_moment, body.ang_accel, body.twist_peak, body.twist) = (origin, origin, origin, origin, origin);
+}
+
+/// **Untamed's keep spot** (the quad's, as its run calls it each frame): with no wheel on a hazard
+/// surface (`on_hazard`, [`Tail::on_hazard`] as the update left it), the spot is where the quad was
+/// last free while it is stuck, else the body; stood on the ground (`ground`), with a ground facing up
+/// past 0.8 it is kept as the place to put back to, with the heading flattened and normalized and the
+/// ground's normal as the up.
+pub fn untamed_keep_spot(pb: &mut crate::handling::untamed::PutBack, v: &crate::handling::tail::Vehicle, on_hazard: bool, body: Vf, heading: Vf, ground: impl FnOnce(Vf) -> (Vf, Vf)) {
+    if on_hazard {
+        return;
+    }
+    let spot = if v.stuck != 0 { v.last_free } else { body };
+    let (at, normal) = ground(spot);
+    if !(normal.y() <= F(KEEP_UP)) {
+        pb.saved_position = at;
+        pb.saved_orientation = crate::air::normalize(heading.merge(Dest::Y, Vf::ZERO));
+        pb.saved_up = normal;
+    }
+}
+
+/// How far up the ground under a kept spot must face.
+const KEEP_UP: f32 = 0.8;
 
 /// **The quad's wreck on an MX Unleashed world** (MD123a), as [`Ride`] keeps it: the reason it is
 /// down for (`0` riding), the clock it is down for, `MaxWreckTime`, the struck class the reason-15
@@ -4589,6 +4711,59 @@ impl<R: Moto + Default> Ride<R> {
         let mut m = TailOn { vehicle: &mut t.vehicle, put_back: &mut t.put_back, on: PutOn { spot, rest: &mut self.rest } };
         update(&mut t.tail, &mut self.q, &mut view, dt, &mut m);
         self.body.set_view(&view);
+    }
+
+    /// **MD168a: the frame's tail on Untamed's step** ([`Tailed::untamed`]): [`Ride::tail_on`]'s, but
+    /// the body is kept as where the quad was last free first, when it was free after the last frame's
+    /// clock, the put-back is Untamed's (the saved place stood on the world's ground and lifted 0.3 ft
+    /// along its normal, the body reset there at once: [`untamed_settle`]), and after the tail the place
+    /// is kept ([`untamed_keep_spot`]).
+    pub fn tail_on_untamed(&mut self, dt: F, world: &mut dyn crate::world::World) {
+        let Some(Tailed { tail, vehicle, put_back: pb, untamed: Some(back) }) = self.tailed.as_mut() else { return };
+        let b = &self.bike;
+        tail.wheel_surface = b.more.map(|m| m.record);
+        tail.wheel_sunk = b.wheels.map(|w| w.ray_hit != 0);
+        tail.wheel_squeeze = b.wheels.map(|w| w.compression);
+        let node = &b.parts.scene.nodes[0].world;
+        (tail.node_up, tail.node_forward) = (node[1], node[2]);
+        if vehicle.free != 0 {
+            vehicle.last_free = self.body.position;
+        }
+        let (mut settled, mut wheels) = (None, [false; 4]);
+        let mut view = self.body.view();
+        let on = UntamedPutOn { back, world: &mut *world, cofg: b.cofg, settled: &mut settled, base: self.body, wheels: &mut wheels, rest: &mut self.rest };
+        let mut m = UntamedTailOn { vehicle, put_back: pb, on };
+        update(tail, &mut self.q, &mut view, dt, &mut m);
+        if let Some(full) = settled {
+            self.body = full;
+        }
+        self.body.set_view(&view);
+        let heading = tail.node_forward;
+        untamed_keep_spot(back, vehicle, tail.on_hazard, self.body.position, heading, |at| world.ground(at));
+        for k in (0..4).filter(|&k| wheels[k]) {
+            self.untamed_wheel_reset(k);
+        }
+    }
+
+    /// **Untamed's wheel reset** (the put-back's, each wheel's): not down and no sweep, the squeeze,
+    /// the spring's force, the spin, its torque and both cleared words zero; the load point, the
+    /// contact's, chassis' and local velocities and the local force `(0, 0, 0, 1)`; both normals up,
+    /// `(0, 1, 0, 1)`. Every copy the port keeps of those words alike (the quad's wheel, the drive,
+    /// the spin, the more).
+    pub fn untamed_wheel_reset(&mut self, k: usize) {
+        let (origin, up) = (Vf::new(0.0, 0.0, 0.0, 1.0), Vf::new(0.0, 1.0, 0.0, 1.0));
+        let w = &mut self.bike.wheels[k];
+        (w.ray_hit, w.swept_contact, w.compression, w.spring_force) = (0, 0, F::ZERO, F::ZERO);
+        (w.load_point, w.contact_velocity, w.chassis_velocity) = (origin, origin, origin);
+        (w.contact_normal, w.ground_normal) = (up, up);
+        let s = &mut self.bike.spins[k];
+        (s.spin, s.torque, s.cleared) = (F::ZERO, F::ZERO, [F::ZERO; 2]);
+        (s.local_velocity, s.local_force) = (origin, origin);
+        let d = &mut self.bike.parts.drive[k];
+        (d.spin, d.torque, d.forward) = (F::ZERO, F::ZERO, F::ZERO);
+        self.bike.more[k].chassis_velocity_local = origin;
+        let qw = &mut self.q.wheels[k];
+        (qw.contact_vel, qw.normal) = (origin, up);
     }
 
     /// **The swap between the riding and the wreck rays** ([`swap_rays`]) on the record's rays, the

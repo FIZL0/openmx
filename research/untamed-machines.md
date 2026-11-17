@@ -288,6 +288,17 @@ it passes 1 s: Untamed's new branch, which SLUS-21104 never takes. With hazard 1
 the spawn every second, and its rear wheels are off the ground for a few ticks after each drop. The
 stick moved −0x10 (+0x1298), the ramped stick +0x10 (+0x12f8): not every 0x12xx word follows one rule.
 
+**Put-back on Untamed's step (MD168a).** The quad's put-back resets each wheel (contact, compression,
+spring, spin and drive words, normals to up), detaches, and runs the vehicle put-back: the saved spot
+(`+0xd30`, SLUS `+0xd40`) snapped to the ground and lifted 0.3 ft along its normal, facing the saved
+forward, then the ground reset (orient, body commit: still, at rest). The spot is kept by a keep-spot slot
+(vt `+0x3ac`) each tick: the last-free place (`+0xbf0`, written at the tail's start while free) when stuck,
+else the body; only with no wheel on a hazard (`+0xc10`) and a ground normal y over 0.8, the forward
+flattened. So hazard-time goes back to where it left the ground, hazard-on always to the spawn.
+`quad::Ride::tail_on_untamed` (when `Tailed::untamed` is set, by `Ride::untamed`); MD147's hazard-time
+replays bit for bit to row 190 and hazard-on through all 370 rows. The put-back rows look a tick late
+only because the capture reads before the tick's tail.
+
 Not classified (they differ, but are world, collision or presentation code the quad shares with every
 machine, or were not reached): the plant's axis-angle turn (628 → 312 B: likely a Ghidra size split), the
 quaternion-to-euler (MD93d found the same clamps; a new `jal` past its end at the larger size), the collide

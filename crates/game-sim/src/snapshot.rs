@@ -1411,7 +1411,8 @@ wire!(crate::quad::Wheel { steered, rear_pair, touching, normal, contact_vel, ba
 wire!(crate::quad::Bike { held, gas_cut, cut_time, joystick, stick, clutch, gate_cut, clutch_keys, ride, engine, air_keys, air, stick_hold, preload_cue, spin_applied, spin_active, touching, struck_class, buttons, right_y, up_y, stunt_id, rider_stunt, flip_clip, flip_stunt, gas_gyro_torque, gyro, wheels, more, ground, ground_of, cofg, spins, parts, contacts });
 wire!(crate::atv_body::Body { enabled, linear_axes, inv_mass, damping, last_position, position, velocity, last_force, force, accel, correction_peak, correction, max_speed, max_accel, angular_axes, inv_inertia, ang_damping, last_quat, quat, moment, last_moment, rates, ang_accel, twist_peak, twist, max_rates, max_ang_accel });
 wire!(crate::quad::Recorded { record, held, riding, wreck, rays, parts });
-wire!(crate::quad::Tailed { tail, vehicle, put_back });
+wire!(crate::quad::Tailed { tail, vehicle, put_back, untamed });
+wire!(crate::handling::untamed::PutBack { position, orientation, up, saved_position, saved_orientation, saved_up, respawn, driver_respawn, hold, saved_hold, has_ground, has_attachment });
 wire!(crate::quad::Wrecked { reason, clock, max_time, class, category, spot, node, counting, edge, wrecks, small, limits, balance, wanted, blend, trick_wrecked, racing, crossup, rng, back, search });
 wire!(crate::quad::Rays { active, active_too, record, wreck, riding });
 wire!(crate::quad::WreckParts { body, trigger, wreck, segments });
