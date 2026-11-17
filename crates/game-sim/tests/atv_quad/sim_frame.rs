@@ -1368,9 +1368,11 @@ fn a_spoiled_held_contact_turns_the_ports_step_red() {
 #[test]
 fn the_palm_strikes_contacts_push_the_ports_quad() {
     let Some(seen) = palm(PALM_RIDE, Some(Pieces::Port), None, false) else { return };
-    // MD118: the record's outside is Rust's; only the pair log's heap resize goes to the original
+    // MD118: the record's outside is Rust's; MD140: the pair log's two grows too (one moves the log,
+    // one grows it in place), each checked against the original's resize word for word
     let o = &seen.port_outside;
     assert!(o.keys().all(|k| !k.starts_with("> ")), "an outside call was handed on: {o:?}");
+    assert_eq!(o.get("heap: the pair log grown"), Some(&2), "the pair log's grows: {o:?}");
     for k in ["record search part stand", "record search pair, kind 0", "sweep pair, kind 0"] {
         assert!(o.get(k).is_some_and(|&n| n > 0), "the ride never reached {k}: {o:?}");
     }

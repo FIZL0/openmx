@@ -15860,6 +15860,8 @@ use game_sim::{atv_part, ray_probe};
 
 #[path = "mxvatv_bike_ride/gather_in_ram.rs"]
 mod gather_in_ram;
+#[path = "mxvatv_bike_ride/heap_in_ram.rs"]
+mod heap_in_ram;
 use gather_in_ram::*;
 
 /// F46c: the sweep probe's clear's globals — the two words it zeroes, and where it notes the
@@ -16260,7 +16262,7 @@ fn bike_heard_in_ram(ee: &Ee, bike: u32, struck: u32) -> atv_hear::Heard {
 
 /// **F54 — the pair log's listener in Rust** ([`atv_hear::push`]): the owner at `o` logs `{probe,
 /// struck, 0, kind}` on its log (`+0x3c8`), the log's words written back; a grow is the heap's resize
-/// (the original's, `grown` told the bytes).
+/// (MD140: Rust's, checked against the original's; `grown` told the bytes).
 fn pair_log_heard_in_ram(ee: &mut Ee, o: u32, probe: u32, struck: u32, grown: &mut dyn FnMut(u32)) {
     let l = o + 0x3c8;
     let kind = atv_hear::kind(ee.u32_at(struck + 0x94), [ee.u32_at(o + 0x2c), ee.u32_at(o + 0x30)]);
@@ -16268,9 +16270,7 @@ fn pair_log_heard_in_ram(ee: &mut Ee, o: u32, probe: u32, struck: u32, grown: &m
     let mut log = atv_hear::Log { count: i(ee, 0), entries: ee.u32_at(l + 8), step: i(ee, 0xc), capacity: i(ee, 0x10), most: i(ee, 0x14) };
     let slot = atv_hear::push(&mut log, &mut |at, bytes| {
         grown(bytes);
-        ee.set(28, GP);
-        ee.call(HEAP_RESIZE_F54, &[u64::from(at), u64::from(bytes), u64::from(PAIR_LOG_FILE), u64::from(PAIR_LOG_LINE)], &[], BUDGET);
-        ee.v0() as u32
+        heap_in_ram::resize_checked(ee, HEAP_RESIZE_F54, GP, BUDGET, at, bytes, PAIR_LOG_FILE, PAIR_LOG_LINE)
     });
     ee.set_u32(l + 8, log.entries);
     ee.set_u32(l + 0x10, log.capacity as u32);
