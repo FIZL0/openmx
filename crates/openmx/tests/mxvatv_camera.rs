@@ -21,6 +21,10 @@
 //! block is the last row's, or two ticks on, or a dropped tick, loses the target the camera stepped
 //! on, so the replay reseeds after it. The counts are printed for every capture.
 //!
+//! R28's capture (`context/capture/r28/buggy.csv`) plays MD39a's drive with the right stick swinging
+//! the camera's yaw off a half turn (`research/r28/swing.pad`): the row's player offsets are handed to
+//! the camera before each step, as the stick leaves them.
+//!
 //! Each machine skips without its capture, its camera file or the map.
 
 #[allow(dead_code)]
@@ -42,8 +46,10 @@ use game_sim::track;
 use ps2_float::{F, Vf};
 
 /// Each capture, the folder under `context/capture` it is in, and the machine in it: MD82b's behind
-/// the cars and the ATV, MD82c's (`research/md82c/fly.sh`) behind MD80a's four flights.
-const CAPTURES: [(&str, &str, ModMachine); 11] = [
+/// the cars and the ATV, MD82c's (`research/md82c/fly.sh`) behind MD80a's four flights, and R28's
+/// behind the buggy with the right stick swinging the camera round towards the front
+/// (`research/r28/swing.pad`), where the rear and swing fades run below one.
+const CAPTURES: [(&str, &str, ModMachine); 12] = [
     ("md82b", "buggy", ModMachine::Buggy),
     ("md82b", "baja", ModMachine::Baja),
     ("md82b", "sandrail", ModMachine::Sandrail),
@@ -55,6 +61,7 @@ const CAPTURES: [(&str, &str, ModMachine); 11] = [
     ("md82c", "biplane3", ModMachine::Biplane),
     ("md82c", "kiowa", ModMachine::Helicopter),
     ("md82c", "kiowa3", ModMachine::Helicopter),
+    ("r28", "buggy", ModMachine::Buggy),
 ];
 
 /// The frame time the camera is handed: the lags' alpha is this over their time constant in every row.
@@ -191,6 +198,15 @@ fn seeded(c: &Capture, row: usize, presets: Vec<Preset>) -> ModFollow {
     cam
 }
 
+/// The player's four offsets (zoom, yaw, pitch, fov) as row `row` holds them: what the right stick
+/// left in them before this tick's camera step, which the replay hands the camera with the target.
+/// Every MD82b/MD82c row holds zeros; R28's tape swings the yaw.
+fn stick(c: &Capture, row: usize, cam: &mut ModFollow) {
+    let f = &mut cam.race.cam;
+    let user = c.quad(row, "cam_user");
+    (f.user_zoom, f.user_yaw, f.user_pitch, f.user_fov) = (F(user.x()), F(user.y()), F(user.z()), F(user.w()));
+}
+
 /// Every way row `row` and the port's camera after its frame differ.
 fn differences(c: &Capture, row: usize, cam: &ModFollow, eye: Vf) -> Vec<String> {
     fields(c, row, cam, eye).into_iter().filter(|(_, want, got)| want.to_bits() != got.to_bits())
@@ -258,6 +274,7 @@ fn each_mod_machines_eye_and_target_replay_slus_21104s() {
                     return false;
                 }
                 let (before, eye_before) = (ModFollow { race: Race { cam: cam.race.cam.clone() } }, eye);
+                stick(&c, row, &mut cam);
                 eye = cam.update(F(DT), &c.rider(row), F::ONE, &curve, Switches::default(), &mut ground).position;
                 let after = fields(&c, row, &cam, eye);
                 if !either(&after, &fields(&c, row, &before, eye_before)) {
@@ -316,6 +333,7 @@ fn each_mod_machines_eye_and_target_replay_slus_21104s() {
             airborne += rider.airborne as usize;
             still += (rider.speed < 0.0001) as usize;
             let (before, eye_before) = (ModFollow { race: Race { cam: cam.race.cam.clone() } }, eye);
+            stick(&c, row, &mut cam);
             eye = cam.update(F(DT), &rider, F::ONE, &curve, Switches::default(), &mut ground).position;
             let bad = differences(&c, row, &cam, eye);
             if bad.is_empty() {

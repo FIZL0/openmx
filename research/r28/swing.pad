@@ -1,0 +1,53 @@
+# R28: MD39a's drive (research/md39a/drive.pad, tick for tick) with the right stick swinging MX vs. ATV's
+# follow camera round towards the front. Full stick turns the user yaw 0.05 a tick (cam +0xdc) and the
+# camera's yaw is pi minus it; the stick does nothing for the state's first ~20 ticks. The swings put the
+# yaw inside the rear fade (1.047..pi/2) while the car pulls away under 29.33 ft/s, past it (yaw < 1.047:
+# no look-ahead, lag scale 0.25) at speed and over the jump, then the other way into the fade again as the
+# brake stops the car, and on past it while it stands and pulls away again.
+sleep 15t
+down cross
+stick l 1 0
+sleep 5t
+stick r 1 0
+sleep 36t
+stick r 0 0
+sleep 4t
+stick l 0 0
+sleep 60t
+stick r 1 0
+sleep 10t
+stick r 0 0
+sleep 150t
+stick r -1 0
+sleep 20t
+stick l -1 0
+sleep 40t
+stick l 0 0
+stick r 0 0
+sleep 20t
+stick l 1 0
+sleep 40t
+stick l 0 0
+stick r -1 0
+sleep 20t
+stick r 0 0
+up cross
+down square
+sleep 50t
+stick r -1 0
+sleep 10t
+stick r 0 0
+sleep 30t
+up square
+down cross
+sleep 60t
+stick l -1 0
+down circle
+stick r 1 0
+sleep 30t
+up circle
+stick l 0 0
+stick r 0 0
+sleep 90t
+release
+sleep 45t
