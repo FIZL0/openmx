@@ -16,6 +16,7 @@
 // has reached, so that a fix shows as a raised mark and a regression as a failure. The human, with no
 // pad but the stick its image was saved holding on the first step, agrees on every row (S329).
 
+use super::draws::c33_looks;
 use super::lane::s323_free09;
 use super::sim::{s12e_bike, s12e_racer, s12e_seek_world, s12e_u64};
 use super::*;
@@ -51,7 +52,7 @@ pub(crate) const C33_NAMES: [&str; 4] = ["ai0", "ai1", "human", "ai2"];
 
 /// The last tick each of [`C33_LANES`] agrees with the original's, bit for bit, on every agreed row up
 /// to it but the torn ones: the regression mark.
-const C33_AGREES_THROUGH: [u64; 5] = [28, 28, 1802, 206, 6];
+const C33_AGREES_THROUGH: [u64; 5] = [28, 28, 1802, 206, 14];
 
 /// One rider's words off an image, at the offsets `tests/two_p_rider.rs` (S174) seeds a rider from.
 struct Image<'a> {
@@ -261,6 +262,10 @@ fn c33_bike(ee: &Ee, r: u32, phy: &Phy, name: &str, col: &Arc<BikeCol>) -> Bike 
     im.wheel(0, &mut bike.ride.front);
     im.wheel(1, &mut bike.ride.rear);
     im.rest(&mut bike.ride);
+    // The body's rates, as the shell fills them (S328a: the grid's first threshold cancels the look
+    // clock), and the image's body holds the same threshold.
+    bike.body_rates = game_render::vehicle::params();
+    assert_eq!(im.float(im.at(0xdb4) + 0xa14), bike.body_rates.band[0], "rider {r:#x}'s body's first band");
     bike
 }
 
@@ -431,7 +436,20 @@ fn s12e_free09s_four_racers_ride_as_the_capture() {
         let (last, row) = (&pair[0], &pair[1]);
         assert_eq!(row.frame, C33_FROM + 2 + n as u64, "the capture's rows run on from the image, one a tick");
         // The step into a row is the frame length the row before it read.
+        let looks_were: Vec<F> = (0..C33_RIDERS.len()).map(|k| sim.rider_of(c33_player(k)).body.look).collect();
         sim.step_all(last.dt, &controls, &mut world);
+        // S328a: the bodies' look-around clocks re-arm on the generator as the original's do
+        // (draws.rs's C33_LOOKS), through 14: ai0 and ai2 launch at 15.
+        if row.frame < 15 && last.agreed {
+            let rearmed: Vec<(&'static str, F)> = (0..C33_RIDERS.len())
+                .filter(|&k| looks_were[k] <= F::ZERO && sim.rider_of(c33_player(k)).body.look > F::ZERO)
+                .map(|k| (C33_NAMES[k], sim.rider_of(c33_player(k)).body.look))
+                .collect();
+            let mut want = c33_looks(row.frame, last.rng);
+            want.sort_by_key(|l| C33_NAMES.iter().position(|n| *n == l.0));
+            let bits = |v: &[(&'static str, F)]| v.iter().map(|&(n, l)| (n, l.0.to_bits())).collect::<Vec<_>>();
+            assert_eq!(bits(&rearmed), bits(&want), "tick {}: the look-around clocks the Sim re-armed", row.frame);
+        }
         // The human's pad from the second step on: none, so nothing held.
         controls[c33_player(2)] = Controls::default();
         if !row.agreed {

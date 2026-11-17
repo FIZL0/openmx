@@ -165,11 +165,17 @@ impl Pool {
     /// A unit float out of the same generator, seeded the same way. Only the look timer's re-arm
     /// asks for one.
     pub fn unit(&mut self, clock: Clock) -> F {
+        self.generator(clock).unit()
+    }
+
+    /// The generator itself, seeded off the clock first if nothing has: what the look-around clock
+    /// draws on when the Sim has no shared one to hand it ([`Body::look_timer`]).
+    pub fn generator(&mut self, clock: Clock) -> &mut Rng {
         if !self.seeded {
             self.rng.seed(clock.seed());
             self.seeded = true;
         }
-        self.rng.unit()
+        &mut self.rng
     }
 
     /// One of the ten get-ready idles, not one of the ones already drawn this round.
@@ -225,6 +231,13 @@ impl Params {
             look_min: F(f32::from_bits(0x4170_0000)),
             look_max: F(f32::from_bits(0x4234_0000)),
         }
+    }
+
+    /// The wait the look-around clock re-arms to off one unit draw: the draw remapped onto
+    /// [`Params::look_min`]..[`Params::look_max`] and clamped back into them, which is the engine's
+    /// shared remap with a degenerate input range it can never hit.
+    pub fn rearm(&self, unit: F) -> F {
+        remap(unit, F::ZERO, F::ONE, self.look_min, self.look_max)
     }
 }
 
@@ -353,6 +366,23 @@ impl Default for Body {
     }
 }
 
+/// The selection reaches its fourth arm, riding or standing about, and the body is standing: no gate,
+/// no wreck, no gesture, spin, backflip, flight or reverse; stopped, both axes centred and the throttle
+/// shut. The only frames the look-around clock runs on.
+fn standing(p: &Params, r: &vehicle_anim::Request, a: &Ask) -> bool {
+    !r.cut
+        && !a.wreck
+        && a.gesture == SLOTS as i32
+        && a.spin.is_none()
+        && !a.backflip
+        && !a.airborne
+        && a.reversing == F::ZERO
+        && r.band.abs() < p.stopped
+        && r.phase_axis == CENTRED
+        && r.mix_axis == CENTRED
+        && a.throttle == F::ZERO
+}
+
 impl Body {
     /// Which state the body wants, written into [`vehicle_anim::Driver::want`].
     ///
@@ -412,30 +442,14 @@ impl Body {
             // Which side of centre the bars are on picks which of the pair.
             *want = if r.phase_axis < CENTRED { REVERSE_L } else { REVERSE_R };
         } else {
-            // 4 — riding, or standing about. The clock is the only one in the machine.
-            if r.band.abs() < p.stopped
-                && r.phase_axis == CENTRED
-                && r.mix_axis == CENTRED
-                && a.throttle == F::ZERO
-            {
-                if F::ZERO < self.look {
-                    self.look = self.look - dt;
-                    if self.look < F::ZERO {
-                        // A plain draw, *not* the gate's no-repeat one: the look-around can repeat
-                        // itself and does not touch the list the gate keeps.
-                        *want = IDLE + pool.draw(IDLES, clock);
-                        self.looking = true;
-                        // The idle is put on by the step below, and a clip that has run out stops the
-                        // step advancing anything — so the flag is cleared here, in front of it.
-                        self.player.finished = false;
-                    }
-                } else {
-                    // Re-arm. The draw is a unit float remapped onto the two bounds and clamped back
-                    // into them, which is the engine's shared remap with a degenerate input range it
-                    // can never hit.
-                    let unit = pool.unit(clock);
-                    self.look = remap(unit, F::ZERO, F::ONE, p.look_min, p.look_max);
-                }
+            // 4 — riding, or standing about. The clock is the only one in the machine, and the Sim
+            // runs it ([`Body::look_timer`], S328a): its draws are on the race's generator. A look
+            // below zero is the tick it fired, with the idle it drew already in `want`.
+            if standing(p, r, a) && self.look < F::ZERO {
+                self.looking = true;
+                // The idle is put on by the step below, and a clip that has run out stops the step
+                // advancing anything — so the flag is cleared here, in front of it.
+                self.player.finished = false;
             }
             if !self.looking {
                 *want = TURN_RIDING;
@@ -448,6 +462,39 @@ impl Body {
         if vp.band[0] < r.band {
             self.look = F::ZERO;
             self.looking = false;
+        }
+    }
+
+    /// **The look-around clock** (S328a): the countdown and re-arm of the selection's fourth arm,
+    /// and the cancel every frame runs, drawing on `rng` — the game's one generator, which the Sim
+    /// hands it ([`crate::Sim::step_all`]), so the re-arm's draw lands where the original's does among
+    /// every other draw of the tick. The selection ([`Body::select`]) only reads what it left: a
+    /// look below zero is a fire, and the idle it drew is in [`vehicle_anim::Driver::want`].
+    ///
+    /// With the disc's numbers a fire and the cancel never meet in one frame (the fire needs the band
+    /// under [`Params::stopped`], the cancel over the grid's first threshold, far above it); with any
+    /// others the fire still reaches the selection, which then cancels as the original's does. A
+    /// re-arm below zero (look bounds below zero, which no disc has) would read as a fire.
+    pub fn look_timer(&mut self, dt: F, p: &Params, vp: &vehicle_anim::Params, r: &vehicle_anim::Request, a: &Ask, rng: &mut Rng) {
+        let mut fired = false;
+        if standing(p, r, a) {
+            if F::ZERO < self.look {
+                self.look = self.look - dt;
+                if self.look < F::ZERO {
+                    fired = true;
+                    // A plain draw, *not* the gate's no-repeat one: the look-around can repeat itself
+                    // and does not touch the list the gate keeps.
+                    self.veh.want = IDLE + rng.index(IDLES);
+                }
+            } else {
+                // Re-arm ([`Params::rearm`]).
+                self.look = p.rearm(rng.unit());
+            }
+        }
+        // Moving off cancels it, as the selection's own cancel does — but a clock that fired this frame
+        // is left below zero for the selection to see, and that cancel zeroes it after.
+        if vp.band[0] < r.band && !fired {
+            self.look = F::ZERO;
         }
     }
 

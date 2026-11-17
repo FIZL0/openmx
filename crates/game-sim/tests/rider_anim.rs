@@ -318,9 +318,11 @@ fn the_selection_matches_over_thirty_thousand_frames() {
 
         // The body's numbers, as the actor is built: the standing-still limit, the two look bounds and
         // the ready rate. Sometimes generated, so a disc that configures them differently is covered.
+        // The look bounds are kept positive (S328a): the Sim's clock tells the selection it fired by
+        // leaving it below zero, so a wait re-armed below zero reads as a fire the original never made.
         let (stopped, look_min, look_max, rate_ready) = match pick.upto(3) {
             0 => (1.466_666_7, 15.0, 45.0, pick.float(5.0).abs()),
-            1 => (pick.float(5.0).abs(), pick.float(30.0), pick.float(60.0), pick.float(5.0)),
+            1 => (pick.float(5.0).abs(), pick.float(30.0).abs(), pick.float(60.0).abs(), pick.float(5.0)),
             _ => (1.466_666_7, pick.float(20.0).abs(), pick.float(60.0).abs(), 0.0),
         };
         // The pose grid's first threshold, which doubles as the speed that cancels the look timer.
@@ -534,6 +536,9 @@ fn the_selection_matches_over_thirty_thousand_frames() {
         };
         let mut pool =
             Pool { used: pool0, count: count0, rng: Rng::from_seed(seed), seeded: true };
+        // The original's selection is one function; the port's look-around clock is the Sim's half
+        // of it (S328a), run first.
+        body.look_timer(F(dt), &p, &vp, &r, &a, pool.generator(Clock::default()));
         body.select(F(dt), &p, &vp, &mut r, &a, &mut pool, Clock::default());
         body.latch(&mut vp, &r);
         let got_side = Decision {
@@ -2080,6 +2085,8 @@ mod two_p_poses {
                     body.veh.reverse = F(c.f(row - 1, &n("d_reverse")));
                 }
                 let lib = &drawn.pose_lib;
+                // The look-around clock, as the Sim runs it (S328a).
+                body.look_timer(dt, &numbers, &rates, &r, &ask, pool.generator(clock));
                 let (frame, clocked) =
                     body.frame_clocked(dt, &numbers, &mut rates, &mut r, &ask, lib, &mut pool, clock, true, &|id| drawn.timing(id));
                 if seeds.time {
