@@ -159,6 +159,10 @@ pub struct Sim {
     /// a map with no hit data, or a session that never loaded it — is what every state was before.
     /// Nothing steps it yet (the AI lane, S323), so it is not walked or sent.
     pub seek: Option<Box<ai::seek::World>>,
+    /// The players' engine notes (S328b, [`engine_note`]): their sample picks draw on the race's
+    /// generator. `None` — a ride whose shell plays its own note — draws nothing for them, as every
+    /// state did before. Not on the wire yet, like the lane.
+    pub notes: Option<Box<engine_note::Notes>>,
 }
 
 /// On a world that wraps (MD29), the copy of the point `at` nearest `from`, one width over on each
@@ -270,6 +274,7 @@ impl Sim {
             race: None,
             ai: None,
             seek: None,
+            notes: None,
         }
     }
 
@@ -425,6 +430,8 @@ impl Sim {
         self.wreck_pushed_back(0);
         // The body's look-around clock, after the bike (S328a).
         self.bodies_look(dt, std::slice::from_ref(controls));
+        // The engine note, after the body (S328b).
+        self.notes_frame(dt, std::slice::from_ref(controls));
         // The race manager walks after the bikes (S291): it sees where this frame left them.
         self.race_frame(dt, world);
         self.props_step(dt, &prop_movers);
@@ -702,6 +709,8 @@ impl Sim {
         frames.reverse();
         // The bodies' look-around clocks, after every bike (S328a).
         self.bodies_look(dt, &rode);
+        // The engine notes, after the bodies (S328b).
+        self.notes_frame(dt, &rode);
         // The race manager walks after every bike (S291).
         self.race_frame(dt, world);
         self.props_step(dt, &prop_movers);
@@ -812,6 +821,7 @@ impl Clone for Sim {
             race: self.race.clone(),
             ai: self.ai.clone(),
             seek: self.seek.clone(),
+            notes: self.notes.clone(),
         }
     }
 }
@@ -1408,6 +1418,9 @@ mod tests {
 /// The freestyle event (S92): the stunt competition's countdown, its 120-second clock, the track's
 /// target and the verdict, around the freeride card's points.
 pub mod event;
+
+/// The bike's engine note (S328b): the machine that picks its samples, on the game's generator.
+pub mod engine_note;
 
 /// The race activities (S13): the gates a race is counted through — the start gate and its penalty.
 pub mod race;

@@ -627,7 +627,12 @@ fn setup(kit: &Kit, state: &str) -> Option<Setup> {
     let fs = files()?;
     let ee = image(kit, state)?;
     let at = at(&ee);
-    let ride = seeded(&ee, &at, made(&fs, &ee, &at));
+    let mut ride = seeded(&ee, &at, made(&fs, &ee, &at));
+    // The map-edge gate as the image holds it (off in Free Ride): armed by default, Rocksbury's spawn
+    // is inside the port's edge band and the quad is thrown every tick (MD144a's throw).
+    if let Some(w) = ride.wrecked.as_mut() {
+        w.edge = b(&ee, QUAD + u(0x308));
+    }
     let segments = ride.trigger_segments().expect("the quad's trigger probe");
     let terrain = ee.u32_at(at.wheels[0] + 0x1e0);
     let area = f(&ee, terrain + 0x40);
