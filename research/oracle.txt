@@ -9215,7 +9215,8 @@ atv_part_read               atv 0x00493210 = MXU physics_part_read (0x0015a500):
 # +0x1a8 + 4 * entry+0x80, +0x1a4 against an actor (= MXU collision_friction's +0x190/+0x198/+0x194).
 # Gravity rewrites (MD63f): the wreck 0x004d3f90 -WreckGravity(+0xc90) * body+0x18 * 32.2, the put-backs
 # 0x004d40a0/0x004d40b0 (0x004c4350, which vehicle not read) -*(+0xe8) * body+0x18 * 32.2; body+0x18 read as
-# the mass (inferred).
+# the mass (inferred). R33: these are the fliers' (Kiowa 0x004d3f90/0x004d40a0, biplane 0x004c0cc0/0x004c4350),
+# not the bike's; 0x004d40b0 is 0x004d40a0's body (# R33).
 atv_post_event              atv 0x00272300 = the preload cue's post (a0 *0x00442eb0, a1 bike +0x674, a2 8, a3 14, t0 bike +0xd20, t1 0)
 car_launch                  boot 0x00397e20 (dt, car): every substep. Clutch let out from standing:
 #                                           the converter boost eases from a speed-scaled start to 1.
@@ -10702,6 +10703,39 @@ atv_heap_free               atv 0x001b76d0 = free
 #   object; the state-4 unwreck only divides *(+0xe8)+4 by the throw scale for a 13.
 #   Along flip-1 the test enters 1 (front) on row 125 and the clock's unwreck puts it back on row 193;
 #   the tail's own put-back (vt +0x3a8 from the update) is never taken on either replay.
+# R33 — which vehicles rewrite the gravity block on a wreck (MD63f, F31b4b). Comment rows only. Journal:
+# research/journal/2026-11-16-r33-wreck-gravity-vtable. Read off state04.ee.bin's vtables (all classes' are
+# in RAM there whether or not one is spawned) and the folded ELF (./kit fn/dis -o atv).
+#   Vtable 0x003cfad0 is the Kiowa's (MD80a/MD80c: heli 0x01ab7d20 in kiowa, vtable at +4). Its +0x368
+#   wreck entry is 0x004d3f90 and +0x36c unwreck 0x004d40a0; no other vtable holds either word.
+#   Slots +0x368 entry / +0x36c unwreck / +0x3a8 put back per class:
+#     quad 0x003ce250 and bike 0x003d0450: 0x004e2260 / 0x004e2380 (put back 0x004b8e30 / 0x004d8940)
+#     biplane 0x003ce7b0: 0x004c0cc0 / 0x004c4350 / 0x004a6f70
+#     buggy 0x003cec60, car 0x003cf130, golf cart 0x003cf600, truck 0x003cff80: 0x004cd3c0 / 0x004cd420 /
+#       0x004a6f70
+#     Kiowa 0x003cfad0: 0x004d3f90 / 0x004d40a0 / 0x004a6f70
+#   So only the two fliers rewrite gravity; bikes, quads and the four-wheelers never do (the quad shares
+#   the bike's entry and unwreck, which leave it alone: F31b4b).
+#   Kiowa entry 0x004d3f90(heli, reason): base entry 0x004a83d0 (the bike's entry calls it too); body
+#     +0x1d0 xyz *= 1.0 (vmulbc, 0x3f800000); gravity block *(+0xe8)+0x40 = (0, 32.2 * (-(+0xc90) * body
+#     +0x18), 0, 1) (neg.s, mul.s, mul.s); *(+0x11dc) vt +0x94; reason != 13 -> vt +0x478(heli) (the
+#     blade throw); node *(+0x1220) byte 3 bit 0x40 set, *(+0x1224) cleared.
+#   Kiowa unwreck 0x004d40a0(heli, kind): $2 = 32.2 (0x4200cccd) built in its first four instructions
+#     (mtc1 at 0x004d40b4), so 0x004d40b0 is its middle, not a function (Ghidra's split). Block = (0, 32.2 * (-*(*(+0xe8)) * body+0x18), 0, 1);
+#     *(+0x11dc) vt +0x90; +0x10f0..+0x1104 and +0x1138 (held height) zeroed; when +0x1200 and +0x132c
+#     are set, the six nodes' bit 0x40 put back and the four rotor parts' vt +0x134(part, 1); vt +0xe8;
+#     base unwreck 0x004a8500.
+#   Biplane entry 0x004c0cc0: base entry; rates *= 4.0 (0x40800000); the same WreckGravity block; +0x318
+#     throttle 0, engine *(+0x1164)+0x64 0; *(+0x12e8) vt +0x94. Unwreck 0x004c4350: the GravityScale
+#     block; *(+0x12e8) vt +0x90; vt +0xe8; base unwreck 0x004a8500.
+#   Four-wheelers' entry 0x004cd3c0: base entry, rates *= 2.42 (0x401ae148), *(+0x12b0) vt +0x94; unwreck
+#     0x004cd420: +0x31c = 1, +0x1118 = 0, body +0x80 velocity *= 0.12 (0x3df5c28f), vt +0x90, vt +0xe8,
+#     base unwreck. No gravity write.
+#   The port's rounding is the same: biplane::gravity_force = G * (-scale * mass). The biplane's is in
+#     Flight::wreck/unwreck (MD112), the Kiowa's in kiowa::Wreckage::wreck and its unwreck.
+#   0x001fc1e4 (in 0x001fb5e0, the engine) has a jal 0x004d40b0 after an alloc(500, .., 0x411): it lands
+#     mid-prologue in the game overlay, so it must be a front-end (UI_REL.BIN) call over the same
+#     addresses; not followed.
 # F31b5c — the tail's, wreck's and update's callees left in the interpreter, watched on ride-2 and flip-1
 # (game_sim::handling::wreck::engine_reset/engine_gear/wheel_reset; tests/mxvatv_bike_ride.rs' census).
 # Comment rows only. Journal: research/journal/2026-11-05-f31b5c-tail-callees-watched/.
