@@ -1028,6 +1028,18 @@ impl Mods {
     /// it is taken: the stock cars' four on the same fields, on knobs of its own.
     pub fn mxvatv_car(&self, seat: usize, car: &mut car::Car) {
         self.car_knobs(seat, [Knob::MxvatvCarSpeed, Knob::MxvatvCarAccel, Knob::MxvatvCarGrip, Knob::MxvatvCarSuspension], car);
+        // P368: the launch (`MaxClutchTorqueScale` times the engine's torque at a standstill, easing
+        // to 1 over `ClutchTorqueScaleTime`) on top of k times the torque swings a freshly taken
+        // car's drive wheels between their top speeds when it lands on the gas, and holds it still
+        // for a second (R36; SLUS-21104's frame does the same on the same numbers). Over 100% the
+        // launch is off (a scale of 1): the knob's k is the pull off the line. The file's / k or / k^2
+        // still held the buggy at 110-140%; off, it is never slower than at 100%. Under 100% the
+        // file's launch stays.
+        if self.factor(seat, Knob::MxvatvCarAccel).is_some_and(|k| k > F::ONE) {
+            if let Some(s) = car.max_clutch_torque_scale.as_mut() {
+                *s = F::ONE;
+            }
+        }
     }
 
     /// A car's top speed, acceleration, grip and suspension on `knobs` (in that order).

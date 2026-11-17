@@ -82,8 +82,7 @@ fn ride(car: &vehicle::MxvatvCarRide, mods: &Mods, ticks: usize, held: &dyn Fn(u
 }
 
 /// The ticks the car is left to come down onto the floor and settle before the gas: it is taken a
-/// foot over the ground, and drive wheels spun up in that drop land spinning backwards on SLUS-21104's
-/// step and hold the car for a second (with 150% acceleration), which is not what these measure.
+/// foot over the ground, and the landing on the gas is not what these measure (P368's test is).
 const SETTLE: usize = 30;
 
 /// Cross held, after [`SETTLE`].
@@ -221,3 +220,38 @@ fn an_mxvatv_car_knob_changes_the_cars_ride() {
 }
 
 
+
+/// P368: over 100% acceleration the car's launch is off (a scale of 1); under 100%, and on the other
+/// knobs, it is the file's.
+#[test]
+fn mxvatv_car_acceleration_over_100_turns_the_launch_off() {
+    let Some(car) = buggy() else { return };
+    let launch = |k: Knob, pct: u16| file(&car, &with(k, pct)).max_clutch_torque_scale.expect("the buggy has a launch");
+    let stock = launch(Knob::MxvatvCarAccel, 100);
+    assert!(stock > F(1.5), "the buggy's launch {stock}");
+    for pct in [110, 150, 500] {
+        assert_eq!(launch(Knob::MxvatvCarAccel, pct), F::ONE, "{pct}%");
+    }
+    assert_eq!(launch(Knob::MxvatvCarAccel, 50), stock);
+    for k in [Knob::MxvatvCarSpeed, Knob::MxvatvCarGrip, Knob::MxvatvCarSuspension] {
+        assert_eq!(launch(k, 200), stock, "{k:?}");
+    }
+}
+
+/// P368 (R36): taken a foot over the floor with the gas held from the first tick, inside its launch,
+/// the buggy at every acceleration over 100% drives off at least as fast as at 100% a second in, and
+/// near it at two, rather than its drive wheels swinging between their top speeds and holding it
+/// still for a second (which the file's launch / k still did at 110-140%).
+#[test]
+fn a_freshly_taken_mxvatv_car_on_the_gas_drives_off_over_100() {
+    let Some(car) = buggy() else { return };
+    let away = |mods: &Mods| ride(&car, mods, 60, &|_| report(0xff, 0x7f));
+    let stock = away(&Mods::original());
+    let (one, two) = (speed(&stock[29]), speed(&stock[59]));
+    assert!(one > 10.0, "the stock buggy is away: {one}");
+    for pct in (110..=Knob::MxvatvCarAccel.most()).step_by(10) {
+        let b = away(&with(Knob::MxvatvCarAccel, pct));
+        println!("{pct}%: {} / {} ft/s at 1 / 2 s (100%: {one} / {two})", speed(&b[29]), speed(&b[59]));
+        assert!(speed(&b[29]) >= one && speed(&b[59]) > two * 0.95, "held at {pct}%: {} {}", speed(&b[29]), speed(&b[59]));
+    }
+}
