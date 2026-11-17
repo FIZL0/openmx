@@ -32,8 +32,8 @@ const GAS_GYRO_HELP: &str = "MX vs. ATV's option: the throttle held in the air s
 /// down reads its pitch folded back under the ground's limit, so it touches down on its front wheel
 /// and rides on where the original throws the rider in the air.
 const AIR_WRECKS_HELP: &str = "Whether the bike's angle in the air throws the rider off: upside down, nosed over or rolled too far. \
-     Off, you ride every jump out, and only the landing is judged, so a bike nosed down past straight down can come down on its \
-     front wheel and ride on, where the original game throws the rider off before it touches. On is the original game.";
+     Off, you ride every jump out and only the landing is judged: come down upside down, or nosed past straight down, and the \
+     rider is thrown off as it touches, where the original game throws them off before. On is the original game.";
 /// The Backwards Landings Bail row's help (S161).
 const BACKWARDS_BAIL_HELP: &str = "Whether a landing with the bike facing back against the way it is going throws the rider off. \
      The original game judges a crossed-up landing by an angle that reads one past about 135 degrees as nearly straight, so the bike \

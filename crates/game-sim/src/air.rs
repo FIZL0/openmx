@@ -1550,6 +1550,12 @@ pub fn wreck_test(p: &Params, air: &mut Air, chassis: &Chassis, step: &Step, loa
 /// One trick ending is an attitude too (S154): a no-hander rolled past
 /// [`Params::no_hander_max_roll_angle`] wrecks in the air as well as on the ground. `in_air` false
 /// skips it while neither on the ground nor touching anything, and judges it on the touch as ever.
+///
+/// Not the original's (P347): `in_air` false throws a touch with the bike's up axis below level — the
+/// roof or the far side of straight down — off the back if its pitch reads up, else as a nose dive.
+/// The ground pitch limits read the euler pitch, which folds back past straight down (115 degrees
+/// nose down reads 65), so without this a front-wheel landing past vertical rode on. The original
+/// never reaches it: its airborne clause throws such a bike before it touches.
 pub fn wreck_test_in(p: &Params, air: &mut Air, chassis: &Chassis, step: &Step, loads: &Loads, in_air: bool) -> Option<Wreck> {
     if loads.fore_aft > p.back_wreck_speed_limit {
         return Some(Wreck::Back);
@@ -1584,6 +1590,9 @@ pub fn wreck_test_in(p: &Params, air: &mut Air, chassis: &Chassis, step: &Step, 
         if chassis.pitch > p.airborne_pitch_up_wreck_angle || rolled {
             return Some(Wreck::Tail);
         }
+    }
+    if !in_air && (air.on_ground || step.touching) && F(step.up.y()) < F::ZERO {
+        return Some(if chassis.pitch > F::ZERO { Wreck::Tail } else { Wreck::NoseDive });
     }
     if air.flip_torque_applied && step.touching {
         return Some(Wreck::Tail);
