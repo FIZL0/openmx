@@ -1113,6 +1113,9 @@ struct Palm {
     port_outside: BTreeMap<String, u32>,
     /// The words that differed on the spoiled frame.
     spoiled: Vec<u32>,
+    /// MD142: the stores to the mesh tree walk's mode global, the original's whole frames' and the
+    /// twin's (its original code and the port's Rust), with the port's world step.
+    walk_setups: [u32; 2],
 }
 
 impl Palm {
@@ -1224,8 +1227,18 @@ fn sim_chain(
         for &(a, v) in &lay {
             ee.set_u32(a, v);
         }
+        // MD142: the stores to the tree walk's mode, counted on both machines with the port's step.
+        let walks = port == Some(Pieces::Port);
+        // Read, not taken: a replay's `after` reads the original's log too.
+        let stores = |ee: &Ee| ee.log.borrow().as_ref().map_or(0, |l| l.iter().filter(|&&(_, a, _)| a == record_outside::TREE_WALK_MODE_AT).count() as u32);
+        if walks {
+            *ee.log.borrow_mut() = Some(vec![]);
+        }
         run(&mut ee, SIM_FRAME, &[u64::from(sim)], dt);
         if let Some(t) = twin.as_mut() {
+            if walks {
+                *t.log.borrow_mut() = Some(vec![]);
+            }
             for &(a, v) in &lay {
                 t.set_u32(a, v);
             }
@@ -1244,6 +1257,9 @@ fn sim_chain(
                 .collect::<Vec<_>>()
                 .join("\n");
             assert!(bad.is_empty(), "frame {k} ({p:x?}): {} words differ from the original's whole frame:\n{show}", bad.len());
+            let walked = [stores(&ee), stores(t)];
+            assert_eq!(walked[0], walked[1], "frame {k}: the tree walk's setup stored by the original, by the port");
+            seen.walk_setups = [0, 1].map(|i| seen.walk_setups[i] + walked[i]);
         }
         let lay = after(k, &ee);
         for &(a, v) in &lay {
@@ -1359,6 +1375,30 @@ fn a_spoiled_held_contact_turns_the_ports_step_red() {
     }
 }
 
+/// MD142 — the comparison reads the mesh pair's tree walk setup: the port's first mesh pair (frame 81,
+/// the ride's first walk setup, the original's too) spoiled, its four globals unwritten, or one of
+/// them wrong (the mode or the descriptor 4 over, a tree pointer off the stack), and the palm ride
+/// goes red on that frame, on the word spoiled (all four when unwritten).
+#[test]
+fn a_spoiled_walk_setup_goes_red() {
+    use record_outside::{WalkSpoil, WALK_SPOIL};
+    const WORDS: [u32; 4] = [0x003d_ce30, 0x003d_ce38, 0x003d_ce40, 0x003d_ce48];
+    for (spoil, words) in [(WalkSpoil::Skip, &WORDS[..])].into_iter().chain((0..4).map(|k| (WalkSpoil::Word(k), &WORDS[k..=k]))) {
+        WALK_SPOIL.set(Some(spoil));
+        let ran = std::panic::catch_unwind(|| palm(82, Some(Pieces::Port), None, false));
+        WALK_SPOIL.set(None);
+        match ran {
+            Ok(None) => return,
+            Ok(Some(_)) => panic!("{spoil:?} went unseen"),
+            Err(e) => {
+                let msg = e.downcast_ref::<String>().cloned().unwrap_or_default();
+                let red: Vec<u32> = WORDS.into_iter().filter(|w| msg.contains(&format!("{w:#010x} "))).collect();
+                assert!(msg.starts_with("frame 81 ") && red == words, "{spoil:?} red for another reason: {msg}");
+            }
+        }
+    }
+}
+
 /// MD105b — **the palm strike's contacts push the port's quad**: the palm ride with the quad's
 /// record's virtuals and the world step both the port's ([`WorldStep`]): the contacts
 /// [`record::pass`] files each frame are handed to [`quad::Steps`]' [`atv_contact::Held`]
@@ -1377,6 +1417,9 @@ fn the_palm_strikes_contacts_push_the_ports_quad() {
         assert!(o.get(k).is_some_and(|&n| n > 0), "the ride never reached {k}: {o:?}");
     }
     check_palm(&seen);
+    // MD142: the walk setup's stores on the original as many as on the twin, frame by frame (in the
+    // chain), the port's mesh pairs among them; 1342 on this ride, the first on frame 81.
+    assert!(seen.walk_setups[0] > o["record search pair, kind 0"], "the tree walk's setups: {:?}, {o:?}", seen.walk_setups);
     assert_eq!(seen.port_frames as usize, PALM_RIDE, "the port's world step ran every frame");
     assert!(seen.port_resolved > 0, "the port's step never resolved a contact: {seen:?}");
     let [searches, hits, sweeps, pairs, points, swept] = seen.port_asked;
