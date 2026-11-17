@@ -6218,3 +6218,7 @@ mod borrow;
 /// MD178: the clutch lever off the pad reader.
 #[path = "atv_quad/clutch_lever.rs"]
 mod clutch_lever;
+
+/// MD178a: a remote quad's stick, brake and clutch lever cleared by the vehicle update.
+#[path = "atv_quad/remote_let_go.rs"]
+mod remote_let_go;

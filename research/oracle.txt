@@ -13246,6 +13246,16 @@ atv_bike_pad_reader         atv 0x004e36c0 = the bike/quad pad reader (quad vtab
 #   +0xd20, 0) (the press cue), then +0x17ac = +0x12c0; strength 0 -> +0x12c0 = 0, +0x17ac = 0. Only the
 #   reader reads +0x17ac (and the reset 0x004de778 zeroes it); writers of +0x12c0 elsewhere: 0x004c3ef4,
 #   0x004c752c, 0x004cda3c, 0x004de304, 0x004e1538/0x004e1560/0x004e1cac, 0x004e3728/0x004e39c8 (the reader).
+# MD178a — the quad's clutch lever's other two writers (src quad.rs Ride::remote_let_go; proof
+#   crates/game-sim/tests/atv_quad/remote_let_go.rs, 10,000 cases on md37a/atv-r-spawn.ee.bin). Journal:
+#   research/journal/2026-11-17-md178a-atv-clutch-writers.
+# 0x004e1538/0x004e1560 are inside atv_bike_ai_habits 0x004e0f50..0x004e1870 (Ghidra splits it at
+#   0x004e1460; quad vtable +0x254 through thunk 0x004bfb30, a0 - 0x48c; its caller not traced), the twin of
+#   MXU ai_habits 0x00280070 on driver +0x48c's +0x38 bits: 0x20 gate clutch and gate clock +0x52c >= delay
+#   +0x530 -> 8; 8 -> +0x12c0 = 1.0, 8 off, 0x10 on; else +0x12c0 = 0. AI-driven bikes only, by the twin
+#   (MXU's runs for AI riders alone); the port's AI riders ride MXU bikes (ai.rs habits, h.clutch).
+# 0x004e1cac is atv_bike_vehicle_update 0x004e1b90: kind (+0xbc4)+0x28 - 3 < 2 (read again after the ghost
+#   step vt +0x3a4) and the skip bit (*0x003eab60)+0x225 & 8 clear -> +0x12a8, +0x12ac, +0x310, +0x12c0 = 0.
 # MD63f — the MX vs. ATV Kiowa's wreck and unwreck, and the gravity they write (src kiowa::Crash::wreck_mxvatv,
 # kiowa::mxvatv_taken_gravity, Wreckage::wreck_mx / unwreck_mx; openmx vehicle.rs KiowaRide::built; tests
 # mxvatv_kiowa.rs the_mxvatv_wreck_and_unwreck_are_the_originals, the_taken_mxvatv_kiowa_holds_the_unwrecks_gravity).
