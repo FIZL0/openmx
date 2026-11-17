@@ -8342,6 +8342,20 @@ atv_record_apply            atv 0x00207240 = collision_apply
 #   back through the inverse (0x001b3180); tire init 0x0039ac10, width setter 0x0039ae00 adds (width,0,0).
 #   Parked cars read: truck first_recording @0x00e1e210, baja s149a-free07 @0x00605270, buggy
 #   s149a-free11 @0x00611ba0; launch timer full, cofg = CofGAI, undriven tires at the undriven top speed.
+# S343 — the truck's pose against the original's node matrices (game-render/tests/car.rs the_trucks_pose_is_the_originals).
+# Parked truck @0x00e1e210 in context/states/first_recording.p2m2_SaveState.eeMemory.bin (root MonsterTruck).
+# 0x003e07b0 node table: e04..e10 tires FL FR RL RR; e14 FL hub, e18 FR, e1c RL, e20 RR; e24..e30 lower struts
+#   (FL FR RL RR); e34..e40 upper swingarms; e44..e50 lower swingarms; e54..e60 upper swingarm nodes; e64..e70
+#   lower swingarm nodes; e74 FrontAxle, e78 RearAxle, e7c FrontDriveLine, e80 RearDriveLine. Places: e90 FL hub,
+#   ea0 FR, eb0 RL, ec0 RR; ed0..f00 lower struts; f10/f20 axles; f30/f40 axle nodes; f50..fc0 the swingarms'
+#   own places (rounded, source not found); fd0 = FR hub x - FL hub x; fd4 RearTireSteerScale.
+# Hubs 0x001b2640(node, bind + (0, comp, 0)) then 0x001b2e50 about y by steer (rears x fd4); tires about x by spin,
+#   rows' y x stretch; lower struts lifted the same; axles lifted by the pair's mean, set about z by
+#   +-acos_table(fd0 / sqrt(fd0^2 + d^2)), d = right comp - left (negated if d < 0). Drive line: dir =
+#   n(0x001b2870(line, root) - axle node place); swingarm i: dir = n(0x001b2870(node i, root) - f50 + 16i), each
+#   0x001b1e20(node, root, dir, y, 1,1,1) -> 0x0013e330: rows [up' x dir, up', dir], up' = n(dir x (y x dir)).
+#   The seat marks and axle nodes are never written (stale worlds, no vertices). The acos table (ptr 0x46a688,
+#   scale 0x46a6a0 = 14999.5) ends [29999] = [30000] = 2^-11, so a level axle rolls 0.00049.
 # S264 — the cars' pose against the original's node matrices (game-render/tests/car.rs against_the_original).
 # The driven buggy's car is at 0x00605270 in context/states/c34-buggy-switched.ee.bin (free06).
 # Scene node: +0x40 local, +0x80 world (translation +0xb0), +0x100 parent, +0x104 first child,

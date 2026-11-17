@@ -233,4 +233,75 @@ mod against_the_original {
         assert!(wrong.is_empty(), "nodes not as the original posed them:\n{}", wrong.join("\n"));
         assert!(moved >= 16, "only {moved} nodes moved from the model: the image is hardly posed");
     }
+
+    /// The monster truck parked in first_recording's image (free09), where S149a found it.
+    const TRUCK: u32 = 0x00e1_e210;
+
+    /// S343: the truck's pose against the original's own node matrices, in first_recording's image
+    /// (`context/states/first_recording.p2m2_SaveState.eeMemory.bin`, the car at [`TRUCK`]), parked
+    /// with its springs settled under its own weight. As the buggy's: the tires read off the car,
+    /// posed by the port, every node of the original's tree compared in the car's own space.
+    #[test]
+    fn the_trucks_pose_is_the_originals() {
+        let Ok(kit) = Kit::load().map_err(|w| skip(&w)) else { return };
+        let path = kit.ctx("states").join("first_recording.p2m2_SaveState.eeMemory.bin");
+        if !path.exists() {
+            skip(&format!("{} is not there: first_recording's image with the parked truck", path.display()));
+            return;
+        }
+        let Ok(ee) = Ee::from_ram(&path).map_err(|w| skip(&w)) else { return };
+        let Some(mut disc) = disc() else { return };
+        let archives = [disc.res(car::ARCHIVE).expect("the machines' archive")];
+        let mut assets = Assets::default();
+        let drawn = Car::load(&mut assets, &archives, "monstertruck").expect("the truck");
+        let model = assets.models[&drawn.model].model.clone();
+        assert!(car::has_truck_rig(&model), "the truck lacks its rig's nodes");
+
+        let car = TRUCK;
+        // The rears' steer as the caller gives it, times the truck's RearTireSteerScale.
+        let rear_steer = ee.f32_at(car + 0xfd4);
+        let tires: [Tire; 4] = std::array::from_fn(|k| {
+            let t = ee.u32_at(car + TIRE_OBJECTS[k]);
+            let compression = ee.f32_at(t + TIRE_COMPRESSION);
+            let scale = car::squash(compression, ee.f32_at(t + TIRE_MAX_COMPRESSION), ee.f32_at(t + TIRE_MAX_SCALE));
+            let steer = ee.f32_at(t + TIRE_STEER) * if k >= 2 { rear_steer } else { 1.0 };
+            Tire { spin: ee.f32_at(t + TIRE_SPIN), steer, compression, scale }
+        });
+        assert!(tires.iter().all(|t| t.compression > 0.1), "{tires:?}");
+        let posed = drawn.pose(&assets, &tires);
+        let root = ee.u32_at(car + ROOT);
+        assert_eq!(name(&ee, ee.u32_at(root + NODE_NAME)), "MonsterTruck");
+        let root_world = mat(&ee, root + NODE_WORLD);
+        let mut theirs = Vec::new();
+        nodes(&ee, ee.u32_at(root + NODE_CHILD), &mut theirs);
+        assert_eq!(theirs.len() + 1, model.nodes.len(), "the original's tree and the model's differ in size");
+
+        let (mut wrong, mut turned, mut stale) = (Vec::new(), 0, Vec::new());
+        for (n, a) in &theirs {
+            let i = model.nodes.iter().position(|m| m.name.eq_ignore_ascii_case(n)).unwrap_or_else(|| panic!("{n} is not in the model"));
+            let mut want = into_root(root_world, mat(&ee, a + NODE_WORLD));
+            // A node nothing writes keeps an old world: its local on its parent's world is not it.
+            // Such a node must carry no vertex; it is then held to its own local on its parent.
+            let parent = ee.u32_at(a + NODE_PARENT);
+            let fresh = mat(&ee, a + NODE_LOCAL).mul(into_root(root_world, mat(&ee, parent + NODE_WORLD)));
+            if off(fresh, want).1 > 3e-3 {
+                let drawn_on = model.meshes.iter().flat_map(|m| m.strips.iter().flat_map(|s| s.verts.iter())).any(|v| v.node == i);
+                assert!(!drawn_on, "{n} keeps an old world but carries vertices");
+                stale.push(n.clone());
+                want = fresh;
+            }
+            let (turn, place) = off(posed[i], want);
+            if turn > 2e-3 || place > 3e-3 {
+                wrong.push(format!("{n}: turn {turn}, place {place}"));
+            }
+            if off(model.world(i), want).0 > 0.05 {
+                turned += 1;
+            }
+        }
+        assert!(wrong.is_empty(), "nodes not as the original posed them:\n{}", wrong.join("\n"));
+        // The drive lines and the eight swingarms swing off the model's own turns.
+        assert!(turned >= 10, "only {turned} nodes turned from the model: the image is hardly posed");
+        // Only the marks the step never writes: the seat's four and the axle nodes.
+        assert!(stale.len() <= 6, "too many nodes off their own local: {stale:?}");
+    }
 }
