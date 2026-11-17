@@ -14,7 +14,7 @@ use game_render::ini;
 use game_render::mat::M4;
 use game_render::scene::{Placement, Scene};
 use game_sim::camera_flash::{self, CameraFlashes};
-use game_sim::race::{FlashLevels, HallOfFame, LapCard, PodiumFlashes, Race, RaceOver, ResultEvent, Supercross};
+use game_sim::race::{FlashLevels, HallOfFame, LapCard, PodiumFlashes, Race, RaceOver, ResultEvent, ResultSeat, Supercross};
 use ps2_float::F;
 
 /// The track's flash words off its `.toy`'s first `[CameraFlash]` (sx01 has two; the original keeps
@@ -79,13 +79,44 @@ impl Stadium {
         self.shown(flashes).map(|(model, at, alpha)| Actor { model, at, pose: None, lod_from: None, alpha, casts: false })
     }
 
-    /// P313: a card of the race's lap line has finished, and [`Supercross::race_over`] hears it in a
-    /// single race of `laps` laps: the flashes burst toward its finish (`burst`, the race's
-    /// flashes'), and what it answers (the fireworks) is the caller's to show.
-    pub fn card_finishes(&self, card: &LapCard, laps: u8, burst: &mut PodiumFlashes) -> RaceOver {
+    /// P313: a card of the race's lap line has finished, and [`Supercross::race_over`] hears it
+    /// (`finish`): the flashes burst toward its finish (`burst`, the race's flashes'), and what it
+    /// answers (the fireworks, a player's win and Hall of Fame entries: P354) is the caller's.
+    pub fn card_finishes(&self, finish: &Finish, burst: &mut PodiumFlashes) -> RaceOver {
+        finish.heard(Some(burst), &self.levels)
+    }
+}
+
+/// P354: a card's finish as [`Supercross::race_over`] hears it: the card, its seat if a player's,
+/// the event, its track in the league's list (−1 for none) and the profile's Hall of Fame.
+pub struct Finish<'a> {
+    pub card: LapCard,
+    pub seat: Option<ResultSeat>,
+    pub event: ResultEvent,
+    pub track: i32,
+    pub fame: &'a HallOfFame,
+}
+
+impl<'a> Finish<'a> {
+    /// An AI rider's card (or a player's off any Hall of Fame track) in a single race of `laps` laps:
+    /// no seat, so no win and no records.
+    pub fn single(card: &LapCard, laps: u8, fame: &'a HallOfFame) -> Self {
         let event = ResultEvent { activity: 2, laps, ..ResultEvent::default() };
-        let levels = self.levels;
-        Supercross::new().race_over(card, None, &event, -1, &HallOfFame::default(), Some(burst), &levels)
+        Finish { card: card.clone(), seat: None, event, track: -1, fame }
+    }
+
+    /// The first seat's human card in a single race of `laps` laps on `track` of `league`, bike class
+    /// `class`: a player's card, keeping records, on a seat with a profile.
+    pub fn player(card: &LapCard, seat: i32, league: i32, track: i32, class: i32, laps: u8, fame: &'a HallOfFame) -> Self {
+        let event = ResultEvent { league, activity: 2, class, laps, ..ResultEvent::default() };
+        let seat = Some(ResultSeat { seat, keeps_records: true, profile: true });
+        let card = LapCard { flags: card.flags | game_sim::race::card_flags::PLAYER, ..card.clone() };
+        Finish { card, seat, event, track, fame }
+    }
+
+    /// What [`Supercross::race_over`] answers, setting `burst` going where there is one.
+    pub fn heard(&self, burst: Option<&mut PodiumFlashes>, levels: &FlashLevels) -> RaceOver {
+        Supercross::new().race_over(&self.card, self.seat, &self.event, self.track, self.fame, burst, levels)
     }
 }
 
@@ -121,7 +152,8 @@ mod tests {
         assert!(s.flashes.is_none());
         let flashes = race.flashes.as_deref_mut().unwrap();
         let card = LapCard { place: 1, flags: card_flags::PLAYER | card_flags::TAKING_PART | card_flags::OUT, ..LapCard::default() };
-        let over = s.card_finishes(&card, 3, &mut flashes.burst);
+        let none = HallOfFame::default();
+        let over = s.card_finishes(&Finish::single(&card, 3, &none), &mut flashes.burst);
         assert!(over.fireworks);
         assert_eq!((flashes.burst.length.0, flashes.burst.half.0), (2.0, 1.0));
         for _ in 0..30 {
@@ -130,5 +162,28 @@ mod tests {
         let flashes = race.flashes.as_deref().unwrap();
         assert!(flashes.brightness().0 > 0.25);
         assert_eq!(s.shown(flashes).count(), flashes.lit_count());
+    }
+
+    /// P354: the human's finish through the stadium counts the win and the Hall of Fame records its
+    /// times beat in the profile's tables; the same card as an AI rider's counts neither.
+    #[test]
+    fn a_players_finish_keeps_its_win_and_records() {
+        use game_sim::race::{FameEntry, fame_table};
+        let mut sx = Scene::parse("[Model1]\nSLT=cameraflash\n");
+        let s = Stadium::take(&mut sx, "sx01", SX01).unwrap();
+        let mut fame = HallOfFame::new();
+        for table in [fame_table::SX_BEST_LAP, fame_table::SX_3_LAPS] {
+            let at = HallOfFame::offset(table, 2, 1).unwrap() / 4;
+            fame.words[at..at + 5].fill(100f32.to_bits());
+        }
+        let card = LapCard { place: 1, best_lap: F(30.0), race_time: F(90.5), ..LapCard::default() };
+        let mut burst = PodiumFlashes::default();
+        let over = s.card_finishes(&Finish::player(&card, 0, 0, 2, 1, 3, &fame), &mut burst);
+        assert_eq!(over.win, Some(0));
+        let entry = |table| FameEntry { seat: 0, track: 2, table };
+        assert_eq!(over.fame, vec![entry(fame_table::SX_BEST_LAP), entry(fame_table::SX_3_LAPS)]);
+        assert!(over.fireworks && burst.length.0 == 2.0);
+        let over = s.card_finishes(&Finish::single(&card, 3, &fame), &mut PodiumFlashes::default());
+        assert_eq!((over.win, over.fame.len(), over.fireworks), (None, 0, true));
     }
 }
