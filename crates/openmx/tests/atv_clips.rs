@@ -153,3 +153,54 @@ fn a_quad_backflip_plays_the_riders_backflip_and_the_originals_air_pose() {
         assert_eq!((clip, weight), (game_sim::quad::POSE_CLIPS[1], 0.5), "frame {t}: the chassis plays the air pose's middle at a half");
     }
 }
+
+/// V130: the Untamed quad off the same ramp, on Untamed's step (`untamed_atv`'s own `.phy.bpb`), with
+/// no trick: in the air its chassis blends the riding pose's clips (Untamed's riding pose is id 54,
+/// its animate's bound; the driver keeps it as the table's row 46), as the Unleashed quad's does. The
+/// stunt table is `mxvatv_atv`'s: Untamed's has the same 46 rows (MD144b). Skips without both packs.
+#[test]
+fn an_untamed_quad_in_the_air_blends_the_riding_pose() {
+    let Some(dir) = pack() else { return };
+    let untamed = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../mods/machines/untamed_atv");
+    if !untamed.join("mod.json").is_file() {
+        println!("SKIPPED: no mods/machines/untamed_atv (openmx-mods' import-atv untamed-atv makes it)");
+        return;
+    }
+    let files = game_render::disc::Res::folder(&dir).expect("the pack's folder reads");
+    let ufiles = game_render::disc::Res::folder(&untamed).expect("the Untamed pack's folder reads");
+    let atv = vehicle::AtvRide::read("untamed_atv", "Veh/atv_Race250P.phy.bpb", &mut |n| ufiles.read(&n.replace('/', "\\")).ok()).expect("the quad builds");
+    let mut atv = atv.on_untamed_step();
+    atv.stunts = table(&files);
+
+    let mut world = Ramp;
+    let spot = Spot::still(Vf::new(0.0, 0.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), Vf::new(0.0, 1.0, 0.0, 0.0));
+    atv.take(&spot, &mut world).expect("the floor is under it");
+    let (mut left, mut aired, mut landed) = (false, 0, 0);
+    for t in 0..400 {
+        atv.step(&Controls { gas: F::ONE, ..Controls::default() }, F(DT), &mut world);
+        let q = atv.ridden.as_ref().unwrap();
+        assert!(q.ride.bike.untamed(), "ridden on Untamed's step");
+        let d = q.clips.as_ref().expect("the quad's clips tick");
+        assert_eq!(d.shift, game_sim::quad::UNTAMED_STUNT_SHIFT, "frame {t}: the driver reads Untamed's ids");
+        if q.ride.q.on_ground || q.ride.down() {
+            if left {
+                landed += 1;
+                if landed > 10 {
+                    break;
+                }
+            }
+            continue;
+        }
+        if q.ride.body.position.z() < FOOT {
+            continue;
+        }
+        left = true;
+        aired += 1;
+        assert_eq!(d.current, game_sim::quad::RIDING_POSE, "frame {t}: in the air on no stunt, the riding pose");
+        let Some(Played::Two { clips, .. }) = d.played else { panic!("frame {t}: the chassis plays {:?}", d.played) };
+        let p = game_sim::quad::POSE_CLIPS;
+        assert!(clips == [p[1], p[0]] || clips == [p[2], p[1]], "frame {t}: the riding pose's clips, not {clips:?}");
+    }
+    assert!(aired > 3, "the quad was hardly in the air ({aired} frames)");
+    println!("in the air {aired} frames, all on the riding pose");
+}

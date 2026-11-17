@@ -365,7 +365,9 @@ impl Driver {
     }
 
     /// The table row of a stunt id the step hands out: [`Driver::shift`] down past the riding stunts'
-    /// 41 rows, as the Untamed quad's air control takes its stunt id 8 lower (MD144).
+    /// 41 rows, as the Untamed quad's air control takes its stunt id 8 lower (MD144). The driver's
+    /// stunt word stays in those rows, so animate's riding-pose compare is Unleashed's 46 on either
+    /// step: Untamed's animate compares its own ids with bounds 8 up (54, MD144a), the same choice (V130).
     fn row_of(&self, id: i32) -> i32 {
         if self.shift != 0 && id >= 41 + self.shift { id - self.shift } else { id }
     }
@@ -968,6 +970,28 @@ mod tests {
         d.tick_on(&[], &air, false, false, Default::default(), DT);
         d.tick_on(&[Call::StartStunt(49)], &air, false, true, Default::default(), DT);
         assert_ne!(d.current, 41);
+    }
+
+    /// V130: the driver keeps its stunt word in the table's rows, so on an Untamed quad the riding
+    /// pose is still 46 when animate compares it. Untamed's own riding pose id (54, its animate's
+    /// bound, MD144a) comes in as row 46, and the air pose blends just as on Unleashed's step.
+    #[test]
+    fn an_untamed_quad_in_the_air_blends_the_riding_pose() {
+        use game_sim::quad::Call;
+        let air = quad(false);
+        let mut unleashed = Driver::new(table());
+        unleashed.tick_on(&[], &air, false, false, Default::default(), DT);
+        let mut d = Driver::new(table());
+        d.shift = game_sim::quad::UNTAMED_STUNT_SHIFT;
+        d.tick_on(&[], &air, false, false, Default::default(), DT);
+        assert_eq!(d.current, game_sim::quad::RIDING_POSE);
+        assert_eq!(d.played, unleashed.played, "the same blend as Unleashed's");
+        assert!(matches!(d.played, Some(Played::Two { clips: [48, 47], .. })), "{:?}", d.played);
+        let mut d = Driver::new(table());
+        d.shift = game_sim::quad::UNTAMED_STUNT_SHIFT;
+        d.tick_on(&[Call::StartStunt((game_sim::quad::RIDING_POSE + game_sim::quad::UNTAMED_STUNT_SHIFT) as u32)], &air, false, false, Default::default(), DT);
+        assert_eq!(d.current, game_sim::quad::RIDING_POSE, "Untamed's 54 is the riding pose's row");
+        assert!(matches!(d.played, Some(Played::Two { .. })), "{:?}", d.played);
     }
 
     #[test]
