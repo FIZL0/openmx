@@ -138,6 +138,15 @@ fn load(machine: MxvatvMachine, name: &str, curve: &CurveTable) -> Load {
     Load::read(&ini, machine, model.half_box(&origin), points, curve)
 }
 
+/// The car's collision record's ray probe as the shell rigs it (MD149b): the `col` the pack's
+/// mod.json lists for `name`, or `None` with none listed (the shell's car then has no record).
+fn riding(name: &str) -> Option<game_sim::track::Rays> {
+    let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(pack_dir().join("mod.json")).unwrap()).unwrap();
+    let col = manifest["cars"].as_array()?.iter().find(|c| c["car"] == name)?["col"].as_str().filter(|c| !c.is_empty())?.to_string();
+    let bytes = std::fs::read(pack_dir().join(&col)).unwrap_or_else(|e| panic!("{col}: {e}"));
+    Some(game_sim::track::Rays::parse(&bytes).unwrap_or_else(|e| panic!("{col}: {e}")))
+}
+
 /// The `n` hex words after `key` in `line` (an `along` among them skipped).
 fn words(line: &str, key: &str, n: usize) -> Vec<u32> {
     let at = line.find(key).unwrap_or_else(|| panic!("no `{key}` in `{line}`")) + key.len();
@@ -187,6 +196,9 @@ fn each_mxvatv_car_drives_in_the_shell_on_the_step_it_is_proved_on() {
             let yaw = f(3).atan2(f(4));
             let quat = Vf::new(0.0, (yaw / 2.0).sin(), 0.0, (yaw / 2.0).cos());
             let mut ride = load.ride(Vf::new(f(0), f(1) + lift, f(2), 1.0), quat, F::ZERO);
+            if let Some(riding) = riding(name) {
+                ride.rig(&load, &riding);
+            }
             let (mut input, table) = (Manager::connected(), Table::SHIPPED);
             for _ in 0..IN {
                 input.tick(dt, &[report, Report::idle()]);
