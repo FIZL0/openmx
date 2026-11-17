@@ -6688,7 +6688,7 @@ impl Updates for UpdateInRam<'_> {
             && in_rust("fade search")
         {
             let (r0, mut kinds) = (self.ee.ran, BTreeMap::new());
-            fade_search_in_ram(self.ee, rec, &mut kinds);
+            assert!(fade_search_in_ram(self.ee, rec, &mut kinds), "a listener searched the database inside the fade search: not followed (F60)");
             let handed: Vec<&str> = kinds.keys().filter_map(|k| k.strip_prefix("> ")).collect();
             book(format!("the tail: the fade search hands on {}", handed.join(", ")), self.ee.ran - r0);
             return 0;
@@ -16347,7 +16347,7 @@ impl atv_part::Outside for PartWorldInRam<'_> {
             0 => ray_probe::Shape::Mesh(self.mesh.insert(MeshInRam::read(self.ee, c)).mesh()),
             1 => panic!("the part search paired a hierarchy ({c:#x}): its parts are not read"),
             5 => unreachable!("a sphere is the part's own test"),
-            6 => panic!("the part search paired a kind 6 ({c:#x}): its test is not Rust's"),
+            6 => unreachable!("a box is the part's own test"),
             _ => ray_probe::Shape::Never,
         }
     }
@@ -16356,6 +16356,14 @@ impl atv_part::Outside for PartWorldInRam<'_> {
         (self.ee.u32_at(c + 0x78) == 5).then(|| {
             *self.kinds.entry("record search pair, kind 5".into()).or_default() += 1;
             atv_part::Sphere { centre: vf_at(self.ee, c + 0x50), radius: word_f(self.ee, c + 0x180), radius2: word_f(self.ee, c + 0x184) }
+        })
+    }
+    /// F49: a box (kind 6) as F53's oracle reads it; the fade search meets them on nat05.
+    fn oriented_box(&mut self, other: usize) -> Option<atv_part::OrientedBox> {
+        let c = self.items[other] - 0x18;
+        (self.ee.u32_at(c + 0x78) == 6).then(|| {
+            *self.kinds.entry("record search pair, kind 6".into()).or_default() += 1;
+            f53_box_in_ram(self.ee, c)
         })
     }
 }
@@ -16509,7 +16517,8 @@ fn part_search_in_ram(ee: &mut Ee, part: u32, list: u32, kinds: &mut BTreeMap<St
 /// structures' walk state ([`GatherInRam::write_query`]), the parts' group, the probe's last centre
 /// and budget, the clear's globals and the record ([`write_part_record`]). Counts the pairs and the
 /// calls handed on (a plant part stood, a hearer) into `kinds`.
-fn fade_search_in_ram(ee: &mut Ee, part: u32, kinds: &mut BTreeMap<String, u32>) {
+/// False (nothing written back) when a listener searched the database inside the walk (F60).
+fn fade_search_in_ram(ee: &mut Ee, part: u32, kinds: &mut BTreeMap<String, u32>) -> bool {
     use game_sim::atv_search;
     assert_eq!(ee.u32_at(part + 0x188), 0, "the part has a ray filter: its reset and test are not Rust's");
     let (mut m, mut objects, mut broad) = GatherInRam::read(ee, part);
@@ -16551,11 +16560,17 @@ fn fade_search_in_ram(ee: &mut Ee, part: u32, kinds: &mut BTreeMap<String, u32>)
         }
     }
     let (was_o, was_b) = (objects.clone(), broad.clone());
+    let stamp = world.ee.u16_at(STAMP_AT);
     let mut n = atv_part::PartRays { probe, record, world: &mut world, pairs: 0 };
     atv_search::collide_world(&mut objects, &mut broad, 0, 0, &|o| retired[o], &mut n);
     let (record, pairs) = (n.record, n.pairs);
+    let descended = world.mesh.as_ref().map(|m| m.id);
     for (k, v) in std::mem::take(&mut world.kinds) {
         *kinds.entry(k.replace("record search", "fade search")).or_default() += v;
+    }
+    if ee.u16_at(STAMP_AT) != stamp {
+        // A struck plant's listener searched the database mid-walk (F51's journal, F60).
+        return false;
     }
     for (k, o) in objects.iter_mut().enumerate() {
         if let Some(g) = o.group.take() {
@@ -16577,6 +16592,13 @@ fn fade_search_in_ram(ee: &mut Ee, part: u32, kinds: &mut BTreeMap<String, u32>)
     if active && broad.places[0].space.is_some() {
         write_part_record(ee, part, r, &record, pairs);
     }
+    // The last mesh descended leaves its descriptor and the descent's flag (F53); the descent's two
+    // stack pointers and its leaf scratch are the interpreter's own frame, not ported.
+    if let Some(c) = descended {
+        ee.set_u32(F53_DESCRIPTOR_AT, c + 0x230);
+        ee.set_u32(F53_DESCENT_FLAG_AT, 1);
+    }
+    true
 }
 
 /// The part search's outcome past the flags, written back: the clear's globals, the pairs' smooth
@@ -24147,4 +24169,143 @@ fn the_camera_link_into_the_bike_flags_is_the_originals() {
     }
     eprintln!("{t:?}");
     assert!(t.values().all(|&n| n >= 1000) && t.len() == 4, "{t:?}");
+}
+
+// --- F49: the wreck fade's world search against the original's -------------------------------------
+
+/// F49: the message post's two record words copied from frame slots it never sets (`sp+208`,
+/// `sp+212` stored at these pcs as the store log has them): whatever the deeper calls before left
+/// on the stack, so the original's depend on the interpreter's stack depth.
+const POST_STALE_STORES: [u32; 2] = [0x0018_7cc4, 0x0018_7ccc];
+
+/// The bytes the message post stored from its never-set frame slots during the last call, the store
+/// log taken (and turned off).
+fn stale_stack_copies(ee: &Ee) -> std::collections::BTreeSet<u32> {
+    let log = ee.log.borrow_mut().take().unwrap_or_default();
+    log.iter().filter(|&&(pc, ..)| POST_STALE_STORES.contains(&pc)).map(|&(_, at, _)| at).collect()
+}
+
+/// F49: a collidable's box moved in its database (the place's second half, after its vt `+0xc8`
+/// stands it at its node; the test stands the part at a frame of its own with vt `+0xcc` instead).
+const PART_BOX_MOVE: u32 = 0x0011_4480;
+
+/// **F49 — the wreck fade's world search is the original's.** The riding part the fade searches with
+/// (the bike's `+0xcc`, 14 rays round a tree) moved by its frame onto a spot by one of nat05's mesh
+/// triangles (two in three) or anywhere round the bike out to 400 ft, turned now and then, and stood
+/// there and its box moved by the original's calls on both RAMs; its last centre and budget drawn, now and then made inactive,
+/// its plants left out (`NO_GROUPS`) or not, its hit bit drawn. Then searched as the fade searches
+/// (`lazy` 0), one RAM by SLUS-21104's search and one by [`fade_search_in_ram`]: the answer's budget,
+/// the record and every RAM byte outside the stack the same after each search. A struck plant whose
+/// listener searches the database mid-walk is not followed (F51's journal, F60): the case is skipped.
+#[test]
+fn the_fade_search_is_the_originals() {
+    let Some(ee) = image() else { return };
+    let mut a = hooked(ee);
+    let mut b = hooked(image().unwrap());
+    b.ram.clone_from(&a.ram);
+    let part = a.u32_at(BIKE + 0xcc);
+    assert_eq!(a.u32_at(part + 0x188), 0, "the riding part has no ray filter");
+    let (m, world, _) = GatherInRam::read(&a, part);
+    let meshes: Vec<u32> = (1..world.len())
+        .filter(|&k| world[k].class == ws::Class::Object)
+        .map(|k| m.items[k] - 0x18)
+        .filter(|&c| a.u32_at(c + f51_at::KIND) == 0 && a.u32_at(c + f51_at::TRIANGLES) != 0)
+        .collect();
+    let frame: Vec<u32> = (0..16).map(|i| a.u32_at(part + 0x130 + 4 * i)).collect();
+    let home = vf_at(&a, part + 0x160);
+    let origin = vf_at(&a, a.u32_at(part + 0x180));
+    let flags = a.u8_at(part + 0x126);
+    let stand = a.u32_at(a.u32_at(part + 0xc) + 0xcc);
+    let mut g = Gen(0x0f49_fade_5eed_0001);
+    let mut kinds = BTreeMap::<String, u32>::new();
+    let mut seen = BTreeMap::<&str, u32>::new();
+    for n in 0..1500 {
+        let ends = f51_segment(&mut g, &a, &meshes, home);
+        let spot: [f32; 3] = std::array::from_fn(|i| (ends[0].0[i] + ends[1].0[i]) * 0.5 + g.f(-1.0, 1.0));
+        // The frame's rows: the image's, or turned about y (and tipped a little now and then).
+        let rows: [[f32; 3]; 3] = if g.one_in(3) {
+            std::array::from_fn(|r| std::array::from_fn(|c| f32::from_bits(frame[4 * r + c])))
+        } else {
+            let (s, c) = g.f(-3.2, 3.2).sin_cos();
+            let t = if g.one_in(3) { g.f(-0.5, 0.5) } else { 0.0 };
+            let (st, ct) = t.sin_cos();
+            [[c, 0.0, -s], [s * st, ct, c * st], [s * ct, -st, c * ct]]
+        };
+        let o = origin.0;
+        let pos: [f32; 3] = std::array::from_fn(|i| spot[i] - (o[0] * rows[0][i] + o[1] * rows[1][i] + o[2] * rows[2][i]));
+        let mut byte = flags & !ws::flags::HIT;
+        if g.one_in(15) {
+            byte &= !bp::more_flags::ACTIVE;
+        }
+        if g.one_in(4) {
+            byte |= ws::flags::NO_GROUPS;
+        }
+        if g.one_in(2) {
+            byte |= ws::flags::HIT;
+        }
+        let last = if g.one_in(2) { home } else { Vf::new(pos[0] + g.f(-8.0, 8.0), pos[1] + g.f(-8.0, 8.0), pos[2] + g.f(-8.0, 8.0), 1.0) };
+        let budget = if g.one_in(4) { 0.0 } else { g.f(-5.0, 50.0) };
+        for ee in [&mut a, &mut b] {
+            for (r, row) in rows.iter().enumerate() {
+                set_vf(ee, F51_AREA + 0x10 * r as u32, Vf::new(row[0], row[1], row[2], 0.0));
+            }
+            set_vf(ee, F51_AREA + 0x30, Vf::new(pos[0], pos[1], pos[2], 1.0));
+            ee.set(28, GP);
+            ee.call(stand, &[u64::from(part), u64::from(F51_AREA)], &[], BUDGET);
+            ee.set(28, GP);
+            ee.call(PART_BOX_MOVE, &[u64::from(part)], &[], BUDGET);
+            set_u8(ee, part + 0x126, byte);
+            set_vf(ee, part + 0x60, last);
+            ee.set_u32(part + 0x74, budget.to_bits());
+        }
+        let off = bytes_differ(&a.ram, &b.ram, a.stack);
+        assert!(off.is_empty(), "search {n}: the place left the RAMs apart at {off:?}");
+        a.set(28, GP);
+        *a.log.borrow_mut() = Some(Vec::new());
+        a.call(SEARCH_ALL, &[u64::from(part), 0], &[], BUDGET);
+        let stale = stale_stack_copies(&a);
+        let theirs = a.f0();
+        *b.log.borrow_mut() = Some(Vec::new());
+        let followed = fade_search_in_ram(&mut b, part, &mut kinds);
+        let stale: std::collections::BTreeSet<u32> = stale.union(&stale_stack_copies(&b)).copied().collect();
+        // What the post copied from its never-set slots: the original's bytes kept.
+        for &at in &stale {
+            set_u8(&mut b, at, a.u8_at(at));
+        }
+        if !stale.is_empty() {
+            *seen.entry("stale stack words posted").or_default() += 1;
+        }
+        // The descent's stack pointers and leaf scratch (F53): the original's frame, copied.
+        for at in F53_STACK_POINTERS.into_iter().chain(F53_SCRATCH.step_by(4)) {
+            b.set_u32(at, a.u32_at(at));
+        }
+        if !followed {
+            // A struck plant's listener searched the database mid-walk: not followed (F60).
+            *seen.entry("reentered").or_default() += 1;
+            b.ram.clone_from(&a.ram);
+            continue;
+        }
+        let ctx = format!("search {n} (flags {byte:#x}, at {pos:?})");
+        let ours = b.u32_at(part + 0x74);
+        // The answer is the new budget (or f32::MAX, budget untouched, when it cannot search).
+        if theirs != f32::MAX {
+            assert_eq!(theirs.to_bits(), ours, "{ctx}: the answer ({theirs} theirs, {} ours)", f32::from_bits(ours));
+        }
+        let off = bytes_differ(&a.ram, &b.ram, a.stack);
+        assert!(off.is_empty(), "{ctx}: RAM differs at {} ranges\n  {}", off.len(), off.iter().take(40).cloned().collect::<Vec<_>>().join("\n  "));
+        let hit = a.u8_at(part + 0x126) & ws::flags::HIT != 0;
+        let groups = byte & ws::flags::NO_GROUPS == 0;
+        *seen.entry(if byte & bp::more_flags::ACTIVE == 0 { "inactive" } else if theirs == f32::MAX { "max" } else if hit { "hit" } else { "clear" }).or_default() += 1;
+        if groups {
+            *seen.entry("with plants").or_default() += 1;
+        }
+    }
+    eprintln!("F49 fade search: {seen:?}, pairs {kinds:?}");
+    let got = |k: &str| seen.get(k).copied().unwrap_or(0);
+    assert!(got("hit") >= 300, "the searches hit: {seen:?}");
+    assert!(got("clear") >= 300, "{seen:?}");
+    assert!(got("inactive") >= 50, "{seen:?}");
+    for k in ["fade search part stand", "fade search pair, kind 0", "fade search pair, kind 5", "fade search pair, kind 6", "> fade search on_struck"] {
+        assert!(kinds.contains_key(k), "no {k}: {kinds:?}");
+    }
 }
