@@ -11294,6 +11294,44 @@ atv_heap_free               atv 0x001b76d0 = free
 #   posts +0x460/+0x468 row 125, read only by the next post (row 193); +0x444 rows 125, 193, stored back
 #   unchanged, read by the frame. Posts and kind set dropped: both replays bit-exact, the bike object and
 #   blocks the full frame's but +0x460/+0x468.
+# F48 — the posts' camera controller's store into the bike's flags +0x444: the camera link
+# (game_sim::handling::update::camera_link; tests/mxvatv_bike_ride.rs
+# the_camera_link_into_the_bike_flags_is_the_originals). Journal:
+# research/journal/2026-11-16-f48-camera-link-flags/.
+#   The store is pc 0x004f723c in 0x004f7210, the bike's link interface (bike+0x43c, vt at its +0x48:
+#   0x003d05f0) vt +0x44 add-link(obj, key, wanter): obj+8 (= bike+0x444) |= key; then obj+0x24's list
+#   (count, head, tail; nodes [data, prev, next], 0x001b5920 nth, 0x001b5710 append, 0x001b7340/0x001b7620
+#   allocs) gets an 8-byte (key, wanter) unless there is one (that is bike +0x460/+0x468). vt +0x48
+#   0x004f72f0 clears the key's bit and the first matching entry (telling its wanter vt +0x38); vt +0x4c
+#   0x004f73b0 zeroes obj+8 and tells every entry's wanter. Neither runs on the bike on C15.
+#   It is reached from the link pass 0x005075b0(reg): for each item of reg+0x30 (nodes [item, -, next]),
+#   for i < item vt +0x2c count, item vt +0x30(item, i, &key) != 0 -> for every item p of the list:
+#   q = p vt +0x40(p, key) != 0 -> item vt +0x34(item, key, q), p vt +0x44(p, key, item) (ra 0x0050769c).
+#   The bike's +0x40 0x004de110 is a thunk (a0 -= 0x43c) to its lookup 0x004ddf20: the first of masks
+#   +0x734, +0x9c4, +0xa94, +0xb54, +0x6b4, +0x498 (+0x9c4 again, unreachable), +0x6a8 that shares a bit
+#   with the key -> bike + that mask - 4 (+0x48c+8 for +0x498, +0x680+0x24 for +0x6a8), else 0. The
+#   bike's want count +0x2c 0x004f71b0 is `jr ra; v0 = 0`.
+#   Every class with add-link 0x004f7210 at vt +0x44 (27 in the ELF) wants one key (+0x2c returns 1) from
+#   one word: cameras +0x7c (0x0048d390 etc., set by the camera bases 0x001c3950 / 0x00234690 from the
+#   interface names "CameraInterface" via 0x00214b30(0x005423c0, name, flag)), the first-person camera
+#   +0xa8 (0x00484fb0; 0x00484010: "FirstPersonCameraInterface"), +0x374 (class 0x003d1294,
+#   0x004f1e30), two by name through 0x00214b30 directly (0x0027f050, 0x0048e380: "AnimatedCamera").
+#   The controller (class 0x003ccc90, ctor 0x0048f390; state 4 0x012bcca0, its listener +0x38) on post
+#   (8, id), each under its guards: 0xb -> 0x00490770 -> vt +0x84(ctl, +0x88, ...) (the switch); 7, 0xd -> vt
+#   +0x84(ctl, +0x4c, 0); 6 -> vt +0x84(ctl, +0x78, 0). Slots: +0x7c (0x0048f670, class via 0x00485020)
+#   and +0x80 (0x0048f790) the chase cameras, +0x78 one of them (0x00490b30), +0x84 first-person
+#   (0x0048f8c0, class 0x0048e460, only with a name), +0x88 the wreck camera (0x0048f990, 0x0048cc00);
+#   +0x4c the remembered camera: +0x28 (0x00490480), +0x84 kept or +0x78 (0x0048ffd0), or a1
+#   (0x0048f5d0). A switch removes the old camera (its vt +0x4c clear-all, ra 0x00507360; a camera
+#   answers nothing, so its list is empty and only its own flags clear) and runs the pass on the
+#   registry (state 4 0x01219f50: the bike's link, 0x010af63c wanting 8, the current camera).
+#   State 4: flags 0x18; +0x9c4 0x10, +0xa94 0x20; the chase cameras' and the wreck camera's key 0x10, the
+#   first-person camera's (0x012a5dc0) 0x20. C15 flip-1: row 125 post (8, 0xb) and row 193 (8, 0xd)
+#   each or 8 then 0x10 in: no change. A post that switches to a remembered first-person camera while
+#   the flags lack 0x20 or-s it in, and the sync then takes its +0xa94 branches.
+#   Oracle: 10 000 registries (the bike's link and 0-3 stand-ins with hooked +0x2c/+0x30/+0x34/+0x40/
+#   +0x44, random keys and masks, random flags), the pass vs camera_link: +0x444 equal, the bike told
+#   once per answered key.
 # B35 — the typed step's wreck test runs the hits after a clause's entry, as F31b4b's word port does
 # (game_sim::handling::step::wreck_entries; tests/mxvatv_step.rs). Comment rows only.
 #   The entry 0x004e2260 run whole and unhooked on state04's bike 0x00e714e0 (reason 4) keeps +0xc8,

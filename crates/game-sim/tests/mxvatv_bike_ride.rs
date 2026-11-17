@@ -23654,3 +23654,196 @@ fn the_kind_sets_categories_are_the_originals() {
         assert!(tally.get(path).copied().unwrap_or(0) >= 100, "{path} came up too rarely: {tally:?}");
     }
 }
+
+// --- F48: the posts' camera controller's link into the bike's flags ------------------------------
+
+/// The registered objects' link pass (each wanter's keys offered to every object; an object that
+/// answers one is told), the bike's link interface (`bike+0x43c`, vt at its `+0x48`) and that vt's
+/// lookup (`+0x40`, a thunk to the bike's interface lookup) and add-link (`+0x44`: flags `+8` |= the
+/// key, then a (key, wanter) list entry unless there is one).
+const LINK_PASS: u32 = 0x0050_75b0;
+const BIKE_LINK: u32 = BIKE + 0x43c;
+const LINK_LOOKUP_FN: u32 = 0x004d_e110;
+const LINK_ADD_FN: u32 = 0x004f_7210;
+/// State 4's camera controller (the event post's listener at its `+0x38`) and its class; the chase
+/// camera's (`+0x7c`, current `+0x78`), the first-person one's (`+0x84`) and the wreck camera's
+/// (`+0x88`) key words, and the registry the controller links its camera into (state 4's).
+const CAMERA_CONTROLLER: u32 = 0x012b_cca0;
+const CAMERA_CONTROLLER_VT: u32 = 0x003c_cc90;
+const LINK_REGISTRY: u32 = 0x0121_9f50;
+
+/// **F48 — the posts' store into the bike's flags is the camera link, ported**: 10 000 registries
+/// run through SLUS-21104's link pass and through [`update::camera_link`] from the same words. Each
+/// holds the bike's link interface (state 4's, its lookup and add-link the original's) and 0 to 3
+/// stand-ins, laid in random order: each wants 0 to 2 keys (a lone bit, the bike's own masks' bits,
+/// any bits, or 0; now and then the get says none) and may answer keys itself (a mask). The bike's
+/// flags and its seven interface masks are drawn at random. The flags `+0x444` come out the same,
+/// and the bike is told (its add-link) once per key it answers. Then state 4's controller: the
+/// cameras a post switches to (the chase and the wreck camera; the remembered one is either) want
+/// the camera's key 0x10, already in the flags, so on C15 the link leaves them; the first-person
+/// camera wants 0x20, which the bike answers (its `+0xa94`) and the flags lack: a post switching to
+/// it (the remembered camera can be it) or-s it in.
+#[test]
+fn the_camera_link_into_the_bike_flags_is_the_originals() {
+    let Some(mut ee) = image().map(hooked) else { return };
+    let link_vt = ee.u32_at(BIKE_LINK + 0x48);
+    assert_eq!((ee.u32_at(link_vt + 0x40), ee.u32_at(link_vt + 0x44)), (LINK_LOOKUP_FN, LINK_ADD_FN), "the bike's link vt +0x40, +0x44");
+    assert_eq!(ee.u32_at(link_vt + 0x2c), 0x004f_71b0, "the bike's link wants nothing (vt +0x2c)");
+    assert_eq!(ee.u32_at(0x004f_71b0), 0x03e0_0008, "the bike's want count: jr ra");
+    assert_eq!(ee.u32_at(0x004f_71b4), 0x0000_102d, "the bike's want count: v0 = 0");
+
+    // State 4's controller and its cameras' keys.
+    let c = CAMERA_CONTROLLER;
+    assert_eq!(ee.u32_at(c + 4), CAMERA_CONTROLLER_VT, "the camera controller's class");
+    // Each camera's key, asked of it: its link interface (`+0x24`) wants one (vt `+0x2c`), got by vt
+    // `+0x30` (the interface, 0, where).
+    let key_of = |ee: &mut Ee, cam: u32| {
+        let (link, out) = (cam + 0x24, ee.scratch(0));
+        let vt = ee.u32_at(link + 0x48);
+        ee.set(28, GP);
+        ee.call(ee.u32_at(vt + 0x2c), &[u64::from(link)], &[], BUDGET);
+        assert_eq!(ee.r(2), 1, "camera {cam:#x} wants one key");
+        ee.call(ee.u32_at(vt + 0x30), &[u64::from(link), 0, u64::from(out)], &[], BUDGET);
+        assert_eq!(ee.r(2), 1, "camera {cam:#x}'s key");
+        ee.u32_at(out)
+    };
+    let (chase, first, wreck) = (ee.u32_at(c + 0x78), ee.u32_at(c + 0x84), ee.u32_at(c + 0x88));
+    assert_eq!(ee.u32_at(c + 0x4c), chase, "the remembered camera: the current one");
+    assert!([ee.u32_at(c + 0x7c), ee.u32_at(c + 0x80)].contains(&chase), "the current camera: one of the two chase ones");
+    let other = ee.u32_at(c + 0x7c) ^ ee.u32_at(c + 0x80) ^ chase;
+    let keys: Vec<u32> = [chase, other, first, wreck].map(|cam| key_of(&mut ee, cam)).to_vec();
+    let [k_chase, k_other, k_first, k_wreck] = keys[..] else { unreachable!() };
+    assert_eq!((k_chase, k_other, k_first, k_wreck), (0x10, 0x10, 0x20, 0x10), "the cameras' keys: chase, the other chase, first-person, wreck");
+    let flags = ee.u32_at(BIKE + 0x444);
+    assert_eq!(flags, 0x18, "state 4's flags");
+    assert_eq!((ee.u32_at(BIKE + 0x9c4), ee.u32_at(BIKE + 0xa94)), (0x10, 0x20), "the camera's and the first-person camera's masks");
+    let mut items = Vec::new();
+    let mut n = ee.u32_at(LINK_REGISTRY + 0x30);
+    while n != 0 {
+        items.push(ee.u32_at(n));
+        n = ee.u32_at(n + 8);
+    }
+    assert_eq!(items, [BIKE_LINK, 0x010a_f63c, chase + 0x24], "state 4's registry: the bike, the one wanting 8, the chase camera");
+    for (keys, want) in [(vec![8, k_chase], 0x18), (vec![8, k_other], 0x18), (vec![8, k_wreck], 0x18), (vec![8, k_first], 0x38)] {
+        let mut m = UpdateInRam { ee: &mut ee, x: 0.0 };
+        update::camera_link(&mut m, &keys);
+        assert_eq!(ee.u32_at(BIKE + 0x444), want, "state 4 linking {keys:x?}");
+        ee.set_u32(BIKE + 0x444, flags);
+    }
+
+    // The oracle.
+    let (reg, nodes, fake_vt, fakes, heap) = (WRECK_AREA, WRECK_AREA + 0x100, WRECK_AREA + 0x200, WRECK_AREA + 0x400, WRECK_AREA + 0x1000);
+    let [count_fn, get_fn, store_fn, lookup_fn, add_fn] = [0, 1, 2, 3, 4].map(|k| WRECK_AREA + 0x300 + 8 * k);
+    for (o, f) in [(0x2c, count_fn), (0x30, get_fn), (0x34, store_fn), (0x40, lookup_fn), (0x44, add_fn)] {
+        ee.set_u32(fake_vt + o, f);
+    }
+    // A stand-in at `a`: `+0x10` its key count, `+0x14..` its keys, `+0x20..` whether each get
+    // answers, `+0x30` the mask it answers.
+    ee.hooks.insert(count_fn, Box::new(|ee: &mut Ee| ee.set(2, u64::from(ee.u32_at(ee.r(4) as u32 + 0x10)))));
+    ee.hooks.insert(get_fn, Box::new(|ee: &mut Ee| {
+        let (a, i, out) = (ee.r(4) as u32, ee.r(5) as u32, ee.r(6) as u32);
+        ee.set_u32(out, ee.u32_at(a + 0x14 + 4 * i));
+        ee.set(2, u64::from(ee.u32_at(a + 0x20 + 4 * i)));
+    }));
+    ee.hooks.insert(store_fn, Box::new(|ee: &mut Ee| ee.set(2, 0)));
+    ee.hooks.insert(lookup_fn, Box::new(|ee: &mut Ee| {
+        let a = ee.r(4) as u32;
+        let hit = ee.u32_at(a + 0x30) & ee.r(5) as u32 != 0;
+        ee.set(2, if hit { u64::from(a) } else { 0 });
+    }));
+    ee.hooks.insert(add_fn, Box::new(|ee: &mut Ee| ee.set(2, 0)));
+    // The heap: handed out in order from `heap`, back to the start every case.
+    let next = Rc::new(RefCell::new(heap));
+    for f in [HEAP_NEW, HEAP_ALLOC] {
+        let next = next.clone();
+        ee.hooks.insert(f, Box::new(move |ee: &mut Ee| {
+            let at = *next.borrow();
+            *next.borrow_mut() = at + (ee.r(4) as u32 + 15 & !15);
+            ee.set(2, u64::from(at));
+        }));
+    }
+    let told = Rc::new(RefCell::new(0u32));
+    let t = told.clone();
+    ee.hooks.insert(LINK_ADD_FN, Box::new(move |ee: &mut Ee| {
+        assert_eq!(ee.r(4) as u32, BIKE_LINK, "the add-link's object");
+        *t.borrow_mut() += 1;
+        run_as_itself(ee, LINK_ADD_FN);
+    }));
+    let regions = [(BIKE + 0x430, 0x40), (BIKE + 0x490, 0x10), (BIKE + 0x6a0, 0x20), (BIKE + 0x730, 0x10), (BIKE + 0x9c0, 0x10), (BIKE + 0xa90, 0x10), (BIKE + 0xb50, 0x10)];
+    let image_words = snap_regions(&ee, &regions);
+    let mut g = Gen(0x0000_f048);
+    let mut t = BTreeMap::new();
+    for k in 0..10_000 {
+        restore_regions(&mut ee, &regions, &image_words);
+        *next.borrow_mut() = heap;
+        let masks: Vec<u32> = [0x734, 0x9c4, 0xa94, 0xb54, 0x6b4, 0x498, 0x6a8]
+            .map(|o| {
+                let m = match g.bits() % 4 {
+                    0 => 0,
+                    1 => 1 << (g.bits() % 32),
+                    2 => g.bits(),
+                    _ => ee.u32_at(BIKE + o),
+                };
+                ee.set_u32(BIKE + o, m);
+                m
+            })
+            .to_vec();
+        let any_mask = masks.iter().fold(0, |a, &m| a | m);
+        let flags = match g.bits() % 4 {
+            0 => g.bits(),
+            1 => g.bits() & any_mask,
+            2 => 0x18,
+            _ => !(1 << (g.bits() % 32)) | if g.one_in(2) { u32::MAX } else { 0 },
+        };
+        ee.set_u32(BIKE + 0x444, flags);
+        let n = g.bits() % 4;
+        let mut list = vec![BIKE_LINK];
+        let mut wanted = Vec::new();
+        for i in 0..n {
+            let a = fakes + 0x80 * i;
+            ee.set_u32(a + 0x48, fake_vt);
+            let keys = g.bits() % 3;
+            ee.set_u32(a + 0x10, keys);
+            for j in 0..keys {
+                let key = match g.bits() % 5 {
+                    0 => 0,
+                    1 => 1 << (g.bits() % 32),
+                    2 => g.bits(),
+                    _ => any_mask & (1 << (g.bits() % 32)) | if g.one_in(3) { 1 << (g.bits() % 32) } else { 0 },
+                };
+                let ok = u32::from(!g.one_in(8));
+                ee.set_u32(a + 0x14 + 4 * j, key);
+                ee.set_u32(a + 0x20 + 4 * j, ok);
+            }
+            ee.set_u32(a + 0x30, if g.one_in(2) { g.bits() } else { 0 });
+            list.insert((g.bits() % (list.len() as u32 + 1)) as usize, a);
+        }
+        for (i, &a) in list.iter().enumerate() {
+            let node = nodes + 0x10 * i as u32;
+            ee.set_u32(node, a);
+            ee.set_u32(node + 8, if i + 1 == list.len() { 0 } else { node + 0x10 });
+            if a != BIKE_LINK {
+                for j in 0..ee.u32_at(a + 0x10) {
+                    if ee.u32_at(a + 0x20 + 4 * j) != 0 {
+                        wanted.push(ee.u32_at(a + 0x14 + 4 * j));
+                    }
+                }
+            }
+        }
+        ee.set_u32(reg + 0x30, nodes);
+        let answered = wanted.iter().filter(|&&key| key & any_mask != 0).count() as u32;
+        let grows = wanted.iter().any(|&key| key & any_mask != 0 && key & !flags != 0);
+        tally(&mut t, if wanted.is_empty() { "nothing wanted" } else if answered == 0 { "none answered" } else if grows { "flags grow" } else { "flags kept" });
+        *told.borrow_mut() = 0;
+        ee.set(28, GP);
+        ee.call(LINK_PASS, &[u64::from(reg)], &[], BUDGET);
+        let want = ee.u32_at(BIKE + 0x444);
+        assert_eq!(*told.borrow(), answered, "case {k}: the bike told");
+        ee.set_u32(BIKE + 0x444, flags);
+        update::camera_link(&mut UpdateInRam { ee: &mut ee, x: 0.0 }, &wanted);
+        let got = ee.u32_at(BIKE + 0x444);
+        assert_eq!(got, want, "case {k}: flags {flags:#x}, masks {masks:x?}, wanted {wanted:x?}");
+    }
+    eprintln!("{t:?}");
+    assert!(t.values().all(|&n| n >= 1000) && t.len() == 4, "{t:?}");
+}

@@ -1783,6 +1783,24 @@ pub fn trick_end(m: &mut impl Updates, id: u32) -> u32 {
     1
 }
 
+/// The bike's interfaces' masks, in the order its interface lookup tries them: the replay's, the
+/// camera's, the first-person camera's, the body's, and three more.
+const INTERFACE_MASKS: [u32; 7] = [0x734, 0x9c4, 0xa94, 0xb54, 0x6b4, 0x498, 0x6a8];
+
+/// **The camera link** (F48): what the event posts' camera controller does to the bike's flags
+/// (`+0x444`) when it switches the camera and every registered object is linked again. Each key a
+/// registered object wants (`wanted`, one per object and in their order) that one of the bike's
+/// interfaces answers (a mask in [`INTERFACE_MASKS`] sharing a bit with it) is or-ed in whole. The
+/// link never clears a bit, so the flags change only when a wanted key is new to them.
+pub fn camera_link(m: &mut impl Updates, wanted: &[u32]) {
+    for &key in wanted {
+        if INTERFACE_MASKS.iter().any(|&o| key & w(m, o) != 0) {
+            let flags = w(m, 0x444);
+            put(m, 0x444, flags | key);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
