@@ -17,8 +17,10 @@
 //! - the bike's probes are the image's (their rays, trees and records);
 //! - each of the bike's three ray probes, stood at frames that put a ray across one of Nat05's meshes
 //!   (six a mesh; Nat05's plants have no trunks to aim at), gathers the list the original gathers and
-//!   searches it to the record the original's search leaves, word for word, and to its hit bit but
-//!   where only a plant's sphere was struck (the port stands no plant spheres).
+//!   searches it to the record the original's search leaves, word for word, and to its hit bit (a
+//!   plant's sphere or a zone struck alone sets it with no contact);
+//! - each species' sphere part, built from the esb, is the image's (its point, frame, radius and
+//!   radius squared), on the eco's unit, and no plant in the image is hidden or turned.
 //!
 //! What the ride itself filed (the vehicles' spheres, the riders' and machines' parts in the moving
 //! list) is copied from the image and retired on both sides, so the searches see the world alone; a
@@ -810,7 +812,7 @@ fn run(d: &mut Data, k: usize, record: &mut Record, t: &Matrix) -> Outcome {
     let mut wheels = Wheels::new(&p.rays, *t, &pw.props, w.meshes.start, plants);
     wheels.record = std::mem::take(record);
     let parts = d.slots[0]..w.objects.len();
-    let mut rays = Rays { wheels, parts, zones: pw.zones.clone(), zone_shapes: &pw.zone_shapes };
+    let mut rays = Rays { wheels, parts, zones: pw.zones.clone(), zone_shapes: &pw.zone_shapes, spheres: pw.spheres.clone(), stood: None };
     let retired = |o: usize| d.retired.contains(&o);
     let hit = atv_props::search(&mut w.objects, p.object, &list.found, &retired, &mut rays);
     assert_eq!(w.objects[p.object].radius.0.to_bits(), reach, "the {} probe's reach", p.name);
@@ -882,11 +884,9 @@ fn the_bikes_probes_search_nat05_as_the_original() {
             let o = run(&mut d, k, &mut record, t);
             assert_eq!(o.lists.1, o.lists.0, "the {name} probe, {what}: the list");
             assert_eq!(o.got, o.want, "the {name} probe, {what}: the record");
-            if o.hit.0 != o.hit.1 {
-                // Only a part the port strikes nothing on (a sphere) can tell them apart.
-                assert!(o.hit.0 && o.want.contacts.is_empty() && o.groups, "the {name} probe, {what}: the hit bit {:?}; {} contacts, groups {}, list {:x?}", o.hit, o.want.contacts.len(), o.groups, o.lists.0);
-                hit_only += 1;
-            }
+            assert_eq!(o.hit.1, o.hit.0, "the {name} probe, {what}: the hit bit; {} contacts, groups {}, list {:x?}", o.want.contacts.len(), o.groups, o.lists.0);
+            // Struck with no contact: a plant's sphere or a zone alone.
+            hit_only += usize::from(o.hit.0 && o.want.contacts.is_empty());
             hits += usize::from(o.hit.0);
             synced += o.synced;
             contacts += o.want.contacts.len();
@@ -900,10 +900,49 @@ fn the_bikes_probes_search_nat05_as_the_original() {
         let others: Vec<_> = struck.keys().filter(|s| matches!(s, Struck::Other(_))).collect();
         out += &format!(
             "\nthe {name} probe: {} frames, {hits} hit, {contacts} contacts on {meshes} meshes and {on_parts} on parts, others {others:x?}; \
-             {groups} lists held plants; {hit_only} hit only a part with no contact; {synced} lists changed by callbacks",
+             {groups} lists held plants; {hit_only} hit with no contact; {synced} lists changed by callbacks",
             frames.len()
         );
         assert!(contacts > 100, "the {name} probe struck something");
     }
     println!("{out}\nsyscalls (number, caller): {:x?}", d.syscalls.borrow());
+}
+
+
+/// A plant group entry's flags (`+0x16`): hidden, turned.
+const PLANT_HIDDEN_OR_TURNED: u8 = 0x0c;
+
+#[test]
+fn the_plants_spheres_are_the_images() {
+    let Some(d) = data() else { return };
+    let ee = &d.ee;
+    let eco = ee.u32_at(ECO_AT);
+    assert_eq!(d.pw.spheres.unit.0.to_bits(), ee.u32_at(eco + 0xc4), "the eco's unit");
+    assert_eq!(d.pw.spheres.species.len(), d.parts.len(), "the species");
+    let mut spheres = 0;
+    for (m, ((scales, built), parts)) in d.pw.spheres.species.iter().zip(&d.parts).enumerate() {
+        let a = ee.u32_at(ee.u32_at(eco + 0x84) + 4 * m as u32);
+        let want = [0x100, 0x104, 0x10c, 0x114].map(|o| ee.u32_at(a + o));
+        assert_eq!([scales.lean[0], scales.lean[1], scales.size[0], scales.size[1]].map(|f| f.0.to_bits()), want, "species {m}'s scale words");
+        assert_eq!(built.len(), parts.len(), "species {m}'s parts");
+        for (k, (b, &p)) in built.iter().zip(parts).enumerate() {
+            assert_eq!(b.is_some(), ee.u32_at(p + at::KIND) == 5, "species {m}'s part {k} is a sphere");
+            let Some(b) = b else { continue };
+            assert_eq!(bits(b.local), words(ee, p + 0x130), "species {m}'s part {k}'s point");
+            for r in 0..3 {
+                assert_eq!(bits(b.frame[r]), words(ee, p + 0x140 + 0x10 * r as u32), "species {m}'s part {k}'s frame row {r}");
+            }
+            assert_eq!((b.radius.0.to_bits(), b.radius2.0.to_bits()), (ee.u32_at(p + 0x180), ee.u32_at(p + 0x184)), "species {m}'s part {k}'s radius");
+            spheres += 1;
+        }
+    }
+    let mut plants = 0;
+    walk_entries(ee, ee.u32_at(d.tree + 0x8c), &mut |e| {
+        if ee.u8_at(e + 2) == 3 {
+            assert_eq!(ee.u8_at(e + 0x16) & PLANT_HIDDEN_OR_TURNED, 0, "plant {e:#x}'s flags");
+            plants += 1;
+        }
+    });
+    assert!(spheres > 0 && plants > 0, "{spheres} spheres, {plants} plants");
+    println!("{spheres} sphere parts, {plants} plant entries");
 }
