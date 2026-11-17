@@ -2193,16 +2193,23 @@ fn the_quads_tire_reader_is_the_originals() {
     eprintln!("{tally:?}");
 }
 
-/// The quad in each of MD37a's RAM images, and the files its `.phy` may be: the `r` images ride the
-/// `atv_` quad, the `s` ones the `atv_s_` (MD37a's poke), each a Race or a Pro, A or P.
-const QUAD_IMAGES: [(&str, u32, &str); 6] = [
-    ("atv-r-spawn", 0x015e_0690, "atv_"),
-    ("atv-r-air", 0x015e_0690, "atv_"),
-    ("atv-r-spawn-late", 0x015e_0690, "atv_"),
-    ("atv-s-spawn", 0x015e_0b90, "atv_s_"),
-    ("atv-s-air", 0x015e_0b90, "atv_s_"),
-    ("atv-s-spawn-late", 0x015e_0b90, "atv_s_"),
+/// MD37a's RAM image and C28's four, and the files the player quad's `.phy` may be: the `r` images
+/// ride the `atv_` quad, the `s` ones the `atv_s_` (MD37a's poke), each a Race or a Pro, A or P. The
+/// quads are found, not pinned ([`quads_in`]): C28's heap is not MD37a's.
+const QUAD_IMAGES: [(&str, &str); 5] = [
+    ("atv-r-spawn", "atv_"),
+    ("c28-atv-r-spawn", "atv_"),
+    ("c28-atv-r-air", "atv_"),
+    ("c28-atv-s-spawn", "atv_s_"),
+    ("c28-atv-s-air", "atv_s_"),
 ];
+/// Every quad object in a RAM image (its vptr at `+4`), lowest first. The player's is the first, made
+/// before the idle one that also sits in Desert Oasis Free Ride (MD37a's at `+0x77a00` from it, C28's at
+/// `+0x770e0`).
+fn quads_in(ee: &Ee) -> Vec<u32> {
+    let vt = QUAD_VTABLE.to_le_bytes();
+    (0x0010_0000..ee.ram.len() - 8).step_by(4).filter(|&a| ee.ram[a + 4..a + 8] == vt).map(|a| a as u32).collect()
+}
 const QUAD_FILES: [&str; 4] = ["race250a", "race250p", "pro250a", "pro250p"];
 
 /// The reader's words a ride moves on: the spring the ground step swaps between stopped and moving,
@@ -2243,10 +2250,10 @@ fn poisoned(image: &quad::TireSetup) -> quad::TireSetup {
     t
 }
 
-/// The tire reader on the quad files themselves: in each of MD37a's six RAM images the four wheels'
-/// tire words, the two pairs' springs and the mud are what [`quad::tire_phy`] reads out of one of the
+/// The tire reader on the quad files themselves: in each of [`QUAD_IMAGES`], for every quad in it, the
+/// four wheels' tire words, the two pairs' springs and the mud are what [`quad::tire_phy`] reads out of one of the
 /// candidate `.phy` files (with the image's own mass, and from [`poisoned`] words), but for the spring
-/// and rest point a ride moves. Every image must match exactly one file.
+/// and rest point a ride moves. Every quad must match exactly one file, the player's one of its own kind.
 #[test]
 fn the_quad_images_wheels_are_their_phy_files() {
     let Ok(kit) = Kit::load().map_err(|w| skip(&w)) else { return };
@@ -2261,32 +2268,42 @@ fn the_quad_images_wheels_are_their_phy_files() {
         return;
     }
     let mut seen = 0;
-    for (name, obj, prefix) in QUAD_IMAGES {
+    for (name, player_prefix) in QUAD_IMAGES {
         let path = dir.join(format!("{name}.ee{}", ".bin"));
         if !path.exists() {
-            skip(&format!("{} is not there (MD37a's; memory: md37a ATV states live in s2)", path.display()));
+            skip(&format!(
+                "{} is not there (MD37a's or C28's; copy it in from ~/repos/openmx-slots/kept-context/md37a)",
+                path.display()
+            ));
             continue;
         }
         let ee = Ee::from_ram(&path).unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(ee.u32_at(obj + 4), QUAD_VTABLE, "{name}: no quad at {obj:#x}");
-        let image = read_tire(&ee, obj);
-        let mass = F(ee.f32_at(ee.u32_at(ee.u32_at(obj + QUAD_WHEELS) + 0x1e4) + 0x18));
-        let mut matched = vec![];
-        let mut first_miss = String::new();
-        for file in QUAD_FILES {
-            let at = phy.join(format!("{prefix}{file}.phy"));
-            let bytes = std::fs::read(&at).unwrap_or_else(|e| panic!("{}: {e}", at.display()));
-            let mut t = poisoned(&image);
-            quad::tire_phy(&mut t, &Ini::parse_bytes(&bytes), mass);
-            if format!("{:?}", settled(t)) == format!("{:?}", settled(image)) {
-                matched.push(file);
-            } else if first_miss.is_empty() {
-                first_miss = format!("{prefix}{file}: {:?}", first_difference(&settled(image), &settled(t)));
+        let quads = quads_in(&ee);
+        assert!(!quads.is_empty(), "{name}: no quad (vptr {QUAD_VTABLE:#x} at +4)");
+        for (k, &obj) in quads.iter().enumerate() {
+            // The player's quad must be its image's own kind; the idle one may be any of the eight.
+            let prefixes: &[&str] = if k == 0 { &[player_prefix] } else { &["atv_", "atv_s_"] };
+            let image = read_tire(&ee, obj);
+            let mass = F(ee.f32_at(ee.u32_at(ee.u32_at(obj + QUAD_WHEELS) + 0x1e4) + 0x18));
+            let mut matched = vec![];
+            let mut first_miss = String::new();
+            for prefix in prefixes {
+                for file in QUAD_FILES {
+                    let at = phy.join(format!("{prefix}{file}.phy"));
+                    let bytes = std::fs::read(&at).unwrap_or_else(|e| panic!("{}: {e}", at.display()));
+                    let mut t = poisoned(&image);
+                    quad::tire_phy(&mut t, &Ini::parse_bytes(&bytes), mass);
+                    if format!("{:?}", settled(t)) == format!("{:?}", settled(image)) {
+                        matched.push(format!("{prefix}{file}"));
+                    } else if first_miss.is_empty() {
+                        first_miss = format!("{prefix}{file}: {:?}", first_difference(&settled(image), &settled(t)));
+                    }
+                }
             }
+            assert!(matched.len() == 1, "{name}, quad {obj:#x}: matched {matched:?} (first miss {first_miss})");
+            println!("{name}, quad {obj:#x}: {} (mass {})", matched[0], mass.0);
+            seen += 1;
         }
-        assert!(matched.len() == 1, "{name}: matched {matched:?} (first miss {first_miss})");
-        println!("{name}: {prefix}{} (mass {})", matched[0], mass.0);
-        seen += 1;
     }
     assert!(seen > 0 || QUAD_IMAGES.is_empty());
 }
