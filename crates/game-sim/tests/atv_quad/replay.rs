@@ -7,9 +7,10 @@ use std::collections::HashMap;
 const C28_SIM: u32 = 0x0065_bcc0;
 const C28_QUAD: u32 = 0x0150_a990;
 /// The pad reader's stores, quad-relative (F31's, the vehicle class's): brake/gas in, d-pad, stick and
-/// holds, clutch and reverse in, +0x14c8, the put-back request, the trick byte, +0x17ac.
+/// holds and the stick's angle and length, clutch and reverse in, +0x14c8, the put-back request, the
+/// trick byte, +0x17ac.
 const READER: [(u32, u32); 7] =
-    [(0x310, 8), (0x12a0, 0x18), (0x12c0, 8), (0x14c8, 4), (0x14d4, 4), (0x14ec, 4), (0x17ac, 4)];
+    [(0x310, 8), (0x12a0, 0x20), (0x12c0, 8), (0x14c8, 4), (0x14d4, 4), (0x14ec, 4), (0x17ac, 4)];
 /// The put-back spot and its orientation, quad-relative (F31's).
 const SPOT: [(u32, u32); 1] = [(0xd38, 0x38)];
 /// The rider settled, quad-relative (MD148): the rider's update copies "a ragdoll bone touches" here
@@ -21,6 +22,27 @@ const SETTLED: [(u32, u32); 1] = [(0x920, 4)];
 /// machine's in row r when the recorder read the row after the rider's update, and in row r + 1 when
 /// it read the row after the quad's frame but before the rider's (the s- rides').
 const RIDER_COPY: u32 = 0x930;
+/// Quad words the sim frame leaves to code that runs between two frames, outside it, as (offset,
+/// bytes, bits held against the rows): the replay runs no such code, so these bits are not compared
+/// (MD121's journal):
+/// - `+0x44` bit 0x400: set by the vehicle's scene-node pass (the `+0xc` node's vt +0x48, a thunk to
+///   the quad's vt +0x108, which ends in the bit's setter), cleared by the vehicle's PostProcess in the
+///   frame. No reader of it was found.
+/// - `+0x6f8..+0x720`'s ride time, top speed, wheelie and stoppie distances and their bests: the frame
+///   counts them off the player's score card (`*(+0x680)`: its flags, speed `+0x108` and step `+0x18`),
+///   which the card's own update writes between frames.
+/// - `+0x464`, `+0x468`: the camera link list's node pointers, which the allocator hands out; the
+///   game's other per-frame code allocates and frees between frames, so its blocks are others.
+/// - `+0xd90`: where the vehicle last gathered its nearby list (the sphere gather, between frames;
+///   `+0xd38`, the squared distance since, is in the spot, laid).
+const BETWEEN: [(u32, u32, u32); 6] =
+    [(0x44, 4, !0x400), (0x6f8, 8, 0), (0x70c, 8, 0), (0x71c, 8, 0), (0x464, 8, 0), (0xd90, 0x10, 0)];
+/// The rider's block in the quad, quad-relative: the rider's update writes its copies here
+/// (`*(rider+0x378)` is quad +0x730). From a wreck's first row the interpreter's rider ragdoll leaves
+/// the original's (R37), so the block is not compared from there on.
+const RIDER_BLOCK: (u32, u32) = (0x870, 0x980);
+/// The quad's wreck reason (non-zero while wrecked).
+const REASON: u32 = 0xc80;
 
 type Row = HashMap<String, String>;
 
@@ -60,26 +82,58 @@ fn blocks(ee: &Ee) -> Vec<(String, u32, u32)> {
     v
 }
 
-/// Every captured word of the body, engine and wheels the machine holds otherwise, and the quad's
-/// words that differ as (offset, machine, capture).
-fn diff(ee: &Ee, row: &Row) -> (Vec<String>, Vec<(u32, u32, u32)>) {
-    let mut out = Vec::new();
-    for (name, at, len) in blocks(ee) {
-        let want = hex_words(&row[&name]);
-        for i in 0..len / 4 {
-            let (got, w) = (ee.u32_at(at + 4 * i), want[i as usize]);
-            if got != w {
-                out.push(format!("{name}+{:#x}: {got:#010x} ({}) want {w:#010x} ({})", 4 * i, f32::from_bits(got), f32::from_bits(w)));
+/// Every byte the row holds that the machine must equal, as address → (byte, bits compared): the
+/// body, engine and wheels whole, and the quad's own 0x1800 bytes but for [`BETWEEN`], the spot when
+/// it is laid a row late (`spot_late`), and the rider's block once wrecked ([`RIDER_BLOCK`]).
+fn want(ee: &Ee, row: &Row, spot_late: bool, wrecked: bool) -> HashMap<u32, (u8, u8)> {
+    let mut want = HashMap::new();
+    let mut put = |at: u32, words: Vec<u32>, mask: &dyn Fn(u32) -> u32| {
+        for (i, w) in words.into_iter().enumerate() {
+            let m = mask(4 * i as u32);
+            for (b, (x, k)) in w.to_le_bytes().into_iter().zip(m.to_le_bytes()).enumerate() {
+                if k != 0 {
+                    want.insert(at + 4 * i as u32 + b as u32, (x, k));
+                }
             }
         }
+    };
+    for (name, at, _) in blocks(ee) {
+        put(at, hex_words(&row[&name]), &|_| !0);
     }
-    let quad = obj(row)
-        .iter()
-        .enumerate()
-        .map(|(i, &w)| (4 * i as u32, ee.u32_at(C28_QUAD + 4 * i as u32), w))
-        .filter(|&(_, got, w)| got != w)
-        .collect();
-    (out, quad)
+    let mask = |off: u32| {
+        let skip = |(at, len): (u32, u32)| (at..at + len).contains(&off);
+        if let Some(&(_, _, bits)) = BETWEEN.iter().find(|&&(at, len, _)| skip((at, len))) {
+            bits
+        } else if (spot_late && SPOT.iter().any(|&s| skip(s))) || (wrecked && skip((RIDER_BLOCK.0, RIDER_BLOCK.1 - RIDER_BLOCK.0))) {
+            0
+        } else {
+            !0
+        }
+    };
+    put(C28_QUAD, obj(row), &mask);
+    want
+}
+
+/// The words of `want` the machine holds otherwise, as text.
+fn diff(ee: &Ee, want: &HashMap<u32, (u8, u8)>) -> Vec<String> {
+    let mut words: Vec<u32> = want.iter().filter(|&(&a, &(x, k))| ee.u8_at(a) & k != x & k).map(|(&a, _)| a & !3).collect();
+    words.sort();
+    words.dedup();
+    let name = |a: u32| {
+        let rel = |base: u32| a.wrapping_sub(base);
+        match blocks(ee).into_iter().find(|&(_, at, len)| rel(at) < len) {
+            Some((n, at, _)) => format!("{n}+{:#x}", rel(at)),
+            None => format!("quad+{:#x}", rel(C28_QUAD)),
+        }
+    };
+    let byte = |a: u32| want.get(&a).map_or(0, |&(x, _)| x);
+    words
+        .into_iter()
+        .map(|a| {
+            let (got, w) = (ee.u32_at(a), u32::from_le_bytes([byte(a), byte(a + 1), byte(a + 2), byte(a + 3)]));
+            format!("{}: {got:#010x} ({}) want {w:#010x} ({})", name(a), f32::from_bits(got), f32::from_bits(w))
+        })
+        .collect()
 }
 
 /// Whether the ride's rows were read after the game wrote the put-back spot for the next frame. The
@@ -109,26 +163,20 @@ fn spot_after(rows: &[Row]) -> bool {
     after > before
 }
 
-/// The captured blocks' bytes as they are now, by address.
+/// The captured blocks' and the quad's bytes as they are now, by address.
 fn block_bytes(ee: &Ee) -> HashMap<u32, u8> {
-    blocks(ee).into_iter().flat_map(|(_, at, len)| (at..at + len).map(|a| (a, ee.u8_at(a))).collect::<Vec<_>>()).collect()
+    blocks(ee).into_iter().chain([(String::new(), C28_QUAD, 0x1800)]).flat_map(|(_, at, len)| (at..at + len).map(|a| (a, ee.u8_at(a))).collect::<Vec<_>>()).collect()
 }
 
-/// A7's mid-frame read: the instant inside the frame just run where every captured byte of the body,
-/// engine and wheels was the row's, found by laying the frame's writes ([`Ee::log`]) one by one over
-/// the blocks as they were before it (`pre`). Answers how many of the frame's block writes had landed
-/// and the pc of the last, at the first such instant (0 writes: the row was read before the frame).
-fn mid_frame(ee: &Ee, row: &Row, pre: &HashMap<u32, u8>) -> Option<(usize, usize, u32)> {
-    let mut want = HashMap::new();
-    for (name, at, _) in blocks(ee) {
-        for (i, w) in hex_words(&row[&name]).into_iter().enumerate() {
-            for (b, x) in w.to_le_bytes().into_iter().enumerate() {
-                want.insert(at + 4 * i as u32 + b as u32, x);
-            }
-        }
-    }
+/// A7's mid-frame read: the instant inside the frame just run where every byte of `want` (the body,
+/// engine, wheels and the quad's words) was the row's, found by laying the frame's writes
+/// ([`Ee::log`]) one by one over the bytes as they were before it (`pre`). Answers how many of the
+/// frame's writes to those bytes had landed and the pc of the last, at the first such instant (0
+/// writes: the row was read before the frame).
+fn mid_frame(ee: &Ee, want: &HashMap<u32, (u8, u8)>, pre: &HashMap<u32, u8>) -> Option<(usize, usize, u32)> {
+    let off_by = |a: &u32, x: u8| want.get(a).is_some_and(|&(w, k)| x & k != w & k);
     let mut now = pre.clone();
-    let mut off = now.iter().filter(|(a, x)| want[a] != **x).count();
+    let mut off = now.iter().filter(|&(a, &x)| off_by(a, x)).count();
     let log = ee.log.borrow();
     let writes: Vec<_> = log.as_ref().expect("the write log is on").iter().filter(|(_, a, _)| want.contains_key(a)).collect();
     if off == 0 {
@@ -136,7 +184,7 @@ fn mid_frame(ee: &Ee, row: &Row, pre: &HashMap<u32, u8>) -> Option<(usize, usize
     }
     for (k, &&(pc, a, x)) in writes.iter().enumerate() {
         let was = now.insert(a, x).unwrap();
-        off = off + usize::from(x != want[&a]) - usize::from(was != want[&a]);
+        off = off + usize::from(off_by(&a, x)) - usize::from(off_by(&a, was));
         if off == 0 {
             return Some((k + 1, writes.len(), pc));
         }
@@ -154,10 +202,8 @@ fn c28_heap(state: &str) -> image::Heap {
 /// original's whole sim frame, and with `port` the frame in pieces beside it, every RAM word equal):
 /// before each row's frame the pad reader's stores and the put-back spot that frame reads
 /// ([`spot_after`]) are laid on both machines, after it every captured word of the body, engine and
-/// wheels must be the row's, at the frame's end or at an instant inside it ([`mid_frame`]), and the
-/// rider's settled word ([`SETTLED`]) is laid for the next. The quad's own words that differ are told
-/// apart by whether the frame wrote them, and listed (to `MD37B_LOG` if set): they are bookkeeping the
-/// physics does not read back (see the journal).
+/// wheels and every word of the quad ([`want`]) must be the row's, at the frame's end or at an instant
+/// inside it ([`mid_frame`]), and the rider's settled word ([`SETTLED`]) is laid for the next.
 fn replay(name: &str, state: &str, upto: usize, port: Option<Pieces>, tail: bool) -> Option<Palm> {
     image::set_heap(c28_heap(state));
     let rows = rows(name)?;
@@ -171,18 +217,24 @@ fn replay(name: &str, state: &str, upto: usize, port: Option<Pieces>, tail: bool
     let after_spot = spot_after(&rows);
     let pre = RefCell::new(HashMap::new());
     let before = |r: usize, ee: &Ee| {
-        *pre.borrow_mut() = block_bytes(ee);
         *ee.log.borrow_mut() = Some(Vec::new());
         // The spot frame r reads is row r-1's when the rows are read after the game writes it, row r's
         // when before (s-wheelie-launch's put-back on row 158 lands on row 158's spot).
         let spot = if after_spot { r.checked_sub(1).map_or(Vec::new(), |q| words(&rows[q], &SPOT)) } else { words(&rows[r], &SPOT) };
-        [words(&rows[r], &READER), spot].concat()
+        let lay = [words(&rows[r], &READER), spot].concat();
+        let mut bytes = block_bytes(ee);
+        for &(a, w) in &lay {
+            for (b, x) in w.to_le_bytes().into_iter().enumerate() {
+                bytes.insert(a + b as u32, x);
+            }
+        }
+        *pre.borrow_mut() = bytes;
+        lay
     };
     let mid = RefCell::new(Vec::<(usize, usize, usize, u32)>::new());
-    let outside = RefCell::new(BTreeMap::<u32, (usize, usize, u32, u32)>::new());
-    let inside = RefCell::new(BTreeMap::<u32, (usize, usize, u32, u32)>::new());
     let torn = RefCell::new(Vec::<usize>::new());
     let first = RefCell::new(String::new());
+    let wrecked = Cell::new(None::<usize>);
     // Which row holds frame r's rider copy: the last row whose copy is the machine's, bit for bit.
     let late = Cell::new(false);
     let settled = |r: usize, ee: &Ee| {
@@ -197,27 +249,27 @@ fn replay(name: &str, state: &str, upto: usize, port: Option<Pieces>, tail: bool
     };
     let after = |r: usize, ee: &Ee| {
         let row = &rows[r];
-        let mut lay = settled(r, ee);
-        let (d, quad) = diff(ee, row);
+        let lay = settled(r, ee);
+        if wrecked.get().is_none() && (ee.u32_at(C28_QUAD + REASON) != 0 || obj(row)[REASON as usize / 4] != 0) {
+            wrecked.set(Some(r));
+        }
+        let want = want(ee, row, after_spot, wrecked.get().is_some());
+        let d = diff(ee, &want);
         // A row the recorder read while the game's frame ran differs at the frame's end (s-jump's
-        // row 74: a substep short, its forces summed and not yet integrated), and must equal the
-        // machine at an instant inside the frame. PINE reads at a fixed point in emulated time, so a
-        // slower re-record reads the same rows mid-frame (C32).
+        // row 74: a substep short, its forces summed and not yet integrated; the s- rides' quad words
+        // the frame's tail writes after the physics), and must equal the machine at an instant inside
+        // the frame. PINE reads at a fixed point in emulated time, so a slower re-record reads the
+        // same rows mid-frame (C32).
         if !d.is_empty() {
-            if let Some((k, of, pc)) = mid_frame(ee, row, &pre.borrow()) {
+            if let Some((k, of, pc)) = mid_frame(ee, &want, &pre.borrow()) {
                 mid.borrow_mut().push((r, k, of, pc));
                 return lay;
             }
             if torn.borrow().is_empty() {
-                *first.borrow_mut() = format!("row {r} (vsync {}): {} words differ\n  {}", row["vsync"], d.len(), d.iter().take(40).cloned().collect::<Vec<_>>().join("\n  "));
+                *first.borrow_mut() = format!("row {r} (vsync {}): {} words differ at the frame's end\n  {}", row["vsync"], d.len(), d.iter().take(40).cloned().collect::<Vec<_>>().join("\n  "));
             }
             torn.borrow_mut().push(r);
             return lay;
-        }
-        for (off, got, want) in quad {
-            let wrote = (0..4).any(|b| ee.written.contains(&(C28_QUAD + off + b)));
-            let mut m = if wrote { inside.borrow_mut() } else { outside.borrow_mut() };
-            m.entry(off).or_insert((r, 0, got, want)).1 += 1;
         }
         if r % 50 == 0 {
             eprintln!("MD37b {name} row {r} equal");
@@ -225,30 +277,28 @@ fn replay(name: &str, state: &str, upto: usize, port: Option<Pieces>, tail: bool
         lay
     };
     let seen = sim_chain(n, port, None, tail, before, after);
-    let show = |m: &BTreeMap<u32, (usize, usize, u32, u32)>| {
-        m.iter().map(|(off, (r, n, got, want))| format!("+{off:#x} from row {r} on {n} rows ({got:#010x} want {want:#010x})")).collect::<Vec<_>>().join("\n  ")
-    };
-    let (outside, inside, torn, mid) = (outside.into_inner(), inside.into_inner(), torn.into_inner(), mid.into_inner());
-    assert!(torn.is_empty(), "{name}: rows {torn:?} differ from the capture at every instant of their frames; the first was {}", first.borrow());
+    let (torn, mid) = (torn.into_inner(), mid.into_inner());
     let say = format!(
-        "MD37b {name} ({n} rows; rows read mid-frame (row: block writes landed of the frame's, at pc): {}; rows matching no instant {torn:?}): quad words the frame never wrote that differ from the capture:\n  {}\nquad words the frame wrote otherwise:\n  {}\n",
+        "MD37b {name} ({n} rows, wrecked from {:?}; rows read mid-frame (row: writes landed of the frame's, at pc): {}; rows matching no instant {torn:?})\n",
+        wrecked.get(),
         mid.iter().map(|(r, k, of, pc)| format!("{r}: {k}/{of} {pc:#x}")).collect::<Vec<_>>().join(", "),
-        show(&outside),
-        show(&inside)
     );
     eprint!("{say}");
     if let Ok(log) = std::env::var("MD37B_LOG") {
         use std::io::Write;
-        std::fs::OpenOptions::new().create(true).append(true).open(log).unwrap().write_all(say.as_bytes()).unwrap();
+        let all = format!("{say}{}\n", first.borrow());
+        std::fs::OpenOptions::new().create(true).append(true).open(log).unwrap().write_all(all.as_bytes()).unwrap();
     }
+    assert!(torn.is_empty(), "{name}: rows {torn:?} differ from the capture at every instant of their frames; the first was {}", first.borrow());
     seen
 }
 
 /// Each ride twice: by the original's frame alone, and by the port's pieces and tail beside it (every
 /// RAM word of the twin equal to the original's after each frame, and both equal to the capture). Every
 /// ride is replayed whole. race-jump-side's put-back is timed by the rider's ragdoll settling, laid from
-/// the rows (MD148). s-stoppie-short reads rows 124-133, 153 and 175-299 but a few mid-frame,
-/// s-wheelie-launch 81-83, s-jump 74 (A7's journal).
+/// the rows (MD148). With the quad's words compared (MD121), nearly every s- row is read mid-frame:
+/// the recorder reads them before the quad's last few dozen writes of the frame (the race- rows at its
+/// end); A7's torn rows (s-stoppie-short's, s-wheelie-launch 81-83, s-jump 74) are among them.
 macro_rules! rides {
     ($($orig:ident, $port:ident: $name:literal off $state:literal upto $upto:literal;)*) => {$(
         #[test]
