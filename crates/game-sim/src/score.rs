@@ -119,7 +119,8 @@ pub struct Score {
     pub shut: bool,
     /// **Out of time (S92):** the event's clock ran out on this card. No combo opens — but a trick
     /// started while the backflip watch stands at 3 (round, not yet scored) still opens one, and a
-    /// combo already open scores and banks as before.
+    /// combo already open scores and banks as before. No backflip watch starts either; one already
+    /// part way round goes on ([`Score::watch_flip`], S284).
     pub out: bool,
     /// **The start-gate penalty (P158),** seconds (the card's `+0x1c0`): while it is above 0 the bike's
     /// tick cuts the gas ([`crate::ride::Controls::gas_cut`]), and the manager's tick runs it down.
@@ -365,6 +366,30 @@ impl Score {
         self.frame_with(dt, s, None);
     }
 
+    /// **The backflip watch's step** (the end of the rider's tick): up in the air and riding, the
+    /// chassis' attitude moves the watch on; otherwise a watch part way round is forgotten. A card
+    /// whose event time is out ([`Score::out`], S284) does not start a watch — only one already past 0
+    /// goes on, as the original's tick steps it only on a card not out or a watch above 0.
+    pub fn watch_flip(&mut self, s: &Sense) {
+        if !s.wrecked && s.airborne && (!self.out || 0 < self.flip) {
+            let (up, forward) = (s.up_y, s.forward_y);
+            if F::ZERO < up && F(-0.79) < forward {
+                // Right way up again: a flip that went over is round, any other is forgotten.
+                match self.flip {
+                    2 => self.flip = 3,
+                    0 | 3 => {}
+                    _ => self.flip = 0,
+                }
+            } else if up < F::ZERO && F::ZERO < forward && self.flip == 0 {
+                self.flip = 1;
+            } else if up < F::ZERO && forward < F::ZERO && self.flip == 1 {
+                self.flip = 2;
+            }
+        } else if self.flip != 3 && self.flip != 0 {
+            self.flip = 0;
+        }
+    }
+
     /// [`Score::frame`] with MX vs. ATV's front flip watch beside the backflip's (MD16):
     /// `front_flip` is the watch and what a front flip is worth. `None` is [`Score::frame`] exactly.
     ///
@@ -432,23 +457,7 @@ impl Score {
             self.start(BACKFLIP, s);
             self.flip = 0;
         }
-        if !s.wrecked && s.airborne {
-            let (up, forward) = (s.up_y, s.forward_y);
-            if F::ZERO < up && F(-0.79) < forward {
-                // Right way up again: a flip that went over is round, any other is forgotten.
-                match self.flip {
-                    2 => self.flip = 3,
-                    0 | 3 => {}
-                    _ => self.flip = 0,
-                }
-            } else if up < F::ZERO && F::ZERO < forward && self.flip == 0 {
-                self.flip = 1;
-            } else if up < F::ZERO && forward < F::ZERO && self.flip == 1 {
-                self.flip = 2;
-            }
-        } else if self.flip != 3 && self.flip != 0 {
-            self.flip = 0;
-        }
+        self.watch_flip(s);
         if let Some((w, points)) = front_flip {
             if *w == 3 && !self.scoring {
                 self.start_flat(FRONTFLIP, points);
