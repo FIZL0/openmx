@@ -373,6 +373,64 @@ fn path(s: &State) -> &'static str {
     }
 }
 
+/// Runs `s` through the original and the port and panics, naming state `k`, where they part.
+fn same_as_the_original(ee: &mut Ee, calls: &RefCell<Calls>, s: &State, k: usize) {
+    reset(ee);
+    poke(ee, s);
+    {
+        let mut c = calls.borrow_mut();
+        *c = Calls { start_answer: s.start_answer, steep_answer: s.steep_answer, ..Calls::default() };
+    }
+    ee.call(BACKFLIP, &[u64::from(OBJ)], &[s.st.dt.0], 20_000);
+    only_touched_the_regions(ee).unwrap_or_else(|e| panic!("state {k}: {e}\n{s:#?}"));
+    let was = snap(ee);
+    let orig = std::mem::take(&mut *calls.borrow_mut());
+
+    let mut t = s.clone();
+    let (mut started, mut steeped) = (false, false);
+    let out = handling::backflip(
+        &t.p,
+        &mut t.air,
+        &mut t.ch,
+        &t.st,
+        &t.inp,
+        &mut t.clip,
+        || {
+            started = true;
+            s.start_answer
+        },
+        || {
+            steeped = true;
+            s.steep_answer
+        },
+    );
+    if out.stunt_cleared {
+        t.inp.stunt_id = 255;
+    }
+    reset(ee);
+    poke(ee, &t);
+    let now = snap(ee);
+    if was != now {
+        let i = was.iter().zip(&now).position(|(a, b)| a != b).unwrap();
+        panic!(
+            "state {k} ({}): {} is {:#010x} ({}) in the original and {:#010x} ({}) in the port\n{s:#?}",
+            path(s),
+            where_is(i),
+            was[i],
+            f32::from_bits(was[i]),
+            now[i],
+            f32::from_bits(now[i]),
+        );
+    }
+    let want_started: Vec<u32> = if started { vec![s.flip_stunt] } else { vec![] };
+    assert_eq!(orig.started, want_started, "state {k}: the stunt start");
+    assert_eq!(out.stunt_started, started && s.start_answer, "state {k}");
+    let want_ended: Vec<u32> = if out.stunt_ended { vec![s.flip_stunt] } else { vec![] };
+    assert_eq!(orig.ended, want_ended, "state {k}: the stunt end");
+    assert_eq!(orig.steep, u32::from(steeped), "state {k}: the steep test");
+    assert_eq!(orig.wrecks, out.wreck.map(u32::from).into_iter().collect::<Vec<_>>(), "state {k}: the wreck");
+}
+
 #[test]
 fn mxvatv_backflip_is_the_originals() {
     let Some((mut ee, calls)) = harness() else { return };
@@ -381,64 +439,48 @@ fn mxvatv_backflip_is_the_originals() {
     for k in 0..10_000 {
         let s = g.state();
         *tally.entry(path(&s)).or_insert(0u32) += 1;
-        reset(&mut ee);
-        poke(&mut ee, &s);
-        {
-            let mut c = calls.borrow_mut();
-            *c = Calls { start_answer: s.start_answer, steep_answer: s.steep_answer, ..Calls::default() };
-        }
-        ee.call(BACKFLIP, &[u64::from(OBJ)], &[s.st.dt.0], 20_000);
-        only_touched_the_regions(&ee).unwrap_or_else(|e| panic!("state {k}: {e}\n{s:#?}"));
-        let was = snap(&ee);
-        let orig = std::mem::take(&mut *calls.borrow_mut());
-
-        let mut t = s.clone();
-        let (mut started, mut steeped) = (false, false);
-        let out = handling::backflip(
-            &t.p,
-            &mut t.air,
-            &mut t.ch,
-            &t.st,
-            &t.inp,
-            &mut t.clip,
-            || {
-                started = true;
-                s.start_answer
-            },
-            || {
-                steeped = true;
-                s.steep_answer
-            },
-        );
-        if out.stunt_cleared {
-            t.inp.stunt_id = 255;
-        }
-        reset(&mut ee);
-        poke(&mut ee, &t);
-        let now = snap(&ee);
-        if was != now {
-            let i = was.iter().zip(&now).position(|(a, b)| a != b).unwrap();
-            panic!(
-                "state {k} ({}): {} is {:#010x} ({}) in the original and {:#010x} ({}) in the port\n{s:#?}",
-                path(&s),
-                where_is(i),
-                was[i],
-                f32::from_bits(was[i]),
-                now[i],
-                f32::from_bits(now[i]),
-            );
-        }
-        let want_started: Vec<u32> = if started { vec![s.flip_stunt] } else { vec![] };
-        assert_eq!(orig.started, want_started, "state {k}: the stunt start");
-        assert_eq!(out.stunt_started, started && s.start_answer, "state {k}");
-        let want_ended: Vec<u32> = if out.stunt_ended { vec![s.flip_stunt] } else { vec![] };
-        assert_eq!(orig.ended, want_ended, "state {k}: the stunt end");
-        assert_eq!(orig.steep, u32::from(steeped), "state {k}: the steep test");
-        assert_eq!(orig.wrecks, out.wreck.map(u32::from).into_iter().collect::<Vec<_>>(), "state {k}: the wreck");
+        same_as_the_original(&mut ee, &calls, &s, k);
     }
     for want in ["off the lip", "arming", "triggered", "waiting", "in the grace", "off the lip in time", "ended", "ended mid-clip", "turning, right side down", "turning, right side up"] {
         let n = tally.get(want).copied().unwrap_or(0);
         assert!(n >= 50, "only {n} state(s) went down {want:?}: {tally:?}");
+    }
+}
+
+/// R29 — the lip's two speeds (the body's `vel.y` over 5, the contact's `vel.z` over 30) as NaN patterns:
+/// the original branches on `c.ole`, and its FPU reads an exponent-255 pattern as ±max, so a +NaN is over
+/// either threshold and a -NaN under it. Lip states only, each speed as +NaN, -NaN, a signalling NaN, ±inf
+/// or its own value.
+#[test]
+fn mxvatv_backflip_lip_takes_nan_speeds_as_the_original() {
+    let Some((mut ee, calls)) = harness() else { return };
+    let odd = [0x7fc0_0000u32, 0xffc0_0000, 0x7f80_0001, 0xff80_0001, 0x7f80_0000, 0xff80_0000];
+    let mut g = Gen(0x0d40_0029);
+    let mut k = 0;
+    for _ in 0..200 {
+        let mut s = g.state();
+        s.air.flip_active = false;
+        s.air.on_ground = true;
+        s.st.spinning = false;
+        s.st.spin_active = false;
+        s.st.brake = F::ZERO;
+        for vy in odd.iter().copied().map(Some).chain([None]) {
+            for cz in odd.iter().copied().map(Some).chain([None]) {
+                if vy.is_none() && cz.is_none() {
+                    continue;
+                }
+                let mut t = s.clone();
+                if let Some(b) = vy {
+                    t.ch.vel = Vf::new(t.ch.vel.x(), f32::from_bits(b), t.ch.vel.z(), t.ch.vel.w());
+                }
+                if let Some(b) = cz {
+                    let c = t.air.contact_vel;
+                    t.air.contact_vel = Vf::new(c.x(), c.y(), f32::from_bits(b), c.w());
+                }
+                same_as_the_original(&mut ee, &calls, &t, k);
+                k += 1;
+            }
+        }
     }
 }
 

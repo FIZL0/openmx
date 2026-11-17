@@ -153,8 +153,9 @@ pub fn backflip(
         let lip = air.on_ground
             && !step.spinning
             && !step.spin_active
-            && chassis.vel.y() > 5.0
-            && air.contact_vel.z() > 30.0
+            // Read as the FPU's c.ole does (through F): a NaN pattern is ±max, so a +NaN speed is over.
+            && F(chassis.vel.y()) > 5.0
+            && F(air.contact_vel.z()) > 30.0
             && step.brake == 0.0;
         if !lip {
             air.flip_active = false;
