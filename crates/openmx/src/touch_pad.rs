@@ -513,6 +513,40 @@ mod tests {
         assert_eq!(hidden.read().0, [0.0; 17]);
     }
 
+    /// F38: a finger that lands on the menus drags as the mouse does, for the Controllers screen's
+    /// cards (P214) as for the Tricks camera; one on a button or the stick drags nothing.
+    #[test]
+    fn a_finger_on_the_menus_drags() {
+        use crate::window::Mouse;
+        let mut p = phone();
+        let mut clicks = Vec::new();
+        p.touch(down(1, (1278.0, 500.0)), 0.0, &mut clicks);
+        p.touch(Touch { id: 1, phase: Phase::Move, at: (1300.5, 520.0) }, 0.1, &mut clicks);
+        p.touch(Touch { id: 1, phase: Phase::Move, at: (1400.0, 600.0) }, 0.2, &mut clicks);
+        p.touch(up(1, (1400.0, 600.0)), 0.3, &mut clicks);
+        assert_eq!(p.take_drags(), vec![(Mouse::Down, 1278, 500), (Mouse::Move, 1300, 520), (Mouse::Move, 1400, 600), (Mouse::Up, 1400, 600)]);
+        assert_eq!(clicks, vec![(1278, 500)], "the press is a click too");
+        assert!(p.take_drags().is_empty());
+        // A cancelled finger lets the card go.
+        p.touch(down(2, (1278.0, 500.0)), 1.0, &mut clicks);
+        p.touch(Touch { id: 2, phase: Phase::Cancel, at: (1280.0, 500.0) }, 1.1, &mut clicks);
+        assert_eq!(p.take_drags(), vec![(Mouse::Down, 1278, 500), (Mouse::Up, 1280, 500)]);
+        // Fingers on a button and on the stick are the pad's.
+        let at = centre(&p, CROSS);
+        p.touch(down(3, at), 2.0, &mut clicks);
+        p.touch(Touch { id: 3, phase: Phase::Move, at: (at.0 + 5.0, at.1) }, 2.1, &mut clicks);
+        p.touch(up(3, at), 2.2, &mut clicks);
+        p.touch(down(4, (400.0, 800.0)), 3.0, &mut clicks);
+        p.touch(Touch { id: 4, phase: Phase::Move, at: (450.0, 800.0) }, 3.1, &mut clicks);
+        p.touch(up(4, (450.0, 800.0)), 3.2, &mut clicks);
+        assert!(p.take_drags().is_empty());
+        // Hidden, any finger drags.
+        p.shown = false;
+        p.touch(down(5, at), 4.0, &mut clicks);
+        p.touch(up(5, at), 4.1, &mut clicks);
+        assert_eq!(p.take_drags().len(), 2);
+    }
+
     #[test]
     fn it_draws_only_when_shown() {
         let mut p = phone();
