@@ -10321,6 +10321,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             // The manager runs on through the outro: the commit reads its clock as the ride is left.
             if let Some(hand) = front.as_deref_mut().and_then(|f| f.menu.race.hand.as_mut()) {
                 hand.tally.clock = race_clock;
+                // P364: so does each seat's banked total, which the score commit reads.
+                for (s, seat) in hand.tally.seats.iter_mut().zip(&world.seats) {
+                    s.banked = seat.sim.rider.score.total;
+                }
             }
         }
         if simulated {
@@ -10377,6 +10381,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                             seats.extend((1..world.seats.len()).map(|k| (race_player(k, players), front.menu.racer_name(k))));
                             let mut hand = race_start::hand_over_seats(laps, laps_run, &seats, &race_watch.overs);
                             hand.tally.clock = race_clock;
+                            for (s, seat) in hand.tally.seats.iter_mut().zip(&world.seats) {
+                                s.banked = seat.sim.rider.score.total;
+                            }
                             front.menu.race_ended(hand);
                         }
                     }

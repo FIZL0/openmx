@@ -370,11 +370,19 @@ pub fn hand_over_seats(laps: &race::Laps, laps_run: u8, players: &[(usize, Strin
     let end = Supercross::new().race_end(&seats, &event, false);
     // P358: each player seat's tally for the stats commit, seat 0 first, and seat 0's profile; the
     // shell sets the manager's clock. The feet are the card's own odometer: the tracker's is not
-    // ported.
+    // ported. P364: seat 0 alone has a profile (slot 0); the shell sets each seat's banked total.
     let tally_seats = players
         .iter()
-        .filter_map(|(player, _)| laps.cards.iter().find(|e| e.player == *player))
-        .map(|e| SeatTally { feet: e.card.odometer, preloads: e.stats.preloads, clutches: e.stats.clutches, wrecks: e.stats.wrecks })
+        .enumerate()
+        .filter_map(|(k, (player, _))| laps.cards.iter().find(|e| e.player == *player).map(|e| (k, e)))
+        .map(|(k, e)| SeatTally {
+            feet: e.card.odometer,
+            preloads: e.stats.preloads,
+            clutches: e.stats.clutches,
+            wrecks: e.stats.wrecks,
+            profile: (k == 0).then_some(0),
+            banked: F::ZERO,
+        })
         .collect();
     let tally = RaceTally { activity: event.activity, profile: Some(0), clock: F::ZERO, seats: tally_seats };
     HandOver { cards, end, overs: overs.to_vec(), tally }

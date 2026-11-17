@@ -142,7 +142,8 @@ pub struct Results {
     pub league: bool,
     pub quitting: bool,
     pub after: Option<After>,
-    /// P358: what the race handed over for the stats commit Restart and Quit run on their way out.
+    /// P358: what the race handed over for the stats commit Restart and Quit run on their way out
+    /// (and the score commit it runs first, P364).
     pub tally: RaceTally,
 }
 

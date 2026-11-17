@@ -10596,7 +10596,7 @@ fn the_results_buttons_commit_the_race_statistics() {
     use menu::results::{CardStats, HandOver, RaceTally, ResultCard, SeatTally, Who};
     use ps2_float::F;
     let (mut m, mut r) = fresh();
-    let tally = RaceTally { activity: 2, profile: Some(0), clock: F(60.0), seats: vec![SeatTally { feet: F(1000.0), preloads: 2, clutches: 3, wrecks: 1 }] };
+    let tally = RaceTally { activity: 2, profile: Some(0), clock: F(60.0), seats: vec![SeatTally { feet: F(1000.0), preloads: 2, clutches: 3, wrecks: 1, ..SeatTally::default() }] };
     let mut to_results = |m: &mut Menu, r: &mut Reader, fame: bool, league: bool| {
         main_to(m, r, "Race");
         tap(m, r, Control::Cross);

@@ -12014,8 +12014,20 @@ results_stats_commit        boot 0x0029d1c0 () the commit Restart (0x0029cde0) a
 #                                           +0x38 preloads / +0x3c clutches / +0x34 wrecks.
 results_score_commit        boot 0x002041a0 (app) for k < event +0x114 with (app+0x3f4)[k]: profile +0xc0
 #                                           += cvt.w.s(card(*(RaceStatusVehicleInterface item - 0x24))
-#                                           +0xdc banked total) through the identity 0x0036ea50. Not
-#                                           ported (P358 follow-up).
+#                                           +0xdc banked total) through the identity 0x0036ea50. Each
+#                                           player's own profile (the stats commit uses player 0's);
+#                                           a null profile skips. menu::results::Records::commit_score
+#                                           (P364; tests/race_results.rs runs it whole).
+# P364 — who reads profile +0xc0 (the points; objdump of every lw/sw +0xc0, then the profile code read):
+#   the unlock shop's purchase 0x002f0da0 calls unlock_buy 0x0037d1b0 (unlocks, index, player 0's
+#   +0xc0): an item (+0x14 locked) costing +0x10 <= points is unlocked and returned, else 0 and the
+#   "Not Enough Points" dialog (0x43b8b0); then profile_unlock 0x0036df40 (profile, item, pay) marks
+#   profile +0xc4's table and, with pay, takes the cost off +0xc0; the shop shows "%d" of +0xc0.
+#   The profile save 0x0036e440 copies +0xc0 into the save data +0x5718, the load 0x0036e710 back;
+#   the profile reset 0x0036e1f0 zeroes it. Nothing else reads it as points.
+#   A race card banks: score_combo_start gates on the manager running and the card taking part (event
+#   mode 5 alone wants card bit 0x100), score_combo_end banks in every mode. s282c-sx01-race's four
+#   cards (manager mode 2, flags 0x5e01, 10.57 s in) hold +0xdc 0: no trick yet. Not seen non-zero.
 #   profile_stat_add cases (stats +slot*2 u16 / +slot*4 f32; 6 slots): 0 u16 +0x114 += cvt.w.s
 #   (play time; the stats page's STR_TOTAL_GAMEPLAY_HOURS, returns 0), 1 f32 +0 += (feet; MILES/KILOMETERS
 #   DRIVEN), 2 u16 +0x120 (PRELOADS), 3 +0x12c (CLUTCHES), 4 +0x138 (WRECKS), 5 f32 +0x18 (HOURS_RACING),
