@@ -6392,6 +6392,25 @@ impl Pilot {
     }
 }
 
+/// The score keeper's modes (its `+0x64`, which the keeper's tick picks its handler by; S92 found
+/// no other value stored). The habits' cross-up reads it ([`Habits::keeper_state`]), and so does the
+/// race start ([`Racer::race_start`]).
+pub mod keeper_mode {
+    /// The machine race (the gate race's line and zones, `race::LapRules::gate_line`).
+    pub const MACHINE_RACE: i32 = 1;
+    /// The supercross race and the fast lap: the race handler the laps are ([`crate::race::Laps`]).
+    pub const RACE: i32 = 2;
+    /// Every free ride, and the stunt competition ([`crate::event`]): no cross-up for an AI rider.
+    pub const FREE_RIDE: i32 = 3;
+}
+
+/// **The score keeper's mode of a Sim's ride** (S364): a ride with a race ([`crate::Sim::race`], the
+/// supercross race's start and laps) keeps score in [`keeper_mode::RACE`], every other ride in
+/// [`keeper_mode::FREE_RIDE`]. The Sim runs no machine race.
+pub fn keeper_mode_of(race: Option<&crate::race::Race>) -> i32 {
+    if race.is_some() { keeper_mode::RACE } else { keeper_mode::FREE_RIDE }
+}
+
 /// **What player `player`'s race driver drives by** (S331b, [`Around::racing`]), off the race's
 /// `laps` as they stand this tick: the race's kind, the race track's reach (its `+0x38`) and the
 /// line's spot; the player's lap card's flags, distances to the line, on-the-track word, where it

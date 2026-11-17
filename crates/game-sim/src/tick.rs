@@ -805,7 +805,8 @@ impl crate::Sim {
     /// before the riders', so it reads them as this tick's race left them. The avoidance's
     /// keep-on-the-track edge and the habits' cross-up spot ask the race track at the card's spot
     /// (S331c, [`crate::ai::on_track_of`]), and the trick plan and the habits read the node the
-    /// brain's own spot is on in the lane's AI net ([`crate::ai::route_node`]).
+    /// brain's own spot is on in the lane's AI net ([`crate::ai::route_node`]). The habits' keeper
+    /// word is the ride's score keeper mode (S364, [`crate::ai::keeper_mode_of`]).
     ///
     /// The brain thinks after its bike's frame (S330): the original's hand-off is the last thing its
     /// rider's update writes, so the bike rides the levers of the frame before and each AI rider
@@ -838,6 +839,8 @@ impl crate::Sim {
             *edge = Some(std::sync::Arc::new(crate::ai::path::Net::from_track(&l.track)));
         }
         let track = laps.zip(edge.as_deref()).and_then(|(l, e)| crate::ai::on_track_of(l, e, i));
+        // S364: the habits' keeper word, the score keeper's mode for this ride.
+        pilots[k].1.racer.habits.keeper_state = crate::ai::keeper_mode_of(self.race.as_deref());
         pilots[k].1.think_among(mount, world, &bikes, seek, tables, &others, tricks, racing, track, rng, dt);
         let ch = &mut rider.ride.chassis;
         let w = ch.world_ang_vel;
