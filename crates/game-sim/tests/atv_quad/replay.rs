@@ -24,14 +24,23 @@ const LCG: u64 = 0x5851_f42d_4c95_7f2d;
 /// R37: the rand() draws the original made between the image and a ride's frame that the replayed sim
 /// frames do not make (the game draws rand() outside the sim frame too), as (ride, frame, draws): the
 /// RNG is stepped that many times before that frame on both machines. The wreck's first frame draws
-/// the rider's spin (three draws, base + spread × (2 × draw − 1) per axis) and race-jump-side's row 226
-/// an idle variant (one of five); with these race-jump-side's ragdoll copies equal the capture bit for
-/// bit on every row (s-jump's on all but its phase-flipped row 49), and race-jump-side's "a bone
-/// touches" (+0x920) arms its put-back on the capture's frame by itself. race-jump, race-wheelie-launch
-/// and s-wheelie-launch lag too (their copies part at first contact) but are not found yet; their
-/// bodies match without it. Found by inverting the captured spin through the frame's own quaternion and
-/// searching the LCG's stream for its draws (the journal).
-const RNG_LAG: [(&str, usize, u64); 3] = [("race-jump-side", 183, 41), ("race-jump-side", 226, 1), ("s-jump", 74, 33)];
+/// the rider's spin (three draws, base + spread × (2 × draw − 1) per axis), and later one frame draws an
+/// idle variant (one of five: race-jump-side's row 226, s-wheelie-launch's 132). With these every
+/// race- ride's ragdoll copies equal the capture bit for bit on every row, the s- rides' on all but
+/// their phase-flipped rows (s-jump 49, s-wheelie-launch 145), and race-jump-side's "a bone touches"
+/// (+0x920) arms its put-back on the capture's frame by itself. Each wreck's lag was found by inverting
+/// the captured spin through the quaternion the frame turned it by and searching the LCG's stream for
+/// its draws (R37, R41); each idle variant's is the smallest that picks the variant that matches. Where
+/// the original's extra draws come from is not known (the journals).
+const RNG_LAG: [(&str, usize, u64); 7] = [
+    ("race-jump-side", 183, 41),
+    ("race-jump-side", 226, 1),
+    ("s-jump", 74, 33),
+    ("race-jump", 66, 22),
+    ("race-wheelie-launch", 80, 50),
+    ("s-wheelie-launch", 82, 53),
+    ("s-wheelie-launch", 132, 1),
+];
 /// Quad words the sim frame leaves to code that runs between two frames, outside it, as (offset,
 /// bytes, bits held against the rows): the replay runs no such code, so these bits are not compared
 /// (MD121's journal):
@@ -49,8 +58,8 @@ const BETWEEN: [(u32, u32, u32); 6] =
     [(0x44, 4, !0x400), (0x6f8, 8, 0), (0x70c, 8, 0), (0x71c, 8, 0), (0x464, 8, 0), (0xd90, 0x10, 0)];
 /// The rider's block in the quad, quad-relative: the rider's update writes its copies here
 /// (`*(rider+0x378)` is quad +0x730). From a wreck's first row the interpreter's rider ragdoll leaves
-/// the original's, so the block is not compared from there on; R37's RNG lag lines race-jump-side's
-/// up again ([`RAGDOLL`]).
+/// the original's, so the block is not compared from there on; the RNG's lag lines the ragdoll
+/// copies up again ([`RAGDOLL`], [`RNG_LAG`]).
 const RIDER_BLOCK: (u32, u32) = (0x870, 0x980);
 /// The quad's wreck reason (non-zero while wrecked).
 const REASON: u32 = 0xc80;
@@ -304,7 +313,7 @@ fn replay(name: &str, state: &str, upto: usize, port: Option<Pieces>, tail: bool
         let all = format!("{say}{}\n", first.borrow());
         std::fs::OpenOptions::new().create(true).append(true).open(log).unwrap().write_all(all.as_bytes()).unwrap();
     }
-    assert!(name != "race-jump-side" || ragdoll.is_empty(), "{name}: the rider's ragdoll copies differ from the capture on rows {ragdoll:?}");
+    assert!(!name.starts_with("race-") || ragdoll.is_empty(), "{name}: the rider's ragdoll copies differ from the capture on rows {ragdoll:?}");
     assert!(torn.is_empty(), "{name}: rows {torn:?} differ from the capture at every instant of their frames; the first was {}", first.borrow());
     seen
 }
