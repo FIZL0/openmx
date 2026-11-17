@@ -6677,6 +6677,8 @@ pub enum Part {
     Line(Bounds),
     /// The splash's build label, top left (B32).
     Build(Bounds),
+    /// The splash's New version card, top right (P355).
+    Update(Bounds),
     /// The screen's slanted title over the band's left end, with its lean and shadow (F10).
     Title(Bounds),
 }
