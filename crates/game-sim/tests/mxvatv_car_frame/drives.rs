@@ -97,6 +97,18 @@ struct Seen {
     last_up: f32,
     /// The frame whose respawn ended a run on its side.
     respawned: Option<usize>,
+    /// Each frame's tires and engine after it (R36).
+    dropped: Vec<Dropped>,
+}
+
+/// A frame's end, for a car dropped on the gas: each tire's spin (rad/s) and grounded flag, the
+/// engine's rpm and the car's speed (ft/s).
+#[derive(Clone, Copy, Debug, Default)]
+struct Dropped {
+    spin: [f32; 4],
+    grounded: [bool; 4],
+    rpm: f32,
+    speed: f32,
 }
 
 /// Runs the original's world step from inside its hook, on the world and tick it was handed, and
@@ -120,12 +132,27 @@ pub(crate) fn world_step_inside(ee: &mut Ee) -> (u32, F) {
 /// Desert Oasis and the smooth noise, the sort's search the original's): every word the port keeps
 /// must equal the original's after it, every frame.
 fn beside(d: &Drive, through: Through) -> Option<Seen> {
-    beside_posed(d, through, None)
+    beside_posed(d, through, Pose::Captured)
 }
 
-/// [`beside`], with the car first put on its side when `side` is given ([`put_on_side`]): as many
-/// frames as [`SIDE_FRAMES`] then, not the capture's rows.
-fn beside_posed(d: &Drive, through: Through, side: Option<f32>) -> Option<Seen> {
+/// How the car starts off its image: as captured, on the tape; put on its side ([`put_on_side`]);
+/// or lifted on the gas ([`put_up_on_the_gas`], R36).
+#[derive(Clone, Copy, PartialEq)]
+enum Pose {
+    Captured,
+    Side(f32),
+    /// Lifted `lift` ft and pitched `pitch` with full gas from the first frame, its acceleration
+    /// `accel` times the file's (the Game Modifier's fields), its launch's timer reset when `fresh`.
+    Dropped { lift: f32, pitch: f32, accel: f32, fresh: bool },
+}
+
+/// [`beside`], with the car first posed ([`Pose`]): as many frames as [`SIDE_FRAMES`] or
+/// [`DROP_FRAMES`] then, not the capture's rows.
+fn beside_posed(d: &Drive, through: Through, pose: Pose) -> Option<Seen> {
+    let side = match pose {
+        Pose::Side(roll) => Some(roll),
+        _ => None,
+    };
     let mut pre = drive::image(d.name)?;
     let ticks = drive::tape()?;
     let rows = drive::rows(d.name)?;
@@ -141,6 +168,12 @@ fn beside_posed(d: &Drive, through: Through, side: Option<f32>) -> Option<Seen> 
     if let Some(roll) = side {
         put_on_side(&mut pre, d.car, roll);
     }
+    if let Pose::Dropped { lift, pitch, accel, fresh } = pose {
+        put_up_on_the_gas(&mut pre, d.car, lift, pitch, accel);
+        if fresh {
+            pre.set_u32(d.car + mx::LAUNCH_TIMER, 0);
+        }
+    }
     let s = drive::sim(&pre);
     let mut ee = drive::hooked(pre);
     let seen: Shared<Seen> = Rc::default();
@@ -150,7 +183,7 @@ fn beside_posed(d: &Drive, through: Through, side: Option<f32>) -> Option<Seen> 
     // MD156: the car's update stepped beside too, on the frame's way (the Ride's way skips it) and
     // on MD107's drives as captured (not MD169's on its side).
     let updates: Shared<super::update_beside::UpdateSeen> = Rc::default();
-    if matches!(through, Through::Frame) && side.is_none() {
+    if matches!(through, Through::Frame) && pose == Pose::Captured {
         super::update_beside::hook_update(&mut ee, d.name, frame_no.clone(), updates.clone());
     }
     ee.hooks.insert(WORLD_STEP, Box::new(move |ee: &mut Ee| {
@@ -195,8 +228,8 @@ fn beside_posed(d: &Drive, through: Through, side: Option<f32>) -> Option<Seen> 
                 v = r.vehicle.clone();
             }
         }
-        // On its side, the original's respawn (which the port hands out) ends the comparison.
-        if side.is_some() && pieces.rest.oasis.rest.iter().any(|c| matches!(c, Call::Respawn)) {
+        // Posed, the original's respawn (which the port hands out) ends the comparison.
+        if pose != Pose::Captured && pieces.rest.oasis.rest.iter().any(|c| matches!(c, Call::Respawn)) {
             keep.borrow_mut().respawned = Some(k);
             return;
         }
@@ -237,21 +270,35 @@ fn beside_posed(d: &Drive, through: Through, side: Option<f32>) -> Option<Seen> 
             s.first_wreck = Some((k, car.state));
         }
         s.last_up = car.up.y();
+        s.dropped.push(Dropped {
+            spin: pieces.state.tires.map(|t| t.spin.0),
+            grounded: car.tires.map(|t| t.grounded),
+            rpm: pieces.state.engine.rpm.0,
+            speed: car.speed.0,
+        });
     }));
     // As many frames as the capture has rows (MD107's test steps one past the row the last vsync
     // names); every frame's input two tape ticks back, as there.
     let mut j = 0;
-    for _ in 0..side.map_or(rows.len(), |_| SIDE_FRAMES) {
+    let frames = match pose {
+        Pose::Captured => rows.len(),
+        Pose::Side(_) => SIDE_FRAMES,
+        Pose::Dropped { .. } => DROP_FRAMES,
+    };
+    // Dropped, every frame's input is full gas and the stick centred, from the first.
+    let gas: Vec<drive::Row> = (0..=frames).map(|_| [("buttons", "cross"), ("lx", "0"), ("ly", "0")].map(|(k, v)| (k.to_string(), v.to_string())).into()).collect();
+    let (ticks, back) = if matches!(pose, Pose::Dropped { .. }) { (gas, 0) } else { (ticks, 2) };
+    for _ in 0..frames {
         *frame_no.borrow_mut() = j + 1;
-        drive::step(&mut ee, s, d, &ticks, &mut j, 2);
+        drive::step(&mut ee, s, d, &ticks, &mut j, back);
         if seen.borrow().respawned.is_some() {
             break;
         }
     }
     let seen = std::mem::take(&mut *seen.borrow_mut());
-    let want = seen.respawned.map_or(side.map_or(rows.len(), |_| SIDE_FRAMES), |k| k - 1);
+    let want = seen.respawned.map_or(frames, |k| k - 1);
     assert_eq!(seen.frames, want, "{}: the world step ran once a frame", d.name);
-    if matches!(through, Through::Frame) && side.is_none() {
+    if matches!(through, Through::Frame) && pose == Pose::Captured {
         let u = std::mem::take(&mut *updates.borrow_mut());
         assert_eq!(u.frames, rows.len(), "{}: the car's update ran once a frame", d.name);
         // MD156a, MD156b: every class step is ported and compared.
@@ -415,7 +462,7 @@ const ON_ITS_SIDE: [(&Drive, Option<usize>); 5] =
 #[test]
 fn each_car_put_on_its_side_is_the_ports() {
     for (d, wreck) in ON_ITS_SIDE {
-        let Some(seen) = beside_posed(d, Through::Frame, Some(std::f32::consts::FRAC_PI_2)) else { return };
+        let Some(seen) = beside_posed(d, Through::Frame, Pose::Side(std::f32::consts::FRAC_PI_2)) else { return };
         eprintln!("MD169 {}: {} frames on its side equal to the original's; wrecked {:?}, respawned {:?}, up {}", d.name, seen.frames, seen.first_wreck, seen.respawned, seen.last_up);
         assert_eq!(seen.first_wreck, wreck.map(|k| (k, atv_car::WRECK_TIPPED)), "{}: the original's wreck on its side", d.name);
         if wreck.is_none() {
@@ -423,6 +470,94 @@ fn each_car_put_on_its_side_is_the_ports() {
             assert!(seen.last_up > 0.9, "{}: not back on its wheels (up {})", d.name, seen.last_up);
         } else {
             assert!(seen.respawned.is_some(), "{}: never respawned after its tipped wreck", d.name);
+        }
+    }
+}
+
+// --- R36: a car dropped on the gas -------------------------------------------------------------------
+
+/// How many frames a car dropped on the gas is stepped (two seconds).
+const DROP_FRAMES: usize = 60;
+
+/// The car in image `ee` lifted `lift` ft where it stands and turned `pitch` radians about its own
+/// side axis (a positive pitch tips the nose down), still (velocity, rates and the last substep's
+/// pose with it), and its acceleration `accel` times the file's as the Game Modifier makes it (P288's
+/// `Mods::mxvatv_car`: the engine's torque table and converter, the wings' area and each tire's wheel
+/// friction on every surface, each times `accel` in the PS2's arithmetic).
+fn put_up_on_the_gas(ee: &mut Ee, car: u32, lift: f32, pitch: f32, accel: f32) {
+    let b = ee.u32_at(car + at::BODY);
+    let q = get_v(ee, b + 0x190);
+    let (s, c) = (pitch / 2.0).sin_cos();
+    let (x, y, z, w) = (q.x(), q.y(), q.z(), q.w());
+    // q · (s about x, c), Hamilton's product.
+    let r = Vf::new(w * s + x * c, y * c + z * s, z * c - y * s, w * c - x * s);
+    let p = get_v(ee, b + 0x70);
+    let p = Vf::new(p.x(), p.y() + lift, p.z(), p.w());
+    for (o, v) in [(0x170, r), (0x190, r), (0x60, p), (0x70, p), (0x80, Vf::ZERO), (0x1d0, Vf::ZERO)] {
+        put_v(ee, b + o, v);
+    }
+    if accel == 1.0 {
+        return;
+    }
+    let scale = |ee: &mut Ee, a: u32| ee.set_u32(a, (F(ee.f32_at(a)) * F(accel)).to_bits());
+    let e = ee.u32_at(car + at::ENGINE);
+    let torques = ee.u32_at(e + engine::TORQUES);
+    for i in 0..ee.u32_at(e + engine::RPM_COUNT) {
+        scale(ee, torques + 4 * i);
+    }
+    scale(ee, e + engine::PUMP_SCALE);
+    scale(ee, e + engine::MAX_PUMP);
+    scale(ee, car + mx::AREA);
+    for t in at::TIRES {
+        let t = ee.u32_at(car + t);
+        // The second of a surface's sixteen tables ([`surface_fields`]).
+        for i in 0..16 {
+            scale(ee, t + tire::SURFACES + 0x40 + 4 * i);
+        }
+    }
+}
+
+/// R36's drops of the buggy, as (lift ft, pitch, acceleration, launch fresh): whether the original's
+/// rear wheels are held swinging between their top speeds, and what it does by frame 30.
+const DROPS: [(f32, f32, f32, bool, bool); 5] = [
+    // Fresh, as the shell's take makes it: stuck at 150% (fronts first, and rears first as the
+    // shell's flat floor lands it), away at the file's.
+    (1.0, 0.0, 1.5, true, true),
+    (1.5, -0.1, 1.5, true, true),
+    (1.0, 0.0, 1.0, true, false),
+    // The image's own launch long spent: away at 150% and at 200%.
+    (1.0, 0.0, 1.5, false, false),
+    (2.0, 0.0, 2.0, false, false),
+];
+
+/// **R36: the buggy dropped on full gas is the port's**, from MX vs. ATV's own frame: MD135's frame
+/// beside the interpreter's from the image with the car lifted and held on the gas
+/// ([`put_up_on_the_gas`]), every word equal for [`DROP_FRAMES`] frames, at the file's acceleration
+/// and the Game Modifier's 150% and 200%, with the launch's torque scale fresh (its timer at 0, as a
+/// car is made: the image's own ran out, from 0 and a standing start, before it was saved) or spent.
+///
+/// What the original does there ([`DROPS`]): fresh and at 150%, the rear wheels land and swing
+/// between their top speed both ways every three frames for most of a second, the engine near
+/// 5000-5500 rpm and the buggy still, until the launch's scale has eased off; at the file's they flip
+/// once or twice and the buggy drives off. With the launch spent, no drop sticks. So the shell's
+/// fresh car taken a foot up on the gas at 150% sticks as SLUS-21104's would.
+#[test]
+fn a_buggy_dropped_on_the_gas_is_the_ports() {
+    for (lift, pitch, accel, fresh, stuck) in DROPS {
+        let pose = Pose::Dropped { lift, pitch, accel, fresh };
+        let Some(seen) = beside_posed(&drive::BUGGY, Through::Frame, pose) else { return };
+        let what = format!("dropped {lift} ft, pitch {pitch}, {accel}x, launch fresh {fresh}");
+        assert_eq!(seen.respawned, None, "{what}: respawned");
+        let first = seen.dropped.iter().position(|f| f.grounded.iter().any(|&g| g)).expect("it lands");
+        let topped = seen.dropped.iter().filter(|f| f.spin[2] <= -27.0 && f.spin[3] <= -27.0).count();
+        let speed = seen.dropped[29].speed;
+        eprintln!("R36 {what}: lands on frame {}, rears at minus their top on {topped} frames, {speed} ft/s at frame 30", first + 1);
+        if stuck {
+            assert!(topped >= 8 && speed < 1.0, "{what}: not held ({topped} frames topped, {speed} ft/s)");
+            let revs: Vec<f32> = seen.dropped[12..30].iter().map(|f| f.rpm).collect();
+            assert!(revs.iter().all(|r| (4500.0..6000.0).contains(r)), "{what}: the engine's revs while held {revs:?}");
+        } else {
+            assert!(topped <= 2 && speed > 20.0, "{what}: held ({topped} frames topped, {speed} ft/s)");
         }
     }
 }
