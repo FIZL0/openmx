@@ -702,6 +702,70 @@ fn each_car_touching_a_prop_holds_its_air_control_off() {
     });
 }
 
+/// R38: each car, rigged on free09, lifted [`LIFT`] ft at [`AIR_SPEED`] with its air control held off
+/// (touching) and stepped two frames, the stick and the lean each at 0 and 1. The steer moves no body
+/// word; the lean moves only the body's position and last position, and only by the centre of mass's
+/// travel: its `z` slid back `CofGTravelBack` × the lean (the truck's 3 ft, the others' none), turned
+/// into the world, so the frame's origin (the position less the turned centre) stays put. The
+/// travel step itself is proved against the original (tests/mxvatv_car_frame/pieces.rs,
+/// `travel_cofg_is_mx_unleasheds`).
+#[test]
+fn each_cars_lean_moves_its_body_by_the_cofg_travel_alone() {
+    let Some(files) = Files::load() else { return };
+    let mut disc = match Disc::open_configured() {
+        Ok(d) => d,
+        Err(why) => {
+            skip(&why);
+            return;
+        }
+    };
+    in_free09(&mut disc, |world| {
+        let mut moved = 0;
+        for (name, machine, phy, model) in CARS {
+            let (ride, _) = files.rigged(machine, phy, model, world, SPOT, yaw_quat(0.0));
+            let back = ride.keys.cofg_travel_back.0;
+            let mut air = |stick: f32, lean: f32| {
+                let mut r = ride.clone();
+                let b = &mut r.body;
+                b.position.0[1] += LIFT;
+                b.last_position = b.position;
+                b.velocity = Vf::new(0.0, 0.0, AIR_SPEED, 0.0);
+                (r.state.touching, r.state.stick, r.state.lean) = (true, F(stick), F(lean));
+                let noise = r.noise.clone();
+                let mut rest = Vec::new();
+                for _ in 0..2 {
+                    r.frame_with(dt(), atv_car::OnWorld { world: &mut *world, noise: &noise, rest: &mut rest });
+                }
+                assert!(!r.car.grounded, "{name}: grounded {LIFT} ft up");
+                r
+            };
+            let centred = air(0.0, 0.0);
+            let still = |r: &atv_car::Ride| {
+                let mut b = r.body;
+                (b.position, b.last_position) = (Vf::ZERO, Vf::ZERO);
+                b
+            };
+            assert_eq!(air(1.0, 0.0).body, centred.body, "{name}: the steer moved the body");
+            let leaned = air(0.0, 1.0);
+            assert_eq!(still(&leaned), still(&centred), "{name}: the lean moved a body word but the position");
+            let dz = leaned.car.cofg.z() - centred.car.cofg.z();
+            assert_eq!(dz, -back, "{name}: the lean slid the centre of mass {dz} ft along z, not -CofGTravelBack");
+            // Turned into the world by the forward row: the body's whole move.
+            let f = centred.car.forward;
+            let shift = [0, 1, 2].map(|k| leaned.body.position.0[k] - centred.body.position.0[k]);
+            let last = [0, 1, 2].map(|k| leaned.body.last_position.0[k] - centred.body.last_position.0[k]);
+            eprintln!("{name}: CofGTravelBack {back}, the lean's move {shift:?}, the last position's {last:?}");
+            for k in 0..3 {
+                let want = f.0[k] * dz;
+                assert!((shift[k] - want).abs() < 1e-3, "{name}: the lean moved the body {shift:?}, not the travel {dz} along {f:?}");
+                assert!((last[k] - want).abs() < 1e-3, "{name}: the lean moved the last position {last:?}, not the travel {dz} along {f:?}");
+            }
+            moved += (back != 0.0) as usize;
+        }
+        assert_eq!(moved, 1, "only the truck has a centre of mass travel back");
+    });
+}
+
 
 // --- MD169: a car on its side ----------------------------------------------------------------------
 
