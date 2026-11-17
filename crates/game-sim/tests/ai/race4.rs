@@ -401,7 +401,7 @@ fn s12e_free09s_four_racers_ride_as_the_capture() {
         .map(|(k, &(r, _, b))| (c33_player(k), c33_pilot(&ee, &lists, b, r)))
         .collect();
     let gen0 = s12e_u64(&ee, rand_state);
-    sim.ai = Some(Box::new(Lane { seek, tables: Arc::new(controls::tables(&ee)), rng: Rng::from_state(gen0), pilots, net: None, cards: Vec::new() }));
+    sim.ai = Some(Box::new(Lane { seek, tables: Arc::new(controls::tables(&ee)), rng: Rng::from_state(gen0), pilots, net: None, cards: Vec::new(), edge: None }));
 
     // The image's RAM already holds the bodies of the first row: it is tick 3's, saved before its
     // frame counter moved on. Each step from it is the next row.

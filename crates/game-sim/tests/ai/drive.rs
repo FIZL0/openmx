@@ -1170,8 +1170,6 @@ fn ride_sx01_joined(mode: i32, with_net: bool, watch: bool) -> Option<std::colle
                     others: &bike.others,
                     edge: None,
                     vehicle: None,
-                    jump: None,
-                    node: None,
                     spot: None,
                     tricks: None,
                     race_state: None,
