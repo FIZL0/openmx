@@ -729,11 +729,19 @@ impl atv_part::Outside for PartWorldInRam<'_> {
                 // MD118: the pair's tree walk's setup (the part's pair always runs it on a mesh)
                 // notes in its globals the walk's mode (1), the mesh's descriptor, and the two tree
                 // arrays it keeps in its own frame, gone once the pair returns: any stack address.
-                self.ee.set_u32(TREE_WALK_MODE_AT, 1);
-                self.ee.set_u32(SWEEP_DESCRIPTOR_AT, c + 0x230);
+                // MD142: unguarded, on every mesh pair: the original stores them as often as the
+                // port, frame by frame (`sim_frame`'s palm counts both).
+                let spoil = WALK_SPOIL.take();
                 let sp = self.ee.stack;
-                self.ee.set_u32(TREE_WALK_TREES_AT[0], sp - 8);
-                self.ee.set_u32(TREE_WALK_TREES_AT[1], sp - 0x10);
+                let mut words = [(TREE_WALK_MODE_AT, 1), (SWEEP_DESCRIPTOR_AT, c + 0x230), (TREE_WALK_TREES_AT[0], sp - 8), (TREE_WALK_TREES_AT[1], sp - 0x10)];
+                match spoil {
+                    Some(WalkSpoil::Skip) => words = [(0, 0); 4],
+                    Some(WalkSpoil::Word(k)) => words[k].1 = if k < 2 { words[k].1 + 4 } else { 0 },
+                    None => {}
+                }
+                for (a, v) in words.into_iter().filter(|&(a, _)| a != 0) {
+                    self.ee.set_u32(a, v);
+                }
                 ray_probe::Shape::Mesh(self.mesh.insert(MeshInRam::read(self.ee, c)).mesh())
             }
             1 => panic!("the part search paired a hierarchy ({c:#x}): its parts are not read"),
@@ -833,7 +841,21 @@ fn part_record_in_ram(ee: &Ee, r: u32) -> ray_probe::Record {
 
 /// MD118: the globals the part's pair's tree walk setup writes on a mesh: the walk's mode, and the
 /// two tree arrays (pointers into its frame). The descriptor goes in [`SWEEP_DESCRIPTOR_AT`].
-const TREE_WALK_MODE_AT: u32 = 0x003d_ce30;
+pub(super) const TREE_WALK_MODE_AT: u32 = 0x003d_ce30;
+
+/// MD142: a mutant of the next mesh pair's tree walk setup ([`WALK_SPOIL`]).
+#[derive(Clone, Copy, Debug)]
+pub(super) enum WalkSpoil {
+    /// None of the four globals written.
+    Skip,
+    /// One of them wrong: the mode or the descriptor 4 over, a tree pointer 0 (off the stack).
+    Word(usize),
+}
+
+thread_local! {
+    /// MD142: spoils the next mesh pair's tree walk setup on this thread, once.
+    pub(super) static WALK_SPOIL: std::cell::Cell<Option<WalkSpoil>> = const { std::cell::Cell::new(None) };
+}
 const TREE_WALK_TREES_AT: [u32; 2] = [0x003d_ce40, 0x003d_ce48];
 
 /// The smooth-flag global the part's pair sets from the probe's `+0x184`.
