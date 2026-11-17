@@ -161,6 +161,11 @@ pub struct Controls {
     /// AI rider's hand-off writes `+0x628`/`+0x62c` itself, which the player's pad read writes
     /// squared, so [`Held::step`] takes it as it is. A pad leaves it false.
     pub squared: bool,
+    /// **Untamed's analogue preload (MD93e):** the axis bound to SLUS-21701's preload action, `None`
+    /// while nothing is bound to it, which is how Untamed ships and how [`Controls::through`] leaves
+    /// it (MX Unleashed has no such command). [`Controls::with_preload`] binds one. Only a ride on
+    /// [`crate::handling::Handling::Untamed`] reads it ([`crate::handling::untamed::preload`]).
+    pub preload: Option<F>,
 }
 
 impl Controls {
@@ -231,7 +236,15 @@ impl Controls {
             hands_off: false,
             gas_cut: false,
             squared: false,
+            preload: None,
         }
+    }
+
+    /// These controls with Untamed's analogue preload bound to `axis` (MD93e), read through `range`,
+    /// or unbound with `None`. SLUS-21701 reads its preload action's axis straight off the pad
+    /// device, as it reads the sticks; nothing is bound to it on the shipped bindings.
+    pub fn with_preload(self, pad: &crate::input::Pad, axis: Option<crate::input::Axis>, range: &crate::input::AxisRange) -> Controls {
+        Controls { preload: axis.map(|a| pad.axis_through(a, range)), ..self }
     }
 }
 
@@ -2694,9 +2707,9 @@ impl Ride {
             match mxvatv.as_deref_mut() {
                 // MX vs. ATV's preload (MD63): its equal-times force and its cue. The cue's event is
                 // the presentation's, and nothing here plays it.
-                // Untamed's (MD93) has an analogue preload too, which no control binds here.
+                // Untamed's (MD93) has an analogue preload too, on the axis bound to it (MD93e).
                 Some(f) if p.handling == crate::handling::Handling::Untamed => {
-                    crate::handling::untamed::preload(&p.air, air, &mut ac, &astep, None, &mut f.preload_cue);
+                    crate::handling::untamed::preload(&p.air, air, &mut ac, &astep, c.preload, &mut f.preload_cue);
                 }
                 Some(f) => {
                     crate::handling::step::preload(&p.air, air, &mut ac, &astep, &mut f.preload_cue);

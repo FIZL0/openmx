@@ -213,7 +213,7 @@ in order. Online, a room names only its pack, so an Untamed host's room rides as
 
 | function | what changed from SLUS-21104 | port | in the ride |
 |---|---|---|---|
-| preload | an analogue preload: bound and pushed past 0.001 on the lip, it fires at once with the axis mapped onto `0..MaxPreload`, and the stick's path then runs in the same call. The cue is posted while firing (SLUS-21104: while the timer is above 0) | `untamed::preload` | yes, axis unbound (`None`; MD93e binds it) |
+| preload | an analogue preload: bound and pushed past 0.001 on the lip, it fires at once with the axis mapped onto `0..MaxPreload`, and the stick's path then runs in the same call. The cue is posted while firing (SLUS-21104: while the timer is above 0) | `untamed::preload` | yes, the axis `ride::Controls::preload` (MD93e: `None` unless `Controls::with_preload` binds one, as Untamed ships) |
 | wreck entry | reason 13's three random spins stored as one quadword, `w` zero; new vtable slots | `untamed::wreck_entry` | no (SLUS-21104's isn't either) |
 | put back | the ground snap lifts the bike 0.3 ft along the normal and keeps the normal as up; the driver's respawn only with both first words set; no `+0x60`/`+0x70` restore; the attachment's put-back; post (8, 0x15) | `untamed::put_back` | no (the ride's put-back is the port's own) |
 | backflip, spin in the air | — | MD93a, MD93b | — |
