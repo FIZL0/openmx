@@ -320,26 +320,55 @@ class Threads:
     """A gate's test threads, `jobs` of them: a binary takes one per test it holds, up to all of them, waiting
     its turn (first come, first served) until that many are free. Each binary used to run with all `jobs`
     threads beside `jobs` others, up to jobs² threads a gate: at three gates at once the machine ran 2.5
-    threads a core and `tick` took 1105 s against 148 s with the machine to itself (11-11)."""
+    threads a core and `tick` took 1105 s against 148 s with the machine to itself (11-11).
 
-    def __init__(self, n: int):
-        self.n, self.free, self.cv, self.queue = n, n, threading.Condition(), []
+    A binary that waits holds up the queue, so a later one may go past it (backfill) when it fits in the
+    threads free now and either ends, by its last time, before the first in line could start, or leaves that
+    one enough threads when it would. Without it each wide binary waited for the one before to end: menu took
+    all 20 threads for 480 s, then camera's 20 waited out tick's 11 for 400 s, and the gate ran its four big
+    binaries one after another with half the pool idle (11-17). `secs` is unknown (None) for a new binary,
+    which goes past only on the threads to spare."""
+
+    def __init__(self, n: int, clock=time.monotonic):
+        self.n, self.free, self.cv, self.queue, self.clock = n, n, threading.Condition(), [], clock
+        self.ends: dict[object, tuple[int, float]] = {}  # running: threads, expected end
+
+    def _may_start(self, me, k: int, secs: float | None) -> bool:
+        if self.free < k:
+            return False
+        head = self.queue[0]
+        if head[0] is me:
+            return True
+        if self.free >= head[1]:  # the first in line goes first
+            return False
+        # When could the first in line start, and how many threads would be spare then?
+        now, hk = self.clock(), head[1]
+        free, shadow = self.free, now
+        for t, end in sorted(((t, max(e, now)) for t, e in self.ends.values()), key=lambda x: x[1]):
+            if free >= hk:
+                break
+            free, shadow = free + t, end
+        spare = free - hk
+        return (secs is not None and now + secs <= shadow) or k <= spare
 
     @contextmanager
-    def take(self, want: int):
+    def take(self, want: int, secs: float | None = None):
         k = max(1, min(want, self.n))
         me = object()
         with self.cv:
-            self.queue.append(me)
-            self.cv.wait_for(lambda: self.queue[0] is me and self.free >= k)
-            self.queue.pop(0)
+            entry = (me, k)
+            self.queue.append(entry)
+            self.cv.wait_for(lambda: self._may_start(me, k, secs))
+            self.queue.remove(entry)
             self.free -= k
+            self.ends[me] = (k, self.clock() + (secs or 0.0))
             self.cv.notify_all()
         try:
             yield k
         finally:
             with self.cv:
                 self.free += k
+                del self.ends[me]
                 self.cv.notify_all()
 
 
@@ -390,9 +419,9 @@ def count_tests(b: Binary, env: dict) -> int:
 
 
 def _run_one(b: Binary, env: dict, filters: list[str] | None = None, threads: Threads | None = None,
-             way: GiveWay | None = None) -> None:
+             way: GiveWay | None = None, secs: float | None = None) -> None:
     if threads is not None:
-        with threads.take(count_tests(b, env)) as k:
+        with threads.take(count_tests(b, env), secs) as k:
             return _run_one(b, {**env, 'RUST_TEST_THREADS': str(k)}, filters, way=way)
     if way is not None:
         with way.turn():
@@ -510,7 +539,8 @@ def run(cmd: str, cwd: Path, env: dict, jobs: int, log_path: Path, shared: str, 
 
         with ThreadPoolExecutor(max_workers=workers) as pool:
             dfut = pool.submit(doc_tests)
-            list(pool.map(lambda b: _run_one(b, benv, threads=threads, way=way), pooled))
+            list(pool.map(lambda b: _run_one(b, benv, threads=threads, way=way,
+                                             secs=float(last[b.args]) if b.args in last else None), pooled))
             drc, dout = dfut.result()
         for b in later:
             _run_one(b, benv, way=way)

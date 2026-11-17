@@ -299,6 +299,31 @@ def test_threads() -> None:
     check([x for x, _ in got] == list('abcde'), f'in the order they came ({[x for x, _ in got]})')
 
 
+def test_threads_backfill() -> None:
+    import threading, time
+    t = cargo_gate.Threads(4)
+    order, lock = [], threading.Lock()
+
+    def one(want, secs, tag, hold):
+        with t.take(want, secs):
+            with lock:
+                order.append(tag)
+            time.sleep(hold)
+
+    # a holds 2 till ~0.3 s; b wants all 4 and waits; c (short) fits before b could start; d (long) would
+    # hold b up past then, and e (no time known) has no threads to spare when b starts: both wait for b.
+    runs = [threading.Thread(target=one, args=a) for a in
+            [(2, 0.3, 'a', 0.3), (4, 0.1, 'b', 0.1), (1, 0.05, 'c', 0.05), (2, 5.0, 'd', 0.05), (1, None, 'e', 0.05)]]
+    for r in runs:
+        r.start()
+        time.sleep(0.02)
+    for r in runs:
+        r.join()
+    check(order.index('c') < order.index('b'), f'a short binary goes past a wide one waiting ({order})')
+    check(order.index('b') < order.index('d') and order.index('b') < order.index('e'),
+          f'one that would delay it does not ({order})')
+
+
 def test_give_way() -> None:
     import threading, time
     want, events, lock = threading.Event(), [], threading.Lock()
