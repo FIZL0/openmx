@@ -16,15 +16,18 @@
 // OPENMX_GPU_BREAK set to `label,frames` (P336), the first WebGPU command encoder labelled `label` made after that many
 // frames is broken (a debug group popped that was never pushed), as WebKit finds an encoder broken by a command in it:
 // the run then waits for the page's fallback as with a fault. With OPENMX_GPU_FRAMES set, the page is watched until it
-// has shown that many pictures (the worker's counts a second, summed; at most two minutes) rather than for SECONDS.
+// has shown that many pictures, the worker's own frames counted (frames.mjs), rather than for SECONDS: a page slowed by
+// load takes longer, and only a minute with no new picture ends the watch early (K57: two minutes of wall clock ended
+// it at 683 of 1500 in a busy merge gate).
 // Prints one JSON line:
-// { state, gpu, drawn, fps: [per second...], lit, pixels, png, log? } — `gpu` what the page says draws (worker.js's `gpu`),
+// { state, gpu, drawn, fps: [per second...], shown?, lit, pixels, png, log? } — `gpu` what the page says draws (worker.js's `gpu`),
 // `drawn` its first GPU frame, `fps` the page's pictures a second as worker.js counts them, and `lit` how many of the
-// last screenshot's `pixels` are not black. The screenshot is written to <out.png>.
+// last screenshot's `pixels` are not black; `shown` (with OPENMX_GPU_FRAMES) the worker's frames while it was watched. The screenshot is written to <out.png>.
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { WORKER, PAGE } from './frames.mjs';
 
 const [webdir, iso, profile, out, query = '', ...flags] = process.argv.slice(2);
 const SECONDS = Number(process.env.OPENMX_GPU_SECONDS ?? 20);
@@ -104,6 +107,8 @@ const server = http.createServer((req, res) => {
     if (p === '/worker.js' && FAULT) b = Buffer.concat([Buffer.from(fault(FAULT)), b]);
     if (p === '/worker.js' && BREAK) b = Buffer.concat([Buffer.from(broken(...BREAK.split(','))), b]);
     if (p === '/worker.js' && LIMITS === 'iphone') b = Buffer.concat([Buffer.from(iphone), b]);
+    // the worker's frames counted, for the watch below (frames.mjs)
+    if (p === '/worker.js' && FRAMES) b = Buffer.concat([Buffer.from(WORKER), b]);
     res.writeHead(200, { 'content-type': types[path.extname(f)] ?? 'application/octet-stream' });
     res.end(b);
   });
@@ -172,6 +177,7 @@ await send('Page.enable');
 // No pad of the machine's reaches the page: another slot's `./kit pad` (or a pad in a hand) pressing a button shows
 // itself to every chromium here, and the page then hides the touch pad and reads its presses as the rider's (K13).
 await send('Page.addScriptToEvaluateOnNewDocument', { source: 'navigator.getGamepads = () => [];' });
+if (FRAMES) await send('Page.addScriptToEvaluateOnNewDocument', { source: PAGE });
 // the worker's console too: what the module says (its renderer, its adapter) is how a failure explains itself
 await send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true });
 if (PHONE) {
@@ -194,13 +200,21 @@ for (let picks = 0; picks < 3; picks++) {
 if (d.state === 'failed' || !(d.drawn?.startsWith(WANT) || d.gpu === 'software'))
   fail(`the page did not start drawing: ${JSON.stringify(d)} (${await evaluate("document.querySelector('#status')?.textContent")})`);
 
-// the ride: its pictures a second, as the worker counts them, each second for SECONDS
+// the ride: its pictures a second, as the worker counts them, each second for SECONDS; or, with FRAMES, until the
+// worker has drawn that many frames since the watch began, however long a loaded machine takes, and a minute with no
+// new frame the bound on a failure only
 const fps = [];
-const shown = () => fps.reduce((a, b) => a + b, 0);
-for (let s = 0; FRAMES ? shown() < FRAMES && s < 120 : s < SECONDS; s++) {
+const seen = async () => (await evaluate('window.openmxTestSeen?.[0]')) ?? 0;
+const first = FRAMES ? await seen() : 0;
+let shown = 0;
+for (let s = 0, moved = Date.now(); FRAMES ? shown < FRAMES && Date.now() - moved < 60000 : s < SECONDS; s++) {
   await new Promise(r => setTimeout(r, 1000));
   d = await data();
   fps.push(Number(d.fps ?? 0));
+  if (!FRAMES) continue;
+  const now = (await seen()) - first;
+  if (now > shown) moved = Date.now();
+  shown = now;
 }
 const png = (await send('Page.captureScreenshot', { format: 'png' })).result.data;
 fs.writeFileSync(out, Buffer.from(png, 'base64'));
@@ -217,7 +231,7 @@ const [lit, pixels] = await evaluate(`(async () => {
   return [lit, i.width * i.height];
 })()`);
 const log = LOG ? { log: await evaluate("openmxLog.lines.join('\\n')") } : {};
-console.log(JSON.stringify({ state: d.state, gpu: d.gpu, drawn: d.drawn, fps, lit, pixels, png: out, ...log }));
+console.log(JSON.stringify({ state: d.state, gpu: d.gpu, drawn: d.drawn, fps, ...(FRAMES ? { shown } : {}), lit, pixels, png: out, ...log }));
 chrome.kill();
 await new Promise(r => chrome.on('exit', r));
 server.close();
