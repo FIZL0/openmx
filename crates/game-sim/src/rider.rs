@@ -1432,6 +1432,79 @@ impl Rider {
         }
     }
 
+    /// **What the body is asked this frame** (S27, split out by S328a): the request's fill — every
+    /// field of [`Rider::body_request`] the rider derives — and the flags of the request block only
+    /// the selection reads, with whether a front flip holds the rider forward (P159). [`Rider::body_frame`]
+    /// runs it first, and [`Rider::body_look`] for the look-around clock the Sim runs. See
+    /// `body_frame`'s table for the mapping.
+    fn body_ask(&mut self, c: &Controls, gate: Gate, lib: &vehicle_anim::Library) -> (rider_anim::Ask, bool) {
+        let Rider { ride, tricks, body_request, packed_pose, packed_fore_aft, put_back, cut_put_back, .. } = self;
+        // A front flip (MD16, P159) leans the rider forward rather than playing the backflip's clip.
+        let front = ride.tricks.as_ref().is_some_and(|t| air::front_flipping(&ride.air, t.flip_row));
+        let ask = rider_anim::Ask {
+            // The wheels are off the ground. The id would nearly do instead — `Trick::WHEELIE` *is*
+            // `motion.rs`'s airborne idle — but it is only set on a flight with no trick asked for,
+            // and the body's airborne pose is what a stoppie in the air should show too. For a
+            // gesture the choice makes no difference: the gesture arm runs in front of this one.
+            airborne: ride.air.airborne || front,
+            // The bike's own turning flag (V35): recording2's request carries it on every captured
+            // tick, raised the tick the flip torque first goes in and dropped the tick the rotation is
+            // over. The trick id never says so — it is the airborne idle's through the whole flip.
+            // MD16's front flip turns through the same flag and has no clip in either game: it is not
+            // a backflip here, and holds the airborne lean full forward instead (P159).
+            backflip: ride.air.flipping && !front,
+            no_hander: tricks.no_hander,
+            // Down as the request last saw it, and only that: the fill sits before the machine's
+            // verdict, so on a wreck's entry tick the body is still riding and enters its wreck mode
+            // the tick after (S91), and on the tick the wreck clock puts the rider back it is still
+            // in the wreck (S74).
+            wreck: put_back.wreck,
+            countdown: gate.countdown,
+            throttle: c.gas,
+            // A tick behind the pad read (F13, [`PutBack::reverse`]).
+            reversing: if put_back.reverse { F::ONE } else { F::ZERO },
+            gesture: tricks.requested.slot().map_or_else(|| pack_state(lib, tricks.requested), |s| s as i32),
+            spin: spin_state(lib, ride),
+        };
+        // Every field the rider derives. `cut` and `offset` are left as they are: the body's own
+        // selection is the only writer of the first and nothing here wants the second.
+        body_request.held = put_back.held;
+        body_request.at_base = false;
+        body_request.base = ride.position();
+        body_request.rotation = ride.chassis.quat;
+        // The block the body reads is the riding request (S111/S112): its axes are the pose and the
+        // fore-aft the state pack latched before this tick's header, and its band is the contact
+        // velocity's forward lane, all three copied by the request's fill.
+        body_request.phase_axis = *packed_pose;
+        body_request.mix_axis = *packed_fore_aft;
+        // The band off the bike as the put-back set it down, standing still, on a cut's put-back tick
+        // (P270): the contact speed is still the one the wreck left, which the next physics rewrites,
+        // and it drew the rolling pose for a tick before the standing one.
+        body_request.band = if *cut_put_back && put_back.told_early() { F::ZERO } else { F(ride.air.contact_vel.z()) };
+        body_request.progress = tricks.progress;
+        body_request.seq = tricks.seq;
+        (ask, front)
+    }
+
+    /// **The body's look-around clock, in the Sim** (S328a): [`rider_anim::Body::look_timer`] on this
+    /// frame's request, drawing on `rng` — the game's one generator, which the original's selection
+    /// draws the re-arm and the idle on among every other draw of the tick. The Sim runs it after
+    /// every rider's frame ([`crate::Sim::step_all`]), with the controls the bike rode; a Sim with no
+    /// shared generator hands `None` and the body's own pool draws, seeded off a zero clock, as every
+    /// shell's [`Gate`] has it. [`Rider::body_frame`] then reads what it left.
+    ///
+    /// The Sim holds no clip table, so a trick pack's extra or 360 counts as no gesture here
+    /// (MD21's states need the pack's clip to exist): the only frames that differ are ones with
+    /// such a clip asked for on the ground.
+    pub fn body_look(&mut self, dt: F, c: &Controls, rng: Option<&mut crate::rng::Rng>) {
+        let (ask, _) = self.body_ask(c, Gate::default(), &vehicle_anim::Library::default());
+        let rng = match rng {
+            Some(rng) => rng,
+            None => self.idles.generator(rider_anim::Clock::default()),
+        };
+        self.body.look_timer(dt, &self.body_numbers, &self.body_rates, &self.body_request, &ask, rng);
+    }
+
     /// **One frame of the rider's own animation** (S27): the body actor's selection, the step it
     /// hands its answer to, and the clip clock.
     ///
@@ -1484,6 +1557,12 @@ impl Rider {
     /// [`Crash::landed`] and the rider point's own height and velocity. A rider who is down with no
     /// wreck files under them has no [`Crash`] at all, so nothing settles and nothing changes for
     /// them: they lie there until the hand chord, exactly as before.
+    ///
+    /// # The look-around clock is the Sim's
+    ///
+    /// The selection's one clock draws on the game's generator, so the Sim runs it in its tick
+    /// ([`Rider::body_look`], S328a) and the selection here only reads what it left. A rider stepped
+    /// without a Sim has no look-arounds.
     pub fn body_frame(
         &mut self,
         dt: F,
@@ -1492,52 +1571,25 @@ impl Rider {
         lib: &vehicle_anim::Library,
         clip: &impl Fn(motion::ClipId) -> motion::Clip,
     ) -> vehicle_anim::Frame {
+        let (ask, front) = self.body_ask(c, gate, lib);
         let Rider {
             ride,
-            tricks,
             body,
             body_numbers,
             body_rates,
             body_request,
             body_clocked,
-            packed_pose,
-            packed_fore_aft,
             idles,
             crash,
             wreckage,
             ragdoll,
-            put_back,
-            cut_put_back,
             feet,
+            packed_pose,
             ..
         } = self;
-        // A front flip (MD16, P159) leans the rider forward rather than playing the backflip's clip.
-        let front = ride.tricks.as_ref().is_some_and(|t| air::front_flipping(&ride.air, t.flip_row));
-        let ask = rider_anim::Ask {
-            // The wheels are off the ground. The id would nearly do instead — `Trick::WHEELIE` *is*
-            // `motion.rs`'s airborne idle — but it is only set on a flight with no trick asked for,
-            // and the body's airborne pose is what a stoppie in the air should show too. For a
-            // gesture the choice makes no difference: the gesture arm runs in front of this one.
-            airborne: ride.air.airborne || front,
-            // The bike's own turning flag (V35): recording2's request carries it on every captured
-            // tick, raised the tick the flip torque first goes in and dropped the tick the rotation is
-            // over. The trick id never says so — it is the airborne idle's through the whole flip.
-            // MD16's front flip turns through the same flag and has no clip in either game: it is not
-            // a backflip here, and holds the airborne lean full forward instead (P159).
-            backflip: ride.air.flipping && !front,
-            no_hander: tricks.no_hander,
-            // Down as the request last saw it, and only that: the fill sits before the machine's
-            // verdict, so on a wreck's entry tick the body is still riding and enters its wreck mode
-            // the tick after (S91), and on the tick the wreck clock puts the rider back it is still
-            // in the wreck (S74).
-            wreck: put_back.wreck,
-            countdown: gate.countdown,
-            throttle: c.gas,
-            // A tick behind the pad read (F13, [`PutBack::reverse`]).
-            reversing: if put_back.reverse { F::ONE } else { F::ZERO },
-            gesture: tricks.requested.slot().map_or_else(|| pack_state(lib, tricks.requested), |s| s as i32),
-            spin: spin_state(lib, ride),
-        };
+        if front {
+            body.hold_forward(body_request);
+        }
         // The mode machine, in front of the animation: in the original the two are different slots
         // of the body actor's vtable, and the wreck mode is what writes `settled` for the selection
         // below to read.
@@ -1553,26 +1605,6 @@ impl Rider {
             }),
         };
         let wrecks = wreckage.as_ref().map_or_else(phy::Wrecks::default, |w| w.wrecks);
-        // Every field the rider derives. `cut` and `offset` are left as they are: the body's own
-        // selection is the only writer of the first and nothing here wants the second.
-        body_request.held = put_back.held;
-        body_request.at_base = false;
-        body_request.base = ride.position();
-        body_request.rotation = ride.chassis.quat;
-        // The block the body reads is the riding request (S111/S112): its axes are the pose and the
-        // fore-aft the state pack latched before this tick's header, and its band is the contact
-        // velocity's forward lane, all three copied by the request's fill.
-        body_request.phase_axis = *packed_pose;
-        body_request.mix_axis = *packed_fore_aft;
-        // The band off the bike as the put-back set it down, standing still, on a cut's put-back tick
-        // (P270): the contact speed is still the one the wreck left, which the next physics rewrites,
-        // and it drew the rolling pose for a tick before the standing one.
-        body_request.band = if *cut_put_back && put_back.told_early() { F::ZERO } else { F(ride.air.contact_vel.z()) };
-        body_request.progress = tricks.progress;
-        body_request.seq = tricks.seq;
-        if front {
-            body.hold_forward(body_request);
-        }
         body.mode(dt, body_request, &ask, &wrecks, thrown, idles, gate.clock);
         // A ragdoll throws its own damping switch, in its settle test (S61, `Down::step`).
         let (frame, clocked) = body.frame_clocked(
