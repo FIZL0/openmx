@@ -335,6 +335,8 @@ fn write_collider(ee: &mut Ee, p: &mut Pick, r: u32) {
     set_quad(ee, r + INV_INERTIA, ii);
     let c = if p.one_in(4) { Vf::new(0.0, 0.0, 0.0, 1.0) } else { p.loose(4.0) };
     set_quad(ee, r + COFG, c);
+    // Junk: the resolution turns the centre of mass into the world before it reads it, so a stale
+    // one (a seam's shift, a nearest copy: K52) must not change what it does.
     let junk = p.loose(50.0);
     set_quad(ee, r + COFG_WORLD, junk);
     ee.set_u32(r + ACTORS, p.flags());

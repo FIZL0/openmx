@@ -672,13 +672,9 @@ impl Flight {
     /// wrote, where the plane really is.
     pub fn pushed(&mut self, p: &crate::rider_contact::Flown) {
         let (position, last_position) = (self.body.position, self.body.last_position);
-        let by = p.body.position.sub(position);
         self.body = p.body;
         (self.body.position, self.body.last_position) = (position, last_position);
         self.collider = p.collider;
-        if p.body.position != position {
-            self.collider.cofg_world = self.collider.cofg_world.sub(by);
-        }
     }
 
     /// The plane stood with its model's origin at `origin` (the port's own spots: a switch's landing,
@@ -1067,7 +1063,7 @@ impl Flight {
 
     /// **Over a seam** (MD44, the port's own; [`crate::rider::Rider::wrap_round`]'s for the plane): on
     /// a world that wraps, a plane whose body has crossed a seam is moved back one width on that
-    /// axis — its body, its collision record and its collider ([`crate::seam`]) — and the answer is
+    /// axis — its body and its collision record ([`crate::seam`]) — and the answer is
     /// the widths it was past, `[x, z]`. Its speed, spin and attitude are not places and do not
     /// change, so it flies on as it was flying; the measure is taken again, for its matrix's origin.
     /// The spawn a wreck's recovery puts it back on is a place in the world already.
@@ -1082,7 +1078,6 @@ impl Flight {
         let by = [crate::seam::by(laps[0], area.width), crate::seam::by(laps[1], area.depth)];
         crate::seam::body(&mut self.body, by);
         crate::seam::record(&mut self.record, by);
-        self.collider.cofg_world = crate::seam::moved(self.collider.cofg_world, by);
         self.remeasure(acos);
         laps
     }
@@ -2510,13 +2505,12 @@ impl Dynamics for Together<'_, '_> {
         let mut kept = Vec::new();
         for f in before.iter_mut().chain(after.iter_mut()) {
             let b = &mut f.flight.body;
-            kept.push((b.position, b.last_position, f.flight.collider.cofg_world));
+            kept.push((b.position, b.last_position));
             let near = crate::nearest_copy(&*self.ground.0, from, b.position);
             if near != b.position {
                 let by = near.sub(b.position);
                 b.position = near;
                 b.last_position = b.last_position.add(by);
-                f.flight.collider.cofg_world = f.flight.collider.cofg_world.add(by);
             }
         }
         let mut planes: Vec<(&mut Collider, Weighed<'_>)> = before
@@ -2544,11 +2538,10 @@ impl Dynamics for Together<'_, '_> {
         drop(others);
         drop(bodies);
         drop(planes);
-        for (f, (position, last, cofg)) in before.iter_mut().chain(after.iter_mut()).zip(kept) {
+        for (f, (position, last)) in before.iter_mut().chain(after.iter_mut()).zip(kept) {
             let b = &mut f.flight.body;
             if b.position != position {
                 (b.position, b.last_position) = (position, last);
-                f.flight.collider.cofg_world = cofg;
             }
         }
     }

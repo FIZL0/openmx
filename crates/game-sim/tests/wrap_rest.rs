@@ -208,7 +208,6 @@ fn plane_places(f: &Flight) -> Vec<(&'static str, Vf)> {
         ("position", f.body.position),
         ("last position", f.body.last_position),
         ("record origin", f.record.node.origin),
-        ("collider cofg", f.collider.cofg_world),
     ]
 }
 
@@ -238,6 +237,9 @@ fn a_plane_flown_over_the_seam_comes_in_at_the_far_side_flying_as_it_was() {
             assert_eq!(bits(p), bits(less_width(q)), "tick {tick}: {name} {p:?} against {q:?}");
         }
         assert!((0.0..WIDTH).contains(&a.body.position.x()), "tick {tick}: not brought inside: {:?}", a.body.position);
+        // The collider's centre of mass in the world is an offset from the body, not a place: the
+        // seam leaves it as the wide one's (K52).
+        assert_eq!(bits(a.collider.cofg_world), bits(b.collider.cofg_world), "tick {tick}: collider cofg");
         // The measure's matrix is taken again from the moved body, so its origin is the body's
         // less its turned centre of gravity, a few bits off the wide one's less the width.
         assert!(gap(a.measure.matrix.0[3], b.measure.matrix.0[3], WIDTH) < 1e-3, "tick {tick}: the matrix");
@@ -292,7 +294,6 @@ fn wreck_places(s: &Sim) -> Vec<(&'static str, Vf)> {
         ("wreck bike", c.bike.body.position),
         ("wreck bike last", c.bike.body.last_position),
         ("record origin", c.bike.record.node.origin),
-        ("collider cofg", c.bike.collider.cofg_world),
         ("origin", c.origin),
         ("rider", c.rider),
         ("chassis", s.rider.ride.chassis.cofg_world),
@@ -323,6 +324,8 @@ fn a_wreck_thrown_over_the_seam_is_moved_whole_and_put_back_inside() {
             assert_eq!(bits(p), bits(less_width(q)), "tick {tick}: {name} {p:?} against {q:?}");
         }
         let (ca, cb) = (a.rider.crash.as_ref().unwrap(), c.rider.crash.as_ref().unwrap());
+        // An offset from the wreck bike's body, not a place: the seam leaves it alone (K52).
+        assert_eq!(bits(ca.bike.collider.cofg_world), bits(cb.bike.collider.cofg_world), "tick {tick}: collider cofg");
         assert_eq!(ca.bike.body.velocity.to_bits(), cb.bike.body.velocity.to_bits());
         assert_eq!(ca.bike.body.quat.to_bits(), cb.bike.body.quat.to_bits());
         assert_eq!(ca.rider_vel.to_bits(), cb.rider_vel.to_bits());
