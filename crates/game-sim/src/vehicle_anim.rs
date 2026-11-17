@@ -929,7 +929,9 @@ impl Driver {
                         // play's length is seconds — taken as it stands the cross was 4 s over a
                         // 1.47 s clip, and the throw never got past a third of its weight. The cross
                         // is the gesture rows' own quarter second instead. A held request's zero rate
-                        // is still the hard cut.
+                        // is still the hard cut. (MD79: the stunt start's record numbers MD78 took for
+                        // a fade are the 360's score, 2000 and 15000 a second, so the original's own
+                        // cross is still unread.)
                         let cross = if pack_state(lib, s, SPIN_LEFT..=SPIN_RIGHT) && self.rate > F::ZERO {
                             F::ONE / self.rate
                         } else {
