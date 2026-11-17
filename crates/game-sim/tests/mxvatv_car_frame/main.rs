@@ -2505,6 +2505,7 @@ mod own_back; // MD154: the car's respawn, unhooked
 mod shell; // MD159: MD39b's five drives through the shell's car
 mod golf_step; // MD156a: the golf cart's class step
 mod truck_step; // MD156b: the monster truck's class step
+mod untamed; // MD161a: MD160's Untamed monster-truck drives beside SLUS-21701
 
 use own_back::*;
 use own_calls::*;
