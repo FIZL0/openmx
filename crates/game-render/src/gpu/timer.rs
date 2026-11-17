@@ -1,9 +1,11 @@
-//! The GPU's own time for a frame's views (V122): a timestamp before the views' pass and one after
-//! the frame's, read back a few frames later, so [`super::AutoScale`] judges the render scale on what
+//! The GPU's own time for a frame's views (V122): a timestamp at the start of the views' pass and one
+//! at the end of the frame's, read back a few frames later, so [`super::AutoScale`] judges the render scale on what
 //! the pixels cost and not on the wall time of a draw, which under VSync is mostly the wait for the
 //! display and on a busy CPU the CPU's lateness.
 //!
-//! Only where the adapter has `TIMESTAMP_QUERY` (Vulkan, RADV among them; not WebGL2).
+//! Only where the adapter has `TIMESTAMP_QUERY` (Vulkan, RADV among them; Metal; not WebGL2). The
+//! timestamps ride on the frame's own render passes (P346): Metal writes none from an encoder with
+//! no work in it, so the empty marker passes V122 used timed no frame on the iPhone.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -62,18 +64,26 @@ impl Timer {
         Some(Timer { queries, period: queue.get_timestamp_period(), slots })
     }
 
-    /// The first timestamp, before the views' pass, in a free slot (which this frame's `scale` is
-    /// kept beside); `None` when every slot is still in flight.
-    pub(super) fn begin(&mut self, encoder: &mut wgpu::CommandEncoder, scale: f32) -> Option<usize> {
+    /// A free slot for this frame's timestamps, with its `scale` kept beside; `None` when every slot
+    /// is still in flight.
+    pub(super) fn begin(&mut self, scale: f32) -> Option<usize> {
         let k = self.slots.iter().position(|s| s.state.load(Ordering::Acquire) == FREE)?;
         self.slots[k].scale = scale;
-        self.mark(encoder, Some(2 * k as u32), None);
         Some(k)
     }
 
-    /// The second timestamp, after the frame's last pass, and both copied out for reading.
+    /// Slot `k`'s timestamps for a pass: at its start when it is the frame's `first`, at its end when
+    /// the `last`.
+    fn pass(&self, k: usize, first: bool, last: bool) -> wgpu::RenderPassTimestampWrites<'_> {
+        wgpu::RenderPassTimestampWrites {
+            query_set: &self.queries,
+            beginning_of_pass_write_index: first.then_some(2 * k as u32),
+            end_of_pass_write_index: last.then_some(2 * k as u32 + 1),
+        }
+    }
+
+    /// Both timestamps, written by the frame's passes, copied out for reading.
     pub(super) fn end(&mut self, encoder: &mut wgpu::CommandEncoder, k: usize) {
-        self.mark(encoder, None, Some(2 * k as u32 + 1));
         let slot = &self.slots[k];
         encoder.resolve_query_set(&self.queries, 2 * k as u32..2 * k as u32 + 2, &slot.resolve, 0);
         encoder.copy_buffer_to_buffer(&slot.resolve, 0, &slot.read, 0, 2 * wgpu::QUERY_SIZE as u64);
@@ -112,16 +122,10 @@ impl Timer {
         }
         out
     }
+}
 
-    /// An empty pass that only writes a timestamp.
-    fn mark(&self, encoder: &mut wgpu::CommandEncoder, beginning: Option<u32>, end: Option<u32>) {
-        encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("frame time"),
-            timestamp_writes: Some(wgpu::ComputePassTimestampWrites {
-                query_set: &self.queries,
-                beginning_of_pass_write_index: beginning,
-                end_of_pass_write_index: end,
-            }),
-        });
-    }
+/// The timestamps for a frame's pass, where `timer` has the frame in slot `timed`: the first pass
+/// writes the start and the last the end, one pass that is both writes both.
+pub(super) fn writes(timer: &Option<Timer>, timed: Option<usize>, first: bool, last: bool) -> Option<wgpu::RenderPassTimestampWrites<'_>> {
+    timer.as_ref().zip(timed).map(|(t, k)| t.pass(k, first, last))
 }
