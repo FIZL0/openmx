@@ -245,6 +245,16 @@ impl Game for Rides<'_> {
                 .filter_map(|(i, s)| vehicle::lane_hull(s, cars.get(i)?, i)),
         );
         let driven: Vec<usize> = hulls[flown.len()..].iter().map(|h| h.seat).collect();
+        // And a seat's quad out (MD173), after the cars', as split screen's (MD179): its chassis'
+        // `F.col` (the seat's own copy of the quad has the mesh) struck by the bikes' body rays, its
+        // body pushed by their resolve, the mirrors on its record after its own pass.
+        let quads = &*self.quads;
+        hulls.extend(
+            (self.sims.iter().enumerate())
+                .filter(|&(i, _)| touching[i])
+                .filter_map(|(i, s)| s.quad.as_ref()?.ride.hull(i, quads.get(i)?.as_ref()?.hull.as_deref()?)),
+        );
+        let quadded: Vec<usize> = hulls[flown.len() + driven.len()..].iter().map(|h| h.seat).collect();
         let on: Vec<(&game_sim::rider::Rider, bool)> =
             self.sims.iter().zip(&touching).map(|(s, &t)| (&s.rider, t && s.plane.is_none() && s.car.is_none() && s.quad.is_none())).collect();
         let met = rider_contact::contacts_met(&on, &hulls, dt, &*self.world);
@@ -280,6 +290,7 @@ impl Game for Rides<'_> {
                 let from = self.sims[seat].rider.ride.transform().0[3];
                 b.planes = (flown.iter().filter_map(|&j| Some(self.sims[j].plane.as_ref()?.flown(j, from, &*self.world))))
                     .chain(driven.iter().filter_map(|&j| vehicle::lane_flown(&self.sims[j], j, from, &*self.world)))
+                    .chain(quadded.iter().filter_map(|&j| self.sims[j].quad.as_ref()?.ride.flown(j, from, &*self.world)))
                     .collect();
                 b
             });
@@ -295,6 +306,11 @@ impl Game for Rides<'_> {
             if let Some(j) = driven.iter().position(|&j| j == seat) {
                 let m = mirrors.get_mut(flown.len() + j).map(std::mem::take).unwrap_or_default();
                 met = (self.sims[seat].car.as_ref()).map(|c| rider_contact::met_among(self.sims, m, c.machine.body.position, &*self.world));
+            }
+            // A seat's quad the same, by the mirrors on its record (MD173).
+            if let Some(j) = quadded.iter().position(|&j| j == seat) {
+                let m = mirrors.get_mut(flown.len() + driven.len() + j).map(std::mem::take).unwrap_or_default();
+                met = (self.sims[seat].quad.as_ref()).map(|q| rider_contact::met_among(self.sims, m, q.ride.body.position, &*self.world));
             }
             if paused[seat] {
                 continue;
@@ -345,8 +361,9 @@ impl Game for Rides<'_> {
                 held.push(Held { seat, k: plane, plane: readied, ready, met, bikes, wanted });
                 continue;
             }
-            // On the quad (MD152) neither, as offline's quad has none: the quad on the bike's hands.
-            if vehicle::ride_lane(sim, &hands, dt, self.world) {
+            // On the quad (MD152) neither, as offline's quad has none: the quad on the bike's hands,
+            // with the mirrors of the bikes' strikes on its hull (MD173).
+            if vehicle::ride_lane_met(sim, &hands, dt, self.world, met.as_ref()) {
                 continue;
             }
             // In a car (S249) the bike is not stepped either, nor are any markers: offline a car has
@@ -383,9 +400,12 @@ impl Game for Rides<'_> {
             if let Some(b) = &bump {
                 rider_contact::bumped_among(self.sims, b);
                 for f in &b.planes {
-                    match self.sims[f.seat].plane.as_mut() {
-                        Some(p) => p.pushed(f),
-                        None => vehicle::lane_pushed(&mut self.sims[f.seat], f),
+                    let to = &mut self.sims[f.seat];
+                    match (to.plane.as_mut(), to.quad.as_deref_mut()) {
+                        // A quad's body (MD173), which the flown copy carries.
+                        (_, Some(q)) if f.quad.is_some() => q.ride.pushed(f),
+                        (Some(p), _) => p.pushed(f),
+                        _ => vehicle::lane_pushed(to, f),
                     }
                 }
             }

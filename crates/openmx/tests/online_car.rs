@@ -348,6 +348,8 @@ struct Machine2 {
     glitch: bool,
     /// F23: seat, tick and speed its bike is set going at after that tick's step.
     shove: Option<(usize, u64, ps2_float::Vf)>,
+    /// MD173: every seat's quad, as the shell hands the session them ([`Rides::quads`]).
+    quads: Vec<Option<vehicle::AtvRide>>,
 }
 
 impl Machine2 {
@@ -360,7 +362,7 @@ impl Machine2 {
                 sim
             })
             .collect();
-        Machine2 { sims, world: Flat::default(), cars: vec![cars.to_vec(); net::SEATS], glitch: false, shove: None }
+        Machine2 { sims, world: Flat::default(), cars: vec![cars.to_vec(); net::SEATS], glitch: false, shove: None, quads: Vec::new() }
     }
 
     fn frame(&mut self, np: &mut Netplay<rides::State>, local: &[Report]) {
@@ -376,7 +378,7 @@ impl Machine2 {
                 sim.rider.ride.chassis.vel = vel;
             }
         };
-        let mut game = Rides { quads: &mut [], fliers: &mut [], sims: &mut self.sims, world: &mut self.world, after: Some(&mut after), time_scale: None, plane: None, cars: &self.cars };
+        let mut game = Rides { quads: &mut self.quads, fliers: &mut [], sims: &mut self.sims, world: &mut self.world, after: Some(&mut after), time_scale: None, plane: None, cars: &self.cars };
         np.frame(&mut game, local, ROUND.as_secs_f32());
     }
 
@@ -598,7 +600,7 @@ fn an_online_bike_is_stopped_by_the_other_seats_parked_car() {
                 sim
             })
             .collect();
-        Machine2 { sims, world: Flat::default(), cars: vec![cars; net::SEATS], glitch: false, shove: Some((0, 60, Vf::new(0.0, 0.0, 30.0, 0.0))) }
+        Machine2 { sims, world: Flat::default(), cars: vec![cars; net::SEATS], glitch: false, shove: Some((0, 60, Vf::new(0.0, 0.0, 30.0, 0.0))), quads: Vec::new() }
     };
     // g's seat on the buggy from its first tick, never on the gas; the host's pad idle.
     let pad = |seat: usize, _: usize| {
@@ -651,6 +653,127 @@ fn an_online_bike_is_stopped_by_the_other_seats_parked_car() {
         assert!(fastest > idle + 1.0, "{who}: the car was pushed to {fastest} ft/s along the bike's way (with no hull {idle})");
         // Parked on an idle pad the buggy creeps on along its nose a little either way.
         assert!(pushed > still + 1.0, "{who}: the car moved {pushed} ft along the bike's way (with no hull {still})");
+    }
+}
+
+/// MD173: an online bike meets the other seat's quad as split screen's does (MD179). g's seat takes
+/// openmx-mods' Race 250 P where its bike stands, 25 ft up the host's way and facing along it, and
+/// leaves it standing, its pad idle; at tick 60 the host's bike is set rolling into its tail at 30
+/// ft/s. On both machines its body rays strike the quad's hull (`ATV_R_ChasisF.col`): the bike is held
+/// behind the quad, short of where it rolls on to through a quad with no hull, and its resolve pushes
+/// the quad along its way, where the quad with no hull stands; and the two machines agree tick for
+/// tick throughout. A state taken while the bike's mirrors are on the quad's record hashes the same
+/// read back (a resync's or a join's). Skips without the disc or the pack in this checkout's mods
+/// folder.
+#[test]
+fn an_online_bike_is_stopped_by_the_other_seats_quad() {
+    use game_sim::bike_col::{self, BikeCol};
+    use net::Game;
+    use ps2_float::Vf;
+    let pack = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../mods/machines/mxvatv_atv");
+    if !pack.join("mod.json").is_file() {
+        eprintln!("skipped: no mods/machines/mxvatv_atv (openmx-mods' import-atv makes it)");
+        return;
+    }
+    let Some(mut disc) = disc() else { return };
+    let res = disc.res("Tracks\\free09_ss_2.res").expect("the split track's archive");
+    let read = |name: String| res.read_suffix(&name).unwrap_or_else(|e| panic!("{e}"));
+    let col = std::sync::Arc::new(
+        BikeCol::load(&read(bike_col::rays_file(bike_col::MODEL)), &read(bike_col::shape_file(bike_col::MODEL))).expect("the bike's collision files"),
+    );
+    let bikes: Vec<String> = disc.entries().iter().map(|e| e.name.clone()).filter(|n| n.to_ascii_lowercase().starts_with("bike\\")).collect();
+    let phy = bikes.iter().find_map(|b| disc.res(b).ok()?.read_suffix("race125p.phy").ok()).expect("race125p.phy");
+    let tables = game_sim::ride::Tables::build();
+    let phy = game_sim::phy::Phy::read_bytes(&phy, &tables.curve);
+    let files = game_render::disc::Res::folder(&pack).expect("the pack's folder reads");
+    let quad = vehicle::AtvRide::read("mxvatv_atv", "Veh/atv_Race250P.phy", &mut |n| files.read(&n.replace('/', "\\")).ok())
+        .expect("the quad builds");
+    assert!(quad.hull.is_some(), "the pack has no ATV_R_ChasisF.col");
+    let machine = |hull: bool| {
+        let mut quad = quad.clone();
+        if !hull {
+            quad.hull = None;
+        }
+        let sims = [0.0, 25.0]
+            .into_iter()
+            .map(|z| {
+                let mut sim = Sim::new(0x173);
+                std::sync::Arc::make_mut(&mut sim.phy).collisions = phy.collisions;
+                let mounts = game_sim::stock::mounts(&sim.phy);
+                sim.rider = game_sim::rider::Rider::new(&sim.phy, mounts, Vf::new(0.0, 1.0, z, 1.0), game_sim::stock::FACING, Default::default());
+                sim.rider.sense.wrecks_enabled = false;
+                sim.rider.carries_bike_col(std::sync::Arc::clone(&col));
+                sim
+            })
+            .collect();
+        let quads = vec![Some(quad); net::SEATS];
+        Machine2 { sims, world: Flat::default(), cars: vec![Vec::new(); net::SEATS], glitch: false, shove: Some((0, 60, Vf::new(0.0, 0.0, 30.0, 0.0))), quads }
+    };
+    // g's seat on the quad from its first tick, never on the gas; the host's pad idle.
+    let pad = |seat: usize, _: usize| {
+        let mut r = Report::from_buttons(0);
+        if seat == 1 {
+            r.0[net::SWITCH] = vehicle::Wanted { to: Some(Kind::Atv), dpad_rides: true, ..Default::default() }.byte();
+        }
+        r
+    };
+    let ride = |hull: bool| {
+        let lineup = Lineup::parse("host,g").unwrap();
+        driven();
+        let mut nets: Vec<Netplay<rides::State>> =
+            ["host", "g"].iter().map(|me| Netplay::new(lineup.clone(), me, Timing::default(), dumps()).unwrap()).collect();
+        let mut games: Vec<Machine2> = (0..2).map(|_| machine(hull)).collect();
+        // The quad where it stood at the shove, and how fast it went in the second and a half after.
+        let mut parked: Vec<Option<f32>> = vec![None; 2];
+        let mut fastest = [0.0f32; 2];
+        let mut sent = 0;
+        rounds_on(&mut nets, &mut games, 3, 0..160, &pad, |_, _, games| {
+            for (i, g) in games.iter().enumerate() {
+                let Some(lane) = g.sims[1].quad.as_ref() else { continue };
+                // The state, while the bike's strikes are on the quad's list, through the codec.
+                let held = &lane.ride.recorded.as_ref().expect("the quad's record").held;
+                if held.entries.iter().any(|e| e.contact.other.is_some()) {
+                    let (mut sims, mut quads, mut world) = (g.sims.clone(), g.quads.clone(), Flat::default());
+                    let mut r = Rides { quads: &mut quads, fliers: &mut [], sims: &mut sims, world: &mut world, after: None, time_scale: None, plane: None, cars: &g.cars };
+                    let (bytes, want) = (r.encode().expect("a state"), r.hash());
+                    r.decode(&bytes).expect("the state reads back");
+                    assert_eq!(r.hash(), want, "the state read back at tick {} hashes apart", g.sims[0].ticks);
+                    sent += 1;
+                }
+                match g.sims[0].ticks {
+                    ..=60 => parked[i] = Some(lane.ride.body.position.z()),
+                    61..=105 => fastest[i] = fastest[i].max(lane.ride.body.velocity.z()),
+                    _ => {}
+                }
+            }
+        });
+        assert!(nets.iter().all(|np| np.desyncs.is_empty() && !np.desynced), "the machines parted");
+        let n = agree(&nets, 0);
+        assert!(n > 120, "only {n} ticks agreed");
+        assert_eq!(sent > 0, hull, "{sent} states read back with the bike's strikes on the quad's list");
+        games
+            .iter()
+            .zip(parked)
+            .zip(fastest)
+            .map(|((g, parked), fastest)| {
+                assert!(g.sims[0].ticks > 100, "the host's bike rode {} ticks", g.sims[0].ticks);
+                let parked = parked.expect("the quad stood before the shove");
+                let quad = g.sims[1].quad.as_ref().expect("the quad is out").ride.body.position.z();
+                (g.sims[0].rider.ride.position().z(), quad - parked, fastest, parked)
+            })
+            .collect::<Vec<_>>()
+    };
+    let (met, through) = (ride(true), ride(false));
+    for (who, (&(bike, pushed, fastest, parked), &(past, still, idle, _))) in ["host", "g"].iter().zip(met.iter().zip(&through)) {
+        println!(
+            "{who}: quad parked at z {parked}; bike at z {bike}, the quad pushed {pushed} ft, at most {fastest} ft/s; with no hull the bike at z {past}, the quad moved {still} ft, at most {idle} ft/s"
+        );
+        assert!(past > parked + 5.0, "{who}: with no hull the bike stopped at z {past}, short of the quad's far side");
+        // The quad is light beside a car: shoved ahead, the bike follows it on but stays behind it.
+        assert!(bike < parked + pushed, "{who}: the bike went on to z {bike}, through the quad at z {}", parked + pushed);
+        assert!(bike < past - 3.0, "{who}: the bike reached z {bike}, as far as with no hull (z {past})");
+        assert!(fastest > idle + 1.0, "{who}: the quad was pushed to {fastest} ft/s along the bike's way (with no hull {idle})");
+        assert!(pushed > still + 0.5, "{who}: the quad moved {pushed} ft along the bike's way (with no hull {still})");
     }
 }
 

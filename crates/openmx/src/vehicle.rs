@@ -2178,10 +2178,16 @@ fn quad_spot(lane: &game_sim::quad::Lane, world: &mut dyn World) -> Spot {
 /// [`Sim::quad`]: the track's path cars, then the quad on the seat's `controls` (its bike's hands,
 /// as offline), the bike not stepped. A seat not on its quad does nothing; `false` then.
 pub fn ride_lane(sim: &mut Sim, controls: &Controls, dt: F, world: &mut dyn World) -> bool {
+    ride_lane_met(sim, controls, dt, world, None)
+}
+
+/// [`ride_lane`] among the riders' bikes (MD173): `met`, the mirrors of their strikes on the quad's
+/// hull and their chassis ([`AtvRide::step_met`]), as split screen's [`Garage::step_among`] has them.
+pub fn ride_lane_met(sim: &mut Sim, controls: &Controls, dt: F, world: &mut dyn World, met: Option<&flight::Met>) -> bool {
     let Some(lane) = sim.quad.as_deref_mut() else { return false };
     sim.traffic.frame(dt, world);
     lane.ride.rest.clear();
-    lane.ride.step(controls, dt, world, lane.segments);
+    lane.ride.step_met(controls, dt, world, lane.segments, met);
     let down = lane.ride.down();
     if down && !lane.was_down {
         lane.wrecks += 1;
