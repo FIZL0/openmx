@@ -216,6 +216,24 @@ pub struct Assets {
     /// While the ride's own models load ([`Assets::own`]), how many of the archives at the front are
     /// the map's: they are searched last, and their answers are not these. 0 the rest of the time.
     map: usize,
+    /// While a pack's model loads under a key of its own ([`Assets::load_key`]), the key's pack part
+    /// (`mxvatv_fliers:`): its materials and textures are remembered apart from the disc's of the
+    /// same names. Empty the rest of the time.
+    scope: String,
+}
+
+/// The key a pack's model is loaded under ([`Assets::load_key`]): the pack's id, a colon, the
+/// model's file name.
+pub fn pack_key(pack: &str, name: &str) -> String {
+    format!("{pack}:{name}")
+}
+
+/// A model key's pack part, colon and all (empty for the disc's), and its file name.
+pub fn split_key(key: &str) -> (&str, &str) {
+    match key.rfind(':') {
+        Some(i) => key.split_at(i + 1),
+        None => ("", key),
+    }
 }
 
 impl Assets {
@@ -249,9 +267,25 @@ impl Assets {
     /// What a material or texture file is remembered by: the map's and the ride's own apart.
     fn answer_key(&self, name: &str) -> String {
         match self.map {
-            0 => name.to_string(),
-            _ => format!("own:{name}"),
+            0 => format!("{}{name}", self.scope),
+            _ => format!("own:{}{name}", self.scope),
         }
+    }
+
+    /// Load a model by its key (P325): a plain name is [`Assets::load`]'s, and `pack:name`
+    /// ([`pack_key`]) loads the file `name` kept under the whole key, its materials and textures
+    /// apart from the disc's too. A pack's flier files carry the disc's very names (`biplane`,
+    /// `kiowa2`, `propconeblur`, `Pitts_body01`), and keyed by name whichever loaded first was drawn
+    /// for both.
+    pub fn load_key(&mut self, archives: &[Res], key: &str) -> bool {
+        let (scope, name) = split_key(key);
+        if scope.is_empty() {
+            return self.load(archives, name);
+        }
+        let was = std::mem::replace(&mut self.scope, scope.to_string());
+        let loaded = self.load_as(archives, name, key);
+        self.scope = was;
+        loaded
     }
 
     /// Load one model by the name a scene uses for it, from the first archive that has it. Returns

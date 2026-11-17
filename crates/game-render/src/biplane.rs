@@ -55,7 +55,7 @@ use crate::mat::{M4, V3, v3};
 use crate::psg::Model;
 use crate::rider::Anchors;
 use crate::vehicle::about;
-use crate::world::Assets;
+use crate::world::{Assets, split_key};
 use game_sim::biplane_anim::{self, Surfaces};
 use game_sim::motion::Animations;
 
@@ -111,6 +111,9 @@ pub struct Biplane {
     pub seat: V3,
     /// `PropDummy`'s index among the model's nodes: where a [`Biplane::pose`] has the turned prop.
     pub prop_node: Option<usize>,
+    /// The names its two prop cones are loaded under in [`Assets`]: [`PROP`] and [`PROP_BROKEN`],
+    /// or a pack's own under its key (P325).
+    pub cones: [String; 2],
 }
 
 impl Biplane {
@@ -121,18 +124,22 @@ impl Biplane {
     }
 
     /// [`Biplane::load`] of the plane's model `model` by name (`biplane3`, MX vs. ATV's second model,
-    /// MD80e), with the same prop cones.
+    /// MD80e), with the same prop cones. A pack's model is asked for by its key
+    /// ([`crate::world::pack_key`], P325), and its cones are the pack's under the same pack part.
     pub fn load_model(assets: &mut Assets, archives: &[Res], model: &str) -> Option<Biplane> {
-        if !assets.load(archives, model) {
+        if !assets.load_key(archives, model) {
             return None;
         }
+        let scope = split_key(model).0;
+        let cones = [PROP, PROP_BROKEN].map(|cone| format!("{scope}{cone}"));
         // A plane with no cone still flies; it is drawn without one.
-        assets.load(archives, PROP);
-        assets.load(archives, PROP_BROKEN);
+        for cone in &cones {
+            assets.load_key(archives, cone);
+        }
         // The blur's disc is see-through, but its material writes depth (V107): drawn before the
         // train's carriages, a bike or a toy behind it, it hid them inside the disc. Its blended
         // surfaces leave depth alone, and both renderers draw those after everything that does.
-        for cone in [PROP, PROP_BROKEN] {
+        for cone in &cones {
             if let Some(loaded) = assets.models.get_mut(cone) {
                 for s in loaded.surfaces.iter_mut().filter(|s| s.blend) {
                     s.depth_write = false;
@@ -146,6 +153,7 @@ impl Biplane {
             anchors: SEAT.map(|name| node(loaded, name).map(|m| m.point(v3(0.0, 0.0, 0.0)).sub(PILOT_SEAT))),
             prop_node: loaded.nodes.iter().position(|n| n.name.eq_ignore_ascii_case(PROP_NODE)),
             seat: PILOT_SEAT,
+            cones,
         })
     }
 
@@ -168,7 +176,7 @@ impl Biplane {
     pub fn parts(&self, at: M4, crashed: bool) -> Vec<(&str, M4)> {
         let mut out = vec![(self.model.as_str(), at)];
         if let Some(prop) = self.prop {
-            out.push((if crashed { PROP_BROKEN } else { PROP }, prop.mul(at)));
+            out.push((self.cone(crashed), prop.mul(at)));
         }
         out
     }
@@ -188,9 +196,20 @@ impl Biplane {
         if let Some(bind) = self.prop {
             let (s, c) = angle.sin_cos();
             let turned = M4([[c, s, 0.0, 0.0], [-s, c, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], bind.0[3]]);
-            out.push((PROP, turned.mul(at)));
+            out.push((self.cone(false), turned.mul(at)));
         }
         out
+    }
+
+    /// The name the bent cone (`broken`) or the blur is loaded under.
+    pub fn cone(&self, broken: bool) -> &str {
+        &self.cones[usize::from(broken)]
+    }
+
+    /// The names of everything it draws in [`Assets`]: the plane and its two cones, what the GPU
+    /// uploads for it.
+    pub fn models(&self) -> [String; 3] {
+        [self.model.clone(), self.cones[0].clone(), self.cones[1].clone()]
     }
 
     /// Where to draw the pilot for a plane placed at `at`: its root in [`Biplane::seat`], turned
@@ -217,8 +236,7 @@ impl Biplane {
         let mut out = vec![(self.model.as_str(), at)];
         let prop = self.prop_node.and_then(|i| pose.get(i).copied()).or(self.prop);
         if let Some(prop) = prop {
-            let cone = if surfaces.cone == biplane_anim::CONE_BENT { PROP_BROKEN } else { PROP };
-            out.push((cone, prop.mul(at)));
+            out.push((self.cone(surfaces.cone == biplane_anim::CONE_BENT), prop.mul(at)));
         }
         out
     }

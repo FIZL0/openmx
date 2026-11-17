@@ -794,7 +794,7 @@ fn refit_fliers(
             // Drawn as the load draws it: the pack's skin seated on its model's pelvis box (P316),
             // or the disc's in the livery picked.
             let drawn = match (pack.filter(|_| mxvatv.is_some()), res) {
-                (Some(f), _) => Biplane::load_model(assets, std::slice::from_ref(&f.files), &f.skin).map(|d| {
+                (Some(f), _) => Biplane::load_model(assets, std::slice::from_ref(&f.files), &flier_refit::model_key(f)).map(|d| {
                     match f.phy_bytes().map(|b| biplane::mxvatv_seat(phy::Plane::read_mxvatv_bytes(&b, f.model_one()).plane.pelvis_box.position)) {
                         Some(seat) => d.with_seat(seat),
                         None => d,
@@ -804,7 +804,7 @@ fn refit_fliers(
                 (None, None) => None,
             };
             if let Some(d) = drawn {
-                models.extend([d.model.clone(), biplane::PROP.to_string(), biplane::PROP_BROKEN.to_string()]);
+                models.extend(d.models());
                 put(plane_drawn, l, d);
             }
             changed.push((l, Machine::Biplane));
@@ -824,15 +824,14 @@ fn refit_fliers(
             // Drawn in the pack's skin where it flies off the pack, else the disc's livery (V113).
             let pack = fl.kiowa.as_ref().filter(|_| lot.kiowa_of(l).is_some_and(|k| k.mxvatv.is_some()));
             let name = match pack {
-                Some(f) => f.skin.clone(),
+                Some(f) => flier_refit::model_key(f),
                 None => game_render::kiowa::MODELS[fl.original_of(Machine::Helicopter)].to_string(),
             };
             let from = pack.map(|f| &f.files).or(res);
             if let Some(d) = from.and_then(|r| Kiowa::load_model(assets, std::slice::from_ref(r), &name)).and_then(|_| Kiowa::found_model(assets, &name)) {
-                put(&mut lot.mxvatv_kiowa, l, name.clone());
+                put(&mut lot.mxvatv_kiowa, l, name);
+                models.extend(d.models());
                 put(kiowa_drawn, l, d);
-                use game_render::kiowa::{BLADE_BENT, BLADE_BLUR, TAIL_BENT, TAIL_BLUR};
-                models.extend([name, BLADE_BLUR.into(), BLADE_BENT.into(), TAIL_BLUR.into(), TAIL_BENT.into()]);
                 // The software path's posed copies are the old skin's.
                 for p in (0..seats.len()).filter(|i| mine(i)) {
                     assets.models.remove(&format!("kiowa@seat{p}"));
@@ -5675,7 +5674,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         (0..vehicle::LIVERIES).map(|l| fliers[l].kiowa.as_ref().filter(|_| lot.kiowa_of(l).is_some_and(|k| k.mxvatv.is_some()))).collect();
     lot.mxvatv_kiowa = (0..vehicle::LIVERIES)
         .map(|l| match kiowa_pack[l] {
-            Some(f) => f.skin.clone(),
+            Some(f) => flier_refit::model_key(f),
             None => game_render::kiowa::MODELS[fliers[l].original_of(Machine::Helicopter)].to_string(),
         })
         .collect();
@@ -5697,7 +5696,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             let seat = if liveries > 1 { format!("P{} ", l + 1) } else { String::new() };
             match kiowa_pack[l] {
                 Some(f) => {
-                    println!("kiowa: {seat}{}'s, on its steps, drawn in {}", f.id, lot.mxvatv_kiowa[l]);
+                    println!("kiowa: {seat}{}'s, on its steps, drawn in {}", f.id, f.skin);
                     // Its thrown blades' files, the pack's where it has them (MD109).
                     let blades = flier_refit::blade_files(res, Some(f)).from_pack;
                     println!("kiowa: {seat}thrown blades: {blades} of 4 files off {}, the rest the disc's", f.id);
@@ -5733,7 +5732,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     // Its pilot sits on the skin's model's pelvis box, as SLUS-21104 seats it (P316).
                     Some(f) => {
                         let seat = f.phy_bytes().map(|b| biplane::mxvatv_seat(phy::Plane::read_mxvatv_bytes(&b, f.model_one()).plane.pelvis_box.position));
-                        let d = Biplane::load_model(&mut assets, std::slice::from_ref(&f.files), &f.skin)?;
+                        let d = Biplane::load_model(&mut assets, std::slice::from_ref(&f.files), &flier_refit::model_key(f))?;
                         Some(match seat {
                             Some(seat) => d.with_seat(seat),
                             None => d,
@@ -5749,7 +5748,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             for (l, d) in drawn.iter().enumerate().filter(|_| picked) {
                 let seat = if liveries > 1 { format!("P{} ", l + 1) } else { String::new() };
                 match plane_pack[l] {
-                    Some(f) => println!("biplane: {seat}{}'s, drawn in {}", f.id, d.model),
+                    Some(f) => println!("biplane: {seat}{}'s, drawn in {}", f.id, f.skin),
                     None => println!("biplane: {seat}MX Unleashed's, drawn in {}", d.model),
                 }
             }
@@ -8186,13 +8185,13 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         // pick offline loads one (`refit_fliers`).
         online_drawn_from = plane_drawn.len();
         for (l, f) in &local {
-            let Some(d) = Biplane::load_model(&mut assets, std::slice::from_ref(&f.files), &f.skin) else { continue };
+            let Some(d) = Biplane::load_model(&mut assets, std::slice::from_ref(&f.files), &flier_refit::model_key(f)) else { continue };
             let d = match f.phy_bytes().map(|b| biplane::mxvatv_seat(phy::Plane::read_mxvatv_bytes(&b, f.model_one()).plane.pelvis_box.position)) {
                 Some(seat) => d.with_seat(seat),
                 None => d,
             };
             online_drawn.push((l.skin.pack.clone(), l.skin.skin.clone(), plane_drawn.len()));
-            online_models.extend([d.model.clone(), biplane::PROP.to_string(), biplane::PROP_BROKEN.to_string()]);
+            online_models.extend(d.models());
             plane_drawn.push(d);
         }
         on.fliers_here(packs, local.into_iter().map(|(l, _)| l).collect());
@@ -11386,7 +11385,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 let alpha = vehicle::shown_alpha(1.0, seat.paused);
                 actors.extend(kiowa_draw::actors(drawn, &assets, &rotor, at, alpha, &mut gpu_poses));
                 // And its thrown blades (P265), each at its own node, as the tick left it.
-                actors.extend(kiowa_draw::blades(heli).into_iter().map(|at| Actor { model: game_render::kiowa::BLADE_BENT, at, pose: None, lod_from: None, alpha, casts: false }));
+                actors.extend(kiowa_draw::blades(heli).into_iter().map(|at| Actor { model: drawn.bent(), at, pose: None, lod_from: None, alpha, casts: false }));
                 // And its pilot in the seat, as the plane's (P216b).
                 if let (Some(Some(pilot)), Some(model)) = (heli_pilots.get(p), &rigs[p].body_model) {
                     gpu_poses.push(pilot.palette.clone());
@@ -11856,7 +11855,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 let before = before_helis.get(p).copied().flatten().filter(|_| !cut[p]);
                 let Some((at, rotor)) = heli_drawn(heli, before, &blend) else { continue };
                 actor.extend(kiowa_draw::skinned(drawn, &heli_copies[p], &mut assets, &rotor, at));
-                actor.extend(kiowa_draw::blades(heli).into_iter().map(|at| (game_render::kiowa::BLADE_BENT, at)));
+                actor.extend(kiowa_draw::blades(heli).into_iter().map(|at| (drawn.bent(), at)));
                 if let (Some(Some(pilot)), Some(model)) = (heli_pilots.get(p), &rigs[p].body_model) {
                     if let Some(loaded) = assets.models.get_mut(model.as_str()) {
                         loaded.tris = perf.time(Stage::Skinning, || game_render::skin::skin(&loaded.model, &pilot.palette, RIDER_GROUP));
