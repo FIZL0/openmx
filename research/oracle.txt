@@ -13403,3 +13403,21 @@ race_finish_listener        boot 0x002fc410 slot +0x14 (Finished; thunk 0x003004
 #   place from car+0xd30, look words +0xd60..+0xd68 to the camera (+0x6a4), a ground query under +0x80
 #   raised 0.3 along the normal, rows from +0xd40, then 0x004c8880, vt +0x3a0/+0x39c, event 0x0025e740;
 #   then the tire resets 0x004d74c0 x4 and engine reset 0x004d65c0 (SLUS-21104's shape). Not ported.
+
+# MD134 — the part reader's box frame (quad::spawn_frame / Load::read_model, tests/atv_quad/load.rs
+#   the_models_box_is_the_c28_records_but_one_float, now exact on all four C28 images).
+#   Creation: factory 0x002cfc90 -> ctor 0x004b8530 -> vt +0x340 0x004b8ab0 -> 0x004de920: 0x004a6140 copies
+#   desc point/heading to quad +0x50/+0x60 and (0,1,0,1) (0x00397000) to +0x70; 0x004dff90 loads the model;
+#   0x00194af0(node, +0x50); 0x00194260(node, 0, +0x60, +0x70, 0, 1, 0) -> rows 0x001340b0 (unit up, unit
+#   heading by vrsqrt/vmulq, x = vopmula/vopmsub(up, heading)); then the init vt +0x46c 0x004b9db0.
+#   Init: 0x004920a0 reads +0x50/+0x60/+0x70 back off the node (w 0), load path vt +0xdc 0x004922a0 ->
+#   vt +0xe8 0x004a4c60 -> 0x00492ca0 -> place vt +0xf0 0x00492e50(quad, +0x50, +0x60, +0x70):
+#   up = (h x up) x h (vopmula/vopmsub pairs), then h and up each made unit again (vmul.xyz, vadday.x,
+#   vmaddz.x by vf0w, vrsqrt, vmulq.xyz), +0x50 w = 1, quaternion 0x00135860, body vt(+0x110)+0x10 position,
+#   +0x58 orientation with 0x00396fc0, +0x3c; node translation = body +0x70 less body +0x1a0 turned by +0x190,
+#   0x00194b10(node, 0, that), 0x00194260(node, 0, +0x60, +0x70, 0, 1, 0). Mounts vt +0x470 and the phy load
+#   vt +0xf4 (part reader 0x00493210, box 0x001961f0) both run after it, at the end of the init (0x004ba2c8).
+#   Start spot (RAM, no static refs) 0x00669e40 point 45301cf5 42f428f5 454e7828, 0x00669e50 heading
+#   3f75c28f 0 be999999; unit(heading) = 3f7458cc 0 be98b77f = quad +0x60; unit again 3f7458cd 0 be98b780.
+#   Frame rows_facing(start point, unit(unit(start heading))) = spawn_frame(start point, quad +0x60):
+#   box 400833cd 3ff98919 40410f77 (= the box rec +0x60 needs) and the four mounts bit-exact.

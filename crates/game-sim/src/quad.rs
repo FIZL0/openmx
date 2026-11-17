@@ -3839,11 +3839,11 @@ impl Load {
         w
     }
 
-    /// Load a parsed file with the model's inputs read off the model at the quad's spawn point `at`
-    /// and `heading`: the part reader's box in the heading's own frame ([`heading_frame`]), the
-    /// mounts in the unit one ([`spawn_frame`]).
+    /// Load a parsed file with the model's inputs read off the model at the quad's start spot `at`
+    /// facing `heading`: the part reader's box and the mounts both in [`spawn_frame`] (MD134).
     pub fn read_model(ini: &crate::phy::Ini, model: &Model, at: Vf, heading: Vf, curve: &crate::camera::CurveTable) -> Result<Load, String> {
-        Ok(Load::read(ini, model.half_box(&heading_frame(at, heading)), model.mounts(&spawn_frame(at, heading))?, curve))
+        let frame = spawn_frame(at, heading);
+        Ok(Load::read(ini, model.half_box(&frame), model.mounts(&frame)?, curve))
     }
 }
 
@@ -3960,17 +3960,13 @@ impl Model {
     }
 }
 
-/// **The quad's placement as the wheel setup reads the model in it**: at `at`, facing `heading` made
-/// unit length ([`crate::contact::unit`]) as the third row, upright (`(0, 1, 0)`) and the first row
-/// their cross, `(z.z, 0, -z.x)`. The quad keeps both as its spawn point and heading.
+/// **The quad's placement as the wheel setup and the part reader read the model in it**: at `at`,
+/// facing `heading` made unit length ([`crate::contact::unit`]) as the third row, upright (`(0, 1, 0)`)
+/// and the first row their cross, `(z.z, 0, -z.x)`. Both readers run after the load path re-places
+/// the node at the start spot with the kept heading made unit once more, so `at` is the start spot
+/// (not where the quad has settled since) and `heading` the kept one, already unit (MD134).
 pub fn spawn_frame(at: Vf, heading: Vf) -> crate::math::Mat4 {
     rows_facing(at, crate::contact::unit(heading))
-}
-
-/// **The quad's placement as the part reader reads the model in it**: [`spawn_frame`] with the
-/// heading as kept, not made unit length.
-pub fn heading_frame(at: Vf, heading: Vf) -> crate::math::Mat4 {
-    rows_facing(at, heading)
 }
 
 fn rows_facing(at: Vf, z: Vf) -> crate::math::Mat4 {
