@@ -140,11 +140,24 @@ fn put_v(ee: &mut Ee, a: u32, v: Vf) {
     }
 }
 
+/// The word of RAM at `a`, and below `len` zeroed bytes at `base`, for the harness to lay out between
+/// calls. Straight into the RAM, not through [`Ee::set_u32`]: that notes every byte in the machine's
+/// written set, which `call` empties before it runs anyway, and those notes were most of this binary's
+/// time (K63).
+fn raw(ee: &mut Ee, a: u32) -> &mut [u8] {
+    assert!(a >> 28 != 7 && a & 0x1000_0000 == 0, "{a:#x} is not plain RAM");
+    let at = (a & 0x0fff_ffff) as usize;
+    &mut ee.ram[at..at + 4]
+}
+fn zero(ee: &mut Ee, base: u32, len: u32) {
+    assert!(base >> 28 != 7 && base & 0x1000_0000 == 0, "{base:#x} is not plain RAM");
+    let at = (base & 0x0fff_ffff) as usize;
+    ee.ram[at..at + len as usize].fill(0);
+}
+
 fn reset(ee: &mut Ee) {
     for (_, base, len) in REGIONS {
-        for o in (0..len).step_by(4) {
-            ee.set_u32(base + o, 0);
-        }
+        zero(ee, base, len);
     }
 }
 
@@ -2027,7 +2040,7 @@ fn lay_out_tires(ee: &mut Ee, l: &TireLayout) {
     let mut words = l.words.iter();
     for &(_, base, len) in &TIRE_REGIONS {
         for o in (0..len).step_by(4) {
-            ee.set_u32(base + o, *words.next().unwrap());
+            raw(ee, base + o).copy_from_slice(&words.next().unwrap().to_le_bytes());
         }
     }
     ee.set_u32(OBJ + 0x4, QUAD_VTABLE);
@@ -2104,28 +2117,73 @@ fn tire_paths(file: &TireFile, l: &TireLayout, t: &quad::TireSetup) -> Vec<&'sta
 /// the original may write nothing but them and its stack.
 #[test]
 fn the_quads_tire_reader_is_the_originals() {
-    let Some(mut ee) = image() else { return };
+    if image().is_none() {
+        return;
+    }
+    let mut g = Gen(0x64b0_0001);
+    let files: Vec<(TireFile, TireLayout)> = (0..10_000).map(|_| (g.tire_file(), g.tire_layout())).collect();
+    // The original reads each file in ~665k instructions, 190 s for all of them on one core: the files
+    // are split over eight machines on threads of their own, each its own image (K63).
+    const SHARDS: usize = 8;
+    let tallies: Vec<BTreeMap<&str, u32>> = std::thread::scope(|s| {
+        let shards: Vec<_> = (0..SHARDS).map(|k| s.spawn({
+            let files = &files;
+            move || tire_reader_shard(files, k, SHARDS)
+        })).collect();
+        shards.into_iter().map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e))).collect()
+    });
+    let mut tally = BTreeMap::new();
+    for (p, n) in tallies.into_iter().flatten() {
+        *tally.entry(p).or_insert(0u32) += n;
+    }
+    each_path_seen(
+        &tally,
+        &[
+            "front 16 surfaces",
+            "front no surfaces",
+            "front negative count",
+            "front some surfaces",
+            "rear count is the front's",
+            "rear 16 surfaces",
+            "rear own count",
+            "no rear section",
+            "no front radius",
+            "radius > 0",
+            "radius <= 0",
+            "steering inertia > 0",
+            "steering inertia kept",
+            "sweep rebuilt",
+            "no sweep",
+            "flag missing",
+            "flag word true",
+            "flag word false",
+            "flag number",
+        ],
+        50,
+    );
+    eprintln!("{tally:?}");
+}
+
+/// Every `shards`th of [`the_quads_tire_reader_is_the_originals`]' files from the `shard`th, on an
+/// image of its own; what each took, tallied.
+fn tire_reader_shard(files: &[(TireFile, TireLayout)], shard: usize, shards: usize) -> BTreeMap<&'static str, u32> {
+    let mut ee = image().expect("the image went away");
     let file = Rc::new(RefCell::new(Ini::default()));
     let sweeps = Rc::new(RefCell::new(vec![]));
     hook_tire_ini(&mut ee, &file, &sweeps);
-    let mut g = Gen(0x64b0_0001);
     let mut tally = BTreeMap::new();
     let strtok_last = ee.u32_at(IMPURE_PTR) + 0x5c;
     // `strtod`'s big numbers come out of a pool the image has already allocated: its freelist and the
     // blocks after it.
     let pool = ee.u32_at(ee.u32_at(IMPURE_PTR) + 0x4c);
-    for k in 0..10_000 {
-        let f = g.tire_file();
-        let l = g.tire_layout();
-        let ini = Ini::parse(&tire_text(&f));
+    for (k, (f, l)) in files.iter().enumerate().skip(shard).step_by(shards) {
+        let ini = Ini::parse(&tire_text(f));
         *file.borrow_mut() = ini.clone();
         sweeps.borrow_mut().clear();
         lay_out_tires(&mut ee, &l);
         // A missing front count leaves the reader's stack word: make it a known zero.
         let frame = ee.stack - 0x2000;
-        for o in (0..0x2000).step_by(4) {
-            ee.set_u32(frame + o, 0);
-        }
+        zero(&mut ee, frame, 0x2000);
         ee.call(TIRE_PHY, &[u64::from(OBJ), u64::from(INI)], &[], 20_000_000);
         for (a, b) in ee.written_ranges() {
             let inside = TIRE_REGIONS.iter().any(|&(_, base, len)| a >= base && b <= base + len)
@@ -2161,36 +2219,11 @@ fn the_quads_tire_reader_is_the_originals() {
             .collect();
         let bits = |c: &[SweepCall]| c.iter().map(|&(s, o, a, b, x, y)| (s, o, a.0.map(f32::to_bits), b.0.map(f32::to_bits), x, y)).collect::<Vec<_>>();
         assert_eq!(bits(&original_sweeps), bits(&port_sweeps), "file {k}: the sweep rebuilds differ\n{}", tire_text(&f));
-        for p in tire_paths(&f, &l, &t) {
+        for p in tire_paths(f, l, &t) {
             *tally.entry(p).or_insert(0u32) += 1;
         }
     }
-    each_path_seen(
-        &tally,
-        &[
-            "front 16 surfaces",
-            "front no surfaces",
-            "front negative count",
-            "front some surfaces",
-            "rear count is the front's",
-            "rear 16 surfaces",
-            "rear own count",
-            "no rear section",
-            "no front radius",
-            "radius > 0",
-            "radius <= 0",
-            "steering inertia > 0",
-            "steering inertia kept",
-            "sweep rebuilt",
-            "no sweep",
-            "flag missing",
-            "flag word true",
-            "flag word false",
-            "flag number",
-        ],
-        50,
-    );
-    eprintln!("{tally:?}");
+    tally
 }
 
 /// MD37a's RAM image and C28's four, and the files the player quad's `.phy` may be: the `r` images
@@ -3137,9 +3170,7 @@ fn all_regions() -> impl Iterator<Item = (&'static str, u32, u32)> {
 
 fn reset_all(ee: &mut Ee) {
     for (_, base, len) in all_regions() {
-        for o in (0..len).step_by(4) {
-            ee.set_u32(base + o, 0);
-        }
+        zero(ee, base, len);
     }
 }
 
@@ -4197,8 +4228,10 @@ fn each_unhooked_in(
         log.borrow_mut().clear();
         *answers.borrow_mut() = r.answers.iter().copied().collect();
         echo.set(r.echo);
-        reset_all(&mut ee);
-        poke_ride(&mut ee, &r);
+        ee.quietly(|ee| {
+            reset_all(ee);
+            poke_ride(ee, &r);
+        });
         match run {
             Listener::Head => ee.call(GROUND_HEAD, &[u64::from(OBJ)], &[r.s.dt.0], 200_000),
             Listener::Force => ee.call(GROUND_STEP, &[u64::from(OBJ)], &[r.s.dt.0], 2_000_000),
@@ -4226,8 +4259,10 @@ fn each_unhooked_in(
         u.bike = m.steps.bike;
         // The backflip's stunt id and the rider's stunt word are the bike's; the quad's poke writes
         // the balance word, which the port's quad does not change.
-        reset_all(&mut ee);
-        poke_ride(&mut ee, &u);
+        ee.quietly(|ee| {
+            reset_all(ee);
+            poke_ride(ee, &u);
+        });
         let now = snap_all(&ee);
         if let Some(i) = was.iter().zip(&now).position(|(a, b)| a != b) {
             panic!(
@@ -5443,9 +5478,7 @@ fn lay_list(ee: &mut Ee, col: u32, at: u32, l: &quad::List, buffer: u32) {
 fn poke_wreck_block(ee: &mut Ee, c: &WreckCase) {
     // The grown lists are read only up to their counts, so their room is not cleared.
     for (base, len) in WRECK_REGIONS.into_iter().take(3) {
-        for o in (0..len).step_by(4) {
-            ee.set_u32(base + o, 0);
-        }
+        zero(ee, base, len);
     }
     for (k, col) in [&c.w.riding, &c.w.frame, &c.w.sweep].into_iter().enumerate() {
         let at = PART_AT[2 + k];
@@ -5682,9 +5715,7 @@ struct SwapCase {
 
 fn poke_swap(ee: &mut Ee, c: &SwapCase) {
     for (base, len) in [(OBJ, 0x1800), (PART_AT[0], 0x1400)] {
-        for o in (0..len).step_by(4) {
-            ee.set_u32(base + o, 0);
-        }
+        zero(ee, base, len);
     }
     ee.set_u32(OBJ + 0xcc, c.r.active);
     ee.set_u32(OBJ + 0xd8, c.r.active_too);
@@ -5808,9 +5839,7 @@ fn the_quads_md65b_slots_hold_the_paired_functions() {
 /// The quad's object and its four wheels zeroed, and the wheels hung on the quad.
 fn lay_wheels(ee: &mut Ee) {
     for (base, len) in [(OBJ, 0x1800), (WHEEL[0], 0x4000)] {
-        for o in (0..len).step_by(4) {
-            ee.set_u32(base + o, 0);
-        }
+        zero(ee, base, len);
     }
     ee.set_u32(OBJ + 0x4, QUAD_VTABLE);
     for (k, w) in WHEEL.into_iter().enumerate() {
@@ -6020,9 +6049,7 @@ fn the_quads_ground_settle_is_the_originals() {
     let mut t = BTreeMap::new();
     for k in 0..10_000 {
         lay_wheels(&mut ee);
-        for o in (0..0x200).step_by(4) {
-            ee.set_u32(BODY + o, 0);
-        }
+        zero(&mut ee, BODY, 0x200);
         ee.set_u32(OBJ + 0xb8, BODY);
         ee.set_u32(OBJ + 0x3b4, GROUND_WORLD);
         let body = Body { orientation: if g.one_in(10) { g.vec(-2.0, 2.0) } else { g.quaternion() }, ..Body::default() };

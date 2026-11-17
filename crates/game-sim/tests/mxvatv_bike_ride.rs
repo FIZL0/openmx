@@ -4099,8 +4099,7 @@ impl Listeners for TreeInRam<'_> {
             } else {
                 vec![0..want.len()]
             };
-            let d: Vec<String> = (0..want.len())
-                .step_by(4)
+            let d: Vec<String> = words_of_differing_pages(&want, &self.ee.ram)
                 .filter(|a| !stack.contains(a) && bike.iter().any(|r| r.contains(a)) && want[*a..*a + 4] != self.ee.ram[*a..*a + 4])
                 .map(|a| format!("{a:#x}: port {:#010x}, original {:#010x}", self.ee.u32_at(a as u32), u32::from_le_bytes(want[a..a + 4].try_into().unwrap())))
                 .collect();
@@ -5231,14 +5230,14 @@ fn port_wreck(ee: &mut Ee, c: tail::Out, dt: F) {
 #[allow(clippy::float_arithmetic)]
 fn the_ground_reset_is_the_originals() {
     let Some(mut ee) = image().map(hooked) else { return };
-    let base = ee.ram.clone();
+    ee.mark();
     let mut g = Gen(0x0031_b5e0);
     let mut t = BTreeMap::new();
     let mut off = Vec::new();
     let body = ee.u32_at(BIKE + wreck::BODY);
     let riding = ee.u32_at(BIKE + 0xcc);
     for k in 0..10_000 {
-        ee.ram.clone_from(&base);
+        ee.undo();
         let quad = |ee: &mut Ee, at: u32, v: [f32; 4]| {
             for (i, x) in v.into_iter().enumerate() {
                 ee.set_f32(at + 4 * i as u32, x);
@@ -5267,12 +5266,17 @@ fn the_ground_reset_is_the_originals() {
         ee.set_u32(BIKE + 0xcc, if ride { riding } else { 0 });
         tally(&mut t, if on { "parts on" } else { "parts left" });
         tally(&mut t, if ride { "riding part" } else { "no riding part" });
-        let (before, spr) = (ee.ram.clone(), ee.spr.clone());
-        ee.set(28, GP);
-        ee.call(GROUND_RESET, &[u64::from(BIKE)], &[0.0], BUDGET);
-        let (want, want_spr) = (std::mem::replace(&mut ee.ram, before), std::mem::replace(&mut ee.spr, spr));
-        wreck::ground(&mut WreckInRam { ee: &mut ee, x: 0.0 });
-        let d = bytes_differ(&want, &ee.ram, ee.stack);
+        let (spr, mut want_spr, words) = (ee.spr.clone(), Vec::new(), stack_words(ee.stack));
+        let d = split_run(
+            &mut ee,
+            words,
+            |ee| {
+                ee.set(28, GP);
+                ee.call(GROUND_RESET, &[u64::from(BIKE)], &[0.0], BUDGET);
+                want_spr = std::mem::replace(&mut ee.spr, spr);
+            },
+            |ee| wreck::ground(&mut WreckInRam { ee, x: 0.0 }),
+        );
         if !d.is_empty() || want_spr != ee.spr {
             off.push(format!("{k} (on {on}, riding {ride}): RAM differs at {d:?}, scratchpad same {}", want_spr == ee.spr));
         }
@@ -5294,7 +5298,7 @@ fn the_ground_reset_is_the_originals() {
 fn the_out_of_bounds_check_is_the_originals() {
     let Some(mut ee) = image().map(hooked) else { return };
     assert_eq!(vt(&ee, 0x16c), OUT_OF_BOUNDS_FN, "the bike's vt +0x16c");
-    let base = ee.ram.clone();
+    ee.mark();
     let mut g = Gen(0x0031_b5f5);
     let mut t = BTreeMap::new();
     let mut off = Vec::new();
@@ -5303,7 +5307,7 @@ fn the_out_of_bounds_check_is_the_originals() {
     let world = ee.u32_at(BIKE + 0xe8);
     let image_extent = (ee.f32_at(extent + 0x40), ee.f32_at(extent + 0x48));
     for k in 0..12_000 {
-        ee.ram.clone_from(&base);
+        ee.undo();
         let held = !g.one_in(10);
         ee.set_u32(BIKE + 0x308, u32::from(held));
         let (w, d) = match g.bits() % 4 {
@@ -5348,13 +5352,19 @@ fn the_out_of_bounds_check_is_the_originals() {
         if middle && path != "not held" && path != "inside" {
             tally(&mut t, "thrown from the middle");
         }
-        let (before, spr) = (ee.ram.clone(), ee.spr.clone());
-        ee.set(28, GP);
-        ee.call(OUT_OF_BOUNDS_FN, &[u64::from(BIKE)], &[0.0], BUDGET);
-        let said = ee.r(2) as u32;
-        let (want, want_spr) = (std::mem::replace(&mut ee.ram, before), std::mem::replace(&mut ee.spr, spr));
-        let got = wreck::out_of_bounds(&mut WreckInRam { ee: &mut ee, x: 0.0 });
-        let diff = bytes_differ(&want, &ee.ram, ee.stack);
+        let (spr, mut want_spr, words) = (ee.spr.clone(), Vec::new(), stack_words(ee.stack));
+        let (mut said, mut got) = (0, 0);
+        let diff = split_run(
+            &mut ee,
+            words,
+            |ee| {
+                ee.set(28, GP);
+                ee.call(OUT_OF_BOUNDS_FN, &[u64::from(BIKE)], &[0.0], BUDGET);
+                said = ee.r(2) as u32;
+                want_spr = std::mem::replace(&mut ee.spr, spr);
+            },
+            |ee| got = wreck::out_of_bounds(&mut WreckInRam { ee, x: 0.0 }),
+        );
         if said != got || !diff.is_empty() || want_spr != ee.spr {
             off.push(format!("{k} ({path}, {x} {z} in {w} x {d}): said {said}, port {got}, RAM differs at {diff:?}, scratchpad same {}", want_spr == ee.spr));
         }
@@ -10437,7 +10447,11 @@ fn bytes_differ(a: &[u8], b: &[u8], stack: u32) -> Vec<String> {
     let stack = (stack.saturating_sub(0x4_0000) as usize)..(stack as usize + 0x400);
     let mut out = Vec::new();
     let mut run: Option<(usize, usize)> = None;
-    for i in (0..a.len()).step_by(4) {
+    // Page by page first: one slice compare passes a page that is the same, and most of 32 MB is.
+    // Word by word over all of it was most of the time of the oracles that compare every word of RAM
+    // (K63). A run only grows by the next word, so skipping a same page cannot change one.
+    let words = (0..a.len()).step_by(0x1000).filter(|&p| a[p..(p + 0x1000).min(a.len())] != b[p..(p + 0x1000).min(b.len())]);
+    for i in words.flat_map(|p| (p..(p + 0x1000).min(a.len())).step_by(4)) {
         let off = !stack.contains(&i) && a[i..i + 4] != b[i..i + 4];
         match (&mut run, off) {
             (Some((_, e)), true) if *e == i => *e = i + 4,
@@ -10450,6 +10464,66 @@ fn bytes_differ(a: &[u8], b: &[u8], stack: u32) -> Vec<String> {
     }
     out.extend(run.map(|(s, e)| format!("{s:#x}..{e:#x}")));
     out
+}
+
+/// `original` and then `port` from the same RAM, and where their RAMs came out different outside
+/// `ignore`, as [`bytes_differ`] says it of two whole copies: through the machine's journal
+/// ([`Ee::mark`]) rather than copies of all 32 MB, which were most of the time of the oracles that
+/// compare every word of RAM (K63). A page neither side wrote is the same in both. RAM is left as
+/// `port` left it. Marks the machine if it is not marked: a test that marks it at its image can put
+/// the image back with [`Ee::undo`] rather than a copy of it.
+fn split_run(ee: &mut Ee, ignore: std::ops::Range<usize>, original: impl FnOnce(&mut Ee), port: impl FnOnce(&mut Ee)) -> Vec<String> {
+    if !ee.marked() {
+        ee.mark();
+    }
+    let page = |ee: &Ee, at: u32| ee.ram[at as usize..at as usize + 0x1000].to_vec();
+    let before: Vec<(u32, Vec<u8>)> = ee.marked_pages().into_iter().map(|at| (at, page(ee, at))).collect();
+    original(ee);
+    let want: BTreeMap<u32, Vec<u8>> = ee.marked_pages().into_iter().map(|at| (at, page(ee, at))).collect();
+    ee.undo();
+    for (at, words) in &before {
+        ee.ram[*at as usize..*at as usize + 0x1000].copy_from_slice(words);
+    }
+    port(ee);
+    let mut out = Vec::new();
+    let mut run: Option<(usize, usize)> = None;
+    for at in ee.marked_pages() {
+        // A page only the port wrote held, for the original, what it held before the port's first write.
+        let theirs = want.get(&at).map(Vec::as_slice).unwrap_or_else(|| ee.at_mark(at));
+        let ours = &ee.ram[at as usize..at as usize + 0x1000];
+        if theirs == ours {
+            continue;
+        }
+        for o in (0..0x1000).step_by(4) {
+            let i = at as usize + o;
+            if ignore.contains(&i) || theirs[o..o + 4] == ours[o..o + 4] {
+                continue;
+            }
+            match &mut run {
+                Some((_, e)) if *e == i => *e = i + 4,
+                _ => {
+                    out.extend(run.take().map(|(s, e)| format!("{s:#x}..{e:#x}")));
+                    run = Some((i, i + 4));
+                }
+            }
+        }
+    }
+    out.extend(run.map(|(s, e)| format!("{s:#x}..{e:#x}")));
+    out
+}
+
+/// The word offsets of every 4 KiB page where `a` and `b` differ, in order: a word-by-word walk of a
+/// whole RAM was most of the replays' time, and most pages are the same (K63).
+fn words_of_differing_pages<'a>(a: &'a [u8], b: &'a [u8]) -> impl Iterator<Item = usize> + 'a {
+    (0..a.len())
+        .step_by(0x1000)
+        .filter(move |&p| a[p..(p + 0x1000).min(a.len())] != b[p..(p + 0x1000).min(b.len())])
+        .flat_map(move |p| (p..(p + 0x1000).min(a.len())).step_by(4))
+}
+
+/// What [`bytes_differ`] leaves out: the interpreter's stack and scratch.
+fn stack_words(stack: u32) -> std::ops::Range<usize> {
+    (stack.saturating_sub(0x4_0000) as usize)..(stack as usize + 0x400)
 }
 
 /// [`bytes_differ`] on two interpreters' RAMs, and their scratchpads.
@@ -10645,7 +10719,7 @@ fn the_damping_setters_are_the_ports() {
             ee.set_u32(a, w);
         }
         let stack = (ee.stack - 0x4_0000) as usize..(ee.stack + 0x400) as usize;
-        for i in (0..after.len()).step_by(4) {
+        for i in words_of_differing_pages(&after, &ee.ram) {
             if !stack.contains(&i) && after[i..i + 4] != ee.ram[i..i + 4] {
                 off.push(format!("{k}: {i:#x} original {:02x?}, port {:02x?}", &after[i..i + 4], &ee.ram[i..i + 4]));
             }
@@ -10813,7 +10887,7 @@ fn differing_bytes(a: &Ee, b: &Ee) -> Vec<std::ops::Range<u32>> {
         Some(r) if r.end == at => r.end = at + 4,
         _ => out.push(at..at + 4),
     };
-    for i in (0..a.ram.len()).step_by(4) {
+    for i in words_of_differing_pages(&a.ram, &b.ram) {
         if !stack.contains(&i) && a.ram[i..i + 4] != b.ram[i..i + 4] {
             add(i as u32);
         }
@@ -17537,11 +17611,11 @@ fn the_plant_stand_on_a_sphere_is_the_originals() {
     assert_eq!(n, 10, "state 4's species");
     assert!(ee.ram[F54_AREA as usize..F54_AREA as usize + 0x10000].iter().all(|&b| b == 0));
     let log: Calls = Rc::default();
-    let base = ee.ram.clone();
+    ee.mark();
     let mut g = Gen(0x0f54_0001);
     let (mut t, mut off) = (BTreeMap::new(), Vec::new());
     for k in 0..10_000 {
-        ee.ram.clone_from(&base);
+        ee.undo();
         let plant = F54_AREA;
         f54_plant(&mut ee, &mut g, plant, n, 1);
         let sp = ee.u32_at(list + 4 * u32::from(ee.u8_at(plant + 0x12)));
@@ -17618,11 +17692,11 @@ fn the_plant_stand_on_a_mesh_is_the_originals() {
     ee.set_u32(eco + 0x70, turns);
     ee.set_u32(part + 0xc, vtable);
     ee.set_u32(vtable + 0xcc, F54_MESH_SLOT);
-    let base = ee.ram.clone();
+    ee.mark();
     let mut g = Gen(0x0f54_0002);
     let (mut t, mut off) = (BTreeMap::new(), Vec::new());
     for k in 0..10_000 {
-        ee.ram.clone_from(&base);
+        ee.undo();
         let plant = F54_AREA;
         f54_plant(&mut ee, &mut g, plant, 1, 16);
         let i = g.bits() % 4;
@@ -17761,12 +17835,12 @@ fn the_riding_parts_listeners_are_the_originals() {
     log_hook(&mut ee, HEAP_RESIZE_F54, 4, &[], false, F54_AREA + 0x8000, &log);
     let (probe, struck, owner, entries) = (F54_AREA, F54_AREA + 0x200, F54_AREA + 0x1000, F54_AREA + 0x2000);
     let mask_at = ee.u32_at(BIKE + 0xe8) + 0xa4;
-    let base = ee.ram.clone();
+    ee.mark();
     let mut g = Gen(0x0f54_0004);
     let (mut t, mut off) = (BTreeMap::new(), Vec::new());
     let category = |g: &mut Gen| if g.one_in(4) { 1 << (g.bits() % 32) } else if g.one_in(5) { 0 } else { g.bits() };
     for k in 0..10_000 {
-        ee.ram.clone_from(&base);
+        ee.undo();
         set_u8(&mut ee, BIKE + 0x44, g.bits() as u8);
         ee.set_u32(mask_at, category(&mut g));
         ee.set_u32(struck + 0x94, category(&mut g));
@@ -17792,7 +17866,7 @@ fn the_riding_parts_listeners_are_the_originals() {
         }
     }
     for k in 0..10_000 {
-        ee.ram.clone_from(&base);
+        ee.undo();
         ee.set_u32(owner + 0x2c, category(&mut g));
         ee.set_u32(owner + 0x30, category(&mut g));
         ee.set_u32(struck + 0x94, category(&mut g));
@@ -17999,19 +18073,25 @@ fn log_hook(ee: &mut Ee, at: u32, ints: usize, quads: &'static [usize], float: b
 /// The original's run of `f` and the port's from the same RAM: where RAM differs, and whether
 /// the hooked calls differ.
 fn f47_compare(ee: &mut Ee, log: &Calls, original: impl FnOnce(&mut Ee), port: impl FnOnce(&mut Ee)) -> Vec<String> {
-    let (before, spr) = (ee.ram.clone(), ee.spr.clone());
+    let spr = ee.spr.clone();
     log.borrow_mut().clear();
-    original(ee);
-    let want_log = std::mem::take(&mut *log.borrow_mut());
-    let (want, want_spr) = (std::mem::replace(&mut ee.ram, before), std::mem::replace(&mut ee.spr, spr));
-    port(ee);
-    let got_log = std::mem::take(&mut *log.borrow_mut());
     // The glue's scratch slots over the stack (the out-parameters it hands the original's callees,
     // [`WRECK_SCRATCH`]'s the highest) are not the game's.
-    let mut want = want;
-    let slots = ee.stack as usize..ee.scratch(WRECK_SCRATCH[4] + 1) as usize;
-    want[slots.clone()].copy_from_slice(&ee.ram[slots]);
-    let mut d: Vec<String> = bytes_differ(&want, &ee.ram, ee.stack).into_iter().map(|r| format!("RAM at {r}")).collect();
+    let words = stack_words(ee.stack);
+    let ignore = words.start..words.end.max(ee.scratch(WRECK_SCRATCH[4] + 1) as usize);
+    let (mut want_log, mut want_spr) = (Vec::new(), Vec::new());
+    let ram = split_run(
+        ee,
+        ignore,
+        |ee| {
+            original(ee);
+            want_log = std::mem::take(&mut *log.borrow_mut());
+            want_spr = std::mem::replace(&mut ee.spr, spr);
+        },
+        port,
+    );
+    let got_log = std::mem::take(&mut *log.borrow_mut());
+    let mut d: Vec<String> = ram.into_iter().map(|r| format!("RAM at {r}")).collect();
     if want_spr != ee.spr {
         let at: Vec<usize> = (0..want_spr.len()).filter(|&i| want_spr[i] != ee.spr[i]).collect();
         d.push(format!("the scratchpad at {:x?} ({} bytes)", &at[..at.len().min(8)], at.len()));
@@ -18042,13 +18122,13 @@ fn the_body_reset_is_the_originals() {
     assert_eq!(vt(&ee, BODY_RESET.0), BODY_RESET.1, "the bike's vt +0x13c");
     let log: Calls = Rc::default();
     log_hook(&mut ee, HEAP_REALLOC, 4, &[], false, F47_AREA + 0x800, &log);
-    let base = ee.ram.clone();
+    ee.mark();
     let mut g = Gen(0x0f47_0001);
     let (mut t, mut off) = (BTreeMap::new(), Vec::new());
     let (body, world, owner, record, riding, bounds) = [reset::BODY, reset::WORLD, reset::OWNER, reset::RECORD, reset::RIDING, reset::BOUNDS].map(|o| ee.u32_at(BIKE + o)).into();
     let second = ee.u32_at(BIKE + reset::SECOND);
     for k in 0..10_000 {
-        ee.ram.clone_from(&base);
+        ee.undo();
         let on = !g.one_in(8);
         ee.set_u32(body, if on { if g.one_in(2) { 1 } else { g.bits() | 1 } } else { 0 });
         tally(&mut t, if on { "body on" } else { "body off" });
@@ -18123,13 +18203,13 @@ fn the_respawn_is_the_originals() {
     let Some(mut ee) = image().map(hooked) else { return };
     assert_eq!(vt(&ee, RESPAWN.0), RESPAWN.1, "the bike's vt +0xe8");
     let log: Calls = Rc::default();
-    let base = ee.ram.clone();
+    ee.mark();
     let mut g = Gen(0x0f47_0002);
     let (mut t, mut off) = (BTreeMap::new(), Vec::new());
     let body = ee.u32_at(BIKE + wreck::BODY);
     let riding = ee.u32_at(BIKE + 0xcc);
     for k in 0..10_000 {
-        ee.ram.clone_from(&base);
+        ee.undo();
         let r = |g: &mut Gen, s: f32| [g.f(-s, s), g.f(-s, s), g.f(-s, s), g.near(1.0, -2.0, 2.0)];
         let quad = |ee: &mut Ee, at: u32, v: [f32; 4]| {
             for (i, x) in v.into_iter().enumerate() {
@@ -18198,12 +18278,12 @@ fn the_event_post_is_the_originals() {
             ee.set_u32(count, c.wrapping_add(step));
         }
     }));
-    let base = ee.ram.clone();
+    ee.mark();
     let mut g = Gen(0x0f47_0003);
     let (mut t, mut off) = (BTreeMap::new(), Vec::new());
     let poster = F47_AREA + 0x1000;
     for k in 0..10_000 {
-        ee.ram.clone_from(&base);
+        ee.undo();
         let (queue, from, message) = if g.one_in(10) {
             tally(&mut t, "state 4's queue");
             let id = ee.u32_at(BIKE + 0xd20);
@@ -18287,7 +18367,7 @@ fn the_node_box_in_the_database_is_the_originals() {
     let list = ee.u32_at(node + 0x144);
     assert_eq!(listed, 22, "state 4's node gathers its 22 skeleton nodes");
     let skeleton: Vec<u32> = (0..listed).map(|k| ee.u32_at(list + 4 * k)).collect();
-    let base = ee.ram.clone();
+    ee.mark();
     let mut g = Gen(0x0f47_0004);
     let (mut t, mut off) = (BTreeMap::new(), Vec::new());
     let quad = |ee: &mut Ee, at: u32, v: [f32; 4]| {
@@ -18296,7 +18376,7 @@ fn the_node_box_in_the_database_is_the_originals() {
         }
     };
     for k in 0..10_000 {
-        ee.ram.clone_from(&base);
+        ee.undo();
         let r = |g: &mut Gen, s: f32| [g.near(0.0, -s, s), g.near(0.0, -s, s), g.near(0.0, -s, s), g.near(1.0, -2.0, 2.0)];
         ee.set_u32(BIKE + 8, F47_AREA | 0x10);
         ee.set_u32(node + 8, if g.one_in(8) { 0 } else { F47_AREA | 0x20 });
@@ -18391,12 +18471,12 @@ fn the_post_process_out_of_the_world_is_the_originals() {
     let node = ee.u32_at(BIKE + 0xe4);
     let world = ee.u32_at(BIKE + 0xe8);
     let area = F47_AREA + 0x3000;
-    let base = ee.ram.clone();
+    ee.mark();
     let mut g = Gen(0x0f47_0005);
     let (mut t, mut off) = (BTreeMap::new(), Vec::new());
     let mut answered = BTreeMap::new();
     for k in 0..10_000 {
-        ee.ram.clone_from(&base);
+        ee.undo();
         let v = |ee: &mut Ee, g: &mut Gen, a: u32, r: f32| {
             for i in 0..3 {
                 let x = g.near(0.0, -r, r);
@@ -18485,7 +18565,7 @@ fn the_records_parented_node_is_the_originals() {
     assert_eq!(ee.u32_at(node + NODE_PARENT), 0, "state 4's node has no parent");
     let parent = F47_AREA + 0x4000;
     let log: Calls = Rc::default();
-    let base = ee.ram.clone();
+    ee.mark();
     let mut g = Gen(0x0f47_0006);
     let (mut t, mut off) = (BTreeMap::new(), Vec::new());
     let mut answered = BTreeMap::new();
@@ -18504,7 +18584,7 @@ fn the_records_parented_node_is_the_originals() {
         }
     };
     for k in 0..10_000 {
-        ee.ram.clone_from(&base);
+        ee.undo();
         for o in (0..0x150).step_by(4) {
             let w = ee.u32_at(node + o);
             ee.set_u32(parent + o, w);

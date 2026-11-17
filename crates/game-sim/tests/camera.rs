@@ -31,9 +31,25 @@ use game_sim::camera::{
     rotate,
 };
 use ps2_float::{F, Vf};
-use ps2_oracle::{Ee, addr, game_or_skip};
+use ps2_oracle::{Ee, game_or_skip};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
+
+/// [`ps2_oracle::addr`], looked up once per name: each lookup reads `kit.toml` and the whole address
+/// file again, and the harness asks for the vtable's sixteen slots on every case — that was most of
+/// this binary's time (K63).
+fn addr(name: &str) -> Result<u32, String> {
+    thread_local! {
+        static KNOWN: RefCell<HashMap<String, u32>> = RefCell::new(HashMap::new());
+    }
+    if let Some(a) = KNOWN.with(|k| k.borrow().get(name).copied()) {
+        return Ok(a);
+    }
+    let a = ps2_oracle::addr(name)?;
+    KNOWN.with(|k| k.borrow_mut().insert(name.to_string(), a));
+    Ok(a)
+}
 
 /// The two tables the game builds at startup, where the harness has the game put them.
 const ACOS: u32 = 0x0100_0000;
