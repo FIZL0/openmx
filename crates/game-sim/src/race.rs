@@ -671,7 +671,8 @@ pub struct Race {
     pub activity: Option<Supercross>,
     /// The word the drop draws for the scene (its `+0xf0`), eight to thirteen seconds.
     pub scene_clock: F,
-    /// The race's draws: the watch's two per rider caught and the drop's one.
+    /// The race's draws: the watch's two per rider caught and the drop's one. The Sim's one
+    /// generator in a race: its AI riders draw on it after this tick (S333, `Sim::think`).
     pub rng: Rng,
     /// The race's laps (P313), on a race read off its track's file: `None` — a start alone, as S13b
     /// ported it — and the tick does nothing after the drop.
