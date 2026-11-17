@@ -52,7 +52,7 @@ pub(crate) const C33_NAMES: [&str; 4] = ["ai0", "ai1", "human", "ai2"];
 
 /// The last tick each of [`C33_LANES`] agrees with the original's, bit for bit, on every agreed row up
 /// to it but the torn ones: the regression mark.
-const C33_AGREES_THROUGH: [u64; 5] = [28, 28, 1802, 206, 14];
+const C33_AGREES_THROUGH: [u64; 5] = [132, 147, 1802, 206, 14];
 
 /// One rider's words off an image, at the offsets `tests/two_p_rider.rs` (S174) seeds a rider from.
 struct Image<'a> {
@@ -348,11 +348,13 @@ fn c33_ours(bike: &Bike) -> [[u32; 4]; 4] {
     [ch.cofg_world, ch.quat, ch.vel, ch.world_ang_vel].map(|v| v.to_bits())
 }
 
-/// The Sim's player for each of [`C33_RIDERS`]: `Sim::step_all` walks its players from the last to
-/// the first, and the original walks the actor list from its head, so the actor list's head is the
-/// Sim's last player.
-fn c33_player(k: usize) -> usize {
-    C33_RIDERS.len() - 1 - k
+/// The Sim's player for each of [`C33_RIDERS`]: the game's own player number ([`c33_by_player`]: the
+/// human 0, ai2 1, ai0 2, ai1 3). `Sim::step_all` walks its players from the last to the first, and
+/// so does the original's frame: ai1, ai0, ai2, then the human, not the actor list's order (S338:
+/// the order its collision resolves run in, in the interpreter). It shows where two riders touch:
+/// at tick 29 ai0's push off ai1 reads ai1 as ai1's frame has just left it.
+fn c33_player(ee: &Ee, k: usize) -> usize {
+    c33_by_player(ee).iter().position(|&j| j == k).unwrap()
 }
 
 #[test]
@@ -388,7 +390,7 @@ fn s12e_free09s_four_racers_ride_as_the_capture() {
     let names = C33_RIDERS.map(|(_, _, b)| track::physics_file(track::Engine::Cc250, false, if b == 0 { C33_HUMAN_TUNING } else { track::Tuning::A }));
     let phys: Vec<Phy> = names.iter().map(|n| bikes.phy(n, &tables)).collect();
     let mut order: Vec<usize> = (0..C33_RIDERS.len()).collect();
-    order.sort_by_key(|&k| c33_player(k));
+    order.sort_by_key(|&k| c33_player(&ee, k));
     let seeded = |k: usize| c33_bike(&ee, C33_RIDERS[k].0, &phys[k], &names[k], &bikes.col);
     let mut sim = Sim::with_rider(0, Arc::clone(&tables), phys[order[0]].clone(), seeded(order[0]));
     for &k in &order[1..] {
@@ -398,7 +400,7 @@ fn s12e_free09s_four_racers_ride_as_the_capture() {
         .iter()
         .enumerate()
         .filter(|(_, (_, _, b))| *b != 0)
-        .map(|(k, &(r, _, b))| (c33_player(k), c33_pilot(&ee, &lists, b, r)))
+        .map(|(k, &(r, _, b))| (c33_player(&ee, k), c33_pilot(&ee, &lists, b, r)))
         .collect();
     let gen0 = s12e_u64(&ee, rand_state);
     sim.ai = Some(Box::new(Lane { seek, tables: Arc::new(controls::tables(&ee)), rng: Rng::from_state(gen0), pilots, net: None, cards: Vec::new() }));
@@ -431,19 +433,19 @@ fn s12e_free09s_four_racers_ride_as_the_capture() {
     // The AI riders' levers are their brains'. The human has no pad, but the first step after a
     // load rides on the controls the state was saved holding (S117): the image's stick.
     let mut controls = vec![Controls::default(); C33_RIDERS.len()];
-    controls[c33_player(2)] = c33_saved_controls(&ee, C33_RIDERS[2].0);
+    controls[c33_player(&ee, 2)] = c33_saved_controls(&ee, C33_RIDERS[2].0);
     for (n, pair) in rows.windows(2).enumerate() {
         let (last, row) = (&pair[0], &pair[1]);
         assert_eq!(row.frame, C33_FROM + 2 + n as u64, "the capture's rows run on from the image, one a tick");
         // The step into a row is the frame length the row before it read.
-        let looks_were: Vec<F> = (0..C33_RIDERS.len()).map(|k| sim.rider_of(c33_player(k)).body.look).collect();
+        let looks_were: Vec<F> = (0..C33_RIDERS.len()).map(|k| sim.rider_of(c33_player(&ee, k)).body.look).collect();
         sim.step_all(last.dt, &controls, &mut world);
         // S328a: the bodies' look-around clocks re-arm on the generator as the original's do
         // (draws.rs's C33_LOOKS), through 14: ai0 and ai2 launch at 15.
         if row.frame < 15 && last.agreed {
             let rearmed: Vec<(&'static str, F)> = (0..C33_RIDERS.len())
-                .filter(|&k| looks_were[k] <= F::ZERO && sim.rider_of(c33_player(k)).body.look > F::ZERO)
-                .map(|k| (C33_NAMES[k], sim.rider_of(c33_player(k)).body.look))
+                .filter(|&k| looks_were[k] <= F::ZERO && sim.rider_of(c33_player(&ee, k)).body.look > F::ZERO)
+                .map(|k| (C33_NAMES[k], sim.rider_of(c33_player(&ee, k)).body.look))
                 .collect();
             let mut want = c33_looks(row.frame, last.rng);
             want.sort_by_key(|l| C33_NAMES.iter().position(|n| *n == l.0));
@@ -451,12 +453,12 @@ fn s12e_free09s_four_racers_ride_as_the_capture() {
             assert_eq!(bits(&rearmed), bits(&want), "tick {}: the look-around clocks the Sim re-armed", row.frame);
         }
         // The human's pad from the second step on: none, so nothing held.
-        controls[c33_player(2)] = Controls::default();
+        controls[c33_player(&ee, 2)] = Controls::default();
         if !row.agreed {
             continue;
         }
         for (k, lane) in lanes[..4].iter_mut().enumerate() {
-            let ours = c33_ours(sim.rider_of(c33_player(k)));
+            let ours = c33_ours(sim.rider_of(c33_player(&ee, k)));
             let off: Vec<String> = C33_WORDS
                 .iter()
                 .zip(ours)

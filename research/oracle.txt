@@ -12743,6 +12743,12 @@ camera_flash_tick           boot 0x002f95c0 (object, f12 dt): ring +0x48 (times,
 #   The hand-off (0x002806ec +0x644, 0x0027fee4 +0x628, 0x0027fef0 +0x62c, 0x0027ff2c +0x63c, 0x0027ff48
 #   +0x640) is the last lever store in a frame, after the bike's limiter (0x00251b4c +0x670 ...); +0x628 is
 #   the stick as the bike's limiter reads it, so an AI rider's steer is not squared again.
+# S338 — C33's ai0/ai1 at tick 29 (journal 2026-11-16-s338-s12-ai-in-the-sim). Comment rows only.
+#   Whole frame in Ee (S328's draws.rs recipe), collision_resolve hooked: the riders' updates run ai1, ai0,
+#   ai2, human = the game's player numbers (rider+0x10d0 -> +0x1e4; human 0, ai2 1, ai0 2, ai1 3) from the
+#   last down, not the actor list's order (ai0, ai1, human, ai2). collision_node_update (0x0026f800) puts
+#   ai0's strike on ai1 (record+0x100 count, +0x108 list) at ticks 29 and 30, bit for bit the port's;
+#   ai0's spring reads ai1 after ai1's frame (normal speed -1.7256, record+0x1d8; relative +0x1e0).
 # F62b: the rider controller's clip advance vt +0x88 0x0013c7b0 and clip start 0x0013ea90 in Rust (anim::advance,
 # anim::start, anim::set_clip; tests/mxvatv_bike_ride.rs rider_leaf serves Call::ClipAdvance / Call::ClipStart).
 # Journal: research/journal/2026-11-13-f62b-clip-advance-and-crossfade.
