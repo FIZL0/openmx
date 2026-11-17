@@ -432,7 +432,7 @@ impl Kit2 {
     /// Both planes' bodies as the bike's resolve finds them, in RAM.
     fn flown(&self, ee: &Ee, recs: &[u32; 4], plane_colliders: &[Collider; 2]) -> Vec<Flown> {
         (0..2)
-            .map(|k| Flown { seat: k, collider: plane_colliders[k], body: body_of(ee, body_at(ee, recs[2 + k])), mass: self.plane.mass })
+            .map(|k| Flown { seat: k, collider: plane_colliders[k], body: body_of(ee, body_at(ee, recs[2 + k])), mass: self.plane.mass, quad: None })
             .collect()
     }
 }

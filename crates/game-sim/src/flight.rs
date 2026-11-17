@@ -621,7 +621,7 @@ impl Flight {
             body.position = near;
             body.last_position = body.last_position.add(by);
         }
-        crate::rider_contact::Flown { seat, collider: self.collider, body, mass: self.mass }
+        crate::rider_contact::Flown { seat, collider: self.collider, body, mass: self.mass, quad: None }
     }
 
     /// The body a bike's resolve pushed, written back (N22a): its speeds, spins and what its resolve

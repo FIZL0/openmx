@@ -2580,6 +2580,20 @@ impl<R: Moto, G, S: Sweep> Steps<R, G, S> {
     }
 }
 
+/// **The chassis' frame mesh** (MD179): the `F.col` beside a riding probe's `M.col`
+/// (`ATV_R_ChasisM.col` → `ATV_R_ChasisF.col`, both in `Veh\\VehicleType_1.res`), the mesh the
+/// riders' bikes' body rays strike ([`Ride::hull`]), as a car's `f.col` is. `None` for a name not
+/// ending `M.col`.
+pub fn hull_file(riding: &str) -> Option<String> {
+    let stem = riding.strip_suffix("M.col").or_else(|| riding.strip_suffix("m.col"))?;
+    Some(format!("{stem}F.col"))
+}
+
+/// The category the quad's hull is gathered by among the riders' bikes (MD179): a car's
+/// ([`crate::car::COLLIDABLE`]), which a ghost's body rays ignore as they ignore a car. The quad's
+/// record's own category word is not read off SLUS-21104.
+pub const HULL_CATEGORY: u32 = crate::car::COLLIDABLE;
+
 // --- MD65a: the wreck body ----------------------------------------------------------------------------
 
 /// The file the quad's wreck rays load from, on its scene node.
@@ -4131,9 +4145,19 @@ impl<R: Moto + Default> Ride<R> {
     /// the sweep [`OnWorld`] (`segments` the trigger probe's, [`trigger_segments`]), and the in-world
     /// test's box the world's ([`world_bounds`]).
     pub fn frame_on(&mut self, dt: F, world: &mut dyn crate::world::World, segments: [[Vf; 2]; 4]) {
+        self.frame_met(dt, world, segments, None);
+    }
+
+    /// [`Ride::frame_on`] among the riders' bikes (MD179): with `met`, the mirrors of their strikes on
+    /// the quad's hull filed on its record after the pass's entries ([`Ride::file_mirrors`]), which
+    /// the gravity's call resolves against their chassis every substep.
+    fn frame_met(&mut self, dt: F, world: &mut dyn crate::world::World, segments: [[Vf; 2]; 4], met: Option<&crate::flight::Met>) {
         let b = &mut self.bike.parts.bounds;
         *b = world_bounds(world, b.floor);
         self.record_on(dt, world);
+        if let Some(m) = met {
+            self.file_mirrors(m);
+        }
         {
             let cell: std::cell::RefCell<&mut dyn crate::world::World> = std::cell::RefCell::new(&mut *world);
             let ground = |at: Vf, record: &mut u8| world_ground(&mut **cell.borrow_mut(), at, record);
@@ -4152,9 +4176,86 @@ impl<R: Moto + Default> Ride<R> {
     /// One tick as the shell steps it: the controls laid ([`Ride::controls`]), then [`Ride::frame_on`].
     /// A quad that is down ([`Ride::down`]) has no rider on it: its controls are let go.
     pub fn step(&mut self, c: &crate::ride::Controls, dt: F, world: &mut dyn crate::world::World, segments: [[Vf; 2]; 4]) {
+        self.step_met(c, dt, world, segments, None);
+    }
+
+    /// [`Ride::step`] among the riders' bikes (MD179, [`Ride::frame_met`]): `met` the mirrors of
+    /// their strikes on its hull and their chassis. `None`, [`Ride::step`] exactly.
+    pub fn step_met(
+        &mut self,
+        c: &crate::ride::Controls,
+        dt: F,
+        world: &mut dyn crate::world::World,
+        segments: [[Vf; 2]; 4],
+        met: Option<&crate::flight::Met>,
+    ) {
         let none = crate::ride::Controls::default();
         self.controls(if self.down() { &none } else { c });
-        self.frame_on(dt, world, segments);
+        self.frame_met(dt, world, segments, met);
+    }
+
+    /// **The bikes' mirrors on the quad's record** (MD179): after [`Ride::record_on`]'s refill, each
+    /// of `met`'s mirrors filed in the held list up to the record's room, naming its bike among
+    /// `met`'s chassis ([`crate::atv_contact::Held::file_mirrors`]). The record's touch flags and the
+    /// wreck's view of its contacts are left as the pass set them. A quad with no record meets no bike.
+    fn file_mirrors(&mut self, met: &crate::flight::Met) {
+        let Some(r) = self.recorded.as_mut() else { return };
+        if met.mirrors.is_empty() {
+            return;
+        }
+        let room = usize::try_from(r.record.capacity).unwrap_or(0).saturating_sub(r.held.entries.len());
+        r.held.file_mirrors(&met.mirrors, &met.colliders, &met.vehicles, room);
+        self.bike.contacts = Some(r.held.clone());
+    }
+
+    /// **Its hull as the riders' bikes meet it** (MD179): `mesh` (the chassis' frame mesh,
+    /// [`hull_file`]) where the scene node stands it — the frame its collision record's rays are
+    /// stood at ([`RecordOn`]) — the room its record has, and [`HULL_CATEGORY`]. Seat `seat` is the
+    /// quad's player. `None` for a quad with no record.
+    pub fn hull<'a>(&self, seat: usize, mesh: &'a crate::track::Mesh) -> Option<crate::rider_contact::Hull<'a>> {
+        let r = self.recorded.as_ref()?;
+        let w = self.bike.parts.scene.nodes[0].world;
+        let at = crate::math::Mat4([w[0], w[1], w[2], w[3].merge(Dest::W, Vf::new(0.0, 0.0, 0.0, 1.0))]);
+        let capacity = usize::try_from(r.record.capacity).unwrap_or(0);
+        Some(crate::rider_contact::Hull { seat, mesh, at, capacity, category: HULL_CATEGORY })
+    }
+
+    /// **Its body as a bike's resolve pushes it** (MD179, [`crate::rider_contact::Bump::planes`]):
+    /// the record's collision object and mass, the quad's body and centre of mass, the copy nearest
+    /// `from` (the bike) on a world that wraps, as a car's is ([`crate::car::Machine::flown`]).
+    /// `None` for a quad with no record.
+    pub fn flown(&self, seat: usize, from: Vf, world: &dyn crate::world::World) -> Option<crate::rider_contact::Flown> {
+        let held = &self.recorded.as_ref()?.held;
+        let mut body = self.body;
+        let near = crate::nearest_copy(world, from, body.position);
+        if near != body.position {
+            let by = near.sub(body.position);
+            body.position = near;
+            body.last_position = body.last_position.add(by);
+        }
+        let quad = crate::rider_contact::FlownQuad { body, cofg: self.bike.cofg };
+        Some(crate::rider_contact::Flown {
+            seat,
+            collider: held.record.collider,
+            body: crate::biplane::Body::default(),
+            mass: held.mass,
+            quad: Some(quad),
+        })
+    }
+
+    /// The body a bike's resolve pushed, written back (MD179): its speeds, spins, accumulators and
+    /// what the resolve wrote, where the quad really is, and the record's collision object, as a
+    /// car's is ([`crate::car::Machine::pushed`]).
+    pub fn pushed(&mut self, p: &crate::rider_contact::Flown) {
+        let (Some(q), Some(r)) = (p.quad.as_ref(), self.recorded.as_mut()) else { return };
+        let (position, last_position) = (self.body.position, self.body.last_position);
+        let by = q.body.position.sub(position);
+        self.body = q.body;
+        (self.body.position, self.body.last_position) = (position, last_position);
+        r.held.record.collider = p.collider;
+        if q.body.position != position {
+            r.held.record.collider.cofg_world = r.held.record.collider.cofg_world.sub(by);
+        }
     }
 }
 

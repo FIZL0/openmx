@@ -21,8 +21,8 @@
 
 use crate::atv_body;
 use crate::contact::{
-    Collider, Contact, HARD, Mover, Other, Own, Rigid, damp, friction_on, impulse_masked, mutual, plus, relative_velocity_on,
-    spring_on,
+    Collider, Contact, HARD, Mover, Other, Own, Rigid, Side, Vehicle, damp, friction_on, impulse_masked, mutual, plus,
+    relative_velocity_on, spring_on,
 };
 use ps2_float::{F, Vf};
 
@@ -153,6 +153,10 @@ pub struct Held {
     pub movers: Vec<Mover>,
     pub mass: F,
     pub body: Option<atv_body::Body>,
+    /// MD179: the riders' bikes the list's mirrors name (an entry's other `k` is `bikes[k]`), each
+    /// one's collision object and chassis as it stood when it struck the quad's hull
+    /// ([`Held::file_mirrors`]). Emptied with the list at each refill.
+    pub bikes: Vec<(Collider, Vehicle)>,
 }
 
 impl Held {
@@ -164,6 +168,7 @@ impl Held {
     /// the held record cannot answer ([`Held::resolve`]).
     pub fn refill(&mut self, filed: &[crate::handling::record::Contact]) -> bool {
         let was = std::mem::take(&mut self.entries);
+        self.bikes.clear();
         if filed.iter().any(|c| c.other != 0 || c.mover != 0) {
             return false;
         }
@@ -190,16 +195,29 @@ impl Held {
         true
     }
 
+    /// **The riders' bikes' strikes on the quad's hull** (MD179, [`crate::rider_contact::gather_met`]'s
+    /// mirrors): each mirror filed after the refill's entries, up to `room` more, its other side the
+    /// bike it names (`colliders` and `vehicles` by player), which [`Held::resolve`] pushes against as
+    /// a car's record does ([`crate::car::Machine::step_met`]). Their relative velocities start at
+    /// zero; the resolution writes each before it reads it.
+    pub fn file_mirrors(&mut self, mirrors: &[Contact], colliders: &[Collider], vehicles: &[Vehicle], room: usize) {
+        self.bikes = colliders.iter().copied().zip(vehicles.iter().copied()).collect();
+        self.entries.extend(mirrors.iter().take(room).map(|c| Entry { contact: *c, relative: Vf::ZERO }));
+    }
+
     /// The record's resolution on the quad's body, handed 1 as the gravity hands it, with `cofg` the
-    /// body's centre of mass in its frame. `false`, and nothing done, if a contact is with another
-    /// record (none is held) or the whole body is not in.
+    /// body's centre of mass in its frame. A contact's other side is one of [`Held::bikes`] (MD179).
+    /// `false`, and nothing done, if a contact is with another record than those (none is held) or
+    /// the whole body is not in.
     pub fn resolve(&mut self, cofg: Vf) -> bool {
-        if self.entries.iter().any(|e| e.contact.other.is_some()) {
+        if self.entries.iter().any(|e| e.contact.other.is_some_and(|k| k >= self.bikes.len())) {
             return false;
         }
         let Some(body) = self.body.as_mut() else { return false };
         let mut me = Weighed { body, mass: self.mass, cofg };
-        resolve(&mut self.record, &mut Own::Body(&mut me), &mut self.entries, &mut [], &self.movers, true);
+        let mut others: Vec<Other<'_>> =
+            self.bikes.iter_mut().map(|(collider, v)| Other { collider, side: Side::Vehicle(v) }).collect();
+        resolve(&mut self.record, &mut Own::Body(&mut me), &mut self.entries, &mut others, &self.movers, true);
         true
     }
 }

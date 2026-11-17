@@ -2269,6 +2269,14 @@ impl<P: sim_world::World> Game for World<P> {
                 .filter_map(|(i, s)| s.garage.car_up()?.hull(i)),
         );
         let driven: Vec<usize> = hulls[flown.len()..].iter().map(|h| h.seat).collect();
+        // And a ridden quad's (MD179), after the cars': its chassis' `F.col` struck by the bikes' body
+        // rays, its body pushed by their resolve, and the mirrors on its record after its own pass.
+        hulls.extend(
+            (self.seats.iter().enumerate())
+                .filter(|&(_, s)| !s.waiting && s.riding)
+                .filter_map(|(i, s)| s.garage.atv_up()?.hull(i)),
+        );
+        let quads: Vec<usize> = hulls[flown.len() + driven.len()..].iter().map(|h| h.seat).collect();
         let met = game_sim::rider_contact::contacts_met(&riders(&self.seats, &on), &hulls, dt, &self.place);
         drop(hulls);
         let (mut lists, mut mirrors) = match met {
@@ -2300,6 +2308,7 @@ impl<P: sim_world::World> Game for World<P> {
                     .iter()
                     .filter_map(|&j| Some(self.seats[j].garage.flight_flown()?.flown(j, from, &self.place)))
                     .chain(driven.iter().filter_map(|&j| self.seats[j].garage.car_up()?.flown(j, from, &self.place)))
+                    .chain(quads.iter().filter_map(|&j| self.seats[j].garage.atv_up()?.flown(j, from, &self.place)))
                     .collect();
                 b
             });
@@ -2318,6 +2327,13 @@ impl<P: sim_world::World> Game for World<P> {
                 let phys: Vec<(&rider::Rider, &game_sim::phy::Phy)> = self.seats.iter().map(|s| (&s.sim.rider, &*s.sim.phy)).collect();
                 met = (self.seats[me].garage.car_up().and_then(|c| c.driven.as_ref()))
                     .map(|c| game_sim::rider_contact::met_riders(&phys, m, c.body.position, &self.place));
+            }
+            // A ridden quad the same, by the mirrors on its record (MD179).
+            if let Some(j) = quads.iter().position(|&j| j == me) {
+                let m = mirrors.get_mut(flown.len() + driven.len() + j).map(std::mem::take).unwrap_or_default();
+                let phys: Vec<(&rider::Rider, &game_sim::phy::Phy)> = self.seats.iter().map(|s| (&s.sim.rider, &*s.sim.phy)).collect();
+                met = (self.seats[me].garage.atv_up().and_then(|a| a.quad()))
+                    .map(|q| game_sim::rider_contact::met_riders(&phys, m, q.body.position, &self.place));
             }
             let near = riders(&self.seats, &on);
             let rivals = game_sim::rider_contact::rivals_among(&near, me, &self.place);
@@ -2742,6 +2758,88 @@ mod split_contact {
         // Parked on an idle pad the buggy creeps on along its nose a little either way.
         assert!(fastest > idle + 1.0, "the car was pushed to {fastest} ft/s along the bike's way (with no hull {idle})");
         assert!(pushed > still + 0.5, "the car moved {pushed} ft along the bike's way (with no hull {still})");
+    }
+
+    /// MD179: a split-screen bike meets the other seat's quad as it meets a car (F26). Seat 1 takes
+    /// openmx-mods' Race 250 P where its bike stands, 25 ft up seat 0's way and facing along it, and
+    /// leaves it standing; seat 0's bike rolls into its tail at 30 ft/s. Its body rays strike the
+    /// quad's hull (`ATV_R_ChasisF.col`): the bike is held behind the quad, short of where it rolls on
+    /// to through a quad with no hull, and its resolve pushes the quad along its way, where the quad
+    /// with no hull stands still. Skips without the disc or the pack in this checkout's mods folder.
+    #[test]
+    fn a_split_bike_is_stopped_by_the_other_seats_quad() {
+        use game_render::disc::Disc;
+        use game_sim::bike_col::{self, BikeCol};
+        let pack = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../mods/machines/mxvatv_atv");
+        if !pack.join("mod.json").is_file() {
+            eprintln!("skipped: no mods/machines/mxvatv_atv (openmx-mods' import-atv makes it)");
+            return;
+        }
+        let Ok(mut disc) = Disc::open_configured() else {
+            eprintln!("skipped: no disc configured");
+            return;
+        };
+        let res = disc.res("Tracks\\free09_ss_2.res").expect("the split track's archive");
+        let read = |name: String| res.read_suffix(&name).unwrap_or_else(|e| panic!("{e}"));
+        let col = std::sync::Arc::new(
+            BikeCol::load(&read(bike_col::rays_file(bike_col::MODEL)), &read(bike_col::shape_file(bike_col::MODEL)))
+                .expect("the bike's collision files"),
+        );
+        let bikes: Vec<String> =
+            disc.entries().iter().map(|e| e.name.clone()).filter(|n| n.to_ascii_lowercase().starts_with("bike\\")).collect();
+        let phy = bikes.iter().find_map(|b| disc.res(b).ok()?.read_suffix("race125p.phy").ok()).expect("race125p.phy");
+        let tables = game_sim::ride::Tables::build();
+        let phy = game_sim::phy::Phy::read_bytes(&phy, &tables.curve);
+        let files = game_render::disc::Res::folder(&pack).expect("the pack's folder reads");
+        let quad = crate::vehicle::AtvRide::read("mxvatv_atv", "Veh/atv_Race250P.phy", &mut |n| files.read(&n.replace('/', "\\")).ok())
+            .expect("the quad builds");
+        assert!(quad.hull.is_some(), "the pack has no ATV_R_ChasisF.col");
+        let at = |world: &World<Flat>| world.seats[1].garage.atv_up().and_then(|a| a.quad()).expect("the quad is out").body;
+        let ride = |hull: bool| {
+            let sims: Vec<Sim> = [0.0, 25.0]
+                .into_iter()
+                .map(|z| {
+                    let mut sim = Sim::new(0x179);
+                    std::sync::Arc::make_mut(&mut sim.phy).collisions = phy.collisions;
+                    let mounts = game_sim::stock::mounts(&sim.phy);
+                    sim.rider = Rider::new(&sim.phy, mounts, Vf::new(0.0, 1.0, z, 1.0), game_sim::stock::FACING, Default::default());
+                    sim.rider.sense.wrecks_enabled = false;
+                    sim.rider.carries_bike_col(std::sync::Arc::clone(&col));
+                    sim
+                })
+                .collect();
+            let mut world = split(sims);
+            let mut atv = quad.clone();
+            if !hull {
+                atv.hull = None;
+            }
+            let seat = &mut world.seats[1];
+            seat.garage.atv = Some(atv);
+            seat.garage.switch(Kind::Atv, &mut seat.sim, &mut world.place).expect("the quad is taken");
+            // Settled on its wheels before the bike sets off.
+            for _ in 0..30 {
+                world.simulate(DT, Input::default(), &mut Default::default());
+            }
+            let parked = at(&world).position;
+            world.seats[0].sim.rider.ride.chassis.vel = Vf::new(0.0, 0.0, 30.0, 0.0);
+            let mut fastest = 0.0f32;
+            for _ in 0..45 {
+                world.simulate(DT, Input::default(), &mut Default::default());
+                fastest = fastest.max(at(&world).velocity.z());
+            }
+            let bike = world.seats[0].sim.rider.ride.position().z();
+            (bike, at(&world).position.z() - parked.z(), fastest, parked.z())
+        };
+        let ((bike, pushed, fastest, parked), (through, still, idle, _)) = (ride(true), ride(false));
+        println!(
+            "quad parked at z {parked}; bike at z {bike}, the quad pushed {pushed} ft, at most {fastest} ft/s; with no hull the bike at z {through}, the quad moved {still} ft, at most {idle} ft/s"
+        );
+        assert!(through > parked + 5.0, "with no hull the bike stopped at z {through}, short of the quad's far side");
+        // The quad is light beside a car: shoved ahead, the bike follows it on but stays behind it.
+        assert!(bike < parked + pushed, "the bike went on to z {bike}, through the quad at z {}", parked + pushed);
+        assert!(bike < through - 3.0, "the bike reached z {bike}, as far as with no hull (z {through})");
+        assert!(fastest > idle + 1.0, "the quad was pushed to {fastest} ft/s along the bike's way (with no hull {idle})");
+        assert!(pushed > still + 0.5, "the quad moved {pushed} ft along the bike's way (with no hull {still})");
     }
 }
 
