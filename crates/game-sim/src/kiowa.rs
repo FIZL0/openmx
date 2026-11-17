@@ -2369,6 +2369,16 @@ impl Throw {
     }
 }
 
+/// **The gravity an MX vs. ATV helicopter is taken with** (MD63f): the body wrapper's force as
+/// SLUS-21104's unwreck writes it, `(0, 32.2 * (-gravity_scale * mass), 0, 1)`, not the load's
+/// `(0, -gravity_scale * Weight, 0, 1)` ([`Part::read`]): the two round apart (-1369.9999 against -1370
+/// for `kiowa.phy`). The player's helicopter holds the unwreck's from the start, the idle twin the
+/// load's; MX vs. ATV's wreck and unwreck write the same as MX Unleashed's ([`Wreckage::wreck`],
+/// [`Wreckage::unwreck`]).
+pub fn mxvatv_taken_gravity(gravity_scale: F, mass: F) -> Vf {
+    crate::biplane::gravity_force(gravity_scale, mass)
+}
+
 /// What the wreck, the unwreck and the put-back read and write besides [`Ride`].
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Wreckage {
@@ -3295,9 +3305,19 @@ impl Kiowa {
 }
 
 impl Crash {
+    /// MXVehicle's wreck entry, the part this module needs (MD63f): [`Crash::wreck`]'s reason and not
+    /// down, and the clock zeroed. MX Unleashed's helicopter leaves the clock to its unwreck; SLUS-21104's
+    /// zeroes it on every wreck, so a crashed helicopter thrown from the edge counts its 2.5 s from the
+    /// throw.
+    pub fn wreck_mxvatv(&mut self, reason: u32, out: &mut Crashed) {
+        self.wreck(reason, out);
+        self.clock = F::ZERO;
+    }
+
     /// [`Crash::step`] with MX vs. ATV's edge test and throw in place of MX Unleashed's (MXVehicle's
-    /// wreck check, [`crate::biplane::throw_mxvatv`]); the rest of the Kiowa's test (the strike, the
-    /// contact speed, the clocks and the put-back) is [`Crash::step`]'s.
+    /// wreck check, [`crate::biplane::throw_mxvatv`]) and MXVehicle's wreck entry
+    /// ([`Crash::wreck_mxvatv`]); the rest of the Kiowa's test (the strike, the contact speed, the
+    /// clocks and the put-back) is [`Crash::step`]'s.
     #[allow(clippy::too_many_arguments)]
     pub fn step_mxvatv(
         &mut self,
@@ -3314,9 +3334,13 @@ impl Crash {
         let mut thrown = None;
         if let Some(area) = area.filter(|a| self.reason != THROWN && a.outside_mxvatv(position, F(EDGE))) {
             crate::biplane::throw_mxvatv(area, position, velocity, rates, throw_scale, rng);
-            self.wreck(THROWN, thrown.get_or_insert_with(Crashed::default));
+            self.wreck_mxvatv(THROWN, thrown.get_or_insert_with(Crashed::default));
         }
         let out = self.step(c, None, position, velocity, rates, throw_scale, rng, dt, strike);
+        if out.wreck.is_some() {
+            // the strike's or the contact's wreck, which [`Crash::step`] returns from at once
+            self.clock = F::ZERO;
+        }
         match thrown {
             Some(t) => Crashed { wreck: t.wreck, ..out },
             None => out,

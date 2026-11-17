@@ -3165,7 +3165,11 @@ impl KiowaRide {
             flown: true,
             gravity_scale: part.gravity_scale,
             throw_scale: F::ZERO,
-            gravity: part.gravity,
+            // MX vs. ATV's player's helicopter is taken with the unwreck's gravity (MD63f).
+            gravity: match self.mxvatv {
+                Some(_) => game_sim::kiowa::mxvatv_taken_gravity(part.gravity_scale, part.mass),
+                None => part.gravity,
+            },
             area: world.area(),
             // Its sound is V114's: no clips, no draw.
             touchdown_sound: false,

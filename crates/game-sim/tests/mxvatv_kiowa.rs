@@ -14,6 +14,10 @@
 //!    tests/mxvatv_biplane.rs runs it on the plane;
 //! 5. **the crash test's clocks** (`Crash::step_mxvatv`), its vtable calls hooked.
 //!
+//! 6. **the wreck and the unwreck** (MD63f): SLUS-21104's own (the Kiowa's vtable `+0x368`/`+0x36c`, with
+//!    MXVehicle's halves) against `Crash::wreck_mxvatv` with `Wreckage::wreck_mx`, and
+//!    `Wreckage::unwreck_mx` with `Kiowa::unwreck_controls`: the gravity they write above all.
+//!
 //! And **the reader** (`Phy::read_mxvatv`): MX vs. ATV's `kiowa.phy` read as model one and model two
 //! against what the game loaded into `kiowa` (model one) and `kiowa3` (model two).
 //!
@@ -802,7 +806,259 @@ fn the_mxvatv_crash_clocks_match_the_original() {
 }
 
 // ---------------------------------------------------------------------------------------------------
-// 6 — the reader
+// 6 — the wreck and the unwreck (MD63f)
+// ---------------------------------------------------------------------------------------------------
+
+/// The Kiowa's words the wreck and the unwreck touch (research/oracle.txt # MD63f).
+mod wreck_at {
+    pub const WRECK_GRAVITY: u32 = 0xc90;
+    pub const WRECK_DAMPING: u32 = 0xca0;
+    pub const WRECK_INERTIA: u32 = 0xcb0;
+    pub const INERTIA: u32 = 0xcc0;
+    pub const KIND: u32 = 0xbbc;
+    pub const SOUND: u32 = 0x11dc;
+    /// The rotor's four nodes (the first gates the unwreck's node swap), `+0x1220` and the wrecked
+    /// blades'.
+    pub const NODES: [u32; 6] = [0x1200, 0x1204, 0x1208, 0x120c, 0x1220, 0x1224];
+    pub const BLADES: u32 = 0x132c;
+    /// In the gravity block (`*(+0xe8)`): the force.
+    pub const FORCE: u32 = 0x40;
+    /// In the body: the mass, the damping, the inertia and its inverse, the angular damping.
+    pub const MASS: u32 = 0x18;
+    pub const DAMPING: u32 = 0x30;
+    pub const BODY_INERTIA: u32 = 0x130;
+    pub const INV_INERTIA: u32 = 0x140;
+    pub const ANG_DAMPING: u32 = 0x150;
+}
+
+fn node_hidden(ee: &Ee, node: u32) -> bool {
+    ee.u8_at(node + 3) & 0x40 != 0
+}
+
+/// 0, -0, a stock value, or anything in ±`x`.
+fn edgy(pick: &mut Pick, stock: f32, x: f32) -> f32 {
+    match pick.next() % 8 {
+        0 => 0.0,
+        1 => -0.0,
+        2 => stock,
+        _ => pick.range(-x, x),
+    }
+}
+
+fn edgy_quad(pick: &mut Pick, x: f32) -> [f32; 4] {
+    [0; 4].map(|_| edgy(pick, 1.0, x))
+}
+
+/// SLUS-21104's wreck (`0x004d3f90`) and unwreck (`0x004d40a0`) on generated helicopters, every word
+/// they write against the port's: above all the gravity block's force, which the wreck sets from
+/// `WreckGravity` and the body's mass and the unwreck from the gravity scale and the mass — MX
+/// Unleashed's formula, not the load's `-GravityScale * Weight`. Their calls out are hooked: the sound,
+/// the blade throw, the put-back (vtable `+0xe8`), the blades' stop, the rumble's test and the event
+/// post; the body's damping and inertia setters run as themselves.
+#[test]
+fn the_mxvatv_wreck_and_unwreck_are_the_originals() {
+    use game_sim::biplane::{Body, THROWN};
+    use game_sim::kiowa::{Crashed, Kiowa, Measure, Nodes, Ride, Throw, Wreckage};
+    use game_sim::math::Mat4;
+    let Some(mut ee) = heli() else { return };
+    let vtable = ee.u32_at(HELI + 4);
+    assert_eq!(ee.u32_at(vtable + 0x368), 0x004d_3f90, "the Kiowa's wreck slot");
+    assert_eq!(ee.u32_at(vtable + 0x36c), 0x004d_40a0, "the Kiowa's unwreck slot");
+    assert_eq!(ee.u32_at(HELI + wreck_at::KIND), 3, "the Kiowa's kind word (the damping gate)");
+    let body = ee.u32_at(HELI + at::BODY);
+    let block = ee.u32_at(HELI + at::GRAVITY);
+    let asked = Rc::new(RefCell::new(Vec::<String>::new()));
+    let hook = |ee: &mut Ee, at: u32, name: &'static str| {
+        let a = asked.clone();
+        ee.hooks.insert(at, Box::new(move |ee| {
+            a.borrow_mut().push(name.to_string());
+            ee.set(2, 0);
+        }));
+    };
+    let sound_vt = ee.u32_at(ee.u32_at(HELI + wreck_at::SOUND) + 4);
+    let at = ee.u32_at(sound_vt + 0x94);
+    hook(&mut ee, at, "sound on");
+    let at = ee.u32_at(sound_vt + 0x90);
+    hook(&mut ee, at, "sound off");
+    let at = ee.u32_at(vtable + 0x478);
+    hook(&mut ee, at, "blades thrown");
+    let at = ee.u32_at(vtable + 0xe8);
+    hook(&mut ee, at, "put back");
+    let stop = ee.u32_at(ee.u32_at(ee.u32_at(HELI + wreck_at::BLADES) + 4) + 0x134);
+    for k in 0..4 {
+        let b = ee.u32_at(HELI + wreck_at::BLADES + 4 * k);
+        assert_eq!(ee.u32_at(ee.u32_at(b + 4) + 0x134), stop, "blade {k}'s stop slot");
+    }
+    hook(&mut ee, stop, "blade stopped");
+    // the rumble's test, which the player's helicopter reaches; 0, no rumble
+    hook(&mut ee, 0x0051_a250, "rumble test");
+    let a = asked.clone();
+    ee.hooks.insert(f("atv_post_event"), Box::new(move |ee| {
+        a.borrow_mut().push(format!("event {} {}", ee.r(6), ee.r(7)));
+        ee.set(2, 0);
+    }));
+    let nodes: [u32; 6] = wreck_at::NODES.map(|o| ee.u32_at(HELI + o));
+    assert!(nodes.iter().all(|&n| n != 0) && ee.u32_at(HELI + wreck_at::BLADES) != 0, "the nodes and blades are built");
+
+    let mut pick = Pick(0x9b05_688c_2b3e_6c1f);
+    let mut counts = [0usize; 3];
+    for case in 0..CASES {
+        let unwreck = pick.one_in(2);
+        let reason = if unwreck {
+            [0, 1, THROWN, (pick.next() % 20) as u32][(pick.next() % 4) as usize]
+        } else {
+            [1, THROWN, (pick.next() % 20) as u32][(pick.next() % 3) as usize]
+        };
+        let before = [0, 1, THROWN, (pick.next() % 20) as u32][(pick.next() % 4) as usize];
+        let clock = pick.range(0.0, 6.0);
+        let down = pick.one_in(2);
+        let mass = match pick.next() % 10 {
+            0 => 0.0,
+            1 => pick.range(-50.0, 0.0),
+            2 => 42.546_58,
+            _ => pick.range(1.0, 200.0),
+        };
+        let wreck_gravity = edgy(&mut pick, 3.0, 6.0);
+        let gravity_scale = edgy(&mut pick, 1.0, 4.0);
+        let throw_scale = edgy(&mut pick, 0.5, 2.0);
+        let wreck_damping = edgy_quad(&mut pick, 2.0);
+        let wreck_inertia = edgy_quad(&mut pick, 2.0);
+        let inertia = [edgy(&mut pick, 10795.494, 20000.0), edgy(&mut pick, 10212.026, 20000.0), edgy(&mut pick, 1301.4453, 20000.0), edgy(&mut pick, 1.0, 3.0)];
+        let rates = edgy_quad(&mut pick, 6.0);
+        let hidden: [bool; 6] = [0; 6].map(|_| pick.one_in(2));
+        let pad = [0; 7].map(|_| pick.range(-1.0, 1.0));
+
+        ee.set_u32(HELI + at::REASON, if unwreck { reason } else { before });
+        ee.set_f32(HELI + at::CLOCK, clock);
+        ee.set_u32(HELI + at::DOWN, u32::from(down));
+        ee.set_f32(body + wreck_at::MASS, mass);
+        ee.set_f32(HELI + wreck_at::WRECK_GRAVITY, wreck_gravity);
+        ee.set_f32(block, gravity_scale);
+        ee.set_f32(block + 4, throw_scale);
+        set_quad(&mut ee, HELI + wreck_at::WRECK_DAMPING, wreck_damping);
+        set_quad(&mut ee, HELI + wreck_at::WRECK_INERTIA, wreck_inertia);
+        set_quad(&mut ee, HELI + wreck_at::INERTIA, inertia);
+        set_quad(&mut ee, body + BODY_RATES, rates);
+        for o in [wreck_at::DAMPING, wreck_at::BODY_INERTIA, wreck_at::INV_INERTIA, wreck_at::ANG_DAMPING] {
+            let q = edgy_quad(&mut pick, 9.0);
+            set_quad(&mut ee, body + o, q);
+        }
+        let force = edgy_quad(&mut pick, 5000.0);
+        set_quad(&mut ee, block + wreck_at::FORCE, force);
+        for (n, h) in nodes.iter().zip(hidden) {
+            // byte +3's 0x40, the top byte of the word
+            let word = ee.u32_at(*n) & !0x4000_0000 | if h { 0x4000_0000 } else { 0 };
+            ee.set_u32(*n, word);
+        }
+        for (k, o) in [at::CLIMB, at::DESCEND, at::FRACTION, at::PAD, at::PAD + 4, at::PAD + 8, at::HOLD].into_iter().enumerate() {
+            ee.set_f32(HELI + o, pad[k]);
+        }
+        asked.borrow_mut().clear();
+
+        let damping = quad(&ee, body + wreck_at::DAMPING);
+        let ang_damping = quad(&ee, body + wreck_at::ANG_DAMPING);
+        let inv_inertia = quad(&ee, body + wreck_at::INV_INERTIA);
+        let mut ride = Ride {
+            body: Body { rates: Vf::new(rates[0], rates[1], rates[2], rates[3]), damping, ang_damping, inv_inertia, ..Body::default() },
+            measure: Measure::default(),
+            crash: Crash { reason: if unwreck { reason } else { before }, down, clock: F(clock), ..Crash::default() },
+            flown: true,
+            gravity_scale: F(gravity_scale),
+            throw_scale: F(throw_scale),
+            gravity: Vf::new(force[0], force[1], force[2], force[3]),
+            area: None,
+            touchdown_sound: false,
+            rotor_angle: F::ZERO,
+            rotor_hidden: hidden[0],
+        };
+        let mut w = Wreckage {
+            wreck_gravity: F(wreck_gravity),
+            wreck_damping: Vf::new(wreck_damping[0], wreck_damping[1], wreck_damping[2], wreck_damping[3]),
+            wreck_inertia: Vf::new(wreck_inertia[0], wreck_inertia[1], wreck_inertia[2], wreck_inertia[3]),
+            inertia: Vf::new(inertia[0], inertia[1], inertia[2], inertia[3]),
+            mass: F(mass),
+            body_inertia: quad(&ee, body + wreck_at::BODY_INERTIA),
+            nodes: Nodes { rotor: [hidden[1], hidden[2], hidden[3]], intact: hidden[4], wrecked: hidden[5] },
+            ..Wreckage::default()
+        };
+        let mut kiowa = Kiowa::default();
+        let want_asked: Vec<String>;
+        if unwreck {
+            ee.call(0x004d_40a0, &[u64::from(HELI), 1], &[], BUDGET);
+            w.unwreck_mx(&mut ride);
+            kiowa.unwreck_controls();
+            want_asked = ["sound off"].into_iter().map(String::from)
+                .chain((0..4).map(|_| "blade stopped".to_string()))
+                .chain(["put back".to_string(), "event 8 13".to_string()])
+                .collect();
+            same_lanes("the built inertia", case, w.inertia, vector(&ee, HELI + wreck_at::INERTIA), 4);
+            let pads = [kiowa.pad.climb, kiowa.pad.descend, kiowa.commands.altitude_fraction, kiowa.pad.lateral,
+                        kiowa.pad.longitudinal, kiowa.pad.pedal, kiowa.control.hold_altitude];
+            for (k, o) in [at::CLIMB, at::DESCEND, at::FRACTION, at::PAD, at::PAD + 4, at::PAD + 8, at::HOLD].into_iter().enumerate() {
+                same(&format!("the control word at +{o:#x}"), case, pads[k], ee.f32_at(HELI + o));
+            }
+            same("the throw's scale", case, ride.throw_scale, ee.f32_at(block + 4));
+            counts[1] += 1;
+        } else {
+            ee.call(0x004d_3f90, &[u64::from(HELI), u64::from(reason)], &[], BUDGET);
+            let mut out = Crashed::default();
+            ride.crash.wreck_mxvatv(reason, &mut out);
+            let throw = Throw { blades: [Mat4([Vf::default(); 4]); 4], model: Mat4([Vf::default(); 4]) };
+            w.wreck_mx(&mut ride, reason, &throw, &mut Rng::from_seed(1));
+            assert_eq!(out.wreck, Some(reason), "case {case}: the wreck asked");
+            want_asked = ["rumble test", "event 8 11", "sound on"].into_iter().map(String::from)
+                .chain((reason != THROWN).then(|| "blades thrown".to_string()))
+                .collect();
+            counts[0] += 1;
+            counts[2] += usize::from(reason == THROWN);
+        }
+        assert_eq!(*asked.borrow(), want_asked, "case {case}: the calls out (reason {reason})");
+        assert_eq!(ee.u32_at(HELI + at::REASON), ride.crash.reason, "case {case}: the reason");
+        same("the clock", case, ride.crash.clock, ee.f32_at(HELI + at::CLOCK));
+        assert_eq!(ee.u32_at(HELI + at::DOWN) != 0, ride.crash.down, "case {case}: the latch");
+        same_lanes("the gravity", case, ride.gravity, vector(&ee, block + wreck_at::FORCE), 4);
+        same("the gravity scale", case, ride.gravity_scale, ee.f32_at(block));
+        same_lanes("the rates", case, ride.body.rates, vector(&ee, body + BODY_RATES), 4);
+        same_lanes("the damping", case, ride.body.damping, vector(&ee, body + wreck_at::DAMPING), 4);
+        same_lanes("the angular damping", case, ride.body.ang_damping, vector(&ee, body + wreck_at::ANG_DAMPING), 4);
+        same_lanes("the body's inertia", case, w.body_inertia, vector(&ee, body + wreck_at::BODY_INERTIA), 4);
+        same_lanes("the inverse inertia", case, ride.body.inv_inertia, vector(&ee, body + wreck_at::INV_INERTIA), 3);
+        // The wreck's blade throw is hooked in the original, so only the two nodes the wreck itself
+        // swaps are the port's there; the unwreck swaps all six.
+        let got = nodes.map(|n| node_hidden(&ee, n));
+        let port = [ride.rotor_hidden, w.nodes.rotor[0], w.nodes.rotor[1], w.nodes.rotor[2], w.nodes.intact, w.nodes.wrecked];
+        let swapped = if unwreck { 0 } else { 4 };
+        assert_eq!(got[swapped..], port[swapped..], "case {case}: the nodes hidden (rotor x4, +0x1220, the wrecked blades)");
+    }
+    println!("the wreck and unwreck: {} wrecks ({} thrown), {} unwrecks, bit-exact", counts[0], counts[2], counts[1]);
+}
+
+/// The gravity the player's helicopter is taken with (MD63f): in both of MD80a's images the player's
+/// Kiowa, never wrecked, holds the unwreck's `32.2 * (-scale * mass)`, and the idle twin the load's
+/// `-scale * Weight` (`Part::read`'s), each from `kiowa.phy` as the port reads it.
+#[test]
+fn the_taken_mxvatv_kiowa_holds_the_unwrecks_gravity() {
+    let Some(bytes) = phy() else { return };
+    for (name, heli, twin, model_one) in [("kiowa", HELI, 0x01b2_0740, true), ("kiowa3", HELI_TWO, 0x0153_7000, false)] {
+        let Some(ee) = image(name, heli) else { return };
+        let part = Phy::read_mxvatv_bytes(&bytes, model_one).phy.mass_properties;
+        for (who, h) in [("the player's", heli), ("the idle twin's", twin)] {
+            assert_eq!(ee.u32_at(h + 4), KIOWA_VTABLE, "{name}: no Kiowa at {h:#x}");
+            assert_eq!(ee.u32_at(h + 0x6c4), 0, "{name}: {who} Kiowa has wrecked");
+            let block = ee.u32_at(h + at::GRAVITY);
+            same_word(&format!("{name}: {who} gravity scale"), part.gravity_scale, &ee, block);
+            same_word(&format!("{name}: {who} mass"), part.mass, &ee, ee.u32_at(h + at::BODY) + wreck_at::MASS);
+        }
+        let taken = game_sim::kiowa::mxvatv_taken_gravity(part.gravity_scale, part.mass);
+        same_quad(&format!("{name}: the player's gravity"), taken, &ee, ee.u32_at(heli + at::GRAVITY) + wreck_at::FORCE);
+        same_quad(&format!("{name}: the idle twin's gravity"), part.gravity, &ee, ee.u32_at(twin + at::GRAVITY) + wreck_at::FORCE);
+        assert_ne!(taken.to_bits(), part.gravity.to_bits(), "{name}: the two gravities round alike");
+        println!("{name}: taken {:?}, loaded {:?}", taken, part.gravity);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------
+// 7 — the reader
 // ---------------------------------------------------------------------------------------------------
 
 fn phy() -> Option<Vec<u8>> {

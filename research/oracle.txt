@@ -9226,6 +9226,7 @@ atv_part_read               atv 0x00493210 = MXU physics_part_read (0x0015a500):
 # Gravity rewrites (MD63f): the wreck 0x004d3f90 -WreckGravity(+0xc90) * body+0x18 * 32.2, the put-backs
 # 0x004d40a0/0x004d40b0 (0x004c4350, which vehicle not read) -*(+0xe8) * body+0x18 * 32.2; body+0x18 read as
 # the mass (inferred).
+# (MD63f: these are the Kiowa's (vtable 0x003cfad0), not the bike's; 0x004c4350 is the plane's. See # MD63f.)
 atv_post_event              atv 0x00272300 = the preload cue's post (a0 *0x00442eb0, a1 bike +0x674, a2 8, a3 14, t0 bike +0xd20, t1 0)
 car_launch                  boot 0x00397e20 (dt, car): every substep. Clutch let out from standing:
 #                                           the converter boost eases from a speed-scaled start to 1.
@@ -13118,3 +13119,27 @@ atv_bike_pad_reader         atv 0x004e36c0 = the bike/quad pad reader (quad vtab
 #   +0xd20, 0) (the press cue), then +0x17ac = +0x12c0; strength 0 -> +0x12c0 = 0, +0x17ac = 0. Only the
 #   reader reads +0x17ac (and the reset 0x004de778 zeroes it); writers of +0x12c0 elsewhere: 0x004c3ef4,
 #   0x004c752c, 0x004cda3c, 0x004de304, 0x004e1538/0x004e1560/0x004e1cac, 0x004e3728/0x004e39c8 (the reader).
+# MD63f — the MX vs. ATV Kiowa's wreck and unwreck, and the gravity they write (src kiowa::Crash::wreck_mxvatv,
+# kiowa::mxvatv_taken_gravity, Wreckage::wreck_mx / unwreck_mx; openmx vehicle.rs KiowaRide::built; tests
+# mxvatv_kiowa.rs the_mxvatv_wreck_and_unwreck_are_the_originals, the_taken_mxvatv_kiowa_holds_the_unwrecks_gravity).
+# Owner: the gravity rewriters are the Kiowa's (vtable 0x003cfad0, # MD80a), not the bike's. A writer scan of
+# GAME_REL (stores to +0x44 with 32.2 near) finds only the plane (0x004c0d2c, 0x004c439c) and the Kiowa
+# (0x004d4000, 0x004d40ec).
+# Wreck 0x004d3f90 = vt +0x368 (heli, reason): base wreck 0x004a83d0 (reason +0xc80, clock +0xc84 = 0, latch
+#   +0xc8c = 0; rumble test 0x0051a250(+0x6ac) when +0xbc4 state +0x28 == 1 and +0x5c; if +0xbbc not 0/1: body
+#   vt +0x20 / +0x68 with WreckDamping +0xca0, vt +0x60 with WreckInertia +0xcb0 * inertia +0xcc0 (vmul.xyz);
+#   post (8, 11)); body +0x1d0 rates.xyz * 1.0; *(+0xe8)+0x40 = (0, 32.2 * (-+0xc90 * body+0x18), 0, 1);
+#   +0x11dc vt +0x94 (sound); reason != 13: vt +0x478 (0x004d3720, blade throw); node +0x1220 hidden,
+#   +0x1224 shown (byte 3 bit 0x40).
+# Unwreck 0x004d40a0 = vt +0x36c (heli, 1): *(+0xe8)+0x40 = (0, 32.2 * (-*(+0xe8) * body+0x18), 0, 1);
+#   +0x11dc vt +0x90; zeroes +0x10f0..+0x1104 and +0x1138; if +0x1200 and +0x132c: rotor nodes
+#   +0x1200..+0x120c and +0x1220 shown, +0x1224 hidden, blades +0x132c..+0x1338 vt +0x134(1); vt +0xe8
+#   (0x004d36a0, put-back: placement 0x004a6f70(heli, 1, 1), +0x10f8 = 0.5 if +0x684's +0x50 & 1, +0x48c
+#   vt +0xb0, vt +0x378); base unwreck 0x004a8500 (reason 13: *(+0xe8)+4 /= 0.5; reason, clock = 0, latch
+#   kept; if +0xbbc not 0/1: dampings (1,1,1,1) 0x00396fd0, inertia from +0xcc0 with its w set 1; post (8, 13)).
+# Body (vtable 0x003cd200): vt +0x20 0x00493b20 damping +0x30; vt +0x68 0x00493b00 angular damping +0x150;
+#   vt +0x60 0x00493bf0 inertia +0x130, inverse +0x140..+0x148 (0 where the lane <= 0), w of its arg = 1.
+#   Mass +0x18. 10000 cases bit-exact (4995 wrecks, 1744 thrown; 5005 unwrecks), +0xbbc = 3 as imaged.
+# Spawn: in md80a kiowa/kiowa3 the never-wrecked player (0x01ab7d20 / 0x014c8f00) holds the unwreck's
+#   -1369.9998779 (0xc4ab3fff), the idle twins (0x01b20740 / 0x01537000) the load's -1370; the port now
+#   builds the MX vs. ATV player's Ride with the former. Which spawn path calls the unwreck: not found.
