@@ -2760,3 +2760,28 @@ fn the_toy_loops_are_the_discs() {
          free10_ss 4 car; free11 8 car,semi; free11_ss 8 car,semi"
     );
 }
+
+/// **C23: no cheer on a landed trick.** The original's crowd cheers only on a race place gained
+/// (P285, research/bike-sounds.md); a trick landing calls no crowd sound. A seat lands from the air
+/// on a track with a crowd and a cheer to pick, once with a trick and once without: the mixer holds
+/// the same voices both times.
+#[test]
+fn a_landed_trick_queues_no_cheer() {
+    let voices = |trick: bool| {
+        let mixer = Arc::new(std::sync::Mutex::new(Mixer::new(Music::new(Vec::new(), 1))));
+        let mut s = audio::Sound::new(mixer.clone());
+        s.world.crowd = true;
+        s.world.cheer = audio::List { sounds: vec![(tone(0.5, 2.0), false)] };
+        s.seats.push(audio::SeatSound::new(Arc::new(tone_bike()), 0));
+        let at = |grounded: bool, landed_trick: bool| audio::SeatFrame {
+            hands: Hands { grounded, gas: 0.0, clutch: 0.0, speed: 10.0, at: [0.0; 3], vel: [0.0, 0.0, 10.0] },
+            landed_trick,
+            ..audio::SeatFrame::default()
+        };
+        s.frame(&[at(false, false)], 1.0 / 30.0);
+        s.frame(&[at(true, trick)], 1.0 / 30.0);
+        let n = mixer.lock().unwrap().voices();
+        n
+    };
+    assert_eq!(voices(true), voices(false), "a landed trick played a crowd sound");
+}
