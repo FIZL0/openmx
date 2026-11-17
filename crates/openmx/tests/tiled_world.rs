@@ -588,3 +588,27 @@ fn a_worlds_spawn_is_its_start() {
     let far: f32 = start.iter().zip(&away).map(|(a, b)| (a - b) * (a - b)).sum::<f32>().sqrt();
     assert!(far > 50.0, "the throttle alone did not leave the start: {away:?}\n{said}");
 }
+
+/// F25: a world's split-screen ticks go to the sim thread (N23a) while the picture reads its own copy
+/// of the tiles, and the ride is the same tick for tick: every seat's hash after every tick, the
+/// thread on and off, ten seconds on the throttle and two at rest.
+#[test]
+fn a_worlds_ticks_on_the_sim_thread_are_the_same_ride() {
+    let tape = spawn_tape("sim-thread", 300, 0);
+    let ride = |mode: &str| shell(&format!("sim-thread-{mode}"), "md8_world", &[
+        "--players", "2", "--play", tape.to_str().unwrap(), "--frames", "360", "--steady-clock", "--trace-hash", "--no-sound", "--sim-thread", mode,
+    ]);
+    let (Some(off), Some(on)) = (ride("off"), ride("on")) else { return };
+    let hashes = |said: &str| -> Vec<String> { said.lines().filter(|l| l.starts_with("tick ") && l.contains(" hash ")).map(str::to_string).collect() };
+    let (off_hashes, on_hashes) = (hashes(&off), hashes(&on));
+    assert_eq!(off_hashes.len(), 360, "{off}");
+    let there: u64 = line(&on, "sim thread: ").split_whitespace().nth(2).unwrap().parse().unwrap();
+    // All but the first tick, whose picture needs it landed, and the last, which ends the ride.
+    assert!(there >= 300, "{there} ticks ran on the sim thread:\n{on}");
+    for (a, b) in off_hashes.iter().zip(&on_hashes) {
+        assert_eq!(a, b, "the sim thread's ride parted from the loop's");
+    }
+    assert_eq!(off_hashes.len(), on_hashes.len());
+    assert_eq!(line(&off, "ride hash "), line(&on, "ride hash "));
+    println!("md8_world: {} ticks the same, {there} on the sim thread", on_hashes.len());
+}
