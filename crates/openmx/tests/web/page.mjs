@@ -43,15 +43,49 @@ const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'openmx-page-'));
 // then waits on a ride that never starts); nor its background calls to Google (GCM sign-in, component updates).
 const chrome = spawn('chromium', ['--headless=new', '--remote-debugging-port=0', `--user-data-dir=${profile}`,
   '--no-first-run', '--no-default-browser-check', '--disable-extensions',
-  '--disable-component-extensions-with-background-pages', '--disable-background-networking', 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
+  '--disable-component-extensions-with-background-pages', '--disable-background-networking', 'about:blank'],
+  { stdio: ['ignore', 'ignore', 'pipe'], detached: true });
+// Chromium's GPU, network and storage processes outlive its browser process by a moment and still write into the
+// profile: a removal on the browser's exit can find it refilled (ENOTEMPTY under load, K33's online.mjs). So, as
+// online.mjs, chromium has a process group of its own (`detached`) and the profile goes once that whole group has:
+// the browser told to close, the group waited for, and what has not gone killed. Shorter waits than online.mjs's: the
+// test (netplay_browser.rs's Node) kills this script five seconds after closing its stdin, which would leave the group
+// running. A profile that still will not go is said on stderr; it does not change the exit code.
+const gone = () => {
+  try {
+    process.kill(-chrome.pid, 0);
+    return false;
+  } catch {
+    return true;
+  }
+};
+let quitting = false;
+// the DevTools connection, once it is up: the browser's own Browser.close is the orderly way out
+let ws;
 const quit = code => {
-  const done = () => {
-    fs.rmSync(profile, { recursive: true, force: true });
-    process.exit(code);
+  if (quitting) return;
+  quitting = true;
+  server.close();
+  const until = async (ok, ms) => {
+    for (const end = Date.now() + ms; !ok() && Date.now() < end; ) await new Promise(r => setTimeout(r, 50));
   };
-  if (chrome.exitCode !== null || chrome.signalCode !== null) done();
-  chrome.on('exit', done);
-  chrome.kill();
+  (async () => {
+    if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ id: 1e9, method: 'Browser.close' }));
+    else chrome.kill();
+    await until(gone, 3000);
+    if (!gone()) {
+      try {
+        process.kill(-chrome.pid, 'SIGKILL');
+      } catch {}
+      await until(gone, 1000);
+    }
+    try {
+      fs.rmSync(profile, { recursive: true, force: true });
+    } catch (e) {
+      console.error(`the profile stays: ${e.message}`);
+    }
+    process.exit(code);
+  })();
 };
 const fail = why => {
   console.error(why);
@@ -73,7 +107,7 @@ const wsUrl = await new Promise(resolve => {
 });
 process.stdout.write('page chromium\n');
 const targets = await (await fetch(wsUrl.replace('ws://', 'http://').replace(/\/devtools.*/, '/json'))).json();
-const ws = new WebSocket(targets.find(t => t.type === 'page').webSocketDebuggerUrl);
+ws = new WebSocket(targets.find(t => t.type === 'page').webSocketDebuggerUrl);
 await new Promise(r => ws.addEventListener('open', r));
 let id = 0;
 const pending = new Map();
