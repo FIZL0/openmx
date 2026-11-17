@@ -4770,6 +4770,24 @@ fn load_in_front<'env, T: Send + 'env>(
 }
 
 
+/// A world tile's slow textures' levels, made on a thread of their own (MD28).
+type Levels = std::sync::mpsc::Receiver<Vec<(usize, u8, game_render::gpu::Mips)>>;
+
+/// A tile dressed mid-ride whose models are still going up: its dressing index, the models left, and
+/// its slow textures' levels being made.
+type Unshown = (usize, Vec<String>, Option<Levels>);
+
+/// What putting up dressed tile `d`'s models takes (MD28): their slow textures' levels started on a
+/// thread of their own, and every model left to go up, a few a frame.
+fn dress_uploads(r: &Renderer, assets: &Assets, d: &world_dress::Dressed) -> Unshown {
+    let work: Vec<_> = r.mips_wanted(assets, &d.taken.models).into_iter().map(|(t, keep)| (t, keep, assets.textures[t].clone())).collect();
+    let (send, levels) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let _ = send.send(work.into_iter().map(|(t, keep, tex)| (t, keep, game_render::gpu::Mips::of(&tex, keep))).collect());
+    });
+    (d.index, d.taken.models.iter().rev().cloned().collect(), Some(levels))
+}
+
 /// One loading frame where the front end has one, between two steps of a ride's load (P127): what
 /// to leave the ride for, if anything. A cancel puts the pick back.
 /// Wait while the app is away from the front (MD97: on the iPhone, the app switcher mid-load left
@@ -7471,8 +7489,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // Tiles dressed mid-ride whose models are still going up, a few a frame, and not drawn till
     // they all are: by dressing index, the models left, and their slow textures' levels being made
     // on a thread of their own (MD28: a tile's at once was a 57 ms frame).
-    type Levels = std::sync::mpsc::Receiver<Vec<(usize, u8, game_render::gpu::Mips)>>;
-    let mut unshown: Vec<(usize, Vec<String>, Option<Levels>)> = Vec::new();
+    let mut unshown: Vec<Unshown> = Vec::new();
     let (world_reach, wrap) = match &sim {
         Land::Tiles(t) => (Some(t.reach), drawn_wrap(t)),
         _ => (None, None),
@@ -10395,17 +10412,32 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             // the pieces wait, and those held are built again once it is back, as what went up
             // while it went may not have.
             let in_front = gpuwin::in_front();
-            if let Some(stream) = &mut ground_stream
-                && in_front
-                && gpuwin::times_away() != ground_away
-            {
+            if in_front && gpuwin::times_away() != ground_away {
                 ground_away = gpuwin::times_away();
-                println!("world ground: back in front at tick {}, {} pieces built again", pacer.ticks(), stream.build_again());
-                // The paint's arrays the background gave back, before a map's pages are written (P307).
-                if let Some(r) = renderer_of(&mut offscreen, window)
-                    && r.take_back_ground_paint()
-                {
-                    println!("world paint: page arrays made again at tick {}", pacer.ticks());
+                if let Some(stream) = &mut ground_stream {
+                    println!("world ground: back in front at tick {}, {} pieces built again", pacer.ticks(), stream.build_again());
+                    // The paint's arrays the background gave back, before a map's pages are written (P307).
+                    if let Some(r) = renderer_of(&mut offscreen, window)
+                        && r.take_back_ground_paint()
+                    {
+                        println!("world paint: page arrays made again at tick {}", pacer.ticks());
+                    }
+                }
+                // And the maps' own pages written again over themselves, and every dressed tile's
+                // models and textures let go and put up again, a few a frame (MD97a): a map stays drawn
+                // as it is till its pages come, a tile's props and cars are not drawn till its models are up.
+                if let Some(r) = renderer_of(&mut offscreen, window) {
+                    if let Some(paint) = &mut paint_stream {
+                        println!("world paint: back in front at tick {}, {} maps written again", pacer.ticks(), paint.write_again(r));
+                    }
+                    if !dressed.is_empty() {
+                        unshown.clear();
+                        for d in &dressed {
+                            r.drop_owner(d.index as u32, &d.taken.models, d.taken.textures.clone());
+                            unshown.push(dress_uploads(r, &assets, d));
+                        }
+                        println!("world props: back in front at tick {}, {} tiles put up again", pacer.ticks(), dressed.len());
+                    }
                 }
             }
             if let Some(stream) = ground_stream.as_mut().filter(|_| in_front) {
@@ -10461,13 +10493,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                                 g.foliage = foliage;
                             }
                             if let Some(r) = renderer_of(&mut offscreen, window) {
-                                let work: Vec<_> =
-                                    r.mips_wanted(&assets, &d.taken.models).into_iter().map(|(t, keep)| (t, keep, assets.textures[t].clone())).collect();
-                                let (send, levels) = std::sync::mpsc::channel();
-                                thread::spawn(move || {
-                                    let _ = send.send(work.into_iter().map(|(t, keep, tex)| (t, keep, game_render::gpu::Mips::of(&tex, keep))).collect());
-                                });
-                                unshown.push((d.index, d.taken.models.iter().rev().cloned().collect(), Some(levels)));
+                                unshown.push(dress_uploads(r, &assets, &d));
                             }
                             dressed.push(d);
                         }
@@ -10488,7 +10514,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     println!("{line} at tick {}", pacer.ticks());
                 }
             }
-            if let Some(r) = renderer_of(&mut offscreen, window) {
+            // Not while the iPhone app is away (MD97a): the tiles dressed wait, their collision in
+            // the place already.
+            if let Some(r) = renderer_of(&mut offscreen, window).filter(|_| in_front) {
                 let at = Instant::now();
                 while let Some((index, left, levels)) = unshown.first_mut() {
                     if let Some(made) = levels {
