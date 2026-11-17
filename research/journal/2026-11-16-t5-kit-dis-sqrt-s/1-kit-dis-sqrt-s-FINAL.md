@@ -1,4 +1,4 @@
-# 1 — kit dis sqrt s (PART)
+# 1 — kit dis sqrt s (FINAL)
 
 Task T5. 2026-11-16.
 
