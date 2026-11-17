@@ -360,6 +360,19 @@ mod tests {
         }
     }
 
+    /// World `id`'s tiles, spec and plan laid out as its build ends: its [`STARTS`] file's widening
+    /// (MD102), the joins' build's last pass without the solve.
+    fn built_plan(disc: &mut Disc, id: &str) -> (Vec<stitch::Tile>, stitch::build::Params, stitch::build::Start, stitch::build::Plan) {
+        let (maps, p) = stitch_tiles(disc, id).unwrap();
+        let (_, text) = STARTS.iter().find(|(w, _)| *w == id).unwrap();
+        let start = stitch::build::Start::from_json(Json::parse(text).unwrap().get("start").unwrap()).unwrap();
+        let cuts: Vec<[u32; 4]> = maps.iter().map(|t| t.trim_cut(p.trim).keep).collect();
+        let step = stitch::build::lattice_spacing(&maps);
+        let gates: Vec<[f64; 4]> = maps.iter().zip(&cuts).map(|(t, k)| stitch::build::cut_source(t, *k, step, &p).gates).collect();
+        let plan = stitch::build::plan_widened(&maps, &cuts, &gates, &p, &start.widen).unwrap();
+        (maps, p, start, plan)
+    }
+
     /// The most join between two neighbouring maps of MX Unleashed: WORLD (MD155).
     const EVEN_GAP: f64 = 1500.0;
 
@@ -368,15 +381,16 @@ mod tests {
     /// (the wrap joins were up to 2,740 ft, nationals that could not start before their own trimmed
     /// ground), so riding off any map reaches the next one across about the same stretch. With
     /// `$OPENMX_LAYOUT_DUMP` set it writes each tile's interior there, `id x0 z0 x1 z1`, and the
-    /// world's extent, to draw. Without the disc it skips.
+    /// world's extent, to draw. Laid out as its build ends (MD102; it was the coarse [`stitch::build::layout`],
+    /// whose widening is not the build's: nat01 > free10 there was 1,508 ft, 1,004 built). Without the
+    /// disc it skips.
     #[test]
     fn world_mxu_is_laid_out_evenly() {
         let Ok(mut disc) = Disc::open_configured() else {
             eprintln!("skipped: no disc");
             return;
         };
-        let (maps, p) = stitch_tiles(&mut disc, "world_mxu").unwrap();
-        let plan = stitch::build::layout(&maps, &p).unwrap();
+        let (maps, p, _, plan) = built_plan(&mut disc, "world_mxu");
         let mut ids: Vec<&str> = plan.placed.iter().enumerate().map(|(t, _)| maps[t].id.as_str()).collect();
         assert_eq!(ids, tiles("world_mxu"));
         ids.sort();
@@ -394,6 +408,46 @@ mod tests {
         for j in plan.join_widths(p.wrap.as_deref()) {
             let to = j.to.unwrap_or_else(|| panic!("{} faces no map on side {}", name(j.tile), j.side));
             assert!(j.width <= EVEN_GAP, "{} side {} to {}: {:.0} ft of join (at most {EVEN_GAP})", name(j.tile), j.side, name(to), j.width);
+        }
+    }
+
+    /// MD102: a wrapped unit world's joins over the seam are joins like any other (MX Unleashed's
+    /// three). Laid out as its build ends, each join is what its pair needs
+    /// ([`stitch::build::unit_gaps`]) and a share of its line's slack, and no join over the seam has
+    /// more slack than the most any join inside the world has on that axis, give or take a leaf (a
+    /// tile's origin is on whole leaves). In world_mxu they had up to 200 ft more (nat10 > nat09 over
+    /// x: 833 ft past its need beside the line's 478-564), the slack each line's first and last tile
+    /// were held off the seam by. No join inside is over 1,800 ft. Without the disc it skips.
+    #[test]
+    fn seam_joins_are_like_the_others() {
+        let Ok(mut disc) = Disc::open_configured() else {
+            eprintln!("skipped: no disc");
+            return;
+        };
+        for id in ["world_mxu", "world_mxu_free", "world_mxu_nat"] {
+            let (maps, p, start, plan) = built_plan(&mut disc, id);
+            let needs = stitch::build::unit_gaps(&maps, &p, &start.widen);
+            let name = |t: usize| maps[t].id.as_str();
+            // Per axis, the most slack inside the world and over the seam, and which join.
+            let mut most: [[(f64, String); 2]; 2] = Default::default();
+            most.iter_mut().flatten().for_each(|m| m.0 = f64::MIN);
+            for j in plan.join_widths(p.wrap.as_deref()) {
+                // A tile alone in its row or column (world_mxu_free's, along z) faces only itself.
+                let Some(to) = j.to else { continue };
+                let (axis, (a, b)) = (j.side % 2, if j.side >= 2 { (j.tile, to) } else { (to, j.tile) });
+                let need = needs[axis][a][b];
+                assert!(j.width > need - 1.0, "{id}: {} > {}: {:.0} ft of join, under the {need:.0} it needs", name(a), name(b), j.width);
+                assert!(j.wrapped || j.width <= 1800.0, "{id}: {} > {}: {:.0} ft of join (at most 1800)", name(a), name(b), j.width);
+                let m = &mut most[axis][usize::from(j.wrapped)];
+                if j.width - need > m.0 {
+                    *m = (j.width - need, format!("{} > {}, {:.0} ft for {need:.0}", name(a), name(b), j.width));
+                }
+            }
+            let leaf = 16.0 * plan.spacing;
+            for (axis, [inside, seam]) in most.iter().enumerate().filter(|(_, [_, seam])| !seam.1.is_empty()) {
+                eprintln!("{id} axis {axis}: most slack {:.0} ft inside ({}), {:.0} over the seam ({})", inside.0, inside.1, seam.0, seam.1);
+                assert!(seam.0 <= inside.0.max(0.0) + leaf, "{id} axis {axis}: {} over the seam, {:.0} ft past its need; inside at most {:.0} ({})", seam.1, seam.0, inside.0, inside.1);
+            }
         }
     }
 }
