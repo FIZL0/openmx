@@ -1097,6 +1097,10 @@ pub mod atv_world;
 /// the gathered list, and its record read out as the contact distributor's contacts.
 pub mod atv_search;
 
+/// A map's prop world for the bike (F34): SLUS-21104's Free Ride world built from the map's files, and
+/// the bike's ray probes searched over it.
+pub mod atv_props;
+
 /// The quad's Moto, part 2 (MD75b): SLUS-21104's gearbox, head and tail, gravity, engine, air drag,
 /// wheel clear, rev limiter and peak rates, answered in [`quad::Steps`].
 pub mod atv_moto;
