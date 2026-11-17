@@ -13,7 +13,9 @@
 //! * a wall in the middle has none: its copy places are empty, no mesh and no reach;
 //! * the places are always there, so a still shape keeps its number whether a copy is in use;
 //! * a strike heard on a copy is told to the wall it copies;
-//! * a world that does not wrap mirrors the list alone, as before.
+//! * a world that does not wrap mirrors the list alone, as before;
+//! * (MD167) a bike by the near seam strikes a knockable ball by the far one, the record where the
+//!   bike is; on a world that does not wrap the strike is the plain one (skipped without the disc).
 
 use game_sim::math::{self, Mat4};
 use game_sim::tiles::{generate, Piece, Reach, SEAM_COPIES, Source, Tile, Tiled};
@@ -162,4 +164,150 @@ fn a_world_that_does_not_wrap_mirrors_the_list_alone() {
     let near = near.unwrap();
     assert_eq!(near.props[0].mesh.triangles.len(), 2);
     assert!(near.props.iter().skip(1).all(|p| !close(p.centre, Prop::on(mesh(), &pose(-4.0, 200.0)).centre)), "no copy");
+}
+
+// MD167: the knockable props (S197) by a seam. The bike's body rays strike a prop by the far seam
+// where the prop stands again one width over, by the bike, as the moving list's shapes do.
+
+/// A flat world wrapped on `x` alone, `width` feet across.
+struct Seam {
+    flat: game_sim::world::Flat,
+    width: F,
+}
+
+impl World for Seam {
+    fn ground(&mut self, at: Vf) -> (Vf, Vf) {
+        self.flat.ground(at)
+    }
+
+    fn solid(&mut self, bundle: &game_sim::collide::Bundle, record: &mut game_sim::collide::Record) -> bool {
+        self.flat.solid(bundle, record)
+    }
+
+    fn area(&self) -> Option<game_sim::biplane::Area> {
+        Some(game_sim::biplane::Area { width: self.width, depth: F(10_000.0) })
+    }
+
+    fn wrap(&self) -> [bool; 2] {
+        [true, false]
+    }
+}
+
+const DT: F = F(game_sim::tick::DeltaTime::CAP_30);
+
+/// free09's props as the ride loads them, and the bike's collision files, off the disc
+/// (tests/prop_strike_paths.rs).
+fn knock_disc() -> Option<(game_sim::prop_set::PropSet, std::sync::Arc<game_sim::bike_col::BikeCol>)> {
+    use game_sim::bike_col::{self, BikeCol};
+    let mut disc = game_render::disc::Disc::open_configured().map_err(|why| ps2_oracle::skip(&why)).ok()?;
+    let member = disc.entries().iter().find(|e| e.name.eq_ignore_ascii_case("Tracks\\free09.res")).expect("free09.res").name.clone();
+    let res = disc.res(&member).expect("free09's archive");
+    let toy = game_sim::phy::Ini::parse_bytes(&res.read_suffix("free09.toy").expect("free09.toy"));
+    let scene = game_sim::track::Scene::parse(&res.read_suffix("free09.scn").expect("free09.scn")).expect("free09.scn parses");
+    let (set, said) = game_sim::prop_set::PropSet::load(
+        &toy,
+        "Tracks\\Free09\\",
+        &scene.models,
+        &mut |p| res.read(p).ok(),
+        &mut |p| res.read_suffix(p).ok(),
+        Some(game_sim::biplane::Area::new(F(3.0), F(3.0), F(9.0), F(9.0))),
+    );
+    assert!(said.is_empty(), "free09 loads whole: {said:?}");
+    let split = disc.res("Tracks\\free09_ss_2.res").expect("the split track's archive");
+    let read = |name: String| split.read_suffix(&name).unwrap_or_else(|e| panic!("{e}"));
+    let col = BikeCol::load(&read(bike_col::rays_file(bike_col::MODEL)), &read(bike_col::shape_file(bike_col::MODEL)))
+        .expect("the bike's collision files");
+    Some((set, std::sync::Arc::new(col)))
+}
+
+fn close_by(a: Vf, b: Vf, by: f32) -> bool {
+    close(Vf::new(a.x() + by, a.y(), a.z(), a.w()), b)
+}
+
+#[test]
+fn a_bike_by_the_near_seam_strikes_a_ball_by_the_far_one() {
+    let Some((set, col)) = knock_disc() else { return };
+    let mut sim = game_sim::Sim::new(0x5167);
+    sim.traffic.props = set;
+    sim.rider.sense.wrecks_enabled = false;
+    sim.rider.carries_bike_col(col);
+    // The bike ahead of a ball on +x, facing back at it, where its rays strike it.
+    let facing = Vf::new(-1.0, 0.0, 0.0, 0.0);
+    let mut found = None;
+    'find: for (c, coll) in sim.traffic.props.collections.iter().enumerate() {
+        let Some(o) = coll.objects.first().filter(|o| o.collision.is_some()) else { continue };
+        let ball = o.node.origin;
+        for ahead in (8..24).map(|k| k as f32 * 0.25) {
+            for up in [0.0, 0.5, 1.0, -0.5, 1.5] {
+                let at = Vf::new(ball.x() + ahead, ball.y() + up, ball.z(), 1.0);
+                let mut probe = sim.clone();
+                probe.rider.place(at, facing);
+                let strike = probe.prop_strike(0, DT);
+                if strike.struck.iter().any(|s| s.0 == c) && !strike.contacts.is_empty() {
+                    found = Some((c, at, strike));
+                    break 'find;
+                }
+            }
+        }
+    }
+    let (c, at, want) = found.expect("some spot by some ball where the bike's rays strike it");
+    // A world whose far seam is the whole foot under the bike: the ball 2 to 6 feet short of it, the
+    // bike a width back, within a foot past the near seam.
+    let width = at.x().floor();
+    let wrapped = Seam { flat: game_sim::world::Flat::default(), width: F(width) };
+    let near = Vf::new(at.x() - width, at.y(), at.z(), 1.0);
+    assert!((0.0..1.0).contains(&near.x()));
+    let mut probe = sim.clone();
+    probe.rider.place(near, facing);
+    assert!(probe.prop_strike(0, DT).struck.is_empty(), "alone, the ball is a width from the bike");
+    let got = probe.prop_strike_in(0, DT, &wrapped);
+    // The same ball struck, by the same rays, the record where the bike is.
+    assert_eq!(got.struck.iter().map(|s| (s.0, s.1, s.2.len())).collect::<Vec<_>>(), want.struck.iter().map(|s| (s.0, s.1, s.2.len())).collect::<Vec<_>>());
+    assert!(got.struck.iter().any(|s| s.0 == c));
+    assert_eq!(got.contacts.len(), want.contacts.len(), "one entry a ray, as at the ball's own place");
+    // The bike's entries where the bike is; the mirrors on the ball's list at the ball's own place.
+    for (g, w) in got.contacts.iter().zip(&want.contacts) {
+        assert_eq!((g.kind, g.other, g.surface), (w.kind, w.other, w.surface));
+        assert!(close(g.normal, w.normal), "normal {:?} vs {:?}", g.normal, w.normal);
+        assert!(close_by(g.point, w.point, width), "point {:?} vs {:?}", g.point, w.point);
+        assert!(close(g.from, w.from), "from {:?} vs {:?}", g.from, w.from);
+    }
+    for (g, w) in got.struck.iter().zip(&want.struck).flat_map(|(g, w)| g.2.iter().zip(&w.2)) {
+        assert_eq!((g.kind, g.other, g.surface), (w.kind, w.other, w.surface));
+        assert!(close(g.normal, w.normal), "mirror normal {:?} vs {:?}", g.normal, w.normal);
+        assert!(close(g.point, w.point), "mirror point {:?} vs {:?}", g.point, w.point);
+    }
+    let k = got.struck.iter().position(|s| s.0 == c).unwrap();
+    assert!(got.across.contains(&(k, [F(width), F::ZERO])), "struck across the seam: {:?}", got.across);
+    assert!(want.across.is_empty());
+    // The bike's frame pushes the ball a width back, by the bike; written back, it is where it was.
+    let mut set = probe.traffic.props.clone();
+    let before = set.collections[c].bones[0].body;
+    let pushed = set.strike(&got);
+    let p = pushed.iter().find(|p| p.collection == c).expect("the ball pushed");
+    assert!(close_by(p.body.position, before.position, width), "pushed by the bike: {:?} vs {:?}", p.body.position, before.position);
+    assert_eq!(set.across.len(), got.across.len());
+    set.pushed(&pushed);
+    let after = set.collections[c].bones[0].body;
+    assert_eq!((after.position.0.map(f32::to_bits), after.last_position.0.map(f32::to_bits)), (before.position.0.map(f32::to_bits), before.last_position.0.map(f32::to_bits)), "back at its place, word for word");
+    // The props' step sees the striker by the ball and uses the list up.
+    probe.traffic.props = set;
+    let movers = game_sim::prop_set::PropMovers::default();
+    probe.props_step(DT, &movers);
+    assert!(probe.traffic.props.across.is_empty());
+    // And it moves the ball as the same strike at the ball's own place does.
+    let mut there = sim.clone();
+    there.rider.place(at, facing);
+    let pushed = there.traffic.props.strike(&want);
+    there.traffic.props.pushed(&pushed);
+    there.props_step(DT, &movers);
+    let (g, w) = (probe.traffic.props.collections[c].bones[0].body, there.traffic.props.collections[c].bones[0].body);
+    assert!(close(g.position, w.position), "position {:?} vs {:?}", g.position, w.position);
+    assert!(close(g.velocity, w.velocity), "velocity {:?} vs {:?}", g.velocity, w.velocity);
+    assert!(close(g.rates, w.rates), "rates {:?} vs {:?}", g.rates, w.rates);
+    assert!(w.velocity != Vf::ZERO || w.rates != Vf::ZERO, "the step moved the ball: {:?}", w);
+    // And on a world that does not wrap, the strike is the plain one, word for word.
+    let mut there = sim.clone();
+    there.rider.place(at, facing);
+    assert_eq!(there.prop_strike_in(0, DT, &game_sim::world::Flat::default()), want);
 }

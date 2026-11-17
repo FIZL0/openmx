@@ -42,6 +42,10 @@
 //! ([`crate::Sim::step_bumped`], [`crate::Sim::step_among`]: online and split screen), whose props are
 //! its own copy, struck by its own bike ([`crate::Sim::prop_strike_seated`]) — unless the seats share one
 //! set (S197c, [`crate::prop_seats`]), as the shell's and online's seats do.
+//!
+//! On a world that wraps (MD167, MD29) every step path strikes in the world's seams too
+//! ([`strike_wrapped`]): a prop by the far side of a seam the bike's rays reach across has a copy one
+//! width over, by the bike, in the same search, and a copy's hit is its prop's.
 
 #![deny(clippy::float_arithmetic)]
 
@@ -98,6 +102,23 @@ pub struct Strike {
     /// its entries' bodies start among its other sides. `None` for a strike that is not a riding
     /// bike's, which [`PropSet::strike_in`] puts on as [`PropSet::strike`] does.
     pub by: Option<(usize, usize)>,
+    /// The struck bodies the rays met at a copy one width over (MD167, [`strike_wrapped`]): each by its
+    /// place in [`Strike::struck`], and the shift that brings the bike to it. Their mirrors stand at
+    /// the body's own place.
+    pub across: Vec<(usize, [F; 2])>,
+}
+
+/// **A body a riding bike struck across a seam** (MD167): by its collection and object, the striker's
+/// player, and the shift `by` that brings the bike to it. The bike's frame pushes the body a width
+/// back, by the bike ([`PropSet::strike_in`]), which [`PropSet::pushed`] undoes (`pushed` then set);
+/// the props' step sees the striker `by` over, by the body ([`crate::Sim::props_step`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Across {
+    pub collection: usize,
+    pub object: usize,
+    pub player: usize,
+    pub by: [F; 2],
+    pub pushed: bool,
 }
 
 /// One prop's collidable mesh, where its node stands it.
@@ -108,6 +129,8 @@ struct Posed<'a> {
     to_world: Mat4,
     centre: Vf,
     radius: F,
+    /// The shift that brings the bike to this place: zero at the prop's own, a seam's at a copy.
+    by: [F; 2],
 }
 
 /// Where the props start in the search's list: after the bike's four collidables.
@@ -193,7 +216,23 @@ impl Search for Found {
 /// mirrors' other side; `first` where the struck bodies start among the bike's other sides (the
 /// session's player count). At most [`CAPACITY`] entries, one per ray.
 pub fn strike(col: &BikeCol, at: &Mat4, set: &PropSet, me: usize, first: usize, dt: F) -> Strike {
-    let mut strike = rays_strike(col, at, set, me, first, dt);
+    strike_seams(col, at, set, me, first, dt, &[])
+}
+
+/// [`strike`] on a world that wraps (MD167, MD29): the props by the far side of a seam the bike's
+/// rays reach across stand again one width over, by the bike, as the moving list's shapes do
+/// (MD153a), so a bike by the near seam strikes a ball by the far one. On a world that does not
+/// wrap, [`strike`].
+pub fn strike_wrapped(col: &BikeCol, at: &Mat4, set: &PropSet, me: usize, first: usize, dt: F, world: &dyn crate::world::World) -> Strike {
+    let (centre, reach) = flight_search::reach(&col.rays, &at.0);
+    let seams = crate::tiles::seam_shifts(world, centre, reach);
+    strike_seams(col, at, set, me, first, dt, &seams)
+}
+
+/// [`strike`] with the props' copies `seams` over: each a shift that brings the bike to the world's
+/// copy on a seam's far side.
+fn strike_seams(col: &BikeCol, at: &Mat4, set: &PropSet, me: usize, first: usize, dt: F, seams: &[[F; 2]]) -> Strike {
+    let mut strike = rays_strike(col, at, set, me, first, dt, seams);
     probes_struck(&mut strike, set, me, first);
     strike.by = Some((me, first));
     strike
@@ -224,9 +263,13 @@ fn probes_struck(strike: &mut Strike, set: &PropSet, me: usize, first: usize) {
     }
 }
 
-/// [`strike`]'s body rays alone.
-fn rays_strike(col: &BikeCol, at: &Mat4, set: &PropSet, me: usize, first: usize, dt: F) -> Strike {
-    let posed: Vec<Posed<'_>> = set
+/// [`strike`]'s body rays alone. A prop by the far side of a seam (one of `seams`, the shifts that
+/// bring the bike to the world's copy there) has a copy after every prop's own place, moved back by
+/// the shift, where its sphere is within the rays' reach: striking the copy where the bike is, rather
+/// than the bike one width over, keeps the bike's frame and the record's points as they are, and
+/// lets the rays meet props on both sides in one search.
+fn rays_strike(col: &BikeCol, at: &Mat4, set: &PropSet, me: usize, first: usize, dt: F, seams: &[[F; 2]]) -> Strike {
+    let mut posed: Vec<Posed<'_>> = set
         .collections
         .iter()
         .zip(set.shapes.iter())
@@ -235,10 +278,24 @@ fn rays_strike(col: &BikeCol, at: &Mat4, set: &PropSet, me: usize, first: usize,
             coll.objects.iter().zip(shapes).enumerate().filter_map(move |(o, (object, mesh))| {
                 let mesh = mesh.as_ref().filter(|_| object.collision.is_some())?;
                 let (to_world, centre, radius) = Prop::posed(mesh, &PropSet::matrix(&object.node));
-                Some(Posed { collection: c, object: o, mesh, to_world, centre, radius })
+                Some(Posed { collection: c, object: o, mesh, to_world, centre, radius, by: [F::ZERO; 2] })
             })
         })
         .collect();
+    let (centre, reach) = flight_search::reach(&col.rays, &at.0);
+    let mut copies = Vec::new();
+    for by in seams {
+        let back = [F::ZERO - by[0], F::ZERO - by[1]];
+        for p in &posed {
+            let moved = Vf::new((F(p.centre.x()) + back[0]).0, p.centre.y(), (F(p.centre.z()) + back[1]).0, p.centre.w());
+            if distance(centre, moved) - p.radius <= reach {
+                let mut to_world = p.to_world;
+                to_world.0[3] = Vf::new((F(to_world.0[3].x()) + back[0]).0, to_world.0[3].y(), (F(to_world.0[3].z()) + back[1]).0, to_world.0[3].w());
+                copies.push(Posed { centre: moved, to_world, by: *by, ..*p });
+            }
+        }
+    }
+    posed.extend(copies);
     if posed.is_empty() {
         return Strike::default();
     }
@@ -255,7 +312,6 @@ fn rays_strike(col: &BikeCol, at: &Mat4, set: &PropSet, me: usize, first: usize,
     }));
     let ray = ray_probe::Record { listed: true, capacity: CAPACITY, one_per_ray: true, ..ray_probe::Record::default() };
     let mut strikes = Strikes { col, at: *at, posed: &posed, facets: (0..posed.len()).map(|_| None).collect(), ray };
-    let (centre, _) = flight_search::reach(&col.rays, &at.0);
     let found = posed
         .iter()
         .enumerate()
@@ -264,14 +320,16 @@ fn rays_strike(col: &BikeCol, at: &Mat4, set: &PropSet, me: usize, first: usize,
     world_search::search_nearby(&mut objects, bike_col::BODY_RAYS, &Nearby { found, prepare: false }, &mut strikes);
     // Each struck prop's collision object is a record of its own after the bike's, in the order the
     // rays first met it; its list starts empty, as the node's clear left it before the bike searched.
+    // A copy one width over is its prop's (MD167).
     let mut hit: Vec<usize> = Vec::new();
+    let body = |k: usize| (posed[k].collection, posed[k].object);
     let hits: Vec<Hit> = strikes
         .ray
         .contacts
         .iter()
         .map(|c| {
             let k = c.object as usize - PROPS;
-            let at = hit.iter().position(|&h| h == k).unwrap_or_else(|| {
+            let at = hit.iter().position(|&h| body(h) == body(k)).unwrap_or_else(|| {
                 hit.push(k);
                 hit.len() - 1
             });
@@ -309,11 +367,23 @@ fn rays_strike(col: &BikeCol, at: &Mat4, set: &PropSet, me: usize, first: usize,
         .iter()
         .zip(records)
         .map(|(&k, r)| {
-            let mirrors = r.contacts.into_iter().map(|e| Contact { other: Some(me), ..e }).collect();
+            let mirrors: Vec<Contact> = r.contacts.into_iter().map(|e| Contact { other: Some(me), ..e }).collect();
             (posed[k].collection, posed[k].object, mirrors)
         })
-        .collect();
-    Strike { contacts, struck, ..Strike::default() }
+        .collect::<Vec<(usize, usize, Vec<Contact>)>>();
+    // A copy's mirrors go back to its prop's place, where the prop's step resolves them.
+    let mut struck = struck;
+    let mut across = Vec::new();
+    for (at, &k) in hit.iter().enumerate() {
+        let by = posed[k].by;
+        if by != [F::ZERO; 2] {
+            for e in &mut struck[at].2 {
+                e.point = crate::seam::moved(e.point, by);
+            }
+            across.push((at, by));
+        }
+    }
+    Strike { contacts, struck, across, ..Strike::default() }
 }
 
 impl PropSet {
@@ -387,6 +457,15 @@ impl PropSet {
             r.touching_other = true;
             pushed.push(Pushed { collection: c, object: o, collider: col.collider, body: bone.body, mass: bone.mass });
         }
+        // One struck across a seam is pushed a width back, by the bike (MD167).
+        if let Some((player, _)) = strike.by {
+            self.across.retain(|a| a.player != player);
+            for &(at, by) in &strike.across {
+                let Some(p) = pushed.iter_mut().find(|p| (p.collection, p.object) == (strike.struck[at].0, strike.struck[at].1)) else { continue };
+                crate::seam::body(&mut p.body, [F::ZERO - by[0], F::ZERO - by[1]]);
+                self.across.push(Across { collection: p.collection, object: p.object, player, by, pushed: false });
+            }
+        }
         // The bodies only the props' probes' mirrors name (B29), after the struck.
         for &(c, o) in &strike.probed {
             let coll = &self.collections[c];
@@ -399,10 +478,16 @@ impl PropSet {
 
     /// The struck bodies as the bike's frame left them, written back: the body and the centre its
     /// collision object's resolve wrote.
+    /// One pushed across a seam (MD167, [`Across`]) goes back its width.
     pub fn pushed(&mut self, pushed: &[Pushed]) {
         for p in pushed {
+            let mut body = p.body;
+            if let Some(a) = self.across.iter_mut().find(|a| !a.pushed && (a.collection, a.object) == (p.collection, p.object)) {
+                crate::seam::body(&mut body, a.by);
+                a.pushed = true;
+            }
             let coll = &mut self.collections[p.collection];
-            coll.bones[p.object].body = p.body;
+            coll.bones[p.object].body = body;
             if let Some(col) = coll.objects[p.object].collision.as_mut() {
                 col.collider = p.collider;
             }
@@ -415,7 +500,13 @@ impl crate::Sim {
     /// (the wreck bike's object is not the riding one), a ghost (its body rays are out of the world),
     /// a bike the shell gave no collision files, or a track with no props.
     pub fn prop_strike(&self, i: usize, dt: F) -> Strike {
-        self.prop_strike_by(i, i, self.players(), dt)
+        self.prop_strike_by(i, i, self.players(), dt, None)
+    }
+
+    /// [`Sim::prop_strike`] in `world`: on one that wraps, the props by a seam's far side struck one
+    /// width over too ([`strike_wrapped`], MD167).
+    pub fn prop_strike_in(&self, i: usize, dt: F, world: &dyn crate::world::World) -> Strike {
+        self.prop_strike_by(i, i, self.players(), dt, Some(world))
     }
 
     /// [`Sim::prop_strike`] for a one-player Sim's bike among `players` seats (online and split
@@ -423,25 +514,30 @@ impl crate::Sim {
     /// struck bodies after every seat's vehicle in its bump, and its mirrors name it as player 1, the
     /// one striker its own props' step reads ([`Sim::props_step`]). A seat's props are its own copy,
     /// struck by its own bike only, as its cars are.
-    pub fn prop_strike_seated(&self, players: usize, dt: F) -> Strike {
-        self.prop_strike_by(0, 0, players, dt)
+    /// The props by a wrapped `world`'s seams are struck one width over too (MD167).
+    pub fn prop_strike_seated(&self, players: usize, dt: F, world: &dyn crate::world::World) -> Strike {
+        self.prop_strike_by(0, 0, players, dt, Some(world))
     }
 
     /// A one-player Sim's bike as seat `me` of the seats' shared props (S197c, [`crate::prop_seats`]):
     /// its mirrors name it by its seat, the striker the shared step reads it as, and its entries'
     /// bodies come after the `first` vehicles of its bump.
-    pub(crate) fn prop_strike_shared(&self, me: usize, first: usize, dt: F) -> Strike {
-        self.prop_strike_by(0, me, first, dt)
+    pub(crate) fn prop_strike_shared(&self, me: usize, first: usize, dt: F, world: &dyn crate::world::World) -> Strike {
+        self.prop_strike_by(0, me, first, dt, Some(world))
     }
 
-    /// Player `i`'s strike, its mirrors naming striker `me` and its entries' bodies from `first`.
-    fn prop_strike_by(&self, i: usize, me: usize, first: usize, dt: F) -> Strike {
+    /// Player `i`'s strike, its mirrors naming striker `me` and its entries' bodies from `first`; in
+    /// `world`'s seams' copies too where it wraps.
+    fn prop_strike_by(&self, i: usize, me: usize, first: usize, dt: F, world: Option<&dyn crate::world::World>) -> Strike {
         let r = self.rider_of(i);
         let Some(col) = r.bike_col.as_deref() else { return Strike::default() };
         if r.state.wreck.is_some() || r.ghost.on || self.traffic.props.is_empty() {
             return Strike::default();
         }
-        strike(col, &r.ride.transform(), &self.traffic.props, me, first, dt)
+        match world {
+            Some(world) => strike_wrapped(col, &r.ride.transform(), &self.traffic.props, me, first, dt, world),
+            None => strike(col, &r.ride.transform(), &self.traffic.props, me, first, dt),
+        }
     }
 
     /// `strike` put on the props ([`PropSet::strike_in`]: the struck woken, one it filed searched in
@@ -469,6 +565,16 @@ impl crate::Sim {
             return;
         }
         let mut bump = self.bump(0, Vec::new());
+        // A striker that struck across a seam is seen by the bodies it struck, one width over (MD167).
+        let mut moved = Vec::new();
+        for a in std::mem::take(&mut self.traffic.props.across) {
+            if !moved.contains(&a.player)
+                && let Some(v) = bump.vehicles.get_mut(a.player)
+            {
+                v.node.origin = crate::seam::moved(v.node.origin, a.by);
+                moved.push(a.player);
+            }
+        }
         let sides = self.wreck_sides();
         let mut wrecks: Vec<(Collider, Body, F)> = sides.iter().map(|s| s.unwrap_or_default()).collect();
         let mut bodies: Vec<(&mut Collider, Weighed<'_>)> = wrecks.iter_mut().map(|(c, body, mass)| (c, Weighed { body, mass: *mass })).collect();

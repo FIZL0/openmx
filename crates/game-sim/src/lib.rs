@@ -404,7 +404,7 @@ impl Sim {
         // are, before the bike is stepped.
         let cars = self.car_contacts(0, world, dt);
         // And against the knockable props (S197): what they strike is woken, and pushed in the frame.
-        let mut strike = self.prop_strike(0, dt);
+        let mut strike = self.prop_strike_in(0, dt, &*world);
         let said = if cars.is_empty() && strike.contacts.is_empty() {
             // The wheels stand on the props for the frame (S210, [`prop_wheel`]).
             self.lend_props(0);
@@ -665,7 +665,7 @@ impl Sim {
         for (i, c) in controls.iter().enumerate().rev() {
             // And its body rays against the knockable props (S197a), where the riders walked before
             // it left them: what it strikes is woken, and pushed in its frame.
-            let strike = self.prop_strike(i, dt);
+            let strike = self.prop_strike_in(i, dt, &*world);
             let mut bump = Some(lists.as_mut().map(|l| std::mem::take(&mut l[i])).unwrap_or_default())
                 .map(|l| mover_contact::merged(l, std::mem::take(&mut cars[i])))
                 .filter(|l| !l.is_empty() || !strike.contacts.is_empty())

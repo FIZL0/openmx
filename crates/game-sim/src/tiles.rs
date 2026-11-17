@@ -802,32 +802,7 @@ impl Tiled {
     /// The shifts, in feet, that bring a point within `reach` of a seam to the copy of the world
     /// on the seam's far side: none on a world that does not wrap, and up to three by a corner.
     fn copies(&self, at: Vf, reach: F) -> Vec<[F; 2]> {
-        if self.wrap == [false, false] {
-            return Vec::new();
-        }
-        let ways = |axis: usize, v: F| -> Vec<F> {
-            let side = self.extent()[axis];
-            let mut out = vec![F::ZERO];
-            if self.wrap[axis] {
-                if v + reach >= side {
-                    out.push(F::ZERO - side);
-                }
-                if v - reach < F::ZERO {
-                    out.push(side);
-                }
-            }
-            out
-        };
-        let (xs, zs) = (ways(0, F(at.x())), ways(1, F(at.z())));
-        let mut out = Vec::new();
-        for &dz in &zs {
-            for &dx in &xs {
-                if dx != F::ZERO || dz != F::ZERO {
-                    out.push([dx, dz]);
-                }
-            }
-        }
-        out
+        shifts(self.wrap, self.extent(), at, reach)
     }
 
     /// How far a world point is from tile `i`'s rectangle ([`Tile::gap`]), the nearest of its copies
@@ -1165,6 +1140,47 @@ impl Tile {
         let dz = (z0 - z).max(z - z1).max(F::ZERO);
         dx.max(dz)
     }
+}
+
+/// **The seam shifts of any world** ([`Tiled::copies`] on [`World::wrap`] and [`World::area`]'s
+/// sides): the shifts, in feet, that bring a point within `reach` of a seam to the copy of the world
+/// on the seam's far side. None on a world that does not wrap, or that has no area.
+pub fn seam_shifts(world: &dyn World, at: Vf, reach: F) -> Vec<[F; 2]> {
+    match world.area() {
+        Some(area) => shifts(world.wrap(), [area.width, area.depth], at, reach),
+        None => Vec::new(),
+    }
+}
+
+/// [`Tiled::copies`] for a world wrapped on `wrap`, its rectangle's sides `side`: up to three by a
+/// corner, `x` fastest.
+fn shifts(wrap: [bool; 2], side: [F; 2], at: Vf, reach: F) -> Vec<[F; 2]> {
+    if wrap == [false, false] {
+        return Vec::new();
+    }
+    let ways = |axis: usize, v: F| -> Vec<F> {
+        let side = side[axis];
+        let mut out = vec![F::ZERO];
+        if wrap[axis] {
+            if v + reach >= side {
+                out.push(F::ZERO - side);
+            }
+            if v - reach < F::ZERO {
+                out.push(side);
+            }
+        }
+        out
+    };
+    let (xs, zs) = (ways(0, F(at.x())), ways(1, F(at.z())));
+    let mut out = Vec::new();
+    for &dz in &zs {
+        for &dx in &xs {
+            if dx != F::ZERO || dz != F::ZERO {
+                out.push([dx, dz]);
+            }
+        }
+    }
+    out
 }
 
 /// A point moved along `x` and `z`.

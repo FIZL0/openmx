@@ -74,6 +74,10 @@ pub struct PropSet {
     /// probes are heard striking (F27a2, [`PropSet::hear_ridden`]); `None`, and they hear no bike. A
     /// constant of the ride, for the sound alone.
     pub bike_frame: Option<Arc<Mesh>>,
+    /// The bodies a riding bike struck across a wrapped world's seam this tick (MD167,
+    /// [`crate::prop_contact::Across`]), from the strike to the props' step. Not state: made and used
+    /// up inside one tick.
+    pub across: Vec<crate::prop_contact::Across>,
 }
 
 impl PropSet {
@@ -211,6 +215,7 @@ impl PropSet {
             shapes: Arc::new(shapes),
             listeners: Vec::new(),
             bike_frame: None,
+            across: Vec::new(),
         };
         (set, said)
     }

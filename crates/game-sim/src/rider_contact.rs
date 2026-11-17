@@ -848,7 +848,7 @@ impl crate::Sim {
         let cars = self.car_contacts(0, world, dt);
         if let Some(b) = bump.as_deref_mut() {
             b.contacts = crate::mover_contact::merged(std::mem::take(&mut b.contacts), cars);
-            let strike = self.prop_strike_seated(b.vehicles.len() + b.planes.len(), dt);
+            let strike = self.prop_strike_seated(b.vehicles.len() + b.planes.len(), dt, &*world);
             self.strike_into(b, strike, dt, world, &mut prop_movers);
         }
         // The wheels stand on the props for the frame (S210, [`crate::prop_wheel`]).
@@ -1132,8 +1132,8 @@ impl Sim {
         let cars = self.car_contacts(0, world, dt);
         let players = bump.as_deref().map_or(1, |b| b.vehicles.len() + b.planes.len());
         let strike = match shared.as_ref() {
-            Some((_, seat)) => self.prop_strike_shared(*seat, players, dt),
-            None => self.prop_strike_seated(players, dt),
+            Some((_, seat)) => self.prop_strike_shared(*seat, players, dt, &*world),
+            None => self.prop_strike_seated(players, dt, &*world),
         };
         let mut own;
         let bump = match bump {
