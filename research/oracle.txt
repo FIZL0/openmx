@@ -11231,6 +11231,21 @@ atv_heap_free               atv 0x001b76d0 = free
 #   leaves). Node delete (vt +8, 1) 0x001aff00: first chunk read before the children; chunks to *(+0x90)
 #   unless +0x98 bit 0; +0x880--; free 0x001b76d0.
 
+# F49: the wreck fade's world search 0x001148e0(*(bike+0xcc), 0) against the original over RAM
+# (tests/mxvatv_bike_ride.rs the_fade_search_is_the_originals; the port is F31b5l's atv_search::collide_world
+# behind fade_search_in_ram). Journal: research/journal/2026-11-16-f49-fade-search-oracle/.
+#   State 4 part 0x00ea5970: flags 0x02, 14 rays from one origin, tree +0x17c 0x00ea5b20 root 0, record
+#   +0x7c 0x00ea5ef0 (capacity 14, +0xac words 0x01ea7250). Placing it: vt +0xc8 (0x001bd180) re-stands
+#   it at its node; vt +0xcc (0x001bcfe0: 16 words to +0x130, centre/reach to +0x50/+0x70) on a frame of
+#   one's own, then the box move 0x00114480 (the place 0x00114360 is vt +0xc8 then 0x00114480).
+#   A mesh pair leaves 0x003dce38 = mesh + 0x230 (an address, not the word there) and 0x003dce30 = 1
+#   (F53). nat05 has kind 6 boxes the search reaches (0x01dc64b0, 0x01dc9540); their on_struck +0x120 =
+#   0x001a8000(struck, probe): DAT 0x00390570 && *(struck+0x88)+0x21 bit 0 -> 0x001a9630(owner, probe):
+#   owner +0xe4 = probe, +0xc8++, (+0xf4 & 0xf) >> 3 == 1 -> 0x001a9730(owner, probe, 1, 1) (a listener's
+#   vt +0x14 at 0x001a9a6c posts a message), then 0x00115750 both ways. The post 0x00187850 copies a
+#   52-byte record from its frame sp+176..sp+216; sp+208 and sp+212 are never set in it (stores at
+#   0x00187cc4 / 0x00187ccc): the record's +0x2c/+0x30 hold whatever deeper calls left on the stack
+#   (the part's address, two floats), so they depend on the interpreter's stack depth.
 # F31b4c — MX vs. ATV's [Mass Properties]: the rigid-body part reader and the bike loader's re-read
 # (game_sim::handling::mass; tests/mxvatv_mass.rs, tests/mxvatv_bike_ride.rs). Comment rows only.
 # Journal: research/journal/2026-11-04-f31b4c-mass/1-mass-FINAL.md.
