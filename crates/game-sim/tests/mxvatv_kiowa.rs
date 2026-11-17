@@ -18,6 +18,10 @@
 //!    MXVehicle's halves) against `Crash::wreck_mxvatv` with `Wreckage::wreck_mx`, and
 //!    `Wreckage::unwreck_mx` with `Kiowa::unwreck_controls`: the gravity they write above all.
 //!
+//! 8. **the put-back's placement and the blade throw** (MD199): the Kiowa's vtable `+0xe8` (MXVehicle's
+//!    placement, the ground taken away) against `Wreckage::put_back`, and `+0x478` against
+//!    `Wreckage::throw_blades`, both with `Wreckage::mxvatv` on.
+//!
 //! And **the reader** (`Phy::read_mxvatv`): MX vs. ATV's `kiowa.phy` read as model one and model two
 //! against what the game loaded into `kiowa` (model one) and `kiowa3` (model two).
 //!
@@ -1137,3 +1141,297 @@ fn the_mxvatv_kiowa_file_reads_as_the_original_loads_it() {
         println!("{name}: model {}, read as loaded", if model_one { "one" } else { "two" });
     }
 }
+
+
+// ---------------------------------------------------------------------------------------------------
+// 8 — the put-back's placement and the blade throw (MD199)
+// ---------------------------------------------------------------------------------------------------
+
+/// The helicopter's fields the put-back and the throw read (# MD63f, # MD199).
+mod place_at {
+    /// The body wrapper's place: the position, the nose and the up.
+    pub const PLACE: u32 = 0x50;
+    /// The spawn the placement copies over the place first.
+    pub const SPAWN: u32 = 0xd40;
+    /// The ground the placement searches when asked to (0: none).
+    pub const GROUND: u32 = 0x3b4;
+    /// The owner, whose `+0x50` bit 0 leaves the altitude fraction 0.5.
+    pub const OWNER: u32 = 0x684;
+    /// The helicopter's model node, and the four blades' nodes in it.
+    pub const NODE: u32 = 0xe4;
+    pub const BLADE_NODES: u32 = 0x11ec;
+}
+/// In the body: the centre of the last substep and this one's, the orientation's, the rates, the
+/// centre of gravity's offset.
+mod body_at {
+    pub const LAST_POSITION: u32 = 0x60;
+    pub const POSITION: u32 = 0x70;
+    pub const VELOCITY: u32 = 0x80;
+    pub const LAST_QUAT: u32 = 0x170;
+    pub const QUAT: u32 = 0x190;
+    pub const COFG: u32 = 0x1a0;
+    pub const RATES: u32 = 0x1d0;
+}
+
+/// A direction for a place: mostly anything in the unit box, sometimes an axis or a signed zero lane.
+fn direction(pick: &mut Pick) -> [f32; 4] {
+    let w = edgy(pick, 1.0, 2.0);
+    match pick.next() % 6 {
+        0 => [0.0, 1.0, 0.0, w],
+        1 => [0.0, 0.0, 1.0, w],
+        2 => [-0.0, pick.range(0.5, 1.0), pick.range(-0.5, 0.5), w],
+        _ => [pick.range(-1.0, 1.0), pick.range(-1.0, 1.0), pick.range(-1.0, 1.0), w],
+    }
+}
+
+fn vf(q: [f32; 4]) -> Vf {
+    Vf::new(q[0], q[1], q[2], q[3])
+}
+
+/// The kernel the ground reset's node and part calls reach (tests/mxvatv_bike_ride.rs' `hooked`): DIntr
+/// and EIntr answered 0, and every `addiu $3, $zero, n; syscall; jr $ra` stub its argument back (the
+/// thread id, `0x2f`, 1): the heap's semaphores.
+fn kernel_hooked(ee: &mut Ee) {
+    ee.hooks.insert(0x0034_8fa0, Box::new(|ee: &mut Ee| ee.set(2, 0)));
+    ee.hooks.insert(0x0034_8ff0, Box::new(|ee: &mut Ee| ee.set(2, 0)));
+    for a in (0x0030_0000..0x0036_0000u32).step_by(4) {
+        if ee.u32_at(a) >> 16 == 0x2403 && ee.u32_at(a + 4) == 0x0000_000c && ee.u32_at(a + 8) == 0x03e0_0008 {
+            let n = ee.u32_at(a) & 0xffff;
+            ee.hooks.insert(a, Box::new(move |ee: &mut Ee| {
+                let v = if n == 0x2f { 1 } else { ee.r(4) };
+                ee.set(2, v);
+            }));
+        }
+    }
+}
+
+/// SLUS-21104's put-back (the Kiowa's vtable `+0xe8`, `0x004d36a0`) on generated spawns and centres of
+/// gravity, the body as its placement (MXVehicle's, asked to snap and to keep: the spawn over the place,
+/// then the ground reset) leaves it, against the port's ([`Wreckage::put_back`] with the spawn as its
+/// place). The ground is taken away (`+0x3b4` 0), so the placement does not search it; its calls out are
+/// hooked: the camera's snap (vt `+0x3a0`), the sound's (`0x004fa760`), the event post and the
+/// presentation copy (vt `+0x378`). The ground reset's node and part calls run as themselves.
+#[test]
+fn the_mxvatv_put_back_places_as_the_original() {
+    use game_sim::biplane::Body;
+    use game_sim::kiowa::{Crash, Measure, Ride, Wreckage};
+    let Some(mut ee) = heli() else { return };
+    let vtable = ee.u32_at(HELI + 4);
+    assert_eq!(ee.u32_at(vtable + 0xe8), 0x004d_36a0, "the Kiowa's put-back slot");
+    let body = ee.u32_at(HELI + at::BODY);
+    let owner = ee.u32_at(HELI + place_at::OWNER);
+    assert_ne!(owner, 0, "the player's helicopter has an owner");
+    ee.set_u32(HELI + place_at::GROUND, 0);
+    kernel_hooked(&mut ee);
+    let asked = Rc::new(RefCell::new(Vec::<String>::new()));
+    let hook = |ee: &mut Ee, at: u32, name: &'static str| {
+        let a = asked.clone();
+        ee.hooks.insert(at, Box::new(move |ee| {
+            a.borrow_mut().push(name.to_string());
+            ee.set(2, 0);
+        }));
+    };
+    let at = ee.u32_at(vtable + 0x3a0);
+    hook(&mut ee, at, "camera");
+    let at = ee.u32_at(vtable + 0x378);
+    hook(&mut ee, at, "present");
+    hook(&mut ee, 0x004f_a760, "sound");
+    let a = asked.clone();
+    ee.hooks.insert(f("atv_post_event"), Box::new(move |ee| {
+        a.borrow_mut().push(format!("event {} {}", ee.r(6), ee.r(7)));
+        ee.set(2, 0);
+    }));
+    let owner_word = ee.u32_at(owner + 0x50);
+
+    let mut pick = Pick(0x51c3_77e0_9d24_a6b1);
+    let mut owned_cases = 0;
+    for case in 0..CASES {
+        let spawn = [
+            [pick.range(-8000.0, 8000.0), pick.range(-500.0, 2000.0), pick.range(-8000.0, 8000.0), edgy(&mut pick, 1.0, 2.0)],
+            direction(&mut pick),
+            direction(&mut pick),
+        ];
+        let cofg = match pick.next() % 4 {
+            0 => [0.0, 5.5, 0.0, 1.0],
+            1 => [0.0; 4],
+            _ => [edgy(&mut pick, 0.0, 9.0), edgy(&mut pick, 5.5, 9.0), edgy(&mut pick, 0.0, 9.0), 1.0],
+        };
+        let owned = pick.one_in(2);
+        owned_cases += usize::from(owned);
+        // a place the spawn is copied over, and a body somewhere else, moving
+        for (k, q) in spawn.iter().enumerate() {
+            set_quad(&mut ee, HELI + place_at::SPAWN + 0x10 * k as u32, *q);
+            let other = edgy_quad(&mut pick, 100.0);
+            set_quad(&mut ee, HELI + place_at::PLACE + 0x10 * k as u32, other);
+        }
+        set_quad(&mut ee, body + body_at::COFG, cofg);
+        for o in [body_at::LAST_POSITION, body_at::POSITION, body_at::VELOCITY, body_at::RATES] {
+            let q = edgy_quad(&mut pick, 100.0);
+            set_quad(&mut ee, body + o, q);
+        }
+        ee.set_u32(owner + 0x50, owner_word & !1 | u32::from(owned));
+        ee.set_f32(HELI + at::FRACTION, 0.0);
+        asked.borrow_mut().clear();
+        ee.call(0x004d_36a0, &[u64::from(HELI)], &[], BUDGET);
+
+        let mut ride = Ride {
+            body: Body { cofg: vf(cofg), ..Body::default() },
+            measure: Measure::default(),
+            crash: Crash::default(),
+            flown: true,
+            gravity_scale: F::ONE,
+            throw_scale: F(0.5),
+            gravity: Vf::default(),
+            area: None,
+            touchdown_sound: false,
+            rotor_angle: F::ZERO,
+            rotor_hidden: false,
+        };
+        let spawn_vf = spawn.map(vf);
+        let mut w = Wreckage { place: spawn_vf, spawn: spawn_vf, mass: F::ONE, mxvatv: true, ..Wreckage::default() };
+        let fraction = w.put_back(&mut ride, owned);
+
+        let want: Vec<String> = ["camera", "sound", "event 8 21", "present"].into_iter().map(String::from).collect();
+        assert_eq!(*asked.borrow(), want, "case {case}: the calls out");
+        same("the altitude fraction", case, fraction, ee.f32_at(HELI + at::FRACTION));
+        for (k, what) in ["the place", "the place's nose", "the place's up"].into_iter().enumerate() {
+            same_lanes(what, case, w.place[k], vector(&ee, HELI + place_at::PLACE + 0x10 * k as u32), 4);
+        }
+        let b = &ride.body;
+        same_lanes("the last centre", case, b.last_position, vector(&ee, body + body_at::LAST_POSITION), 4);
+        same_lanes("the centre", case, b.position, vector(&ee, body + body_at::POSITION), 4);
+        same_lanes("the velocity", case, b.velocity, vector(&ee, body + body_at::VELOCITY), 4);
+        same_lanes("the last orientation", case, b.last_quat, vector(&ee, body + body_at::LAST_QUAT), 4);
+        same_lanes("the orientation", case, b.quat, vector(&ee, body + body_at::QUAT), 4);
+        same_lanes("the rates", case, b.rates, vector(&ee, body + body_at::RATES), 4);
+    }
+    println!("the put-back: {CASES} cases ({owned_cases} owned), bit-exact");
+}
+
+/// A node's world rows (`+0x70..+0xa0`: the three axes, then the origin) as the port's matrix.
+fn node_world(ee: &Ee, node: u32) -> game_sim::math::Mat4 {
+    game_sim::math::Mat4([0, 1, 2, 3].map(|k| quad(ee, node + 0x70 + 0x10 * k)))
+}
+
+/// SLUS-21104's blade throw (the Kiowa's vtable `+0x478`, `0x004d3720`) on generated helicopters, blades
+/// and nodes, each blade's body as the throw leaves it, and the nodes it hides, against the port's
+/// ([`Wreckage::throw_blades`] on the same nodes, its generator the original's `rand()`). The nodes'
+/// world rows are written in as generated and their lazy rebuild hooked, so the
+/// original reads them as they stand; the blades' start (vt `+0x130`) is hooked and counted; their
+/// place (vt `+0xf0`, MXVehicle's orient) runs as itself.
+#[test]
+fn the_mxvatv_blade_throw_is_the_originals() {
+    use game_sim::biplane::Body;
+    use game_sim::kiowa::{Blades, Crash, Measure, Ride, Throw, Wreckage};
+    use game_sim::ragdoll::Bone;
+    let Some(mut ee) = heli() else { return };
+    let vtable = ee.u32_at(HELI + 4);
+    assert_eq!(ee.u32_at(vtable + 0x478), 0x004d_3720, "the Kiowa's blade throw slot");
+    kernel_hooked(&mut ee);
+    let body = ee.u32_at(HELI + at::BODY);
+    let model = ee.u32_at(HELI + place_at::NODE);
+    let blades: [u32; 4] = [0, 1, 2, 3].map(|k| ee.u32_at(HELI + wreck_at::BLADES + 4 * k));
+    let blade_nodes: [u32; 4] = [0, 1, 2, 3].map(|k| ee.u32_at(HELI + place_at::BLADE_NODES + 4 * k));
+    let blade_bodies = blades.map(|b| ee.u32_at(b + at::BODY));
+    let start = ee.u32_at(ee.u32_at(blades[0] + 4) + 0x130);
+    for b in blades {
+        assert_eq!(ee.u32_at(ee.u32_at(b + 4) + 0x130), start, "a blade's start slot");
+    }
+    let started = Rc::new(RefCell::new(Vec::<u32>::new()));
+    let s = started.clone();
+    ee.hooks.insert(start, Box::new(move |ee| {
+        s.borrow_mut().push(ee.r(4) as u32);
+        ee.set(2, 0);
+    }));
+    ee.hooks.insert(0x0019_3b30, Box::new(|_| {}));
+    let rng = Rc::new(RefCell::new(Rng::from_seed(0)));
+    let r = rng.clone();
+    ee.hooks.insert(0x0035_61a8, Box::new(move |ee| {
+        let v = r.borrow_mut().rand();
+        ee.set(2, v as i64 as u64);
+    }));
+    let nodes: [u32; 6] = wreck_at::NODES.map(|o| ee.u32_at(HELI + o));
+    let blade_part = game_sim::phy::Part::read_bytes(&[], "PhysicsPart1");
+
+    let mut pick = Pick(0x7d2e_0b91_c4f3_5a68);
+    for case in 0..CASES {
+        let axes = |pick: &mut Pick| [0; 3].map(|_| [edgy(pick, 1.0, 1.0), edgy(pick, 0.0, 1.0), edgy(pick, 0.0, 1.0), edgy(pick, 0.0, 1.0)]);
+        let world = |pick: &mut Pick| {
+            let [a, b, c] = axes(pick);
+            [a, b, c, [pick.range(-8000.0, 8000.0), pick.range(-500.0, 2000.0), pick.range(-8000.0, 8000.0), edgy(pick, 1.0, 2.0)]]
+        };
+        let heli_world = world(&mut pick);
+        let blade_worlds = [0; 4].map(|_| world(&mut pick));
+        let rates = edgy_quad(&mut pick, 6.0);
+        let velocity = edgy_quad(&mut pick, 200.0);
+        let cofg = [edgy(&mut pick, 0.0, 9.0), edgy(&mut pick, 5.5, 9.0), edgy(&mut pick, 0.0, 9.0), 1.0];
+        let blade_cofg = [0; 4].map(|_| [edgy(&mut pick, 0.0, 9.0), edgy(&mut pick, 0.0, 9.0), edgy(&mut pick, 9.0, 12.0), 1.0]);
+        let hidden: [bool; 6] = [0; 6].map(|_| pick.one_in(2));
+        let seed = pick.next() as u32;
+
+        for (k, row) in heli_world.iter().enumerate() {
+            set_quad(&mut ee, model + 0x70 + 0x10 * k as u32, *row);
+        }
+        for (n, w) in blade_nodes.iter().zip(blade_worlds) {
+            for (k, row) in w.iter().enumerate() {
+                set_quad(&mut ee, n + 0x70 + 0x10 * k as u32, *row);
+            }
+        }
+        set_quad(&mut ee, body + body_at::RATES, rates);
+        set_quad(&mut ee, body + body_at::VELOCITY, velocity);
+        set_quad(&mut ee, body + body_at::COFG, cofg);
+        for (b, c) in blade_bodies.iter().zip(blade_cofg) {
+            set_quad(&mut ee, b + body_at::COFG, c);
+        }
+        for (n, h) in nodes.iter().zip(hidden) {
+            let word = ee.u32_at(*n) & !0x4000_0000 | if h { 0x4000_0000 } else { 0 };
+            ee.set_u32(*n, word);
+        }
+        *rng.borrow_mut() = Rng::from_seed(seed);
+        started.borrow_mut().clear();
+        ee.call(0x004d_3720, &[u64::from(HELI)], &[], BUDGET);
+
+        let mut ride = Ride {
+            body: Body { rates: vf(rates), velocity: vf(velocity), cofg: vf(cofg), ..Body::default() },
+            measure: Measure::default(),
+            crash: Crash::default(),
+            flown: true,
+            gravity_scale: F::ONE,
+            throw_scale: F(0.5),
+            gravity: Vf::default(),
+            area: None,
+            touchdown_sound: false,
+            rotor_angle: F::ZERO,
+            rotor_hidden: hidden[0],
+        };
+        let mut set = Blades::default();
+        set.set.bones = blade_cofg.map(|c| Bone { body: Body { cofg: vf(c), ..Body::default() }, mass: F::ONE, inertia: Vf::default(), reference: Vf::default() }).to_vec();
+        set.set.objects = vec![game_sim::prop_world::Object::new(&blade_part, Vf::default(), Vf::default(), Vf::default()); 4];
+        let mut w = Wreckage { blades: set, mxvatv: true, ..Wreckage::default() };
+        w.nodes.rotor = [hidden[1], hidden[2], hidden[3]];
+        w.nodes.intact = hidden[4];
+        w.nodes.wrecked = hidden[5];
+        let throw = Throw { blades: blade_worlds.map(|m| game_sim::math::Mat4(m.map(vf))), model: game_sim::math::Mat4(heli_world.map(vf)) };
+        assert_eq!(throw.model, node_world(&ee, model), "case {case}: the model's rows as written");
+        let mut port_rng = Rng::from_seed(seed);
+        w.throw_blades(&mut ride, &throw, &mut port_rng);
+
+        assert_eq!(*started.borrow(), blades.to_vec(), "case {case}: the blades started");
+        assert_eq!(port_rng.state(), rng.borrow().state(), "case {case}: the draws");
+        for (k, bb) in blade_bodies.iter().enumerate() {
+            let b = &w.blades.set.bones[k].body;
+            let what = |s: &str| format!("blade {k}'s {s}");
+            same_lanes(&what("last centre"), case, b.last_position, vector(&ee, bb + body_at::LAST_POSITION), 4);
+            same_lanes(&what("centre"), case, b.position, vector(&ee, bb + body_at::POSITION), 4);
+            same_lanes(&what("velocity"), case, b.velocity, vector(&ee, bb + body_at::VELOCITY), 4);
+            same_lanes(&what("last orientation"), case, b.last_quat, vector(&ee, bb + body_at::LAST_QUAT), 4);
+            same_lanes(&what("orientation"), case, b.quat, vector(&ee, bb + body_at::QUAT), 4);
+            same_lanes(&what("rates"), case, b.rates, vector(&ee, bb + body_at::RATES), 4);
+        }
+        let got = nodes.map(|n| node_hidden(&ee, n));
+        let port = [ride.rotor_hidden, w.nodes.rotor[0], w.nodes.rotor[1], w.nodes.rotor[2], w.nodes.intact, w.nodes.wrecked];
+        assert_eq!(got, port, "case {case}: the nodes hidden (rotor x4, +0x1220, the wrecked blades)");
+    }
+    println!("the blade throw: {CASES} cases, bit-exact");
+}
+
