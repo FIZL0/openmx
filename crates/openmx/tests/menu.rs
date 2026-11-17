@@ -2019,6 +2019,31 @@ fn the_splash_hints_sit_on_the_bottom_edge() {
     }
 }
 
+/// B32: the splash's build label hangs from the frame's top edge: the gap over it is less than
+/// twice its own height at 16:9, the Deck's 16:10, a phone held either way and a wide screen (held
+/// upright it sat at the stage's top, mid-screen over the scene).
+#[test]
+fn the_splash_build_label_sits_on_the_top_edge() {
+    let mut disc = match game_render::Disc::open_configured() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    let art = menu::Art::load(&mut disc).expect("the menus' art");
+    for (w, h) in [(1920, 1080), (1280, 800), (390, 844), (844, 390), (2520, 1080)] {
+        let (mut m, _) = fresh();
+        m.open(Screen::Splash);
+        let parts = art.parts(&m, &mut game_render::Frame::new(w, h, [90, 90, 90]));
+        let found: Vec<_> = parts.iter().filter_map(|p| if let menu::Part::Build(b) = p { Some(*b) } else { None }).collect();
+        assert_eq!(found.len(), 1, "at {w}x{h}: one build label");
+        let b = found[0];
+        assert!(b[1] >= 0.0 && b[1] < 2.0 * b[3], "at {w}x{h}: the build label {b:?} floats {} px under the top edge", b[1]);
+        assert!(b[0] >= 0.0 && b[0] + b[2] <= w as f32, "at {w}x{h}: the build label {b:?} is off the frame");
+    }
+}
+
 /// V111: on the Online screen every row's words, and the cursor's pill, sit inside the list's
 /// plate, with the network on LAN Only and on Internet + LAN, and the four rows above it do not move
 /// when the last one's word changes.
@@ -2124,7 +2149,7 @@ fn every_pill_fits_its_label_and_nothing_covers_the_logo() {
                                 assert!(!overlap(*logo, *b), "{screen:?} at {w}x{h}: an item on the logo");
                             }
                         }
-                        menu::Part::Plate(_) | menu::Part::Hints(_) | menu::Part::Line(_) => {}
+                        menu::Part::Plate(_) | menu::Part::Hints(_) | menu::Part::Line(_) | menu::Part::Build(_) => {}
                         // Unstretched: 512x64 at any shape.
                         menu::Part::Logo(b) => assert!((b[2] / b[3] - 8.0).abs() < 0.01, "{screen:?} at {w}x{h}"),
                         menu::Part::Card { card, .. } => {
