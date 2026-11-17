@@ -50,6 +50,9 @@ pub struct Start {
     pub ai: Vec<game_sim::rider::Rider>,
     /// P313c: the drop gate's sink, on a track whose gate sinks ([`gate_sink`]).
     pub sink: Option<game_sim::drop_gate::Sink>,
+    /// C40: the race file's own line spot, as its load spotted it, before [`laps`] moves the line
+    /// onto the finish gate: what the drop gate's trigger is measured to.
+    pub file_line: Option<race::Spot>,
 }
 
 impl Start {
@@ -134,7 +137,7 @@ pub fn lay_out(prop: &Prop, drops: Vec<F>, riders: i32, seed: u32) -> Option<Sta
         (0..riders).map(|card| s.grid_spot(GridStart::Gate { centre: start.centre, normal: start.normal, width: start.width }, card, riders)).collect();
     let (spot, facing) = grid[0];
     let (lane, place, delay) = (s.lanes[0], s.starting_place(0), s.start_delay);
-    Some(Start { spot, facing, lane, place, riders, gate: start, delay, rng, activity: s, laps: None, grid, ai: Vec::new(), sink: None })
+    Some(Start { spot, facing, lane, place, riders, gate: start, delay, rng, activity: s, laps: None, grid, ai: Vec::new(), sink: None, file_line: None })
 }
 
 /// P313a: how many entries the rider database holds, which the roster's identity draws pick from
@@ -220,7 +223,10 @@ pub fn give_ai_net(sim: &mut game_sim::Sim, file: &[u8], terrain: &mut dyn game_
 /// The port's own: the nodes the original raises onto the scene's props (S296a) stay on the terrain
 /// (sx01's file has none), and a track with no finish-gate prop in its scene keeps the file's line
 /// (the original looks in the track's toys next).
-pub fn laps(file: &[u8], terrain: &mut dyn game_sim::world::World, finish: Option<&Prop>, laps: i32, riders: &[(Vf, u64)]) -> Option<race::Laps> {
+///
+/// C40: and the race file's own line spot as the load spotted it, before the finish gate moves the
+/// line (the drop gate's trigger is measured to it, [`gate_sink`]).
+pub fn laps(file: &[u8], terrain: &mut dyn game_sim::world::World, finish: Option<&Prop>, laps: i32, riders: &[(Vf, u64)]) -> Option<(race::Laps, race::Spot)> {
     let mut t = race::TrackFile::parse(file).ok()?;
     let raised = t.snap_to_ground(Some(terrain));
     if !raised.is_empty() {
@@ -229,6 +235,7 @@ pub fn laps(file: &[u8], terrain: &mut dyn game_sim::world::World, finish: Optio
     let (mut paths, spots) = race::TrackPaths::load(&t)?;
     let mut line = t.line?;
     let mut line_spot = spots[1]?;
+    let file_line = line_spot;
     if let Some(finish) = finish {
         line.centre = line.centre.merge(ps2_float::Dest::XYZ, finish.at);
         game_sim::ai::follow::spot(&mut paths, line.centre, false, &mut line_spot, None);
@@ -238,7 +245,7 @@ pub fn laps(file: &[u8], terrain: &mut dyn game_sim::world::World, finish: Optio
     }
     line_spot.at()?;
     let course = race::Course { line, line_spot, lap_length: paths.lap_length };
-    Some(race::Laps::new(race::supercross_rules(laps), course, paths, riders))
+    Some((race::Laps::new(race::supercross_rules(laps), course, paths, riders), file_line))
 }
 
 /// P313: the readouts a card gives the HUD: the lap it rides (one past the laps it has run, held at
@@ -410,15 +417,16 @@ impl SinkWords {
 }
 
 /// P313c: the drop gate's sink bound to the race's `laps`, on a track whose `.toy` sets
-/// `MoveGateDown`: its collision pieces found among the scene's collision `files` by name, each
+/// `MoveGateDown`, its trigger measured to `line`, the race file's own line spot ([`Start::file_line`],
+/// C40): its collision pieces found among the scene's collision `files` by name, each
 /// where the props hold it (`at_index`, [`game_sim::world::Props::load_indexed`]). `None` on any
 /// other track: there the original's trigger can fire but sinks nothing.
-pub fn gate_sink<'a>(toy: &str, laps: &mut race::Laps, files: impl IntoIterator<Item = &'a str>, at_index: &[Option<usize>]) -> Option<game_sim::drop_gate::Sink> {
+pub fn gate_sink<'a>(toy: &str, laps: &mut race::Laps, line: race::Spot, files: impl IntoIterator<Item = &'a str>, at_index: &[Option<usize>]) -> Option<game_sim::drop_gate::Sink> {
     let w = SinkWords::read(toy).filter(|w| w.move_down)?;
     let names = game_sim::drop_gate::collision_names(&w.name, w.soultree, w.collision);
     let pieces = game_sim::drop_gate::gathered(files, &names).into_iter().filter_map(|k| at_index.get(k).copied().flatten()).collect();
     let [x, y, z] = w.trigger_at;
-    Some(game_sim::drop_gate::Sink::bind(laps, Vf::new(x, y, z, 1.0), true, F(w.move_time), pieces))
+    Some(game_sim::drop_gate::Sink::bind(laps, line, Vf::new(x, y, z, 1.0), true, F(w.move_time), pieces))
 }
 
 /// P313b: the drop gate as it falls at the drop. The race activity makes a gate object from the
@@ -767,12 +775,13 @@ mod tests {
         let files = ["a.col", "missing.col", "THQsxdropgate03.col", "thqsxdropgate04.col", "THQsxdropgate02.col"];
         // `missing.col` did not load, so the props after it are one place down.
         let at_index = [Some(0), None, Some(1), Some(2), Some(3)];
-        let sink = gate_sink(toy, &mut laps, files, &at_index).unwrap();
+        let line = laps.course.line_spot;
+        let sink = gate_sink(toy, &mut laps, line, files, &at_index).unwrap();
         assert_eq!(sink.pieces, [1, 2]);
         assert_eq!((sink.move_time, sink.move_down, sink.armed), (F(0.25), true, true));
         // No paths to find a spot on: the port measures the trigger 0.
         assert_eq!(sink.trigger, F::ZERO);
-        assert!(gate_sink(SX01_DROP_GATE, &mut laps, files, &at_index).is_none());
+        assert!(gate_sink(SX01_DROP_GATE, &mut laps, line, files, &at_index).is_none());
         // A race with a sink hands it on.
         let prop = Prop { across: Vf::new(1.0, 0.0, 0.0, 0.0), look: Vf::new(0.0, 0.0, 1.0, 0.0), at: Vf::new(0.0, 0.0, 0.0, 1.0), half_width: F(30.0), height: F(1.0) };
         let mut s = lay_out(&prop, vec![F(1.54)], 1, 1).unwrap();

@@ -6189,7 +6189,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             let (on, _) = sim_world::World::ground(&mut sim, Vf::new(spot.x(), 1.0e4, spot.z(), 1.0));
             cards.push((Vf::new(spot.x(), on.y(), spot.z(), 1.0), kind));
         }
-        s.laps = file.as_deref().and_then(|f| race_start::laps(f, &mut sim, finish.as_ref(), laps, &cards));
+        let made = file.as_deref().and_then(|f| race_start::laps(f, &mut sim, finish.as_ref(), laps, &cards));
+        s.file_line = made.as_ref().map(|m| m.1);
+        s.laps = made.map(|m| m.0);
         match &s.laps {
             Some(l) => println!(
                 "race: laps on {} — lap {:.2}, line at {:.2},{:.2},{:.2}{}",
@@ -6226,8 +6228,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // A world's tiles stand their own props, which the scene's collision list does not number.
     if let (Some(s), Some(toy), None) = (race_start.as_mut(), gate_toy.as_deref(), &world_mod)
         && let Some(laps) = s.laps.as_mut()
+        && let Some(line) = s.file_line
     {
-        s.sink = race_start::gate_sink(toy, laps, place.collision.iter().map(|c| c.file.as_str()), &prop_at);
+        s.sink = race_start::gate_sink(toy, laps, line, place.collision.iter().map(|c| c.file.as_str()), &prop_at);
         if let Some(k) = &s.sink {
             println!("race: drop gate sinks {:.2} from the line, {} collision pieces", k.trigger.0, k.pieces.len());
         }
