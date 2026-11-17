@@ -5199,6 +5199,7 @@ fn the_race_handler_holds_c31s_live_sx01_laps() {
     for (rel, h) in &held {
         assert!(h.stepped > 20_000 && h.torn < 3_000, "{rel}: {h:?}");
         assert!(h.laps >= 7 && h.bests >= 4 && h.finished == 3, "{rel}: the AI riders' laps and finishes, {h:?}");
+        assert!(h.long_way <= if rel.contains("gas") { 1 } else { 13 }, "{rel}: the long way round, {h:?}");
         if rel.contains("gas") {
             assert!(h.off > 4_000 && h.too_long >= 10 && h.back >= 25, "{rel}: the human's off-track episodes, {h:?}");
         }
@@ -5221,13 +5222,23 @@ fn c31_hold(text: &str, prefix: &str, track: &C31Track, what: &str) -> C31Held {
         /// The rider ids in the manager's list order (its `+0x34`, each card's next at `+0x1c8`).
         order: Vec<usize>,
     }
-    // The cards sit side by side in rider id order, so a card's address ranks it.
+    // The cards sit side by side in rider id order, so a card's address ranks it: the head and the
+    // nexts are every card's address once, and sorted they are the cards' addresses by id. The list is
+    // walked from the head, as S13dRow::order walks it.
     let order = |mgr: &[u8], raws: &[Vec<u8>]| -> Vec<usize> {
         let word = |b: &[u8], o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
-        let mut at: Vec<u32> = std::iter::once(word(mgr, 0x34)).chain(raws.iter().map(|r| word(r, 0x1c8))).filter(|&a| a != 0).collect();
-        let list = at.clone();
-        at.sort_unstable();
-        list.iter().map(|a| at.binary_search(a).unwrap()).collect()
+        let mut by_id: Vec<u32> = std::iter::once(word(mgr, 0x34)).chain(raws.iter().map(|r| word(r, 0x1c8))).filter(|&a| a != 0).collect();
+        by_id.sort_unstable();
+        let mut list = Vec::new();
+        let mut at = word(mgr, 0x34);
+        while let Ok(k) = by_id.binary_search(&at) {
+            if k >= raws.len() || list.len() == raws.len() {
+                break;
+            }
+            list.push(k);
+            at = word(&raws[k], 0x1c8);
+        }
+        list
     };
     let rows: Vec<Row> = lines
         .map(|l| {
@@ -5335,7 +5346,8 @@ fn c31_hold(text: &str, prefix: &str, track: &C31Track, what: &str) -> C31Held {
             // hangs on the scratch the route searches leave on the paths. The original's drifts tick to
             // tick for a rider standing still: the other cards' searches and their computer aims (S302)
             // run first, and so do the AI riders' own path searches, which are not ported — with the
-            // aims in, one tick of gas-held sx01 is left (frame 293, the human). Both are far past the
+            // aims in and the cards in list order, one tick of gas-held sx01 is left (frame 293, the human)
+            // and 13 of the four AI riders'. Both are far past the
             // search's reach, so the progress test, the one reader of the word, reads them alike.
             let behind_kept = b.lap.spot.path == a.lap.kept_spot.path && b.lap.spot.piece == a.lap.kept_spot.piece && b.lap.spot.along < a.lap.kept_spot.along;
             let far = |x: F| x.0 > track.paths.ahead.0;
@@ -5358,7 +5370,7 @@ fn c31_hold(text: &str, prefix: &str, track: &C31Track, what: &str) -> C31Held {
     assert!(bad.is_empty(), "{what}: words that differ (count, first four): {bad:#?}");
     assert_eq!(speed_off, 0, "{what}: cards whose speed is not their velocity's length");
     assert!(xor & !C31_UNPORTED_FLAGS == 0, "{what}: flags {xor:#x}");
-    C31Held { stepped, torn, laps, bests, finished, off, too_long, back }
+    C31Held { stepped, torn, laps, bests, finished, off, too_long, back, long_way }
 }
 
 /// What one capture put through the handler.
@@ -5372,6 +5384,9 @@ struct C31Held {
     off: usize,
     too_long: usize,
     back: usize,
+    /// Distances left the long way round (see c31_hold): the cards stepped in list order leave one
+    /// on gas-held sx01 and 13 on the four AI riders' (S307: 3,036 when stepped by address rank).
+    long_way: usize,
 }
 
 // --- S292: the gate race's line and the zones --------------------------------------------------------
