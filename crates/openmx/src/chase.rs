@@ -175,7 +175,8 @@ pub fn mod_presets(m: ModMachine) -> &'static str {
 
 /// The file `m` reads when the game's current camera is its race camera rather than the follow
 /// camera: the same name with `RC_` for `FC_`, which is how SLUS-21104 builds it. These files carry
-/// the race camera's airborne filters ahead of the presets.
+/// the race camera's airborne filters ahead of the presets. Despite the name, SLUS-21104 puts a
+/// machine on that camera only in a hill climb; every race rides [`mod_presets`]' file (MD166).
 pub fn mod_race_presets(m: ModMachine) -> String {
     mod_presets(m).replacen("FC_", "RC_", 1)
 }

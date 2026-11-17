@@ -7,7 +7,10 @@
 //! the player's four offsets, its ground lift, its eight lags and the viewport's eye. MD82c's
 //! (`context/capture/md82c/<flight>.csv`, `research/md82c/fly.sh`) read the same behind the biplane and
 //! the Kiowa, both models, playing MD80a's flight tapes from its Desert Oasis states: the fliers follow
-//! with the same camera and update, from `FC_BiplaneDefault.pb` and `FC_HeliDefault.pb`.
+//! with the same camera and update, from `FC_BiplaneDefault.pb` and `FC_HeliDefault.pb`. MD166's
+//! (`context/capture/md166/<machine>-race.csv`, the same player; the ATV and a trophy truck on `FC_BajaDefault.pb`) play MD39a's tape from an Open Class
+//! race's start at Desert Oasis: SLUS-21104 hands a racing machine its follow camera too, and keeps the
+//! race camera (the `RC_` files) for a hill climb.
 //!
 //! The replay seeds the port's camera from the first clean row and from then on hands it nothing but
 //! each row's target block (torn, stale and wrecked rows are handled in the loop, and counted). Its presets are the machine's camera file read as [`Preset::read_layout`] reads
@@ -42,8 +45,10 @@ use game_sim::track;
 use ps2_float::{F, Vf};
 
 /// Each capture, the folder under `context/capture` it is in, and the machine in it: MD82b's behind
-/// the cars and the ATV, MD82c's (`research/md82c/fly.sh`) behind MD80a's four flights.
-const CAPTURES: [(&str, &str, ModMachine); 11] = [
+/// the cars and the ATV, MD82c's (`research/md82c/fly.sh`) behind MD80a's four flights, and MD166's
+/// in a race (Open Class at Desert Oasis, four AI opponents) behind the ATV and the buggy — a race
+/// hands the machine the same follow camera on the same `FC_` file as a free ride.
+const CAPTURES: [(&str, &str, ModMachine); 13] = [
     ("md82b", "buggy", ModMachine::Buggy),
     ("md82b", "baja", ModMachine::Baja),
     ("md82b", "sandrail", ModMachine::Sandrail),
@@ -55,6 +60,8 @@ const CAPTURES: [(&str, &str, ModMachine); 11] = [
     ("md82c", "biplane3", ModMachine::Biplane),
     ("md82c", "kiowa", ModMachine::Helicopter),
     ("md82c", "kiowa3", ModMachine::Helicopter),
+    ("md166", "atv-race", ModMachine::Atv),
+    ("md166", "car-race", ModMachine::Baja),
 ];
 
 /// The frame time the camera is handed: the lags' alpha is this over their time constant in every row.
@@ -117,12 +124,27 @@ impl Capture {
     /// Whether row `row`'s target block is two ticks on from the last row's: the poll read the next
     /// tick's machine, so the block the camera stepped on this tick is lost. Told by the body point
     /// moving about twice the distance the two rows' speeds cover in a tick (a step covers 0.8–1.2 of
-    /// it in every capture).
+    /// it in every capture). Under 5 ft/s only when the next row repeats this one (MD166's ATV slowing
+    /// after its race: the read ran ahead, then the next poll landed before the frame caught up).
     fn jumped(&self, row: usize) -> bool {
         let (p, q) = (self.quad(row, "a_point"), self.quad(row - 1, "a_point"));
         let moved = (0..3).map(|k| (p[k] - q[k]) * (p[k] - q[k])).sum::<f32>().sqrt();
         let speed = (self.num(row, "a_flag.y") + self.num(row - 1, "a_flag.y")) / 2.0;
-        speed > 5.0 && moved > 1.6 * speed * DT
+        let slow = row + 1 < self.rows.len() && self.has_actor(row + 1) && self.doubled(row + 1);
+        (speed > 5.0 || slow) && moved > 1.6 * speed * DT
+    }
+
+    /// Whether row `row` is a race's put-back (MD166): the machine left the course and the next row
+    /// has it set back on the track, further from this row's point than any machine covers in a tick
+    /// (50 ft; the fastest drive here makes 4). The original resets its camera on the frame before
+    /// the machine moves, which is not the follow update, so the replay steps neither row and
+    /// reseeds after them.
+    fn put_back(&self, row: usize) -> bool {
+        if row + 1 >= self.rows.len() || !self.has_actor(row + 1) {
+            return false;
+        }
+        let (p, q) = (self.quad(row + 1, "a_point"), self.quad(row, "a_point"));
+        (0..3).map(|k| (p[k] - q[k]) * (p[k] - q[k])).sum::<f32>() > 50.0 * 50.0
     }
 
     /// Whether the camera held a target block that tick (a wrecked ATV rider has none).
@@ -275,7 +297,7 @@ fn each_mod_machines_eye_and_target_replay_slus_21104s() {
         let mut eye = c.quad(first, "vp_eye");
         let mut ground = ground();
         let (mut replayed, mut airborne, mut still, mut wrecked, mut skipped) = (0, 0, 0, 0, 0);
-        let (mut held, mut doubled) = (0, 0);
+        let (mut held, mut doubled, mut put_back) = (0, 0, 0);
         let mut row = first + 1;
         while row < c.rows.len() {
             assert_eq!(c.word(row, "still") & 0x800, 0, "{name} row {row}: the still bit");
@@ -290,6 +312,18 @@ fn each_mod_machines_eye_and_target_replay_slus_21104s() {
                 }
                 let at = seed(end);
                 skipped += at - end + 1;
+                cam = seeded(&c, at, presets.clone());
+                eye = c.quad(at, "vp_eye");
+                row = at + 1;
+                continue;
+            }
+            if c.put_back(row) {
+                put_back += 1;
+                if row + 17 > c.rows.len() {
+                    break;
+                }
+                let at = seed(row + 1);
+                skipped += at - row;
                 cam = seeded(&c, at, presets.clone());
                 eye = c.quad(at, "vp_eye");
                 row = at + 1;
@@ -340,7 +374,7 @@ fn each_mod_machines_eye_and_target_replay_slus_21104s() {
         }
         eprintln!(
             "{name}: {file}, {replayed} rows replayed bit for bit from row {first} ({airborne} airborne, {still} standing; \
-             {held} read late, {doubled} doubled or dropped, {wrecked} wrecked, {skipped} reseeded after)"
+             {held} read late, {doubled} doubled or dropped, {wrecked} wrecked, {put_back} put back, {skipped} reseeded after)"
         );
         // Every row compared, on time or late, is bit for bit; the reseeds must leave most of the ride.
         assert!(
@@ -350,7 +384,7 @@ fn each_mod_machines_eye_and_target_replay_slus_21104s() {
         checked += 1;
     }
     if checked == 0 {
-        eprintln!("skip: no MD82b or MD82c capture with its camera file");
+        eprintln!("skip: no MD82b, MD82c or MD166 capture with its camera file");
     }
 }
 

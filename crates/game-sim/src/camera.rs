@@ -1872,8 +1872,10 @@ const MOD_SWING_FADE: [f32; 2] = [HALF_PI, 2.0943952];
 /// (one bit under the nearest `f32`, as the object stores it) and a quarter.
 const MOD_REAR_FADE: [f32; 2] = [f32::from_bits(0x3f86_0a91), HALF_PI];
 
-/// The race camera MX vs. ATV Unleashed (SLUS-21104) follows every machine with — bike, ATV, car,
-/// truck — on the presets [`Preset::read_layout`] reads out of the mod's camera file.
+/// The camera MX vs. ATV Unleashed (SLUS-21104) follows every machine with — bike, ATV, car,
+/// truck — on the presets [`Preset::read_layout`] reads out of the mod's `FC_` camera file, in a race
+/// as in a free ride (MD166). The game holds a second, race camera on the `RC_` files beside it, but
+/// hands a machine that one only in a hill climb.
 ///
 /// It is MX Unleashed's [`Race`] with a rear fade worked in. The camera keeps two angles,
 /// [`MOD_REAR_FADE`], and measures how far the yaw is past the first towards the second. With the
