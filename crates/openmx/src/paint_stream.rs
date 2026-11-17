@@ -181,6 +181,24 @@ impl PaintStream {
         }
     }
 
+    /// Every map back on its far pages, as [`Renderer::give_back_ground`] left them (P307: the iPhone
+    /// app in the background): those near the riders are read and written again from the next
+    /// update, once [`Renderer::take_back_ground_paint`] has made the arrays again. A map being read
+    /// stays asked, and is written when it comes. How many maps were let go.
+    pub fn given_back(&mut self) -> usize {
+        self.writing.clear();
+        let mut n = 0;
+        for (held, name) in self.held.iter_mut().zip(&self.names) {
+            if matches!(held, Held::Shown | Held::Writing) {
+                *held = Held::Far;
+                n += 1;
+                self.log.push(format!("world paint: {name} let go in the background"));
+            }
+        }
+        self.let_go += n;
+        n
+    }
+
     /// The median and the 90th percentile of the writing updates' CPU time, in seconds, and how many
     /// there were (K53).
     pub fn writing_cpu_spread(&self) -> (f32, f32, usize) {

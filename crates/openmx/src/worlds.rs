@@ -1416,6 +1416,15 @@ impl GroundStream {
         n
     }
 
+    /// What the GPU had of the pieces went with [`game_render::gpu::Renderer::give_back_ground`] (P307:
+    /// the iPhone app in the background): the parts not handed over yet are let go, and every piece
+    /// held is built again as [`GroundStream::build_again`] does. The stand-in is drawn till each
+    /// comes. The number of pieces asked.
+    pub fn given_back(&mut self) -> usize {
+        self.pending.clear();
+        self.build_again()
+    }
+
     /// How many pieces are held now.
     pub fn held(&self) -> usize {
         self.held.iter().filter(|h| h.is_some()).count()
@@ -2318,6 +2327,53 @@ mod tests {
         for _ in 0..3 {
             assert!(s.update(&near).is_empty(), "built again once, not every frame");
         }
+        let _ = std::fs::remove_dir_all(mods.parent().unwrap());
+    }
+
+    /// P307: the GPU's pieces given back in the background, a piece half handed over is not finished
+    /// after — its parts left are let go — and every piece held comes again whole, its first part
+    /// first, as it was.
+    #[test]
+    fn the_ground_given_back_comes_again_whole_not_from_half_a_piece() {
+        let mods = std::env::temp_dir().join(format!("openmx-p307-given-{}", std::process::id())).join("mods");
+        let _ = std::fs::remove_dir_all(&mods);
+        two_tile_world(&mods, "p307_given", r#"{"game": "Real elevation"}"#);
+        let w = find(&mods, "p307_given").unwrap();
+        let corners = |made: &GroundPiece| -> Vec<[u32; 3]> { made.chunks.iter().flat_map(|c| c.vertices.iter().map(|v| v.pos.map(f32::to_bits))).collect() };
+        let reach = Reach { load: F(5000.0), drop: F(6000.0) };
+        // Off the tiles, so no piece is one a rider is on, which goes whole in a frame.
+        let near = [[60.0f32, -100.0]];
+        let mut first = std::collections::BTreeMap::new();
+        let mut s = GroundStream::start_into(&w, 4, reach, None, &near, false, &mut |i, made| {
+            first.insert(i, corners(&made));
+        });
+        // Asked again and handed over a chunk a frame: one frame's first part out, the rest waiting.
+        s.chunks_a_frame = 1;
+        s.build_again();
+        let until = Instant::now() + std::time::Duration::from_secs(60);
+        let mut out = Vec::new();
+        while out.is_empty() && Instant::now() < until {
+            out = s.update(&near);
+            std::thread::yield_now();
+        }
+        assert!(matches!(out.first(), Some(Change::Add(..))), "a first part handed over");
+        assert!(!s.pending.is_empty(), "with parts left to hand over");
+        assert_eq!(s.given_back(), w.pieces.len());
+        assert!(s.pending.is_empty(), "the parts left are let go");
+        let mut again: std::collections::BTreeMap<usize, Vec<[u32; 3]>> = std::collections::BTreeMap::new();
+        let mut shown = std::collections::BTreeSet::new();
+        while shown.len() < w.pieces.len() && Instant::now() < until {
+            for change in s.update(&near) {
+                match change {
+                    Change::Add(i, made) => _ = again.insert(i, corners(&made)),
+                    Change::More(i, made) => again.get_mut(&i).expect("more of a piece before its first part").extend(corners(&made)),
+                    Change::Drop(i) => panic!("piece {i} dropped"),
+                    Change::Show(i) => _ = shown.insert(i),
+                }
+            }
+            std::thread::yield_now();
+        }
+        assert_eq!(again, first, "every piece again, whole, the same ground");
         let _ = std::fs::remove_dir_all(mods.parent().unwrap());
     }
 
