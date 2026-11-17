@@ -2170,7 +2170,8 @@ pub struct Vehicle {
     /// Node 0's subtree, its first child first; empty, and [`Call::SubtreeOutOfDate`] goes on.
     pub below: Vec<Below>,
     /// Untamed's vehicle force (MD81d): after the gravity it adds a zero force as well (`xyz`), which
-    /// turns a -0 into +0. Off, SLUS-21104's.
+    /// turns a -0 into +0; and Untamed's put-back (MD183): its ground reset takes no collidable out
+    /// of the database before the orient ([`respawn_ground`]). Off, SLUS-21104's.
     pub untamed: bool,
     /// The respawn's words (MD154); `None`, and [`Call::Respawn`] goes on.
     pub back: Option<Back>,
@@ -2398,6 +2399,9 @@ const BACK_LIFT: u32 = 0x3e99_999a;
 /// starting the ghost; then, with the engine and all four tires, each tire's reset and the engine's
 /// ([`Call::TireReset`], [`Call::EngineReset`]).
 ///
+/// Untamed's put-back (MD183) is the same code at its own offsets, with [`Vehicle::untamed`]'s ground
+/// reset.
+///
 /// The put-back: the spot's position copied in; with a run whose spot's first two words are both
 /// set, the run's three words the spot's; with a terrain, the ground queried at the position
 /// ([`Call::BackGround`]), the position lifted along its normal by 0.3 (`xyz`), the forward the
@@ -2442,7 +2446,7 @@ fn respawn<S: Steps>(o: &mut Own<'_, S>, car: &mut Car, body: &mut Body) {
 /// **The ground reset** (the put-back's, as the bike's [`crate::handling::wreck::ground`]): with bit 1
 /// of the flag byte the node taken out of the database ([`Call::NodeUnhook`]); the frame's entry
 /// taken out if there is a frame, the riding probe's and the sweep's if there is a riding probe
-/// ([`Call::PartUnhook`]); the body's staged velocity [`BACK_ORIGIN`]; the orient ([`respawn_orient`]);
+/// ([`Call::PartUnhook`]; Untamed's, [`Vehicle::untamed`], takes neither out); the body's staged velocity [`BACK_ORIGIN`]; the orient ([`respawn_orient`]);
 /// with that bit the node hung back ([`Call::NodeRehang`]); and with the sync's switch, the frame,
 /// then the riding probe and the sweep (with a riding probe), each turned on and attached
 /// ([`Call::PartOn`], [`Call::PartAttach`]).
@@ -2453,12 +2457,14 @@ fn respawn_ground<S: Steps>(o: &mut Own<'_, S>, car: &mut Car, body: &mut Body) 
         o.rest.call(Call::NodeUnhook, car, body);
     }
     let c = o.v.collidables;
-    if let Some(p) = c.frame {
-        o.rest.call(Call::PartUnhook(p), car, body);
-    }
-    if let Some(p) = c.riding {
-        o.rest.call(Call::PartUnhook(p), car, body);
-        o.rest.call(Call::PartUnhook(Part::Sweep), car, body);
+    if !o.v.untamed {
+        if let Some(p) = c.frame {
+            o.rest.call(Call::PartUnhook(p), car, body);
+        }
+        if let Some(p) = c.riding {
+            o.rest.call(Call::PartUnhook(p), car, body);
+            o.rest.call(Call::PartUnhook(Part::Sweep), car, body);
+        }
     }
     o.v.back.as_mut().expect("tested").staged_velocity = BACK_ORIGIN;
     respawn_orient(o, car, body);
