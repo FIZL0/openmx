@@ -525,11 +525,11 @@ pub(crate) struct UBeside {
     sort: SortAnswer,
     held: Option<UHeld>,
     resolves: usize,
-    /// The tire steps handed out for a tire standing on an object, which the port leaves to its
-    /// caller and this harness cannot answer: the frame is not compared.
+    /// The tire steps (and since MD131 the stands-on asks) handed out for a tire standing on an object,
+    /// which this harness cannot answer: the frame is not compared.
     unported: Vec<Call>,
-    /// The original unwrecked and put the truck back this frame (not compared): a query the original
-    /// never asked is answered with its nearest.
+    /// The original unwrecked and put the truck back this frame (MD183): the put-back's calls may be
+    /// handed out ([`U_PUT_BACK_HANDED`]).
     put_back: bool,
     /// The drive and frame, for the panics.
     at: String,
@@ -541,7 +541,7 @@ impl UBeside {
     fn answer(&mut self, at: Vf) -> UGround {
         self.asked += 1;
         let mut k = self.ground.iter().position(|g| g.asked == at.to_bits());
-        if k.is_none() && (self.put_back || !self.unported.is_empty()) {
+        if k.is_none() && !self.unported.is_empty() {
             let d = |g: &UGround| { let v = Vf(g.asked.map(f32::from_bits)); (0..3).map(|i| (v.0[i] - at.0[i]).abs()).sum::<f32>() };
             k = (0..self.ground.len()).min_by(|&x, &y| d(&self.ground[x]).total_cmp(&d(&self.ground[y])));
         }
@@ -578,6 +578,10 @@ impl Steps for UBeside {
                 self.resolves += 1;
             }
             Call::GroundUnder(at) => car.ground_normal = self.answer(at).normal,
+            Call::BackGround(at) => {
+                car.ground_normal = self.answer(at).normal;
+                self.rest.push(c);
+            }
             Call::TireGround(k, at) => {
                 let g = self.answer(at);
                 car.tires[k].query = (g.point, g.normal);
@@ -590,7 +594,9 @@ impl Steps for UBeside {
                 let k = k.unwrap_or_else(|| panic!("the port asked the noise at {at:?}, the original's engine never did ({:?})", self.noise));
                 car.noise = self.noise.remove(k).1;
             }
-            Call::TireStep(..) => self.unported.push(c),
+            // Since MD131 the tire step asks what a tire stands on itself; nothing answers it for
+            // Untamed yet, so the frame is not compared, as a tire step handed out was not.
+            Call::TireStep(..) | Call::StandsOn(_) => self.unported.push(c),
             Call::SortSearch => {
                 car.sort = self.sort;
                 self.rest.push(c);
@@ -599,6 +605,11 @@ impl Steps for UBeside {
         }
     }
 }
+
+/// What the put-back hands out beyond [`super::drives::HANDED_OUT`] (MD183): its ground query
+/// (answered by the original's), the ghost's start, the trail's reset, the node's unhook and rehang
+/// in the database, and each collidable's turn-on and attach.
+const U_PUT_BACK_HANDED: [&str; 7] = ["BackGround", "GhostStart", "TrailReset", "NodeUnhook", "NodeRehang", "PartOn", "PartAttach"];
 
 /// What a drive beside came to.
 #[derive(Default)]
@@ -613,7 +624,7 @@ pub(crate) struct USeen {
     pub(crate) wrecked: usize,
     /// Frames not compared: a tire stood on an object ([`UBeside::unported`]).
     pub(crate) on_objects: Vec<usize>,
-    /// Frames not compared: the truck unwrecked and was put back at its spot.
+    /// Frames the truck unwrecked and was put back at its spot (compared, MD183).
     pub(crate) respawned: Vec<usize>,
     /// Frames whose record held contacts with another record.
     pub(crate) with_others: usize,
@@ -673,6 +684,7 @@ pub(crate) fn u_beside(d: &UDrive, ride: bool) -> Option<USeen> {
         let mut v = read_vehicle(&vb, &p, &o);
         v.untamed = true;
         v.scene.untamed = true;
+        v.back = Some(read_back(&vb, &p));
         let contacts = vb.u32_at(p.record + 0xf0);
         if contacts != 0 {
             v.held = game_sim::handling::record::held(&|a| vb.u32_at(a), p.record);
@@ -715,12 +727,10 @@ pub(crate) fn u_beside(d: &UDrive, ride: bool) -> Option<USeen> {
             keep.borrow_mut().on_objects.push(k);
             return;
         }
-        // The unwreck's respawn stands the truck at its spot through Untamed's own put-back
-        // (0x4ca900: a ground query under the spot, the node's rows, the body placed from the node),
-        // not MX Unleashed's the port has.
+        // The unwreck's respawn stands the truck at its spot through Untamed's put-back (MD183):
+        // compared with the respawn's words.
         if put_back {
             keep.borrow_mut().respawned.push(k);
-            return;
         }
         let pm = Mx { keys: Keys { tires: pieces.keys.tires.clone(), ..m.keys.clone() }, state: pieces.state, ..m };
         let resolved: Vec<(u32, u32)> = v
@@ -729,7 +739,8 @@ pub(crate) fn u_beside(d: &UDrive, ride: bool) -> Option<USeen> {
             .or(pieces.rest.held.as_ref().map(|h| &h.car))
             .filter(|_| contacts != 0)
             .map_or(Vec::new(), |h| game_sim::handling::record::held_words(&game_sim::atv_contact::Held { body: None, ..h.clone() }, p.record, &|a| va.u32_at(a)));
-        let parts = [car_words(&car, &p), game_sim::handling::seed::body_words(&body, p.body), mx_words(&pm, &p), vehicle_words(&va, &v, &p, &o), resolved];
+        let back = back_words(&va, v.back.as_ref().expect("read"), &p);
+        let parts = [car_words(&car, &p), game_sim::handling::seed::body_words(&body, p.body), mx_words(&pm, &p), vehicle_words(&va, &v, &p, &o), resolved, back];
         let counts = parts.clone().map(|ws| ws.iter().filter(|&&(a, x)| va.u32_at(a) != x).count());
         let after: Vec<(u32, u32)> = parts.concat();
         let bad: Vec<String> = after
@@ -744,7 +755,7 @@ pub(crate) fn u_beside(d: &UDrive, ride: bool) -> Option<USeen> {
             .collect();
         assert!(
             bad.is_empty(),
-            "{name} frame {k}: words of the port's Untamed frame differ from SLUS-21701's (car, body, pieces, vehicle, record: {counts:?}; {contacts} contacts, state {}, handed out {:?}):\n{}",
+            "{name} frame {k}: words of the port's Untamed frame differ from SLUS-21701's (car, body, pieces, vehicle, record, respawn: {counts:?}; {contacts} contacts, state {}, handed out {:?}):\n{}",
             car.state,
             pieces.rest.rest,
             bad.join("\n")
@@ -762,7 +773,8 @@ pub(crate) fn u_beside(d: &UDrive, ride: bool) -> Option<USeen> {
         let mut s = keep.borrow_mut();
         for c in &pieces.rest.rest {
             let n = format!("{c:?}").split([' ', '(', '{']).next().unwrap().to_string();
-            assert!(super::drives::HANDED_OUT.contains(&n.as_str()), "{name} frame {k}: the port's frame handed out {c:?}");
+            let put_back_call = put_back && U_PUT_BACK_HANDED.contains(&n.as_str());
+            assert!(super::drives::HANDED_OUT.contains(&n.as_str()) || put_back_call, "{name} frame {k}: the port's frame handed out {c:?}");
             *s.handed.entry(n).or_default() += 1;
         }
         s.frames += 1;
@@ -778,7 +790,7 @@ pub(crate) fn u_beside(d: &UDrive, ride: bool) -> Option<USeen> {
     }
     let seen = std::mem::take(&mut *seen.borrow_mut());
     eprintln!(
-        "MD161a {} ({}): {} frames, {} words in all equal to SLUS-21701's; {} ground queries answered; handed out {:?}; wrecked on {}; {} other world steps; contacts with another record on {}; not compared, a tire on an object: {:?}, put back: {:?}",
+        "MD161a {} ({}): {} frames, {} words in all equal to SLUS-21701's; {} ground queries answered; handed out {:?}; wrecked on {}; {} other world steps; contacts with another record on {}; not compared, a tire on an object: {:?}; put back (compared): {:?}",
         d.name,
         if ride { "through Ride" } else { "frame_untamed" },
         seen.frames,
@@ -799,6 +811,11 @@ pub(crate) fn u_beside(d: &UDrive, ride: bool) -> Option<USeen> {
 fn u_beside_test(d: &UDrive, ride: bool) {
     let Some(s) = u_beside(d, ride) else { return };
     assert!(s.frames > 0, "{}: no frame compared", d.name);
+    // MD183: the wreck drive's unwreck puts the truck back on frame 83, compared through the port's
+    // respawn with Untamed's ground reset.
+    if d.name == U_WRECK.name {
+        assert_eq!(s.respawned, [83], "{}: the frames put back", d.name);
+    }
 }
 
 #[test]

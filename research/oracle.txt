@@ -13403,3 +13403,12 @@ race_finish_listener        boot 0x002fc410 slot +0x14 (Finished; thunk 0x003004
 #   place from car+0xd30, look words +0xd60..+0xd68 to the camera (+0x6a4), a ground query under +0x80
 #   raised 0.3 along the normal, rows from +0xd40, then 0x004c8880, vt +0x3a0/+0x39c, event 0x0025e740;
 #   then the tire resets 0x004d74c0 x4 and engine reset 0x004d65c0 (SLUS-21104's shape). Not ported.
+
+# MD183 — Untamed's (SLUS-21701) car put-back, ported as atv_car's respawn with Vehicle::untamed; proved on MD160's
+#   wreck drive frame 83 (tests/mxvatv_car_frame/untamed.rs untamed_wreck_*_beside). Comment rows only, as # MD161a.
+#   Journal: research/journal/2026-11-17-md183-untamed-car-put-back.
+#   put-back 0x004ca900 = SLUS-21104's 0x004a6f70 instruction for instruction at moved offsets (# MD154 -> u()).
+#   0x004c8880: ground reset 0x004b9130, +0x34c = 1. Ground reset 0x004b9130 differs from SLUS-21104's 0x00492ca0:
+#   no collidable unhooks (only the node's, 0x00189040(+0x114) with +0x75 bit 1); body vt +0x14 (0x003b5f60);
+#   orient vt +0xf0 on +0x80/+0x90/+0xa0; rehang 0x00192cb0(+0x114, +0xe0, 2, 1); +0x74 bit 0 -> +0x100, then
+#   +0xfc and +0x104: (p+0x54)->vt +0x24 with p+0x50, attach 0x001138a0(p, +0xe4, +0xf0, 1, 0, 0).
