@@ -12495,6 +12495,10 @@ atv_pair_log_grow           atv 0x0025b840 = a growable log's resize to a1 entri
 # files three heightfield contacts (rays 3, 6, 16: the wingtips' ends; surface 0); the body's force listener
 # resolves them (vt+0x88, 1) after gravity, every substep: atv_contact::resolve, word for word. The sweep never
 # hits and the world rays file nothing along either flight.
+# MD110a — the plane's record off the disc (flight::MxvatvRecord::read): the part reader's [Mass Properties] words
+# (handling::mass::Part) over the constructor's: +0x24 1, +0x28 1, +0x48..+0x54 1.0, +0xfc 1, +0x100 0x1000,
+# +0x104 ~0, +0x200/+0x204 set, class *(+0x208)+0x94 0x43804. Rays: model one BiplaneM.col (44), model two
+# Biplane3M.col (36), bit-exact with both images. +0x60/+0x70 inertia ~2e-5 off (box taken at the load spot).
 # MD107 — MD39a's five car drives replayed bit-exact (tests/mxvatv_car_replay.rs; the car's input step
 #   ported as game_sim::atv_car::input, proved by the_car_input_step_is_the_ports, 10,000 cases on
 #   md39a/buggy.ee.bin). Journal: research/journal/2026-11-09-md107-mxvatv-car-step.

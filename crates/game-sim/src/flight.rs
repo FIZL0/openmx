@@ -242,7 +242,81 @@ pub struct MxvatvRecord {
     pub rays: Vec<[Vf; 2]>,
 }
 
+/// Where [`MxvatvRecord::load`] lays the part reader's words to read the record back: scratch places,
+/// nobody's RAM.
+const MXVATV_RECORD_AT: crate::handling::mass::Layout =
+    crate::handling::mass::Layout { object: 0x1000, body: 0x2000, record: 0x3000, gravity: 0x4000 };
+const MXVATV_RECORD_CLASS_AT: u32 = 0x5000;
+/// The plane's record's constructor words no `.phy` key writes, as biplane3's image holds them (MD80a):
+/// the actor bit it is, what it collides with (everything), and its class word (the record's `+0x208`
+/// object's `+0x94`).
+pub const MXVATV_RECORD_ACTORS: u32 = 0x1000;
+pub const MXVATV_RECORD_COLLIDES: u32 = !0;
+pub const MXVATV_RECORD_CLASS: u32 = 0x0004_3804;
+
 impl MxvatvRecord {
+    /// **SLUS-21104's plane record as loaded** (MD110a), off the disc: what the part reader writes from
+    /// the `.phy`'s `[Mass Properties]` ([`crate::handling::mass::Part`], read with the skin's model's
+    /// box, laid at scratch places and read back as the record and its resolution's fields) over the
+    /// record's constructor, as biplane3's image holds it: the heightfield rays, the world rays, the
+    /// rays and the sweep on (the last two as `CheckForCollisions` and `CheckForHighSpeedCollisions`
+    /// say), rests and damping of one, a body, the terrain, the near-field list, one contact a ray, the
+    /// two probes and the class word [`MXVATV_RECORD_CLASS`]; and the active part's rays, the skin's
+    /// `…M.col` ray probe. The held list's body is left to the flight, its mass is the part's body's.
+    pub fn load(part: &crate::handling::mass::Part, rays: &track::Rays) -> MxvatvRecord {
+        use crate::handling::record;
+        let rays = Rays::of(rays).pairs();
+        let r = &part.record;
+        let mut words = std::collections::BTreeMap::new();
+        for (a, mask, v) in part.words(MXVATV_RECORD_AT) {
+            let w = words.entry(a).or_insert(0u32);
+            *w = (*w & !mask) | (v & mask);
+        }
+        let at = MXVATV_RECORD_AT.record;
+        let one = F::ONE.to_bits();
+        for (o, v) in [
+            (0x24, 1),
+            (0x28, 1),
+            (0x2c, u32::from(r.check_for_collisions != 0)),
+            (0x30, u32::from(r.check_high_speed != 0)),
+            (0x48, one),
+            (0x4c, one),
+            (0x50, one),
+            (0x54, one),
+            (0xe4, MXVATV_RECORD_AT.body),
+            (0xec, 1),
+            (0xf4, rays.len() as u32),
+            (0xfc, 1),
+            (0x100, MXVATV_RECORD_ACTORS),
+            (0x104, MXVATV_RECORD_COLLIDES),
+            (0x200, 1),
+            (0x204, 1),
+            (0x208, MXVATV_RECORD_CLASS_AT),
+        ] {
+            words.insert(at + o, v);
+        }
+        // The `w` lanes of the centre of mass in the world and the relative velocity.
+        for o in [0x9c, 0x1fc] {
+            words.insert(at + o, one);
+        }
+        words.insert(MXVATV_RECORD_CLASS_AT + 0x94, MXVATV_RECORD_CLASS);
+        let w = |a: u32| words.get(&a).copied().unwrap_or(0);
+        let mut held = record::held(&w, at).expect("a record with no contacts is held");
+        held.body = None;
+        MxvatvRecord { record: record::read(&w, at), held, rays }
+    }
+
+    /// [`MxvatvRecord::load`] off the skin's files: the `.phy` (`Veh\biplane.phy`), the skin's model
+    /// (`Veh\Anim\<skin>.psg`, whose box the part reader's inertia is worked out from, the model stood
+    /// at the origin facing `+z`) and its ray probe (`Veh\Col\<Skin>M.col`).
+    pub fn read(phy: &[u8], psg: &[u8], rays: &[u8], curve: &CurveTable) -> Result<MxvatvRecord, String> {
+        let model = crate::quad::Model::parse(psg)?;
+        let origin = crate::quad::spawn_frame(Vf::new(0.0, 0.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 1.0));
+        let ini = phy::Ini::parse_bytes(phy);
+        let part = crate::handling::mass::Part::read(&ini.section("Mass Properties"), model.half_box(&origin), curve);
+        Ok(MxvatvRecord::load(&part, &track::Rays::parse(rays)?))
+    }
+
     /// **The record's clear and pass** (MD110), before the world steps: [`crate::handling::record::clear`]
     /// and [`crate::handling::record::pass`] on `body` with `matrix` the vehicle's scene node (the
     /// measure's matrix, which a sweep's push moves), the heightfield rays on `terrain` (none, no
@@ -504,6 +578,14 @@ impl Flight {
     /// ([`phy::Plane::read_mxvatv`]), flown by SLUS-21104's steps ([`Flight::mxvatv`]).
     pub fn new_mxvatv(plane: &phy::MxvatvPlane) -> Flight {
         Flight { mxvatv: true, ..Flight::new(&plane.plane) }
+    }
+
+    /// The plane with SLUS-21104's collision record (MD110a, [`MxvatvRecord::read`] off the disc): its
+    /// frames then search the world's SLUS-21104 terrain with the record's rays, and its hull strikes
+    /// the ground.
+    pub fn with_mxvatv_record(mut self, record: MxvatvRecord) -> Flight {
+        self.record_mxvatv = Some(Box::new(record));
+        self
     }
 
     /// **The plane's numbers changed under a flight going on** (P98): what [`Flight::new`] took off

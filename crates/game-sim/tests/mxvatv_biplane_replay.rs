@@ -21,7 +21,9 @@
 //!   MD101b it stands on Desert Oasis's ground ([`ground::Under`] over MC02's terrain, the object the
 //!   tires' `+0x134` points at), and its tires are compared too, word for word; since MD110 its
 //!   collision record ([`flight::MxvatvRecord`], seeded off `*(plane + 0xc8)`) runs its pass on that
-//!   terrain and resolves its contacts, and the record's words are compared too.
+//!   terrain and resolves its contacts, and the record's words are compared too; since MD110a the
+//!   record is also built off the disc ([`flight::MxvatvRecord::read`]: `biplane.phy`, the skin's
+//!   `.psg` and `…M.col`), compared with the image's, and flown in its place.
 //!
 //! Skips without the images or the captures.
 
@@ -845,7 +847,7 @@ fn tires_diff(p: &flight::Flight, ee: &Ee, plane: u32) -> Vec<String> {
 /// The interpreter replays the flight from its image as [`interpret`] does (fed off the tape); at
 /// every [`STRETCH`]th frame a port plane is seeded off its RAM ([`seeded`]) and flown on beside it
 /// on the same pad words, its body compared with the game's after each frame.
-fn port_flies(f: &Flight) -> Option<Vec<Stretch>> {
+fn port_flies(f: &Flight, disc: Option<&flight::MxvatvRecord>) -> Option<Vec<Stretch>> {
     let (phy, mut ee, ticks) = (phy_file()?, hooked(image(f.name)?), tape(f.name)?);
     // Every frame up to the last row's (and the one after, for a late last row).
     let frames = by_frame(&ee, f.plane, &rows(f.name)?).iter().map(|&(j, _)| j).max()? + 1;
@@ -868,7 +870,11 @@ fn port_flies(f: &Flight) -> Option<Vec<Stretch>> {
     let mut port: Option<flight::Flight> = None;
     for j in 1..=frames {
         if (j - 1) % STRETCH == 0 {
-            port = Some(seeded(&ee, f.plane, &phy, &tables));
+            let mut p = seeded(&ee, f.plane, &phy, &tables);
+            if let Some(d) = disc {
+                p.record_mxvatv = Some(Box::new(on_the_discs(d, &p.record_mxvatv.take().unwrap())));
+            }
+            port = Some(p);
             out.push(Stretch { from: j - 1, agreed: 0, grounded: ee.u32_at(f.plane + at::GROUNDED) != 0, parted: Vec::new(), drift: None });
         }
         feed(&mut ee, f.plane, &ticks, j);
@@ -905,8 +911,12 @@ fn port_flies(f: &Flight) -> Option<Vec<Stretch>> {
 }
 
 fn port_flown(f: &Flight, pinned: &[usize]) {
-    let Some(stretches) = port_flies(f) else { return };
-    for s in &stretches {
+    let Some(stretches) = port_flies(f, None) else { return };
+    ratchet(f, &stretches, pinned);
+}
+
+fn ratchet(f: &Flight, stretches: &[Stretch], pinned: &[usize]) {
+    for s in stretches {
         println!(
             "{} from frame {} ({}): {} frames agree{}",
             f.name,
@@ -940,3 +950,103 @@ fn the_port_flies_biplane3() {
     port_flown(&BIPLANE3, BIPLANE3_AGREES_THROUGH);
 }
 
+
+// --- MD110a: the plane's record off the disc ------------------------------------------------------
+
+/// The skin's files off MX vs. ATV's disc (MXVSATV.PSR's `Veh\\Anim\\<skin>.psg` and
+/// `Veh\\Col\\<Skin>M.col`, MD110a's copies), and its record built from them with `biplane.phy`
+/// ([`flight::MxvatvRecord::read`]).
+fn record_off_the_disc(skin: &str, col: &str) -> Option<flight::MxvatvRecord> {
+    let dir = Kit::load().ok()?.ctx("mxvatv-ps2/md110a");
+    let read = |name: &str| {
+        let bytes = std::fs::read(dir.join(name)).ok();
+        if bytes.is_none() {
+            skip(&format!("no {} (MXVSATV.PSR's Veh\\Anim and Veh\\Col: memory mxvsatv-psr-off-the-iso)", dir.join(name).display()));
+        }
+        bytes
+    };
+    let (phy, psg, rays) = (phy_file()?, read(&format!("{skin}.psg"))?, read(col)?);
+    Some(flight::MxvatvRecord::read(&phy, &psg, &rays, &game_sim::camera::CurveTable::build()).unwrap())
+}
+
+/// The record built off the disc is the one in the flight's image, in every word the flight does not
+/// move: the record's flags and tuning, its resolution's fields (mass, the scenery's and the actors'
+/// responses, the surfaces, the impulse mask), and the active part's rays bit for bit. The record's
+/// last sweep and contacts, and its resolution's speeds, are state; its inverse inertia is the part
+/// reader's off the model's box, within `within` (relative).
+fn the_record_off_the_disc_is_the_images(f: &Flight, skin: &str, col: &str, within: f32) {
+    let (Some(ee), Some(ours)) = (image(f.name), record_off_the_disc(skin, col)) else { return };
+    let theirs = read_record(&ee, f.plane);
+    let still = |r: &record::Record| {
+        let mut r = r.clone();
+        (r.swept_from, r.swept_to, r.contacts) = (Vf::ZERO, Vf::ZERO, Vec::new());
+        r
+    };
+    assert_eq!(still(&ours.record), still(&theirs.record), "{}: the record", f.name);
+    let collider = |h: &game_sim::atv_contact::Held| {
+        let mut c = h.record.clone();
+        (c.collider.cofg_world, c.collider.normal_speed, c.collider.relative, c.collider.inv_inertia) = (Vf::ZERO, F::ZERO, Vf::ZERO, Vf::ZERO);
+        (c, h.movers.len(), h.body.is_some())
+    };
+    assert_eq!(collider(&ours.held), collider(&theirs.held), "{}: the record's resolution fields", f.name);
+    let body_mass = ee.f32_at(ee.u32_at(f.plane + 0xb8) + 0x18);
+    assert_eq!(ours.held.mass.to_bits(), body_mass.to_bits(), "{}: the held mass, the body's", f.name);
+    let (ii, ij) = (ours.held.record.collider.inv_inertia, theirs.held.record.collider.inv_inertia);
+    let off = ii.0.iter().zip(ij.0).map(|(x, y)| (x - y).abs() / y.abs().max(1e-12)).fold(0.0f32, f32::max);
+    assert!(off <= within, "{}: the record's inverse inertia: ours {ii:?}, the image's {ij:?} ({off} off)", f.name);
+    let bits = |r: &[[Vf; 2]]| r.iter().flat_map(|s| s.iter().flat_map(|v| v.0.map(f32::to_bits))).collect::<Vec<_>>();
+    assert_eq!(bits(&ours.rays), bits(&theirs.rays), "{}: the part's rays", f.name);
+    println!("{}: the record off the disc is the image's; {} rays, inverse inertia {off} off", f.name, ours.rays.len());
+}
+
+/// **biplane3's record off the disc** (MD110a): `biplane.phy` for model two, `biplane3.psg` and
+/// `Biplane3M.col`.
+#[test]
+fn biplane3s_record_off_the_disc_is_its_images() {
+    the_record_off_the_disc_is_the_images(&BIPLANE3, "biplane3", "Biplane3M.col", 1e-4);
+}
+
+/// **And biplane's** (model one): `biplane.psg` and `BiplaneM.col`.
+#[test]
+fn biplanes_record_off_the_disc_is_its_images() {
+    the_record_off_the_disc_is_the_images(&BIPLANE, "biplane", "BiplaneM.col", 1e-4);
+}
+
+
+/// The disc's record (`d`, [`flight::MxvatvRecord::read`]) carrying the state the seeded one (`s`, off
+/// RAM) holds: the touch flags, the last sweep, the contacts and struck object, the terrain, and the
+/// resolution's list and speeds. Everything else, the tuning, the resolution's fields and the rays,
+/// is the disc's.
+fn on_the_discs(d: &flight::MxvatvRecord, s: &flight::MxvatvRecord) -> flight::MxvatvRecord {
+    let mut r = d.clone();
+    let (o, i) = (&mut r.record, &s.record);
+    (o.touching, o.touching_other, o.on_ground, o.on_object) = (i.touching, i.touching_other, i.on_ground, i.on_object);
+    (o.swept_from, o.swept_to, o.contacts, o.struck, o.terrain) = (i.swept_from, i.swept_to, i.contacts.clone(), i.struck, i.terrain);
+    r.held.entries = s.held.entries.clone();
+    let (o, i) = (&mut r.held.record.collider, &s.held.record.collider);
+    (o.cofg_world, o.normal_speed, o.relative) = (i.cofg_world, i.normal_speed, i.relative);
+    r
+}
+
+/// **A plane on the disc's record strikes the ground with its hull** (MD110a): each flight's stretches
+/// flown as [`the_port_flies_biplane3`] does, on the record built off the disc ([`record_off_the_disc`],
+/// [`flight::MxvatvRecord::read`]) in place of the image's, as far as the image's record flies them
+/// ([`BIPLANE_AGREES_THROUGH`], [`BIPLANE3_AGREES_THROUGH`]): biplane3's from 2000 files the game's
+/// three heightfield contacts at 2060 and resolves them word for word. The record's inverse inertia
+/// (a few parts in 10⁵ off the image's: the game took the model's box where the plane was loaded) is
+/// read only where two records meet, which no terrain strike is.
+fn flies_on_the_discs_record(f: &Flight, skin: &str, col: &str, pinned: &[usize]) {
+    let Some(disc) = record_off_the_disc(skin, col) else { return };
+    let Some(stretches) = port_flies(f, Some(&disc)) else { return };
+    ratchet(f, &stretches, pinned);
+}
+
+#[test]
+fn biplane3_flies_on_the_discs_record() {
+    flies_on_the_discs_record(&BIPLANE3, "biplane3", "Biplane3M.col", BIPLANE3_AGREES_THROUGH);
+}
+
+#[test]
+fn biplane_flies_on_the_discs_record() {
+    flies_on_the_discs_record(&BIPLANE, "biplane", "BiplaneM.col", BIPLANE_AGREES_THROUGH);
+}
