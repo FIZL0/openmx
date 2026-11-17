@@ -1315,7 +1315,13 @@ fn depth_state(write: bool, compare: wgpu::CompareFunction) -> wgpu::DepthStenci
 }
 
 /// A pass over `color` and `depth`, both cleared: black, and far.
-fn begin_pass<'e>(encoder: &'e mut wgpu::CommandEncoder, color: &wgpu::TextureView, depth: &wgpu::TextureView, label: &str) -> wgpu::RenderPass<'e> {
+fn begin_pass<'e>(
+    encoder: &'e mut wgpu::CommandEncoder,
+    color: &wgpu::TextureView,
+    depth: &wgpu::TextureView,
+    label: &str,
+    timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
+) -> wgpu::RenderPass<'e> {
     encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some(label),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1335,14 +1341,19 @@ fn begin_pass<'e>(encoder: &'e mut wgpu::CommandEncoder, color: &wgpu::TextureVi
             }),
             stencil_ops: None,
         }),
-        timestamp_writes: None,
+        timestamp_writes: timestamps,
         occlusion_query_set: None,
         multiview_mask: None,
     })
 }
 
 /// A pass over `color` as it is and `depth` cleared ([`Renderer::render_over`]).
-fn begin_pass_over<'e>(encoder: &'e mut wgpu::CommandEncoder, color: &wgpu::TextureView, depth: &wgpu::TextureView) -> wgpu::RenderPass<'e> {
+fn begin_pass_over<'e>(
+    encoder: &'e mut wgpu::CommandEncoder,
+    color: &wgpu::TextureView,
+    depth: &wgpu::TextureView,
+    timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
+) -> wgpu::RenderPass<'e> {
     encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("over"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1362,7 +1373,7 @@ fn begin_pass_over<'e>(encoder: &'e mut wgpu::CommandEncoder, color: &wgpu::Text
             }),
             stencil_ops: None,
         }),
-        timestamp_writes: None,
+        timestamp_writes: timestamps,
         occlusion_query_set: None,
         multiview_mask: None,
     })
@@ -4617,10 +4628,10 @@ impl Renderer {
         let picture = picture_rect(target, bleed);
         let [px, py, pw, ph] = picture;
         let drawn_at = if pw > 0 && ph > 0 && !over { scale } else { 1.0 };
-        if self.timer.is_some() {
-            self.stage(&mut encoder, &mut scope, "the frame's first timestamp");
-        }
-        let timed = self.timer.as_mut().and_then(|t| t.begin(&mut encoder, drawn_at));
+        let timed = self.timer.as_mut().and_then(|t| t.begin(drawn_at));
+        // The frame's timestamps go on its first and last passes (P346: Metal writes none from an
+        // empty pass, so the iPhone timed no frame).
+        let timestamps = timer::writes;
         if scale < 1.0 && pw > 0 && ph > 0 && !over {
             // The views into the low texture, each view's edges scaled and rounded so they still meet;
             // then the low texture stretched over the picture (the frame and its bleed), and the
@@ -4629,7 +4640,7 @@ impl Renderer {
             self.stage(&mut encoder, &mut scope, "the views");
             let (low, low_depth) = self.upscale.low(&self.device, self.format, &self.clamp_sampler, size);
             {
-                let mut pass = begin_pass(&mut encoder, &low, &low_depth, "views");
+                let mut pass = begin_pass(&mut encoder, &low, &low_depth, "views", timestamps(&self.timer, timed, true, false));
                 let (kx, ky) = (size.0 as f32 / pw as f32, size.1 as f32 / ph as f32);
                 let rect = |r: [u32; 4]| {
                     let [x, y, w, h] = view_rect(target, bleed, r);
@@ -4642,7 +4653,7 @@ impl Renderer {
             }
             self.stage(&mut encoder, &mut scope, "the picture and overlay");
             let depth = self.depth_for(target.size);
-            let mut pass = begin_pass(&mut encoder, target.view, &depth, "frame");
+            let mut pass = begin_pass(&mut encoder, target.view, &depth, "frame", timestamps(&self.timer, timed, false, true));
             pass.set_scissor_rect(px, py, pw, ph);
             self.upscale.draw(&self.queue, &mut pass, picture);
             drawn.draws += 1;
@@ -4651,15 +4662,15 @@ impl Renderer {
             self.stage(&mut encoder, &mut scope, "the views and overlay");
             let depth = self.depth_for(target.size);
             let mut pass = match over {
-                true => begin_pass_over(&mut encoder, target.view, &depth),
-                false => begin_pass(&mut encoder, target.view, &depth, "frame"),
+                true => begin_pass_over(&mut encoder, target.view, &depth, timestamps(&self.timer, timed, true, true)),
+                false => begin_pass(&mut encoder, target.view, &depth, "frame", timestamps(&self.timer, timed, true, true)),
             };
             let rect = |r: [u32; 4]| view_rect(target, bleed, r);
             self.draw_views(&mut pass, views, &passes, &ground_counts, rect, target.size, &mut drawn);
             self.draw_overlay(&mut pass, target, frame, sprites, &mut drawn);
         }
         if timed.is_some() {
-            self.stage(&mut encoder, &mut scope, "the frame's last timestamp");
+            self.stage(&mut encoder, &mut scope, "the frame's timestamps read");
         }
         if let (Some(t), Some(k)) = (self.timer.as_mut(), timed) {
             t.end(&mut encoder, k);
@@ -5035,7 +5046,7 @@ impl Renderer {
         let depth = self.depth_for(target.size);
         let mut encoder = self.device.create_command_encoder(&Default::default());
         {
-            let mut pass = begin_pass(&mut encoder, target.view, &depth, "sprites");
+            let mut pass = begin_pass(&mut encoder, target.view, &depth, "sprites", None);
             let [x, y, w, h] = picture_rect(target, self.bleed());
             pass.set_scissor_rect(x, y, w, h);
             if any {
