@@ -186,7 +186,9 @@ PICK = {
     'c/tests/alone.rs': '#[test]\nfn alone() { assert_eq!(c::one(), 1); }\n',
     'research/oracle.txt': '# names\nalpha boot 0x00100000 one\nbeta boot 0x00100010 two\n',
     'research/c9/rows.csv': 'a,b\n',
-    'gate.toml': '[select]\noracle = "research/oracle.txt"\ndata = ["research"]\nignore = ["*.md"]\n',
+    'gate.toml': '[select]\noracle = "research/oracle.txt"\ndata = ["research"]\nignore = ["*.md"]\n'
+                 '[select.reach]\n"kit/*" = [\'"alpha"\']\n',
+    'kit/tool.py': 'x = 1\n',
 }
 
 
@@ -233,6 +235,8 @@ def test_select() -> None:
         check(got == {'-p b --test names'}, f"an oracle line: the binary naming it ({sorted(got)})")
         got = ran({'research/c9/rows.csv': 'a,b\n1,2\n'})
         check(got == set(), f'a research file no test names reaches nothing ({sorted(got)})')
+        got = ran({'kit/tool.py': 'x = 2\n'})
+        check(got == {'-p b --test names'}, f'a reach glob: the binaries holding its words ({sorted(got)})')
         got = ran({'notes.md': 'hi\n'})
         check(got == set(), f'an ignored file reaches nothing ({sorted(got)})')
         got = ran({'Cargo.toml': PICK['Cargo.toml'] + '\n'})
