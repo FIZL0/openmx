@@ -1,6 +1,8 @@
 # MD82b: MX vs. ATV Unleashed's (SLUS-21104) follow camera every tick, behind a machine driven by
 # MD39a's drive tape. CAM is replaced by the camera object (vtable 0x003cc6f0 at +4); play.sh does that
 # and adds the start trigger. Field map: research/oracle.txt # MD82b.
+# R28 plays it behind the buggy with the right stick swinging the camera (research/r28/swing.pad): cam_user
+# is what the stick leaves in the player offsets, which tests/mxvatv_camera.rs hands the camera each row.
 [watch]
 name        = "md82b-camera"
 description = "MX vs. ATV (SLUS-21104) follow camera: its target block, its angles, lags and viewport eye per tick"
