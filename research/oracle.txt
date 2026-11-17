@@ -13031,3 +13031,20 @@ atv_sound_queue_flush       atv 0x001840c0 = (driver, 0) the SIF send (handed ou
 # collision_search_gather(*(rider+0x7bc), *(rider+0x7c4), 3) on recording2, 4000 lists bit-exact, sleeping
 # f.col listed among scene meshes and plants wherever the cells reach). The wheel probe +0x7c8 searches that
 # list: collide_against_search(+0x7c8, *(rider+0x7bc)) once a tick before the substeps.
+
+# --- F68: the wheel probe's record through the bike's list, props awake and asleep (src flight_search.rs
+#   Kept::place_knocks; tests/prop_knock.rs the_wheel_probe_meets_props_and_scenery_through_the_bikes_list;
+#   journal 2026-11-17-f68-wheel-record-through-the-list)
+# f68 states (free09, research/s195 aim.py `8 2 40 25 9` off first_recording, knock.py `f68 9 2 --frames 60
+#   --late 15`): ball 2 woken at 2920, f68-2919..2922 and f68-2935; at 2935 balls 1 and 2 awake.
+# An awake prop's mesh collidable stays in the static tree: balls 1 and 2's f.col space nodes (+8) are
+#   table+0x34 (the tree), keys (+0xc) 0xba082016 / 0xba082036 where they stand now (asleep ball 0 0x400c0016);
+#   the moving list (table+0x38, 110 entries) holds none of them. The "moving structure" above (S240) is wrong
+#   for the props: +0x116 0x14 is only the awake flag. So the gather lists an awake prop only where the
+#   query's cells reach its key, like a sleeping one.
+# Proved (tests/prop_knock.rs): 5056 placings of the bike's node on every free09 prop (half rolled 20-29
+#   degrees, one segment on a crate's top, the other on the scene mesh under it): the bike's list (entries,
+#   distances), its centre and bound, the wheel record (struck, point, normal, fraction) and the props struck,
+#   woken in order (bodies enabled, collections active, the node's listener list) bit for bit; 124 records
+#   hold scenery and a struck prop, 71 wake more than one. Trigger boxes, bikes and the shack's hierarchy are
+#   taken off the original's list first (the port's world has none of them).
