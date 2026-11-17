@@ -4177,6 +4177,9 @@ impl<R: Moto + Default> Ride<R> {
             if let Some(h) = self.bike.contacts.take() {
                 r.held = h;
             }
+            // The bikes it met are this frame's (MD173): off the wire, and out of the hash with them,
+            // so a seat's state hashes alike on a machine that decoded it.
+            r.held.bikes.clear();
         }
         if self.tailed.as_ref().is_some_and(|t| t.untamed.is_some()) {
             self.tail_on_untamed(dt, world);
