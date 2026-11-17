@@ -6,8 +6,9 @@
 //! SLUS-21701 off a RAM image of a Free Ride in it (`context/untamed/ram/nat_or.bin`, the 32 MB
 //! eeMemory of an Untamed save state; the GAME_REL.BIN overlay is in it). Its wreck test runs in the
 //! interpreter with its own vtable, on the bike laid out at Untamed's offsets, and the reasons it
-//! enters and the throw it writes must be [`step::wreck_test`]'s then [`step::hit_wreck`]'s on the
-//! same state with Untamed's limits.
+//! enters and the throw it writes must be [`step::wreck_entries`]' on the same state with Untamed's
+//! limits: its entry leaves the collision record touched, as SLUS-21104's does, so the hits run after a
+//! clause's entry too (R34).
 //!
 //! The one change SLUS-21701 made to the clauses is the trick bound: the rider's stunt id is a trick at
 //! most 48 (SLUS-21104: 40), Untamed having eight more stunts. The port reads that as
@@ -28,7 +29,6 @@ const OBJ: u32 = 0x01c0_0000;
 const BODY: u32 = 0x01c0_2000;
 const DRIVER: u32 = 0x01c0_6000;
 const RECORD: u32 = 0x01c0_6100;
-const WRECK_RECORD: u32 = 0x01c0_6400;
 const CONTACTS: u32 = 0x01c0_6600;
 const STRUCK: u32 = 0x01c0_6c00;
 const OTHERS: u32 = 0x01c0_7000;
@@ -422,11 +422,13 @@ fn wreck_path(s: &WreckState, landed: Option<air::Wreck>, hit: Option<air::Wreck
     }
 }
 
-/// SLUS-21701's wreck test on a driven bike not yet down, the port's [`step::wreck_test`] then
-/// [`step::hit_wreck`] with the trick bound at 48: 10,000 states through the original with its own
-/// vtable, the wreck entry hooked to log the reason and do the record swap its collision call does
-/// (the riding record out, an empty one in). The reasons entered, in order, and the throw at `+0x1250`
-/// must be the port's. The original may write only the bike, its harness pieces and its stack.
+/// SLUS-21701's wreck test on a driven bike not yet down, the port's [`step::wreck_entries`] (its
+/// [`step::wreck_test`] then [`step::hit_wreck`] whatever the first answered) with the trick bound at
+/// 48: 10,000 states through the original with its own vtable, the wreck entry hooked to log the
+/// reason and set the reason words. The hook leaves the record where it is, as the original's entry
+/// does ([`an_entry_leaves_the_record_touched`], R34), so a clause and a hit both enter. The reasons
+/// entered, in order, and the throw at `+0x1250` must be the port's. The original may write only the
+/// bike, its harness pieces and its stack.
 #[test]
 fn untamed_wreck_test_is_the_originals() {
     let Some(mut ee) = image() else { return };
@@ -440,7 +442,6 @@ fn untamed_wreck_test_is_the_originals() {
             ee.set_u32(OBJ + 0xc70, reason);
             ee.set_u32(OBJ + 0xc74, 0);
             ee.set_u32(OBJ + 0xc7c, 0);
-            ee.set_u32(OBJ + 0xf8, WRECK_RECORD);
         }));
     }
     let mut g = Gen(0x0d81_a001);
@@ -464,18 +465,18 @@ fn untamed_wreck_test_is_the_originals() {
         let impact: Vec<u32> = (0..4).map(|i| ee.u32_at(OBJ + 0x1250 + 4 * i)).collect();
 
         let mut air = s.air.clone();
-        let landed = step::wreck_test(&s.p, &mut air, &s.chassis, &s.step, &s.loads, &s.w, true);
-        let hit = if landed.is_some() {
-            None
-        } else {
-            step::hit_wreck(&s.p, &mut air, s.step.touching, s.small, s.height, &s.loads, &s.contacts)
-        };
+        let (landed, hit) =
+            step::wreck_entries(&s.p, &mut air, &s.chassis, &s.step, &s.loads, &s.w, true, s.small, s.height, &s.contacts);
         let path = wreck_path(&s, landed, hit);
-        let want: Vec<u32> = landed.or(hit).map(|w| w as u32).into_iter().collect();
+        let want: Vec<u32> = landed.into_iter().chain(hit).map(|w| w as u32).collect();
         assert_eq!(got, want, "state {k} ({path}): the reasons\n{s:#?}");
         let port: Vec<u32> = air.wreck_impact.0.iter().map(|v| v.to_bits()).collect();
         assert_eq!(impact, port, "state {k} ({path}): the throw\n{s:#?}");
         *tally.entry(path).or_insert(0u32) += 1;
+        if want.len() == 2 {
+            *tally.entry(if hit == Some(air::Wreck::Joust) { "a clause, then a joust" } else { "a clause, then scenery" })
+                .or_insert(0) += 1;
+        }
     }
     eprintln!("{tally:?}");
     enough(
@@ -489,6 +490,7 @@ fn untamed_wreck_test_is_the_originals() {
     );
     // The ids SLUS-21701 made tricks: a wreck mid trick here, the bike let go on SLUS-21104.
     enough(&tally, &["mid trick 41-48"], 20);
+    enough(&tally, &["a clause, then a joust", "a clause, then scenery"], 10);
 }
 
 /// The same states with SLUS-21104's bound (a trick at most 40): the original must answer otherwise
@@ -502,7 +504,6 @@ fn untamed_tricks_41_to_48_are_tricks() {
         ee.hooks.insert(WRECK_ENTRY, Box::new(move |ee| {
             log.borrow_mut().push(ee.r(5) as u32);
             ee.set_u32(OBJ + 0xc70, ee.r(5) as u32);
-            ee.set_u32(OBJ + 0xf8, WRECK_RECORD);
         }));
     }
     let mut g = Gen(0x0d81_a002);
@@ -518,16 +519,50 @@ fn untamed_tricks_41_to_48_are_tricks() {
         ee.call(WRECK_TEST, &[u64::from(OBJ)], &[0.0], 20_000);
         s.step.stunt = false;
         let mut air = s.air.clone();
-        let landed = step::wreck_test(&s.p, &mut air, &s.chassis, &s.step, &s.loads, &s.w, true);
-        let hit = if landed.is_some() {
-            None
-        } else {
-            step::hit_wreck(&s.p, &mut air, s.step.touching, s.small, s.height, &s.loads, &s.contacts)
-        };
-        let old: Vec<u32> = landed.or(hit).map(|w| w as u32).into_iter().collect();
+        let (landed, hit) =
+            step::wreck_entries(&s.p, &mut air, &s.chassis, &s.step, &s.loads, &s.w, true, s.small, s.height, &s.contacts);
+        let old: Vec<u32> = landed.into_iter().chain(hit).map(|w| w as u32).collect();
         if *log.borrow() != old {
             differs += 1;
         }
     }
     assert!(differs >= 20, "only {differs} state(s) told SLUS-21701's bound from SLUS-21104's");
+}
+
+/// R34: SLUS-21701's whole wreck entry, run unhooked on the Free Ride image's own bike (its record
+/// given a touch and a contact), leaves the record where it was, touching, its contact count kept: it
+/// writes the record's part word (`+0x200`, the bike's new part at `+0xfc`) and nothing else on it.
+/// SLUS-21104's does the same (B35, `tests/mxvatv_step.rs`), so Untamed's hits also answer after a
+/// clause's entry.
+#[test]
+fn an_entry_leaves_the_record_touched() {
+    const BIKE: u32 = 0x01b1_6440;
+    let Some(mut ee) = image() else { return };
+    // Every `addiu $3, $zero, n; syscall; jr $ra`: the answer is a0, the thread id (0x2f) 1.
+    for a in (0x0008_0000..0x0034_0000u32).step_by(4) {
+        if ee.u32_at(a) >> 16 == 0x2403 && ee.u32_at(a + 4) == 0x0000_000c && ee.u32_at(a + 8) == 0x03e0_0008 {
+            let n = ee.u32_at(a) & 0xffff;
+            ee.hooks.insert(a, Box::new(move |ee: &mut Ee| {
+                let v = if n == 0x2f { 1 } else { ee.r(4) };
+                ee.set(2, v);
+            }));
+        }
+    }
+    assert_eq!(ee.u32_at(BIKE + 4), BIKE_VTABLE, "the image's bike");
+    assert_eq!(ee.u32_at(BIKE + 0xc70), 0, "the image's bike is up");
+    let rec = ee.u32_at(BIKE + 0xf8);
+    let part = ee.u32_at(BIKE + 0xfc);
+    ee.set_u32(rec + 0x34, 1);
+    ee.set_u32(rec + 0xf0, 1);
+    let before: Vec<u32> = (0..0x300).step_by(4).map(|o| ee.u32_at(rec + o)).collect();
+    ee.call(WRECK_ENTRY, &[u64::from(BIKE), 4], &[], 50_000_000);
+    assert_eq!(ee.u32_at(BIKE + 0xc70), 4, "the entry ran");
+    assert_eq!(ee.u32_at(BIKE + 0x708), 1, "the entry ran to its end (the wreck count)");
+    assert_eq!(ee.u32_at(BIKE + 0xf8), rec, "the record stays");
+    assert_ne!(ee.u32_at(BIKE + 0xfc), part, "the part swapped");
+    for (i, w) in before.iter().enumerate() {
+        let o = 4 * i as u32;
+        let want = if o == 0x200 { ee.u32_at(BIKE + 0xfc) } else { *w };
+        assert_eq!(ee.u32_at(rec + o), want, "the record's +{o:#x}");
+    }
 }

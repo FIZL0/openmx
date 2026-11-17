@@ -13447,3 +13447,10 @@ race_finish_listener        boot 0x002fc410 slot +0x14 (Finished; thunk 0x003004
 #   no collidable unhooks (only the node's, 0x00189040(+0x114) with +0x75 bit 1); body vt +0x14 (0x003b5f60);
 #   orient vt +0xf0 on +0x80/+0x90/+0xa0; rehang 0x00192cb0(+0x114, +0xe0, 2, 1); +0x74 bit 0 -> +0x100, then
 #   +0xfc and +0x104: (p+0x54)->vt +0x24 with p+0x50, attach 0x001138a0(p, +0xe4, +0xf0, 1, 0, 0).
+# R34 — SLUS-21701's wreck entry keeps the record too (rider.rs's hits-after-a-clause on Handling::Untamed;
+# tests/untamed_step.rs). Comment rows only.
+#   The entry 0x004fa390 run whole and unhooked on the Untamed image's first bike 0x01b16440 (reason 4;
+#   syscall stubs 0x80000..0x340000 answered) keeps +0xf8, the record's +0x34 touched and +0xf0 count;
+#   it writes only the record's +0x200 (= the bike's new part at +0xfc). MD81a's hook had swapped +0xf8
+#   to an empty record; with no swap, 414 of 10 000 states enter twice (231 clause then joust, 183
+#   clause then scenery), reasons and +0x1250 matching. With the swap put back, the oracle fails at state 8.
