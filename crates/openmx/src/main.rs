@@ -3970,10 +3970,10 @@ async fn front_end(args: Args) -> Result<(), String> {
     };
     let (width, height) = frame_size(shell.window.as_ref().expect("the front end has a window"));
     let mut frame = Frame::new(width, height, [0, 0, 0]);
-    // A pause asked for by `--screen` is over a ride, so it starts one on the last track; so is its
-    // Tricks page (P259).
+    // A pause asked for by `--screen` is over a ride, so it starts one on the last track; so are its
+    // Tricks page (P259) and its Garage (P341).
     let mut act = match shell.front.menu.screen() {
-        Some(menu::Screen::Pause | menu::Screen::Tricks) => Act::Ride(shell.front.menu.settings.track.clone()),
+        Some(menu::Screen::Pause | menu::Screen::Tricks | menu::Screen::PauseGarage) => Act::Ride(shell.front.menu.settings.track.clone()),
         _ => Act::Stay,
     };
     let mut shot = args.shot.clone();
@@ -4053,7 +4053,7 @@ async fn front_end(args: Args) -> Result<(), String> {
                 }
                 a.wiring = shell.front.wiring();
                 // The shot is the menu's unless it is of the pause, which is drawn over the ride.
-                a.shot = shot.take_if(|_| matches!(shell.front.menu.screen(), Some(menu::Screen::Pause | menu::Screen::Tricks)));
+                a.shot = shot.take_if(|_| matches!(shell.front.menu.screen(), Some(menu::Screen::Pause | menu::Screen::Tricks | menu::Screen::PauseGarage)));
                 a.seconds = args.seconds.map(|s| (s - started.elapsed().as_secs_f32()).max(0.0));
                 // A local game (P43): one player a seat its join screen has in play, each on that seat's
                 // controller, drawn in the split layout it picked.
@@ -6717,6 +6717,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     let mut trick_stage: Option<Option<trick_view::TrickView>> = None;
     // Each seat's pad as the pause last read it, whose right stick turns the page's camera (P319).
     let mut trick_sticks: Vec<Report> = Vec::new();
+    // The pause Garage's lit flier, turning in its picture (P326), and since when it has turned.
+    let (mut pause_flier, mut pause_flier_since) = (garage_view::PauseFlier::default(), None::<Instant>);
     // What a picture drawn while a tick runs on the sim thread asks of the place (N23a): the same
     // ground, and none of the props, which the tick has. A tiled world's ticks stay on the loop.
     let mut drawn_land = match (&sim, keep_terrain.get()) {
@@ -8276,6 +8278,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             front.menu.heli[i] = seat.garage.heli.is_some();
             front.menu.atv[i] = seat.garage.atv.is_some();
             front.menu.mxvatv_car[i] = seat.garage.mxvatv_car.is_some();
+        }
+        // `--screen pause-garage --menu-row Biplane` (P326's shot): the tiles are the ride's, known now.
+        if let (Some(menu::Screen::PauseGarage), Some(label)) = (front.menu.screen(), &args.menu_row) {
+            front.menu.point_at_row(label);
         }
     }
     let mut start_readers: Vec<Reader> = (1..world.seats.len()).map(|_| Reader::at(RIDE_HZ)).collect();
@@ -11530,6 +11536,18 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             }
             None => Vec::new(),
         };
+        // The pause Garage's flier (P326), in the ride's assets for the GPU; a shot's stands still.
+        let flier_shown = front.as_deref_mut().and_then(|f| garage_view::pause_flier(&mut f.menu, &rects, world.seats.len()));
+        pause_flier.show(flier_shown.as_ref().map(|(f, _)| f), shot.is_some());
+        let since = *pause_flier_since.get_or_insert_with(Instant::now);
+        pause_flier_since = flier_shown.as_ref().filter(|_| shot.is_none()).map(|_| since);
+        let flier_turn = garage_view::Stage::turn((since.elapsed().as_secs_f32() * 60.0) as u32);
+        let flier_pose = if gpu_on {
+            pause_flier.take_into(&mut assets, renderer_of(&mut offscreen, window));
+            flier_shown.as_ref().and_then(|(_, rect)| pause_flier.pose(*rect, flier_turn))
+        } else {
+            None
+        };
         let mut skinned: Vec<Option<usize>> = vec![None; rigs.len()];
         let mut drawn = 0;
         // Each flying player's pilot (V39), posed once for every view and both renderers.
@@ -11940,6 +11958,9 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 if let (Some(Some(stage)), Some(rig)) = (&trick_stage, rigs.first()) {
                     let models = trick_view::Models { bike: &rig.bike_model, parts: &rig.parts, body: rig.body_model.as_deref() };
                     stage.draw_gpu_each(r, t, &assets, &models, &trick_posed);
+                }
+                if let Some(pose) = &flier_pose {
+                    garage_view::PauseFlier::draw_gpu(r, t, &assets, pose);
                 }
             };
             let mut waited = Duration::ZERO;
@@ -12447,6 +12468,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             for (rect, posed) in &trick_posed {
                 stage.draw_soft(&mut frame, &assets, *rect, &models, posed);
             }
+        }
+        // And the pause Garage's flier (P326).
+        if let (false, Some((_, rect))) = (gpu_on, &flier_shown) {
+            pause_flier.draw_soft(&mut frame, *rect, flier_turn);
         }
         stages.mark(stages::Stage::Hud);
         if let Some(window) = window.as_mut().filter(|_| !gpu_on) {

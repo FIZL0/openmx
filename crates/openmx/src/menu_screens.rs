@@ -176,6 +176,26 @@ pub(super) fn garage_stage(size: (usize, usize)) -> [f32; 4] {
     [o[0] + x * em, o[1] + y * em, w * em, h * em]
 }
 
+/// The pause Garage's picture panel (P341): right of its tiles, x, y, width, height.
+fn pause_garage_picture() -> Box4 {
+    let (_, _, top) = page_column(false);
+    [45.0, top, 31.0, 13.0]
+}
+
+/// What of [`pause_garage_picture`] a picture fills, inside the panel's rim.
+fn pause_garage_inside() -> Box4 {
+    let pic = pause_garage_picture();
+    [pic[0] + 0.8, pic[1] + 0.6, pic[2] - 1.6, pic[3] - 1.2]
+}
+
+/// [`pause_garage_inside`] in a `size` frame's pixels: where the shell turns a flier tile's skin
+/// (P326).
+pub(super) fn pause_garage_stage(size: (usize, usize)) -> [f32; 4] {
+    let (em, o) = fit(size);
+    let [x, y, w, h] = pause_garage_inside();
+    [o[0] + x * em, o[1] + y * em, w * em, h * em]
+}
+
 /// [`TRICK_STAGE`] in a `size` frame's pixels: x, y, width, height.
 pub(super) fn trick_stage(size: (usize, usize)) -> [f32; 4] {
     let (em, o) = fit(size);
@@ -1816,16 +1836,18 @@ impl Pen<'_> {
         self.title(&title);
         self.hints(&[(Btn::Circle, "Back"), (Btn::L1R1, "Livery"), (Btn::Cross, "Ride")]);
         let Some(r) = rows.get(at) else { return };
-        let (sx, sw) = (45.0, 31.0);
-        let pic = [sx, top, sw, 13.0];
+        let pic = pause_garage_picture();
+        let (sx, sw) = (pic[0], pic[2]);
         self.round([pic[0] + 0.4, pic[1] + 0.45, pic[2], pic[3]], 1.6, SHADOW, SHADOW);
         self.round(pic, 1.6, [0xff, 0xfd, 0xf8, 255], [0xe7, 0xe0, 0xd4, 255]);
         let tile = match r.key {
             Key::Tile(i) => tiles.get(i),
             _ => None,
         };
-        if let Some((image, tex)) = tile.and_then(|t| t.picture.as_deref()).and_then(|k| self.icon(k)) {
-            self.contain(image, tex, [pic[0] + 0.8, pic[1] + 0.6, pic[2] - 1.6, pic[3] - 1.2], [255, 255, 255, 255]);
+        // A flier's skin the shell turns there instead (P326).
+        let turned = menu.pause_flier().is_some();
+        if let Some((image, tex)) = tile.filter(|_| !turned).and_then(|t| t.picture.as_deref()).and_then(|k| self.icon(k)) {
+            self.contain(image, tex, pause_garage_inside(), [255, 255, 255, 255]);
         }
         self.side(menu, Screen::PauseGarage, &rows, r, sx, top + pic[3] + 1.2, sw);
     }
