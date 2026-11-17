@@ -1819,6 +1819,9 @@ pub struct MxvatvPlane {
     /// `Left1stPerShoulderOffset`, `Right1stPerShoulderOffset`.
     pub left_shoulder_offset: Vf,
     pub right_shoulder_offset: Vf,
+    /// Read as model one (the keys' `ModelOne`), or model two: which model's box the body's inertia
+    /// is worked out from ([`crate::flight::Flight::new_mxvatv`]).
+    pub model_one: bool,
 }
 
 /// Whether SLUS-21104's plane is model one, from its skin's name form: the spawn record's form word,
@@ -1889,6 +1892,7 @@ impl Plane {
             fp_camera_offset: s.vector(&key("FPCameraOffset"), UNIT_W),
             left_shoulder_offset: s.vector("Left1stPerShoulderOffset", UNIT_W),
             right_shoulder_offset: s.vector("Right1stPerShoulderOffset", UNIT_W),
+            model_one,
         }
     }
 }
