@@ -69,3 +69,9 @@ See the list at the end of `1-blades-on-the-hull-FINAL.md`. In short:
   contacts are not ported;
 - the 34 part-way rows' accumulators are not compared;
 - the reading of the 25 in-post rows is inferred.
+
+## R25 — the heli's rays on a blade, captured
+
+See `research/journal/2026-11-17-r25-kiowa-blade-entries/`. R25's fast6 wreck (a higher climb than
+fast1) has the helicopter's ray meet blade 3 on 1484. The port matches it bit for bit: the replay, and
+all five records on every row. No blade-on-blade entry showed in seven new wrecks.
