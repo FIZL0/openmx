@@ -96,6 +96,28 @@ pub fn text(bytes: &[u8]) -> String {
     bytes.iter().map(|&b| b as char).collect()
 }
 
+/// An INI file's bytes as text: MX vs. ATV Untamed's compiled INI (a BPB, `game_sim::bpb`:
+/// `ATV_R_250_KTM.sub.bpb`, `Striker_Plastics.psm.bpb`, MD144b) written back as the text of its
+/// sections and pairs, each section in file order (an empty one too); anything else as [`text`].
+/// A BPB the reader refuses comes out empty, as a file with nothing in it reads.
+pub fn text_of(bytes: &[u8]) -> String {
+    if !game_sim::bpb::is_bpb(bytes) {
+        return text(bytes);
+    }
+    let Ok(ini) = game_sim::bpb::parse(bytes) else {
+        return String::new();
+    };
+    let mut out = String::new();
+    let mut pairs = ini.entries().peekable();
+    for name in ini.names() {
+        out += &format!("[{name}]\n");
+        while let Some((_, key, value)) = pairs.next_if(|(s, _, _)| *s == name.as_str()) {
+            out += &format!("{key}={value}\n");
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,5 +146,76 @@ mod tests {
             Some(vec![627.03, 94.28, 651.93])
         );
         assert_eq!(s[2].get("missing"), None);
+    }
+
+    /// A BPB of `(name, index, keys)` sections as Untamed's are laid out (`game_sim::bpb`): a key's
+    /// value a long string (type 1), a short one (2), an int (4) or a float (8).
+    fn bpb(sections: &[(&str, Option<u16>, &[(&str, u16, &str)])]) -> Vec<u8> {
+        let intern = |table: &mut Vec<u8>, s: &str| {
+            let at = table.len() as u32;
+            table.extend_from_slice(s.as_bytes());
+            table.push(0);
+            at
+        };
+        let (mut names, mut values, mut secs, mut keys) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let mut n_keys = 0u32;
+        for (name, index, pairs) in sections {
+            secs.extend_from_slice(&0u32.to_le_bytes());
+            secs.extend_from_slice(&intern(&mut names, name).to_le_bytes());
+            secs.extend_from_slice(&index.unwrap_or(0xffff).to_le_bytes());
+            secs.extend_from_slice(&(pairs.len() as u16).to_le_bytes());
+            secs.extend_from_slice(&n_keys.to_le_bytes());
+            for &(key, kind, value) in pairs.iter() {
+                let mut r = [0u8; 16];
+                r[4..8].copy_from_slice(&intern(&mut names, key).to_le_bytes());
+                r[8..10].copy_from_slice(&kind.to_le_bytes());
+                match kind {
+                    1 => r[12..16].copy_from_slice(&intern(&mut values, value).to_le_bytes()),
+                    2 => r[10..10 + value.len()].copy_from_slice(value.as_bytes()),
+                    4 => r[12..16].copy_from_slice(&value.parse::<i32>().unwrap().to_le_bytes()),
+                    _ => r[12..16].copy_from_slice(&value.parse::<f32>().unwrap().to_le_bytes()),
+                }
+                keys.extend_from_slice(&r);
+                n_keys += 1;
+            }
+        }
+        let mut out = b"BPB\0".to_vec();
+        let key_at = 0x20 + secs.len();
+        let names_at = key_at + keys.len();
+        let values_at = names_at + names.len();
+        for w in [0x20, key_at] {
+            out.extend_from_slice(&(w as u32).to_le_bytes());
+        }
+        out.extend_from_slice(&(sections.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(n_keys as u16).to_le_bytes());
+        for w in [names_at, names.len(), values_at, values.len()] {
+            out.extend_from_slice(&(w as u32).to_le_bytes());
+        }
+        for part in [secs, keys, names, values] {
+            out.extend_from_slice(&part);
+        }
+        out
+    }
+
+    /// MD144b: a compiled `.sub` reads as its text would: sections in order, an empty one kept, an
+    /// indexed one titled `SubObject1`, each value type as text, the text readers' pairs.
+    #[test]
+    fn a_bpb_reads_as_the_text_it_was_compiled_from() {
+        let b = bpb(&[
+            ("Objects", None, &[("MCF", 2, "a.mcf"), ("NumberOfSubObjects", 4, "1")]),
+            ("Empty", None, &[]),
+            ("Material Changes", None, &[("ATV_R_450f_KTM_Plastics", 1, "Striker_Plastics")]),
+            ("SubObject", Some(1), &[("SLT", 1, "atv_r_250_plastics"), ("Scale", 8, "0.5")]),
+        ]);
+        let s = parse(&text_of(&b));
+        let titled: Vec<&str> = s.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(titled, ["", "Objects", "Empty", "Material Changes", "SubObject1"]);
+        assert_eq!((s[1].get("MCF"), s[1].number("NumberOfSubObjects")), (Some("a.mcf"), Some(1.0)));
+        assert!(s[2].keys.is_empty());
+        assert_eq!(s[3].keys, [("ATV_R_450f_KTM_Plastics".to_string(), "Striker_Plastics".to_string())]);
+        assert_eq!((s[4].get("SLT"), s[4].number("Scale")), (Some("atv_r_250_plastics"), Some(0.5)));
+        // Text stays text, and a BPB the reader refuses reads as nothing.
+        assert_eq!(text_of(b"[A]\nB=1\n"), "[A]\nB=1\n");
+        assert_eq!(text_of(&b[..0x10]), "");
     }
 }

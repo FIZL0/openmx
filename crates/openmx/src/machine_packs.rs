@@ -292,8 +292,15 @@ fn member(name: &str) -> String {
 }
 
 impl Pack {
+    /// An INI of the pack's as text; a BPB (Untamed's compiled INI: `ATV_R_250_KTM.sub.bpb`, MD144b)
+    /// written back as the text its sections and pairs make, so the text readers take either.
     fn text(&self, name: &str) -> Result<String, String> {
-        Ok(ini::text(&self.files.read(&member(name))?))
+        let bytes = self.files.read(&member(name))?;
+        if !game_sim::bpb::is_bpb(&bytes) {
+            return Ok(ini::text(&bytes));
+        }
+        game_sim::bpb::parse(&bytes).map_err(|e| format!("{name}: {e}"))?;
+        Ok(ini::text_of(&bytes))
     }
 
     /// A model by its name (`ATVS_R_Chasis`, `yfz450_plastic`): `<name>.psg` anywhere in the pack.

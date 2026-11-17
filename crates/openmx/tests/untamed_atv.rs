@@ -117,3 +117,28 @@ fn a_bare_quad_is_unleashed_s_beside_the_untamed_pack() {
     let Some(untamed) = ride(320, &switched, &["--atv", "atv_Race250P@untamed_atv"]) else { return };
     assert_ne!(quad_line(&bare).0, quad_line(&untamed).0, "the Untamed quad rode as Unleashed's");
 }
+
+/// **MD144b: the Untamed quad is drawn**: its compiled build (`ATV_R_250_KTM.sub.bpb`) read as the
+/// `.phy.bpb` is, its parts and materials (`.psm.bpb`) and Untamed's ATV rider set, the pack's own.
+/// Under `--trace-picture` each drawn frame names its chassis and parts and the rider sat on it; a
+/// shot is written for the eye.
+#[test]
+fn the_untamed_quad_is_drawn_with_untameds_rider() {
+    if !pack("untamed_atv") {
+        return;
+    }
+    let switched = tape("drawn.tape", 160, &["30 atv"]);
+    let shot = scratch("drawn.png");
+    let shot_flags = ["--trace-picture", "--size", "640x448", "--overlay", "none", "--shot-frame", "148", "--shot"];
+    let mut more: Vec<&str> = shot_flags.to_vec();
+    more.extend([shot.to_str().expect("a path"), "--atv", "atv_Race250P@untamed_atv"]);
+    let Some(said) = ride(150, &switched, &more) else { return };
+    let drawn = said.lines().find(|l| l.starts_with("atv: drawn as ")).unwrap_or_else(|| panic!("not drawn:\n{said}"));
+    assert!(drawn.starts_with("atv: drawn as Veh/Anim/ATV_R_250_KTM.sub.bpb ("), "{drawn}");
+    let frames: Vec<&str> = said.lines().filter(|l| l.starts_with("picture atv: seat 0 ")).collect();
+    assert!(frames.len() >= 100, "the quad was hardly drawn ({} frames):\n{said}", frames.len());
+    assert!(frames.iter().all(|l| l.contains(" quad:250r_atv_chasis at ") && !l.contains(" parts 0 ")), "{}", frames[0]);
+    let riders = said.lines().filter(|l| l.starts_with("pilot: seat 0 ") && !l.ends_with(" of 0")).count();
+    assert!(riders >= frames.len(), "frames without a rider:\n{said}");
+    assert!(std::fs::metadata(&shot).is_ok_and(|m| m.len() > 0), "no shot at {}", shot.display());
+}
