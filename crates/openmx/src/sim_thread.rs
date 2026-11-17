@@ -19,6 +19,14 @@
 //! before it (the picture the last tick ended on, held), over a place with the same ground and no
 //! props, which is all a picture asks of it.
 //!
+//! Run ahead (F24, `--run-ahead`, on by default), the tick that has run waits for its second half
+//! until the next tick is due, and every picture till then blends the two ticks before it, from
+//! before-copies kept a tick longer: the motion as smooth as on the loop's own thread, a tick behind
+//! it, where holding the last tick's end showed it in 30 Hz steps on a 60 Hz display. The tick's
+//! three parts still run in their order, with nothing but pictures between them, so it is the same
+//! ride; the price is one tick more between a press and the picture (and the sound) of it, paid
+//! only while the ride could not keep up on one thread.
+//!
 //! The browser has no second thread ([`crate::thread`]): there is no worker, and every tick runs on
 //! the loop as before.
 

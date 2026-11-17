@@ -213,6 +213,25 @@ impl Pacer {
         let past = now.saturating_duration_since(self.start).saturating_sub(self.due(last));
         (past.as_secs_f32() / self.step.as_secs_f32()).clamp(0.0, 1.0)
     }
+
+    /// [`Pacer::blend`] a tick further behind (F24): while a tick that has run on the sim thread is
+    /// held back until the next is due, the picture goes from the tick before the last to the last as
+    /// it would once the held one had landed.
+    pub fn ahead(&self, now: Instant) -> f32 {
+        let past = now.saturating_duration_since(self.start).saturating_sub(self.due(self.done));
+        (past.as_secs_f32() / self.step.as_secs_f32()).clamp(0.0, 1.0)
+    }
+
+    /// Whether the tick after the one held is due at `now`, or none after it ever will be: when a
+    /// held tick lands (F24).
+    pub fn next_due(&self, now: Instant) -> bool {
+        let next = self.done + 1;
+        if self.most.is_some_and(|most| next >= most) {
+            return true;
+        }
+        let due = self.due(next);
+        self.until.is_some_and(|until| due >= until) || now.saturating_duration_since(self.start) >= due
+    }
 }
 
 /// The least time one picture takes (P90), from the VSync and frame limit settings: `limit` is the
@@ -644,6 +663,31 @@ mod tests {
         assert!(p.owed(late) && p.backlog(late), "tick 1 is the last --frames lets run");
         p.ran();
         assert!(p.owed(late) && !p.backlog(late), "and none after it");
+    }
+
+    /// F24: a tick held back on the sim thread lands as the next comes due, and the pictures held
+    /// meanwhile run from 0 to 1 over that tick, as `blend`'s do over the tick after it once landed.
+    #[test]
+    fn a_held_tick_lands_as_the_next_is_due() {
+        let start = Instant::now();
+        let mut p = Pacer::new(TICK, start);
+        p.ran();
+        assert!(p.owed(start + TICK), "tick 1 is owed, and goes to the sim thread");
+        assert_eq!(p.blend(start + TICK + TICK / 4), 1.0, "the held picture of before");
+        assert!((p.ahead(start + TICK + TICK / 4) - 0.25).abs() < 1e-3);
+        assert!(!p.next_due(start + TICK + TICK / 2));
+        assert!(p.next_due(start + TICK * 2), "tick 2 due: tick 1 lands");
+        assert_eq!(p.ahead(start + TICK * 2), 1.0);
+        p.ran();
+        assert!(p.owed(start + TICK * 2), "landed, tick 2 goes off in its turn");
+        assert_eq!(p.ahead(start + TICK * 2), 0.0, "and the pictures go on from the tick 1 landed with");
+        assert!((p.ahead(start + TICK * 2 + TICK / 4) - 0.25).abs() < 1e-3);
+        let mut p = Pacer::new(TICK, start).most(Some(2));
+        p.ran();
+        assert!(p.next_due(start + TICK), "--frames runs no tick 2: tick 1 lands at once");
+        let mut p = Pacer::new(TICK, start).until(Some(TICK.as_secs_f32() * 1.5));
+        p.ran();
+        assert!(p.next_due(start + TICK), "nor --seconds");
     }
 
     /// `--steady-clock`: the pictures alone move it, by their floor, however long they really take,

@@ -2998,6 +2998,10 @@ struct Args {
     /// `--sim-thread auto|on|off` (N23a): whether a tick may run on a thread of its own while the
     /// picture before it is drawn. Auto when a window's split screen overruns its pictures' time.
     sim_thread: sim_thread::Mode,
+    /// `--run-ahead on|off` (F24): whether a tick run on the sim thread is held back until the next
+    /// is due, the pictures meanwhile blending the two ticks before it, which is smooth at one tick
+    /// more of input latency; off, the picture drawn beside it holds the last tick's end.
+    run_ahead: bool,
     /// `--draw-fps N`: draw at most N pictures a second. Unset, a window draws as fast as its
     /// display takes them and a headless ride draws 60. The ride's ticks are 30 a second either way
     /// (P52).
@@ -8428,6 +8432,27 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     };
     let mut flight = None;
     let mut gauge = sim_thread::Gauge::default();
+    // The picture's before-copies a tick further back (F24), swapped with the loop's own at a tick's
+    // first half, which leaves them the tick before's; again while a tick run ahead is held on the
+    // sim thread, which the picture then blends from; and back when it lands. The cut tests are
+    // copied, not swapped, at the first half: each one carries what it measured the tick before.
+    let mut behind = Behind::default();
+    macro_rules! swap_behind {
+        () => {
+            std::mem::swap(&mut before, &mut behind.before);
+            std::mem::swap(&mut before_ai, &mut behind.ai);
+            std::mem::swap(&mut before_cameras, &mut behind.cameras);
+            std::mem::swap(&mut before_planes, &mut behind.planes);
+            std::mem::swap(&mut before_helis, &mut behind.helis);
+            std::mem::swap(&mut before_cars, &mut behind.cars);
+            std::mem::swap(&mut before_quads, &mut behind.quads);
+            std::mem::swap(&mut before_mxvatv_cars, &mut behind.mxvatv_cars);
+            std::mem::swap(&mut before_surfaces, &mut behind.surfaces);
+            std::mem::swap(&mut traffic_before, &mut behind.traffic);
+            std::mem::swap(&mut cars_before, &mut behind.path_cars);
+            std::mem::swap(&mut props_before, &mut behind.props);
+        };
+    }
     loop {
         // The picture before this one is the page's until its next frame (P196). A tick is not a
         // picture: waiting for the page's frame after one as well spent a display frame on every
@@ -8445,7 +8470,11 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         }
         // A tick that ran on the sim thread while the picture before it was drawn (N23a) lands here,
         // its first half run before it went: only the simulation and what comes after it are left.
-        if flight.is_some() || pacer.owed(moment) {
+        // One run ahead (F24) is held until the next tick is due, or the ride is ending.
+        let lands = flight.as_ref().is_some_and(|f: &Ticking<_>| {
+            !f.ahead || pacer.next_due(moment) || args.seconds.is_some_and(|limit| clock.elapsed().as_secs_f32() >= limit)
+        });
+        if lands || (flight.is_none() && pacer.owed(moment)) {
         let landing = flight.take();
         // Whether a player joined or left the ride this tick (P76), which keeps the tick off the sim
         // thread: its second half lays out the views' riders and cameras for the new count, and a
@@ -9442,6 +9471,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         // as the first seat's `sim` (the only local seat online), every other seat as one of the
         // seats after it (N5). Its frames count toward `--frames`, the engine's not being run.
         // Where everything is before this tick, which the picture blends from until the next.
+        if sim_worker.is_some() && args.run_ahead {
+            swap_behind!();
+            behind.cuts.clone_from(&cuts);
+        }
         before = world.seats.iter().zip(&rigs).map(|(seat, rig)| Shown::of(seat, rig, &assets, ragdolled.as_ref(), gpu_on)).collect();
         before_ai = ai_shown(&ai_rigs, &world.seats[0].sim, &assets, ragdolled.as_ref());
         before_cameras.clone_from(&cameras);
@@ -9489,7 +9522,12 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             let input = engine_input(&world.seats[0].reports[0]);
             let now = pace::tick_clock(pacer.ticks());
             let world = std::mem::replace(&mut world, stand_in);
-            flight = Some(Ticking { world, engine: engine.clone(), now, input, step: None, took: Duration::ZERO });
+            flight = Some(Ticking { world, engine: engine.clone(), now, input, step: None, took: Duration::ZERO, ahead: args.run_ahead });
+            // Run ahead (F24), the pictures until it lands blend the two ticks before it.
+            if args.run_ahead {
+                swap_behind!();
+                std::mem::swap(&mut cuts, &mut behind.cuts);
+            }
         }
         if flight.is_none() {
         let sim_at = Instant::now();
@@ -9885,6 +9923,10 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
             Some(mut ran) => {
                 if ran.step.is_none() {
                     ran.run();
+                }
+                if ran.ahead {
+                    swap_behind!();
+                    std::mem::swap(&mut cuts, &mut behind.cuts);
                 }
                 drawn_land = Some(std::mem::replace(&mut world, ran.world).place);
                 engine = ran.engine;
@@ -10798,12 +10840,15 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         // The picture, owing no tick (P52): every camera, bike, rider and the plane blended from the
         // tick before the last to the last by how far the wall clock is past it. Render-side only:
         // nothing below writes the simulation.
-        let blend = pace::Blend(pacer.blend(moment));
+        let blend = pace::Blend(match flight.as_ref().is_some_and(|f| f.ahead) {
+            true => pacer.ahead(moment),
+            false => pacer.blend(moment),
+        });
         let drawing_at = Instant::now();
         // The window's wait this frame, for the line a second (P324).
         let mut frame_waited = Duration::ZERO;
         // A tick sent off above runs on the sim thread while this picture is drawn (N23a).
-        let drawn = sim_thread::beside(sim_worker.as_ref().zip(flight.as_mut()), Ticking::run, || -> Result<(), String> {
+        let drawn = sim_thread::beside(sim_worker.as_ref().zip(flight.as_mut().filter(|f| f.step.is_none())), Ticking::run, || -> Result<(), String> {
         // A world's pieces fading in over their stand-in (V92), on the picture's own clock.
         if ground_stream.is_some() {
             let shown = (pacer.ticks() as f32 - 1.0 + blend.0).max(0.0) * pace::TICK.as_secs_f32();
@@ -12160,7 +12205,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
         drawn?;
 
         if let Some(limit) = args.seconds {
-            if clock.elapsed().as_secs_f32() >= limit {
+            // A tick still on the sim thread lands first, at the next pass.
+            if clock.elapsed().as_secs_f32() >= limit && flight.is_none() {
                 break;
             }
         }
@@ -12693,6 +12739,28 @@ struct Ticking<P> {
     step: Option<game_sim::tick::Step>,
     /// What the step took, for the gauge.
     took: Duration,
+    /// Run ahead (F24): held, once it has run, until the next tick is due, the pictures meanwhile
+    /// blending the two before it; else landed at the pass after the one picture drawn beside it.
+    ahead: bool,
+}
+
+/// The picture's before-copies of the tick before the loop's own (F24), for a picture a tick
+/// further behind while a tick run ahead is held on the sim thread.
+#[derive(Default)]
+struct Behind {
+    before: Vec<Shown>,
+    ai: Vec<Shown>,
+    cameras: Vec<Camera>,
+    planes: Vec<Option<M4>>,
+    helis: Vec<Option<(M4, Rotor)>>,
+    cars: Vec<Option<M4>>,
+    quads: Vec<Option<M4>>,
+    mxvatv_cars: Vec<Option<M4>>,
+    surfaces: Vec<Option<game_sim::biplane_anim::Surfaces>>,
+    cuts: Vec<pace::Cut>,
+    traffic: f64,
+    path_cars: Vec<game_sim::math::Mat4>,
+    props: Vec<game_sim::contact::Node>,
 }
 
 impl<P: sim_world::World> Ticking<P> {
@@ -15475,6 +15543,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         frames: None,
         steady_clock: false,
         sim_thread: sim_thread::Mode::Auto,
+        run_ahead: true,
         draw_fps: None,
         vsync: None,
         fps_limit: None,
@@ -15979,6 +16048,13 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--sim-thread" => {
                 args.sim_thread = sim_thread::Mode::parse(&next("auto, on or off")?).ok_or("--sim-thread: auto, on or off")?
             }
+            "--run-ahead" => {
+                args.run_ahead = match next("on or off")?.as_str() {
+                    "on" => true,
+                    "off" => false,
+                    w => return Err(format!("--run-ahead: on or off, not {w}")),
+                }
+            }
             "--draw-fps" => {
                 let fps: f32 = next("pictures a second")?.parse().map_err(|_| "--draw-fps: not a number")?;
                 if !(fps > 0.0) {
@@ -16078,7 +16154,7 @@ fn parse_args() -> Result<Option<Args>, String> {
                             [--players 1..8] [--split h|v] [--headless] [--frames N] [--timings]\n\
                             [--world-ground all|near] [--world-reach LOAD,DROP] [--world-fine LOAD,DROP|off] [--world-lean] [--world-chunks N]\n\
                             [--world-sweep X0,Z0,X1,Z1] [--world-stand-in on|off] [--warm on|off]\n\
-                            [--draw-fps N] [--steady-clock] [--sim-thread auto|on|off] [--vsync on|off] [--fps-limit off|N|refresh]\n\
+                            [--draw-fps N] [--steady-clock] [--sim-thread auto|on|off] [--run-ahead on|off] [--vsync on|off] [--fps-limit off|N|refresh]\n\
                             [--record TAPE] [--play TAPE|RECORDING.p2m2 [--phase second]]\n\
                             [--throttle cross|r2] [--pad-pressure ds2@8|AXIS:CONTROL,...]\n\
                             [--pads k,0,1,-] [--controls new|original|new,original,...]\n\
@@ -16154,6 +16230,8 @@ fn parse_args() -> Result<Option<Args>, String> {
                      runs each tick on a thread of its own while the picture before it is drawn\n\
                      (offline, not in a tiled world), the same ride; auto does when a window's\n\
                      split screen cannot fit a tick and a picture in a picture's time.\n\
+                     --run-ahead off draws the last tick held while the next runs there, and\n\
+                     not the two before it blended, a tick sooner but at half the motion's rate.\n\
                      The window opens at the screen's size and the frame fills it, re-made when\n\
                      the window is resized, wider or taller as the original's own 16:9 mode\n\
                      would draw it; --aspect 4:3, 16:9, 16:10 or 21:9 draws the largest frame of\n\
