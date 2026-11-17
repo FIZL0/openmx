@@ -16270,6 +16270,13 @@ fn pair_log_heard_in_ram(ee: &mut Ee, o: u32, probe: u32, struck: u32, grown: &m
     let mut log = atv_hear::Log { count: i(ee, 0), entries: ee.u32_at(l + 8), step: i(ee, 0xc), capacity: i(ee, 0x10), most: i(ee, 0x14) };
     let slot = atv_hear::push(&mut log, &mut |at, bytes| {
         grown(bytes);
+        // K64: a test that stubs the allocator (F54's listeners hand it a made-up log) gets the stub on
+        // both sides; Rust's resize is checked only against the original's own.
+        if ee.hooks.contains_key(&HEAP_RESIZE_F54) {
+            ee.set(28, GP);
+            ee.call(HEAP_RESIZE_F54, &[u64::from(at), u64::from(bytes), u64::from(PAIR_LOG_FILE), u64::from(PAIR_LOG_LINE)], &[], BUDGET);
+            return ee.v0() as u32;
+        }
         heap_in_ram::resize_checked(ee, HEAP_RESIZE_F54, GP, BUDGET, at, bytes, PAIR_LOG_FILE, PAIR_LOG_LINE)
     });
     ee.set_u32(l + 8, log.entries);
