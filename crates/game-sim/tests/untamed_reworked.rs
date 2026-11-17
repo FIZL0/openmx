@@ -881,7 +881,7 @@ fn flip_where(i: usize) -> String {
 fn flip_path(s: &FlipState) -> &'static str {
     let (a, st, inp) = (&s.air, &s.st, &s.inp);
     if !a.flip_active {
-        let lip = a.on_ground && !st.spinning && !st.spin_active && !(s.ch.vel.y() <= 5.0) && !(a.contact_vel.z() <= 30.0) && st.brake == 0.0;
+        let lip = a.on_ground && !st.spinning && !st.spin_active && F(s.ch.vel.y()) > 5.0 && F(a.contact_vel.z()) > 30.0 && st.brake == 0.0;
         if !lip {
             "off the lip"
         } else if s.bound != 0 {
@@ -906,9 +906,9 @@ fn flip_path(s: &FlipState) -> &'static str {
     }
 }
 
-#[test]
-fn untamed_backflip_is_the_originals() {
-    let Some(mut ee) = image() else { return };
+/// Untamed's backflip with its stunt, steep and binding calls answered from [`FlipCalls`].
+fn flip_harness() -> Option<(Ee, Rc<RefCell<FlipCalls>>)> {
+    let mut ee = image()?;
     let calls = Rc::new(RefCell::new(FlipCalls::default()));
     let c = calls.clone();
     ee.hooks.insert(START_STUNT, Box::new(move |ee| {
@@ -935,64 +935,77 @@ fn untamed_backflip_is_the_originals() {
         ee.set(2, u64::from(c.pressed_answer));
     }));
 
+    Some((ee, calls))
+}
+
+/// Runs `s` through the original and the port and panics, naming state `k`, where they part. Returns
+/// the state's path.
+fn flip_same_as_the_original(ee: &mut Ee, calls: &RefCell<FlipCalls>, s: &FlipState, k: usize) -> &'static str {
+    let path = flip_path(s);
+    flip_reset(ee);
+    poke_flip(ee, s);
+    *calls.borrow_mut() = FlipCalls {
+        start_answer: s.start_answer,
+        steep_answer: s.steep_answer,
+        pressed_answer: s.inp.button == Some(true),
+        ..FlipCalls::default()
+    };
+    ee.call(BACKFLIP, &[u64::from(OBJ)], &[s.st.dt.0], 20_000);
+    let frame = (ee.stack - 0x2000, ee.stack + 0x40);
+    for (a, b) in ee.written_ranges() {
+        let inside = FLIP_REGIONS.iter().any(|&(_, base, len)| a >= base && b <= base + len) || (a >= frame.0 && b <= frame.1);
+        assert!(inside, "state {k}: the original wrote {a:#010x}..{b:#010x}, which is not the bike or the stack\n{s:#?}");
+    }
+    let was = flip_snap(ee);
+    let orig = std::mem::take(&mut *calls.borrow_mut());
+
+    let mut t = s.clone();
+    let (mut started, mut steeped) = (false, false);
+    let out = untamed::backflip(&t.p, &mut t.air, &mut t.ch, &t.st, &t.inp, &mut t.clip, || {
+        started = true;
+        s.start_answer
+    }, || {
+        steeped = true;
+        s.steep_answer
+    });
+    if out.stunt_cleared {
+        t.inp.stunt_id = 255;
+    }
+    flip_reset(ee);
+    poke_flip(ee, &t);
+    let now = flip_snap(ee);
+    if was != now {
+        let i = was.iter().zip(&now).position(|(a, b)| a != b).unwrap();
+        panic!(
+            "state {k} ({path}): {} is {:#010x} ({}) in the original and {:#010x} ({}) in the port\n{s:#?}",
+            flip_where(i),
+            was[i],
+            f32::from_bits(was[i]),
+            now[i],
+            f32::from_bits(now[i]),
+        );
+    }
+    let want_started: Vec<(u32, u32)> = if started { vec![(s.flip_stunt, 1)] } else { vec![] };
+    assert_eq!(orig.started, want_started, "state {k} ({path}): the stunt start");
+    assert_eq!(out.stunt_started, started && s.start_answer, "state {k}");
+    let want_ended: Vec<u32> = if out.stunt_ended { vec![s.flip_stunt] } else { vec![] };
+    assert_eq!(orig.ended, want_ended, "state {k} ({path}): the stunt end");
+    assert_eq!(orig.steep, u32::from(steeped), "state {k} ({path}): the steep test");
+    assert_eq!(orig.wrecks, out.wreck.map(u32::from).into_iter().collect::<Vec<_>>(), "state {k} ({path}): the wreck");
+    // The binding is asked only on a lip with the backflip bound.
+    assert_eq!(orig.pressed, u32::from(path.starts_with("bound")), "state {k} ({path}): the binding asked");
+    path
+}
+
+#[test]
+fn untamed_backflip_is_the_originals() {
+    let Some((mut ee, calls)) = flip_harness() else { return };
     let mut g = Gen(0x0d93_a001);
     let mut tally = BTreeMap::new();
     for k in 0..20_000 {
         let s = g.flip();
-        let path = flip_path(&s);
+        let path = flip_same_as_the_original(&mut ee, &calls, &s, k);
         *tally.entry(path).or_insert(0u32) += 1;
-        flip_reset(&mut ee);
-        poke_flip(&mut ee, &s);
-        *calls.borrow_mut() = FlipCalls {
-            start_answer: s.start_answer,
-            steep_answer: s.steep_answer,
-            pressed_answer: s.inp.button == Some(true),
-            ..FlipCalls::default()
-        };
-        ee.call(BACKFLIP, &[u64::from(OBJ)], &[s.st.dt.0], 20_000);
-        let frame = (ee.stack - 0x2000, ee.stack + 0x40);
-        for (a, b) in ee.written_ranges() {
-            let inside = FLIP_REGIONS.iter().any(|&(_, base, len)| a >= base && b <= base + len) || (a >= frame.0 && b <= frame.1);
-            assert!(inside, "state {k}: the original wrote {a:#010x}..{b:#010x}, which is not the bike or the stack\n{s:#?}");
-        }
-        let was = flip_snap(&ee);
-        let orig = std::mem::take(&mut *calls.borrow_mut());
-
-        let mut t = s.clone();
-        let (mut started, mut steeped) = (false, false);
-        let out = untamed::backflip(&t.p, &mut t.air, &mut t.ch, &t.st, &t.inp, &mut t.clip, || {
-            started = true;
-            s.start_answer
-        }, || {
-            steeped = true;
-            s.steep_answer
-        });
-        if out.stunt_cleared {
-            t.inp.stunt_id = 255;
-        }
-        flip_reset(&mut ee);
-        poke_flip(&mut ee, &t);
-        let now = flip_snap(&ee);
-        if was != now {
-            let i = was.iter().zip(&now).position(|(a, b)| a != b).unwrap();
-            panic!(
-                "state {k} ({path}): {} is {:#010x} ({}) in the original and {:#010x} ({}) in the port\n{s:#?}",
-                flip_where(i),
-                was[i],
-                f32::from_bits(was[i]),
-                now[i],
-                f32::from_bits(now[i]),
-            );
-        }
-        let want_started: Vec<(u32, u32)> = if started { vec![(s.flip_stunt, 1)] } else { vec![] };
-        assert_eq!(orig.started, want_started, "state {k} ({path}): the stunt start");
-        assert_eq!(out.stunt_started, started && s.start_answer, "state {k}");
-        let want_ended: Vec<u32> = if out.stunt_ended { vec![s.flip_stunt] } else { vec![] };
-        assert_eq!(orig.ended, want_ended, "state {k} ({path}): the stunt end");
-        assert_eq!(orig.steep, u32::from(steeped), "state {k} ({path}): the steep test");
-        assert_eq!(orig.wrecks, out.wreck.map(u32::from).into_iter().collect::<Vec<_>>(), "state {k} ({path}): the wreck");
-        // The binding is asked only on a lip with the backflip bound.
-        assert_eq!(orig.pressed, u32::from(path.starts_with("bound")), "state {k} ({path}): the binding asked");
     }
     enough(
         &tally,
@@ -1013,6 +1026,45 @@ fn untamed_backflip_is_the_originals() {
         ],
         100,
     );
+}
+
+/// R39 — the lip's two speeds (the body's `vel.y` over 5, the contact's `vel.z` over 30) as NaN patterns,
+/// as R29 checks SLUS-21104's: the original branches on `c.ole`, and its FPU reads an exponent-255 pattern
+/// as ±max, so a +NaN is over either threshold and a -NaN under it. Lip states only, bound and not, each
+/// speed as +NaN, -NaN, a signalling NaN, ±inf or its own value.
+#[test]
+fn untamed_backflip_lip_takes_nan_speeds_as_the_original() {
+    let Some((mut ee, calls)) = flip_harness() else { return };
+    let odd = [0x7fc0_0000u32, 0xffc0_0000, 0x7f80_0001, 0xff80_0001, 0x7f80_0000, 0xff80_0000];
+    let mut g = Gen(0x0d40_0039);
+    let mut tally = BTreeMap::new();
+    let mut k = 0;
+    for _ in 0..200 {
+        let mut s = g.flip();
+        s.air.flip_active = false;
+        s.air.on_ground = true;
+        s.st.spinning = false;
+        s.st.spin_active = false;
+        s.st.brake = F::ZERO;
+        for vy in odd.iter().copied().map(Some).chain([None]) {
+            for cz in odd.iter().copied().map(Some).chain([None]) {
+                if vy.is_none() && cz.is_none() {
+                    continue;
+                }
+                let mut t = s.clone();
+                if let Some(b) = vy {
+                    t.ch.vel = Vf::new(t.ch.vel.x(), f32::from_bits(b), t.ch.vel.z(), t.ch.vel.w());
+                }
+                if let Some(b) = cz {
+                    let c = t.air.contact_vel;
+                    t.air.contact_vel = Vf::new(c.x(), c.y(), f32::from_bits(b), c.w());
+                }
+                *tally.entry(flip_same_as_the_original(&mut ee, &calls, &t, k)).or_insert(0u32) += 1;
+                k += 1;
+            }
+        }
+    }
+    enough(&tally, &["off the lip", "bound, pressed", "bound, not pressed", "arming", "triggered", "waiting"], 20);
 }
 
 /// MD93a's wiring: [`untamed::ride_backflip`] reads the ride's trick buttons as Untamed's reader keeps
