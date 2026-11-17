@@ -315,6 +315,10 @@ pub struct Driver {
     /// MD165: the rider's motion, ticked after the chassis' off what the quad's state pack hands the
     /// rider ([`Ask`]).
     pub motion: Motion,
+    /// MD144b: how far up the step's stunt ids are from the table's rows past the riding stunts (41
+    /// on): [`game_sim::quad::UNTAMED_STUNT_SHIFT`] on MX vs. ATV Untamed's step (its backflip 49, its
+    /// 360s 52 and 53), 0 on Unleashed's. Set by [`Driver::tick`].
+    pub shift: i32,
 }
 
 /// The quad's clips as [`game_sim::quad::animate`] asks for them.
@@ -348,7 +352,7 @@ impl Driver {
             crossup_blend: F(0.5),
             fore_aft_blend: F(0.5),
         };
-        Driver { stunts, anim, current: NO_STUNT, clock: 0.0, rider: None, played: None, under: None, motion: Motion::default() }
+        Driver { stunts, anim, current: NO_STUNT, clock: 0.0, rider: None, played: None, under: None, motion: Motion::default(), shift: 0 }
     }
 
     fn named(&self, id: i32, names: &[&str]) -> bool {
@@ -358,6 +362,12 @@ impl Driver {
     /// A stunt's name, `None` for no row.
     pub fn name(&self, id: i32) -> Option<&str> {
         usize::try_from(id).ok().and_then(|i| self.stunts.get(i)).map(|s| s.name.as_str())
+    }
+
+    /// The table row of a stunt id the step hands out: [`Driver::shift`] down past the riding stunts'
+    /// 41 rows, as the Untamed quad's air control takes its stunt id 8 lower (MD144).
+    fn row_of(&self, id: i32) -> i32 {
+        if self.shift != 0 && id >= 41 + self.shift { id - self.shift } else { id }
     }
 
     /// The stunt start: see [`Driver`].
@@ -377,6 +387,7 @@ impl Driver {
     /// One frame after the ride's step: its calls this tick (`ride.rest`), the stunt's clock and end,
     /// then the animation driver on copies of the quad (nothing of the ride is written).
     pub fn tick(&mut self, ride: &game_sim::quad::Ride, dt: f32) {
+        self.shift = if ride.bike.untamed() { game_sim::quad::UNTAMED_STUNT_SHIFT } else { 0 };
         let held = ride.bike.air.flip_active || ride.bike.spin_active;
         let pb = ride.tailed.as_ref().map(|t| t.put_back.clone()).unwrap_or_default();
         self.tick_on(&ride.rest, &ride.q, ride.down(), held, pb, dt);
@@ -392,7 +403,7 @@ impl Driver {
         }
         for c in calls {
             match *c {
-                Call::StartStunt(id) => self.start(id as i32, airborne, down),
+                Call::StartStunt(id) => self.start(self.row_of(id as i32), airborne, down),
                 Call::EndStunt => self.rider = None,
                 _ => {}
             }
@@ -935,6 +946,28 @@ mod tests {
         d.tick_on(&[], &air, false, false, Default::default(), DT);
         assert_eq!((d.current, d.rider), (game_sim::quad::RIDING_POSE, None), "ended when the flip stops");
         assert!(matches!(d.played, Some(Played::Two { .. })));
+    }
+
+    /// MD144b: on Untamed's step the backflip comes as 49, the table's row 41 eight up; the driver
+    /// plays row 41 for it, and takes an id below 49 as the row it names.
+    #[test]
+    fn an_untamed_quads_backflip_is_the_tables_row_8_down() {
+        use game_sim::quad::Call;
+        let mut d = Driver::new(table());
+        d.shift = game_sim::quad::UNTAMED_STUNT_SHIFT;
+        let air = quad(false);
+        d.tick_on(&[], &air, false, false, Default::default(), DT);
+        d.tick_on(&[Call::StartStunt(49)], &air, false, true, Default::default(), DT);
+        assert_eq!((d.current, d.rider.map(|r| r.0)), (41, Some(41)));
+        let mut d = Driver::new(table());
+        d.shift = game_sim::quad::UNTAMED_STUNT_SHIFT;
+        d.tick_on(&[Call::StartStunt(42)], &quad(true), false, false, Default::default(), DT);
+        assert_eq!(d.rider.map(|r| r.0), Some(42), "an id below 49 is the row it names");
+        // On Unleashed's step 49 is no row: the backflip is not started.
+        let mut d = Driver::new(table());
+        d.tick_on(&[], &air, false, false, Default::default(), DT);
+        d.tick_on(&[Call::StartStunt(49)], &air, false, true, Default::default(), DT);
+        assert_ne!(d.current, 41);
     }
 
     #[test]

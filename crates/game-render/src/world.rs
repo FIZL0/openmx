@@ -372,23 +372,25 @@ impl Assets {
         material: &str,
     ) -> (Option<usize>, Surface) {
         let asked = material;
+        // MD144b: MX vs. ATV Untamed ships its materials compiled only (`Striker_Plastics.psm.bpb`).
+        let psm_of = |name: &str| read(&format!("{name}.psm")).or_else(|| read(&format!("{name}.psm.bpb")));
         // A repaint whose material no archive has keeps the mesh's own (V37): 500_03.sub paints its
         // pipe `CR-250_Exhaust`, which its archive does not ship, and ships the pipe's own
         // `rm-250_rs_02_exhaust` material and texture that nothing else on the bike uses.
         let renamed = self
             .renames
             .get(&material.to_ascii_lowercase())
-            .and_then(|to| read(&format!("{to}.psm")).map(|psm| (to.clone(), psm)));
+            .and_then(|to| psm_of(to).map(|psm| (to.clone(), psm)));
         let (material, psm) = match renamed {
             Some(found) => (found.0, Some(found.1)),
-            None => (material.to_string(), read(&format!("{material}.psm"))),
+            None => (material.to_string(), psm_of(material)),
         };
         let material = material.as_str();
         let asked_key = self.answer_key(asked);
         let Some(psm) = psm else {
             return (self.by_name.get(&asked_key).copied(), Surface::default());
         };
-        let m = Material::parse(&crate::ini::text(&psm));
+        let m = Material::parse(&crate::ini::text_of(&psm));
         let surface = Surface::of(&m);
         if let Some(&i) = self.by_name.get(&asked_key) {
             return (Some(i), surface);

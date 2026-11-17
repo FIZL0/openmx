@@ -1887,7 +1887,7 @@ pub struct Bike {
 
 /// How far Untamed moved the rider's stunt ids up (MD81b, MD93): the backflip's 41 → 49, the 360s' 44,
 /// 45 → 52, 53, the air control's and the clears' bounds alike.
-const UNTAMED_STUNT_SHIFT: i32 = 8;
+pub const UNTAMED_STUNT_SHIFT: i32 = 8;
 
 impl Bike {
     /// MD144: the quad rides MX vs. ATV Untamed's step ([`Ride::untamed`]): its preload, backflip, 360
