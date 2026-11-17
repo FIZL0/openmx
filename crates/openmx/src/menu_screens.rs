@@ -1585,6 +1585,12 @@ impl Menu {
 }
 
 /// The ems the lit track's title has beside its `count`; a long one stops short of it.
+/// P333: where Cross leaves the Hall of Fame's pages for, by the results menu's button that led
+/// there.
+fn way_out(r: &Results) -> &'static str {
+    if r.after == Some(race::After::Restart) { "Restart" } else { "Main Menu" }
+}
+
 fn title_room(count: &str) -> f32 {
     PICK_SIDE.1 - ink::ink().measure(Weight::Bold, count, 1.2) - 2.0
 }
@@ -2994,25 +3000,18 @@ impl Pen<'_> {
         let about = format!("{} laps, {} riders.", r.laps, r.riders);
         match r.stage {
             race::Stage::Tips => {
-                let y = self.heading("Race Over", &name, &about, x, 8.0, w, 2.6);
-                let mut y = y + 1.4;
-                for t in &r.tips {
-                    let mut said = Vec::new();
-                    if t.preload {
-                        said.push("No preload in that race: hold it before a jump's lip and let go on the lip to go higher.");
-                    }
-                    if t.clutch {
-                        said.push("No clutch in that race: feather it out of the turns and off the start to pull away harder.");
-                    }
-                    self.text(Weight::Heavy, &format!("Player {}", t.seat + 1), x, y + CAP * 1.2, 1.2, 0.0, PEACH, Align::Left);
-                    y += 2.0;
-                    for line in said {
-                        y = self.para(line, x, y, w, 1.0, 1.5, CHALK) + 0.6;
-                    }
-                    y += 1.0;
-                }
+                // P333: the popup's page as the original writes it — who missed the move, and its line.
+                let y = self.heading("Race Over", &name, &race::tip_title(&r.tips, r.tip_page), x, 8.0, w, 2.6);
+                let said = if r.tip_page == race::TipPage::Preload { race::PRELOAD_TIP } else { race::CLUTCH_TIP };
+                self.para(said, x, y + 1.4, w, 1.1, 1.5, CHALK);
                 self.title(Screen::Results.title());
                 self.hints(&[(Btn::Cross, "OK")]);
+            }
+            race::Stage::Board if r.quitting => {
+                let y = self.heading(race::QUIT_TITLE, &name, &about, x, 8.0, w, 2.6);
+                self.para(race::QUIT_ASK, x, y + 1.4, w, 1.1, 1.5, CHALK);
+                self.title(Screen::Results.title());
+                self.hints(&[(Btn::Cross, "Yes"), (Btn::Circle, "No")]);
             }
             race::Stage::Fame if r.fame_try().is_some() && !r.earned.is_empty() => {
                 // P334: the entry page — the seat's new records, then its name on the keyboard.
@@ -3038,7 +3037,7 @@ impl Pen<'_> {
                 let said = format!("{} set a time that earns a place in the Hall of Fame.", seats.join(" and "));
                 self.para(&said, x, y + 1.4, w, 1.1, 1.5, CHALK);
                 self.title(Screen::Results.title());
-                self.hints(&[(Btn::Cross, "Main Menu")]);
+                self.hints(&[(Btn::Cross, way_out(r))]);
             }
             race::Stage::Table => {
                 // P334: the tables the names went in, the new entries picked out.
@@ -3060,7 +3059,7 @@ impl Pen<'_> {
                     y += 1.0;
                 }
                 self.title(Screen::Results.title());
-                self.hints(&[(Btn::Cross, "Main Menu")]);
+                self.hints(&[(Btn::Cross, way_out(r))]);
             }
             race::Stage::Board => {
                 let Some(board) = &r.board else { return };
@@ -3088,8 +3087,16 @@ impl Pen<'_> {
                     y += h + 0.4;
                 }
                 self.title(Screen::Results.title());
-                let next = if r.fame.waiting { "Hall of Fame" } else { "Main Menu" };
-                self.hints(&[(Btn::LeftRight, "Page"), (Btn::Cross, next)]);
+                // P333: the results menu's own button bar.
+                let mut hints = vec![(Btn::LeftRight, "Page")];
+                for b in r.buttons() {
+                    hints.push(match b {
+                        race::After::Quit => (Btn::Triangle, "Quit"),
+                        race::After::Restart => (Btn::Cross, "Restart"),
+                        race::After::Next => (Btn::Cross, "Next"),
+                    });
+                }
+                self.hints(&hints);
             }
         }
     }

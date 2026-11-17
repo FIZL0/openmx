@@ -135,6 +135,53 @@ pub struct Results {
     pub fame_at: Option<i32>,
     pub earned: Vec<(String, String)>,
     pub fame_tables: Vec<FameTable>,
+    /// P333: the tip popup's page shown; whether the race was a league's (the event's league word,
+    /// which offers Next where a single race offers Restart and Quit); whether Quit's "Are you sure"
+    /// is up; and the button the way out does once the Hall of Fame is done.
+    pub tip_page: TipPage,
+    pub league: bool,
+    pub quitting: bool,
+    pub after: Option<After>,
+}
+
+/// The preload and clutch tip popup's two pages, preload first: each is shown when any player
+/// missed that move, the clutch page after the preload page's OK (P333).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TipPage {
+    #[default]
+    Preload,
+    Clutch,
+}
+
+/// The results menu's buttons, as its button bar offers them (P333): a single race's Restart
+/// (Cross) and Quit (Triangle), a league's Next (Cross).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum After {
+    Restart,
+    Quit,
+    Next,
+}
+
+/// The tip popup's lines, as the original writes them: the preload page's text and the clutch
+/// page's.
+pub const PRELOAD_TIP: &str = "You didn't use the \"pre-load\" feature during the last race!";
+pub const CLUTCH_TIP: &str = "You didn't use the \"clutch\" feature during the last race!";
+
+/// Quit's warning, as the original's dialog asks it.
+pub const QUIT_TITLE: &str = "Warning";
+pub const QUIT_ASK: &str = "Are you sure you want to quit?";
+
+/// The tip popup page's title for the players in `tips` who missed its move, as the original
+/// writes it: both players, Player 1 when seat 0 missed it, else Player 2 (P333).
+pub fn tip_title(tips: &[Tip], page: TipPage) -> String {
+    let missed = |seat: i32| tips.iter().any(|t| t.seat == seat && if page == TipPage::Preload { t.preload } else { t.clutch });
+    let who = match (missed(0), missed(1)) {
+        (true, true) => "Player 1 and Player 2",
+        (true, false) => "Player 1",
+        _ => "Player 2",
+    };
+    let what = if page == TipPage::Preload { "Preload Warning:" } else { "Clutch Warning:" };
+    format!("{who} {what}")
 }
 
 /// One of the Hall of Fame's tables after a name went in, as the screen shows it: its title and
@@ -176,6 +223,10 @@ impl Results {
             fame_at: None,
             earned: Vec::new(),
             fame_tables: Vec::new(),
+            tip_page: TipPage::Preload,
+            league: false,
+            quitting: false,
+            after: None,
         }
     }
 
@@ -192,7 +243,33 @@ impl Results {
             r.fame.mark(e.seat, e.track);
         }
         r.stage = if r.tips.is_empty() { Stage::Board } else { Stage::Tips };
+        r.tip_page = if r.tips.iter().any(|t| t.preload) { TipPage::Preload } else { TipPage::Clutch };
         r
+    }
+
+    /// The tip popup's OK (P333): the clutch page after the preload page when a player missed the
+    /// clutch too, else the results menu — as the popup's close goes on.
+    pub fn tip_ok(&mut self) {
+        if self.tip_page == TipPage::Preload && self.tips.iter().any(|t| t.clutch) {
+            self.tip_page = TipPage::Clutch;
+        } else {
+            self.stage = Stage::Board;
+        }
+    }
+
+    /// The results menu's button bar (P333): a single race's Triangle Quit and Cross Restart, or a
+    /// league's Cross Next.
+    pub fn buttons(&self) -> &'static [After] {
+        if self.league { &[After::Next] } else { &[After::Quit, After::Restart] }
+    }
+
+    /// A results menu button pressed (P333), with Quit's "Are you sure" answered: the Hall of Fame
+    /// first when a mark is waiting (Restart and Quit go there first; a league's Next goes on to
+    /// the standings), `false` when there is nothing more to show and the way out is `after`'s.
+    pub fn press(&mut self, after: After) -> bool {
+        self.after = Some(after);
+        self.quitting = false;
+        after != After::Next && self.next_stage()
     }
 
     /// Cross on the results screen: on to the next of its stages, `false` when it was the last.
@@ -373,14 +450,40 @@ impl Menu {
                     self.type_for(super::Typing::Fame);
                     return Act::Stay;
                 }
-                if let Some(r) = self.race.results.as_mut().filter(|r| r.board.is_some() && r.stage == Stage::Board)
-                    && (p.left || p.right || p.l1 || p.r1)
-                {
-                    r.page = if p.left || p.l1 { (r.page + pages - 1) % pages } else { (r.page + 1) % pages };
-                } else if p.ok || p.back || p.start {
+                let ok = p.ok || p.start;
+                // P333: the tip popup takes only its OK.
+                if let Some(r) = self.race.results.as_mut().filter(|r| r.stage == Stage::Tips) {
+                    if ok {
+                        r.tip_ok();
+                    }
+                    return Act::Stay;
+                }
+                // P333: the results menu's own buttons, and Quit's "Are you sure".
+                if let Some(r) = self.race.results.as_mut().filter(|r| r.board.is_some() && r.stage == Stage::Board) {
+                    let pressed = if r.quitting {
+                        if p.back {
+                            r.quitting = false;
+                        }
+                        ok.then_some(After::Quit)
+                    } else if p.left || p.right || p.l1 || p.r1 {
+                        r.page = if p.left || p.l1 { (r.page + pages - 1) % pages } else { (r.page + 1) % pages };
+                        None
+                    } else if p.back && r.buttons().contains(&After::Quit) {
+                        r.quitting = true;
+                        None
+                    } else if ok {
+                        Some(if r.league { After::Next } else { After::Restart })
+                    } else {
+                        None
+                    };
+                    match pressed {
+                        Some(after) if r.press(after) => r.fame_page(&self.race.fame),
+                        Some(_) => return self.results_way_out(),
+                        None => {}
+                    }
+                } else if ok || p.back {
                     if !self.race.results.as_mut().is_some_and(Results::next_stage) {
-                        self.race.results = None;
-                        self.stack = vec![Screen::Main];
+                        return self.results_way_out();
                     } else if let Some(r) = self.race.results.as_mut() {
                         r.fame_page(&self.race.fame);
                     }
@@ -388,6 +491,20 @@ impl Menu {
             }
             _ => {}
         }
+        Act::Stay
+    }
+
+    /// P333: the results screen left, by its button: Restart rides the same race again (from its
+    /// setup, where a load that fails lands), Quit and a league's Next (which has no standings
+    /// here) go to the main menu, as does a results screen with no buttons.
+    fn results_way_out(&mut self) -> Act {
+        let Some(r) = self.race.results.take() else { return Act::Stay };
+        if r.after == Some(After::Restart) {
+            self.set_race(RaceSetup { track: r.track, laps: r.laps, riders: r.riders });
+            self.stack = vec![Screen::Main, Screen::Race, Screen::RaceSetup];
+            return self.start_race();
+        }
+        self.stack = vec![Screen::Main];
         Act::Stay
     }
 
