@@ -337,18 +337,24 @@ fn fast_landing(name: &str) -> PathBuf {
 #[test]
 fn the_packs_kiowa_throws_the_packs_blades() {
     // MD109: a pack's helicopter builds the blades its wreck throws off the pack's wreckblade.phy and
-    // bladebent.psg (the bytes MX Unleashed's disc has too); the pack has no blade collision, so
-    // those two are the disc's. On the fast landing it wrecks and throws all four, which are still out
-    // at tick 440.
+    // bladebent.psg (the bytes MX Unleashed's disc has too), and since MD130 off its
+    // BladeBent{M,F}.col too, so all four are the pack's (a pack built before MD130 has two, the
+    // collision pair then the disc's). On the fast landing it wrecks and throws all four blades,
+    // which are still out at tick 440.
     if !pack() {
         return;
+    }
+    let cols = root().join("mods/machines/mxvatv_fliers/Veh/Col");
+    let want = 2 + ["BladeBentM.col", "BladeBentF.col"].iter().filter(|f| cols.join(f).is_file()).count();
+    if want < 4 {
+        eprintln!("SKIPPED: the pack's blade collision (mods/machines/mxvatv_fliers predates MD130; rebuild it with import-atv fliers)");
     }
     let tape = fast_landing("md109-thrown-blades.tape");
     for skin in ["1", "3"] {
         let Some(said) = ride(440, &tape, &["--fliers", "mxvatv", "--flier-skin", skin]) else { return };
         let line = said.lines().find(|l| l.starts_with("kiowa: thrown blades: ")).unwrap_or_else(|| panic!("no thrown-blades line:\n{said}"));
         let from: usize = line.split_whitespace().nth(3).and_then(|n| n.parse().ok()).unwrap_or_else(|| panic!("no count in `{line}`"));
-        assert!(from >= 2, "skin {skin}: wreckblade.phy and bladebent.psg are the pack's: {line}");
+        assert_eq!(from, want, "skin {skin}: wreckblade.phy, bladebent.psg and the pack's BladeBent .col are the pack's: {line}");
         let blades = said.lines().find(|l| l.starts_with("kiowa: blades: ")).unwrap_or_else(|| panic!("skin {skin} threw no blades:\n{said}"));
         assert_eq!(blades.split_whitespace().nth(2), Some("4"), "skin {skin}: {blades}");
         println!("skin {skin}: {line}; {blades}");
