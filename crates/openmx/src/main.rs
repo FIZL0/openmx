@@ -8223,6 +8223,8 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
     // How many of `--online-script`'s words have gone (K29).
     let mut online_scripted = 0usize;
     let mut online_gas = false;
+    // `--online-script`'s `dress` (T3): this machine's first seat dressed again as a peer's, looked through.
+    let mut online_redress = false;
     // In the browser (P204): the last ten seconds of the ride settled here that the page's console
     // was told of (`Online::settled_line`).
     #[cfg(target_arch = "wasm32")]
@@ -9505,6 +9507,7 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                 match (word.as_str(), parse_switch_word(word)) {
                     ("gas", _) => online_gas = true,
                     ("lift", _) => online_gas = false,
+                    ("dress", _) => online_redress = true,
                     // `biplane@pack/skin` (P318): that flier, where the ride offers it
                     (_, Ok((to, Some(pick)))) if to == Kind::Biplane => match online_fliers::byte_of(on.flier_offer(), &pick.pack, &pick.skin, roster::ORIGINAL_PACK) {
                         Some(byte) => {
@@ -9684,6 +9687,39 @@ async fn ride(mut args: Args, shell: Option<&mut Shell>) -> Result<Leave, String
                     Err(e) => println!("online: seat {} ({}): not dressed: {e}", d + 1, taken.peer),
                 }
                 peer_dress.dress(d, taken);
+            }
+            // `--online-script`'s `dress` (T3): this machine's own seat rebuilt as a peer seat is (N16),
+            // which a second player sitting down on this machine (N20) rides in and looks through,
+            // its view and cameras with it: its cars followed on their own presets (S268).
+            if std::mem::take(&mut online_redress) {
+                peers_dressed += 1;
+                let mut dress = PeerDress {
+                    disc: &mut disc,
+                    assets: &mut assets,
+                    kit: &mut kit,
+                    rider_member: rider_member.as_deref(),
+                    own: &own,
+                    bike_member: &bike_member,
+                    vehicle: &vehicle,
+                    archives: &archives,
+                    stunts: &table.stunts,
+                    pack: pack_clips.as_ref().map(|c| (c, stunts.stunts.as_slice())),
+                    motion: phy.motion(),
+                    body_model: join_body_model.as_deref(),
+                    gpu_on,
+                    cameras: &join_cameras,
+                    car_cameras: &car_cameras,
+                };
+                match dress_peer(&mut dress, peers_dressed, &own) {
+                    Ok((rig, made)) => {
+                        if let (true, Some(r)) = (gpu_on, renderer_of(&mut offscreen, window)) {
+                            r.upload_models(&assets, &made.iter().collect::<Vec<_>>());
+                        }
+                        rigs[0] = rig;
+                        println!("online: seat 1 dressed as a peer's, {} car cameras", rigs[0].car_cameras.len());
+                    }
+                    Err(e) => println!("online: seat 1: not dressed: {e}"),
+                }
             }
             // A player on this machine took a seat or gave theirs up (N20), at the tick every machine
             // took it at: a view each, laid out again for the local count as a local freeride's are
@@ -15801,11 +15837,11 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--trace-camera" => args.trace_camera = true,
             "--trace-air" => args.trace_air = true,
             "--online-script" => {
-                let bad = || "--online-script: FRAME:WORD,... (a machine, biplane@pack/skin, gas or lift)".to_string();
+                let bad = || "--online-script: FRAME:WORD,... (a machine, biplane@pack/skin, gas, lift or dress)".to_string();
                 for pair in next("frame:word pairs")?.split(',') {
                     let (f, word) = pair.split_once(':').ok_or_else(bad)?;
                     let word = word.trim();
-                    if word != "gas" && word != "lift" && parse_switch_word(word).is_err() {
+                    if !["gas", "lift", "dress"].contains(&word) && parse_switch_word(word).is_err() {
                         return Err(bad());
                     }
                     args.online_script.push((f.trim().parse().map_err(|_| bad())?, word.to_string()));
@@ -16199,7 +16235,8 @@ fn parse_args() -> Result<Option<Args>, String> {
                      --trace-switch N rides the throttle alone for N frames first;\n\
                      --online-script F:WORD,... online, picks a machine (bike, biplane, buggy,\n\
                      monster, baja, or biplane@pack/skin) at session tick F, or holds Cross\n\
-                     (gas) or lets it go (lift);\n\
+                     (gas) or lets it go (lift), or dresses this machine's seat again as a\n\
+                     peer's (dress);\n\
                      --trace-stick-y F:Y,... sets the stick's y from frame F on, each until\n\
                      the next, and adds the backflip's columns to --trace-feel's line;\n\
                      --trace-camera prints each view's camera a frame (preset, distance, pitch,\n\
