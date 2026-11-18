@@ -4157,10 +4157,13 @@ impl<R: Moto + Default> Ride<R> {
     /// the quad's hull filed on its record after the pass's entries ([`Ride::file_mirrors`]), which
     /// the gravity's call resolves against their chassis every substep.
     fn frame_met(&mut self, dt: F, world: &mut dyn crate::world::World, segments: [[Vf; 2]; 4], met: Option<&crate::flight::Met>) {
-        self.frame_among(dt, world, segments, met, &mut []);
+        self.frame_among(dt, world, segments, met, &mut [], None);
     }
 
     /// [`Ride::frame_met`] among knockable bodies (MD224): the record's pass [`Ride::record_among`].
+    /// MD247: after the quad's step, each awake body's own world's step ([`KnockFrame`]), its
+    /// resolution pushing the quad, before the frame's tail (Untamed's props' world steps from the
+    /// tail's first listener).
     fn frame_among(
         &mut self,
         dt: F,
@@ -4168,13 +4171,14 @@ impl<R: Moto + Default> Ride<R> {
         segments: [[Vf; 2]; 4],
         met: Option<&crate::flight::Met>,
         knocked: &mut [Knockable],
+        mut hull: Option<&mut Knockable>,
     ) {
         let b = &mut self.bike.parts.bounds;
         *b = world_bounds(world, b.floor);
         if knocked.is_empty() {
             self.record_on(dt, world);
         } else {
-            self.record_among(dt, world, knocked);
+            self.record_among(dt, world, knocked, hull.as_deref_mut());
         }
         if let Some(m) = met {
             self.file_mirrors(m);
@@ -4200,6 +4204,12 @@ impl<R: Moto + Default> Ride<R> {
             // The bikes it met are this frame's (MD173): off the wire, and out of the hash with them,
             // so a seat's state hashes alike on a machine that decoded it.
             r.held.bikes.clear();
+            let mut quad = crate::atv_contact::Knocked { collider: r.held.record.collider, body: self.body, mass: r.held.mass, cofg: self.bike.cofg };
+            for k in knocked.iter_mut() {
+                k.step_own(dt, &mut quad);
+            }
+            self.body = quad.body;
+            r.held.record.collider = quad.collider;
         }
         if self.tailed.as_ref().is_some_and(|t| t.untamed.is_some()) {
             self.tail_on_untamed(dt, world);
@@ -4230,11 +4240,21 @@ impl<R: Moto + Default> Ride<R> {
         self.frame_met(dt, world, segments, met);
     }
 
-    /// [`Ride::step`] among knockable bodies (MD224, [`Ride::record_among`]).
-    pub fn step_among(&mut self, c: &crate::ride::Controls, dt: F, world: &mut dyn crate::world::World, segments: [[Vf; 2]; 4], knocked: &mut [Knockable]) {
+    /// [`Ride::step`] among knockable bodies (MD224, [`Ride::record_among`]). MD247: `hull` is the
+    /// quad's hull as the bodies' own passes strike it (its chassis' frame mesh, [`hull_file`]); its
+    /// frame and record are the quad's for the tick, whatever it holds.
+    pub fn step_among(
+        &mut self,
+        c: &crate::ride::Controls,
+        dt: F,
+        world: &mut dyn crate::world::World,
+        segments: [[Vf; 2]; 4],
+        knocked: &mut [Knockable],
+        hull: Option<&mut Knockable>,
+    ) {
         let none = crate::ride::Controls::default();
         self.controls(if self.down() { &none } else { c });
-        self.frame_among(dt, world, segments, None, knocked);
+        self.frame_among(dt, world, segments, None, knocked, hull);
     }
 
     /// **The bikes' mirrors on the quad's record** (MD179): after [`Ride::record_on`]'s refill, each
@@ -4451,8 +4471,12 @@ impl crate::handling::record::Collides for RecordOn<'_> {
 ///
 /// MD246: with its `body` (its record's resolution fields and rigid body), the quad's resolution
 /// pushes it as it pushes the quad ([`crate::atv_contact::Held::refill_among`]); without one, a hit
-/// on it is not resolved. The body is not stepped here: nothing yet runs the body's own pass, its
-/// resolution or its step (its `frame` stays where it stood).
+/// on it is not resolved.
+///
+/// MD247: with its `own` frame as well ([`KnockFrame`]), the body runs its own frame once the quad's
+/// hits wake it (its rigid body's [`crate::atv_body::Body::enabled`]): its record's pass in the quad's
+/// ([`Ride::record_among`]) and its world's step after the quad's ([`Ride::frame_among`]), which moves
+/// `frame`. Without one it stays where it stood.
 #[derive(Clone, Debug)]
 pub struct Knockable {
     pub id: u32,
@@ -4461,18 +4485,96 @@ pub struct Knockable {
     pub frame: [Vf; 4],
     pub record: crate::handling::record::Record,
     pub body: Option<crate::atv_contact::Knocked>,
+    pub own: Option<KnockFrame>,
+}
+
+/// **A knockable body's own frame** (MD247; Untamed's bale, research/oracle.txt `# MD247`), what it
+/// runs once it is awake:
+///
+/// - its record's pass, with its `rays` (its `m.col`'s and their tree, in its node's frame): the
+///   heightfield rays against the terrain ([`RecordOn::under`]), the world rays against the world and the quad's hull
+///   ([`RecordAmong`]), whose hits on the hull name the quad's record and file their mirrors on its
+///   list after the quad's own hits (the quad's pass runs first);
+/// - its own world's step after the quad's (a world of its own, `world`; Untamed's props' runs at 55
+///   a second, so two substeps at 30 frames a second): the correction's peak cleared, then each
+///   substep the vehicle's force ([`crate::atv_car::vehicle_force`]'s: `gravity` added with no mass,
+///   then nothing, then its record's resolution against the quad, `held`), and the body's
+///   [`crate::atv_body::Body::integrate_untamed`] and [`crate::atv_body::Body::end_substep`]; after
+///   the substeps its frame placed at the body ([`crate::atv_moto::quat_frame`] at
+///   [`crate::atv_moto::origin`]).
+///
+/// `held` is the record's resolution and its list: its collider is [`Knockable::body`]'s while the
+/// resolution runs, and its entries keep the relative velocities the list's slots held.
+#[derive(Clone, Debug)]
+pub struct KnockFrame {
+    pub rays: crate::flight_search::Rays,
+    pub gravity: Vf,
+    pub world: crate::biplane::World,
+    pub held: crate::atv_contact::Held,
 }
 
 impl Knockable {
     /// `mesh` standing at `frame`, its record `record` (named `id`), with no body.
     pub fn new(id: u32, mesh: crate::track::Mesh, frame: [Vf; 4], record: crate::handling::record::Record) -> Knockable {
         let facets = crate::flight_search::facets(&mesh);
-        Knockable { id, mesh, facets, frame, record, body: None }
+        Knockable { id, mesh, facets, frame, record, body: None, own: None }
     }
 
     /// The same with its body (MD246).
     pub fn with_body(self, body: crate::atv_contact::Knocked) -> Knockable {
         Knockable { body: Some(body), ..self }
+    }
+
+    /// The same with its own frame (MD247).
+    pub fn with_frame(self, own: KnockFrame) -> Knockable {
+        Knockable { own: Some(own), ..self }
+    }
+
+    /// Awake (MD247): it has its own frame and its body is enabled.
+    fn awake(&self) -> bool {
+        self.own.is_some() && self.body.is_some_and(|b| b.body.enabled)
+    }
+
+    /// Its scene node as the record's outside sees it: a node with no parent at `frame`.
+    fn scene(&self) -> crate::atv_moto::Scene {
+        let mut scene = crate::atv_moto::Scene { untamed: true, ..Default::default() };
+        scene.nodes[0].local = self.frame;
+        scene
+    }
+
+    /// **Its own world's step** (MD247, [`KnockFrame`]) with `quad` the quad's record and body its
+    /// resolution pushes, after the quad's step. A body asleep, or a list naming another record than
+    /// the quad's (`1`) or a mover, is not stepped.
+    fn step_own(&mut self, dt: F, quad: &mut crate::atv_contact::Knocked) {
+        if !self.awake() {
+            return;
+        }
+        let (Some(own), Some(k)) = (self.own.as_mut(), self.body.as_mut()) else { return };
+        if !own.held.refill_among(&self.record.contacts, vec![*quad], &[1]) {
+            return;
+        }
+        own.held.record.collider = k.collider;
+        own.held.mass = k.mass;
+        k.body.correction_peak = crate::chassis::CLEAR;
+        let (n, h) = own.world.substeps(dt);
+        for _ in 0..n {
+            if !k.body.enabled {
+                continue;
+            }
+            let b = &mut k.body;
+            b.force = b.force.merge(Dest::XYZ, b.force.add(own.gravity));
+            b.force = b.force.merge(Dest::XYZ, b.force.add(Vf::ZERO));
+            own.held.body = Some(*b);
+            own.held.resolve(k.cofg);
+            k.body = own.held.body.take().expect("the body resolved");
+            k.body.integrate_untamed(h);
+            k.body.end_substep();
+        }
+        k.collider = own.held.record.collider;
+        *quad = own.held.bodies[0];
+        own.held.bodies.clear();
+        let at = crate::atv_moto::origin(&k.body.view(), k.cofg);
+        self.frame = crate::atv_moto::quat_frame(k.body.quat, at);
     }
 }
 
@@ -4481,10 +4583,15 @@ impl Knockable {
 /// ([`crate::ray_probe::pair`], the rays stood at the scene node's frame against the body's mesh at
 /// its frame; one contact per ray, the nearest). A ray that strikes both the world and a body keeps
 /// the nearer of the two points (the port's choice: [`RecordOn`]'s world hits carry no fraction).
-/// The hits are listed in ray order. Another record a hit names is the body's own.
+/// The bodies' hits are listed first, each body's in its probe's order (MD247: the descent's through
+/// the stored tree, as the original lists a bale's hits on the quad's hull: face by face, each face's
+/// in ray order), then the world's on the other rays in ray order.
+/// Another record a hit names is the body's own.
 pub struct RecordAmong<'a, 'b> {
     pub on: RecordOn<'a>,
     pub knocked: &'b mut [Knockable],
+    /// The rays' stored tree, where they have one (a bale's, its `m.col`'s); else one is built.
+    pub tree: Option<crate::flight_search::Rays>,
 }
 
 impl RecordAmong<'_, '_> {
@@ -4496,7 +4603,7 @@ impl RecordAmong<'_, '_> {
         if self.knocked.is_empty() || segments.is_empty() {
             return Vec::new();
         }
-        let Some(tree) = crate::kiowa::try_ray_tree(&segments) else { return Vec::new() };
+        let Some(tree) = self.tree.clone().or_else(|| crate::kiowa::try_ray_tree(&segments)) else { return Vec::new() };
         self.on.scene.tip(0, Vf::new(0.0, 0.0, 0.0, 1.0));
         let probe = RayProbe { transform: self.on.scene.nodes[0].world, root: tree.root, nodes: &tree.nodes, segments: &tree.segments };
         let mut out = Vec::new();
@@ -4565,14 +4672,16 @@ impl crate::handling::record::Collides for RecordAmong<'_, '_> {
                 by_ray[i] = Some(h);
             }
         }
+        let mut out = Vec::new();
         for (i, h) in knocked {
             let from = start(i, self.on.scene);
-            match by_ray[i] {
-                Some(w) if !(far(h.point, from) < far(w.point, from)) => {}
-                _ => by_ray[i] = Some(h),
+            match by_ray[i].take() {
+                Some(w) if !(far(h.point, from) < far(w.point, from)) => out.push(w),
+                _ => out.push(h),
             }
         }
-        by_ray.into_iter().flatten().collect()
+        out.extend(by_ray.into_iter().flatten());
+        out
     }
     fn terrain_box(&self) -> [Vf; 2] {
         self.on.terrain_box()
@@ -4973,21 +5082,34 @@ impl<R: Moto + Default> Ride<R> {
     }
 
     /// [`Ride::record_on`] among knockable bodies (MD224, [`RecordAmong`]): the quad's hits on them
-    /// filed naming their records, and the mirrors on those. Each body's list is emptied first (in
-    /// the original each body's own pass clears it before the quad's runs; that pass is not run here).
+    /// filed naming their records, and the mirrors on those. Each body's list is emptied first (an
+    /// awake body's record wholly cleared, as the original's clears run before any pass).
     /// MD246: the held list holds the hits with the bodies struck as their other sides
     /// ([`crate::atv_contact::Held::refill_among`]), which the gravity's call pushes every substep;
     /// [`Ride::frame_among`] hands the pushed bodies back. A hit on a body without one
     /// ([`Knockable::body`]) does not hold: the held list is empty and the gravity resolves nothing.
-    pub fn record_among(&mut self, dt: F, world: &mut dyn crate::world::World, knocked: &mut [Knockable]) {
+    ///
+    /// MD247: a body with its own frame ([`KnockFrame`]) the quad's pass strikes wakes (in the
+    /// original the struck collidable's listener wakes it from the quad's search, and its pass runs
+    /// later the same tick). Then each awake body's pass, in `knocked`'s order, among the world and
+    /// `hull` (the quad's hull at its scene node, with the quad's record as the one its hits name):
+    /// their mirrors land on the quad's list after its own hits, and the held list is refilled from
+    /// it all.
+    pub fn record_among(&mut self, dt: F, world: &mut dyn crate::world::World, knocked: &mut [Knockable], hull: Option<&mut Knockable>) {
         let Some(r) = self.recorded.as_mut() else { return };
         for k in knocked.iter_mut() {
-            k.record.contacts.clear();
+            if k.awake() {
+                let mut scene = k.scene();
+                let mut on = RecordOn { world: &mut *world, scene: &mut scene, rays: &[], damped: None, category: 0, nobody: Default::default() };
+                crate::handling::record::clear(&mut k.record, &mut on);
+            } else {
+                k.record.contacts.clear();
+            }
         }
         let (class, category) = self.wrecked.as_ref().map_or((0, 0), |w| (w.class, w.category));
         let rays = r.active().to_vec();
-        let on = RecordOn { world, scene: &mut self.bike.parts.scene, rays: &rays, damped: None, category, nobody: Default::default() };
-        let mut among = RecordAmong { on, knocked };
+        let on = RecordOn { world: &mut *world, scene: &mut self.bike.parts.scene, rays: &rays, damped: None, category, nobody: Default::default() };
+        let mut among = RecordAmong { on, knocked: &mut *knocked, tree: None };
         crate::handling::record::clear(&mut r.record, &mut among);
         let mut view = self.body.view();
         let body = if r.record.body { Some(&mut view) } else { None };
@@ -4996,6 +5118,32 @@ impl<R: Moto + Default> Ride<R> {
             (self.body.damping, self.body.ang_damping) = (linear, angular);
         }
         self.body.set_view(&view);
+        for k in knocked.iter_mut() {
+            if k.own.is_some() && r.record.contacts.iter().any(|c| c.other == k.id) {
+                if let Some(b) = k.body.as_mut() {
+                    b.body.enabled = true;
+                }
+            }
+        }
+        if let Some(hull) = hull {
+            let w = self.bike.parts.scene.nodes[0].world;
+            hull.frame = [w[0], w[1], w[2], w[3].merge(Dest::W, Vf::new(0.0, 0.0, 0.0, 1.0))];
+            hull.id = 1;
+            std::mem::swap(&mut hull.record, &mut r.record);
+            for k in knocked.iter_mut().filter(|k| k.awake()) {
+                let mut scene = k.scene();
+                let tree = k.own.as_ref().map(|o| o.rays.clone());
+                let own_rays = tree.as_ref().map(|t| t.pairs()).unwrap_or_default();
+                let on = RecordOn { world: &mut *world, scene: &mut scene, rays: &own_rays, damped: None, category: HULL_CATEGORY, nobody: Default::default() };
+                let mut among = RecordAmong { on, knocked: std::slice::from_mut(&mut *hull), tree };
+                let b = k.body.as_mut().expect("an awake body");
+                let mut view = b.body.view();
+                let body = if k.record.body { Some(&mut view) } else { None };
+                crate::handling::record::pass(&mut k.record, k.id, body, dt, &mut among);
+                b.body.set_view(&view);
+            }
+            std::mem::swap(&mut hull.record, &mut r.record);
+        }
         let (bodies, ids): (Vec<_>, Vec<u32>) = knocked.iter().filter_map(|k| Some((k.body?, k.id))).unzip();
         r.held.refill_among(&r.record.contacts, bodies, &ids);
         self.bike.contacts = Some(r.held.clone());
