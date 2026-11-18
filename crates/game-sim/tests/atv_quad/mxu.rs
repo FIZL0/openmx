@@ -631,7 +631,7 @@ fn the_quad_from_its_files_rides_free09_headless() {
 
 /// MD123's rigs' files ([`quad::Ride::rig`]): the bike's `m.col` (the riding rays) and
 /// [`quad::WRECK_FILE`], both MXVSATV.PSR's `Veh\\Col`, or why they are not there.
-fn quad_cols() -> Option<(game_sim::track::Rays, game_sim::track::Rays)> {
+pub(super) fn quad_cols() -> Option<(game_sim::track::Rays, game_sim::track::Rays)> {
     let kit = Kit::load().map_err(|w| skip(&w)).ok()?;
     let dir = kit.ctx("mxvatv-ps2/md37a");
     let (riding, wreck) = (dir.join("250r_atv_chasism.col"), dir.join(quad::WRECK_FILE));
@@ -1060,7 +1060,7 @@ fn the_quads_trigger_and_wreck_file_come_from_its_loader() {
 }
 
 /// The quad's chassis' frame mesh (MD179's, `ATV_R_ChasisF.col` in the `mxvatv_atv` pack).
-fn quad_hull() -> Option<game_sim::track::Mesh> {
+pub(super) fn quad_hull() -> Option<game_sim::track::Mesh> {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mods/machines/mxvatv_atv/Veh/Col/ATV_R_ChasisF.col");
     let Ok(b) = std::fs::read(&path) else {
         skip(&format!("{} is not there (the mxvatv_atv pack, off MX vs. ATV's disc)", path.display()));
@@ -1121,5 +1121,78 @@ fn two_quads_meet_on_free09() {
         }
         eprintln!("MD98a two quads: the records held the other's hits {held:?} frames, the struck one pushed {pushed} times");
         assert!(held[0] > 0 && held[1] > 0 && pushed > 0, "the quads never met");
+    });
+}
+
+/// S481: [`two_quads_meet_on_free09`]'s two quads stepped in the original's frame order
+/// ([`quad::step_together`]: every record cleared, every pass, one world step, every tail). They
+/// meet: each record's list holds the mirrors (kind 1) the other quad's pass filed there, and they
+/// stay in its held list (naming the other quad, its body the other side) through its gravity's call;
+/// neither quad leaves the world. A quad alone in [`quad::step_together`] steps as
+/// [`quad::Ride::step`] does, bit for bit.
+#[test]
+fn two_quads_step_together_on_free09() {
+    let (Some(files), Some(cols), Some(hull)) = (quad_files(), quad_cols(), quad_hull()) else { return };
+    let mut disc = match Disc::open_configured() {
+        Ok(d) => d,
+        Err(why) => {
+            skip(&why);
+            return;
+        }
+    };
+    let dt = F::from_bits(0x3d08_850a);
+    const IDS: [u32; 2] = [0x01a5_11b0, 0x01aa_5020];
+    let trees = [game_sim::flight_search::Rays::of(&cols.0)];
+    in_free09(&mut disc, |world| {
+        let made = |world: &mut Place<'_>, at: (f32, f32), yaw: f32| {
+            let (mut ride, load) = files_on(&files, world, at, yaw);
+            ride.rig(&load, &cols.0, &cols.1);
+            (ride, quad::trigger_segments(&load.tires, true).expect("the trigger probe's segments"))
+        };
+        // Alone, as Ride::step.
+        let (mut alone, segments) = made(world, SPOT, 0.0);
+        let mut stepped = alone.clone();
+        for k in 0..STAND + 20 {
+            let c = if k >= STAND { Controls { gas: F::ONE, ..Controls::default() } } else { Controls::default() };
+            stepped.rest.clear();
+            stepped.step(&c, dt, world, segments);
+            alone.rest.clear();
+            let mut one = [quad::Among { ride: &mut alone, controls: c, segments, me: IDS[0], hull: &hull, trees: &trees }];
+            quad::step_together(&mut one, dt, world);
+            let wire = |r: &quad::Ride| {
+                let mut out = Vec::new();
+                game_sim::snapshot::Wire::put(r, &mut out);
+                out
+            };
+            assert!(wire(&alone) == wire(&stepped), "frame {k}: alone in step_together, {:?} against {:?}", alone.body, stepped.body);
+        }
+        // Two, meeting.
+        let (mut a, sa) = made(world, SPOT, 0.0);
+        let (mut b, sb) = made(world, (SPOT.0, SPOT.1 + 40.0), std::f32::consts::FRAC_PI_2);
+        let (mut mirrored, mut held) = ([0usize; 2], [0usize; 2]);
+        for k in 0..GAS {
+            let gas = if k >= STAND { Controls { gas: F::ONE, ..Controls::default() } } else { Controls::default() };
+            a.rest.clear();
+            b.rest.clear();
+            let mut two = [
+                quad::Among { ride: &mut a, controls: gas, segments: sa, me: IDS[0], hull: &hull, trees: &trees },
+                quad::Among { ride: &mut b, controls: Controls::default(), segments: sb, me: IDS[1], hull: &hull, trees: &trees },
+            ];
+            quad::step_together(&mut two, dt, world);
+            for (me, ride) in [&a, &b].into_iter().enumerate() {
+                let them = IDS[1 - me];
+                let r = ride.recorded.as_ref().unwrap();
+                if r.record.contacts.iter().any(|c| c.kind == 1 && c.other == them) {
+                    mirrored[me] += 1;
+                    assert!(r.held.entries.iter().any(|e| e.contact.kind == 1 && e.contact.other == Some(0)), "frame {k}: quad {me}'s mirrors are not held");
+                    assert!(!ride.rest.contains(&Call::GravityRecord), "frame {k}: quad {me}'s gravity's call was handed on");
+                }
+                held[me] += usize::from(r.held.entries.iter().any(|e| e.contact.other == Some(0)));
+                let p = ride.body.position;
+                assert!(p.0.iter().all(|v| v.is_finite()), "frame {k}: quad {me}'s body is at {p:?}");
+            }
+        }
+        eprintln!("S481 two quads together: lists with the other's mirrors {mirrored:?} frames, held the other {held:?}");
+        assert!(mirrored[0] > 0 && mirrored[1] > 0, "no mirror stayed on a record");
     });
 }

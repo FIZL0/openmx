@@ -1805,6 +1805,172 @@ pub fn frame(
     world.step(dt, &mut Frame { p, q, body, table, m });
 }
 
+/// S481: SLUS-21104's world step over several quads ([`step_together`]): each list holds one
+/// element per quad, in the quads' order (quad `i`'s [`Frame`] answers element `i` of every list).
+/// Around quad `i`'s force listener the other quads its held list names (`others[i]`, in the order
+/// its refill took them) are laid into the list from where they stand, and what its resolution did
+/// to them goes back: one world, every body pushed where it is.
+struct Frames<'a, R, G, S> {
+    frames: Vec<Frame<'a, Steps<R, G, S>>>,
+    others: Vec<Vec<usize>>,
+}
+
+impl<R: Moto, G: FnMut(Vf, &mut u8) -> (Vf, Vf), S: Sweep> crate::biplane::Dynamics for Frames<'_, R, G, S> {
+    fn count(&self, list: crate::biplane::List) -> i32 {
+        if list == crate::biplane::List::Constraints { 0 } else { self.frames.len() as i32 }
+    }
+    fn preforce(&mut self, i: i32, dt: F) {
+        self.frames[i as usize].preforce(0, dt);
+    }
+    fn force(&mut self, i: i32, h: F) {
+        let i = i as usize;
+        let others = self.others[i].clone();
+        let laid: Vec<_> = others.iter().map(|&j| (*self.frames[j].body, self.frames[j].m.bike.contacts.as_ref().map(|c| c.record.collider))).collect();
+        if let Some(held) = self.frames[i].m.bike.contacts.as_mut() {
+            for (k, (body, collider)) in held.bodies.iter_mut().zip(laid) {
+                k.body = body;
+                if let Some(c) = collider {
+                    k.collider = c;
+                }
+            }
+        }
+        self.frames[i].force(0, h);
+        let pushed = self.frames[i].m.bike.contacts.as_ref().map(|c| c.bodies.clone()).unwrap_or_default();
+        for (&j, k) in others.iter().zip(pushed) {
+            *self.frames[j].body = k.body;
+            if let Some(c) = self.frames[j].m.bike.contacts.as_mut() {
+                c.record.collider = k.collider;
+            }
+        }
+    }
+    fn enabled(&self, body: i32) -> bool {
+        self.frames[body as usize].enabled(0)
+    }
+    fn integrate(&mut self, body: i32, h: F) {
+        self.frames[body as usize].integrate(0, h);
+    }
+    fn end_substep(&mut self, body: i32) {
+        self.frames[body as usize].end_substep(0);
+    }
+    fn constrain(&mut self, _: i32, _: bool) {}
+    fn post(&mut self, i: i32, dt: F) {
+        self.frames[i as usize].post(0, dt);
+    }
+}
+
+/// **One quad among others for [`step_together`]** (S481): its ride, the pad's controls, its
+/// trigger probe's segments ([`trigger_segments`]), the name its record goes by to the others'
+/// (the original's record address will do) and its chassis' frame mesh ([`hull_file`]), which the
+/// others' passes strike. `trees`: the stored trees of the parts its record may run on (the riding
+/// `.col`'s, [`crate::flight_search::Rays::of`]): the pass strikes the others' hulls with the one
+/// whose rays are the active part's, as the original's part probe does (its tree is the file's, C38);
+/// with none, one is built ([`crate::kiowa::try_ray_tree`]), which files the hits in another order.
+pub struct Among<'a, R> {
+    pub ride: &'a mut Ride<R>,
+    pub controls: crate::ride::Controls,
+    pub segments: [[Vf; 2]; 4],
+    pub me: u32,
+    pub hull: &'a crate::track::Mesh,
+    pub trees: &'a [crate::flight_search::Rays],
+}
+
+/// **Quads stepping one frame together, in the original's order** (S481; SLUS-21104's sim frame,
+/// research/oracle.txt `# F31a`): each quad's controls laid ([`Ride::step`]'s), then every quad's
+/// record cleared, then every record's pass in turn (the others' hulls standing where their scene
+/// nodes are, [`Ride::struck`]: a hit on one files its mirror on that quad's record, which keeps it,
+/// [`crate::handling::record::pass`]), then each held list refilled from its whole list with the
+/// other quads' records and bodies; then one world step over all of them ([`Frames`]: the
+/// preforce listeners in turn, each substep every quad's force listener, whose gravity's call
+/// pushes the other quads where they are, then every body's integrate, and the post listeners);
+/// then each quad's tail and wreck test, in turn. Proved on C38's touch image: the passes in this
+/// order file both records' lists as the original's (tests/atv_quad/quads_touch.rs).
+///
+/// [`Ride::step_quads`] steps one quad's whole frame among the others instead.
+pub fn step_together<R: Moto + Default>(quads: &mut [Among<'_, R>], dt: F, world: &mut dyn crate::world::World) {
+    let none = crate::ride::Controls::default();
+    for a in quads.iter_mut() {
+        let c = if a.ride.down() { &none } else { &a.controls };
+        a.ride.controls(c);
+        let b = &mut a.ride.bike.parts.bounds;
+        *b = world_bounds(world, b.floor);
+    }
+    for a in quads.iter_mut() {
+        a.ride.record_clear(world);
+    }
+    let ids: Vec<u32> = quads.iter().map(|a| a.me).collect();
+    for i in 0..quads.len() {
+        let mut hulls: Vec<(usize, Knockable)> = Vec::new();
+        for (j, a) in quads.iter_mut().enumerate() {
+            if j != i {
+                if let Some(k) = a.ride.hull_of(a.me, a.hull) {
+                    hulls.push((j, k));
+                }
+            }
+        }
+        let mut knocked: Vec<Knockable> = hulls.iter().map(|(_, k)| k.clone()).collect();
+        let me = quads[i].me;
+        quads[i].ride.record_pass(dt, world, me, &mut knocked, quads[i].trees);
+        for ((j, _), k) in hulls.into_iter().zip(knocked) {
+            quads[j].ride.hull_back(k);
+        }
+    }
+    let mut others = Vec::with_capacity(quads.len());
+    for i in 0..quads.len() {
+        let (mut bodies, mut named, mut whose) = (Vec::new(), Vec::new(), Vec::new());
+        for (j, a) in quads.iter().enumerate() {
+            if j == i {
+                continue;
+            }
+            let Some(r) = a.ride.recorded.as_ref() else { continue };
+            bodies.push(crate::atv_contact::Knocked { collider: r.held.record.collider, body: a.ride.body, mass: r.held.mass, cofg: a.ride.bike.cofg });
+            named.push(ids[j]);
+            whose.push(j);
+        }
+        quads[i].ride.record_hold(bodies, &named);
+        others.push(whose);
+    }
+    {
+        let cell: std::cell::RefCell<&mut dyn crate::world::World> = std::cell::RefCell::new(&mut *world);
+        let ground = |at: Vf, record: &mut u8| world_ground(&mut **cell.borrow_mut(), at, record);
+        let mut steps: Vec<_> = quads
+            .iter_mut()
+            .map(|a| Steps { bike: a.ride.bike.clone(), rest: std::mem::take(&mut a.ride.rest), ground, sweep: OnWorld { world: &cell, segments: a.segments } })
+            .collect();
+        {
+            let frames = quads
+                .iter_mut()
+                .zip(steps.iter_mut())
+                .map(|(a, m)| {
+                    let Ride { p, q, body, table, .. } = &mut *a.ride;
+                    Frame { p, q, body, table, m }
+                })
+                .collect();
+            WORLD.step(dt, &mut Frames { frames, others });
+        }
+        for (a, m) in quads.iter_mut().zip(steps) {
+            (a.ride.bike, a.ride.rest) = (m.bike, m.rest);
+        }
+    }
+    for a in quads.iter_mut() {
+        let ride = &mut *a.ride;
+        if let Some(r) = &mut ride.recorded {
+            // The held list comes back from the steps' bike; the other quads it pushed are theirs
+            // already (Frames), so they go out of it.
+            if let Some(h) = ride.bike.contacts.take() {
+                r.held = h;
+            }
+            r.held.bodies.clear();
+            r.held.bikes.clear();
+        }
+        if ride.tailed.as_ref().is_some_and(|t| t.untamed.is_some()) {
+            ride.tail_on_untamed(dt, world);
+        } else {
+            ride.tail_on(dt);
+        }
+        ride.wreck_on(dt, world);
+    }
+}
+
 // --- the bike's steps on the quad (MD75a) -----------------------------------------------------------
 
 /// What SLUS-21104's bike steps keep on the quad beyond [`Quad`] and [`Body`], in the steps' own
@@ -4281,7 +4447,7 @@ impl<R: Moto + Default> Ride<R> {
         let w = self.bike.parts.scene.nodes[0].world;
         let frame = [w[0], w[1], w[2], w[3].merge(Dest::W, Vf::new(0.0, 0.0, 0.0, 1.0))];
         let body = crate::atv_contact::Knocked { collider: r.held.record.collider, body: self.body, mass: r.held.mass, cofg: self.bike.cofg };
-        Some(Knockable::new(me, mesh.clone(), frame, r.record.clone()).with_body(body))
+        Some(Knockable::new(me, mesh.clone(), frame, r.record.clone()).with_body(body).with_category(RECORD_CLASS))
     }
 
     /// **What another quad's step did to this one** (MD98a): its body and its record's resolution
@@ -4291,6 +4457,65 @@ impl<R: Moto + Default> Ride<R> {
         let (Some(r), Some(b)) = (self.recorded.as_mut(), k.body) else { return };
         self.body = b.body;
         r.held.record.collider = b.collider;
+    }
+
+    /// S481, [`step_together`]'s clear: the record's heightfield flag from [`Quad::tipped`] (as
+    /// [`Ride::record_on`] lays it), the record cleared, and the damping the clear gives the body.
+    fn record_clear(&mut self, world: &mut dyn crate::world::World) {
+        let Some(r) = self.recorded.as_mut() else { return };
+        r.record.heightfield = self.q.tipped;
+        let mut on = RecordOn { world, scene: &mut self.bike.parts.scene, rays: &[], damped: None, category: 0, nobody: Default::default(), stood: None };
+        crate::handling::record::clear(&mut r.record, &mut on);
+        if let Some((linear, angular)) = on.damped {
+            (self.body.damping, self.body.ang_damping) = (linear, angular);
+        }
+    }
+
+    /// S481, [`step_together`]'s pass: [`Ride::record_as`]'s pass on a cleared record, named `me`,
+    /// among `others` (the other quads' hulls, [`Ride::hull_of`]), whose records take the mirrors;
+    /// its struck class into [`Bike::struck_class`]. The held list is not refilled: the others'
+    /// passes may file more on this record ([`Ride::record_hold`]).
+    fn record_pass(&mut self, dt: F, world: &mut dyn crate::world::World, me: u32, others: &mut [Knockable], trees: &[crate::flight_search::Rays]) {
+        let Some(r) = self.recorded.as_mut() else { return };
+        let (class, category) = self.wrecked.as_ref().map_or((0, 0), |w| (w.class, w.category));
+        let rays = r.active().to_vec();
+        let tree = trees.iter().find(|t| t.pairs() == rays).cloned();
+        let stood = r.kept.then(|| self.bike.parts.collidables.states[crate::atv_sync::slot(r.active_part())].frame);
+        r.kept = false;
+        let on = RecordOn { world, scene: &mut self.bike.parts.scene, rays: &rays, damped: None, category, nobody: Default::default(), stood };
+        let mut among = RecordAmong { on, knocked: others, tree };
+        let mut view = self.body.view();
+        let body = if r.record.body { Some(&mut view) } else { None };
+        crate::handling::record::pass(&mut r.record, me, body, dt, &mut among);
+        let struck = r.record.struck;
+        let quad_struck = among.knocked.iter().any(|k| k.id == struck) && r.record.contacts.iter().any(|c| c.other == struck);
+        self.bike.struck_class = !quad_struck && among.on.struck_class(&r.record, class);
+        self.body.set_view(&view);
+    }
+
+    /// S481, [`step_together`]'s refill once every pass ran: the held list from the record's whole
+    /// list (its own hits and the mirrors the others' passes filed), with `bodies` (named `ids`) the
+    /// other quads' records and bodies; the record's touch into [`Bike::touching`].
+    fn record_hold(&mut self, bodies: Vec<crate::atv_contact::Knocked>, ids: &[u32]) {
+        let Some(r) = self.recorded.as_mut() else { return };
+        r.held.refill_among(&r.record.contacts, bodies, ids);
+        self.bike.contacts = Some(r.held.clone());
+        self.bike.touching = r.record.touching;
+    }
+
+    /// S481: [`Ride::struck`] with the record itself moved in, not copied: another quad's pass files
+    /// its mirrors there, and [`Ride::hull_back`] puts it back.
+    fn hull_of(&mut self, me: u32, mesh: &crate::track::Mesh) -> Option<Knockable> {
+        let k = self.struck(me, mesh)?;
+        let record = std::mem::take(&mut self.recorded.as_mut()?.record);
+        Some(Knockable { record, ..k })
+    }
+
+    /// The record [`Ride::hull_of`] moved out, back with what was filed on it.
+    fn hull_back(&mut self, k: Knockable) {
+        if let Some(r) = self.recorded.as_mut() {
+            r.record = k.record;
+        }
     }
 
     /// **The bikes' mirrors on the quad's record** (MD179): after [`Ride::record_on`]'s refill, each
@@ -4562,6 +4787,10 @@ pub struct Knockable {
     pub record: crate::handling::record::Record,
     pub body: Option<crate::atv_contact::Knocked>,
     pub own: Option<KnockFrame>,
+    /// S481: the category word its collidable is in (the struck collidable's `+0x94`, which the
+    /// striking record's mask is tested against); `None`, the striking pass's own
+    /// ([`RecordOn::category`]), as before.
+    pub category: Option<u32>,
 }
 
 /// **A knockable body's own frame** (MD247; Untamed's bale, research/oracle.txt `# MD247`), what it
@@ -4593,7 +4822,12 @@ impl Knockable {
     /// `mesh` standing at `frame`, its record `record` (named `id`), with no body.
     pub fn new(id: u32, mesh: crate::track::Mesh, frame: [Vf; 4], record: crate::handling::record::Record) -> Knockable {
         let facets = crate::flight_search::facets(&mesh);
-        Knockable { id, mesh, facets, frame, record, body: None, own: None }
+        Knockable { id, mesh, facets, frame, record, body: None, own: None, category: None }
+    }
+
+    /// The same in the category `word` (S481: another quad's hull, [`RECORD_CLASS`]).
+    pub fn with_category(self, word: u32) -> Knockable {
+        Knockable { category: Some(word), ..self }
     }
 
     /// The same with its body (MD246).
@@ -4691,7 +4925,7 @@ impl RecordAmong<'_, '_> {
             }
             for c in &rec.contacts {
                 let Some(i) = rays.iter().position(|&[a, b]| a == c.from && b == c.to) else { continue };
-                let struck = crate::handling::record::Struck { object: k.id, other: k.id, mover: 0, category: self.on.category };
+                let struck = crate::handling::record::Struck { object: k.id, other: k.id, mover: 0, category: k.category.unwrap_or(self.on.category) };
                 out.push((i, crate::handling::record::Hit { from: c.from, to: c.to, normal: c.normal, point: c.point, struck }));
             }
         }
@@ -6055,10 +6289,11 @@ const RIG_AT: crate::handling::mass::Layout = crate::handling::mass::Layout { ob
 const RIG_CLASS_AT: u32 = 0x5000;
 /// The record's constructor words no `.phy` key writes, as the spawned quad holds them (the Oasis
 /// spawn image's record): the actor bit it is, what it collides with (everything), and its class
-/// word (the record's `+0x208` object's `+0x94`).
+/// word (the record's `+0x208` object's `+0x94`). S481: that object is the quad's hull, and its
+/// class word the category another quad's pass strikes it in (C38's touch image).
 const RECORD_ACTORS: u32 = 0x1000;
 const RECORD_COLLIDES: u32 = !0;
-const RECORD_CLASS: u32 = 0x3012;
+pub const RECORD_CLASS: u32 = 0x3012;
 /// The handles the quad's ray parts and the quad itself go by ([`build_wreck_body`]'s lists, the
 /// swap): any distinct words other than 0, since an MX Unleashed world never names them.
 const RIDING_RAYS: u32 = 1;
