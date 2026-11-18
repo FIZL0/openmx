@@ -1129,7 +1129,7 @@ score_machine_zones_end     boot 0x00264520 the pc after the zone list
 #   The vtable-only caller 0x00285090 (vtables 0x0045542c, 0x0045c53c) is an AI driver's steering
 #   (+0xd4 its card, +0xdc the track): with its +0x30 bit 0x40000000 it tests the card's next gate
 #   (+0x80) and on 2 (beside) sets +0x30 |= 0xffffffff80000000, which sends it back along the path
-#   (0x0026e0c0, 0x0026d780). AI, not lap bookkeeping: not ported (S292b).
+#   (0x0026e0c0, 0x0026d780). S292b: this is ai_gate_drive below, ported as ai::drive::mode_four (S314).
 # S13e: the track's race file. Not in Tracks\sx01.res: it is tracks\sx01\sx01.tdf inside
 # Tracks\sx01_2.res (with sx01ai.tdf, supercross.aty, sx01.wpt, hit.dat).
 # S282c: tracks\sx01\sx01ai.tdf is a second race file, read by the same track_file_load into
