@@ -29,6 +29,8 @@ bodies after it, and the nine bone collisions.
 
 After the load it rides 30 frames (no pad) before it pauses; `ride=0` teleports as soon after the load
 as the pause lands (B15/C37: a state saved mid-jump, research/c37/south3.sh's).
+With `req` each row also has the riding request's (body actor +0x488) +0x10 rows, +0x50 frame (the
+bike model's "Bike" root node in the world), +0xa0 rates and +0xb0..+0xe0 hands and feet (S466).
 Run it under `./kit pcsx2 with --`, with PCSX2 started under QT_ACCESSIBILITY=1.
 """
 
@@ -52,6 +54,7 @@ SECS = float(sys.argv[6])
 OUT = Path(sys.argv[7])
 BONES = 'bones' in sys.argv[8:]   # move the ragdoll with the bike
 RIDE = next((int(a[5:]) for a in sys.argv[8:] if a.startswith('ride=')), 30)
+REQ = 'req' in sys.argv[8:]       # S466: the riding request's rows, frame and rates too
 SYM = cfg().symbols
 FRAME = SYM['frame_counter']
 MANAGER = SYM['game_manager']
@@ -175,12 +178,20 @@ reads = [(veh + 0x1b0, 12), (ch + 0x260, 12), (BODY + 0x2d0, 12), (BODY + 0x310,
          (rider + 0xd40, 12), (rider + 0x748, 4), (actor + 0x2a4, 12), (actor + 0x6b0, 12)]
 reads += [(c + 0x14, 4) for c in coll]
 reads += [(lo, hi - lo)]
+REQ_AT = p.read32(actor + 0x488)
+if REQ:
+    reads += [(REQ_AT + 0x10, 0x40), (REQ_AT + 0x50, 0x40), (REQ_AT + 0xa0, 0x10), (REQ_AT + 0xb0, 0x40)]
 
 head = ['frame', 'x', 'y', 'z', 'vx', 'vy', 'vz', 'body_2d0_x', 'body_2d0_y', 'body_2d0_z', 'body_310_x',
         'body_310_y', 'body_310_z', 'cofg_x', 'cofg_y', 'cofg_z', 'pub_x', 'pub_y', 'pub_z', 'reason', 'riding',
         'placed', 'off_bike', 'settled', 'flung', 'touch']
 for i in range(PARTS):
     head += ['b%d_%s' % (i, c) for c in ('x', 'y', 'z', 'vx', 'vy', 'vz')]
+if REQ:
+    head += ['rows%d%s' % (r, c) for r in range(4) for c in 'xyzw']
+    head += ['frame%d%s' % (r, c) for r in range(4) for c in 'xyzw']
+    head += ['rates_%s' % c for c in 'xyzw']
+    head += ['%s_%s' % (h, c) for h in ('hand0', 'hand1', 'foot0', 'foot1') for c in 'xyzw']
 head += ['same']
 
 
@@ -205,6 +216,8 @@ def row(f, raw):
     out.append(touch)
     for b in bones:
         out += struct.unpack_from('<3f', raw, o + b - lo + 0x60) + struct.unpack_from('<3f', raw, o + b - lo + 0x70)
+    if REQ:
+        out += struct.unpack_from('<52f', raw, o + hi - lo)
     return out
 
 
