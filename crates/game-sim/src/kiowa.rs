@@ -2179,6 +2179,25 @@ impl Surroundings for OnMxvatv<'_> {
     }
 }
 
+/// **SLUS-21104's Kiowa record off the disc** (MD115a): the plane's record built the plane's way
+/// ([`crate::flight::MxvatvRecord::read`]), off the helicopter's files: `Veh\kiowa.phy`'s `[Mass
+/// Properties]`, the skin's model (`Veh\Anim\<skin>.psg`) and its ray probe (`Veh\Col\<Skin>M.col`,
+/// 22 rays for model one, 24 for model two). The helicopter's record is the same class with the same
+/// constructor words (the class word too), so nothing differs but the files.
+pub fn mxvatv_record(phy: &[u8], psg: &[u8], rays: &[u8], curve: &CurveTable) -> Result<crate::flight::MxvatvRecord, String> {
+    crate::flight::MxvatvRecord::read(phy, psg, rays, curve)
+}
+
+impl WreckRotor {
+    /// **The rotor's collision spheres' centres** (MD115a), in the model's frame, what
+    /// [`OnMxvatv`]'s strike asks the terrain under: SLUS-21104's rotor collision object (`+0x11c8`)
+    /// holds the wreck rays as the loader's tree keeps them ([`WreckRotor::probe`]), a sphere at each
+    /// ray's far end.
+    pub fn centres(&self) -> Vec<Vf> {
+        self.probe().pairs().iter().map(|r| r[1]).collect()
+    }
+}
+
 // --- the wreck and the put-back ----------------------------------------------------------------------
 
 /// What every accumulator and a body's start velocity and rates are reset to: the constant
