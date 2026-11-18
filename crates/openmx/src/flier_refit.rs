@@ -14,13 +14,15 @@ use super::vehicle::{self, PackFlier};
 
 /// One livery's plane files, what its flights are built off: the plane's `.phy` (the pack's, else
 /// the disc's), whether it is MX vs. ATV's and which of its two models (`Some(true)` model one, on
-/// SLUS-21104's steps), and its collision object's ray probe and hull.
+/// SLUS-21104's steps), its collision object's ray probe and hull, and a pack plane's SLUS-21104
+/// collision record (MD110a1), which its flights take over SLUS-21104's terrain.
 #[derive(Clone, Default)]
 pub struct PlaneFiles {
     pub phy: Option<Vec<u8>>,
     pub mxvatv: Option<bool>,
     pub rays: Option<Rays>,
     pub hull: Option<Mesh>,
+    pub record: Option<game_sim::flight::MxvatvRecord>,
 }
 
 impl PlaneFiles {
@@ -46,7 +48,8 @@ impl PlaneFiles {
         let hull = res.and_then(|_| pack.and_then(|f| f.hull()).or_else(|| disc(game_sim::flight::HULL))).and_then(|bytes| {
             Mesh::parse(&bytes).map_err(|e| eprintln!("biplane: {}: {e}", game_sim::flight::HULL)).ok()
         });
-        PlaneFiles { phy, mxvatv, rays, hull }
+        let record = pack.filter(|f| f.phy_bytes().is_some()).and_then(PackFlier::mxvatv_record);
+        PlaneFiles { phy, mxvatv, rays, hull, record }
     }
 
     /// The plane's stock file the modifiers go on: MX vs. ATV's read for the skin's model.
