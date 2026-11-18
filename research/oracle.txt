@@ -1530,7 +1530,10 @@ ride_state_machine          boot 0x0027bc90 (dt in f12, bike) the player bike's 
 #                                           CannonballWreckTime, +0xd3c the settle gate, +0x10d0 the AI
 #                                           route (+0xd4 = following), +0x20 the player record (+0x34
 #                                           control source, 1 = local human; +0x50 its screen), +0xf9c
-#                                           the race record (bit 0x80000 of the long at +8), +0x12d8
+#                                           the race record (bit 0x80000 of the long at +8: the card's
+#                                           jump watch, cleared 0x0027be2c..0x0027be50 every tick +0x748
+#                                           != 0, after the reset request; S429 RaceCard::riding_bit),
+#                                           +0x12d8
 #                                           wrecks per stats period, +0x12f8 entries per restart,
 #                                           +0x14b4 the shown flag, +0x14d0 the chord latch, +0x14d4
 #                                           the put-back kind
