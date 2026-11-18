@@ -9,7 +9,10 @@
 //! 3. **the ride** — a plane flown level into a wall of bikes strikes one, does not crash on it and
 //!    does not fly through; with the bikes out of the world it flies through;
 //! 4. **the records** (B9) — each bike is its collision record's, and the plane's rays on a bike
-//!    moved into it name that record and file their mirrors on it as the port's search does.
+//!    moved into it name that record and file their mirrors on it as the port's search does;
+//! 5. **the bikes ride on** (B9a) — the plane's node collides its record before the AI bikes', so a
+//!    struck bike's list is the plane's mirrors ahead of its own, and one-player `Sim::step` steps a
+//!    bike the plane pushed.
 
 use game_render::disc::Disc;
 use game_sim::archive::{Psr, Res};
@@ -32,6 +35,8 @@ const PLANE_COLLISION: u32 = 0x170;
 const NEARBY: u32 = 0x10c;
 const RAY_PROBE: u32 = 0x1f0;
 const SWEEP_PROBE: u32 = 0x1f4;
+/// The collision node the plane's record is on (B9a).
+const NODE: u32 = 0x0060_b200;
 
 /// A collidable's fields (S44/S45's offsets, and the bike's: S95).
 mod at {
@@ -313,6 +318,45 @@ fn a_plane_flown_into_named_bikes_pushes_them() {
     assert!(met.struck.is_empty() && met.pushed.is_empty() && met.vehicles.iter().all(|v| v.velocity == Vf::ZERO), "unnamed bikes moved");
 }
 
+/// **B9a: the AI riders ride on while player 1 flies**: one-player `Sim::step` with the plane up and
+/// another rider's bike in its way. The frame the plane's rays strike the bike, its resolve pushes the
+/// bike's chassis the plane's way, and the bike — stepped after the plane, as the original's bike world
+/// is (S99's clock), its list the plane's mirrors — moves on that push; before B9a it stood still for
+/// as long as the plane flew.
+#[test]
+fn the_bike_a_one_player_plane_strikes_rides_on() {
+    let Some((f, _)) = the_plane() else { return };
+    let mut sim = game_sim::Sim::new(0x5354);
+    let mounts = game_sim::stock::mounts(&sim.phy);
+    let start = Vf::new(0.0, 197.0, 30.0, 1.0);
+    let mut other = game_sim::rider::Rider::new(&sim.phy, mounts, start, Vf::new(1.0, 0.0, 0.0, 0.0), game_sim::trick::Set::default());
+    // Kept up on its bike: this is about the push, not the wreck it may lead to.
+    other.sense.wrecks_enabled = false;
+    other.sense.air_wrecks = false;
+    let phy = (*sim.phy).clone();
+    sim.add_player(phy, other);
+    let mut f = f;
+    f.attitude.flown = true;
+    f.place(Vf::new(0.0, 198.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 0.0), &sim.tables.ride.acos);
+    f.body.velocity = Vf::new(0.0, 0.0, 120.0, 1.0);
+    sim.plane = Some(f);
+    let mut ground = Flat { y: F(196.0), ..Default::default() };
+    let dt = F(1.0 / 30.0);
+    let mut pushed = None;
+    for tick in 0..40 {
+        let before = sim.others[0].rider.ride.position();
+        sim.step(dt, &Default::default(), &mut ground);
+        let r = &sim.others[0].rider;
+        assert_ne!(r.ride.position().to_bits(), before.to_bits(), "tick {tick}: the other rider was not stepped");
+        if pushed.is_none() && r.ride.chassis.vel.z() > 1.0 {
+            pushed = Some(tick);
+        }
+    }
+    let t = pushed.expect("the plane never pushed the bike");
+    let z = sim.others[0].rider.ride.position().z();
+    assert!(z > start.z() + 1.0, "the pushed bike (tick {t}) did not ride on: z {z:?}");
+}
+
 /// A collision record's list (count `+0x100`, entries of 0x80 at `+0x108`), each entry's other side
 /// named by its place in `recs` (99: something else, `None`: nothing).
 fn list_at(ee: &Ee, r: u32, recs: &[u32]) -> Vec<game_sim::contact::Contact> {
@@ -484,3 +528,87 @@ const B9_POSES: [(usize, [f32; 3]); 8] = [
     (0, [2.0, -3.0, 3.0]),
     (1, [-1.5, -2.5, -2.0]),
 ];
+
+/// [`B9_POSES`]' pose `pose` on a fresh image: the bike moved into the plane, its box's centre rebuilt
+/// and the plane's search refilled, as [`the_one_player_planes_rays_name_the_states_bikes`] sets it.
+fn posed(pose: usize, found: &[u32]) -> Option<Ee> {
+    let (moved, offset) = B9_POSES[pose];
+    let mut ee = image()?;
+    let body = body_of(&ee, ee.u32_at(ee.u32_at(PLANE + PLANE_COLLISION) + 0xf4));
+    let p = body.position;
+    let at = Vf::new(p.x() + offset[0], p.y() + offset[1], p.z() + offset[2], 1.0);
+    let o = found[moved];
+    for (l, x) in at.0.iter().enumerate() {
+        ee.set_f32(o + at::TRANSFORM + 0x30 + 4 * l as u32, *x);
+    }
+    let spare = (ee.stack - 0x8000) & !0xf;
+    ee.call(addr("mesh_collidable_bounds").unwrap(), &[u64::from(o), u64::from(o + at::CENTRE), u64::from(spare)], &[], 1_000_000);
+    ee.call(addr("plane_refresh_search").unwrap(), &[u64::from(PLANE + 0x50)], &[], 50_000_000);
+    Some(ee)
+}
+
+/// **B9a: a bike's list is the plane's mirrors, then its own**. The original's collision node empties
+/// every record's list, then searches the plane's record before the bikes' (S99's clock): the bike
+/// moved into the plane resolves, in the bike world's step after the plane's post, a list of the
+/// plane's kind-1 mirrors first and its own search's entries after, up to its record's capacity.
+/// At every pose in [`B9_POSES`], the moved bike's list after the plane's collide and then its own
+/// is, entry for entry and bit for bit, [`game_sim::rider_contact::struck_first`] of the mirrors the
+/// plane's collide alone left on it and the list the bike's collide alone files on a second image —
+/// what `Sim::step`'s plane lane hands each AI rider's frame. The state's own collision node collides
+/// the plane's record first and the AI riders' bikes after it.
+#[test]
+fn a_bike_the_plane_struck_lists_its_mirrors_ahead_of_its_own() {
+    let Some(ee) = image() else { return };
+    let found = bikes_in(&ee);
+    let recs: Vec<u32> = found.iter().map(|&o| ee.u32_at(o + 0x80)).collect();
+    let rec = ee.u32_at(PLANE + PLANE_COLLISION);
+    let mut named = recs.clone();
+    named.push(rec);
+    // The plane's collision node (its dynamics world at +0x78 is S99's): count +0x30,
+    // records +0x38, collided in that order. The plane's record leads, the AI riders' bikes follow.
+    let node: Vec<u32> = (0..ee.u32_at(NODE + 0x30)).map(|k| ee.u32_at(ee.u32_at(NODE + 0x38) + 4 * k)).collect();
+    assert_eq!(node.first(), Some(&rec), "the node's first record is the plane's: {node:x?}");
+    for &r in &recs[1..] {
+        assert!(node.contains(&r), "bike record {r:#x} is not on the plane's node: {node:x?}");
+    }
+    let dt = ee.f32_at(addr("frame_dt").unwrap());
+    let empty_all = |ee: &mut Ee| {
+        for &r in &named {
+            ee.call(ee.u32_at(ee.u32_at(r + 8) + 0x74), &[u64::from(r)], &[], 1_000_000);
+        }
+    };
+    let collide = |ee: &mut Ee, r: u32| {
+        ee.call(addr("collision_record_collide").unwrap(), &[u64::from(r)], &[dt], 50_000_000);
+    };
+    let (mut struck, mut both, mut full) = (0, 0, 0);
+    for pose in 0..B9_POSES.len() {
+        let moved = B9_POSES[pose].0;
+        let r = recs[moved];
+        // the tick: lists emptied, the plane's collide, then the bike's
+        let Some(mut ee) = posed(pose, &found) else { return };
+        empty_all(&mut ee);
+        collide(&mut ee, rec);
+        let mirrors = list_at(&ee, r, &named);
+        assert!(mirrors.iter().all(|c| c.kind == 1 && c.other == Some(recs.len())), "pose {pose}: the plane's mirrors on bike {moved}: {mirrors:?}");
+        collide(&mut ee, r);
+        let all = list_at(&ee, r, &named);
+        // the bike's collide alone, on the same pose
+        let Some(mut alone) = posed(pose, &found) else { return };
+        empty_all(&mut alone);
+        collide(&mut alone, r);
+        let own = list_at(&alone, r, &named);
+        let port = game_sim::rider_contact::struck_first(std::slice::from_ref(&mirrors), own.clone(), Vf::ZERO, &Flat::default());
+        assert_eq!(port.len(), all.len(), "pose {pose}: bike {moved}'s list\nport {port:?}\noriginal {all:?}");
+        for (k, (a, b)) in port.iter().zip(&all).enumerate() {
+            assert!(same_entry(a, b), "pose {pose}: bike {moved} entry {k}\nport {a:?}\noriginal {b:?}");
+        }
+        struck += usize::from(!mirrors.is_empty());
+        both += usize::from(!mirrors.is_empty() && !own.is_empty());
+        full += usize::from(mirrors.len() + own.len() > game_sim::rider_contact::CAPACITY);
+        eprintln!("B9a pose {pose}: {} mirrors, {} own, {} listed", mirrors.len(), own.len(), all.len());
+    }
+    eprintln!("B9a: {struck} poses struck, {both} with the bike's own entries too, {full} past the record's room");
+    // The bike's own rays stand where its chassis was (only its collidable moved), and strike
+    // nothing there: its own list is empty at every pose. Pose 7's mirrors fill its record.
+    assert_eq!((struck, both, full), (7, 0, 0), "the poses the plane struck the bike in");
+}
