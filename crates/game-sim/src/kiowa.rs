@@ -2449,6 +2449,22 @@ fn place_mxvatv(body: &mut Body, position: &mut Vf, facing: Vf, up: Vf) -> (Vf, 
     axes
 }
 
+/// How far SLUS-21104's placement lifts the spawn along the ground's normal (0.3).
+const SNAP_LIFT: f32 = f32::from_bits(0x3e99_999a);
+
+/// **SLUS-21104's placement's ground snap** (MXVehicle's put-back asked to snap, the vehicle having a
+/// ground; MD214): the spawn's position through the ground query ([`crate::atv_ground::query`], its
+/// `y` the ground's height where the terrain has a cell), then moved along the answered normal by
+/// [`SNAP_LIFT`] (`xyz`); the nose the spawn's, the up the normal (the whole quad). Where the query
+/// writes no normal (a terrain with no map) the original reads its stack's leftovers; here the
+/// spawn's up stands in.
+fn snap_mxvatv(t: &crate::atv_ground::Terrain<'_>, spawn: [Vf; 3]) -> [Vf; 3] {
+    let [mut at, facing, mut normal] = spawn;
+    crate::atv_ground::query(t, &mut at, Some(&mut normal), None);
+    let lift = normal.merge(Dest::XYZ, normal.mul_q(SNAP_LIFT));
+    [at.merge(Dest::XYZ, at.add(lift)), facing, normal]
+}
+
 /// `orientation_transform_point`: `p` through the transform, row 3 first (`+ vf0.x`), then `x`,
 /// `y` and `z`; `w` is `p`'s.
 fn node_point(m: &Mat4, p: Vf) -> Vf {
@@ -2620,12 +2636,22 @@ impl Wreckage {
     ///
     /// SLUS-21104's ([`Wreckage::mxvatv`]: its unwreck, vt `+0x36c`, around MXVehicle's placement)
     /// copies the spawn over the place first, whether owned or not, and stands the body by its model's
-    /// origin there ([`place_mxvatv`]); its owner's bit only leaves the 0.5. Not here: its ground search
-    /// when the helicopter has a ground (the place moved 0.3 along the ground's normal, the up that
-    /// normal).
+    /// origin there ([`place_mxvatv`]); its owner's bit only leaves the 0.5. With no ground it does not
+    /// snap ([`Wreckage::put_back_on`]).
     pub fn put_back(&mut self, ride: &mut Ride, owned: bool) -> F {
+        self.put_back_on(ride, owned, None)
+    }
+
+    /// [`Wreckage::put_back`] over the helicopter's ground (`+0x3b4`, SLUS-21104's terrain; MD214):
+    /// SLUS-21104's placement, given one, snaps the spawn to it ([`snap_mxvatv`]) before it stands
+    /// the body there. MX Unleashed's has no ground to ask, and with [`Wreckage::mxvatv`] off this is
+    /// [`Wreckage::put_back`].
+    pub fn put_back_on(&mut self, ride: &mut Ride, owned: bool, ground: Option<&crate::atv_ground::Terrain<'_>>) -> F {
         if self.mxvatv {
             self.place = self.spawn;
+            if let Some(t) = ground {
+                self.place = snap_mxvatv(t, self.spawn);
+            }
             let [mut at, facing, up] = self.place;
             let (facing, up) = place_mxvatv(&mut ride.body, &mut at, facing, up);
             self.place = [at, facing, up];
@@ -2650,13 +2676,26 @@ impl Wreckage {
     /// cannot reach the [`Kiowa`], so the caller hands it to [`Kiowa::put_back_controls`] after the
     /// tick (nothing between reads what it zeroes).
     pub fn act(&mut self, asked: &Crashed, ride: &mut Ride, throw: &Throw, owned: bool, rng: &mut Rng) -> Option<F> {
+        self.act_on(asked, ride, throw, owned, rng, None)
+    }
+
+    /// [`Wreckage::act`] with the put-back over the helicopter's ground ([`Wreckage::put_back_on`]).
+    pub fn act_on(
+        &mut self,
+        asked: &Crashed,
+        ride: &mut Ride,
+        throw: &Throw,
+        owned: bool,
+        rng: &mut Rng,
+        ground: Option<&crate::atv_ground::Terrain<'_>>,
+    ) -> Option<F> {
         if let Some(reason) = asked.wreck {
             self.wreck_mx(ride, reason, throw, rng);
         }
         if asked.debris {
             self.throw_blades(ride, throw, rng);
         }
-        asked.recover.then(|| self.put_back(ride, owned))
+        asked.recover.then(|| self.put_back_on(ride, owned, ground))
     }
 }
 

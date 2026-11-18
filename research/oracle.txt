@@ -13556,6 +13556,12 @@ race_finish_listener        boot 0x002fc410 slot +0x14 (Finished; thunk 0x003004
 #   +0x132c..+0x1338 (vtable 0x003cce10: +0x130 start 0x004946c0, +0xf0 place = the orient 0x00492e50, so the
 #   blade's centre also moves on by its turned cofg (0, 0, 9)). Node world rows +0x70..+0xa0, brought up to date
 #   by 0x00193b30 (hooked in the oracle). rand 0x003561a8. 10000 cases bit-exact.
+# MD214 — the MX vs. ATV Kiowa put-back's ground snap (src kiowa::Wreckage::put_back_on / act_on, snap_mxvatv;
+#   test mxvatv_kiowa.rs the_mxvatv_put_back_snaps_to_the_ground_as_the_original; journal
+#   research/journal/2026-11-18-md214-kiowa-put-back-ground-snap). 0x004a6f70 with +0x3b4 left in (kiowa image:
+#   Desert Oasis's terrain object, MC02.ps2.trn): 0x004833c0(ground, +0x50, sp+80, 0, 0) writes +0x54 (y) in place,
+#   +0x50.xyz += normal.xyz * 0x3e99999a, +0x70 = normal (whole quad), +0x60 = +0xd50. 10000 cases bit-exact.
+#   The game's MX vs. ATV helicopter now runs Wreckage::mxvatv, spawn = model origin where taken.
 # B34b — a prop the plane wakes strikes the props beside it in the same walk (src prop_props.rs
 #   strike_props_late, prop_contact.rs strike_in; test prop_plane.rs a_ball_the_plane_wakes_strikes_the_ball_beside_it;
 #   journal research/journal/2026-11-17-b34b-late-prop-strikes-props).
