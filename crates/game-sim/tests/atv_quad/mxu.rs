@@ -1058,3 +1058,68 @@ fn the_quads_trigger_and_wreck_file_come_from_its_loader() {
     assert!(bare.recorded.as_ref().unwrap().wreck.is_empty(), "no file, no wreck rays");
     assert_eq!(bare.bike.parts.collidables.states[slot(quad::Part::Wreck)].kind, game_sim::atv_sync::Kind::default());
 }
+
+/// The quad's chassis' frame mesh (MD179's, `ATV_R_ChasisF.col` in the `mxvatv_atv` pack).
+fn quad_hull() -> Option<game_sim::track::Mesh> {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mods/machines/mxvatv_atv/Veh/Col/ATV_R_ChasisF.col");
+    let Ok(b) = std::fs::read(&path) else {
+        skip(&format!("{} is not there (the mxvatv_atv pack, off MX vs. ATV's disc)", path.display()));
+        return None;
+    };
+    Some(game_sim::track::Mesh::parse(&b).unwrap_or_else(|e| panic!("ATV_R_ChasisF.col: {e}")))
+}
+
+/// MD98a: two quads made from their files on free09, the one standing across the track 40 ft ahead
+/// of the other, which goes on the gas into it. Each steps among the other ([`quad::Ride::step_quads`],
+/// the other as its record strikes it, [`quad::Ride::struck`]) and the other takes what its
+/// resolution did ([`quad::Ride::take_pushed`]). They meet: each record's held list holds hits naming
+/// the other quad's record, with its body as their other side, the gravity's call answers them, and
+/// the struck quad comes back pushed (the spring pushes only its own side: the other is pushed by the
+/// impulse of a hard hit); neither quad leaves the world.
+#[test]
+fn two_quads_meet_on_free09() {
+    let (Some(files), Some(cols), Some(hull)) = (quad_files(), quad_cols(), quad_hull()) else { return };
+    let mut disc = match Disc::open_configured() {
+        Ok(d) => d,
+        Err(why) => {
+            skip(&why);
+            return;
+        }
+    };
+    let dt = F::from_bits(0x3d08_850a);
+    const IDS: [u32; 2] = [0x01a5_11b0, 0x01aa_5020];
+    in_free09(&mut disc, |world| {
+        let mut quads: Vec<(quad::Ride, [[Vf; 2]; 4])> = [(SPOT, 0.0), ((SPOT.0, SPOT.1 + 40.0), std::f32::consts::FRAC_PI_2)]
+            .into_iter()
+            .map(|(at, yaw)| {
+                let (mut ride, load) = files_on(&files, world, at, yaw);
+                ride.rig(&load, &cols.0, &cols.1);
+                (ride, quad::trigger_segments(&load.tires, true).expect("the trigger probe's segments"))
+            })
+            .collect();
+        let (mut held, mut pushed) = ([0usize; 2], 0usize);
+        for k in 0..GAS {
+            for me in 0..2 {
+                let them = 1 - me;
+                let c = if me == 0 && k >= STAND { Controls { gas: F::ONE, ..Controls::default() } } else { Controls::default() };
+                let mut other = [quads[them].0.struck(IDS[them], &hull).expect("a record")];
+                let was = other[0].body.expect("a body").body;
+                let (ride, segments) = &mut quads[me];
+                ride.rest.clear();
+                ride.step_quads(&c, dt, world, *segments, IDS[me], &mut other);
+                let r = ride.recorded.as_ref().unwrap();
+                if r.record.contacts.iter().any(|c| c.other == IDS[them]) {
+                    assert!(r.held.entries.iter().any(|e| e.contact.other == Some(0)), "frame {k}: quad {me}'s hits on the other are not held");
+                    assert!(!ride.rest.contains(&Call::GravityRecord), "frame {k}: quad {me}'s gravity's call was handed on");
+                    held[me] += 1;
+                }
+                pushed += usize::from(other[0].body.unwrap().body.velocity != was.velocity);
+                quads[them].0.take_pushed(&other[0]);
+                let p = quads[me].0.body.position;
+                assert!(p.0.iter().all(|v| v.is_finite()), "frame {k}: quad {me}'s body is at {p:?}");
+            }
+        }
+        eprintln!("MD98a two quads: the records held the other's hits {held:?} frames, the struck one pushed {pushed} times");
+        assert!(held[0] > 0 && held[1] > 0 && pushed > 0, "the quads never met");
+    });
+}

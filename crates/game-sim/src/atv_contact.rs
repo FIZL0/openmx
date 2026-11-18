@@ -163,7 +163,8 @@ pub struct Held {
     pub bodies: Vec<Knocked>,
 }
 
-/// **A knockable body as the quad's resolution pushes it** (MD246, Untamed's bales): its collision
+/// **A knockable body as the quad's resolution pushes it** (MD246, Untamed's bales; MD98a, another
+/// quad, [`crate::quad::Ride::struck`]): its collision
 /// record's resolution fields ([`Record`]'s collider), its rigid body (the record's `+0xe4`) with the
 /// body's mass (`+0x18`), and the centre of mass the resolution measures its arm from.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -180,14 +181,18 @@ impl Held {
     /// the list (its kind, ray, normal, point and surface word; both arms [`crate::handling::record::BLANK`]).
     /// An entry's relative velocity is left as the list's slot held it (the resolution writes it before it
     /// reads it). `false`, and the list left empty, if a contact is with another record or a mover, which
-    /// the held record cannot answer ([`Held::resolve`]).
+    /// the held record cannot answer ([`Held::resolve`]): another record held with its body is
+    /// [`Held::refill_among`]'s.
     pub fn refill(&mut self, filed: &[crate::handling::record::Contact]) -> bool {
         self.refill_among(filed, Vec::new(), &[])
     }
 
     /// [`Held::refill`] among knockable bodies (MD246): a contact naming `ids[k]` as its other record
-    /// is held with `bodies[k]` as its other side (Untamed's quad's own hits on a bale). `false`, and
-    /// the list left empty, if a contact names another record than those, or a mover.
+    /// is held with `bodies[k]` as its other side (Untamed's quad's own hits on a bale). MD98a: or
+    /// another quad's record and body, its contacts the record's own (kind 0) and the mirrors of the
+    /// other's (kind 1) alike, which [`Held::resolve`] answers as a [`Side::Body`] (proved on C38's
+    /// two touching quads). `false`, and the list left empty, if a contact names another record than
+    /// those, or a mover.
     pub fn refill_among(&mut self, filed: &[crate::handling::record::Contact], bodies: Vec<Knocked>, ids: &[u32]) -> bool {
         let was = std::mem::take(&mut self.entries);
         self.bikes.clear();
