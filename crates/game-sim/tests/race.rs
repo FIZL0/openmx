@@ -141,7 +141,8 @@
 //!     generated name lists each (bytes past 0x7f too), against [`race::find_prop`] and
 //!     [`race::find_toy`]: the answer and the needle the toy lookup leaves lowercased.
 //! 40. **The prop bound query**: 10,000 generated node trees (own boxes or none, children with
-//!     children, stale or kept, sized or not, spheres), against [`race::PropBound::query`].
+//!     children, stale or kept, sized or not, box- or sphere-bounded with their radii; S324 the
+//!     sphere rebuild), against [`race::PropBound::query`].
 //! 41. **The gates' props on the race images**: the drop and finish props [`Supercross::gate_props`]
 //!     finds on eight race images against the original's lookups, and every scene prop's bound,
 //!     marked stale, against its query.
@@ -9384,9 +9385,11 @@ fn put_bound_node(ee: &mut Ee, p: &mut Pick, next: &mut u32, depth: u32) -> (u32
 
 /// The prop's bound query, on 10,000 generated props — stale or not, sized or not, the rebuild bit,
 /// boxed or not, up to three children in the prop's own array and two levels of linked children under
-/// each, stray words in every row and box — against [`race::PropBound::query`]: both answers and
-/// every word of the bound the node keeps, its radius and its flags. A stale sphere-bounded prop is
-/// the port's refusal, and not run.
+/// each, stray words in every row and box, every node's own sphere radius (`+0x114`) above, at or
+/// under zero — against [`race::PropBound::query`]: both answers and every word of the bound the node
+/// keeps, its radius and its flags. Sphere-bounded props rebuild as spheres (S324); where neither the
+/// prop nor any child has a box the original's centre is a stack word nothing wrote, and the centre
+/// is not compared.
 #[test]
 fn the_prop_bound_query_is_prop_bound() {
     let Some(mut ee) = game_or_skip() else { return };
@@ -9396,7 +9399,15 @@ fn the_prop_bound_query_is_prop_bound() {
     };
     ee.set_u32(B_TABLE + 0x88, rebuild);
     let mut p = Pick(0x5297_0002);
-    let (mut rebuilt, mut kept, mut spheres, mut sized) = (0, 0, 0, 0);
+    let (mut rebuilt, mut kept, mut spheres, mut sized, mut unset) = (0, 0, 0, 0, 0);
+    let radius = |p: &mut Pick| match p.below(6) {
+        0 => p.stray(0.0),
+        1 => -p.range(0.0, 20.0),
+        _ => {
+            let r = p.range(0.0, 40.0);
+            p.stray(r)
+        }
+    };
     for case in 0..10_000 {
         let mut next = 0;
         let (root, mut tree) = put_bound_node(&mut ee, &mut p, &mut next, 2);
@@ -9413,33 +9424,50 @@ fn the_prop_bound_query_is_prop_bound() {
         put_quad(&mut ee, root + 0xc0, own.centre);
         put_quad(&mut ee, root + 0xd0, own.half_extent);
         tree.own = (flags & race::bound_flags::BOXED != 0).then_some(own);
+        let own_radius = F(radius(&mut p));
+        put_f(&mut ee, root + 0x114, own_radius);
         let kids = p.below(4) as u32;
         ee.set_u32(root + 0x11c, kids);
         ee.set_u32(root + 0x13c, B_KIDS);
+        let mut radii = Vec::new();
         for k in 0..kids {
             let (at, n) = put_bound_node(&mut ee, &mut p, &mut next, 1);
             ee.set_u32(B_KIDS + 4 * k, at);
+            let r = F(radius(&mut p));
+            put_f(&mut ee, at + 0x114, r);
+            radii.push(r);
             tree.children.push(n);
         }
+        let sphere = flags & race::bound_flags::STALE != 0
+            && (flags & race::bound_flags::REBUILD != 0 || flags & race::bound_flags::SIZED == 0)
+            && flags & race::bound_flags::SPHERE != 0;
+        let no_centre = sphere && tree.own.is_none() && tree.children.iter().all(|c| c.own.is_none());
         let (c, h, r) = (p.range(-9.0, 9.0), p.range(0.0, 9.0), p.range(0.0, 9.0));
         let mut port = race::PropBound { centre: p.quad([c; 3]), half: p.quad([h; 3]), radius: F(p.stray(r)), flags };
         put_quad(&mut ee, root + 0xe0, port.centre);
         put_quad(&mut ee, root + 0xf0, port.half);
         put_f(&mut ee, root + 0x118, port.radius);
-        let Some((c, h)) = port.query(&tree) else {
-            assert!(flags & race::bound_flags::SPHERE != 0, "case {case}: refused a box node ({flags:#x})");
-            spheres += 1;
-            continue;
-        };
+        let (c, h) = port.query(&tree, race::SphereRadii { own: own_radius, children: &radii });
         ee.call(query, &[u64::from(root), u64::from(B_OUT), u64::from(B_OUT + 16)], &[], BUDGET);
         let game = (quad(&ee, B_OUT), quad(&ee, B_OUT + 16));
-        assert_eq!((c.to_bits(), h.to_bits()), (game.0.to_bits(), game.1.to_bits()), "case {case}: the answers ({flags:#x})");
         let kept_words = (quad(&ee, root + 0xe0).to_bits(), quad(&ee, root + 0xf0).to_bits(), ee.u32_at(root + 0x118), ee.u8_at(root + 0x110));
-        assert_eq!(
-            kept_words,
-            (port.centre.to_bits(), port.half.to_bits(), port.radius.0.to_bits(), port.flags),
-            "case {case}: the kept bound ({flags:#x})"
-        );
+        if no_centre {
+            unset += 1;
+            assert_eq!(h.to_bits(), game.1.to_bits(), "case {case}: the half extent ({flags:#x})");
+            assert_eq!(
+                (kept_words.1, kept_words.2, kept_words.3),
+                (port.half.to_bits(), port.radius.0.to_bits(), port.flags),
+                "case {case}: the kept bound but its centre ({flags:#x})"
+            );
+        } else {
+            assert_eq!((c.to_bits(), h.to_bits()), (game.0.to_bits(), game.1.to_bits()), "case {case}: the answers ({flags:#x})");
+            assert_eq!(
+                kept_words,
+                (port.centre.to_bits(), port.half.to_bits(), port.radius.0.to_bits(), port.flags),
+                "case {case}: the kept bound ({flags:#x})"
+            );
+        }
+        spheres += usize::from(sphere);
         if port.flags != flags {
             rebuilt += 1;
             sized += usize::from(port.flags & race::bound_flags::SIZED != 0 && flags & race::bound_flags::SIZED == 0);
@@ -9447,8 +9475,11 @@ fn the_prop_bound_query_is_prop_bound() {
             kept += 1;
         }
     }
-    assert!(rebuilt > 1_000 && kept > 1_000 && spheres > 100 && sized > 100, "{rebuilt} rebuilt, {kept} kept, {spheres} spheres, {sized} newly sized");
-    eprintln!("prop bound: {rebuilt} rebuilt ({sized} newly sized), {kept} kept, {spheres} stale spheres refused");
+    assert!(
+        rebuilt > 1_000 && kept > 1_000 && spheres > 1_000 && sized > 100 && unset > 10,
+        "{rebuilt} rebuilt, {kept} kept, {spheres} spheres, {sized} newly sized, {unset} with no centre"
+    );
+    eprintln!("prop bound: {rebuilt} rebuilt ({sized} newly sized, {spheres} spheres, {unset} with no centre), {kept} kept");
 }
 
 /// A C string in an image (at most 256 bytes).
@@ -9487,7 +9518,8 @@ fn gate_prop_images() -> Vec<(String, Ee)> {
 /// and toy-list lookup, called on the same names; and every scene prop's bound, marked stale, against
 /// the original's bound query ([`race::PropBound::query`]): the answer and the centre, half extent,
 /// radius and flags it keeps. The rows are read after the original's query, which rebuilds a moved
-/// node's transform first (not ported); stale sphere-bounded props are counted and passed over.
+/// node's transform first (not ported); sphere-bounded props rebuild as spheres off the radii in RAM
+/// (S324), and are counted.
 #[test]
 fn the_race_images_gate_props_and_their_bounds_are_the_loaders() {
     let [find_at, toy_find_at, toys_at, app_at, manager, bound_at, gp] =
@@ -9545,14 +9577,14 @@ fn the_race_images_gate_props_and_their_bounds_are_the_loaders() {
         for &p in props.iter().filter(|&&p| p != 0) {
             let flags = ee.u8_at(p + 0x110) | race::bound_flags::STALE | race::bound_flags::REBUILD;
             let mut port = race::PropBound { centre: Vf::VF0, half: Vf::VF0, radius: F(0.0), flags };
-            if flags & race::bound_flags::SPHERE != 0 {
-                assert_eq!(port.query(&ram_bound_node(&ee, p, true)), None, "{name}: prop {p:x}, sphere-bounded");
-                spheres += 1;
-                continue;
-            }
+            spheres += usize::from(flags & race::bound_flags::SPHERE != 0);
             ee.write(p + 0x110, 1, u128::from(flags));
             ee.call(bound_at, &[u64::from(p), u64::from(c), u64::from(h)], &[], 10_000_000);
-            let got = port.query(&ram_bound_node(&ee, p, true)).expect("a box bound");
+            let tree = ram_bound_node(&ee, p, true);
+            let array = ee.u32_at(p + 0x13c);
+            let radii: Vec<F> = (0..tree.children.len() as u32).map(|k| F(f32::from_bits(ee.u32_at(ee.u32_at(array + 4 * k) + 0x114)))).collect();
+            let own = F(f32::from_bits(ee.u32_at(p + 0x114)));
+            let got = port.query(&tree, race::SphereRadii { own, children: &radii });
             let what = format!("{name}: prop {p:x} {:?}", String::from_utf8_lossy(&ram_c_str(&ee, ee.u32_at(p + 0x120))));
             assert_eq!((got.0.to_bits(), got.1.to_bits()), (quad(&ee, c).to_bits(), quad(&ee, h).to_bits()), "{what}: the answer");
             assert_eq!(port.centre.to_bits(), quad(&ee, p + 0xe0).to_bits(), "{what}: the centre kept");
@@ -9566,7 +9598,7 @@ fn the_race_images_gate_props_and_their_bounds_are_the_loaders() {
         return skip("no race image with a scene");
     }
     assert!(bounds > 1_000 && toy_finishes > 0, "{tracks} tracks, {bounds} bounds, {toy_finishes} finish gates among the toys");
-    eprintln!("gate props on {tracks} race images: {bounds} prop bounds rebuilt, {spheres} sphere-bounded passed over, {toy_finishes} finish gates among the toys");
+    eprintln!("gate props on {tracks} race images: {bounds} prop bounds rebuilt, {spheres} of them sphere-bounded, {toy_finishes} finish gates among the toys");
 }
 
 /// **The finish line's width and height off the finish prop's load-time bound** (sx01): the loader
@@ -9617,7 +9649,7 @@ fn sx01s_finish_line_is_as_wide_and_high_as_the_finish_props_rest_bound() {
     every(&tree, &mut children);
     assert_eq!(children.len(), ee.u32_at(prop + 0x11c) as usize, "the prop's children are the model's nodes");
     let mut bound = race::PropBound { centre: Vf::VF0, half: Vf::VF0, radius: F(0.0), flags: flags | race::bound_flags::STALE };
-    let (_, half) = bound.query(&BoundsNode { own: None, world: frame, children }).expect("a box bound");
+    let (_, half) = bound.query(&BoundsNode { own: None, world: frame, children }, race::SphereRadii::default());
     let gate_box = tree.own.expect("the gate's box").half_extent;
     // The width and height are the gate box's own; its depth comes back through the prop's turned
     // frame an ulp short (1.7741324, as the image's kept bound has it too).
