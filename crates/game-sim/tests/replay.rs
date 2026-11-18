@@ -13992,9 +13992,9 @@ fn s474_ride_drawn(
             let r = &mut sim.rider;
             let of = |bs: &[game_sim::ragdoll::Bone]| bs.iter().map(|b| (b.body.position, b.body.velocity)).collect();
             bones.push(match (&r.ragdoll, &r.riding) {
-                (Some(d), _) => B19Bones { down: true, bones: of(&d.ragdoll.bones) },
-                (None, Some(rd)) => B19Bones { down: false, bones: of(&rd.actor.ragdoll.bones) },
-                (None, None) => B19Bones { down: false, bones: Vec::new() },
+                (Some(d), _) => B19Bones { down: true, bones: of(&d.ragdoll.bones), touch: d.contacts.iter().enumerate().map(|(i, c)| u32::from(c.touched) << i).sum() },
+                (None, Some(rd)) => B19Bones { down: false, bones: of(&rd.actor.ragdoll.bones), touch: 0 },
+                (None, None) => B19Bones { down: false, bones: Vec::new(), touch: 0 },
             });
             seen.push(S474Tick { crossup: r.ride.air.crossup.0, pose: r.motion.pose.0 });
             if bones.len() < ticks {
