@@ -243,6 +243,9 @@ pub struct Row {
     pub now: Option<usize>,
     /// A line under each choice in the side panel, where the concept has one.
     pub tips: Vec<String>,
+    /// A heading line over each choice in the open dropdown, where one is not empty (P317a: the Song
+    /// list's games); the cursor and a click step over it.
+    pub heads: Vec<String>,
     /// What the row does.
     pub about: String,
     /// Why the row does not apply, which dims it and keeps it as it is.
@@ -265,6 +268,7 @@ impl Row {
             choices: Vec::new(),
             now: None,
             tips: Vec::new(),
+            heads: Vec::new(),
             about: about.into(),
             off: None,
             meter: None,
@@ -959,8 +963,9 @@ impl Menu {
         rows
     }
 
-    /// The Song row's list under game headings (P317): with more than one game's songs, each game's
-    /// name beside its first song, and the songs without their game, which the heading says.
+    /// The Song row's list under game headings (P317, P317a): with more than one game's songs, a
+    /// heading line naming each game over its first song, and the songs without their game, which
+    /// the heading says.
     fn song_headings(&self, song: &mut Row) {
         let games: Vec<Option<&super::MusicGame>> = self
             .music_choices
@@ -976,7 +981,7 @@ impl Menu {
             return;
         }
         let mut last = None;
-        song.tips = games
+        song.heads = games
             .iter()
             .map(|g| {
                 let here = g.map(|g| (g.key.as_str(), g.pack));

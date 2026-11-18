@@ -265,33 +265,55 @@ const DROP_PITCH: f32 = 2.05;
 /// gap and the ▼.
 const DROP_PILL_EXTRA: f32 = 0.55 + 0.4 + 0.6 + 0.55;
 
-/// Where an open dropdown (P277) is: its panel, each choice shown and its box, and whether choices
-/// run past the top and past the bottom.
+/// Where an open dropdown (P277) is: its panel, each choice shown and its box, each heading line
+/// shown (P317a) by the choice it is over and its box, and whether lines run past the top and past
+/// the bottom.
 pub(super) struct DropSpots {
     pub panel: Box4,
     pub items: Vec<(usize, Box4)>,
+    pub heads: Vec<(usize, Box4)>,
     pub above: bool,
     pub below: bool,
 }
 
 /// A dropdown of `n` choices, the cursor on `j`, for the row whose box is `row`: right-aligned under
 /// the row's value, or over the row where there is more room there, between the logo and the band;
-/// as many choices as fit, scrolled round `j`, past which an arrow says there are more.
-pub(super) fn drop_spots(row: Box4, n: usize, j: usize) -> DropSpots {
+/// as many lines as fit, scrolled round `j`'s, past which an arrow says there are more. A choice with
+/// a non-empty entry in `heads` has a heading line of its own over it (P317a), which is never one of
+/// the items, so the cursor and a click pass it by.
+pub(super) fn drop_spots(row: Box4, n: usize, heads: &[String], j: usize) -> DropSpots {
     let (top, bottom) = (2.0, STAGE.1 - BAND - 0.3);
     let pad = 0.45;
     let w = 23.0f32.min(row[2] - 1.0);
     let x = row[0] + row[2] - w - 0.6;
+    // each line: the choice it is or is over, and whether it is that choice's heading
+    let mut lines = Vec::with_capacity(n);
+    for k in 0..n {
+        if heads.get(k).is_some_and(|h| !h.is_empty()) {
+            lines.push((k, true));
+        }
+        lines.push((k, false));
+    }
+    let total = lines.len();
+    let at = lines.iter().position(|&l| l == (j, false)).unwrap_or(0);
     let below = bottom - (row[1] + row[3] + 0.15);
     let above = row[1] - 0.15 - top;
     let room = below.max(above);
-    let fits = (((room - 2.0 * pad) / DROP_PITCH) as usize).clamp(1, n.max(1));
-    let shown = n.min(fits);
-    let first = j.saturating_sub(shown / 2).min(n - shown);
+    let fits = (((room - 2.0 * pad) / DROP_PITCH) as usize).clamp(1, total.max(1));
+    let shown = total.min(fits);
+    let mut first = at.saturating_sub(shown / 2).min(total - shown);
+    // the cursor's game heading kept in sight with its first song
+    if first > 0 && first == at && lines[first - 1].1 {
+        first -= 1;
+    }
     let h = shown as f32 * DROP_PITCH + 2.0 * pad;
     let y = if below >= h || below >= above { row[1] + row[3] + 0.15 } else { row[1] - 0.15 - h };
-    let items = (first..first + shown).map(|k| (k, [x + 0.35, y + pad + (k - first) as f32 * DROP_PITCH, w - 0.7, DROP_PITCH])).collect();
-    DropSpots { panel: [x, y, w, h], items, above: first > 0, below: first + shown < n }
+    let (mut items, mut head_spots) = (Vec::new(), Vec::new());
+    for (i, &(k, head)) in lines.iter().enumerate().skip(first).take(shown) {
+        let b = [x + 0.35, y + pad + (i - first) as f32 * DROP_PITCH, w - 0.7, DROP_PITCH];
+        if head { head_spots.push((k, b)) } else { items.push((k, b)) }
+    }
+    DropSpots { panel: [x, y, w, h], items, heads: head_spots, above: first > 0, below: first + shown < total }
 }
 
 impl Menu {
@@ -325,8 +347,13 @@ impl Menu {
         let (x, w, top) = page_column(!self.tabs(screen).is_empty());
         let spots = row_spots(&rows, cur, x, w, top).0;
         if let Some((i, j)) = self.listing() {
+            let d = spots.iter().find(|s| s.0 == i).map(|&(_, b)| drop_spots(b, rows[i].choices.len(), &rows[i].heads, j));
+            // a game's heading (P317a) is no choice: the list stays open
+            if d.as_ref().is_some_and(|d| d.heads.iter().any(|(_, b)| inside(b))) {
+                return true;
+            }
             self.listing = None;
-            let hit = spots.iter().find(|s| s.0 == i).and_then(|&(_, b)| drop_spots(b, rows[i].choices.len(), j).items.into_iter().find(|(_, b)| inside(b)));
+            let hit = d.and_then(|d| d.items.into_iter().find(|(_, b)| inside(b)));
             match hit {
                 Some((k, _)) => {
                     self.pick(&rows[i], k);
@@ -380,7 +407,20 @@ impl Menu {
         let rows = self.page_of(screen);
         let (x, w, top) = page_column(!self.tabs(screen).is_empty());
         let (_, row) = row_spots(&rows, self.cursor(screen), x, w, top).0.into_iter().find(|s| s.0 == i)?;
-        let (_, b) = drop_spots(row, rows[i].choices.len(), j).items.into_iter().find(|s| s.0 == k)?;
+        let (_, b) = drop_spots(row, rows[i].choices.len(), &rows[i].heads, j).items.into_iter().find(|s| s.0 == k)?;
+        let (em, o) = fit(size);
+        Some([o[0] + (b[0] + b[2] / 2.0) * em, o[1] + (b[1] + b[3] / 2.0) * em])
+    }
+
+    /// The middle of the heading line over choice `k` in the open dropdown (P317a), as
+    /// [`Menu::list_point`]; `None` with no list open, no heading there or it scrolled off.
+    pub fn list_head_point(&self, k: usize, size: (usize, usize)) -> Option<[f32; 2]> {
+        let (i, j) = self.listing()?;
+        let screen = self.screen()?;
+        let rows = self.page_of(screen);
+        let (x, w, top) = page_column(!self.tabs(screen).is_empty());
+        let (_, row) = row_spots(&rows, self.cursor(screen), x, w, top).0.into_iter().find(|s| s.0 == i)?;
+        let (_, b) = drop_spots(row, rows[i].choices.len(), &rows[i].heads, j).heads.into_iter().find(|s| s.0 == k)?;
         let (em, o) = fit(size);
         Some([o[0] + (b[0] + b[2] / 2.0) * em, o[1] + (b[1] + b[3] / 2.0) * em])
     }
@@ -1199,12 +1239,17 @@ impl<'a> Pen<'a> {
     /// Row `at`'s open dropdown (P277, opentennis's B498) under the row's box `row`, or over it:
     /// every choice of `r` that fits, the one it is on lit, the row's own dotted, each with its hint.
     fn drop_list(&mut self, r: &Row, row: Box4, j: usize) {
-        let d = drop_spots(row, r.choices.len(), j);
+        let d = drop_spots(row, r.choices.len(), &r.heads, j);
         let b = d.panel;
         self.round([b[0] + 0.35, b[1] + 0.4, b[2], b[3]], 0.9, SHADOW, SHADOW);
         self.round(b, 0.9, [0x2a, 0x14, 0x08, 250], [0x12, 0x09, 0x04, 250]);
         self.ring(b, 0.9, 0.12, [255, 255, 255, 90]);
         let size = DROP_TYPE;
+        // the games' headings (P317a), as a page's heading rows
+        for &(k, hb) in &d.heads {
+            let name = self.fit(Weight::Bold, &r.heads[k].to_uppercase(), 0.8 * size, hb[2] - 1.2);
+            self.text(Weight::Bold, &name, hb[0] + 0.6, Pen::mid(hb[1] + hb[3] / 2.0 + 0.15, 0.8 * size), 0.8 * size, 0.0, HEADING, Align::Left);
+        }
         for &(k, ib) in &d.items {
             let mid = ib[1] + ib[3] / 2.0;
             let lit = k == j;
@@ -1452,7 +1497,8 @@ impl<'a> Pen<'a> {
                     let tx = x + dot + 0.6 * size;
                     let choice = self.fit(cw, choice, size, w - (tx - x));
                     self.text(cw, &choice, tx, Pen::mid(mid, size), size, 0.0, cc, Align::Left);
-                    if let Some(tip) = r.tips.get(i).filter(|t| !t.is_empty()) {
+                    // the Song list's game beside its first song (P317a), where the side panel has no heading lines
+                    if let Some(tip) = r.tips.get(i).or(r.heads.get(i)).filter(|t| !t.is_empty()) {
                         let ex = tx + self.wide(cw, &choice, size) + 0.4 * size;
                         let tip = self.fit(Weight::Bold, tip, 0.8 * size, (x + w - ex).max(0.0));
                         self.text(Weight::Bold, &tip, ex, Pen::mid(mid, size), 0.8 * size, 0.0, TIP, Align::Left);
@@ -3570,6 +3616,7 @@ impl Row {
             choices: Vec::new(),
             now: None,
             tips: Vec::new(),
+            heads: Vec::new(),
             about: String::new(),
             off: None,
             meter: None,
