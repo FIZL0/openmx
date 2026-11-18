@@ -164,6 +164,39 @@ fn the_untamed_quads_stunt_ids_are_its_spawn_images() {
     assert!(r.bike.untamed() && r.bike.parts.scene.untamed && r.tailed.as_ref().is_some_and(|t| t.tail.untamed) == r.tailed.is_some());
 }
 
+/// MD207: the wheelie's and the stoppie's ids the rigged quad's tail hands on ([`quad::Tail`]'s, the
+/// stunt its update starts past a second on one pair) are SLUS-21104's 42 and 43 (`+0x13c4`, `+0x13c8`,
+/// C28's image; `atv_quad` checks them), and on Untamed's step the spawn image's 50 and 51 (`+0x13d4`,
+/// `+0x13d8`, the words SLUS-21701's update hands its stunt start). Both inits look them up by name.
+#[test]
+fn the_untamed_quads_wheelie_and_stoppie_ids_are_its_spawn_images() {
+    let Some(files) = quad_files() else { return };
+    let Ok(kit) = Kit::load().map_err(|w| skip(&w)) else { return };
+    let dir = kit.ctx("mxvatv-ps2/md37a");
+    let (path, riding, wreck) = (kit.ctx("untamed/md147").join(format!("spawn{}", ".ee.bin")), dir.join("250r_atv_chasism.col"), dir.join(quad::WRECK_FILE));
+    let (Ok(r), Ok(w)) = (std::fs::read(&riding), std::fs::read(&wreck)) else {
+        skip(&format!("{} or {} is not there: MXVSATV.PSR's Veh\\Col (MD123)", riding.display(), wreck.display()));
+        return;
+    };
+    if !path.exists() {
+        skip(&format!("{} is not there: eeMemory.bin of MD147's spawn.p2s (research/md147)", path.display()));
+        return;
+    }
+    let ee = Ee::from_ram(&path).unwrap_or_else(|e| panic!("{e}"));
+    let parse = |b: &[u8], what: &str| game_sim::track::Rays::parse(b).unwrap_or_else(|e| panic!("{what}: {e}"));
+    let (riding, wreck) = (parse(&r, "250r_atv_chasism.col"), parse(&w, quad::WRECK_FILE));
+    let (at, heading) = (Vf::new(0.0, 0.0, 0.0, 1.0), Vf::new(0.0, 0.0, 1.0, 1.0));
+    let curve = game_sim::camera::CurveTable::build();
+    let load = quad::Load::read_model(&files.0, &files.1, at, heading, &curve).unwrap_or_else(|e| panic!("{e}"));
+    let mut r = quad::Ride::spawn(&load, &files.1, at, heading, None, Vec::<Call>::new());
+    r.rig(&load, &riding, &wreck);
+    let ids = |r: &quad::Ride| r.tailed.as_ref().map(|t| (t.tail.wheelie_stunt, t.tail.stoppie_stunt));
+    assert_eq!(ids(&r), Some((42, 43)), "SLUS-21104's ids");
+    r.untamed();
+    assert_eq!(ids(&r), Some((ee.u32_at(QUAD + 0x13d4), ee.u32_at(QUAD + 0x13d8))), "the spawn image's ids");
+    assert_eq!(ids(&r), Some((50, 51)));
+}
+
 /// And the routing is live: with R1 held beside another trick button Untamed's backflip and 360 arm
 /// where SLUS-21104's (which wants R1 alone) do not, so some of those states must come out different.
 #[test]
