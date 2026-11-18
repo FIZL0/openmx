@@ -52,7 +52,8 @@ fn every_car_loads_and_poses_by_its_tires() {
 
         // At rest it is the model; the baja's and the buggy's rig sets its turns afresh as the
         // original's does (S264), dropping the model's own: the baja's left hub's 11°, and its
-        // unturned swing arm pitched 7.4° to look at its rear tires, which then sit 0.68 ft low.
+        // unturned swing arm pitched 7.4° to look at its rear tires, which then sit 0.68 ft low
+        // (S342's driven baja matches the original's nodes; its rears, 0.71 ft up, are at the model's).
         let rest = drawn.pose(&assets, &[Tire::REST; 4]);
         let near = if car::has_buggy_rig(&model) { 0.7 } else { 1e-4 };
         assert_eq!(car::has_buggy_rig(&model), !name.starts_with("monstertruck"), "{name}");
@@ -93,7 +94,8 @@ fn every_car_loads_and_poses_by_its_tires() {
 /// S264: the buggy's pose against the original's own node matrices, in C34's switched image of the
 /// driven buggy on free06 (`context/states/c34-buggy-switched.ee.bin`, the car at [`BUGGY`]). The four tires' spin, steer and compression are read off the car's tire
 /// objects and posed by the port; every node of the original's tree is brought into the car's own
-/// space (its root's world undone) and compared with the port's node of the same name.
+/// space (its root's world undone) and compared with the port's node of the same name. S342 does the
+/// baja the same way, S343 the truck.
 mod against_the_original {
     use super::*;
     use game_render::mat::M4;
@@ -177,12 +179,33 @@ mod against_the_original {
     #[test]
     fn the_buggys_pose_is_the_originals() {
         let Some((ee, car)) = image() else { return };
+        posed_as_the_original(&ee, car, "buggy", "Buggy");
+    }
+
+    /// S342: the baja on free07, parked by S149a's boot (`boot.py free07 2 5 <slot> 5`), switched to and
+    /// driven a moment by `research/s342/drive.sh`, its RAM image `context/states/s342-baja-free07.ee.bin`
+    /// (the car at [`BUGGY`]'s place, as S149a found it). Coasting, steer 0, springs at 0.26–0.71 ft.
+    #[test]
+    fn the_bajas_pose_is_the_originals() {
+        let Ok(kit) = Kit::load().map_err(|w| skip(&w)) else { return };
+        let path = kit.ctx("states").join("s342-baja-free07.ee.bin");
+        if !path.exists() {
+            skip(&format!("{} is not there: S342's image of the driven baja", path.display()));
+            return;
+        }
+        let Ok(ee) = Ee::from_ram(&path).map_err(|w| skip(&w)) else { return };
+        posed_as_the_original(&ee, BUGGY, "baja", "Baja");
+    }
+
+    /// The baja's and buggy's step: the car `car_name`'s pose against the original's car at `car`,
+    /// whose root node is `root_name`.
+    fn posed_as_the_original(ee: &Ee, car: u32, car_name: &str, root_name: &str) {
         let Some(mut disc) = disc() else { return };
         let archives = [disc.res(car::ARCHIVE).expect("the machines' archive")];
         let mut assets = Assets::default();
-        let drawn = Car::load(&mut assets, &archives, "buggy").expect("the buggy");
+        let drawn = Car::load(&mut assets, &archives, car_name).unwrap_or_else(|| panic!("the {car_name}"));
         let model = assets.models[&drawn.model].model.clone();
-        assert!(car::has_buggy_rig(&model), "the buggy lacks its rig's nodes");
+        assert!(car::has_buggy_rig(&model), "the {car_name} lacks its rig's nodes");
 
         let tires: [Tire; 4] = std::array::from_fn(|k| {
             let t = ee.u32_at(car + TIRE_OBJECTS[k]);
@@ -190,18 +213,18 @@ mod against_the_original {
             let scale = car::squash(compression, ee.f32_at(t + TIRE_MAX_COMPRESSION), ee.f32_at(t + TIRE_MAX_SCALE));
             Tire { spin: ee.f32_at(t + TIRE_SPIN), steer: ee.f32_at(t + TIRE_STEER), compression, scale }
         });
-        // A ridden frame: every spring is working.
+        // A driven frame: every spring is working.
         assert!(tires.iter().all(|t| t.compression > 0.1), "{tires:?}");
         let posed = drawn.pose(&assets, &tires);
         let root = ee.u32_at(car + ROOT);
-        assert_eq!(name(&ee, ee.u32_at(root + NODE_NAME)), "Buggy");
-        let root_world = mat(&ee, root + NODE_WORLD);
-        let in_car = |node: u32| into_root(root_world, mat(&ee, node + NODE_WORLD));
+        assert_eq!(name(ee, ee.u32_at(root + NODE_NAME)), root_name);
+        let root_world = mat(ee, root + NODE_WORLD);
+        let in_car = |node: u32| into_root(root_world, mat(ee, node + NODE_WORLD));
         let mut theirs = Vec::new();
-        nodes(&ee, ee.u32_at(root + NODE_CHILD), &mut theirs);
+        nodes(ee, ee.u32_at(root + NODE_CHILD), &mut theirs);
         assert_eq!(theirs.len() + 1, model.nodes.len(), "the original's tree and the model's differ in size");
 
-        let (mut wrong, mut moved) = (Vec::new(), 0);
+        let (mut wrong, mut turned) = (Vec::new(), 0);
         for (n, a) in &theirs {
             let i = model.nodes.iter().position(|m| m.name.eq_ignore_ascii_case(n)).unwrap_or_else(|| panic!("{n} is not in the model"));
             let mut want = in_car(*a);
@@ -212,7 +235,7 @@ mod against_the_original {
                 assert!(tires[0].steer == 0.0 && tires[1].steer == 0.0, "the image is steered: {tires:?}");
                 let hub = ee.u32_at(a + NODE_PARENT);
                 let mut unturned = M4::IDENTITY;
-                unturned.0[3] = mat(&ee, hub + NODE_LOCAL).0[3];
+                unturned.0[3] = mat(ee, hub + NODE_LOCAL).0[3];
                 let stale = model.nodes[i].local.mul(unturned).mul(in_car(ee.u32_at(hub + NODE_PARENT)));
                 let (turn, place) = off(stale, want);
                 assert!(turn < 2e-3 && place < 3e-3, "{n}: not the world before the hub's turn: {turn} {place}");
@@ -226,12 +249,13 @@ mod against_the_original {
             if turn > 2e-3 || place > 3e-3 {
                 wrong.push(format!("{n}: turn {turn}, place {place}"));
             }
-            if off(model.world(i), want).1 > 0.2 {
-                moved += 1;
+            if off(model.world(i), want).0 > 0.05 {
+                turned += 1;
             }
         }
         assert!(wrong.is_empty(), "nodes not as the original posed them:\n{}", wrong.join("\n"));
-        assert!(moved >= 16, "only {moved} nodes moved from the model: the image is hardly posed");
+        // The arms, hubs, tires and struts all turn off the model's own turns (the baja 32, the buggy 29).
+        assert!(turned >= 20, "only {turned} nodes turned from the model: the image is hardly posed");
     }
 
     /// The monster truck parked in first_recording's image (free09), where S149a found it.
