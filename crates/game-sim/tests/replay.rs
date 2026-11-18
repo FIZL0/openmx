@@ -13808,6 +13808,200 @@ fn s466_holds(rows: &[std::collections::HashMap<String, f32>]) -> Vec<game_sim::
         .collect()
 }
 
+/// **S474: the shell's drawn bike root on the windmill's verdict tick lags the original's a tick.**
+/// S466 found the original's riding request root (the bike model's "Bike" node) ~30 degrees off the
+/// chassis node on the image's row and tick 1's, and back within ~1.6 degrees on the verdict tick's.
+/// Does the port's shell hand the riding body the same snap? No: it hands it a tick late.
+///
+/// The snap is not the wreck's. The drawn bike plays the airborne clips at the crossup the motion
+/// driver shows ([`game_sim::motion::Driver::select`]), and the crossup is 0 while the chassis'
+/// speed word (measured at the end of the last tick) is under 10. The teleport stopped the bike
+/// but left that word at 29.1 ft/s, so tick 1 still measures a crossup (-0.357 rad, from a
+/// velocity of 1e-5 ft/s across), and tick 2 reads 1.04 and measures 0. The original's crossup and
+/// shown pose are the port's on both ticks (context/capture/s474/south3-cross.csv, S466's run again
+/// with research/r14_windmill_bones.py's `cross`).
+///
+/// In the original each tick's request root is posed at that tick's own crossup: 31.9 degrees at the
+/// image's -0.387, 29.7 at tick 1's -0.357, 1.6 at tick 2's 0. The shell draws the chassis after a
+/// tick and hands its root to the next ([`s474_ride_drawn`], crates/openmx main.rs `ride_holds_of`), so
+/// tick `t` gets the root of tick `t - 1`'s pose: the verdict tick gets tick 1's ~29.7 degrees, the
+/// air lean S466 found 9% slow.
+#[test]
+fn the_shells_drawn_root_lags_the_originals_a_tick() {
+    let Some(req) = columns_capture("s474", "south3-cross") else { return };
+    let Some(b15) = columns_capture("b15", "south3-bones") else { return };
+    for (got, want) in req.iter().zip(&b15) {
+        assert!(want.iter().all(|(k, v)| k == "same" || got.get(k).is_some_and(|g| g.to_bits() == v.to_bits())), "the cross run is C37's on frame {}", want["frame"]);
+    }
+    let w = req.iter().position(|r| r["reason"] != 0.0).expect("the throw's wreck");
+    let throw = w - 1;
+    assert_eq!(throw, 2, "the verdict on tick 2 (row {w})");
+    let quad = |r: &std::collections::HashMap<String, f32>, k: &str| Vf::new(r[&format!("{k}x")], r[&format!("{k}y")], r[&format!("{k}z")], r[&format!("{k}w")]);
+    // A row's request root in its chassis node's frame, as S466's holds read it.
+    let root_of = |r: &std::collections::HashMap<String, f32>| {
+        let m = Mat4([0, 1, 2, 3].map(|i| quad(r, &format!("rows{i}"))));
+        let frame = Mat4([0, 1, 2, 3].map(|i| quad(r, &format!("frame{i}"))));
+        math::mul(&frame, &math::inverse(&m).expect("the request's rows"))
+    };
+    // How far a root turns the chassis frame, in degrees.
+    let turn = |m: &Mat4| {
+        let trace = m.0[0].x() + m.0[1].y() + m.0[2].z();
+        ((trace - 1.0) * 0.5).clamp(-1.0, 1.0).acos().to_degrees()
+    };
+    let apart = |a: &Mat4, b: &Mat4| turn(&math::mul(a, &math::inverse(b).unwrap()));
+
+    let Some((port, held, _)) = s474_ride_drawn("b15", "south3-bones", throw, 56, |_, h| h) else { return };
+    // The motion's input, the original's: tick t's crossup and shown pose are row t + 1's.
+    for (t, p) in port.iter().enumerate().map(|(i, p)| (i + 1, p)) {
+        let row = &req[t + 1];
+        assert_eq!((p.crossup.to_bits(), p.pose.to_bits()), (row["crossup"].to_bits(), row["pose"].to_bits()), "tick {t}: crossup and pose {p:?} against the original's");
+    }
+    let mut seen = Vec::new();
+    for (t, h) in held.iter().enumerate().map(|(i, h)| (i + 1, h)) {
+        let (now, before) = (root_of(&req[t + 1]), root_of(&req[t]));
+        let (ours, lagged, theirs) = (turn(&h.root), apart(&h.root, &before), apart(&h.root, &now));
+        seen.push(format!("tick {t}: the shell's root {ours:.2} deg off the chassis, the original's {:.2} (the tick before's {:.2}); {theirs:.3} deg from the original's, {lagged:.3} from the tick before's", turn(&now), turn(&before)));
+    }
+    let seen = seen.join("\n");
+    println!("{seen}");
+    // Each tick's root is the clip posed at the tick before's pose: the original's root a row back.
+    // Measured: 0.000 deg on both ticks.
+    for (t, h) in held.iter().enumerate().map(|(i, h)| (i + 1, h)) {
+        assert!(apart(&h.root, &root_of(&req[t])) < 0.01, "tick {t}: the shell's root is not the original's a row back:\n{seen}");
+    }
+    // So the verdict tick keeps the air lean the original's has dropped.
+    let (verdict, original) = (&held[throw - 1].root, root_of(&req[w]));
+    assert!(turn(&original) < 2.0 && turn(verdict) > 25.0, "the verdict tick's roots:\n{seen}");
+
+    // What it costs: the shell's roots with the original's hands and feet leave the bones apart on the
+    // verdict tick and the entry, where the original's roots keep them under 0.6 ft/s (S466).
+    let original_holds = s466_holds(&req);
+    let Some((_, _, bones)) = s474_ride_drawn("b15", "south3-bones", throw + 1, 56, |t, h| game_sim::ragdoll_riding::Holds { root: h.root, ..original_holds[t - 1] }) else { return };
+    let mut gaps = Vec::new();
+    for (t, b) in bones.iter().enumerate().map(|(i, b)| (i + 1, b)) {
+        let row = &b15[t + 1];
+        let mut dv = [0.0f32; 3];
+        for (j, (_, v)) in b.bones.iter().enumerate() {
+            for (c, k) in ["vx", "vy", "vz"].into_iter().enumerate() {
+                dv[c] += (v[c] - row[&format!("b{j}_{k}")]) / b.bones.len() as f32;
+            }
+        }
+        assert_eq!(b.down, row["riding"] == 0.0, "tick {t}: down against the original's riding word");
+        gaps.push(dv);
+    }
+    println!("the bones' mean velocity gap with the shell's roots: {gaps:?}");
+    // Measured: (+0.09, -0.02, +0.30) on tick 1, (-1.21, -1.91, -0.49) on the verdict tick and
+    // (-0.32, +0.42, +1.48) on the entry. Pinned so a fix shows here (S474a).
+    let worst = |dv: [f32; 3]| dv.iter().fold(0.0f32, |a, d| a.max(d.abs()));
+    assert!(worst(gaps[0]) < 0.5, "tick 1's gap: {gaps:?}");
+    assert!(worst(gaps[throw - 1]) > 1.5 && worst(gaps[throw]) > 1.0, "the shell's lagged root no longer parts the bones (S474a?): {gaps:?}");
+}
+
+/// One tick of [`s474_ride_drawn`]: the crossup and the pose the motion driver shows.
+#[derive(Debug)]
+struct S474Tick {
+    crossup: f32,
+    pose: f32,
+}
+
+/// [`r24_ride`] with the bike drawn beside it as the shell draws it (crates/openmx main.rs: the
+/// chassis posed off the ride after each tick, its "Bike" node and grips handed to the next tick as
+/// [`game_sim::rider::Rider::holds`]). The chassis is drawn once off the image before tick 1, with the
+/// motion driver on the image's airborne idle and pose (rider `+0x9e8`/`+0x9ec`), so tick 1 does not
+/// restart it. `pick` gets the tick a drawn hold is for and the drawn hold, and says what is handed
+/// in. Hands back each tick's crossup and pose, the holds handed to ticks 1.., and the bones.
+fn s474_ride_drawn(
+    dir: &str,
+    name: &str,
+    ticks: usize,
+    draws: u32,
+    pick: impl Fn(usize, game_sim::ragdoll_riding::Holds) -> game_sim::ragdoll_riding::Holds,
+) -> Option<(Vec<S474Tick>, Vec<game_sim::ragdoll_riding::Holds>, Vec<B19Bones>)> {
+    use game_render::disc::Disc;
+    let mut disc = Disc::open_configured().ok()?;
+    let bikes: Vec<String> = disc
+        .entries()
+        .iter()
+        .map(|e| e.name.clone())
+        .filter(|n| n.to_ascii_lowercase().starts_with("bike\\") && n.to_ascii_lowercase().ends_with(".res"))
+        .collect();
+    let bike = bikes.into_iter().find(|b| disc.res(b).ok().is_some_and(|r| r.read_suffix(FREERIDE_PHY).is_ok()))?;
+    let bike = disc.res(&bike).ok()?;
+    let sub = bike.find_suffix(".sub")?.name.clone();
+    let sub = game_render::scene::Vehicle::parse(&game_render::ini::text(&bike.read(&sub).ok()?));
+    let chassis = game_render::vehicle::Chassis::load(vec![bike], &sub.mcf, "bike_", &[], game_render::vehicle::params()).ok()?;
+    let chassis = std::cell::RefCell::new(chassis);
+    let root = chassis.borrow().nodes.root.expect("a chassis root");
+    let dt = F(1.0 / 30.0);
+    // The shell's frame: the chassis posed off the rider, and what it hands the next tick.
+    let draw = |r: &game_sim::rider::Rider| {
+        let mut chassis = chassis.borrow_mut();
+        let want = chassis.want_under(&r.ride, &r.tricks, r.body.veh.want);
+        let request = chassis.riding_under(r, want);
+        chassis.ride(dt, want, &request, r, game_render::vehicle::Drive::of(&r.ride));
+        let [Some(foot_l), Some(foot_r), Some(hand_l), Some(hand_r)] = game_render::chassis::grips(&chassis) else { panic!("the chassis lacks a hold") };
+        let point = |a: game_render::mat::V3| Vf::new(a.x, a.y, a.z, 1.0);
+        game_sim::ragdoll_riding::Holds { root: Mat4(chassis.world[root].0.map(Vf)), hands: [point(hand_l), point(hand_r)], feet: [point(foot_l), point(foot_r)] }
+    };
+    let image = private_dir("capture").join(dir).join(format!("{name}-before.ram"));
+    let (mut body, doll) = r24_body()?;
+    let skeleton = std::cell::RefCell::new(None);
+    let held = std::cell::RefCell::new(Vec::new());
+    let (mut bones, mut seen) = (Vec::new(), Vec::new());
+    s211_ride_seeded(
+        &image,
+        [0.0; 3],
+        ticks,
+        true,
+        |st, sim| {
+            let kit = sim.rider.ragdoll_kit.clone().expect("the kit");
+            let m = sim.rider.ride.transform();
+            let (riding, _) = b19_riding(st, &kit, &m);
+            sim.rider.body.veh.state = riding.actor.clip;
+            sim.rider.riding = Some(Box::new(riding));
+            let state = u64::from(st.word(0x0042_3b30).unwrap()) | u64::from(st.word(0x0042_3b34).unwrap()) << 32;
+            let mut rng = game_sim::rng::Rng::from_state(state);
+            for _ in 0..draws {
+                rng.rand();
+            }
+            sim.rider.idles.rng = rng;
+            sim.rider.idles.seeded = true;
+            let p = Arc::new(r24_posed(st, &mut body, &doll, &m));
+            sim.rider.skeleton = Some(p.clone());
+            *skeleton.borrow_mut() = Some(p);
+            let r = &mut sim.rider;
+            let (pose, fore_aft) = (st.float(st.rider + 0x9e8).unwrap(), st.float(st.rider + 0x9ec).unwrap());
+            assert_eq!(fore_aft, F(0.5), "the image's fore-aft: AirBck and AirMid, mixed by 0");
+            r.motion.action = Trick::WHEELIE;
+            (r.motion.pose, r.motion.fore_aft, r.motion.ramp) = (pose, fore_aft, F::ZERO);
+            let blend = game_sim::motion::Blend::Two { phase: pose, mix: F::ZERO, ramp: F::ZERO, a: game_sim::motion::Slot::AirBck, b: game_sim::motion::Slot::AirMid };
+            r.animation = game_sim::motion::Frame { blend, restart: false };
+            // Twice: a chassis' first frame has no drawn pose to hand over from.
+            draw(r);
+            let h = pick(1, draw(r));
+            held.borrow_mut().push(h);
+            r.holds = Some(Arc::new(h));
+        },
+        |sim| {
+            let r = &mut sim.rider;
+            let of = |bs: &[game_sim::ragdoll::Bone]| bs.iter().map(|b| (b.body.position, b.body.velocity)).collect();
+            bones.push(match (&r.ragdoll, &r.riding) {
+                (Some(d), _) => B19Bones { down: true, bones: of(&d.ragdoll.bones) },
+                (None, Some(rd)) => B19Bones { down: false, bones: of(&rd.actor.ragdoll.bones) },
+                (None, None) => B19Bones { down: false, bones: Vec::new() },
+            });
+            seen.push(S474Tick { crossup: r.ride.air.crossup.0, pose: r.motion.pose.0 });
+            if bones.len() < ticks {
+                let h = pick(bones.len() + 1, draw(r));
+                held.borrow_mut().push(h);
+                r.holds = Some(Arc::new(h));
+            }
+            r.skeleton = skeleton.borrow().clone();
+        },
+    )?;
+    Some((seen, held.into_inner(), bones))
+}
+
 /// **R24: the bones follow the original through the windmill's throw.** R14's south-bones, ridden as
 /// [`the_bones_enter_the_wreck_a_tick_after_the_verdict`] rides it, drifted ~0.12 ft a tick from the
 /// first tick, with the bones' x velocity low. Two of the test's seeds were not the original's, and

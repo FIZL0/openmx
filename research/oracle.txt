@@ -6520,6 +6520,12 @@ ui_sounds_free      boot 0x002424c0
 #   it sits ~30 degrees off +0x10's rows in the air and is back within a few degrees on the wreck's
 #   verdict tick (+0xa0's z -22.298 there; about the image's frame the same rates give -20.48). Read it
 #   per row with research/r14_windmill_bones.py's `req` (actor +0x488 = the request).
+#   S474: that snap is not the wreck's. The root is the drawn bike's airborne pair at the crossup
+#   (rider +0x600) of the same tick the request is filled on: 31.9 deg at the image's -0.387, 29.7 at
+#   tick 1's -0.357, 1.6 at tick 2's 0 (the crossup is 0 under speed 10; the teleport left the speed
+#   word +0x34 at 29.1, so tick 1 still measured one). The port's shell hands the next tick the root it
+#   drew after this one, a tick late. research/r14_windmill_bones.py's `cross` logs +0x600, +0x9e8/+0x9ec
+#   and chassis +0x34 per row.
 # P85 — the shootoff's sound and the music fade. The player bike's builder (0x00280fb0) makes a sound
 # child at +0x149c (ctor 0x001fe7e0, vtable 0x004521b0, update 0x001fea70), read from Aud\event.aud's
 # [Cannonball] (0x001fe8b0): Cannon = SFX\cannonball_stereo (streamed, stereo, one-shot, 8.0 s at 22050)
