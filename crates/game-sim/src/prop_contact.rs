@@ -686,7 +686,7 @@ pub fn across_back(moved: Vec<(usize, [F; 2], Body, Body)>, bodies: &mut [(Colli
 }
 
 /// One body [`across_moved`] or [`across_flown`] moved `by`, from `before` to `after`, back.
-fn body_back(b: &mut Body, by: [F; 2], before: &Body, after: &Body) {
+pub(crate) fn body_back(b: &mut Body, by: [F; 2], before: &Body, after: &Body) {
     let same = |a: Vf, b: Vf| a.0.map(f32::to_bits) == b.0.map(f32::to_bits);
     let back = [F::ZERO - by[0], F::ZERO - by[1]];
     b.position = if same(b.position, after.position) { before.position } else { crate::seam::moved(b.position, back) };
