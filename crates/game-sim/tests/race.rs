@@ -8090,7 +8090,10 @@ fn f_spot(p: &mut Pick, t: &TrackPaths) -> Spot {
 /// reach, vt+0x8c route follower and its vt+0x88 look-ahead, the path queries and `rand`). Riders and
 /// goals placed or not yet, the goal's route or the plain look-ahead, the look-ahead cone, drift and its
 /// draws, the side step, the node speed words and their blend, the hand-over to the seeker. The brain's
-/// follower words, the goal's spot, the paths' scratch words and pools, and the generator.
+/// follower words, the goal's spot, the paths' scratch words and pools, and the generator. Also a
+/// rider spot left naming another path's node (S311): the follower's drift and speeds read that node;
+/// with a goal the original's hand-over measure on it never returns, so the run stops after the
+/// follower (the port skips the hand-over).
 ///
 /// Left out, because the original reads words nobody set: a rider or goal the net search cannot place
 /// (it then reads its null spot, or points it never wrote on its stack), a course with a one-node path
@@ -8126,8 +8129,8 @@ fn the_ais_path_branch_matches_the_tick() {
     ee.hooks.insert(end, Box::new(|ee| ee.set(31, ps2_oracle::DONE as i32 as i64 as u64)));
     // The route follower, run nested (at the stack pointer it would get anyway). A route path that
     // placed nothing hands on the place before it with its own path, so the spot can name another
-    // path's node, which the port's spot cannot say; the measure after it then recurses for good.
-    // Such a case stops here and is left out.
+    // path's node (S311): the follower reads that node, and with a goal the hand-over's measure after
+    // it recurses for good, so such a case stops here (the port leaves the hand-over out).
     let cross = Rc::new(Cell::new(false));
     let seen_cross = cross.clone();
     ee.hooks.insert(PF_FOLLOW, Box::new(move |ee| {
@@ -8138,7 +8141,8 @@ fn the_ais_path_branch_matches_the_tick() {
         let node = ee.u32_at(F_AI + 0x224);
         let other = node != 0 && ee.u32_at(F_AI + 0x220) != t_rec(((node - T_NODES) / 0x60 / 16) as usize);
         seen_cross.set(other);
-        ee.set(31, if other { ps2_oracle::DONE as i32 as i64 as u64 } else { ra });
+        let stop = other && ee.u32_at(F_AI + 0x34c) != 0;
+        ee.set(31, if stop { ps2_oracle::DONE as i32 as i64 as u64 } else { ra });
         // The hook goes back under the address it was reached at.
         ee.pc = PF_FOLLOW;
     }));
@@ -8202,7 +8206,14 @@ fn the_ais_path_branch_matches_the_tick() {
             period: F(p.range(0.0, 3.0)),
             reach: game_sim::ai::seek::Reach {
                 base: F(p.range(0.0, 20.0)),
-                max: F(if p.below(10) == 0 { -1.0 } else { p.range(0.0, 80.0) }),
+                // A max of 0 is the route locate's limit too: a rider spot at a node's start then
+                // places nothing on any route path, and the spot names the last one with its own
+                // path's node (S311).
+                max: F(match p.below(10) {
+                    0 => -1.0,
+                    1 | 2 => 0.0,
+                    _ => p.range(0.0, 80.0),
+                }),
                 gain: F(p.range(0.0, 2.0)),
             },
             cruise: F(p.range(0.0, 150.0)),
@@ -8275,10 +8286,6 @@ fn the_ais_path_branch_matches_the_tick() {
         // The seeker leaves the net in a0 for the goal's search.
         cross.set(false);
         ee.call(branch, &[u64::from(T_TRACK)], &[], BUDGET * 400);
-        if cross.get() {
-            *seen.entry("left out: another path's node").or_default() += 1;
-            continue;
-        }
         let before = f;
         let goal_before = goal;
         let free_before = t.free_routes;
@@ -8294,6 +8301,12 @@ fn the_ais_path_branch_matches_the_tick() {
         assert_eq!(rng.state(), ee.read(rand_state, 8) as u64, "{what}: the generator");
 
         let mut count = |k: &'static str| *seen.entry(k).or_default() += 1;
+        if cross.get() {
+            count("spot on another path's node");
+            if goal.is_some() {
+                count("spot on another path's node, hand-over never measured");
+            }
+        }
         if before.spot.path == 0 {
             count("rider placed");
         }
@@ -8354,7 +8367,8 @@ fn the_ais_path_branch_matches_the_tick() {
             && at("speed by the nodes") > 500
             && at("default speed") > 300
             && at("looked ahead") > 2000
-            && at("handed over") > 500,
+            && at("handed over") > 500
+            && at("spot on another path's node, hand-over never measured") > 20,
         "{seen:?}"
     );
 }
