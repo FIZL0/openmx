@@ -227,3 +227,137 @@ fn the_path_branch_rides_sx01s_ai_net_as_the_race_image() {
     eprintln!("sx01 path branch: {seen:?}");
     assert!(seen["branches"] == 3 * 401 && seen.get("changed path").copied().unwrap_or(0) > 3, "{seen:?}");
 }
+
+/// Free RAM in the race image for the poked target jump (S339).
+const S339_JUMP: u32 = 0x01f8_0000;
+
+/// The tick's path branch as `Racer::path_branch` joins it (S339), on the sx01 race image: each of its
+/// three AI riders, on the image's AI net, given a target jump poked into free RAM (its `+0x34c`)
+/// whose setup leg (`+0xe0`, spot `+0x110` path 0) stands on one of eight nodes of the net (four on
+/// other paths, four on along its own), from
+/// `ai_seek_path_branch` to `ai_seek_path_end`, then on with the rider moved along its heading at its
+/// target speed (as S309's test) until the branch hands over to the seeker or 300 branches pass. The
+/// port's brain words are put in their homes (flag word, seeker state, aim, heading and speed, the
+/// rider's frame and speed, the reach, the controller's angles) and read back out of them; each
+/// branch compares the follower's words, the goal's spot as the jump keeps it, the net's scratch
+/// words and pools, and the generator.
+#[test]
+fn s339_the_ticks_path_branch_rides_to_a_target_jump_as_the_race_image() {
+    use game_sim::ai::{RIDE, seek};
+    let kit = match ps2_oracle::Kit::load() {
+        Ok(k) => k,
+        Err(why) => return skip(&why),
+    };
+    let image = kit.ctx("states").join(S282C_STATE);
+    if !image.exists() {
+        return skip(&format!("{} is not there: see the_path_branch_rides_sx01s_ai_net_as_the_race_image", image.display()));
+    }
+    let Some(at) = named(&["boot_gp", "ai_seek_path_branch", "ai_seek_path_end", "rand_state"]) else { return };
+    let [gp, branch, end, rand_state] = at[..] else { unreachable!() };
+    let mut seen = std::collections::BTreeMap::<&str, u32>::new();
+    for (k, r) in S282C_RIDERS.into_iter().enumerate() {
+        for g in 0..8 {
+            let mut ee = ps2_oracle::Ee::from_ram(&image).unwrap_or_else(|e| panic!("{e}"));
+            ee.set(28, u64::from(gp));
+            ee.hooks.insert(end, Box::new(|ee| ee.set(31, ps2_oracle::DONE as i32 as i64 as u64)));
+            let net = ee.u32_at(r + 0xdc);
+            let (mut t, recs, nodes) = s309_paths(&ee, net);
+            assert_eq!((ee.u32_at(r + 0x354), ee.u32_at(r + 0x34c)), (0, 0), "rider {r:#x}: on the path, no goal");
+
+            // The goal: a node's first point, on odd goals a different path for each rider and goal,
+            // on even ones a few nodes on along the rider's own path (or its last node).
+            let f = s309_follower(&ee, r, &recs, &nodes).expect("the image's spot is on its path");
+            let goal = if g % 2 == 1 {
+                let p = (k * 11 + g * 7 + 3) % t.paths.len();
+                t.paths[p].nodes[t.paths[p].nodes.len() / 2].points[0]
+            } else {
+                let own = &t.paths[f.spot.path as usize - 1].nodes;
+                own[(f.spot.piece as usize + 2 + 3 * g).min(own.len() - 1)].points[0]
+            };
+            let goal = Vf::new(goal.x(), goal.y(), goal.z(), 1.0);
+            assert!((0..0x120).step_by(4).all(|o| ee.u32_at(S339_JUMP + o) == 0), "{S339_JUMP:#x} is free in the image");
+            put(&mut ee, S339_JUMP + 0xe0, goal);
+            ee.set_u32(r + 0x34c, S339_JUMP);
+            let mut world = seek::World::default();
+            world.jumps.push(seek::Jump { setup: seek::Leg { point: goal, ..Default::default() }, ..Default::default() });
+
+            // The port's racer, with the image's follower words in their homes.
+            let mut racer = game_sim::ai::spawn(&mut Rng::from_state(1), 1, Some(RIDE), 2).racer;
+            let mut b = racer.brain;
+            racer.follower = f;
+            b.flags = f.flags;
+            racer.seeker.state = f.state;
+            racer.seeker.jump = Some(0);
+            (racer.seeker.aim, racer.seeker.heading, racer.seeker.speed) = (f.aim, f.heading, f.speed);
+            (racer.senses.frame[3], racer.senses.frame[2], racer.senses.speed) = (f.position, f.forward, f.own_speed);
+            racer.reach = f.reach;
+            (racer.controls.aim, racer.controls.heading, racer.controls.roll) = (F(f.angles.x()), F(f.angles.y()), F(f.angles.z()));
+            let view = |racer: &game_sim::ai::Racer, b: &game_sim::ai::Brain| {
+                let mut v = racer.follower;
+                (v.flags, v.state) = (b.flags, racer.seeker.state);
+                (v.position, v.forward, v.own_speed) = (racer.senses.frame[3], racer.senses.frame[2], racer.senses.speed);
+                (v.aim, v.heading, v.speed) = (racer.seeker.aim, racer.seeker.heading, racer.seeker.speed);
+                v.reach = racer.reach;
+                let c = &racer.controls;
+                v.angles = Vf::new(c.aim.0, c.heading.0, c.roll.0, v.angles.w());
+                v
+            };
+
+            let race = ee.u32_at(r + 0xd8);
+            let race_word = (race != 0).then(|| ee.u32_at(race + 0x5c));
+            let mut rng = Rng::from_state(ee.read(rand_state, 8) as u64);
+            let dt = F(1.0 / 30.0);
+            for step in 0..300 {
+                let before = view(&racer, &b);
+                ee.set(19, u64::from(r));
+                ee.set_f(22, dt.0);
+                ee.call(branch, &[u64::from(net)], &[], BUDGET * 20);
+                racer.path_branch(&mut b, &mut t, &mut world, race_word, &mut rng, dt);
+                let mine = view(&racer, &b);
+                let what = format!("rider {r:#x} goal {g} step {step}: {before:?}");
+                let Some(theirs) = s309_follower(&ee, r, &recs, &nodes) else {
+                    panic!("{what}: the original's spot names another path's node");
+                };
+                assert_eq!(s309_bits(&theirs), s309_bits(&mine), "{what}\n original {theirs:?}\n port     {mine:?}");
+                let kept = s309_spot(&ee, S339_JUMP + 0x110, &recs, &nodes).expect("the goal's spot is on the net");
+                assert_eq!(kept, world.jumps[0].setup.spot, "{what}: the goal's spot");
+                assert_eq!(ee.u32_at(r + 0x34c), S339_JUMP, "{what}: the target jump stays");
+                let (now, _, _) = s309_paths(&ee, net);
+                for (k, (a, b)) in now.paths.iter().zip(&t.paths).enumerate() {
+                    assert_eq!((a.flags, a.dist.0.to_bits(), a.best), (b.flags, b.dist.0.to_bits(), b.best), "{what}: path {k}'s scratch words");
+                }
+                assert_eq!(
+                    (now.free_routes, now.free_parents, now.free_candidates),
+                    (t.free_routes, t.free_parents, t.free_candidates),
+                    "{what}: the pools"
+                );
+                assert_eq!(rng.state(), ee.read(rand_state, 8) as u64, "{what}: the generator");
+
+                let mut count = |k: &'static str| *seen.entry(k).or_default() += 1;
+                count("branches");
+                if step == 0 && kept.path != 0 {
+                    count("goal placed");
+                }
+                if mine.spot.path != before.spot.path {
+                    count("changed path");
+                }
+                if racer.seeker.state == 1 {
+                    count("handed over");
+                    break;
+                }
+
+                // Ride on: along the heading at the target speed, on both sides alike.
+                let go = mine.speed.0 * dt.0;
+                let p = mine.position;
+                let position = Vf([p.x() + mine.heading.x() * go, p.y(), p.z() + mine.heading.z() * go, p.w()]);
+                (racer.senses.frame[3], racer.senses.frame[2], racer.senses.speed) = (position, mine.heading, mine.speed);
+                put(&mut ee, r + 0xc0, position);
+                put(&mut ee, r + 0xb0, mine.heading);
+                ee.set_f32(r + 0x80, mine.speed.0);
+            }
+        }
+    }
+    eprintln!("s339 path branch: {seen:?}");
+    let n = |k| seen.get(k).copied().unwrap_or(0);
+    assert!(n("goal placed") == 24 && n("handed over") > 3 && n("branches") > 100, "{seen:?}");
+}

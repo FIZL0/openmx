@@ -102,6 +102,7 @@ fn sk_read_leg(ee: &ps2_oracle::Ee, at: u32) -> sk::Leg {
         point: sk_vf(ee, at + 0x20),
         facing: sk_vf(ee, at + 0x30),
         learnt: sk_f(ee, at + 0x4c),
+        spot: Default::default(),
     }
 }
 
@@ -427,6 +428,7 @@ fn sk_gen_jump(p: &mut Pick) -> sk::Jump {
             point: lip,
             facing: facing(p, run),
             learnt: F(if p.chance(6) { 100.0 } else { p.range(-20.0, 115.0) }),
+            spot: Default::default(),
         },
         landing: sk::Leg {
             velocity: if p.chance(4) { Vf::new(0.0, 0.0, 0.0, 0.0) } else { p.vec_w(120.0) },
@@ -434,6 +436,7 @@ fn sk_gen_jump(p: &mut Pick) -> sk::Jump {
             point: landing,
             facing: facing(p, fly),
             learnt: F(p.range(-10.0, 110.0)),
+            spot: Default::default(),
         },
         setup: sk::Leg {
             velocity: if p.chance(3) { p.vec(100.0, 0.0) } else { Vf::new(0.0, 0.0, 0.0, 0.0) },
@@ -441,6 +444,7 @@ fn sk_gen_jump(p: &mut Pick) -> sk::Jump {
             point: setup,
             facing: facing(p, run),
             learnt: F(p.range(-10.0, 110.0)),
+            spot: Default::default(),
         },
     }
 }
